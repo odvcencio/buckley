@@ -1,0 +1,24 @@
+name: cargo_clippy
+description: Run Clippy linter to catch common Rust mistakes
+parameters:
+  type: object
+  properties:
+    package:
+      type: string
+      description: Specific package to check
+    all:
+      type: boolean
+      description: Check all packages in workspace
+      default: false
+    fix:
+      type: boolean
+      description: Automatically apply suggestions
+      default: false
+    deny:
+      type: array
+      description: Lint warnings to deny (e.g., ["warnings", "clippy::all"])
+      items:
+        type: string
+  required: []
+executable: ./cargo_clippy.sh
+timeout_ms: 300000

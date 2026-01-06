@@ -1,0 +1,36 @@
+.git
+.gitignore
+.github
+.buckley
+.claude
+**/logs/
+logs/
+*.log
+*.log.*
+*.jsonl
+*.ndjson
+
+# Local artifacts
+dist/
+coverage.*
+coverage.out
+buckley
+buckley.exe
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Node workspaces (UI assets are committed under pkg/ipc/ui)
+node_modules/
+web/node_modules/
+web/dist/
+web/.vite/
+apps/**/node_modules/
+docs/site/node_modules/
+docs/site/docs/.vitepress/cache/
+docs/site/docs/.vitepress/dist/
+
+# Sensitive
+.env
+*.key

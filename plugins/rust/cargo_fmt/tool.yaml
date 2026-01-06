@@ -1,0 +1,19 @@
+name: cargo_fmt
+description: Format Rust code with rustfmt
+parameters:
+  type: object
+  properties:
+    package:
+      type: string
+      description: Specific package to format
+    all:
+      type: boolean
+      description: Format all packages in workspace
+      default: false
+    check:
+      type: boolean
+      description: Check formatting without writing changes
+      default: false
+  required: []
+executable: ./cargo_fmt.sh
+timeout_ms: 120000

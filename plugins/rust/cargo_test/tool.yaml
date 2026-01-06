@@ -1,0 +1,20 @@
+name: cargo_test
+description: Run Rust tests using cargo
+parameters:
+  type: object
+  properties:
+    package:
+      type: string
+      description: Specific package to test (optional)
+      default: ""
+    verbose:
+      type: boolean
+      description: Enable verbose test output
+      default: false
+    release:
+      type: boolean
+      description: Run tests in release mode
+      default: false
+  required: []
+executable: ./cargo_test.sh
+timeout_ms: 600000

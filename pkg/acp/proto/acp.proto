@@ -1,0 +1,274 @@
+syntax = "proto3";
+
+package buckley.acp.v1;
+
+option go_package = "github.com/odvcencio/buckley/pkg/acp/proto;acppb";
+
+import "types.proto";
+import "google/protobuf/empty.proto";
+import "google/protobuf/timestamp.proto";
+
+service AgentCommunication {
+  // Agent lifecycle
+  rpc RegisterAgent(RegisterAgentRequest) returns (RegisterAgentResponse);
+  rpc UnregisterAgent(UnregisterAgentRequest) returns (google.protobuf.Empty);
+  rpc DiscoverAgents(DiscoverAgentsRequest) returns (DiscoverAgentsResponse);
+  rpc GetAgentInfo(GetAgentInfoRequest) returns (AgentInfo);
+
+  // Capability negotiation
+  rpc GetServerCapabilities(google.protobuf.Empty) returns (ServerCapabilities);
+  rpc RequestCapabilities(CapabilityRequest) returns (CapabilityGrant);
+  rpc RevokeCapabilities(CapabilityRevocation) returns (google.protobuf.Empty);
+
+  // Context management
+  rpc CreateSession(CreateSessionRequest) returns (Session);
+  rpc UpdateSessionContext(ContextDelta) returns (google.protobuf.Empty);
+  rpc CreateContextHandle(ContextHandleRequest) returns (ContextHandle);
+  rpc ResolveContextHandle(ContextHandle) returns (ContextData);
+
+  // Task streaming
+  rpc StreamTask(TaskStreamRequest) returns (stream TaskEvent);
+  rpc SubscribeTaskEvents(TaskSubscription) returns (stream TaskEvent);
+
+  // P2P introduction
+  rpc GetP2PEndpoint(P2PEndpointRequest) returns (P2PEndpoint);
+  rpc EstablishP2PConnection(P2PHandshake) returns (P2PConnectionInfo);
+
+  // Tool execution
+  rpc RequestToolExecution(ToolExecutionRequest) returns (stream ToolExecutionEvent);
+  rpc ApproveToolExecution(ToolApproval) returns (google.protobuf.Empty);
+  rpc RejectToolExecution(ToolRejection) returns (google.protobuf.Empty);
+
+  // Message exchange (for LSP integration)
+  rpc SendMessage(SendMessageRequest) returns (SendMessageResponse);
+
+  // Editor-native flows
+  rpc StreamInlineCompletions(InlineCompletionRequest) returns (stream InlineCompletionEvent);
+  rpc ProposeEdits(ProposeEditsRequest) returns (ProposeEditsResponse);
+  rpc ApplyEdits(ApplyEditsRequest) returns (ApplyEditsResponse);
+  rpc UpdateEditorState(UpdateEditorStateRequest) returns (UpdateEditorStateResponse);
+}
+
+// Request/Response messages
+message RegisterAgentRequest {
+  string agent_id = 1;
+  string type = 2;
+  string endpoint = 3;
+  repeated string capabilities = 4;
+  map<string, string> metadata = 5;
+}
+
+message RegisterAgentResponse {
+  AgentInfo agent = 1;
+  string session_token = 2;
+}
+
+message UnregisterAgentRequest {
+  string agent_id = 1;
+  string reason = 2;
+}
+
+message DiscoverAgentsRequest {
+  string type = 1;
+  repeated string capabilities = 2;
+  map<string, string> tags = 3;
+}
+
+message DiscoverAgentsResponse {
+  repeated AgentInfo agents = 1;
+}
+
+message GetAgentInfoRequest {
+  string agent_id = 1;
+}
+
+message CapabilityRequest {
+  repeated string capabilities = 1;
+  int64 duration_seconds = 2;
+  GrantContext context = 3;
+}
+
+message CapabilityRevocation {
+  string grant_id = 1;
+}
+
+message CreateSessionRequest {
+  string agent_id = 1;
+  map<string, string> metadata = 2;
+}
+
+message ContextDelta {
+  string session_id = 1;
+  repeated string added_files = 2;
+  repeated string removed_files = 3;
+  map<string, string> metadata = 4;
+}
+
+message ContextHandleRequest {
+  string type = 1;
+  bytes data = 2;
+}
+
+message ContextData {
+  string type = 1;
+  bytes data = 2;
+}
+
+message TaskStreamRequest {
+  string task_id = 1;
+  string agent_id = 2;
+  string query = 3;
+  EditorContext context = 4;
+}
+
+message TaskSubscription {
+  string plan_id = 1;
+  repeated string task_ids = 2;
+}
+
+message P2PEndpointRequest {
+  string requester_id = 1;
+  string target_agent_id = 2;
+}
+
+message P2PHandshake {
+  string token = 1;
+}
+
+message P2PConnectionInfo {
+  string connection_id = 1;
+  repeated string capabilities = 2;
+}
+
+message ToolExecutionRequest {
+  string agent_id = 1;
+  string tool = 2;
+  map<string, string> parameters = 3;
+}
+
+message ToolExecutionEvent {
+  string execution_id = 1;
+  string status = 2;
+  string output = 3;
+  google.protobuf.Timestamp timestamp = 4;
+}
+
+message ToolApproval {
+  string execution_id = 1;
+  bool remember = 2;
+}
+
+message ToolRejection {
+  string execution_id = 1;
+  string reason = 2;
+}
+
+message Message {
+  string role = 1;
+  string content = 2;
+}
+
+message SendMessageRequest {
+  string agent_id = 1;
+  Message message = 2;
+  EditorContext context = 3;
+}
+
+message SendMessageResponse {
+  Message response = 1;
+}
+
+// Editor context and inline features
+message DocumentSnapshot {
+  string uri = 1;
+  string language_id = 2;
+  string content = 3;
+  Range selection = 4;
+  repeated Range visible_ranges = 5;
+  int64 version = 6;
+  string workspace_root = 7;
+  map<string, string> metadata = 8;
+}
+
+message EditorContext {
+  DocumentSnapshot document = 1;
+  repeated DocumentSnapshot related_documents = 2;
+  repeated string symbols = 3;
+  map<string, string> metadata = 4;
+}
+
+message InlineCompletionRequest {
+  string agent_id = 1;
+  string session_id = 2;
+  EditorContext context = 3;
+  string prompt = 4;
+  int32 max_suggestions = 5;
+}
+
+message InlineCompletionEvent {
+  string completion_id = 1;
+  string text = 2;
+  bool is_final = 3;
+  string finish_reason = 4;
+  double score = 5;
+}
+
+message TextEdit {
+  string uri = 1;
+  Range range = 2;
+  string new_text = 3;
+}
+
+message ProposedEdit {
+  string uri = 1;
+  repeated TextEdit edits = 2;
+  string summary = 3;
+  string title = 4;
+  double score = 5;
+  int32 rank = 6;
+}
+
+message ProposeEditsRequest {
+  string agent_id = 1;
+  string session_id = 2;
+  string instruction = 3;
+  EditorContext context = 4;
+  bool apply = 5;
+  int32 max_suggestions = 6;
+}
+
+message ProposeEditsResponse {
+  string plan_id = 1;
+  string task_id = 2;
+  repeated ProposedEdit edits = 3;
+  string summary = 4;
+}
+
+message ApplyEditsRequest {
+  string agent_id = 1;
+  string session_id = 2;
+  repeated TextEdit edits = 3;
+  string title = 4;
+  bool dry_run = 5;
+}
+
+message ApplyEditsResponse {
+  bool applied = 1;
+  repeated string files = 2;
+  string message = 3;
+}
+
+message UpdateEditorStateRequest {
+  string agent_id = 1;
+  string session_id = 2;
+  EditorContext context = 3;
+  repeated string diagnostics = 4;
+  bool request_todo_sync = 5;
+}
+
+message UpdateEditorStateResponse {
+  string plan_state = 1;
+  string todo_state = 2;
+  repeated string approvals = 3;
+  repeated string tools_in_progress = 4;
+}

@@ -1,0 +1,26 @@
+name: golangci_lint
+description: Run golangci-lint with configurable linters
+parameters:
+  type: object
+  properties:
+    path:
+      type: string
+      description: Path to lint (e.g., ./..., ./pkg/config)
+      default: ./...
+    enable:
+      type: array
+      description: Linters to enable (e.g., staticcheck, errcheck, govet)
+      items:
+        type: string
+    disable:
+      type: array
+      description: Linters to disable
+      items:
+        type: string
+    fix:
+      type: boolean
+      description: Apply automatic fixes
+      default: false
+  required: []
+executable: ./golangci_lint.sh
+timeout_ms: 300000

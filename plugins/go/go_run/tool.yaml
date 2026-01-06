@@ -1,0 +1,16 @@
+name: go_run
+description: Run Go program
+parameters:
+  type: object
+  properties:
+    package:
+      type: string
+      description: Package path to run
+      default: .
+    args:
+      type: string
+      description: Arguments to pass to the program
+      default: ""
+  required: []
+executable: ./go_run.sh
+timeout_ms: 300000

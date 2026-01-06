@@ -1,0 +1,187 @@
+version: 2
+
+project_name: buckley
+
+before:
+  hooks:
+    - ./scripts/build-ui.sh
+    - ./scripts/test.sh
+
+builds:
+  - id: buckley
+    main: ./cmd/buckley
+    binary: buckley
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      - goos: windows
+        goarch: arm64
+    ldflags:
+      - -s -w
+      - -X main.version={{.Version}}
+      - -X main.commit={{.Commit}}
+      - -X main.buildDate={{.Date}}
+
+archives:
+  - id: default
+    formats:
+      - tar.gz
+    name_template: >-
+      {{ .ProjectName }}_
+      {{- .Version }}_
+      {{- .Os }}_
+      {{- .Arch }}
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+    files:
+      - README.md
+      - LICENSE
+      - CHANGELOG.md
+
+nfpms:
+  - id: buckley
+    package_name: buckley
+    ids:
+      - buckley
+    vendor: Buckley Contributors
+    homepage: https://github.com/odvcencio/buckley
+    maintainer: Buckley Contributors <maintainers@buckley.dev>
+    description: AI-powered development assistant for your terminal.
+    license: MIT
+    formats:
+      - deb
+      - rpm
+    bindir: /usr/bin
+
+homebrew_casks:
+  - name: buckley
+    ids:
+      - default
+    binaries:
+      - buckley
+    repository:
+      owner: odvcencio
+      name: buckley
+      branch: main
+    commit_author:
+      name: Buckley Release Bot
+      email: buckley-bot@users.noreply.github.com
+    homepage: https://github.com/odvcencio/buckley
+    description: AI-powered development assistant for your terminal.
+    license: MIT
+
+scoops:
+  - name: buckley
+    repository:
+      owner: odvcencio
+      name: buckley
+      branch: main
+    directory: bucket
+    commit_author:
+      name: Buckley Release Bot
+      email: buckley-bot@users.noreply.github.com
+    homepage: https://github.com/odvcencio/buckley
+    description: AI-powered development assistant for your terminal.
+    license: MIT
+
+checksum:
+  name_template: 'checksums.txt'
+  algorithm: sha256
+
+dockers_v2:
+  - id: buckley
+    dockerfile: build/docker/Dockerfile.runtime
+    ids:
+      - buckley
+    images:
+      - ghcr.io/odvcencio/buckley
+    tags:
+      - "{{ .Version }}"
+      - "{{ if and (not .IsNightly) (eq .Prerelease \"\") }}latest{{ end }}"
+    platforms:
+      - linux/amd64
+      - linux/arm64
+    labels:
+      org.opencontainers.image.title: "{{ .ProjectName }}"
+      org.opencontainers.image.description: AI-powered development assistant for your terminal.
+      org.opencontainers.image.url: https://github.com/odvcencio/buckley
+      org.opencontainers.image.source: https://github.com/odvcencio/buckley
+      org.opencontainers.image.version: "{{ .Version }}"
+      org.opencontainers.image.revision: "{{ .FullCommit }}"
+      org.opencontainers.image.created: "{{ .Date }}"
+  - id: buckley-worker
+    dockerfile: build/docker/Dockerfile.worker
+    ids:
+      - buckley
+    images:
+      - ghcr.io/odvcencio/buckley-worker
+    tags:
+      - "{{ .Version }}"
+      - "{{ if and (not .IsNightly) (eq .Prerelease \"\") }}latest{{ end }}"
+    platforms:
+      - linux/amd64
+      - linux/arm64
+    labels:
+      org.opencontainers.image.title: "{{ .ProjectName }} Worker"
+      org.opencontainers.image.description: AI-powered development assistant worker image (includes build tools).
+      org.opencontainers.image.url: https://github.com/odvcencio/buckley
+      org.opencontainers.image.source: https://github.com/odvcencio/buckley
+      org.opencontainers.image.version: "{{ .Version }}"
+      org.opencontainers.image.revision: "{{ .FullCommit }}"
+      org.opencontainers.image.created: "{{ .Date }}"
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  sort: asc
+  use: github
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
+      - '^ci:'
+      - '^chore:'
+      - Merge pull request
+      - Merge branch
+  groups:
+    - title: Features
+      regexp: '^.*?feat(\([[:word:]]+\))??!?:.+$'
+      order: 0
+    - title: Bug Fixes
+      regexp: '^.*?fix(\([[:word:]]+\))??!?:.+$'
+      order: 1
+    - title: Performance
+      regexp: '^.*?perf(\([[:word:]]+\))??!?:.+$'
+      order: 2
+    - title: Refactoring
+      regexp: '^.*?refactor(\([[:word:]]+\))??!?:.+$'
+      order: 3
+    - title: Other
+      order: 999
+
+release:
+  github:
+    owner: odvcencio
+    name: buckley
+  draft: false
+  prerelease: auto
+  mode: append
+  header: |
+    ## Buckley {{ .Version }}
+
+    AI-powered development assistant for your terminal.
+  footer: |
+    **Full Changelog**: https://github.com/odvcencio/buckley/compare/{{ .PreviousTag }}...{{ .Tag }}
+
+    ---
+    Built with GoReleaser

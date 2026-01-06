@@ -1,0 +1,56 @@
+# Binaries
+/buckley
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test binaries
+*.test
+*.out
+coverage.*
+coverage.out
+
+# Go workspace
+/vendor/
+/dist/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Buckley runtime
+.buckley/sessions/
+.buckley/logs/
+.buckley/memory.db
+.buckley/cache/
+.buckley/*.db
+
+# Logs (any location)
+**/logs/
+logs/
+*.log
+*.log.*
+*.jsonl
+*.ndjson
+**/.buckley/logs/
+
+# Sensitive
+.env
+*.key
+
+# Node workspace
+node_modules/
+apps/desktop/node_modules/
+apps/desktop/dist/
+apps/desktop/.vite/
+docs/site/node_modules/
+docs/site/docs/.vitepress/cache/
+docs/site/docs/.vitepress/dist/
+
+# OS
+.DS_Store
+Thumbs.db
+docs/.vitepress/dist/

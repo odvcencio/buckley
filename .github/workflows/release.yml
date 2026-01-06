@@ -1,0 +1,111 @@
+name: Release
+
+# Temporarily manual-only while GitHub Actions minutes are exhausted.
+# Re-enable tag-push triggers for the OSS launch gate.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Git tag to release (e.g. v1.0.0)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  packages: write
+  id-token: write
+
+jobs:
+  release:
+    name: Release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.tag }}
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache: true
+
+      - name: Install release tooling (syft, cosign)
+        run: |
+          set -euo pipefail
+          go install github.com/anchore/syft/cmd/syft@v1.38.2
+          go install github.com/sigstore/cosign/v2/cmd/cosign@v2.6.1
+          echo "$HOME/go/bin" >> "$GITHUB_PATH"
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.2.21'
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: v2.13.1
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate SBOMs (source + container)
+        run: |
+          set -euo pipefail
+          tag="${{ inputs.tag }}"
+          version="${tag#v}"
+          mkdir -p dist
+          syft dir:. -o cyclonedx-json=dist/sbom-source.cdx.json
+          syft "ghcr.io/${GITHUB_REPOSITORY_OWNER}/buckley:${version}" -o cyclonedx-json=dist/sbom-image.cdx.json
+
+      - name: Sign checksums + SBOMs (keyless)
+        env:
+          COSIGN_YES: "true"
+        run: |
+          set -euo pipefail
+          cosign sign-blob dist/checksums.txt \
+            --output-signature dist/checksums.txt.sig \
+            --output-certificate dist/checksums.txt.pem
+          cosign sign-blob dist/sbom-source.cdx.json \
+            --output-signature dist/sbom-source.cdx.json.sig \
+            --output-certificate dist/sbom-source.cdx.json.pem
+          cosign sign-blob dist/sbom-image.cdx.json \
+            --output-signature dist/sbom-image.cdx.json.sig \
+            --output-certificate dist/sbom-image.cdx.json.pem
+
+      - name: Sign container image (keyless)
+        env:
+          COSIGN_YES: "true"
+        run: |
+          set -euo pipefail
+          tag="${{ inputs.tag }}"
+          version="${tag#v}"
+          cosign sign "ghcr.io/${GITHUB_REPOSITORY_OWNER}/buckley:${version}"
+          if [[ "$version" != *-* ]]; then
+            cosign sign "ghcr.io/${GITHUB_REPOSITORY_OWNER}/buckley:latest"
+          fi
+
+      - name: Upload signatures + SBOMs to GitHub Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag="${{ inputs.tag }}"
+          gh release upload "${tag}" \
+            dist/checksums.txt.sig dist/checksums.txt.pem \
+            dist/sbom-source.cdx.json dist/sbom-source.cdx.json.sig dist/sbom-source.cdx.json.pem \
+            dist/sbom-image.cdx.json dist/sbom-image.cdx.json.sig dist/sbom-image.cdx.json.pem \
+            --clobber

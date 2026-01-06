@@ -1,0 +1,20 @@
+name: go_test
+description: Run Go tests for specified package
+parameters:
+  type: object
+  properties:
+    package:
+      type: string
+      description: Package path (e.g., ./..., ./pkg/config, or specific test)
+      default: ./...
+    verbose:
+      type: boolean
+      description: Enable verbose test output
+      default: false
+    coverage:
+      type: boolean
+      description: Generate coverage report
+      default: false
+  required: []
+executable: ./go_test.sh
+timeout_ms: 600000

@@ -1,0 +1,16 @@
+name: go_build
+description: Build Go binary
+parameters:
+  type: object
+  properties:
+    output:
+      type: string
+      description: Output binary name
+      default: ""
+    package:
+      type: string
+      description: Package path to build
+      default: .
+  required: []
+executable: ./go_build.sh
+timeout_ms: 300000

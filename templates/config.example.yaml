@@ -1,0 +1,145 @@
+models:
+  planning: moonshotai/kimi-k2-thinking
+  execution: openai/gpt-4-turbo
+  review: anthropic/claude-sonnet-4-5
+  fallback_chains:
+    moonshotai/kimi-k2-thinking:
+      - openai/o1-preview
+      - anthropic/claude-opus-4
+    openai/gpt-4-turbo:
+      - anthropic/claude-sonnet-4-5
+
+personality:
+  enabled: true
+  quirk_probability: 0.15
+  tone: friendly
+  default_persona: buckley
+  phase_overrides:
+    review: reviewer
+  personas:
+    buckley:
+      name: Buckley
+      summary: Loyal systems engineer & pragmatic pair-programmer.
+      traits:
+        - Systematic and plan-driven
+        - Transparent narrator of intent
+      directives:
+        - State intent before touching code
+        - Summarize progress after each task
+      voice:
+        planning: Architect mindset focused on structure, dependencies, and risks.
+        execution: Pragmatic implementer narrating concrete edits and validation.
+        review: Calm reviewer highlighting regressions and missing tests.
+    reviewer:
+      name: Nitpicky Reviewer
+      summary: Fastidious reviewer that guards architecture and regression risk.
+      directives:
+        - Prioritize correctness and regressions over ergonomics
+        - Require explicit test evidence for every change
+      voice:
+        review: Direct, concise code review voice that cites files and line ranges.
+
+memory:
+  auto_compact_threshold: 0.9
+  max_compactions: 2
+
+orchestrator:
+  trust_level: balanced    # conservative | balanced | autonomous
+  max_self_heal_attempts: 3
+  max_review_cycles: 3
+  task_phase_loop:
+    - builder
+    - verify
+    - review
+  task_phases:
+    - stage: builder
+      name: Builder
+      description: Generate and apply code changes for the current task.
+      targets:
+        - Translate plan pseudocode into code
+        - Run local commands/tools as needed
+    - stage: verify
+      name: Verifier
+      description: Validate results locally before review.
+      targets:
+        - Run tests and linters
+        - Check edge cases/regressions
+    - stage: review
+      name: Reviewer
+      description: Review artifacts and enforce quality gates.
+      targets:
+        - Catch regressions and missing tests
+        - Ensure conventions and documentation
+
+worktrees:
+  use_containers: false
+  root_path: "" # Optional override; blank keeps operations scoped to the current repo
+
+cost_management:
+  session_budget: 5.0
+  daily_budget: 20.0
+  monthly_budget: 100.0
+  auto_stop_at: 50.0
+
+retry_policy:
+  max_retries: 3
+  initial_backoff: 1s
+  max_backoff: 30s
+  multiplier: 2.0
+
+# IPC server (Mission Control UI). Disabled by default.
+ipc:
+  enabled: false
+  bind: 127.0.0.1:4488
+  enable_browser: false
+  allowed_origins:
+    - http://localhost
+    - http://127.0.0.1
+  public_metrics: false
+  require_token: false
+  basic_auth_enabled: false
+  basic_auth_username: ""
+  basic_auth_password: ""
+
+# Clone safety policy for any operation that runs `git clone` (headless sessions, batch workers, etc).
+git_clone:
+  allowed_schemes: [https, ssh]
+  allowed_hosts: [] # empty = allow all (except denied_hosts)
+  denied_hosts: []
+  deny_private_networks: false
+  resolve_dns: true
+  deny_scp_syntax: false
+  dns_resolve_timeout_seconds: 2
+
+# Artifact locations (plans/execution/reviews/archives). Defaults keep artifacts in the repo under docs/.
+artifacts:
+  planning_dir: docs/plans
+  execution_dir: docs/execution
+  review_dir: docs/reviews
+  archive_dir: docs/archive
+  archive_by_month: true
+  auto_archive_on_pr_merge: true
+
+# ACP (Agent Communication Protocol) server for editor integrations (e.g. Zed bridge).
+# Set acp.listen to enable.
+acp:
+  event_store: sqlite # sqlite | nats
+  listen: ""          # e.g. 127.0.0.1:50051
+  allow_insecure_local: false
+  tls_cert_file: ""
+  tls_key_file: ""
+  tls_client_ca_file: ""
+  nats:
+    url: nats://localhost:4222
+    stream_prefix: acp
+    snapshot_bucket: acp_snapshots
+    connect_timeout: 5s
+    request_timeout: 5s
+
+# Batch worker settings (Kubernetes Jobs). Disabled by default.
+batch:
+  enabled: false
+  namespace: ""
+  kubeconfig: ""
+  wait_for_completion: true
+  follow_logs: true
