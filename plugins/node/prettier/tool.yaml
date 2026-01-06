@@ -1,0 +1,23 @@
+name: prettier
+description: Format code with Prettier (JS, TS, JSON, Markdown, etc.)
+parameters:
+  type: object
+  properties:
+    path:
+      type: string
+      description: Files or glob patterns to format
+      default: .
+    write:
+      type: boolean
+      description: Write formatted output to files
+      default: false
+    check:
+      type: boolean
+      description: Check if files are formatted without writing
+      default: false
+    parser:
+      type: string
+      description: Parser to use (typescript, babel, json, markdown, etc.)
+  required: []
+executable: ./prettier.sh
+timeout_ms: 120000

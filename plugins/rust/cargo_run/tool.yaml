@@ -1,0 +1,20 @@
+name: cargo_run
+description: Run Rust project using cargo
+parameters:
+  type: object
+  properties:
+    release:
+      type: boolean
+      description: Run in release mode
+      default: false
+    package:
+      type: string
+      description: Specific package to run (optional)
+      default: ""
+    args:
+      type: string
+      description: Arguments to pass to the program
+      default: ""
+  required: []
+executable: ./cargo_run.sh
+timeout_ms: 300000

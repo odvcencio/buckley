@@ -1,0 +1,20 @@
+name: npm_test
+description: Run npm tests
+parameters:
+  type: object
+  properties:
+    watch:
+      type: boolean
+      description: Run tests in watch mode
+      default: false
+    coverage:
+      type: boolean
+      description: Generate coverage report
+      default: false
+    args:
+      type: string
+      description: Additional arguments to pass to test runner
+      default: ""
+  required: []
+executable: ./npm_test.sh
+timeout_ms: 600000

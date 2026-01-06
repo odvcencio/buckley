@@ -1,0 +1,778 @@
+syntax = "proto3";
+
+package buckley.ipc.v1;
+
+option go_package = "github.com/odvcencio/buckley/pkg/ipc/proto;ipcpb";
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/struct.proto";
+import "google/protobuf/empty.proto";
+
+// =============================================================================
+// BuckleyIPC - Real-time communication for UI clients and automation
+// =============================================================================
+
+service BuckleyIPC {
+  // ---------------------------------------------------------------------------
+  // Event Streaming (replaces WebSocket)
+  // ---------------------------------------------------------------------------
+
+  // Subscribe opens a server-streaming connection for real-time events.
+  // Used by web UI, CLI watchers, and monitoring tools.
+  rpc Subscribe(SubscribeRequest) returns (stream Event);
+
+  // ---------------------------------------------------------------------------
+  // Session Management
+  // ---------------------------------------------------------------------------
+
+  // SendCommand dispatches user input or slash commands to a session.
+  rpc SendCommand(CommandRequest) returns (CommandResponse);
+
+  // ListSessions returns all active and recent sessions.
+  rpc ListSessions(ListSessionsRequest) returns (ListSessionsResponse);
+
+  // GetSession returns detailed session state including messages and todos.
+  rpc GetSession(GetSessionRequest) returns (SessionDetail);
+
+  // ---------------------------------------------------------------------------
+  // Headless Sessions (server-side sandboxed execution)
+  // ---------------------------------------------------------------------------
+
+  // CreateHeadlessSession spawns an isolated session on the server.
+  rpc CreateHeadlessSession(CreateHeadlessRequest) returns (HeadlessSession);
+
+  // DeleteHeadlessSession terminates and cleans up a headless session.
+  rpc DeleteHeadlessSession(DeleteHeadlessRequest) returns (google.protobuf.Empty);
+
+  // ListHeadlessSessions returns all running headless sessions.
+  rpc ListHeadlessSessions(google.protobuf.Empty) returns (HeadlessSessionList);
+
+  // ---------------------------------------------------------------------------
+  // Plans
+  // ---------------------------------------------------------------------------
+
+  // ListPlans returns all available plans.
+  rpc ListPlans(ListPlansRequest) returns (ListPlansResponse);
+
+  // GetPlan returns detailed plan information including tasks.
+  rpc GetPlan(GetPlanRequest) returns (Plan);
+
+  // ---------------------------------------------------------------------------
+  // Projects
+  // ---------------------------------------------------------------------------
+
+  // ListProjects returns all known projects.
+  rpc ListProjects(google.protobuf.Empty) returns (ProjectList);
+
+  // CreateProject registers a new project.
+  rpc CreateProject(CreateProjectRequest) returns (Project);
+
+  // ---------------------------------------------------------------------------
+  // Personas
+  // ---------------------------------------------------------------------------
+
+  // ListPersonas returns available AI personas.
+  rpc ListPersonas(google.protobuf.Empty) returns (PersonaList);
+
+  // ---------------------------------------------------------------------------
+  // Workflow Orchestration
+  // ---------------------------------------------------------------------------
+
+  // WorkflowAction triggers plan/execute/pause/resume operations.
+  rpc WorkflowAction(WorkflowActionRequest) returns (WorkflowActionResponse);
+
+  // ---------------------------------------------------------------------------
+  // Host Agent Mode (trusted execution on remote machines)
+  // ---------------------------------------------------------------------------
+
+  // RegisterAgent connects a host agent to the server.
+  // The agent receives commands via the returned stream.
+  rpc RegisterAgent(RegisterAgentRequest) returns (stream AgentCommand);
+
+  // ReportAgentResult sends execution results back to the server.
+  rpc ReportAgentResult(AgentResult) returns (google.protobuf.Empty);
+
+  // AgentHeartbeat keeps the agent connection alive and reports status.
+  rpc AgentHeartbeat(AgentHeartbeatRequest) returns (AgentHeartbeatResponse);
+
+  // ListAgents returns all connected host agents.
+  rpc ListAgents(google.protobuf.Empty) returns (AgentList);
+
+  // ---------------------------------------------------------------------------
+  // Tool Approvals
+  // ---------------------------------------------------------------------------
+
+  // ListPendingApprovals returns pending tool call approvals for a session.
+  rpc ListPendingApprovals(ListPendingApprovalsRequest) returns (PendingApprovalsList);
+
+  // ApproveToolCall approves a pending tool call.
+  rpc ApproveToolCall(ApproveToolCallRequest) returns (ApproveToolCallResponse);
+
+  // RejectToolCall rejects a pending tool call.
+  rpc RejectToolCall(RejectToolCallRequest) returns (RejectToolCallResponse);
+
+  // GetApprovalPolicy returns the active approval policy.
+  rpc GetApprovalPolicy(google.protobuf.Empty) returns (ApprovalPolicy);
+
+  // UpdateApprovalPolicy updates the approval policy configuration.
+  rpc UpdateApprovalPolicy(UpdateApprovalPolicyRequest) returns (ApprovalPolicy);
+
+  // GetAuditLog returns the tool execution audit log for a session.
+  rpc GetAuditLog(GetAuditLogRequest) returns (AuditLogResponse);
+
+  // ---------------------------------------------------------------------------
+  // Push Notifications
+  // ---------------------------------------------------------------------------
+
+  // SubscribePush registers a browser for push notifications.
+  rpc SubscribePush(PushSubscriptionRequest) returns (PushSubscriptionResponse);
+
+  // UnsubscribePush removes a push subscription.
+  rpc UnsubscribePush(UnsubscribePushRequest) returns (google.protobuf.Empty);
+
+  // GetVAPIDPublicKey returns the server's VAPID public key for Web Push.
+  rpc GetVAPIDPublicKey(google.protobuf.Empty) returns (VAPIDPublicKeyResponse);
+}
+
+// =============================================================================
+// Event Streaming Messages
+// =============================================================================
+
+message SubscribeRequest {
+  // Filter to specific session (empty = all sessions)
+  string session_id = 1;
+
+  // Filter to specific event types (empty = all types)
+  // Types: "session.*", "message.*", "todo.*", "telemetry.*", "view.*", "agent.*"
+  repeated string event_types = 2;
+
+  // Resume from specific event for replay after reconnect
+  string last_event_id = 3;
+
+  // Include agent events (requires elevated permissions)
+  bool include_agent_events = 4;
+}
+
+message Event {
+  // Event type (e.g., "session.created", "message.added", "view.patch")
+  string type = 1;
+
+  // Associated session ID (if applicable)
+  string session_id = 2;
+
+  // Event payload (flexible JSON-like structure)
+  google.protobuf.Struct payload = 3;
+
+  // When the event occurred
+  google.protobuf.Timestamp timestamp = 4;
+
+  // Unique event ID for replay tracking
+  string event_id = 5;
+
+  // Originating agent ID (for agent events)
+  string agent_id = 6;
+}
+
+// =============================================================================
+// Session Messages
+// =============================================================================
+
+message CommandRequest {
+  string session_id = 1;
+
+  // Command type: "input", "slash", "interrupt", "approve", "reject"
+  string type = 2;
+
+  // Command content (user message or slash command)
+  string content = 3;
+
+  // Session-specific auth token
+  string session_token = 4;
+
+  // Target agent for host agent commands
+  string agent_id = 5;
+}
+
+message CommandResponse {
+  // "accepted", "rejected", "queued"
+  string status = 1;
+  string message = 2;
+  string command_id = 3;
+}
+
+message ListSessionsRequest {
+  int32 limit = 1;
+  int32 offset = 2;
+
+  // Filter by status: "active", "idle", "completed"
+  string status_filter = 3;
+
+  // Filter by project path prefix
+  string project_filter = 4;
+}
+
+message ListSessionsResponse {
+  repeated SessionSummary sessions = 1;
+  int32 total_count = 2;
+}
+
+message SessionSummary {
+  string id = 1;
+  string project_path = 2;
+  string git_repo = 3;
+  string git_branch = 4;
+  string status = 5;
+  google.protobuf.Timestamp created_at = 6;
+  google.protobuf.Timestamp last_active = 7;
+  int32 message_count = 8;
+  int32 todo_count = 9;
+
+  // If this is a host agent session
+  string agent_id = 10;
+}
+
+message GetSessionRequest {
+  string session_id = 1;
+
+  // How many recent messages to include
+  int32 message_limit = 2;
+}
+
+message SessionDetail {
+  SessionSummary session = 1;
+  repeated Message recent_messages = 2;
+  repeated Todo todos = 3;
+  repeated Skill active_skills = 4;
+  PlanSummary active_plan = 5;
+  SessionSummaryText summary = 6;
+}
+
+message Message {
+  string id = 1;
+  string role = 2;  // "user", "assistant", "system", "tool"
+  string content = 3;
+  google.protobuf.Timestamp timestamp = 4;
+
+  // For tool messages
+  string tool_name = 5;
+  string tool_call_id = 6;
+}
+
+message Todo {
+  string id = 1;
+  string content = 2;
+  string status = 3;  // "pending", "in_progress", "completed", "failed"
+  int32 order_index = 4;
+  google.protobuf.Timestamp created_at = 5;
+  google.protobuf.Timestamp updated_at = 6;
+}
+
+message Skill {
+  string id = 1;
+  string name = 2;
+  string phase = 3;
+  bool active = 4;
+}
+
+message PlanSummary {
+  string id = 1;
+  string feature_name = 2;
+  string description = 3;
+  string status = 4;
+  int32 total_tasks = 5;
+  int32 completed_tasks = 6;
+}
+
+message SessionSummaryText {
+  string summary = 1;
+  google.protobuf.Timestamp generated_at = 2;
+}
+
+// =============================================================================
+// Headless Session Messages
+// =============================================================================
+
+message CreateHeadlessRequest {
+  // Project path or git URL to clone
+  string project = 1;
+
+  // Initial prompt to start the session
+  string initial_prompt = 2;
+
+  // Model override (empty = use default)
+  string model = 3;
+
+  // Git branch to work on
+  string branch = 4;
+
+  // Environment variables to inject
+  map<string, string> env = 5;
+
+  // Resource limits
+  ResourceLimits limits = 6;
+
+  // Tool restrictions
+  ToolPolicy tool_policy = 7;
+}
+
+message ResourceLimits {
+  string cpu = 1;        // e.g., "2" or "500m"
+  string memory = 2;     // e.g., "4Gi"
+  string storage = 3;    // e.g., "10Gi"
+  int32 timeout_seconds = 4;
+}
+
+message ToolPolicy {
+  repeated string allowed_tools = 1;
+  repeated string denied_tools = 2;
+  repeated string require_approval = 3;
+  int32 max_exec_time_seconds = 4;
+  int64 max_file_size_bytes = 5;
+}
+
+message HeadlessSession {
+  string id = 1;
+  string status = 2;  // "starting", "running", "completed", "failed"
+  string project = 3;
+  string branch = 4;
+  google.protobuf.Timestamp created_at = 5;
+  google.protobuf.Timestamp updated_at = 6;
+
+  // Container details (if running in k8s)
+  string pod_name = 7;
+  string namespace = 8;
+}
+
+message DeleteHeadlessRequest {
+  string session_id = 1;
+
+  // Force kill even if session is running
+  bool force = 2;
+
+  // Cleanup workspace after deletion
+  bool cleanup_workspace = 3;
+}
+
+message HeadlessSessionList {
+  repeated HeadlessSession sessions = 1;
+}
+
+// =============================================================================
+// Workflow Messages
+// =============================================================================
+
+message WorkflowActionRequest {
+  string session_id = 1;
+
+  // Action: "plan", "execute", "pause", "resume", "cancel"
+  string action = 2;
+
+  // For "plan" action
+  string feature = 3;
+  string description = 4;
+
+  // For "execute" action
+  string plan_id = 5;
+  string task_id = 6;  // Optional: execute specific task
+
+  // For "pause"/"resume" actions
+  string note = 7;
+}
+
+message WorkflowActionResponse {
+  string status = 1;  // "accepted", "rejected"
+  string message = 2;
+  string plan_id = 3;
+  string task_id = 4;
+}
+
+// =============================================================================
+// Host Agent Messages
+// =============================================================================
+
+message RegisterAgentRequest {
+  // Unique agent identifier (generated or user-provided)
+  string agent_id = 1;
+
+  // Human-readable name
+  string name = 2;
+
+  // Hostname of the machine running the agent
+  string hostname = 3;
+
+  // Agent capabilities
+  repeated string capabilities = 4;  // "shell", "gui", "sudo", "docker", "file"
+
+  // Working directory (default project path)
+  string work_dir = 5;
+
+  // Agent metadata
+  map<string, string> metadata = 6;
+
+  // Authentication token
+  string token = 7;
+
+  // Agent version
+  string version = 8;
+
+  // Platform info
+  string os = 9;       // "linux", "darwin", "windows"
+  string arch = 10;    // "amd64", "arm64"
+}
+
+message AgentCommand {
+  // Unique command ID for result correlation
+  string command_id = 1;
+
+  // Originating session
+  string session_id = 2;
+
+  // Command type
+  oneof command {
+    ShellCommand shell = 10;
+    FileOperation file = 11;
+    GuiAction gui = 12;
+    ProcessControl process = 13;
+    SystemQuery query = 14;
+  }
+
+  // Execution constraints
+  int32 timeout_seconds = 20;
+  bool require_approval = 21;
+  string approval_prompt = 22;
+}
+
+message ShellCommand {
+  string command = 1;
+  string working_dir = 2;
+  map<string, string> env = 3;
+  bool capture_output = 4;
+  bool stream_output = 5;  // Stream stdout/stderr as events
+  string stdin_data = 6;
+  bool use_pty = 7;        // Allocate PTY for interactive commands
+}
+
+message FileOperation {
+  // "read", "write", "append", "delete", "list", "stat", "mkdir"
+  string operation = 1;
+  string path = 2;
+  bytes content = 3;
+  int32 mode = 4;  // Unix file mode
+  bool recursive = 5;
+}
+
+message GuiAction {
+  // "screenshot", "click", "type", "move", "scroll", "key"
+  string action = 1;
+
+  // For click/move actions
+  int32 x = 2;
+  int32 y = 3;
+  string button = 4;  // "left", "right", "middle"
+
+  // For type action
+  string text = 5;
+
+  // For key action
+  repeated string keys = 6;  // e.g., ["ctrl", "c"]
+
+  // For scroll action
+  int32 delta_x = 7;
+  int32 delta_y = 8;
+
+  // Capture screenshot after action
+  bool capture_after = 9;
+
+  // Target window (optional)
+  string window_name = 10;
+}
+
+message ProcessControl {
+  // "list", "kill", "signal"
+  string action = 1;
+  int32 pid = 2;
+  string signal = 3;  // "TERM", "KILL", "HUP", etc.
+  string name_filter = 4;  // For list action
+}
+
+message SystemQuery {
+  // "env", "user", "disk", "memory", "network", "services"
+  string query_type = 1;
+  string filter = 2;
+}
+
+message AgentResult {
+  string command_id = 1;
+  string agent_id = 2;
+
+  // Execution status
+  bool success = 3;
+  int32 exit_code = 4;
+  string error = 5;
+
+  // Output data
+  string stdout = 10;
+  string stderr = 11;
+  bytes binary_output = 12;  // For file reads, screenshots
+
+  // For file operations
+  FileInfo file_info = 20;
+  repeated FileInfo file_list = 21;
+
+  // For system queries
+  google.protobuf.Struct query_result = 22;
+
+  // Timing
+  google.protobuf.Timestamp started_at = 30;
+  google.protobuf.Timestamp completed_at = 31;
+}
+
+message FileInfo {
+  string path = 1;
+  string name = 2;
+  bool is_dir = 3;
+  int64 size = 4;
+  int32 mode = 5;
+  google.protobuf.Timestamp modified_at = 6;
+}
+
+message AgentHeartbeatRequest {
+  string agent_id = 1;
+
+  // Current system stats
+  double cpu_percent = 2;
+  double memory_percent = 3;
+  int64 disk_free_bytes = 4;
+
+  // Active command count
+  int32 active_commands = 5;
+}
+
+message AgentHeartbeatResponse {
+  // Server acknowledgment
+  bool ok = 1;
+
+  // Commands to cancel (if any)
+  repeated string cancel_command_ids = 2;
+
+  // Configuration updates
+  map<string, string> config_updates = 3;
+}
+
+message AgentList {
+  repeated AgentInfo agents = 1;
+}
+
+message AgentInfo {
+  string agent_id = 1;
+  string name = 2;
+  string hostname = 3;
+  repeated string capabilities = 4;
+  string status = 5;  // "connected", "busy", "disconnected"
+  google.protobuf.Timestamp connected_at = 6;
+  google.protobuf.Timestamp last_heartbeat = 7;
+  string os = 8;
+  string arch = 9;
+  string version = 10;
+
+  // Current workload
+  int32 active_sessions = 11;
+  int32 active_commands = 12;
+}
+
+// =============================================================================
+// Plan Messages
+// =============================================================================
+
+message ListPlansRequest {
+  int32 limit = 1;
+  int32 offset = 2;
+  string status_filter = 3;  // "active", "completed", "archived"
+}
+
+message ListPlansResponse {
+  repeated PlanSummary plans = 1;
+  int32 total_count = 2;
+}
+
+message GetPlanRequest {
+  string plan_id = 1;
+}
+
+message Plan {
+  string id = 1;
+  string feature_name = 2;
+  string description = 3;
+  string status = 4;  // "pending", "in_progress", "completed", "failed"
+  repeated PlanTask tasks = 5;
+  google.protobuf.Timestamp created_at = 6;
+  google.protobuf.Timestamp updated_at = 7;
+}
+
+message PlanTask {
+  string id = 1;
+  string title = 2;
+  string description = 3;
+  string status = 4;  // "pending", "in_progress", "completed", "failed"
+  int32 order_index = 5;
+  google.protobuf.Timestamp created_at = 6;
+  google.protobuf.Timestamp updated_at = 7;
+}
+
+// =============================================================================
+// Project Messages
+// =============================================================================
+
+message ProjectList {
+  repeated Project projects = 1;
+}
+
+message Project {
+  string slug = 1;
+  string name = 2;
+  string path = 3;
+  int32 session_count = 4;
+  google.protobuf.Timestamp last_active = 5;
+}
+
+message CreateProjectRequest {
+  string name = 1;
+  string path = 2;
+}
+
+// =============================================================================
+// Persona Messages
+// =============================================================================
+
+message PersonaList {
+  repeated Persona personas = 1;
+}
+
+message Persona {
+  string id = 1;
+  string name = 2;
+  string description = 3;
+  string tone = 4;  // "professional", "friendly", "quirky"
+  bool active = 5;
+}
+
+// =============================================================================
+// Approval Messages
+// =============================================================================
+
+message ListPendingApprovalsRequest {
+  string session_id = 1;  // Filter by session (empty = all sessions)
+}
+
+message PendingApprovalsList {
+  repeated PendingApproval approvals = 1;
+}
+
+message PendingApproval {
+  string id = 1;
+  string session_id = 2;
+  string tool_name = 3;
+  google.protobuf.Struct tool_input = 4;
+  int32 risk_score = 5;
+  repeated string risk_reasons = 6;
+  string status = 7;  // "pending", "approved", "rejected", "expired", "auto"
+  google.protobuf.Timestamp expires_at = 8;
+  google.protobuf.Timestamp created_at = 9;
+
+  // Rich display fields for approval modals
+  string operation_type = 10;  // e.g., "shell:write", "write", "read"
+  string description = 11;     // Human-readable explanation
+  string command = 12;         // For shell operations, the command to run
+  string file_path = 13;       // For file operations, the target path
+  repeated DiffLine diff_lines = 14;  // For file edits, the diff preview
+  int32 added_lines = 15;      // Lines added (for diff summary)
+  int32 removed_lines = 16;    // Lines removed (for diff summary)
+}
+
+// DiffLine represents a single line in a diff preview.
+message DiffLine {
+  string type = 1;    // "add", "remove", "context"
+  string content = 2;
+}
+
+message ApproveToolCallRequest {
+  string approval_id = 1;
+  string note = 2;  // Optional user note
+}
+
+message ApproveToolCallResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message RejectToolCallRequest {
+  string approval_id = 1;
+  string reason = 2;  // Optional rejection reason
+}
+
+message RejectToolCallResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message ApprovalPolicy {
+  int64 id = 1;
+  string name = 2;
+  bool is_active = 3;
+  string config = 4;  // JSON-encoded policy configuration
+  google.protobuf.Timestamp created_at = 5;
+  google.protobuf.Timestamp updated_at = 6;
+}
+
+message UpdateApprovalPolicyRequest {
+  string name = 1;
+  string config = 2;  // JSON-encoded policy configuration
+  bool activate = 3;  // Whether to make this the active policy
+}
+
+message GetAuditLogRequest {
+  string session_id = 1;
+  int32 limit = 2;  // Max entries to return (default 100)
+}
+
+message AuditLogResponse {
+  repeated AuditEntry entries = 1;
+}
+
+message AuditEntry {
+  int64 id = 1;
+  string session_id = 2;
+  string approval_id = 3;
+  string tool_name = 4;
+  string tool_input = 5;
+  string tool_output = 6;
+  int32 risk_score = 7;
+  string decision = 8;  // "auto", "approved", "rejected"
+  string decided_by = 9;
+  google.protobuf.Timestamp executed_at = 10;
+  int64 duration_ms = 11;
+}
+
+// =============================================================================
+// Push Notification Messages
+// =============================================================================
+
+message PushSubscriptionRequest {
+  string endpoint = 1;
+  string p256dh = 2;
+  string auth = 3;
+  string user_agent = 4;
+}
+
+message PushSubscriptionResponse {
+  bool success = 1;
+  string subscription_id = 2;
+}
+
+message UnsubscribePushRequest {
+  string endpoint = 1;
+}
+
+message VAPIDPublicKeyResponse {
+  string public_key = 1;
+}

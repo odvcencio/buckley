@@ -1,0 +1,31 @@
+FROM alpine:3.21
+
+ARG TARGETPLATFORM
+
+RUN apk add --no-cache \
+    ca-certificates \
+    git \
+    openssh-client \
+    bash \
+    curl \
+    jq
+
+RUN addgroup -g 1000 buckley && \
+    adduser -u 1000 -G buckley -h /home/buckley -D buckley
+
+COPY $TARGETPLATFORM/buckley /usr/local/bin/buckley
+
+RUN mkdir -p /home/buckley/.buckley /buckley/projects /buckley/shared && \
+    chown -R buckley:buckley /home/buckley /buckley
+
+USER buckley
+WORKDIR /home/buckley
+
+# Health check (works in Docker and is ignored by Kubernetes probes)
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD curl -f http://localhost:4488/healthz || exit 1
+
+EXPOSE 4488
+
+ENTRYPOINT ["buckley"]
+CMD ["serve", "--bind", "0.0.0.0:4488", "--browser", "--require-token", "--generate-token", "--token-file", "/home/buckley/.buckley/ipc-token"]

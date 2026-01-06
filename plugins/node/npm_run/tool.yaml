@@ -1,0 +1,15 @@
+name: npm_run
+description: Run npm script from package.json
+parameters:
+  type: object
+  properties:
+    script:
+      type: string
+      description: Script name to run (e.g., build, start, dev)
+    args:
+      type: string
+      description: Additional arguments to pass to the script
+      default: ""
+  required: [script]
+executable: ./npm_run.sh
+timeout_ms: 600000

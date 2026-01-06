@@ -1,0 +1,15 @@
+name: go_vet
+description: Run go vet to detect suspicious constructs
+parameters:
+  type: object
+  properties:
+    package:
+      type: string
+      description: Package path to vet (e.g., ./..., ./pkg/config)
+      default: ./...
+    tags:
+      type: string
+      description: Build tags to use during vetting
+  required: []
+executable: ./go_vet.sh
+timeout_ms: 120000
