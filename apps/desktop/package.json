@@ -14,7 +14,7 @@
     "start": "npm run package && cross-env BUCKLEY_UI_ASSETS_DIR=../../pkg/ipc/ui electron ."
   },
   "devDependencies": {
-    "concurrently": "^8.2.2",
+    "concurrently": "^9.2.1",
     "cross-env": "^7.0.3",
     "electron": "^31.0.2",
     "wait-on": "^7.0.1"
