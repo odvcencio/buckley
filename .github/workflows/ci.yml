@@ -207,7 +207,7 @@ jobs:
         run: go build -o buckley-${{ matrix.name }}-${{ matrix.goarch }}${{ matrix.ext }} ./cmd/buckley
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: buckley-${{ matrix.name }}-${{ matrix.goarch }}
           path: buckley-${{ matrix.name }}-${{ matrix.goarch }}${{ matrix.ext }}
