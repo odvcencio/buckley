@@ -1,0 +1,80 @@
+syntax = "proto3";
+
+package buckley.acp.v1;
+
+option go_package = "github.com/odvcencio/buckley/pkg/acp/proto;acppb";
+
+import "google/protobuf/timestamp.proto";
+
+// Core types
+message AgentInfo {
+  string id = 1;
+  string type = 2;
+  string endpoint = 3;
+  repeated string capabilities = 4;
+  map<string, string> metadata = 5;
+  google.protobuf.Timestamp registered_at = 6;
+}
+
+message ServerCapabilities {
+  string protocol_version = 1;
+  repeated string features = 2;
+  int32 max_agents = 3;
+  repeated string supported_auth = 4;
+}
+
+message Session {
+  string session_id = 1;
+  string agent_id = 2;
+  google.protobuf.Timestamp created_at = 3;
+  map<string, string> metadata = 4;
+}
+
+message ContextHandle {
+  string handle_id = 1;
+  string type = 2;
+  int64 size_bytes = 3;
+  google.protobuf.Timestamp created_at = 4;
+}
+
+message CapabilityGrant {
+  string grant_id = 1;
+  string agent_id = 2;
+  repeated string capabilities = 3;
+  google.protobuf.Timestamp issued_at = 4;
+  google.protobuf.Timestamp expires_at = 5;
+  GrantContext context = 6;
+}
+
+message GrantContext {
+  repeated string allowed_paths = 1;
+  repeated string allowed_tools = 2;
+  int32 max_agents = 3;
+  string approval_mode = 4;
+}
+
+message P2PEndpoint {
+  string address = 1;
+  string token = 2;
+  google.protobuf.Timestamp expires_at = 3;
+}
+
+message TaskEvent {
+  string task_id = 1;
+  string plan_id = 2;
+  string status = 3;
+  int32 progress = 4;
+  string message = 5;
+  google.protobuf.Timestamp timestamp = 6;
+}
+
+// Editor coordinate types (aligned with LSP semantics)
+message Position {
+  int32 line = 1;
+  int32 character = 2;
+}
+
+message Range {
+  Position start = 1;
+  Position end = 2;
+}

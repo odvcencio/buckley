@@ -1,0 +1,20 @@
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Ignore generated assets and intentional test fixtures."
+paths = [
+  '''^apps/desktop/dist/''',
+  '''^pkg/ipc/ui/assets/''',
+  '''^pkg/model/transport_test\.go$''',
+  '''^pkg/security/analyzer_test\.go$''',
+  '''^pkg/security/secrets_test\.go$''',
+  '''^pkg/setup/wizard_test\.go$''',
+]
+
+regexes = [
+  # Historical placeholder (not a real secret).
+  '''sk-or-v1-REPLACE_ME''',
+  # Documentation-only example (not a real secret).
+  '''api_key=abc123def456''',
+]

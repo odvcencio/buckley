@@ -1,0 +1,35 @@
+FROM node:20-alpine
+
+# Install development tools
+RUN apk add --no-cache \
+    git \
+    make \
+    curl \
+    jq \
+    ca-certificates \
+    python3 \
+    g++ \
+    bash \
+    openssh-client
+
+# Install Bun (for JS/TS workflows)
+RUN curl -fsSL https://bun.sh/install | bash
+ENV PATH="/root/.bun/bin:${PATH}"
+
+# Install global npm packages
+RUN npm install -g \
+    typescript \
+    ts-node \
+    eslint \
+    prettier \
+    jest \
+    nodemon
+
+# Set working directory
+WORKDIR /workspace
+
+# Configure git for safer directory operations
+RUN git config --global --add safe.directory /workspace
+
+# Default command
+CMD ["sleep", "infinity"]

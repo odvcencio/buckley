@@ -1,0 +1,20 @@
+name: ts_node
+description: Execute TypeScript files directly with ts-node
+parameters:
+  type: object
+  properties:
+    file:
+      type: string
+      description: TypeScript file to execute
+    args:
+      type: array
+      description: Command-line arguments to pass
+      items:
+        type: string
+    transpile_only:
+      type: boolean
+      description: Skip type checking for faster execution
+      default: false
+  required: [file]
+executable: ./ts_node.sh
+timeout_ms: 300000

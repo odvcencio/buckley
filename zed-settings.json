@@ -1,0 +1,10 @@
+{
+  "agent_servers": {
+    "Buckley": {
+      "type": "custom",
+      "command": "buckley",
+      "args": ["acp"],
+      "env": {}
+    }
+  }
+}

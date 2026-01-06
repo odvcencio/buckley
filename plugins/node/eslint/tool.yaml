@@ -1,0 +1,25 @@
+name: eslint
+description: Lint JavaScript and TypeScript with ESLint
+parameters:
+  type: object
+  properties:
+    path:
+      type: string
+      description: Files or directories to lint
+      default: .
+    fix:
+      type: boolean
+      description: Automatically fix problems
+      default: false
+    format:
+      type: string
+      description: Output format (stylish, json, compact, etc.)
+      default: stylish
+    ext:
+      type: array
+      description: File extensions to lint (e.g., [".js", ".ts", ".tsx"])
+      items:
+        type: string
+  required: []
+executable: ./eslint.sh
+timeout_ms: 180000

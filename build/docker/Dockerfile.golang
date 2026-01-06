@@ -1,0 +1,28 @@
+FROM golang:1.25-alpine
+
+# Install development tools
+RUN apk add --no-cache \
+    git \
+    make \
+    curl \
+    jq \
+    gcc \
+    musl-dev \
+    bash \
+    openssh-client
+
+# Install golangci-lint
+RUN go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
+
+# Install other Go tools
+RUN go install golang.org/x/tools/cmd/goimports@latest && \
+    go install github.com/go-delve/delve/cmd/dlv@latest
+
+# Set working directory
+WORKDIR /workspace
+
+# Configure git for safer directory operations
+RUN git config --global --add safe.directory /workspace
+
+# Default command (sleep infinity for dev container)
+CMD ["sleep", "infinity"]

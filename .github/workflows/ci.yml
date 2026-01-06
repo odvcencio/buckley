@@ -1,0 +1,213 @@
+name: CI
+
+# Temporarily manual-only while GitHub Actions minutes are exhausted.
+# Re-enable push/pull_request triggers for the OSS launch gate.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache: true
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Run tests with coverage
+        run: GO_TEST_COVERAGE=1 ./scripts/test.sh
+
+      - name: Run tests with race detector
+        run: GO_TEST_RACE=1 ./scripts/test.sh
+
+      - name: Check coverage threshold
+        run: |
+          set -euo pipefail
+          if [ ! -f coverage.out ]; then
+            echo "No coverage file found"
+            exit 1
+          fi
+
+          # Extract total coverage percentage
+          raw_total=$(go tool cover -func=coverage.out | awk '/^total:/{gsub("%","",$3); print $3}')
+          echo "Raw total coverage: ${raw_total}%"
+
+          # Exclude generated/mocked code from threshold enforcement.
+          { echo "mode: atomic"; tail -n +2 coverage.out | grep -v "/proto/" | grep -v "/mocks/"; } > coverage.filtered.out
+          total=$(go tool cover -func=coverage.filtered.out | awk '/^total:/{gsub("%","",$3); print $3}')
+
+          echo "Total coverage: ${total}%"
+
+          # Fail if coverage is below threshold (50% for now, increase over time)
+          threshold=50
+          if awk -v total="$total" -v threshold="$threshold" 'BEGIN{ exit (total < threshold) ? 0 : 1 }'; then
+            echo "Coverage ${total}% is below threshold ${threshold}%"
+            exit 1
+          fi
+
+          echo "Coverage ${total}% meets threshold ${threshold}%"
+
+  ui:
+    name: UI Build (embedded)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.2.21'
+
+      - name: Build embedded UI
+        run: ./scripts/build-ui.sh
+
+      - name: Ensure UI assets are up to date
+        run: git diff --exit-code
+
+  security:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache: true
+
+      - name: Run gosec
+        run: |
+          go install github.com/securego/gosec/v2/cmd/gosec@latest
+          gosec -exclude=G104,G304 -fmt=json -out=gosec-results.json ./... || true
+          # Fail only on high severity issues
+          if grep -q '"severity": "HIGH"' gosec-results.json 2>/dev/null; then
+            echo "High severity security issues found:"
+            cat gosec-results.json
+            exit 1
+          fi
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache: true
+
+      - name: Check gofmt (changed files)
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          base="$PR_BASE_SHA"
+          if [ -z "$base" ]; then
+            base="$PUSH_BEFORE_SHA"
+          fi
+          if [ -z "$base" ]; then
+            echo "No base SHA available; skipping gofmt check."
+            exit 0
+          fi
+          if [ "$base" = "0000000000000000000000000000000000000000" ]; then
+            echo "Base SHA is empty (new branch); skipping gofmt check."
+            exit 0
+          fi
+
+          files="$(git diff --name-only "$base" "$HEAD_SHA" -- '*.go' || true)"
+          if [ -z "$files" ]; then
+            echo "No Go files changed."
+            exit 0
+          fi
+
+          unformatted="$(gofmt -l $files || true)"
+          if [ -n "$unformatted" ]; then
+            echo "gofmt required on:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Check go mod tidy
+        run: |
+          go mod tidy
+          git diff --exit-code
+
+      - name: Run go vet
+        run: go vet ./...
+
+      - name: Run golangci-lint
+        if: github.event_name == 'pull_request'
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.7.2
+          only-new-issues: true
+          args: --timeout=5m
+
+  build:
+    name: Build
+    strategy:
+      matrix:
+        include:
+          - name: linux
+            runner: ubuntu-latest
+            goos: linux
+            goarch: amd64
+            ext: ''
+          - name: macos
+            runner: macos-latest
+            goos: darwin
+            goarch: amd64
+            ext: ''
+          - name: windows
+            runner: windows-latest
+            goos: windows
+            goarch: amd64
+            ext: '.exe'
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache: true
+
+      - name: Build
+        env:
+          CGO_ENABLED: '0'
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: go build -o buckley-${{ matrix.name }}-${{ matrix.goarch }}${{ matrix.ext }} ./cmd/buckley
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: buckley-${{ matrix.name }}-${{ matrix.goarch }}
+          path: buckley-${{ matrix.name }}-${{ matrix.goarch }}${{ matrix.ext }}

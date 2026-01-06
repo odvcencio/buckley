@@ -1,0 +1,28 @@
+FROM golang:1.25-alpine
+
+ARG TARGETPLATFORM
+
+RUN apk add --no-cache \
+    ca-certificates \
+    git \
+    openssh-client \
+    bash \
+    curl \
+    jq \
+    make \
+    gcc \
+    musl-dev
+
+RUN addgroup -g 1000 buckley && \
+    adduser -u 1000 -G buckley -h /home/buckley -D buckley
+
+COPY $TARGETPLATFORM/buckley /usr/local/bin/buckley
+
+RUN mkdir -p /home/buckley/.buckley /buckley/projects /buckley/shared /workspace && \
+    chown -R buckley:buckley /home/buckley /buckley /workspace
+
+USER buckley
+WORKDIR /workspace
+
+ENTRYPOINT ["buckley"]
+
