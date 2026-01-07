@@ -315,7 +315,7 @@ func (s *Scratchpad) shouldPersist(entry *Entry, now time.Time) bool {
 	switch entry.Type {
 	case EntryTypeArtifact:
 		return s.config.PersistArtifacts
-	case EntryTypeDecision:
+	case EntryTypeDecision, EntryTypeStrategy:
 		return s.config.PersistDecisions
 	default:
 		return false

@@ -73,9 +73,40 @@ type RLMScratchpadEntry struct {
 	Summary string
 }
 
+// CircuitStatus summarizes circuit breaker health.
+type CircuitStatus struct {
+	State              string // "Closed", "Open", "HalfOpen"
+	ConsecutiveFailures int
+	MaxFailures        int
+	LastError          string
+	RetryAfterSecs     int
+}
+
+// SidebarConfig holds configurable options for the sidebar.
+type SidebarConfig struct {
+	// Width is the sidebar width in characters. Default 24, min 16, max 60.
+	Width int
+	// MinWidth is the minimum width when resizing. Default 16.
+	MinWidth int
+	// MaxWidth is the maximum width when resizing. Default 60.
+	MaxWidth int
+}
+
+// DefaultSidebarConfig returns sensible defaults.
+func DefaultSidebarConfig() SidebarConfig {
+	return SidebarConfig{
+		Width:    24,
+		MinWidth: 16,
+		MaxWidth: 60,
+	}
+}
+
 // Sidebar displays task progress, plan, and running tools.
 type Sidebar struct {
 	FocusableBase
+
+	// Configuration
+	config SidebarConfig
 
 	// Current task info
 	currentTask     string
@@ -109,6 +140,10 @@ type Sidebar struct {
 	rlmScratchpad []RLMScratchpadEntry
 	showRLM       bool
 
+	// Circuit breaker status
+	circuitStatus *CircuitStatus
+	showCircuit   bool
+
 	// Scroll state (for long lists)
 	planScrollOffset int
 	focusedSection   int // 0=task, 1=plan, 2=tools, 3=touches, 4=files
@@ -125,9 +160,23 @@ type Sidebar struct {
 	failedStyle    backend.Style
 }
 
-// NewSidebar creates a new sidebar widget.
+// NewSidebar creates a new sidebar widget with default configuration.
 func NewSidebar() *Sidebar {
+	return NewSidebarWithConfig(DefaultSidebarConfig())
+}
+
+// NewSidebarWithConfig creates a new sidebar widget with the given configuration.
+func NewSidebarWithConfig(cfg SidebarConfig) *Sidebar {
+	// Apply constraints
+	if cfg.Width < cfg.MinWidth {
+		cfg.Width = cfg.MinWidth
+	}
+	if cfg.Width > cfg.MaxWidth {
+		cfg.Width = cfg.MaxWidth
+	}
+
 	return &Sidebar{
+		config:          cfg,
 		showCurrentTask: true,
 		showPlan:        true,
 		showTools:       true,
@@ -171,6 +220,9 @@ func (s *Sidebar) HasContent() bool {
 		return true
 	}
 	if s.showRLM && (s.rlmStatus != nil || len(s.rlmScratchpad) > 0) {
+		return true
+	}
+	if s.showCircuit && s.circuitStatus != nil {
 		return true
 	}
 	if s.showTouches && len(s.activeTouches) > 0 {
@@ -262,6 +314,20 @@ func (s *Sidebar) SetRLMStatus(status *RLMStatus, scratchpad []RLMScratchpadEntr
 	}
 }
 
+// SetCircuitStatus updates the circuit breaker status display.
+func (s *Sidebar) SetCircuitStatus(status *CircuitStatus) {
+	s.circuitStatus = status
+	// Always show circuit section when there's a problem
+	if status != nil && status.State != "Closed" {
+		s.showCircuit = true
+	}
+}
+
+// SetShowCircuit controls visibility of circuit breaker section.
+func (s *Sidebar) SetShowCircuit(show bool) {
+	s.showCircuit = show
+}
+
 // SetShowRLM controls visibility of the RLM section.
 func (s *Sidebar) SetShowRLM(show bool) {
 	s.showRLM = show
@@ -279,8 +345,11 @@ func (s *Sidebar) ToggleRecentFiles() {
 
 // Measure returns the preferred size.
 func (s *Sidebar) Measure(constraints runtime.Constraints) runtime.Size {
-	// Sidebar has fixed width, flexible height
-	width := 24
+	// Sidebar has configurable width, flexible height
+	width := s.config.Width
+	if width <= 0 {
+		width = 24 // fallback default
+	}
 	if constraints.MaxWidth < width {
 		width = constraints.MaxWidth
 	}
@@ -288,6 +357,32 @@ func (s *Sidebar) Measure(constraints runtime.Constraints) runtime.Size {
 		Width:  width,
 		Height: constraints.MaxHeight,
 	}
+}
+
+// SetWidth changes the sidebar width within configured min/max bounds.
+func (s *Sidebar) SetWidth(width int) {
+	if width < s.config.MinWidth {
+		width = s.config.MinWidth
+	}
+	if width > s.config.MaxWidth {
+		width = s.config.MaxWidth
+	}
+	s.config.Width = width
+}
+
+// Width returns the current sidebar width.
+func (s *Sidebar) Width() int {
+	return s.config.Width
+}
+
+// Grow increases the sidebar width by delta characters.
+func (s *Sidebar) Grow(delta int) {
+	s.SetWidth(s.config.Width + delta)
+}
+
+// Shrink decreases the sidebar width by delta characters.
+func (s *Sidebar) Shrink(delta int) {
+	s.SetWidth(s.config.Width - delta)
 }
 
 // Layout stores the assigned bounds.
@@ -329,6 +424,11 @@ func (s *Sidebar) Render(ctx runtime.RenderContext) {
 	// RLM Section
 	if s.showRLM && (s.rlmStatus != nil || len(s.rlmScratchpad) > 0) {
 		y = s.renderRLM(ctx.Buffer, contentX, y, contentWidth)
+	}
+
+	// Circuit Breaker Section (show prominently when there are issues)
+	if s.showCircuit && s.circuitStatus != nil {
+		y = s.renderCircuit(ctx.Buffer, contentX, y, contentWidth)
 	}
 
 	// Experiments Section
@@ -564,6 +664,62 @@ func (s *Sidebar) renderRLM(buf *runtime.Buffer, x, y, width int) int {
 	return y
 }
 
+// renderCircuit draws the circuit breaker status section.
+func (s *Sidebar) renderCircuit(buf *runtime.Buffer, x, y, width int) int {
+	if s.circuitStatus == nil {
+		return y
+	}
+
+	// Header with warning icon for problems
+	icon := '▼'
+	headerText := "Circuit"
+	headerStyle := s.headerStyle
+	if s.circuitStatus.State == "Open" {
+		icon = '⚠'
+		headerText = "Circuit OPEN"
+		headerStyle = s.failedStyle.Bold(true)
+	} else if s.circuitStatus.State == "HalfOpen" {
+		icon = '◐'
+		headerText = "Circuit Testing"
+		headerStyle = s.activeStyle
+	}
+
+	buf.Set(x, y, icon, headerStyle)
+	buf.SetString(x+2, y, headerText, headerStyle)
+	y++
+
+	// Show failure count
+	if s.circuitStatus.ConsecutiveFailures > 0 {
+		failLine := fmt.Sprintf("Failures: %d/%d",
+			s.circuitStatus.ConsecutiveFailures,
+			s.circuitStatus.MaxFailures)
+		style := s.textStyle
+		if s.circuitStatus.ConsecutiveFailures >= s.circuitStatus.MaxFailures {
+			style = s.failedStyle
+		} else if s.circuitStatus.ConsecutiveFailures >= s.circuitStatus.MaxFailures-1 {
+			style = s.activeStyle
+		}
+		buf.SetString(x+2, y, truncateSidebarText(failLine, width-2), style)
+		y++
+	}
+
+	// Show retry countdown when open
+	if s.circuitStatus.State == "Open" && s.circuitStatus.RetryAfterSecs > 0 {
+		retryLine := fmt.Sprintf("Retry in %ds", s.circuitStatus.RetryAfterSecs)
+		buf.SetString(x+2, y, truncateSidebarText(retryLine, width-2), s.textStyle)
+		y++
+	}
+
+	// Show last error (truncated)
+	if s.circuitStatus.LastError != "" {
+		errLine := truncateSidebarText(s.circuitStatus.LastError, width-2)
+		buf.SetString(x+2, y, errLine, s.failedStyle)
+		y++
+	}
+
+	return y
+}
+
 // renderTouches draws the active touches section.
 func (s *Sidebar) renderTouches(buf *runtime.Buffer, x, y, width int) int {
 	buf.Set(x, y, '▼', s.headerStyle)
@@ -681,6 +837,20 @@ func (s *Sidebar) HandleMessage(msg runtime.Message) runtime.HandleResult {
 			s.planScrollOffset++
 		}
 		return runtime.Handled()
+
+	case terminal.KeyLeft:
+		// Ctrl+Left to shrink sidebar
+		if key.Ctrl {
+			s.Shrink(4)
+			return runtime.Handled()
+		}
+
+	case terminal.KeyRight:
+		// Ctrl+Right to grow sidebar
+		if key.Ctrl {
+			s.Grow(4)
+			return runtime.Handled()
+		}
 
 	case terminal.KeyRune:
 		switch key.Rune {

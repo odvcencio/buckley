@@ -30,7 +30,7 @@ const (
 	DefaultExecutionModel   = defaultOpenRouterModel
 	DefaultReviewModel      = defaultOpenRouterModel
 	DefaultProvider         = "openrouter"
-	DefaultExecutionMode    = ExecutionModeRLM
+	DefaultExecutionMode    = ExecutionModeClassic // RLM is experimental
 	DefaultOneshotMode      = ExecutionModeClassic
 	DefaultTrustLevel       = "balanced"
 	DefaultApprovalMode     = "safe"
@@ -494,6 +494,10 @@ type UIConfig struct {
 	ToolGroupingWindowSeconds int    `yaml:"tool_grouping_window_seconds"`
 	ShowToolCosts             bool   `yaml:"show_tool_costs"`
 	ShowIntentStatements      bool   `yaml:"show_intent_statements"`
+	// Sidebar settings
+	SidebarWidth    int `yaml:"sidebar_width"`     // Sidebar width in characters (16-60, default 24)
+	SidebarMinWidth int `yaml:"sidebar_min_width"` // Minimum sidebar width (default 16)
+	SidebarMaxWidth int `yaml:"sidebar_max_width"` // Maximum sidebar width (default 60)
 	// Accessibility settings
 	HighContrast    bool `yaml:"high_contrast"`    // Use high-contrast color scheme
 	UseTextLabels   bool `yaml:"use_text_labels"`  // Add text labels to color-only indicators
@@ -684,36 +688,27 @@ func DefaultConfig() *Config {
 			Coordinator: RLMCoordinatorConfig{
 				Model:               "auto",
 				MaxIterations:       10,
-				MaxTokensBudget:     100000,
+				MaxTokensBudget:     0, // 0 = unlimited
 				MaxWallTime:         10 * time.Minute,
 				ConfidenceThreshold: 0.95,
 				StreamPartials:      true,
 			},
+			// All tiers default to kimi-k2 - users can customize per-tier models in config
 			Tiers: map[string]RLMTierConfig{
 				"trivial": {
-					MaxCostPerMillion: 0.50,
-					MinContextWindow:  8000,
-					Prefer:            []string{"speed", "cost"},
+					Model: "moonshotai/kimi-k2-thinking",
 				},
 				"light": {
-					MaxCostPerMillion: 3.00,
-					MinContextWindow:  16000,
-					Prefer:            []string{"cost", "quality"},
+					Model: "moonshotai/kimi-k2-thinking",
 				},
 				"medium": {
-					MaxCostPerMillion: 10.00,
-					MinContextWindow:  32000,
-					Prefer:            []string{"quality", "cost"},
+					Model: "moonshotai/kimi-k2-thinking",
 				},
 				"heavy": {
-					MaxCostPerMillion: 30.00,
-					MinContextWindow:  64000,
-					Prefer:            []string{"quality"},
+					Model: "moonshotai/kimi-k2-thinking",
 				},
 				"reasoning": {
-					MinContextWindow: 100000,
-					Prefer:           []string{"quality"},
-					Requires:         []string{"extended_thinking"},
+					Model: "moonshotai/kimi-k2-thinking",
 				},
 			},
 			Scratchpad: RLMScratchpadConfig{
@@ -905,6 +900,9 @@ func DefaultConfig() *Config {
 			ToolGroupingWindowSeconds: 30,
 			ShowToolCosts:             true,
 			ShowIntentStatements:      true,
+			SidebarWidth:              24,
+			SidebarMinWidth:           16,
+			SidebarMaxWidth:           60,
 		},
 		Commenting: CommentingConfig{
 			RequireFunctionDocs:           true,

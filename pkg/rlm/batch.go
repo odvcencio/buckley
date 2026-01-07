@@ -13,6 +13,7 @@ import (
 	"github.com/odvcencio/buckley/pkg/coordination/reliability"
 	"github.com/odvcencio/buckley/pkg/coordination/security"
 	"github.com/odvcencio/buckley/pkg/model"
+	"github.com/odvcencio/buckley/pkg/telemetry"
 	"github.com/odvcencio/buckley/pkg/tool"
 	"github.com/oklog/ulid/v2"
 	"golang.org/x/time/rate"
@@ -36,38 +37,78 @@ type BatchRequest struct {
 	Parallel bool
 }
 
+// ToolCallEvent records a tool invocation for transparency.
+type ToolCallEvent struct {
+	TaskID    string        `json:"task_id"`
+	AgentID   string        `json:"agent_id"`
+	ToolName  string        `json:"tool_name"`
+	Arguments string        `json:"arguments,omitempty"`
+	Success   bool          `json:"success"`
+	Error     string        `json:"error,omitempty"`
+	Duration  time.Duration `json:"duration_ms"`
+}
+
 // BatchResult captures the outcome of a dispatched task.
 type BatchResult struct {
-	TaskID     string
-	AgentID    string
-	ModelUsed  string
-	Summary    string
-	RawKey     string
-	TokensUsed int
-	Duration   time.Duration
-	Error      string
+	TaskID           string
+	AgentID          string
+	ModelUsed        string
+	Summary          string
+	RawKey           string
+	TokensUsed       int
+	Duration         time.Duration
+	Error            string
+	WeightRequested  Weight        // Original weight requested
+	WeightUsed       Weight        // Actual weight after escalation
+	WeightExplanation string       // Why this weight/model was chosen
+	EscalationPath   []string      // Models tried before success (for transparency)
+	ToolCalls        []ToolCallEvent // Tool calls made by sub-agent
 }
 
 // BatchDispatcher runs sub-agents with optional concurrency control.
 type BatchDispatcher struct {
-	router      *ModelRouter
-	models      *model.Manager
-	registry    *tool.Registry
-	scratchpad  ScratchpadWriter
-	conflicts   *ConflictDetector
-	approver    *security.ToolApprover
-	rateLimiter *rate.Limiter
-	semaphore   chan struct{}
-	breaker     *reliability.CircuitBreaker
-	bus         bus.MessageBus
+	router           *ModelRouter
+	models           *model.Manager
+	registry         *tool.Registry
+	scratchpad       ScratchpadWriter
+	conflicts        *ConflictDetector
+	approver         *security.ToolApprover
+	rateLimiter      *rate.Limiter
+	semaphore        chan struct{}
+	breaker          *reliability.CircuitBreaker
+	bus              bus.MessageBus
+	telemetry        *telemetry.Hub
+	enableEscalation bool
+	maxEscalations   int
 }
 
 // BatchDispatcherConfig configures dispatcher behavior.
 type BatchDispatcherConfig struct {
-	MaxConcurrent int
-	RateLimit     rate.Limit
-	Burst         int
-	Circuit       reliability.CircuitBreakerConfig
+	MaxConcurrent    int
+	RateLimit        rate.Limit
+	Burst            int
+	Circuit          reliability.CircuitBreakerConfig
+	EnableEscalation bool // Auto-retry with higher tier on failure
+	MaxEscalations   int  // Max tier escalations per task (default 2)
+}
+
+// EscalationOrder defines the weight tier escalation path.
+var EscalationOrder = []Weight{
+	WeightTrivial,
+	WeightLight,
+	WeightMedium,
+	WeightHeavy,
+	WeightReasoning,
+}
+
+// nextWeight returns the next higher weight tier for escalation.
+func nextWeight(current Weight) (Weight, bool) {
+	for i, w := range EscalationOrder {
+		if w == current && i < len(EscalationOrder)-1 {
+			return EscalationOrder[i+1], true
+		}
+	}
+	return current, false
 }
 
 // BatchDispatcherDeps supplies dependencies for dispatcher creation.
@@ -79,6 +120,7 @@ type BatchDispatcherDeps struct {
 	Conflicts  *ConflictDetector
 	Approver   *security.ToolApprover
 	Bus        bus.MessageBus
+	Telemetry  *telemetry.Hub
 }
 
 // NewBatchDispatcher creates a dispatcher with the given configuration.
@@ -106,20 +148,77 @@ func NewBatchDispatcher(cfg BatchDispatcherConfig, deps BatchDispatcherDeps) (*B
 		limiter = nil
 	}
 
-	breaker := reliability.NewCircuitBreaker(cfg.Circuit)
+	maxEscalations := cfg.MaxEscalations
+	if maxEscalations <= 0 {
+		maxEscalations = 2 // Default: allow up to 2 escalations
+	}
 
-	return &BatchDispatcher{
-		router:      deps.Router,
-		models:      deps.Models,
-		registry:    deps.Registry,
-		scratchpad:  deps.Scratchpad,
-		conflicts:   deps.Conflicts,
-		approver:    deps.Approver,
-		rateLimiter: limiter,
-		semaphore:   make(chan struct{}, maxConcurrent),
-		breaker:     breaker,
-		bus:         deps.Bus,
-	}, nil
+	d := &BatchDispatcher{
+		router:           deps.Router,
+		models:           deps.Models,
+		registry:         deps.Registry,
+		scratchpad:       deps.Scratchpad,
+		conflicts:        deps.Conflicts,
+		approver:         deps.Approver,
+		rateLimiter:      limiter,
+		semaphore:        make(chan struct{}, maxConcurrent),
+		bus:              deps.Bus,
+		telemetry:        deps.Telemetry,
+		enableEscalation: cfg.EnableEscalation,
+		maxEscalations:   maxEscalations,
+	}
+
+	// Configure circuit breaker with logging callbacks
+	cfg.Circuit.OnFailure = func(event reliability.FailureEvent) {
+		// Publish to bus for IPC/logging
+		d.publishEvent(context.Background(), "buckley.rlm.circuit.failure", map[string]any{
+			"error":           event.Error.Error(),
+			"consecutive_num": event.ConsecutiveNum,
+			"max_failures":    event.MaxFailures,
+			"will_open":       event.WillOpen,
+		})
+		// Publish to telemetry for TUI
+		if d.telemetry != nil {
+			d.telemetry.Publish(telemetry.Event{
+				Type: telemetry.EventCircuitFailure,
+				Data: map[string]any{
+					"error":           event.Error.Error(),
+					"consecutive_num": event.ConsecutiveNum,
+					"max_failures":    event.MaxFailures,
+					"will_open":       event.WillOpen,
+				},
+			})
+		}
+	}
+	cfg.Circuit.OnStateChange = func(event reliability.StateChangeEvent) {
+		errMsg := ""
+		if event.LastError != nil {
+			errMsg = event.LastError.Error()
+		}
+		// Publish to bus for IPC/logging
+		d.publishEvent(context.Background(), "buckley.rlm.circuit.state_change", map[string]any{
+			"from":       event.From.String(),
+			"to":         event.To.String(),
+			"reason":     event.Reason,
+			"last_error": errMsg,
+		})
+		// Publish to telemetry for TUI
+		if d.telemetry != nil {
+			d.telemetry.Publish(telemetry.Event{
+				Type: telemetry.EventCircuitStateChange,
+				Data: map[string]any{
+					"from":       event.From.String(),
+					"to":         event.To.String(),
+					"reason":     event.Reason,
+					"last_error": errMsg,
+				},
+			})
+		}
+	}
+
+	d.breaker = reliability.NewCircuitBreaker(cfg.Circuit)
+
+	return d, nil
 }
 
 // Execute runs the batch and returns results in input order.
@@ -186,25 +285,120 @@ func (d *BatchDispatcher) executeTask(ctx context.Context, task SubTask) (BatchR
 		res.TaskID = ulid.Make().String()
 	}
 
+	// Track original weight request
 	weight := task.Weight
 	if strings.TrimSpace(string(weight)) == "" {
 		weight = WeightMedium
 	}
-	modelID, err := d.router.Select(weight)
-	if err != nil {
-		res.Error = err.Error()
-		return res, err
-	}
-	res.ModelUsed = modelID
+	res.WeightRequested = weight
+	res.WeightUsed = weight
+	res.EscalationPath = []string{}
 
-	if d.rateLimiter != nil {
-		if err := d.rateLimiter.Wait(ctx); err != nil {
+	// Try with escalation if enabled
+	currentWeight := weight
+	escalations := 0
+
+	for {
+		modelID, explanation, err := d.selectModelWithExplanation(currentWeight)
+		if err != nil {
 			res.Error = err.Error()
 			return res, err
 		}
+		res.ModelUsed = modelID
+		res.WeightUsed = currentWeight
+		res.WeightExplanation = explanation
+		res.EscalationPath = append(res.EscalationPath, fmt.Sprintf("%s:%s", currentWeight, modelID))
+
+		if d.rateLimiter != nil {
+			if err := d.rateLimiter.Wait(ctx); err != nil {
+				res.Error = err.Error()
+				return res, err
+			}
+		}
+
+		agentID := fmt.Sprintf("rlm-%s", res.TaskID)
+		if escalations > 0 {
+			agentID = fmt.Sprintf("rlm-%s-esc%d", res.TaskID, escalations)
+		}
+
+		execResult, execErr := d.executeSubAgent(ctx, task, agentID, modelID, &res)
+
+		// Merge results
+		if execResult != nil {
+			res.AgentID = execResult.AgentID
+			res.Summary = execResult.Summary
+			res.RawKey = execResult.RawKey
+			res.TokensUsed += execResult.TokensUsed
+			// Convert tool calls for transparency
+			for _, tc := range execResult.ToolCalls {
+				res.ToolCalls = append(res.ToolCalls, ToolCallEvent{
+					TaskID:    res.TaskID,
+					AgentID:   agentID,
+					ToolName:  tc.Name,
+					Arguments: tc.Arguments,
+					Success:   tc.Success,
+					Error:     tc.Result,
+					Duration:  tc.Duration,
+				})
+			}
+		}
+
+		// Success - we're done
+		if execErr == nil {
+			res.Error = ""
+			return res, nil
+		}
+
+		// Check if we should escalate
+		if !d.enableEscalation || escalations >= d.maxEscalations {
+			res.Error = execErr.Error()
+			return res, execErr
+		}
+
+		// Try to escalate to next tier
+		nextW, canEscalate := nextWeight(currentWeight)
+		if !canEscalate {
+			res.Error = execErr.Error()
+			return res, execErr
+		}
+
+		// Emit escalation event for transparency
+		d.emitEscalationEvent(ctx, res.TaskID, currentWeight, nextW, execErr.Error())
+
+		currentWeight = nextW
+		escalations++
+	}
+}
+
+// selectModelWithExplanation returns model ID and human-readable explanation.
+func (d *BatchDispatcher) selectModelWithExplanation(weight Weight) (string, string, error) {
+	modelID, err := d.router.Select(weight)
+	if err != nil {
+		return "", "", err
 	}
 
-	agentID := fmt.Sprintf("rlm-%s", res.TaskID)
+	// Build explanation
+	explanation := fmt.Sprintf("Selected %s for %s tier", modelID, weight)
+
+	// Add tier-specific context
+	switch weight {
+	case WeightTrivial:
+		explanation += " (fast, low-cost for simple lookups)"
+	case WeightLight:
+		explanation += " (balanced for basic analysis)"
+	case WeightMedium:
+		explanation += " (default tier for general tasks)"
+	case WeightHeavy:
+		explanation += " (high-quality for complex operations)"
+	case WeightReasoning:
+		explanation += " (extended thinking for deep analysis)"
+	}
+
+	return modelID, explanation, nil
+}
+
+// executeSubAgent runs a single sub-agent attempt.
+func (d *BatchDispatcher) executeSubAgent(ctx context.Context, task SubTask, agentID, modelID string, res *BatchResult) (*SubAgentResult, error) {
 	agent, err := NewSubAgent(SubAgentConfig{
 		ID:            agentID,
 		Model:         modelID,
@@ -219,39 +413,76 @@ func (d *BatchDispatcher) executeTask(ctx context.Context, task SubTask) (BatchR
 		Approver:   d.approver,
 	})
 	if err != nil {
-		res.Error = err.Error()
-		return res, err
+		return nil, err
 	}
+
+	var execResult *SubAgentResult
+	var execErr error
 
 	run := func() error {
 		start := time.Now()
-		if d.bus != nil {
-			d.publishEvent(ctx, "buckley.rlm.task.started", map[string]any{
-				"task_id":  res.TaskID,
-				"agent_id": agentID,
-				"model":    modelID,
+
+		// Emit task started with weight info
+		d.publishEvent(ctx, "buckley.rlm.task.started", map[string]any{
+			"task_id":          res.TaskID,
+			"agent_id":         agentID,
+			"model":            modelID,
+			"weight":           string(res.WeightUsed),
+			"weight_requested": string(res.WeightRequested),
+			"explanation":      res.WeightExplanation,
+		})
+
+		// Emit to telemetry for TUI
+		if d.telemetry != nil {
+			d.telemetry.Publish(telemetry.Event{
+				Type:   telemetry.EventTaskStarted,
+				TaskID: res.TaskID,
+				Data: map[string]any{
+					"agent_id":         agentID,
+					"model":            modelID,
+					"weight":           string(res.WeightUsed),
+					"weight_requested": string(res.WeightRequested),
+					"explanation":      res.WeightExplanation,
+				},
 			})
 		}
-		execResult, execErr := agent.Execute(ctx, task.Prompt)
+
+		execResult, execErr = agent.Execute(ctx, task.Prompt)
 		res.Duration = time.Since(start)
-		if execResult != nil {
-			res.AgentID = execResult.AgentID
-			res.Summary = execResult.Summary
-			res.RawKey = execResult.RawKey
-			res.TokensUsed = execResult.TokensUsed
-		}
-		if execErr != nil {
-			res.Error = execErr.Error()
-		}
-		if d.bus != nil {
-			d.publishEvent(ctx, "buckley.rlm.task.completed", map[string]any{
-				"task_id":     res.TaskID,
-				"agent_id":    agentID,
-				"model":       modelID,
-				"duration_ms": res.Duration.Milliseconds(),
-				"error":       res.Error,
+
+		// Emit tool calls in real-time (already happened during execution)
+		// Now emit completion
+		d.publishEvent(ctx, "buckley.rlm.task.completed", map[string]any{
+			"task_id":         res.TaskID,
+			"agent_id":        agentID,
+			"model":           modelID,
+			"weight":          string(res.WeightUsed),
+			"duration_ms":     res.Duration.Milliseconds(),
+			"tokens_used":     res.TokensUsed,
+			"escalation_path": res.EscalationPath,
+			"error":           res.Error,
+		})
+
+		if d.telemetry != nil {
+			eventType := telemetry.EventTaskCompleted
+			if execErr != nil {
+				eventType = telemetry.EventTaskFailed
+			}
+			d.telemetry.Publish(telemetry.Event{
+				Type:   eventType,
+				TaskID: res.TaskID,
+				Data: map[string]any{
+					"agent_id":         agentID,
+					"model":            modelID,
+					"weight":           string(res.WeightUsed),
+					"duration_ms":      res.Duration.Milliseconds(),
+					"tokens_used":      res.TokensUsed,
+					"escalation_path":  res.EscalationPath,
+					"tool_calls_count": len(res.ToolCalls),
+				},
 			})
 		}
+
 		return execErr
 	}
 
@@ -260,10 +491,30 @@ func (d *BatchDispatcher) executeTask(ctx context.Context, task SubTask) (BatchR
 	} else {
 		err = run()
 	}
-	if err != nil {
-		return res, err
+
+	return execResult, err
+}
+
+// emitEscalationEvent publishes an escalation event for transparency.
+func (d *BatchDispatcher) emitEscalationEvent(ctx context.Context, taskID string, from, to Weight, reason string) {
+	d.publishEvent(ctx, "buckley.rlm.task.escalated", map[string]any{
+		"task_id":     taskID,
+		"from_weight": string(from),
+		"to_weight":   string(to),
+		"reason":      reason,
+	})
+
+	if d.telemetry != nil {
+		d.telemetry.Publish(telemetry.Event{
+			Type:   telemetry.EventType("rlm.escalation"),
+			TaskID: taskID,
+			Data: map[string]any{
+				"from_weight": string(from),
+				"to_weight":   string(to),
+				"reason":      reason,
+			},
+		})
 	}
-	return res, nil
 }
 
 func (d *BatchDispatcher) publishEvent(ctx context.Context, subject string, payload map[string]any) {

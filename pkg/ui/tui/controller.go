@@ -16,6 +16,8 @@ import (
 	"github.com/odvcencio/buckley/pkg/config"
 	projectcontext "github.com/odvcencio/buckley/pkg/context"
 	"github.com/odvcencio/buckley/pkg/conversation"
+	"github.com/odvcencio/buckley/pkg/diagnostics"
+	"github.com/odvcencio/buckley/pkg/execution"
 	"github.com/odvcencio/buckley/pkg/model"
 	"github.com/odvcencio/buckley/pkg/session"
 	"github.com/odvcencio/buckley/pkg/skill"
@@ -44,8 +46,14 @@ type Controller struct {
 	conversation *conversation.Conversation
 	telemetry    *telemetry.Hub
 
+	// Execution strategy for tool calling (classic, rlm)
+	execStrategy execution.ExecutionStrategy
+
 	// Event bridge for sidebar updates
 	telemetryBridge *TelemetryUIBridge
+
+	// Backend diagnostics collector
+	diagnostics *diagnostics.Collector
 
 	// State
 	workDir string
@@ -240,9 +248,37 @@ func NewController(cfg ControllerConfig) (*Controller, error) {
 		currentSession: currentIdx,
 	}
 
+	// Initialize execution strategy based on config
+	execMode := config.DefaultExecutionMode
+	if cfg.Config != nil {
+		execMode = cfg.Config.ExecutionMode()
+	}
+	strategyFactory := execution.NewFactory(
+		cfg.ModelManager,
+		projectSessions[currentIdx].ToolRegistry,
+		cfg.Store,
+		cfg.Telemetry,
+		execution.FactoryConfig{
+			DefaultMaxIterations: 25,
+			ConfidenceThreshold:  0.7,
+			UseTOON:              cfg.Config != nil && cfg.Config.Encoding.UseToon,
+			EnableReasoning:      true,
+		},
+	)
+	strategy, err := strategyFactory.Create(execMode)
+	if err != nil {
+		strategy, _ = strategyFactory.Create(config.ExecutionModeClassic)
+	}
+	ctrl.execStrategy = strategy
+
 	// Create telemetry bridge for sidebar updates
 	if cfg.Telemetry != nil {
 		ctrl.telemetryBridge = NewTelemetryUIBridge(cfg.Telemetry, app)
+
+		// Create and subscribe diagnostics collector
+		ctrl.diagnostics = diagnostics.NewCollector()
+		ctrl.diagnostics.Subscribe(cfg.Telemetry)
+		app.SetDiagnostics(ctrl.diagnostics)
 	}
 
 	// Set up callbacks
@@ -950,6 +986,12 @@ func (c *Controller) runToolLoop(ctx context.Context, sess *SessionState, modelI
 		return "", nil, fmt.Errorf("session unavailable")
 	}
 
+	// Use execution strategy if available (the one true path)
+	if c.execStrategy != nil {
+		return c.runWithStrategy(ctx, sess)
+	}
+
+	// Legacy fallback (should not reach here in normal operation)
 	useTools := sess.ToolRegistry != nil
 	toolChoice := "auto"
 	maxIterations := 10
@@ -1049,6 +1091,105 @@ func (c *Controller) runToolLoop(ctx context.Context, sess *SessionState, modelI
 	}
 
 	return "", &totalUsage, fmt.Errorf("max tool calling iterations (%d) exceeded", maxIterations)
+}
+
+// runWithStrategy executes using the configured execution strategy.
+// This is the one true path for tool execution.
+func (c *Controller) runWithStrategy(ctx context.Context, sess *SessionState) (string, *model.Usage, error) {
+	// Get the last user message as the prompt
+	prompt := ""
+	if sess.Conversation != nil {
+		messages := sess.Conversation.Messages
+		for i := len(messages) - 1; i >= 0; i-- {
+			if messages[i].Role == "user" {
+				if content, ok := messages[i].Content.(string); ok {
+					prompt = content
+				} else {
+					prompt = fmt.Sprintf("%v", messages[i].Content)
+				}
+				break
+			}
+		}
+	}
+
+	// Build allowed tools from skill state
+	var allowedTools []string
+	if sess.SkillState != nil {
+		allowedTools = sess.SkillState.ToolFilter()
+	}
+
+	// Build system prompt
+	systemPrompt := c.buildSystemPrompt(sess)
+
+	// Create execution request
+	req := execution.ExecutionRequest{
+		Prompt:        prompt,
+		Conversation:  sess.Conversation,
+		SessionID:     sess.ID,
+		SystemPrompt:  systemPrompt,
+		AllowedTools:  allowedTools,
+		MaxIterations: 25,
+	}
+
+	// Set up stream handler for TUI updates
+	if runner, ok := c.execStrategy.(interface{ SetStreamHandler(execution.StreamHandler) }); ok {
+		runner.SetStreamHandler(&tuiStreamHandler{
+			app:  c.app,
+			sess: sess,
+			ctrl: c,
+		})
+	}
+
+	// Execute
+	result, err := c.execStrategy.Execute(ctx, req)
+	if err != nil {
+		return "", nil, err
+	}
+
+	// Update conversation with result
+	if result.Content != "" {
+		sess.Conversation.AddAssistantMessageWithReasoning(result.Content, result.Reasoning)
+		c.saveMessage(sess.ID, "assistant", result.Content)
+	}
+
+	usage := &model.Usage{
+		PromptTokens:     result.Usage.PromptTokens,
+		CompletionTokens: result.Usage.CompletionTokens,
+		TotalTokens:      result.Usage.TotalTokens,
+	}
+
+	return result.Content, usage, nil
+}
+
+// tuiStreamHandler bridges execution events to the TUI display.
+type tuiStreamHandler struct {
+	app  *WidgetApp
+	sess *SessionState
+	ctrl *Controller
+}
+
+func (h *tuiStreamHandler) OnText(text string) {
+	// Text is handled in OnComplete
+}
+
+func (h *tuiStreamHandler) OnReasoning(reasoning string) {
+	// Could display thinking indicator
+	h.app.SetStatus("Thinking...")
+}
+
+func (h *tuiStreamHandler) OnToolStart(name string, arguments string) {
+	h.app.SetStatus(fmt.Sprintf("Running %s...", name))
+}
+
+func (h *tuiStreamHandler) OnToolEnd(name string, result string, err error) {
+	if err != nil {
+		h.app.AddMessage(fmt.Sprintf("Error running %s: %v", name, err), "system")
+	}
+	// Tool results are handled internally by the strategy
+}
+
+func (h *tuiStreamHandler) OnComplete(result *execution.ExecutionResult) {
+	h.app.SetStatus("Ready")
 }
 
 func parseToolParams(raw string) (map[string]any, error) {
@@ -1349,6 +1490,11 @@ func (c *Controller) Stop() {
 	// Stop telemetry bridge
 	if c.telemetryBridge != nil {
 		c.telemetryBridge.Stop()
+	}
+
+	// Close diagnostics collector
+	if c.diagnostics != nil {
+		c.diagnostics.Close()
 	}
 
 	c.mu.Lock()

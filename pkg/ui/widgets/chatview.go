@@ -235,6 +235,11 @@ func (c *ChatView) Clear() {
 	c.lastContent = ""
 }
 
+// GetContent returns all text content from the chat view (last N lines).
+func (c *ChatView) GetContent(limit int) []string {
+	return c.buffer.GetAllContent(limit)
+}
+
 // ScrollUp scrolls up by n lines.
 func (c *ChatView) ScrollUp(n int) {
 	c.buffer.ScrollUp(n)

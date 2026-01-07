@@ -16,7 +16,7 @@ func (t *ListMergeConflictsTool) Name() string {
 }
 
 func (t *ListMergeConflictsTool) Description() string {
-	return "List files with merge conflicts and summarize conflicting sections"
+	return "List files with git merge conflicts and summarize conflicting sections. Shows conflict markers (<<<<<<, =======, >>>>>>) and the differing content from each branch. Use this after a merge/rebase/cherry-pick to see all conflicts at once before resolving them."
 }
 
 func (t *ListMergeConflictsTool) Parameters() ParameterSchema {
@@ -177,7 +177,7 @@ func (t *MarkResolvedTool) Name() string {
 }
 
 func (t *MarkResolvedTool) Description() string {
-	return "Mark a file as resolved by staging it (git add)"
+	return "Mark a merge conflict as resolved by staging the file (git add). Use this after you have manually edited the file to remove conflict markers and chosen the correct content. This tells git that the conflict in this file has been resolved."
 }
 
 func (t *MarkResolvedTool) Parameters() ParameterSchema {

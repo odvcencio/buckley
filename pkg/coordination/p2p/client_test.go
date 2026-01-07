@@ -96,7 +96,7 @@ func TestP2PClientSendMessage(t *testing.T) {
 		// Next request should be blocked by circuit breaker
 		err3 := client.SendMessage(ctx, []byte("msg3"))
 		assert.Error(t, err3)
-		assert.Equal(t, reliability.ErrCircuitOpen, err3)
+		assert.True(t, errors.Is(err3, reliability.ErrCircuitOpen), "expected circuit open error, got: %v", err3)
 	})
 
 	t.Run("nil connection returns error", func(t *testing.T) {

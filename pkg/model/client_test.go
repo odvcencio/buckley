@@ -556,6 +556,67 @@ func TestExtractTextContent(t *testing.T) {
 	}
 }
 
+// TestExtractThinkingContent tests thinking tag extraction
+func TestExtractThinkingContent(t *testing.T) {
+	tests := []struct {
+		name         string
+		input        string
+		wantThinking string
+		wantContent  string
+	}{
+		{
+			name:         "no_thinking_tags",
+			input:        "Hello, world!",
+			wantThinking: "",
+			wantContent:  "Hello, world!",
+		},
+		{
+			name:         "single_thinking_block",
+			input:        "<think>Let me consider this...</think>Here is my answer.",
+			wantThinking: "Let me consider this...",
+			wantContent:  "Here is my answer.",
+		},
+		{
+			name:         "multiple_thinking_blocks",
+			input:        "<think>First thought</think>Middle text<think>Second thought</think>Final answer.",
+			wantThinking: "First thought\n\nSecond thought",
+			wantContent:  "Middle textFinal answer.",
+		},
+		{
+			name:         "multiline_thinking",
+			input:        "<think>\nStep 1: Do this\nStep 2: Do that\n</think>\nThe result is 42.",
+			wantThinking: "Step 1: Do this\nStep 2: Do that",
+			wantContent:  "The result is 42.",
+		},
+		{
+			name:         "empty_thinking_block",
+			input:        "<think></think>Content only.",
+			wantThinking: "",
+			wantContent:  "Content only.",
+		},
+		{
+			name:         "thinking_only",
+			input:        "<think>Just thinking, no output</think>",
+			wantThinking: "Just thinking, no output",
+			wantContent:  "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotThinking, gotContent := ExtractThinkingContent(tt.input)
+
+			if gotThinking != tt.wantThinking {
+				t.Errorf("thinking = %q, want %q", gotThinking, tt.wantThinking)
+			}
+
+			if gotContent != tt.wantContent {
+				t.Errorf("content = %q, want %q", gotContent, tt.wantContent)
+			}
+		})
+	}
+}
+
 // TestClient_calculateRetryDelay tests retry delay calculation
 func TestClient_calculateRetryDelay(t *testing.T) {
 	client := NewClient("test-key", "")

@@ -36,6 +36,7 @@ type TelemetryUIBridge struct {
 	experimentVariants map[string]widgets.ExperimentVariant
 	rlmStatus          *widgets.RLMStatus
 	rlmScratchpad      []widgets.RLMScratchpadEntry
+	circuitStatus      *widgets.CircuitStatus
 }
 
 type touchEntry struct {
@@ -163,6 +164,10 @@ func (b *TelemetryUIBridge) handleEvent(event telemetry.Event) {
 		b.handleExperimentVariant(event, "failed")
 	case telemetry.EventRLMIteration:
 		b.handleRLMIteration(event)
+	case telemetry.EventCircuitFailure:
+		b.handleCircuitFailure(event)
+	case telemetry.EventCircuitStateChange:
+		b.handleCircuitStateChange(event)
 	}
 }
 
@@ -337,6 +342,7 @@ func (b *TelemetryUIBridge) updateSidebar() {
 	b.app.SetRunningTools(tools)
 	b.app.SetActiveTouches(touches)
 	b.app.SetRLMStatus(b.rlmStatus, b.rlmScratchpad)
+	b.app.sidebar.SetCircuitStatus(b.circuitStatus)
 	b.app.sidebar.SetExperiment(b.experiment, b.experimentStatus, experimentVariants)
 	b.app.sidebar.SetRecentFiles(b.recentFiles)
 	b.app.Refresh()
@@ -357,6 +363,43 @@ func (b *TelemetryUIBridge) handleRLMIteration(event telemetry.Event) {
 	if len(b.rlmScratchpad) > maxRLMScratchpadEntries {
 		b.rlmScratchpad = b.rlmScratchpad[:maxRLMScratchpadEntries]
 	}
+	b.updateSidebar()
+}
+
+func (b *TelemetryUIBridge) handleCircuitFailure(event telemetry.Event) {
+	// Create or update circuit status
+	if b.circuitStatus == nil {
+		b.circuitStatus = &widgets.CircuitStatus{
+			State:       "Closed",
+			MaxFailures: getInt(event.Data, "max_failures"),
+		}
+	}
+
+	b.circuitStatus.ConsecutiveFailures = getInt(event.Data, "consecutive_num")
+	b.circuitStatus.LastError = getString(event.Data, "error")
+
+	if willOpen, ok := getBool(event.Data, "will_open"); ok && willOpen {
+		b.circuitStatus.State = "Open"
+	}
+
+	b.updateSidebar()
+}
+
+func (b *TelemetryUIBridge) handleCircuitStateChange(event telemetry.Event) {
+	toState := getString(event.Data, "to")
+	if b.circuitStatus == nil {
+		b.circuitStatus = &widgets.CircuitStatus{}
+	}
+
+	b.circuitStatus.State = toState
+	b.circuitStatus.LastError = getString(event.Data, "last_error")
+
+	// Clear failures when circuit closes
+	if toState == "Closed" {
+		b.circuitStatus.ConsecutiveFailures = 0
+		b.circuitStatus.LastError = ""
+	}
+
 	b.updateSidebar()
 }
 

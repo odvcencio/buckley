@@ -22,7 +22,7 @@ func (t *CreateSkillTool) Name() string {
 }
 
 func (t *CreateSkillTool) Description() string {
-	return "Create a new Buckley skill by writing a SKILL.md file under .buckley/skills/<name>/SKILL.md. Provide name, description, and markdown body."
+	return "Create a new Buckley skill by writing a SKILL.md file under .buckley/skills/<name>/SKILL.md. Skills define reusable workflows with structured guidance for tasks like TDD, debugging, or code review. Provide name, description, and markdown body containing the skill's instructions."
 }
 
 func (t *CreateSkillTool) Parameters() ParameterSchema {

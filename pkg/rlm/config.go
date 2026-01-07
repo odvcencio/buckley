@@ -57,7 +57,7 @@ func DefaultConfig() Config {
 		Coordinator: CoordinatorConfig{
 			Model:               "auto",
 			MaxIterations:       10,
-			MaxTokensBudget:     100000,
+			MaxTokensBudget:     0, // 0 = unlimited, let the model work until done
 			MaxWallTime:         10 * time.Minute,
 			ConfidenceThreshold: 0.95,
 			StreamPartials:      true,
@@ -75,32 +75,24 @@ func DefaultConfig() Config {
 }
 
 // DefaultTiers returns the default tier configuration.
+// All tiers default to kimi-k2-thinking - users can customize per-tier models in config.
 func DefaultTiers() map[Weight]TierConfig {
+	defaultModel := "moonshotai/kimi-k2-thinking"
 	return map[Weight]TierConfig{
 		WeightTrivial: {
-			MaxCostPerMillion: 0.50,
-			MinContextWindow:  8000,
-			Prefer:            []string{"speed", "cost"},
+			Model: defaultModel,
 		},
 		WeightLight: {
-			MaxCostPerMillion: 3.00,
-			MinContextWindow:  16000,
-			Prefer:            []string{"cost", "quality"},
+			Model: defaultModel,
 		},
 		WeightMedium: {
-			MaxCostPerMillion: 10.00,
-			MinContextWindow:  32000,
-			Prefer:            []string{"quality", "cost"},
+			Model: defaultModel,
 		},
 		WeightHeavy: {
-			MaxCostPerMillion: 30.00,
-			MinContextWindow:  64000,
-			Prefer:            []string{"quality"},
+			Model: defaultModel,
 		},
 		WeightReasoning: {
-			MinContextWindow: 100000,
-			Prefer:           []string{"quality"},
-			Requires:         []string{"extended_thinking"},
+			Model: defaultModel,
 		},
 	}
 }
@@ -123,9 +115,7 @@ func (c *Config) Normalize() {
 	if c.Coordinator.MaxIterations <= 0 {
 		c.Coordinator.MaxIterations = 10
 	}
-	if c.Coordinator.MaxTokensBudget <= 0 {
-		c.Coordinator.MaxTokensBudget = 100000
-	}
+	// MaxTokensBudget 0 = unlimited (don't override)
 	if c.Coordinator.MaxWallTime <= 0 {
 		c.Coordinator.MaxWallTime = 10 * time.Minute
 	}

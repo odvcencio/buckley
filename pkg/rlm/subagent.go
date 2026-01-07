@@ -11,6 +11,7 @@ import (
 	"github.com/odvcencio/buckley/pkg/model"
 	"github.com/odvcencio/buckley/pkg/tool"
 	"github.com/odvcencio/buckley/pkg/tool/builtin"
+	"github.com/odvcencio/buckley/pkg/toolrunner"
 )
 
 const (
@@ -167,72 +168,43 @@ func (a *SubAgent) Execute(ctx context.Context, task string) (*SubAgentResult, e
 	}
 
 	allowedRegistry, allowedSet := a.allowedRegistry(ctx)
-	toolDefs := buildToolDefinitions(allowedRegistry)
-
-	messages := []model.Message{
-		{Role: "system", Content: a.systemPrompt},
-		{Role: "user", Content: task},
-	}
 
 	result := &SubAgentResult{
 		AgentID:   a.id,
 		ModelUsed: a.model,
 	}
 
-	for i := 0; i < a.maxIterations; i++ {
-		resp, err := a.client.ChatCompletion(ctx, model.ChatRequest{
-			Model:    a.model,
-			Messages: messages,
-			Tools:    toolDefs,
-			ToolChoice: func() string {
-				if len(toolDefs) == 0 {
-					return "none"
-				}
-				return "auto"
-			}(),
-		})
-		if err != nil {
-			result.Duration = time.Since(start)
-			return result, err
-		}
-		result.TokensUsed += resp.Usage.TotalTokens
+	runner, err := toolrunner.New(toolrunner.Config{
+		Models:               a.client,
+		Registry:             allowedRegistry,
+		DefaultMaxIterations: a.maxIterations,
+		ToolExecutor: func(ctx context.Context, call model.ToolCall, args map[string]any, tools map[string]tool.Tool) (toolrunner.ToolExecutionResult, error) {
+			return a.executeToolCall(ctx, call, args, tools, allowedSet)
+		},
+	})
+	if err != nil {
+		result.Duration = time.Since(start)
+		return result, err
+	}
 
-		if len(resp.Choices) == 0 {
-			result.Duration = time.Since(start)
-			return result, fmt.Errorf("no response from model")
-		}
-
-		choice := resp.Choices[0]
-
-		if len(choice.Message.ToolCalls) > 0 {
-			toolResults, err := a.executeTools(ctx, choice.Message.ToolCalls, allowedRegistry, allowedSet, result)
-			if err != nil {
-				result.Duration = time.Since(start)
-				return result, err
-			}
-
-			messages = append(messages, model.Message{
-				Role:      "assistant",
-				Content:   choice.Message.Content,
-				ToolCalls: choice.Message.ToolCalls,
-			})
-			for _, tr := range toolResults {
-				messages = append(messages, model.Message{
-					Role:       "tool",
-					ToolCallID: tr.ID,
-					Name:       tr.Name,
-					Content:    tr.Result,
-				})
-			}
-			continue
-		}
-
-		content, err := model.ExtractTextContent(choice.Message.Content)
-		if err != nil {
-			content = fmt.Sprintf("%v", choice.Message.Content)
-		}
-		result.Summary = strings.TrimSpace(content)
-		break
+	execResult, execErr := runner.Run(ctx, toolrunner.Request{
+		Messages: []model.Message{
+			{Role: "system", Content: a.systemPrompt},
+			{Role: "user", Content: task},
+		},
+		SelectionPrompt: task,
+		AllowedTools:    allowedToolNames(allowedSet),
+		MaxIterations:   a.maxIterations,
+		Model:           a.model,
+	})
+	if execResult != nil {
+		result.TokensUsed = execResult.Usage.TotalTokens
+		result.Summary = strings.TrimSpace(execResult.Content)
+		result.ToolCalls = append(result.ToolCalls, toSubAgentToolCalls(execResult.ToolCalls)...)
+	}
+	if execErr != nil {
+		result.Duration = time.Since(start)
+		return result, execErr
 	}
 
 	if result.Summary == "" {
@@ -264,24 +236,35 @@ func (a *SubAgent) allowedRegistry(ctx context.Context) (*tool.Registry, map[str
 	if a.registry == nil {
 		return tool.NewEmptyRegistry(), allowed
 	}
-	if a.approver == nil {
-		for _, t := range a.registry.List() {
-			allowed[t.Name()] = struct{}{}
-		}
-	} else {
+
+	// Default: sub-agents get all tools from registry
+	// The approver can restrict this if configured
+	for _, t := range a.registry.List() {
+		allowed[t.Name()] = struct{}{}
+	}
+
+	// If approver is set, use it to filter (but don't require it)
+	if a.approver != nil {
 		allowedTools := a.approver.GetAllowedToolsForAgent(ctx)
-		if len(allowedTools) == 0 {
-			return tool.NewEmptyRegistry(), allowed
-		}
-		for _, name := range allowedTools {
-			allowed[name] = struct{}{}
-		}
-		if _, ok := allowed["*"]; ok {
-			allowed = map[string]struct{}{}
-			for _, t := range a.registry.List() {
-				allowed[t.Name()] = struct{}{}
+		// Only restrict if approver explicitly returns a non-empty list
+		if len(allowedTools) > 0 {
+			if _, hasWildcard := func() (struct{}, bool) {
+				for _, name := range allowedTools {
+					if name == "*" {
+						return struct{}{}, true
+					}
+				}
+				return struct{}{}, false
+			}(); !hasWildcard {
+				// Approver returned specific tools, use those
+				allowed = map[string]struct{}{}
+				for _, name := range allowedTools {
+					allowed[name] = struct{}{}
+				}
 			}
+			// If wildcard, keep the full registry (already set above)
 		}
+		// If empty list, keep full registry access (don't restrict)
 	}
 
 	if len(a.allowedTools) > 0 {
@@ -295,83 +278,55 @@ func (a *SubAgent) allowedRegistry(ctx context.Context) (*tool.Registry, map[str
 	return a.registry, allowed
 }
 
-func buildToolDefinitions(registry *tool.Registry) []map[string]any {
-	if registry == nil {
-		return nil
+func (a *SubAgent) executeToolCall(ctx context.Context, call model.ToolCall, args map[string]any, tools map[string]tool.Tool, allowed map[string]struct{}) (toolrunner.ToolExecutionResult, error) {
+	name := strings.TrimSpace(call.Function.Name)
+	if name == "" {
+		return toolrunner.ToolExecutionResult{}, fmt.Errorf("tool name missing")
 	}
-	tools := registry.List()
-	defs := make([]map[string]any, 0, len(tools))
-	for _, t := range tools {
-		defs = append(defs, tool.ToOpenAIFunction(t))
+	if len(allowed) == 0 {
+		return toolrunner.ToolExecutionResult{}, fmt.Errorf("no tools allowed")
 	}
-	return defs
-}
-
-func (a *SubAgent) executeTools(ctx context.Context, calls []model.ToolCall, registry *tool.Registry, allowed map[string]struct{}, result *SubAgentResult) ([]SubAgentToolCall, error) {
-	toolResults := make([]SubAgentToolCall, 0, len(calls))
-
-	for _, call := range calls {
-		name := call.Function.Name
-		if name == "" {
-			return nil, fmt.Errorf("tool name missing")
+	if _, ok := allowed[name]; !ok {
+		return toolrunner.ToolExecutionResult{}, fmt.Errorf("tool not allowed: %s", name)
+	}
+	if a.approver != nil {
+		if err := a.approver.CheckToolAccess(ctx, name); err != nil {
+			return toolrunner.ToolExecutionResult{}, err
 		}
-		if len(allowed) == 0 {
-			return nil, fmt.Errorf("no tools allowed")
-		}
-		if _, ok := allowed[name]; !ok {
-			return nil, fmt.Errorf("tool not allowed: %s", name)
-		}
-		if a.approver != nil {
-			if err := a.approver.CheckToolAccess(ctx, name); err != nil {
-				return nil, err
-			}
-		}
-
-		var args map[string]any
-		if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil {
-			toolResults = append(toolResults, SubAgentToolCall{
-				ID:        call.ID,
-				Name:      name,
-				Arguments: call.Function.Arguments,
-				Result:    fmt.Sprintf("invalid arguments: %v", err),
-				Success:   false,
-			})
-			continue
-		}
-
-		if args == nil {
-			args = map[string]any{}
-		}
-		if call.ID != "" {
-			args[tool.ToolCallIDParam] = call.ID
-		}
-
-		release := a.acquireLock(name, args)
-		start := time.Now()
-		res, err := registry.Execute(name, args)
-		if release != nil {
-			release()
-		}
-
-		toolCall := SubAgentToolCall{
-			ID:        call.ID,
-			Name:      name,
-			Arguments: call.Function.Arguments,
-			Duration:  time.Since(start),
-		}
-
-		if err != nil {
-			toolCall.Result = fmt.Sprintf("execution error: %v", err)
-			toolCall.Success = false
-		} else {
-			toolCall.Success = res != nil && res.Success
-			toolCall.Result = formatToolResult(res)
-		}
-		toolResults = append(toolResults, toolCall)
-		result.ToolCalls = append(result.ToolCalls, toolCall)
+	}
+	if _, ok := tools[name]; !ok {
+		errMsg := fmt.Sprintf("tool not found: %s", name)
+		return toolrunner.ToolExecutionResult{
+			Result:  errMsg,
+			Error:   errMsg,
+			Success: false,
+		}, nil
 	}
 
-	return toolResults, nil
+	release := a.acquireLock(name, args)
+	res, err := a.registry.Execute(name, args)
+	if release != nil {
+		release()
+	}
+
+	if err != nil {
+		errMsg := fmt.Sprintf("execution error: %v", err)
+		return toolrunner.ToolExecutionResult{
+			Result:  errMsg,
+			Error:   errMsg,
+			Success: false,
+		}, nil
+	}
+
+	if res == nil {
+		return toolrunner.ToolExecutionResult{}, nil
+	}
+
+	return toolrunner.ToolExecutionResult{
+		Result:  formatToolResult(res),
+		Error:   res.Error,
+		Success: res.Success,
+	}, nil
 }
 
 func (a *SubAgent) acquireLock(name string, args map[string]any) func() {
@@ -449,6 +404,32 @@ func summarizeToolCalls(calls []SubAgentToolCall) string {
 		}
 	}
 	return fmt.Sprintf("Executed %d tool calls: %s", len(calls), strings.Join(names, ", "))
+}
+
+func allowedToolNames(allowed map[string]struct{}) []string {
+	if len(allowed) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(allowed))
+	for name := range allowed {
+		names = append(names, name)
+	}
+	return names
+}
+
+func toSubAgentToolCalls(calls []toolrunner.ToolCallRecord) []SubAgentToolCall {
+	out := make([]SubAgentToolCall, 0, len(calls))
+	for _, call := range calls {
+		out = append(out, SubAgentToolCall{
+			ID:        call.ID,
+			Name:      call.Name,
+			Arguments: call.Arguments,
+			Result:    call.Result,
+			Success:   call.Success,
+			Duration:  time.Duration(call.Duration) * time.Millisecond,
+		})
+	}
+	return out
 }
 
 func marshalSubAgentRaw(result *SubAgentResult) []byte {

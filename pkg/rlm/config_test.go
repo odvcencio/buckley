@@ -7,8 +7,9 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.Coordinator.MaxIterations <= 0 {
 		t.Fatalf("expected default MaxIterations > 0")
 	}
-	if cfg.Coordinator.MaxTokensBudget <= 0 {
-		t.Fatalf("expected default MaxTokensBudget > 0")
+	// MaxTokensBudget 0 = unlimited (no artificial limit)
+	if cfg.Coordinator.MaxTokensBudget != 0 {
+		t.Fatalf("expected default MaxTokensBudget = 0 (unlimited), got %d", cfg.Coordinator.MaxTokensBudget)
 	}
 	if len(cfg.Tiers) == 0 {
 		t.Fatalf("expected default tiers")

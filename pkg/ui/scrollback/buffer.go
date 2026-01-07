@@ -650,6 +650,28 @@ func (b *Buffer) LineCount() int {
 	return len(b.lines)
 }
 
+// GetAllContent returns all text content from the buffer.
+func (b *Buffer) GetAllContent(limit int) []string {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+
+	if limit <= 0 || limit > len(b.lines) {
+		limit = len(b.lines)
+	}
+
+	// Get the last N lines
+	start := len(b.lines) - limit
+	if start < 0 {
+		start = 0
+	}
+
+	result := make([]string, 0, limit)
+	for i := start; i < len(b.lines); i++ {
+		result = append(result, b.lines[i].Content)
+	}
+	return result
+}
+
 // RowCount returns total rendered row count.
 func (b *Buffer) RowCount() int {
 	b.mu.RLock()

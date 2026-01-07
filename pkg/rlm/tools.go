@@ -2,6 +2,7 @@ package rlm
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -93,16 +94,31 @@ func (t *DelegateTool) Execute(params map[string]any) (*builtin.Result, error) {
 		return &builtin.Result{Success: false, Error: "no result returned"}, nil
 	}
 	res := results[0]
+	data := map[string]any{
+		"summary":            res.Summary,
+		"scratchpad_key":     res.RawKey,
+		"agent_id":           res.AgentID,
+		"model":              res.ModelUsed,
+		"weight_requested":   string(res.WeightRequested),
+		"weight_used":        string(res.WeightUsed),
+		"weight_explanation": res.WeightExplanation,
+		"tokens_used":        res.TokensUsed,
+		"duration_ms":        res.Duration.Milliseconds(),
+		"error":              res.Error,
+	}
+	// Include escalation path if any escalation occurred
+	if len(res.EscalationPath) > 1 {
+		data["escalation_path"] = res.EscalationPath
+		data["escalated"] = true
+	}
+	// Include tool call summary for transparency
+	if len(res.ToolCalls) > 0 {
+		data["tool_calls_count"] = len(res.ToolCalls)
+	}
 	return &builtin.Result{
 		Success: res.Error == "",
-		Data: map[string]any{
-			"summary":        res.Summary,
-			"scratchpad_key": res.RawKey,
-			"agent_id":       res.AgentID,
-			"model":          res.ModelUsed,
-			"error":          res.Error,
-		},
-		Error: res.Error,
+		Data:    data,
+		Error:   res.Error,
 	}, nil
 }
 
@@ -166,14 +182,27 @@ func (t *DelegateBatchTool) Execute(params map[string]any) (*builtin.Result, err
 	results, execErr := t.dispatcher.Execute(ctx, BatchRequest{Tasks: tasks, Parallel: parallel})
 	data := make([]map[string]any, 0, len(results))
 	for _, res := range results {
-		data = append(data, map[string]any{
-			"task_id":        res.TaskID,
-			"agent_id":       res.AgentID,
-			"summary":        res.Summary,
-			"scratchpad_key": res.RawKey,
-			"model":          res.ModelUsed,
-			"error":          res.Error,
-		})
+		item := map[string]any{
+			"task_id":            res.TaskID,
+			"agent_id":           res.AgentID,
+			"summary":            res.Summary,
+			"scratchpad_key":     res.RawKey,
+			"model":              res.ModelUsed,
+			"weight_requested":   string(res.WeightRequested),
+			"weight_used":        string(res.WeightUsed),
+			"weight_explanation": res.WeightExplanation,
+			"tokens_used":        res.TokensUsed,
+			"duration_ms":        res.Duration.Milliseconds(),
+			"error":              res.Error,
+		}
+		if len(res.EscalationPath) > 1 {
+			item["escalation_path"] = res.EscalationPath
+			item["escalated"] = true
+		}
+		if len(res.ToolCalls) > 0 {
+			item["tool_calls_count"] = len(res.ToolCalls)
+		}
+		data = append(data, item)
 	}
 
 	result := &builtin.Result{
@@ -456,6 +485,196 @@ func parseFloat(input any, fallback float64) float64 {
 		}
 	}
 	return fallback
+}
+
+// SearchScratchpadTool provides semantic search over scratchpad entries.
+type SearchScratchpadTool struct {
+	rag         *ScratchpadRAG
+	ctxProvider func() context.Context
+}
+
+// NewSearchScratchpadTool constructs a search_scratchpad tool.
+func NewSearchScratchpadTool(rag *ScratchpadRAG, ctxProvider func() context.Context) *SearchScratchpadTool {
+	return &SearchScratchpadTool{rag: rag, ctxProvider: ctxProvider}
+}
+
+func (t *SearchScratchpadTool) Name() string {
+	return "search_scratchpad"
+}
+
+func (t *SearchScratchpadTool) Description() string {
+	return "Semantically search the scratchpad for relevant past work. Returns entries most similar to your query."
+}
+
+func (t *SearchScratchpadTool) Parameters() builtin.ParameterSchema {
+	return builtin.ParameterSchema{
+		Type: "object",
+		Properties: map[string]builtin.PropertySchema{
+			"query": {
+				Type:        "string",
+				Description: "Search query describing what you're looking for",
+			},
+			"type": {
+				Type:        "string",
+				Description: "Optional filter by entry type: file, command, analysis, decision, artifact, strategy",
+			},
+			"limit": {
+				Type:        "integer",
+				Description: "Max results to return (default 5)",
+			},
+		},
+		Required: []string{"query"},
+	}
+}
+
+func (t *SearchScratchpadTool) Execute(params map[string]any) (*builtin.Result, error) {
+	if t == nil || t.rag == nil {
+		return &builtin.Result{Success: false, Error: "scratchpad search unavailable"}, nil
+	}
+
+	query, _ := params["query"].(string)
+	if strings.TrimSpace(query) == "" {
+		return &builtin.Result{Success: false, Error: "query required"}, nil
+	}
+
+	limit := parseInt(params["limit"], 5)
+	entryType, _ := params["type"].(string)
+
+	ctx := context.Background()
+	if t.ctxProvider != nil {
+		ctx = t.ctxProvider()
+	}
+
+	var results []RAGSearchResult
+	var err error
+
+	if strings.TrimSpace(entryType) != "" {
+		results, err = t.rag.SearchByType(ctx, query, EntryType(entryType), limit)
+	} else {
+		results, err = t.rag.Search(ctx, query, limit)
+	}
+
+	if err != nil {
+		return &builtin.Result{Success: false, Error: err.Error()}, nil
+	}
+
+	// Format results for coordinator
+	data := make([]map[string]any, 0, len(results))
+	for _, r := range results {
+		data = append(data, map[string]any{
+			"key":        r.Entry.Key,
+			"type":       string(r.Entry.Type),
+			"summary":    r.Entry.Summary,
+			"created_by": r.Entry.CreatedBy,
+			"similarity": r.Similarity,
+			"rank":       r.Rank,
+		})
+	}
+
+	return &builtin.Result{
+		Success: true,
+		Data: map[string]any{
+			"results": data,
+			"query":   query,
+			"count":   len(results),
+		},
+	}, nil
+}
+
+// RecordStrategyTool persists strategic decisions for context learning.
+type RecordStrategyTool struct {
+	scratchpad  ScratchpadWriter
+	ctxProvider func() context.Context
+}
+
+// NewRecordStrategyTool constructs a record_strategy tool.
+func NewRecordStrategyTool(scratchpad ScratchpadWriter, ctxProvider func() context.Context) *RecordStrategyTool {
+	return &RecordStrategyTool{scratchpad: scratchpad, ctxProvider: ctxProvider}
+}
+
+func (t *RecordStrategyTool) Name() string {
+	return "record_strategy"
+}
+
+func (t *RecordStrategyTool) Description() string {
+	return "Record a strategic decision or approach for future reference. Use this to persist decomposition strategies, tier selection rationale, or lessons learned."
+}
+
+func (t *RecordStrategyTool) Parameters() builtin.ParameterSchema {
+	return builtin.ParameterSchema{
+		Type: "object",
+		Properties: map[string]builtin.PropertySchema{
+			"category": {
+				Type:        "string",
+				Description: "Strategy category: decomposition, tier_selection, retry_approach, or lesson_learned",
+			},
+			"summary": {
+				Type:        "string",
+				Description: "Brief summary of the strategy (shown in context)",
+			},
+			"details": {
+				Type:        "string",
+				Description: "Full details of the strategic decision",
+			},
+			"rationale": {
+				Type:        "string",
+				Description: "Why this strategy was chosen",
+			},
+		},
+		Required: []string{"category", "summary"},
+	}
+}
+
+func (t *RecordStrategyTool) Execute(params map[string]any) (*builtin.Result, error) {
+	if t == nil || t.scratchpad == nil {
+		return &builtin.Result{Success: false, Error: "scratchpad unavailable"}, nil
+	}
+
+	category, _ := params["category"].(string)
+	summary, _ := params["summary"].(string)
+	details, _ := params["details"].(string)
+	rationale, _ := params["rationale"].(string)
+
+	if strings.TrimSpace(category) == "" {
+		return &builtin.Result{Success: false, Error: "category required"}, nil
+	}
+	if strings.TrimSpace(summary) == "" {
+		return &builtin.Result{Success: false, Error: "summary required"}, nil
+	}
+
+	ctx := context.Background()
+	if t.ctxProvider != nil {
+		ctx = t.ctxProvider()
+	}
+
+	// Build structured raw content
+	raw := map[string]string{
+		"category":  category,
+		"summary":   summary,
+		"details":   details,
+		"rationale": rationale,
+	}
+	rawBytes, _ := json.Marshal(raw)
+
+	key, err := t.scratchpad.Write(ctx, WriteRequest{
+		Type:      EntryTypeStrategy,
+		Raw:       rawBytes,
+		Summary:   fmt.Sprintf("[%s] %s", category, summary),
+		Metadata:  map[string]any{"category": category},
+		CreatedBy: "coordinator",
+	})
+	if err != nil {
+		return &builtin.Result{Success: false, Error: err.Error()}, nil
+	}
+
+	return &builtin.Result{
+		Success: true,
+		Data: map[string]any{
+			"key":      key,
+			"category": category,
+			"summary":  summary,
+		},
+	}, nil
 }
 
 func toolRegistryDefinitions(registry *tool.Registry) []map[string]any {

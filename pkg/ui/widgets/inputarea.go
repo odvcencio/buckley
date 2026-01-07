@@ -27,6 +27,12 @@ type InputArea struct {
 	cursorPos int
 	mode      InputMode
 
+	// History navigation
+	history      []string // Past inputs (oldest first)
+	historyIndex int      // Current history position (-1 = not navigating)
+	historyMax   int      // Max history entries to keep
+	savedText    string   // Saved current text when navigating history
+
 	// Minimum and maximum height
 	minHeight int
 	maxHeight int
@@ -70,6 +76,8 @@ func NewInputArea() *InputArea {
 	return &InputArea{
 		minHeight:    2,
 		maxHeight:    10,
+		historyIndex: -1,
+		historyMax:   100,
 		bgStyle:      backend.DefaultStyle(),
 		textStyle:    backend.DefaultStyle(),
 		borderStyle:  backend.DefaultStyle(),
@@ -82,6 +90,64 @@ func NewInputArea() *InputArea {
 		envSymbol:    "$",
 		searchSymbol: "/",
 	}
+}
+
+// AddToHistory adds an entry to the input history.
+func (i *InputArea) AddToHistory(text string) {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return
+	}
+	// Don't add duplicates of the most recent entry
+	if len(i.history) > 0 && i.history[len(i.history)-1] == text {
+		return
+	}
+	i.history = append(i.history, text)
+	// Trim to max size
+	if len(i.history) > i.historyMax {
+		i.history = i.history[len(i.history)-i.historyMax:]
+	}
+	i.historyIndex = -1
+}
+
+// historyPrev navigates to the previous history entry.
+func (i *InputArea) historyPrev() bool {
+	if len(i.history) == 0 {
+		return false
+	}
+	if i.historyIndex == -1 {
+		// Save current text before navigating
+		i.savedText = i.text.String()
+		i.historyIndex = len(i.history) - 1
+	} else if i.historyIndex > 0 {
+		i.historyIndex--
+	} else {
+		return false // Already at oldest
+	}
+	i.SetText(i.history[i.historyIndex])
+	return true
+}
+
+// historyNext navigates to the next history entry.
+func (i *InputArea) historyNext() bool {
+	if i.historyIndex == -1 {
+		return false // Not in history mode
+	}
+	if i.historyIndex < len(i.history)-1 {
+		i.historyIndex++
+		i.SetText(i.history[i.historyIndex])
+	} else {
+		// Return to saved text
+		i.historyIndex = -1
+		i.SetText(i.savedText)
+	}
+	return true
+}
+
+// ResetHistory resets the history navigation state (call when text is modified).
+func (i *InputArea) resetHistoryNav() {
+	i.historyIndex = -1
+	i.savedText = ""
 }
 
 // SetStyles sets the input area styles.
@@ -431,6 +497,8 @@ func (i *InputArea) HandleMessage(msg runtime.Message) runtime.HandleResult {
 		if text == "" {
 			return runtime.Handled()
 		}
+		// Add to history before submitting
+		i.AddToHistory(text)
 		mode := i.mode
 		if i.onSubmit != nil {
 			i.onSubmit(text, mode)
@@ -444,6 +512,7 @@ func (i *InputArea) HandleMessage(msg runtime.Message) runtime.HandleResult {
 			i.text.WriteString(text[:i.cursorPos-1])
 			i.text.WriteString(text[i.cursorPos:])
 			i.cursorPos--
+			i.resetHistoryNav()
 			i.checkModeChange()
 			i.notifyChange()
 		}
@@ -455,6 +524,7 @@ func (i *InputArea) HandleMessage(msg runtime.Message) runtime.HandleResult {
 			i.text.Reset()
 			i.text.WriteString(text[:i.cursorPos])
 			i.text.WriteString(text[i.cursorPos+1:])
+			i.resetHistoryNav()
 			i.notifyChange()
 		}
 		return runtime.Handled()
@@ -472,13 +542,23 @@ func (i *InputArea) HandleMessage(msg runtime.Message) runtime.HandleResult {
 		return runtime.Handled()
 
 	case terminal.KeyUp:
+		// First try moving cursor up in multiline text
 		if i.moveCursorVertical(-1) {
+			return runtime.Handled()
+		}
+		// If can't move up (at first line), navigate history
+		if i.historyPrev() {
 			return runtime.Handled()
 		}
 		return runtime.Unhandled()
 
 	case terminal.KeyDown:
+		// First try moving cursor down in multiline text
 		if i.moveCursorVertical(1) {
+			return runtime.Handled()
+		}
+		// If can't move down (at last line), navigate history
+		if i.historyNext() {
 			return runtime.Handled()
 		}
 		return runtime.Unhandled()
@@ -550,6 +630,7 @@ func (i *InputArea) handleRune(r rune) runtime.HandleResult {
 	i.text.WriteRune(r)
 	i.text.WriteString(text[i.cursorPos:])
 	i.cursorPos++
+	i.resetHistoryNav() // Reset history navigation when text is modified
 	i.notifyChange()
 
 	return runtime.Handled()

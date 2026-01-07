@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -505,4 +506,33 @@ func ExtractTextContent(content any) (string, error) {
 func ExtractTextContentOrEmpty(content any) string {
 	text, _ := ExtractTextContent(content)
 	return text
+}
+
+// thinkTagPattern matches <think>...</think> blocks in model output.
+// Kimi K2 and other reasoning models embed thinking in these tags.
+var thinkTagPattern = regexp.MustCompile(`(?s)<think>(.*?)</think>`)
+
+// ExtractThinkingContent separates thinking/reasoning from the main content.
+// Returns (thinking, content) where thinking is the content of <think> tags
+// and content is the remaining text with thinking tags removed.
+func ExtractThinkingContent(text string) (thinking string, content string) {
+	matches := thinkTagPattern.FindAllStringSubmatch(text, -1)
+	if len(matches) == 0 {
+		return "", text
+	}
+
+	// Collect all thinking blocks
+	var thinkingParts []string
+	for _, match := range matches {
+		if len(match) > 1 {
+			thinkingParts = append(thinkingParts, strings.TrimSpace(match[1]))
+		}
+	}
+
+	// Remove thinking tags from content
+	content = thinkTagPattern.ReplaceAllString(text, "")
+	content = strings.TrimSpace(content)
+
+	thinking = strings.Join(thinkingParts, "\n\n")
+	return thinking, content
 }

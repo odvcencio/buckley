@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/odvcencio/buckley/pkg/diagnostics"
 	"github.com/odvcencio/buckley/pkg/ui/backend"
 	"github.com/odvcencio/buckley/pkg/ui/backend/tcell"
 	"github.com/odvcencio/buckley/pkg/ui/compositor"
@@ -54,7 +55,8 @@ type WidgetApp struct {
 
 	// Sidebar state
 	sidebarVisible     bool
-	minWidthForSidebar int // Auto-hide below this width
+	sidebarUserOverride bool // User manually toggled, don't auto-hide
+	minWidthForSidebar int  // Auto-hide below this width
 
 	// File picker
 	filePicker *filepicker.FilePicker
@@ -110,6 +112,9 @@ type WidgetApp struct {
 
 	// Render synchronization
 	renderMu sync.Mutex
+
+	// Backend diagnostics
+	diagnostics *diagnostics.Collector
 }
 
 // WidgetAppConfig configures the widget-based TUI application.
@@ -219,14 +224,14 @@ func NewWidgetApp(cfg WidgetAppConfig) (*WidgetApp, error) {
 	)
 
 	// Determine if sidebar should be visible based on terminal width and content
-	sidebarVisible := w >= 100 && sidebar.HasContent()
+	sidebarVisible := w >= 80 && sidebar.HasContent()
 
 	// Build main content area with HBox (ChatView + Sidebar)
 	var mainArea *runtime.Flex
 	if sidebarVisible {
 		mainArea = runtime.HBox(
-			runtime.Flexible(chatView, 3), // 75% for chat
-			runtime.Sized(sidebar, 24),    // Fixed 24 cols for sidebar
+			runtime.Flexible(chatView, 3),        // 75% for chat
+			runtime.Sized(sidebar, sidebar.Width()), // Dynamic sidebar width
 		)
 	} else {
 		mainArea = runtime.HBox(
@@ -269,7 +274,7 @@ func NewWidgetApp(cfg WidgetAppConfig) (*WidgetApp, error) {
 		root:                root,
 		mainArea:            mainArea,
 		sidebarVisible:      sidebarVisible,
-		minWidthForSidebar:  100,
+		minWidthForSidebar:  80, // Lower threshold for sidebar visibility
 		filePicker:          fp,
 		theme:               th,
 		workDir:             workDir,
@@ -839,6 +844,18 @@ func (a *WidgetApp) handleKeyMsg(m KeyMsg) bool {
 		return true
 	}
 
+	// Ctrl+D: debug dump screen state
+	if key == terminal.KeyCtrlD || (m.Ctrl && m.Rune == 'd') {
+		a.debugDumpScreen()
+		return true
+	}
+
+	// Ctrl+Left: toggle sidebar (alternative to Ctrl+B)
+	if m.Ctrl && key == terminal.KeyLeft {
+		a.toggleSidebar()
+		return true
+	}
+
 	// Alt+Left/Right: session navigation
 	if m.Alt {
 		switch key {
@@ -988,6 +1005,10 @@ func (a *WidgetApp) refreshInputLayout() {
 }
 
 func (a *WidgetApp) updateSidebarVisibility() {
+	// Don't auto-hide if user manually toggled the sidebar
+	if a.sidebarUserOverride {
+		return
+	}
 	w, _ := a.screen.Size()
 	shouldShow := w >= a.minWidthForSidebar && a.sidebar.HasContent()
 	if shouldShow == a.sidebarVisible {
@@ -1350,6 +1371,7 @@ func (a *WidgetApp) RequestApproval(req ApprovalRequestMsg) {
 // toggleSidebar toggles the sidebar visibility and rebuilds the layout.
 func (a *WidgetApp) toggleSidebar() {
 	a.sidebarVisible = !a.sidebarVisible
+	a.sidebarUserOverride = true // User manually toggled, don't auto-hide
 	if a.sidebarVisible {
 		a.setStatusOverride("Sidebar shown", 2*time.Second)
 	} else {
@@ -1367,7 +1389,7 @@ func (a *WidgetApp) rebuildLayout() {
 	if a.sidebarVisible {
 		a.mainArea = runtime.HBox(
 			runtime.Flexible(a.chatView, 3),
-			runtime.Sized(a.sidebar, 24),
+			runtime.Sized(a.sidebar, a.sidebar.Width()),
 		)
 	} else {
 		a.mainArea = runtime.HBox(
@@ -1392,7 +1414,11 @@ func (a *WidgetApp) rebuildLayout() {
 }
 
 // SetSidebarVisible sets the sidebar visibility.
+// Respects user override - won't change visibility if user manually toggled.
 func (a *WidgetApp) SetSidebarVisible(visible bool) {
+	if a.sidebarUserOverride {
+		return // Don't override user's manual choice
+	}
 	if a.sidebarVisible != visible {
 		a.sidebarVisible = visible
 		a.rebuildLayout()
@@ -1433,9 +1459,14 @@ func (a *WidgetApp) SetActiveTouches(touches []widgets.TouchSummary) {
 }
 
 // SetRLMStatus updates the sidebar's RLM status display.
+// Auto-shows sidebar when RLM content arrives (unless user manually hid it).
 func (a *WidgetApp) SetRLMStatus(status *widgets.RLMStatus, scratchpad []widgets.RLMScratchpadEntry) {
 	a.sidebar.SetRLMStatus(status, scratchpad)
-	a.updateSidebarVisibility()
+	// Auto-show sidebar for RLM mode if user hasn't manually hidden it
+	if !a.sidebarUserOverride && !a.sidebarVisible && (status != nil || len(scratchpad) > 0) {
+		a.sidebarVisible = true
+		a.rebuildLayout()
+	}
 	a.dirty = true
 }
 
@@ -1461,6 +1492,11 @@ func (a *WidgetApp) Metrics() RenderMetrics {
 	a.renderMu.Lock()
 	defer a.renderMu.Unlock()
 	return a.metrics
+}
+
+// SetDiagnostics sets the backend diagnostics collector for debug dumps.
+func (a *WidgetApp) SetDiagnostics(collector *diagnostics.Collector) {
+	a.diagnostics = collector
 }
 
 // WelcomeScreen displays a beautiful welcome screen.
@@ -1597,4 +1633,75 @@ func maxInputHeight(screenHeight int) int {
 		return minInputHeight
 	}
 	return maxInput
+}
+
+// debugDumpScreen dumps the current screen state to a file for debugging.
+func (a *WidgetApp) debugDumpScreen() {
+	w, h := a.screen.Size()
+	timestamp := time.Now().Format("2006-01-02_15-04-05")
+	filename := fmt.Sprintf("buckley_debug_%s.txt", timestamp)
+
+	var sb strings.Builder
+	sb.WriteString("=== Buckley Debug Dump ===\n")
+	sb.WriteString(fmt.Sprintf("Timestamp: %s\n", time.Now().Format(time.RFC3339)))
+	sb.WriteString(fmt.Sprintf("Screen Size: %d x %d\n", w, h))
+	sb.WriteString(fmt.Sprintf("Sidebar Visible: %v\n", a.sidebarVisible))
+	sb.WriteString(fmt.Sprintf("Sidebar User Override: %v\n", a.sidebarUserOverride))
+	sb.WriteString(fmt.Sprintf("Status: %s\n", a.statusText))
+	sb.WriteString(fmt.Sprintf("Scroll Position: %s\n", a.scrollIndicator))
+	sb.WriteString("\n")
+
+	// Dump render metrics
+	sb.WriteString("=== Render Metrics ===\n")
+	a.renderMu.Lock()
+	sb.WriteString(fmt.Sprintf("Frame Count: %d\n", a.metrics.FrameCount))
+	sb.WriteString(fmt.Sprintf("Dropped Frames: %d\n", a.metrics.DroppedFrames))
+	sb.WriteString(fmt.Sprintf("Last Frame Time: %v\n", a.metrics.LastFrameTime))
+	a.renderMu.Unlock()
+	sb.WriteString("\n")
+
+	// Dump chat view content (last 50 lines)
+	sb.WriteString("=== Chat View Content (last 50 lines) ===\n")
+	if a.chatView != nil {
+		lines := a.chatView.GetContent(50)
+		for i, line := range lines {
+			sb.WriteString(fmt.Sprintf("%4d: %s\n", i+1, line))
+		}
+	}
+	sb.WriteString("\n")
+
+	// Dump sidebar state
+	sb.WriteString("=== Sidebar State ===\n")
+	if a.sidebar != nil {
+		sb.WriteString(fmt.Sprintf("Has Content: %v\n", a.sidebar.HasContent()))
+		sb.WriteString(fmt.Sprintf("Width: %d\n", a.sidebar.Width()))
+	}
+	sb.WriteString("\n")
+
+	// Dump input area
+	sb.WriteString("=== Input Area ===\n")
+	if a.inputArea != nil {
+		sb.WriteString(fmt.Sprintf("Has Text: %v\n", a.inputArea.HasText()))
+		sb.WriteString(fmt.Sprintf("Text: %q\n", a.inputArea.Text()))
+	}
+	sb.WriteString("\n")
+
+	// Dump backend diagnostics
+	if a.diagnostics != nil {
+		sb.WriteString(a.diagnostics.Dump())
+	} else {
+		sb.WriteString("=== Backend Diagnostics ===\n")
+		sb.WriteString("(not available - diagnostics collector not configured)\n\n")
+	}
+
+	sb.WriteString("=== End Debug Dump ===\n")
+
+	// Write to file
+	err := os.WriteFile(filename, []byte(sb.String()), 0644)
+	if err != nil {
+		a.setStatusOverride(fmt.Sprintf("Debug dump failed: %v", err), 3*time.Second)
+		return
+	}
+
+	a.setStatusOverride(fmt.Sprintf("Debug dump saved to %s", filename), 3*time.Second)
 }

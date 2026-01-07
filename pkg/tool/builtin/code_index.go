@@ -19,7 +19,7 @@ func (t *LookupContextTool) Name() string {
 }
 
 func (t *LookupContextTool) Description() string {
-	return "Query the project code index for relevant files or symbols before reading from disk."
+	return "Query the project code index for relevant files or symbols. Returns indexed information about functions, types, and files matching your query. Use this to quickly find where code is defined without reading multiple files. Faster than grep for finding specific definitions."
 }
 
 func (t *LookupContextTool) Parameters() ParameterSchema {

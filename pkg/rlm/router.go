@@ -118,7 +118,8 @@ func (r *ModelRouter) Select(weight Weight) (string, error) {
 		if r.modelAvailable(pin) {
 			return pin, nil
 		}
-		return "", fmt.Errorf("pinned model not found: %s", pin)
+		// Pin not available, fall through to catalog search instead of failing
+		// This allows graceful degradation when configured model isn't accessible
 	}
 
 	if len(tier.Models) > 0 {
