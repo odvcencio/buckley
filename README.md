@@ -100,9 +100,9 @@ Different models for different jobs:
 
 ```yaml
 models:
-  planning: anthropic/claude-sonnet-4-20250514
-  execution: moonshotai/kimi-k2
-  review: anthropic/claude-sonnet-4-20250514
+  planning: moonshotai/kimi-k2-thinking
+  execution: moonshotai/kimi-k2-thinking
+  review: moonshotai/kimi-k2-thinking
 ```
 
 Supports OpenRouter (100+ models), Anthropic, OpenAI, Google, Ollama.

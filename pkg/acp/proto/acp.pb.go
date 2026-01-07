@@ -2445,7 +2445,7 @@ const file_acp_proto_rawDesc = "" +
 	"\fProposeEdits\x12#.buckley.acp.v1.ProposeEditsRequest\x1a$.buckley.acp.v1.ProposeEditsResponse\x12S\n" +
 	"\n" +
 	"ApplyEdits\x12!.buckley.acp.v1.ApplyEditsRequest\x1a\".buckley.acp.v1.ApplyEditsResponse\x12h\n" +
-	"\x11UpdateEditorState\x12(.buckley.acp.v1.UpdateEditorStateRequest\x1a).buckley.acp.v1.UpdateEditorStateResponseB.Z,github.com/odvcencio/buckley/pkg/acp/proto;acppbb\x06proto3"
+	"\x11UpdateEditorState\x12(.buckley.acp.v1.UpdateEditorStateRequest\x1a).buckley.acp.v1.UpdateEditorStateResponseB2Z0github.com/odvcencio/buckley/pkg/acp/proto;acppbb\x06proto3"
 
 var (
 	file_acp_proto_rawDescOnce sync.Once
