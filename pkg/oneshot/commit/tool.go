@@ -47,7 +47,7 @@ var GenerateCommitTool = tools.Definition{
 			),
 			"subject": {
 				Type:        "string",
-				Description: "Short summary of the change, imperative mood, no period, max 50 chars",
+				Description: "Short summary of the change, imperative mood, no period. The FULL header (action + scope + subject) must be <= 72 chars total, so budget accordingly (e.g., 'add(ui): ' is 9 chars, leaving 63 for subject)",
 				MaxLength:   72,
 			},
 			"body": tools.ArrayProperty(
