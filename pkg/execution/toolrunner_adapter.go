@@ -76,5 +76,6 @@ func toExecutionResult(result *toolrunner.Result) *ExecutionResult {
 		ToolCalls:  result.ToolCalls,
 		Usage:      result.Usage,
 		Iterations: result.Iterations,
+		FinishReason: result.FinishReason,
 	}
 }

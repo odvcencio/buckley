@@ -158,6 +158,7 @@ func (m *Manager) ChatCompletion(ctx context.Context, req ChatRequest) (*ChatRes
 	if provider == nil {
 		return nil, fmt.Errorf("no provider configured for model %s", req.Model)
 	}
+	req = applyProviderTransforms(req, provider.ID())
 	req.Model = normalizeModelForProvider(req.Model, provider.ID())
 	resp, err := provider.ChatCompletion(ctx, req)
 	if err != nil {
@@ -175,8 +176,17 @@ func (m *Manager) ChatCompletionStream(ctx context.Context, req ChatRequest) (<-
 		close(errChan)
 		return nil, errChan
 	}
+	req = applyProviderTransforms(req, provider.ID())
 	req.Model = normalizeModelForProvider(req.Model, provider.ID())
 	return provider.ChatCompletionStream(ctx, req)
+}
+
+func applyProviderTransforms(req ChatRequest, providerID string) ChatRequest {
+	if providerID != "openrouter" || len(req.Transforms) > 0 {
+		return req
+	}
+	req.Transforms = []string{"middle-out"}
+	return req
 }
 
 func (m *Manager) providerForModel(modelID string) Provider {
@@ -484,12 +494,21 @@ func ExtractTextContent(content any) (string, error) {
 	switch v := content.(type) {
 	case string:
 		return v, nil
+	case []ContentPart:
+		if text := extractTextFromContentParts(v); text != "" {
+			return text, nil
+		}
 	case []any:
 		// Try to extract text from content parts
 		var textParts []string
 		for _, part := range v {
-			if partMap, ok := part.(map[string]any); ok {
-				if text, ok := partMap["text"].(string); ok && text != "" {
+			switch partVal := part.(type) {
+			case map[string]any:
+				if text := extractTextFromMap(partVal); text != "" {
+					textParts = append(textParts, text)
+				}
+			case ContentPart:
+				if text := extractTextFromContentParts([]ContentPart{partVal}); text != "" {
 					textParts = append(textParts, text)
 				}
 			}
@@ -497,9 +516,60 @@ func ExtractTextContent(content any) (string, error) {
 		if len(textParts) > 0 {
 			return strings.Join(textParts, "\n"), nil
 		}
+	case map[string]any:
+		if text := extractTextFromMap(v); text != "" {
+			return text, nil
+		}
 	}
 
 	return "", fmt.Errorf("unexpected content format")
+}
+
+func extractTextFromContentParts(parts []ContentPart) string {
+	var textParts []string
+	for _, part := range parts {
+		if strings.TrimSpace(part.Type) == "text" && part.Text != "" {
+			textParts = append(textParts, part.Text)
+		}
+	}
+	return strings.Join(textParts, "\n")
+}
+
+func extractTextFromMap(part map[string]any) string {
+	if part == nil {
+		return ""
+	}
+	if text := extractTextValue(part["text"]); text != "" {
+		return text
+	}
+	if text := extractTextValue(part["content"]); text != "" {
+		return text
+	}
+	if text := extractTextValue(part["value"]); text != "" {
+		return text
+	}
+	if text := extractTextValue(part["output_text"]); text != "" {
+		return text
+	}
+	return ""
+}
+
+func extractTextValue(raw any) string {
+	switch v := raw.(type) {
+	case string:
+		return v
+	case map[string]any:
+		if text := extractTextValue(v["text"]); text != "" {
+			return text
+		}
+		if text := extractTextValue(v["content"]); text != "" {
+			return text
+		}
+		if text := extractTextValue(v["value"]); text != "" {
+			return text
+		}
+	}
+	return ""
 }
 
 // ExtractTextContentOrEmpty extracts text from content, returning empty string on error

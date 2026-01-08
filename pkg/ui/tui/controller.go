@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -270,6 +271,9 @@ func NewController(cfg ControllerConfig) (*Controller, error) {
 		strategy, _ = strategyFactory.Create(config.ExecutionModeClassic)
 	}
 	ctrl.execStrategy = strategy
+	if ctrl.execStrategy != nil {
+		app.SetExecutionMode(ctrl.execStrategy.Name())
+	}
 
 	// Create telemetry bridge for sidebar updates
 	if cfg.Telemetry != nil {
@@ -323,15 +327,14 @@ func (c *Controller) Run() error {
 		}
 	}
 
+	c.updateContextIndicator(sess, c.executionModelID(), "", allowedToolsForSession(sess))
+
 	// Run the app
 	return c.app.Run()
 }
 
 // handleSubmit processes user input submission.
 func (c *Controller) handleSubmit(text string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
 	if text == "" {
 		return
 	}
@@ -341,6 +344,9 @@ func (c *Controller) handleSubmit(text string) {
 		c.handleCommand(text)
 		return
 	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
 
 	// Get current session
 	sess := c.sessions[c.currentSession]
@@ -378,12 +384,28 @@ func (c *Controller) handleCommand(text string) {
 	}
 
 	cmd := strings.ToLower(parts[0])
+	args := []string{}
+	if len(parts) > 1 {
+		args = parts[1:]
+	}
+	start := time.Now()
+	c.emitUICommandEvent(cmd, args, "start", 0)
+	defer func() {
+		c.emitUICommandEvent(cmd, args, "end", time.Since(start))
+	}()
 
 	switch cmd {
 	case "/new", "/clear", "/reset":
 		c.newSession()
 
-	case "/sessions", "/tabs":
+	case "/sessions":
+		if len(args) > 0 {
+			c.handleSessionsCommand(args)
+			return
+		}
+		c.listSessions()
+
+	case "/tabs":
 		c.listSessions()
 
 	case "/next", "/n":
@@ -400,20 +422,22 @@ func (c *Controller) handleCommand(text string) {
 				return
 			}
 			modelID := strings.TrimSpace(strings.Join(parts[1:], " "))
-			c.setExecutionModelLocked(modelID)
+			c.setExecutionModel(modelID)
 		} else {
-			c.showModelPickerLocked()
+			c.showModelPicker()
 		}
 
 	case "/help":
 		c.app.AddMessage(`Commands:
   /new, /clear, /reset - Start a new session
   /sessions, /tabs     - List active sessions
+  /sessions complete   - Mark session completed (soft delete)
   /next, /n            - Switch to next session
   /prev, /p            - Switch to previous session
   /model [id]          - Pick or set the execution model
   /model curate        - Curate models for ACP/editor pickers
   /skill [name|list]   - List or activate a skill
+  /context             - Show context budget details
   /review              - Review current git diff
   /commit              - Generate commit message for staged changes
   /help                - Show this help
@@ -433,6 +457,9 @@ Shortcuts: Alt+Right (next), Alt+Left (prev), Ctrl+F (search)`, "system")
 	case "/skill", "/skills":
 		c.handleSkillCommand(parts[1:])
 
+	case "/context":
+		c.showContextBudget()
+
 	default:
 		c.app.AddMessage("Unknown command: "+cmd+". Type /help for available commands.", "system")
 	}
@@ -451,6 +478,12 @@ func (c *Controller) showModelPickerLocked() {
 		}
 		c.setExecutionModel(modelID)
 	})
+}
+
+func (c *Controller) showModelPicker() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.showModelPickerLocked()
 }
 
 func (c *Controller) collectModelPickerItemsLocked(curated map[string]struct{}) ([]widgets.PaletteItem, map[string]model.ModelInfo) {
@@ -534,14 +567,14 @@ func (c *Controller) collectModelPickerItemsLocked(curated map[string]struct{}) 
 
 func (c *Controller) handleModelCurate(args []string) {
 	if len(args) == 0 {
-		c.showModelCuratePickerLocked()
+		c.showModelCuratePicker()
 		return
 	}
 
 	sub := strings.ToLower(args[0])
 	switch sub {
 	case "list":
-		c.showCuratedModelsLocked()
+		c.showCuratedModels()
 	case "clear":
 		c.mu.Lock()
 		c.cfg.Models.Curated = nil
@@ -589,6 +622,12 @@ func (c *Controller) showModelCuratePickerLocked() {
 			c.app.AddMessage("Curated models updated. Use /model curate save to persist.", "system")
 		}
 	})
+}
+
+func (c *Controller) showModelCuratePicker() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.showModelCuratePickerLocked()
 }
 
 func (c *Controller) toggleCuratedModel(modelID string) bool {
@@ -657,15 +696,19 @@ func (c *Controller) removeCuratedModel(modelID string) {
 }
 
 func (c *Controller) showCuratedModelsLocked() {
-	c.mu.Lock()
 	curated := append([]string{}, c.cfg.Models.Curated...)
-	c.mu.Unlock()
 
 	if len(curated) == 0 {
 		c.app.AddMessage("Curated list is empty. ACP will use execution/planning/review defaults.", "system")
 		return
 	}
 	c.app.AddMessage("Curated models:\n- "+strings.Join(curated, "\n- "), "system")
+}
+
+func (c *Controller) showCuratedModels() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.showCuratedModelsLocked()
 }
 
 func (c *Controller) saveCuratedModels(target string) {
@@ -759,8 +802,15 @@ func appendModelTag(tags []string, curated map[string]struct{}, modelID string) 
 
 func (c *Controller) setExecutionModel(modelID string) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	c.setExecutionModelLocked(modelID)
+	sess := (*SessionState)(nil)
+	if len(c.sessions) > 0 && c.currentSession >= 0 && c.currentSession < len(c.sessions) {
+		sess = c.sessions[c.currentSession]
+	}
+	c.mu.Unlock()
+	if sess != nil {
+		c.updateContextIndicator(sess, c.executionModelID(), "", allowedToolsForSession(sess))
+	}
 }
 
 func (c *Controller) setExecutionModelLocked(modelID string) {
@@ -863,47 +913,61 @@ func preferredModelIDs(execID, planID, reviewID string, catalog map[string]model
 
 // newSession creates a new session, clearing the current conversation.
 func (c *Controller) newSession() {
+	c.mu.Lock()
+	var oldSess *SessionState
+	if len(c.sessions) > 0 && c.currentSession >= 0 && c.currentSession < len(c.sessions) {
+		oldSess = c.sessions[c.currentSession]
+	}
+	c.mu.Unlock()
+
 	// Mark old session as completed
-	oldSess := c.sessions[c.currentSession]
-	if oldSess.ID != "" {
-		_ = c.store.SetSessionStatus(oldSess.ID, storage.SessionStatusCompleted)
+	if oldSess != nil {
+		if oldSess.ID != "" {
+			_ = c.store.SetSessionStatus(oldSess.ID, storage.SessionStatusCompleted)
+		}
 	}
 
-	// Generate new session ID
+	newSess, err := c.createNewSessionState()
+	if err != nil {
+		c.app.AddMessage("Error creating session: "+err.Error(), "system")
+		return
+	}
+	c.mu.Lock()
+	c.sessions = append([]*SessionState{newSess}, c.sessions...)
+	c.currentSession = 0
+	c.conversation = newSess.Conversation
+	c.registry = newSess.ToolRegistry
+	c.mu.Unlock()
+
+	// Clear scrollback and show fresh welcome
+	c.app.ClearScrollback()
+	c.app.WelcomeScreen()
+	c.app.AddMessage("New session started: "+newSess.ID, "system")
+	c.app.SetStatus("Ready")
+	c.updateContextIndicator(newSess, c.executionModelID(), "", allowedToolsForSession(newSess))
+}
+
+func (c *Controller) createNewSessionState() (*SessionState, error) {
+	if c.store == nil {
+		return nil, fmt.Errorf("session store unavailable")
+	}
 	baseID := session.DetermineSessionID(c.workDir)
 	timestamp := time.Now().Format("0102-150405")
-	newSessionID := fmt.Sprintf("%s-%s", baseID, timestamp)
+	sessionID := fmt.Sprintf("%s-%s", baseID, timestamp)
 
-	// Create new session in store
 	now := time.Now()
 	storageSess := &storage.Session{
-		ID:          newSessionID,
+		ID:          sessionID,
 		ProjectPath: c.workDir,
 		CreatedAt:   now,
 		LastActive:  now,
 		Status:      storage.SessionStatusActive,
 	}
 	if err := c.store.CreateSession(storageSess); err != nil {
-		c.app.AddMessage("Error creating session: "+err.Error(), "system")
-		return
+		return nil, err
 	}
 
-	// Create new session state and add to list
-	newSess, err := newSessionState(c.cfg, c.store, c.workDir, c.telemetry, newSessionID, false)
-	if err != nil {
-		c.app.AddMessage("Error creating session: "+err.Error(), "system")
-		return
-	}
-	c.sessions = append([]*SessionState{newSess}, c.sessions...)
-	c.currentSession = 0
-	c.conversation = newSess.Conversation
-	c.registry = newSess.ToolRegistry
-
-	// Clear scrollback and show fresh welcome
-	c.app.ClearScrollback()
-	c.app.WelcomeScreen()
-	c.app.AddMessage("New session started: "+newSessionID, "system")
-	c.app.SetStatus("Ready")
+	return newSessionState(c.cfg, c.store, c.workDir, c.telemetry, sessionID, false)
 }
 
 // streamResponse handles the AI response streaming for a specific session.
@@ -923,10 +987,12 @@ func (c *Controller) streamResponse(ctx context.Context, prompt string, sess *Se
 	sess.Conversation.AddUserMessage(prompt)
 	c.saveMessage(sess.ID, "user", prompt)
 
-	modelID := c.cfg.Models.Execution
-	if modelID == "" {
-		modelID = "openai/gpt-4o"
+	modelID := c.executionModelID()
+	contextPrompt := ""
+	if c.execStrategy != nil {
+		contextPrompt = prompt
 	}
+	c.updateContextIndicator(sess, modelID, contextPrompt, allowedToolsForSession(sess))
 
 	fullResponse, usage, err := c.runToolLoop(ctx, sess, modelID)
 	c.app.RemoveThinkingIndicator()
@@ -967,6 +1033,7 @@ func (c *Controller) streamResponse(ctx context.Context, prompt string, sess *Se
 		}
 	}
 	c.app.SetTokenCount(tokens, costCents)
+	c.updateContextIndicator(sess, modelID, "", allowedToolsForSession(sess))
 
 	// Check for queued messages and process them
 	if c.processMessageQueue(sess) {
@@ -1009,7 +1076,7 @@ func (c *Controller) runToolLoop(ctx context.Context, sess *SessionState, modelI
 
 		req := model.ChatRequest{
 			Model:    modelID,
-			Messages: c.buildMessagesForSession(sess),
+			Messages: c.buildMessagesForSession(sess, modelID, allowedTools),
 		}
 		if useTools && sess.ToolRegistry != nil {
 			tools := sess.ToolRegistry.ToOpenAIFunctionsFiltered(allowedTools)
@@ -1046,6 +1113,7 @@ func (c *Controller) runToolLoop(ctx context.Context, sess *SessionState, modelI
 			}
 			sess.Conversation.AddAssistantMessageWithReasoning(text, msg.Reasoning)
 			c.saveMessage(sess.ID, "assistant", text)
+			c.warnIfTruncatedResponse(resp.Choices[0].FinishReason)
 			return text, &totalUsage, nil
 		}
 
@@ -1118,13 +1186,15 @@ func (c *Controller) runWithStrategy(ctx context.Context, sess *SessionState) (s
 		allowedTools = sess.SkillState.ToolFilter()
 	}
 
-	// Build system prompt
-	systemPrompt := c.buildSystemPrompt(sess)
+	modelID := c.executionModelID()
+
+	// Build system prompt + trimmed context
+	systemPrompt, trimmedConv := c.buildRequestContext(sess, modelID, prompt, allowedTools)
 
 	// Create execution request
 	req := execution.ExecutionRequest{
 		Prompt:        prompt,
-		Conversation:  sess.Conversation,
+		Conversation:  trimmedConv,
 		SessionID:     sess.ID,
 		SystemPrompt:  systemPrompt,
 		AllowedTools:  allowedTools,
@@ -1151,6 +1221,7 @@ func (c *Controller) runWithStrategy(ctx context.Context, sess *SessionState) (s
 		sess.Conversation.AddAssistantMessageWithReasoning(result.Content, result.Reasoning)
 		c.saveMessage(sess.ID, "assistant", result.Content)
 	}
+	c.warnIfTruncatedResponse(result.FinishReason)
 
 	usage := &model.Usage{
 		PromptTokens:     result.Usage.PromptTokens,
@@ -1274,6 +1345,22 @@ func isToolUnsupportedError(err error) bool {
 	return false
 }
 
+func (c *Controller) warnIfTruncatedResponse(finishReason string) {
+	if c.app == nil || !finishReasonIndicatesTruncation(finishReason) {
+		return
+	}
+	c.app.AddMessage("Warning: response may be truncated (model hit output limit). Ask to continue or reduce context.", "system")
+}
+
+func finishReasonIndicatesTruncation(reason string) bool {
+	switch strings.ToLower(strings.TrimSpace(reason)) {
+	case "length", "max_tokens", "max_tokens_exceeded", "context_length_exceeded":
+		return true
+	default:
+		return false
+	}
+}
+
 func (c *Controller) emitStreaming(sessionID string, streaming bool) {
 	if c.telemetry == nil || strings.TrimSpace(sessionID) == "" {
 		return
@@ -1288,45 +1375,399 @@ func (c *Controller) emitStreaming(sessionID string, streaming bool) {
 	})
 }
 
+func (c *Controller) emitUICommandEvent(cmd string, args []string, phase string, duration time.Duration) {
+	if c.telemetry == nil || strings.TrimSpace(cmd) == "" {
+		return
+	}
+	data := map[string]any{
+		"command": cmd,
+		"phase":   phase,
+	}
+	if len(args) > 0 {
+		data["args"] = args
+	}
+	if duration > 0 {
+		data["duration_ms"] = duration.Milliseconds()
+	}
+	sessionID := ""
+	if c.mu.TryLock() {
+		if len(c.sessions) > 0 && c.currentSession >= 0 && c.currentSession < len(c.sessions) {
+			sessionID = c.sessions[c.currentSession].ID
+		}
+		c.mu.Unlock()
+	}
+	c.telemetry.Publish(telemetry.Event{
+		Type:      telemetry.EventUICommand,
+		SessionID: sessionID,
+		Data:      data,
+	})
+}
+
+const (
+	defaultContextWindow     = 8192
+	defaultPromptBudgetRatio = 0.9
+	messageOverheadTokens    = 4
+)
+
+type ContextBudgetStats struct {
+	ModelID             string
+	ContextWindow       int
+	PromptBudget        int
+	PromptBudgetRatio   float64
+	ToolTokens          int
+	SystemTokens        int
+	ConversationTokens  int
+	PromptTokens        int
+	UsedTokens          int
+	RemainingTokens     int
+	TotalMessages       int
+	TrimmedMessages     int
+	ProjectContextMode  string
+}
+
+func (c *Controller) executionModelID() string {
+	modelID := ""
+	if c.cfg != nil {
+		modelID = strings.TrimSpace(c.cfg.Models.Execution)
+	}
+	if modelID == "" {
+		modelID = "openai/gpt-4o"
+	}
+	return modelID
+}
+
+func (c *Controller) contextWindow(modelID string) int {
+	contextWindow := defaultContextWindow
+	if c.modelMgr != nil {
+		if info, err := c.modelMgr.GetModelInfo(modelID); err == nil && info != nil && info.ContextLength > 0 {
+			contextWindow = info.ContextLength
+		}
+	}
+	return contextWindow
+}
+
+func (c *Controller) promptBudgetRatio() float64 {
+	ratio := defaultPromptBudgetRatio
+	if c.cfg != nil && c.cfg.Memory.AutoCompactThreshold > 0 && c.cfg.Memory.AutoCompactThreshold <= 1 {
+		ratio = c.cfg.Memory.AutoCompactThreshold
+	}
+	return ratio
+}
+
+func (c *Controller) promptBudget(modelID string) int {
+	contextWindow := c.contextWindow(modelID)
+	ratio := c.promptBudgetRatio()
+	budget := int(float64(contextWindow) * ratio)
+	if budget <= 0 {
+		budget = contextWindow
+	}
+	return budget
+}
+
+func allowedToolsForSession(sess *SessionState) []string {
+	if sess == nil || sess.SkillState == nil {
+		return nil
+	}
+	return sess.SkillState.ToolFilter()
+}
+
+func estimateMessageTokens(role, content string) int {
+	if strings.TrimSpace(content) == "" {
+		return 0
+	}
+	return conversation.CountTokens(content) + conversation.CountTokens(role) + messageOverheadTokens
+}
+
+func estimateConversationMessageTokens(msg conversation.Message) int {
+	if msg.Tokens > 0 {
+		return msg.Tokens + messageOverheadTokens
+	}
+	content := conversation.GetContentAsString(msg.Content)
+	if msg.Role == "assistant" && strings.TrimSpace(content) == "" && strings.TrimSpace(msg.Reasoning) != "" {
+		content = msg.Reasoning
+	}
+	return estimateMessageTokens(msg.Role, content)
+}
+
+func estimateToolTokens(registry *tool.Registry, allowedTools []string) int {
+	if registry == nil {
+		return 0
+	}
+	tools := registry.ToOpenAIFunctionsFiltered(allowedTools)
+	if len(tools) == 0 {
+		return 0
+	}
+	raw, err := json.Marshal(tools)
+	if err != nil {
+		return 0
+	}
+	return conversation.CountTokens(string(raw))
+}
+
+func buildProjectContextSummary(ctx *projectcontext.ProjectContext) string {
+	if ctx == nil || !ctx.Loaded {
+		return ""
+	}
+	var b strings.Builder
+	if strings.TrimSpace(ctx.Summary) != "" {
+		b.WriteString("Summary: " + strings.TrimSpace(ctx.Summary) + "\n")
+	}
+	if len(ctx.Rules) > 0 {
+		b.WriteString("Development Rules:\n")
+		for _, rule := range ctx.Rules {
+			rule = strings.TrimSpace(rule)
+			if rule != "" {
+				b.WriteString("- " + rule + "\n")
+			}
+		}
+	}
+	if len(ctx.Guidelines) > 0 {
+		b.WriteString("Agent Guidelines:\n")
+		for _, guideline := range ctx.Guidelines {
+			guideline = strings.TrimSpace(guideline)
+			if guideline != "" {
+				b.WriteString("- " + guideline + "\n")
+			}
+		}
+	}
+	return strings.TrimSpace(b.String())
+}
+
+func (c *Controller) buildSystemPromptWithBudget(sess *SessionState, budgetTokens int) string {
+	base := "You are Buckley, an AI development assistant. "
+	base += "You help users with software engineering tasks including writing code, debugging, and explaining concepts. "
+	base += "Match the user's requested level of detail. "
+	base += "If asked to validate or cite code, use tools and include file paths and code snippets. "
+	base += "Put user-facing details in the final response, not hidden reasoning.\n\n"
+	var b strings.Builder
+	used := 0
+	appendSection := func(content string, required bool) {
+		if strings.TrimSpace(content) == "" {
+			return
+		}
+		if !required && budgetTokens <= 0 {
+			return
+		}
+		tokens := conversation.CountTokens(content)
+		if budgetTokens > 0 && !required && used+tokens > budgetTokens {
+			return
+		}
+		b.WriteString(content)
+		used += tokens
+	}
+
+	appendSection(base, true)
+
+	rawProject := ""
+	projectSummary := ""
+	if c.projectCtx != nil && c.projectCtx.Loaded {
+		rawProject = strings.TrimSpace(c.projectCtx.RawContent)
+		projectSummary = buildProjectContextSummary(c.projectCtx)
+	}
+
+	if budgetTokens > 0 && (rawProject != "" || projectSummary != "") {
+		projectSection := ""
+		if rawProject != "" {
+			projectSection = "Project Context:\n" + rawProject + "\n\n"
+		}
+		summarySection := ""
+		if projectSummary != "" {
+			summarySection = "Project Context (summary):\n" + projectSummary + "\n\n"
+		}
+
+		remaining := budgetTokens - used
+		if remaining > 0 {
+			if projectSection != "" && conversation.CountTokens(projectSection) <= remaining {
+				appendSection(projectSection, false)
+			} else if summarySection != "" && conversation.CountTokens(summarySection) <= remaining {
+				appendSection(summarySection, false)
+			}
+		}
+	}
+
+	workDir := fmt.Sprintf("Working directory: %s\n", c.workDir)
+	appendSection(workDir, true)
+
+	appendSection("If the user asks to create a new skill, draft name/description/body and call create_skill to save it.\n", true)
+
+	if sess != nil && sess.SkillRegistry != nil {
+		if desc := strings.TrimSpace(sess.SkillRegistry.GetDescriptions()); desc != "" {
+			appendSection("\n"+desc+"\n", false)
+		}
+	}
+
+	return strings.TrimSpace(b.String()) + "\n"
+}
+
+func trimConversationToBudget(conv *conversation.Conversation, budgetTokens int) *conversation.Conversation {
+	if conv == nil {
+		return nil
+	}
+	if budgetTokens <= 0 || len(conv.Messages) == 0 {
+		return &conversation.Conversation{SessionID: conv.SessionID}
+	}
+
+	used := 0
+	start := len(conv.Messages)
+	lastIdx := len(conv.Messages) - 1
+
+	for i := lastIdx; i >= 0; i-- {
+		msgTokens := estimateConversationMessageTokens(conv.Messages[i])
+		if i == lastIdx && msgTokens > budgetTokens {
+			start = i
+			used = msgTokens
+			break
+		}
+		if used+msgTokens > budgetTokens {
+			break
+		}
+		used += msgTokens
+		start = i
+	}
+
+	if start == len(conv.Messages) {
+		return &conversation.Conversation{SessionID: conv.SessionID}
+	}
+
+	trimmed := &conversation.Conversation{
+		SessionID:  conv.SessionID,
+		Messages:   append([]conversation.Message{}, conv.Messages[start:]...),
+		TokenCount: used,
+	}
+	return trimmed
+}
+
+func (c *Controller) buildRequestContext(sess *SessionState, modelID, prompt string, allowedTools []string) (string, *conversation.Conversation) {
+	budget := c.promptBudget(modelID)
+	registry := c.registry
+	if sess != nil && sess.ToolRegistry != nil {
+		registry = sess.ToolRegistry
+	}
+	if budget > 0 {
+		budget -= estimateToolTokens(registry, allowedTools)
+		if prompt != "" {
+			budget -= estimateMessageTokens("user", prompt)
+		}
+		if budget < 0 {
+			budget = 0
+		}
+	}
+
+	systemPrompt := c.buildSystemPromptWithBudget(sess, budget)
+	if budget > 0 {
+		budget -= estimateMessageTokens("system", systemPrompt)
+		if budget < 0 {
+			budget = 0
+		}
+	}
+
+	var trimmed *conversation.Conversation
+	if sess != nil {
+		trimmed = trimConversationToBudget(sess.Conversation, budget)
+	} else {
+		trimmed = trimConversationToBudget(nil, 0)
+	}
+
+	return systemPrompt, trimmed
+}
+
+func projectContextMode(systemPrompt string) string {
+	if strings.Contains(systemPrompt, "Project Context (summary):") {
+		return "summary"
+	}
+	if strings.Contains(systemPrompt, "Project Context:") {
+		return "raw"
+	}
+	return "none"
+}
+
+func (c *Controller) buildContextBudgetStats(sess *SessionState, modelID, prompt string, allowedTools []string) ContextBudgetStats {
+	stats := ContextBudgetStats{
+		ModelID:           modelID,
+		ContextWindow:     c.contextWindow(modelID),
+		PromptBudget:      c.promptBudget(modelID),
+		PromptBudgetRatio: c.promptBudgetRatio(),
+	}
+	if sess == nil || sess.Conversation == nil {
+		return stats
+	}
+
+	registry := c.registry
+	if sess.ToolRegistry != nil {
+		registry = sess.ToolRegistry
+	}
+
+	systemPrompt, trimmed := c.buildRequestContext(sess, modelID, prompt, allowedTools)
+
+	stats.ToolTokens = estimateToolTokens(registry, allowedTools)
+	stats.PromptTokens = estimateMessageTokens("user", prompt)
+	stats.SystemTokens = estimateMessageTokens("system", systemPrompt)
+	if trimmed != nil {
+		stats.ConversationTokens = trimmed.TokenCount
+		stats.TrimmedMessages = len(trimmed.Messages)
+	}
+	stats.TotalMessages = len(sess.Conversation.Messages)
+	stats.ProjectContextMode = projectContextMode(systemPrompt)
+
+	stats.UsedTokens = stats.ToolTokens + stats.PromptTokens + stats.SystemTokens + stats.ConversationTokens
+	stats.RemainingTokens = stats.PromptBudget - stats.UsedTokens
+	if stats.RemainingTokens < 0 {
+		stats.RemainingTokens = 0
+	}
+
+	return stats
+}
+
+func (c *Controller) updateContextIndicator(sess *SessionState, modelID, prompt string, allowedTools []string) {
+	if c.app == nil || sess == nil {
+		return
+	}
+	stats := c.buildContextBudgetStats(sess, modelID, prompt, allowedTools)
+	c.app.SetContextUsage(stats.UsedTokens, stats.PromptBudget, stats.ContextWindow)
+}
+
+func formatContextBudgetStats(stats ContextBudgetStats) string {
+	var b strings.Builder
+	b.WriteString("Context budget:\n")
+	if stats.ModelID != "" {
+		b.WriteString(fmt.Sprintf("- Model: %s\n", stats.ModelID))
+	}
+	if stats.ContextWindow > 0 {
+		b.WriteString(fmt.Sprintf("- Context window: %d tokens\n", stats.ContextWindow))
+	}
+	if stats.PromptBudget > 0 {
+		b.WriteString(fmt.Sprintf("- Prompt budget: %d tokens (ratio %.2f)\n", stats.PromptBudget, stats.PromptBudgetRatio))
+	}
+	b.WriteString(fmt.Sprintf("- Used: %d tokens (system %d, conversation %d, tools %d, prompt %d)\n",
+		stats.UsedTokens, stats.SystemTokens, stats.ConversationTokens, stats.ToolTokens, stats.PromptTokens))
+	if stats.RemainingTokens > 0 {
+		b.WriteString(fmt.Sprintf("- Remaining: %d tokens\n", stats.RemainingTokens))
+	}
+	if stats.TotalMessages > 0 {
+		b.WriteString(fmt.Sprintf("- Messages kept: %d/%d\n", stats.TrimmedMessages, stats.TotalMessages))
+	}
+	if stats.ProjectContextMode != "" {
+		b.WriteString(fmt.Sprintf("- Project context: %s\n", stats.ProjectContextMode))
+	}
+	b.WriteString("Note: token counts are estimates; excludes current input unless specified.")
+	return b.String()
+}
+
 // buildMessagesForSession constructs the message list for the API using a specific session.
-func (c *Controller) buildMessagesForSession(sess *SessionState) []model.Message {
+func (c *Controller) buildMessagesForSession(sess *SessionState, modelID string, allowedTools []string) []model.Message {
 	messages := []model.Message{}
 
-	// System prompt
-	systemPrompt := c.buildSystemPrompt(sess)
+	systemPrompt, trimmed := c.buildRequestContext(sess, modelID, "", allowedTools)
 	messages = append(messages, model.Message{
 		Role:    "system",
 		Content: systemPrompt,
 	})
 
-	// Add conversation history from session
-	if sess != nil && sess.Conversation != nil {
-		messages = append(messages, sess.Conversation.ToModelMessages()...)
+	if trimmed != nil {
+		messages = append(messages, trimmed.ToModelMessages()...)
 	}
 
 	return messages
-}
-
-// buildSystemPrompt constructs the system prompt.
-func (c *Controller) buildSystemPrompt(sess *SessionState) string {
-	prompt := "You are Buckley, an AI development assistant. "
-	prompt += "You help users with software engineering tasks including writing code, debugging, and explaining concepts. "
-	prompt += "Be concise and helpful.\n\n"
-
-	if c.projectCtx != nil && c.projectCtx.RawContent != "" {
-		prompt += "Project Context:\n" + c.projectCtx.RawContent + "\n\n"
-	}
-
-	prompt += fmt.Sprintf("Working directory: %s\n", c.workDir)
-	prompt += "If the user asks to create a new skill, draft name/description/body and call create_skill to save it.\n"
-
-	if sess != nil && sess.SkillRegistry != nil {
-		if desc := strings.TrimSpace(sess.SkillRegistry.GetDescriptions()); desc != "" {
-			prompt += "\n" + desc + "\n"
-		}
-	}
-
-	return prompt
 }
 
 // handleFileSelect processes file selection from the picker.
@@ -1391,61 +1832,263 @@ func buildRegistry(cfg *config.Config, store *storage.Store, workDir string, hub
 	return registry
 }
 
-// listSessions shows all active sessions for this project.
-func (c *Controller) listSessions() {
-	c.mu.Lock()
-	sessions := c.sessions
-	current := c.currentSession
+func (c *Controller) handleSessionsCommand(args []string) {
+	if len(args) == 0 {
+		c.listSessions()
+		return
+	}
+	sub := strings.ToLower(strings.TrimSpace(args[0]))
+	switch sub {
+	case "complete", "close", "archive":
+		c.completeSessionsCommand(args[1:])
+	default:
+		c.app.AddMessage("Usage: /sessions [complete <id|index|all|current>]", "system")
+	}
+}
+
+func (c *Controller) completeSessionsCommand(args []string) {
+	if len(args) == 0 {
+		c.app.AddMessage("Usage: /sessions complete <id|index|all|current>", "system")
+		return
+	}
+	if c.store == nil {
+		c.app.AddMessage("Session store unavailable.", "system")
+		return
+	}
+	target := strings.TrimSpace(args[0])
+	switch strings.ToLower(target) {
+	case "all":
+		c.completeAllSessions()
+		return
+	case "current":
+		c.completeCurrentSession()
+		return
+	}
+
+	if idx, err := strconv.Atoi(target); err == nil {
+		c.completeSessionByIndex(idx - 1)
+		return
+	}
+	c.completeSessionByID(target)
+}
+
+func (c *Controller) completeAllSessions() {
+	if !c.mu.TryLock() {
+		c.app.AddMessage("Session list busy; try again.", "system")
+		return
+	}
+	if len(c.sessions) <= 1 {
+		c.mu.Unlock()
+		c.app.AddMessage("No other sessions to complete.", "system")
+		return
+	}
+
+	currentIdx := c.currentSession
+	current := c.sessions[currentIdx]
+	toComplete := make([]*SessionState, 0, len(c.sessions)-1)
+	for i, sess := range c.sessions {
+		if i == currentIdx {
+			continue
+		}
+		toComplete = append(toComplete, sess)
+	}
+	c.sessions = []*SessionState{current}
+	c.currentSession = 0
+	c.conversation = current.Conversation
+	c.registry = current.ToolRegistry
 	c.mu.Unlock()
 
-	if len(sessions) == 0 {
+	failed := 0
+	for _, sess := range toComplete {
+		if err := c.store.SetSessionStatus(sess.ID, storage.SessionStatusCompleted); err != nil {
+			failed++
+		}
+	}
+	if failed > 0 {
+		c.app.AddMessage(fmt.Sprintf("Completed %d sessions (%d failed).", len(toComplete)-failed, failed), "system")
+	} else {
+		c.app.AddMessage(fmt.Sprintf("Completed %d sessions.", len(toComplete)), "system")
+	}
+	c.updateContextIndicator(current, c.executionModelID(), "", allowedToolsForSession(current))
+}
+
+func (c *Controller) completeCurrentSession() {
+	c.mu.Lock()
+	idx := c.currentSession
+	c.mu.Unlock()
+	c.completeSessionByIndex(idx)
+}
+
+func (c *Controller) completeSessionByID(sessionID string) {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		c.app.AddMessage("Session ID required.", "system")
+		return
+	}
+	if !c.mu.TryLock() {
+		c.app.AddMessage("Session list busy; try again.", "system")
+		return
+	}
+	idx := -1
+	for i, sess := range c.sessions {
+		if sess.ID == sessionID {
+			idx = i
+			break
+		}
+	}
+	c.mu.Unlock()
+	if idx < 0 {
+		c.app.AddMessage("Session not found: "+sessionID, "system")
+		return
+	}
+	c.completeSessionByIndex(idx)
+}
+
+func (c *Controller) completeSessionByIndex(idx int) {
+	if !c.mu.TryLock() {
+		c.app.AddMessage("Session list busy; try again.", "system")
+		return
+	}
+	if idx < 0 || idx >= len(c.sessions) {
+		c.mu.Unlock()
+		c.app.AddMessage("Session index out of range.", "system")
+		return
+	}
+
+	sess := c.sessions[idx]
+	wasCurrent := idx == c.currentSession
+	onlySession := len(c.sessions) == 1
+
+	if !onlySession {
+		c.sessions = append(c.sessions[:idx], c.sessions[idx+1:]...)
+		if idx < c.currentSession {
+			c.currentSession--
+		}
+		if wasCurrent {
+			if idx >= len(c.sessions) {
+				idx = len(c.sessions) - 1
+			}
+			c.currentSession = idx
+			c.switchToSessionLocked(idx)
+		}
+	}
+	c.mu.Unlock()
+
+	if err := c.store.SetSessionStatus(sess.ID, storage.SessionStatusCompleted); err != nil {
+		c.app.AddMessage("Failed to complete session "+sess.ID+": "+err.Error(), "system")
+	} else {
+		c.app.AddMessage("Session completed: "+sess.ID, "system")
+	}
+
+	if wasCurrent {
+		if onlySession {
+			newSess, err := c.createNewSessionState()
+			if err != nil {
+				c.app.AddMessage("Error creating session: "+err.Error(), "system")
+				return
+			}
+			c.mu.Lock()
+			c.sessions = []*SessionState{newSess}
+			c.currentSession = 0
+			c.conversation = newSess.Conversation
+			c.registry = newSess.ToolRegistry
+			c.mu.Unlock()
+
+			c.app.ClearScrollback()
+			c.app.WelcomeScreen()
+			c.app.AddMessage("New session started: "+newSess.ID, "system")
+			c.app.SetStatus("Ready")
+			c.updateContextIndicator(newSess, c.executionModelID(), "", allowedToolsForSession(newSess))
+			return
+		}
+		c.mu.Lock()
+		if c.currentSession >= 0 && c.currentSession < len(c.sessions) {
+			current := c.sessions[c.currentSession]
+			c.mu.Unlock()
+			c.updateContextIndicator(current, c.executionModelID(), "", allowedToolsForSession(current))
+		} else {
+			c.mu.Unlock()
+		}
+	}
+}
+
+// listSessions shows all active sessions for this project.
+func (c *Controller) listSessions() {
+	if !c.mu.TryLock() {
+		c.app.AddMessage("Session list busy; try again.", "system")
+		return
+	}
+	current := c.currentSession
+	snapshots := make([]struct {
+		id        string
+		streaming bool
+	}, 0, len(c.sessions))
+	for _, sess := range c.sessions {
+		snapshots = append(snapshots, struct {
+			id        string
+			streaming bool
+		}{
+			id:        sess.ID,
+			streaming: sess.Streaming,
+		})
+	}
+	c.mu.Unlock()
+
+	if len(snapshots) == 0 {
 		c.app.AddMessage("No active sessions", "system")
 		return
 	}
 
 	var sb strings.Builder
 	sb.WriteString("Active sessions:\n")
-	for i, sess := range sessions {
+	for i, sess := range snapshots {
 		marker := "  "
 		if i == current {
 			marker = "→ "
 		}
 		status := ""
-		if sess.Streaming {
+		if sess.streaming {
 			status = " (streaming...)"
 		}
-		sb.WriteString(fmt.Sprintf("%s[%d] %s%s\n", marker, i+1, sess.ID, status))
+		sb.WriteString(fmt.Sprintf("%s[%d] %s%s\n", marker, i+1, sess.id, status))
 	}
 	sb.WriteString("\nUse /next or /prev to switch (Alt+Right/Left)")
+	sb.WriteString("\nUse /sessions complete <id|index|all> to archive sessions")
 	c.app.AddMessage(sb.String(), "system")
 }
 
 // nextSession switches to the next session.
 func (c *Controller) nextSession() {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-
 	if len(c.sessions) <= 1 {
+		c.mu.Unlock()
 		c.app.AddMessage("No other sessions to switch to", "system")
 		return
 	}
 
 	c.currentSession = (c.currentSession + 1) % len(c.sessions)
 	c.switchToSessionLocked(c.currentSession)
+	sess := c.sessions[c.currentSession]
+	c.mu.Unlock()
+
+	c.updateContextIndicator(sess, c.executionModelID(), "", allowedToolsForSession(sess))
 }
 
 // prevSession switches to the previous session.
 func (c *Controller) prevSession() {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-
 	if len(c.sessions) <= 1 {
+		c.mu.Unlock()
 		c.app.AddMessage("No other sessions to switch to", "system")
 		return
 	}
 
 	c.currentSession = (c.currentSession - 1 + len(c.sessions)) % len(c.sessions)
 	c.switchToSessionLocked(c.currentSession)
+	sess := c.sessions[c.currentSession]
+	c.mu.Unlock()
+
+	c.updateContextIndicator(sess, c.executionModelID(), "", allowedToolsForSession(sess))
 }
 
 // switchToSessionLocked loads a session by index.
@@ -1553,10 +2196,17 @@ Be specific with file:line references. Flag critical issues first.`, "```diff\n"
 	// Display as user message and stream response
 	c.app.AddMessage("/review", "user")
 
-	sess := c.sessions[c.currentSession]
 	ctx, cancel := context.WithCancel(context.Background())
+	c.mu.Lock()
+	if len(c.sessions) == 0 {
+		c.mu.Unlock()
+		c.app.AddMessage("No active session available.", "system")
+		return
+	}
+	sess := c.sessions[c.currentSession]
 	sess.Cancel = cancel
 	sess.Streaming = true
+	c.mu.Unlock()
 	c.emitStreaming(sess.ID, true)
 
 	go c.streamResponse(ctx, prompt, sess)
@@ -1599,17 +2249,47 @@ Output ONLY the commit message, nothing else.`, "```diff\n"+diff+"\n```", recent
 	// Display as user message and stream response
 	c.app.AddMessage("/commit", "user")
 
-	sess := c.sessions[c.currentSession]
 	ctx, cancel := context.WithCancel(context.Background())
+	c.mu.Lock()
+	if len(c.sessions) == 0 {
+		c.mu.Unlock()
+		c.app.AddMessage("No active session available.", "system")
+		return
+	}
+	sess := c.sessions[c.currentSession]
 	sess.Cancel = cancel
 	sess.Streaming = true
+	c.mu.Unlock()
 	c.emitStreaming(sess.ID, true)
 
 	go c.streamResponse(ctx, prompt, sess)
 }
 
-func (c *Controller) handleSkillCommand(args []string) {
+func (c *Controller) showContextBudget() {
+	c.mu.Lock()
+	if len(c.sessions) == 0 {
+		c.mu.Unlock()
+		c.app.AddMessage("No active session available.", "system")
+		return
+	}
 	sess := c.sessions[c.currentSession]
+	modelID := c.executionModelID()
+	allowedTools := allowedToolsForSession(sess)
+	c.mu.Unlock()
+
+	stats := c.buildContextBudgetStats(sess, modelID, "", allowedTools)
+	c.app.AddMessage(formatContextBudgetStats(stats), "system")
+}
+
+func (c *Controller) handleSkillCommand(args []string) {
+	c.mu.Lock()
+	if len(c.sessions) == 0 {
+		c.mu.Unlock()
+		c.app.AddMessage("No active session available.", "system")
+		return
+	}
+	sess := c.sessions[c.currentSession]
+	c.mu.Unlock()
 	if sess == nil || sess.SkillRegistry == nil || sess.SkillState == nil {
 		c.app.AddMessage("Skill system unavailable in this session.", "system")
 		return
@@ -1666,17 +2346,21 @@ func (c *Controller) handleSkillCommand(args []string) {
 	content, _ := result.Data["content"].(string)
 	if content != "" && message != "" {
 		c.app.AddMessage(message+"\n\n"+content, "system")
+		c.updateContextIndicator(sess, c.executionModelID(), "", allowedToolsForSession(sess))
 		return
 	}
 	if content != "" {
 		c.app.AddMessage(content, "system")
+		c.updateContextIndicator(sess, c.executionModelID(), "", allowedToolsForSession(sess))
 		return
 	}
 	if message != "" {
 		c.app.AddMessage(message, "system")
+		c.updateContextIndicator(sess, c.executionModelID(), "", allowedToolsForSession(sess))
 		return
 	}
 	c.app.AddMessage(fmt.Sprintf("Skill %q activated.", name), "system")
+	c.updateContextIndicator(sess, c.executionModelID(), "", allowedToolsForSession(sess))
 }
 
 // getGitDiff returns the combined staged and unstaged diff.

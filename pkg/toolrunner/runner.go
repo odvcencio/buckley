@@ -48,6 +48,7 @@ type Result struct {
 	ToolCalls  []ToolCallRecord
 	Usage      model.Usage
 	Iterations int
+	FinishReason string
 }
 
 // ToolExecutionResult captures the outcome of a tool execution.
@@ -185,6 +186,7 @@ And these available tools:
 
 Which tools (if any) would you need to complete this request?
 Return a JSON array of tool names, e.g., ["read_file", "write_file", "run_shell"]
+If the request asks about the repo/codebase or to validate claims, include search_text and read_file.
 If no tools are needed, return [].
 Only include tools you will actually use.`, selectionContext, catalog.String())
 
@@ -297,6 +299,7 @@ func (r *Runner) executeWithTools(ctx context.Context, req Request, tools []tool
 		}
 
 		choice := resp.Choices[0]
+		result.FinishReason = choice.FinishReason
 		msg := choice.Message
 
 		if msg.Reasoning != "" && r.config.EnableReasoning {
@@ -304,10 +307,19 @@ func (r *Runner) executeWithTools(ctx context.Context, req Request, tools []tool
 		}
 
 		if len(msg.ToolCalls) == 0 {
-			rawContent, _ := model.ExtractTextContent(msg.Content)
+			rawContent, err := model.ExtractTextContent(msg.Content)
+			if err != nil {
+				return result, fmt.Errorf("extract text content: %w", err)
+			}
 			thinking, content := model.ExtractThinkingContent(rawContent)
 			if thinking != "" && result.Reasoning == "" {
 				result.Reasoning = thinking
+			}
+			if strings.TrimSpace(content) == "" {
+				if result.Reasoning != "" {
+					return result, fmt.Errorf("model returned reasoning without final response")
+				}
+				return result, fmt.Errorf("model returned empty response")
 			}
 
 			result.Content = content

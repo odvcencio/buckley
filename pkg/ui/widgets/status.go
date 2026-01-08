@@ -1,6 +1,8 @@
 package widgets
 
 import (
+	"strings"
+
 	"github.com/odvcencio/buckley/pkg/ui/backend"
 	"github.com/odvcencio/buckley/pkg/ui/runtime"
 )
@@ -11,6 +13,10 @@ type StatusBar struct {
 	status     string
 	tokens     int
 	costCents  float64
+	contextUsed   int
+	contextBudget int
+	contextWindow int
+	executionMode string
 	scrollPos  string // "TOP", "END", or percentage
 	bgStyle    backend.Style
 	textStyle  backend.Style
@@ -34,6 +40,18 @@ func (s *StatusBar) SetStatus(text string) {
 func (s *StatusBar) SetTokens(tokens int, costCents float64) {
 	s.tokens = tokens
 	s.costCents = costCents
+}
+
+// SetContextUsage updates context usage display.
+func (s *StatusBar) SetContextUsage(used, budget, window int) {
+	s.contextUsed = used
+	s.contextBudget = budget
+	s.contextWindow = window
+}
+
+// SetExecutionMode updates execution mode display.
+func (s *StatusBar) SetExecutionMode(mode string) {
+	s.executionMode = mode
 }
 
 // SetScrollPosition updates the scroll position indicator.
@@ -65,20 +83,36 @@ func (s *StatusBar) Render(ctx runtime.RenderContext) {
 	// Fill background
 	ctx.Buffer.Fill(bounds, ' ', s.bgStyle)
 
-	// Left side: status
+	// Left side: status + mode
 	left := " " + s.status
+	if strings.TrimSpace(s.executionMode) != "" {
+		left += " · " + strings.TrimSpace(s.executionMode)
+	}
 	ctx.Buffer.SetString(bounds.X, bounds.Y, left, s.textStyle)
 
-	// Right side: tokens + cost
-	right := ""
+	// Right side: context + tokens/cost
+	ctxSegment := formatContextUsage(s.contextUsed, s.contextBudget, s.contextWindow)
+	tokenSegment := ""
 	if s.tokens > 0 {
-		right = formatTokens(s.tokens)
+		tokenSegment = formatTokens(s.tokens)
 		if s.costCents > 0 {
-			right += " · $" + formatCost(s.costCents)
+			tokenSegment += " · $" + formatCost(s.costCents)
 		}
-		right += " "
+	}
+	right := ""
+	if ctxSegment != "" {
+		right = ctxSegment
+		if tokenSegment != "" {
+			combined := ctxSegment + " · " + tokenSegment
+			if fitsRight(bounds, left, combined+" ") {
+				right = combined
+			}
+		}
+	} else if tokenSegment != "" {
+		right = tokenSegment
 	}
 	if right != "" {
+		right = right + " "
 		x := bounds.X + bounds.Width - len(right)
 		if x > bounds.X+len(left) {
 			ctx.Buffer.SetString(x, bounds.Y, right, s.textStyle)
@@ -92,6 +126,29 @@ func (s *StatusBar) Render(ctx runtime.RenderContext) {
 			ctx.Buffer.SetString(center, bounds.Y, s.scrollPos, s.textStyle)
 		}
 	}
+}
+
+func fitsRight(bounds runtime.Rect, left, right string) bool {
+	x := bounds.X + bounds.Width - len(right)
+	return x > bounds.X+len(left)
+}
+
+func formatContextUsage(used, budget, window int) string {
+	if used <= 0 && budget <= 0 && window <= 0 {
+		return ""
+	}
+	usedStr := formatTokens(used)
+	if budget > 0 && window > 0 && budget != window {
+		return "ctx " + usedStr + "/" + formatTokens(budget) + " (" + formatTokens(window) + ")"
+	}
+	denom := budget
+	if denom <= 0 {
+		denom = window
+	}
+	if denom > 0 {
+		return "ctx " + usedStr + "/" + formatTokens(denom)
+	}
+	return "ctx " + usedStr
 }
 
 // formatTokens formats a token count with K/M suffixes.

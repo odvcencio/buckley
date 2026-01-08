@@ -119,6 +119,22 @@ type TokensMsg struct {
 
 func (TokensMsg) isMessage() {}
 
+// ContextMsg updates context usage display.
+type ContextMsg struct {
+	Used   int
+	Budget int
+	Window int
+}
+
+func (ContextMsg) isMessage() {}
+
+// ExecutionModeMsg updates execution mode display.
+type ExecutionModeMsg struct {
+	Mode string
+}
+
+func (ExecutionModeMsg) isMessage() {}
+
 // ModelMsg updates the active model name.
 type ModelMsg struct {
 	Name string

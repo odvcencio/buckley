@@ -97,6 +97,7 @@ type ChatRequest struct {
 	Tools       []map[string]any `json:"tools,omitempty"`       // OpenAI function definitions
 	ToolChoice  string           `json:"tool_choice,omitempty"` // "auto", "none", or specific function
 	Reasoning   *ReasoningConfig `json:"reasoning,omitempty"`   // Reasoning config for supported models
+	Transforms  []string         `json:"transforms,omitempty"`  // Provider-specific prompt transforms (e.g., OpenRouter)
 }
 
 // ChatResponse represents a non-streaming chat completion response

@@ -458,7 +458,7 @@ func (r *Runner) runConversationLoop() error {
 	defer close(stopWatcher)
 
 	result, err := runner.Run(ctx, toolrunner.Request{
-		Messages:      r.conv.ToModelMessages(),
+		Messages:      buildHeadlessMessages(r, modelID),
 		MaxIterations: maxIterations,
 		Model:         modelID,
 	})
@@ -529,7 +529,7 @@ func (r *Runner) watchRunState(ctx context.Context, cancel context.CancelFunc, s
 func (r *Runner) buildChatRequest() model.ChatRequest {
 	return model.ChatRequest{
 		Model:    r.executionModelID(),
-		Messages: r.conv.ToModelMessages(),
+		Messages: buildHeadlessMessages(r, r.executionModelID()),
 		Tools:    r.tools.ToOpenAIFunctions(),
 	}
 }

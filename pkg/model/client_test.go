@@ -521,6 +521,29 @@ func TestExtractTextContent(t *testing.T) {
 			wantErr: false,
 		},
 		{
+			name: "content_parts_slice",
+			content: []ContentPart{
+				{Type: "text", Text: "Part 1"},
+				{Type: "text", Text: "Part 2"},
+			},
+			want:    "Part 1\nPart 2",
+			wantErr: false,
+		},
+		{
+			name:    "map_text_content",
+			content: map[string]any{"type": "text", "text": "Hello"},
+			want:    "Hello",
+			wantErr: false,
+		},
+		{
+			name: "nested_text_value",
+			content: []any{
+				map[string]any{"type": "text", "text": map[string]any{"value": "Nested"}},
+			},
+			want:    "Nested",
+			wantErr: false,
+		},
+		{
 			name:    "empty_string",
 			content: "",
 			want:    "",

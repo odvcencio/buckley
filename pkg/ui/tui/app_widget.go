@@ -80,6 +80,10 @@ type WidgetApp struct {
 	statusOverrideUntil time.Time
 	unreadCount         int
 	scrollIndicator     string
+	contextUsed         int
+	contextBudget       int
+	contextWindow       int
+	executionMode       string
 	inputMeasuredHeight int
 	selectionActive     bool
 	selectionLastLine   int
@@ -492,6 +496,7 @@ func (a *WidgetApp) showSlashCommandPalette() {
 		{ID: "/prev", Label: "/prev", Description: "Switch to previous session"},
 		{ID: "/model", Label: "/model", Description: "Select execution model"},
 		{ID: "/model curate", Label: "/model curate", Description: "Curate models for ACP/editor pickers"},
+		{ID: "/context", Label: "/context", Description: "Show context budget details"},
 		{ID: "/help", Label: "/help", Description: "Show available commands"},
 		{ID: "/quit", Label: "/quit", Description: "Exit Buckley"},
 	}
@@ -748,6 +753,17 @@ func (a *WidgetApp) update(msg Message) bool {
 
 	case TokensMsg:
 		a.statusBar.SetTokens(m.Tokens, m.CostCent)
+		return true
+
+	case ContextMsg:
+		a.contextUsed = m.Used
+		a.contextBudget = m.Budget
+		a.contextWindow = m.Window
+		a.statusBar.SetContextUsage(m.Used, m.Budget, m.Window)
+		return true
+	case ExecutionModeMsg:
+		a.executionMode = m.Mode
+		a.statusBar.SetExecutionMode(m.Mode)
 		return true
 
 	case ModelMsg:
@@ -1339,6 +1355,16 @@ func (a *WidgetApp) SetTokenCount(tokens int, costCents float64) {
 	a.Post(TokensMsg{Tokens: tokens, CostCent: costCents})
 }
 
+// SetContextUsage updates context usage display. Thread-safe via message passing.
+func (a *WidgetApp) SetContextUsage(used, budget, window int) {
+	a.Post(ContextMsg{Used: used, Budget: budget, Window: window})
+}
+
+// SetExecutionMode updates execution mode display. Thread-safe via message passing.
+func (a *WidgetApp) SetExecutionMode(mode string) {
+	a.Post(ExecutionModeMsg{Mode: mode})
+}
+
 // SetModelName updates model display. Thread-safe via message passing.
 func (a *WidgetApp) SetModelName(name string) {
 	a.Post(ModelMsg{Name: name})
@@ -1649,6 +1675,9 @@ func (a *WidgetApp) debugDumpScreen() {
 	sb.WriteString(fmt.Sprintf("Sidebar User Override: %v\n", a.sidebarUserOverride))
 	sb.WriteString(fmt.Sprintf("Status: %s\n", a.statusText))
 	sb.WriteString(fmt.Sprintf("Scroll Position: %s\n", a.scrollIndicator))
+	if a.contextWindow > 0 {
+		sb.WriteString(fmt.Sprintf("Context Usage: %d/%d (window %d)\n", a.contextUsed, a.contextBudget, a.contextWindow))
+	}
 	sb.WriteString("\n")
 
 	// Dump render metrics

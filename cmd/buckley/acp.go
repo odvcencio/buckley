@@ -214,7 +214,7 @@ func makePromptHandler(
 		}
 
 		modelOverride := resolveACPModelOverride(cfg, mgr, session.Mode)
-		responseText, err := runACPLoop(ctx, cfg, mgr, state.conv, state.registry, state.skillState, modelOverride, stream)
+		responseText, err := runACPLoop(ctx, cfg, mgr, state, modelOverride, stream)
 		if err != nil {
 			logf("prompt error: %v", err)
 			stream(acp.NewAgentMessageChunk(fmt.Sprintf("\n\nError: %v", err)))
@@ -235,6 +235,8 @@ type acpSessionState struct {
 	registry   *tool.Registry
 	skills     *skill.Registry
 	skillState *skill.RuntimeState
+	projectCtx *projectcontext.ProjectContext
+	workDir    string
 }
 
 type acpEmbeddedResource struct {
@@ -338,32 +340,175 @@ func getACPSessionState(
 	// Wire todo persistence for the ACP session
 	registry.SetTodoStore(&acpTodoStoreAdapter{sessionID: session.ID})
 
-	conv.AddSystemMessage(buildACPSystemPrompt(projectContext, workDir, skills))
-
 	state := &acpSessionState{
 		conv:       conv,
 		registry:   registry,
 		skills:     skills,
 		skillState: skillState,
+		projectCtx: projectContext,
+		workDir:    workDir,
 	}
 	sessions[session.ID] = state
 	return state
 }
 
-func buildACPSystemPrompt(projectContext *projectcontext.ProjectContext, workDir string, skills *skill.Registry) string {
-	prompt := defaultACPSystemPrompt
-	if projectContext != nil && strings.TrimSpace(projectContext.RawContent) != "" {
-		prompt += "\n\nProject Context:\n" + projectContext.RawContent
+func buildACPSystemPromptWithBudget(projectContext *projectcontext.ProjectContext, workDir string, skills *skill.Registry, budgetTokens int) string {
+	var b strings.Builder
+	used := 0
+
+	appendSection := func(content string, required bool) {
+		if strings.TrimSpace(content) == "" {
+			return
+		}
+		if !required && budgetTokens <= 0 {
+			return
+		}
+		tokens := conversation.CountTokens(content)
+		if budgetTokens > 0 && !required && used+tokens > budgetTokens {
+			return
+		}
+		b.WriteString(content)
+		used += tokens
 	}
+
+	appendSection(defaultACPSystemPrompt, true)
+
+	rawProject := ""
+	projectSummary := ""
+	if projectContext != nil && projectContext.Loaded {
+		rawProject = strings.TrimSpace(projectContext.RawContent)
+		projectSummary = buildProjectContextSummary(projectContext)
+	}
+
+	if budgetTokens > 0 && (rawProject != "" || projectSummary != "") {
+		projectSection := ""
+		if rawProject != "" {
+			projectSection = "\n\nProject Context:\n" + rawProject
+		}
+		summarySection := ""
+		if projectSummary != "" {
+			summarySection = "\n\nProject Context (summary):\n" + projectSummary
+		}
+
+		remaining := budgetTokens - used
+		if remaining > 0 {
+			if projectSection != "" && conversation.CountTokens(projectSection) <= remaining {
+				appendSection(projectSection, false)
+			} else if summarySection != "" && conversation.CountTokens(summarySection) <= remaining {
+				appendSection(summarySection, false)
+			}
+		}
+	}
+
 	if strings.TrimSpace(workDir) != "" {
-		prompt += "\n\nWorking directory: " + workDir
+		appendSection("\n\nWorking directory: "+workDir, true)
 	}
 	if skills != nil {
 		if desc := strings.TrimSpace(skills.GetDescriptions()); desc != "" {
-			prompt += "\n\n" + desc
+			appendSection("\n\n"+desc, false)
 		}
 	}
-	return prompt
+
+	return strings.TrimSpace(b.String())
+}
+
+func trimACPConversationToBudget(conv *conversation.Conversation, budgetTokens int) *conversation.Conversation {
+	if conv == nil {
+		return nil
+	}
+	if budgetTokens <= 0 || len(conv.Messages) == 0 {
+		return &conversation.Conversation{SessionID: conv.SessionID}
+	}
+
+	var systemMsgs []conversation.Message
+	var otherMsgs []conversation.Message
+	for _, msg := range conv.Messages {
+		content := conversation.GetContentAsString(msg.Content)
+		if msg.Role == "system" && strings.HasPrefix(strings.TrimSpace(content), strings.TrimSpace(defaultACPSystemPrompt)) {
+			continue
+		}
+		if msg.Role == "system" {
+			systemMsgs = append(systemMsgs, msg)
+			continue
+		}
+		otherMsgs = append(otherMsgs, msg)
+	}
+
+	used := 0
+	kept := make([]conversation.Message, 0, len(systemMsgs)+len(otherMsgs))
+	for _, msg := range systemMsgs {
+		tokens := estimateConversationMessageTokens(msg)
+		if used+tokens > budgetTokens {
+			break
+		}
+		used += tokens
+		kept = append(kept, msg)
+	}
+
+	start := len(otherMsgs)
+	lastIdx := len(otherMsgs) - 1
+	for i := lastIdx; i >= 0; i-- {
+		tokens := estimateConversationMessageTokens(otherMsgs[i])
+		if i == lastIdx && tokens > budgetTokens {
+			start = i
+			used += tokens
+			break
+		}
+		if used+tokens > budgetTokens {
+			break
+		}
+		used += tokens
+		start = i
+	}
+
+	if start < len(otherMsgs) {
+		kept = append(kept, otherMsgs[start:]...)
+	}
+
+	return &conversation.Conversation{
+		SessionID:  conv.SessionID,
+		Messages:   kept,
+		TokenCount: used,
+	}
+}
+
+func buildACPRequestMessages(cfg *config.Config, mgr *model.Manager, state *acpSessionState, modelID string, allowedTools []string, includeTools bool) []model.Message {
+	messages := []model.Message{}
+
+	budget := promptBudget(cfg, mgr, modelID)
+	if includeTools && state != nil {
+		budget -= estimateToolTokens(state.registry, allowedTools)
+		if budget < 0 {
+			budget = 0
+		}
+	}
+
+	var systemPrompt string
+	if state != nil {
+		systemPrompt = buildACPSystemPromptWithBudget(state.projectCtx, state.workDir, state.skills, budget)
+	} else {
+		systemPrompt = strings.TrimSpace(defaultACPSystemPrompt)
+	}
+	if budget > 0 {
+		budget -= estimateMessageTokens("system", systemPrompt)
+		if budget < 0 {
+			budget = 0
+		}
+	}
+
+	messages = append(messages, model.Message{
+		Role:    "system",
+		Content: systemPrompt,
+	})
+
+	if state != nil {
+		trimmed := trimACPConversationToBudget(state.conv, budget)
+		if trimmed != nil {
+			messages = append(messages, trimmed.ToModelMessages()...)
+		}
+	}
+
+	return messages
 }
 
 func handleACPUserSkillCommand(prompt string, state *acpSessionState) (bool, string) {
@@ -561,12 +706,16 @@ func runACPLoop(
 	ctx context.Context,
 	cfg *config.Config,
 	mgr *model.Manager,
-	conv *conversation.Conversation,
-	registry *tool.Registry,
-	skillState *skill.RuntimeState,
+	state *acpSessionState,
 	modelOverride string,
 	stream acp.StreamFunc,
 ) (string, error) {
+	if state == nil {
+		return "", fmt.Errorf("session state unavailable")
+	}
+	conv := state.conv
+	registry := state.registry
+	skillState := state.skillState
 	modelID := strings.TrimSpace(modelOverride)
 	if modelID == "" {
 		modelID = cfg.Models.Execution
@@ -603,7 +752,7 @@ func runACPLoop(
 
 		req := model.ChatRequest{
 			Model:    modelID,
-			Messages: conv.ToModelMessages(),
+			Messages: buildACPRequestMessages(cfg, mgr, state, modelID, allowedTools, useTools),
 		}
 		if useTools {
 			req.Tools = tools

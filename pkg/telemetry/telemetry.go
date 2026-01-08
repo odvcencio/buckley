@@ -36,6 +36,7 @@ const (
 	EventEditorInline               EventType = "editor.inline"
 	EventEditorPropose              EventType = "editor.propose"
 	EventEditorApply                EventType = "editor.apply"
+	EventUICommand                  EventType = "ui.command"
 	EventExperimentStarted          EventType = "experiment.started"
 	EventExperimentCompleted        EventType = "experiment.completed"
 	EventExperimentFailed           EventType = "experiment.failed"

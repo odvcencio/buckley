@@ -22,6 +22,18 @@ func TestNewStatusBar(t *testing.T) {
 	if sb.costCents != 0 {
 		t.Errorf("expected costCents 0, got %f", sb.costCents)
 	}
+	if sb.contextUsed != 0 {
+		t.Errorf("expected contextUsed 0, got %d", sb.contextUsed)
+	}
+	if sb.contextBudget != 0 {
+		t.Errorf("expected contextBudget 0, got %d", sb.contextBudget)
+	}
+	if sb.contextWindow != 0 {
+		t.Errorf("expected contextWindow 0, got %d", sb.contextWindow)
+	}
+	if sb.executionMode != "" {
+		t.Errorf("expected executionMode empty, got %q", sb.executionMode)
+	}
 }
 
 func TestStatusBar_SetStatus(t *testing.T) {
@@ -67,6 +79,32 @@ func TestStatusBar_SetTokens_Large(t *testing.T) {
 	}
 	if sb.costCents != 150.50 {
 		t.Errorf("expected costCents 150.50, got %f", sb.costCents)
+	}
+}
+
+func TestStatusBar_SetContextUsage(t *testing.T) {
+	sb := NewStatusBar()
+
+	sb.SetContextUsage(1200, 8000, 8192)
+
+	if sb.contextUsed != 1200 {
+		t.Errorf("expected contextUsed 1200, got %d", sb.contextUsed)
+	}
+	if sb.contextBudget != 8000 {
+		t.Errorf("expected contextBudget 8000, got %d", sb.contextBudget)
+	}
+	if sb.contextWindow != 8192 {
+		t.Errorf("expected contextWindow 8192, got %d", sb.contextWindow)
+	}
+}
+
+func TestStatusBar_SetExecutionMode(t *testing.T) {
+	sb := NewStatusBar()
+
+	sb.SetExecutionMode("classic")
+
+	if sb.executionMode != "classic" {
+		t.Errorf("expected executionMode 'classic', got %q", sb.executionMode)
 	}
 }
 

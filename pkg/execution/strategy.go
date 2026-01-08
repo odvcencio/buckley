@@ -61,6 +61,9 @@ type ExecutionResult struct {
 
 	// Iterations counts how many tool loops were executed
 	Iterations int
+
+	// FinishReason records the model finish reason (e.g., "stop", "length")
+	FinishReason string
 }
 
 // ToolCallRecord captures a single tool invocation.

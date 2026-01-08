@@ -27,6 +27,7 @@ import (
 	acpserver "github.com/odvcencio/buckley/pkg/acp/server"
 	"github.com/odvcencio/buckley/pkg/config"
 	projectcontext "github.com/odvcencio/buckley/pkg/context"
+	"github.com/odvcencio/buckley/pkg/conversation"
 	coordination "github.com/odvcencio/buckley/pkg/coordination/coordinator"
 	coordevents "github.com/odvcencio/buckley/pkg/coordination/events"
 	"github.com/odvcencio/buckley/pkg/ipc"
@@ -266,22 +267,26 @@ func executeOneShot(prompt string, cfg *config.Config, mgr *model.Manager, store
 		mgr.SetRequestTimeout(0)
 	}
 
-	// Build system prompt
-	systemPrompt := "You are Buckley, an AI development assistant. Be concise and helpful."
-	if projectContext != nil && projectContext.RawContent != "" {
-		systemPrompt += "\n\nProject Context:\n" + projectContext.RawContent
+	// Get model ID
+	modelID := cfg.Models.Execution
+	if modelID == "" {
+		modelID = "openai/gpt-4o"
 	}
+
+	// Build system prompt with budgeted project context
+	budget := promptBudget(cfg, mgr, modelID)
+	if budget > 0 {
+		budget -= estimateMessageTokens("user", prompt)
+		if budget < 0 {
+			budget = 0
+		}
+	}
+	systemPrompt := buildOneShotSystemPrompt(projectContext, budget)
 
 	// Build messages
 	messages := []model.Message{
 		{Role: "system", Content: systemPrompt},
 		{Role: "user", Content: prompt},
-	}
-
-	// Get model ID
-	modelID := cfg.Models.Execution
-	if modelID == "" {
-		modelID = "openai/gpt-4o"
 	}
 
 	// Create request
@@ -312,6 +317,55 @@ func executeOneShot(prompt string, cfg *config.Config, mgr *model.Manager, store
 			}
 		}
 	}
+}
+
+func buildOneShotSystemPrompt(projectContext *projectcontext.ProjectContext, budgetTokens int) string {
+	base := "You are Buckley, an AI development assistant. Be concise and helpful.\n\n"
+	var b strings.Builder
+	used := 0
+
+	appendSection := func(content string, required bool) {
+		if strings.TrimSpace(content) == "" {
+			return
+		}
+		if !required && budgetTokens <= 0 {
+			return
+		}
+		tokens := conversation.CountTokens(content)
+		if budgetTokens > 0 && !required && used+tokens > budgetTokens {
+			return
+		}
+		b.WriteString(content)
+		used += tokens
+	}
+
+	appendSection(base, true)
+
+	if projectContext != nil && projectContext.Loaded {
+		rawProject := strings.TrimSpace(projectContext.RawContent)
+		projectSummary := buildProjectContextSummary(projectContext)
+		if budgetTokens > 0 && (rawProject != "" || projectSummary != "") {
+			projectSection := ""
+			if rawProject != "" {
+				projectSection = "Project Context:\n" + rawProject + "\n\n"
+			}
+			summarySection := ""
+			if projectSummary != "" {
+				summarySection = "Project Context (summary):\n" + projectSummary + "\n\n"
+			}
+
+			remaining := budgetTokens - used
+			if remaining > 0 {
+				if projectSection != "" && conversation.CountTokens(projectSection) <= remaining {
+					appendSection(projectSection, false)
+				} else if summarySection != "" && conversation.CountTokens(summarySection) <= remaining {
+					appendSection(summarySection, false)
+				}
+			}
+		}
+	}
+
+	return strings.TrimSpace(b.String())
 }
 
 func runPlanCommand(args []string) error {

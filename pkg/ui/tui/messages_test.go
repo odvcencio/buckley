@@ -20,6 +20,8 @@ func TestMessages_ImplementInterface(t *testing.T) {
 		RefreshMsg{},
 		StatusMsg{Text: "Ready"},
 		TokensMsg{Tokens: 100, CostCent: 0.01},
+		ContextMsg{Used: 1000, Budget: 8000, Window: 8192},
+		ExecutionModeMsg{Mode: "classic"},
 		ModelMsg{Name: "gpt-4"},
 		AddMessageMsg{Content: "hi", Source: "user"},
 		AppendMsg{Text: " world"},
@@ -55,6 +57,8 @@ func TestMessages_IsMessageMethods(t *testing.T) {
 	RefreshMsg{}.isMessage()
 	StatusMsg{}.isMessage()
 	TokensMsg{}.isMessage()
+	ContextMsg{}.isMessage()
+	ExecutionModeMsg{}.isMessage()
 	ModelMsg{}.isMessage()
 	AddMessageMsg{}.isMessage()
 	AppendMsg{}.isMessage()
