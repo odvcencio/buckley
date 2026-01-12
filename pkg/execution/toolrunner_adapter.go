@@ -1,6 +1,9 @@
 package execution
 
 import (
+	"strings"
+
+	"github.com/odvcencio/buckley/pkg/encoding/toon"
 	"github.com/odvcencio/buckley/pkg/model"
 	"github.com/odvcencio/buckley/pkg/toolrunner"
 )
@@ -66,12 +69,15 @@ func toExecutionResult(result *toolrunner.Result) *ExecutionResult {
 	if result == nil {
 		return &ExecutionResult{}
 	}
+	// Sanitize any TOON fragments that may have leaked into the output.
+	// TOON is great for wire efficiency but should never appear in user-facing content.
+	content := strings.TrimSpace(toon.SanitizeOutput(result.Content))
 	return &ExecutionResult{
-		Content:    result.Content,
-		Reasoning:  result.Reasoning,
-		ToolCalls:  result.ToolCalls,
-		Usage:      result.Usage,
-		Iterations: result.Iterations,
+		Content:      content,
+		Reasoning:    result.Reasoning,
+		ToolCalls:    result.ToolCalls,
+		Usage:        result.Usage,
+		Iterations:   result.Iterations,
 		FinishReason: result.FinishReason,
 	}
 }
