@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/odvcencio/buckley/pkg/conversation"
 	"github.com/odvcencio/buckley/pkg/model"
 	"github.com/odvcencio/buckley/pkg/rlm"
 	"github.com/odvcencio/buckley/pkg/storage"
@@ -148,16 +149,26 @@ func (s *RLMStrategy) buildTaskPrompt(req ExecutionRequest) string {
 
 	// Add conversation context if available
 	if req.Conversation != nil && len(req.Conversation.Messages) > 0 {
-		sb.WriteString("\n\n## Conversation Context\n")
-		// Include last few messages for context
 		messages := req.Conversation.Messages
-		start := len(messages) - 5
-		if start < 0 {
-			start = 0
+		if req.ContextBuilder != nil {
+			budget := req.ContextBudget
+			if budget <= 0 {
+				budget = s.rlmContextBudget(req)
+			}
+			messages = req.ContextBuilder.BuildMessages(req.Conversation, budget, "rlm")
 		}
-		for _, msg := range messages[start:] {
-			content := contentToString(msg.Content)
-			sb.WriteString(fmt.Sprintf("\n**%s**: %s", msg.Role, truncate(content, 500)))
+		if len(messages) > 0 {
+			sb.WriteString("\n\n## Conversation Context\n")
+			for _, msg := range messages {
+				content := contentToString(msg.Content)
+				if strings.TrimSpace(content) == "" && strings.TrimSpace(msg.Reasoning) != "" {
+					content = msg.Reasoning
+				}
+				if strings.TrimSpace(content) == "" {
+					continue
+				}
+				sb.WriteString(fmt.Sprintf("\n**%s**: %s", msg.Role, content))
+			}
 		}
 	}
 
@@ -171,23 +182,49 @@ func (s *RLMStrategy) buildTaskPrompt(req ExecutionRequest) string {
 	return sb.String()
 }
 
-// truncate shortens text to maxLen, adding ellipsis if truncated.
-func truncate(s string, maxLen int) string {
-	if len(s) <= maxLen {
-		return s
-	}
-	return s[:maxLen-3] + "..."
-}
-
 // contentToString converts message content to string.
 func contentToString(content any) string {
-	if content == nil {
+	switch v := content.(type) {
+	case nil:
 		return ""
+	case string:
+		return v
+	default:
+		if text := conversation.GetContentAsString(v); strings.TrimSpace(text) != "" {
+			return text
+		}
+		return fmt.Sprintf("%v", content)
 	}
-	if s, ok := content.(string); ok {
-		return s
+}
+
+func (s *RLMStrategy) rlmContextBudget(req ExecutionRequest) int {
+	modelID := ""
+	if s != nil && s.config.Models != nil {
+		modelID = s.config.Models.GetExecutionModel()
 	}
-	return fmt.Sprintf("%v", content)
+	contextWindow := contextWindowForModel(s.config.Models, modelID)
+	if contextWindow <= 0 {
+		return 0
+	}
+
+	var base strings.Builder
+	base.WriteString(req.Prompt)
+	if len(req.AllowedTools) > 0 {
+		base.WriteString("\n\n## Available Tools\n")
+		base.WriteString("When delegating, restrict sub-agents to these tools: ")
+		base.WriteString(strings.Join(req.AllowedTools, ", "))
+	}
+
+	budget := contextWindow - conversation.CountTokens(base.String())
+	if budget <= 0 {
+		return 0
+	}
+	headerTokens := conversation.CountTokens("## Conversation Context")
+	budget -= headerTokens
+	if budget < 0 {
+		budget = 0
+	}
+	return budget
 }
 
 // OnIteration registers a callback for iteration events.

@@ -49,6 +49,7 @@ type Controller struct {
 
 	// Execution strategy for tool calling (classic, rlm)
 	execStrategy execution.ExecutionStrategy
+	strategyFactory execution.StrategyFactory
 
 	// Event bridge for sidebar updates
 	telemetryBridge *TelemetryUIBridge
@@ -78,6 +79,7 @@ type SessionState struct {
 	ToolRegistry  *tool.Registry
 	SkillRegistry *skill.Registry
 	SkillState    *skill.RuntimeState
+	Compactor     *conversation.CompactionManager
 	Streaming     bool
 	Cancel        context.CancelFunc
 	MessageQueue  []QueuedMessage // Messages queued while streaming
@@ -93,7 +95,7 @@ type ControllerConfig struct {
 	SessionID    string // Resume session, empty for new
 }
 
-func newSessionState(cfg *config.Config, store *storage.Store, workDir string, hub *telemetry.Hub, sessionID string, loadMessages bool) (*SessionState, error) {
+func newSessionState(cfg *config.Config, store *storage.Store, workDir string, hub *telemetry.Hub, modelMgr *model.Manager, sessionID string, loadMessages bool) (*SessionState, error) {
 	sess := &SessionState{
 		ID:           sessionID,
 		Conversation: conversation.New(sessionID),
@@ -136,6 +138,19 @@ func newSessionState(cfg *config.Config, store *storage.Store, workDir string, h
 	sess.ToolRegistry = registry
 	sess.SkillRegistry = skills
 	sess.SkillState = skillState
+	compactor := conversation.NewCompactionManager(modelMgr, cfg)
+	compactor.SetConversation(sess.Conversation)
+	if store != nil {
+		compactor.SetOnComplete(func(_ *conversation.CompactionResult) {
+			if err := sess.Conversation.SaveAllMessages(store); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to persist compaction: %v\n", err)
+			}
+		})
+	}
+	sess.Compactor = compactor
+	if sess.ToolRegistry != nil {
+		sess.ToolRegistry.SetCompactionManager(compactor)
+	}
 
 	return sess, nil
 }
@@ -152,7 +167,7 @@ func NewController(cfg ControllerConfig) (*Controller, error) {
 	allSessions, _ := cfg.Store.ListSessions(100)
 	for _, s := range allSessions {
 		if s.ProjectPath == workDir && s.Status == storage.SessionStatusActive {
-			sess, err := newSessionState(cfg.Config, cfg.Store, workDir, cfg.Telemetry, s.ID, true)
+			sess, err := newSessionState(cfg.Config, cfg.Store, workDir, cfg.Telemetry, cfg.ModelManager, s.ID, true)
 			if err != nil {
 				return nil, err
 			}
@@ -184,7 +199,7 @@ func NewController(cfg ControllerConfig) (*Controller, error) {
 			if err := cfg.Store.CreateSession(sess); err != nil {
 				return nil, fmt.Errorf("create session: %w", err)
 			}
-			sessState, err := newSessionState(cfg.Config, cfg.Store, workDir, cfg.Telemetry, sessionID, false)
+			sessState, err := newSessionState(cfg.Config, cfg.Store, workDir, cfg.Telemetry, cfg.ModelManager, sessionID, false)
 			if err != nil {
 				return nil, err
 			}
@@ -212,7 +227,7 @@ func NewController(cfg ControllerConfig) (*Controller, error) {
 			if err := cfg.Store.CreateSession(sess); err != nil {
 				return nil, fmt.Errorf("create session: %w", err)
 			}
-			sessState, err := newSessionState(cfg.Config, cfg.Store, workDir, cfg.Telemetry, sessionID, false)
+			sessState, err := newSessionState(cfg.Config, cfg.Store, workDir, cfg.Telemetry, cfg.ModelManager, sessionID, false)
 			if err != nil {
 				return nil, err
 			}
@@ -266,6 +281,7 @@ func NewController(cfg ControllerConfig) (*Controller, error) {
 			EnableReasoning:      true,
 		},
 	)
+	ctrl.strategyFactory = strategyFactory
 	strategy, err := strategyFactory.Create(execMode)
 	if err != nil {
 		strategy, _ = strategyFactory.Create(config.ExecutionModeClassic)
@@ -427,6 +443,15 @@ func (c *Controller) handleCommand(text string) {
 			c.showModelPicker()
 		}
 
+	case "/mode":
+		if len(args) == 0 {
+			c.app.AddMessage("Usage: /mode [classic|rlm]", "system")
+			return
+		}
+		if err := c.handleModeCommand(args[0]); err != nil {
+			c.app.AddMessage("Failed to switch mode: "+err.Error(), "system")
+		}
+
 	case "/help":
 		c.app.AddMessage(`Commands:
   /new, /clear, /reset - Start a new session
@@ -435,6 +460,7 @@ func (c *Controller) handleCommand(text string) {
   /next, /n            - Switch to next session
   /prev, /p            - Switch to previous session
   /model [id]          - Pick or set the execution model
+  /mode [classic|rlm]   - Switch execution mode
   /model curate        - Curate models for ACP/editor pickers
   /skill [name|list]   - List or activate a skill
   /context             - Show context budget details
@@ -830,6 +856,29 @@ func (c *Controller) setExecutionModelLocked(modelID string) {
 	c.app.AddMessage("Execution model set to "+modelID, "system")
 }
 
+func (c *Controller) handleModeCommand(mode string) error {
+	mode = strings.TrimSpace(mode)
+	if mode == "" {
+		return fmt.Errorf("mode required")
+	}
+	if c.strategyFactory == nil {
+		return fmt.Errorf("execution strategy factory unavailable")
+	}
+	strategy, err := c.strategyFactory.Create(mode)
+	if err != nil {
+		return err
+	}
+	c.execStrategy = strategy
+	if c.execStrategy != nil {
+		c.app.SetExecutionMode(c.execStrategy.Name())
+		if c.cfg != nil {
+			c.cfg.Execution.Mode = c.execStrategy.Name()
+		}
+	}
+	c.app.AddMessage(fmt.Sprintf("Switched to %s mode", c.execStrategy.Name()), "system")
+	return nil
+}
+
 func catalogHasModel(mgr *model.Manager, modelID string) bool {
 	if mgr == nil {
 		return true
@@ -967,7 +1016,7 @@ func (c *Controller) createNewSessionState() (*SessionState, error) {
 		return nil, err
 	}
 
-	return newSessionState(c.cfg, c.store, c.workDir, c.telemetry, sessionID, false)
+	return newSessionState(c.cfg, c.store, c.workDir, c.telemetry, c.modelMgr, sessionID, false)
 }
 
 // streamResponse handles the AI response streaming for a specific session.
@@ -1189,7 +1238,7 @@ func (c *Controller) runWithStrategy(ctx context.Context, sess *SessionState) (s
 	modelID := c.executionModelID()
 
 	// Build system prompt + trimmed context
-	systemPrompt, trimmedConv := c.buildRequestContext(sess, modelID, prompt, allowedTools)
+	systemPrompt, trimmedConv, budget := c.buildRequestContext(sess, modelID, prompt, allowedTools)
 
 	// Create execution request
 	req := execution.ExecutionRequest{
@@ -1199,6 +1248,8 @@ func (c *Controller) runWithStrategy(ctx context.Context, sess *SessionState) (s
 		SystemPrompt:  systemPrompt,
 		AllowedTools:  allowedTools,
 		MaxIterations: 25,
+		ContextBuilder: conversation.NewContextBuilder(sess.Compactor),
+		ContextBudget:  budget,
 	}
 
 	// Set up stream handler for TUI updates
@@ -1637,7 +1688,7 @@ func trimConversationToBudget(conv *conversation.Conversation, budgetTokens int)
 	return trimmed
 }
 
-func (c *Controller) buildRequestContext(sess *SessionState, modelID, prompt string, allowedTools []string) (string, *conversation.Conversation) {
+func (c *Controller) buildRequestContext(sess *SessionState, modelID, prompt string, allowedTools []string) (string, *conversation.Conversation, int) {
 	budget := c.promptBudget(modelID)
 	registry := c.registry
 	if sess != nil && sess.ToolRegistry != nil {
@@ -1661,14 +1712,14 @@ func (c *Controller) buildRequestContext(sess *SessionState, modelID, prompt str
 		}
 	}
 
-	var trimmed *conversation.Conversation
+	// Return full conversation - let the strategy's ContextBuilder handle trimming
+	// to avoid double-trimming and ensure tool call fields are preserved
+	var conv *conversation.Conversation
 	if sess != nil {
-		trimmed = trimConversationToBudget(sess.Conversation, budget)
-	} else {
-		trimmed = trimConversationToBudget(nil, 0)
+		conv = sess.Conversation
 	}
 
-	return systemPrompt, trimmed
+	return systemPrompt, conv, budget
 }
 
 func projectContextMode(systemPrompt string) string {
@@ -1697,11 +1748,14 @@ func (c *Controller) buildContextBudgetStats(sess *SessionState, modelID, prompt
 		registry = sess.ToolRegistry
 	}
 
-	systemPrompt, trimmed := c.buildRequestContext(sess, modelID, prompt, allowedTools)
+	systemPrompt, conv, budget := c.buildRequestContext(sess, modelID, prompt, allowedTools)
 
 	stats.ToolTokens = estimateToolTokens(registry, allowedTools)
 	stats.PromptTokens = estimateMessageTokens("user", prompt)
 	stats.SystemTokens = estimateMessageTokens("system", systemPrompt)
+
+	// Simulate trimming for stats display
+	trimmed := trimConversationToBudget(conv, budget)
 	if trimmed != nil {
 		stats.ConversationTokens = trimmed.TokenCount
 		stats.TrimmedMessages = len(trimmed.Messages)
@@ -1757,12 +1811,14 @@ func formatContextBudgetStats(stats ContextBudgetStats) string {
 func (c *Controller) buildMessagesForSession(sess *SessionState, modelID string, allowedTools []string) []model.Message {
 	messages := []model.Message{}
 
-	systemPrompt, trimmed := c.buildRequestContext(sess, modelID, "", allowedTools)
+	systemPrompt, conv, budget := c.buildRequestContext(sess, modelID, "", allowedTools)
 	messages = append(messages, model.Message{
 		Role:    "system",
 		Content: systemPrompt,
 	})
 
+	// Trim conversation to budget before converting to model messages
+	trimmed := trimConversationToBudget(conv, budget)
 	if trimmed != nil {
 		messages = append(messages, trimmed.ToModelMessages()...)
 	}

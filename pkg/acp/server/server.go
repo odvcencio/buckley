@@ -630,45 +630,17 @@ func resolveRLMConfig(cfg *config.Config) rlm.Config {
 	base.Scratchpad.PersistArtifacts = rlmCfg.Scratchpad.PersistArtifacts
 	base.Scratchpad.PersistDecisions = rlmCfg.Scratchpad.PersistDecisions
 
-	if len(rlmCfg.Tiers) > 0 {
-		if base.Tiers == nil {
-			base.Tiers = make(map[rlm.Weight]rlm.TierConfig)
-		}
-		for name, tier := range rlmCfg.Tiers {
-			weight := rlm.Weight(strings.ToLower(strings.TrimSpace(name)))
-			if weight == "" {
-				continue
-			}
-			base.Tiers[weight] = mergeRLMConfigTier(base.Tiers[weight], tier)
-		}
+	if strings.TrimSpace(rlmCfg.SubAgent.Model) != "" {
+		base.SubAgent.Model = rlmCfg.SubAgent.Model
+	}
+	if rlmCfg.SubAgent.MaxConcurrent != 0 {
+		base.SubAgent.MaxConcurrent = rlmCfg.SubAgent.MaxConcurrent
+	}
+	if rlmCfg.SubAgent.Timeout != 0 {
+		base.SubAgent.Timeout = rlmCfg.SubAgent.Timeout
 	}
 
 	base.Normalize()
-	return base
-}
-
-func mergeRLMConfigTier(base rlm.TierConfig, override config.RLMTierConfig) rlm.TierConfig {
-	if strings.TrimSpace(override.Model) != "" {
-		base.Model = override.Model
-	}
-	if strings.TrimSpace(override.Provider) != "" {
-		base.Provider = override.Provider
-	}
-	if override.Models != nil {
-		base.Models = append([]string{}, override.Models...)
-	}
-	if override.MaxCostPerMillion != 0 {
-		base.MaxCostPerMillion = override.MaxCostPerMillion
-	}
-	if override.MinContextWindow != 0 {
-		base.MinContextWindow = override.MinContextWindow
-	}
-	if override.Prefer != nil {
-		base.Prefer = append([]string{}, override.Prefer...)
-	}
-	if override.Requires != nil {
-		base.Requires = append([]string{}, override.Requires...)
-	}
 	return base
 }
 

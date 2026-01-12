@@ -477,9 +477,9 @@ func (r *Runner) executeToolDefault(name string, args map[string]any, toolMap ma
 
 	success := toolResult.Success
 	if toolResult.Data != nil {
-		if data, err := json.Marshal(toolResult.Data); err == nil {
+		if result, err := tool.ToJSON(toolResult); err == nil {
 			return ToolExecutionResult{
-				Result:  string(data),
+				Result:  result,
 				Success: success,
 			}
 		}

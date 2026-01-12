@@ -103,6 +103,7 @@ type Runner struct {
 	emitter       EventEmitter
 	telemetry     *telemetry.Hub
 	modelOverride string
+	compactor     *conversation.CompactionManager
 
 	workflow     *orchestrator.WorkflowManager
 	orchestrator *orchestrator.Orchestrator
@@ -259,6 +260,23 @@ func NewRunner(cfg RunnerConfig) (*Runner, error) {
 		commandStopped:        make(chan struct{}),
 	}
 
+	compactor := conversation.NewCompactionManager(cfg.ModelManager, sessionCfg)
+	compactor.SetConversation(conv)
+	compactor.SetOnComplete(func(_ *conversation.CompactionResult) {
+		if err := conv.SaveAllMessages(cfg.Store); err != nil {
+			r.emit(RunnerEvent{
+				Type:      EventWarning,
+				SessionID: r.sessionID,
+				Timestamp: time.Now(),
+				Data:      map[string]any{"message": fmt.Sprintf("Failed to persist compaction: %v", err)},
+			})
+		}
+	})
+	r.compactor = compactor
+	if r.tools != nil {
+		r.tools.SetCompactionManager(compactor)
+	}
+
 	go r.commandLoop()
 	r.startMaxRuntimeTimer(cfg.MaxRuntime)
 
@@ -275,6 +293,26 @@ func (r *Runner) State() RunnerState {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return r.state
+}
+
+// SetMode updates the execution mode for this runner.
+func (r *Runner) SetMode(mode string) error {
+	mode = strings.ToLower(strings.TrimSpace(mode))
+	if mode == "" {
+		return fmt.Errorf("mode required")
+	}
+	if mode != config.ExecutionModeClassic && mode != config.ExecutionModeRLM && mode != "auto" {
+		return fmt.Errorf("invalid execution mode: %s", mode)
+	}
+
+	r.mu.Lock()
+	if r.config == nil {
+		r.config = config.DefaultConfig()
+	}
+	r.config.Execution.Mode = mode
+	r.mu.Unlock()
+
+	return nil
 }
 
 // LastActive returns the last activity timestamp.

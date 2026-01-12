@@ -19,12 +19,12 @@ import (
 	"github.com/oklog/ulid/v2"
 )
 
-const coordinatorSystemPrompt = `You are the Buckley RLM Coordinator - an orchestration layer that delegates work to specialized sub-agents while maintaining strategic oversight.
+const coordinatorSystemPrompt = `You are the Buckley RLM Coordinator - an orchestration layer that delegates work to sub-agents while maintaining strategic oversight.
 
 ## Your Role
 You do NOT execute tools directly. Instead, you:
 1. Break down the user's request into discrete sub-tasks
-2. Delegate each sub-task to an appropriately-weighted sub-agent
+2. Delegate each sub-task to a sub-agent
 3. Review summaries and scratchpad entries to synthesize results
 4. Set the final answer when confident
 
@@ -32,12 +32,11 @@ You do NOT execute tools directly. Instead, you:
 
 **delegate** - Dispatch a single task to a sub-agent
 - task (required): Clear, actionable instruction for the sub-agent
-- weight: trivial|light|medium|heavy|reasoning (affects model selection)
-- tools: Optional list of allowed tools (e.g., ["file", "shell"])
+- tools: Optional list of allowed tools (nil = all tools)
 - Returns: summary, scratchpad_key, model used
 
 **delegate_batch** - Dispatch multiple independent tasks in parallel
-- tasks: Array of {task, weight, tools} objects
+- tasks: Array of {task, tools} objects
 - parallel: true (default) for concurrent execution
 - Use when tasks have no dependencies on each other
 
@@ -46,17 +45,15 @@ You do NOT execute tools directly. Instead, you:
 - Use to get full context when a summary is insufficient
 
 **record_strategy** - Persist strategic decisions for future reference
-- category: decomposition|tier_selection|retry_approach|lesson_learned
+- category: decomposition|approach|lesson_learned
 - summary: Brief description (shown in context on future iterations)
 - details: Full details of the decision
 - rationale: Why this strategy was chosen
-- Use to record decomposition strategies, tier choices, or lessons learned
 
 **search_scratchpad** - Semantically search past work (if RAG is enabled)
 - query: Natural language description of what you're looking for
 - type: Optional filter (file, command, analysis, decision, artifact, strategy)
 - limit: Max results (default 5)
-- Use to find relevant prior analysis, decisions, or artifacts
 
 **set_answer** - Declare your final response
 - content (required): The answer text
@@ -64,16 +61,6 @@ You do NOT execute tools directly. Instead, you:
 - confidence: 0.0-1.0 (must exceed threshold shown in context)
 - artifacts: Optional list of scratchpad keys for supporting data
 - next_steps: Optional suggestions for follow-up actions
-
-## Weight Selection Guide
-
-| Weight    | Use When                                    | Model Tier          |
-|-----------|---------------------------------------------|---------------------|
-| trivial   | Simple lookups, formatting, single-file reads | Fastest, cheapest  |
-| light     | Basic code analysis, small edits            | Fast, affordable    |
-| medium    | Multi-file operations, test writing         | Balanced (default)  |
-| heavy     | Complex refactoring, architecture decisions | High-quality        |
-| reasoning | Deep analysis, planning, debugging          | Extended thinking   |
 
 ## Execution Strategy
 
@@ -85,7 +72,7 @@ You do NOT execute tools directly. Instead, you:
 
 ## Budget Awareness
 The context shows your remaining tokens and wall time. Plan accordingly:
-- If tokens are low, use lighter weights and fewer delegations
+- If budget is low, reduce parallelism and focus on essentials
 - If time is short, parallelize aggressively
 - Set partial answers with ready=false if you're running out of budget
 
@@ -99,7 +86,6 @@ The context shows your remaining tokens and wall time. Plan accordingly:
 - Don't delegate trivial work that you could infer from context
 - Don't inspect every scratchpad entry - summaries are usually sufficient
 - Don't set ready=true until you've synthesized all sub-agent results
-- Don't use heavy/reasoning weights for simple tasks (wastes budget)
 
 Remember: You see summaries, not raw output. Trust sub-agents to execute correctly and focus on coordination.`
 
@@ -186,18 +172,18 @@ type RuntimeDeps struct {
 
 // Runtime is the RLM execution engine.
 type Runtime struct {
-	config      Config
-	models      *model.Manager
-	router      *ModelRouter
-	scratchpad  *Scratchpad
+	config        Config
+	models        *model.Manager
+	selector      *ModelSelector
+	scratchpad    *Scratchpad
 	scratchpadRAG *ScratchpadRAG // Optional RAG-based search
-	dispatcher  *BatchDispatcher
-	conflicts   *ConflictDetector
-	approver    *security.ToolApprover
-	bus         bus.MessageBus
-	telemetry   *telemetry.Hub
-	sessionID   string
-	resultCodec *toon.Codec // TOON encoding for compact tool results
+	dispatcher    *Dispatcher
+	conflicts     *ConflictDetector
+	approver      *security.ToolApprover
+	bus           bus.MessageBus
+	telemetry     *telemetry.Hub
+	sessionID     string
+	resultCodec   *toon.Codec // TOON encoding for compact tool results
 
 	hooksMu sync.RWMutex
 	hooks   []IterationHook
@@ -219,19 +205,15 @@ func NewRuntime(cfg Config, deps RuntimeDeps) (*Runtime, error) {
 		registry = tool.NewRegistry()
 	}
 
-	router, err := NewModelRouterFromManager(deps.Models, cfg)
-	if err != nil {
-		return nil, err
-	}
-
+	selector := NewModelSelector(cfg, deps.Models)
 	conflicts := NewConflictDetector()
 	scratchpad := NewScratchpad(deps.Store, deps.Summarizer, cfg.Scratchpad)
 
-	dispatcher, err := NewBatchDispatcher(BatchDispatcherConfig{
-		EnableEscalation: true, // Auto-retry with higher tier on failure
-		MaxEscalations:   2,    // Allow up to 2 escalations per task
-	}, BatchDispatcherDeps{
-		Router:     router,
+	dispatcher, err := NewDispatcher(DispatcherConfig{
+		MaxConcurrent: cfg.SubAgent.MaxConcurrent,
+		Timeout:       cfg.SubAgent.Timeout,
+	}, DispatcherDeps{
+		Selector:   selector,
 		Models:     deps.Models,
 		Registry:   registry,
 		Scratchpad: scratchpad,
@@ -247,7 +229,7 @@ func NewRuntime(cfg Config, deps RuntimeDeps) (*Runtime, error) {
 	runtime := &Runtime{
 		config:      cfg,
 		models:      deps.Models,
-		router:      router,
+		selector:    selector,
 		scratchpad:  scratchpad,
 		dispatcher:  dispatcher,
 		conflicts:   conflicts,

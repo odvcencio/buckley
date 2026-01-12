@@ -38,7 +38,7 @@ const (
 	DefaultDailyBudget      = 20.00
 	DefaultMonthlyBudget    = 200.00
 	DefaultIPCBind          = "127.0.0.1:4488"
-	DefaultCompactThreshold = 0.9
+	DefaultCompactThreshold = 0.75
 	DefaultMaxSelfHeal      = 3
 	DefaultMaxReviewCycles  = 3
 )
@@ -250,9 +250,9 @@ type OneshotModeConfig struct {
 
 // RLMConfig controls the Recursive Language Model runtime.
 type RLMConfig struct {
-	Coordinator RLMCoordinatorConfig     `yaml:"coordinator"`
-	Tiers       map[string]RLMTierConfig `yaml:"tiers"`
-	Scratchpad  RLMScratchpadConfig      `yaml:"scratchpad"`
+	Coordinator RLMCoordinatorConfig   `yaml:"coordinator"`
+	SubAgent    RLMSubAgentConfig      `yaml:"sub_agent"`
+	Scratchpad  RLMScratchpadConfig    `yaml:"scratchpad"`
 }
 
 // RLMCoordinatorConfig controls coordinator behavior.
@@ -265,15 +265,11 @@ type RLMCoordinatorConfig struct {
 	StreamPartials      bool          `yaml:"stream_partials"`
 }
 
-// RLMTierConfig controls per-tier model routing.
-type RLMTierConfig struct {
-	Model             string   `yaml:"model"`
-	Provider          string   `yaml:"provider"`
-	Models            []string `yaml:"models"`
-	MaxCostPerMillion float64  `yaml:"max_cost_per_million"`
-	MinContextWindow  int      `yaml:"min_context_window"`
-	Prefer            []string `yaml:"prefer"`
-	Requires          []string `yaml:"requires"`
+// RLMSubAgentConfig controls sub-agent behavior.
+type RLMSubAgentConfig struct {
+	Model         string        `yaml:"model"`           // Model for all sub-agents (default: execution model)
+	MaxConcurrent int           `yaml:"max_concurrent"`  // Parallel execution limit
+	Timeout       time.Duration `yaml:"timeout"`         // Per-task timeout
 }
 
 // RLMScratchpadConfig controls scratchpad retention.
@@ -294,7 +290,9 @@ func (c RLMConfig) IsZero() bool {
 		c.Coordinator.MaxWallTime == 0 &&
 		c.Coordinator.ConfidenceThreshold == 0 &&
 		!c.Coordinator.StreamPartials &&
-		len(c.Tiers) == 0 &&
+		c.SubAgent.Model == "" &&
+		c.SubAgent.MaxConcurrent == 0 &&
+		c.SubAgent.Timeout == 0 &&
 		c.Scratchpad.MaxEntriesMemory == 0 &&
 		c.Scratchpad.MaxRawBytesMemory == 0 &&
 		c.Scratchpad.EvictionPolicy == "" &&
@@ -480,6 +478,8 @@ type TaskPhaseConfig struct {
 // CompactionConfig defines artifact compaction behavior
 type CompactionConfig struct {
 	ContextThreshold float64  `yaml:"context_threshold"`
+	RLMAutoTrigger   float64  `yaml:"rlm_auto_trigger"`
+	CompactionRatio  float64  `yaml:"compaction_ratio"`
 	TaskInterval     int      `yaml:"task_interval"`
 	TokenThreshold   int      `yaml:"token_threshold"`
 	TargetReduction  float64  `yaml:"target_reduction"`
@@ -657,7 +657,7 @@ func DefaultConfig() *Config {
 			Tone:             "friendly",
 		},
 		Memory: MemoryConfig{
-			AutoCompactThreshold: 0.9,
+			AutoCompactThreshold: 0.75,
 			MaxCompactions:       0,  // 0 = unlimited
 			SummaryTimeoutSecs:   30, // 30 second timeout for compaction
 			RetrievalEnabled:     true,
@@ -693,23 +693,10 @@ func DefaultConfig() *Config {
 				ConfidenceThreshold: 0.95,
 				StreamPartials:      true,
 			},
-			// All tiers default to kimi-k2 - users can customize per-tier models in config
-			Tiers: map[string]RLMTierConfig{
-				"trivial": {
-					Model: "moonshotai/kimi-k2-thinking",
-				},
-				"light": {
-					Model: "moonshotai/kimi-k2-thinking",
-				},
-				"medium": {
-					Model: "moonshotai/kimi-k2-thinking",
-				},
-				"heavy": {
-					Model: "moonshotai/kimi-k2-thinking",
-				},
-				"reasoning": {
-					Model: "moonshotai/kimi-k2-thinking",
-				},
+			SubAgent: RLMSubAgentConfig{
+				Model:         "",              // Empty = use execution model
+				MaxConcurrent: 3,               // Parallel sub-agent limit
+				Timeout:       5 * time.Minute, // Per-task timeout
 			},
 			Scratchpad: RLMScratchpadConfig{
 				MaxEntriesMemory:  1000,
@@ -883,6 +870,8 @@ func DefaultConfig() *Config {
 		},
 		Compaction: CompactionConfig{
 			ContextThreshold: 0.80,
+			RLMAutoTrigger:   0.85,
+			CompactionRatio:  0.45,
 			TaskInterval:     20,
 			TokenThreshold:   15000,
 			TargetReduction:  0.70,
@@ -891,7 +880,6 @@ func DefaultConfig() *Config {
 				"moonshotai/kimi-k2-thinking",
 				"qwen/qwen3-coder",
 				"openai/gpt-5.2-mini",
-				"google/gemini-3-flash",
 			},
 		},
 		UI: UIConfig{
@@ -1293,6 +1281,12 @@ func (c *Config) Validate() error {
 	// Validate compaction threshold
 	if c.Memory.AutoCompactThreshold < 0 || c.Memory.AutoCompactThreshold > 1 {
 		return fmt.Errorf("auto compact threshold must be between 0 and 1, got %f", c.Memory.AutoCompactThreshold)
+	}
+	if c.Compaction.RLMAutoTrigger < 0 || c.Compaction.RLMAutoTrigger > 1 {
+		return fmt.Errorf("rlm auto trigger must be between 0 and 1, got %f", c.Compaction.RLMAutoTrigger)
+	}
+	if c.Compaction.CompactionRatio < 0 || c.Compaction.CompactionRatio > 1 {
+		return fmt.Errorf("compaction ratio must be between 0 and 1, got %f", c.Compaction.CompactionRatio)
 	}
 
 	// Validate batch config

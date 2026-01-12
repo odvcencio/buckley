@@ -3,7 +3,6 @@ package config
 import (
 	"fmt"
 	"os"
-	"strings"
 
 	"github.com/odvcencio/buckley/pkg/personality"
 	"gopkg.in/yaml.v3"
@@ -369,17 +368,14 @@ func mergeConfigs(base, override *Config, raw map[string]any) {
 	if boolFieldSet(raw, "rlm", "coordinator", "stream_partials") {
 		base.RLM.Coordinator.StreamPartials = override.RLM.Coordinator.StreamPartials
 	}
-	if boolFieldSet(raw, "rlm", "tiers") {
-		if override.RLM.Tiers == nil {
-			base.RLM.Tiers = nil
-		} else {
-			if base.RLM.Tiers == nil {
-				base.RLM.Tiers = make(map[string]RLMTierConfig, len(override.RLM.Tiers))
-			}
-			for name, tier := range override.RLM.Tiers {
-				base.RLM.Tiers[name] = mergeRLMTierConfig(base.RLM.Tiers[name], tier)
-			}
-		}
+	if boolFieldSet(raw, "rlm", "sub_agent", "model") {
+		base.RLM.SubAgent.Model = override.RLM.SubAgent.Model
+	}
+	if boolFieldSet(raw, "rlm", "sub_agent", "max_concurrent") {
+		base.RLM.SubAgent.MaxConcurrent = override.RLM.SubAgent.MaxConcurrent
+	}
+	if boolFieldSet(raw, "rlm", "sub_agent", "timeout") {
+		base.RLM.SubAgent.Timeout = override.RLM.SubAgent.Timeout
 	}
 	if boolFieldSet(raw, "rlm", "scratchpad", "max_entries_memory") {
 		base.RLM.Scratchpad.MaxEntriesMemory = override.RLM.Scratchpad.MaxEntriesMemory
@@ -732,6 +728,12 @@ func mergeConfigs(base, override *Config, raw map[string]any) {
 	if override.Compaction.ContextThreshold != 0 {
 		base.Compaction.ContextThreshold = override.Compaction.ContextThreshold
 	}
+	if override.Compaction.RLMAutoTrigger != 0 {
+		base.Compaction.RLMAutoTrigger = override.Compaction.RLMAutoTrigger
+	}
+	if override.Compaction.CompactionRatio != 0 {
+		base.Compaction.CompactionRatio = override.Compaction.CompactionRatio
+	}
 	if override.Compaction.TaskInterval != 0 {
 		base.Compaction.TaskInterval = override.Compaction.TaskInterval
 	}
@@ -807,27 +809,3 @@ func boolFieldSet(raw map[string]any, path ...string) bool {
 	return true
 }
 
-func mergeRLMTierConfig(base, override RLMTierConfig) RLMTierConfig {
-	if strings.TrimSpace(override.Model) != "" {
-		base.Model = override.Model
-	}
-	if strings.TrimSpace(override.Provider) != "" {
-		base.Provider = override.Provider
-	}
-	if override.Models != nil {
-		base.Models = append([]string{}, override.Models...)
-	}
-	if override.MaxCostPerMillion != 0 {
-		base.MaxCostPerMillion = override.MaxCostPerMillion
-	}
-	if override.MinContextWindow != 0 {
-		base.MinContextWindow = override.MinContextWindow
-	}
-	if override.Prefer != nil {
-		base.Prefer = append([]string{}, override.Prefer...)
-	}
-	if override.Requires != nil {
-		base.Requires = append([]string{}, override.Requires...)
-	}
-	return base
-}

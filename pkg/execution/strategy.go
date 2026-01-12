@@ -37,6 +37,12 @@ type ExecutionRequest struct {
 
 	// Stream enables streaming responses when supported
 	Stream bool
+
+	// ContextBuilder trims conversation history and triggers compaction.
+	ContextBuilder *conversation.ContextBuilder
+
+	// ContextBudget is the token budget reserved for conversation messages.
+	ContextBudget int
 }
 
 // ExecutionResult contains the output from request execution.

@@ -1,117 +1,65 @@
 package rlm
 
-import (
-	"testing"
+import "testing"
 
-	"github.com/odvcencio/buckley/pkg/model"
-)
-
-type stubResolver struct {
-	providers        map[string]string
-	supportsReasoner map[string]bool
+type mockExecModelProvider struct {
+	model string
 }
 
-func (s stubResolver) ProviderIDForModel(modelID string) string {
-	return s.providers[modelID]
+func (m mockExecModelProvider) GetExecutionModel() string {
+	return m.model
 }
 
-func (s stubResolver) SupportsReasoning(modelID string) bool {
-	return s.supportsReasoner[modelID]
-}
-
-func TestModelRouterSelectHonorsPin(t *testing.T) {
-	catalog := &model.ModelCatalog{Data: []model.ModelInfo{
-		{ID: "a", ContextLength: 8000},
-		{ID: "b", ContextLength: 16000},
-	}}
-
-	cfg := Config{Tiers: map[Weight]TierConfig{
-		WeightLight: {Prefer: []string{"cost"}},
-	}}
-
-	router, err := NewModelRouterWithCatalog(catalog, cfg, RouterOptions{
-		Pins: map[Weight]string{WeightLight: "b"},
-	})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	modelID, err := router.Select(WeightLight)
-	if err != nil {
-		t.Fatalf("unexpected select error: %v", err)
-	}
-	if modelID != "b" {
-		t.Fatalf("expected pinned model b, got %s", modelID)
-	}
-}
-
-func TestModelRouterSelectFiltersByTierConstraints(t *testing.T) {
-	catalog := &model.ModelCatalog{Data: []model.ModelInfo{
-		{ID: "cheap-small", ContextLength: 4000, Pricing: model.ModelPricing{Prompt: 0.2, Completion: 0.2}},
-		{ID: "expensive-large", ContextLength: 32000, Pricing: model.ModelPricing{Prompt: 12.0, Completion: 12.0}},
-		{ID: "good-fit", ContextLength: 16000, Pricing: model.ModelPricing{Prompt: 2.0, Completion: 2.5}},
-	}}
-
-	cfg := Config{Tiers: map[Weight]TierConfig{
-		WeightMedium: {
-			MinContextWindow:  8000,
-			MaxCostPerMillion: 10.0,
-			Prefer:            []string{"cost"},
-		},
-	}}
-
-	router, err := NewModelRouterWithCatalog(catalog, cfg, RouterOptions{})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	modelID, err := router.Select(WeightMedium)
-	if err != nil {
-		t.Fatalf("unexpected select error: %v", err)
-	}
-	if modelID != "good-fit" {
-		t.Fatalf("expected good-fit, got %s", modelID)
-	}
-}
-
-func TestModelRouterSelectAppliesProviderAndReasoning(t *testing.T) {
-	catalog := &model.ModelCatalog{Data: []model.ModelInfo{
-		{ID: "openrouter/reasoner", ContextLength: 100000},
-		{ID: "openai/fast", ContextLength: 32000},
-	}}
-
-	resolver := stubResolver{
-		providers: map[string]string{
-			"openrouter/reasoner": "openrouter",
-			"openai/fast":         "openai",
-		},
-		supportsReasoner: map[string]bool{
-			"openrouter/reasoner": true,
-			"openai/fast":         false,
+func TestModelSelectorUsesConfiguredModel(t *testing.T) {
+	cfg := Config{
+		SubAgent: SubAgentConfig{
+			Model: "configured-model",
 		},
 	}
+	selector := NewModelSelector(cfg, mockExecModelProvider{model: "fallback"})
 
-	cfg := Config{Tiers: map[Weight]TierConfig{
-		WeightReasoning: {
-			Provider: "openrouter",
-			Requires: []string{"extended_thinking"},
-			Prefer:   []string{"quality"},
+	got := selector.Select()
+	if got != "configured-model" {
+		t.Fatalf("expected configured-model, got %s", got)
+	}
+}
+
+func TestModelSelectorFallsBackToExecutionModel(t *testing.T) {
+	cfg := Config{
+		SubAgent: SubAgentConfig{
+			Model: "", // Empty = use execution model
 		},
-	}}
+	}
+	selector := NewModelSelector(cfg, mockExecModelProvider{model: "execution-model"})
 
-	router, err := NewModelRouterWithCatalog(catalog, cfg, RouterOptions{
-		ProviderResolver:  resolver,
-		CapabilityChecker: resolver,
-	})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	got := selector.Select()
+	if got != "execution-model" {
+		t.Fatalf("expected execution-model fallback, got %s", got)
+	}
+}
+
+func TestModelSelectorSetModelOverrides(t *testing.T) {
+	cfg := Config{
+		SubAgent: SubAgentConfig{
+			Model: "initial-model",
+		},
+	}
+	selector := NewModelSelector(cfg, mockExecModelProvider{model: "fallback"})
+
+	selector.SetModel("override-model")
+
+	got := selector.Select()
+	if got != "override-model" {
+		t.Fatalf("expected override-model, got %s", got)
+	}
+}
+
+func TestModelSelectorNilSafe(t *testing.T) {
+	var selector *ModelSelector
+	got := selector.Select()
+	if got != "" {
+		t.Fatalf("expected empty string for nil selector, got %s", got)
 	}
 
-	modelID, err := router.Select(WeightReasoning)
-	if err != nil {
-		t.Fatalf("unexpected select error: %v", err)
-	}
-	if modelID != "openrouter/reasoner" {
-		t.Fatalf("expected openrouter/reasoner, got %s", modelID)
-	}
+	selector.SetModel("test") // Should not panic
 }

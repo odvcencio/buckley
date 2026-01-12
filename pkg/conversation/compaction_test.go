@@ -18,28 +18,28 @@ func TestCompactionManager_ShouldCompact_EdgeCases(t *testing.T) {
 		description     string
 	}{
 		{
-			name:            "exactly_at_90_percent_threshold",
-			tokenCount:      9000,
+			name:            "exactly_at_75_percent_threshold",
+			tokenCount:      7500,
 			maxTokens:       10000,
 			compactionCount: 0,
 			expected:        true,
-			description:     "Should compact when exactly at 90% threshold",
+			description:     "Should compact when exactly at 75% threshold",
 		},
 		{
-			name:            "just_below_90_percent",
-			tokenCount:      8999,
+			name:            "just_below_75_percent",
+			tokenCount:      7499,
 			maxTokens:       10000,
 			compactionCount: 0,
 			expected:        false,
-			description:     "Should not compact when just below 90%",
+			description:     "Should not compact when just below 75%",
 		},
 		{
-			name:            "just_above_90_percent",
-			tokenCount:      9001,
+			name:            "just_above_75_percent",
+			tokenCount:      7501,
 			maxTokens:       10000,
 			compactionCount: 0,
 			expected:        true,
-			description:     "Should compact when just above 90%",
+			description:     "Should compact when just above 75%",
 		},
 		{
 			name:            "max_compactions_reached",
@@ -71,7 +71,7 @@ func TestCompactionManager_ShouldCompact_EdgeCases(t *testing.T) {
 			maxTokens:       200000,
 			compactionCount: 0,
 			expected:        true,
-			description:     "Should compact large context at 90%",
+			description:     "Should compact large context above threshold",
 		},
 	}
 
@@ -105,7 +105,7 @@ func TestCompactionManager_Compact_MessageCounts(t *testing.T) {
 			name:              "minimum_4_messages",
 			messageCount:      4,
 			expectError:       false,
-			expectedCutoff:    2, // 40% of 4 = 1.6, rounds to 2 (minimum)
+			expectedCutoff:    2, // 45% of 4 = 1.8, rounds to 2 (minimum)
 			expectedRemaining: 3, // 2 kept + 1 summary
 			description:       "Should compact 4 messages (minimum)",
 		},
@@ -121,7 +121,7 @@ func TestCompactionManager_Compact_MessageCounts(t *testing.T) {
 			name:              "exactly_5_messages",
 			messageCount:      5,
 			expectError:       false,
-			expectedCutoff:    2, // 40% of 5 = 2
+			expectedCutoff:    2, // 45% of 5 = 2.25
 			expectedRemaining: 4, // 3 kept + 1 summary
 			description:       "Should compact 5 messages correctly",
 		},
@@ -129,7 +129,7 @@ func TestCompactionManager_Compact_MessageCounts(t *testing.T) {
 			name:              "exactly_10_messages",
 			messageCount:      10,
 			expectError:       false,
-			expectedCutoff:    4, // 40% of 10 = 4
+			expectedCutoff:    4, // 45% of 10 = 4.5
 			expectedRemaining: 7, // 6 kept + 1 summary
 			description:       "Should compact 10 messages correctly",
 		},
@@ -137,16 +137,16 @@ func TestCompactionManager_Compact_MessageCounts(t *testing.T) {
 			name:              "large_50_messages",
 			messageCount:      50,
 			expectError:       false,
-			expectedCutoff:    20, // 40% of 50 = 20
-			expectedRemaining: 31, // 30 kept + 1 summary
+			expectedCutoff:    22, // 45% of 50 = 22.5
+			expectedRemaining: 29, // 28 kept + 1 summary
 			description:       "Should compact large conversation",
 		},
 		{
 			name:              "very_large_100_messages",
 			messageCount:      100,
 			expectError:       false,
-			expectedCutoff:    40, // 40% of 100 = 40
-			expectedRemaining: 61, // 60 kept + 1 summary
+			expectedCutoff:    45, // 45% of 100 = 45
+			expectedRemaining: 56, // 55 kept + 1 summary
 			description:       "Should handle very large conversations",
 		},
 	}
@@ -164,7 +164,7 @@ func TestCompactionManager_Compact_MessageCounts(t *testing.T) {
 			}
 
 			// Calculate cutoff using same logic as Compact()
-			cutoff := int(float64(tt.messageCount) * 0.4)
+			cutoff := int(float64(tt.messageCount) * defaultCompactionRatio)
 			if cutoff < 2 {
 				cutoff = 2
 			}
@@ -225,7 +225,7 @@ func TestCompactionManager_EstimateTokensSaved_EdgeCases(t *testing.T) {
 			name:          "many_small_messages",
 			messageCount:  50,
 			tokensPerMsg:  50,
-			expectedSaved: 700, // 20 msgs * 50 = 1000 before, 300 summary = 700 saved
+			expectedSaved: 770, // 22 msgs * 50 = 1100 before, 330 summary = 770 saved
 			description:   "Should handle many small messages",
 		},
 	}
@@ -299,7 +299,7 @@ func TestCompactionManager_Compact_TokenRecalculation(t *testing.T) {
 			}
 
 			// Verify cutoff calculation
-			cutoff := int(float64(tt.messageCount) * 0.4)
+			cutoff := int(float64(tt.messageCount) * defaultCompactionRatio)
 			if cutoff < 2 {
 				cutoff = 2
 			}
@@ -404,12 +404,12 @@ func TestShouldCompact_ConfigurableThreshold(t *testing.T) {
 		maxTokens  int
 		expected   bool
 	}{
-		{"default_at_90_percent", 0.0, 9000, 10000, true},    // Uses default 0.9
+		{"default_at_75_percent", 0.0, 7500, 10000, true},    // Uses default 0.75
 		{"custom_at_80_percent", 0.8, 8000, 10000, true},     // 80% threshold met
 		{"custom_below_80_percent", 0.8, 7999, 10000, false}, // Below 80%
 		{"custom_70_percent", 0.7, 7000, 10000, true},        // 70% threshold met
-		{"invalid_uses_default", 1.5, 9000, 10000, true},     // Invalid uses default
-		{"negative_uses_default", -0.5, 9000, 10000, true},   // Negative uses default
+		{"invalid_uses_default", 1.5, 7500, 10000, true},     // Invalid uses default
+		{"negative_uses_default", -0.5, 7500, 10000, true},   // Negative uses default
 	}
 
 	for _, tt := range tests {

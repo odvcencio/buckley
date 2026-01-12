@@ -2,17 +2,6 @@ package rlm
 
 import "time"
 
-// Weight identifies a subagent tier.
-type Weight string
-
-const (
-	WeightTrivial   Weight = "trivial"
-	WeightLight     Weight = "light"
-	WeightMedium    Weight = "medium"
-	WeightHeavy     Weight = "heavy"
-	WeightReasoning Weight = "reasoning"
-)
-
 // CoordinatorConfig controls coordinator behavior.
 type CoordinatorConfig struct {
 	Model               string
@@ -23,15 +12,13 @@ type CoordinatorConfig struct {
 	StreamPartials      bool
 }
 
-// TierConfig controls model routing for subagents in a weight tier.
-type TierConfig struct {
-	Model             string
-	Provider          string
-	Models            []string
-	MaxCostPerMillion float64
-	MinContextWindow  int
-	Prefer            []string
-	Requires          []string
+// SubAgentConfig controls sub-agent execution.
+// Simplified from the original 5-tier system - all sub-agents use the same model.
+// Patterns will emerge from usage; add tiers back when data shows need.
+type SubAgentConfig struct {
+	Model         string        // Model for all sub-agents (default: execution model)
+	MaxConcurrent int           // Parallel execution limit
+	Timeout       time.Duration // Per-task timeout
 }
 
 // ScratchpadConfig controls scratchpad retention and limits.
@@ -45,9 +32,10 @@ type ScratchpadConfig struct {
 }
 
 // Config is the top-level configuration for RLM.
+// Simplified: orchestrator + single sub-agent class (no tiers).
 type Config struct {
 	Coordinator CoordinatorConfig
-	Tiers       map[Weight]TierConfig
+	SubAgent    SubAgentConfig
 	Scratchpad  ScratchpadConfig
 }
 
@@ -62,7 +50,11 @@ func DefaultConfig() Config {
 			ConfidenceThreshold: 0.95,
 			StreamPartials:      true,
 		},
-		Tiers: DefaultTiers(),
+		SubAgent: SubAgentConfig{
+			Model:         "", // Empty = use execution model
+			MaxConcurrent: 5,
+			Timeout:       5 * time.Minute,
+		},
 		Scratchpad: ScratchpadConfig{
 			MaxEntriesMemory:  1000,
 			MaxRawBytesMemory: 50 * 1024 * 1024,
@@ -74,43 +66,10 @@ func DefaultConfig() Config {
 	}
 }
 
-// DefaultTiers returns the default tier configuration.
-// All tiers default to kimi-k2-thinking - users can customize per-tier models in config.
-func DefaultTiers() map[Weight]TierConfig {
-	defaultModel := "moonshotai/kimi-k2-thinking"
-	return map[Weight]TierConfig{
-		WeightTrivial: {
-			Model: defaultModel,
-		},
-		WeightLight: {
-			Model: defaultModel,
-		},
-		WeightMedium: {
-			Model: defaultModel,
-		},
-		WeightHeavy: {
-			Model: defaultModel,
-		},
-		WeightReasoning: {
-			Model: defaultModel,
-		},
-	}
-}
-
 // Normalize fills missing defaults.
 func (c *Config) Normalize() {
 	if c == nil {
 		return
-	}
-	if c.Tiers == nil {
-		c.Tiers = DefaultTiers()
-	} else {
-		defaults := DefaultTiers()
-		for key, tier := range defaults {
-			if _, ok := c.Tiers[key]; !ok {
-				c.Tiers[key] = tier
-			}
-		}
 	}
 	if c.Coordinator.MaxIterations <= 0 {
 		c.Coordinator.MaxIterations = 10
@@ -121,6 +80,12 @@ func (c *Config) Normalize() {
 	}
 	if c.Coordinator.ConfidenceThreshold <= 0 {
 		c.Coordinator.ConfidenceThreshold = 0.95
+	}
+	if c.SubAgent.MaxConcurrent <= 0 {
+		c.SubAgent.MaxConcurrent = 5
+	}
+	if c.SubAgent.Timeout <= 0 {
+		c.SubAgent.Timeout = 5 * time.Minute
 	}
 	if c.Scratchpad.MaxEntriesMemory <= 0 {
 		c.Scratchpad.MaxEntriesMemory = 1000
@@ -133,16 +98,5 @@ func (c *Config) Normalize() {
 	}
 	if c.Scratchpad.EvictionPolicy == "" {
 		c.Scratchpad.EvictionPolicy = "lru"
-	}
-}
-
-// Weights returns weight tiers in stable order.
-func Weights() []Weight {
-	return []Weight{
-		WeightTrivial,
-		WeightLight,
-		WeightMedium,
-		WeightHeavy,
-		WeightReasoning,
 	}
 }

@@ -72,8 +72,8 @@ type SubAgent struct {
 	approver   *security.ToolApprover
 }
 
-// SubAgentConfig configures a sub-agent execution.
-type SubAgentConfig struct {
+// SubAgentInstanceConfig configures a sub-agent execution.
+type SubAgentInstanceConfig struct {
 	ID            string
 	Model         string
 	SystemPrompt  string
@@ -113,7 +113,7 @@ type SubAgentToolCall struct {
 }
 
 // NewSubAgent creates a sub-agent with dependencies.
-func NewSubAgent(cfg SubAgentConfig, deps SubAgentDeps) (*SubAgent, error) {
+func NewSubAgent(cfg SubAgentInstanceConfig, deps SubAgentDeps) (*SubAgent, error) {
 	if strings.TrimSpace(cfg.ID) == "" {
 		return nil, fmt.Errorf("sub-agent ID required")
 	}

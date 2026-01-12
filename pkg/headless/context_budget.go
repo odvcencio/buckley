@@ -11,9 +11,10 @@ import (
 )
 
 const (
-	headlessDefaultContextWindow     = 8192
+	headlessDefaultContextWindow     = 0
 	headlessDefaultPromptBudgetRatio = 0.9
 	headlessMessageOverheadTokens    = 4
+	headlessFallbackContextWindow    = 128000
 )
 
 func headlessPromptBudget(cfg *config.Config, mgr *model.Manager, modelID string) int {
@@ -22,6 +23,9 @@ func headlessPromptBudget(cfg *config.Config, mgr *model.Manager, modelID string
 		if info, err := mgr.GetModelInfo(modelID); err == nil && info != nil && info.ContextLength > 0 {
 			contextWindow = info.ContextLength
 		}
+	}
+	if contextWindow <= 0 {
+		contextWindow = headlessFallbackContextWindow
 	}
 	ratio := headlessDefaultPromptBudgetRatio
 	if cfg != nil && cfg.Memory.AutoCompactThreshold > 0 && cfg.Memory.AutoCompactThreshold <= 1 {

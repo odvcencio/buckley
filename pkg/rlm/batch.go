@@ -19,13 +19,13 @@ import (
 	"golang.org/x/time/rate"
 )
 
-const defaultBatchConcurrency = 4
+const defaultBatchConcurrency = 5
 
 // SubTask is a single delegated task.
+// Simplified: no weight tiers, all sub-agents use the same model.
 type SubTask struct {
 	ID            string
 	Prompt        string
-	Weight        Weight
 	AllowedTools  []string
 	SystemPrompt  string
 	MaxIterations int
@@ -49,71 +49,48 @@ type ToolCallEvent struct {
 }
 
 // BatchResult captures the outcome of a dispatched task.
+// Simplified: no weight/escalation tracking.
 type BatchResult struct {
-	TaskID           string
-	AgentID          string
-	ModelUsed        string
-	Summary          string
-	RawKey           string
-	TokensUsed       int
-	Duration         time.Duration
-	Error            string
-	WeightRequested  Weight        // Original weight requested
-	WeightUsed       Weight        // Actual weight after escalation
-	WeightExplanation string       // Why this weight/model was chosen
-	EscalationPath   []string      // Models tried before success (for transparency)
-	ToolCalls        []ToolCallEvent // Tool calls made by sub-agent
+	TaskID     string
+	AgentID    string
+	ModelUsed  string
+	Summary    string
+	RawKey     string
+	TokensUsed int
+	Duration   time.Duration
+	Error      string
+	ToolCalls  []ToolCallEvent // Tool calls made by sub-agent
 }
 
-// BatchDispatcher runs sub-agents with optional concurrency control.
-type BatchDispatcher struct {
-	router           *ModelRouter
-	models           *model.Manager
-	registry         *tool.Registry
-	scratchpad       ScratchpadWriter
-	conflicts        *ConflictDetector
-	approver         *security.ToolApprover
-	rateLimiter      *rate.Limiter
-	semaphore        chan struct{}
-	breaker          *reliability.CircuitBreaker
-	bus              bus.MessageBus
-	telemetry        *telemetry.Hub
-	enableEscalation bool
-	maxEscalations   int
+// Dispatcher runs sub-agents with concurrency control.
+// Simplified from BatchDispatcher: no weight-based routing or escalation.
+type Dispatcher struct {
+	selector    *ModelSelector
+	models      *model.Manager
+	registry    *tool.Registry
+	scratchpad  ScratchpadWriter
+	conflicts   *ConflictDetector
+	approver    *security.ToolApprover
+	rateLimiter *rate.Limiter
+	semaphore   chan struct{}
+	breaker     *reliability.CircuitBreaker
+	bus         bus.MessageBus
+	telemetry   *telemetry.Hub
+	timeout     time.Duration
 }
 
-// BatchDispatcherConfig configures dispatcher behavior.
-type BatchDispatcherConfig struct {
-	MaxConcurrent    int
-	RateLimit        rate.Limit
-	Burst            int
-	Circuit          reliability.CircuitBreakerConfig
-	EnableEscalation bool // Auto-retry with higher tier on failure
-	MaxEscalations   int  // Max tier escalations per task (default 2)
+// DispatcherConfig configures dispatcher behavior.
+type DispatcherConfig struct {
+	MaxConcurrent int
+	Timeout       time.Duration
+	RateLimit     rate.Limit
+	Burst         int
+	Circuit       reliability.CircuitBreakerConfig
 }
 
-// EscalationOrder defines the weight tier escalation path.
-var EscalationOrder = []Weight{
-	WeightTrivial,
-	WeightLight,
-	WeightMedium,
-	WeightHeavy,
-	WeightReasoning,
-}
-
-// nextWeight returns the next higher weight tier for escalation.
-func nextWeight(current Weight) (Weight, bool) {
-	for i, w := range EscalationOrder {
-		if w == current && i < len(EscalationOrder)-1 {
-			return EscalationOrder[i+1], true
-		}
-	}
-	return current, false
-}
-
-// BatchDispatcherDeps supplies dependencies for dispatcher creation.
-type BatchDispatcherDeps struct {
-	Router     *ModelRouter
+// DispatcherDeps supplies dependencies for dispatcher creation.
+type DispatcherDeps struct {
+	Selector   *ModelSelector
 	Models     *model.Manager
 	Registry   *tool.Registry
 	Scratchpad ScratchpadWriter
@@ -123,10 +100,10 @@ type BatchDispatcherDeps struct {
 	Telemetry  *telemetry.Hub
 }
 
-// NewBatchDispatcher creates a dispatcher with the given configuration.
-func NewBatchDispatcher(cfg BatchDispatcherConfig, deps BatchDispatcherDeps) (*BatchDispatcher, error) {
-	if deps.Router == nil {
-		return nil, fmt.Errorf("model router required")
+// NewDispatcher creates a dispatcher with the given configuration.
+func NewDispatcher(cfg DispatcherConfig, deps DispatcherDeps) (*Dispatcher, error) {
+	if deps.Selector == nil {
+		return nil, fmt.Errorf("model selector required")
 	}
 	if deps.Models == nil {
 		return nil, fmt.Errorf("model manager required")
@@ -148,24 +125,23 @@ func NewBatchDispatcher(cfg BatchDispatcherConfig, deps BatchDispatcherDeps) (*B
 		limiter = nil
 	}
 
-	maxEscalations := cfg.MaxEscalations
-	if maxEscalations <= 0 {
-		maxEscalations = 2 // Default: allow up to 2 escalations
+	timeout := cfg.Timeout
+	if timeout <= 0 {
+		timeout = 5 * time.Minute
 	}
 
-	d := &BatchDispatcher{
-		router:           deps.Router,
-		models:           deps.Models,
-		registry:         deps.Registry,
-		scratchpad:       deps.Scratchpad,
-		conflicts:        deps.Conflicts,
-		approver:         deps.Approver,
-		rateLimiter:      limiter,
-		semaphore:        make(chan struct{}, maxConcurrent),
-		bus:              deps.Bus,
-		telemetry:        deps.Telemetry,
-		enableEscalation: cfg.EnableEscalation,
-		maxEscalations:   maxEscalations,
+	d := &Dispatcher{
+		selector:    deps.Selector,
+		models:      deps.Models,
+		registry:    deps.Registry,
+		scratchpad:  deps.Scratchpad,
+		conflicts:   deps.Conflicts,
+		approver:    deps.Approver,
+		rateLimiter: limiter,
+		semaphore:   make(chan struct{}, maxConcurrent),
+		bus:         deps.Bus,
+		telemetry:   deps.Telemetry,
+		timeout:     timeout,
 	}
 
 	// Configure circuit breaker with logging callbacks
@@ -222,7 +198,7 @@ func NewBatchDispatcher(cfg BatchDispatcherConfig, deps BatchDispatcherDeps) (*B
 }
 
 // Execute runs the batch and returns results in input order.
-func (d *BatchDispatcher) Execute(ctx context.Context, req BatchRequest) ([]BatchResult, error) {
+func (d *Dispatcher) Execute(ctx context.Context, req BatchRequest) ([]BatchResult, error) {
 	if len(req.Tasks) == 0 {
 		return nil, nil
 	}
@@ -232,7 +208,7 @@ func (d *BatchDispatcher) Execute(ctx context.Context, req BatchRequest) ([]Batc
 	return d.executeParallel(ctx, req.Tasks)
 }
 
-func (d *BatchDispatcher) executeSequential(ctx context.Context, tasks []SubTask) ([]BatchResult, error) {
+func (d *Dispatcher) executeSequential(ctx context.Context, tasks []SubTask) ([]BatchResult, error) {
 	results := make([]BatchResult, 0, len(tasks))
 	var combinedErr error
 	for _, task := range tasks {
@@ -245,7 +221,7 @@ func (d *BatchDispatcher) executeSequential(ctx context.Context, tasks []SubTask
 	return results, combinedErr
 }
 
-func (d *BatchDispatcher) executeParallel(ctx context.Context, tasks []SubTask) ([]BatchResult, error) {
+func (d *Dispatcher) executeParallel(ctx context.Context, tasks []SubTask) ([]BatchResult, error) {
 	results := make([]BatchResult, len(tasks))
 	var mu sync.Mutex
 	var combinedErr error
@@ -275,7 +251,7 @@ func (d *BatchDispatcher) executeParallel(ctx context.Context, tasks []SubTask) 
 	return results, combinedErr
 }
 
-func (d *BatchDispatcher) executeTask(ctx context.Context, task SubTask) (BatchResult, error) {
+func (d *Dispatcher) executeTask(ctx context.Context, task SubTask) (BatchResult, error) {
 	res := BatchResult{TaskID: task.ID}
 	if strings.TrimSpace(task.Prompt) == "" {
 		res.Error = "task prompt required"
@@ -285,121 +261,62 @@ func (d *BatchDispatcher) executeTask(ctx context.Context, task SubTask) (BatchR
 		res.TaskID = ulid.Make().String()
 	}
 
-	// Track original weight request
-	weight := task.Weight
-	if strings.TrimSpace(string(weight)) == "" {
-		weight = WeightMedium
+	// Get the model from selector (single model for all sub-agents)
+	modelID := d.selector.Select()
+	if modelID == "" {
+		res.Error = "no model available"
+		return res, fmt.Errorf("no model available")
 	}
-	res.WeightRequested = weight
-	res.WeightUsed = weight
-	res.EscalationPath = []string{}
+	res.ModelUsed = modelID
 
-	// Try with escalation if enabled
-	currentWeight := weight
-	escalations := 0
-
-	for {
-		modelID, explanation, err := d.selectModelWithExplanation(currentWeight)
-		if err != nil {
+	if d.rateLimiter != nil {
+		if err := d.rateLimiter.Wait(ctx); err != nil {
 			res.Error = err.Error()
 			return res, err
 		}
-		res.ModelUsed = modelID
-		res.WeightUsed = currentWeight
-		res.WeightExplanation = explanation
-		res.EscalationPath = append(res.EscalationPath, fmt.Sprintf("%s:%s", currentWeight, modelID))
-
-		if d.rateLimiter != nil {
-			if err := d.rateLimiter.Wait(ctx); err != nil {
-				res.Error = err.Error()
-				return res, err
-			}
-		}
-
-		agentID := fmt.Sprintf("rlm-%s", res.TaskID)
-		if escalations > 0 {
-			agentID = fmt.Sprintf("rlm-%s-esc%d", res.TaskID, escalations)
-		}
-
-		execResult, execErr := d.executeSubAgent(ctx, task, agentID, modelID, &res)
-
-		// Merge results
-		if execResult != nil {
-			res.AgentID = execResult.AgentID
-			res.Summary = execResult.Summary
-			res.RawKey = execResult.RawKey
-			res.TokensUsed += execResult.TokensUsed
-			// Convert tool calls for transparency
-			for _, tc := range execResult.ToolCalls {
-				res.ToolCalls = append(res.ToolCalls, ToolCallEvent{
-					TaskID:    res.TaskID,
-					AgentID:   agentID,
-					ToolName:  tc.Name,
-					Arguments: tc.Arguments,
-					Success:   tc.Success,
-					Error:     tc.Result,
-					Duration:  tc.Duration,
-				})
-			}
-		}
-
-		// Success - we're done
-		if execErr == nil {
-			res.Error = ""
-			return res, nil
-		}
-
-		// Check if we should escalate
-		if !d.enableEscalation || escalations >= d.maxEscalations {
-			res.Error = execErr.Error()
-			return res, execErr
-		}
-
-		// Try to escalate to next tier
-		nextW, canEscalate := nextWeight(currentWeight)
-		if !canEscalate {
-			res.Error = execErr.Error()
-			return res, execErr
-		}
-
-		// Emit escalation event for transparency
-		d.emitEscalationEvent(ctx, res.TaskID, currentWeight, nextW, execErr.Error())
-
-		currentWeight = nextW
-		escalations++
 	}
+
+	agentID := fmt.Sprintf("rlm-%s", res.TaskID)
+
+	// Apply timeout if configured
+	if d.timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, d.timeout)
+		defer cancel()
+	}
+
+	execResult, execErr := d.executeSubAgent(ctx, task, agentID, modelID, &res)
+
+	// Merge results
+	if execResult != nil {
+		res.AgentID = execResult.AgentID
+		res.Summary = execResult.Summary
+		res.RawKey = execResult.RawKey
+		res.TokensUsed = execResult.TokensUsed
+		// Convert tool calls for transparency
+		for _, tc := range execResult.ToolCalls {
+			res.ToolCalls = append(res.ToolCalls, ToolCallEvent{
+				TaskID:    res.TaskID,
+				AgentID:   agentID,
+				ToolName:  tc.Name,
+				Arguments: tc.Arguments,
+				Success:   tc.Success,
+				Error:     tc.Result,
+				Duration:  tc.Duration,
+			})
+		}
+	}
+
+	if execErr != nil {
+		res.Error = execErr.Error()
+	}
+
+	return res, execErr
 }
 
-// selectModelWithExplanation returns model ID and human-readable explanation.
-func (d *BatchDispatcher) selectModelWithExplanation(weight Weight) (string, string, error) {
-	modelID, err := d.router.Select(weight)
-	if err != nil {
-		return "", "", err
-	}
-
-	// Build explanation
-	explanation := fmt.Sprintf("Selected %s for %s tier", modelID, weight)
-
-	// Add tier-specific context
-	switch weight {
-	case WeightTrivial:
-		explanation += " (fast, low-cost for simple lookups)"
-	case WeightLight:
-		explanation += " (balanced for basic analysis)"
-	case WeightMedium:
-		explanation += " (default tier for general tasks)"
-	case WeightHeavy:
-		explanation += " (high-quality for complex operations)"
-	case WeightReasoning:
-		explanation += " (extended thinking for deep analysis)"
-	}
-
-	return modelID, explanation, nil
-}
-
-// executeSubAgent runs a single sub-agent attempt.
-func (d *BatchDispatcher) executeSubAgent(ctx context.Context, task SubTask, agentID, modelID string, res *BatchResult) (*SubAgentResult, error) {
-	agent, err := NewSubAgent(SubAgentConfig{
+// executeSubAgent runs a single sub-agent.
+func (d *Dispatcher) executeSubAgent(ctx context.Context, task SubTask, agentID, modelID string, res *BatchResult) (*SubAgentResult, error) {
+	agent, err := NewSubAgent(SubAgentInstanceConfig{
 		ID:            agentID,
 		Model:         modelID,
 		SystemPrompt:  task.SystemPrompt,
@@ -422,14 +339,11 @@ func (d *BatchDispatcher) executeSubAgent(ctx context.Context, task SubTask, age
 	run := func() error {
 		start := time.Now()
 
-		// Emit task started with weight info
+		// Emit task started
 		d.publishEvent(ctx, "buckley.rlm.task.started", map[string]any{
-			"task_id":          res.TaskID,
-			"agent_id":         agentID,
-			"model":            modelID,
-			"weight":           string(res.WeightUsed),
-			"weight_requested": string(res.WeightRequested),
-			"explanation":      res.WeightExplanation,
+			"task_id":  res.TaskID,
+			"agent_id": agentID,
+			"model":    modelID,
 		})
 
 		// Emit to telemetry for TUI
@@ -438,11 +352,8 @@ func (d *BatchDispatcher) executeSubAgent(ctx context.Context, task SubTask, age
 				Type:   telemetry.EventTaskStarted,
 				TaskID: res.TaskID,
 				Data: map[string]any{
-					"agent_id":         agentID,
-					"model":            modelID,
-					"weight":           string(res.WeightUsed),
-					"weight_requested": string(res.WeightRequested),
-					"explanation":      res.WeightExplanation,
+					"agent_id": agentID,
+					"model":    modelID,
 				},
 			})
 		}
@@ -450,17 +361,14 @@ func (d *BatchDispatcher) executeSubAgent(ctx context.Context, task SubTask, age
 		execResult, execErr = agent.Execute(ctx, task.Prompt)
 		res.Duration = time.Since(start)
 
-		// Emit tool calls in real-time (already happened during execution)
-		// Now emit completion
+		// Emit completion
 		d.publishEvent(ctx, "buckley.rlm.task.completed", map[string]any{
-			"task_id":         res.TaskID,
-			"agent_id":        agentID,
-			"model":           modelID,
-			"weight":          string(res.WeightUsed),
-			"duration_ms":     res.Duration.Milliseconds(),
-			"tokens_used":     res.TokensUsed,
-			"escalation_path": res.EscalationPath,
-			"error":           res.Error,
+			"task_id":     res.TaskID,
+			"agent_id":    agentID,
+			"model":       modelID,
+			"duration_ms": res.Duration.Milliseconds(),
+			"tokens_used": res.TokensUsed,
+			"error":       res.Error,
 		})
 
 		if d.telemetry != nil {
@@ -474,10 +382,8 @@ func (d *BatchDispatcher) executeSubAgent(ctx context.Context, task SubTask, age
 				Data: map[string]any{
 					"agent_id":         agentID,
 					"model":            modelID,
-					"weight":           string(res.WeightUsed),
 					"duration_ms":      res.Duration.Milliseconds(),
 					"tokens_used":      res.TokensUsed,
-					"escalation_path":  res.EscalationPath,
 					"tool_calls_count": len(res.ToolCalls),
 				},
 			})
@@ -495,29 +401,7 @@ func (d *BatchDispatcher) executeSubAgent(ctx context.Context, task SubTask, age
 	return execResult, err
 }
 
-// emitEscalationEvent publishes an escalation event for transparency.
-func (d *BatchDispatcher) emitEscalationEvent(ctx context.Context, taskID string, from, to Weight, reason string) {
-	d.publishEvent(ctx, "buckley.rlm.task.escalated", map[string]any{
-		"task_id":     taskID,
-		"from_weight": string(from),
-		"to_weight":   string(to),
-		"reason":      reason,
-	})
-
-	if d.telemetry != nil {
-		d.telemetry.Publish(telemetry.Event{
-			Type:   telemetry.EventType("rlm.escalation"),
-			TaskID: taskID,
-			Data: map[string]any{
-				"from_weight": string(from),
-				"to_weight":   string(to),
-				"reason":      reason,
-			},
-		})
-	}
-}
-
-func (d *BatchDispatcher) publishEvent(ctx context.Context, subject string, payload map[string]any) {
+func (d *Dispatcher) publishEvent(ctx context.Context, subject string, payload map[string]any) {
 	if d.bus == nil || subject == "" {
 		return
 	}

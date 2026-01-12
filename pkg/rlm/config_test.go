@@ -11,26 +11,25 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.Coordinator.MaxTokensBudget != 0 {
 		t.Fatalf("expected default MaxTokensBudget = 0 (unlimited), got %d", cfg.Coordinator.MaxTokensBudget)
 	}
-	if len(cfg.Tiers) == 0 {
-		t.Fatalf("expected default tiers")
+	if cfg.SubAgent.MaxConcurrent <= 0 {
+		t.Fatalf("expected default SubAgent.MaxConcurrent > 0")
 	}
-	if _, ok := cfg.Tiers[WeightReasoning]; !ok {
-		t.Fatalf("expected reasoning tier")
+	if cfg.SubAgent.Timeout <= 0 {
+		t.Fatalf("expected default SubAgent.Timeout > 0")
 	}
 }
 
 func TestNormalizeFillsDefaults(t *testing.T) {
-	cfg := Config{
-		Tiers: map[Weight]TierConfig{
-			WeightTrivial: {MaxCostPerMillion: 1.0},
-		},
-	}
+	cfg := Config{}
 	cfg.Normalize()
-	if _, ok := cfg.Tiers[WeightLight]; !ok {
-		t.Fatalf("expected Normalize to fill missing tiers")
-	}
 	if cfg.Coordinator.MaxIterations <= 0 {
 		t.Fatalf("expected Normalize to fill coordinator defaults")
+	}
+	if cfg.SubAgent.MaxConcurrent <= 0 {
+		t.Fatalf("expected Normalize to fill subagent defaults")
+	}
+	if cfg.SubAgent.Timeout <= 0 {
+		t.Fatalf("expected Normalize to fill subagent timeout")
 	}
 	if cfg.Scratchpad.MaxEntriesMemory <= 0 {
 		t.Fatalf("expected Normalize to fill scratchpad defaults")

@@ -11,6 +11,7 @@ import (
 	"github.com/oklog/ulid/v2"
 	"github.com/pmezard/go-difflib/difflib"
 
+	"github.com/odvcencio/buckley/pkg/conversation"
 	"github.com/odvcencio/buckley/pkg/containerexec"
 	"github.com/odvcencio/buckley/pkg/embeddings"
 	"github.com/odvcencio/buckley/pkg/mission"
@@ -259,6 +260,14 @@ func (r *Registry) UpdateTelemetrySession(sessionID string) {
 // SetTodoStore initializes the TODO tool with a storage backend
 func (r *Registry) SetTodoStore(store builtin.TodoStore) {
 	r.Register(&builtin.TodoTool{Store: store})
+}
+
+// SetCompactionManager registers the compact_context tool.
+func (r *Registry) SetCompactionManager(compactor *conversation.CompactionManager) {
+	if r == nil || compactor == nil {
+		return
+	}
+	r.Register(builtin.NewCompactContextTool(compactor))
 }
 
 // GetTodoTool returns the registered TodoTool, or nil if not registered

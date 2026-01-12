@@ -49,13 +49,9 @@ func buildMessages(req ExecutionRequest) []model.Message {
 		})
 	}
 
+	// Use ToModelMessages to preserve ToolCalls, ToolCallID, Name fields
 	if req.Conversation != nil {
-		for _, msg := range req.Conversation.Messages {
-			messages = append(messages, model.Message{
-				Role:    msg.Role,
-				Content: msg.Content,
-			})
-		}
+		messages = append(messages, req.Conversation.ToModelMessages()...)
 	}
 
 	messages = append(messages, model.Message{

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/odvcencio/buckley/pkg/conversation"
 	"github.com/odvcencio/buckley/pkg/toolrunner"
 )
 
@@ -60,6 +61,26 @@ func (s *ClassicStrategy) SetStreamHandler(handler StreamHandler) {
 func (s *ClassicStrategy) Execute(ctx context.Context, req ExecutionRequest) (*ExecutionResult, error) {
 	if s == nil || s.runner == nil {
 		return nil, fmt.Errorf("tool runner not initialized")
+	}
+
+	if req.ContextBuilder != nil && req.Conversation != nil {
+		budget := req.ContextBudget
+		if budget <= 0 {
+			modelID := ""
+			if s.config.Models != nil {
+				modelID = s.config.Models.GetExecutionModel()
+			}
+			budget = contextBudgetForRequest(s.config.Models, s.config.Registry, req, modelID)
+		}
+		trimmed := req.ContextBuilder.BuildMessages(req.Conversation, budget, "classic")
+		if len(trimmed) > 0 {
+			req.Conversation = &conversation.Conversation{
+				SessionID: req.Conversation.SessionID,
+				Messages:  trimmed,
+			}
+		} else {
+			req.Conversation = nil
+		}
 	}
 
 	messages := buildMessages(req)

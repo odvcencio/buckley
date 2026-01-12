@@ -12,12 +12,12 @@ import (
 
 // DelegateTool dispatches a single task to a sub-agent.
 type DelegateTool struct {
-	dispatcher  *BatchDispatcher
+	dispatcher  *Dispatcher
 	ctxProvider func() context.Context
 }
 
 // NewDelegateTool constructs a delegate tool.
-func NewDelegateTool(dispatcher *BatchDispatcher, ctxProvider func() context.Context) *DelegateTool {
+func NewDelegateTool(dispatcher *Dispatcher, ctxProvider func() context.Context) *DelegateTool {
 	return &DelegateTool{dispatcher: dispatcher, ctxProvider: ctxProvider}
 }
 
@@ -37,13 +37,9 @@ func (t *DelegateTool) Parameters() builtin.ParameterSchema {
 				Type:        "string",
 				Description: "Task description for the sub-agent",
 			},
-			"weight": {
-				Type:        "string",
-				Description: "Task weight tier (trivial, light, medium, heavy, reasoning)",
-			},
 			"tools": {
 				Type:        "array",
-				Description: "Optional list of allowed tools",
+				Description: "Optional list of allowed tools (nil = all tools)",
 			},
 			"system_prompt": {
 				Type:        "string",
@@ -67,7 +63,6 @@ func (t *DelegateTool) Execute(params map[string]any) (*builtin.Result, error) {
 		return &builtin.Result{Success: false, Error: "task must be a non-empty string"}, nil
 	}
 
-	weight := parseWeight(params["weight"])
 	tools := parseStringSlice(params["tools"])
 	systemPrompt, _ := params["system_prompt"].(string)
 	maxIterations := parseInt(params["max_iterations"], 0)
@@ -80,7 +75,6 @@ func (t *DelegateTool) Execute(params map[string]any) (*builtin.Result, error) {
 	results, err := t.dispatcher.Execute(ctx, BatchRequest{
 		Tasks: []SubTask{{
 			Prompt:        task,
-			Weight:        weight,
 			AllowedTools:  tools,
 			SystemPrompt:  systemPrompt,
 			MaxIterations: maxIterations,
@@ -95,21 +89,13 @@ func (t *DelegateTool) Execute(params map[string]any) (*builtin.Result, error) {
 	}
 	res := results[0]
 	data := map[string]any{
-		"summary":            res.Summary,
-		"scratchpad_key":     res.RawKey,
-		"agent_id":           res.AgentID,
-		"model":              res.ModelUsed,
-		"weight_requested":   string(res.WeightRequested),
-		"weight_used":        string(res.WeightUsed),
-		"weight_explanation": res.WeightExplanation,
-		"tokens_used":        res.TokensUsed,
-		"duration_ms":        res.Duration.Milliseconds(),
-		"error":              res.Error,
-	}
-	// Include escalation path if any escalation occurred
-	if len(res.EscalationPath) > 1 {
-		data["escalation_path"] = res.EscalationPath
-		data["escalated"] = true
+		"summary":        res.Summary,
+		"scratchpad_key": res.RawKey,
+		"agent_id":       res.AgentID,
+		"model":          res.ModelUsed,
+		"tokens_used":    res.TokensUsed,
+		"duration_ms":    res.Duration.Milliseconds(),
+		"error":          res.Error,
 	}
 	// Include tool call summary for transparency
 	if len(res.ToolCalls) > 0 {
@@ -124,12 +110,12 @@ func (t *DelegateTool) Execute(params map[string]any) (*builtin.Result, error) {
 
 // DelegateBatchTool dispatches multiple tasks at once.
 type DelegateBatchTool struct {
-	dispatcher  *BatchDispatcher
+	dispatcher  *Dispatcher
 	ctxProvider func() context.Context
 }
 
 // NewDelegateBatchTool constructs a delegate_batch tool.
-func NewDelegateBatchTool(dispatcher *BatchDispatcher, ctxProvider func() context.Context) *DelegateBatchTool {
+func NewDelegateBatchTool(dispatcher *Dispatcher, ctxProvider func() context.Context) *DelegateBatchTool {
 	return &DelegateBatchTool{dispatcher: dispatcher, ctxProvider: ctxProvider}
 }
 
@@ -147,11 +133,11 @@ func (t *DelegateBatchTool) Parameters() builtin.ParameterSchema {
 		Properties: map[string]builtin.PropertySchema{
 			"tasks": {
 				Type:        "array",
-				Description: "List of tasks with task, weight, tools, system_prompt",
+				Description: "List of tasks with task, tools, system_prompt",
 			},
 			"parallel": {
 				Type:        "boolean",
-				Description: "Run tasks in parallel",
+				Description: "Run tasks in parallel (default true)",
 				Default:     true,
 			},
 		},
@@ -183,21 +169,14 @@ func (t *DelegateBatchTool) Execute(params map[string]any) (*builtin.Result, err
 	data := make([]map[string]any, 0, len(results))
 	for _, res := range results {
 		item := map[string]any{
-			"task_id":            res.TaskID,
-			"agent_id":           res.AgentID,
-			"summary":            res.Summary,
-			"scratchpad_key":     res.RawKey,
-			"model":              res.ModelUsed,
-			"weight_requested":   string(res.WeightRequested),
-			"weight_used":        string(res.WeightUsed),
-			"weight_explanation": res.WeightExplanation,
-			"tokens_used":        res.TokensUsed,
-			"duration_ms":        res.Duration.Milliseconds(),
-			"error":              res.Error,
-		}
-		if len(res.EscalationPath) > 1 {
-			item["escalation_path"] = res.EscalationPath
-			item["escalated"] = true
+			"task_id":        res.TaskID,
+			"agent_id":       res.AgentID,
+			"summary":        res.Summary,
+			"scratchpad_key": res.RawKey,
+			"model":          res.ModelUsed,
+			"tokens_used":    res.TokensUsed,
+			"duration_ms":    res.Duration.Milliseconds(),
+			"error":          res.Error,
 		}
 		if len(res.ToolCalls) > 0 {
 			item["tool_calls_count"] = len(res.ToolCalls)
@@ -369,10 +348,6 @@ func parseSubTasks(input any) ([]SubTask, error) {
 		if strings.TrimSpace(prompt) == "" {
 			return nil, fmt.Errorf("task prompt required")
 		}
-		weight := parseWeight(payload["weight"])
-		if strings.TrimSpace(string(weight)) == "" {
-			weight = WeightMedium
-		}
 		tools := parseStringSlice(payload["tools"])
 		systemPrompt, _ := payload["system_prompt"].(string)
 		maxIterations := parseInt(payload["max_iterations"], 0)
@@ -380,26 +355,12 @@ func parseSubTasks(input any) ([]SubTask, error) {
 		tasks = append(tasks, SubTask{
 			ID:            id,
 			Prompt:        prompt,
-			Weight:        weight,
 			AllowedTools:  tools,
 			SystemPrompt:  systemPrompt,
 			MaxIterations: maxIterations,
 		})
 	}
 	return tasks, nil
-}
-
-func parseWeight(input any) Weight {
-	if input == nil {
-		return Weight("")
-	}
-	if value, ok := input.(string); ok {
-		value = strings.TrimSpace(strings.ToLower(value))
-		if value != "" {
-			return Weight(value)
-		}
-	}
-	return Weight("")
 }
 
 func parseStringSlice(input any) []string {
