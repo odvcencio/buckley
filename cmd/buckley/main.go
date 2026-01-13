@@ -618,6 +618,7 @@ func printHelp() {
 	fmt.Println("  acp [--workdir dir] [--log file] Start ACP agent on stdio (Zed/JetBrains/Neovim)")
 	fmt.Println("  hunt [--dir path]                Scan codebase for improvement suggestions")
 	fmt.Println("  dream [--dir path] [--plan]      Analyze architecture and identify gaps")
+	fmt.Println("  ralph --prompt <p> [--timeout t] Autonomous task runner with iteration control")
 	fmt.Println("  config [check|show|path]         Manage configuration")
 	fmt.Println("  doctor                           Quick system health check (alias for config check)")
 	fmt.Println("  completion [bash|zsh|fish]       Generate shell completions")
@@ -1135,6 +1136,8 @@ func dispatchSubcommand(args []string) (bool, int) {
 		return true, runCommand(runHuntCommand, args[1:])
 	case "dream":
 		return true, runCommand(runDreamCommand, args[1:])
+	case "ralph":
+		return true, runCommand(runRalphCommand, args[1:])
 	case "config":
 		return true, runCommand(runConfigCommand, args[1:])
 	case "doctor":
