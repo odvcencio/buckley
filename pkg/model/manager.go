@@ -173,6 +173,7 @@ func (m *Manager) ChatCompletion(ctx context.Context, req ChatRequest) (*ChatRes
 	}
 	req.Model = selectedModel
 	req = applyProviderTransforms(req, provider.ID())
+	req = m.applyPromptCache(req, provider.ID())
 	req.Model = normalizeModelForProvider(req.Model, provider.ID())
 	resp, err := provider.ChatCompletion(ctx, req)
 	if err != nil {
@@ -192,6 +193,7 @@ func (m *Manager) ChatCompletionStream(ctx context.Context, req ChatRequest) (<-
 	}
 	req.Model = selectedModel
 	req = applyProviderTransforms(req, provider.ID())
+	req = m.applyPromptCache(req, provider.ID())
 	req.Model = normalizeModelForProvider(req.Model, provider.ID())
 	return provider.ChatCompletionStream(ctx, req)
 }
@@ -202,6 +204,44 @@ func applyProviderTransforms(req ChatRequest, providerID string) ChatRequest {
 	}
 	req.Transforms = []string{"middle-out"}
 	return req
+}
+
+func (m *Manager) applyPromptCache(req ChatRequest, providerID string) ChatRequest {
+	if req.PromptCache != nil {
+		return req
+	}
+	if m == nil || m.config == nil {
+		return req
+	}
+	cfg := m.config.PromptCache
+	if !cfg.Enabled {
+		return req
+	}
+	if cfg.SystemMessages <= 0 && cfg.TailMessages <= 0 {
+		return req
+	}
+	if len(cfg.Providers) > 0 && !containsString(cfg.Providers, providerID) {
+		return req
+	}
+	req.PromptCache = &PromptCache{
+		Enabled:        true,
+		SystemMessages: cfg.SystemMessages,
+		TailMessages:   cfg.TailMessages,
+	}
+	return req
+}
+
+func containsString(values []string, target string) bool {
+	if len(values) == 0 {
+		return false
+	}
+	target = strings.TrimSpace(target)
+	for _, value := range values {
+		if strings.TrimSpace(value) == target {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *Manager) providerForModel(modelID string) Provider {

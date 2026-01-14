@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -22,7 +23,9 @@ import (
 	"github.com/odvcencio/buckley/pkg/embeddings"
 	"github.com/odvcencio/buckley/pkg/execution"
 	"github.com/odvcencio/buckley/pkg/filewatch"
+	"github.com/odvcencio/buckley/pkg/mcp"
 	"github.com/odvcencio/buckley/pkg/model"
+	"github.com/odvcencio/buckley/pkg/orchestrator"
 	"github.com/odvcencio/buckley/pkg/session"
 	"github.com/odvcencio/buckley/pkg/skill"
 	"github.com/odvcencio/buckley/pkg/storage"
@@ -79,19 +82,21 @@ type QueuedMessage struct {
 	Content      string
 	Timestamp    time.Time
 	Acknowledged bool
+	Attachments  []string
 }
 
 // SessionState holds the state for a single session.
 type SessionState struct {
-	ID            string
-	Conversation  *conversation.Conversation
-	ToolRegistry  *tool.Registry
-	SkillRegistry *skill.Registry
-	SkillState    *skill.RuntimeState
-	Compactor     *conversation.CompactionManager
-	Streaming     bool
-	Cancel        context.CancelFunc
-	MessageQueue  []QueuedMessage // Messages queued while streaming
+	ID                 string
+	Conversation       *conversation.Conversation
+	ToolRegistry       *tool.Registry
+	SkillRegistry      *skill.Registry
+	SkillState         *skill.RuntimeState
+	Compactor          *conversation.CompactionManager
+	Streaming          bool
+	Cancel             context.CancelFunc
+	MessageQueue       []QueuedMessage // Messages queued while streaming
+	PendingAttachments []string
 }
 
 // ControllerConfig configures the controller.
@@ -113,15 +118,24 @@ func newSessionState(cfg *config.Config, store *storage.Store, workDir string, h
 	if loadMessages && store != nil {
 		if msgs, err := store.GetMessages(sessionID, 1000, 0); err == nil {
 			for _, msg := range msgs {
-				content := msg.Content
-				if msg.ContentJSON != "" {
-					content = msg.ContentJSON
-				}
+				content := conversation.MaterializeContent(msg.ContentJSON, msg.Content)
 				switch msg.Role {
 				case "user":
-					sess.Conversation.AddUserMessage(content)
+					if parts, ok := content.([]model.ContentPart); ok {
+						sess.Conversation.AddUserMessageParts(parts)
+						continue
+					}
+					if text, ok := content.(string); ok {
+						sess.Conversation.AddUserMessage(text)
+					}
 				case "assistant":
-					sess.Conversation.AddAssistantMessage(content)
+					if parts, ok := content.([]model.ContentPart); ok {
+						sess.Conversation.AddAssistantMessageParts(parts, msg.Reasoning)
+						continue
+					}
+					if text, ok := content.(string); ok {
+						sess.Conversation.AddAssistantMessageWithReasoning(text, msg.Reasoning)
+					}
 				}
 			}
 		}
@@ -379,10 +393,7 @@ func (c *Controller) Run() error {
 	if len(sess.Conversation.Messages) > 0 {
 		c.app.AddMessage(fmt.Sprintf("Resuming session: %s (%d messages)", sess.ID, len(sess.Conversation.Messages)), "system")
 		for _, msg := range sess.Conversation.Messages {
-			content := ""
-			if s, ok := msg.Content.(string); ok {
-				content = s
-			}
+			content := conversation.GetContentAsString(msg.Content)
 			c.app.AddMessage(content, msg.Role)
 		}
 	}
@@ -395,10 +406,6 @@ func (c *Controller) Run() error {
 
 // handleSubmit processes user input submission.
 func (c *Controller) handleSubmit(text string) {
-	if text == "" {
-		return
-	}
-
 	// Handle commands
 	if strings.HasPrefix(text, "/") {
 		c.handleCommand(text)
@@ -410,21 +417,36 @@ func (c *Controller) handleSubmit(text string) {
 
 	// Get current session
 	sess := c.sessions[c.currentSession]
+	attachments := append([]string(nil), sess.PendingAttachments...)
+	if text == "" && len(attachments) == 0 {
+		return
+	}
 
 	// If session is streaming, queue the message instead of starting new stream
 	if sess.Streaming {
 		sess.MessageQueue = append(sess.MessageQueue, QueuedMessage{
-			Content:   text,
-			Timestamp: time.Now(),
+			Content:     text,
+			Timestamp:   time.Now(),
+			Attachments: attachments,
 		})
+		sess.PendingAttachments = nil
 		// Show queued message with indicator
-		c.app.AddMessage(text+" (queued)", "user")
+		displayText := text
+		if strings.TrimSpace(displayText) == "" && len(attachments) > 0 {
+			displayText = fmt.Sprintf("[Queued %d attachment(s)]", len(attachments))
+		}
+		c.app.AddMessage(displayText+" (queued)", "user")
 		c.updateQueueIndicator(sess)
 		return
 	}
 
 	// Add user message to display
-	c.app.AddMessage(text, "user")
+	displayText := text
+	if strings.TrimSpace(displayText) == "" && len(attachments) > 0 {
+		displayText = fmt.Sprintf("[Sent %d attachment(s)]", len(attachments))
+	}
+	c.app.AddMessage(displayText, "user")
+	sess.PendingAttachments = nil
 
 	// Create context with cancellation for this session
 	ctx, cancel := context.WithCancel(context.Background())
@@ -434,7 +456,7 @@ func (c *Controller) handleSubmit(text string) {
 	c.emitStreaming(sess.ID, true)
 
 	// Start streaming response for this session
-	go c.streamResponse(ctx, text, sess)
+	go c.streamResponse(ctx, text, sess, attachments)
 }
 
 // handleCommand processes slash commands.
@@ -1086,7 +1108,7 @@ func (c *Controller) createNewSessionState() (*SessionState, error) {
 }
 
 // streamResponse handles the AI response streaming for a specific session.
-func (c *Controller) streamResponse(ctx context.Context, prompt string, sess *SessionState) {
+func (c *Controller) streamResponse(ctx context.Context, prompt string, sess *SessionState, attachments []string) {
 	defer func() {
 		c.mu.Lock()
 		sess.Streaming = false
@@ -1102,14 +1124,95 @@ func (c *Controller) streamResponse(ctx context.Context, prompt string, sess *Se
 	c.app.SetStatus("Thinking...")
 	c.app.ShowThinkingIndicator()
 
-	// Add user message to session's conversation and persist
-	sess.Conversation.AddUserMessage(prompt)
-	c.saveMessage(sess.ID, "user", prompt)
+	inputText := strings.TrimSpace(prompt)
+	if len(attachments) > 0 {
+		if inputText != "" {
+			inputText += "\n"
+		}
+		inputText += strings.Join(attachments, "\n")
+	}
+	raw := orchestrator.ParseInputText(inputText)
+	processor := orchestrator.NewInputProcessor(nil)
+	if c.cfg != nil {
+		processor.EnableVideoProcessing(c.cfg.Input.Video.Enabled)
+		processor.SetMaxFrames(c.cfg.Input.Video.MaxFrames)
+	}
+	processor.SetWorkDir(c.workDir)
+	input, err := processor.Process(ctx, raw)
+	if err != nil {
+		c.app.AddMessage(fmt.Sprintf("Error processing input: %v", err), "system")
+		c.app.SetStatus("Error")
+		return
+	}
+
+	var parts []model.ContentPart
+	if strings.TrimSpace(input.Text) != "" {
+		parts = append(parts, model.ContentPart{
+			Type: "text",
+			Text: input.Text,
+		})
+	}
+	for _, img := range input.Images {
+		parts = append(parts, model.ContentPart{
+			Type: "image_url",
+			ImageURL: &model.ImageURL{
+				URL:    img.DataURL,
+				Detail: "auto",
+			},
+		})
+	}
+
+	var warnings []string
+	for _, att := range input.Attachments {
+		if !isTextAttachment(att.MimeType) {
+			warnings = append(warnings, fmt.Sprintf("Skipped non-text attachment: %s", att.Name))
+			continue
+		}
+		content, truncated, err := readAttachmentText(att.Path, defaultTUIAttachmentMaxBytes)
+		if err != nil {
+			warnings = append(warnings, fmt.Sprintf("Attachment %s: %v", att.Name, err))
+			continue
+		}
+		text := fmt.Sprintf("Attachment: %s\n```\n%s\n```", att.Name, content)
+		if truncated {
+			text += "\n...[truncated]"
+		}
+		parts = append(parts, model.ContentPart{
+			Type: "text",
+			Text: text,
+		})
+	}
+	if len(warnings) > 0 {
+		c.app.AddMessage(strings.Join(warnings, "\n"), "system")
+	}
+	if len(input.Metadata.ProcessingErrors) > 0 {
+		c.app.AddMessage(strings.Join(input.Metadata.ProcessingErrors, "\n"), "system")
+	}
+
+	if len(parts) == 0 {
+		if strings.TrimSpace(prompt) == "" {
+			c.app.AddMessage("No input content.", "system")
+			c.app.SetStatus("Error")
+			return
+		}
+		parts = append(parts, model.ContentPart{Type: "text", Text: prompt})
+	}
+
+	useParts := len(input.Images) > 0 || len(input.Attachments) > 0 || len(parts) > 1 || (len(parts) == 1 && parts[0].Type != "text")
+	if useParts {
+		sess.Conversation.AddUserMessageParts(parts)
+	} else {
+		sess.Conversation.AddUserMessage(parts[0].Text)
+	}
+	c.saveLastMessage(sess)
 
 	modelID := c.executionModelID()
 	contextPrompt := ""
 	if c.execStrategy != nil {
-		contextPrompt = prompt
+		contextPrompt = strings.TrimSpace(input.Text)
+		if contextPrompt == "" {
+			contextPrompt = prompt
+		}
 	}
 	c.updateContextIndicator(sess, modelID, contextPrompt, allowedToolsForSession(sess))
 
@@ -1232,7 +1335,7 @@ func (c *Controller) runToolLoop(ctx context.Context, sess *SessionState, modelI
 				return "", nil, err
 			}
 			sess.Conversation.AddAssistantMessageWithReasoning(text, msg.Reasoning)
-			c.saveMessage(sess.ID, "assistant", text)
+			c.saveLastMessage(sess)
 			c.warnIfTruncatedResponse(resp.Choices[0].FinishReason)
 			return text, &totalUsage, nil
 		}
@@ -1290,11 +1393,7 @@ func (c *Controller) runWithStrategy(ctx context.Context, sess *SessionState) (s
 		messages := sess.Conversation.Messages
 		for i := len(messages) - 1; i >= 0; i-- {
 			if messages[i].Role == "user" {
-				if content, ok := messages[i].Content.(string); ok {
-					prompt = content
-				} else {
-					prompt = fmt.Sprintf("%v", messages[i].Content)
-				}
+				prompt = conversation.GetContentAsString(messages[i].Content)
 				break
 			}
 		}
@@ -1341,7 +1440,7 @@ func (c *Controller) runWithStrategy(ctx context.Context, sess *SessionState) (s
 	// Update conversation with result
 	if result.Content != "" {
 		sess.Conversation.AddAssistantMessageWithReasoning(result.Content, result.Reasoning)
-		c.saveMessage(sess.ID, "assistant", result.Content)
+		c.saveLastMessage(sess)
 	}
 	c.warnIfTruncatedResponse(result.FinishReason)
 
@@ -1976,17 +2075,21 @@ func (c *Controller) handleFileSelect(path string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// Read file and add to context
+	if len(c.sessions) == 0 {
+		return
+	}
+
 	fullPath := filepath.Join(c.workDir, path)
-	content, err := os.ReadFile(fullPath)
-	if err != nil {
+	if _, err := os.Stat(fullPath); err != nil {
 		c.app.AddMessage(fmt.Sprintf("Error reading file: %v", err), "system")
 		return
 	}
 
-	// Add file content as context
-	msg := fmt.Sprintf("File: %s\n```\n%s\n```", path, string(content))
-	c.app.AddMessage(msg, "system")
+	sess := c.sessions[c.currentSession]
+	sess.PendingAttachments = append(sess.PendingAttachments, fullPath)
+	if c.app != nil {
+		c.app.SetStatusOverride(fmt.Sprintf("Queued attachment: %s", path), 3*time.Second)
+	}
 }
 
 // handleShellCmd executes a shell command.
@@ -1998,6 +2101,7 @@ func (c *Controller) handleShellCmd(cmd string) string {
 
 // defaultTUIMaxOutputBytes limits tool output in TUI mode.
 const defaultTUIMaxOutputBytes = 100_000
+const defaultTUIAttachmentMaxBytes = 50_000
 
 // buildRegistry creates the tool registry with all available tools.
 func buildRegistry(cfg *config.Config, store *storage.Store, workDir string, hub *telemetry.Hub, sessionID string, progressMgr *progress.ProgressManager, toastMgr *toast.ToastManager) *tool.Registry {
@@ -2041,6 +2145,22 @@ func buildRegistry(cfg *config.Config, store *storage.Store, workDir string, hub
 	// Load user plugins from ~/.buckley/plugins/ and ./.buckley/plugins/
 	if err := registry.LoadDefaultPlugins(); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to load some plugins: %v\n", err)
+	}
+
+	if cfg != nil {
+		manager, err := mcp.ManagerFromConfig(context.Background(), cfg.MCP)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: MCP setup failed: %v\n", err)
+		}
+		if manager != nil {
+			mcp.RegisterMCPTools(manager, func(_ string, toolAny any) {
+				toolAdapter, ok := toolAny.(tool.Tool)
+				if !ok {
+					return
+				}
+				registry.Register(toolAdapter)
+			})
+		}
 	}
 
 	// Set working directory for file tools
@@ -2371,18 +2491,16 @@ func (c *Controller) Stop() {
 	c.app.Quit()
 }
 
-// saveMessage persists a message to storage.
-func (c *Controller) saveMessage(sessionID, role, content string) {
-	if c.store == nil {
+// saveLastMessage persists the most recent conversation message to storage.
+func (c *Controller) saveLastMessage(sess *SessionState) {
+	if c.store == nil || sess == nil || sess.Conversation == nil {
 		return
 	}
-	msg := &storage.Message{
-		SessionID: sessionID,
-		Role:      role,
-		Content:   content,
-		Timestamp: time.Now(),
+	messages := sess.Conversation.Messages
+	if len(messages) == 0 {
+		return
 	}
-	_ = c.store.SaveMessage(msg) // Ignore errors for now
+	_ = sess.Conversation.SaveMessage(c.store, messages[len(messages)-1])
 }
 
 // handleReview reviews the current git diff in conversation.
@@ -2430,7 +2548,7 @@ Be specific with file:line references. Flag critical issues first.`, "```diff\n"
 	c.emitStreaming(sess.ID, true)
 	c.app.SetStreaming(true)
 
-	go c.streamResponse(ctx, prompt, sess)
+	go c.streamResponse(ctx, prompt, sess, nil)
 }
 
 // handleCommit generates a commit message for staged changes.
@@ -2484,7 +2602,7 @@ Output ONLY the commit message, nothing else.`, "```diff\n"+diff+"\n```", recent
 	c.emitStreaming(sess.ID, true)
 	c.app.SetStreaming(true)
 
-	go c.streamResponse(ctx, prompt, sess)
+	go c.streamResponse(ctx, prompt, sess, nil)
 }
 
 func (c *Controller) handleSearchCommand(args []string) {
@@ -2996,6 +3114,40 @@ func copyDurationMap(src map[string]time.Duration) map[string]time.Duration {
 	return out
 }
 
+func isTextAttachment(mime string) bool {
+	mime = strings.ToLower(strings.TrimSpace(mime))
+	if strings.HasPrefix(mime, "text/") {
+		return true
+	}
+	switch mime {
+	case "application/json", "application/xml", "application/x-yaml", "application/yaml", "application/javascript", "application/typescript":
+		return true
+	default:
+		return false
+	}
+}
+
+func readAttachmentText(path string, limit int) (string, bool, error) {
+	if limit <= 0 {
+		limit = defaultTUIAttachmentMaxBytes
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return "", false, err
+	}
+	defer file.Close()
+
+	data, err := io.ReadAll(io.LimitReader(file, int64(limit)+1))
+	if err != nil {
+		return "", false, err
+	}
+	truncated := len(data) > limit
+	if truncated {
+		data = data[:limit]
+	}
+	return string(data), truncated, nil
+}
+
 func (c *Controller) handleSkillCommand(args []string) {
 	c.mu.Lock()
 	if len(c.sessions) == 0 {
@@ -3159,6 +3311,6 @@ func (c *Controller) processMessageQueue(sess *SessionState) bool {
 	c.app.SetStreaming(true)
 
 	// Stream response (this will recursively process remaining queue)
-	c.streamResponse(ctx, queued.Content, sess)
+	c.streamResponse(ctx, queued.Content, sess, queued.Attachments)
 	return true
 }

@@ -116,6 +116,14 @@ type StatusMsg struct {
 
 func (StatusMsg) isMessage() {}
 
+// StatusOverrideMsg temporarily overrides the status bar text.
+type StatusOverrideMsg struct {
+	Text     string
+	Duration time.Duration
+}
+
+func (StatusOverrideMsg) isMessage() {}
+
 // TokensMsg updates token/cost display.
 type TokensMsg struct {
 	Tokens   int

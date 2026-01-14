@@ -799,6 +799,9 @@ func (a *WidgetApp) update(msg Message) bool {
 			return true
 		}
 		return false
+	case StatusOverrideMsg:
+		a.setStatusOverride(m.Text, m.Duration)
+		return true
 
 	case TokensMsg:
 		a.statusBar.SetTokens(m.Tokens, m.CostCent)
@@ -1444,6 +1447,11 @@ func (a *WidgetApp) StreamEnd(sessionID, fullText string) {
 // SetStatus updates status. Thread-safe via message passing.
 func (a *WidgetApp) SetStatus(text string) {
 	a.Post(StatusMsg{Text: text})
+}
+
+// SetStatusOverride temporarily overrides the status bar text.
+func (a *WidgetApp) SetStatusOverride(text string, duration time.Duration) {
+	a.Post(StatusOverrideMsg{Text: text, Duration: duration})
 }
 
 // SetTokenCount updates token display. Thread-safe via message passing.

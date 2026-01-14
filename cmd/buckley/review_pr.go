@@ -68,6 +68,7 @@ func runReviewPRCommand(args []string) error {
 	if cwd, err := os.Getwd(); err == nil {
 		registry.ConfigureContainers(cfg, cwd)
 	}
+	registerMCPTools(cfg, registry)
 
 	// Create runner with RLM for full tool access
 	runner := review.NewRunner(review.RunnerConfig{

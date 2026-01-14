@@ -52,34 +52,36 @@ var providerDefaultModels = map[string]string{
 
 // Config represents the complete Buckley configuration
 type Config struct {
-	Models         ModelConfig         `yaml:"models"`
-	Providers      ProviderConfig      `yaml:"providers"`
-	Encoding       EncodingConfig      `yaml:"encoding"`
-	Personality    PersonalityConfig   `yaml:"personality"`
-	Memory         MemoryConfig        `yaml:"memory"`
-	Orchestrator   OrchestratorConfig  `yaml:"orchestrator"`
-	Execution      ExecutionModeConfig `yaml:"execution"`
-	Oneshot        OneshotModeConfig   `yaml:"oneshot"`
-	RLM            RLMConfig           `yaml:"rlm"`
-	Approval       ApprovalConfig      `yaml:"approval"`
+	Models         ModelConfig          `yaml:"models"`
+	Providers      ProviderConfig       `yaml:"providers"`
+	PromptCache    PromptCacheConfig    `yaml:"prompt_cache"`
+	Encoding       EncodingConfig       `yaml:"encoding"`
+	Personality    PersonalityConfig    `yaml:"personality"`
+	Memory         MemoryConfig         `yaml:"memory"`
+	Orchestrator   OrchestratorConfig   `yaml:"orchestrator"`
+	Execution      ExecutionModeConfig  `yaml:"execution"`
+	Oneshot        OneshotModeConfig    `yaml:"oneshot"`
+	RLM            RLMConfig            `yaml:"rlm"`
+	Approval       ApprovalConfig       `yaml:"approval"`
 	ToolMiddleware ToolMiddlewareConfig `yaml:"tool_middleware"`
-	ACP            ACPConfig           `yaml:"acp"`
-	Worktrees      WorktreeConfig      `yaml:"worktrees"`
-	Experiment     ExperimentConfig    `yaml:"experiment"`
-	Batch          BatchConfig         `yaml:"batch"`
-	GitClone       giturl.ClonePolicy  `yaml:"git_clone"`
-	IPC            IPCConfig           `yaml:"ipc"`
-	CostManagement CostConfig          `yaml:"cost_management"`
-	RetryPolicy    RetryPolicy         `yaml:"retry_policy"`
-	Artifacts      ArtifactsConfig     `yaml:"artifacts"`
-	Workflow       WorkflowConfig      `yaml:"workflow"`
-	Compaction     CompactionConfig    `yaml:"compaction"`
-	UI             UIConfig            `yaml:"ui"`
-	Commenting     CommentingConfig    `yaml:"commenting"`
-	GitEvents      GitEventsConfig     `yaml:"git_events"`
-	Input          InputConfig         `yaml:"input"`
-	Diagnostics    DiagnosticsConfig   `yaml:"diagnostics"`
-	Notify         NotifyConfig        `yaml:"notify"`
+	MCP            MCPConfig            `yaml:"mcp"`
+	ACP            ACPConfig            `yaml:"acp"`
+	Worktrees      WorktreeConfig       `yaml:"worktrees"`
+	Experiment     ExperimentConfig     `yaml:"experiment"`
+	Batch          BatchConfig          `yaml:"batch"`
+	GitClone       giturl.ClonePolicy   `yaml:"git_clone"`
+	IPC            IPCConfig            `yaml:"ipc"`
+	CostManagement CostConfig           `yaml:"cost_management"`
+	RetryPolicy    RetryPolicy          `yaml:"retry_policy"`
+	Artifacts      ArtifactsConfig      `yaml:"artifacts"`
+	Workflow       WorkflowConfig       `yaml:"workflow"`
+	Compaction     CompactionConfig     `yaml:"compaction"`
+	UI             UIConfig             `yaml:"ui"`
+	Commenting     CommentingConfig     `yaml:"commenting"`
+	GitEvents      GitEventsConfig      `yaml:"git_events"`
+	Input          InputConfig          `yaml:"input"`
+	Diagnostics    DiagnosticsConfig    `yaml:"diagnostics"`
+	Notify         NotifyConfig         `yaml:"notify"`
 }
 
 // NotifyConfig controls async notifications for human-in-the-loop workflows
@@ -197,6 +199,14 @@ type LiteLLMRouterConfig struct {
 	FallbackModels []string `yaml:"fallback_models"`
 }
 
+// PromptCacheConfig controls provider prompt caching options.
+type PromptCacheConfig struct {
+	Enabled        bool     `yaml:"enabled"`
+	Providers      []string `yaml:"providers"`
+	SystemMessages int      `yaml:"system_messages"`
+	TailMessages   int      `yaml:"tail_messages"`
+}
+
 // EncodingConfig controls serialization preferences.
 type EncodingConfig struct {
 	UseToon bool `yaml:"use_toon"`
@@ -251,9 +261,9 @@ type OneshotModeConfig struct {
 
 // RLMConfig controls the Recursive Language Model runtime.
 type RLMConfig struct {
-	Coordinator RLMCoordinatorConfig   `yaml:"coordinator"`
-	SubAgent    RLMSubAgentConfig      `yaml:"sub_agent"`
-	Scratchpad  RLMScratchpadConfig    `yaml:"scratchpad"`
+	Coordinator RLMCoordinatorConfig `yaml:"coordinator"`
+	SubAgent    RLMSubAgentConfig    `yaml:"sub_agent"`
+	Scratchpad  RLMScratchpadConfig  `yaml:"scratchpad"`
 }
 
 // RLMCoordinatorConfig controls coordinator behavior.
@@ -268,9 +278,9 @@ type RLMCoordinatorConfig struct {
 
 // RLMSubAgentConfig controls sub-agent behavior.
 type RLMSubAgentConfig struct {
-	Model         string        `yaml:"model"`           // Model for all sub-agents (default: execution model)
-	MaxConcurrent int           `yaml:"max_concurrent"`  // Parallel execution limit
-	Timeout       time.Duration `yaml:"timeout"`         // Per-task timeout
+	Model         string        `yaml:"model"`          // Model for all sub-agents (default: execution model)
+	MaxConcurrent int           `yaml:"max_concurrent"` // Parallel execution limit
+	Timeout       time.Duration `yaml:"timeout"`        // Per-task timeout
 }
 
 // RLMScratchpadConfig controls scratchpad retention.
@@ -453,10 +463,26 @@ type ToolRetryConfig struct {
 
 // ToolMiddlewareConfig defines middleware defaults for tool execution.
 type ToolMiddlewareConfig struct {
-	DefaultTimeout  time.Duration        `yaml:"default_timeout"`
+	DefaultTimeout  time.Duration            `yaml:"default_timeout"`
 	PerToolTimeouts map[string]time.Duration `yaml:"per_tool_timeouts"`
-	MaxResultBytes  int                  `yaml:"max_result_bytes"`
-	Retry           ToolRetryConfig      `yaml:"retry"`
+	MaxResultBytes  int                      `yaml:"max_result_bytes"`
+	Retry           ToolRetryConfig          `yaml:"retry"`
+}
+
+// MCPConfig defines MCP server settings for tool integration.
+type MCPConfig struct {
+	Enabled bool              `yaml:"enabled"`
+	Servers []MCPServerConfig `yaml:"servers"`
+}
+
+// MCPServerConfig describes a single MCP server.
+type MCPServerConfig struct {
+	Name     string            `yaml:"name"`
+	Command  string            `yaml:"command"`
+	Args     []string          `yaml:"args"`
+	Env      map[string]string `yaml:"env"`
+	Timeout  time.Duration     `yaml:"timeout"`
+	Disabled bool              `yaml:"disabled"`
 }
 
 // ArtifactsConfig defines artifact storage locations
@@ -663,6 +689,12 @@ func DefaultConfig() *Config {
 				"chatgpt-":   "openai",
 			},
 		},
+		PromptCache: PromptCacheConfig{
+			Enabled:        false,
+			Providers:      []string{"anthropic"},
+			SystemMessages: 1,
+			TailMessages:   2,
+		},
 		Encoding: EncodingConfig{
 			UseToon: true,
 		},
@@ -767,6 +799,10 @@ func DefaultConfig() *Config {
 				Multiplier:   2,
 				Jitter:       0.2,
 			},
+		},
+		MCP: MCPConfig{
+			Enabled: false,
+			Servers: []MCPServerConfig{},
 		},
 		ACP: ACPConfig{
 			EventStore:         defaultACPStore(),
@@ -1327,6 +1363,12 @@ func (c *Config) Validate() error {
 	}
 	if c.ToolMiddleware.Retry.Jitter < 0 {
 		return fmt.Errorf("tool_middleware.retry.jitter must be >= 0")
+	}
+	if c.PromptCache.SystemMessages < 0 {
+		return fmt.Errorf("prompt_cache.system_messages must be >= 0")
+	}
+	if c.PromptCache.TailMessages < 0 {
+		return fmt.Errorf("prompt_cache.tail_messages must be >= 0")
 	}
 
 	// Validate quirk probability

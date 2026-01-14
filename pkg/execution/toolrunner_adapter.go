@@ -57,6 +57,24 @@ func buildMessages(req ExecutionRequest) []model.Message {
 		messages = append(messages, req.Conversation.ToModelMessages()...)
 	}
 
+	if req.Conversation != nil && len(req.Conversation.Messages) > 0 {
+		last := req.Conversation.Messages[len(req.Conversation.Messages)-1]
+		if last.Role == "user" {
+			if strings.TrimSpace(req.Prompt) == "" {
+				return messages
+			}
+			if parts, ok := last.Content.([]model.ContentPart); ok && len(parts) > 0 {
+				if strings.TrimSpace(parts[0].Text) == strings.TrimSpace(req.Prompt) {
+					return messages
+				}
+			} else if text, err := model.ExtractTextContent(last.Content); err == nil {
+				if strings.TrimSpace(text) == strings.TrimSpace(req.Prompt) {
+					return messages
+				}
+			}
+		}
+	}
+
 	messages = append(messages, model.Message{
 		Role:    "user",
 		Content: req.Prompt,

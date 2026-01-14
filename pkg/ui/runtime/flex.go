@@ -215,6 +215,25 @@ func (f *Flex) Layout(bounds Rect) {
 	}
 }
 
+// Bounds returns the assigned bounds for the flex container.
+func (f *Flex) Bounds() Rect {
+	return f.bounds
+}
+
+// ChildWidgets returns the flex container's child widgets.
+func (f *Flex) ChildWidgets() []Widget {
+	if len(f.Children) == 0 {
+		return nil
+	}
+	children := make([]Widget, 0, len(f.Children))
+	for _, child := range f.Children {
+		if child.Widget != nil {
+			children = append(children, child.Widget)
+		}
+	}
+	return children
+}
+
 // Render draws all children.
 func (f *Flex) Render(ctx RenderContext) {
 	for i, child := range f.Children {
@@ -277,6 +296,11 @@ func (s *Spacer) Measure(constraints Constraints) Size {
 
 func (s *Spacer) Layout(bounds Rect) {
 	s.bounds = bounds
+}
+
+// Bounds returns the assigned bounds for the spacer.
+func (s *Spacer) Bounds() Rect {
+	return s.bounds
 }
 
 func (s *Spacer) Render(ctx RenderContext) {

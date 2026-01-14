@@ -336,6 +336,7 @@ func getACPSessionState(
 		createTool.SetWorkDir(workDir)
 	}
 	registry.Register(createTool)
+	registerMCPTools(cfg, registry)
 
 	// Wire todo persistence for the ACP session
 	registry.SetTodoStore(&acpTodoStoreAdapter{sessionID: session.ID})

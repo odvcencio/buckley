@@ -423,6 +423,7 @@ func runPlanCommand(args []string) error {
 	if cwd, err := os.Getwd(); err == nil {
 		registry.ConfigureContainers(cfg, cwd)
 	}
+	registerMCPTools(cfg, registry)
 	planStore := orchestrator.NewFilePlanStore(cfg.Artifacts.PlanningDir)
 	orch := newOrchestratorFn(store, mgr, registry, cfg, nil, planStore)
 
@@ -464,6 +465,7 @@ func runExecuteCommand(args []string) error {
 	if cwd, err := os.Getwd(); err == nil {
 		registry.ConfigureContainers(cfg, cwd)
 	}
+	registerMCPTools(cfg, registry)
 
 	planStore := orchestrator.NewFilePlanStore(cfg.Artifacts.PlanningDir)
 	orch := newOrchestratorFn(store, mgr, registry, cfg, nil, planStore)
@@ -537,6 +539,7 @@ func runExecuteTaskCommand(args []string) error {
 	if cwd, err := os.Getwd(); err == nil {
 		registry.ConfigureContainers(cfg, cwd)
 	}
+	registerMCPTools(cfg, registry)
 
 	planStore := orchestrator.NewFilePlanStore(cfg.Artifacts.PlanningDir)
 	orch := newOrchestratorFn(store, mgr, registry, cfg, nil, planStore)

@@ -168,6 +168,16 @@ type Widget interface {
 	HandleMessage(msg Message) HandleResult
 }
 
+// BoundsProvider reports the widget's assigned bounds.
+type BoundsProvider interface {
+	Bounds() Rect
+}
+
+// ChildProvider exposes child widgets for container traversal.
+type ChildProvider interface {
+	ChildWidgets() []Widget
+}
+
 // Invalidatable marks widgets that can report whether they need a render pass.
 type Invalidatable interface {
 	Invalidate()

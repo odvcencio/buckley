@@ -42,24 +42,39 @@ func (m *Manager) Connect(ctx context.Context) error {
 			continue // Already connected
 		}
 
+		serverCtx := ctx
+		var cancel context.CancelFunc
+		if cfg.Timeout > 0 {
+			serverCtx, cancel = context.WithTimeout(ctx, cfg.Timeout)
+		}
+
 		client, err := NewClient(cfg)
 		if err != nil {
 			errs = append(errs, fmt.Sprintf("%s: %v", name, err))
+			if cancel != nil {
+				cancel()
+			}
 			continue
 		}
 
-		if err := client.Initialize(ctx); err != nil {
+		if err := client.Initialize(serverCtx); err != nil {
 			client.Close()
 			errs = append(errs, fmt.Sprintf("%s: %v", name, err))
+			if cancel != nil {
+				cancel()
+			}
 			continue
 		}
 
 		// Fetch tools
-		if _, err := client.ListTools(ctx); err != nil {
+		if _, err := client.ListTools(serverCtx); err != nil {
 			// Non-fatal, some servers may not have tools
 		}
 
 		m.clients[name] = client
+		if cancel != nil {
+			cancel()
+		}
 	}
 
 	if len(errs) > 0 {
@@ -83,21 +98,36 @@ func (m *Manager) ConnectServer(ctx context.Context, name string) error {
 		return nil // Already connected
 	}
 
+	serverCtx := ctx
+	var cancel context.CancelFunc
+	if cfg.Timeout > 0 {
+		serverCtx, cancel = context.WithTimeout(ctx, cfg.Timeout)
+	}
+
 	client, err := NewClient(cfg)
 	if err != nil {
+		if cancel != nil {
+			cancel()
+		}
 		return fmt.Errorf("failed to create client: %w", err)
 	}
 
-	if err := client.Initialize(ctx); err != nil {
+	if err := client.Initialize(serverCtx); err != nil {
 		client.Close()
+		if cancel != nil {
+			cancel()
+		}
 		return fmt.Errorf("failed to initialize: %w", err)
 	}
 
-	if _, err := client.ListTools(ctx); err != nil {
+	if _, err := client.ListTools(serverCtx); err != nil {
 		// Non-fatal
 	}
 
 	m.clients[name] = client
+	if cancel != nil {
+		cancel()
+	}
 	return nil
 }
 

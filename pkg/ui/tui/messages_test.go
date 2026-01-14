@@ -22,6 +22,7 @@ func TestMessages_ImplementInterface(t *testing.T) {
 		QuitMsg{},
 		RefreshMsg{},
 		StatusMsg{Text: "Ready"},
+		StatusOverrideMsg{Text: "Busy", Duration: 2 * time.Second},
 		TokensMsg{Tokens: 100, CostCent: 0.01},
 		ContextMsg{Used: 1000, Budget: 8000, Window: 8192},
 		ExecutionModeMsg{Mode: "classic"},
@@ -62,6 +63,7 @@ func TestMessages_IsMessageMethods(t *testing.T) {
 	QuitMsg{}.isMessage()
 	RefreshMsg{}.isMessage()
 	StatusMsg{}.isMessage()
+	StatusOverrideMsg{}.isMessage()
 	TokensMsg{}.isMessage()
 	ContextMsg{}.isMessage()
 	ExecutionModeMsg{}.isMessage()

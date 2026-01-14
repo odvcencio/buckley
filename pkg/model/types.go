@@ -87,6 +87,13 @@ type ReasoningConfig struct {
 	Effort string `json:"effort,omitempty"` // "low", "medium", "high"
 }
 
+// PromptCache configures provider-specific prompt caching behavior.
+type PromptCache struct {
+	Enabled        bool
+	SystemMessages int
+	TailMessages   int
+}
+
 // ChatRequest represents a request to the chat completion API
 type ChatRequest struct {
 	Model       string           `json:"model"`
@@ -98,6 +105,7 @@ type ChatRequest struct {
 	ToolChoice  string           `json:"tool_choice,omitempty"` // "auto", "none", or specific function
 	Reasoning   *ReasoningConfig `json:"reasoning,omitempty"`   // Reasoning config for supported models
 	Transforms  []string         `json:"transforms,omitempty"`  // Provider-specific prompt transforms (e.g., OpenRouter)
+	PromptCache *PromptCache     `json:"-"`
 }
 
 // ChatResponse represents a non-streaming chat completion response

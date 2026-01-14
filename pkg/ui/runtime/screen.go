@@ -19,6 +19,8 @@ type Screen struct {
 	layers        []*Layer
 	buffer        *Buffer
 	theme         *theme.Theme
+	hitGrid       *HitGrid
+	hitGridModal  bool
 }
 
 // NewScreen creates a new screen with the given dimensions.
@@ -27,10 +29,11 @@ func NewScreen(w, h int, th *theme.Theme) *Screen {
 		th = theme.DefaultTheme()
 	}
 	return &Screen{
-		width:  w,
-		height: h,
-		buffer: NewBuffer(w, h),
-		theme:  th,
+		width:   w,
+		height:  h,
+		buffer:  NewBuffer(w, h),
+		theme:   th,
+		hitGrid: NewHitGrid(w, h),
 	}
 }
 
@@ -44,6 +47,9 @@ func (s *Screen) Resize(w, h int) {
 	s.width = w
 	s.height = h
 	s.buffer.Resize(w, h)
+	if s.hitGrid != nil {
+		s.hitGrid.Resize(w, h)
+	}
 
 	// Re-layout all layers
 	bounds := Rect{0, 0, w, h}
@@ -169,12 +175,28 @@ func (s *Screen) Render() {
 
 		layer.Root.Render(ctx)
 	}
+
+	s.buildHitGrid()
 }
 
 // HandleMessage dispatches a message to the appropriate layer.
 // Messages go to the top layer. If not handled and not modal,
 // they bubble down to lower layers.
 func (s *Screen) HandleMessage(msg Message) HandleResult {
+	if mouse, ok := msg.(MouseMsg); ok && s.hitGrid != nil {
+		if target := s.hitGrid.WidgetAt(mouse.X, mouse.Y); target != nil {
+			result := target.HandleMessage(msg)
+			for _, cmd := range result.Commands {
+				s.handleCommand(cmd)
+			}
+			if result.Handled || s.hitGridModal {
+				return result
+			}
+		} else if s.hitGridModal {
+			return Unhandled()
+		}
+	}
+
 	// Process from top to bottom
 	for i := len(s.layers) - 1; i >= 0; i-- {
 		layer := s.layers[i]
@@ -219,6 +241,56 @@ func (s *Screen) handleCommand(cmd Command) {
 		s.PushLayer(c.Widget, c.Modal)
 	}
 	// Other commands bubble up to App
+}
+
+func (s *Screen) buildHitGrid() {
+	if s.hitGrid == nil {
+		s.hitGrid = NewHitGrid(s.width, s.height)
+	} else {
+		s.hitGrid.Resize(s.width, s.height)
+		s.hitGrid.Clear()
+	}
+	s.hitGridModal = false
+	if len(s.layers) == 0 {
+		return
+	}
+
+	start := 0
+	if top := s.layers[len(s.layers)-1]; top != nil && top.Modal {
+		start = len(s.layers) - 1
+		s.hitGridModal = true
+	}
+	for i := start; i < len(s.layers); i++ {
+		layer := s.layers[i]
+		if layer == nil || layer.Root == nil {
+			continue
+		}
+		s.addHitWidgets(layer.Root)
+	}
+}
+
+func (s *Screen) addHitWidgets(widget Widget) {
+	if widget == nil {
+		return
+	}
+	if container, ok := widget.(ChildProvider); ok {
+		children := container.ChildWidgets()
+		if len(children) > 0 {
+			for _, child := range children {
+				s.addHitWidgets(child)
+			}
+			return
+		}
+	}
+	boundsProvider, ok := widget.(BoundsProvider)
+	if !ok {
+		return
+	}
+	bounds := boundsProvider.Bounds()
+	if bounds.Width <= 0 || bounds.Height <= 0 {
+		return
+	}
+	s.hitGrid.Add(widget, bounds)
 }
 
 // RenderContext provides context to widgets during rendering.
