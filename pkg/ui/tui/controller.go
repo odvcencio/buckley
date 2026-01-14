@@ -21,6 +21,7 @@ import (
 	"github.com/odvcencio/buckley/pkg/embeddings"
 	"github.com/odvcencio/buckley/pkg/diagnostics"
 	"github.com/odvcencio/buckley/pkg/execution"
+	"github.com/odvcencio/buckley/pkg/filewatch"
 	"github.com/odvcencio/buckley/pkg/model"
 	"github.com/odvcencio/buckley/pkg/session"
 	"github.com/odvcencio/buckley/pkg/skill"

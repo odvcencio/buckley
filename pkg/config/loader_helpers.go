@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/odvcencio/buckley/pkg/personality"
 	"gopkg.in/yaml.v3"
@@ -418,6 +419,38 @@ func mergeConfigs(base, override *Config, raw map[string]any) {
 		base.Approval.AutoApprovePatterns = append([]string{}, override.Approval.AutoApprovePatterns...)
 	}
 
+	if boolFieldSet(raw, "tool_middleware", "default_timeout") {
+		base.ToolMiddleware.DefaultTimeout = override.ToolMiddleware.DefaultTimeout
+	}
+	if boolFieldSet(raw, "tool_middleware", "per_tool_timeouts") {
+		if override.ToolMiddleware.PerToolTimeouts == nil {
+			base.ToolMiddleware.PerToolTimeouts = nil
+		} else {
+			base.ToolMiddleware.PerToolTimeouts = make(map[string]time.Duration, len(override.ToolMiddleware.PerToolTimeouts))
+			for k, v := range override.ToolMiddleware.PerToolTimeouts {
+				base.ToolMiddleware.PerToolTimeouts[k] = v
+			}
+		}
+	}
+	if boolFieldSet(raw, "tool_middleware", "max_result_bytes") {
+		base.ToolMiddleware.MaxResultBytes = override.ToolMiddleware.MaxResultBytes
+	}
+	if boolFieldSet(raw, "tool_middleware", "retry", "max_attempts") {
+		base.ToolMiddleware.Retry.MaxAttempts = override.ToolMiddleware.Retry.MaxAttempts
+	}
+	if boolFieldSet(raw, "tool_middleware", "retry", "initial_delay") {
+		base.ToolMiddleware.Retry.InitialDelay = override.ToolMiddleware.Retry.InitialDelay
+	}
+	if boolFieldSet(raw, "tool_middleware", "retry", "max_delay") {
+		base.ToolMiddleware.Retry.MaxDelay = override.ToolMiddleware.Retry.MaxDelay
+	}
+	if boolFieldSet(raw, "tool_middleware", "retry", "multiplier") {
+		base.ToolMiddleware.Retry.Multiplier = override.ToolMiddleware.Retry.Multiplier
+	}
+	if boolFieldSet(raw, "tool_middleware", "retry", "jitter") {
+		base.ToolMiddleware.Retry.Jitter = override.ToolMiddleware.Retry.Jitter
+	}
+
 	if boolFieldSet(raw, "batch", "enabled") {
 		base.Batch.Enabled = override.Batch.Enabled
 	}
@@ -808,4 +841,3 @@ func boolFieldSet(raw map[string]any, path ...string) bool {
 	}
 	return true
 }
-

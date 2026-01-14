@@ -368,6 +368,40 @@ func buildOneShotSystemPrompt(projectContext *projectcontext.ProjectContext, bud
 	return strings.TrimSpace(b.String())
 }
 
+func applyToolDefaults(registry *tool.Registry, cfg *config.Config, hub *telemetry.Hub, sessionID string) {
+	if registry == nil {
+		return
+	}
+	defaults := tool.DefaultRegistryConfig()
+	if cfg != nil {
+		defaults.MaxOutputBytes = cfg.ToolMiddleware.MaxResultBytes
+		defaults.Middleware.DefaultTimeout = cfg.ToolMiddleware.DefaultTimeout
+		defaults.Middleware.PerToolTimeouts = copyDurationMap(cfg.ToolMiddleware.PerToolTimeouts)
+		defaults.Middleware.MaxResultBytes = cfg.ToolMiddleware.MaxResultBytes
+		defaults.Middleware.RetryConfig = tool.RetryConfig{
+			MaxAttempts:  cfg.ToolMiddleware.Retry.MaxAttempts,
+			InitialDelay: cfg.ToolMiddleware.Retry.InitialDelay,
+			MaxDelay:     cfg.ToolMiddleware.Retry.MaxDelay,
+			Multiplier:   cfg.ToolMiddleware.Retry.Multiplier,
+			Jitter:       cfg.ToolMiddleware.Retry.Jitter,
+		}
+	}
+	defaults.TelemetryHub = hub
+	defaults.TelemetrySessionID = strings.TrimSpace(sessionID)
+	tool.ApplyRegistryConfig(registry, defaults)
+}
+
+func copyDurationMap(src map[string]time.Duration) map[string]time.Duration {
+	if len(src) == 0 {
+		return nil
+	}
+	out := make(map[string]time.Duration, len(src))
+	for k, v := range src {
+		out[k] = v
+	}
+	return out
+}
+
 func runPlanCommand(args []string) error {
 	if len(args) < 2 {
 		return fmt.Errorf("usage: buckley plan <feature-name> <description>")
@@ -385,6 +419,7 @@ func runPlanCommand(args []string) error {
 
 	// Create orchestrator
 	registry := tool.NewRegistry()
+	applyToolDefaults(registry, cfg, nil, "")
 	if cwd, err := os.Getwd(); err == nil {
 		registry.ConfigureContainers(cfg, cwd)
 	}
@@ -422,6 +457,7 @@ func runExecuteCommand(args []string) error {
 
 	// Create orchestrator
 	registry := tool.NewRegistry()
+	applyToolDefaults(registry, cfg, nil, "")
 	if err := registry.LoadDefaultPlugins(); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to load some plugins: %v\n", err)
 	}
@@ -494,6 +530,7 @@ func runExecuteTaskCommand(args []string) error {
 	defer store.Close()
 
 	registry := tool.NewRegistry()
+	applyToolDefaults(registry, cfg, nil, "")
 	if err := registry.LoadDefaultPlugins(); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to load some plugins: %v\n", err)
 	}

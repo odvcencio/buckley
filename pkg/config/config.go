@@ -1302,6 +1302,33 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("invalid approval mode: %s (valid: ask, safe, auto, yolo)", c.Approval.Mode)
 	}
 
+	if c.ToolMiddleware.DefaultTimeout < 0 {
+		return fmt.Errorf("tool_middleware.default_timeout must be >= 0")
+	}
+	if c.ToolMiddleware.MaxResultBytes < 0 {
+		return fmt.Errorf("tool_middleware.max_result_bytes must be >= 0")
+	}
+	for name, timeout := range c.ToolMiddleware.PerToolTimeouts {
+		if timeout < 0 {
+			return fmt.Errorf("tool_middleware.per_tool_timeouts.%s must be >= 0", name)
+		}
+	}
+	if c.ToolMiddleware.Retry.MaxAttempts < 0 {
+		return fmt.Errorf("tool_middleware.retry.max_attempts must be >= 0")
+	}
+	if c.ToolMiddleware.Retry.InitialDelay < 0 {
+		return fmt.Errorf("tool_middleware.retry.initial_delay must be >= 0")
+	}
+	if c.ToolMiddleware.Retry.MaxDelay < 0 {
+		return fmt.Errorf("tool_middleware.retry.max_delay must be >= 0")
+	}
+	if c.ToolMiddleware.Retry.Multiplier < 0 {
+		return fmt.Errorf("tool_middleware.retry.multiplier must be >= 0")
+	}
+	if c.ToolMiddleware.Retry.Jitter < 0 {
+		return fmt.Errorf("tool_middleware.retry.jitter must be >= 0")
+	}
+
 	// Validate quirk probability
 	if c.Personality.QuirkProbability < 0 || c.Personality.QuirkProbability > 1 {
 		return fmt.Errorf("quirk probability must be between 0 and 1, got %f", c.Personality.QuirkProbability)
