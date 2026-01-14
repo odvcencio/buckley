@@ -312,16 +312,21 @@ func NewController(cfg ControllerConfig) (*Controller, error) {
 	if cfg.Config != nil {
 		execMode = cfg.Config.ExecutionMode()
 	}
+	rlmSubAgentMaxConcurrent := 0
+	if cfg.Config != nil {
+		rlmSubAgentMaxConcurrent = cfg.Config.RLM.SubAgent.MaxConcurrent
+	}
 	strategyFactory := execution.NewFactory(
 		cfg.ModelManager,
 		projectSessions[currentIdx].ToolRegistry,
 		cfg.Store,
 		cfg.Telemetry,
 		execution.FactoryConfig{
-			DefaultMaxIterations: 25,
-			ConfidenceThreshold:  0.7,
-			UseTOON:              cfg.Config != nil && cfg.Config.Encoding.UseToon,
-			EnableReasoning:      true,
+			DefaultMaxIterations:     25,
+			ConfidenceThreshold:      0.7,
+			RLMSubAgentMaxConcurrent: rlmSubAgentMaxConcurrent,
+			UseTOON:                  cfg.Config != nil && cfg.Config.Encoding.UseToon,
+			EnableReasoning:          true,
 		},
 	)
 	ctrl.strategyFactory = strategyFactory

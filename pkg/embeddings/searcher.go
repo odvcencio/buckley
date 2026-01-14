@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -26,6 +27,13 @@ type EmbeddingProvider interface {
 type Searcher struct {
 	provider EmbeddingProvider
 	db       *sql.DB
+
+	indexMu            sync.Mutex
+	indexInProgress    bool
+	lastIndexReport    IndexReport
+	lastIndexErr       error
+	lastIndexStarted   time.Time
+	lastIndexCompleted time.Time
 }
 
 // IndexReport summarizes indexing work.
@@ -33,6 +41,15 @@ type IndexReport struct {
 	Embedded int
 	Skipped  int
 	Errors   int
+}
+
+// IndexStatus captures the most recent indexing state.
+type IndexStatus struct {
+	InProgress    bool
+	LastReport    IndexReport
+	LastError     string
+	LastStarted   time.Time
+	LastCompleted time.Time
 }
 
 const (
@@ -88,8 +105,62 @@ func NewSearcher(provider EmbeddingProvider, db *sql.DB) *Searcher {
 	}
 }
 
+// StartIndex runs indexing in the background. Returns false if indexing is already running.
+func (s *Searcher) StartIndex(ctx context.Context, rootPath string) (bool, error) {
+	if s == nil {
+		return false, errors.New("searcher not initialized")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if !s.beginIndex() {
+		return false, nil
+	}
+
+	go func() {
+		report, err := s.indexDirectory(ctx, rootPath)
+		s.finishIndex(report, err)
+	}()
+
+	return true, nil
+}
+
+// IndexStatus returns the last indexing status snapshot.
+func (s *Searcher) IndexStatus() IndexStatus {
+	if s == nil {
+		return IndexStatus{}
+	}
+	s.indexMu.Lock()
+	defer s.indexMu.Unlock()
+	status := IndexStatus{
+		InProgress:    s.indexInProgress,
+		LastReport:    s.lastIndexReport,
+		LastStarted:   s.lastIndexStarted,
+		LastCompleted: s.lastIndexCompleted,
+	}
+	if s.lastIndexErr != nil {
+		status.LastError = s.lastIndexErr.Error()
+	}
+	return status
+}
+
 // IndexDirectory indexes all supported files in a directory tree.
 func (s *Searcher) IndexDirectory(ctx context.Context, rootPath string) (IndexReport, error) {
+	if s == nil {
+		return IndexReport{}, errors.New("searcher not initialized")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if !s.beginIndex() {
+		return IndexReport{}, fmt.Errorf("indexing already in progress")
+	}
+	report, err := s.indexDirectory(ctx, rootPath)
+	s.finishIndex(report, err)
+	return report, err
+}
+
+func (s *Searcher) indexDirectory(ctx context.Context, rootPath string) (IndexReport, error) {
 	var report IndexReport
 	err := filepath.WalkDir(rootPath, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
@@ -168,6 +239,29 @@ func (s *Searcher) IndexDirectory(ctx context.Context, rootPath string) (IndexRe
 		report.Errors++
 	}
 	return report, err
+}
+
+func (s *Searcher) beginIndex() bool {
+	s.indexMu.Lock()
+	defer s.indexMu.Unlock()
+	if s.indexInProgress {
+		return false
+	}
+	s.indexInProgress = true
+	s.lastIndexReport = IndexReport{}
+	s.lastIndexErr = nil
+	s.lastIndexStarted = time.Now()
+	s.lastIndexCompleted = time.Time{}
+	return true
+}
+
+func (s *Searcher) finishIndex(report IndexReport, err error) {
+	s.indexMu.Lock()
+	defer s.indexMu.Unlock()
+	s.indexInProgress = false
+	s.lastIndexReport = report
+	s.lastIndexErr = err
+	s.lastIndexCompleted = time.Now()
 }
 
 // IndexMarkdownFiles indexes a fixed set of documentation files.

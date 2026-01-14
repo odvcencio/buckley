@@ -162,6 +162,10 @@ func (t *IndexManagementTool) Parameters() ParameterSchema {
 				Type:        "string",
 				Description: "Directory path to index (required for 'build' action, typically '.' for current directory)",
 			},
+			"async": {
+				Type:        "boolean",
+				Description: "Run indexing asynchronously and return immediately (build action only)",
+			},
 		},
 		Required: []string{"action"},
 	}
@@ -193,6 +197,35 @@ func (t *IndexManagementTool) Execute(params map[string]any) (*Result, error) {
 			return &Result{
 				Success: false,
 				Error:   "path parameter is required for build action",
+			}, nil
+		}
+
+		async, _ := params["async"].(bool)
+		if async {
+			started, err := t.searcher.StartIndex(ctx, path)
+			if err != nil {
+				return &Result{
+					Success: false,
+					Error:   fmt.Sprintf("Failed to start index: %v", err),
+				}, nil
+			}
+			status := t.searcher.IndexStatus()
+			message := fmt.Sprintf("Indexing started for: %s", path)
+			if !started {
+				message = "Indexing already in progress"
+			}
+			return &Result{
+				Success: true,
+				Data: map[string]any{
+					"message":          message,
+					"indexing_started": started,
+					"in_progress":      status.InProgress,
+					"last_started":     status.LastStarted,
+					"last_completed":   status.LastCompleted,
+					"last_error":       status.LastError,
+					"last_report":      status.LastReport,
+					"requested_path":   path,
+				},
 			}, nil
 		}
 
@@ -240,6 +273,7 @@ func (t *IndexManagementTool) Execute(params map[string]any) (*Result, error) {
 				Error:   fmt.Sprintf("Failed to get status: %v", err),
 			}, nil
 		}
+		status := t.searcher.IndexStatus()
 
 		return &Result{
 			Success: true,
@@ -247,6 +281,11 @@ func (t *IndexManagementTool) Execute(params map[string]any) (*Result, error) {
 				"indexed_items":   count,
 				"ready_to_search": count > 0,
 				"status":          fmt.Sprintf("%d files indexed", count),
+				"in_progress":     status.InProgress,
+				"last_started":    status.LastStarted,
+				"last_completed":  status.LastCompleted,
+				"last_error":      status.LastError,
+				"last_report":     status.LastReport,
 			},
 		}, nil
 

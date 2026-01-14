@@ -26,6 +26,9 @@ type FactoryConfig struct {
 	// ConfidenceThreshold for RLM strategy
 	ConfidenceThreshold float64
 
+	// RLMSubAgentMaxConcurrent controls RLM sub-agent concurrency
+	RLMSubAgentMaxConcurrent int
+
 	// UseTOON enables compact tool result encoding
 	UseTOON bool
 
@@ -81,9 +84,10 @@ func (f *DefaultFactory) createRLM() (ExecutionStrategy, error) {
 			EnableReasoning:      f.config.EnableReasoning,
 			UseTOON:              f.config.UseTOON,
 		},
-		ModelManager: f.models, // RLM runtime needs concrete type
-		Store:        f.store,
-		Telemetry:    f.telemetry,
+		ModelManager:          f.models, // RLM runtime needs concrete type
+		Store:                 f.store,
+		Telemetry:             f.telemetry,
+		SubAgentMaxConcurrent: f.config.RLMSubAgentMaxConcurrent,
 	})
 }
 

@@ -146,6 +146,26 @@ providers:
 
 **Security Note:** Never commit API keys in config files. Use environment variables or `~/.buckley/config.env`.
 
+### prompt_cache
+
+Provider prompt caching controls.
+
+```yaml
+prompt_cache:
+  enabled: true
+  providers: [openrouter, litellm, openai]
+  system_messages: 2
+  tail_messages: 8
+  key: "project-cache-key"
+  retention: "24h" # in-memory | 24h
+```
+
+**Selection & behavior:**
+- If `providers` is empty, caching applies to any provider that supports it.
+- `openrouter` and `litellm` trim messages to the last `system_messages` + `tail_messages` for OpenAI-compatible caching.
+- `openai` uses `prompt_cache_key` and `prompt_cache_retention` (no message trimming).
+- Per-request `prompt_cache` settings override config defaults.
+
 ### diagnostics
 
 Debugging and logging controls.
@@ -358,6 +378,25 @@ ipc:
 ```
 
 **Security:** When binding to non-localhost addresses, authentication is required.
+
+### mcp
+
+Model Context Protocol (MCP) server integration.
+
+```yaml
+mcp:
+  enabled: true
+  servers:
+    - name: filesystem
+      command: /path/to/mcp-server
+      args: ["--stdio"]
+      env:
+        MCP_LOG_LEVEL: info
+      timeout: 30s
+      disabled: false
+```
+
+Each server command is launched as a subprocess and must speak MCP JSON-RPC over stdio.
 
 ### acp
 

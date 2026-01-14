@@ -23,14 +23,6 @@ func (c *StyleCache) Get(style compositor.Style) backend.Style {
 	if c == nil {
 		return themeToBackendStyle(style)
 	}
-
-	c.mu.RLock()
-	cached, ok := c.cache[style]
-	c.mu.RUnlock()
-	if ok {
-		return cached
-	}
-
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.cache == nil {

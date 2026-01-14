@@ -60,6 +60,9 @@ type RLMStrategyConfig struct {
 
 	// MaxTokensBudget limits total tokens across all iterations
 	MaxTokensBudget int
+
+	// SubAgentMaxConcurrent overrides the default sub-agent parallelism
+	SubAgentMaxConcurrent int
 }
 
 // NewRLMStrategy creates a strategy using the RLM coordinator pattern.
@@ -85,6 +88,9 @@ func NewRLMStrategy(cfg RLMStrategyConfig) (*RLMStrategy, error) {
 	}
 	if cfg.CoordinatorModel != "" {
 		rlmCfg.Coordinator.Model = cfg.CoordinatorModel
+	}
+	if cfg.SubAgentMaxConcurrent > 0 {
+		rlmCfg.SubAgent.MaxConcurrent = cfg.SubAgentMaxConcurrent
 	}
 
 	// Create runtime - uses the concrete ModelManager for RLM's needs

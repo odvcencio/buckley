@@ -83,6 +83,7 @@ func (b *ExternalBackend) Execute(ctx context.Context, req BackendRequest) (*Bac
 
 	// Create command with context
 	cmd := exec.CommandContext(ctx, b.command, cmdArgs...)
+	setProcessGroup(cmd)
 
 	// Set working directory to sandbox path
 	if req.SandboxPath != "" {
@@ -94,14 +95,40 @@ func (b *ExternalBackend) Execute(ctx context.Context, req BackendRequest) (*Bac
 	cmd.Stdout = &output
 	cmd.Stderr = &output
 
-	// Run the command
-	err := cmd.Run()
-
-	result.Duration = time.Since(startTime)
-	result.Output = output.String()
-
-	if err != nil {
+	// Run the command with cancellation handling
+	if err := cmd.Start(); err != nil {
+		result.Duration = time.Since(startTime)
+		result.Output = output.String()
 		result.Error = fmt.Errorf("command execution failed: %w", err)
+		return result, nil
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- cmd.Wait()
+	}()
+
+	select {
+	case err := <-done:
+		result.Duration = time.Since(startTime)
+		result.Output = output.String()
+		if err != nil {
+			result.Error = fmt.Errorf("command execution failed: %w", err)
+		}
+	case <-ctx.Done():
+		_ = forceKill(cmd)
+		var err error
+		select {
+		case err = <-done:
+		case <-time.After(2 * time.Second):
+		}
+		result.Duration = time.Since(startTime)
+		result.Output = output.String()
+		if ctx.Err() != nil {
+			result.Error = ctx.Err()
+		} else if err != nil {
+			result.Error = fmt.Errorf("command execution failed: %w", err)
+		}
 	}
 
 	return result, nil
