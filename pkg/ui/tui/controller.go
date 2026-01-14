@@ -26,7 +26,9 @@ import (
 	"github.com/odvcencio/buckley/pkg/telemetry"
 	"github.com/odvcencio/buckley/pkg/tool"
 	"github.com/odvcencio/buckley/pkg/tool/builtin"
+	"github.com/odvcencio/buckley/pkg/ui/progress"
 	"github.com/odvcencio/buckley/pkg/ui/theme"
+	"github.com/odvcencio/buckley/pkg/ui/toast"
 	"github.com/odvcencio/buckley/pkg/ui/widgets"
 	"gopkg.in/yaml.v3"
 )
@@ -46,9 +48,11 @@ type Controller struct {
 	registry     *tool.Registry
 	conversation *conversation.Conversation
 	telemetry    *telemetry.Hub
+	progressMgr  *progress.ProgressManager
+	toastMgr     *toast.ToastManager
 
 	// Execution strategy for tool calling (classic, rlm)
-	execStrategy execution.ExecutionStrategy
+	execStrategy    execution.ExecutionStrategy
 	strategyFactory execution.StrategyFactory
 
 	// Event bridge for sidebar updates
@@ -95,7 +99,7 @@ type ControllerConfig struct {
 	SessionID    string // Resume session, empty for new
 }
 
-func newSessionState(cfg *config.Config, store *storage.Store, workDir string, hub *telemetry.Hub, modelMgr *model.Manager, sessionID string, loadMessages bool) (*SessionState, error) {
+func newSessionState(cfg *config.Config, store *storage.Store, workDir string, hub *telemetry.Hub, modelMgr *model.Manager, sessionID string, loadMessages bool, progressMgr *progress.ProgressManager, toastMgr *toast.ToastManager) (*SessionState, error) {
 	sess := &SessionState{
 		ID:           sessionID,
 		Conversation: conversation.New(sessionID),
@@ -124,7 +128,7 @@ func newSessionState(cfg *config.Config, store *storage.Store, workDir string, h
 	}
 
 	skillState := skill.NewRuntimeState(sess.Conversation.AddSystemMessage)
-	registry := buildRegistry(cfg, store, workDir, hub, sessionID)
+	registry := buildRegistry(cfg, store, workDir, hub, sessionID, progressMgr, toastMgr)
 	registry.Register(&builtin.SkillActivationTool{
 		Registry:     skills,
 		Conversation: skillState,
@@ -162,12 +166,15 @@ func NewController(cfg ControllerConfig) (*Controller, error) {
 		return nil, fmt.Errorf("get working directory: %w", err)
 	}
 
+	progressMgr := progress.NewProgressManager()
+	toastMgr := toast.NewToastManager()
+
 	// Collect all active sessions for this project and load their messages
 	var projectSessions []*SessionState
 	allSessions, _ := cfg.Store.ListSessions(100)
 	for _, s := range allSessions {
 		if s.ProjectPath == workDir && s.Status == storage.SessionStatusActive {
-			sess, err := newSessionState(cfg.Config, cfg.Store, workDir, cfg.Telemetry, cfg.ModelManager, s.ID, true)
+			sess, err := newSessionState(cfg.Config, cfg.Store, workDir, cfg.Telemetry, cfg.ModelManager, s.ID, true, progressMgr, toastMgr)
 			if err != nil {
 				return nil, err
 			}
@@ -199,7 +206,7 @@ func NewController(cfg ControllerConfig) (*Controller, error) {
 			if err := cfg.Store.CreateSession(sess); err != nil {
 				return nil, fmt.Errorf("create session: %w", err)
 			}
-			sessState, err := newSessionState(cfg.Config, cfg.Store, workDir, cfg.Telemetry, cfg.ModelManager, sessionID, false)
+			sessState, err := newSessionState(cfg.Config, cfg.Store, workDir, cfg.Telemetry, cfg.ModelManager, sessionID, false, progressMgr, toastMgr)
 			if err != nil {
 				return nil, err
 			}
@@ -227,7 +234,7 @@ func NewController(cfg ControllerConfig) (*Controller, error) {
 			if err := cfg.Store.CreateSession(sess); err != nil {
 				return nil, fmt.Errorf("create session: %w", err)
 			}
-			sessState, err := newSessionState(cfg.Config, cfg.Store, workDir, cfg.Telemetry, cfg.ModelManager, sessionID, false)
+			sessState, err := newSessionState(cfg.Config, cfg.Store, workDir, cfg.Telemetry, cfg.ModelManager, sessionID, false, progressMgr, toastMgr)
 			if err != nil {
 				return nil, err
 			}
@@ -259,6 +266,8 @@ func NewController(cfg ControllerConfig) (*Controller, error) {
 		registry:       projectSessions[currentIdx].ToolRegistry,
 		conversation:   projectSessions[currentIdx].Conversation,
 		telemetry:      cfg.Telemetry,
+		progressMgr:    progressMgr,
+		toastMgr:       toastMgr,
 		workDir:        workDir,
 		sessions:       projectSessions,
 		currentSession: currentIdx,
@@ -290,6 +299,23 @@ func NewController(cfg ControllerConfig) (*Controller, error) {
 	if ctrl.execStrategy != nil {
 		app.SetExecutionMode(ctrl.execStrategy.Name())
 	}
+	if setter, ok := ctrl.execStrategy.(interface {
+		SetProgressManager(*progress.ProgressManager)
+	}); ok {
+		setter.SetProgressManager(progressMgr)
+	}
+	if setter, ok := ctrl.execStrategy.(interface{ SetToastManager(*toast.ToastManager) }); ok {
+		setter.SetToastManager(toastMgr)
+	}
+	app.SetStreaming(projectSessions[currentIdx].Streaming)
+
+	progressMgr.SetOnChange(func(items []progress.Progress) {
+		app.SetProgress(items)
+	})
+	toastMgr.SetOnChange(func(items []*toast.Toast) {
+		app.SetToasts(items)
+	})
+	app.SetToastDismissHandler(toastMgr.Dismiss)
 
 	// Create telemetry bridge for sidebar updates
 	if cfg.Telemetry != nil {
@@ -386,6 +412,7 @@ func (c *Controller) handleSubmit(text string) {
 	ctx, cancel := context.WithCancel(context.Background())
 	sess.Cancel = cancel
 	sess.Streaming = true
+	c.app.SetStreaming(true)
 	c.emitStreaming(sess.ID, true)
 
 	// Start streaming response for this session
@@ -875,6 +902,14 @@ func (c *Controller) handleModeCommand(mode string) error {
 			c.cfg.Execution.Mode = c.execStrategy.Name()
 		}
 	}
+	if setter, ok := c.execStrategy.(interface {
+		SetProgressManager(*progress.ProgressManager)
+	}); ok {
+		setter.SetProgressManager(c.progressMgr)
+	}
+	if setter, ok := c.execStrategy.(interface{ SetToastManager(*toast.ToastManager) }); ok {
+		setter.SetToastManager(c.toastMgr)
+	}
 	c.app.AddMessage(fmt.Sprintf("Switched to %s mode", c.execStrategy.Name()), "system")
 	return nil
 }
@@ -993,6 +1028,7 @@ func (c *Controller) newSession() {
 	c.app.WelcomeScreen()
 	c.app.AddMessage("New session started: "+newSess.ID, "system")
 	c.app.SetStatus("Ready")
+	c.app.SetStreaming(false)
 	c.updateContextIndicator(newSess, c.executionModelID(), "", allowedToolsForSession(newSess))
 }
 
@@ -1016,7 +1052,7 @@ func (c *Controller) createNewSessionState() (*SessionState, error) {
 		return nil, err
 	}
 
-	return newSessionState(c.cfg, c.store, c.workDir, c.telemetry, c.modelMgr, sessionID, false)
+	return newSessionState(c.cfg, c.store, c.workDir, c.telemetry, c.modelMgr, sessionID, false, c.progressMgr, c.toastMgr)
 }
 
 // streamResponse handles the AI response streaming for a specific session.
@@ -1025,8 +1061,12 @@ func (c *Controller) streamResponse(ctx context.Context, prompt string, sess *Se
 		c.mu.Lock()
 		sess.Streaming = false
 		sess.Cancel = nil
+		isCurrent := c.currentSession >= 0 && c.currentSession < len(c.sessions) && c.sessions[c.currentSession] == sess
 		c.mu.Unlock()
 		c.emitStreaming(sess.ID, false)
+		if isCurrent {
+			c.app.SetStreaming(false)
+		}
 	}()
 
 	c.app.SetStatus("Thinking...")
@@ -1242,12 +1282,12 @@ func (c *Controller) runWithStrategy(ctx context.Context, sess *SessionState) (s
 
 	// Create execution request
 	req := execution.ExecutionRequest{
-		Prompt:        prompt,
-		Conversation:  trimmedConv,
-		SessionID:     sess.ID,
-		SystemPrompt:  systemPrompt,
-		AllowedTools:  allowedTools,
-		MaxIterations: 25,
+		Prompt:         prompt,
+		Conversation:   trimmedConv,
+		SessionID:      sess.ID,
+		SystemPrompt:   systemPrompt,
+		AllowedTools:   allowedTools,
+		MaxIterations:  25,
 		ContextBuilder: conversation.NewContextBuilder(sess.Compactor),
 		ContextBudget:  budget,
 	}
@@ -1461,19 +1501,19 @@ const (
 )
 
 type ContextBudgetStats struct {
-	ModelID             string
-	ContextWindow       int
-	PromptBudget        int
-	PromptBudgetRatio   float64
-	ToolTokens          int
-	SystemTokens        int
-	ConversationTokens  int
-	PromptTokens        int
-	UsedTokens          int
-	RemainingTokens     int
-	TotalMessages       int
-	TrimmedMessages     int
-	ProjectContextMode  string
+	ModelID            string
+	ContextWindow      int
+	PromptBudget       int
+	PromptBudgetRatio  float64
+	ToolTokens         int
+	SystemTokens       int
+	ConversationTokens int
+	PromptTokens       int
+	UsedTokens         int
+	RemainingTokens    int
+	TotalMessages      int
+	TrimmedMessages    int
+	ProjectContextMode string
 }
 
 func (c *Controller) executionModelID() string {
@@ -1929,7 +1969,7 @@ func (c *Controller) handleShellCmd(cmd string) string {
 const defaultTUIMaxOutputBytes = 100_000
 
 // buildRegistry creates the tool registry with all available tools.
-func buildRegistry(cfg *config.Config, store *storage.Store, workDir string, hub *telemetry.Hub, sessionID string) *tool.Registry {
+func buildRegistry(cfg *config.Config, store *storage.Store, workDir string, hub *telemetry.Hub, sessionID string, progressMgr *progress.ProgressManager, toastMgr *toast.ToastManager) *tool.Registry {
 	registry := tool.NewRegistry()
 	registry.SetMaxOutputBytes(defaultTUIMaxOutputBytes)
 
@@ -1947,6 +1987,13 @@ func buildRegistry(cfg *config.Config, store *storage.Store, workDir string, hub
 	// Enable telemetry
 	if hub != nil && sessionID != "" {
 		registry.EnableTelemetry(hub, sessionID)
+	}
+
+	if progressMgr != nil {
+		registry.Use(tool.Progress(progressMgr, tool.DefaultLongRunningTools))
+	}
+	if toastMgr != nil {
+		registry.Use(tool.ToastNotifications(toastMgr))
 	}
 
 	// Load user plugins from ~/.buckley/plugins/ and ./.buckley/plugins/
@@ -2256,6 +2303,7 @@ func (c *Controller) switchToSessionLocked(idx int) {
 	} else {
 		c.app.SetStatus("Ready")
 	}
+	c.app.SetStreaming(sess.Streaming)
 }
 
 // Stop gracefully stops the controller.
@@ -2338,6 +2386,7 @@ Be specific with file:line references. Flag critical issues first.`, "```diff\n"
 	sess.Streaming = true
 	c.mu.Unlock()
 	c.emitStreaming(sess.ID, true)
+	c.app.SetStreaming(true)
 
 	go c.streamResponse(ctx, prompt, sess)
 }
@@ -2391,6 +2440,7 @@ Output ONLY the commit message, nothing else.`, "```diff\n"+diff+"\n```", recent
 	sess.Streaming = true
 	c.mu.Unlock()
 	c.emitStreaming(sess.ID, true)
+	c.app.SetStreaming(true)
 
 	go c.streamResponse(ctx, prompt, sess)
 }
@@ -2571,6 +2621,7 @@ func (c *Controller) processMessageQueue(sess *SessionState) bool {
 	sess.Streaming = true
 	c.emitStreaming(sess.ID, true)
 	c.mu.Unlock()
+	c.app.SetStreaming(true)
 
 	// Stream response (this will recursively process remaining queue)
 	c.streamResponse(ctx, queued.Content, sess)

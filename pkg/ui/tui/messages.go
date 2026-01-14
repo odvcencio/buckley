@@ -1,7 +1,12 @@
 // Package tui provides the terminal user interface.
 package tui
 
-import "time"
+import (
+	"time"
+
+	"github.com/odvcencio/buckley/pkg/ui/progress"
+	"github.com/odvcencio/buckley/pkg/ui/toast"
+)
 
 // Message is the interface for all events flowing through the UI.
 // All UI state mutations happen through message processing.
@@ -134,6 +139,27 @@ type ExecutionModeMsg struct {
 }
 
 func (ExecutionModeMsg) isMessage() {}
+
+// ProgressMsg updates active progress indicators.
+type ProgressMsg struct {
+	Items []progress.Progress
+}
+
+func (ProgressMsg) isMessage() {}
+
+// ToastsMsg updates active toast notifications.
+type ToastsMsg struct {
+	Toasts []*toast.Toast
+}
+
+func (ToastsMsg) isMessage() {}
+
+// StreamingMsg updates streaming indicator state.
+type StreamingMsg struct {
+	Active bool
+}
+
+func (StreamingMsg) isMessage() {}
 
 // ModelMsg updates the active model name.
 type ModelMsg struct {

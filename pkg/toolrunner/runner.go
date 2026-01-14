@@ -43,11 +43,11 @@ type Request struct {
 
 // Result contains the output from tool runner execution.
 type Result struct {
-	Content    string
-	Reasoning  string
-	ToolCalls  []ToolCallRecord
-	Usage      model.Usage
-	Iterations int
+	Content      string
+	Reasoning    string
+	ToolCalls    []ToolCallRecord
+	Usage        model.Usage
+	Iterations   int
 	FinishReason string
 }
 
@@ -441,10 +441,10 @@ func (r *Runner) executeTool(ctx context.Context, call model.ToolCall, args map[
 	if r.config.ToolExecutor != nil {
 		return r.config.ToolExecutor(ctx, call, args, toolMap)
 	}
-	return r.executeToolDefault(call.Function.Name, args, toolMap), nil
+	return r.executeToolDefault(ctx, call.Function.Name, args, toolMap), nil
 }
 
-func (r *Runner) executeToolDefault(name string, args map[string]any, toolMap map[string]tool.Tool) ToolExecutionResult {
+func (r *Runner) executeToolDefault(ctx context.Context, name string, args map[string]any, toolMap map[string]tool.Tool) ToolExecutionResult {
 	if _, ok := toolMap[name]; !ok {
 		errMsg := fmt.Sprintf("tool not found: %s", name)
 		return ToolExecutionResult{
@@ -454,7 +454,7 @@ func (r *Runner) executeToolDefault(name string, args map[string]any, toolMap ma
 		}
 	}
 
-	toolResult, err := r.config.Registry.Execute(name, args)
+	toolResult, err := r.config.Registry.ExecuteWithContext(ctx, name, args)
 	if err != nil {
 		return ToolExecutionResult{
 			Result:  fmt.Sprintf("error: %s", err.Error()),

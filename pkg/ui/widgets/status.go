@@ -1,25 +1,30 @@
 package widgets
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/odvcencio/buckley/pkg/ui/backend"
+	"github.com/odvcencio/buckley/pkg/ui/progress"
 	"github.com/odvcencio/buckley/pkg/ui/runtime"
 )
 
 // StatusBar is the Buckley status bar widget.
 type StatusBar struct {
 	Base
-	status     string
-	tokens     int
-	costCents  float64
+	status        string
+	tokens        int
+	costCents     float64
 	contextUsed   int
 	contextBudget int
 	contextWindow int
 	executionMode string
-	scrollPos  string // "TOP", "END", or percentage
-	bgStyle    backend.Style
-	textStyle  backend.Style
+	scrollPos     string // "TOP", "END", or percentage
+	progress      []progress.Progress
+	streaming     bool
+	streamAnim    int
+	bgStyle       backend.Style
+	textStyle     backend.Style
 }
 
 // NewStatusBar creates a new status bar widget.
@@ -59,6 +64,31 @@ func (s *StatusBar) SetScrollPosition(pos string) {
 	s.scrollPos = pos
 }
 
+// SetProgress updates active progress indicators.
+func (s *StatusBar) SetProgress(items []progress.Progress) {
+	if len(items) == 0 {
+		s.progress = nil
+		return
+	}
+	s.progress = append([]progress.Progress(nil), items...)
+}
+
+// SetStreaming updates streaming state.
+func (s *StatusBar) SetStreaming(streaming bool) {
+	s.streaming = streaming
+	if !streaming {
+		s.streamAnim = 0
+	}
+}
+
+// SetStreamAnim updates the streaming animation frame index.
+func (s *StatusBar) SetStreamAnim(frame int) {
+	if frame < 0 {
+		frame = 0
+	}
+	s.streamAnim = frame
+}
+
 // SetStyles sets the status bar styles.
 func (s *StatusBar) SetStyles(bg, text backend.Style) {
 	s.bgStyle = bg
@@ -87,6 +117,9 @@ func (s *StatusBar) Render(ctx runtime.RenderContext) {
 	left := " " + s.status
 	if strings.TrimSpace(s.executionMode) != "" {
 		left += " · " + strings.TrimSpace(s.executionMode)
+	}
+	if activity := formatActivity(s.progress, s.streaming, s.streamAnim); activity != "" {
+		left += " · " + activity
 	}
 	ctx.Buffer.SetString(bounds.X, bounds.Y, left, s.textStyle)
 
@@ -131,6 +164,58 @@ func (s *StatusBar) Render(ctx runtime.RenderContext) {
 func fitsRight(bounds runtime.Rect, left, right string) bool {
 	x := bounds.X + bounds.Width - len(right)
 	return x > bounds.X+len(left)
+}
+
+func formatActivity(items []progress.Progress, streaming bool, streamAnim int) string {
+	var parts []string
+	if progress := formatProgress(items); progress != "" {
+		parts = append(parts, progress)
+	}
+	if streaming {
+		parts = append(parts, "stream "+streamFrame(streamAnim))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return strings.Join(parts, " · ")
+}
+
+func formatProgress(items []progress.Progress) string {
+	if len(items) == 0 {
+		return ""
+	}
+	entry := items[0]
+	label := strings.TrimSpace(entry.Label)
+	if label == "" {
+		label = "Working"
+	}
+	suffix := ""
+	switch entry.Type {
+	case progress.ProgressSteps:
+		if entry.Total > 0 {
+			suffix = fmt.Sprintf(" %d/%d", entry.Current, entry.Total)
+		}
+	case progress.ProgressDeterminate:
+		if entry.Total > 0 {
+			pct := int(entry.Percent*100 + 0.5)
+			suffix = fmt.Sprintf(" %d%%", pct)
+		}
+	}
+	if len(items) > 1 {
+		suffix += fmt.Sprintf(" +%d", len(items)-1)
+	}
+	return label + suffix
+}
+
+func streamFrame(frame int) string {
+	frames := []string{"|", "/", "-", "\\"}
+	if len(frames) == 0 {
+		return ""
+	}
+	if frame < 0 {
+		frame = 0
+	}
+	return frames[frame%len(frames)]
 }
 
 func formatContextUsage(used, budget, window int) string {

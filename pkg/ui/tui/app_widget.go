@@ -16,9 +16,11 @@ import (
 	"github.com/odvcencio/buckley/pkg/ui/compositor"
 	"github.com/odvcencio/buckley/pkg/ui/filepicker"
 	"github.com/odvcencio/buckley/pkg/ui/markdown"
+	"github.com/odvcencio/buckley/pkg/ui/progress"
 	"github.com/odvcencio/buckley/pkg/ui/runtime"
 	"github.com/odvcencio/buckley/pkg/ui/terminal"
 	"github.com/odvcencio/buckley/pkg/ui/theme"
+	"github.com/odvcencio/buckley/pkg/ui/toast"
 	"github.com/odvcencio/buckley/pkg/ui/widgets"
 )
 
@@ -45,18 +47,19 @@ type WidgetApp struct {
 	running bool
 
 	// Widget tree
-	header    *widgets.Header
-	chatView  *widgets.ChatView
-	inputArea *widgets.InputArea
-	statusBar *widgets.StatusBar
-	sidebar   *widgets.Sidebar
-	root      runtime.Widget
-	mainArea  *runtime.Flex // HBox containing chatView + sidebar
+	header     *widgets.Header
+	chatView   *widgets.ChatView
+	inputArea  *widgets.InputArea
+	statusBar  *widgets.StatusBar
+	sidebar    *widgets.Sidebar
+	toastStack *widgets.ToastStack
+	root       runtime.Widget
+	mainArea   *runtime.Flex // HBox containing chatView + sidebar
 
 	// Sidebar state
-	sidebarVisible     bool
+	sidebarVisible      bool
 	sidebarUserOverride bool // User manually toggled, don't auto-hide
-	minWidthForSidebar int  // Auto-hide below this width
+	minWidthForSidebar  int  // Auto-hide below this width
 
 	// File picker
 	filePicker *filepicker.FilePicker
@@ -89,6 +92,10 @@ type WidgetApp struct {
 	selectionLastLine   int
 	selectionLastCol    int
 	selectionLastValid  bool
+	streaming           bool
+	streamAnim          int
+	streamAnimLast      time.Time
+	streamAnimInterval  time.Duration
 
 	// Soft cursor animation
 	cursorPulseStart    time.Time
@@ -217,6 +224,16 @@ func NewWidgetApp(cfg WidgetAppConfig) (*WidgetApp, error) {
 		themeToBackendStyle(th.TextMuted),
 	)
 
+	toastStack := widgets.NewToastStack()
+	toastStack.SetStyles(
+		themeToBackendStyle(th.SurfaceRaised),
+		themeToBackendStyle(th.TextPrimary),
+		themeToBackendStyle(th.Info),
+		themeToBackendStyle(th.Success),
+		themeToBackendStyle(th.Warning),
+		themeToBackendStyle(th.Error),
+	)
+
 	// Create sidebar
 	sidebar := widgets.NewSidebar()
 	sidebar.SetStyles(
@@ -234,7 +251,7 @@ func NewWidgetApp(cfg WidgetAppConfig) (*WidgetApp, error) {
 	var mainArea *runtime.Flex
 	if sidebarVisible {
 		mainArea = runtime.HBox(
-			runtime.Flexible(chatView, 3),        // 75% for chat
+			runtime.Flexible(chatView, 3),           // 75% for chat
 			runtime.Sized(sidebar, sidebar.Width()), // Dynamic sidebar width
 		)
 	} else {
@@ -260,6 +277,7 @@ func NewWidgetApp(cfg WidgetAppConfig) (*WidgetApp, error) {
 
 	// Add root layer (focus scope is created internally)
 	screen.PushLayer(root, false)
+	screen.PushLayer(toastStack, false)
 
 	// Focus the input area
 	inputArea.Focus()
@@ -275,6 +293,7 @@ func NewWidgetApp(cfg WidgetAppConfig) (*WidgetApp, error) {
 		inputArea:           inputArea,
 		statusBar:           statusBar,
 		sidebar:             sidebar,
+		toastStack:          toastStack,
 		root:                root,
 		mainArea:            mainArea,
 		sidebarVisible:      sidebarVisible,
@@ -290,6 +309,7 @@ func NewWidgetApp(cfg WidgetAppConfig) (*WidgetApp, error) {
 		cursorPulseStart:    time.Now(),
 		cursorPulsePeriod:   2600 * time.Millisecond,
 		cursorPulseInterval: 50 * time.Millisecond,
+		streamAnimInterval:  120 * time.Millisecond,
 		inputMeasuredHeight: inputArea.Measure(runtime.Constraints{MaxWidth: w, MaxHeight: h}).Height,
 	}
 
@@ -696,6 +716,21 @@ func (a *WidgetApp) updateAnimations(now time.Time) bool {
 		}
 	}
 
+	if a.streaming {
+		if a.streamAnimInterval <= 0 {
+			a.streamAnimInterval = 120 * time.Millisecond
+		}
+		if a.streamAnimLast.IsZero() {
+			a.streamAnimLast = now
+		}
+		if now.Sub(a.streamAnimLast) >= a.streamAnimInterval {
+			a.streamAnim++
+			a.statusBar.SetStreamAnim(a.streamAnim)
+			a.streamAnimLast = now
+			dirty = true
+		}
+	}
+
 	return dirty
 }
 
@@ -764,6 +799,26 @@ func (a *WidgetApp) update(msg Message) bool {
 	case ExecutionModeMsg:
 		a.executionMode = m.Mode
 		a.statusBar.SetExecutionMode(m.Mode)
+		return true
+
+	case ProgressMsg:
+		a.statusBar.SetProgress(m.Items)
+		return true
+
+	case ToastsMsg:
+		if a.toastStack != nil {
+			a.toastStack.SetToasts(m.Toasts)
+		}
+		return true
+
+	case StreamingMsg:
+		a.streaming = m.Active
+		a.statusBar.SetStreaming(m.Active)
+		if !m.Active {
+			a.streamAnim = 0
+			a.statusBar.SetStreamAnim(0)
+			a.streamAnimLast = time.Time{}
+		}
 		return true
 
 	case ModelMsg:
@@ -1365,6 +1420,21 @@ func (a *WidgetApp) SetExecutionMode(mode string) {
 	a.Post(ExecutionModeMsg{Mode: mode})
 }
 
+// SetProgress updates progress indicators. Thread-safe via message passing.
+func (a *WidgetApp) SetProgress(items []progress.Progress) {
+	a.Post(ProgressMsg{Items: items})
+}
+
+// SetToasts updates toast notifications. Thread-safe via message passing.
+func (a *WidgetApp) SetToasts(toasts []*toast.Toast) {
+	a.Post(ToastsMsg{Toasts: toasts})
+}
+
+// SetStreaming updates streaming indicator state. Thread-safe via message passing.
+func (a *WidgetApp) SetStreaming(active bool) {
+	a.Post(StreamingMsg{Active: active})
+}
+
 // SetModelName updates model display. Thread-safe via message passing.
 func (a *WidgetApp) SetModelName(name string) {
 	a.Post(ModelMsg{Name: name})
@@ -1386,6 +1456,14 @@ func (a *WidgetApp) SetSessionCallbacks(onNext, onPrev func()) {
 // SetApprovalCallback sets the callback for tool approval decisions.
 func (a *WidgetApp) SetApprovalCallback(onApproval func(requestID string, approved, alwaysAllow bool)) {
 	a.onApproval = onApproval
+}
+
+// SetToastDismissHandler sets the handler to dismiss toasts from the UI.
+func (a *WidgetApp) SetToastDismissHandler(onDismiss func(string)) {
+	if a.toastStack == nil {
+		return
+	}
+	a.toastStack.SetOnDismiss(onDismiss)
 }
 
 // RequestApproval displays an approval dialog for a tool operation.
@@ -1432,8 +1510,7 @@ func (a *WidgetApp) rebuildLayout() {
 	)
 
 	// Update screen with new root
-	a.screen.PopLayer()
-	a.screen.PushLayer(a.root, false)
+	a.screen.SetRoot(a.root)
 	a.screen.Resize(w, h)
 
 	a.dirty = true

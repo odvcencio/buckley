@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/odvcencio/buckley/pkg/ui/backend"
+	"github.com/odvcencio/buckley/pkg/ui/progress"
 	"github.com/odvcencio/buckley/pkg/ui/runtime"
 )
 
@@ -33,6 +34,15 @@ func TestNewStatusBar(t *testing.T) {
 	}
 	if sb.executionMode != "" {
 		t.Errorf("expected executionMode empty, got %q", sb.executionMode)
+	}
+	if len(sb.progress) != 0 {
+		t.Errorf("expected no progress entries, got %d", len(sb.progress))
+	}
+	if sb.streaming {
+		t.Error("expected streaming false by default")
+	}
+	if sb.streamAnim != 0 {
+		t.Errorf("expected streamAnim 0, got %d", sb.streamAnim)
 	}
 }
 
@@ -127,6 +137,38 @@ func TestStatusBar_SetScrollPosition(t *testing.T) {
 
 	if sb.scrollPos != "END" {
 		t.Errorf("expected scrollPos 'END', got '%s'", sb.scrollPos)
+	}
+}
+
+func TestStatusBar_SetProgress(t *testing.T) {
+	sb := NewStatusBar()
+	sb.SetProgress([]progress.Progress{{ID: "p1", Label: "Run"}})
+
+	if len(sb.progress) != 1 {
+		t.Fatalf("expected 1 progress entry, got %d", len(sb.progress))
+	}
+	if sb.progress[0].Label != "Run" {
+		t.Errorf("expected label Run, got %q", sb.progress[0].Label)
+	}
+}
+
+func TestStatusBar_SetStreaming(t *testing.T) {
+	sb := NewStatusBar()
+	sb.SetStreaming(true)
+
+	if !sb.streaming {
+		t.Fatal("expected streaming true")
+	}
+	sb.SetStreamAnim(3)
+	if sb.streamAnim != 3 {
+		t.Fatalf("expected streamAnim 3, got %d", sb.streamAnim)
+	}
+	sb.SetStreaming(false)
+	if sb.streaming {
+		t.Fatal("expected streaming false")
+	}
+	if sb.streamAnim != 0 {
+		t.Fatalf("expected streamAnim reset, got %d", sb.streamAnim)
 	}
 }
 

@@ -15,6 +15,7 @@ type Message struct {
 	ContentJSON string    `json:"contentJson,omitempty"`
 	ContentType string    `json:"contentType,omitempty"`
 	Reasoning   string    `json:"reasoning,omitempty"` // Reasoning/thinking content for reasoning models
+	Embedding   []byte    `json:"embedding,omitempty"`
 	Timestamp   time.Time `json:"timestamp"`
 	Tokens      int       `json:"tokens"`
 	IsSummary   bool      `json:"isSummary"`

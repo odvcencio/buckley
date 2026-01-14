@@ -173,6 +173,8 @@ var migrations = []Migration{
 	{7, "session_principal", ensureSessionsPrincipalSchema},
 	{8, "session_principal_backfill", backfillSessionsPrincipal},
 	{9, "rlm_scratchpad_entries", ensureScratchpadSchema},
+	{10, "messages_search", ensureMessagesSearchSchema},
+	{11, "memories_project_path", ensureMemoriesSchema},
 }
 
 // runMigrations runs the schema migrations with version tracking

@@ -304,7 +304,7 @@ func (a *SubAgent) executeToolCall(ctx context.Context, call model.ToolCall, arg
 	}
 
 	release := a.acquireLock(name, args)
-	res, err := a.registry.Execute(name, args)
+	res, err := a.registry.ExecuteWithContext(ctx, name, args)
 	if release != nil {
 		release()
 	}

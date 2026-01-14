@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/odvcencio/buckley/pkg/conversation"
@@ -11,6 +12,8 @@ import (
 	"github.com/odvcencio/buckley/pkg/rlm"
 	"github.com/odvcencio/buckley/pkg/storage"
 	"github.com/odvcencio/buckley/pkg/telemetry"
+	"github.com/odvcencio/buckley/pkg/ui/progress"
+	"github.com/odvcencio/buckley/pkg/ui/toast"
 )
 
 // RLMStrategy uses the coordinator/sub-agent pattern for execution.
@@ -27,9 +30,11 @@ import (
 //   - Scratchpad enables cross-task visibility without context pollution
 //   - Supports 200+ sequential tool calls via Kimi K2's agentic capabilities
 type RLMStrategy struct {
-	runtime   *rlm.Runtime
-	config    StrategyConfig
-	telemetry *telemetry.Hub
+	runtime       *rlm.Runtime
+	config        StrategyConfig
+	telemetry     *telemetry.Hub
+	streamMu      sync.Mutex
+	streamAdapter *RLMStreamAdapter
 }
 
 // RLMStrategyConfig extends StrategyConfig with RLM-specific options.
@@ -137,6 +142,7 @@ func (s *RLMStrategy) Execute(ctx context.Context, req ExecutionRequest) (*Execu
 		},
 	}
 
+	s.emitStreamComplete(result)
 	return result, nil
 }
 
@@ -227,10 +233,73 @@ func (s *RLMStrategy) rlmContextBudget(req ExecutionRequest) int {
 	return budget
 }
 
+// SetStreamHandler attaches a stream handler for iteration updates.
+func (s *RLMStrategy) SetStreamHandler(handler StreamHandler) {
+	if s == nil {
+		return
+	}
+	adapter := s.ensureStreamAdapter()
+	if adapter == nil {
+		return
+	}
+	adapter.SetHandler(handler)
+}
+
+// SetProgressManager attaches a progress manager for iteration updates.
+func (s *RLMStrategy) SetProgressManager(manager *progress.ProgressManager) {
+	if s == nil {
+		return
+	}
+	adapter := s.ensureStreamAdapter()
+	if adapter == nil {
+		return
+	}
+	adapter.SetProgressManager(manager)
+}
+
+// SetToastManager attaches a toast manager for budget warnings.
+func (s *RLMStrategy) SetToastManager(manager *toast.ToastManager) {
+	if s == nil {
+		return
+	}
+	adapter := s.ensureStreamAdapter()
+	if adapter == nil {
+		return
+	}
+	adapter.SetToastManager(manager)
+}
+
 // OnIteration registers a callback for iteration events.
 // This enables progress tracking in the TUI without true streaming.
 func (s *RLMStrategy) OnIteration(hook rlm.IterationHook) {
 	if s.runtime != nil {
 		s.runtime.OnIteration(hook)
+	}
+}
+
+func (s *RLMStrategy) ensureStreamAdapter() *RLMStreamAdapter {
+	if s == nil {
+		return nil
+	}
+	s.streamMu.Lock()
+	defer s.streamMu.Unlock()
+	if s.streamAdapter == nil {
+		s.streamAdapter = NewRLMStreamAdapter(nil, nil, nil)
+		if s.runtime != nil {
+			s.runtime.OnIteration(s.streamAdapter.OnRLMEvent)
+		}
+	}
+	return s.streamAdapter
+}
+
+func (s *RLMStrategy) emitStreamComplete(result *ExecutionResult) {
+	if s == nil {
+		return
+	}
+	s.streamMu.Lock()
+	adapter := s.streamAdapter
+	s.streamMu.Unlock()
+	if adapter != nil {
+		adapter.OnComplete(result)
 	}
 }

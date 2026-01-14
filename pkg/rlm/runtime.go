@@ -105,14 +105,14 @@ type IterationEvent struct {
 
 // DelegationInfo captures info about a delegated task.
 type DelegationInfo struct {
-	TaskID          string `json:"task_id"`
-	Weight          string `json:"weight"`
-	WeightUsed      string `json:"weight_used,omitempty"`
-	Model           string `json:"model,omitempty"`
-	Escalated       bool   `json:"escalated,omitempty"`
-	Summary         string `json:"summary,omitempty"`
-	Success         bool   `json:"success"`
-	ToolCallsCount  int    `json:"tool_calls_count,omitempty"`
+	TaskID         string `json:"task_id"`
+	Weight         string `json:"weight"`
+	WeightUsed     string `json:"weight_used,omitempty"`
+	Model          string `json:"model,omitempty"`
+	Escalated      bool   `json:"escalated,omitempty"`
+	Summary        string `json:"summary,omitempty"`
+	Success        bool   `json:"success"`
+	ToolCallsCount int    `json:"tool_calls_count,omitempty"`
 }
 
 // BudgetStatus tracks resource consumption.
@@ -166,7 +166,7 @@ type RuntimeDeps struct {
 	Summarizer   func([]byte) string
 	Telemetry    *telemetry.Hub
 	SessionID    string
-	UseToon      bool // Use TOON encoding for compact tool results
+	UseToon      bool              // Use TOON encoding for compact tool results
 	Embedder     EmbeddingProvider // Optional embedder for RAG-based scratchpad search
 }
 
@@ -814,7 +814,7 @@ func (r *Runtime) executeCoordinatorTools(ctx context.Context, registry *tool.Re
 		if call.ID != "" {
 			args[tool.ToolCallIDParam] = call.ID
 		}
-		res, err := registry.Execute(name, args)
+		res, err := registry.ExecuteWithContext(ctx, name, args)
 		if err != nil {
 			result.Result = fmt.Sprintf("execution error: %v", err)
 		} else {
@@ -903,9 +903,9 @@ func (r *Runtime) recordHistory(event IterationEvent) {
 // compactHistoryLocked summarizes old iterations to save context space.
 // Must be called with historyMu held.
 func (r *Runtime) compactHistoryLocked() {
-	const maxItems = 8        // Keep this many items max
-	const compactBatch = 3    // Compact this many old items into one
-	const keepRecent = 3      // Always keep this many recent items uncompacted
+	const maxItems = 8     // Keep this many items max
+	const compactBatch = 3 // Compact this many old items into one
+	const keepRecent = 3   // Always keep this many recent items uncompacted
 
 	if len(r.history) <= maxItems {
 		return

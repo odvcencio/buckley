@@ -3,6 +3,9 @@ package tui
 import (
 	"testing"
 	"time"
+
+	"github.com/odvcencio/buckley/pkg/ui/progress"
+	"github.com/odvcencio/buckley/pkg/ui/toast"
 )
 
 func TestMessages_ImplementInterface(t *testing.T) {
@@ -22,6 +25,9 @@ func TestMessages_ImplementInterface(t *testing.T) {
 		TokensMsg{Tokens: 100, CostCent: 0.01},
 		ContextMsg{Used: 1000, Budget: 8000, Window: 8192},
 		ExecutionModeMsg{Mode: "classic"},
+		ProgressMsg{Items: []progress.Progress{{ID: "p1"}}},
+		ToastsMsg{Toasts: []*toast.Toast{{ID: "t1"}}},
+		StreamingMsg{Active: true},
 		ModelMsg{Name: "gpt-4"},
 		AddMessageMsg{Content: "hi", Source: "user"},
 		AppendMsg{Text: " world"},
@@ -59,6 +65,9 @@ func TestMessages_IsMessageMethods(t *testing.T) {
 	TokensMsg{}.isMessage()
 	ContextMsg{}.isMessage()
 	ExecutionModeMsg{}.isMessage()
+	ProgressMsg{}.isMessage()
+	ToastsMsg{}.isMessage()
+	StreamingMsg{}.isMessage()
 	ModelMsg{}.isMessage()
 	AddMessageMsg{}.isMessage()
 	AppendMsg{}.isMessage()

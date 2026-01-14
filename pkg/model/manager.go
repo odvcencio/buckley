@@ -21,6 +21,7 @@ type Manager struct {
 	catalog        map[string]ModelInfo
 	providerModels map[string][]string
 	modelProviders map[string]string
+	routingHooks   *RoutingHooks
 }
 
 // NewManager creates a new model manager
@@ -43,6 +44,7 @@ func NewManager(cfg *config.Config) (*Manager, error) {
 		catalog:        make(map[string]ModelInfo),
 		providerModels: make(map[string][]string),
 		modelProviders: make(map[string]string),
+		routingHooks:   NewRoutingHooks(),
 	}, nil
 }
 
@@ -143,6 +145,17 @@ func (m *Manager) ProviderIDForModel(modelID string) string {
 	return ""
 }
 
+// RoutingHooks exposes the model routing hook registry.
+func (m *Manager) RoutingHooks() *RoutingHooks {
+	if m == nil {
+		return nil
+	}
+	if m.routingHooks == nil {
+		m.routingHooks = NewRoutingHooks()
+	}
+	return m.routingHooks
+}
+
 // SetRequestTimeout updates provider HTTP request timeouts when supported.
 func (m *Manager) SetRequestTimeout(timeout time.Duration) {
 	for _, provider := range m.providers {
@@ -154,10 +167,11 @@ func (m *Manager) SetRequestTimeout(timeout time.Duration) {
 
 // ChatCompletion performs a chat completion routed to the proper provider
 func (m *Manager) ChatCompletion(ctx context.Context, req ChatRequest) (*ChatResponse, error) {
-	provider := m.providerForModel(req.Model)
+	selectedModel, provider := m.resolveModel(req.Model)
 	if provider == nil {
 		return nil, fmt.Errorf("no provider configured for model %s", req.Model)
 	}
+	req.Model = selectedModel
 	req = applyProviderTransforms(req, provider.ID())
 	req.Model = normalizeModelForProvider(req.Model, provider.ID())
 	resp, err := provider.ChatCompletion(ctx, req)
@@ -169,13 +183,14 @@ func (m *Manager) ChatCompletion(ctx context.Context, req ChatRequest) (*ChatRes
 
 // ChatCompletionStream performs a streaming chat completion
 func (m *Manager) ChatCompletionStream(ctx context.Context, req ChatRequest) (<-chan StreamChunk, <-chan error) {
-	provider := m.providerForModel(req.Model)
+	selectedModel, provider := m.resolveModel(req.Model)
 	if provider == nil {
 		errChan := make(chan error, 1)
 		errChan <- fmt.Errorf("no provider configured for model %s", req.Model)
 		close(errChan)
 		return nil, errChan
 	}
+	req.Model = selectedModel
 	req = applyProviderTransforms(req, provider.ID())
 	req.Model = normalizeModelForProvider(req.Model, provider.ID())
 	return provider.ChatCompletionStream(ctx, req)
@@ -190,11 +205,58 @@ func applyProviderTransforms(req ChatRequest, providerID string) ChatRequest {
 }
 
 func (m *Manager) providerForModel(modelID string) Provider {
+	_, provider := m.resolveModel(modelID)
+	return provider
+}
+
+func (m *Manager) resolveModel(modelID string) (string, Provider) {
+	if m == nil {
+		return modelID, nil
+	}
+	requested := strings.TrimSpace(modelID)
+	if requested == "" {
+		return modelID, nil
+	}
+
+	providerID, routed := m.providerIDFromRouting(requested)
+	reason := ""
+	if routed {
+		reason = "config"
+	}
+
+	selected := requested
+	decision := &RoutingDecision{
+		RequestedModel: requested,
+		SelectedModel:  selected,
+		Reason:         reason,
+	}
+	if m.routingHooks != nil {
+		decision = m.routingHooks.Apply(decision)
+		if decision != nil && strings.TrimSpace(decision.SelectedModel) != "" {
+			selected = decision.SelectedModel
+		}
+	}
+
+	if selected != requested {
+		providerID, _ = m.providerIDFromRouting(selected)
+	}
+
+	return selected, m.providerFromIDOrFallback(providerID)
+}
+
+func (m *Manager) providerIDFromRouting(modelID string) (string, bool) {
 	for prefix, providerID := range m.config.Providers.ModelRouting {
 		if strings.HasPrefix(modelID, prefix) {
-			if provider, ok := m.providers[providerID]; ok {
-				return provider
-			}
+			return providerID, true
+		}
+	}
+	return "", false
+}
+
+func (m *Manager) providerFromIDOrFallback(providerID string) Provider {
+	if providerID != "" {
+		if provider, ok := m.providers[providerID]; ok {
+			return provider
 		}
 	}
 
