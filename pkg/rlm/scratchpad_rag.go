@@ -17,11 +17,13 @@ type EmbeddingProvider interface {
 
 // RAGConfig configures scratchpad RAG behavior.
 type RAGConfig struct {
-	MaxEntries          int           // Max entries to search (default 100)
-	MaxCacheSize        int           // Max cached embeddings (default 500)
-	EmbeddingTTL        time.Duration // How long to cache embeddings (default 1h)
-	MinSimilarity       float64       // Minimum similarity to include in results (default 0.1)
-	CleanupInterval     time.Duration // How often to clean expired embeddings (default 5m)
+	MaxEntries      int           // Max entries to search (default 100)
+	MaxCacheSize    int           // Max cached embeddings (default 500)
+	EmbeddingTTL    time.Duration // How long to cache embeddings (default 1h)
+	QueryCacheSize  int           // Max cached query embeddings (default 20)
+	QueryCacheTTL   time.Duration // How long to cache query embeddings (default 10m)
+	MinSimilarity   float64       // Minimum similarity to include in results (default 0.1)
+	CleanupInterval time.Duration // How often to clean expired embeddings (default 5m)
 }
 
 // DefaultRAGConfig returns sensible defaults.
@@ -30,6 +32,8 @@ func DefaultRAGConfig() RAGConfig {
 		MaxEntries:      100,
 		MaxCacheSize:    500,
 		EmbeddingTTL:    time.Hour,
+		QueryCacheSize:  20,
+		QueryCacheTTL:   10 * time.Minute,
 		MinSimilarity:   0.1,
 		CleanupInterval: 5 * time.Minute,
 	}
@@ -54,6 +58,10 @@ type ScratchpadRAG struct {
 	mu         sync.RWMutex
 	embeddings map[string]*cachedEmbedding
 	lastUpdate time.Time
+
+	queryMu    sync.Mutex
+	queryCache map[string]*cachedEmbedding
+	queryOrder []string
 
 	cleanupOnce sync.Once
 	stopCleanup chan struct{}
@@ -82,6 +90,12 @@ func NewScratchpadRAGWithConfig(scratchpad *Scratchpad, embedder EmbeddingProvid
 	if config.EmbeddingTTL <= 0 {
 		config.EmbeddingTTL = DefaultRAGConfig().EmbeddingTTL
 	}
+	if config.QueryCacheSize <= 0 {
+		config.QueryCacheSize = DefaultRAGConfig().QueryCacheSize
+	}
+	if config.QueryCacheTTL <= 0 {
+		config.QueryCacheTTL = DefaultRAGConfig().QueryCacheTTL
+	}
 	if config.CleanupInterval <= 0 {
 		config.CleanupInterval = DefaultRAGConfig().CleanupInterval
 	}
@@ -91,6 +105,7 @@ func NewScratchpadRAGWithConfig(scratchpad *Scratchpad, embedder EmbeddingProvid
 		embedder:    embedder,
 		config:      config,
 		embeddings:  make(map[string]*cachedEmbedding),
+		queryCache:  make(map[string]*cachedEmbedding),
 		stopCleanup: make(chan struct{}),
 	}
 
@@ -127,10 +142,15 @@ func (r *ScratchpadRAG) Search(ctx context.Context, query string, limit int) ([]
 		limit = 5
 	}
 
-	// Get query embedding
-	queryEmbed, err := r.embedder.Embed(ctx, query)
-	if err != nil {
-		return nil, err
+	// Get query embedding (cache recent queries)
+	queryEmbed, ok := r.getQueryEmbedding(query)
+	if !ok {
+		embed, err := r.embedder.Embed(ctx, query)
+		if err != nil {
+			return nil, err
+		}
+		queryEmbed = embed
+		r.setQueryEmbedding(query, queryEmbed)
 	}
 
 	// Get scratchpad entries (configurable limit)
@@ -399,14 +419,22 @@ func (r *ScratchpadRAG) cleanupLoop() {
 // cleanupExpired removes embeddings that have exceeded their TTL.
 func (r *ScratchpadRAG) cleanupExpired() {
 	r.mu.Lock()
-	defer r.mu.Unlock()
-
 	now := time.Now()
 	for key, cached := range r.embeddings {
 		if now.Sub(cached.createdAt) > r.config.EmbeddingTTL {
 			delete(r.embeddings, key)
 		}
 	}
+	r.mu.Unlock()
+
+	r.queryMu.Lock()
+	for key, cached := range r.queryCache {
+		if r.config.QueryCacheTTL > 0 && now.Sub(cached.createdAt) > r.config.QueryCacheTTL {
+			delete(r.queryCache, key)
+			r.removeQueryOrderLocked(key)
+		}
+	}
+	r.queryMu.Unlock()
 }
 
 // ClearCache removes all cached embeddings.
@@ -417,6 +445,11 @@ func (r *ScratchpadRAG) ClearCache() {
 	r.mu.Lock()
 	r.embeddings = make(map[string]*cachedEmbedding)
 	r.mu.Unlock()
+
+	r.queryMu.Lock()
+	r.queryCache = make(map[string]*cachedEmbedding)
+	r.queryOrder = nil
+	r.queryMu.Unlock()
 }
 
 // Close stops the background cleanup goroutine.
@@ -464,6 +497,74 @@ func (r *ScratchpadRAG) CacheStats() (size int, oldestAge time.Duration) {
 		}
 	}
 	return size, time.Since(oldest)
+}
+
+func (r *ScratchpadRAG) getQueryEmbedding(query string) ([]float64, bool) {
+	query = strings.TrimSpace(query)
+	if query == "" || r == nil {
+		return nil, false
+	}
+
+	r.queryMu.Lock()
+	defer r.queryMu.Unlock()
+
+	cached, ok := r.queryCache[query]
+	if !ok {
+		return nil, false
+	}
+	if r.config.QueryCacheTTL > 0 && time.Since(cached.createdAt) > r.config.QueryCacheTTL {
+		delete(r.queryCache, query)
+		r.removeQueryOrderLocked(query)
+		return nil, false
+	}
+	cached.createdAt = time.Now()
+	r.touchQueryOrderLocked(query)
+	return cached.embedding, true
+}
+
+func (r *ScratchpadRAG) setQueryEmbedding(query string, embedding []float64) {
+	query = strings.TrimSpace(query)
+	if query == "" || r == nil || len(embedding) == 0 {
+		return
+	}
+
+	r.queryMu.Lock()
+	defer r.queryMu.Unlock()
+
+	r.queryCache[query] = &cachedEmbedding{
+		embedding: embedding,
+		createdAt: time.Now(),
+	}
+	r.touchQueryOrderLocked(query)
+	r.enforceQueryCacheSizeLocked()
+}
+
+func (r *ScratchpadRAG) touchQueryOrderLocked(query string) {
+	r.removeQueryOrderLocked(query)
+	r.queryOrder = append(r.queryOrder, query)
+}
+
+func (r *ScratchpadRAG) removeQueryOrderLocked(query string) {
+	if query == "" {
+		return
+	}
+	for i, key := range r.queryOrder {
+		if key == query {
+			r.queryOrder = append(r.queryOrder[:i], r.queryOrder[i+1:]...)
+			return
+		}
+	}
+}
+
+func (r *ScratchpadRAG) enforceQueryCacheSizeLocked() {
+	if r.config.QueryCacheSize <= 0 {
+		return
+	}
+	for len(r.queryCache) > r.config.QueryCacheSize && len(r.queryOrder) > 0 {
+		key := r.queryOrder[0]
+		r.queryOrder = r.queryOrder[1:]
+		delete(r.queryCache, key)
+	}
 }
 
 // cosineSim computes cosine similarity between two vectors.

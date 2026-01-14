@@ -65,21 +65,20 @@ type BatchResult struct {
 // Dispatcher runs sub-agents with concurrency control.
 // Simplified from BatchDispatcher: no weight-based routing or escalation.
 type Dispatcher struct {
-	selector    *ModelSelector
-	models      *model.Manager
-	registry    *tool.Registry
-	scratchpad  ScratchpadWriter
-	conflicts   *ConflictDetector
-	approver    *security.ToolApprover
-	rateLimiter *rate.Limiter
-	semaphore   chan struct{}
-	breaker     *reliability.CircuitBreaker
-	bus         bus.MessageBus
-	telemetry   *telemetry.Hub
-	timeout     time.Duration
-	timeoutMu   sync.Mutex
-	lastDuration time.Duration
-	taskCount    int
+	selector     *ModelSelector
+	models       *model.Manager
+	registry     *tool.Registry
+	scratchpad   ScratchpadWriter
+	conflicts    *ConflictDetector
+	approver     *security.ToolApprover
+	rateLimiter  *rate.Limiter
+	semaphore    chan struct{}
+	breaker      *reliability.CircuitBreaker
+	bus          bus.MessageBus
+	telemetry    *telemetry.Hub
+	timeout      time.Duration
+	timeoutMu    sync.Mutex
+	timeoutStats map[string]*timeoutStats
 }
 
 // DispatcherConfig configures dispatcher behavior.
@@ -134,17 +133,18 @@ func NewDispatcher(cfg DispatcherConfig, deps DispatcherDeps) (*Dispatcher, erro
 	}
 
 	d := &Dispatcher{
-		selector:    deps.Selector,
-		models:      deps.Models,
-		registry:    deps.Registry,
-		scratchpad:  deps.Scratchpad,
-		conflicts:   deps.Conflicts,
-		approver:    deps.Approver,
-		rateLimiter: limiter,
-		semaphore:   make(chan struct{}, maxConcurrent),
-		bus:         deps.Bus,
-		telemetry:   deps.Telemetry,
-		timeout:     timeout,
+		selector:     deps.Selector,
+		models:       deps.Models,
+		registry:     deps.Registry,
+		scratchpad:   deps.Scratchpad,
+		conflicts:    deps.Conflicts,
+		approver:     deps.Approver,
+		rateLimiter:  limiter,
+		semaphore:    make(chan struct{}, maxConcurrent),
+		bus:          deps.Bus,
+		telemetry:    deps.Telemetry,
+		timeout:      timeout,
+		timeoutStats: make(map[string]*timeoutStats),
 	}
 
 	// Configure circuit breaker with logging callbacks
@@ -282,7 +282,7 @@ func (d *Dispatcher) executeTask(ctx context.Context, task SubTask) (BatchResult
 	agentID := fmt.Sprintf("rlm-%s", res.TaskID)
 
 	// Apply timeout if configured
-	timeout := d.nextTimeout()
+	timeout := d.nextTimeout(modelID)
 	if timeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, timeout)
@@ -315,7 +315,7 @@ func (d *Dispatcher) executeTask(ctx context.Context, task SubTask) (BatchResult
 		res.Error = execErr.Error()
 	}
 
-	d.recordTaskDuration(res.Duration)
+	d.recordTaskDuration(modelID, res.Duration)
 
 	return res, execErr
 }
@@ -418,7 +418,12 @@ func (d *Dispatcher) publishEvent(ctx context.Context, subject string, payload m
 	_ = d.bus.Publish(ctx, subject, data)
 }
 
-func (d *Dispatcher) nextTimeout() time.Duration {
+type timeoutStats struct {
+	ema   time.Duration
+	count int
+}
+
+func (d *Dispatcher) nextTimeout(modelID string) time.Duration {
 	if d == nil {
 		return 0
 	}
@@ -431,8 +436,9 @@ func (d *Dispatcher) nextTimeout() time.Duration {
 	defer d.timeoutMu.Unlock()
 
 	timeout := base
-	if d.taskCount > 0 && d.lastDuration > 0 {
-		timeout = d.lastDuration + d.lastDuration/2
+	stats := d.timeoutStats[modelID]
+	if stats != nil && stats.count > 0 && stats.ema > 0 {
+		timeout = stats.ema + stats.ema/2
 		maxTimeout := base * 2
 		if timeout > maxTimeout {
 			timeout = maxTimeout
@@ -442,15 +448,25 @@ func (d *Dispatcher) nextTimeout() time.Duration {
 			timeout = minTimeout
 		}
 	}
-	d.taskCount++
 	return timeout
 }
 
-func (d *Dispatcher) recordTaskDuration(duration time.Duration) {
+func (d *Dispatcher) recordTaskDuration(modelID string, duration time.Duration) {
 	if d == nil || duration <= 0 {
 		return
 	}
 	d.timeoutMu.Lock()
-	d.lastDuration = duration
+	stats := d.timeoutStats[modelID]
+	if stats == nil {
+		stats = &timeoutStats{}
+		d.timeoutStats[modelID] = stats
+	}
+	if stats.count == 0 {
+		stats.ema = duration
+	} else {
+		alpha := 0.3
+		stats.ema = time.Duration(alpha*float64(duration) + (1-alpha)*float64(stats.ema))
+	}
+	stats.count++
 	d.timeoutMu.Unlock()
 }

@@ -398,21 +398,19 @@ func (t *ListScratchpadTool) Execute(params map[string]any) (*builtin.Result, er
 		ctx = t.ctxProvider()
 	}
 
-	entries, err := t.scratchpad.ListSummaries(ctx, limit*2) // Get extra for filtering
-	if err != nil {
-		return &builtin.Result{Success: false, Error: err.Error()}, nil
-	}
-
-	// Filter by type if specified
 	var filtered []EntrySummary
-	for _, entry := range entries {
-		if typeFilter != "" && string(entry.Type) != typeFilter {
-			continue
+	if strings.TrimSpace(typeFilter) != "" {
+		entries, err := t.scratchpad.ListSummariesByType(ctx, EntryType(typeFilter), limit)
+		if err != nil {
+			return &builtin.Result{Success: false, Error: err.Error()}, nil
 		}
-		filtered = append(filtered, entry)
-		if len(filtered) >= limit {
-			break
+		filtered = entries
+	} else {
+		entries, err := t.scratchpad.ListSummaries(ctx, limit)
+		if err != nil {
+			return &builtin.Result{Success: false, Error: err.Error()}, nil
 		}
+		filtered = entries
 	}
 
 	data := make([]map[string]any, 0, len(filtered))
@@ -762,14 +760,14 @@ func (t *RecordStrategyTool) Parameters() builtin.ParameterSchema {
 
 // Valid strategy categories
 var validStrategyCategories = map[string]bool{
-	"decomposition":   true,
-	"approach":        true,
-	"retry_approach":  true,
-	"lesson_learned":  true,
-	"architecture":    true,
-	"optimization":    true,
-	"error_handling":  true,
-	"decision":        true,
+	"decomposition":  true,
+	"approach":       true,
+	"retry_approach": true,
+	"lesson_learned": true,
+	"architecture":   true,
+	"optimization":   true,
+	"error_handling": true,
+	"decision":       true,
 }
 
 func (t *RecordStrategyTool) Execute(params map[string]any) (*builtin.Result, error) {

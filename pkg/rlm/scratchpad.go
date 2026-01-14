@@ -19,6 +19,10 @@ const defaultScratchpadSummaryLimit = 200
 type Scratchpad struct {
 	mu         sync.RWMutex
 	entries    map[string]*Entry
+	order      []*Entry
+	orderIndex map[string]int
+	typeOrder  map[EntryType][]*Entry
+	typeIndex  map[EntryType]map[string]int
 	store      *storage.Store
 	summarizer func([]byte) string
 	config     ScratchpadConfig
@@ -31,6 +35,9 @@ func NewScratchpad(store *storage.Store, summarizer func([]byte) string, cfg Scr
 	cfg = normalizeScratchpadConfig(cfg)
 	return &Scratchpad{
 		entries:    make(map[string]*Entry),
+		orderIndex: make(map[string]int),
+		typeOrder:  make(map[EntryType][]*Entry),
+		typeIndex:  make(map[EntryType]map[string]int),
 		store:      store,
 		summarizer: summarizer,
 		config:     cfg,
@@ -88,11 +95,7 @@ func (s *Scratchpad) Write(ctx context.Context, req WriteRequest) (string, error
 		s.mu.Unlock()
 		return key, nil
 	}
-	if existing := s.entries[key]; existing != nil {
-		s.rawBytes -= entrySize(existing)
-	}
-	s.entries[key] = entry
-	s.rawBytes += entrySize(entry)
+	s.setEntryLocked(entry)
 	s.enforceLimitsLocked(now)
 	if s.entries[key] != nil {
 		wroteSummary = toEntrySummary(entry)
@@ -179,11 +182,7 @@ func (s *Scratchpad) WriteBatch(ctx context.Context, requests []WriteRequest) ([
 		if s.isExpired(entry, now) {
 			continue
 		}
-		if existing := s.entries[key]; existing != nil {
-			s.rawBytes -= entrySize(existing)
-		}
-		s.entries[key] = entry
-		s.rawBytes += entrySize(entry)
+		s.setEntryLocked(entry)
 		writtenByKey[key] = entry
 
 		if s.shouldPersist(entry, now) && s.store != nil {
@@ -256,15 +255,41 @@ func (s *Scratchpad) ListSummaries(ctx context.Context, limit int) ([]EntrySumma
 	now := time.Now().UTC()
 	s.mu.Lock()
 	s.purgeExpiredLocked(now)
-	entries := make([]*Entry, 0, len(s.entries))
-	for _, entry := range s.entries {
-		entries = append(entries, entry)
-	}
+	entries := append([]*Entry{}, s.order...)
 	s.mu.Unlock()
 
-	sort.Slice(entries, func(i, j int) bool {
-		return entries[i].CreatedAt.After(entries[j].CreatedAt)
-	})
+	if limit > 0 && len(entries) > limit {
+		entries = entries[:limit]
+	}
+
+	out := make([]EntrySummary, 0, len(entries))
+	s.mu.Lock()
+	for _, entry := range entries {
+		entry.LastAccess = now
+		out = append(out, *toEntrySummary(entry))
+	}
+	s.mu.Unlock()
+	return out, nil
+}
+
+// ListSummariesByType returns summaries ordered by creation time (newest first) for a specific type.
+func (s *Scratchpad) ListSummariesByType(ctx context.Context, entryType EntryType, limit int) ([]EntrySummary, error) {
+	if s == nil {
+		return nil, fmt.Errorf("scratchpad is nil")
+	}
+	if strings.TrimSpace(string(entryType)) == "" {
+		return s.ListSummaries(ctx, limit)
+	}
+	if err := s.loadFromStoreByType(ctx, entryType, limit); err != nil {
+		return nil, err
+	}
+
+	now := time.Now().UTC()
+	s.mu.Lock()
+	s.purgeExpiredLocked(now)
+	entries := append([]*Entry{}, s.typeOrder[entryType]...)
+	s.mu.Unlock()
+
 	if limit > 0 && len(entries) > limit {
 		entries = entries[:limit]
 	}
@@ -342,8 +367,7 @@ func (s *Scratchpad) getEntry(ctx context.Context, key string) (*Entry, error) {
 		s.mu.Unlock()
 		return entry, nil
 	}
-	s.entries[key] = entry
-	s.rawBytes += entrySize(entry)
+	s.setEntryLocked(entry)
 	s.enforceLimitsLocked(now)
 	s.mu.Unlock()
 	return entry, nil
@@ -374,8 +398,42 @@ func (s *Scratchpad) loadFromStore(ctx context.Context, limit int) error {
 		if s.isExpired(entry, now) {
 			continue
 		}
-		s.entries[stored.Key] = entry
-		s.rawBytes += entrySize(entry)
+		s.setEntryLocked(entry)
+	}
+	s.enforceLimitsLocked(now)
+	s.mu.Unlock()
+	return nil
+}
+
+func (s *Scratchpad) loadFromStoreByType(ctx context.Context, entryType EntryType, limit int) error {
+	if s == nil || s.store == nil {
+		return nil
+	}
+	if strings.TrimSpace(string(entryType)) == "" {
+		return s.loadFromStore(ctx, limit)
+	}
+	if limit < 0 {
+		limit = 0
+	}
+	entries, err := s.store.ListScratchpadEntriesByType(ctx, string(entryType), limit)
+	if err != nil {
+		return err
+	}
+	if len(entries) == 0 {
+		return nil
+	}
+
+	now := time.Now().UTC()
+	s.mu.Lock()
+	for _, stored := range entries {
+		if _, ok := s.entries[stored.Key]; ok {
+			continue
+		}
+		entry := entryFromStorage(&stored)
+		if s.isExpired(entry, now) {
+			continue
+		}
+		s.setEntryLocked(entry)
 	}
 	s.enforceLimitsLocked(now)
 	s.mu.Unlock()
@@ -524,6 +582,8 @@ func (s *Scratchpad) removeEntryLocked(key string) {
 		return
 	}
 	delete(s.entries, key)
+	s.removeFromOrderLocked(key)
+	s.removeFromTypeOrderLocked(entry)
 	s.rawBytes -= entrySize(entry)
 	if s.rawBytes < 0 {
 		s.rawBytes = 0
@@ -562,6 +622,112 @@ func (s *Scratchpad) emitOnWrite(ctx context.Context, summaries []EntrySummary) 
 		return
 	}
 	handler(ctx, summaries)
+}
+
+func (s *Scratchpad) setEntryLocked(entry *Entry) {
+	if entry == nil {
+		return
+	}
+	if entry.Key == "" {
+		return
+	}
+	if existing := s.entries[entry.Key]; existing != nil {
+		s.removeEntryLocked(entry.Key)
+	}
+	s.entries[entry.Key] = entry
+	s.rawBytes += entrySize(entry)
+	s.insertIntoOrderLocked(entry)
+	s.insertIntoTypeOrderLocked(entry)
+}
+
+func (s *Scratchpad) insertIntoOrderLocked(entry *Entry) {
+	if entry == nil {
+		return
+	}
+	idx := sort.Search(len(s.order), func(i int) bool {
+		return !s.order[i].CreatedAt.After(entry.CreatedAt)
+	})
+	s.order = append(s.order, nil)
+	copy(s.order[idx+1:], s.order[idx:])
+	s.order[idx] = entry
+	if s.orderIndex == nil {
+		s.orderIndex = make(map[string]int)
+	}
+	for i := idx; i < len(s.order); i++ {
+		s.orderIndex[s.order[i].Key] = i
+	}
+}
+
+func (s *Scratchpad) insertIntoTypeOrderLocked(entry *Entry) {
+	if entry == nil {
+		return
+	}
+	if s.typeOrder == nil {
+		s.typeOrder = make(map[EntryType][]*Entry)
+	}
+	if s.typeIndex == nil {
+		s.typeIndex = make(map[EntryType]map[string]int)
+	}
+	list := s.typeOrder[entry.Type]
+	idx := sort.Search(len(list), func(i int) bool {
+		return !list[i].CreatedAt.After(entry.CreatedAt)
+	})
+	list = append(list, nil)
+	copy(list[idx+1:], list[idx:])
+	list[idx] = entry
+	s.typeOrder[entry.Type] = list
+
+	index := s.typeIndex[entry.Type]
+	if index == nil {
+		index = make(map[string]int)
+		s.typeIndex[entry.Type] = index
+	}
+	for i := idx; i < len(list); i++ {
+		index[list[i].Key] = i
+	}
+}
+
+func (s *Scratchpad) removeFromOrderLocked(key string) {
+	if key == "" {
+		return
+	}
+	idx, ok := s.orderIndex[key]
+	if !ok {
+		return
+	}
+	s.order = append(s.order[:idx], s.order[idx+1:]...)
+	delete(s.orderIndex, key)
+	for i := idx; i < len(s.order); i++ {
+		s.orderIndex[s.order[i].Key] = i
+	}
+}
+
+func (s *Scratchpad) removeFromTypeOrderLocked(entry *Entry) {
+	if entry == nil {
+		return
+	}
+	index := s.typeIndex[entry.Type]
+	if index == nil {
+		return
+	}
+	idx, ok := index[entry.Key]
+	if !ok {
+		return
+	}
+	list := s.typeOrder[entry.Type]
+	if idx < 0 || idx >= len(list) {
+		return
+	}
+	list = append(list[:idx], list[idx+1:]...)
+	s.typeOrder[entry.Type] = list
+	delete(index, entry.Key)
+	for i := idx; i < len(list); i++ {
+		index[list[i].Key] = i
+	}
+	if len(list) == 0 {
+		delete(s.typeOrder, entry.Type)
+		delete(s.typeIndex, entry.Type)
+	}
 }
 
 func cloneMetadata(input map[string]any) map[string]any {

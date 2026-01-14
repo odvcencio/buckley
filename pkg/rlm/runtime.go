@@ -4,6 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
+	"io"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -196,6 +199,12 @@ type Runtime struct {
 	// Iteration tracking for context
 	historyMu sync.RWMutex
 	history   []IterationHistory
+
+	contextMu              sync.Mutex
+	historySnapshotHash    uint64
+	scratchpadSnapshotHash uint64
+	historySnapshotSet     bool
+	scratchpadSnapshotSet  bool
 }
 
 // NewRuntime wires the runtime dependencies together.
@@ -755,47 +764,49 @@ func (r *Runtime) buildCoordinatorContext(ctx context.Context, task string, answ
 	r.historyMu.RUnlock()
 
 	if len(history) > 0 {
-		sb.WriteString("\nIteration History (for context):\n")
-		for _, h := range history {
-			if h.Compacted {
-				// Compacted entry - show condensed summary
-				sb.WriteString(fmt.Sprintf("- %s", h.Summary))
-				sb.WriteString(fmt.Sprintf(" [%d tokens]\n", h.TokensUsed))
-			} else {
-				// Regular entry - show full details
-				sb.WriteString(fmt.Sprintf("- Iteration %d: ", h.Iteration))
-				if len(h.Delegations) > 0 {
-					var delegSummaries []string
-					for _, d := range h.Delegations {
-						status := "✓"
-						if !d.Success {
-							status = "✗"
+		if r.shouldIncludeHistory(history) {
+			sb.WriteString("\nIteration History (for context):\n")
+			for _, h := range history {
+				if h.Compacted {
+					// Compacted entry - show condensed summary
+					sb.WriteString(fmt.Sprintf("- %s", h.Summary))
+					sb.WriteString(fmt.Sprintf(" [%d tokens]\n", h.TokensUsed))
+				} else {
+					// Regular entry - show full details
+					sb.WriteString(fmt.Sprintf("- Iteration %d: ", h.Iteration))
+					if len(h.Delegations) > 0 {
+						var delegSummaries []string
+						for _, d := range h.Delegations {
+							status := "✓"
+							if !d.Success {
+								status = "✗"
+							}
+							if d.Model != "" {
+								delegSummaries = append(delegSummaries, fmt.Sprintf("%s(%s)%s", d.Weight, d.Model, status))
+							} else if d.Summary != "" {
+								delegSummaries = append(delegSummaries, d.Summary)
+							}
 						}
-						if d.Model != "" {
-							delegSummaries = append(delegSummaries, fmt.Sprintf("%s(%s)%s", d.Weight, d.Model, status))
-						} else if d.Summary != "" {
-							delegSummaries = append(delegSummaries, d.Summary)
+						if len(delegSummaries) > 0 {
+							sb.WriteString(strings.Join(delegSummaries, ", "))
 						}
 					}
-					if len(delegSummaries) > 0 {
-						sb.WriteString(strings.Join(delegSummaries, ", "))
+					if h.Summary != "" {
+						if len(h.Summary) > 100 {
+							sb.WriteString(fmt.Sprintf(" → %s...", h.Summary[:100]))
+						} else {
+							sb.WriteString(fmt.Sprintf(" → %s", h.Summary))
+						}
 					}
+					sb.WriteString(fmt.Sprintf(" [%d tokens]\n", h.TokensUsed))
 				}
-				if h.Summary != "" {
-					if len(h.Summary) > 100 {
-						sb.WriteString(fmt.Sprintf(" → %s...", h.Summary[:100]))
-					} else {
-						sb.WriteString(fmt.Sprintf(" → %s", h.Summary))
-					}
-				}
-				sb.WriteString(fmt.Sprintf(" [%d tokens]\n", h.TokensUsed))
 			}
 		}
 	}
 
 	// Scratchpad summaries
 	summaries, err := r.scratchpad.ListSummaries(ctx, 8)
-	if err == nil && len(summaries) > 0 {
+	if err == nil && len(summaries) > 0 && r.shouldIncludeScratchpad(summaries) {
 		sb.WriteString("\nScratchpad summaries:\n")
 		for _, summary := range summaries {
 			sb.WriteString("- ")
@@ -849,6 +860,96 @@ func (r *Runtime) compactMessages(messages []model.Message) []model.Message {
 	out = append(out, system, model.Message{Role: "assistant", Content: compactNote})
 	out = append(out, recent...)
 	return out
+}
+
+func (r *Runtime) shouldIncludeHistory(history []IterationHistory) bool {
+	if r == nil || len(history) == 0 {
+		return false
+	}
+	hash := hashHistorySnapshot(history)
+
+	r.contextMu.Lock()
+	defer r.contextMu.Unlock()
+
+	if r.historySnapshotSet && r.historySnapshotHash == hash {
+		return false
+	}
+	r.historySnapshotHash = hash
+	r.historySnapshotSet = true
+	return true
+}
+
+func (r *Runtime) shouldIncludeScratchpad(summaries []EntrySummary) bool {
+	if r == nil || len(summaries) == 0 {
+		return false
+	}
+	hash := hashScratchpadSnapshot(summaries)
+
+	r.contextMu.Lock()
+	defer r.contextMu.Unlock()
+
+	if r.scratchpadSnapshotSet && r.scratchpadSnapshotHash == hash {
+		return false
+	}
+	r.scratchpadSnapshotHash = hash
+	r.scratchpadSnapshotSet = true
+	return true
+}
+
+func hashHistorySnapshot(history []IterationHistory) uint64 {
+	h := fnv.New64a()
+	for _, item := range history {
+		writeHashInt(h, int64(item.Iteration))
+		writeHashBool(h, item.Compacted)
+		writeHashInt(h, int64(item.TokensUsed))
+		writeHashString(h, item.Summary)
+		for _, d := range item.Delegations {
+			writeHashString(h, d.TaskID)
+			writeHashString(h, d.Weight)
+			writeHashString(h, d.WeightUsed)
+			writeHashString(h, d.Model)
+			writeHashBool(h, d.Escalated)
+			writeHashBool(h, d.Success)
+			writeHashInt(h, int64(d.ToolCallsCount))
+			writeHashString(h, d.Summary)
+		}
+	}
+	return h.Sum64()
+}
+
+func hashScratchpadSnapshot(summaries []EntrySummary) uint64 {
+	h := fnv.New64a()
+	for _, summary := range summaries {
+		writeHashString(h, summary.Key)
+		writeHashString(h, string(summary.Type))
+		writeHashString(h, summary.Summary)
+		writeHashString(h, summary.CreatedBy)
+		writeHashInt(h, summary.CreatedAt.UnixNano())
+	}
+	return h.Sum64()
+}
+
+func writeHashString(h io.Writer, value string) {
+	if value == "" {
+		_, _ = h.Write([]byte{0})
+		return
+	}
+	_, _ = io.WriteString(h, value)
+	_, _ = h.Write([]byte{0})
+}
+
+func writeHashInt(h io.Writer, value int64) {
+	buf := strconv.AppendInt(make([]byte, 0, 20), value, 10)
+	_, _ = h.Write(buf)
+	_, _ = h.Write([]byte{0})
+}
+
+func writeHashBool(h io.Writer, value bool) {
+	if value {
+		_, _ = h.Write([]byte{1})
+		return
+	}
+	_, _ = h.Write([]byte{0})
 }
 
 func (r *Runtime) executeCoordinatorTools(ctx context.Context, registry *tool.Registry, calls []model.ToolCall) []coordinatorToolResult {
