@@ -18,10 +18,10 @@ type SectionItem struct {
 type Section struct {
 	FocusableBase
 
-	title     string
-	items     []SectionItem
-	expanded  bool
-	maxItems  int // Max items to show when expanded (0 = all)
+	title    string
+	items    []SectionItem
+	expanded bool
+	maxItems int // Max items to show when expanded (0 = all)
 
 	// Styles
 	headerStyle   backend.Style
@@ -109,7 +109,7 @@ func (s *Section) Measure(constraints runtime.Constraints) runtime.Size {
 
 // Layout stores the assigned bounds.
 func (s *Section) Layout(bounds runtime.Rect) {
-	s.bounds = bounds
+	s.Base.Layout(bounds)
 }
 
 // Render draws the section.

@@ -28,6 +28,7 @@ type ChatView struct {
 	scrollThumb    backend.Style
 	selectionStyle backend.Style
 	searchStyle    backend.Style
+	bgStyle        backend.Style
 
 	// Markdown rendering
 	mdRenderer  *markdown.Renderer
@@ -52,6 +53,7 @@ func NewChatView() *ChatView {
 		scrollThumb:    backend.DefaultStyle(),
 		selectionStyle: backend.DefaultStyle().Reverse(true),
 		searchStyle:    backend.DefaultStyle().Reverse(true),
+		bgStyle:        backend.DefaultStyle(),
 	}
 }
 
@@ -64,12 +66,13 @@ func (c *ChatView) SetStyles(user, assistant, system, tool, thinking backend.Sty
 	c.thinkingStyle = thinking
 }
 
-// SetUIStyles configures scrollbar and selection styles.
-func (c *ChatView) SetUIStyles(scrollbar, thumb, selection, search backend.Style) {
+// SetUIStyles configures scrollbar, selection, and background styles.
+func (c *ChatView) SetUIStyles(scrollbar, thumb, selection, search, background backend.Style) {
 	c.scrollbarStyle = scrollbar
 	c.scrollThumb = thumb
 	c.selectionStyle = selection
 	c.searchStyle = search
+	c.bgStyle = background
 }
 
 // SetMarkdownRenderer configures markdown rendering for the chat view.
@@ -366,7 +369,7 @@ func (c *ChatView) Measure(constraints runtime.Constraints) runtime.Size {
 
 // Layout updates the scrollback buffer size.
 func (c *ChatView) Layout(bounds runtime.Rect) {
-	c.bounds = bounds
+	c.Base.Layout(bounds)
 	c.buffer.Resize(bounds.Width, bounds.Height)
 }
 
@@ -376,6 +379,7 @@ func (c *ChatView) Render(ctx runtime.RenderContext) {
 	if bounds.Width == 0 || bounds.Height == 0 {
 		return
 	}
+	ctx.Clear(c.bgStyle)
 
 	// Get visible lines from scrollback
 	lines := c.buffer.GetVisibleLines()

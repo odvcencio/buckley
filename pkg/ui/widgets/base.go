@@ -9,13 +9,17 @@ import (
 // Base provides common functionality for widgets.
 // Embed this in widget structs to get default implementations.
 type Base struct {
-	bounds  runtime.Rect
-	focused bool
+	bounds      runtime.Rect
+	focused     bool
+	needsRender bool
 }
 
 // Layout stores the assigned bounds.
 func (b *Base) Layout(bounds runtime.Rect) {
-	b.bounds = bounds
+	if b.bounds != bounds {
+		b.bounds = bounds
+		b.needsRender = true
+	}
 }
 
 // Bounds returns the widget's assigned bounds.
@@ -46,6 +50,21 @@ func (b *Base) Blur() {
 // IsFocused returns whether the widget is focused.
 func (b *Base) IsFocused() bool {
 	return b.focused
+}
+
+// Invalidate marks the widget as needing a render pass.
+func (b *Base) Invalidate() {
+	b.needsRender = true
+}
+
+// NeedsRender reports whether the widget needs to re-render.
+func (b *Base) NeedsRender() bool {
+	return b.needsRender
+}
+
+// ClearInvalidation clears the render-needed flag.
+func (b *Base) ClearInvalidation() {
+	b.needsRender = false
 }
 
 // FocusableBase extends Base for focusable widgets.

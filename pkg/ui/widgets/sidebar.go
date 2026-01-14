@@ -75,11 +75,31 @@ type RLMScratchpadEntry struct {
 
 // CircuitStatus summarizes circuit breaker health.
 type CircuitStatus struct {
-	State              string // "Closed", "Open", "HalfOpen"
+	State               string // "Closed", "Open", "HalfOpen"
 	ConsecutiveFailures int
-	MaxFailures        int
-	LastError          string
-	RetryAfterSecs     int
+	MaxFailures         int
+	LastError           string
+	RetryAfterSecs      int
+}
+
+type sidebarSectionKind int
+
+const (
+	sectionCurrentTask sidebarSectionKind = iota
+	sectionPlan
+	sectionTools
+	sectionRLM
+	sectionCircuit
+	sectionExperiment
+	sectionTouches
+	sectionRecentFiles
+)
+
+type sidebarSectionHit struct {
+	Kind      sidebarSectionKind
+	HeaderY   int
+	BodyStart int
+	BodyEnd   int
 }
 
 // SidebarConfig holds configurable options for the sidebar.
@@ -146,7 +166,9 @@ type Sidebar struct {
 
 	// Scroll state (for long lists)
 	planScrollOffset int
-	focusedSection   int // 0=task, 1=plan, 2=tools, 3=touches, 4=files
+	planViewportRows int
+	focusedSection   sidebarSectionKind
+	sectionHits      []sidebarSectionHit
 
 	// Styles
 	borderStyle    backend.Style
@@ -158,6 +180,7 @@ type Sidebar struct {
 	activeStyle    backend.Style
 	pendingStyle   backend.Style
 	failedStyle    backend.Style
+	bgStyle        backend.Style
 }
 
 // NewSidebar creates a new sidebar widget with default configuration.
@@ -193,39 +216,41 @@ func NewSidebarWithConfig(cfg SidebarConfig) *Sidebar {
 		activeStyle:     backend.DefaultStyle().Foreground(backend.ColorYellow).Bold(true),
 		pendingStyle:    backend.DefaultStyle().Foreground(backend.ColorDefault),
 		failedStyle:     backend.DefaultStyle().Foreground(backend.ColorRed),
+		bgStyle:         backend.DefaultStyle(),
 	}
 }
 
 // SetStyles configures the sidebar appearance.
-func (s *Sidebar) SetStyles(border, header, text, progressFull, progressEmpty backend.Style) {
+func (s *Sidebar) SetStyles(border, header, text, progressFull, progressEmpty, background backend.Style) {
 	s.borderStyle = border
 	s.headerStyle = header
 	s.textStyle = text
 	s.progressFull = progressFull
 	s.progressEmpty = progressEmpty
+	s.bgStyle = background
 }
 
 // HasContent returns true when any sidebar section has data to render.
 func (s *Sidebar) HasContent() bool {
-	if s.showCurrentTask && strings.TrimSpace(s.currentTask) != "" {
+	if strings.TrimSpace(s.currentTask) != "" {
 		return true
 	}
-	if s.showPlan && len(s.planTasks) > 0 {
+	if len(s.planTasks) > 0 {
 		return true
 	}
-	if s.showTools && len(s.runningTools) > 0 {
+	if len(s.runningTools) > 0 {
 		return true
 	}
-	if s.showExperiment && (strings.TrimSpace(s.experimentName) != "" || len(s.experimentVariants) > 0) {
+	if strings.TrimSpace(s.experimentName) != "" || strings.TrimSpace(s.experimentStatus) != "" || len(s.experimentVariants) > 0 {
 		return true
 	}
-	if s.showRLM && (s.rlmStatus != nil || len(s.rlmScratchpad) > 0) {
+	if s.rlmStatus != nil || len(s.rlmScratchpad) > 0 {
 		return true
 	}
-	if s.showCircuit && s.circuitStatus != nil {
+	if s.circuitStatus != nil {
 		return true
 	}
-	if s.showTouches && len(s.activeTouches) > 0 {
+	if len(s.activeTouches) > 0 {
 		return true
 	}
 	if len(s.recentFiles) > 0 {
@@ -387,7 +412,54 @@ func (s *Sidebar) Shrink(delta int) {
 
 // Layout stores the assigned bounds.
 func (s *Sidebar) Layout(bounds runtime.Rect) {
-	s.bounds = bounds
+	s.Base.Layout(bounds)
+}
+
+func (s *Sidebar) recordSection(kind sidebarSectionKind, headerY, bodyStart, bodyEnd int) {
+	s.sectionHits = append(s.sectionHits, sidebarSectionHit{
+		Kind:      kind,
+		HeaderY:   headerY,
+		BodyStart: bodyStart,
+		BodyEnd:   bodyEnd,
+	})
+}
+
+func (s *Sidebar) sectionHitAt(y int) (sidebarSectionHit, bool) {
+	for _, hit := range s.sectionHits {
+		if hit.HeaderY == y {
+			return hit, true
+		}
+		if y >= hit.BodyStart && y <= hit.BodyEnd {
+			return hit, true
+		}
+	}
+	return sidebarSectionHit{}, false
+}
+
+func (s *Sidebar) scrollPlan(delta int) bool {
+	if len(s.planTasks) == 0 {
+		return false
+	}
+	viewport := s.planViewportRows
+	if viewport <= 0 {
+		viewport = 5
+	}
+	maxScroll := len(s.planTasks) - viewport
+	if maxScroll < 0 {
+		maxScroll = 0
+	}
+	next := s.planScrollOffset + delta
+	if next < 0 {
+		next = 0
+	}
+	if next > maxScroll {
+		next = maxScroll
+	}
+	if next == s.planScrollOffset {
+		return false
+	}
+	s.planScrollOffset = next
+	return true
 }
 
 // Render draws the sidebar.
@@ -396,6 +468,8 @@ func (s *Sidebar) Render(ctx runtime.RenderContext) {
 	if b.Width < 10 || b.Height < 5 {
 		return
 	}
+	ctx.Clear(s.bgStyle)
+	s.sectionHits = s.sectionHits[:0]
 
 	// Draw left border
 	for y := b.Y; y < b.Y+b.Height; y++ {
@@ -407,43 +481,59 @@ func (s *Sidebar) Render(ctx runtime.RenderContext) {
 	contentWidth := b.Width - 1
 
 	// Current Task Section
-	if s.showCurrentTask && s.currentTask != "" {
+	if strings.TrimSpace(s.currentTask) != "" {
+		startY := y
 		y = s.renderCurrentTask(ctx.Buffer, contentX, y, contentWidth)
+		s.recordSection(sectionCurrentTask, startY, startY+1, y-1)
 	}
 
 	// Plan Section
-	if s.showPlan && len(s.planTasks) > 0 {
+	if len(s.planTasks) > 0 {
+		startY := y
 		y = s.renderPlan(ctx.Buffer, contentX, y, contentWidth, b.Y+b.Height-y)
+		s.recordSection(sectionPlan, startY, startY+1, y-1)
 	}
 
 	// Running Tools Section
-	if s.showTools && len(s.runningTools) > 0 {
+	if len(s.runningTools) > 0 {
+		startY := y
 		y = s.renderTools(ctx.Buffer, contentX, y, contentWidth)
+		s.recordSection(sectionTools, startY, startY+1, y-1)
 	}
 
 	// RLM Section
-	if s.showRLM && (s.rlmStatus != nil || len(s.rlmScratchpad) > 0) {
+	if s.rlmStatus != nil || len(s.rlmScratchpad) > 0 {
+		startY := y
 		y = s.renderRLM(ctx.Buffer, contentX, y, contentWidth)
+		s.recordSection(sectionRLM, startY, startY+1, y-1)
 	}
 
 	// Circuit Breaker Section (show prominently when there are issues)
-	if s.showCircuit && s.circuitStatus != nil {
+	if s.circuitStatus != nil {
+		startY := y
 		y = s.renderCircuit(ctx.Buffer, contentX, y, contentWidth)
+		s.recordSection(sectionCircuit, startY, startY+1, y-1)
 	}
 
 	// Experiments Section
-	if s.showExperiment && (s.experimentName != "" || len(s.experimentVariants) > 0) {
+	if s.experimentName != "" || len(s.experimentVariants) > 0 || s.experimentStatus != "" {
+		startY := y
 		y = s.renderExperiment(ctx.Buffer, contentX, y, contentWidth)
+		s.recordSection(sectionExperiment, startY, startY+1, y-1)
 	}
 
 	// Active Touches Section
-	if s.showTouches && len(s.activeTouches) > 0 {
+	if len(s.activeTouches) > 0 {
+		startY := y
 		y = s.renderTouches(ctx.Buffer, contentX, y, contentWidth)
+		s.recordSection(sectionTouches, startY, startY+1, y-1)
 	}
 
 	// Recent Files Section
 	if len(s.recentFiles) > 0 {
-		s.renderRecentFiles(ctx.Buffer, contentX, y, contentWidth)
+		startY := y
+		y = s.renderRecentFiles(ctx.Buffer, contentX, y, contentWidth)
+		s.recordSection(sectionRecentFiles, startY, startY+1, y-1)
 	}
 }
 
@@ -457,6 +547,10 @@ func (s *Sidebar) renderCurrentTask(buf *runtime.Buffer, x, y, width int) int {
 	buf.Set(x, y, icon, s.headerStyle)
 	buf.SetString(x+2, y, "Current Task", s.headerStyle)
 	y++
+
+	if !s.showCurrentTask {
+		return y
+	}
 
 	// Task name
 	taskName := s.currentTask
@@ -514,16 +608,40 @@ func (s *Sidebar) renderPlan(buf *runtime.Buffer, x, y, width, maxHeight int) in
 	y++
 
 	if !s.showPlan {
+		s.planViewportRows = 0
 		return y
 	}
 
 	// Tasks
 	maxTasks := maxHeight - 1
-	if maxTasks > len(s.planTasks) {
-		maxTasks = len(s.planTasks)
+	if maxTasks < 0 {
+		maxTasks = 0
+	}
+	s.planViewportRows = maxTasks
+	if maxTasks == 0 {
+		return y
+	}
+	totalTasks := len(s.planTasks)
+	maxScroll := totalTasks - maxTasks
+	if maxScroll < 0 {
+		maxScroll = 0
+	}
+	if s.planScrollOffset > maxScroll {
+		s.planScrollOffset = maxScroll
+	}
+	start := s.planScrollOffset
+	if start < 0 {
+		start = 0
+	}
+	if start > totalTasks {
+		start = totalTasks
+	}
+	end := start + maxTasks
+	if end > totalTasks {
+		end = totalTasks
 	}
 
-	for i := 0; i < maxTasks; i++ {
+	for i := start; i < end; i++ {
 		task := s.planTasks[i]
 
 		// Status icon
@@ -568,9 +686,17 @@ func (s *Sidebar) renderPlan(buf *runtime.Buffer, x, y, width, maxHeight int) in
 // renderTools draws the running tools section.
 func (s *Sidebar) renderTools(buf *runtime.Buffer, x, y, width int) int {
 	// Header
-	buf.Set(x, y, '▼', s.headerStyle)
+	icon := '▼'
+	if !s.showTools {
+		icon = '▶'
+	}
+	buf.Set(x, y, icon, s.headerStyle)
 	buf.SetString(x+2, y, "Tools Running", s.headerStyle)
 	y++
+
+	if !s.showTools {
+		return y
+	}
 
 	for _, tool := range s.runningTools {
 		// Spinner icon
@@ -683,10 +809,17 @@ func (s *Sidebar) renderCircuit(buf *runtime.Buffer, x, y, width int) int {
 		headerText = "Circuit Testing"
 		headerStyle = s.activeStyle
 	}
+	if !s.showCircuit && s.circuitStatus.State == "Closed" {
+		icon = '▶'
+	}
 
 	buf.Set(x, y, icon, headerStyle)
 	buf.SetString(x+2, y, headerText, headerStyle)
 	y++
+
+	if !s.showCircuit {
+		return y
+	}
 
 	// Show failure count
 	if s.circuitStatus.ConsecutiveFailures > 0 {
@@ -722,9 +855,17 @@ func (s *Sidebar) renderCircuit(buf *runtime.Buffer, x, y, width int) int {
 
 // renderTouches draws the active touches section.
 func (s *Sidebar) renderTouches(buf *runtime.Buffer, x, y, width int) int {
-	buf.Set(x, y, '▼', s.headerStyle)
+	icon := '▼'
+	if !s.showTouches {
+		icon = '▶'
+	}
+	buf.Set(x, y, icon, s.headerStyle)
 	buf.SetString(x+2, y, "Active Touches", s.headerStyle)
 	y++
+
+	if !s.showTouches {
+		return y
+	}
 
 	for _, touch := range s.activeTouches {
 		label := touch.Path
@@ -746,9 +887,17 @@ func (s *Sidebar) renderTouches(buf *runtime.Buffer, x, y, width int) int {
 }
 
 func (s *Sidebar) renderExperiment(buf *runtime.Buffer, x, y, width int) int {
-	buf.Set(x, y, '▼', s.headerStyle)
+	icon := '▼'
+	if !s.showExperiment {
+		icon = '▶'
+	}
+	buf.Set(x, y, icon, s.headerStyle)
 	buf.SetString(x+2, y, "Experiment", s.headerStyle)
 	y++
+
+	if !s.showExperiment {
+		return y
+	}
 
 	if s.experimentName != "" {
 		name := truncateSidebarText(s.experimentName, width-4)
@@ -816,69 +965,143 @@ func (s *Sidebar) renderRecentFiles(buf *runtime.Buffer, x, y, width int) int {
 
 // HandleMessage processes input.
 func (s *Sidebar) HandleMessage(msg runtime.Message) runtime.HandleResult {
-	key, ok := msg.(runtime.KeyMsg)
-	if !ok {
+	switch m := msg.(type) {
+	case runtime.KeyMsg:
+		switch m.Key {
+		case terminal.KeyUp:
+			s.scrollPlan(-1)
+			return runtime.Handled()
+
+		case terminal.KeyDown:
+			s.scrollPlan(1)
+			return runtime.Handled()
+
+		case terminal.KeyLeft:
+			// Ctrl+Left to shrink sidebar
+			if m.Ctrl {
+				s.Shrink(4)
+				return runtime.Handled()
+			}
+
+		case terminal.KeyRight:
+			// Ctrl+Right to grow sidebar
+			if m.Ctrl {
+				s.Grow(4)
+				return runtime.Handled()
+			}
+
+		case terminal.KeyRune:
+			switch m.Rune {
+			case '1': // Toggle current task
+				s.showCurrentTask = !s.showCurrentTask
+				return runtime.Handled()
+			case '2': // Toggle plan
+				s.showPlan = !s.showPlan
+				return runtime.Handled()
+			case '3': // Toggle tools
+				s.showTools = !s.showTools
+				return runtime.Handled()
+			case '4': // Toggle touches
+				s.showTouches = !s.showTouches
+				return runtime.Handled()
+			case '5': // Toggle recent files
+				s.showRecentFiles = !s.showRecentFiles
+				return runtime.Handled()
+			case '6': // Toggle experiments
+				s.showExperiment = !s.showExperiment
+				return runtime.Handled()
+			case '7': // Toggle RLM
+				s.showRLM = !s.showRLM
+				return runtime.Handled()
+			case '8': // Toggle circuit breaker
+				s.showCircuit = !s.showCircuit
+				return runtime.Handled()
+			}
+		}
+	case runtime.MouseMsg:
+		return s.handleMouse(m)
+	}
+
+	return runtime.Unhandled()
+}
+
+func (s *Sidebar) handleMouse(m runtime.MouseMsg) runtime.HandleResult {
+	if !s.bounds.Contains(m.X, m.Y) {
 		return runtime.Unhandled()
 	}
 
-	switch key.Key {
-	case terminal.KeyUp:
-		if s.planScrollOffset > 0 {
-			s.planScrollOffset--
+	if m.Action == runtime.MousePress && (m.Button == runtime.MouseWheelUp || m.Button == runtime.MouseWheelDown) {
+		delta := 1
+		if m.Button == runtime.MouseWheelUp {
+			delta = -1
 		}
-		return runtime.Handled()
+		if hit, ok := s.sectionHitAt(m.Y); ok && hit.Kind == sectionPlan {
+			if s.scrollPlan(delta) {
+				return runtime.Handled()
+			}
+			return runtime.Handled()
+		}
+		if s.focusedSection == sectionPlan && s.scrollPlan(delta) {
+			return runtime.Handled()
+		}
+		return runtime.Unhandled()
+	}
 
-	case terminal.KeyDown:
-		maxScroll := len(s.planTasks) - 5
-		if maxScroll < 0 {
-			maxScroll = 0
+	if m.Action == runtime.MousePress && m.Button == runtime.MouseLeft {
+		hit, ok := s.sectionHitAt(m.Y)
+		if !ok {
+			return runtime.Unhandled()
 		}
-		if s.planScrollOffset < maxScroll {
-			s.planScrollOffset++
-		}
-		return runtime.Handled()
-
-	case terminal.KeyLeft:
-		// Ctrl+Left to shrink sidebar
-		if key.Ctrl {
-			s.Shrink(4)
+		if m.Y == hit.HeaderY {
+			if s.toggleSection(hit.Kind) {
+				return runtime.Handled()
+			}
 			return runtime.Handled()
 		}
-
-	case terminal.KeyRight:
-		// Ctrl+Right to grow sidebar
-		if key.Ctrl {
-			s.Grow(4)
-			return runtime.Handled()
-		}
-
-	case terminal.KeyRune:
-		switch key.Rune {
-		case '1': // Toggle current task
-			s.showCurrentTask = !s.showCurrentTask
-			return runtime.Handled()
-		case '2': // Toggle plan
-			s.showPlan = !s.showPlan
-			return runtime.Handled()
-		case '3': // Toggle tools
-			s.showTools = !s.showTools
-			return runtime.Handled()
-		case '4': // Toggle touches
-			s.showTouches = !s.showTouches
-			return runtime.Handled()
-		case '5': // Toggle recent files
-			s.showRecentFiles = !s.showRecentFiles
-			return runtime.Handled()
-		case '6': // Toggle experiments
-			s.showExperiment = !s.showExperiment
-			return runtime.Handled()
-		case '7': // Toggle RLM
-			s.showRLM = !s.showRLM
+		if m.Y >= hit.BodyStart && m.Y <= hit.BodyEnd {
+			s.focusedSection = hit.Kind
+			if hit.Kind == sectionRecentFiles && s.showRecentFiles {
+				index := m.Y - hit.BodyStart
+				if index >= 0 && index < len(s.recentFiles) {
+					return runtime.WithCommand(runtime.FileSelected{Path: s.recentFiles[index]})
+				}
+			}
 			return runtime.Handled()
 		}
 	}
 
 	return runtime.Unhandled()
+}
+
+func (s *Sidebar) toggleSection(kind sidebarSectionKind) bool {
+	switch kind {
+	case sectionCurrentTask:
+		s.showCurrentTask = !s.showCurrentTask
+		return true
+	case sectionPlan:
+		s.showPlan = !s.showPlan
+		return true
+	case sectionTools:
+		s.showTools = !s.showTools
+		return true
+	case sectionRLM:
+		s.showRLM = !s.showRLM
+		return true
+	case sectionCircuit:
+		s.showCircuit = !s.showCircuit
+		return true
+	case sectionExperiment:
+		s.showExperiment = !s.showExperiment
+		return true
+	case sectionTouches:
+		s.showTouches = !s.showTouches
+		return true
+	case sectionRecentFiles:
+		s.showRecentFiles = !s.showRecentFiles
+		return true
+	default:
+		return false
+	}
 }
 
 func experimentStatusSymbol(status string) string {

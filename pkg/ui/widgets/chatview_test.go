@@ -564,9 +564,27 @@ func TestChatView_SetUIStyles(t *testing.T) {
 	selection := backend.DefaultStyle().Reverse(true)
 	search := backend.DefaultStyle().Reverse(true)
 
-	cv.SetUIStyles(scrollbar, thumb, selection, search)
+	cv.SetUIStyles(scrollbar, thumb, selection, search, backend.DefaultStyle())
 
 	// No panic means success
+}
+
+func TestChatView_RenderBackgroundFill(t *testing.T) {
+	cv := NewChatView()
+	bg := backend.DefaultStyle().Background(backend.ColorRGB(10, 20, 30))
+	cv.SetUIStyles(backend.DefaultStyle(), backend.DefaultStyle(), backend.DefaultStyle(), backend.DefaultStyle(), bg)
+
+	bounds := runtime.Rect{X: 0, Y: 0, Width: 4, Height: 2}
+	cv.Layout(bounds)
+
+	buf := runtime.NewBuffer(bounds.Width, bounds.Height)
+	ctx := runtime.RenderContext{Buffer: buf, Bounds: bounds}
+	cv.Render(ctx)
+
+	cell := buf.Get(0, 0)
+	if cell.Style != bg {
+		t.Fatalf("expected background style, got %#v", cell.Style)
+	}
 }
 
 func TestChatView_OnScrollChange_NilCallback(t *testing.T) {

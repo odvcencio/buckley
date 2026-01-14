@@ -25,15 +25,15 @@ const (
 
 // ApprovalRequest contains all information needed to display an approval dialog.
 type ApprovalRequest struct {
-	ID          string     // Unique identifier for this request
-	Tool        string     // Tool name (e.g., "run_shell", "write_file")
-	Operation   string     // Operation type (e.g., "shell:write", "write")
-	Description string     // Human-readable explanation
-	Command     string     // For shell operations, the command to run
-	FilePath    string     // For file operations, the target path
-	DiffLines   []DiffLine // For file edits, the diff preview
-	AddedLines  int        // Lines added (for diff summary)
-	RemovedLines int       // Lines removed (for diff summary)
+	ID           string     // Unique identifier for this request
+	Tool         string     // Tool name (e.g., "run_shell", "write_file")
+	Operation    string     // Operation type (e.g., "shell:write", "write")
+	Description  string     // Human-readable explanation
+	Command      string     // For shell operations, the command to run
+	FilePath     string     // For file operations, the target path
+	DiffLines    []DiffLine // For file edits, the diff preview
+	AddedLines   int        // Lines added (for diff summary)
+	RemovedLines int        // Lines removed (for diff summary)
 }
 
 // ApprovalWidget displays a modal dialog for tool approval.
@@ -125,12 +125,13 @@ func (a *ApprovalWidget) Layout(bounds runtime.Rect) {
 	x := bounds.X + (bounds.Width-size.Width)/2
 	y := bounds.Y + (bounds.Height-size.Height)/2
 
-	a.bounds = runtime.Rect{
+	newBounds := runtime.Rect{
 		X:      x,
 		Y:      y,
 		Width:  size.Width,
 		Height: size.Height,
 	}
+	a.Base.Layout(newBounds)
 }
 
 // Render draws the approval dialog.

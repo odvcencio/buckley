@@ -3,6 +3,7 @@ package tui
 
 import (
 	"fmt"
+	"log"
 	"math"
 	"os"
 	"os/exec"
@@ -74,7 +75,9 @@ type WidgetApp struct {
 	dirty       bool
 
 	// Render metrics
-	metrics RenderMetrics
+	metrics     RenderMetrics
+	styleCache  *StyleCache
+	debugRender bool
 
 	// Ctrl+C handling
 	ctrlCArmedUntil     time.Time
@@ -176,72 +179,76 @@ func NewWidgetApp(cfg WidgetAppConfig) (*WidgetApp, error) {
 	if th == nil {
 		th = theme.DefaultTheme()
 	}
+	styleCache := NewStyleCache()
+	debugRender := strings.TrimSpace(os.Getenv("BUCKLEY_RENDER_DEBUG")) != ""
 
 	// Create widgets
 	header := widgets.NewHeader()
 	header.SetModelName(cfg.ModelName)
 	header.SetStyles(
-		themeToBackendStyle(th.Surface),
-		themeToBackendStyle(th.Logo),
-		themeToBackendStyle(th.TextSecondary),
+		styleCache.Get(th.Surface),
+		styleCache.Get(th.Logo),
+		styleCache.Get(th.TextSecondary),
 	)
 
 	chatView := widgets.NewChatView()
 	chatView.SetStyles(
-		themeToBackendStyle(th.User),
-		themeToBackendStyle(th.Assistant),
-		themeToBackendStyle(th.System),
-		themeToBackendStyle(th.Tool),
-		themeToBackendStyle(th.Thinking),
+		styleCache.Get(th.User),
+		styleCache.Get(th.Assistant),
+		styleCache.Get(th.System),
+		styleCache.Get(th.Tool),
+		styleCache.Get(th.Thinking),
 	)
 	chatView.SetUIStyles(
-		themeToBackendStyle(th.Scrollbar),
-		themeToBackendStyle(th.ScrollThumb),
-		themeToBackendStyle(th.Selection),
-		themeToBackendStyle(th.SearchMatch),
+		styleCache.Get(th.Scrollbar),
+		styleCache.Get(th.ScrollThumb),
+		styleCache.Get(th.Selection),
+		styleCache.Get(th.SearchMatch),
+		styleCache.Get(th.Background),
 	)
 	mdRenderer := markdown.NewRenderer(th)
-	chatView.SetMarkdownRenderer(mdRenderer, themeToBackendStyle(mdRenderer.CodeBlockBackground()))
+	chatView.SetMarkdownRenderer(mdRenderer, styleCache.Get(mdRenderer.CodeBlockBackground()))
 
 	inputArea := widgets.NewInputArea()
 	inputArea.SetStyles(
-		themeToBackendStyle(th.SurfaceRaised),
-		themeToBackendStyle(th.TextPrimary),
-		themeToBackendStyle(th.Border),
+		styleCache.Get(th.SurfaceRaised),
+		styleCache.Get(th.TextPrimary),
+		styleCache.Get(th.Border),
 	)
 	inputArea.SetModeStyles(
-		themeToBackendStyle(th.ModeNormal),
-		themeToBackendStyle(th.ModeShell),
-		themeToBackendStyle(th.ModeEnv),
-		themeToBackendStyle(th.ModeSearch),
+		styleCache.Get(th.ModeNormal),
+		styleCache.Get(th.ModeShell),
+		styleCache.Get(th.ModeEnv),
+		styleCache.Get(th.ModeSearch),
 	)
 	inputArea.SetHeightLimits(minInputHeight, maxInputHeight(h))
 
 	statusBar := widgets.NewStatusBar()
 	statusBar.SetStatus("Ready")
 	statusBar.SetStyles(
-		themeToBackendStyle(th.Surface),
-		themeToBackendStyle(th.TextMuted),
+		styleCache.Get(th.Surface),
+		styleCache.Get(th.TextMuted),
 	)
 
 	toastStack := widgets.NewToastStack()
 	toastStack.SetStyles(
-		themeToBackendStyle(th.SurfaceRaised),
-		themeToBackendStyle(th.TextPrimary),
-		themeToBackendStyle(th.Info),
-		themeToBackendStyle(th.Success),
-		themeToBackendStyle(th.Warning),
-		themeToBackendStyle(th.Error),
+		styleCache.Get(th.SurfaceRaised),
+		styleCache.Get(th.TextPrimary),
+		styleCache.Get(th.Info),
+		styleCache.Get(th.Success),
+		styleCache.Get(th.Warning),
+		styleCache.Get(th.Error),
 	)
 
 	// Create sidebar
 	sidebar := widgets.NewSidebar()
 	sidebar.SetStyles(
-		themeToBackendStyle(th.Border),
-		themeToBackendStyle(th.TextSecondary),
-		themeToBackendStyle(th.TextPrimary),
-		themeToBackendStyle(th.Accent),
-		themeToBackendStyle(th.TextMuted),
+		styleCache.Get(th.Border),
+		styleCache.Get(th.TextSecondary),
+		styleCache.Get(th.TextPrimary),
+		styleCache.Get(th.Accent),
+		styleCache.Get(th.TextMuted),
+		styleCache.Get(th.Surface),
 	)
 
 	// Determine if sidebar should be visible based on terminal width and content
@@ -311,6 +318,8 @@ func NewWidgetApp(cfg WidgetAppConfig) (*WidgetApp, error) {
 		cursorPulseInterval: 50 * time.Millisecond,
 		streamAnimInterval:  120 * time.Millisecond,
 		inputMeasuredHeight: inputArea.Measure(runtime.Constraints{MaxWidth: w, MaxHeight: h}).Height,
+		styleCache:          styleCache,
+		debugRender:         debugRender,
 	}
 
 	// Create coalescer for smooth streaming
@@ -354,10 +363,10 @@ func NewWidgetApp(cfg WidgetAppConfig) (*WidgetApp, error) {
 func (a *WidgetApp) showSearchOverlay() {
 	search := widgets.NewSearchWidget()
 	search.SetStyles(
-		themeToBackendStyle(a.theme.Surface),
-		themeToBackendStyle(a.theme.Border),
-		themeToBackendStyle(a.theme.TextPrimary),
-		themeToBackendStyle(a.theme.Accent),
+		a.style(a.theme.Surface),
+		a.style(a.theme.Border),
+		a.style(a.theme.TextPrimary),
+		a.style(a.theme.Accent),
 	)
 	search.SetOnSearch(func(query string) {
 		a.chatView.Search(query)
@@ -394,12 +403,12 @@ func (a *WidgetApp) showFilePicker() {
 	// Create widget wrapper
 	pickerWidget := widgets.NewFilePickerWidget(a.filePicker)
 	pickerWidget.SetStyles(
-		themeToBackendStyle(a.theme.Surface),
-		themeToBackendStyle(a.theme.Border),
-		themeToBackendStyle(a.theme.TextPrimary),
-		themeToBackendStyle(a.theme.Selection),
-		themeToBackendStyle(a.theme.Accent),
-		themeToBackendStyle(a.theme.TextPrimary),
+		a.style(a.theme.Surface),
+		a.style(a.theme.Border),
+		a.style(a.theme.TextPrimary),
+		a.style(a.theme.Selection),
+		a.style(a.theme.Accent),
+		a.style(a.theme.TextPrimary),
 	)
 	pickerWidget.Focus()
 
@@ -435,10 +444,10 @@ func (a *WidgetApp) showApprovalDialog(msg ApprovalRequestMsg) {
 	// Create widget
 	approvalWidget := widgets.NewApprovalWidget(req)
 	approvalWidget.SetStyles(
-		themeToBackendStyle(a.theme.Surface),
-		themeToBackendStyle(a.theme.Border),
-		themeToBackendStyle(a.theme.Accent),
-		themeToBackendStyle(a.theme.TextPrimary),
+		a.style(a.theme.Surface),
+		a.style(a.theme.Border),
+		a.style(a.theme.Accent),
+		a.style(a.theme.TextPrimary),
 	)
 	approvalWidget.Focus()
 
@@ -486,13 +495,13 @@ func (a *WidgetApp) showCommandPalette() {
 	palette.SetItems(items)
 
 	palette.SetStyles(
-		themeToBackendStyle(a.theme.Surface),
-		themeToBackendStyle(a.theme.Border),
-		themeToBackendStyle(a.theme.Accent),
-		themeToBackendStyle(a.theme.TextPrimary),
-		themeToBackendStyle(a.theme.TextPrimary),
-		themeToBackendStyle(a.theme.Selection),
-		themeToBackendStyle(a.theme.TextSecondary),
+		a.style(a.theme.Surface),
+		a.style(a.theme.Border),
+		a.style(a.theme.Accent),
+		a.style(a.theme.TextPrimary),
+		a.style(a.theme.TextPrimary),
+		a.style(a.theme.Selection),
+		a.style(a.theme.TextSecondary),
 	)
 	palette.Focus()
 
@@ -535,13 +544,13 @@ func (a *WidgetApp) showSlashCommandPalette() {
 	})
 
 	palette.SetStyles(
-		themeToBackendStyle(a.theme.Surface),
-		themeToBackendStyle(a.theme.Border),
-		themeToBackendStyle(a.theme.Accent),
-		themeToBackendStyle(a.theme.TextPrimary),
-		themeToBackendStyle(a.theme.TextPrimary),
-		themeToBackendStyle(a.theme.Selection),
-		themeToBackendStyle(a.theme.TextSecondary),
+		a.style(a.theme.Surface),
+		a.style(a.theme.Border),
+		a.style(a.theme.Accent),
+		a.style(a.theme.TextPrimary),
+		a.style(a.theme.TextPrimary),
+		a.style(a.theme.Selection),
+		a.style(a.theme.TextSecondary),
 	)
 	palette.Focus()
 
@@ -560,13 +569,13 @@ func (a *WidgetApp) ShowModelPicker(items []widgets.PaletteItem, onSelect func(i
 		palette.SetOnSelect(onSelect)
 	}
 	palette.SetStyles(
-		themeToBackendStyle(a.theme.Surface),
-		themeToBackendStyle(a.theme.Border),
-		themeToBackendStyle(a.theme.Accent),
-		themeToBackendStyle(a.theme.TextPrimary),
-		themeToBackendStyle(a.theme.TextPrimary),
-		themeToBackendStyle(a.theme.Selection),
-		themeToBackendStyle(a.theme.TextSecondary),
+		a.style(a.theme.Surface),
+		a.style(a.theme.Border),
+		a.style(a.theme.Accent),
+		a.style(a.theme.TextPrimary),
+		a.style(a.theme.TextPrimary),
+		a.style(a.theme.Selection),
+		a.style(a.theme.TextSecondary),
 	)
 	palette.Focus()
 
@@ -982,6 +991,12 @@ func (a *WidgetApp) handleKeyMsg(m KeyMsg) bool {
 
 // handleMouseMsg processes mouse input.
 func (a *WidgetApp) handleMouseMsg(m MouseMsg) bool {
+	if a.sidebarVisible && a.sidebar != nil {
+		if a.sidebar.Bounds().Contains(m.X, m.Y) {
+			return a.dispatchRuntimeMouse(m)
+		}
+	}
+
 	// Handle scroll wheel on the chat view
 	switch m.Button {
 	case MouseWheelUp:
@@ -1049,7 +1064,10 @@ func (a *WidgetApp) handleMouseMsg(m MouseMsg) bool {
 		}
 	}
 
-	// Convert to runtime.MouseMsg and dispatch through screen
+	return a.dispatchRuntimeMouse(m)
+}
+
+func (a *WidgetApp) dispatchRuntimeMouse(m MouseMsg) bool {
 	runtimeMsg := runtime.MouseMsg{
 		X:      m.X,
 		Y:      m.Y,
@@ -1323,14 +1341,32 @@ func (a *WidgetApp) render() {
 		a.metrics.DroppedFrames++
 	}
 
+	if a.debugRender && a.metrics.FrameCount%60 == 0 {
+		avg := time.Duration(0)
+		if a.metrics.FrameCount > 0 {
+			avg = a.metrics.TotalRenderTime / time.Duration(a.metrics.FrameCount)
+		}
+		dropPct := 0.0
+		if a.metrics.FrameCount > 0 {
+			dropPct = float64(a.metrics.DroppedFrames) / float64(a.metrics.FrameCount) * 100
+		}
+		log.Printf("[render] frames=%d avg=%v dropped=%.1f%% cells=%d full=%d partial=%d",
+			a.metrics.FrameCount,
+			avg,
+			dropPct,
+			a.metrics.CellsUpdated,
+			a.metrics.FullRedraws,
+			a.metrics.PartialRedraws)
+	}
+
 	a.lastRender = time.Now()
 }
 
 func (a *WidgetApp) initSoftCursor() {
-	accent := themeToBackendStyle(a.theme.Accent).FG()
-	accentDim := themeToBackendStyle(a.theme.AccentDim).FG()
-	surface := themeToBackendStyle(a.theme.SurfaceRaised).BG()
-	textInverse := themeToBackendStyle(a.theme.TextInverse).FG()
+	accent := a.style(a.theme.Accent).FG()
+	accentDim := a.style(a.theme.AccentDim).FG()
+	surface := a.style(a.theme.SurfaceRaised).BG()
+	textInverse := a.style(a.theme.TextInverse).FG()
 
 	a.cursorBGHigh = accent
 	a.cursorBGLow = blendColor(surface, accentDim, 0.35)
@@ -1642,6 +1678,13 @@ func (a *WidgetApp) WelcomeScreen() {
 	for _, tip := range tips {
 		a.chatView.AddMessage(tip, "system")
 	}
+}
+
+func (a *WidgetApp) style(cs compositor.Style) backend.Style {
+	if a == nil || a.styleCache == nil {
+		return themeToBackendStyle(cs)
+	}
+	return a.styleCache.Get(cs)
 }
 
 // themeToBackendStyle converts a compositor.Style to backend.Style.

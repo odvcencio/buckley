@@ -1,6 +1,9 @@
 package runtime
 
-import "github.com/odvcencio/buckley/pkg/ui/theme"
+import (
+	"github.com/odvcencio/buckley/pkg/ui/backend"
+	"github.com/odvcencio/buckley/pkg/ui/theme"
+)
 
 // Layer represents a layer in the modal stack.
 // Each layer has its own widget tree and focus scope.
@@ -147,8 +150,6 @@ func (s *Screen) FocusScope() *FocusScope {
 
 // Render draws all layers to the buffer.
 func (s *Screen) Render() {
-	s.buffer.Clear()
-
 	ctx := RenderContext{
 		Buffer:  s.buffer,
 		Theme:   s.theme,
@@ -224,8 +225,8 @@ func (s *Screen) handleCommand(cmd Command) {
 type RenderContext struct {
 	Buffer  *Buffer
 	Theme   *theme.Theme
-	Focused bool   // Is the containing layer focused?
-	Bounds  Rect   // Widget's allocated bounds
+	Focused bool // Is the containing layer focused?
+	Bounds  Rect // Widget's allocated bounds
 }
 
 // Sub creates a new context for a child widget with adjusted bounds.
@@ -236,6 +237,14 @@ func (ctx RenderContext) Sub(bounds Rect) RenderContext {
 		Focused: ctx.Focused,
 		Bounds:  bounds,
 	}
+}
+
+// Clear fills the context bounds with spaces using the provided style.
+func (ctx RenderContext) Clear(style backend.Style) {
+	if ctx.Buffer == nil {
+		return
+	}
+	ctx.Buffer.Fill(ctx.Bounds, ' ', style)
 }
 
 // SubBuffer returns a buffer view clipped to the context bounds.

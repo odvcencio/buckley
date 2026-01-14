@@ -168,6 +168,13 @@ type Widget interface {
 	HandleMessage(msg Message) HandleResult
 }
 
+// Invalidatable marks widgets that can report whether they need a render pass.
+type Invalidatable interface {
+	Invalidate()
+	NeedsRender() bool
+	ClearInvalidation()
+}
+
 // Focusable extends Widget for widgets that can receive keyboard focus.
 type Focusable interface {
 	Widget

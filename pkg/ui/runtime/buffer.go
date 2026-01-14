@@ -1,5 +1,14 @@
 package runtime
 
+// Widget Rendering Architecture:
+//
+// Widgets render to runtime.Buffer via RenderContext. The Buffer tracks
+// which cells changed (dirty tracking). app_widget.render() iterates
+// dirty cells and writes them to the backend.
+//
+// compositor.Screen exists as an alternative for pure-ANSI output but
+// is not used in the tcell backend path.
+
 import "github.com/odvcencio/buckley/pkg/ui/backend"
 
 // Cell represents a single character cell in the buffer.

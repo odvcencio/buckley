@@ -90,7 +90,7 @@ func (p *Panel) Measure(constraints runtime.Constraints) runtime.Size {
 
 // Layout positions the panel and its child.
 func (p *Panel) Layout(bounds runtime.Rect) {
-	p.bounds = bounds
+	p.Base.Layout(bounds)
 
 	if p.child == nil {
 		return
@@ -180,7 +180,7 @@ func (b *Box) Measure(constraints runtime.Constraints) runtime.Size {
 
 // Layout assigns bounds to the box and child.
 func (b *Box) Layout(bounds runtime.Rect) {
-	b.bounds = bounds
+	b.Base.Layout(bounds)
 	if b.child != nil {
 		b.child.Layout(bounds)
 	}

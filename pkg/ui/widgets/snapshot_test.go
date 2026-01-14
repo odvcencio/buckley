@@ -142,6 +142,7 @@ func TestSnapshot_Sidebar(t *testing.T) {
 		backend.DefaultStyle(),
 		backend.DefaultStyle().Foreground(backend.ColorGreen),
 		backend.DefaultStyle(),
+		backend.DefaultStyle(),
 	)
 
 	output := renderToString(s, 30, 20)

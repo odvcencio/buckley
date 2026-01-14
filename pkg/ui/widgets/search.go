@@ -82,12 +82,13 @@ func (s *SearchWidget) Measure(constraints runtime.Constraints) runtime.Size {
 
 // Layout positions at the bottom of the screen.
 func (s *SearchWidget) Layout(bounds runtime.Rect) {
-	s.bounds = runtime.Rect{
+	newBounds := runtime.Rect{
 		X:      bounds.X,
 		Y:      bounds.Y + bounds.Height - 1,
 		Width:  bounds.Width,
 		Height: 1,
 	}
+	s.Base.Layout(newBounds)
 }
 
 // Render draws the search bar.

@@ -3,6 +3,7 @@ package widgets
 import (
 	"testing"
 
+	"github.com/odvcencio/buckley/pkg/ui/backend"
 	"github.com/odvcencio/buckley/pkg/ui/runtime"
 	"github.com/odvcencio/buckley/pkg/ui/terminal"
 )
@@ -268,6 +269,127 @@ func TestSidebar_Render(t *testing.T) {
 	cell := buf.Get(0, 0)
 	if cell.Rune != '│' {
 		t.Errorf("expected left border '│', got '%c'", cell.Rune)
+	}
+}
+
+func TestSidebar_Render_PlanScrollOffset(t *testing.T) {
+	s := NewSidebar()
+	s.SetPlanTasks([]PlanTask{
+		{Name: "Alpha", Status: TaskPending},
+		{Name: "Beta", Status: TaskPending},
+		{Name: "Gamma", Status: TaskPending},
+		{Name: "Delta", Status: TaskPending},
+		{Name: "Epsilon", Status: TaskPending},
+		{Name: "Zeta", Status: TaskPending},
+	})
+	s.planScrollOffset = 1
+	s.Layout(runtime.Rect{X: 0, Y: 0, Width: 30, Height: 6})
+
+	buf := runtime.NewBuffer(30, 6)
+	ctx := runtime.RenderContext{Buffer: buf}
+	s.Render(ctx)
+
+	cell := buf.Get(5, 1)
+	if cell.Rune != 'B' {
+		t.Fatalf("expected plan to start with Beta, got %q", string(cell.Rune))
+	}
+}
+
+func TestSidebar_HandleMessage_MouseTogglePlan(t *testing.T) {
+	s := NewSidebar()
+	s.SetPlanTasks([]PlanTask{{Name: "Alpha", Status: TaskPending}})
+	s.Layout(runtime.Rect{X: 0, Y: 0, Width: 30, Height: 8})
+
+	buf := runtime.NewBuffer(30, 8)
+	ctx := runtime.RenderContext{Buffer: buf, Bounds: runtime.Rect{X: 0, Y: 0, Width: 30, Height: 8}}
+	s.Render(ctx)
+
+	headerY := -1
+	for _, hit := range s.sectionHits {
+		if hit.Kind == sectionPlan {
+			headerY = hit.HeaderY
+			break
+		}
+	}
+	if headerY < 0 {
+		t.Fatal("expected plan section hit")
+	}
+
+	msg := runtime.MouseMsg{X: 2, Y: headerY, Button: runtime.MouseLeft, Action: runtime.MousePress}
+	result := s.HandleMessage(msg)
+	if !result.Handled {
+		t.Fatal("expected mouse click to be handled")
+	}
+	if s.showPlan {
+		t.Fatal("expected showPlan to toggle off")
+	}
+}
+
+func TestSidebar_HandleMessage_MouseSelectRecentFile(t *testing.T) {
+	s := NewSidebar()
+	s.SetRecentFiles([]string{"alpha.txt", "beta.txt"})
+	s.SetShowRecentFiles(true)
+	s.Layout(runtime.Rect{X: 0, Y: 0, Width: 30, Height: 8})
+
+	buf := runtime.NewBuffer(30, 8)
+	ctx := runtime.RenderContext{Buffer: buf, Bounds: runtime.Rect{X: 0, Y: 0, Width: 30, Height: 8}}
+	s.Render(ctx)
+
+	var hit sidebarSectionHit
+	found := false
+	for _, h := range s.sectionHits {
+		if h.Kind == sectionRecentFiles {
+			hit = h
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("expected recent files section hit")
+	}
+	if hit.BodyStart > hit.BodyEnd {
+		t.Fatal("expected recent files body range")
+	}
+
+	msg := runtime.MouseMsg{X: 2, Y: hit.BodyStart, Button: runtime.MouseLeft, Action: runtime.MousePress}
+	result := s.HandleMessage(msg)
+	if !result.Handled {
+		t.Fatal("expected mouse click to be handled")
+	}
+	if len(result.Commands) != 1 {
+		t.Fatalf("expected 1 command, got %d", len(result.Commands))
+	}
+	cmd, ok := result.Commands[0].(runtime.FileSelected)
+	if !ok {
+		t.Fatalf("expected FileSelected command, got %T", result.Commands[0])
+	}
+	if cmd.Path != "alpha.txt" {
+		t.Fatalf("expected alpha.txt, got %q", cmd.Path)
+	}
+}
+
+func TestSidebar_RenderBackgroundFill(t *testing.T) {
+	s := NewSidebar()
+	bg := backend.DefaultStyle().Background(backend.ColorRGB(8, 9, 10))
+	s.SetStyles(
+		backend.DefaultStyle(),
+		backend.DefaultStyle(),
+		backend.DefaultStyle(),
+		backend.DefaultStyle(),
+		backend.DefaultStyle(),
+		bg,
+	)
+
+	bounds := runtime.Rect{X: 0, Y: 0, Width: 12, Height: 5}
+	s.Layout(bounds)
+
+	buf := runtime.NewBuffer(bounds.Width, bounds.Height)
+	ctx := runtime.RenderContext{Buffer: buf, Bounds: bounds}
+	s.Render(ctx)
+
+	cell := buf.Get(1, 0)
+	if cell.Style != bg {
+		t.Fatalf("expected background style, got %#v", cell.Style)
 	}
 }
 
