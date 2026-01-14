@@ -110,6 +110,95 @@ func (s *Scratchpad) Write(ctx context.Context, req WriteRequest) (string, error
 	return key, nil
 }
 
+// WriteBatch stores multiple entries efficiently.
+func (s *Scratchpad) WriteBatch(ctx context.Context, requests []WriteRequest) ([]string, error) {
+	if s == nil {
+		return nil, fmt.Errorf("scratchpad is nil")
+	}
+	if len(requests) == 0 {
+		return nil, nil
+	}
+
+	now := time.Now().UTC()
+	keys := make([]string, len(requests))
+	var persistEntries []storage.ScratchpadEntry
+
+	s.mu.Lock()
+	s.purgeExpiredLocked(now)
+
+	for i, req := range requests {
+		key := strings.TrimSpace(req.Key)
+		if key == "" {
+			key = ulid.Make().String()
+		}
+		keys[i] = key
+
+		entryType := req.Type
+		if entryType == "" {
+			entryType = EntryTypeAnalysis
+		}
+		createdAt := req.CreatedAt
+		if createdAt.IsZero() {
+			createdAt = now
+		}
+		summary := strings.TrimSpace(req.Summary)
+		if summary == "" {
+			summary = s.summarize(req.Raw)
+		}
+
+		entry := &Entry{
+			Key:        key,
+			Type:       entryType,
+			Raw:        req.Raw,
+			Summary:    summary,
+			Metadata:   cloneMetadata(req.Metadata),
+			CreatedBy:  strings.TrimSpace(req.CreatedBy),
+			CreatedAt:  createdAt,
+			LastAccess: now,
+		}
+
+		if s.isExpired(entry, now) {
+			continue
+		}
+		if existing := s.entries[key]; existing != nil {
+			s.rawBytes -= entrySize(existing)
+		}
+		s.entries[key] = entry
+		s.rawBytes += entrySize(entry)
+
+		if s.shouldPersist(entry, now) && s.store != nil {
+			metadataJSON := ""
+			if entry.Metadata != nil {
+				if data, err := json.Marshal(entry.Metadata); err == nil {
+					metadataJSON = string(data)
+				}
+			}
+			persistEntries = append(persistEntries, storage.ScratchpadEntry{
+				Key:       entry.Key,
+				EntryType: string(entry.Type),
+				Raw:       entry.Raw,
+				Summary:   entry.Summary,
+				Metadata:  metadataJSON,
+				CreatedBy: entry.CreatedBy,
+				CreatedAt: entry.CreatedAt,
+			})
+		}
+	}
+
+	s.enforceLimitsLocked(now)
+	s.mu.Unlock()
+
+	// Persist all entries that need persistence
+	for _, entry := range persistEntries {
+		if _, err := s.store.UpsertScratchpadEntry(ctx, entry); err != nil {
+			// Log but don't fail - memory write succeeded
+			continue
+		}
+	}
+
+	return keys, nil
+}
+
 // Inspect returns a summary-only view for coordinators.
 func (s *Scratchpad) Inspect(ctx context.Context, key string) (*EntrySummary, error) {
 	entry, err := s.getEntry(ctx, key)

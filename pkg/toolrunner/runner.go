@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/odvcencio/buckley/pkg/model"
@@ -14,6 +15,7 @@ import (
 const (
 	defaultMaxIterations  = 25
 	defaultMaxToolsPhase1 = 15
+	defaultMaxParallel    = 5
 )
 
 // ModelClient defines the interface for LLM interactions used by the runner.
@@ -29,6 +31,8 @@ type Config struct {
 	DefaultMaxIterations int
 	MaxToolsPhase1       int
 	EnableReasoning      bool
+	EnableParallelTools  bool // Enable parallel execution of independent tools
+	MaxParallelTools     int  // Max concurrent tool executions (default 5)
 	ToolExecutor         ToolExecutor
 }
 
@@ -81,11 +85,73 @@ type StreamHandler interface {
 	OnComplete(result *Result)
 }
 
+// toolSelectionCache caches tool selection results.
+type toolSelectionCache struct {
+	mu      sync.RWMutex
+	entries map[string]cachedSelection
+	maxSize int
+}
+
+type cachedSelection struct {
+	toolNames []string
+	createdAt time.Time
+}
+
+func newToolSelectionCache(maxSize int) *toolSelectionCache {
+	if maxSize <= 0 {
+		maxSize = 100
+	}
+	return &toolSelectionCache{
+		entries: make(map[string]cachedSelection),
+		maxSize: maxSize,
+	}
+}
+
+func (c *toolSelectionCache) get(key string) ([]string, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	entry, ok := c.entries[key]
+	if !ok {
+		return nil, false
+	}
+	// Cache entries expire after 5 minutes
+	if time.Since(entry.createdAt) > 5*time.Minute {
+		return nil, false
+	}
+	return entry.toolNames, true
+}
+
+func (c *toolSelectionCache) set(key string, toolNames []string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// Enforce max size by removing oldest entries
+	if len(c.entries) >= c.maxSize {
+		var oldestKey string
+		var oldestTime time.Time
+		for k, v := range c.entries {
+			if oldestKey == "" || v.createdAt.Before(oldestTime) {
+				oldestKey = k
+				oldestTime = v.createdAt
+			}
+		}
+		if oldestKey != "" {
+			delete(c.entries, oldestKey)
+		}
+	}
+
+	c.entries[key] = cachedSelection{
+		toolNames: toolNames,
+		createdAt: time.Now(),
+	}
+}
+
 // Runner executes a tool loop with optional tool selection.
 type Runner struct {
 	config         Config
 	streamHandler  StreamHandler
 	maxToolsPhase1 int
+	selectionCache *toolSelectionCache
 }
 
 // New creates a tool runner with the provided config.
@@ -113,6 +179,7 @@ func New(cfg Config) (*Runner, error) {
 	return &Runner{
 		config:         cfg,
 		maxToolsPhase1: maxToolsPhase1,
+		selectionCache: newToolSelectionCache(100),
 	}, nil
 }
 
@@ -163,6 +230,34 @@ func (r *Runner) availableTools(allowed []string) []tool.Tool {
 
 // selectTools performs phase 1: ask model which tools it needs.
 func (r *Runner) selectTools(ctx context.Context, req Request, tools []tool.Tool) ([]tool.Tool, error) {
+	selectionContext := strings.TrimSpace(req.SelectionPrompt)
+	if selectionContext == "" {
+		selectionContext = lastUserMessage(req.Messages)
+	}
+
+	// Build cache key from selection context
+	cacheKey := selectionContext
+
+	// Check cache first
+	if r.selectionCache != nil {
+		if cachedNames, ok := r.selectionCache.get(cacheKey); ok {
+			toolMap := make(map[string]tool.Tool, len(tools))
+			for _, t := range tools {
+				toolMap[t.Name()] = t
+			}
+			var selected []tool.Tool
+			for _, name := range cachedNames {
+				if t, ok := toolMap[name]; ok {
+					selected = append(selected, t)
+				}
+			}
+			if len(selected) > 0 || len(cachedNames) == 0 {
+				return selected, nil
+			}
+			// Cache miss - cached tools no longer available
+		}
+	}
+
 	var catalog strings.Builder
 	catalog.WriteString("Available tools:\n")
 	for _, t := range tools {
@@ -171,11 +266,6 @@ func (r *Runner) selectTools(ctx context.Context, req Request, tools []tool.Tool
 			desc = desc[:idx+1]
 		}
 		catalog.WriteString(fmt.Sprintf("- %s: %s\n", t.Name(), desc))
-	}
-
-	selectionContext := strings.TrimSpace(req.SelectionPrompt)
-	if selectionContext == "" {
-		selectionContext = lastUserMessage(req.Messages)
 	}
 
 	selectionPrompt := fmt.Sprintf(`Given this user request:
@@ -210,6 +300,11 @@ Only include tools you will actually use.`, selectionContext, catalog.String())
 
 	content, _ := model.ExtractTextContent(resp.Choices[0].Message.Content)
 	selectedNames := r.parseToolNames(content)
+
+	// Cache the result
+	if r.selectionCache != nil {
+		r.selectionCache.set(cacheKey, selectedNames)
+	}
 
 	toolMap := make(map[string]tool.Tool, len(tools))
 	for _, t := range tools {
@@ -363,78 +458,138 @@ func (r *Runner) executeToolCalls(ctx context.Context, calls []model.ToolCall, t
 		toolMap[t.Name()] = t
 	}
 
+	// Use parallel execution if enabled and multiple calls
+	if r.config.EnableParallelTools && len(calls) > 1 {
+		return r.executeToolCallsParallel(ctx, calls, toolMap, result)
+	}
+
+	return r.executeToolCallsSequential(ctx, calls, toolMap, result)
+}
+
+func (r *Runner) executeToolCallsSequential(ctx context.Context, calls []model.ToolCall, toolMap map[string]tool.Tool, result *Result) ([]ToolCallRecord, error) {
 	var records []ToolCallRecord
 
 	for _, call := range calls {
-		record := ToolCallRecord{
-			ID:        call.ID,
-			Name:      call.Function.Name,
-			Arguments: call.Function.Arguments,
-		}
-
-		start := time.Now()
-
-		if r.streamHandler != nil {
-			r.streamHandler.OnToolStart(call.Function.Name, call.Function.Arguments)
-		}
-
-		var args map[string]any
-		if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil {
-			record.Error = fmt.Sprintf("invalid arguments: %v", err)
-			record.Result = record.Error
-			record.Success = false
-			record.Duration = time.Since(start).Milliseconds()
-
-			if r.streamHandler != nil {
-				r.streamHandler.OnToolEnd(call.Function.Name, record.Result, fmt.Errorf("%s", record.Error))
-			}
-
-			records = append(records, record)
-			result.ToolCalls = append(result.ToolCalls, record)
-			continue
-		}
-
-		if args == nil {
-			args = map[string]any{}
-		}
-		if call.ID != "" {
-			args[tool.ToolCallIDParam] = call.ID
-		}
-
-		execResult, execErr := r.executeTool(ctx, call, args, toolMap)
-		if execErr != nil {
-			record.Error = execErr.Error()
-			record.Result = record.Error
-			record.Success = false
-			record.Duration = time.Since(start).Milliseconds()
-
-			if r.streamHandler != nil {
-				r.streamHandler.OnToolEnd(call.Function.Name, record.Result, execErr)
-			}
-
-			return records, execErr
-		}
-
-		if execResult.Error != "" {
-			record.Error = execResult.Error
-		}
-		record.Result = execResult.Result
-		record.Success = execResult.Success
-		record.Duration = time.Since(start).Milliseconds()
-
-		if r.streamHandler != nil {
-			var err error
-			if record.Error != "" {
-				err = fmt.Errorf("%s", record.Error)
-			}
-			r.streamHandler.OnToolEnd(call.Function.Name, record.Result, err)
-		}
+		record := r.executeSingleToolCall(ctx, call, toolMap)
 
 		records = append(records, record)
 		result.ToolCalls = append(result.ToolCalls, record)
+
+		// Stop on fatal error (not tool failure, but execution error)
+		if record.Error != "" && !record.Success {
+			// Check if this is a "tool not found" type error vs execution error
+			if strings.Contains(record.Error, "tool not found") {
+				continue // Tool failures are ok, continue
+			}
+		}
 	}
 
 	return records, nil
+}
+
+func (r *Runner) executeToolCallsParallel(ctx context.Context, calls []model.ToolCall, toolMap map[string]tool.Tool, result *Result) ([]ToolCallRecord, error) {
+	maxParallel := r.config.MaxParallelTools
+	if maxParallel <= 0 {
+		maxParallel = defaultMaxParallel
+	}
+
+	// Semaphore for concurrency control
+	sem := make(chan struct{}, maxParallel)
+	records := make([]ToolCallRecord, len(calls))
+
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+
+	for i, call := range calls {
+		i := i
+		call := call
+
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+
+			// Acquire semaphore
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			record := r.executeSingleToolCall(ctx, call, toolMap)
+
+			mu.Lock()
+			records[i] = record
+			mu.Unlock()
+		}()
+	}
+
+	wg.Wait()
+
+	// Append all records to result
+	result.ToolCalls = append(result.ToolCalls, records...)
+
+	return records, nil
+}
+
+func (r *Runner) executeSingleToolCall(ctx context.Context, call model.ToolCall, toolMap map[string]tool.Tool) ToolCallRecord {
+	record := ToolCallRecord{
+		ID:        call.ID,
+		Name:      call.Function.Name,
+		Arguments: call.Function.Arguments,
+	}
+
+	start := time.Now()
+
+	if r.streamHandler != nil {
+		r.streamHandler.OnToolStart(call.Function.Name, call.Function.Arguments)
+	}
+
+	var args map[string]any
+	if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil {
+		record.Error = fmt.Sprintf("invalid arguments: %v", err)
+		record.Result = record.Error
+		record.Success = false
+		record.Duration = time.Since(start).Milliseconds()
+
+		if r.streamHandler != nil {
+			r.streamHandler.OnToolEnd(call.Function.Name, record.Result, fmt.Errorf("%s", record.Error))
+		}
+		return record
+	}
+
+	if args == nil {
+		args = map[string]any{}
+	}
+	if call.ID != "" {
+		args[tool.ToolCallIDParam] = call.ID
+	}
+
+	execResult, execErr := r.executeTool(ctx, call, args, toolMap)
+	if execErr != nil {
+		record.Error = execErr.Error()
+		record.Result = record.Error
+		record.Success = false
+		record.Duration = time.Since(start).Milliseconds()
+
+		if r.streamHandler != nil {
+			r.streamHandler.OnToolEnd(call.Function.Name, record.Result, execErr)
+		}
+		return record
+	}
+
+	if execResult.Error != "" {
+		record.Error = execResult.Error
+	}
+	record.Result = execResult.Result
+	record.Success = execResult.Success
+	record.Duration = time.Since(start).Milliseconds()
+
+	if r.streamHandler != nil {
+		var err error
+		if record.Error != "" {
+			err = fmt.Errorf("%s", record.Error)
+		}
+		r.streamHandler.OnToolEnd(call.Function.Name, record.Result, err)
+	}
+
+	return record
 }
 
 func (r *Runner) executeTool(ctx context.Context, call model.ToolCall, args map[string]any, toolMap map[string]tool.Tool) (ToolExecutionResult, error) {

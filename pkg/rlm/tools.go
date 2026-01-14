@@ -261,6 +261,180 @@ func (t *InspectTool) Execute(params map[string]any) (*builtin.Result, error) {
 	}, nil
 }
 
+// InspectRawTool returns full scratchpad entry content including raw data.
+type InspectRawTool struct {
+	scratchpad  *Scratchpad
+	ctxProvider func() context.Context
+}
+
+// NewInspectRawTool constructs an inspect_raw tool.
+func NewInspectRawTool(scratchpad *Scratchpad, ctxProvider func() context.Context) *InspectRawTool {
+	return &InspectRawTool{scratchpad: scratchpad, ctxProvider: ctxProvider}
+}
+
+func (t *InspectRawTool) Name() string {
+	return "inspect_raw"
+}
+
+func (t *InspectRawTool) Description() string {
+	return "Inspect a scratchpad entry with full raw content. Use when summary is insufficient."
+}
+
+func (t *InspectRawTool) Parameters() builtin.ParameterSchema {
+	return builtin.ParameterSchema{
+		Type: "object",
+		Properties: map[string]builtin.PropertySchema{
+			"key": {
+				Type:        "string",
+				Description: "Scratchpad entry key",
+			},
+			"max_length": {
+				Type:        "integer",
+				Description: "Max raw content length to return (default 10000)",
+			},
+		},
+		Required: []string{"key"},
+	}
+}
+
+func (t *InspectRawTool) Execute(params map[string]any) (*builtin.Result, error) {
+	if t == nil || t.scratchpad == nil {
+		return &builtin.Result{Success: false, Error: "scratchpad unavailable"}, nil
+	}
+	key, ok := params["key"].(string)
+	if !ok || strings.TrimSpace(key) == "" {
+		return &builtin.Result{Success: false, Error: "key must be a non-empty string"}, nil
+	}
+
+	maxLength := parseInt(params["max_length"], 10000)
+	if maxLength <= 0 {
+		maxLength = 10000
+	}
+
+	ctx := context.Background()
+	if t.ctxProvider != nil {
+		ctx = t.ctxProvider()
+	}
+
+	entry, err := t.scratchpad.InspectRaw(ctx, key)
+	if err != nil {
+		return &builtin.Result{Success: false, Error: err.Error()}, nil
+	}
+	if entry == nil {
+		return &builtin.Result{Success: false, Error: "scratchpad entry not found"}, nil
+	}
+
+	rawContent := string(entry.Raw)
+	truncated := false
+	if len(rawContent) > maxLength {
+		rawContent = rawContent[:maxLength]
+		truncated = true
+	}
+
+	return &builtin.Result{
+		Success: true,
+		Data: map[string]any{
+			"key":        entry.Key,
+			"type":       string(entry.Type),
+			"raw":        rawContent,
+			"truncated":  truncated,
+			"total_size": len(entry.Raw),
+			"summary":    entry.Summary,
+			"metadata":   entry.Metadata,
+			"created_by": entry.CreatedBy,
+			"created_at": entry.CreatedAt,
+		},
+	}, nil
+}
+
+// ListScratchpadTool lists recent scratchpad entries.
+type ListScratchpadTool struct {
+	scratchpad  *Scratchpad
+	ctxProvider func() context.Context
+}
+
+// NewListScratchpadTool constructs a list_scratchpad tool.
+func NewListScratchpadTool(scratchpad *Scratchpad, ctxProvider func() context.Context) *ListScratchpadTool {
+	return &ListScratchpadTool{scratchpad: scratchpad, ctxProvider: ctxProvider}
+}
+
+func (t *ListScratchpadTool) Name() string {
+	return "list_scratchpad"
+}
+
+func (t *ListScratchpadTool) Description() string {
+	return "List recent scratchpad entries. Use to see what data is available without searching."
+}
+
+func (t *ListScratchpadTool) Parameters() builtin.ParameterSchema {
+	return builtin.ParameterSchema{
+		Type: "object",
+		Properties: map[string]builtin.PropertySchema{
+			"limit": {
+				Type:        "integer",
+				Description: "Max entries to return (default 20)",
+			},
+			"type": {
+				Type:        "string",
+				Description: "Optional filter by entry type: file, command, analysis, decision, artifact, strategy",
+			},
+		},
+	}
+}
+
+func (t *ListScratchpadTool) Execute(params map[string]any) (*builtin.Result, error) {
+	if t == nil || t.scratchpad == nil {
+		return &builtin.Result{Success: false, Error: "scratchpad unavailable"}, nil
+	}
+
+	limit := parseInt(params["limit"], 20)
+	if limit <= 0 {
+		limit = 20
+	}
+	typeFilter, _ := params["type"].(string)
+
+	ctx := context.Background()
+	if t.ctxProvider != nil {
+		ctx = t.ctxProvider()
+	}
+
+	entries, err := t.scratchpad.ListSummaries(ctx, limit*2) // Get extra for filtering
+	if err != nil {
+		return &builtin.Result{Success: false, Error: err.Error()}, nil
+	}
+
+	// Filter by type if specified
+	var filtered []EntrySummary
+	for _, entry := range entries {
+		if typeFilter != "" && string(entry.Type) != typeFilter {
+			continue
+		}
+		filtered = append(filtered, entry)
+		if len(filtered) >= limit {
+			break
+		}
+	}
+
+	data := make([]map[string]any, 0, len(filtered))
+	for _, entry := range filtered {
+		data = append(data, map[string]any{
+			"key":        entry.Key,
+			"type":       string(entry.Type),
+			"summary":    entry.Summary,
+			"created_by": entry.CreatedBy,
+			"created_at": entry.CreatedAt,
+		})
+	}
+
+	return &builtin.Result{
+		Success: true,
+		Data: map[string]any{
+			"entries": data,
+			"count":   len(data),
+		},
+	}, nil
+}
+
 // SetAnswerTool updates the runtime answer state.
 type SetAnswerTool struct {
 	answer *Answer
@@ -586,6 +760,18 @@ func (t *RecordStrategyTool) Parameters() builtin.ParameterSchema {
 	}
 }
 
+// Valid strategy categories
+var validStrategyCategories = map[string]bool{
+	"decomposition":   true,
+	"approach":        true,
+	"retry_approach":  true,
+	"lesson_learned":  true,
+	"architecture":    true,
+	"optimization":    true,
+	"error_handling":  true,
+	"decision":        true,
+}
+
 func (t *RecordStrategyTool) Execute(params map[string]any) (*builtin.Result, error) {
 	if t == nil || t.scratchpad == nil {
 		return &builtin.Result{Success: false, Error: "scratchpad unavailable"}, nil
@@ -596,8 +782,20 @@ func (t *RecordStrategyTool) Execute(params map[string]any) (*builtin.Result, er
 	details, _ := params["details"].(string)
 	rationale, _ := params["rationale"].(string)
 
-	if strings.TrimSpace(category) == "" {
+	category = strings.TrimSpace(strings.ToLower(category))
+	if category == "" {
 		return &builtin.Result{Success: false, Error: "category required"}, nil
+	}
+	// Validate category
+	if !validStrategyCategories[category] {
+		validList := make([]string, 0, len(validStrategyCategories))
+		for k := range validStrategyCategories {
+			validList = append(validList, k)
+		}
+		return &builtin.Result{
+			Success: false,
+			Error:   fmt.Sprintf("invalid category %q; valid categories: %s", category, strings.Join(validList, ", ")),
+		}, nil
 	}
 	if strings.TrimSpace(summary) == "" {
 		return &builtin.Result{Success: false, Error: "summary required"}, nil

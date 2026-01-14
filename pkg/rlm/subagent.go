@@ -167,6 +167,11 @@ func (a *SubAgent) Execute(ctx context.Context, task string) (*SubAgentResult, e
 		return nil, fmt.Errorf("task required")
 	}
 
+	// Ensure all locks are released when this sub-agent completes or is cancelled
+	if a.conflicts != nil {
+		defer a.conflicts.ReleaseAll(a.id)
+	}
+
 	allowedRegistry, allowedSet := a.allowedRegistry(ctx)
 
 	result := &SubAgentResult{

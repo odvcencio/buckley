@@ -903,9 +903,20 @@ func (r *Runtime) recordHistory(event IterationEvent) {
 // compactHistoryLocked summarizes old iterations to save context space.
 // Must be called with historyMu held.
 func (r *Runtime) compactHistoryLocked() {
-	const maxItems = 8     // Keep this many items max
-	const compactBatch = 3 // Compact this many old items into one
-	const keepRecent = 3   // Always keep this many recent items uncompacted
+	maxItems := r.config.Coordinator.HistoryMaxItems
+	compactBatch := r.config.Coordinator.HistoryCompactN
+	keepRecent := r.config.Coordinator.HistoryKeepRecent
+
+	// Use defaults if not configured
+	if maxItems <= 0 {
+		maxItems = 8
+	}
+	if compactBatch <= 0 {
+		compactBatch = 3
+	}
+	if keepRecent <= 0 {
+		keepRecent = 3
+	}
 
 	if len(r.history) <= maxItems {
 		return

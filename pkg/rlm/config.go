@@ -10,6 +10,10 @@ type CoordinatorConfig struct {
 	MaxWallTime         time.Duration
 	ConfidenceThreshold float64
 	StreamPartials      bool
+	// History compaction settings
+	HistoryMaxItems   int // Max items before compaction (default 8)
+	HistoryCompactN   int // Number of old items to compact together (default 3)
+	HistoryKeepRecent int // Always keep this many recent items uncompacted (default 3)
 }
 
 // SubAgentConfig controls sub-agent execution.
@@ -49,6 +53,9 @@ func DefaultConfig() Config {
 			MaxWallTime:         10 * time.Minute,
 			ConfidenceThreshold: 0.95,
 			StreamPartials:      true,
+			HistoryMaxItems:     8,
+			HistoryCompactN:     3,
+			HistoryKeepRecent:   3,
 		},
 		SubAgent: SubAgentConfig{
 			Model:         "", // Empty = use execution model
@@ -80,6 +87,15 @@ func (c *Config) Normalize() {
 	}
 	if c.Coordinator.ConfidenceThreshold <= 0 {
 		c.Coordinator.ConfidenceThreshold = 0.95
+	}
+	if c.Coordinator.HistoryMaxItems <= 0 {
+		c.Coordinator.HistoryMaxItems = 8
+	}
+	if c.Coordinator.HistoryCompactN <= 0 {
+		c.Coordinator.HistoryCompactN = 3
+	}
+	if c.Coordinator.HistoryKeepRecent <= 0 {
+		c.Coordinator.HistoryKeepRecent = 3
 	}
 	if c.SubAgent.MaxConcurrent <= 0 {
 		c.SubAgent.MaxConcurrent = 5

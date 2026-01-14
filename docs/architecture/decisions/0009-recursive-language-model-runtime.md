@@ -2,35 +2,33 @@
 
 ## Status
 
-Accepted (Revised)
+Accepted
 
 ## Context
 
 Complex tasks benefit from iterative refinement:
 - Initial responses may be incomplete or low-confidence
-- Different subtasks have different complexity (trivial lookup vs. deep reasoning)
-- Cost optimization requires routing to appropriate model tiers
 - Long-running tasks need persistence and resumability
 - Agents need shared memory for coordination
+- Observability into agent behavior is essential
 
 Requirements:
 - Iterative refinement until confidence threshold met
-- Tiered model routing by task complexity
 - Budget and iteration limits
 - Coordination of parallel subtasks
-- Observability into agent behavior
-- Graceful handling of failures with escalation
+- Graceful handling of failures with circuit breakers
+- Full observability via telemetry
 
 Options considered:
 1. **Single-shot execution** - Simple but quality ceiling
 2. **Fixed retry loops** - Better but inflexible
-3. **Coordinator-driven iteration with tiers** - Adaptive, cost-optimized
+3. **Coordinator-driven iteration** - Adaptive, observable
 
 ## Decision
 
 ### Execution Modes: Classic vs RLM
 
-Buckley supports two execution modes, both built on the same ToolRunner foundation. ToolRunner is a shared tool-use loop, not an execution mode.
+Buckley supports two execution modes, both built on the same ToolRunner foundation.
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -49,43 +47,38 @@ Buckley supports two execution modes, both built on the same ToolRunner foundati
 │      Classic Mode       │     │         RLM Mode            │
 │                         │     │                             │
 │  Single agent context   │     │  Coordinator + Sub-agents   │
-│  Direct tool access     │     │  Tiered model routing       │
-│  Simple conversations   │     │  Parallel task dispatch     │
-│                         │     │  Iterative refinement       │
-│  Best for:              │     │  Shared scratchpad memory   │
-│  - Quick tasks          │     │                             │
-│  - Direct Q&A           │     │  Best for:                  │
-│  - Single-file edits    │     │  - Complex multi-step tasks │
-│                         │     │  - Research + synthesis     │
-│                         │     │  - Cost-sensitive workloads │
+│  Direct tool access     │     │  Parallel task dispatch     │
+│  Simple conversations   │     │  Iterative refinement       │
+│                         │     │  Shared scratchpad memory   │
+│  Best for:              │     │                             │
+│  - Quick tasks          │     │  Best for:                  │
+│  - Direct Q&A           │     │  - Complex multi-step tasks │
+│  - Single-file edits    │     │  - Research + synthesis     │
+│                         │     │  - Long-running work        │
 └─────────────────────────┘     └─────────────────────────────┘
 ```
-
-**ToolRunner** is the de facto tool execution pattern for both modes. It implements:
-- Two-phase selection when many tools available (reduces tokens)
-- Automatic tool loop (call → result → continue until done)
-- Streaming events for UI responsiveness
 
 ### RLM Architecture
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
 │                        Coordinator                            │
-│  - Assesses task complexity                                  │
-│  - Delegates to sub-agents with weight hints                 │
-│  - Tracks iteration history                                  │
+│  - Breaks down user request into sub-tasks                   │
+│  - Delegates to sub-agents via delegate/delegate_batch       │
+│  - Reviews summaries and scratchpad entries                  │
+│  - Tracks iteration history with automatic compaction        │
 │  - Monitors budget (tokens, wall time)                       │
-│  - Decides when answer is ready                              │
+│  - Sets final answer when confident                          │
 └──────────────────────────────────────────────────────────────┘
                               │
           ┌───────────────────┼───────────────────┐
           ▼                   ▼                   ▼
 ┌─────────────────┐ ┌─────────────────┐ ┌─────────────────┐
-│  Sub-Agent      │ │  Sub-Agent      │ │  Sub-Agent      │
-│  (trivial)      │ │  (medium)       │ │  (reasoning)    │
+│   Sub-Agent 1   │ │   Sub-Agent 2   │ │   Sub-Agent N   │
 │                 │ │                 │ │                 │
-│  Fast model     │ │  Balanced       │ │  Deep thinking  │
-│  Simple lookups │ │  Most tasks     │ │  Complex logic  │
+│  Uses configured│ │  Parallel       │ │  Circuit        │
+│  model          │ │  execution      │ │  breaker        │
+│  Full tool access│ │  via Dispatcher │ │  protection     │
 └─────────────────┘ └─────────────────┘ └─────────────────┘
           │                   │                   │
           └───────────────────┼───────────────────┘
@@ -93,9 +86,10 @@ Buckley supports two execution modes, both built on the same ToolRunner foundati
 ┌──────────────────────────────────────────────────────────────┐
 │                        Scratchpad                             │
 │  - Shared memory between agents                              │
-│  - Persists strategic decisions                              │
-│  - RAG-enabled semantic search                               │
-│  - TTL-based expiration                                      │
+│  - Entry types: file, command, analysis, decision, artifact  │
+│  - Strategic decisions persist across sessions               │
+│  - RAG-enabled semantic search (optional)                    │
+│  - TTL-based expiration with LRU eviction                    │
 └──────────────────────────────────────────────────────────────┘
 ```
 
@@ -107,80 +101,74 @@ type Answer struct {
     Ready      bool
     Confidence float64
     Artifacts  []string
+    NextSteps  []string
     Iteration  int
     TokensUsed int
 }
 
-type RLMCoordinatorConfig struct {
-    Model               string
-    MaxIterations       int
-    MaxTokensBudget     int
-    MaxWallTime         time.Duration
-    ConfidenceThreshold float64
+type CoordinatorConfig struct {
+    Model               string        // Model for coordinator
+    MaxIterations       int           // Default: 10
+    MaxTokensBudget     int           // 0 = unlimited
+    MaxWallTime         time.Duration // Default: 10m
+    ConfidenceThreshold float64       // Default: 0.95
     StreamPartials      bool
 }
-```
 
-### Model Tiers and Adaptive Escalation
-
-Route subtasks to appropriate models based on complexity:
-
-```yaml
-rlm:
-  tiers:
-    trivial:
-      max_cost_per_million: 0.50
-      min_context_window: 8000
-      prefer: [speed, cost]
-    light:
-      max_cost_per_million: 3.00
-      prefer: [cost, quality]
-    medium:
-      max_cost_per_million: 10.00
-      prefer: [quality, cost]
-    heavy:
-      max_cost_per_million: 30.00
-      prefer: [quality]
-    reasoning:
-      min_context_window: 100000
-      requires: [extended_thinking]
-```
-
-**Adaptive Escalation**: When a sub-agent fails at a given tier, automatically retry with the next higher tier:
-
-```
-trivial → light → medium → heavy → reasoning
-```
-
-Each escalation is tracked and reported:
-```go
-type BatchResult struct {
-    WeightRequested   Weight   // Original tier requested
-    WeightUsed        Weight   // Actual tier after escalation
-    WeightExplanation string   // Why this tier was chosen
-    EscalationPath    []string // Models tried before success
-    ToolCalls         []ToolCallEvent
+type SubAgentConfig struct {
+    Model         string        // Model for sub-agents (empty = execution model)
+    MaxConcurrent int           // Parallel execution limit (default: 5)
+    Timeout       time.Duration // Per-task timeout (default: 5m)
 }
 ```
 
-### Iteration Loop with History
+### Coordinator Tools
+
+The coordinator orchestrates via these built-in tools:
+
+| Tool | Purpose |
+|------|---------|
+| `delegate` | Dispatch a single task to a sub-agent |
+| `delegate_batch` | Dispatch multiple independent tasks in parallel |
+| `inspect` | Retrieve full details from a scratchpad entry |
+| `record_strategy` | Persist strategic decisions for future context |
+| `search_scratchpad` | Semantic search over past work (RAG-enabled) |
+| `set_answer` | Declare the final response with confidence |
+
+### Sub-Agent Execution
+
+Sub-agents use the ToolRunner pattern with:
+- Configurable model (falls back to execution model if not set)
+- Full tool access from the registry (filterable via approver)
+- Conflict detection for concurrent file access (read/write locks)
+- Automatic scratchpad writes for task output
+
+```go
+type SubTask struct {
+    ID            string
+    Prompt        string
+    AllowedTools  []string  // Optional tool filter
+    SystemPrompt  string    // Custom prompt override
+    MaxIterations int       // Per-task iteration limit
+}
+```
+
+### Iteration Loop
 
 ```
 1. Coordinator receives task
-2. Build context with iteration history (compacted if needed)
-3. Assess complexity, delegate to sub-agents
-4. Sub-agents execute (with escalation on failure)
+2. Build context with budget status and iteration history
+3. Coordinator delegates to sub-agents
+4. Sub-agents execute with tool access
 5. Results written to scratchpad
-6. Record iteration in history
-7. If confidence < threshold AND budget remains:
-   - Compact old iterations if approaching token limit
-   - Goto 2
+6. Record iteration in history (auto-compact if >8 items)
+7. If confidence < threshold AND budget remains: goto 2
 8. Return final answer (or checkpoint for resume)
 ```
 
-### Budget Visualization
+### Budget Tracking
 
-The coordinator receives real-time budget status:
+Real-time budget status provided to coordinator:
 
 ```go
 type BudgetStatus struct {
@@ -191,25 +179,23 @@ type BudgetStatus struct {
     WallTimeElapsed string
     WallTimeMax     string
     WallTimePercent float64
-    Warning         string  // "high", "critical", or ""
+    Warning         string  // "low" at 75%, "critical" at 90%
 }
 ```
-
-Warnings trigger at 75% (high) and 90% (critical) utilization, informing the coordinator to prioritize completion.
 
 ### Context Compaction
 
-As iterations accumulate, older history is compacted to preserve token budget:
+Iteration history auto-compacts to preserve token budget:
 
 ```go
-type CompactionConfig struct {
-    MaxHistoryItems   int  // Keep this many recent iterations full
-    CompactOlderThan  int  // Compact iterations older than this
-    SummaryMaxLength  int  // Max chars per compacted summary
-}
+const (
+    maxItems     = 8  // Keep this many items max
+    compactBatch = 3  // Compact this many old items into one
+    keepRecent   = 3  // Always keep recent items uncompacted
+)
 ```
 
-Compaction preserves essential information (delegations, outcomes) while reducing token overhead from detailed reasoning traces.
+Compaction preserves essential information (delegations, outcomes) while reducing token overhead.
 
 ### Checkpoint and Resume
 
@@ -227,15 +213,13 @@ type Checkpoint struct {
 }
 
 // Create checkpoint mid-execution
-checkpoint := runtime.CreateCheckpoint()
+checkpoint, _ := runtime.CreateCheckpoint(task, &answer)
 
 // Resume later
 result, err := runtime.ResumeFromCheckpoint(ctx, checkpoint)
 ```
 
-### Scratchpad with Strategic Persistence
-
-Entry types with persistence rules:
+### Scratchpad Entry Types
 
 | Type | Persists | Use Case |
 |------|----------|----------|
@@ -246,20 +230,9 @@ Entry types with persistence rules:
 | `artifact` | Yes | Generated outputs |
 | `strategy` | Yes | Strategic decisions for future context |
 
-Strategic decisions are explicitly recorded:
-```go
-// Coordinator can record strategic decisions
-scratchpad.Write(ctx, WriteRequest{
-    Type:      EntryTypeStrategy,
-    Raw:       []byte("Chose microservices over monolith because..."),
-    Summary:   "Architecture: microservices",
-    CreatedBy: "coordinator",
-})
-```
+### RAG-Enabled Search
 
-### RAG-Enabled Scratchpad Search
-
-Semantic search over scratchpad entries using embeddings:
+Optional semantic search over scratchpad entries:
 
 ```go
 type ScratchpadRAG struct {
@@ -270,8 +243,22 @@ type ScratchpadRAG struct {
 
 // Search for relevant past context
 results, _ := rag.Search(ctx, "authentication decisions", 5)
-for _, r := range results {
-    fmt.Printf("%s (%.2f): %s\n", r.Entry.Key, r.Similarity, r.Entry.Summary)
+```
+
+### Dispatcher with Circuit Breaker
+
+The Dispatcher manages sub-agent execution with:
+- Concurrency control via semaphore
+- Optional rate limiting
+- Circuit breaker for failure protection
+
+```go
+type DispatcherConfig struct {
+    MaxConcurrent int
+    Timeout       time.Duration
+    RateLimit     rate.Limit
+    Burst         int
+    Circuit       reliability.CircuitBreakerConfig
 }
 ```
 
@@ -282,31 +269,28 @@ Real-time observability into RLM execution:
 ```go
 const (
     EventRLMIteration     = "rlm.iteration"      // Iteration completed
-    EventRLMDelegation    = "rlm.delegation"     // Task delegated
-    EventRLMEscalation    = "rlm.escalation"     // Weight tier escalated
-    EventRLMToolCall      = "rlm.tool_call"      // Sub-agent tool execution
-    EventRLMReasoning     = "rlm.reasoning"      // Coordinator reasoning trace
     EventRLMBudgetWarning = "rlm.budget_warning" // Budget threshold crossed
+    EventTaskStarted      = "task.started"       // Sub-agent task started
+    EventTaskCompleted    = "task.completed"     // Sub-agent task completed
+    EventTaskFailed       = "task.failed"        // Sub-agent task failed
+    EventCircuitFailure   = "circuit.failure"    // Circuit breaker failure
+    EventCircuitStateChange = "circuit.state_change"
 )
 ```
-
-Events flow to TUI for real-time display in the sidebar.
 
 ## Consequences
 
 ### Positive
 - Quality improves with iteration
-- Cost optimization via tier routing
-- Automatic escalation handles transient failures
 - Budget visibility prevents runaway costs
 - Checkpointing enables long task resumption
 - RAG retrieves relevant past context
+- Circuit breaker prevents cascade failures
 - Full observability via telemetry
 
 ### Negative
 - Added latency for multiple iterations
 - Complexity in coordinator logic
-- Tier selection heuristics need tuning
 - Embedding costs for RAG (mitigated by caching)
 - Checkpoint storage overhead
 
@@ -315,26 +299,23 @@ Events flow to TUI for real-time display in the sidebar.
 ```yaml
 rlm:
   coordinator:
-    model: "anthropic/claude-sonnet"
+    model: "auto"  # Uses execution model
     max_iterations: 10
-    max_tokens_budget: 100000
-    max_wall_time: 5m
-    confidence_threshold: 0.85
+    max_tokens_budget: 0  # Unlimited
+    max_wall_time: 10m
+    confidence_threshold: 0.95
+    stream_partials: true
 
-  batch:
+  sub_agent:
+    model: ""  # Empty = use execution model
     max_concurrent: 5
-    enable_escalation: true
-    max_escalations: 2
+    timeout: 5m
 
   scratchpad:
     max_entries_memory: 1000
+    max_raw_bytes_memory: 52428800  # 50MB
     eviction_policy: lru
     default_ttl: 1h
     persist_artifacts: true
     persist_decisions: true
-
-  history:
-    max_items: 20
-    compact_older_than: 5
-    summary_max_length: 500
 ```

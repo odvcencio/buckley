@@ -6,9 +6,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -774,11 +776,9 @@ func (c *Controller) addCuratedModel(modelID string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	for _, id := range c.cfg.Models.Curated {
-		if id == modelID {
-			c.app.AddMessage("Model already in curated list: "+modelID, "system")
-			return
-		}
+	if slices.Contains(c.cfg.Models.Curated, modelID) {
+		c.app.AddMessage("Model already in curated list: "+modelID, "system")
+		return
 	}
 	c.cfg.Models.Curated = append(c.cfg.Models.Curated, modelID)
 	c.app.AddMessage("Added model to curated list. Use /model curate save to persist.", "system")
@@ -1287,7 +1287,7 @@ func (c *Controller) runToolLoop(ctx context.Context, sess *SessionState, modelI
 	maxIterations := 10
 	totalUsage := model.Usage{}
 
-	for iter := 0; iter < maxIterations; iter++ {
+	for range maxIterations {
 		if ctx.Err() != nil {
 			return "", nil, ctx.Err()
 		}
@@ -2538,6 +2538,7 @@ Be specific with file:line references. Flag critical issues first.`, "```diff\n"
 	c.mu.Lock()
 	if len(c.sessions) == 0 {
 		c.mu.Unlock()
+		cancel()
 		c.app.AddMessage("No active session available.", "system")
 		return
 	}
@@ -2592,6 +2593,7 @@ Output ONLY the commit message, nothing else.`, "```diff\n"+diff+"\n```", recent
 	c.mu.Lock()
 	if len(c.sessions) == 0 {
 		c.mu.Unlock()
+		cancel()
 		c.app.AddMessage("No active session available.", "system")
 		return
 	}
@@ -3108,9 +3110,7 @@ func copyDurationMap(src map[string]time.Duration) map[string]time.Duration {
 		return nil
 	}
 	out := make(map[string]time.Duration, len(src))
-	for key, value := range src {
-		out[key] = value
-	}
+	maps.Copy(out, src)
 	return out
 }
 
