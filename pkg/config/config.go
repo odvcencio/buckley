@@ -205,6 +205,8 @@ type PromptCacheConfig struct {
 	Providers      []string `yaml:"providers"`
 	SystemMessages int      `yaml:"system_messages"`
 	TailMessages   int      `yaml:"tail_messages"`
+	Key            string   `yaml:"key"`
+	Retention      string   `yaml:"retention"`
 }
 
 // EncodingConfig controls serialization preferences.
@@ -691,9 +693,11 @@ func DefaultConfig() *Config {
 		},
 		PromptCache: PromptCacheConfig{
 			Enabled:        false,
-			Providers:      []string{"anthropic"},
+			Providers:      []string{"anthropic", "openrouter", "litellm", "openai"},
 			SystemMessages: 1,
 			TailMessages:   2,
+			Key:            "",
+			Retention:      "",
 		},
 		Encoding: EncodingConfig{
 			UseToon: true,
@@ -1369,6 +1373,11 @@ func (c *Config) Validate() error {
 	}
 	if c.PromptCache.TailMessages < 0 {
 		return fmt.Errorf("prompt_cache.tail_messages must be >= 0")
+	}
+	if retention := strings.ToLower(strings.TrimSpace(c.PromptCache.Retention)); retention != "" {
+		if retention != "in-memory" && retention != "24h" {
+			return fmt.Errorf("prompt_cache.retention must be in-memory or 24h")
+		}
 	}
 
 	// Validate quirk probability

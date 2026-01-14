@@ -207,27 +207,47 @@ func applyProviderTransforms(req ChatRequest, providerID string) ChatRequest {
 }
 
 func (m *Manager) applyPromptCache(req ChatRequest, providerID string) ChatRequest {
-	if req.PromptCache != nil {
+	var cfg config.PromptCacheConfig
+	if m != nil && m.config != nil {
+		cfg = m.config.PromptCache
+	}
+
+	cache := req.PromptCache
+	cacheEnabled := cache != nil && cache.Enabled
+	if !cacheEnabled {
+		if !cfg.Enabled {
+			return req
+		}
+		if len(cfg.Providers) > 0 && !containsString(cfg.Providers, providerID) {
+			return req
+		}
+		cache = &PromptCache{
+			Enabled:        true,
+			SystemMessages: cfg.SystemMessages,
+			TailMessages:   cfg.TailMessages,
+		}
+		req.PromptCache = cache
+		cacheEnabled = true
+	}
+
+	if !cacheEnabled {
 		return req
 	}
-	if m == nil || m.config == nil {
-		return req
+
+	switch providerID {
+	case "openrouter", "litellm":
+		if cache.SystemMessages > 0 || cache.TailMessages > 0 {
+			req.Messages = applyOpenAICompatiblePromptCache(req.Messages, cache)
+		}
+	case "openai":
+		if req.PromptCacheKey == "" {
+			req.PromptCacheKey = strings.TrimSpace(cfg.Key)
+		}
+		if req.PromptCacheRetention == "" {
+			req.PromptCacheRetention = strings.TrimSpace(cfg.Retention)
+		}
 	}
-	cfg := m.config.PromptCache
-	if !cfg.Enabled {
-		return req
-	}
-	if cfg.SystemMessages <= 0 && cfg.TailMessages <= 0 {
-		return req
-	}
-	if len(cfg.Providers) > 0 && !containsString(cfg.Providers, providerID) {
-		return req
-	}
-	req.PromptCache = &PromptCache{
-		Enabled:        true,
-		SystemMessages: cfg.SystemMessages,
-		TailMessages:   cfg.TailMessages,
-	}
+
 	return req
 }
 

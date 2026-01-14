@@ -61,12 +61,19 @@ type ContentPart struct {
 	Type     string    `json:"type"` // "text" or "image_url"
 	Text     string    `json:"text,omitempty"`
 	ImageURL *ImageURL `json:"image_url,omitempty"`
+	// CacheControl is used by providers that support prompt caching.
+	CacheControl *CacheControl `json:"cache_control,omitempty"`
 }
 
 // ImageURL represents an image URL in a content part
 type ImageURL struct {
 	URL    string `json:"url"`
 	Detail string `json:"detail,omitempty"` // "low", "high", "auto"
+}
+
+// CacheControl marks content blocks for prompt caching.
+type CacheControl struct {
+	Type string `json:"type"`
 }
 
 // ToolCall represents a function/tool call from the assistant
@@ -96,16 +103,18 @@ type PromptCache struct {
 
 // ChatRequest represents a request to the chat completion API
 type ChatRequest struct {
-	Model       string           `json:"model"`
-	Messages    []Message        `json:"messages"`
-	Temperature float64          `json:"temperature,omitempty"`
-	MaxTokens   int              `json:"max_tokens,omitempty"`
-	Stream      bool             `json:"stream"`
-	Tools       []map[string]any `json:"tools,omitempty"`       // OpenAI function definitions
-	ToolChoice  string           `json:"tool_choice,omitempty"` // "auto", "none", or specific function
-	Reasoning   *ReasoningConfig `json:"reasoning,omitempty"`   // Reasoning config for supported models
-	Transforms  []string         `json:"transforms,omitempty"`  // Provider-specific prompt transforms (e.g., OpenRouter)
-	PromptCache *PromptCache     `json:"-"`
+	Model                string           `json:"model"`
+	Messages             []Message        `json:"messages"`
+	Temperature          float64          `json:"temperature,omitempty"`
+	MaxTokens            int              `json:"max_tokens,omitempty"`
+	Stream               bool             `json:"stream"`
+	Tools                []map[string]any `json:"tools,omitempty"`                // OpenAI function definitions
+	ToolChoice           string           `json:"tool_choice,omitempty"`          // "auto", "none", or specific function
+	Reasoning            *ReasoningConfig `json:"reasoning,omitempty"`            // Reasoning config for supported models
+	Transforms           []string         `json:"transforms,omitempty"`           // Provider-specific prompt transforms (e.g., OpenRouter)
+	PromptCacheKey       string           `json:"prompt_cache_key,omitempty"`      // OpenAI prompt caching key
+	PromptCacheRetention string           `json:"prompt_cache_retention,omitempty"` // OpenAI prompt cache retention
+	PromptCache          *PromptCache     `json:"-"`
 }
 
 // ChatResponse represents a non-streaming chat completion response
