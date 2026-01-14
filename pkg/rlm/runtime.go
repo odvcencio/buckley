@@ -89,6 +89,11 @@ The context shows your remaining tokens and wall time. Plan accordingly:
 
 Remember: You see summaries, not raw output. Trust sub-agents to execute correctly and focus on coordination.`
 
+const (
+	coordinatorMaxMessages  = 40
+	coordinatorKeepMessages = 12
+)
+
 // IterationEvent captures progress for observers.
 type IterationEvent struct {
 	Iteration      int
@@ -243,6 +248,7 @@ func NewRuntime(cfg Config, deps RuntimeDeps) (*Runtime, error) {
 	// Initialize RAG-based scratchpad search if embedder is provided
 	if deps.Embedder != nil {
 		runtime.scratchpadRAG = NewScratchpadRAG(scratchpad, deps.Embedder)
+		scratchpad.SetOnWrite(runtime.scratchpadRAG.OnWrite)
 	}
 
 	return runtime, nil
@@ -351,9 +357,9 @@ func (r *Runtime) executeFromState(ctx context.Context, task string, answer *Ans
 	if maxWallTime <= 0 {
 		maxWallTime = DefaultConfig().Coordinator.MaxWallTime
 	}
-	confidenceThreshold := r.config.Coordinator.ConfidenceThreshold
-	if confidenceThreshold <= 0 {
-		confidenceThreshold = DefaultConfig().Coordinator.ConfidenceThreshold
+	baseConfidenceThreshold := r.config.Coordinator.ConfidenceThreshold
+	if baseConfidenceThreshold <= 0 {
+		baseConfidenceThreshold = DefaultConfig().Coordinator.ConfidenceThreshold
 	}
 
 	runtimeDeadline := false
@@ -379,6 +385,9 @@ func (r *Runtime) executeFromState(ctx context.Context, task string, answer *Ans
 	if answer.Iteration > 0 {
 		resumeNote = fmt.Sprintf("\n[Resumed from iteration %d with %d tokens used]\n", answer.Iteration, answer.TokensUsed)
 	}
+
+	budgetStatus := r.calculateBudgetStatus(answer.TokensUsed, maxTokens, start)
+	confidenceThreshold := r.adaptiveConfidenceThreshold(baseConfidenceThreshold, budgetStatus)
 
 	messages := []model.Message{
 		{Role: "system", Content: coordinatorSystemPrompt},
@@ -419,6 +428,7 @@ func (r *Runtime) executeFromState(ctx context.Context, task string, answer *Ans
 				answer.Ready = true
 			}
 			summaries := r.collectScratchpadSummaries(ctx, 6)
+			budgetStatus := r.calculateBudgetStatus(answer.TokensUsed, maxTokens, start)
 			r.emitIteration(IterationEvent{
 				Iteration:      answer.Iteration,
 				MaxIterations:  maxIterations,
@@ -428,7 +438,7 @@ func (r *Runtime) executeFromState(ctx context.Context, task string, answer *Ans
 				Summary:        answer.Content,
 				Scratchpad:     summaries,
 				ReasoningTrace: content,
-				BudgetStatus:   r.calculateBudgetStatus(answer.TokensUsed, maxTokens, start),
+				BudgetStatus:   budgetStatus,
 			})
 			break
 		}
@@ -452,6 +462,8 @@ func (r *Runtime) executeFromState(ctx context.Context, task string, answer *Ans
 			})
 		}
 
+		budgetStatus := r.calculateBudgetStatus(answer.TokensUsed, maxTokens, start)
+		confidenceThreshold = r.adaptiveConfidenceThreshold(baseConfidenceThreshold, budgetStatus)
 		if maxTokens > 0 && answer.TokensUsed >= maxTokens {
 			answer.Ready = true
 		}
@@ -470,7 +482,7 @@ func (r *Runtime) executeFromState(ctx context.Context, task string, answer *Ans
 			Scratchpad:     summaries,
 			ReasoningTrace: reasoningTrace,
 			Delegations:    delegations,
-			BudgetStatus:   r.calculateBudgetStatus(answer.TokensUsed, maxTokens, start),
+			BudgetStatus:   budgetStatus,
 		})
 
 		if !answer.Ready {
@@ -478,6 +490,7 @@ func (r *Runtime) executeFromState(ctx context.Context, task string, answer *Ans
 				Role:    "user",
 				Content: r.buildCoordinatorContext(ctx, task, answer, start, maxTokens, confidenceThreshold),
 			})
+			messages = r.compactMessages(messages)
 		}
 	}
 
@@ -505,9 +518,9 @@ func (r *Runtime) Execute(ctx context.Context, task string) (*Answer, error) {
 	if maxWallTime <= 0 {
 		maxWallTime = DefaultConfig().Coordinator.MaxWallTime
 	}
-	confidenceThreshold := r.config.Coordinator.ConfidenceThreshold
-	if confidenceThreshold <= 0 {
-		confidenceThreshold = DefaultConfig().Coordinator.ConfidenceThreshold
+	baseConfidenceThreshold := r.config.Coordinator.ConfidenceThreshold
+	if baseConfidenceThreshold <= 0 {
+		baseConfidenceThreshold = DefaultConfig().Coordinator.ConfidenceThreshold
 	}
 
 	runtimeDeadline := false
@@ -527,6 +540,9 @@ func (r *Runtime) Execute(ctx context.Context, task string) (*Answer, error) {
 	if len(toolDefs) == 0 {
 		toolChoice = "none"
 	}
+
+	budgetStatus := r.calculateBudgetStatus(answer.TokensUsed, maxTokens, start)
+	confidenceThreshold := r.adaptiveConfidenceThreshold(baseConfidenceThreshold, budgetStatus)
 
 	messages := []model.Message{
 		{Role: "system", Content: coordinatorSystemPrompt},
@@ -567,6 +583,7 @@ func (r *Runtime) Execute(ctx context.Context, task string) (*Answer, error) {
 				answer.Ready = true
 			}
 			summaries := r.collectScratchpadSummaries(ctx, 6)
+			budgetStatus := r.calculateBudgetStatus(answer.TokensUsed, maxTokens, start)
 			r.emitIteration(IterationEvent{
 				Iteration:      answer.Iteration,
 				MaxIterations:  maxIterations,
@@ -576,7 +593,7 @@ func (r *Runtime) Execute(ctx context.Context, task string) (*Answer, error) {
 				Summary:        answer.Content,
 				Scratchpad:     summaries,
 				ReasoningTrace: content,
-				BudgetStatus:   r.calculateBudgetStatus(answer.TokensUsed, maxTokens, start),
+				BudgetStatus:   budgetStatus,
 			})
 			break
 		}
@@ -603,6 +620,8 @@ func (r *Runtime) Execute(ctx context.Context, task string) (*Answer, error) {
 			})
 		}
 
+		budgetStatus := r.calculateBudgetStatus(answer.TokensUsed, maxTokens, start)
+		confidenceThreshold = r.adaptiveConfidenceThreshold(baseConfidenceThreshold, budgetStatus)
 		if maxTokens > 0 && answer.TokensUsed >= maxTokens {
 			answer.Ready = true
 		}
@@ -621,7 +640,7 @@ func (r *Runtime) Execute(ctx context.Context, task string) (*Answer, error) {
 			Scratchpad:     summaries,
 			ReasoningTrace: reasoningTrace,
 			Delegations:    delegations,
-			BudgetStatus:   r.calculateBudgetStatus(answer.TokensUsed, maxTokens, start),
+			BudgetStatus:   budgetStatus,
 		})
 
 		if !answer.Ready {
@@ -629,6 +648,7 @@ func (r *Runtime) Execute(ctx context.Context, task string) (*Answer, error) {
 				Role:    "user",
 				Content: r.buildCoordinatorContext(ctx, task, &answer, start, maxTokens, confidenceThreshold),
 			})
+			messages = r.compactMessages(messages)
 		}
 	}
 
@@ -800,6 +820,35 @@ func (r *Runtime) collectScratchpadSummaries(ctx context.Context, limit int) []E
 		return nil
 	}
 	return summaries
+}
+
+func (r *Runtime) compactMessages(messages []model.Message) []model.Message {
+	if len(messages) == 0 {
+		return messages
+	}
+	if coordinatorMaxMessages <= 0 || len(messages) <= coordinatorMaxMessages {
+		return messages
+	}
+	if coordinatorKeepMessages <= 0 || len(messages) <= coordinatorKeepMessages+1 {
+		return messages
+	}
+
+	system := messages[0]
+	recent := messages[len(messages)-coordinatorKeepMessages:]
+	removed := messages[1 : len(messages)-coordinatorKeepMessages]
+
+	toolCount := 0
+	for _, msg := range removed {
+		if msg.Role == "tool" {
+			toolCount++
+		}
+	}
+
+	compactNote := fmt.Sprintf("[Compacted %d earlier messages (%d tool results).]", len(removed), toolCount)
+	out := make([]model.Message, 0, 2+len(recent))
+	out = append(out, system, model.Message{Role: "assistant", Content: compactNote})
+	out = append(out, recent...)
+	return out
 }
 
 func (r *Runtime) executeCoordinatorTools(ctx context.Context, registry *tool.Registry, calls []model.ToolCall) []coordinatorToolResult {
@@ -1016,6 +1065,25 @@ func (r *Runtime) calculateBudgetStatus(tokensUsed, maxTokens int, start time.Ti
 	}
 
 	return status
+}
+
+func (r *Runtime) adaptiveConfidenceThreshold(base float64, status BudgetStatus) float64 {
+	threshold := base
+	if threshold <= 0 {
+		threshold = DefaultConfig().Coordinator.ConfidenceThreshold
+	}
+	if status.TokensPercent >= 90 || status.WallTimePercent >= 90 {
+		threshold *= 0.8
+	} else if status.TokensPercent >= 75 || status.WallTimePercent >= 75 {
+		threshold *= 0.9
+	}
+	if threshold < 0 {
+		threshold = 0
+	}
+	if threshold > 1 {
+		threshold = 1
+	}
+	return threshold
 }
 
 type coordinatorToolResult struct {

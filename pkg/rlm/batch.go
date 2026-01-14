@@ -77,6 +77,9 @@ type Dispatcher struct {
 	bus         bus.MessageBus
 	telemetry   *telemetry.Hub
 	timeout     time.Duration
+	timeoutMu   sync.Mutex
+	lastDuration time.Duration
+	taskCount    int
 }
 
 // DispatcherConfig configures dispatcher behavior.
@@ -279,9 +282,10 @@ func (d *Dispatcher) executeTask(ctx context.Context, task SubTask) (BatchResult
 	agentID := fmt.Sprintf("rlm-%s", res.TaskID)
 
 	// Apply timeout if configured
-	if d.timeout > 0 {
+	timeout := d.nextTimeout()
+	if timeout > 0 {
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, d.timeout)
+		ctx, cancel = context.WithTimeout(ctx, timeout)
 		defer cancel()
 	}
 
@@ -310,6 +314,8 @@ func (d *Dispatcher) executeTask(ctx context.Context, task SubTask) (BatchResult
 	if execErr != nil {
 		res.Error = execErr.Error()
 	}
+
+	d.recordTaskDuration(res.Duration)
 
 	return res, execErr
 }
@@ -410,4 +416,41 @@ func (d *Dispatcher) publishEvent(ctx context.Context, subject string, payload m
 		return
 	}
 	_ = d.bus.Publish(ctx, subject, data)
+}
+
+func (d *Dispatcher) nextTimeout() time.Duration {
+	if d == nil {
+		return 0
+	}
+	base := d.timeout
+	if base <= 0 {
+		return 0
+	}
+
+	d.timeoutMu.Lock()
+	defer d.timeoutMu.Unlock()
+
+	timeout := base
+	if d.taskCount > 0 && d.lastDuration > 0 {
+		timeout = d.lastDuration + d.lastDuration/2
+		maxTimeout := base * 2
+		if timeout > maxTimeout {
+			timeout = maxTimeout
+		}
+		minTimeout := base / 2
+		if minTimeout > 0 && timeout < minTimeout {
+			timeout = minTimeout
+		}
+	}
+	d.taskCount++
+	return timeout
+}
+
+func (d *Dispatcher) recordTaskDuration(duration time.Duration) {
+	if d == nil || duration <= 0 {
+		return
+	}
+	d.timeoutMu.Lock()
+	d.lastDuration = duration
+	d.timeoutMu.Unlock()
 }

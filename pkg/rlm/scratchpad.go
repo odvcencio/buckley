@@ -23,6 +23,7 @@ type Scratchpad struct {
 	summarizer func([]byte) string
 	config     ScratchpadConfig
 	rawBytes   int64
+	onWrite    func(context.Context, []EntrySummary)
 }
 
 // NewScratchpad constructs a scratchpad backed by an optional store.
@@ -34,6 +35,16 @@ func NewScratchpad(store *storage.Store, summarizer func([]byte) string, cfg Scr
 		summarizer: summarizer,
 		config:     cfg,
 	}
+}
+
+// SetOnWrite registers a callback after successful writes.
+func (s *Scratchpad) SetOnWrite(handler func(context.Context, []EntrySummary)) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.onWrite = handler
+	s.mu.Unlock()
 }
 
 // Write stores raw data and returns the entry key.
@@ -70,6 +81,7 @@ func (s *Scratchpad) Write(ctx context.Context, req WriteRequest) (string, error
 	}
 
 	var persistEntry *storage.ScratchpadEntry
+	var wroteSummary *EntrySummary
 	s.mu.Lock()
 	s.purgeExpiredLocked(now)
 	if s.isExpired(entry, now) {
@@ -82,6 +94,9 @@ func (s *Scratchpad) Write(ctx context.Context, req WriteRequest) (string, error
 	s.entries[key] = entry
 	s.rawBytes += entrySize(entry)
 	s.enforceLimitsLocked(now)
+	if s.entries[key] != nil {
+		wroteSummary = toEntrySummary(entry)
+	}
 	if s.shouldPersist(entry, now) && s.store != nil {
 		metadataJSON := ""
 		if entry.Metadata != nil {
@@ -106,6 +121,9 @@ func (s *Scratchpad) Write(ctx context.Context, req WriteRequest) (string, error
 			return key, err
 		}
 	}
+	if wroteSummary != nil {
+		s.emitOnWrite(ctx, []EntrySummary{*wroteSummary})
+	}
 
 	return key, nil
 }
@@ -122,6 +140,7 @@ func (s *Scratchpad) WriteBatch(ctx context.Context, requests []WriteRequest) ([
 	now := time.Now().UTC()
 	keys := make([]string, len(requests))
 	var persistEntries []storage.ScratchpadEntry
+	writtenByKey := make(map[string]*Entry, len(requests))
 
 	s.mu.Lock()
 	s.purgeExpiredLocked(now)
@@ -165,6 +184,7 @@ func (s *Scratchpad) WriteBatch(ctx context.Context, requests []WriteRequest) ([
 		}
 		s.entries[key] = entry
 		s.rawBytes += entrySize(entry)
+		writtenByKey[key] = entry
 
 		if s.shouldPersist(entry, now) && s.store != nil {
 			metadataJSON := ""
@@ -186,6 +206,14 @@ func (s *Scratchpad) WriteBatch(ctx context.Context, requests []WriteRequest) ([
 	}
 
 	s.enforceLimitsLocked(now)
+	var wroteSummaries []EntrySummary
+	for _, entry := range writtenByKey {
+		if s.entries[entry.Key] != nil {
+			if summary := toEntrySummary(entry); summary != nil {
+				wroteSummaries = append(wroteSummaries, *summary)
+			}
+		}
+	}
 	s.mu.Unlock()
 
 	// Persist all entries that need persistence
@@ -194,6 +222,9 @@ func (s *Scratchpad) WriteBatch(ctx context.Context, requests []WriteRequest) ([
 			// Log but don't fail - memory write succeeded
 			continue
 		}
+	}
+	if len(wroteSummaries) > 0 {
+		s.emitOnWrite(ctx, wroteSummaries)
 	}
 
 	return keys, nil
@@ -518,6 +549,19 @@ func toEntrySummary(entry *Entry) *EntrySummary {
 		CreatedBy: entry.CreatedBy,
 		CreatedAt: entry.CreatedAt,
 	}
+}
+
+func (s *Scratchpad) emitOnWrite(ctx context.Context, summaries []EntrySummary) {
+	if s == nil || len(summaries) == 0 {
+		return
+	}
+	s.mu.RLock()
+	handler := s.onWrite
+	s.mu.RUnlock()
+	if handler == nil {
+		return
+	}
+	handler(ctx, summaries)
 }
 
 func cloneMetadata(input map[string]any) map[string]any {

@@ -12,6 +12,7 @@ import (
 // EmbeddingProvider generates embeddings for text.
 type EmbeddingProvider interface {
 	Embed(ctx context.Context, text string) ([]float64, error)
+	EmbedBatch(ctx context.Context, texts []string) ([][]float64, error)
 }
 
 // RAGConfig configures scratchpad RAG behavior.
@@ -37,6 +38,11 @@ func DefaultRAGConfig() RAGConfig {
 type cachedEmbedding struct {
 	embedding []float64
 	createdAt time.Time
+}
+
+type embeddingRequest struct {
+	key  string
+	text string
 }
 
 // ScratchpadRAG provides semantic search over scratchpad entries.
@@ -94,6 +100,19 @@ func NewScratchpadRAGWithConfig(scratchpad *Scratchpad, embedder EmbeddingProvid
 	})
 
 	return r
+}
+
+// OnWrite precomputes embeddings for newly written entries.
+func (r *ScratchpadRAG) OnWrite(_ context.Context, entries []EntrySummary) {
+	if r == nil || r.embedder == nil || len(entries) == 0 {
+		return
+	}
+	if r.isClosed() {
+		return
+	}
+	snapshot := make([]EntrySummary, len(entries))
+	copy(snapshot, entries)
+	go r.precomputeEmbeddings(context.Background(), snapshot)
 }
 
 // Search finds semantically similar scratchpad entries.
@@ -210,43 +229,129 @@ func (r *ScratchpadRAG) syncCache(currentEntries []EntrySummary) {
 
 // updateEmbeddings generates embeddings for entries that don't have them.
 func (r *ScratchpadRAG) updateEmbeddings(ctx context.Context, entries []EntrySummary) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
+	if r == nil || r.embedder == nil {
+		return nil
+	}
 	now := time.Now()
+	requests := r.collectEmbeddingRequests(entries, now)
+	if len(requests) == 0 {
+		return nil
+	}
 
-	for _, entry := range entries {
-		cached, ok := r.embeddings[entry.Key]
-		// Skip if we have a non-expired embedding
-		if ok && now.Sub(cached.createdAt) < r.config.EmbeddingTTL {
+	embeddings := r.embedRequests(ctx, requests)
+
+	r.mu.Lock()
+	for i, req := range requests {
+		if i >= len(embeddings) {
+			break
+		}
+		embed := embeddings[i]
+		if len(embed) == 0 {
 			continue
 		}
-
-		// Build text to embed: combine type, summary, and metadata
-		var textParts []string
-		textParts = append(textParts, string(entry.Type))
-		textParts = append(textParts, entry.Summary)
-		if entry.CreatedBy != "" {
-			textParts = append(textParts, "created by: "+entry.CreatedBy)
-		}
-
-		text := strings.Join(textParts, " | ")
-		embed, err := r.embedder.Embed(ctx, text)
-		if err != nil {
-			continue // Skip on error, don't fail whole operation
-		}
-
-		r.embeddings[entry.Key] = &cachedEmbedding{
-			embedding: embed,
-			createdAt: now,
-		}
+		r.embeddings[req.key] = &cachedEmbedding{embedding: embed, createdAt: now}
 	}
 
 	// Enforce max cache size (evict oldest)
 	r.enforceCacheSizeLocked()
 
 	r.lastUpdate = now
+	r.mu.Unlock()
 	return nil
+}
+
+func (r *ScratchpadRAG) precomputeEmbeddings(ctx context.Context, entries []EntrySummary) {
+	if r == nil || r.embedder == nil {
+		return
+	}
+	now := time.Now()
+	requests := r.collectEmbeddingRequests(entries, now)
+	if len(requests) == 0 {
+		return
+	}
+	embeddings := r.embedRequests(ctx, requests)
+
+	r.mu.Lock()
+	for i, req := range requests {
+		if i >= len(embeddings) {
+			break
+		}
+		embed := embeddings[i]
+		if len(embed) == 0 {
+			continue
+		}
+		r.embeddings[req.key] = &cachedEmbedding{embedding: embed, createdAt: now}
+	}
+	r.enforceCacheSizeLocked()
+	r.lastUpdate = now
+	r.mu.Unlock()
+}
+
+func (r *ScratchpadRAG) collectEmbeddingRequests(entries []EntrySummary, now time.Time) []embeddingRequest {
+	if r == nil || len(entries) == 0 {
+		return nil
+	}
+	requests := make([]embeddingRequest, 0, len(entries))
+
+	r.mu.RLock()
+	for _, entry := range entries {
+		if entry.Key == "" {
+			continue
+		}
+		cached, ok := r.embeddings[entry.Key]
+		if ok && now.Sub(cached.createdAt) < r.config.EmbeddingTTL {
+			continue
+		}
+		text := r.buildEmbeddingText(entry)
+		if strings.TrimSpace(text) == "" {
+			continue
+		}
+		requests = append(requests, embeddingRequest{key: entry.Key, text: text})
+	}
+	r.mu.RUnlock()
+
+	return requests
+}
+
+func (r *ScratchpadRAG) embedRequests(ctx context.Context, requests []embeddingRequest) [][]float64 {
+	if r == nil || r.embedder == nil || len(requests) == 0 {
+		return nil
+	}
+	texts := make([]string, len(requests))
+	for i, req := range requests {
+		texts[i] = req.text
+	}
+	embeddings, err := r.embedder.EmbedBatch(ctx, texts)
+	if err == nil && len(embeddings) == len(requests) {
+		return embeddings
+	}
+
+	embeddings = make([][]float64, len(requests))
+	for i, req := range requests {
+		embed, err := r.embedder.Embed(ctx, req.text)
+		if err != nil {
+			continue
+		}
+		embeddings[i] = embed
+	}
+	return embeddings
+}
+
+func (r *ScratchpadRAG) buildEmbeddingText(entry EntrySummary) string {
+	parts := make([]string, 0, 3)
+	if entry.Type != "" {
+		parts = append(parts, string(entry.Type))
+	}
+	if strings.TrimSpace(entry.Summary) != "" {
+		parts = append(parts, entry.Summary)
+	}
+	if strings.TrimSpace(entry.CreatedBy) != "" {
+		parts = append(parts, "created by: "+entry.CreatedBy)
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return strings.Join(parts, " | ")
 }
 
 // enforceCacheSizeLocked removes oldest embeddings if cache exceeds max size.
@@ -324,6 +429,18 @@ func (r *ScratchpadRAG) Close() {
 		// Already closed
 	default:
 		close(r.stopCleanup)
+	}
+}
+
+func (r *ScratchpadRAG) isClosed() bool {
+	if r == nil {
+		return true
+	}
+	select {
+	case <-r.stopCleanup:
+		return true
+	default:
+		return false
 	}
 }
 
