@@ -17,6 +17,8 @@ import (
 	"github.com/odvcencio/buckley/pkg/config"
 	projectcontext "github.com/odvcencio/buckley/pkg/context"
 	"github.com/odvcencio/buckley/pkg/conversation"
+	"github.com/odvcencio/buckley/pkg/cost"
+	"github.com/odvcencio/buckley/pkg/embeddings"
 	"github.com/odvcencio/buckley/pkg/diagnostics"
 	"github.com/odvcencio/buckley/pkg/execution"
 	"github.com/odvcencio/buckley/pkg/model"
@@ -50,6 +52,8 @@ type Controller struct {
 	telemetry    *telemetry.Hub
 	progressMgr  *progress.ProgressManager
 	toastMgr     *toast.ToastManager
+	budgetAlerts *cost.BudgetNotifier
+	costTrackers map[string]*cost.Tracker
 
 	// Execution strategy for tool calling (classic, rlm)
 	execStrategy    execution.ExecutionStrategy
@@ -168,6 +172,17 @@ func NewController(cfg ControllerConfig) (*Controller, error) {
 
 	progressMgr := progress.NewProgressManager()
 	toastMgr := toast.NewToastManager()
+	budgetNotifier := cost.NewBudgetNotifier()
+	budgetNotifier.OnAlert(func(alert cost.BudgetAlert) {
+		if toastMgr == nil {
+			return
+		}
+		level, title, message := formatBudgetToast(alert)
+		if strings.TrimSpace(message) == "" {
+			message = "budget threshold reached"
+		}
+		toastMgr.Show(level, title, message, toast.DefaultToastDuration)
+	})
 
 	// Collect all active sessions for this project and load their messages
 	var projectSessions []*SessionState
@@ -268,6 +283,8 @@ func NewController(cfg ControllerConfig) (*Controller, error) {
 		telemetry:      cfg.Telemetry,
 		progressMgr:    progressMgr,
 		toastMgr:       toastMgr,
+		budgetAlerts:   budgetNotifier,
+		costTrackers:   map[string]*cost.Tracker{},
 		workDir:        workDir,
 		sessions:       projectSessions,
 		currentSession: currentIdx,
@@ -491,6 +508,9 @@ func (c *Controller) handleCommand(text string) {
   /model curate        - Curate models for ACP/editor pickers
   /skill [name|list]   - List or activate a skill
   /context             - Show context budget details
+  /search [query]      - Search conversation history
+  /export [options]    - Export current session
+  /import [file]       - Import conversation file
   /review              - Review current git diff
   /commit              - Generate commit message for staged changes
   /help                - Show this help
@@ -512,6 +532,15 @@ Shortcuts: Alt+Right (next), Alt+Left (prev), Ctrl+F (search)`, "system")
 
 	case "/context":
 		c.showContextBudget()
+
+	case "/search":
+		c.handleSearchCommand(args)
+
+	case "/export":
+		c.handleExportCommand(args)
+
+	case "/import":
+		c.handleImportCommand(args)
 
 	default:
 		c.app.AddMessage("Unknown command: "+cmd+". Type /help for available commands.", "system")
@@ -1111,6 +1140,7 @@ func (c *Controller) streamResponse(ctx context.Context, prompt string, sess *Se
 				costCents = cost * 100 // Convert dollars to cents
 			}
 		}
+		c.recordCost(sess.ID, modelID, usage)
 	} else {
 		// Fallback: estimate tokens from response length
 		tokens = len(fullResponse) / 4
@@ -2445,6 +2475,315 @@ Output ONLY the commit message, nothing else.`, "```diff\n"+diff+"\n```", recent
 	go c.streamResponse(ctx, prompt, sess)
 }
 
+func (c *Controller) handleSearchCommand(args []string) {
+	if c.store == nil {
+		c.app.AddMessage("Search unavailable: storage not configured.", "system")
+		return
+	}
+	c.mu.Lock()
+	if len(c.sessions) == 0 {
+		c.mu.Unlock()
+		c.app.AddMessage("No active session available.", "system")
+		return
+	}
+	sessionID := c.sessions[c.currentSession].ID
+	c.mu.Unlock()
+
+	mode := ""
+	limit := 5
+	scopeAll := false
+	var queryParts []string
+	for i := 0; i < len(args); i++ {
+		switch strings.ToLower(strings.TrimSpace(args[i])) {
+		case "--semantic", "-s":
+			mode = "semantic"
+		case "--fulltext", "--fts", "-f":
+			mode = "fulltext"
+		case "--all":
+			scopeAll = true
+		case "--limit", "-l":
+			if i+1 >= len(args) {
+				c.app.AddMessage("Usage: /search [--semantic|--fulltext] [--all] [--limit N] <query>", "system")
+				return
+			}
+			value, err := strconv.Atoi(args[i+1])
+			if err != nil || value <= 0 {
+				c.app.AddMessage("Limit must be a positive integer.", "system")
+				return
+			}
+			limit = value
+			i++
+		default:
+			queryParts = append(queryParts, args[i])
+		}
+	}
+
+	query := strings.TrimSpace(strings.Join(queryParts, " "))
+	if query == "" {
+		c.app.AddMessage("Usage: /search [--semantic|--fulltext] [--all] [--limit N] <query>", "system")
+		return
+	}
+
+	var provider embeddings.EmbeddingProvider
+	if mode == "" || mode == "semantic" {
+		provider = c.newEmbeddingProvider()
+		if mode == "" {
+			if provider != nil {
+				mode = "semantic"
+			} else {
+				mode = "fulltext"
+			}
+		}
+	}
+
+	if scopeAll {
+		if mode == "semantic" {
+			c.app.AddMessage("Semantic search is session-scoped; use /search --fulltext --all <query>.", "system")
+			return
+		}
+		sessionID = ""
+	}
+
+	searcher := conversation.NewConversationSearcher(c.store, provider)
+	opts := conversation.SearchOptions{SessionID: sessionID, Limit: limit}
+	ctx := context.Background()
+
+	var (
+		results []conversation.SearchResult
+		err     error
+	)
+	switch mode {
+	case "semantic":
+		if provider == nil {
+			c.app.AddMessage("Semantic search unavailable: configure OPENROUTER_API_KEY or OPENAI_API_KEY.", "system")
+			return
+		}
+		results, err = searcher.Search(ctx, query, opts)
+	default:
+		results, err = searcher.SearchFullText(ctx, query, opts)
+		mode = "fulltext"
+	}
+	if err != nil {
+		c.app.AddMessage("Search failed: "+err.Error(), "system")
+		return
+	}
+	if len(results) == 0 {
+		c.app.AddMessage("No matches found.", "system")
+		return
+	}
+
+	scopeLabel := "current session"
+	if sessionID == "" {
+		scopeLabel = "all sessions"
+	}
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("Search results (%s, %s):\n", mode, scopeLabel))
+	for i, res := range results {
+		line := fmt.Sprintf("%d. [%.2f] %s", i+1, res.Score, res.Role)
+		if strings.TrimSpace(res.SessionID) != "" {
+			line += " (" + res.SessionID + ")"
+		}
+		if !res.Timestamp.IsZero() {
+			line += " " + res.Timestamp.Format(time.RFC3339)
+		}
+		b.WriteString(line + "\n")
+		snippet := strings.TrimSpace(res.Snippet)
+		if snippet == "" {
+			snippet = strings.TrimSpace(res.Content)
+		}
+		if len(snippet) > 240 {
+			snippet = snippet[:240] + "..."
+		}
+		if snippet != "" {
+			b.WriteString(snippet + "\n\n")
+		}
+	}
+	c.app.AddMessage(strings.TrimSpace(b.String()), "system")
+}
+
+func (c *Controller) handleExportCommand(args []string) {
+	if c.store == nil {
+		c.app.AddMessage("Export unavailable: storage not configured.", "system")
+		return
+	}
+	c.mu.Lock()
+	if len(c.sessions) == 0 {
+		c.mu.Unlock()
+		c.app.AddMessage("No active session available.", "system")
+		return
+	}
+	sessionID := c.sessions[c.currentSession].ID
+	c.mu.Unlock()
+
+	opts := conversation.ExportOptions{Format: conversation.ExportMarkdown}
+	outputPath := ""
+
+	for i := 0; i < len(args); i++ {
+		arg := strings.ToLower(strings.TrimSpace(args[i]))
+		switch arg {
+		case "--format", "-f":
+			if i+1 >= len(args) {
+				c.app.AddMessage("Usage: /export [--format json|markdown|html] [--output path] [--include-system] [--include-tools] [--include-metadata]", "system")
+				return
+			}
+			format, ok := parseExportFormat(args[i+1])
+			if !ok {
+				c.app.AddMessage("Unsupported export format: "+args[i+1], "system")
+				return
+			}
+			opts.Format = format
+			i++
+		case "--output", "-o":
+			if i+1 >= len(args) {
+				c.app.AddMessage("Usage: /export [--format json|markdown|html] [--output path] [--include-system] [--include-tools] [--include-metadata]", "system")
+				return
+			}
+			outputPath = strings.TrimSpace(args[i+1])
+			i++
+		case "--include-system":
+			opts.IncludeSystem = true
+		case "--include-tools":
+			opts.IncludeToolCalls = true
+		case "--include-metadata":
+			opts.IncludeMetadata = true
+		default:
+			if outputPath == "" {
+				outputPath = strings.TrimSpace(args[i])
+			}
+		}
+	}
+
+	if outputPath == "" {
+		ext := exportExtension(opts.Format)
+		timestamp := time.Now().Format("20060102-150405")
+		outputPath = fmt.Sprintf("buckley-export-%s-%s%s", sessionID, timestamp, ext)
+	}
+	if !filepath.IsAbs(outputPath) {
+		outputPath = filepath.Join(c.workDir, outputPath)
+	}
+
+	exporter := conversation.NewExporter(c.store)
+	data, err := exporter.Export(sessionID, opts)
+	if err != nil {
+		c.app.AddMessage("Export failed: "+err.Error(), "system")
+		return
+	}
+
+	if err := os.MkdirAll(filepath.Dir(outputPath), 0o755); err != nil {
+		c.app.AddMessage("Export failed: "+err.Error(), "system")
+		return
+	}
+	if err := os.WriteFile(outputPath, data, 0o644); err != nil {
+		c.app.AddMessage("Export failed: "+err.Error(), "system")
+		return
+	}
+
+	c.app.AddMessage(fmt.Sprintf("Exported session %s to %s", sessionID, outputPath), "system")
+}
+
+func (c *Controller) handleImportCommand(args []string) {
+	if c.store == nil {
+		c.app.AddMessage("Import unavailable: storage not configured.", "system")
+		return
+	}
+
+	var (
+		format    conversation.ExportFormat
+		inputPath string
+	)
+	for i := 0; i < len(args); i++ {
+		arg := strings.ToLower(strings.TrimSpace(args[i]))
+		switch arg {
+		case "--format", "-f":
+			if i+1 >= len(args) {
+				c.app.AddMessage("Usage: /import [--format json|markdown] <path>", "system")
+				return
+			}
+			parsed, ok := parseExportFormat(args[i+1])
+			if !ok {
+				c.app.AddMessage("Unsupported import format: "+args[i+1], "system")
+				return
+			}
+			format = parsed
+			i++
+		default:
+			if inputPath == "" {
+				inputPath = strings.TrimSpace(args[i])
+			}
+		}
+	}
+	if inputPath == "" {
+		c.app.AddMessage("Usage: /import [--format json|markdown] <path>", "system")
+		return
+	}
+	if !filepath.IsAbs(inputPath) {
+		inputPath = filepath.Join(c.workDir, inputPath)
+	}
+
+	if format == "" {
+		ext := strings.ToLower(filepath.Ext(inputPath))
+		switch ext {
+		case ".md", ".markdown":
+			format = conversation.ExportMarkdown
+		case ".json":
+			format = conversation.ExportJSON
+		case ".html", ".htm":
+			c.app.AddMessage("HTML import not supported; use JSON or Markdown.", "system")
+			return
+		default:
+			format = conversation.ExportJSON
+		}
+	}
+	if format == conversation.ExportHTML {
+		c.app.AddMessage("HTML import not supported; use JSON or Markdown.", "system")
+		return
+	}
+
+	data, err := os.ReadFile(inputPath)
+	if err != nil {
+		c.app.AddMessage("Import failed: "+err.Error(), "system")
+		return
+	}
+
+	importer := conversation.NewImporter(c.store)
+	result, err := importer.Import(data, format)
+	if err != nil {
+		c.app.AddMessage("Import failed: "+err.Error(), "system")
+		return
+	}
+	if result == nil || strings.TrimSpace(result.SessionID) == "" {
+		c.app.AddMessage("Import completed but no session was created.", "system")
+		return
+	}
+
+	if err := c.store.UpdateSessionProjectPath(result.SessionID, c.workDir); err != nil {
+		c.app.AddMessage("Imported session; failed to set project path: "+err.Error(), "system")
+	}
+
+	newSess, err := newSessionState(c.cfg, c.store, c.workDir, c.telemetry, c.modelMgr, result.SessionID, true, c.progressMgr, c.toastMgr)
+	if err != nil {
+		c.app.AddMessage("Imported session but failed to load: "+err.Error(), "system")
+		return
+	}
+
+	c.mu.Lock()
+	c.sessions = append([]*SessionState{newSess}, c.sessions...)
+	c.currentSession = 0
+	c.switchToSessionLocked(0)
+	c.mu.Unlock()
+
+	c.app.AddMessage(fmt.Sprintf("Imported session: %s (%d messages)", result.SessionID, result.MessageCount), "system")
+	if len(result.Warnings) > 0 {
+		var b strings.Builder
+		b.WriteString("Import warnings:\n")
+		for _, warn := range result.Warnings {
+			b.WriteString("- " + warn + "\n")
+		}
+		c.app.AddMessage(strings.TrimSpace(b.String()), "system")
+	}
+	c.updateContextIndicator(newSess, c.executionModelID(), "", allowedToolsForSession(newSess))
+}
+
 func (c *Controller) showContextBudget() {
 	c.mu.Lock()
 	if len(c.sessions) == 0 {
@@ -2459,6 +2798,179 @@ func (c *Controller) showContextBudget() {
 
 	stats := c.buildContextBudgetStats(sess, modelID, "", allowedTools)
 	c.app.AddMessage(formatContextBudgetStats(stats), "system")
+}
+
+func (c *Controller) recordCost(sessionID, modelID string, usage *model.Usage) {
+	if c == nil || usage == nil {
+		return
+	}
+	tracker := c.ensureCostTracker(sessionID)
+	if tracker == nil {
+		return
+	}
+	if _, err := tracker.RecordAPICall(modelID, usage.PromptTokens, usage.CompletionTokens); err != nil {
+		return
+	}
+	if c.budgetAlerts != nil {
+		c.budgetAlerts.Check(tracker.CheckBudget())
+	}
+}
+
+func (c *Controller) ensureCostTracker(sessionID string) *cost.Tracker {
+	if c == nil || c.store == nil || c.modelMgr == nil {
+		return nil
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return nil
+	}
+
+	c.mu.Lock()
+	if c.costTrackers == nil {
+		c.costTrackers = map[string]*cost.Tracker{}
+	}
+	if tracker, ok := c.costTrackers[sessionID]; ok {
+		c.mu.Unlock()
+		return tracker
+	}
+	c.mu.Unlock()
+
+	tracker, err := cost.New(sessionID, c.store, c.modelMgr)
+	if err != nil {
+		return nil
+	}
+	if c.cfg != nil {
+		tracker.SetBudgets(
+			c.cfg.CostManagement.SessionBudget,
+			c.cfg.CostManagement.DailyBudget,
+			c.cfg.CostManagement.MonthlyBudget,
+			c.cfg.CostManagement.AutoStopAt,
+		)
+	}
+
+	c.mu.Lock()
+	if c.costTrackers == nil {
+		c.costTrackers = map[string]*cost.Tracker{}
+	}
+	c.costTrackers[sessionID] = tracker
+	c.mu.Unlock()
+	return tracker
+}
+
+func formatBudgetToast(alert cost.BudgetAlert) (toast.ToastLevel, string, string) {
+	level := toast.ToastInfo
+	title := "Budget alert"
+	switch alert.Level {
+	case cost.BudgetAlertWarning:
+		level = toast.ToastWarning
+		title = "Budget warning"
+	case cost.BudgetAlertCritical:
+		level = toast.ToastError
+		title = "Budget critical"
+	case cost.BudgetAlertExceeded:
+		level = toast.ToastError
+		title = "Budget exceeded"
+	}
+
+	label := "Session"
+	costValue := alert.Status.SessionCost
+	budgetValue := alert.Status.SessionBudget
+	switch strings.ToLower(alert.BudgetType) {
+	case cost.BudgetTypeDaily:
+		label = "Daily"
+		costValue = alert.Status.DailyCost
+		budgetValue = alert.Status.DailyBudget
+	case cost.BudgetTypeMonthly:
+		label = "Monthly"
+		costValue = alert.Status.MonthlyCost
+		budgetValue = alert.Status.MonthlyBudget
+	}
+
+	message := fmt.Sprintf("%s budget %.0f%% ($%.2f / $%.2f)", label, alert.Percent, costValue, budgetValue)
+	return level, title, message
+}
+
+func (c *Controller) newEmbeddingProvider() embeddings.EmbeddingProvider {
+	if c == nil || c.cfg == nil {
+		return nil
+	}
+	cacheDir := ""
+	if strings.TrimSpace(c.workDir) != "" {
+		cacheDir = filepath.Join(c.workDir, ".buckley", "embeddings")
+	}
+
+	type providerCandidate struct {
+		id       string
+		settings config.ProviderSettings
+		kind     embeddings.ProviderKind
+	}
+	candidates := []providerCandidate{
+		{id: "openrouter", settings: c.cfg.Providers.OpenRouter, kind: embeddings.ProviderOpenRouter},
+		{id: "openai", settings: c.cfg.Providers.OpenAI, kind: embeddings.ProviderOpenAI},
+	}
+
+	pick := func(candidate providerCandidate) embeddings.EmbeddingProvider {
+		if !candidate.settings.Enabled || strings.TrimSpace(candidate.settings.APIKey) == "" {
+			return nil
+		}
+		return embeddings.NewService(embeddings.ServiceOptions{
+			APIKey:   candidate.settings.APIKey,
+			Provider: candidate.kind,
+			BaseURL:  embeddingsBaseURL(candidate.settings.BaseURL),
+			CacheDir: cacheDir,
+		})
+	}
+
+	preferred := strings.ToLower(strings.TrimSpace(c.cfg.Models.DefaultProvider))
+	for _, candidate := range candidates {
+		if candidate.id == preferred {
+			if provider := pick(candidate); provider != nil {
+				return provider
+			}
+			break
+		}
+	}
+	for _, candidate := range candidates {
+		if provider := pick(candidate); provider != nil {
+			return provider
+		}
+	}
+	return nil
+}
+
+func parseExportFormat(raw string) (conversation.ExportFormat, bool) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "json":
+		return conversation.ExportJSON, true
+	case "markdown", "md":
+		return conversation.ExportMarkdown, true
+	case "html", "htm":
+		return conversation.ExportHTML, true
+	default:
+		return "", false
+	}
+}
+
+func exportExtension(format conversation.ExportFormat) string {
+	switch format {
+	case conversation.ExportJSON:
+		return ".json"
+	case conversation.ExportHTML:
+		return ".html"
+	default:
+		return ".md"
+	}
+}
+
+func embeddingsBaseURL(base string) string {
+	base = strings.TrimSpace(base)
+	if base == "" {
+		return ""
+	}
+	if strings.HasSuffix(base, "/embeddings") {
+		return base
+	}
+	return strings.TrimRight(base, "/") + "/embeddings"
 }
 
 func (c *Controller) handleSkillCommand(args []string) {

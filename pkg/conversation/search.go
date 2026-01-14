@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/odvcencio/buckley/pkg/embeddings"
 	"github.com/odvcencio/buckley/pkg/memory"

@@ -194,7 +194,7 @@ func (m *Manager) RetrieveRelevant(ctx context.Context, query string, opts Recal
 			tokenBudget -= toks
 		}
 		selected = append(selected, rec)
-		if len(selected) >= limit {
+		if len(selected) >= opts.Limit {
 			break
 		}
 	}

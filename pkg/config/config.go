@@ -62,6 +62,7 @@ type Config struct {
 	Oneshot        OneshotModeConfig   `yaml:"oneshot"`
 	RLM            RLMConfig           `yaml:"rlm"`
 	Approval       ApprovalConfig      `yaml:"approval"`
+	ToolMiddleware ToolMiddlewareConfig `yaml:"tool_middleware"`
 	ACP            ACPConfig           `yaml:"acp"`
 	Worktrees      WorktreeConfig      `yaml:"worktrees"`
 	Experiment     ExperimentConfig    `yaml:"experiment"`
@@ -441,6 +442,23 @@ type RetryPolicy struct {
 	Multiplier     float64       `yaml:"multiplier"`
 }
 
+// ToolRetryConfig defines retry behavior for tool execution.
+type ToolRetryConfig struct {
+	MaxAttempts  int           `yaml:"max_attempts"`
+	InitialDelay time.Duration `yaml:"initial_delay"`
+	MaxDelay     time.Duration `yaml:"max_delay"`
+	Multiplier   float64       `yaml:"multiplier"`
+	Jitter       float64       `yaml:"jitter"`
+}
+
+// ToolMiddlewareConfig defines middleware defaults for tool execution.
+type ToolMiddlewareConfig struct {
+	DefaultTimeout  time.Duration        `yaml:"default_timeout"`
+	PerToolTimeouts map[string]time.Duration `yaml:"per_tool_timeouts"`
+	MaxResultBytes  int                  `yaml:"max_result_bytes"`
+	Retry           ToolRetryConfig      `yaml:"retry"`
+}
+
 // ArtifactsConfig defines artifact storage locations
 type ArtifactsConfig struct {
 	PlanningDir          string `yaml:"planning_dir"`
@@ -737,6 +755,17 @@ func DefaultConfig() *Config {
 				"cargo test",
 				"cargo build",
 				"pytest",
+			},
+		},
+		ToolMiddleware: ToolMiddlewareConfig{
+			DefaultTimeout: 2 * time.Minute,
+			MaxResultBytes: 100_000,
+			Retry: ToolRetryConfig{
+				MaxAttempts:  2,
+				InitialDelay: 200 * time.Millisecond,
+				MaxDelay:     2 * time.Second,
+				Multiplier:   2,
+				Jitter:       0.2,
 			},
 		},
 		ACP: ACPConfig{

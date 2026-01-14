@@ -459,7 +459,9 @@ func (a *WidgetApp) showCommandPalette() {
 		{ID: "new", Category: "Session", Label: "New Conversation", Shortcut: "/new"},
 		{ID: "clear", Category: "Session", Label: "Clear Messages", Shortcut: "/clear"},
 		{ID: "history", Category: "Session", Label: "View History", Shortcut: "/history"},
+		{ID: "search", Category: "Session", Label: "Search Conversation", Shortcut: "/search"},
 		{ID: "export", Category: "Session", Label: "Export Conversation", Shortcut: "/export"},
+		{ID: "import", Category: "Session", Label: "Import Conversation", Shortcut: "/import"},
 
 		// Navigation commands
 		{ID: "toggle-sidebar", Category: "View", Label: "Toggle Sidebar", Shortcut: "Ctrl+B"},
@@ -511,6 +513,9 @@ func (a *WidgetApp) showSlashCommandPalette() {
 		{ID: "/commit", Label: "/commit", Description: "Generate commit message"},
 		{ID: "/new", Label: "/new", Description: "Start a new session"},
 		{ID: "/clear", Label: "/clear", Description: "Clear current session"},
+		{ID: "/search", Label: "/search", Description: "Search conversation history"},
+		{ID: "/export", Label: "/export", Description: "Export current session"},
+		{ID: "/import", Label: "/import", Description: "Import conversation file"},
 		{ID: "/sessions", Label: "/sessions", Description: "List active sessions"},
 		{ID: "/next", Label: "/next", Description: "Switch to next session"},
 		{ID: "/prev", Label: "/prev", Description: "Switch to previous session"},
