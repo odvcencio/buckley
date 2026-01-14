@@ -18,8 +18,8 @@ import (
 	projectcontext "github.com/odvcencio/buckley/pkg/context"
 	"github.com/odvcencio/buckley/pkg/conversation"
 	"github.com/odvcencio/buckley/pkg/cost"
-	"github.com/odvcencio/buckley/pkg/embeddings"
 	"github.com/odvcencio/buckley/pkg/diagnostics"
+	"github.com/odvcencio/buckley/pkg/embeddings"
 	"github.com/odvcencio/buckley/pkg/execution"
 	"github.com/odvcencio/buckley/pkg/filewatch"
 	"github.com/odvcencio/buckley/pkg/model"
@@ -2002,7 +2002,30 @@ const defaultTUIMaxOutputBytes = 100_000
 // buildRegistry creates the tool registry with all available tools.
 func buildRegistry(cfg *config.Config, store *storage.Store, workDir string, hub *telemetry.Hub, sessionID string, progressMgr *progress.ProgressManager, toastMgr *toast.ToastManager) *tool.Registry {
 	registry := tool.NewRegistry()
-	registry.SetMaxOutputBytes(defaultTUIMaxOutputBytes)
+
+	registryCfg := tool.DefaultRegistryConfig()
+	registryCfg.MaxOutputBytes = defaultTUIMaxOutputBytes
+	if cfg != nil {
+		if cfg.ToolMiddleware.MaxResultBytes > 0 {
+			registryCfg.MaxOutputBytes = cfg.ToolMiddleware.MaxResultBytes
+		}
+		registryCfg.Middleware.DefaultTimeout = cfg.ToolMiddleware.DefaultTimeout
+		registryCfg.Middleware.PerToolTimeouts = copyDurationMap(cfg.ToolMiddleware.PerToolTimeouts)
+		registryCfg.Middleware.MaxResultBytes = cfg.ToolMiddleware.MaxResultBytes
+		registryCfg.Middleware.RetryConfig = tool.RetryConfig{
+			MaxAttempts:  cfg.ToolMiddleware.Retry.MaxAttempts,
+			InitialDelay: cfg.ToolMiddleware.Retry.InitialDelay,
+			MaxDelay:     cfg.ToolMiddleware.Retry.MaxDelay,
+			Multiplier:   cfg.ToolMiddleware.Retry.Multiplier,
+			Jitter:       cfg.ToolMiddleware.Retry.Jitter,
+		}
+	}
+	registryCfg.TelemetryHub = hub
+	registryCfg.TelemetrySessionID = sessionID
+	registryCfg.Middleware.ProgressManager = progressMgr
+	registryCfg.Middleware.ToastManager = toastMgr
+	registryCfg.Middleware.FileWatcher = filewatch.NewFileWatcher(100)
+	tool.ApplyRegistryConfig(registry, registryCfg)
 
 	// Configure container execution if enabled
 	if cfg != nil && workDir != "" {
@@ -2013,18 +2036,6 @@ func buildRegistry(cfg *config.Config, store *storage.Store, workDir string, hub
 	if store != nil {
 		registry.SetTodoStore(&todoStoreAdapter{store: store})
 		registry.EnableCodeIndex(store)
-	}
-
-	// Enable telemetry
-	if hub != nil && sessionID != "" {
-		registry.EnableTelemetry(hub, sessionID)
-	}
-
-	if progressMgr != nil {
-		registry.Use(tool.Progress(progressMgr, tool.DefaultLongRunningTools))
-	}
-	if toastMgr != nil {
-		registry.Use(tool.ToastNotifications(toastMgr))
 	}
 
 	// Load user plugins from ~/.buckley/plugins/ and ./.buckley/plugins/
@@ -2972,6 +2983,17 @@ func embeddingsBaseURL(base string) string {
 		return base
 	}
 	return strings.TrimRight(base, "/") + "/embeddings"
+}
+
+func copyDurationMap(src map[string]time.Duration) map[string]time.Duration {
+	if len(src) == 0 {
+		return nil
+	}
+	out := make(map[string]time.Duration, len(src))
+	for key, value := range src {
+		out[key] = value
+	}
+	return out
 }
 
 func (c *Controller) handleSkillCommand(args []string) {

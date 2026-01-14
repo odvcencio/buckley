@@ -11,21 +11,20 @@ import (
 	"strings"
 	"time"
 
-	"github.com/odvcencio/buckley/pkg/conversation"
 	"github.com/odvcencio/buckley/pkg/embeddings"
 	"github.com/odvcencio/buckley/pkg/storage"
 )
 
 // Record represents an episodic memory item.
 type Record struct {
-	ID         int64
-	SessionID  string
+	ID          int64
+	SessionID   string
 	ProjectPath string
-	Kind       string
-	Content    string
-	Metadata   map[string]any
-	CreatedAt  time.Time
-	Similarity float64
+	Kind        string
+	Content     string
+	Metadata    map[string]any
+	CreatedAt   time.Time
+	Similarity  float64
 }
 
 // RecallScope controls memory retrieval scope.
@@ -127,14 +126,14 @@ func (m *Manager) RetrieveRelevant(ctx context.Context, query string, opts Recal
 	var records []Record
 	for rows.Next() {
 		var (
-			id         int64
-			sid        string
+			id          int64
+			sid         string
 			projectPath sql.NullString
-			kind       string
-			content    string
-			embedBytes []byte
-			metaRaw    sql.NullString
-			createdAt  time.Time
+			kind        string
+			content     string
+			embedBytes  []byte
+			metaRaw     sql.NullString
+			createdAt   time.Time
 		)
 		if err := rows.Scan(&id, &sid, &projectPath, &kind, &content, &embedBytes, &metaRaw, &createdAt); err != nil {
 			continue
@@ -182,7 +181,7 @@ func (m *Manager) RetrieveRelevant(ctx context.Context, query string, opts Recal
 			continue
 		}
 		if tokenBudget > 0 {
-			toks := conversation.CountTokens(rec.Content)
+			toks := estimateTokens(rec.Content)
 			if toks > tokenBudget && len(selected) > 0 {
 				break
 			}
@@ -225,6 +224,11 @@ func (m *Manager) queryMemories(ctx context.Context, opts RecallOptions) (*sql.R
 			WHERE session_id = ?
 		`, sessionID)
 	}
+}
+
+func estimateTokens(text string) int {
+	// Rough estimate: ~4 characters per token.
+	return len(text) / 4
 }
 
 // serializeEmbedding converts a float64 slice to bytes.
