@@ -807,6 +807,12 @@ func mergeConfigs(base, override *Config, raw map[string]any) {
 	if boolFieldSet(raw, "ui", "reduce_animation") {
 		base.UI.ReduceAnimation = override.UI.ReduceAnimation
 	}
+	if override.UI.MessageMetadata != "" {
+		base.UI.MessageMetadata = override.UI.MessageMetadata
+	}
+	if override.WebUI.BaseURL != "" {
+		base.WebUI.BaseURL = override.WebUI.BaseURL
+	}
 
 	if boolFieldSet(raw, "commenting", "require_function_docs") {
 		base.Commenting.RequireFunctionDocs = override.Commenting.RequireFunctionDocs

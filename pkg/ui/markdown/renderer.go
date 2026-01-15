@@ -2,6 +2,7 @@ package markdown
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/odvcencio/buckley/pkg/ui/compositor"
@@ -307,31 +308,59 @@ func (r *Renderer) renderCodeBlock(state *renderState, raw []byte, language stri
 	state.flushLine(false, false, "")
 	code := strings.TrimRight(string(raw), "\n")
 
-	prefix := []StyledSpan{{Text: "│ ", Style: state.cfg.CodeBlockBorder}}
-	state.withPrefix(prefix, func() {
-		label := language
-		if label == "" {
-			label = "code"
-		}
-		header := label + "  [Alt+C copy]"
-		state.lines = append(state.lines, StyledLine{
-			Spans:        []StyledSpan{{Text: header, Style: state.cfg.CodeBlockLang}},
-			Prefix:       append([]StyledSpan{}, state.prefix...),
-			IsCode:       true,
-			IsCodeHeader: true,
-			Language:     language,
-		})
-		var lines []StyledLine
-		if state.highlighter != nil {
-			lines = state.highlighter.Highlight(code, language, state.cfg)
-		} else {
-			lines = fallbackCodeLines(code, language, state.cfg)
-		}
-		for _, line := range lines {
-			line.Prefix = append(append([]StyledSpan{}, state.prefix...), line.Prefix...)
-			state.lines = append(state.lines, line)
-		}
+	label := language
+	if label == "" {
+		label = "code"
+	}
+	header := label + "  [copy] [open]"
+	basePrefix := append([]StyledSpan{}, state.prefix...)
+	headerPrefix := append(basePrefix, StyledSpan{Text: "│ ", Style: state.cfg.CodeBlockBorder})
+	state.lines = append(state.lines, StyledLine{
+		Spans:        []StyledSpan{{Text: header, Style: state.cfg.CodeBlockLang}},
+		Prefix:       headerPrefix,
+		IsCode:       true,
+		IsCodeHeader: true,
+		Language:     language,
 	})
+
+	var lines []StyledLine
+	if state.highlighter != nil {
+		lines = state.highlighter.Highlight(code, language, state.cfg)
+	} else {
+		lines = fallbackCodeLines(code, language, state.cfg)
+	}
+
+	lineCount := len(lines)
+	showLineNumbers := lineCount > 0
+	optionalNumbers := lineCount <= 10
+	numWidth := 0
+	numberStyle := state.cfg.CodeBlockLineNumber
+	borderStyle := state.cfg.CodeBlockBorder
+	if showLineNumbers {
+		numWidth = len(strconv.Itoa(lineCount))
+		numberStyle = applyCodeBlockBG(numberStyle, state.cfg.CodeBlockBG)
+		borderStyle = applyCodeBlockBG(borderStyle, state.cfg.CodeBlockBG)
+	}
+
+	for i := range lines {
+		linePrefix := append([]StyledSpan{}, basePrefix...)
+		if showLineNumbers {
+			num := fmt.Sprintf("%*d", numWidth, i+1)
+			linePrefix = append(linePrefix,
+				StyledSpan{Text: num, Style: numberStyle},
+				StyledSpan{Text: " ", Style: numberStyle},
+				StyledSpan{Text: "│ ", Style: borderStyle},
+			)
+		} else {
+			linePrefix = append(linePrefix, StyledSpan{Text: "│ ", Style: state.cfg.CodeBlockBorder})
+		}
+		lines[i].Prefix = append(linePrefix, lines[i].Prefix...)
+		if showLineNumbers {
+			lines[i].CodeLineNumberWidth = numWidth
+			lines[i].CodeLineNumberOptional = optionalNumbers
+		}
+		state.lines = append(state.lines, lines[i])
+	}
 }
 
 func fallbackCodeLines(code, language string, cfg *StyleConfig) []StyledLine {

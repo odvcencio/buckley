@@ -26,21 +26,16 @@ func TestChatView_AddMessage_User(t *testing.T) {
 	cv.AddMessage("Hello, world!", "user")
 
 	lines := cv.buffer.GetVisibleLines()
-	if len(lines) < 2 {
-		t.Fatalf("expected at least 2 lines, got %d", len(lines))
+	if len(lines) < 1 {
+		t.Fatalf("expected at least 1 line, got %d", len(lines))
 	}
 
-	// First line should be empty (separator)
-	if lines[0].Content != "" {
-		t.Errorf("expected empty first line, got '%s'", lines[0].Content)
+	// First line should have the user message with prefix strip
+	if lines[0].Content != "▍ ▶ Hello, world!" {
+		t.Errorf("expected '▍ ▶ Hello, world!', got '%s'", lines[0].Content)
 	}
-
-	// Second line should have the user message with prefix
-	if lines[1].Content != "▶ Hello, world!" {
-		t.Errorf("expected '▶ Hello, world!', got '%s'", lines[1].Content)
-	}
-	if lines[1].Source != "user" {
-		t.Errorf("expected source 'user', got '%s'", lines[1].Source)
+	if lines[0].Source != "user" {
+		t.Errorf("expected source 'user', got '%s'", lines[0].Source)
 	}
 }
 
@@ -51,16 +46,16 @@ func TestChatView_AddMessage_Assistant(t *testing.T) {
 	cv.AddMessage("I can help with that.", "assistant")
 
 	lines := cv.buffer.GetVisibleLines()
-	if len(lines) < 2 {
-		t.Fatalf("expected at least 2 lines, got %d", len(lines))
+	if len(lines) < 1 {
+		t.Fatalf("expected at least 1 line, got %d", len(lines))
 	}
 
-	// Second line should have the assistant message
-	if lines[1].Content != "I can help with that." {
-		t.Errorf("expected 'I can help with that.', got '%s'", lines[1].Content)
+	// First line should have the assistant message with prefix strip
+	if lines[0].Content != "▍ I can help with that." {
+		t.Errorf("expected '▍ I can help with that.', got '%s'", lines[0].Content)
 	}
-	if lines[1].Source != "assistant" {
-		t.Errorf("expected source 'assistant', got '%s'", lines[1].Source)
+	if lines[0].Source != "assistant" {
+		t.Errorf("expected source 'assistant', got '%s'", lines[0].Source)
 	}
 }
 
@@ -99,7 +94,7 @@ func TestChatView_AddMessage_System(t *testing.T) {
 	lines := cv.buffer.GetVisibleLines()
 	found := false
 	for _, line := range lines {
-		if line.Content == "System notification" {
+		if line.Content == "▍ System notification" {
 			found = true
 			if line.Source != "system" {
 				t.Errorf("expected source 'system', got '%s'", line.Source)
@@ -125,7 +120,7 @@ func TestChatView_AppendText(t *testing.T) {
 	lines := cv.buffer.GetVisibleLines()
 	found := false
 	for _, line := range lines {
-		if line.Content == "Hello, world!" {
+		if line.Content == "▍ Hello, world!" {
 			found = true
 			break
 		}

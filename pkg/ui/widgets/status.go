@@ -25,6 +25,8 @@ type StatusBar struct {
 	streamAnim    int
 	bgStyle       backend.Style
 	textStyle     backend.Style
+	contextBounds runtime.Rect
+	tokenBounds   runtime.Rect
 }
 
 // NewStatusBar creates a new status bar widget.
@@ -124,6 +126,8 @@ func (s *StatusBar) Render(ctx runtime.RenderContext) {
 	ctx.Buffer.SetString(bounds.X, bounds.Y, left, s.textStyle)
 
 	// Right side: context + tokens/cost
+	s.contextBounds = runtime.Rect{}
+	s.tokenBounds = runtime.Rect{}
 	ctxSegment := formatContextUsage(s.contextUsed, s.contextBudget, s.contextWindow)
 	tokenSegment := ""
 	if s.tokens > 0 {
@@ -145,10 +149,23 @@ func (s *StatusBar) Render(ctx runtime.RenderContext) {
 		right = tokenSegment
 	}
 	if right != "" {
-		right = right + " "
-		x := bounds.X + bounds.Width - len(right)
+		drawText := right + " "
+		x := bounds.X + bounds.Width - len(drawText)
 		if x > bounds.X+len(left) {
-			ctx.Buffer.SetString(x, bounds.Y, right, s.textStyle)
+			ctx.Buffer.SetString(x, bounds.Y, drawText, s.textStyle)
+			if ctxSegment != "" && tokenSegment != "" && right == ctxSegment+" · "+tokenSegment {
+				s.contextBounds = runtime.Rect{X: x, Y: bounds.Y, Width: len(ctxSegment), Height: 1}
+				s.tokenBounds = runtime.Rect{
+					X:      x + len(ctxSegment) + len(" · "),
+					Y:      bounds.Y,
+					Width:  len(tokenSegment),
+					Height: 1,
+				}
+			} else if right == ctxSegment && ctxSegment != "" {
+				s.contextBounds = runtime.Rect{X: x, Y: bounds.Y, Width: len(ctxSegment), Height: 1}
+			} else if right == tokenSegment && tokenSegment != "" {
+				s.tokenBounds = runtime.Rect{X: x, Y: bounds.Y, Width: len(tokenSegment), Height: 1}
+			}
 		}
 	}
 
@@ -159,6 +176,17 @@ func (s *StatusBar) Render(ctx runtime.RenderContext) {
 			ctx.Buffer.SetString(center, bounds.Y, s.scrollPos, s.textStyle)
 		}
 	}
+}
+
+// WebLinkAt returns a status bar link target at the given point.
+func (s *StatusBar) WebLinkAt(x, y int) (string, bool) {
+	if s.contextBounds.Contains(x, y) {
+		return "context", true
+	}
+	if s.tokenBounds.Contains(x, y) {
+		return "usage", true
+	}
+	return "", false
 }
 
 func fitsRight(bounds runtime.Rect, left, right string) bool {

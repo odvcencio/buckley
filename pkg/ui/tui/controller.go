@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -180,6 +181,38 @@ func newSessionState(cfg *config.Config, store *storage.Store, workDir string, h
 	return sess, nil
 }
 
+func resolveWebBaseURL(cfg *config.Config) string {
+	if cfg == nil {
+		return ""
+	}
+	if strings.TrimSpace(cfg.WebUI.BaseURL) != "" {
+		return cfg.WebUI.BaseURL
+	}
+	if !cfg.IPC.Enabled || !cfg.IPC.EnableBrowser {
+		return ""
+	}
+	bind := strings.TrimSpace(cfg.IPC.Bind)
+	if bind == "" {
+		return ""
+	}
+	host, port, err := net.SplitHostPort(bind)
+	if err != nil {
+		if strings.HasPrefix(bind, ":") {
+			host = "127.0.0.1"
+			port = strings.TrimPrefix(bind, ":")
+		} else {
+			return ""
+		}
+	}
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		host = "127.0.0.1"
+	}
+	if port == "" {
+		return ""
+	}
+	return fmt.Sprintf("http://%s:%s", host, port)
+}
+
 // NewController creates a new TUI controller.
 func NewController(cfg ControllerConfig) (*Controller, error) {
 	workDir, err := os.Getwd()
@@ -279,11 +312,25 @@ func NewController(cfg ControllerConfig) (*Controller, error) {
 	projectRoot := workDir
 
 	// Create TUI app
+	currentSessionID := ""
+	if currentIdx >= 0 && currentIdx < len(projectSessions) {
+		currentSessionID = projectSessions[currentIdx].ID
+	}
+	webBaseURL := ""
+	metadataMode := ""
+	if cfg.Config != nil {
+		webBaseURL = resolveWebBaseURL(cfg.Config)
+		metadataMode = cfg.Config.UI.MessageMetadata
+	}
 	app, err := NewWidgetApp(WidgetAppConfig{
-		Theme:       theme.DefaultTheme(),
-		ModelName:   cfg.Config.Models.Execution,
-		WorkDir:     workDir,
-		ProjectRoot: projectRoot,
+		Theme:           theme.DefaultTheme(),
+		ModelName:       cfg.Config.Models.Execution,
+		SessionID:       currentSessionID,
+		WorkDir:         workDir,
+		ProjectRoot:     projectRoot,
+		ReduceMotion:    cfg.Config != nil && cfg.Config.UI.ReduceAnimation,
+		MessageMetadata: metadataMode,
+		WebBaseURL:      webBaseURL,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("create TUI app: %w", err)
@@ -1083,6 +1130,7 @@ func (c *Controller) newSession() {
 	// Clear scrollback and show fresh welcome
 	c.app.ClearScrollback()
 	c.app.WelcomeScreen()
+	c.app.SetSessionID(newSess.ID)
 	c.app.AddMessage("New session started: "+newSess.ID, "system")
 	c.app.SetStatus("Ready")
 	c.app.SetStreaming(false)
@@ -2445,6 +2493,7 @@ func (c *Controller) switchToSessionLocked(idx int) {
 	sess := c.sessions[idx]
 	c.conversation = sess.Conversation
 	c.registry = sess.ToolRegistry
+	c.app.SetSessionID(sess.ID)
 
 	// Clear and rebuild display
 	c.app.ClearScrollback()

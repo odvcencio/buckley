@@ -2,6 +2,7 @@ package widgets
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/odvcencio/buckley/pkg/ui/backend"
@@ -88,6 +89,7 @@ const (
 	sectionCurrentTask sidebarSectionKind = iota
 	sectionPlan
 	sectionTools
+	sectionContext
 	sectionRLM
 	sectionCircuit
 	sectionExperiment
@@ -100,6 +102,20 @@ type sidebarSectionHit struct {
 	HeaderY   int
 	BodyStart int
 	BodyEnd   int
+}
+
+type sidebarLinkKind int
+
+const (
+	linkPlan sidebarLinkKind = iota
+	linkTool
+	linkContext
+)
+
+type sidebarLinkHit struct {
+	Kind  sidebarLinkKind
+	Rect  runtime.Rect
+	Index int
 }
 
 // SidebarConfig holds configurable options for the sidebar.
@@ -141,6 +157,14 @@ type Sidebar struct {
 	runningTools []RunningTool
 	showTools    bool
 
+	// Context usage section
+	contextUsed    int
+	contextBudget  int
+	contextWindow  int
+	contextHistory []float64
+	contextMax     int
+	showContext    bool
+
 	// Active touches section
 	activeTouches []TouchSummary
 	showTouches   bool
@@ -169,18 +193,26 @@ type Sidebar struct {
 	planViewportRows int
 	focusedSection   sidebarSectionKind
 	sectionHits      []sidebarSectionHit
+	linkHits         []sidebarLinkHit
+	spinnerFrame     int
 
 	// Styles
-	borderStyle    backend.Style
-	headerStyle    backend.Style
-	textStyle      backend.Style
-	progressFull   backend.Style
-	progressEmpty  backend.Style
-	completedStyle backend.Style
-	activeStyle    backend.Style
-	pendingStyle   backend.Style
-	failedStyle    backend.Style
-	bgStyle        backend.Style
+	borderStyle     backend.Style
+	headerStyle     backend.Style
+	textStyle       backend.Style
+	progressFull    backend.Style
+	progressEmpty   backend.Style
+	progressEdge    backend.Style
+	completedStyle  backend.Style
+	activeStyle     backend.Style
+	pendingStyle    backend.Style
+	failedStyle     backend.Style
+	contextActive   backend.Style
+	contextWarn     backend.Style
+	contextCritical backend.Style
+	contextMuted    backend.Style
+	spinnerStyle    backend.Style
+	bgStyle         backend.Style
 }
 
 // NewSidebar creates a new sidebar widget with default configuration.
@@ -203,19 +235,27 @@ func NewSidebarWithConfig(cfg SidebarConfig) *Sidebar {
 		showCurrentTask: true,
 		showPlan:        true,
 		showTools:       true,
+		showContext:     true,
 		showTouches:     true,
 		showRecentFiles: false, // Collapsed by default
 		showExperiment:  false,
 		showRLM:         true,
+		contextMax:      12,
 		borderStyle:     backend.DefaultStyle(),
 		headerStyle:     backend.DefaultStyle().Bold(true),
 		textStyle:       backend.DefaultStyle(),
 		progressFull:    backend.DefaultStyle().Foreground(backend.ColorGreen),
 		progressEmpty:   backend.DefaultStyle().Foreground(backend.ColorDefault),
+		progressEdge:    backend.DefaultStyle().Bold(true),
 		completedStyle:  backend.DefaultStyle().Foreground(backend.ColorGreen),
 		activeStyle:     backend.DefaultStyle().Foreground(backend.ColorYellow).Bold(true),
 		pendingStyle:    backend.DefaultStyle().Foreground(backend.ColorDefault),
 		failedStyle:     backend.DefaultStyle().Foreground(backend.ColorRed),
+		contextActive:   backend.DefaultStyle().Foreground(backend.ColorGreen),
+		contextWarn:     backend.DefaultStyle().Foreground(backend.ColorYellow),
+		contextCritical: backend.DefaultStyle().Foreground(backend.ColorRed),
+		contextMuted:    backend.DefaultStyle().Foreground(backend.ColorDefault),
+		spinnerStyle:    backend.DefaultStyle(),
 		bgStyle:         backend.DefaultStyle(),
 	}
 }
@@ -230,6 +270,32 @@ func (s *Sidebar) SetStyles(border, header, text, progressFull, progressEmpty, b
 	s.bgStyle = background
 }
 
+// SetProgressEdgeStyle configures the highlight style for active progress edges.
+func (s *Sidebar) SetProgressEdgeStyle(style backend.Style) {
+	s.progressEdge = style
+}
+
+// SetStatusStyles configures styles for status indicators.
+func (s *Sidebar) SetStatusStyles(completed, active, pending, failed backend.Style) {
+	s.completedStyle = completed
+	s.activeStyle = active
+	s.pendingStyle = pending
+	s.failedStyle = failed
+}
+
+// SetContextStyles configures styles for context usage indicators.
+func (s *Sidebar) SetContextStyles(active, warn, critical, muted backend.Style) {
+	s.contextActive = active
+	s.contextWarn = warn
+	s.contextCritical = critical
+	s.contextMuted = muted
+}
+
+// SetSpinnerStyle configures the spinner style.
+func (s *Sidebar) SetSpinnerStyle(style backend.Style) {
+	s.spinnerStyle = style
+}
+
 // HasContent returns true when any sidebar section has data to render.
 func (s *Sidebar) HasContent() bool {
 	if strings.TrimSpace(s.currentTask) != "" {
@@ -239,6 +305,9 @@ func (s *Sidebar) HasContent() bool {
 		return true
 	}
 	if len(s.runningTools) > 0 {
+		return true
+	}
+	if s.contextUsed > 0 || s.contextBudget > 0 || s.contextWindow > 0 {
 		return true
 	}
 	if strings.TrimSpace(s.experimentName) != "" || strings.TrimSpace(s.experimentStatus) != "" || len(s.experimentVariants) > 0 {
@@ -294,6 +363,34 @@ func (s *Sidebar) SetRunningTools(tools []RunningTool) {
 // SetShowTools controls visibility of tools section.
 func (s *Sidebar) SetShowTools(show bool) {
 	s.showTools = show
+}
+
+// SetContextUsage updates context usage values.
+func (s *Sidebar) SetContextUsage(used, budget, window int) {
+	s.contextUsed = used
+	s.contextBudget = budget
+	s.contextWindow = window
+	if used > 0 || budget > 0 || window > 0 {
+		s.showContext = true
+	}
+	if budget > 0 || window > 0 {
+		ratio := s.contextRatio()
+		if ratio < 0 {
+			ratio = 0
+		}
+		if ratio > 1 {
+			ratio = 1
+		}
+		s.contextHistory = append(s.contextHistory, ratio)
+		if s.contextMax > 0 && len(s.contextHistory) > s.contextMax {
+			s.contextHistory = s.contextHistory[len(s.contextHistory)-s.contextMax:]
+		}
+	}
+}
+
+// SetShowContext controls visibility of context section.
+func (s *Sidebar) SetShowContext(show bool) {
+	s.showContext = show
 }
 
 // SetActiveTouches updates the active touches list.
@@ -363,6 +460,14 @@ func (s *Sidebar) SetShowExperiment(show bool) {
 	s.showExperiment = show
 }
 
+// SetSpinnerFrame updates the spinner animation frame.
+func (s *Sidebar) SetSpinnerFrame(frame int) {
+	if frame < 0 {
+		frame = 0
+	}
+	s.spinnerFrame = frame
+}
+
 // ToggleRecentFiles toggles the recent files section.
 func (s *Sidebar) ToggleRecentFiles() {
 	s.showRecentFiles = !s.showRecentFiles
@@ -424,6 +529,17 @@ func (s *Sidebar) recordSection(kind sidebarSectionKind, headerY, bodyStart, bod
 	})
 }
 
+func (s *Sidebar) recordLink(kind sidebarLinkKind, rect runtime.Rect, index int) {
+	if rect.Width <= 0 || rect.Height <= 0 {
+		return
+	}
+	s.linkHits = append(s.linkHits, sidebarLinkHit{
+		Kind:  kind,
+		Rect:  rect,
+		Index: index,
+	})
+}
+
 func (s *Sidebar) sectionHitAt(y int) (sidebarSectionHit, bool) {
 	for _, hit := range s.sectionHits {
 		if hit.HeaderY == y {
@@ -434,6 +550,29 @@ func (s *Sidebar) sectionHitAt(y int) (sidebarSectionHit, bool) {
 		}
 	}
 	return sidebarSectionHit{}, false
+}
+
+// WebLinkAt returns a sidebar web link hit if the point is inside one.
+func (s *Sidebar) WebLinkAt(x, y int) (string, bool) {
+	for _, hit := range s.linkHits {
+		if hit.Rect.Contains(x, y) {
+			return sidebarLinkName(hit.Kind), true
+		}
+	}
+	return "", false
+}
+
+func sidebarLinkName(kind sidebarLinkKind) string {
+	switch kind {
+	case linkPlan:
+		return "plan"
+	case linkTool:
+		return "tools"
+	case linkContext:
+		return "context"
+	default:
+		return ""
+	}
 }
 
 func (s *Sidebar) scrollPlan(delta int) bool {
@@ -462,6 +601,89 @@ func (s *Sidebar) scrollPlan(delta int) bool {
 	return true
 }
 
+func (s *Sidebar) contextRatio() float64 {
+	if s.contextBudget > 0 {
+		return float64(s.contextUsed) / float64(s.contextBudget)
+	}
+	if s.contextWindow > 0 {
+		return float64(s.contextUsed) / float64(s.contextWindow)
+	}
+	return 0
+}
+
+func (s *Sidebar) contextTrend() float64 {
+	if len(s.contextHistory) < 2 {
+		return 0
+	}
+	a := s.contextHistory[len(s.contextHistory)-2]
+	b := s.contextHistory[len(s.contextHistory)-1]
+	return b - a
+}
+
+func (s *Sidebar) sectionsToRender() []sidebarSectionKind {
+	type entry struct {
+		kind     sidebarSectionKind
+		priority int
+		order    int
+	}
+
+	baseOrder := map[sidebarSectionKind]int{
+		sectionCurrentTask: 0,
+		sectionPlan:        1,
+		sectionTools:       2,
+		sectionContext:     3,
+		sectionRLM:         4,
+		sectionCircuit:     5,
+		sectionExperiment:  6,
+		sectionTouches:     7,
+		sectionRecentFiles: 8,
+	}
+
+	var entries []entry
+	add := func(kind sidebarSectionKind, available bool, priority int) {
+		if !available {
+			return
+		}
+		entries = append(entries, entry{kind: kind, priority: priority, order: baseOrder[kind]})
+	}
+
+	contextAvailable := s.contextUsed > 0 || s.contextBudget > 0 || s.contextWindow > 0
+	contextRatio := s.contextRatio()
+
+	add(sectionCircuit, s.circuitStatus != nil, func() int {
+		if s.circuitStatus != nil && s.circuitStatus.State != "Closed" {
+			return 5
+		}
+		return 45
+	}())
+	add(sectionTools, len(s.runningTools) > 0, 10)
+	add(sectionPlan, len(s.planTasks) > 0, 16)
+	add(sectionCurrentTask, strings.TrimSpace(s.currentTask) != "", 18)
+	add(sectionContext, contextAvailable, func() int {
+		if contextRatio >= 0.85 {
+			return 12
+		}
+		return 30
+	}())
+	add(sectionRLM, s.rlmStatus != nil || len(s.rlmScratchpad) > 0, 28)
+	add(sectionExperiment, s.experimentName != "" || len(s.experimentVariants) > 0 || s.experimentStatus != "", 35)
+	add(sectionTouches, len(s.activeTouches) > 0, 38)
+	add(sectionRecentFiles, len(s.recentFiles) > 0, 42)
+
+	sort.SliceStable(entries, func(i, j int) bool {
+		if entries[i].priority == entries[j].priority {
+			return entries[i].order < entries[j].order
+		}
+		return entries[i].priority < entries[j].priority
+	})
+
+	out := make([]sidebarSectionKind, 0, len(entries))
+	for _, entry := range entries {
+		out = append(out, entry.kind)
+	}
+	return out
+}
+
 // Render draws the sidebar.
 func (s *Sidebar) Render(ctx runtime.RenderContext) {
 	b := s.bounds
@@ -470,6 +692,7 @@ func (s *Sidebar) Render(ctx runtime.RenderContext) {
 	}
 	ctx.Clear(s.bgStyle)
 	s.sectionHits = s.sectionHits[:0]
+	s.linkHits = s.linkHits[:0]
 
 	// Draw left border
 	for y := b.Y; y < b.Y+b.Height; y++ {
@@ -480,60 +703,31 @@ func (s *Sidebar) Render(ctx runtime.RenderContext) {
 	contentX := b.X + 1
 	contentWidth := b.Width - 1
 
-	// Current Task Section
-	if strings.TrimSpace(s.currentTask) != "" {
+	for _, kind := range s.sectionsToRender() {
 		startY := y
-		y = s.renderCurrentTask(ctx.Buffer, contentX, y, contentWidth)
-		s.recordSection(sectionCurrentTask, startY, startY+1, y-1)
-	}
-
-	// Plan Section
-	if len(s.planTasks) > 0 {
-		startY := y
-		y = s.renderPlan(ctx.Buffer, contentX, y, contentWidth, b.Y+b.Height-y)
-		s.recordSection(sectionPlan, startY, startY+1, y-1)
-	}
-
-	// Running Tools Section
-	if len(s.runningTools) > 0 {
-		startY := y
-		y = s.renderTools(ctx.Buffer, contentX, y, contentWidth)
-		s.recordSection(sectionTools, startY, startY+1, y-1)
-	}
-
-	// RLM Section
-	if s.rlmStatus != nil || len(s.rlmScratchpad) > 0 {
-		startY := y
-		y = s.renderRLM(ctx.Buffer, contentX, y, contentWidth)
-		s.recordSection(sectionRLM, startY, startY+1, y-1)
-	}
-
-	// Circuit Breaker Section (show prominently when there are issues)
-	if s.circuitStatus != nil {
-		startY := y
-		y = s.renderCircuit(ctx.Buffer, contentX, y, contentWidth)
-		s.recordSection(sectionCircuit, startY, startY+1, y-1)
-	}
-
-	// Experiments Section
-	if s.experimentName != "" || len(s.experimentVariants) > 0 || s.experimentStatus != "" {
-		startY := y
-		y = s.renderExperiment(ctx.Buffer, contentX, y, contentWidth)
-		s.recordSection(sectionExperiment, startY, startY+1, y-1)
-	}
-
-	// Active Touches Section
-	if len(s.activeTouches) > 0 {
-		startY := y
-		y = s.renderTouches(ctx.Buffer, contentX, y, contentWidth)
-		s.recordSection(sectionTouches, startY, startY+1, y-1)
-	}
-
-	// Recent Files Section
-	if len(s.recentFiles) > 0 {
-		startY := y
-		y = s.renderRecentFiles(ctx.Buffer, contentX, y, contentWidth)
-		s.recordSection(sectionRecentFiles, startY, startY+1, y-1)
+		switch kind {
+		case sectionCurrentTask:
+			y = s.renderCurrentTask(ctx.Buffer, contentX, y, contentWidth)
+		case sectionPlan:
+			y = s.renderPlan(ctx.Buffer, contentX, y, contentWidth, b.Y+b.Height-y)
+		case sectionTools:
+			y = s.renderTools(ctx.Buffer, contentX, y, contentWidth)
+		case sectionContext:
+			y = s.renderContext(ctx.Buffer, contentX, y, contentWidth)
+		case sectionRLM:
+			y = s.renderRLM(ctx.Buffer, contentX, y, contentWidth)
+		case sectionCircuit:
+			y = s.renderCircuit(ctx.Buffer, contentX, y, contentWidth)
+		case sectionExperiment:
+			y = s.renderExperiment(ctx.Buffer, contentX, y, contentWidth)
+		case sectionTouches:
+			y = s.renderTouches(ctx.Buffer, contentX, y, contentWidth)
+		case sectionRecentFiles:
+			y = s.renderRecentFiles(ctx.Buffer, contentX, y, contentWidth)
+		}
+		if y > startY {
+			s.recordSection(kind, startY, startY+1, y-1)
+		}
 	}
 }
 
@@ -577,6 +771,9 @@ func (s *Sidebar) renderProgressBar(buf *runtime.Buffer, x, y, width, percent in
 		if i < filled {
 			ch = '█'
 			style = s.progressFull
+			if i == filled-1 {
+				style = s.progressEdge
+			}
 		}
 		buf.Set(x+i, y, ch, style)
 	}
@@ -603,8 +800,26 @@ func (s *Sidebar) renderPlan(buf *runtime.Buffer, x, y, width, maxHeight int) in
 			completed++
 		}
 	}
-	header := "Plan (" + intToStr(completed) + "/" + intToStr(len(s.planTasks)) + ")"
-	buf.SetString(x+2, y, header, s.headerStyle)
+	total := len(s.planTasks)
+	percent := 0
+	if total > 0 {
+		percent = int(float64(completed)*100/float64(total) + 0.5)
+	}
+	ringRows := 0
+	useRing := s.showPlan && total > 0 && width >= progressRingSize+8 && maxHeight >= progressRingSize+2
+	if useRing {
+		ringRows = progressRingSize
+	}
+	header := "Plan"
+	if total > 0 {
+		if useRing {
+			header = fmt.Sprintf("Plan %d/%d", completed, total)
+		} else {
+			ring := progressGlyph(percent)
+			header = fmt.Sprintf("Plan %c %d/%d", ring, completed, total)
+		}
+	}
+	buf.SetString(x+2, y, truncateSidebarText(header, width-2), s.headerStyle)
 	y++
 
 	if !s.showPlan {
@@ -612,8 +827,23 @@ func (s *Sidebar) renderPlan(buf *runtime.Buffer, x, y, width, maxHeight int) in
 		return y
 	}
 
+	if useRing {
+		ringX := x + 2
+		ringY := y
+		drawProgressRing(buf, ringX, ringY, percent, s.progressFull, s.progressEmpty, s.progressEdge)
+		s.recordLink(linkPlan, runtime.Rect{X: ringX, Y: ringY, Width: progressRingSize, Height: progressRingSize}, -1)
+		labelX := ringX + progressRingSize + 1
+		labelWidth := width - (labelX - x)
+		if labelWidth > 0 && total > 0 {
+			label := fmt.Sprintf("%d/%d %d%%", completed, total, percent)
+			buf.SetString(labelX, ringY+2, truncateSidebarText(label, labelWidth), s.textStyle)
+			s.recordLink(linkPlan, runtime.Rect{X: labelX, Y: ringY + 2, Width: minInt(labelWidth, width-(labelX-x)), Height: 1}, -1)
+		}
+		y += progressRingSize
+	}
+
 	// Tasks
-	maxTasks := maxHeight - 1
+	maxTasks := maxHeight - 1 - ringRows
 	if maxTasks < 0 {
 		maxTasks = 0
 	}
@@ -677,6 +907,7 @@ func (s *Sidebar) renderPlan(buf *runtime.Buffer, x, y, width, maxHeight int) in
 			textStyle = s.activeStyle
 		}
 		buf.SetString(x+4, y, name, textStyle)
+		s.recordLink(linkPlan, runtime.Rect{X: x + 2, Y: y, Width: width - 2, Height: 1}, i)
 		y++
 	}
 
@@ -698,9 +929,19 @@ func (s *Sidebar) renderTools(buf *runtime.Buffer, x, y, width int) int {
 		return y
 	}
 
-	for _, tool := range s.runningTools {
+	for i, tool := range s.runningTools {
 		// Spinner icon
-		buf.Set(x+2, y, '⟳', s.activeStyle)
+		spinner := toolSpinnerFrames(tool.Name)
+		spinRune := '⟳'
+		if len(spinner) > 0 {
+			frame := s.spinnerFrame % len(spinner)
+			spinRune = []rune(spinner[frame])[0]
+		}
+		style := s.spinnerStyle
+		if style == (backend.Style{}) {
+			style = s.activeStyle
+		}
+		buf.Set(x+2, y, spinRune, style)
 		buf.Set(x+3, y, ' ', s.textStyle)
 
 		name := tool.Name
@@ -709,6 +950,7 @@ func (s *Sidebar) renderTools(buf *runtime.Buffer, x, y, width int) int {
 			name = name[:maxName-3] + "..."
 		}
 		buf.SetString(x+4, y, name, s.textStyle)
+		s.recordLink(linkTool, runtime.Rect{X: x + 2, Y: y, Width: width - 2, Height: 1}, i)
 		y++
 
 		// Command detail if present
@@ -718,6 +960,105 @@ func (s *Sidebar) renderTools(buf *runtime.Buffer, x, y, width int) int {
 				cmd = cmd[:width-7] + "..."
 			}
 			buf.SetString(x+4, y, cmd, s.textStyle)
+			s.recordLink(linkTool, runtime.Rect{X: x + 2, Y: y, Width: width - 2, Height: 1}, i)
+			y++
+		}
+	}
+
+	return y
+}
+
+func (s *Sidebar) renderContext(buf *runtime.Buffer, x, y, width int) int {
+	icon := '▼'
+	if !s.showContext {
+		icon = '▶'
+	}
+	buf.Set(x, y, icon, s.headerStyle)
+
+	header := "Context"
+	ratio := s.contextRatio()
+	if ratio > 0 {
+		pct := int(ratio*100 + 0.5)
+		header = "Context " + intToStr(pct) + "%"
+	}
+	buf.SetString(x+2, y, truncateSidebarText(header, width-2), s.headerStyle)
+	y++
+
+	if !s.showContext {
+		return y
+	}
+
+	if ratio < 0 {
+		ratio = 0
+	}
+	if ratio > 1 {
+		ratio = 1
+	}
+
+	barWidth := width - 10
+	if barWidth > 12 {
+		barWidth = 12
+	}
+	showPercent := true
+	if barWidth < 6 {
+		barWidth = width - 4
+		showPercent = false
+	}
+	if barWidth < 1 {
+		barWidth = 1
+		showPercent = false
+	}
+
+	fill := int(float64(barWidth)*ratio + 0.5)
+	if fill < 0 {
+		fill = 0
+	}
+	if fill > barWidth {
+		fill = barWidth
+	}
+
+	fillStyle := s.contextActive
+	if ratio >= 0.85 {
+		fillStyle = s.contextCritical
+	} else if ratio >= 0.6 {
+		fillStyle = s.contextWarn
+	}
+
+	barX := x + 2
+	for i := 0; i < barWidth; i++ {
+		ch := '░'
+		style := s.contextMuted
+		if i < fill {
+			ch = '█'
+			style = fillStyle
+			if i == fill-1 {
+				style = s.progressEdge
+			}
+		}
+		buf.Set(barX+i, y, ch, style)
+	}
+
+	if showPercent {
+		percent := intToStr(int(ratio*100+0.5)) + "%"
+		arrow := trendArrow(s.contextTrend())
+		text := percent + " " + arrow
+		if len(text) > width-barWidth-3 {
+			text = percent
+		}
+		buf.SetString(barX+barWidth+1, y, truncateSidebarText(text, width-barWidth-3), s.textStyle)
+	}
+	s.recordLink(linkContext, runtime.Rect{X: x + 2, Y: y, Width: width - 2, Height: 1}, -1)
+	y++
+
+	sparkWidth := width - 4
+	if sparkWidth > 12 {
+		sparkWidth = 12
+	}
+	if sparkWidth >= 6 {
+		spark := sparkline(s.contextHistory, sparkWidth)
+		if spark != "" {
+			buf.SetString(x+2, y, spark, s.contextMuted)
+			s.recordLink(linkContext, runtime.Rect{X: x + 2, Y: y, Width: width - 2, Height: 1}, -1)
 			y++
 		}
 	}
@@ -1001,19 +1342,22 @@ func (s *Sidebar) HandleMessage(msg runtime.Message) runtime.HandleResult {
 			case '3': // Toggle tools
 				s.showTools = !s.showTools
 				return runtime.Handled()
-			case '4': // Toggle touches
+			case '4': // Toggle context
+				s.showContext = !s.showContext
+				return runtime.Handled()
+			case '5': // Toggle touches
 				s.showTouches = !s.showTouches
 				return runtime.Handled()
-			case '5': // Toggle recent files
+			case '6': // Toggle recent files
 				s.showRecentFiles = !s.showRecentFiles
 				return runtime.Handled()
-			case '6': // Toggle experiments
+			case '7': // Toggle experiments
 				s.showExperiment = !s.showExperiment
 				return runtime.Handled()
-			case '7': // Toggle RLM
+			case '8': // Toggle RLM
 				s.showRLM = !s.showRLM
 				return runtime.Handled()
-			case '8': // Toggle circuit breaker
+			case '9': // Toggle circuit breaker
 				s.showCircuit = !s.showCircuit
 				return runtime.Handled()
 			}
@@ -1084,6 +1428,9 @@ func (s *Sidebar) toggleSection(kind sidebarSectionKind) bool {
 	case sectionTools:
 		s.showTools = !s.showTools
 		return true
+	case sectionContext:
+		s.showContext = !s.showContext
+		return true
 	case sectionRLM:
 		s.showRLM = !s.showRLM
 		return true
@@ -1127,6 +1474,24 @@ func experimentStatusStyle(status string, s *Sidebar) backend.Style {
 		return s.failedStyle
 	default:
 		return s.pendingStyle
+	}
+}
+
+func toolSpinnerFrames(name string) []string {
+	lower := strings.ToLower(name)
+	switch {
+	case strings.Contains(lower, "shell") || strings.Contains(lower, "command"):
+		return []string{"⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"}
+	case strings.Contains(lower, "search") || strings.Contains(lower, "grep"):
+		return []string{"◇", "◈", "◆", "◈"}
+	case strings.Contains(lower, "fetch") || strings.Contains(lower, "http") || strings.Contains(lower, "web"):
+		return []string{"○", "◔", "◑", "◕", "●", "◕", "◑", "◔"}
+	case strings.Contains(lower, "read") || strings.Contains(lower, "write") || strings.Contains(lower, "file"):
+		return []string{"◐", "◓", "◑", "◒"}
+	case strings.Contains(lower, "llm") || strings.Contains(lower, "model") || strings.Contains(lower, "chat"):
+		return []string{"∙", "∘", "○", "◎", "○", "∘"}
+	default:
+		return []string{"⟳"}
 	}
 }
 

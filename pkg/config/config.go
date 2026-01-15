@@ -77,6 +77,7 @@ type Config struct {
 	Workflow       WorkflowConfig       `yaml:"workflow"`
 	Compaction     CompactionConfig     `yaml:"compaction"`
 	UI             UIConfig             `yaml:"ui"`
+	WebUI          WebUIConfig          `yaml:"web_ui"`
 	Commenting     CommentingConfig     `yaml:"commenting"`
 	GitEvents      GitEventsConfig      `yaml:"git_events"`
 	Input          InputConfig          `yaml:"input"`
@@ -548,6 +549,12 @@ type UIConfig struct {
 	HighContrast    bool `yaml:"high_contrast"`    // Use high-contrast color scheme
 	UseTextLabels   bool `yaml:"use_text_labels"`  // Add text labels to color-only indicators
 	ReduceAnimation bool `yaml:"reduce_animation"` // Reduce or disable animations
+	MessageMetadata string `yaml:"message_metadata"` // "always", "hover", or "never"
+}
+
+// WebUIConfig defines web UI integration settings.
+type WebUIConfig struct {
+	BaseURL string `yaml:"base_url"`
 }
 
 // CommentingConfig defines code commenting requirements
@@ -960,6 +967,10 @@ func DefaultConfig() *Config {
 			SidebarWidth:              24,
 			SidebarMinWidth:           16,
 			SidebarMaxWidth:           60,
+			MessageMetadata:           "always",
+		},
+		WebUI: WebUIConfig{
+			BaseURL: "",
 		},
 		Commenting: CommentingConfig{
 			RequireFunctionDocs:           true,
@@ -1168,6 +1179,9 @@ func applyEnvOverrides(cfg *Config, configEnv map[string]string) {
 	}
 	if v := os.Getenv("BUCKLEY_PUSH_SUBJECT"); v != "" {
 		cfg.IPC.PushSubject = v
+	}
+	if v := os.Getenv("BUCKLEY_WEB_URL"); v != "" {
+		cfg.WebUI.BaseURL = v
 	}
 
 	if v, ok := envBool("BUCKLEY_BATCH_ENABLED"); ok {

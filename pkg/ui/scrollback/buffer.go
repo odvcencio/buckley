@@ -64,6 +64,9 @@ type Line struct {
 	IsCode       bool
 	IsCodeHeader bool
 	Language     string
+	MessageID    int
+	CodeLineNumberWidth    int
+	CodeLineNumberOptional bool
 }
 
 // LineStyle defines visual styling for a line.
@@ -582,6 +585,71 @@ func (b *Buffer) LatestCodeBlock() (language, code string, ok bool) {
 	return language, strings.Join(lines, "\n"), true
 }
 
+// CodeBlockAt returns the code block content containing the given line index.
+func (b *Buffer) CodeBlockAt(lineIndex int) (language, code string, ok bool) {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+
+	if lineIndex < 0 || lineIndex >= len(b.lines) {
+		return "", "", false
+	}
+	if !b.lines[lineIndex].IsCode {
+		return "", "", false
+	}
+
+	start := lineIndex
+	for start-1 >= 0 && b.lines[start-1].IsCode {
+		start--
+	}
+	end := lineIndex
+	for end+1 < len(b.lines) && b.lines[end+1].IsCode {
+		end++
+	}
+
+	for i := start; i <= end; i++ {
+		if b.lines[i].Language != "" {
+			language = b.lines[i].Language
+			break
+		}
+	}
+
+	lines := make([]string, 0, end-start+1)
+	for i := start; i <= end; i++ {
+		if b.lines[i].IsCodeHeader {
+			continue
+		}
+		lines = append(lines, b.lines[i].Content)
+	}
+	if len(lines) == 0 {
+		return language, "", false
+	}
+
+	return language, strings.Join(lines, "\n"), true
+}
+
+// CodeBlockRange returns the start and end line indices for a code block.
+func (b *Buffer) CodeBlockRange(lineIndex int) (start, end int, ok bool) {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+
+	if lineIndex < 0 || lineIndex >= len(b.lines) {
+		return 0, 0, false
+	}
+	if !b.lines[lineIndex].IsCode {
+		return 0, 0, false
+	}
+
+	start = lineIndex
+	for start-1 >= 0 && b.lines[start-1].IsCode {
+		start--
+	}
+	end = lineIndex
+	for end+1 < len(b.lines) && b.lines[end+1].IsCode {
+		end++
+	}
+	return start, end, true
+}
+
 // GetVisibleLines returns lines currently in viewport.
 func (b *Buffer) GetVisibleLines() []VisibleLine {
 	b.mu.RLock()
@@ -603,6 +671,9 @@ func (b *Buffer) GetVisibleLines() []VisibleLine {
 					RowIndex:  rowIndex - b.scrollTop,
 					IsCode:    line.IsCode,
 					Language:  line.Language,
+					MessageID: line.MessageID,
+					CodeLineNumberWidth:    line.CodeLineNumberWidth,
+					CodeLineNumberOptional: line.CodeLineNumberOptional,
 				}
 
 				// Check selection
@@ -628,6 +699,60 @@ func (b *Buffer) GetVisibleLines() []VisibleLine {
 	return result
 }
 
+// VisibleLineAt returns the visible line at the given viewport row.
+func (b *Buffer) VisibleLineAt(row int) (VisibleLine, bool) {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+
+	if row < 0 || row >= b.height {
+		return VisibleLine{}, false
+	}
+
+	absoluteRow := b.scrollTop + row
+	if absoluteRow < 0 || absoluteRow >= b.totalRows {
+		return VisibleLine{}, false
+	}
+
+	rowIndex := 0
+	for lineIdx, line := range b.lines {
+		for wrapIdx, wrapped := range line.Wrapped {
+			if rowIndex == absoluteRow {
+				return VisibleLine{
+					Content:   wrapped.Text,
+					Spans:     wrapped.Spans,
+					Style:     line.Style,
+					Source:    line.Source,
+					LineIndex: lineIdx,
+					WrapIndex: wrapIdx,
+					RowIndex:  row,
+					IsCode:    line.IsCode,
+					Language:  line.Language,
+					MessageID: line.MessageID,
+					CodeLineNumberWidth:    line.CodeLineNumberWidth,
+					CodeLineNumberOptional: line.CodeLineNumberOptional,
+				}, true
+			}
+			rowIndex++
+			if rowIndex > absoluteRow {
+				break
+			}
+		}
+	}
+
+	return VisibleLine{}, false
+}
+
+// LineAt returns the raw line at the given index.
+func (b *Buffer) LineAt(index int) (Line, bool) {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+
+	if index < 0 || index >= len(b.lines) {
+		return Line{}, false
+	}
+	return b.lines[index], true
+}
+
 // VisibleLine represents a line ready for rendering.
 type VisibleLine struct {
 	Content          string
@@ -641,6 +766,9 @@ type VisibleLine struct {
 	SearchHighlights []int // Column indices of search matches
 	IsCode           bool
 	Language         string
+	MessageID        int
+	CodeLineNumberWidth    int
+	CodeLineNumberOptional bool
 }
 
 // LineCount returns total line count.

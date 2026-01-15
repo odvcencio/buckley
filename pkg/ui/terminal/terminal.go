@@ -30,6 +30,9 @@ type MouseEvent struct {
 	X, Y   int
 	Button MouseButton
 	Action MouseAction
+	Alt    bool
+	Ctrl   bool
+	Shift  bool
 }
 
 func (MouseEvent) eventMarker() {}

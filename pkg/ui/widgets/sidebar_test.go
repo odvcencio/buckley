@@ -20,6 +20,9 @@ func TestSidebar_New(t *testing.T) {
 	if !s.showTools {
 		t.Error("showTools should be true by default")
 	}
+	if !s.showContext {
+		t.Error("showContext should be true by default")
+	}
 	if !s.showTouches {
 		t.Error("showTouches should be true by default")
 	}
@@ -187,22 +190,31 @@ func TestSidebar_HandleMessage_SectionToggles(t *testing.T) {
 		t.Error("showTools should be false after '3'")
 	}
 
-	// Toggle touches with '4'
+	// Toggle context with '4'
 	result = s.HandleMessage(runtime.KeyMsg{Key: terminal.KeyRune, Rune: '4'})
 	if !result.Handled {
 		t.Error("'4' should be handled")
 	}
-	if s.showTouches {
-		t.Error("showTouches should be false after '4'")
+	if s.showContext {
+		t.Error("showContext should be false after '4'")
 	}
 
-	// Toggle recent files with '5'
+	// Toggle touches with '5'
 	result = s.HandleMessage(runtime.KeyMsg{Key: terminal.KeyRune, Rune: '5'})
 	if !result.Handled {
 		t.Error("'5' should be handled")
 	}
+	if s.showTouches {
+		t.Error("showTouches should be false after '5'")
+	}
+
+	// Toggle recent files with '6'
+	result = s.HandleMessage(runtime.KeyMsg{Key: terminal.KeyRune, Rune: '6'})
+	if !result.Handled {
+		t.Error("'6' should be handled")
+	}
 	if !s.showRecentFiles {
-		t.Error("showRecentFiles should be true after '5'")
+		t.Error("showRecentFiles should be true after '6'")
 	}
 }
 

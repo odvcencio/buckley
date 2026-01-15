@@ -27,7 +27,7 @@ Options considered:
 Implement automatic compaction with summarization:
 
 ```go
-// Trigger compaction at 90% of context limit
+// Trigger compaction at 75% of context limit
 func (cm *CompactionManager) ShouldCompact(conv *Conversation, maxTokens int) bool {
     threshold := float64(maxTokens) * cm.cfg.Memory.AutoCompactThreshold
     return float64(conv.TokenCount) >= threshold
@@ -59,7 +59,7 @@ Segment selection:
 - Conversations can run indefinitely without manual intervention
 - Important context preserved through summarization
 - Graceful degradation when LLM summarization fails
-- Configurable threshold (default 90%) balances efficiency and safety
+- Configurable threshold (default 75%) balances efficiency and safety
 
 ### Negative
 - Summarization adds latency and cost
@@ -69,7 +69,7 @@ Segment selection:
 ### Configuration
 ```yaml
 memory:
-  auto_compact_threshold: 0.9
+  auto_compact_threshold: 0.75
   max_compactions: 0          # 0 = unlimited
   summary_timeout_secs: 30
 ```

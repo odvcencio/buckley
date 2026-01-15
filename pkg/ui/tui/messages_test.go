@@ -30,6 +30,7 @@ func TestMessages_ImplementInterface(t *testing.T) {
 		ToastsMsg{Toasts: []*toast.Toast{{ID: "t1"}}},
 		StreamingMsg{Active: true},
 		ModelMsg{Name: "gpt-4"},
+		SessionMsg{ID: "session-1"},
 		AddMessageMsg{Content: "hi", Source: "user"},
 		AppendMsg{Text: " world"},
 		ThinkingMsg{Show: true},
@@ -71,6 +72,7 @@ func TestMessages_IsMessageMethods(t *testing.T) {
 	ToastsMsg{}.isMessage()
 	StreamingMsg{}.isMessage()
 	ModelMsg{}.isMessage()
+	SessionMsg{}.isMessage()
 	AddMessageMsg{}.isMessage()
 	AppendMsg{}.isMessage()
 	ThinkingMsg{}.isMessage()

@@ -208,11 +208,15 @@ func convertEvent(ev tcell.Event) terminal.Event {
 		return terminal.ResizeEvent{Width: w, Height: h}
 	case *tcell.EventMouse:
 		x, y := e.Position()
+		mods := e.Modifiers()
 		return terminal.MouseEvent{
 			X:      x,
 			Y:      y,
 			Button: convertMouseButton(e.Buttons()),
 			Action: convertMouseAction(e.Buttons()),
+			Alt:    mods&tcell.ModAlt != 0,
+			Ctrl:   mods&tcell.ModCtrl != 0,
+			Shift:  mods&tcell.ModShift != 0,
 		}
 	default:
 		return nil

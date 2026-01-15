@@ -176,6 +176,13 @@ type ModelMsg struct {
 
 func (ModelMsg) isMessage() {}
 
+// SessionMsg updates session display metadata.
+type SessionMsg struct {
+	ID string
+}
+
+func (SessionMsg) isMessage() {}
+
 // AddMessageMsg adds a new message to the conversation.
 type AddMessageMsg struct {
 	Content string
@@ -229,6 +236,9 @@ type MouseMsg struct {
 	X, Y   int
 	Button MouseButton
 	Action MouseAction
+	Alt    bool
+	Ctrl   bool
+	Shift  bool
 }
 
 func (MouseMsg) isMessage() {}

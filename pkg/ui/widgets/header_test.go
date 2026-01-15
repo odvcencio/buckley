@@ -160,10 +160,10 @@ func TestHeader_Render_WithModelName(t *testing.T) {
 	h.Render(ctx)
 
 	// Model name should be on the right with trailing space
-	// "gpt-4 " = 6 chars, so starts at 40 - 6 = 34
-	cell := buf.Get(34, 0)
+	// "gpt-4" = 5 chars, so starts at 40 - 5 = 35
+	cell := buf.Get(35, 0)
 	if cell.Rune != 'g' {
-		t.Errorf("expected 'g' at (34,0), got '%c'", cell.Rune)
+		t.Errorf("expected 'g' at (35,0), got '%c'", cell.Rune)
 	}
 }
 

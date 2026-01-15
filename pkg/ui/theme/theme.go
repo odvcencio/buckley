@@ -21,9 +21,17 @@ type Theme struct {
 	TextInverse   compositor.Style // Text on accent backgrounds
 
 	// Accent colors
-	Accent      compositor.Style // Primary action, highlights
-	AccentDim   compositor.Style // Subtle accent usage
-	AccentGlow  compositor.Style // Emphasis, active states
+	Accent       compositor.Style // Primary action, highlights
+	AccentDim    compositor.Style // Subtle accent usage
+	AccentGlow   compositor.Style // Emphasis, active states
+	ElectricBlue compositor.Style // Active processes, streaming
+	Coral        compositor.Style // Warnings, errors, attention
+	Teal         compositor.Style // Informational, metrics
+
+	// Glow variants
+	BlueGlow   compositor.Style
+	PurpleGlow compositor.Style
+	CoralGlow  compositor.Style
 
 	// Semantic colors
 	Success compositor.Style
@@ -39,12 +47,12 @@ type Theme struct {
 	Thinking  compositor.Style
 
 	// UI elements
-	Border       compositor.Style
-	BorderFocus  compositor.Style
-	Selection    compositor.Style
-	SearchMatch  compositor.Style
-	Scrollbar    compositor.Style
-	ScrollThumb  compositor.Style
+	Border      compositor.Style
+	BorderFocus compositor.Style
+	Selection   compositor.Style
+	SearchMatch compositor.Style
+	Scrollbar   compositor.Style
+	ScrollThumb compositor.Style
 
 	// Mode indicators
 	ModeNormal compositor.Style
@@ -73,15 +81,23 @@ func DefaultTheme() *Theme {
 		TextInverse:   compositor.DefaultStyle().WithFG(compositor.RGB(12, 12, 16)),
 
 		// Accent - warm amber/gold (memorable, warm, inviting)
-		Accent:     compositor.DefaultStyle().WithFG(compositor.RGB(255, 183, 77)),
-		AccentDim:  compositor.DefaultStyle().WithFG(compositor.RGB(180, 130, 60)),
-		AccentGlow: compositor.DefaultStyle().WithFG(compositor.RGB(255, 200, 100)).WithBold(true),
+		Accent:       compositor.DefaultStyle().WithFG(compositor.RGB(255, 183, 77)),
+		AccentDim:    compositor.DefaultStyle().WithFG(compositor.RGB(180, 130, 60)),
+		AccentGlow:   compositor.DefaultStyle().WithFG(compositor.RGB(255, 200, 100)).WithBold(true),
+		ElectricBlue: compositor.DefaultStyle().WithFG(compositor.RGB(79, 195, 247)),
+		Coral:        compositor.DefaultStyle().WithFG(compositor.RGB(255, 138, 101)),
+		Teal:         compositor.DefaultStyle().WithFG(compositor.RGB(77, 182, 172)),
+
+		// Glow variants - softened highlights
+		BlueGlow:   compositor.DefaultStyle().WithFG(compositor.RGB(120, 210, 255)).WithDim(true),
+		PurpleGlow: compositor.DefaultStyle().WithFG(compositor.RGB(210, 160, 255)).WithDim(true),
+		CoralGlow:  compositor.DefaultStyle().WithFG(compositor.RGB(255, 170, 150)).WithDim(true),
 
 		// Semantic colors
 		Success: compositor.DefaultStyle().WithFG(compositor.RGB(134, 239, 172)),
-		Warning: compositor.DefaultStyle().WithFG(compositor.RGB(253, 224, 71)),
-		Error:   compositor.DefaultStyle().WithFG(compositor.RGB(248, 113, 113)),
-		Info:    compositor.DefaultStyle().WithFG(compositor.RGB(147, 197, 253)),
+		Warning: compositor.DefaultStyle().WithFG(compositor.RGB(255, 138, 101)),
+		Error:   compositor.DefaultStyle().WithFG(compositor.RGB(255, 110, 90)),
+		Info:    compositor.DefaultStyle().WithFG(compositor.RGB(77, 182, 172)),
 
 		// Message sources - each has distinct character
 		User:      compositor.DefaultStyle().WithFG(compositor.RGB(134, 239, 172)), // Fresh green
@@ -113,15 +129,15 @@ func DefaultTheme() *Theme {
 // Symbols provides consistent iconography.
 var Symbols = struct {
 	// Bullets and markers
-	Bullet       string
-	BulletEmpty  string
-	Arrow        string
-	ArrowRight   string
-	ArrowDown    string
-	Check        string
-	Cross        string
-	Dot          string
-	Ring         string
+	Bullet      string
+	BulletEmpty string
+	Arrow       string
+	ArrowRight  string
+	ArrowDown   string
+	Check       string
+	Cross       string
+	Dot         string
+	Ring        string
 
 	// Borders (rounded)
 	BorderTopLeft     string
@@ -152,15 +168,15 @@ var Symbols = struct {
 	ModeSearch string
 
 	// File types
-	FileDefault   string
-	FileFolder    string
-	FileGo        string
-	FileJS        string
-	FileTS        string
-	FilePython    string
-	FileMarkdown  string
-	FileYAML      string
-	FileJSON      string
+	FileDefault  string
+	FileFolder   string
+	FileGo       string
+	FileJS       string
+	FileTS       string
+	FilePython   string
+	FileMarkdown string
+	FileYAML     string
+	FileJSON     string
 }{
 	// Bullets and markers
 	Bullet:      "●",

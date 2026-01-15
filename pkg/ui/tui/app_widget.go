@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"net/url"
 	"os"
 	"os/exec"
+	stdRuntime "runtime"
 	"strings"
 	"sync"
 	"time"
@@ -37,9 +39,45 @@ type RenderMetrics struct {
 }
 
 const (
-	minInputHeight = 2
-	minChatHeight  = 4
+	minInputHeight       = 2
+	minChatHeight        = 4
+	sidebarStandardWidth = 25
+	sidebarWideWidth     = 35
+	sidebarMinWidth      = 120
+	sidebarWideMinWidth  = 160
 )
+
+type layoutSpec struct {
+	sidebarVisible  bool
+	presenceVisible bool
+	sidebarWidth    int
+	showHeader      bool
+	showStatus      bool
+}
+
+func layoutForWidth(width int, hasSidebarContent bool) layoutSpec {
+	if !hasSidebarContent {
+		return layoutSpec{}
+	}
+	switch {
+	case width >= sidebarWideMinWidth:
+		return layoutSpec{sidebarVisible: true, sidebarWidth: sidebarWideWidth}
+	case width >= sidebarMinWidth:
+		return layoutSpec{sidebarVisible: true, sidebarWidth: sidebarStandardWidth}
+	default:
+		return layoutSpec{presenceVisible: true}
+	}
+}
+
+func layoutForScreen(width, height int, hasSidebarContent, focusMode bool) layoutSpec {
+	if focusMode {
+		return layoutSpec{showHeader: false, showStatus: false}
+	}
+	spec := layoutForWidth(width, hasSidebarContent)
+	spec.showHeader = height >= 20
+	spec.showStatus = height >= 20
+	return spec
+}
 
 // WidgetApp is the main TUI application using the widget tree architecture.
 type WidgetApp struct {
@@ -53,6 +91,7 @@ type WidgetApp struct {
 	inputArea  *widgets.InputArea
 	statusBar  *widgets.StatusBar
 	sidebar    *widgets.Sidebar
+	presence   *widgets.PresenceStrip
 	toastStack *widgets.ToastStack
 	root       runtime.Widget
 	mainArea   *runtime.Flex // HBox containing chatView + sidebar
@@ -60,7 +99,11 @@ type WidgetApp struct {
 	// Sidebar state
 	sidebarVisible      bool
 	sidebarUserOverride bool // User manually toggled, don't auto-hide
-	minWidthForSidebar  int  // Auto-hide below this width
+	sidebarAutoHidden   bool
+	presenceVisible     bool
+	headerVisible       bool
+	statusVisible       bool
+	focusMode           bool
 
 	// File picker
 	filePicker *filepicker.FilePicker
@@ -99,6 +142,9 @@ type WidgetApp struct {
 	streamAnim          int
 	streamAnimLast      time.Time
 	streamAnimInterval  time.Duration
+	sidebarAnimFrame    int
+	sidebarAnimLast     time.Time
+	sidebarAnimInterval time.Duration
 
 	// Soft cursor animation
 	cursorPulseStart    time.Time
@@ -110,6 +156,14 @@ type WidgetApp struct {
 	cursorBGHigh        backend.Color
 	cursorFG            backend.Color
 
+	// Presence strip state
+	runningToolCount  int
+	planTotal         int
+	planCompleted     int
+	presenceAlert     bool
+	currentTaskActive bool
+	reduceMotion      bool
+
 	// Callbacks
 	onSubmit      func(text string)
 	onQuit        func()
@@ -118,11 +172,14 @@ type WidgetApp struct {
 	onNextSession func()
 	onPrevSession func()
 	onApproval    func(requestID string, approved, alwaysAllow bool)
+	onToastDismiss func(string)
 
 	// Configuration
 	theme       *theme.Theme
 	workDir     string
 	projectRoot string
+	webBaseURL  string
+	sessionID   string
 
 	// Render synchronization
 	renderMu sync.Mutex
@@ -133,13 +190,17 @@ type WidgetApp struct {
 
 // WidgetAppConfig configures the widget-based TUI application.
 type WidgetAppConfig struct {
-	Theme       *theme.Theme
-	ModelName   string
-	WorkDir     string
-	ProjectRoot string
-	OnSubmit    func(text string)
-	OnQuit      func()
-	Backend     backend.Backend // Optional: for testing
+	Theme           *theme.Theme
+	ModelName       string
+	SessionID       string
+	WorkDir         string
+	ProjectRoot     string
+	ReduceMotion    bool
+	MessageMetadata string
+	WebBaseURL      string
+	OnSubmit        func(text string)
+	OnQuit          func()
+	Backend         backend.Backend // Optional: for testing
 }
 
 // NewWidgetApp creates and initializes the widget-based TUI application.
@@ -185,6 +246,7 @@ func NewWidgetApp(cfg WidgetAppConfig) (*WidgetApp, error) {
 	// Create widgets
 	header := widgets.NewHeader()
 	header.SetModelName(cfg.ModelName)
+	header.SetSessionID(cfg.SessionID)
 	header.SetStyles(
 		styleCache.Get(th.Surface),
 		styleCache.Get(th.Logo),
@@ -199,6 +261,9 @@ func NewWidgetApp(cfg WidgetAppConfig) (*WidgetApp, error) {
 		styleCache.Get(th.Tool),
 		styleCache.Get(th.Thinking),
 	)
+	chatView.SetModelName(cfg.ModelName)
+	chatView.SetMetadataStyle(styleCache.Get(th.TextMuted))
+	chatView.SetMessageMetadataMode(cfg.MessageMetadata)
 	chatView.SetUIStyles(
 		styleCache.Get(th.Scrollbar),
 		styleCache.Get(th.ScrollThumb),
@@ -231,6 +296,7 @@ func NewWidgetApp(cfg WidgetAppConfig) (*WidgetApp, error) {
 	)
 
 	toastStack := widgets.NewToastStack()
+	toastStack.SetAnimationsEnabled(!cfg.ReduceMotion)
 	toastStack.SetStyles(
 		styleCache.Get(th.SurfaceRaised),
 		styleCache.Get(th.TextPrimary),
@@ -250,9 +316,39 @@ func NewWidgetApp(cfg WidgetAppConfig) (*WidgetApp, error) {
 		styleCache.Get(th.TextMuted),
 		styleCache.Get(th.Surface),
 	)
+	sidebar.SetProgressEdgeStyle(styleCache.Get(th.AccentGlow))
+	sidebar.SetStatusStyles(
+		styleCache.Get(th.Success),
+		styleCache.Get(th.ElectricBlue).Bold(true),
+		styleCache.Get(th.TextMuted),
+		styleCache.Get(th.Coral),
+	)
+	sidebar.SetContextStyles(
+		styleCache.Get(th.Teal),
+		styleCache.Get(th.Accent),
+		styleCache.Get(th.Coral),
+		styleCache.Get(th.TextMuted),
+	)
+	sidebar.SetSpinnerStyle(styleCache.Get(th.ElectricBlue))
 
-	// Determine if sidebar should be visible based on terminal width and content
-	sidebarVisible := w >= 80 && sidebar.HasContent()
+	presence := widgets.NewPresenceStrip()
+	presence.SetStyles(
+		styleCache.Get(th.Border),
+		styleCache.Get(th.TextMuted),
+		styleCache.Get(th.ElectricBlue),
+		styleCache.Get(th.Coral),
+		styleCache.Get(th.Accent),
+		styleCache.Get(th.Background),
+	)
+
+	layout := layoutForScreen(w, h, sidebar.HasContent(), false)
+	if layout.sidebarWidth > 0 {
+		sidebar.SetWidth(layout.sidebarWidth)
+	}
+	sidebarVisible := layout.sidebarVisible
+	presenceVisible := layout.presenceVisible
+	headerVisible := layout.showHeader
+	statusVisible := layout.showStatus
 
 	// Build main content area with HBox (ChatView + Sidebar)
 	var mainArea *runtime.Flex
@@ -260,6 +356,11 @@ func NewWidgetApp(cfg WidgetAppConfig) (*WidgetApp, error) {
 		mainArea = runtime.HBox(
 			runtime.Flexible(chatView, 3),           // 75% for chat
 			runtime.Sized(sidebar, sidebar.Width()), // Dynamic sidebar width
+		)
+	} else if presenceVisible {
+		mainArea = runtime.HBox(
+			runtime.Expanded(chatView),
+			runtime.Sized(presence, 2),
 		)
 	} else {
 		mainArea = runtime.HBox(
@@ -272,12 +373,16 @@ func NewWidgetApp(cfg WidgetAppConfig) (*WidgetApp, error) {
 	// MainArea (HBox: ChatView + Sidebar)
 	// InputArea (fixed 2+ rows)
 	// StatusBar (fixed 1 row)
-	root := runtime.VBox(
-		runtime.Fixed(header),
-		runtime.Expanded(mainArea),
-		runtime.Fixed(inputArea),
-		runtime.Fixed(statusBar),
-	)
+	children := make([]runtime.FlexChild, 0, 4)
+	if headerVisible {
+		children = append(children, runtime.Fixed(header))
+	}
+	children = append(children, runtime.Expanded(mainArea))
+	children = append(children, runtime.Fixed(inputArea))
+	if statusVisible {
+		children = append(children, runtime.Fixed(statusBar))
+	}
+	root := runtime.VBox(children...)
 
 	// Create screen
 	screen := runtime.NewScreen(w, h, th)
@@ -300,15 +405,21 @@ func NewWidgetApp(cfg WidgetAppConfig) (*WidgetApp, error) {
 		inputArea:           inputArea,
 		statusBar:           statusBar,
 		sidebar:             sidebar,
+		presence:            presence,
 		toastStack:          toastStack,
 		root:                root,
 		mainArea:            mainArea,
 		sidebarVisible:      sidebarVisible,
-		minWidthForSidebar:  80, // Lower threshold for sidebar visibility
+		presenceVisible:     presenceVisible,
+		sidebarAutoHidden:   presenceVisible && !sidebarVisible,
+		headerVisible:       headerVisible,
+		statusVisible:       statusVisible,
 		filePicker:          fp,
 		theme:               th,
 		workDir:             workDir,
 		projectRoot:         projectRoot,
+		webBaseURL:          normalizeWebBaseURL(cfg.WebBaseURL),
+		sessionID:           strings.TrimSpace(cfg.SessionID),
 		onSubmit:            cfg.OnSubmit,
 		onQuit:              cfg.OnQuit,
 		messages:            make(chan Message, 256),
@@ -317,15 +428,18 @@ func NewWidgetApp(cfg WidgetAppConfig) (*WidgetApp, error) {
 		cursorPulsePeriod:   2600 * time.Millisecond,
 		cursorPulseInterval: 50 * time.Millisecond,
 		streamAnimInterval:  120 * time.Millisecond,
+		sidebarAnimInterval: 120 * time.Millisecond,
 		inputMeasuredHeight: inputArea.Measure(runtime.Constraints{MaxWidth: w, MaxHeight: h}).Height,
 		styleCache:          styleCache,
 		debugRender:         debugRender,
+		reduceMotion:        cfg.ReduceMotion,
 	}
 
 	// Create coalescer for smooth streaming
 	app.coalescer = NewCoalescer(DefaultCoalescerConfig(), app.Post)
 	app.initSoftCursor()
 	app.applyScrollStatus(chatView.ScrollPosition())
+	app.updatePresenceStrip()
 
 	chatView.OnScrollChange(func(top, total, viewHeight int) {
 		if app.applyScrollStatus(top, total, viewHeight) {
@@ -687,6 +801,9 @@ func (a *WidgetApp) pollEvents() {
 				Y:      e.Y,
 				Button: MouseButton(e.Button),
 				Action: MouseAction(e.Action),
+				Alt:    e.Alt,
+				Ctrl:   e.Ctrl,
+				Shift:  e.Shift,
 			})
 		case terminal.PasteEvent:
 			a.Post(PasteMsg{Text: e.Text})
@@ -730,7 +847,7 @@ func (a *WidgetApp) updateAnimations(now time.Time) bool {
 		}
 	}
 
-	if a.streaming {
+	if a.streaming && !a.reduceMotion {
 		if a.streamAnimInterval <= 0 {
 			a.streamAnimInterval = 120 * time.Millisecond
 		}
@@ -741,6 +858,31 @@ func (a *WidgetApp) updateAnimations(now time.Time) bool {
 			a.streamAnim++
 			a.statusBar.SetStreamAnim(a.streamAnim)
 			a.streamAnimLast = now
+			dirty = true
+		}
+	}
+
+	if !a.reduceMotion {
+		if a.sidebarAnimInterval <= 0 {
+			a.sidebarAnimInterval = 120 * time.Millisecond
+		}
+		if now.Sub(a.sidebarAnimLast) >= a.sidebarAnimInterval {
+			a.sidebarAnimFrame++
+			if a.runningToolCount > 0 {
+				a.sidebar.SetSpinnerFrame(a.sidebarAnimFrame)
+				dirty = true
+			}
+			if a.presenceVisible && a.presence != nil {
+				a.presence.SetPulseStep(a.sidebarAnimFrame)
+				dirty = true
+			}
+			a.sidebarAnimLast = now
+		}
+	}
+
+	if a.toastStack != nil && !a.reduceMotion {
+		a.toastStack.SetNow(now)
+		if a.toastStack.HasActiveAnimations(now) {
 			dirty = true
 		}
 	}
@@ -812,6 +954,9 @@ func (a *WidgetApp) update(msg Message) bool {
 		a.contextBudget = m.Budget
 		a.contextWindow = m.Window
 		a.statusBar.SetContextUsage(m.Used, m.Budget, m.Window)
+		a.sidebar.SetContextUsage(m.Used, m.Budget, m.Window)
+		a.updatePresenceStrip()
+		a.updateSidebarVisibility()
 		return true
 	case ExecutionModeMsg:
 		a.executionMode = m.Mode
@@ -826,20 +971,44 @@ func (a *WidgetApp) update(msg Message) bool {
 		if a.toastStack != nil {
 			a.toastStack.SetToasts(m.Toasts)
 		}
+		alert := false
+		for _, t := range m.Toasts {
+			if t == nil {
+				continue
+			}
+			if t.Level == toast.ToastWarning || t.Level == toast.ToastError {
+				alert = true
+				break
+			}
+		}
+		a.presenceAlert = alert
+		a.updatePresenceStrip()
 		return true
 
 	case StreamingMsg:
 		a.streaming = m.Active
 		a.statusBar.SetStreaming(m.Active)
+		if a.reduceMotion && m.Active {
+			a.streamAnim = 0
+			a.statusBar.SetStreamAnim(0)
+			a.streamAnimLast = time.Time{}
+		}
 		if !m.Active {
 			a.streamAnim = 0
 			a.statusBar.SetStreamAnim(0)
 			a.streamAnimLast = time.Time{}
 		}
+		a.updatePresenceStrip()
 		return true
 
 	case ModelMsg:
 		a.header.SetModelName(m.Name)
+		a.chatView.SetModelName(m.Name)
+		return true
+
+	case SessionMsg:
+		a.sessionID = strings.TrimSpace(m.ID)
+		a.header.SetSessionID(a.sessionID)
 		return true
 
 	case ThinkingMsg:
@@ -921,6 +1090,10 @@ func (a *WidgetApp) handleKeyMsg(m KeyMsg) bool {
 	}
 
 	// Ctrl+F: search
+	if m.Ctrl && m.Shift && key == terminal.KeyRune && (m.Rune == 'f' || m.Rune == 'F') {
+		a.toggleFocusMode()
+		return true
+	}
 	if key == terminal.KeyCtrlF || (m.Ctrl && m.Rune == 'f') {
 		a.showSearchOverlay()
 		return true
@@ -929,6 +1102,16 @@ func (a *WidgetApp) handleKeyMsg(m KeyMsg) bool {
 	// Alt+C: copy last code block
 	if m.Alt && (key == terminal.KeyRune && (m.Rune == 'c' || m.Rune == 'C')) {
 		a.copyLatestCodeBlock()
+		return true
+	}
+
+	// Alt+W: open session in web UI, Alt+Shift+W opens dashboard
+	if m.Alt && key == terminal.KeyRune && (m.Rune == 'w' || m.Rune == 'W') {
+		target := "session"
+		if m.Shift || m.Rune == 'W' {
+			target = "dashboard"
+		}
+		a.openWebTarget(target, false)
 		return true
 	}
 
@@ -994,6 +1177,21 @@ func (a *WidgetApp) handleKeyMsg(m KeyMsg) bool {
 
 // handleMouseMsg processes mouse input.
 func (a *WidgetApp) handleMouseMsg(m MouseMsg) bool {
+	if !a.sidebarVisible && a.presenceVisible && a.presence != nil {
+		if a.presence.Bounds().Contains(m.X, m.Y) {
+			if m.Action == MousePress && m.Button == MouseLeft {
+				a.toggleSidebar()
+				return true
+			}
+		}
+	}
+
+	if m.Action == MousePress && m.Button == MouseLeft {
+		if a.handleWebClick(m) {
+			return true
+		}
+	}
+
 	if a.sidebarVisible && a.sidebar != nil {
 		if a.sidebar.Bounds().Contains(m.X, m.Y) {
 			return a.dispatchRuntimeMouse(m)
@@ -1070,12 +1268,72 @@ func (a *WidgetApp) handleMouseMsg(m MouseMsg) bool {
 	return a.dispatchRuntimeMouse(m)
 }
 
+func (a *WidgetApp) handleWebClick(m MouseMsg) bool {
+	if a.toastStack != nil {
+		if entry, ok := a.toastStack.ToastAt(m.X, m.Y); ok {
+			if entry.Level == toast.ToastWarning || entry.Level == toast.ToastError {
+				handled := a.openWebTarget("errors", m.Shift)
+				if handled && a.onToastDismiss != nil {
+					a.onToastDismiss(entry.ID)
+				}
+				return handled
+			}
+		}
+	}
+
+	if a.headerVisible && a.header != nil {
+		if target, ok := a.header.WebLinkAt(m.X, m.Y); ok {
+			if target == "model" {
+				return a.openWebTarget("model", m.Shift)
+			}
+			return a.openWebTarget("session", m.Shift)
+		}
+	}
+
+	if a.statusVisible && a.statusBar != nil {
+		if target, ok := a.statusBar.WebLinkAt(m.X, m.Y); ok {
+			return a.openWebTarget(target, m.Shift)
+		}
+	}
+
+	if a.sidebarVisible && a.sidebar != nil {
+		if target, ok := a.sidebar.WebLinkAt(m.X, m.Y); ok {
+			return a.openWebTarget(target, m.Shift)
+		}
+	}
+
+	if a.chatView != nil {
+		if action, language, code, ok := a.chatView.CodeHeaderActionAtPoint(m.X, m.Y); ok {
+			switch action {
+			case "copy":
+				if err := copyToClipboard(code); err != nil {
+					a.setStatusOverride("Copy failed: "+err.Error(), 3*time.Second)
+				} else {
+					if language == "" {
+						a.setStatusOverride("Copied code block", 2*time.Second)
+					} else {
+						a.setStatusOverride("Copied "+language+" code block", 2*time.Second)
+					}
+				}
+				return true
+			case "open":
+				return a.openWebTarget("code", m.Shift)
+			}
+		}
+	}
+
+	return false
+}
+
 func (a *WidgetApp) dispatchRuntimeMouse(m MouseMsg) bool {
 	runtimeMsg := runtime.MouseMsg{
 		X:      m.X,
 		Y:      m.Y,
 		Button: runtime.MouseButton(m.Button),
 		Action: runtime.MouseAction(m.Action),
+		Alt:    m.Alt,
+		Ctrl:   m.Ctrl,
+		Shift:  m.Shift,
 	}
 
 	result := a.screen.HandleMessage(runtimeMsg)
@@ -1102,22 +1360,50 @@ func (a *WidgetApp) refreshInputLayout() {
 }
 
 func (a *WidgetApp) updateSidebarVisibility() {
-	// Don't auto-hide if user manually toggled the sidebar
-	if a.sidebarUserOverride {
-		return
+	w, h := a.screen.Size()
+	layout := layoutForScreen(w, h, a.sidebar.HasContent(), a.focusMode)
+	if layout.sidebarWidth > 0 {
+		a.sidebar.SetWidth(layout.sidebarWidth)
 	}
-	w, _ := a.screen.Size()
-	shouldShow := w >= a.minWidthForSidebar && a.sidebar.HasContent()
-	if shouldShow == a.sidebarVisible {
+	shouldShow := layout.sidebarVisible
+	shouldPresence := layout.presenceVisible
+	if a.sidebarUserOverride && !a.focusMode {
+		shouldShow = a.sidebarVisible
+		shouldPresence = a.presenceVisible
+	}
+	if shouldShow == a.sidebarVisible && shouldPresence == a.presenceVisible && layout.showHeader == a.headerVisible && layout.showStatus == a.statusVisible {
 		return
 	}
 	a.sidebarVisible = shouldShow
+	a.presenceVisible = shouldPresence
+	a.sidebarAutoHidden = shouldPresence && !shouldShow
+	a.headerVisible = layout.showHeader
+	a.statusVisible = layout.showStatus
 	a.rebuildLayout()
 }
 
 func (a *WidgetApp) updateScrollStatus() bool {
 	top, total, viewHeight := a.chatView.ScrollPosition()
 	return a.applyScrollStatus(top, total, viewHeight)
+}
+
+func (a *WidgetApp) updatePresenceStrip() {
+	if a.presence == nil {
+		return
+	}
+	planPct := -1
+	if a.planTotal > 0 {
+		planPct = int(float64(a.planCompleted)*100/float64(a.planTotal) + 0.5)
+	}
+	active := a.runningToolCount > 0 || a.streaming || a.currentTaskActive || (planPct > 0 && planPct < 100)
+	alert := a.presenceAlert
+	if a.contextBudget > 0 {
+		if float64(a.contextUsed)/float64(a.contextBudget) >= 0.9 {
+			alert = true
+		}
+	}
+	a.presence.SetActivity(active, alert, a.streaming)
+	a.presence.SetPlanProgress(planPct)
 }
 
 func (a *WidgetApp) applyScrollStatus(top, total, viewHeight int) bool {
@@ -1187,6 +1473,56 @@ func (a *WidgetApp) copyLatestCodeBlock() {
 	} else {
 		a.setStatusOverride("Copied "+language+" code block", 2*time.Second)
 	}
+}
+
+func (a *WidgetApp) openWebTarget(target string, copyOnly bool) bool {
+	webURL := a.webURL(target)
+	if webURL == "" {
+		a.setStatusOverride("Web UI not configured", 3*time.Second)
+		return true
+	}
+	if copyOnly {
+		if err := copyToClipboard(webURL); err != nil {
+			a.setStatusOverride("Copy failed: "+err.Error(), 3*time.Second)
+			return true
+		}
+		a.setStatusOverride("Web URL copied", 2*time.Second)
+		return true
+	}
+	if err := openURL(webURL); err != nil {
+		a.setStatusOverride("Open failed: "+err.Error(), 3*time.Second)
+		return true
+	}
+	a.setStatusOverride("Opened web UI", 2*time.Second)
+	return true
+}
+
+func (a *WidgetApp) webURL(target string) string {
+	base := a.webBaseURL
+	if base == "" {
+		return ""
+	}
+	sessionID := strings.TrimSpace(a.sessionID)
+	view := ""
+	switch target {
+	case "dashboard":
+		sessionID = ""
+	case "plan":
+		view = "plan"
+	case "tools":
+		view = "tools"
+	case "usage":
+		view = "usage"
+	case "context":
+		view = "context"
+	case "model":
+		view = "model"
+	case "errors":
+		view = "errors"
+	case "code":
+		view = "code"
+	}
+	return buildWebURL(base, sessionID, view)
 }
 
 // handleCommand processes commands emitted by widgets.
@@ -1489,6 +1825,11 @@ func (a *WidgetApp) SetModelName(name string) {
 	a.Post(ModelMsg{Name: name})
 }
 
+// SetSessionID updates session display. Thread-safe via message passing.
+func (a *WidgetApp) SetSessionID(id string) {
+	a.Post(SessionMsg{ID: id})
+}
+
 // SetCallbacks sets the event handlers.
 func (a *WidgetApp) SetCallbacks(onSubmit func(string), onFileSelect func(string), onShellCmd func(string) string) {
 	a.onSubmit = onSubmit
@@ -1512,6 +1853,7 @@ func (a *WidgetApp) SetToastDismissHandler(onDismiss func(string)) {
 	if a.toastStack == nil {
 		return
 	}
+	a.onToastDismiss = onDismiss
 	a.toastStack.SetOnDismiss(onDismiss)
 }
 
@@ -1525,12 +1867,32 @@ func (a *WidgetApp) RequestApproval(req ApprovalRequestMsg) {
 func (a *WidgetApp) toggleSidebar() {
 	a.sidebarVisible = !a.sidebarVisible
 	a.sidebarUserOverride = true // User manually toggled, don't auto-hide
+	a.sidebarAutoHidden = false
+	a.presenceVisible = false
 	if a.sidebarVisible {
 		a.setStatusOverride("Sidebar shown", 2*time.Second)
 	} else {
 		a.setStatusOverride("Sidebar hidden", 2*time.Second)
 	}
 	a.rebuildLayout()
+}
+
+// toggleFocusMode toggles focus mode (chat + input only).
+func (a *WidgetApp) toggleFocusMode() {
+	a.focusMode = !a.focusMode
+	if a.focusMode {
+		a.sidebarVisible = false
+		a.presenceVisible = false
+		a.sidebarAutoHidden = false
+	}
+	a.updateSidebarVisibility()
+	if a.statusVisible {
+		if a.focusMode {
+			a.setStatusOverride("Focus mode on", 2*time.Second)
+		} else {
+			a.setStatusOverride("Focus mode off", 2*time.Second)
+		}
+	}
 }
 
 // rebuildLayout rebuilds the main area layout based on sidebar visibility.
@@ -1544,19 +1906,27 @@ func (a *WidgetApp) rebuildLayout() {
 			runtime.Flexible(a.chatView, 3),
 			runtime.Sized(a.sidebar, a.sidebar.Width()),
 		)
+	} else if a.presenceVisible && a.presence != nil {
+		a.mainArea = runtime.HBox(
+			runtime.Expanded(a.chatView),
+			runtime.Sized(a.presence, 2),
+		)
 	} else {
 		a.mainArea = runtime.HBox(
 			runtime.Expanded(a.chatView),
 		)
 	}
 
-	// Rebuild root with new main area
-	a.root = runtime.VBox(
-		runtime.Fixed(a.header),
-		runtime.Expanded(a.mainArea),
-		runtime.Fixed(a.inputArea),
-		runtime.Fixed(a.statusBar),
-	)
+	children := make([]runtime.FlexChild, 0, 4)
+	if a.headerVisible {
+		children = append(children, runtime.Fixed(a.header))
+	}
+	children = append(children, runtime.Expanded(a.mainArea))
+	children = append(children, runtime.Fixed(a.inputArea))
+	if a.statusVisible {
+		children = append(children, runtime.Fixed(a.statusBar))
+	}
+	a.root = runtime.VBox(children...)
 
 	// Update screen with new root
 	a.screen.SetRoot(a.root)
@@ -1573,6 +1943,10 @@ func (a *WidgetApp) SetSidebarVisible(visible bool) {
 	}
 	if a.sidebarVisible != visible {
 		a.sidebarVisible = visible
+		if visible {
+			a.presenceVisible = false
+			a.sidebarAutoHidden = false
+		}
 		a.rebuildLayout()
 	}
 }
@@ -1585,6 +1959,8 @@ func (a *WidgetApp) IsSidebarVisible() bool {
 // SetCurrentTask updates the sidebar's current task display.
 func (a *WidgetApp) SetCurrentTask(name string, progress int) {
 	a.sidebar.SetCurrentTask(name, progress)
+	a.currentTaskActive = strings.TrimSpace(name) != ""
+	a.updatePresenceStrip()
 	a.updateSidebarVisibility()
 	a.dirty = true
 }
@@ -1592,6 +1968,14 @@ func (a *WidgetApp) SetCurrentTask(name string, progress int) {
 // SetPlanTasks updates the sidebar's plan task list.
 func (a *WidgetApp) SetPlanTasks(tasks []widgets.PlanTask) {
 	a.sidebar.SetPlanTasks(tasks)
+	a.planTotal = len(tasks)
+	a.planCompleted = 0
+	for _, task := range tasks {
+		if task.Status == widgets.TaskCompleted {
+			a.planCompleted++
+		}
+	}
+	a.updatePresenceStrip()
 	a.updateSidebarVisibility()
 	a.dirty = true
 }
@@ -1599,6 +1983,11 @@ func (a *WidgetApp) SetPlanTasks(tasks []widgets.PlanTask) {
 // SetRunningTools updates the sidebar's running tools list.
 func (a *WidgetApp) SetRunningTools(tools []widgets.RunningTool) {
 	a.sidebar.SetRunningTools(tools)
+	a.runningToolCount = len(tools)
+	a.updatePresenceStrip()
+	if a.reduceMotion {
+		a.sidebar.SetSpinnerFrame(0)
+	}
 	a.updateSidebarVisibility()
 	a.dirty = true
 }
@@ -1777,6 +2166,65 @@ func copyToClipboard(text string) error {
 	}
 
 	return fmt.Errorf("no clipboard command available")
+}
+
+func normalizeWebBaseURL(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	if !strings.Contains(raw, "://") {
+		raw = "http://" + raw
+	}
+	if _, err := url.Parse(raw); err != nil {
+		return ""
+	}
+	return raw
+}
+
+func buildWebURL(base, sessionID, view string) string {
+	if strings.TrimSpace(base) == "" {
+		return ""
+	}
+	parsed, err := url.Parse(base)
+	if err != nil {
+		return ""
+	}
+	query := parsed.Query()
+	if strings.TrimSpace(sessionID) != "" {
+		query.Set("sessionId", sessionID)
+	}
+	if strings.TrimSpace(view) != "" {
+		query.Set("view", view)
+	}
+	parsed.RawQuery = query.Encode()
+	return parsed.String()
+}
+
+func openURL(target string) error {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return fmt.Errorf("empty url")
+	}
+
+	var cmds [][]string
+	switch stdRuntime.GOOS {
+	case "darwin":
+		cmds = [][]string{{"open", target}}
+	case "windows":
+		cmds = [][]string{{"cmd", "/c", "start", "", target}}
+	default:
+		cmds = [][]string{{"xdg-open", target}, {"gio", "open", target}}
+	}
+
+	for _, args := range cmds {
+		cmd := exec.Command(args[0], args[1:]...)
+		if err := cmd.Start(); err == nil {
+			return nil
+		}
+	}
+
+	return fmt.Errorf("no open command available")
 }
 
 func max(a, b int) int {

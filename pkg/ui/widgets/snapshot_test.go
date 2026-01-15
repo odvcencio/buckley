@@ -135,6 +135,7 @@ func TestSnapshot_Sidebar(t *testing.T) {
 	s.SetRunningTools([]RunningTool{
 		{ID: "1", Name: "shell", Command: "go test ./..."},
 	})
+	s.SetContextUsage(4700, 10000, 0)
 	s.SetRecentFiles([]string{"pkg/main.go", "pkg/utils.go"})
 	s.SetStyles(
 		backend.DefaultStyle(),

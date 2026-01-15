@@ -21,6 +21,8 @@ type StyledLine struct {
 	IsCode       bool         // Inside a code block
 	IsCodeHeader bool         // Header line for a code block
 	Language     string       // Language for syntax highlighting
+	CodeLineNumberWidth    int  // Width of the code line number gutter
+	CodeLineNumberOptional bool // Line numbers appear on hover for short blocks
 	BlankLine    bool         // Empty line for spacing
 }
 
@@ -66,6 +68,7 @@ type StyleConfig struct {
 	CodeBlockBorder compositor.Style
 	CodeBlockBG     compositor.Style
 	CodeBlockLang   compositor.Style
+	CodeBlockLineNumber compositor.Style
 
 	// Tables
 	TableHeader compositor.Style
@@ -111,9 +114,10 @@ func DefaultStyleConfig(t *theme.Theme) *StyleConfig {
 		HorizontalRule:   compositor.DefaultStyle().WithFG(t.Border.FG),
 
 		// Code blocks
-		CodeBlockBorder: compositor.DefaultStyle().WithFG(t.Accent.FG),
-		CodeBlockBG:     compositor.DefaultStyle().WithBG(t.Surface.BG),
-		CodeBlockLang:   compositor.DefaultStyle().WithFG(t.TextMuted.FG).WithItalic(true),
+		CodeBlockBorder:     compositor.DefaultStyle().WithFG(t.Accent.FG),
+		CodeBlockBG:         compositor.DefaultStyle().WithBG(t.Surface.BG),
+		CodeBlockLang:       compositor.DefaultStyle().WithFG(t.TextMuted.FG).WithItalic(true),
+		CodeBlockLineNumber: compositor.DefaultStyle().WithFG(t.TextMuted.FG),
 
 		// Tables
 		TableHeader: compositor.DefaultStyle().WithFG(textFG).WithBold(true),
