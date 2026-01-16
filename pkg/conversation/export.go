@@ -82,10 +82,10 @@ type exportMessage struct {
 }
 
 type exportPayload struct {
-	SessionID  string          `json:"session_id"`
-	ExportedAt time.Time       `json:"exported_at"`
+	SessionID  string           `json:"session_id"`
+	ExportedAt time.Time        `json:"exported_at"`
 	Session    *storage.Session `json:"session,omitempty"`
-	Messages   []exportMessage `json:"messages"`
+	Messages   []exportMessage  `json:"messages"`
 }
 
 func filterExportMessages(messages []storage.Message, opts ExportOptions) []storage.Message {
@@ -133,7 +133,7 @@ func exportJSON(sessionID string, session *storage.Session, messages []storage.M
 			item.IsSummary = msg.IsSummary
 			item.IsTruncated = msg.IsTruncated
 			item.Metadata = map[string]any{
-				"summary": msg.IsSummary,
+				"summary":   msg.IsSummary,
 				"truncated": msg.IsTruncated,
 			}
 		}

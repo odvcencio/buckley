@@ -19,9 +19,9 @@ type SummaryInput struct {
 
 // SummaryGenerator creates compressed summaries of session history.
 type SummaryGenerator struct {
-	client     ChatCompleter
-	model      string
-	maxTokens  int
+	client    ChatCompleter
+	model     string
+	maxTokens int
 }
 
 // NewSummaryGenerator constructs a summary generator.

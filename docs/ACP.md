@@ -1,12 +1,12 @@
 # Agent Communication Protocol (ACP)
 
-**Purpose**: LSP-based integration for external editors (Zed, VS Code, etc.)
+**Purpose**: Zed ACP integration for editor agents, with an optional LSP bridge for editors that only speak LSP.
 
 ---
 
 ## What ACP Does
 
-ACP lets editors talk to Buckley via the Language Server Protocol. You get AI assistance directly in your editor without switching to a terminal.
+ACP lets editors talk to Buckley directly for agent sessions, tool calls, and editor context without switching to a terminal. Buckley supports ACP over stdio via `buckley acp` and can expose an ACP gRPC server for editor bridges. Editors that only speak LSP can use `buckley lsp` as an adapter.
 
 **Not in scope**: Multi-agent orchestration, agent swarms, P2P mesh. That's a separate system.
 
@@ -15,21 +15,23 @@ ACP lets editors talk to Buckley via the Language Server Protocol. You get AI as
 ## Architecture
 
 ```
-┌──────────────┐     stdio/LSP     ┌──────────────┐
+┌──────────────┐  ACP (stdio/gRPC)  ┌──────────────┐
 │              │ ←───────────────→ │              │
-│  Zed Editor  │                   │  Buckley     │
-│              │                   │  LSP Bridge  │
+│  Editor      │                   │  Buckley     │
+│  (Zed ACP)   │                   │  ACP Server  │
 └──────────────┘                   └──────────────┘
 ```
 
-The LSP bridge is a plugin that:
+The optional LSP bridge adapts ACP to LSP and:
 1. Speaks LSP over stdio to the editor
-2. Translates requests to Buckley's internal API
+2. Translates requests into ACP calls
 3. Streams responses back to the editor
 
 ---
 
-## LSP Extensions
+## LSP Bridge Extensions
+
+These `$/buckley/*` methods are specific to the LSP bridge, not the ACP protocol itself.
 
 Standard LSP plus custom methods in the `$/buckley/*` namespace:
 
@@ -100,12 +102,11 @@ Editor prompts you before Buckley runs risky operations.
 ## Configuration
 
 ```yaml
-# .buckley/config.yaml
+# ~/.buckley/config.yaml
 acp:
-  enabled: true
-  lsp:
-    transport: stdio  # or tcp
-    port: 4489        # if tcp
+  listen: "127.0.0.1:50051"
+  event_store: sqlite
+  allow_insecure_local: false
 ```
 
 ---
@@ -114,15 +115,15 @@ acp:
 
 ### Zed
 
-Install the Buckley extension (when available). It auto-detects local Buckley installations.
+Install the Buckley extension (when available) and configure it to launch `buckley acp` (see `zed-settings.json`).
 
 ### VS Code
 
-Install the Buckley extension from the marketplace. Configure the path to your Buckley binary if not in PATH.
+Install the Buckley extension if ACP support is available, or run the LSP bridge with `buckley lsp`.
 
 ### Other Editors
 
-Any LSP-capable editor works. Point it at `buckley lsp` as the language server.
+ACP-capable editors should launch `buckley acp` over stdio. LSP-only editors can point at `buckley lsp`.
 
 ---
 

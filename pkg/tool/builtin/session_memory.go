@@ -128,15 +128,15 @@ func (t *SessionMemoryTool) handleSearch(params map[string]any) (*Result, error)
 			})
 		}
 		return &Result{Success: true, Data: map[string]any{
-			"tier":   "raw",
-			"query":  query,
-			"count":  len(items),
+			"tier":    "raw",
+			"query":   query,
+			"count":   len(items),
 			"results": items,
 		}}, nil
 
 	case "events":
 		eq := ralph.EventQuery{
-			SessionID: t.SessionID,
+			SessionID:  t.SessionID,
 			EventTypes: splitCSV(stringParam(params, "event_types")),
 			Tools:      splitCSV(stringParam(params, "tools")),
 			FilePaths:  splitCSV(stringParam(params, "file_paths")),
@@ -164,9 +164,9 @@ func (t *SessionMemoryTool) handleSearch(params map[string]any) (*Result, error)
 			})
 		}
 		return &Result{Success: true, Data: map[string]any{
-			"tier":   "events",
-			"query":  query,
-			"count":  len(items),
+			"tier":    "events",
+			"query":   query,
+			"count":   len(items),
 			"results": items,
 		}}, nil
 
@@ -186,9 +186,9 @@ func (t *SessionMemoryTool) handleSearch(params map[string]any) (*Result, error)
 			})
 		}
 		return &Result{Success: true, Data: map[string]any{
-			"tier":   "summary",
-			"query":  query,
-			"count":  len(items),
+			"tier":    "summary",
+			"query":   query,
+			"count":   len(items),
 			"results": items,
 		}}, nil
 	default:

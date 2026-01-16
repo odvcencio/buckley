@@ -89,11 +89,11 @@ func summarizeStructure(root string) []string {
 		return nil
 	}
 	ignored := map[string]struct{}{
-		".git":          {},
-		".buckley":      {},
+		".git":           {},
+		".buckley":       {},
 		".ralph-sandbox": {},
-		".ralph-logs":   {},
-		"node_modules": {},
+		".ralph-logs":    {},
+		"node_modules":   {},
 	}
 
 	out := []string{}

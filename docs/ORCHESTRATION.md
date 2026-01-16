@@ -127,6 +127,6 @@ buckley resume <plan-id>
 
 ## Related
 
-- [ACP (Editor Integration)](./ACP.md) - LSP protocol for editors
+- [ACP (Editor Integration)](./ACP.md) - Zed ACP for editor agents (optional LSP bridge)
 - [CLI Reference](./CLI.md) - All commands
 - [Architecture Decisions](./architecture/decisions/) - Design rationale

@@ -54,17 +54,17 @@ type WrappedLine struct {
 
 // Line represents a single line in the buffer.
 type Line struct {
-	Content      string
-	Style        LineStyle
-	Timestamp    time.Time
-	Source       string // "user", "assistant", "system", "tool"
-	Spans        []Span
-	Prefix       []Span        // Repeated prefix for wrapped lines
-	Wrapped      []WrappedLine // Pre-computed wrapped lines
-	IsCode       bool
-	IsCodeHeader bool
-	Language     string
-	MessageID    int
+	Content                string
+	Style                  LineStyle
+	Timestamp              time.Time
+	Source                 string // "user", "assistant", "system", "tool"
+	Spans                  []Span
+	Prefix                 []Span        // Repeated prefix for wrapped lines
+	Wrapped                []WrappedLine // Pre-computed wrapped lines
+	IsCode                 bool
+	IsCodeHeader           bool
+	Language               string
+	MessageID              int
 	CodeLineNumberWidth    int
 	CodeLineNumberOptional bool
 }
@@ -662,16 +662,16 @@ func (b *Buffer) GetVisibleLines() []VisibleLine {
 		for wrapIdx, wrapped := range line.Wrapped {
 			if rowIndex >= b.scrollTop && rowIndex < b.scrollTop+b.height {
 				vl := VisibleLine{
-					Content:   wrapped.Text,
-					Spans:     wrapped.Spans,
-					Style:     line.Style,
-					Source:    line.Source,
-					LineIndex: lineIdx,
-					WrapIndex: wrapIdx,
-					RowIndex:  rowIndex - b.scrollTop,
-					IsCode:    line.IsCode,
-					Language:  line.Language,
-					MessageID: line.MessageID,
+					Content:                wrapped.Text,
+					Spans:                  wrapped.Spans,
+					Style:                  line.Style,
+					Source:                 line.Source,
+					LineIndex:              lineIdx,
+					WrapIndex:              wrapIdx,
+					RowIndex:               rowIndex - b.scrollTop,
+					IsCode:                 line.IsCode,
+					Language:               line.Language,
+					MessageID:              line.MessageID,
 					CodeLineNumberWidth:    line.CodeLineNumberWidth,
 					CodeLineNumberOptional: line.CodeLineNumberOptional,
 				}
@@ -718,16 +718,16 @@ func (b *Buffer) VisibleLineAt(row int) (VisibleLine, bool) {
 		for wrapIdx, wrapped := range line.Wrapped {
 			if rowIndex == absoluteRow {
 				return VisibleLine{
-					Content:   wrapped.Text,
-					Spans:     wrapped.Spans,
-					Style:     line.Style,
-					Source:    line.Source,
-					LineIndex: lineIdx,
-					WrapIndex: wrapIdx,
-					RowIndex:  row,
-					IsCode:    line.IsCode,
-					Language:  line.Language,
-					MessageID: line.MessageID,
+					Content:                wrapped.Text,
+					Spans:                  wrapped.Spans,
+					Style:                  line.Style,
+					Source:                 line.Source,
+					LineIndex:              lineIdx,
+					WrapIndex:              wrapIdx,
+					RowIndex:               row,
+					IsCode:                 line.IsCode,
+					Language:               line.Language,
+					MessageID:              line.MessageID,
 					CodeLineNumberWidth:    line.CodeLineNumberWidth,
 					CodeLineNumberOptional: line.CodeLineNumberOptional,
 				}, true
@@ -755,18 +755,18 @@ func (b *Buffer) LineAt(index int) (Line, bool) {
 
 // VisibleLine represents a line ready for rendering.
 type VisibleLine struct {
-	Content          string
-	Spans            []Span
-	Style            LineStyle
-	Source           string // "user", "assistant", "system", "tool"
-	LineIndex        int    // Original line index
-	WrapIndex        int    // Wrap segment index
-	RowIndex         int    // Row in viewport (0 = top)
-	Selected         bool
-	SearchHighlights []int // Column indices of search matches
-	IsCode           bool
-	Language         string
-	MessageID        int
+	Content                string
+	Spans                  []Span
+	Style                  LineStyle
+	Source                 string // "user", "assistant", "system", "tool"
+	LineIndex              int    // Original line index
+	WrapIndex              int    // Wrap segment index
+	RowIndex               int    // Row in viewport (0 = top)
+	Selected               bool
+	SearchHighlights       []int // Column indices of search matches
+	IsCode                 bool
+	Language               string
+	MessageID              int
 	CodeLineNumberWidth    int
 	CodeLineNumberOptional bool
 }

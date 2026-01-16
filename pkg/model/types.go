@@ -108,11 +108,11 @@ type ChatRequest struct {
 	Temperature          float64          `json:"temperature,omitempty"`
 	MaxTokens            int              `json:"max_tokens,omitempty"`
 	Stream               bool             `json:"stream"`
-	Tools                []map[string]any `json:"tools,omitempty"`                // OpenAI function definitions
-	ToolChoice           string           `json:"tool_choice,omitempty"`          // "auto", "none", or specific function
-	Reasoning            *ReasoningConfig `json:"reasoning,omitempty"`            // Reasoning config for supported models
-	Transforms           []string         `json:"transforms,omitempty"`           // Provider-specific prompt transforms (e.g., OpenRouter)
-	PromptCacheKey       string           `json:"prompt_cache_key,omitempty"`      // OpenAI prompt caching key
+	Tools                []map[string]any `json:"tools,omitempty"`                  // OpenAI function definitions
+	ToolChoice           string           `json:"tool_choice,omitempty"`            // "auto", "none", or specific function
+	Reasoning            *ReasoningConfig `json:"reasoning,omitempty"`              // Reasoning config for supported models
+	Transforms           []string         `json:"transforms,omitempty"`             // Provider-specific prompt transforms (e.g., OpenRouter)
+	PromptCacheKey       string           `json:"prompt_cache_key,omitempty"`       // OpenAI prompt caching key
 	PromptCacheRetention string           `json:"prompt_cache_retention,omitempty"` // OpenAI prompt cache retention
 	PromptCache          *PromptCache     `json:"-"`
 }

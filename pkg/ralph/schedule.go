@@ -18,9 +18,9 @@ type CronSpec struct {
 }
 
 type fieldSpec struct {
-	all      bool   // * wildcard
-	interval int    // */N interval
-	values   []int  // specific values
+	all      bool     // * wildcard
+	interval int      // */N interval
+	values   []int    // specific values
 	ranges   [][2]int // ranges like 1-5
 }
 

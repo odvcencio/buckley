@@ -10,12 +10,12 @@ import (
 
 // memoryAwareModelClient wraps a ModelClient and injects relevant episodic memories.
 type memoryAwareModelClient struct {
-	base      ModelClient
-	memories  *memory.Manager
-	sessionID string
+	base        ModelClient
+	memories    *memory.Manager
+	sessionID   string
 	projectPath string
-	limit     int
-	maxTokens int
+	limit       int
+	maxTokens   int
 }
 
 // NewMemoryAwareModelClient returns a ModelClient that injects episodic memories.
@@ -27,12 +27,12 @@ func NewMemoryAwareModelClient(base ModelClient, memories *memory.Manager, sessi
 		limit = 5
 	}
 	return &memoryAwareModelClient{
-		base:      base,
-		memories:  memories,
-		sessionID: sessionID,
+		base:        base,
+		memories:    memories,
+		sessionID:   sessionID,
 		projectPath: strings.TrimSpace(projectPath),
-		limit:     limit,
-		maxTokens: maxTokens,
+		limit:       limit,
+		maxTokens:   maxTokens,
 	}
 }
 

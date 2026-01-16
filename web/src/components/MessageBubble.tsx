@@ -32,15 +32,18 @@ const markdownComponents: Components = {
       </pre>
     )
   },
-  code({ inline, className, children, ...props }) {
-    if (inline) {
+  code({ className, children, ...props }) {
+    // In react-markdown v10+, code blocks have className like 'language-xxx'.
+    // Inline code has no language class.
+    const isCodeBlock = className?.includes('language-')
+    if (!isCodeBlock) {
       return (
         <code className="message-markdown__inline-code" {...props}>
           {children}
         </code>
       )
     }
-    const mergedClass = className ? `message-markdown__code ${className}` : 'message-markdown__code'
+    const mergedClass = `message-markdown__code ${className}`
     return (
       <code className={mergedClass} {...props}>
         {children}

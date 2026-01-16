@@ -8,11 +8,11 @@ import (
 )
 
 const (
-	envBuckleyDBPath          = "BUCKLEY_DB_PATH"
-	envBuckleyDataDir         = "BUCKLEY_DATA_DIR"
-	envBuckleyACPEventsDBPath = "BUCKLEY_ACP_EVENTS_DB_PATH"
+	envBuckleyDBPath            = "BUCKLEY_DB_PATH"
+	envBuckleyDataDir           = "BUCKLEY_DATA_DIR"
+	envBuckleyACPEventsDBPath   = "BUCKLEY_ACP_EVENTS_DB_PATH"
 	envBuckleyCoordEventsDBPath = "BUCKLEY_COORD_EVENTS_DB_PATH"
-	envBuckleyRemoteAuthPath  = "BUCKLEY_REMOTE_AUTH_PATH"
+	envBuckleyRemoteAuthPath    = "BUCKLEY_REMOTE_AUTH_PATH"
 )
 
 func resolveDBPath() (string, error) {

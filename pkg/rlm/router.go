@@ -10,8 +10,8 @@ type ExecutionModelProvider interface {
 // ModelSelector provides sub-agent model selection.
 // Simplified: no tiers, just a single configured model or fallback to execution model.
 type ModelSelector struct {
-	model            string // Configured sub-agent model
-	executionModel   ExecutionModelProvider
+	model          string // Configured sub-agent model
+	executionModel ExecutionModelProvider
 }
 
 // NewModelSelector creates a selector from configuration.

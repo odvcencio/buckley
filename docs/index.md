@@ -96,7 +96,7 @@ providers:
 | [Skills](./SKILLS.md) | Workflow guidance system |
 | [Tools](./TOOLS.md) | Built-in tools reference |
 | [Orchestration](./ORCHESTRATION.md) | Multi-agent coordination |
-| [Editor Integration](./ACP.md) | LSP for Zed, VS Code |
+| [Editor Integration](./ACP.md) | Zed ACP (optional LSP bridge) |
 | [Architecture Decisions](./architecture/decisions/) | Design rationale |
 
 ## Open Source

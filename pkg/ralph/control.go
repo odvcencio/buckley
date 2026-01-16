@@ -19,7 +19,7 @@ const (
 
 // Rotation modes for backend selection.
 const (
-	RotationNone      = "none"
+	RotationNone       = "none"
 	RotationTimeSliced = "time_sliced"
 	RotationRoundRobin = "round_robin"
 )
@@ -29,13 +29,13 @@ const BackendTypeInternal = "internal"
 
 // ControlConfig represents the ralph-control.yaml configuration.
 type ControlConfig struct {
-	Backends          map[string]BackendConfig     `yaml:"backends"`
-	Mode              string                       `yaml:"mode"` // sequential, parallel, round_robin
-	Rotation          RotationConfig               `yaml:"rotation"`
-	Memory            MemoryConfig                 `yaml:"memory"`
-	ContextProcessing ContextProcessingConfig      `yaml:"context_processing"`
-	Schedule          []ScheduleRule               `yaml:"schedule"`
-	Override          OverrideConfig               `yaml:"override"`
+	Backends          map[string]BackendConfig `yaml:"backends"`
+	Mode              string                   `yaml:"mode"` // sequential, parallel, round_robin
+	Rotation          RotationConfig           `yaml:"rotation"`
+	Memory            MemoryConfig             `yaml:"memory"`
+	ContextProcessing ContextProcessingConfig  `yaml:"context_processing"`
+	Schedule          []ScheduleRule           `yaml:"schedule"`
+	Override          OverrideConfig           `yaml:"override"`
 }
 
 // BackendConfig configures a single backend.

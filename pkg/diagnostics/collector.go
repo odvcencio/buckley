@@ -233,14 +233,14 @@ func (c *Collector) Stats() map[string]any {
 	defer c.mu.RUnlock()
 
 	return map[string]any{
-		"uptime":        time.Since(c.started).String(),
-		"api_calls":     c.apiCalls,
-		"api_errors":    c.apiErrors,
-		"total_tokens":  c.totalTokens,
-		"event_count":   len(c.events),
-		"model_calls":   c.modelCalls,
-		"tool_calls":    c.toolCalls,
+		"uptime":         time.Since(c.started).String(),
+		"api_calls":      c.apiCalls,
+		"api_errors":     c.apiErrors,
+		"total_tokens":   c.totalTokens,
+		"event_count":    len(c.events),
+		"model_calls":    c.modelCalls,
+		"tool_calls":     c.toolCalls,
 		"circuit_states": c.circuitStates,
-		"error_count":   len(c.recentErrors),
+		"error_count":    len(c.recentErrors),
 	}
 }

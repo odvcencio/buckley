@@ -21,7 +21,7 @@ func (extractorStubEmbedder) Embed(ctx context.Context, text string) ([]float64,
 	return []float64{0, 1, 0}, nil
 }
 
-type extractorStubModel struct{
+type extractorStubModel struct {
 	response string
 }
 

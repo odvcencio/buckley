@@ -1,4 +1,4 @@
-import { AlertTriangle, Check, FileText, Terminal, X } from 'lucide-react'
+import { AlertTriangle, FileText, Terminal, X } from 'lucide-react'
 
 import type { DiffLine, PendingApproval } from '../types'
 import { useOverlayControls } from '../hooks/useOverlayControls'

@@ -26,13 +26,13 @@ type MiddlewareConfig struct {
 	ProgressManager *progress.ProgressManager
 	FileWatcher     *filewatch.FileWatcher
 
-	DefaultTimeout  time.Duration
-	PerToolTimeouts map[string]time.Duration
-	RetryConfig     RetryConfig
-	MaxResultBytes  int
+	DefaultTimeout   time.Duration
+	PerToolTimeouts  map[string]time.Duration
+	RetryConfig      RetryConfig
+	MaxResultBytes   int
 	LongRunningTools map[string]string
 
-	ValidationConfig ValidationConfig
+	ValidationConfig  ValidationConfig
 	OnValidationError func(tool, param, msg string)
 }
 
@@ -85,7 +85,7 @@ func DefaultRegistryConfig() RegistryConfig {
 				Multiplier:   DefaultRetryMultiplier,
 				Jitter:       DefaultRetryJitter,
 			},
-			MaxResultBytes:  DefaultToolMaxResult,
+			MaxResultBytes:   DefaultToolMaxResult,
 			LongRunningTools: DefaultLongRunningTools,
 		},
 	}

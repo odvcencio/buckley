@@ -614,9 +614,9 @@ type UIConfig struct {
 	SidebarMinWidth int `yaml:"sidebar_min_width"` // Minimum sidebar width (default 16)
 	SidebarMaxWidth int `yaml:"sidebar_max_width"` // Maximum sidebar width (default 60)
 	// Accessibility settings
-	HighContrast    bool `yaml:"high_contrast"`    // Use high-contrast color scheme
-	UseTextLabels   bool `yaml:"use_text_labels"`  // Add text labels to color-only indicators
-	ReduceAnimation bool `yaml:"reduce_animation"` // Reduce or disable animations
+	HighContrast    bool   `yaml:"high_contrast"`    // Use high-contrast color scheme
+	UseTextLabels   bool   `yaml:"use_text_labels"`  // Add text labels to color-only indicators
+	ReduceAnimation bool   `yaml:"reduce_animation"` // Reduce or disable animations
 	MessageMetadata string `yaml:"message_metadata"` // "always", "hover", or "never"
 }
 

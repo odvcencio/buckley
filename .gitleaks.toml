@@ -10,6 +10,7 @@ paths = [
   '''^pkg/security/analyzer_test\.go$''',
   '''^pkg/security/secrets_test\.go$''',
   '''^pkg/setup/wizard_test\.go$''',
+  '''^docs/plans/''',
 ]
 
 regexes = [

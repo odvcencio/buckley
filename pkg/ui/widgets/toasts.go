@@ -53,7 +53,7 @@ func NewToastStack() *ToastStack {
 		successStyle: backend.DefaultStyle(),
 		warnStyle:    backend.DefaultStyle(),
 		errorStyle:   backend.DefaultStyle(),
-		animate:     true,
+		animate:      true,
 	}
 }
 

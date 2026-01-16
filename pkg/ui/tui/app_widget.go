@@ -165,13 +165,13 @@ type WidgetApp struct {
 	reduceMotion      bool
 
 	// Callbacks
-	onSubmit      func(text string)
-	onQuit        func()
-	onFileSelect  func(path string)
-	onShellCmd    func(cmd string) string
-	onNextSession func()
-	onPrevSession func()
-	onApproval    func(requestID string, approved, alwaysAllow bool)
+	onSubmit       func(text string)
+	onQuit         func()
+	onFileSelect   func(path string)
+	onShellCmd     func(cmd string) string
+	onNextSession  func()
+	onPrevSession  func()
+	onApproval     func(requestID string, approved, alwaysAllow bool)
 	onToastDismiss func(string)
 
 	// Configuration

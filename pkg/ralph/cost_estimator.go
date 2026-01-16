@@ -12,9 +12,9 @@ var defaultPrices = map[string][2]float64{
 	"claude-opus-4":   {15.0, 75.0},
 	"claude-sonnet-4": {3.0, 15.0},
 	"claude-haiku":    {0.25, 1.25},
-	"opus":            {15.0, 75.0},  // alias
-	"sonnet":          {3.0, 15.0},   // alias
-	"haiku":           {0.25, 1.25},  // alias
+	"opus":            {15.0, 75.0}, // alias
+	"sonnet":          {3.0, 15.0},  // alias
+	"haiku":           {0.25, 1.25}, // alias
 
 	// OpenAI models
 	"gpt-4":       {30.0, 60.0},

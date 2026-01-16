@@ -4,9 +4,9 @@ package tcell
 import (
 	"strings"
 
+	"github.com/gdamore/tcell/v2"
 	"github.com/odvcencio/buckley/pkg/ui/backend"
 	"github.com/odvcencio/buckley/pkg/ui/terminal"
-	"github.com/gdamore/tcell/v2"
 )
 
 // Backend implements backend.Backend using tcell.

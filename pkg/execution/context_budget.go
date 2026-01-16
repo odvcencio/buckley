@@ -45,7 +45,9 @@ func contextWindowForModel(models ModelClient, modelID string) int {
 			return length
 		}
 	}
-	if provider, ok := models.(interface{ GetModelInfo(string) (*model.ModelInfo, error) }); ok {
+	if provider, ok := models.(interface {
+		GetModelInfo(string) (*model.ModelInfo, error)
+	}); ok {
 		if info, err := provider.GetModelInfo(modelID); err == nil && info != nil && info.ContextLength > 0 {
 			return info.ContextLength
 		}

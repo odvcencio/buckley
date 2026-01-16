@@ -400,7 +400,7 @@ Each server command is launched as a subprocess and must speak MCP JSON-RPC over
 
 ### acp
 
-Agent Communication Protocol (gRPC) server.
+Zed Agent Communication Protocol (ACP) gRPC server.
 
 ```yaml
 acp:
