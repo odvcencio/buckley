@@ -216,6 +216,46 @@ func (s *Store) GetAllMessages(sessionID string) ([]Message, error) {
 	return s.GetMessages(sessionID, 999999, 0)
 }
 
+// GetLatestMessageByRole returns the most recent message for a role in a session.
+func (s *Store) GetLatestMessageByRole(sessionID, role string) (*Message, error) {
+	query := `
+		SELECT id, session_id, role, content, content_json, content_type, reasoning, timestamp, tokens, is_summary, COALESCE(is_truncated, FALSE)
+		FROM messages
+		WHERE session_id = ? AND role = ?
+		ORDER BY id DESC
+		LIMIT 1
+	`
+	row := s.db.QueryRow(query, sessionID, role)
+
+	var msg Message
+	var contentJSON sql.NullString
+	var contentType sql.NullString
+	var reasoning sql.NullString
+	if err := row.Scan(
+		&msg.ID,
+		&msg.SessionID,
+		&msg.Role,
+		&msg.Content,
+		&contentJSON,
+		&contentType,
+		&reasoning,
+		&msg.Timestamp,
+		&msg.Tokens,
+		&msg.IsSummary,
+		&msg.IsTruncated,
+	); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+	msg.ContentJSON = contentJSON.String
+	msg.ContentType = defaultContentType(contentType.String)
+	msg.Reasoning = reasoning.String
+
+	return &msg, nil
+}
+
 // GetRecentMessagesByRole returns the most recent messages for a role across sessions.
 func (s *Store) GetRecentMessagesByRole(role string, limit int) ([]Message, error) {
 	query := `

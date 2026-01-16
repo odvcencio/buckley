@@ -171,6 +171,7 @@ type WhenContext struct {
 //   - "cost > 5.0"
 //   - "elapsed > 60" (minutes)
 //   - "has_error"
+//   - "iteration % 10 == 0"
 func EvalWhen(expr string, ctx WhenContext) bool {
 	expr = strings.TrimSpace(expr)
 	if expr == "" {
@@ -182,8 +183,27 @@ func EvalWhen(expr string, ctx WhenContext) bool {
 		return ctx.HasError
 	}
 
-	// Parse comparison: "var op value"
 	parts := strings.Fields(expr)
+
+	// Parse modulo comparison: "var % mod op value"
+	if len(parts) == 5 && parts[1] == "%" {
+		varValue, ok := whenValue(parts[0], ctx)
+		if !ok {
+			return false
+		}
+		modValue, err := strconv.Atoi(parts[2])
+		if err != nil || modValue == 0 {
+			return false
+		}
+		targetValue, err := strconv.Atoi(parts[4])
+		if err != nil {
+			return false
+		}
+		remainder := int(varValue) % modValue
+		return compareValues(float64(remainder), parts[3], float64(targetValue))
+	}
+
+	// Parse comparison: "var op value"
 	if len(parts) != 3 {
 		return false
 	}
@@ -192,21 +212,8 @@ func EvalWhen(expr string, ctx WhenContext) bool {
 	op := parts[1]
 	valueStr := parts[2]
 
-	var varValue float64
-	switch varName {
-	case "iteration":
-		varValue = float64(ctx.Iteration)
-	case "error_count":
-		varValue = float64(ctx.ErrorCount)
-	case "consec_errors":
-		varValue = float64(ctx.ConsecErrors)
-	case "cost":
-		varValue = ctx.TotalCost
-	case "tokens":
-		varValue = float64(ctx.TotalTokens)
-	case "elapsed":
-		varValue = float64(ctx.ElapsedMinutes)
-	default:
+	varValue, ok := whenValue(varName, ctx)
+	if !ok {
 		return false
 	}
 
@@ -215,6 +222,29 @@ func EvalWhen(expr string, ctx WhenContext) bool {
 		return false
 	}
 
+	return compareValues(varValue, op, targetValue)
+}
+
+func whenValue(name string, ctx WhenContext) (float64, bool) {
+	switch name {
+	case "iteration":
+		return float64(ctx.Iteration), true
+	case "error_count":
+		return float64(ctx.ErrorCount), true
+	case "consec_errors":
+		return float64(ctx.ConsecErrors), true
+	case "cost":
+		return ctx.TotalCost, true
+	case "tokens":
+		return float64(ctx.TotalTokens), true
+	case "elapsed":
+		return float64(ctx.ElapsedMinutes), true
+	default:
+		return 0, false
+	}
+}
+
+func compareValues(varValue float64, op string, targetValue float64) bool {
 	switch op {
 	case ">":
 		return varValue > targetValue

@@ -10,24 +10,44 @@ import (
 	"os/signal"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/odvcencio/buckley/pkg/config"
+	"github.com/odvcencio/buckley/pkg/filewatch"
 	"github.com/odvcencio/buckley/pkg/headless"
 	"github.com/odvcencio/buckley/pkg/ipc/command"
 	"github.com/odvcencio/buckley/pkg/model"
 	"github.com/odvcencio/buckley/pkg/ralph"
 	"github.com/odvcencio/buckley/pkg/storage"
 	"github.com/odvcencio/buckley/pkg/tool"
+	"github.com/odvcencio/buckley/pkg/tool/builtin"
 	"gopkg.in/yaml.v3"
 )
 
 // ralphHeadlessRunner implements ralph.HeadlessRunner wrapping headless.Runner.
 type ralphHeadlessRunner struct {
-	runner *headless.Runner
+	runner    *headless.Runner
+	store     *storage.Store
+	sessionID string
+}
+
+type modelContextProvider struct {
+	manager *model.Manager
+}
+
+func (p modelContextProvider) ContextLength(modelID string) int {
+	if p.manager == nil {
+		return 0
+	}
+	length, err := p.manager.GetContextLength(modelID)
+	if err != nil {
+		return 0
+	}
+	return length
 }
 
 func (r *ralphHeadlessRunner) ProcessInput(ctx context.Context, input string) error {
@@ -45,6 +65,76 @@ func (r *ralphHeadlessRunner) State() string {
 		return "idle"
 	}
 	return string(r.runner.State())
+}
+
+func (r *ralphHeadlessRunner) SetModelOverride(modelID string) {
+	if r == nil || r.runner == nil {
+		return
+	}
+	r.runner.SetModelOverride(modelID)
+}
+
+func (r *ralphHeadlessRunner) WaitForIdle(ctx context.Context) error {
+	if r == nil || r.runner == nil {
+		return fmt.Errorf("runner not initialized")
+	}
+
+	ticker := time.NewTicker(200 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		state := r.runner.State()
+		switch state {
+		case headless.StateIdle:
+			return nil
+		case headless.StatePaused:
+			return fmt.Errorf("runner paused")
+		case headless.StateError:
+			return fmt.Errorf("runner entered error state")
+		case headless.StateStopped:
+			return fmt.Errorf("runner stopped")
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
+	}
+}
+
+func (r *ralphHeadlessRunner) LatestAssistantMessageID(ctx context.Context) (int64, error) {
+	_ = ctx
+	if r == nil || r.store == nil {
+		return 0, fmt.Errorf("store not initialized")
+	}
+	msg, err := r.store.GetLatestMessageByRole(r.sessionID, "assistant")
+	if err != nil {
+		return 0, err
+	}
+	if msg == nil {
+		return 0, nil
+	}
+	return msg.ID, nil
+}
+
+func (r *ralphHeadlessRunner) LatestAssistantMessage(ctx context.Context, afterID int64) (string, int, int64, error) {
+	_ = ctx
+	if r == nil || r.store == nil {
+		return "", 0, 0, fmt.Errorf("store not initialized")
+	}
+	msg, err := r.store.GetLatestMessageByRole(r.sessionID, "assistant")
+	if err != nil {
+		return "", 0, 0, err
+	}
+	if msg == nil || msg.ID <= afterID {
+		return "", 0, 0, nil
+	}
+	content := msg.Content
+	if strings.TrimSpace(content) == "" && strings.TrimSpace(msg.ContentJSON) != "" {
+		content = msg.ContentJSON
+	}
+	return content, msg.Tokens, msg.ID, nil
 }
 
 func (r *ralphHeadlessRunner) Stop() {
@@ -128,7 +218,7 @@ func newRalphHeadlessRunner(
 		return nil, fmt.Errorf("creating headless runner: %w", err)
 	}
 
-	return &ralphHeadlessRunner{runner: runner}, nil
+	return &ralphHeadlessRunner{runner: runner, store: store, sessionID: sessionID}, nil
 }
 
 func runRalphCommand(args []string) error {
@@ -216,6 +306,21 @@ func runRalphCommand(args []string) error {
 		cfg.Models.Execution = *model
 	}
 
+	controlPath := filepath.Join(workDir, "ralph-control.yaml")
+	controlCfg, err := loadOrCreateControlConfig(controlPath)
+	if err != nil {
+		return err
+	}
+	if err := controlCfg.Validate(); err != nil {
+		return fmt.Errorf("validating control config: %w", err)
+	}
+	if controlCfg.ContextProcessing.Enabled && strings.TrimSpace(controlCfg.ContextProcessing.Model) == "" {
+		return fmt.Errorf("context_processing.model is required when context processing is enabled")
+	}
+	if controlCfg.Memory.Enabled && controlCfg.Memory.SummaryInterval > 0 && strings.TrimSpace(controlCfg.Memory.SummaryModel) == "" {
+		return fmt.Errorf("memory.summary_model is required when summary_interval is set")
+	}
+
 	sessionID := uuid.New().String()[:8]
 
 	// Setup sandbox
@@ -262,6 +367,17 @@ func runRalphCommand(args []string) error {
 	}
 	defer logger.Close()
 
+	var memoryStore *ralph.MemoryStore
+	if controlCfg.Memory.Enabled {
+		memoryPath := filepath.Join(logDir, "ralph-memory.db")
+		memoryStore, err = ralph.NewMemoryStore(memoryPath)
+		if err != nil {
+			return fmt.Errorf("create memory store: %w", err)
+		}
+		defer memoryStore.Close()
+		logger.SetEventSink(memoryStore)
+	}
+
 	// Create session
 	session := ralph.NewSession(ralph.SessionConfig{
 		SessionID:     sessionID,
@@ -273,12 +389,32 @@ func runRalphCommand(args []string) error {
 		NoRefine:      *noRefine,
 	})
 
+	projectCtx := ralph.BuildProjectContext(workDir)
+
 	// Create tool registry configured for the sandbox
 	registry := tool.NewRegistry()
 	registry.SetWorkDir(sandboxPath)
 	registry.ConfigureContainers(cfg, sandboxPath)
 	registry.SetSandboxConfig(cfg.Sandbox.ToSandboxConfig(sandboxPath))
 	registerMCPTools(cfg, registry)
+
+	fileWatcher := filewatch.NewFileWatcher(100)
+	fileWatcher.Subscribe("*", func(change filewatch.FileChange) {
+		if logger != nil {
+			logger.LogFileChange(change)
+		}
+		if session != nil && strings.TrimSpace(change.Path) != "" {
+			session.AddModifiedFile(change.Path)
+		}
+	})
+	registry.Use(tool.FileChangeTracking(fileWatcher))
+
+	if memoryStore != nil {
+		registry.Register(&builtin.SessionMemoryTool{
+			Store:     memoryStore,
+			SessionID: sessionID,
+		})
+	}
 
 	// Create headless runner
 	runner, err := newRalphHeadlessRunner(cfg, mgr, store, registry, logger, sessionID, sandboxPath, *timeout)
@@ -287,10 +423,75 @@ func runRalphCommand(args []string) error {
 	}
 	defer runner.Stop()
 
+	backendRegistry := ralph.NewBackendRegistry()
+	for name, backend := range controlCfg.Backends {
+		if backend.Type == ralph.BackendTypeInternal {
+			backendRegistry.Register(ralph.NewInternalBackend(name, runner, ralph.InternalOptions{}))
+		} else {
+			backendRegistry.Register(ralph.NewExternalBackend(name, backend.Command, backend.Args, backend.Options))
+		}
+	}
+
+	orchestrator := ralph.NewOrchestrator(backendRegistry, controlCfg)
+	orchestrator.SetLogger(logger)
+	orchestrator.SetContextProvider(modelContextProvider{manager: mgr})
+
+	var contextProcessor *ralph.ContextProcessor
+	if strings.TrimSpace(controlCfg.ContextProcessing.Model) != "" {
+		maxTokens := controlCfg.ContextProcessing.MaxOutputTokens
+		if maxTokens <= 0 {
+			maxTokens = 500
+		}
+		contextProcessor = ralph.NewContextProcessor(mgr, controlCfg.ContextProcessing.Model, maxTokens)
+	}
+
+	var summaryGenerator *ralph.SummaryGenerator
+	if strings.TrimSpace(controlCfg.Memory.SummaryModel) != "" {
+		summaryGenerator = ralph.NewSummaryGenerator(mgr, controlCfg.Memory.SummaryModel, 500)
+	}
+
 	// Create executor with progress feedback
 	executor := ralph.NewExecutor(session, runner, logger,
 		ralph.WithProgressWriter(os.Stdout),
+		ralph.WithOrchestrator(orchestrator),
+		ralph.WithMemoryStore(memoryStore),
+		ralph.WithContextProcessor(contextProcessor),
+		ralph.WithSummaryGenerator(summaryGenerator),
+		ralph.WithProjectContext(projectCtx),
 	)
+
+	var controlWatcher *ralph.ControlWatcher
+	var stopWatcher chan struct{}
+	if _, err := os.Stat(controlPath); err == nil {
+		controlWatcher = ralph.NewControlWatcher(controlPath, time.Second)
+		if err := controlWatcher.Start(); err != nil {
+			return fmt.Errorf("start control watcher: %w", err)
+		}
+		stopWatcher = make(chan struct{})
+		updates := controlWatcher.Subscribe()
+		go func() {
+			for {
+				select {
+				case cfg := <-updates:
+					if cfg == nil {
+						continue
+					}
+					if err := cfg.Validate(); err != nil {
+						if logger != nil {
+							logger.LogError(0, "control_watcher", err)
+						}
+						continue
+					}
+					orchestrator.UpdateConfig(cfg)
+				case <-stopWatcher:
+					return
+				}
+			}
+		}()
+		defer controlWatcher.Stop()
+	} else if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("stat control file: %w", err)
+	}
 
 	// Setup signal handling
 	ctx, cancel := context.WithCancel(context.Background())
@@ -304,6 +505,10 @@ func runRalphCommand(args []string) error {
 		runner.Stop()
 		cancel()
 	}()
+
+	if stopWatcher != nil {
+		defer close(stopWatcher)
+	}
 
 	// Print startup info
 	fmt.Printf("Ralph session %s starting\n", sessionID)
@@ -542,6 +747,15 @@ func setControlConfigValue(cfg *ralph.ControlConfig, kv string) error {
 		}
 		cfg.Mode = value
 
+	case "rotation":
+		return setRotationValue(&cfg.Rotation, parts[1:], value)
+
+	case "memory":
+		return setMemoryValue(&cfg.Memory, parts[1:], value)
+
+	case "context_processing":
+		return setContextProcessingValue(&cfg.ContextProcessing, parts[1:], value)
+
 	case "override":
 		return setOverrideValue(&cfg.Override, parts[1:], value)
 
@@ -576,6 +790,27 @@ func splitDotPath(path string) []string {
 		parts = append(parts, current)
 	}
 	return parts
+}
+
+func splitCSV(value string) []string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil
+	}
+	parts := strings.Split(value, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
+}
+
+func parseBool(value string) bool {
+	value = strings.ToLower(strings.TrimSpace(value))
+	return value == "true" || value == "1" || value == "yes"
 }
 
 // setOverrideValue sets a value in the OverrideConfig.
@@ -613,6 +848,129 @@ func setOverrideValue(override *ralph.OverrideConfig, parts []string, value stri
 
 	default:
 		return fmt.Errorf("unknown override field: %q", parts[0])
+	}
+
+	return nil
+}
+
+func setRotationValue(rotation *ralph.RotationConfig, parts []string, value string) error {
+	if len(parts) == 0 {
+		return fmt.Errorf("rotation requires a field name")
+	}
+
+	switch parts[0] {
+	case "mode":
+		if len(parts) != 1 {
+			return fmt.Errorf("rotation.mode does not support nested keys")
+		}
+		rotation.Mode = value
+	case "interval":
+		if len(parts) != 1 {
+			return fmt.Errorf("rotation.interval does not support nested keys")
+		}
+		interval, err := time.ParseDuration(value)
+		if err != nil {
+			return fmt.Errorf("invalid rotation interval: %w", err)
+		}
+		rotation.Interval = interval
+	case "order":
+		if len(parts) != 1 {
+			return fmt.Errorf("rotation.order does not support nested keys")
+		}
+		rotation.Order = splitCSV(value)
+	default:
+		return fmt.Errorf("unknown rotation field: %q", parts[0])
+	}
+
+	return nil
+}
+
+func setMemoryValue(memory *ralph.MemoryConfig, parts []string, value string) error {
+	if len(parts) == 0 {
+		return fmt.Errorf("memory requires a field name")
+	}
+
+	switch parts[0] {
+	case "enabled":
+		if len(parts) != 1 {
+			return fmt.Errorf("memory.enabled does not support nested keys")
+		}
+		memory.Enabled = parseBool(value)
+	case "summary_interval":
+		if len(parts) != 1 {
+			return fmt.Errorf("memory.summary_interval does not support nested keys")
+		}
+		parsed, err := strconv.Atoi(strings.TrimSpace(value))
+		if err != nil {
+			return fmt.Errorf("invalid summary_interval: %w", err)
+		}
+		memory.SummaryInterval = parsed
+	case "summary_model":
+		if len(parts) != 1 {
+			return fmt.Errorf("memory.summary_model does not support nested keys")
+		}
+		memory.SummaryModel = value
+	case "retention_days":
+		if len(parts) != 1 {
+			return fmt.Errorf("memory.retention_days does not support nested keys")
+		}
+		parsed, err := strconv.Atoi(strings.TrimSpace(value))
+		if err != nil {
+			return fmt.Errorf("invalid retention_days: %w", err)
+		}
+		memory.RetentionDays = parsed
+	case "max_raw_turns":
+		if len(parts) != 1 {
+			return fmt.Errorf("memory.max_raw_turns does not support nested keys")
+		}
+		parsed, err := strconv.Atoi(strings.TrimSpace(value))
+		if err != nil {
+			return fmt.Errorf("invalid max_raw_turns: %w", err)
+		}
+		memory.MaxRawTurns = parsed
+	default:
+		return fmt.Errorf("unknown memory field: %q", parts[0])
+	}
+
+	return nil
+}
+
+func setContextProcessingValue(cfg *ralph.ContextProcessingConfig, parts []string, value string) error {
+	if len(parts) == 0 {
+		return fmt.Errorf("context_processing requires a field name")
+	}
+
+	switch parts[0] {
+	case "enabled":
+		if len(parts) != 1 {
+			return fmt.Errorf("context_processing.enabled does not support nested keys")
+		}
+		cfg.Enabled = parseBool(value)
+	case "model":
+		if len(parts) != 1 {
+			return fmt.Errorf("context_processing.model does not support nested keys")
+		}
+		cfg.Model = value
+	case "max_output_tokens":
+		if len(parts) != 1 {
+			return fmt.Errorf("context_processing.max_output_tokens does not support nested keys")
+		}
+		parsed, err := strconv.Atoi(strings.TrimSpace(value))
+		if err != nil {
+			return fmt.Errorf("invalid max_output_tokens: %w", err)
+		}
+		cfg.MaxOutputTokens = parsed
+	case "budget_pct":
+		if len(parts) != 1 {
+			return fmt.Errorf("context_processing.budget_pct does not support nested keys")
+		}
+		parsed, err := strconv.Atoi(strings.TrimSpace(value))
+		if err != nil {
+			return fmt.Errorf("invalid budget_pct: %w", err)
+		}
+		cfg.BudgetPct = parsed
+	default:
+		return fmt.Errorf("unknown context_processing field: %q", parts[0])
 	}
 
 	return nil
@@ -663,11 +1021,81 @@ func setBackendValue(cfg *ralph.ControlConfig, backendName string, parts []strin
 		}
 		backend.Options[optionName] = value
 
+	case "thresholds":
+		if len(parts) < 2 {
+			return fmt.Errorf("thresholds requires a field name")
+		}
+		if err := setBackendThreshold(&backend.Thresholds, parts[1:], value); err != nil {
+			return err
+		}
+
+	case "models":
+		if len(parts) < 2 {
+			return fmt.Errorf("models requires a field name")
+		}
+		if err := setBackendModels(&backend.Models, parts[1:], value); err != nil {
+			return err
+		}
+
 	default:
 		return fmt.Errorf("unknown backend field: %q", parts[0])
 	}
 
 	cfg.Backends[backendName] = backend
+	return nil
+}
+
+func setBackendThreshold(thresholds *ralph.BackendThresholds, parts []string, value string) error {
+	switch parts[0] {
+	case "max_requests_per_window":
+		parsed, err := strconv.Atoi(strings.TrimSpace(value))
+		if err != nil {
+			return fmt.Errorf("invalid max_requests_per_window: %w", err)
+		}
+		thresholds.MaxRequestsPerWindow = parsed
+	case "max_cost_per_hour":
+		parsed, err := strconv.ParseFloat(strings.TrimSpace(value), 64)
+		if err != nil {
+			return fmt.Errorf("invalid max_cost_per_hour: %w", err)
+		}
+		thresholds.MaxCostPerHour = parsed
+	case "max_context_pct":
+		parsed, err := strconv.Atoi(strings.TrimSpace(value))
+		if err != nil {
+			return fmt.Errorf("invalid max_context_pct: %w", err)
+		}
+		thresholds.MaxContextPct = parsed
+	case "max_consecutive_errors":
+		parsed, err := strconv.Atoi(strings.TrimSpace(value))
+		if err != nil {
+			return fmt.Errorf("invalid max_consecutive_errors: %w", err)
+		}
+		thresholds.MaxConsecutiveErrors = parsed
+	default:
+		return fmt.Errorf("unknown threshold field: %q", parts[0])
+	}
+	return nil
+}
+
+func setBackendModels(models *ralph.BackendModels, parts []string, value string) error {
+	switch parts[0] {
+	case "default":
+		if len(parts) != 1 {
+			return fmt.Errorf("models.default does not support nested keys")
+		}
+		models.Default = value
+	case "rules":
+		if len(parts) != 1 {
+			return fmt.Errorf("models.rules does not support nested keys")
+		}
+		var rules []ralph.ModelRule
+		if err := yaml.Unmarshal([]byte(value), &rules); err != nil {
+			return fmt.Errorf("parsing model rules: %w", err)
+		}
+		models.Rules = rules
+	default:
+		return fmt.Errorf("unknown models field: %q", parts[0])
+	}
 	return nil
 }
 

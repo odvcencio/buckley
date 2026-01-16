@@ -704,6 +704,14 @@ func TestExpandTemplateVars(t *testing.T) {
 			expected: "session=abc-123",
 		},
 		{
+			name:  "model variable",
+			input: "--model={model}",
+			req: BackendRequest{
+				Model: "sonnet",
+			},
+			expected: "--model=sonnet",
+		},
+		{
 			name:  "multiple variables",
 			input: "{prompt} in {sandbox} iter {iteration} session {session_id}",
 			req: BackendRequest{

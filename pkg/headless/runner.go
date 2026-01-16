@@ -295,6 +295,17 @@ func (r *Runner) State() RunnerState {
 	return r.state
 }
 
+// SetModelOverride updates the model override used for execution.
+func (r *Runner) SetModelOverride(modelID string) {
+	if r == nil {
+		return
+	}
+	modelID = strings.TrimSpace(modelID)
+	r.mu.Lock()
+	r.modelOverride = modelID
+	r.mu.Unlock()
+}
+
 // SetMode updates the execution mode for this runner.
 func (r *Runner) SetMode(mode string) error {
 	mode = strings.ToLower(strings.TrimSpace(mode))

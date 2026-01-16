@@ -8,6 +8,8 @@ import (
 	"os"
 	"sync"
 	"time"
+
+	"github.com/odvcencio/buckley/pkg/filewatch"
 )
 
 // LogEvent represents a single event in the JSONL log.
@@ -25,6 +27,12 @@ type Logger struct {
 	file      *os.File
 	writer    *bufio.Writer
 	sessionID string
+	sink      EventSink
+}
+
+// EventSink receives raw log events for indexing.
+type EventSink interface {
+	HandleLogEvent(event LogEvent)
 }
 
 // NewLogger creates a new JSONL logger.
@@ -37,6 +45,16 @@ func NewLogger(path string) (*Logger, error) {
 		file:   f,
 		writer: bufio.NewWriter(f),
 	}, nil
+}
+
+// SetEventSink attaches a sink to receive log events.
+func (l *Logger) SetEventSink(sink EventSink) {
+	if l == nil {
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.sink = sink
 }
 
 // Close flushes and closes the log file.
@@ -60,7 +78,6 @@ func (l *Logger) write(evt LogEvent, setSessionID ...string) {
 		return
 	}
 	l.mu.Lock()
-	defer l.mu.Unlock()
 
 	// Atomically set sessionID if provided
 	if len(setSessionID) > 0 {
@@ -74,11 +91,18 @@ func (l *Logger) write(evt LogEvent, setSessionID ...string) {
 
 	data, err := json.Marshal(evt)
 	if err != nil {
+		l.mu.Unlock()
 		return
 	}
-	l.writer.Write(data)
-	l.writer.WriteByte('\n')
-	l.writer.Flush()
+	_, _ = l.writer.Write(data)
+	_ = l.writer.WriteByte('\n')
+	_ = l.writer.Flush()
+	sink := l.sink
+	l.mu.Unlock()
+
+	if sink != nil {
+		sink.HandleLogEvent(evt)
+	}
 }
 
 // LogSessionStart logs the start of a session.
@@ -132,6 +156,40 @@ func (l *Logger) LogToolResult(tool string, success bool, output string) {
 			"tool":    tool,
 			"success": success,
 			"output":  truncate(output, 1000),
+		},
+	})
+}
+
+// LogFileChange logs a file change observed during tool execution.
+func (l *Logger) LogFileChange(change filewatch.FileChange) {
+	if l == nil {
+		return
+	}
+	l.write(LogEvent{
+		Event: "file_change",
+		Data: map[string]any{
+			"path":     change.Path,
+			"type":     string(change.Type),
+			"tool":     change.ToolName,
+			"size":     change.Size,
+			"mod_time": change.ModTime,
+			"old_path": change.OldPath,
+			"call_id":  change.CallID,
+		},
+	})
+}
+
+// LogError logs a backend error event.
+func (l *Logger) LogError(iteration int, backend string, err error) {
+	if l == nil || err == nil {
+		return
+	}
+	l.write(LogEvent{
+		Event:     "error",
+		Iteration: iteration,
+		Data: map[string]any{
+			"backend": backend,
+			"error":   err.Error(),
 		},
 	})
 }
@@ -218,6 +276,7 @@ func (l *Logger) LogBackendResult(iteration int, result *BackendResult) {
 		Iteration: iteration,
 		Data: map[string]any{
 			"backend":       result.Backend,
+			"model":         result.Model,
 			"duration_ms":   result.Duration.Milliseconds(),
 			"tokens_in":     result.TokensIn,
 			"tokens_out":    result.TokensOut,
@@ -243,6 +302,7 @@ func (l *Logger) LogBackendComparison(iteration int, results []*BackendResult) {
 		}
 		backends = append(backends, map[string]any{
 			"backend":       r.Backend,
+			"model":         r.Model,
 			"duration_ms":   r.Duration.Milliseconds(),
 			"tokens_in":     r.TokensIn,
 			"tokens_out":    r.TokensOut,
@@ -278,6 +338,22 @@ func (l *Logger) LogBackendSwitch(from, to, reason string) {
 			"from":   from,
 			"to":     to,
 			"reason": reason,
+		},
+	})
+}
+
+// LogModelSwitch logs when the selected model changes for a backend.
+func (l *Logger) LogModelSwitch(backend, from, to, reason string) {
+	if l == nil {
+		return
+	}
+	l.write(LogEvent{
+		Event: "model_switch",
+		Data: map[string]any{
+			"backend": backend,
+			"from":    from,
+			"to":      to,
+			"reason":  reason,
 		},
 	})
 }

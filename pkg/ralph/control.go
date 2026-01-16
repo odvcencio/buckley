@@ -4,6 +4,8 @@ package ralph
 import (
 	"fmt"
 	"os"
+	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -15,24 +17,80 @@ const (
 	ModeRoundRobin = "round_robin"
 )
 
+// Rotation modes for backend selection.
+const (
+	RotationNone      = "none"
+	RotationTimeSliced = "time_sliced"
+	RotationRoundRobin = "round_robin"
+)
+
 // BackendTypeInternal indicates an internal Buckley backend.
 const BackendTypeInternal = "internal"
 
 // ControlConfig represents the ralph-control.yaml configuration.
 type ControlConfig struct {
-	Backends map[string]BackendConfig `yaml:"backends"`
-	Mode     string                   `yaml:"mode"` // sequential, parallel, round_robin
-	Schedule []ScheduleRule           `yaml:"schedule"`
-	Override OverrideConfig           `yaml:"override"`
+	Backends          map[string]BackendConfig     `yaml:"backends"`
+	Mode              string                       `yaml:"mode"` // sequential, parallel, round_robin
+	Rotation          RotationConfig               `yaml:"rotation"`
+	Memory            MemoryConfig                 `yaml:"memory"`
+	ContextProcessing ContextProcessingConfig      `yaml:"context_processing"`
+	Schedule          []ScheduleRule               `yaml:"schedule"`
+	Override          OverrideConfig               `yaml:"override"`
 }
 
 // BackendConfig configures a single backend.
 type BackendConfig struct {
-	Type    string            `yaml:"type"`    // "internal" or empty for external
-	Command string            `yaml:"command"` // for external backends
-	Args    []string          `yaml:"args"`
-	Options map[string]string `yaml:"options"`
-	Enabled bool              `yaml:"enabled"`
+	Type       string            `yaml:"type"`    // "internal" or empty for external
+	Command    string            `yaml:"command"` // for external backends
+	Args       []string          `yaml:"args"`
+	Options    map[string]string `yaml:"options"`
+	Enabled    bool              `yaml:"enabled"`
+	Thresholds BackendThresholds `yaml:"thresholds"`
+	Models     BackendModels     `yaml:"models"`
+}
+
+// BackendThresholds control proactive switching behavior.
+type BackendThresholds struct {
+	MaxRequestsPerWindow int     `yaml:"max_requests_per_window"`
+	MaxCostPerHour       float64 `yaml:"max_cost_per_hour"`
+	MaxContextPct        int     `yaml:"max_context_pct"`
+	MaxConsecutiveErrors int     `yaml:"max_consecutive_errors"`
+}
+
+// BackendModels configures dynamic model selection.
+type BackendModels struct {
+	Default string      `yaml:"default"`
+	Rules   []ModelRule `yaml:"rules"`
+}
+
+// ModelRule selects a model when its condition is true.
+type ModelRule struct {
+	When  string `yaml:"when"`
+	Model string `yaml:"model"`
+}
+
+// RotationConfig defines optional backend rotation behavior.
+type RotationConfig struct {
+	Mode     string        `yaml:"mode"`
+	Interval time.Duration `yaml:"interval"`
+	Order    []string      `yaml:"order"`
+}
+
+// MemoryConfig configures Ralph session memory.
+type MemoryConfig struct {
+	Enabled         bool   `yaml:"enabled"`
+	SummaryInterval int    `yaml:"summary_interval"`
+	SummaryModel    string `yaml:"summary_model"`
+	RetentionDays   int    `yaml:"retention_days"`
+	MaxRawTurns     int    `yaml:"max_raw_turns"`
+}
+
+// ContextProcessingConfig configures context injection.
+type ContextProcessingConfig struct {
+	Enabled         bool   `yaml:"enabled"`
+	Model           string `yaml:"model"`
+	MaxOutputTokens int    `yaml:"max_output_tokens"`
+	BudgetPct       int    `yaml:"budget_pct"`
 }
 
 // ScheduleRule defines a trigger-action pair for automated control.
@@ -92,14 +150,28 @@ func (c *ControlConfig) Validate() error {
 		return fmt.Errorf("control config is nil")
 	}
 
-	// Validate mode
+	// Validate mode (default to sequential if empty)
 	switch c.Mode {
 	case ModeSequential, ModeParallel, ModeRoundRobin:
 		// valid
 	case "":
-		return fmt.Errorf("mode is required")
+		c.Mode = ModeSequential
 	default:
 		return fmt.Errorf("invalid mode: %q (must be sequential, parallel, or round_robin)", c.Mode)
+	}
+
+	// Validate rotation mode (default to none if empty)
+	switch c.Rotation.Mode {
+	case RotationNone, RotationTimeSliced, RotationRoundRobin:
+		// valid
+	case "":
+		c.Rotation.Mode = RotationNone
+	default:
+		return fmt.Errorf("invalid rotation mode: %q (must be none, time_sliced, or round_robin)", c.Rotation.Mode)
+	}
+
+	if c.Rotation.Mode == RotationTimeSliced && c.Rotation.Interval <= 0 {
+		return fmt.Errorf("rotation.interval must be set for time_sliced mode")
 	}
 
 	// Validate at least one backend exists
@@ -133,6 +205,19 @@ func validateBackend(name string, backend BackendConfig) error {
 		// External backends must have command
 		if backend.Command == "" {
 			return fmt.Errorf("backend %q: external backends must have command", name)
+		}
+	}
+
+	if backend.Thresholds.MaxContextPct < 0 || backend.Thresholds.MaxContextPct > 100 {
+		return fmt.Errorf("backend %q: max_context_pct must be between 0 and 100", name)
+	}
+
+	for _, rule := range backend.Models.Rules {
+		if strings.TrimSpace(rule.Model) == "" {
+			return fmt.Errorf("backend %q: model rule is missing model", name)
+		}
+		if strings.TrimSpace(rule.When) == "" {
+			return fmt.Errorf("backend %q: model rule is missing when clause", name)
 		}
 	}
 

@@ -53,6 +53,7 @@ var encodingOverrideFlag string
 var quietMode bool
 var noColor bool
 var configPath string
+var rlmMode bool
 
 // initDependenciesFn allows tests to stub dependency initialization without hitting the network.
 var initDependenciesFn = initDependencies
@@ -84,6 +85,7 @@ type startupOptions struct {
 	configPath       string
 	plainModeSet     bool
 	plainMode        bool
+	rlmMode          bool
 }
 
 func main() {
@@ -104,6 +106,7 @@ func main() {
 	quietMode = opts.quiet
 	noColor = opts.noColor
 	configPath = opts.configPath
+	rlmMode = opts.rlmMode
 	os.Args = append([]string{os.Args[0]}, opts.args...)
 
 	if handled, exitCode := dispatchSubcommand(opts.args); handled {
@@ -139,6 +142,7 @@ func main() {
 		os.Exit(2)
 	}
 	applySandboxOverride(cfg)
+	applyRLMOverride(cfg)
 	tool.SetResultEncoding(cfg.Encoding.UseToon)
 
 	if !cfg.Providers.HasReadyProvider() {
@@ -606,6 +610,7 @@ func initDependencies() (*config.Config, *model.Manager, *storage.Store, error) 
 	if encodingOverrideFlag != "" {
 		cfg.Encoding.UseToon = encodingOverrideFlag != "json"
 	}
+	applyRLMOverride(cfg)
 	tool.SetResultEncoding(cfg.Encoding.UseToon)
 
 	if !cfg.Providers.HasReadyProvider() {
@@ -687,6 +692,7 @@ func printHelp() {
 	fmt.Println("  --no-color                       Disable colored output")
 	fmt.Println("  --tui                            Use rich TUI interface")
 	fmt.Println("  --plain                          Use plain scrollback mode")
+	fmt.Println("  --rlm                            Use RLM execution mode (experimental)")
 	fmt.Println("  --encoding json|toon             Set serialization format")
 	fmt.Println("  --json                           Shortcut for --encoding json")
 	fmt.Println("  -v, --version                    Show version information")
@@ -1266,6 +1272,8 @@ func parseStartupOptions(raw []string) (*startupOptions, error) {
 			opts.quiet = true
 		case "--no-color":
 			opts.noColor = true
+		case "--rlm":
+			opts.rlmMode = true
 		case "--config", "-c":
 			nextConfig = true
 		default:
@@ -1331,6 +1339,16 @@ func applySandboxOverride(cfg *config.Config) {
 		cfg.Worktrees.UseContainers = true
 	case "host", "off", "disable", "disabled", "false", "no":
 		cfg.Worktrees.UseContainers = false
+	}
+}
+
+func applyRLMOverride(cfg *config.Config) {
+	if cfg == nil {
+		return
+	}
+	if rlmMode {
+		cfg.Execution.Mode = config.ExecutionModeRLM
+		cfg.Oneshot.Mode = config.ExecutionModeRLM
 	}
 }
 

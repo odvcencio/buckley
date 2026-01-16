@@ -25,6 +25,9 @@ type BackendRequest struct {
 	// Prompt is the task description to execute.
 	Prompt string
 
+	// Model is the resolved model identifier for this backend execution.
+	Model string
+
 	// SandboxPath is the working directory for the execution.
 	SandboxPath string
 
@@ -42,6 +45,9 @@ type BackendRequest struct {
 type BackendResult struct {
 	// Backend is the name of the backend that produced this result.
 	Backend string
+
+	// Model is the model identifier used for this execution.
+	Model string
 
 	// Duration is how long the execution took.
 	Duration time.Duration

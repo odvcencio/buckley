@@ -129,6 +129,15 @@ func (s *Session) AddModifiedFile(path string) {
 	s.filesModified = append(s.filesModified, path)
 }
 
+// ModifiedFiles returns a copy of the modified files list.
+func (s *Session) ModifiedFiles() []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]string, len(s.filesModified))
+	copy(out, s.filesModified)
+	return out
+}
+
 // GetPrompt returns the current prompt.
 func (s *Session) GetPrompt() string {
 	s.mu.RLock()

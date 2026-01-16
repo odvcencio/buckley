@@ -28,6 +28,7 @@ type ExternalBackend struct {
 //
 // The args slice can contain template variables that will be expanded:
 //   - {prompt}     - BackendRequest.Prompt
+//   - {model}      - BackendRequest.Model
 //   - {sandbox}    - BackendRequest.SandboxPath
 //   - {iteration}  - BackendRequest.Iteration (as string)
 //   - {session_id} - BackendRequest.SessionID
@@ -75,6 +76,7 @@ func (b *ExternalBackend) Execute(ctx context.Context, req BackendRequest) (*Bac
 
 	result := &BackendResult{
 		Backend:      b.name,
+		Model:        req.Model,
 		FilesChanged: []string{},
 	}
 
@@ -176,6 +178,7 @@ func (b *ExternalBackend) SetAvailable(available bool) {
 func expandTemplateVars(input string, req BackendRequest) string {
 	result := input
 	result = strings.ReplaceAll(result, "{prompt}", req.Prompt)
+	result = strings.ReplaceAll(result, "{model}", req.Model)
 	result = strings.ReplaceAll(result, "{sandbox}", req.SandboxPath)
 	result = strings.ReplaceAll(result, "{iteration}", strconv.Itoa(req.Iteration))
 	result = strings.ReplaceAll(result, "{session_id}", req.SessionID)

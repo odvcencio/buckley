@@ -380,6 +380,7 @@ func TestLogger_LogBackendResult(t *testing.T) {
 
 	result := &BackendResult{
 		Backend:      "claude",
+		Model:        "sonnet",
 		Duration:     58 * time.Second,
 		TokensIn:     2500,
 		TokensOut:    1800,
@@ -414,6 +415,9 @@ func TestLogger_LogBackendResult(t *testing.T) {
 	}
 	if evt.Data["backend"] != "claude" {
 		t.Errorf("expected backend=claude, got %v", evt.Data["backend"])
+	}
+	if evt.Data["model"] != "sonnet" {
+		t.Errorf("expected model=sonnet, got %v", evt.Data["model"])
 	}
 	if int(evt.Data["duration_ms"].(float64)) != 58000 {
 		t.Errorf("expected duration_ms=58000, got %v", evt.Data["duration_ms"])
@@ -476,6 +480,7 @@ func TestLogger_LogBackendComparison(t *testing.T) {
 	results := []*BackendResult{
 		{
 			Backend:      "claude",
+			Model:        "sonnet",
 			Duration:     30 * time.Second,
 			TokensIn:     1500,
 			TokensOut:    1000,
@@ -486,6 +491,7 @@ func TestLogger_LogBackendComparison(t *testing.T) {
 		},
 		{
 			Backend:      "codex",
+			Model:        "o3",
 			Duration:     25 * time.Second,
 			TokensIn:     1200,
 			TokensOut:    800,
@@ -528,6 +534,9 @@ func TestLogger_LogBackendComparison(t *testing.T) {
 	}
 
 	first := backends[0].(map[string]any)
+	if first["model"] == "" {
+		t.Errorf("expected model in first backend entry, got %v", first["model"])
+	}
 	if first["backend"] != "claude" {
 		t.Errorf("expected first backend=claude, got %v", first["backend"])
 	}

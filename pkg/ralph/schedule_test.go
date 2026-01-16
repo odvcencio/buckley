@@ -231,6 +231,18 @@ func TestEvalWhen(t *testing.T) {
 			result: false,
 		},
 		{
+			name:   "iteration modulo match",
+			expr:   "iteration % 5 == 0",
+			ctx:    WhenContext{Iteration: 10},
+			result: true,
+		},
+		{
+			name:   "iteration modulo no match",
+			expr:   "iteration % 4 == 0",
+			ctx:    WhenContext{Iteration: 10},
+			result: false,
+		},
+		{
 			name:   "equals operator",
 			expr:   "iteration == 10",
 			ctx:    WhenContext{Iteration: 10},

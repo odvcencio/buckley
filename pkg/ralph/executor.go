@@ -3,11 +3,16 @@ package ralph
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
+	"sort"
+	"strings"
 	"sync"
 	"time"
+
+	"github.com/odvcencio/buckley/pkg/conversation"
 )
 
 // HeadlessRunner defines the interface for executing prompts.
@@ -28,6 +33,12 @@ type Executor struct {
 	orchestrator *Orchestrator
 	logger       *Logger
 	progress     ProgressWriter
+	memoryStore  *MemoryStore
+	contextProc  *ContextProcessor
+	summaryGen   *SummaryGenerator
+	projectCtx   string
+	lastBackend  string
+	lastModel    string
 
 	mu              sync.Mutex
 	promptFileMtime time.Time
@@ -48,6 +59,34 @@ func WithOrchestrator(o *Orchestrator) ExecutorOption {
 func WithProgressWriter(w ProgressWriter) ExecutorOption {
 	return func(e *Executor) {
 		e.progress = w
+	}
+}
+
+// WithMemoryStore attaches a session memory store.
+func WithMemoryStore(store *MemoryStore) ExecutorOption {
+	return func(e *Executor) {
+		e.memoryStore = store
+	}
+}
+
+// WithContextProcessor attaches a context processor for prompt injection.
+func WithContextProcessor(processor *ContextProcessor) ExecutorOption {
+	return func(e *Executor) {
+		e.contextProc = processor
+	}
+}
+
+// WithSummaryGenerator attaches a summary generator for session memory.
+func WithSummaryGenerator(generator *SummaryGenerator) ExecutorOption {
+	return func(e *Executor) {
+		e.summaryGen = generator
+	}
+}
+
+// WithProjectContext sets the static project context text.
+func WithProjectContext(ctx string) ExecutorOption {
+	return func(e *Executor) {
+		e.projectCtx = ctx
 	}
 }
 
@@ -147,7 +186,12 @@ func (e *Executor) runIteration(ctx context.Context) error {
 	// Progress feedback
 	e.writeProgress("Iteration %d started...\n", iteration)
 
-	prompt := e.buildIterationPrompt()
+	basePrompt := e.buildIterationPrompt(iteration)
+	cfg := e.currentControlConfig()
+	prompt, promptTokens, ctxErr := e.buildContextPrompt(ctx, iteration, basePrompt, cfg)
+	if ctxErr != nil {
+		e.logInternalError(iteration, "context_processing", ctxErr)
+	}
 	startTime := time.Now()
 
 	var err error
@@ -167,27 +211,33 @@ func (e *Executor) runIteration(ctx context.Context) error {
 			SandboxPath: e.session.Sandbox,
 			Iteration:   iteration,
 			SessionID:   e.session.ID,
+			Context: map[string]any{
+				"prompt_tokens": promptTokens,
+			},
 		}
 
-		results, err = e.orchestrator.Execute(ctx, req)
-
-		// Log backend results and update session stats
-		for _, result := range results {
-			if result == nil {
+		for {
+			results, err = e.orchestrator.Execute(ctx, req)
+			var parked ErrAllBackendsParked
+			if err != nil && errors.As(err, &parked) {
+				waitFor := defaultRateLimitBackoff
+				if !parked.NextAvailable.IsZero() {
+					waitFor = time.Until(parked.NextAvailable)
+				}
+				if waitFor < 0 {
+					waitFor = 0
+				}
+				e.writeProgress("All backends parked. Waiting %s...\n", waitFor.Round(time.Second))
+				if waitErr := waitForDuration(ctx, waitFor); waitErr != nil {
+					return nil
+				}
 				continue
 			}
-			if e.logger != nil {
-				e.logger.LogBackendResult(iteration, result)
-			}
-			// Update session stats from result
-			e.session.AddTokens(result.TokensIn+result.TokensOut, result.Cost)
-			for _, file := range result.FilesChanged {
-				e.session.AddModifiedFile(file)
-			}
-			if result.Error != nil {
-				e.lastError = result.Error
-			}
+			break
 		}
+
+		// Log backend results and update session stats
+		e.handleBackendResults(ctx, iteration, prompt, promptTokens, results, cfg)
 
 		// Log comparison for parallel mode
 		if len(results) > 1 && e.logger != nil {
@@ -210,6 +260,319 @@ func (e *Executor) runIteration(ctx context.Context) error {
 	}
 
 	return err
+}
+
+func (e *Executor) currentControlConfig() *ControlConfig {
+	if e == nil || e.orchestrator == nil {
+		return nil
+	}
+	return e.orchestrator.Config()
+}
+
+func (e *Executor) buildContextPrompt(ctx context.Context, iteration int, base string, cfg *ControlConfig) (string, int, error) {
+	promptTokens := conversation.CountTokens(base)
+	if e == nil || e.contextProc == nil || cfg == nil || !cfg.ContextProcessing.Enabled {
+		return base, promptTokens, nil
+	}
+
+	input := ContextInput{
+		Iteration:    iteration,
+		BudgetTokens: e.contextBudgetTokens(cfg),
+		SessionState: e.buildSessionState(iteration),
+		Summaries:    e.buildSummaryContext(ctx, iteration, cfg),
+		Project:      e.projectCtx,
+	}
+
+	block, err := e.contextProc.BuildContextBlock(ctx, input)
+	if err != nil {
+		return base, promptTokens, err
+	}
+
+	block = strings.TrimSpace(block)
+	if block == "" {
+		return base, promptTokens, nil
+	}
+
+	prompt := fmt.Sprintf("<ralph-context>\n%s\n</ralph-context>\n\n%s", block, base)
+	return prompt, conversation.CountTokens(prompt), nil
+}
+
+func (e *Executor) buildSessionState(iteration int) string {
+	stats := e.session.Stats()
+	lines := []string{
+		fmt.Sprintf("iteration: %d", iteration),
+		fmt.Sprintf("elapsed: %s", stats.Elapsed.Round(time.Second)),
+		fmt.Sprintf("total_tokens: %d", stats.TotalTokens),
+		fmt.Sprintf("total_cost: $%.4f", stats.TotalCost),
+	}
+
+	if strings.TrimSpace(e.lastBackend) != "" {
+		lines = append(lines, "backend: "+e.lastBackend)
+	}
+	if strings.TrimSpace(e.lastModel) != "" {
+		lines = append(lines, "model: "+e.lastModel)
+	}
+	if e.lastError != nil {
+		lines = append(lines, "last_error: "+e.lastError.Error())
+	}
+
+	files := e.session.ModifiedFiles()
+	if len(files) > 0 {
+		lines = append(lines, fmt.Sprintf("files_modified: %d", len(files)))
+		if len(files) > 10 {
+			files = files[len(files)-10:]
+		}
+		lines = append(lines, "recent_files: "+strings.Join(files, ", "))
+	}
+
+	return strings.Join(lines, "\n")
+}
+
+func (e *Executor) buildSummaryContext(ctx context.Context, iteration int, cfg *ControlConfig) string {
+	if e == nil || e.memoryStore == nil || cfg == nil || !cfg.Memory.Enabled {
+		return ""
+	}
+
+	summaries, err := e.memoryStore.ListSummaries(ctx, e.session.ID, 0, 3)
+	if err != nil {
+		e.logInternalError(iteration, "memory_store", err)
+		return ""
+	}
+	if len(summaries) == 0 {
+		return ""
+	}
+
+	for i, j := 0, len(summaries)-1; i < j; i, j = i+1, j-1 {
+		summaries[i], summaries[j] = summaries[j], summaries[i]
+	}
+
+	lines := make([]string, 0, len(summaries)*3)
+	for _, summary := range summaries {
+		lines = append(lines, fmt.Sprintf("Iterations %d-%d:", summary.StartIteration, summary.EndIteration))
+		if strings.TrimSpace(summary.Summary) != "" {
+			lines = append(lines, summary.Summary)
+		}
+		if len(summary.KeyDecisions) > 0 {
+			lines = append(lines, "Key decisions: "+strings.Join(summary.KeyDecisions, "; "))
+		}
+		if len(summary.ErrorPatterns) > 0 {
+			lines = append(lines, "Error patterns: "+strings.Join(summary.ErrorPatterns, "; "))
+		}
+		if len(summary.FilesModified) > 0 {
+			lines = append(lines, "Files modified: "+strings.Join(summary.FilesModified, ", "))
+		}
+	}
+
+	return strings.Join(lines, "\n")
+}
+
+func (e *Executor) contextBudgetTokens(cfg *ControlConfig) int {
+	if e == nil || cfg == nil {
+		return 0
+	}
+
+	budget := cfg.ContextProcessing.MaxOutputTokens
+	if cfg.ContextProcessing.BudgetPct > 0 && strings.TrimSpace(e.lastModel) != "" && e.orchestrator != nil {
+		provider := e.orchestrator.ContextProvider()
+		if provider != nil {
+			if contextLen := provider.ContextLength(e.lastModel); contextLen > 0 {
+				budget = (contextLen * cfg.ContextProcessing.BudgetPct) / 100
+			}
+		}
+	}
+
+	if cfg.ContextProcessing.MaxOutputTokens > 0 && (budget == 0 || budget > cfg.ContextProcessing.MaxOutputTokens) {
+		budget = cfg.ContextProcessing.MaxOutputTokens
+	}
+	if budget <= 0 {
+		budget = 500
+	}
+
+	return budget
+}
+
+func (e *Executor) handleBackendResults(ctx context.Context, iteration int, prompt string, promptTokens int, results []*BackendResult, cfg *ControlConfig) {
+	var iterationErr error
+
+	for _, result := range results {
+		if result == nil {
+			continue
+		}
+		e.normalizeResultTokens(result, promptTokens)
+
+		if strings.TrimSpace(result.Backend) != "" {
+			e.lastBackend = result.Backend
+		}
+		if strings.TrimSpace(result.Model) != "" {
+			e.lastModel = result.Model
+		}
+
+		if e.logger != nil {
+			e.logger.LogBackendResult(iteration, result)
+		}
+
+		cost := result.Cost
+		if cost == 0 {
+			cost = result.CostEstimate
+		}
+		e.session.AddTokens(result.TokensIn+result.TokensOut, cost)
+		for _, file := range result.FilesChanged {
+			e.session.AddModifiedFile(file)
+		}
+		if result.Error != nil {
+			iterationErr = result.Error
+			e.logInternalError(iteration, result.Backend, result.Error)
+		}
+	}
+
+	if iterationErr != nil {
+		e.lastError = iterationErr
+	} else {
+		e.lastError = nil
+	}
+
+	e.updateMemory(ctx, iteration, prompt, promptTokens, results, cfg)
+}
+
+func (e *Executor) normalizeResultTokens(result *BackendResult, promptTokens int) {
+	if result == nil {
+		return
+	}
+	if result.TokensIn == 0 && promptTokens > 0 {
+		result.TokensIn = promptTokens
+	}
+	if result.TokensOut == 0 && strings.TrimSpace(result.Output) != "" {
+		result.TokensOut = conversation.CountTokens(result.Output)
+	}
+}
+
+func (e *Executor) updateMemory(ctx context.Context, iteration int, prompt string, promptTokens int, results []*BackendResult, cfg *ControlConfig) {
+	if e == nil || e.memoryStore == nil || cfg == nil || !cfg.Memory.Enabled {
+		return
+	}
+
+	for _, result := range results {
+		if result == nil {
+			continue
+		}
+		tokensIn := result.TokensIn
+		if tokensIn == 0 && promptTokens > 0 {
+			tokensIn = promptTokens
+		}
+		tokensOut := result.TokensOut
+		if tokensOut == 0 && strings.TrimSpace(result.Output) != "" {
+			tokensOut = conversation.CountTokens(result.Output)
+		}
+		cost := result.Cost
+		if cost == 0 {
+			cost = result.CostEstimate
+		}
+
+		turn := &TurnRecord{
+			SessionID: e.session.ID,
+			Iteration: iteration,
+			Timestamp: time.Now(),
+			Prompt:    prompt,
+			Response:  result.Output,
+			Backend:   result.Backend,
+			Model:     result.Model,
+			TokensIn:  tokensIn,
+			TokensOut: tokensOut,
+			Cost:      cost,
+		}
+		if result.Error != nil {
+			turn.Error = result.Error.Error()
+		}
+		if err := e.memoryStore.SaveTurn(ctx, turn); err != nil {
+			e.logInternalError(iteration, "memory_store", err)
+		}
+	}
+
+	if cfg.Memory.MaxRawTurns > 0 {
+		if err := e.memoryStore.TrimRawTurns(ctx, e.session.ID, cfg.Memory.MaxRawTurns); err != nil {
+			e.logInternalError(iteration, "memory_store", err)
+		}
+	}
+
+	if cfg.Memory.SummaryInterval > 0 && e.summaryGen != nil && iteration%cfg.Memory.SummaryInterval == 0 {
+		start := iteration - cfg.Memory.SummaryInterval + 1
+		if start < 1 {
+			start = 1
+		}
+		turns, err := e.memoryStore.GetTurnsInRange(ctx, e.session.ID, start, iteration)
+		if err != nil {
+			e.logInternalError(iteration, "memory_store", err)
+			return
+		}
+		if len(turns) == 0 {
+			return
+		}
+		summary, err := e.summaryGen.Generate(ctx, SummaryInput{
+			SessionID:      e.session.ID,
+			StartIteration: start,
+			EndIteration:   iteration,
+			Turns:          turns,
+		})
+		if err != nil {
+			e.logInternalError(iteration, "summary_generator", err)
+			return
+		}
+		summary.FilesModified = e.filesModifiedForRange(ctx, iteration, start, iteration)
+		if err := e.memoryStore.SaveSummary(ctx, summary); err != nil {
+			e.logInternalError(iteration, "memory_store", err)
+		}
+		if cfg.Memory.RetentionDays > 0 {
+			if err := e.memoryStore.PruneRetention(ctx, cfg.Memory.RetentionDays); err != nil {
+				e.logInternalError(iteration, "memory_store", err)
+			}
+		}
+	}
+}
+
+func (e *Executor) filesModifiedForRange(ctx context.Context, iteration int, startIteration int, endIteration int) []string {
+	if e == nil || e.memoryStore == nil {
+		return nil
+	}
+
+	events, err := e.memoryStore.SearchEvents(ctx, EventQuery{
+		SessionID:  e.session.ID,
+		EventTypes: []string{"file_change"},
+		Since:      startIteration,
+		Until:      endIteration,
+		Limit:      200,
+	})
+	if err != nil {
+		e.logInternalError(iteration, "memory_store", err)
+		return nil
+	}
+
+	files := make(map[string]struct{})
+	for _, evt := range events {
+		path := strings.TrimSpace(evt.FilePath)
+		if path == "" {
+			continue
+		}
+		files[path] = struct{}{}
+	}
+
+	if len(files) == 0 {
+		return nil
+	}
+
+	out := make([]string, 0, len(files))
+	for path := range files {
+		out = append(out, path)
+	}
+	sort.Strings(out)
+
+	return out
+}
+
+func (e *Executor) logInternalError(iteration int, backend string, err error) {
+	if e == nil || e.logger == nil || err == nil {
+		return
+	}
+	e.logger.LogError(iteration, backend, err)
 }
 
 func (e *Executor) handleScheduleAction(action *ScheduleAction) {
@@ -235,10 +598,9 @@ func (e *Executor) writeProgress(format string, args ...any) {
 	}
 }
 
-func (e *Executor) buildIterationPrompt() string {
+func (e *Executor) buildIterationPrompt(iteration int) string {
 	base := e.session.GetPrompt()
 
-	iteration := e.session.Iteration()
 	if iteration > 1 {
 		base = fmt.Sprintf("[Iteration %d] Continue working on the task.\n\nOriginal task:\n%s", iteration, base)
 	}
@@ -291,4 +653,19 @@ func (e *Executor) Resume() error {
 		return fmt.Errorf("executor not initialized")
 	}
 	return e.session.TransitionTo(StateRunning)
+}
+
+func waitForDuration(ctx context.Context, waitFor time.Duration) error {
+	if waitFor <= 0 {
+		return nil
+	}
+	timer := time.NewTimer(waitFor)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }

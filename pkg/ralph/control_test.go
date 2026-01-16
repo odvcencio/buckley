@@ -227,8 +227,67 @@ func TestControlConfig_Validate_EmptyMode(t *testing.T) {
 		},
 	}
 	err := cfg.Validate()
+	if err != nil {
+		t.Fatalf("Validate failed for empty mode: %v", err)
+	}
+	if cfg.Mode != ModeSequential {
+		t.Errorf("expected mode %q, got %q", ModeSequential, cfg.Mode)
+	}
+}
+
+func TestControlConfig_Validate_TimeSlicedRotationRequiresInterval(t *testing.T) {
+	cfg := &ControlConfig{
+		Mode: ModeSequential,
+		Rotation: RotationConfig{
+			Mode: RotationTimeSliced,
+		},
+		Backends: map[string]BackendConfig{
+			"test": {Command: "test-cli", Enabled: true},
+		},
+	}
+	err := cfg.Validate()
 	if err == nil {
-		t.Error("expected error for empty mode")
+		t.Error("expected error for time_sliced rotation without interval")
+	}
+}
+
+func TestControlConfig_Validate_InvalidContextPct(t *testing.T) {
+	cfg := &ControlConfig{
+		Mode: ModeSequential,
+		Backends: map[string]BackendConfig{
+			"test": {
+				Command: "test-cli",
+				Enabled: true,
+				Thresholds: BackendThresholds{
+					MaxContextPct: 120,
+				},
+			},
+		},
+	}
+	err := cfg.Validate()
+	if err == nil {
+		t.Error("expected error for invalid max_context_pct")
+	}
+}
+
+func TestControlConfig_Validate_ModelRuleRequiresFields(t *testing.T) {
+	cfg := &ControlConfig{
+		Mode: ModeSequential,
+		Backends: map[string]BackendConfig{
+			"test": {
+				Command: "test-cli",
+				Enabled: true,
+				Models: BackendModels{
+					Rules: []ModelRule{
+						{When: "consec_errors >= 2"},
+					},
+				},
+			},
+		},
+	}
+	err := cfg.Validate()
+	if err == nil {
+		t.Error("expected error for model rule missing model")
 	}
 }
 

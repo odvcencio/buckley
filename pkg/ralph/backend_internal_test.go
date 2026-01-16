@@ -10,12 +10,12 @@ import (
 
 // mockHeadlessRunnerForBackend implements HeadlessRunner for testing InternalBackend.
 type mockHeadlessRunnerForBackend struct {
-	processCount int
-	lastInput    string
-	shouldError  bool
+	processCount  int
+	lastInput     string
+	shouldError   bool
 	errorToReturn error
-	state        string
-	processDelay time.Duration
+	state         string
+	processDelay  time.Duration
 }
 
 func (m *mockHeadlessRunnerForBackend) ProcessInput(ctx context.Context, input string) error {
@@ -262,9 +262,9 @@ func TestInternalBackend_Execute_DefaultTokensAndCost(t *testing.T) {
 		t.Fatalf("Execute() error = %v", err)
 	}
 
-	// For now, tokens and cost are 0 (to be enhanced later)
-	if result.TokensIn != 0 {
-		t.Errorf("result.TokensIn = %d, want 0", result.TokensIn)
+	// Prompt tokens should be counted; output/cost remain zero without output telemetry.
+	if result.TokensIn == 0 {
+		t.Errorf("result.TokensIn = %d, want > 0", result.TokensIn)
 	}
 	if result.TokensOut != 0 {
 		t.Errorf("result.TokensOut = %d, want 0", result.TokensOut)

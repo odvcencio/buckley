@@ -4,8 +4,11 @@ package ralph
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
+
+	"github.com/odvcencio/buckley/pkg/conversation"
 )
 
 // InternalOptions configures the internal Buckley backend.
@@ -33,6 +36,16 @@ type InternalBackend struct {
 	available bool
 }
 
+type headlessModelOverrider interface {
+	SetModelOverride(modelID string)
+}
+
+type headlessOutputProvider interface {
+	WaitForIdle(ctx context.Context) error
+	LatestAssistantMessageID(ctx context.Context) (int64, error)
+	LatestAssistantMessage(ctx context.Context, afterID int64) (string, int, int64, error)
+}
+
 // NewInternalBackend creates a new internal Buckley backend.
 func NewInternalBackend(name string, runner HeadlessRunner, options InternalOptions) *InternalBackend {
 	return &InternalBackend{
@@ -54,6 +67,7 @@ func (b *InternalBackend) Execute(ctx context.Context, req BackendRequest) (*Bac
 
 	result := &BackendResult{
 		Backend: b.name,
+		Model:   req.Model,
 	}
 
 	// Check if runner is available
@@ -63,8 +77,34 @@ func (b *InternalBackend) Execute(ctx context.Context, req BackendRequest) (*Bac
 		return result, nil
 	}
 
+	if overrider, ok := b.runner.(headlessModelOverrider); ok {
+		overrider.SetModelOverride(req.Model)
+	}
+
+	var beforeID int64
+	if outputProvider, ok := b.runner.(headlessOutputProvider); ok {
+		if id, err := outputProvider.LatestAssistantMessageID(ctx); err == nil {
+			beforeID = id
+		}
+	}
+
 	// Execute the prompt through the runner
 	err := b.runner.ProcessInput(ctx, req.Prompt)
+
+	if outputProvider, ok := b.runner.(headlessOutputProvider); ok {
+		if waitErr := outputProvider.WaitForIdle(ctx); waitErr != nil && err == nil {
+			err = waitErr
+		}
+		content, tokensOut, _, msgErr := outputProvider.LatestAssistantMessage(ctx, beforeID)
+		if msgErr != nil && err == nil {
+			err = msgErr
+		}
+		result.Output = content
+		result.TokensOut = tokensOut
+		if result.TokensOut == 0 && strings.TrimSpace(result.Output) != "" {
+			result.TokensOut = conversation.CountTokens(result.Output)
+		}
+	}
 
 	result.Duration = time.Since(startTime)
 
@@ -72,8 +112,7 @@ func (b *InternalBackend) Execute(ctx context.Context, req BackendRequest) (*Bac
 		result.Error = err
 	}
 
-	// Note: TokensIn, TokensOut, Cost, CostEstimate are left as 0 for now.
-	// These will be enhanced when we add telemetry integration.
+	result.TokensIn = conversation.CountTokens(req.Prompt)
 
 	return result, nil
 }
