@@ -1,4 +1,4 @@
-package widgets
+package buckley
 
 import (
 	"fmt"
@@ -8,6 +8,7 @@ import (
 	"github.com/odvcencio/buckley/pkg/ui/backend"
 	"github.com/odvcencio/buckley/pkg/ui/runtime"
 	"github.com/odvcencio/buckley/pkg/ui/terminal"
+	uiwidgets "github.com/odvcencio/buckley/pkg/ui/widgets"
 )
 
 // TaskStatus represents the status of a task in the plan.
@@ -139,7 +140,7 @@ func DefaultSidebarConfig() SidebarConfig {
 
 // Sidebar displays task progress, plan, and running tools.
 type Sidebar struct {
-	FocusableBase
+	uiwidgets.FocusableBase
 
 	// Configuration
 	config SidebarConfig
@@ -517,7 +518,7 @@ func (s *Sidebar) Shrink(delta int) {
 
 // Layout stores the assigned bounds.
 func (s *Sidebar) Layout(bounds runtime.Rect) {
-	s.Base.Layout(bounds)
+	s.FocusableBase.Layout(bounds)
 }
 
 func (s *Sidebar) recordSection(kind sidebarSectionKind, headerY, bodyStart, bodyEnd int) {
@@ -686,7 +687,7 @@ func (s *Sidebar) sectionsToRender() []sidebarSectionKind {
 
 // Render draws the sidebar.
 func (s *Sidebar) Render(ctx runtime.RenderContext) {
-	b := s.bounds
+	b := s.Bounds()
 	if b.Width < 10 || b.Height < 5 {
 		return
 	}
@@ -1010,10 +1011,10 @@ func (s *Sidebar) renderContext(buf *runtime.Buffer, x, y, width int) int {
 	}
 
 	barX := x + 2
-	gaugeStyle := GaugeStyle{
+	gaugeStyle := uiwidgets.GaugeStyle{
 		FillChar:  '█',
 		EmptyChar: '░',
-		Thresholds: []GaugeThreshold{
+		Thresholds: []uiwidgets.GaugeThreshold{
 			{Ratio: 0.0, Style: s.contextActive},
 			{Ratio: 0.6, Style: s.contextWarn},
 			{Ratio: 0.85, Style: s.contextCritical},
@@ -1021,7 +1022,7 @@ func (s *Sidebar) renderContext(buf *runtime.Buffer, x, y, width int) int {
 		EmptyStyle: s.contextMuted,
 		EdgeStyle:  s.progressEdge,
 	}
-	DrawGauge(buf, barX, y, barWidth, ratio, gaugeStyle)
+	uiwidgets.DrawGauge(buf, barX, y, barWidth, ratio, gaugeStyle)
 
 	if showPercent {
 		percent := intToStr(int(ratio*100+0.5)) + "%"
@@ -1355,7 +1356,7 @@ func (s *Sidebar) HandleMessage(msg runtime.Message) runtime.HandleResult {
 }
 
 func (s *Sidebar) handleMouse(m runtime.MouseMsg) runtime.HandleResult {
-	if !s.bounds.Contains(m.X, m.Y) {
+	if !s.Bounds().Contains(m.X, m.Y) {
 		return runtime.Unhandled()
 	}
 

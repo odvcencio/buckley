@@ -1,4 +1,4 @@
-package widgets
+package buckley
 
 import (
 	"testing"

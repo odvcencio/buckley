@@ -10,7 +10,7 @@ import (
 
 	"github.com/odvcencio/buckley/pkg/telemetry"
 	"github.com/odvcencio/buckley/pkg/touch"
-	"github.com/odvcencio/buckley/pkg/ui/widgets"
+	buckleywidgets "github.com/odvcencio/buckley/pkg/ui/widgets/buckley"
 )
 
 // TelemetryUIBridge forwards telemetry events to the TUI for sidebar updates.
@@ -26,21 +26,21 @@ type TelemetryUIBridge struct {
 	mu                 sync.Mutex
 	currentTask        string
 	taskProgress       int
-	planTasks          []widgets.PlanTask
-	runningTools       map[string]widgets.RunningTool
+	planTasks          []buckleywidgets.PlanTask
+	runningTools       map[string]buckleywidgets.RunningTool
 	activeTouches      map[string]touchEntry
 	recentFiles        []string
 	experimentID       string
 	experiment         string
 	experimentStatus   string
-	experimentVariants map[string]widgets.ExperimentVariant
-	rlmStatus          *widgets.RLMStatus
-	rlmScratchpad      []widgets.RLMScratchpadEntry
-	circuitStatus      *widgets.CircuitStatus
+	experimentVariants map[string]buckleywidgets.ExperimentVariant
+	rlmStatus          *buckleywidgets.RLMStatus
+	rlmScratchpad      []buckleywidgets.RLMScratchpadEntry
+	circuitStatus      *buckleywidgets.CircuitStatus
 }
 
 type touchEntry struct {
-	summary   widgets.TouchSummary
+	summary   buckleywidgets.TouchSummary
 	expiresAt time.Time
 	startedAt time.Time
 }
@@ -56,9 +56,9 @@ func NewTelemetryUIBridge(hub *telemetry.Hub, app *WidgetApp) *TelemetryUIBridge
 		app:                app,
 		eventCh:            eventCh,
 		unsubscribe:        unsub,
-		runningTools:       make(map[string]widgets.RunningTool),
+		runningTools:       make(map[string]buckleywidgets.RunningTool),
 		activeTouches:      make(map[string]touchEntry),
-		experimentVariants: make(map[string]widgets.ExperimentVariant),
+		experimentVariants: make(map[string]buckleywidgets.ExperimentVariant),
 	}
 }
 
@@ -178,13 +178,13 @@ func (b *TelemetryUIBridge) handleTaskStarted(event telemetry.Event) {
 	}
 	b.currentTask = name
 	b.taskProgress = 0
-	b.updateTaskStatus(event.TaskID, widgets.TaskInProgress)
+	b.updateTaskStatus(event.TaskID, buckleywidgets.TaskInProgress)
 	b.updateSidebar()
 }
 
 func (b *TelemetryUIBridge) handleTaskCompleted(event telemetry.Event) {
 	b.taskProgress = 100
-	b.updateTaskStatus(event.TaskID, widgets.TaskCompleted)
+	b.updateTaskStatus(event.TaskID, buckleywidgets.TaskCompleted)
 	b.updateSidebar()
 
 	// Clear current task after a brief delay
@@ -201,7 +201,7 @@ func (b *TelemetryUIBridge) handleTaskCompleted(event telemetry.Event) {
 }
 
 func (b *TelemetryUIBridge) handleTaskFailed(event telemetry.Event) {
-	b.updateTaskStatus(event.TaskID, widgets.TaskFailed)
+	b.updateTaskStatus(event.TaskID, buckleywidgets.TaskFailed)
 	b.currentTask = ""
 	b.taskProgress = 0
 	b.updateSidebar()
@@ -213,18 +213,18 @@ func (b *TelemetryUIBridge) handlePlanUpdate(event telemetry.Event) {
 		b.planTasks = nil
 		for _, t := range tasks {
 			if task, ok := t.(map[string]any); ok {
-				pt := widgets.PlanTask{
+				pt := buckleywidgets.PlanTask{
 					Name:   getString(task, "name"),
-					Status: widgets.TaskPending,
+					Status: buckleywidgets.TaskPending,
 				}
 				if status := getString(task, "status"); status != "" {
 					switch status {
 					case "completed", "done":
-						pt.Status = widgets.TaskCompleted
+						pt.Status = buckleywidgets.TaskCompleted
 					case "in_progress", "running":
-						pt.Status = widgets.TaskInProgress
+						pt.Status = buckleywidgets.TaskInProgress
 					case "failed":
-						pt.Status = widgets.TaskFailed
+						pt.Status = buckleywidgets.TaskFailed
 					}
 				}
 				b.planTasks = append(b.planTasks, pt)
@@ -234,7 +234,7 @@ func (b *TelemetryUIBridge) handlePlanUpdate(event telemetry.Event) {
 	b.updateSidebar()
 }
 
-func (b *TelemetryUIBridge) updateTaskStatus(taskID string, status widgets.TaskStatus) {
+func (b *TelemetryUIBridge) updateTaskStatus(taskID string, status buckleywidgets.TaskStatus) {
 	for i := range b.planTasks {
 		if b.planTasks[i].Name == taskID {
 			b.planTasks[i].Status = status
@@ -244,7 +244,7 @@ func (b *TelemetryUIBridge) updateTaskStatus(taskID string, status widgets.TaskS
 }
 
 func (b *TelemetryUIBridge) addRunningTool(id, toolType, desc string) {
-	b.runningTools[id] = widgets.RunningTool{
+	b.runningTools[id] = buckleywidgets.RunningTool{
 		ID:      id,
 		Name:    toolType,
 		Command: desc,
@@ -328,7 +328,7 @@ func (b *TelemetryUIBridge) updateSidebar() {
 	}
 
 	// Convert running tools map to slice
-	tools := make([]widgets.RunningTool, 0, len(b.runningTools))
+	tools := make([]buckleywidgets.RunningTool, 0, len(b.runningTools))
 	for _, t := range b.runningTools {
 		tools = append(tools, t)
 	}
@@ -349,7 +349,7 @@ func (b *TelemetryUIBridge) updateSidebar() {
 }
 
 func (b *TelemetryUIBridge) handleRLMIteration(event telemetry.Event) {
-	status := &widgets.RLMStatus{
+	status := &buckleywidgets.RLMStatus{
 		Iteration:     getInt(event.Data, "iteration"),
 		MaxIterations: getInt(event.Data, "max_iterations"),
 		TokensUsed:    getInt(event.Data, "tokens_used"),
@@ -369,7 +369,7 @@ func (b *TelemetryUIBridge) handleRLMIteration(event telemetry.Event) {
 func (b *TelemetryUIBridge) handleCircuitFailure(event telemetry.Event) {
 	// Create or update circuit status
 	if b.circuitStatus == nil {
-		b.circuitStatus = &widgets.CircuitStatus{
+		b.circuitStatus = &buckleywidgets.CircuitStatus{
 			State:       "Closed",
 			MaxFailures: getInt(event.Data, "max_failures"),
 		}
@@ -388,7 +388,7 @@ func (b *TelemetryUIBridge) handleCircuitFailure(event telemetry.Event) {
 func (b *TelemetryUIBridge) handleCircuitStateChange(event telemetry.Event) {
 	toState := getString(event.Data, "to")
 	if b.circuitStatus == nil {
-		b.circuitStatus = &widgets.CircuitStatus{}
+		b.circuitStatus = &buckleywidgets.CircuitStatus{}
 	}
 
 	b.circuitStatus.State = toState
@@ -404,7 +404,7 @@ func (b *TelemetryUIBridge) handleCircuitStateChange(event telemetry.Event) {
 }
 
 // SetPlanTasks allows external code to set plan tasks directly.
-func (b *TelemetryUIBridge) SetPlanTasks(tasks []widgets.PlanTask) {
+func (b *TelemetryUIBridge) SetPlanTasks(tasks []buckleywidgets.PlanTask) {
 	b.mu.Lock()
 	b.planTasks = tasks
 	b.mu.Unlock()
@@ -439,7 +439,7 @@ func (b *TelemetryUIBridge) handleExperimentStarted(event telemetry.Event) {
 		status = "running"
 	}
 	b.experimentStatus = status
-	b.experimentVariants = make(map[string]widgets.ExperimentVariant)
+	b.experimentVariants = make(map[string]buckleywidgets.ExperimentVariant)
 
 	if raw, ok := event.Data["variants"]; ok {
 		if list, ok := raw.([]any); ok {
@@ -449,7 +449,7 @@ func (b *TelemetryUIBridge) handleExperimentStarted(event telemetry.Event) {
 					if variantID == "" {
 						continue
 					}
-					b.experimentVariants[variantID] = widgets.ExperimentVariant{
+					b.experimentVariants[variantID] = buckleywidgets.ExperimentVariant{
 						ID:      variantID,
 						Name:    getString(item, "name"),
 						ModelID: getString(item, "model"),
@@ -516,11 +516,11 @@ func (b *TelemetryUIBridge) handleExperimentVariant(event telemetry.Event, statu
 	b.updateSidebar()
 }
 
-func (b *TelemetryUIBridge) collectExperimentVariants() []widgets.ExperimentVariant {
+func (b *TelemetryUIBridge) collectExperimentVariants() []buckleywidgets.ExperimentVariant {
 	if len(b.experimentVariants) == 0 {
 		return nil
 	}
-	var variants []widgets.ExperimentVariant
+	var variants []buckleywidgets.ExperimentVariant
 	for _, variant := range b.experimentVariants {
 		variants = append(variants, variant)
 	}
@@ -650,17 +650,17 @@ func getFloat(m map[string]any, key string) (float64, bool) {
 	return 0, false
 }
 
-func parseRLMScratchpadEntries(raw any) []widgets.RLMScratchpadEntry {
+func parseRLMScratchpadEntries(raw any) []buckleywidgets.RLMScratchpadEntry {
 	if raw == nil {
 		return nil
 	}
-	entries := []widgets.RLMScratchpadEntry{}
+	entries := []buckleywidgets.RLMScratchpadEntry{}
 	switch list := raw.(type) {
-	case []widgets.RLMScratchpadEntry:
+	case []buckleywidgets.RLMScratchpadEntry:
 		return append(entries, list...)
 	case []map[string]any:
 		for _, item := range list {
-			entries = append(entries, widgets.RLMScratchpadEntry{
+			entries = append(entries, buckleywidgets.RLMScratchpadEntry{
 				Key:     getString(item, "key"),
 				Type:    getString(item, "type"),
 				Summary: getString(item, "summary"),
@@ -672,7 +672,7 @@ func parseRLMScratchpadEntries(raw any) []widgets.RLMScratchpadEntry {
 			if !ok {
 				continue
 			}
-			entries = append(entries, widgets.RLMScratchpadEntry{
+			entries = append(entries, buckleywidgets.RLMScratchpadEntry{
 				Key:     getString(entry, "key"),
 				Type:    getString(entry, "type"),
 				Summary: getString(entry, "summary"),
@@ -710,7 +710,7 @@ func getInt(m map[string]any, key string) int {
 	return 0
 }
 
-func touchSummaryFromEvent(event telemetry.Event) (widgets.TouchSummary, time.Time) {
+func touchSummaryFromEvent(event telemetry.Event) (buckleywidgets.TouchSummary, time.Time) {
 	data := event.Data
 	path := getString(data, "filePath")
 	if path == "" {
@@ -719,7 +719,7 @@ func touchSummaryFromEvent(event telemetry.Event) (widgets.TouchSummary, time.Ti
 	if path == "" {
 		path = getString(data, "file_path")
 	}
-	summary := widgets.TouchSummary{
+	summary := buckleywidgets.TouchSummary{
 		Path:      path,
 		Operation: getString(data, "operationType"),
 		Ranges:    extractTouchRanges(data),
@@ -728,19 +728,19 @@ func touchSummaryFromEvent(event telemetry.Event) (widgets.TouchSummary, time.Ti
 	return summary, expiresAt
 }
 
-func extractTouchRanges(data map[string]any) []widgets.TouchRange {
+func extractTouchRanges(data map[string]any) []buckleywidgets.TouchRange {
 	if data == nil {
 		return nil
 	}
 	switch ranges := data["ranges"].(type) {
 	case []touch.LineRange:
-		out := make([]widgets.TouchRange, 0, len(ranges))
+		out := make([]buckleywidgets.TouchRange, 0, len(ranges))
 		for _, r := range ranges {
-			out = append(out, widgets.TouchRange{Start: r.Start, End: r.End})
+			out = append(out, buckleywidgets.TouchRange{Start: r.Start, End: r.End})
 		}
 		return out
 	case []any:
-		out := make([]widgets.TouchRange, 0, len(ranges))
+		out := make([]buckleywidgets.TouchRange, 0, len(ranges))
 		for _, item := range ranges {
 			entry, ok := item.(map[string]any)
 			if !ok {
@@ -754,7 +754,7 @@ func extractTouchRanges(data map[string]any) []widgets.TouchRange {
 			if end == 0 {
 				end = start
 			}
-			out = append(out, widgets.TouchRange{Start: start, End: end})
+			out = append(out, buckleywidgets.TouchRange{Start: start, End: end})
 		}
 		return out
 	default:
@@ -777,7 +777,7 @@ func extractTime(data map[string]any, key string) time.Time {
 	return time.Time{}
 }
 
-func (b *TelemetryUIBridge) collectTouches() []widgets.TouchSummary {
+func (b *TelemetryUIBridge) collectTouches() []buckleywidgets.TouchSummary {
 	now := time.Now()
 	touches := make([]touchEntry, 0, len(b.activeTouches))
 	for id, entry := range b.activeTouches {
@@ -793,7 +793,7 @@ func (b *TelemetryUIBridge) collectTouches() []widgets.TouchSummary {
 	if len(touches) > maxTouchEntries {
 		touches = touches[:maxTouchEntries]
 	}
-	out := make([]widgets.TouchSummary, 0, len(touches))
+	out := make([]buckleywidgets.TouchSummary, 0, len(touches))
 	for _, entry := range touches {
 		out = append(out, entry.summary)
 	}

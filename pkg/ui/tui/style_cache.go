@@ -5,6 +5,7 @@ import (
 
 	"github.com/odvcencio/buckley/pkg/ui/backend"
 	"github.com/odvcencio/buckley/pkg/ui/compositor"
+	uistyle "github.com/odvcencio/buckley/pkg/ui/style"
 )
 
 // StyleCache caches compositor to backend style conversions.
@@ -21,7 +22,7 @@ func NewStyleCache() *StyleCache {
 // Get returns the cached backend style for the compositor style.
 func (c *StyleCache) Get(style compositor.Style) backend.Style {
 	if c == nil {
-		return themeToBackendStyle(style)
+		return uistyle.ToBackend(style)
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -31,7 +32,7 @@ func (c *StyleCache) Get(style compositor.Style) backend.Style {
 	if cached, ok := c.cache[style]; ok {
 		return cached
 	}
-	converted := themeToBackendStyle(style)
+	converted := uistyle.ToBackend(style)
 	c.cache[style] = converted
 	return converted
 }

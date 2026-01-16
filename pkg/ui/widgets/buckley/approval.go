@@ -1,4 +1,4 @@
-package widgets
+package buckley
 
 import (
 	"strings"
@@ -6,6 +6,7 @@ import (
 	"github.com/odvcencio/buckley/pkg/ui/backend"
 	"github.com/odvcencio/buckley/pkg/ui/runtime"
 	"github.com/odvcencio/buckley/pkg/ui/terminal"
+	uiwidgets "github.com/odvcencio/buckley/pkg/ui/widgets"
 )
 
 // DiffLine represents a single line in a diff preview.
@@ -36,9 +37,18 @@ type ApprovalRequest struct {
 	RemovedLines int        // Lines removed (for diff summary)
 }
 
+// ApprovalResponse captures the user's decision on a tool approval request.
+type ApprovalResponse struct {
+	RequestID   string // ID of the original request
+	Approved    bool   // Whether the operation was approved
+	AlwaysAllow bool   // Remember this decision for the tool
+}
+
+func (ApprovalResponse) Command() {}
+
 // ApprovalWidget displays a modal dialog for tool approval.
 type ApprovalWidget struct {
-	FocusableBase
+	uiwidgets.FocusableBase
 
 	request      ApprovalRequest
 	scrollOffset int // For scrolling through diff
@@ -131,12 +141,12 @@ func (a *ApprovalWidget) Layout(bounds runtime.Rect) {
 		Width:  size.Width,
 		Height: size.Height,
 	}
-	a.Base.Layout(newBounds)
+	a.FocusableBase.Layout(newBounds)
 }
 
 // Render draws the approval dialog.
 func (a *ApprovalWidget) Render(ctx runtime.RenderContext) {
-	b := a.bounds
+	b := a.Bounds()
 	if b.Width < 20 || b.Height < 8 {
 		return
 	}
@@ -360,7 +370,7 @@ func (a *ApprovalWidget) HandleMessage(msg runtime.Message) runtime.HandleResult
 	case terminal.KeyEscape:
 		// Escape = Deny
 		return runtime.WithCommands(
-			runtime.ApprovalResponse{
+			ApprovalResponse{
 				RequestID:   a.request.ID,
 				Approved:    false,
 				AlwaysAllow: false,
@@ -390,7 +400,7 @@ func (a *ApprovalWidget) HandleMessage(msg runtime.Message) runtime.HandleResult
 		switch key.Rune {
 		case 'a', 'A', 'y', 'Y': // Allow / Yes
 			return runtime.WithCommands(
-				runtime.ApprovalResponse{
+				ApprovalResponse{
 					RequestID:   a.request.ID,
 					Approved:    true,
 					AlwaysAllow: false,
@@ -400,7 +410,7 @@ func (a *ApprovalWidget) HandleMessage(msg runtime.Message) runtime.HandleResult
 
 		case 'd', 'D', 'n', 'N': // Deny / No
 			return runtime.WithCommands(
-				runtime.ApprovalResponse{
+				ApprovalResponse{
 					RequestID:   a.request.ID,
 					Approved:    false,
 					AlwaysAllow: false,
@@ -410,7 +420,7 @@ func (a *ApprovalWidget) HandleMessage(msg runtime.Message) runtime.HandleResult
 
 		case 'l', 'L': // Always allow
 			return runtime.WithCommands(
-				runtime.ApprovalResponse{
+				ApprovalResponse{
 					RequestID:   a.request.ID,
 					Approved:    true,
 					AlwaysAllow: true,

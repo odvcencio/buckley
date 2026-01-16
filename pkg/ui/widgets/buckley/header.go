@@ -1,15 +1,16 @@
-package widgets
+package buckley
 
 import (
 	"strings"
 
 	"github.com/odvcencio/buckley/pkg/ui/backend"
 	"github.com/odvcencio/buckley/pkg/ui/runtime"
+	uiwidgets "github.com/odvcencio/buckley/pkg/ui/widgets"
 )
 
 // Header is the Buckley header bar widget.
 type Header struct {
-	Base
+	uiwidgets.Base
 	logo          string
 	modelName     string
 	sessionID     string
@@ -57,7 +58,7 @@ func (h *Header) Measure(constraints runtime.Constraints) runtime.Size {
 
 // Render draws the header.
 func (h *Header) Render(ctx runtime.RenderContext) {
-	bounds := h.bounds
+	bounds := h.Bounds()
 	if bounds.Width == 0 || bounds.Height == 0 {
 		return
 	}

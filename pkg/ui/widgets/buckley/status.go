@@ -1,4 +1,4 @@
-package widgets
+package buckley
 
 import (
 	"fmt"
@@ -7,11 +7,12 @@ import (
 	"github.com/odvcencio/buckley/pkg/ui/backend"
 	"github.com/odvcencio/buckley/pkg/ui/progress"
 	"github.com/odvcencio/buckley/pkg/ui/runtime"
+	uiwidgets "github.com/odvcencio/buckley/pkg/ui/widgets"
 )
 
 // StatusBar is the Buckley status bar widget.
 type StatusBar struct {
-	Base
+	uiwidgets.Base
 	status        string
 	tokens        int
 	costCents     float64
@@ -107,7 +108,7 @@ func (s *StatusBar) Measure(constraints runtime.Constraints) runtime.Size {
 
 // Render draws the status bar.
 func (s *StatusBar) Render(ctx runtime.RenderContext) {
-	bounds := s.bounds
+	bounds := s.Bounds()
 	if bounds.Width == 0 || bounds.Height == 0 {
 		return
 	}

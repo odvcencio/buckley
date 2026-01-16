@@ -1,13 +1,14 @@
-package widgets
+package buckley
 
 import (
 	"github.com/odvcencio/buckley/pkg/ui/backend"
 	"github.com/odvcencio/buckley/pkg/ui/runtime"
+	uiwidgets "github.com/odvcencio/buckley/pkg/ui/widgets"
 )
 
 // PresenceStrip renders a compact activity indicator when the sidebar is hidden.
 type PresenceStrip struct {
-	Base
+	uiwidgets.Base
 
 	width int
 
@@ -103,7 +104,7 @@ func (p *PresenceStrip) Layout(bounds runtime.Rect) {
 
 // Render draws the presence strip.
 func (p *PresenceStrip) Render(ctx runtime.RenderContext) {
-	b := p.bounds
+	b := p.Bounds()
 	if b.Width <= 0 || b.Height <= 0 {
 		return
 	}

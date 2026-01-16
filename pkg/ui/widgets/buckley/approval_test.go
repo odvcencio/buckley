@@ -1,4 +1,4 @@
-package widgets
+package buckley
 
 import (
 	"testing"
@@ -70,7 +70,7 @@ func TestApprovalWidget_HandleAllow(t *testing.T) {
 	}
 
 	// First command should be ApprovalResponse
-	resp, ok := result.Commands[0].(runtime.ApprovalResponse)
+	resp, ok := result.Commands[0].(ApprovalResponse)
 	if !ok {
 		t.Fatalf("expected ApprovalResponse, got %T", result.Commands[0])
 	}
@@ -106,7 +106,7 @@ func TestApprovalWidget_HandleDeny(t *testing.T) {
 		t.Error("expected handled")
 	}
 
-	resp, ok := result.Commands[0].(runtime.ApprovalResponse)
+	resp, ok := result.Commands[0].(ApprovalResponse)
 	if !ok {
 		t.Fatalf("expected ApprovalResponse, got %T", result.Commands[0])
 	}
@@ -130,7 +130,7 @@ func TestApprovalWidget_HandleAlwaysAllow(t *testing.T) {
 		t.Error("expected handled")
 	}
 
-	resp, ok := result.Commands[0].(runtime.ApprovalResponse)
+	resp, ok := result.Commands[0].(ApprovalResponse)
 	if !ok {
 		t.Fatalf("expected ApprovalResponse, got %T", result.Commands[0])
 	}
@@ -157,7 +157,7 @@ func TestApprovalWidget_HandleEscape(t *testing.T) {
 		t.Error("expected handled")
 	}
 
-	resp, ok := result.Commands[0].(runtime.ApprovalResponse)
+	resp, ok := result.Commands[0].(ApprovalResponse)
 	if !ok {
 		t.Fatalf("expected ApprovalResponse, got %T", result.Commands[0])
 	}
@@ -189,7 +189,7 @@ func TestApprovalWidget_HandleYesNo(t *testing.T) {
 				t.Error("expected handled")
 			}
 
-			resp, ok := result.Commands[0].(runtime.ApprovalResponse)
+			resp, ok := result.Commands[0].(ApprovalResponse)
 			if !ok {
 				t.Fatalf("expected ApprovalResponse, got %T", result.Commands[0])
 			}

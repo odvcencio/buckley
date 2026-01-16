@@ -1,4 +1,4 @@
-package widgets
+package buckley
 
 import (
 	"flag"
@@ -15,19 +15,15 @@ var updateSnapshots = flag.Bool("update-snapshots", false, "Update golden snapsh
 
 // renderToString renders a widget to a string for snapshot comparison.
 func renderToString(w runtime.Widget, width, height int) string {
-	// Create buffer
 	buf := runtime.NewBuffer(width, height)
 
-	// Measure and layout
 	constraints := runtime.Constraints{MaxWidth: width, MaxHeight: height}
 	w.Measure(constraints)
 	w.Layout(runtime.Rect{X: 0, Y: 0, Width: width, Height: height})
 
-	// Render
 	ctx := runtime.RenderContext{Buffer: buf}
 	w.Render(ctx)
 
-	// Convert to string
 	var sb strings.Builder
 	for y := 0; y < height; y++ {
 		for x := 0; x < width; x++ {
@@ -50,7 +46,6 @@ func assertSnapshot(t *testing.T, name string, actual string) {
 	goldenPath := filepath.Join("testdata", name+".golden")
 
 	if *updateSnapshots {
-		// Update mode: write the actual output
 		if err := os.MkdirAll("testdata", 0755); err != nil {
 			t.Fatalf("failed to create testdata dir: %v", err)
 		}
@@ -61,7 +56,6 @@ func assertSnapshot(t *testing.T, name string, actual string) {
 		return
 	}
 
-	// Compare mode: read expected and compare
 	expected, err := os.ReadFile(goldenPath)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -75,45 +69,104 @@ func assertSnapshot(t *testing.T, name string, actual string) {
 	}
 }
 
-// TestSnapshot_InputArea tests the input area widget rendering.
-func TestSnapshot_InputArea(t *testing.T) {
-	ia := NewInputArea()
-	ia.SetStyles(
+func TestSnapshot_Header(t *testing.T) {
+	h := NewHeader()
+	h.SetModelName("gpt-4o")
+	h.SetStyles(
 		backend.DefaultStyle(),
-		backend.DefaultStyle(),
+		backend.DefaultStyle().Bold(true),
 		backend.DefaultStyle(),
 	)
-	ia.SetModeStyles(
-		backend.DefaultStyle().Foreground(backend.ColorGreen),
-		backend.DefaultStyle().Foreground(backend.ColorYellow),
-		backend.DefaultStyle().Foreground(backend.ColorCyan),
-		backend.DefaultStyle().Foreground(backend.ColorMagenta),
-	)
-	ia.Focus()
 
-	output := renderToString(ia, 80, 3)
-	assertSnapshot(t, "inputarea", output)
+	output := renderToString(h, 80, 1)
+	assertSnapshot(t, "header", output)
 }
 
-// TestSnapshot_Palette tests the palette widget rendering.
-func TestSnapshot_Palette(t *testing.T) {
-	p := NewPaletteWidget("Commands")
-	p.SetItems([]PaletteItem{
-		{ID: "1", Category: "Session", Label: "New Conversation", Shortcut: "/new"},
-		{ID: "2", Category: "Session", Label: "Clear Messages", Shortcut: "/clear"},
-		{ID: "3", Category: "View", Label: "Toggle Sidebar", Shortcut: "Ctrl+B"},
+func TestSnapshot_StatusBar(t *testing.T) {
+	s := NewStatusBar()
+	s.SetStatus("Ready")
+	s.SetTokens(5000, 0.25)
+	s.SetStyles(
+		backend.DefaultStyle(),
+		backend.DefaultStyle(),
+	)
+
+	output := renderToString(s, 80, 1)
+	assertSnapshot(t, "statusbar", output)
+}
+
+func TestSnapshot_Sidebar(t *testing.T) {
+	s := NewSidebar()
+	s.SetCurrentTask("Building project", 65)
+	s.SetPlanTasks([]PlanTask{
+		{Name: "Setup environment", Status: TaskCompleted},
+		{Name: "Write tests", Status: TaskInProgress},
+		{Name: "Deploy to prod", Status: TaskPending},
 	})
-	p.SetStyles(
+	s.SetRunningTools([]RunningTool{
+		{ID: "1", Name: "shell", Command: "go test ./..."},
+	})
+	s.SetContextUsage(4700, 10000, 0)
+	s.SetRecentFiles([]string{"pkg/main.go", "pkg/utils.go"})
+	s.SetStyles(
+		backend.DefaultStyle(),
+		backend.DefaultStyle().Bold(true),
+		backend.DefaultStyle(),
+		backend.DefaultStyle().Foreground(backend.ColorGreen),
+		backend.DefaultStyle(),
+		backend.DefaultStyle(),
+	)
+
+	output := renderToString(s, 30, 20)
+	assertSnapshot(t, "sidebar", output)
+}
+
+func TestSnapshot_Approval(t *testing.T) {
+	req := ApprovalRequest{
+		ID:          "req-1",
+		Tool:        "run_shell",
+		Operation:   "execute",
+		Description: "Run a shell command",
+		Command:     "rm -rf node_modules",
+	}
+	a := NewApprovalWidget(req)
+	a.SetStyles(
 		backend.DefaultStyle(),
 		backend.DefaultStyle(),
 		backend.DefaultStyle().Bold(true),
 		backend.DefaultStyle(),
+	)
+	a.Focus()
+
+	output := renderToString(a, 60, 15)
+	assertSnapshot(t, "approval", output)
+}
+
+func TestSnapshot_ApprovalWithDiff(t *testing.T) {
+	req := ApprovalRequest{
+		ID:        "req-2",
+		Tool:      "write_file",
+		Operation: "edit",
+		FilePath:  "pkg/main.go",
+		DiffLines: []DiffLine{
+			{Type: DiffContext, Content: "package main"},
+			{Type: DiffContext, Content: ""},
+			{Type: DiffRemove, Content: "func oldFunc() {}"},
+			{Type: DiffAdd, Content: "func newFunc() {}"},
+			{Type: DiffContext, Content: ""},
+		},
+		AddedLines:   1,
+		RemovedLines: 1,
+	}
+	a := NewApprovalWidget(req)
+	a.SetStyles(
 		backend.DefaultStyle(),
-		backend.DefaultStyle().Reverse(true),
+		backend.DefaultStyle(),
+		backend.DefaultStyle().Bold(true),
 		backend.DefaultStyle(),
 	)
-	p.Focus()
+	a.Focus()
 
-	output := renderToString(p, 60, 12)
-	assertSnapshot(t, "palette", output)
+	output := renderToString(a, 60, 18)
+	assertSnapshot(t, "approval_diff", output)
 }

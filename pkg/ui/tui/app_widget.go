@@ -21,10 +21,12 @@ import (
 	"github.com/odvcencio/buckley/pkg/ui/markdown"
 	"github.com/odvcencio/buckley/pkg/ui/progress"
 	"github.com/odvcencio/buckley/pkg/ui/runtime"
+	uistyle "github.com/odvcencio/buckley/pkg/ui/style"
 	"github.com/odvcencio/buckley/pkg/ui/terminal"
 	"github.com/odvcencio/buckley/pkg/ui/theme"
 	"github.com/odvcencio/buckley/pkg/ui/toast"
 	"github.com/odvcencio/buckley/pkg/ui/widgets"
+	buckleywidgets "github.com/odvcencio/buckley/pkg/ui/widgets/buckley"
 )
 
 // RenderMetrics tracks rendering performance statistics.
@@ -86,12 +88,12 @@ type WidgetApp struct {
 	running bool
 
 	// Widget tree
-	header     *widgets.Header
+	header     *buckleywidgets.Header
 	chatView   *widgets.ChatView
 	inputArea  *widgets.InputArea
-	statusBar  *widgets.StatusBar
-	sidebar    *widgets.Sidebar
-	presence   *widgets.PresenceStrip
+	statusBar  *buckleywidgets.StatusBar
+	sidebar    *buckleywidgets.Sidebar
+	presence   *buckleywidgets.PresenceStrip
 	toastStack *widgets.ToastStack
 	root       runtime.Widget
 	mainArea   *runtime.Flex // HBox containing chatView + sidebar
@@ -244,7 +246,7 @@ func NewWidgetApp(cfg WidgetAppConfig) (*WidgetApp, error) {
 	debugRender := strings.TrimSpace(os.Getenv("BUCKLEY_RENDER_DEBUG")) != ""
 
 	// Create widgets
-	header := widgets.NewHeader()
+	header := buckleywidgets.NewHeader()
 	header.SetModelName(cfg.ModelName)
 	header.SetSessionID(cfg.SessionID)
 	header.SetStyles(
@@ -288,7 +290,7 @@ func NewWidgetApp(cfg WidgetAppConfig) (*WidgetApp, error) {
 	)
 	inputArea.SetHeightLimits(minInputHeight, maxInputHeight(h))
 
-	statusBar := widgets.NewStatusBar()
+	statusBar := buckleywidgets.NewStatusBar()
 	statusBar.SetStatus("Ready")
 	statusBar.SetStyles(
 		styleCache.Get(th.Surface),
@@ -307,7 +309,7 @@ func NewWidgetApp(cfg WidgetAppConfig) (*WidgetApp, error) {
 	)
 
 	// Create sidebar
-	sidebar := widgets.NewSidebar()
+	sidebar := buckleywidgets.NewSidebar()
 	sidebar.SetStyles(
 		styleCache.Get(th.Border),
 		styleCache.Get(th.TextSecondary),
@@ -331,7 +333,7 @@ func NewWidgetApp(cfg WidgetAppConfig) (*WidgetApp, error) {
 	)
 	sidebar.SetSpinnerStyle(styleCache.Get(th.ElectricBlue))
 
-	presence := widgets.NewPresenceStrip()
+	presence := buckleywidgets.NewPresenceStrip()
 	presence.SetStyles(
 		styleCache.Get(th.Border),
 		styleCache.Get(th.TextMuted),
@@ -534,16 +536,16 @@ func (a *WidgetApp) showFilePicker() {
 // showApprovalDialog creates and displays an approval dialog.
 func (a *WidgetApp) showApprovalDialog(msg ApprovalRequestMsg) {
 	// Convert message diff lines to widget diff lines
-	diffLines := make([]widgets.DiffLine, len(msg.DiffLines))
+	diffLines := make([]buckleywidgets.DiffLine, len(msg.DiffLines))
 	for i, line := range msg.DiffLines {
-		diffLines[i] = widgets.DiffLine{
-			Type:    widgets.DiffLineType(line.Type),
+		diffLines[i] = buckleywidgets.DiffLine{
+			Type:    buckleywidgets.DiffLineType(line.Type),
 			Content: line.Content,
 		}
 	}
 
 	// Create approval request for widget
-	req := widgets.ApprovalRequest{
+	req := buckleywidgets.ApprovalRequest{
 		ID:           msg.ID,
 		Tool:         msg.Tool,
 		Operation:    msg.Operation,
@@ -556,7 +558,7 @@ func (a *WidgetApp) showApprovalDialog(msg ApprovalRequestMsg) {
 	}
 
 	// Create widget
-	approvalWidget := widgets.NewApprovalWidget(req)
+	approvalWidget := buckleywidgets.NewApprovalWidget(req)
 	approvalWidget.SetStyles(
 		a.style(a.theme.Surface),
 		a.style(a.theme.Border),
@@ -1533,7 +1535,7 @@ func (a *WidgetApp) handleCommand(cmd runtime.Command) {
 		if a.onFileSelect != nil {
 			a.onFileSelect(c.Path)
 		}
-	case runtime.ApprovalResponse:
+	case buckleywidgets.ApprovalResponse:
 		// Notify callback with approval decision
 		if a.onApproval != nil {
 			a.onApproval(c.RequestID, c.Approved, c.AlwaysAllow)
@@ -1966,12 +1968,12 @@ func (a *WidgetApp) SetCurrentTask(name string, progress int) {
 }
 
 // SetPlanTasks updates the sidebar's plan task list.
-func (a *WidgetApp) SetPlanTasks(tasks []widgets.PlanTask) {
+func (a *WidgetApp) SetPlanTasks(tasks []buckleywidgets.PlanTask) {
 	a.sidebar.SetPlanTasks(tasks)
 	a.planTotal = len(tasks)
 	a.planCompleted = 0
 	for _, task := range tasks {
-		if task.Status == widgets.TaskCompleted {
+		if task.Status == buckleywidgets.TaskCompleted {
 			a.planCompleted++
 		}
 	}
@@ -1981,7 +1983,7 @@ func (a *WidgetApp) SetPlanTasks(tasks []widgets.PlanTask) {
 }
 
 // SetRunningTools updates the sidebar's running tools list.
-func (a *WidgetApp) SetRunningTools(tools []widgets.RunningTool) {
+func (a *WidgetApp) SetRunningTools(tools []buckleywidgets.RunningTool) {
 	a.sidebar.SetRunningTools(tools)
 	a.runningToolCount = len(tools)
 	a.updatePresenceStrip()
@@ -1993,7 +1995,7 @@ func (a *WidgetApp) SetRunningTools(tools []widgets.RunningTool) {
 }
 
 // SetActiveTouches updates the sidebar's active touches list.
-func (a *WidgetApp) SetActiveTouches(touches []widgets.TouchSummary) {
+func (a *WidgetApp) SetActiveTouches(touches []buckleywidgets.TouchSummary) {
 	a.sidebar.SetActiveTouches(touches)
 	a.updateSidebarVisibility()
 	a.dirty = true
@@ -2001,7 +2003,7 @@ func (a *WidgetApp) SetActiveTouches(touches []widgets.TouchSummary) {
 
 // SetRLMStatus updates the sidebar's RLM status display.
 // Auto-shows sidebar when RLM content arrives (unless user manually hid it).
-func (a *WidgetApp) SetRLMStatus(status *widgets.RLMStatus, scratchpad []widgets.RLMScratchpadEntry) {
+func (a *WidgetApp) SetRLMStatus(status *buckleywidgets.RLMStatus, scratchpad []buckleywidgets.RLMScratchpadEntry) {
 	a.sidebar.SetRLMStatus(status, scratchpad)
 	// Auto-show sidebar for RLM mode if user hasn't manually hidden it
 	if !a.sidebarUserOverride && !a.sidebarVisible && (status != nil || len(scratchpad) > 0) {
@@ -2079,50 +2081,9 @@ func (a *WidgetApp) WelcomeScreen() {
 
 func (a *WidgetApp) style(cs compositor.Style) backend.Style {
 	if a == nil || a.styleCache == nil {
-		return themeToBackendStyle(cs)
+		return uistyle.ToBackend(cs)
 	}
 	return a.styleCache.Get(cs)
-}
-
-// themeToBackendStyle converts a compositor.Style to backend.Style.
-func themeToBackendStyle(cs compositor.Style) backend.Style {
-	style := backend.DefaultStyle()
-
-	// Convert foreground
-	if cs.FG.Mode == compositor.ColorModeRGB {
-		r := uint8((cs.FG.Value >> 16) & 0xFF)
-		g := uint8((cs.FG.Value >> 8) & 0xFF)
-		b := uint8(cs.FG.Value & 0xFF)
-		style = style.Foreground(backend.ColorRGB(r, g, b))
-	} else if cs.FG.Mode != compositor.ColorModeDefault {
-		style = style.Foreground(backend.Color(cs.FG.Value & 0xFF))
-	}
-
-	// Convert background
-	if cs.BG.Mode == compositor.ColorModeRGB {
-		r := uint8((cs.BG.Value >> 16) & 0xFF)
-		g := uint8((cs.BG.Value >> 8) & 0xFF)
-		b := uint8(cs.BG.Value & 0xFF)
-		style = style.Background(backend.ColorRGB(r, g, b))
-	} else if cs.BG.Mode != compositor.ColorModeDefault {
-		style = style.Background(backend.Color(cs.BG.Value & 0xFF))
-	}
-
-	// Attributes
-	if cs.Bold {
-		style = style.Bold(true)
-	}
-	if cs.Italic {
-		style = style.Italic(true)
-	}
-	if cs.Underline {
-		style = style.Underline(true)
-	}
-	if cs.Dim {
-		style = style.Dim(true)
-	}
-
-	return style
 }
 
 func blendColor(a, b backend.Color, t float64) backend.Color {

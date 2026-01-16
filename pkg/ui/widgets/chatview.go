@@ -6,10 +6,10 @@ import (
 	"time"
 
 	"github.com/odvcencio/buckley/pkg/ui/backend"
-	"github.com/odvcencio/buckley/pkg/ui/compositor"
 	"github.com/odvcencio/buckley/pkg/ui/markdown"
 	"github.com/odvcencio/buckley/pkg/ui/runtime"
 	"github.com/odvcencio/buckley/pkg/ui/scrollback"
+	uistyle "github.com/odvcencio/buckley/pkg/ui/style"
 	"github.com/odvcencio/buckley/pkg/ui/terminal"
 )
 
@@ -410,7 +410,7 @@ func convertMarkdownSpans(spans []markdown.StyledSpan) []scrollback.Span {
 		}
 		out = append(out, scrollback.Span{
 			Text:  span.Text,
-			Style: compositorToBackendStyle(span.Style),
+			Style: uistyle.ToBackend(span.Style),
 		})
 	}
 	return out
@@ -923,41 +923,4 @@ func isItalic(s backend.Style) bool {
 func isDim(s backend.Style) bool {
 	_, _, attrs := s.Decompose()
 	return attrs&backend.AttrDim != 0
-}
-
-func compositorToBackendStyle(cs compositor.Style) backend.Style {
-	style := backend.DefaultStyle()
-
-	if cs.FG.Mode == compositor.ColorModeRGB {
-		r := uint8((cs.FG.Value >> 16) & 0xFF)
-		g := uint8((cs.FG.Value >> 8) & 0xFF)
-		b := uint8(cs.FG.Value & 0xFF)
-		style = style.Foreground(backend.ColorRGB(r, g, b))
-	} else if cs.FG.Mode != compositor.ColorModeDefault {
-		style = style.Foreground(backend.Color(cs.FG.Value & 0xFF))
-	}
-
-	if cs.BG.Mode == compositor.ColorModeRGB {
-		r := uint8((cs.BG.Value >> 16) & 0xFF)
-		g := uint8((cs.BG.Value >> 8) & 0xFF)
-		b := uint8(cs.BG.Value & 0xFF)
-		style = style.Background(backend.ColorRGB(r, g, b))
-	} else if cs.BG.Mode != compositor.ColorModeDefault {
-		style = style.Background(backend.Color(cs.BG.Value & 0xFF))
-	}
-
-	if cs.Bold {
-		style = style.Bold(true)
-	}
-	if cs.Italic {
-		style = style.Italic(true)
-	}
-	if cs.Underline {
-		style = style.Underline(true)
-	}
-	if cs.Dim {
-		style = style.Dim(true)
-	}
-
-	return style
 }

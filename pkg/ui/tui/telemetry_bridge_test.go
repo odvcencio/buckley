@@ -7,7 +7,7 @@ import (
 
 	"github.com/odvcencio/buckley/pkg/telemetry"
 	"github.com/odvcencio/buckley/pkg/touch"
-	"github.com/odvcencio/buckley/pkg/ui/widgets"
+	buckleywidgets "github.com/odvcencio/buckley/pkg/ui/widgets/buckley"
 )
 
 func TestTelemetryUIBridge_New(t *testing.T) {
@@ -69,13 +69,13 @@ func TestTelemetryUIBridge_HandlePlanUpdate(t *testing.T) {
 	if len(bridge.planTasks) != 3 {
 		t.Fatalf("expected 3 plan tasks, got %d", len(bridge.planTasks))
 	}
-	if bridge.planTasks[0].Status != widgets.TaskCompleted {
+	if bridge.planTasks[0].Status != buckleywidgets.TaskCompleted {
 		t.Errorf("expected first task completed, got %d", bridge.planTasks[0].Status)
 	}
-	if bridge.planTasks[1].Status != widgets.TaskInProgress {
+	if bridge.planTasks[1].Status != buckleywidgets.TaskInProgress {
 		t.Errorf("expected second task in progress, got %d", bridge.planTasks[1].Status)
 	}
-	if bridge.planTasks[2].Status != widgets.TaskPending {
+	if bridge.planTasks[2].Status != buckleywidgets.TaskPending {
 		t.Errorf("expected third task pending, got %d", bridge.planTasks[2].Status)
 	}
 }
@@ -271,9 +271,9 @@ func TestTelemetryUIBridge_SetPlanTasks(t *testing.T) {
 
 	bridge := NewTelemetryUIBridge(hub, nil)
 
-	tasks := []widgets.PlanTask{
-		{Name: "Task 1", Status: widgets.TaskCompleted},
-		{Name: "Task 2", Status: widgets.TaskInProgress},
+	tasks := []buckleywidgets.PlanTask{
+		{Name: "Task 1", Status: buckleywidgets.TaskCompleted},
+		{Name: "Task 2", Status: buckleywidgets.TaskInProgress},
 	}
 
 	bridge.SetPlanTasks(tasks)
@@ -347,23 +347,23 @@ func TestTelemetryUIBridge_UpdateTaskStatus(t *testing.T) {
 	bridge := NewTelemetryUIBridge(hub, nil)
 
 	// Set up plan tasks
-	bridge.planTasks = []widgets.PlanTask{
-		{Name: "task-1", Status: widgets.TaskPending},
-		{Name: "task-2", Status: widgets.TaskPending},
+	bridge.planTasks = []buckleywidgets.PlanTask{
+		{Name: "task-1", Status: buckleywidgets.TaskPending},
+		{Name: "task-2", Status: buckleywidgets.TaskPending},
 	}
 
 	// Update status of task-1
-	bridge.updateTaskStatus("task-1", widgets.TaskCompleted)
+	bridge.updateTaskStatus("task-1", buckleywidgets.TaskCompleted)
 
-	if bridge.planTasks[0].Status != widgets.TaskCompleted {
+	if bridge.planTasks[0].Status != buckleywidgets.TaskCompleted {
 		t.Errorf("expected task-1 to be completed, got %d", bridge.planTasks[0].Status)
 	}
-	if bridge.planTasks[1].Status != widgets.TaskPending {
+	if bridge.planTasks[1].Status != buckleywidgets.TaskPending {
 		t.Errorf("expected task-2 to still be pending, got %d", bridge.planTasks[1].Status)
 	}
 
 	// Update non-existent task (should not panic)
-	bridge.updateTaskStatus("task-999", widgets.TaskFailed)
+	bridge.updateTaskStatus("task-999", buckleywidgets.TaskFailed)
 }
 
 func TestTelemetryUIBridge_HandleBuilderEvents(t *testing.T) {
@@ -579,16 +579,16 @@ func TestTelemetryUIBridge_HandlePlanCreated(t *testing.T) {
 	if len(bridge.planTasks) != 4 {
 		t.Fatalf("expected 4 plan tasks, got %d", len(bridge.planTasks))
 	}
-	if bridge.planTasks[0].Status != widgets.TaskCompleted {
+	if bridge.planTasks[0].Status != buckleywidgets.TaskCompleted {
 		t.Errorf("expected first task completed (done), got %d", bridge.planTasks[0].Status)
 	}
-	if bridge.planTasks[1].Status != widgets.TaskInProgress {
+	if bridge.planTasks[1].Status != buckleywidgets.TaskInProgress {
 		t.Errorf("expected second task in progress (running), got %d", bridge.planTasks[1].Status)
 	}
-	if bridge.planTasks[2].Status != widgets.TaskFailed {
+	if bridge.planTasks[2].Status != buckleywidgets.TaskFailed {
 		t.Errorf("expected third task failed, got %d", bridge.planTasks[2].Status)
 	}
-	if bridge.planTasks[3].Status != widgets.TaskPending {
+	if bridge.planTasks[3].Status != buckleywidgets.TaskPending {
 		t.Errorf("expected fourth task pending (no status), got %d", bridge.planTasks[3].Status)
 	}
 }
@@ -600,8 +600,8 @@ func TestTelemetryUIBridge_HandlePlanUpdateNoTasks(t *testing.T) {
 	bridge := NewTelemetryUIBridge(hub, nil)
 
 	// Set initial tasks
-	bridge.planTasks = []widgets.PlanTask{
-		{Name: "Old task", Status: widgets.TaskPending},
+	bridge.planTasks = []buckleywidgets.PlanTask{
+		{Name: "Old task", Status: buckleywidgets.TaskPending},
 	}
 
 	// Simulate plan update without tasks key
@@ -822,7 +822,7 @@ func TestTelemetryUIBridge_StopWithNilUnsubscribe(t *testing.T) {
 	bridge := &TelemetryUIBridge{
 		hub:          hub,
 		app:          nil,
-		runningTools: make(map[string]widgets.RunningTool),
+		runningTools: make(map[string]buckleywidgets.RunningTool),
 		// eventCh and unsubscribe are nil
 	}
 
