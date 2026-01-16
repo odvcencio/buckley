@@ -1,4 +1,4 @@
-// Package widgets provides concrete widget implementations for Buckley's TUI.
+// Package widgets provides reusable widgets for terminal UIs.
 package widgets
 
 import (

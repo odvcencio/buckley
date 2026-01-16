@@ -88,9 +88,9 @@ func TestPushOverlay(t *testing.T) {
 
 type testSimpleWidget struct{}
 
-func (t *testSimpleWidget) Measure(c Constraints) Size       { return Size{} }
-func (t *testSimpleWidget) Layout(bounds Rect)               {}
-func (t *testSimpleWidget) Render(ctx RenderContext)         {}
+func (t *testSimpleWidget) Measure(c Constraints) Size { return Size{} }
+func (t *testSimpleWidget) Layout(bounds Rect)         {}
+func (t *testSimpleWidget) Render(ctx RenderContext)   {}
 func (t *testSimpleWidget) HandleMessage(msg Message) HandleResult {
 	return Unhandled()
 }

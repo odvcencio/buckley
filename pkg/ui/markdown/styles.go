@@ -1,4 +1,4 @@
-// Package markdown provides markdown parsing and rendering for Buckley's TUI.
+// Package markdown provides markdown parsing and rendering for terminal UIs.
 // It uses goldmark for parsing and custom rendering to the compositor system.
 package markdown
 

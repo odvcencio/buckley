@@ -90,7 +90,7 @@ type WidgetApp struct {
 	// Widget tree
 	header     *buckleywidgets.Header
 	chatView   *widgets.ChatView
-	inputArea  *widgets.InputArea
+	inputArea  *buckleywidgets.InputArea
 	statusBar  *buckleywidgets.StatusBar
 	sidebar    *buckleywidgets.Sidebar
 	presence   *buckleywidgets.PresenceStrip
@@ -276,7 +276,7 @@ func NewWidgetApp(cfg WidgetAppConfig) (*WidgetApp, error) {
 	mdRenderer := markdown.NewRenderer(th)
 	chatView.SetMarkdownRenderer(mdRenderer, styleCache.Get(mdRenderer.CodeBlockBackground()))
 
-	inputArea := widgets.NewInputArea()
+	inputArea := buckleywidgets.NewInputArea()
 	inputArea.SetStyles(
 		styleCache.Get(th.SurfaceRaised),
 		styleCache.Get(th.TextPrimary),
@@ -450,7 +450,7 @@ func NewWidgetApp(cfg WidgetAppConfig) (*WidgetApp, error) {
 	})
 
 	// Set up input callbacks
-	inputArea.OnSubmit(func(text string, mode widgets.InputMode) {
+	inputArea.OnSubmit(func(text string, mode buckleywidgets.InputMode) {
 		app.handleSubmit(text, mode)
 	})
 	inputArea.OnChange(func(text string) {
@@ -700,9 +700,9 @@ func (a *WidgetApp) ShowModelPicker(items []widgets.PaletteItem, onSelect func(i
 }
 
 // handleSubmit processes input submission based on mode.
-func (a *WidgetApp) handleSubmit(text string, mode widgets.InputMode) {
+func (a *WidgetApp) handleSubmit(text string, mode buckleywidgets.InputMode) {
 	switch mode {
-	case widgets.ModeShell:
+	case buckleywidgets.ModeShell:
 		if a.onShellCmd != nil {
 			// Remove leading ! if present
 			cmd := text
@@ -715,7 +715,7 @@ func (a *WidgetApp) handleSubmit(text string, mode widgets.InputMode) {
 				a.AddMessage(result, "tool")
 			}
 		}
-	case widgets.ModeEnv:
+	case buckleywidgets.ModeEnv:
 		// Handle env var lookup
 		varName := text
 		if len(varName) > 0 && varName[0] == '$' {

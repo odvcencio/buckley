@@ -1,4 +1,4 @@
-// Package runtime provides the widget runtime for Buckley's TUI.
+// Package runtime provides a widget runtime for terminal UIs.
 // It implements a constraint-based layout system with focus management
 // and a modal stack for overlays.
 package runtime

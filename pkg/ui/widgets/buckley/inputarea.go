@@ -1,4 +1,4 @@
-package widgets
+package buckley
 
 import (
 	"strings"
@@ -6,6 +6,7 @@ import (
 	"github.com/odvcencio/buckley/pkg/ui/backend"
 	"github.com/odvcencio/buckley/pkg/ui/runtime"
 	"github.com/odvcencio/buckley/pkg/ui/terminal"
+	uiwidgets "github.com/odvcencio/buckley/pkg/ui/widgets"
 )
 
 // InputMode represents the current input mode.
@@ -19,9 +20,9 @@ const (
 	ModePicker           // @
 )
 
-// InputArea is the Buckley input widget with mode support.
+// InputArea is a mode-aware input widget.
 type InputArea struct {
-	FocusableBase
+	uiwidgets.FocusableBase
 
 	text      strings.Builder
 	cursorPos int
@@ -258,7 +259,7 @@ func (i *InputArea) Mode() InputMode {
 
 // CursorPosition returns screen coordinates for the cursor.
 func (i *InputArea) CursorPosition() (x, y int) {
-	bounds := i.bounds
+	bounds := i.Bounds()
 	availWidth := bounds.Width - 4 // mode indicator + padding
 	if availWidth < 10 {
 		availWidth = 10
@@ -292,7 +293,8 @@ func (i *InputArea) moveCursorVertical(delta int) bool {
 	if delta == 0 {
 		return false
 	}
-	availWidth := i.bounds.Width - 4
+	bounds := i.Bounds()
+	availWidth := bounds.Width - 4
 	if availWidth < 10 {
 		availWidth = 10
 	}
@@ -347,7 +349,7 @@ func (i *InputArea) Measure(constraints runtime.Constraints) runtime.Size {
 
 // Render draws the input area.
 func (i *InputArea) Render(ctx runtime.RenderContext) {
-	bounds := i.bounds
+	bounds := i.Bounds()
 	if bounds.Width == 0 || bounds.Height == 0 {
 		return
 	}
@@ -391,7 +393,7 @@ func (i *InputArea) Render(ctx runtime.RenderContext) {
 	}
 
 	// Draw cursor if focused
-	if i.focused {
+	if i.IsFocused() {
 		cursorX, cursorY := i.CursorPosition()
 		if cursorX >= bounds.X && cursorX < bounds.X+bounds.Width &&
 			cursorY >= bounds.Y && cursorY < bounds.Y+bounds.Height {
@@ -482,7 +484,7 @@ func (i *InputArea) cursorLineCol(lines []inputLine) (line, col int) {
 
 // HandleMessage processes keyboard input.
 func (i *InputArea) HandleMessage(msg runtime.Message) runtime.HandleResult {
-	if !i.focused {
+	if !i.IsFocused() {
 		return runtime.Unhandled()
 	}
 

@@ -1,4 +1,4 @@
-// Package theme provides a unified visual design system for Buckley's TUI.
+// Package theme provides a unified visual design system for terminal UIs.
 // Inspired by Dark Elegance: rich blacks, subtle depth, glowing accents.
 package theme
 

@@ -69,6 +69,25 @@ func assertSnapshot(t *testing.T, name string, actual string) {
 	}
 }
 
+func TestSnapshot_InputArea(t *testing.T) {
+	ia := NewInputArea()
+	ia.SetStyles(
+		backend.DefaultStyle(),
+		backend.DefaultStyle(),
+		backend.DefaultStyle(),
+	)
+	ia.SetModeStyles(
+		backend.DefaultStyle().Foreground(backend.ColorGreen),
+		backend.DefaultStyle().Foreground(backend.ColorYellow),
+		backend.DefaultStyle().Foreground(backend.ColorCyan),
+		backend.DefaultStyle().Foreground(backend.ColorMagenta),
+	)
+	ia.Focus()
+
+	output := renderToString(ia, 80, 3)
+	assertSnapshot(t, "inputarea", output)
+}
+
 func TestSnapshot_Header(t *testing.T) {
 	h := NewHeader()
 	h.SetModelName("gpt-4o")

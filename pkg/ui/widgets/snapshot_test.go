@@ -75,26 +75,6 @@ func assertSnapshot(t *testing.T, name string, actual string) {
 	}
 }
 
-// TestSnapshot_InputArea tests the input area widget rendering.
-func TestSnapshot_InputArea(t *testing.T) {
-	ia := NewInputArea()
-	ia.SetStyles(
-		backend.DefaultStyle(),
-		backend.DefaultStyle(),
-		backend.DefaultStyle(),
-	)
-	ia.SetModeStyles(
-		backend.DefaultStyle().Foreground(backend.ColorGreen),
-		backend.DefaultStyle().Foreground(backend.ColorYellow),
-		backend.DefaultStyle().Foreground(backend.ColorCyan),
-		backend.DefaultStyle().Foreground(backend.ColorMagenta),
-	)
-	ia.Focus()
-
-	output := renderToString(ia, 80, 3)
-	assertSnapshot(t, "inputarea", output)
-}
-
 // TestSnapshot_Palette tests the palette widget rendering.
 func TestSnapshot_Palette(t *testing.T) {
 	p := NewPaletteWidget("Commands")
