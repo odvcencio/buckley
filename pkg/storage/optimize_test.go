@@ -2,6 +2,7 @@ package storage
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -305,5 +306,40 @@ func BenchmarkGetDatabaseStats(b *testing.B) {
 		if err != nil {
 			b.Fatal(err)
 		}
+	}
+}
+
+func BenchmarkInsertMessageFTS(b *testing.B) {
+	tmpDir := b.TempDir()
+	dbPath := filepath.Join(tmpDir, "bench.db")
+
+	store, err := New(dbPath)
+	if err != nil {
+		b.Fatalf("Failed to create store: %v", err)
+	}
+	defer store.Close()
+
+	store.OptimizeDatabase()
+
+	session := &Session{
+		ID:          "bench-session",
+		ProjectPath: "/test",
+		CreatedAt:   time.Now(),
+		LastActive:  time.Now(),
+	}
+	store.CreateSession(session)
+
+	content := strings.Repeat("fts benchmark message ", 50)
+	b.ResetTimer()
+
+	for i := 0; i < b.N; i++ {
+		msg := &Message{
+			SessionID: "bench-session",
+			Role:      "user",
+			Content:   content,
+			Timestamp: time.Now(),
+			Tokens:    50,
+		}
+		store.SaveMessage(msg)
 	}
 }

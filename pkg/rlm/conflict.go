@@ -1,16 +1,20 @@
 package rlm
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 )
 
 // ConflictDetector tracks read/write access for resources (typically files).
 type ConflictDetector struct {
-	mu    sync.Mutex
-	locks map[string]*resourceLock
+	mu      sync.Mutex
+	cond    *sync.Cond
+	locks   map[string]*resourceLock
+	timeout time.Duration
 }
 
 type resourceLock struct {
@@ -19,55 +23,151 @@ type resourceLock struct {
 	writerCount int
 }
 
-// NewConflictDetector returns an empty detector.
-func NewConflictDetector() *ConflictDetector {
-	return &ConflictDetector{
-		locks: make(map[string]*resourceLock),
+// ConflictDetectorOption configures a ConflictDetector.
+type ConflictDetectorOption func(*ConflictDetector)
+
+// WithLockTimeout sets the default timeout for lock acquisition.
+func WithLockTimeout(timeout time.Duration) ConflictDetectorOption {
+	return func(c *ConflictDetector) {
+		c.timeout = timeout
 	}
+}
+
+// NewConflictDetector returns an empty detector.
+func NewConflictDetector(opts ...ConflictDetectorOption) *ConflictDetector {
+	c := &ConflictDetector{
+		locks:   make(map[string]*resourceLock),
+		timeout: 30 * time.Second, // Default timeout
+	}
+	c.cond = sync.NewCond(&c.mu)
+	for _, opt := range opts {
+		opt(c)
+	}
+	return c
 }
 
 // AcquireRead acquires a read lock for a task on a path.
 func (c *ConflictDetector) AcquireRead(taskID, path string) error {
+	return c.AcquireReadWithTimeout(taskID, path, c.timeout)
+}
+
+// AcquireReadWithTimeout acquires a read lock with a specific timeout.
+func (c *ConflictDetector) AcquireReadWithTimeout(taskID, path string, timeout time.Duration) error {
 	taskID, path = normalizeLockInputs(taskID, path)
 	if taskID == "" || path == "" {
 		return fmt.Errorf("invalid read lock: taskID and path required")
 	}
 
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	lock := c.lockFor(path)
-	if lock.writer != "" && lock.writer != taskID {
-		return &LockConflictError{Path: path, Holder: lock.writer, Mode: "write"}
+	for {
+		lock := c.lockFor(path)
+		// Can acquire read if no writer or we are the writer
+		if lock.writer == "" || lock.writer == taskID {
+			lock.readers[taskID]++
+			return nil
+		}
+
+		// Wait for condition or timeout
+		if err := c.waitWithContext(ctx); err != nil {
+			return &LockConflictError{
+				Path:    path,
+				Holder:  lock.writer,
+				Mode:    "write",
+				Timeout: true,
+			}
+		}
 	}
-	lock.readers[taskID]++
-	return nil
 }
 
 // AcquireWrite acquires a write lock for a task on a path.
 func (c *ConflictDetector) AcquireWrite(taskID, path string) error {
+	return c.AcquireWriteWithTimeout(taskID, path, c.timeout)
+}
+
+// AcquireWriteWithTimeout acquires a write lock with a specific timeout.
+func (c *ConflictDetector) AcquireWriteWithTimeout(taskID, path string, timeout time.Duration) error {
 	taskID, path = normalizeLockInputs(taskID, path)
 	if taskID == "" || path == "" {
 		return fmt.Errorf("invalid write lock: taskID and path required")
 	}
 
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	lock := c.lockFor(path)
-	if lock.writer != "" && lock.writer != taskID {
-		return &LockConflictError{Path: path, Holder: lock.writer, Mode: "write"}
-	}
-	for reader := range lock.readers {
-		if reader != taskID {
-			return &LockConflictError{Path: path, Holder: reader, Mode: "read"}
+	for {
+		lock := c.lockFor(path)
+
+		// Check if we can acquire the write lock
+		canAcquire := true
+		var conflictHolder string
+		var conflictMode string
+
+		// Another writer holds the lock
+		if lock.writer != "" && lock.writer != taskID {
+			canAcquire = false
+			conflictHolder = lock.writer
+			conflictMode = "write"
+		}
+
+		// Check for other readers
+		if canAcquire {
+			for reader := range lock.readers {
+				if reader != taskID {
+					canAcquire = false
+					conflictHolder = reader
+					conflictMode = "read"
+					break
+				}
+			}
+		}
+
+		if canAcquire {
+			// Remove ourselves from readers if present
+			delete(lock.readers, taskID)
+			lock.writer = taskID
+			lock.writerCount++
+			return nil
+		}
+
+		// Wait for condition or timeout
+		if err := c.waitWithContext(ctx); err != nil {
+			return &LockConflictError{
+				Path:    path,
+				Holder:  conflictHolder,
+				Mode:    conflictMode,
+				Timeout: true,
+			}
 		}
 	}
-	delete(lock.readers, taskID)
+}
 
-	lock.writer = taskID
-	lock.writerCount++
-	return nil
+// waitWithContext waits on the condition variable with context cancellation support.
+// Must be called with mu held. Returns error if context is done.
+func (c *ConflictDetector) waitWithContext(ctx context.Context) error {
+	// Use a channel to detect when Wait returns
+	done := make(chan struct{})
+	go func() {
+		c.cond.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		// Broadcast to unblock the waiting goroutine
+		c.cond.Broadcast()
+		<-done // Wait for it to finish
+		return ctx.Err()
+	}
 }
 
 // ReleaseRead releases a read lock for a task on a path.
@@ -92,6 +192,7 @@ func (c *ConflictDetector) ReleaseRead(taskID, path string) {
 		}
 	}
 	c.cleanupLock(path, lock)
+	c.cond.Broadcast() // Wake up waiters
 }
 
 // ReleaseWrite releases a write lock for a task on a path.
@@ -115,6 +216,7 @@ func (c *ConflictDetector) ReleaseWrite(taskID, path string) {
 		lock.writerCount = 0
 	}
 	c.cleanupLock(path, lock)
+	c.cond.Broadcast() // Wake up waiters
 }
 
 // ReleaseAll clears any locks held by a task.
@@ -135,6 +237,7 @@ func (c *ConflictDetector) ReleaseAll(taskID string) {
 		}
 		c.cleanupLock(path, lock)
 	}
+	c.cond.Broadcast() // Wake up waiters
 }
 
 // Snapshot returns a copy of the current lock state.
@@ -161,14 +264,18 @@ type LockState struct {
 
 // LockConflictError indicates a conflicting lock holder.
 type LockConflictError struct {
-	Path   string
-	Holder string
-	Mode   string
+	Path    string
+	Holder  string
+	Mode    string
+	Timeout bool
 }
 
 func (e *LockConflictError) Error() string {
 	if e == nil {
 		return "lock conflict"
+	}
+	if e.Timeout {
+		return fmt.Sprintf("lock timeout on %s (held %s by %s)", e.Path, e.Mode, e.Holder)
 	}
 	return fmt.Sprintf("lock conflict on %s (held %s by %s)", e.Path, e.Mode, e.Holder)
 }

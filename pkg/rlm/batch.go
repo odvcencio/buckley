@@ -13,18 +13,19 @@ import (
 	"github.com/odvcencio/buckley/pkg/coordination/reliability"
 	"github.com/odvcencio/buckley/pkg/coordination/security"
 	"github.com/odvcencio/buckley/pkg/model"
+	"github.com/odvcencio/buckley/pkg/telemetry"
 	"github.com/odvcencio/buckley/pkg/tool"
 	"github.com/oklog/ulid/v2"
 	"golang.org/x/time/rate"
 )
 
-const defaultBatchConcurrency = 4
+const defaultBatchConcurrency = 5
 
 // SubTask is a single delegated task.
+// Simplified: no weight tiers, all sub-agents use the same model.
 type SubTask struct {
 	ID            string
 	Prompt        string
-	Weight        Weight
 	AllowedTools  []string
 	SystemPrompt  string
 	MaxIterations int
@@ -36,7 +37,19 @@ type BatchRequest struct {
 	Parallel bool
 }
 
+// ToolCallEvent records a tool invocation for transparency.
+type ToolCallEvent struct {
+	TaskID    string        `json:"task_id"`
+	AgentID   string        `json:"agent_id"`
+	ToolName  string        `json:"tool_name"`
+	Arguments string        `json:"arguments,omitempty"`
+	Success   bool          `json:"success"`
+	Error     string        `json:"error,omitempty"`
+	Duration  time.Duration `json:"duration_ms"`
+}
+
 // BatchResult captures the outcome of a dispatched task.
+// Simplified: no weight/escalation tracking.
 type BatchResult struct {
 	TaskID     string
 	AgentID    string
@@ -46,45 +59,53 @@ type BatchResult struct {
 	TokensUsed int
 	Duration   time.Duration
 	Error      string
+	ToolCalls  []ToolCallEvent // Tool calls made by sub-agent
 }
 
-// BatchDispatcher runs sub-agents with optional concurrency control.
-type BatchDispatcher struct {
-	router      *ModelRouter
-	models      *model.Manager
-	registry    *tool.Registry
-	scratchpad  ScratchpadWriter
-	conflicts   *ConflictDetector
-	approver    *security.ToolApprover
-	rateLimiter *rate.Limiter
-	semaphore   chan struct{}
-	breaker     *reliability.CircuitBreaker
-	bus         bus.MessageBus
+// Dispatcher runs sub-agents with concurrency control.
+// Simplified from BatchDispatcher: no weight-based routing or escalation.
+type Dispatcher struct {
+	selector     *ModelSelector
+	models       *model.Manager
+	registry     *tool.Registry
+	scratchpad   ScratchpadWriter
+	conflicts    *ConflictDetector
+	approver     *security.ToolApprover
+	rateLimiter  *rate.Limiter
+	semaphore    chan struct{}
+	breaker      *reliability.CircuitBreaker
+	bus          bus.MessageBus
+	telemetry    *telemetry.Hub
+	timeout      time.Duration
+	timeoutMu    sync.Mutex
+	timeoutStats map[string]*timeoutStats
 }
 
-// BatchDispatcherConfig configures dispatcher behavior.
-type BatchDispatcherConfig struct {
+// DispatcherConfig configures dispatcher behavior.
+type DispatcherConfig struct {
 	MaxConcurrent int
+	Timeout       time.Duration
 	RateLimit     rate.Limit
 	Burst         int
 	Circuit       reliability.CircuitBreakerConfig
 }
 
-// BatchDispatcherDeps supplies dependencies for dispatcher creation.
-type BatchDispatcherDeps struct {
-	Router     *ModelRouter
+// DispatcherDeps supplies dependencies for dispatcher creation.
+type DispatcherDeps struct {
+	Selector   *ModelSelector
 	Models     *model.Manager
 	Registry   *tool.Registry
 	Scratchpad ScratchpadWriter
 	Conflicts  *ConflictDetector
 	Approver   *security.ToolApprover
 	Bus        bus.MessageBus
+	Telemetry  *telemetry.Hub
 }
 
-// NewBatchDispatcher creates a dispatcher with the given configuration.
-func NewBatchDispatcher(cfg BatchDispatcherConfig, deps BatchDispatcherDeps) (*BatchDispatcher, error) {
-	if deps.Router == nil {
-		return nil, fmt.Errorf("model router required")
+// NewDispatcher creates a dispatcher with the given configuration.
+func NewDispatcher(cfg DispatcherConfig, deps DispatcherDeps) (*Dispatcher, error) {
+	if deps.Selector == nil {
+		return nil, fmt.Errorf("model selector required")
 	}
 	if deps.Models == nil {
 		return nil, fmt.Errorf("model manager required")
@@ -106,24 +127,81 @@ func NewBatchDispatcher(cfg BatchDispatcherConfig, deps BatchDispatcherDeps) (*B
 		limiter = nil
 	}
 
-	breaker := reliability.NewCircuitBreaker(cfg.Circuit)
+	timeout := cfg.Timeout
+	if timeout <= 0 {
+		timeout = 5 * time.Minute
+	}
 
-	return &BatchDispatcher{
-		router:      deps.Router,
-		models:      deps.Models,
-		registry:    deps.Registry,
-		scratchpad:  deps.Scratchpad,
-		conflicts:   deps.Conflicts,
-		approver:    deps.Approver,
-		rateLimiter: limiter,
-		semaphore:   make(chan struct{}, maxConcurrent),
-		breaker:     breaker,
-		bus:         deps.Bus,
-	}, nil
+	d := &Dispatcher{
+		selector:     deps.Selector,
+		models:       deps.Models,
+		registry:     deps.Registry,
+		scratchpad:   deps.Scratchpad,
+		conflicts:    deps.Conflicts,
+		approver:     deps.Approver,
+		rateLimiter:  limiter,
+		semaphore:    make(chan struct{}, maxConcurrent),
+		bus:          deps.Bus,
+		telemetry:    deps.Telemetry,
+		timeout:      timeout,
+		timeoutStats: make(map[string]*timeoutStats),
+	}
+
+	// Configure circuit breaker with logging callbacks
+	cfg.Circuit.OnFailure = func(event reliability.FailureEvent) {
+		// Publish to bus for IPC/logging
+		d.publishEvent(context.Background(), "buckley.rlm.circuit.failure", map[string]any{
+			"error":           event.Error.Error(),
+			"consecutive_num": event.ConsecutiveNum,
+			"max_failures":    event.MaxFailures,
+			"will_open":       event.WillOpen,
+		})
+		// Publish to telemetry for TUI
+		if d.telemetry != nil {
+			d.telemetry.Publish(telemetry.Event{
+				Type: telemetry.EventCircuitFailure,
+				Data: map[string]any{
+					"error":           event.Error.Error(),
+					"consecutive_num": event.ConsecutiveNum,
+					"max_failures":    event.MaxFailures,
+					"will_open":       event.WillOpen,
+				},
+			})
+		}
+	}
+	cfg.Circuit.OnStateChange = func(event reliability.StateChangeEvent) {
+		errMsg := ""
+		if event.LastError != nil {
+			errMsg = event.LastError.Error()
+		}
+		// Publish to bus for IPC/logging
+		d.publishEvent(context.Background(), "buckley.rlm.circuit.state_change", map[string]any{
+			"from":       event.From.String(),
+			"to":         event.To.String(),
+			"reason":     event.Reason,
+			"last_error": errMsg,
+		})
+		// Publish to telemetry for TUI
+		if d.telemetry != nil {
+			d.telemetry.Publish(telemetry.Event{
+				Type: telemetry.EventCircuitStateChange,
+				Data: map[string]any{
+					"from":       event.From.String(),
+					"to":         event.To.String(),
+					"reason":     event.Reason,
+					"last_error": errMsg,
+				},
+			})
+		}
+	}
+
+	d.breaker = reliability.NewCircuitBreaker(cfg.Circuit)
+
+	return d, nil
 }
 
 // Execute runs the batch and returns results in input order.
-func (d *BatchDispatcher) Execute(ctx context.Context, req BatchRequest) ([]BatchResult, error) {
+func (d *Dispatcher) Execute(ctx context.Context, req BatchRequest) ([]BatchResult, error) {
 	if len(req.Tasks) == 0 {
 		return nil, nil
 	}
@@ -133,7 +211,7 @@ func (d *BatchDispatcher) Execute(ctx context.Context, req BatchRequest) ([]Batc
 	return d.executeParallel(ctx, req.Tasks)
 }
 
-func (d *BatchDispatcher) executeSequential(ctx context.Context, tasks []SubTask) ([]BatchResult, error) {
+func (d *Dispatcher) executeSequential(ctx context.Context, tasks []SubTask) ([]BatchResult, error) {
 	results := make([]BatchResult, 0, len(tasks))
 	var combinedErr error
 	for _, task := range tasks {
@@ -146,7 +224,7 @@ func (d *BatchDispatcher) executeSequential(ctx context.Context, tasks []SubTask
 	return results, combinedErr
 }
 
-func (d *BatchDispatcher) executeParallel(ctx context.Context, tasks []SubTask) ([]BatchResult, error) {
+func (d *Dispatcher) executeParallel(ctx context.Context, tasks []SubTask) ([]BatchResult, error) {
 	results := make([]BatchResult, len(tasks))
 	var mu sync.Mutex
 	var combinedErr error
@@ -176,7 +254,7 @@ func (d *BatchDispatcher) executeParallel(ctx context.Context, tasks []SubTask) 
 	return results, combinedErr
 }
 
-func (d *BatchDispatcher) executeTask(ctx context.Context, task SubTask) (BatchResult, error) {
+func (d *Dispatcher) executeTask(ctx context.Context, task SubTask) (BatchResult, error) {
 	res := BatchResult{TaskID: task.ID}
 	if strings.TrimSpace(task.Prompt) == "" {
 		res.Error = "task prompt required"
@@ -186,14 +264,11 @@ func (d *BatchDispatcher) executeTask(ctx context.Context, task SubTask) (BatchR
 		res.TaskID = ulid.Make().String()
 	}
 
-	weight := task.Weight
-	if strings.TrimSpace(string(weight)) == "" {
-		weight = WeightMedium
-	}
-	modelID, err := d.router.Select(weight)
-	if err != nil {
-		res.Error = err.Error()
-		return res, err
+	// Get the model from selector (single model for all sub-agents)
+	modelID := d.selector.Select()
+	if modelID == "" {
+		res.Error = "no model available"
+		return res, fmt.Errorf("no model available")
 	}
 	res.ModelUsed = modelID
 
@@ -205,7 +280,49 @@ func (d *BatchDispatcher) executeTask(ctx context.Context, task SubTask) (BatchR
 	}
 
 	agentID := fmt.Sprintf("rlm-%s", res.TaskID)
-	agent, err := NewSubAgent(SubAgentConfig{
+
+	// Apply timeout if configured
+	timeout := d.nextTimeout(modelID)
+	if timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
+
+	execResult, execErr := d.executeSubAgent(ctx, task, agentID, modelID, &res)
+
+	// Merge results
+	if execResult != nil {
+		res.AgentID = execResult.AgentID
+		res.Summary = execResult.Summary
+		res.RawKey = execResult.RawKey
+		res.TokensUsed = execResult.TokensUsed
+		// Convert tool calls for transparency
+		for _, tc := range execResult.ToolCalls {
+			res.ToolCalls = append(res.ToolCalls, ToolCallEvent{
+				TaskID:    res.TaskID,
+				AgentID:   agentID,
+				ToolName:  tc.Name,
+				Arguments: tc.Arguments,
+				Success:   tc.Success,
+				Error:     tc.Result,
+				Duration:  tc.Duration,
+			})
+		}
+	}
+
+	if execErr != nil {
+		res.Error = execErr.Error()
+	}
+
+	d.recordTaskDuration(modelID, res.Duration)
+
+	return res, execErr
+}
+
+// executeSubAgent runs a single sub-agent.
+func (d *Dispatcher) executeSubAgent(ctx context.Context, task SubTask, agentID, modelID string, res *BatchResult) (*SubAgentResult, error) {
+	agent, err := NewSubAgent(SubAgentInstanceConfig{
 		ID:            agentID,
 		Model:         modelID,
 		SystemPrompt:  task.SystemPrompt,
@@ -219,39 +336,65 @@ func (d *BatchDispatcher) executeTask(ctx context.Context, task SubTask) (BatchR
 		Approver:   d.approver,
 	})
 	if err != nil {
-		res.Error = err.Error()
-		return res, err
+		return nil, err
 	}
+
+	var execResult *SubAgentResult
+	var execErr error
 
 	run := func() error {
 		start := time.Now()
-		if d.bus != nil {
-			d.publishEvent(ctx, "buckley.rlm.task.started", map[string]any{
-				"task_id":  res.TaskID,
-				"agent_id": agentID,
-				"model":    modelID,
+
+		// Emit task started
+		d.publishEvent(ctx, "buckley.rlm.task.started", map[string]any{
+			"task_id":  res.TaskID,
+			"agent_id": agentID,
+			"model":    modelID,
+		})
+
+		// Emit to telemetry for TUI
+		if d.telemetry != nil {
+			d.telemetry.Publish(telemetry.Event{
+				Type:   telemetry.EventTaskStarted,
+				TaskID: res.TaskID,
+				Data: map[string]any{
+					"agent_id": agentID,
+					"model":    modelID,
+				},
 			})
 		}
-		execResult, execErr := agent.Execute(ctx, task.Prompt)
+
+		execResult, execErr = agent.Execute(ctx, task.Prompt)
 		res.Duration = time.Since(start)
-		if execResult != nil {
-			res.AgentID = execResult.AgentID
-			res.Summary = execResult.Summary
-			res.RawKey = execResult.RawKey
-			res.TokensUsed = execResult.TokensUsed
-		}
-		if execErr != nil {
-			res.Error = execErr.Error()
-		}
-		if d.bus != nil {
-			d.publishEvent(ctx, "buckley.rlm.task.completed", map[string]any{
-				"task_id":     res.TaskID,
-				"agent_id":    agentID,
-				"model":       modelID,
-				"duration_ms": res.Duration.Milliseconds(),
-				"error":       res.Error,
+
+		// Emit completion
+		d.publishEvent(ctx, "buckley.rlm.task.completed", map[string]any{
+			"task_id":     res.TaskID,
+			"agent_id":    agentID,
+			"model":       modelID,
+			"duration_ms": res.Duration.Milliseconds(),
+			"tokens_used": res.TokensUsed,
+			"error":       res.Error,
+		})
+
+		if d.telemetry != nil {
+			eventType := telemetry.EventTaskCompleted
+			if execErr != nil {
+				eventType = telemetry.EventTaskFailed
+			}
+			d.telemetry.Publish(telemetry.Event{
+				Type:   eventType,
+				TaskID: res.TaskID,
+				Data: map[string]any{
+					"agent_id":         agentID,
+					"model":            modelID,
+					"duration_ms":      res.Duration.Milliseconds(),
+					"tokens_used":      res.TokensUsed,
+					"tool_calls_count": len(res.ToolCalls),
+				},
 			})
 		}
+
 		return execErr
 	}
 
@@ -260,13 +403,11 @@ func (d *BatchDispatcher) executeTask(ctx context.Context, task SubTask) (BatchR
 	} else {
 		err = run()
 	}
-	if err != nil {
-		return res, err
-	}
-	return res, nil
+
+	return execResult, err
 }
 
-func (d *BatchDispatcher) publishEvent(ctx context.Context, subject string, payload map[string]any) {
+func (d *Dispatcher) publishEvent(ctx context.Context, subject string, payload map[string]any) {
 	if d.bus == nil || subject == "" {
 		return
 	}
@@ -275,4 +416,57 @@ func (d *BatchDispatcher) publishEvent(ctx context.Context, subject string, payl
 		return
 	}
 	_ = d.bus.Publish(ctx, subject, data)
+}
+
+type timeoutStats struct {
+	ema   time.Duration
+	count int
+}
+
+func (d *Dispatcher) nextTimeout(modelID string) time.Duration {
+	if d == nil {
+		return 0
+	}
+	base := d.timeout
+	if base <= 0 {
+		return 0
+	}
+
+	d.timeoutMu.Lock()
+	defer d.timeoutMu.Unlock()
+
+	timeout := base
+	stats := d.timeoutStats[modelID]
+	if stats != nil && stats.count > 0 && stats.ema > 0 {
+		timeout = stats.ema + stats.ema/2
+		maxTimeout := base * 2
+		if timeout > maxTimeout {
+			timeout = maxTimeout
+		}
+		minTimeout := base / 2
+		if minTimeout > 0 && timeout < minTimeout {
+			timeout = minTimeout
+		}
+	}
+	return timeout
+}
+
+func (d *Dispatcher) recordTaskDuration(modelID string, duration time.Duration) {
+	if d == nil || duration <= 0 {
+		return
+	}
+	d.timeoutMu.Lock()
+	stats := d.timeoutStats[modelID]
+	if stats == nil {
+		stats = &timeoutStats{}
+		d.timeoutStats[modelID] = stats
+	}
+	if stats.count == 0 {
+		stats.ema = duration
+	} else {
+		alpha := 0.3
+		stats.ema = time.Duration(alpha*float64(duration) + (1-alpha)*float64(stats.ema))
+	}
+	stats.count++
+	d.timeoutMu.Unlock()
 }

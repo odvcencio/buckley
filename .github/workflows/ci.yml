@@ -1,8 +1,10 @@
 name: CI
 
-# Temporarily manual-only while GitHub Actions minutes are exhausted.
-# Re-enable push/pull_request triggers for the OSS launch gate.
 on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -13,6 +15,7 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
@@ -61,6 +64,7 @@ jobs:
   ui:
     name: UI Build (embedded)
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
 
@@ -78,6 +82,7 @@ jobs:
   security:
     name: Security Scan
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
         with:
@@ -108,6 +113,7 @@ jobs:
   lint:
     name: Lint
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
         with:
@@ -171,7 +177,9 @@ jobs:
 
   build:
     name: Build
+    timeout-minutes: 10
     strategy:
+      fail-fast: true
       matrix:
         include:
           - name: linux

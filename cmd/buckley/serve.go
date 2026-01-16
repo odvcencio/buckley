@@ -171,6 +171,12 @@ func runServeCommand(args []string) error {
 	}
 	defer store.Close()
 
+	coordRuntime, err := initCoordinationRuntime(appCfg)
+	if err != nil {
+		return err
+	}
+	defer coordRuntime.Close()
+
 	projectRoot := config.ResolveProjectRoot(appCfg)
 	cfg := ipc.Config{
 		BindAddress:       *bind,
@@ -192,6 +198,8 @@ func runServeCommand(args []string) error {
 
 	telemetryHub := telemetry.NewHub()
 	defer telemetryHub.Close()
+	stopTelemetry := startTelemetryPersistence(ctx, telemetryHub, coordRuntime.eventStore)
+	defer stopTelemetry()
 	commandGateway := command.NewGateway()
 	planStore := orchestrator.NewFilePlanStore(appCfg.Artifacts.PlanningDir)
 
@@ -215,7 +223,7 @@ func runServeCommand(args []string) error {
 		appCfg.ACP.AllowInsecureLocal = true
 		autoACP = true
 	}
-	if stopACP, err := startACPServer(appCfg, models, store); err != nil {
+	if stopACP, err := startACPServer(appCfg, models, store, coordRuntime); err != nil {
 		if autoACP {
 			fmt.Fprintf(os.Stderr, "warning: failed to start ACP server: %v\n", err)
 		} else {

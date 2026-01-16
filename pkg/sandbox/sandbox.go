@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
-	"syscall"
 	"time"
 )
 
@@ -162,12 +161,10 @@ func (s *Sandbox) Execute(ctx context.Context, command string) *Result {
 		defer cancel()
 	}
 
-	cmd := exec.CommandContext(ctx, "sh", "-c", command)
+	cmd := shellCommandContext(ctx, command)
 
-	// Set up process group for cleanup
-	cmd.SysProcAttr = &syscall.SysProcAttr{
-		Setpgid: true,
-	}
+	// Set up process group for cleanup (platform-specific)
+	setSysProcAttr(cmd)
 
 	// Restrict environment if in strict mode
 	if s.config.Mode == ModeStrict {

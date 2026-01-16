@@ -276,7 +276,7 @@ func TestLatestCodeBlock(t *testing.T) {
 	buf.AppendLine("plain", LineStyle{}, "user")
 
 	buf.AppendMessage([]Line{
-		{Content: "go  [Alt+C copy]", IsCode: true, IsCodeHeader: true, Language: "go"},
+		{Content: "go  [copy] [open]", IsCode: true, IsCodeHeader: true, Language: "go"},
 		{Content: "fmt.Println(\"hi\")", IsCode: true, Language: "go"},
 		{Content: "", IsCode: true, Language: "go"},
 		{Content: "fmt.Println(\"bye\")", IsCode: true, Language: "go"},

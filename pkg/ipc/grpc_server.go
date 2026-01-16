@@ -24,7 +24,7 @@ import (
 	ipcpb "github.com/odvcencio/buckley/pkg/ipc/proto"
 	"github.com/odvcencio/buckley/pkg/orchestrator"
 	"github.com/odvcencio/buckley/pkg/storage"
-	"github.com/odvcencio/buckley/pkg/ui/viewmodel"
+	"github.com/odvcencio/buckley/pkg/ui/buckley/viewmodel"
 )
 
 // GRPCService implements the BuckleyIPC Connect service.

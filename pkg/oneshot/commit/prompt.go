@@ -115,8 +115,15 @@ func SystemPrompt() string {
 Use the generate_commit tool to produce your response. The tool expects:
 - action: The verb describing what this commit does (add, fix, update, refactor, etc.)
 - scope: Optional component/area (e.g., "api", "ui", "config")
-- subject: Short summary, imperative mood, no period, ~50 chars
+- subject: Short summary, imperative mood, no period
 - body: Bullet points explaining WHAT changed and WHY
+
+CRITICAL: The full header line (action + scope + subject) MUST be <= 72 characters.
+Calculate your budget: "action(scope): " uses characters, so adjust subject length.
+Examples:
+- "add(ui): dark mode toggle" = 25 chars ✓
+- "refactor(execution): unify execution patterns" = 46 chars ✓
+- "refactor(execution): unify execution around ToolRunner pattern with modes" = 74 chars ✗ TOO LONG
 
 Guidelines:
 - Focus on the "what" and "why", not the "how"

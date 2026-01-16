@@ -37,15 +37,15 @@ type PaletteWidget struct {
 	maxVisible  int
 
 	// Styles
-	bgStyle          backend.Style
-	borderStyle      backend.Style
-	titleStyle       backend.Style
-	queryStyle       backend.Style
-	itemStyle        backend.Style
-	selectedStyle    backend.Style
-	categoryStyle    backend.Style
-	descStyle        backend.Style
-	shortcutStyle    backend.Style
+	bgStyle       backend.Style
+	borderStyle   backend.Style
+	titleStyle    backend.Style
+	queryStyle    backend.Style
+	itemStyle     backend.Style
+	selectedStyle backend.Style
+	categoryStyle backend.Style
+	descStyle     backend.Style
+	shortcutStyle backend.Style
 }
 
 // NewPaletteWidget creates a new palette widget.
@@ -178,12 +178,13 @@ func (p *PaletteWidget) Layout(bounds runtime.Rect) {
 	x := bounds.X + (bounds.Width-size.Width)/2
 	y := bounds.Y + (bounds.Height-size.Height)/2
 
-	p.bounds = runtime.Rect{
+	newBounds := runtime.Rect{
 		X:      x,
 		Y:      y,
 		Width:  size.Width,
 		Height: size.Height,
 	}
+	p.Base.Layout(newBounds)
 }
 
 // Render draws the palette.

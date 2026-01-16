@@ -27,6 +27,7 @@ import (
 	acpserver "github.com/odvcencio/buckley/pkg/acp/server"
 	"github.com/odvcencio/buckley/pkg/config"
 	projectcontext "github.com/odvcencio/buckley/pkg/context"
+	"github.com/odvcencio/buckley/pkg/conversation"
 	coordination "github.com/odvcencio/buckley/pkg/coordination/coordinator"
 	coordevents "github.com/odvcencio/buckley/pkg/coordination/events"
 	"github.com/odvcencio/buckley/pkg/ipc"
@@ -38,7 +39,7 @@ import (
 	"github.com/odvcencio/buckley/pkg/storage"
 	"github.com/odvcencio/buckley/pkg/telemetry"
 	"github.com/odvcencio/buckley/pkg/tool"
-	"github.com/odvcencio/buckley/pkg/ui/tui"
+	"github.com/odvcencio/buckley/pkg/ui/buckley/tui"
 )
 
 // Version information - set via ldflags during build
@@ -52,6 +53,7 @@ var encodingOverrideFlag string
 var quietMode bool
 var noColor bool
 var configPath string
+var rlmMode bool
 
 // initDependenciesFn allows tests to stub dependency initialization without hitting the network.
 var initDependenciesFn = initDependencies
@@ -83,6 +85,7 @@ type startupOptions struct {
 	configPath       string
 	plainModeSet     bool
 	plainMode        bool
+	rlmMode          bool
 }
 
 func main() {
@@ -103,6 +106,7 @@ func main() {
 	quietMode = opts.quiet
 	noColor = opts.noColor
 	configPath = opts.configPath
+	rlmMode = opts.rlmMode
 	os.Args = append([]string{os.Args[0]}, opts.args...)
 
 	if handled, exitCode := dispatchSubcommand(opts.args); handled {
@@ -138,6 +142,7 @@ func main() {
 		os.Exit(2)
 	}
 	applySandboxOverride(cfg)
+	applyRLMOverride(cfg)
 	tool.SetResultEncoding(cfg.Encoding.UseToon)
 
 	if !cfg.Providers.HasReadyProvider() {
@@ -221,8 +226,17 @@ func main() {
 		}
 	}
 
+	coordRuntime, err := initCoordinationRuntime(cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error initializing coordination runtime: %v\n", err)
+		os.Exit(1)
+	}
+	defer coordRuntime.Close()
+
 	telemetryHub := telemetry.NewHub()
 	defer telemetryHub.Close()
+	stopTelemetry := startTelemetryPersistence(context.Background(), telemetryHub, coordRuntime.eventStore)
+	defer stopTelemetry()
 
 	// Create and run TUI
 	ctrl, err := tui.NewController(tui.ControllerConfig{
@@ -266,22 +280,26 @@ func executeOneShot(prompt string, cfg *config.Config, mgr *model.Manager, store
 		mgr.SetRequestTimeout(0)
 	}
 
-	// Build system prompt
-	systemPrompt := "You are Buckley, an AI development assistant. Be concise and helpful."
-	if projectContext != nil && projectContext.RawContent != "" {
-		systemPrompt += "\n\nProject Context:\n" + projectContext.RawContent
+	// Get model ID
+	modelID := cfg.Models.Execution
+	if modelID == "" {
+		modelID = "openai/gpt-4o"
 	}
+
+	// Build system prompt with budgeted project context
+	budget := promptBudget(cfg, mgr, modelID)
+	if budget > 0 {
+		budget -= estimateMessageTokens("user", prompt)
+		if budget < 0 {
+			budget = 0
+		}
+	}
+	systemPrompt := buildOneShotSystemPrompt(projectContext, budget)
 
 	// Build messages
 	messages := []model.Message{
 		{Role: "system", Content: systemPrompt},
 		{Role: "user", Content: prompt},
-	}
-
-	// Get model ID
-	modelID := cfg.Models.Execution
-	if modelID == "" {
-		modelID = "openai/gpt-4o"
 	}
 
 	// Create request
@@ -314,6 +332,92 @@ func executeOneShot(prompt string, cfg *config.Config, mgr *model.Manager, store
 	}
 }
 
+func buildOneShotSystemPrompt(projectContext *projectcontext.ProjectContext, budgetTokens int) string {
+	base := "You are Buckley, an AI development assistant. Be concise and helpful.\n\n"
+	var b strings.Builder
+	used := 0
+
+	appendSection := func(content string, required bool) {
+		if strings.TrimSpace(content) == "" {
+			return
+		}
+		if !required && budgetTokens <= 0 {
+			return
+		}
+		tokens := conversation.CountTokens(content)
+		if budgetTokens > 0 && !required && used+tokens > budgetTokens {
+			return
+		}
+		b.WriteString(content)
+		used += tokens
+	}
+
+	appendSection(base, true)
+
+	if projectContext != nil && projectContext.Loaded {
+		rawProject := strings.TrimSpace(projectContext.RawContent)
+		projectSummary := buildProjectContextSummary(projectContext)
+		if budgetTokens > 0 && (rawProject != "" || projectSummary != "") {
+			projectSection := ""
+			if rawProject != "" {
+				projectSection = "Project Context:\n" + rawProject + "\n\n"
+			}
+			summarySection := ""
+			if projectSummary != "" {
+				summarySection = "Project Context (summary):\n" + projectSummary + "\n\n"
+			}
+
+			remaining := budgetTokens - used
+			if remaining > 0 {
+				if projectSection != "" && conversation.CountTokens(projectSection) <= remaining {
+					appendSection(projectSection, false)
+				} else if summarySection != "" && conversation.CountTokens(summarySection) <= remaining {
+					appendSection(summarySection, false)
+				}
+			}
+		}
+	}
+
+	return strings.TrimSpace(b.String())
+}
+
+func applyToolDefaults(registry *tool.Registry, cfg *config.Config, hub *telemetry.Hub, sessionID string) {
+	if registry == nil {
+		return
+	}
+	defaults := tool.DefaultRegistryConfig()
+	if cfg != nil {
+		defaults.MaxOutputBytes = cfg.ToolMiddleware.MaxResultBytes
+		defaults.Middleware.DefaultTimeout = cfg.ToolMiddleware.DefaultTimeout
+		defaults.Middleware.PerToolTimeouts = copyDurationMap(cfg.ToolMiddleware.PerToolTimeouts)
+		defaults.Middleware.MaxResultBytes = cfg.ToolMiddleware.MaxResultBytes
+		defaults.Middleware.RetryConfig = tool.RetryConfig{
+			MaxAttempts:  cfg.ToolMiddleware.Retry.MaxAttempts,
+			InitialDelay: cfg.ToolMiddleware.Retry.InitialDelay,
+			MaxDelay:     cfg.ToolMiddleware.Retry.MaxDelay,
+			Multiplier:   cfg.ToolMiddleware.Retry.Multiplier,
+			Jitter:       cfg.ToolMiddleware.Retry.Jitter,
+		}
+	}
+	defaults.TelemetryHub = hub
+	defaults.TelemetrySessionID = strings.TrimSpace(sessionID)
+	tool.ApplyRegistryConfig(registry, defaults)
+	if cfg != nil {
+		registry.SetSandboxConfig(cfg.Sandbox.ToSandboxConfig(""))
+	}
+}
+
+func copyDurationMap(src map[string]time.Duration) map[string]time.Duration {
+	if len(src) == 0 {
+		return nil
+	}
+	out := make(map[string]time.Duration, len(src))
+	for k, v := range src {
+		out[k] = v
+	}
+	return out
+}
+
 func runPlanCommand(args []string) error {
 	if len(args) < 2 {
 		return fmt.Errorf("usage: buckley plan <feature-name> <description>")
@@ -331,9 +435,11 @@ func runPlanCommand(args []string) error {
 
 	// Create orchestrator
 	registry := tool.NewRegistry()
+	applyToolDefaults(registry, cfg, nil, "")
 	if cwd, err := os.Getwd(); err == nil {
 		registry.ConfigureContainers(cfg, cwd)
 	}
+	registerMCPTools(cfg, registry)
 	planStore := orchestrator.NewFilePlanStore(cfg.Artifacts.PlanningDir)
 	orch := newOrchestratorFn(store, mgr, registry, cfg, nil, planStore)
 
@@ -368,12 +474,14 @@ func runExecuteCommand(args []string) error {
 
 	// Create orchestrator
 	registry := tool.NewRegistry()
+	applyToolDefaults(registry, cfg, nil, "")
 	if err := registry.LoadDefaultPlugins(); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to load some plugins: %v\n", err)
 	}
 	if cwd, err := os.Getwd(); err == nil {
 		registry.ConfigureContainers(cfg, cwd)
 	}
+	registerMCPTools(cfg, registry)
 
 	planStore := orchestrator.NewFilePlanStore(cfg.Artifacts.PlanningDir)
 	orch := newOrchestratorFn(store, mgr, registry, cfg, nil, planStore)
@@ -440,12 +548,14 @@ func runExecuteTaskCommand(args []string) error {
 	defer store.Close()
 
 	registry := tool.NewRegistry()
+	applyToolDefaults(registry, cfg, nil, "")
 	if err := registry.LoadDefaultPlugins(); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to load some plugins: %v\n", err)
 	}
 	if cwd, err := os.Getwd(); err == nil {
 		registry.ConfigureContainers(cfg, cwd)
 	}
+	registerMCPTools(cfg, registry)
 
 	planStore := orchestrator.NewFilePlanStore(cfg.Artifacts.PlanningDir)
 	orch := newOrchestratorFn(store, mgr, registry, cfg, nil, planStore)
@@ -500,6 +610,7 @@ func initDependencies() (*config.Config, *model.Manager, *storage.Store, error) 
 	if encodingOverrideFlag != "" {
 		cfg.Encoding.UseToon = encodingOverrideFlag != "json"
 	}
+	applyRLMOverride(cfg)
 	tool.SetResultEncoding(cfg.Encoding.UseToon)
 
 	if !cfg.Providers.HasReadyProvider() {
@@ -564,6 +675,7 @@ func printHelp() {
 	fmt.Println("  acp [--workdir dir] [--log file] Start ACP agent on stdio (Zed/JetBrains/Neovim)")
 	fmt.Println("  hunt [--dir path]                Scan codebase for improvement suggestions")
 	fmt.Println("  dream [--dir path] [--plan]      Analyze architecture and identify gaps")
+	fmt.Println("  ralph --prompt <p> [--timeout t] Autonomous task runner with iteration control")
 	fmt.Println("  config [check|show|path]         Manage configuration")
 	fmt.Println("  doctor                           Quick system health check (alias for config check)")
 	fmt.Println("  completion [bash|zsh|fish]       Generate shell completions")
@@ -580,6 +692,7 @@ func printHelp() {
 	fmt.Println("  --no-color                       Disable colored output")
 	fmt.Println("  --tui                            Use rich TUI interface")
 	fmt.Println("  --plain                          Use plain scrollback mode")
+	fmt.Println("  --rlm                            Use RLM execution mode (experimental)")
 	fmt.Println("  --encoding json|toon             Set serialization format")
 	fmt.Println("  --json                           Shortcut for --encoding json")
 	fmt.Println("  -v, --version                    Show version information")
@@ -1081,6 +1194,8 @@ func dispatchSubcommand(args []string) (bool, int) {
 		return true, runCommand(runHuntCommand, args[1:])
 	case "dream":
 		return true, runCommand(runDreamCommand, args[1:])
+	case "ralph":
+		return true, runCommand(runRalphCommand, args[1:])
 	case "config":
 		return true, runCommand(runConfigCommand, args[1:])
 	case "doctor":
@@ -1157,6 +1272,8 @@ func parseStartupOptions(raw []string) (*startupOptions, error) {
 			opts.quiet = true
 		case "--no-color":
 			opts.noColor = true
+		case "--rlm":
+			opts.rlmMode = true
 		case "--config", "-c":
 			nextConfig = true
 		default:
@@ -1222,6 +1339,16 @@ func applySandboxOverride(cfg *config.Config) {
 		cfg.Worktrees.UseContainers = true
 	case "host", "off", "disable", "disabled", "false", "no":
 		cfg.Worktrees.UseContainers = false
+	}
+}
+
+func applyRLMOverride(cfg *config.Config) {
+	if cfg == nil {
+		return
+	}
+	if rlmMode {
+		cfg.Execution.Mode = config.ExecutionModeRLM
+		cfg.Oneshot.Mode = config.ExecutionModeRLM
 	}
 }
 
@@ -1366,7 +1493,7 @@ func humanReadableURL(bind string) string {
 }
 
 // startACPServer launches the ACP gRPC server when configured.
-func startACPServer(cfg *config.Config, mgr *model.Manager, store *storage.Store) (func(), error) {
+func startACPServer(cfg *config.Config, mgr *model.Manager, store *storage.Store, runtime *coordinationRuntime) (func(), error) {
 	acpCfg := cfg.ACP
 	if strings.TrimSpace(acpCfg.Listen) == "" {
 		return nil, nil
@@ -1405,55 +1532,43 @@ func startACPServer(cfg *config.Config, mgr *model.Manager, store *storage.Store
 		fmt.Fprintf(os.Stderr, "Warning: starting ACP without TLS (allow_insecure_local=true for %s)\n", acpCfg.Listen)
 	}
 
+	var err error
 	var eventStore coordevents.EventStore
-	var closer func()
-
-	if strings.ToLower(acpCfg.EventStore) == "nats" {
-		opts := coordevents.NATSOptions{
-			URL:            acpCfg.NATS.URL,
-			Username:       acpCfg.NATS.Username,
-			Password:       acpCfg.NATS.Password,
-			Token:          acpCfg.NATS.Token,
-			TLS:            acpCfg.NATS.TLS,
-			StreamPrefix:   acpCfg.NATS.StreamPrefix,
-			SnapshotBucket: acpCfg.NATS.SnapshotBucket,
-			ConnectTimeout: acpCfg.NATS.ConnectTimeout,
-			RequestTimeout: acpCfg.NATS.RequestTimeout,
-		}
-		store, err := coordevents.NewNATSEventStore(opts)
-		if err != nil {
-			return nil, fmt.Errorf("init NATS event store: %w", err)
-		}
-		eventStore = store
-		closer = store.Close
+	var closeStore func()
+	if runtime != nil && runtime.eventStore != nil {
+		eventStore = runtime.eventStore
 	} else {
-		dbPath, err := resolveACPEventsDBPath()
+		store, closer, err := buildCoordinationEventStore(cfg)
 		if err != nil {
 			return nil, err
 		}
-		if err := os.MkdirAll(filepath.Dir(dbPath), 0o700); err != nil {
-			return nil, fmt.Errorf("init SQLite event store: ensure directory: %w", err)
-		}
-		store, err := coordevents.NewSQLiteEventStore(dbPath)
-		if err != nil {
-			return nil, fmt.Errorf("init SQLite event store: %w", err)
-		}
 		eventStore = store
-		closer = func() { _ = store.Close() }
+		closeStore = closer
 	}
 
-	coord, err := coordination.NewCoordinator(coordination.DefaultConfig(), eventStore)
-	if err != nil {
-		if closer != nil {
-			closer()
+	coord := (*coordination.Coordinator)(nil)
+	if runtime != nil {
+		coord = runtime.coordinator
+	}
+	if coord == nil {
+		coord, err = coordination.NewCoordinator(coordination.DefaultConfig(), eventStore)
+		if err != nil {
+			if closeStore != nil {
+				closeStore()
+			}
+			return nil, fmt.Errorf("init ACP coordinator: %w", err)
 		}
-		return nil, fmt.Errorf("init ACP coordinator: %w", err)
 	}
-
+	if coord == nil {
+		if closeStore != nil {
+			closeStore()
+		}
+		return nil, fmt.Errorf("init ACP coordinator: coordinator is nil")
+	}
 	srv, err := acpserver.NewServer(coord, mgr, cfg, store)
 	if err != nil {
-		if closer != nil {
-			closer()
+		if closeStore != nil {
+			closeStore()
 		}
 		return nil, fmt.Errorf("init ACP gRPC server: %w", err)
 	}
@@ -1471,8 +1586,8 @@ func startACPServer(cfg *config.Config, mgr *model.Manager, store *storage.Store
 
 	lis, err := net.Listen("tcp", acpCfg.Listen)
 	if err != nil {
-		if closer != nil {
-			closer()
+		if closeStore != nil {
+			closeStore()
 		}
 		return nil, fmt.Errorf("listen on %s: %w", acpCfg.Listen, err)
 	}
@@ -1484,8 +1599,8 @@ func startACPServer(cfg *config.Config, mgr *model.Manager, store *storage.Store
 
 	stop := func() {
 		grpcServer.GracefulStop()
-		if closer != nil {
-			closer()
+		if closeStore != nil {
+			closeStore()
 		}
 	}
 

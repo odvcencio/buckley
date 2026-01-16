@@ -1,8 +1,8 @@
-// Package acp implements the Agent Client Protocol (ACP) for editor integration.
+// Package acp implements the Zed Agent Communication Protocol (ACP) for editor integration.
 // ACP is a JSON-RPC 2.0 protocol over stdio that standardizes communication between
 // editors (clients) and AI coding agents (servers like Buckley).
 //
-// See: https://agentclientprotocol.com
+// See: https://agentcommunicationprotocol.com
 package acp
 
 import "encoding/json"

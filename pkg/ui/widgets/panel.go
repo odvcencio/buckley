@@ -90,7 +90,7 @@ func (p *Panel) Measure(constraints runtime.Constraints) runtime.Size {
 
 // Layout positions the panel and its child.
 func (p *Panel) Layout(bounds runtime.Rect) {
-	p.bounds = bounds
+	p.Base.Layout(bounds)
 
 	if p.child == nil {
 		return
@@ -144,6 +144,14 @@ func (p *Panel) HandleMessage(msg runtime.Message) runtime.HandleResult {
 	return runtime.Unhandled()
 }
 
+// ChildWidgets returns the panel's child widget.
+func (p *Panel) ChildWidgets() []runtime.Widget {
+	if p.child == nil {
+		return nil
+	}
+	return []runtime.Widget{p.child}
+}
+
 // Box is a simple container that fills its background.
 type Box struct {
 	Base
@@ -180,7 +188,7 @@ func (b *Box) Measure(constraints runtime.Constraints) runtime.Size {
 
 // Layout assigns bounds to the box and child.
 func (b *Box) Layout(bounds runtime.Rect) {
-	b.bounds = bounds
+	b.Base.Layout(bounds)
 	if b.child != nil {
 		b.child.Layout(bounds)
 	}
@@ -203,6 +211,14 @@ func (b *Box) HandleMessage(msg runtime.Message) runtime.HandleResult {
 		return b.child.HandleMessage(msg)
 	}
 	return runtime.Unhandled()
+}
+
+// ChildWidgets returns the box's child widget.
+func (b *Box) ChildWidgets() []runtime.Widget {
+	if b.child == nil {
+		return nil
+	}
+	return []runtime.Widget{b.child}
 }
 
 // max returns the larger of two ints.

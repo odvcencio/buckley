@@ -337,7 +337,7 @@ func (t *InsertTextTool) Name() string {
 }
 
 func (t *InsertTextTool) Description() string {
-	return "Insert text at a specific line number in a file. Use this to add new code without replacing existing content. Line numbers are 1-indexed."
+	return "Insert text at a specific line number in a file without replacing existing content. Line numbers are 1-indexed. The new text is inserted before the specified line, pushing existing content down. Use this to add imports, new functions, or code blocks at specific locations."
 }
 
 func (t *InsertTextTool) Parameters() ParameterSchema {
@@ -463,7 +463,7 @@ func (t *DeleteLinesTool) Name() string {
 }
 
 func (t *DeleteLinesTool) Description() string {
-	return "Delete a range of lines from a file. Line numbers are 1-indexed and inclusive."
+	return "Delete a range of lines from a file. Line numbers are 1-indexed and inclusive (start and end lines are both deleted). Shows the deleted content before removal. Use this to remove dead code, old comments, or unwanted sections."
 }
 
 func (t *DeleteLinesTool) Parameters() ParameterSchema {

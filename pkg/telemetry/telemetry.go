@@ -36,6 +36,7 @@ const (
 	EventEditorInline               EventType = "editor.inline"
 	EventEditorPropose              EventType = "editor.propose"
 	EventEditorApply                EventType = "editor.apply"
+	EventUICommand                  EventType = "ui.command"
 	EventExperimentStarted          EventType = "experiment.started"
 	EventExperimentCompleted        EventType = "experiment.completed"
 	EventExperimentFailed           EventType = "experiment.failed"
@@ -43,6 +44,14 @@ const (
 	EventExperimentVariantCompleted EventType = "experiment.variant.completed"
 	EventExperimentVariantFailed    EventType = "experiment.variant.failed"
 	EventRLMIteration               EventType = "rlm.iteration"
+	EventCircuitFailure             EventType = "circuit.failure"
+	EventCircuitStateChange         EventType = "circuit.state_change"
+
+	// RLM transparency events
+	EventRLMEscalation    EventType = "rlm.escalation"     // Weight tier escalation
+	EventRLMToolCall      EventType = "rlm.tool_call"      // Sub-agent tool execution
+	EventRLMReasoning     EventType = "rlm.reasoning"      // Coordinator reasoning trace
+	EventRLMBudgetWarning EventType = "rlm.budget_warning" // Token/time budget alerts
 )
 
 // Event describes workflow telemetry that UIs and IPC clients can consume.

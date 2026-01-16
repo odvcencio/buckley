@@ -1,4 +1,4 @@
-// Package runtime provides the widget runtime for Buckley's TUI.
+// Package runtime provides a widget runtime for terminal UIs.
 // It implements a constraint-based layout system with focus management
 // and a modal stack for overlays.
 package runtime
@@ -166,6 +166,23 @@ type Widget interface {
 	// HandleMessage processes input/events.
 	// Returns result indicating if handled and any commands to bubble up.
 	HandleMessage(msg Message) HandleResult
+}
+
+// BoundsProvider reports the widget's assigned bounds.
+type BoundsProvider interface {
+	Bounds() Rect
+}
+
+// ChildProvider exposes child widgets for container traversal.
+type ChildProvider interface {
+	ChildWidgets() []Widget
+}
+
+// Invalidatable marks widgets that can report whether they need a render pass.
+type Invalidatable interface {
+	Invalidate()
+	NeedsRender() bool
+	ClearInvalidation()
 }
 
 // Focusable extends Widget for widgets that can receive keyboard focus.

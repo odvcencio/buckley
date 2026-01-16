@@ -18,7 +18,7 @@ import (
 	"github.com/odvcencio/buckley/pkg/config"
 	"github.com/odvcencio/buckley/pkg/orchestrator"
 	"github.com/odvcencio/buckley/pkg/storage"
-	"github.com/odvcencio/buckley/pkg/ui/viewmodel"
+	"github.com/odvcencio/buckley/pkg/ui/buckley/viewmodel"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"

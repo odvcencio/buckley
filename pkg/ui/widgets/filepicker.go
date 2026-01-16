@@ -77,12 +77,13 @@ func (f *FilePickerWidget) Layout(bounds runtime.Rect) {
 	x := bounds.X + (bounds.Width-size.Width)/2
 	y := bounds.Y + (bounds.Height-size.Height)/2
 
-	f.bounds = runtime.Rect{
+	newBounds := runtime.Rect{
 		X:      x,
 		Y:      y,
 		Width:  size.Width,
 		Height: size.Height,
 	}
+	f.Base.Layout(newBounds)
 }
 
 // Render draws the file picker.

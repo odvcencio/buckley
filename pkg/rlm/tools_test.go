@@ -26,7 +26,7 @@ func TestDelegateToolValidation(t *testing.T) {
 
 func TestDelegateToolEmptyTask(t *testing.T) {
 	// Create a minimal dispatcher that won't be called
-	tool := &DelegateTool{dispatcher: &BatchDispatcher{}}
+	tool := &DelegateTool{dispatcher: &Dispatcher{}}
 
 	tests := []struct {
 		name   string
@@ -161,29 +161,6 @@ func TestSetAnswerToolSuccess(t *testing.T) {
 	}
 }
 
-func TestParseWeight(t *testing.T) {
-	tests := []struct {
-		input any
-		want  Weight
-	}{
-		{nil, Weight("")},
-		{"", Weight("")},
-		{"trivial", WeightTrivial},
-		{"LIGHT", WeightLight},
-		{"  medium  ", WeightMedium},
-		{"heavy", WeightHeavy},
-		{"reasoning", WeightReasoning},
-		{123, Weight("")},
-	}
-
-	for _, tt := range tests {
-		got := parseWeight(tt.input)
-		if got != tt.want {
-			t.Errorf("parseWeight(%v) = %q, want %q", tt.input, got, tt.want)
-		}
-	}
-}
-
 func TestParseStringSlice(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -294,8 +271,8 @@ func TestParseSubTasks(t *testing.T) {
 		{
 			name: "valid multiple tasks",
 			input: []any{
-				map[string]any{"task": "task 1", "weight": "light"},
-				map[string]any{"task": "task 2", "weight": "heavy"},
+				map[string]any{"task": "task 1"},
+				map[string]any{"task": "task 2", "tools": []any{"file", "shell"}},
 			},
 			wantLen: 2,
 		},
@@ -316,7 +293,7 @@ func TestParseSubTasks(t *testing.T) {
 		},
 		{
 			name:    "missing task prompt",
-			input:   []any{map[string]any{"weight": "light"}},
+			input:   []any{map[string]any{"tools": []any{"file"}}},
 			wantErr: true,
 		},
 	}
@@ -356,7 +333,7 @@ func TestDelegateBatchToolValidation(t *testing.T) {
 }
 
 func TestDelegateBatchToolMissingTasks(t *testing.T) {
-	tool := &DelegateBatchTool{dispatcher: &BatchDispatcher{}}
+	tool := &DelegateBatchTool{dispatcher: &Dispatcher{}}
 
 	result, err := tool.Execute(map[string]any{})
 	if err != nil {

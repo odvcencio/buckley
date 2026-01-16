@@ -42,6 +42,24 @@ func TestDefaultTheme(t *testing.T) {
 	if th.AccentGlow == (compositor.Style{}) {
 		t.Error("AccentGlow style not set")
 	}
+	if th.ElectricBlue == (compositor.Style{}) {
+		t.Error("ElectricBlue style not set")
+	}
+	if th.Coral == (compositor.Style{}) {
+		t.Error("Coral style not set")
+	}
+	if th.Teal == (compositor.Style{}) {
+		t.Error("Teal style not set")
+	}
+	if th.BlueGlow == (compositor.Style{}) {
+		t.Error("BlueGlow style not set")
+	}
+	if th.PurpleGlow == (compositor.Style{}) {
+		t.Error("PurpleGlow style not set")
+	}
+	if th.CoralGlow == (compositor.Style{}) {
+		t.Error("CoralGlow style not set")
+	}
 
 	// Verify semantic colors
 	if th.Success == (compositor.Style{}) {

@@ -98,6 +98,20 @@ func (c *Conversation) AddUserMessage(content string) {
 	c.TokenCount += msg.Tokens
 }
 
+// AddUserMessageParts adds a user message with multimodal parts.
+func (c *Conversation) AddUserMessageParts(parts []model.ContentPart) {
+	text := GetContentAsString(parts)
+	msg := Message{
+		Role:      "user",
+		Content:   parts,
+		Timestamp: time.Now(),
+		Tokens:    estimateTokens(text),
+		IsSummary: false,
+	}
+	c.Messages = append(c.Messages, msg)
+	c.TokenCount += msg.Tokens
+}
+
 // AddAssistantMessage adds an assistant message
 func (c *Conversation) AddAssistantMessage(content string) {
 	c.AddAssistantMessageWithReasoning(content, "")
@@ -109,6 +123,22 @@ func (c *Conversation) AddAssistantMessageWithReasoning(content string, reasonin
 	msg := Message{
 		Role:      "assistant",
 		Content:   content,
+		Timestamp: time.Now(),
+		Tokens:    tokens,
+		IsSummary: false,
+		Reasoning: reasoning,
+	}
+	c.Messages = append(c.Messages, msg)
+	c.TokenCount += msg.Tokens
+}
+
+// AddAssistantMessageParts adds an assistant message with multimodal parts.
+func (c *Conversation) AddAssistantMessageParts(parts []model.ContentPart, reasoning string) {
+	text := GetContentAsString(parts)
+	tokens := estimateTokens(text) + estimateTokens(reasoning)
+	msg := Message{
+		Role:      "assistant",
+		Content:   parts,
 		Timestamp: time.Now(),
 		Tokens:    tokens,
 		IsSummary: false,

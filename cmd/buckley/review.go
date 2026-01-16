@@ -70,7 +70,9 @@ func runReviewCommand(args []string) error {
 	registry := tool.NewRegistry()
 	if cwd, err := os.Getwd(); err == nil {
 		registry.ConfigureContainers(cfg, cwd)
+		registry.SetSandboxConfig(cfg.Sandbox.ToSandboxConfig(cwd))
 	}
+	registerMCPTools(cfg, registry)
 
 	// Create runner with RLM for full tool access
 	runner := review.NewRunner(review.RunnerConfig{

@@ -352,3 +352,56 @@ func TestSupportsHelpersAndCostCalculation(t *testing.T) {
 		t.Fatalf("unexpected cost: %f", cost)
 	}
 }
+
+func TestChatCompletionAppliesRoutingHooks(t *testing.T) {
+	cfg := &config.Config{
+		Models: config.ModelConfig{
+			DefaultProvider: "p1",
+			FallbackChains:  map[string][]string{},
+		},
+		Providers: config.ProviderConfig{
+			ModelRouting: map[string]string{"p2": "p2"},
+		},
+	}
+	prov1 := &stubProvider{
+		id: "p1",
+		catalog: ModelCatalog{
+			Data: []ModelInfo{{ID: "p1/model-a", ContextLength: 8_000}},
+		},
+	}
+	prov2 := &stubProvider{
+		id: "p2",
+		catalog: ModelCatalog{
+			Data: []ModelInfo{{ID: "p2/model-b", ContextLength: 8_000}},
+		},
+	}
+	mgr := &Manager{
+		config:         cfg,
+		providers:      map[string]Provider{"p1": prov1, "p2": prov2},
+		providerOrder:  []string{"p1", "p2"},
+		catalog:        make(map[string]ModelInfo),
+		providerModels: make(map[string][]string),
+		modelProviders: make(map[string]string),
+		routingHooks:   NewRoutingHooks(),
+	}
+	if err := mgr.Initialize(); err != nil {
+		t.Fatalf("Initialize() error = %v", err)
+	}
+
+	mgr.RoutingHooks().Register(func(decision *RoutingDecision) *RoutingDecision {
+		decision.SelectedModel = "p2/model-b"
+		decision.Reason = "hook"
+		return decision
+	})
+
+	_, err := mgr.ChatCompletion(context.Background(), ChatRequest{
+		Model: "p1/model-a",
+	})
+	if err != nil {
+		t.Fatalf("ChatCompletion() error = %v", err)
+	}
+
+	if prov2.lastRequest.Model != "model-b" {
+		t.Fatalf("expected routed model to use p2/model-b, got %q", prov2.lastRequest.Model)
+	}
+}

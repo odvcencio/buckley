@@ -97,6 +97,9 @@ func (r *Runner) initRuntime() error {
 		if r.cfg.RLM.Coordinator.ConfidenceThreshold > 0 {
 			rlmCfg.Coordinator.ConfidenceThreshold = r.cfg.RLM.Coordinator.ConfidenceThreshold
 		}
+		if r.cfg.RLM.SubAgent.MaxConcurrent > 0 {
+			rlmCfg.SubAgent.MaxConcurrent = r.cfg.RLM.SubAgent.MaxConcurrent
+		}
 	}
 
 	runtime, err := rlm.NewRuntime(rlmCfg, rlm.RuntimeDeps{

@@ -80,3 +80,35 @@ func TestScratchpadEntryList(t *testing.T) {
 		t.Fatalf("expected newest entry, got %s", listed[0].Key)
 	}
 }
+
+func TestScratchpadEntryListByType(t *testing.T) {
+	store, err := New(filepath.Join(t.TempDir(), "scratchpad-type.db"))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	base := time.Now().UTC().Add(-time.Minute)
+	entries := []ScratchpadEntry{
+		{Key: "entry-1", EntryType: "analysis", Summary: "one", CreatedAt: base},
+		{Key: "entry-2", EntryType: "decision", Summary: "two", CreatedAt: base.Add(5 * time.Second)},
+		{Key: "entry-3", EntryType: "analysis", Summary: "three", CreatedAt: base.Add(10 * time.Second)},
+	}
+	for _, entry := range entries {
+		if _, err := store.UpsertScratchpadEntry(ctx, entry); err != nil {
+			t.Fatalf("UpsertScratchpadEntry() error = %v", err)
+		}
+	}
+
+	listed, err := store.ListScratchpadEntriesByType(ctx, "analysis", 10)
+	if err != nil {
+		t.Fatalf("ListScratchpadEntriesByType() error = %v", err)
+	}
+	if len(listed) != 2 {
+		t.Fatalf("expected 2 entries, got %d", len(listed))
+	}
+	if listed[0].Key != "entry-3" || listed[1].Key != "entry-1" {
+		t.Fatalf("expected newest analysis first, got %s then %s", listed[0].Key, listed[1].Key)
+	}
+}

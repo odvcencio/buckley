@@ -54,16 +54,19 @@ type WrappedLine struct {
 
 // Line represents a single line in the buffer.
 type Line struct {
-	Content      string
-	Style        LineStyle
-	Timestamp    time.Time
-	Source       string // "user", "assistant", "system", "tool"
-	Spans        []Span
-	Prefix       []Span        // Repeated prefix for wrapped lines
-	Wrapped      []WrappedLine // Pre-computed wrapped lines
-	IsCode       bool
-	IsCodeHeader bool
-	Language     string
+	Content                string
+	Style                  LineStyle
+	Timestamp              time.Time
+	Source                 string // "user", "assistant", "system", "tool"
+	Spans                  []Span
+	Prefix                 []Span        // Repeated prefix for wrapped lines
+	Wrapped                []WrappedLine // Pre-computed wrapped lines
+	IsCode                 bool
+	IsCodeHeader           bool
+	Language               string
+	MessageID              int
+	CodeLineNumberWidth    int
+	CodeLineNumberOptional bool
 }
 
 // LineStyle defines visual styling for a line.
@@ -582,6 +585,71 @@ func (b *Buffer) LatestCodeBlock() (language, code string, ok bool) {
 	return language, strings.Join(lines, "\n"), true
 }
 
+// CodeBlockAt returns the code block content containing the given line index.
+func (b *Buffer) CodeBlockAt(lineIndex int) (language, code string, ok bool) {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+
+	if lineIndex < 0 || lineIndex >= len(b.lines) {
+		return "", "", false
+	}
+	if !b.lines[lineIndex].IsCode {
+		return "", "", false
+	}
+
+	start := lineIndex
+	for start-1 >= 0 && b.lines[start-1].IsCode {
+		start--
+	}
+	end := lineIndex
+	for end+1 < len(b.lines) && b.lines[end+1].IsCode {
+		end++
+	}
+
+	for i := start; i <= end; i++ {
+		if b.lines[i].Language != "" {
+			language = b.lines[i].Language
+			break
+		}
+	}
+
+	lines := make([]string, 0, end-start+1)
+	for i := start; i <= end; i++ {
+		if b.lines[i].IsCodeHeader {
+			continue
+		}
+		lines = append(lines, b.lines[i].Content)
+	}
+	if len(lines) == 0 {
+		return language, "", false
+	}
+
+	return language, strings.Join(lines, "\n"), true
+}
+
+// CodeBlockRange returns the start and end line indices for a code block.
+func (b *Buffer) CodeBlockRange(lineIndex int) (start, end int, ok bool) {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+
+	if lineIndex < 0 || lineIndex >= len(b.lines) {
+		return 0, 0, false
+	}
+	if !b.lines[lineIndex].IsCode {
+		return 0, 0, false
+	}
+
+	start = lineIndex
+	for start-1 >= 0 && b.lines[start-1].IsCode {
+		start--
+	}
+	end = lineIndex
+	for end+1 < len(b.lines) && b.lines[end+1].IsCode {
+		end++
+	}
+	return start, end, true
+}
+
 // GetVisibleLines returns lines currently in viewport.
 func (b *Buffer) GetVisibleLines() []VisibleLine {
 	b.mu.RLock()
@@ -594,15 +662,18 @@ func (b *Buffer) GetVisibleLines() []VisibleLine {
 		for wrapIdx, wrapped := range line.Wrapped {
 			if rowIndex >= b.scrollTop && rowIndex < b.scrollTop+b.height {
 				vl := VisibleLine{
-					Content:   wrapped.Text,
-					Spans:     wrapped.Spans,
-					Style:     line.Style,
-					Source:    line.Source,
-					LineIndex: lineIdx,
-					WrapIndex: wrapIdx,
-					RowIndex:  rowIndex - b.scrollTop,
-					IsCode:    line.IsCode,
-					Language:  line.Language,
+					Content:                wrapped.Text,
+					Spans:                  wrapped.Spans,
+					Style:                  line.Style,
+					Source:                 line.Source,
+					LineIndex:              lineIdx,
+					WrapIndex:              wrapIdx,
+					RowIndex:               rowIndex - b.scrollTop,
+					IsCode:                 line.IsCode,
+					Language:               line.Language,
+					MessageID:              line.MessageID,
+					CodeLineNumberWidth:    line.CodeLineNumberWidth,
+					CodeLineNumberOptional: line.CodeLineNumberOptional,
 				}
 
 				// Check selection
@@ -628,19 +699,76 @@ func (b *Buffer) GetVisibleLines() []VisibleLine {
 	return result
 }
 
+// VisibleLineAt returns the visible line at the given viewport row.
+func (b *Buffer) VisibleLineAt(row int) (VisibleLine, bool) {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+
+	if row < 0 || row >= b.height {
+		return VisibleLine{}, false
+	}
+
+	absoluteRow := b.scrollTop + row
+	if absoluteRow < 0 || absoluteRow >= b.totalRows {
+		return VisibleLine{}, false
+	}
+
+	rowIndex := 0
+	for lineIdx, line := range b.lines {
+		for wrapIdx, wrapped := range line.Wrapped {
+			if rowIndex == absoluteRow {
+				return VisibleLine{
+					Content:                wrapped.Text,
+					Spans:                  wrapped.Spans,
+					Style:                  line.Style,
+					Source:                 line.Source,
+					LineIndex:              lineIdx,
+					WrapIndex:              wrapIdx,
+					RowIndex:               row,
+					IsCode:                 line.IsCode,
+					Language:               line.Language,
+					MessageID:              line.MessageID,
+					CodeLineNumberWidth:    line.CodeLineNumberWidth,
+					CodeLineNumberOptional: line.CodeLineNumberOptional,
+				}, true
+			}
+			rowIndex++
+			if rowIndex > absoluteRow {
+				break
+			}
+		}
+	}
+
+	return VisibleLine{}, false
+}
+
+// LineAt returns the raw line at the given index.
+func (b *Buffer) LineAt(index int) (Line, bool) {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+
+	if index < 0 || index >= len(b.lines) {
+		return Line{}, false
+	}
+	return b.lines[index], true
+}
+
 // VisibleLine represents a line ready for rendering.
 type VisibleLine struct {
-	Content          string
-	Spans            []Span
-	Style            LineStyle
-	Source           string // "user", "assistant", "system", "tool"
-	LineIndex        int    // Original line index
-	WrapIndex        int    // Wrap segment index
-	RowIndex         int    // Row in viewport (0 = top)
-	Selected         bool
-	SearchHighlights []int // Column indices of search matches
-	IsCode           bool
-	Language         string
+	Content                string
+	Spans                  []Span
+	Style                  LineStyle
+	Source                 string // "user", "assistant", "system", "tool"
+	LineIndex              int    // Original line index
+	WrapIndex              int    // Wrap segment index
+	RowIndex               int    // Row in viewport (0 = top)
+	Selected               bool
+	SearchHighlights       []int // Column indices of search matches
+	IsCode                 bool
+	Language               string
+	MessageID              int
+	CodeLineNumberWidth    int
+	CodeLineNumberOptional bool
 }
 
 // LineCount returns total line count.
@@ -648,6 +776,28 @@ func (b *Buffer) LineCount() int {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	return len(b.lines)
+}
+
+// GetAllContent returns all text content from the buffer.
+func (b *Buffer) GetAllContent(limit int) []string {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+
+	if limit <= 0 || limit > len(b.lines) {
+		limit = len(b.lines)
+	}
+
+	// Get the last N lines
+	start := len(b.lines) - limit
+	if start < 0 {
+		start = 0
+	}
+
+	result := make([]string, 0, limit)
+	for i := start; i < len(b.lines); i++ {
+		result = append(result, b.lines[i].Content)
+	}
+	return result
 }
 
 // RowCount returns total rendered row count.
