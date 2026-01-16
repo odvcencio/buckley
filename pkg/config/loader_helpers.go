@@ -419,6 +419,37 @@ func mergeConfigs(base, override *Config, raw map[string]any) {
 		base.Approval.AutoApprovePatterns = append([]string{}, override.Approval.AutoApprovePatterns...)
 	}
 
+	if boolFieldSet(raw, "sandbox", "mode") {
+		base.Sandbox.Mode = override.Sandbox.Mode
+	}
+	if boolFieldSet(raw, "sandbox", "allow_unsafe") {
+		base.Sandbox.AllowUnsafe = override.Sandbox.AllowUnsafe
+	}
+	if boolFieldSet(raw, "sandbox", "workspace_path") {
+		base.Sandbox.WorkspacePath = override.Sandbox.WorkspacePath
+	}
+	if boolFieldSet(raw, "sandbox", "allowed_paths") {
+		base.Sandbox.AllowedPaths = append([]string{}, override.Sandbox.AllowedPaths...)
+	}
+	if boolFieldSet(raw, "sandbox", "denied_paths") {
+		base.Sandbox.DeniedPaths = append([]string{}, override.Sandbox.DeniedPaths...)
+	}
+	if boolFieldSet(raw, "sandbox", "allowed_commands") {
+		base.Sandbox.AllowedCommands = append([]string{}, override.Sandbox.AllowedCommands...)
+	}
+	if boolFieldSet(raw, "sandbox", "denied_commands") {
+		base.Sandbox.DeniedCommands = append([]string{}, override.Sandbox.DeniedCommands...)
+	}
+	if boolFieldSet(raw, "sandbox", "allow_network") {
+		base.Sandbox.AllowNetwork = override.Sandbox.AllowNetwork
+	}
+	if boolFieldSet(raw, "sandbox", "timeout") {
+		base.Sandbox.Timeout = override.Sandbox.Timeout
+	}
+	if boolFieldSet(raw, "sandbox", "max_output_bytes") {
+		base.Sandbox.MaxOutputBytes = override.Sandbox.MaxOutputBytes
+	}
+
 	if boolFieldSet(raw, "tool_middleware", "default_timeout") {
 		base.ToolMiddleware.DefaultTimeout = override.ToolMiddleware.DefaultTimeout
 	}

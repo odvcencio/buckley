@@ -51,14 +51,14 @@ func TestStartEmbeddedIPCServerGuardsAndTokenError(t *testing.T) {
 
 func TestStartACPServerGuardsAndErrors(t *testing.T) {
 	cfg := config.DefaultConfig()
-	stop, err := startACPServer(cfg, nil, nil)
+	stop, err := startACPServer(cfg, nil, nil, nil)
 	if err != nil || stop != nil {
 		t.Fatalf("expected empty listen to noop, got stopSet=%v err=%v", stop != nil, err)
 	}
 
 	cfg = config.DefaultConfig()
 	cfg.ACP.Listen = "0.0.0.0:5555"
-	_, err = startACPServer(cfg, nil, nil)
+	_, err = startACPServer(cfg, nil, nil, nil)
 	if err == nil || !strings.Contains(err.Error(), "requires mTLS") {
 		t.Fatalf("expected tls/loopback guard error, got %v", err)
 	}

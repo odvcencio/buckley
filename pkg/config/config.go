@@ -11,6 +11,7 @@ import (
 
 	"github.com/odvcencio/buckley/pkg/giturl"
 	"github.com/odvcencio/buckley/pkg/personality"
+	"github.com/odvcencio/buckley/pkg/sandbox"
 	corev1 "k8s.io/api/core/v1"
 )
 
@@ -63,6 +64,7 @@ type Config struct {
 	Oneshot        OneshotModeConfig    `yaml:"oneshot"`
 	RLM            RLMConfig            `yaml:"rlm"`
 	Approval       ApprovalConfig       `yaml:"approval"`
+	Sandbox        SandboxConfig        `yaml:"sandbox"`
 	ToolMiddleware ToolMiddlewareConfig `yaml:"tool_middleware"`
 	MCP            MCPConfig            `yaml:"mcp"`
 	ACP            ACPConfig            `yaml:"acp"`
@@ -383,6 +385,72 @@ type ApprovalConfig struct {
 	AutoApprovePatterns []string `yaml:"auto_approve_patterns"`
 }
 
+// SandboxConfig controls command sandboxing for tool execution.
+type SandboxConfig struct {
+	// Mode sets the sandbox level: disabled, readonly, workspace, strict
+	Mode string `yaml:"mode"`
+
+	// AllowUnsafe must be true to allow mode=disabled.
+	AllowUnsafe bool `yaml:"allow_unsafe"`
+
+	// WorkspacePath is the default working directory for sandbox checks.
+	WorkspacePath string `yaml:"workspace_path"`
+
+	// AllowedPaths are additional allowed paths (overrides default when set).
+	AllowedPaths []string `yaml:"allowed_paths"`
+
+	// DeniedPaths are paths that are never allowed.
+	DeniedPaths []string `yaml:"denied_paths"`
+
+	// AllowedCommands are explicit allowlist entries for strict mode.
+	AllowedCommands []string `yaml:"allowed_commands"`
+
+	// DeniedCommands are explicit denylist entries.
+	DeniedCommands []string `yaml:"denied_commands"`
+
+	// AllowNetwork permits network access when true.
+	AllowNetwork bool `yaml:"allow_network"`
+
+	// Timeout caps command runtime (0 = no timeout).
+	Timeout time.Duration `yaml:"timeout"`
+
+	// MaxOutputBytes caps command output (0 = unlimited).
+	MaxOutputBytes int64 `yaml:"max_output_bytes"`
+}
+
+// ToSandboxConfig converts the config into a runtime sandbox configuration.
+func (c SandboxConfig) ToSandboxConfig(workDir string) sandbox.Config {
+	mode, err := parseSandboxMode(c.Mode)
+	if err != nil {
+		mode = sandbox.ModeWorkspace
+	}
+
+	cfg := sandbox.Config{
+		Mode:            mode,
+		WorkspacePath:   strings.TrimSpace(c.WorkspacePath),
+		AllowedPaths:    append([]string{}, c.AllowedPaths...),
+		DeniedPaths:     append([]string{}, c.DeniedPaths...),
+		AllowedCommands: append([]string{}, c.AllowedCommands...),
+		DeniedCommands:  append([]string{}, c.DeniedCommands...),
+		AllowNetwork:    c.AllowNetwork,
+		Timeout:         c.Timeout,
+		MaxOutputSize:   c.MaxOutputBytes,
+	}
+
+	if cfg.WorkspacePath == "" && strings.TrimSpace(workDir) != "" {
+		cfg.WorkspacePath = strings.TrimSpace(workDir)
+	}
+	if cfg.WorkspacePath != "" {
+		if len(cfg.AllowedPaths) == 0 {
+			cfg.AllowedPaths = []string{cfg.WorkspacePath}
+		} else if !containsString(cfg.AllowedPaths, cfg.WorkspacePath) {
+			cfg.AllowedPaths = append(cfg.AllowedPaths, cfg.WorkspacePath)
+		}
+	}
+
+	return cfg
+}
+
 // WorktreeConfig controls git worktree behavior
 type WorktreeConfig struct {
 	UseContainers    bool   `yaml:"use_containers"`
@@ -579,6 +647,43 @@ func defaultACPStore() string {
 		return "nats"
 	}
 	return "sqlite"
+}
+
+func defaultSandboxConfig() SandboxConfig {
+	cfg := SandboxConfig{
+		Mode:           "workspace",
+		AllowUnsafe:    false,
+		AllowNetwork:   false,
+		Timeout:        5 * time.Minute,
+		MaxOutputBytes: 10 * 1024 * 1024,
+	}
+
+	if cwd, err := os.Getwd(); err == nil && strings.TrimSpace(cwd) != "" {
+		cfg.WorkspacePath = cwd
+		cfg.AllowedPaths = []string{cwd}
+	}
+
+	home, err := os.UserHomeDir()
+	if err == nil && strings.TrimSpace(home) != "" {
+		cfg.DeniedPaths = append(cfg.DeniedPaths,
+			filepath.Join(home, ".ssh"),
+			filepath.Join(home, ".gnupg"),
+			filepath.Join(home, ".aws"),
+		)
+	}
+	cfg.DeniedPaths = append(cfg.DeniedPaths, "/etc", "/var", "/usr", "/bin", "/sbin")
+	cfg.DeniedCommands = []string{
+		"rm -rf /",
+		"rm -rf ~",
+		"sudo rm",
+		"chmod 777",
+		"curl | sh",
+		"curl | bash",
+		"wget | sh",
+		"wget | bash",
+	}
+
+	return cfg
 }
 
 func defaultNATSURL() string {
@@ -800,6 +905,7 @@ func DefaultConfig() *Config {
 				"pytest",
 			},
 		},
+		Sandbox: defaultSandboxConfig(),
 		ToolMiddleware: ToolMiddlewareConfig{
 			DefaultTimeout: 2 * time.Minute,
 			MaxResultBytes: 100_000,
@@ -1065,6 +1171,25 @@ func applyEnvOverrides(cfg *Config, configEnv map[string]string) {
 	if v := os.Getenv("BUCKLEY_APPROVAL_MODE"); v != "" {
 		cfg.Approval.Mode = v
 	}
+	if v := os.Getenv("BUCKLEY_TOOL_SANDBOX_MODE"); v != "" {
+		cfg.Sandbox.Mode = v
+	}
+	if val, ok := envBool("BUCKLEY_UNSAFE"); ok && val {
+		cfg.Sandbox.AllowUnsafe = true
+	}
+	if val, ok := envBool("BUCKLEY_TOOL_SANDBOX_ALLOW_NETWORK"); ok {
+		cfg.Sandbox.AllowNetwork = val
+	}
+	if v := strings.TrimSpace(os.Getenv("BUCKLEY_TOOL_SANDBOX_TIMEOUT")); v != "" {
+		if dur, err := time.ParseDuration(v); err == nil {
+			cfg.Sandbox.Timeout = dur
+		}
+	}
+	if v := strings.TrimSpace(os.Getenv("BUCKLEY_TOOL_SANDBOX_MAX_OUTPUT_BYTES")); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
+			cfg.Sandbox.MaxOutputBytes = n
+		}
+	}
 	if v := os.Getenv("BUCKLEY_EXECUTION_MODE"); v != "" {
 		cfg.Execution.Mode = v
 	}
@@ -1322,6 +1447,30 @@ func normalizeMode(mode, fallback string) string {
 	return mode
 }
 
+func parseSandboxMode(mode string) (sandbox.Mode, error) {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "", "workspace":
+		return sandbox.ModeWorkspace, nil
+	case "readonly", "read-only", "read_only":
+		return sandbox.ModeReadOnly, nil
+	case "strict":
+		return sandbox.ModeStrict, nil
+	case "disabled", "disable", "off", "none":
+		return sandbox.ModeDisabled, nil
+	default:
+		return sandbox.ModeWorkspace, fmt.Errorf("invalid sandbox mode: %s (valid: disabled, readonly, workspace, strict)", mode)
+	}
+}
+
+func containsString(values []string, target string) bool {
+	for _, value := range values {
+		if strings.TrimSpace(value) == target {
+			return true
+		}
+	}
+	return false
+}
+
 // Validate checks configuration validity
 func (c *Config) Validate() error {
 	// Validate trust level
@@ -1354,6 +1503,19 @@ func (c *Config) Validate() error {
 	}
 	if c.Approval.Mode != "" && !validApprovalModes[strings.ToLower(c.Approval.Mode)] {
 		return fmt.Errorf("invalid approval mode: %s (valid: ask, safe, auto, yolo)", c.Approval.Mode)
+	}
+	sandboxMode, err := parseSandboxMode(c.Sandbox.Mode)
+	if err != nil {
+		return err
+	}
+	if sandboxMode == sandbox.ModeDisabled && !c.Sandbox.AllowUnsafe {
+		return fmt.Errorf("sandbox.mode disabled requires sandbox.allow_unsafe: true")
+	}
+	if c.Sandbox.Timeout < 0 {
+		return fmt.Errorf("sandbox.timeout must be >= 0")
+	}
+	if c.Sandbox.MaxOutputBytes < 0 {
+		return fmt.Errorf("sandbox.max_output_bytes must be >= 0")
 	}
 
 	if c.ToolMiddleware.DefaultTimeout < 0 {

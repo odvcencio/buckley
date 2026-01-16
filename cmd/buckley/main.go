@@ -222,8 +222,17 @@ func main() {
 		}
 	}
 
+	coordRuntime, err := initCoordinationRuntime(cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error initializing coordination runtime: %v\n", err)
+		os.Exit(1)
+	}
+	defer coordRuntime.Close()
+
 	telemetryHub := telemetry.NewHub()
 	defer telemetryHub.Close()
+	stopTelemetry := startTelemetryPersistence(context.Background(), telemetryHub, coordRuntime.eventStore)
+	defer stopTelemetry()
 
 	// Create and run TUI
 	ctrl, err := tui.NewController(tui.ControllerConfig{
@@ -389,6 +398,9 @@ func applyToolDefaults(registry *tool.Registry, cfg *config.Config, hub *telemet
 	defaults.TelemetryHub = hub
 	defaults.TelemetrySessionID = strings.TrimSpace(sessionID)
 	tool.ApplyRegistryConfig(registry, defaults)
+	if cfg != nil {
+		registry.SetSandboxConfig(cfg.Sandbox.ToSandboxConfig(""))
+	}
 }
 
 func copyDurationMap(src map[string]time.Duration) map[string]time.Duration {
@@ -1463,7 +1475,7 @@ func humanReadableURL(bind string) string {
 }
 
 // startACPServer launches the ACP gRPC server when configured.
-func startACPServer(cfg *config.Config, mgr *model.Manager, store *storage.Store) (func(), error) {
+func startACPServer(cfg *config.Config, mgr *model.Manager, store *storage.Store, runtime *coordinationRuntime) (func(), error) {
 	acpCfg := cfg.ACP
 	if strings.TrimSpace(acpCfg.Listen) == "" {
 		return nil, nil
@@ -1502,55 +1514,43 @@ func startACPServer(cfg *config.Config, mgr *model.Manager, store *storage.Store
 		fmt.Fprintf(os.Stderr, "Warning: starting ACP without TLS (allow_insecure_local=true for %s)\n", acpCfg.Listen)
 	}
 
+	var err error
 	var eventStore coordevents.EventStore
-	var closer func()
-
-	if strings.ToLower(acpCfg.EventStore) == "nats" {
-		opts := coordevents.NATSOptions{
-			URL:            acpCfg.NATS.URL,
-			Username:       acpCfg.NATS.Username,
-			Password:       acpCfg.NATS.Password,
-			Token:          acpCfg.NATS.Token,
-			TLS:            acpCfg.NATS.TLS,
-			StreamPrefix:   acpCfg.NATS.StreamPrefix,
-			SnapshotBucket: acpCfg.NATS.SnapshotBucket,
-			ConnectTimeout: acpCfg.NATS.ConnectTimeout,
-			RequestTimeout: acpCfg.NATS.RequestTimeout,
-		}
-		store, err := coordevents.NewNATSEventStore(opts)
-		if err != nil {
-			return nil, fmt.Errorf("init NATS event store: %w", err)
-		}
-		eventStore = store
-		closer = store.Close
+	var closeStore func()
+	if runtime != nil && runtime.eventStore != nil {
+		eventStore = runtime.eventStore
 	} else {
-		dbPath, err := resolveACPEventsDBPath()
+		store, closer, err := buildCoordinationEventStore(cfg)
 		if err != nil {
 			return nil, err
 		}
-		if err := os.MkdirAll(filepath.Dir(dbPath), 0o700); err != nil {
-			return nil, fmt.Errorf("init SQLite event store: ensure directory: %w", err)
-		}
-		store, err := coordevents.NewSQLiteEventStore(dbPath)
-		if err != nil {
-			return nil, fmt.Errorf("init SQLite event store: %w", err)
-		}
 		eventStore = store
-		closer = func() { _ = store.Close() }
+		closeStore = closer
 	}
 
-	coord, err := coordination.NewCoordinator(coordination.DefaultConfig(), eventStore)
-	if err != nil {
-		if closer != nil {
-			closer()
+	coord := (*coordination.Coordinator)(nil)
+	if runtime != nil {
+		coord = runtime.coordinator
+	}
+	if coord == nil {
+		coord, err = coordination.NewCoordinator(coordination.DefaultConfig(), eventStore)
+		if err != nil {
+			if closeStore != nil {
+				closeStore()
+			}
+			return nil, fmt.Errorf("init ACP coordinator: %w", err)
 		}
-		return nil, fmt.Errorf("init ACP coordinator: %w", err)
 	}
-
+	if coord == nil {
+		if closeStore != nil {
+			closeStore()
+		}
+		return nil, fmt.Errorf("init ACP coordinator: coordinator is nil")
+	}
 	srv, err := acpserver.NewServer(coord, mgr, cfg, store)
 	if err != nil {
-		if closer != nil {
-			closer()
+		if closeStore != nil {
+			closeStore()
 		}
 		return nil, fmt.Errorf("init ACP gRPC server: %w", err)
 	}
@@ -1568,8 +1568,8 @@ func startACPServer(cfg *config.Config, mgr *model.Manager, store *storage.Store
 
 	lis, err := net.Listen("tcp", acpCfg.Listen)
 	if err != nil {
-		if closer != nil {
-			closer()
+		if closeStore != nil {
+			closeStore()
 		}
 		return nil, fmt.Errorf("listen on %s: %w", acpCfg.Listen, err)
 	}
@@ -1581,8 +1581,8 @@ func startACPServer(cfg *config.Config, mgr *model.Manager, store *storage.Store
 
 	stop := func() {
 		grpcServer.GracefulStop()
-		if closer != nil {
-			closer()
+		if closeStore != nil {
+			closeStore()
 		}
 	}
 

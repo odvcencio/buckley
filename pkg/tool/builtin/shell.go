@@ -8,6 +8,8 @@ import (
 	"runtime"
 	"strings"
 	"time"
+
+	"github.com/odvcencio/buckley/pkg/sandbox"
 )
 
 const (
@@ -22,6 +24,8 @@ type ShellCommandTool struct {
 	composeFile      string
 	containerService string
 	containerWorkDir string
+	sandboxConfig    sandbox.Config
+	sandboxEnabled   bool
 }
 
 // ConfigureContainerMode enables docker compose execution for commands.
@@ -76,6 +80,15 @@ func (t *ShellCommandTool) Parameters() ParameterSchema {
 	}
 }
 
+// SetSandboxConfig configures command sandboxing.
+func (t *ShellCommandTool) SetSandboxConfig(cfg sandbox.Config) {
+	if t == nil {
+		return
+	}
+	t.sandboxConfig = cfg
+	t.sandboxEnabled = true
+}
+
 func (t *ShellCommandTool) Execute(params map[string]any) (*Result, error) {
 	cmd, ok := params["command"].(string)
 	if !ok || strings.TrimSpace(cmd) == "" {
@@ -91,6 +104,13 @@ func (t *ShellCommandTool) Execute(params map[string]any) (*Result, error) {
 	interactive := parseBoolParam(params["interactive"], false)
 	if interactive && !explicitTimeout {
 		timeout = 0 // allow long-lived interactive sessions unless user overrides
+	}
+
+	if t.sandboxEnabled && !t.containerEnabled {
+		sandboxCfg := t.sandboxConfigForCommand()
+		if err := sandbox.New(sandboxCfg).Validate(cmd); err != nil {
+			return &Result{Success: false, Error: "sandbox blocked command: " + err.Error()}, nil
+		}
 	}
 
 	if interactive {
@@ -208,6 +228,37 @@ func (t *ShellCommandTool) Execute(params map[string]any) (*Result, error) {
 	}
 
 	return result, nil
+}
+
+func (t *ShellCommandTool) sandboxConfigForCommand() sandbox.Config {
+	cfg := t.sandboxConfig
+	cfg.AllowedPaths = append([]string{}, cfg.AllowedPaths...)
+	cfg.DeniedPaths = append([]string{}, cfg.DeniedPaths...)
+	cfg.AllowedCommands = append([]string{}, cfg.AllowedCommands...)
+	cfg.DeniedCommands = append([]string{}, cfg.DeniedCommands...)
+
+	workDir := strings.TrimSpace(t.workDir)
+	if cfg.WorkspacePath == "" && workDir != "" {
+		cfg.WorkspacePath = workDir
+	}
+	if workDir != "" {
+		if len(cfg.AllowedPaths) == 0 {
+			cfg.AllowedPaths = []string{workDir}
+		} else if !containsPath(cfg.AllowedPaths, workDir) {
+			cfg.AllowedPaths = append(cfg.AllowedPaths, workDir)
+		}
+	}
+
+	return cfg
+}
+
+func containsPath(paths []string, target string) bool {
+	for _, path := range paths {
+		if strings.TrimSpace(path) == target {
+			return true
+		}
+	}
+	return false
 }
 
 type interactiveLaunchResult struct {

@@ -2183,6 +2183,9 @@ func buildRegistry(cfg *config.Config, store *storage.Store, workDir string, hub
 	registryCfg.Middleware.ToastManager = toastMgr
 	registryCfg.Middleware.FileWatcher = filewatch.NewFileWatcher(100)
 	tool.ApplyRegistryConfig(registry, registryCfg)
+	if cfg != nil {
+		registry.SetSandboxConfig(cfg.Sandbox.ToSandboxConfig(workDir))
+	}
 
 	// Configure container execution if enabled
 	if cfg != nil && workDir != "" {

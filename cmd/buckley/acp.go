@@ -327,6 +327,9 @@ func getACPSessionState(
 		registry.ConfigureContainers(cfg, workDir)
 		registry.SetWorkDir(workDir)
 	}
+	if cfg != nil {
+		registry.SetSandboxConfig(cfg.Sandbox.ToSandboxConfig(workDir))
+	}
 	registry.Register(&builtin.SkillActivationTool{
 		Registry:     skills,
 		Conversation: skillState,

@@ -277,6 +277,7 @@ func runRalphCommand(args []string) error {
 	registry := tool.NewRegistry()
 	registry.SetWorkDir(sandboxPath)
 	registry.ConfigureContainers(cfg, sandboxPath)
+	registry.SetSandboxConfig(cfg.Sandbox.ToSandboxConfig(sandboxPath))
 	registerMCPTools(cfg, registry)
 
 	// Create headless runner

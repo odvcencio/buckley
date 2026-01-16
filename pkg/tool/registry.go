@@ -16,6 +16,7 @@ import (
 	"github.com/odvcencio/buckley/pkg/conversation"
 	"github.com/odvcencio/buckley/pkg/embeddings"
 	"github.com/odvcencio/buckley/pkg/mission"
+	"github.com/odvcencio/buckley/pkg/sandbox"
 	"github.com/odvcencio/buckley/pkg/storage"
 	"github.com/odvcencio/buckley/pkg/telemetry"
 	"github.com/odvcencio/buckley/pkg/tool/builtin"
@@ -155,6 +156,19 @@ func (r *Registry) SetMaxOutputBytes(max int) {
 	for _, t := range tools {
 		if setter, ok := t.(interface{ SetMaxOutputBytes(int) }); ok {
 			setter.SetMaxOutputBytes(max)
+		}
+	}
+}
+
+// SetSandboxConfig configures command sandboxing for tools that support it.
+func (r *Registry) SetSandboxConfig(cfg sandbox.Config) {
+	if r == nil {
+		return
+	}
+	tools := r.snapshotTools()
+	for _, t := range tools {
+		if setter, ok := t.(interface{ SetSandboxConfig(sandbox.Config) }); ok {
+			setter.SetSandboxConfig(cfg)
 		}
 	}
 }
