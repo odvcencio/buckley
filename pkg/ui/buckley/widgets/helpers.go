@@ -1,4 +1,4 @@
-package buckley
+package widgets
 
 func intToStr(n int) string {
 	if n == 0 {

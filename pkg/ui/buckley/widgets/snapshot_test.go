@@ -1,4 +1,4 @@
-package buckley
+package widgets
 
 import (
 	"flag"

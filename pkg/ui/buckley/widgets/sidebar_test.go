@@ -1,4 +1,4 @@
-package buckley
+package widgets
 
 import (
 	"testing"
@@ -96,7 +96,7 @@ func TestSidebar_SetRecentFiles(t *testing.T) {
 
 	files := []string{
 		"pkg/api/server.go",
-		"pkg/ui/widgets/sidebar.go",
+		"pkg/ui/buckley/widgets/sidebar.go",
 	}
 	s.SetRecentFiles(files)
 
@@ -109,15 +109,15 @@ func TestSidebar_SetActiveTouches(t *testing.T) {
 	s := NewSidebar()
 
 	touches := []TouchSummary{
-		{Path: "pkg/ui/widgets/sidebar.go", Operation: "write"},
-		{Path: "pkg/ui/tui/app_widget.go", Operation: "read"},
+		{Path: "pkg/ui/buckley/widgets/sidebar.go", Operation: "write"},
+		{Path: "pkg/ui/buckley/tui/app_widget.go", Operation: "read"},
 	}
 	s.SetActiveTouches(touches)
 
 	if len(s.activeTouches) != 2 {
 		t.Errorf("expected 2 touches, got %d", len(s.activeTouches))
 	}
-	if s.activeTouches[0].Path != "pkg/ui/widgets/sidebar.go" {
+	if s.activeTouches[0].Path != "pkg/ui/buckley/widgets/sidebar.go" {
 		t.Errorf("expected first touch path, got %s", s.activeTouches[0].Path)
 	}
 }

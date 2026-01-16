@@ -26,7 +26,7 @@ import (
 	"github.com/odvcencio/buckley/pkg/ui/theme"
 	"github.com/odvcencio/buckley/pkg/ui/toast"
 	"github.com/odvcencio/buckley/pkg/ui/widgets"
-	buckleywidgets "github.com/odvcencio/buckley/pkg/ui/widgets/buckley"
+	buckleywidgets "github.com/odvcencio/buckley/pkg/ui/buckley/widgets"
 )
 
 // RenderMetrics tracks rendering performance statistics.

@@ -1,4 +1,4 @@
-package buckley
+package widgets
 
 import (
 	"github.com/odvcencio/buckley/pkg/ui/backend"

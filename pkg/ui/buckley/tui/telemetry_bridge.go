@@ -10,7 +10,7 @@ import (
 
 	"github.com/odvcencio/buckley/pkg/telemetry"
 	"github.com/odvcencio/buckley/pkg/touch"
-	buckleywidgets "github.com/odvcencio/buckley/pkg/ui/widgets/buckley"
+	buckleywidgets "github.com/odvcencio/buckley/pkg/ui/buckley/widgets"
 )
 
 // TelemetryUIBridge forwards telemetry events to the TUI for sidebar updates.
