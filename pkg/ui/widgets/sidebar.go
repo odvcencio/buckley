@@ -1009,34 +1009,19 @@ func (s *Sidebar) renderContext(buf *runtime.Buffer, x, y, width int) int {
 		showPercent = false
 	}
 
-	fill := int(float64(barWidth)*ratio + 0.5)
-	if fill < 0 {
-		fill = 0
-	}
-	if fill > barWidth {
-		fill = barWidth
-	}
-
-	fillStyle := s.contextActive
-	if ratio >= 0.85 {
-		fillStyle = s.contextCritical
-	} else if ratio >= 0.6 {
-		fillStyle = s.contextWarn
-	}
-
 	barX := x + 2
-	for i := 0; i < barWidth; i++ {
-		ch := '░'
-		style := s.contextMuted
-		if i < fill {
-			ch = '█'
-			style = fillStyle
-			if i == fill-1 {
-				style = s.progressEdge
-			}
-		}
-		buf.Set(barX+i, y, ch, style)
+	gaugeStyle := GaugeStyle{
+		FillChar:  '█',
+		EmptyChar: '░',
+		Thresholds: []GaugeThreshold{
+			{Ratio: 0.0, Style: s.contextActive},
+			{Ratio: 0.6, Style: s.contextWarn},
+			{Ratio: 0.85, Style: s.contextCritical},
+		},
+		EmptyStyle: s.contextMuted,
+		EdgeStyle:  s.progressEdge,
 	}
+	DrawGauge(buf, barX, y, barWidth, ratio, gaugeStyle)
 
 	if showPercent {
 		percent := intToStr(int(ratio*100+0.5)) + "%"
