@@ -12,8 +12,8 @@ import (
 	"github.com/odvcencio/buckley/pkg/rlm"
 	"github.com/odvcencio/buckley/pkg/storage"
 	"github.com/odvcencio/buckley/pkg/telemetry"
-	"github.com/odvcencio/buckley/pkg/ui/progress"
-	"github.com/odvcencio/buckley/pkg/ui/toast"
+	"github.com/odvcencio/fluffy-ui/progress"
+	"github.com/odvcencio/fluffy-ui/toast"
 )
 
 // RLMStrategy uses the coordinator/sub-agent pattern for execution.

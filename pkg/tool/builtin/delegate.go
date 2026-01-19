@@ -116,7 +116,7 @@ func (t *CodexTool) Name() string {
 }
 
 func (t *CodexTool) Description() string {
-	return "**DELEGATE TO CODEX** when the user asks for code generation, code transformation, or quick coding tasks. Trigger phrases: 'generate code', 'write a function', 'create a script', 'transform this code', 'refactor', 'snippet'. Use this to offload coding work to Codex's specialized code generation capabilities, saving your context for higher-level coordination. Always consider delegating pure code generation tasks rather than doing them yourself."
+	return "Delegate a task to Codex CLI for code generation or transformation."
 }
 
 func (t *CodexTool) Parameters() ParameterSchema {
@@ -221,7 +221,7 @@ func (t *ClaudeTool) Name() string {
 }
 
 func (t *ClaudeTool) Description() string {
-	return "**DELEGATE TO CLAUDE** for analysis, code review, investigation, or research tasks. Trigger phrases: 'analyze', 'review', 'investigate', 'research', 'evaluate', 'assess', 'compare', 'explain how', 'what is'. Use this to get a fresh perspective or deep analysis from Claude without polluting your conversation context. Especially useful for security reviews, code quality checks, and exploratory research."
+	return "Delegate a task to Claude CLI for analysis, review, or research."
 }
 
 func (t *ClaudeTool) Parameters() ParameterSchema {
@@ -326,7 +326,7 @@ func (t *BuckleyTool) Name() string {
 }
 
 func (t *BuckleyTool) Description() string {
-	return "**SPAWN BUCKLEY SUBAGENT** for isolated, self-contained tasks that don't need conversation history. Trigger phrases: 'check if', 'quick analysis of', 'investigate file', 'search for', 'find all', 'list', 'count', 'summarize this file'. Use this when you need a fresh Buckley instance with clean context to handle a focused task independently. Perfect for parallel work, exploratory file analysis, or saving main conversation context."
+	return "Spawn a Buckley subagent to handle an isolated task independently."
 }
 
 func (t *BuckleyTool) Parameters() ParameterSchema {

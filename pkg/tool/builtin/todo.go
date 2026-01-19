@@ -101,7 +101,7 @@ func (t *TodoTool) Name() string {
 }
 
 func (t *TodoTool) Description() string {
-	return "**ALWAYS USE FOR MULTI-STEP WORK** - Manage TODO lists for systematic task execution. For complex tasks, use action='brainstorm' to analyze approaches before committing. Actions: brainstorm (analyze task, propose approaches), refine (generate TODOs from approach), commit (create TODOs), create, update, list, checkpoint, clear, get_active. This is MANDATORY for organized work."
+	return "Manage TODO lists for task tracking. Supports brainstorming, creating, updating, and listing tasks."
 }
 
 func (t *TodoTool) Parameters() ParameterSchema {

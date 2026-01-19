@@ -4,7 +4,7 @@ import (
 	"strings"
 
 	"github.com/odvcencio/buckley/pkg/tool/builtin"
-	"github.com/odvcencio/buckley/pkg/ui/toast"
+	"github.com/odvcencio/fluffy-ui/toast"
 )
 
 // ToastNotifications emits toast messages for tool failures.

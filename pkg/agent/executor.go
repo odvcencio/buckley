@@ -206,6 +206,16 @@ func (c *executorModelClient) GetExecutionModel() string {
 	return c.models.GetExecutionModel()
 }
 
+func (c *executorModelClient) ChatCompletionStream(ctx context.Context, req model.ChatRequest) (<-chan model.StreamChunk, <-chan error) {
+	if c == nil || c.models == nil {
+		errChan := make(chan error, 1)
+		errChan <- fmt.Errorf("models not available")
+		close(errChan)
+		return nil, errChan
+	}
+	return c.models.ChatCompletionStream(ctx, req)
+}
+
 type executorStreamHandler struct {
 	agent     *Agent
 	ctx       context.Context

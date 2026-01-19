@@ -40,6 +40,55 @@ func (m *MockModelClient) GetExecutionModel() string {
 	return "test-model"
 }
 
+func (m *MockModelClient) ChatCompletionStream(ctx context.Context, req model.ChatRequest) (<-chan model.StreamChunk, <-chan error) {
+	// For tests, convert non-streaming response to streaming format
+	chunkChan := make(chan model.StreamChunk, 1)
+	errChan := make(chan error, 1)
+
+	go func() {
+		defer close(chunkChan)
+		defer close(errChan)
+
+		resp, err := m.ChatCompletion(ctx, req)
+		if err != nil {
+			errChan <- err
+			return
+		}
+
+		if len(resp.Choices) > 0 {
+			msg := resp.Choices[0].Message
+			chunk := model.StreamChunk{
+				ID:    resp.ID,
+				Model: resp.Model,
+				Choices: []model.StreamChoice{{
+					Index: 0,
+					Delta: model.MessageDelta{
+						Role:      msg.Role,
+						Content:   model.ExtractTextContentOrEmpty(msg.Content),
+						Reasoning: msg.Reasoning,
+					},
+				}},
+				Usage: &resp.Usage,
+			}
+			// Convert tool calls to deltas
+			for i, tc := range msg.ToolCalls {
+				chunk.Choices[0].Delta.ToolCalls = append(chunk.Choices[0].Delta.ToolCalls, model.ToolCallDelta{
+					Index: i,
+					ID:    tc.ID,
+					Type:  tc.Type,
+					Function: &model.FunctionCallDelta{
+						Name:      tc.Function.Name,
+						Arguments: tc.Function.Arguments,
+					},
+				})
+			}
+			chunkChan <- chunk
+		}
+	}()
+
+	return chunkChan, errChan
+}
+
 func emptyRegistry() *tool.Registry {
 	return tool.NewRegistry(tool.WithBuiltinFilter(func(t tool.Tool) bool {
 		return false

@@ -39,7 +39,7 @@ import (
 	"github.com/odvcencio/buckley/pkg/storage"
 	"github.com/odvcencio/buckley/pkg/telemetry"
 	"github.com/odvcencio/buckley/pkg/tool"
-	"github.com/odvcencio/buckley/pkg/ui/buckley/tui"
+	"github.com/odvcencio/buckley/pkg/buckley/ui/tui"
 )
 
 // Version information - set via ldflags during build

@@ -24,7 +24,7 @@ func (t *RunTestsTool) Name() string {
 }
 
 func (t *RunTestsTool) Description() string {
-	return "Run tests with smart filtering by path, pattern, or name. Auto-detects test framework (Go, Jest, pytest, etc.) and provides formatted results with pass/fail counts, timing, and coverage info when available. Use this to verify code changes or run specific test suites."
+	return "Run tests with optional path and pattern filtering. Auto-detects test framework."
 }
 
 func (t *RunTestsTool) Parameters() ParameterSchema {

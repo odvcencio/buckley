@@ -6,7 +6,7 @@ import (
 	"github.com/oklog/ulid/v2"
 
 	"github.com/odvcencio/buckley/pkg/tool/builtin"
-	"github.com/odvcencio/buckley/pkg/ui/progress"
+	"github.com/odvcencio/fluffy-ui/progress"
 )
 
 // DefaultLongRunningTools lists tools that should trigger progress indicators.

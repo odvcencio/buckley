@@ -6,8 +6,8 @@ import (
 	"github.com/odvcencio/buckley/pkg/filewatch"
 	"github.com/odvcencio/buckley/pkg/mission"
 	"github.com/odvcencio/buckley/pkg/telemetry"
-	"github.com/odvcencio/buckley/pkg/ui/progress"
-	"github.com/odvcencio/buckley/pkg/ui/toast"
+	"github.com/odvcencio/fluffy-ui/progress"
+	"github.com/odvcencio/fluffy-ui/toast"
 )
 
 const (

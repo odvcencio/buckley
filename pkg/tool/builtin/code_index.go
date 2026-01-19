@@ -32,7 +32,7 @@ func (t *LookupContextTool) Parameters() ParameterSchema {
 			},
 			"path": {
 				Type:        "string",
-				Description: "Optional glob (e.g. pkg/ui/*.go) to restrict results.",
+				Description: "Optional glob (e.g. pkg/buckley/ui/*.go) to restrict results.",
 			},
 			"symbol": {
 				Type:        "string",

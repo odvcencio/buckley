@@ -20,7 +20,7 @@ func (t *EditFileTool) Name() string {
 }
 
 func (t *EditFileTool) Description() string {
-	return "Make targeted edits to a file by replacing exact text. The old_string must match exactly (including whitespace and indentation). Use this for precise code modifications. Shows a diff preview before applying changes."
+	return "Edit a file by replacing exact text matches. Shows diff preview."
 }
 
 func (t *EditFileTool) Parameters() ParameterSchema {
@@ -33,7 +33,7 @@ func (t *EditFileTool) Parameters() ParameterSchema {
 			},
 			"old_string": {
 				Type:        "string",
-				Description: "Exact text to find and replace (must match exactly including whitespace)",
+				Description: "Text to find (exact match)",
 			},
 			"new_string": {
 				Type:        "string",
@@ -41,7 +41,7 @@ func (t *EditFileTool) Parameters() ParameterSchema {
 			},
 			"replace_all": {
 				Type:        "boolean",
-				Description: "If true, replace all occurrences. If false (default), only replace the first occurrence",
+				Description: "Replace all occurrences (default: first only)",
 				Default:     false,
 			},
 		},

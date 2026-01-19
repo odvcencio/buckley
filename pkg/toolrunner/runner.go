@@ -24,6 +24,7 @@ const (
 // ModelClient defines the interface for LLM interactions used by the runner.
 type ModelClient interface {
 	ChatCompletion(ctx context.Context, req model.ChatRequest) (*model.ChatResponse, error)
+	ChatCompletionStream(ctx context.Context, req model.ChatRequest) (<-chan model.StreamChunk, <-chan error)
 	GetExecutionModel() string
 }
 
@@ -37,6 +38,7 @@ type Config struct {
 	EnableParallelTools  bool // Enable parallel execution of independent tools
 	MaxParallelTools     int  // Max concurrent tool executions (default 5)
 	ToolExecutor         ToolExecutor
+	DisableStreaming     bool // Disable streaming (streaming is ON by default)
 }
 
 // Request contains inputs for a tool runner execution.
@@ -280,6 +282,7 @@ And these available tools:
 Which tools (if any) would you need to complete this request?
 Return a JSON array of tool names, e.g., ["read_file", "write_file", "run_shell"]
 If the request asks about the repo/codebase or to validate claims, include search_text and read_file.
+If the request needs git history/status/diff/blame or merge info, include git_status/git_log/git_diff/git_blame (and list_merge_conflicts if relevant).
 If no tools are needed, return [].
 Only include tools you will actually use.`, selectionContext, catalog.String())
 
@@ -321,11 +324,66 @@ Only include tools you will actually use.`, selectionContext, catalog.String())
 		}
 	}
 
+	if shouldIncludeGitTools(selectionContext) {
+		selected = ensureToolSelection(selected, toolMap, []string{
+			"git_status",
+			"git_log",
+			"git_diff",
+			"git_blame",
+			"list_merge_conflicts",
+		})
+	}
+
 	if len(selectedNames) > 0 && len(selected) == 0 {
 		return tools, nil
 	}
 
 	return selected, nil
+}
+
+func shouldIncludeGitTools(selectionContext string) bool {
+	if strings.TrimSpace(selectionContext) == "" {
+		return false
+	}
+	lower := strings.ToLower(selectionContext)
+	keywords := []string{
+		"git",
+		"repo",
+		"repository",
+		"branch",
+		"commit",
+		"diff",
+		"status",
+		"log",
+		"blame",
+		"merge",
+	}
+	for _, keyword := range keywords {
+		if strings.Contains(lower, keyword) {
+			return true
+		}
+	}
+	return false
+}
+
+func ensureToolSelection(selected []tool.Tool, toolMap map[string]tool.Tool, names []string) []tool.Tool {
+	if len(names) == 0 || len(toolMap) == 0 {
+		return selected
+	}
+	seen := make(map[string]struct{}, len(selected))
+	for _, t := range selected {
+		seen[t.Name()] = struct{}{}
+	}
+	for _, name := range names {
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		if t, ok := toolMap[name]; ok {
+			selected = append(selected, t)
+			seen[name] = struct{}{}
+		}
+	}
+	return selected
 }
 
 func (r *Runner) parseToolNames(content string) []string {
@@ -352,6 +410,164 @@ func (r *Runner) parseToolNames(content string) []string {
 }
 
 func (r *Runner) executeWithTools(ctx context.Context, req Request, tools []tool.Tool, result *Result) (*Result, error) {
+	// Use streaming by default unless disabled
+	if !r.config.DisableStreaming {
+		return r.executeWithToolsStreaming(ctx, req, tools, result)
+	}
+	return r.executeWithToolsNonStreaming(ctx, req, tools, result)
+}
+
+// executeWithToolsStreaming uses streaming for real-time output and proper tool call accumulation.
+// This follows the Kimi K2 / OpenAI streaming pattern where tool call deltas are accumulated by index.
+func (r *Runner) executeWithToolsStreaming(ctx context.Context, req Request, tools []tool.Tool, result *Result) (*Result, error) {
+	var toolDefs []map[string]any
+	for _, t := range tools {
+		toolDefs = append(toolDefs, tool.ToOpenAIFunction(t))
+	}
+
+	messages := append([]model.Message{}, req.Messages...)
+
+	maxIterations := req.MaxIterations
+	if maxIterations <= 0 {
+		maxIterations = r.config.DefaultMaxIterations
+	}
+	if maxIterations <= 0 {
+		maxIterations = defaultMaxIterations
+	}
+
+	deduper := newToolResultDeduper()
+
+	for iteration := 0; iteration < maxIterations; iteration++ {
+		result.Iterations = iteration + 1
+
+		if err := ctx.Err(); err != nil {
+			return result, err
+		}
+
+		apiReq := model.ChatRequest{
+			Model:    r.requestModel(req),
+			Messages: messages,
+			Tools:    toolDefs,
+			Stream:   true,
+		}
+		if len(toolDefs) > 0 {
+			apiReq.ToolChoice = "auto"
+		}
+
+		// Use streaming
+		chunkChan, errChan := r.config.Models.ChatCompletionStream(ctx, apiReq)
+
+		// Accumulate streaming response
+		acc := model.NewStreamAccumulator()
+		var finishReason string
+
+	streamLoop:
+		for {
+			select {
+			case <-ctx.Done():
+				return result, ctx.Err()
+			case err := <-errChan:
+				if err != nil {
+					return result, fmt.Errorf("streaming chat completion: %w", err)
+				}
+				break streamLoop
+			case chunk, ok := <-chunkChan:
+				if !ok {
+					break streamLoop
+				}
+				acc.Add(chunk)
+
+				// Extract finish reason from chunk
+				if len(chunk.Choices) > 0 && chunk.Choices[0].FinishReason != nil {
+					finishReason = *chunk.Choices[0].FinishReason
+				}
+
+				// Stream text content to handler
+				if r.streamHandler != nil && len(chunk.Choices) > 0 {
+					delta := chunk.Choices[0].Delta
+					if delta.Content != "" {
+						r.streamHandler.OnText(delta.Content)
+					}
+					if delta.Reasoning != "" {
+						r.streamHandler.OnReasoning(delta.Reasoning)
+					}
+				}
+			}
+		}
+
+		// Update usage from accumulated response
+		if usage := acc.Usage(); usage != nil {
+			result.Usage.PromptTokens += usage.PromptTokens
+			result.Usage.CompletionTokens += usage.CompletionTokens
+			result.Usage.TotalTokens += usage.TotalTokens
+		}
+
+		result.FinishReason = finishReason
+		msg := acc.Message()
+
+		if msg.Reasoning != "" && r.config.EnableReasoning {
+			result.Reasoning = msg.Reasoning
+		}
+
+		// Check for tool calls
+		if !acc.HasToolCalls() {
+			rawContent := acc.Content()
+			thinking, content := model.ExtractThinkingContent(rawContent)
+			if thinking != "" && result.Reasoning == "" {
+				result.Reasoning = thinking
+			}
+			if strings.TrimSpace(content) == "" {
+				if result.Reasoning != "" {
+					return result, fmt.Errorf("model returned reasoning without final response")
+				}
+				return result, fmt.Errorf("model returned empty response")
+			}
+
+			result.Content = content
+			if r.streamHandler != nil {
+				r.streamHandler.OnComplete(result)
+			}
+			return result, nil
+		}
+
+		// Process tool calls
+		toolCalls := acc.ToolCalls()
+
+		// Ensure tool call IDs are set
+		for i := range toolCalls {
+			if toolCalls[i].ID == "" {
+				toolCalls[i].ID = fmt.Sprintf("tool-%d", i+1)
+			}
+		}
+
+		messages = append(messages, model.Message{
+			Role:      "assistant",
+			Content:   msg.Content,
+			ToolCalls: toolCalls,
+		})
+
+		toolResults, err := r.executeToolCalls(ctx, toolCalls, tools, result)
+		if err != nil {
+			return result, err
+		}
+		for _, tr := range toolResults {
+			content := deduper.messageFor(tr)
+			messages = append(messages, model.Message{
+				Role:       "tool",
+				ToolCallID: tr.ID,
+				Name:       tr.Name,
+				Content:    content,
+			})
+		}
+	}
+
+	result.Content = "Maximum iterations reached. Please try a simpler request."
+	return result, nil
+}
+
+// executeWithToolsNonStreaming uses the traditional non-streaming approach.
+// Kept for fallback when streaming is disabled.
+func (r *Runner) executeWithToolsNonStreaming(ctx context.Context, req Request, tools []tool.Tool, result *Result) (*Result, error) {
 	var toolDefs []map[string]any
 	for _, t := range tools {
 		toolDefs = append(toolDefs, tool.ToOpenAIFunction(t))

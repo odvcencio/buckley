@@ -661,6 +661,16 @@ func (c *headlessModelClient) GetExecutionModel() string {
 	return c.runner.modelManager.GetExecutionModel()
 }
 
+func (c *headlessModelClient) ChatCompletionStream(ctx context.Context, req model.ChatRequest) (<-chan model.StreamChunk, <-chan error) {
+	if c == nil || c.runner == nil || c.runner.modelManager == nil {
+		errChan := make(chan error, 1)
+		errChan <- fmt.Errorf("runner not available")
+		close(errChan)
+		return nil, errChan
+	}
+	return c.runner.modelManager.ChatCompletionStream(ctx, req)
+}
+
 type toolExecutionError struct {
 	err error
 }

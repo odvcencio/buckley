@@ -1,0 +1,2826 @@
+// Package tui provides the integrated terminal user interface for Buckley.
+package tui
+
+import (
+	"fmt"
+	"log"
+	"math"
+	"net/url"
+	"os"
+	"os/exec"
+	stdRuntime "runtime"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/odvcencio/buckley/pkg/buckley/ui/filepicker"
+	buckleywidgets "github.com/odvcencio/buckley/pkg/buckley/ui/widgets"
+	"github.com/odvcencio/buckley/pkg/diagnostics"
+	"github.com/odvcencio/fluffy-ui/accessibility"
+	"github.com/odvcencio/fluffy-ui/backend"
+	"github.com/odvcencio/fluffy-ui/backend/tcell"
+	"github.com/odvcencio/fluffy-ui/clipboard"
+	"github.com/odvcencio/fluffy-ui/compositor"
+	"github.com/odvcencio/fluffy-ui/keybind"
+	"github.com/odvcencio/fluffy-ui/markdown"
+	"github.com/odvcencio/fluffy-ui/progress"
+	"github.com/odvcencio/fluffy-ui/recording"
+	"github.com/odvcencio/fluffy-ui/runtime"
+	"github.com/odvcencio/fluffy-ui/scroll"
+	uistyle "github.com/odvcencio/fluffy-ui/style"
+	"github.com/odvcencio/fluffy-ui/terminal"
+	"github.com/odvcencio/fluffy-ui/theme"
+	"github.com/odvcencio/fluffy-ui/toast"
+	"github.com/odvcencio/fluffy-ui/widgets"
+)
+
+// RenderMetrics tracks rendering performance statistics.
+type RenderMetrics struct {
+	FrameCount      int64         // Total frames rendered
+	DroppedFrames   int64         // Frames skipped due to being too slow
+	TotalRenderTime time.Duration // Total time spent rendering
+	LastFrameTime   time.Duration // Duration of last frame
+	CellsUpdated    int64         // Cells updated in last frame
+	FullRedraws     int64         // Number of full screen redraws
+	PartialRedraws  int64         // Number of partial redraws
+}
+
+const (
+	minInputHeight       = 2
+	minChatHeight        = 4
+	sidebarStandardWidth = 25
+	sidebarWideWidth     = 35
+	sidebarMinWidth      = 120
+	sidebarWideMinWidth  = 160
+)
+
+type layoutSpec struct {
+	sidebarVisible  bool
+	presenceVisible bool
+	sidebarWidth    int
+	showHeader      bool
+	showStatus      bool
+}
+
+func layoutForWidth(width int, hasSidebarContent bool) layoutSpec {
+	if !hasSidebarContent {
+		return layoutSpec{}
+	}
+	switch {
+	case width >= sidebarWideMinWidth:
+		return layoutSpec{sidebarVisible: true, sidebarWidth: sidebarWideWidth}
+	case width >= sidebarMinWidth:
+		return layoutSpec{sidebarVisible: true, sidebarWidth: sidebarStandardWidth}
+	default:
+		return layoutSpec{presenceVisible: true}
+	}
+}
+
+func layoutForScreen(width, height int, hasSidebarContent, focusMode bool) layoutSpec {
+	if focusMode {
+		return layoutSpec{showHeader: false, showStatus: false}
+	}
+	spec := layoutForWidth(width, hasSidebarContent)
+	spec.showHeader = height >= 20
+	spec.showStatus = height >= 20
+	return spec
+}
+
+// WidgetApp is the main TUI application using the widget tree architecture.
+type WidgetApp struct {
+	screen  *runtime.Screen
+	backend backend.Backend
+	running bool
+
+	// Widget tree
+	header     *buckleywidgets.Header
+	chatView   *buckleywidgets.ChatView
+	inputArea  *buckleywidgets.InputArea
+	statusBar  *buckleywidgets.StatusBar
+	sidebar    *buckleywidgets.Sidebar
+	presence   *buckleywidgets.PresenceStrip
+	toastStack *widgets.ToastStack
+	root       runtime.Widget
+	mainArea   *runtime.Flex // HBox containing chatView + sidebar
+
+	// Sidebar state
+	sidebarVisible      bool
+	sidebarUserOverride bool // User manually toggled, don't auto-hide
+	sidebarAutoHidden   bool
+	presenceVisible     bool
+	headerVisible       bool
+	statusVisible       bool
+	focusMode           bool
+
+	// File picker
+	filePicker     *filepicker.FilePicker
+	commandPalette *widgets.EnhancedPalette
+
+	// Keybindings
+	keyRegistry *keybind.CommandRegistry
+	keymaps     *keybind.KeymapStack
+	keyRouter   *keybind.KeyRouter
+	clipboard   clipboard.Clipboard
+
+	// Message loop
+	messages  chan Message
+	coalescer *Coalescer
+
+	// Frame timing
+	frameTicker *time.Ticker
+	lastRender  time.Time
+	dirty       bool
+
+	// Render metrics
+	metrics     RenderMetrics
+	styleCache  *StyleCache
+	debugRender bool
+
+	// Ctrl+C handling
+	ctrlCArmedUntil     time.Time
+	statusText          string
+	statusOverride      string
+	statusOverrideUntil time.Time
+	unreadCount         int
+	scrollIndicator     string
+	contextUsed         int
+	contextBudget       int
+	contextWindow       int
+	executionMode       string
+	inputMeasuredHeight int
+	selectionActive     bool
+	selectionLastLine   int
+	selectionLastCol    int
+	selectionLastValid  bool
+	streaming           bool
+	streamAnim          int
+	streamAnimLast      time.Time
+	streamAnimInterval  time.Duration
+	sidebarAnimFrame    int
+	sidebarAnimLast     time.Time
+	sidebarAnimInterval time.Duration
+
+	// Soft cursor animation
+	cursorPulseStart    time.Time
+	cursorPulsePeriod   time.Duration
+	cursorPulseInterval time.Duration
+	cursorPulseLast     time.Time
+	cursorStyle         backend.Style
+	cursorBGLow         backend.Color
+	cursorBGHigh        backend.Color
+	cursorFG            backend.Color
+
+	// Presence strip state
+	runningToolCount  int
+	planTotal         int
+	planCompleted     int
+	presenceAlert     bool
+	currentTaskActive bool
+	reduceMotion      bool
+	highContrast      bool
+	useTextLabels     bool
+
+	// Accessibility
+	announcer  accessibility.Announcer
+	focusStyle *accessibility.FocusStyle
+
+	// Callbacks
+	onSubmit       func(text string)
+	onQuit         func()
+	onFileSelect   func(path string)
+	onShellCmd     func(cmd string) string
+	onNextSession  func()
+	onPrevSession  func()
+	onApproval     func(requestID string, approved, alwaysAllow bool)
+	onToastDismiss func(string)
+
+	// Configuration
+	theme       *theme.Theme
+	workDir     string
+	projectRoot string
+	webBaseURL  string
+	sessionID   string
+
+	// Render synchronization
+	renderMu sync.Mutex
+
+	// Backend diagnostics
+	diagnostics *diagnostics.Collector
+
+	// Recording
+	recorder   runtime.Recorder
+	recordPath string
+}
+
+// WidgetAppConfig configures the widget-based TUI application.
+type WidgetAppConfig struct {
+	Theme           *theme.Theme
+	ModelName       string
+	SessionID       string
+	WorkDir         string
+	ProjectRoot     string
+	ReduceMotion    bool
+	HighContrast    bool
+	UseTextLabels   bool
+	MessageMetadata string
+	WebBaseURL      string
+	OnSubmit        func(text string)
+	OnQuit          func()
+	Backend         backend.Backend // Optional: for testing
+}
+
+// NewWidgetApp creates and initializes the widget-based TUI application.
+func NewWidgetApp(cfg WidgetAppConfig) (*WidgetApp, error) {
+	// Determine working directory
+	workDir := cfg.WorkDir
+	if workDir == "" {
+		workDir, _ = os.Getwd()
+	}
+
+	projectRoot := cfg.ProjectRoot
+	if projectRoot == "" {
+		projectRoot = workDir
+	}
+
+	// Create or use provided backend
+	var be backend.Backend
+	if cfg.Backend != nil {
+		be = cfg.Backend
+	} else {
+		var err error
+		be, err = tcell.New()
+		if err != nil {
+			return nil, fmt.Errorf("create backend: %w", err)
+		}
+	}
+
+	// Initialize backend to get size
+	if err := be.Init(); err != nil {
+		return nil, fmt.Errorf("init backend: %w", err)
+	}
+	be.HideCursor()
+	w, h := be.Size()
+
+	// Get theme
+	th := cfg.Theme
+	if th == nil {
+		th = theme.DefaultTheme()
+	}
+	styleCache := NewStyleCache()
+	debugRender := strings.TrimSpace(os.Getenv("BUCKLEY_RENDER_DEBUG")) != ""
+	sysClipboard := newSystemClipboard()
+	appClipboard := clipboard.Clipboard(sysClipboard)
+	if sysClipboard == nil || !sysClipboard.Available() {
+		appClipboard = &clipboard.MemoryClipboard{}
+	}
+	focusStyle := &accessibility.FocusStyle{
+		Indicator:    ">",
+		Style:        styleCache.Get(th.Accent).Bold(true),
+		HighContrast: styleCache.Get(th.TextPrimary).Reverse(true),
+	}
+	announcer := &accessibility.SimpleAnnouncer{}
+
+	// Create widgets
+	header := buckleywidgets.NewHeader()
+	header.SetModelName(cfg.ModelName)
+	header.SetSessionID(cfg.SessionID)
+	header.SetStyles(
+		styleCache.Get(th.Surface),
+		styleCache.Get(th.Logo),
+		styleCache.Get(th.TextSecondary),
+	)
+
+	chatView := buckleywidgets.NewChatView()
+	chatView.SetStyles(
+		styleCache.Get(th.User),
+		styleCache.Get(th.Assistant),
+		styleCache.Get(th.System),
+		styleCache.Get(th.Tool),
+		styleCache.Get(th.Thinking),
+	)
+	chatView.SetModelName(cfg.ModelName)
+	chatView.SetMetadataStyle(styleCache.Get(th.TextMuted))
+	chatView.SetMessageMetadataMode(cfg.MessageMetadata)
+	chatView.SetUIStyles(
+		styleCache.Get(th.Scrollbar),
+		styleCache.Get(th.ScrollThumb),
+		styleCache.Get(th.Selection),
+		styleCache.Get(th.SearchMatch),
+		styleCache.Get(th.Background),
+	)
+	mdRenderer := markdown.NewRenderer(th)
+	chatView.SetMarkdownRenderer(mdRenderer, styleCache.Get(mdRenderer.CodeBlockBackground()))
+
+	inputArea := buckleywidgets.NewInputArea()
+	inputArea.SetStyles(
+		styleCache.Get(th.SurfaceRaised),
+		styleCache.Get(th.TextPrimary),
+		styleCache.Get(th.Border),
+	)
+	inputArea.SetModeStyles(
+		styleCache.Get(th.ModeNormal),
+		styleCache.Get(th.ModeShell),
+		styleCache.Get(th.ModeEnv),
+		styleCache.Get(th.ModeSearch),
+	)
+	inputArea.SetHeightLimits(minInputHeight, maxInputHeight(h))
+
+	statusBar := buckleywidgets.NewStatusBar()
+	statusBar.SetStatus("Ready")
+	statusBar.SetStyles(
+		styleCache.Get(th.Surface),
+		styleCache.Get(th.TextMuted),
+	)
+
+	toastStack := widgets.NewToastStack()
+	toastStack.SetAnimationsEnabled(!cfg.ReduceMotion)
+	toastStack.SetStyles(
+		styleCache.Get(th.SurfaceRaised),
+		styleCache.Get(th.TextPrimary),
+		styleCache.Get(th.Info),
+		styleCache.Get(th.Success),
+		styleCache.Get(th.Warning),
+		styleCache.Get(th.Error),
+	)
+
+	// Create sidebar
+	sidebar := buckleywidgets.NewSidebar()
+	sidebar.SetStyles(
+		styleCache.Get(th.Border),
+		styleCache.Get(th.TextSecondary),
+		styleCache.Get(th.TextPrimary),
+		styleCache.Get(th.Accent),
+		styleCache.Get(th.TextMuted),
+		styleCache.Get(th.Surface),
+	)
+	sidebar.SetProgressEdgeStyle(styleCache.Get(th.AccentGlow))
+	sidebar.SetStatusStyles(
+		styleCache.Get(th.Success),
+		styleCache.Get(th.ElectricBlue).Bold(true),
+		styleCache.Get(th.TextMuted),
+		styleCache.Get(th.Coral),
+	)
+	sidebar.SetContextStyles(
+		styleCache.Get(th.Teal),
+		styleCache.Get(th.Accent),
+		styleCache.Get(th.Coral),
+		styleCache.Get(th.TextMuted),
+	)
+	sidebar.SetSpinnerStyle(styleCache.Get(th.ElectricBlue))
+
+	presence := buckleywidgets.NewPresenceStrip()
+	presence.SetStyles(
+		styleCache.Get(th.Border),
+		styleCache.Get(th.TextMuted),
+		styleCache.Get(th.ElectricBlue),
+		styleCache.Get(th.Coral),
+		styleCache.Get(th.Accent),
+		styleCache.Get(th.Background),
+	)
+
+	layout := layoutForScreen(w, h, sidebar.HasContent(), false)
+	if layout.sidebarWidth > 0 {
+		sidebar.SetWidth(layout.sidebarWidth)
+	}
+	sidebarVisible := layout.sidebarVisible
+	presenceVisible := layout.presenceVisible
+	headerVisible := layout.showHeader
+	statusVisible := layout.showStatus
+
+	// Build main content area with HBox (ChatView + Sidebar)
+	var mainArea *runtime.Flex
+	if sidebarVisible {
+		mainArea = runtime.HBox(
+			runtime.Flexible(chatView, 3),           // 75% for chat
+			runtime.Sized(sidebar, sidebar.Width()), // Dynamic sidebar width
+		)
+	} else if presenceVisible {
+		mainArea = runtime.HBox(
+			runtime.Expanded(chatView),
+			runtime.Sized(presence, 2),
+		)
+	} else {
+		mainArea = runtime.HBox(
+			runtime.Expanded(chatView), // Full width when sidebar hidden
+		)
+	}
+
+	// Build widget tree using VBox layout
+	// Header (fixed 1 row)
+	// MainArea (HBox: ChatView + Sidebar)
+	// InputArea (fixed 2+ rows)
+	// StatusBar (fixed 1 row)
+	children := make([]runtime.FlexChild, 0, 4)
+	if headerVisible {
+		children = append(children, runtime.Fixed(header))
+	}
+	children = append(children, runtime.Expanded(mainArea))
+	children = append(children, runtime.Fixed(inputArea))
+	if statusVisible {
+		children = append(children, runtime.Fixed(statusBar))
+	}
+	root := runtime.VBox(children...)
+
+	// Create screen
+	screen := runtime.NewScreen(w, h)
+	screen.SetAutoRegisterFocus(true)
+
+	// Add root layer (focus scope is created internally)
+	screen.PushLayer(root, false)
+	screen.PushLayer(toastStack, false)
+
+	// Create file picker
+	fp := filepicker.NewFilePicker(projectRoot)
+
+	app := &WidgetApp{
+		screen:              screen,
+		backend:             be,
+		header:              header,
+		chatView:            chatView,
+		inputArea:           inputArea,
+		statusBar:           statusBar,
+		sidebar:             sidebar,
+		presence:            presence,
+		toastStack:          toastStack,
+		root:                root,
+		mainArea:            mainArea,
+		sidebarVisible:      sidebarVisible,
+		presenceVisible:     presenceVisible,
+		sidebarAutoHidden:   presenceVisible && !sidebarVisible,
+		headerVisible:       headerVisible,
+		statusVisible:       statusVisible,
+		filePicker:          fp,
+		theme:               th,
+		workDir:             workDir,
+		projectRoot:         projectRoot,
+		webBaseURL:          normalizeWebBaseURL(cfg.WebBaseURL),
+		sessionID:           strings.TrimSpace(cfg.SessionID),
+		clipboard:           appClipboard,
+		onSubmit:            cfg.OnSubmit,
+		onQuit:              cfg.OnQuit,
+		messages:            make(chan Message, 256),
+		statusText:          "Ready",
+		cursorPulseStart:    time.Now(),
+		cursorPulsePeriod:   2600 * time.Millisecond,
+		cursorPulseInterval: 50 * time.Millisecond,
+		streamAnimInterval:  120 * time.Millisecond,
+		sidebarAnimInterval: 120 * time.Millisecond,
+		inputMeasuredHeight: inputArea.Measure(runtime.Constraints{MaxWidth: w, MaxHeight: h}).Height,
+		styleCache:          styleCache,
+		debugRender:         debugRender,
+		reduceMotion:        cfg.ReduceMotion,
+		highContrast:        cfg.HighContrast,
+		useTextLabels:       cfg.UseTextLabels,
+		announcer:           announcer,
+		focusStyle:          focusStyle,
+	}
+
+	recordPath := strings.TrimSpace(os.Getenv("BUCKLEY_TUI_RECORD"))
+	if recordPath != "" {
+		recorder, err := buildRecorder(recordPath, app.sessionID)
+		if err != nil {
+			log.Printf("tui recording init failed: %v", err)
+		} else {
+			app.recorder = recorder
+			app.recordPath = recordPath
+		}
+	}
+
+	app.initKeybindings()
+	app.initFocus()
+
+	// Create coalescer for smooth streaming
+	app.coalescer = NewCoalescer(DefaultCoalescerConfig(), app.Post)
+	app.initSoftCursor()
+	app.applyScrollStatus(chatView.ScrollPosition())
+	app.updatePresenceStrip()
+
+	chatView.OnScrollChange(func(top, total, viewHeight int) {
+		if app.applyScrollStatus(top, total, viewHeight) {
+			app.dirty = true
+		}
+	})
+
+	// Set up input callbacks
+	inputArea.OnSubmit(func(text string, mode buckleywidgets.InputMode) {
+		app.handleSubmit(text, mode)
+	})
+	inputArea.OnChange(func(text string) {
+		app.refreshInputLayout()
+	})
+
+	// Wire file picker trigger
+	inputArea.OnTriggerPicker(func() {
+		app.showFilePicker()
+	})
+
+	// Wire search trigger
+	inputArea.OnTriggerSearch(func() {
+		app.showSearchOverlay()
+	})
+
+	// Wire slash command trigger
+	inputArea.OnTriggerSlashCommand(func() {
+		app.showSlashCommandPalette()
+	})
+
+	return app, nil
+}
+
+// showSearchOverlay creates and displays the search bar overlay.
+func (a *WidgetApp) showSearchOverlay() {
+	search := widgets.NewSearchWidget()
+	search.SetStyles(
+		a.style(a.theme.Surface),
+		a.style(a.theme.Border),
+		a.style(a.theme.TextPrimary),
+		a.style(a.theme.Accent),
+	)
+	search.SetOnSearch(func(query string) {
+		a.chatView.Search(query)
+		current, total := a.chatView.SearchMatches()
+		search.SetMatchInfo(current, total)
+		a.updateScrollStatus()
+		a.dirty = true
+	})
+	search.SetOnNavigate(func() {
+		a.chatView.NextMatch()
+		current, total := a.chatView.SearchMatches()
+		search.SetMatchInfo(current, total)
+		a.updateScrollStatus()
+		a.dirty = true
+	}, func() {
+		a.chatView.PrevMatch()
+		current, total := a.chatView.SearchMatches()
+		search.SetMatchInfo(current, total)
+		a.updateScrollStatus()
+		a.dirty = true
+	})
+	search.Focus()
+
+	// Push as modal overlay
+	a.screen.PushLayer(search, true)
+	a.dirty = true
+}
+
+// showFilePicker creates and displays the file picker overlay.
+func (a *WidgetApp) showFilePicker() {
+	// Activate the picker (position doesn't matter for centered overlay)
+	a.filePicker.Activate(0)
+
+	// Create widget wrapper
+	pickerWidget := buckleywidgets.NewFilePickerWidget(a.filePicker)
+	pickerWidget.SetStyles(
+		a.style(a.theme.Surface),
+		a.style(a.theme.Border),
+		a.style(a.theme.TextPrimary),
+		a.style(a.theme.Selection),
+		a.style(a.theme.Accent),
+		a.style(a.theme.TextPrimary),
+	)
+	pickerWidget.Focus()
+
+	// Push as modal overlay
+	a.screen.PushLayer(pickerWidget, true)
+	a.dirty = true
+}
+
+// showApprovalDialog creates and displays an approval dialog.
+func (a *WidgetApp) showApprovalDialog(msg ApprovalRequestMsg) {
+	// Convert message diff lines to widget diff lines
+	diffLines := make([]buckleywidgets.DiffLine, len(msg.DiffLines))
+	for i, line := range msg.DiffLines {
+		diffLines[i] = buckleywidgets.DiffLine{
+			Type:    buckleywidgets.DiffLineType(line.Type),
+			Content: line.Content,
+		}
+	}
+
+	// Create approval request for widget
+	req := buckleywidgets.ApprovalRequest{
+		ID:           msg.ID,
+		Tool:         msg.Tool,
+		Operation:    msg.Operation,
+		Description:  msg.Description,
+		Command:      msg.Command,
+		FilePath:     msg.FilePath,
+		DiffLines:    diffLines,
+		AddedLines:   msg.AddedLines,
+		RemovedLines: msg.RemovedLines,
+	}
+
+	// Create widget
+	approvalWidget := buckleywidgets.NewApprovalWidget(req)
+	approvalWidget.SetStyles(
+		a.style(a.theme.Surface),
+		a.style(a.theme.Border),
+		a.style(a.theme.Accent),
+		a.style(a.theme.TextPrimary),
+	)
+	approvalWidget.Focus()
+
+	// Push as modal overlay
+	a.screen.PushLayer(approvalWidget, true)
+	a.dirty = true
+}
+
+// showCommandPalette creates and displays the command palette overlay.
+func (a *WidgetApp) showCommandPalette() {
+	if a.commandPalette == nil {
+		return
+	}
+	a.commandPalette.Refresh()
+	a.commandPalette.SetKeymapStack(a.keymaps)
+	palette := a.commandPalette.Widget
+	palette.SetPlaceholder("> ")
+	palette.SetMaxVisible(12)
+	palette.SetStyles(
+		a.style(a.theme.Surface),
+		a.style(a.theme.Border),
+		a.style(a.theme.Accent),
+		a.style(a.theme.TextPrimary),
+		a.style(a.theme.TextPrimary),
+		a.style(a.theme.Selection),
+		a.style(a.theme.TextSecondary),
+	)
+	palette.Focus()
+
+	// Push as modal overlay
+	a.screen.PushLayer(palette, true)
+	a.dirty = true
+}
+
+func (a *WidgetApp) initKeybindings() {
+	registry := keybind.NewRegistry()
+	a.registerCommands(registry)
+
+	keymaps := &keybind.KeymapStack{}
+	keymaps.Push(a.baseKeymap())
+
+	a.keyRegistry = registry
+	a.keymaps = keymaps
+	a.keyRouter = keybind.NewKeyRouter(registry, nil, keymaps)
+
+	palette := widgets.NewEnhancedPalette(registry)
+	palette.SetKeymapStack(keymaps)
+	palette.Pin("new")
+	palette.Pin("search")
+	palette.Pin("toggle-sidebar")
+	palette.Pin("file-picker")
+	a.commandPalette = palette
+}
+
+func (a *WidgetApp) initFocus() {
+	if a == nil || a.screen == nil {
+		return
+	}
+	if announcer, ok := a.announcer.(*accessibility.SimpleAnnouncer); ok && a.useTextLabels {
+		announcer.SetOnMessage(func(msg accessibility.Announcement) {
+			a.setStatusOverride(msg.Message, 2*time.Second)
+		})
+	}
+	scope := a.screen.FocusScope()
+	if scope == nil {
+		if a.inputArea != nil {
+			a.inputArea.Focus()
+		}
+		return
+	}
+	scope.SetOnChange(func(prev, next runtime.Focusable) {
+		if a.announcer != nil {
+			if accessible, ok := next.(accessibility.Accessible); ok {
+				a.announcer.AnnounceChange(accessible)
+			}
+		}
+		a.dirty = true
+	})
+	if a.inputArea != nil {
+		scope.SetFocus(a.inputArea)
+	}
+}
+
+func (a *WidgetApp) baseKeymap() *keybind.Keymap {
+	return &keybind.Keymap{
+		Name: "buckley",
+		Bindings: []keybind.Binding{
+			{Key: keybind.MustParseKeySequence("ctrl+p"), Command: "palette"},
+			{Key: keybind.MustParseKeySequence("ctrl+b"), Command: "toggle-sidebar"},
+			{Key: keybind.MustParseKeySequence("ctrl+left"), Command: "toggle-sidebar"},
+			{Key: keybind.MustParseKeySequence("ctrl+f"), Command: "search"},
+			{Key: keybind.MustParseKeySequence("ctrl+shift+f"), Command: "focus-mode"},
+			{Key: keybind.MustParseKeySequence("alt+home"), Command: "scroll-top"},
+			{Key: keybind.MustParseKeySequence("alt+end"), Command: "scroll-bottom"},
+			{Key: keybind.MustParseKeySequence("alt+c"), Command: "copy-code"},
+			{Key: keybind.MustParseKeySequence("alt+w"), Command: "open-web-session"},
+			{Key: keybind.MustParseKeySequence("alt+shift+w"), Command: "open-web-dashboard"},
+			{Key: keybind.MustParseKeySequence("alt+left"), Command: "session-prev"},
+			{Key: keybind.MustParseKeySequence("alt+right"), Command: "session-next"},
+			{Key: keybind.MustParseKeySequence("ctrl+d"), Command: "debug"},
+			{Key: keybind.MustParseKeySequence("tab"), Command: "focus.next"},
+			{Key: keybind.MustParseKeySequence("shift+tab"), Command: "focus.prev"},
+			{Key: keybind.MustParseKeySequence("pgup"), Command: "scroll.pageUp"},
+			{Key: keybind.MustParseKeySequence("pgdn"), Command: "scroll.pageDown"},
+			{Key: keybind.MustParseKeySequence("ctrl+shift+c"), Command: clipboard.CommandCopy, When: keybind.WhenFocusedClipboardTarget()},
+			{Key: keybind.MustParseKeySequence("ctrl+shift+x"), Command: clipboard.CommandCut, When: keybind.WhenFocusedClipboardTarget()},
+			{Key: keybind.MustParseKeySequence("ctrl+shift+v"), Command: clipboard.CommandPaste, When: keybind.WhenFocusedClipboardTarget()},
+		},
+	}
+}
+
+func (a *WidgetApp) registerCommands(registry *keybind.CommandRegistry) {
+	if registry == nil {
+		return
+	}
+
+	registry.RegisterAll(
+		keybind.Command{
+			ID:          "palette",
+			Title:       "Command Palette",
+			Description: "Open the command palette",
+			Category:    "View",
+			Handler: func(ctx keybind.Context) {
+				a.showCommandPalette()
+			},
+		},
+		keybind.Command{
+			ID:          "new",
+			Title:       "New Conversation",
+			Description: "Start a new conversation",
+			Category:    "Session",
+			Handler: func(ctx keybind.Context) {
+				a.handlePaletteCommand("new")
+			},
+		},
+		keybind.Command{
+			ID:          "clear",
+			Title:       "Clear Messages",
+			Description: "Clear the current conversation",
+			Category:    "Session",
+			Handler: func(ctx keybind.Context) {
+				a.handlePaletteCommand("clear")
+			},
+		},
+		keybind.Command{
+			ID:          "history",
+			Title:       "View History",
+			Description: "Show conversation history",
+			Category:    "Session",
+			Handler: func(ctx keybind.Context) {
+				a.handlePaletteCommand("history")
+			},
+		},
+		keybind.Command{
+			ID:          "search",
+			Title:       "Search Conversation",
+			Description: "Search the conversation",
+			Category:    "Session",
+			Handler: func(ctx keybind.Context) {
+				a.handlePaletteCommand("search")
+			},
+		},
+		keybind.Command{
+			ID:          "export",
+			Title:       "Export Conversation",
+			Description: "Export the current conversation",
+			Category:    "Session",
+			Handler: func(ctx keybind.Context) {
+				a.handlePaletteCommand("export")
+			},
+		},
+		keybind.Command{
+			ID:          "import",
+			Title:       "Import Conversation",
+			Description: "Import a conversation file",
+			Category:    "Session",
+			Handler: func(ctx keybind.Context) {
+				a.handlePaletteCommand("import")
+			},
+		},
+		keybind.Command{
+			ID:          "session-next",
+			Title:       "Next Session",
+			Description: "Switch to the next session",
+			Category:    "Session",
+			Enabled: func(ctx keybind.Context) bool {
+				return a.onNextSession != nil
+			},
+			Handler: func(ctx keybind.Context) {
+				if a.onNextSession != nil {
+					a.onNextSession()
+				}
+			},
+		},
+		keybind.Command{
+			ID:          "session-prev",
+			Title:       "Previous Session",
+			Description: "Switch to the previous session",
+			Category:    "Session",
+			Enabled: func(ctx keybind.Context) bool {
+				return a.onPrevSession != nil
+			},
+			Handler: func(ctx keybind.Context) {
+				if a.onPrevSession != nil {
+					a.onPrevSession()
+				}
+			},
+		},
+		keybind.Command{
+			ID:          "toggle-sidebar",
+			Title:       "Toggle Sidebar",
+			Description: "Show or hide the sidebar",
+			Category:    "View",
+			Handler: func(ctx keybind.Context) {
+				a.handlePaletteCommand("toggle-sidebar")
+			},
+		},
+		keybind.Command{
+			ID:          "file-picker",
+			Title:       "Open File Picker",
+			Description: "Open the file picker",
+			Category:    "View",
+			Handler: func(ctx keybind.Context) {
+				a.handlePaletteCommand("file-picker")
+			},
+		},
+		keybind.Command{
+			ID:          "scroll-top",
+			Title:       "Scroll to Top",
+			Description: "Jump to the top of the conversation",
+			Category:    "View",
+			Handler: func(ctx keybind.Context) {
+				a.handlePaletteCommand("scroll-top")
+			},
+		},
+		keybind.Command{
+			ID:          "scroll-bottom",
+			Title:       "Scroll to Bottom",
+			Description: "Jump to the latest message",
+			Category:    "View",
+			Handler: func(ctx keybind.Context) {
+				a.handlePaletteCommand("scroll-bottom")
+			},
+		},
+		keybind.Command{
+			ID:          "copy-code",
+			Title:       "Copy Last Code Block",
+			Description: "Copy the most recent code block",
+			Category:    "View",
+			Handler: func(ctx keybind.Context) {
+				a.handlePaletteCommand("copy-code")
+			},
+		},
+		keybind.Command{
+			ID:          "focus-mode",
+			Title:       "Toggle Focus Mode",
+			Description: "Hide chrome and focus on chat",
+			Category:    "View",
+			Handler: func(ctx keybind.Context) {
+				a.toggleFocusMode()
+			},
+		},
+		keybind.Command{
+			ID:          "open-web-session",
+			Title:       "Open Web Session",
+			Description: "Open the current session in the web UI",
+			Category:    "View",
+			Handler: func(ctx keybind.Context) {
+				a.openWebTarget("session", false)
+			},
+		},
+		keybind.Command{
+			ID:          "open-web-dashboard",
+			Title:       "Open Web Dashboard",
+			Description: "Open the web dashboard",
+			Category:    "View",
+			Handler: func(ctx keybind.Context) {
+				a.openWebTarget("dashboard", false)
+			},
+		},
+		keybind.Command{
+			ID:          "models",
+			Title:       "Select Model",
+			Description: "Pick an execution model",
+			Category:    "Model",
+			Handler: func(ctx keybind.Context) {
+				a.handlePaletteCommand("models")
+			},
+		},
+		keybind.Command{
+			ID:          "usage",
+			Title:       "Show Usage Stats",
+			Description: "Show token usage",
+			Category:    "Model",
+			Handler: func(ctx keybind.Context) {
+				a.handlePaletteCommand("usage")
+			},
+		},
+		keybind.Command{
+			ID:          "plans",
+			Title:       "List Plans",
+			Description: "List available plans",
+			Category:    "Plan",
+			Handler: func(ctx keybind.Context) {
+				a.handlePaletteCommand("plans")
+			},
+		},
+		keybind.Command{
+			ID:          "status",
+			Title:       "Plan Status",
+			Description: "Show plan status",
+			Category:    "Plan",
+			Handler: func(ctx keybind.Context) {
+				a.handlePaletteCommand("status")
+			},
+		},
+		keybind.Command{
+			ID:          "help",
+			Title:       "Show Help",
+			Description: "Show available commands",
+			Category:    "System",
+			Handler: func(ctx keybind.Context) {
+				a.handlePaletteCommand("help")
+			},
+		},
+		keybind.Command{
+			ID:          "config",
+			Title:       "View Config",
+			Description: "Open configuration view",
+			Category:    "System",
+			Handler: func(ctx keybind.Context) {
+				a.handlePaletteCommand("config")
+			},
+		},
+		keybind.Command{
+			ID:          "quit",
+			Title:       "Quit Buckley",
+			Description: "Exit Buckley",
+			Category:    "System",
+			Handler: func(ctx keybind.Context) {
+				a.Quit()
+			},
+		},
+		keybind.Command{
+			ID:          "debug",
+			Title:       "Dump Screen",
+			Description: "Dump the current screen state",
+			Category:    "System",
+			Handler: func(ctx keybind.Context) {
+				a.debugDumpScreen()
+			},
+		},
+		keybind.Command{
+			ID:          "focus.next",
+			Title:       "Next Focus",
+			Description: "Move focus to the next widget",
+			Category:    "Focus",
+			Handler: func(ctx keybind.Context) {
+				if scope := a.screen.FocusScope(); scope != nil {
+					scope.FocusNext()
+					a.dirty = true
+				}
+			},
+		},
+		keybind.Command{
+			ID:          "focus.prev",
+			Title:       "Previous Focus",
+			Description: "Move focus to the previous widget",
+			Category:    "Focus",
+			Handler: func(ctx keybind.Context) {
+				if scope := a.screen.FocusScope(); scope != nil {
+					scope.FocusPrev()
+					a.dirty = true
+				}
+			},
+		},
+		keybind.Command{
+			ID:          "scroll.pageUp",
+			Title:       "Page Up",
+			Description: "Scroll up by one page",
+			Category:    "View",
+			Handler: func(ctx keybind.Context) {
+				a.scrollPage(ctx, -1)
+			},
+		},
+		keybind.Command{
+			ID:          "scroll.pageDown",
+			Title:       "Page Down",
+			Description: "Scroll down by one page",
+			Category:    "View",
+			Handler: func(ctx keybind.Context) {
+				a.scrollPage(ctx, 1)
+			},
+		},
+		keybind.Command{
+			ID:          clipboard.CommandCopy,
+			Title:       "Copy",
+			Description: "Copy from the focused widget",
+			Category:    "Clipboard",
+			Enabled: func(ctx keybind.Context) bool {
+				if a.clipboard == nil || !a.clipboard.Available() {
+					return false
+				}
+				_, ok := ctx.Focused.(clipboard.Target)
+				return ok
+			},
+			Handler: func(ctx keybind.Context) {
+				target, ok := ctx.Focused.(clipboard.Target)
+				if !ok || a.clipboard == nil || !a.clipboard.Available() {
+					return
+				}
+				text, ok := target.ClipboardCopy()
+				if !ok {
+					return
+				}
+				if err := a.clipboard.Write(text); err != nil {
+					a.setStatusOverride("Copy failed: "+err.Error(), 3*time.Second)
+					return
+				}
+				a.setStatusOverride("Copied to clipboard", 2*time.Second)
+			},
+		},
+		keybind.Command{
+			ID:          clipboard.CommandCut,
+			Title:       "Cut",
+			Description: "Cut from the focused widget",
+			Category:    "Clipboard",
+			Enabled: func(ctx keybind.Context) bool {
+				if a.clipboard == nil || !a.clipboard.Available() {
+					return false
+				}
+				_, ok := ctx.Focused.(clipboard.Target)
+				return ok
+			},
+			Handler: func(ctx keybind.Context) {
+				target, ok := ctx.Focused.(clipboard.Target)
+				if !ok || a.clipboard == nil || !a.clipboard.Available() {
+					return
+				}
+				text, ok := target.ClipboardCut()
+				if !ok {
+					return
+				}
+				if err := a.clipboard.Write(text); err != nil {
+					a.setStatusOverride("Cut failed: "+err.Error(), 3*time.Second)
+					return
+				}
+				a.setStatusOverride("Cut to clipboard", 2*time.Second)
+				a.dirty = true
+			},
+		},
+		keybind.Command{
+			ID:          clipboard.CommandPaste,
+			Title:       "Paste",
+			Description: "Paste into the focused widget",
+			Category:    "Clipboard",
+			Enabled: func(ctx keybind.Context) bool {
+				if a.clipboard == nil || !a.clipboard.Available() {
+					return false
+				}
+				_, ok := ctx.Focused.(clipboard.Target)
+				return ok
+			},
+			Handler: func(ctx keybind.Context) {
+				target, ok := ctx.Focused.(clipboard.Target)
+				if !ok || a.clipboard == nil || !a.clipboard.Available() {
+					return
+				}
+				text, err := a.clipboard.Read()
+				if err != nil {
+					a.setStatusOverride("Paste failed: "+err.Error(), 3*time.Second)
+					return
+				}
+				if !target.ClipboardPaste(text) {
+					return
+				}
+				a.dirty = true
+			},
+		},
+	)
+}
+
+func (a *WidgetApp) keyContext() keybind.Context {
+	var focused runtime.Widget
+	if a.screen != nil {
+		if scope := a.screen.FocusScope(); scope != nil {
+			if current := scope.Current(); current != nil {
+				focused = current
+			}
+		}
+	}
+	ctx := keybind.Context{Focused: focused}
+	if accessible, ok := focused.(accessibility.Accessible); ok {
+		ctx.FocusedWidget = accessible
+	}
+	if handler, ok := focused.(keybind.Handler); ok {
+		ctx.Keymap = handler.Keymap()
+	}
+	return ctx
+}
+
+func (a *WidgetApp) executeCommandID(id string) bool {
+	if a.keyRegistry == nil || id == "" {
+		return false
+	}
+	if !a.keyRegistry.Execute(id, a.keyContext()) {
+		return false
+	}
+	if a.commandPalette != nil && id != "palette" {
+		a.commandPalette.Record(id)
+	}
+	return true
+}
+
+func (a *WidgetApp) handleKeybind(m KeyMsg) bool {
+	if a.keyRouter == nil {
+		return false
+	}
+	msg := runtime.KeyMsg{
+		Key:   terminal.Key(m.Key),
+		Rune:  m.Rune,
+		Alt:   m.Alt,
+		Ctrl:  m.Ctrl,
+		Shift: m.Shift,
+	}
+	return a.keyRouter.HandleKey(msg, a.keyContext())
+}
+
+func (a *WidgetApp) scrollPage(ctx keybind.Context, pages int) {
+	if pages == 0 {
+		return
+	}
+	if ctx.Focused != nil {
+		if controller, ok := ctx.Focused.(scroll.Controller); ok {
+			controller.PageBy(pages)
+			a.updateScrollStatus()
+			a.dirty = true
+			return
+		}
+	}
+	if a.chatView == nil {
+		return
+	}
+	if pages < 0 {
+		a.chatView.PageUp()
+	} else {
+		a.chatView.PageDown()
+	}
+	a.updateScrollStatus()
+	a.dirty = true
+}
+
+// showSlashCommandPalette creates and displays the slash command palette.
+func (a *WidgetApp) showSlashCommandPalette() {
+	palette := widgets.NewPaletteWidget("Commands")
+	palette.SetPlaceholder("/")
+	palette.SetMaxVisible(10)
+
+	// Slash command items
+	items := []widgets.PaletteItem{
+		{ID: "/review", Label: "/review", Description: "Review current git diff"},
+		{ID: "/commit", Label: "/commit", Description: "Generate commit message"},
+		{ID: "/new", Label: "/new", Description: "Start a new session"},
+		{ID: "/clear", Label: "/clear", Description: "Clear current session"},
+		{ID: "/search", Label: "/search", Description: "Search conversation history"},
+		{ID: "/export", Label: "/export", Description: "Export current session"},
+		{ID: "/import", Label: "/import", Description: "Import conversation file"},
+		{ID: "/sessions", Label: "/sessions", Description: "List active sessions"},
+		{ID: "/next", Label: "/next", Description: "Switch to next session"},
+		{ID: "/prev", Label: "/prev", Description: "Switch to previous session"},
+		{ID: "/model", Label: "/model", Description: "Select execution model"},
+		{ID: "/model curate", Label: "/model curate", Description: "Curate models for ACP/editor pickers"},
+		{ID: "/context", Label: "/context", Description: "Show context budget details"},
+		{ID: "/help", Label: "/help", Description: "Show available commands"},
+		{ID: "/quit", Label: "/quit", Description: "Exit Buckley"},
+	}
+	palette.SetItems(items)
+
+	palette.SetOnSelect(func(item widgets.PaletteItem) {
+		// Execute the slash command
+		if a.onSubmit != nil {
+			a.onSubmit(item.ID)
+		}
+	})
+
+	palette.SetStyles(
+		a.style(a.theme.Surface),
+		a.style(a.theme.Border),
+		a.style(a.theme.Accent),
+		a.style(a.theme.TextPrimary),
+		a.style(a.theme.TextPrimary),
+		a.style(a.theme.Selection),
+		a.style(a.theme.TextSecondary),
+	)
+	palette.Focus()
+
+	// Push as modal overlay
+	a.screen.PushLayer(palette, true)
+	a.dirty = true
+}
+
+// ShowModelPicker displays a model picker overlay.
+func (a *WidgetApp) ShowModelPicker(items []widgets.PaletteItem, onSelect func(item widgets.PaletteItem)) {
+	palette := widgets.NewPaletteWidget("Models")
+	palette.SetPlaceholder("search models...")
+	palette.SetMaxVisible(16)
+	palette.SetItems(items)
+	if onSelect != nil {
+		palette.SetOnSelect(onSelect)
+	}
+	palette.SetStyles(
+		a.style(a.theme.Surface),
+		a.style(a.theme.Border),
+		a.style(a.theme.Accent),
+		a.style(a.theme.TextPrimary),
+		a.style(a.theme.TextPrimary),
+		a.style(a.theme.Selection),
+		a.style(a.theme.TextSecondary),
+	)
+	palette.Focus()
+
+	a.screen.PushLayer(palette, true)
+	a.dirty = true
+}
+
+// handleSubmit processes input submission based on mode.
+func (a *WidgetApp) handleSubmit(text string, mode buckleywidgets.InputMode) {
+	switch mode {
+	case buckleywidgets.ModeShell:
+		if a.onShellCmd != nil {
+			// Remove leading ! if present
+			cmd := text
+			if len(cmd) > 0 && cmd[0] == '!' {
+				cmd = cmd[1:]
+			}
+			result := a.onShellCmd(cmd)
+			a.AddMessage("$ "+cmd, "system")
+			if result != "" {
+				a.AddMessage(result, "tool")
+			}
+		}
+	case buckleywidgets.ModeEnv:
+		// Handle env var lookup
+		varName := text
+		if len(varName) > 0 && varName[0] == '$' {
+			varName = varName[1:]
+		}
+		value := os.Getenv(varName)
+		a.AddMessage("$"+varName+" = "+value, "system")
+	default:
+		if a.onSubmit != nil {
+			a.onSubmit(text)
+		}
+	}
+	a.inputArea.Clear()
+}
+
+// Post sends a message to the event loop.
+// Safe to call from any goroutine.
+func (a *WidgetApp) Post(msg Message) {
+	select {
+	case a.messages <- msg:
+	default:
+		// Channel full - drop message
+	}
+}
+
+// Run starts the TUI event loop.
+func (a *WidgetApp) Run() error {
+	defer a.backend.Fini()
+
+	a.running = true
+	a.dirty = true
+
+	if a.recorder != nil {
+		w, h := a.screen.Size()
+		if err := a.recorder.Start(w, h, time.Now()); err != nil {
+			log.Printf("tui recording start failed: %v", err)
+			a.recorder = nil
+		} else if a.recordPath != "" {
+			a.setStatusOverride("Recording enabled", 3*time.Second)
+		}
+	}
+	defer func() {
+		if a.recorder != nil {
+			_ = a.recorder.Close()
+		}
+	}()
+
+	// Frame ticker for 60 FPS rendering
+	a.frameTicker = time.NewTicker(16 * time.Millisecond)
+	defer a.frameTicker.Stop()
+
+	// Start terminal event poller in background
+	go a.pollEvents()
+
+	// Main event loop
+	for a.running {
+		select {
+		case msg := <-a.messages:
+			if a.update(msg) {
+				a.dirty = true
+			}
+
+		case now := <-a.frameTicker.C:
+			a.coalescer.Tick()
+			if a.updateAnimations(now) {
+				a.dirty = true
+			}
+			if a.dirty {
+				a.render()
+				a.dirty = false
+			}
+		}
+	}
+
+	return nil
+}
+
+// pollEvents reads terminal events and posts them as messages.
+func (a *WidgetApp) pollEvents() {
+	for a.running {
+		ev := a.backend.PollEvent()
+		if ev == nil {
+			continue
+		}
+
+		switch e := ev.(type) {
+		case terminal.KeyEvent:
+			a.Post(KeyMsg{
+				Key:   int(e.Key),
+				Rune:  e.Rune,
+				Alt:   e.Alt,
+				Ctrl:  e.Ctrl,
+				Shift: e.Shift,
+			})
+		case terminal.ResizeEvent:
+			a.Post(ResizeMsg{Width: e.Width, Height: e.Height})
+		case terminal.MouseEvent:
+			a.Post(MouseMsg{
+				X:      e.X,
+				Y:      e.Y,
+				Button: MouseButton(e.Button),
+				Action: MouseAction(e.Action),
+				Alt:    e.Alt,
+				Ctrl:   e.Ctrl,
+				Shift:  e.Shift,
+			})
+		case terminal.PasteEvent:
+			a.Post(PasteMsg{Text: e.Text})
+		}
+	}
+}
+
+func (a *WidgetApp) updateAnimations(now time.Time) bool {
+	dirty := false
+
+	if a.statusOverride != "" && !now.Before(a.statusOverrideUntil) {
+		a.statusOverride = ""
+		a.statusOverrideUntil = time.Time{}
+		a.statusBar.SetStatus(a.statusText)
+		dirty = true
+	}
+	if !a.ctrlCArmedUntil.IsZero() && !now.Before(a.ctrlCArmedUntil) {
+		a.ctrlCArmedUntil = time.Time{}
+	}
+
+	if a.inputArea.IsFocused() {
+		if a.cursorPulsePeriod <= 0 {
+			a.cursorPulsePeriod = 2600 * time.Millisecond
+		}
+		if a.cursorPulseInterval <= 0 {
+			a.cursorPulseInterval = 50 * time.Millisecond
+		}
+		if a.cursorPulseStart.IsZero() {
+			a.cursorPulseStart = now
+		}
+
+		if now.Sub(a.cursorPulseLast) >= a.cursorPulseInterval {
+			phase := a.cursorPhase(now)
+			style := a.cursorStyleForPhase(phase)
+			if style != a.cursorStyle {
+				a.cursorStyle = style
+				a.inputArea.SetCursorStyle(style)
+				dirty = true
+			}
+			a.cursorPulseLast = now
+		}
+	}
+
+	if a.streaming && !a.reduceMotion {
+		if a.streamAnimInterval <= 0 {
+			a.streamAnimInterval = 120 * time.Millisecond
+		}
+		if a.streamAnimLast.IsZero() {
+			a.streamAnimLast = now
+		}
+		if now.Sub(a.streamAnimLast) >= a.streamAnimInterval {
+			a.streamAnim++
+			a.statusBar.SetStreamAnim(a.streamAnim)
+			a.streamAnimLast = now
+			dirty = true
+		}
+	}
+
+	if !a.reduceMotion {
+		if a.sidebarAnimInterval <= 0 {
+			a.sidebarAnimInterval = 120 * time.Millisecond
+		}
+		if now.Sub(a.sidebarAnimLast) >= a.sidebarAnimInterval {
+			a.sidebarAnimFrame++
+			if a.runningToolCount > 0 {
+				a.sidebar.SetSpinnerFrame(a.sidebarAnimFrame)
+				dirty = true
+			}
+			if a.presenceVisible && a.presence != nil {
+				a.presence.SetPulseStep(a.sidebarAnimFrame)
+				dirty = true
+			}
+			a.sidebarAnimLast = now
+		}
+	}
+
+	if a.toastStack != nil && !a.reduceMotion {
+		a.toastStack.SetNow(now)
+		if a.toastStack.HasActiveAnimations(now) {
+			dirty = true
+		}
+	}
+
+	return dirty
+}
+
+// update processes a message and returns true if a render is needed.
+func (a *WidgetApp) update(msg Message) bool {
+	switch m := msg.(type) {
+	case KeyMsg:
+		return a.handleKeyMsg(m)
+
+	case ResizeMsg:
+		a.applyInputHeightLimit(m.Height)
+		a.inputMeasuredHeight = a.inputArea.Measure(runtime.Constraints{MaxWidth: m.Width, MaxHeight: m.Height}).Height
+		a.screen.Resize(m.Width, m.Height)
+		if a.recorder != nil {
+			if err := a.recorder.Resize(m.Width, m.Height); err != nil {
+				log.Printf("tui recording resize failed: %v", err)
+				a.recorder = nil
+			}
+		}
+		// The ChatView widget handles its own scrollback resizing in Layout()
+		a.updateSidebarVisibility()
+		return true
+
+	case StreamChunk:
+		a.coalescer.Add(m.SessionID, m.Text)
+		return false
+
+	case StreamFlush:
+		a.chatView.AppendText(m.Text)
+		a.updateScrollStatus()
+		return true
+
+	case StreamDone:
+		a.coalescer.Flush(m.SessionID)
+		a.coalescer.Clear(m.SessionID)
+		return true
+
+	case AddMessageMsg:
+		wasFollowing := a.isFollowing()
+		a.chatView.AddMessage(m.Content, m.Source)
+		if !wasFollowing && m.Source != "thinking" {
+			a.unreadCount++
+		}
+		a.updateScrollStatus()
+		return true
+
+	case AppendMsg:
+		a.chatView.AppendText(m.Text)
+		a.updateScrollStatus()
+		return true
+
+	case StatusMsg:
+		a.statusText = m.Text
+		if a.statusOverride == "" || time.Now().After(a.statusOverrideUntil) {
+			a.statusOverride = ""
+			a.statusOverrideUntil = time.Time{}
+			a.statusBar.SetStatus(m.Text)
+			return true
+		}
+		return false
+	case StatusOverrideMsg:
+		a.setStatusOverride(m.Text, m.Duration)
+		return true
+
+	case TokensMsg:
+		a.statusBar.SetTokens(m.Tokens, m.CostCent)
+		return true
+
+	case ContextMsg:
+		a.contextUsed = m.Used
+		a.contextBudget = m.Budget
+		a.contextWindow = m.Window
+		a.statusBar.SetContextUsage(m.Used, m.Budget, m.Window)
+		a.sidebar.SetContextUsage(m.Used, m.Budget, m.Window)
+		a.updatePresenceStrip()
+		a.updateSidebarVisibility()
+		return true
+	case ExecutionModeMsg:
+		a.executionMode = m.Mode
+		a.statusBar.SetExecutionMode(m.Mode)
+		return true
+
+	case ProgressMsg:
+		a.statusBar.SetProgress(m.Items)
+		return true
+
+	case ToastsMsg:
+		if a.toastStack != nil {
+			a.toastStack.SetToasts(m.Toasts)
+		}
+		alert := false
+		for _, t := range m.Toasts {
+			if t == nil {
+				continue
+			}
+			if t.Level == toast.ToastWarning || t.Level == toast.ToastError {
+				alert = true
+				break
+			}
+		}
+		a.presenceAlert = alert
+		a.updatePresenceStrip()
+		return true
+
+	case StreamingMsg:
+		a.streaming = m.Active
+		a.statusBar.SetStreaming(m.Active)
+		if a.reduceMotion && m.Active {
+			a.streamAnim = 0
+			a.statusBar.SetStreamAnim(0)
+			a.streamAnimLast = time.Time{}
+		}
+		if !m.Active {
+			a.streamAnim = 0
+			a.statusBar.SetStreamAnim(0)
+			a.streamAnimLast = time.Time{}
+		}
+		a.updatePresenceStrip()
+		return true
+
+	case ModelMsg:
+		a.header.SetModelName(m.Name)
+		a.chatView.SetModelName(m.Name)
+		return true
+
+	case SessionMsg:
+		a.sessionID = strings.TrimSpace(m.ID)
+		a.header.SetSessionID(a.sessionID)
+		return true
+
+	case ThinkingMsg:
+		if m.Show {
+			a.chatView.AddMessage("", "thinking")
+		} else {
+			a.chatView.RemoveThinkingIndicator()
+		}
+		a.updateScrollStatus()
+		return true
+
+	case RefreshMsg:
+		return true
+
+	case QuitMsg:
+		a.Quit()
+		return false
+
+	case ApprovalRequestMsg:
+		a.showApprovalDialog(m)
+		return true
+
+	case MouseMsg:
+		return a.handleMouseMsg(m)
+
+	case PasteMsg:
+		a.inputArea.InsertText(m.Text)
+		return true
+
+	default:
+		return false
+	}
+}
+
+// handleKeyMsg processes keyboard input.
+func (a *WidgetApp) handleKeyMsg(m KeyMsg) bool {
+	key := terminal.Key(m.Key)
+
+	// Ctrl+C: clear input first, second press within 3s exits
+	if key == terminal.KeyCtrlC {
+		now := time.Now()
+		if now.Before(a.ctrlCArmedUntil) {
+			a.Quit()
+			return false
+		}
+		hadText := a.inputArea.HasText()
+		a.inputArea.Clear()
+		a.ctrlCArmedUntil = now.Add(3 * time.Second)
+		if hadText {
+			a.setStatusOverride("Input cleared · Press Ctrl+C again to quit", 3*time.Second)
+		} else {
+			a.setStatusOverride("Press Ctrl+C again to quit", 3*time.Second)
+		}
+		return true
+	}
+
+	if a.handleKeybind(m) {
+		return true
+	}
+
+	// Convert to runtime.KeyMsg and dispatch through screen
+	runtimeMsg := runtime.KeyMsg{
+		Key:   key,
+		Rune:  m.Rune,
+		Alt:   m.Alt,
+		Ctrl:  m.Ctrl,
+		Shift: m.Shift,
+	}
+
+	if a.inputArea.IsFocused() {
+		switch key {
+		case terminal.KeyUp, terminal.KeyDown, terminal.KeyHome, terminal.KeyEnd:
+			result := a.inputArea.HandleMessage(runtimeMsg)
+			if result.Handled {
+				for _, cmd := range result.Commands {
+					a.handleCommand(cmd)
+				}
+				return true
+			}
+		}
+	}
+
+	result := a.screen.HandleMessage(runtimeMsg)
+
+	// Process commands that bubble up from widgets
+	for _, cmd := range result.Commands {
+		a.handleCommand(cmd)
+	}
+
+	return result.Handled
+}
+
+// handleMouseMsg processes mouse input.
+func (a *WidgetApp) handleMouseMsg(m MouseMsg) bool {
+	if !a.sidebarVisible && a.presenceVisible && a.presence != nil {
+		if a.presence.Bounds().Contains(m.X, m.Y) {
+			if m.Action == MousePress && m.Button == MouseLeft {
+				a.toggleSidebar()
+				return true
+			}
+		}
+	}
+
+	if m.Action == MousePress && m.Button == MouseLeft {
+		if a.handleWebClick(m) {
+			return true
+		}
+	}
+
+	if a.sidebarVisible && a.sidebar != nil {
+		if a.sidebar.Bounds().Contains(m.X, m.Y) {
+			return a.dispatchRuntimeMouse(m)
+		}
+	}
+
+	// Handle scroll wheel on the chat view
+	switch m.Button {
+	case MouseWheelUp:
+		a.chatView.ScrollUp(3)
+		return true
+	case MouseWheelDown:
+		a.chatView.ScrollDown(3)
+		return true
+	}
+
+	if m.Action == MouseRelease && a.selectionActive {
+		line, col, ok := a.chatView.PositionForPoint(m.X, m.Y)
+		if ok {
+			a.chatView.UpdateSelection(line, col)
+			a.selectionLastLine = line
+			a.selectionLastCol = col
+			a.selectionLastValid = true
+		} else if a.selectionLastValid {
+			a.chatView.UpdateSelection(a.selectionLastLine, a.selectionLastCol)
+		}
+
+		a.chatView.EndSelection()
+		a.selectionActive = false
+		a.selectionLastValid = false
+		if a.chatView.HasSelection() {
+			text := a.chatView.SelectionText()
+			if text == "" {
+				a.chatView.ClearSelection()
+			} else if err := a.writeClipboard(text); err != nil {
+				a.setStatusOverride("Copy failed: "+err.Error(), 3*time.Second)
+			} else {
+				a.setStatusOverride("Selection copied", 2*time.Second)
+			}
+		}
+		a.dirty = true
+		return true
+	}
+
+	if m.Action == MousePress && m.Button == MouseRight {
+		if _, _, ok := a.chatView.PositionForPoint(m.X, m.Y); ok {
+			a.chatView.ClearSelection()
+			a.selectionActive = false
+			a.selectionLastValid = false
+			a.setStatusOverride("Selection cleared", 2*time.Second)
+			a.dirty = true
+			return true
+		}
+	}
+
+	if m.Action == MousePress && m.Button == MouseLeft {
+		line, col, ok := a.chatView.PositionForPoint(m.X, m.Y)
+		if ok {
+			if !a.selectionActive {
+				a.chatView.ClearSelection()
+				a.chatView.StartSelection(line, col)
+				a.selectionActive = true
+			} else {
+				a.chatView.UpdateSelection(line, col)
+			}
+			a.selectionLastLine = line
+			a.selectionLastCol = col
+			a.selectionLastValid = true
+			a.dirty = true
+			return true
+		}
+	}
+
+	return a.dispatchRuntimeMouse(m)
+}
+
+func (a *WidgetApp) handleWebClick(m MouseMsg) bool {
+	if a.toastStack != nil {
+		if entry, ok := a.toastStack.ToastAt(m.X, m.Y); ok {
+			if entry.Level == toast.ToastWarning || entry.Level == toast.ToastError {
+				handled := a.openWebTarget("errors", m.Shift)
+				if handled && a.onToastDismiss != nil {
+					a.onToastDismiss(entry.ID)
+				}
+				return handled
+			}
+		}
+	}
+
+	if a.headerVisible && a.header != nil {
+		if target, ok := a.header.WebLinkAt(m.X, m.Y); ok {
+			if target == "model" {
+				return a.openWebTarget("model", m.Shift)
+			}
+			return a.openWebTarget("session", m.Shift)
+		}
+	}
+
+	if a.statusVisible && a.statusBar != nil {
+		if target, ok := a.statusBar.WebLinkAt(m.X, m.Y); ok {
+			return a.openWebTarget(target, m.Shift)
+		}
+	}
+
+	if a.sidebarVisible && a.sidebar != nil {
+		if target, ok := a.sidebar.WebLinkAt(m.X, m.Y); ok {
+			return a.openWebTarget(target, m.Shift)
+		}
+	}
+
+	if a.chatView != nil {
+		if action, language, code, ok := a.chatView.CodeHeaderActionAtPoint(m.X, m.Y); ok {
+			switch action {
+			case "copy":
+				if err := a.writeClipboard(code); err != nil {
+					a.setStatusOverride("Copy failed: "+err.Error(), 3*time.Second)
+				} else {
+					if language == "" {
+						a.setStatusOverride("Copied code block", 2*time.Second)
+					} else {
+						a.setStatusOverride("Copied "+language+" code block", 2*time.Second)
+					}
+				}
+				return true
+			case "open":
+				return a.openWebTarget("code", m.Shift)
+			}
+		}
+	}
+
+	return false
+}
+
+func (a *WidgetApp) dispatchRuntimeMouse(m MouseMsg) bool {
+	runtimeMsg := runtime.MouseMsg{
+		X:      m.X,
+		Y:      m.Y,
+		Button: runtime.MouseButton(m.Button),
+		Action: runtime.MouseAction(m.Action),
+		Alt:    m.Alt,
+		Ctrl:   m.Ctrl,
+		Shift:  m.Shift,
+	}
+
+	result := a.screen.HandleMessage(runtimeMsg)
+	for _, cmd := range result.Commands {
+		a.handleCommand(cmd)
+	}
+
+	return result.Handled
+}
+
+func (a *WidgetApp) applyInputHeightLimit(screenHeight int) {
+	a.inputArea.SetHeightLimits(minInputHeight, maxInputHeight(screenHeight))
+}
+
+func (a *WidgetApp) refreshInputLayout() {
+	w, h := a.screen.Size()
+	desired := a.inputArea.Measure(runtime.Constraints{MaxWidth: w, MaxHeight: h}).Height
+	if desired == a.inputMeasuredHeight {
+		return
+	}
+	a.inputMeasuredHeight = desired
+	a.screen.Resize(w, h)
+	a.dirty = true
+}
+
+func (a *WidgetApp) updateSidebarVisibility() {
+	w, h := a.screen.Size()
+	layout := layoutForScreen(w, h, a.sidebar.HasContent(), a.focusMode)
+	if layout.sidebarWidth > 0 {
+		a.sidebar.SetWidth(layout.sidebarWidth)
+	}
+	shouldShow := layout.sidebarVisible
+	shouldPresence := layout.presenceVisible
+	if a.sidebarUserOverride && !a.focusMode {
+		shouldShow = a.sidebarVisible
+		shouldPresence = a.presenceVisible
+	}
+	if shouldShow == a.sidebarVisible && shouldPresence == a.presenceVisible && layout.showHeader == a.headerVisible && layout.showStatus == a.statusVisible {
+		return
+	}
+	a.sidebarVisible = shouldShow
+	a.presenceVisible = shouldPresence
+	a.sidebarAutoHidden = shouldPresence && !shouldShow
+	a.headerVisible = layout.showHeader
+	a.statusVisible = layout.showStatus
+	a.rebuildLayout()
+}
+
+func (a *WidgetApp) updateScrollStatus() bool {
+	top, total, viewHeight := a.chatView.ScrollPosition()
+	return a.applyScrollStatus(top, total, viewHeight)
+}
+
+func (a *WidgetApp) updatePresenceStrip() {
+	if a.presence == nil {
+		return
+	}
+	planPct := -1
+	if a.planTotal > 0 {
+		planPct = int(float64(a.planCompleted)*100/float64(a.planTotal) + 0.5)
+	}
+	active := a.runningToolCount > 0 || a.streaming || a.currentTaskActive || (planPct > 0 && planPct < 100)
+	alert := a.presenceAlert
+	if a.contextBudget > 0 {
+		if float64(a.contextUsed)/float64(a.contextBudget) >= 0.9 {
+			alert = true
+		}
+	}
+	a.presence.SetActivity(active, alert, a.streaming)
+	a.presence.SetPlanProgress(planPct)
+}
+
+func (a *WidgetApp) applyScrollStatus(top, total, viewHeight int) bool {
+	indicator := a.scrollIndicatorFor(top, total, viewHeight)
+	if indicator != a.scrollIndicator {
+		a.scrollIndicator = indicator
+		a.statusBar.SetScrollPosition(indicator)
+		return true
+	}
+	return false
+}
+
+func (a *WidgetApp) scrollIndicatorFor(top, total, viewHeight int) string {
+	if total <= 0 || viewHeight <= 0 {
+		return ""
+	}
+
+	atTop := top <= 0
+	atBottom := top+viewHeight >= total
+	if atBottom && a.unreadCount > 0 {
+		a.unreadCount = 0
+	}
+
+	scrollRange := total - viewHeight
+	var pos string
+	switch {
+	case atTop && scrollRange > 0:
+		pos = "TOP"
+	case atBottom || scrollRange <= 0:
+		pos = "END"
+	default:
+		pct := (top * 100) / max(1, scrollRange)
+		pos = fmt.Sprintf("%d%%", pct)
+	}
+
+	if a.unreadCount > 0 && !atBottom {
+		pos = fmt.Sprintf("%s  %d new", pos, a.unreadCount)
+	}
+
+	return pos
+}
+
+func (a *WidgetApp) isFollowing() bool {
+	top, total, viewHeight := a.chatView.ScrollPosition()
+	return total == 0 || top+viewHeight >= total
+}
+
+func (a *WidgetApp) jumpToLatest() {
+	a.chatView.ScrollToBottom()
+	a.unreadCount = 0
+	a.updateScrollStatus()
+	a.setStatusOverride("Jumped to latest", 2*time.Second)
+}
+
+func (a *WidgetApp) copyLatestCodeBlock() {
+	language, code, ok := a.chatView.LatestCodeBlock()
+	if !ok {
+		a.setStatusOverride("No code block to copy", 3*time.Second)
+		return
+	}
+	if err := a.writeClipboard(code); err != nil {
+		a.setStatusOverride("Copy failed: "+err.Error(), 3*time.Second)
+		return
+	}
+	if language == "" {
+		a.setStatusOverride("Copied code block", 2*time.Second)
+	} else {
+		a.setStatusOverride("Copied "+language+" code block", 2*time.Second)
+	}
+}
+
+func (a *WidgetApp) openWebTarget(target string, copyOnly bool) bool {
+	webURL := a.webURL(target)
+	if webURL == "" {
+		a.setStatusOverride("Web UI not configured", 3*time.Second)
+		return true
+	}
+	if copyOnly {
+		if err := a.writeClipboard(webURL); err != nil {
+			a.setStatusOverride("Copy failed: "+err.Error(), 3*time.Second)
+			return true
+		}
+		a.setStatusOverride("Web URL copied", 2*time.Second)
+		return true
+	}
+	if err := openURL(webURL); err != nil {
+		a.setStatusOverride("Open failed: "+err.Error(), 3*time.Second)
+		return true
+	}
+	a.setStatusOverride("Opened web UI", 2*time.Second)
+	return true
+}
+
+func (a *WidgetApp) webURL(target string) string {
+	base := a.webBaseURL
+	if base == "" {
+		return ""
+	}
+	sessionID := strings.TrimSpace(a.sessionID)
+	view := ""
+	switch target {
+	case "dashboard":
+		sessionID = ""
+	case "plan":
+		view = "plan"
+	case "tools":
+		view = "tools"
+	case "usage":
+		view = "usage"
+	case "context":
+		view = "context"
+	case "model":
+		view = "model"
+	case "errors":
+		view = "errors"
+	case "code":
+		view = "code"
+	}
+	return buildWebURL(base, sessionID, view)
+}
+
+// handleCommand processes commands emitted by widgets.
+func (a *WidgetApp) handleCommand(cmd runtime.Command) {
+	switch c := cmd.(type) {
+	case runtime.FileSelected:
+		// Insert file path into input or notify callback
+		if a.onFileSelect != nil {
+			a.onFileSelect(c.Path)
+		}
+	case buckleywidgets.ApprovalResponse:
+		// Notify callback with approval decision
+		if a.onApproval != nil {
+			a.onApproval(c.RequestID, c.Approved, c.AlwaysAllow)
+		}
+	case runtime.PaletteSelected:
+		a.executeCommandID(c.ID)
+	case runtime.Quit:
+		a.Quit()
+	case runtime.Submit:
+		// Already handled by inputArea callback
+	case runtime.Cancel:
+		// Overlay dismissal handled by Screen
+	}
+}
+
+// handlePaletteCommand handles command palette selections.
+func (a *WidgetApp) handlePaletteCommand(id string) {
+	switch id {
+	// Session commands
+	case "new":
+		a.ClearScrollback()
+		a.AddMessage("Started new conversation", "system")
+	case "clear":
+		a.ClearScrollback()
+	case "history":
+		// Submit /history command
+		if a.onSubmit != nil {
+			a.onSubmit("/history")
+		}
+	case "search":
+		a.showSearchOverlay()
+	case "export":
+		if a.onSubmit != nil {
+			a.onSubmit("/export")
+		}
+	case "import":
+		if a.onSubmit != nil {
+			a.onSubmit("/import")
+		}
+
+	// View commands
+	case "toggle-sidebar":
+		a.toggleSidebar()
+	case "file-picker":
+		a.showFilePicker()
+	case "scroll-top":
+		a.chatView.ScrollToTop()
+		a.updateScrollStatus()
+		a.setStatusOverride("Top of conversation", 2*time.Second)
+	case "scroll-bottom":
+		a.jumpToLatest()
+	case "copy-code":
+		a.copyLatestCodeBlock()
+
+	// Model commands
+	case "models":
+		if a.onSubmit != nil {
+			a.onSubmit("/model")
+		}
+	case "usage":
+		if a.onSubmit != nil {
+			a.onSubmit("/usage")
+		}
+
+	// Plan commands
+	case "plans":
+		if a.onSubmit != nil {
+			a.onSubmit("/plans")
+		}
+	case "status":
+		if a.onSubmit != nil {
+			a.onSubmit("/status")
+		}
+
+	// System commands
+	case "help":
+		if a.onSubmit != nil {
+			a.onSubmit("/help")
+		}
+	case "config":
+		if a.onSubmit != nil {
+			a.onSubmit("/config")
+		}
+	case "quit":
+		a.Quit()
+	}
+}
+
+// Quit stops the application.
+func (a *WidgetApp) Quit() {
+	a.running = false
+	if a.onQuit != nil {
+		a.onQuit()
+	}
+}
+
+// render draws the UI to the backend using partial redraws.
+func (a *WidgetApp) render() {
+	a.renderMu.Lock()
+	defer a.renderMu.Unlock()
+
+	start := time.Now()
+
+	// Render to buffer
+	a.screen.Render()
+	buf := a.screen.Buffer()
+	a.drawFocusIndicator(buf)
+
+	// Track cells updated
+	var cellsUpdated int64
+
+	// Use partial redraw if only some cells changed
+	if buf.IsDirty() {
+		dirtyCount := buf.DirtyCount()
+		w, h := buf.Size()
+		totalCells := w * h
+
+		// If more than half the cells are dirty, do a full redraw
+		// (more efficient than many individual SetContent calls)
+		if dirtyCount > totalCells/2 {
+			for y := 0; y < h; y++ {
+				for x := 0; x < w; x++ {
+					cell := buf.Get(x, y)
+					a.backend.SetContent(x, y, cell.Rune, nil, cell.Style)
+				}
+			}
+			cellsUpdated = int64(totalCells)
+			a.metrics.FullRedraws++
+		} else {
+			// Partial redraw - only dirty cells
+			buf.ForEachDirtyCell(func(x, y int, cell runtime.Cell) {
+				a.backend.SetContent(x, y, cell.Rune, nil, cell.Style)
+				cellsUpdated++
+			})
+			a.metrics.PartialRedraws++
+		}
+		buf.ClearDirty()
+	}
+
+	// Show the screen
+	a.backend.Show()
+
+	// Update metrics
+	elapsed := time.Since(start)
+	a.metrics.FrameCount++
+	a.metrics.TotalRenderTime += elapsed
+	a.metrics.LastFrameTime = elapsed
+	a.metrics.CellsUpdated = cellsUpdated
+
+	// Check for dropped frames (if render took longer than 16ms)
+	if elapsed > 16*time.Millisecond {
+		a.metrics.DroppedFrames++
+	}
+
+	if a.debugRender && a.metrics.FrameCount%60 == 0 {
+		avg := time.Duration(0)
+		if a.metrics.FrameCount > 0 {
+			avg = a.metrics.TotalRenderTime / time.Duration(a.metrics.FrameCount)
+		}
+		dropPct := 0.0
+		if a.metrics.FrameCount > 0 {
+			dropPct = float64(a.metrics.DroppedFrames) / float64(a.metrics.FrameCount) * 100
+		}
+		log.Printf("[render] frames=%d avg=%v dropped=%.1f%% cells=%d full=%d partial=%d",
+			a.metrics.FrameCount,
+			avg,
+			dropPct,
+			a.metrics.CellsUpdated,
+			a.metrics.FullRedraws,
+			a.metrics.PartialRedraws)
+	}
+
+	if a.recorder != nil && buf != nil {
+		if err := a.recorder.Frame(buf, time.Now()); err != nil {
+			log.Printf("tui recording frame failed: %v", err)
+			a.recorder = nil
+		}
+	}
+
+	a.lastRender = time.Now()
+}
+
+func (a *WidgetApp) initSoftCursor() {
+	accent := a.style(a.theme.Accent).FG()
+	accentDim := a.style(a.theme.AccentDim).FG()
+	surface := a.style(a.theme.SurfaceRaised).BG()
+	textInverse := a.style(a.theme.TextInverse).FG()
+
+	a.cursorBGHigh = accent
+	a.cursorBGLow = blendColor(surface, accentDim, 0.35)
+	a.cursorFG = textInverse
+	a.cursorStyle = a.cursorStyleForPhase(0.2)
+	a.inputArea.SetCursorStyle(a.cursorStyle)
+}
+
+func (a *WidgetApp) cursorPhase(now time.Time) float64 {
+	if a.cursorPulsePeriod <= 0 {
+		return 1
+	}
+	elapsed := now.Sub(a.cursorPulseStart)
+	phase := float64(elapsed%a.cursorPulsePeriod) / float64(a.cursorPulsePeriod)
+	return 0.5 - 0.5*math.Cos(2*math.Pi*phase)
+}
+
+func (a *WidgetApp) cursorStyleForPhase(phase float64) backend.Style {
+	bg := blendColor(a.cursorBGLow, a.cursorBGHigh, phase)
+	style := backend.DefaultStyle().Foreground(a.cursorFG).Background(bg)
+	if phase < 0.35 {
+		style = style.Dim(true)
+	} else if phase > 0.75 {
+		style = style.Bold(true)
+	}
+	return style
+}
+
+func (a *WidgetApp) setStatusOverride(text string, duration time.Duration) {
+	if duration <= 0 {
+		duration = 3 * time.Second
+	}
+	a.statusOverride = text
+	a.statusOverrideUntil = time.Now().Add(duration)
+	a.statusBar.SetStatus(text)
+}
+
+// Public API methods
+
+// Refresh forces a re-render.
+func (a *WidgetApp) Refresh() {
+	a.Post(RefreshMsg{})
+}
+
+// AddMessage adds a message. Thread-safe via message passing.
+func (a *WidgetApp) AddMessage(content, source string) {
+	a.Post(AddMessageMsg{Content: content, Source: source})
+}
+
+// RemoveThinkingIndicator removes the thinking indicator.
+func (a *WidgetApp) RemoveThinkingIndicator() {
+	a.Post(ThinkingMsg{Show: false})
+}
+
+// ShowThinkingIndicator shows the thinking indicator.
+func (a *WidgetApp) ShowThinkingIndicator() {
+	a.Post(ThinkingMsg{Show: true})
+}
+
+// AppendToLastMessage appends text. Thread-safe via message passing.
+func (a *WidgetApp) AppendToLastMessage(text string) {
+	a.Post(AppendMsg{Text: text})
+}
+
+// StreamChunk sends a streaming chunk through the coalescer.
+func (a *WidgetApp) StreamChunk(sessionID, text string) {
+	a.Post(StreamChunk{SessionID: sessionID, Text: text})
+}
+
+// StreamEnd signals the end of a streaming session.
+func (a *WidgetApp) StreamEnd(sessionID, fullText string) {
+	a.Post(StreamDone{SessionID: sessionID, FullText: fullText})
+}
+
+// SetStatus updates status. Thread-safe via message passing.
+func (a *WidgetApp) SetStatus(text string) {
+	a.Post(StatusMsg{Text: text})
+}
+
+// SetStatusOverride temporarily overrides the status bar text.
+func (a *WidgetApp) SetStatusOverride(text string, duration time.Duration) {
+	a.Post(StatusOverrideMsg{Text: text, Duration: duration})
+}
+
+// SetTokenCount updates token display. Thread-safe via message passing.
+func (a *WidgetApp) SetTokenCount(tokens int, costCents float64) {
+	a.Post(TokensMsg{Tokens: tokens, CostCent: costCents})
+}
+
+// SetContextUsage updates context usage display. Thread-safe via message passing.
+func (a *WidgetApp) SetContextUsage(used, budget, window int) {
+	a.Post(ContextMsg{Used: used, Budget: budget, Window: window})
+}
+
+// SetExecutionMode updates execution mode display. Thread-safe via message passing.
+func (a *WidgetApp) SetExecutionMode(mode string) {
+	a.Post(ExecutionModeMsg{Mode: mode})
+}
+
+// SetProgress updates progress indicators. Thread-safe via message passing.
+func (a *WidgetApp) SetProgress(items []progress.Progress) {
+	a.Post(ProgressMsg{Items: items})
+}
+
+// SetToasts updates toast notifications. Thread-safe via message passing.
+func (a *WidgetApp) SetToasts(toasts []*toast.Toast) {
+	a.Post(ToastsMsg{Toasts: toasts})
+}
+
+// SetStreaming updates streaming indicator state. Thread-safe via message passing.
+func (a *WidgetApp) SetStreaming(active bool) {
+	a.Post(StreamingMsg{Active: active})
+}
+
+// SetModelName updates model display. Thread-safe via message passing.
+func (a *WidgetApp) SetModelName(name string) {
+	a.Post(ModelMsg{Name: name})
+}
+
+// SetSessionID updates session display. Thread-safe via message passing.
+func (a *WidgetApp) SetSessionID(id string) {
+	a.Post(SessionMsg{ID: id})
+}
+
+// SetCallbacks sets the event handlers.
+func (a *WidgetApp) SetCallbacks(onSubmit func(string), onFileSelect func(string), onShellCmd func(string) string) {
+	a.onSubmit = onSubmit
+	a.onFileSelect = onFileSelect
+	a.onShellCmd = onShellCmd
+}
+
+// SetSessionCallbacks sets the session navigation callbacks.
+func (a *WidgetApp) SetSessionCallbacks(onNext, onPrev func()) {
+	a.onNextSession = onNext
+	a.onPrevSession = onPrev
+}
+
+// SetApprovalCallback sets the callback for tool approval decisions.
+func (a *WidgetApp) SetApprovalCallback(onApproval func(requestID string, approved, alwaysAllow bool)) {
+	a.onApproval = onApproval
+}
+
+// SetToastDismissHandler sets the handler to dismiss toasts from the UI.
+func (a *WidgetApp) SetToastDismissHandler(onDismiss func(string)) {
+	if a.toastStack == nil {
+		return
+	}
+	a.onToastDismiss = onDismiss
+	a.toastStack.SetOnDismiss(onDismiss)
+}
+
+// RequestApproval displays an approval dialog for a tool operation.
+// The callback set via SetApprovalCallback will be called with the decision.
+func (a *WidgetApp) RequestApproval(req ApprovalRequestMsg) {
+	a.Post(req)
+}
+
+// toggleSidebar toggles the sidebar visibility and rebuilds the layout.
+func (a *WidgetApp) toggleSidebar() {
+	a.sidebarVisible = !a.sidebarVisible
+	a.sidebarUserOverride = true // User manually toggled, don't auto-hide
+	a.sidebarAutoHidden = false
+	a.presenceVisible = false
+	if a.sidebarVisible {
+		a.setStatusOverride("Sidebar shown", 2*time.Second)
+	} else {
+		a.setStatusOverride("Sidebar hidden", 2*time.Second)
+	}
+	a.rebuildLayout()
+}
+
+// toggleFocusMode toggles focus mode (chat + input only).
+func (a *WidgetApp) toggleFocusMode() {
+	a.focusMode = !a.focusMode
+	if a.focusMode {
+		a.sidebarVisible = false
+		a.presenceVisible = false
+		a.sidebarAutoHidden = false
+	}
+	a.updateSidebarVisibility()
+	if a.statusVisible {
+		if a.focusMode {
+			a.setStatusOverride("Focus mode on", 2*time.Second)
+		} else {
+			a.setStatusOverride("Focus mode off", 2*time.Second)
+		}
+	}
+}
+
+func (a *WidgetApp) drawFocusIndicator(buf *runtime.Buffer) {
+	if a == nil || buf == nil || a.focusStyle == nil {
+		return
+	}
+	indicator := a.focusStyle.Indicator
+	if indicator == "" || a.screen == nil {
+		return
+	}
+	scope := a.screen.FocusScope()
+	if scope == nil {
+		return
+	}
+	focused := scope.Current()
+	if focused == nil {
+		return
+	}
+	boundsProvider, ok := focused.(runtime.BoundsProvider)
+	if !ok {
+		return
+	}
+	bounds := boundsProvider.Bounds()
+	if bounds.Width <= 0 || bounds.Height <= 0 {
+		return
+	}
+
+	style := a.focusStyle.Style
+	if a.highContrast && a.focusStyle.HighContrast != (backend.Style{}) {
+		style = a.focusStyle.HighContrast
+	}
+	x := bounds.X - len(indicator)
+	if x < 0 {
+		x = bounds.X
+	}
+	buf.SetString(x, bounds.Y, indicator, style)
+}
+
+// rebuildLayout rebuilds the main area layout based on sidebar visibility.
+func (a *WidgetApp) rebuildLayout() {
+	// Get current screen size
+	w, h := a.screen.Size()
+
+	// Rebuild main area with or without sidebar
+	if a.sidebarVisible {
+		a.mainArea = runtime.HBox(
+			runtime.Flexible(a.chatView, 3),
+			runtime.Sized(a.sidebar, a.sidebar.Width()),
+		)
+	} else if a.presenceVisible && a.presence != nil {
+		a.mainArea = runtime.HBox(
+			runtime.Expanded(a.chatView),
+			runtime.Sized(a.presence, 2),
+		)
+	} else {
+		a.mainArea = runtime.HBox(
+			runtime.Expanded(a.chatView),
+		)
+	}
+
+	children := make([]runtime.FlexChild, 0, 4)
+	if a.headerVisible {
+		children = append(children, runtime.Fixed(a.header))
+	}
+	children = append(children, runtime.Expanded(a.mainArea))
+	children = append(children, runtime.Fixed(a.inputArea))
+	if a.statusVisible {
+		children = append(children, runtime.Fixed(a.statusBar))
+	}
+	a.root = runtime.VBox(children...)
+
+	// Update screen with new root
+	a.screen.SetRoot(a.root)
+	a.screen.Resize(w, h)
+
+	a.dirty = true
+}
+
+// SetSidebarVisible sets the sidebar visibility.
+// Respects user override - won't change visibility if user manually toggled.
+func (a *WidgetApp) SetSidebarVisible(visible bool) {
+	if a.sidebarUserOverride {
+		return // Don't override user's manual choice
+	}
+	if a.sidebarVisible != visible {
+		a.sidebarVisible = visible
+		if visible {
+			a.presenceVisible = false
+			a.sidebarAutoHidden = false
+		}
+		a.rebuildLayout()
+	}
+}
+
+// IsSidebarVisible returns the sidebar visibility state.
+func (a *WidgetApp) IsSidebarVisible() bool {
+	return a.sidebarVisible
+}
+
+// SetCurrentTask updates the sidebar's current task display.
+func (a *WidgetApp) SetCurrentTask(name string, progress int) {
+	a.sidebar.SetCurrentTask(name, progress)
+	a.currentTaskActive = strings.TrimSpace(name) != ""
+	a.updatePresenceStrip()
+	a.updateSidebarVisibility()
+	a.dirty = true
+}
+
+// SetPlanTasks updates the sidebar's plan task list.
+func (a *WidgetApp) SetPlanTasks(tasks []buckleywidgets.PlanTask) {
+	a.sidebar.SetPlanTasks(tasks)
+	a.planTotal = len(tasks)
+	a.planCompleted = 0
+	for _, task := range tasks {
+		if task.Status == buckleywidgets.TaskCompleted {
+			a.planCompleted++
+		}
+	}
+	a.updatePresenceStrip()
+	a.updateSidebarVisibility()
+	a.dirty = true
+}
+
+// SetRunningTools updates the sidebar's running tools list.
+func (a *WidgetApp) SetRunningTools(tools []buckleywidgets.RunningTool) {
+	a.sidebar.SetRunningTools(tools)
+	a.runningToolCount = len(tools)
+	a.updatePresenceStrip()
+	if a.reduceMotion {
+		a.sidebar.SetSpinnerFrame(0)
+	}
+	a.updateSidebarVisibility()
+	a.dirty = true
+}
+
+// SetActiveTouches updates the sidebar's active touches list.
+func (a *WidgetApp) SetActiveTouches(touches []buckleywidgets.TouchSummary) {
+	a.sidebar.SetActiveTouches(touches)
+	a.updateSidebarVisibility()
+	a.dirty = true
+}
+
+// SetRLMStatus updates the sidebar's RLM status display.
+// Auto-shows sidebar when RLM content arrives (unless user manually hid it).
+func (a *WidgetApp) SetRLMStatus(status *buckleywidgets.RLMStatus, scratchpad []buckleywidgets.RLMScratchpadEntry) {
+	a.sidebar.SetRLMStatus(status, scratchpad)
+	// Auto-show sidebar for RLM mode if user hasn't manually hidden it
+	if !a.sidebarUserOverride && !a.sidebarVisible && (status != nil || len(scratchpad) > 0) {
+		a.sidebarVisible = true
+		a.rebuildLayout()
+	}
+	a.dirty = true
+}
+
+// ClearScrollback clears all messages.
+func (a *WidgetApp) ClearScrollback() {
+	a.chatView.Clear()
+	a.unreadCount = 0
+	a.updateScrollStatus()
+}
+
+// HasInput returns true if there's text in the input.
+func (a *WidgetApp) HasInput() bool {
+	return a.inputArea.HasText()
+}
+
+// ClearInput clears the input.
+func (a *WidgetApp) ClearInput() {
+	a.inputArea.Clear()
+}
+
+// Metrics returns a copy of the current render metrics.
+func (a *WidgetApp) Metrics() RenderMetrics {
+	a.renderMu.Lock()
+	defer a.renderMu.Unlock()
+	return a.metrics
+}
+
+// SetDiagnostics sets the backend diagnostics collector for debug dumps.
+func (a *WidgetApp) SetDiagnostics(collector *diagnostics.Collector) {
+	a.diagnostics = collector
+}
+
+// WelcomeScreen displays a beautiful welcome screen.
+func (a *WidgetApp) WelcomeScreen() {
+	// ASCII art logo
+	logo := []string{
+		"",
+		"   ╭──────────────────────────────────────╮",
+		"   │                                      │",
+		"   │   ●  B U C K L E Y                   │",
+		"   │      AI Development Assistant        │",
+		"   │                                      │",
+		"   ╰──────────────────────────────────────╯",
+		"",
+	}
+
+	for _, line := range logo {
+		a.chatView.AddMessage(line, "system")
+	}
+
+	// Tips
+	tips := []string{
+		"  Quick tips:",
+		"  • Type your question or task to get started",
+		"  • Use @ to search and attach files",
+		"  • Use ! to run shell commands",
+		"  • Use $ to view environment variables",
+		"  • Use /help to see available commands",
+		"  • Use Ctrl+F to search conversation",
+		"  • Use Alt+End to jump to latest",
+		"  • Press Ctrl+C twice to quit",
+		"",
+	}
+
+	for _, tip := range tips {
+		a.chatView.AddMessage(tip, "system")
+	}
+}
+
+func (a *WidgetApp) style(cs compositor.Style) backend.Style {
+	if a == nil || a.styleCache == nil {
+		return uistyle.ToBackend(cs)
+	}
+	return a.styleCache.Get(cs)
+}
+
+func blendColor(a, b backend.Color, t float64) backend.Color {
+	if t <= 0 {
+		return a
+	}
+	if t >= 1 {
+		return b
+	}
+	if !a.IsRGB() || !b.IsRGB() {
+		if t < 0.5 {
+			return a
+		}
+		return b
+	}
+
+	ar, ag, ab := a.RGB()
+	br, bg, bb := b.RGB()
+
+	r := uint8(float64(ar) + (float64(br)-float64(ar))*t + 0.5)
+	g := uint8(float64(ag) + (float64(bg)-float64(ag))*t + 0.5)
+	bv := uint8(float64(ab) + (float64(bb)-float64(ab))*t + 0.5)
+	return backend.ColorRGB(r, g, bv)
+}
+
+func (a *WidgetApp) writeClipboard(text string) error {
+	if a == nil || a.clipboard == nil || !a.clipboard.Available() {
+		return fmt.Errorf("clipboard unavailable")
+	}
+	return a.clipboard.Write(text)
+}
+
+func buildRecorder(path, sessionID string) (runtime.Recorder, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return nil, nil
+	}
+	title := "Buckley"
+	if strings.TrimSpace(sessionID) != "" {
+		title = "Buckley " + sessionID
+	}
+	options := recording.AsciicastOptions{Title: title}
+	lower := strings.ToLower(path)
+	switch {
+	case strings.HasSuffix(lower, ".mp4"), strings.HasSuffix(lower, ".webm"):
+		return recording.NewVideoRecorder(path, recording.VideoRecorderOptions{Cast: options})
+	case strings.HasSuffix(lower, ".cast"), strings.HasSuffix(lower, ".cast.gz"):
+		return recording.NewAsciicastRecorder(path, options)
+	default:
+		return recording.NewAsciicastRecorder(path, options)
+	}
+}
+
+func normalizeWebBaseURL(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	if !strings.Contains(raw, "://") {
+		raw = "http://" + raw
+	}
+	if _, err := url.Parse(raw); err != nil {
+		return ""
+	}
+	return raw
+}
+
+func buildWebURL(base, sessionID, view string) string {
+	if strings.TrimSpace(base) == "" {
+		return ""
+	}
+	parsed, err := url.Parse(base)
+	if err != nil {
+		return ""
+	}
+	query := parsed.Query()
+	if strings.TrimSpace(sessionID) != "" {
+		query.Set("sessionId", sessionID)
+	}
+	if strings.TrimSpace(view) != "" {
+		query.Set("view", view)
+	}
+	parsed.RawQuery = query.Encode()
+	return parsed.String()
+}
+
+func openURL(target string) error {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return fmt.Errorf("empty url")
+	}
+
+	var cmds [][]string
+	switch stdRuntime.GOOS {
+	case "darwin":
+		cmds = [][]string{{"open", target}}
+	case "windows":
+		cmds = [][]string{{"cmd", "/c", "start", "", target}}
+	default:
+		cmds = [][]string{{"xdg-open", target}, {"gio", "open", target}}
+	}
+
+	for _, args := range cmds {
+		cmd := exec.Command(args[0], args[1:]...)
+		if err := cmd.Start(); err == nil {
+			return nil
+		}
+	}
+
+	return fmt.Errorf("no open command available")
+}
+
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func maxInputHeight(screenHeight int) int {
+	maxInput := screenHeight - 2 - minChatHeight
+	if maxInput < minInputHeight {
+		return minInputHeight
+	}
+	return maxInput
+}
+
+// debugDumpScreen dumps the current screen state to a file for debugging.
+func (a *WidgetApp) debugDumpScreen() {
+	w, h := a.screen.Size()
+	timestamp := time.Now().Format("2006-01-02_15-04-05")
+	filename := fmt.Sprintf("buckley_debug_%s.txt", timestamp)
+
+	var sb strings.Builder
+	sb.WriteString("=== Buckley Debug Dump ===\n")
+	sb.WriteString(fmt.Sprintf("Timestamp: %s\n", time.Now().Format(time.RFC3339)))
+	sb.WriteString(fmt.Sprintf("Screen Size: %d x %d\n", w, h))
+	sb.WriteString(fmt.Sprintf("Sidebar Visible: %v\n", a.sidebarVisible))
+	sb.WriteString(fmt.Sprintf("Sidebar User Override: %v\n", a.sidebarUserOverride))
+	sb.WriteString(fmt.Sprintf("Status: %s\n", a.statusText))
+	sb.WriteString(fmt.Sprintf("Scroll Position: %s\n", a.scrollIndicator))
+	if a.contextWindow > 0 {
+		sb.WriteString(fmt.Sprintf("Context Usage: %d/%d (window %d)\n", a.contextUsed, a.contextBudget, a.contextWindow))
+	}
+	sb.WriteString("\n")
+
+	// Dump render metrics
+	sb.WriteString("=== Render Metrics ===\n")
+	a.renderMu.Lock()
+	sb.WriteString(fmt.Sprintf("Frame Count: %d\n", a.metrics.FrameCount))
+	sb.WriteString(fmt.Sprintf("Dropped Frames: %d\n", a.metrics.DroppedFrames))
+	sb.WriteString(fmt.Sprintf("Last Frame Time: %v\n", a.metrics.LastFrameTime))
+	a.renderMu.Unlock()
+	sb.WriteString("\n")
+
+	// Dump chat view content (last 50 lines)
+	sb.WriteString("=== Chat View Content (last 50 lines) ===\n")
+	if a.chatView != nil {
+		lines := a.chatView.GetContent(50)
+		for i, line := range lines {
+			sb.WriteString(fmt.Sprintf("%4d: %s\n", i+1, line))
+		}
+	}
+	sb.WriteString("\n")
+
+	// Dump sidebar state
+	sb.WriteString("=== Sidebar State ===\n")
+	if a.sidebar != nil {
+		sb.WriteString(fmt.Sprintf("Has Content: %v\n", a.sidebar.HasContent()))
+		sb.WriteString(fmt.Sprintf("Width: %d\n", a.sidebar.Width()))
+	}
+	sb.WriteString("\n")
+
+	// Dump input area
+	sb.WriteString("=== Input Area ===\n")
+	if a.inputArea != nil {
+		sb.WriteString(fmt.Sprintf("Has Text: %v\n", a.inputArea.HasText()))
+		sb.WriteString(fmt.Sprintf("Text: %q\n", a.inputArea.Text()))
+	}
+	sb.WriteString("\n")
+
+	// Dump backend diagnostics
+	if a.diagnostics != nil {
+		sb.WriteString(a.diagnostics.Dump())
+	} else {
+		sb.WriteString("=== Backend Diagnostics ===\n")
+		sb.WriteString("(not available - diagnostics collector not configured)\n\n")
+	}
+
+	sb.WriteString("=== End Debug Dump ===\n")
+
+	// Write to file
+	err := os.WriteFile(filename, []byte(sb.String()), 0644)
+	if err != nil {
+		a.setStatusOverride(fmt.Sprintf("Debug dump failed: %v", err), 3*time.Second)
+		return
+	}
+
+	a.setStatusOverride(fmt.Sprintf("Debug dump saved to %s", filename), 3*time.Second)
+}

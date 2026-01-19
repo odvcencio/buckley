@@ -19,7 +19,7 @@ func (t *SearchTextTool) Name() string {
 }
 
 func (t *SearchTextTool) Description() string {
-	return "**SEARCH CODEBASE** when user asks 'where is', 'find all', 'search for', 'grep for', 'locate'. Use this BEFORE reading files when you don't know exact locations. Supports regex patterns and glob filtering. Essential for discovering function definitions, usage patterns, imports, string literals, TODOs, or any code pattern across the project. Always prefer this over guessing file locations."
+	return "Search for text patterns in files using regex. Supports glob filtering and context lines."
 }
 
 func (t *SearchTextTool) Parameters() ParameterSchema {

@@ -54,7 +54,7 @@ func (t *ShellCommandTool) Name() string {
 }
 
 func (t *ShellCommandTool) Description() string {
-	return "Execute shell commands via bash with configurable timeout (default 120s, max 600s). Returns stdout, stderr, and exit code. Use this for build commands, tests, or system operations. Prefer specialized tools (read_file, search_text, git_*) when available for better results."
+	return "Execute a shell command and return stdout, stderr, and exit code."
 }
 
 func (t *ShellCommandTool) Parameters() ParameterSchema {
@@ -63,16 +63,16 @@ func (t *ShellCommandTool) Parameters() ParameterSchema {
 		Properties: map[string]PropertySchema{
 			"command": {
 				Type:        "string",
-				Description: "Full shell command to run (executed with bash -lc)",
+				Description: "Shell command to execute",
 			},
 			"timeout_seconds": {
 				Type:        "integer",
-				Description: "Timeout in seconds before the command is killed (default 120)",
+				Description: "Timeout in seconds (default 120, max 600)",
 				Default:     120,
 			},
 			"interactive": {
 				Type:        "boolean",
-				Description: "Run command in an interactive terminal for manual input/output (experimental). When true, Buckley opens a separate terminal window (when available) and waits for you to finish before resuming.",
+				Description: "Run in interactive terminal mode",
 				Default:     false,
 			},
 		},

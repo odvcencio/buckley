@@ -6,8 +6,8 @@ import (
 	"sync"
 
 	"github.com/odvcencio/buckley/pkg/rlm"
-	"github.com/odvcencio/buckley/pkg/ui/progress"
-	"github.com/odvcencio/buckley/pkg/ui/toast"
+	"github.com/odvcencio/fluffy-ui/progress"
+	"github.com/odvcencio/fluffy-ui/toast"
 )
 
 const rlmProgressID = "rlm-iterations"

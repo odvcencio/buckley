@@ -124,6 +124,9 @@ type ModelClient interface {
 	// ChatCompletion sends a chat request and returns the response.
 	ChatCompletion(ctx context.Context, req model.ChatRequest) (*model.ChatResponse, error)
 
+	// ChatCompletionStream sends a streaming chat request.
+	ChatCompletionStream(ctx context.Context, req model.ChatRequest) (<-chan model.StreamChunk, <-chan error)
+
 	// GetExecutionModel returns the model ID to use for execution.
 	GetExecutionModel() string
 }

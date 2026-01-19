@@ -11,7 +11,7 @@ import (
 	"time"
 
 	acppb "github.com/odvcencio/buckley/pkg/acp/proto"
-	"github.com/odvcencio/buckley/pkg/ui/buckley/viewmodel"
+	"github.com/odvcencio/buckley/pkg/buckley/ui/viewmodel"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
 )
