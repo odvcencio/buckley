@@ -1,1 +1,0 @@
-cargo:rerun-if-changed=/home/draco/work/buckley/apps/browserd/../../pkg/browser/adapters/servo/proto/browserd.proto

@@ -82,22 +82,40 @@ func (r *ralphHeadlessRunner) WaitForIdle(ctx context.Context) error {
 	ticker := time.NewTicker(200 * time.Millisecond)
 	defer ticker.Stop()
 
+	// Wait for the runner to transition out of idle (start processing),
+	// then wait for it to return to idle (finish processing).
+	sawNonIdle := false
+	maxWait := time.After(5 * time.Minute) // Safety timeout
+
 	for {
 		state := r.runner.State()
 		switch state {
 		case headless.StateIdle:
-			return nil
+			if sawNonIdle {
+				// Runner processed something and is now idle
+				return nil
+			}
+			// Still waiting for processing to start
+		case headless.StateProcessing:
+			sawNonIdle = true
 		case headless.StatePaused:
 			return fmt.Errorf("runner paused")
 		case headless.StateError:
 			return fmt.Errorf("runner entered error state")
 		case headless.StateStopped:
 			return fmt.Errorf("runner stopped")
+		default:
+			sawNonIdle = true // Any other state counts as processing
 		}
 
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
+		case <-maxWait:
+			if sawNonIdle {
+				return nil // Timed out but saw processing, treat as done
+			}
+			return fmt.Errorf("timeout waiting for runner to start processing")
 		case <-ticker.C:
 		}
 	}
@@ -404,6 +422,12 @@ func runRalphCommand(args []string) error {
 		logger.SetEventSink(memoryStore)
 	}
 
+	// Determine max iterations (CLI flag takes precedence over config)
+	effectiveMaxIterations := *maxIterations
+	if effectiveMaxIterations == 0 && controlCfg.MaxIterations > 0 {
+		effectiveMaxIterations = controlCfg.MaxIterations
+	}
+
 	// Create session
 	session := ralph.NewSession(ralph.SessionConfig{
 		SessionID:     sessionID,
@@ -411,7 +435,7 @@ func runRalphCommand(args []string) error {
 		PromptFile:    *promptFile,
 		Sandbox:       sandboxPath,
 		Timeout:       *timeout,
-		MaxIterations: *maxIterations,
+		MaxIterations: effectiveMaxIterations,
 		NoRefine:      *noRefine,
 	})
 
@@ -545,8 +569,8 @@ func runRalphCommand(args []string) error {
 	if *timeout > 0 {
 		fmt.Printf("  Timeout: %s\n", *timeout)
 	}
-	if *maxIterations > 0 {
-		fmt.Printf("  Max iterations: %d\n", *maxIterations)
+	if effectiveMaxIterations > 0 {
+		fmt.Printf("  Max iterations: %d\n", effectiveMaxIterations)
 	}
 	fmt.Println()
 

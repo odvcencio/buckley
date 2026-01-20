@@ -178,10 +178,21 @@ func (e *Executor) Run(ctx context.Context) error {
 
 func (e *Executor) runIteration(ctx context.Context) error {
 	iteration := e.session.IncrementIteration()
+	maxIter := e.session.MaxIterations
 
 	if e.logger != nil {
-		e.logger.LogIterationStart(iteration)
+		e.logger.LogIterationStartWithContext(iteration, maxIter, "", "")
 	}
+
+	// Print iteration header
+	e.writeProgress("\n")
+	e.writeProgress("════════════════════════════════════════════════════════════════\n")
+	if maxIter > 0 {
+		e.writeProgress("  ITERATION %d/%d\n", iteration, maxIter)
+	} else {
+		e.writeProgress("  ITERATION %d\n", iteration)
+	}
+	e.writeProgress("════════════════════════════════════════════════════════════════\n")
 
 	// Start live stopwatch
 	startTime := time.Now()
@@ -201,6 +212,7 @@ func (e *Executor) runIteration(ctx context.Context) error {
 
 	var err error
 	var results []*BackendResult
+	var selectedBackend, selectedModel string
 
 	// Use orchestrator if available, otherwise fall back to direct runner
 	if e.orchestrator != nil {
@@ -209,6 +221,16 @@ func (e *Executor) runIteration(ctx context.Context) error {
 		// Check for schedule actions
 		if action := e.orchestrator.EvaluateSchedule(e.lastError); action != nil {
 			e.handleScheduleAction(action)
+		}
+
+		// Show which backend will be used
+		selectedBackend, selectedModel = e.predictNextBackend()
+		if selectedBackend != "" {
+			e.writeProgress("  Backend: %s", selectedBackend)
+			if selectedModel != "" {
+				e.writeProgress(" (model: %s)", selectedModel)
+			}
+			e.writeProgress("\n")
 		}
 
 		req := BackendRequest{
@@ -233,7 +255,7 @@ func (e *Executor) runIteration(ctx context.Context) error {
 				if waitFor < 0 {
 					waitFor = 0
 				}
-				e.writeProgress("All backends parked. Waiting %s...\n", waitFor.Round(time.Second))
+				e.writeProgress("  [PARKED] All backends parked. Waiting %s...\n", waitFor.Round(time.Second))
 				if waitErr := waitForDuration(ctx, waitFor); waitErr != nil {
 					return nil
 				}
@@ -251,22 +273,189 @@ func (e *Executor) runIteration(ctx context.Context) error {
 		}
 	} else {
 		// Direct runner execution
+		e.writeProgress("  Backend: direct (no orchestrator)\n")
 		err = e.runner.ProcessInput(ctx, prompt)
 		if err != nil {
 			e.lastError = err
 		}
 	}
 
-	// Show completion (stopwatch cleanup handled by defer)
+	// Show completion summary
 	duration := time.Since(startTime)
-	e.writeProgress("Iteration %d completed in %s\n", iteration, duration.Round(time.Millisecond))
+	e.writeProgress("────────────────────────────────────────────────────────────────\n")
+	e.writeIterationSummary(iteration, duration, results)
 
 	if e.logger != nil {
-		stats := e.session.Stats()
-		e.logger.LogIterationEnd(iteration, stats.TotalTokens, stats.TotalCost)
+		sessionStats := e.session.Stats()
+		// Build iteration stats from results
+		iterStats := IterationStats{
+			Duration:           duration,
+			SessionTotalTokens: sessionStats.TotalTokens,
+			SessionTotalCost:   sessionStats.TotalCost,
+			Backend:            selectedBackend,
+			Model:              selectedModel,
+			Success:            err == nil,
+		}
+		if err != nil {
+			iterStats.Error = err.Error()
+		}
+		for _, r := range results {
+			if r != nil {
+				iterStats.TokensIn += r.TokensIn
+				iterStats.TokensOut += r.TokensOut
+				iterStats.FilesChanged += len(r.FilesChanged)
+				if iterStats.Backend == "" && r.Backend != "" {
+					iterStats.Backend = r.Backend
+				}
+				if iterStats.Model == "" && r.Model != "" {
+					iterStats.Model = r.Model
+				}
+			}
+		}
+		e.logger.LogIterationEndWithStats(iteration, iterStats)
 	}
 
 	return err
+}
+
+// predictNextBackend returns the backend and model that will likely be used next.
+func (e *Executor) predictNextBackend() (string, string) {
+	if e.orchestrator == nil {
+		return "", ""
+	}
+
+	cfg := e.orchestrator.Config()
+	if cfg == nil {
+		return "", ""
+	}
+
+	// Get first active backend from rotation order
+	order := cfg.Rotation.Order
+	if len(order) == 0 {
+		for name := range cfg.Backends {
+			order = append(order, name)
+		}
+		sort.Strings(order)
+	}
+
+	activeSet := make(map[string]struct{})
+	if len(cfg.Override.ActiveBackends) > 0 {
+		for _, name := range cfg.Override.ActiveBackends {
+			activeSet[name] = struct{}{}
+		}
+	}
+
+	for _, name := range order {
+		if len(activeSet) > 0 {
+			if _, ok := activeSet[name]; !ok {
+				continue
+			}
+		}
+		bcfg, ok := cfg.Backends[name]
+		if !ok || !bcfg.Enabled {
+			continue
+		}
+		model := bcfg.Models.Default
+		if model == "" {
+			if v, ok := bcfg.Options["model"]; ok {
+				model = v
+			}
+		}
+		return name, model
+	}
+
+	return "", ""
+}
+
+// writeIterationSummary writes a summary of the iteration results.
+func (e *Executor) writeIterationSummary(iteration int, duration time.Duration, results []*BackendResult) {
+	e.writeProgress("  Status: ")
+
+	if len(results) == 0 {
+		e.writeProgress("completed (no results)\n")
+		e.writeProgress("  Duration: %s\n", duration.Round(time.Millisecond))
+		return
+	}
+
+	// Check for errors
+	var hasError bool
+	var errMsg string
+	for _, r := range results {
+		if r != nil && r.Error != nil {
+			hasError = true
+			errMsg = r.Error.Error()
+			break
+		}
+	}
+
+	if hasError {
+		e.writeProgress("ERROR\n")
+		e.writeProgress("  Error: %s\n", truncateForDisplay(errMsg, 100))
+	} else {
+		e.writeProgress("OK\n")
+	}
+
+	// Aggregate stats
+	var totalTokensIn, totalTokensOut int
+	var totalCost float64
+	var filesChanged []string
+	var backend, model string
+
+	for _, r := range results {
+		if r == nil {
+			continue
+		}
+		totalTokensIn += r.TokensIn
+		totalTokensOut += r.TokensOut
+		if r.Cost > 0 {
+			totalCost += r.Cost
+		} else {
+			totalCost += r.CostEstimate
+		}
+		filesChanged = append(filesChanged, r.FilesChanged...)
+		if backend == "" && r.Backend != "" {
+			backend = r.Backend
+		}
+		if model == "" && r.Model != "" {
+			model = r.Model
+		}
+	}
+
+	e.writeProgress("  Duration: %s\n", duration.Round(time.Millisecond))
+	if backend != "" {
+		e.writeProgress("  Backend: %s", backend)
+		if model != "" {
+			e.writeProgress(" (%s)", model)
+		}
+		e.writeProgress("\n")
+	}
+	e.writeProgress("  Tokens: %d in / %d out\n", totalTokensIn, totalTokensOut)
+	if totalCost > 0 {
+		e.writeProgress("  Cost: $%.4f\n", totalCost)
+	}
+	if len(filesChanged) > 0 {
+		e.writeProgress("  Files changed: %d\n", len(filesChanged))
+		// Show first few files
+		for i, f := range filesChanged {
+			if i >= 3 {
+				e.writeProgress("    ... and %d more\n", len(filesChanged)-3)
+				break
+			}
+			e.writeProgress("    - %s\n", f)
+		}
+	}
+
+	// Show session totals
+	stats := e.session.Stats()
+	e.writeProgress("  Session total: %d tokens, $%.4f\n", stats.TotalTokens, stats.TotalCost)
+}
+
+func truncateForDisplay(s string, max int) string {
+	s = strings.ReplaceAll(s, "\n", " ")
+	if len(s) <= max {
+		return s
+	}
+	return s[:max] + "..."
 }
 
 // runStopwatch displays a live updating timer for the current iteration.
@@ -620,17 +809,17 @@ func (e *Executor) handleScheduleAction(action *ScheduleAction) {
 
 	switch action.Action {
 	case "pause":
-		e.writeProgress("Schedule triggered pause: %s\n", action.Reason)
+		e.writeProgress("  [SCHEDULE] >>> PAUSE: %s\n", action.Reason)
 		e.session.TransitionTo(StatePaused)
 	case "resume":
-		e.writeProgress("Schedule triggered resume\n")
+		e.writeProgress("  [SCHEDULE] >>> RESUME\n")
 		e.session.TransitionTo(StateRunning)
 	case "set_mode":
 		mode := strings.TrimSpace(action.Mode)
 		if mode == "" {
 			return
 		}
-		e.writeProgress("Schedule switching mode to: %s\n", mode)
+		e.writeProgress("  [SCHEDULE] >>> MODE CHANGE: %s\n", mode)
 		e.updateControlConfig(func(cfg *ControlConfig) {
 			cfg.Mode = mode
 		})
@@ -646,7 +835,7 @@ func (e *Executor) handleScheduleAction(action *ScheduleAction) {
 			return backend
 		}, moveBackendFirst)
 		if target != "" {
-			e.writeProgress("Schedule switching backend to: %s\n", target)
+			e.writeProgress("  [SCHEDULE] >>> BACKEND SWITCH: %s\n", target)
 		}
 	case "rotate_backend":
 		target := e.applyBackendSelection(func(active []string, _ string) string {
@@ -656,7 +845,7 @@ func (e *Executor) handleScheduleAction(action *ScheduleAction) {
 			return nextBackendAfter(active, active[0])
 		}, rotateBackendOrder)
 		if target != "" {
-			e.writeProgress("Schedule rotating backend to: %s\n", target)
+			e.writeProgress("  [SCHEDULE] >>> BACKEND ROTATE: %s\n", target)
 		}
 	case "next_backend":
 		current := strings.TrimSpace(e.lastBackend)
@@ -671,7 +860,7 @@ func (e *Executor) handleScheduleAction(action *ScheduleAction) {
 			return nextBackendAfter(active, use)
 		}, rotateBackendOrder)
 		if target != "" {
-			e.writeProgress("Schedule switching to next backend: %s\n", target)
+			e.writeProgress("  [SCHEDULE] >>> NEXT BACKEND: %s\n", target)
 		}
 	}
 }

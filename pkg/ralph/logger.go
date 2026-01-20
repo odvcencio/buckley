@@ -131,6 +131,28 @@ func (l *Logger) LogIterationStart(iteration int) {
 	})
 }
 
+// LogIterationStartWithContext logs the start of an iteration with context.
+func (l *Logger) LogIterationStartWithContext(iteration, maxIterations int, backend, model string) {
+	if l == nil {
+		return
+	}
+	data := map[string]any{}
+	if maxIterations > 0 {
+		data["max_iterations"] = maxIterations
+	}
+	if backend != "" {
+		data["backend"] = backend
+	}
+	if model != "" {
+		data["model"] = model
+	}
+	l.write(LogEvent{
+		Event:     "iteration_start",
+		Iteration: iteration,
+		Data:      data,
+	})
+}
+
 // LogToolCall logs a tool invocation.
 func (l *Logger) LogToolCall(tool string, args map[string]any) {
 	if l == nil {
@@ -242,6 +264,43 @@ func (l *Logger) LogIterationEnd(iteration, tokens int, cost float64) {
 	})
 }
 
+// LogIterationEndWithStats logs the end of an iteration with detailed stats.
+func (l *Logger) LogIterationEndWithStats(iteration int, stats IterationStats) {
+	if l == nil {
+		return
+	}
+	l.write(LogEvent{
+		Event:     "iteration_end",
+		Iteration: iteration,
+		Data: map[string]any{
+			"duration_ms":        stats.Duration.Milliseconds(),
+			"tokens_in":          stats.TokensIn,
+			"tokens_out":         stats.TokensOut,
+			"session_total_tokens": stats.SessionTotalTokens,
+			"session_total_cost":   stats.SessionTotalCost,
+			"backend":            stats.Backend,
+			"model":              stats.Model,
+			"files_changed":      stats.FilesChanged,
+			"success":            stats.Success,
+			"error":              stats.Error,
+		},
+	})
+}
+
+// IterationStats holds statistics for a single iteration.
+type IterationStats struct {
+	Duration           time.Duration
+	TokensIn           int
+	TokensOut          int
+	SessionTotalTokens int
+	SessionTotalCost   float64
+	Backend            string
+	Model              string
+	FilesChanged       int
+	Success            bool
+	Error              string
+}
+
 // LogStateChange logs a state transition.
 func (l *Logger) LogStateChange(from, to State, reason string) {
 	if l == nil {
@@ -302,9 +361,21 @@ func (l *Logger) LogBackendResult(iteration int, result *BackendResult) {
 		"tests_passed":  result.TestsPassed,
 		"tests_failed":  result.TestsFailed,
 	}
-	// Include output when there's an error (helps diagnose command failures)
-	if result.Error != nil && result.Output != "" {
+	// Include output (truncated) for debugging
+	if result.Output != "" {
 		data["output"] = truncate(result.Output, 2000)
+	}
+	// Include error details
+	if result.Error != nil {
+		data["error"] = result.Error.Error()
+	}
+	// Include actual files changed (first 20)
+	if len(result.FilesChanged) > 0 {
+		files := result.FilesChanged
+		if len(files) > 20 {
+			files = files[:20]
+		}
+		data["files_list"] = files
 	}
 	l.write(LogEvent{
 		Event:     "backend_result",

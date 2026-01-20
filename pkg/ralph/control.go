@@ -36,6 +36,7 @@ type ControlConfig struct {
 	ContextProcessing ContextProcessingConfig  `yaml:"context_processing"`
 	Schedule          []ScheduleRule           `yaml:"schedule"`
 	Override          OverrideConfig           `yaml:"override"`
+	MaxIterations     int                      `yaml:"max_iterations"` // 0 = unlimited
 }
 
 // BackendConfig configures a single backend.
@@ -106,6 +107,8 @@ type ScheduleRule struct {
 // ScheduleTrigger defines when a schedule rule should fire.
 // Multiple conditions can be specified; the rule fires when any condition matches.
 type ScheduleTrigger struct {
+	// AtIteration fires at exactly iteration N (e.g., 6 fires only at iteration 6).
+	AtIteration int `yaml:"at_iteration"`
 	// EveryIterations fires after every N iterations (e.g., 10 fires at 10, 20, 30...).
 	EveryIterations int `yaml:"every_iterations"`
 	// OnError fires when an error message contains this substring (case-insensitive).

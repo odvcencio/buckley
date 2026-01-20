@@ -666,6 +666,13 @@ func (o *Orchestrator) EvaluateSchedule(lastError error) *ScheduleAction {
 
 // triggerMatches checks if a trigger condition is satisfied.
 func (o *Orchestrator) triggerMatches(trigger ScheduleTrigger, iteration int, lastError error) bool {
+	// Check at_iteration trigger (exact match)
+	if trigger.AtIteration > 0 {
+		if iteration == trigger.AtIteration {
+			return true
+		}
+	}
+
 	// Check every_iterations trigger
 	if trigger.EveryIterations > 0 {
 		if iteration > 0 && iteration%trigger.EveryIterations == 0 {
