@@ -53,7 +53,6 @@ Buckley uses [Uber's gomock](https://github.com/uber-go/mock) for generating tes
 | `Tool` | `pkg/tool` | `mock_tool_test.go` | `mockgen -package=tool -destination=pkg/tool/mock_tool_test.go github.com/odvcencio/buckley/pkg/tool Tool` |
 | `commandRunner` | `pkg/github` | `mock_runner_test.go` | `mockgen -package=github -destination=pkg/github/mock_runner_test.go github.com/odvcencio/buckley/pkg/github commandRunner` |
 | `gitCommandRunner` | `pkg/session` | `mock_git_runner_test.go` | `mockgen -package=session -destination=pkg/session/mock_git_runner_test.go github.com/odvcencio/buckley/pkg/session gitCommandRunner` |
-| `compactor` | `pkg/ui` | `mock_compactor_test.go` | `mockgen -package=ui -destination=pkg/ui/mock_compactor_test.go github.com/odvcencio/buckley/pkg/ui compactor` |
 
 ### Generating a New Mock
 
