@@ -24,6 +24,11 @@ func (r *Registry) approvalMiddleware() Middleware {
 					ctx.Params = params
 					return next(ctx)
 				})
+			case "browser_clipboard_read":
+				return r.executeWithMissionClipboardRead(ctx.Params, func(params map[string]any) (*builtin.Result, error) {
+					ctx.Params = params
+					return next(ctx)
+				})
 			default:
 				return next(ctx)
 			}

@@ -24,6 +24,10 @@ type InternalOptions struct {
 
 	// ApprovalMode controls tool approval behavior (ask/safe/auto/yolo).
 	ApprovalMode string
+
+	// PromptTemplate is an optional template for the prompt.
+	// Supports placeholders: {prompt}, {session_files}
+	PromptTemplate string
 }
 
 // InternalBackend wraps the headless.Runner as a Backend implementation.
@@ -88,8 +92,11 @@ func (b *InternalBackend) Execute(ctx context.Context, req BackendRequest) (*Bac
 		}
 	}
 
+	// Apply prompt template if configured
+	prompt := b.applyPromptTemplate(req)
+
 	// Execute the prompt through the runner
-	err := b.runner.ProcessInput(ctx, req.Prompt)
+	err := b.runner.ProcessInput(ctx, prompt)
 
 	if outputProvider, ok := b.runner.(headlessOutputProvider); ok {
 		if waitErr := outputProvider.WaitForIdle(ctx); waitErr != nil && err == nil {
@@ -135,4 +142,26 @@ func (b *InternalBackend) SetAvailable(available bool) {
 // Options returns the configuration options for this backend.
 func (b *InternalBackend) Options() InternalOptions {
 	return b.options
+}
+
+// applyPromptTemplate applies the prompt template with placeholder substitution.
+// Supports: {prompt}, {session_files}
+func (b *InternalBackend) applyPromptTemplate(req BackendRequest) string {
+	template := b.options.PromptTemplate
+	if template == "" {
+		return req.Prompt
+	}
+
+	// Build session files list
+	sessionFiles := ""
+	if len(req.SessionFiles) > 0 {
+		sessionFiles = strings.Join(req.SessionFiles, "\n")
+	}
+
+	// Apply substitutions
+	result := template
+	result = strings.ReplaceAll(result, "{prompt}", req.Prompt)
+	result = strings.ReplaceAll(result, "{session_files}", sessionFiles)
+
+	return result
 }

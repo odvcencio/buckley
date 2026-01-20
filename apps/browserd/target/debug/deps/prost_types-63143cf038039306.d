@@ -1,0 +1,12 @@
+/home/draco/work/buckley/apps/browserd/target/debug/deps/prost_types-63143cf038039306.d: /home/draco/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/prost-types-0.12.6/src/lib.rs /home/draco/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/prost-types-0.12.6/src/datetime.rs /home/draco/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/prost-types-0.12.6/src/any.rs /home/draco/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/prost-types-0.12.6/src/duration.rs /home/draco/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/prost-types-0.12.6/src/timestamp.rs /home/draco/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/prost-types-0.12.6/src/type_url.rs /home/draco/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/prost-types-0.12.6/src/compiler.rs /home/draco/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/prost-types-0.12.6/src/protobuf.rs
+
+/home/draco/work/buckley/apps/browserd/target/debug/deps/libprost_types-63143cf038039306.rmeta: /home/draco/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/prost-types-0.12.6/src/lib.rs /home/draco/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/prost-types-0.12.6/src/datetime.rs /home/draco/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/prost-types-0.12.6/src/any.rs /home/draco/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/prost-types-0.12.6/src/duration.rs /home/draco/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/prost-types-0.12.6/src/timestamp.rs /home/draco/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/prost-types-0.12.6/src/type_url.rs /home/draco/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/prost-types-0.12.6/src/compiler.rs /home/draco/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/prost-types-0.12.6/src/protobuf.rs
+
+/home/draco/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/prost-types-0.12.6/src/lib.rs:
+/home/draco/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/prost-types-0.12.6/src/datetime.rs:
+/home/draco/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/prost-types-0.12.6/src/any.rs:
+/home/draco/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/prost-types-0.12.6/src/duration.rs:
+/home/draco/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/prost-types-0.12.6/src/timestamp.rs:
+/home/draco/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/prost-types-0.12.6/src/type_url.rs:
+/home/draco/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/prost-types-0.12.6/src/compiler.rs:
+/home/draco/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/prost-types-0.12.6/src/protobuf.rs:

@@ -207,10 +207,11 @@ func (e *Executor) runIteration(ctx context.Context) error {
 		}
 
 		req := BackendRequest{
-			Prompt:      prompt,
-			SandboxPath: e.session.Sandbox,
-			Iteration:   iteration,
-			SessionID:   e.session.ID,
+			Prompt:       prompt,
+			SandboxPath:  e.session.Sandbox,
+			Iteration:    iteration,
+			SessionID:    e.session.ID,
+			SessionFiles: e.session.ModifiedFiles(),
 			Context: map[string]any{
 				"prompt_tokens": promptTokens,
 			},
@@ -421,7 +422,7 @@ func (e *Executor) handleBackendResults(ctx context.Context, iteration int, prom
 		}
 		if result.Error != nil {
 			iterationErr = result.Error
-			e.logInternalError(iteration, result.Backend, result.Error)
+			e.logInternalErrorWithOutput(iteration, result.Backend, result.Error, result.Output)
 		}
 	}
 
@@ -573,6 +574,13 @@ func (e *Executor) logInternalError(iteration int, backend string, err error) {
 		return
 	}
 	e.logger.LogError(iteration, backend, err)
+}
+
+func (e *Executor) logInternalErrorWithOutput(iteration int, backend string, err error, output string) {
+	if e == nil || e.logger == nil || err == nil {
+		return
+	}
+	e.logger.LogErrorWithOutput(iteration, backend, err, output)
 }
 
 func (e *Executor) handleScheduleAction(action *ScheduleAction) {

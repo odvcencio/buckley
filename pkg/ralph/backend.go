@@ -37,6 +37,10 @@ type BackendRequest struct {
 	// SessionID is the unique identifier for the Ralph session.
 	SessionID string
 
+	// SessionFiles is the list of files modified during this session.
+	// Used by internal backends for targeted operations (e.g., commits).
+	SessionFiles []string
+
 	// Context contains additional metadata for the execution.
 	Context map[string]any
 }

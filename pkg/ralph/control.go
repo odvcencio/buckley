@@ -40,13 +40,14 @@ type ControlConfig struct {
 
 // BackendConfig configures a single backend.
 type BackendConfig struct {
-	Type       string            `yaml:"type"`    // "internal" or empty for external
-	Command    string            `yaml:"command"` // for external backends
-	Args       []string          `yaml:"args"`
-	Options    map[string]string `yaml:"options"`
-	Enabled    bool              `yaml:"enabled"`
-	Thresholds BackendThresholds `yaml:"thresholds"`
-	Models     BackendModels     `yaml:"models"`
+	Type           string            `yaml:"type"`            // "internal" or empty for external
+	Command        string            `yaml:"command"`         // for external backends
+	Args           []string          `yaml:"args"`            // for external backends
+	PromptTemplate string            `yaml:"prompt_template"` // for internal backends: template with {prompt}, {session_files} placeholders
+	Options        map[string]string `yaml:"options"`
+	Enabled        bool              `yaml:"enabled"`
+	Thresholds     BackendThresholds `yaml:"thresholds"`
+	Models         BackendModels     `yaml:"models"`
 }
 
 // BackendThresholds control proactive switching behavior.

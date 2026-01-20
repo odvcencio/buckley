@@ -194,6 +194,25 @@ func (l *Logger) LogError(iteration int, backend string, err error) {
 	})
 }
 
+// LogErrorWithOutput logs a backend error event with command output for debugging.
+func (l *Logger) LogErrorWithOutput(iteration int, backend string, err error, output string) {
+	if l == nil || err == nil {
+		return
+	}
+	data := map[string]any{
+		"backend": backend,
+		"error":   err.Error(),
+	}
+	if output != "" {
+		data["output"] = truncate(output, 2000)
+	}
+	l.write(LogEvent{
+		Event:     "error",
+		Iteration: iteration,
+		Data:      data,
+	})
+}
+
 // LogModelResponse logs model output.
 func (l *Logger) LogModelResponse(content string, tokens int) {
 	if l == nil {
@@ -271,21 +290,26 @@ func (l *Logger) LogBackendResult(iteration int, result *BackendResult) {
 	if l == nil || result == nil {
 		return
 	}
+	data := map[string]any{
+		"backend":       result.Backend,
+		"model":         result.Model,
+		"duration_ms":   result.Duration.Milliseconds(),
+		"tokens_in":     result.TokensIn,
+		"tokens_out":    result.TokensOut,
+		"cost":          result.Cost,
+		"cost_estimate": result.CostEstimate,
+		"files_changed": len(result.FilesChanged),
+		"tests_passed":  result.TestsPassed,
+		"tests_failed":  result.TestsFailed,
+	}
+	// Include output when there's an error (helps diagnose command failures)
+	if result.Error != nil && result.Output != "" {
+		data["output"] = truncate(result.Output, 2000)
+	}
 	l.write(LogEvent{
 		Event:     "backend_result",
 		Iteration: iteration,
-		Data: map[string]any{
-			"backend":       result.Backend,
-			"model":         result.Model,
-			"duration_ms":   result.Duration.Milliseconds(),
-			"tokens_in":     result.TokensIn,
-			"tokens_out":    result.TokensOut,
-			"cost":          result.Cost,
-			"cost_estimate": result.CostEstimate,
-			"files_changed": len(result.FilesChanged),
-			"tests_passed":  result.TestsPassed,
-			"tests_failed":  result.TestsFailed,
-		},
+		Data:      data,
 	})
 }
 

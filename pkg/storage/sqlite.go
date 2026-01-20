@@ -179,7 +179,23 @@ var migrations = []Migration{
 
 // runMigrations runs the schema migrations with version tracking
 func runMigrations(db *sql.DB) error {
-	// First apply the base schema (idempotent via CREATE TABLE IF NOT EXISTS)
+	// First, ensure the schema_migrations table exists so we can track versions
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS schema_migrations (
+		version INTEGER PRIMARY KEY,
+		name TEXT NOT NULL,
+		applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+	)`); err != nil {
+		return fmt.Errorf("create schema_migrations: %w", err)
+	}
+
+	// Run pre-schema migrations to add any missing columns to existing tables.
+	// This must happen BEFORE applying the base schema because schema.sql
+	// may contain indexes that reference columns added by migrations.
+	if err := runPreSchemaMigrations(db); err != nil {
+		return fmt.Errorf("pre-schema migrations: %w", err)
+	}
+
+	// Now apply the base schema (idempotent via CREATE TABLE IF NOT EXISTS)
 	if _, err := db.Exec(schemaSQL); err != nil {
 		return fmt.Errorf("apply base schema: %w", err)
 	}
@@ -206,6 +222,34 @@ func runMigrations(db *sql.DB) error {
 	}
 
 	return nil
+}
+
+// runPreSchemaMigrations adds missing columns to existing tables before the
+// base schema is applied. This prevents failures when schema.sql references
+// columns that don't exist in old databases.
+func runPreSchemaMigrations(db *sql.DB) error {
+	// Check if sessions table exists and add missing columns
+	if tableExists(db, "sessions") {
+		if err := ensureSessionSchema(db); err != nil {
+			return fmt.Errorf("ensure session schema: %w", err)
+		}
+	}
+
+	// Check if memories table exists and add missing columns
+	if tableExists(db, "memories") {
+		if err := ensureMemoriesSchema(db); err != nil {
+			return fmt.Errorf("ensure memories schema: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// tableExists checks if a table exists in the database
+func tableExists(db *sql.DB, tableName string) bool {
+	var count int
+	err := db.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?", tableName).Scan(&count)
+	return err == nil && count > 0
 }
 
 // getSchemaVersion returns the current schema version (0 if no migrations applied)
@@ -303,6 +347,24 @@ func ensureSessionSchema(db *sql.DB) error {
 	if !cols["completed_at"] {
 		if _, err := db.Exec(`ALTER TABLE sessions ADD COLUMN completed_at TIMESTAMP`); err != nil {
 			return fmt.Errorf("add session completed_at: %w", err)
+		}
+	}
+
+	if !cols["project_path"] {
+		if _, err := db.Exec(`ALTER TABLE sessions ADD COLUMN project_path TEXT`); err != nil {
+			return fmt.Errorf("add session project_path: %w", err)
+		}
+	}
+
+	if !cols["git_repo"] {
+		if _, err := db.Exec(`ALTER TABLE sessions ADD COLUMN git_repo TEXT`); err != nil {
+			return fmt.Errorf("add session git_repo: %w", err)
+		}
+	}
+
+	if !cols["git_branch"] {
+		if _, err := db.Exec(`ALTER TABLE sessions ADD COLUMN git_branch TEXT`); err != nil {
+			return fmt.Errorf("add session git_branch: %w", err)
 		}
 	}
 

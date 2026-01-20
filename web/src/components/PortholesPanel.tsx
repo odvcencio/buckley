@@ -17,6 +17,7 @@ import {
   FileCode,
   Loader2,
   FlaskConical,
+  Monitor,
 } from 'lucide-react'
 
 import type { DisplaySession, PendingApproval, ViewLineRange, ViewSessionState } from '../types'
@@ -78,6 +79,19 @@ interface RLMState {
   tokensUsed?: number
   summary?: string
   scratchpad: RLMScratchpadEntry[]
+}
+
+interface BrowserEventSummary {
+  type?: string
+  stateVersion?: number
+  timestamp?: string
+  hasFrame?: boolean
+  frameWidth?: number
+  frameHeight?: number
+  frameFormat?: string
+  hasDomDiff?: boolean
+  hasAccessibilityDiff?: boolean
+  hasHitTest?: boolean
 }
 
 function getTelemetryData(event: ActivityEvent): Record<string, unknown> | null {
@@ -194,6 +208,33 @@ function parseRLMState(activity: ActivityEvent[], sessionId?: string | null): RL
     summary: typeof data.summary === 'string' ? data.summary : undefined,
     scratchpad: parseRLMScratchpad(data.scratchpad),
   }
+}
+
+function parseBrowserEvent(raw: Record<string, unknown>): BrowserEventSummary | null {
+  const type = typeof raw.type === 'string' ? raw.type : undefined
+  const stateVersion = toNumber(raw.state_version)
+  const timestamp = typeof raw.timestamp === 'string' ? raw.timestamp : undefined
+  const summary: BrowserEventSummary = {
+    type,
+    stateVersion,
+    timestamp,
+    hasFrame: raw.has_frame === true,
+    frameWidth: toNumber(raw.frame_width),
+    frameHeight: toNumber(raw.frame_height),
+    frameFormat: typeof raw.frame_format === 'string' ? raw.frame_format : undefined,
+    hasDomDiff: raw.has_dom_diff === true,
+    hasAccessibilityDiff: raw.has_accessibility_diff === true,
+    hasHitTest: raw.has_hit_test === true,
+  }
+  if (summary.type || summary.timestamp || typeof summary.stateVersion === 'number') {
+    return summary
+  }
+  return null
+}
+
+function formatBrowserEventType(value?: string) {
+  if (!value) return 'event'
+  return value.replace(/_/g, ' ')
 }
 
 function experimentStatusBadge(status?: string) {
@@ -335,6 +376,29 @@ function PortholesBody({
 
   const experimentState = useMemo(() => parseExperimentState(activity), [activity])
   const rlmState = useMemo(() => parseRLMState(activity, sessionId), [activity, sessionId])
+  const browserEvents = useMemo(() => {
+    const out: BrowserEventSummary[] = []
+    for (const event of activity) {
+      if (event.type !== 'telemetry.tool.completed' && event.type !== 'telemetry.tool.failed') {
+        continue
+      }
+      if (sessionId && event.sessionId && event.sessionId !== sessionId) {
+        continue
+      }
+      const data = getTelemetryData(event)
+      if (!data) continue
+      const toolName = typeof data.toolName === 'string' ? data.toolName : typeof data.tool === 'string' ? data.tool : undefined
+      if (toolName !== 'browser_stream') continue
+      const rawEvents = data.browser_events
+      if (!Array.isArray(rawEvents)) continue
+      for (const rawEvent of rawEvents) {
+        if (!isRecord(rawEvent)) continue
+        const parsed = parseBrowserEvent(rawEvent)
+        if (parsed) out.push(parsed)
+      }
+    }
+    return out.slice(0, 30)
+  }, [activity, sessionId])
 
   return (
     <>
@@ -450,6 +514,51 @@ function PortholesBody({
           </div>
         </Section>
       )}
+
+      <Section title="Browser" icon={Monitor} defaultOpen={false}>
+        {browserEvents.length === 0 ? (
+          <div className="text-sm text-[var(--color-text-muted)]">
+            No browser stream events yet.
+          </div>
+        ) : (
+          <div className="space-y-2">
+            {browserEvents.map((event, idx) => {
+              const timeLabel = event.timestamp ? new Date(event.timestamp).toLocaleTimeString() : undefined
+              const detailParts = []
+              if (event.hasFrame && event.frameWidth && event.frameHeight) {
+                detailParts.push(`${event.frameWidth}x${event.frameHeight}`)
+              }
+              if (event.hasDomDiff) detailParts.push('dom')
+              if (event.hasAccessibilityDiff) detailParts.push('a11y')
+              if (event.hasHitTest) detailParts.push('hit')
+              const detail = detailParts.join(' · ')
+              return (
+                <div
+                  key={`${event.type ?? 'event'}:${event.timestamp ?? idx}`}
+                  className="rounded-xl bg-[var(--color-depth)] border border-[var(--color-border-subtle)] p-3"
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="text-xs font-semibold text-[var(--color-text-secondary)]">
+                      {formatBrowserEventType(event.type)}
+                    </div>
+                    {typeof event.stateVersion === 'number' && (
+                      <div className="text-[10px] text-[var(--color-text-muted)] font-mono">
+                        v{event.stateVersion}
+                      </div>
+                    )}
+                  </div>
+                  {(detail || timeLabel) && (
+                    <div className="mt-1 text-[10px] text-[var(--color-text-muted)] flex items-center justify-between gap-2">
+                      <span>{detail || 'stream'}</span>
+                      {timeLabel && <span className="font-mono">{timeLabel}</span>}
+                    </div>
+                  )}
+                </div>
+              )
+            })}
+          </div>
+        )}
+      </Section>
 
       {rlmState ? (
         <Section title="RLM Loop" icon={Cpu} defaultOpen>

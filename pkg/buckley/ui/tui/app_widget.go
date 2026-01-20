@@ -679,7 +679,9 @@ func (a *WidgetApp) initFocus() {
 			a.setStatusOverride(msg.Message, 2*time.Second)
 		})
 	}
-	scope := a.screen.FocusScope()
+	// Use BaseFocusScope to get the base layer's scope where main widgets are
+	// (overlay layers like toastStack may be on top but have no focusables)
+	scope := a.screen.BaseFocusScope()
 	if scope == nil {
 		if a.inputArea != nil {
 			a.inputArea.Focus()
@@ -974,7 +976,7 @@ func (a *WidgetApp) registerCommands(registry *keybind.CommandRegistry) {
 			Description: "Move focus to the next widget",
 			Category:    "Focus",
 			Handler: func(ctx keybind.Context) {
-				if scope := a.screen.FocusScope(); scope != nil {
+				if scope := a.screen.BaseFocusScope(); scope != nil {
 					scope.FocusNext()
 					a.dirty = true
 				}
@@ -986,7 +988,7 @@ func (a *WidgetApp) registerCommands(registry *keybind.CommandRegistry) {
 			Description: "Move focus to the previous widget",
 			Category:    "Focus",
 			Handler: func(ctx keybind.Context) {
-				if scope := a.screen.FocusScope(); scope != nil {
+				if scope := a.screen.BaseFocusScope(); scope != nil {
 					scope.FocusPrev()
 					a.dirty = true
 				}
@@ -1643,16 +1645,14 @@ func (a *WidgetApp) handleKeyMsg(m KeyMsg) bool {
 		Shift: m.Shift,
 	}
 
+	// When input area is focused, forward all key events to it for handling
 	if a.inputArea.IsFocused() {
-		switch key {
-		case terminal.KeyUp, terminal.KeyDown, terminal.KeyHome, terminal.KeyEnd:
-			result := a.inputArea.HandleMessage(runtimeMsg)
-			if result.Handled {
-				for _, cmd := range result.Commands {
-					a.handleCommand(cmd)
-				}
-				return true
+		result := a.inputArea.HandleMessage(runtimeMsg)
+		if result.Handled {
+			for _, cmd := range result.Commands {
+				a.handleCommand(cmd)
 			}
+			return true
 		}
 	}
 

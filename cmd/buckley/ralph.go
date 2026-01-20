@@ -426,7 +426,9 @@ func runRalphCommand(args []string) error {
 	backendRegistry := ralph.NewBackendRegistry()
 	for name, backend := range controlCfg.Backends {
 		if backend.Type == ralph.BackendTypeInternal {
-			backendRegistry.Register(ralph.NewInternalBackend(name, runner, ralph.InternalOptions{}))
+			backendRegistry.Register(ralph.NewInternalBackend(name, runner, ralph.InternalOptions{
+				PromptTemplate: backend.PromptTemplate,
+			}))
 		} else {
 			backendRegistry.Register(ralph.NewExternalBackend(name, backend.Command, backend.Args, backend.Options))
 		}

@@ -1,0 +1,1 @@
+{"rustc":16285725380928457773,"features":"","declared_features":"","target":0,"profile":0,"path":0,"deps":[[10484740257598914037,"build_script_build",false,18183222318785323821]],"local":[{"RerunIfChanged":{"output":"debug/build/browserd-9b7892db64593e4c/output","paths":["../../pkg/browser/adapters/servo/proto/browserd.proto"]}}],"rustflags":[],"config":0,"compile_kind":0}

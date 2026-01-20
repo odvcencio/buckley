@@ -212,6 +212,14 @@ func (r *Registry) registerBuiltins(cfg registryOptions) {
 	register(&builtin.ListMergeConflictsTool{})
 	register(&builtin.MarkResolvedTool{})
 	register(&builtin.HeadlessBrowseTool{})
+	register(&builtin.BrowserStartTool{})
+	register(&builtin.BrowserNavigateTool{})
+	register(&builtin.BrowserObserveTool{})
+	register(&builtin.BrowserStreamTool{})
+	register(&builtin.BrowserActTool{})
+	register(&builtin.BrowserClipboardReadTool{})
+	register(&builtin.BrowserClipboardWriteTool{})
+	register(&builtin.BrowserCloseTool{})
 	register(&builtin.ShellCommandTool{})
 
 	// Delegation tools with guardrails (depth limits, rate limits, recursion prevention)
@@ -686,6 +694,44 @@ func (r *Registry) executeWithMissionPatch(params map[string]any, execFn func(ma
 	return execFn(params)
 }
 
+func (r *Registry) executeWithMissionClipboardRead(params map[string]any, execFn func(map[string]any) (*builtin.Result, error)) (*builtin.Result, error) {
+	rawSession, ok := params["session_id"]
+	if !ok {
+		return &builtin.Result{Success: false, Error: "session_id parameter is required"}, nil
+	}
+	sessionID := strings.TrimSpace(fmt.Sprintf("%v", rawSession))
+	if sessionID == "" || sessionID == "<nil>" {
+		return &builtin.Result{Success: false, Error: "session_id parameter is required"}, nil
+	}
+
+	expectedState := ""
+	if rawState, ok := params["expected_state_version"]; ok {
+		if trimmed := strings.TrimSpace(fmt.Sprintf("%v", rawState)); trimmed != "" && trimmed != "<nil>" {
+			expectedState = trimmed
+		}
+	}
+
+	diff := fmt.Sprintf("clipboard read requested\nsession_id: %s", sessionID)
+	if expectedState != "" {
+		diff = fmt.Sprintf("%s\nexpected_state_version: %s", diff, expectedState)
+	}
+
+	changeID, err := r.recordPendingChange(fmt.Sprintf("browser/clipboard/%s", sessionID), diff, "browser_clipboard_read")
+	if err != nil {
+		return &builtin.Result{Success: false, Error: fmt.Sprintf("failed to create pending change: %v", err)}, nil
+	}
+
+	change, err := r.awaitDecision(changeID)
+	if err != nil {
+		return &builtin.Result{Success: false, Error: fmt.Sprintf("approval wait failed: %v", err)}, nil
+	}
+	if change.Status != "approved" {
+		return &builtin.Result{Success: false, Error: fmt.Sprintf("change %s %s by %s", change.ID, change.Status, change.ReviewedBy)}, nil
+	}
+
+	return execFn(params)
+}
+
 func (r *Registry) recordPendingChange(filePath, diff, toolName string) (string, error) {
 	if r.missionStore == nil {
 		return "", fmt.Errorf("mission store not configured")
@@ -787,6 +833,17 @@ func (r *Registry) publishToolEvent(eventType telemetry.EventType, callID, toolN
 	}
 	if res != nil {
 		payload["success"] = res.Success
+		if strings.TrimSpace(toolName) == "browser_stream" {
+			if rawEvents, ok := res.Data["events"]; ok {
+				summary := summarizeBrowserEvents(rawEvents, 25)
+				if len(summary) > 0 {
+					payload["browser_events"] = summary
+				}
+			}
+			if count, ok := res.Data["event_count"]; ok {
+				payload["browser_event_count"] = count
+			}
+		}
 	}
 	if err != nil {
 		payload["error"] = err.Error()
@@ -854,6 +911,66 @@ func truncateForTelemetry(value string) string {
 		return value
 	}
 	return value[:limit] + "..."
+}
+
+func summarizeBrowserEvents(raw any, limit int) []map[string]any {
+	if limit <= 0 {
+		limit = 10
+	}
+	out := make([]map[string]any, 0, limit)
+	switch events := raw.(type) {
+	case []map[string]any:
+		for _, event := range events {
+			if len(out) >= limit {
+				break
+			}
+			out = append(out, summarizeBrowserEvent(event))
+		}
+	case []any:
+		for _, item := range events {
+			if len(out) >= limit {
+				break
+			}
+			event, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			out = append(out, summarizeBrowserEvent(event))
+		}
+	}
+	return out
+}
+
+func summarizeBrowserEvent(event map[string]any) map[string]any {
+	summary := map[string]any{
+		"type":          event["type"],
+		"state_version": event["state_version"],
+		"timestamp":     event["timestamp"],
+	}
+	if frame, ok := event["frame"].(map[string]any); ok {
+		summary["has_frame"] = true
+		if width, ok := frame["width"]; ok {
+			summary["frame_width"] = width
+		}
+		if height, ok := frame["height"]; ok {
+			summary["frame_height"] = height
+		}
+		if format, ok := frame["format"]; ok {
+			summary["frame_format"] = format
+		}
+	} else if event["frame"] != nil {
+		summary["has_frame"] = true
+	}
+	if event["dom_diff"] != nil {
+		summary["has_dom_diff"] = true
+	}
+	if event["accessibility_diff"] != nil {
+		summary["has_accessibility_diff"] = true
+	}
+	if event["hit_test"] != nil {
+		summary["has_hit_test"] = true
+	}
+	return summary
 }
 
 // SetContainerContext tracks compose/workdir metadata without forcing container execution.

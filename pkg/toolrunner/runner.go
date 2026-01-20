@@ -38,7 +38,6 @@ type Config struct {
 	EnableParallelTools  bool // Enable parallel execution of independent tools
 	MaxParallelTools     int  // Max concurrent tool executions (default 5)
 	ToolExecutor         ToolExecutor
-	DisableStreaming     bool // Disable streaming (streaming is ON by default)
 }
 
 // Request contains inputs for a tool runner execution.
@@ -409,17 +408,9 @@ func (r *Runner) parseToolNames(content string) []string {
 	return names
 }
 
-func (r *Runner) executeWithTools(ctx context.Context, req Request, tools []tool.Tool, result *Result) (*Result, error) {
-	// Use streaming by default unless disabled
-	if !r.config.DisableStreaming {
-		return r.executeWithToolsStreaming(ctx, req, tools, result)
-	}
-	return r.executeWithToolsNonStreaming(ctx, req, tools, result)
-}
-
-// executeWithToolsStreaming uses streaming for real-time output and proper tool call accumulation.
+// executeWithTools uses streaming for real-time output and proper tool call accumulation.
 // This follows the Kimi K2 / OpenAI streaming pattern where tool call deltas are accumulated by index.
-func (r *Runner) executeWithToolsStreaming(ctx context.Context, req Request, tools []tool.Tool, result *Result) (*Result, error) {
+func (r *Runner) executeWithTools(ctx context.Context, req Request, tools []tool.Tool, result *Result) (*Result, error) {
 	var toolDefs []map[string]any
 	for _, t := range tools {
 		toolDefs = append(toolDefs, tool.ToOpenAIFunction(t))
@@ -482,11 +473,15 @@ func (r *Runner) executeWithToolsStreaming(ctx context.Context, req Request, too
 					finishReason = *chunk.Choices[0].FinishReason
 				}
 
-				// Stream text content to handler
+				// Stream text content to handler (filtering out tool call tokens)
 				if r.streamHandler != nil && len(chunk.Choices) > 0 {
 					delta := chunk.Choices[0].Delta
 					if delta.Content != "" {
-						r.streamHandler.OnText(delta.Content)
+						// Filter out Kimi K2 style tool call tokens from streamed content
+						filtered := model.FilterToolCallTokens(delta.Content)
+						if filtered != "" {
+							r.streamHandler.OnText(filtered)
+						}
 					}
 					if delta.Reasoning != "" {
 						r.streamHandler.OnReasoning(delta.Reasoning)
@@ -503,15 +498,17 @@ func (r *Runner) executeWithToolsStreaming(ctx context.Context, req Request, too
 		}
 
 		result.FinishReason = finishReason
-		msg := acc.Message()
+		// Use FinalizeWithTokenParsing to handle models like Kimi K2 that may
+		// embed tool calls as special tokens in the content field
+		msg := acc.FinalizeWithTokenParsing()
 
 		if msg.Reasoning != "" && r.config.EnableReasoning {
 			result.Reasoning = msg.Reasoning
 		}
 
-		// Check for tool calls
-		if !acc.HasToolCalls() {
-			rawContent := acc.Content()
+		// Check for tool calls (including those parsed from special tokens)
+		if len(msg.ToolCalls) == 0 {
+			rawContent, _ := msg.Content.(string)
 			thinking, content := model.ExtractThinkingContent(rawContent)
 			if thinking != "" && result.Reasoning == "" {
 				result.Reasoning = thinking
@@ -531,7 +528,7 @@ func (r *Runner) executeWithToolsStreaming(ctx context.Context, req Request, too
 		}
 
 		// Process tool calls
-		toolCalls := acc.ToolCalls()
+		toolCalls := msg.ToolCalls
 
 		// Ensure tool call IDs are set
 		for i := range toolCalls {
@@ -547,115 +544,6 @@ func (r *Runner) executeWithToolsStreaming(ctx context.Context, req Request, too
 		})
 
 		toolResults, err := r.executeToolCalls(ctx, toolCalls, tools, result)
-		if err != nil {
-			return result, err
-		}
-		for _, tr := range toolResults {
-			content := deduper.messageFor(tr)
-			messages = append(messages, model.Message{
-				Role:       "tool",
-				ToolCallID: tr.ID,
-				Name:       tr.Name,
-				Content:    content,
-			})
-		}
-	}
-
-	result.Content = "Maximum iterations reached. Please try a simpler request."
-	return result, nil
-}
-
-// executeWithToolsNonStreaming uses the traditional non-streaming approach.
-// Kept for fallback when streaming is disabled.
-func (r *Runner) executeWithToolsNonStreaming(ctx context.Context, req Request, tools []tool.Tool, result *Result) (*Result, error) {
-	var toolDefs []map[string]any
-	for _, t := range tools {
-		toolDefs = append(toolDefs, tool.ToOpenAIFunction(t))
-	}
-
-	messages := append([]model.Message{}, req.Messages...)
-
-	maxIterations := req.MaxIterations
-	if maxIterations <= 0 {
-		maxIterations = r.config.DefaultMaxIterations
-	}
-	if maxIterations <= 0 {
-		maxIterations = defaultMaxIterations
-	}
-
-	deduper := newToolResultDeduper()
-
-	for iteration := 0; iteration < maxIterations; iteration++ {
-		result.Iterations = iteration + 1
-
-		if err := ctx.Err(); err != nil {
-			return result, err
-		}
-
-		apiReq := model.ChatRequest{
-			Model:    r.requestModel(req),
-			Messages: messages,
-			Tools:    toolDefs,
-		}
-		if len(toolDefs) > 0 {
-			apiReq.ToolChoice = "auto"
-		}
-
-		resp, err := r.config.Models.ChatCompletion(ctx, apiReq)
-		if err != nil {
-			return result, fmt.Errorf("chat completion: %w", err)
-		}
-
-		result.Usage.PromptTokens += resp.Usage.PromptTokens
-		result.Usage.CompletionTokens += resp.Usage.CompletionTokens
-		result.Usage.TotalTokens += resp.Usage.TotalTokens
-
-		if len(resp.Choices) == 0 {
-			return result, fmt.Errorf("no response from model")
-		}
-
-		choice := resp.Choices[0]
-		result.FinishReason = choice.FinishReason
-		msg := choice.Message
-
-		if msg.Reasoning != "" && r.config.EnableReasoning {
-			result.Reasoning = msg.Reasoning
-		}
-
-		if len(msg.ToolCalls) == 0 {
-			rawContent, err := model.ExtractTextContent(msg.Content)
-			if err != nil {
-				return result, fmt.Errorf("extract text content: %w", err)
-			}
-			thinking, content := model.ExtractThinkingContent(rawContent)
-			if thinking != "" && result.Reasoning == "" {
-				result.Reasoning = thinking
-			}
-			if strings.TrimSpace(content) == "" {
-				if result.Reasoning != "" {
-					return result, fmt.Errorf("model returned reasoning without final response")
-				}
-				return result, fmt.Errorf("model returned empty response")
-			}
-
-			result.Content = content
-			if r.streamHandler != nil {
-				if result.Reasoning != "" {
-					r.streamHandler.OnReasoning(result.Reasoning)
-				}
-				r.streamHandler.OnText(content)
-				r.streamHandler.OnComplete(result)
-			}
-			return result, nil
-		}
-
-		messages = append(messages, model.Message{
-			Role:      "assistant",
-			Content:   msg.Content,
-			ToolCalls: msg.ToolCalls,
-		})
-
-		toolResults, err := r.executeToolCalls(ctx, msg.ToolCalls, tools, result)
 		if err != nil {
 			return result, err
 		}

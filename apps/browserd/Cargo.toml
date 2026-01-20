@@ -1,0 +1,16 @@
+[package]
+name = "browserd"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+libc = "0.2"
+prost = "0.12"
+prost-types = "0.12"
+url = "2.5"
+
+[build-dependencies]
+prost-build = "0.12"
+
+[features]
+servo = []
