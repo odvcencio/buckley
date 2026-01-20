@@ -2,6 +2,9 @@ package servo
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"strings"
@@ -328,6 +331,9 @@ func (s *Session) sendWithReconnect(ctx context.Context, req *browserdpb.Request
 	if err == nil {
 		return resp, nil
 	}
+	if isTimeoutError(err) {
+		return nil, fmt.Errorf("%w: %v", browser.ErrOperationTimeout, err)
+	}
 	if !browser.IsRetryableError(err) && !isNetworkError(err) {
 		return nil, err
 	}
@@ -346,6 +352,20 @@ func isNetworkError(err error) bool {
 		strings.Contains(errStr, "connection reset") ||
 		strings.Contains(errStr, "EOF") ||
 		strings.Contains(errStr, "use of closed")
+}
+
+func isTimeoutError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return true
+	}
+	return false
 }
 
 func responseError(resp *browserdpb.Response) error {

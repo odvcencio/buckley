@@ -47,7 +47,7 @@ func (r *Runtime) NewSession(ctx context.Context, sessionCfg browser.SessionConf
 	}
 	cmd := exec.CommandContext(ctx, r.cfg.BrowserdPath, "--socket", socketPath, "--session-id", normalized.SessionID)
 	if err := cmd.Start(); err != nil {
-		return nil, fmt.Errorf("start browserd: %w", err)
+		return nil, fmt.Errorf("%w: start browserd: %v", browser.ErrUnavailable, err)
 	}
 	waitDone := make(chan struct{})
 	go func() {
@@ -59,7 +59,7 @@ func (r *Runtime) NewSession(ctx context.Context, sessionCfg browser.SessionConf
 	if err != nil {
 		_ = cmd.Process.Kill()
 		<-waitDone
-		return nil, err
+		return nil, fmt.Errorf("%w: %v", browser.ErrUnavailable, err)
 	}
 	sessionClient := newClient(conn)
 

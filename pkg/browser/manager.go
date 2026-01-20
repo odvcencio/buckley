@@ -32,6 +32,9 @@ func (s *instrumentedSession) Navigate(ctx context.Context, url string) (*Observ
 	obs, err := s.inner.Navigate(ctx, url)
 	if s.metrics != nil {
 		s.metrics.RecordNavigate(s.inner.ID(), url, time.Since(start))
+		if err == nil && obs != nil && obs.Frame != nil {
+			s.metrics.RecordFrameDelivered(s.inner.ID(), time.Since(start))
+		}
 	}
 	return obs, err
 }
@@ -41,6 +44,9 @@ func (s *instrumentedSession) Observe(ctx context.Context, opts ObserveOptions) 
 	obs, err := s.inner.Observe(ctx, opts)
 	if s.metrics != nil {
 		s.metrics.RecordObserve(s.inner.ID(), time.Since(start), opts)
+		if err == nil && obs != nil && obs.Frame != nil {
+			s.metrics.RecordFrameDelivered(s.inner.ID(), time.Since(start))
+		}
 	}
 	return obs, err
 }
@@ -55,7 +61,41 @@ func (s *instrumentedSession) Act(ctx context.Context, action Action) (*ActionRe
 }
 
 func (s *instrumentedSession) Stream(ctx context.Context, opts StreamOptions) (<-chan StreamEvent, error) {
-	return s.inner.Stream(ctx, opts)
+	events, err := s.inner.Stream(ctx, opts)
+	if err != nil || s.metrics == nil {
+		return events, err
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	out := make(chan StreamEvent)
+	go func() {
+		defer close(out)
+		for {
+			select {
+			case event, ok := <-events:
+				if !ok {
+					return
+				}
+				s.metrics.RecordStreamEvent(s.inner.ID(), event.Type)
+				if event.Type == StreamEventFrame && event.Frame != nil {
+					if !event.Frame.Timestamp.IsZero() {
+						s.metrics.RecordFrameDelivered(s.inner.ID(), time.Since(event.Frame.Timestamp))
+					} else if !event.Timestamp.IsZero() {
+						s.metrics.RecordFrameDelivered(s.inner.ID(), time.Since(event.Timestamp))
+					}
+				}
+				select {
+				case out <- event:
+				case <-ctx.Done():
+					return
+				}
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	return out, nil
 }
 
 func (s *instrumentedSession) Close() error {

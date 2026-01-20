@@ -87,7 +87,7 @@ func TestBrowserRuntimeLifecycle(t *testing.T) {
 	if navObs == nil {
 		t.Fatal("Navigate returned nil observation")
 	}
-	initialVersion := navObs.StateVersion
+	prevVersion := navObs.StateVersion
 	t.Logf("Navigate returned state_version=%d, url=%s", navObs.StateVersion, navObs.URL)
 
 	// Observe current state
@@ -104,8 +104,10 @@ func TestBrowserRuntimeLifecycle(t *testing.T) {
 	if obs == nil {
 		t.Fatal("Observe returned nil observation")
 	}
-	if obs.StateVersion < initialVersion {
-		t.Errorf("Observe state_version=%d < initial=%d", obs.StateVersion, initialVersion)
+	if obs.StateVersion < prevVersion {
+		t.Errorf("Observe state_version=%d < prev=%d", obs.StateVersion, prevVersion)
+	} else if obs.StateVersion > prevVersion {
+		prevVersion = obs.StateVersion
 	}
 	t.Logf("Observe returned state_version=%d, has_frame=%v, has_dom=%v",
 		obs.StateVersion, obs.Frame != nil, len(obs.DOMSnapshot) > 0)
@@ -122,8 +124,10 @@ func TestBrowserRuntimeLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Act (click) failed: %v", err)
 	}
-	if clickResult.StateVersion <= obs.StateVersion {
-		t.Logf("click state_version=%d (may not increment for stub)", clickResult.StateVersion)
+	if clickResult.StateVersion <= prevVersion {
+		t.Errorf("click state_version=%d <= prev=%d", clickResult.StateVersion, prevVersion)
+	} else {
+		prevVersion = clickResult.StateVersion
 	}
 	t.Logf("Click action returned state_version=%d", clickResult.StateVersion)
 
@@ -136,6 +140,11 @@ func TestBrowserRuntimeLifecycle(t *testing.T) {
 	typeResult, err := sess.Act(ctx, typeAction)
 	if err != nil {
 		t.Fatalf("Act (type) failed: %v", err)
+	}
+	if typeResult.StateVersion <= prevVersion {
+		t.Errorf("type state_version=%d <= prev=%d", typeResult.StateVersion, prevVersion)
+	} else {
+		prevVersion = typeResult.StateVersion
 	}
 	t.Logf("Type action returned state_version=%d", typeResult.StateVersion)
 
@@ -151,6 +160,11 @@ func TestBrowserRuntimeLifecycle(t *testing.T) {
 	scrollResult, err := sess.Act(ctx, scrollAction)
 	if err != nil {
 		t.Fatalf("Act (scroll) failed: %v", err)
+	}
+	if scrollResult.StateVersion <= prevVersion {
+		t.Errorf("scroll state_version=%d <= prev=%d", scrollResult.StateVersion, prevVersion)
+	} else {
+		prevVersion = scrollResult.StateVersion
 	}
 	t.Logf("Scroll action returned state_version=%d", scrollResult.StateVersion)
 
