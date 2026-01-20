@@ -40,6 +40,10 @@ type Executor struct {
 	lastBackend  string
 	lastModel    string
 
+	// Git workflow
+	commitBackend Backend
+	onSessionEnd  func(ctx context.Context) error
+
 	mu              sync.Mutex
 	promptFileMtime time.Time
 	lastError       error
@@ -87,6 +91,20 @@ func WithSummaryGenerator(generator *SummaryGenerator) ExecutorOption {
 func WithProjectContext(ctx string) ExecutorOption {
 	return func(e *Executor) {
 		e.projectCtx = ctx
+	}
+}
+
+// WithCommitBackend sets the backend used for automatic commits after each iteration.
+func WithCommitBackend(backend Backend) ExecutorOption {
+	return func(e *Executor) {
+		e.commitBackend = backend
+	}
+}
+
+// WithSessionEndHandler sets a callback for when the session completes.
+func WithSessionEndHandler(handler func(ctx context.Context) error) ExecutorOption {
+	return func(e *Executor) {
+		e.onSessionEnd = handler
 	}
 }
 
@@ -148,6 +166,13 @@ func (e *Executor) Run(ctx context.Context) error {
 		stats := e.session.Stats()
 		if e.logger != nil {
 			e.logger.LogSessionEnd(reason, stats.Iteration, stats.TotalCost)
+		}
+
+		// Call session end handler (e.g., for PR creation)
+		if e.onSessionEnd != nil {
+			if err := e.onSessionEnd(ctx); err != nil {
+				e.writeProgress("  [SESSION-END] Handler failed: %v\n", err)
+			}
 		}
 	}()
 
@@ -315,7 +340,52 @@ func (e *Executor) runIteration(ctx context.Context) error {
 		e.logger.LogIterationEndWithStats(iteration, iterStats)
 	}
 
+	// Auto-commit if enabled and there are changes
+	if e.session.GitWorkflow.AutoCommit && e.commitBackend != nil && err == nil {
+		e.runAutoCommit(ctx, iteration)
+	}
+
 	return err
+}
+
+// runAutoCommit runs the commit backend to commit changes from the current iteration.
+func (e *Executor) runAutoCommit(ctx context.Context, iteration int) {
+	modifiedFiles := e.session.ModifiedFiles()
+	if len(modifiedFiles) == 0 {
+		return
+	}
+
+	e.writeProgress("\n")
+	e.writeProgress("  [AUTO-COMMIT] Committing iteration %d changes...\n", iteration)
+
+	commitPrompt := fmt.Sprintf(`Commit the changes from iteration %d of this Ralph session.
+
+Files modified during this session:
+%s
+
+Create a concise commit message that describes what was accomplished in this iteration.
+Stage and commit only the files listed above.`, iteration, strings.Join(modifiedFiles, "\n"))
+
+	req := BackendRequest{
+		Prompt:       commitPrompt,
+		SandboxPath:  e.session.Sandbox,
+		Iteration:    iteration,
+		SessionID:    e.session.ID,
+		SessionFiles: modifiedFiles,
+	}
+
+	result, err := e.commitBackend.Execute(ctx, req)
+	if err != nil {
+		e.writeProgress("  [AUTO-COMMIT] Failed: %v\n", err)
+		return
+	}
+
+	if result != nil && result.Error != nil {
+		e.writeProgress("  [AUTO-COMMIT] Failed: %v\n", result.Error)
+		return
+	}
+
+	e.writeProgress("  [AUTO-COMMIT] Done\n")
 }
 
 // predictNextBackend returns the backend and model that will likely be used next.

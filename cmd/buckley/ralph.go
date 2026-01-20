@@ -28,6 +28,42 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// getRalphDataDir returns the base directory for Ralph data (~/.buckley/ralph/).
+func getRalphDataDir() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		home = os.Getenv("HOME")
+	}
+	if home == "" {
+		return "", fmt.Errorf("could not determine home directory")
+	}
+	return filepath.Join(home, ".buckley", "ralph"), nil
+}
+
+// getProjectName returns a safe project name for organizing Ralph data.
+// Uses the git repo name if in a git repo, otherwise the directory basename.
+func getProjectName(workDir string) string {
+	// Try to get git repo name
+	if ralph.IsGitRepo(workDir) {
+		if repoRoot, err := ralph.GetRepoRoot(workDir); err == nil {
+			return filepath.Base(repoRoot)
+		}
+	}
+	// Fall back to directory basename
+	return filepath.Base(workDir)
+}
+
+// truncateString truncates a string to maxLen characters, adding "..." if truncated.
+func truncateString(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	if maxLen <= 3 {
+		return s[:maxLen]
+	}
+	return s[:maxLen-3] + "..."
+}
+
 // ralphHeadlessRunner implements ralph.HeadlessRunner wrapping headless.Runner.
 type ralphHeadlessRunner struct {
 	runner    *headless.Runner
@@ -261,6 +297,8 @@ func runRalphCommand(args []string) error {
 	noRefine := fs.Bool("no-refine", false, "Skip prompt refinement phase")
 	watch := fs.Bool("watch", false, "Watch prompt file for changes")
 	model := fs.String("model", "", "Model to use for execution")
+	autoCommit := fs.Bool("auto-commit", false, "Automatically commit changes after each iteration")
+	createPR := fs.Bool("create-pr", false, "Create a PR when the session completes")
 
 	if err := fs.Parse(args); err != nil {
 		if err == flag.ErrHelp {
@@ -341,9 +379,28 @@ func runRalphCommand(args []string) error {
 
 	sessionID := uuid.New().String()[:8]
 
-	// Setup sandbox
-	sandboxPath := ""
+	// Get ralph data directory (~/.buckley/ralph/)
+	ralphDataDir, err := getRalphDataDir()
+	if err != nil {
+		return fmt.Errorf("get ralph data directory: %w", err)
+	}
+
+	// Get project name for organizing data
+	projectName := getProjectName(workDir)
+
+	// Create run directory: ~/.buckley/ralph/projects/<project>/runs/<session>/
+	runDir := filepath.Join(ralphDataDir, "projects", projectName, "runs", sessionID)
+	if err := os.MkdirAll(runDir, 0755); err != nil {
+		return fmt.Errorf("create run directory: %w", err)
+	}
+
+	// Setup sandbox in run directory
+	sandboxPath := filepath.Join(runDir, "sandbox")
 	var sandboxMgr *ralph.SandboxManager
+	var repoRoot string
+	var originalBranch string
+	var ralphBranch string
+
 	shouldPreserveSandbox := func() bool {
 		if sandboxMgr == nil || sandboxPath == "" {
 			return false
@@ -365,14 +422,21 @@ func runRalphCommand(args []string) error {
 		return true
 	}
 	if ralph.IsGitRepo(workDir) {
-		repoRoot, err := ralph.GetRepoRoot(workDir)
+		var err error
+		repoRoot, err = ralph.GetRepoRoot(workDir)
 		if err != nil {
 			return fmt.Errorf("get repo root: %w", err)
 		}
+
+		// Get current branch for PR creation
+		originalBranch, err = ralph.GetCurrentBranch(repoRoot)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warning: could not get current branch: %v\n", err)
+		}
+
 		sandboxMgr = ralph.NewSandboxManager(repoRoot)
-		sandboxPath = filepath.Join(repoRoot, ".ralph-sandbox", sessionID)
-		branchName := fmt.Sprintf("ralph/%s", sessionID)
-		if err := sandboxMgr.CreateWorktree(sandboxPath, branchName); err != nil {
+		ralphBranch = fmt.Sprintf("ralph/%s", sessionID)
+		if err := sandboxMgr.CreateWorktree(sandboxPath, ralphBranch); err != nil {
 			return fmt.Errorf("create sandbox worktree: %w", err)
 		}
 		defer func() {
@@ -384,7 +448,6 @@ func runRalphCommand(args []string) error {
 			}
 		}()
 	} else {
-		sandboxPath = filepath.Join(workDir, ".ralph-sandbox", sessionID)
 		sandboxMgr = ralph.NewSandboxManager(workDir)
 		if err := sandboxMgr.CreateFreshDirectory(sandboxPath, true); err != nil {
 			return fmt.Errorf("create sandbox directory: %w", err)
@@ -399,12 +462,14 @@ func runRalphCommand(args []string) error {
 		}()
 	}
 
-	// Setup logger
-	logDir := filepath.Join(workDir, ".ralph-logs")
-	if err := os.MkdirAll(logDir, 0755); err != nil {
-		return fmt.Errorf("create log directory: %w", err)
+	// Save prompt to run directory
+	promptPath := filepath.Join(runDir, "prompt.md")
+	if err := os.WriteFile(promptPath, []byte(actualPrompt), 0644); err != nil {
+		return fmt.Errorf("save prompt file: %w", err)
 	}
-	logPath := filepath.Join(logDir, fmt.Sprintf("%s.jsonl", sessionID))
+
+	// Setup logger in run directory
+	logPath := filepath.Join(runDir, "log.jsonl")
 	logger, err := ralph.NewLogger(logPath)
 	if err != nil {
 		return fmt.Errorf("create logger: %w", err)
@@ -413,7 +478,7 @@ func runRalphCommand(args []string) error {
 
 	var memoryStore *ralph.MemoryStore
 	if controlCfg.Memory.Enabled {
-		memoryPath := filepath.Join(logDir, "ralph-memory.db")
+		memoryPath := filepath.Join(runDir, "memory.db")
 		memoryStore, err = ralph.NewMemoryStore(memoryPath)
 		if err != nil {
 			return fmt.Errorf("create memory store: %w", err)
@@ -428,7 +493,7 @@ func runRalphCommand(args []string) error {
 		effectiveMaxIterations = controlCfg.MaxIterations
 	}
 
-	// Create session
+	// Create session with git workflow config
 	session := ralph.NewSession(ralph.SessionConfig{
 		SessionID:     sessionID,
 		Prompt:        actualPrompt,
@@ -437,6 +502,12 @@ func runRalphCommand(args []string) error {
 		Timeout:       *timeout,
 		MaxIterations: effectiveMaxIterations,
 		NoRefine:      *noRefine,
+		GitWorkflow: ralph.GitWorkflowConfig{
+			AutoCommit:   *autoCommit,
+			CreatePR:     *createPR,
+			TargetBranch: originalBranch,
+			RepoRoot:     repoRoot,
+		},
 	})
 
 	projectCtx := ralph.BuildProjectContext(workDir)
@@ -502,15 +573,72 @@ func runRalphCommand(args []string) error {
 		summaryGenerator = ralph.NewSummaryGenerator(mgr, controlCfg.Memory.SummaryModel, 500)
 	}
 
+	// Find or create commit backend for auto-commit
+	var commitBackend ralph.Backend
+	if *autoCommit {
+		// Look for a commit backend in the config (buckley-commit, codex-commit, etc.)
+		for name, bcfg := range controlCfg.Backends {
+			if strings.Contains(name, "commit") && bcfg.Enabled {
+				if b, ok := backendRegistry.Get(name); ok {
+					commitBackend = b
+					break
+				}
+			}
+		}
+		// Fall back to creating an internal commit backend if none found
+		if commitBackend == nil {
+			commitBackend = ralph.NewInternalBackend("auto-commit", runner, ralph.InternalOptions{
+				PromptTemplate: `Stage and commit the files modified during this Ralph session.
+
+Files to commit:
+{session_files}
+
+Create a concise commit message describing what was accomplished.
+{prompt}`,
+			})
+		}
+	}
+
+	// Create session end handler for PR creation
+	var sessionEndHandler func(ctx context.Context) error
+	if *createPR && repoRoot != "" && ralphBranch != "" && originalBranch != "" {
+		sessionEndHandler = func(ctx context.Context) error {
+			fmt.Printf("\n[PR-CREATION] Pushing branch and creating PR...\n")
+
+			// Push the branch
+			if err := ralph.PushBranch(sandboxPath, ralphBranch, "origin"); err != nil {
+				return fmt.Errorf("push branch: %w", err)
+			}
+
+			// Create PR
+			title := fmt.Sprintf("Ralph session %s", sessionID)
+			body := fmt.Sprintf("## Summary\n\nAutomated changes from Ralph session `%s`.\n\n**Original prompt:**\n```\n%s\n```\n\n---\n🤖 Generated by Ralph", sessionID, truncateString(actualPrompt, 500))
+			prURL, err := ralph.CreatePR(sandboxPath, title, body, originalBranch)
+			if err != nil {
+				return fmt.Errorf("create PR: %w", err)
+			}
+
+			fmt.Printf("[PR-CREATION] PR created: %s\n", prURL)
+			return nil
+		}
+	}
+
 	// Create executor with progress feedback
-	executor := ralph.NewExecutor(session, runner, logger,
+	executorOpts := []ralph.ExecutorOption{
 		ralph.WithProgressWriter(os.Stdout),
 		ralph.WithOrchestrator(orchestrator),
 		ralph.WithMemoryStore(memoryStore),
 		ralph.WithContextProcessor(contextProcessor),
 		ralph.WithSummaryGenerator(summaryGenerator),
 		ralph.WithProjectContext(projectCtx),
-	)
+	}
+	if commitBackend != nil {
+		executorOpts = append(executorOpts, ralph.WithCommitBackend(commitBackend))
+	}
+	if sessionEndHandler != nil {
+		executorOpts = append(executorOpts, ralph.WithSessionEndHandler(sessionEndHandler))
+	}
+	executor := ralph.NewExecutor(session, runner, logger, executorOpts...)
 
 	var controlWatcher *ralph.ControlWatcher
 	var stopWatcher chan struct{}
@@ -564,8 +692,8 @@ func runRalphCommand(args []string) error {
 
 	// Print startup info
 	fmt.Printf("Ralph session %s starting\n", sessionID)
+	fmt.Printf("  Run dir: %s\n", runDir)
 	fmt.Printf("  Sandbox: %s\n", sandboxPath)
-	fmt.Printf("  Log: %s\n", logPath)
 	if *timeout > 0 {
 		fmt.Printf("  Timeout: %s\n", *timeout)
 	}
@@ -1161,7 +1289,9 @@ func runRalphList(args []string) error {
 		fs.PrintDefaults()
 	}
 
-	logDir := fs.String("log-dir", "", "Directory containing ralph logs (default: .ralph-logs)")
+	logDir := fs.String("log-dir", "", "Directory containing ralph runs (overrides project detection)")
+	project := fs.String("project", "", "Project name (default: current directory's project)")
+	allProjects := fs.Bool("all-projects", false, "Show sessions from all projects")
 	all := fs.Bool("all", false, "Show all sessions including completed")
 
 	if err := fs.Parse(args); err != nil {
@@ -1171,26 +1301,41 @@ func runRalphList(args []string) error {
 		return err
 	}
 
-	// Determine log directory
-	dir := *logDir
-	if dir == "" {
-		cwd, err := os.Getwd()
+	// Determine runs directory
+	runsDir := *logDir
+	if runsDir == "" {
+		ralphDataDir, err := getRalphDataDir()
 		if err != nil {
-			return fmt.Errorf("get working directory: %w", err)
+			return fmt.Errorf("get ralph data directory: %w", err)
 		}
-		dir = filepath.Join(cwd, ".ralph-logs")
+
+		if *allProjects {
+			// List from all projects
+			return listAllProjectSessions(ralphDataDir, *all)
+		}
+
+		// Get project name
+		projectName := *project
+		if projectName == "" {
+			cwd, err := os.Getwd()
+			if err != nil {
+				return fmt.Errorf("get working directory: %w", err)
+			}
+			projectName = getProjectName(cwd)
+		}
+		runsDir = filepath.Join(ralphDataDir, "projects", projectName, "runs")
 	}
 
 	// Check if directory exists
-	if _, err := os.Stat(dir); os.IsNotExist(err) {
+	if _, err := os.Stat(runsDir); os.IsNotExist(err) {
 		fmt.Println("No ralph sessions found.")
 		return nil
 	}
 
-	// List log files
-	entries, err := os.ReadDir(dir)
+	// List run directories
+	entries, err := os.ReadDir(runsDir)
 	if err != nil {
-		return fmt.Errorf("reading log directory: %w", err)
+		return fmt.Errorf("reading runs directory: %w", err)
 	}
 
 	type sessionInfo struct {
@@ -1206,12 +1351,17 @@ func runRalphList(args []string) error {
 	var sessions []sessionInfo
 
 	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".jsonl") {
+		if !entry.IsDir() {
 			continue
 		}
 
-		sessionID := strings.TrimSuffix(entry.Name(), ".jsonl")
-		logPath := filepath.Join(dir, entry.Name())
+		sessionID := entry.Name()
+		logPath := filepath.Join(runsDir, sessionID, "log.jsonl")
+
+		// Check if log file exists
+		if _, err := os.Stat(logPath); os.IsNotExist(err) {
+			continue
+		}
 
 		info, err := parseSessionLog(logPath)
 		if err != nil {
@@ -1252,6 +1402,120 @@ func runRalphList(args []string) error {
 		prompt = strings.ReplaceAll(prompt, "\n", " ")
 
 		fmt.Printf("%-10s  %-12s  %-8s  %-6d  $%-9.4f  %s\n",
+			s.ID,
+			s.StartTime.Format("01-02 15:04"),
+			s.Status,
+			s.Iters,
+			s.Cost,
+			prompt,
+		)
+	}
+
+	return nil
+}
+
+// listAllProjectSessions lists sessions from all projects.
+func listAllProjectSessions(ralphDataDir string, showAll bool) error {
+	projectsDir := filepath.Join(ralphDataDir, "projects")
+	if _, err := os.Stat(projectsDir); os.IsNotExist(err) {
+		fmt.Println("No ralph sessions found.")
+		return nil
+	}
+
+	projects, err := os.ReadDir(projectsDir)
+	if err != nil {
+		return fmt.Errorf("reading projects directory: %w", err)
+	}
+
+	type sessionInfo struct {
+		Project   string
+		ID        string
+		StartTime time.Time
+		Status    string
+		Iters     int
+		Cost      float64
+		Prompt    string
+	}
+
+	var allSessions []sessionInfo
+
+	for _, proj := range projects {
+		if !proj.IsDir() {
+			continue
+		}
+		projectName := proj.Name()
+		runsDir := filepath.Join(projectsDir, projectName, "runs")
+
+		entries, err := os.ReadDir(runsDir)
+		if err != nil {
+			continue // Skip projects without runs
+		}
+
+		for _, entry := range entries {
+			if !entry.IsDir() {
+				continue
+			}
+
+			sessionID := entry.Name()
+			logPath := filepath.Join(runsDir, sessionID, "log.jsonl")
+
+			// Check if log file exists
+			if _, err := os.Stat(logPath); os.IsNotExist(err) {
+				continue
+			}
+
+			info, err := parseSessionLog(logPath)
+			if err != nil {
+				continue
+			}
+
+			// Skip completed sessions unless --all is specified
+			if !showAll && info.Status == "completed" {
+				continue
+			}
+
+			allSessions = append(allSessions, sessionInfo{
+				Project:   projectName,
+				ID:        sessionID,
+				StartTime: info.StartTime,
+				Status:    info.Status,
+				Iters:     info.Iters,
+				Cost:      info.Cost,
+				Prompt:    info.Prompt,
+			})
+		}
+	}
+
+	if len(allSessions) == 0 {
+		fmt.Println("No ralph sessions found.")
+		return nil
+	}
+
+	// Sort by start time (newest first)
+	sort.Slice(allSessions, func(i, j int) bool {
+		return allSessions[i].StartTime.After(allSessions[j].StartTime)
+	})
+
+	// Print header
+	fmt.Printf("%-15s  %-10s  %-12s  %-8s  %-6s  %-10s  %s\n",
+		"PROJECT", "SESSION", "STARTED", "STATUS", "ITERS", "COST", "PROMPT")
+	fmt.Println(strings.Repeat("-", 100))
+
+	// Print sessions
+	for _, s := range allSessions {
+		prompt := s.Prompt
+		if len(prompt) > 25 {
+			prompt = prompt[:22] + "..."
+		}
+		prompt = strings.ReplaceAll(prompt, "\n", " ")
+
+		projectName := s.Project
+		if len(projectName) > 15 {
+			projectName = projectName[:12] + "..."
+		}
+
+		fmt.Printf("%-15s  %-10s  %-12s  %-8s  %-6d  $%-9.4f  %s\n",
+			projectName,
 			s.ID,
 			s.StartTime.Format("01-02 15:04"),
 			s.Status,

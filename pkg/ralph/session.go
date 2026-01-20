@@ -6,6 +6,18 @@ import (
 	"time"
 )
 
+// GitWorkflowConfig configures automatic git operations.
+type GitWorkflowConfig struct {
+	// AutoCommit enables automatic commits after each iteration.
+	AutoCommit bool
+	// CreatePR enables PR creation on session completion.
+	CreatePR bool
+	// TargetBranch is the branch to create PRs against.
+	TargetBranch string
+	// RepoRoot is the path to the main repository.
+	RepoRoot string
+}
+
 // SessionConfig configures a new Ralph session.
 type SessionConfig struct {
 	SessionID     string
@@ -15,6 +27,7 @@ type SessionConfig struct {
 	Timeout       time.Duration
 	MaxIterations int
 	NoRefine      bool
+	GitWorkflow   GitWorkflowConfig
 }
 
 // Session manages a Ralph autonomous execution session.
@@ -28,6 +41,7 @@ type Session struct {
 	Timeout       time.Duration
 	MaxIterations int
 	NoRefine      bool
+	GitWorkflow   GitWorkflowConfig
 
 	state         State
 	iteration     int
@@ -47,6 +61,7 @@ func NewSession(cfg SessionConfig) *Session {
 		Timeout:       cfg.Timeout,
 		MaxIterations: cfg.MaxIterations,
 		NoRefine:      cfg.NoRefine,
+		GitWorkflow:   cfg.GitWorkflow,
 		state:         StateInit,
 	}
 }
