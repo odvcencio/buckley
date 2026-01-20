@@ -2,9 +2,9 @@ package servo
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 	"time"
 
@@ -21,10 +21,12 @@ type Session struct {
 	client *client
 	cmd    *exec.Cmd
 
-	socketPath string
-	waitDone   chan struct{}
-
-	connectTimeout time.Duration
+	socketPath       string
+	waitDone         chan struct{}
+	connectTimeout   time.Duration
+	operationTimeout time.Duration
+	maxReconnects    int
+	reconnectAttempt int
 }
 
 // ID returns the session identifier.
@@ -40,22 +42,25 @@ func (s *Session) Navigate(ctx context.Context, url string) (*browser.Observatio
 	if err := s.ensureOpen(); err != nil {
 		return nil, err
 	}
+	ctx, cancel := s.withOperationTimeout(ctx)
+	defer cancel()
+
 	req := &browserdpb.Request{
 		SessionId: s.id,
 		Payload: &browserdpb.Request_Navigate{
 			Navigate: &browserdpb.NavigateRequest{Url: url},
 		},
 	}
-	resp, err := s.client.send(ctx, req)
+	resp, err := s.sendWithReconnect(ctx, req)
 	if err != nil {
-		return nil, err
+		return nil, browser.WrapBrowserdError("navigate", "navigation failed", err)
 	}
 	if err := responseError(resp); err != nil {
 		return nil, err
 	}
 	payload, ok := resp.Payload.(*browserdpb.Response_Navigate)
 	if !ok || payload.Navigate == nil {
-		return nil, fmt.Errorf("navigate: unexpected response")
+		return nil, browser.NewBrowserdError("invalid_response", "navigate: unexpected response")
 	}
 	return fromProtoObservation(payload.Navigate.Observation), nil
 }
@@ -65,22 +70,25 @@ func (s *Session) Observe(ctx context.Context, opts browser.ObserveOptions) (*br
 	if err := s.ensureOpen(); err != nil {
 		return nil, err
 	}
+	ctx, cancel := s.withOperationTimeout(ctx)
+	defer cancel()
+
 	req := &browserdpb.Request{
 		SessionId: s.id,
 		Payload: &browserdpb.Request_Observe{
 			Observe: &browserdpb.ObserveRequest{Options: toProtoObserveOptions(opts)},
 		},
 	}
-	resp, err := s.client.send(ctx, req)
+	resp, err := s.sendWithReconnect(ctx, req)
 	if err != nil {
-		return nil, err
+		return nil, browser.WrapBrowserdError("observe", "observe failed", err)
 	}
 	if err := responseError(resp); err != nil {
 		return nil, err
 	}
 	payload, ok := resp.Payload.(*browserdpb.Response_Observe)
 	if !ok || payload.Observe == nil {
-		return nil, fmt.Errorf("observe: unexpected response")
+		return nil, browser.NewBrowserdError("invalid_response", "observe: unexpected response")
 	}
 	return fromProtoObservation(payload.Observe.Observation), nil
 }
@@ -90,22 +98,25 @@ func (s *Session) Act(ctx context.Context, action browser.Action) (*browser.Acti
 	if err := s.ensureOpen(); err != nil {
 		return nil, err
 	}
+	ctx, cancel := s.withOperationTimeout(ctx)
+	defer cancel()
+
 	req := &browserdpb.Request{
 		SessionId: s.id,
 		Payload: &browserdpb.Request_Act{
 			Act: &browserdpb.ActRequest{Action: toProtoAction(action)},
 		},
 	}
-	resp, err := s.client.send(ctx, req)
+	resp, err := s.sendWithReconnect(ctx, req)
 	if err != nil {
-		return nil, err
+		return nil, browser.WrapBrowserdError("act", "action failed", err)
 	}
 	if err := responseError(resp); err != nil {
 		return nil, err
 	}
 	payload, ok := resp.Payload.(*browserdpb.Response_Act)
 	if !ok || payload.Act == nil {
-		return nil, fmt.Errorf("act: unexpected response")
+		return nil, browser.NewBrowserdError("invalid_response", "act: unexpected response")
 	}
 	return fromProtoActionResult(payload.Act.Result), nil
 }
@@ -158,7 +169,7 @@ func (s *Session) Stream(ctx context.Context, opts browser.StreamOptions) (<-cha
 	payload, ok := resp.Payload.(*browserdpb.Response_StreamSubscribe)
 	if !ok || payload.StreamSubscribe == nil || !payload.StreamSubscribe.Subscribed {
 		_ = streamClient.close()
-		return nil, fmt.Errorf("stream: subscribe failed")
+		return nil, browser.NewBrowserdError("stream_subscribe", "stream subscription failed")
 	}
 
 	events := make(chan browser.StreamEvent)
@@ -179,6 +190,10 @@ func (s *Session) Stream(ctx context.Context, opts browser.StreamOptions) (<-cha
 		defer close(done)
 
 		for {
+			// Set a read deadline based on context
+			if deadline, ok := ctx.Deadline(); ok {
+				_ = streamClient.conn.SetReadDeadline(deadline)
+			}
 			env, err := readEnvelope(streamClient.conn)
 			if err != nil {
 				return
@@ -265,15 +280,104 @@ func (s *Session) ensureOpen() error {
 	return nil
 }
 
+// reconnect attempts to re-establish the connection to browserd.
+func (s *Session) reconnect(ctx context.Context) error {
+	if s == nil {
+		return browser.ErrSessionClosed
+	}
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return browser.ErrSessionClosed
+	}
+	if s.reconnectAttempt >= s.maxReconnects {
+		s.mu.Unlock()
+		return browser.ErrReconnectFailed
+	}
+	s.reconnectAttempt++
+	oldClient := s.client
+	socketPath := s.socketPath
+	connectTimeout := s.connectTimeout
+	s.mu.Unlock()
+
+	if oldClient != nil {
+		_ = oldClient.close()
+	}
+
+	conn, err := dialBrowserd(ctx, socketPath, connectTimeout)
+	if err != nil {
+		return browser.WrapBrowserdError("reconnect", "failed to reconnect", err)
+	}
+	newClient := newClient(conn)
+
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		_ = newClient.close()
+		return browser.ErrSessionClosed
+	}
+	s.client = newClient
+	s.reconnectAttempt = 0
+	s.mu.Unlock()
+	return nil
+}
+
+// sendWithReconnect sends a request with automatic reconnection on connection errors.
+func (s *Session) sendWithReconnect(ctx context.Context, req *browserdpb.Request) (*browserdpb.Response, error) {
+	resp, err := s.client.send(ctx, req)
+	if err == nil {
+		return resp, nil
+	}
+	if !browser.IsRetryableError(err) && !isNetworkError(err) {
+		return nil, err
+	}
+	if err := s.reconnect(ctx); err != nil {
+		return nil, err
+	}
+	return s.client.send(ctx, req)
+}
+
+func isNetworkError(err error) bool {
+	if err == nil {
+		return false
+	}
+	errStr := err.Error()
+	return strings.Contains(errStr, "broken pipe") ||
+		strings.Contains(errStr, "connection reset") ||
+		strings.Contains(errStr, "EOF") ||
+		strings.Contains(errStr, "use of closed")
+}
+
 func responseError(resp *browserdpb.Response) error {
 	if resp == nil {
-		return fmt.Errorf("missing response")
+		return browser.NewBrowserdError("empty_response", "missing response")
 	}
 	if resp.Error == nil {
 		return nil
 	}
-	if resp.Error.Message == "" {
-		return fmt.Errorf("browserd error: %s", resp.Error.Code)
+	code := resp.Error.Code
+	if code == "" {
+		code = "unknown"
 	}
-	return fmt.Errorf("browserd error: %s", resp.Error.Message)
+	message := resp.Error.Message
+	if message == "" {
+		message = "operation failed"
+	}
+	return browser.NewBrowserdError(code, message)
+}
+
+// withOperationTimeout applies the session's operation timeout to a context if
+// the context doesn't already have a deadline.
+func (s *Session) withOperationTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if _, hasDeadline := ctx.Deadline(); hasDeadline {
+		return ctx, func() {}
+	}
+	timeout := s.operationTimeout
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	return context.WithTimeout(ctx, timeout)
 }

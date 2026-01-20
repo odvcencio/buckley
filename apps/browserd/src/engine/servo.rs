@@ -1,3 +1,16 @@
+//! Servo browser engine adapter.
+//!
+//! STATUS: Not implemented. This is a scaffold for future Servo integration.
+//!
+//! BLOCKERS:
+//! - The `servo` crate on crates.io is a parked placeholder, not the real engine
+//! - Real Servo embedding requires building from the Servo repository
+//! - Servo has complex FFI bindings and platform-specific dependencies
+//! - Would need: libservo, script, layout, and compositing crates from servo/servo repo
+//!
+//! Until these blockers are resolved, use the stub engine (default) for testing.
+//! The stub engine provides fake browser state that exercises the full IPC pipeline.
+
 use crate::proto as pb;
 use super::{BrowserEngine, EngineError};
 use std::sync::mpsc;

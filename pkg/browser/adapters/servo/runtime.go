@@ -86,13 +86,15 @@ func (r *Runtime) NewSession(ctx context.Context, sessionCfg browser.SessionConf
 	}
 
 	return &Session{
-		id:             normalized.SessionID,
-		cfg:            normalized,
-		client:         sessionClient,
-		cmd:            cmd,
-		socketPath:     socketPath,
-		waitDone:       waitDone,
-		connectTimeout: r.cfg.ConnectTimeout,
+		id:               normalized.SessionID,
+		cfg:              normalized,
+		client:           sessionClient,
+		cmd:              cmd,
+		socketPath:       socketPath,
+		waitDone:         waitDone,
+		connectTimeout:   r.cfg.ConnectTimeout,
+		operationTimeout: r.cfg.OperationTimeout,
+		maxReconnects:    r.cfg.MaxReconnects,
 	}, nil
 }
 

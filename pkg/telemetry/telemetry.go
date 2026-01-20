@@ -52,6 +52,16 @@ const (
 	EventRLMToolCall      EventType = "rlm.tool_call"      // Sub-agent tool execution
 	EventRLMReasoning     EventType = "rlm.reasoning"      // Coordinator reasoning trace
 	EventRLMBudgetWarning EventType = "rlm.budget_warning" // Token/time budget alerts
+
+	// Browser runtime events
+	EventBrowserSessionCreated EventType = "browser.session_created"
+	EventBrowserSessionClosed  EventType = "browser.session_closed"
+	EventBrowserNavigate       EventType = "browser.navigate"
+	EventBrowserObserve        EventType = "browser.observe"
+	EventBrowserAction         EventType = "browser.action"
+	EventBrowserActionFailed   EventType = "browser.action_failed"
+	EventBrowserFrameDelivered EventType = "browser.frame_delivered"
+	EventBrowserStreamEvent    EventType = "browser.stream_event"
 )
 
 // Event describes workflow telemetry that UIs and IPC clients can consume.
