@@ -474,9 +474,90 @@ func TestExternalBackend_Execute_FilesChangedEmpty(t *testing.T) {
 		t.Fatalf("Execute() error = %v", err)
 	}
 
-	// FilesChanged should be empty for now
+	// FilesChanged should be empty when no git repo or no changes
 	if len(result.FilesChanged) != 0 {
 		t.Errorf("result.FilesChanged = %v, want empty slice", result.FilesChanged)
+	}
+}
+
+func TestExternalBackend_Execute_FilesChangedDetectsNewFiles(t *testing.T) {
+	// Create a git repo in temp dir
+	sandbox := t.TempDir()
+
+	// Initialize git repo
+	initCmd := NewExternalBackend("git-init", "git", []string{"init"}, nil)
+	ctx := context.Background()
+	_, err := initCmd.Execute(ctx, BackendRequest{SandboxPath: sandbox})
+	if err != nil {
+		t.Fatalf("git init error = %v", err)
+	}
+
+	// Create a command that will create a new file
+	backend := NewExternalBackend("touch-test", "sh", []string{"-c", "echo 'new content' > newfile.txt"}, nil)
+
+	req := BackendRequest{
+		Prompt:      "test",
+		SandboxPath: sandbox,
+		Iteration:   1,
+		SessionID:   "test-session",
+	}
+
+	result, err := backend.Execute(ctx, req)
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	// FilesChanged should contain the newly created file
+	if len(result.FilesChanged) != 1 {
+		t.Errorf("result.FilesChanged len = %d, want 1, got %v", len(result.FilesChanged), result.FilesChanged)
+	}
+
+	if len(result.FilesChanged) > 0 && result.FilesChanged[0] != "newfile.txt" {
+		t.Errorf("result.FilesChanged[0] = %q, want %q", result.FilesChanged[0], "newfile.txt")
+	}
+}
+
+func TestExternalBackend_Execute_FilesChangedIgnoresPreexisting(t *testing.T) {
+	// Create a git repo in temp dir
+	sandbox := t.TempDir()
+
+	// Initialize git repo
+	initCmd := NewExternalBackend("git-init", "git", []string{"init"}, nil)
+	ctx := context.Background()
+	_, err := initCmd.Execute(ctx, BackendRequest{SandboxPath: sandbox})
+	if err != nil {
+		t.Fatalf("git init error = %v", err)
+	}
+
+	// Pre-create a file that will already be "dirty" before execution
+	touchCmd := NewExternalBackend("touch", "sh", []string{"-c", "echo 'existing' > existing.txt"}, nil)
+	_, err = touchCmd.Execute(ctx, BackendRequest{SandboxPath: sandbox})
+	if err != nil {
+		t.Fatalf("touch existing error = %v", err)
+	}
+
+	// Now execute a command that creates a NEW file
+	backend := NewExternalBackend("touch-test", "sh", []string{"-c", "echo 'brand new' > brandnew.txt"}, nil)
+
+	req := BackendRequest{
+		Prompt:      "test",
+		SandboxPath: sandbox,
+		Iteration:   1,
+		SessionID:   "test-session",
+	}
+
+	result, err := backend.Execute(ctx, req)
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	// FilesChanged should only contain the newly created file, not the pre-existing one
+	if len(result.FilesChanged) != 1 {
+		t.Errorf("result.FilesChanged len = %d, want 1, got %v", len(result.FilesChanged), result.FilesChanged)
+	}
+
+	if len(result.FilesChanged) > 0 && result.FilesChanged[0] != "brandnew.txt" {
+		t.Errorf("result.FilesChanged[0] = %q, want %q", result.FilesChanged[0], "brandnew.txt")
 	}
 }
 

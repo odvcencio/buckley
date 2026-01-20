@@ -326,6 +326,26 @@ func runRalphCommand(args []string) error {
 	// Setup sandbox
 	sandboxPath := ""
 	var sandboxMgr *ralph.SandboxManager
+	shouldPreserveSandbox := func() bool {
+		if sandboxMgr == nil || sandboxPath == "" {
+			return false
+		}
+		files, err := sandboxMgr.GetModifiedFiles(sandboxPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warning: preserving sandbox %s: %v\n", sandboxPath, err)
+			return true
+		}
+		if len(files) == 0 {
+			return false
+		}
+		sample := files
+		if len(sample) > 10 {
+			sample = sample[:10]
+		}
+		fmt.Fprintf(os.Stderr, "warning: preserving sandbox with uncommitted changes: %s\n", sandboxPath)
+		fmt.Fprintf(os.Stderr, "warning: uncommitted files (%d): %s\n", len(files), strings.Join(sample, ", "))
+		return true
+	}
 	if ralph.IsGitRepo(workDir) {
 		repoRoot, err := ralph.GetRepoRoot(workDir)
 		if err != nil {
@@ -338,6 +358,9 @@ func runRalphCommand(args []string) error {
 			return fmt.Errorf("create sandbox worktree: %w", err)
 		}
 		defer func() {
+			if shouldPreserveSandbox() {
+				return
+			}
 			if err := sandboxMgr.RemoveWorktree(sandboxPath); err != nil {
 				fmt.Fprintf(os.Stderr, "warning: failed to remove worktree: %v\n", err)
 			}
@@ -349,6 +372,9 @@ func runRalphCommand(args []string) error {
 			return fmt.Errorf("create sandbox directory: %w", err)
 		}
 		defer func() {
+			if shouldPreserveSandbox() {
+				return
+			}
 			if err := os.RemoveAll(sandboxPath); err != nil {
 				fmt.Fprintf(os.Stderr, "warning: failed to remove sandbox: %v\n", err)
 			}

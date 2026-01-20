@@ -2,6 +2,7 @@
 package ralph
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"fmt"
@@ -80,6 +81,9 @@ func (b *ExternalBackend) Execute(ctx context.Context, req BackendRequest) (*Bac
 		FilesChanged: []string{},
 	}
 
+	// Snapshot git status before execution to detect file changes
+	filesBefore := gitChangedFiles(req.SandboxPath)
+
 	// Build command arguments
 	cmdArgs := b.buildArgs(req)
 
@@ -133,6 +137,10 @@ func (b *ExternalBackend) Execute(ctx context.Context, req BackendRequest) (*Bac
 		}
 	}
 
+	// Detect file changes by comparing git status before and after
+	filesAfter := gitChangedFiles(req.SandboxPath)
+	result.FilesChanged = diffChangedFiles(filesBefore, filesAfter)
+
 	return result, nil
 }
 
@@ -183,4 +191,52 @@ func expandTemplateVars(input string, req BackendRequest) string {
 	result = strings.ReplaceAll(result, "{iteration}", strconv.Itoa(req.Iteration))
 	result = strings.ReplaceAll(result, "{session_id}", req.SessionID)
 	return result
+}
+
+// gitChangedFiles returns a set of files that git reports as changed.
+// Uses git status --porcelain to detect modified, added, and deleted files.
+func gitChangedFiles(dir string) map[string]struct{} {
+	result := make(map[string]struct{})
+	if dir == "" {
+		return result
+	}
+
+	cmd := exec.Command("git", "status", "--porcelain")
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	if err != nil {
+		return result
+	}
+
+	scanner := bufio.NewScanner(bytes.NewReader(out))
+	for scanner.Scan() {
+		line := scanner.Text()
+		if len(line) < 4 {
+			continue
+		}
+		// git status --porcelain format: XY filename
+		// X = index status, Y = worktree status
+		// Skip the first 3 characters (status + space)
+		path := strings.TrimSpace(line[3:])
+		// Handle renamed files: "R  old -> new"
+		if idx := strings.Index(path, " -> "); idx != -1 {
+			path = path[idx+4:]
+		}
+		if path != "" {
+			result[path] = struct{}{}
+		}
+	}
+	return result
+}
+
+// diffChangedFiles returns files in after that weren't in before.
+func diffChangedFiles(before, after map[string]struct{}) []string {
+	var changed []string
+	for path := range after {
+		if _, existed := before[path]; !existed {
+			changed = append(changed, path)
+		}
+	}
+	sort.Strings(changed)
+	return changed
 }

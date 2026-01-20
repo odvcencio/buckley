@@ -183,8 +183,14 @@ func (e *Executor) runIteration(ctx context.Context) error {
 		e.logger.LogIterationStart(iteration)
 	}
 
-	// Progress feedback
-	e.writeProgress("Iteration %d started...\n", iteration)
+	// Start live stopwatch
+	startTime := time.Now()
+	stopwatchCtx, stopStopwatch := context.WithCancel(ctx)
+	defer func() {
+		stopStopwatch()
+		e.clearStopwatchLine()
+	}()
+	go e.runStopwatch(stopwatchCtx, iteration, startTime)
 
 	basePrompt := e.buildIterationPrompt(iteration)
 	cfg := e.currentControlConfig()
@@ -192,7 +198,6 @@ func (e *Executor) runIteration(ctx context.Context) error {
 	if ctxErr != nil {
 		e.logInternalError(iteration, "context_processing", ctxErr)
 	}
-	startTime := time.Now()
 
 	var err error
 	var results []*BackendResult
@@ -252,6 +257,7 @@ func (e *Executor) runIteration(ctx context.Context) error {
 		}
 	}
 
+	// Show completion (stopwatch cleanup handled by defer)
 	duration := time.Since(startTime)
 	e.writeProgress("Iteration %d completed in %s\n", iteration, duration.Round(time.Millisecond))
 
@@ -261,6 +267,30 @@ func (e *Executor) runIteration(ctx context.Context) error {
 	}
 
 	return err
+}
+
+// runStopwatch displays a live updating timer for the current iteration.
+func (e *Executor) runStopwatch(ctx context.Context, iteration int, startTime time.Time) {
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			elapsed := time.Since(startTime).Round(time.Second)
+			minutes := int(elapsed.Minutes())
+			seconds := int(elapsed.Seconds()) % 60
+			// Use carriage return to overwrite the line
+			e.writeProgress("\rIteration %d [%d:%02d] running...  ", iteration, minutes, seconds)
+		}
+	}
+}
+
+// clearStopwatchLine clears the stopwatch line with carriage return and spaces.
+func (e *Executor) clearStopwatchLine() {
+	e.writeProgress("\r                                          \r")
 }
 
 func (e *Executor) currentControlConfig() *ControlConfig {
@@ -592,12 +622,196 @@ func (e *Executor) handleScheduleAction(action *ScheduleAction) {
 	case "pause":
 		e.writeProgress("Schedule triggered pause: %s\n", action.Reason)
 		e.session.TransitionTo(StatePaused)
+	case "resume":
+		e.writeProgress("Schedule triggered resume\n")
+		e.session.TransitionTo(StateRunning)
 	case "set_mode":
-		e.writeProgress("Schedule switching mode to: %s\n", action.Mode)
-		if e.orchestrator != nil && e.orchestrator.config != nil {
-			e.orchestrator.config.Mode = action.Mode
+		mode := strings.TrimSpace(action.Mode)
+		if mode == "" {
+			return
+		}
+		e.writeProgress("Schedule switching mode to: %s\n", mode)
+		e.updateControlConfig(func(cfg *ControlConfig) {
+			cfg.Mode = mode
+		})
+	case "set_backend":
+		backend := strings.TrimSpace(action.Backend)
+		if backend == "" {
+			return
+		}
+		target := e.applyBackendSelection(func(active []string, _ string) string {
+			if indexOfBackend(active, backend) == -1 {
+				return ""
+			}
+			return backend
+		}, moveBackendFirst)
+		if target != "" {
+			e.writeProgress("Schedule switching backend to: %s\n", target)
+		}
+	case "rotate_backend":
+		target := e.applyBackendSelection(func(active []string, _ string) string {
+			if len(active) == 0 {
+				return ""
+			}
+			return nextBackendAfter(active, active[0])
+		}, rotateBackendOrder)
+		if target != "" {
+			e.writeProgress("Schedule rotating backend to: %s\n", target)
+		}
+	case "next_backend":
+		current := strings.TrimSpace(e.lastBackend)
+		target := e.applyBackendSelection(func(active []string, lastBackend string) string {
+			if len(active) == 0 {
+				return ""
+			}
+			use := current
+			if use == "" {
+				use = strings.TrimSpace(lastBackend)
+			}
+			return nextBackendAfter(active, use)
+		}, rotateBackendOrder)
+		if target != "" {
+			e.writeProgress("Schedule switching to next backend: %s\n", target)
 		}
 	}
+}
+
+func (e *Executor) updateControlConfig(update func(cfg *ControlConfig)) bool {
+	if e == nil || e.orchestrator == nil {
+		return false
+	}
+	o := e.orchestrator
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.config == nil {
+		return false
+	}
+	update(o.config)
+	return true
+}
+
+func (e *Executor) applyBackendSelection(selectTarget func(active []string, lastBackend string) string, reorder func(order []string, target string) ([]string, bool)) string {
+	if e == nil || e.orchestrator == nil {
+		return ""
+	}
+	o := e.orchestrator
+	o.mu.Lock()
+	defer o.mu.Unlock()
+
+	cfg := o.config
+	if cfg == nil {
+		return ""
+	}
+
+	fullOrder := backendNamesInOrder(cfg)
+	if len(fullOrder) == 0 {
+		return ""
+	}
+
+	activeOrder := activeBackendOrder(cfg, fullOrder)
+	if len(activeOrder) == 0 {
+		return ""
+	}
+
+	target := strings.TrimSpace(selectTarget(activeOrder, o.lastBackend))
+	if target == "" {
+		return ""
+	}
+	if indexOfBackend(activeOrder, target) == -1 {
+		return ""
+	}
+
+	newOrder, ok := reorder(fullOrder, target)
+	if !ok {
+		return ""
+	}
+
+	cfg.Rotation.Order = newOrder
+	o.currentBackend = 0
+	o.lastRotation = time.Now()
+	return target
+}
+
+func activeBackendOrder(cfg *ControlConfig, fullOrder []string) []string {
+	if cfg == nil || len(fullOrder) == 0 {
+		return nil
+	}
+	if len(cfg.Override.ActiveBackends) == 0 {
+		out := make([]string, len(fullOrder))
+		copy(out, fullOrder)
+		return out
+	}
+
+	active := make(map[string]struct{}, len(cfg.Override.ActiveBackends))
+	for _, name := range cfg.Override.ActiveBackends {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		active[name] = struct{}{}
+	}
+	if len(active) == 0 {
+		out := make([]string, len(fullOrder))
+		copy(out, fullOrder)
+		return out
+	}
+
+	out := make([]string, 0, len(fullOrder))
+	for _, name := range fullOrder {
+		if _, ok := active[name]; ok {
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
+func nextBackendAfter(order []string, current string) string {
+	if len(order) == 0 {
+		return ""
+	}
+	idx := indexOfBackend(order, current)
+	if idx == -1 {
+		return order[0]
+	}
+	return order[(idx+1)%len(order)]
+}
+
+func rotateBackendOrder(order []string, target string) ([]string, bool) {
+	if len(order) == 0 {
+		return nil, false
+	}
+	idx := indexOfBackend(order, target)
+	if idx == -1 {
+		return order, false
+	}
+	out := make([]string, 0, len(order))
+	out = append(out, order[idx:]...)
+	out = append(out, order[:idx]...)
+	return out, true
+}
+
+func moveBackendFirst(order []string, target string) ([]string, bool) {
+	if len(order) == 0 {
+		return nil, false
+	}
+	idx := indexOfBackend(order, target)
+	if idx == -1 {
+		return order, false
+	}
+	out := make([]string, 0, len(order))
+	out = append(out, order[idx])
+	out = append(out, order[:idx]...)
+	out = append(out, order[idx+1:]...)
+	return out, true
+}
+
+func indexOfBackend(order []string, name string) int {
+	for i, value := range order {
+		if value == name {
+			return i
+		}
+	}
+	return -1
 }
 
 func (e *Executor) writeProgress(format string, args ...any) {

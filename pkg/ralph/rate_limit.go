@@ -22,6 +22,7 @@ var (
 	reRetryAfter = regexp.MustCompile(`(?i)retry[- ]after[^\d]*(\d+)\s*(seconds?|secs?|s|minutes?|mins?|m|hours?|hrs?|h)`)
 	reTryAgain   = regexp.MustCompile(`(?i)try again in[^\d]*(\d+)\s*(seconds?|secs?|s|minutes?|mins?|m|hours?|hrs?|h)`)
 	reResetsAt   = regexp.MustCompile(`(?i)resets? at\s*([^\s]+)`)
+	reResetsTime = regexp.MustCompile(`(?i)resets?\s*(?:at\s*)?([0-9]{1,2}(?::[0-9]{2}){0,2}\s*(?:am|pm)?)\s*(?:\(([^)]+)\))?`)
 )
 
 // ParseRateLimitResponse extracts retry timing hints from response content or headers.
@@ -49,6 +50,18 @@ func ParseRateLimitResponse(resp string, headers map[string]string) *RateLimitIn
 		found = true
 		if info.ErrorPattern == "" {
 			info.ErrorPattern = "rate limit"
+		}
+	}
+	if strings.Contains(lower, "hit your limit") || strings.Contains(lower, "limit reached") || strings.Contains(lower, "usage limit") {
+		found = true
+		if info.ErrorPattern == "" {
+			info.ErrorPattern = "limit reached"
+		}
+	}
+	if strings.Contains(lower, "limit") && strings.Contains(lower, "reset") {
+		found = true
+		if info.ErrorPattern == "" {
+			info.ErrorPattern = "limit reset"
 		}
 	}
 
@@ -79,6 +92,19 @@ func ParseRateLimitResponse(resp string, headers map[string]string) *RateLimitIn
 		}
 		if info.ErrorPattern == "" {
 			info.ErrorPattern = "resets at"
+		}
+	}
+	if match := reResetsTime.FindStringSubmatch(resp); len(match) >= 2 {
+		found = true
+		tz := ""
+		if len(match) > 2 {
+			tz = match[2]
+		}
+		if ts := parseTimeOfDay(match[1], tz); !ts.IsZero() {
+			info.WindowResets = ts
+		}
+		if info.ErrorPattern == "" {
+			info.ErrorPattern = "resets time"
 		}
 	}
 
@@ -122,6 +148,47 @@ func parseDuration(numStr, unit string) time.Duration {
 	default:
 		return 0
 	}
+}
+
+func parseTimeOfDay(value string, tz string) time.Time {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" {
+		return time.Time{}
+	}
+	value = strings.ReplaceAll(value, " ", "")
+
+	loc := time.Local
+	if tz != "" {
+		if loaded, err := time.LoadLocation(strings.TrimSpace(tz)); err == nil {
+			loc = loaded
+		}
+	}
+
+	layouts := []string{
+		"3pm",
+		"3:04pm",
+		"3:04:05pm",
+		"15:04",
+		"15:04:05",
+	}
+
+	var parsed time.Time
+	for _, layout := range layouts {
+		if t, err := time.ParseInLocation(layout, value, loc); err == nil {
+			parsed = t
+			break
+		}
+	}
+	if parsed.IsZero() {
+		return time.Time{}
+	}
+
+	now := time.Now().In(loc)
+	candidate := time.Date(now.Year(), now.Month(), now.Day(), parsed.Hour(), parsed.Minute(), parsed.Second(), 0, loc)
+	if !candidate.After(now) {
+		candidate = candidate.Add(24 * time.Hour)
+	}
+	return candidate
 }
 
 func parseTimestamp(value string) time.Time {

@@ -4,6 +4,7 @@ package ralph
 import (
 	"context"
 	"os"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -170,5 +171,69 @@ func TestExecutor_PromptReload(t *testing.T) {
 	// but we're testing the code path doesn't panic or error
 	if mock.processCount != 2 {
 		t.Errorf("expected 2 iterations, got %d", mock.processCount)
+	}
+}
+
+func TestExecutor_HandleScheduleAction_BackendActions(t *testing.T) {
+	baseConfig := func() *ControlConfig {
+		return &ControlConfig{
+			Mode: ModeSequential,
+			Rotation: RotationConfig{
+				Order: []string{"claude", "codex", "buckley"},
+			},
+			Backends: map[string]BackendConfig{
+				"claude":  {Command: "claude", Enabled: true},
+				"codex":   {Command: "codex", Enabled: true},
+				"buckley": {Command: "buckley", Enabled: true},
+			},
+		}
+	}
+
+	tests := []struct {
+		name          string
+		action        *ScheduleAction
+		lastBackend   string
+		expectedOrder []string
+	}{
+		{
+			name:          "set_backend",
+			action:        &ScheduleAction{Action: "set_backend", Backend: "codex"},
+			expectedOrder: []string{"codex", "claude", "buckley"},
+		},
+		{
+			name:          "rotate_backend",
+			action:        &ScheduleAction{Action: "rotate_backend"},
+			expectedOrder: []string{"codex", "buckley", "claude"},
+		},
+		{
+			name:          "next_backend",
+			action:        &ScheduleAction{Action: "next_backend"},
+			lastBackend:   "codex",
+			expectedOrder: []string{"buckley", "claude", "codex"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := baseConfig()
+			orch := NewOrchestrator(NewBackendRegistry(), cfg)
+			sess := NewSession(SessionConfig{
+				SessionID: "test-schedule",
+				Prompt:    "test",
+				Sandbox:   t.TempDir(),
+			})
+			exec := NewExecutor(sess, &mockHeadlessRunner{}, nil, WithOrchestrator(orch))
+			exec.lastBackend = tt.lastBackend
+
+			exec.handleScheduleAction(tt.action)
+
+			got := orch.Config().Rotation.Order
+			if !reflect.DeepEqual(got, tt.expectedOrder) {
+				t.Fatalf("expected order %v, got %v", tt.expectedOrder, got)
+			}
+			if orch.currentBackend != 0 {
+				t.Errorf("expected currentBackend reset to 0, got %d", orch.currentBackend)
+			}
+		})
 	}
 }
