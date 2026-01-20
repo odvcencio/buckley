@@ -88,6 +88,9 @@ func TestBrowserRuntimeLifecycle(t *testing.T) {
 		t.Fatal("Navigate returned nil observation")
 	}
 	initialVersion := navObs.StateVersion
+	if initialVersion == 0 {
+		t.Fatalf("Navigate returned invalid state_version=%d", initialVersion)
+	}
 	t.Logf("Navigate returned state_version=%d, url=%s", navObs.StateVersion, navObs.URL)
 
 	// Observe current state
@@ -123,7 +126,7 @@ func TestBrowserRuntimeLifecycle(t *testing.T) {
 		t.Fatalf("Act (click) failed: %v", err)
 	}
 	if clickResult.StateVersion <= obs.StateVersion {
-		t.Logf("click state_version=%d (may not increment for stub)", clickResult.StateVersion)
+		t.Fatalf("click state_version=%d <= observe=%d", clickResult.StateVersion, obs.StateVersion)
 	}
 	t.Logf("Click action returned state_version=%d", clickResult.StateVersion)
 
@@ -136,6 +139,9 @@ func TestBrowserRuntimeLifecycle(t *testing.T) {
 	typeResult, err := sess.Act(ctx, typeAction)
 	if err != nil {
 		t.Fatalf("Act (type) failed: %v", err)
+	}
+	if typeResult.StateVersion <= clickResult.StateVersion {
+		t.Fatalf("type state_version=%d <= click=%d", typeResult.StateVersion, clickResult.StateVersion)
 	}
 	t.Logf("Type action returned state_version=%d", typeResult.StateVersion)
 
@@ -151,6 +157,9 @@ func TestBrowserRuntimeLifecycle(t *testing.T) {
 	scrollResult, err := sess.Act(ctx, scrollAction)
 	if err != nil {
 		t.Fatalf("Act (scroll) failed: %v", err)
+	}
+	if scrollResult.StateVersion <= typeResult.StateVersion {
+		t.Fatalf("scroll state_version=%d <= type=%d", scrollResult.StateVersion, typeResult.StateVersion)
 	}
 	t.Logf("Scroll action returned state_version=%d", scrollResult.StateVersion)
 
@@ -174,6 +183,9 @@ func TestBrowserRuntimeLifecycle(t *testing.T) {
 		eventCount := 0
 		for event := range events {
 			eventCount++
+			if event.StateVersion < scrollResult.StateVersion {
+				t.Fatalf("stream event state_version=%d < scroll=%d", event.StateVersion, scrollResult.StateVersion)
+			}
 			t.Logf("Stream event: type=%s, state_version=%d", event.Type, event.StateVersion)
 			if eventCount >= 3 {
 				streamCancel()

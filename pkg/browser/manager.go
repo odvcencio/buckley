@@ -39,8 +39,12 @@ func (s *instrumentedSession) Navigate(ctx context.Context, url string) (*Observ
 func (s *instrumentedSession) Observe(ctx context.Context, opts ObserveOptions) (*Observation, error) {
 	start := time.Now()
 	obs, err := s.inner.Observe(ctx, opts)
+	latency := time.Since(start)
 	if s.metrics != nil {
-		s.metrics.RecordObserve(s.inner.ID(), time.Since(start), opts)
+		s.metrics.RecordObserve(s.inner.ID(), latency, opts)
+		if err == nil && obs != nil && obs.Frame != nil {
+			s.metrics.RecordFrameDelivered(s.inner.ID(), latency)
+		}
 	}
 	return obs, err
 }
@@ -55,7 +59,44 @@ func (s *instrumentedSession) Act(ctx context.Context, action Action) (*ActionRe
 }
 
 func (s *instrumentedSession) Stream(ctx context.Context, opts StreamOptions) (<-chan StreamEvent, error) {
-	return s.inner.Stream(ctx, opts)
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	events, err := s.inner.Stream(ctx, opts)
+	if err != nil || s.metrics == nil {
+		return events, err
+	}
+	out := make(chan StreamEvent)
+	go func() {
+		defer close(out)
+		for {
+			select {
+			case event, ok := <-events:
+				if !ok {
+					return
+				}
+				s.metrics.RecordStreamEvent(s.inner.ID(), event.Type)
+				if event.Type == StreamEventFrame && event.Frame != nil {
+					latency := time.Duration(0)
+					if !event.Frame.Timestamp.IsZero() {
+						latency = time.Since(event.Frame.Timestamp)
+						if latency < 0 {
+							latency = 0
+						}
+					}
+					s.metrics.RecordFrameDelivered(s.inner.ID(), latency)
+				}
+				select {
+				case out <- event:
+				case <-ctx.Done():
+					return
+				}
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	return out, nil
 }
 
 func (s *instrumentedSession) Close() error {
