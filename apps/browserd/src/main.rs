@@ -67,14 +67,18 @@ fn run(args: Args) -> io::Result<()> {
         match stream {
             Ok(stream) => {
                 let sessions = Arc::clone(&sessions);
-                if let Err(err) = handle_connection(
-                    stream,
-                    args.session_id.as_deref(),
-                    sessions,
-                    audit_logger.as_ref(),
-                ) {
-                    eprintln!("connection error: {err}");
-                }
+                let session_id = args.session_id.clone();
+                let audit_logger = audit_logger.clone();
+                thread::spawn(move || {
+                    if let Err(err) = handle_connection(
+                        stream,
+                        session_id.as_deref(),
+                        sessions,
+                        audit_logger.as_ref(),
+                    ) {
+                        eprintln!("connection error: {err}");
+                    }
+                });
             }
             Err(err) => eprintln!("accept error: {err}"),
         }
@@ -141,6 +145,7 @@ struct StreamSettings {
     target_fps: u32,
 }
 
+#[derive(Clone)]
 struct AuditLogger {
     dir: PathBuf,
 }
