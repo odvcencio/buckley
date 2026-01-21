@@ -140,8 +140,10 @@ func DefaultSidebarConfig() SidebarConfig {
 }
 
 // Sidebar displays task progress, plan, and running tools.
+// Note: Uses Base (not FocusableBase) to prevent stealing focus from InputArea at startup.
+// Sidebar keyboard shortcuts (arrows, numbers) are handled via the app's keybind system.
 type Sidebar struct {
-	uiwidgets.FocusableBase
+	uiwidgets.Base
 
 	// Configuration
 	config SidebarConfig
@@ -519,7 +521,7 @@ func (s *Sidebar) Shrink(delta int) {
 
 // Layout stores the assigned bounds.
 func (s *Sidebar) Layout(bounds runtime.Rect) {
-	s.FocusableBase.Layout(bounds)
+	s.Base.Layout(bounds)
 }
 
 func (s *Sidebar) recordSection(kind sidebarSectionKind, headerY, bodyStart, bodyEnd int) {

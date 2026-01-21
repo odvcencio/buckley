@@ -2474,6 +2474,12 @@ func (a *WidgetApp) rebuildLayout() {
 	a.screen.SetRoot(a.root)
 	a.screen.Resize(w, h)
 
+	// Re-focus the input area after layout rebuild
+	// (SetRoot's auto-register may have given focus to sidebar)
+	if scope := a.screen.BaseFocusScope(); scope != nil {
+		scope.SetFocus(a.inputArea)
+	}
+
 	a.dirty = true
 }
 

@@ -316,7 +316,8 @@ func (c *ChatView) metadataLine(content, source string, messageTime time.Time) *
 }
 
 func (c *ChatView) metadataText(content, source string, messageTime time.Time, modelName string, userAt time.Time) string {
-	if source == "thinking" {
+	// Skip metadata for thinking and system messages (like welcome screen) - they're not sent to the model
+	if source == "thinking" || source == "system" || source == "tool" {
 		return ""
 	}
 	parts := make([]string, 0, 4)
