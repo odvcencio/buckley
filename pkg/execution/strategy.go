@@ -108,6 +108,9 @@ type StreamHandler interface {
 	// OnReasoning is called when reasoning content is generated (thinking models).
 	OnReasoning(reasoning string)
 
+	// OnReasoningEnd is called when a reasoning block completes.
+	OnReasoningEnd()
+
 	// OnToolStart is called when a tool execution begins.
 	OnToolStart(name string, arguments string)
 

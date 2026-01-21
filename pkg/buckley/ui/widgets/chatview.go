@@ -457,6 +457,50 @@ func (c *ChatView) RemoveThinkingIndicator() {
 	c.buffer.RemoveLastLineIfSource("thinking")
 }
 
+// AppendReasoning appends streaming reasoning text (dimmed).
+func (c *ChatView) AppendReasoning(text string) {
+	c.buffer.AppendReasoningLine(text, scrollback.LineStyle{
+		FG:     extractFG(c.thinkingStyle),
+		Italic: true,
+		Dim:    true,
+	})
+}
+
+// CollapseReasoning collapses reasoning block to preview.
+func (c *ChatView) CollapseReasoning(preview, full string) {
+	c.buffer.ReplaceReasoningBlock(preview, full, scrollback.LineStyle{
+		FG:     extractFG(c.thinkingStyle),
+		Italic: true,
+		Dim:    true,
+	})
+}
+
+// ClearReasoningBlock clears reasoning state for new message.
+func (c *ChatView) ClearReasoningBlock() {
+	c.buffer.ClearReasoningBlock()
+}
+
+// ToggleReasoning toggles reasoning block between collapsed and expanded.
+// Returns true if a toggle occurred.
+func (c *ChatView) ToggleReasoning() bool {
+	expandedStyle := scrollback.LineStyle{
+		FG:     extractFG(c.thinkingStyle),
+		Italic: true,
+		Dim:    true,
+	}
+	collapsedStyle := scrollback.LineStyle{
+		FG:     extractFG(c.thinkingStyle),
+		Italic: true,
+		Dim:    true,
+	}
+	return c.buffer.ToggleReasoningBlock(expandedStyle, collapsedStyle)
+}
+
+// IsReasoningLine returns true if the line at the given index is part of a reasoning block.
+func (c *ChatView) IsReasoningLine(lineIdx int) bool {
+	return c.buffer.IsReasoningLine(lineIdx)
+}
+
 // Clear clears all messages.
 func (c *ChatView) Clear() {
 	c.buffer.Clear()
@@ -841,6 +885,17 @@ func (c *ChatView) HandleMessage(msg runtime.Message) runtime.HandleResult {
 }
 
 func (c *ChatView) handleMouse(m runtime.MouseMsg) runtime.HandleResult {
+	// Handle left click on reasoning blocks
+	if m.Action == runtime.MousePress && m.Button == runtime.MouseLeft {
+		lineIndex, _, ok := c.PositionForPoint(m.X, m.Y)
+		if ok && c.IsReasoningLine(lineIndex) {
+			if c.ToggleReasoning() {
+				return runtime.Handled()
+			}
+		}
+	}
+
+	// Handle hover (mouse move without button)
 	if m.Button != runtime.MouseNone || m.Action != runtime.MouseRelease {
 		return runtime.Unhandled()
 	}

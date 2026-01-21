@@ -228,6 +228,8 @@ func (h *executorStreamHandler) OnText(text string) {}
 
 func (h *executorStreamHandler) OnReasoning(reasoning string) {}
 
+func (h *executorStreamHandler) OnReasoningEnd() {}
+
 func (h *executorStreamHandler) OnToolStart(name string, arguments string) {}
 
 func (h *executorStreamHandler) OnToolEnd(name string, result string, err error) {

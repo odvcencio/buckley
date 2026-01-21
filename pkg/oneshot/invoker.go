@@ -17,6 +17,17 @@ type ModelClient interface {
 	ChatCompletion(ctx context.Context, req model.ChatRequest) (*model.ChatResponse, error)
 }
 
+// StreamingModelClient extends ModelClient with streaming support.
+type StreamingModelClient interface {
+	ModelClient
+	ChatCompletionStream(ctx context.Context, req model.ChatRequest) (<-chan model.StreamChunk, <-chan error)
+}
+
+// StreamCallback is called for each streaming chunk.
+// reasoningChunk contains thinking/reasoning tokens as they stream.
+// contentChunk contains the main response content.
+type StreamCallback func(reasoningChunk, contentChunk string)
+
 // DefaultInvoker implements Invoker using the model client.
 type DefaultInvoker struct {
 	client   ModelClient
@@ -132,6 +143,138 @@ func (inv *DefaultInvoker) Invoke(ctx context.Context, systemPrompt, userPrompt 
 				builder.WithContent(content)
 			}
 		}
+	}
+
+	// Complete trace
+	trace := builder.Complete(tokens, cost)
+
+	// Record in ledger if available
+	if inv.ledger != nil {
+		inv.ledger.Record(transparency.CostEntry{
+			Model:        inv.model,
+			Tokens:       tokens,
+			Cost:         cost,
+			Latency:      trace.Duration,
+			InvocationID: traceID,
+		})
+	}
+
+	return result, trace, nil
+}
+
+// InvokeStream executes a one-shot command with streaming output.
+// The callback is called for each chunk of reasoning/content as it streams.
+// This allows showing thinking progress for models like kimi-k2-thinking.
+func (inv *DefaultInvoker) InvokeStream(ctx context.Context, systemPrompt, userPrompt string, tool tools.Definition, audit *transparency.ContextAudit, callback StreamCallback) (*Result, *transparency.Trace, error) {
+	// Check if client supports streaming
+	streamClient, ok := inv.client.(StreamingModelClient)
+	if !ok {
+		// Fall back to non-streaming
+		return inv.Invoke(ctx, systemPrompt, userPrompt, tool, audit)
+	}
+
+	// Generate trace ID
+	traceID := fmt.Sprintf("inv-%d", time.Now().UnixNano())
+
+	// Start building trace
+	builder := transparency.NewTraceBuilder(traceID, inv.model, inv.provider)
+	builder.WithContext(audit)
+
+	// Build request
+	req := model.ChatRequest{
+		Model: inv.model,
+		Messages: []model.Message{
+			{Role: "system", Content: systemPrompt},
+			{Role: "user", Content: userPrompt},
+		},
+		Tools:      []map[string]any{tool.ToOpenAIFormat()},
+		ToolChoice: "auto",
+		Stream:     true,
+	}
+
+	// Capture request for tracing
+	builder.WithRequest(&transparency.RequestTrace{
+		Messages: []transparency.MessageTrace{
+			{Role: "system", Content: truncateForTrace(systemPrompt, 500), ContentLength: len(systemPrompt)},
+			{Role: "user", Content: truncateForTrace(userPrompt, 500), ContentLength: len(userPrompt)},
+		},
+		Tools:       []string{tool.Name},
+		Temperature: req.Temperature,
+		MaxTokens:   req.MaxTokens,
+	})
+
+	// Make streaming request
+	chunkChan, errChan := streamClient.ChatCompletionStream(ctx, req)
+
+	// Accumulate response
+	acc := model.NewStreamAccumulator()
+
+	// Process chunks
+	for {
+		select {
+		case chunk, ok := <-chunkChan:
+			if !ok {
+				// Channel closed, done receiving chunks
+				goto done
+			}
+
+			// Stream reasoning/content to callback
+			if callback != nil && len(chunk.Choices) > 0 {
+				delta := chunk.Choices[0].Delta
+				if delta.Reasoning != "" || delta.Content != "" {
+					// Filter tool call tokens from streamed content
+					filteredContent := model.FilterToolCallTokens(delta.Content)
+					callback(delta.Reasoning, filteredContent)
+				}
+			}
+
+			acc.Add(chunk)
+
+		case err := <-errChan:
+			if err != nil {
+				builder.WithError(err)
+				trace := builder.Build()
+				return nil, trace, fmt.Errorf("model request failed: %w", err)
+			}
+		}
+	}
+done:
+
+	// Get final message with parsed tool calls
+	msg := acc.FinalizeWithTokenParsing()
+
+	// Get usage from accumulator
+	usage := acc.Usage()
+	var tokens transparency.TokenUsage
+	if usage != nil {
+		tokens = transparency.TokenUsage{
+			Input:  usage.PromptTokens,
+			Output: usage.CompletionTokens,
+		}
+	}
+
+	// Extract reasoning for trace
+	if msg.Reasoning != "" {
+		builder.WithReasoning(msg.Reasoning)
+		tokens.Reasoning = estimateTokens(msg.Reasoning)
+	}
+
+	cost := inv.pricing.Calculate(tokens)
+
+	// Build result
+	result := &Result{}
+	if len(msg.ToolCalls) > 0 {
+		tc := msg.ToolCalls[0]
+		toolCall := &tools.ToolCall{
+			ID:        tc.ID,
+			Name:      tc.Function.Name,
+			Arguments: json.RawMessage(tc.Function.Arguments),
+		}
+		result.ToolCall = toolCall
+		builder.WithToolCalls([]tools.ToolCall{*toolCall})
+	} else if content, ok := msg.Content.(string); ok && content != "" {
+		result.TextContent = content
+		builder.WithContent(content)
 	}
 
 	// Complete trace

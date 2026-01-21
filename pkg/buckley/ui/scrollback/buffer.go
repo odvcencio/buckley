@@ -38,6 +38,14 @@ type Buffer struct {
 	// Last message tracking for streaming replacement
 	lastMessageStart int
 	hasLastMessage   bool
+
+	// Reasoning block tracking
+	reasoningStart    int
+	reasoningEnd      int
+	hasReasoningBlock bool
+	reasoningExpanded bool
+	reasoningPreview  string
+	reasoningFull     string
 }
 
 // Span represents a styled run of text.
@@ -289,6 +297,148 @@ func (b *Buffer) Clear() {
 	b.searchMatches = nil
 	b.lastMessageStart = 0
 	b.hasLastMessage = false
+}
+
+// AppendReasoningLine appends a reasoning line (dimmed, collapsible).
+func (b *Buffer) AppendReasoningLine(content string, style LineStyle) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if !b.hasReasoningBlock {
+		b.reasoningStart = len(b.lines)
+		b.hasReasoningBlock = true
+	}
+
+	line := Line{
+		Content:   content,
+		Style:     style,
+		Timestamp: time.Now(),
+		Source:    "reasoning",
+	}
+	b.appendLineLocked(line, false)
+	b.reasoningEnd = len(b.lines)
+}
+
+// ReplaceReasoningBlock replaces streaming reasoning with collapsed preview.
+func (b *Buffer) ReplaceReasoningBlock(preview, full string, collapsedStyle LineStyle) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if !b.hasReasoningBlock {
+		return
+	}
+
+	// Remove all reasoning lines and update totalRows
+	if b.reasoningStart < len(b.lines) {
+		for i := b.reasoningStart; i < len(b.lines); i++ {
+			b.totalRows -= len(b.lines[i].Wrapped)
+		}
+		b.lines = b.lines[:b.reasoningStart]
+	}
+
+	// Add collapsed preview line
+	b.reasoningPreview = preview
+	b.reasoningFull = full
+	b.reasoningExpanded = false
+
+	// Only show "..." if the text was actually truncated
+	suffix := ""
+	if len(full) > len(preview) {
+		suffix = "..."
+	}
+	collapsedText := "▶ \"" + preview + suffix + "\" (click to expand)"
+	line := Line{
+		Content:   collapsedText,
+		Style:     collapsedStyle,
+		Timestamp: time.Now(),
+		Source:    "reasoning-collapsed",
+	}
+	b.appendLineLocked(line, false)
+	b.reasoningEnd = len(b.lines)
+}
+
+// ClearReasoningBlock clears reasoning block tracking.
+func (b *Buffer) ClearReasoningBlock() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.hasReasoningBlock = false
+	b.reasoningExpanded = false
+	b.reasoningPreview = ""
+	b.reasoningFull = ""
+}
+
+// ToggleReasoningBlock toggles reasoning between collapsed and expanded states.
+// Returns true if a toggle occurred.
+func (b *Buffer) ToggleReasoningBlock(expandedStyle, collapsedStyle LineStyle) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if !b.hasReasoningBlock || b.reasoningFull == "" {
+		return false
+	}
+
+	// Find and remove the current reasoning display line
+	if b.reasoningStart < len(b.lines) {
+		// Update totalRows before removing
+		for i := b.reasoningStart; i < len(b.lines) && i < b.reasoningEnd; i++ {
+			b.totalRows -= len(b.lines[i].Wrapped)
+		}
+		b.lines = b.lines[:b.reasoningStart]
+	}
+
+	if b.reasoningExpanded {
+		// Collapse: show preview
+		suffix := ""
+		if len(b.reasoningFull) > len(b.reasoningPreview) {
+			suffix = "..."
+		}
+		collapsedText := "▶ \"" + b.reasoningPreview + suffix + "\" (click to expand)"
+		line := Line{
+			Content:   collapsedText,
+			Style:     collapsedStyle,
+			Timestamp: time.Now(),
+			Source:    "reasoning-collapsed",
+		}
+		b.appendLineLocked(line, false)
+		b.reasoningExpanded = false
+	} else {
+		// Expand: show full reasoning with gutter
+		expandedHeader := "▼ \"" + b.reasoningPreview + "\" (click to collapse)"
+		headerLine := Line{
+			Content:   expandedHeader,
+			Style:     collapsedStyle,
+			Timestamp: time.Now(),
+			Source:    "reasoning-header",
+		}
+		b.appendLineLocked(headerLine, false)
+
+		// Add reasoning content lines with gutter
+		lines := strings.Split(b.reasoningFull, "\n")
+		for _, content := range lines {
+			gutterLine := Line{
+				Content:   "│ " + content,
+				Style:     expandedStyle,
+				Timestamp: time.Now(),
+				Source:    "reasoning-expanded",
+			}
+			b.appendLineLocked(gutterLine, false)
+		}
+		b.reasoningExpanded = true
+	}
+
+	b.reasoningEnd = len(b.lines)
+	return true
+}
+
+// IsReasoningLine returns true if the line at the given index is part of a reasoning block.
+func (b *Buffer) IsReasoningLine(lineIdx int) bool {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+
+	if !b.hasReasoningBlock {
+		return false
+	}
+	return lineIdx >= b.reasoningStart && lineIdx < b.reasoningEnd
 }
 
 // RemoveLastLineIfSource removes the last line if it has the given source.

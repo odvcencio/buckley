@@ -1587,6 +1587,15 @@ func (a *WidgetApp) update(msg Message) bool {
 		a.updateScrollStatus()
 		return true
 
+	case ReasoningMsg:
+		a.chatView.AppendReasoning(m.Text)
+		a.statusBar.SetStatus("Thinking...")
+		return true
+
+	case ReasoningEndMsg:
+		a.chatView.CollapseReasoning(m.Preview, m.Full)
+		return true
+
 	case RefreshMsg:
 		return true
 
@@ -1645,8 +1654,10 @@ func (a *WidgetApp) handleKeyMsg(m KeyMsg) bool {
 		Shift: m.Shift,
 	}
 
-	// When input area is focused, forward all key events to it for handling
-	if a.inputArea.IsFocused() {
+	// When input area is focused and no modal overlay is active,
+	// forward all key events to it for handling.
+	// Skip this when overlays are active so they receive key events.
+	if a.inputArea.IsFocused() && a.screen.LayerCount() == 1 {
 		result := a.inputArea.HandleMessage(runtimeMsg)
 		if result.Handled {
 			for _, cmd := range result.Commands {
@@ -2284,6 +2295,16 @@ func (a *WidgetApp) StreamChunk(sessionID, text string) {
 // StreamEnd signals the end of a streaming session.
 func (a *WidgetApp) StreamEnd(sessionID, fullText string) {
 	a.Post(StreamDone{SessionID: sessionID, FullText: fullText})
+}
+
+// AppendReasoning appends reasoning text to display. Thread-safe.
+func (a *WidgetApp) AppendReasoning(text string) {
+	a.Post(ReasoningMsg{Text: text})
+}
+
+// CollapseReasoning collapses reasoning to preview. Thread-safe.
+func (a *WidgetApp) CollapseReasoning(preview, full string) {
+	a.Post(ReasoningEndMsg{Preview: preview, Full: full})
 }
 
 // SetStatus updates status. Thread-safe via message passing.

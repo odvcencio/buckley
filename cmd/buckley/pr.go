@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/exec"
 	"strings"
-	"time"
 
 	"github.com/odvcencio/buckley/pkg/config"
 	"github.com/odvcencio/buckley/pkg/oneshot"
@@ -27,7 +26,8 @@ func runPRCommand(args []string) error {
 	verbose := fs.Bool("verbose", false, "show model reasoning and full trace")
 	showCost := fs.Bool("cost", true, "show token/cost breakdown")
 	modelFlag := fs.String("model", "", "model to use (default: BUCKLEY_MODEL_PR or execution model)")
-	timeout := fs.Duration("timeout", 2*time.Minute, "timeout for model request")
+	timeout := fs.Duration("timeout", 0, "timeout for model request (0 = no timeout)")
+	noStream := fs.Bool("no-stream", false, "disable streaming (don't show thinking progress)")
 
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -78,6 +78,18 @@ func runPRCommand(args []string) error {
 		Ledger:   ledger,
 	})
 
+	// Set up streaming callback if streaming is enabled
+	var streamCallback oneshot.StreamCallback
+	streamingEnabled := !*noStream && stdinIsTerminalFn()
+	if streamingEnabled {
+		streamCallback = func(reasoning, content string) {
+			// Show reasoning (thinking) tokens as they stream
+			if reasoning != "" {
+				termOut.Stream(reasoning)
+			}
+		}
+	}
+
 	type prRunner interface {
 		Run(ctx context.Context, opts prgen.ContextOptions) (*prgen.RunResult, error)
 	}
@@ -90,8 +102,9 @@ func runPRCommand(args []string) error {
 		})
 	} else {
 		runner = prgen.NewRunner(prgen.RunnerConfig{
-			Invoker: invoker,
-			Ledger:  ledger,
+			Invoker:        invoker,
+			Ledger:         ledger,
+			StreamCallback: streamCallback,
 		})
 	}
 
@@ -101,8 +114,12 @@ func runPRCommand(args []string) error {
 		opts.BaseBranch = *baseFlag
 	}
 
-	// Run with timeout
-	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+	// Run with optional timeout (0 = no timeout, for thinking models)
+	ctx := context.Background()
+	var cancel context.CancelFunc = func() {}
+	if *timeout > 0 {
+		ctx, cancel = context.WithTimeout(ctx, *timeout)
+	}
 	defer cancel()
 
 	// Show what we're doing
@@ -110,18 +127,25 @@ func runPRCommand(args []string) error {
 		termOut.Dim("Using model: %s", modelID)
 	}
 
-	// Execute the PR generation with spinner
-	spinner := terminal.NewSpinner("Generating PR...")
-	spinner.Start()
-
-	result, err := runner.Run(ctx, opts)
-
-	if err != nil {
-		spinner.StopWithError(err.Error())
-	} else if result.Error != nil {
-		spinner.StopWithError(result.Error.Error())
+	// Execute the PR generation
+	var result *prgen.RunResult
+	if streamingEnabled {
+		// Streaming mode: show thinking progress inline
+		termOut.Dim("Thinking...")
+		result, err = runner.Run(ctx, opts)
+		termOut.StreamEnd() // End the streaming line
 	} else {
-		spinner.StopWithSuccess("Generated PR")
+		// Non-streaming mode: use spinner
+		spinner := terminal.NewSpinner("Generating PR...")
+		spinner.Start()
+		result, err = runner.Run(ctx, opts)
+		if err != nil {
+			spinner.StopWithError(err.Error())
+		} else if result.Error != nil {
+			spinner.StopWithError(result.Error.Error())
+		} else {
+			spinner.StopWithSuccess("Generated PR")
+		}
 	}
 
 	if err != nil {

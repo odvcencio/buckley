@@ -24,6 +24,12 @@ func (a *toolrunnerStreamAdapter) OnReasoning(reasoning string) {
 	}
 }
 
+func (a *toolrunnerStreamAdapter) OnReasoningEnd() {
+	if a.handler != nil {
+		a.handler.OnReasoningEnd()
+	}
+}
+
 func (a *toolrunnerStreamAdapter) OnToolStart(name string, arguments string) {
 	if a.handler != nil {
 		a.handler.OnToolStart(name, arguments)

@@ -84,6 +84,7 @@ type ToolCallRecord struct {
 type StreamHandler interface {
 	OnText(text string)
 	OnReasoning(reasoning string)
+	OnReasoningEnd()
 	OnToolStart(name string, arguments string)
 	OnToolEnd(name string, result string, err error)
 	OnComplete(result *Result)
@@ -452,6 +453,18 @@ func (r *Runner) executeWithTools(ctx context.Context, req Request, tools []tool
 		acc := model.NewStreamAccumulator()
 		var finishReason string
 
+		// Initialize think tag parser for streaming content
+		var thinkParser *ThinkTagParser
+		var hasReasoningDetails bool
+
+		if r.streamHandler != nil {
+			thinkParser = NewThinkTagParser(
+				r.streamHandler.OnReasoning,
+				r.streamHandler.OnText,
+				r.streamHandler.OnReasoningEnd,
+			)
+		}
+
 	streamLoop:
 		for {
 			select {
@@ -473,21 +486,51 @@ func (r *Runner) executeWithTools(ctx context.Context, req Request, tools []tool
 					finishReason = *chunk.Choices[0].FinishReason
 				}
 
-				// Stream text content to handler (filtering out tool call tokens)
+				// Stream content to handler with reasoning details and think tag parsing
 				if r.streamHandler != nil && len(chunk.Choices) > 0 {
 					delta := chunk.Choices[0].Delta
-					if delta.Content != "" {
-						// Filter out Kimi K2 style tool call tokens from streamed content
-						filtered := model.FilterToolCallTokens(delta.Content)
-						if filtered != "" {
-							r.streamHandler.OnText(filtered)
+
+					// Handle reasoning_details (OpenRouter format)
+					for _, rd := range delta.ReasoningDetails {
+						hasReasoningDetails = true
+						text := rd.Text
+						if text == "" {
+							text = rd.Summary
+						}
+						if text != "" {
+							r.streamHandler.OnReasoning(text)
 						}
 					}
-					if delta.Reasoning != "" {
+
+					// Handle legacy reasoning field
+					if delta.Reasoning != "" && !hasReasoningDetails {
 						r.streamHandler.OnReasoning(delta.Reasoning)
+					}
+
+					// Handle content - route through think parser unless reasoning_details present
+					if delta.Content != "" {
+						filtered := model.FilterToolCallTokens(delta.Content)
+						if filtered != "" {
+							if hasReasoningDetails {
+								// reasoning_details takes precedence, don't parse think tags
+								r.streamHandler.OnText(filtered)
+							} else if thinkParser != nil {
+								thinkParser.Write(filtered)
+							}
+						}
 					}
 				}
 			}
+		}
+
+		// Flush any remaining content from think parser
+		if thinkParser != nil {
+			thinkParser.Flush()
+		}
+
+		// Signal reasoning end for reasoning_details format
+		if hasReasoningDetails && r.streamHandler != nil {
+			r.streamHandler.OnReasoningEnd()
 		}
 
 		// Update usage from accumulated response
@@ -515,7 +558,12 @@ func (r *Runner) executeWithTools(ctx context.Context, req Request, tools []tool
 			}
 			if strings.TrimSpace(content) == "" {
 				if result.Reasoning != "" {
-					return result, fmt.Errorf("model returned reasoning without final response")
+					// Model provided reasoning but no response - this is valid
+					result.Content = ""
+					if r.streamHandler != nil {
+						r.streamHandler.OnComplete(result)
+					}
+					return result, nil
 				}
 				return result, fmt.Errorf("model returned empty response")
 			}

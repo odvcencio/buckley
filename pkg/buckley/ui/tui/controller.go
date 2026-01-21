@@ -1510,9 +1510,11 @@ func (c *Controller) runWithStrategy(ctx context.Context, sess *SessionState) (s
 
 // tuiStreamHandler bridges execution events to the TUI display.
 type tuiStreamHandler struct {
-	app  *WidgetApp
-	sess *SessionState
-	ctrl *Controller
+	app          *WidgetApp
+	sess         *SessionState
+	ctrl         *Controller
+	reasoning    strings.Builder
+	hasReasoning bool
 }
 
 func (h *tuiStreamHandler) OnText(text string) {
@@ -1520,8 +1522,22 @@ func (h *tuiStreamHandler) OnText(text string) {
 }
 
 func (h *tuiStreamHandler) OnReasoning(reasoning string) {
-	// Could display thinking indicator
-	h.app.SetStatus("Thinking...")
+	h.reasoning.WriteString(reasoning)
+	h.hasReasoning = true
+	h.app.AppendReasoning(reasoning)
+}
+
+func (h *tuiStreamHandler) OnReasoningEnd() {
+	if h.hasReasoning {
+		full := h.reasoning.String()
+		preview := full
+		if len(preview) > 40 {
+			preview = preview[:40]
+		}
+		h.app.CollapseReasoning(preview, full)
+	}
+	h.reasoning.Reset()
+	h.hasReasoning = false
 }
 
 func (h *tuiStreamHandler) OnToolStart(name string, arguments string) {

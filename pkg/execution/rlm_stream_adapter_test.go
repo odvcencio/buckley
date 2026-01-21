@@ -19,6 +19,8 @@ func (s *stubStreamHandler) OnText(string) {}
 
 func (s *stubStreamHandler) OnReasoning(string) {}
 
+func (s *stubStreamHandler) OnReasoningEnd() {}
+
 func (s *stubStreamHandler) OnToolStart(name string, _ string) {
 	s.starts++
 	s.lastTool = name

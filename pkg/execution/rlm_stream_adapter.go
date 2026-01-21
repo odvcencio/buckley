@@ -74,6 +74,19 @@ func (a *RLMStreamAdapter) OnComplete(result *ExecutionResult) {
 	}
 }
 
+// OnReasoningEnd forwards reasoning completion to the stream handler.
+func (a *RLMStreamAdapter) OnReasoningEnd() {
+	if a == nil {
+		return
+	}
+	a.mu.Lock()
+	handler := a.handler
+	a.mu.Unlock()
+	if handler != nil {
+		handler.OnReasoningEnd()
+	}
+}
+
 // OnRLMEvent handles iteration events and updates downstream handlers.
 func (a *RLMStreamAdapter) OnRLMEvent(event rlm.IterationEvent) {
 	if a == nil {

@@ -205,6 +205,21 @@ type ThinkingMsg struct {
 
 func (ThinkingMsg) isMessage() {}
 
+// ReasoningMsg streams reasoning content to the display.
+type ReasoningMsg struct {
+	Text string // Incremental reasoning text to append
+}
+
+func (ReasoningMsg) isMessage() {}
+
+// ReasoningEndMsg signals reasoning block is complete and should collapse.
+type ReasoningEndMsg struct {
+	Preview string // First ~40 chars for collapsed view
+	Full    string // Full reasoning content
+}
+
+func (ReasoningEndMsg) isMessage() {}
+
 // --- Overlay/Mode Events ---
 
 // ModeChangeMsg signals input mode change.
