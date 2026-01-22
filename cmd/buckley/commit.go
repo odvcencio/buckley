@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 
 	"github.com/odvcencio/buckley/pkg/config"
+	"github.com/odvcencio/buckley/pkg/logging"
 	"github.com/odvcencio/buckley/pkg/oneshot"
 	commitgen "github.com/odvcencio/buckley/pkg/oneshot/commit"
 	oneshotrlm "github.com/odvcencio/buckley/pkg/oneshot/rlm"
@@ -29,11 +31,11 @@ func runCommitCommand(args []string) error {
 	dryRun := fs.Bool("dry-run", false, "print the generated commit message without committing")
 	yes := fs.Bool("yes", false, "skip confirmation prompts and run git commit")
 	pushFlag := fs.Bool("push", true, "push current branch after committing")
-	verbose := fs.Bool("verbose", false, "show model reasoning and full trace")
+	verbose := fs.Bool("verbose", false, "stream model reasoning as it happens")
+	trace := fs.Bool("trace", false, "show context audit and reasoning trace after completion")
 	showCost := fs.Bool("cost", true, "show token/cost breakdown")
 	modelFlag := fs.String("model", "", "model to use (default: BUCKLEY_MODEL_COMMIT or execution model)")
 	timeout := fs.Duration("timeout", 0, "timeout for model request (0 = no timeout)")
-	noStream := fs.Bool("no-stream", false, "disable streaming (don't show thinking progress)")
 
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -84,18 +86,33 @@ func runCommitCommand(args []string) error {
 		Ledger:   ledger,
 	})
 
-	// Set up streaming callback if streaming is enabled
+	// Set up streaming callback if verbose mode is enabled
 	var streamCallback oneshot.StreamCallback
-	streamingEnabled := !*noStream && stdinIsTerminalFn()
+	var reasoningLog *logging.ReasoningLogger
+	streamingEnabled := *verbose && stdinIsTerminalFn()
+
 	if streamingEnabled {
+		// Initialize reasoning logger
+		if home, err := os.UserHomeDir(); err == nil {
+			logDir := filepath.Join(home, ".buckley", "logs")
+			reasoningLog, _ = logging.NewReasoningLogger(logDir)
+		}
+
 		streamCallback = func(reasoning, content string) {
 			// Show reasoning (thinking) tokens as they stream
 			if reasoning != "" {
 				termOut.Stream(reasoning)
+				if reasoningLog != nil {
+					reasoningLog.Write(reasoning)
+				}
 			}
-			// Content is usually the tool call, less interesting to stream
 		}
 	}
+	defer func() {
+		if reasoningLog != nil {
+			reasoningLog.Close()
+		}
+	}()
 
 	var runner commitRunner
 	if cfg != nil && cfg.OneshotMode() == config.ExecutionModeRLM {
@@ -153,13 +170,13 @@ func runCommitCommand(args []string) error {
 		printWarnings(result.Warnings)
 	}
 
-	// Show context audit (what was sent)
-	if *verbose && result.ContextAudit != nil {
+	// Show context audit (--trace flag)
+	if *trace && result.ContextAudit != nil {
 		printContextAudit(result.ContextAudit)
 	}
 
-	// Show reasoning (for thinking models)
-	if *verbose && result.Trace != nil && result.Trace.Reasoning != "" {
+	// Show reasoning trace (--trace flag)
+	if *trace && result.Trace != nil && result.Trace.Reasoning != "" {
 		printReasoning(result.Trace.Reasoning)
 	}
 

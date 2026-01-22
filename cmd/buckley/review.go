@@ -22,7 +22,8 @@ func runReviewCommand(args []string) error {
 	projectMode := fs.Bool("project", false, "review the entire project instead of branch diff")
 	baseBranch := fs.String("base", "", "base branch to compare against (default: auto-detect main/master)")
 	includeUnstaged := fs.Bool("unstaged", true, "include unstaged changes in review")
-	verbose := fs.Bool("verbose", false, "show full context and reasoning")
+	verbose := fs.Bool("verbose", false, "stream model reasoning as it happens")
+	trace := fs.Bool("trace", false, "show context audit and reasoning trace after completion")
 	showCost := fs.Bool("cost", true, "show token/cost breakdown")
 	modelFlag := fs.String("model", "", "model to use (default: BUCKLEY_MODEL_REVIEW or execution model)")
 	timeout := fs.Duration("timeout", 5*time.Minute, "timeout for model request")
@@ -133,10 +134,13 @@ func runReviewCommand(args []string) error {
 		return fmt.Errorf("review failed: %w", runErr)
 	}
 
-	// Show context audit if verbose
-	if *verbose && result.ContextAudit != nil {
+	// Show context audit (--trace flag)
+	if *trace && result.ContextAudit != nil {
 		printReviewContextAudit(result.ContextAudit)
 	}
+
+	// Note: --verbose flag reserved for future streaming support
+	_ = verbose
 
 	// Check for errors
 	if result.Error != nil {

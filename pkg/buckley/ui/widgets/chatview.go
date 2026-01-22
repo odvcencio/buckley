@@ -69,8 +69,10 @@ type messageEntry struct {
 
 // NewChatView creates a new chat view widget.
 func NewChatView() *ChatView {
+	// Use larger default buffer size - Layout will resize to actual terminal dimensions.
+	// This prevents content added before first Layout from being wrapped too narrow.
 	return &ChatView{
-		buffer:           scrollback.NewBuffer(80, 24),
+		buffer:           scrollback.NewBuffer(200, 50),
 		userStyle:        backend.DefaultStyle(),
 		assistantStyle:   backend.DefaultStyle(),
 		systemStyle:      backend.DefaultStyle().Dim(true),

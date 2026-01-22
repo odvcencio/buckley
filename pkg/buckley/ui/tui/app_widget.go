@@ -1752,6 +1752,14 @@ func (a *WidgetApp) handleMouseMsg(m MouseMsg) bool {
 	if m.Action == MousePress && m.Button == MouseLeft {
 		line, col, ok := a.chatView.PositionForPoint(m.X, m.Y)
 		if ok {
+			// Check if click is on reasoning block - let ChatView handle toggle
+			if a.chatView.IsReasoningLine(line) {
+				if a.chatView.ToggleReasoning() {
+					a.dirty = true
+					return true
+				}
+			}
+			// Otherwise start selection
 			if !a.selectionActive {
 				a.chatView.ClearSelection()
 				a.chatView.StartSelection(line, col)

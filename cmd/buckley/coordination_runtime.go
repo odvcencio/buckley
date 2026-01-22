@@ -120,7 +120,10 @@ func startTelemetryPersistence(ctx context.Context, hub *telemetry.Hub, store co
 					streamID = "system"
 				}
 				if err := store.Append(ctx, streamID, []coordevents.Event{coordEvent}); err != nil {
-					fmt.Fprintf(os.Stderr, "warning: persist telemetry event: %v\n", err)
+					// Don't warn on context cancellation (expected during shutdown)
+					if ctx.Err() == nil {
+						fmt.Fprintf(os.Stderr, "warning: persist telemetry event: %v\n", err)
+					}
 				}
 			}
 		}
