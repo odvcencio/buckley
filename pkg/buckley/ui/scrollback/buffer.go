@@ -801,6 +801,7 @@ func (b *Buffer) CodeBlockRange(lineIndex int) (start, end int, ok bool) {
 }
 
 // GetVisibleLines returns lines currently in viewport.
+// The returned data is a deep copy, safe to use after the buffer is mutated.
 func (b *Buffer) GetVisibleLines() []VisibleLine {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
@@ -811,9 +812,16 @@ func (b *Buffer) GetVisibleLines() []VisibleLine {
 	for lineIdx, line := range b.lines {
 		for wrapIdx, wrapped := range line.Wrapped {
 			if rowIndex >= b.scrollTop && rowIndex < b.scrollTop+b.height {
+				// Deep copy Spans to avoid race with buffer mutations
+				var spansCopy []Span
+				if len(wrapped.Spans) > 0 {
+					spansCopy = make([]Span, len(wrapped.Spans))
+					copy(spansCopy, wrapped.Spans)
+				}
+
 				vl := VisibleLine{
 					Content:                wrapped.Text,
-					Spans:                  wrapped.Spans,
+					Spans:                  spansCopy,
 					Style:                  line.Style,
 					Source:                 line.Source,
 					LineIndex:              lineIdx,
@@ -850,6 +858,7 @@ func (b *Buffer) GetVisibleLines() []VisibleLine {
 }
 
 // VisibleLineAt returns the visible line at the given viewport row.
+// The returned data is a deep copy, safe to use after the buffer is mutated.
 func (b *Buffer) VisibleLineAt(row int) (VisibleLine, bool) {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
@@ -867,9 +876,15 @@ func (b *Buffer) VisibleLineAt(row int) (VisibleLine, bool) {
 	for lineIdx, line := range b.lines {
 		for wrapIdx, wrapped := range line.Wrapped {
 			if rowIndex == absoluteRow {
+				// Deep copy Spans to avoid race with buffer mutations
+				var spansCopy []Span
+				if len(wrapped.Spans) > 0 {
+					spansCopy = make([]Span, len(wrapped.Spans))
+					copy(spansCopy, wrapped.Spans)
+				}
 				return VisibleLine{
 					Content:                wrapped.Text,
-					Spans:                  wrapped.Spans,
+					Spans:                  spansCopy,
 					Style:                  line.Style,
 					Source:                 line.Source,
 					LineIndex:              lineIdx,

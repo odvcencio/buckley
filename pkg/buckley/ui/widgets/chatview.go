@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/odvcencio/buckley/pkg/buckley/ui/scrollback"
+	"github.com/odvcencio/fluffy-ui/accessibility"
 	"github.com/odvcencio/fluffy-ui/backend"
 	"github.com/odvcencio/fluffy-ui/clipboard"
 	"github.com/odvcencio/fluffy-ui/markdown"
@@ -1052,3 +1053,69 @@ func (c *ChatView) ScrollToEnd() {
 
 var _ clipboard.Target = (*ChatView)(nil)
 var _ scroll.Controller = (*ChatView)(nil)
+var _ accessibility.Accessible = (*ChatView)(nil)
+
+// AccessibleRole returns the accessibility role for the chat view.
+func (c *ChatView) AccessibleRole() accessibility.Role {
+	return accessibility.RoleList
+}
+
+// AccessibleLabel returns a label describing the chat view's current state.
+func (c *ChatView) AccessibleLabel() string {
+	if c == nil || c.buffer == nil {
+		return "Chat View"
+	}
+	count := c.buffer.LineCount()
+	if count == 0 {
+		return "Chat View (empty)"
+	}
+	return fmt.Sprintf("Chat View (%d messages)", count)
+}
+
+// AccessibleDescription returns additional context about the chat view.
+func (c *ChatView) AccessibleDescription() string {
+	if c == nil || c.buffer == nil {
+		return ""
+	}
+	// Include recent message preview for debugging
+	lines := c.buffer.GetVisibleLines()
+	if len(lines) == 0 {
+		return ""
+	}
+	// Get last non-empty line content
+	for i := len(lines) - 1; i >= 0; i-- {
+		content := strings.TrimSpace(lines[i].Content)
+		if content != "" {
+			if len(content) > 80 {
+				content = content[:80] + "..."
+			}
+			return fmt.Sprintf("Last: %s", content)
+		}
+	}
+	return ""
+}
+
+// AccessibleState returns the current state of the chat view.
+func (c *ChatView) AccessibleState() accessibility.StateSet {
+	return accessibility.StateSet{
+		ReadOnly: true,
+	}
+}
+
+// AccessibleValue returns scroll position information.
+func (c *ChatView) AccessibleValue() *accessibility.ValueInfo {
+	if c == nil || c.buffer == nil {
+		return nil
+	}
+	top, total, height := c.buffer.ScrollPosition()
+	if total == 0 {
+		return nil
+	}
+	pct := float64(top) / float64(total) * 100
+	return &accessibility.ValueInfo{
+		Min:     0,
+		Max:     float64(total),
+		Current: float64(top),
+		Text:    fmt.Sprintf("Line %d of %d (%.0f%%), viewport %d lines", top+1, total, pct, height),
+	}
+}

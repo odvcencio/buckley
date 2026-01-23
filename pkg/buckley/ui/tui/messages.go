@@ -68,6 +68,13 @@ type StreamFlush struct {
 
 func (StreamFlush) isMessage() {}
 
+// ReasoningFlush is sent by the reasoning coalescer to flush buffered reasoning.
+type ReasoningFlush struct {
+	Text string
+}
+
+func (ReasoningFlush) isMessage() {}
+
 // --- Tool Events ---
 
 // ToolStart signals a tool is beginning execution.

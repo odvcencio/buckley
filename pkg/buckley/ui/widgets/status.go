@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/odvcencio/fluffy-ui/accessibility"
 	"github.com/odvcencio/fluffy-ui/backend"
 	"github.com/odvcencio/fluffy-ui/progress"
 	"github.com/odvcencio/fluffy-ui/runtime"
@@ -311,4 +312,52 @@ func itoa(i int) string {
 		buf[pos] = '-'
 	}
 	return string(buf[pos:])
+}
+
+var _ accessibility.Accessible = (*StatusBar)(nil)
+
+// AccessibleRole returns the accessibility role for the status bar.
+func (s *StatusBar) AccessibleRole() accessibility.Role {
+	return accessibility.RoleStatus
+}
+
+// AccessibleLabel returns the current status text.
+func (s *StatusBar) AccessibleLabel() string {
+	if s == nil {
+		return "Status"
+	}
+	return s.status
+}
+
+// AccessibleDescription returns detailed status information.
+func (s *StatusBar) AccessibleDescription() string {
+	if s == nil {
+		return ""
+	}
+	var parts []string
+	if s.streaming {
+		parts = append(parts, "streaming")
+	}
+	if s.executionMode != "" {
+		parts = append(parts, s.executionMode)
+	}
+	if s.contextBudget > 0 {
+		parts = append(parts, fmt.Sprintf("ctx %d/%d", s.contextUsed, s.contextBudget))
+	}
+	if s.tokens > 0 {
+		parts = append(parts, fmt.Sprintf("%d tokens", s.tokens))
+	}
+	return strings.Join(parts, " · ")
+}
+
+// AccessibleState returns the current state of the status bar.
+func (s *StatusBar) AccessibleState() accessibility.StateSet {
+	return accessibility.StateSet{
+		ReadOnly: true,
+	}
+}
+
+// AccessibleValue returns nil (status bar doesn't have a numeric value).
+func (s *StatusBar) AccessibleValue() *accessibility.ValueInfo {
+	return nil
 }

@@ -256,6 +256,9 @@ func (r *Registry) registerBuiltins(cfg registryOptions) {
 	// Register terminal editor helper
 	register(&builtin.TerminalEditorTool{})
 
+	// Register fluffy-ui agent tool for AI-driven UI automation
+	register(&builtin.FluffyAgentTool{})
+
 	// Note: TODO tool is registered separately with SetTodoStore()
 }
 

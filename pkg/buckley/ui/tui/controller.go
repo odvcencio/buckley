@@ -110,6 +110,7 @@ type ControllerConfig struct {
 	ProjectCtx   *projectcontext.ProjectContext
 	Telemetry    *telemetry.Hub
 	SessionID    string // Resume session, empty for new
+	AgentSocket  string // unix:/path or tcp:host:port for agent API
 }
 
 func newSessionState(cfg *config.Config, store *storage.Store, workDir string, hub *telemetry.Hub, modelMgr *model.Manager, sessionID string, loadMessages bool, progressMgr *progress.ProgressManager, toastMgr *toast.ToastManager) (*SessionState, error) {
@@ -333,6 +334,7 @@ func NewController(cfg ControllerConfig) (*Controller, error) {
 		UseTextLabels:   cfg.Config != nil && cfg.Config.UI.UseTextLabels,
 		MessageMetadata: metadataMode,
 		WebBaseURL:      webBaseURL,
+		AgentSocket:     cfg.AgentSocket,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("create TUI app: %w", err)

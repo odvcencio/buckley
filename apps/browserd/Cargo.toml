@@ -8,9 +8,28 @@ libc = "0.2"
 prost = "0.12"
 prost-types = "0.12"
 url = "2.5"
+log = "0.4"
+env_logger = "0.11"
+
+# Servo dependencies (feature-gated)
+# Use main branch - v0.0.3 has internal API mismatches
+servo = { git = "https://github.com/servo/servo", branch = "main", package = "libservo", optional = true }
+surfman = { version = "0.9", optional = true }
+euclid = { version = "0.22", optional = true }
+image = { version = "0.25", optional = true, default-features = false, features = ["png"] }
+serde_json = { version = "1.0", optional = true }
+dpi = { version = "0.1", optional = true }
+# Force aws_lc_rs feature for servo's TLS stack
+rustls = { version = "0.23", optional = true, features = ["aws_lc_rs"] }
 
 [build-dependencies]
 prost-build = "0.12"
 
 [features]
-servo = []
+default = []
+servo = ["dep:servo", "dep:surfman", "dep:euclid", "dep:image", "dep:serde_json", "dep:dpi", "dep:rustls"]
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = true

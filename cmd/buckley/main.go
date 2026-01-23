@@ -86,6 +86,7 @@ type startupOptions struct {
 	plainModeSet     bool
 	plainMode        bool
 	rlmMode          bool
+	agentSocket      string
 }
 
 func main() {
@@ -246,6 +247,7 @@ func main() {
 		ProjectCtx:   projectContext,
 		Telemetry:    telemetryHub,
 		SessionID:    resumeSessionID,
+		AgentSocket:  opts.agentSocket,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error creating TUI: %v\n", err)
@@ -693,6 +695,7 @@ func printHelp() {
 	fmt.Println("  --tui                            Use rich TUI interface")
 	fmt.Println("  --plain                          Use plain scrollback mode")
 	fmt.Println("  --rlm                            Use RLM execution mode (experimental)")
+	fmt.Println("  --agent-socket <addr>            Start agent API server (unix:/path or tcp:host:port)")
 	fmt.Println("  --encoding json|toon             Set serialization format")
 	fmt.Println("  --json                           Shortcut for --encoding json")
 	fmt.Println("  -v, --version                    Show version information")
@@ -1235,6 +1238,7 @@ func parseStartupOptions(raw []string) (*startupOptions, error) {
 	var nextPrompt bool
 	var nextEncoding bool
 	var nextConfig bool
+	var nextAgentSocket bool
 
 	for _, arg := range raw {
 		if nextPrompt {
@@ -1250,6 +1254,11 @@ func parseStartupOptions(raw []string) (*startupOptions, error) {
 		if nextConfig {
 			opts.configPath = arg
 			nextConfig = false
+			continue
+		}
+		if nextAgentSocket {
+			opts.agentSocket = arg
+			nextAgentSocket = false
 			continue
 		}
 
@@ -1276,9 +1285,13 @@ func parseStartupOptions(raw []string) (*startupOptions, error) {
 			opts.rlmMode = true
 		case "--config", "-c":
 			nextConfig = true
+		case "--agent-socket":
+			nextAgentSocket = true
 		default:
 			if strings.HasPrefix(arg, "--config=") {
 				opts.configPath = strings.TrimPrefix(arg, "--config=")
+			} else if strings.HasPrefix(arg, "--agent-socket=") {
+				opts.agentSocket = strings.TrimPrefix(arg, "--agent-socket=")
 			} else {
 				filtered = append(filtered, arg)
 			}
@@ -1290,6 +1303,9 @@ func parseStartupOptions(raw []string) (*startupOptions, error) {
 	}
 	if nextEncoding {
 		return nil, fmt.Errorf("--encoding requires a value")
+	}
+	if nextAgentSocket {
+		return nil, fmt.Errorf("--agent-socket requires an address")
 	}
 	if nextConfig {
 		return nil, fmt.Errorf("--config requires a path argument")

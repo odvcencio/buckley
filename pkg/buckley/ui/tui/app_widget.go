@@ -2,6 +2,7 @@
 package tui
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"math"
@@ -17,6 +18,7 @@ import (
 	buckleywidgets "github.com/odvcencio/buckley/pkg/buckley/ui/widgets"
 	"github.com/odvcencio/buckley/pkg/diagnostics"
 	"github.com/odvcencio/fluffy-ui/accessibility"
+	"github.com/odvcencio/fluffy-ui/agent"
 	"github.com/odvcencio/fluffy-ui/backend"
 	"github.com/odvcencio/fluffy-ui/backend/tcell"
 	"github.com/odvcencio/fluffy-ui/clipboard"
@@ -123,8 +125,11 @@ type WidgetApp struct {
 	clipboard   clipboard.Clipboard
 
 	// Message loop
-	messages  chan Message
-	coalescer *Coalescer
+	messages           chan Message
+	coalescer          *Coalescer
+	reasoningBuffer    strings.Builder
+	reasoningLastFlush time.Time
+	reasoningMu        sync.Mutex
 
 	// Frame timing
 	frameTicker *time.Ticker
@@ -210,6 +215,12 @@ type WidgetApp struct {
 	// Recording
 	recorder   runtime.Recorder
 	recordPath string
+
+	// Agent API for external debugging/testing
+	agent       *agent.Agent
+	agentServer *agent.Server
+	agentCtx    context.Context
+	agentCancel context.CancelFunc
 }
 
 // WidgetAppConfig configures the widget-based TUI application.
@@ -227,6 +238,7 @@ type WidgetAppConfig struct {
 	OnSubmit        func(text string)
 	OnQuit          func()
 	Backend         backend.Backend // Optional: for testing
+	AgentSocket     string          // Optional: unix:/path or tcp:host:port for agent API
 }
 
 // NewWidgetApp creates and initializes the widget-based TUI application.
@@ -523,6 +535,11 @@ func NewWidgetApp(cfg WidgetAppConfig) (*WidgetApp, error) {
 	inputArea.OnTriggerSlashCommand(func() {
 		app.showSlashCommandPalette()
 	})
+
+	// Initialize agent API server if socket path provided
+	if cfg.AgentSocket != "" {
+		app.initAgentServer(cfg.AgentSocket)
+	}
 
 	return app, nil
 }
@@ -1324,6 +1341,13 @@ func (a *WidgetApp) Run() error {
 
 		case now := <-a.frameTicker.C:
 			a.coalescer.Tick()
+			// Flush reasoning if it's been waiting (16ms+ since last content)
+			a.reasoningMu.Lock()
+			hasReasoning := a.reasoningBuffer.Len() > 0 && now.Sub(a.reasoningLastFlush) >= 16*time.Millisecond
+			a.reasoningMu.Unlock()
+			if hasReasoning {
+				a.flushReasoningBuffer()
+			}
 			if a.updateAnimations(now) {
 				a.dirty = true
 			}
@@ -1588,11 +1612,20 @@ func (a *WidgetApp) update(msg Message) bool {
 		return true
 
 	case ReasoningMsg:
+		// Legacy: direct reasoning (bypassed by coalesced path)
+		a.chatView.AppendReasoning(m.Text)
+		a.statusBar.SetStatus("Thinking...")
+		return true
+
+	case ReasoningFlush:
+		// Coalesced reasoning batch
 		a.chatView.AppendReasoning(m.Text)
 		a.statusBar.SetStatus("Thinking...")
 		return true
 
 	case ReasoningEndMsg:
+		// Flush any remaining reasoning before collapsing
+		a.flushReasoningBuffer()
 		a.chatView.CollapseReasoning(m.Preview, m.Full)
 		return true
 
@@ -2135,6 +2168,7 @@ func (a *WidgetApp) handlePaletteCommand(id string) {
 // Quit stops the application.
 func (a *WidgetApp) Quit() {
 	a.running = false
+	a.stopAgentServer()
 	if a.onQuit != nil {
 		a.onQuit()
 	}
@@ -2305,9 +2339,32 @@ func (a *WidgetApp) StreamEnd(sessionID, fullText string) {
 	a.Post(StreamDone{SessionID: sessionID, FullText: fullText})
 }
 
-// AppendReasoning appends reasoning text to display. Thread-safe.
+// AppendReasoning appends reasoning text to display with coalescing. Thread-safe.
 func (a *WidgetApp) AppendReasoning(text string) {
-	a.Post(ReasoningMsg{Text: text})
+	a.reasoningMu.Lock()
+	a.reasoningBuffer.WriteString(text)
+	bufLen := a.reasoningBuffer.Len()
+	a.reasoningMu.Unlock()
+
+	// Flush immediately if buffer is large (64 chars is good for reasoning)
+	if bufLen >= 64 {
+		a.flushReasoningBuffer()
+	}
+}
+
+// flushReasoningBuffer flushes accumulated reasoning to display.
+func (a *WidgetApp) flushReasoningBuffer() {
+	a.reasoningMu.Lock()
+	if a.reasoningBuffer.Len() == 0 {
+		a.reasoningMu.Unlock()
+		return
+	}
+	text := a.reasoningBuffer.String()
+	a.reasoningBuffer.Reset()
+	a.reasoningLastFlush = time.Now()
+	a.reasoningMu.Unlock()
+
+	a.Post(ReasoningFlush{Text: text})
 }
 
 // CollapseReasoning collapses reasoning to preview. Thread-safe.
@@ -2709,6 +2766,56 @@ func buildRecorder(path, sessionID string) (runtime.Recorder, error) {
 		return recording.NewAsciicastRecorder(path, options)
 	default:
 		return recording.NewAsciicastRecorder(path, options)
+	}
+}
+
+// initAgentServer starts the agent API server for external debugging/testing.
+// The agent exposes the UI's accessibility tree via a JSONL protocol.
+func (a *WidgetApp) initAgentServer(addr string) {
+	if a == nil || addr == "" {
+		return
+	}
+
+	// Create agent with manual screen attachment
+	a.agent = agent.New(agent.Config{
+		DisableAutoAttach: true,
+		IncludeText:       true,
+	})
+	a.agent.SetScreen(a.screen)
+
+	// Create server
+	var err error
+	a.agentServer, err = agent.NewServer(agent.ServerOptions{
+		Addr:      addr,
+		Agent:     a.agent,
+		AllowText: true,
+	})
+	if err != nil {
+		log.Printf("agent server init failed: %v", err)
+		return
+	}
+
+	// Start server in background
+	a.agentCtx, a.agentCancel = context.WithCancel(context.Background())
+	go func() {
+		if err := a.agentServer.Serve(a.agentCtx); err != nil && a.agentCtx.Err() == nil {
+			log.Printf("agent server error: %v", err)
+		}
+	}()
+
+	log.Printf("agent server listening on %s", addr)
+}
+
+// stopAgentServer shuts down the agent API server.
+func (a *WidgetApp) stopAgentServer() {
+	if a == nil {
+		return
+	}
+	if a.agentCancel != nil {
+		a.agentCancel()
+	}
+	if a.agentServer != nil {
+		_ = a.agentServer.Close()
 	}
 }
 
