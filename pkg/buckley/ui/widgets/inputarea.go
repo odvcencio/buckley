@@ -1,7 +1,6 @@
 package widgets
 
 import (
-	"strconv"
 	"strings"
 
 	"github.com/odvcencio/fluffy-ui/accessibility"
@@ -27,15 +26,18 @@ const (
 type InputArea struct {
 	uiwidgets.FocusableBase
 
-	text      strings.Builder
-	cursorPos int
-	mode      InputMode
+	textarea  *uiwidgets.TextArea
+	modeLabel *uiwidgets.Label
+	panel     *uiwidgets.Panel
+	layout    *runtime.Flex
+
+	mode InputMode
 
 	// History navigation
-	history      []string // Past inputs (oldest first)
-	historyIndex int      // Current history position (-1 = not navigating)
-	historyMax   int      // Max history entries to keep
-	savedText    string   // Saved current text when navigating history
+	history      []string
+	historyIndex int
+	historyMax   int
+	savedText    string
 
 	// Minimum and maximum height
 	minHeight int
@@ -67,17 +69,14 @@ type InputArea struct {
 	onTriggerPicker       func()
 	onTriggerSearch       func()
 	onTriggerSlashCommand func()
-}
 
-type inputLine struct {
-	text  string
-	start int
-	end   int
+	suppressChange bool
+	textBounds     runtime.Rect
 }
 
 // NewInputArea creates a new input area widget.
 func NewInputArea() *InputArea {
-	return &InputArea{
+	input := &InputArea{
 		minHeight:    2,
 		maxHeight:    10,
 		historyIndex: -1,
@@ -94,6 +93,26 @@ func NewInputArea() *InputArea {
 		envSymbol:    "$",
 		searchSymbol: "/",
 	}
+
+	input.textarea = uiwidgets.NewTextArea()
+	input.textarea.SetLabel("Input")
+	input.textarea.SetStyle(input.textStyle)
+	input.textarea.SetFocusStyle(input.textStyle)
+	input.textarea.OnChange(func(text string) {
+		input.handleTextChange(text)
+	})
+
+	input.modeLabel = uiwidgets.NewLabel("")
+	input.layout = runtime.HBox(
+		runtime.Fixed(input.modeLabel),
+		runtime.Expanded(input.textarea),
+	)
+	input.panel = uiwidgets.NewPanel(input.layout)
+	input.panel.WithBorder(input.borderStyle)
+	input.panel.SetStyle(input.bgStyle)
+	input.syncModeIndicator()
+
+	return input
 }
 
 // AddToHistory adds an entry to the input history.
@@ -102,12 +121,10 @@ func (i *InputArea) AddToHistory(text string) {
 	if text == "" {
 		return
 	}
-	// Don't add duplicates of the most recent entry
 	if len(i.history) > 0 && i.history[len(i.history)-1] == text {
 		return
 	}
 	i.history = append(i.history, text)
-	// Trim to max size
 	if len(i.history) > i.historyMax {
 		i.history = i.history[len(i.history)-i.historyMax:]
 	}
@@ -120,13 +137,12 @@ func (i *InputArea) historyPrev() bool {
 		return false
 	}
 	if i.historyIndex == -1 {
-		// Save current text before navigating
-		i.savedText = i.text.String()
+		i.savedText = i.Text()
 		i.historyIndex = len(i.history) - 1
 	} else if i.historyIndex > 0 {
 		i.historyIndex--
 	} else {
-		return false // Already at oldest
+		return false
 	}
 	i.SetText(i.history[i.historyIndex])
 	return true
@@ -135,20 +151,18 @@ func (i *InputArea) historyPrev() bool {
 // historyNext navigates to the next history entry.
 func (i *InputArea) historyNext() bool {
 	if i.historyIndex == -1 {
-		return false // Not in history mode
+		return false
 	}
 	if i.historyIndex < len(i.history)-1 {
 		i.historyIndex++
 		i.SetText(i.history[i.historyIndex])
 	} else {
-		// Return to saved text
 		i.historyIndex = -1
 		i.SetText(i.savedText)
 	}
 	return true
 }
 
-// ResetHistory resets the history navigation state (call when text is modified).
 func (i *InputArea) resetHistoryNav() {
 	i.historyIndex = -1
 	i.savedText = ""
@@ -159,6 +173,17 @@ func (i *InputArea) SetStyles(bg, text, border backend.Style) {
 	i.bgStyle = bg
 	i.textStyle = text
 	i.borderStyle = border
+	if i.panel != nil {
+		i.panel.SetStyle(bg)
+		i.panel.WithBorder(border)
+	}
+	if i.textarea != nil {
+		i.textarea.SetStyle(text)
+		i.textarea.SetFocusStyle(text)
+	}
+	if i.modeLabel != nil {
+		i.syncModeIndicator()
+	}
 }
 
 // SetModeStyles sets the mode indicator styles.
@@ -167,6 +192,7 @@ func (i *InputArea) SetModeStyles(normal, shell, env, search backend.Style) {
 	i.shellMode = shell
 	i.envMode = env
 	i.searchMode = search
+	i.syncModeIndicator()
 }
 
 // SetCursorStyle sets the style used for the soft cursor.
@@ -218,41 +244,53 @@ func (i *InputArea) OnTriggerSlashCommand(fn func()) {
 
 // Text returns the current input text.
 func (i *InputArea) Text() string {
-	return i.text.String()
+	if i.textarea == nil {
+		return ""
+	}
+	return i.textarea.Text()
 }
 
-// SetText sets the input text.
+// SetText sets the input text without firing change callbacks.
 func (i *InputArea) SetText(text string) {
-	i.text.Reset()
-	i.text.WriteString(text)
-	i.cursorPos = i.text.Len()
+	if i.textarea == nil {
+		return
+	}
+	i.suppressChange = true
+	i.textarea.SetText(text)
+	i.suppressChange = false
 }
 
 // Clear clears the input.
 func (i *InputArea) Clear() {
-	i.text.Reset()
-	i.cursorPos = 0
-	i.mode = ModeNormal
+	i.SetText("")
+	i.setMode(ModeNormal)
 }
 
 // HasText returns true if there's text in the input.
 func (i *InputArea) HasText() bool {
-	return i.text.Len() > 0
+	return i.Text() != ""
 }
 
 // InsertText inserts text at the cursor position.
-// Used for paste operations.
 func (i *InputArea) InsertText(s string) {
-	if s == "" {
+	if i.textarea == nil || s == "" {
 		return
 	}
-	current := i.text.String()
-	i.text.Reset()
-	i.text.WriteString(current[:i.cursorPos])
-	i.text.WriteString(s)
-	i.text.WriteString(current[i.cursorPos:])
-	i.cursorPos += len(s)
-	i.notifyChange()
+	text := []rune(i.textarea.Text())
+	offset := i.textarea.CursorOffset()
+	if offset < 0 {
+		offset = 0
+	}
+	if offset > len(text) {
+		offset = len(text)
+	}
+	insert := []rune(s)
+	updated := append(text[:offset], append(insert, text[offset:]...)...)
+	i.suppressChange = true
+	i.textarea.SetText(string(updated))
+	i.textarea.SetCursorOffset(offset + len(insert))
+	i.suppressChange = false
+	i.notifyChange(string(updated))
 }
 
 // Mode returns the current input mode.
@@ -260,229 +298,78 @@ func (i *InputArea) Mode() InputMode {
 	return i.mode
 }
 
-// CursorPosition returns screen coordinates for the cursor.
+// CursorPosition returns the cursor position in characters.
 func (i *InputArea) CursorPosition() (x, y int) {
-	bounds := i.Bounds()
-	availWidth := bounds.Width - 4 // mode indicator + padding
-	if availWidth < 10 {
-		availWidth = 10
+	if i.textarea == nil {
+		return 0, 0
 	}
-
-	lines := i.inputLines(availWidth)
-	cursorLine, cursorCol := i.cursorLineCol(lines)
-
-	// Account for scrolling in tall input
-	maxVisibleLines := bounds.Height - 1 // minus border
-	if maxVisibleLines < 1 {
-		return bounds.X + 3, bounds.Y + 1
-	}
-	startLine := 0
-	if cursorLine >= startLine+maxVisibleLines {
-		startLine = cursorLine - maxVisibleLines + 1
-	}
-
-	visibleCursorLine := cursorLine - startLine
-	if visibleCursorLine < 0 {
-		visibleCursorLine = 0
-	}
-	if visibleCursorLine >= maxVisibleLines {
-		visibleCursorLine = maxVisibleLines - 1
-	}
-
-	return bounds.X + 3 + cursorCol, bounds.Y + 1 + visibleCursorLine
-}
-
-func (i *InputArea) moveCursorVertical(delta int) bool {
-	if delta == 0 {
-		return false
-	}
-	bounds := i.Bounds()
-	availWidth := bounds.Width - 4
-	if availWidth < 10 {
-		availWidth = 10
-	}
-	if availWidth <= 0 {
-		return false
-	}
-
-	lines := i.inputLines(availWidth)
-	if len(lines) < 2 {
-		return false
-	}
-	line, col := i.cursorLineCol(lines)
-	targetLine := line + delta
-	if targetLine < 0 || targetLine >= len(lines) {
-		return false
-	}
-	target := lines[targetLine]
-	if col > len(target.text) {
-		col = len(target.text)
-	}
-	i.cursorPos = target.start + col
-	return true
+	return i.textarea.CursorPosition()
 }
 
 // Measure returns the preferred size based on content.
 func (i *InputArea) Measure(constraints runtime.Constraints) runtime.Size {
-	availWidth := constraints.MaxWidth - 4
-	if availWidth < 10 {
-		availWidth = 10
+	width := constraints.MaxWidth
+	if width <= 0 {
+		width = constraints.MinWidth
 	}
-
-	lines := i.inputLines(availWidth)
-	lineCount := len(lines)
-	if lineCount == 0 {
-		lineCount = 1
+	if width <= 0 {
+		width = 1
 	}
-
-	// Add 1 for border, clamp to limits
-	height := lineCount + 1
+	borderPad := 2
+	labelSize := runtime.Size{Width: 0, Height: 1}
+	if i.modeLabel != nil {
+		labelSize = i.modeLabel.Measure(runtime.Constraints{MaxWidth: width, MaxHeight: constraints.MaxHeight})
+	}
+	textWidth := width - labelSize.Width - borderPad
+	if textWidth < 1 {
+		textWidth = 1
+	}
+	textHeight := 1
+	if i.textarea != nil {
+		textHeight = i.textarea.Measure(runtime.Constraints{MaxWidth: textWidth, MaxHeight: maxConstraint}).Height
+	}
+	height := textHeight + borderPad
 	if height < i.minHeight {
 		height = i.minHeight
 	}
-	if height > i.maxHeight {
+	if i.maxHeight > 0 && height > i.maxHeight {
 		height = i.maxHeight
 	}
+	return runtime.Size{Width: width, Height: height}
+}
 
-	return runtime.Size{
-		Width:  constraints.MaxWidth,
-		Height: height,
+// Layout positions the input area.
+func (i *InputArea) Layout(bounds runtime.Rect) {
+	i.FocusableBase.Layout(bounds)
+	if i.panel != nil {
+		i.panel.Layout(bounds)
+	}
+	if i.textarea != nil {
+		i.textBounds = i.textarea.Bounds()
 	}
 }
 
 // Render draws the input area.
 func (i *InputArea) Render(ctx runtime.RenderContext) {
-	bounds := i.Bounds()
-	if bounds.Width == 0 || bounds.Height == 0 {
+	if i.panel == nil {
 		return
 	}
+	i.syncModeIndicator()
+	i.panel.Render(ctx)
 
-	// Fill background
-	ctx.Buffer.Fill(bounds, ' ', i.bgStyle)
-
-	// Draw top border
-	for x := 0; x < bounds.Width; x++ {
-		ctx.Buffer.Set(bounds.X+x, bounds.Y, '─', i.borderStyle)
-	}
-
-	// Draw mode indicator
-	modeStyle, modeChar := i.modeIndicator()
-	ctx.Buffer.Set(bounds.X+1, bounds.Y+1, rune(modeChar[0]), modeStyle)
-
-	// Draw text with wrapping
-	availWidth := bounds.Width - 4
-	if availWidth < 10 {
-		availWidth = 10
-	}
-
-	lines := i.inputLines(availWidth)
-	if len(lines) == 0 {
-		lines = []inputLine{{text: "", start: 0, end: 0}}
-	}
-
-	// Calculate scroll
-	maxVisibleLines := bounds.Height - 1
-	cursorLine, _ := i.cursorLineCol(lines)
-	startLine := 0
-	if cursorLine >= startLine+maxVisibleLines {
-		startLine = cursorLine - maxVisibleLines + 1
-	}
-
-	// Render visible lines
-	for j := 0; j < maxVisibleLines && startLine+j < len(lines); j++ {
-		line := lines[startLine+j]
-		y := bounds.Y + 1 + j
-		ctx.Buffer.SetString(bounds.X+3, y, line.text, i.textStyle)
-	}
-
-	// Draw cursor if focused
-	if i.IsFocused() {
-		cursorX, cursorY := i.CursorPosition()
-		if cursorX >= bounds.X && cursorX < bounds.X+bounds.Width &&
-			cursorY >= bounds.Y && cursorY < bounds.Y+bounds.Height {
-			var ch rune = ' '
-			if i.cursorPos < i.text.Len() {
-				ch = rune(i.text.String()[i.cursorPos])
-				if ch == '\n' {
-					ch = ' '
-				}
+	if i.cursorStyleSet && i.IsFocused() && i.textarea != nil {
+		cx, cy := i.textarea.CursorPosition()
+		absX := i.textBounds.X + cx
+		absY := i.textBounds.Y + cy
+		if absX >= i.textBounds.X && absX < i.textBounds.X+i.textBounds.Width && absY >= i.textBounds.Y && absY < i.textBounds.Y+i.textBounds.Height {
+			cell := ctx.Buffer.Get(absX, absY)
+			r := cell.Rune
+			if r == 0 {
+				r = ' '
 			}
-			cursorStyle := i.textStyle.Reverse(true)
-			if i.cursorStyleSet {
-				cursorStyle = i.cursorStyle
-			}
-			ctx.Buffer.Set(cursorX, cursorY, ch, cursorStyle)
+			ctx.Buffer.Set(absX, absY, r, i.cursorStyle)
 		}
 	}
-}
-
-func (i *InputArea) inputLines(width int) []inputLine {
-	if width <= 0 {
-		width = 1
-	}
-	text := i.text.String()
-	if text == "" {
-		return []inputLine{{text: "", start: 0, end: 0}}
-	}
-
-	lines := make([]inputLine, 0, (len(text)/width)+1)
-	lineStart := 0
-	for idx := 0; idx <= len(text); idx++ {
-		if idx == len(text) || text[idx] == '\n' {
-			segment := text[lineStart:idx]
-			if segment == "" {
-				lines = append(lines, inputLine{text: "", start: lineStart, end: lineStart})
-			} else {
-				for segStart := 0; segStart < len(segment); segStart += width {
-					segEnd := segStart + width
-					if segEnd > len(segment) {
-						segEnd = len(segment)
-					}
-					lines = append(lines, inputLine{
-						text:  segment[segStart:segEnd],
-						start: lineStart + segStart,
-						end:   lineStart + segEnd,
-					})
-				}
-			}
-			lineStart = idx + 1
-		}
-	}
-
-	if len(lines) == 0 {
-		return []inputLine{{text: "", start: 0, end: 0}}
-	}
-	return lines
-}
-
-func (i *InputArea) cursorLineCol(lines []inputLine) (line, col int) {
-	if len(lines) == 0 {
-		return 0, 0
-	}
-	textLen := i.text.Len()
-	pos := i.cursorPos
-	if pos < 0 {
-		pos = 0
-	}
-	if pos > textLen {
-		pos = textLen
-	}
-
-	for idx, line := range lines {
-		if pos <= line.end {
-			col = pos - line.start
-			if col < 0 {
-				col = 0
-			}
-			if col > len(line.text) {
-				col = len(line.text)
-			}
-			return idx, col
-		}
-	}
-
-	last := lines[len(lines)-1]
-	return len(lines) - 1, len(last.text)
 }
 
 // HandleMessage processes keyboard input.
@@ -498,11 +385,10 @@ func (i *InputArea) HandleMessage(msg runtime.Message) runtime.HandleResult {
 
 	switch key.Key {
 	case terminal.KeyEnter:
-		text := strings.TrimSpace(i.text.String())
+		text := strings.TrimSpace(i.Text())
 		if text == "" {
 			return runtime.Handled()
 		}
-		// Add to history before submitting
 		i.AddToHistory(text)
 		mode := i.mode
 		if i.onSubmit != nil {
@@ -510,81 +396,27 @@ func (i *InputArea) HandleMessage(msg runtime.Message) runtime.HandleResult {
 		}
 		return runtime.WithCommand(runtime.Submit{Text: text})
 
-	case terminal.KeyBackspace:
-		if i.cursorPos > 0 {
-			text := i.text.String()
-			i.text.Reset()
-			i.text.WriteString(text[:i.cursorPos-1])
-			i.text.WriteString(text[i.cursorPos:])
-			i.cursorPos--
-			i.resetHistoryNav()
-			i.checkModeChange()
-			i.notifyChange()
-		}
-		return runtime.Handled()
-
-	case terminal.KeyDelete:
-		text := i.text.String()
-		if i.cursorPos < len(text) {
-			i.text.Reset()
-			i.text.WriteString(text[:i.cursorPos])
-			i.text.WriteString(text[i.cursorPos+1:])
-			i.resetHistoryNav()
-			i.notifyChange()
-		}
-		return runtime.Handled()
-
-	case terminal.KeyLeft:
-		if i.cursorPos > 0 {
-			i.cursorPos--
-		}
-		return runtime.Handled()
-
-	case terminal.KeyRight:
-		if i.cursorPos < i.text.Len() {
-			i.cursorPos++
-		}
-		return runtime.Handled()
-
 	case terminal.KeyUp:
-		// First try moving cursor up in multiline text
-		if i.moveCursorVertical(-1) {
-			return runtime.Handled()
+		if i.canMoveVertical(-1) {
+			return i.textarea.HandleMessage(msg)
 		}
-		// If can't move up (at first line), navigate history
 		if i.historyPrev() {
 			return runtime.Handled()
 		}
 		return runtime.Unhandled()
 
 	case terminal.KeyDown:
-		// First try moving cursor down in multiline text
-		if i.moveCursorVertical(1) {
-			return runtime.Handled()
+		if i.canMoveVertical(1) {
+			return i.textarea.HandleMessage(msg)
 		}
-		// If can't move down (at last line), navigate history
 		if i.historyNext() {
 			return runtime.Handled()
 		}
 		return runtime.Unhandled()
 
-	case terminal.KeyHome:
-		i.cursorPos = 0
-		return runtime.Handled()
-
-	case terminal.KeyEnd:
-		i.cursorPos = i.text.Len()
-		return runtime.Handled()
-
 	case terminal.KeyEscape:
-		i.mode = ModeNormal
-		if i.onModeChange != nil {
-			i.onModeChange(i.mode)
-		}
+		i.setMode(ModeNormal)
 		return runtime.WithCommand(runtime.Cancel{})
-
-	case terminal.KeyRune:
-		return i.handleRune(key.Rune)
 
 	case terminal.KeyCtrlC:
 		if i.HasText() {
@@ -592,63 +424,142 @@ func (i *InputArea) HandleMessage(msg runtime.Message) runtime.HandleResult {
 			return runtime.Handled()
 		}
 		return runtime.Unhandled()
-	}
 
-	return runtime.Unhandled()
-}
-
-func (i *InputArea) handleRune(r rune) runtime.HandleResult {
-	// Check for mode triggers at start of input
-	if i.text.Len() == 0 {
-		switch r {
-		case '!':
-			i.mode = ModeShell
-			if i.onModeChange != nil {
-				i.onModeChange(i.mode)
+	case terminal.KeyRune:
+		if i.textarea != nil && strings.TrimSpace(i.textarea.Text()) == "" {
+			switch key.Rune {
+			case '!':
+				i.setMode(ModeShell)
+			case '$':
+				i.setMode(ModeEnv)
+			case '/':
+				if i.onTriggerSlashCommand != nil {
+					i.onTriggerSlashCommand()
+					return runtime.Handled()
+				}
+				i.setMode(ModeNormal)
+			case '@':
+				if i.onTriggerPicker != nil {
+					i.onTriggerPicker()
+					return runtime.Handled()
+				}
+			default:
+				i.setMode(ModeNormal)
 			}
-		case '$':
-			i.mode = ModeEnv
-			if i.onModeChange != nil {
-				i.onModeChange(i.mode)
-			}
-		case '/':
-			// Trigger slash command palette for command selection
-			if i.onTriggerSlashCommand != nil {
-				i.onTriggerSlashCommand()
-				return runtime.Handled()
-			}
-			i.mode = ModeNormal
-		case '@':
-			if i.onTriggerPicker != nil {
-				i.onTriggerPicker()
-				return runtime.Handled()
-			}
-		default:
-			i.mode = ModeNormal
 		}
 	}
 
-	// Insert character
-	text := i.text.String()
-	i.text.Reset()
-	i.text.WriteString(text[:i.cursorPos])
-	i.text.WriteRune(r)
-	i.text.WriteString(text[i.cursorPos:])
-	i.cursorPos++
-	i.resetHistoryNav() // Reset history navigation when text is modified
-	i.notifyChange()
-
-	return runtime.Handled()
+	if i.textarea == nil {
+		return runtime.Unhandled()
+	}
+	return i.textarea.HandleMessage(msg)
 }
 
-func (i *InputArea) checkModeChange() {
-	// Reset mode if input is now empty
-	if i.text.Len() == 0 {
-		i.mode = ModeNormal
-		if i.onModeChange != nil {
-			i.onModeChange(i.mode)
-		}
+// ClipboardCopy returns the current text.
+func (i *InputArea) ClipboardCopy() (string, bool) {
+	if i.textarea == nil {
+		return "", false
 	}
+	return i.textarea.ClipboardCopy()
+}
+
+// ClipboardCut returns the current text and clears it.
+func (i *InputArea) ClipboardCut() (string, bool) {
+	if i.textarea == nil {
+		return "", false
+	}
+	text, ok := i.textarea.ClipboardCut()
+	if ok {
+		i.setMode(ModeNormal)
+	}
+	return text, ok
+}
+
+// ClipboardPaste inserts text from clipboard.
+func (i *InputArea) ClipboardPaste(text string) bool {
+	if text == "" {
+		return false
+	}
+	i.InsertText(text)
+	return true
+}
+
+// Bind attaches app services.
+func (i *InputArea) Bind(services runtime.Services) {
+	if i.textarea != nil {
+		i.textarea.Bind(services)
+	}
+}
+
+// Unbind releases app services.
+func (i *InputArea) Unbind() {
+	if i.textarea != nil {
+		i.textarea.Unbind()
+	}
+}
+
+// Focus forwards focus to the text area.
+func (i *InputArea) Focus() {
+	i.FocusableBase.Focus()
+	if i.textarea != nil {
+		i.textarea.Focus()
+	}
+}
+
+// Blur clears focus from the text area.
+func (i *InputArea) Blur() {
+	i.FocusableBase.Blur()
+	if i.textarea != nil {
+		i.textarea.Blur()
+	}
+}
+
+func (i *InputArea) handleTextChange(text string) {
+	if i.suppressChange {
+		return
+	}
+	i.resetHistoryNav()
+	i.checkModeChange(text)
+	i.notifyChange(text)
+}
+
+func (i *InputArea) notifyChange(text string) {
+	if i.onChange != nil {
+		i.onChange(text)
+	}
+}
+
+func (i *InputArea) checkModeChange(text string) {
+	if strings.TrimSpace(text) == "" {
+		i.setMode(ModeNormal)
+	}
+}
+
+func (i *InputArea) setMode(mode InputMode) {
+	if i.mode == mode {
+		return
+	}
+	i.mode = mode
+	i.syncModeIndicator()
+	if i.onModeChange != nil {
+		i.onModeChange(mode)
+	}
+}
+
+func (i *InputArea) syncModeIndicator() {
+	if i.modeLabel == nil {
+		return
+	}
+	style, symbol := i.modeIndicator()
+	if symbol == "" {
+		symbol = " "
+	}
+	text := symbol
+	if !strings.HasSuffix(text, " ") {
+		text += " "
+	}
+	i.modeLabel.SetText(text)
+	i.modeLabel.SetStyle(style)
 }
 
 func (i *InputArea) modeIndicator() (backend.Style, string) {
@@ -664,48 +575,31 @@ func (i *InputArea) modeIndicator() (backend.Style, string) {
 	}
 }
 
-func (i *InputArea) notifyChange() {
-	if i.onChange != nil {
-		i.onChange(i.text.String())
-	}
-}
-
-func (i *InputArea) ClipboardCopy() (string, bool) {
-	text := i.text.String()
-	if text == "" {
-		return "", false
-	}
-	return text, true
-}
-
-func (i *InputArea) ClipboardCut() (string, bool) {
-	text := i.text.String()
-	if text == "" {
-		return "", false
-	}
-	i.Clear()
-	i.notifyChange()
-	return text, true
-}
-
-func (i *InputArea) ClipboardPaste(text string) bool {
-	if text == "" {
+func (i *InputArea) canMoveVertical(delta int) bool {
+	if i.textarea == nil {
 		return false
 	}
-	i.InsertText(text)
-	return true
+	_, line := i.textarea.CursorPosition()
+	lines := strings.Count(i.textarea.Text(), "\n")
+	if delta < 0 {
+		return line > 0
+	}
+	return line < lines
 }
 
 var _ clipboard.Target = (*InputArea)(nil)
 
+// AccessibleRole returns the accessibility role.
 func (i *InputArea) AccessibleRole() accessibility.Role {
 	return accessibility.RoleTextbox
 }
 
+// AccessibleLabel returns the accessibility label.
 func (i *InputArea) AccessibleLabel() string {
 	return "Input"
 }
 
+// AccessibleDescription returns the accessibility description.
 func (i *InputArea) AccessibleDescription() string {
 	switch i.mode {
 	case ModeShell:
@@ -719,16 +613,17 @@ func (i *InputArea) AccessibleDescription() string {
 	}
 }
 
+// AccessibleState returns the accessibility state set.
 func (i *InputArea) AccessibleState() accessibility.StateSet {
 	return accessibility.StateSet{}
 }
 
+// AccessibleValue returns the accessibility value.
 func (i *InputArea) AccessibleValue() *accessibility.ValueInfo {
-	if i.text.Len() == 0 {
-		return nil
-	}
-	count := len([]rune(i.text.String()))
-	return &accessibility.ValueInfo{Text: strconv.Itoa(count) + " chars"}
+	text := i.Text()
+	return &accessibility.ValueInfo{Text: text}
 }
+
+const maxConstraint = 10000
 
 var _ accessibility.Accessible = (*InputArea)(nil)

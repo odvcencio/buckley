@@ -907,6 +907,57 @@ func (b *Buffer) VisibleLineAt(row int) (VisibleLine, bool) {
 	return VisibleLine{}, false
 }
 
+// VisibleLineAtRow returns the visible line at the given absolute row index.
+// The returned data is a deep copy, safe to use after the buffer is mutated.
+func (b *Buffer) VisibleLineAtRow(row int) (VisibleLine, bool) {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+
+	if row < 0 || row >= b.totalRows {
+		return VisibleLine{}, false
+	}
+
+	rowIndex := 0
+	for lineIdx, line := range b.lines {
+		for wrapIdx, wrapped := range line.Wrapped {
+			if rowIndex == row {
+				var spansCopy []Span
+				if len(wrapped.Spans) > 0 {
+					spansCopy = make([]Span, len(wrapped.Spans))
+					copy(spansCopy, wrapped.Spans)
+				}
+				vl := VisibleLine{
+					Content:                wrapped.Text,
+					Spans:                  spansCopy,
+					Style:                  line.Style,
+					Source:                 line.Source,
+					LineIndex:              lineIdx,
+					WrapIndex:              wrapIdx,
+					RowIndex:               row,
+					IsCode:                 line.IsCode,
+					Language:               line.Language,
+					MessageID:              line.MessageID,
+					CodeLineNumberWidth:    line.CodeLineNumberWidth,
+					CodeLineNumberOptional: line.CodeLineNumberOptional,
+				}
+				if b.hasSelection {
+					vl.Selected = b.isRowSelected(lineIdx, wrapIdx, wrapped.Text)
+				}
+				if b.searchQuery != "" {
+					vl.SearchHighlights = b.getSearchHighlights(lineIdx, wrapIdx, wrapped.Text)
+				}
+				return vl, true
+			}
+			rowIndex++
+			if rowIndex > row {
+				break
+			}
+		}
+	}
+
+	return VisibleLine{}, false
+}
+
 // LineAt returns the raw line at the given index.
 func (b *Buffer) LineAt(index int) (Line, bool) {
 	b.mu.RLock()

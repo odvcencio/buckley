@@ -21,6 +21,11 @@ import (
 type ChatView struct {
 	uiwidgets.Base
 	buffer *scrollback.Buffer
+	list   *uiwidgets.VirtualList[scrollback.VisibleLine]
+
+	layout     *runtime.Flex
+	listBounds runtime.Rect
+	services   runtime.Services
 
 	// Styles for different message types
 	userStyle      backend.Style
@@ -48,6 +53,14 @@ type ChatView struct {
 	metadataMode  string
 	modelName     string
 
+	reasoningPanel     *uiwidgets.Panel
+	reasoningAccordion *uiwidgets.Accordion
+	reasoningSection   *uiwidgets.AccordionSection
+	reasoningText      *TextBlock
+	reasoningVisible   bool
+	reasoningPreview   string
+	reasoningBuilder   strings.Builder
+
 	nextMessageID    int
 	lastMessageID    int
 	messages         map[int]messageEntry
@@ -57,6 +70,32 @@ type ChatView struct {
 
 	// Callbacks
 	onScrollChange func(top, total, viewHeight int)
+}
+
+type chatListAdapter struct {
+	chat *ChatView
+}
+
+func (a chatListAdapter) Count() int {
+	if a.chat == nil || a.chat.buffer == nil {
+		return 0
+	}
+	return a.chat.buffer.RowCount()
+}
+
+func (a chatListAdapter) Item(index int) scrollback.VisibleLine {
+	if a.chat == nil || a.chat.buffer == nil {
+		return scrollback.VisibleLine{}
+	}
+	line, _ := a.chat.buffer.VisibleLineAtRow(index)
+	return line
+}
+
+func (a chatListAdapter) Render(item scrollback.VisibleLine, index int, selected bool, ctx runtime.RenderContext) {
+	if a.chat == nil {
+		return
+	}
+	a.chat.renderVisibleLine(ctx, item)
 }
 
 type messageEntry struct {
@@ -72,7 +111,7 @@ type messageEntry struct {
 func NewChatView() *ChatView {
 	// Use larger default buffer size - Layout will resize to actual terminal dimensions.
 	// This prevents content added before first Layout from being wrapped too narrow.
-	return &ChatView{
+	chat := &ChatView{
 		buffer:           scrollback.NewBuffer(200, 50),
 		userStyle:        backend.DefaultStyle(),
 		assistantStyle:   backend.DefaultStyle(),
@@ -90,6 +129,19 @@ func NewChatView() *ChatView {
 		hoveredCodeStart: -1,
 		hoveredCodeEnd:   -1,
 	}
+	chat.list = uiwidgets.NewVirtualList[scrollback.VisibleLine](chatListAdapter{chat: chat})
+	chat.list.SetItemHeight(1)
+	chat.list.SetOverscan(4)
+	chat.list.SetLabel("Chat messages")
+
+	chat.reasoningText = NewTextBlock("")
+	chat.reasoningSection = uiwidgets.NewAccordionSection("Reasoning", chat.reasoningText, uiwidgets.WithSectionExpanded(false))
+	chat.reasoningAccordion = uiwidgets.NewAccordion(chat.reasoningSection)
+	chat.reasoningAccordion.SetAllowMultiple(false)
+	chat.reasoningPanel = uiwidgets.NewPanel(chat.reasoningAccordion).WithBorder(backend.DefaultStyle())
+	chat.reasoningPanel.SetTitle("Reasoning")
+	chat.rebuildLayout()
+	return chat
 }
 
 // SetStyles configures the message styles.
@@ -99,6 +151,9 @@ func (c *ChatView) SetStyles(user, assistant, system, tool, thinking backend.Sty
 	c.systemStyle = system
 	c.toolStyle = tool
 	c.thinkingStyle = thinking
+	if c.reasoningText != nil {
+		c.reasoningText.SetStyle(thinking)
+	}
 }
 
 // SetUIStyles configures scrollbar, selection, and background styles.
@@ -108,6 +163,14 @@ func (c *ChatView) SetUIStyles(scrollbar, thumb, selection, search, background b
 	c.selectionStyle = selection
 	c.searchStyle = search
 	c.bgStyle = background
+	if c.list != nil {
+		c.list.SetStyle(background)
+		c.list.SetSelectedStyle(selection)
+	}
+	if c.reasoningPanel != nil {
+		c.reasoningPanel.SetStyle(background)
+		c.reasoningPanel.WithBorder(scrollbar)
+	}
 }
 
 // SetMarkdownRenderer configures markdown rendering for the chat view.
@@ -151,6 +214,7 @@ func (c *ChatView) AddMessage(content, source string) {
 			Italic: true,
 			Dim:    true,
 		}, "thinking")
+		c.syncListOffset()
 		return
 	default:
 		now := time.Now()
@@ -179,6 +243,7 @@ func (c *ChatView) AddMessage(content, source string) {
 		c.buffer.AppendMessage(lines)
 		c.lastSource = source
 		c.lastContent = content
+		c.syncListOffset()
 	}
 }
 
@@ -205,6 +270,7 @@ func (c *ChatView) AppendText(text string) {
 	}
 	lines := c.buildMessageLines(c.lastContent, c.lastSource, messageTime, c.lastMessageID)
 	c.buffer.ReplaceLastMessage(lines)
+	c.syncListOffset()
 }
 
 func (c *ChatView) buildMessageLines(content, source string, messageTime time.Time, messageID int) []scrollback.Line {
@@ -458,50 +524,66 @@ func (c *ChatView) roleStripPrefix(source string) []scrollback.Span {
 // RemoveThinkingIndicator removes the thinking indicator if present.
 func (c *ChatView) RemoveThinkingIndicator() {
 	c.buffer.RemoveLastLineIfSource("thinking")
+	c.syncListOffset()
 }
 
 // AppendReasoning appends streaming reasoning text (dimmed).
 func (c *ChatView) AppendReasoning(text string) {
-	c.buffer.AppendReasoningLine(text, scrollback.LineStyle{
-		FG:     extractFG(c.thinkingStyle),
-		Italic: true,
-		Dim:    true,
-	})
+	if strings.TrimSpace(text) == "" {
+		return
+	}
+	c.reasoningBuilder.WriteString(text)
+	c.setReasoningVisible(true)
+	if c.reasoningText != nil {
+		c.reasoningText.SetText(c.reasoningBuilder.String())
+	}
+	c.Invalidate()
 }
 
 // CollapseReasoning collapses reasoning block to preview.
 func (c *ChatView) CollapseReasoning(preview, full string) {
-	c.buffer.ReplaceReasoningBlock(preview, full, scrollback.LineStyle{
-		FG:     extractFG(c.thinkingStyle),
-		Italic: true,
-		Dim:    true,
-	})
+	c.reasoningPreview = strings.TrimSpace(preview)
+	c.reasoningBuilder.Reset()
+	c.reasoningBuilder.WriteString(full)
+	c.setReasoningVisible(true)
+	if c.reasoningSection != nil {
+		title := "Reasoning"
+		if c.reasoningPreview != "" {
+			title = "Reasoning: " + c.reasoningPreview
+		}
+		c.reasoningSection.SetTitle(title)
+		c.reasoningSection.SetExpanded(false)
+	}
+	if c.reasoningText != nil {
+		c.reasoningText.SetText(full)
+	}
+	c.Invalidate()
 }
 
 // ClearReasoningBlock clears reasoning state for new message.
 func (c *ChatView) ClearReasoningBlock() {
-	c.buffer.ClearReasoningBlock()
+	c.reasoningBuilder.Reset()
+	c.reasoningPreview = ""
+	c.setReasoningVisible(false)
+	if c.reasoningText != nil {
+		c.reasoningText.SetText("")
+	}
+	c.Invalidate()
 }
 
 // ToggleReasoning toggles reasoning block between collapsed and expanded.
 // Returns true if a toggle occurred.
 func (c *ChatView) ToggleReasoning() bool {
-	expandedStyle := scrollback.LineStyle{
-		FG:     extractFG(c.thinkingStyle),
-		Italic: true,
-		Dim:    true,
+	if !c.reasoningVisible || c.reasoningSection == nil {
+		return false
 	}
-	collapsedStyle := scrollback.LineStyle{
-		FG:     extractFG(c.thinkingStyle),
-		Italic: true,
-		Dim:    true,
-	}
-	return c.buffer.ToggleReasoningBlock(expandedStyle, collapsedStyle)
+	c.reasoningSection.SetExpanded(!c.reasoningSection.Expanded())
+	return true
 }
 
 // IsReasoningLine returns true if the line at the given index is part of a reasoning block.
 func (c *ChatView) IsReasoningLine(lineIdx int) bool {
-	return c.buffer.IsReasoningLine(lineIdx)
+	return false
 }
 
 // Clear clears all messages.
@@ -517,6 +599,13 @@ func (c *ChatView) Clear() {
 	c.hoveredMessageID = 0
 	c.hoveredCodeStart = -1
 	c.hoveredCodeEnd = -1
+	c.reasoningBuilder.Reset()
+	c.reasoningPreview = ""
+	c.setReasoningVisible(false)
+	if c.reasoningText != nil {
+		c.reasoningText.SetText("")
+	}
+	c.syncListOffset()
 }
 
 // GetContent returns all text content from the chat view (last N lines).
@@ -527,36 +616,42 @@ func (c *ChatView) GetContent(limit int) []string {
 // ScrollUp scrolls up by n lines.
 func (c *ChatView) ScrollUp(n int) {
 	c.buffer.ScrollUp(n)
+	c.syncListOffset()
 	c.notifyScroll()
 }
 
 // ScrollDown scrolls down by n lines.
 func (c *ChatView) ScrollDown(n int) {
 	c.buffer.ScrollDown(n)
+	c.syncListOffset()
 	c.notifyScroll()
 }
 
 // PageUp scrolls up by one page.
 func (c *ChatView) PageUp() {
 	c.buffer.PageUp()
+	c.syncListOffset()
 	c.notifyScroll()
 }
 
 // PageDown scrolls down by one page.
 func (c *ChatView) PageDown() {
 	c.buffer.PageDown()
+	c.syncListOffset()
 	c.notifyScroll()
 }
 
 // ScrollToTop scrolls to the beginning.
 func (c *ChatView) ScrollToTop() {
 	c.buffer.ScrollToTop()
+	c.syncListOffset()
 	c.notifyScroll()
 }
 
 // ScrollToBottom scrolls to the end.
 func (c *ChatView) ScrollToBottom() {
 	c.buffer.ScrollToBottom()
+	c.syncListOffset()
 	c.notifyScroll()
 }
 
@@ -567,11 +662,11 @@ func (c *ChatView) ScrollPosition() (top, total, viewHeight int) {
 
 // PositionForPoint maps screen coordinates to a buffer position.
 func (c *ChatView) PositionForPoint(x, y int) (line, col int, ok bool) {
-	bounds := c.Bounds()
+	bounds := c.listBounds
 	if x < bounds.X || y < bounds.Y || y >= bounds.Y+bounds.Height {
 		return 0, 0, false
 	}
-	if x >= bounds.X+bounds.Width-1 {
+	if x >= bounds.X+bounds.Width {
 		return 0, 0, false
 	}
 	row := y - bounds.Y
@@ -685,7 +780,28 @@ func (c *ChatView) Measure(constraints runtime.Constraints) runtime.Size {
 // Layout updates the scrollback buffer size.
 func (c *ChatView) Layout(bounds runtime.Rect) {
 	c.Base.Layout(bounds)
-	c.buffer.Resize(bounds.Width, bounds.Height)
+	content := bounds
+	if content.Width > 0 {
+		content.Width -= 1
+	}
+	if content.Width < 0 {
+		content.Width = 0
+	}
+	if c.layout == nil {
+		c.rebuildLayout()
+	}
+	if c.layout != nil {
+		c.layout.Layout(content)
+	}
+	if c.list != nil {
+		c.listBounds = c.list.Bounds()
+	} else {
+		c.listBounds = content
+	}
+	if c.buffer != nil {
+		c.buffer.Resize(c.listBounds.Width, c.listBounds.Height)
+	}
+	c.syncListOffset()
 }
 
 // Render draws the chat view.
@@ -696,115 +812,16 @@ func (c *ChatView) Render(ctx runtime.RenderContext) {
 	}
 	ctx.Clear(c.bgStyle)
 
-	// Get visible lines from scrollback
-	lines := c.buffer.GetVisibleLines()
-	hoveredCodeStart := c.hoveredCodeStart
-	hoveredCodeEnd := c.hoveredCodeEnd
-
-	for i, line := range lines {
-		if i >= bounds.Height {
-			break
-		}
-		y := bounds.Y + i
-		maxX := bounds.X + bounds.Width - 1
-		hideLineNumbers := line.IsCode &&
-			line.CodeLineNumberOptional &&
-			line.CodeLineNumberWidth > 0 &&
-			(line.LineIndex < hoveredCodeStart || line.LineIndex > hoveredCodeEnd)
-
-		if line.Selected {
-			text := line.Content
-			if hideLineNumbers {
-				runes := []rune(text)
-				for i := 0; i < line.CodeLineNumberWidth && i < len(runes); i++ {
-					runes[i] = ' '
-				}
-				text = string(runes)
-			}
-			if len([]rune(text)) > bounds.Width-1 {
-				text = string([]rune(text)[:bounds.Width-1])
-			}
-			ctx.Buffer.SetString(bounds.X, y, text, c.selectionStyle)
-			for x := bounds.X + len([]rune(text)); x < maxX; x++ {
-				ctx.Buffer.Set(x, y, ' ', c.selectionStyle)
-			}
-			continue
-		}
-
-		if len(line.Spans) > 0 {
-			highlightSet := make(map[int]bool, len(line.SearchHighlights))
-			for _, idx := range line.SearchHighlights {
-				highlightSet[idx] = true
-			}
-
-			x := bounds.X
-			pos := 0
-			for _, span := range line.Spans {
-				for _, r := range span.Text {
-					if x >= maxX {
-						break
-					}
-					if hideLineNumbers && pos < line.CodeLineNumberWidth {
-						ctx.Buffer.Set(x, y, ' ', c.codeBlockBG)
-						x++
-						pos++
-						continue
-					}
-					style := span.Style
-					if highlightSet[pos] {
-						style = c.searchStyle
-					}
-					ctx.Buffer.Set(x, y, r, style)
-					x++
-					pos++
-				}
-				if x >= maxX {
-					break
-				}
-			}
-
-			if line.IsCode {
-				fillStyle := c.codeBlockBG
-				for ; x < maxX; x++ {
-					ctx.Buffer.Set(x, y, ' ', fillStyle)
-				}
-			}
-			continue
-		}
-
-		// Fallback for plain lines
-		style := c.styleForSource(line.Source)
-		if line.Style.Bold {
-			style = style.Bold(true)
-		}
-		if line.Style.Italic {
-			style = style.Italic(true)
-		}
-		if line.Style.Dim {
-			style = style.Dim(true)
-		}
-
-		text := line.Content
-		if hideLineNumbers {
-			runes := []rune(text)
-			for i := 0; i < line.CodeLineNumberWidth && i < len(runes); i++ {
-				runes[i] = ' '
-			}
-			text = string(runes)
-		}
-		if len([]rune(text)) > bounds.Width-1 {
-			text = string([]rune(text)[:bounds.Width-1])
-		}
-		ctx.Buffer.SetString(bounds.X, y, text, style)
-		if line.IsCode {
-			fillStyle := c.codeBlockBG
-			for x := bounds.X + len([]rune(text)); x < maxX; x++ {
-				ctx.Buffer.Set(x, y, ' ', fillStyle)
-			}
-		}
+	if c.layout == nil {
+		c.rebuildLayout()
+	}
+	if c.layout != nil {
+		c.layout.Render(ctx)
 	}
 
-	if c.metadataMode == "hover" && c.hoveredMessageID > 0 {
+	// Hover metadata overlay
+	lines := c.buffer.GetVisibleLines()
+	if c.metadataMode == "hover" && c.hoveredMessageID > 0 && c.listBounds.Width > 0 {
 		meta := c.metadataTextForMessage(c.hoveredMessageID)
 		if meta != "" {
 			metaLine := -1
@@ -814,15 +831,15 @@ func (c *ChatView) Render(ctx runtime.RenderContext) {
 					break
 				}
 			}
-			if metaLine >= 0 && metaLine < bounds.Height {
-				availableWidth := bounds.Width - 1
+			if metaLine >= 0 && metaLine < c.listBounds.Height {
+				availableWidth := c.listBounds.Width
 				metaLen := len([]rune(meta))
 				if metaLen <= availableWidth {
 					content := strings.TrimRight(lines[metaLine].Content, " ")
 					contentLen := len([]rune(content))
-					startX := bounds.X + availableWidth - metaLen
-					if startX > bounds.X+contentLen {
-						ctx.Buffer.SetString(startX, bounds.Y+metaLine, meta, c.metadataStyle)
+					startX := c.listBounds.X + availableWidth - metaLen
+					if startX > c.listBounds.X+contentLen {
+						ctx.Buffer.SetString(startX, c.listBounds.Y+metaLine, meta, c.metadataStyle)
 					}
 				}
 			}
@@ -833,9 +850,120 @@ func (c *ChatView) Render(ctx runtime.RenderContext) {
 	c.renderScrollbar(ctx)
 }
 
+func (c *ChatView) renderVisibleLine(ctx runtime.RenderContext, line scrollback.VisibleLine) {
+	bounds := ctx.Bounds
+	if bounds.Width <= 0 || bounds.Height <= 0 {
+		return
+	}
+
+	hoveredCodeStart := c.hoveredCodeStart
+	hoveredCodeEnd := c.hoveredCodeEnd
+	maxX := bounds.X + bounds.Width
+	hideLineNumbers := line.IsCode &&
+		line.CodeLineNumberOptional &&
+		line.CodeLineNumberWidth > 0 &&
+		(line.LineIndex < hoveredCodeStart || line.LineIndex > hoveredCodeEnd)
+
+	if line.Selected {
+		text := line.Content
+		if hideLineNumbers {
+			runes := []rune(text)
+			for i := 0; i < line.CodeLineNumberWidth && i < len(runes); i++ {
+				runes[i] = ' '
+			}
+			text = string(runes)
+		}
+		runes := []rune(text)
+		if len(runes) > bounds.Width {
+			text = string(runes[:bounds.Width])
+		}
+		ctx.Buffer.SetString(bounds.X, bounds.Y, text, c.selectionStyle)
+		for x := bounds.X + len([]rune(text)); x < maxX; x++ {
+			ctx.Buffer.Set(x, bounds.Y, ' ', c.selectionStyle)
+		}
+		return
+	}
+
+	if len(line.Spans) > 0 {
+		highlightSet := make(map[int]bool, len(line.SearchHighlights))
+		for _, idx := range line.SearchHighlights {
+			highlightSet[idx] = true
+		}
+
+		x := bounds.X
+		pos := 0
+		for _, span := range line.Spans {
+			for _, r := range span.Text {
+				if x >= maxX {
+					break
+				}
+				if hideLineNumbers && pos < line.CodeLineNumberWidth {
+					ctx.Buffer.Set(x, bounds.Y, ' ', c.codeBlockBG)
+					x++
+					pos++
+					continue
+				}
+				style := span.Style
+				if highlightSet[pos] {
+					style = c.searchStyle
+				}
+				ctx.Buffer.Set(x, bounds.Y, r, style)
+				x++
+				pos++
+			}
+			if x >= maxX {
+				break
+			}
+		}
+
+		if line.IsCode {
+			fillStyle := c.codeBlockBG
+			for ; x < maxX; x++ {
+				ctx.Buffer.Set(x, bounds.Y, ' ', fillStyle)
+			}
+		}
+		return
+	}
+
+	// Fallback for plain lines
+	style := c.styleForSource(line.Source)
+	if line.Style.Bold {
+		style = style.Bold(true)
+	}
+	if line.Style.Italic {
+		style = style.Italic(true)
+	}
+	if line.Style.Dim {
+		style = style.Dim(true)
+	}
+
+	text := line.Content
+	if hideLineNumbers {
+		runes := []rune(text)
+		for i := 0; i < line.CodeLineNumberWidth && i < len(runes); i++ {
+			runes[i] = ' '
+		}
+		text = string(runes)
+	}
+	runes := []rune(text)
+	if len(runes) > bounds.Width {
+		text = string(runes[:bounds.Width])
+	}
+	ctx.Buffer.SetString(bounds.X, bounds.Y, text, style)
+	if line.IsCode {
+		fillStyle := c.codeBlockBG
+		for x := bounds.X + len([]rune(text)); x < maxX; x++ {
+			ctx.Buffer.Set(x, bounds.Y, ' ', fillStyle)
+		}
+	}
+}
+
 // renderScrollbar draws the scrollbar on the right edge.
 func (c *ChatView) renderScrollbar(ctx runtime.RenderContext) {
-	bounds := c.Bounds()
+	bounds := c.listBounds
+	if bounds.Width <= 0 || bounds.Height <= 0 {
+		return
+	}
 	top, total, viewH := c.buffer.ScrollPosition()
 
 	if total <= viewH {
@@ -846,7 +974,7 @@ func (c *ChatView) renderScrollbar(ctx runtime.RenderContext) {
 	thumbSize := max(1, (viewH*viewH)/total)
 	thumbPos := (top * (viewH - thumbSize)) / (total - viewH)
 
-	scrollX := bounds.X + bounds.Width - 1
+	scrollX := bounds.X + bounds.Width
 
 	for y := 0; y < bounds.Height; y++ {
 		var r rune
@@ -866,6 +994,11 @@ func (c *ChatView) renderScrollbar(ctx runtime.RenderContext) {
 func (c *ChatView) HandleMessage(msg runtime.Message) runtime.HandleResult {
 	switch m := msg.(type) {
 	case runtime.KeyMsg:
+		if c.layout != nil {
+			if result := c.layout.HandleMessage(msg); result.Handled {
+				return result
+			}
+		}
 		switch m.Key {
 		case terminal.KeyUp:
 			c.ScrollUp(1)
@@ -881,6 +1014,11 @@ func (c *ChatView) HandleMessage(msg runtime.Message) runtime.HandleResult {
 			return runtime.Handled()
 		}
 	case runtime.MouseMsg:
+		if c.layout != nil {
+			if result := c.layout.HandleMessage(msg); result.Handled {
+				return result
+			}
+		}
 		return c.handleMouse(m)
 	}
 
@@ -888,16 +1026,6 @@ func (c *ChatView) HandleMessage(msg runtime.Message) runtime.HandleResult {
 }
 
 func (c *ChatView) handleMouse(m runtime.MouseMsg) runtime.HandleResult {
-	// Handle left click on reasoning blocks
-	if m.Action == runtime.MousePress && m.Button == runtime.MouseLeft {
-		lineIndex, _, ok := c.PositionForPoint(m.X, m.Y)
-		if ok && c.IsReasoningLine(lineIndex) {
-			if c.ToggleReasoning() {
-				return runtime.Handled()
-			}
-		}
-	}
-
 	// Handle hover (mouse move without button)
 	if m.Button != runtime.MouseNone || m.Action != runtime.MouseRelease {
 		return runtime.Unhandled()
@@ -960,6 +1088,46 @@ func (c *ChatView) notifyScroll() {
 		top, total, viewH := c.buffer.ScrollPosition()
 		c.onScrollChange(top, total, viewH)
 	}
+}
+
+func (c *ChatView) rebuildLayout() {
+	children := make([]runtime.FlexChild, 0, 2)
+	if c.reasoningVisible && c.reasoningPanel != nil {
+		children = append(children, runtime.Fixed(c.reasoningPanel))
+	}
+	if c.list != nil {
+		children = append(children, runtime.Expanded(c.list))
+	}
+	c.layout = runtime.VBox(children...)
+}
+
+func (c *ChatView) setReasoningVisible(visible bool) {
+	if c.reasoningVisible == visible {
+		return
+	}
+	c.reasoningVisible = visible
+	c.rebuildLayout()
+	c.services.Relayout()
+	c.Invalidate()
+}
+
+func (c *ChatView) syncListOffset() {
+	if c.list == nil || c.buffer == nil {
+		return
+	}
+	top, _, _ := c.buffer.ScrollPosition()
+	if top < 0 {
+		top = 0
+	}
+	c.list.ScrollToOffset(top)
+}
+
+// ReasoningContains reports whether a screen point falls within the reasoning panel.
+func (c *ChatView) ReasoningContains(x, y int) bool {
+	if !c.reasoningVisible || c.reasoningPanel == nil {
+		return false
+	}
+	return c.reasoningPanel.Bounds().Contains(x, y)
 }
 
 // Style helper functions - extract info from backend.Style
@@ -1054,6 +1222,27 @@ func (c *ChatView) ScrollToEnd() {
 var _ clipboard.Target = (*ChatView)(nil)
 var _ scroll.Controller = (*ChatView)(nil)
 var _ accessibility.Accessible = (*ChatView)(nil)
+var _ runtime.ChildProvider = (*ChatView)(nil)
+var _ runtime.Bindable = (*ChatView)(nil)
+var _ runtime.Unbindable = (*ChatView)(nil)
+
+// Bind stores app services for layout invalidation.
+func (c *ChatView) Bind(services runtime.Services) {
+	c.services = services
+}
+
+// Unbind clears app services.
+func (c *ChatView) Unbind() {
+	c.services = runtime.Services{}
+}
+
+// ChildWidgets returns child widgets for proper widget tree traversal.
+func (c *ChatView) ChildWidgets() []runtime.Widget {
+	if c.layout == nil {
+		return nil
+	}
+	return c.layout.ChildWidgets()
+}
 
 // AccessibleRole returns the accessibility role for the chat view.
 func (c *ChatView) AccessibleRole() accessibility.Role {

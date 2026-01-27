@@ -26,8 +26,8 @@ func TestSidebar_New(t *testing.T) {
 	if !s.showTouches {
 		t.Error("showTouches should be true by default")
 	}
-	if s.showRecentFiles {
-		t.Error("showRecentFiles should be false by default")
+	if !s.showRecentFiles {
+		t.Error("showRecentFiles should be true by default")
 	}
 }
 
@@ -218,43 +218,27 @@ func TestSidebar_HandleMessage_SectionToggles(t *testing.T) {
 	}
 }
 
-func TestSidebar_HandleMessage_Scroll(t *testing.T) {
+func TestSidebar_HandleMessage_TabSwitch(t *testing.T) {
 	s := NewSidebar()
-	s.SetPlanTasks([]PlanTask{
-		{Name: "1", Status: TaskCompleted},
-		{Name: "2", Status: TaskCompleted},
-		{Name: "3", Status: TaskCompleted},
-		{Name: "4", Status: TaskCompleted},
-		{Name: "5", Status: TaskCompleted},
-		{Name: "6", Status: TaskCompleted},
-		{Name: "7", Status: TaskCompleted},
-		{Name: "8", Status: TaskCompleted},
-		{Name: "9", Status: TaskCompleted},
-		{Name: "10", Status: TaskCompleted},
-	})
+	if s.tabs == nil {
+		t.Fatal("expected tabs to be initialized")
+	}
+	s.tabs.Focus()
 
-	// Scroll down
-	result := s.HandleMessage(runtime.KeyMsg{Key: terminal.KeyDown})
+	result := s.HandleMessage(runtime.KeyMsg{Key: terminal.KeyRight})
 	if !result.Handled {
-		t.Error("down should be handled")
+		t.Fatal("expected right key to switch tabs")
 	}
-	if s.planScrollOffset != 1 {
-		t.Errorf("expected scroll offset 1, got %d", s.planScrollOffset)
+	if s.tabs.SelectedIndex() != 1 {
+		t.Fatalf("expected tab index 1, got %d", s.tabs.SelectedIndex())
 	}
 
-	// Scroll up
-	result = s.HandleMessage(runtime.KeyMsg{Key: terminal.KeyUp})
+	result = s.HandleMessage(runtime.KeyMsg{Key: terminal.KeyLeft})
 	if !result.Handled {
-		t.Error("up should be handled")
+		t.Fatal("expected left key to switch tabs")
 	}
-	if s.planScrollOffset != 0 {
-		t.Errorf("expected scroll offset 0, got %d", s.planScrollOffset)
-	}
-
-	// Scroll up at top shouldn't go negative
-	s.HandleMessage(runtime.KeyMsg{Key: terminal.KeyUp})
-	if s.planScrollOffset != 0 {
-		t.Errorf("scroll offset should not go negative, got %d", s.planScrollOffset)
+	if s.tabs.SelectedIndex() != 0 {
+		t.Fatalf("expected tab index 0, got %d", s.tabs.SelectedIndex())
 	}
 }
 
@@ -284,99 +268,57 @@ func TestSidebar_Render(t *testing.T) {
 	}
 }
 
-func TestSidebar_Render_PlanScrollOffset(t *testing.T) {
+func TestSidebar_UpdatePlanTableRows(t *testing.T) {
 	s := NewSidebar()
 	s.SetPlanTasks([]PlanTask{
 		{Name: "Alpha", Status: TaskPending},
-		{Name: "Beta", Status: TaskPending},
-		{Name: "Gamma", Status: TaskPending},
-		{Name: "Delta", Status: TaskPending},
-		{Name: "Epsilon", Status: TaskPending},
-		{Name: "Zeta", Status: TaskPending},
+		{Name: "Beta", Status: TaskInProgress},
 	})
-	s.planScrollOffset = 1
-	s.Layout(runtime.Rect{X: 0, Y: 0, Width: 30, Height: 6})
 
-	buf := runtime.NewBuffer(30, 6)
-	ctx := runtime.RenderContext{Buffer: buf}
-	s.Render(ctx)
-
-	cell := buf.Get(5, 1)
-	if cell.Rune != 'B' {
-		t.Fatalf("expected plan to start with Beta, got %q", string(cell.Rune))
+	if s.planTable == nil {
+		t.Fatal("expected plan table to be initialized")
+	}
+	if len(s.planTable.Rows) != 2 {
+		t.Fatalf("expected 2 plan rows, got %d", len(s.planTable.Rows))
+	}
+	if s.planTable.Rows[0][0] != "Alpha" {
+		t.Fatalf("expected first row Alpha, got %q", s.planTable.Rows[0][0])
+	}
+	if s.planTable.Rows[1][1] != "running" {
+		t.Fatalf("expected second row status running, got %q", s.planTable.Rows[1][1])
 	}
 }
 
-func TestSidebar_HandleMessage_MouseTogglePlan(t *testing.T) {
+func TestSidebar_UpdateFilesTree(t *testing.T) {
 	s := NewSidebar()
-	s.SetPlanTasks([]PlanTask{{Name: "Alpha", Status: TaskPending}})
-	s.Layout(runtime.Rect{X: 0, Y: 0, Width: 30, Height: 8})
+	s.SetProjectPath("/tmp/buckley")
+	s.SetRecentFiles([]string{"pkg/main.go", "pkg/ui/sidebar.go"})
 
-	buf := runtime.NewBuffer(30, 8)
-	ctx := runtime.RenderContext{Buffer: buf, Bounds: runtime.Rect{X: 0, Y: 0, Width: 30, Height: 8}}
-	s.Render(ctx)
-
-	headerY := -1
-	for _, hit := range s.sectionHits {
-		if hit.Kind == sectionPlan {
-			headerY = hit.HeaderY
-			break
-		}
+	if s.filesTree == nil || s.filesTree.Root == nil {
+		t.Fatal("expected files tree root")
 	}
-	if headerY < 0 {
-		t.Fatal("expected plan section hit")
+	if s.filesTree.Root.Label != "buckley" {
+		t.Fatalf("expected root label buckley, got %q", s.filesTree.Root.Label)
 	}
-
-	msg := runtime.MouseMsg{X: 2, Y: headerY, Button: runtime.MouseLeft, Action: runtime.MousePress}
-	result := s.HandleMessage(msg)
-	if !result.Handled {
-		t.Fatal("expected mouse click to be handled")
-	}
-	if s.showPlan {
-		t.Fatal("expected showPlan to toggle off")
+	if len(s.filesTree.Root.Children) == 0 {
+		t.Fatal("expected file nodes under root")
 	}
 }
 
-func TestSidebar_HandleMessage_MouseSelectRecentFile(t *testing.T) {
+func TestSidebar_UpdateTouchesTree(t *testing.T) {
 	s := NewSidebar()
-	s.SetRecentFiles([]string{"alpha.txt", "beta.txt"})
-	s.SetShowRecentFiles(true)
-	s.Layout(runtime.Rect{X: 0, Y: 0, Width: 30, Height: 8})
+	s.SetActiveTouches([]TouchSummary{
+		{Path: "pkg/main.go", Operation: "write", Ranges: []TouchRange{{Start: 1, End: 3}}},
+	})
 
-	buf := runtime.NewBuffer(30, 8)
-	ctx := runtime.RenderContext{Buffer: buf, Bounds: runtime.Rect{X: 0, Y: 0, Width: 30, Height: 8}}
-	s.Render(ctx)
-
-	var hit sidebarSectionHit
-	found := false
-	for _, h := range s.sectionHits {
-		if h.Kind == sectionRecentFiles {
-			hit = h
-			found = true
-			break
-		}
+	if s.touchesTree == nil || s.touchesTree.Root == nil {
+		t.Fatal("expected touches tree root")
 	}
-	if !found {
-		t.Fatal("expected recent files section hit")
+	if len(s.touchesTree.Root.Children) == 0 {
+		t.Fatal("expected touch children")
 	}
-	if hit.BodyStart > hit.BodyEnd {
-		t.Fatal("expected recent files body range")
-	}
-
-	msg := runtime.MouseMsg{X: 2, Y: hit.BodyStart, Button: runtime.MouseLeft, Action: runtime.MousePress}
-	result := s.HandleMessage(msg)
-	if !result.Handled {
-		t.Fatal("expected mouse click to be handled")
-	}
-	if len(result.Commands) != 1 {
-		t.Fatalf("expected 1 command, got %d", len(result.Commands))
-	}
-	cmd, ok := result.Commands[0].(runtime.FileSelected)
-	if !ok {
-		t.Fatalf("expected FileSelected command, got %T", result.Commands[0])
-	}
-	if cmd.Path != "alpha.txt" {
-		t.Fatalf("expected alpha.txt, got %q", cmd.Path)
+	if s.touchesTree.Root.Children[0].Label != "pkg/main.go" {
+		t.Fatalf("expected touch label pkg/main.go, got %q", s.touchesTree.Root.Children[0].Label)
 	}
 }
 

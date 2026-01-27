@@ -319,9 +319,18 @@ func NewController(cfg ControllerConfig) (*Controller, error) {
 	}
 	webBaseURL := ""
 	metadataMode := ""
+	audioCfg := AudioConfig{}
 	if cfg.Config != nil {
 		webBaseURL = resolveWebBaseURL(cfg.Config)
 		metadataMode = cfg.Config.UI.MessageMetadata
+		audioCfg = AudioConfig{
+			Enabled:      cfg.Config.UI.Audio.Enabled,
+			AssetsPath:   cfg.Config.UI.Audio.AssetsPath,
+			MasterVolume: cfg.Config.UI.Audio.MasterVolume,
+			SFXVolume:    cfg.Config.UI.Audio.SFXVolume,
+			MusicVolume:  cfg.Config.UI.Audio.MusicVolume,
+			Muted:        cfg.Config.UI.Audio.Muted,
+		}
 	}
 	app, err := NewWidgetApp(WidgetAppConfig{
 		Theme:           theme.DefaultTheme(),
@@ -334,6 +343,7 @@ func NewController(cfg ControllerConfig) (*Controller, error) {
 		UseTextLabels:   cfg.Config != nil && cfg.Config.UI.UseTextLabels,
 		MessageMetadata: metadataMode,
 		WebBaseURL:      webBaseURL,
+		Audio:           audioCfg,
 		AgentSocket:     cfg.AgentSocket,
 	})
 	if err != nil {

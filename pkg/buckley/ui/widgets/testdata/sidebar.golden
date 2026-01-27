@@ -1,20 +1,25 @@
-│▼ Tools Running              
-│  ⣾ shell                    
-│      go test ./...          
-│▼ Plan 1/3                   
-│   ●●●                       
-│  ○   ●                      
-│  ○   ○ 1/3 33%              
-│  ○   ○                      
-│   ○○○                       
-│  ✓ Setup environment        
-│  → Write tests              
-│  ○ Deploy to prod           
-│▼ Current Task               
-│  Building project           
-│  ████████████████░░░░░░░░░ 6
-│                             
-│▼ Context 47%                
-│  ██████░░░░░░ 47% →         
-│  ▄                          
-│▶ Recent Files               
+ Status  Files                                                                  
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                

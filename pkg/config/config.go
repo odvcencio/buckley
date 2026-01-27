@@ -602,6 +602,16 @@ type CompactionConfig struct {
 	Models           []string `yaml:"models"`
 }
 
+// UIAudioConfig defines audio settings for the TUI.
+type UIAudioConfig struct {
+	Enabled      bool   `yaml:"enabled"`
+	AssetsPath   string `yaml:"assets_path"`
+	MasterVolume int    `yaml:"master_volume"`
+	SFXVolume    int    `yaml:"sfx_volume"`
+	MusicVolume  int    `yaml:"music_volume"`
+	Muted        bool   `yaml:"muted"`
+}
+
 // UIConfig defines UI behavior
 type UIConfig struct {
 	ActivityPanelDefault      string `yaml:"activity_panel_default"` // "collapsed" or "expanded"
@@ -614,10 +624,11 @@ type UIConfig struct {
 	SidebarMinWidth int `yaml:"sidebar_min_width"` // Minimum sidebar width (default 16)
 	SidebarMaxWidth int `yaml:"sidebar_max_width"` // Maximum sidebar width (default 60)
 	// Accessibility settings
-	HighContrast    bool   `yaml:"high_contrast"`    // Use high-contrast color scheme
-	UseTextLabels   bool   `yaml:"use_text_labels"`  // Add text labels to color-only indicators
-	ReduceAnimation bool   `yaml:"reduce_animation"` // Reduce or disable animations
-	MessageMetadata string `yaml:"message_metadata"` // "always", "hover", or "never"
+	HighContrast    bool          `yaml:"high_contrast"`    // Use high-contrast color scheme
+	UseTextLabels   bool          `yaml:"use_text_labels"`  // Add text labels to color-only indicators
+	ReduceAnimation bool          `yaml:"reduce_animation"` // Reduce or disable animations
+	MessageMetadata string        `yaml:"message_metadata"` // "always", "hover", or "never"
+	Audio           UIAudioConfig `yaml:"audio"`
 }
 
 // WebUIConfig defines web UI integration settings.
@@ -1074,6 +1085,14 @@ func DefaultConfig() *Config {
 			SidebarMinWidth:           16,
 			SidebarMaxWidth:           60,
 			MessageMetadata:           "always",
+			Audio: UIAudioConfig{
+				Enabled:      false,
+				AssetsPath:   "",
+				MasterVolume: 100,
+				SFXVolume:    80,
+				MusicVolume:  60,
+				Muted:        false,
+			},
 		},
 		WebUI: WebUIConfig{
 			BaseURL: "",

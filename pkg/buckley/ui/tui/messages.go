@@ -4,6 +4,7 @@ package tui
 import (
 	"time"
 
+	buckleywidgets "github.com/odvcencio/buckley/pkg/buckley/ui/widgets"
 	"github.com/odvcencio/fluffy-ui/progress"
 	"github.com/odvcencio/fluffy-ui/toast"
 )
@@ -317,3 +318,38 @@ const (
 	DiffAdd
 	DiffRemove
 )
+
+// --- Audio Events ---
+
+// AudioSFXMsg schedules a sound effect cue.
+type AudioSFXMsg struct {
+	Cue string
+}
+
+func (AudioSFXMsg) isMessage() {}
+
+// --- Sidebar Events ---
+
+// SidebarSnapshot captures the complete sidebar state for restoration.
+type SidebarSnapshot struct {
+	CurrentTask        string
+	TaskProgress       int
+	PlanTasks          []buckleywidgets.PlanTask
+	RunningTools       []buckleywidgets.RunningTool
+	ToolHistory        []buckleywidgets.ToolHistoryEntry
+	ActiveTouches      []buckleywidgets.TouchSummary
+	RecentFiles        []string
+	RLMStatus          *buckleywidgets.RLMStatus
+	RLMScratchpad      []buckleywidgets.RLMScratchpadEntry
+	CircuitStatus      *buckleywidgets.CircuitStatus
+	Experiment         string
+	ExperimentStatus   string
+	ExperimentVariants []buckleywidgets.ExperimentVariant
+}
+
+// SidebarStateMsg updates the sidebar with a complete state snapshot.
+type SidebarStateMsg struct {
+	Snapshot SidebarSnapshot
+}
+
+func (SidebarStateMsg) isMessage() {}

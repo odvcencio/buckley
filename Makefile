@@ -72,3 +72,30 @@ clean:
 	@echo "Cleaning build artifacts..."
 	rm -f buckley
 	rm -rf pkg/ipc/ui/assets pkg/ipc/ui/index.html
+
+# Agent E2E Test targets
+.PHONY: agent-test-build
+agent-test-build:
+	@echo "Building agent test driver..."
+	mkdir -p scripts/agent-tests/.bin
+	go build -o scripts/agent-tests/.bin/agent-test-driver scripts/agent-tests/*.go
+
+.PHONY: agent-test-list
+agent-test-list: agent-test-build
+	@echo "Available agent test scenarios..."
+	@./scripts/agent-tests/runner.sh --list
+
+.PHONY: agent-test-smoke
+agent-test-smoke: agent-test-build
+	@echo "Running agent smoke test..."
+	@./scripts/agent-tests/runner.sh --scenario scripts/agent-tests/scenarios/smoke.json --verbose
+
+.PHONY: agent-test-all
+agent-test-all: agent-test-build
+	@echo "Running all agent E2E tests..."
+	@./scripts/agent-tests/runner.sh --scenario scripts/agent-tests/scenarios/ --verbose
+
+.PHONY: agent-test-demo
+agent-test-demo: agent-test-build
+	@echo "Running agent test demo mode..."
+	@./scripts/agent-tests/runner.sh --verbose

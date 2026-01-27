@@ -9,34 +9,19 @@ import (
 
 	"github.com/odvcencio/fluffy-ui/backend"
 	"github.com/odvcencio/fluffy-ui/runtime"
+	uitesting "github.com/odvcencio/fluffy-ui/testing"
 )
 
 var updateSnapshots = flag.Bool("update-snapshots", false, "Update golden snapshot files")
 
-// renderToString renders a widget to a string for snapshot comparison.
-func renderToString(w runtime.Widget, width, height int) string {
-	buf := runtime.NewBuffer(width, height)
-
-	constraints := runtime.Constraints{MaxWidth: width, MaxHeight: height}
-	w.Measure(constraints)
-	w.Layout(runtime.Rect{X: 0, Y: 0, Width: width, Height: height})
-
-	ctx := runtime.RenderContext{Buffer: buf}
-	w.Render(ctx)
-
-	var sb strings.Builder
-	for y := 0; y < height; y++ {
-		for x := 0; x < width; x++ {
-			cell := buf.Get(x, y)
-			if cell.Rune == 0 {
-				sb.WriteRune(' ')
-			} else {
-				sb.WriteRune(cell.Rune)
-			}
-		}
-		sb.WriteRune('\n')
+// renderSnapshot renders via the simulation backend for snapshot comparison.
+func renderSnapshot(w runtime.Widget, width, height int) string {
+	be := uitesting.RenderWidget(w, width, height)
+	output := be.Capture()
+	if !strings.HasSuffix(output, "\n") {
+		output += "\n"
 	}
-	return sb.String()
+	return output
 }
 
 // assertSnapshot compares rendered output against a golden file.
@@ -84,7 +69,7 @@ func TestSnapshot_InputArea(t *testing.T) {
 	)
 	ia.Focus()
 
-	output := renderToString(ia, 80, 3)
+	output := renderSnapshot(ia, 80, 3)
 	assertSnapshot(t, "inputarea", output)
 }
 
@@ -97,7 +82,7 @@ func TestSnapshot_Header(t *testing.T) {
 		backend.DefaultStyle(),
 	)
 
-	output := renderToString(h, 80, 1)
+	output := renderSnapshot(h, 80, 1)
 	assertSnapshot(t, "header", output)
 }
 
@@ -110,7 +95,7 @@ func TestSnapshot_StatusBar(t *testing.T) {
 		backend.DefaultStyle(),
 	)
 
-	output := renderToString(s, 80, 1)
+	output := renderSnapshot(s, 80, 1)
 	assertSnapshot(t, "statusbar", output)
 }
 
@@ -136,7 +121,7 @@ func TestSnapshot_Sidebar(t *testing.T) {
 		backend.DefaultStyle(),
 	)
 
-	output := renderToString(s, 30, 20)
+	output := renderSnapshot(s, 30, 20)
 	assertSnapshot(t, "sidebar", output)
 }
 
@@ -157,7 +142,7 @@ func TestSnapshot_Approval(t *testing.T) {
 	)
 	a.Focus()
 
-	output := renderToString(a, 60, 15)
+	output := renderSnapshot(a, 60, 15)
 	assertSnapshot(t, "approval", output)
 }
 
@@ -186,6 +171,6 @@ func TestSnapshot_ApprovalWithDiff(t *testing.T) {
 	)
 	a.Focus()
 
-	output := renderToString(a, 60, 18)
+	output := renderSnapshot(a, 60, 18)
 	assertSnapshot(t, "approval_diff", output)
 }

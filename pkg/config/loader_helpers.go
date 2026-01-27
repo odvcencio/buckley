@@ -841,6 +841,24 @@ func mergeConfigs(base, override *Config, raw map[string]any) {
 	if override.UI.MessageMetadata != "" {
 		base.UI.MessageMetadata = override.UI.MessageMetadata
 	}
+	if boolFieldSet(raw, "ui", "audio", "enabled") {
+		base.UI.Audio.Enabled = override.UI.Audio.Enabled
+	}
+	if boolFieldSet(raw, "ui", "audio", "assets_path") {
+		base.UI.Audio.AssetsPath = override.UI.Audio.AssetsPath
+	}
+	if boolFieldSet(raw, "ui", "audio", "master_volume") {
+		base.UI.Audio.MasterVolume = override.UI.Audio.MasterVolume
+	}
+	if boolFieldSet(raw, "ui", "audio", "sfx_volume") {
+		base.UI.Audio.SFXVolume = override.UI.Audio.SFXVolume
+	}
+	if boolFieldSet(raw, "ui", "audio", "music_volume") {
+		base.UI.Audio.MusicVolume = override.UI.Audio.MusicVolume
+	}
+	if boolFieldSet(raw, "ui", "audio", "muted") {
+		base.UI.Audio.Muted = override.UI.Audio.Muted
+	}
 	if override.WebUI.BaseURL != "" {
 		base.WebUI.BaseURL = override.WebUI.BaseURL
 	}

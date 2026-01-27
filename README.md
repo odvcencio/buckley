@@ -190,6 +190,22 @@ Full docs at [buckley.draco.quest](https://buckley.draco.quest)
 go test ./pkg/orchestrator # Specific package
 ```
 
+### Self-Healing E2E Tests
+
+Buckley includes an AI-powered E2E testing framework that adapts to UI changes:
+
+```bash
+# Terminal 1: Start Buckley with agent socket
+./buckley --agent-socket unix:/tmp/buckley.sock
+
+# Terminal 2: Run self-healing tests
+make agent-test-smoke      # Run smoke test
+make agent-test-all        # Run all scenarios
+make agent-test-list       # List available scenarios
+```
+
+Unlike traditional E2E tests that break when UI changes, these tests use **semantic matching** to find widgets by intent rather than brittle selectors. See [`scripts/agent-tests/`](scripts/agent-tests/) for implementation details.
+
 ---
 
 ## License
