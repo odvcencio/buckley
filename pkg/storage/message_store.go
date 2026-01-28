@@ -2,6 +2,7 @@ package storage
 
 import (
 	"database/sql"
+	"fmt"
 	"strings"
 	"time"
 )
@@ -318,4 +319,111 @@ func nullIfEmpty(value string) any {
 		return nil
 	}
 	return value
+}
+
+// SaveMessagesBatch efficiently saves multiple messages in a single transaction.
+// This reduces database round-trips compared to calling SaveMessage for each message.
+func (s *Store) SaveMessagesBatch(messages []*Message) error {
+	if len(messages) == 0 {
+		return nil
+	}
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin batch transaction: %w", err)
+	}
+
+	stmt, err := tx.Prepare(`
+		INSERT INTO messages (session_id, role, content, content_json, content_type, reasoning, timestamp, tokens, is_summary, is_truncated)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`)
+	if err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("prepare batch insert: %w", err)
+	}
+	defer stmt.Close()
+
+	now := time.Now()
+	totalTokens := 0
+	var sessionID string
+	var latest time.Time
+
+	for _, msg := range messages {
+		if msg == nil {
+			continue
+		}
+		if sessionID == "" {
+			sessionID = msg.SessionID
+		}
+		if msg.Timestamp.IsZero() {
+			msg.Timestamp = now
+		}
+		if msg.Timestamp.After(latest) {
+			latest = msg.Timestamp
+		}
+		totalTokens += msg.Tokens
+
+		result, err := stmt.Exec(
+			msg.SessionID,
+			msg.Role,
+			msg.Content,
+			nullIfEmpty(msg.ContentJSON),
+			defaultContentType(msg.ContentType),
+			nullIfEmpty(msg.Reasoning),
+			msg.Timestamp,
+			msg.Tokens,
+			msg.IsSummary,
+			msg.IsTruncated,
+		)
+		if err != nil {
+			_ = tx.Rollback()
+			return fmt.Errorf("batch insert message: %w", err)
+		}
+
+		id, err := result.LastInsertId()
+		if err != nil {
+			_ = tx.Rollback()
+			return fmt.Errorf("get last insert id: %w", err)
+		}
+		msg.ID = id
+	}
+
+	// Update session stats in a single query
+	if sessionID != "" {
+		update := `
+			UPDATE sessions
+			SET message_count = message_count + ?,
+			    total_tokens = total_tokens + ?,
+			    last_active = ?
+			WHERE session_id = ?
+		`
+		if _, err := tx.Exec(update, len(messages), totalTokens, latest, sessionID); err != nil {
+			_ = tx.Rollback()
+			return fmt.Errorf("update session stats: %w", err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit batch transaction: %w", err)
+	}
+
+	// Notify after successful commit
+	for _, msg := range messages {
+		if msg == nil {
+			continue
+		}
+		msgCopy := *msg
+		s.notify(newEvent(EventMessageCreated, msg.SessionID, msg.ID, msgCopy))
+	}
+
+	if sessionID != "" {
+		s.notify(newEvent(EventSessionUpdated, sessionID, sessionID, map[string]any{
+			"lastActive":    now,
+			"messageDelta":  len(messages),
+			"tokensDelta":   totalTokens,
+			"latestMessage": latest,
+		}))
+	}
+
+	return nil
 }

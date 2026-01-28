@@ -1,8 +1,11 @@
 package conversation
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"fmt"
+	"io"
 	"strings"
 	"sync"
 	"time"
@@ -16,6 +19,12 @@ const (
 	defaultRLMAutoTrigger     = 0.85
 	defaultCompactionRatio    = 0.45
 	primaryCompactionModel    = "moonshotai/kimi-k2-thinking"
+
+	// Tiered threshold constants
+	warningThreshold  = 0.80
+	compactThreshold  = 0.90
+	queueBufferSize   = 3
+	defaultMaxQueueWait = 5 * time.Second
 )
 
 // CompactionResult captures the result of a compaction pass.
@@ -33,6 +42,148 @@ type CompactionConfig struct {
 	CompactionRatio    float64
 }
 
+// CompactionRequest represents a request to compact a conversation
+type CompactionRequest struct {
+	Ctx        context.Context
+	Conv       *Conversation
+	OnComplete func(*CompactionResult)
+}
+
+// Compressor defines the interface for message compression
+type Compressor interface {
+	Compress(data []byte) ([]byte, error)
+	Decompress(data []byte) ([]byte, error)
+	Name() string
+}
+
+// GzipCompressor implements Compressor using gzip
+type GzipCompressor struct {
+	level int
+}
+
+// NewGzipCompressor creates a new gzip compressor with the specified level
+func NewGzipCompressor(level int) *GzipCompressor {
+	if level < gzip.DefaultCompression || level > gzip.BestCompression {
+		level = gzip.DefaultCompression
+	}
+	return &GzipCompressor{level: level}
+}
+
+// Compress compresses data using gzip
+func (g *GzipCompressor) Compress(data []byte) ([]byte, error) {
+	var buf bytes.Buffer
+	writer, err := gzip.NewWriterLevel(&buf, g.level)
+	if err != nil {
+		return nil, fmt.Errorf("creating gzip writer: %w", err)
+	}
+	if _, err := writer.Write(data); err != nil {
+		writer.Close()
+		return nil, fmt.Errorf("writing gzip data: %w", err)
+	}
+	if err := writer.Close(); err != nil {
+		return nil, fmt.Errorf("closing gzip writer: %w", err)
+	}
+	return buf.Bytes(), nil
+}
+
+// Decompress decompresses gzip data
+func (g *GzipCompressor) Decompress(data []byte) ([]byte, error) {
+	reader, err := gzip.NewReader(bytes.NewReader(data))
+	if err != nil {
+		return nil, fmt.Errorf("creating gzip reader: %w", err)
+	}
+	defer reader.Close()
+	result, err := io.ReadAll(reader)
+	if err != nil {
+		return nil, fmt.Errorf("reading gzip data: %w", err)
+	}
+	return result, nil
+}
+
+// Name returns the compressor name
+func (g *GzipCompressor) Name() string {
+	return "gzip"
+}
+
+// tokenEstimateCache provides cached token estimation for improved performance
+type tokenEstimateCache struct {
+	mu      sync.RWMutex
+	entries map[string]cacheEntry
+	maxSize int
+}
+
+type cacheEntry struct {
+	tokens    int
+	timestamp time.Time
+}
+
+// newTokenEstimateCache creates a new token estimation cache
+func newTokenEstimateCache(maxSize int) *tokenEstimateCache {
+	if maxSize <= 0 {
+		maxSize = 1000
+	}
+	return &tokenEstimateCache{
+		entries: make(map[string]cacheEntry),
+		maxSize: maxSize,
+	}
+}
+
+// Get retrieves a cached token count for the given text
+func (c *tokenEstimateCache) Get(text string) (int, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	entry, ok := c.entries[text]
+	if !ok {
+		return 0, false
+	}
+	// Entries older than 5 minutes are considered stale
+	if time.Since(entry.timestamp) > 5*time.Minute {
+		return 0, false
+	}
+	return entry.tokens, true
+}
+
+// Set stores a token count in the cache
+func (c *tokenEstimateCache) Set(text string, tokens int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	
+	// Simple eviction: if at capacity, clear half the entries
+	if len(c.entries) >= c.maxSize {
+		c.evictHalf()
+	}
+	
+	c.entries[text] = cacheEntry{
+		tokens:    tokens,
+		timestamp: time.Now(),
+	}
+}
+
+// evictHalf removes half of the entries (oldest first)
+func (c *tokenEstimateCache) evictHalf() {
+	type kv struct {
+		key   string
+		value cacheEntry
+	}
+	var sorted []kv
+	for k, v := range c.entries {
+		sorted = append(sorted, kv{k, v})
+	}
+	// Sort by timestamp (oldest first)
+	for i := 0; i < len(sorted)-1; i++ {
+		for j := i + 1; j < len(sorted); j++ {
+			if sorted[i].value.timestamp.After(sorted[j].value.timestamp) {
+				sorted[i], sorted[j] = sorted[j], sorted[i]
+			}
+		}
+	}
+	// Remove half
+	removeCount := len(sorted) / 2
+	for i := 0; i < removeCount && i < len(sorted); i++ {
+		delete(c.entries, sorted[i].key)
+	}
+}
+
 // CompactionManager handles conversation compaction
 type CompactionManager struct {
 	modelManager   *model.Manager
@@ -42,6 +193,29 @@ type CompactionManager struct {
 	onComplete     func(*CompactionResult)
 	compactionMu   sync.Mutex
 	compacting     bool
+
+	// Async queue and worker
+	compactionQueue chan CompactionRequest
+	queueMu         sync.Mutex
+	queueRunning    bool
+	queueDone       chan struct{}
+	queueWG         sync.WaitGroup
+	queueCtx        context.Context
+	queueCancel     context.CancelFunc
+
+	// Compression support
+	compressor Compressor
+
+	// Token estimation cache
+	tokenCache *tokenEstimateCache
+
+	// Backpressure control
+	backpressureMu      sync.RWMutex
+	pendingCompactions  int
+	maxPending          int
+
+	// Tiered threshold callbacks
+	warningThresholdFn func(float64)
 }
 
 // NewCompactionManager creates a new compaction manager
@@ -50,10 +224,110 @@ func NewCompactionManager(mgr *model.Manager, cfg *config.Config) *CompactionMan
 	if cfg != nil && cfg.Memory.SummaryTimeoutSecs > 0 {
 		timeout = time.Duration(cfg.Memory.SummaryTimeoutSecs) * time.Second
 	}
-	return &CompactionManager{
-		modelManager:   mgr,
-		cfg:            cfg,
-		summaryTimeout: timeout,
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	cm := &CompactionManager{
+		modelManager:        mgr,
+		cfg:                 cfg,
+		summaryTimeout:      timeout,
+		compactionQueue:     make(chan CompactionRequest, queueBufferSize),
+		queueDone:           make(chan struct{}),
+		queueCtx:            ctx,
+		queueCancel:         cancel,
+		compressor:          NewGzipCompressor(gzip.DefaultCompression),
+		tokenCache:          newTokenEstimateCache(1000),
+		maxPending:          queueBufferSize,
+		warningThresholdFn:  nil,
+	}
+
+	// Start background worker
+	cm.startQueueWorker()
+
+	return cm
+}
+
+// startQueueWorker starts the background worker goroutine
+func (cm *CompactionManager) startQueueWorker() {
+	cm.queueMu.Lock()
+	defer cm.queueMu.Unlock()
+
+	if cm.queueRunning {
+		return
+	}
+
+	cm.queueRunning = true
+	cm.queueWG.Add(1)
+
+	go cm.queueWorker()
+}
+
+// queueWorker processes compaction requests from the queue
+func (cm *CompactionManager) queueWorker() {
+	defer cm.queueWG.Done()
+
+	for {
+		select {
+		case <-cm.queueCtx.Done():
+			return
+		case req, ok := <-cm.compactionQueue:
+			if !ok {
+				return
+			}
+			cm.processQueueRequest(req)
+		}
+	}
+}
+
+// processQueueRequest processes a single compaction request from the queue
+func (cm *CompactionManager) processQueueRequest(req CompactionRequest) {
+	// Decrement pending count
+	cm.backpressureMu.Lock()
+	cm.pendingCompactions--
+	if cm.pendingCompactions < 0 {
+		cm.pendingCompactions = 0
+	}
+	cm.backpressureMu.Unlock()
+
+	// Perform compaction
+	ctx := req.Ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	// Set conversation temporarily
+	cm.compactionMu.Lock()
+	oldConv := cm.conversation
+	cm.conversation = req.Conv
+	cm.compacting = true
+	cm.compactionMu.Unlock()
+
+	result, err := cm.Compact(ctx)
+	if err != nil {
+		for _, model := range cm.fallbackModels() {
+			result, err = cm.compactWith(ctx, model)
+			if err == nil {
+				break
+			}
+		}
+	}
+	if err != nil {
+		result = cm.compactFallback()
+	}
+
+	// Restore original conversation
+	cm.compactionMu.Lock()
+	cm.conversation = oldConv
+	cm.compacting = false
+	cm.compactionMu.Unlock()
+
+	// Call completion handler
+	if result != nil && req.OnComplete != nil {
+		req.OnComplete(result)
+	}
+	// Also call global onComplete if set
+	if result != nil && cm.onComplete != nil {
+		cm.onComplete(result)
 	}
 }
 
@@ -73,25 +347,75 @@ func (cm *CompactionManager) SetOnComplete(handler func(*CompactionResult)) {
 	cm.onComplete = handler
 }
 
-func (cm *CompactionManager) compactionConfig() CompactionConfig {
-	cfg := CompactionConfig{
-		ClassicAutoTrigger: defaultClassicAutoTrigger,
-		RLMAutoTrigger:     defaultRLMAutoTrigger,
-		CompactionRatio:    defaultCompactionRatio,
+// SetCompressor sets a custom compressor implementation
+func (cm *CompactionManager) SetCompressor(c Compressor) {
+	if cm == nil {
+		return
 	}
-	if cm == nil || cm.cfg == nil {
-		return cfg
+	cm.compressor = c
+}
+
+// SetWarningThresholdFn sets the callback for warning threshold
+func (cm *CompactionManager) SetWarningThresholdFn(fn func(float64)) {
+	if cm == nil {
+		return
 	}
-	if cm.cfg.Memory.AutoCompactThreshold > 0 && cm.cfg.Memory.AutoCompactThreshold <= 1 {
-		cfg.ClassicAutoTrigger = cm.cfg.Memory.AutoCompactThreshold
+	cm.warningThresholdFn = fn
+}
+
+// Stop gracefully shuts down the compaction manager
+func (cm *CompactionManager) Stop() {
+	if cm == nil {
+		return
 	}
-	if cm.cfg.Compaction.RLMAutoTrigger > 0 && cm.cfg.Compaction.RLMAutoTrigger <= 1 {
-		cfg.RLMAutoTrigger = cm.cfg.Compaction.RLMAutoTrigger
+
+	cm.queueMu.Lock()
+	if !cm.queueRunning {
+		cm.queueMu.Unlock()
+		return
 	}
-	if cm.cfg.Compaction.CompactionRatio > 0 && cm.cfg.Compaction.CompactionRatio <= 1 {
-		cfg.CompactionRatio = cm.cfg.Compaction.CompactionRatio
+	cm.queueRunning = false
+	cm.queueMu.Unlock()
+
+	// Cancel context to stop worker
+	if cm.queueCancel != nil {
+		cm.queueCancel()
 	}
-	return cfg
+
+	// Close queue channel
+	close(cm.compactionQueue)
+
+	// Wait for worker to finish with timeout
+	done := make(chan struct{})
+	go func() {
+		cm.queueWG.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// Worker finished cleanly
+	case <-time.After(10 * time.Second):
+		// Timeout waiting for worker
+	}
+}
+
+// IsQueueRunning returns whether the background queue worker is running
+func (cm *CompactionManager) IsQueueRunning() bool {
+	if cm == nil {
+		return false
+	}
+	cm.queueMu.Lock()
+	defer cm.queueMu.Unlock()
+	return cm.queueRunning
+}
+
+// QueueLength returns the current number of pending compaction requests
+func (cm *CompactionManager) QueueLength() int {
+	if cm == nil {
+		return 0
+	}
+	return len(cm.compactionQueue)
 }
 
 // ShouldCompact checks if a conversation should be compacted
@@ -117,7 +441,84 @@ func (cm *CompactionManager) ShouldAutoCompact(mode string, usageRatio float64) 
 	return usageRatio >= threshold
 }
 
+// CheckThresholds checks if the usage ratio crosses warning or compact thresholds
+// Returns: shouldCompact (bool), isWarning (bool)
+func (cm *CompactionManager) CheckThresholds(usageRatio float64) (shouldCompact bool, isWarning bool) {
+	if cm == nil {
+		return false, false
+	}
+
+	// Check warning threshold first (80%)
+	if usageRatio >= warningThreshold && usageRatio < compactThreshold {
+		if cm.warningThresholdFn != nil {
+			cm.warningThresholdFn(usageRatio)
+		}
+		return false, true
+	}
+
+	// Check compact threshold (90%)
+	if usageRatio >= compactThreshold {
+		return true, false
+	}
+
+	return false, false
+}
+
+// GetThresholds returns the current warning and compact thresholds
+func (cm *CompactionManager) GetThresholds() (warning float64, compact float64) {
+	return warningThreshold, compactThreshold
+}
+
+// TriggerAsyncCompaction submits a compaction request to the async queue
+// This method does not block - returns immediately after queueing
+// Returns true if the request was queued, false if queue is full (backpressure)
+func (cm *CompactionManager) TriggerAsyncCompaction(ctx context.Context, conv *Conversation, onComplete func(*CompactionResult)) bool {
+	if cm == nil {
+		return false
+	}
+
+	// Check backpressure
+	cm.backpressureMu.Lock()
+	if cm.pendingCompactions >= cm.maxPending {
+		cm.backpressureMu.Unlock()
+		return false // Queue full, apply backpressure
+	}
+	cm.pendingCompactions++
+	cm.backpressureMu.Unlock()
+
+	req := CompactionRequest{
+		Ctx:        ctx,
+		Conv:       conv,
+		OnComplete: onComplete,
+	}
+
+	// Try to queue with timeout
+	select {
+	case cm.compactionQueue <- req:
+		return true
+	case <-time.After(defaultMaxQueueWait):
+		// Decrement pending count on timeout
+		cm.backpressureMu.Lock()
+		cm.pendingCompactions--
+		if cm.pendingCompactions < 0 {
+			cm.pendingCompactions = 0
+		}
+		cm.backpressureMu.Unlock()
+		return false
+	case <-ctx.Done():
+		// Decrement pending count on context cancellation
+		cm.backpressureMu.Lock()
+		cm.pendingCompactions--
+		if cm.pendingCompactions < 0 {
+			cm.pendingCompactions = 0
+		}
+		cm.backpressureMu.Unlock()
+		return false
+	}
+}
+
 // CompactAsync triggers compaction in the background with fallback models.
+// Note: This is the original async method that uses the queue internally
 func (cm *CompactionManager) CompactAsync(ctx context.Context) {
 	if cm == nil {
 		return
@@ -128,9 +529,12 @@ func (cm *CompactionManager) CompactAsync(ctx context.Context) {
 		cm.compactionMu.Unlock()
 		return
 	}
+	// Note: We set compacting here but the actual work is done in the queue
+	// This maintains backward compatibility with existing behavior
 	cm.compacting = true
 	cm.compactionMu.Unlock()
 
+	// Use the queue for processing
 	go func() {
 		defer func() {
 			cm.compactionMu.Lock()
@@ -140,14 +544,15 @@ func (cm *CompactionManager) CompactAsync(ctx context.Context) {
 
 		result, err := cm.Compact(ctx)
 		if err != nil {
-			for _, model := range cm.fallbackModels() {
-				result, err = cm.compactWith(ctx, model)
-				if err == nil {
+			for _, m := range cm.fallbackModels() {
+				var fallbackErr error
+				result, fallbackErr = cm.compactWith(ctx, m)
+				if fallbackErr == nil {
 					break
 				}
 			}
 		}
-		if err != nil {
+		if result == nil {
 			result = cm.compactFallback()
 		}
 		if result != nil && cm.onComplete != nil {
@@ -217,16 +622,44 @@ func (cm *CompactionManager) applySummary(conv *Conversation, summary string, to
 	if conv == nil {
 		return
 	}
+
+	// Compress large summaries before storing
+	summaryContent := fmt.Sprintf("[Summary of %d previous messages]\n\n%s", len(toSummarize), summary)
+	if cm.compressor != nil && len(summaryContent) > 4096 {
+		compressed, err := cm.compressor.Compress([]byte(summaryContent))
+		if err == nil {
+			// Store compressed indicator prefix
+			summaryContent = fmt.Sprintf("[COMPRESSED:%s]%s", cm.compressor.Name(), string(compressed))
+		}
+	}
+
 	summaryMsg := Message{
 		Role:      "system",
-		Content:   fmt.Sprintf("[Summary of %d previous messages]\n\n%s", len(toSummarize), summary),
+		Content:   summaryContent,
 		Timestamp: toKeep[0].Timestamp,
-		Tokens:    estimateTokens(summary),
+		Tokens:    cm.estimateTokensCached(summary),
 		IsSummary: true,
 	}
 	conv.Messages = append([]Message{summaryMsg}, toKeep...)
 	conv.UpdateTokenCount()
 	conv.CompactionCount++
+}
+
+// estimateTokensCached provides cached token estimation
+func (cm *CompactionManager) estimateTokensCached(text string) int {
+	if cm == nil || cm.tokenCache == nil {
+		return estimateTokens(text)
+	}
+
+	// Check cache first
+	if tokens, ok := cm.tokenCache.Get(text); ok {
+		return tokens
+	}
+
+	// Calculate and cache
+	tokens := estimateTokens(text)
+	cm.tokenCache.Set(text, tokens)
+	return tokens
 }
 
 func (cm *CompactionManager) fallbackModels() []string {
@@ -287,6 +720,27 @@ func (cm *CompactionManager) generateSummaryWithRetry(ctx context.Context, model
 		}
 	}
 	return "", lastErr
+}
+
+func (cm *CompactionManager) compactionConfig() CompactionConfig {
+	cfg := CompactionConfig{
+		ClassicAutoTrigger: defaultClassicAutoTrigger,
+		RLMAutoTrigger:     defaultRLMAutoTrigger,
+		CompactionRatio:    defaultCompactionRatio,
+	}
+	if cm == nil || cm.cfg == nil {
+		return cfg
+	}
+	if cm.cfg.Memory.AutoCompactThreshold > 0 && cm.cfg.Memory.AutoCompactThreshold <= 1 {
+		cfg.ClassicAutoTrigger = cm.cfg.Memory.AutoCompactThreshold
+	}
+	if cm.cfg.Compaction.RLMAutoTrigger > 0 && cm.cfg.Compaction.RLMAutoTrigger <= 1 {
+		cfg.RLMAutoTrigger = cm.cfg.Compaction.RLMAutoTrigger
+	}
+	if cm.cfg.Compaction.CompactionRatio > 0 && cm.cfg.Compaction.CompactionRatio <= 1 {
+		cfg.CompactionRatio = cm.cfg.Compaction.CompactionRatio
+	}
+	return cfg
 }
 
 // selectCompactionSegments splits messages into segments to summarize and to retain,

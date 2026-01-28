@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/odvcencio/buckley/pkg/bus"
@@ -205,6 +206,21 @@ type Runtime struct {
 	scratchpadSnapshotHash uint64
 	historySnapshotSet     bool
 	scratchpadSnapshotSet  bool
+
+	// Async compaction channel
+	compactionCh chan struct{}
+	compactionWg sync.WaitGroup
+
+	// Token counting cache
+	tokenCacheMu sync.RWMutex
+	tokenCache   map[string]int
+
+	// Rate limiting for iterations
+	lastIterationTime atomic.Int64 // Unix nanoseconds
+	minIterationDelay time.Duration
+
+	// Model call timeout
+	modelCallTimeout time.Duration
 }
 
 // NewRuntime wires the runtime dependencies together.
@@ -241,17 +257,21 @@ func NewRuntime(cfg Config, deps RuntimeDeps) (*Runtime, error) {
 	}
 
 	runtime := &Runtime{
-		config:      cfg,
-		models:      deps.Models,
-		selector:    selector,
-		scratchpad:  scratchpad,
-		dispatcher:  dispatcher,
-		conflicts:   conflicts,
-		approver:    deps.ToolApprover,
-		bus:         deps.Bus,
-		telemetry:   deps.Telemetry,
-		sessionID:   strings.TrimSpace(deps.SessionID),
-		resultCodec: toon.New(deps.UseToon),
+		config:            cfg,
+		models:            deps.Models,
+		selector:          selector,
+		scratchpad:        scratchpad,
+		dispatcher:        dispatcher,
+		conflicts:         conflicts,
+		approver:          deps.ToolApprover,
+		bus:               deps.Bus,
+		telemetry:         deps.Telemetry,
+		sessionID:         strings.TrimSpace(deps.SessionID),
+		resultCodec:       toon.New(deps.UseToon),
+		compactionCh:      make(chan struct{}, 1),
+		tokenCache:        make(map[string]int),
+		minIterationDelay: 10 * time.Millisecond, // Minimum delay between iterations
+		modelCallTimeout:  2 * time.Minute,       // Default timeout for model calls
 	}
 
 	// Initialize RAG-based scratchpad search if embedder is provided
@@ -260,7 +280,119 @@ func NewRuntime(cfg Config, deps RuntimeDeps) (*Runtime, error) {
 		scratchpad.SetOnWrite(runtime.scratchpadRAG.OnWrite)
 	}
 
+	// Start async compaction worker
+	runtime.compactionWg.Add(1)
+	go runtime.compactionWorker()
+
 	return runtime, nil
+}
+
+// Close shuts down the runtime and waits for background workers.
+func (r *Runtime) Close() error {
+	if r == nil {
+		return nil
+	}
+	close(r.compactionCh)
+	r.compactionWg.Wait()
+	return nil
+}
+
+// compactionWorker processes async compaction requests.
+func (r *Runtime) compactionWorker() {
+	defer r.compactionWg.Done()
+	for range r.compactionCh {
+		r.historyMu.Lock()
+		r.compactHistoryLocked()
+		r.historyMu.Unlock()
+	}
+}
+
+// triggerAsyncCompaction triggers a non-blocking compaction.
+func (r *Runtime) triggerAsyncCompaction() {
+	if r == nil {
+		return
+	}
+	select {
+	case r.compactionCh <- struct{}{}:
+		// Compaction triggered
+	default:
+		// Compaction already pending, skip
+	}
+}
+
+// countTokens returns cached token count or computes and caches it.
+func (r *Runtime) countTokens(text string) int {
+	if r == nil {
+		return approximateTokenCount(text)
+	}
+
+	// Fast path: compute hash key
+	h := fnv.New64a()
+	_, _ = io.WriteString(h, text)
+	key := strconv.FormatUint(h.Sum64(), 36)
+
+	// Check cache
+	r.tokenCacheMu.RLock()
+	if count, ok := r.tokenCache[key]; ok {
+		r.tokenCacheMu.RUnlock()
+		return count
+	}
+	r.tokenCacheMu.RUnlock()
+
+	// Compute count
+	count := approximateTokenCount(text)
+
+	// Store in cache (with bounded size protection)
+	r.tokenCacheMu.Lock()
+	// Simple eviction: if cache too large, clear it
+	if len(r.tokenCache) > 10000 {
+		r.tokenCache = make(map[string]int)
+	}
+	r.tokenCache[key] = count
+	r.tokenCacheMu.Unlock()
+
+	return count
+}
+
+// approximateTokenCount provides a fast estimate of token count.
+// Uses a simple approximation: ~4 characters per token on average.
+func approximateTokenCount(text string) int {
+	if text == "" {
+		return 0
+	}
+	// Simple approximation: ~4 chars per token for English text
+	count := len(text) / 4
+	if count < 1 {
+		return 1
+	}
+	return count
+}
+
+// rateLimitIteration enforces a minimum delay between iterations.
+// Returns true if the iteration should proceed, false if context is cancelled.
+func (r *Runtime) rateLimitIteration(ctx context.Context) bool {
+	if r == nil || r.minIterationDelay <= 0 {
+		return ctx.Err() == nil
+	}
+
+	// Check context first
+	if err := ctx.Err(); err != nil {
+		return false
+	}
+
+	lastTime := time.Unix(0, r.lastIterationTime.Load())
+	elapsed := time.Since(lastTime)
+	if elapsed < r.minIterationDelay {
+		select {
+		case <-time.After(r.minIterationDelay - elapsed):
+			// Continue
+		case <-ctx.Done():
+			return false
+		}
+	}
+
+	r.lastIterationTime.Store(time.Now().UnixNano())
+	return ctx.Err() == nil
 }
 
 // OnIteration registers a hook for iteration events.
@@ -404,6 +536,7 @@ func (r *Runtime) executeFromState(ctx context.Context, task string, answer *Ans
 	}
 
 	for answer.Iteration < maxIterations && !answer.Ready {
+		// Check context cancellation with early exit
 		if err := ctx.Err(); err != nil {
 			if err == context.DeadlineExceeded && runtimeDeadline {
 				answer.Ready = true
@@ -412,16 +545,41 @@ func (r *Runtime) executeFromState(ctx context.Context, task string, answer *Ans
 			return answer, err
 		}
 
+		// Rate limiting between iterations
+		if !r.rateLimitIteration(ctx) {
+			if err := ctx.Err(); err != nil {
+				if err == context.DeadlineExceeded && runtimeDeadline {
+					answer.Ready = true
+					break
+				}
+				return answer, err
+			}
+		}
+
 		answer.Iteration++
 
-		resp, err := r.models.ChatCompletion(ctx, model.ChatRequest{
+		// Create timeout context for model call
+		modelCtx, modelCancel := context.WithTimeout(ctx, r.modelCallTimeout)
+		resp, err := r.models.ChatCompletion(modelCtx, model.ChatRequest{
 			Model:      r.coordinatorModelID(),
 			Messages:   messages,
 			Tools:      toolDefs,
 			ToolChoice: toolChoice,
 		})
+		modelCancel()
+
+		// Handle timeout specifically
 		if err != nil {
-			return answer, err
+			if ctx.Err() != nil {
+				// Parent context cancelled
+				if ctx.Err() == context.DeadlineExceeded && runtimeDeadline {
+					answer.Ready = true
+					break
+				}
+				return answer, ctx.Err()
+			}
+			// Model call timeout or other error
+			return answer, fmt.Errorf("model call failed: %w", err)
 		}
 		answer.TokensUsed += resp.Usage.TotalTokens
 
@@ -559,6 +717,7 @@ func (r *Runtime) Execute(ctx context.Context, task string) (*Answer, error) {
 	}
 
 	for answer.Iteration < maxIterations && !answer.Ready {
+		// Check context cancellation with early exit
 		if err := ctx.Err(); err != nil {
 			if err == context.DeadlineExceeded && runtimeDeadline {
 				answer.Ready = true
@@ -567,16 +726,41 @@ func (r *Runtime) Execute(ctx context.Context, task string) (*Answer, error) {
 			return &answer, err
 		}
 
+		// Rate limiting between iterations
+		if !r.rateLimitIteration(ctx) {
+			if err := ctx.Err(); err != nil {
+				if err == context.DeadlineExceeded && runtimeDeadline {
+					answer.Ready = true
+					break
+				}
+				return &answer, err
+			}
+		}
+
 		answer.Iteration++
 
-		resp, err := r.models.ChatCompletion(ctx, model.ChatRequest{
+		// Create timeout context for model call
+		modelCtx, modelCancel := context.WithTimeout(ctx, r.modelCallTimeout)
+		resp, err := r.models.ChatCompletion(modelCtx, model.ChatRequest{
 			Model:      r.coordinatorModelID(),
 			Messages:   messages,
 			Tools:      toolDefs,
 			ToolChoice: toolChoice,
 		})
+		modelCancel()
+
+		// Handle timeout specifically
 		if err != nil {
-			return &answer, err
+			if ctx.Err() != nil {
+				// Parent context cancelled
+				if ctx.Err() == context.DeadlineExceeded && runtimeDeadline {
+					answer.Ready = true
+					break
+				}
+				return &answer, ctx.Err()
+			}
+			// Model call timeout or other error
+			return &answer, fmt.Errorf("model call failed: %w", err)
 		}
 		answer.TokensUsed += resp.Usage.TotalTokens
 
@@ -1045,9 +1229,13 @@ func (r *Runtime) recordHistory(event IterationEvent) {
 	}
 	r.historyMu.Lock()
 	r.history = append(r.history, entry)
-	// Compact history when it grows too large
-	r.compactHistoryLocked()
+	needsCompaction := len(r.history) > r.config.Coordinator.HistoryMaxItems
 	r.historyMu.Unlock()
+
+	// Trigger async compaction if needed
+	if needsCompaction {
+		r.triggerAsyncCompaction()
+	}
 }
 
 // compactHistoryLocked summarizes old iterations to save context space.

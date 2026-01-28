@@ -888,3 +888,284 @@ func TestClient_ChatCompletion_Retry(t *testing.T) {
 		t.Errorf("expected at least 2 attempts, got %d", attempts)
 	}
 }
+
+// TestDefaultRetryConfig tests the default retry configuration
+func TestDefaultRetryConfig(t *testing.T) {
+	config := DefaultRetryConfig()
+
+	if config.MaxRetries != 3 {
+		t.Errorf("MaxRetries = %d, want 3", config.MaxRetries)
+	}
+	if config.InitialInterval != 100*time.Millisecond {
+		t.Errorf("InitialInterval = %v, want 100ms", config.InitialInterval)
+	}
+	if config.MaxInterval != 5*time.Second {
+		t.Errorf("MaxInterval = %v, want 5s", config.MaxInterval)
+	}
+	if config.Multiplier != 2.0 {
+		t.Errorf("Multiplier = %f, want 2.0", config.Multiplier)
+	}
+}
+
+// TestDefaultTransport tests the optimized transport configuration
+func TestDefaultTransport(t *testing.T) {
+	transport := DefaultTransport()
+
+	if transport.MaxIdleConns != 100 {
+		t.Errorf("MaxIdleConns = %d, want 100", transport.MaxIdleConns)
+	}
+	if transport.MaxIdleConnsPerHost != 20 {
+		t.Errorf("MaxIdleConnsPerHost = %d, want 20", transport.MaxIdleConnsPerHost)
+	}
+	if transport.MaxConnsPerHost != 50 {
+		t.Errorf("MaxConnsPerHost = %d, want 50", transport.MaxConnsPerHost)
+	}
+	if transport.IdleConnTimeout != 90*time.Second {
+		t.Errorf("IdleConnTimeout = %v, want 90s", transport.IdleConnTimeout)
+	}
+	if transport.TLSHandshakeTimeout != 10*time.Second {
+		t.Errorf("TLSHandshakeTimeout = %v, want 10s", transport.TLSHandshakeTimeout)
+	}
+	if transport.ExpectContinueTimeout != 1*time.Second {
+		t.Errorf("ExpectContinueTimeout = %v, want 1s", transport.ExpectContinueTimeout)
+	}
+	if !transport.ForceAttemptHTTP2 {
+		t.Error("ForceAttemptHTTP2 should be true")
+	}
+	if transport.DisableKeepAlives {
+		t.Error("DisableKeepAlives should be false")
+	}
+	if transport.DisableCompression {
+		t.Error("DisableCompression should be false")
+	}
+}
+
+// TestClient_SetRetryConfig tests setting custom retry configuration
+func TestClient_SetRetryConfig(t *testing.T) {
+	client := NewClient("test-key", "")
+
+	customConfig := RetryConfig{
+		MaxRetries:      5,
+		InitialInterval: 200 * time.Millisecond,
+		MaxInterval:     10 * time.Second,
+		Multiplier:      3.0,
+	}
+
+	client.SetRetryConfig(customConfig)
+
+	if client.retryConfig.MaxRetries != 5 {
+		t.Errorf("MaxRetries = %d, want 5", client.retryConfig.MaxRetries)
+	}
+	if client.retryConfig.InitialInterval != 200*time.Millisecond {
+		t.Errorf("InitialInterval = %v, want 200ms", client.retryConfig.InitialInterval)
+	}
+	if client.retryConfig.MaxInterval != 10*time.Second {
+		t.Errorf("MaxInterval = %v, want 10s", client.retryConfig.MaxInterval)
+	}
+	if client.retryConfig.Multiplier != 3.0 {
+		t.Errorf("Multiplier = %f, want 3.0", client.retryConfig.Multiplier)
+	}
+}
+
+// TestIsIdempotentMethod tests the idempotent method detection
+func TestIsIdempotentMethod(t *testing.T) {
+	tests := []struct {
+		method    string
+		expected  bool
+	}{
+		{"GET", true},
+		{"HEAD", true},
+		{"OPTIONS", true},
+		{"PUT", true},
+		{"DELETE", true},
+		{"POST", false},
+		{"PATCH", false},
+		{"get", true},  // case insensitive
+		{"post", false},
+		{"UNKNOWN", false}, // conservative default
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.method, func(t *testing.T) {
+			result := isIdempotentMethod(tt.method)
+			if result != tt.expected {
+				t.Errorf("isIdempotentMethod(%q) = %v, want %v", tt.method, result, tt.expected)
+			}
+		})
+	}
+}
+
+// TestClient_CalculateBackoff tests the exponential backoff with jitter
+func TestClient_CalculateBackoff(t *testing.T) {
+	client := NewClient("test-key", "")
+	client.SetRetryConfig(RetryConfig{
+		MaxRetries:      3,
+		InitialInterval: 100 * time.Millisecond,
+		MaxInterval:     5 * time.Second,
+		Multiplier:      2.0,
+	})
+
+	tests := []struct {
+		name     string
+		attempt  int
+		minDelay time.Duration
+		maxDelay time.Duration
+	}{
+		{
+			name:     "first_attempt",
+			attempt:  0,
+			minDelay: 100 * time.Millisecond,
+			maxDelay: 100 * time.Millisecond,
+		},
+		{
+			name:     "first_retry",
+			attempt:  1,
+			minDelay: 150 * time.Millisecond, // 200 * 0.75
+			maxDelay: 250 * time.Millisecond, // 200 * 1.25 (with max jitter)
+		},
+		{
+			name:     "second_retry",
+			attempt:  2,
+			minDelay: 300 * time.Millisecond, // 400 * 0.75
+			maxDelay: 500 * time.Millisecond, // 400 * 1.25 (with max jitter)
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			delay := client.calculateBackoff(tt.attempt)
+			if delay < tt.minDelay || delay > tt.maxDelay {
+				t.Errorf("calculateBackoff(%d) = %v, want between %v and %v",
+					tt.attempt, delay, tt.minDelay, tt.maxDelay)
+			}
+		})
+	}
+}
+
+// TestClient_DoWithRetry_Idempotent tests retry behavior for idempotent requests
+func TestClient_DoWithRetry_Idempotent(t *testing.T) {
+	attempts := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		if attempts < 3 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			w.Write([]byte(`{"error": {"message": "service unavailable"}}`))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"data": "success"}`))
+	}))
+	defer server.Close()
+
+	client := NewClient("test-key", server.URL)
+	client.SetRetryConfig(RetryConfig{
+		MaxRetries:      3,
+		InitialInterval: 10 * time.Millisecond,
+		MaxInterval:     100 * time.Millisecond,
+		Multiplier:      2.0,
+	})
+
+	req, err := http.NewRequest("GET", server.URL+"/test", nil)
+	if err != nil {
+		t.Fatalf("failed to create request: %v", err)
+	}
+
+	resp, err := client.DoWithRetry(req)
+	if err != nil {
+		t.Fatalf("expected success after retry, got error: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status code = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+
+	if attempts != 3 {
+		t.Errorf("expected 3 attempts, got %d", attempts)
+	}
+}
+
+// TestClient_DoWithRetry_NonIdempotent tests no retry for non-idempotent requests
+func TestClient_DoWithRetry_NonIdempotent(t *testing.T) {
+	attempts := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		w.WriteHeader(http.StatusServiceUnavailable)
+		w.Write([]byte(`{"error": {"message": "service unavailable"}}`))
+	}))
+	defer server.Close()
+
+	client := NewClient("test-key", server.URL)
+
+	req, err := http.NewRequest("POST", server.URL+"/test", strings.NewReader(`{"data": "test"}`))
+	if err != nil {
+		t.Fatalf("failed to create request: %v", err)
+	}
+
+	resp, err := client.DoWithRetry(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Errorf("status code = %d, want %d", resp.StatusCode, http.StatusServiceUnavailable)
+	}
+
+	if attempts != 1 {
+		t.Errorf("expected 1 attempt for non-idempotent request, got %d", attempts)
+	}
+}
+
+// TestClient_DoWithRetry_ContextCancellation tests context cancellation during retry
+func TestClient_DoWithRetry_ContextCancellation(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		w.Write([]byte(`{"error": {"message": "service unavailable"}}`))
+	}))
+	defer server.Close()
+
+	client := NewClient("test-key", server.URL)
+	client.SetRetryConfig(RetryConfig{
+		MaxRetries:      5,
+		InitialInterval: 500 * time.Millisecond,
+		MaxInterval:     1 * time.Second,
+		Multiplier:      2.0,
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, "GET", server.URL+"/test", nil)
+	if err != nil {
+		t.Fatalf("failed to create request: %v", err)
+	}
+
+	_, err = client.DoWithRetry(req)
+	if err == nil {
+		t.Fatal("expected error due to context cancellation")
+	}
+
+	if !strings.Contains(err.Error(), "context") {
+		t.Errorf("expected context error, got: %v", err)
+	}
+}
+
+// TestClientOptions_WithRetryConfig tests client initialization with custom retry config
+func TestClientOptions_WithRetryConfig(t *testing.T) {
+	customConfig := &RetryConfig{
+		MaxRetries:      5,
+		InitialInterval: 200 * time.Millisecond,
+		MaxInterval:     10 * time.Second,
+		Multiplier:      3.0,
+	}
+
+	client := NewClientWithOptions("test-key", "", ClientOptions{
+		NetworkLogsEnabled: false,
+		RetryConfig:        customConfig,
+	})
+
+	if client.retryConfig.MaxRetries != 5 {
+		t.Errorf("MaxRetries = %d, want 5", client.retryConfig.MaxRetries)
+	}
+}

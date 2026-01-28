@@ -629,7 +629,7 @@ func (r *Registry) shouldGateChanges() bool {
 	return r.requireMissionApproval && r.missionStore != nil && r.missionSession != ""
 }
 
-func (r *Registry) executeWithMissionWrite(params map[string]any, execFn func(map[string]any) (*builtin.Result, error)) (*builtin.Result, error) {
+func (r *Registry) executeWithMissionWrite(ctx context.Context, params map[string]any, execFn func(map[string]any) (*builtin.Result, error)) (*builtin.Result, error) {
 	path, ok := params["path"].(string)
 	if !ok || strings.TrimSpace(path) == "" {
 		return &builtin.Result{Success: false, Error: "path parameter is required"}, nil
@@ -663,7 +663,7 @@ func (r *Registry) executeWithMissionWrite(params map[string]any, execFn func(ma
 		return &builtin.Result{Success: false, Error: fmt.Sprintf("failed to create pending change: %v", err)}, nil
 	}
 
-	change, err := r.awaitDecision(changeID)
+	change, err := r.awaitDecision(ctx, changeID)
 	if err != nil {
 		return &builtin.Result{Success: false, Error: fmt.Sprintf("approval wait failed: %v", err)}, nil
 	}
@@ -674,7 +674,7 @@ func (r *Registry) executeWithMissionWrite(params map[string]any, execFn func(ma
 	return execFn(params)
 }
 
-func (r *Registry) executeWithMissionPatch(params map[string]any, execFn func(map[string]any) (*builtin.Result, error)) (*builtin.Result, error) {
+func (r *Registry) executeWithMissionPatch(ctx context.Context, params map[string]any, execFn func(map[string]any) (*builtin.Result, error)) (*builtin.Result, error) {
 	rawPatch, ok := params["patch"].(string)
 	if !ok || strings.TrimSpace(rawPatch) == "" {
 		return &builtin.Result{Success: false, Error: "patch parameter must be a non-empty string"}, nil
@@ -686,7 +686,7 @@ func (r *Registry) executeWithMissionPatch(params map[string]any, execFn func(ma
 		return &builtin.Result{Success: false, Error: fmt.Sprintf("failed to create pending change: %v", err)}, nil
 	}
 
-	change, err := r.awaitDecision(changeID)
+	change, err := r.awaitDecision(ctx, changeID)
 	if err != nil {
 		return &builtin.Result{Success: false, Error: fmt.Sprintf("approval wait failed: %v", err)}, nil
 	}
@@ -697,7 +697,7 @@ func (r *Registry) executeWithMissionPatch(params map[string]any, execFn func(ma
 	return execFn(params)
 }
 
-func (r *Registry) executeWithMissionClipboardRead(params map[string]any, execFn func(map[string]any) (*builtin.Result, error)) (*builtin.Result, error) {
+func (r *Registry) executeWithMissionClipboardRead(ctx context.Context, params map[string]any, execFn func(map[string]any) (*builtin.Result, error)) (*builtin.Result, error) {
 	rawSession, ok := params["session_id"]
 	if !ok {
 		return &builtin.Result{Success: false, Error: "session_id parameter is required"}, nil
@@ -724,7 +724,7 @@ func (r *Registry) executeWithMissionClipboardRead(params map[string]any, execFn
 		return &builtin.Result{Success: false, Error: fmt.Sprintf("failed to create pending change: %v", err)}, nil
 	}
 
-	change, err := r.awaitDecision(changeID)
+	change, err := r.awaitDecision(ctx, changeID)
 	if err != nil {
 		return &builtin.Result{Success: false, Error: fmt.Sprintf("approval wait failed: %v", err)}, nil
 	}
@@ -755,12 +755,14 @@ func (r *Registry) recordPendingChange(filePath, diff, toolName string) (string,
 	return changeID, r.missionStore.CreatePendingChange(change)
 }
 
-func (r *Registry) awaitDecision(changeID string) (*mission.PendingChange, error) {
+func (r *Registry) awaitDecision(parentCtx context.Context, changeID string) (*mission.PendingChange, error) {
 	timeout := r.missionTimeout
 	if timeout <= 0 {
 		timeout = 10 * time.Minute
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+
+	// Create a context that respects both the parent context and the timeout
+	ctx, cancel := context.WithTimeout(parentCtx, timeout)
 	defer cancel()
 
 	return r.missionStore.WaitForDecision(ctx, changeID, 750*time.Millisecond)

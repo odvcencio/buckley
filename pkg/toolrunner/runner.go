@@ -1,7 +1,6 @@
 package toolrunner
 
 import (
-	"container/list"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -10,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/odvcencio/buckley/pkg/model"
@@ -36,9 +36,12 @@ type Config struct {
 	DefaultMaxIterations int
 	MaxToolsPhase1       int
 	EnableReasoning      bool
-	EnableParallelTools  bool // Enable parallel execution of independent tools
-	MaxParallelTools     int  // Max concurrent tool executions (default 5)
+	EnableParallelTools  bool          // Enable parallel execution of independent tools
+	MaxParallelTools     int           // Max concurrent tool executions (default 5)
 	ToolExecutor         ToolExecutor
+	CacheSize            int           // Max cache entries (default 100)
+	CacheTTL             time.Duration // Cache entry TTL (default 5 minutes)
+	ModelTimeout         time.Duration // Timeout for model calls (default 2 minutes)
 }
 
 // Request contains inputs for a tool runner execution.
@@ -92,80 +95,297 @@ type StreamHandler interface {
 	OnComplete(result *Result)
 }
 
-// toolSelectionCache caches tool selection results.
-type toolSelectionCache struct {
-	mu      sync.Mutex
-	entries map[string]*list.Element
-	order   *list.List
-	maxSize int
+// CacheStats tracks cache performance metrics.
+type CacheStats struct {
+	Hits      uint64
+	Misses    uint64
+	Evictions uint64
 }
 
-type cachedSelection struct {
+// HitRate returns the cache hit rate as a percentage (0-100).
+func (s CacheStats) HitRate() float64 {
+	total := s.Hits + s.Misses
+	if total == 0 {
+		return 0
+	}
+	return float64(s.Hits) * 100 / float64(total)
+}
+
+// cacheEntry represents a single cache entry with metadata.
+type cacheEntry struct {
 	key       string
 	toolNames []string
 	createdAt time.Time
 }
 
-func newToolSelectionCache(maxSize int) *toolSelectionCache {
-	if maxSize <= 0 {
-		maxSize = 100
+// IsExpired checks if the entry has exceeded its TTL.
+func (e *cacheEntry) IsExpired(ttl time.Duration) bool {
+	return time.Since(e.createdAt) > ttl
+}
+
+// lruNode represents a node in the doubly-linked list for O(1) LRU operations.
+type lruNode struct {
+	key        string
+	value      *cacheEntry
+	prev, next *lruNode
+}
+
+// nodePool provides memory-efficient recycling of lruNode instances
+// to reduce GC pressure during high cache churn.
+var nodePool = sync.Pool{
+	New: func() any {
+		return &lruNode{}
+	},
+}
+
+// getNode retrieves a node from the pool or allocates a new one.
+func getNode() *lruNode {
+	return nodePool.Get().(*lruNode)
+}
+
+// putNode returns a node to the pool for reuse.
+func putNode(n *lruNode) {
+	n.key = ""
+	n.value = nil
+	n.prev = nil
+	n.next = nil
+	nodePool.Put(n)
+}
+
+// toolSelectionCache is an efficient LRU cache with TTL expiration and statistics.
+// It uses a doubly-linked list + map for O(1) LRU tracking and FNV-1a hashing for fast key lookups.
+// All operations are thread-safe.
+type toolSelectionCache struct {
+	mu         sync.RWMutex
+	entries    map[string]*lruNode
+	head, tail *lruNode
+	size       int
+	ttl        time.Duration
+	hits       atomic.Uint64
+	misses     atomic.Uint64
+	evictions  atomic.Uint64
+}
+
+// newToolSelectionCache creates a new cache with the specified size and TTL.
+func newToolSelectionCache(size int, ttl time.Duration) *toolSelectionCache {
+	if size <= 0 {
+		size = 100
+	}
+	if ttl <= 0 {
+		ttl = 5 * time.Minute
 	}
 	return &toolSelectionCache{
-		entries: make(map[string]*list.Element),
-		order:   list.New(),
-		maxSize: maxSize,
+		entries: make(map[string]*lruNode, size),
+		size:    size,
+		ttl:     ttl,
 	}
 }
 
+// hashKey generates a compact FNV-1a hash for the cache key.
+func (c *toolSelectionCache) hashKey(key string) string {
+	h := fnv.New64a()
+	_, _ = io.WriteString(h, key)
+	return fmt.Sprintf("%016x", h.Sum64())
+}
+
+// get retrieves a cached entry and updates LRU order.
+// The entry's TTL is refreshed on successful access.
 func (c *toolSelectionCache) get(key string) ([]string, bool) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	entry, ok := c.entries[key]
+	hashedKey := c.hashKey(key)
+
+	c.mu.RLock()
+	node, ok := c.entries[hashedKey]
+	c.mu.RUnlock()
+
 	if !ok {
+		c.misses.Add(1)
 		return nil, false
 	}
-	selection := entry.Value.(cachedSelection)
-	// Cache entries expire after 5 minutes
-	if time.Since(selection.createdAt) > 5*time.Minute {
-		c.order.Remove(entry)
-		delete(c.entries, key)
+
+	entry := node.value
+
+	if entry.IsExpired(c.ttl) {
+		c.mu.Lock()
+		// Double-check after acquiring write lock
+		if node, stillOk := c.entries[hashedKey]; stillOk && node.value.IsExpired(c.ttl) {
+			c.removeNode(node)
+			c.evictions.Add(1)
+		}
+		c.mu.Unlock()
+		c.misses.Add(1)
 		return nil, false
 	}
-	c.order.MoveToFront(entry)
-	return selection.toolNames, true
+
+	// Update LRU order by moving to head and refresh TTL
+	c.mu.Lock()
+	c.moveToHead(node)
+	entry.createdAt = time.Now()
+	c.mu.Unlock()
+
+	c.hits.Add(1)
+	return entry.toolNames, true
 }
 
+// set adds or updates a cache entry.
 func (c *toolSelectionCache) set(key string, toolNames []string) {
+	hashedKey := c.hashKey(key)
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if entry, ok := c.entries[key]; ok {
-		selection := cachedSelection{
-			key:       key,
-			toolNames: toolNames,
-			createdAt: time.Now(),
-		}
-		entry.Value = selection
-		c.order.MoveToFront(entry)
+	// Update existing entry
+	if node, ok := c.entries[hashedKey]; ok {
+		node.value.toolNames = toolNames
+		node.value.createdAt = time.Now()
+		c.moveToHead(node)
 		return
 	}
 
-	if len(c.entries) >= c.maxSize {
-		oldest := c.order.Back()
-		if oldest != nil {
-			selection := oldest.Value.(cachedSelection)
-			delete(c.entries, selection.key)
-			c.order.Remove(oldest)
-		}
+	// Evict oldest if at capacity
+	if len(c.entries) >= c.size {
+		c.evictOldest()
 	}
 
-	selection := cachedSelection{
+	// Add new entry using pooled node
+	node := getNode()
+	node.key = hashedKey
+	node.value = &cacheEntry{
 		key:       key,
 		toolNames: toolNames,
 		createdAt: time.Now(),
 	}
-	entry := c.order.PushFront(selection)
-	c.entries[key] = entry
+	c.entries[hashedKey] = node
+	c.addToHead(node)
+}
+
+// Stats returns current cache statistics.
+func (c *toolSelectionCache) Stats() CacheStats {
+	return CacheStats{
+		Hits:      c.hits.Load(),
+		Misses:    c.misses.Load(),
+		Evictions: c.evictions.Load(),
+	}
+}
+
+// ResetStats resets all cache statistics to zero.
+func (c *toolSelectionCache) ResetStats() {
+	c.hits.Store(0)
+	c.misses.Store(0)
+	c.evictions.Store(0)
+}
+
+// WarmCache pre-populates the cache with common contexts.
+// Each context is hashed and stored with its associated tools.
+func (c *toolSelectionCache) WarmCache(commonContexts []string, tools []tool.Tool) {
+	toolNames := make([]string, len(tools))
+	for i, t := range tools {
+		toolNames[i] = t.Name()
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	for _, ctx := range commonContexts {
+		hashedKey := c.hashKey(ctx)
+		// Skip if already exists
+		if _, ok := c.entries[hashedKey]; ok {
+			continue
+		}
+
+		// Evict oldest if at capacity
+		if len(c.entries) >= c.size {
+			c.evictOldest()
+		}
+
+		// Add new entry using pooled node
+		node := getNode()
+		node.key = hashedKey
+		node.value = &cacheEntry{
+			key:       ctx,
+			toolNames: toolNames,
+			createdAt: time.Now(),
+		}
+		c.entries[hashedKey] = node
+		c.addToHead(node)
+	}
+}
+
+// WarmCacheAsync pre-populates the cache asynchronously without blocking the caller.
+func (c *toolSelectionCache) WarmCacheAsync(commonContexts []string, tools []tool.Tool) {
+	go c.WarmCache(commonContexts, tools)
+}
+
+// addToHead adds a node to the head (most recently used) of the LRU list.
+// Must be called with lock held.
+func (c *toolSelectionCache) addToHead(node *lruNode) {
+	node.prev = nil
+	node.next = c.head
+
+	if c.head != nil {
+		c.head.prev = node
+	}
+	c.head = node
+
+	if c.tail == nil {
+		c.tail = node
+	}
+}
+
+// moveToHead moves an existing node to the head of the LRU list.
+// Must be called with lock held.
+func (c *toolSelectionCache) moveToHead(node *lruNode) {
+	if node == c.head {
+		return // Already at head
+	}
+
+	// Remove from current position
+	if node.prev != nil {
+		node.prev.next = node.next
+	}
+	if node.next != nil {
+		node.next.prev = node.prev
+	}
+	if node == c.tail {
+		c.tail = node.prev
+	}
+
+	// Add to head
+	c.addToHead(node)
+}
+
+// evictOldest removes the oldest entry from the cache.
+// Must be called with lock held.
+func (c *toolSelectionCache) evictOldest() {
+	if c.tail == nil {
+		return // Empty cache
+	}
+	c.removeNode(c.tail)
+	c.evictions.Add(1)
+}
+
+// removeNode removes a node from both the map and LRU list.
+// The node is returned to the pool for reuse.
+// Must be called with lock held.
+func (c *toolSelectionCache) removeNode(node *lruNode) {
+	delete(c.entries, node.key)
+
+	// Unlink from list
+	if node.prev != nil {
+		node.prev.next = node.next
+	} else {
+		// Node is head
+		c.head = node.next
+	}
+
+	if node.next != nil {
+		node.next.prev = node.prev
+	} else {
+		// Node is tail
+		c.tail = node.prev
+	}
+
+	// Return node to pool
+	putNode(node)
 }
 
 // Runner executes a tool loop with optional tool selection.
@@ -198,16 +418,53 @@ func New(cfg Config) (*Runner, error) {
 	cfg.DefaultMaxIterations = maxIter
 	cfg.MaxToolsPhase1 = maxToolsPhase1
 
+	// Set default model timeout if not specified
+	if cfg.ModelTimeout <= 0 {
+		cfg.ModelTimeout = 2 * time.Minute
+	}
+
 	return &Runner{
 		config:         cfg,
 		maxToolsPhase1: maxToolsPhase1,
-		selectionCache: newToolSelectionCache(100),
+		selectionCache: newToolSelectionCache(cfg.CacheSize, cfg.CacheTTL),
 	}, nil
 }
 
 // SetStreamHandler configures streaming event handler.
 func (r *Runner) SetStreamHandler(handler StreamHandler) {
 	r.streamHandler = handler
+}
+
+// CacheStats returns current cache statistics.
+func (r *Runner) CacheStats() CacheStats {
+	if r.selectionCache == nil {
+		return CacheStats{}
+	}
+	return r.selectionCache.Stats()
+}
+
+// WarmCache pre-populates the tool selection cache with common contexts.
+func (r *Runner) WarmCache(commonContexts []string, tools []tool.Tool) {
+	if r.selectionCache == nil {
+		return
+	}
+	r.selectionCache.WarmCache(commonContexts, tools)
+}
+
+// WarmCacheAsync pre-populates the tool selection cache asynchronously without blocking.
+func (r *Runner) WarmCacheAsync(commonContexts []string, tools []tool.Tool) {
+	if r.selectionCache == nil {
+		return
+	}
+	r.selectionCache.WarmCacheAsync(commonContexts, tools)
+}
+
+// ResetCacheStats resets cache statistics to zero.
+func (r *Runner) ResetCacheStats() {
+	if r.selectionCache == nil {
+		return
+	}
+	r.selectionCache.ResetStats()
 }
 
 func (r *Runner) notifyStreamError(err error) {
@@ -220,6 +477,9 @@ func (r *Runner) notifyStreamError(err error) {
 // Run processes the request using automatic tool loop.
 func (r *Runner) Run(ctx context.Context, req Request) (*Result, error) {
 	result := &Result{}
+
+	// Apply model timeout if context doesn't have a deadline
+	ctx = r.withModelTimeout(ctx)
 
 	availableTools := r.availableTools(req.AllowedTools)
 
@@ -235,6 +495,18 @@ func (r *Runner) Run(ctx context.Context, req Request) (*Result, error) {
 	}
 
 	return r.executeWithTools(ctx, req, selectedTools, result)
+}
+
+// withModelTimeout applies the configured model timeout if the context doesn't already have a deadline.
+func (r *Runner) withModelTimeout(ctx context.Context) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	// Only apply timeout if context doesn't already have a deadline
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline && r.config.ModelTimeout > 0 {
+		ctx, _ = context.WithTimeout(ctx, r.config.ModelTimeout)
+	}
+	return ctx
 }
 
 func (r *Runner) availableTools(allowed []string) []tool.Tool {
@@ -264,12 +536,9 @@ func (r *Runner) selectTools(ctx context.Context, req Request, tools []tool.Tool
 		selectionContext = lastUserMessage(req.Messages)
 	}
 
-	// Build cache key from selection context
-	cacheKey := selectionContext
-
-	// Check cache first
+	// Check cache first (cache key is hashed internally)
 	if r.selectionCache != nil {
-		if cachedNames, ok := r.selectionCache.get(cacheKey); ok {
+		if cachedNames, ok := r.selectionCache.get(selectionContext); ok {
 			toolMap := make(map[string]tool.Tool, len(tools))
 			for _, t := range tools {
 				toolMap[t.Name()] = t
@@ -333,7 +602,7 @@ Only include tools you will actually use.`, selectionContext, catalog.String())
 
 	// Cache the result
 	if r.selectionCache != nil {
-		r.selectionCache.set(cacheKey, selectedNames)
+		r.selectionCache.set(selectionContext, selectedNames)
 	}
 
 	toolMap := make(map[string]tool.Tool, len(tools))

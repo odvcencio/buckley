@@ -100,9 +100,9 @@ Different models for different jobs:
 
 ```yaml
 models:
-  planning: moonshotai/kimi-k2-thinking
-  execution: moonshotai/kimi-k2-thinking
-  review: moonshotai/kimi-k2-thinking
+  planning: moonshotai/kimi-k2.5
+  execution: moonshotai/kimi-k2.5
+  review: moonshotai/kimi-k2.5
 ```
 
 Supports OpenRouter (100+ models), Anthropic, OpenAI, Google, Ollama.
@@ -115,8 +115,8 @@ Compare models on the same task:
 
 ```bash
 buckley experiment run "add-dark-mode" \
-    -m moonshotai/kimi-k2-thinking \
-    -m anthropic/claude-sonnet-4-5 \
+    -m moonshotai/kimi-k2.5 \
+    -m anthropic/claude-sonnet-4.5 \
     -p "Add dark mode toggle"
 ```
 
