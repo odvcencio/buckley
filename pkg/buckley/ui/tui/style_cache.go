@@ -3,9 +3,9 @@ package tui
 import (
 	"sync"
 
-	"github.com/odvcencio/fluffy-ui/backend"
-	"github.com/odvcencio/fluffy-ui/compositor"
-	uistyle "github.com/odvcencio/fluffy-ui/style"
+	"github.com/odvcencio/fluffyui/backend"
+	"github.com/odvcencio/fluffyui/compositor"
+	uistyle "github.com/odvcencio/fluffyui/style"
 )
 
 // StyleCache caches compositor to backend style conversions.

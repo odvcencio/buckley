@@ -1,8 +1,8 @@
 package widgets
 
 import (
-	"github.com/odvcencio/fluffy-ui/runtime"
-	uiwidgets "github.com/odvcencio/fluffy-ui/widgets"
+	"github.com/odvcencio/fluffyui/runtime"
+	uiwidgets "github.com/odvcencio/fluffyui/widgets"
 )
 
 // CenteredOverlay positions a child widget in the center of the available bounds.

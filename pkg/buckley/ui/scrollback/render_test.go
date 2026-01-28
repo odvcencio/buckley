@@ -3,7 +3,7 @@ package scrollback
 import (
 	"testing"
 
-	"github.com/odvcencio/fluffy-ui/compositor"
+	"github.com/odvcencio/fluffyui/compositor"
 )
 
 func TestDefaultRenderConfig(t *testing.T) {

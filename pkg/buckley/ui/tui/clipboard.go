@@ -5,7 +5,7 @@ import (
 	"os/exec"
 	"strings"
 
-	"github.com/odvcencio/fluffy-ui/clipboard"
+	"github.com/odvcencio/fluffyui/clipboard"
 )
 
 type systemClipboard struct {

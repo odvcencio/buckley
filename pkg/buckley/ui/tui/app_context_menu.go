@@ -6,7 +6,7 @@ import (
 	"time"
 
 	buckleywidgets "github.com/odvcencio/buckley/pkg/buckley/ui/widgets"
-	"github.com/odvcencio/fluffy-ui/widgets"
+	"github.com/odvcencio/fluffyui/widgets"
 )
 
 func (a *WidgetApp) contextMenuActive() bool {

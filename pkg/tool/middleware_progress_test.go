@@ -4,7 +4,7 @@ import (
 	"testing"
 
 	"github.com/odvcencio/buckley/pkg/tool/builtin"
-	"github.com/odvcencio/fluffy-ui/progress"
+	"github.com/odvcencio/fluffyui/progress"
 )
 
 func TestProgressMiddlewareTracksLongRunningTools(t *testing.T) {

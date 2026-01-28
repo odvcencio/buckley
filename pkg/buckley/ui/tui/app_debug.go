@@ -8,11 +8,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/odvcencio/fluffy-ui/backend"
-	"github.com/odvcencio/fluffy-ui/compositor"
-	"github.com/odvcencio/fluffy-ui/recording"
-	"github.com/odvcencio/fluffy-ui/runtime"
-	uistyle "github.com/odvcencio/fluffy-ui/style"
+	"github.com/odvcencio/fluffyui/backend"
+	"github.com/odvcencio/fluffyui/compositor"
+	"github.com/odvcencio/fluffyui/recording"
+	"github.com/odvcencio/fluffyui/runtime"
+	uistyle "github.com/odvcencio/fluffyui/style"
 )
 
 func isErrorMessage(text string) bool {

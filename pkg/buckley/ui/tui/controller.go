@@ -7,11 +7,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"maps"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"sort"
 	"strconv"
@@ -36,10 +38,10 @@ import (
 	"github.com/odvcencio/buckley/pkg/telemetry"
 	"github.com/odvcencio/buckley/pkg/tool"
 	"github.com/odvcencio/buckley/pkg/tool/builtin"
-	"github.com/odvcencio/fluffy-ui/progress"
-	"github.com/odvcencio/fluffy-ui/theme"
-	"github.com/odvcencio/fluffy-ui/toast"
-	"github.com/odvcencio/fluffy-ui/widgets"
+	"github.com/odvcencio/fluffyui/progress"
+	"github.com/odvcencio/fluffyui/theme"
+	"github.com/odvcencio/fluffyui/toast"
+	"github.com/odvcencio/fluffyui/widgets"
 	"gopkg.in/yaml.v3"
 )
 
@@ -508,19 +510,19 @@ func (c *Controller) Run() error {
 
 // handleSubmit processes user input submission.
 func (c *Controller) handleSubmit(text string) {
-	// Handle commands
+	// Handle commands immediately (no locking needed)
 	if strings.HasPrefix(text, "/") {
 		c.handleCommand(text)
 		return
 	}
 
 	c.mu.Lock()
-	defer c.mu.Unlock()
 
 	// Get current session
 	sess := c.sessions[c.currentSession]
 	attachments := append([]string(nil), sess.PendingAttachments...)
 	if text == "" && len(attachments) == 0 {
+		c.mu.Unlock()
 		return
 	}
 
@@ -532,7 +534,9 @@ func (c *Controller) handleSubmit(text string) {
 			Attachments: attachments,
 		})
 		sess.PendingAttachments = nil
-		// Show queued message with indicator
+		c.mu.Unlock()
+
+		// Show queued message with indicator (outside lock)
 		displayText := text
 		if strings.TrimSpace(displayText) == "" && len(attachments) > 0 {
 			displayText = fmt.Sprintf("[Queued %d attachment(s)]", len(attachments))
@@ -542,18 +546,21 @@ func (c *Controller) handleSubmit(text string) {
 		return
 	}
 
-	// Add user message to display
+	// Add user message to display (outside lock)
 	displayText := text
 	if strings.TrimSpace(displayText) == "" && len(attachments) > 0 {
 		displayText = fmt.Sprintf("[Sent %d attachment(s)]", len(attachments))
 	}
-	c.app.AddMessage(displayText, "user")
-	sess.PendingAttachments = nil
 
 	// Create context with cancellation for this session
 	ctx, cancel := context.WithCancel(c.baseContext())
 	sess.Cancel = cancel
 	sess.Streaming = true
+	sess.PendingAttachments = nil
+	c.mu.Unlock()
+
+	// Update UI (outside lock)
+	c.app.AddMessage(displayText, "user")
 	c.app.SetStreaming(true)
 	c.emitStreaming(sess.ID, true)
 
@@ -1212,6 +1219,11 @@ func (c *Controller) createNewSessionState() (*SessionState, error) {
 func (c *Controller) streamResponse(ctx context.Context, prompt string, sess *SessionState, attachments []string) {
 	defer func() {
 		if r := recover(); r != nil {
+			// Log stack trace for debugging
+			stack := make([]byte, 4096)
+			n := runtime.Stack(stack, false)
+			log.Printf("Panic in streamResponse: %v\n%s", r, stack[:n])
+
 			if c.app != nil {
 				c.app.AddMessage(fmt.Sprintf("Internal error: %v", r), "system")
 				c.app.SetStatus("Error")

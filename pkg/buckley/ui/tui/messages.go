@@ -5,8 +5,8 @@ import (
 	"time"
 
 	buckleywidgets "github.com/odvcencio/buckley/pkg/buckley/ui/widgets"
-	"github.com/odvcencio/fluffy-ui/progress"
-	"github.com/odvcencio/fluffy-ui/toast"
+	"github.com/odvcencio/fluffyui/progress"
+	"github.com/odvcencio/fluffyui/toast"
 )
 
 // Message is the interface for all events flowing through the UI.

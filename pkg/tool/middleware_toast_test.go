@@ -5,7 +5,7 @@ import (
 	"testing"
 
 	"github.com/odvcencio/buckley/pkg/tool/builtin"
-	"github.com/odvcencio/fluffy-ui/toast"
+	"github.com/odvcencio/fluffyui/toast"
 )
 
 func TestToastNotificationsOnFailure(t *testing.T) {

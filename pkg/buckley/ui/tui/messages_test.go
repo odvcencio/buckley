@@ -4,8 +4,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/odvcencio/fluffy-ui/progress"
-	"github.com/odvcencio/fluffy-ui/toast"
+	"github.com/odvcencio/fluffyui/progress"
+	"github.com/odvcencio/fluffyui/toast"
 )
 
 func TestMessages_ImplementInterface(t *testing.T) {

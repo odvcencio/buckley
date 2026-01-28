@@ -6,13 +6,13 @@ import (
 	"time"
 
 	buckleywidgets "github.com/odvcencio/buckley/pkg/buckley/ui/widgets"
-	"github.com/odvcencio/fluffy-ui/accessibility"
-	"github.com/odvcencio/fluffy-ui/keybind"
-	"github.com/odvcencio/fluffy-ui/runtime"
-	"github.com/odvcencio/fluffy-ui/scroll"
-	"github.com/odvcencio/fluffy-ui/terminal"
-	"github.com/odvcencio/fluffy-ui/toast"
-	"github.com/odvcencio/fluffy-ui/widgets"
+	"github.com/odvcencio/fluffyui/accessibility"
+	"github.com/odvcencio/fluffyui/keybind"
+	"github.com/odvcencio/fluffyui/runtime"
+	"github.com/odvcencio/fluffyui/scroll"
+	"github.com/odvcencio/fluffyui/terminal"
+	"github.com/odvcencio/fluffyui/toast"
+	"github.com/odvcencio/fluffyui/widgets"
 )
 
 // ============================================================================
@@ -67,19 +67,9 @@ func (a *WidgetApp) handleKeyMsg(m KeyMsg) bool {
 		Shift: m.Shift,
 	}
 
-	// When input area is focused and no modal overlay is active,
-	// forward all key events to it for handling.
-	// Skip this when overlays are active so they receive key events.
-	if a.inputArea.IsFocused() && a.screen.LayerCount() == 1 {
-		result := a.inputArea.HandleMessage(runtimeMsg)
-		if result.Handled {
-			for _, cmd := range result.Commands {
-				a.handleCommand(cmd)
-			}
-			return true
-		}
-	}
-
+	// Let fluffyui's screen handle the key event.
+	// The screen routes to the focused widget in the active layer.
+	// Modal overlays (when push with 'true') take precedence automatically.
 	result := a.screen.HandleMessage(runtimeMsg)
 
 	// Process commands that bubble up from widgets

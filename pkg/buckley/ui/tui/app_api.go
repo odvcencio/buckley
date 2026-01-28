@@ -5,10 +5,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/odvcencio/fluffy-ui/accessibility"
-	"github.com/odvcencio/fluffy-ui/progress"
-	"github.com/odvcencio/fluffy-ui/state"
-	"github.com/odvcencio/fluffy-ui/toast"
+	"github.com/odvcencio/fluffyui/accessibility"
+	"github.com/odvcencio/fluffyui/progress"
+	"github.com/odvcencio/fluffyui/state"
+	"github.com/odvcencio/fluffyui/toast"
 )
 
 // AddMessage adds a message. Thread-safe via message passing.

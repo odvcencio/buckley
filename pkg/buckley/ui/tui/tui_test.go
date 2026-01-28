@@ -3,7 +3,7 @@ package tui
 import (
 	"testing"
 
-	"github.com/odvcencio/fluffy-ui/theme"
+	"github.com/odvcencio/fluffyui/theme"
 )
 
 func TestLayoutConstants(t *testing.T) {

@@ -13,10 +13,10 @@ import (
 	"testing"
 
 	"github.com/odvcencio/buckley/pkg/buckley/ui/widgets"
-	"github.com/odvcencio/fluffy-ui/backend"
-	"github.com/odvcencio/fluffy-ui/backend/sim"
-	"github.com/odvcencio/fluffy-ui/runtime"
-	"github.com/odvcencio/fluffy-ui/theme"
+	"github.com/odvcencio/fluffyui/backend"
+	"github.com/odvcencio/fluffyui/backend/sim"
+	"github.com/odvcencio/fluffyui/runtime"
+	"github.com/odvcencio/fluffyui/theme"
 )
 
 // TestTUI_HeaderRendering tests that the header widget renders correctly.

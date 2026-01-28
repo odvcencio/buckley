@@ -7,9 +7,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/odvcencio/fluffy-ui/backend"
-	"github.com/odvcencio/fluffy-ui/runtime"
-	uitesting "github.com/odvcencio/fluffy-ui/testing"
+	"github.com/odvcencio/fluffyui/backend"
+	"github.com/odvcencio/fluffyui/runtime"
+	uitesting "github.com/odvcencio/fluffyui/testing"
 )
 
 var updateSnapshots = flag.Bool("update-snapshots", false, "Update golden snapshot files")

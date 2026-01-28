@@ -7,7 +7,7 @@ import (
 	"os"
 	"sync"
 
-	"github.com/odvcencio/fluffy-ui/fur"
+	"github.com/odvcencio/fluffyui/fur"
 )
 
 var (

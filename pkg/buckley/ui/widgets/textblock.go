@@ -3,9 +3,9 @@ package widgets
 import (
 	"strings"
 
-	"github.com/odvcencio/fluffy-ui/backend"
-	"github.com/odvcencio/fluffy-ui/runtime"
-	uiwidgets "github.com/odvcencio/fluffy-ui/widgets"
+	"github.com/odvcencio/fluffyui/backend"
+	"github.com/odvcencio/fluffyui/runtime"
+	uiwidgets "github.com/odvcencio/fluffyui/widgets"
 )
 
 // TextBlock renders multi-line wrapped text.

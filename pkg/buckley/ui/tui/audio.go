@@ -6,8 +6,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/odvcencio/fluffy-ui/audio"
-	"github.com/odvcencio/fluffy-ui/audio/execdriver"
+	"github.com/odvcencio/fluffyui/audio"
+	"github.com/odvcencio/fluffyui/audio/execdriver"
 )
 
 const (

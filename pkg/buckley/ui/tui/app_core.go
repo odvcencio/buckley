@@ -14,21 +14,21 @@ import (
 	"github.com/odvcencio/buckley/pkg/buckley/ui/filepicker"
 	buckleywidgets "github.com/odvcencio/buckley/pkg/buckley/ui/widgets"
 	"github.com/odvcencio/buckley/pkg/diagnostics"
-	"github.com/odvcencio/fluffy-ui/accessibility"
-	"github.com/odvcencio/fluffy-ui/agent"
-	"github.com/odvcencio/fluffy-ui/animation"
-	"github.com/odvcencio/fluffy-ui/audio"
-	"github.com/odvcencio/fluffy-ui/backend"
-	"github.com/odvcencio/fluffy-ui/backend/tcell"
-	"github.com/odvcencio/fluffy-ui/clipboard"
-	"github.com/odvcencio/fluffy-ui/keybind"
-	"github.com/odvcencio/fluffy-ui/markdown"
-	"github.com/odvcencio/fluffy-ui/runtime"
-	"github.com/odvcencio/fluffy-ui/state"
-	"github.com/odvcencio/fluffy-ui/terminal"
-	"github.com/odvcencio/fluffy-ui/theme"
-	"github.com/odvcencio/fluffy-ui/toast"
-	"github.com/odvcencio/fluffy-ui/widgets"
+	"github.com/odvcencio/fluffyui/accessibility"
+	"github.com/odvcencio/fluffyui/agent"
+	"github.com/odvcencio/fluffyui/animation"
+	"github.com/odvcencio/fluffyui/audio"
+	"github.com/odvcencio/fluffyui/backend"
+	"github.com/odvcencio/fluffyui/backend/tcell"
+	"github.com/odvcencio/fluffyui/clipboard"
+	"github.com/odvcencio/fluffyui/keybind"
+	"github.com/odvcencio/fluffyui/markdown"
+	"github.com/odvcencio/fluffyui/runtime"
+	"github.com/odvcencio/fluffyui/state"
+	"github.com/odvcencio/fluffyui/terminal"
+	"github.com/odvcencio/fluffyui/theme"
+	"github.com/odvcencio/fluffyui/toast"
+	"github.com/odvcencio/fluffyui/widgets"
 )
 
 const (
@@ -566,9 +566,11 @@ func NewWidgetApp(cfg WidgetAppConfig) (*WidgetApp, error) {
 	})
 
 	// Set up input callbacks
+	// onSubmit is called when user presses Enter in the input area
 	inputArea.OnSubmit(func(text string, mode buckleywidgets.InputMode) {
 		app.handleSubmit(text, mode)
 	})
+	// onChange is called when text changes - trigger re-layout for auto-resize
 	inputArea.OnChange(func(text string) {
 		app.refreshInputLayout()
 	})
@@ -940,31 +942,32 @@ func (a *WidgetApp) Quit() {
 
 // Post sends a message to the event loop.
 // Safe to call from any goroutine.
+// Uses non-blocking send to prevent goroutine stalls during high load.
 func (a *WidgetApp) Post(msg Message) {
 	if a == nil || a.messages == nil {
 		return
 	}
-	if atomic.LoadInt32(&a.inUpdate) == 1 {
-		select {
-		case a.messages <- msg:
-		default:
-			log.Printf("Warning: TUI message queue full during update, dropping message: %T", msg)
-		}
-		return
+
+	// Non-blocking send with timeout handling
+	// This prevents stalls when the UI is under heavy load
+	timeout := a.messageQueueTimeout
+	if timeout <= 0 {
+		timeout = 100 * time.Millisecond
 	}
-	if a.messageQueueTimeout == 0 {
-		select {
-		case a.messages <- msg:
-		case <-a.quitCh:
-		}
-		return
-	}
-	timer := time.NewTimer(a.messageQueueTimeout)
+
+	timer := time.NewTimer(timeout)
 	defer timer.Stop()
+
 	select {
 	case a.messages <- msg:
+		// Message queued successfully
 	case <-a.quitCh:
+		// Application quitting, drop message silently
 	case <-timer.C:
-		log.Printf("Warning: TUI message queue full, dropping message: %T", msg)
+		// Queue full - this indicates the UI is overloaded
+		// Log at debug level since this can happen during normal streaming
+		if os.Getenv("BUCKLEY_TUI_DEBUG") != "" {
+			log.Printf("Debug: TUI message queue full, dropping %T", msg)
+		}
 	}
 }

@@ -7,10 +7,10 @@ import (
 	"time"
 
 	buckleywidgets "github.com/odvcencio/buckley/pkg/buckley/ui/widgets"
-	"github.com/odvcencio/fluffy-ui/clipboard"
-	"github.com/odvcencio/fluffy-ui/keybind"
-	"github.com/odvcencio/fluffy-ui/runtime"
-	"github.com/odvcencio/fluffy-ui/widgets"
+	"github.com/odvcencio/fluffyui/clipboard"
+	"github.com/odvcencio/fluffyui/keybind"
+	"github.com/odvcencio/fluffyui/runtime"
+	"github.com/odvcencio/fluffyui/widgets"
 )
 
 // ============================================================================
@@ -491,7 +491,8 @@ func (a *WidgetApp) handleCommand(cmd runtime.Command) {
 	case runtime.Quit:
 		a.Quit()
 	case runtime.Submit:
-		// Already handled by inputArea callback
+		// Submission is handled directly by inputArea's onSubmit callback
+		// This command is just a notification that bubbles up from the widget
 	case runtime.Cancel:
 		// Overlay dismissal handled by Screen
 	}
