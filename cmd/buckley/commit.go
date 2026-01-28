@@ -6,10 +6,11 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/odvcencio/buckley/pkg/config"
+	"github.com/odvcencio/buckley/pkg/logging"
 	"github.com/odvcencio/buckley/pkg/oneshot"
 	commitgen "github.com/odvcencio/buckley/pkg/oneshot/commit"
 	oneshotrlm "github.com/odvcencio/buckley/pkg/oneshot/rlm"
@@ -30,10 +31,11 @@ func runCommitCommand(args []string) error {
 	dryRun := fs.Bool("dry-run", false, "print the generated commit message without committing")
 	yes := fs.Bool("yes", false, "skip confirmation prompts and run git commit")
 	pushFlag := fs.Bool("push", true, "push current branch after committing")
-	verbose := fs.Bool("verbose", false, "show model reasoning and full trace")
+	verbose := fs.Bool("verbose", false, "stream model reasoning as it happens")
+	trace := fs.Bool("trace", false, "show context audit and reasoning trace after completion")
 	showCost := fs.Bool("cost", true, "show token/cost breakdown")
 	modelFlag := fs.String("model", "", "model to use (default: BUCKLEY_MODEL_COMMIT or execution model)")
-	timeout := fs.Duration("timeout", 2*time.Minute, "timeout for model request")
+	timeout := fs.Duration("timeout", 0, "timeout for model request (0 = no timeout)")
 
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -84,6 +86,34 @@ func runCommitCommand(args []string) error {
 		Ledger:   ledger,
 	})
 
+	// Set up streaming callback if verbose mode is enabled
+	var streamCallback oneshot.StreamCallback
+	var reasoningLog *logging.ReasoningLogger
+	streamingEnabled := *verbose && stdinIsTerminalFn()
+
+	if streamingEnabled {
+		// Initialize reasoning logger
+		if home, err := os.UserHomeDir(); err == nil {
+			logDir := filepath.Join(home, ".buckley", "logs")
+			reasoningLog, _ = logging.NewReasoningLogger(logDir)
+		}
+
+		streamCallback = func(reasoning, content string) {
+			// Show reasoning (thinking) tokens as they stream
+			if reasoning != "" {
+				termOut.Stream(reasoning)
+				if reasoningLog != nil {
+					reasoningLog.Write(reasoning)
+				}
+			}
+		}
+	}
+	defer func() {
+		if reasoningLog != nil {
+			reasoningLog.Close()
+		}
+	}()
+
 	var runner commitRunner
 	if cfg != nil && cfg.OneshotMode() == config.ExecutionModeRLM {
 		runner = oneshotrlm.NewCommitRunner(oneshotrlm.CommitRunnerConfig{
@@ -92,13 +122,18 @@ func runCommitCommand(args []string) error {
 		})
 	} else {
 		runner = commitgen.NewRunner(commitgen.RunnerConfig{
-			Invoker: invoker,
-			Ledger:  ledger,
+			Invoker:        invoker,
+			Ledger:         ledger,
+			StreamCallback: streamCallback,
 		})
 	}
 
-	// Run with timeout
-	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+	// Run with optional timeout (0 = no timeout, for thinking models)
+	ctx := context.Background()
+	var cancel context.CancelFunc = func() {}
+	if *timeout > 0 {
+		ctx, cancel = context.WithTimeout(ctx, *timeout)
+	}
 	defer cancel()
 
 	// Show what we're doing
@@ -106,18 +141,25 @@ func runCommitCommand(args []string) error {
 		termOut.Dim("Using model: %s", modelID)
 	}
 
-	// Execute the commit generation with spinner
-	spinner := terminal.NewSpinner("Generating commit message...")
-	spinner.Start()
-
-	result, err := runner.Run(ctx, commitgen.DefaultContextOptions())
-
-	if err != nil {
-		spinner.StopWithError(err.Error())
-	} else if result.Error != nil {
-		spinner.StopWithError(result.Error.Error())
+	// Execute the commit generation
+	var result *commitgen.RunResult
+	if streamingEnabled {
+		// Streaming mode: show thinking progress inline
+		termOut.Dim("Thinking...")
+		result, err = runner.Run(ctx, commitgen.DefaultContextOptions())
+		termOut.StreamEnd() // End the streaming line
 	} else {
-		spinner.StopWithSuccess("Generated commit message")
+		// Non-streaming mode: use spinner
+		spinner := terminal.NewSpinner("Generating commit message...")
+		spinner.Start()
+		result, err = runner.Run(ctx, commitgen.DefaultContextOptions())
+		if err != nil {
+			spinner.StopWithError(err.Error())
+		} else if result.Error != nil {
+			spinner.StopWithError(result.Error.Error())
+		} else {
+			spinner.StopWithSuccess("Generated commit message")
+		}
 	}
 	if err != nil {
 		return fmt.Errorf("commit generation failed: %w", err)
@@ -128,13 +170,13 @@ func runCommitCommand(args []string) error {
 		printWarnings(result.Warnings)
 	}
 
-	// Show context audit (what was sent)
-	if *verbose && result.ContextAudit != nil {
+	// Show context audit (--trace flag)
+	if *trace && result.ContextAudit != nil {
 		printContextAudit(result.ContextAudit)
 	}
 
-	// Show reasoning (for thinking models)
-	if *verbose && result.Trace != nil && result.Trace.Reasoning != "" {
+	// Show reasoning trace (--trace flag)
+	if *trace && result.Trace != nil && result.Trace.Reasoning != "" {
 		printReasoning(result.Trace.Reasoning)
 	}
 

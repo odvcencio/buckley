@@ -25,6 +25,7 @@ type Planner struct {
 	planStore       PlanStore
 	systemPrompt    string
 	personaProvider *personality.PersonaProvider
+	ctx             context.Context
 }
 
 type Plan struct {
@@ -167,7 +168,23 @@ func NewPlanner(mgr ModelClient, cfg *config.Config, store *storage.Store, workf
 		planStore:       planStore,
 		systemPrompt:    defaultPlanningSystemPrompt(useToon, personaSection),
 		personaProvider: personaProvider,
+		ctx:             context.Background(),
 	}
+}
+
+func (p *Planner) baseContext() context.Context {
+	if p == nil || p.ctx == nil {
+		return context.Background()
+	}
+	return p.ctx
+}
+
+// SetContext updates the planner context for downstream calls.
+func (p *Planner) SetContext(ctx context.Context) {
+	if p == nil || ctx == nil {
+		return
+	}
+	p.ctx = ctx
 }
 
 func (p *Planner) GeneratePlan(featureName, description string) (*Plan, error) {
@@ -195,7 +212,7 @@ func (p *Planner) GeneratePlan(featureName, description string) (*Plan, error) {
 	prompt := p.buildPlanningPrompt(featureName, description, ctx, indexHints)
 
 	// 3. Call planning model (no timeout - let it run as long as needed)
-	reqCtx, cancel := context.WithCancel(context.Background())
+	reqCtx, cancel := context.WithCancel(p.baseContext())
 	defer cancel()
 	p.sendProgress("🤖 Asking %s to draft the plan…", safeModelName(p.config.Models.Planning))
 
@@ -350,7 +367,7 @@ func (p *Planner) lookupIndexContext(query string, limit int) string {
 	if p.store == nil || strings.TrimSpace(query) == "" {
 		return ""
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(p.baseContext(), 2*time.Second)
 	defer cancel()
 
 	files, err := p.store.SearchFiles(ctx, query, "", limit)
@@ -384,7 +401,7 @@ func (p *Planner) enrichTasksWithIndex(plan *Plan) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(p.baseContext(), 3*time.Second)
 	defer cancel()
 
 	for i := range plan.Tasks {

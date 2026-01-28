@@ -1,13 +1,12 @@
 models:
-  planning: moonshotai/kimi-k2-thinking
-  execution: openai/gpt-4-turbo
-  review: anthropic/claude-sonnet-4-5
+  planning: moonshotai/kimi-k2.5
+  execution: moonshotai/kimi-k2.5
+  review: moonshotai/kimi-k2.5
   fallback_chains:
-    moonshotai/kimi-k2-thinking:
-      - openai/o1-preview
-      - anthropic/claude-opus-4
+    moonshotai/kimi-k2.5:
+      - anthropic/claude-opus-4.5
     openai/gpt-4-turbo:
-      - anthropic/claude-sonnet-4-5
+      - anthropic/claude-sonnet-4.5
 
 personality:
   enabled: true

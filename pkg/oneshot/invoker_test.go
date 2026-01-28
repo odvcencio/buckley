@@ -176,7 +176,7 @@ func TestInvokerWithReasoning(t *testing.T) {
 	// Create a mock response with reasoning (thinking model)
 	mockResp := &model.ChatResponse{
 		ID:    "resp-789",
-		Model: "kimi-k2-thinking",
+		Model: "kimi-k2.5",
 		Choices: []model.Choice{
 			{
 				Index: 0,
@@ -208,7 +208,7 @@ func TestInvokerWithReasoning(t *testing.T) {
 
 	invoker := NewInvoker(InvokerConfig{
 		Client: client,
-		Model:  "kimi-k2-thinking",
+		Model:  "kimi-k2.5",
 	})
 
 	tool := tools.Definition{

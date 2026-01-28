@@ -11,31 +11,31 @@ func TestNewSubAgentValidation(t *testing.T) {
 
 	tests := []struct {
 		name    string
-		cfg     SubAgentConfig
+		cfg     SubAgentInstanceConfig
 		deps    SubAgentDeps
 		wantErr string
 	}{
 		{
 			name:    "empty ID",
-			cfg:     SubAgentConfig{ID: "", Model: "test-model"},
+			cfg:     SubAgentInstanceConfig{ID: "", Model: "test-model"},
 			deps:    SubAgentDeps{Models: nil, Registry: registry},
 			wantErr: "sub-agent ID required",
 		},
 		{
 			name:    "nil model manager",
-			cfg:     SubAgentConfig{ID: "test-agent", Model: "test-model"},
+			cfg:     SubAgentInstanceConfig{ID: "test-agent", Model: "test-model"},
 			deps:    SubAgentDeps{Models: nil, Registry: registry},
 			wantErr: "model manager required",
 		},
 		{
 			name:    "nil registry",
-			cfg:     SubAgentConfig{ID: "test-agent", Model: "test-model"},
+			cfg:     SubAgentInstanceConfig{ID: "test-agent", Model: "test-model"},
 			deps:    SubAgentDeps{Models: nil, Registry: nil},
 			wantErr: "model manager required", // fails on models first
 		},
 		{
 			name:    "empty model",
-			cfg:     SubAgentConfig{ID: "test-agent", Model: ""},
+			cfg:     SubAgentInstanceConfig{ID: "test-agent", Model: ""},
 			deps:    SubAgentDeps{Registry: registry},
 			wantErr: "model manager required", // fails on models first
 		},

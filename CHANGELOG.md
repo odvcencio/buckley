@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Default auto-compaction threshold lowered from 0.90 to 0.75 for earlier context trimming.
+
 ## [1.0.0] - 2026-01-04
 
 ### Added

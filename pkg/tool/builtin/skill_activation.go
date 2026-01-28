@@ -38,7 +38,7 @@ func (t *SkillActivationTool) Name() string {
 }
 
 func (t *SkillActivationTool) Description() string {
-	return "Activate or deactivate workflow skills to receive structured guidance. Use this when you recognize a pattern that matches an available skill (TDD, debugging, planning, etc.). Skills can also be manually activated by the user via /skill command or automatically during phase transitions."
+	return "Activate or deactivate workflow skills for structured guidance."
 }
 
 func (t *SkillActivationTool) Parameters() ParameterSchema {
@@ -51,11 +51,11 @@ func (t *SkillActivationTool) Parameters() ParameterSchema {
 			},
 			"skill": {
 				Type:        "string",
-				Description: "Name of the skill to activate/deactivate (e.g., 'test-driven-development', 'systematic-debugging')",
+				Description: "Name of the skill",
 			},
 			"scope": {
 				Type:        "string",
-				Description: "Description of the activation context (e.g., 'implementing user auth', 'debugging login flow'). Optional for deactivate.",
+				Description: "Context for activation (optional for deactivate)",
 			},
 		},
 		Required: []string{"action", "skill"},

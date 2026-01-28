@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -11,6 +12,8 @@ import (
 
 	"github.com/odvcencio/buckley/pkg/config"
 )
+
+const catalogFetchTimeout = 30 * time.Second
 
 // Manager manages provider routing and model metadata.
 type Manager struct {
@@ -20,6 +23,7 @@ type Manager struct {
 	catalog        map[string]ModelInfo
 	providerModels map[string][]string
 	modelProviders map[string]string
+	routingHooks   *RoutingHooks
 }
 
 // NewManager creates a new model manager
@@ -42,6 +46,7 @@ func NewManager(cfg *config.Config) (*Manager, error) {
 		catalog:        make(map[string]ModelInfo),
 		providerModels: make(map[string][]string),
 		modelProviders: make(map[string]string),
+		routingHooks:   NewRoutingHooks(),
 	}, nil
 }
 
@@ -59,7 +64,7 @@ func (m *Manager) Initialize() error {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			cat, err := provider.FetchCatalog()
+			cat, err := fetchCatalogWithTimeout(provider, catalogFetchTimeout)
 			if err != nil {
 				errCh <- fmt.Errorf("%s catalog: %w", provider.ID(), err)
 				return
@@ -91,6 +96,28 @@ func (m *Manager) Initialize() error {
 		return err
 	}
 	return nil
+}
+
+func fetchCatalogWithTimeout(provider Provider, timeout time.Duration) (*ModelCatalog, error) {
+	if timeout <= 0 {
+		return provider.FetchCatalog()
+	}
+	type result struct {
+		cat *ModelCatalog
+		err error
+	}
+	resCh := make(chan result, 1)
+	go func() {
+		cat, err := provider.FetchCatalog()
+		resCh <- result{cat: cat, err: err}
+	}()
+
+	select {
+	case res := <-resCh:
+		return res.cat, res.err
+	case <-time.After(timeout):
+		return nil, fmt.Errorf("fetch timed out after %s", timeout)
+	}
 }
 
 // GetModelInfo returns information about a model
@@ -142,6 +169,17 @@ func (m *Manager) ProviderIDForModel(modelID string) string {
 	return ""
 }
 
+// RoutingHooks exposes the model routing hook registry.
+func (m *Manager) RoutingHooks() *RoutingHooks {
+	if m == nil {
+		return nil
+	}
+	if m.routingHooks == nil {
+		m.routingHooks = NewRoutingHooks()
+	}
+	return m.routingHooks
+}
+
 // SetRequestTimeout updates provider HTTP request timeouts when supported.
 func (m *Manager) SetRequestTimeout(timeout time.Duration) {
 	for _, provider := range m.providers {
@@ -153,10 +191,13 @@ func (m *Manager) SetRequestTimeout(timeout time.Duration) {
 
 // ChatCompletion performs a chat completion routed to the proper provider
 func (m *Manager) ChatCompletion(ctx context.Context, req ChatRequest) (*ChatResponse, error) {
-	provider := m.providerForModel(req.Model)
+	selectedModel, provider := m.resolveModel(req.Model)
 	if provider == nil {
 		return nil, fmt.Errorf("no provider configured for model %s", req.Model)
 	}
+	req.Model = selectedModel
+	req = applyProviderTransforms(req, provider.ID())
+	req = m.applyPromptCache(req, provider.ID())
 	req.Model = normalizeModelForProvider(req.Model, provider.ID())
 	resp, err := provider.ChatCompletion(ctx, req)
 	if err != nil {
@@ -167,23 +208,139 @@ func (m *Manager) ChatCompletion(ctx context.Context, req ChatRequest) (*ChatRes
 
 // ChatCompletionStream performs a streaming chat completion
 func (m *Manager) ChatCompletionStream(ctx context.Context, req ChatRequest) (<-chan StreamChunk, <-chan error) {
-	provider := m.providerForModel(req.Model)
+	selectedModel, provider := m.resolveModel(req.Model)
 	if provider == nil {
 		errChan := make(chan error, 1)
 		errChan <- fmt.Errorf("no provider configured for model %s", req.Model)
 		close(errChan)
 		return nil, errChan
 	}
+	req.Model = selectedModel
+	req = applyProviderTransforms(req, provider.ID())
+	req = m.applyPromptCache(req, provider.ID())
 	req.Model = normalizeModelForProvider(req.Model, provider.ID())
 	return provider.ChatCompletionStream(ctx, req)
 }
 
+func applyProviderTransforms(req ChatRequest, providerID string) ChatRequest {
+	if providerID != "openrouter" || len(req.Transforms) > 0 {
+		return req
+	}
+	req.Transforms = []string{"middle-out"}
+	return req
+}
+
+func (m *Manager) applyPromptCache(req ChatRequest, providerID string) ChatRequest {
+	var cfg config.PromptCacheConfig
+	if m != nil && m.config != nil {
+		cfg = m.config.PromptCache
+	}
+
+	cache := req.PromptCache
+	cacheEnabled := cache != nil && cache.Enabled
+	if !cacheEnabled {
+		if !cfg.Enabled {
+			return req
+		}
+		if len(cfg.Providers) > 0 && !containsString(cfg.Providers, providerID) {
+			return req
+		}
+		cache = &PromptCache{
+			Enabled:        true,
+			SystemMessages: cfg.SystemMessages,
+			TailMessages:   cfg.TailMessages,
+		}
+		req.PromptCache = cache
+		cacheEnabled = true
+	}
+
+	if !cacheEnabled {
+		return req
+	}
+
+	switch providerID {
+	case "openrouter", "litellm":
+		if cache.SystemMessages > 0 || cache.TailMessages > 0 {
+			req.Messages = applyOpenAICompatiblePromptCache(req.Messages, cache)
+		}
+	case "openai":
+		if req.PromptCacheKey == "" {
+			req.PromptCacheKey = strings.TrimSpace(cfg.Key)
+		}
+		if req.PromptCacheRetention == "" {
+			req.PromptCacheRetention = strings.TrimSpace(cfg.Retention)
+		}
+	}
+
+	return req
+}
+
+func containsString(values []string, target string) bool {
+	if len(values) == 0 {
+		return false
+	}
+	target = strings.TrimSpace(target)
+	for _, value := range values {
+		if strings.TrimSpace(value) == target {
+			return true
+		}
+	}
+	return false
+}
+
 func (m *Manager) providerForModel(modelID string) Provider {
+	_, provider := m.resolveModel(modelID)
+	return provider
+}
+
+func (m *Manager) resolveModel(modelID string) (string, Provider) {
+	if m == nil {
+		return modelID, nil
+	}
+	requested := strings.TrimSpace(modelID)
+	if requested == "" {
+		return modelID, nil
+	}
+
+	providerID, routed := m.providerIDFromRouting(requested)
+	reason := ""
+	if routed {
+		reason = "config"
+	}
+
+	selected := requested
+	decision := &RoutingDecision{
+		RequestedModel: requested,
+		SelectedModel:  selected,
+		Reason:         reason,
+	}
+	if m.routingHooks != nil {
+		decision = m.routingHooks.Apply(decision)
+		if decision != nil && strings.TrimSpace(decision.SelectedModel) != "" {
+			selected = decision.SelectedModel
+		}
+	}
+
+	if selected != requested {
+		providerID, _ = m.providerIDFromRouting(selected)
+	}
+
+	return selected, m.providerFromIDOrFallback(providerID)
+}
+
+func (m *Manager) providerIDFromRouting(modelID string) (string, bool) {
 	for prefix, providerID := range m.config.Providers.ModelRouting {
 		if strings.HasPrefix(modelID, prefix) {
-			if provider, ok := m.providers[providerID]; ok {
-				return provider
-			}
+			return providerID, true
+		}
+	}
+	return "", false
+}
+
+func (m *Manager) providerFromIDOrFallback(providerID string) Provider {
+	if providerID != "" {
+		if provider, ok := m.providers[providerID]; ok {
+			return provider
 		}
 	}
 
@@ -483,12 +640,21 @@ func ExtractTextContent(content any) (string, error) {
 	switch v := content.(type) {
 	case string:
 		return v, nil
+	case []ContentPart:
+		if text := extractTextFromContentParts(v); text != "" {
+			return text, nil
+		}
 	case []any:
 		// Try to extract text from content parts
 		var textParts []string
 		for _, part := range v {
-			if partMap, ok := part.(map[string]any); ok {
-				if text, ok := partMap["text"].(string); ok && text != "" {
+			switch partVal := part.(type) {
+			case map[string]any:
+				if text := extractTextFromMap(partVal); text != "" {
+					textParts = append(textParts, text)
+				}
+			case ContentPart:
+				if text := extractTextFromContentParts([]ContentPart{partVal}); text != "" {
 					textParts = append(textParts, text)
 				}
 			}
@@ -496,13 +662,93 @@ func ExtractTextContent(content any) (string, error) {
 		if len(textParts) > 0 {
 			return strings.Join(textParts, "\n"), nil
 		}
+	case map[string]any:
+		if text := extractTextFromMap(v); text != "" {
+			return text, nil
+		}
 	}
 
 	return "", fmt.Errorf("unexpected content format")
+}
+
+func extractTextFromContentParts(parts []ContentPart) string {
+	var textParts []string
+	for _, part := range parts {
+		if strings.TrimSpace(part.Type) == "text" && part.Text != "" {
+			textParts = append(textParts, part.Text)
+		}
+	}
+	return strings.Join(textParts, "\n")
+}
+
+func extractTextFromMap(part map[string]any) string {
+	if part == nil {
+		return ""
+	}
+	if text := extractTextValue(part["text"]); text != "" {
+		return text
+	}
+	if text := extractTextValue(part["content"]); text != "" {
+		return text
+	}
+	if text := extractTextValue(part["value"]); text != "" {
+		return text
+	}
+	if text := extractTextValue(part["output_text"]); text != "" {
+		return text
+	}
+	return ""
+}
+
+func extractTextValue(raw any) string {
+	switch v := raw.(type) {
+	case string:
+		return v
+	case map[string]any:
+		if text := extractTextValue(v["text"]); text != "" {
+			return text
+		}
+		if text := extractTextValue(v["content"]); text != "" {
+			return text
+		}
+		if text := extractTextValue(v["value"]); text != "" {
+			return text
+		}
+	}
+	return ""
 }
 
 // ExtractTextContentOrEmpty extracts text from content, returning empty string on error
 func ExtractTextContentOrEmpty(content any) string {
 	text, _ := ExtractTextContent(content)
 	return text
+}
+
+// thinkTagPattern matches <think>...</think> blocks in model output.
+// Kimi K2 and other reasoning models embed thinking in these tags.
+var thinkTagPattern = regexp.MustCompile(`(?s)<think>(.*?)</think>`)
+
+// ExtractThinkingContent separates thinking/reasoning from the main content.
+// Returns (thinking, content) where thinking is the content of <think> tags
+// and content is the remaining text with thinking tags removed.
+func ExtractThinkingContent(text string) (thinking string, content string) {
+	matches := thinkTagPattern.FindAllStringSubmatch(text, -1)
+	if len(matches) == 0 {
+		return "", text
+	}
+
+	// Collect all thinking blocks
+	var thinkingParts []string
+	for _, match := range matches {
+		if len(match) > 1 {
+			thinkingParts = append(thinkingParts, strings.TrimSpace(match[1]))
+		}
+	}
+
+	// Remove thinking tags from content
+	content = thinkTagPattern.ReplaceAllString(text, "")
+	content = strings.TrimSpace(content)
+
+	thinking = strings.Join(thinkingParts, "\n\n")
+	return thinking, content
 }

@@ -63,9 +63,15 @@ func TestRegistryEmptyName(t *testing.T) {
 
 func TestRegistrySubset(t *testing.T) {
 	r := NewRegistry()
-	r.MustRegister(Definition{Name: "tool_a", Description: "A"})
-	r.MustRegister(Definition{Name: "tool_b", Description: "B"})
-	r.MustRegister(Definition{Name: "tool_c", Description: "C"})
+	if err := r.Register(Definition{Name: "tool_a", Description: "A"}); err != nil {
+		t.Fatalf("failed to register tool_a: %v", err)
+	}
+	if err := r.Register(Definition{Name: "tool_b", Description: "B"}); err != nil {
+		t.Fatalf("failed to register tool_b: %v", err)
+	}
+	if err := r.Register(Definition{Name: "tool_c", Description: "C"}); err != nil {
+		t.Fatalf("failed to register tool_c: %v", err)
+	}
 
 	subset := r.Subset("tool_a", "tool_c", "nonexistent")
 

@@ -26,6 +26,7 @@ import (
 	"github.com/odvcencio/buckley/pkg/telemetry"
 	"github.com/odvcencio/buckley/pkg/tool"
 	"github.com/odvcencio/buckley/pkg/tool/builtin"
+	"github.com/odvcencio/buckley/pkg/toolrunner"
 )
 
 // RunnerState represents the current state of a headless session.
@@ -102,6 +103,7 @@ type Runner struct {
 	emitter       EventEmitter
 	telemetry     *telemetry.Hub
 	modelOverride string
+	compactor     *conversation.CompactionManager
 
 	workflow     *orchestrator.WorkflowManager
 	orchestrator *orchestrator.Orchestrator
@@ -128,6 +130,7 @@ type Runner struct {
 	commandStop    chan struct{}
 	commandStopped chan struct{}
 	stopOnce       sync.Once
+	ctx            context.Context
 }
 
 // PendingApproval represents a tool call awaiting user approval.
@@ -162,6 +165,7 @@ type RunnerConfig struct {
 	ToolPolicy    *ToolPolicy
 	MaxRuntime    time.Duration
 	SystemPrompt  string // If empty, uses default system prompt for tool-using agents
+	Context       context.Context
 }
 
 // NewRunner creates a new headless session runner.
@@ -182,6 +186,10 @@ func NewRunner(cfg RunnerConfig) (*Runner, error) {
 	}
 
 	conv := conversation.New(cfg.Session.ID)
+	baseCtx := cfg.Context
+	if baseCtx == nil {
+		baseCtx = context.Background()
+	}
 
 	// Load existing conversation from storage
 	if err := conv.LoadFromStorage(cfg.Store); err != nil {
@@ -256,12 +264,45 @@ func NewRunner(cfg RunnerConfig) (*Runner, error) {
 		commandQueue:          make(chan command.SessionCommand, 64),
 		commandStop:           make(chan struct{}),
 		commandStopped:        make(chan struct{}),
+		ctx:                   baseCtx,
+	}
+
+	compactor := conversation.NewCompactionManager(cfg.ModelManager, sessionCfg)
+	compactor.SetConversation(conv)
+	compactor.SetOnComplete(func(_ *conversation.CompactionResult) {
+		if err := conv.SaveAllMessages(cfg.Store); err != nil {
+			r.emit(RunnerEvent{
+				Type:      EventWarning,
+				SessionID: r.sessionID,
+				Timestamp: time.Now(),
+				Data:      map[string]any{"message": fmt.Sprintf("Failed to persist compaction: %v", err)},
+			})
+		}
+	})
+	r.compactor = compactor
+	if r.tools != nil {
+		r.tools.SetCompactionManager(compactor)
 	}
 
 	go r.commandLoop()
 	r.startMaxRuntimeTimer(cfg.MaxRuntime)
 
 	return r, nil
+}
+
+func (r *Runner) baseContext() context.Context {
+	if r == nil || r.ctx == nil {
+		return context.Background()
+	}
+	return r.ctx
+}
+
+// SetContext updates the base context for headless execution.
+func (r *Runner) SetContext(ctx context.Context) {
+	if r == nil || ctx == nil {
+		return
+	}
+	r.ctx = ctx
 }
 
 // SessionID returns the session identifier.
@@ -274,6 +315,37 @@ func (r *Runner) State() RunnerState {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return r.state
+}
+
+// SetModelOverride updates the model override used for execution.
+func (r *Runner) SetModelOverride(modelID string) {
+	if r == nil {
+		return
+	}
+	modelID = strings.TrimSpace(modelID)
+	r.mu.Lock()
+	r.modelOverride = modelID
+	r.mu.Unlock()
+}
+
+// SetMode updates the execution mode for this runner.
+func (r *Runner) SetMode(mode string) error {
+	mode = strings.ToLower(strings.TrimSpace(mode))
+	if mode == "" {
+		return fmt.Errorf("mode required")
+	}
+	if mode != config.ExecutionModeClassic && mode != config.ExecutionModeRLM && mode != "auto" {
+		return fmt.Errorf("invalid execution mode: %s", mode)
+	}
+
+	r.mu.Lock()
+	if r.config == nil {
+		r.config = config.DefaultConfig()
+	}
+	r.config.Execution.Mode = mode
+	r.mu.Unlock()
+
+	return nil
 }
 
 // LastActive returns the last activity timestamp.
@@ -423,77 +495,76 @@ func (r *Runner) processUserInput(content string) error {
 }
 
 func (r *Runner) runConversationLoop() error {
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(r.baseContext())
 	r.mu.Lock()
 	r.cancelFunc = cancel
 	r.mu.Unlock()
 	defer cancel()
 
+	if r.State() == StateStopped || r.State() == StatePaused {
+		return nil
+	}
+
+	if r.tools == nil {
+		return fmt.Errorf("tool registry required")
+	}
+
 	maxIterations := 50 // Prevent runaway loops
-	for i := 0; i < maxIterations; i++ {
-		if r.State() == StateStopped || r.State() == StatePaused {
-			break
+	modelID := r.executionModelID()
+	runner, err := toolrunner.New(toolrunner.Config{
+		Models:               &headlessModelClient{runner: r},
+		Registry:             r.tools,
+		DefaultMaxIterations: maxIterations,
+		MaxToolsPhase1:       len(r.tools.List()),
+		EnableReasoning:      true,
+		ToolExecutor:         r.executeToolCall,
+	})
+	if err != nil {
+		r.emitError("tool runner init failed", err)
+		return err
+	}
+
+	stopWatcher := make(chan struct{})
+	go r.watchRunState(ctx, cancel, stopWatcher)
+	defer close(stopWatcher)
+
+	result, err := runner.Run(ctx, toolrunner.Request{
+		Messages:      buildHeadlessMessages(r, modelID),
+		MaxIterations: maxIterations,
+		Model:         modelID,
+	})
+	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			return nil
 		}
-
-		// Build request
-		req := r.buildChatRequest()
-
-		// Call model
-		response, err := r.callModel(ctx, req)
-		if err != nil {
-			r.emitError("model call failed", err)
+		var toolErr toolExecutionError
+		if errors.As(err, &toolErr) {
 			return err
 		}
+		r.emitError("model call failed", err)
+		return err
+	}
 
-		// Extract message from response
-		if len(response.Choices) == 0 {
-			r.emit(RunnerEvent{
-				Type:      EventWarning,
-				SessionID: r.sessionID,
-				Timestamp: time.Now(),
-				Data:      map[string]any{"message": "Model returned empty response - ending conversation"},
-			})
-			break
-		}
-		msg := response.Choices[0].Message
-		content := getMessageContent(msg.Content)
-		reasoning := msg.Reasoning
+	if result == nil || strings.TrimSpace(result.Content) == "" {
+		r.emit(RunnerEvent{
+			Type:      EventWarning,
+			SessionID: r.sessionID,
+			Timestamp: time.Now(),
+			Data:      map[string]any{"message": "Model returned no content and no tool calls - ending conversation"},
+		})
+		return nil
+	}
 
-		// Check for tool calls
-		if len(msg.ToolCalls) > 0 {
-			if err := r.handleToolCalls(ctx, msg.ToolCalls); err != nil {
-				if err == context.Canceled {
-					return nil
-				}
-				return err
-			}
-			continue // Loop back for next model call
-		}
-
-		// Regular text response - add to conversation and finish
-		if content != "" {
-			r.conv.AddAssistantMessageWithReasoning(content, reasoning)
-			assistantMsg := r.conv.Messages[len(r.conv.Messages)-1]
-			if err := r.conv.SaveMessage(r.store, assistantMsg); err != nil {
-				r.emitError("failed to save assistant message", err)
-			}
-		} else {
-			// No content and no tool calls - unusual, emit warning
-			r.emit(RunnerEvent{
-				Type:      EventWarning,
-				SessionID: r.sessionID,
-				Timestamp: time.Now(),
-				Data:      map[string]any{"message": "Model returned no content and no tool calls - ending conversation"},
-			})
-		}
-
-		break // No tool calls, conversation complete
+	r.conv.AddAssistantMessageWithReasoning(result.Content, result.Reasoning)
+	assistantMsg := r.conv.Messages[len(r.conv.Messages)-1]
+	if err := r.conv.SaveMessage(r.store, assistantMsg); err != nil {
+		r.emitError("failed to save assistant message", err)
 	}
 
 	return nil
 }
 
-func (r *Runner) buildChatRequest() model.ChatRequest {
+func (r *Runner) executionModelID() string {
 	modelID := r.config.Models.Execution
 	if modelID == "" {
 		modelID = r.config.Models.Planning
@@ -501,10 +572,35 @@ func (r *Runner) buildChatRequest() model.ChatRequest {
 	if r.modelOverride != "" {
 		modelID = r.modelOverride
 	}
+	return modelID
+}
 
+func (r *Runner) watchRunState(ctx context.Context, cancel context.CancelFunc, stop <-chan struct{}) {
+	if r == nil {
+		return
+	}
+	ticker := time.NewTicker(200 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-stop:
+			return
+		case <-ticker.C:
+			state := r.State()
+			if state == StatePaused || state == StateStopped {
+				cancel()
+				return
+			}
+		}
+	}
+}
+
+func (r *Runner) buildChatRequest() model.ChatRequest {
 	return model.ChatRequest{
-		Model:    modelID,
-		Messages: r.conv.ToModelMessages(),
+		Model:    r.executionModelID(),
+		Messages: buildHeadlessMessages(r, r.executionModelID()),
 		Tools:    r.tools.ToOpenAIFunctions(),
 	}
 }
@@ -550,6 +646,247 @@ func (r *Runner) callModel(ctx context.Context, req model.ChatRequest) (*model.C
 	}
 
 	return resp, err
+}
+
+type headlessModelClient struct {
+	runner *Runner
+}
+
+func (c *headlessModelClient) ChatCompletion(ctx context.Context, req model.ChatRequest) (*model.ChatResponse, error) {
+	if c == nil || c.runner == nil {
+		return nil, fmt.Errorf("runner not available")
+	}
+
+	resp, err := c.runner.callModel(ctx, req)
+	if err != nil || resp == nil {
+		return resp, err
+	}
+	if len(req.Tools) == 0 {
+		return resp, err
+	}
+	if len(resp.Choices) == 0 {
+		return resp, err
+	}
+
+	msg := resp.Choices[0].Message
+	if len(msg.ToolCalls) > 0 {
+		c.runner.conv.AddToolCallMessage(msg.ToolCalls)
+	}
+
+	return resp, err
+}
+
+func (c *headlessModelClient) GetExecutionModel() string {
+	if c == nil || c.runner == nil || c.runner.modelManager == nil {
+		return ""
+	}
+	return c.runner.modelManager.GetExecutionModel()
+}
+
+func (c *headlessModelClient) ChatCompletionStream(ctx context.Context, req model.ChatRequest) (<-chan model.StreamChunk, <-chan error) {
+	if c == nil || c.runner == nil || c.runner.modelManager == nil {
+		errChan := make(chan error, 1)
+		errChan <- fmt.Errorf("runner not available")
+		close(errChan)
+		return nil, errChan
+	}
+	return c.runner.modelManager.ChatCompletionStream(ctx, req)
+}
+
+type toolExecutionError struct {
+	err error
+}
+
+func (e toolExecutionError) Error() string {
+	if e.err == nil {
+		return ""
+	}
+	return e.err.Error()
+}
+
+func (e toolExecutionError) Unwrap() error {
+	return e.err
+}
+
+func (r *Runner) executeToolCall(ctx context.Context, tc model.ToolCall, args map[string]any, _ map[string]tool.Tool) (toolrunner.ToolExecutionResult, error) {
+	decision := "auto"
+	if args == nil {
+		args = map[string]any{}
+	}
+
+	r.emit(RunnerEvent{
+		Type:      EventToolCallStarted,
+		SessionID: r.sessionID,
+		Timestamp: time.Now(),
+		Data: map[string]any{
+			"toolCallId": tc.ID,
+			"toolName":   tc.Function.Name,
+			"arguments":  tc.Function.Arguments,
+		},
+	})
+
+	if strings.EqualFold(tc.Function.Name, "run_shell") {
+		if interactive, ok := args["interactive"].(bool); ok && interactive {
+			message := "Tool execution denied: interactive shell sessions are not supported in headless mode"
+			decision = "rejected"
+			r.conv.AddToolResponseMessage(tc.ID, tc.Function.Name, message)
+			r.emit(RunnerEvent{
+				Type:      EventToolCallComplete,
+				SessionID: r.sessionID,
+				Timestamp: time.Now(),
+				Data: map[string]any{
+					"toolCallId": tc.ID,
+					"toolName":   tc.Function.Name,
+					"success":    false,
+					"error":      message,
+				},
+			})
+			if r.store != nil {
+				decidedBy := "system"
+				riskScore := 0
+				if approvalDecision, score := r.approvalAuditFields(tc.ID); approvalDecision != "" || score != 0 {
+					if approvalDecision != "" {
+						decidedBy = approvalDecision
+					}
+					riskScore = score
+				}
+				if logErr := r.store.LogToolExecution(&storage.ToolAuditEntry{
+					SessionID:  r.sessionID,
+					ApprovalID: tc.ID,
+					ToolName:   tc.Function.Name,
+					ToolInput:  tc.Function.Arguments,
+					RiskScore:  riskScore,
+					Decision:   decision,
+					DecidedBy:  decidedBy,
+					ExecutedAt: time.Now(),
+					DurationMs: 0,
+					ToolOutput: message,
+				}); logErr != nil {
+					r.emitError("failed to log tool execution", logErr)
+				}
+			}
+			return toolrunner.ToolExecutionResult{Result: message, Error: message, Success: false}, nil
+		}
+	}
+
+	r.clampToolTimeoutArgs(tc.Function.Name, args)
+
+	if r.requiresApproval(tc.Function.Name) {
+		approved, err := r.waitForApproval(ctx, tc.ID, tc.Function.Name, args)
+		if err != nil {
+			return toolrunner.ToolExecutionResult{}, toolExecutionError{err: err}
+		}
+		if !approved {
+			message := "Tool execution rejected by user"
+			decision = "rejected"
+			r.conv.AddToolResponseMessage(tc.ID, tc.Function.Name, message)
+			r.emit(RunnerEvent{
+				Type:      EventToolCallComplete,
+				SessionID: r.sessionID,
+				Timestamp: time.Now(),
+				Data: map[string]any{
+					"toolCallId": tc.ID,
+					"toolName":   tc.Function.Name,
+					"success":    false,
+					"error":      message,
+				},
+			})
+			if r.store != nil {
+				decidedBy, riskScore := r.approvalAuditFields(tc.ID)
+				if logErr := r.store.LogToolExecution(&storage.ToolAuditEntry{
+					SessionID:  r.sessionID,
+					ApprovalID: tc.ID,
+					ToolName:   tc.Function.Name,
+					ToolInput:  tc.Function.Arguments,
+					RiskScore:  riskScore,
+					Decision:   decision,
+					DecidedBy:  decidedBy,
+					ExecutedAt: time.Now(),
+					DurationMs: 0,
+					ToolOutput: message,
+				}); logErr != nil {
+					r.emitError("failed to log tool execution", logErr)
+				}
+			}
+			return toolrunner.ToolExecutionResult{Result: message, Error: message, Success: false}, nil
+		}
+		decision = "approved"
+	}
+
+	startTime := time.Now()
+	result, err := r.tools.ExecuteWithContext(ctx, tc.Function.Name, args)
+	duration := time.Since(startTime)
+
+	decidedBy, riskScore := r.approvalAuditFields(tc.ID)
+	auditEntry := &storage.ToolAuditEntry{
+		SessionID:  r.sessionID,
+		ApprovalID: tc.ID,
+		ToolName:   tc.Function.Name,
+		ToolInput:  tc.Function.Arguments,
+		RiskScore:  riskScore,
+		Decision:   decision,
+		DecidedBy:  decidedBy,
+		ExecutedAt: startTime,
+		DurationMs: duration.Milliseconds(),
+	}
+
+	if err != nil {
+		errorResult := fmt.Sprintf("Error: %v", err)
+		auditEntry.ToolOutput = errorResult
+
+		r.conv.AddToolResponseMessage(tc.ID, tc.Function.Name, errorResult)
+		r.emit(RunnerEvent{
+			Type:      EventToolCallComplete,
+			SessionID: r.sessionID,
+			Timestamp: time.Now(),
+			Data: map[string]any{
+				"toolCallId": tc.ID,
+				"toolName":   tc.Function.Name,
+				"success":    false,
+				"error":      err.Error(),
+			},
+		})
+
+		if r.store != nil {
+			if logErr := r.store.LogToolExecution(auditEntry); logErr != nil {
+				r.emitError("failed to log tool execution", logErr)
+			}
+		}
+
+		return toolrunner.ToolExecutionResult{
+			Result:  errorResult,
+			Error:   err.Error(),
+			Success: false,
+		}, nil
+	}
+
+	resultContent := r.formatToolResult(result)
+	auditEntry.ToolOutput = truncateOutput(resultContent, 10000)
+
+	r.conv.AddToolResponseMessage(tc.ID, tc.Function.Name, resultContent)
+
+	r.emit(RunnerEvent{
+		Type:      EventToolCallComplete,
+		SessionID: r.sessionID,
+		Timestamp: time.Now(),
+		Data: map[string]any{
+			"toolCallId": tc.ID,
+			"toolName":   tc.Function.Name,
+			"success":    result.Success,
+			"output":     truncateOutput(resultContent, 1000),
+		},
+	})
+
+	if r.store != nil {
+		if logErr := r.store.LogToolExecution(auditEntry); logErr != nil {
+			r.emitError("failed to log tool execution", logErr)
+		}
+	}
+
+	return toolrunner.ToolExecutionResult{
+		Result:  resultContent,
+		Success: result.Success,
+	}, nil
 }
 
 func (r *Runner) handleToolCalls(ctx context.Context, toolCalls []model.ToolCall) error {
@@ -669,7 +1006,7 @@ func (r *Runner) handleToolCalls(ctx context.Context, toolCalls []model.ToolCall
 
 		// Execute tool with timing
 		startTime := time.Now()
-		result, err := r.tools.Execute(tc.Function.Name, args)
+		result, err := r.tools.ExecuteWithContext(ctx, tc.Function.Name, args)
 		duration := time.Since(startTime)
 
 		// Log to audit trail
@@ -1242,7 +1579,7 @@ func (r *Runner) runPlanCommand(args []string) error {
 
 	_ = r.persistSystemMessage(fmt.Sprintf("⏳ Planning %q…", featureName))
 
-	plan, err := orch.PlanFeature(featureName, description)
+	plan, err := orch.PlanFeatureWithContext(r.baseContext(), featureName, description)
 	if err != nil {
 		if handled := r.handleWorkflowPause(err); handled {
 			return nil
@@ -1272,7 +1609,7 @@ func (r *Runner) runExecuteCommand(args []string) error {
 
 	if len(args) > 0 {
 		taskID := args[0]
-		if err := orch.ExecuteTask(taskID); err != nil {
+		if err := orch.ExecuteTaskWithContext(r.baseContext(), taskID); err != nil {
 			if handled := r.handleWorkflowPause(err); handled {
 				return nil
 			}
@@ -1281,7 +1618,7 @@ func (r *Runner) runExecuteCommand(args []string) error {
 		return r.persistSystemMessage(fmt.Sprintf("✓ Task %s completed.", taskID))
 	}
 
-	if err := orch.ExecutePlan(); err != nil {
+	if err := orch.ExecutePlanWithContext(r.baseContext()); err != nil {
 		if handled := r.handleWorkflowPause(err); handled {
 			return nil
 		}

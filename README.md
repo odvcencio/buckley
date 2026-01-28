@@ -100,9 +100,9 @@ Different models for different jobs:
 
 ```yaml
 models:
-  planning: anthropic/claude-sonnet-4-20250514
-  execution: moonshotai/kimi-k2
-  review: anthropic/claude-sonnet-4-20250514
+  planning: moonshotai/kimi-k2.5
+  execution: moonshotai/kimi-k2.5
+  review: moonshotai/kimi-k2.5
 ```
 
 Supports OpenRouter (100+ models), Anthropic, OpenAI, Google, Ollama.
@@ -115,8 +115,8 @@ Compare models on the same task:
 
 ```bash
 buckley experiment run "add-dark-mode" \
-    -m moonshotai/kimi-k2-thinking \
-    -m anthropic/claude-sonnet-4-5 \
+    -m moonshotai/kimi-k2.5 \
+    -m anthropic/claude-sonnet-4.5 \
     -p "Add dark mode toggle"
 ```
 
@@ -189,6 +189,22 @@ Full docs at [buckley.draco.quest](https://buckley.draco.quest)
 ./scripts/test.sh -race    # With race detector
 go test ./pkg/orchestrator # Specific package
 ```
+
+### Self-Healing E2E Tests
+
+Buckley includes an AI-powered E2E testing framework that adapts to UI changes:
+
+```bash
+# Terminal 1: Start Buckley with agent socket
+./buckley --agent-socket unix:/tmp/buckley.sock
+
+# Terminal 2: Run self-healing tests
+make agent-test-smoke      # Run smoke test
+make agent-test-all        # Run all scenarios
+make agent-test-list       # List available scenarios
+```
+
+Unlike traditional E2E tests that break when UI changes, these tests use **semantic matching** to find widgets by intent rather than brittle selectors. See [`scripts/agent-tests/`](scripts/agent-tests/) for implementation details.
 
 ---
 

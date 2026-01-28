@@ -31,6 +31,7 @@ type ReviewAgent struct {
 	logger          *reviewLogger
 	schemaBlock     string
 	personaProvider *personality.PersonaProvider
+	ctx             context.Context
 }
 
 // SetPersonaProvider swaps the persona provider for upcoming review cycles.
@@ -150,7 +151,23 @@ func NewReviewAgent(plan *Plan, cfg *config.Config, client ModelClient, registry
 		logger:          newReviewLogger(plan),
 		schemaBlock:     reviewSchemaBlock(useToon),
 		personaProvider: personaProvider,
+		ctx:             context.Background(),
 	}
+}
+
+func (a *ReviewAgent) baseContext() context.Context {
+	if a == nil || a.ctx == nil {
+		return context.Background()
+	}
+	return a.ctx
+}
+
+// SetContext updates the base context for review operations.
+func (a *ReviewAgent) SetContext(ctx context.Context) {
+	if a == nil || ctx == nil {
+		return
+	}
+	a.ctx = ctx
 }
 
 // Review runs the review loop for a single task implementation.
@@ -178,7 +195,7 @@ func (a *ReviewAgent) Review(task *Task, builderResult *BuilderResult) (*ReviewR
 		}
 	}
 	systemPrompt := prompts.ReviewPrompt(time.Now(), personaProfile)
-	reqCtx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	reqCtx, cancel := context.WithTimeout(a.baseContext(), 90*time.Second)
 	defer cancel()
 
 	req := model.ChatRequest{

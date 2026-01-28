@@ -171,6 +171,30 @@ Plugin receives JSON on stdin, writes JSON to stdout.
 
 ---
 
+## Middleware Recipes
+
+Compose middleware with `tool.Chain` and register it on the registry:
+
+```go
+registry := tool.NewRegistry()
+tool.ApplyRegistryConfig(registry, tool.DefaultRegistryConfig())
+
+registry.Use(tool.Chain(
+	tool.Timeout(30*time.Second, nil),
+	tool.Retry(tool.RetryConfig{
+		MaxAttempts:  3,
+		InitialDelay: 200 * time.Millisecond,
+		MaxDelay:     2 * time.Second,
+		Multiplier:   2,
+		Jitter:       0.2,
+	}),
+))
+```
+
+`Chain` applies middleware in order (first is outermost). Custom middleware runs after the built-in telemetry, hooks, and approval layers.
+
+---
+
 ## Related
 
 - [Skills](./SKILLS.md) - Restrict tools per workflow

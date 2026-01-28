@@ -35,11 +35,20 @@ func ensureMemoriesSchema(db *sql.DB) error {
 		return nil
 	}
 
+	if !cols["project_path"] {
+		if _, err := db.Exec(`ALTER TABLE memories ADD COLUMN project_path TEXT`); err != nil {
+			return fmt.Errorf("add memories.project_path: %w", err)
+		}
+	}
+
 	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_memories_session ON memories(session_id)`); err != nil {
 		return fmt.Errorf("ensure idx_memories_session: %w", err)
 	}
 	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_memories_created ON memories(created_at)`); err != nil {
 		return fmt.Errorf("ensure idx_memories_created: %w", err)
+	}
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_memories_project ON memories(project_path)`); err != nil {
+		return fmt.Errorf("ensure idx_memories_project: %w", err)
 	}
 
 	return nil

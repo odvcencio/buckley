@@ -30,10 +30,6 @@ func TestHierarchyManager_Initialize(t *testing.T) {
 		tmpDir,
 		filepath.Join(tmpDir, "architecture"),
 		filepath.Join(tmpDir, "architecture", "decisions"),
-		filepath.Join(tmpDir, "plans"),
-		filepath.Join(tmpDir, "execution"),
-		filepath.Join(tmpDir, "reviews"),
-		filepath.Join(tmpDir, "archive"),
 	}
 
 	for _, dir := range requiredDirs {
@@ -47,7 +43,6 @@ func TestHierarchyManager_Initialize(t *testing.T) {
 		filepath.Join(tmpDir, "README.md"),
 		filepath.Join(tmpDir, "architecture", "overview.md"),
 		filepath.Join(tmpDir, "architecture", "decisions", "README.md"),
-		filepath.Join(tmpDir, "archive", "README.md"),
 	}
 
 	for _, file := range requiredFiles {

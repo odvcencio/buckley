@@ -14,13 +14,30 @@ import (
 type PRCreator struct {
 	modelClient ModelClient
 	cfg         *config.Config
+	ctx         context.Context
 }
 
 func NewPRCreator(mgr ModelClient, cfg *config.Config) *PRCreator {
 	return &PRCreator{
 		modelClient: mgr,
 		cfg:         cfg,
+		ctx:         context.Background(),
 	}
+}
+
+func (pc *PRCreator) baseContext() context.Context {
+	if pc == nil || pc.ctx == nil {
+		return context.Background()
+	}
+	return pc.ctx
+}
+
+// SetContext updates the base context for PR generation.
+func (pc *PRCreator) SetContext(ctx context.Context) {
+	if pc == nil || ctx == nil {
+		return
+	}
+	pc.ctx = ctx
 }
 
 type PRInfo struct {
@@ -97,7 +114,7 @@ func (pc *PRCreator) GeneratePR(plan *Plan) (*PRInfo, error) {
 func (pc *PRCreator) generateDescription(plan *Plan, commits []string) (string, error) {
 	prompt := pc.buildPRPrompt(plan, commits)
 
-	reqCtx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	reqCtx, cancel := context.WithTimeout(pc.baseContext(), 45*time.Second)
 	defer cancel()
 
 	req := model.ChatRequest{
@@ -111,7 +128,7 @@ func (pc *PRCreator) generateDescription(plan *Plan, commits []string) (string, 
 
 	resp, err := pc.modelClient.ChatCompletion(reqCtx, req)
 	if err != nil {
-		return "", fmt.Errorf("PR description generation failed: %w", err)
+		return "", fmt.Errorf("pr description generation failed: %w", err)
 	}
 
 	if len(resp.Choices) == 0 {

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/odvcencio/buckley/pkg/config"
+	"github.com/odvcencio/buckley/pkg/filewatch"
 	"github.com/odvcencio/buckley/pkg/giturl"
 	"github.com/odvcencio/buckley/pkg/ipc/command"
 	"github.com/odvcencio/buckley/pkg/mission"
@@ -322,21 +323,42 @@ func (r *Registry) EnsureSession(sessionID string) (*Runner, error) {
 
 func (r *Registry) buildToolRegistry(sessionID string, project string) *tool.Registry {
 	tools := tool.NewRegistry()
-	tools.SetMaxOutputBytes(defaultHeadlessMaxOutputBytes)
+
+	registryCfg := tool.DefaultRegistryConfig()
+	registryCfg.MaxOutputBytes = defaultHeadlessMaxOutputBytes
+	if r.config != nil {
+		if r.config.ToolMiddleware.MaxResultBytes > 0 {
+			registryCfg.MaxOutputBytes = r.config.ToolMiddleware.MaxResultBytes
+		}
+		registryCfg.Middleware.DefaultTimeout = r.config.ToolMiddleware.DefaultTimeout
+		registryCfg.Middleware.PerToolTimeouts = copyDurationMap(r.config.ToolMiddleware.PerToolTimeouts)
+		registryCfg.Middleware.MaxResultBytes = r.config.ToolMiddleware.MaxResultBytes
+		registryCfg.Middleware.RetryConfig = tool.RetryConfig{
+			MaxAttempts:  r.config.ToolMiddleware.Retry.MaxAttempts,
+			InitialDelay: r.config.ToolMiddleware.Retry.InitialDelay,
+			MaxDelay:     r.config.ToolMiddleware.Retry.MaxDelay,
+			Multiplier:   r.config.ToolMiddleware.Retry.Multiplier,
+			Jitter:       r.config.ToolMiddleware.Retry.Jitter,
+		}
+	}
+	registryCfg.TelemetryHub = r.telemetry
+	registryCfg.TelemetrySessionID = sessionID
+	registryCfg.Middleware.FileWatcher = filewatch.NewFileWatcher(100)
+	if r.store != nil && r.config != nil && r.config.Workflow.IncrementalApproval {
+		registryCfg.MissionStore = mission.NewStore(r.store.DB())
+		registryCfg.MissionAgentID = "buckley-headless"
+		registryCfg.MissionSessionID = sessionID
+		registryCfg.RequireMissionApproval = true
+		registryCfg.MissionTimeout = 15 * time.Minute
+	}
+	tool.ApplyRegistryConfig(tools, registryCfg)
+
 	if strings.TrimSpace(project) != "" && r.config != nil {
 		tools.ConfigureContainers(r.config, project)
 	}
 	if r.store != nil {
 		tools.SetTodoStore(&todoStoreAdapter{store: r.store})
 		tools.EnableCodeIndex(r.store)
-	}
-	if r.telemetry != nil && strings.TrimSpace(sessionID) != "" {
-		tools.EnableTelemetry(r.telemetry, sessionID)
-	}
-	if r.store != nil && r.config != nil && r.config.Workflow.IncrementalApproval {
-		missionStore := mission.NewStore(r.store.DB())
-		tools.EnableMissionControl(missionStore, "buckley-headless", true, 15*time.Minute)
-		tools.UpdateMissionSession(sessionID)
 	}
 	if err := tools.LoadDefaultPlugins(); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to load some plugins: %v\n", err)
@@ -345,6 +367,17 @@ func (r *Registry) buildToolRegistry(sessionID string, project string) *tool.Reg
 		tools.SetWorkDir(project)
 	}
 	return tools
+}
+
+func copyDurationMap(src map[string]time.Duration) map[string]time.Duration {
+	if len(src) == 0 {
+		return nil
+	}
+	out := make(map[string]time.Duration, len(src))
+	for key, value := range src {
+		out[key] = value
+	}
+	return out
 }
 
 func applyToolPolicy(registry *tool.Registry, policy *ToolPolicy) {

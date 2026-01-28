@@ -223,7 +223,7 @@ func (e *experimentExecutor) runConversation(ctx context.Context, modelID string
 
 		for _, tc := range choice.Message.ToolCalls {
 			metrics.toolCalls++
-			payload, filePath, err := executeToolCall(registry, codec, tc)
+			payload, filePath, err := executeToolCall(ctx, registry, codec, tc)
 			if err != nil {
 				metrics.toolFailures++
 			} else {
@@ -247,7 +247,7 @@ func (e *experimentExecutor) runConversation(ctx context.Context, modelID string
 	return "", metrics, collectFiles(filesTouched), fmt.Errorf("max tool iterations exceeded")
 }
 
-func executeToolCall(registry *tool.Registry, codec *toon.Codec, call model.ToolCall) (string, string, error) {
+func executeToolCall(ctx context.Context, registry *tool.Registry, codec *toon.Codec, call model.ToolCall) (string, string, error) {
 	var params map[string]any
 	if err := json.Unmarshal([]byte(call.Function.Arguments), &params); err != nil {
 		return "", "", fmt.Errorf("failed to parse tool arguments: %w", err)
@@ -260,7 +260,7 @@ func executeToolCall(registry *tool.Registry, codec *toon.Codec, call model.Tool
 	}
 
 	rich := touch.ExtractFromArgs(call.Function.Name, params)
-	result, err := registry.Execute(call.Function.Name, params)
+	result, err := registry.ExecuteWithContext(ctx, call.Function.Name, params)
 	if err != nil {
 		return "", normalizeFilePath(rich.FilePath), err
 	}

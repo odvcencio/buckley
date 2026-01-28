@@ -14,6 +14,7 @@ const (
 	EntryTypeAnalysis EntryType = "analysis"
 	EntryTypeDecision EntryType = "decision"
 	EntryTypeArtifact EntryType = "artifact"
+	EntryTypeStrategy EntryType = "strategy" // Strategic decisions for context
 )
 
 // Entry stores raw and summarized scratchpad content.

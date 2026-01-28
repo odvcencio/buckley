@@ -61,12 +61,19 @@ type ContentPart struct {
 	Type     string    `json:"type"` // "text" or "image_url"
 	Text     string    `json:"text,omitempty"`
 	ImageURL *ImageURL `json:"image_url,omitempty"`
+	// CacheControl is used by providers that support prompt caching.
+	CacheControl *CacheControl `json:"cache_control,omitempty"`
 }
 
 // ImageURL represents an image URL in a content part
 type ImageURL struct {
 	URL    string `json:"url"`
 	Detail string `json:"detail,omitempty"` // "low", "high", "auto"
+}
+
+// CacheControl marks content blocks for prompt caching.
+type CacheControl struct {
+	Type string `json:"type"`
 }
 
 // ToolCall represents a function/tool call from the assistant
@@ -87,16 +94,27 @@ type ReasoningConfig struct {
 	Effort string `json:"effort,omitempty"` // "low", "medium", "high"
 }
 
+// PromptCache configures provider-specific prompt caching behavior.
+type PromptCache struct {
+	Enabled        bool
+	SystemMessages int
+	TailMessages   int
+}
+
 // ChatRequest represents a request to the chat completion API
 type ChatRequest struct {
-	Model       string           `json:"model"`
-	Messages    []Message        `json:"messages"`
-	Temperature float64          `json:"temperature,omitempty"`
-	MaxTokens   int              `json:"max_tokens,omitempty"`
-	Stream      bool             `json:"stream"`
-	Tools       []map[string]any `json:"tools,omitempty"`       // OpenAI function definitions
-	ToolChoice  string           `json:"tool_choice,omitempty"` // "auto", "none", or specific function
-	Reasoning   *ReasoningConfig `json:"reasoning,omitempty"`   // Reasoning config for supported models
+	Model                string           `json:"model"`
+	Messages             []Message        `json:"messages"`
+	Temperature          float64          `json:"temperature,omitempty"`
+	MaxTokens            int              `json:"max_tokens,omitempty"`
+	Stream               bool             `json:"stream"`
+	Tools                []map[string]any `json:"tools,omitempty"`                  // OpenAI function definitions
+	ToolChoice           string           `json:"tool_choice,omitempty"`            // "auto", "none", or specific function
+	Reasoning            *ReasoningConfig `json:"reasoning,omitempty"`              // Reasoning config for supported models
+	Transforms           []string         `json:"transforms,omitempty"`             // Provider-specific prompt transforms (e.g., OpenRouter)
+	PromptCacheKey       string           `json:"prompt_cache_key,omitempty"`       // OpenAI prompt caching key
+	PromptCacheRetention string           `json:"prompt_cache_retention,omitempty"` // OpenAI prompt cache retention
+	PromptCache          *PromptCache     `json:"-"`
 }
 
 // ChatResponse represents a non-streaming chat completion response
@@ -131,10 +149,21 @@ type StreamChoice struct {
 
 // MessageDelta represents incremental content in a stream
 type MessageDelta struct {
-	Role      string          `json:"role,omitempty"`
-	Content   string          `json:"content,omitempty"`
-	Reasoning string          `json:"reasoning,omitempty"` // For thinking/reasoning models
-	ToolCalls []ToolCallDelta `json:"tool_calls,omitempty"`
+	Role             string            `json:"role,omitempty"`
+	Content          string            `json:"content,omitempty"`
+	Reasoning        string            `json:"reasoning,omitempty"`          // For thinking/reasoning models
+	ReasoningDetails []ReasoningDetail `json:"reasoning_details,omitempty"` // OpenRouter's reasoning_details format
+	ToolCalls        []ToolCallDelta   `json:"tool_calls,omitempty"`
+}
+
+// ReasoningDetail represents a reasoning block from OpenRouter's reasoning_details format.
+type ReasoningDetail struct {
+	Type    string `json:"type"`              // "reasoning.text", "reasoning.summary", "reasoning.encrypted"
+	ID      string `json:"id,omitempty"`
+	Index   int    `json:"index,omitempty"`
+	Text    string `json:"text,omitempty"`    // For reasoning.text
+	Summary string `json:"summary,omitempty"` // For reasoning.summary
+	Format  string `json:"format,omitempty"`
 }
 
 // ToolCallDelta represents incremental tool call data in streaming

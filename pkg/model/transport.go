@@ -39,6 +39,21 @@ type LoggingTransport struct {
 // networkLogDir is the directory for network logs
 var networkLogDir = paths.BuckleyLogsBaseDir()
 
+// defaultTransport is lazily initialized
+var (
+	defaultTransportOnce sync.Once
+	defaultTransport     *http.Transport
+)
+
+// getDefaultTransport returns the optimized default transport.
+// This function is kept for backward compatibility with existing code.
+func getDefaultTransport() *http.Transport {
+	defaultTransportOnce.Do(func() {
+		defaultTransport = DefaultTransport()
+	})
+	return defaultTransport
+}
+
 // NewLoggingTransport creates a new logging transport
 func NewLoggingTransport(base http.RoundTripper) *LoggingTransport {
 	return NewLoggingTransportWithEnabled(base, true)
@@ -48,7 +63,7 @@ func NewLoggingTransport(base http.RoundTripper) *LoggingTransport {
 // disables request/response logging entirely.
 func NewLoggingTransportWithEnabled(base http.RoundTripper, enabled bool) *LoggingTransport {
 	if base == nil {
-		base = http.DefaultTransport
+		base = getDefaultTransport()
 	}
 
 	lt := &LoggingTransport{base: base, enabled: enabled}

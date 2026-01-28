@@ -97,6 +97,9 @@ func (r *Runner) initRuntime() error {
 		if r.cfg.RLM.Coordinator.ConfidenceThreshold > 0 {
 			rlmCfg.Coordinator.ConfidenceThreshold = r.cfg.RLM.Coordinator.ConfidenceThreshold
 		}
+		if r.cfg.RLM.SubAgent.MaxConcurrent > 0 {
+			rlmCfg.SubAgent.MaxConcurrent = r.cfg.RLM.SubAgent.MaxConcurrent
+		}
 	}
 
 	runtime, err := rlm.NewRuntime(rlmCfg, rlm.RuntimeDeps{
@@ -355,7 +358,7 @@ func (r *Runner) executeTaskBatch(plan *orchestrator.Plan, tasks []orchestrator.
 		for _, task := range tasks {
 			r.updateTaskStatus(plan, task.ID, orchestrator.TaskFailed)
 		}
-		return fmt.Errorf("RLM execution failed: %w", err)
+		return fmt.Errorf("rlm execution failed: %w", err)
 	}
 
 	// Parse answer to determine which tasks succeeded

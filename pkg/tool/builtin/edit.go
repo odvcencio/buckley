@@ -20,7 +20,7 @@ func (t *EditFileTool) Name() string {
 }
 
 func (t *EditFileTool) Description() string {
-	return "Make targeted edits to a file by replacing exact text. The old_string must match exactly (including whitespace and indentation). Use this for precise code modifications. Shows a diff preview before applying changes."
+	return "Edit a file by replacing exact text matches. Shows diff preview."
 }
 
 func (t *EditFileTool) Parameters() ParameterSchema {
@@ -33,7 +33,7 @@ func (t *EditFileTool) Parameters() ParameterSchema {
 			},
 			"old_string": {
 				Type:        "string",
-				Description: "Exact text to find and replace (must match exactly including whitespace)",
+				Description: "Text to find (exact match)",
 			},
 			"new_string": {
 				Type:        "string",
@@ -41,7 +41,7 @@ func (t *EditFileTool) Parameters() ParameterSchema {
 			},
 			"replace_all": {
 				Type:        "boolean",
-				Description: "If true, replace all occurrences. If false (default), only replace the first occurrence",
+				Description: "Replace all occurrences (default: first only)",
 				Default:     false,
 			},
 		},
@@ -337,7 +337,7 @@ func (t *InsertTextTool) Name() string {
 }
 
 func (t *InsertTextTool) Description() string {
-	return "Insert text at a specific line number in a file. Use this to add new code without replacing existing content. Line numbers are 1-indexed."
+	return "Insert text at a specific line number in a file without replacing existing content. Line numbers are 1-indexed. The new text is inserted before the specified line, pushing existing content down. Use this to add imports, new functions, or code blocks at specific locations."
 }
 
 func (t *InsertTextTool) Parameters() ParameterSchema {
@@ -463,7 +463,7 @@ func (t *DeleteLinesTool) Name() string {
 }
 
 func (t *DeleteLinesTool) Description() string {
-	return "Delete a range of lines from a file. Line numbers are 1-indexed and inclusive."
+	return "Delete a range of lines from a file. Line numbers are 1-indexed and inclusive (start and end lines are both deleted). Shows the deleted content before removal. Use this to remove dead code, old comments, or unwanted sections."
 }
 
 func (t *DeleteLinesTool) Parameters() ParameterSchema {

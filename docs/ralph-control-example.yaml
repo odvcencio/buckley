@@ -1,0 +1,164 @@
+# Ralph Control Configuration - Complete Example
+#
+# This file documents all available configuration options for Ralph,
+# the multi-backend orchestration system.
+#
+# Copy and customize for your use case.
+
+# Maximum iterations before stopping (0 = unlimited)
+# Can also be set via CLI: --max-iterations=N
+max_iterations: 10
+
+# Execution mode:
+# - sequential: Try backends in order until one succeeds (default)
+# - parallel: Run all backends simultaneously, compare results
+# - round_robin: Rotate through backends each iteration
+mode: sequential
+
+# Backend definitions
+backends:
+  # External backend: Claude Code CLI
+  claude:
+    command: claude
+    args: ["-p", "{prompt}", "--dangerously-skip-permissions"]
+    enabled: true
+    thresholds:
+      max_consecutive_errors: 3      # Park after 3 errors in a row
+      max_requests_per_window: 100   # Max requests per hour
+      max_cost_per_hour: 5.0         # Max cost per hour in dollars
+      max_context_pct: 90            # Park when context > 90% full
+    models:
+      default: ""  # Use CLI default
+      rules:
+        # Switch to faster model after 10 iterations
+        - when: "iteration > 10"
+          model: "claude-3-haiku"
+
+  # External backend: Codex CLI
+  codex:
+    command: codex
+    args: ["exec", "{prompt}"]
+    enabled: true
+    thresholds:
+      max_consecutive_errors: 5
+
+  # Internal backend: Buckley itself for specific tasks
+  buckley-commit:
+    type: internal
+    enabled: true
+    thresholds:
+      max_consecutive_errors: 1  # Fail fast, let fallback handle it
+    models:
+      default: moonshotai/kimi-k2.5
+    prompt_template: |
+      Stage and commit ONLY the files modified during this Ralph session.
+
+      Files modified during this session:
+      {session_files}
+
+      Steps:
+      1. Stage ONLY the files listed above
+      2. Use the generate_commit tool to create a commit message
+      3. Push the commit to remote
+
+      Context from current iteration:
+      {prompt}
+
+  # Fallback commit backend using Codex
+  codex-commit:
+    command: codex
+    args:
+      - "exec"
+      - |
+        Create a git commit for the changes made during this session.
+        Only commit files that were modified during this session.
+        Context: {prompt}
+    enabled: true
+
+# Backend rotation settings
+rotation:
+  mode: none  # none, round_robin, time_sliced
+  interval: 5m  # For time_sliced mode
+  order: [claude, codex]  # Preferred order
+
+# Schedule rules - trigger actions based on conditions
+schedule:
+  # At exactly iteration 6, switch to buckley-commit
+  - trigger:
+      at_iteration: 6
+    action: set_backend
+    backend: buckley-commit
+
+  # At exactly iteration 7, switch to codex
+  - trigger:
+      at_iteration: 7
+    action: set_backend
+    backend: codex
+
+  # Every 5 iterations, trigger a commit
+  - trigger:
+      every_iterations: 5
+    action: set_backend
+    backend: buckley-commit
+
+  # On rate limit error, switch to next backend
+  - trigger:
+      on_error: "rate_limit"
+    action: next_backend
+
+  # On quota error, switch to next backend
+  - trigger:
+      on_error: "quota"
+    action: next_backend
+
+  # Using "when" expressions (CEL-like syntax)
+  # Available variables: iteration, error_count, consec_errors,
+  #                      total_cost, total_tokens, elapsed_minutes, has_error
+  - trigger:
+      when: "total_cost > 1.0"
+    action: pause
+    reason: "Cost limit reached"
+
+  # Cron-based triggers (standard cron syntax)
+  - trigger:
+      cron: "0 */2 * * *"  # Every 2 hours
+    action: rotate_backend
+
+# Session memory configuration
+memory:
+  enabled: true
+  summary_interval: 5       # Generate summary every N iterations
+  summary_model: moonshotai/kimi-k2.5
+  retention_days: 7         # Keep summaries for N days
+  max_raw_turns: 500        # Maximum raw turns to keep
+
+# Context processing - inject session state into prompts
+context_processing:
+  enabled: true
+  model: moonshotai/kimi-k2.5
+  max_output_tokens: 400    # Max tokens for context block
+  budget_pct: 10            # Context budget as % of model context
+
+# Manual overrides (can be modified while running via control file)
+override:
+  paused: false
+  active_backends: [claude, codex, buckley-commit, codex-commit]
+  # next_action: ""  # Force a specific action
+  # backend_options:
+  #   claude:
+  #     model: claude-3-opus
+
+# Schedule actions available:
+#   - set_backend: Switch to a specific backend
+#   - next_backend: Move to next backend in rotation order
+#   - rotate_backend: Rotate the backend order
+#   - set_mode: Change execution mode
+#   - pause: Pause execution (with reason)
+#   - resume: Resume execution
+
+# Trigger types:
+#   - at_iteration: N      # Fire at exactly iteration N
+#   - every_iterations: N  # Fire every N iterations (N, 2N, 3N...)
+#   - on_error: "pattern"  # Fire when error contains pattern
+#   - when: "expression"   # Fire when CEL expression is true
+#   - cron: "* * * * *"    # Fire on cron schedule

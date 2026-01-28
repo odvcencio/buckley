@@ -73,7 +73,7 @@ func (gh *CLI) EnsureAuthenticated() error {
 		return nil
 	}
 	if _, err := gh.run("auth", "status"); err != nil {
-		return fmt.Errorf("GitHub CLI not authenticated. Please run: gh auth login (%w)", err)
+		return fmt.Errorf("github cli not authenticated; please run: gh auth login (%w)", err)
 	}
 	gh.authenticated = true
 	return nil

@@ -6,14 +6,17 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/oklog/ulid/v2"
 	"github.com/pmezard/go-difflib/difflib"
 
 	"github.com/odvcencio/buckley/pkg/containerexec"
+	"github.com/odvcencio/buckley/pkg/conversation"
 	"github.com/odvcencio/buckley/pkg/embeddings"
 	"github.com/odvcencio/buckley/pkg/mission"
+	"github.com/odvcencio/buckley/pkg/sandbox"
 	"github.com/odvcencio/buckley/pkg/storage"
 	"github.com/odvcencio/buckley/pkg/telemetry"
 	"github.com/odvcencio/buckley/pkg/tool/builtin"
@@ -26,7 +29,12 @@ const ToolCallIDParam = "__buckley_tool_call_id"
 
 // Registry manages all available tools
 type Registry struct {
-	tools            map[string]Tool
+	mu          sync.RWMutex
+	tools       map[string]Tool
+	middlewares []Middleware
+	executor    Executor
+	hooks       *HookRegistry
+
 	containerCompose string
 	containerWorkDir string
 	containerExecute bool
@@ -49,9 +57,12 @@ type RegistryOption func(*registryOptions)
 
 // NewEmptyRegistry creates a new empty tool registry without any built-in tools
 func NewEmptyRegistry() *Registry {
-	return &Registry{
+	r := &Registry{
 		tools: make(map[string]Tool),
+		hooks: &HookRegistry{},
 	}
+	r.rebuildExecutor()
+	return r
 }
 
 // NewRegistry creates a new tool registry with built-in tools
@@ -62,9 +73,11 @@ func NewRegistry(opts ...RegistryOption) *Registry {
 	}
 	r := &Registry{
 		tools: make(map[string]Tool),
+		hooks: &HookRegistry{},
 	}
 
 	r.registerBuiltins(cfg)
+	r.rebuildExecutor()
 
 	return r
 }
@@ -84,7 +97,8 @@ func (r *Registry) SetWorkDir(workDir string) {
 		workDir = abs
 	}
 	workDir = filepath.Clean(workDir)
-	for _, t := range r.tools {
+	tools := r.snapshotTools()
+	for _, t := range tools {
 		if setter, ok := t.(interface{ SetWorkDir(string) }); ok {
 			setter.SetWorkDir(workDir)
 		}
@@ -99,7 +113,8 @@ func (r *Registry) SetEnv(env map[string]string) {
 	if len(env) == 0 {
 		return
 	}
-	for _, t := range r.tools {
+	tools := r.snapshotTools()
+	for _, t := range tools {
 		if setter, ok := t.(interface{ SetEnv(map[string]string) }); ok {
 			setter.SetEnv(env)
 		}
@@ -111,7 +126,8 @@ func (r *Registry) SetMaxFileSizeBytes(max int64) {
 	if r == nil {
 		return
 	}
-	for _, t := range r.tools {
+	tools := r.snapshotTools()
+	for _, t := range tools {
 		if setter, ok := t.(interface{ SetMaxFileSizeBytes(int64) }); ok {
 			setter.SetMaxFileSizeBytes(max)
 		}
@@ -123,7 +139,8 @@ func (r *Registry) SetMaxExecTimeSeconds(seconds int32) {
 	if r == nil {
 		return
 	}
-	for _, t := range r.tools {
+	tools := r.snapshotTools()
+	for _, t := range tools {
 		if setter, ok := t.(interface{ SetMaxExecTimeSeconds(int32) }); ok {
 			setter.SetMaxExecTimeSeconds(seconds)
 		}
@@ -135,9 +152,23 @@ func (r *Registry) SetMaxOutputBytes(max int) {
 	if r == nil {
 		return
 	}
-	for _, t := range r.tools {
+	tools := r.snapshotTools()
+	for _, t := range tools {
 		if setter, ok := t.(interface{ SetMaxOutputBytes(int) }); ok {
 			setter.SetMaxOutputBytes(max)
+		}
+	}
+}
+
+// SetSandboxConfig configures command sandboxing for tools that support it.
+func (r *Registry) SetSandboxConfig(cfg sandbox.Config) {
+	if r == nil {
+		return
+	}
+	tools := r.snapshotTools()
+	for _, t := range tools {
+		if setter, ok := t.(interface{ SetSandboxConfig(sandbox.Config) }); ok {
+			setter.SetSandboxConfig(cfg)
 		}
 	}
 }
@@ -181,6 +212,14 @@ func (r *Registry) registerBuiltins(cfg registryOptions) {
 	register(&builtin.ListMergeConflictsTool{})
 	register(&builtin.MarkResolvedTool{})
 	register(&builtin.HeadlessBrowseTool{})
+	register(&builtin.BrowserStartTool{})
+	register(&builtin.BrowserNavigateTool{})
+	register(&builtin.BrowserObserveTool{})
+	register(&builtin.BrowserStreamTool{})
+	register(&builtin.BrowserActTool{})
+	register(&builtin.BrowserClipboardReadTool{})
+	register(&builtin.BrowserClipboardWriteTool{})
+	register(&builtin.BrowserCloseTool{})
 	register(&builtin.ShellCommandTool{})
 
 	// Delegation tools with guardrails (depth limits, rate limits, recursion prevention)
@@ -216,6 +255,9 @@ func (r *Registry) registerBuiltins(cfg registryOptions) {
 
 	// Register terminal editor helper
 	register(&builtin.TerminalEditorTool{})
+
+	// Register fluffy-ui agent tool for AI-driven UI automation
+	register(&builtin.FluffyAgentTool{})
 
 	// Note: TODO tool is registered separately with SetTodoStore()
 }
@@ -261,12 +303,22 @@ func (r *Registry) SetTodoStore(store builtin.TodoStore) {
 	r.Register(&builtin.TodoTool{Store: store})
 }
 
+// SetCompactionManager registers the compact_context tool.
+func (r *Registry) SetCompactionManager(compactor *conversation.CompactionManager) {
+	if r == nil || compactor == nil {
+		return
+	}
+	r.Register(builtin.NewCompactContextTool(compactor))
+}
+
 // GetTodoTool returns the registered TodoTool, or nil if not registered
 func (r *Registry) GetTodoTool() *builtin.TodoTool {
-	if t, ok := r.tools["todo"]; ok {
-		if todoTool, ok := t.(*builtin.TodoTool); ok {
-			return todoTool
-		}
+	t, ok := r.Get("todo")
+	if !ok {
+		return nil
+	}
+	if todoTool, ok := t.(*builtin.TodoTool); ok {
+		return todoTool
 	}
 	return nil
 }
@@ -294,17 +346,22 @@ func (r *Registry) EnableCodeIndex(store *storage.Store) {
 		return
 	}
 	r.Register(&builtin.LookupContextTool{Store: store})
-	if tool, ok := r.tools["find_symbol"]; ok {
+	if tool, ok := r.Get("find_symbol"); ok {
 		if fs, ok := tool.(*builtin.FindSymbolTool); ok {
 			fs.Store = store
+			return
 		}
-	} else {
-		r.Register(&builtin.FindSymbolTool{Store: store})
 	}
+	r.Register(&builtin.FindSymbolTool{Store: store})
 }
 
 // Register registers a tool
 func (r *Registry) Register(t Tool) {
+	if r == nil || t == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.tools[t.Name()] = t
 }
 
@@ -313,6 +370,8 @@ func (r *Registry) Remove(name string) {
 	if r == nil {
 		return
 	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	delete(r.tools, name)
 }
 
@@ -321,84 +380,183 @@ func (r *Registry) Filter(keep func(Tool) bool) {
 	if r == nil || keep == nil {
 		return
 	}
-	for name, t := range r.tools {
+	tools := r.snapshotToolMap()
+	var remove []string
+	for name, t := range tools {
 		if !keep(t) {
-			delete(r.tools, name)
+			remove = append(remove, name)
 		}
+	}
+	if len(remove) == 0 {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, name := range remove {
+		delete(r.tools, name)
 	}
 }
 
 // Get returns a tool by name
 func (r *Registry) Get(name string) (Tool, bool) {
+	if r == nil {
+		return nil, false
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	t, ok := r.tools[name]
 	return t, ok
 }
 
 // List returns all registered tools
 func (r *Registry) List() []Tool {
-	tools := make([]Tool, 0, len(r.tools))
-	for _, t := range r.tools {
-		tools = append(tools, t)
-	}
-	return tools
+	return r.snapshotTools()
 }
 
-// Execute executes a tool by name
+// Hooks returns the registry hook manager.
+func (r *Registry) Hooks() *HookRegistry {
+	if r == nil {
+		return nil
+	}
+	return r.hooks
+}
+
+// Use registers a middleware on the registry.
+func (r *Registry) Use(mw Middleware) {
+	if r == nil || mw == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.middlewares = append(r.middlewares, mw)
+	r.rebuildExecutorLocked()
+}
+
+// Execute executes a tool by name using a background context.
 func (r *Registry) Execute(name string, params map[string]any) (*builtin.Result, error) {
+	return r.ExecuteWithContext(context.Background(), name, params)
+}
+
+// ExecuteWithContext executes a tool by name using the provided context.
+func (r *Registry) ExecuteWithContext(ctx context.Context, name string, params map[string]any) (*builtin.Result, error) {
 	if name == "" {
 		return nil, fmt.Errorf("tool name cannot be empty")
 	}
-	t, ok := r.tools[name]
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	t, ok := r.Get(name)
 	if !ok {
 		return nil, fmt.Errorf("tool not found: %s", name)
 	}
-
-	callID := toolCallIDFromParams(params)
-	rich := touch.ExtractFromArgs(name, params)
-	start := time.Now()
-	if r.telemetryHub != nil {
-		r.publishToolEvent(telemetry.EventToolStarted, callID, name, rich, start, nil, nil)
+	execCtx := &ExecutionContext{
+		Context:   ctx,
+		ToolName:  name,
+		Tool:      t,
+		SessionID: r.telemetrySession,
+		CallID:    toolCallIDFromParams(params),
+		Params:    params,
+		StartTime: time.Now(),
+		Attempt:   1,
+		Metadata:  make(map[string]any),
 	}
+	exec := r.executorForCall()
+	if exec == nil {
+		return nil, fmt.Errorf("tool executor not initialized")
+	}
+	return exec(execCtx)
+}
 
-	execFn := func(p map[string]any) (*builtin.Result, error) {
-		if r.containerExecute && r.containerCompose != "" {
-			service := containerexec.GetServiceForTool(name)
-			runner := containerexec.NewContainerRunner(r.containerCompose, service, r.containerWorkDir, t)
-			return runner.Execute(p)
+func (r *Registry) executorForCall() Executor {
+	if r == nil {
+		return nil
+	}
+	r.mu.RLock()
+	exec := r.executor
+	r.mu.RUnlock()
+	if exec != nil {
+		return exec
+	}
+	r.rebuildExecutor()
+	r.mu.RLock()
+	exec = r.executor
+	r.mu.RUnlock()
+	return exec
+}
+
+func (r *Registry) rebuildExecutor() {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.rebuildExecutorLocked()
+}
+
+func (r *Registry) rebuildExecutorLocked() {
+	base := r.baseExecutor()
+	middlewares := make([]Middleware, 0, len(r.middlewares)+3)
+	middlewares = append(middlewares, r.telemetryMiddleware(), Hooks(r.hooks), r.approvalMiddleware())
+	middlewares = append(middlewares, r.middlewares...)
+	r.executor = Chain(middlewares...)(base)
+}
+
+func (r *Registry) baseExecutor() Executor {
+	return func(ctx *ExecutionContext) (*builtin.Result, error) {
+		if ctx == nil {
+			return nil, fmt.Errorf("execution context required")
 		}
-		return t.Execute(p)
-	}
-
-	if name == "run_shell" && r.telemetryHub != nil {
-		res, err := r.executeWithShellTelemetry(execFn, params)
-		if r.telemetryHub != nil {
-			r.publishToolEvent(eventTypeForResult(res, err), callID, name, rich, time.Now(), res, err)
+		name := strings.TrimSpace(ctx.ToolName)
+		if name == "" {
+			return nil, fmt.Errorf("tool name cannot be empty")
 		}
-		return res, err
-	}
-
-	if r.shouldGateChanges() {
-		switch name {
-		case "write_file":
-			res, err := r.executeWithMissionWrite(params, execFn)
-			if r.telemetryHub != nil {
-				r.publishToolEvent(eventTypeForResult(res, err), callID, name, rich, time.Now(), res, err)
+		t := ctx.Tool
+		if t == nil {
+			var ok bool
+			t, ok = r.Get(name)
+			if !ok {
+				return nil, fmt.Errorf("tool not found: %s", name)
 			}
-			return res, err
-		case "apply_patch":
-			res, err := r.executeWithMissionPatch(params, execFn)
-			if r.telemetryHub != nil {
-				r.publishToolEvent(eventTypeForResult(res, err), callID, name, rich, time.Now(), res, err)
-			}
-			return res, err
+			ctx.Tool = t
+		}
+
+		params := ctx.Params
+		if params == nil {
+			params = map[string]any{}
+			ctx.Params = params
+		}
+		if strings.TrimSpace(ctx.CallID) == "" {
+			ctx.CallID = toolCallIDFromParams(params)
+		}
+		if ctx.StartTime.IsZero() {
+			ctx.StartTime = time.Now()
+		}
+		return r.executeTool(ctx, t, params)
+	}
+}
+
+func (r *Registry) executeTool(ctx *ExecutionContext, tool Tool, params map[string]any) (*builtin.Result, error) {
+	if ctx != nil && ctx.Context != nil {
+		if err := ctx.Context.Err(); err != nil {
+			return nil, err
 		}
 	}
-
-	res, err := execFn(params)
-	if r.telemetryHub != nil {
-		r.publishToolEvent(eventTypeForResult(res, err), callID, name, rich, time.Now(), res, err)
+	if r.containerExecute && r.containerCompose != "" {
+		service := containerexec.GetServiceForTool(strings.TrimSpace(ctx.ToolName))
+		runner := containerexec.NewContainerRunner(r.containerCompose, service, r.containerWorkDir, tool)
+		return runner.Execute(params)
 	}
-	return res, err
+	if tool == nil {
+		return nil, fmt.Errorf("tool required")
+	}
+	if ctxTool, ok := tool.(ContextTool); ok {
+		execCtx := ctx.Context
+		if execCtx == nil {
+			execCtx = context.Background()
+		}
+		return ctxTool.ExecuteWithContext(execCtx, params)
+	}
+	return tool.Execute(params)
 }
 
 // EnableContainers configures the registry to run tools inside containers.
@@ -471,7 +629,7 @@ func (r *Registry) shouldGateChanges() bool {
 	return r.requireMissionApproval && r.missionStore != nil && r.missionSession != ""
 }
 
-func (r *Registry) executeWithMissionWrite(params map[string]any, execFn func(map[string]any) (*builtin.Result, error)) (*builtin.Result, error) {
+func (r *Registry) executeWithMissionWrite(ctx context.Context, params map[string]any, execFn func(map[string]any) (*builtin.Result, error)) (*builtin.Result, error) {
 	path, ok := params["path"].(string)
 	if !ok || strings.TrimSpace(path) == "" {
 		return &builtin.Result{Success: false, Error: "path parameter is required"}, nil
@@ -505,7 +663,7 @@ func (r *Registry) executeWithMissionWrite(params map[string]any, execFn func(ma
 		return &builtin.Result{Success: false, Error: fmt.Sprintf("failed to create pending change: %v", err)}, nil
 	}
 
-	change, err := r.awaitDecision(changeID)
+	change, err := r.awaitDecision(ctx, changeID)
 	if err != nil {
 		return &builtin.Result{Success: false, Error: fmt.Sprintf("approval wait failed: %v", err)}, nil
 	}
@@ -516,7 +674,7 @@ func (r *Registry) executeWithMissionWrite(params map[string]any, execFn func(ma
 	return execFn(params)
 }
 
-func (r *Registry) executeWithMissionPatch(params map[string]any, execFn func(map[string]any) (*builtin.Result, error)) (*builtin.Result, error) {
+func (r *Registry) executeWithMissionPatch(ctx context.Context, params map[string]any, execFn func(map[string]any) (*builtin.Result, error)) (*builtin.Result, error) {
 	rawPatch, ok := params["patch"].(string)
 	if !ok || strings.TrimSpace(rawPatch) == "" {
 		return &builtin.Result{Success: false, Error: "patch parameter must be a non-empty string"}, nil
@@ -528,7 +686,45 @@ func (r *Registry) executeWithMissionPatch(params map[string]any, execFn func(ma
 		return &builtin.Result{Success: false, Error: fmt.Sprintf("failed to create pending change: %v", err)}, nil
 	}
 
-	change, err := r.awaitDecision(changeID)
+	change, err := r.awaitDecision(ctx, changeID)
+	if err != nil {
+		return &builtin.Result{Success: false, Error: fmt.Sprintf("approval wait failed: %v", err)}, nil
+	}
+	if change.Status != "approved" {
+		return &builtin.Result{Success: false, Error: fmt.Sprintf("change %s %s by %s", change.ID, change.Status, change.ReviewedBy)}, nil
+	}
+
+	return execFn(params)
+}
+
+func (r *Registry) executeWithMissionClipboardRead(ctx context.Context, params map[string]any, execFn func(map[string]any) (*builtin.Result, error)) (*builtin.Result, error) {
+	rawSession, ok := params["session_id"]
+	if !ok {
+		return &builtin.Result{Success: false, Error: "session_id parameter is required"}, nil
+	}
+	sessionID := strings.TrimSpace(fmt.Sprintf("%v", rawSession))
+	if sessionID == "" || sessionID == "<nil>" {
+		return &builtin.Result{Success: false, Error: "session_id parameter is required"}, nil
+	}
+
+	expectedState := ""
+	if rawState, ok := params["expected_state_version"]; ok {
+		if trimmed := strings.TrimSpace(fmt.Sprintf("%v", rawState)); trimmed != "" && trimmed != "<nil>" {
+			expectedState = trimmed
+		}
+	}
+
+	diff := fmt.Sprintf("clipboard read requested\nsession_id: %s", sessionID)
+	if expectedState != "" {
+		diff = fmt.Sprintf("%s\nexpected_state_version: %s", diff, expectedState)
+	}
+
+	changeID, err := r.recordPendingChange(fmt.Sprintf("browser/clipboard/%s", sessionID), diff, "browser_clipboard_read")
+	if err != nil {
+		return &builtin.Result{Success: false, Error: fmt.Sprintf("failed to create pending change: %v", err)}, nil
+	}
+
+	change, err := r.awaitDecision(ctx, changeID)
 	if err != nil {
 		return &builtin.Result{Success: false, Error: fmt.Sprintf("approval wait failed: %v", err)}, nil
 	}
@@ -559,12 +755,14 @@ func (r *Registry) recordPendingChange(filePath, diff, toolName string) (string,
 	return changeID, r.missionStore.CreatePendingChange(change)
 }
 
-func (r *Registry) awaitDecision(changeID string) (*mission.PendingChange, error) {
+func (r *Registry) awaitDecision(parentCtx context.Context, changeID string) (*mission.PendingChange, error) {
 	timeout := r.missionTimeout
 	if timeout <= 0 {
 		timeout = 10 * time.Minute
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+
+	// Create a context that respects both the parent context and the timeout
+	ctx, cancel := context.WithTimeout(parentCtx, timeout)
 	defer cancel()
 
 	return r.missionStore.WaitForDecision(ctx, changeID, 750*time.Millisecond)
@@ -618,7 +816,7 @@ func (r *Registry) publishShellEvent(eventType telemetry.EventType, data map[str
 	})
 }
 
-func (r *Registry) publishToolEvent(eventType telemetry.EventType, callID, toolName string, rich touch.RichFields, timestamp time.Time, res *builtin.Result, err error) {
+func (r *Registry) publishToolEvent(eventType telemetry.EventType, callID, toolName string, rich touch.RichFields, timestamp time.Time, res *builtin.Result, err error, attempt int, metadata map[string]any) {
 	if r.telemetryHub == nil {
 		return
 	}
@@ -635,11 +833,33 @@ func (r *Registry) publishToolEvent(eventType telemetry.EventType, callID, toolN
 	if rich.Description != "" {
 		payload["description"] = rich.Description
 	}
+	if attempt > 0 {
+		payload["attempt"] = attempt
+	}
 	if res != nil {
 		payload["success"] = res.Success
+		if strings.TrimSpace(toolName) == "browser_stream" {
+			if rawEvents, ok := res.Data["events"]; ok {
+				summary := summarizeBrowserEvents(rawEvents, 25)
+				if len(summary) > 0 {
+					payload["browser_events"] = summary
+				}
+			}
+			if count, ok := res.Data["event_count"]; ok {
+				payload["browser_event_count"] = count
+			}
+		}
 	}
 	if err != nil {
 		payload["error"] = err.Error()
+	}
+	if metadata != nil {
+		if stack, ok := metadata["panic_stack"].(string); ok && strings.TrimSpace(stack) != "" {
+			payload["panic_stack"] = stack
+		}
+		if value, ok := metadata["panic_value"]; ok {
+			payload["panic_value"] = fmt.Sprintf("%v", value)
+		}
 	}
 	r.telemetryHub.Publish(telemetry.Event{
 		Type:      eventType,
@@ -698,6 +918,66 @@ func truncateForTelemetry(value string) string {
 	return value[:limit] + "..."
 }
 
+func summarizeBrowserEvents(raw any, limit int) []map[string]any {
+	if limit <= 0 {
+		limit = 10
+	}
+	out := make([]map[string]any, 0, limit)
+	switch events := raw.(type) {
+	case []map[string]any:
+		for _, event := range events {
+			if len(out) >= limit {
+				break
+			}
+			out = append(out, summarizeBrowserEvent(event))
+		}
+	case []any:
+		for _, item := range events {
+			if len(out) >= limit {
+				break
+			}
+			event, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			out = append(out, summarizeBrowserEvent(event))
+		}
+	}
+	return out
+}
+
+func summarizeBrowserEvent(event map[string]any) map[string]any {
+	summary := map[string]any{
+		"type":          event["type"],
+		"state_version": event["state_version"],
+		"timestamp":     event["timestamp"],
+	}
+	if frame, ok := event["frame"].(map[string]any); ok {
+		summary["has_frame"] = true
+		if width, ok := frame["width"]; ok {
+			summary["frame_width"] = width
+		}
+		if height, ok := frame["height"]; ok {
+			summary["frame_height"] = height
+		}
+		if format, ok := frame["format"]; ok {
+			summary["frame_format"] = format
+		}
+	} else if event["frame"] != nil {
+		summary["has_frame"] = true
+	}
+	if event["dom_diff"] != nil {
+		summary["has_dom_diff"] = true
+	}
+	if event["accessibility_diff"] != nil {
+		summary["has_accessibility_diff"] = true
+	}
+	if event["hit_test"] != nil {
+		summary["has_hit_test"] = true
+	}
+	return summary
+}
+
 // SetContainerContext tracks compose/workdir metadata without forcing container execution.
 func (r *Registry) SetContainerContext(composePath, workDir string) {
 	r.containerCompose = composePath
@@ -711,8 +991,9 @@ func (r *Registry) ContainerInfo() (enabled bool, composePath string, workDir st
 
 // ToOpenAIFunctions converts all tools to OpenAI function calling format
 func (r *Registry) ToOpenAIFunctions() []map[string]any {
-	functions := make([]map[string]any, 0, len(r.tools))
-	for _, t := range r.tools {
+	tools := r.snapshotTools()
+	functions := make([]map[string]any, 0, len(tools))
+	for _, t := range tools {
 		functions = append(functions, ToOpenAIFunction(t))
 	}
 	return functions
@@ -724,8 +1005,9 @@ func (r *Registry) ToOpenAIFunctionsFiltered(allowed []string) []map[string]any 
 	if len(allowed) == 0 {
 		return r.ToOpenAIFunctions()
 	}
+	tools := r.snapshotTools()
 	functions := make([]map[string]any, 0, len(allowed))
-	for _, t := range r.tools {
+	for _, t := range tools {
 		if IsToolAllowed(t.Name(), allowed) {
 			functions = append(functions, ToOpenAIFunction(t))
 		}
@@ -735,7 +1017,38 @@ func (r *Registry) ToOpenAIFunctionsFiltered(allowed []string) []map[string]any 
 
 // Count returns the number of registered tools
 func (r *Registry) Count() int {
+	if r == nil {
+		return 0
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	return len(r.tools)
+}
+
+func (r *Registry) snapshotTools() []Tool {
+	if r == nil {
+		return nil
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	tools := make([]Tool, 0, len(r.tools))
+	for _, t := range r.tools {
+		tools = append(tools, t)
+	}
+	return tools
+}
+
+func (r *Registry) snapshotToolMap() map[string]Tool {
+	if r == nil {
+		return nil
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	tools := make(map[string]Tool, len(r.tools))
+	for name, t := range r.tools {
+		tools[name] = t
+	}
+	return tools
 }
 
 // LoadExternal loads external plugin tools from a directory

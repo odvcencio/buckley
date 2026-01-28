@@ -11,11 +11,12 @@ import (
 
 	"github.com/odvcencio/buckley/pkg/giturl"
 	"github.com/odvcencio/buckley/pkg/personality"
+	"github.com/odvcencio/buckley/pkg/sandbox"
 	corev1 "k8s.io/api/core/v1"
 )
 
 const (
-	defaultOpenRouterModel = "moonshotai/kimi-k2-thinking"
+	defaultOpenRouterModel = "moonshotai/kimi-k2.5"
 	defaultOpenAIModel     = "openai/gpt-5.2-codex-xhigh"
 	defaultAnthropicModel  = "anthropic/claude-sonnet-4-5"
 	defaultGoogleModel     = "google/gemini-3-pro"
@@ -30,7 +31,7 @@ const (
 	DefaultExecutionModel   = defaultOpenRouterModel
 	DefaultReviewModel      = defaultOpenRouterModel
 	DefaultProvider         = "openrouter"
-	DefaultExecutionMode    = ExecutionModeRLM
+	DefaultExecutionMode    = ExecutionModeClassic // RLM is experimental
 	DefaultOneshotMode      = ExecutionModeClassic
 	DefaultTrustLevel       = "balanced"
 	DefaultApprovalMode     = "safe"
@@ -38,7 +39,7 @@ const (
 	DefaultDailyBudget      = 20.00
 	DefaultMonthlyBudget    = 200.00
 	DefaultIPCBind          = "127.0.0.1:4488"
-	DefaultCompactThreshold = 0.9
+	DefaultCompactThreshold = 0.75
 	DefaultMaxSelfHeal      = 3
 	DefaultMaxReviewCycles  = 3
 )
@@ -52,33 +53,38 @@ var providerDefaultModels = map[string]string{
 
 // Config represents the complete Buckley configuration
 type Config struct {
-	Models         ModelConfig         `yaml:"models"`
-	Providers      ProviderConfig      `yaml:"providers"`
-	Encoding       EncodingConfig      `yaml:"encoding"`
-	Personality    PersonalityConfig   `yaml:"personality"`
-	Memory         MemoryConfig        `yaml:"memory"`
-	Orchestrator   OrchestratorConfig  `yaml:"orchestrator"`
-	Execution      ExecutionModeConfig `yaml:"execution"`
-	Oneshot        OneshotModeConfig   `yaml:"oneshot"`
-	RLM            RLMConfig           `yaml:"rlm"`
-	Approval       ApprovalConfig      `yaml:"approval"`
-	ACP            ACPConfig           `yaml:"acp"`
-	Worktrees      WorktreeConfig      `yaml:"worktrees"`
-	Experiment     ExperimentConfig    `yaml:"experiment"`
-	Batch          BatchConfig         `yaml:"batch"`
-	GitClone       giturl.ClonePolicy  `yaml:"git_clone"`
-	IPC            IPCConfig           `yaml:"ipc"`
-	CostManagement CostConfig          `yaml:"cost_management"`
-	RetryPolicy    RetryPolicy         `yaml:"retry_policy"`
-	Artifacts      ArtifactsConfig     `yaml:"artifacts"`
-	Workflow       WorkflowConfig      `yaml:"workflow"`
-	Compaction     CompactionConfig    `yaml:"compaction"`
-	UI             UIConfig            `yaml:"ui"`
-	Commenting     CommentingConfig    `yaml:"commenting"`
-	GitEvents      GitEventsConfig     `yaml:"git_events"`
-	Input          InputConfig         `yaml:"input"`
-	Diagnostics    DiagnosticsConfig   `yaml:"diagnostics"`
-	Notify         NotifyConfig        `yaml:"notify"`
+	Models         ModelConfig          `yaml:"models"`
+	Providers      ProviderConfig       `yaml:"providers"`
+	PromptCache    PromptCacheConfig    `yaml:"prompt_cache"`
+	Encoding       EncodingConfig       `yaml:"encoding"`
+	Personality    PersonalityConfig    `yaml:"personality"`
+	Memory         MemoryConfig         `yaml:"memory"`
+	Orchestrator   OrchestratorConfig   `yaml:"orchestrator"`
+	Execution      ExecutionModeConfig  `yaml:"execution"`
+	Oneshot        OneshotModeConfig    `yaml:"oneshot"`
+	RLM            RLMConfig            `yaml:"rlm"`
+	Approval       ApprovalConfig       `yaml:"approval"`
+	Sandbox        SandboxConfig        `yaml:"sandbox"`
+	ToolMiddleware ToolMiddlewareConfig `yaml:"tool_middleware"`
+	MCP            MCPConfig            `yaml:"mcp"`
+	ACP            ACPConfig            `yaml:"acp"`
+	Worktrees      WorktreeConfig       `yaml:"worktrees"`
+	Experiment     ExperimentConfig     `yaml:"experiment"`
+	Batch          BatchConfig          `yaml:"batch"`
+	GitClone       giturl.ClonePolicy   `yaml:"git_clone"`
+	IPC            IPCConfig            `yaml:"ipc"`
+	CostManagement CostConfig           `yaml:"cost_management"`
+	RetryPolicy    RetryPolicy          `yaml:"retry_policy"`
+	Artifacts      ArtifactsConfig      `yaml:"artifacts"`
+	Workflow       WorkflowConfig       `yaml:"workflow"`
+	Compaction     CompactionConfig     `yaml:"compaction"`
+	UI             UIConfig             `yaml:"ui"`
+	WebUI          WebUIConfig          `yaml:"web_ui"`
+	Commenting     CommentingConfig     `yaml:"commenting"`
+	GitEvents      GitEventsConfig      `yaml:"git_events"`
+	Input          InputConfig          `yaml:"input"`
+	Diagnostics    DiagnosticsConfig    `yaml:"diagnostics"`
+	Notify         NotifyConfig         `yaml:"notify"`
 }
 
 // NotifyConfig controls async notifications for human-in-the-loop workflows
@@ -196,6 +202,16 @@ type LiteLLMRouterConfig struct {
 	FallbackModels []string `yaml:"fallback_models"`
 }
 
+// PromptCacheConfig controls provider prompt caching options.
+type PromptCacheConfig struct {
+	Enabled        bool     `yaml:"enabled"`
+	Providers      []string `yaml:"providers"`
+	SystemMessages int      `yaml:"system_messages"`
+	TailMessages   int      `yaml:"tail_messages"`
+	Key            string   `yaml:"key"`
+	Retention      string   `yaml:"retention"`
+}
+
 // EncodingConfig controls serialization preferences.
 type EncodingConfig struct {
 	UseToon bool `yaml:"use_toon"`
@@ -250,9 +266,9 @@ type OneshotModeConfig struct {
 
 // RLMConfig controls the Recursive Language Model runtime.
 type RLMConfig struct {
-	Coordinator RLMCoordinatorConfig     `yaml:"coordinator"`
-	Tiers       map[string]RLMTierConfig `yaml:"tiers"`
-	Scratchpad  RLMScratchpadConfig      `yaml:"scratchpad"`
+	Coordinator RLMCoordinatorConfig `yaml:"coordinator"`
+	SubAgent    RLMSubAgentConfig    `yaml:"sub_agent"`
+	Scratchpad  RLMScratchpadConfig  `yaml:"scratchpad"`
 }
 
 // RLMCoordinatorConfig controls coordinator behavior.
@@ -265,15 +281,11 @@ type RLMCoordinatorConfig struct {
 	StreamPartials      bool          `yaml:"stream_partials"`
 }
 
-// RLMTierConfig controls per-tier model routing.
-type RLMTierConfig struct {
-	Model             string   `yaml:"model"`
-	Provider          string   `yaml:"provider"`
-	Models            []string `yaml:"models"`
-	MaxCostPerMillion float64  `yaml:"max_cost_per_million"`
-	MinContextWindow  int      `yaml:"min_context_window"`
-	Prefer            []string `yaml:"prefer"`
-	Requires          []string `yaml:"requires"`
+// RLMSubAgentConfig controls sub-agent behavior.
+type RLMSubAgentConfig struct {
+	Model         string        `yaml:"model"`          // Model for all sub-agents (default: execution model)
+	MaxConcurrent int           `yaml:"max_concurrent"` // Parallel execution limit
+	Timeout       time.Duration `yaml:"timeout"`        // Per-task timeout
 }
 
 // RLMScratchpadConfig controls scratchpad retention.
@@ -294,7 +306,9 @@ func (c RLMConfig) IsZero() bool {
 		c.Coordinator.MaxWallTime == 0 &&
 		c.Coordinator.ConfidenceThreshold == 0 &&
 		!c.Coordinator.StreamPartials &&
-		len(c.Tiers) == 0 &&
+		c.SubAgent.Model == "" &&
+		c.SubAgent.MaxConcurrent == 0 &&
+		c.SubAgent.Timeout == 0 &&
 		c.Scratchpad.MaxEntriesMemory == 0 &&
 		c.Scratchpad.MaxRawBytesMemory == 0 &&
 		c.Scratchpad.EvictionPolicy == "" &&
@@ -371,6 +385,72 @@ type ApprovalConfig struct {
 	AutoApprovePatterns []string `yaml:"auto_approve_patterns"`
 }
 
+// SandboxConfig controls command sandboxing for tool execution.
+type SandboxConfig struct {
+	// Mode sets the sandbox level: disabled, readonly, workspace, strict
+	Mode string `yaml:"mode"`
+
+	// AllowUnsafe must be true to allow mode=disabled.
+	AllowUnsafe bool `yaml:"allow_unsafe"`
+
+	// WorkspacePath is the default working directory for sandbox checks.
+	WorkspacePath string `yaml:"workspace_path"`
+
+	// AllowedPaths are additional allowed paths (overrides default when set).
+	AllowedPaths []string `yaml:"allowed_paths"`
+
+	// DeniedPaths are paths that are never allowed.
+	DeniedPaths []string `yaml:"denied_paths"`
+
+	// AllowedCommands are explicit allowlist entries for strict mode.
+	AllowedCommands []string `yaml:"allowed_commands"`
+
+	// DeniedCommands are explicit denylist entries.
+	DeniedCommands []string `yaml:"denied_commands"`
+
+	// AllowNetwork permits network access when true.
+	AllowNetwork bool `yaml:"allow_network"`
+
+	// Timeout caps command runtime (0 = no timeout).
+	Timeout time.Duration `yaml:"timeout"`
+
+	// MaxOutputBytes caps command output (0 = unlimited).
+	MaxOutputBytes int64 `yaml:"max_output_bytes"`
+}
+
+// ToSandboxConfig converts the config into a runtime sandbox configuration.
+func (c SandboxConfig) ToSandboxConfig(workDir string) sandbox.Config {
+	mode, err := parseSandboxMode(c.Mode)
+	if err != nil {
+		mode = sandbox.ModeWorkspace
+	}
+
+	cfg := sandbox.Config{
+		Mode:            mode,
+		WorkspacePath:   strings.TrimSpace(c.WorkspacePath),
+		AllowedPaths:    append([]string{}, c.AllowedPaths...),
+		DeniedPaths:     append([]string{}, c.DeniedPaths...),
+		AllowedCommands: append([]string{}, c.AllowedCommands...),
+		DeniedCommands:  append([]string{}, c.DeniedCommands...),
+		AllowNetwork:    c.AllowNetwork,
+		Timeout:         c.Timeout,
+		MaxOutputSize:   c.MaxOutputBytes,
+	}
+
+	if cfg.WorkspacePath == "" && strings.TrimSpace(workDir) != "" {
+		cfg.WorkspacePath = strings.TrimSpace(workDir)
+	}
+	if cfg.WorkspacePath != "" {
+		if len(cfg.AllowedPaths) == 0 {
+			cfg.AllowedPaths = []string{cfg.WorkspacePath}
+		} else if !containsString(cfg.AllowedPaths, cfg.WorkspacePath) {
+			cfg.AllowedPaths = append(cfg.AllowedPaths, cfg.WorkspacePath)
+		}
+	}
+
+	return cfg
+}
+
 // WorktreeConfig controls git worktree behavior
 type WorktreeConfig struct {
 	UseContainers    bool   `yaml:"use_containers"`
@@ -443,6 +523,39 @@ type RetryPolicy struct {
 	Multiplier     float64       `yaml:"multiplier"`
 }
 
+// ToolRetryConfig defines retry behavior for tool execution.
+type ToolRetryConfig struct {
+	MaxAttempts  int           `yaml:"max_attempts"`
+	InitialDelay time.Duration `yaml:"initial_delay"`
+	MaxDelay     time.Duration `yaml:"max_delay"`
+	Multiplier   float64       `yaml:"multiplier"`
+	Jitter       float64       `yaml:"jitter"`
+}
+
+// ToolMiddlewareConfig defines middleware defaults for tool execution.
+type ToolMiddlewareConfig struct {
+	DefaultTimeout  time.Duration            `yaml:"default_timeout"`
+	PerToolTimeouts map[string]time.Duration `yaml:"per_tool_timeouts"`
+	MaxResultBytes  int                      `yaml:"max_result_bytes"`
+	Retry           ToolRetryConfig          `yaml:"retry"`
+}
+
+// MCPConfig defines MCP server settings for tool integration.
+type MCPConfig struct {
+	Enabled bool              `yaml:"enabled"`
+	Servers []MCPServerConfig `yaml:"servers"`
+}
+
+// MCPServerConfig describes a single MCP server.
+type MCPServerConfig struct {
+	Name     string            `yaml:"name"`
+	Command  string            `yaml:"command"`
+	Args     []string          `yaml:"args"`
+	Env      map[string]string `yaml:"env"`
+	Timeout  time.Duration     `yaml:"timeout"`
+	Disabled bool              `yaml:"disabled"`
+}
+
 // ArtifactsConfig defines artifact storage locations
 type ArtifactsConfig struct {
 	PlanningDir          string `yaml:"planning_dir"`
@@ -480,11 +593,23 @@ type TaskPhaseConfig struct {
 // CompactionConfig defines artifact compaction behavior
 type CompactionConfig struct {
 	ContextThreshold float64  `yaml:"context_threshold"`
+	RLMAutoTrigger   float64  `yaml:"rlm_auto_trigger"`
+	CompactionRatio  float64  `yaml:"compaction_ratio"`
 	TaskInterval     int      `yaml:"task_interval"`
 	TokenThreshold   int      `yaml:"token_threshold"`
 	TargetReduction  float64  `yaml:"target_reduction"`
 	PreserveCommands bool     `yaml:"preserve_commands"`
 	Models           []string `yaml:"models"`
+}
+
+// UIAudioConfig defines audio settings for the TUI.
+type UIAudioConfig struct {
+	Enabled      bool   `yaml:"enabled"`
+	AssetsPath   string `yaml:"assets_path"`
+	MasterVolume int    `yaml:"master_volume"`
+	SFXVolume    int    `yaml:"sfx_volume"`
+	MusicVolume  int    `yaml:"music_volume"`
+	Muted        bool   `yaml:"muted"`
 }
 
 // UIConfig defines UI behavior
@@ -494,10 +619,21 @@ type UIConfig struct {
 	ToolGroupingWindowSeconds int    `yaml:"tool_grouping_window_seconds"`
 	ShowToolCosts             bool   `yaml:"show_tool_costs"`
 	ShowIntentStatements      bool   `yaml:"show_intent_statements"`
+	// Sidebar settings
+	SidebarWidth    int `yaml:"sidebar_width"`     // Sidebar width in characters (16-60, default 24)
+	SidebarMinWidth int `yaml:"sidebar_min_width"` // Minimum sidebar width (default 16)
+	SidebarMaxWidth int `yaml:"sidebar_max_width"` // Maximum sidebar width (default 60)
 	// Accessibility settings
-	HighContrast    bool `yaml:"high_contrast"`    // Use high-contrast color scheme
-	UseTextLabels   bool `yaml:"use_text_labels"`  // Add text labels to color-only indicators
-	ReduceAnimation bool `yaml:"reduce_animation"` // Reduce or disable animations
+	HighContrast    bool          `yaml:"high_contrast"`    // Use high-contrast color scheme
+	UseTextLabels   bool          `yaml:"use_text_labels"`  // Add text labels to color-only indicators
+	ReduceAnimation bool          `yaml:"reduce_animation"` // Reduce or disable animations
+	MessageMetadata string        `yaml:"message_metadata"` // "always", "hover", or "never"
+	Audio           UIAudioConfig `yaml:"audio"`
+}
+
+// WebUIConfig defines web UI integration settings.
+type WebUIConfig struct {
+	BaseURL string `yaml:"base_url"`
 }
 
 // CommentingConfig defines code commenting requirements
@@ -522,6 +658,43 @@ func defaultACPStore() string {
 		return "nats"
 	}
 	return "sqlite"
+}
+
+func defaultSandboxConfig() SandboxConfig {
+	cfg := SandboxConfig{
+		Mode:           "workspace",
+		AllowUnsafe:    false,
+		AllowNetwork:   false,
+		Timeout:        5 * time.Minute,
+		MaxOutputBytes: 10 * 1024 * 1024,
+	}
+
+	if cwd, err := os.Getwd(); err == nil && strings.TrimSpace(cwd) != "" {
+		cfg.WorkspacePath = cwd
+		cfg.AllowedPaths = []string{cwd}
+	}
+
+	home, err := os.UserHomeDir()
+	if err == nil && strings.TrimSpace(home) != "" {
+		cfg.DeniedPaths = append(cfg.DeniedPaths,
+			filepath.Join(home, ".ssh"),
+			filepath.Join(home, ".gnupg"),
+			filepath.Join(home, ".aws"),
+		)
+	}
+	cfg.DeniedPaths = append(cfg.DeniedPaths, "/etc", "/var", "/usr", "/bin", "/sbin")
+	cfg.DeniedCommands = []string{
+		"rm -rf /",
+		"rm -rf ~",
+		"sudo rm",
+		"chmod 777",
+		"curl | sh",
+		"curl | bash",
+		"wget | sh",
+		"wget | bash",
+	}
+
+	return cfg
 }
 
 func defaultNATSURL() string {
@@ -641,6 +814,14 @@ func DefaultConfig() *Config {
 				"chatgpt-":   "openai",
 			},
 		},
+		PromptCache: PromptCacheConfig{
+			Enabled:        false,
+			Providers:      []string{"anthropic", "openrouter", "litellm", "openai"},
+			SystemMessages: 1,
+			TailMessages:   2,
+			Key:            "",
+			Retention:      "",
+		},
 		Encoding: EncodingConfig{
 			UseToon: true,
 		},
@@ -653,7 +834,7 @@ func DefaultConfig() *Config {
 			Tone:             "friendly",
 		},
 		Memory: MemoryConfig{
-			AutoCompactThreshold: 0.9,
+			AutoCompactThreshold: 0.75,
 			MaxCompactions:       0,  // 0 = unlimited
 			SummaryTimeoutSecs:   30, // 30 second timeout for compaction
 			RetrievalEnabled:     true,
@@ -684,37 +865,15 @@ func DefaultConfig() *Config {
 			Coordinator: RLMCoordinatorConfig{
 				Model:               "auto",
 				MaxIterations:       10,
-				MaxTokensBudget:     100000,
+				MaxTokensBudget:     0, // 0 = unlimited
 				MaxWallTime:         10 * time.Minute,
 				ConfidenceThreshold: 0.95,
 				StreamPartials:      true,
 			},
-			Tiers: map[string]RLMTierConfig{
-				"trivial": {
-					MaxCostPerMillion: 0.50,
-					MinContextWindow:  8000,
-					Prefer:            []string{"speed", "cost"},
-				},
-				"light": {
-					MaxCostPerMillion: 3.00,
-					MinContextWindow:  16000,
-					Prefer:            []string{"cost", "quality"},
-				},
-				"medium": {
-					MaxCostPerMillion: 10.00,
-					MinContextWindow:  32000,
-					Prefer:            []string{"quality", "cost"},
-				},
-				"heavy": {
-					MaxCostPerMillion: 30.00,
-					MinContextWindow:  64000,
-					Prefer:            []string{"quality"},
-				},
-				"reasoning": {
-					MinContextWindow: 100000,
-					Prefer:           []string{"quality"},
-					Requires:         []string{"extended_thinking"},
-				},
+			SubAgent: RLMSubAgentConfig{
+				Model:         "",              // Empty = use execution model
+				MaxConcurrent: 3,               // Parallel sub-agent limit
+				Timeout:       5 * time.Minute, // Per-task timeout
 			},
 			Scratchpad: RLMScratchpadConfig{
 				MaxEntriesMemory:  1000,
@@ -756,6 +915,22 @@ func DefaultConfig() *Config {
 				"cargo build",
 				"pytest",
 			},
+		},
+		Sandbox: defaultSandboxConfig(),
+		ToolMiddleware: ToolMiddlewareConfig{
+			DefaultTimeout: 2 * time.Minute,
+			MaxResultBytes: 100_000,
+			Retry: ToolRetryConfig{
+				MaxAttempts:  2,
+				InitialDelay: 200 * time.Millisecond,
+				MaxDelay:     2 * time.Second,
+				Multiplier:   2,
+				Jitter:       0.2,
+			},
+		},
+		MCP: MCPConfig{
+			Enabled: false,
+			Servers: []MCPServerConfig{},
 		},
 		ACP: ACPConfig{
 			EventStore:         defaultACPStore(),
@@ -888,15 +1063,16 @@ func DefaultConfig() *Config {
 		},
 		Compaction: CompactionConfig{
 			ContextThreshold: 0.80,
+			RLMAutoTrigger:   0.85,
+			CompactionRatio:  0.45,
 			TaskInterval:     20,
 			TokenThreshold:   15000,
 			TargetReduction:  0.70,
 			PreserveCommands: true,
 			Models: []string{
-				"moonshotai/kimi-k2-thinking",
+				"moonshotai/kimi-k2.5",
 				"qwen/qwen3-coder",
 				"openai/gpt-5.2-mini",
-				"google/gemini-3-flash",
 			},
 		},
 		UI: UIConfig{
@@ -905,6 +1081,21 @@ func DefaultConfig() *Config {
 			ToolGroupingWindowSeconds: 30,
 			ShowToolCosts:             true,
 			ShowIntentStatements:      true,
+			SidebarWidth:              24,
+			SidebarMinWidth:           16,
+			SidebarMaxWidth:           60,
+			MessageMetadata:           "always",
+			Audio: UIAudioConfig{
+				Enabled:      false,
+				AssetsPath:   "",
+				MasterVolume: 100,
+				SFXVolume:    80,
+				MusicVolume:  60,
+				Muted:        false,
+			},
+		},
+		WebUI: WebUIConfig{
+			BaseURL: "",
 		},
 		Commenting: CommentingConfig{
 			RequireFunctionDocs:           true,
@@ -998,6 +1189,25 @@ func applyEnvOverrides(cfg *Config, configEnv map[string]string) {
 	}
 	if v := os.Getenv("BUCKLEY_APPROVAL_MODE"); v != "" {
 		cfg.Approval.Mode = v
+	}
+	if v := os.Getenv("BUCKLEY_TOOL_SANDBOX_MODE"); v != "" {
+		cfg.Sandbox.Mode = v
+	}
+	if val, ok := envBool("BUCKLEY_UNSAFE"); ok && val {
+		cfg.Sandbox.AllowUnsafe = true
+	}
+	if val, ok := envBool("BUCKLEY_TOOL_SANDBOX_ALLOW_NETWORK"); ok {
+		cfg.Sandbox.AllowNetwork = val
+	}
+	if v := strings.TrimSpace(os.Getenv("BUCKLEY_TOOL_SANDBOX_TIMEOUT")); v != "" {
+		if dur, err := time.ParseDuration(v); err == nil {
+			cfg.Sandbox.Timeout = dur
+		}
+	}
+	if v := strings.TrimSpace(os.Getenv("BUCKLEY_TOOL_SANDBOX_MAX_OUTPUT_BYTES")); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
+			cfg.Sandbox.MaxOutputBytes = n
+		}
 	}
 	if v := os.Getenv("BUCKLEY_EXECUTION_MODE"); v != "" {
 		cfg.Execution.Mode = v
@@ -1113,6 +1323,9 @@ func applyEnvOverrides(cfg *Config, configEnv map[string]string) {
 	}
 	if v := os.Getenv("BUCKLEY_PUSH_SUBJECT"); v != "" {
 		cfg.IPC.PushSubject = v
+	}
+	if v := os.Getenv("BUCKLEY_WEB_URL"); v != "" {
+		cfg.WebUI.BaseURL = v
 	}
 
 	if v, ok := envBool("BUCKLEY_BATCH_ENABLED"); ok {
@@ -1253,6 +1466,30 @@ func normalizeMode(mode, fallback string) string {
 	return mode
 }
 
+func parseSandboxMode(mode string) (sandbox.Mode, error) {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "", "workspace":
+		return sandbox.ModeWorkspace, nil
+	case "readonly", "read-only", "read_only":
+		return sandbox.ModeReadOnly, nil
+	case "strict":
+		return sandbox.ModeStrict, nil
+	case "disabled", "disable", "off", "none":
+		return sandbox.ModeDisabled, nil
+	default:
+		return sandbox.ModeWorkspace, fmt.Errorf("invalid sandbox mode: %s (valid: disabled, readonly, workspace, strict)", mode)
+	}
+}
+
+func containsString(values []string, target string) bool {
+	for _, value := range values {
+		if strings.TrimSpace(value) == target {
+			return true
+		}
+	}
+	return false
+}
+
 // Validate checks configuration validity
 func (c *Config) Validate() error {
 	// Validate trust level
@@ -1286,6 +1523,57 @@ func (c *Config) Validate() error {
 	if c.Approval.Mode != "" && !validApprovalModes[strings.ToLower(c.Approval.Mode)] {
 		return fmt.Errorf("invalid approval mode: %s (valid: ask, safe, auto, yolo)", c.Approval.Mode)
 	}
+	sandboxMode, err := parseSandboxMode(c.Sandbox.Mode)
+	if err != nil {
+		return err
+	}
+	if sandboxMode == sandbox.ModeDisabled && !c.Sandbox.AllowUnsafe {
+		return fmt.Errorf("sandbox.mode disabled requires sandbox.allow_unsafe: true")
+	}
+	if c.Sandbox.Timeout < 0 {
+		return fmt.Errorf("sandbox.timeout must be >= 0")
+	}
+	if c.Sandbox.MaxOutputBytes < 0 {
+		return fmt.Errorf("sandbox.max_output_bytes must be >= 0")
+	}
+
+	if c.ToolMiddleware.DefaultTimeout < 0 {
+		return fmt.Errorf("tool_middleware.default_timeout must be >= 0")
+	}
+	if c.ToolMiddleware.MaxResultBytes < 0 {
+		return fmt.Errorf("tool_middleware.max_result_bytes must be >= 0")
+	}
+	for name, timeout := range c.ToolMiddleware.PerToolTimeouts {
+		if timeout < 0 {
+			return fmt.Errorf("tool_middleware.per_tool_timeouts.%s must be >= 0", name)
+		}
+	}
+	if c.ToolMiddleware.Retry.MaxAttempts < 0 {
+		return fmt.Errorf("tool_middleware.retry.max_attempts must be >= 0")
+	}
+	if c.ToolMiddleware.Retry.InitialDelay < 0 {
+		return fmt.Errorf("tool_middleware.retry.initial_delay must be >= 0")
+	}
+	if c.ToolMiddleware.Retry.MaxDelay < 0 {
+		return fmt.Errorf("tool_middleware.retry.max_delay must be >= 0")
+	}
+	if c.ToolMiddleware.Retry.Multiplier < 0 {
+		return fmt.Errorf("tool_middleware.retry.multiplier must be >= 0")
+	}
+	if c.ToolMiddleware.Retry.Jitter < 0 {
+		return fmt.Errorf("tool_middleware.retry.jitter must be >= 0")
+	}
+	if c.PromptCache.SystemMessages < 0 {
+		return fmt.Errorf("prompt_cache.system_messages must be >= 0")
+	}
+	if c.PromptCache.TailMessages < 0 {
+		return fmt.Errorf("prompt_cache.tail_messages must be >= 0")
+	}
+	if retention := strings.ToLower(strings.TrimSpace(c.PromptCache.Retention)); retention != "" {
+		if retention != "in-memory" && retention != "24h" {
+			return fmt.Errorf("prompt_cache.retention must be in-memory or 24h")
+		}
+	}
 
 	// Validate quirk probability
 	if c.Personality.QuirkProbability < 0 || c.Personality.QuirkProbability > 1 {
@@ -1295,6 +1583,12 @@ func (c *Config) Validate() error {
 	// Validate compaction threshold
 	if c.Memory.AutoCompactThreshold < 0 || c.Memory.AutoCompactThreshold > 1 {
 		return fmt.Errorf("auto compact threshold must be between 0 and 1, got %f", c.Memory.AutoCompactThreshold)
+	}
+	if c.Compaction.RLMAutoTrigger < 0 || c.Compaction.RLMAutoTrigger > 1 {
+		return fmt.Errorf("rlm auto trigger must be between 0 and 1, got %f", c.Compaction.RLMAutoTrigger)
+	}
+	if c.Compaction.CompactionRatio < 0 || c.Compaction.CompactionRatio > 1 {
+		return fmt.Errorf("compaction ratio must be between 0 and 1, got %f", c.Compaction.CompactionRatio)
 	}
 
 	// Validate batch config

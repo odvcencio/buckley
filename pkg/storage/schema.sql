@@ -1,5 +1,14 @@
 -- Buckley Database Schema
 -- Phase 3: Memory & Sessions
+--
+-- Recommended indexes for message queries (added for performance):
+--   CREATE INDEX idx_messages_session_time ON messages(session_id, timestamp);
+--   CREATE INDEX idx_messages_session_role ON messages(session_id, role);
+-- These indexes optimize:
+--   - Cursor-based pagination (GetMessagesWithCursor)
+--   - Batch loading (GetMessagesWithSessions)
+--   - Session statistics (GetSessionStats)
+--   - Role-based filtering
 
 -- Schema migrations tracking
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -37,6 +46,7 @@ CREATE TABLE IF NOT EXISTS messages (
     content_json TEXT,
     content_type TEXT NOT NULL DEFAULT 'text',
     reasoning TEXT,
+    embedding BLOB,
     timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     tokens INT DEFAULT 0,
     is_summary BOOLEAN DEFAULT FALSE,
@@ -47,10 +57,39 @@ CREATE TABLE IF NOT EXISTS messages (
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
 CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp);
 
+-- Performance indexes for message retrieval and pagination
+-- Supports GetMessagesWithCursor, GetMessagesWithSessions, GetSessionStats
+CREATE INDEX IF NOT EXISTS idx_messages_session_time ON messages(session_id, timestamp);
+
+-- Performance index for role-based queries
+-- Supports GetSessionStats role distribution and role-based filtering
+CREATE INDEX IF NOT EXISTS idx_messages_session_role ON messages(session_id, role);
+
+-- Message full-text search (Phase 6)
+CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+    content,
+    content='messages',
+    content_rowid='id'
+);
+
+CREATE TRIGGER IF NOT EXISTS messages_ai AFTER INSERT ON messages BEGIN
+    INSERT INTO messages_fts(rowid, content) VALUES (new.id, COALESCE(new.content, ''));
+END;
+
+CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages BEGIN
+    INSERT INTO messages_fts(messages_fts, rowid, content) VALUES ('delete', old.id, COALESCE(old.content, ''));
+END;
+
+CREATE TRIGGER IF NOT EXISTS messages_au AFTER UPDATE ON messages BEGIN
+    INSERT INTO messages_fts(messages_fts, rowid, content) VALUES ('delete', old.id, COALESCE(old.content, ''));
+    INSERT INTO messages_fts(rowid, content) VALUES (new.id, COALESCE(new.content, ''));
+END;
+
 -- Episodic memories: compacted summaries / decisions for retrieval
 CREATE TABLE IF NOT EXISTS memories (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id TEXT NOT NULL,
+    project_path TEXT,
     kind TEXT NOT NULL,
     content TEXT NOT NULL,
     embedding BLOB NOT NULL,
@@ -61,6 +100,7 @@ CREATE TABLE IF NOT EXISTS memories (
 
 CREATE INDEX IF NOT EXISTS idx_memories_session ON memories(session_id);
 CREATE INDEX IF NOT EXISTS idx_memories_created ON memories(created_at);
+CREATE INDEX IF NOT EXISTS idx_memories_project ON memories(project_path);
 
 -- Embeddings table: vector embeddings for semantic search (Phase 6)
 CREATE TABLE IF NOT EXISTS embeddings (

@@ -84,7 +84,7 @@ func TestWhisperTranscriber_TranscribeNoAPIKey(t *testing.T) {
 	if err == nil {
 		t.Error("Expected error for missing API key")
 	}
-	if err.Error() != "OpenAI API key not configured for transcription" {
+	if err.Error() != "openai api key not configured for transcription" {
 		t.Errorf("Unexpected error: %v", err)
 	}
 }

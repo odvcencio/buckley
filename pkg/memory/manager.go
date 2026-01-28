@@ -11,20 +11,38 @@ import (
 	"strings"
 	"time"
 
-	"github.com/odvcencio/buckley/pkg/conversation"
 	"github.com/odvcencio/buckley/pkg/embeddings"
 	"github.com/odvcencio/buckley/pkg/storage"
 )
 
 // Record represents an episodic memory item.
 type Record struct {
-	ID         int64
-	SessionID  string
-	Kind       string
-	Content    string
-	Metadata   map[string]any
-	CreatedAt  time.Time
-	Similarity float64
+	ID          int64
+	SessionID   string
+	ProjectPath string
+	Kind        string
+	Content     string
+	Metadata    map[string]any
+	CreatedAt   time.Time
+	Similarity  float64
+}
+
+// RecallScope controls memory retrieval scope.
+type RecallScope string
+
+const (
+	RecallScopeSession RecallScope = "session"
+	RecallScopeProject RecallScope = "project"
+)
+
+// RecallOptions configures memory retrieval.
+type RecallOptions struct {
+	Scope       RecallScope
+	SessionID   string
+	ProjectPath string
+	Limit       int
+	MinScore    float64
+	MaxTokens   int
 }
 
 // Manager stores and retrieves episodic memories using embeddings.
@@ -43,6 +61,11 @@ func NewManager(store *storage.Store, provider embeddings.EmbeddingProvider) *Ma
 
 // Record stores a memory item for a session.
 func (m *Manager) Record(ctx context.Context, sessionID, kind, content string, metadata map[string]any) error {
+	return m.RecordWithScope(ctx, sessionID, kind, content, metadata, "")
+}
+
+// RecordWithScope stores a memory item with optional project scope.
+func (m *Manager) RecordWithScope(ctx context.Context, sessionID, kind, content string, metadata map[string]any, projectPath string) error {
 	if m == nil || m.store == nil || m.provider == nil {
 		return nil
 	}
@@ -64,23 +87,26 @@ func (m *Manager) Record(ctx context.Context, sessionID, kind, content string, m
 		}
 	}
 	_, err = m.store.DB().ExecContext(ctx, `
-		INSERT INTO memories (session_id, kind, content, embedding, metadata)
-		VALUES (?, ?, ?, ?, ?)
-	`, sessionID, kind, content, embeddingBytes, metaJSON)
+		INSERT INTO memories (session_id, project_path, kind, content, embedding, metadata)
+		VALUES (?, ?, ?, ?, ?, ?)
+	`, sessionID, strings.TrimSpace(projectPath), kind, content, embeddingBytes, metaJSON)
 	return err
 }
 
 // RetrieveRelevant returns the most relevant memory items for a query.
 // If maxTokens > 0, results are capped to roughly that token budget.
-func (m *Manager) RetrieveRelevant(ctx context.Context, sessionID, query string, limit int, maxTokens int) ([]Record, error) {
+func (m *Manager) RetrieveRelevant(ctx context.Context, query string, opts RecallOptions) ([]Record, error) {
 	if m == nil || m.store == nil || m.provider == nil {
 		return nil, nil
 	}
-	if strings.TrimSpace(sessionID) == "" || strings.TrimSpace(query) == "" {
+	if strings.TrimSpace(query) == "" {
 		return nil, nil
 	}
-	if limit <= 0 {
-		limit = 5
+	if opts.Limit <= 0 {
+		opts.Limit = 5
+	}
+	if opts.MinScore <= 0 {
+		opts.MinScore = 0.6
 	}
 
 	queryEmbedding, err := m.provider.Embed(ctx, query)
@@ -88,28 +114,28 @@ func (m *Manager) RetrieveRelevant(ctx context.Context, sessionID, query string,
 		return nil, err
 	}
 
-	rows, err := m.store.DB().QueryContext(ctx, `
-		SELECT id, session_id, kind, content, embedding, metadata, created_at
-		FROM memories
-		WHERE session_id = ?
-	`, sessionID)
+	rows, err := m.queryMemories(ctx, opts)
 	if err != nil {
 		return nil, err
+	}
+	if rows == nil {
+		return nil, nil
 	}
 	defer rows.Close()
 
 	var records []Record
 	for rows.Next() {
 		var (
-			id         int64
-			sid        string
-			kind       string
-			content    string
-			embedBytes []byte
-			metaRaw    sql.NullString
-			createdAt  time.Time
+			id          int64
+			sid         string
+			projectPath sql.NullString
+			kind        string
+			content     string
+			embedBytes  []byte
+			metaRaw     sql.NullString
+			createdAt   time.Time
 		)
-		if err := rows.Scan(&id, &sid, &kind, &content, &embedBytes, &metaRaw, &createdAt); err != nil {
+		if err := rows.Scan(&id, &sid, &projectPath, &kind, &content, &embedBytes, &metaRaw, &createdAt); err != nil {
 			continue
 		}
 
@@ -124,13 +150,14 @@ func (m *Manager) RetrieveRelevant(ctx context.Context, sessionID, query string,
 		}
 
 		records = append(records, Record{
-			ID:         id,
-			SessionID:  sid,
-			Kind:       kind,
-			Content:    content,
-			Metadata:   meta,
-			CreatedAt:  createdAt,
-			Similarity: similarity,
+			ID:          id,
+			SessionID:   sid,
+			ProjectPath: projectPath.String,
+			Kind:        kind,
+			Content:     content,
+			Metadata:    meta,
+			CreatedAt:   createdAt,
+			Similarity:  similarity,
 		})
 	}
 
@@ -146,15 +173,15 @@ func (m *Manager) RetrieveRelevant(ctx context.Context, sessionID, query string,
 		return records[i].Similarity > records[j].Similarity
 	})
 
-	selected := make([]Record, 0, limit)
-	tokenBudget := maxTokens
+	selected := make([]Record, 0, opts.Limit)
+	tokenBudget := opts.MaxTokens
 	for _, rec := range records {
 		// Skip very low-similarity noise.
-		if rec.Similarity < 0.6 {
+		if rec.Similarity < opts.MinScore {
 			continue
 		}
 		if tokenBudget > 0 {
-			toks := conversation.CountTokens(rec.Content)
+			toks := estimateTokens(rec.Content)
 			if toks > tokenBudget && len(selected) > 0 {
 				break
 			}
@@ -166,12 +193,42 @@ func (m *Manager) RetrieveRelevant(ctx context.Context, sessionID, query string,
 			tokenBudget -= toks
 		}
 		selected = append(selected, rec)
-		if len(selected) >= limit {
+		if len(selected) >= opts.Limit {
 			break
 		}
 	}
 
 	return selected, nil
+}
+
+func (m *Manager) queryMemories(ctx context.Context, opts RecallOptions) (*sql.Rows, error) {
+	switch opts.Scope {
+	case RecallScopeProject:
+		projectPath := strings.TrimSpace(opts.ProjectPath)
+		if projectPath == "" {
+			return nil, nil
+		}
+		return m.store.DB().QueryContext(ctx, `
+			SELECT id, session_id, project_path, kind, content, embedding, metadata, created_at
+			FROM memories
+			WHERE project_path = ?
+		`, projectPath)
+	default:
+		sessionID := strings.TrimSpace(opts.SessionID)
+		if sessionID == "" {
+			return nil, nil
+		}
+		return m.store.DB().QueryContext(ctx, `
+			SELECT id, session_id, project_path, kind, content, embedding, metadata, created_at
+			FROM memories
+			WHERE session_id = ?
+		`, sessionID)
+	}
+}
+
+func estimateTokens(text string) int {
+	// Rough estimate: ~4 characters per token.
+	return len(text) / 4
 }
 
 // serializeEmbedding converts a float64 slice to bytes.

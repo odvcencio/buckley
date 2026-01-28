@@ -4,8 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
+	"io"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/odvcencio/buckley/pkg/bus"
@@ -16,14 +20,15 @@ import (
 	"github.com/odvcencio/buckley/pkg/telemetry"
 	"github.com/odvcencio/buckley/pkg/tool"
 	"github.com/odvcencio/buckley/pkg/tool/builtin"
+	"github.com/oklog/ulid/v2"
 )
 
-const coordinatorSystemPrompt = `You are the Buckley RLM Coordinator - an orchestration layer that delegates work to specialized sub-agents while maintaining strategic oversight.
+const coordinatorSystemPrompt = `You are the Buckley RLM Coordinator - an orchestration layer that delegates work to sub-agents while maintaining strategic oversight.
 
 ## Your Role
 You do NOT execute tools directly. Instead, you:
 1. Break down the user's request into discrete sub-tasks
-2. Delegate each sub-task to an appropriately-weighted sub-agent
+2. Delegate each sub-task to a sub-agent
 3. Review summaries and scratchpad entries to synthesize results
 4. Set the final answer when confident
 
@@ -31,12 +36,11 @@ You do NOT execute tools directly. Instead, you:
 
 **delegate** - Dispatch a single task to a sub-agent
 - task (required): Clear, actionable instruction for the sub-agent
-- weight: trivial|light|medium|heavy|reasoning (affects model selection)
-- tools: Optional list of allowed tools (e.g., ["file", "shell"])
+- tools: Optional list of allowed tools (nil = all tools)
 - Returns: summary, scratchpad_key, model used
 
 **delegate_batch** - Dispatch multiple independent tasks in parallel
-- tasks: Array of {task, weight, tools} objects
+- tasks: Array of {task, tools} objects
 - parallel: true (default) for concurrent execution
 - Use when tasks have no dependencies on each other
 
@@ -44,22 +48,23 @@ You do NOT execute tools directly. Instead, you:
 - key: The scratchpad_key returned from a delegate call
 - Use to get full context when a summary is insufficient
 
+**record_strategy** - Persist strategic decisions for future reference
+- category: decomposition|approach|lesson_learned
+- summary: Brief description (shown in context on future iterations)
+- details: Full details of the decision
+- rationale: Why this strategy was chosen
+
+**search_scratchpad** - Semantically search past work (if RAG is enabled)
+- query: Natural language description of what you're looking for
+- type: Optional filter (file, command, analysis, decision, artifact, strategy)
+- limit: Max results (default 5)
+
 **set_answer** - Declare your final response
 - content (required): The answer text
 - ready: true when answer is complete
 - confidence: 0.0-1.0 (must exceed threshold shown in context)
 - artifacts: Optional list of scratchpad keys for supporting data
 - next_steps: Optional suggestions for follow-up actions
-
-## Weight Selection Guide
-
-| Weight    | Use When                                    | Model Tier          |
-|-----------|---------------------------------------------|---------------------|
-| trivial   | Simple lookups, formatting, single-file reads | Fastest, cheapest  |
-| light     | Basic code analysis, small edits            | Fast, affordable    |
-| medium    | Multi-file operations, test writing         | Balanced (default)  |
-| heavy     | Complex refactoring, architecture decisions | High-quality        |
-| reasoning | Deep analysis, planning, debugging          | Extended thinking   |
 
 ## Execution Strategy
 
@@ -71,7 +76,7 @@ You do NOT execute tools directly. Instead, you:
 
 ## Budget Awareness
 The context shows your remaining tokens and wall time. Plan accordingly:
-- If tokens are low, use lighter weights and fewer delegations
+- If budget is low, reduce parallelism and focus on essentials
 - If time is short, parallelize aggressively
 - Set partial answers with ready=false if you're running out of budget
 
@@ -85,18 +90,76 @@ The context shows your remaining tokens and wall time. Plan accordingly:
 - Don't delegate trivial work that you could infer from context
 - Don't inspect every scratchpad entry - summaries are usually sufficient
 - Don't set ready=true until you've synthesized all sub-agent results
-- Don't use heavy/reasoning weights for simple tasks (wastes budget)
 
 Remember: You see summaries, not raw output. Trust sub-agents to execute correctly and focus on coordination.`
 
+const (
+	coordinatorMaxMessages  = 40
+	coordinatorKeepMessages = 12
+)
+
 // IterationEvent captures progress for observers.
 type IterationEvent struct {
-	Iteration     int
-	MaxIterations int
-	Ready         bool
-	TokensUsed    int
-	Summary       string
-	Scratchpad    []EntrySummary
+	Iteration      int
+	MaxIterations  int
+	Ready          bool
+	TokensUsed     int
+	MaxTokens      int
+	Summary        string
+	Scratchpad     []EntrySummary
+	ReasoningTrace string           // Coordinator's reasoning for this iteration
+	Delegations    []DelegationInfo // Tasks delegated this iteration
+	BudgetStatus   BudgetStatus     // Token/time budget status
+}
+
+// DelegationInfo captures info about a delegated task.
+type DelegationInfo struct {
+	TaskID         string `json:"task_id"`
+	Weight         string `json:"weight"`
+	WeightUsed     string `json:"weight_used,omitempty"`
+	Model          string `json:"model,omitempty"`
+	Escalated      bool   `json:"escalated,omitempty"`
+	Summary        string `json:"summary,omitempty"`
+	Success        bool   `json:"success"`
+	ToolCallsCount int    `json:"tool_calls_count,omitempty"`
+}
+
+// BudgetStatus tracks resource consumption.
+type BudgetStatus struct {
+	TokensUsed      int     `json:"tokens_used"`
+	TokensMax       int     `json:"tokens_max"`
+	TokensRemaining int     `json:"tokens_remaining"`
+	TokensPercent   float64 `json:"tokens_percent"`
+	WallTimeElapsed string  `json:"wall_time_elapsed"`
+	WallTimeMax     string  `json:"wall_time_max"`
+	WallTimePercent float64 `json:"wall_time_percent"`
+	Warning         string  `json:"warning,omitempty"` // e.g., "tokens_low", "time_low"
+}
+
+// IterationHistory tracks past iterations for context.
+type IterationHistory struct {
+	Iteration   int              `json:"iteration"`
+	Delegations []DelegationInfo `json:"delegations,omitempty"`
+	Summary     string           `json:"summary,omitempty"`
+	TokensUsed  int              `json:"tokens_used"`
+	Compacted   bool             `json:"compacted,omitempty"` // True if this is a compacted summary
+}
+
+// CompactionConfig controls context compaction behavior.
+type CompactionConfig struct {
+	MaxHistoryItems    int // Max items before compaction (default 6)
+	CompactedBatchSize int // Batch size for compaction (default 3)
+}
+
+// Checkpoint captures the state of an RLM execution for resumption.
+type Checkpoint struct {
+	ID         string             `json:"id"`
+	Task       string             `json:"task"`
+	Answer     Answer             `json:"answer"`
+	History    []IterationHistory `json:"history,omitempty"`
+	CreatedAt  time.Time          `json:"created_at"`
+	ResumedAt  time.Time          `json:"resumed_at,omitempty"`
+	Scratchpad []string           `json:"scratchpad_keys,omitempty"` // Keys to restore
 }
 
 // IterationHook receives iteration events.
@@ -112,25 +175,52 @@ type RuntimeDeps struct {
 	Summarizer   func([]byte) string
 	Telemetry    *telemetry.Hub
 	SessionID    string
-	UseToon      bool // Use TOON encoding for compact tool results
+	UseToon      bool              // Use TOON encoding for compact tool results
+	Embedder     EmbeddingProvider // Optional embedder for RAG-based scratchpad search
 }
 
 // Runtime is the RLM execution engine.
 type Runtime struct {
-	config      Config
-	models      *model.Manager
-	router      *ModelRouter
-	scratchpad  *Scratchpad
-	dispatcher  *BatchDispatcher
-	conflicts   *ConflictDetector
-	approver    *security.ToolApprover
-	bus         bus.MessageBus
-	telemetry   *telemetry.Hub
-	sessionID   string
-	resultCodec *toon.Codec // TOON encoding for compact tool results
+	config        Config
+	models        *model.Manager
+	selector      *ModelSelector
+	scratchpad    *Scratchpad
+	scratchpadRAG *ScratchpadRAG // Optional RAG-based search
+	dispatcher    *Dispatcher
+	conflicts     *ConflictDetector
+	approver      *security.ToolApprover
+	bus           bus.MessageBus
+	telemetry     *telemetry.Hub
+	sessionID     string
+	resultCodec   *toon.Codec // TOON encoding for compact tool results
 
 	hooksMu sync.RWMutex
 	hooks   []IterationHook
+
+	// Iteration tracking for context
+	historyMu sync.RWMutex
+	history   []IterationHistory
+
+	contextMu              sync.Mutex
+	historySnapshotHash    uint64
+	scratchpadSnapshotHash uint64
+	historySnapshotSet     bool
+	scratchpadSnapshotSet  bool
+
+	// Async compaction channel
+	compactionCh chan struct{}
+	compactionWg sync.WaitGroup
+
+	// Token counting cache
+	tokenCacheMu sync.RWMutex
+	tokenCache   map[string]int
+
+	// Rate limiting for iterations
+	lastIterationTime atomic.Int64 // Unix nanoseconds
+	minIterationDelay time.Duration
+
+	// Model call timeout
+	modelCallTimeout time.Duration
 }
 
 // NewRuntime wires the runtime dependencies together.
@@ -145,40 +235,164 @@ func NewRuntime(cfg Config, deps RuntimeDeps) (*Runtime, error) {
 		registry = tool.NewRegistry()
 	}
 
-	router, err := NewModelRouterFromManager(deps.Models, cfg)
-	if err != nil {
-		return nil, err
-	}
-
+	selector := NewModelSelector(cfg, deps.Models)
 	conflicts := NewConflictDetector()
 	scratchpad := NewScratchpad(deps.Store, deps.Summarizer, cfg.Scratchpad)
 
-	dispatcher, err := NewBatchDispatcher(BatchDispatcherConfig{}, BatchDispatcherDeps{
-		Router:     router,
+	dispatcher, err := NewDispatcher(DispatcherConfig{
+		MaxConcurrent: cfg.SubAgent.MaxConcurrent,
+		Timeout:       cfg.SubAgent.Timeout,
+	}, DispatcherDeps{
+		Selector:   selector,
 		Models:     deps.Models,
 		Registry:   registry,
 		Scratchpad: scratchpad,
 		Conflicts:  conflicts,
 		Approver:   deps.ToolApprover,
 		Bus:        deps.Bus,
+		Telemetry:  deps.Telemetry,
 	})
 	if err != nil {
 		return nil, err
 	}
 
-	return &Runtime{
-		config:      cfg,
-		models:      deps.Models,
-		router:      router,
-		scratchpad:  scratchpad,
-		dispatcher:  dispatcher,
-		conflicts:   conflicts,
-		approver:    deps.ToolApprover,
-		bus:         deps.Bus,
-		telemetry:   deps.Telemetry,
-		sessionID:   strings.TrimSpace(deps.SessionID),
-		resultCodec: toon.New(deps.UseToon),
-	}, nil
+	runtime := &Runtime{
+		config:            cfg,
+		models:            deps.Models,
+		selector:          selector,
+		scratchpad:        scratchpad,
+		dispatcher:        dispatcher,
+		conflicts:         conflicts,
+		approver:          deps.ToolApprover,
+		bus:               deps.Bus,
+		telemetry:         deps.Telemetry,
+		sessionID:         strings.TrimSpace(deps.SessionID),
+		resultCodec:       toon.New(deps.UseToon),
+		compactionCh:      make(chan struct{}, 1),
+		tokenCache:        make(map[string]int),
+		minIterationDelay: 10 * time.Millisecond, // Minimum delay between iterations
+		modelCallTimeout:  2 * time.Minute,       // Default timeout for model calls
+	}
+
+	// Initialize RAG-based scratchpad search if embedder is provided
+	if deps.Embedder != nil {
+		runtime.scratchpadRAG = NewScratchpadRAG(scratchpad, deps.Embedder)
+		scratchpad.SetOnWrite(runtime.scratchpadRAG.OnWrite)
+	}
+
+	// Start async compaction worker
+	runtime.compactionWg.Add(1)
+	go runtime.compactionWorker()
+
+	return runtime, nil
+}
+
+// Close shuts down the runtime and waits for background workers.
+func (r *Runtime) Close() error {
+	if r == nil {
+		return nil
+	}
+	close(r.compactionCh)
+	r.compactionWg.Wait()
+	return nil
+}
+
+// compactionWorker processes async compaction requests.
+func (r *Runtime) compactionWorker() {
+	defer r.compactionWg.Done()
+	for range r.compactionCh {
+		r.historyMu.Lock()
+		r.compactHistoryLocked()
+		r.historyMu.Unlock()
+	}
+}
+
+// triggerAsyncCompaction triggers a non-blocking compaction.
+func (r *Runtime) triggerAsyncCompaction() {
+	if r == nil {
+		return
+	}
+	select {
+	case r.compactionCh <- struct{}{}:
+		// Compaction triggered
+	default:
+		// Compaction already pending, skip
+	}
+}
+
+// countTokens returns cached token count or computes and caches it.
+func (r *Runtime) countTokens(text string) int {
+	if r == nil {
+		return approximateTokenCount(text)
+	}
+
+	// Fast path: compute hash key
+	h := fnv.New64a()
+	_, _ = io.WriteString(h, text)
+	key := strconv.FormatUint(h.Sum64(), 36)
+
+	// Check cache
+	r.tokenCacheMu.RLock()
+	if count, ok := r.tokenCache[key]; ok {
+		r.tokenCacheMu.RUnlock()
+		return count
+	}
+	r.tokenCacheMu.RUnlock()
+
+	// Compute count
+	count := approximateTokenCount(text)
+
+	// Store in cache (with bounded size protection)
+	r.tokenCacheMu.Lock()
+	// Simple eviction: if cache too large, clear it
+	if len(r.tokenCache) > 10000 {
+		r.tokenCache = make(map[string]int)
+	}
+	r.tokenCache[key] = count
+	r.tokenCacheMu.Unlock()
+
+	return count
+}
+
+// approximateTokenCount provides a fast estimate of token count.
+// Uses a simple approximation: ~4 characters per token on average.
+func approximateTokenCount(text string) int {
+	if text == "" {
+		return 0
+	}
+	// Simple approximation: ~4 chars per token for English text
+	count := len(text) / 4
+	if count < 1 {
+		return 1
+	}
+	return count
+}
+
+// rateLimitIteration enforces a minimum delay between iterations.
+// Returns true if the iteration should proceed, false if context is cancelled.
+func (r *Runtime) rateLimitIteration(ctx context.Context) bool {
+	if r == nil || r.minIterationDelay <= 0 {
+		return ctx.Err() == nil
+	}
+
+	// Check context first
+	if err := ctx.Err(); err != nil {
+		return false
+	}
+
+	lastTime := time.Unix(0, r.lastIterationTime.Load())
+	elapsed := time.Since(lastTime)
+	if elapsed < r.minIterationDelay {
+		select {
+		case <-time.After(r.minIterationDelay - elapsed):
+			// Continue
+		case <-ctx.Done():
+			return false
+		}
+	}
+
+	r.lastIterationTime.Store(time.Now().UnixNano())
+	return ctx.Err() == nil
 }
 
 // OnIteration registers a hook for iteration events.
@@ -189,6 +403,266 @@ func (r *Runtime) OnIteration(hook IterationHook) {
 	r.hooksMu.Lock()
 	r.hooks = append(r.hooks, hook)
 	r.hooksMu.Unlock()
+}
+
+// CreateCheckpoint captures the current execution state for later resumption.
+func (r *Runtime) CreateCheckpoint(task string, answer *Answer) (*Checkpoint, error) {
+	if r == nil {
+		return nil, fmt.Errorf("runtime is nil")
+	}
+	if answer == nil {
+		return nil, fmt.Errorf("answer is nil")
+	}
+
+	r.historyMu.RLock()
+	history := make([]IterationHistory, len(r.history))
+	copy(history, r.history)
+	r.historyMu.RUnlock()
+
+	// Collect scratchpad keys
+	var scratchpadKeys []string
+	if r.scratchpad != nil {
+		summaries, err := r.scratchpad.ListSummaries(context.Background(), 50)
+		if err == nil {
+			for _, s := range summaries {
+				scratchpadKeys = append(scratchpadKeys, s.Key)
+			}
+		}
+	}
+
+	checkpoint := &Checkpoint{
+		ID:         ulid.Make().String(),
+		Task:       task,
+		Answer:     *answer,
+		History:    history,
+		CreatedAt:  time.Now().UTC(),
+		Scratchpad: scratchpadKeys,
+	}
+
+	return checkpoint, nil
+}
+
+// ResumeFromCheckpoint restores state from a checkpoint and continues execution.
+func (r *Runtime) ResumeFromCheckpoint(ctx context.Context, checkpoint *Checkpoint) (*Answer, error) {
+	if r == nil {
+		return nil, fmt.Errorf("runtime is nil")
+	}
+	if checkpoint == nil {
+		return nil, fmt.Errorf("checkpoint is nil")
+	}
+
+	// Restore history
+	r.historyMu.Lock()
+	r.history = make([]IterationHistory, len(checkpoint.History))
+	copy(r.history, checkpoint.History)
+	r.historyMu.Unlock()
+
+	// Update checkpoint with resume time
+	checkpoint.ResumedAt = time.Now().UTC()
+
+	// Emit resume event
+	if r.telemetry != nil {
+		r.telemetry.Publish(telemetry.Event{
+			Type:      telemetry.EventType("rlm.resumed"),
+			SessionID: r.sessionID,
+			Data: map[string]any{
+				"checkpoint_id": checkpoint.ID,
+				"task":          checkpoint.Task,
+				"iteration":     checkpoint.Answer.Iteration,
+				"tokens_used":   checkpoint.Answer.TokensUsed,
+			},
+		})
+	}
+
+	// Continue execution from where we left off
+	return r.executeFromState(ctx, checkpoint.Task, &checkpoint.Answer)
+}
+
+// executeFromState continues execution from a given state.
+func (r *Runtime) executeFromState(ctx context.Context, task string, answer *Answer) (*Answer, error) {
+	if answer == nil {
+		a := NewAnswer(0)
+		answer = &a
+	}
+	if answer.Ready {
+		return answer, nil
+	}
+
+	start := time.Now()
+	maxIterations := r.config.Coordinator.MaxIterations
+	if maxIterations <= 0 {
+		maxIterations = DefaultConfig().Coordinator.MaxIterations
+	}
+	maxTokens := r.config.Coordinator.MaxTokensBudget // 0 = unlimited
+	maxWallTime := r.config.Coordinator.MaxWallTime
+	if maxWallTime <= 0 {
+		maxWallTime = DefaultConfig().Coordinator.MaxWallTime
+	}
+	baseConfidenceThreshold := r.config.Coordinator.ConfidenceThreshold
+	if baseConfidenceThreshold <= 0 {
+		baseConfidenceThreshold = DefaultConfig().Coordinator.ConfidenceThreshold
+	}
+
+	runtimeDeadline := false
+	if maxWallTime > 0 {
+		desired := start.Add(maxWallTime)
+		if deadline, ok := ctx.Deadline(); !ok || deadline.After(desired) {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithDeadline(ctx, desired)
+			defer cancel()
+			runtimeDeadline = true
+		}
+	}
+
+	registry := r.buildCoordinatorRegistry(ctx, answer)
+	toolDefs := toolRegistryDefinitions(registry)
+	toolChoice := "auto"
+	if len(toolDefs) == 0 {
+		toolChoice = "none"
+	}
+
+	// Build initial context with resumption note
+	resumeNote := ""
+	if answer.Iteration > 0 {
+		resumeNote = fmt.Sprintf("\n[Resumed from iteration %d with %d tokens used]\n", answer.Iteration, answer.TokensUsed)
+	}
+
+	budgetStatus := r.calculateBudgetStatus(answer.TokensUsed, maxTokens, start)
+	confidenceThreshold := r.adaptiveConfidenceThreshold(baseConfidenceThreshold, budgetStatus)
+
+	messages := []model.Message{
+		{Role: "system", Content: coordinatorSystemPrompt},
+		{Role: "user", Content: resumeNote + r.buildCoordinatorContext(ctx, task, answer, start, maxTokens, confidenceThreshold)},
+	}
+
+	for answer.Iteration < maxIterations && !answer.Ready {
+		// Check context cancellation with early exit
+		if err := ctx.Err(); err != nil {
+			if err == context.DeadlineExceeded && runtimeDeadline {
+				answer.Ready = true
+				break
+			}
+			return answer, err
+		}
+
+		// Rate limiting between iterations
+		if !r.rateLimitIteration(ctx) {
+			if err := ctx.Err(); err != nil {
+				if err == context.DeadlineExceeded && runtimeDeadline {
+					answer.Ready = true
+					break
+				}
+				return answer, err
+			}
+		}
+
+		answer.Iteration++
+
+		// Create timeout context for model call
+		modelCtx, modelCancel := context.WithTimeout(ctx, r.modelCallTimeout)
+		resp, err := r.models.ChatCompletion(modelCtx, model.ChatRequest{
+			Model:      r.coordinatorModelID(),
+			Messages:   messages,
+			Tools:      toolDefs,
+			ToolChoice: toolChoice,
+		})
+		modelCancel()
+
+		// Handle timeout specifically
+		if err != nil {
+			if ctx.Err() != nil {
+				// Parent context cancelled
+				if ctx.Err() == context.DeadlineExceeded && runtimeDeadline {
+					answer.Ready = true
+					break
+				}
+				return answer, ctx.Err()
+			}
+			// Model call timeout or other error
+			return answer, fmt.Errorf("model call failed: %w", err)
+		}
+		answer.TokensUsed += resp.Usage.TotalTokens
+
+		if len(resp.Choices) == 0 {
+			return answer, fmt.Errorf("no response from coordinator")
+		}
+
+		choice := resp.Choices[0]
+		if len(choice.Message.ToolCalls) == 0 {
+			content := extractText(choice.Message)
+			if content != "" {
+				answer.Content = strings.TrimSpace(content)
+				answer.Ready = true
+			}
+			summaries := r.collectScratchpadSummaries(ctx, 6)
+			budgetStatus := r.calculateBudgetStatus(answer.TokensUsed, maxTokens, start)
+			r.emitIteration(IterationEvent{
+				Iteration:      answer.Iteration,
+				MaxIterations:  maxIterations,
+				Ready:          answer.Ready,
+				TokensUsed:     answer.TokensUsed,
+				MaxTokens:      maxTokens,
+				Summary:        answer.Content,
+				Scratchpad:     summaries,
+				ReasoningTrace: content,
+				BudgetStatus:   budgetStatus,
+			})
+			break
+		}
+
+		reasoningTrace := extractText(choice.Message)
+
+		messages = append(messages, model.Message{
+			Role:      "assistant",
+			Content:   choice.Message.Content,
+			ToolCalls: choice.Message.ToolCalls,
+		})
+		toolResults := r.executeCoordinatorTools(ctx, registry, choice.Message.ToolCalls)
+		delegations := r.extractDelegationsFromToolResults(toolResults)
+
+		for _, result := range toolResults {
+			messages = append(messages, model.Message{
+				Role:       "tool",
+				ToolCallID: result.ID,
+				Name:       result.Name,
+				Content:    result.Result,
+			})
+		}
+
+		budgetStatus := r.calculateBudgetStatus(answer.TokensUsed, maxTokens, start)
+		confidenceThreshold = r.adaptiveConfidenceThreshold(baseConfidenceThreshold, budgetStatus)
+		if maxTokens > 0 && answer.TokensUsed >= maxTokens {
+			answer.Ready = true
+		}
+		if !answer.Ready && answer.Content != "" && answer.Confidence >= confidenceThreshold {
+			answer.Ready = true
+		}
+
+		summaries := r.collectScratchpadSummaries(ctx, 6)
+		r.emitIteration(IterationEvent{
+			Iteration:      answer.Iteration,
+			MaxIterations:  maxIterations,
+			Ready:          answer.Ready,
+			TokensUsed:     answer.TokensUsed,
+			MaxTokens:      maxTokens,
+			Summary:        answer.Content,
+			Scratchpad:     summaries,
+			ReasoningTrace: reasoningTrace,
+			Delegations:    delegations,
+			BudgetStatus:   budgetStatus,
+		})
+
+		if !answer.Ready {
+			messages = append(messages, model.Message{
+				Role:    "user",
+				Content: r.buildCoordinatorContext(ctx, task, answer, start, maxTokens, confidenceThreshold),
+			})
+			messages = r.compactMessages(messages)
+		}
+	}
+
+	answer.Normalize()
+	return answer, nil
 }
 
 // Execute runs the coordinator loop for a task.
@@ -206,17 +680,14 @@ func (r *Runtime) Execute(ctx context.Context, task string) (*Answer, error) {
 	if maxIterations <= 0 {
 		maxIterations = DefaultConfig().Coordinator.MaxIterations
 	}
-	maxTokens := r.config.Coordinator.MaxTokensBudget
-	if maxTokens <= 0 {
-		maxTokens = DefaultConfig().Coordinator.MaxTokensBudget
-	}
+	maxTokens := r.config.Coordinator.MaxTokensBudget // 0 = unlimited
 	maxWallTime := r.config.Coordinator.MaxWallTime
 	if maxWallTime <= 0 {
 		maxWallTime = DefaultConfig().Coordinator.MaxWallTime
 	}
-	confidenceThreshold := r.config.Coordinator.ConfidenceThreshold
-	if confidenceThreshold <= 0 {
-		confidenceThreshold = DefaultConfig().Coordinator.ConfidenceThreshold
+	baseConfidenceThreshold := r.config.Coordinator.ConfidenceThreshold
+	if baseConfidenceThreshold <= 0 {
+		baseConfidenceThreshold = DefaultConfig().Coordinator.ConfidenceThreshold
 	}
 
 	runtimeDeadline := false
@@ -237,12 +708,16 @@ func (r *Runtime) Execute(ctx context.Context, task string) (*Answer, error) {
 		toolChoice = "none"
 	}
 
+	budgetStatus := r.calculateBudgetStatus(answer.TokensUsed, maxTokens, start)
+	confidenceThreshold := r.adaptiveConfidenceThreshold(baseConfidenceThreshold, budgetStatus)
+
 	messages := []model.Message{
 		{Role: "system", Content: coordinatorSystemPrompt},
 		{Role: "user", Content: r.buildCoordinatorContext(ctx, task, &answer, start, maxTokens, confidenceThreshold)},
 	}
 
 	for answer.Iteration < maxIterations && !answer.Ready {
+		// Check context cancellation with early exit
 		if err := ctx.Err(); err != nil {
 			if err == context.DeadlineExceeded && runtimeDeadline {
 				answer.Ready = true
@@ -251,16 +726,41 @@ func (r *Runtime) Execute(ctx context.Context, task string) (*Answer, error) {
 			return &answer, err
 		}
 
+		// Rate limiting between iterations
+		if !r.rateLimitIteration(ctx) {
+			if err := ctx.Err(); err != nil {
+				if err == context.DeadlineExceeded && runtimeDeadline {
+					answer.Ready = true
+					break
+				}
+				return &answer, err
+			}
+		}
+
 		answer.Iteration++
 
-		resp, err := r.models.ChatCompletion(ctx, model.ChatRequest{
+		// Create timeout context for model call
+		modelCtx, modelCancel := context.WithTimeout(ctx, r.modelCallTimeout)
+		resp, err := r.models.ChatCompletion(modelCtx, model.ChatRequest{
 			Model:      r.coordinatorModelID(),
 			Messages:   messages,
 			Tools:      toolDefs,
 			ToolChoice: toolChoice,
 		})
+		modelCancel()
+
+		// Handle timeout specifically
 		if err != nil {
-			return &answer, err
+			if ctx.Err() != nil {
+				// Parent context cancelled
+				if ctx.Err() == context.DeadlineExceeded && runtimeDeadline {
+					answer.Ready = true
+					break
+				}
+				return &answer, ctx.Err()
+			}
+			// Model call timeout or other error
+			return &answer, fmt.Errorf("model call failed: %w", err)
 		}
 		answer.TokensUsed += resp.Usage.TotalTokens
 
@@ -276,16 +776,23 @@ func (r *Runtime) Execute(ctx context.Context, task string) (*Answer, error) {
 				answer.Ready = true
 			}
 			summaries := r.collectScratchpadSummaries(ctx, 6)
+			budgetStatus := r.calculateBudgetStatus(answer.TokensUsed, maxTokens, start)
 			r.emitIteration(IterationEvent{
-				Iteration:     answer.Iteration,
-				MaxIterations: maxIterations,
-				Ready:         answer.Ready,
-				TokensUsed:    answer.TokensUsed,
-				Summary:       answer.Content,
-				Scratchpad:    summaries,
+				Iteration:      answer.Iteration,
+				MaxIterations:  maxIterations,
+				Ready:          answer.Ready,
+				TokensUsed:     answer.TokensUsed,
+				MaxTokens:      maxTokens,
+				Summary:        answer.Content,
+				Scratchpad:     summaries,
+				ReasoningTrace: content,
+				BudgetStatus:   budgetStatus,
 			})
 			break
 		}
+
+		// Extract reasoning trace from coordinator message (text before tool calls)
+		reasoningTrace := extractText(choice.Message)
 
 		messages = append(messages, model.Message{
 			Role:      "assistant",
@@ -293,6 +800,10 @@ func (r *Runtime) Execute(ctx context.Context, task string) (*Answer, error) {
 			ToolCalls: choice.Message.ToolCalls,
 		})
 		toolResults := r.executeCoordinatorTools(ctx, registry, choice.Message.ToolCalls)
+
+		// Track delegations for transparency
+		delegations := r.extractDelegationsFromToolResults(toolResults)
+
 		for _, result := range toolResults {
 			messages = append(messages, model.Message{
 				Role:       "tool",
@@ -302,7 +813,9 @@ func (r *Runtime) Execute(ctx context.Context, task string) (*Answer, error) {
 			})
 		}
 
-		if answer.TokensUsed >= maxTokens {
+		budgetStatus := r.calculateBudgetStatus(answer.TokensUsed, maxTokens, start)
+		confidenceThreshold = r.adaptiveConfidenceThreshold(baseConfidenceThreshold, budgetStatus)
+		if maxTokens > 0 && answer.TokensUsed >= maxTokens {
 			answer.Ready = true
 		}
 		if !answer.Ready && answer.Content != "" && answer.Confidence >= confidenceThreshold {
@@ -311,12 +824,16 @@ func (r *Runtime) Execute(ctx context.Context, task string) (*Answer, error) {
 
 		summaries := r.collectScratchpadSummaries(ctx, 6)
 		r.emitIteration(IterationEvent{
-			Iteration:     answer.Iteration,
-			MaxIterations: maxIterations,
-			Ready:         answer.Ready,
-			TokensUsed:    answer.TokensUsed,
-			Summary:       answer.Content,
-			Scratchpad:    summaries,
+			Iteration:      answer.Iteration,
+			MaxIterations:  maxIterations,
+			Ready:          answer.Ready,
+			TokensUsed:     answer.TokensUsed,
+			MaxTokens:      maxTokens,
+			Summary:        answer.Content,
+			Scratchpad:     summaries,
+			ReasoningTrace: reasoningTrace,
+			Delegations:    delegations,
+			BudgetStatus:   budgetStatus,
 		})
 
 		if !answer.Ready {
@@ -324,6 +841,7 @@ func (r *Runtime) Execute(ctx context.Context, task string) (*Answer, error) {
 				Role:    "user",
 				Content: r.buildCoordinatorContext(ctx, task, &answer, start, maxTokens, confidenceThreshold),
 			})
+			messages = r.compactMessages(messages)
 		}
 	}
 
@@ -346,6 +864,13 @@ func (r *Runtime) buildCoordinatorRegistry(ctx context.Context, answer *Answer) 
 	registry.Register(NewDelegateBatchTool(r.dispatcher, ctxProvider))
 	registry.Register(NewInspectTool(r.scratchpad, ctxProvider))
 	registry.Register(NewSetAnswerTool(answer))
+	registry.Register(NewRecordStrategyTool(r.scratchpad, ctxProvider))
+
+	// Register RAG-based search if available
+	if r.scratchpadRAG != nil {
+		registry.Register(NewSearchScratchpadTool(r.scratchpadRAG, ctxProvider))
+	}
+
 	return registry
 }
 
@@ -360,40 +885,112 @@ func (r *Runtime) buildCoordinatorContext(ctx context.Context, task string, answ
 		sb.WriteString(answer.Content)
 		sb.WriteString("\n")
 	}
+
+	// Enhanced budget section with visual indicators
 	sb.WriteString("\nBudget:\n")
-	sb.WriteString(fmt.Sprintf("tokens_used: %d\nmax_tokens: %d\n", answer.TokensUsed, maxTokens))
+	tokenPercent := 0.0
 	if maxTokens > 0 {
+		tokenPercent = float64(answer.TokensUsed) / float64(maxTokens) * 100
 		remaining := maxTokens - answer.TokensUsed
 		if remaining < 0 {
 			remaining = 0
 		}
-		sb.WriteString(fmt.Sprintf("tokens_remaining: %d\n", remaining))
+		sb.WriteString(fmt.Sprintf("tokens: %d/%d (%.1f%% used, %d remaining)\n", answer.TokensUsed, maxTokens, tokenPercent, remaining))
+
+		// Budget warnings
+		if tokenPercent >= 90 {
+			sb.WriteString("⚠️ CRITICAL: Token budget nearly exhausted - wrap up immediately\n")
+		} else if tokenPercent >= 75 {
+			sb.WriteString("⚠️ WARNING: Token budget running low - prioritize completion\n")
+		}
+	} else {
+		sb.WriteString(fmt.Sprintf("tokens_used: %d\n", answer.TokensUsed))
 	}
+
+	// Time budget
 	deadline := time.Time{}
+	maxWallTime := r.config.Coordinator.MaxWallTime
+	if maxWallTime <= 0 {
+		maxWallTime = DefaultConfig().Coordinator.MaxWallTime
+	}
 	if ctx != nil {
 		if d, ok := ctx.Deadline(); ok {
 			deadline = d
 		}
 	}
-	if deadline.IsZero() {
-		maxWallTime := r.config.Coordinator.MaxWallTime
-		if maxWallTime <= 0 {
-			maxWallTime = DefaultConfig().Coordinator.MaxWallTime
-		}
-		if maxWallTime > 0 {
-			deadline = start.Add(maxWallTime)
-		}
+	if deadline.IsZero() && maxWallTime > 0 {
+		deadline = start.Add(maxWallTime)
 	}
 	if !deadline.IsZero() {
+		elapsed := time.Since(start)
 		remaining := time.Until(deadline)
 		if remaining < 0 {
 			remaining = 0
 		}
-		sb.WriteString(fmt.Sprintf("wall_time_remaining: %s\n", remaining.Round(time.Second)))
+		total := elapsed + remaining
+		timePercent := 0.0
+		if total > 0 {
+			timePercent = float64(elapsed) / float64(total) * 100
+		}
+		sb.WriteString(fmt.Sprintf("time: %s elapsed, %s remaining (%.1f%% used)\n", elapsed.Round(time.Second), remaining.Round(time.Second), timePercent))
+
+		if remaining < time.Minute {
+			sb.WriteString("⚠️ CRITICAL: Less than 1 minute remaining - finalize now\n")
+		} else if remaining < 2*time.Minute {
+			sb.WriteString("⚠️ WARNING: Time running low - plan to complete soon\n")
+		}
 	}
 
+	// Iteration history for learning from past attempts (with compaction)
+	r.historyMu.RLock()
+	history := make([]IterationHistory, len(r.history))
+	copy(history, r.history)
+	r.historyMu.RUnlock()
+
+	if len(history) > 0 {
+		if r.shouldIncludeHistory(history) {
+			sb.WriteString("\nIteration History (for context):\n")
+			for _, h := range history {
+				if h.Compacted {
+					// Compacted entry - show condensed summary
+					sb.WriteString(fmt.Sprintf("- %s", h.Summary))
+					sb.WriteString(fmt.Sprintf(" [%d tokens]\n", h.TokensUsed))
+				} else {
+					// Regular entry - show full details
+					sb.WriteString(fmt.Sprintf("- Iteration %d: ", h.Iteration))
+					if len(h.Delegations) > 0 {
+						var delegSummaries []string
+						for _, d := range h.Delegations {
+							status := "✓"
+							if !d.Success {
+								status = "✗"
+							}
+							if d.Model != "" {
+								delegSummaries = append(delegSummaries, fmt.Sprintf("%s(%s)%s", d.Weight, d.Model, status))
+							} else if d.Summary != "" {
+								delegSummaries = append(delegSummaries, d.Summary)
+							}
+						}
+						if len(delegSummaries) > 0 {
+							sb.WriteString(strings.Join(delegSummaries, ", "))
+						}
+					}
+					if h.Summary != "" {
+						if len(h.Summary) > 100 {
+							sb.WriteString(fmt.Sprintf(" → %s...", h.Summary[:100]))
+						} else {
+							sb.WriteString(fmt.Sprintf(" → %s", h.Summary))
+						}
+					}
+					sb.WriteString(fmt.Sprintf(" [%d tokens]\n", h.TokensUsed))
+				}
+			}
+		}
+	}
+
+	// Scratchpad summaries
 	summaries, err := r.scratchpad.ListSummaries(ctx, 8)
-	if err == nil && len(summaries) > 0 {
+	if err == nil && len(summaries) > 0 && r.shouldIncludeScratchpad(summaries) {
 		sb.WriteString("\nScratchpad summaries:\n")
 		for _, summary := range summaries {
 			sb.WriteString("- ")
@@ -420,6 +1017,125 @@ func (r *Runtime) collectScratchpadSummaries(ctx context.Context, limit int) []E
 	return summaries
 }
 
+func (r *Runtime) compactMessages(messages []model.Message) []model.Message {
+	if len(messages) == 0 {
+		return messages
+	}
+	if coordinatorMaxMessages <= 0 || len(messages) <= coordinatorMaxMessages {
+		return messages
+	}
+	if coordinatorKeepMessages <= 0 || len(messages) <= coordinatorKeepMessages+1 {
+		return messages
+	}
+
+	system := messages[0]
+	recent := messages[len(messages)-coordinatorKeepMessages:]
+	removed := messages[1 : len(messages)-coordinatorKeepMessages]
+
+	toolCount := 0
+	for _, msg := range removed {
+		if msg.Role == "tool" {
+			toolCount++
+		}
+	}
+
+	compactNote := fmt.Sprintf("[Compacted %d earlier messages (%d tool results).]", len(removed), toolCount)
+	out := make([]model.Message, 0, 2+len(recent))
+	out = append(out, system, model.Message{Role: "assistant", Content: compactNote})
+	out = append(out, recent...)
+	return out
+}
+
+func (r *Runtime) shouldIncludeHistory(history []IterationHistory) bool {
+	if r == nil || len(history) == 0 {
+		return false
+	}
+	hash := hashHistorySnapshot(history)
+
+	r.contextMu.Lock()
+	defer r.contextMu.Unlock()
+
+	if r.historySnapshotSet && r.historySnapshotHash == hash {
+		return false
+	}
+	r.historySnapshotHash = hash
+	r.historySnapshotSet = true
+	return true
+}
+
+func (r *Runtime) shouldIncludeScratchpad(summaries []EntrySummary) bool {
+	if r == nil || len(summaries) == 0 {
+		return false
+	}
+	hash := hashScratchpadSnapshot(summaries)
+
+	r.contextMu.Lock()
+	defer r.contextMu.Unlock()
+
+	if r.scratchpadSnapshotSet && r.scratchpadSnapshotHash == hash {
+		return false
+	}
+	r.scratchpadSnapshotHash = hash
+	r.scratchpadSnapshotSet = true
+	return true
+}
+
+func hashHistorySnapshot(history []IterationHistory) uint64 {
+	h := fnv.New64a()
+	for _, item := range history {
+		writeHashInt(h, int64(item.Iteration))
+		writeHashBool(h, item.Compacted)
+		writeHashInt(h, int64(item.TokensUsed))
+		writeHashString(h, item.Summary)
+		for _, d := range item.Delegations {
+			writeHashString(h, d.TaskID)
+			writeHashString(h, d.Weight)
+			writeHashString(h, d.WeightUsed)
+			writeHashString(h, d.Model)
+			writeHashBool(h, d.Escalated)
+			writeHashBool(h, d.Success)
+			writeHashInt(h, int64(d.ToolCallsCount))
+			writeHashString(h, d.Summary)
+		}
+	}
+	return h.Sum64()
+}
+
+func hashScratchpadSnapshot(summaries []EntrySummary) uint64 {
+	h := fnv.New64a()
+	for _, summary := range summaries {
+		writeHashString(h, summary.Key)
+		writeHashString(h, string(summary.Type))
+		writeHashString(h, summary.Summary)
+		writeHashString(h, summary.CreatedBy)
+		writeHashInt(h, summary.CreatedAt.UnixNano())
+	}
+	return h.Sum64()
+}
+
+func writeHashString(h io.Writer, value string) {
+	if value == "" {
+		_, _ = h.Write([]byte{0})
+		return
+	}
+	_, _ = io.WriteString(h, value)
+	_, _ = h.Write([]byte{0})
+}
+
+func writeHashInt(h io.Writer, value int64) {
+	buf := strconv.AppendInt(make([]byte, 0, 20), value, 10)
+	_, _ = h.Write(buf)
+	_, _ = h.Write([]byte{0})
+}
+
+func writeHashBool(h io.Writer, value bool) {
+	if value {
+		_, _ = h.Write([]byte{1})
+		return
+	}
+	_, _ = h.Write([]byte{0})
+}
+
 func (r *Runtime) executeCoordinatorTools(ctx context.Context, registry *tool.Registry, calls []model.ToolCall) []coordinatorToolResult {
 	results := make([]coordinatorToolResult, 0, len(calls))
 	for _, call := range calls {
@@ -432,7 +1148,7 @@ func (r *Runtime) executeCoordinatorTools(ctx context.Context, registry *tool.Re
 		if call.ID != "" {
 			args[tool.ToolCallIDParam] = call.ID
 		}
-		res, err := registry.Execute(name, args)
+		res, err := registry.ExecuteWithContext(ctx, name, args)
 		if err != nil {
 			result.Result = fmt.Sprintf("execution error: %v", err)
 		} else {
@@ -444,35 +1160,303 @@ func (r *Runtime) executeCoordinatorTools(ctx context.Context, registry *tool.Re
 }
 
 func (r *Runtime) emitIteration(event IterationEvent) {
+	// Record in history for context learning
+	r.recordHistory(event)
+
 	r.hooksMu.RLock()
 	hooks := append([]IterationHook{}, r.hooks...)
 	r.hooksMu.RUnlock()
 	for _, hook := range hooks {
 		hook(event)
 	}
+
 	if r.telemetry != nil {
 		data := map[string]any{
-			"iteration":      event.Iteration,
-			"max_iterations": event.MaxIterations,
-			"ready":          event.Ready,
-			"tokens_used":    event.TokensUsed,
-			"summary":        event.Summary,
+			"iteration":       event.Iteration,
+			"max_iterations":  event.MaxIterations,
+			"ready":           event.Ready,
+			"tokens_used":     event.TokensUsed,
+			"tokens_max":      event.MaxTokens,
+			"summary":         event.Summary,
+			"reasoning_trace": event.ReasoningTrace,
 		}
 		if len(event.Scratchpad) > 0 {
 			data["scratchpad"] = formatScratchpadSummaries(event.Scratchpad)
+		}
+		if len(event.Delegations) > 0 {
+			data["delegations"] = event.Delegations
+		}
+		// Add budget status
+		data["budget"] = map[string]any{
+			"tokens_used":      event.BudgetStatus.TokensUsed,
+			"tokens_max":       event.BudgetStatus.TokensMax,
+			"tokens_remaining": event.BudgetStatus.TokensRemaining,
+			"tokens_percent":   event.BudgetStatus.TokensPercent,
+			"wall_time":        event.BudgetStatus.WallTimeElapsed,
+			"warning":          event.BudgetStatus.Warning,
 		}
 		r.telemetry.Publish(telemetry.Event{
 			Type:      telemetry.EventRLMIteration,
 			SessionID: r.sessionID,
 			Data:      data,
 		})
+
+		// Emit budget warning if needed
+		if event.BudgetStatus.Warning != "" {
+			r.telemetry.Publish(telemetry.Event{
+				Type:      telemetry.EventRLMBudgetWarning,
+				SessionID: r.sessionID,
+				Data: map[string]any{
+					"warning":          event.BudgetStatus.Warning,
+					"tokens_percent":   event.BudgetStatus.TokensPercent,
+					"tokens_remaining": event.BudgetStatus.TokensRemaining,
+				},
+			})
+		}
 	}
+}
+
+// recordHistory saves iteration info for context learning with automatic compaction.
+func (r *Runtime) recordHistory(event IterationEvent) {
+	if r == nil {
+		return
+	}
+	entry := IterationHistory{
+		Iteration:   event.Iteration,
+		Delegations: event.Delegations,
+		Summary:     event.Summary,
+		TokensUsed:  event.TokensUsed,
+	}
+	r.historyMu.Lock()
+	r.history = append(r.history, entry)
+	needsCompaction := len(r.history) > r.config.Coordinator.HistoryMaxItems
+	r.historyMu.Unlock()
+
+	// Trigger async compaction if needed
+	if needsCompaction {
+		r.triggerAsyncCompaction()
+	}
+}
+
+// compactHistoryLocked summarizes old iterations to save context space.
+// Must be called with historyMu held.
+func (r *Runtime) compactHistoryLocked() {
+	maxItems := r.config.Coordinator.HistoryMaxItems
+	compactBatch := r.config.Coordinator.HistoryCompactN
+	keepRecent := r.config.Coordinator.HistoryKeepRecent
+
+	// Use defaults if not configured
+	if maxItems <= 0 {
+		maxItems = 8
+	}
+	if compactBatch <= 0 {
+		compactBatch = 3
+	}
+	if keepRecent <= 0 {
+		keepRecent = 3
+	}
+
+	if len(r.history) <= maxItems {
+		return
+	}
+
+	// Don't compact if we don't have enough items to make it worthwhile
+	compactableCount := len(r.history) - keepRecent
+	if compactableCount < compactBatch {
+		return
+	}
+
+	// Take the oldest non-recent items and compact them
+	toCompact := r.history[:compactBatch]
+	remaining := r.history[compactBatch:]
+
+	// Build a compacted summary
+	var totalTokens int
+	var allDelegations []DelegationInfo
+	var summaryParts []string
+	iterations := make([]int, 0, len(toCompact))
+
+	for _, h := range toCompact {
+		iterations = append(iterations, h.Iteration)
+		totalTokens += h.TokensUsed
+		allDelegations = append(allDelegations, h.Delegations...)
+		if h.Summary != "" {
+			// Truncate individual summaries in compacted form
+			summary := h.Summary
+			if len(summary) > 50 {
+				summary = summary[:50] + "..."
+			}
+			summaryParts = append(summaryParts, summary)
+		}
+	}
+
+	// Create compacted entry
+	compacted := IterationHistory{
+		Iteration:  iterations[0], // Use first iteration number
+		Compacted:  true,
+		TokensUsed: totalTokens,
+		Summary:    fmt.Sprintf("[Compacted iterations %d-%d] %s", iterations[0], iterations[len(iterations)-1], strings.Join(summaryParts, "; ")),
+	}
+
+	// Summarize delegations (just counts)
+	successCount := 0
+	failCount := 0
+	for _, d := range allDelegations {
+		if d.Success {
+			successCount++
+		} else {
+			failCount++
+		}
+	}
+	if successCount > 0 || failCount > 0 {
+		compacted.Delegations = []DelegationInfo{{
+			TaskID:  fmt.Sprintf("compacted-%d-%d", iterations[0], iterations[len(iterations)-1]),
+			Summary: fmt.Sprintf("%d delegations (%d succeeded, %d failed)", successCount+failCount, successCount, failCount),
+			Success: failCount == 0,
+		}}
+	}
+
+	// Rebuild history with compacted entry at the start
+	r.history = append([]IterationHistory{compacted}, remaining...)
+}
+
+// calculateBudgetStatus computes current budget status with warnings.
+func (r *Runtime) calculateBudgetStatus(tokensUsed, maxTokens int, start time.Time) BudgetStatus {
+	status := BudgetStatus{
+		TokensUsed: tokensUsed,
+		TokensMax:  maxTokens,
+	}
+
+	if maxTokens > 0 {
+		status.TokensRemaining = maxTokens - tokensUsed
+		if status.TokensRemaining < 0 {
+			status.TokensRemaining = 0
+		}
+		status.TokensPercent = float64(tokensUsed) / float64(maxTokens) * 100
+	}
+
+	maxWallTime := r.config.Coordinator.MaxWallTime
+	if maxWallTime <= 0 {
+		maxWallTime = DefaultConfig().Coordinator.MaxWallTime
+	}
+	if maxWallTime > 0 {
+		elapsed := time.Since(start)
+		status.WallTimeElapsed = elapsed.Round(time.Second).String()
+		status.WallTimeMax = maxWallTime.String()
+		status.WallTimePercent = float64(elapsed) / float64(maxWallTime) * 100
+	}
+
+	// Determine warning level
+	if status.TokensPercent >= 90 || status.WallTimePercent >= 90 {
+		status.Warning = "critical"
+	} else if status.TokensPercent >= 75 || status.WallTimePercent >= 75 {
+		status.Warning = "low"
+	}
+
+	return status
+}
+
+func (r *Runtime) adaptiveConfidenceThreshold(base float64, status BudgetStatus) float64 {
+	threshold := base
+	if threshold <= 0 {
+		threshold = DefaultConfig().Coordinator.ConfidenceThreshold
+	}
+	if status.TokensPercent >= 90 || status.WallTimePercent >= 90 {
+		threshold *= 0.8
+	} else if status.TokensPercent >= 75 || status.WallTimePercent >= 75 {
+		threshold *= 0.9
+	}
+	if threshold < 0 {
+		threshold = 0
+	}
+	if threshold > 1 {
+		threshold = 1
+	}
+	return threshold
 }
 
 type coordinatorToolResult struct {
 	ID     string
 	Name   string
 	Result string
+}
+
+// extractDelegationsFromToolResults parses delegation info from tool results for transparency.
+func (r *Runtime) extractDelegationsFromToolResults(results []coordinatorToolResult) []DelegationInfo {
+	var delegations []DelegationInfo
+
+	for _, result := range results {
+		if result.Name != "delegate" && result.Name != "delegate_batch" {
+			continue
+		}
+
+		// Parse the JSON result to extract delegation info
+		var parsed map[string]any
+		if err := json.Unmarshal([]byte(result.Result), &parsed); err != nil {
+			continue
+		}
+
+		// Handle single delegate result
+		if data, ok := parsed["data"].(map[string]any); ok {
+			deleg := extractDelegationFromData(data)
+			if deleg.TaskID != "" || deleg.Weight != "" {
+				delegations = append(delegations, deleg)
+			}
+		}
+
+		// Handle batch results
+		if data, ok := parsed["data"].(map[string]any); ok {
+			if results, ok := data["results"].([]any); ok {
+				for _, item := range results {
+					if itemMap, ok := item.(map[string]any); ok {
+						deleg := extractDelegationFromData(itemMap)
+						if deleg.TaskID != "" || deleg.Weight != "" {
+							delegations = append(delegations, deleg)
+						}
+					}
+				}
+			}
+		}
+	}
+
+	return delegations
+}
+
+// extractDelegationFromData extracts DelegationInfo from a data map.
+func extractDelegationFromData(data map[string]any) DelegationInfo {
+	info := DelegationInfo{}
+
+	if v, ok := data["task_id"].(string); ok {
+		info.TaskID = v
+	}
+	if v, ok := data["agent_id"].(string); ok && info.TaskID == "" {
+		info.TaskID = v
+	}
+	if v, ok := data["weight_requested"].(string); ok {
+		info.Weight = v
+	}
+	if v, ok := data["weight_used"].(string); ok {
+		info.WeightUsed = v
+	}
+	if v, ok := data["model"].(string); ok {
+		info.Model = v
+	}
+	if v, ok := data["summary"].(string); ok {
+		info.Summary = v
+	}
+	if v, ok := data["escalated"].(bool); ok {
+		info.Escalated = v
+	}
+	if v, ok := data["tool_calls_count"].(float64); ok {
+		info.ToolCallsCount = int(v)
+	}
+	if _, ok := data["error"].(string); ok && data["error"] != "" {
+		info.Success = false
+	} else {
+		info.Success = true
+	}
+
+	return info
 }
 
 func (r *Runtime) formatCoordinatorResult(res *builtin.Result) string {

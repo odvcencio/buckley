@@ -214,7 +214,7 @@ func TestLoadAlignsModelsToOpenAIWhenOpenRouterDisabled(t *testing.T) {
 		t.Fatalf("config.Load returned error: %v", err)
 	}
 
-	expected := "openai/gpt-5.1-codex"
+	expected := "openai/gpt-5.2-codex-xhigh"
 	if cfg.Models.Planning != expected {
 		t.Fatalf("expected planning model to fall back to %s, got %s", expected, cfg.Models.Planning)
 	}

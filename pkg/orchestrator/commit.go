@@ -17,13 +17,30 @@ import (
 type CommitGenerator struct {
 	modelClient ModelClient
 	cfg         *config.Config
+	ctx         context.Context
 }
 
 func NewCommitGenerator(mgr ModelClient, cfg *config.Config) *CommitGenerator {
 	return &CommitGenerator{
 		modelClient: mgr,
 		cfg:         cfg,
+		ctx:         context.Background(),
 	}
+}
+
+func (cg *CommitGenerator) baseContext() context.Context {
+	if cg == nil || cg.ctx == nil {
+		return context.Background()
+	}
+	return cg.ctx
+}
+
+// SetContext updates the base context for commit generation.
+func (cg *CommitGenerator) SetContext(ctx context.Context) {
+	if cg == nil || ctx == nil {
+		return
+	}
+	cg.ctx = ctx
 }
 
 type CommitInfo struct {
@@ -97,7 +114,7 @@ func (cg *CommitGenerator) Generate(task *Task) (*CommitInfo, error) {
 	// Generate commit message
 	prompt := cg.buildCommitPrompt(task, diff, files, stats, detail)
 
-	reqCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	reqCtx, cancel := context.WithTimeout(cg.baseContext(), 30*time.Second)
 	defer cancel()
 
 	req := model.ChatRequest{

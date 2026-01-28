@@ -102,7 +102,7 @@ func (w *WhisperTranscriber) Transcribe(ctx context.Context, audioPath string) (
 	}
 
 	if w.apiKey == "" {
-		return "", fmt.Errorf("OpenAI API key not configured for transcription")
+		return "", fmt.Errorf("openai api key not configured for transcription")
 	}
 
 	// Open the audio file

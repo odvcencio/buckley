@@ -2,13 +2,15 @@ package agent
 
 import (
 	"context"
-	"encoding/json"
+	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/odvcencio/buckley/pkg/bus"
 	"github.com/odvcencio/buckley/pkg/model"
 	"github.com/odvcencio/buckley/pkg/tool"
+	"github.com/odvcencio/buckley/pkg/toolrunner"
 )
 
 // TaskResult represents the outcome of a task execution.
@@ -107,157 +109,73 @@ func (e *TaskExecutor) Execute(ctx context.Context, taskID string, role Role, ta
 	execCtx, cancel := context.WithTimeout(ctx, e.config.TotalTimeout)
 	defer cancel()
 
-	// Build initial messages
-	messages := []model.Message{
-		{Role: "user", Content: task},
+	messages := buildExecutorMessages(task, cfg.SystemPrompt)
+
+	registry := e.tools
+	if registry == nil {
+		registry = tool.NewEmptyRegistry()
 	}
 
-	// Execution loop
-	for i := 0; i < e.config.MaxIterations; i++ {
-		select {
-		case <-execCtx.Done():
-			result.Error = "execution timeout"
-			result.Duration = time.Since(start)
-			return result, execCtx.Err()
-		default:
-		}
-
-		// Call LLM
-		resp, err := agent.Chat(execCtx, messages)
-		if err != nil {
-			result.Error = fmt.Sprintf("chat error: %v", err)
-			result.Duration = time.Since(start)
-			return result, err
-		}
-
-		result.TokensUsed += resp.Usage.TotalTokens
-
-		if len(resp.Choices) == 0 {
-			result.Error = "no response from model"
-			result.Duration = time.Since(start)
-			return result, fmt.Errorf("no response")
-		}
-
-		choice := resp.Choices[0]
-
-		// Check for tool calls
-		if len(choice.Message.ToolCalls) > 0 {
-			// Execute tools
-			toolResults, err := e.executeTools(execCtx, choice.Message.ToolCalls, result)
-			if err != nil {
-				// Tool execution failed, but we can continue
-				messages = append(messages, model.Message{
-					Role:    "assistant",
-					Content: choice.Message.Content,
-				})
-				messages = append(messages, model.Message{
-					Role:    "user",
-					Content: fmt.Sprintf("Tool execution error: %v. Please try a different approach.", err),
-				})
-				continue
-			}
-
-			// Add assistant message with tool calls
-			messages = append(messages, model.Message{
-				Role:      "assistant",
-				Content:   choice.Message.Content,
-				ToolCalls: choice.Message.ToolCalls,
-			})
-
-			// Add tool results
-			for _, tr := range toolResults {
-				messages = append(messages, model.Message{
-					Role:       "tool",
-					Content:    tr.Result,
-					ToolCallID: tr.Name, // Simplified - real impl would use proper ID
-				})
-			}
-
-			// Publish progress
-			agent.PublishTaskEvent(execCtx, "progress", map[string]any{
-				"iteration":  i + 1,
-				"tool_calls": len(choice.Message.ToolCalls),
-			})
-
-			continue
-		}
-
-		// No tool calls - check finish reason
-		if choice.FinishReason == "stop" {
-			// Extract final response
-			content, err := model.ExtractTextContent(choice.Message.Content)
-			if err != nil {
-				content = fmt.Sprintf("%v", choice.Message.Content)
-			}
-
-			result.Success = true
-			result.Output = content
-			result.Duration = time.Since(start)
-
-			// Resolve agent
-			agent.Resolve(execCtx, result)
-
-			return result, nil
-		}
-
-		// Add response and continue
-		messages = append(messages, model.Message{
-			Role:    "assistant",
-			Content: choice.Message.Content,
-		})
+	maxToolsPhase1 := len(cfg.AllowedTools)
+	if maxToolsPhase1 == 0 {
+		maxToolsPhase1 = len(registry.List())
 	}
 
-	result.Error = "max iterations reached"
+	iteration := 0
+	runner, err := toolrunner.New(toolrunner.Config{
+		Models:               &executorModelClient{models: e.models, iteration: &iteration},
+		Registry:             registry,
+		DefaultMaxIterations: e.config.MaxIterations,
+		MaxToolsPhase1:       maxToolsPhase1,
+	})
+	if err != nil {
+		result.Error = err.Error()
+		result.Duration = time.Since(start)
+		return result, err
+	}
+
+	runner.SetStreamHandler(&executorStreamHandler{
+		agent:     agent,
+		ctx:       execCtx,
+		iteration: &iteration,
+	})
+
+	runResult, err := runner.Run(execCtx, toolrunner.Request{
+		Messages:      messages,
+		AllowedTools:  cfg.AllowedTools,
+		MaxIterations: e.config.MaxIterations,
+		Model:         cfg.Model,
+	})
+
 	result.Duration = time.Since(start)
-	return result, fmt.Errorf("max iterations")
-}
-
-func (e *TaskExecutor) executeTools(ctx context.Context, toolCalls []model.ToolCall, result *TaskResult) ([]ToolCall, error) {
-	var results []ToolCall
-
-	for _, tc := range toolCalls {
-		_, cancel := context.WithTimeout(ctx, e.config.ToolTimeout)
-
-		start := time.Now()
-		toolResult := ToolCall{
-			Name:      tc.Function.Name,
-			Arguments: tc.Function.Arguments,
-		}
-
-		// Parse arguments
-		var args map[string]any
-		if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
-			toolResult.Result = fmt.Sprintf("invalid arguments: %v", err)
-			toolResult.Success = false
-		} else {
-			if args != nil && tc.ID != "" {
-				args[tool.ToolCallIDParam] = tc.ID
-			}
-			// Execute tool
-			res, err := e.tools.Execute(tc.Function.Name, args)
-			if err != nil {
-				toolResult.Result = fmt.Sprintf("execution error: %v", err)
-				toolResult.Success = false
-			} else {
-				// Format result
-				if res != nil && res.Data != nil {
-					resultData, _ := json.Marshal(res.Data)
-					toolResult.Result = string(resultData)
-				} else {
-					toolResult.Result = "success"
-				}
-				toolResult.Success = true
-			}
-		}
-
-		toolResult.Duration = time.Since(start)
-		results = append(results, toolResult)
-		result.ToolCalls = append(result.ToolCalls, toolResult)
-
-		cancel()
+	if runResult != nil {
+		result.TokensUsed = runResult.Usage.TotalTokens
+		result.ToolCalls = toTaskToolCalls(runResult.ToolCalls)
 	}
 
-	return results, nil
+	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			result.Error = "execution timeout"
+		} else {
+			result.Error = err.Error()
+		}
+		return result, err
+	}
+
+	if maxIterationsReached(runResult, e.config.MaxIterations) {
+		result.Error = "max iterations reached"
+		return result, fmt.Errorf("max iterations")
+	}
+
+	if runResult != nil {
+		result.Success = true
+		result.Output = runResult.Content
+	}
+
+	// Resolve agent
+	agent.Resolve(execCtx, result)
+
+	return result, nil
 }
 
 // ExecuteSimple is a convenience method for simple task execution.
@@ -265,3 +183,122 @@ func (e *TaskExecutor) ExecuteSimple(ctx context.Context, task string) (*TaskRes
 	taskID := fmt.Sprintf("simple-%d", time.Now().UnixNano())
 	return e.Execute(ctx, taskID, RoleExecutor, task, DefaultAgentConfig())
 }
+
+type executorModelClient struct {
+	models    *model.Manager
+	iteration *int
+}
+
+func (c *executorModelClient) ChatCompletion(ctx context.Context, req model.ChatRequest) (*model.ChatResponse, error) {
+	if req.Temperature == 0 {
+		req.Temperature = 0.3
+	}
+	if c.iteration != nil && (req.ToolChoice == "auto" || len(req.Tools) > 0) {
+		*c.iteration++
+	}
+	return c.models.ChatCompletion(ctx, req)
+}
+
+func (c *executorModelClient) GetExecutionModel() string {
+	if c == nil || c.models == nil {
+		return ""
+	}
+	return c.models.GetExecutionModel()
+}
+
+func (c *executorModelClient) ChatCompletionStream(ctx context.Context, req model.ChatRequest) (<-chan model.StreamChunk, <-chan error) {
+	if c == nil || c.models == nil {
+		errChan := make(chan error, 1)
+		errChan <- fmt.Errorf("models not available")
+		close(errChan)
+		return nil, errChan
+	}
+	return c.models.ChatCompletionStream(ctx, req)
+}
+
+type executorStreamHandler struct {
+	agent     *Agent
+	ctx       context.Context
+	iteration *int
+	lastIter  int
+	toolCalls int
+}
+
+func (h *executorStreamHandler) OnText(text string) {}
+
+func (h *executorStreamHandler) OnReasoning(reasoning string) {}
+
+func (h *executorStreamHandler) OnReasoningEnd() {}
+
+func (h *executorStreamHandler) OnToolStart(name string, arguments string) {}
+
+func (h *executorStreamHandler) OnToolEnd(name string, result string, err error) {
+	if h == nil || h.agent == nil || h.ctx == nil {
+		return
+	}
+
+	currentIter := 0
+	if h.iteration != nil {
+		currentIter = *h.iteration
+	}
+	if currentIter != h.lastIter {
+		h.lastIter = currentIter
+		h.toolCalls = 0
+	}
+	h.toolCalls++
+
+	_ = h.agent.PublishTaskEvent(h.ctx, "progress", map[string]any{
+		"iteration":  currentIter,
+		"tool_calls": h.toolCalls,
+	})
+}
+
+func (h *executorStreamHandler) OnError(err error) {
+	if h == nil || h.agent == nil || h.ctx == nil || err == nil {
+		return
+	}
+	_ = h.agent.PublishTaskEvent(h.ctx, "error", map[string]any{
+		"error": err.Error(),
+	})
+}
+
+func (h *executorStreamHandler) OnComplete(result *toolrunner.Result) {}
+
+func buildExecutorMessages(task string, systemPrompt string) []model.Message {
+	messages := []model.Message{
+		{Role: "user", Content: task},
+	}
+	if strings.TrimSpace(systemPrompt) == "" {
+		return messages
+	}
+	return append([]model.Message{{Role: "system", Content: systemPrompt}}, messages...)
+}
+
+func maxIterationsReached(result *toolrunner.Result, maxIterations int) bool {
+	if result == nil || maxIterations <= 0 {
+		return false
+	}
+	if result.Iterations < maxIterations {
+		return false
+	}
+	return strings.TrimSpace(result.Content) == toolrunnerMaxIterationsMessage
+}
+
+func toTaskToolCalls(records []toolrunner.ToolCallRecord) []ToolCall {
+	if len(records) == 0 {
+		return nil
+	}
+	calls := make([]ToolCall, 0, len(records))
+	for _, record := range records {
+		calls = append(calls, ToolCall{
+			Name:      record.Name,
+			Arguments: record.Arguments,
+			Result:    record.Result,
+			Duration:  time.Duration(record.Duration) * time.Millisecond,
+			Success:   record.Success,
+		})
+	}
+	return calls
+}
+
+const toolrunnerMaxIterationsMessage = "Maximum iterations reached. Please try a simpler request."

@@ -13,13 +13,26 @@ type Manager struct {
 	mu      sync.RWMutex
 	clients map[string]*Client
 	configs map[string]Config
+
+	healthMu           sync.Mutex
+	healthCache        map[string]healthStatus
+	healthCheckTTL     time.Duration
+	healthCheckTimeout time.Duration
+}
+
+type healthStatus struct {
+	checkedAt time.Time
+	err       error
 }
 
 // NewManager creates a new MCP manager
 func NewManager() *Manager {
 	return &Manager{
-		clients: make(map[string]*Client),
-		configs: make(map[string]Config),
+		clients:            make(map[string]*Client),
+		configs:            make(map[string]Config),
+		healthCache:        make(map[string]healthStatus),
+		healthCheckTTL:     30 * time.Second,
+		healthCheckTimeout: 2 * time.Second,
 	}
 }
 
@@ -42,24 +55,39 @@ func (m *Manager) Connect(ctx context.Context) error {
 			continue // Already connected
 		}
 
+		serverCtx := ctx
+		var cancel context.CancelFunc
+		if cfg.Timeout > 0 {
+			serverCtx, cancel = context.WithTimeout(ctx, cfg.Timeout)
+		}
+
 		client, err := NewClient(cfg)
 		if err != nil {
 			errs = append(errs, fmt.Sprintf("%s: %v", name, err))
+			if cancel != nil {
+				cancel()
+			}
 			continue
 		}
 
-		if err := client.Initialize(ctx); err != nil {
+		if err := client.Initialize(serverCtx); err != nil {
 			client.Close()
 			errs = append(errs, fmt.Sprintf("%s: %v", name, err))
+			if cancel != nil {
+				cancel()
+			}
 			continue
 		}
 
 		// Fetch tools
-		if _, err := client.ListTools(ctx); err != nil {
+		if _, err := client.ListTools(serverCtx); err != nil {
 			// Non-fatal, some servers may not have tools
 		}
 
 		m.clients[name] = client
+		if cancel != nil {
+			cancel()
+		}
 	}
 
 	if len(errs) > 0 {
@@ -83,21 +111,36 @@ func (m *Manager) ConnectServer(ctx context.Context, name string) error {
 		return nil // Already connected
 	}
 
+	serverCtx := ctx
+	var cancel context.CancelFunc
+	if cfg.Timeout > 0 {
+		serverCtx, cancel = context.WithTimeout(ctx, cfg.Timeout)
+	}
+
 	client, err := NewClient(cfg)
 	if err != nil {
+		if cancel != nil {
+			cancel()
+		}
 		return fmt.Errorf("failed to create client: %w", err)
 	}
 
-	if err := client.Initialize(ctx); err != nil {
+	if err := client.Initialize(serverCtx); err != nil {
 		client.Close()
+		if cancel != nil {
+			cancel()
+		}
 		return fmt.Errorf("failed to initialize: %w", err)
 	}
 
-	if _, err := client.ListTools(ctx); err != nil {
+	if _, err := client.ListTools(serverCtx); err != nil {
 		// Non-fatal
 	}
 
 	m.clients[name] = client
+	if cancel != nil {
+		cancel()
+	}
 	return nil
 }
 
@@ -112,6 +155,7 @@ func (m *Manager) DisconnectServer(name string) error {
 	}
 
 	delete(m.clients, name)
+	m.clearHealth(name)
 	return client.Close()
 }
 
@@ -173,11 +217,15 @@ type ToolWithServer struct {
 
 // CallTool calls a tool on the appropriate server
 func (m *Manager) CallTool(ctx context.Context, serverName, toolName string, args map[string]any) (*ToolCallResult, error) {
+	if err := m.ensureHealthy(ctx, serverName); err != nil {
+		return nil, err
+	}
+
 	m.mu.RLock()
 	client, ok := m.clients[serverName]
 	m.mu.RUnlock()
 
-	if !ok {
+	if !ok || client == nil {
 		return nil, fmt.Errorf("server not connected: %s", serverName)
 	}
 
@@ -277,11 +325,91 @@ func (m *Manager) Close() error {
 		}
 	}
 	m.clients = make(map[string]*Client)
+	m.clearAllHealth()
 
 	if len(errs) > 0 {
 		return fmt.Errorf("errors closing servers: %s", strings.Join(errs, "; "))
 	}
 	return nil
+}
+
+func (m *Manager) ensureHealthy(ctx context.Context, serverName string) error {
+	if serverName == "" {
+		return fmt.Errorf("server name required")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if cached, ok := m.cachedHealth(serverName); ok {
+		return cached
+	}
+
+	if _, ok := m.GetClient(serverName); !ok {
+		err := fmt.Errorf("server not connected: %s", serverName)
+		m.recordHealth(serverName, err)
+		return err
+	}
+
+	err := m.checkServerHealth(ctx, serverName)
+
+	m.recordHealth(serverName, err)
+	return err
+}
+
+func (m *Manager) checkServerHealth(ctx context.Context, serverName string) error {
+	client, ok := m.GetClient(serverName)
+	if !ok || client == nil {
+		return fmt.Errorf("server not connected: %s", serverName)
+	}
+	timeout := m.healthCheckTimeout
+	if timeout <= 0 {
+		timeout = 2 * time.Second
+	}
+	checkCtx, cancel := context.WithTimeout(ctx, timeout)
+	_, err := client.ListTools(checkCtx)
+	cancel()
+	if err != nil {
+		return fmt.Errorf("health check failed: %w", err)
+	}
+	return nil
+}
+
+func (m *Manager) cachedHealth(serverName string) (error, bool) {
+	m.healthMu.Lock()
+	defer m.healthMu.Unlock()
+	status, ok := m.healthCache[serverName]
+	if !ok {
+		return nil, false
+	}
+	ttl := m.healthCheckTTL
+	if ttl <= 0 {
+		return nil, false
+	}
+	if time.Since(status.checkedAt) <= ttl {
+		return status.err, true
+	}
+	return nil, false
+}
+
+func (m *Manager) recordHealth(serverName string, err error) {
+	m.healthMu.Lock()
+	defer m.healthMu.Unlock()
+	m.healthCache[serverName] = healthStatus{
+		checkedAt: time.Now(),
+		err:       err,
+	}
+}
+
+func (m *Manager) clearHealth(serverName string) {
+	m.healthMu.Lock()
+	defer m.healthMu.Unlock()
+	delete(m.healthCache, serverName)
+}
+
+func (m *Manager) clearAllHealth() {
+	m.healthMu.Lock()
+	defer m.healthMu.Unlock()
+	m.healthCache = make(map[string]healthStatus)
 }
 
 // HealthCheck checks the health of all connected servers

@@ -103,14 +103,43 @@ func (s *Service) Embed(ctx context.Context, text string) ([]float64, error) {
 
 // EmbedBatch generates embeddings for multiple texts
 func (s *Service) EmbedBatch(ctx context.Context, texts []string) ([][]float64, error) {
+	if len(texts) == 0 {
+		return nil, nil
+	}
+
 	embeddings := make([][]float64, len(texts))
+	missingTexts := make([]string, 0, len(texts))
+	missingIndexes := make([]int, 0, len(texts))
 
 	for i, text := range texts {
-		embedding, err := s.Embed(ctx, text)
-		if err != nil {
-			return nil, fmt.Errorf("failed to embed text %d: %w", i, err)
+		cacheKey := s.computeCacheKey(text)
+		if cached, ok := s.cache.Get(cacheKey); ok {
+			embeddings[i] = cached
+			continue
 		}
-		embeddings[i] = embedding
+		missingTexts = append(missingTexts, text)
+		missingIndexes = append(missingIndexes, i)
+	}
+
+	if len(missingTexts) == 0 {
+		return embeddings, nil
+	}
+
+	batchEmbeddings, err := s.callEmbeddingBatchAPI(ctx, missingTexts)
+	if err != nil {
+		return nil, err
+	}
+	if len(batchEmbeddings) != len(missingTexts) {
+		return nil, fmt.Errorf("embedding response size mismatch: got %d, want %d", len(batchEmbeddings), len(missingTexts))
+	}
+
+	for i, idx := range missingIndexes {
+		embedding := batchEmbeddings[i]
+		if len(embedding) == 0 {
+			return nil, fmt.Errorf("embedding response missing vector at index %d", i)
+		}
+		embeddings[idx] = embedding
+		_ = s.cache.Set(s.computeCacheKey(missingTexts[i]), embedding)
 	}
 
 	return embeddings, nil
@@ -138,13 +167,13 @@ func (s *Service) callEmbeddingAPI(ctx context.Context, text string) ([]float64,
 
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("API request failed: %w", err)
+		return nil, fmt.Errorf("api request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("API returned status %d: %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf("api returned status %d: %s", resp.StatusCode, string(body))
 	}
 
 	var result struct {
@@ -162,6 +191,86 @@ func (s *Service) callEmbeddingAPI(ctx context.Context, text string) ([]float64,
 	}
 
 	return result.Data[0].Embedding, nil
+}
+
+// callEmbeddingBatchAPI calls the embeddings API with multiple inputs.
+func (s *Service) callEmbeddingBatchAPI(ctx context.Context, texts []string) ([][]float64, error) {
+	reqBody := map[string]any{
+		"model": s.model,
+		"input": texts,
+	}
+
+	jsonData, err := json.Marshal(reqBody)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", s.apiURL, bytes.NewBuffer(jsonData))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+s.apiKey)
+
+	resp, err := s.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("api request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("api returned status %d: %s", resp.StatusCode, string(body))
+	}
+
+	var result struct {
+		Data []struct {
+			Index     int       `json:"index"`
+			Embedding []float64 `json:"embedding"`
+		} `json:"data"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	if len(result.Data) == 0 {
+		return nil, fmt.Errorf("no embeddings returned")
+	}
+
+	embeddings := make([][]float64, len(texts))
+	useIndexes := false
+	for _, item := range result.Data {
+		if item.Index != 0 {
+			useIndexes = true
+			break
+		}
+	}
+
+	if useIndexes {
+		for _, item := range result.Data {
+			if item.Index < 0 || item.Index >= len(texts) {
+				return nil, fmt.Errorf("embedding index out of range: %d", item.Index)
+			}
+			embeddings[item.Index] = item.Embedding
+		}
+	} else {
+		if len(result.Data) != len(texts) {
+			return nil, fmt.Errorf("embedding response size mismatch: got %d, want %d", len(result.Data), len(texts))
+		}
+		for i, item := range result.Data {
+			embeddings[i] = item.Embedding
+		}
+	}
+
+	for i, embedding := range embeddings {
+		if len(embedding) == 0 {
+			return nil, fmt.Errorf("embedding missing at index %d", i)
+		}
+	}
+
+	return embeddings, nil
 }
 
 // computeCacheKey computes a cache key for the text

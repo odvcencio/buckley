@@ -1,0 +1,275 @@
+syntax = "proto3";
+
+package buckley.browserd.v1;
+
+option go_package = "github.com/odvcencio/buckley/pkg/browser/adapters/servo/proto;browserdpb";
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/struct.proto";
+
+message Envelope {
+  oneof message {
+    Request request = 1;
+    Response response = 2;
+    StreamEvent event = 3;
+  }
+}
+
+message Error {
+  string code = 1;
+  string message = 2;
+}
+
+message Request {
+  string request_id = 1;
+  string session_id = 2;
+  oneof payload {
+    CreateSessionRequest create_session = 3;
+    NavigateRequest navigate = 4;
+    ObserveRequest observe = 5;
+    ActRequest act = 6;
+    CloseSessionRequest close_session = 7;
+    StreamSubscribeRequest stream_subscribe = 8;
+  }
+}
+
+message Response {
+  string request_id = 1;
+  string session_id = 2;
+  Error error = 3;
+  oneof payload {
+    CreateSessionResponse create_session = 4;
+    NavigateResponse navigate = 5;
+    ObserveResponse observe = 6;
+    ActResponse act = 7;
+    CloseSessionResponse close_session = 8;
+    StreamSubscribeResponse stream_subscribe = 9;
+  }
+}
+
+message CreateSessionRequest {
+  SessionConfig config = 1;
+}
+
+message CreateSessionResponse {
+  SessionInfo session = 1;
+  Observation observation = 2;
+}
+
+message NavigateRequest {
+  string url = 1;
+}
+
+message NavigateResponse {
+  Observation observation = 1;
+}
+
+message ObserveRequest {
+  ObserveOptions options = 1;
+}
+
+message ObserveResponse {
+  Observation observation = 1;
+}
+
+message ActRequest {
+  Action action = 1;
+}
+
+message ActResponse {
+  ActionResult result = 1;
+}
+
+message CloseSessionRequest {}
+
+message CloseSessionResponse {
+  bool closed = 1;
+}
+
+message StreamSubscribeRequest {
+  StreamOptions options = 1;
+}
+
+message StreamSubscribeResponse {
+  bool subscribed = 1;
+}
+
+message SessionInfo {
+  string session_id = 1;
+  uint64 state_version = 2;
+  string url = 3;
+}
+
+message SessionConfig {
+  string session_id = 1;
+  string initial_url = 2;
+  Viewport viewport = 3;
+  string user_agent = 4;
+  string locale = 5;
+  string timezone = 6;
+  uint32 frame_rate = 7;
+  repeated string network_allowlist = 8;
+  ClipboardPolicy clipboard = 9;
+}
+
+message Viewport {
+  uint32 width = 1;
+  uint32 height = 2;
+  double device_scale_factor = 3;
+}
+
+message ClipboardPolicy {
+  ClipboardMode mode = 1;
+  bool allow_read = 2;
+  bool allow_write = 3;
+  uint32 max_bytes = 4;
+  repeated string read_allowlist = 5;
+}
+
+enum ClipboardMode {
+  CLIPBOARD_MODE_UNSPECIFIED = 0;
+  CLIPBOARD_MODE_VIRTUAL = 1;
+  CLIPBOARD_MODE_HOST = 2;
+}
+
+message ObserveOptions {
+  bool include_frame = 1;
+  bool include_dom_snapshot = 2;
+  bool include_accessibility = 3;
+  bool include_hit_test = 4;
+}
+
+message StreamOptions {
+  bool include_frames = 1;
+  bool include_dom_diffs = 2;
+  bool include_accessibility_diffs = 3;
+  bool include_hit_test = 4;
+  uint32 target_fps = 5;
+}
+
+message Observation {
+  uint64 state_version = 1;
+  string url = 2;
+  string title = 3;
+  Frame frame = 4;
+  bytes dom_snapshot = 5;
+  bytes accessibility_tree = 6;
+  HitTestMap hit_test = 7;
+  google.protobuf.Timestamp timestamp = 8;
+}
+
+message Frame {
+  uint64 state_version = 1;
+  uint32 width = 2;
+  uint32 height = 3;
+  FrameFormat format = 4;
+  bytes data = 5;
+  google.protobuf.Timestamp timestamp = 6;
+}
+
+enum FrameFormat {
+  FRAME_FORMAT_UNSPECIFIED = 0;
+  FRAME_FORMAT_PNG = 1;
+  FRAME_FORMAT_JPEG = 2;
+  FRAME_FORMAT_WEBP = 3;
+}
+
+message HitTestMap {
+  uint32 width = 1;
+  uint32 height = 2;
+  repeated HitRegion regions = 3;
+}
+
+message HitRegion {
+  uint64 node_id = 1;
+  Rect bounds = 2;
+}
+
+message Rect {
+  int32 x = 1;
+  int32 y = 2;
+  int32 width = 3;
+  int32 height = 4;
+}
+
+message Point {
+  int32 x = 1;
+  int32 y = 2;
+}
+
+message Action {
+  ActionType type = 1;
+  uint64 expected_state_version = 2;
+  ActionTarget target = 3;
+  string text = 4;
+  string key = 5;
+  ScrollDelta scroll = 6;
+  repeated KeyModifier modifiers = 7;
+}
+
+message ActionTarget {
+  uint64 node_id = 1;
+  Point point = 2;
+}
+
+message ScrollDelta {
+  int32 x = 1;
+  int32 y = 2;
+  ScrollUnit unit = 3;
+}
+
+enum ScrollUnit {
+  SCROLL_UNIT_UNSPECIFIED = 0;
+  SCROLL_UNIT_PIXELS = 1;
+  SCROLL_UNIT_LINES = 2;
+}
+
+enum ActionType {
+  ACTION_TYPE_UNSPECIFIED = 0;
+  ACTION_TYPE_CLICK = 1;
+  ACTION_TYPE_TYPE = 2;
+  ACTION_TYPE_SCROLL = 3;
+  ACTION_TYPE_HOVER = 4;
+  ACTION_TYPE_KEY = 5;
+  ACTION_TYPE_FOCUS = 6;
+  ACTION_TYPE_CLIPBOARD_READ = 7;
+  ACTION_TYPE_CLIPBOARD_WRITE = 8;
+}
+
+enum KeyModifier {
+  KEY_MODIFIER_UNSPECIFIED = 0;
+  KEY_MODIFIER_SHIFT = 1;
+  KEY_MODIFIER_ALT = 2;
+  KEY_MODIFIER_CTRL = 3;
+  KEY_MODIFIER_META = 4;
+}
+
+message ActionResult {
+  uint64 state_version = 1;
+  Observation observation = 2;
+  repeated Effect effects = 3;
+}
+
+message Effect {
+  string kind = 1;
+  string summary = 2;
+  google.protobuf.Struct metadata = 3;
+}
+
+message StreamEvent {
+  StreamEventType type = 1;
+  uint64 state_version = 2;
+  Frame frame = 3;
+  bytes dom_diff = 4;
+  bytes accessibility_diff = 5;
+  HitTestMap hit_test = 6;
+  google.protobuf.Timestamp timestamp = 7;
+}
+
+enum StreamEventType {
+  STREAM_EVENT_TYPE_UNSPECIFIED = 0;
+  STREAM_EVENT_TYPE_FRAME = 1;
+  STREAM_EVENT_TYPE_DOM_DIFF = 2;
+  STREAM_EVENT_TYPE_ACCESSIBILITY_DIFF = 3;
+  STREAM_EVENT_TYPE_HIT_TEST = 4;
+}

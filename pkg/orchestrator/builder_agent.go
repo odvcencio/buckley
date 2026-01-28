@@ -30,6 +30,7 @@ type BuilderAgent struct {
 	workflow     *WorkflowManager
 	logger       *builderLogger
 	resultCodec  *toon.Codec
+	ctx          context.Context
 }
 
 // BuilderResult captures the outcome of a builder run.
@@ -85,7 +86,23 @@ func NewBuilderAgent(plan *Plan, cfg *config.Config, client ModelClient, registr
 		workflow:     workflow,
 		logger:       newBuilderLogger(plan),
 		resultCodec:  toon.New(cfg.Encoding.UseToon),
+		ctx:          context.Background(),
 	}
+}
+
+func (a *BuilderAgent) baseContext() context.Context {
+	if a == nil || a.ctx == nil {
+		return context.Background()
+	}
+	return a.ctx
+}
+
+// SetContext updates the base context for builder operations.
+func (a *BuilderAgent) SetContext(ctx context.Context) {
+	if a == nil || ctx == nil {
+		return
+	}
+	a.ctx = ctx
 }
 
 // Build generates and applies an implementation for the provided task.
@@ -303,7 +320,7 @@ func (a *BuilderAgent) generateImplementation(task *Task) (string, error) {
 }
 
 func (a *BuilderAgent) generateWithTools(req model.ChatRequest, task *Task) (string, error) {
-	ctx := context.Background()
+	ctx := a.baseContext()
 	maxIterations := 10 // Prevent infinite loops
 	messages := req.Messages
 	skillState := (*skill.RuntimeState)(nil)

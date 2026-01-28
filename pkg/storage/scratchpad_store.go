@@ -153,6 +153,59 @@ func (s *Store) ListScratchpadEntries(ctx context.Context, limit int) ([]Scratch
 	return entries, rows.Err()
 }
 
+// ListScratchpadEntriesByType returns scratchpad entries filtered by type, ordered by creation time (descending).
+func (s *Store) ListScratchpadEntriesByType(ctx context.Context, entryType string, limit int) ([]ScratchpadEntry, error) {
+	if s == nil || s.db == nil {
+		return nil, ErrStoreClosed
+	}
+	if entryType == "" {
+		return s.ListScratchpadEntries(ctx, limit)
+	}
+
+	query := `
+		SELECT key, entry_type, raw, summary, metadata, created_by, created_at, updated_at
+		FROM rlm_scratchpad_entries
+		WHERE entry_type = ?
+		ORDER BY created_at DESC
+	`
+	args := []any{entryType}
+	if limit > 0 {
+		query += " LIMIT ?"
+		args = append(args, limit)
+	}
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	entries := []ScratchpadEntry{}
+	for rows.Next() {
+		var entry ScratchpadEntry
+		var summary sql.NullString
+		var metadata sql.NullString
+		var createdBy sql.NullString
+		if err := rows.Scan(
+			&entry.Key,
+			&entry.EntryType,
+			&entry.Raw,
+			&summary,
+			&metadata,
+			&createdBy,
+			&entry.CreatedAt,
+			&entry.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		entry.Summary = summary.String
+		entry.Metadata = metadata.String
+		entry.CreatedBy = createdBy.String
+		entries = append(entries, entry)
+	}
+	return entries, rows.Err()
+}
+
 func ensureScratchpadSchema(db *sql.DB) error {
 	queries := []string{
 		`CREATE TABLE IF NOT EXISTS rlm_scratchpad_entries (

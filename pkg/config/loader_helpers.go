@@ -3,7 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
-	"strings"
+	"time"
 
 	"github.com/odvcencio/buckley/pkg/personality"
 	"gopkg.in/yaml.v3"
@@ -369,17 +369,14 @@ func mergeConfigs(base, override *Config, raw map[string]any) {
 	if boolFieldSet(raw, "rlm", "coordinator", "stream_partials") {
 		base.RLM.Coordinator.StreamPartials = override.RLM.Coordinator.StreamPartials
 	}
-	if boolFieldSet(raw, "rlm", "tiers") {
-		if override.RLM.Tiers == nil {
-			base.RLM.Tiers = nil
-		} else {
-			if base.RLM.Tiers == nil {
-				base.RLM.Tiers = make(map[string]RLMTierConfig, len(override.RLM.Tiers))
-			}
-			for name, tier := range override.RLM.Tiers {
-				base.RLM.Tiers[name] = mergeRLMTierConfig(base.RLM.Tiers[name], tier)
-			}
-		}
+	if boolFieldSet(raw, "rlm", "sub_agent", "model") {
+		base.RLM.SubAgent.Model = override.RLM.SubAgent.Model
+	}
+	if boolFieldSet(raw, "rlm", "sub_agent", "max_concurrent") {
+		base.RLM.SubAgent.MaxConcurrent = override.RLM.SubAgent.MaxConcurrent
+	}
+	if boolFieldSet(raw, "rlm", "sub_agent", "timeout") {
+		base.RLM.SubAgent.Timeout = override.RLM.SubAgent.Timeout
 	}
 	if boolFieldSet(raw, "rlm", "scratchpad", "max_entries_memory") {
 		base.RLM.Scratchpad.MaxEntriesMemory = override.RLM.Scratchpad.MaxEntriesMemory
@@ -420,6 +417,69 @@ func mergeConfigs(base, override *Config, raw map[string]any) {
 	}
 	if boolFieldSet(raw, "approval", "auto_approve_patterns") {
 		base.Approval.AutoApprovePatterns = append([]string{}, override.Approval.AutoApprovePatterns...)
+	}
+
+	if boolFieldSet(raw, "sandbox", "mode") {
+		base.Sandbox.Mode = override.Sandbox.Mode
+	}
+	if boolFieldSet(raw, "sandbox", "allow_unsafe") {
+		base.Sandbox.AllowUnsafe = override.Sandbox.AllowUnsafe
+	}
+	if boolFieldSet(raw, "sandbox", "workspace_path") {
+		base.Sandbox.WorkspacePath = override.Sandbox.WorkspacePath
+	}
+	if boolFieldSet(raw, "sandbox", "allowed_paths") {
+		base.Sandbox.AllowedPaths = append([]string{}, override.Sandbox.AllowedPaths...)
+	}
+	if boolFieldSet(raw, "sandbox", "denied_paths") {
+		base.Sandbox.DeniedPaths = append([]string{}, override.Sandbox.DeniedPaths...)
+	}
+	if boolFieldSet(raw, "sandbox", "allowed_commands") {
+		base.Sandbox.AllowedCommands = append([]string{}, override.Sandbox.AllowedCommands...)
+	}
+	if boolFieldSet(raw, "sandbox", "denied_commands") {
+		base.Sandbox.DeniedCommands = append([]string{}, override.Sandbox.DeniedCommands...)
+	}
+	if boolFieldSet(raw, "sandbox", "allow_network") {
+		base.Sandbox.AllowNetwork = override.Sandbox.AllowNetwork
+	}
+	if boolFieldSet(raw, "sandbox", "timeout") {
+		base.Sandbox.Timeout = override.Sandbox.Timeout
+	}
+	if boolFieldSet(raw, "sandbox", "max_output_bytes") {
+		base.Sandbox.MaxOutputBytes = override.Sandbox.MaxOutputBytes
+	}
+
+	if boolFieldSet(raw, "tool_middleware", "default_timeout") {
+		base.ToolMiddleware.DefaultTimeout = override.ToolMiddleware.DefaultTimeout
+	}
+	if boolFieldSet(raw, "tool_middleware", "per_tool_timeouts") {
+		if override.ToolMiddleware.PerToolTimeouts == nil {
+			base.ToolMiddleware.PerToolTimeouts = nil
+		} else {
+			base.ToolMiddleware.PerToolTimeouts = make(map[string]time.Duration, len(override.ToolMiddleware.PerToolTimeouts))
+			for k, v := range override.ToolMiddleware.PerToolTimeouts {
+				base.ToolMiddleware.PerToolTimeouts[k] = v
+			}
+		}
+	}
+	if boolFieldSet(raw, "tool_middleware", "max_result_bytes") {
+		base.ToolMiddleware.MaxResultBytes = override.ToolMiddleware.MaxResultBytes
+	}
+	if boolFieldSet(raw, "tool_middleware", "retry", "max_attempts") {
+		base.ToolMiddleware.Retry.MaxAttempts = override.ToolMiddleware.Retry.MaxAttempts
+	}
+	if boolFieldSet(raw, "tool_middleware", "retry", "initial_delay") {
+		base.ToolMiddleware.Retry.InitialDelay = override.ToolMiddleware.Retry.InitialDelay
+	}
+	if boolFieldSet(raw, "tool_middleware", "retry", "max_delay") {
+		base.ToolMiddleware.Retry.MaxDelay = override.ToolMiddleware.Retry.MaxDelay
+	}
+	if boolFieldSet(raw, "tool_middleware", "retry", "multiplier") {
+		base.ToolMiddleware.Retry.Multiplier = override.ToolMiddleware.Retry.Multiplier
+	}
+	if boolFieldSet(raw, "tool_middleware", "retry", "jitter") {
+		base.ToolMiddleware.Retry.Jitter = override.ToolMiddleware.Retry.Jitter
 	}
 
 	if boolFieldSet(raw, "batch", "enabled") {
@@ -732,6 +792,12 @@ func mergeConfigs(base, override *Config, raw map[string]any) {
 	if override.Compaction.ContextThreshold != 0 {
 		base.Compaction.ContextThreshold = override.Compaction.ContextThreshold
 	}
+	if override.Compaction.RLMAutoTrigger != 0 {
+		base.Compaction.RLMAutoTrigger = override.Compaction.RLMAutoTrigger
+	}
+	if override.Compaction.CompactionRatio != 0 {
+		base.Compaction.CompactionRatio = override.Compaction.CompactionRatio
+	}
 	if override.Compaction.TaskInterval != 0 {
 		base.Compaction.TaskInterval = override.Compaction.TaskInterval
 	}
@@ -772,6 +838,30 @@ func mergeConfigs(base, override *Config, raw map[string]any) {
 	if boolFieldSet(raw, "ui", "reduce_animation") {
 		base.UI.ReduceAnimation = override.UI.ReduceAnimation
 	}
+	if override.UI.MessageMetadata != "" {
+		base.UI.MessageMetadata = override.UI.MessageMetadata
+	}
+	if boolFieldSet(raw, "ui", "audio", "enabled") {
+		base.UI.Audio.Enabled = override.UI.Audio.Enabled
+	}
+	if boolFieldSet(raw, "ui", "audio", "assets_path") {
+		base.UI.Audio.AssetsPath = override.UI.Audio.AssetsPath
+	}
+	if boolFieldSet(raw, "ui", "audio", "master_volume") {
+		base.UI.Audio.MasterVolume = override.UI.Audio.MasterVolume
+	}
+	if boolFieldSet(raw, "ui", "audio", "sfx_volume") {
+		base.UI.Audio.SFXVolume = override.UI.Audio.SFXVolume
+	}
+	if boolFieldSet(raw, "ui", "audio", "music_volume") {
+		base.UI.Audio.MusicVolume = override.UI.Audio.MusicVolume
+	}
+	if boolFieldSet(raw, "ui", "audio", "muted") {
+		base.UI.Audio.Muted = override.UI.Audio.Muted
+	}
+	if override.WebUI.BaseURL != "" {
+		base.WebUI.BaseURL = override.WebUI.BaseURL
+	}
 
 	if boolFieldSet(raw, "commenting", "require_function_docs") {
 		base.Commenting.RequireFunctionDocs = override.Commenting.RequireFunctionDocs
@@ -805,29 +895,4 @@ func boolFieldSet(raw map[string]any, path ...string) bool {
 		current = val
 	}
 	return true
-}
-
-func mergeRLMTierConfig(base, override RLMTierConfig) RLMTierConfig {
-	if strings.TrimSpace(override.Model) != "" {
-		base.Model = override.Model
-	}
-	if strings.TrimSpace(override.Provider) != "" {
-		base.Provider = override.Provider
-	}
-	if override.Models != nil {
-		base.Models = append([]string{}, override.Models...)
-	}
-	if override.MaxCostPerMillion != 0 {
-		base.MaxCostPerMillion = override.MaxCostPerMillion
-	}
-	if override.MinContextWindow != 0 {
-		base.MinContextWindow = override.MinContextWindow
-	}
-	if override.Prefer != nil {
-		base.Prefer = append([]string{}, override.Prefer...)
-	}
-	if override.Requires != nil {
-		base.Requires = append([]string{}, override.Requires...)
-	}
-	return base
 }

@@ -203,6 +203,9 @@ func (p *AnthropicProvider) toAnthropicRequest(req ChatRequest, stream bool) (*a
 		anthReq.MaxTokens = 4096
 	}
 
+	cache := req.PromptCache
+	cacheEnabled := cache != nil && cache.Enabled
+
 	var systemParts []string
 	for _, msg := range req.Messages {
 		text := messageContentToText(msg.Content)
@@ -225,16 +228,47 @@ func (p *AnthropicProvider) toAnthropicRequest(req ChatRequest, stream bool) (*a
 	}
 
 	if len(systemParts) > 0 {
-		anthReq.System = strings.Join(systemParts, "\n\n")
+		if cacheEnabled && cache.SystemMessages > 0 {
+			systemBlocks := make([]anthropicContent, len(systemParts))
+			for i, part := range systemParts {
+				block := anthropicContent{
+					Type: "text",
+					Text: part,
+				}
+				if i < cache.SystemMessages {
+					block.CacheControl = promptCacheControl()
+				}
+				systemBlocks[i] = block
+			}
+			anthReq.System = systemBlocks
+		} else {
+			anthReq.System = strings.Join(systemParts, "\n\n")
+		}
+	}
+
+	if cacheEnabled && cache.TailMessages > 0 && len(anthReq.Messages) > 0 {
+		start := len(anthReq.Messages) - cache.TailMessages
+		if start < 0 {
+			start = 0
+		}
+		for i := start; i < len(anthReq.Messages); i++ {
+			for j := range anthReq.Messages[i].Content {
+				anthReq.Messages[i].Content[j].CacheControl = promptCacheControl()
+			}
+		}
 	}
 
 	return anthReq, nil
 }
 
+func promptCacheControl() *anthropicCacheControl {
+	return &anthropicCacheControl{Type: "ephemeral"}
+}
+
 // anthropicRequest maps to Anthropics messages payload.
 type anthropicRequest struct {
 	Model       string             `json:"model"`
-	System      string             `json:"system,omitempty"`
+	System      any                `json:"system,omitempty"`
 	Messages    []anthropicMessage `json:"messages"`
 	MaxTokens   int                `json:"max_tokens"`
 	Temperature float64            `json:"temperature,omitempty"`
@@ -250,8 +284,13 @@ type anthropicMessage struct {
 }
 
 type anthropicContent struct {
+	Type         string                 `json:"type"`
+	Text         string                 `json:"text"`
+	CacheControl *anthropicCacheControl `json:"cache_control,omitempty"`
+}
+
+type anthropicCacheControl struct {
 	Type string `json:"type"`
-	Text string `json:"text"`
 }
 
 type anthropicResponse struct {

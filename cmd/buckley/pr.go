@@ -6,10 +6,11 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/odvcencio/buckley/pkg/config"
+	"github.com/odvcencio/buckley/pkg/logging"
 	"github.com/odvcencio/buckley/pkg/oneshot"
 	prgen "github.com/odvcencio/buckley/pkg/oneshot/pr"
 	oneshotrlm "github.com/odvcencio/buckley/pkg/oneshot/rlm"
@@ -24,10 +25,11 @@ func runPRCommand(args []string) error {
 	yes := fs.Bool("yes", false, "skip confirmation prompts and create the PR")
 	pushFlag := fs.Bool("push", true, "push current branch before creating PR")
 	baseFlag := fs.String("base", "", "base branch (default: auto-detect main/master)")
-	verbose := fs.Bool("verbose", false, "show model reasoning and full trace")
+	verbose := fs.Bool("verbose", false, "stream model reasoning as it happens")
+	trace := fs.Bool("trace", false, "show context audit and reasoning trace after completion")
 	showCost := fs.Bool("cost", true, "show token/cost breakdown")
 	modelFlag := fs.String("model", "", "model to use (default: BUCKLEY_MODEL_PR or execution model)")
-	timeout := fs.Duration("timeout", 2*time.Minute, "timeout for model request")
+	timeout := fs.Duration("timeout", 0, "timeout for model request (0 = no timeout)")
 
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -78,6 +80,34 @@ func runPRCommand(args []string) error {
 		Ledger:   ledger,
 	})
 
+	// Set up streaming callback if verbose mode is enabled
+	var streamCallback oneshot.StreamCallback
+	var reasoningLog *logging.ReasoningLogger
+	streamingEnabled := *verbose && stdinIsTerminalFn()
+
+	if streamingEnabled {
+		// Initialize reasoning logger
+		if home, err := os.UserHomeDir(); err == nil {
+			logDir := filepath.Join(home, ".buckley", "logs")
+			reasoningLog, _ = logging.NewReasoningLogger(logDir)
+		}
+
+		streamCallback = func(reasoning, content string) {
+			// Show reasoning (thinking) tokens as they stream
+			if reasoning != "" {
+				termOut.Stream(reasoning)
+				if reasoningLog != nil {
+					reasoningLog.Write(reasoning)
+				}
+			}
+		}
+	}
+	defer func() {
+		if reasoningLog != nil {
+			reasoningLog.Close()
+		}
+	}()
+
 	type prRunner interface {
 		Run(ctx context.Context, opts prgen.ContextOptions) (*prgen.RunResult, error)
 	}
@@ -90,8 +120,9 @@ func runPRCommand(args []string) error {
 		})
 	} else {
 		runner = prgen.NewRunner(prgen.RunnerConfig{
-			Invoker: invoker,
-			Ledger:  ledger,
+			Invoker:        invoker,
+			Ledger:         ledger,
+			StreamCallback: streamCallback,
 		})
 	}
 
@@ -101,8 +132,12 @@ func runPRCommand(args []string) error {
 		opts.BaseBranch = *baseFlag
 	}
 
-	// Run with timeout
-	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+	// Run with optional timeout (0 = no timeout, for thinking models)
+	ctx := context.Background()
+	var cancel context.CancelFunc = func() {}
+	if *timeout > 0 {
+		ctx, cancel = context.WithTimeout(ctx, *timeout)
+	}
 	defer cancel()
 
 	// Show what we're doing
@@ -110,31 +145,38 @@ func runPRCommand(args []string) error {
 		termOut.Dim("Using model: %s", modelID)
 	}
 
-	// Execute the PR generation with spinner
-	spinner := terminal.NewSpinner("Generating PR...")
-	spinner.Start()
-
-	result, err := runner.Run(ctx, opts)
-
-	if err != nil {
-		spinner.StopWithError(err.Error())
-	} else if result.Error != nil {
-		spinner.StopWithError(result.Error.Error())
+	// Execute the PR generation
+	var result *prgen.RunResult
+	if streamingEnabled {
+		// Streaming mode: show thinking progress inline
+		termOut.Dim("Thinking...")
+		result, err = runner.Run(ctx, opts)
+		termOut.StreamEnd() // End the streaming line
 	} else {
-		spinner.StopWithSuccess("Generated PR")
+		// Non-streaming mode: use spinner
+		spinner := terminal.NewSpinner("Generating PR...")
+		spinner.Start()
+		result, err = runner.Run(ctx, opts)
+		if err != nil {
+			spinner.StopWithError(err.Error())
+		} else if result.Error != nil {
+			spinner.StopWithError(result.Error.Error())
+		} else {
+			spinner.StopWithSuccess("Generated PR")
+		}
 	}
 
 	if err != nil {
 		return fmt.Errorf("PR generation failed: %w", err)
 	}
 
-	// Show context audit
-	if *verbose && result.ContextAudit != nil {
+	// Show context audit (--trace flag)
+	if *trace && result.ContextAudit != nil {
 		printContextAudit(result.ContextAudit)
 	}
 
-	// Show reasoning
-	if *verbose && result.Trace != nil && result.Trace.Reasoning != "" {
+	// Show reasoning trace (--trace flag)
+	if *trace && result.Trace != nil && result.Trace.Reasoning != "" {
 		printReasoning(result.Trace.Reasoning)
 	}
 

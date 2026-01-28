@@ -19,7 +19,7 @@ func (t *LookupContextTool) Name() string {
 }
 
 func (t *LookupContextTool) Description() string {
-	return "Query the project code index for relevant files or symbols before reading from disk."
+	return "Query the project code index for relevant files or symbols. Returns indexed information about functions, types, and files matching your query. Use this to quickly find where code is defined without reading multiple files. Faster than grep for finding specific definitions."
 }
 
 func (t *LookupContextTool) Parameters() ParameterSchema {
@@ -32,7 +32,7 @@ func (t *LookupContextTool) Parameters() ParameterSchema {
 			},
 			"path": {
 				Type:        "string",
-				Description: "Optional glob (e.g. pkg/ui/*.go) to restrict results.",
+				Description: "Optional glob (e.g. pkg/buckley/ui/*.go) to restrict results.",
 			},
 			"symbol": {
 				Type:        "string",
@@ -47,6 +47,10 @@ func (t *LookupContextTool) Parameters() ParameterSchema {
 }
 
 func (t *LookupContextTool) Execute(params map[string]any) (*Result, error) {
+	return t.ExecuteWithContext(context.Background(), params)
+}
+
+func (t *LookupContextTool) ExecuteWithContext(ctx context.Context, params map[string]any) (*Result, error) {
 	if t.Store == nil {
 		return &Result{Success: false, Error: "code index is not available"}, nil
 	}
@@ -56,7 +60,10 @@ func (t *LookupContextTool) Execute(params map[string]any) (*Result, error) {
 	symbol := strings.TrimSpace(getStringParam(params, "symbol"))
 	limit := getIntParam(params, "limit", 20)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
 	files, err := t.Store.SearchFiles(ctx, query, pathGlob, limit)

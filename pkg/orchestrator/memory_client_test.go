@@ -76,7 +76,7 @@ func TestMemoryAwareModelClient_InsertsMemories(t *testing.T) {
 			}, nil
 		}).Times(1)
 
-	client := NewMemoryAwareModelClient(mockModel, memMgr, "sess-1", 3, 0)
+	client := NewMemoryAwareModelClient(mockModel, memMgr, "sess-1", "", 3, 0)
 
 	req := model.ChatRequest{
 		Model: "test",
