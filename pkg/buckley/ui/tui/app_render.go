@@ -2,8 +2,10 @@
 package tui
 
 import (
+	"fmt"
 	"log"
 	"math"
+	"os"
 	"time"
 
 	"github.com/odvcencio/buckley/pkg/diagnostics"
@@ -172,7 +174,17 @@ func (a *WidgetApp) updateAnimations(now time.Time) bool {
 		a.ctrlCArmedUntil = time.Time{}
 	}
 
-	if a.inputArea.IsFocused() {
+	// Debug: log focus state during animation updates
+	inputFocused := a.inputArea.IsFocused()
+	if os.Getenv("BUCKLEY_TUI_DEBUG") != "" && a.metrics.FrameCount < 10 {
+		if f, err := os.OpenFile("/tmp/buckley-focus.log", os.O_APPEND|os.O_WRONLY, 0644); err == nil {
+			fmt.Fprintf(f, "[%s] updateAnimations frame=%d: inputArea.IsFocused()=%v\n",
+				time.Now().Format("15:04:05.000"), a.metrics.FrameCount, inputFocused)
+			f.Close()
+		}
+	}
+
+	if inputFocused {
 		if a.cursorPulsePeriod <= 0 {
 			a.cursorPulsePeriod = 2600 * time.Millisecond
 		}
@@ -321,7 +333,9 @@ func (a *WidgetApp) drawFocusIndicator(buf *runtime.Buffer) {
 	if indicator == "" || a.screen == nil {
 		return
 	}
-	scope := a.screen.FocusScope()
+	// Use BaseFocusScope to get focus from the base layer where main widgets live,
+	// not the top overlay layer which may have no focusables (e.g., toastStack)
+	scope := a.screen.BaseFocusScope()
 	if scope == nil {
 		return
 	}

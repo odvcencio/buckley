@@ -2,6 +2,9 @@
 package tui
 
 import (
+	"fmt"
+	"log"
+	"os"
 	"strings"
 	"time"
 
@@ -32,6 +35,20 @@ import (
 func (a *WidgetApp) handleKeyMsg(m KeyMsg) bool {
 	key := terminal.Key(m.Key)
 
+	// Debug logging for input diagnosis - write to file since tcell captures stderr
+	if os.Getenv("BUCKLEY_TUI_DEBUG") != "" {
+		if f, err := os.OpenFile("/tmp/buckley-focus.log", os.O_APPEND|os.O_WRONLY, 0644); err == nil {
+			fmt.Fprintf(f, "[%s] handleKeyMsg: key=%d rune=%q ctrl=%v alt=%v inputFocused=%v\n",
+				time.Now().Format("15:04:05.000"), m.Key, m.Rune, m.Ctrl, m.Alt, a.inputArea.IsFocused())
+			f.Close()
+		}
+	}
+
+	// Debug logging for input diagnosis
+	if a.debugInput() {
+		a.logInputDebug("handleKeyMsg", m, key)
+	}
+
 	// Ctrl+C: clear input first, second press within 3s exits
 	if key == terminal.KeyCtrlC {
 		now := time.Now()
@@ -55,6 +72,9 @@ func (a *WidgetApp) handleKeyMsg(m KeyMsg) bool {
 	}
 
 	if a.handleKeybind(m) {
+		if a.debugInput() {
+			log.Printf("[input-debug] keybind consumed key=%d rune=%q", m.Key, m.Rune)
+		}
 		return true
 	}
 
@@ -72,8 +92,16 @@ func (a *WidgetApp) handleKeyMsg(m KeyMsg) bool {
 	// to all children rather than routing to focused widgets, so we
 	// need this shortcut to ensure the input area gets priority.
 	// Only skip this when modal overlays are active (modal=true on push).
-	if a.inputArea.IsFocused() && !a.hasModalOverlay() {
+	inputFocused := a.inputArea.IsFocused()
+	hasModal := a.hasModalOverlay()
+	if a.debugInput() {
+		log.Printf("[input-debug] inputArea.IsFocused()=%v hasModalOverlay()=%v", inputFocused, hasModal)
+	}
+	if inputFocused && !hasModal {
 		result := a.inputArea.HandleMessage(runtimeMsg)
+		if a.debugInput() {
+			log.Printf("[input-debug] inputArea.HandleMessage result.Handled=%v", result.Handled)
+		}
 		if result.Handled {
 			for _, cmd := range result.Commands {
 				a.handleCommand(cmd)
@@ -210,7 +238,10 @@ func (a *WidgetApp) handleKeybind(m KeyMsg) bool {
 func (a *WidgetApp) keyContext() keybind.Context {
 	var focused runtime.Widget
 	if a.screen != nil {
-		if scope := a.screen.FocusScope(); scope != nil {
+		// Use BaseFocusScope to get the base layer's focus (where main widgets live)
+		// rather than FocusScope which returns the top overlay layer's scope.
+		// This ensures keybind conditions see the actual focused widget in the main UI.
+		if scope := a.screen.BaseFocusScope(); scope != nil {
 			if current := scope.Current(); current != nil {
 				focused = current
 			}

@@ -664,6 +664,11 @@ func (a *WidgetApp) Run() error {
 		}
 	}()
 
+	// Re-establish focus before starting event loop
+	// Focus may have been lost between initFocus() and Run() due to
+	// intermediate operations (WelcomeScreen, context updates, etc.)
+	a.ensureFocus()
+
 	// Frame ticker for render cadence (use target FPS interval)
 	frameInterval := a.frameTimeTarget
 	if frameInterval <= 0 {

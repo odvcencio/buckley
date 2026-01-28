@@ -253,3 +253,201 @@ func TestTelemetryUIBridge_Truncate(t *testing.T) {
 		}
 	}
 }
+
+// =============================================================================
+// SimpleTelemetryBridge Tests (for Runner)
+// =============================================================================
+
+// mockTelemetryPoster collects posted messages for verification.
+type mockTelemetryPoster struct {
+	messages []Message
+}
+
+func (m *mockTelemetryPoster) Post(msg Message) {
+	m.messages = append(m.messages, msg)
+}
+
+func TestSimpleTelemetryBridge_New(t *testing.T) {
+	hub := telemetry.NewHub()
+	defer hub.Close()
+
+	poster := &mockTelemetryPoster{}
+	bridge := NewSimpleTelemetryBridge(hub, poster)
+	if bridge == nil {
+		t.Fatal("expected non-nil bridge")
+	}
+	if bridge.hub != hub {
+		t.Error("hub not set correctly")
+	}
+	if bridge.poster != poster {
+		t.Error("poster not set correctly")
+	}
+}
+
+func TestSimpleTelemetryBridge_NewNilHub(t *testing.T) {
+	poster := &mockTelemetryPoster{}
+	bridge := NewSimpleTelemetryBridge(nil, poster)
+	if bridge == nil {
+		t.Fatal("expected non-nil bridge even with nil hub")
+	}
+	// Should not panic when starting with nil hub
+	bridge.Start(nil)
+	bridge.Stop()
+}
+
+func TestSimpleTelemetryBridge_HandleTaskEvents(t *testing.T) {
+	hub := telemetry.NewHub()
+	defer hub.Close()
+
+	poster := &mockTelemetryPoster{}
+	bridge := NewSimpleTelemetryBridge(hub, poster)
+
+	bridge.handleEvent(telemetry.Event{
+		Type:   telemetry.EventTaskStarted,
+		TaskID: "task-1",
+		Data:   map[string]any{"name": "Build project"},
+	})
+
+	if bridge.currentTask != "Build project" {
+		t.Errorf("expected currentTask 'Build project', got %q", bridge.currentTask)
+	}
+	if bridge.taskProgress != 0 {
+		t.Errorf("expected taskProgress 0, got %d", bridge.taskProgress)
+	}
+}
+
+func TestSimpleTelemetryBridge_HandleTaskCompleted(t *testing.T) {
+	hub := telemetry.NewHub()
+	defer hub.Close()
+
+	poster := &mockTelemetryPoster{}
+	bridge := NewSimpleTelemetryBridge(hub, poster)
+
+	// Start a task first
+	bridge.handleEvent(telemetry.Event{
+		Type:   telemetry.EventTaskStarted,
+		TaskID: "task-1",
+		Data:   map[string]any{"name": "Test task"},
+	})
+
+	// Then complete it
+	bridge.handleEvent(telemetry.Event{
+		Type:   telemetry.EventTaskCompleted,
+		TaskID: "task-1",
+	})
+
+	if bridge.taskProgress != 100 {
+		t.Errorf("expected taskProgress 100, got %d", bridge.taskProgress)
+	}
+}
+
+func TestSimpleTelemetryBridge_HandleToolEvents(t *testing.T) {
+	hub := telemetry.NewHub()
+	defer hub.Close()
+
+	poster := &mockTelemetryPoster{}
+	bridge := NewSimpleTelemetryBridge(hub, poster)
+
+	bridge.handleEvent(telemetry.Event{
+		Type:      telemetry.EventToolStarted,
+		TaskID:    "tool-1",
+		Timestamp: time.Now(),
+		Data:      map[string]any{"toolName": "bash", "command": "ls -la"},
+	})
+
+	if len(bridge.runningTools) != 1 {
+		t.Errorf("expected 1 running tool, got %d", len(bridge.runningTools))
+	}
+	if bridge.runningTools[0].Name != "bash" {
+		t.Errorf("expected tool name 'bash', got %q", bridge.runningTools[0].Name)
+	}
+
+	// Complete the tool
+	bridge.handleEvent(telemetry.Event{
+		Type:      telemetry.EventToolCompleted,
+		TaskID:    "tool-1",
+		Timestamp: time.Now(),
+	})
+
+	if len(bridge.runningTools) != 0 {
+		t.Errorf("expected 0 running tools after completion, got %d", len(bridge.runningTools))
+	}
+}
+
+func TestSimpleTelemetryBridge_HandleRLMIteration(t *testing.T) {
+	hub := telemetry.NewHub()
+	defer hub.Close()
+
+	poster := &mockTelemetryPoster{}
+	bridge := NewSimpleTelemetryBridge(hub, poster)
+
+	bridge.handleEvent(telemetry.Event{
+		Type: telemetry.EventRLMIteration,
+		Data: map[string]any{
+			"iteration":      2,
+			"max_iterations": 5,
+			"ready":          true,
+			"tokens_used":    1200,
+			"summary":        "draft answer",
+		},
+	})
+
+	if bridge.rlmStatus == nil {
+		t.Fatal("expected rlmStatus to be set")
+	}
+	if bridge.rlmStatus.Iteration != 2 {
+		t.Errorf("expected iteration 2, got %d", bridge.rlmStatus.Iteration)
+	}
+	if !bridge.rlmStatus.Ready {
+		t.Error("expected ready to be true")
+	}
+	if bridge.rlmStatus.TokensUsed != 1200 {
+		t.Errorf("expected tokens 1200, got %d", bridge.rlmStatus.TokensUsed)
+	}
+}
+
+func TestSimpleTelemetryBridge_SetPlanTasks(t *testing.T) {
+	hub := telemetry.NewHub()
+	defer hub.Close()
+
+	poster := &mockTelemetryPoster{}
+	bridge := NewSimpleTelemetryBridge(hub, poster)
+
+	tasks := []buckleywidgets.PlanTask{
+		{Name: "Task 1", Status: buckleywidgets.TaskPending},
+		{Name: "Task 2", Status: buckleywidgets.TaskInProgress},
+	}
+	bridge.SetPlanTasks(tasks)
+
+	if len(bridge.planTasks) != 2 {
+		t.Errorf("expected 2 plan tasks, got %d", len(bridge.planTasks))
+	}
+	if bridge.planTasks[0].Name != "Task 1" {
+		t.Errorf("expected first task name 'Task 1', got %q", bridge.planTasks[0].Name)
+	}
+}
+
+func TestSimpleTelemetryBridge_PostsSnapshot(t *testing.T) {
+	hub := telemetry.NewHub()
+	defer hub.Close()
+
+	poster := &mockTelemetryPoster{}
+	bridge := NewSimpleTelemetryBridge(hub, poster)
+
+	// Handle an event - should post a snapshot
+	bridge.handleEvent(telemetry.Event{
+		Type:   telemetry.EventTaskStarted,
+		TaskID: "task-1",
+		Data:   map[string]any{"name": "Test"},
+	})
+	bridge.postSnapshot()
+
+	if len(poster.messages) == 0 {
+		t.Error("expected at least one message to be posted")
+	}
+
+	// Verify it's a SidebarStateMsg
+	if _, ok := poster.messages[0].(SidebarStateMsg); !ok {
+		t.Errorf("expected SidebarStateMsg, got %T", poster.messages[0])
+	}
+}

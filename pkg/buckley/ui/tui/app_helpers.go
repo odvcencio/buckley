@@ -3,6 +3,7 @@ package tui
 
 import (
 	"fmt"
+	"log"
 	"net/url"
 	"os"
 	"os/exec"
@@ -12,6 +13,7 @@ import (
 
 	buckleywidgets "github.com/odvcencio/buckley/pkg/buckley/ui/widgets"
 	"github.com/odvcencio/fluffyui/accessibility"
+	"github.com/odvcencio/fluffyui/terminal"
 	"github.com/odvcencio/fluffyui/widgets"
 )
 
@@ -469,4 +471,29 @@ func (a *WidgetApp) playSFX(cue string) {
 		return
 	}
 	a.audioService.PlaySFX(cue)
+}
+
+// debugInput returns true if input debugging is enabled.
+func (a *WidgetApp) debugInput() bool {
+	return os.Getenv("BUCKLEY_TUI_DEBUG") != ""
+}
+
+// logInputDebug logs input diagnostic information.
+func (a *WidgetApp) logInputDebug(source string, m KeyMsg, key terminal.Key) {
+	var focusInfo string
+	if a.screen != nil {
+		if scope := a.screen.BaseFocusScope(); scope != nil {
+			current := scope.Current()
+			if current != nil {
+				focusInfo = fmt.Sprintf("focusScope.Current()=%T", current)
+			} else {
+				focusInfo = "focusScope.Current()=nil"
+			}
+			focusInfo += fmt.Sprintf(" count=%d", scope.Count())
+		} else {
+			focusInfo = "BaseFocusScope()=nil"
+		}
+	}
+	log.Printf("[input-debug] %s: key=%d rune=%q alt=%v ctrl=%v shift=%v | %s",
+		source, key, m.Rune, m.Alt, m.Ctrl, m.Shift, focusInfo)
 }

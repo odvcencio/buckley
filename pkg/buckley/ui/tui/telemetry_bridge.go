@@ -15,6 +15,13 @@ import (
 	"github.com/odvcencio/fluffyui/state"
 )
 
+// TelemetryBridge is the common interface for telemetry bridges.
+type TelemetryBridge interface {
+	Start(ctx context.Context)
+	Stop()
+	SetPlanTasks(tasks []buckleywidgets.PlanTask)
+}
+
 // TelemetryUIBridge forwards telemetry events to the TUI for sidebar updates.
 type TelemetryUIBridge struct {
 	hub         *telemetry.Hub
@@ -1014,4 +1021,309 @@ func extractTime(data map[string]any, key string) time.Time {
 		}
 	}
 	return time.Time{}
+}
+
+// =============================================================================
+// SimpleTelemetryBridge - for Runner (no scheduler dependency)
+// =============================================================================
+
+// TelemetryPoster is the interface for posting telemetry messages to the UI.
+type TelemetryPoster interface {
+	Post(msg Message)
+}
+
+// SimpleTelemetryBridge forwards telemetry events to the TUI without scheduler dependency.
+// Used by Runner which doesn't have access to WidgetApp's stateScheduler.
+type SimpleTelemetryBridge struct {
+	hub         *telemetry.Hub
+	poster      TelemetryPoster
+	eventCh     <-chan telemetry.Event
+	unsubscribe func()
+	cancel      context.CancelFunc
+	wg          sync.WaitGroup
+	mu          sync.Mutex
+
+	// State mirrors (simpler than signal-based approach)
+	currentTask        string
+	taskProgress       int
+	planTasks          []buckleywidgets.PlanTask
+	runningTools       []buckleywidgets.RunningTool
+	toolHistory        []buckleywidgets.ToolHistoryEntry
+	touchEntries       []touchEntry
+	recentFiles        []string
+	rlmStatus          *buckleywidgets.RLMStatus
+	rlmScratchpad      []buckleywidgets.RLMScratchpadEntry
+	circuitStatus      *buckleywidgets.CircuitStatus
+	experiment         string
+	experimentStatus   string
+	experimentVariants []buckleywidgets.ExperimentVariant
+}
+
+// NewSimpleTelemetryBridge creates a bridge from telemetry hub to any TelemetryPoster.
+func NewSimpleTelemetryBridge(hub *telemetry.Hub, poster TelemetryPoster) *SimpleTelemetryBridge {
+	if hub == nil || poster == nil {
+		return &SimpleTelemetryBridge{}
+	}
+	eventCh, unsub := hub.Subscribe()
+	return &SimpleTelemetryBridge{
+		hub:         hub,
+		poster:      poster,
+		eventCh:     eventCh,
+		unsubscribe: unsub,
+	}
+}
+
+// Start begins forwarding telemetry events to the UI.
+func (b *SimpleTelemetryBridge) Start(ctx context.Context) {
+	if b == nil || b.hub == nil {
+		return
+	}
+	ctx, b.cancel = context.WithCancel(ctx)
+	b.wg.Add(1)
+	go b.forwardLoop(ctx)
+}
+
+// Stop ceases forwarding and cleans up subscriptions.
+func (b *SimpleTelemetryBridge) Stop() {
+	if b == nil {
+		return
+	}
+	if b.cancel != nil {
+		b.cancel()
+	}
+	if b.unsubscribe != nil {
+		b.unsubscribe()
+	}
+	b.wg.Wait()
+}
+
+func (b *SimpleTelemetryBridge) forwardLoop(ctx context.Context) {
+	defer b.wg.Done()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case event, ok := <-b.eventCh:
+			if !ok {
+				return
+			}
+			b.handleEvent(event)
+			b.postSnapshot()
+		}
+	}
+}
+
+func (b *SimpleTelemetryBridge) postSnapshot() {
+	if b.poster == nil {
+		return
+	}
+	b.mu.Lock()
+	snapshot := b.buildSnapshot()
+	b.mu.Unlock()
+	b.poster.Post(SidebarStateMsg{Snapshot: snapshot})
+}
+
+func (b *SimpleTelemetryBridge) buildSnapshot() SidebarSnapshot {
+	now := time.Now()
+	return SidebarSnapshot{
+		CurrentTask:        b.currentTask,
+		TaskProgress:       b.taskProgress,
+		PlanTasks:          append([]buckleywidgets.PlanTask(nil), b.planTasks...),
+		RunningTools:       cloneRunningTools(b.runningTools),
+		ToolHistory:        append([]buckleywidgets.ToolHistoryEntry(nil), b.toolHistory...),
+		ActiveTouches:      summarizeTouches(b.touchEntries, now),
+		RecentFiles:        append([]string(nil), b.recentFiles...),
+		RLMStatus:          b.rlmStatus,
+		RLMScratchpad:      append([]buckleywidgets.RLMScratchpadEntry(nil), b.rlmScratchpad...),
+		CircuitStatus:      b.circuitStatus,
+		Experiment:         b.experiment,
+		ExperimentStatus:   b.experimentStatus,
+		ExperimentVariants: cloneAndSortVariants(b.experimentVariants),
+	}
+}
+
+func (b *SimpleTelemetryBridge) handleEvent(event telemetry.Event) {
+	if b == nil {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	b.pruneExpiredTouches()
+
+	switch event.Type {
+	case telemetry.EventTaskStarted:
+		name := event.TaskID
+		if data, ok := event.Data["name"].(string); ok {
+			name = data
+		}
+		b.currentTask = name
+		b.taskProgress = 0
+		b.planTasks = updateTaskStatus(b.planTasks, event.TaskID, buckleywidgets.TaskInProgress)
+
+	case telemetry.EventTaskCompleted:
+		b.taskProgress = 100
+		b.planTasks = updateTaskStatus(b.planTasks, event.TaskID, buckleywidgets.TaskCompleted)
+
+	case telemetry.EventTaskFailed:
+		b.taskProgress = 100
+		b.planTasks = updateTaskStatus(b.planTasks, event.TaskID, buckleywidgets.TaskFailed)
+
+	case telemetry.EventPlanCreated, telemetry.EventPlanUpdated:
+		b.handlePlanUpdate(event)
+
+	case telemetry.EventToolStarted:
+		b.handleToolStarted(event)
+	case telemetry.EventToolCompleted, telemetry.EventToolFailed:
+		b.handleToolFinished(event)
+
+	case telemetry.EventRLMIteration:
+		b.handleRLMIteration(event)
+	case telemetry.EventCircuitFailure:
+		b.handleCircuitFailure(event)
+	case telemetry.EventCircuitStateChange:
+		b.handleCircuitStateChange(event)
+	}
+}
+
+func (b *SimpleTelemetryBridge) handlePlanUpdate(event telemetry.Event) {
+	if tasks, ok := event.Data["tasks"].([]any); ok {
+		updated := make([]buckleywidgets.PlanTask, 0, len(tasks))
+		for _, t := range tasks {
+			if task, ok := t.(map[string]any); ok {
+				pt := buckleywidgets.PlanTask{
+					Name:   getString(task, "name"),
+					Status: buckleywidgets.TaskPending,
+				}
+				if status := getString(task, "status"); status != "" {
+					switch status {
+					case "completed", "done":
+						pt.Status = buckleywidgets.TaskCompleted
+					case "in_progress", "running":
+						pt.Status = buckleywidgets.TaskInProgress
+					case "failed":
+						pt.Status = buckleywidgets.TaskFailed
+					}
+				}
+				updated = append(updated, pt)
+			}
+		}
+		b.planTasks = updated
+	}
+}
+
+func (b *SimpleTelemetryBridge) handleToolStarted(event telemetry.Event) {
+	toolName := getString(event.Data, "toolName")
+	desc := getString(event.Data, "description")
+	if desc == "" {
+		desc = getString(event.Data, "command")
+	}
+	if toolName != "" && event.TaskID != "" {
+		tool := buckleywidgets.RunningTool{ID: event.TaskID, Name: toolName, Command: desc}
+		b.runningTools = upsertRunningTool(b.runningTools, tool)
+	}
+	if toolName != "" || desc != "" {
+		entry := buckleywidgets.ToolHistoryEntry{
+			Name:   firstNonEmpty(toolName, "tool"),
+			Status: "running",
+			Detail: truncate(desc, 40),
+			When:   event.Timestamp,
+		}
+		b.toolHistory = append(b.toolHistory, entry)
+		if len(b.toolHistory) > maxToolHistoryEntries {
+			b.toolHistory = b.toolHistory[len(b.toolHistory)-maxToolHistoryEntries:]
+		}
+	}
+}
+
+func (b *SimpleTelemetryBridge) handleToolFinished(event telemetry.Event) {
+	status := "completed"
+	if event.Type == telemetry.EventToolFailed {
+		status = "failed"
+	}
+	if event.TaskID != "" {
+		if tool, ok := findRunningTool(b.runningTools, event.TaskID); ok {
+			entry := buckleywidgets.ToolHistoryEntry{
+				Name:   firstNonEmpty(tool.Name, "tool"),
+				Status: status,
+				Detail: truncate(tool.Command, 40),
+				When:   event.Timestamp,
+			}
+			b.toolHistory = append(b.toolHistory, entry)
+			if len(b.toolHistory) > maxToolHistoryEntries {
+				b.toolHistory = b.toolHistory[len(b.toolHistory)-maxToolHistoryEntries:]
+			}
+		}
+		b.runningTools = removeRunningTool(b.runningTools, event.TaskID)
+	}
+}
+
+func (b *SimpleTelemetryBridge) handleRLMIteration(event telemetry.Event) {
+	b.rlmStatus = &buckleywidgets.RLMStatus{
+		Iteration:     getInt(event.Data, "iteration"),
+		MaxIterations: getInt(event.Data, "max_iterations"),
+		TokensUsed:    getInt(event.Data, "tokens_used"),
+		Summary:       getString(event.Data, "summary"),
+	}
+	if ready, ok := getBool(event.Data, "ready"); ok {
+		b.rlmStatus.Ready = ready
+	}
+	b.rlmScratchpad = parseRLMScratchpadEntries(event.Data["scratchpad"])
+	if len(b.rlmScratchpad) > maxRLMScratchpadEntries {
+		b.rlmScratchpad = b.rlmScratchpad[:maxRLMScratchpadEntries]
+	}
+}
+
+func (b *SimpleTelemetryBridge) handleCircuitFailure(event telemetry.Event) {
+	if b.circuitStatus == nil {
+		b.circuitStatus = &buckleywidgets.CircuitStatus{
+			State:       "Closed",
+			MaxFailures: getInt(event.Data, "max_failures"),
+		}
+	}
+	b.circuitStatus.ConsecutiveFailures = getInt(event.Data, "consecutive_num")
+	b.circuitStatus.LastError = getString(event.Data, "error")
+	if willOpen, ok := getBool(event.Data, "will_open"); ok && willOpen {
+		b.circuitStatus.State = "Open"
+	}
+}
+
+func (b *SimpleTelemetryBridge) handleCircuitStateChange(event telemetry.Event) {
+	toState := getString(event.Data, "to")
+	if b.circuitStatus == nil {
+		b.circuitStatus = &buckleywidgets.CircuitStatus{}
+	}
+	b.circuitStatus.State = toState
+	b.circuitStatus.LastError = getString(event.Data, "last_error")
+	if toState == "Closed" {
+		b.circuitStatus.ConsecutiveFailures = 0
+		b.circuitStatus.LastError = ""
+	}
+}
+
+func (b *SimpleTelemetryBridge) pruneExpiredTouches() {
+	if len(b.touchEntries) == 0 {
+		return
+	}
+	now := time.Now()
+	alive := make([]touchEntry, 0, len(b.touchEntries))
+	for _, entry := range b.touchEntries {
+		if !entry.expiresAt.IsZero() && now.After(entry.expiresAt) {
+			continue
+		}
+		alive = append(alive, entry)
+	}
+	b.touchEntries = alive
+}
+
+// SetPlanTasks allows external code to set plan tasks directly.
+func (b *SimpleTelemetryBridge) SetPlanTasks(tasks []buckleywidgets.PlanTask) {
+	if b == nil {
+		return
+	}
+	b.mu.Lock()
+	b.planTasks = tasks
+	b.mu.Unlock()
+	b.postSnapshot()
 }

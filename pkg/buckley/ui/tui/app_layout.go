@@ -2,6 +2,9 @@
 package tui
 
 import (
+	"fmt"
+	"log"
+	"os"
 	"strings"
 	"time"
 
@@ -24,16 +27,30 @@ import (
 // ============================================================================
 
 func (a *WidgetApp) initFocus() {
+	debug := os.Getenv("BUCKLEY_TUI_DEBUG") != ""
 	if a == nil || a.screen == nil {
+		if debug {
+			log.Printf("[focus-debug] initFocus: a=%v screen=%v", a != nil, a != nil && a.screen != nil)
+		}
 		return
 	}
 	a.updateAnnouncerLabels()
 	// Use BaseFocusScope to get the base layer's scope where main widgets are
 	// (overlay layers like toastStack may be on top but have no focusables)
 	scope := a.screen.BaseFocusScope()
+	if debug {
+		if scope != nil {
+			log.Printf("[focus-debug] initFocus: BaseFocusScope count=%d", scope.Count())
+		} else {
+			log.Printf("[focus-debug] initFocus: BaseFocusScope is nil")
+		}
+	}
 	if scope == nil {
 		if a.inputArea != nil {
 			a.inputArea.Focus()
+			if debug {
+				log.Printf("[focus-debug] initFocus: called inputArea.Focus() directly (no scope)")
+			}
 		}
 		return
 	}
@@ -46,8 +63,76 @@ func (a *WidgetApp) initFocus() {
 		a.dirty = true
 	})
 	if a.inputArea != nil {
-		scope.SetFocus(a.inputArea)
+		ok := scope.SetFocus(a.inputArea)
+		if debug {
+			log.Printf("[focus-debug] initFocus: scope.SetFocus(inputArea) returned %v", ok)
+			if !ok {
+				log.Printf("[focus-debug] initFocus: inputArea may already be focused or not registered")
+				// Try to find what IS registered
+				if current := scope.Current(); current != nil {
+					log.Printf("[focus-debug] initFocus: current focus is %T", current)
+				} else {
+					log.Printf("[focus-debug] initFocus: no current focus")
+				}
+			}
+		}
+		// Ensure inputArea's internal focus state is set even if scope.SetFocus
+		// returned false (which happens when inputArea is already focused)
+		if !a.inputArea.IsFocused() {
+			a.inputArea.Focus()
+			if debug {
+				log.Printf("[focus-debug] initFocus: called inputArea.Focus() directly")
+			}
+		}
 	}
+}
+
+// ensureFocus ensures the input area has focus.
+// Call this before starting the event loop and after any operation that
+// might have disrupted focus state.
+func (a *WidgetApp) ensureFocus() {
+	if a == nil || a.screen == nil || a.inputArea == nil {
+		return
+	}
+
+	// File-based debug logging (tcell captures stderr)
+	var debugFile *os.File
+	if os.Getenv("BUCKLEY_TUI_DEBUG") != "" {
+		if f, err := os.OpenFile("/tmp/buckley-focus.log", os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644); err == nil {
+			debugFile = f
+			defer f.Close()
+		}
+	}
+	debugLog := func(format string, args ...any) {
+		if debugFile != nil {
+			fmt.Fprintf(debugFile, "[%s] "+format+"\n", append([]any{time.Now().Format("15:04:05.000")}, args...)...)
+		}
+	}
+
+	debugLog("ensureFocus: starting, inputArea.IsFocused()=%v", a.inputArea.IsFocused())
+
+	// Always try to set focus via scope first
+	if scope := a.screen.BaseFocusScope(); scope != nil {
+		scopeCount := scope.Count()
+		var currentType string
+		if c := scope.Current(); c != nil {
+			currentType = fmt.Sprintf("%T", c)
+		} else {
+			currentType = "nil"
+		}
+		debugLog("ensureFocus: scope has %d focusables, current=%s", scopeCount, currentType)
+
+		ok := scope.SetFocus(a.inputArea)
+		debugLog("ensureFocus: scope.SetFocus returned %v, IsFocused now=%v", ok, a.inputArea.IsFocused())
+	}
+
+	// Always call Focus() directly to ensure internal state is set
+	// This is needed because scope.SetFocus might not propagate to FocusableBase
+	// InputArea.Focus() also calls its internal textarea.Focus()
+	a.inputArea.Focus()
+	debugLog("ensureFocus: called inputArea.Focus(), IsFocused now=%v", a.inputArea.IsFocused())
+
+	a.dirty = true
 }
 
 // rebuildLayout rebuilds the main area layout based on sidebar visibility.
@@ -90,7 +175,10 @@ func (a *WidgetApp) rebuildLayout() {
 	// Re-focus the input area after layout rebuild
 	// (SetRoot's auto-register may have given focus to sidebar)
 	if scope := a.screen.BaseFocusScope(); scope != nil {
-		scope.SetFocus(a.inputArea)
+		ok := scope.SetFocus(a.inputArea)
+		if os.Getenv("BUCKLEY_TUI_DEBUG") != "" {
+			log.Printf("[focus-debug] rebuildLayout: scope.SetFocus(inputArea) returned %v, inputArea.IsFocused()=%v", ok, a.inputArea.IsFocused())
+		}
 	}
 
 	a.dirty = true

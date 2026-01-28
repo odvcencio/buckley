@@ -17,7 +17,7 @@ require (
 	github.com/gorilla/websocket v1.5.3
 	github.com/muesli/termenv v0.16.0
 	github.com/nats-io/nats.go v1.37.0
-	github.com/odvcencio/fluffyui v0.1.0
+	github.com/odvcencio/fluffyui v0.2.3
 	github.com/oklog/ulid/v2 v2.1.1
 	github.com/pkoukk/tiktoken-go v0.1.8
 	github.com/pmezard/go-difflib v1.0.0

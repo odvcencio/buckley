@@ -23,8 +23,12 @@ const (
 )
 
 // InputArea is a mode-aware input widget.
+// It delegates all focus operations to its internal TextArea to avoid focus conflicts.
 type InputArea struct {
-	uiwidgets.FocusableBase
+	// Embed Base for Layout/Bounds/styling, but NOT FocusableBase.
+	// Focus operations are delegated to the internal textarea to prevent
+	// the dual-focus problem where InputArea and textarea have separate focus states.
+	uiwidgets.Base
 
 	textarea  *uiwidgets.TextArea
 	modeLabel *uiwidgets.Label
@@ -196,9 +200,14 @@ func (i *InputArea) SetModeStyles(normal, shell, env, search backend.Style) {
 }
 
 // SetCursorStyle sets the style used for the soft cursor.
+// This forwards the style to the internal textarea so it can render its own cursor.
 func (i *InputArea) SetCursorStyle(style backend.Style) {
 	i.cursorStyle = style
 	i.cursorStyleSet = true
+	// Forward to textarea so it renders its cursor with this style
+	if i.textarea != nil {
+		i.textarea.SetFocusStyle(style)
+	}
 }
 
 // ClearCursorStyle resets to the default cursor styling.
@@ -340,7 +349,7 @@ func (i *InputArea) Measure(constraints runtime.Constraints) runtime.Size {
 
 // Layout positions the input area.
 func (i *InputArea) Layout(bounds runtime.Rect) {
-	i.FocusableBase.Layout(bounds)
+	i.Base.Layout(bounds)
 	if i.panel != nil {
 		i.panel.Layout(bounds)
 	}
@@ -355,21 +364,9 @@ func (i *InputArea) Render(ctx runtime.RenderContext) {
 		return
 	}
 	i.syncModeIndicator()
+	// The panel renders the textarea, which handles its own cursor rendering
+	// when focused and SetFocusStyle has been called
 	i.panel.Render(ctx)
-
-	if i.cursorStyleSet && i.IsFocused() && i.textarea != nil {
-		cx, cy := i.textarea.CursorPosition()
-		absX := i.textBounds.X + cx
-		absY := i.textBounds.Y + cy
-		if absX >= i.textBounds.X && absX < i.textBounds.X+i.textBounds.Width && absY >= i.textBounds.Y && absY < i.textBounds.Y+i.textBounds.Height {
-			cell := ctx.Buffer.Get(absX, absY)
-			r := cell.Rune
-			if r == 0 {
-				r = ' '
-			}
-			ctx.Buffer.Set(absX, absY, r, i.cursorStyle)
-		}
-	}
 }
 
 // HandleMessage processes keyboard input.
@@ -498,20 +495,38 @@ func (i *InputArea) Unbind() {
 	}
 }
 
+// CanFocus returns true if this widget can receive focus.
+// Delegates to the internal textarea.
+func (i *InputArea) CanFocus() bool {
+	if i.textarea == nil {
+		return false
+	}
+	return i.textarea.CanFocus()
+}
+
 // Focus forwards focus to the text area.
+// Delegates entirely to textarea - no separate FocusableBase.
 func (i *InputArea) Focus() {
-	i.FocusableBase.Focus()
 	if i.textarea != nil {
 		i.textarea.Focus()
 	}
 }
 
 // Blur clears focus from the text area.
+// Delegates entirely to textarea - no separate FocusableBase.
 func (i *InputArea) Blur() {
-	i.FocusableBase.Blur()
 	if i.textarea != nil {
 		i.textarea.Blur()
 	}
+}
+
+// IsFocused returns true if the internal textarea has focus.
+// Delegates entirely to textarea - no separate FocusableBase.
+func (i *InputArea) IsFocused() bool {
+	if i.textarea == nil {
+		return false
+	}
+	return i.textarea.IsFocused()
 }
 
 func (i *InputArea) handleTextChange(text string) {
