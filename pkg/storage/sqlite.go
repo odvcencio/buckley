@@ -23,6 +23,7 @@ type Store struct {
 	db         *sql.DB
 	observers  []Observer
 	observerMu sync.RWMutex
+	stmtCache  stmtCache
 }
 
 // ErrStoreClosed indicates the underlying database connection is unavailable.

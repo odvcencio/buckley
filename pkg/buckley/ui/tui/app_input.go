@@ -67,9 +67,22 @@ func (a *WidgetApp) handleKeyMsg(m KeyMsg) bool {
 		Shift: m.Shift,
 	}
 
-	// Let fluffyui's screen handle the key event.
-	// The screen routes to the focused widget in the active layer.
-	// Modal overlays (when push with 'true') take precedence automatically.
+	// When input area is focused and no modal overlay is active,
+	// forward key events to it first. The Flex container broadcasts
+	// to all children rather than routing to focused widgets, so we
+	// need this shortcut to ensure the input area gets priority.
+	// Only skip this when modal overlays are active (modal=true on push).
+	if a.inputArea.IsFocused() && !a.hasModalOverlay() {
+		result := a.inputArea.HandleMessage(runtimeMsg)
+		if result.Handled {
+			for _, cmd := range result.Commands {
+				a.handleCommand(cmd)
+			}
+			return true
+		}
+	}
+
+	// Fall through to screen for other handlers (chatView scroll, etc.)
 	result := a.screen.HandleMessage(runtimeMsg)
 
 	// Process commands that bubble up from widgets

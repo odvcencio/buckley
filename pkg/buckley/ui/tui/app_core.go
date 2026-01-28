@@ -35,6 +35,9 @@ const (
 	defaultMessageQueueSize    = 1024
 	defaultMessageQueueTimeout = 100 * time.Millisecond
 	defaultFrameInterval       = 16 * time.Millisecond
+	defaultTargetFPS           = 60
+	minTargetFPS               = 30
+	maxTargetFPS               = 120
 )
 
 // ============================================================================
@@ -206,6 +209,35 @@ type WidgetApp struct {
 	agentCtx    context.Context
 	agentCancel context.CancelFunc
 	agentDone   chan struct{}
+
+	// ============================================================================
+	// RENDER PIPELINE OPTIMIZATION
+	// ============================================================================
+	
+	// Render queue for async rendering
+	renderCh     chan renderOp
+	renderQueue  []renderOp
+	renderQueueMu sync.Mutex
+	
+	// Dirty region tracking
+	dirtyRegions  []dirtyRect
+	dirtyRegionsMu sync.Mutex
+	fullRedraw    bool
+	
+	// Frame rate limiting
+	targetFPS      int
+	frameTimeTarget time.Duration
+	skipFrame      bool
+	lastFrameTime  time.Duration
+	
+	// Double buffering
+	backBuffer     *runtime.Buffer
+	frontBuffer    *runtime.Buffer
+	bufferSwapMu   sync.RWMutex
+	
+	// Message cache for optimized rendering
+	messageCache      *messageRenderCache
+	messageCacheMu    sync.RWMutex
 }
 
 // WidgetAppConfig configures the widget-based TUI application.
@@ -508,6 +540,15 @@ func NewWidgetApp(cfg WidgetAppConfig) (*WidgetApp, error) {
 		animator:            animator,
 		audioService:        audioService,
 		stateQueue:          stateQueue,
+		
+		// Initialize render pipeline optimization fields
+		renderCh:        make(chan renderOp, 64),
+		renderQueue:     make([]renderOp, 0, 32),
+		dirtyRegions:    make([]dirtyRect, 0, 8),
+		targetFPS:       defaultTargetFPS,
+		frameTimeTarget: time.Second / defaultTargetFPS,
+		messageCache:    newMessageRenderCache(),
+		fullRedraw:      true, // Start with full redraw
 	}
 
 	app.stateScheduler = state.SchedulerFunc(func(fn func()) {
@@ -623,12 +664,21 @@ func (a *WidgetApp) Run() error {
 		}
 	}()
 
-	// Frame ticker for render cadence
-	a.frameTicker = time.NewTicker(a.frameInterval)
+	// Frame ticker for render cadence (use target FPS interval)
+	frameInterval := a.frameTimeTarget
+	if frameInterval <= 0 {
+		frameInterval = defaultFrameInterval
+	}
+	a.frameTicker = time.NewTicker(frameInterval)
 	defer a.frameTicker.Stop()
 
 	// Start terminal event poller in background
 	go a.pollEvents()
+	
+	// Start async render processor
+	renderDone := make(chan struct{})
+	go a.processRenderQueue(renderDone)
+	defer close(renderDone)
 
 	// Main event loop
 	for a.running {
@@ -638,7 +688,7 @@ func (a *WidgetApp) Run() error {
 			updated := a.update(msg)
 			atomic.StoreInt32(&a.inUpdate, 0)
 			if updated {
-				a.dirty = true
+				a.markDirty(dirtyRect{}) // Mark full screen dirty
 			}
 
 		case now := <-a.frameTicker.C:
@@ -651,17 +701,83 @@ func (a *WidgetApp) Run() error {
 				a.flushReasoningBuffer()
 			}
 			if a.updateAnimations(now) {
-				a.dirty = true
+				a.markDirty(dirtyRect{}) // Mark full screen dirty for animations
 			}
 			a.updateAlert(now)
 			if a.dirty {
+				// Frame rate limiting: skip frame if rendering is too slow
+				if a.shouldSkipFrame() {
+					a.metrics.DroppedFrames++
+					if a.debugRender && a.metrics.FrameCount%60 == 0 {
+						log.Printf("[render] dropped frame (last frame: %v, target: %v)",
+							a.lastFrameTime, a.frameTimeTarget)
+					}
+					continue
+				}
 				a.render()
 				a.dirty = false
+				// Clear dirty regions after render
+				a.dirtyRegionsMu.Lock()
+				a.dirtyRegions = a.dirtyRegions[:0]
+				a.fullRedraw = false
+				a.dirtyRegionsMu.Unlock()
 			}
 		}
 	}
 
 	return nil
+}
+
+// processRenderQueue processes async render operations.
+func (a *WidgetApp) processRenderQueue(done <-chan struct{}) {
+	for {
+		select {
+		case <-done:
+			return
+		case op := <-a.renderCh:
+			a.handleRenderOp(op)
+		default:
+			// Process pending queue
+			a.renderQueueMu.Lock()
+			if len(a.renderQueue) > 0 {
+				op := a.renderQueue[0]
+				a.renderQueue = a.renderQueue[1:]
+				a.renderQueueMu.Unlock()
+				a.handleRenderOp(op)
+			} else {
+				a.renderQueueMu.Unlock()
+				// Wait for next operation
+				select {
+				case <-done:
+					return
+				case op := <-a.renderCh:
+					a.handleRenderOp(op)
+				}
+			}
+		}
+	}
+}
+
+// handleRenderOp processes a single render operation.
+func (a *WidgetApp) handleRenderOp(op renderOp) {
+	switch op.Type {
+	case opRenderRegion:
+		a.markDirty(op.Region)
+	case opRenderFull:
+		a.markDirty(dirtyRect{})
+	case opSwapBuffers:
+		a.swapBuffers()
+	}
+}
+
+// swapBuffers swaps front and back buffers for double buffering.
+func (a *WidgetApp) swapBuffers() {
+	a.bufferSwapMu.Lock()
+	defer a.bufferSwapMu.Unlock()
+	
+	if a.backBuffer != nil && a.frontBuffer != nil {
+		a.backBuffer, a.frontBuffer = a.frontBuffer, a.backBuffer
+	}
 }
 
 // pollEvents reads terminal events and posts them as messages.
@@ -970,4 +1086,148 @@ func (a *WidgetApp) Post(msg Message) {
 			log.Printf("Debug: TUI message queue full, dropping %T", msg)
 		}
 	}
+}
+
+// SetTargetFPS sets the target frame rate for the UI rendering.
+// Valid range is 30-120 FPS. Values outside this range will be clamped.
+// This allows adjusting the trade-off between smoothness and CPU usage.
+func (a *WidgetApp) SetTargetFPS(fps int) {
+	if a == nil {
+		return
+	}
+	
+	// Clamp to valid range
+	if fps < minTargetFPS {
+		fps = minTargetFPS
+	}
+	if fps > maxTargetFPS {
+		fps = maxTargetFPS
+	}
+	
+	a.renderMu.Lock()
+	defer a.renderMu.Unlock()
+	
+	a.targetFPS = fps
+	a.frameTimeTarget = time.Second / time.Duration(fps)
+	
+	// Update frame ticker interval
+	if a.frameTicker != nil {
+		a.frameTicker.Reset(a.frameTimeTarget)
+	}
+	
+	if a.debugRender {
+		log.Printf("[render] target FPS set to %d (frame time: %v)", fps, a.frameTimeTarget)
+	}
+}
+
+// queueRender adds a render operation to the async queue.
+// Safe to call from any goroutine.
+func (a *WidgetApp) queueRender(op renderOp) {
+	if a == nil || a.renderCh == nil {
+		return
+	}
+	
+	select {
+	case a.renderCh <- op:
+		// Queued successfully
+	default:
+		// Channel full, add to pending queue
+		a.renderQueueMu.Lock()
+		a.renderQueue = append(a.renderQueue, op)
+		a.renderQueueMu.Unlock()
+	}
+}
+
+// markDirty marks a region as needing redraw.
+// If region is empty, marks entire screen as dirty.
+func (a *WidgetApp) markDirty(region dirtyRect) {
+	if a == nil {
+		return
+	}
+	
+	a.dirtyRegionsMu.Lock()
+	defer a.dirtyRegionsMu.Unlock()
+	
+	if region.isEmpty() {
+		a.fullRedraw = true
+		a.dirtyRegions = a.dirtyRegions[:0]
+	} else {
+		if a.fullRedraw {
+			return // Already doing full redraw
+		}
+		
+		// Try to merge with existing regions
+		for i, existing := range a.dirtyRegions {
+			if intersects(existing, region) || adjacent(existing, region) {
+				a.dirtyRegions[i] = union(existing, region)
+				a.mergeDirtyRegions()
+				a.dirty = true
+				return
+			}
+		}
+		
+		// Add as new region
+		a.dirtyRegions = append(a.dirtyRegions, region)
+		
+		// Switch to full redraw if too many regions
+		if len(a.dirtyRegions) > 10 {
+			a.fullRedraw = true
+			a.dirtyRegions = a.dirtyRegions[:0]
+		}
+	}
+	
+	a.dirty = true
+}
+
+// Helper functions for dirty region management
+func intersects(a, b dirtyRect) bool {
+	return a.MinX < b.MaxX && a.MaxX > b.MinX &&
+		a.MinY < b.MaxY && a.MaxY > b.MinY
+}
+
+func adjacent(a, b dirtyRect) bool {
+	horizAdj := (a.MaxX == b.MinX || b.MaxX == a.MinX) &&
+		a.MinY < b.MaxY && b.MinY < a.MaxY
+	vertAdj := (a.MaxY == b.MinY || b.MaxY == a.MinY) &&
+		a.MinX < b.MaxX && b.MinX < a.MaxX
+	return horizAdj || vertAdj
+}
+
+func union(a, b dirtyRect) dirtyRect {
+	return dirtyRect{
+		MinX: min(a.MinX, b.MinX),
+		MinY: min(a.MinY, b.MinY),
+		MaxX: max(a.MaxX, b.MaxX),
+		MaxY: max(a.MaxY, b.MaxY),
+	}
+}
+
+func (a *WidgetApp) mergeDirtyRegions() {
+	changed := true
+	for changed && len(a.dirtyRegions) > 1 {
+		changed = false
+		for i := 0; i < len(a.dirtyRegions)-1; i++ {
+			for j := i + 1; j < len(a.dirtyRegions); j++ {
+				if intersects(a.dirtyRegions[i], a.dirtyRegions[j]) ||
+					adjacent(a.dirtyRegions[i], a.dirtyRegions[j]) {
+					a.dirtyRegions[i] = union(a.dirtyRegions[i], a.dirtyRegions[j])
+					a.dirtyRegions = append(a.dirtyRegions[:j], a.dirtyRegions[j+1:]...)
+					changed = true
+					break
+				}
+			}
+			if changed {
+				break
+			}
+		}
+	}
+}
+
+// shouldSkipFrame returns true if we should skip this frame to maintain target FPS.
+func (a *WidgetApp) shouldSkipFrame() bool {
+	if a.lastFrameTime == 0 {
+		return false
+	}
+	// Skip if last frame took longer than frame time budget
+	return a.lastFrameTime > a.frameTimeTarget
 }

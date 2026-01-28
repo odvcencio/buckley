@@ -15,6 +15,22 @@ import (
 	"github.com/odvcencio/fluffyui/widgets"
 )
 
+// hasModalOverlay returns true if there's a modal overlay on top of the base layer.
+func (a *WidgetApp) hasModalOverlay() bool {
+	if a == nil || a.screen == nil {
+		return false
+	}
+	// Check if any layer above the base is modal
+	count := a.screen.LayerCount()
+	for i := 1; i < count; i++ {
+		layer := a.screen.Layer(i)
+		if layer != nil && layer.Modal {
+			return true
+		}
+	}
+	return false
+}
+
 func (a *WidgetApp) setStatusOverride(text string, duration time.Duration) {
 	if duration <= 0 {
 		duration = 3 * time.Second

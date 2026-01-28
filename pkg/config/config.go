@@ -16,7 +16,7 @@ import (
 )
 
 const (
-	defaultOpenRouterModel = "moonshotai/kimi-k2-thinking"
+	defaultOpenRouterModel = "moonshotai/kimi-k2.5"
 	defaultOpenAIModel     = "openai/gpt-5.2-codex-xhigh"
 	defaultAnthropicModel  = "anthropic/claude-sonnet-4-5"
 	defaultGoogleModel     = "google/gemini-3-pro"
@@ -1070,7 +1070,7 @@ func DefaultConfig() *Config {
 			TargetReduction:  0.70,
 			PreserveCommands: true,
 			Models: []string{
-				"moonshotai/kimi-k2-thinking",
+				"moonshotai/kimi-k2.5",
 				"qwen/qwen3-coder",
 				"openai/gpt-5.2-mini",
 			},

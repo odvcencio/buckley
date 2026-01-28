@@ -26,62 +26,93 @@ import (
 //   - drawFocusIndicator
 // ============================================================================
 
-// render draws the UI to the backend using partial redraws.
+// render draws the UI to the backend using partial redraws with optimization.
 func (a *WidgetApp) render() {
 	a.renderMu.Lock()
 	defer a.renderMu.Unlock()
 
 	start := time.Now()
 
-	// Render to buffer
+	// Get dirty regions
+	a.dirtyRegionsMu.Lock()
+	regions := make([]dirtyRect, len(a.dirtyRegions))
+	copy(regions, a.dirtyRegions)
+	fullRedraw := a.fullRedraw
+	a.dirtyRegionsMu.Unlock()
+
+	// Render to screen buffer (this is the back buffer)
 	a.screen.Render()
 	buf := a.screen.Buffer()
 	a.drawFocusIndicator(buf)
 
 	// Track cells updated
 	var cellsUpdated int64
+	w, h := buf.Size()
+	totalCells := w * h
 
-	// Use partial redraw if only some cells changed
-	if buf.IsDirty() {
+	// Determine if we should do full or partial redraw
+	// Full redraw if: explicitly requested, too many regions, or buffer is mostly dirty
+	shouldFullRedraw := fullRedraw
+	if !shouldFullRedraw && buf.IsDirty() {
 		dirtyCount := buf.DirtyCount()
-		w, h := buf.Size()
-		totalCells := w * h
-
-		// If more than half the cells are dirty, do a full redraw
-		// (more efficient than many individual SetContent calls)
-		if dirtyCount > totalCells/2 {
-			for y := 0; y < h; y++ {
-				for x := 0; x < w; x++ {
-					cell := buf.Get(x, y)
-					a.backend.SetContent(x, y, cell.Rune, nil, cell.Style)
-				}
-			}
-			cellsUpdated = int64(totalCells)
-			a.metrics.FullRedraws++
-		} else {
-			// Partial redraw - only dirty cells
-			buf.ForEachDirtyCell(func(x, y int, cell runtime.Cell) {
-				a.backend.SetContent(x, y, cell.Rune, nil, cell.Style)
-				cellsUpdated++
-			})
-			a.metrics.PartialRedraws++
+		if dirtyCount > totalCells/2 || len(regions) > 10 {
+			shouldFullRedraw = true
 		}
-		buf.ClearDirty()
 	}
 
-	// Show the screen
+	if shouldFullRedraw {
+		// Full redraw - all cells
+		for y := 0; y < h; y++ {
+			for x := 0; x < w; x++ {
+				cell := buf.Get(x, y)
+				a.backend.SetContent(x, y, cell.Rune, nil, cell.Style)
+			}
+		}
+		cellsUpdated = int64(totalCells)
+		a.metrics.FullRedraws++
+	} else if len(regions) > 0 {
+		// Partial redraw based on dirty regions
+		for _, region := range regions {
+			// Clip region to buffer bounds
+			minX := maxInt(0, region.MinX)
+			minY := maxInt(0, region.MinY)
+			maxX := minInt(w, region.MaxX)
+			maxY := minInt(h, region.MaxY)
+			
+			for y := minY; y < maxY; y++ {
+				for x := minX; x < maxX; x++ {
+					cell := buf.Get(x, y)
+					a.backend.SetContent(x, y, cell.Rune, nil, cell.Style)
+					cellsUpdated++
+				}
+			}
+		}
+		a.metrics.PartialRedraws++
+	} else if buf.IsDirty() {
+		// Fallback: use buffer's dirty tracking
+		buf.ForEachDirtyCell(func(x, y int, cell runtime.Cell) {
+			a.backend.SetContent(x, y, cell.Rune, nil, cell.Style)
+			cellsUpdated++
+		})
+		a.metrics.PartialRedraws++
+	}
+
+	buf.ClearDirty()
+
+	// Show the screen (atomic operation for double buffering effect)
 	a.backend.Show()
 
 	// Update metrics
 	elapsed := time.Since(start)
+	a.lastFrameTime = elapsed
 	a.metrics.FrameCount++
 	a.metrics.TotalRenderTime += elapsed
 	a.metrics.LastFrameTime = elapsed
 	a.metrics.CellsUpdated = cellsUpdated
 
-	// Check for dropped frames (if render took longer than 16ms)
-	if elapsed > 16*time.Millisecond {
-		a.metrics.DroppedFrames++
+	// Log frame time warning if rendering is too slow
+	if elapsed > a.frameTimeTarget && a.debugRender {
+		log.Printf("[render] slow frame: %v (target: %v)", elapsed, a.frameTimeTarget)
 	}
 
 	if a.debugRender && a.metrics.FrameCount%60 == 0 {
@@ -93,13 +124,18 @@ func (a *WidgetApp) render() {
 		if a.metrics.FrameCount > 0 {
 			dropPct = float64(a.metrics.DroppedFrames) / float64(a.metrics.FrameCount) * 100
 		}
-		log.Printf("[render] frames=%d avg=%v dropped=%.1f%% cells=%d full=%d partial=%d",
+		regionCount := len(regions)
+		if fullRedraw {
+			regionCount = -1 // Indicate full redraw
+		}
+		log.Printf("[render] frames=%d avg=%v dropped=%.1f%% cells=%d full=%d partial=%d regions=%d",
 			a.metrics.FrameCount,
 			avg,
 			dropPct,
 			a.metrics.CellsUpdated,
 			a.metrics.FullRedraws,
-			a.metrics.PartialRedraws)
+			a.metrics.PartialRedraws,
+			regionCount)
 	}
 
 	if a.recorder != nil && buf != nil {

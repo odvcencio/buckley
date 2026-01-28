@@ -1150,7 +1150,7 @@ func preferredModelIDs(execID, planID, reviewID string, catalog map[string]model
 	add(execID)
 	add(planID)
 	add(reviewID)
-	add("moonshotai/kimi-k2-thinking")
+	add("moonshotai/kimi-k2.5")
 	return ids
 }
 

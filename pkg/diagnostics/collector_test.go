@@ -35,8 +35,11 @@ func TestCollectorSubscribe(t *testing.T) {
 		Data:      map[string]any{"tool": "read_file"},
 	})
 
-	// Give time for events to be processed
-	time.Sleep(50 * time.Millisecond)
+	// Flush events to ensure immediate delivery (needed for async batching hub)
+	hub.Flush()
+
+	// Give time for events to be dispatched and processed
+	time.Sleep(300 * time.Millisecond)
 
 	stats := c.Stats()
 	if stats["api_calls"].(int) != 1 {

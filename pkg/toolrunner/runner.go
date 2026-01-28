@@ -138,6 +138,24 @@ var nodePool = sync.Pool{
 	},
 }
 
+// toolCallRecordPool provides memory-efficient recycling of ToolCallRecord slices
+// to reduce GC pressure during tool execution.
+var toolCallRecordPool = sync.Pool{
+	New: func() any {
+		// Pre-allocate with capacity for typical batch sizes
+		s := make([]ToolCallRecord, 0, 8)
+		return &s
+	},
+}
+
+// builderPool provides memory-efficient recycling of strings.Builder
+// instances for tool result formatting.
+var builderPool = sync.Pool{
+	New: func() any {
+		return &strings.Builder{}
+	},
+}
+
 // getNode retrieves a node from the pool or allocates a new one.
 func getNode() *lruNode {
 	return nodePool.Get().(*lruNode)
@@ -150,6 +168,49 @@ func putNode(n *lruNode) {
 	n.prev = nil
 	n.next = nil
 	nodePool.Put(n)
+}
+
+// acquireToolCallRecordSlice retrieves a ToolCallRecord slice from the pool.
+// Returns a slice with 0 length but pre-allocated capacity.
+func acquireToolCallRecordSlice() []ToolCallRecord {
+	s := toolCallRecordPool.Get().(*[]ToolCallRecord)
+	return (*s)[:0]
+}
+
+// releaseToolCallRecordSlice returns a ToolCallRecord slice to the pool.
+// The slice should not be used after this call.
+func releaseToolCallRecordSlice(s []ToolCallRecord) {
+	if s == nil {
+		return
+	}
+	// Only pool reasonably-sized slices to avoid memory bloat
+	if cap(s) > 1024 {
+		return
+	}
+	// Clear the slice to allow GC of referenced data
+	for i := range s {
+		s[i] = ToolCallRecord{}
+	}
+	toolCallRecordPool.Put(&s)
+}
+
+// acquireBuilder retrieves a strings.Builder from the pool.
+func acquireBuilder() *strings.Builder {
+	b := builderPool.Get().(*strings.Builder)
+	b.Reset()
+	return b
+}
+
+// releaseBuilder returns a strings.Builder to the pool.
+func releaseBuilder(b *strings.Builder) {
+	if b == nil {
+		return
+	}
+	// Don't pool builders with very large buffers
+	if b.Cap() > 64*1024 {
+		return
+	}
+	builderPool.Put(b)
 }
 
 // toolSelectionCache is an efficient LRU cache with TTL expiration and statistics.
@@ -905,6 +966,8 @@ func (r *Runner) executeWithTools(ctx context.Context, req Request, tools []tool
 				Content:    content,
 			})
 		}
+		// Release the pooled slice after processing
+		releaseToolCallRecordSlice(toolResults)
 	}
 
 	result.Content = "Maximum iterations reached. Please try a simpler request."
@@ -926,7 +989,8 @@ func (r *Runner) executeToolCalls(ctx context.Context, calls []model.ToolCall, t
 }
 
 func (r *Runner) executeToolCallsSequential(ctx context.Context, calls []model.ToolCall, toolMap map[string]tool.Tool, result *Result) ([]ToolCallRecord, error) {
-	var records []ToolCallRecord
+	// Use pooled slice for records
+	records := acquireToolCallRecordSlice()
 
 	for _, call := range calls {
 		record := r.executeSingleToolCall(ctx, call, toolMap)
@@ -943,6 +1007,9 @@ func (r *Runner) executeToolCallsSequential(ctx context.Context, calls []model.T
 		}
 	}
 
+	// Note: records slice is returned to caller, so we don't release it here
+	// The caller is responsible for releasing if needed, but typically
+	// the records are appended to result.ToolCalls which lives for the request duration
 	return records, nil
 }
 
@@ -953,7 +1020,14 @@ func (r *Runner) executeToolCallsParallel(ctx context.Context, calls []model.Too
 	}
 
 	batches := buildToolCallBatches(calls)
-	records := make([]ToolCallRecord, len(calls))
+	// Use pooled slice with capacity for all calls
+	records := acquireToolCallRecordSlice()
+	if cap(records) < len(calls) {
+		// Need larger capacity - allocate new slice
+		records = make([]ToolCallRecord, len(calls))
+	} else {
+		records = records[:len(calls)]
+	}
 
 	for _, batch := range batches {
 		if len(batch) == 0 {

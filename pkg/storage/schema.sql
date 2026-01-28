@@ -1,5 +1,14 @@
 -- Buckley Database Schema
 -- Phase 3: Memory & Sessions
+--
+-- Recommended indexes for message queries (added for performance):
+--   CREATE INDEX idx_messages_session_time ON messages(session_id, timestamp);
+--   CREATE INDEX idx_messages_session_role ON messages(session_id, role);
+-- These indexes optimize:
+--   - Cursor-based pagination (GetMessagesWithCursor)
+--   - Batch loading (GetMessagesWithSessions)
+--   - Session statistics (GetSessionStats)
+--   - Role-based filtering
 
 -- Schema migrations tracking
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -47,6 +56,14 @@ CREATE TABLE IF NOT EXISTS messages (
 
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
 CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp);
+
+-- Performance indexes for message retrieval and pagination
+-- Supports GetMessagesWithCursor, GetMessagesWithSessions, GetSessionStats
+CREATE INDEX IF NOT EXISTS idx_messages_session_time ON messages(session_id, timestamp);
+
+-- Performance index for role-based queries
+-- Supports GetSessionStats role distribution and role-based filtering
+CREATE INDEX IF NOT EXISTS idx_messages_session_role ON messages(session_id, role);
 
 -- Message full-text search (Phase 6)
 CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(

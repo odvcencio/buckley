@@ -3,7 +3,34 @@ package model
 import (
 	"regexp"
 	"strings"
+	"sync"
 )
+
+// streamAccumulatorPool provides memory-efficient recycling of StreamAccumulator
+// instances to reduce GC pressure during streaming operations.
+var streamAccumulatorPool = sync.Pool{
+	New: func() any {
+		return &StreamAccumulator{}
+	},
+}
+
+// AcquireStreamAccumulator retrieves a StreamAccumulator from the pool.
+// The accumulator is reset and ready for use.
+func AcquireStreamAccumulator() *StreamAccumulator {
+	a := streamAccumulatorPool.Get().(*StreamAccumulator)
+	a.Reset()
+	return a
+}
+
+// ReleaseStreamAccumulator returns a StreamAccumulator to the pool for reuse.
+// The accumulator should not be used after this call.
+func ReleaseStreamAccumulator(a *StreamAccumulator) {
+	if a == nil {
+		return
+	}
+	a.Reset()
+	streamAccumulatorPool.Put(a)
+}
 
 // StreamAccumulator accumulates streaming chunks into complete responses.
 // It handles tool call delta accumulation following the OpenAI-compatible pattern
@@ -18,7 +45,7 @@ type StreamAccumulator struct {
 
 // NewStreamAccumulator creates a new accumulator for streaming responses.
 func NewStreamAccumulator() *StreamAccumulator {
-	return &StreamAccumulator{}
+	return AcquireStreamAccumulator()
 }
 
 // Add processes a streaming chunk and accumulates its contents.

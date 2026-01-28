@@ -18,12 +18,12 @@ const (
 	defaultClassicAutoTrigger = 0.75
 	defaultRLMAutoTrigger     = 0.85
 	defaultCompactionRatio    = 0.45
-	primaryCompactionModel    = "moonshotai/kimi-k2-thinking"
+	primaryCompactionModel    = "moonshotai/kimi-k2.5"
 
 	// Tiered threshold constants
-	warningThreshold  = 0.80
-	compactThreshold  = 0.90
-	queueBufferSize   = 3
+	warningThreshold    = 0.80
+	compactThreshold    = 0.90
+	queueBufferSize     = 3
 	defaultMaxQueueWait = 5 * time.Second
 )
 
@@ -147,12 +147,12 @@ func (c *tokenEstimateCache) Get(text string) (int, bool) {
 func (c *tokenEstimateCache) Set(text string, tokens int) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	
+
 	// Simple eviction: if at capacity, clear half the entries
 	if len(c.entries) >= c.maxSize {
 		c.evictHalf()
 	}
-	
+
 	c.entries[text] = cacheEntry{
 		tokens:    tokens,
 		timestamp: time.Now(),
@@ -210,9 +210,9 @@ type CompactionManager struct {
 	tokenCache *tokenEstimateCache
 
 	// Backpressure control
-	backpressureMu      sync.RWMutex
-	pendingCompactions  int
-	maxPending          int
+	backpressureMu     sync.RWMutex
+	pendingCompactions int
+	maxPending         int
 
 	// Tiered threshold callbacks
 	warningThresholdFn func(float64)
@@ -228,17 +228,17 @@ func NewCompactionManager(mgr *model.Manager, cfg *config.Config) *CompactionMan
 	ctx, cancel := context.WithCancel(context.Background())
 
 	cm := &CompactionManager{
-		modelManager:        mgr,
-		cfg:                 cfg,
-		summaryTimeout:      timeout,
-		compactionQueue:     make(chan CompactionRequest, queueBufferSize),
-		queueDone:           make(chan struct{}),
-		queueCtx:            ctx,
-		queueCancel:         cancel,
-		compressor:          NewGzipCompressor(gzip.DefaultCompression),
-		tokenCache:          newTokenEstimateCache(1000),
-		maxPending:          queueBufferSize,
-		warningThresholdFn:  nil,
+		modelManager:       mgr,
+		cfg:                cfg,
+		summaryTimeout:     timeout,
+		compactionQueue:    make(chan CompactionRequest, queueBufferSize),
+		queueDone:          make(chan struct{}),
+		queueCtx:           ctx,
+		queueCancel:        cancel,
+		compressor:         NewGzipCompressor(gzip.DefaultCompression),
+		tokenCache:         newTokenEstimateCache(1000),
+		maxPending:         queueBufferSize,
+		warningThresholdFn: nil,
 	}
 
 	// Start background worker
