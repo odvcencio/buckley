@@ -1,9 +1,10 @@
 // Package tui provides the integrated terminal user interface for Buckley.
-// This file defines the App interface that both WidgetApp and Runner implement.
+// This file defines the App interface that Runner implements.
 
 package tui
 
 import (
+	"strings"
 	"time"
 
 	"github.com/odvcencio/buckley/pkg/diagnostics"
@@ -13,11 +14,13 @@ import (
 )
 
 // App is the interface for the TUI application.
-// Both WidgetApp (legacy) and Runner (fluffyui-native) implement this interface.
 type App interface {
 	// Lifecycle
 	Run() error
 	Quit()
+
+	// Messaging (for telemetry bridge)
+	Post(msg Message)
 
 	// Content
 	AddMessage(content, source string)
@@ -28,6 +31,7 @@ type App interface {
 	// Streaming
 	StreamChunk(sessionID, text string)
 	StreamEnd(sessionID, fullText string)
+	IsStreaming() bool
 
 	// Status
 	SetStatus(text string)
@@ -61,4 +65,32 @@ type App interface {
 
 	// Diagnostics
 	SetDiagnostics(collector *diagnostics.Collector)
+}
+
+// normalizeWebBaseURL normalizes the web base URL for links.
+func normalizeWebBaseURL(url string) string {
+	url = strings.TrimSpace(url)
+	if url == "" {
+		return ""
+	}
+	// Remove trailing slash
+	url = strings.TrimSuffix(url, "/")
+	return url
+}
+
+// LayoutSpec defines the layout configuration for the TUI.
+type LayoutSpec struct {
+	SidebarVisible  bool
+	PresenceVisible bool
+	SidebarWidth    int
+	ShowHeader      bool
+	ShowStatus      bool
+}
+
+// RenderMetrics tracks rendering performance statistics.
+type RenderMetrics struct {
+	FrameCount      int64
+	DroppedFrames   int64
+	TotalRenderTime time.Duration
+	LastFrameTime   time.Duration
 }

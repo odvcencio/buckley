@@ -118,7 +118,6 @@ type ControllerConfig struct {
 	SessionID    string // Resume session, empty for new
 	AgentSocket  string // unix:/path or tcp:host:port for agent API
 	Context      context.Context
-	UseRunner    bool // Use fluffyui-native Runner instead of WidgetApp
 }
 
 func newSessionState(ctx context.Context, cfg *config.Config, store *storage.Store, workDir string, hub *telemetry.Hub, modelMgr *model.Manager, sessionID string, loadMessages bool, progressMgr *progress.ProgressManager, toastMgr *toast.ToastManager) (*SessionState, error) {
@@ -345,38 +344,22 @@ func NewController(cfg ControllerConfig) (*Controller, error) {
 			Muted:        cfg.Config.UI.Audio.Muted,
 		}
 	}
+	// Use fluffyui-native Runner by default (simpler, more maintainable)
 	var app App
-	if cfg.UseRunner {
-		app, err = NewRunner(RunnerConfig{
-			Theme:           theme.DefaultTheme(),
-			ModelName:       cfg.Config.Models.Execution,
-			SessionID:       currentSessionID,
-			WorkDir:         workDir,
-			ProjectRoot:     projectRoot,
-			ReduceMotion:    cfg.Config != nil && cfg.Config.UI.ReduceAnimation,
-			HighContrast:    cfg.Config != nil && cfg.Config.UI.HighContrast,
-			UseTextLabels:   cfg.Config != nil && cfg.Config.UI.UseTextLabels,
-			MessageMetadata: metadataMode,
-			WebBaseURL:      webBaseURL,
-			Audio:           audioCfg,
-			AgentSocket:     cfg.AgentSocket,
-		})
-	} else {
-		app, err = NewWidgetApp(WidgetAppConfig{
-			Theme:           theme.DefaultTheme(),
-			ModelName:       cfg.Config.Models.Execution,
-			SessionID:       currentSessionID,
-			WorkDir:         workDir,
-			ProjectRoot:     projectRoot,
-			ReduceMotion:    cfg.Config != nil && cfg.Config.UI.ReduceAnimation,
-			HighContrast:    cfg.Config != nil && cfg.Config.UI.HighContrast,
-			UseTextLabels:   cfg.Config != nil && cfg.Config.UI.UseTextLabels,
-			MessageMetadata: metadataMode,
-			WebBaseURL:      webBaseURL,
-			Audio:           audioCfg,
-			AgentSocket:     cfg.AgentSocket,
-		})
-	}
+	app, err = NewRunner(RunnerConfig{
+		Theme:           theme.DefaultTheme(),
+		ModelName:       cfg.Config.Models.Execution,
+		SessionID:       currentSessionID,
+		WorkDir:         workDir,
+		ProjectRoot:     projectRoot,
+		ReduceMotion:    cfg.Config != nil && cfg.Config.UI.ReduceAnimation,
+		HighContrast:    cfg.Config != nil && cfg.Config.UI.HighContrast,
+		UseTextLabels:   cfg.Config != nil && cfg.Config.UI.UseTextLabels,
+		MessageMetadata: metadataMode,
+		WebBaseURL:      webBaseURL,
+		Audio:           audioCfg,
+		AgentSocket:     cfg.AgentSocket,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("create TUI app: %w", err)
 	}
@@ -452,13 +435,8 @@ func NewController(cfg ControllerConfig) (*Controller, error) {
 
 	// Create telemetry bridge for sidebar updates
 	if cfg.Telemetry != nil {
-		if widgetApp, ok := app.(*WidgetApp); ok {
-			// WidgetApp uses the scheduler-based bridge for optimal reactive updates
-			ctrl.telemetryBridge = NewTelemetryUIBridge(cfg.Telemetry, widgetApp)
-		} else if runner, ok := app.(*Runner); ok {
-			// Runner uses the simpler bridge without scheduler dependency
-			ctrl.telemetryBridge = NewSimpleTelemetryBridge(cfg.Telemetry, runner)
-		}
+		// Runner uses the simpler bridge without scheduler dependency
+		ctrl.telemetryBridge = NewSimpleTelemetryBridge(cfg.Telemetry, app)
 
 		// Create and subscribe diagnostics collector
 		ctrl.diagnostics = diagnostics.NewCollector()

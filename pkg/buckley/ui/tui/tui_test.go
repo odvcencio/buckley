@@ -3,7 +3,6 @@ package tui
 import (
 	"testing"
 
-	"github.com/odvcencio/fluffyui/backend"
 	"github.com/odvcencio/fluffyui/runtime"
 	"github.com/odvcencio/fluffyui/terminal"
 	"github.com/odvcencio/fluffyui/theme"
@@ -222,7 +221,7 @@ func TestInputAreaInFullWidgetTree(t *testing.T) {
 		t.Fatal("inputArea.IsFocused() returned false")
 	}
 
-	// Now send a key message through the screen
+	// Now send a key message
 	msg := runtime.KeyMsg{
 		Key:  terminal.KeyRune,
 		Rune: 'x',
@@ -321,136 +320,48 @@ func TestInputWithOverlayLayers(t *testing.T) {
 func TestFluffyUITextAreaDirect(t *testing.T) {
 	// Test using fluffyui's TextArea directly, not our InputArea wrapper
 	textarea := widgets.NewTextArea()
-	
+
 	// Create a simple widget tree
 	root := runtime.VBox(
 		runtime.Fixed(textarea),
 	)
-	
+
 	// Create screen
 	screen := runtime.NewScreen(80, 24)
 	screen.SetAutoRegisterFocus(true)
 	screen.PushLayer(root, false)
-	
+
 	// Get focus scope and set focus
 	scope := screen.BaseFocusScope()
 	if scope == nil {
 		t.Fatal("BaseFocusScope is nil")
 	}
-	
+
 	t.Logf("Scope has %d focusables", scope.Count())
-	
+
 	// Set focus on textarea
 	scope.SetFocus(textarea)
 	textarea.Focus()
-	
+
 	t.Logf("textarea.IsFocused() = %v", textarea.IsFocused())
-	
+
 	if !textarea.IsFocused() {
 		t.Fatal("TextArea is not focused after Focus() call")
 	}
-	
+
 	// Send a key message
 	msg := runtime.KeyMsg{
 		Key:  terminal.KeyRune,
 		Rune: 'x',
 	}
-	
+
 	result := textarea.HandleMessage(msg)
 	t.Logf("HandleMessage result: Handled=%v", result.Handled)
-	
+
 	text := textarea.Text()
 	t.Logf("TextArea text: %q", text)
-	
+
 	if text != "x" {
 		t.Errorf("Expected text 'x', got %q", text)
 	}
 }
-
-func TestWidgetAppKeyInput(t *testing.T) {
-	// Create a minimal WidgetApp using a test backend
-	testBackend := &testBackendImpl{
-		events: make(chan terminal.Event, 10),
-		width:  80,
-		height: 24,
-	}
-	
-	cfg := WidgetAppConfig{
-		Backend: testBackend,
-	}
-	
-	app, err := NewWidgetApp(cfg)
-	if err != nil {
-		t.Fatalf("NewWidgetApp failed: %v", err)
-	}
-	
-	// Verify inputArea is focused
-	if !app.inputArea.IsFocused() {
-		t.Fatal("inputArea is not focused after NewWidgetApp")
-	}
-	
-	// Simulate a key event through the backend
-	testBackend.events <- terminal.KeyEvent{
-		Key:  terminal.KeyRune,
-		Rune: 'z',
-	}
-	
-	// Process the event manually (since we're not running the full loop)
-	select {
-	case ev := <-testBackend.events:
-		if ke, ok := ev.(terminal.KeyEvent); ok {
-			msg := KeyMsg{
-				Key:  int(ke.Key),
-				Rune: ke.Rune,
-			}
-			app.handleKeyMsg(msg)
-		}
-	default:
-		t.Fatal("No event received")
-	}
-	
-	// Check if text was entered
-	text := app.inputArea.Text()
-	t.Logf("InputArea text after key: %q", text)
-	
-	if text != "z" {
-		t.Errorf("Expected 'z', got %q", text)
-	}
-	
-	app.Quit()
-}
-
-// testBackendImpl is a minimal backend for testing
-type testBackendImpl struct {
-	events chan terminal.Event
-	width  int
-	height int
-}
-
-func (b *testBackendImpl) Init() error                                               { return nil }
-func (b *testBackendImpl) Fini()                                                     {}
-func (b *testBackendImpl) Size() (int, int)                                          { return b.width, b.height }
-func (b *testBackendImpl) SetContent(x, y int, r rune, comb []rune, style backend.Style) {}
-func (b *testBackendImpl) Show()                                                     {}
-func (b *testBackendImpl) Sync()                                                     {}
-func (b *testBackendImpl) Clear()                                                    {}
-func (b *testBackendImpl) HideCursor()                                               {}
-func (b *testBackendImpl) ShowCursor()                                               {}
-func (b *testBackendImpl) SetCursorPos(x, y int)                                     {}
-func (b *testBackendImpl) PollEvent() terminal.Event {
-	select {
-	case ev := <-b.events:
-		return ev
-	default:
-		return nil
-	}
-}
-func (b *testBackendImpl) PostEvent(ev terminal.Event) error {
-	select {
-	case b.events <- ev:
-		return nil
-	default:
-		return nil
-	}
-}
-func (b *testBackendImpl) Beep() {}

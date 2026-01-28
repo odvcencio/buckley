@@ -251,6 +251,7 @@ func (c *ChatView) AddMessage(content, source string) {
 func (c *ChatView) AppendText(text string) {
 	if c.lastSource == "" {
 		c.buffer.AppendText(text)
+		c.Invalidate()
 		return
 	}
 
@@ -266,11 +267,13 @@ func (c *ChatView) AppendText(text string) {
 	}
 	if c.mdRenderer == nil && c.metadataMode != "always" {
 		c.buffer.AppendText(text)
+		c.Invalidate()
 		return
 	}
 	lines := c.buildMessageLines(c.lastContent, c.lastSource, messageTime, c.lastMessageID)
 	c.buffer.ReplaceLastMessage(lines)
 	c.syncListOffset()
+	c.Invalidate()
 }
 
 func (c *ChatView) buildMessageLines(content, source string, messageTime time.Time, messageID int) []scrollback.Line {

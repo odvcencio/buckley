@@ -5,6 +5,7 @@ package tui
 
 import (
 	"context"
+	"log"
 	"strings"
 	"time"
 
@@ -94,6 +95,9 @@ type Runner struct {
 	onApproval    func(requestID string, approved, alwaysAllow bool)
 	onNextSession func()
 	onPrevSession func()
+
+	// Agent server for real-time control
+	agentServer *AgentServer
 }
 
 // NewRunner creates a new fluffyui-native TUI runner.
@@ -135,12 +139,44 @@ func NewRunner(cfg RunnerConfig) (*Runner, error) {
 	// Build widget tree
 	root := r.buildLayout()
 
+	// Create keymap with Buckley-specific bindings
+	// Note: Standard commands (quit, scroll, clipboard) are registered automatically
+	keymap := &keybind.Keymap{
+		Name: "buckley",
+		Bindings: []keybind.Binding{
+			// App commands (from RegisterStandardCommands)
+			{Key: keybind.MustParseKeySequence("ctrl+q"), Command: "app.quit"},
+			{Key: keybind.MustParseKeySequence("f5"), Command: "app.refresh"},
+			// Focus commands (from RegisterStandardCommands)
+			{Key: keybind.MustParseKeySequence("tab"), Command: "focus.next"},
+			{Key: keybind.MustParseKeySequence("shift+tab"), Command: "focus.prev"},
+			// Scroll commands (from RegisterScrollCommands)
+			{Key: keybind.MustParseKeySequence("ctrl+up"), Command: "scroll.up"},
+			{Key: keybind.MustParseKeySequence("ctrl+down"), Command: "scroll.down"},
+			{Key: keybind.MustParseKeySequence("pgup"), Command: "scroll.pageUp"},
+			{Key: keybind.MustParseKeySequence("pgdn"), Command: "scroll.pageDown"},
+			{Key: keybind.MustParseKeySequence("home"), Command: "scroll.top"},
+			{Key: keybind.MustParseKeySequence("end"), Command: "scroll.bottom"},
+			// Clipboard commands (from RegisterClipboardCommands)
+			{Key: keybind.MustParseKeySequence("ctrl+shift+c"), Command: "clipboard.copy", When: keybind.WhenFocusedClipboardTarget()},
+			{Key: keybind.MustParseKeySequence("ctrl+shift+x"), Command: "clipboard.cut", When: keybind.WhenFocusedClipboardTarget()},
+			{Key: keybind.MustParseKeySequence("ctrl+shift+v"), Command: "clipboard.paste", When: keybind.WhenFocusedClipboardTarget()},
+			// Buckley-specific commands
+			{Key: keybind.MustParseKeySequence("ctrl+b"), Command: "buckley.toggle-sidebar"},
+			{Key: keybind.MustParseKeySequence("alt+right"), Command: "buckley.next-session"},
+			{Key: keybind.MustParseKeySequence("alt+left"), Command: "buckley.prev-session"},
+			{Key: keybind.MustParseKeySequence("ctrl+f"), Command: "buckley.search"},
+			{Key: keybind.MustParseKeySequence("ctrl+i"), Command: "buckley.focus-input"},
+		},
+	}
+
 	// Build app options
 	opts := []fluffy.AppOption{
 		fluffy.WithRoot(root),
 		fluffy.WithUpdate(r.update),
 		fluffy.WithTickRate(16 * time.Millisecond),
 		fluffy.WithKeyBindings(r.registerKeyBindings),
+		fluffy.WithKeymap(keymap),
 	}
 
 	if cfg.Backend != nil {
@@ -169,6 +205,14 @@ func NewRunner(cfg RunnerConfig) (*Runner, error) {
 	// Wire input callbacks
 	r.wireInputCallbacks()
 
+	// Initialize agent server if configured
+	if cfg.AgentSocket != "" {
+		if err := r.initAgentServer(cfg.AgentSocket); err != nil {
+			// Log but don't fail - agent server is optional
+			log.Printf("warning: failed to start agent server: %v", err)
+		}
+	}
+
 	return r, nil
 }
 
@@ -178,6 +222,7 @@ func (r *Runner) Run() error {
 	if r == nil || r.app == nil {
 		return nil
 	}
+	defer r.stopAgentServer() // Ensure cleanup on exit
 	return r.app.Run(context.Background())
 }
 
@@ -186,6 +231,7 @@ func (r *Runner) RunWithContext(ctx context.Context) error {
 	if r == nil || r.app == nil {
 		return nil
 	}
+	defer r.stopAgentServer() // Ensure cleanup on exit
 	return r.app.Run(ctx)
 }
 
@@ -351,15 +397,15 @@ func (r *Runner) wireInputCallbacks() {
 	})
 
 	r.inputArea.OnTriggerPicker(func() {
-		// TODO: Show file picker overlay
+		r.showFilePicker()
 	})
 
 	r.inputArea.OnTriggerSearch(func() {
-		// TODO: Show search overlay
+		r.showSearchOverlay()
 	})
 
 	r.inputArea.OnTriggerSlashCommand(func() {
-		// TODO: Show slash command palette
+		r.showSlashCommandPalette()
 	})
 }
 
@@ -389,38 +435,17 @@ func (r *Runner) handleSubmit(text string, mode buckleywidgets.InputMode) {
 
 // registerKeyBindings adds Buckley-specific key bindings.
 func (r *Runner) registerKeyBindings(registry *keybind.CommandRegistry) {
-	registry.Register(keybind.Command{
-		ID:    "buckley.quit",
-		Title: "Quit",
-		Handler: func(ctx keybind.Context) {
-			if r.onQuit != nil {
-				r.onQuit()
-			}
-			r.app.ExecuteCommand(runtime.Quit{})
-		},
-	})
+	// Register fluffyui standard commands (quit, refresh, focus, scroll, clipboard)
+	keybind.RegisterStandardCommands(registry)
+	keybind.RegisterScrollCommands(registry)
+	keybind.RegisterClipboardCommands(registry)
 
+	// Register Buckley-specific commands
 	registry.Register(keybind.Command{
 		ID:    "buckley.toggle-sidebar",
 		Title: "Toggle Sidebar",
 		Handler: func(ctx keybind.Context) {
-			// TODO: Implement sidebar toggle
-		},
-	})
-
-	registry.Register(keybind.Command{
-		ID:    "buckley.scroll-up",
-		Title: "Scroll Up",
-		Handler: func(ctx keybind.Context) {
-			r.chatView.ScrollUp(3)
-		},
-	})
-
-	registry.Register(keybind.Command{
-		ID:    "buckley.scroll-down",
-		Title: "Scroll Down",
-		Handler: func(ctx keybind.Context) {
-			r.chatView.ScrollDown(3)
+			r.toggleSidebar()
 		},
 	})
 
@@ -441,6 +466,22 @@ func (r *Runner) registerKeyBindings(registry *keybind.CommandRegistry) {
 			if r.onPrevSession != nil {
 				r.onPrevSession()
 			}
+		},
+	})
+
+	registry.Register(keybind.Command{
+		ID:    "buckley.search",
+		Title: "Search",
+		Handler: func(ctx keybind.Context) {
+			r.showSearchOverlay()
+		},
+	})
+
+	registry.Register(keybind.Command{
+		ID:    "buckley.focus-input",
+		Title: "Focus Input",
+		Handler: func(ctx keybind.Context) {
+			r.ensureInputFocus()
 		},
 	})
 }
@@ -476,7 +517,9 @@ func (r *Runner) update(app *runtime.App, msg runtime.Message) bool {
 		return true
 
 	case StreamDone:
-		r.coalescer.Flush(m.SessionID)
+		// Flush all pending content to ensure nothing is lost
+		// This handles session switches during streaming
+		r.coalescer.FlushAll()
 		r.coalescer.Clear(m.SessionID)
 		return true
 
@@ -652,6 +695,14 @@ func (r *Runner) SetSession(id string) {
 // SetStreaming updates the streaming indicator.
 func (r *Runner) SetStreaming(active bool) {
 	r.Post(StreamingMsg{Active: active})
+}
+
+// IsStreaming returns true if currently streaming a response.
+func (r *Runner) IsStreaming() bool {
+	if r == nil {
+		return false
+	}
+	return r.streaming
 }
 
 // SetContextUsage updates context usage display.

@@ -50,14 +50,14 @@ func TestModelRoleTags(t *testing.T) {
 
 func TestPreferredModelIDs(t *testing.T) {
 	catalog := map[string]model.ModelInfo{
-		"moonshotai/kimi-k2-thinking": {},
-		"openai/gpt-4o":               {},
+		"moonshotai/kimi-k2.5": {},
+		"openai/gpt-4o":        {},
 	}
 	ids := preferredModelIDs("openai/gpt-4o", "", "", catalog)
 	if len(ids) != 2 {
 		t.Fatalf("expected 2 preferred models, got %d", len(ids))
 	}
-	if ids[0] != "openai/gpt-4o" || ids[1] != "moonshotai/kimi-k2-thinking" {
+	if ids[0] != "openai/gpt-4o" || ids[1] != "moonshotai/kimi-k2.5" {
 		t.Fatalf("unexpected preferred model order: %v", ids)
 	}
 }
