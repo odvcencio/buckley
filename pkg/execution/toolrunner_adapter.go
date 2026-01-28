@@ -42,6 +42,12 @@ func (a *toolrunnerStreamAdapter) OnToolEnd(name string, result string, err erro
 	}
 }
 
+func (a *toolrunnerStreamAdapter) OnError(err error) {
+	if a.handler != nil {
+		a.handler.OnError(err)
+	}
+}
+
 func (a *toolrunnerStreamAdapter) OnComplete(result *toolrunner.Result) {
 	if a.handler != nil {
 		a.handler.OnComplete(toExecutionResult(result))

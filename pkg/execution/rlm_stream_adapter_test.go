@@ -31,6 +31,8 @@ func (s *stubStreamHandler) OnToolEnd(name string, _ string, _ error) {
 	s.lastTool = name
 }
 
+func (s *stubStreamHandler) OnError(error) {}
+
 func (s *stubStreamHandler) OnComplete(_ *ExecutionResult) {
 	s.completes++
 }

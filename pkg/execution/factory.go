@@ -100,12 +100,3 @@ func (f *DefaultFactory) createClassic() (ExecutionStrategy, error) {
 		EnableReasoning:      f.config.EnableReasoning,
 	})
 }
-
-// MustCreate is like Create but panics on error.
-func (f *DefaultFactory) MustCreate(mode string) ExecutionStrategy {
-	s, err := f.Create(mode)
-	if err != nil {
-		panic(fmt.Sprintf("failed to create execution strategy: %v", err))
-	}
-	return s
-}

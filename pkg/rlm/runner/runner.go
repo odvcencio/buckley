@@ -358,7 +358,7 @@ func (r *Runner) executeTaskBatch(plan *orchestrator.Plan, tasks []orchestrator.
 		for _, task := range tasks {
 			r.updateTaskStatus(plan, task.ID, orchestrator.TaskFailed)
 		}
-		return fmt.Errorf("RLM execution failed: %w", err)
+		return fmt.Errorf("rlm execution failed: %w", err)
 	}
 
 	// Parse answer to determine which tasks succeeded

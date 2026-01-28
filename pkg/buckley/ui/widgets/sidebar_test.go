@@ -125,18 +125,14 @@ func TestSidebar_SetActiveTouches(t *testing.T) {
 func TestSidebar_ToggleRecentFiles(t *testing.T) {
 	s := NewSidebar()
 
+	s.ToggleRecentFiles()
 	if s.showRecentFiles {
-		t.Error("should be hidden by default")
+		t.Error("should be hidden after toggle")
 	}
 
 	s.ToggleRecentFiles()
 	if !s.showRecentFiles {
-		t.Error("should be shown after toggle")
-	}
-
-	s.ToggleRecentFiles()
-	if s.showRecentFiles {
-		t.Error("should be hidden after second toggle")
+		t.Error("should be shown after second toggle")
 	}
 }
 
@@ -213,8 +209,8 @@ func TestSidebar_HandleMessage_SectionToggles(t *testing.T) {
 	if !result.Handled {
 		t.Error("'6' should be handled")
 	}
-	if !s.showRecentFiles {
-		t.Error("showRecentFiles should be true after '6'")
+	if s.showRecentFiles {
+		t.Error("showRecentFiles should be false after '6'")
 	}
 }
 
@@ -342,8 +338,8 @@ func TestSidebar_RenderBackgroundFill(t *testing.T) {
 	s.Render(ctx)
 
 	cell := buf.Get(1, 0)
-	if cell.Style != bg {
-		t.Fatalf("expected background style, got %#v", cell.Style)
+	if cell.Style.BG() != bg.BG() {
+		t.Fatalf("expected background color %v, got %v", bg.BG(), cell.Style.BG())
 	}
 }
 

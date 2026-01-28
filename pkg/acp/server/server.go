@@ -347,7 +347,7 @@ func (s *Server) UpdateSessionContext(_ context.Context, req *acppb.ContextDelta
 }
 
 // SendMessage handles a simple request/response for editor integrations.
-func (s *Server) SendMessage(_ context.Context, req *acppb.SendMessageRequest) (*acppb.SendMessageResponse, error) {
+func (s *Server) SendMessage(ctx context.Context, req *acppb.SendMessageRequest) (*acppb.SendMessageResponse, error) {
 	if req.GetMessage() == nil || strings.TrimSpace(req.Message.Content) == "" {
 		return nil, statusError(codes.InvalidArgument, "message required")
 	}
@@ -367,7 +367,7 @@ func (s *Server) SendMessage(_ context.Context, req *acppb.SendMessageRequest) (
 			},
 			Temperature: 0.2,
 		}
-		resp, err := s.models.ChatCompletion(context.Background(), chatReq)
+		resp, err := s.models.ChatCompletion(ctx, chatReq)
 		if err != nil {
 			return nil, statusError(codes.Internal, err.Error())
 		}
@@ -387,7 +387,7 @@ func (s *Server) SendMessage(_ context.Context, req *acppb.SendMessageRequest) (
 		sessionID := ulid.Make().String()
 		runtime, cleanup, err := s.buildRLMRuntime(sessionID, req.AgentId)
 		if err == nil && runtime != nil {
-			answer, execErr := runtime.Execute(context.Background(), req.Message.Content)
+			answer, execErr := runtime.Execute(ctx, req.Message.Content)
 			if cleanup != nil {
 				cleanup()
 			}
@@ -418,10 +418,10 @@ func (s *Server) SendMessage(_ context.Context, req *acppb.SendMessageRequest) (
 
 	featureName := fmt.Sprintf("acp-send-%s", sessionID)
 	desc := req.Message.Content
-	if _, err := orch.PlanFeature(featureName, desc); err != nil {
+	if _, err := orch.PlanFeatureWithContext(ctx, featureName, desc); err != nil {
 		return nil, statusError(codes.Internal, err.Error())
 	}
-	if err := orch.ExecutePlan(); err != nil {
+	if err := orch.ExecutePlanWithContext(ctx); err != nil {
 		return nil, statusError(codes.Internal, err.Error())
 	}
 
@@ -511,7 +511,7 @@ func (s *Server) StreamTask(req *acppb.TaskStreamRequest, stream acppb.AgentComm
 		featureName = "acp-task"
 	}
 
-	if _, err := orch.PlanFeature(featureName, req.Query); err != nil {
+	if _, err := orch.PlanFeatureWithContext(ctx, featureName, req.Query); err != nil {
 		_ = stream.Send(&acppb.TaskEvent{TaskId: req.TaskId, Message: fmt.Sprintf("Plan failed: %v", err)})
 		return statusError(codes.Internal, err.Error())
 	}
@@ -522,7 +522,7 @@ func (s *Server) StreamTask(req *acppb.TaskStreamRequest, stream acppb.AgentComm
 
 	execDone := make(chan error, 1)
 	go func() {
-		execDone <- orch.ExecutePlan()
+		execDone <- orch.ExecutePlanWithContext(ctx)
 	}()
 
 	select {

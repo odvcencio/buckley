@@ -18,6 +18,7 @@ type Validator struct {
 	toolRegistry    *tool.Registry
 	projectDetector *ProjectDetector
 	projectRoot     string
+	ctx             context.Context
 }
 
 // NewValidator creates a new validator
@@ -30,7 +31,23 @@ func NewValidator(registry *tool.Registry, projectRoot string) *Validator {
 		toolRegistry:    registry,
 		projectDetector: NewProjectDetector(root),
 		projectRoot:     root,
+		ctx:             context.Background(),
 	}
+}
+
+func (v *Validator) baseContext() context.Context {
+	if v == nil || v.ctx == nil {
+		return context.Background()
+	}
+	return v.ctx
+}
+
+// SetContext updates the validator context for downstream commands.
+func (v *Validator) SetContext(ctx context.Context) {
+	if v == nil || ctx == nil {
+		return
+	}
+	v.ctx = ctx
 }
 
 // ValidationResult contains validation results
@@ -572,13 +589,30 @@ type Artifact struct {
 // Verifier handles post-execution verification
 type Verifier struct {
 	toolRegistry *tool.Registry
+	ctx          context.Context
 }
 
 // NewVerifier creates a new verifier
 func NewVerifier(registry *tool.Registry) *Verifier {
 	return &Verifier{
 		toolRegistry: registry,
+		ctx:          context.Background(),
 	}
+}
+
+func (verifier *Verifier) baseContext() context.Context {
+	if verifier == nil || verifier.ctx == nil {
+		return context.Background()
+	}
+	return verifier.ctx
+}
+
+// SetContext updates the verifier context for downstream commands.
+func (verifier *Verifier) SetContext(ctx context.Context) {
+	if verifier == nil || ctx == nil {
+		return
+	}
+	verifier.ctx = ctx
 }
 
 // VerifyOutcomes validates that execution produced expected results
@@ -623,8 +657,10 @@ func (verifier *Verifier) VerifyOutcomes(task *Task, result *VerifyResult) error
 
 // verifyFiles checks that expected files were created/modified
 func (verifier *Verifier) verifyFiles(task *Task, result *VerifyResult) error {
-	readTool, ok := verifier.toolRegistry.Get("read_file")
-	if !ok {
+	if verifier.toolRegistry == nil {
+		return fmt.Errorf("tool registry unavailable")
+	}
+	if _, ok := verifier.toolRegistry.Get("read_file"); !ok {
 		return fmt.Errorf("read_file tool not available")
 	}
 
@@ -633,7 +669,7 @@ func (verifier *Verifier) verifyFiles(task *Task, result *VerifyResult) error {
 			"path": filePath,
 		}
 
-		execResult, err := readTool.Execute(params)
+		execResult, err := verifier.toolRegistry.ExecuteWithContext(verifier.baseContext(), "read_file", params)
 		if err != nil || !execResult.Success {
 			result.Errors = append(result.Errors,
 				fmt.Sprintf("Expected file not accessible: %s", filePath))
@@ -668,7 +704,7 @@ func (verifier *Verifier) runVerificationStep(verification string, result *Verif
 	}
 
 	// Run with timeout
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	ctx, cancel := context.WithTimeout(verifier.baseContext(), 5*time.Minute)
 	defer cancel()
 
 	parts := strings.Fields(cmd)

@@ -37,14 +37,6 @@ func (r *Registry) Register(def Definition) error {
 	return nil
 }
 
-// MustRegister adds a tool definition and panics on error.
-// Use this for static tool definitions at init time.
-func (r *Registry) MustRegister(def Definition) {
-	if err := r.Register(def); err != nil {
-		panic(err)
-	}
-}
-
 // Get returns a tool definition by name.
 func (r *Registry) Get(name string) (Definition, bool) {
 	r.mu.RLock()
@@ -124,11 +116,6 @@ var DefaultRegistry = NewRegistry()
 // Register adds a tool to the default registry.
 func Register(def Definition) error {
 	return DefaultRegistry.Register(def)
-}
-
-// MustRegister adds a tool to the default registry, panicking on error.
-func MustRegister(def Definition) {
-	DefaultRegistry.MustRegister(def)
 }
 
 // Get returns a tool from the default registry.

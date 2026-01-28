@@ -7,24 +7,25 @@ import (
 	"math"
 	"net/url"
 	"os"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"connectrpc.com/connect"
-	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/types/known/emptypb"
 	"google.golang.org/protobuf/types/known/structpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	"github.com/odvcencio/buckley/pkg/buckley/ui/viewmodel"
 	"github.com/odvcencio/buckley/pkg/giturl"
 	"github.com/odvcencio/buckley/pkg/headless"
 	"github.com/odvcencio/buckley/pkg/ipc/command"
 	ipcpb "github.com/odvcencio/buckley/pkg/ipc/proto"
 	"github.com/odvcencio/buckley/pkg/orchestrator"
 	"github.com/odvcencio/buckley/pkg/storage"
-	"github.com/odvcencio/buckley/pkg/buckley/ui/viewmodel"
 )
 
 // GRPCService implements the BuckleyIPC Connect service.
@@ -69,6 +70,31 @@ type eventSubscriber struct {
 	events       chan *ipcpb.Event
 	cancel       context.CancelFunc
 	lastSeen     time.Time
+	dropMu       sync.Mutex
+	dropped      int
+	lastDrop     time.Time
+}
+
+func (s *eventSubscriber) recordDrop() {
+	if s == nil {
+		return
+	}
+	s.dropMu.Lock()
+	s.dropped++
+	s.lastDrop = time.Now()
+	s.dropMu.Unlock()
+}
+
+func (s *eventSubscriber) takeDrops() (int, time.Time) {
+	if s == nil {
+		return 0, time.Time{}
+	}
+	s.dropMu.Lock()
+	defer s.dropMu.Unlock()
+	count := s.dropped
+	ts := s.lastDrop
+	s.dropped = 0
+	return count, ts
 }
 
 func requireGRPCScope(ctx context.Context, required string) error {
@@ -146,14 +172,12 @@ func (s *GRPCService) runEventForwarder() {
 			if protoEvent == nil {
 				protoEvent = convertToProtoEvent(event)
 			}
-			cloned := proto.Clone(protoEvent).(*ipcpb.Event)
+			// Events are immutable after conversion; share to avoid per-subscriber cloning.
 			select {
-			case sub.events <- cloned:
+			case sub.events <- protoEvent:
 			default:
-				// Slow subscriber: disconnect to protect the server.
-				if sub.cancel != nil {
-					sub.cancel()
-				}
+				// Slow subscriber: drop and record backpressure signal.
+				sub.recordDrop()
 			}
 		}
 		s.subscribersMu.RUnlock()
@@ -180,20 +204,182 @@ func payloadToStruct(v any) *structpb.Struct {
 		return nil
 	}
 
+	switch payload := v.(type) {
+	case *structpb.Struct:
+		return payload
+	case structpb.Struct:
+		return &payload
+	case map[string]string:
+		converted := make(map[string]any, len(payload))
+		for key, value := range payload {
+			converted[key] = value
+		}
+		if structVal, err := structpb.NewStruct(converted); err == nil {
+			return structVal
+		}
+	case map[string]any:
+		if structVal, err := structpb.NewStruct(payload); err == nil {
+			return structVal
+		}
+	case json.RawMessage:
+		var payloadStruct structpb.Struct
+		if err := protojson.Unmarshal(payload, &payloadStruct); err == nil {
+			return &payloadStruct
+		}
+	}
+
+	if structVal, ok := structToStructpb(v); ok {
+		return structVal
+	}
+
+	if value, err := structpb.NewValue(v); err == nil {
+		if structVal, ok := value.Kind.(*structpb.Value_StructValue); ok {
+			return structVal.StructValue
+		}
+		payload, _ := structpb.NewStruct(map[string]any{"data": value.AsInterface()})
+		return payload
+	}
+
 	raw, err := json.Marshal(v)
 	if err != nil {
 		return nil
 	}
-	var decoded any
-	if err := json.Unmarshal(raw, &decoded); err != nil {
+	var payload structpb.Struct
+	if err := protojson.Unmarshal(raw, &payload); err != nil {
 		return nil
 	}
-	if m, ok := decoded.(map[string]any); ok {
-		payload, _ := structpb.NewStruct(m)
-		return payload
+	return &payload
+}
+
+func structToStructpb(v any) (*structpb.Struct, bool) {
+	val := reflect.ValueOf(v)
+	converted, ok := toStructValue(val)
+	if !ok {
+		return nil, false
 	}
-	payload, _ := structpb.NewStruct(map[string]any{"data": decoded})
-	return payload
+	mapped, ok := converted.(map[string]any)
+	if !ok {
+		return nil, false
+	}
+	structVal, err := structpb.NewStruct(mapped)
+	if err != nil {
+		return nil, false
+	}
+	return structVal, true
+}
+
+func toStructValue(v reflect.Value) (any, bool) {
+	if !v.IsValid() {
+		return nil, true
+	}
+	for v.Kind() == reflect.Interface || v.Kind() == reflect.Pointer {
+		if v.IsNil() {
+			return nil, true
+		}
+		v = v.Elem()
+	}
+
+	switch v.Kind() {
+	case reflect.Bool:
+		return v.Bool(), true
+	case reflect.String:
+		return v.String(), true
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		return float64(v.Int()), true
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+		return float64(v.Uint()), true
+	case reflect.Float32, reflect.Float64:
+		return v.Float(), true
+	case reflect.Map:
+		if v.Type().Key().Kind() != reflect.String {
+			return nil, false
+		}
+		out := make(map[string]any, v.Len())
+		iter := v.MapRange()
+		for iter.Next() {
+			value, ok := toStructValue(iter.Value())
+			if !ok {
+				continue
+			}
+			out[iter.Key().String()] = value
+		}
+		return out, true
+	case reflect.Slice, reflect.Array:
+		if v.Kind() == reflect.Slice && v.Type().Elem().Kind() == reflect.Uint8 {
+			return string(v.Bytes()), true
+		}
+		out := make([]any, 0, v.Len())
+		for i := 0; i < v.Len(); i++ {
+			value, ok := toStructValue(v.Index(i))
+			if !ok {
+				continue
+			}
+			out = append(out, value)
+		}
+		return out, true
+	case reflect.Struct:
+		if v.Type() == reflect.TypeOf(time.Time{}) {
+			return v.Interface().(time.Time).Format(time.RFC3339Nano), true
+		}
+		return structValueToMap(v)
+	default:
+		return nil, false
+	}
+}
+
+func structValueToMap(v reflect.Value) (map[string]any, bool) {
+	if v.Kind() == reflect.Pointer {
+		if v.IsNil() {
+			return nil, true
+		}
+		v = v.Elem()
+	}
+	if v.Kind() != reflect.Struct {
+		return nil, false
+	}
+	out := make(map[string]any)
+	t := v.Type()
+	for i := 0; i < t.NumField(); i++ {
+		field := t.Field(i)
+		if field.PkgPath != "" {
+			continue
+		}
+		name, omitEmpty, skip := parseJSONFieldTag(field)
+		if skip {
+			continue
+		}
+		value := v.Field(i)
+		if omitEmpty && value.IsZero() {
+			continue
+		}
+		converted, ok := toStructValue(value)
+		if !ok {
+			continue
+		}
+		out[name] = converted
+	}
+	return out, true
+}
+
+func parseJSONFieldTag(field reflect.StructField) (string, bool, bool) {
+	tag := field.Tag.Get("json")
+	if tag == "-" {
+		return "", false, true
+	}
+	name := field.Name
+	var omitEmpty bool
+	if tag != "" {
+		parts := strings.Split(tag, ",")
+		if len(parts) > 0 && parts[0] != "" {
+			name = parts[0]
+		}
+		for _, part := range parts[1:] {
+			if part == "omitempty" {
+				omitEmpty = true
+			}
+		}
+	}
+	return name, omitEmpty, false
 }
 
 func matchesEventFilter(event Event, filter *ipcpb.SubscribeRequest) bool {
@@ -472,6 +658,8 @@ func (s *GRPCService) Subscribe(
 	// Send keepalive every 20 seconds
 	keepaliveTicker := time.NewTicker(20 * time.Second)
 	defer keepaliveTicker.Stop()
+	backpressureTicker := time.NewTicker(2 * time.Second)
+	defer backpressureTicker.Stop()
 
 	for {
 		select {
@@ -480,6 +668,20 @@ func (s *GRPCService) Subscribe(
 		case event := <-sub.events:
 			if err := stream.Send(event); err != nil {
 				return err
+			}
+		case <-backpressureTicker.C:
+			if dropped, lastDrop := sub.takeDrops(); dropped > 0 {
+				payload, _ := structpb.NewStruct(map[string]any{
+					"dropped": dropped,
+					"since":   lastDrop.Format(time.RFC3339Nano),
+				})
+				if err := stream.Send(&ipcpb.Event{
+					Type:      "server.backpressure",
+					Payload:   payload,
+					Timestamp: timestamppb.Now(),
+				}); err != nil {
+					return err
+				}
 			}
 		case <-keepaliveTicker.C:
 			if err := stream.Send(&ipcpb.Event{

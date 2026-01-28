@@ -1,6 +1,7 @@
 package builtin
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"strings"
@@ -35,6 +36,10 @@ func (t *TerminalEditorTool) Parameters() ParameterSchema {
 }
 
 func (t *TerminalEditorTool) Execute(params map[string]any) (*Result, error) {
+	return t.ExecuteWithContext(context.Background(), params)
+}
+
+func (t *TerminalEditorTool) ExecuteWithContext(ctx context.Context, params map[string]any) (*Result, error) {
 	rawPath, ok := params["path"].(string)
 	if !ok || strings.TrimSpace(rawPath) == "" {
 		return &Result{Success: false, Error: "path parameter must be a non-empty string"}, nil
@@ -63,7 +68,10 @@ func (t *TerminalEditorTool) Execute(params map[string]any) (*Result, error) {
 
 	shell := &ShellCommandTool{}
 	command := fmt.Sprintf("%s %s", editor, shellEscapeSingleQuotes(absPath))
-	result, err := shell.runInteractiveCommand(command, 0)
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	result, err := shell.runInteractiveCommand(ctx, command, 0)
 	if err != nil {
 		return &Result{Success: false, Error: fmt.Sprintf("failed to open editor: %v", err)}, nil
 	}

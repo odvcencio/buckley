@@ -50,6 +50,10 @@ func (t *FindSymbolTool) Parameters() ParameterSchema {
 }
 
 func (t *FindSymbolTool) Execute(params map[string]any) (*Result, error) {
+	return t.ExecuteWithContext(context.Background(), params)
+}
+
+func (t *FindSymbolTool) ExecuteWithContext(ctx context.Context, params map[string]any) (*Result, error) {
 	symbol, ok := params["symbol"].(string)
 	if !ok || symbol == "" {
 		return &Result{
@@ -76,7 +80,7 @@ func (t *FindSymbolTool) Execute(params map[string]any) (*Result, error) {
 	}
 
 	if t.Store != nil {
-		if data := t.queryIndex(symbol, searchPath); data != nil {
+		if data := t.queryIndex(ctx, symbol, searchPath); data != nil {
 			return &Result{
 				Success: true,
 				Data:    data,
@@ -94,7 +98,7 @@ func (t *FindSymbolTool) Execute(params map[string]any) (*Result, error) {
 	seen := make(map[string]bool) // Deduplicate
 
 	for _, pattern := range patterns {
-		results, err := t.searchForPattern(pattern, searchPath)
+		results, err := t.searchForPattern(ctx, pattern, searchPath)
 		if err != nil {
 			continue
 		}
@@ -179,9 +183,9 @@ func (t *FindSymbolTool) buildSearchPatterns(symbol, symbolType string) []string
 	return patterns
 }
 
-func (t *FindSymbolTool) searchForPattern(pattern, searchPath string) ([]map[string]any, error) {
+func (t *FindSymbolTool) searchForPattern(ctx context.Context, pattern, searchPath string) ([]map[string]any, error) {
 	// Use ripgrep if available, otherwise grep
-	ctx, cancel := t.execContext()
+	ctx, cancel := t.execContextWithParent(ctx)
 	defer cancel()
 
 	var cmd *exec.Cmd
@@ -233,12 +237,15 @@ func (t *FindSymbolTool) searchForPattern(pattern, searchPath string) ([]map[str
 	return results, nil
 }
 
-func (t *FindSymbolTool) queryIndex(symbol, searchPath string) map[string]any {
+func (t *FindSymbolTool) queryIndex(ctx context.Context, symbol, searchPath string) map[string]any {
 	if symbol == "" || t.Store == nil {
 		return nil
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 
 	pathGlob := ""
@@ -307,6 +314,10 @@ func (t *FindReferencesTool) Parameters() ParameterSchema {
 }
 
 func (t *FindReferencesTool) Execute(params map[string]any) (*Result, error) {
+	return t.ExecuteWithContext(context.Background(), params)
+}
+
+func (t *FindReferencesTool) ExecuteWithContext(ctx context.Context, params map[string]any) (*Result, error) {
 	symbol, ok := params["symbol"].(string)
 	if !ok || symbol == "" {
 		return &Result{
@@ -335,7 +346,7 @@ func (t *FindReferencesTool) Execute(params map[string]any) (*Result, error) {
 	// Search for the symbol as a word boundary
 	pattern := fmt.Sprintf(`\b%s\b`, regexp.QuoteMeta(symbol))
 
-	ctx, cancel := t.execContext()
+	ctx, cancel := t.execContextWithParent(ctx)
 	defer cancel()
 
 	var cmd *exec.Cmd
@@ -462,6 +473,10 @@ func (t *GetFunctionSignatureTool) Parameters() ParameterSchema {
 }
 
 func (t *GetFunctionSignatureTool) Execute(params map[string]any) (*Result, error) {
+	return t.ExecuteWithContext(context.Background(), params)
+}
+
+func (t *GetFunctionSignatureTool) ExecuteWithContext(ctx context.Context, params map[string]any) (*Result, error) {
 	funcName, ok := params["function"].(string)
 	if !ok || funcName == "" {
 		return &Result{
@@ -483,7 +498,7 @@ func (t *GetFunctionSignatureTool) Execute(params map[string]any) (*Result, erro
 	}
 
 	// Find the function definition
-	signature, docs, file, line, err := t.findFunctionSignature(funcName, searchPath)
+	signature, docs, file, line, err := t.findFunctionSignature(ctx, funcName, searchPath)
 	if err != nil {
 		return &Result{
 			Success: false,
@@ -503,7 +518,7 @@ func (t *GetFunctionSignatureTool) Execute(params map[string]any) (*Result, erro
 	}, nil
 }
 
-func (t *GetFunctionSignatureTool) findFunctionSignature(funcName, searchPath string) (string, string, string, int, error) {
+func (t *GetFunctionSignatureTool) findFunctionSignature(ctx context.Context, funcName, searchPath string) (string, string, string, int, error) {
 	// Search for function definition
 	patterns := []string{
 		fmt.Sprintf(`func\s+%s\s*\(`, funcName),
@@ -513,7 +528,7 @@ func (t *GetFunctionSignatureTool) findFunctionSignature(funcName, searchPath st
 	}
 
 	for _, pattern := range patterns {
-		ctx, cancel := t.execContext()
+		ctx, cancel := t.execContextWithParent(ctx)
 
 		var cmd *exec.Cmd
 		if _, err := exec.LookPath("rg"); err == nil {

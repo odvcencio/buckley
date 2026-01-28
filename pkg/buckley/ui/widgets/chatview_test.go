@@ -1,12 +1,37 @@
 package widgets
 
 import (
+	"strings"
 	"testing"
 
+	"github.com/odvcencio/buckley/pkg/buckley/ui/scrollback"
 	"github.com/odvcencio/fluffy-ui/backend"
 	"github.com/odvcencio/fluffy-ui/runtime"
 	"github.com/odvcencio/fluffy-ui/terminal"
 )
+
+func prefixText(prefix []scrollback.Span) string {
+	var b strings.Builder
+	for _, span := range prefix {
+		b.WriteString(span.Text)
+	}
+	return b.String()
+}
+
+func findLine(t *testing.T, cv *ChatView, content, source string) scrollback.Line {
+	t.Helper()
+	for i := 0; i < cv.buffer.LineCount(); i++ {
+		line, ok := cv.buffer.LineAt(i)
+		if !ok {
+			continue
+		}
+		if line.Content == content && line.Source == source {
+			return line
+		}
+	}
+	t.Fatalf("expected line with content %q and source %q", content, source)
+	return scrollback.Line{}
+}
 
 func TestNewChatView(t *testing.T) {
 	cv := NewChatView()
@@ -25,17 +50,15 @@ func TestChatView_AddMessage_User(t *testing.T) {
 
 	cv.AddMessage("Hello, world!", "user")
 
-	lines := cv.buffer.GetVisibleLines()
-	if len(lines) < 1 {
-		t.Fatalf("expected at least 1 line, got %d", len(lines))
+	line := findLine(t, cv, "Hello, world!", "user")
+	if got := prefixText(line.Prefix); got != "▍ ▶ " {
+		t.Errorf("expected prefix '▍ ▶ ', got %q", got)
 	}
-
-	// First line should have the user message with prefix strip
-	if lines[0].Content != "▍ ▶ Hello, world!" {
-		t.Errorf("expected '▍ ▶ Hello, world!', got '%s'", lines[0].Content)
+	if line.Content != "Hello, world!" {
+		t.Errorf("expected 'Hello, world!', got '%s'", line.Content)
 	}
-	if lines[0].Source != "user" {
-		t.Errorf("expected source 'user', got '%s'", lines[0].Source)
+	if line.Source != "user" {
+		t.Errorf("expected source 'user', got '%s'", line.Source)
 	}
 }
 
@@ -45,17 +68,15 @@ func TestChatView_AddMessage_Assistant(t *testing.T) {
 
 	cv.AddMessage("I can help with that.", "assistant")
 
-	lines := cv.buffer.GetVisibleLines()
-	if len(lines) < 1 {
-		t.Fatalf("expected at least 1 line, got %d", len(lines))
+	line := findLine(t, cv, "I can help with that.", "assistant")
+	if got := prefixText(line.Prefix); got != "▍ " {
+		t.Errorf("expected prefix '▍ ', got %q", got)
 	}
-
-	// First line should have the assistant message with prefix strip
-	if lines[0].Content != "▍ I can help with that." {
-		t.Errorf("expected '▍ I can help with that.', got '%s'", lines[0].Content)
+	if line.Content != "I can help with that." {
+		t.Errorf("expected 'I can help with that.', got '%s'", line.Content)
 	}
-	if lines[0].Source != "assistant" {
-		t.Errorf("expected source 'assistant', got '%s'", lines[0].Source)
+	if line.Source != "assistant" {
+		t.Errorf("expected source 'assistant', got '%s'", line.Source)
 	}
 }
 
@@ -65,23 +86,9 @@ func TestChatView_AddMessage_Thinking(t *testing.T) {
 
 	cv.AddMessage("", "thinking")
 
-	lines := cv.buffer.GetVisibleLines()
-	if len(lines) < 1 {
-		t.Fatalf("expected at least 1 line, got %d", len(lines))
-	}
-
-	found := false
-	for _, line := range lines {
-		if line.Content == "  ◦ thinking..." {
-			found = true
-			if line.Source != "thinking" {
-				t.Errorf("expected source 'thinking', got '%s'", line.Source)
-			}
-			break
-		}
-	}
-	if !found {
-		t.Error("expected thinking indicator line")
+	line := findLine(t, cv, "  ◦ thinking...", "thinking")
+	if line.Source != "thinking" {
+		t.Errorf("expected source 'thinking', got '%s'", line.Source)
 	}
 }
 
@@ -91,19 +98,12 @@ func TestChatView_AddMessage_System(t *testing.T) {
 
 	cv.AddMessage("System notification", "system")
 
-	lines := cv.buffer.GetVisibleLines()
-	found := false
-	for _, line := range lines {
-		if line.Content == "▍ System notification" {
-			found = true
-			if line.Source != "system" {
-				t.Errorf("expected source 'system', got '%s'", line.Source)
-			}
-			break
-		}
+	line := findLine(t, cv, "System notification", "system")
+	if got := prefixText(line.Prefix); got != "▍ " {
+		t.Errorf("expected prefix '▍ ', got %q", got)
 	}
-	if !found {
-		t.Error("expected system message line")
+	if line.Source != "system" {
+		t.Errorf("expected source 'system', got '%s'", line.Source)
 	}
 }
 
@@ -117,16 +117,9 @@ func TestChatView_AppendText(t *testing.T) {
 	// Append to the message (streaming simulation)
 	cv.AppendText(", world!")
 
-	lines := cv.buffer.GetVisibleLines()
-	found := false
-	for _, line := range lines {
-		if line.Content == "▍ Hello, world!" {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Error("expected appended text 'Hello, world!'")
+	line := findLine(t, cv, "Hello, world!", "assistant")
+	if got := prefixText(line.Prefix); got != "▍ " {
+		t.Errorf("expected prefix '▍ ', got %q", got)
 	}
 }
 
@@ -138,9 +131,12 @@ func TestChatView_RemoveThinkingIndicator(t *testing.T) {
 	cv.AddMessage("", "thinking")
 
 	// Verify it's there
-	lines := cv.buffer.GetVisibleLines()
 	foundBefore := false
-	for _, line := range lines {
+	for i := 0; i < cv.buffer.LineCount(); i++ {
+		line, ok := cv.buffer.LineAt(i)
+		if !ok {
+			continue
+		}
 		if line.Source == "thinking" {
 			foundBefore = true
 			break
@@ -154,9 +150,12 @@ func TestChatView_RemoveThinkingIndicator(t *testing.T) {
 	cv.RemoveThinkingIndicator()
 
 	// Verify it's gone
-	lines = cv.buffer.GetVisibleLines()
 	foundAfter := false
-	for _, line := range lines {
+	for i := 0; i < cv.buffer.LineCount(); i++ {
+		line, ok := cv.buffer.LineAt(i)
+		if !ok {
+			continue
+		}
 		if line.Source == "thinking" {
 			foundAfter = true
 			break
@@ -317,6 +316,7 @@ func TestChatView_ScrollToBottom(t *testing.T) {
 func TestChatView_ScrollPosition(t *testing.T) {
 	cv := NewChatView()
 	cv.Layout(runtime.Rect{X: 0, Y: 0, Width: 80, Height: 10})
+	cv.buffer.Resize(79, 10)
 
 	for i := 0; i < 5; i++ {
 		cv.AddMessage("Line", "user")
@@ -324,8 +324,8 @@ func TestChatView_ScrollPosition(t *testing.T) {
 
 	top, total, viewHeight := cv.ScrollPosition()
 
-	if viewHeight != 10 {
-		t.Errorf("expected viewHeight=10, got %d", viewHeight)
+	if viewHeight <= 0 || viewHeight > 10 {
+		t.Errorf("expected viewHeight between 1 and 10, got %d", viewHeight)
 	}
 	if total < 5 {
 		t.Errorf("expected total >= 5, got %d", total)

@@ -4,6 +4,7 @@ package tui
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"maps"
@@ -75,6 +76,9 @@ type Controller struct {
 	// State
 	workDir string
 
+	ctx    context.Context
+	cancel context.CancelFunc
+
 	// Multi-session support - each session runs independently
 	sessions       []*SessionState // Active sessions for this project
 	currentSession int             // Index into sessions
@@ -111,9 +115,10 @@ type ControllerConfig struct {
 	Telemetry    *telemetry.Hub
 	SessionID    string // Resume session, empty for new
 	AgentSocket  string // unix:/path or tcp:host:port for agent API
+	Context      context.Context
 }
 
-func newSessionState(cfg *config.Config, store *storage.Store, workDir string, hub *telemetry.Hub, modelMgr *model.Manager, sessionID string, loadMessages bool, progressMgr *progress.ProgressManager, toastMgr *toast.ToastManager) (*SessionState, error) {
+func newSessionState(ctx context.Context, cfg *config.Config, store *storage.Store, workDir string, hub *telemetry.Hub, modelMgr *model.Manager, sessionID string, loadMessages bool, progressMgr *progress.ProgressManager, toastMgr *toast.ToastManager) (*SessionState, error) {
 	sess := &SessionState{
 		ID:           sessionID,
 		Conversation: conversation.New(sessionID),
@@ -151,7 +156,7 @@ func newSessionState(cfg *config.Config, store *storage.Store, workDir string, h
 	}
 
 	skillState := skill.NewRuntimeState(sess.Conversation.AddSystemMessage)
-	registry := buildRegistry(cfg, store, workDir, hub, sessionID, progressMgr, toastMgr)
+	registry := buildRegistry(ctx, cfg, store, workDir, hub, sessionID, progressMgr, toastMgr)
 	registry.Register(&builtin.SkillActivationTool{
 		Registry:     skills,
 		Conversation: skillState,
@@ -220,6 +225,11 @@ func NewController(cfg ControllerConfig) (*Controller, error) {
 	if err != nil {
 		return nil, fmt.Errorf("get working directory: %w", err)
 	}
+	baseCtx := cfg.Context
+	if baseCtx == nil {
+		baseCtx = context.Background()
+	}
+	ctrlCtx, ctrlCancel := context.WithCancel(baseCtx)
 
 	progressMgr := progress.NewProgressManager()
 	toastMgr := toast.NewToastManager()
@@ -240,7 +250,7 @@ func NewController(cfg ControllerConfig) (*Controller, error) {
 	allSessions, _ := cfg.Store.ListSessions(100)
 	for _, s := range allSessions {
 		if s.ProjectPath == workDir && s.Status == storage.SessionStatusActive {
-			sess, err := newSessionState(cfg.Config, cfg.Store, workDir, cfg.Telemetry, cfg.ModelManager, s.ID, true, progressMgr, toastMgr)
+			sess, err := newSessionState(ctrlCtx, cfg.Config, cfg.Store, workDir, cfg.Telemetry, cfg.ModelManager, s.ID, true, progressMgr, toastMgr)
 			if err != nil {
 				return nil, err
 			}
@@ -272,7 +282,7 @@ func NewController(cfg ControllerConfig) (*Controller, error) {
 			if err := cfg.Store.CreateSession(sess); err != nil {
 				return nil, fmt.Errorf("create session: %w", err)
 			}
-			sessState, err := newSessionState(cfg.Config, cfg.Store, workDir, cfg.Telemetry, cfg.ModelManager, sessionID, false, progressMgr, toastMgr)
+			sessState, err := newSessionState(ctrlCtx, cfg.Config, cfg.Store, workDir, cfg.Telemetry, cfg.ModelManager, sessionID, false, progressMgr, toastMgr)
 			if err != nil {
 				return nil, err
 			}
@@ -300,7 +310,7 @@ func NewController(cfg ControllerConfig) (*Controller, error) {
 			if err := cfg.Store.CreateSession(sess); err != nil {
 				return nil, fmt.Errorf("create session: %w", err)
 			}
-			sessState, err := newSessionState(cfg.Config, cfg.Store, workDir, cfg.Telemetry, cfg.ModelManager, sessionID, false, progressMgr, toastMgr)
+			sessState, err := newSessionState(ctrlCtx, cfg.Config, cfg.Store, workDir, cfg.Telemetry, cfg.ModelManager, sessionID, false, progressMgr, toastMgr)
 			if err != nil {
 				return nil, err
 			}
@@ -366,6 +376,8 @@ func NewController(cfg ControllerConfig) (*Controller, error) {
 		workDir:        workDir,
 		sessions:       projectSessions,
 		currentSession: currentIdx,
+		ctx:            ctrlCtx,
+		cancel:         ctrlCancel,
 	}
 
 	// Initialize execution strategy based on config
@@ -441,11 +453,29 @@ func NewController(cfg ControllerConfig) (*Controller, error) {
 	return ctrl, nil
 }
 
+func (c *Controller) baseContext() context.Context {
+	if c == nil || c.ctx == nil {
+		return context.Background()
+	}
+	return c.ctx
+}
+
+// SetContext updates the controller base context for downstream operations.
+func (c *Controller) SetContext(ctx context.Context) {
+	if c == nil || ctx == nil {
+		return
+	}
+	if c.cancel != nil {
+		c.cancel()
+	}
+	c.ctx, c.cancel = context.WithCancel(ctx)
+}
+
 // Run starts the TUI controller.
 func (c *Controller) Run() error {
 	// Start telemetry bridge for sidebar updates
 	if c.telemetryBridge != nil {
-		c.telemetryBridge.Start(context.Background())
+		c.telemetryBridge.Start(c.baseContext())
 	}
 
 	// Show welcome
@@ -469,7 +499,11 @@ func (c *Controller) Run() error {
 	c.updateContextIndicator(sess, c.executionModelID(), "", allowedToolsForSession(sess))
 
 	// Run the app
-	return c.app.Run()
+	err := c.app.Run()
+	if c.cancel != nil {
+		c.cancel()
+	}
+	return err
 }
 
 // handleSubmit processes user input submission.
@@ -517,7 +551,7 @@ func (c *Controller) handleSubmit(text string) {
 	sess.PendingAttachments = nil
 
 	// Create context with cancellation for this session
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(c.baseContext())
 	sess.Cancel = cancel
 	sess.Streaming = true
 	c.app.SetStreaming(true)
@@ -1171,12 +1205,19 @@ func (c *Controller) createNewSessionState() (*SessionState, error) {
 		return nil, err
 	}
 
-	return newSessionState(c.cfg, c.store, c.workDir, c.telemetry, c.modelMgr, sessionID, false, c.progressMgr, c.toastMgr)
+	return newSessionState(c.baseContext(), c.cfg, c.store, c.workDir, c.telemetry, c.modelMgr, sessionID, false, c.progressMgr, c.toastMgr)
 }
 
 // streamResponse handles the AI response streaming for a specific session.
 func (c *Controller) streamResponse(ctx context.Context, prompt string, sess *SessionState, attachments []string) {
 	defer func() {
+		if r := recover(); r != nil {
+			if c.app != nil {
+				c.app.AddMessage(fmt.Sprintf("Internal error: %v", r), "system")
+				c.app.SetStatus("Error")
+			}
+			c.clearMessageQueue(sess)
+		}
 		c.mu.Lock()
 		sess.Streaming = false
 		sess.Cancel = nil
@@ -1207,6 +1248,7 @@ func (c *Controller) streamResponse(ctx context.Context, prompt string, sess *Se
 	processor.SetWorkDir(c.workDir)
 	input, err := processor.Process(ctx, raw)
 	if err != nil {
+		c.clearMessageQueue(sess)
 		c.app.AddMessage(fmt.Sprintf("Error processing input: %v", err), "system")
 		c.app.SetStatus("Error")
 		return
@@ -1283,38 +1325,41 @@ func (c *Controller) streamResponse(ctx context.Context, prompt string, sess *Se
 	}
 	c.updateContextIndicator(sess, modelID, contextPrompt, allowedToolsForSession(sess))
 
-	fullResponse, usage, err := c.runToolLoop(ctx, sess, modelID)
+	outcome, err := c.runToolLoop(ctx, sess, modelID)
 	c.app.RemoveThinkingIndicator()
 	if err != nil {
 		if ctx.Err() == context.Canceled {
 			c.app.SetStatus("Cancelled")
 			return
 		}
-		c.app.AddMessage(fmt.Sprintf("Error: %v", err), "system")
+		c.clearMessageQueue(sess)
+		if !outcome.errorReported {
+			c.app.AddMessage(fmt.Sprintf("Error: %v", err), "system")
+		}
 		c.app.SetStatus("Error")
 		return
 	}
 
-	if fullResponse != "" {
-		c.app.AddMessage(fullResponse, "assistant")
+	if outcome.response != "" && !outcome.streamed {
+		c.app.AddMessage(outcome.response, "assistant")
 	}
 
 	// Update token count and cost
 	var tokens int
 	var costCents float64
 
-	if usage != nil {
+	if outcome.usage != nil {
 		// Use actual usage from API response
-		tokens = usage.TotalTokens
+		tokens = outcome.usage.TotalTokens
 		if c.modelMgr != nil {
-			if cost, err := c.modelMgr.CalculateCost(modelID, *usage); err == nil {
+			if cost, err := c.modelMgr.CalculateCost(modelID, *outcome.usage); err == nil {
 				costCents = cost * 100 // Convert dollars to cents
 			}
 		}
-		c.recordCost(sess.ID, modelID, usage)
+		c.recordCost(sess.ID, modelID, outcome.usage)
 	} else {
 		// Fallback: estimate tokens from response length
-		tokens = len(fullResponse) / 4
+		tokens = len(outcome.response) / 4
 		// Estimate cost using model pricing if available
 		if c.modelMgr != nil {
 			if cost, err := c.modelMgr.CalculateCostFromTokens(modelID, 0, tokens); err == nil {
@@ -1335,12 +1380,19 @@ func (c *Controller) streamResponse(ctx context.Context, prompt string, sess *Se
 	c.app.SetStatus("Ready")
 }
 
-func (c *Controller) runToolLoop(ctx context.Context, sess *SessionState, modelID string) (string, *model.Usage, error) {
+type toolLoopOutcome struct {
+	response      string
+	usage         *model.Usage
+	streamed      bool
+	errorReported bool
+}
+
+func (c *Controller) runToolLoop(ctx context.Context, sess *SessionState, modelID string) (toolLoopOutcome, error) {
 	if c.modelMgr == nil {
-		return "", nil, fmt.Errorf("model manager unavailable")
+		return toolLoopOutcome{}, fmt.Errorf("model manager unavailable")
 	}
 	if sess == nil || sess.Conversation == nil {
-		return "", nil, fmt.Errorf("session unavailable")
+		return toolLoopOutcome{}, fmt.Errorf("session unavailable")
 	}
 
 	// Use execution strategy if available (the one true path)
@@ -1356,7 +1408,7 @@ func (c *Controller) runToolLoop(ctx context.Context, sess *SessionState, modelI
 
 	for range maxIterations {
 		if ctx.Err() != nil {
-			return "", nil, ctx.Err()
+			return toolLoopOutcome{}, ctx.Err()
 		}
 
 		allowedTools := []string{}
@@ -1387,24 +1439,24 @@ func (c *Controller) runToolLoop(ctx context.Context, sess *SessionState, modelI
 				useTools = false
 				continue
 			}
-			return "", nil, err
+			return toolLoopOutcome{}, err
 		}
 		totalUsage = addUsage(totalUsage, resp.Usage)
 
 		if len(resp.Choices) == 0 {
-			return "", nil, fmt.Errorf("no response choices")
+			return toolLoopOutcome{}, fmt.Errorf("no response choices")
 		}
 
 		msg := resp.Choices[0].Message
 		if len(msg.ToolCalls) == 0 {
 			text, err := model.ExtractTextContent(msg.Content)
 			if err != nil {
-				return "", nil, err
+				return toolLoopOutcome{}, err
 			}
 			sess.Conversation.AddAssistantMessageWithReasoning(text, msg.Reasoning)
 			c.saveLastMessage(sess)
 			c.warnIfTruncatedResponse(resp.Choices[0].FinishReason)
-			return text, &totalUsage, nil
+			return toolLoopOutcome{response: text, usage: &totalUsage}, nil
 		}
 
 		for i := range msg.ToolCalls {
@@ -1438,7 +1490,7 @@ func (c *Controller) runToolLoop(ctx context.Context, sess *SessionState, modelI
 				params[tool.ToolCallIDParam] = tc.ID
 			}
 
-			result, execErr := sess.ToolRegistry.Execute(tc.Function.Name, params)
+			result, execErr := sess.ToolRegistry.ExecuteWithContext(ctx, tc.Function.Name, params)
 			toolText := formatToolResultForModel(result, execErr)
 			sess.Conversation.AddToolResponseMessage(tc.ID, tc.Function.Name, toolText)
 
@@ -1448,12 +1500,12 @@ func (c *Controller) runToolLoop(ctx context.Context, sess *SessionState, modelI
 		}
 	}
 
-	return "", &totalUsage, fmt.Errorf("max tool calling iterations (%d) exceeded", maxIterations)
+	return toolLoopOutcome{usage: &totalUsage}, fmt.Errorf("max tool calling iterations (%d) exceeded", maxIterations)
 }
 
 // runWithStrategy executes using the configured execution strategy.
 // This is the one true path for tool execution.
-func (c *Controller) runWithStrategy(ctx context.Context, sess *SessionState) (string, *model.Usage, error) {
+func (c *Controller) runWithStrategy(ctx context.Context, sess *SessionState) (toolLoopOutcome, error) {
 	// Get the last user message as the prompt
 	prompt := ""
 	if sess.Conversation != nil {
@@ -1490,18 +1542,22 @@ func (c *Controller) runWithStrategy(ctx context.Context, sess *SessionState) (s
 	}
 
 	// Set up stream handler for TUI updates
+	handler := &tuiStreamHandler{
+		app:  c.app,
+		sess: sess,
+		ctrl: c,
+	}
 	if runner, ok := c.execStrategy.(interface{ SetStreamHandler(execution.StreamHandler) }); ok {
-		runner.SetStreamHandler(&tuiStreamHandler{
-			app:  c.app,
-			sess: sess,
-			ctrl: c,
-		})
+		runner.SetStreamHandler(handler)
 	}
 
 	// Execute
 	result, err := c.execStrategy.Execute(ctx, req)
 	if err != nil {
-		return "", nil, err
+		return toolLoopOutcome{
+			streamed:      handler.hasStreamed(),
+			errorReported: handler.errorWasReported(),
+		}, err
 	}
 
 	// Update conversation with result
@@ -1517,7 +1573,12 @@ func (c *Controller) runWithStrategy(ctx context.Context, sess *SessionState) (s
 		TotalTokens:      result.Usage.TotalTokens,
 	}
 
-	return result.Content, usage, nil
+	return toolLoopOutcome{
+		response:      result.Content,
+		usage:         usage,
+		streamed:      handler.hasStreamed(),
+		errorReported: handler.errorWasReported(),
+	}, nil
 }
 
 // tuiStreamHandler bridges execution events to the TUI display.
@@ -1527,19 +1588,40 @@ type tuiStreamHandler struct {
 	ctrl         *Controller
 	reasoning    strings.Builder
 	hasReasoning bool
+	streamed     bool
+	started      bool
+	errorSeen    bool
+	mu           sync.Mutex
 }
 
 func (h *tuiStreamHandler) OnText(text string) {
-	// Text is handled in OnComplete
+	if h == nil || text == "" {
+		return
+	}
+	h.ensureStreamingMessage()
+	if h.app == nil {
+		return
+	}
+	if h.sess != nil && strings.TrimSpace(h.sess.ID) != "" {
+		h.app.StreamChunk(h.sess.ID, text)
+	} else {
+		h.app.AppendToLastMessage(text)
+	}
 }
 
 func (h *tuiStreamHandler) OnReasoning(reasoning string) {
+	if h == nil || h.app == nil {
+		return
+	}
 	h.reasoning.WriteString(reasoning)
 	h.hasReasoning = true
 	h.app.AppendReasoning(reasoning)
 }
 
 func (h *tuiStreamHandler) OnReasoningEnd() {
+	if h == nil || h.app == nil {
+		return
+	}
 	if h.hasReasoning {
 		full := h.reasoning.String()
 		preview := full
@@ -1563,8 +1645,72 @@ func (h *tuiStreamHandler) OnToolEnd(name string, result string, err error) {
 	// Tool results are handled internally by the strategy
 }
 
+func (h *tuiStreamHandler) OnError(err error) {
+	if h == nil || err == nil {
+		return
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return
+	}
+	h.mu.Lock()
+	if h.errorSeen {
+		h.mu.Unlock()
+		return
+	}
+	h.errorSeen = true
+	h.mu.Unlock()
+	if h.app != nil {
+		h.app.AddMessage(fmt.Sprintf("Error: %v", err), "system")
+		h.app.SetStatus("Error")
+	}
+}
+
 func (h *tuiStreamHandler) OnComplete(result *execution.ExecutionResult) {
+	if h == nil || h.app == nil {
+		return
+	}
+	if h.hasStreamed() && h.sess != nil && strings.TrimSpace(h.sess.ID) != "" {
+		h.app.StreamEnd(h.sess.ID, "")
+	}
 	h.app.SetStatus("Ready")
+}
+
+func (h *tuiStreamHandler) ensureStreamingMessage() {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	if h.started {
+		h.streamed = true
+		h.mu.Unlock()
+		return
+	}
+	h.started = true
+	h.streamed = true
+	h.mu.Unlock()
+
+	if h.app != nil {
+		h.app.RemoveThinkingIndicator()
+		h.app.AddMessage("", "assistant")
+	}
+}
+
+func (h *tuiStreamHandler) hasStreamed() bool {
+	if h == nil {
+		return false
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.streamed
+}
+
+func (h *tuiStreamHandler) errorWasReported() bool {
+	if h == nil {
+		return false
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.errorSeen
 }
 
 func parseToolParams(raw string) (map[string]any, error) {
@@ -2187,7 +2333,7 @@ const defaultTUIMaxOutputBytes = 100_000
 const defaultTUIAttachmentMaxBytes = 50_000
 
 // buildRegistry creates the tool registry with all available tools.
-func buildRegistry(cfg *config.Config, store *storage.Store, workDir string, hub *telemetry.Hub, sessionID string, progressMgr *progress.ProgressManager, toastMgr *toast.ToastManager) *tool.Registry {
+func buildRegistry(ctx context.Context, cfg *config.Config, store *storage.Store, workDir string, hub *telemetry.Hub, sessionID string, progressMgr *progress.ProgressManager, toastMgr *toast.ToastManager) *tool.Registry {
 	registry := tool.NewRegistry()
 
 	registryCfg := tool.DefaultRegistryConfig()
@@ -2234,7 +2380,10 @@ func buildRegistry(cfg *config.Config, store *storage.Store, workDir string, hub
 	}
 
 	if cfg != nil {
-		manager, err := mcp.ManagerFromConfig(context.Background(), cfg.MCP)
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		manager, err := mcp.ManagerFromConfig(ctx, cfg.MCP)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: MCP setup failed: %v\n", err)
 		}
@@ -2621,7 +2770,7 @@ Be specific with file:line references. Flag critical issues first.`, "```diff\n"
 	// Display as user message and stream response
 	c.app.AddMessage("/review", "user")
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(c.baseContext())
 	c.mu.Lock()
 	if len(c.sessions) == 0 {
 		c.mu.Unlock()
@@ -2676,7 +2825,7 @@ Output ONLY the commit message, nothing else.`, "```diff\n"+diff+"\n```", recent
 	// Display as user message and stream response
 	c.app.AddMessage("/commit", "user")
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(c.baseContext())
 	c.mu.Lock()
 	if len(c.sessions) == 0 {
 		c.mu.Unlock()
@@ -2765,7 +2914,7 @@ func (c *Controller) handleSearchCommand(args []string) {
 
 	searcher := conversation.NewConversationSearcher(c.store, provider)
 	opts := conversation.SearchOptions{SessionID: sessionID, Limit: limit}
-	ctx := context.Background()
+	ctx := c.baseContext()
 
 	var (
 		results []conversation.SearchResult
@@ -2979,7 +3128,7 @@ func (c *Controller) handleImportCommand(args []string) {
 		c.app.AddMessage("Imported session; failed to set project path: "+err.Error(), "system")
 	}
 
-	newSess, err := newSessionState(c.cfg, c.store, c.workDir, c.telemetry, c.modelMgr, result.SessionID, true, c.progressMgr, c.toastMgr)
+	newSess, err := newSessionState(c.baseContext(), c.cfg, c.store, c.workDir, c.telemetry, c.modelMgr, result.SessionID, true, c.progressMgr, c.toastMgr)
 	if err != nil {
 		c.app.AddMessage("Imported session but failed to load: "+err.Error(), "system")
 		return
@@ -3363,6 +3512,17 @@ func (c *Controller) updateQueueIndicator(sess *SessionState) {
 	}
 }
 
+func (c *Controller) clearMessageQueue(sess *SessionState) int {
+	if c == nil || sess == nil {
+		return 0
+	}
+	c.mu.Lock()
+	count := len(sess.MessageQueue)
+	sess.MessageQueue = nil
+	c.mu.Unlock()
+	return count
+}
+
 // processMessageQueue handles queued messages after streaming completes.
 // Returns true if there are messages to process, starting a new stream.
 func (c *Controller) processMessageQueue(sess *SessionState) bool {
@@ -3390,7 +3550,7 @@ func (c *Controller) processMessageQueue(sess *SessionState) bool {
 
 	// Start new stream for the queued message
 	c.mu.Lock()
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(c.baseContext())
 	sess.Cancel = cancel
 	sess.Streaming = true
 	c.emitStreaming(sess.ID, true)

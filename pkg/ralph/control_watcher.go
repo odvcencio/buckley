@@ -17,6 +17,7 @@ type ControlWatcher struct {
 	lastHash    [32]byte
 	mu          sync.RWMutex
 	stopCh      chan struct{}
+	stopOnce    sync.Once
 	subscribers []chan *ControlConfig
 	subMu       sync.RWMutex
 	started     bool
@@ -83,19 +84,17 @@ func (w *ControlWatcher) Stop() {
 	}
 
 	w.mu.Lock()
-	defer w.mu.Unlock()
-
 	if !w.started {
+		w.mu.Unlock()
 		return
 	}
-
-	select {
-	case <-w.stopCh:
-		// Already closed
-	default:
-		close(w.stopCh)
-	}
 	w.started = false
+	w.mu.Unlock()
+
+	w.stopOnce.Do(func() {
+		close(w.stopCh)
+	})
+	w.closeSubscribers()
 }
 
 // Config returns the current control configuration.
@@ -203,8 +202,18 @@ func (w *ControlWatcher) loadAndHash() (*ControlConfig, [32]byte, error) {
 
 // notifySubscribers sends the new config to all subscribers.
 func (w *ControlWatcher) notifySubscribers(cfg *ControlConfig) {
+	if w == nil {
+		return
+	}
+
+	w.mu.RLock()
+	if !w.started {
+		w.mu.RUnlock()
+		return
+	}
 	w.subMu.RLock()
 	defer w.subMu.RUnlock()
+	defer w.mu.RUnlock()
 
 	for _, ch := range w.subscribers {
 		// Non-blocking send to avoid blocking the watcher
@@ -214,4 +223,18 @@ func (w *ControlWatcher) notifySubscribers(cfg *ControlConfig) {
 			// Channel full, drop notification
 		}
 	}
+}
+
+func (w *ControlWatcher) closeSubscribers() {
+	if w == nil {
+		return
+	}
+
+	w.subMu.Lock()
+	defer w.subMu.Unlock()
+
+	for _, ch := range w.subscribers {
+		close(ch)
+	}
+	w.subscribers = nil
 }

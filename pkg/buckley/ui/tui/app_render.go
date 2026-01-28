@@ -315,6 +315,9 @@ func (a *WidgetApp) drawFocusIndicator(buf *runtime.Buffer) {
 
 // Metrics returns a copy of the current render metrics.
 func (a *WidgetApp) Metrics() RenderMetrics {
+	if a == nil {
+		return RenderMetrics{}
+	}
 	a.renderMu.Lock()
 	defer a.renderMu.Unlock()
 	return a.metrics
@@ -322,10 +325,16 @@ func (a *WidgetApp) Metrics() RenderMetrics {
 
 // Refresh forces a re-render.
 func (a *WidgetApp) Refresh() {
+	if a == nil {
+		return
+	}
 	a.Post(RefreshMsg{})
 }
 
 // SetDiagnostics sets the backend diagnostics collector for debug dumps.
 func (a *WidgetApp) SetDiagnostics(collector *diagnostics.Collector) {
+	if a == nil {
+		return
+	}
 	a.diagnostics = collector
 }

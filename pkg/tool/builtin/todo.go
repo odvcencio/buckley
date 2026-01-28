@@ -175,6 +175,10 @@ func (t *TodoTool) Parameters() ParameterSchema {
 }
 
 func (t *TodoTool) Execute(params map[string]any) (*Result, error) {
+	return t.ExecuteWithContext(context.Background(), params)
+}
+
+func (t *TodoTool) ExecuteWithContext(ctx context.Context, params map[string]any) (*Result, error) {
 	if t.Store == nil {
 		return &Result{
 			Success: false,
@@ -200,9 +204,9 @@ func (t *TodoTool) Execute(params map[string]any) (*Result, error) {
 
 	switch action {
 	case "brainstorm":
-		return t.handleBrainstorm(sessionID, params)
+		return t.handleBrainstorm(ctx, sessionID, params)
 	case "refine":
-		return t.handleRefine(sessionID, params)
+		return t.handleRefine(ctx, sessionID, params)
 	case "commit":
 		return t.handleCommit(sessionID, params)
 	case "create":
@@ -550,7 +554,7 @@ func (t *TodoTool) formatTodoList(todos []TodoItem) string {
 }
 
 // handleBrainstorm analyzes a task and proposes 2-3 approaches
-func (t *TodoTool) handleBrainstorm(sessionID string, params map[string]any) (*Result, error) {
+func (t *TodoTool) handleBrainstorm(ctx context.Context, sessionID string, params map[string]any) (*Result, error) {
 	if t.LLMClient == nil {
 		return &Result{
 			Success: false,
@@ -584,7 +588,9 @@ func (t *TodoTool) handleBrainstorm(sessionID string, params map[string]any) (*R
 		Temperature: 0.7, // Some creativity for exploring approaches
 	}
 
-	ctx := context.Background()
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	resp, err := t.LLMClient.ChatCompletion(ctx, req)
 	if err != nil {
 		return &Result{
@@ -637,7 +643,7 @@ func (t *TodoTool) handleBrainstorm(sessionID string, params map[string]any) (*R
 }
 
 // handleRefine generates concrete TODOs from a selected approach
-func (t *TodoTool) handleRefine(sessionID string, params map[string]any) (*Result, error) {
+func (t *TodoTool) handleRefine(ctx context.Context, sessionID string, params map[string]any) (*Result, error) {
 	if t.LLMClient == nil {
 		return &Result{
 			Success: false,
@@ -698,7 +704,9 @@ func (t *TodoTool) handleRefine(sessionID string, params map[string]any) (*Resul
 		Temperature: 0.3, // Lower temp for concrete planning
 	}
 
-	ctx := context.Background()
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	resp, err := t.LLMClient.ChatCompletion(ctx, req)
 	if err != nil {
 		return &Result{

@@ -61,6 +61,10 @@ func (t *RunTestsTool) Parameters() ParameterSchema {
 }
 
 func (t *RunTestsTool) Execute(params map[string]any) (*Result, error) {
+	return t.ExecuteWithContext(context.Background(), params)
+}
+
+func (t *RunTestsTool) ExecuteWithContext(ctx context.Context, params map[string]any) (*Result, error) {
 	testPath := "."
 	if p, ok := params["path"].(string); ok && p != "" {
 		testPath = p
@@ -95,10 +99,12 @@ func (t *RunTestsTool) Execute(params map[string]any) (*Result, error) {
 		timeout = int(to)
 	}
 
-	ctx := context.Background()
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if timeout > 0 {
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(context.Background(), time.Duration(timeout)*time.Second)
+		ctx, cancel = context.WithTimeout(ctx, time.Duration(timeout)*time.Second)
 		defer cancel()
 	}
 

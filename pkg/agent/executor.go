@@ -253,6 +253,15 @@ func (h *executorStreamHandler) OnToolEnd(name string, result string, err error)
 	})
 }
 
+func (h *executorStreamHandler) OnError(err error) {
+	if h == nil || h.agent == nil || h.ctx == nil || err == nil {
+		return
+	}
+	_ = h.agent.PublishTaskEvent(h.ctx, "error", map[string]any{
+		"error": err.Error(),
+	})
+}
+
 func (h *executorStreamHandler) OnComplete(result *toolrunner.Result) {}
 
 func buildExecutorMessages(task string, systemPrompt string) []model.Message {

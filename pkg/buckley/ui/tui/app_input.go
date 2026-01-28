@@ -325,6 +325,9 @@ func (a *WidgetApp) dispatchRuntimeMouse(m MouseMsg) bool {
 
 // SetCallbacks sets the event handlers.
 func (a *WidgetApp) SetCallbacks(onSubmit func(string), onFileSelect func(string), onShellCmd func(string) string) {
+	if a == nil {
+		return
+	}
 	a.onSubmit = onSubmit
 	a.onFileSelect = onFileSelect
 	a.onShellCmd = onShellCmd
@@ -332,17 +335,26 @@ func (a *WidgetApp) SetCallbacks(onSubmit func(string), onFileSelect func(string
 
 // SetSessionCallbacks sets the session navigation callbacks.
 func (a *WidgetApp) SetSessionCallbacks(onNext, onPrev func()) {
+	if a == nil {
+		return
+	}
 	a.onNextSession = onNext
 	a.onPrevSession = onPrev
 }
 
 // SetApprovalCallback sets the callback for tool approval decisions.
 func (a *WidgetApp) SetApprovalCallback(onApproval func(requestID string, approved, alwaysAllow bool)) {
+	if a == nil {
+		return
+	}
 	a.onApproval = onApproval
 }
 
 // SetToastDismissHandler sets the handler to dismiss toasts from the UI.
 func (a *WidgetApp) SetToastDismissHandler(onDismiss func(string)) {
+	if a == nil {
+		return
+	}
 	if a.toastStack == nil {
 		return
 	}
@@ -353,6 +365,9 @@ func (a *WidgetApp) SetToastDismissHandler(onDismiss func(string)) {
 // RequestApproval displays an approval dialog for a tool operation.
 // The callback set via SetApprovalCallback will be called with the decision.
 func (a *WidgetApp) RequestApproval(req ApprovalRequestMsg) {
+	if a == nil {
+		return
+	}
 	a.Post(req)
 }
 

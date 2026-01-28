@@ -169,6 +169,9 @@ func (a *WidgetApp) applyInputHeightLimit(screenHeight int) {
 // SetSidebarVisible sets the sidebar visibility.
 // Respects user override - won't change visibility if user manually toggled.
 func (a *WidgetApp) SetSidebarVisible(visible bool) {
+	if a == nil {
+		return
+	}
 	if a.sidebarUserOverride {
 		return // Don't override user's manual choice
 	}
@@ -184,11 +187,17 @@ func (a *WidgetApp) SetSidebarVisible(visible bool) {
 
 // IsSidebarVisible returns the sidebar visibility state.
 func (a *WidgetApp) IsSidebarVisible() bool {
+	if a == nil {
+		return false
+	}
 	return a.sidebarVisible
 }
 
 // SetCurrentTask updates the sidebar's current task display.
 func (a *WidgetApp) SetCurrentTask(name string, progress int) {
+	if a == nil {
+		return
+	}
 	a.sidebar.SetCurrentTask(name, progress)
 	a.currentTaskActive = strings.TrimSpace(name) != ""
 	a.updatePresenceStrip()
@@ -198,6 +207,9 @@ func (a *WidgetApp) SetCurrentTask(name string, progress int) {
 
 // SetPlanTasks updates the sidebar's plan task list.
 func (a *WidgetApp) SetPlanTasks(tasks []buckleywidgets.PlanTask) {
+	if a == nil {
+		return
+	}
 	a.sidebar.SetPlanTasks(tasks)
 	a.planTotal = len(tasks)
 	a.planCompleted = 0
@@ -213,6 +225,9 @@ func (a *WidgetApp) SetPlanTasks(tasks []buckleywidgets.PlanTask) {
 
 // SetRunningTools updates the sidebar's running tools list.
 func (a *WidgetApp) SetRunningTools(tools []buckleywidgets.RunningTool) {
+	if a == nil {
+		return
+	}
 	a.sidebar.SetRunningTools(tools)
 	a.runningToolCount = len(tools)
 	a.updatePresenceStrip()
@@ -225,6 +240,9 @@ func (a *WidgetApp) SetRunningTools(tools []buckleywidgets.RunningTool) {
 
 // SetActiveTouches updates the sidebar's active touches list.
 func (a *WidgetApp) SetActiveTouches(touches []buckleywidgets.TouchSummary) {
+	if a == nil {
+		return
+	}
 	a.sidebar.SetActiveTouches(touches)
 	a.updateSidebarVisibility()
 	a.dirty = true
@@ -233,6 +251,9 @@ func (a *WidgetApp) SetActiveTouches(touches []buckleywidgets.TouchSummary) {
 // SetRLMStatus updates the sidebar's RLM status display.
 // Auto-shows sidebar when RLM content arrives (unless user manually hid it).
 func (a *WidgetApp) SetRLMStatus(status *buckleywidgets.RLMStatus, scratchpad []buckleywidgets.RLMScratchpadEntry) {
+	if a == nil {
+		return
+	}
 	a.sidebar.SetRLMStatus(status, scratchpad)
 	// Auto-show sidebar for RLM mode if user hasn't manually hidden it
 	if !a.sidebarUserOverride && !a.sidebarVisible && (status != nil || len(scratchpad) > 0) {

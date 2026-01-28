@@ -25,12 +25,12 @@ type RenderMetrics struct {
 }
 
 const (
-	minInputHeight       = 2
-	minChatHeight        = 4
-	sidebarStandardWidth = 25
-	sidebarWideWidth     = 35
-	sidebarMinWidth      = 120
-	sidebarWideMinWidth  = 160
+	minInputHeight       = 2   // rows reserved for input
+	minChatHeight        = 4   // minimum chat viewport height in rows
+	sidebarStandardWidth = 25  // columns for standard sidebar layout
+	sidebarWideWidth     = 35  // columns for wide sidebar layout
+	sidebarMinWidth      = 120 // screen width threshold for standard sidebar
+	sidebarWideMinWidth  = 160 // screen width threshold for wide sidebar
 )
 
 type layoutSpec struct {

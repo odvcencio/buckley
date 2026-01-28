@@ -117,6 +117,9 @@ type StreamHandler interface {
 	// OnToolEnd is called when a tool execution completes.
 	OnToolEnd(name string, result string, err error)
 
+	// OnError is called when streaming encounters an error.
+	OnError(err error)
+
 	// OnComplete is called when execution finishes.
 	OnComplete(result *ExecutionResult)
 }

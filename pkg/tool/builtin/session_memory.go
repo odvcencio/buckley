@@ -78,6 +78,10 @@ func (t *SessionMemoryTool) Parameters() ParameterSchema {
 }
 
 func (t *SessionMemoryTool) Execute(params map[string]any) (*Result, error) {
+	return t.ExecuteWithContext(context.Background(), params)
+}
+
+func (t *SessionMemoryTool) ExecuteWithContext(ctx context.Context, params map[string]any) (*Result, error) {
 	if t.Store == nil {
 		return &Result{Success: false, Error: "session memory store not configured"}, nil
 	}
@@ -88,17 +92,17 @@ func (t *SessionMemoryTool) Execute(params map[string]any) (*Result, error) {
 	action := strings.ToLower(stringParam(params, "action"))
 	switch action {
 	case "search":
-		return t.handleSearch(params)
+		return t.handleSearch(ctx, params)
 	case "list_summaries":
-		return t.handleListSummaries(params)
+		return t.handleListSummaries(ctx, params)
 	case "get_turn":
-		return t.handleGetTurn(params)
+		return t.handleGetTurn(ctx, params)
 	default:
 		return &Result{Success: false, Error: fmt.Sprintf("unknown action: %s", action)}, nil
 	}
 }
 
-func (t *SessionMemoryTool) handleSearch(params map[string]any) (*Result, error) {
+func (t *SessionMemoryTool) handleSearch(ctx context.Context, params map[string]any) (*Result, error) {
 	tier := strings.ToLower(stringParam(params, "tier"))
 	if tier == "" {
 		tier = "summary"
@@ -108,7 +112,9 @@ func (t *SessionMemoryTool) handleSearch(params map[string]any) (*Result, error)
 		return &Result{Success: false, Error: "query parameter is required"}, nil
 	}
 	limit := intParam(params, "limit", 5)
-	ctx := context.Background()
+	if ctx == nil {
+		ctx = context.Background()
+	}
 
 	switch tier {
 	case "raw":
@@ -196,10 +202,12 @@ func (t *SessionMemoryTool) handleSearch(params map[string]any) (*Result, error)
 	}
 }
 
-func (t *SessionMemoryTool) handleListSummaries(params map[string]any) (*Result, error) {
+func (t *SessionMemoryTool) handleListSummaries(ctx context.Context, params map[string]any) (*Result, error) {
 	since := intParam(params, "since", 0)
 	limit := intParam(params, "limit", 10)
-	ctx := context.Background()
+	if ctx == nil {
+		ctx = context.Background()
+	}
 
 	summaries, err := t.Store.ListSummaries(ctx, t.SessionID, since, limit)
 	if err != nil {
@@ -221,12 +229,14 @@ func (t *SessionMemoryTool) handleListSummaries(params map[string]any) (*Result,
 	}}, nil
 }
 
-func (t *SessionMemoryTool) handleGetTurn(params map[string]any) (*Result, error) {
+func (t *SessionMemoryTool) handleGetTurn(ctx context.Context, params map[string]any) (*Result, error) {
 	iteration := intParam(params, "iteration", 0)
 	if iteration <= 0 {
 		return &Result{Success: false, Error: "iteration parameter is required"}, nil
 	}
-	ctx := context.Background()
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	turns, err := t.Store.GetTurnsByIteration(ctx, t.SessionID, iteration)
 	if err != nil {
 		return &Result{Success: false, Error: err.Error()}, nil

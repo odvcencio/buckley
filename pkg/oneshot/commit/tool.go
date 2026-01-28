@@ -2,6 +2,8 @@
 package commit
 
 import (
+	"log"
+
 	"github.com/odvcencio/buckley/pkg/oneshot"
 	"github.com/odvcencio/buckley/pkg/tools"
 )
@@ -133,12 +135,16 @@ func (e *ValidationError) Error() string {
 
 func init() {
 	// Register the tool in the tools registry
-	tools.MustRegister(GenerateCommitTool)
+	if err := tools.Register(GenerateCommitTool); err != nil {
+		log.Printf("register commit tool: %v", err)
+	}
 
 	// Register the command in the oneshot registry
-	oneshot.MustRegisterBuiltin(
+	if err := oneshot.RegisterBuiltin(
 		"commit",
 		"Generate a structured git commit message from staged changes",
 		GenerateCommitTool,
-	)
+	); err != nil {
+		log.Printf("register commit command: %v", err)
+	}
 }

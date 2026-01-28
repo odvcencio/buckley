@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -13,8 +14,11 @@ import (
 )
 
 const (
-	interactiveTerminalEnv = "BUCKLEY_INTERACTIVE_TERMINAL"
-	tmuxWindowName         = "Buckley interactive"
+	interactiveTerminalEnv  = "BUCKLEY_INTERACTIVE_TERMINAL"
+	shellDefaultTimeoutEnv  = "BUCKLEY_SHELL_TIMEOUT_SECONDS"
+	tmuxWindowName          = "Buckley interactive"
+	defaultShellTimeoutSecs = 120
+	maxShellTimeoutSecs     = 600
 )
 
 // ShellCommandTool runs bash commands (assumed to be sandboxed in container)
@@ -68,7 +72,7 @@ func (t *ShellCommandTool) Parameters() ParameterSchema {
 			"timeout_seconds": {
 				Type:        "integer",
 				Description: "Timeout in seconds (default 120, max 600)",
-				Default:     120,
+				Default:     defaultShellTimeoutSeconds(),
 			},
 			"interactive": {
 				Type:        "boolean",
@@ -78,6 +82,20 @@ func (t *ShellCommandTool) Parameters() ParameterSchema {
 		},
 		Required: []string{"command"},
 	}
+}
+
+func defaultShellTimeoutSeconds() int {
+	if raw := strings.TrimSpace(os.Getenv(shellDefaultTimeoutEnv)); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil {
+			if parsed > maxShellTimeoutSecs {
+				return maxShellTimeoutSecs
+			}
+			if parsed > 0 {
+				return parsed
+			}
+		}
+	}
+	return defaultShellTimeoutSecs
 }
 
 // SetSandboxConfig configures command sandboxing.
@@ -90,15 +108,20 @@ func (t *ShellCommandTool) SetSandboxConfig(cfg sandbox.Config) {
 }
 
 func (t *ShellCommandTool) Execute(params map[string]any) (*Result, error) {
+	return t.ExecuteWithContext(context.Background(), params)
+}
+
+func (t *ShellCommandTool) ExecuteWithContext(ctx context.Context, params map[string]any) (*Result, error) {
 	cmd, ok := params["command"].(string)
 	if !ok || strings.TrimSpace(cmd) == "" {
 		return &Result{Success: false, Error: "command parameter must be a non-empty string"}, nil
 	}
 
-	timeout := parseInt(params["timeout_seconds"], 120)
+	defaultTimeout := defaultShellTimeoutSeconds()
+	timeout := parseInt(params["timeout_seconds"], defaultTimeout)
 	explicitTimeout := params["timeout_seconds"] != nil
-	if timeout <= 0 || timeout > 600 {
-		timeout = 120
+	if timeout <= 0 || timeout > maxShellTimeoutSecs {
+		timeout = defaultTimeout
 	}
 
 	interactive := parseBoolParam(params["interactive"], false)
@@ -120,7 +143,10 @@ func (t *ShellCommandTool) Execute(params map[string]any) (*Result, error) {
 				Error:   "interactive shell sessions are not supported when container execution is enabled",
 			}, nil
 		}
-		info, err := t.runInteractiveCommand(cmd, timeout)
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		info, err := t.runInteractiveCommand(ctx, cmd, timeout)
 		if err != nil {
 			return &Result{
 				Success: false,
@@ -143,7 +169,10 @@ func (t *ShellCommandTool) Execute(params map[string]any) (*Result, error) {
 		}, nil
 	}
 
-	ctx, cancel := timeoutContext(timeout)
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cancel := timeoutContext(ctx, timeout)
 	defer cancel()
 
 	var command *exec.Cmd
@@ -268,11 +297,14 @@ type interactiveLaunchResult struct {
 	Launcher     string
 }
 
-func (t *ShellCommandTool) runInteractiveCommand(cmd string, timeout int) (*interactiveLaunchResult, error) {
+func (t *ShellCommandTool) runInteractiveCommand(ctx context.Context, cmd string, timeout int) (*interactiveLaunchResult, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	wrapped := wrapInteractiveCommand(cmd)
 
 	if inTmux() {
-		if err := runTmuxInteractive(wrapped, timeout); err == nil {
+		if err := runTmuxInteractive(ctx, wrapped, timeout); err == nil {
 			return &interactiveLaunchResult{
 				Note:         fmt.Sprintf("Interactive shell running in tmux window \"%s\".", tmuxWindowName),
 				UsedExternal: true,
@@ -283,7 +315,7 @@ func (t *ShellCommandTool) runInteractiveCommand(cmd string, timeout int) (*inte
 	}
 
 	if launcher := findTerminalLauncher(); launcher != nil {
-		if err := launcher.run(wrapped, timeout); err == nil {
+		if err := launcher.run(ctx, wrapped, timeout); err == nil {
 			return &interactiveLaunchResult{
 				Note:         fmt.Sprintf("Interactive session opened via %s.", launcher.name),
 				UsedExternal: true,
@@ -292,7 +324,7 @@ func (t *ShellCommandTool) runInteractiveCommand(cmd string, timeout int) (*inte
 		}
 	}
 
-	if err := runAttachedInteractive(wrapped, timeout); err != nil {
+	if err := runAttachedInteractive(ctx, wrapped, timeout); err != nil {
 		return nil, err
 	}
 	return &interactiveLaunchResult{
@@ -306,15 +338,15 @@ type terminalLauncher struct {
 	binary         string
 	args           []string
 	requireDisplay bool
-	runFn          func(shellCmd string, timeout int) error
+	runFn          func(ctx context.Context, shellCmd string, timeout int) error
 }
 
-func (tl *terminalLauncher) run(shellCmd string, timeout int) error {
+func (tl *terminalLauncher) run(ctx context.Context, shellCmd string, timeout int) error {
 	if tl == nil {
 		return fmt.Errorf("no launcher configured")
 	}
 	if tl.runFn != nil {
-		return tl.runFn(shellCmd, timeout)
+		return tl.runFn(ctx, shellCmd, timeout)
 	}
 	if tl.requireDisplay && !hasGUIEnvironment() {
 		return fmt.Errorf("display not available")
@@ -336,7 +368,7 @@ func (tl *terminalLauncher) run(shellCmd string, timeout int) error {
 		args = append(args, shellCmd)
 	}
 
-	ctx, cancel := timeoutContext(timeout)
+	ctx, cancel := timeoutContext(ctx, timeout)
 	defer cancel()
 
 	command := exec.CommandContext(ctx, tl.binary, args...)
@@ -452,11 +484,11 @@ func inTmux() bool {
 	return strings.TrimSpace(os.Getenv("TMUX")) != ""
 }
 
-func runTmuxInteractive(shellCmd string, timeout int) error {
+func runTmuxInteractive(ctx context.Context, shellCmd string, timeout int) error {
 	token := fmt.Sprintf("buckley-interactive-%d", time.Now().UnixNano())
 	windowCmd := fmt.Sprintf("trap 'tmux wait-for -S %[1]s' EXIT; %s", token, shellCmd)
 
-	ctx, cancel := timeoutContext(timeout)
+	ctx, cancel := timeoutContext(ctx, timeout)
 	defer cancel()
 
 	newWindow := exec.CommandContext(ctx, "tmux", "new-window", "-dn", tmuxWindowName, "bash", "-lc", windowCmd)
@@ -474,7 +506,7 @@ func runTmuxInteractive(shellCmd string, timeout int) error {
 	return waitCmd.Run()
 }
 
-func runAppleScriptTerminal(shellCmd string, timeout int) error {
+func runAppleScriptTerminal(ctx context.Context, shellCmd string, timeout int) error {
 	escaped := escapeAppleScript(shellCmd)
 	script := fmt.Sprintf(`tell application "Terminal"
 	activate
@@ -490,7 +522,7 @@ func runAppleScriptTerminal(shellCmd string, timeout int) error {
 	end repeat
 end tell`, escaped)
 
-	ctx, cancel := timeoutContext(timeout)
+	ctx, cancel := timeoutContext(ctx, timeout)
 	defer cancel()
 
 	command := exec.CommandContext(ctx, "osascript", "-e", script)
@@ -499,8 +531,8 @@ end tell`, escaped)
 	return command.Run()
 }
 
-func runAttachedInteractive(shellCmd string, timeout int) error {
-	ctx, cancel := timeoutContext(timeout)
+func runAttachedInteractive(ctx context.Context, shellCmd string, timeout int) error {
+	ctx, cancel := timeoutContext(ctx, timeout)
 	defer cancel()
 
 	fmt.Println("No GUI terminal detected. Running interactive command in current terminal...")
@@ -562,9 +594,12 @@ func parseBoolParam(value any, defaultVal bool) bool {
 	}
 }
 
-func timeoutContext(timeout int) (context.Context, context.CancelFunc) {
-	if timeout <= 0 {
-		return context.WithCancel(context.Background())
+func timeoutContext(parent context.Context, timeout int) (context.Context, context.CancelFunc) {
+	if parent == nil {
+		parent = context.Background()
 	}
-	return context.WithTimeout(context.Background(), time.Duration(timeout)*time.Second)
+	if timeout <= 0 {
+		return context.WithCancel(parent)
+	}
+	return context.WithTimeout(parent, time.Duration(timeout)*time.Second)
 }

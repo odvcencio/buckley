@@ -326,7 +326,7 @@ func (i *InputArea) Measure(constraints runtime.Constraints) runtime.Size {
 	}
 	textHeight := 1
 	if i.textarea != nil {
-		textHeight = i.textarea.Measure(runtime.Constraints{MaxWidth: textWidth, MaxHeight: maxConstraint}).Height
+		textHeight = measureTextHeight(i.textarea.Text(), textWidth)
 	}
 	height := textHeight + borderPad
 	if height < i.minHeight {
@@ -622,6 +622,29 @@ func (i *InputArea) AccessibleState() accessibility.StateSet {
 func (i *InputArea) AccessibleValue() *accessibility.ValueInfo {
 	text := i.Text()
 	return &accessibility.ValueInfo{Text: text}
+}
+
+func measureTextHeight(text string, width int) int {
+	if width <= 0 {
+		return 1
+	}
+	if text == "" {
+		return 1
+	}
+	lines := strings.Split(text, "\n")
+	height := 0
+	for _, line := range lines {
+		runes := len([]rune(line))
+		if runes == 0 {
+			height++
+			continue
+		}
+		height += (runes-1)/width + 1
+	}
+	if height < 1 {
+		return 1
+	}
+	return height
 }
 
 const maxConstraint = 10000

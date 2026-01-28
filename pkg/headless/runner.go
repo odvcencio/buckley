@@ -130,6 +130,7 @@ type Runner struct {
 	commandStop    chan struct{}
 	commandStopped chan struct{}
 	stopOnce       sync.Once
+	ctx            context.Context
 }
 
 // PendingApproval represents a tool call awaiting user approval.
@@ -164,6 +165,7 @@ type RunnerConfig struct {
 	ToolPolicy    *ToolPolicy
 	MaxRuntime    time.Duration
 	SystemPrompt  string // If empty, uses default system prompt for tool-using agents
+	Context       context.Context
 }
 
 // NewRunner creates a new headless session runner.
@@ -184,6 +186,10 @@ func NewRunner(cfg RunnerConfig) (*Runner, error) {
 	}
 
 	conv := conversation.New(cfg.Session.ID)
+	baseCtx := cfg.Context
+	if baseCtx == nil {
+		baseCtx = context.Background()
+	}
 
 	// Load existing conversation from storage
 	if err := conv.LoadFromStorage(cfg.Store); err != nil {
@@ -258,6 +264,7 @@ func NewRunner(cfg RunnerConfig) (*Runner, error) {
 		commandQueue:          make(chan command.SessionCommand, 64),
 		commandStop:           make(chan struct{}),
 		commandStopped:        make(chan struct{}),
+		ctx:                   baseCtx,
 	}
 
 	compactor := conversation.NewCompactionManager(cfg.ModelManager, sessionCfg)
@@ -281,6 +288,21 @@ func NewRunner(cfg RunnerConfig) (*Runner, error) {
 	r.startMaxRuntimeTimer(cfg.MaxRuntime)
 
 	return r, nil
+}
+
+func (r *Runner) baseContext() context.Context {
+	if r == nil || r.ctx == nil {
+		return context.Background()
+	}
+	return r.ctx
+}
+
+// SetContext updates the base context for headless execution.
+func (r *Runner) SetContext(ctx context.Context) {
+	if r == nil || ctx == nil {
+		return
+	}
+	r.ctx = ctx
 }
 
 // SessionID returns the session identifier.
@@ -473,7 +495,7 @@ func (r *Runner) processUserInput(content string) error {
 }
 
 func (r *Runner) runConversationLoop() error {
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(r.baseContext())
 	r.mu.Lock()
 	r.cancelFunc = cancel
 	r.mu.Unlock()
@@ -792,7 +814,7 @@ func (r *Runner) executeToolCall(ctx context.Context, tc model.ToolCall, args ma
 	}
 
 	startTime := time.Now()
-	result, err := r.tools.Execute(tc.Function.Name, args)
+	result, err := r.tools.ExecuteWithContext(ctx, tc.Function.Name, args)
 	duration := time.Since(startTime)
 
 	decidedBy, riskScore := r.approvalAuditFields(tc.ID)
@@ -984,7 +1006,7 @@ func (r *Runner) handleToolCalls(ctx context.Context, toolCalls []model.ToolCall
 
 		// Execute tool with timing
 		startTime := time.Now()
-		result, err := r.tools.Execute(tc.Function.Name, args)
+		result, err := r.tools.ExecuteWithContext(ctx, tc.Function.Name, args)
 		duration := time.Since(startTime)
 
 		// Log to audit trail
@@ -1557,7 +1579,7 @@ func (r *Runner) runPlanCommand(args []string) error {
 
 	_ = r.persistSystemMessage(fmt.Sprintf("⏳ Planning %q…", featureName))
 
-	plan, err := orch.PlanFeature(featureName, description)
+	plan, err := orch.PlanFeatureWithContext(r.baseContext(), featureName, description)
 	if err != nil {
 		if handled := r.handleWorkflowPause(err); handled {
 			return nil
@@ -1587,7 +1609,7 @@ func (r *Runner) runExecuteCommand(args []string) error {
 
 	if len(args) > 0 {
 		taskID := args[0]
-		if err := orch.ExecuteTask(taskID); err != nil {
+		if err := orch.ExecuteTaskWithContext(r.baseContext(), taskID); err != nil {
 			if handled := r.handleWorkflowPause(err); handled {
 				return nil
 			}
@@ -1596,7 +1618,7 @@ func (r *Runner) runExecuteCommand(args []string) error {
 		return r.persistSystemMessage(fmt.Sprintf("✓ Task %s completed.", taskID))
 	}
 
-	if err := orch.ExecutePlan(); err != nil {
+	if err := orch.ExecutePlanWithContext(r.baseContext()); err != nil {
 		if handled := r.handleWorkflowPause(err); handled {
 			return nil
 		}

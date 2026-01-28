@@ -125,7 +125,7 @@ func (s *RLMStrategy) SupportsStreaming() bool {
 // Execute processes the request using the RLM coordinator.
 func (s *RLMStrategy) Execute(ctx context.Context, req ExecutionRequest) (*ExecutionResult, error) {
 	if s.runtime == nil {
-		return nil, fmt.Errorf("RLM runtime not initialized")
+		return nil, fmt.Errorf("rlm runtime not initialized")
 	}
 
 	// Build the task prompt with context
@@ -134,7 +134,7 @@ func (s *RLMStrategy) Execute(ctx context.Context, req ExecutionRequest) (*Execu
 	// Execute via RLM coordinator
 	answer, err := s.runtime.Execute(ctx, task)
 	if err != nil {
-		return nil, fmt.Errorf("RLM execution: %w", err)
+		return nil, fmt.Errorf("rlm execution: %w", err)
 	}
 
 	// Convert RLM answer to ExecutionResult

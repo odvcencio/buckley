@@ -9,6 +9,7 @@ import (
 	"github.com/odvcencio/fluffy-ui/accessibility"
 	"github.com/odvcencio/fluffy-ui/backend"
 	"github.com/odvcencio/fluffy-ui/runtime"
+	"github.com/odvcencio/fluffy-ui/terminal"
 	uiwidgets "github.com/odvcencio/fluffy-ui/widgets"
 )
 
@@ -421,6 +422,9 @@ func (s *Sidebar) SetStyles(border, header, text, progressFull, progressEmpty, b
 	if s.contextLabel != nil {
 		s.contextLabel.SetStyle(text)
 	}
+	if s.tabs != nil {
+		s.tabs.SetStyle(background)
+	}
 }
 
 // SetProgressEdgeStyle configures the highlight style for active progress edges.
@@ -716,13 +720,42 @@ func (s *Sidebar) Render(ctx runtime.RenderContext) {
 	if s.tabs == nil {
 		return
 	}
+	bounds := s.Bounds()
+	if bounds.Width <= 0 || bounds.Height <= 0 {
+		return
+	}
 	s.tabs.Render(ctx)
+	for y := bounds.Y; y < bounds.Y+bounds.Height; y++ {
+		ctx.Buffer.Set(bounds.X, y, '│', s.borderStyle)
+	}
 }
 
 // HandleMessage processes sidebar input.
 func (s *Sidebar) HandleMessage(msg runtime.Message) runtime.HandleResult {
 	if s.tabs == nil {
 		return runtime.Unhandled()
+	}
+	if key, ok := msg.(runtime.KeyMsg); ok && key.Key == terminal.KeyRune {
+		switch key.Rune {
+		case '1':
+			s.SetShowCurrentTask(!s.showCurrentTask)
+			return runtime.Handled()
+		case '2':
+			s.SetShowPlan(!s.showPlan)
+			return runtime.Handled()
+		case '3':
+			s.SetShowTools(!s.showTools)
+			return runtime.Handled()
+		case '4':
+			s.SetShowContext(!s.showContext)
+			return runtime.Handled()
+		case '5':
+			s.SetShowTouches(!s.showTouches)
+			return runtime.Handled()
+		case '6':
+			s.ToggleRecentFiles()
+			return runtime.Handled()
+		}
 	}
 	return s.tabs.HandleMessage(msg)
 }

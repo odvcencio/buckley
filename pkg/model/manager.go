@@ -13,6 +13,8 @@ import (
 	"github.com/odvcencio/buckley/pkg/config"
 )
 
+const catalogFetchTimeout = 30 * time.Second
+
 // Manager manages provider routing and model metadata.
 type Manager struct {
 	config         *config.Config
@@ -62,7 +64,7 @@ func (m *Manager) Initialize() error {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			cat, err := provider.FetchCatalog()
+			cat, err := fetchCatalogWithTimeout(provider, catalogFetchTimeout)
 			if err != nil {
 				errCh <- fmt.Errorf("%s catalog: %w", provider.ID(), err)
 				return
@@ -94,6 +96,28 @@ func (m *Manager) Initialize() error {
 		return err
 	}
 	return nil
+}
+
+func fetchCatalogWithTimeout(provider Provider, timeout time.Duration) (*ModelCatalog, error) {
+	if timeout <= 0 {
+		return provider.FetchCatalog()
+	}
+	type result struct {
+		cat *ModelCatalog
+		err error
+	}
+	resCh := make(chan result, 1)
+	go func() {
+		cat, err := provider.FetchCatalog()
+		resCh <- result{cat: cat, err: err}
+	}()
+
+	select {
+	case res := <-resCh:
+		return res.cat, res.err
+	case <-time.After(timeout):
+		return nil, fmt.Errorf("fetch timed out after %s", timeout)
+	}
 }
 
 // GetModelInfo returns information about a model

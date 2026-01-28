@@ -5,6 +5,7 @@ import (
 	"context"
 	"log"
 	"strings"
+	"time"
 
 	"github.com/odvcencio/fluffy-ui/agent"
 	"github.com/odvcencio/fluffy-ui/runtime"
@@ -18,6 +19,8 @@ import (
 //   - initAgentServer
 //   - stopAgentServer
 // ============================================================================
+
+const agentShutdownTimeout = 2 * time.Second
 
 // initAgentServer starts the agent API server for external debugging/testing.
 // The agent exposes the UI's accessibility tree via a JSONL protocol.
@@ -64,7 +67,9 @@ func (a *WidgetApp) initAgentServer(addr string) {
 
 	// Start server in background
 	a.agentCtx, a.agentCancel = context.WithCancel(context.Background())
+	a.agentDone = make(chan struct{})
 	go func() {
+		defer close(a.agentDone)
 		if err := a.agentServer.Serve(a.agentCtx); err != nil && a.agentCtx.Err() == nil {
 			log.Printf("agent server error: %v", err)
 		}
@@ -83,5 +88,12 @@ func (a *WidgetApp) stopAgentServer() {
 	}
 	if a.agentServer != nil {
 		_ = a.agentServer.Close()
+	}
+	if a.agentDone != nil {
+		select {
+		case <-a.agentDone:
+		case <-time.After(agentShutdownTimeout):
+			log.Printf("agent server shutdown timed out after %s", agentShutdownTimeout)
+		}
 	}
 }

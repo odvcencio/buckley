@@ -167,13 +167,13 @@ func (s *Service) callEmbeddingAPI(ctx context.Context, text string) ([]float64,
 
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("API request failed: %w", err)
+		return nil, fmt.Errorf("api request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("API returned status %d: %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf("api returned status %d: %s", resp.StatusCode, string(body))
 	}
 
 	var result struct {
@@ -215,13 +215,13 @@ func (s *Service) callEmbeddingBatchAPI(ctx context.Context, texts []string) ([]
 
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("API request failed: %w", err)
+		return nil, fmt.Errorf("api request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("API returned status %d: %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf("api returned status %d: %s", resp.StatusCode, string(body))
 	}
 
 	var result struct {

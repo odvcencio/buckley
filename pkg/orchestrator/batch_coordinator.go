@@ -68,7 +68,7 @@ func (b *BatchCoordinator) DispatchTask(ctx context.Context, plan *Plan, task *T
 
 	// Ensure idempotency by deleting any prior job with the same name
 	propagation := metav1.DeletePropagationBackground
-	_ = b.client.BatchV1().Jobs(b.namespace).Delete(context.Background(), jobName, metav1.DeleteOptions{PropagationPolicy: &propagation})
+	_ = b.client.BatchV1().Jobs(b.namespace).Delete(ctx, jobName, metav1.DeleteOptions{PropagationPolicy: &propagation})
 
 	created, err := b.client.BatchV1().Jobs(b.namespace).Create(ctx, job, metav1.CreateOptions{})
 	if err != nil {

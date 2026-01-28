@@ -50,6 +50,10 @@ func (t *SemanticSearchTool) Parameters() ParameterSchema {
 
 // Execute runs the semantic search
 func (t *SemanticSearchTool) Execute(params map[string]any) (*Result, error) {
+	return t.ExecuteWithContext(context.Background(), params)
+}
+
+func (t *SemanticSearchTool) ExecuteWithContext(ctx context.Context, params map[string]any) (*Result, error) {
 	if t.searcher == nil {
 		return &Result{
 			Success: false,
@@ -80,7 +84,9 @@ func (t *SemanticSearchTool) Execute(params map[string]any) (*Result, error) {
 	}
 
 	// Perform search
-	ctx := context.Background()
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	results, err := t.searcher.Search(ctx, query, limit)
 	if err != nil {
 		return &Result{
@@ -173,6 +179,10 @@ func (t *IndexManagementTool) Parameters() ParameterSchema {
 
 // Execute runs the index management command
 func (t *IndexManagementTool) Execute(params map[string]any) (*Result, error) {
+	return t.ExecuteWithContext(context.Background(), params)
+}
+
+func (t *IndexManagementTool) ExecuteWithContext(ctx context.Context, params map[string]any) (*Result, error) {
 	if t.searcher == nil {
 		return &Result{
 			Success: false,
@@ -188,7 +198,9 @@ func (t *IndexManagementTool) Execute(params map[string]any) (*Result, error) {
 		}, nil
 	}
 
-	ctx := context.Background()
+	if ctx == nil {
+		ctx = context.Background()
+	}
 
 	switch action {
 	case "build":

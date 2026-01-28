@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/odvcencio/buckley/pkg/buckley/ui/filepicker"
@@ -30,6 +31,12 @@ import (
 	"github.com/odvcencio/fluffy-ui/widgets"
 )
 
+const (
+	defaultMessageQueueSize    = 1024
+	defaultMessageQueueTimeout = 100 * time.Millisecond
+	defaultFrameInterval       = 16 * time.Millisecond
+)
+
 // ============================================================================
 // FILE: app_core.go
 // PURPOSE: WidgetApp struct definition, constructor (NewWidgetApp), and main Run loop
@@ -48,20 +55,20 @@ type WidgetApp struct {
 	running bool
 
 	// Widget tree
-	header     *buckleywidgets.Header
-	chatView   *buckleywidgets.ChatView
-	inputArea  *buckleywidgets.InputArea
-	statusBar  *buckleywidgets.StatusBar
-	sidebar    *buckleywidgets.Sidebar
-	presence   *buckleywidgets.PresenceStrip
-	toastStack *widgets.ToastStack
-	alertBanner *buckleywidgets.AlertBanner
-	alertWidget *widgets.Alert
-	contextMenu *widgets.Menu
+	header             *buckleywidgets.Header
+	chatView           *buckleywidgets.ChatView
+	inputArea          *buckleywidgets.InputArea
+	statusBar          *buckleywidgets.StatusBar
+	sidebar            *buckleywidgets.Sidebar
+	presence           *buckleywidgets.PresenceStrip
+	toastStack         *widgets.ToastStack
+	alertBanner        *buckleywidgets.AlertBanner
+	alertWidget        *widgets.Alert
+	contextMenu        *widgets.Menu
 	contextMenuOverlay *buckleywidgets.PositionedOverlay
-	contextMenuPanel *widgets.Panel
-	root       runtime.Widget
-	mainArea   *runtime.Flex // HBox containing chatView + sidebar
+	contextMenuPanel   *widgets.Panel
+	root               runtime.Widget
+	mainArea           *runtime.Flex // HBox containing chatView + sidebar
 
 	// Sidebar state
 	sidebarVisible      bool
@@ -83,16 +90,22 @@ type WidgetApp struct {
 	clipboard   clipboard.Clipboard
 
 	// Message loop
-	messages           chan Message
-	coalescer          *Coalescer
-	reasoningBuffer    strings.Builder
-	reasoningLastFlush time.Time
-	reasoningMu        sync.Mutex
+	messages            chan Message
+	messageQueueSize    int
+	messageQueueTimeout time.Duration
+	quitCh              chan struct{}
+	quitOnce            sync.Once
+	inUpdate            int32
+	coalescer           *Coalescer
+	reasoningBuffer     strings.Builder
+	reasoningLastFlush  time.Time
+	reasoningMu         sync.Mutex
 
 	// Frame timing
-	frameTicker *time.Ticker
-	lastRender  time.Time
-	dirty       bool
+	frameTicker   *time.Ticker
+	frameInterval time.Duration
+	lastRender    time.Time
+	dirty         bool
 
 	// Animation framework
 	animator           *animation.Animator
@@ -154,7 +167,7 @@ type WidgetApp struct {
 	reduceMotion      bool
 	highContrast      bool
 	useTextLabels     bool
-	messageMetadata  string
+	messageMetadata   string
 
 	// Accessibility
 	announcer  accessibility.Announcer
@@ -192,25 +205,29 @@ type WidgetApp struct {
 	agentServer *agent.Server
 	agentCtx    context.Context
 	agentCancel context.CancelFunc
+	agentDone   chan struct{}
 }
 
 // WidgetAppConfig configures the widget-based TUI application.
 type WidgetAppConfig struct {
-	Theme           *theme.Theme
-	ModelName       string
-	SessionID       string
-	WorkDir         string
-	ProjectRoot     string
-	ReduceMotion    bool
-	HighContrast    bool
-	UseTextLabels   bool
-	MessageMetadata string
-	WebBaseURL      string
-	Audio           AudioConfig
-	OnSubmit        func(text string)
-	OnQuit          func()
-	Backend         backend.Backend // Optional: for testing
-	AgentSocket     string          // Optional: unix:/path or tcp:host:port for agent API
+	Theme               *theme.Theme
+	ModelName           string
+	SessionID           string
+	WorkDir             string
+	ProjectRoot         string
+	ReduceMotion        bool
+	HighContrast        bool
+	UseTextLabels       bool
+	MessageMetadata     string
+	WebBaseURL          string
+	MessageQueueSize    int
+	MessageQueueTimeout time.Duration
+	FrameInterval       time.Duration
+	Audio               AudioConfig
+	OnSubmit            func(text string)
+	OnQuit              func()
+	Backend             backend.Backend // Optional: for testing
+	AgentSocket         string          // Optional: unix:/path or tcp:host:port for agent API
 }
 
 // NewWidgetApp creates and initializes the widget-based TUI application.
@@ -252,6 +269,21 @@ func NewWidgetApp(cfg WidgetAppConfig) (*WidgetApp, error) {
 	}
 	styleCache := NewStyleCache()
 	debugRender := strings.TrimSpace(os.Getenv("BUCKLEY_RENDER_DEBUG")) != ""
+	messageQueueSize := cfg.MessageQueueSize
+	if messageQueueSize <= 0 {
+		messageQueueSize = defaultMessageQueueSize
+	}
+	messageQueueTimeout := cfg.MessageQueueTimeout
+	switch {
+	case messageQueueTimeout == 0:
+		messageQueueTimeout = defaultMessageQueueTimeout
+	case messageQueueTimeout < 0:
+		messageQueueTimeout = 0
+	}
+	frameInterval := cfg.FrameInterval
+	if frameInterval <= 0 {
+		frameInterval = defaultFrameInterval
+	}
 	sysClipboard := newSystemClipboard()
 	appClipboard := clipboard.Clipboard(sysClipboard)
 	if sysClipboard == nil || !sysClipboard.Available() {
@@ -453,7 +485,11 @@ func NewWidgetApp(cfg WidgetAppConfig) (*WidgetApp, error) {
 		clipboard:           appClipboard,
 		onSubmit:            cfg.OnSubmit,
 		onQuit:              cfg.OnQuit,
-		messages:            make(chan Message, 1024),
+		messages:            make(chan Message, messageQueueSize),
+		messageQueueSize:    messageQueueSize,
+		messageQueueTimeout: messageQueueTimeout,
+		frameInterval:       frameInterval,
+		quitCh:              make(chan struct{}),
 		statusText:          "Ready",
 		cursorPulseStart:    time.Now(),
 		cursorPulsePeriod:   2600 * time.Millisecond,
@@ -562,6 +598,9 @@ func NewWidgetApp(cfg WidgetAppConfig) (*WidgetApp, error) {
 
 // Run starts the TUI event loop.
 func (a *WidgetApp) Run() error {
+	if a == nil {
+		return nil
+	}
 	defer a.backend.Fini()
 
 	a.running = true
@@ -582,8 +621,8 @@ func (a *WidgetApp) Run() error {
 		}
 	}()
 
-	// Frame ticker for 60 FPS rendering
-	a.frameTicker = time.NewTicker(16 * time.Millisecond)
+	// Frame ticker for render cadence
+	a.frameTicker = time.NewTicker(a.frameInterval)
 	defer a.frameTicker.Stop()
 
 	// Start terminal event poller in background
@@ -593,7 +632,10 @@ func (a *WidgetApp) Run() error {
 	for a.running {
 		select {
 		case msg := <-a.messages:
-			if a.update(msg) {
+			atomic.StoreInt32(&a.inUpdate, 1)
+			updated := a.update(msg)
+			atomic.StoreInt32(&a.inUpdate, 0)
+			if updated {
 				a.dirty = true
 			}
 
@@ -881,7 +923,15 @@ func (a *WidgetApp) update(msg Message) bool {
 
 // Quit stops the application.
 func (a *WidgetApp) Quit() {
+	if a == nil {
+		return
+	}
 	a.running = false
+	a.quitOnce.Do(func() {
+		if a.quitCh != nil {
+			close(a.quitCh)
+		}
+	})
 	a.stopAgentServer()
 	if a.onQuit != nil {
 		a.onQuit()
@@ -891,10 +941,30 @@ func (a *WidgetApp) Quit() {
 // Post sends a message to the event loop.
 // Safe to call from any goroutine.
 func (a *WidgetApp) Post(msg Message) {
+	if a == nil || a.messages == nil {
+		return
+	}
+	if atomic.LoadInt32(&a.inUpdate) == 1 {
+		select {
+		case a.messages <- msg:
+		default:
+			log.Printf("Warning: TUI message queue full during update, dropping message: %T", msg)
+		}
+		return
+	}
+	if a.messageQueueTimeout == 0 {
+		select {
+		case a.messages <- msg:
+		case <-a.quitCh:
+		}
+		return
+	}
+	timer := time.NewTimer(a.messageQueueTimeout)
+	defer timer.Stop()
 	select {
 	case a.messages <- msg:
-	case <-time.After(100 * time.Millisecond):
-		// Channel full after timeout - log and drop
+	case <-a.quitCh:
+	case <-timer.C:
 		log.Printf("Warning: TUI message queue full, dropping message: %T", msg)
 	}
 }

@@ -39,6 +39,22 @@ type LoggingTransport struct {
 // networkLogDir is the directory for network logs
 var networkLogDir = paths.BuckleyLogsBaseDir()
 
+var (
+	sharedHTTPTransportOnce sync.Once
+	sharedHTTPTransport     *http.Transport
+)
+
+func sharedTransport() *http.Transport {
+	sharedHTTPTransportOnce.Do(func() {
+		if base, ok := http.DefaultTransport.(*http.Transport); ok {
+			sharedHTTPTransport = base.Clone()
+			return
+		}
+		sharedHTTPTransport = &http.Transport{}
+	})
+	return sharedHTTPTransport
+}
+
 // NewLoggingTransport creates a new logging transport
 func NewLoggingTransport(base http.RoundTripper) *LoggingTransport {
 	return NewLoggingTransportWithEnabled(base, true)
@@ -48,7 +64,7 @@ func NewLoggingTransport(base http.RoundTripper) *LoggingTransport {
 // disables request/response logging entirely.
 func NewLoggingTransportWithEnabled(base http.RoundTripper, enabled bool) *LoggingTransport {
 	if base == nil {
-		base = http.DefaultTransport
+		base = sharedTransport()
 	}
 
 	lt := &LoggingTransport{base: base, enabled: enabled}

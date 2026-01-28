@@ -1,0 +1,25 @@
+{
+  "name": "Navigation Test - Session Management",
+  "description": "Tests creating a new session via keyboard shortcuts",
+  "steps": [
+    {
+      "goal": "Wait for UI to be ready",
+      "action": "sleep",
+      "duration_ms": 500
+    },
+    {
+      "goal": "Press Ctrl+N for new session",
+      "action": "key_combo",
+      "keys": ["ctrl", "n"]
+    },
+    {
+      "goal": "Wait for new session to be created",
+      "action": "sleep",
+      "duration_ms": 1000
+    },
+    {
+      "goal": "Verify we're on a new session",
+      "action": "snapshot"
+    }
+  ]
+}

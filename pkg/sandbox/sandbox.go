@@ -13,6 +13,73 @@ import (
 	"time"
 )
 
+var (
+	dangerousPatterns = []struct {
+		re     *regexp.Regexp
+		reason string
+	}{
+		{regexp.MustCompile(`rm\s+-[rf]+\s+/`), "recursive delete from root"},
+		{regexp.MustCompile(`rm\s+-[rf]+\s+~`), "recursive delete from home"},
+		{regexp.MustCompile(`>\s*/dev/sd`), "writing to block devices"},
+		{regexp.MustCompile(`dd\s+.*of=/dev/`), "dd to devices"},
+		{regexp.MustCompile(`mkfs`), "formatting filesystems"},
+		{regexp.MustCompile(`:\(\)\s*\{`), "fork bomb pattern"},
+		{regexp.MustCompile(`chmod\s+777\s+/`), "dangerous permissions on root"},
+		{regexp.MustCompile(`chown.*-R.*root`), "recursive ownership change to root"},
+	}
+
+	readOnlyPatterns = []*regexp.Regexp{
+		regexp.MustCompile(`^cat\s`),
+		regexp.MustCompile(`^head\s`),
+		regexp.MustCompile(`^tail\s`),
+		regexp.MustCompile(`^less\s`),
+		regexp.MustCompile(`^more\s`),
+		regexp.MustCompile(`^grep\s`),
+		regexp.MustCompile(`^rg\s`),
+		regexp.MustCompile(`^find\s.*-print`),
+		regexp.MustCompile(`^ls\s`),
+		regexp.MustCompile(`^pwd$`),
+		regexp.MustCompile(`^echo\s`),
+		regexp.MustCompile(`^wc\s`),
+		regexp.MustCompile(`^file\s`),
+		regexp.MustCompile(`^stat\s`),
+		regexp.MustCompile(`^du\s`),
+		regexp.MustCompile(`^df\s`),
+		regexp.MustCompile(`^which\s`),
+		regexp.MustCompile(`^whereis\s`),
+		regexp.MustCompile(`^type\s`),
+		regexp.MustCompile(`^git\s+status`),
+		regexp.MustCompile(`^git\s+log`),
+		regexp.MustCompile(`^git\s+diff`),
+		regexp.MustCompile(`^git\s+show`),
+		regexp.MustCompile(`^git\s+branch`),
+		regexp.MustCompile(`^go\s+version`),
+		regexp.MustCompile(`^go\s+list`),
+		regexp.MustCompile(`^node\s+--version`),
+		regexp.MustCompile(`^npm\s+list`),
+		regexp.MustCompile(`^python\s+--version`),
+		regexp.MustCompile(`^pip\s+list`),
+	}
+	networkPatterns = []*regexp.Regexp{
+		regexp.MustCompile(`curl\s`),
+		regexp.MustCompile(`wget\s`),
+		regexp.MustCompile(`ssh\s`),
+		regexp.MustCompile(`scp\s`),
+		regexp.MustCompile(`rsync\s`),
+		regexp.MustCompile(`ftp\s`),
+		regexp.MustCompile(`sftp\s`),
+		regexp.MustCompile(`nc\s`),
+		regexp.MustCompile(`netcat\s`),
+		regexp.MustCompile(`telnet\s`),
+		regexp.MustCompile(`nmap\s`),
+		regexp.MustCompile(`ping\s`),
+		regexp.MustCompile(`traceroute\s`),
+		regexp.MustCompile(`dig\s`),
+		regexp.MustCompile(`nslookup\s`),
+		regexp.MustCompile(`host\s`),
+	}
+)
+
 // Mode represents the sandbox security level
 type Mode int
 
@@ -216,22 +283,8 @@ func (s *Sandbox) Execute(ctx context.Context, command string) *Result {
 }
 
 func (s *Sandbox) checkDangerousPatterns(command string) error {
-	dangerous := []struct {
-		pattern string
-		reason  string
-	}{
-		{`rm\s+-[rf]+\s+/`, "recursive delete from root"},
-		{`rm\s+-[rf]+\s+~`, "recursive delete from home"},
-		{`>\s*/dev/sd`, "writing to block devices"},
-		{`dd\s+.*of=/dev/`, "dd to devices"},
-		{`mkfs`, "formatting filesystems"},
-		{`:\(\)\s*\{`, "fork bomb pattern"},
-		{`chmod\s+777\s+/`, "dangerous permissions on root"},
-		{`chown.*-R.*root`, "recursive ownership change to root"},
-	}
-
-	for _, d := range dangerous {
-		if matched, _ := regexp.MatchString(d.pattern, command); matched {
+	for _, d := range dangerousPatterns {
+		if d.re.MatchString(command) {
 			return fmt.Errorf("dangerous command pattern detected: %s", d.reason)
 		}
 	}
@@ -246,41 +299,8 @@ func (s *Sandbox) isReadOnlyCommand(command string) bool {
 	}
 
 	// Commands that don't modify files
-	readOnlyPatterns := []string{
-		`^cat\s`,
-		`^head\s`,
-		`^tail\s`,
-		`^less\s`,
-		`^more\s`,
-		`^grep\s`,
-		`^rg\s`,
-		`^find\s.*-print`,
-		`^ls\s`,
-		`^pwd$`,
-		`^echo\s`,
-		`^wc\s`,
-		`^file\s`,
-		`^stat\s`,
-		`^du\s`,
-		`^df\s`,
-		`^which\s`,
-		`^whereis\s`,
-		`^type\s`,
-		`^git\s+status`,
-		`^git\s+log`,
-		`^git\s+diff`,
-		`^git\s+show`,
-		`^git\s+branch`,
-		`^go\s+version`,
-		`^go\s+list`,
-		`^node\s+--version`,
-		`^npm\s+list`,
-		`^python\s+--version`,
-		`^pip\s+list`,
-	}
-
 	for _, pattern := range readOnlyPatterns {
-		if matched, _ := regexp.MatchString(pattern, command); matched {
+		if pattern.MatchString(command) {
 			return true
 		}
 	}
@@ -349,27 +369,8 @@ func (s *Sandbox) isAllowedCommand(command string) bool {
 }
 
 func (s *Sandbox) usesNetwork(command string) bool {
-	networkPatterns := []string{
-		`curl\s`,
-		`wget\s`,
-		`ssh\s`,
-		`scp\s`,
-		`rsync\s`,
-		`ftp\s`,
-		`sftp\s`,
-		`nc\s`,
-		`netcat\s`,
-		`telnet\s`,
-		`nmap\s`,
-		`ping\s`,
-		`traceroute\s`,
-		`dig\s`,
-		`nslookup\s`,
-		`host\s`,
-	}
-
 	for _, pattern := range networkPatterns {
-		if matched, _ := regexp.MatchString(pattern, command); matched {
+		if pattern.MatchString(command) {
 			return true
 		}
 	}

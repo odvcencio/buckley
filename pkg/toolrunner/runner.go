@@ -1,6 +1,7 @@
 package toolrunner
 
 import (
+	"container/list"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -87,17 +88,20 @@ type StreamHandler interface {
 	OnReasoningEnd()
 	OnToolStart(name string, arguments string)
 	OnToolEnd(name string, result string, err error)
+	OnError(err error)
 	OnComplete(result *Result)
 }
 
 // toolSelectionCache caches tool selection results.
 type toolSelectionCache struct {
-	mu      sync.RWMutex
-	entries map[string]cachedSelection
+	mu      sync.Mutex
+	entries map[string]*list.Element
+	order   *list.List
 	maxSize int
 }
 
 type cachedSelection struct {
+	key       string
 	toolNames []string
 	createdAt time.Time
 }
@@ -107,48 +111,61 @@ func newToolSelectionCache(maxSize int) *toolSelectionCache {
 		maxSize = 100
 	}
 	return &toolSelectionCache{
-		entries: make(map[string]cachedSelection),
+		entries: make(map[string]*list.Element),
+		order:   list.New(),
 		maxSize: maxSize,
 	}
 }
 
 func (c *toolSelectionCache) get(key string) ([]string, bool) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	entry, ok := c.entries[key]
 	if !ok {
 		return nil, false
 	}
+	selection := entry.Value.(cachedSelection)
 	// Cache entries expire after 5 minutes
-	if time.Since(entry.createdAt) > 5*time.Minute {
+	if time.Since(selection.createdAt) > 5*time.Minute {
+		c.order.Remove(entry)
+		delete(c.entries, key)
 		return nil, false
 	}
-	return entry.toolNames, true
+	c.order.MoveToFront(entry)
+	return selection.toolNames, true
 }
 
 func (c *toolSelectionCache) set(key string, toolNames []string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// Enforce max size by removing oldest entries
-	if len(c.entries) >= c.maxSize {
-		var oldestKey string
-		var oldestTime time.Time
-		for k, v := range c.entries {
-			if oldestKey == "" || v.createdAt.Before(oldestTime) {
-				oldestKey = k
-				oldestTime = v.createdAt
-			}
+	if entry, ok := c.entries[key]; ok {
+		selection := cachedSelection{
+			key:       key,
+			toolNames: toolNames,
+			createdAt: time.Now(),
 		}
-		if oldestKey != "" {
-			delete(c.entries, oldestKey)
+		entry.Value = selection
+		c.order.MoveToFront(entry)
+		return
+	}
+
+	if len(c.entries) >= c.maxSize {
+		oldest := c.order.Back()
+		if oldest != nil {
+			selection := oldest.Value.(cachedSelection)
+			delete(c.entries, selection.key)
+			c.order.Remove(oldest)
 		}
 	}
 
-	c.entries[key] = cachedSelection{
+	selection := cachedSelection{
+		key:       key,
 		toolNames: toolNames,
 		createdAt: time.Now(),
 	}
+	entry := c.order.PushFront(selection)
+	c.entries[key] = entry
 }
 
 // Runner executes a tool loop with optional tool selection.
@@ -191,6 +208,13 @@ func New(cfg Config) (*Runner, error) {
 // SetStreamHandler configures streaming event handler.
 func (r *Runner) SetStreamHandler(handler StreamHandler) {
 	r.streamHandler = handler
+}
+
+func (r *Runner) notifyStreamError(err error) {
+	if r == nil || r.streamHandler == nil || err == nil {
+		return
+	}
+	r.streamHandler.OnError(err)
 }
 
 // Run processes the request using automatic tool loop.
@@ -433,6 +457,7 @@ func (r *Runner) executeWithTools(ctx context.Context, req Request, tools []tool
 		result.Iterations = iteration + 1
 
 		if err := ctx.Err(); err != nil {
+			r.notifyStreamError(err)
 			return result, err
 		}
 
@@ -469,10 +494,14 @@ func (r *Runner) executeWithTools(ctx context.Context, req Request, tools []tool
 		for {
 			select {
 			case <-ctx.Done():
-				return result, ctx.Err()
+				err := ctx.Err()
+				r.notifyStreamError(err)
+				return result, err
 			case err := <-errChan:
 				if err != nil {
-					return result, fmt.Errorf("streaming chat completion: %w", err)
+					wrapped := fmt.Errorf("streaming chat completion: %w", err)
+					r.notifyStreamError(wrapped)
+					return result, wrapped
 				}
 				break streamLoop
 			case chunk, ok := <-chunkChan:
@@ -565,7 +594,9 @@ func (r *Runner) executeWithTools(ctx context.Context, req Request, tools []tool
 					}
 					return result, nil
 				}
-				return result, fmt.Errorf("model returned empty response")
+				err := fmt.Errorf("model returned empty response")
+				r.notifyStreamError(err)
+				return result, err
 			}
 
 			result.Content = content
@@ -593,6 +624,7 @@ func (r *Runner) executeWithTools(ctx context.Context, req Request, tools []tool
 
 		toolResults, err := r.executeToolCalls(ctx, toolCalls, tools, result)
 		if err != nil {
+			r.notifyStreamError(err)
 			return result, err
 		}
 		for _, tr := range toolResults {

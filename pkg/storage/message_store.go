@@ -181,7 +181,11 @@ func (s *Store) GetMessages(sessionID string, limit int, offset int) ([]Message,
 	}
 	defer rows.Close()
 
-	messages := []Message{}
+	capHint := limit
+	if capHint < 0 {
+		capHint = 0
+	}
+	messages := make([]Message, 0, capHint)
 	for rows.Next() {
 		var msg Message
 		var contentJSON sql.NullString

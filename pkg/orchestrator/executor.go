@@ -60,6 +60,13 @@ type Executor struct {
 	taskPhases      []TaskPhase
 }
 
+func (e *Executor) baseContext() context.Context {
+	if e == nil || e.ctx == nil {
+		return context.Background()
+	}
+	return e.ctx
+}
+
 // SetPersonaProvider updates sub-agents with refreshed persona definitions.
 func (e *Executor) SetPersonaProvider(provider *personality.PersonaProvider) {
 	if e == nil || e.reviewer == nil {
@@ -129,6 +136,22 @@ func (e *Executor) SetContext(ctx context.Context) {
 		e.cancel()
 	}
 	e.ctx, e.cancel = context.WithCancel(ctx)
+	if e.builder != nil {
+		e.builder.SetContext(e.ctx)
+	}
+	if e.validator != nil {
+		e.validator.SetContext(e.ctx)
+	}
+	if e.verifier != nil {
+		if setter, ok := e.verifier.(interface{ SetContext(context.Context) }); ok {
+			setter.SetContext(e.ctx)
+		}
+	}
+	if e.reviewer != nil {
+		if setter, ok := e.reviewer.(interface{ SetContext(context.Context) }); ok {
+			setter.SetContext(e.ctx)
+		}
+	}
 }
 
 // Cancel stops any in-flight execution.
@@ -381,7 +404,7 @@ func (e *Executor) recordExecutionStart(task *Task, startTime time.Time) (int64,
 		return 0, fmt.Errorf("store not initialized")
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(e.baseContext(), 5*time.Second)
 	defer cancel()
 
 	result, err := e.store.DB().ExecContext(ctx, `
@@ -406,7 +429,7 @@ func (e *Executor) recordExecutionComplete(executionID int64, task *Task, status
 		return nil // Silently skip if we couldn't start the recording
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(e.baseContext(), 5*time.Second)
 	defer cancel()
 
 	executionTime := time.Since(startTime).Milliseconds()
@@ -631,7 +654,7 @@ func (e *Executor) analyzeAndFix(task *Task, err error) (string, error) {
 		Temperature: 0.2,
 	}
 
-	resp, err := e.modelClient.ChatCompletion(context.Background(), req)
+	resp, err := e.modelClient.ChatCompletion(e.baseContext(), req)
 	if err != nil {
 		return "", err
 	}
@@ -696,7 +719,7 @@ func (e *Executor) generateReviewFix(task *Task, review *ReviewResult) (string, 
 		Temperature: 0.2,
 	}
 
-	resp, err := e.modelClient.ChatCompletion(context.Background(), req)
+	resp, err := e.modelClient.ChatCompletion(e.baseContext(), req)
 	if err != nil {
 		return "", err
 	}
@@ -946,7 +969,7 @@ func (e *Executor) executeTaskInBatch(task *Task) error {
 		return err
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Hour)
+	ctx, cancel := context.WithTimeout(e.baseContext(), 2*time.Hour)
 	defer cancel()
 
 	result, err := e.batchCoordinator.DispatchTask(ctx, e.plan, task)

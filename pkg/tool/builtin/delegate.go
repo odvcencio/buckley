@@ -138,6 +138,10 @@ func (t *CodexTool) Parameters() ParameterSchema {
 }
 
 func (t *CodexTool) Execute(params map[string]any) (*Result, error) {
+	return t.ExecuteWithContext(context.Background(), params)
+}
+
+func (t *CodexTool) ExecuteWithContext(ctx context.Context, params map[string]any) (*Result, error) {
 	// Check delegation guardrails
 	if err := delegationCheck("invoke_codex"); err != nil {
 		return &Result{Success: false, Error: err.Error()}, nil
@@ -153,7 +157,10 @@ func (t *CodexTool) Execute(params map[string]any) (*Result, error) {
 		timeout = 120
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeout)*time.Second)
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(ctx, time.Duration(timeout)*time.Second)
 	defer cancel()
 
 	// Check if codex is available
@@ -243,6 +250,10 @@ func (t *ClaudeTool) Parameters() ParameterSchema {
 }
 
 func (t *ClaudeTool) Execute(params map[string]any) (*Result, error) {
+	return t.ExecuteWithContext(context.Background(), params)
+}
+
+func (t *ClaudeTool) ExecuteWithContext(ctx context.Context, params map[string]any) (*Result, error) {
 	// Check delegation guardrails
 	if err := delegationCheck("invoke_claude"); err != nil {
 		return &Result{Success: false, Error: err.Error()}, nil
@@ -258,7 +269,10 @@ func (t *ClaudeTool) Execute(params map[string]any) (*Result, error) {
 		timeout = 120
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeout)*time.Second)
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(ctx, time.Duration(timeout)*time.Second)
 	defer cancel()
 
 	// Check if claude is available
@@ -348,6 +362,10 @@ func (t *BuckleyTool) Parameters() ParameterSchema {
 }
 
 func (t *BuckleyTool) Execute(params map[string]any) (*Result, error) {
+	return t.ExecuteWithContext(context.Background(), params)
+}
+
+func (t *BuckleyTool) ExecuteWithContext(ctx context.Context, params map[string]any) (*Result, error) {
 	guard := GetDelegationGuard()
 
 	// Check delegation guardrails
@@ -378,7 +396,10 @@ func (t *BuckleyTool) Execute(params map[string]any) (*Result, error) {
 		timeout = 120
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeout)*time.Second)
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(ctx, time.Duration(timeout)*time.Second)
 	defer cancel()
 
 	// Find buckley executable - check current binary first, then PATH
@@ -483,6 +504,10 @@ func (t *SubagentTool) Parameters() ParameterSchema {
 }
 
 func (t *SubagentTool) Execute(params map[string]any) (*Result, error) {
+	return t.ExecuteWithContext(context.Background(), params)
+}
+
+func (t *SubagentTool) ExecuteWithContext(ctx context.Context, params map[string]any) (*Result, error) {
 	guard := GetDelegationGuard()
 
 	// Check delegation guardrails - subagents count as Buckley delegations
@@ -520,7 +545,10 @@ func (t *SubagentTool) Execute(params map[string]any) (*Result, error) {
 		timeout = 300
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeout)*time.Second)
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(ctx, time.Duration(timeout)*time.Second)
 
 	// Find buckley executable
 	buckleyPath := os.Args[0]
