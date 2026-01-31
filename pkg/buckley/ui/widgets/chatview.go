@@ -12,6 +12,7 @@ import (
 	"github.com/odvcencio/fluffyui/markdown"
 	"github.com/odvcencio/fluffyui/runtime"
 	"github.com/odvcencio/fluffyui/scroll"
+	"github.com/odvcencio/fluffyui/state"
 	uistyle "github.com/odvcencio/fluffyui/style"
 	"github.com/odvcencio/fluffyui/terminal"
 	uiwidgets "github.com/odvcencio/fluffyui/widgets"
@@ -26,6 +27,22 @@ type ChatView struct {
 	layout     *runtime.Flex
 	listBounds runtime.Rect
 	services   runtime.Services
+	subs       state.Subscriptions
+
+	messagesSig         state.Readable[[]ChatMessage]
+	thinkingSig         state.Readable[bool]
+	reasoningTextSig    state.Readable[string]
+	reasoningPreviewSig state.Readable[string]
+	reasoningVisibleSig state.Readable[bool]
+
+	ownedMessagesSig         *state.Signal[[]ChatMessage]
+	ownedThinkingSig         *state.Signal[bool]
+	ownedReasoningTextSig    *state.Signal[string]
+	ownedReasoningPreviewSig *state.Signal[string]
+	ownedReasoningVisibleSig *state.Signal[bool]
+
+	lastMessages  []ChatMessage
+	thinkingShown bool
 
 	// Styles for different message types
 	userStyle      backend.Style
@@ -63,7 +80,7 @@ type ChatView struct {
 
 	nextMessageID    int
 	lastMessageID    int
-	messages         map[int]messageEntry
+	messages         map[int]ChatMessage
 	hoveredMessageID int
 	hoveredCodeStart int
 	hoveredCodeEnd   int
@@ -98,7 +115,7 @@ func (a chatListAdapter) Render(item scrollback.VisibleLine, index int, selected
 	a.chat.renderVisibleLine(ctx, item)
 }
 
-type messageEntry struct {
+type ChatMessage struct {
 	ID      int
 	Content string
 	Source  string
@@ -107,8 +124,22 @@ type messageEntry struct {
 	UserAt  time.Time
 }
 
+// ChatViewConfig provides external state for the chat view.
+type ChatViewConfig struct {
+	Messages         state.Readable[[]ChatMessage]
+	Thinking         state.Readable[bool]
+	ReasoningText    state.Readable[string]
+	ReasoningPreview state.Readable[string]
+	ReasoningVisible state.Readable[bool]
+}
+
 // NewChatView creates a new chat view widget.
 func NewChatView() *ChatView {
+	return NewChatViewWithConfig(ChatViewConfig{})
+}
+
+// NewChatViewWithConfig creates a chat view with external state bindings.
+func NewChatViewWithConfig(cfg ChatViewConfig) *ChatView {
 	// Use larger default buffer size - Layout will resize to actual terminal dimensions.
 	// This prevents content added before first Layout from being wrapped too narrow.
 	chat := &ChatView{
@@ -125,9 +156,39 @@ func NewChatView() *ChatView {
 		bgStyle:          backend.DefaultStyle(),
 		metadataStyle:    backend.DefaultStyle().Dim(true),
 		metadataMode:     "always",
-		messages:         make(map[int]messageEntry),
+		messages:         make(map[int]ChatMessage),
 		hoveredCodeStart: -1,
 		hoveredCodeEnd:   -1,
+	}
+	chat.ownedMessagesSig = state.NewSignal([]ChatMessage{})
+	chat.ownedThinkingSig = state.NewSignal(false)
+	chat.ownedReasoningTextSig = state.NewSignal("")
+	chat.ownedReasoningPreviewSig = state.NewSignal("")
+	chat.ownedReasoningVisibleSig = state.NewSignal(false)
+	if cfg.Messages != nil {
+		chat.messagesSig = cfg.Messages
+	} else {
+		chat.messagesSig = chat.ownedMessagesSig
+	}
+	if cfg.Thinking != nil {
+		chat.thinkingSig = cfg.Thinking
+	} else {
+		chat.thinkingSig = chat.ownedThinkingSig
+	}
+	if cfg.ReasoningText != nil {
+		chat.reasoningTextSig = cfg.ReasoningText
+	} else {
+		chat.reasoningTextSig = chat.ownedReasoningTextSig
+	}
+	if cfg.ReasoningPreview != nil {
+		chat.reasoningPreviewSig = cfg.ReasoningPreview
+	} else {
+		chat.reasoningPreviewSig = chat.ownedReasoningPreviewSig
+	}
+	if cfg.ReasoningVisible != nil {
+		chat.reasoningVisibleSig = cfg.ReasoningVisible
+	} else {
+		chat.reasoningVisibleSig = chat.ownedReasoningVisibleSig
 	}
 	chat.list = uiwidgets.NewVirtualList[scrollback.VisibleLine](chatListAdapter{chat: chat})
 	chat.list.SetItemHeight(1)
@@ -141,6 +202,7 @@ func NewChatView() *ChatView {
 	chat.reasoningPanel = uiwidgets.NewPanel(chat.reasoningAccordion).WithBorder(backend.DefaultStyle())
 	chat.reasoningPanel.SetTitle("Reasoning")
 	chat.rebuildLayout()
+	chat.subscribe()
 	return chat
 }
 
@@ -205,10 +267,213 @@ func (c *ChatView) OnScrollChange(fn func(top, total, viewHeight int)) {
 	c.onScrollChange = fn
 }
 
-// AddMessage adds a message to the chat.
-func (c *ChatView) AddMessage(content, source string) {
-	switch source {
-	case "thinking":
+func (c *ChatView) ownsMessages() bool {
+	if c == nil || c.messagesSig == nil || c.ownedMessagesSig == nil {
+		return false
+	}
+	sig, ok := c.messagesSig.(*state.Signal[[]ChatMessage])
+	return ok && sig == c.ownedMessagesSig
+}
+
+func (c *ChatView) ownsThinking() bool {
+	if c == nil || c.thinkingSig == nil || c.ownedThinkingSig == nil {
+		return false
+	}
+	sig, ok := c.thinkingSig.(*state.Signal[bool])
+	return ok && sig == c.ownedThinkingSig
+}
+
+func (c *ChatView) ownsReasoning() bool {
+	if c == nil || c.reasoningTextSig == nil || c.reasoningPreviewSig == nil || c.reasoningVisibleSig == nil {
+		return false
+	}
+	if c.ownedReasoningTextSig == nil || c.ownedReasoningPreviewSig == nil || c.ownedReasoningVisibleSig == nil {
+		return false
+	}
+	textSig, ok := c.reasoningTextSig.(*state.Signal[string])
+	if !ok || textSig != c.ownedReasoningTextSig {
+		return false
+	}
+	previewSig, ok := c.reasoningPreviewSig.(*state.Signal[string])
+	if !ok || previewSig != c.ownedReasoningPreviewSig {
+		return false
+	}
+	visibleSig, ok := c.reasoningVisibleSig.(*state.Signal[bool])
+	return ok && visibleSig == c.ownedReasoningVisibleSig
+}
+
+func (c *ChatView) subscribe() {
+	c.subs.Clear()
+	c.subs.Observe(c.messagesSig, c.onMessagesChanged)
+	c.subs.Observe(c.thinkingSig, c.onThinkingChanged)
+	c.subs.Observe(c.reasoningTextSig, c.onReasoningChanged)
+	c.subs.Observe(c.reasoningPreviewSig, c.onReasoningChanged)
+	c.subs.Observe(c.reasoningVisibleSig, c.onReasoningChanged)
+	c.syncFromMessages()
+	c.syncThinking()
+	c.syncReasoning()
+}
+
+func (c *ChatView) onMessagesChanged() {
+	c.syncFromMessages()
+	c.Invalidate()
+}
+
+func (c *ChatView) onThinkingChanged() {
+	c.syncThinking()
+	c.Invalidate()
+}
+
+func (c *ChatView) onReasoningChanged() {
+	c.syncReasoning()
+	c.Invalidate()
+}
+
+func (c *ChatView) syncFromMessages() {
+	if c.messagesSig == nil {
+		return
+	}
+	msgs := c.messagesSig.Get()
+	if len(msgs) == 0 {
+		c.clearInternal()
+		c.lastMessages = nil
+		return
+	}
+	if len(c.lastMessages) == 0 {
+		c.rebuildFromMessages(msgs)
+		c.lastMessages = cloneMessages(msgs)
+		return
+	}
+	if len(msgs) < len(c.lastMessages) {
+		c.rebuildFromMessages(msgs)
+		c.lastMessages = cloneMessages(msgs)
+		return
+	}
+	if len(msgs) == len(c.lastMessages) {
+		lastIdx := len(msgs) - 1
+		if lastIdx < 0 {
+			return
+		}
+		if !chatMessageEqual(msgs[lastIdx], c.lastMessages[lastIdx]) {
+			if !chatPrefixEqual(msgs, c.lastMessages, lastIdx) {
+				c.rebuildFromMessages(msgs)
+			} else {
+				c.replaceLastMessageInternal(msgs[lastIdx])
+			}
+		}
+		c.lastMessages = cloneMessages(msgs)
+		return
+	}
+	if len(msgs) == len(c.lastMessages)+1 {
+		if !chatPrefixEqual(msgs, c.lastMessages, len(c.lastMessages)) {
+			c.rebuildFromMessages(msgs)
+		} else {
+			c.appendMessageInternal(msgs[len(msgs)-1])
+		}
+		c.lastMessages = cloneMessages(msgs)
+		return
+	}
+	c.rebuildFromMessages(msgs)
+	c.lastMessages = cloneMessages(msgs)
+}
+
+func cloneMessages(messages []ChatMessage) []ChatMessage {
+	if len(messages) == 0 {
+		return nil
+	}
+	cloned := make([]ChatMessage, len(messages))
+	copy(cloned, messages)
+	return cloned
+}
+
+func chatMessageEqual(a, b ChatMessage) bool {
+	if a.ID != b.ID {
+		return false
+	}
+	if a.Content != b.Content || a.Source != b.Source || a.Model != b.Model {
+		return false
+	}
+	if !a.Time.Equal(b.Time) {
+		return false
+	}
+	return a.UserAt.Equal(b.UserAt)
+}
+
+func chatPrefixEqual(a, b []ChatMessage, count int) bool {
+	if count <= 0 {
+		return true
+	}
+	if len(a) < count || len(b) < count {
+		return false
+	}
+	for i := 0; i < count; i++ {
+		if !chatMessageEqual(a[i], b[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+func (c *ChatView) syncThinking() {
+	if c.thinkingSig == nil || c.buffer == nil {
+		return
+	}
+	show := c.thinkingSig.Get()
+	if show && !c.thinkingShown {
+		c.buffer.AppendAuxLine("  ◦ thinking...", scrollback.LineStyle{
+			FG:     extractFG(c.thinkingStyle),
+			Italic: true,
+			Dim:    true,
+		}, "thinking")
+		c.thinkingShown = true
+		c.syncListOffset()
+		return
+	}
+	if !show && c.thinkingShown {
+		c.buffer.RemoveLastLineIfSource("thinking")
+		c.thinkingShown = false
+		c.syncListOffset()
+	}
+}
+
+func (c *ChatView) syncReasoning() {
+	if c.reasoningTextSig == nil || c.reasoningVisibleSig == nil {
+		return
+	}
+	visible := c.reasoningVisibleSig.Get()
+	text := c.reasoningTextSig.Get()
+	preview := ""
+	if c.reasoningPreviewSig != nil {
+		preview = strings.TrimSpace(c.reasoningPreviewSig.Get())
+	}
+	c.reasoningPreview = preview
+	c.setReasoningVisible(visible)
+	if c.reasoningSection != nil {
+		title := "Reasoning"
+		if preview != "" {
+			title = "Reasoning: " + preview
+			c.reasoningSection.SetExpanded(false)
+		}
+		c.reasoningSection.SetTitle(title)
+	}
+	if c.reasoningText != nil {
+		c.reasoningText.SetText(text)
+	}
+}
+
+func (c *ChatView) rebuildFromMessages(messages []ChatMessage) {
+	c.clearInternal()
+	if len(messages) == 0 {
+		return
+	}
+	for _, msg := range messages {
+		c.appendMessageInternal(msg)
+	}
+}
+
+func (c *ChatView) appendMessageInternal(msg ChatMessage) {
+	if msg.Source == "thinking" {
+		c.thinkingShown = true
 		c.buffer.AppendAuxLine("  ◦ thinking...", scrollback.LineStyle{
 			FG:     extractFG(c.thinkingStyle),
 			Italic: true,
@@ -216,39 +481,117 @@ func (c *ChatView) AddMessage(content, source string) {
 		}, "thinking")
 		c.syncListOffset()
 		return
-	default:
-		now := time.Now()
-		c.lastMessage = now
-		if source == "user" {
-			c.lastUserAt = now
+	}
+	now := msg.Time
+	if now.IsZero() {
+		now = time.Now()
+	}
+	if msg.ID <= 0 {
+		c.nextMessageID++
+		msg.ID = c.nextMessageID
+	} else if msg.ID > c.nextMessageID {
+		c.nextMessageID = msg.ID
+	}
+	c.lastMessageID = msg.ID
+	if c.messages == nil {
+		c.messages = make(map[int]ChatMessage)
+	}
+	c.messages[msg.ID] = msg
+	lines := c.buildMessageLines(msg.Content, msg.Source, now, msg.ID)
+	c.buffer.AppendMessage(lines)
+	c.lastSource = msg.Source
+	c.lastContent = msg.Content
+	c.lastMessage = now
+	if msg.Source == "user" {
+		c.lastUserAt = now
+	}
+	c.syncListOffset()
+}
+
+func (c *ChatView) replaceLastMessageInternal(msg ChatMessage) {
+	if c.buffer == nil {
+		return
+	}
+	previousID := c.lastMessageID
+	messageTime := msg.Time
+	if messageTime.IsZero() {
+		messageTime = time.Now()
+	}
+	c.lastContent = msg.Content
+	c.lastSource = msg.Source
+	c.lastMessage = messageTime
+	if msg.ID > 0 {
+		c.lastMessageID = msg.ID
+	}
+	if msg.ID > 0 {
+		if c.messages == nil {
+			c.messages = make(map[int]ChatMessage)
 		}
+		c.messages[msg.ID] = msg
+		if previousID != 0 && previousID != msg.ID {
+			delete(c.messages, previousID)
+		}
+	}
+	lines := c.buildMessageLines(msg.Content, msg.Source, messageTime, msg.ID)
+	c.buffer.ReplaceLastMessage(lines)
+	c.syncListOffset()
+}
+
+// AddMessage adds a message to the chat.
+func (c *ChatView) AddMessage(content, source string) {
+	if c.ownsMessages() {
+		if source == "thinking" {
+			if c.ownedThinkingSig != nil {
+				c.ownedThinkingSig.Set(true)
+			}
+			return
+		}
+		now := time.Now()
 		c.nextMessageID++
 		messageID := c.nextMessageID
-		c.lastMessageID = messageID
-		if c.messages == nil {
-			c.messages = make(map[int]messageEntry)
-		}
-		entry := messageEntry{
+		entry := ChatMessage{
 			ID:      messageID,
 			Content: content,
 			Source:  source,
 			Time:    now,
 			Model:   c.modelName,
 		}
+		if source == "user" {
+			c.lastUserAt = now
+		}
 		if source == "assistant" {
 			entry.UserAt = c.lastUserAt
 		}
-		c.messages[messageID] = entry
-		lines := c.buildMessageLines(content, source, now, messageID)
-		c.buffer.AppendMessage(lines)
-		c.lastSource = source
-		c.lastContent = content
-		c.syncListOffset()
+		current := c.ownedMessagesSig.Get()
+		cloned := append([]ChatMessage(nil), current...)
+		cloned = append(cloned, entry)
+		c.ownedMessagesSig.Set(cloned)
+		return
 	}
+
+	c.appendMessageInternal(ChatMessage{
+		Content: content,
+		Source:  source,
+		Time:    time.Now(),
+		Model:   c.modelName,
+	})
 }
 
 // AppendText appends text to the last message (for streaming).
 func (c *ChatView) AppendText(text string) {
+	if c.ownsMessages() {
+		current := c.ownedMessagesSig.Get()
+		if len(current) == 0 {
+			return
+		}
+		cloned := append([]ChatMessage(nil), current...)
+		last := cloned[len(cloned)-1]
+		last.Content += text
+		cloned[len(cloned)-1] = last
+		c.ownedMessagesSig.Set(cloned)
+		return
+	}
+
 	if c.lastSource == "" {
 		c.buffer.AppendText(text)
 		c.Invalidate()
@@ -526,6 +869,12 @@ func (c *ChatView) roleStripPrefix(source string) []scrollback.Span {
 
 // RemoveThinkingIndicator removes the thinking indicator if present.
 func (c *ChatView) RemoveThinkingIndicator() {
+	if c.ownsThinking() {
+		if c.ownedThinkingSig != nil {
+			c.ownedThinkingSig.Set(false)
+		}
+		return
+	}
 	c.buffer.RemoveLastLineIfSource("thinking")
 	c.syncListOffset()
 }
@@ -533,6 +882,16 @@ func (c *ChatView) RemoveThinkingIndicator() {
 // AppendReasoning appends streaming reasoning text (dimmed).
 func (c *ChatView) AppendReasoning(text string) {
 	if strings.TrimSpace(text) == "" {
+		return
+	}
+	if c.ownsReasoning() {
+		if c.ownedReasoningTextSig != nil {
+			current := c.ownedReasoningTextSig.Get()
+			c.ownedReasoningTextSig.Set(current + text)
+		}
+		if c.ownedReasoningVisibleSig != nil {
+			c.ownedReasoningVisibleSig.Set(true)
+		}
 		return
 	}
 	c.reasoningBuilder.WriteString(text)
@@ -545,6 +904,18 @@ func (c *ChatView) AppendReasoning(text string) {
 
 // CollapseReasoning collapses reasoning block to preview.
 func (c *ChatView) CollapseReasoning(preview, full string) {
+	if c.ownsReasoning() {
+		if c.ownedReasoningPreviewSig != nil {
+			c.ownedReasoningPreviewSig.Set(strings.TrimSpace(preview))
+		}
+		if c.ownedReasoningTextSig != nil {
+			c.ownedReasoningTextSig.Set(full)
+		}
+		if c.ownedReasoningVisibleSig != nil {
+			c.ownedReasoningVisibleSig.Set(true)
+		}
+		return
+	}
 	c.reasoningPreview = strings.TrimSpace(preview)
 	c.reasoningBuilder.Reset()
 	c.reasoningBuilder.WriteString(full)
@@ -565,6 +936,18 @@ func (c *ChatView) CollapseReasoning(preview, full string) {
 
 // ClearReasoningBlock clears reasoning state for new message.
 func (c *ChatView) ClearReasoningBlock() {
+	if c.ownsReasoning() {
+		if c.ownedReasoningTextSig != nil {
+			c.ownedReasoningTextSig.Set("")
+		}
+		if c.ownedReasoningPreviewSig != nil {
+			c.ownedReasoningPreviewSig.Set("")
+		}
+		if c.ownedReasoningVisibleSig != nil {
+			c.ownedReasoningVisibleSig.Set(false)
+		}
+		return
+	}
 	c.reasoningBuilder.Reset()
 	c.reasoningPreview = ""
 	c.setReasoningVisible(false)
@@ -586,29 +969,57 @@ func (c *ChatView) ToggleReasoning() bool {
 
 // IsReasoningLine returns true if the line at the given index is part of a reasoning block.
 func (c *ChatView) IsReasoningLine(lineIdx int) bool {
-	return false
+	if c == nil || c.buffer == nil {
+		return false
+	}
+	return c.buffer.IsReasoningLine(lineIdx)
 }
 
-// Clear clears all messages.
-func (c *ChatView) Clear() {
-	c.buffer.Clear()
+func (c *ChatView) clearInternal() {
+	if c == nil {
+		return
+	}
+	if c.buffer != nil {
+		c.buffer.Clear()
+	}
+	c.lastMessages = nil
+	c.thinkingShown = false
 	c.lastSource = ""
 	c.lastContent = ""
 	c.lastMessage = time.Time{}
 	c.lastUserAt = time.Time{}
-	c.nextMessageID = 0
 	c.lastMessageID = 0
-	c.messages = make(map[int]messageEntry)
+	c.nextMessageID = 0
+	c.messages = make(map[int]ChatMessage)
 	c.hoveredMessageID = 0
 	c.hoveredCodeStart = -1
 	c.hoveredCodeEnd = -1
-	c.reasoningBuilder.Reset()
-	c.reasoningPreview = ""
-	c.setReasoningVisible(false)
-	if c.reasoningText != nil {
-		c.reasoningText.SetText("")
+	if c.list != nil {
+		c.list.ScrollToOffset(0)
 	}
-	c.syncListOffset()
+}
+
+// Clear clears all messages.
+func (c *ChatView) Clear() {
+	if c.ownsMessages() {
+		if c.ownedMessagesSig != nil {
+			c.ownedMessagesSig.Set(nil)
+		}
+		if c.ownedThinkingSig != nil {
+			c.ownedThinkingSig.Set(false)
+		}
+		if c.ownedReasoningTextSig != nil {
+			c.ownedReasoningTextSig.Set("")
+		}
+		if c.ownedReasoningPreviewSig != nil {
+			c.ownedReasoningPreviewSig.Set("")
+		}
+		if c.ownedReasoningVisibleSig != nil {
+			c.ownedReasoningVisibleSig.Set(false)
+		}
+		return
+	}
+	c.clearInternal()
 }
 
 // GetContent returns all text content from the chat view (last N lines).
@@ -1231,11 +1642,20 @@ var _ runtime.Unbindable = (*ChatView)(nil)
 
 // Bind stores app services for layout invalidation.
 func (c *ChatView) Bind(services runtime.Services) {
+	if c == nil {
+		return
+	}
 	c.services = services
+	c.subs.SetScheduler(services.Scheduler())
+	c.subscribe()
 }
 
 // Unbind clears app services.
 func (c *ChatView) Unbind() {
+	if c == nil {
+		return
+	}
+	c.subs.Clear()
 	c.services = runtime.Services{}
 }
 

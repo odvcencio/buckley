@@ -7,6 +7,7 @@ import (
 	"github.com/odvcencio/fluffyui/backend"
 	"github.com/odvcencio/fluffyui/clipboard"
 	"github.com/odvcencio/fluffyui/runtime"
+	"github.com/odvcencio/fluffyui/state"
 	"github.com/odvcencio/fluffyui/terminal"
 	uiwidgets "github.com/odvcencio/fluffyui/widgets"
 )
@@ -22,6 +23,12 @@ const (
 	ModePicker           // @
 )
 
+// InputAreaConfig provides external state bindings for the input area.
+type InputAreaConfig struct {
+	Text state.Writable[string]
+	Mode state.Writable[InputMode]
+}
+
 // InputArea is a mode-aware input widget.
 // It delegates all focus operations to its internal TextArea to avoid focus conflicts.
 type InputArea struct {
@@ -36,6 +43,17 @@ type InputArea struct {
 	layout    *runtime.Flex
 
 	mode InputMode
+
+	services runtime.Services
+	subs     state.Subscriptions
+
+	textSig      state.Readable[string]
+	textWritable state.Writable[string]
+	modeSig      state.Readable[InputMode]
+	modeWritable state.Writable[InputMode]
+
+	ownedTextSig *state.Signal[string]
+	ownedModeSig *state.Signal[InputMode]
 
 	// History navigation
 	history      []string
@@ -80,6 +98,11 @@ type InputArea struct {
 
 // NewInputArea creates a new input area widget.
 func NewInputArea() *InputArea {
+	return NewInputAreaWithConfig(InputAreaConfig{})
+}
+
+// NewInputAreaWithConfig creates a new input area widget with external state.
+func NewInputAreaWithConfig(cfg InputAreaConfig) *InputArea {
 	input := &InputArea{
 		minHeight:    2,
 		maxHeight:    10,
@@ -98,6 +121,23 @@ func NewInputArea() *InputArea {
 		searchSymbol: "/",
 	}
 
+	input.ownedTextSig = state.NewSignal("")
+	input.ownedModeSig = state.NewSignal(ModeNormal)
+	if cfg.Text != nil {
+		input.textSig = cfg.Text
+		input.textWritable = cfg.Text
+	} else {
+		input.textSig = input.ownedTextSig
+		input.textWritable = input.ownedTextSig
+	}
+	if cfg.Mode != nil {
+		input.modeSig = cfg.Mode
+		input.modeWritable = cfg.Mode
+	} else {
+		input.modeSig = input.ownedModeSig
+		input.modeWritable = input.ownedModeSig
+	}
+
 	input.textarea = uiwidgets.NewTextArea()
 	input.textarea.SetLabel("Input")
 	input.textarea.SetStyle(input.textStyle)
@@ -114,7 +154,16 @@ func NewInputArea() *InputArea {
 	input.panel = uiwidgets.NewPanel(input.layout)
 	input.panel.WithBorder(input.borderStyle)
 	input.panel.SetStyle(input.bgStyle)
+	if input.modeSig != nil {
+		input.mode = input.modeSig.Get()
+	}
+	if input.textSig != nil {
+		input.suppressChange = true
+		input.textarea.SetText(input.textSig.Get())
+		input.suppressChange = false
+	}
 	input.syncModeIndicator()
+	input.subscribe()
 
 	return input
 }
@@ -251,9 +300,55 @@ func (i *InputArea) OnTriggerSlashCommand(fn func()) {
 	i.onTriggerSlashCommand = fn
 }
 
+func (i *InputArea) subscribe() {
+	i.subs.Clear()
+	if i.textSig != nil {
+		i.subs.Observe(i.textSig, i.onTextSignalChanged)
+	}
+	if i.modeSig != nil {
+		i.subs.Observe(i.modeSig, i.onModeSignalChanged)
+	}
+	i.onTextSignalChanged()
+	i.onModeSignalChanged()
+}
+
+func (i *InputArea) onTextSignalChanged() {
+	if i.textSig == nil || i.textarea == nil {
+		return
+	}
+	text := i.textSig.Get()
+	if i.textarea.Text() == text {
+		return
+	}
+	i.suppressChange = true
+	i.textarea.SetText(text)
+	i.suppressChange = false
+	if i.services != (runtime.Services{}) {
+		i.services.Invalidate()
+	}
+}
+
+func (i *InputArea) onModeSignalChanged() {
+	if i.modeSig == nil {
+		return
+	}
+	mode := i.modeSig.Get()
+	if i.mode == mode {
+		return
+	}
+	i.mode = mode
+	i.syncModeIndicator()
+	if i.services != (runtime.Services{}) {
+		i.services.Invalidate()
+	}
+}
+
 // Text returns the current input text.
 func (i *InputArea) Text() string {
 	if i.textarea == nil {
+		if i.textSig != nil {
+			return i.textSig.Get()
+		}
 		return ""
 	}
 	return i.textarea.Text()
@@ -261,6 +356,7 @@ func (i *InputArea) Text() string {
 
 // SetText sets the input text without firing change callbacks.
 func (i *InputArea) SetText(text string) {
+	i.setTextSignal(text)
 	if i.textarea == nil {
 		return
 	}
@@ -299,6 +395,7 @@ func (i *InputArea) InsertText(s string) {
 	i.textarea.SetText(string(updated))
 	i.textarea.SetCursorOffset(offset + len(insert))
 	i.suppressChange = false
+	i.setTextSignal(string(updated))
 	i.notifyChange(string(updated))
 }
 
@@ -483,6 +580,9 @@ func (i *InputArea) ClipboardPaste(text string) bool {
 
 // Bind attaches app services.
 func (i *InputArea) Bind(services runtime.Services) {
+	i.services = services
+	i.subs.SetScheduler(services.Scheduler())
+	i.subscribe()
 	if i.textarea != nil {
 		i.textarea.Bind(services)
 	}
@@ -490,6 +590,8 @@ func (i *InputArea) Bind(services runtime.Services) {
 
 // Unbind releases app services.
 func (i *InputArea) Unbind() {
+	i.subs.Clear()
+	i.services = runtime.Services{}
 	if i.textarea != nil {
 		i.textarea.Unbind()
 	}
@@ -534,6 +636,7 @@ func (i *InputArea) handleTextChange(text string) {
 		return
 	}
 	i.resetHistoryNav()
+	i.setTextSignal(text)
 	i.checkModeChange(text)
 	i.notifyChange(text)
 }
@@ -542,6 +645,20 @@ func (i *InputArea) notifyChange(text string) {
 	if i.onChange != nil {
 		i.onChange(text)
 	}
+}
+
+func (i *InputArea) setTextSignal(text string) {
+	if i.textWritable == nil {
+		return
+	}
+	i.textWritable.Set(text)
+}
+
+func (i *InputArea) setModeSignal(mode InputMode) {
+	if i.modeWritable == nil {
+		return
+	}
+	i.modeWritable.Set(mode)
 }
 
 func (i *InputArea) checkModeChange(text string) {
@@ -556,6 +673,7 @@ func (i *InputArea) setMode(mode InputMode) {
 	}
 	i.mode = mode
 	i.syncModeIndicator()
+	i.setModeSignal(mode)
 	if i.onModeChange != nil {
 		i.onModeChange(mode)
 	}

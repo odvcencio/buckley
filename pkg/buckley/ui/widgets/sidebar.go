@@ -9,6 +9,7 @@ import (
 	"github.com/odvcencio/fluffyui/accessibility"
 	"github.com/odvcencio/fluffyui/backend"
 	"github.com/odvcencio/fluffyui/runtime"
+	"github.com/odvcencio/fluffyui/state"
 	"github.com/odvcencio/fluffyui/terminal"
 	uiwidgets "github.com/odvcencio/fluffyui/widgets"
 )
@@ -104,6 +105,31 @@ type SidebarConfig struct {
 	MaxWidth int
 }
 
+// SidebarState captures dynamic sidebar data for reactive bindings.
+type SidebarState struct {
+	CurrentTask        string
+	TaskProgress       int
+	PlanTasks          []PlanTask
+	RunningTools       []RunningTool
+	ToolHistory        []ToolHistoryEntry
+	ActiveTouches      []TouchSummary
+	RecentFiles        []string
+	RLMStatus          *RLMStatus
+	RLMScratchpad      []RLMScratchpadEntry
+	CircuitStatus      *CircuitStatus
+	Experiment         string
+	ExperimentStatus   string
+	ExperimentVariants []ExperimentVariant
+}
+
+// SidebarBindings connects reactive state to the sidebar.
+type SidebarBindings struct {
+	State         state.Readable[SidebarState]
+	ContextUsed   state.Readable[int]
+	ContextBudget state.Readable[int]
+	ContextWindow state.Readable[int]
+}
+
 // DefaultSidebarConfig returns sensible defaults.
 func DefaultSidebarConfig() SidebarConfig {
 	return SidebarConfig{
@@ -118,6 +144,14 @@ type Sidebar struct {
 	uiwidgets.FocusableBase
 
 	config SidebarConfig
+
+	services runtime.Services
+	subs     state.Subscriptions
+
+	stateSig         state.Readable[SidebarState]
+	contextUsedSig   state.Readable[int]
+	contextBudgetSig state.Readable[int]
+	contextWindowSig state.Readable[int]
 
 	currentTask     string
 	taskProgress    int
@@ -220,6 +254,11 @@ func NewSidebar() *Sidebar {
 
 // NewSidebarWithConfig creates a new sidebar widget with the given configuration.
 func NewSidebarWithConfig(cfg SidebarConfig) *Sidebar {
+	return NewSidebarWithBindings(cfg, SidebarBindings{})
+}
+
+// NewSidebarWithBindings creates a new sidebar widget with bindings.
+func NewSidebarWithBindings(cfg SidebarConfig, bindings SidebarBindings) *Sidebar {
 	if cfg.Width < cfg.MinWidth {
 		cfg.Width = cfg.MinWidth
 	}
@@ -255,10 +294,110 @@ func NewSidebarWithConfig(cfg SidebarConfig) *Sidebar {
 		spinnerStyle:    backend.DefaultStyle(),
 		bgStyle:         backend.DefaultStyle(),
 	}
+	s.stateSig = bindings.State
+	s.contextUsedSig = bindings.ContextUsed
+	s.contextBudgetSig = bindings.ContextBudget
+	s.contextWindowSig = bindings.ContextWindow
 
 	s.initWidgets()
 	s.updateAllPanels()
+	s.subscribe()
 	return s
+}
+
+// Bind attaches app services and subscribes to state bindings.
+func (s *Sidebar) Bind(services runtime.Services) {
+	if s == nil {
+		return
+	}
+	s.services = services
+	s.subs.SetScheduler(services.Scheduler())
+	s.subscribe()
+}
+
+// Unbind releases app services and subscriptions.
+func (s *Sidebar) Unbind() {
+	if s == nil {
+		return
+	}
+	s.subs.Clear()
+	s.services = runtime.Services{}
+}
+
+func (s *Sidebar) subscribe() {
+	s.subs.Clear()
+	if s.stateSig != nil {
+		s.subs.Observe(s.stateSig, s.onStateChanged)
+	}
+	if s.contextUsedSig != nil {
+		s.subs.Observe(s.contextUsedSig, s.onContextChanged)
+	}
+	if s.contextBudgetSig != nil {
+		s.subs.Observe(s.contextBudgetSig, s.onContextChanged)
+	}
+	if s.contextWindowSig != nil {
+		s.subs.Observe(s.contextWindowSig, s.onContextChanged)
+	}
+	s.onStateChanged()
+	s.onContextChanged()
+}
+
+func (s *Sidebar) onStateChanged() {
+	if s.stateSig == nil {
+		return
+	}
+	s.applyState(s.stateSig.Get())
+	s.requestRelayout()
+}
+
+func (s *Sidebar) onContextChanged() {
+	if s.contextUsedSig == nil && s.contextBudgetSig == nil && s.contextWindowSig == nil {
+		return
+	}
+	s.applyContext()
+	s.requestInvalidate()
+}
+
+func (s *Sidebar) applyState(state SidebarState) {
+	s.SetCurrentTask(state.CurrentTask, state.TaskProgress)
+	s.SetPlanTasks(state.PlanTasks)
+	s.SetRunningTools(state.RunningTools)
+	s.SetToolHistory(state.ToolHistory)
+	s.SetActiveTouches(state.ActiveTouches)
+	s.SetRecentFiles(state.RecentFiles)
+	s.SetExperiment(state.Experiment, state.ExperimentStatus, state.ExperimentVariants)
+	s.SetRLMStatus(state.RLMStatus, state.RLMScratchpad)
+	s.SetCircuitStatus(state.CircuitStatus)
+}
+
+func (s *Sidebar) applyContext() {
+	used := 0
+	budget := 0
+	window := 0
+	if s.contextUsedSig != nil {
+		used = s.contextUsedSig.Get()
+	}
+	if s.contextBudgetSig != nil {
+		budget = s.contextBudgetSig.Get()
+	}
+	if s.contextWindowSig != nil {
+		window = s.contextWindowSig.Get()
+	}
+	s.SetContextUsage(used, budget, window)
+}
+
+func (s *Sidebar) requestInvalidate() {
+	if s.services == (runtime.Services{}) {
+		return
+	}
+	s.services.Invalidate()
+}
+
+func (s *Sidebar) requestRelayout() {
+	if s.services == (runtime.Services{}) {
+		return
+	}
+	s.services.Relayout()
 }
 
 func (s *Sidebar) initWidgets() {
@@ -1147,3 +1286,5 @@ func rangeLabel(r TouchRange) string {
 
 var _ runtime.Widget = (*Sidebar)(nil)
 var _ runtime.ChildProvider = (*Sidebar)(nil)
+var _ runtime.Bindable = (*Sidebar)(nil)
+var _ runtime.Unbindable = (*Sidebar)(nil)

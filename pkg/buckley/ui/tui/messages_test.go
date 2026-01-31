@@ -3,9 +3,6 @@ package tui
 import (
 	"testing"
 	"time"
-
-	"github.com/odvcencio/fluffyui/progress"
-	"github.com/odvcencio/fluffyui/toast"
 )
 
 func TestMessages_ImplementInterface(t *testing.T) {
@@ -21,19 +18,6 @@ func TestMessages_ImplementInterface(t *testing.T) {
 		TickMsg{Time: time.Now()},
 		QuitMsg{},
 		RefreshMsg{},
-		StatusMsg{Text: "Ready"},
-		StatusOverrideMsg{Text: "Busy", Duration: 2 * time.Second},
-		TokensMsg{Tokens: 100, CostCent: 0.01},
-		ContextMsg{Used: 1000, Budget: 8000, Window: 8192},
-		ExecutionModeMsg{Mode: "classic"},
-		ProgressMsg{Items: []progress.Progress{{ID: "p1"}}},
-		ToastsMsg{Toasts: []*toast.Toast{{ID: "t1"}}},
-		StreamingMsg{Active: true},
-		ModelMsg{Name: "gpt-4"},
-		SessionMsg{ID: "session-1"},
-		AddMessageMsg{Content: "hi", Source: "user"},
-		AppendMsg{Text: " world"},
-		ThinkingMsg{Show: true},
 		ModeChangeMsg{Mode: "normal"},
 		OverlayMsg{Show: true, Name: "file_picker"},
 		SubmitMsg{Text: "hello"},
@@ -63,19 +47,6 @@ func TestMessages_IsMessageMethods(t *testing.T) {
 	TickMsg{}.isMessage()
 	QuitMsg{}.isMessage()
 	RefreshMsg{}.isMessage()
-	StatusMsg{}.isMessage()
-	StatusOverrideMsg{}.isMessage()
-	TokensMsg{}.isMessage()
-	ContextMsg{}.isMessage()
-	ExecutionModeMsg{}.isMessage()
-	ProgressMsg{}.isMessage()
-	ToastsMsg{}.isMessage()
-	StreamingMsg{}.isMessage()
-	ModelMsg{}.isMessage()
-	SessionMsg{}.isMessage()
-	AddMessageMsg{}.isMessage()
-	AppendMsg{}.isMessage()
-	ThinkingMsg{}.isMessage()
 	ModeChangeMsg{}.isMessage()
 	OverlayMsg{}.isMessage()
 	SubmitMsg{}.isMessage()
@@ -152,36 +123,6 @@ func TestToolMessages(t *testing.T) {
 	}
 	if result.Err != nil {
 		t.Errorf("expected no error, got %v", result.Err)
-	}
-}
-
-func TestUIMessages(t *testing.T) {
-	status := StatusMsg{Text: "Ready"}
-	if status.Text != "Ready" {
-		t.Errorf("expected Text='Ready', got %s", status.Text)
-	}
-
-	tokens := TokensMsg{Tokens: 1000, CostCent: 0.05}
-	if tokens.Tokens != 1000 {
-		t.Errorf("expected Tokens=1000, got %d", tokens.Tokens)
-	}
-	if tokens.CostCent != 0.05 {
-		t.Errorf("expected CostCent=0.05, got %f", tokens.CostCent)
-	}
-
-	addMsg := AddMessageMsg{Content: "Hello!", Source: "user"}
-	if addMsg.Content != "Hello!" || addMsg.Source != "user" {
-		t.Errorf("unexpected AddMessageMsg: %+v", addMsg)
-	}
-
-	appendMsg := AppendMsg{Text: " more text"}
-	if appendMsg.Text != " more text" {
-		t.Errorf("expected Text=' more text', got %s", appendMsg.Text)
-	}
-
-	thinking := ThinkingMsg{Show: true}
-	if !thinking.Show {
-		t.Error("expected Show=true")
 	}
 }
 
@@ -376,13 +317,6 @@ func TestMouseMiddleAndRight(t *testing.T) {
 	}
 }
 
-func TestModelMsg(t *testing.T) {
-	msg := ModelMsg{Name: "claude-opus-4-5-20251101"}
-	if msg.Name != "claude-opus-4-5-20251101" {
-		t.Errorf("expected Name='claude-opus-4-5-20251101', got '%s'", msg.Name)
-	}
-}
-
 func TestTickMsg(t *testing.T) {
 	now := time.Now()
 	msg := TickMsg{Time: now}
@@ -398,16 +332,6 @@ func TestOverlayMsgHide(t *testing.T) {
 	}
 	if msg.Name != "file_picker" {
 		t.Errorf("expected Name='file_picker', got '%s'", msg.Name)
-	}
-}
-
-func TestAddMessageMsgSources(t *testing.T) {
-	sources := []string{"user", "assistant", "system", "tool", "thinking"}
-	for _, source := range sources {
-		msg := AddMessageMsg{Content: "test", Source: source}
-		if msg.Source != source {
-			t.Errorf("expected Source='%s', got '%s'", source, msg.Source)
-		}
 	}
 }
 

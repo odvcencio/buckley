@@ -12,35 +12,35 @@ import (
 // SimpleTelemetryBridge Tests (for Runner)
 // =============================================================================
 
-// mockTelemetryPoster collects posted messages for verification.
-type mockTelemetryPoster struct {
-	messages []Message
+// mockSidebarSink collects sidebar state updates for verification.
+type mockSidebarSink struct {
+	states []buckleywidgets.SidebarState
 }
 
-func (m *mockTelemetryPoster) Post(msg Message) {
-	m.messages = append(m.messages, msg)
+func (m *mockSidebarSink) SetSidebarState(state buckleywidgets.SidebarState) {
+	m.states = append(m.states, state)
 }
 
 func TestSimpleTelemetryBridge_New(t *testing.T) {
 	hub := telemetry.NewHub()
 	defer hub.Close()
 
-	poster := &mockTelemetryPoster{}
-	bridge := NewSimpleTelemetryBridge(hub, poster)
+	sink := &mockSidebarSink{}
+	bridge := NewSimpleTelemetryBridge(hub, sink)
 	if bridge == nil {
 		t.Fatal("expected non-nil bridge")
 	}
 	if bridge.hub != hub {
 		t.Error("hub not set correctly")
 	}
-	if bridge.poster != poster {
-		t.Error("poster not set correctly")
+	if bridge.sink != sink {
+		t.Error("sink not set correctly")
 	}
 }
 
 func TestSimpleTelemetryBridge_NewNilHub(t *testing.T) {
-	poster := &mockTelemetryPoster{}
-	bridge := NewSimpleTelemetryBridge(nil, poster)
+	sink := &mockSidebarSink{}
+	bridge := NewSimpleTelemetryBridge(nil, sink)
 	if bridge == nil {
 		t.Fatal("expected non-nil bridge even with nil hub")
 	}
@@ -53,8 +53,8 @@ func TestSimpleTelemetryBridge_HandleTaskEvents(t *testing.T) {
 	hub := telemetry.NewHub()
 	defer hub.Close()
 
-	poster := &mockTelemetryPoster{}
-	bridge := NewSimpleTelemetryBridge(hub, poster)
+	sink := &mockSidebarSink{}
+	bridge := NewSimpleTelemetryBridge(hub, sink)
 
 	bridge.handleEvent(telemetry.Event{
 		Type:   telemetry.EventTaskStarted,
@@ -74,8 +74,8 @@ func TestSimpleTelemetryBridge_HandleTaskCompleted(t *testing.T) {
 	hub := telemetry.NewHub()
 	defer hub.Close()
 
-	poster := &mockTelemetryPoster{}
-	bridge := NewSimpleTelemetryBridge(hub, poster)
+	sink := &mockSidebarSink{}
+	bridge := NewSimpleTelemetryBridge(hub, sink)
 
 	// Start a task first
 	bridge.handleEvent(telemetry.Event{
@@ -99,8 +99,8 @@ func TestSimpleTelemetryBridge_HandleToolEvents(t *testing.T) {
 	hub := telemetry.NewHub()
 	defer hub.Close()
 
-	poster := &mockTelemetryPoster{}
-	bridge := NewSimpleTelemetryBridge(hub, poster)
+	sink := &mockSidebarSink{}
+	bridge := NewSimpleTelemetryBridge(hub, sink)
 
 	bridge.handleEvent(telemetry.Event{
 		Type:      telemetry.EventToolStarted,
@@ -132,8 +132,8 @@ func TestSimpleTelemetryBridge_HandleRLMIteration(t *testing.T) {
 	hub := telemetry.NewHub()
 	defer hub.Close()
 
-	poster := &mockTelemetryPoster{}
-	bridge := NewSimpleTelemetryBridge(hub, poster)
+	sink := &mockSidebarSink{}
+	bridge := NewSimpleTelemetryBridge(hub, sink)
 
 	bridge.handleEvent(telemetry.Event{
 		Type: telemetry.EventRLMIteration,
@@ -164,8 +164,8 @@ func TestSimpleTelemetryBridge_SetPlanTasks(t *testing.T) {
 	hub := telemetry.NewHub()
 	defer hub.Close()
 
-	poster := &mockTelemetryPoster{}
-	bridge := NewSimpleTelemetryBridge(hub, poster)
+	sink := &mockSidebarSink{}
+	bridge := NewSimpleTelemetryBridge(hub, sink)
 
 	tasks := []buckleywidgets.PlanTask{
 		{Name: "Task 1", Status: buckleywidgets.TaskPending},
@@ -185,8 +185,8 @@ func TestSimpleTelemetryBridge_PostsSnapshot(t *testing.T) {
 	hub := telemetry.NewHub()
 	defer hub.Close()
 
-	poster := &mockTelemetryPoster{}
-	bridge := NewSimpleTelemetryBridge(hub, poster)
+	sink := &mockSidebarSink{}
+	bridge := NewSimpleTelemetryBridge(hub, sink)
 
 	// Handle an event - should post a snapshot
 	bridge.handleEvent(telemetry.Event{
@@ -196,13 +196,11 @@ func TestSimpleTelemetryBridge_PostsSnapshot(t *testing.T) {
 	})
 	bridge.postSnapshot()
 
-	if len(poster.messages) == 0 {
-		t.Error("expected at least one message to be posted")
+	if len(sink.states) == 0 {
+		t.Error("expected at least one state update")
 	}
-
-	// Verify it's a SidebarStateMsg
-	if _, ok := poster.messages[0].(SidebarStateMsg); !ok {
-		t.Errorf("expected SidebarStateMsg, got %T", poster.messages[0])
+	if sink.states[0].CurrentTask == "" {
+		t.Errorf("expected sidebar state to include current task")
 	}
 }
 
@@ -210,8 +208,8 @@ func TestSimpleTelemetryBridge_HandlePlanUpdate(t *testing.T) {
 	hub := telemetry.NewHub()
 	defer hub.Close()
 
-	poster := &mockTelemetryPoster{}
-	bridge := NewSimpleTelemetryBridge(hub, poster)
+	sink := &mockSidebarSink{}
+	bridge := NewSimpleTelemetryBridge(hub, sink)
 
 	bridge.handleEvent(telemetry.Event{
 		Type: telemetry.EventPlanUpdated,

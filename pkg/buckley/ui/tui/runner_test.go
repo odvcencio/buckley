@@ -60,7 +60,7 @@ func TestNewRunner(t *testing.T) {
 	}
 }
 
-// TestRunnerSetStatus verifies SetStatus posts a StatusMsg.
+// TestRunnerSetStatus verifies SetStatus updates status state.
 func TestRunnerSetStatus(t *testing.T) {
 	testBackend := newTestBackend(80, 24)
 	runner, err := NewRunner(RunnerConfig{Backend: testBackend})
@@ -70,9 +70,12 @@ func TestRunnerSetStatus(t *testing.T) {
 
 	// SetStatus should not panic
 	runner.SetStatus("Test status")
+	if runner.state.StatusText.Get() != "Test status" {
+		t.Errorf("expected status text to update, got %q", runner.state.StatusText.Get())
+	}
 }
 
-// TestRunnerAddMessage verifies AddMessage posts an AddMessageMsg.
+// TestRunnerAddMessage verifies AddMessage updates chat state.
 func TestRunnerAddMessage(t *testing.T) {
 	testBackend := newTestBackend(80, 24)
 	runner, err := NewRunner(RunnerConfig{Backend: testBackend})
@@ -83,6 +86,16 @@ func TestRunnerAddMessage(t *testing.T) {
 	// AddMessage should not panic
 	runner.AddMessage("Test message", "user")
 	runner.AddMessage("Response", "assistant")
+	msgs := runner.state.ChatMessages.Get()
+	if len(msgs) != 2 {
+		t.Fatalf("expected 2 messages, got %d", len(msgs))
+	}
+	if msgs[0].Content != "Test message" || msgs[0].Source != "user" {
+		t.Errorf("unexpected first message: %+v", msgs[0])
+	}
+	if msgs[1].Content != "Response" || msgs[1].Source != "assistant" {
+		t.Errorf("unexpected second message: %+v", msgs[1])
+	}
 }
 
 // TestRunnerSetCallbacks verifies callbacks can be set.
@@ -177,10 +190,16 @@ func TestRunnerStreaming(t *testing.T) {
 
 	// These should not panic
 	runner.SetStreaming(true)
+	if !runner.state.IsStreaming.Get() {
+		t.Error("expected streaming true")
+	}
 	runner.StreamChunk("session-1", "Hello ")
 	runner.StreamChunk("session-1", "World!")
 	runner.StreamEnd("session-1", "Hello World!")
 	runner.SetStreaming(false)
+	if runner.state.IsStreaming.Get() {
+		t.Error("expected streaming false")
+	}
 }
 
 // TestRunnerThinking verifies thinking indicator methods work.
@@ -212,6 +231,16 @@ func TestRunnerMetadata(t *testing.T) {
 	runner.SetExecutionMode("classic")
 	runner.SetTokenCount(1000, 0.05)
 	runner.SetContextUsage(5000, 8000, 100000)
+
+	if runner.state.StatusMode.Get() != "classic" {
+		t.Errorf("expected execution mode classic, got %q", runner.state.StatusMode.Get())
+	}
+	if runner.state.StatusTokens.Get() != 1000 {
+		t.Errorf("expected tokens 1000, got %d", runner.state.StatusTokens.Get())
+	}
+	if runner.state.ContextUsed.Get() != 5000 {
+		t.Errorf("expected context used 5000, got %d", runner.state.ContextUsed.Get())
+	}
 }
 
 // TestRunnerProgress verifies progress updates work.
@@ -229,6 +258,9 @@ func TestRunnerProgress(t *testing.T) {
 
 	// Should not panic
 	runner.SetProgress(items)
+	if got := runner.state.ProgressItems.Get(); len(got) != len(items) {
+		t.Errorf("expected %d progress items, got %d", len(items), len(got))
+	}
 }
 
 // TestRunnerToasts verifies toast updates work.
@@ -345,8 +377,7 @@ func TestRunnerPost(t *testing.T) {
 	}
 
 	// Post should not panic
-	runner.Post(StatusMsg{Text: "Test"})
-	runner.Post(AddMessageMsg{Content: "Hello", Source: "user"})
+	runner.Post(RefreshMsg{})
 }
 
 // TestRunnerNilSafety verifies nil receiver methods don't panic.
@@ -370,7 +401,6 @@ func TestRunnerNilSafety(t *testing.T) {
 	runner.CollapseReasoning("preview", "full")
 	runner.SetCallbacks(nil, nil, nil)
 	runner.SetSessionCallbacks(nil, nil)
-	runner.Post(StatusMsg{})
 	runner.Quit()
 }
 
@@ -390,16 +420,16 @@ type testRunnerBackend struct {
 	height int
 }
 
-func (b *testRunnerBackend) Init() error                                                  { return nil }
-func (b *testRunnerBackend) Fini()                                                        {}
-func (b *testRunnerBackend) Size() (int, int)                                             { return b.width, b.height }
+func (b *testRunnerBackend) Init() error                                                   { return nil }
+func (b *testRunnerBackend) Fini()                                                         {}
+func (b *testRunnerBackend) Size() (int, int)                                              { return b.width, b.height }
 func (b *testRunnerBackend) SetContent(x, y int, r rune, comb []rune, style backend.Style) {}
-func (b *testRunnerBackend) Show()                                                        {}
-func (b *testRunnerBackend) Sync()                                                        {}
-func (b *testRunnerBackend) Clear()                                                       {}
-func (b *testRunnerBackend) HideCursor()                                                  {}
-func (b *testRunnerBackend) ShowCursor()                                                  {}
-func (b *testRunnerBackend) SetCursorPos(x, y int)                                        {}
+func (b *testRunnerBackend) Show()                                                         {}
+func (b *testRunnerBackend) Sync()                                                         {}
+func (b *testRunnerBackend) Clear()                                                        {}
+func (b *testRunnerBackend) HideCursor()                                                   {}
+func (b *testRunnerBackend) ShowCursor()                                                   {}
+func (b *testRunnerBackend) SetCursorPos(x, y int)                                         {}
 func (b *testRunnerBackend) PollEvent() terminal.Event {
 	select {
 	case ev := <-b.events:

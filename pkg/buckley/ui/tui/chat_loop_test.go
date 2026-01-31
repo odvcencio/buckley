@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	buckleywidgets "github.com/odvcencio/buckley/pkg/buckley/ui/widgets"
 	"github.com/odvcencio/buckley/pkg/diagnostics"
 	"github.com/odvcencio/buckley/pkg/execution"
 	"github.com/odvcencio/buckley/pkg/model"
@@ -19,14 +20,14 @@ import (
 // mockModelClient is a deterministic mock model client for testing.
 type mockModelClient struct {
 	mu sync.Mutex
-	
+
 	// Responses to return
 	responses []mockResponse
 	callIndex int
-	
+
 	// Stream chunks to emit
 	streamChunks []model.StreamChunk
-	
+
 	// Callbacks for verification
 	onChatCompletion func(req model.ChatRequest)
 	onStream         func(req model.ChatRequest)
@@ -40,11 +41,11 @@ type mockResponse struct {
 func (m *mockModelClient) ChatCompletion(ctx context.Context, req model.ChatRequest) (*model.ChatResponse, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	
+
 	if m.onChatCompletion != nil {
 		m.onChatCompletion(req)
 	}
-	
+
 	if m.callIndex >= len(m.responses) {
 		return &model.ChatResponse{
 			Choices: []model.Choice{
@@ -52,7 +53,7 @@ func (m *mockModelClient) ChatCompletion(ctx context.Context, req model.ChatRequ
 			},
 		}, nil
 	}
-	
+
 	resp := m.responses[m.callIndex]
 	m.callIndex++
 	return resp.response, resp.err
@@ -61,20 +62,20 @@ func (m *mockModelClient) ChatCompletion(ctx context.Context, req model.ChatRequ
 func (m *mockModelClient) ChatCompletionStream(ctx context.Context, req model.ChatRequest) (<-chan model.StreamChunk, <-chan error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	
+
 	if m.onStream != nil {
 		m.onStream(req)
 	}
-	
+
 	chunkChan := make(chan model.StreamChunk, len(m.streamChunks))
 	errChan := make(chan error, 1)
-	
+
 	for _, chunk := range m.streamChunks {
 		chunkChan <- chunk
 	}
 	close(chunkChan)
 	close(errChan)
-	
+
 	return chunkChan, errChan
 }
 
@@ -102,7 +103,7 @@ func (m *mockModelClient) SetStreamChunks(chunks []model.StreamChunk) {
 // recordingApp records all TUI operations for verification.
 type recordingApp struct {
 	mu sync.Mutex
-	
+
 	messages      []recordedMessage
 	streamChunks  []recordedStreamChunk
 	statusUpdates []string
@@ -188,20 +189,23 @@ func (r *recordingApp) SetSessionID(id string) {
 	r.sessionID = id
 }
 
-func (r *recordingApp) SetExecutionMode(mode string) {}
+func (r *recordingApp) SetExecutionMode(mode string)                {}
 func (r *recordingApp) SetTokenCount(tokens int, costCents float64) {}
-func (r *recordingApp) SetContextUsage(used, budget, window int) {}
-func (r *recordingApp) ShowThinkingIndicator() {}
-func (r *recordingApp) RemoveThinkingIndicator() {}
-func (r *recordingApp) AppendReasoning(text string) {}
-func (r *recordingApp) CollapseReasoning(preview, full string) {}
+func (r *recordingApp) SetContextUsage(used, budget, window int)    {}
+func (r *recordingApp) ShowThinkingIndicator()                      {}
+func (r *recordingApp) RemoveThinkingIndicator()                    {}
+func (r *recordingApp) AppendReasoning(text string)                 {}
+func (r *recordingApp) CollapseReasoning(preview, full string)      {}
 
-func (r *recordingApp) ShowModelPicker(items []uiwidgets.PaletteItem, onSelect func(uiwidgets.PaletteItem)) {}
-func (r *recordingApp) SetCallbacks(onSubmit func(string), onFileSelect func(string), onShellCmd func(string) string) {}
-func (r *recordingApp) SetSessionCallbacks(onNext, onPrev func()) {}
-func (r *recordingApp) SetProgress(items []progress.Progress) {}
-func (r *recordingApp) SetToasts(toasts []*toast.Toast) {}
-func (r *recordingApp) SetToastDismissHandler(onDismiss func(string)) {}
+func (r *recordingApp) ShowModelPicker(items []uiwidgets.PaletteItem, onSelect func(uiwidgets.PaletteItem)) {
+}
+func (r *recordingApp) SetCallbacks(onSubmit func(string), onFileSelect func(string), onShellCmd func(string) string) {
+}
+func (r *recordingApp) SetSessionCallbacks(onNext, onPrev func())         {}
+func (r *recordingApp) SetProgress(items []progress.Progress)             {}
+func (r *recordingApp) SetSidebarState(state buckleywidgets.SidebarState) {}
+func (r *recordingApp) SetToasts(toasts []*toast.Toast)                   {}
+func (r *recordingApp) SetToastDismissHandler(onDismiss func(string))     {}
 
 func (r *recordingApp) SetDiagnostics(collector *diagnostics.Collector) {}
 
@@ -227,19 +231,19 @@ func (r *recordingApp) GetStreamChunks() []recordedStreamChunk {
 func TestTUIStreamHandler_MessageOrder(t *testing.T) {
 	app := &recordingApp{}
 	sess := &SessionState{ID: "test-session"}
-	
+
 	handler := &tuiStreamHandler{
 		app:  app,
 		sess: sess,
 	}
-	
+
 	// Simulate streaming response
 	handler.OnText("Hello ")
 	handler.OnText("World!")
 	handler.OnComplete(&execution.ExecutionResult{})
-	
+
 	messages := app.GetMessages()
-	
+
 	// Should have exactly one assistant message with combined content
 	var assistantMessages []recordedMessage
 	for _, m := range messages {
@@ -247,11 +251,11 @@ func TestTUIStreamHandler_MessageOrder(t *testing.T) {
 			assistantMessages = append(assistantMessages, m)
 		}
 	}
-	
+
 	if len(assistantMessages) != 1 {
 		t.Errorf("Expected 1 assistant message, got %d: %v", len(assistantMessages), assistantMessages)
 	}
-	
+
 	if len(assistantMessages) == 1 && assistantMessages[0].content != "Hello World!" {
 		t.Errorf("Expected 'Hello World!', got %q", assistantMessages[0].content)
 	}
@@ -260,30 +264,30 @@ func TestTUIStreamHandler_MessageOrder(t *testing.T) {
 // TestTUIStreamHandler_EmptySessionID verifies fallback behavior when session ID is empty.
 func TestTUIStreamHandler_EmptySessionID(t *testing.T) {
 	app := &recordingApp{}
-	
+
 	// Create handler with empty session ID
 	handler := &tuiStreamHandler{
 		app:  app,
 		sess: &SessionState{ID: ""}, // Empty session ID
 	}
-	
+
 	// Add a message first (simulating previous state)
 	app.AddMessage("Previous message", "assistant")
-	
+
 	// Stream text - should create new assistant message and append to it
 	handler.OnText("New streaming text")
-	
+
 	messages := app.GetMessages()
 	// Should have 2 messages: previous + new streaming message
 	if len(messages) != 2 {
 		t.Fatalf("Expected 2 messages (previous + new), got %d", len(messages))
 	}
-	
+
 	// First message should be unchanged
 	if messages[0].content != "Previous message" {
 		t.Errorf("First message changed: got %q", messages[0].content)
 	}
-	
+
 	// Second message should be the streaming message
 	expected := "New streaming text"
 	if messages[1].content != expected {
@@ -295,12 +299,12 @@ func TestTUIStreamHandler_EmptySessionID(t *testing.T) {
 func TestTUIStreamHandler_ConcurrentOnText(t *testing.T) {
 	app := &recordingApp{}
 	sess := &SessionState{ID: "test-session"}
-	
+
 	handler := &tuiStreamHandler{
 		app:  app,
 		sess: sess,
 	}
-	
+
 	// Call OnText from multiple goroutines concurrently
 	var wg sync.WaitGroup
 	for i := 0; i < 10; i++ {
@@ -311,9 +315,9 @@ func TestTUIStreamHandler_ConcurrentOnText(t *testing.T) {
 		}(i)
 	}
 	wg.Wait()
-	
+
 	messages := app.GetMessages()
-	
+
 	// Should have exactly one assistant message
 	var assistantCount int
 	for _, m := range messages {
@@ -321,7 +325,7 @@ func TestTUIStreamHandler_ConcurrentOnText(t *testing.T) {
 			assistantCount++
 		}
 	}
-	
+
 	if assistantCount != 1 {
 		t.Errorf("Expected 1 assistant message (race condition?), got %d", assistantCount)
 	}
@@ -331,7 +335,7 @@ func TestTUIStreamHandler_ConcurrentOnText(t *testing.T) {
 func TestStreamDone_FlushAll(t *testing.T) {
 	var flushed []string
 	var mu sync.Mutex
-	
+
 	coalescer := NewCoalescer(CoalescerConfig{
 		MaxChars: 1000,
 		MaxWait:  1 * time.Second,
@@ -342,15 +346,15 @@ func TestStreamDone_FlushAll(t *testing.T) {
 			mu.Unlock()
 		}
 	})
-	
+
 	// Add content to multiple sessions
 	coalescer.Add("session-1", "Content A")
 	coalescer.Add("session-2", "Content B")
 	coalescer.Add("session-3", "Content C")
-	
+
 	// Flush all via FlushAll
 	coalescer.FlushAll()
-	
+
 	mu.Lock()
 	if len(flushed) != 3 {
 		t.Errorf("Expected 3 flushes (one per session), got %d", len(flushed))
@@ -363,7 +367,7 @@ func TestStreamDone_FlushAll(t *testing.T) {
 func TestChatView_AppendText_Invalidation(t *testing.T) {
 	// Note: This test would require a full widget test harness with rendering.
 	// The actual fix adds c.Invalidate() calls in AppendText.
-	// 
+	//
 	// Before fix:
 	// - AppendText with mdRenderer calls ReplaceLastMessage
 	// - ReplaceLastMessage updates buffer but VirtualList caches item heights
@@ -379,29 +383,29 @@ func TestChatView_AppendText_Invalidation(t *testing.T) {
 // TestRunner_MessageFlow verifies the full message flow through Runner.
 func TestRunner_MessageFlow(t *testing.T) {
 	testBackend := newTestBackend(80, 24)
-	
+
 	cfg := RunnerConfig{
 		Backend:   testBackend,
 		SessionID: "test-session",
 		ModelName: "test-model",
 	}
-	
+
 	runner, err := NewRunner(cfg)
 	if err != nil {
 		t.Fatalf("NewRunner failed: %v", err)
 	}
-	
+
 	// Test AddMessage -> chatView.AddMessage flow
 	runner.AddMessage("User message", "user")
 	runner.AddMessage("Assistant response", "assistant")
-	
+
 	// Test streaming flow
 	runner.SetStreaming(true)
 	runner.StreamChunk("test-session", "Hello ")
 	runner.StreamChunk("test-session", "World!")
 	runner.StreamEnd("test-session", "Hello World!")
 	runner.SetStreaming(false)
-	
+
 	// If we got here without panic, the message flow is working
 	// In a full test with rendering, we'd verify the chatView content
 }
@@ -427,19 +431,19 @@ func TestTUI_ChatLoopDeterministic(t *testing.T) {
 			},
 		},
 	})
-	
+
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	
+
 	chunkChan, errChan := mockClient.ChatCompletionStream(ctx, model.ChatRequest{})
-	
+
 	var receivedChunks []string
 	for chunk := range chunkChan {
 		for _, choice := range chunk.Choices {
 			receivedChunks = append(receivedChunks, choice.Delta.Content)
 		}
 	}
-	
+
 	select {
 	case err := <-errChan:
 		if err != nil {
@@ -447,12 +451,12 @@ func TestTUI_ChatLoopDeterministic(t *testing.T) {
 		}
 	default:
 	}
-	
+
 	expected := []string{"Hello ", "from ", "Buckley!"}
 	if len(receivedChunks) != len(expected) {
 		t.Errorf("Expected %d chunks, got %d: %v", len(expected), len(receivedChunks), receivedChunks)
 	}
-	
+
 	for i, exp := range expected {
 		if i >= len(receivedChunks) || receivedChunks[i] != exp {
 			t.Errorf("Chunk %d: expected %q, got %q", i, exp, receivedChunks[i])
@@ -475,16 +479,16 @@ type chatLoopTestBackend struct {
 	height int
 }
 
-func (b *chatLoopTestBackend) Init() error                                                 { return nil }
-func (b *chatLoopTestBackend) Fini()                                                       {}
-func (b *chatLoopTestBackend) Size() (int, int)                                            { return b.width, b.height }
+func (b *chatLoopTestBackend) Init() error                                                   { return nil }
+func (b *chatLoopTestBackend) Fini()                                                         {}
+func (b *chatLoopTestBackend) Size() (int, int)                                              { return b.width, b.height }
 func (b *chatLoopTestBackend) SetContent(x, y int, r rune, comb []rune, style backend.Style) {}
-func (b *chatLoopTestBackend) Show()                                                       {}
-func (b *chatLoopTestBackend) Sync()                                                       {}
-func (b *chatLoopTestBackend) Clear()                                                      {}
-func (b *chatLoopTestBackend) HideCursor()                                                 {}
-func (b *chatLoopTestBackend) ShowCursor()                                                 {}
-func (b *chatLoopTestBackend) SetCursorPos(x, y int)                                       {}
+func (b *chatLoopTestBackend) Show()                                                         {}
+func (b *chatLoopTestBackend) Sync()                                                         {}
+func (b *chatLoopTestBackend) Clear()                                                        {}
+func (b *chatLoopTestBackend) HideCursor()                                                   {}
+func (b *chatLoopTestBackend) ShowCursor()                                                   {}
+func (b *chatLoopTestBackend) SetCursorPos(x, y int)                                         {}
 func (b *chatLoopTestBackend) PollEvent() terminal.Event {
 	select {
 	case ev := <-b.events:

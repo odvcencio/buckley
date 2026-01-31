@@ -9,6 +9,7 @@ import (
 
 	"github.com/odvcencio/fluffyui/backend"
 	"github.com/odvcencio/fluffyui/runtime"
+	"github.com/odvcencio/fluffyui/state"
 	uitesting "github.com/odvcencio/fluffyui/testing"
 )
 
@@ -87,13 +88,18 @@ func TestSnapshot_Header(t *testing.T) {
 }
 
 func TestSnapshot_StatusBar(t *testing.T) {
-	s := NewStatusBar()
-	s.SetStatus("Ready")
-	s.SetTokens(5000, 0.25)
-	s.SetStyles(
-		backend.DefaultStyle(),
-		backend.DefaultStyle(),
-	)
+	status := state.NewSignal("Ready")
+	tokens := state.NewSignal(5000)
+	cost := state.NewSignal(0.25)
+
+	s := NewStatusBar(StatusBarConfig{
+		StatusText: status,
+		Tokens:     tokens,
+		CostCents:  cost,
+		BGStyle:    backend.DefaultStyle(),
+		TextStyle:  backend.DefaultStyle(),
+		ModeStyle:  backend.DefaultStyle(),
+	})
 
 	output := renderSnapshot(s, 80, 1)
 	assertSnapshot(t, "statusbar", output)

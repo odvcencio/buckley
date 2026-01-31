@@ -358,23 +358,23 @@ func extractTime(data map[string]any, key string) time.Time {
 // SimpleTelemetryBridge - for Runner (no scheduler dependency)
 // =============================================================================
 
-// TelemetryPoster is the interface for posting telemetry messages to the UI.
-type TelemetryPoster interface {
-	Post(msg Message)
+// SidebarStateSink receives sidebar state updates.
+type SidebarStateSink interface {
+	SetSidebarState(state buckleywidgets.SidebarState)
 }
 
 // SimpleTelemetryBridge forwards telemetry events to the TUI without scheduler dependency.
 // Used by Runner which doesn't have access to WidgetApp's stateScheduler.
 type SimpleTelemetryBridge struct {
 	hub         *telemetry.Hub
-	poster      TelemetryPoster
+	sink        SidebarStateSink
 	eventCh     <-chan telemetry.Event
 	unsubscribe func()
 	cancel      context.CancelFunc
 	wg          sync.WaitGroup
 	mu          sync.Mutex
 
-	// State mirrors (simpler than signal-based approach)
+	// State mirrors for snapshot generation
 	currentTask        string
 	taskProgress       int
 	planTasks          []buckleywidgets.PlanTask
@@ -390,15 +390,15 @@ type SimpleTelemetryBridge struct {
 	experimentVariants []buckleywidgets.ExperimentVariant
 }
 
-// NewSimpleTelemetryBridge creates a bridge from telemetry hub to any TelemetryPoster.
-func NewSimpleTelemetryBridge(hub *telemetry.Hub, poster TelemetryPoster) *SimpleTelemetryBridge {
-	if hub == nil || poster == nil {
+// NewSimpleTelemetryBridge creates a bridge from telemetry hub to a sidebar state sink.
+func NewSimpleTelemetryBridge(hub *telemetry.Hub, sink SidebarStateSink) *SimpleTelemetryBridge {
+	if hub == nil || sink == nil {
 		return &SimpleTelemetryBridge{}
 	}
 	eventCh, unsub := hub.Subscribe()
 	return &SimpleTelemetryBridge{
 		hub:         hub,
-		poster:      poster,
+		sink:        sink,
 		eventCh:     eventCh,
 		unsubscribe: unsub,
 	}
@@ -446,18 +446,18 @@ func (b *SimpleTelemetryBridge) forwardLoop(ctx context.Context) {
 }
 
 func (b *SimpleTelemetryBridge) postSnapshot() {
-	if b.poster == nil {
+	if b.sink == nil {
 		return
 	}
 	b.mu.Lock()
 	snapshot := b.buildSnapshot()
 	b.mu.Unlock()
-	b.poster.Post(SidebarStateMsg{Snapshot: snapshot})
+	b.sink.SetSidebarState(snapshot)
 }
 
-func (b *SimpleTelemetryBridge) buildSnapshot() SidebarSnapshot {
+func (b *SimpleTelemetryBridge) buildSnapshot() buckleywidgets.SidebarState {
 	now := time.Now()
-	return SidebarSnapshot{
+	return buckleywidgets.SidebarState{
 		CurrentTask:        b.currentTask,
 		TaskProgress:       b.taskProgress,
 		PlanTasks:          append([]buckleywidgets.PlanTask(nil), b.planTasks...),

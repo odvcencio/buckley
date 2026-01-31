@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/odvcencio/buckley/pkg/buckley/ui/filepicker"
+	uiservices "github.com/odvcencio/buckley/pkg/buckley/ui/tui/services"
+	uitstate "github.com/odvcencio/buckley/pkg/buckley/ui/tui/state"
 	buckleywidgets "github.com/odvcencio/buckley/pkg/buckley/ui/widgets"
 	"github.com/odvcencio/buckley/pkg/diagnostics"
 	"github.com/odvcencio/fluffyui/accessibility"
@@ -67,14 +69,17 @@ type Runner struct {
 	statusBar    *buckleywidgets.StatusBar
 	sidebar      *buckleywidgets.Sidebar
 	presence     *buckleywidgets.PresenceStrip
-	toastStack   *uiwidgets.ToastStack
+	toastStack   *buckleywidgets.SignalToastStack
 	filePicker   *filepicker.FilePicker
 	modelPalette *uiwidgets.PaletteWidget
 
 	// State
+	state            *uitstate.AppState
+	statusService    *uiservices.StatusService
+	chatService      *uiservices.ChatService
+	sidebarService   *uiservices.SidebarService
 	coalescer        *Coalescer
 	reasoningBuilder strings.Builder
-	streaming        bool
 	styleCache       *StyleCache
 
 	// Config
@@ -117,20 +122,31 @@ func NewRunner(cfg RunnerConfig) (*Runner, error) {
 	}
 
 	styleCache := NewStyleCache()
+	appState := uitstate.NewAppState()
+	statusService := uiservices.NewStatusService(appState, nil)
+	chatService := uiservices.NewChatService(appState)
+	sidebarService := uiservices.NewSidebarService(appState)
+	appState.ModelName.Set(strings.TrimSpace(cfg.ModelName))
+	appState.SessionID.Set(strings.TrimSpace(cfg.SessionID))
+	chatService.SetModelName(cfg.ModelName)
 
 	r := &Runner{
-		theme:        th,
-		workDir:      workDir,
-		projectRoot:  projectRoot,
-		webBaseURL:   normalizeWebBaseURL(cfg.WebBaseURL),
-		sessionID:    strings.TrimSpace(cfg.SessionID),
-		styleCache:   styleCache,
-		reduceMotion: cfg.ReduceMotion,
-		onSubmit:     cfg.OnSubmit,
-		onQuit:       cfg.OnQuit,
-		onFileSelect: cfg.OnFileSelect,
-		onShellCmd:   cfg.OnShellCmd,
-		onApproval:   cfg.OnApproval,
+		theme:          th,
+		workDir:        workDir,
+		projectRoot:    projectRoot,
+		webBaseURL:     normalizeWebBaseURL(cfg.WebBaseURL),
+		sessionID:      strings.TrimSpace(cfg.SessionID),
+		state:          appState,
+		statusService:  statusService,
+		chatService:    chatService,
+		sidebarService: sidebarService,
+		styleCache:     styleCache,
+		reduceMotion:   cfg.ReduceMotion,
+		onSubmit:       cfg.OnSubmit,
+		onQuit:         cfg.OnQuit,
+		onFileSelect:   cfg.OnFileSelect,
+		onShellCmd:     cfg.OnShellCmd,
+		onApproval:     cfg.OnApproval,
 	}
 
 	// Build widgets
@@ -248,9 +264,10 @@ func (r *Runner) buildWidgets(cfg RunnerConfig, styleCache *StyleCache) {
 	th := r.theme
 
 	// Header
-	r.header = buckleywidgets.NewHeader()
-	r.header.SetModelName(cfg.ModelName)
-	r.header.SetSessionID(cfg.SessionID)
+	r.header = buckleywidgets.NewHeaderWithConfig(buckleywidgets.HeaderConfig{
+		ModelName: r.state.ModelName,
+		SessionID: r.state.SessionID,
+	})
 	r.header.SetStyles(
 		styleCache.Get(th.Surface),
 		styleCache.Get(th.Logo),
@@ -258,7 +275,13 @@ func (r *Runner) buildWidgets(cfg RunnerConfig, styleCache *StyleCache) {
 	)
 
 	// ChatView
-	r.chatView = buckleywidgets.NewChatView()
+	r.chatView = buckleywidgets.NewChatViewWithConfig(buckleywidgets.ChatViewConfig{
+		Messages:         r.state.ChatMessages,
+		Thinking:         r.state.ChatThinking,
+		ReasoningText:    r.state.ReasoningText,
+		ReasoningPreview: r.state.ReasoningPreview,
+		ReasoningVisible: r.state.ReasoningVisible,
+	})
 	r.chatView.SetStyles(
 		styleCache.Get(th.User),
 		styleCache.Get(th.Assistant),
@@ -280,7 +303,10 @@ func (r *Runner) buildWidgets(cfg RunnerConfig, styleCache *StyleCache) {
 	r.chatView.SetMarkdownRenderer(mdRenderer, styleCache.Get(mdRenderer.CodeBlockBackground()))
 
 	// InputArea
-	r.inputArea = buckleywidgets.NewInputArea()
+	r.inputArea = buckleywidgets.NewInputAreaWithConfig(buckleywidgets.InputAreaConfig{
+		Text: r.state.InputText,
+		Mode: r.state.InputMode,
+	})
 	r.inputArea.SetStyles(
 		styleCache.Get(th.SurfaceRaised),
 		styleCache.Get(th.TextPrimary),
@@ -294,15 +320,33 @@ func (r *Runner) buildWidgets(cfg RunnerConfig, styleCache *StyleCache) {
 	)
 
 	// StatusBar
-	r.statusBar = buckleywidgets.NewStatusBar()
-	r.statusBar.SetStatus("Ready")
-	r.statusBar.SetStyles(
-		styleCache.Get(th.Surface),
-		styleCache.Get(th.TextMuted),
-	)
+	r.statusBar = buckleywidgets.NewStatusBar(buckleywidgets.StatusBarConfig{
+		StatusText:     r.state.StatusText,
+		StatusOverride: r.state.StatusOverride,
+		StatusMode:     r.state.StatusMode,
+		Tokens:         r.state.StatusTokens,
+		CostCents:      r.state.StatusCost,
+		ContextUsed:    r.state.ContextUsed,
+		ContextBudget:  r.state.ContextBudget,
+		ContextWindow:  r.state.ContextWindow,
+		ScrollPos:      r.state.ScrollPos,
+		ProgressItems:  r.state.ProgressItems,
+		IsStreaming:    r.state.IsStreaming,
+		BGStyle:        styleCache.Get(th.Surface),
+		TextStyle:      styleCache.Get(th.TextMuted),
+		ModeStyle:      styleCache.Get(th.Accent),
+	})
 
 	// Sidebar
-	r.sidebar = buckleywidgets.NewSidebar()
+	r.sidebar = buckleywidgets.NewSidebarWithBindings(
+		buckleywidgets.DefaultSidebarConfig(),
+		buckleywidgets.SidebarBindings{
+			State:         r.state.SidebarState,
+			ContextUsed:   r.state.ContextUsed,
+			ContextBudget: r.state.ContextBudget,
+			ContextWindow: r.state.ContextWindow,
+		},
+	)
 	r.sidebar.SetStyles(
 		styleCache.Get(th.Border),
 		styleCache.Get(th.TextSecondary),
@@ -339,7 +383,7 @@ func (r *Runner) buildWidgets(cfg RunnerConfig, styleCache *StyleCache) {
 	)
 
 	// Toast stack
-	r.toastStack = uiwidgets.NewToastStack()
+	r.toastStack = buckleywidgets.NewSignalToastStack(r.state.Toasts)
 	r.toastStack.SetAnimationsEnabled(!cfg.ReduceMotion)
 	r.toastStack.SetStyles(
 		styleCache.Get(th.SurfaceRaised),
@@ -513,7 +557,9 @@ func (r *Runner) update(app *runtime.App, msg runtime.Message) bool {
 		return false
 
 	case StreamFlush:
-		r.chatView.AppendText(m.Text)
+		if r.chatService != nil {
+			r.chatService.AppendToLastMessage(m.Text)
+		}
 		return true
 
 	case StreamDone:
@@ -521,82 +567,6 @@ func (r *Runner) update(app *runtime.App, msg runtime.Message) bool {
 		// This handles session switches during streaming
 		r.coalescer.FlushAll()
 		r.coalescer.Clear(m.SessionID)
-		return true
-
-	case AddMessageMsg:
-		r.chatView.AddMessage(m.Content, m.Source)
-		return true
-
-	case AppendMsg:
-		r.chatView.AppendText(m.Text)
-		return true
-
-	case StatusMsg:
-		r.statusBar.SetStatus(m.Text)
-		return true
-
-	case TokensMsg:
-		r.statusBar.SetTokens(m.Tokens, m.CostCent)
-		return true
-
-	case ContextMsg:
-		r.statusBar.SetContextUsage(m.Used, m.Budget, m.Window)
-		r.sidebar.SetContextUsage(m.Used, m.Budget, m.Window)
-		return true
-
-	case ExecutionModeMsg:
-		r.statusBar.SetExecutionMode(m.Mode)
-		return true
-
-	case ProgressMsg:
-		r.statusBar.SetProgress(m.Items)
-		return true
-
-	case StreamingMsg:
-		r.streaming = m.Active
-		r.statusBar.SetStreaming(m.Active)
-		return true
-
-	case ModelMsg:
-		r.header.SetModelName(m.Name)
-		r.chatView.SetModelName(m.Name)
-		return true
-
-	case SessionMsg:
-		r.sessionID = strings.TrimSpace(m.ID)
-		r.header.SetSessionID(r.sessionID)
-		return true
-
-	case ThinkingMsg:
-		if m.Show {
-			r.chatView.AddMessage("", "thinking")
-		} else {
-			r.chatView.RemoveThinkingIndicator()
-		}
-		return true
-
-	case ReasoningMsg:
-		r.chatView.AppendReasoning(m.Text)
-		r.statusBar.SetStatus("Thinking...")
-		return true
-
-	case ReasoningFlush:
-		r.chatView.AppendReasoning(m.Text)
-		r.statusBar.SetStatus("Thinking...")
-		return true
-
-	case ReasoningEndMsg:
-		r.chatView.CollapseReasoning(m.Preview, m.Full)
-		return true
-
-	case SidebarStateMsg:
-		r.applySidebarSnapshot(m.Snapshot)
-		return true
-
-	case ToastsMsg:
-		if r.toastStack != nil {
-			r.toastStack.SetToasts(m.Toasts)
-		}
 		return true
 
 	case RefreshMsg:
@@ -611,24 +581,6 @@ func (r *Runner) update(app *runtime.App, msg runtime.Message) bool {
 
 	default:
 		return false
-	}
-}
-
-// applySidebarSnapshot updates the sidebar with state snapshot.
-func (r *Runner) applySidebarSnapshot(snapshot SidebarSnapshot) {
-	if r.sidebar == nil {
-		return
-	}
-
-	r.sidebar.SetRunningTools(snapshot.RunningTools)
-	r.sidebar.SetToolHistory(snapshot.ToolHistory)
-	r.sidebar.SetPlanTasks(snapshot.PlanTasks)
-
-	if snapshot.RLMStatus != nil {
-		r.sidebar.SetRLMStatus(snapshot.RLMStatus, snapshot.RLMScratchpad)
-	}
-	if snapshot.CircuitStatus != nil {
-		r.sidebar.SetCircuitStatus(snapshot.CircuitStatus)
 	}
 }
 
@@ -649,12 +601,18 @@ func (r *Runner) Announce(text string, priority accessibility.Priority) {
 
 // SetStatus updates the status bar text.
 func (r *Runner) SetStatus(text string) {
-	r.Post(StatusMsg{Text: text})
+	if r == nil || r.statusService == nil {
+		return
+	}
+	r.statusService.SetStatus(text)
 }
 
 // AddMessage adds a message to the chat view.
 func (r *Runner) AddMessage(content, source string) {
-	r.Post(AddMessageMsg{Content: content, Source: source})
+	if r == nil || r.chatService == nil {
+		return
+	}
+	r.chatService.AddMessage(content, source)
 }
 
 // StreamChunk sends streaming text chunk.
@@ -669,45 +627,60 @@ func (r *Runner) StreamEnd(sessionID, fullText string) {
 
 // AppendToLastMessage appends text to the last message.
 func (r *Runner) AppendToLastMessage(text string) {
-	r.Post(AppendMsg{Text: text})
+	if r == nil || r.chatService == nil {
+		return
+	}
+	r.chatService.AppendToLastMessage(text)
 }
 
 // AppendReasoning appends reasoning content.
 func (r *Runner) AppendReasoning(text string) {
-	r.Post(ReasoningMsg{Text: text})
+	if r == nil || r.chatService == nil {
+		return
+	}
+	r.chatService.AppendReasoning(text)
 }
 
 // CollapseReasoning collapses the reasoning block with a preview.
 func (r *Runner) CollapseReasoning(preview, full string) {
-	r.Post(ReasoningEndMsg{Preview: preview, Full: full})
+	if r == nil || r.chatService == nil {
+		return
+	}
+	r.chatService.CollapseReasoning(preview, full)
 }
 
 // SetModel updates the displayed model name.
 func (r *Runner) SetModel(name string) {
-	r.Post(ModelMsg{Name: name})
+	r.SetModelName(name)
 }
 
 // SetSession updates the displayed session ID.
 func (r *Runner) SetSession(id string) {
-	r.Post(SessionMsg{ID: id})
+	r.SetSessionID(id)
 }
 
 // SetStreaming updates the streaming indicator.
 func (r *Runner) SetStreaming(active bool) {
-	r.Post(StreamingMsg{Active: active})
+	if r == nil || r.statusService == nil {
+		return
+	}
+	r.statusService.SetStreaming(active)
 }
 
 // IsStreaming returns true if currently streaming a response.
 func (r *Runner) IsStreaming() bool {
-	if r == nil {
+	if r == nil || r.state == nil {
 		return false
 	}
-	return r.streaming
+	return r.state.IsStreaming.Get()
 }
 
 // SetContextUsage updates context usage display.
 func (r *Runner) SetContextUsage(used, budget, window int) {
-	r.Post(ContextMsg{Used: used, Budget: budget, Window: window})
+	if r == nil || r.statusService == nil {
+		return
+	}
+	r.statusService.SetContextUsage(used, budget, window)
 }
 
 // Quit stops the application.
@@ -721,44 +694,75 @@ func (r *Runner) Quit() {
 
 // SetModelName updates the displayed model name.
 func (r *Runner) SetModelName(name string) {
-	r.Post(ModelMsg{Name: name})
+	if r == nil || r.state == nil {
+		return
+	}
+	name = strings.TrimSpace(name)
+	r.state.ModelName.Set(name)
+	if r.chatView != nil {
+		r.chatView.SetModelName(name)
+	}
+	if r.chatService != nil {
+		r.chatService.SetModelName(name)
+	}
 }
 
 // SetSessionID updates the displayed session ID.
 func (r *Runner) SetSessionID(id string) {
-	r.Post(SessionMsg{ID: id})
+	if r == nil || r.state == nil {
+		return
+	}
+	id = strings.TrimSpace(id)
+	r.state.SessionID.Set(id)
+	r.sessionID = id
 }
 
 // SetStatusOverride temporarily overrides the status bar text.
 func (r *Runner) SetStatusOverride(text string, duration time.Duration) {
-	r.Post(StatusOverrideMsg{Text: text, Duration: duration})
+	if r == nil || r.statusService == nil {
+		return
+	}
+	r.statusService.SetStatusOverride(text, duration)
 }
 
 // SetTokenCount updates the token count display.
 func (r *Runner) SetTokenCount(tokens int, costCents float64) {
-	r.Post(TokensMsg{Tokens: tokens, CostCent: costCents})
+	if r == nil || r.statusService == nil {
+		return
+	}
+	r.statusService.SetTokenCount(tokens, costCents)
 }
 
 // SetExecutionMode updates the execution mode display.
 func (r *Runner) SetExecutionMode(mode string) {
-	r.Post(ExecutionModeMsg{Mode: mode})
+	if r == nil || r.statusService == nil {
+		return
+	}
+	r.statusService.SetMode(mode)
 }
 
 // ShowThinkingIndicator shows the thinking indicator.
 func (r *Runner) ShowThinkingIndicator() {
-	r.Post(ThinkingMsg{Show: true})
+	if r == nil || r.chatService == nil {
+		return
+	}
+	r.chatService.ShowThinkingIndicator()
 }
 
 // RemoveThinkingIndicator hides the thinking indicator.
 func (r *Runner) RemoveThinkingIndicator() {
-	r.Post(ThinkingMsg{Show: false})
+	if r == nil || r.chatService == nil {
+		return
+	}
+	r.chatService.RemoveThinkingIndicator()
 }
 
 // ClearScrollback clears the chat view.
 func (r *Runner) ClearScrollback() {
-	if r.chatView != nil {
-		r.chatView.Clear()
+	if r == nil || r.chatService == nil {
+		return
 	}
+	r.chatService.ClearMessages()
 }
 
 // WelcomeScreen shows the welcome message.
@@ -766,9 +770,11 @@ func (r *Runner) WelcomeScreen() {
 	if r.chatView == nil {
 		return
 	}
-	r.chatView.Clear()
-	r.chatView.AddMessage("Welcome to Buckley", "system")
-	r.chatView.AddMessage("Type a message to get started, or use /help for commands.", "system")
+	if r.chatService != nil {
+		r.chatService.ClearMessages()
+		r.chatService.AddMessage("Welcome to Buckley", "system")
+		r.chatService.AddMessage("Type a message to get started, or use /help for commands.", "system")
+	}
 }
 
 // ShowModelPicker displays the model picker palette.
@@ -822,12 +828,26 @@ func (r *Runner) SetSessionCallbacks(onNext, onPrev func()) {
 
 // SetProgress updates the progress display.
 func (r *Runner) SetProgress(items []progress.Progress) {
-	r.Post(ProgressMsg{Items: items})
+	if r == nil || r.statusService == nil {
+		return
+	}
+	r.statusService.SetProgress(items)
+}
+
+// SetSidebarState updates sidebar snapshot state.
+func (r *Runner) SetSidebarState(state buckleywidgets.SidebarState) {
+	if r == nil || r.sidebarService == nil {
+		return
+	}
+	r.sidebarService.SetSidebarState(state)
 }
 
 // SetToasts updates the toast display.
 func (r *Runner) SetToasts(toasts []*toast.Toast) {
-	r.Post(ToastsMsg{Toasts: toasts})
+	if r == nil || r.statusService == nil {
+		return
+	}
+	r.statusService.SetToasts(toasts)
 }
 
 // SetToastDismissHandler sets the handler for dismissing toasts.

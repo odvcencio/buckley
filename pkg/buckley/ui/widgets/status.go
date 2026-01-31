@@ -8,103 +8,122 @@ import (
 	"github.com/odvcencio/fluffyui/backend"
 	"github.com/odvcencio/fluffyui/progress"
 	"github.com/odvcencio/fluffyui/runtime"
+	"github.com/odvcencio/fluffyui/state"
 	uiwidgets "github.com/odvcencio/fluffyui/widgets"
 )
 
-// StatusBar is the Buckley status bar widget.
+// StatusBar displays status information at the bottom of the screen.
 type StatusBar struct {
-	uiwidgets.Base
-	status        string
-	tokens        int
-	costCents     float64
-	contextUsed   int
-	contextBudget int
-	contextWindow int
-	executionMode string
-	scrollPos     string // "TOP", "END", or percentage
-	progress      []progress.Progress
-	streaming     bool
-	streamAnim    int
-	bgStyle       backend.Style
-	textStyle     backend.Style
-	contextBounds runtime.Rect
-	tokenBounds   runtime.Rect
+	uiwidgets.Component
+
+	statusText     state.Readable[string]
+	statusOverride state.Readable[string]
+	statusMode     state.Readable[string]
+	tokens         state.Readable[int]
+	costCents      state.Readable[float64]
+	contextUsed    state.Readable[int]
+	contextBudget  state.Readable[int]
+	contextWindow  state.Readable[int]
+	scrollPos      state.Readable[string]
+	progressItems  state.Readable[[]progress.Progress]
+	isStreaming    state.Readable[bool]
+
+	bgStyle   backend.Style
+	textStyle backend.Style
+	modeStyle backend.Style
 }
 
-// NewStatusBar creates a new status bar widget.
-func NewStatusBar() *StatusBar {
+// StatusBarConfig configures the status bar.
+type StatusBarConfig struct {
+	StatusText     state.Readable[string]
+	StatusOverride state.Readable[string]
+	StatusMode     state.Readable[string]
+	Tokens         state.Readable[int]
+	CostCents      state.Readable[float64]
+	ContextUsed    state.Readable[int]
+	ContextBudget  state.Readable[int]
+	ContextWindow  state.Readable[int]
+	ScrollPos      state.Readable[string]
+	ProgressItems  state.Readable[[]progress.Progress]
+	IsStreaming    state.Readable[bool]
+
+	BGStyle   backend.Style
+	TextStyle backend.Style
+	ModeStyle backend.Style
+}
+
+// NewStatusBar creates a new status bar.
+func NewStatusBar(cfg StatusBarConfig) *StatusBar {
+	defaultStyle := backend.DefaultStyle()
+	bg := cfg.BGStyle
+	if bg == (backend.Style{}) {
+		bg = defaultStyle
+	}
+	text := cfg.TextStyle
+	if text == (backend.Style{}) {
+		text = defaultStyle
+	}
+	mode := cfg.ModeStyle
+	if mode == (backend.Style{}) {
+		mode = text
+	}
+
 	return &StatusBar{
-		status:    "Ready",
-		bgStyle:   backend.DefaultStyle(),
-		textStyle: backend.DefaultStyle(),
+		statusText:     readableOrDefault(cfg.StatusText, "Ready"),
+		statusOverride: readableOrDefault(cfg.StatusOverride, ""),
+		statusMode:     readableOrDefault(cfg.StatusMode, ""),
+		tokens:         readableOrDefault(cfg.Tokens, 0),
+		costCents:      readableOrDefault(cfg.CostCents, 0.0),
+		contextUsed:    readableOrDefault(cfg.ContextUsed, 0),
+		contextBudget:  readableOrDefault(cfg.ContextBudget, 0),
+		contextWindow:  readableOrDefault(cfg.ContextWindow, 0),
+		scrollPos:      readableOrDefault(cfg.ScrollPos, ""),
+		progressItems:  readableOrDefault(cfg.ProgressItems, []progress.Progress{}),
+		isStreaming:    readableOrDefault(cfg.IsStreaming, false),
+		bgStyle:        bg,
+		textStyle:      text,
+		modeStyle:      mode,
 	}
 }
 
-// SetStatus updates the status text.
-func (s *StatusBar) SetStatus(text string) {
-	s.status = text
-}
-
-// SetTokens updates the token count and cost.
-func (s *StatusBar) SetTokens(tokens int, costCents float64) {
-	s.tokens = tokens
-	s.costCents = costCents
-}
-
-// SetContextUsage updates context usage display.
-func (s *StatusBar) SetContextUsage(used, budget, window int) {
-	s.contextUsed = used
-	s.contextBudget = budget
-	s.contextWindow = window
-}
-
-// SetExecutionMode updates execution mode display.
-func (s *StatusBar) SetExecutionMode(mode string) {
-	s.executionMode = mode
-}
-
-// SetScrollPosition updates the scroll position indicator.
-func (s *StatusBar) SetScrollPosition(pos string) {
-	s.scrollPos = pos
-}
-
-// SetProgress updates active progress indicators.
-func (s *StatusBar) SetProgress(items []progress.Progress) {
-	if len(items) == 0 {
-		s.progress = nil
-		return
+// Bind attaches app services and subscriptions.
+func (s *StatusBar) Bind(services runtime.Services) {
+	s.Component.Bind(services)
+	s.Subs.Clear()
+	invalidate := func() {
+		if s.Services != (runtime.Services{}) {
+			s.Services.Invalidate()
+		}
 	}
-	s.progress = append([]progress.Progress(nil), items...)
+	s.Observe(s.statusText, invalidate)
+	s.Observe(s.statusOverride, invalidate)
+	s.Observe(s.statusMode, invalidate)
+	s.Observe(s.tokens, invalidate)
+	s.Observe(s.costCents, invalidate)
+	s.Observe(s.contextUsed, invalidate)
+	s.Observe(s.contextBudget, invalidate)
+	s.Observe(s.contextWindow, invalidate)
+	s.Observe(s.scrollPos, invalidate)
+	s.Observe(s.progressItems, invalidate)
+	s.Observe(s.isStreaming, invalidate)
 }
 
-// SetStreaming updates streaming state.
-func (s *StatusBar) SetStreaming(streaming bool) {
-	s.streaming = streaming
-	if !streaming {
-		s.streamAnim = 0
-	}
+// Unbind releases subscriptions.
+func (s *StatusBar) Unbind() {
+	s.Component.Unbind()
 }
 
-// SetStreamAnim updates the streaming animation frame index.
-func (s *StatusBar) SetStreamAnim(frame int) {
-	if frame < 0 {
-		frame = 0
-	}
-	s.streamAnim = frame
-}
-
-// SetStyles sets the status bar styles.
-func (s *StatusBar) SetStyles(bg, text backend.Style) {
-	s.bgStyle = bg
-	s.textStyle = text
-}
-
-// Measure returns the status bar size (1 row tall, full width).
+// Measure returns the preferred size.
 func (s *StatusBar) Measure(constraints runtime.Constraints) runtime.Size {
 	return runtime.Size{
 		Width:  constraints.MaxWidth,
 		Height: 1,
 	}
+}
+
+// Layout positions the status bar.
+func (s *StatusBar) Layout(bounds runtime.Rect) {
+	s.Base.Layout(bounds)
 }
 
 // Render draws the status bar.
@@ -117,78 +136,77 @@ func (s *StatusBar) Render(ctx runtime.RenderContext) {
 	// Fill background
 	ctx.Buffer.Fill(bounds, ' ', s.bgStyle)
 
-	// Left side: status + mode
-	left := " " + s.status
-	if strings.TrimSpace(s.executionMode) != "" {
-		left += " · " + strings.TrimSpace(s.executionMode)
+	status := strings.TrimSpace(s.statusText.Get())
+	if override := strings.TrimSpace(s.statusOverride.Get()); override != "" {
+		status = override
 	}
-	if activity := formatActivity(s.progress, s.streaming, s.streamAnim); activity != "" {
+	if status == "" {
+		status = "Ready"
+	}
+
+	mode := strings.TrimSpace(s.statusMode.Get())
+	activity := formatActivity(s.progressItems.Get(), s.isStreaming.Get())
+
+	left := " " + status
+	if mode != "" {
+		left += " · " + mode
+	}
+	if activity != "" {
 		left += " · " + activity
 	}
+
 	ctx.Buffer.SetString(bounds.X, bounds.Y, left, s.textStyle)
 
-	// Right side: context + tokens/cost
-	s.contextBounds = runtime.Rect{}
-	s.tokenBounds = runtime.Rect{}
-	ctxSegment := formatContextUsage(s.contextUsed, s.contextBudget, s.contextWindow)
-	tokenSegment := ""
-	if s.tokens > 0 {
-		tokenSegment = formatTokens(s.tokens)
-		if s.costCents > 0 {
-			tokenSegment += " · $" + formatCost(s.costCents)
-		}
+	if mode != "" {
+		prefix := " " + status + " · "
+		ctx.Buffer.SetString(bounds.X+len(prefix), bounds.Y, mode, s.modeStyle)
 	}
-	right := ""
-	if ctxSegment != "" {
-		right = ctxSegment
-		if tokenSegment != "" {
-			combined := ctxSegment + " · " + tokenSegment
-			if fitsRight(bounds, left, combined+" ") {
-				right = combined
-			}
-		}
-	} else if tokenSegment != "" {
-		right = tokenSegment
-	}
+
+	ctxSegment := formatContextUsage(s.contextUsed.Get(), s.contextBudget.Get(), s.contextWindow.Get())
+	tokenSegment := formatTokenSegment(s.tokens.Get(), s.costCents.Get())
+	right := joinRightSegments(ctxSegment, tokenSegment, bounds, left)
 	if right != "" {
 		drawText := right + " "
 		x := bounds.X + bounds.Width - len(drawText)
 		if x > bounds.X+len(left) {
 			ctx.Buffer.SetString(x, bounds.Y, drawText, s.textStyle)
-			if ctxSegment != "" && tokenSegment != "" && right == ctxSegment+" · "+tokenSegment {
-				s.contextBounds = runtime.Rect{X: x, Y: bounds.Y, Width: len(ctxSegment), Height: 1}
-				s.tokenBounds = runtime.Rect{
-					X:      x + len(ctxSegment) + len(" · "),
-					Y:      bounds.Y,
-					Width:  len(tokenSegment),
-					Height: 1,
-				}
-			} else if right == ctxSegment && ctxSegment != "" {
-				s.contextBounds = runtime.Rect{X: x, Y: bounds.Y, Width: len(ctxSegment), Height: 1}
-			} else if right == tokenSegment && tokenSegment != "" {
-				s.tokenBounds = runtime.Rect{X: x, Y: bounds.Y, Width: len(tokenSegment), Height: 1}
-			}
 		}
 	}
 
-	// Center: scroll position
-	if s.scrollPos != "" {
-		center := bounds.X + bounds.Width/2 - len(s.scrollPos)/2
-		if center > bounds.X+len(left) && center+len(s.scrollPos) < bounds.X+bounds.Width-len(right) {
-			ctx.Buffer.SetString(center, bounds.Y, s.scrollPos, s.textStyle)
+	if scroll := strings.TrimSpace(s.scrollPos.Get()); scroll != "" {
+		center := bounds.X + bounds.Width/2 - len(scroll)/2
+		if center > bounds.X+len(left) && center+len(scroll) < bounds.X+bounds.Width-len(right) {
+			ctx.Buffer.SetString(center, bounds.Y, scroll, s.textStyle)
 		}
 	}
 }
 
-// WebLinkAt returns a status bar link target at the given point.
-func (s *StatusBar) WebLinkAt(x, y int) (string, bool) {
-	if s.contextBounds.Contains(x, y) {
-		return "context", true
+func joinRightSegments(ctxSegment, tokenSegment string, bounds runtime.Rect, left string) string {
+	if ctxSegment == "" && tokenSegment == "" {
+		return ""
 	}
-	if s.tokenBounds.Contains(x, y) {
-		return "usage", true
+	if ctxSegment != "" && tokenSegment != "" {
+		combined := ctxSegment + " · " + tokenSegment
+		if fitsRight(bounds, left, combined+" ") {
+			return combined
+		}
+		return ctxSegment
 	}
-	return "", false
+	if ctxSegment != "" {
+		return ctxSegment
+	}
+	return tokenSegment
+}
+
+func formatTokenSegment(tokens int, costCents float64) string {
+	if tokens <= 0 {
+		return ""
+	}
+	segment := formatTokens(tokens)
+	if costCents > 0 {
+		segment += " · $" + formatCost(costCents)
+	}
+	return segment
 }
 
 func fitsRight(bounds runtime.Rect, left, right string) bool {
@@ -196,13 +214,13 @@ func fitsRight(bounds runtime.Rect, left, right string) bool {
 	return x > bounds.X+len(left)
 }
 
-func formatActivity(items []progress.Progress, streaming bool, streamAnim int) string {
+func formatActivity(items []progress.Progress, streaming bool) string {
 	var parts []string
 	if progress := formatProgress(items); progress != "" {
 		parts = append(parts, progress)
 	}
 	if streaming {
-		parts = append(parts, "stream "+streamFrame(streamAnim))
+		parts = append(parts, "stream")
 	}
 	if len(parts) == 0 {
 		return ""
@@ -235,17 +253,6 @@ func formatProgress(items []progress.Progress) string {
 		suffix += fmt.Sprintf(" +%d", len(items)-1)
 	}
 	return label + suffix
-}
-
-func streamFrame(frame int) string {
-	frames := []string{"|", "/", "-", "\\"}
-	if len(frames) == 0 {
-		return ""
-	}
-	if frame < 0 {
-		frame = 0
-	}
-	return frames[frame%len(frames)]
 }
 
 func formatContextUsage(used, budget, window int) string {
@@ -314,6 +321,14 @@ func itoa(i int) string {
 	return string(buf[pos:])
 }
 
+func readableOrDefault[T any](sig state.Readable[T], fallback T) state.Readable[T] {
+	if sig != nil {
+		return sig
+	}
+	return state.NewSignal(fallback)
+}
+
+var _ runtime.Widget = (*StatusBar)(nil)
 var _ accessibility.Accessible = (*StatusBar)(nil)
 
 // AccessibleRole returns the accessibility role for the status bar.
@@ -323,29 +338,30 @@ func (s *StatusBar) AccessibleRole() accessibility.Role {
 
 // AccessibleLabel returns the current status text.
 func (s *StatusBar) AccessibleLabel() string {
-	if s == nil {
+	status := strings.TrimSpace(s.statusText.Get())
+	if override := strings.TrimSpace(s.statusOverride.Get()); override != "" {
+		status = override
+	}
+	if status == "" {
 		return "Status"
 	}
-	return s.status
+	return status
 }
 
 // AccessibleDescription returns detailed status information.
 func (s *StatusBar) AccessibleDescription() string {
-	if s == nil {
-		return ""
-	}
 	var parts []string
-	if s.streaming {
+	if s.isStreaming.Get() {
 		parts = append(parts, "streaming")
 	}
-	if s.executionMode != "" {
-		parts = append(parts, s.executionMode)
+	if mode := strings.TrimSpace(s.statusMode.Get()); mode != "" {
+		parts = append(parts, mode)
 	}
-	if s.contextBudget > 0 {
-		parts = append(parts, fmt.Sprintf("ctx %d/%d", s.contextUsed, s.contextBudget))
+	if s.contextBudget.Get() > 0 {
+		parts = append(parts, fmt.Sprintf("ctx %d/%d", s.contextUsed.Get(), s.contextBudget.Get()))
 	}
-	if s.tokens > 0 {
-		parts = append(parts, fmt.Sprintf("%d tokens", s.tokens))
+	if s.tokens.Get() > 0 {
+		parts = append(parts, fmt.Sprintf("%d tokens", s.tokens.Get()))
 	}
 	return strings.Join(parts, " · ")
 }

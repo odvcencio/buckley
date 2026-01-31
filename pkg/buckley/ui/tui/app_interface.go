@@ -7,10 +7,11 @@ import (
 	"strings"
 	"time"
 
+	buckleywidgets "github.com/odvcencio/buckley/pkg/buckley/ui/widgets"
 	"github.com/odvcencio/buckley/pkg/diagnostics"
 	"github.com/odvcencio/fluffyui/progress"
 	"github.com/odvcencio/fluffyui/toast"
-	"github.com/odvcencio/fluffyui/widgets"
+	uiwidgets "github.com/odvcencio/fluffyui/widgets"
 )
 
 // App is the interface for the TUI application.
@@ -52,7 +53,7 @@ type App interface {
 	CollapseReasoning(preview, full string)
 
 	// Overlays
-	ShowModelPicker(items []widgets.PaletteItem, onSelect func(item widgets.PaletteItem))
+	ShowModelPicker(items []uiwidgets.PaletteItem, onSelect func(item uiwidgets.PaletteItem))
 
 	// Callbacks
 	SetCallbacks(onSubmit func(string), onFileSelect func(string), onShellCmd func(string) string)
@@ -60,6 +61,7 @@ type App interface {
 
 	// Progress and Toasts
 	SetProgress(items []progress.Progress)
+	SetSidebarState(state buckleywidgets.SidebarState)
 	SetToasts(toasts []*toast.Toast)
 	SetToastDismissHandler(onDismiss func(string))
 
