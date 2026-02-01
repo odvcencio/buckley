@@ -153,6 +153,9 @@ func NewRunner(cfg RunnerConfig) (*Runner, error) {
 		_, ok := w.(scroll.Controller)
 		return ok
 	})
+	whenSidebarFocused := keybind.WhenFocusedWidget(func(w runtime.Widget) bool {
+		return r.sidebar != nil && widgetInTree(r.sidebar, w)
+	})
 
 	// Create keymap with Buckley-specific bindings
 	// Note: Standard commands (quit, scroll, clipboard) are registered automatically
@@ -182,6 +185,13 @@ func NewRunner(cfg RunnerConfig) (*Runner, error) {
 			{Key: keybind.MustParseKeySequence("alt+left"), Command: "buckley.prev-session"},
 			{Key: keybind.MustParseKeySequence("ctrl+f"), Command: "buckley.search"},
 			{Key: keybind.MustParseKeySequence("ctrl+i"), Command: "buckley.focus-input"},
+			// Sidebar section toggles (when sidebar tabs focused)
+			{Key: keybind.MustParseKeySequence("1"), Command: "buckley.sidebar.toggle-task", When: whenSidebarFocused},
+			{Key: keybind.MustParseKeySequence("2"), Command: "buckley.sidebar.toggle-plan", When: whenSidebarFocused},
+			{Key: keybind.MustParseKeySequence("3"), Command: "buckley.sidebar.toggle-tools", When: whenSidebarFocused},
+			{Key: keybind.MustParseKeySequence("4"), Command: "buckley.sidebar.toggle-context", When: whenSidebarFocused},
+			{Key: keybind.MustParseKeySequence("5"), Command: "buckley.sidebar.toggle-touches", When: whenSidebarFocused},
+			{Key: keybind.MustParseKeySequence("6"), Command: "buckley.sidebar.toggle-files", When: whenSidebarFocused},
 			// Chord sequences (leader: ctrl+g)
 			{Key: keybind.MustParseKeySequence("ctrl+g g"), Command: "buckley.scroll-top"},
 			{Key: keybind.MustParseKeySequence("ctrl+g b"), Command: "buckley.scroll-bottom"},
@@ -347,10 +357,19 @@ func (r *Runner) buildWidgets(cfg RunnerConfig, styleCache *StyleCache) {
 	r.sidebar = buckleywidgets.NewSidebarWithBindings(
 		buckleywidgets.DefaultSidebarConfig(),
 		buckleywidgets.SidebarBindings{
-			State:         r.state.SidebarState,
-			ContextUsed:   r.state.ContextUsed,
-			ContextBudget: r.state.ContextBudget,
-			ContextWindow: r.state.ContextWindow,
+			State:           r.state.SidebarState,
+			ContextUsed:     r.state.ContextUsed,
+			ContextBudget:   r.state.ContextBudget,
+			ContextWindow:   r.state.ContextWindow,
+			ShowCurrentTask: r.state.SidebarShowCurrentTask,
+			ShowPlan:        r.state.SidebarShowPlan,
+			ShowTools:       r.state.SidebarShowTools,
+			ShowContext:     r.state.SidebarShowContext,
+			ShowTouches:     r.state.SidebarShowTouches,
+			ShowRecentFiles: r.state.SidebarShowRecentFiles,
+			ShowExperiment:  r.state.SidebarShowExperiment,
+			ShowRLM:         r.state.SidebarShowRLM,
+			ShowCircuit:     r.state.SidebarShowCircuit,
 		},
 	)
 	r.sidebar.SetStyles(
@@ -473,7 +492,11 @@ func (r *Runner) handleSubmit(text string, mode buckleywidgets.InputMode) {
 		if r.onShellCmd != nil {
 			result := r.onShellCmd(text)
 			if result != "" {
-				r.chatView.AddMessage(result, "system")
+				if r.chatService != nil {
+					r.chatService.AddMessage(result, "system")
+				} else if r.chatView != nil {
+					r.chatView.AddMessage(result, "system")
+				}
 			}
 		}
 	default:
@@ -534,6 +557,66 @@ func (r *Runner) registerKeyBindings(registry *keybind.CommandRegistry) {
 		Title: "Focus Input",
 		Handler: func(ctx keybind.Context) {
 			r.ensureInputFocus()
+		},
+	})
+
+	registry.Register(keybind.Command{
+		ID:    "buckley.sidebar.toggle-task",
+		Title: "Toggle Current Task",
+		Handler: func(ctx keybind.Context) {
+			if r.sidebarService != nil {
+				r.sidebarService.ToggleCurrentTask()
+			}
+		},
+	})
+
+	registry.Register(keybind.Command{
+		ID:    "buckley.sidebar.toggle-plan",
+		Title: "Toggle Plan",
+		Handler: func(ctx keybind.Context) {
+			if r.sidebarService != nil {
+				r.sidebarService.TogglePlan()
+			}
+		},
+	})
+
+	registry.Register(keybind.Command{
+		ID:    "buckley.sidebar.toggle-tools",
+		Title: "Toggle Tools",
+		Handler: func(ctx keybind.Context) {
+			if r.sidebarService != nil {
+				r.sidebarService.ToggleTools()
+			}
+		},
+	})
+
+	registry.Register(keybind.Command{
+		ID:    "buckley.sidebar.toggle-context",
+		Title: "Toggle Context",
+		Handler: func(ctx keybind.Context) {
+			if r.sidebarService != nil {
+				r.sidebarService.ToggleContext()
+			}
+		},
+	})
+
+	registry.Register(keybind.Command{
+		ID:    "buckley.sidebar.toggle-touches",
+		Title: "Toggle Touches",
+		Handler: func(ctx keybind.Context) {
+			if r.sidebarService != nil {
+				r.sidebarService.ToggleTouches()
+			}
+		},
+	})
+
+	registry.Register(keybind.Command{
+		ID:    "buckley.sidebar.toggle-files",
+		Title: "Toggle Recent Files",
+		Handler: func(ctx keybind.Context) {
+			if r.sidebarService != nil {
+				r.sidebarService.ToggleRecentFiles()
+			}
 		},
 	})
 

@@ -1595,6 +1595,7 @@ func (c *ChatView) syncListOffset() {
 		top = 0
 	}
 	c.list.ScrollToOffset(top)
+	c.notifyScroll()
 }
 
 // ReasoningContains reports whether a screen point falls within the reasoning panel.

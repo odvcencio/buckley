@@ -248,6 +248,23 @@ func findFocusableInPath(root, target runtime.Widget) (runtime.Focusable, bool) 
 	return nil, false
 }
 
+func widgetInTree(root, target runtime.Widget) bool {
+	if root == nil || target == nil {
+		return false
+	}
+	if root == target {
+		return true
+	}
+	if container, ok := root.(runtime.ChildProvider); ok {
+		for _, child := range container.ChildWidgets() {
+			if widgetInTree(child, target) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func scrollStatusText(top, total, viewHeight int) string {
 	if total <= 0 || viewHeight <= 0 {
 		return ""

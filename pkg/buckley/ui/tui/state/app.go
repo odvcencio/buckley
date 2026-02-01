@@ -41,8 +41,17 @@ type AppState struct {
 	InputMode *state.Signal[buckleywidgets.InputMode]
 
 	// Sidebar
-	SidebarState *state.Signal[buckleywidgets.SidebarState]
-	SidebarVisible *state.Signal[bool]
+	SidebarState           *state.Signal[buckleywidgets.SidebarState]
+	SidebarVisible         *state.Signal[bool]
+	SidebarShowCurrentTask *state.Signal[bool]
+	SidebarShowPlan        *state.Signal[bool]
+	SidebarShowTools       *state.Signal[bool]
+	SidebarShowContext     *state.Signal[bool]
+	SidebarShowTouches     *state.Signal[bool]
+	SidebarShowRecentFiles *state.Signal[bool]
+	SidebarShowExperiment  *state.Signal[bool]
+	SidebarShowRLM         *state.Signal[bool]
+	SidebarShowCircuit     *state.Signal[bool]
 
 	// Header
 	ModelName *state.Signal[string]
@@ -52,28 +61,37 @@ type AppState struct {
 // NewAppState creates a new application state with defaults.
 func NewAppState() *AppState {
 	return &AppState{
-		StatusText:       state.NewSignal("Ready"),
-		StatusOverride:   state.NewSignal(""),
-		StatusMode:       state.NewSignal(""),
-		StatusTokens:     state.NewSignal(0),
-		StatusCost:       state.NewSignal(0.0),
-		ContextUsed:      state.NewSignal(0),
-		ContextBudget:    state.NewSignal(0),
-		ContextWindow:    state.NewSignal(0),
-		ScrollPos:        state.NewSignal(""),
-		ProgressItems:    state.NewSignal([]progress.Progress{}),
-		Toasts:           state.NewSignal([]*toast.Toast{}),
-		IsStreaming:      state.NewSignal(false),
-		ChatMessages:     state.NewSignal([]buckleywidgets.ChatMessage{}),
-		ChatThinking:     state.NewSignal(false),
-		ReasoningText:    state.NewSignal(""),
-		ReasoningPreview: state.NewSignal(""),
-		ReasoningVisible: state.NewSignal(false),
-		InputText:        state.NewSignal(""),
-		InputMode:        state.NewSignal(buckleywidgets.ModeNormal),
-		SidebarState:     state.NewSignal(buckleywidgets.SidebarState{}),
-		SidebarVisible:  state.NewSignal(true),
-		ModelName:        state.NewSignal(""),
-		SessionID:        state.NewSignal(""),
+		StatusText:             state.NewSignal("Ready"),
+		StatusOverride:         state.NewSignal(""),
+		StatusMode:             state.NewSignal(""),
+		StatusTokens:           state.NewSignal(0),
+		StatusCost:             state.NewSignal(0.0),
+		ContextUsed:            state.NewSignal(0),
+		ContextBudget:          state.NewSignal(0),
+		ContextWindow:          state.NewSignal(0),
+		ScrollPos:              state.NewSignal(""),
+		ProgressItems:          state.NewSignal([]progress.Progress{}),
+		Toasts:                 state.NewSignal([]*toast.Toast{}),
+		IsStreaming:            state.NewSignal(false),
+		ChatMessages:           state.NewSignal([]buckleywidgets.ChatMessage{}),
+		ChatThinking:           state.NewSignal(false),
+		ReasoningText:          state.NewSignal(""),
+		ReasoningPreview:       state.NewSignal(""),
+		ReasoningVisible:       state.NewSignal(false),
+		InputText:              state.NewSignal(""),
+		InputMode:              state.NewSignal(buckleywidgets.ModeNormal),
+		SidebarState:           state.NewSignal(buckleywidgets.SidebarState{}),
+		SidebarVisible:         state.NewSignal(true),
+		SidebarShowCurrentTask: state.NewSignal(true),
+		SidebarShowPlan:        state.NewSignal(true),
+		SidebarShowTools:       state.NewSignal(true),
+		SidebarShowContext:     state.NewSignal(true),
+		SidebarShowTouches:     state.NewSignal(true),
+		SidebarShowRecentFiles: state.NewSignal(true),
+		SidebarShowExperiment:  state.NewSignal(true),
+		SidebarShowRLM:         state.NewSignal(true),
+		SidebarShowCircuit:     state.NewSignal(true),
+		ModelName:              state.NewSignal(""),
+		SessionID:              state.NewSignal(""),
 	}
 }

@@ -5,6 +5,7 @@ import (
 
 	"github.com/odvcencio/fluffyui/backend"
 	"github.com/odvcencio/fluffyui/runtime"
+	"github.com/odvcencio/fluffyui/state"
 	"github.com/odvcencio/fluffyui/terminal"
 )
 
@@ -156,62 +157,91 @@ func TestSidebar_Measure(t *testing.T) {
 	}
 }
 
-func TestSidebar_HandleMessage_SectionToggles(t *testing.T) {
+func TestSidebar_ToggleSections(t *testing.T) {
 	s := NewSidebar()
-	s.Focus()
 
-	// Toggle current task with '1'
-	result := s.HandleMessage(runtime.KeyMsg{Key: terminal.KeyRune, Rune: '1'})
-	if !result.Handled {
-		t.Error("'1' should be handled")
-	}
+	// Toggle current task
+	s.ToggleCurrentTask()
 	if s.showCurrentTask {
-		t.Error("showCurrentTask should be false after '1'")
+		t.Error("showCurrentTask should be false after toggle")
 	}
 
-	// Toggle plan with '2'
-	result = s.HandleMessage(runtime.KeyMsg{Key: terminal.KeyRune, Rune: '2'})
-	if !result.Handled {
-		t.Error("'2' should be handled")
-	}
+	// Toggle plan
+	s.TogglePlan()
 	if s.showPlan {
-		t.Error("showPlan should be false after '2'")
+		t.Error("showPlan should be false after toggle")
 	}
 
-	// Toggle tools with '3'
-	result = s.HandleMessage(runtime.KeyMsg{Key: terminal.KeyRune, Rune: '3'})
-	if !result.Handled {
-		t.Error("'3' should be handled")
-	}
+	// Toggle tools
+	s.ToggleTools()
 	if s.showTools {
-		t.Error("showTools should be false after '3'")
+		t.Error("showTools should be false after toggle")
 	}
 
-	// Toggle context with '4'
-	result = s.HandleMessage(runtime.KeyMsg{Key: terminal.KeyRune, Rune: '4'})
-	if !result.Handled {
-		t.Error("'4' should be handled")
-	}
+	// Toggle context
+	s.ToggleContext()
 	if s.showContext {
-		t.Error("showContext should be false after '4'")
+		t.Error("showContext should be false after toggle")
 	}
 
-	// Toggle touches with '5'
-	result = s.HandleMessage(runtime.KeyMsg{Key: terminal.KeyRune, Rune: '5'})
-	if !result.Handled {
-		t.Error("'5' should be handled")
-	}
+	// Toggle touches
+	s.ToggleTouches()
 	if s.showTouches {
-		t.Error("showTouches should be false after '5'")
+		t.Error("showTouches should be false after toggle")
 	}
 
-	// Toggle recent files with '6'
-	result = s.HandleMessage(runtime.KeyMsg{Key: terminal.KeyRune, Rune: '6'})
-	if !result.Handled {
-		t.Error("'6' should be handled")
-	}
+	// Toggle recent files
+	s.ToggleRecentFiles()
 	if s.showRecentFiles {
-		t.Error("showRecentFiles should be false after '6'")
+		t.Error("showRecentFiles should be false after toggle")
+	}
+}
+
+func TestSidebar_VisibilitySignals(t *testing.T) {
+	showTask := state.NewSignal(false)
+	showPlan := state.NewSignal(true)
+	showTools := state.NewSignal(true)
+	showContext := state.NewSignal(true)
+	showTouches := state.NewSignal(true)
+	showRecent := state.NewSignal(true)
+	showExperiment := state.NewSignal(true)
+	showRLM := state.NewSignal(true)
+	showCircuit := state.NewSignal(true)
+
+	s := NewSidebarWithBindings(DefaultSidebarConfig(), SidebarBindings{
+		ShowCurrentTask: showTask,
+		ShowPlan:        showPlan,
+		ShowTools:       showTools,
+		ShowContext:     showContext,
+		ShowTouches:     showTouches,
+		ShowRecentFiles: showRecent,
+		ShowExperiment:  showExperiment,
+		ShowRLM:         showRLM,
+		ShowCircuit:     showCircuit,
+	})
+
+	if s.showCurrentTask {
+		t.Error("showCurrentTask should follow signal false")
+	}
+
+	showPlan.Set(false)
+	if s.showPlan {
+		t.Error("showPlan should follow signal false")
+	}
+
+	showTouches.Set(false)
+	if s.showTouches {
+		t.Error("showTouches should follow signal false")
+	}
+
+	showRecent.Set(false)
+	if s.showRecentFiles {
+		t.Error("showRecentFiles should follow signal false")
+	}
+
+	showCircuit.Set(false)
+	if s.showCircuit {
+		t.Error("showCircuit should follow signal false")
 	}
 }
 

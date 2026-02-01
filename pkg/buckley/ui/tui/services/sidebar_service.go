@@ -23,6 +23,66 @@ func (svc *SidebarService) SetSidebarState(snapshot buckleywidgets.SidebarState)
 	svc.state.SidebarState.Set(cloneSidebarState(snapshot))
 }
 
+// ToggleCurrentTask toggles the current task section visibility.
+func (svc *SidebarService) ToggleCurrentTask() {
+	if svc == nil || svc.state == nil {
+		return
+	}
+	toggleBool(svc.state.SidebarShowCurrentTask)
+}
+
+// TogglePlan toggles the plan section visibility.
+func (svc *SidebarService) TogglePlan() {
+	if svc == nil || svc.state == nil {
+		return
+	}
+	toggleBool(svc.state.SidebarShowPlan)
+}
+
+// ToggleTools toggles the tools section visibility.
+func (svc *SidebarService) ToggleTools() {
+	if svc == nil || svc.state == nil {
+		return
+	}
+	toggleBool(svc.state.SidebarShowTools)
+}
+
+// ToggleContext toggles the context section visibility.
+func (svc *SidebarService) ToggleContext() {
+	if svc == nil || svc.state == nil {
+		return
+	}
+	toggleBool(svc.state.SidebarShowContext)
+}
+
+// ToggleTouches toggles the touches section visibility.
+func (svc *SidebarService) ToggleTouches() {
+	if svc == nil || svc.state == nil {
+		return
+	}
+	toggleBool(svc.state.SidebarShowTouches)
+}
+
+// ToggleRecentFiles toggles the recent files section visibility.
+func (svc *SidebarService) ToggleRecentFiles() {
+	if svc == nil || svc.state == nil {
+		return
+	}
+	toggleBool(svc.state.SidebarShowRecentFiles)
+}
+
+type boolSignal interface {
+	Get() bool
+	Set(bool) bool
+}
+
+func toggleBool(sig boolSignal) {
+	if sig == nil {
+		return
+	}
+	sig.Set(!sig.Get())
+}
+
 func cloneSidebarState(src buckleywidgets.SidebarState) buckleywidgets.SidebarState {
 	dst := buckleywidgets.SidebarState{
 		CurrentTask:      src.CurrentTask,

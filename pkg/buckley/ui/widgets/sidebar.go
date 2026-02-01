@@ -123,10 +123,19 @@ type SidebarState struct {
 
 // SidebarBindings connects reactive state to the sidebar.
 type SidebarBindings struct {
-	State         state.Readable[SidebarState]
-	ContextUsed   state.Readable[int]
-	ContextBudget state.Readable[int]
-	ContextWindow state.Readable[int]
+	State           state.Readable[SidebarState]
+	ContextUsed     state.Readable[int]
+	ContextBudget   state.Readable[int]
+	ContextWindow   state.Readable[int]
+	ShowCurrentTask state.Readable[bool]
+	ShowPlan        state.Readable[bool]
+	ShowTools       state.Readable[bool]
+	ShowContext     state.Readable[bool]
+	ShowTouches     state.Readable[bool]
+	ShowRecentFiles state.Readable[bool]
+	ShowExperiment  state.Readable[bool]
+	ShowRLM         state.Readable[bool]
+	ShowCircuit     state.Readable[bool]
 }
 
 // DefaultSidebarConfig returns sensible defaults.
@@ -147,10 +156,19 @@ type Sidebar struct {
 	services runtime.Services
 	subs     state.Subscriptions
 
-	stateSig         state.Readable[SidebarState]
-	contextUsedSig   state.Readable[int]
-	contextBudgetSig state.Readable[int]
-	contextWindowSig state.Readable[int]
+	stateSig           state.Readable[SidebarState]
+	contextUsedSig     state.Readable[int]
+	contextBudgetSig   state.Readable[int]
+	contextWindowSig   state.Readable[int]
+	showCurrentTaskSig state.Readable[bool]
+	showPlanSig        state.Readable[bool]
+	showToolsSig       state.Readable[bool]
+	showContextSig     state.Readable[bool]
+	showTouchesSig     state.Readable[bool]
+	showRecentFilesSig state.Readable[bool]
+	showExperimentSig  state.Readable[bool]
+	showRLMSig         state.Readable[bool]
+	showCircuitSig     state.Readable[bool]
 
 	currentTask     string
 	taskProgress    int
@@ -197,10 +215,10 @@ type Sidebar struct {
 	statusContent *runtime.Flex
 	filesContent  *runtime.Flex
 
-	taskPanel    *taskPanel
-	planPanel    *planPanel
-	toolsPanel   *toolsPanel
-	contextPanel *contextPanel
+	taskPanel       *taskPanel
+	planPanel       *planPanel
+	toolsPanel      *toolsPanel
+	contextPanel    *contextPanel
 	experimentPanel *experimentPanel
 	rlmPanel        *rlmPanel
 	circuitPanel    *circuitPanel
@@ -280,6 +298,15 @@ func NewSidebarWithBindings(cfg SidebarConfig, bindings SidebarBindings) *Sideba
 	s.contextUsedSig = bindings.ContextUsed
 	s.contextBudgetSig = bindings.ContextBudget
 	s.contextWindowSig = bindings.ContextWindow
+	s.showCurrentTaskSig = bindings.ShowCurrentTask
+	s.showPlanSig = bindings.ShowPlan
+	s.showToolsSig = bindings.ShowTools
+	s.showContextSig = bindings.ShowContext
+	s.showTouchesSig = bindings.ShowTouches
+	s.showRecentFilesSig = bindings.ShowRecentFiles
+	s.showExperimentSig = bindings.ShowExperiment
+	s.showRLMSig = bindings.ShowRLM
+	s.showCircuitSig = bindings.ShowCircuit
 
 	s.initWidgets()
 	s.updateAllPanels()
@@ -320,8 +347,36 @@ func (s *Sidebar) subscribe() {
 	if s.contextWindowSig != nil {
 		s.subs.Observe(s.contextWindowSig, s.onContextChanged)
 	}
+	if s.showCurrentTaskSig != nil {
+		s.subs.Observe(s.showCurrentTaskSig, s.onVisibilityChanged)
+	}
+	if s.showPlanSig != nil {
+		s.subs.Observe(s.showPlanSig, s.onVisibilityChanged)
+	}
+	if s.showToolsSig != nil {
+		s.subs.Observe(s.showToolsSig, s.onVisibilityChanged)
+	}
+	if s.showContextSig != nil {
+		s.subs.Observe(s.showContextSig, s.onVisibilityChanged)
+	}
+	if s.showTouchesSig != nil {
+		s.subs.Observe(s.showTouchesSig, s.onVisibilityChanged)
+	}
+	if s.showRecentFilesSig != nil {
+		s.subs.Observe(s.showRecentFilesSig, s.onVisibilityChanged)
+	}
+	if s.showExperimentSig != nil {
+		s.subs.Observe(s.showExperimentSig, s.onVisibilityChanged)
+	}
+	if s.showRLMSig != nil {
+		s.subs.Observe(s.showRLMSig, s.onVisibilityChanged)
+	}
+	if s.showCircuitSig != nil {
+		s.subs.Observe(s.showCircuitSig, s.onVisibilityChanged)
+	}
 	s.onStateChanged()
 	s.onContextChanged()
+	s.onVisibilityChanged()
 }
 
 func (s *Sidebar) onStateChanged() {
@@ -338,6 +393,19 @@ func (s *Sidebar) onContextChanged() {
 	}
 	s.applyContext()
 	s.requestInvalidate()
+}
+
+func (s *Sidebar) onVisibilityChanged() {
+	statusChanged, filesChanged := s.applyVisibility()
+	if statusChanged {
+		s.rebuildStatus()
+	}
+	if filesChanged {
+		s.rebuildFiles()
+	}
+	if statusChanged || filesChanged {
+		s.requestRelayout()
+	}
 }
 
 func (s *Sidebar) applyState(state SidebarState) {
@@ -366,6 +434,46 @@ func (s *Sidebar) applyContext() {
 		window = s.contextWindowSig.Get()
 	}
 	s.SetContextUsage(used, budget, window)
+}
+
+func (s *Sidebar) applyVisibility() (bool, bool) {
+	statusChanged := s.applyVisibilityFlag(s.showCurrentTaskSig, &s.showCurrentTask)
+	if s.applyVisibilityFlag(s.showPlanSig, &s.showPlan) {
+		statusChanged = true
+	}
+	if s.applyVisibilityFlag(s.showToolsSig, &s.showTools) {
+		statusChanged = true
+	}
+	if s.applyVisibilityFlag(s.showContextSig, &s.showContext) {
+		statusChanged = true
+	}
+	if s.applyVisibilityFlag(s.showExperimentSig, &s.showExperiment) {
+		statusChanged = true
+	}
+	if s.applyVisibilityFlag(s.showRLMSig, &s.showRLM) {
+		statusChanged = true
+	}
+	if s.applyVisibilityFlag(s.showCircuitSig, &s.showCircuit) {
+		statusChanged = true
+	}
+
+	filesChanged := s.applyVisibilityFlag(s.showRecentFilesSig, &s.showRecentFiles)
+	if s.applyVisibilityFlag(s.showTouchesSig, &s.showTouches) {
+		filesChanged = true
+	}
+	return statusChanged, filesChanged
+}
+
+func (s *Sidebar) applyVisibilityFlag(sig state.Readable[bool], target *bool) bool {
+	if sig == nil || target == nil {
+		return false
+	}
+	next := sig.Get()
+	if *target == next {
+		return false
+	}
+	*target = next
+	return true
 }
 
 func (s *Sidebar) requestInvalidate() {
@@ -598,10 +706,29 @@ func (s *Sidebar) SetCurrentTask(name string, progress int) {
 	s.updateTaskPanel()
 }
 
+func (s *Sidebar) setVisibility(sig state.Readable[bool], target *bool, show bool, rebuild func()) {
+	if s == nil {
+		return
+	}
+	if sig != nil {
+		if writable, ok := sig.(state.Writable[bool]); ok && writable != nil {
+			writable.Set(show)
+		}
+		return
+	}
+	if target == nil || *target == show {
+		return
+	}
+	*target = show
+	if rebuild != nil {
+		rebuild()
+		s.requestRelayout()
+	}
+}
+
 // SetShowCurrentTask controls visibility of current task section.
 func (s *Sidebar) SetShowCurrentTask(show bool) {
-	s.showCurrentTask = show
-	s.rebuildStatus()
+	s.setVisibility(s.showCurrentTaskSig, &s.showCurrentTask, show, s.rebuildStatus)
 }
 
 // ToggleCurrentTask toggles the current task section visibility.
@@ -617,8 +744,7 @@ func (s *Sidebar) SetPlanTasks(tasks []PlanTask) {
 
 // SetShowPlan controls visibility of plan section.
 func (s *Sidebar) SetShowPlan(show bool) {
-	s.showPlan = show
-	s.rebuildStatus()
+	s.setVisibility(s.showPlanSig, &s.showPlan, show, s.rebuildStatus)
 }
 
 // TogglePlan toggles the plan section visibility.
@@ -640,8 +766,7 @@ func (s *Sidebar) SetToolHistory(history []ToolHistoryEntry) {
 
 // SetShowTools controls visibility of tools section.
 func (s *Sidebar) SetShowTools(show bool) {
-	s.showTools = show
-	s.rebuildStatus()
+	s.setVisibility(s.showToolsSig, &s.showTools, show, s.rebuildStatus)
 }
 
 // ToggleTools toggles the tools section visibility.
@@ -654,9 +779,6 @@ func (s *Sidebar) SetContextUsage(used, budget, window int) {
 	s.contextUsed = used
 	s.contextBudget = budget
 	s.contextWindow = window
-	if used > 0 || budget > 0 || window > 0 {
-		s.showContext = true
-	}
 	if budget > 0 || window > 0 {
 		ratio := s.contextRatio()
 		if ratio < 0 {
@@ -675,8 +797,7 @@ func (s *Sidebar) SetContextUsage(used, budget, window int) {
 
 // SetShowContext controls visibility of context section.
 func (s *Sidebar) SetShowContext(show bool) {
-	s.showContext = show
-	s.rebuildStatus()
+	s.setVisibility(s.showContextSig, &s.showContext, show, s.rebuildStatus)
 }
 
 // ToggleContext toggles the context section visibility.
@@ -692,8 +813,7 @@ func (s *Sidebar) SetActiveTouches(touches []TouchSummary) {
 
 // SetShowTouches controls visibility of touches section.
 func (s *Sidebar) SetShowTouches(show bool) {
-	s.showTouches = show
-	s.rebuildFiles()
+	s.setVisibility(s.showTouchesSig, &s.showTouches, show, s.rebuildFiles)
 }
 
 // ToggleTouches toggles the touches section visibility.
@@ -709,8 +829,7 @@ func (s *Sidebar) SetRecentFiles(files []string) {
 
 // SetShowRecentFiles controls visibility of recent files section.
 func (s *Sidebar) SetShowRecentFiles(show bool) {
-	s.showRecentFiles = show
-	s.rebuildFiles()
+	s.setVisibility(s.showRecentFilesSig, &s.showRecentFiles, show, s.rebuildFiles)
 }
 
 // SetExperiment updates the experiment summary.
@@ -718,9 +837,6 @@ func (s *Sidebar) SetExperiment(name, status string, variants []ExperimentVarian
 	s.experimentName = name
 	s.experimentStatus = status
 	s.experimentVariants = variants
-	if strings.TrimSpace(name) != "" || len(variants) > 0 {
-		s.showExperiment = true
-	}
 	s.updateExperimentPanel()
 }
 
@@ -732,37 +848,28 @@ func (s *Sidebar) SetRLMStatus(status *RLMStatus, scratchpad []RLMScratchpadEntr
 	} else {
 		s.rlmScratchpad = append([]RLMScratchpadEntry{}, scratchpad...)
 	}
-	if status != nil || len(scratchpad) > 0 {
-		s.showRLM = true
-	}
 	s.updateRLMPanel()
 }
 
 // SetCircuitStatus updates the circuit breaker status display.
 func (s *Sidebar) SetCircuitStatus(status *CircuitStatus) {
 	s.circuitStatus = status
-	if status != nil && status.State != "Closed" {
-		s.showCircuit = true
-	}
 	s.updateCircuitPanel()
 }
 
 // SetShowCircuit controls visibility of circuit breaker section.
 func (s *Sidebar) SetShowCircuit(show bool) {
-	s.showCircuit = show
-	s.rebuildStatus()
+	s.setVisibility(s.showCircuitSig, &s.showCircuit, show, s.rebuildStatus)
 }
 
 // SetShowRLM controls visibility of the RLM section.
 func (s *Sidebar) SetShowRLM(show bool) {
-	s.showRLM = show
-	s.rebuildStatus()
+	s.setVisibility(s.showRLMSig, &s.showRLM, show, s.rebuildStatus)
 }
 
 // SetShowExperiment controls visibility of experiments section.
 func (s *Sidebar) SetShowExperiment(show bool) {
-	s.showExperiment = show
-	s.rebuildStatus()
+	s.setVisibility(s.showExperimentSig, &s.showExperiment, show, s.rebuildStatus)
 }
 
 // SetSpinnerFrame updates the spinner animation frame.
@@ -778,8 +885,7 @@ func (s *Sidebar) SetSpinnerFrame(frame int) {
 
 // ToggleRecentFiles toggles the recent files section.
 func (s *Sidebar) ToggleRecentFiles() {
-	s.showRecentFiles = !s.showRecentFiles
-	s.rebuildFiles()
+	s.SetShowRecentFiles(!s.showRecentFiles)
 }
 
 // Measure returns the preferred size.
