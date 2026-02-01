@@ -20,9 +20,10 @@ import (
 
 // ChatView displays the conversation history with scrolling.
 type ChatView struct {
-	uiwidgets.Base
+	uiwidgets.FocusableBase
 	buffer *scrollback.Buffer
 	list   *uiwidgets.VirtualList[scrollback.VisibleLine]
+	listView runtime.Widget
 
 	layout     *runtime.Flex
 	listBounds runtime.Rect
@@ -91,6 +92,46 @@ type ChatView struct {
 
 type chatListAdapter struct {
 	chat *ChatView
+}
+
+type passiveVirtualList struct {
+	list *uiwidgets.VirtualList[scrollback.VisibleLine]
+}
+
+func newPassiveVirtualList(list *uiwidgets.VirtualList[scrollback.VisibleLine]) *passiveVirtualList {
+	return &passiveVirtualList{list: list}
+}
+
+func (p *passiveVirtualList) Measure(constraints runtime.Constraints) runtime.Size {
+	if p == nil || p.list == nil {
+		return runtime.Size{}
+	}
+	return p.list.Measure(constraints)
+}
+
+func (p *passiveVirtualList) Layout(bounds runtime.Rect) {
+	if p == nil || p.list == nil {
+		return
+	}
+	p.list.Layout(bounds)
+}
+
+func (p *passiveVirtualList) Render(ctx runtime.RenderContext) {
+	if p == nil || p.list == nil {
+		return
+	}
+	p.list.Render(ctx)
+}
+
+func (p *passiveVirtualList) HandleMessage(msg runtime.Message) runtime.HandleResult {
+	return runtime.Unhandled()
+}
+
+func (p *passiveVirtualList) Bounds() runtime.Rect {
+	if p == nil || p.list == nil {
+		return runtime.Rect{}
+	}
+	return p.list.Bounds()
 }
 
 func (a chatListAdapter) Count() int {
@@ -194,6 +235,7 @@ func NewChatViewWithConfig(cfg ChatViewConfig) *ChatView {
 	chat.list.SetItemHeight(1)
 	chat.list.SetOverscan(4)
 	chat.list.SetLabel("Chat messages")
+	chat.listView = newPassiveVirtualList(chat.list)
 
 	chat.reasoningText = NewTextBlock("")
 	chat.reasoningSection = uiwidgets.NewAccordionSection("Reasoning", chat.reasoningText, uiwidgets.WithSectionExpanded(false))
@@ -1193,7 +1235,7 @@ func (c *ChatView) Measure(constraints runtime.Constraints) runtime.Size {
 
 // Layout updates the scrollback buffer size.
 func (c *ChatView) Layout(bounds runtime.Rect) {
-	c.Base.Layout(bounds)
+	c.FocusableBase.Layout(bounds)
 	content := bounds
 	if content.Width > 0 {
 		content.Width -= 1
@@ -1408,40 +1450,59 @@ func (c *ChatView) renderScrollbar(ctx runtime.RenderContext) {
 func (c *ChatView) HandleMessage(msg runtime.Message) runtime.HandleResult {
 	switch m := msg.(type) {
 	case runtime.KeyMsg:
+		if c.IsFocused() {
+			switch m.Key {
+			case terminal.KeyUp:
+				c.ScrollUp(1)
+				return runtime.Handled()
+			case terminal.KeyDown:
+				c.ScrollDown(1)
+				return runtime.Handled()
+			case terminal.KeyPageUp:
+				c.PageUp()
+				return runtime.Handled()
+			case terminal.KeyPageDown:
+				c.PageDown()
+				return runtime.Handled()
+			}
+		}
 		if c.layout != nil {
 			if result := c.layout.HandleMessage(msg); result.Handled {
 				return result
 			}
-		}
-		switch m.Key {
-		case terminal.KeyUp:
-			c.ScrollUp(1)
-			return runtime.Handled()
-		case terminal.KeyDown:
-			c.ScrollDown(1)
-			return runtime.Handled()
-		case terminal.KeyPageUp:
-			c.PageUp()
-			return runtime.Handled()
-		case terminal.KeyPageDown:
-			c.PageDown()
-			return runtime.Handled()
 		}
 	case runtime.MouseMsg:
+		if result := c.handleMouse(m); result.Handled {
+			return result
+		}
 		if c.layout != nil {
 			if result := c.layout.HandleMessage(msg); result.Handled {
 				return result
 			}
 		}
-		return c.handleMouse(m)
+	default:
+		if c.layout != nil {
+			if result := c.layout.HandleMessage(msg); result.Handled {
+				return result
+			}
+		}
 	}
 
 	return runtime.Unhandled()
 }
 
 func (c *ChatView) handleMouse(m runtime.MouseMsg) runtime.HandleResult {
+	switch m.Button {
+	case runtime.MouseWheelUp:
+		c.ScrollUp(3)
+		return runtime.Handled()
+	case runtime.MouseWheelDown:
+		c.ScrollDown(3)
+		return runtime.Handled()
+	}
+
 	// Handle hover (mouse move without button)
-	if m.Button != runtime.MouseNone || m.Action != runtime.MouseRelease {
+	if m.Button != runtime.MouseNone || (m.Action != runtime.MouseRelease && m.Action != runtime.MouseMove) {
 		return runtime.Unhandled()
 	}
 	lineIndex, _, ok := c.PositionForPoint(m.X, m.Y)
@@ -1509,8 +1570,8 @@ func (c *ChatView) rebuildLayout() {
 	if c.reasoningVisible && c.reasoningPanel != nil {
 		children = append(children, runtime.Fixed(c.reasoningPanel))
 	}
-	if c.list != nil {
-		children = append(children, runtime.Expanded(c.list))
+	if c.listView != nil {
+		children = append(children, runtime.Expanded(c.listView))
 	}
 	c.layout = runtime.VBox(children...)
 }
@@ -1636,6 +1697,7 @@ func (c *ChatView) ScrollToEnd() {
 var _ clipboard.Target = (*ChatView)(nil)
 var _ scroll.Controller = (*ChatView)(nil)
 var _ accessibility.Accessible = (*ChatView)(nil)
+var _ runtime.Focusable = (*ChatView)(nil)
 var _ runtime.ChildProvider = (*ChatView)(nil)
 var _ runtime.Bindable = (*ChatView)(nil)
 var _ runtime.Unbindable = (*ChatView)(nil)

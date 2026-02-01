@@ -158,6 +158,7 @@ func TestSidebar_Measure(t *testing.T) {
 
 func TestSidebar_HandleMessage_SectionToggles(t *testing.T) {
 	s := NewSidebar()
+	s.Focus()
 
 	// Toggle current task with '1'
 	result := s.HandleMessage(runtime.KeyMsg{Key: terminal.KeyRune, Rune: '1'})
@@ -271,17 +272,17 @@ func TestSidebar_UpdatePlanTableRows(t *testing.T) {
 		{Name: "Beta", Status: TaskInProgress},
 	})
 
-	if s.planTable == nil {
+	if s.planPanel == nil || s.planPanel.table == nil {
 		t.Fatal("expected plan table to be initialized")
 	}
-	if len(s.planTable.Rows) != 2 {
-		t.Fatalf("expected 2 plan rows, got %d", len(s.planTable.Rows))
+	if len(s.planPanel.table.Rows) != 2 {
+		t.Fatalf("expected 2 plan rows, got %d", len(s.planPanel.table.Rows))
 	}
-	if s.planTable.Rows[0][0] != "Alpha" {
-		t.Fatalf("expected first row Alpha, got %q", s.planTable.Rows[0][0])
+	if s.planPanel.table.Rows[0][0] != "Alpha" {
+		t.Fatalf("expected first row Alpha, got %q", s.planPanel.table.Rows[0][0])
 	}
-	if s.planTable.Rows[1][1] != "running" {
-		t.Fatalf("expected second row status running, got %q", s.planTable.Rows[1][1])
+	if s.planPanel.table.Rows[1][1] != "running" {
+		t.Fatalf("expected second row status running, got %q", s.planPanel.table.Rows[1][1])
 	}
 }
 
@@ -290,13 +291,13 @@ func TestSidebar_UpdateFilesTree(t *testing.T) {
 	s.SetProjectPath("/tmp/buckley")
 	s.SetRecentFiles([]string{"pkg/main.go", "pkg/ui/sidebar.go"})
 
-	if s.filesTree == nil || s.filesTree.Root == nil {
+	if s.filesPanel == nil || s.filesPanel.tree == nil || s.filesPanel.tree.Root == nil {
 		t.Fatal("expected files tree root")
 	}
-	if s.filesTree.Root.Label != "buckley" {
-		t.Fatalf("expected root label buckley, got %q", s.filesTree.Root.Label)
+	if s.filesPanel.tree.Root.Label != "buckley" {
+		t.Fatalf("expected root label buckley, got %q", s.filesPanel.tree.Root.Label)
 	}
-	if len(s.filesTree.Root.Children) == 0 {
+	if len(s.filesPanel.tree.Root.Children) == 0 {
 		t.Fatal("expected file nodes under root")
 	}
 }
@@ -307,14 +308,14 @@ func TestSidebar_UpdateTouchesTree(t *testing.T) {
 		{Path: "pkg/main.go", Operation: "write", Ranges: []TouchRange{{Start: 1, End: 3}}},
 	})
 
-	if s.touchesTree == nil || s.touchesTree.Root == nil {
+	if s.touchesPanel == nil || s.touchesPanel.tree == nil || s.touchesPanel.tree.Root == nil {
 		t.Fatal("expected touches tree root")
 	}
-	if len(s.touchesTree.Root.Children) == 0 {
+	if len(s.touchesPanel.tree.Root.Children) == 0 {
 		t.Fatal("expected touch children")
 	}
-	if s.touchesTree.Root.Children[0].Label != "pkg/main.go" {
-		t.Fatalf("expected touch label pkg/main.go, got %q", s.touchesTree.Root.Children[0].Label)
+	if s.touchesPanel.tree.Root.Children[0].Label != "pkg/main.go" {
+		t.Fatalf("expected touch label pkg/main.go, got %q", s.touchesPanel.tree.Root.Children[0].Label)
 	}
 }
 

@@ -42,6 +42,7 @@ type AppState struct {
 
 	// Sidebar
 	SidebarState *state.Signal[buckleywidgets.SidebarState]
+	SidebarVisible *state.Signal[bool]
 
 	// Header
 	ModelName *state.Signal[string]
@@ -71,6 +72,7 @@ func NewAppState() *AppState {
 		InputText:        state.NewSignal(""),
 		InputMode:        state.NewSignal(buckleywidgets.ModeNormal),
 		SidebarState:     state.NewSignal(buckleywidgets.SidebarState{}),
+		SidebarVisible:  state.NewSignal(true),
 		ModelName:        state.NewSignal(""),
 		SessionID:        state.NewSignal(""),
 	}

@@ -60,6 +60,28 @@ func TestNewRunner(t *testing.T) {
 	}
 }
 
+func TestRunnerToggleSidebar(t *testing.T) {
+	testBackend := newTestBackend(80, 24)
+	runner, err := NewRunner(RunnerConfig{Backend: testBackend})
+	if err != nil {
+		t.Fatalf("NewRunner failed: %v", err)
+	}
+
+	if !runner.state.SidebarVisible.Get() {
+		t.Fatal("expected sidebar to be visible by default")
+	}
+
+	runner.toggleSidebar()
+	if runner.state.SidebarVisible.Get() {
+		t.Error("expected sidebar to be hidden after toggle")
+	}
+
+	runner.toggleSidebar()
+	if !runner.state.SidebarVisible.Get() {
+		t.Error("expected sidebar to be visible after second toggle")
+	}
+}
+
 // TestRunnerSetStatus verifies SetStatus updates status state.
 func TestRunnerSetStatus(t *testing.T) {
 	testBackend := newTestBackend(80, 24)
@@ -366,18 +388,6 @@ func TestRunnerRunWithContext(t *testing.T) {
 	case <-time.After(500 * time.Millisecond):
 		t.Error("RunWithContext did not exit within timeout")
 	}
-}
-
-// TestRunnerPost verifies Post sends messages to the app.
-func TestRunnerPost(t *testing.T) {
-	testBackend := newTestBackend(80, 24)
-	runner, err := NewRunner(RunnerConfig{Backend: testBackend})
-	if err != nil {
-		t.Fatalf("NewRunner failed: %v", err)
-	}
-
-	// Post should not panic
-	runner.Post(RefreshMsg{})
 }
 
 // TestRunnerNilSafety verifies nil receiver methods don't panic.

@@ -21,6 +21,8 @@ import (
 	"github.com/odvcencio/fluffyui/markdown"
 	"github.com/odvcencio/fluffyui/progress"
 	"github.com/odvcencio/fluffyui/runtime"
+	"github.com/odvcencio/fluffyui/scroll"
+	fstate "github.com/odvcencio/fluffyui/state"
 	"github.com/odvcencio/fluffyui/theme"
 	"github.com/odvcencio/fluffyui/toast"
 	uiwidgets "github.com/odvcencio/fluffyui/widgets"
@@ -68,7 +70,6 @@ type Runner struct {
 	inputArea    *buckleywidgets.InputArea
 	statusBar    *buckleywidgets.StatusBar
 	sidebar      *buckleywidgets.Sidebar
-	presence     *buckleywidgets.PresenceStrip
 	toastStack   *buckleywidgets.SignalToastStack
 	filePicker   *filepicker.FilePicker
 	modelPalette *uiwidgets.PaletteWidget
@@ -79,18 +80,14 @@ type Runner struct {
 	chatService      *uiservices.ChatService
 	sidebarService   *uiservices.SidebarService
 	coalescer        *Coalescer
-	reasoningBuilder strings.Builder
 	styleCache       *StyleCache
+	layoutSubs       fstate.Subscriptions
+	focusInitialized bool
 
 	// Config
 	theme       *theme.Theme
 	workDir     string
 	projectRoot string
-	webBaseURL  string
-	sessionID   string
-
-	// Accessibility
-	reduceMotion bool
 
 	// Callbacks
 	onSubmit      func(text string)
@@ -134,14 +131,11 @@ func NewRunner(cfg RunnerConfig) (*Runner, error) {
 		theme:          th,
 		workDir:        workDir,
 		projectRoot:    projectRoot,
-		webBaseURL:     normalizeWebBaseURL(cfg.WebBaseURL),
-		sessionID:      strings.TrimSpace(cfg.SessionID),
 		state:          appState,
 		statusService:  statusService,
 		chatService:    chatService,
 		sidebarService: sidebarService,
 		styleCache:     styleCache,
-		reduceMotion:   cfg.ReduceMotion,
 		onSubmit:       cfg.OnSubmit,
 		onQuit:         cfg.OnQuit,
 		onFileSelect:   cfg.OnFileSelect,
@@ -155,6 +149,11 @@ func NewRunner(cfg RunnerConfig) (*Runner, error) {
 	// Build widget tree
 	root := r.buildLayout()
 
+	whenScrollable := keybind.WhenFocusedWidget(func(w runtime.Widget) bool {
+		_, ok := w.(scroll.Controller)
+		return ok
+	})
+
 	// Create keymap with Buckley-specific bindings
 	// Note: Standard commands (quit, scroll, clipboard) are registered automatically
 	keymap := &keybind.Keymap{
@@ -167,12 +166,12 @@ func NewRunner(cfg RunnerConfig) (*Runner, error) {
 			{Key: keybind.MustParseKeySequence("tab"), Command: "focus.next"},
 			{Key: keybind.MustParseKeySequence("shift+tab"), Command: "focus.prev"},
 			// Scroll commands (from RegisterScrollCommands)
-			{Key: keybind.MustParseKeySequence("ctrl+up"), Command: "scroll.up"},
-			{Key: keybind.MustParseKeySequence("ctrl+down"), Command: "scroll.down"},
-			{Key: keybind.MustParseKeySequence("pgup"), Command: "scroll.pageUp"},
-			{Key: keybind.MustParseKeySequence("pgdn"), Command: "scroll.pageDown"},
-			{Key: keybind.MustParseKeySequence("home"), Command: "scroll.top"},
-			{Key: keybind.MustParseKeySequence("end"), Command: "scroll.bottom"},
+			{Key: keybind.MustParseKeySequence("ctrl+up"), Command: "scroll.up", When: whenScrollable},
+			{Key: keybind.MustParseKeySequence("ctrl+down"), Command: "scroll.down", When: whenScrollable},
+			{Key: keybind.MustParseKeySequence("pgup"), Command: "scroll.pageUp", When: whenScrollable},
+			{Key: keybind.MustParseKeySequence("pgdn"), Command: "scroll.pageDown", When: whenScrollable},
+			{Key: keybind.MustParseKeySequence("home"), Command: "scroll.home", When: whenScrollable},
+			{Key: keybind.MustParseKeySequence("end"), Command: "scroll.end", When: whenScrollable},
 			// Clipboard commands (from RegisterClipboardCommands)
 			{Key: keybind.MustParseKeySequence("ctrl+shift+c"), Command: "clipboard.copy", When: keybind.WhenFocusedClipboardTarget()},
 			{Key: keybind.MustParseKeySequence("ctrl+shift+x"), Command: "clipboard.cut", When: keybind.WhenFocusedClipboardTarget()},
@@ -183,6 +182,12 @@ func NewRunner(cfg RunnerConfig) (*Runner, error) {
 			{Key: keybind.MustParseKeySequence("alt+left"), Command: "buckley.prev-session"},
 			{Key: keybind.MustParseKeySequence("ctrl+f"), Command: "buckley.search"},
 			{Key: keybind.MustParseKeySequence("ctrl+i"), Command: "buckley.focus-input"},
+			// Chord sequences (leader: ctrl+g)
+			{Key: keybind.MustParseKeySequence("ctrl+g g"), Command: "buckley.scroll-top"},
+			{Key: keybind.MustParseKeySequence("ctrl+g b"), Command: "buckley.scroll-bottom"},
+			{Key: keybind.MustParseKeySequence("ctrl+g s"), Command: "buckley.toggle-sidebar"},
+			{Key: keybind.MustParseKeySequence("ctrl+g f"), Command: "buckley.search"},
+			{Key: keybind.MustParseKeySequence("ctrl+g i"), Command: "buckley.focus-input"},
 		},
 	}
 
@@ -213,10 +218,9 @@ func NewRunner(cfg RunnerConfig) (*Runner, error) {
 	r.app = bundle.App
 	r.bundle = bundle
 
-	// Create coalescer that posts to app via CustomMsg
-	r.coalescer = NewCoalescer(DefaultCoalescerConfig(), func(msg Message) {
-		r.app.Post(runtime.CustomMsg{Value: msg})
-	})
+	r.bindLayoutSignals()
+
+	r.coalescer = NewCoalescer(DefaultCoalescerConfig())
 
 	// Wire input callbacks
 	r.wireInputCallbacks()
@@ -249,14 +253,6 @@ func (r *Runner) RunWithContext(ctx context.Context) error {
 	}
 	defer r.stopAgentServer() // Ensure cleanup on exit
 	return r.app.Run(ctx)
-}
-
-// Post sends a Buckley domain message to the event loop.
-func (r *Runner) Post(msg Message) {
-	if r == nil || r.app == nil {
-		return
-	}
-	r.app.Post(runtime.CustomMsg{Value: msg})
 }
 
 // buildWidgets creates all the Buckley widgets.
@@ -301,6 +297,16 @@ func (r *Runner) buildWidgets(cfg RunnerConfig, styleCache *StyleCache) {
 	)
 	mdRenderer := markdown.NewRenderer(th)
 	r.chatView.SetMarkdownRenderer(mdRenderer, styleCache.Get(mdRenderer.CodeBlockBackground()))
+	r.chatView.OnScrollChange(func(top, total, viewHeight int) {
+		if r.statusService == nil {
+			return
+		}
+		r.statusService.SetScrollPosition(scrollStatusText(top, total, viewHeight))
+	})
+	if r.statusService != nil {
+		top, total, viewHeight := r.chatView.ScrollPosition()
+		r.statusService.SetScrollPosition(scrollStatusText(top, total, viewHeight))
+	}
 
 	// InputArea
 	r.inputArea = buckleywidgets.NewInputAreaWithConfig(buckleywidgets.InputAreaConfig{
@@ -371,17 +377,6 @@ func (r *Runner) buildWidgets(cfg RunnerConfig, styleCache *StyleCache) {
 	r.sidebar.SetSpinnerStyle(styleCache.Get(th.ElectricBlue))
 	r.sidebar.SetProjectPath(r.projectRoot)
 
-	// Presence strip
-	r.presence = buckleywidgets.NewPresenceStrip()
-	r.presence.SetStyles(
-		styleCache.Get(th.Border),
-		styleCache.Get(th.TextMuted),
-		styleCache.Get(th.ElectricBlue),
-		styleCache.Get(th.Coral),
-		styleCache.Get(th.Accent),
-		styleCache.Get(th.Background),
-	)
-
 	// Toast stack
 	r.toastStack = buckleywidgets.NewSignalToastStack(r.state.Toasts)
 	r.toastStack.SetAnimationsEnabled(!cfg.ReduceMotion)
@@ -412,11 +407,13 @@ func (r *Runner) buildWidgets(cfg RunnerConfig, styleCache *StyleCache) {
 
 // buildLayout creates the widget tree layout.
 func (r *Runner) buildLayout() runtime.Widget {
-	// Main content area: ChatView + Sidebar
+	// Main content area: ChatView + optional Sidebar
 	mainArea := runtime.HBox(
 		runtime.Flexible(r.chatView, 3),
-		runtime.Sized(r.sidebar, r.sidebar.Width()),
 	)
+	if r.sidebar != nil && r.state != nil && r.state.SidebarVisible.Get() {
+		mainArea.Add(runtime.Sized(r.sidebar, r.sidebar.Width()))
+	}
 
 	// Full layout: Header, Main, Input, Status
 	root := runtime.VBox(
@@ -427,6 +424,17 @@ func (r *Runner) buildLayout() runtime.Widget {
 	)
 
 	return root
+}
+
+func (r *Runner) bindLayoutSignals() {
+	if r == nil || r.app == nil || r.state == nil || r.state.SidebarVisible == nil {
+		return
+	}
+	r.layoutSubs.Clear()
+	r.layoutSubs.SetScheduler(r.app.Services().Scheduler())
+	r.layoutSubs.Observe(r.state.SidebarVisible, func() {
+		r.rebuildLayout()
+	})
 }
 
 // wireInputCallbacks connects input area callbacks.
@@ -528,11 +536,44 @@ func (r *Runner) registerKeyBindings(registry *keybind.CommandRegistry) {
 			r.ensureInputFocus()
 		},
 	})
+
+	registry.Register(keybind.Command{
+		ID:    "buckley.scroll-top",
+		Title: "Scroll Top",
+		Handler: func(ctx keybind.Context) {
+			if r.chatView == nil {
+				return
+			}
+			r.chatView.ScrollToTop()
+			if ctx.App != nil {
+				ctx.App.Invalidate()
+			}
+		},
+	})
+
+	registry.Register(keybind.Command{
+		ID:    "buckley.scroll-bottom",
+		Title: "Scroll Bottom",
+		Handler: func(ctx keybind.Context) {
+			if r.chatView == nil {
+				return
+			}
+			r.chatView.ScrollToBottom()
+			if ctx.App != nil {
+				ctx.App.Invalidate()
+			}
+		},
+	})
 }
 
 // update handles messages in the event loop.
 // This is the Buckley-specific update function that processes domain messages.
 func (r *Runner) update(app *runtime.App, msg runtime.Message) bool {
+	if mouse, ok := msg.(runtime.MouseMsg); ok {
+		r.handleMouseFocus(app, mouse)
+	}
+	r.initFocusIfNeeded(app)
+
 	// First, let the default handler process terminal events
 	if runtime.DefaultUpdate(app, msg) {
 		return true
@@ -541,47 +582,23 @@ func (r *Runner) update(app *runtime.App, msg runtime.Message) bool {
 	// Handle tick for coalescer
 	if _, ok := msg.(runtime.TickMsg); ok {
 		r.coalescer.Tick()
-		return false
 	}
 
-	// Handle Buckley domain messages wrapped in CustomMsg
-	custom, ok := msg.(runtime.CustomMsg)
-	if !ok {
+	return r.flushPending()
+}
+
+func (r *Runner) flushPending() bool {
+	if r == nil || r.coalescer == nil || r.chatService == nil {
 		return false
 	}
-
-	// Type switch on the inner value
-	switch m := custom.Value.(type) {
-	case StreamChunk:
-		r.coalescer.Add(m.SessionID, m.Text)
-		return false
-
-	case StreamFlush:
-		if r.chatService != nil {
-			r.chatService.AppendToLastMessage(m.Text)
-		}
-		return true
-
-	case StreamDone:
-		// Flush all pending content to ensure nothing is lost
-		// This handles session switches during streaming
-		r.coalescer.FlushAll()
-		r.coalescer.Clear(m.SessionID)
-		return true
-
-	case RefreshMsg:
-		return true
-
-	case QuitMsg:
-		if r.onQuit != nil {
-			r.onQuit()
-		}
-		app.ExecuteCommand(runtime.Quit{})
-		return false
-
-	default:
+	flushed := r.coalescer.Drain()
+	if len(flushed) == 0 {
 		return false
 	}
+	for _, item := range flushed {
+		r.chatService.AppendToLastMessage(item.Text)
+	}
+	return true
 }
 
 // Announce sends an accessibility announcement.
@@ -596,7 +613,7 @@ func (r *Runner) Announce(text string, priority accessibility.Priority) {
 }
 
 // =============================================================================
-// Public API methods (matching WidgetApp interface)
+// Public API methods (matching App interface)
 // =============================================================================
 
 // SetStatus updates the status bar text.
@@ -617,12 +634,20 @@ func (r *Runner) AddMessage(content, source string) {
 
 // StreamChunk sends streaming text chunk.
 func (r *Runner) StreamChunk(sessionID, text string) {
-	r.Post(StreamChunk{SessionID: sessionID, Text: text})
+	if r == nil || r.coalescer == nil {
+		return
+	}
+	r.coalescer.Add(sessionID, text)
 }
 
 // StreamEnd signals end of streaming.
 func (r *Runner) StreamEnd(sessionID, fullText string) {
-	r.Post(StreamDone{SessionID: sessionID, FullText: fullText})
+	if r == nil || r.coalescer == nil {
+		return
+	}
+	// Flush all pending content to ensure nothing is lost on session switch.
+	r.coalescer.FlushAll()
+	r.coalescer.Clear(sessionID)
 }
 
 // AppendToLastMessage appends text to the last message.
@@ -685,7 +710,13 @@ func (r *Runner) SetContextUsage(used, budget, window int) {
 
 // Quit stops the application.
 func (r *Runner) Quit() {
-	r.Post(QuitMsg{})
+	if r == nil || r.app == nil {
+		return
+	}
+	if r.onQuit != nil {
+		r.onQuit()
+	}
+	r.app.ExecuteCommand(runtime.Quit{})
 }
 
 // =============================================================================
@@ -714,7 +745,6 @@ func (r *Runner) SetSessionID(id string) {
 	}
 	id = strings.TrimSpace(id)
 	r.state.SessionID.Set(id)
-	r.sessionID = id
 }
 
 // SetStatusOverride temporarily overrides the status bar text.
@@ -863,6 +893,6 @@ func (r *Runner) SetToastDismissHandler(onDismiss func(string)) {
 
 // SetDiagnostics sets the diagnostics collector.
 func (r *Runner) SetDiagnostics(collector *diagnostics.Collector) {
-	// Runner doesn't use diagnostics directly in the same way WidgetApp does
+	// Runner doesn't use diagnostics directly in the same way the legacy app did
 	// The telemetry bridge handles this through events
 }

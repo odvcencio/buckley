@@ -4,6 +4,8 @@
 package tui
 
 import (
+	"strconv"
+
 	"github.com/odvcencio/fluffyui/backend"
 	"github.com/odvcencio/fluffyui/runtime"
 	uiwidgets "github.com/odvcencio/fluffyui/widgets"
@@ -98,9 +100,14 @@ func (r *Runner) jumpToBottom() {
 
 // toggleSidebar toggles the sidebar visibility.
 func (r *Runner) toggleSidebar() {
-	// Sidebar visibility is managed by the layout
-	// For now, this is a no-op as the sidebar is always visible
-	// when there's content to display
+	if r == nil {
+		return
+	}
+	if r.state == nil || r.state.SidebarVisible == nil {
+		return
+	}
+	visible := r.state.SidebarVisible.Get()
+	r.state.SidebarVisible.Set(!visible)
 }
 
 // rebuildLayout rebuilds the widget tree layout.
@@ -109,15 +116,50 @@ func (r *Runner) rebuildLayout() {
 		return
 	}
 
-	// Get current root and rebuild
+	var focused runtime.Focusable
+	if screen := r.app.Screen(); screen != nil {
+		if scope := screen.BaseFocusScope(); scope != nil {
+			if current := scope.Current(); current != nil {
+				if f, ok := current.(runtime.Focusable); ok {
+					focused = f
+				}
+			}
+		}
+	}
+
 	root := r.buildLayout()
 	r.app.SetRoot(root)
+
+	if screen := r.app.Screen(); screen != nil {
+		if scope := screen.BaseFocusScope(); scope != nil {
+			if focused != nil && (scope.SetFocus(focused) || scope.Current() == focused) {
+				return
+			}
+		}
+	}
+	r.ensureInputFocus()
 }
 
 // ensureInputFocus ensures the input area has focus.
 func (r *Runner) ensureInputFocus() {
-	// Focus management is handled by the runtime
-	// The input area is typically focused by default
+	if r == nil || r.app == nil || r.inputArea == nil {
+		return
+	}
+	screen := r.app.Screen()
+	if screen == nil {
+		return
+	}
+	scope := screen.BaseFocusScope()
+	if scope == nil {
+		return
+	}
+	focusable, ok := interface{}(r.inputArea).(runtime.Focusable)
+	if !ok || !focusable.CanFocus() {
+		return
+	}
+	if scope.SetFocus(focusable) || scope.Current() == focusable {
+		r.app.Invalidate()
+	}
 }
 
 // setToastStyles configures the toast stack styles.
@@ -125,4 +167,104 @@ func (r *Runner) setToastStyles(bg, text, info, success, warn, err backend.Style
 	if r.toastStack != nil {
 		r.toastStack.SetStyles(bg, text, info, success, warn, err)
 	}
+}
+
+func (r *Runner) initFocusIfNeeded(app *runtime.App) {
+	if r == nil || r.focusInitialized {
+		return
+	}
+	if app == nil || app.Screen() == nil {
+		return
+	}
+	r.ensureInputFocus()
+	r.focusInitialized = true
+}
+
+func (r *Runner) handleMouseFocus(app *runtime.App, mouse runtime.MouseMsg) {
+	if r == nil || app == nil {
+		return
+	}
+	if mouse.Action != runtime.MousePress || mouse.Button != runtime.MouseLeft {
+		return
+	}
+	screen := app.Screen()
+	if screen == nil {
+		return
+	}
+	target := screen.WidgetAt(mouse.X, mouse.Y)
+	if target == nil {
+		return
+	}
+	scope, focusable := focusScopeForWidget(screen, target)
+	if scope == nil || focusable == nil || !focusable.CanFocus() {
+		return
+	}
+	if scope.SetFocus(focusable) || scope.Current() == focusable {
+		app.Invalidate()
+	}
+}
+
+func focusScopeForWidget(screen *runtime.Screen, target runtime.Widget) (*runtime.FocusScope, runtime.Focusable) {
+	if screen == nil || target == nil {
+		return nil, nil
+	}
+	for i := screen.LayerCount() - 1; i >= 0; i-- {
+		layer := screen.Layer(i)
+		if layer == nil || layer.Root == nil {
+			continue
+		}
+		focusable, found := findFocusableInPath(layer.Root, target)
+		if !found {
+			continue
+		}
+		return layer.FocusScope, focusable
+	}
+	return screen.FocusScope(), nil
+}
+
+func findFocusableInPath(root, target runtime.Widget) (runtime.Focusable, bool) {
+	if root == nil || target == nil {
+		return nil, false
+	}
+	if root == target {
+		if focusable, ok := root.(runtime.Focusable); ok {
+			return focusable, true
+		}
+		return nil, true
+	}
+	if container, ok := root.(runtime.ChildProvider); ok {
+		for _, child := range container.ChildWidgets() {
+			if focusable, found := findFocusableInPath(child, target); found {
+				if focusable != nil {
+					return focusable, true
+				}
+				if parentFocusable, ok := root.(runtime.Focusable); ok {
+					return parentFocusable, true
+				}
+				return nil, true
+			}
+		}
+	}
+	return nil, false
+}
+
+func scrollStatusText(top, total, viewHeight int) string {
+	if total <= 0 || viewHeight <= 0 {
+		return ""
+	}
+	if total <= viewHeight {
+		return "All"
+	}
+	if top <= 0 {
+		return "Top"
+	}
+	if top >= total-viewHeight {
+		return "Bot"
+	}
+	denom := total - viewHeight
+	if denom <= 0 {
+		return "All"
+	}
+	pct := 100 * top / denom
+	return strconv.Itoa(pct) + "%"
 }

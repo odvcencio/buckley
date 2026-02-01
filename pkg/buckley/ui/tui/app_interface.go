@@ -4,7 +4,6 @@
 package tui
 
 import (
-	"strings"
 	"time"
 
 	buckleywidgets "github.com/odvcencio/buckley/pkg/buckley/ui/widgets"
@@ -19,9 +18,6 @@ type App interface {
 	// Lifecycle
 	Run() error
 	Quit()
-
-	// Messaging (for telemetry bridge)
-	Post(msg Message)
 
 	// Content
 	AddMessage(content, source string)
@@ -67,17 +63,6 @@ type App interface {
 
 	// Diagnostics
 	SetDiagnostics(collector *diagnostics.Collector)
-}
-
-// normalizeWebBaseURL normalizes the web base URL for links.
-func normalizeWebBaseURL(url string) string {
-	url = strings.TrimSpace(url)
-	if url == "" {
-		return ""
-	}
-	// Remove trailing slash
-	url = strings.TrimSuffix(url, "/")
-	return url
 }
 
 // LayoutSpec defines the layout configuration for the TUI.

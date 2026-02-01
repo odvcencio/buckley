@@ -14,7 +14,7 @@ type Coalescer struct {
 	lastAdd  map[string]time.Time
 	maxChars int           // Flush if buffer exceeds this
 	maxWait  time.Duration // Max time before forced flush
-	post     func(Message) // Message posting function
+	pending  []FlushEvent
 }
 
 // CoalescerConfig configures the coalescer behavior.
@@ -31,8 +31,14 @@ func DefaultCoalescerConfig() CoalescerConfig {
 	}
 }
 
+// FlushEvent captures a buffered flush for a session.
+type FlushEvent struct {
+	SessionID string
+	Text      string
+}
+
 // NewCoalescer creates a streaming coalescer.
-func NewCoalescer(cfg CoalescerConfig, post func(Message)) *Coalescer {
+func NewCoalescer(cfg CoalescerConfig) *Coalescer {
 	if cfg.MaxChars == 0 {
 		cfg.MaxChars = 128
 	}
@@ -44,7 +50,6 @@ func NewCoalescer(cfg CoalescerConfig, post func(Message)) *Coalescer {
 		lastAdd:  make(map[string]time.Time),
 		maxChars: cfg.MaxChars,
 		maxWait:  cfg.MaxWait,
-		post:     post,
 	}
 }
 
@@ -105,7 +110,7 @@ func (c *Coalescer) Flush(sessionID string) {
 	c.flushLocked(sessionID)
 }
 
-// flushLocked sends buffered content as a StreamFlush message.
+// flushLocked buffers a flush event for draining.
 // Must be called with lock held.
 func (c *Coalescer) flushLocked(sessionID string) {
 	buf := c.buffers[sessionID]
@@ -117,9 +122,7 @@ func (c *Coalescer) flushLocked(sessionID string) {
 	buf.Reset()
 	c.lastAdd[sessionID] = time.Now()
 
-	if c.post != nil {
-		c.post(StreamFlush{SessionID: sessionID, Text: text})
-	}
+	c.pending = append(c.pending, FlushEvent{SessionID: sessionID, Text: text})
 }
 
 // Clear removes a session's buffer (call on stream end).
@@ -140,4 +143,17 @@ func (c *Coalescer) HasPending() bool {
 		}
 	}
 	return false
+}
+
+// Drain returns and clears pending flush events.
+func (c *Coalescer) Drain() []FlushEvent {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.pending) == 0 {
+		return nil
+	}
+	flushed := make([]FlushEvent, len(c.pending))
+	copy(flushed, c.pending)
+	c.pending = nil
+	return flushed
 }

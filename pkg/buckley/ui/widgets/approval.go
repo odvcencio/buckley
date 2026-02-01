@@ -366,6 +366,9 @@ func (a *ApprovalWidget) HandleMessage(msg runtime.Message) runtime.HandleResult
 	if !ok {
 		return runtime.Unhandled()
 	}
+	if !a.IsFocused() {
+		return runtime.Unhandled()
+	}
 
 	switch key.Key {
 	case terminal.KeyEscape:

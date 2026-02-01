@@ -10,7 +10,6 @@ import (
 	"github.com/odvcencio/fluffyui/backend"
 	"github.com/odvcencio/fluffyui/runtime"
 	"github.com/odvcencio/fluffyui/state"
-	"github.com/odvcencio/fluffyui/terminal"
 	uiwidgets "github.com/odvcencio/fluffyui/widgets"
 )
 
@@ -198,34 +197,17 @@ type Sidebar struct {
 	statusContent *runtime.Flex
 	filesContent  *runtime.Flex
 
-	taskLabel       *uiwidgets.Label
-	taskSpinner     *uiwidgets.Spinner
-	taskProgressBar *uiwidgets.Progress
-	taskPanel       *uiwidgets.Panel
-	planProgressBar *uiwidgets.Progress
-	planTable       *uiwidgets.Table
-	planPanel       *uiwidgets.Panel
-	toolsTable      *uiwidgets.Table
-	toolsPanel      *uiwidgets.Panel
-	contextGauge    *uiwidgets.AnimatedGauge
-	contextBar      *uiwidgets.Progress
-	contextLabel    *uiwidgets.Label
-	contextGrid     *uiwidgets.Grid
-	contextPanel    *uiwidgets.Panel
-	experimentTable *uiwidgets.Table
-	experimentPanel *uiwidgets.Panel
-	rlmTable        *uiwidgets.Table
-	rlmPanel        *uiwidgets.Panel
-	circuitAlert    *uiwidgets.Alert
-	circuitPanel    *uiwidgets.Panel
-	calendar        *uiwidgets.Calendar
-	calendarPanel   *uiwidgets.Panel
-	breadcrumb      *uiwidgets.Breadcrumb
-	breadcrumbPanel *uiwidgets.Panel
-	filesTree       *uiwidgets.Tree
-	filesPanel      *uiwidgets.Panel
-	touchesTree     *uiwidgets.Tree
-	touchesPanel    *uiwidgets.Panel
+	taskPanel    *taskPanel
+	planPanel    *planPanel
+	toolsPanel   *toolsPanel
+	contextPanel *contextPanel
+	experimentPanel *experimentPanel
+	rlmPanel        *rlmPanel
+	circuitPanel    *circuitPanel
+	calendarPanel   *calendarPanel
+	breadcrumbPanel *breadcrumbPanel
+	filesPanel      *filesPanel
+	touchesPanel    *touchesPanel
 	spinnerFrame    int
 
 	// Styles
@@ -401,90 +383,18 @@ func (s *Sidebar) requestRelayout() {
 }
 
 func (s *Sidebar) initWidgets() {
-	s.taskLabel = uiwidgets.NewLabel("No active task")
-	s.taskSpinner = uiwidgets.NewSpinner()
-	s.taskProgressBar = uiwidgets.NewProgress()
-	s.taskProgressBar.Label = "Task"
-	s.taskProgressBar.ShowPercent = true
-	taskHeader := runtime.HBox(
-		runtime.Fixed(s.taskSpinner),
-		runtime.Flexible(s.taskLabel, 1),
-	).WithGap(1)
-	taskContent := runtime.VBox(
-		runtime.Fixed(taskHeader),
-		runtime.Fixed(s.taskProgressBar),
-	)
-	s.taskPanel = uiwidgets.NewPanel(taskContent).WithBorder(s.borderStyle)
-	s.taskPanel.SetTitle("Current Task")
+	s.taskPanel = newTaskPanel(s.borderStyle)
+	s.planPanel = newPlanPanel(s.borderStyle)
+	s.toolsPanel = newToolsPanel(s.borderStyle)
+	s.contextPanel = newContextPanel(s.borderStyle)
 
-	s.planProgressBar = uiwidgets.NewProgress()
-	s.planProgressBar.Label = "Plan"
-	s.planProgressBar.ShowPercent = true
-	s.planTable = uiwidgets.NewTable(
-		uiwidgets.TableColumn{Title: "Task"},
-		uiwidgets.TableColumn{Title: "Status"},
-	)
-	planContent := runtime.VBox(
-		runtime.Fixed(s.planProgressBar),
-		runtime.Fixed(s.planTable),
-	).WithGap(1)
-	s.planPanel = uiwidgets.NewPanel(planContent).WithBorder(s.borderStyle)
-	s.planPanel.SetTitle("Plan")
-
-	s.toolsTable = uiwidgets.NewTable(
-		uiwidgets.TableColumn{Title: "Tool"},
-		uiwidgets.TableColumn{Title: "Status"},
-		uiwidgets.TableColumn{Title: "Detail"},
-	)
-	s.toolsPanel = uiwidgets.NewPanel(s.toolsTable).WithBorder(s.borderStyle)
-	s.toolsPanel.SetTitle("Tools")
-
-	s.contextGauge = uiwidgets.NewAnimatedGauge(0, 1)
-	s.contextLabel = uiwidgets.NewLabel("0 / 0")
-	s.contextBar = uiwidgets.NewProgress()
-	s.contextBar.Label = "Context"
-	s.contextBar.ShowPercent = true
-	s.contextGrid = uiwidgets.NewGrid(2, 2)
-	s.contextGrid.Add(s.contextGauge, 0, 0, 2, 1)
-	s.contextGrid.Add(s.contextLabel, 0, 1, 1, 1)
-	s.contextGrid.Add(s.contextBar, 1, 1, 1, 1)
-	s.contextPanel = uiwidgets.NewPanel(s.contextGrid).WithBorder(s.borderStyle)
-	s.contextPanel.SetTitle("Context")
-
-	s.experimentTable = uiwidgets.NewTable(
-		uiwidgets.TableColumn{Title: "Variant"},
-		uiwidgets.TableColumn{Title: "Status"},
-	)
-	s.experimentPanel = uiwidgets.NewPanel(s.experimentTable).WithBorder(s.borderStyle)
-	s.experimentPanel.SetTitle("Experiments")
-
-	s.rlmTable = uiwidgets.NewTable(
-		uiwidgets.TableColumn{Title: "Key"},
-		uiwidgets.TableColumn{Title: "Type"},
-		uiwidgets.TableColumn{Title: "Summary"},
-	)
-	s.rlmPanel = uiwidgets.NewPanel(s.rlmTable).WithBorder(s.borderStyle)
-	s.rlmPanel.SetTitle("RLM")
-
-	s.circuitAlert = uiwidgets.NewAlert("All systems nominal", uiwidgets.AlertSuccess)
-	s.circuitPanel = uiwidgets.NewPanel(s.circuitAlert).WithBorder(s.borderStyle)
-	s.circuitPanel.SetTitle("Circuit")
-
-	s.calendar = uiwidgets.NewCalendar()
-	s.calendarPanel = uiwidgets.NewPanel(s.calendar).WithBorder(s.borderStyle)
-	s.calendarPanel.SetTitle("Schedule")
-
-	s.breadcrumb = uiwidgets.NewBreadcrumb(uiwidgets.BreadcrumbItem{Label: "Project"})
-	s.breadcrumbPanel = uiwidgets.NewPanel(s.breadcrumb).WithBorder(s.borderStyle)
-	s.breadcrumbPanel.SetTitle("Path")
-
-	s.filesTree = uiwidgets.NewTree(&uiwidgets.TreeNode{Label: "(no files)"})
-	s.filesPanel = uiwidgets.NewPanel(s.filesTree).WithBorder(s.borderStyle)
-	s.filesPanel.SetTitle("Files")
-
-	s.touchesTree = uiwidgets.NewTree(&uiwidgets.TreeNode{Label: "(no touches)"})
-	s.touchesPanel = uiwidgets.NewPanel(s.touchesTree).WithBorder(s.borderStyle)
-	s.touchesPanel.SetTitle("Touches")
+	s.experimentPanel = newExperimentPanel(s.borderStyle)
+	s.rlmPanel = newRLMPanel(s.borderStyle)
+	s.circuitPanel = newCircuitPanel(s.borderStyle)
+	s.calendarPanel = newCalendarPanel(s.borderStyle)
+	s.breadcrumbPanel = newBreadcrumbPanel(s.borderStyle)
+	s.filesPanel = newFilesPanel(s.borderStyle)
+	s.touchesPanel = newTouchesPanel(s.borderStyle)
 
 	s.statusContent = s.buildStatusContent()
 	s.filesContent = s.buildFilesContent()
@@ -500,38 +410,60 @@ func (s *Sidebar) initWidgets() {
 func (s *Sidebar) buildStatusContent() *runtime.Flex {
 	children := make([]runtime.FlexChild, 0, 8)
 	if s.showCurrentTask {
-		children = append(children, runtime.Fixed(s.taskPanel))
+		if panel := s.taskPanel.Panel(); panel != nil {
+			children = append(children, runtime.Fixed(panel))
+		}
 	}
 	if s.showPlan {
-		children = append(children, runtime.Fixed(s.planPanel))
+		if panel := s.planPanel.Panel(); panel != nil {
+			children = append(children, runtime.Fixed(panel))
+		}
 	}
 	if s.showTools {
-		children = append(children, runtime.Fixed(s.toolsPanel))
+		if panel := s.toolsPanel.Panel(); panel != nil {
+			children = append(children, runtime.Fixed(panel))
+		}
 	}
 	if s.showContext {
-		children = append(children, runtime.Fixed(s.contextPanel))
+		if panel := s.contextPanel.Panel(); panel != nil {
+			children = append(children, runtime.Fixed(panel))
+		}
 	}
 	if s.showExperiment {
-		children = append(children, runtime.Fixed(s.experimentPanel))
+		if panel := s.experimentPanel.Panel(); panel != nil {
+			children = append(children, runtime.Fixed(panel))
+		}
 	}
 	if s.showRLM {
-		children = append(children, runtime.Fixed(s.rlmPanel))
+		if panel := s.rlmPanel.Panel(); panel != nil {
+			children = append(children, runtime.Fixed(panel))
+		}
 	}
 	if s.showCircuit {
-		children = append(children, runtime.Fixed(s.circuitPanel))
+		if panel := s.circuitPanel.Panel(); panel != nil {
+			children = append(children, runtime.Fixed(panel))
+		}
 	}
-	children = append(children, runtime.Fixed(s.calendarPanel))
+	if panel := s.calendarPanel.Panel(); panel != nil {
+		children = append(children, runtime.Fixed(panel))
+	}
 	return runtime.VBox(children...).WithGap(1)
 }
 
 func (s *Sidebar) buildFilesContent() *runtime.Flex {
 	children := make([]runtime.FlexChild, 0, 4)
-	children = append(children, runtime.Fixed(s.breadcrumbPanel))
+	if panel := s.breadcrumbPanel.Panel(); panel != nil {
+		children = append(children, runtime.Fixed(panel))
+	}
 	if s.showRecentFiles {
-		children = append(children, runtime.Fixed(s.filesPanel))
+		if panel := s.filesPanel.Panel(); panel != nil {
+			children = append(children, runtime.Fixed(panel))
+		}
 	}
 	if s.showTouches {
-		children = append(children, runtime.Fixed(s.touchesPanel))
+		if panel := s.touchesPanel.Panel(); panel != nil {
+			children = append(children, runtime.Fixed(panel))
+		}
 	}
 	return runtime.VBox(children...).WithGap(1)
 }
@@ -545,21 +477,38 @@ func (s *Sidebar) SetStyles(border, header, text, progressFull, progressEmpty, b
 	s.progressEmpty = progressEmpty
 	s.bgStyle = background
 
-	panels := []*uiwidgets.Panel{
-		s.taskPanel, s.planPanel, s.toolsPanel, s.contextPanel, s.experimentPanel,
-		s.rlmPanel, s.circuitPanel, s.calendarPanel, s.breadcrumbPanel, s.filesPanel, s.touchesPanel,
+	if s.taskPanel != nil {
+		s.taskPanel.SetStyles(border, background, text)
 	}
-	for _, panel := range panels {
-		if panel != nil {
-			panel.SetStyle(background)
-			panel.WithBorder(border)
-		}
+	if s.planPanel != nil {
+		s.planPanel.SetStyles(border, background)
 	}
-	if s.taskLabel != nil {
-		s.taskLabel.SetStyle(text)
+	if s.toolsPanel != nil {
+		s.toolsPanel.SetStyles(border, background)
 	}
-	if s.contextLabel != nil {
-		s.contextLabel.SetStyle(text)
+	if s.contextPanel != nil {
+		s.contextPanel.SetStyles(border, background, text)
+	}
+	if s.experimentPanel != nil {
+		s.experimentPanel.SetStyles(border, background)
+	}
+	if s.rlmPanel != nil {
+		s.rlmPanel.SetStyles(border, background)
+	}
+	if s.circuitPanel != nil {
+		s.circuitPanel.SetStyles(border, background)
+	}
+	if s.calendarPanel != nil {
+		s.calendarPanel.SetStyles(border, background)
+	}
+	if s.breadcrumbPanel != nil {
+		s.breadcrumbPanel.SetStyles(border, background)
+	}
+	if s.filesPanel != nil {
+		s.filesPanel.SetStyles(border, background)
+	}
+	if s.touchesPanel != nil {
+		s.touchesPanel.SetStyles(border, background)
 	}
 	if s.tabs != nil {
 		s.tabs.SetStyle(background)
@@ -585,22 +534,22 @@ func (s *Sidebar) SetContextStyles(active, warn, critical, muted backend.Style) 
 	s.contextWarn = warn
 	s.contextCritical = critical
 	s.contextMuted = muted
-	if s.contextBar != nil {
-		s.contextBar.Style = uiwidgets.GaugeStyle{
+	if s.contextPanel != nil {
+		s.contextPanel.SetGaugeStyle(uiwidgets.GaugeStyle{
 			EmptyStyle: muted,
 			Thresholds: []uiwidgets.GaugeThreshold{
 				{Ratio: 0.7, Style: warn},
 				{Ratio: 0.9, Style: critical},
 			},
-		}
+		})
 	}
 }
 
 // SetSpinnerStyle configures the spinner style.
 func (s *Sidebar) SetSpinnerStyle(style backend.Style) {
 	s.spinnerStyle = style
-	if s.taskSpinner != nil {
-		s.taskSpinner.SetStyle(style)
+	if s.taskPanel != nil {
+		s.taskPanel.SetSpinnerStyle(style)
 	}
 }
 
@@ -655,6 +604,11 @@ func (s *Sidebar) SetShowCurrentTask(show bool) {
 	s.rebuildStatus()
 }
 
+// ToggleCurrentTask toggles the current task section visibility.
+func (s *Sidebar) ToggleCurrentTask() {
+	s.SetShowCurrentTask(!s.showCurrentTask)
+}
+
 // SetPlanTasks updates the plan task list.
 func (s *Sidebar) SetPlanTasks(tasks []PlanTask) {
 	s.planTasks = tasks
@@ -665,6 +619,11 @@ func (s *Sidebar) SetPlanTasks(tasks []PlanTask) {
 func (s *Sidebar) SetShowPlan(show bool) {
 	s.showPlan = show
 	s.rebuildStatus()
+}
+
+// TogglePlan toggles the plan section visibility.
+func (s *Sidebar) TogglePlan() {
+	s.SetShowPlan(!s.showPlan)
 }
 
 // SetRunningTools updates the running tools list.
@@ -683,6 +642,11 @@ func (s *Sidebar) SetToolHistory(history []ToolHistoryEntry) {
 func (s *Sidebar) SetShowTools(show bool) {
 	s.showTools = show
 	s.rebuildStatus()
+}
+
+// ToggleTools toggles the tools section visibility.
+func (s *Sidebar) ToggleTools() {
+	s.SetShowTools(!s.showTools)
 }
 
 // SetContextUsage updates context usage values.
@@ -715,6 +679,11 @@ func (s *Sidebar) SetShowContext(show bool) {
 	s.rebuildStatus()
 }
 
+// ToggleContext toggles the context section visibility.
+func (s *Sidebar) ToggleContext() {
+	s.SetShowContext(!s.showContext)
+}
+
 // SetActiveTouches updates the active touches list.
 func (s *Sidebar) SetActiveTouches(touches []TouchSummary) {
 	s.activeTouches = touches
@@ -725,6 +694,11 @@ func (s *Sidebar) SetActiveTouches(touches []TouchSummary) {
 func (s *Sidebar) SetShowTouches(show bool) {
 	s.showTouches = show
 	s.rebuildFiles()
+}
+
+// ToggleTouches toggles the touches section visibility.
+func (s *Sidebar) ToggleTouches() {
+	s.SetShowTouches(!s.showTouches)
 }
 
 // SetRecentFiles updates the recent files list.
@@ -796,8 +770,8 @@ func (s *Sidebar) SetSpinnerFrame(frame int) {
 	if frame < 0 {
 		frame = 0
 	}
-	if s.taskSpinner != nil && frame != s.spinnerFrame {
-		s.taskSpinner.Advance()
+	if s.taskPanel != nil && frame != s.spinnerFrame {
+		s.taskPanel.AdvanceSpinner()
 	}
 	s.spinnerFrame = frame
 }
@@ -874,28 +848,6 @@ func (s *Sidebar) HandleMessage(msg runtime.Message) runtime.HandleResult {
 	if s.tabs == nil {
 		return runtime.Unhandled()
 	}
-	if key, ok := msg.(runtime.KeyMsg); ok && key.Key == terminal.KeyRune {
-		switch key.Rune {
-		case '1':
-			s.SetShowCurrentTask(!s.showCurrentTask)
-			return runtime.Handled()
-		case '2':
-			s.SetShowPlan(!s.showPlan)
-			return runtime.Handled()
-		case '3':
-			s.SetShowTools(!s.showTools)
-			return runtime.Handled()
-		case '4':
-			s.SetShowContext(!s.showContext)
-			return runtime.Handled()
-		case '5':
-			s.SetShowTouches(!s.showTouches)
-			return runtime.Handled()
-		case '6':
-			s.ToggleRecentFiles()
-			return runtime.Handled()
-		}
-	}
 	return s.tabs.HandleMessage(msg)
 }
 
@@ -942,183 +894,85 @@ func (s *Sidebar) updateAllPanels() {
 }
 
 func (s *Sidebar) updateTaskPanel() {
-	label := strings.TrimSpace(s.currentTask)
-	if label == "" {
-		label = "No active task"
-		if s.taskSpinner != nil {
-			s.taskSpinner.Frames = []string{" "}
-		}
-	} else if s.taskSpinner != nil {
-		s.taskSpinner.Frames = []string{"-", "\\", "|", "/"}
+	if s.taskPanel == nil {
+		return
 	}
-	if s.taskLabel != nil {
-		s.taskLabel.SetText(label)
-	}
-	if s.taskProgressBar != nil {
-		s.taskProgressBar.Value = float64(clampPercent(s.taskProgress))
-		s.taskProgressBar.Max = 100
-	}
+	s.taskPanel.Update(s.currentTask, s.taskProgress)
 }
 
 func (s *Sidebar) updatePlanPanel() {
-	if s.planProgressBar != nil {
-		completed, total := summarizePlan(s.planTasks)
-		percent := 0.0
-		if total > 0 {
-			percent = float64(completed) / float64(total) * 100
-		}
-		s.planProgressBar.Value = percent
-		s.planProgressBar.Max = 100
+	if s.planPanel == nil {
+		return
 	}
-	if s.planTable != nil {
-		rows := make([][]string, 0, len(s.planTasks))
-		for _, task := range s.planTasks {
-			rows = append(rows, []string{task.Name, taskStatusLabel(task.Status)})
-		}
-		if len(rows) == 0 {
-			rows = [][]string{{"No tasks", ""}}
-		}
-		s.planTable.SetRows(rows)
-	}
+	s.planPanel.Update(s.planTasks)
 }
 
 func (s *Sidebar) updateToolsPanel() {
-	if s.toolsTable == nil {
+	if s.toolsPanel == nil {
 		return
 	}
-	rows := make([][]string, 0, len(s.runningTools)+len(s.toolHistory))
-	for _, tool := range s.runningTools {
-		detail := strings.TrimSpace(tool.Command)
-		rows = append(rows, []string{tool.Name, "running", detail})
-	}
-	for i := len(s.toolHistory) - 1; i >= 0 && len(rows) < 12; i-- {
-		entry := s.toolHistory[i]
-		rows = append(rows, []string{entry.Name, entry.Status, entry.Detail})
-	}
-	if len(rows) == 0 {
-		rows = [][]string{{"No tools", "", ""}}
-	}
-	s.toolsTable.SetRows(rows)
+	s.toolsPanel.Update(s.runningTools, s.toolHistory)
 }
 
 func (s *Sidebar) updateContextPanel() {
-	if s.contextLabel != nil {
-		label := formatContextLabel(s.contextUsed, s.contextBudget, s.contextWindow)
-		s.contextLabel.SetText(label)
+	if s.contextPanel == nil {
+		return
 	}
-	if s.contextBar != nil {
-		max := s.contextMaxValue()
-		if max <= 0 {
-			max = 1
-		}
-		s.contextBar.Value = float64(s.contextUsed)
-		s.contextBar.Max = float64(max)
+	label := formatContextLabel(s.contextUsed, s.contextBudget, s.contextWindow)
+	max := s.contextMaxValue()
+	if max <= 0 {
+		max = 1
 	}
-	if s.contextGauge != nil {
-		ratio := s.contextRatio()
-		if ratio < 0 {
-			ratio = 0
-		}
-		if ratio > 1 {
-			ratio = 1
-		}
-		s.contextGauge.SetValue(ratio)
+	ratio := s.contextRatio()
+	if ratio < 0 {
+		ratio = 0
 	}
+	if ratio > 1 {
+		ratio = 1
+	}
+	s.contextPanel.Update(label, s.contextUsed, max, ratio)
 }
 
 func (s *Sidebar) updateExperimentPanel() {
-	if s.experimentTable == nil {
+	if s.experimentPanel == nil {
 		return
 	}
-	rows := make([][]string, 0, len(s.experimentVariants)+1)
-	if strings.TrimSpace(s.experimentName) != "" {
-		rows = append(rows, []string{s.experimentName, s.experimentStatus})
-	}
-	for _, variant := range s.experimentVariants {
-		rows = append(rows, []string{variant.Name, variant.Status})
-	}
-	if len(rows) == 0 {
-		rows = [][]string{{"No experiments", ""}}
-	}
-	s.experimentTable.SetRows(rows)
+	s.experimentPanel.Update(s.experimentName, s.experimentStatus, s.experimentVariants)
 }
 
 func (s *Sidebar) updateRLMPanel() {
-	if s.rlmTable == nil {
+	if s.rlmPanel == nil {
 		return
 	}
-	rows := make([][]string, 0, len(s.rlmScratchpad)+1)
-	if s.rlmStatus != nil {
-		summary := s.rlmStatus.Summary
-		if summary == "" {
-			summary = "Iteration " + intToStr(s.rlmStatus.Iteration)
-		}
-		rows = append(rows, []string{"Status", "", summary})
-	}
-	for _, entry := range s.rlmScratchpad {
-		rows = append(rows, []string{entry.Key, entry.Type, entry.Summary})
-	}
-	if len(rows) == 0 {
-		rows = [][]string{{"No entries", "", ""}}
-	}
-	s.rlmTable.SetRows(rows)
+	s.rlmPanel.Update(s.rlmStatus, s.rlmScratchpad)
 }
 
 func (s *Sidebar) updateCircuitPanel() {
-	if s.circuitAlert == nil {
+	if s.circuitPanel == nil {
 		return
 	}
-	if s.circuitStatus == nil || s.circuitStatus.State == "" {
-		s.circuitAlert.Text = "All systems nominal"
-		s.circuitAlert.Variant = uiwidgets.AlertSuccess
-		return
-	}
-	status := s.circuitStatus.State
-	message := status
-	if s.circuitStatus.LastError != "" {
-		message = status + ": " + s.circuitStatus.LastError
-	}
-	variant := uiwidgets.AlertInfo
-	switch strings.ToLower(status) {
-	case "open":
-		variant = uiwidgets.AlertError
-	case "halfopen", "half-open":
-		variant = uiwidgets.AlertWarning
-	}
-	s.circuitAlert.Text = message
-	s.circuitAlert.Variant = variant
+	s.circuitPanel.Update(s.circuitStatus)
 }
 
 func (s *Sidebar) updateBreadcrumb() {
-	if s.breadcrumb == nil {
+	if s.breadcrumbPanel == nil {
 		return
 	}
-	path := s.projectPath
-	if path == "" {
-		path = "Project"
-	}
-	parts := splitPath(path)
-	items := make([]uiwidgets.BreadcrumbItem, 0, len(parts))
-	for _, part := range parts {
-		items = append(items, uiwidgets.BreadcrumbItem{Label: part})
-	}
-	s.breadcrumb.Items = items
+	s.breadcrumbPanel.Update(s.projectPath)
 }
 
 func (s *Sidebar) updateFilesPanel() {
-	if s.filesTree == nil {
+	if s.filesPanel == nil {
 		return
 	}
-	root := buildTreeFromPaths(s.recentFiles, s.projectPath)
-	s.filesTree.SetRoot(root)
+	s.filesPanel.Update(s.recentFiles, s.projectPath)
 }
 
 func (s *Sidebar) updateTouchesPanel() {
-	if s.touchesTree == nil {
+	if s.touchesPanel == nil {
 		return
 	}
-	root := buildTouchesTree(s.activeTouches)
-	s.touchesTree.SetRoot(root)
+	s.touchesPanel.Update(s.activeTouches)
 }
 
 func (s *Sidebar) contextRatio() float64 {

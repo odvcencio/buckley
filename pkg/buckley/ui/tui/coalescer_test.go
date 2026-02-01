@@ -1,78 +1,44 @@
 package tui
 
 import (
-	"sync"
 	"testing"
 	"time"
 )
 
 func TestCoalescer_Add(t *testing.T) {
-	var received []Message
-	var mu sync.Mutex
-
-	post := func(msg Message) {
-		mu.Lock()
-		received = append(received, msg)
-		mu.Unlock()
-	}
-
-	c := NewCoalescer(CoalescerConfig{MaxChars: 10, MaxWait: 100 * time.Millisecond}, post)
+	c := NewCoalescer(CoalescerConfig{MaxChars: 10, MaxWait: 100 * time.Millisecond})
 
 	// Add small chunks - should buffer
 	c.Add("session1", "abc")
 	c.Add("session1", "def")
 
-	mu.Lock()
-	if len(received) != 0 {
-		t.Errorf("expected 0 messages (buffered), got %d", len(received))
+	if flushed := c.Drain(); len(flushed) != 0 {
+		t.Errorf("expected 0 flushes (buffered), got %d", len(flushed))
 	}
-	mu.Unlock()
 }
 
 func TestCoalescer_FlushOnSize(t *testing.T) {
-	var received []Message
-	var mu sync.Mutex
-
-	post := func(msg Message) {
-		mu.Lock()
-		received = append(received, msg)
-		mu.Unlock()
-	}
-
-	c := NewCoalescer(CoalescerConfig{MaxChars: 10, MaxWait: 100 * time.Millisecond}, post)
+	c := NewCoalescer(CoalescerConfig{MaxChars: 10, MaxWait: 100 * time.Millisecond})
 
 	// Add enough to exceed max chars
 	c.Add("session1", "1234567890ab") // 12 chars > 10
 
-	mu.Lock()
-	if len(received) != 1 {
-		t.Fatalf("expected 1 flush message, got %d", len(received))
+	flushed := c.Drain()
+	if len(flushed) != 1 {
+		t.Fatalf("expected 1 flush event, got %d", len(flushed))
 	}
 
-	flush, ok := received[0].(StreamFlush)
-	if !ok {
-		t.Fatalf("expected StreamFlush, got %T", received[0])
-	}
+	flush := flushed[0]
 	if flush.SessionID != "session1" {
 		t.Errorf("expected session1, got %s", flush.SessionID)
 	}
 	if flush.Text != "1234567890ab" {
 		t.Errorf("expected '1234567890ab', got %s", flush.Text)
 	}
-	mu.Unlock()
 }
 
 func TestCoalescer_Tick(t *testing.T) {
-	var received []Message
-	var mu sync.Mutex
-
-	post := func(msg Message) {
-		mu.Lock()
-		received = append(received, msg)
-		mu.Unlock()
-	}
-
-	c := NewCoalescer(CoalescerConfig{MaxChars: 100, MaxWait: 10 * time.Millisecond}, post)
+	c := NewCoalescer(CoalescerConfig{MaxChars: 100, MaxWait: 10 * time.Millisecond})
 
 	// Add content
 	c.Add("session1", "hello")
@@ -83,29 +49,19 @@ func TestCoalescer_Tick(t *testing.T) {
 	// Tick should flush
 	c.Tick()
 
-	mu.Lock()
-	if len(received) != 1 {
-		t.Fatalf("expected 1 flush message after tick, got %d", len(received))
+	flushed := c.Drain()
+	if len(flushed) != 1 {
+		t.Fatalf("expected 1 flush event after tick, got %d", len(flushed))
 	}
 
-	flush := received[0].(StreamFlush)
+	flush := flushed[0]
 	if flush.Text != "hello" {
 		t.Errorf("expected 'hello', got %s", flush.Text)
 	}
-	mu.Unlock()
 }
 
 func TestCoalescer_FlushAll(t *testing.T) {
-	var received []Message
-	var mu sync.Mutex
-
-	post := func(msg Message) {
-		mu.Lock()
-		received = append(received, msg)
-		mu.Unlock()
-	}
-
-	c := NewCoalescer(CoalescerConfig{MaxChars: 100, MaxWait: time.Hour}, post)
+	c := NewCoalescer(CoalescerConfig{MaxChars: 100, MaxWait: time.Hour})
 
 	// Add to multiple sessions
 	c.Add("session1", "hello")
@@ -114,21 +70,13 @@ func TestCoalescer_FlushAll(t *testing.T) {
 	// FlushAll should flush both
 	c.FlushAll()
 
-	mu.Lock()
-	if len(received) != 2 {
-		t.Fatalf("expected 2 flush messages, got %d", len(received))
+	if flushed := c.Drain(); len(flushed) != 2 {
+		t.Fatalf("expected 2 flush events, got %d", len(flushed))
 	}
-	mu.Unlock()
 }
 
 func TestCoalescer_Clear(t *testing.T) {
-	var received []Message
-
-	post := func(msg Message) {
-		received = append(received, msg)
-	}
-
-	c := NewCoalescer(CoalescerConfig{MaxChars: 100, MaxWait: time.Hour}, post)
+	c := NewCoalescer(CoalescerConfig{MaxChars: 100, MaxWait: time.Hour})
 
 	// Add content
 	c.Add("session1", "hello")
@@ -139,13 +87,13 @@ func TestCoalescer_Clear(t *testing.T) {
 	// FlushAll should produce nothing
 	c.FlushAll()
 
-	if len(received) != 0 {
-		t.Errorf("expected 0 messages after clear, got %d", len(received))
+	if flushed := c.Drain(); len(flushed) != 0 {
+		t.Errorf("expected 0 flushes after clear, got %d", len(flushed))
 	}
 }
 
 func TestCoalescer_HasPending(t *testing.T) {
-	c := NewCoalescer(DefaultCoalescerConfig(), nil)
+	c := NewCoalescer(DefaultCoalescerConfig())
 
 	if c.HasPending() {
 		t.Error("expected no pending initially")
@@ -165,16 +113,7 @@ func TestCoalescer_HasPending(t *testing.T) {
 }
 
 func TestCoalescer_MultipleSessions(t *testing.T) {
-	var received []Message
-	var mu sync.Mutex
-
-	post := func(msg Message) {
-		mu.Lock()
-		received = append(received, msg)
-		mu.Unlock()
-	}
-
-	c := NewCoalescer(CoalescerConfig{MaxChars: 100, MaxWait: time.Hour}, post)
+	c := NewCoalescer(CoalescerConfig{MaxChars: 100, MaxWait: time.Hour})
 
 	// Add to different sessions
 	c.Add("s1", "aaa")
@@ -184,16 +123,15 @@ func TestCoalescer_MultipleSessions(t *testing.T) {
 	// Flush just s1
 	c.Flush("s1")
 
-	mu.Lock()
-	if len(received) != 1 {
-		t.Fatalf("expected 1 message, got %d", len(received))
+	flushed := c.Drain()
+	if len(flushed) != 1 {
+		t.Fatalf("expected 1 flush event, got %d", len(flushed))
 	}
 
-	flush := received[0].(StreamFlush)
+	flush := flushed[0]
 	if flush.SessionID != "s1" || flush.Text != "aaaccc" {
 		t.Errorf("unexpected flush: %+v", flush)
 	}
-	mu.Unlock()
 }
 
 func TestDefaultCoalescerConfig(t *testing.T) {
@@ -208,7 +146,7 @@ func TestDefaultCoalescerConfig(t *testing.T) {
 
 func TestNewCoalescer_ZeroConfig(t *testing.T) {
 	// Test that NewCoalescer applies defaults when config has zero values
-	c := NewCoalescer(CoalescerConfig{}, nil)
+	c := NewCoalescer(CoalescerConfig{})
 
 	if c.maxChars != 128 {
 		t.Errorf("expected default maxChars=128, got %d", c.maxChars)
@@ -224,7 +162,7 @@ func TestNewCoalescer_CustomConfig(t *testing.T) {
 		MaxChars: 256,
 		MaxWait:  50 * time.Millisecond,
 	}
-	c := NewCoalescer(cfg, nil)
+	c := NewCoalescer(cfg)
 
 	if c.maxChars != 256 {
 		t.Errorf("expected maxChars=256, got %d", c.maxChars)
@@ -234,81 +172,48 @@ func TestNewCoalescer_CustomConfig(t *testing.T) {
 	}
 }
 
-func TestCoalescer_NilPost(t *testing.T) {
-	// Test that Coalescer handles nil post function gracefully
-	c := NewCoalescer(DefaultCoalescerConfig(), nil)
-
-	// Add content
-	c.Add("session1", "hello")
-
-	// Should not panic when flushing with nil post function
-	c.Flush("session1")
-	c.FlushAll()
-
-	// HasPending should still work
-	if c.HasPending() {
-		t.Error("expected no pending after flush with nil post")
+func TestCoalescer_DrainEmpty(t *testing.T) {
+	c := NewCoalescer(DefaultCoalescerConfig())
+	if flushed := c.Drain(); len(flushed) != 0 {
+		t.Errorf("expected empty drain on new coalescer, got %d", len(flushed))
 	}
 }
 
 func TestCoalescer_FlushEmpty(t *testing.T) {
-	var received []Message
-	post := func(msg Message) {
-		received = append(received, msg)
-	}
-
-	c := NewCoalescer(DefaultCoalescerConfig(), post)
+	c := NewCoalescer(DefaultCoalescerConfig())
 
 	// Flush non-existent session should be no-op
 	c.Flush("nonexistent")
 
-	if len(received) != 0 {
-		t.Errorf("expected 0 messages for flushing non-existent session, got %d", len(received))
-	}
-
 	// FlushAll on empty coalescer should be no-op
 	c.FlushAll()
 
-	if len(received) != 0 {
-		t.Errorf("expected 0 messages for FlushAll on empty, got %d", len(received))
+	if flushed := c.Drain(); len(flushed) != 0 {
+		t.Errorf("expected 0 flushes for empty coalescer, got %d", len(flushed))
 	}
 }
 
 func TestCoalescer_ClearNonExistent(t *testing.T) {
-	c := NewCoalescer(DefaultCoalescerConfig(), nil)
+	c := NewCoalescer(DefaultCoalescerConfig())
 
 	// Clear non-existent session should not panic
 	c.Clear("nonexistent")
 }
 
 func TestCoalescer_TickNoContent(t *testing.T) {
-	var received []Message
-	post := func(msg Message) {
-		received = append(received, msg)
-	}
-
-	c := NewCoalescer(CoalescerConfig{MaxChars: 100, MaxWait: 1 * time.Millisecond}, post)
+	c := NewCoalescer(CoalescerConfig{MaxChars: 100, MaxWait: 1 * time.Millisecond})
 
 	// Tick with no content should not produce messages
 	c.Tick()
 
-	if len(received) != 0 {
-		t.Errorf("expected 0 messages for tick with no content, got %d", len(received))
+	if flushed := c.Drain(); len(flushed) != 0 {
+		t.Errorf("expected 0 flushes for tick with no content, got %d", len(flushed))
 	}
 }
 
 func TestCoalescer_TickRecentContent(t *testing.T) {
-	var received []Message
-	var mu sync.Mutex
-
-	post := func(msg Message) {
-		mu.Lock()
-		received = append(received, msg)
-		mu.Unlock()
-	}
-
 	// Long max wait to ensure content stays buffered
-	c := NewCoalescer(CoalescerConfig{MaxChars: 100, MaxWait: 1 * time.Hour}, post)
+	c := NewCoalescer(CoalescerConfig{MaxChars: 100, MaxWait: 1 * time.Hour})
 
 	// Add content
 	c.Add("session1", "hello")
@@ -316,22 +221,13 @@ func TestCoalescer_TickRecentContent(t *testing.T) {
 	// Tick immediately should not flush (content is too recent)
 	c.Tick()
 
-	mu.Lock()
-	count := len(received)
-	mu.Unlock()
-
-	if count != 0 {
-		t.Errorf("expected 0 messages for tick with recent content, got %d", count)
+	if flushed := c.Drain(); len(flushed) != 0 {
+		t.Errorf("expected 0 flushes for tick with recent content, got %d", len(flushed))
 	}
 }
 
 func TestCoalescer_TickEmptyBuffer(t *testing.T) {
-	var received []Message
-	post := func(msg Message) {
-		received = append(received, msg)
-	}
-
-	c := NewCoalescer(CoalescerConfig{MaxChars: 100, MaxWait: 1 * time.Millisecond}, post)
+	c := NewCoalescer(CoalescerConfig{MaxChars: 100, MaxWait: 1 * time.Millisecond})
 
 	// Add and then flush
 	c.Add("session1", "hello")
@@ -341,21 +237,16 @@ func TestCoalescer_TickEmptyBuffer(t *testing.T) {
 	time.Sleep(5 * time.Millisecond)
 
 	// Tick should not flush again (buffer is now empty)
-	beforeCount := len(received)
+	beforeCount := len(c.Drain())
 	c.Tick()
 
-	if len(received) != beforeCount {
-		t.Errorf("expected no additional messages after tick on empty buffer, got %d (was %d)", len(received), beforeCount)
+	if len(c.Drain()) != 0 {
+		t.Errorf("expected no additional flushes after tick on empty buffer, had %d before", beforeCount)
 	}
 }
 
 func TestCoalescer_AddToNewBuffer(t *testing.T) {
-	var received []Message
-	post := func(msg Message) {
-		received = append(received, msg)
-	}
-
-	c := NewCoalescer(CoalescerConfig{MaxChars: 5, MaxWait: time.Hour}, post)
+	c := NewCoalescer(CoalescerConfig{MaxChars: 5, MaxWait: time.Hour})
 
 	// First add creates buffer
 	c.Add("s1", "ab")
@@ -364,18 +255,19 @@ func TestCoalescer_AddToNewBuffer(t *testing.T) {
 	c.Add("s1", "cd")
 
 	// Not yet at max, so should be buffered
-	if len(received) != 0 {
-		t.Errorf("expected 0 messages before hitting max, got %d", len(received))
+	if flushed := c.Drain(); len(flushed) != 0 {
+		t.Errorf("expected 0 flushes before hitting max, got %d", len(flushed))
 	}
 
 	// This should trigger flush (total: "abcde" = 5 chars >= 5 maxChars)
 	c.Add("s1", "e")
 
-	if len(received) != 1 {
-		t.Fatalf("expected 1 message after hitting max, got %d", len(received))
+	flushed := c.Drain()
+	if len(flushed) != 1 {
+		t.Fatalf("expected 1 flush after hitting max, got %d", len(flushed))
 	}
 
-	flush := received[0].(StreamFlush)
+	flush := flushed[0]
 	if flush.Text != "abcde" {
 		t.Errorf("expected 'abcde', got '%s'", flush.Text)
 	}

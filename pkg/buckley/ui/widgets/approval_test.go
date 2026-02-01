@@ -57,6 +57,7 @@ func TestApprovalWidget_HandleAllow(t *testing.T) {
 		Tool: "run_shell",
 	}
 	w := NewApprovalWidget(req)
+	w.Focus()
 
 	// Press 'a' for allow
 	result := w.HandleMessage(runtime.KeyMsg{Key: terminal.KeyRune, Rune: 'a'})
@@ -98,6 +99,7 @@ func TestApprovalWidget_HandleDeny(t *testing.T) {
 		Tool: "write_file",
 	}
 	w := NewApprovalWidget(req)
+	w.Focus()
 
 	// Press 'd' for deny
 	result := w.HandleMessage(runtime.KeyMsg{Key: terminal.KeyRune, Rune: 'd'})
@@ -122,6 +124,7 @@ func TestApprovalWidget_HandleAlwaysAllow(t *testing.T) {
 		Tool: "run_shell",
 	}
 	w := NewApprovalWidget(req)
+	w.Focus()
 
 	// Press 'l' for always allow
 	result := w.HandleMessage(runtime.KeyMsg{Key: terminal.KeyRune, Rune: 'l'})
@@ -149,6 +152,7 @@ func TestApprovalWidget_HandleEscape(t *testing.T) {
 		Tool: "run_shell",
 	}
 	w := NewApprovalWidget(req)
+	w.Focus()
 
 	// Press Escape = deny
 	result := w.HandleMessage(runtime.KeyMsg{Key: terminal.KeyEscape})
@@ -183,6 +187,7 @@ func TestApprovalWidget_HandleYesNo(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(string(tt.key), func(t *testing.T) {
 			w := NewApprovalWidget(ApprovalRequest{ID: "test"})
+			w.Focus()
 			result := w.HandleMessage(runtime.KeyMsg{Key: terminal.KeyRune, Rune: tt.key})
 
 			if !result.Handled {
@@ -214,6 +219,7 @@ func TestApprovalWidget_ScrollDiff(t *testing.T) {
 		DiffLines: lines,
 	}
 	w := NewApprovalWidget(req)
+	w.Focus()
 
 	// Initial scroll should be 0
 	if w.scrollOffset != 0 {

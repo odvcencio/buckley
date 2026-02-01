@@ -240,6 +240,9 @@ func (f *FilePickerWidget) HandleMessage(msg runtime.Message) runtime.HandleResu
 	if !ok {
 		return runtime.Unhandled()
 	}
+	if !f.IsFocused() {
+		return runtime.Unhandled()
+	}
 
 	switch key.Key {
 	case terminal.KeyEscape:

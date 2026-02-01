@@ -364,7 +364,7 @@ type SidebarStateSink interface {
 }
 
 // SimpleTelemetryBridge forwards telemetry events to the TUI without scheduler dependency.
-// Used by Runner which doesn't have access to WidgetApp's stateScheduler.
+// Used by Runner which doesn't have direct access to the state scheduler.
 type SimpleTelemetryBridge struct {
 	hub         *telemetry.Hub
 	sink        SidebarStateSink

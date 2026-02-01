@@ -452,6 +452,7 @@ func TestChatView_Render_WithScrollbar(t *testing.T) {
 func TestChatView_HandleMessage_Up(t *testing.T) {
 	cv := NewChatView()
 	cv.Layout(runtime.Rect{X: 0, Y: 0, Width: 80, Height: 5})
+	cv.Focus()
 
 	for i := 0; i < 20; i++ {
 		cv.AddMessage("Line", "user")
@@ -467,6 +468,7 @@ func TestChatView_HandleMessage_Up(t *testing.T) {
 func TestChatView_HandleMessage_Down(t *testing.T) {
 	cv := NewChatView()
 	cv.Layout(runtime.Rect{X: 0, Y: 0, Width: 80, Height: 5})
+	cv.Focus()
 
 	for i := 0; i < 20; i++ {
 		cv.AddMessage("Line", "user")
@@ -483,6 +485,7 @@ func TestChatView_HandleMessage_Down(t *testing.T) {
 func TestChatView_HandleMessage_PageUp(t *testing.T) {
 	cv := NewChatView()
 	cv.Layout(runtime.Rect{X: 0, Y: 0, Width: 80, Height: 5})
+	cv.Focus()
 
 	for i := 0; i < 20; i++ {
 		cv.AddMessage("Line", "user")
@@ -498,6 +501,7 @@ func TestChatView_HandleMessage_PageUp(t *testing.T) {
 func TestChatView_HandleMessage_PageDown(t *testing.T) {
 	cv := NewChatView()
 	cv.Layout(runtime.Rect{X: 0, Y: 0, Width: 80, Height: 5})
+	cv.Focus()
 
 	for i := 0; i < 20; i++ {
 		cv.AddMessage("Line", "user")

@@ -468,6 +468,26 @@ func (i *InputArea) Render(ctx runtime.RenderContext) {
 
 // HandleMessage processes keyboard input.
 func (i *InputArea) HandleMessage(msg runtime.Message) runtime.HandleResult {
+	if mouse, ok := msg.(runtime.MouseMsg); ok {
+		if i.panel == nil {
+			return runtime.Unhandled()
+		}
+		if i.Bounds().Contains(mouse.X, mouse.Y) {
+			if mouse.Button == runtime.MouseLeft && (mouse.Action == runtime.MousePress || mouse.Action == runtime.MouseRelease) {
+				if !i.IsFocused() {
+					i.Focus()
+				}
+			}
+			if i.textarea != nil {
+				if result := i.textarea.HandleMessage(msg); result.Handled {
+					return result
+				}
+			}
+			return runtime.Handled()
+		}
+		return runtime.Unhandled()
+	}
+
 	if !i.IsFocused() {
 		return runtime.Unhandled()
 	}

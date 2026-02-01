@@ -209,8 +209,6 @@ func (r *recordingApp) SetToastDismissHandler(onDismiss func(string))     {}
 
 func (r *recordingApp) SetDiagnostics(collector *diagnostics.Collector) {}
 
-func (r *recordingApp) Post(msg Message) {}
-
 func (r *recordingApp) GetMessages() []recordedMessage {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -331,20 +329,11 @@ func TestTUIStreamHandler_ConcurrentOnText(t *testing.T) {
 	}
 }
 
-// TestStreamDone_FlushAll verifies that StreamDone flushes all pending content.
-func TestStreamDone_FlushAll(t *testing.T) {
-	var flushed []string
-	var mu sync.Mutex
-
+// TestStreamEnd_FlushAll verifies that stream completion flushes all pending content.
+func TestStreamEnd_FlushAll(t *testing.T) {
 	coalescer := NewCoalescer(CoalescerConfig{
 		MaxChars: 1000,
 		MaxWait:  1 * time.Second,
-	}, func(msg Message) {
-		if flush, ok := msg.(StreamFlush); ok {
-			mu.Lock()
-			flushed = append(flushed, flush.Text)
-			mu.Unlock()
-		}
 	})
 
 	// Add content to multiple sessions
@@ -355,11 +344,9 @@ func TestStreamDone_FlushAll(t *testing.T) {
 	// Flush all via FlushAll
 	coalescer.FlushAll()
 
-	mu.Lock()
-	if len(flushed) != 3 {
+	if flushed := coalescer.Drain(); len(flushed) != 3 {
 		t.Errorf("Expected 3 flushes (one per session), got %d", len(flushed))
 	}
-	mu.Unlock()
 }
 
 // TestChatView_AppendText_Invalidation is a placeholder - would need actual ChatView testing.

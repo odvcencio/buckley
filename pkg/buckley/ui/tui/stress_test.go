@@ -9,17 +9,11 @@ import (
 // TestCoalescer_HighFrequencyChunks tests coalescing under rapid chunk delivery.
 func TestCoalescer_HighFrequencyChunks(t *testing.T) {
 	var flushed []string
-	flush := func(msg Message) {
-		if sf, ok := msg.(StreamFlush); ok {
-			flushed = append(flushed, sf.Text)
-		}
-	}
-
 	cfg := CoalescerConfig{
 		MaxWait:  16 * time.Millisecond,
 		MaxChars: 4096,
 	}
-	c := NewCoalescer(cfg, flush)
+	c := NewCoalescer(cfg)
 
 	// Simulate rapid chunks (like a fast streaming API)
 	sessionID := "stress-1"
@@ -29,6 +23,9 @@ func TestCoalescer_HighFrequencyChunks(t *testing.T) {
 
 	// FlushAll to get everything
 	c.FlushAll()
+	for _, item := range c.Drain() {
+		flushed = append(flushed, item.Text)
+	}
 
 	// Should have coalesced many chunks
 	totalLen := 0
@@ -45,17 +42,11 @@ func TestCoalescer_HighFrequencyChunks(t *testing.T) {
 // TestCoalescer_LargeOutput tests handling of large text outputs.
 func TestCoalescer_LargeOutput(t *testing.T) {
 	var flushed []string
-	flush := func(msg Message) {
-		if sf, ok := msg.(StreamFlush); ok {
-			flushed = append(flushed, sf.Text)
-		}
-	}
-
 	cfg := CoalescerConfig{
 		MaxWait:  16 * time.Millisecond,
 		MaxChars: 1024, // Small buffer to force flushes
 	}
-	c := NewCoalescer(cfg, flush)
+	c := NewCoalescer(cfg)
 
 	// Send a large chunk (10KB)
 	largeText := strings.Repeat("x", 10*1024)
@@ -63,6 +54,9 @@ func TestCoalescer_LargeOutput(t *testing.T) {
 
 	// Should have flushed multiple times due to MaxBuffer
 	c.FlushAll()
+	for _, item := range c.Drain() {
+		flushed = append(flushed, item.Text)
+	}
 
 	totalLen := 0
 	for _, f := range flushed {
@@ -77,13 +71,7 @@ func TestCoalescer_LargeOutput(t *testing.T) {
 // TestCoalescer_ConcurrentSessions tests multiple simultaneous sessions.
 func TestCoalescer_ConcurrentSessions(t *testing.T) {
 	sessionData := make(map[string]string)
-	flush := func(msg Message) {
-		if sf, ok := msg.(StreamFlush); ok {
-			sessionData[sf.SessionID] += sf.Text
-		}
-	}
-
-	c := NewCoalescer(DefaultCoalescerConfig(), flush)
+	c := NewCoalescer(DefaultCoalescerConfig())
 
 	// Simulate 10 concurrent sessions
 	numSessions := 10
@@ -97,6 +85,9 @@ func TestCoalescer_ConcurrentSessions(t *testing.T) {
 	}
 
 	c.FlushAll()
+	for _, item := range c.Drain() {
+		sessionData[item.SessionID] += item.Text
+	}
 
 	// Verify each session got its data
 	for s := 0; s < numSessions; s++ {
@@ -113,19 +104,16 @@ func TestCoalescer_ConcurrentSessions(t *testing.T) {
 func TestCoalescer_RapidFlush(t *testing.T) {
 	flushCount := 0
 	totalData := 0
-	flush := func(msg Message) {
-		if sf, ok := msg.(StreamFlush); ok {
-			flushCount++
-			totalData += len(sf.Text)
-		}
-	}
-
-	c := NewCoalescer(DefaultCoalescerConfig(), flush)
+	c := NewCoalescer(DefaultCoalescerConfig())
 
 	// Add data and flush each time
 	for i := 0; i < 100; i++ {
 		c.Add("rapid", "data")
 		c.Flush("rapid") // Explicit flush for this session
+		for _, item := range c.Drain() {
+			flushCount++
+			totalData += len(item.Text)
+		}
 	}
 
 	// Should have all data flushed
@@ -142,19 +130,11 @@ func TestCoalescer_RapidFlush(t *testing.T) {
 func TestCoalescer_MemoryPressure(t *testing.T) {
 	// Track max buffer size seen
 	maxBufferSize := 0
-	flush := func(msg Message) {
-		if sf, ok := msg.(StreamFlush); ok {
-			if len(sf.Text) > maxBufferSize {
-				maxBufferSize = len(sf.Text)
-			}
-		}
-	}
-
 	cfg := CoalescerConfig{
 		MaxWait:  16 * time.Millisecond,
 		MaxChars: 4096,
 	}
-	c := NewCoalescer(cfg, flush)
+	c := NewCoalescer(cfg)
 
 	// Sustained streaming for simulated 1 second (many ticks)
 	for tick := 0; tick < 60; tick++ { // 60 ticks = ~1 second at 60fps
@@ -163,6 +143,11 @@ func TestCoalescer_MemoryPressure(t *testing.T) {
 			c.Add("pressure", strings.Repeat("y", 100))
 		}
 		c.Tick()
+		for _, item := range c.Drain() {
+			if len(item.Text) > maxBufferSize {
+				maxBufferSize = len(item.Text)
+			}
+		}
 	}
 
 	// Max buffer should never exceed configured limit by much

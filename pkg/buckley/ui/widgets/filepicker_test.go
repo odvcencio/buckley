@@ -51,6 +51,7 @@ func TestFilePickerWidget_HandleEscape(t *testing.T) {
 	fp := filepicker.NewFilePicker("/tmp")
 	fp.Activate(0)
 	w := NewFilePickerWidget(fp)
+	w.Focus()
 
 	msg := runtime.KeyMsg{Key: terminal.KeyEscape}
 	result := w.HandleMessage(msg)
@@ -74,6 +75,7 @@ func TestFilePickerWidget_HandleUpDown(t *testing.T) {
 	fp := filepicker.NewFilePicker("/tmp")
 	fp.Activate(0)
 	w := NewFilePickerWidget(fp)
+	w.Focus()
 
 	// Up should be handled
 	result := w.HandleMessage(runtime.KeyMsg{Key: terminal.KeyUp})
@@ -92,6 +94,7 @@ func TestFilePickerWidget_HandleTyping(t *testing.T) {
 	fp := filepicker.NewFilePicker("/tmp")
 	fp.Activate(0)
 	w := NewFilePickerWidget(fp)
+	w.Focus()
 
 	// Type a character
 	result := w.HandleMessage(runtime.KeyMsg{Key: terminal.KeyRune, Rune: 'a'})
@@ -110,6 +113,7 @@ func TestFilePickerWidget_HandleBackspace(t *testing.T) {
 	fp.AppendQuery('a')
 	fp.AppendQuery('b')
 	w := NewFilePickerWidget(fp)
+	w.Focus()
 
 	// Backspace should remove last character
 	result := w.HandleMessage(runtime.KeyMsg{Key: terminal.KeyBackspace})
@@ -188,6 +192,7 @@ func TestFilePickerWidget_HandleEnter_NoSelection(t *testing.T) {
 	fp := filepicker.NewFilePicker("/tmp")
 	fp.Activate(0)
 	w := NewFilePickerWidget(fp)
+	w.Focus()
 
 	// Enter with no matches should just be handled
 	result := w.HandleMessage(runtime.KeyMsg{Key: terminal.KeyEnter})
@@ -200,6 +205,7 @@ func TestFilePickerWidget_HandleUnknownKey(t *testing.T) {
 	fp := filepicker.NewFilePicker("/tmp")
 	fp.Activate(0)
 	w := NewFilePickerWidget(fp)
+	w.Focus()
 
 	// Tab key should not be handled
 	result := w.HandleMessage(runtime.KeyMsg{Key: terminal.KeyTab})

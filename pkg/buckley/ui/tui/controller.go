@@ -49,7 +49,7 @@ import (
 type Controller struct {
 	mu sync.Mutex
 
-	// App is the TUI application (either WidgetApp or Runner)
+	// App is the TUI application
 	app App
 
 	// Backend services

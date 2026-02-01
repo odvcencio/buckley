@@ -7,7 +7,7 @@ import (
 
 // BenchmarkCoalescer_Add measures chunk addition.
 func BenchmarkCoalescer_Add(b *testing.B) {
-	c := NewCoalescer(DefaultCoalescerConfig(), func(msg Message) {})
+	c := NewCoalescer(DefaultCoalescerConfig())
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -17,7 +17,7 @@ func BenchmarkCoalescer_Add(b *testing.B) {
 
 // BenchmarkCoalescer_Tick measures frame tick processing.
 func BenchmarkCoalescer_Tick(b *testing.B) {
-	c := NewCoalescer(DefaultCoalescerConfig(), func(msg Message) {})
+	c := NewCoalescer(DefaultCoalescerConfig())
 
 	// Add some content
 	for i := 0; i < 100; i++ {
@@ -36,8 +36,6 @@ func BenchmarkCoalescer_HighThroughput(b *testing.B) {
 	c := NewCoalescer(CoalescerConfig{
 		MaxWait:  16 * time.Millisecond,
 		MaxChars: 4096,
-	}, func(msg Message) {
-		flushCount++
 	})
 
 	b.ResetTimer()
@@ -47,13 +45,14 @@ func BenchmarkCoalescer_HighThroughput(b *testing.B) {
 			c.Add("session-1", "x")
 		}
 		c.Tick()
+		flushCount += len(c.Drain())
 	}
 	_ = flushCount
 }
 
 // BenchmarkCoalescer_MultipleSessions measures multi-session handling.
 func BenchmarkCoalescer_MultipleSessions(b *testing.B) {
-	c := NewCoalescer(DefaultCoalescerConfig(), func(msg Message) {})
+	c := NewCoalescer(DefaultCoalescerConfig())
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -69,7 +68,7 @@ func BenchmarkCoalescer_MultipleSessions(b *testing.B) {
 
 // BenchmarkCoalescer_FlushAll measures forced flush.
 func BenchmarkCoalescer_FlushAll(b *testing.B) {
-	c := NewCoalescer(DefaultCoalescerConfig(), func(msg Message) {})
+	c := NewCoalescer(DefaultCoalescerConfig())
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
