@@ -146,6 +146,44 @@ func TestApprovalWidget_HandleAlwaysAllow(t *testing.T) {
 	}
 }
 
+func TestApprovalWidget_HandleMouseAllow(t *testing.T) {
+	req := ApprovalRequest{
+		ID:   "req-mouse",
+		Tool: "run_shell",
+	}
+	w := NewApprovalWidget(req)
+	w.Layout(runtime.Rect{X: 0, Y: 0, Width: 80, Height: 24})
+
+	line, ranges := approvalButtonLayout()
+	if len(ranges) == 0 {
+		t.Fatal("expected approval button ranges")
+	}
+	bounds := w.Bounds()
+	x := bounds.X + (bounds.Width-len(line))/2 + ranges[0].start
+	y := bounds.Y + bounds.Height - 2
+
+	result := w.HandleMessage(runtime.MouseMsg{
+		X:      x,
+		Y:      y,
+		Button: runtime.MouseLeft,
+		Action: runtime.MousePress,
+	})
+
+	if !result.Handled {
+		t.Error("expected handled")
+	}
+	if len(result.Commands) != 2 {
+		t.Fatalf("expected 2 commands, got %d", len(result.Commands))
+	}
+	resp, ok := result.Commands[0].(ApprovalResponse)
+	if !ok {
+		t.Fatalf("expected ApprovalResponse, got %T", result.Commands[0])
+	}
+	if !resp.Approved || resp.AlwaysAllow {
+		t.Errorf("expected Approved=true AlwaysAllow=false, got %+v", resp)
+	}
+}
+
 func TestApprovalWidget_HandleEscape(t *testing.T) {
 	req := ApprovalRequest{
 		ID:   "req-esc",

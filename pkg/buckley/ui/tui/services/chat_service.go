@@ -67,6 +67,42 @@ func (svc *ChatService) AddMessage(content, source string) {
 	svc.state.ChatMessages.Set(cloned)
 }
 
+// SetMessages replaces the chat history with the provided messages.
+func (svc *ChatService) SetMessages(messages []buckleywidgets.ChatMessage) {
+	if svc == nil || svc.state == nil {
+		return
+	}
+
+	svc.mu.Lock()
+	cloned := append([]buckleywidgets.ChatMessage(nil), messages...)
+	nextID := 0
+	lastUserAt := time.Time{}
+	for i := range cloned {
+		msg := cloned[i]
+		if msg.ID > nextID {
+			nextID = msg.ID
+		}
+		if msg.ID <= 0 {
+			nextID++
+			msg.ID = nextID
+		}
+		if msg.Source == "user" {
+			lastUserAt = msg.Time
+		}
+		if msg.Source == "assistant" && msg.UserAt.IsZero() && !lastUserAt.IsZero() {
+			msg.UserAt = lastUserAt
+		}
+		cloned[i] = msg
+	}
+	svc.nextID = nextID
+	svc.lastUserAt = lastUserAt
+	svc.state.ChatMessages.Set(cloned)
+	svc.mu.Unlock()
+
+	svc.state.ChatThinking.Set(false)
+	svc.ClearReasoning()
+}
+
 // AppendToLastMessage appends text to the last message.
 func (svc *ChatService) AppendToLastMessage(text string) {
 	if svc == nil || svc.state == nil {

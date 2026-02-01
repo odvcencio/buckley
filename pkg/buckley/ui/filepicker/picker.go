@@ -29,7 +29,7 @@ type FilePicker struct {
 	maxResults int
 
 	// Dimensions
-	width, height   int
+	width, height    int
 	offsetX, offsetY int // Position in screen
 }
 
@@ -162,6 +162,24 @@ func (fp *FilePicker) SelectedIndex() int {
 	fp.mu.RLock()
 	defer fp.mu.RUnlock()
 	return fp.selected
+}
+
+// SetSelected updates the selected index.
+func (fp *FilePicker) SetSelected(index int) {
+	fp.mu.Lock()
+	defer fp.mu.Unlock()
+
+	if len(fp.matches) == 0 {
+		fp.selected = 0
+		return
+	}
+	if index < 0 {
+		index = 0
+	}
+	if index >= len(fp.matches) {
+		index = len(fp.matches) - 1
+	}
+	fp.selected = index
 }
 
 // Query returns current query.

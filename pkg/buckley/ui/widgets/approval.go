@@ -68,6 +68,25 @@ type ApprovalWidget struct {
 	buttonHlStyle backend.Style
 }
 
+type approvalButtonSpec struct {
+	label  string
+	action string
+}
+
+type approvalButtonRange struct {
+	action string
+	start  int
+	end    int
+}
+
+var approvalButtons = []approvalButtonSpec{
+	{label: "[A]llow", action: "allow"},
+	{label: "[D]eny", action: "deny"},
+	{label: "A[l]ways allow", action: "always"},
+}
+
+const approvalButtonSep = "    "
+
 // NewApprovalWidget creates a new approval dialog widget.
 func NewApprovalWidget(req ApprovalRequest) *ApprovalWidget {
 	return &ApprovalWidget{
@@ -347,7 +366,7 @@ func (a *ApprovalWidget) drawDiffPreview(buf *runtime.Buffer, x, y, width, maxLi
 func (a *ApprovalWidget) drawButtons(buf *runtime.Buffer, b runtime.Rect) {
 	y := b.Y + b.Height - 2
 
-	buttons := "[A]llow    [D]eny    A[l]ways allow"
+	buttons, _ := approvalButtonLayout()
 	x := b.X + (b.Width-len(buttons))/2
 
 	// Draw with highlights on key letters
@@ -360,8 +379,32 @@ func (a *ApprovalWidget) drawButtons(buf *runtime.Buffer, b runtime.Rect) {
 	}
 }
 
+func approvalButtonLayout() (string, []approvalButtonRange) {
+	line := ""
+	ranges := make([]approvalButtonRange, 0, len(approvalButtons))
+	pos := 0
+	for i, spec := range approvalButtons {
+		if i > 0 {
+			line += approvalButtonSep
+			pos += len(approvalButtonSep)
+		}
+		start := pos
+		line += spec.label
+		pos += len(spec.label)
+		ranges = append(ranges, approvalButtonRange{
+			action: spec.action,
+			start:  start,
+			end:    pos,
+		})
+	}
+	return line, ranges
+}
+
 // HandleMessage processes keyboard input.
 func (a *ApprovalWidget) HandleMessage(msg runtime.Message) runtime.HandleResult {
+	if mouse, ok := msg.(runtime.MouseMsg); ok {
+		return a.handleMouse(mouse)
+	}
 	key, ok := msg.(runtime.KeyMsg)
 	if !ok {
 		return runtime.Unhandled()
@@ -383,21 +426,11 @@ func (a *ApprovalWidget) HandleMessage(msg runtime.Message) runtime.HandleResult
 		)
 
 	case terminal.KeyUp:
-		// Scroll diff up
-		if a.scrollOffset > 0 {
-			a.scrollOffset--
-		}
+		a.scrollDiff(-1)
 		return runtime.Handled()
 
 	case terminal.KeyDown:
-		// Scroll diff down
-		maxScroll := len(a.request.DiffLines) - 5
-		if maxScroll < 0 {
-			maxScroll = 0
-		}
-		if a.scrollOffset < maxScroll {
-			a.scrollOffset++
-		}
+		a.scrollDiff(1)
 		return runtime.Handled()
 
 	case terminal.KeyRune:
@@ -435,6 +468,110 @@ func (a *ApprovalWidget) HandleMessage(msg runtime.Message) runtime.HandleResult
 	}
 
 	return runtime.Unhandled()
+}
+
+func (a *ApprovalWidget) handleMouse(msg runtime.MouseMsg) runtime.HandleResult {
+	if a == nil {
+		return runtime.Unhandled()
+	}
+	bounds := a.Bounds()
+	if !bounds.Contains(msg.X, msg.Y) {
+		return runtime.Unhandled()
+	}
+	switch msg.Button {
+	case runtime.MouseWheelUp:
+		a.scrollDiff(-1)
+		return runtime.Handled()
+	case runtime.MouseWheelDown:
+		a.scrollDiff(1)
+		return runtime.Handled()
+	case runtime.MouseLeft:
+		if msg.Action != runtime.MousePress {
+			return runtime.Unhandled()
+		}
+		if !a.IsFocused() {
+			a.Focus()
+		}
+		action, ok := a.buttonActionAt(msg.X, msg.Y)
+		if !ok {
+			return runtime.Handled()
+		}
+		switch action {
+		case "allow":
+			return runtime.WithCommands(
+				ApprovalResponse{
+					RequestID:   a.request.ID,
+					Approved:    true,
+					AlwaysAllow: false,
+				},
+				runtime.PopOverlay{},
+			)
+		case "deny":
+			return runtime.WithCommands(
+				ApprovalResponse{
+					RequestID:   a.request.ID,
+					Approved:    false,
+					AlwaysAllow: false,
+				},
+				runtime.PopOverlay{},
+			)
+		case "always":
+			return runtime.WithCommands(
+				ApprovalResponse{
+					RequestID:   a.request.ID,
+					Approved:    true,
+					AlwaysAllow: true,
+				},
+				runtime.PopOverlay{},
+			)
+		}
+		return runtime.Handled()
+	}
+	return runtime.Unhandled()
+}
+
+func (a *ApprovalWidget) buttonActionAt(x, y int) (string, bool) {
+	b := a.Bounds()
+	line, ranges := approvalButtonLayout()
+	if len(line) == 0 {
+		return "", false
+	}
+	buttonY := b.Y + b.Height - 2
+	if y != buttonY {
+		return "", false
+	}
+	startX := b.X + (b.Width-len(line))/2
+	if x < startX || x >= startX+len(line) {
+		return "", false
+	}
+	rel := x - startX
+	for _, r := range ranges {
+		if rel >= r.start && rel < r.end {
+			return r.action, true
+		}
+	}
+	return "", false
+}
+
+func (a *ApprovalWidget) scrollDiff(delta int) {
+	if a == nil || delta == 0 || len(a.request.DiffLines) == 0 {
+		return
+	}
+	maxScroll := len(a.request.DiffLines) - 5
+	if maxScroll < 0 {
+		maxScroll = 0
+	}
+	next := a.scrollOffset + delta
+	if next < 0 {
+		next = 0
+	}
+	if next > maxScroll {
+		next = maxScroll
+	}
+	if next != a.scrollOffset {
+		a.scrollOffset = next
+		a.Invalidate()
+	}
 }
 
 // formatDiffSummary creates a summary string for diff stats.

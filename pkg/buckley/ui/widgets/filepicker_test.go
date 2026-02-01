@@ -1,10 +1,13 @@
 package widgets
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
+	"time"
 
-	"github.com/odvcencio/fluffyui/backend"
 	"github.com/odvcencio/buckley/pkg/buckley/ui/filepicker"
+	"github.com/odvcencio/fluffyui/backend"
 	"github.com/odvcencio/fluffyui/runtime"
 	"github.com/odvcencio/fluffyui/terminal"
 )
@@ -87,6 +90,78 @@ func TestFilePickerWidget_HandleUpDown(t *testing.T) {
 	result = w.HandleMessage(runtime.KeyMsg{Key: terminal.KeyDown})
 	if !result.Handled {
 		t.Error("Down should be handled")
+	}
+}
+
+func TestFilePickerWidget_HandleMouseSelect(t *testing.T) {
+	tmpDir := t.TempDir()
+	files := []string{
+		"one.txt",
+		"two.txt",
+		"dir/three.txt",
+	}
+	for _, name := range files {
+		path := filepath.Join(tmpDir, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("test"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	fp := filepicker.NewFilePicker(tmpDir)
+	for i := 0; i < 50; i++ {
+		if fp.IsIndexReady() {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !fp.IsIndexReady() {
+		t.Fatal("indexing did not complete in time")
+	}
+
+	fp.Activate(0)
+	fp.SetQuery("")
+	w := NewFilePickerWidget(fp)
+	w.Layout(runtime.Rect{X: 0, Y: 0, Width: 80, Height: 24})
+
+	matches := fp.GetMatches()
+	if len(matches) < 2 {
+		t.Fatalf("expected at least 2 matches, got %d", len(matches))
+	}
+
+	bounds := w.Bounds()
+	clickX := bounds.X + 2
+	clickY := bounds.Y + 4 // second row (start at Y+3)
+
+	result := w.HandleMessage(runtime.MouseMsg{
+		X:      clickX,
+		Y:      clickY,
+		Button: runtime.MouseLeft,
+		Action: runtime.MousePress,
+	})
+	if !result.Handled {
+		t.Error("mouse click should be handled")
+	}
+	if fp.SelectedIndex() != 1 {
+		t.Fatalf("expected selected index 1, got %d", fp.SelectedIndex())
+	}
+
+	result = w.HandleMessage(runtime.MouseMsg{
+		X:      clickX,
+		Y:      clickY,
+		Button: runtime.MouseLeft,
+		Action: runtime.MousePress,
+	})
+	if len(result.Commands) != 2 {
+		t.Fatalf("expected 2 commands, got %d", len(result.Commands))
+	}
+	if _, ok := result.Commands[0].(runtime.FileSelected); !ok {
+		t.Fatalf("expected FileSelected, got %T", result.Commands[0])
+	}
+	if _, ok := result.Commands[1].(runtime.PopOverlay); !ok {
+		t.Fatalf("expected PopOverlay, got %T", result.Commands[1])
 	}
 }
 

@@ -75,7 +75,7 @@ type Runner struct {
 	sidebar      *buckleywidgets.Sidebar
 	toastStack   *buckleywidgets.SignalToastStack
 	filePicker   *filepicker.FilePicker
-	modelPalette *uiwidgets.PaletteWidget
+	modelPalette *buckleywidgets.InteractivePalette
 
 	// State
 	state            *uitstate.AppState
@@ -484,7 +484,7 @@ func (r *Runner) buildWidgets(cfg RunnerConfig, styleCache *StyleCache) {
 	r.filePicker = filepicker.NewFilePicker(r.projectRoot)
 
 	// Model palette (used by ShowModelPicker)
-	r.modelPalette = uiwidgets.NewPaletteWidget("Select Model")
+	r.modelPalette = buckleywidgets.NewInteractivePalette("Select Model")
 	r.modelPalette.SetStyles(
 		styleCache.Get(th.SurfaceRaised), // bg
 		styleCache.Get(th.Border),        // border
@@ -834,6 +834,14 @@ func (r *Runner) AddMessage(content, source string) {
 	r.chatService.AddMessage(content, source)
 }
 
+// SetChatMessages replaces the chat history.
+func (r *Runner) SetChatMessages(messages []buckleywidgets.ChatMessage) {
+	if r == nil || r.chatService == nil {
+		return
+	}
+	r.chatService.SetMessages(messages)
+}
+
 // StreamChunk sends streaming text chunk.
 func (r *Runner) StreamChunk(sessionID, text string) {
 	if r == nil || r.coalescer == nil {
@@ -987,26 +995,6 @@ func (r *Runner) RemoveThinkingIndicator() {
 		return
 	}
 	r.chatService.RemoveThinkingIndicator()
-}
-
-// ClearScrollback clears the chat view.
-func (r *Runner) ClearScrollback() {
-	if r == nil || r.chatService == nil {
-		return
-	}
-	r.chatService.ClearMessages()
-}
-
-// WelcomeScreen shows the welcome message.
-func (r *Runner) WelcomeScreen() {
-	if r.chatView == nil {
-		return
-	}
-	if r.chatService != nil {
-		r.chatService.ClearMessages()
-		r.chatService.AddMessage("Welcome to Buckley", "system")
-		r.chatService.AddMessage("Type a message to get started, or use /help for commands.", "system")
-	}
 }
 
 // ShowModelPicker displays the model picker palette.

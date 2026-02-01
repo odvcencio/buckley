@@ -236,6 +236,9 @@ func (f *FilePickerWidget) drawBorder(buf *runtime.Buffer, b runtime.Rect) {
 
 // HandleMessage processes keyboard input.
 func (f *FilePickerWidget) HandleMessage(msg runtime.Message) runtime.HandleResult {
+	if mouse, ok := msg.(runtime.MouseMsg); ok {
+		return f.handleMouse(mouse)
+	}
 	key, ok := msg.(runtime.KeyMsg)
 	if !ok {
 		return runtime.Unhandled()
@@ -281,6 +284,69 @@ func (f *FilePickerWidget) HandleMessage(msg runtime.Message) runtime.HandleResu
 	}
 
 	return runtime.Unhandled()
+}
+
+func (f *FilePickerWidget) handleMouse(msg runtime.MouseMsg) runtime.HandleResult {
+	if f == nil {
+		return runtime.Unhandled()
+	}
+	bounds := f.Bounds()
+	if !bounds.Contains(msg.X, msg.Y) {
+		return runtime.Unhandled()
+	}
+	switch msg.Button {
+	case runtime.MouseWheelUp:
+		f.picker.MoveUp()
+		f.Invalidate()
+		return runtime.Handled()
+	case runtime.MouseWheelDown:
+		f.picker.MoveDown()
+		f.Invalidate()
+		return runtime.Handled()
+	case runtime.MouseLeft:
+		if msg.Action != runtime.MousePress {
+			return runtime.Unhandled()
+		}
+		if !f.IsFocused() {
+			f.Focus()
+		}
+		row, ok := f.matchRowAt(msg.X, msg.Y)
+		if !ok {
+			return runtime.Handled()
+		}
+		selected := f.picker.SelectedIndex()
+		if row == selected {
+			matches := f.picker.GetMatches()
+			if row >= 0 && row < len(matches) {
+				return runtime.WithCommands(
+					runtime.FileSelected{Path: matches[row].Path},
+					runtime.PopOverlay{},
+				)
+			}
+		}
+		f.picker.SetSelected(row)
+		f.Invalidate()
+		return runtime.Handled()
+	}
+	return runtime.Unhandled()
+}
+
+func (f *FilePickerWidget) matchRowAt(x, y int) (int, bool) {
+	b := f.Bounds()
+	if x < b.X+1 || x >= b.X+b.Width-1 {
+		return 0, false
+	}
+	startY := b.Y + 3
+	maxResults := b.Height - 4
+	if y < startY || y >= startY+maxResults {
+		return 0, false
+	}
+	row := y - startY
+	matches := f.picker.GetMatches()
+	if row < 0 || row >= len(matches) {
+		return 0, false
+	}
+	return row, true
 }
 
 // formatCount formats the file count display.

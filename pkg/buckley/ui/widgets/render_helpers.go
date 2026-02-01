@@ -29,6 +29,30 @@ func truncateString(s string, maxWidth int) string {
 	return runewidth.Truncate(s, maxWidth, "...")
 }
 
+func clipStringRight(s string, maxWidth int) string {
+	if maxWidth <= 0 {
+		return ""
+	}
+	if textWidth(s) <= maxWidth {
+		return s
+	}
+	runes := []rune(s)
+	width := 0
+	start := len(runes)
+	for start > 0 {
+		w := runewidth.RuneWidth(runes[start-1])
+		if w < 0 {
+			w = 0
+		}
+		if width+w > maxWidth {
+			break
+		}
+		width += w
+		start--
+	}
+	return string(runes[start:])
+}
+
 func padRight(s string, width int) string {
 	if width <= 0 {
 		return ""

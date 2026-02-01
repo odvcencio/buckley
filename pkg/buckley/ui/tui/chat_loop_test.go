@@ -130,6 +130,19 @@ func (r *recordingApp) AddMessage(content, source string) {
 	r.messages = append(r.messages, recordedMessage{content, source})
 }
 
+func (r *recordingApp) SetChatMessages(messages []buckleywidgets.ChatMessage) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(messages) == 0 {
+		r.messages = nil
+		return
+	}
+	r.messages = make([]recordedMessage, 0, len(messages))
+	for _, msg := range messages {
+		r.messages = append(r.messages, recordedMessage{msg.Content, msg.Source})
+	}
+}
+
 func (r *recordingApp) AppendToLastMessage(text string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -137,16 +150,6 @@ func (r *recordingApp) AppendToLastMessage(text string) {
 		last := &r.messages[len(r.messages)-1]
 		last.content += text
 	}
-}
-
-func (r *recordingApp) ClearScrollback() {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.messages = nil
-}
-
-func (r *recordingApp) WelcomeScreen() {
-	r.AddMessage("Welcome to Buckley", "system")
 }
 
 func (r *recordingApp) StreamChunk(sessionID, text string) {

@@ -32,7 +32,7 @@ func (r *Runner) showSearchOverlay() {
 	}
 
 	// Create search widget
-	searchWidget := uiwidgets.NewSearchWidget()
+	searchWidget := buckleywidgets.NewInteractiveSearch()
 	searchWidget.SetOnSearch(func(query string) {
 		r.chatView.Search(query)
 	})
@@ -49,7 +49,7 @@ func (r *Runner) showSearchOverlay() {
 	// Show as overlay
 	r.app.ExecuteCommand(runtime.PushOverlay{
 		Widget: searchWidget,
-		Modal:  false,
+		Modal:  true,
 	})
 }
 
@@ -78,7 +78,7 @@ func (r *Runner) showSlashCommandPalette() {
 		{ID: "/quit", Label: "/quit", Description: "Exit Buckley"},
 	}
 
-	palette := uiwidgets.NewPaletteWidget("Commands")
+	palette := buckleywidgets.NewInteractivePalette("Commands")
 	palette.SetItems(items)
 	palette.SetOnSelect(func(item uiwidgets.PaletteItem) {
 		r.app.ExecuteCommand(runtime.PopOverlay{})

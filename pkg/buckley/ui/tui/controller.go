@@ -21,6 +21,7 @@ import (
 	"sync"
 	"time"
 
+	buckleywidgets "github.com/odvcencio/buckley/pkg/buckley/ui/widgets"
 	"github.com/odvcencio/buckley/pkg/config"
 	projectcontext "github.com/odvcencio/buckley/pkg/context"
 	"github.com/odvcencio/buckley/pkg/conversation"
@@ -485,6 +486,62 @@ func (c *Controller) SetContext(ctx context.Context) {
 	c.ctx, c.cancel = context.WithCancel(ctx)
 }
 
+func (c *Controller) buildChatMessages(sess *SessionState, intro string, includeContext bool) []buckleywidgets.ChatMessage {
+	if c == nil || sess == nil {
+		return nil
+	}
+
+	modelName := strings.TrimSpace(c.executionModelID())
+	now := time.Now()
+	nextID := 0
+	lastUserAt := time.Time{}
+	baseLen := 0
+	if sess.Conversation != nil {
+		baseLen = len(sess.Conversation.Messages)
+	}
+	messages := make([]buckleywidgets.ChatMessage, 0, baseLen+4)
+
+	addMessage := func(content, source string, messageTime time.Time) {
+		if messageTime.IsZero() {
+			messageTime = now
+		}
+		nextID++
+		entry := buckleywidgets.ChatMessage{
+			ID:      nextID,
+			Content: content,
+			Source:  source,
+			Time:    messageTime,
+			Model:   modelName,
+		}
+		if source == "user" {
+			lastUserAt = entry.Time
+		} else if source == "assistant" {
+			entry.UserAt = lastUserAt
+		}
+		messages = append(messages, entry)
+	}
+
+	addMessage("Welcome to Buckley", "system", now)
+	addMessage("Type a message to get started, or use /help for commands.", "system", now)
+
+	if includeContext && c.projectCtx != nil && c.projectCtx.Loaded {
+		addMessage("Project context loaded from AGENTS.md", "system", now)
+	}
+
+	if strings.TrimSpace(intro) != "" {
+		addMessage(intro, "system", now)
+	}
+
+	if sess.Conversation != nil {
+		for _, msg := range sess.Conversation.Messages {
+			content := conversation.GetContentAsString(msg.Content)
+			addMessage(content, msg.Role, msg.Timestamp)
+		}
+	}
+
+	return messages
+}
+
 // Run starts the TUI controller.
 func (c *Controller) Run() error {
 	// Start telemetry bridge for sidebar updates
@@ -492,23 +549,12 @@ func (c *Controller) Run() error {
 		c.telemetryBridge.Start(c.baseContext())
 	}
 
-	// Show welcome
-	c.app.WelcomeScreen()
-
-	// Add system context if available
-	if c.projectCtx != nil && c.projectCtx.Loaded {
-		c.app.AddMessage("Project context loaded from AGENTS.md", "system")
-	}
-
-	// Load existing conversation history for current session
 	sess := c.sessions[c.currentSession]
-	if len(sess.Conversation.Messages) > 0 {
-		c.app.AddMessage(fmt.Sprintf("Resuming session: %s (%d messages)", sess.ID, len(sess.Conversation.Messages)), "system")
-		for _, msg := range sess.Conversation.Messages {
-			content := conversation.GetContentAsString(msg.Content)
-			c.app.AddMessage(content, msg.Role)
-		}
+	intro := ""
+	if sess != nil && sess.Conversation != nil && len(sess.Conversation.Messages) > 0 {
+		intro = fmt.Sprintf("Resuming session: %s (%d messages)", sess.ID, len(sess.Conversation.Messages))
 	}
+	c.app.SetChatMessages(c.buildChatMessages(sess, intro, true))
 
 	c.updateContextIndicator(sess, c.executionModelID(), "", allowedToolsForSession(sess))
 
@@ -1194,11 +1240,9 @@ func (c *Controller) newSession() {
 	c.registry = newSess.ToolRegistry
 	c.mu.Unlock()
 
-	// Clear scrollback and show fresh welcome
-	c.app.ClearScrollback()
-	c.app.WelcomeScreen()
+	// Reset scrollback with a fresh welcome
 	c.app.SetSessionID(newSess.ID)
-	c.app.AddMessage("New session started: "+newSess.ID, "system")
+	c.app.SetChatMessages(c.buildChatMessages(newSess, "New session started: "+newSess.ID, false))
 	c.app.SetStatus("Ready")
 	c.app.SetStreaming(false)
 	c.updateContextIndicator(newSess, c.executionModelID(), "", allowedToolsForSession(newSess))
@@ -2592,9 +2636,8 @@ func (c *Controller) completeSessionByIndex(idx int) {
 			c.registry = newSess.ToolRegistry
 			c.mu.Unlock()
 
-			c.app.ClearScrollback()
-			c.app.WelcomeScreen()
-			c.app.AddMessage("New session started: "+newSess.ID, "system")
+			c.app.SetSessionID(newSess.ID)
+			c.app.SetChatMessages(c.buildChatMessages(newSess, "New session started: "+newSess.ID, false))
 			c.app.SetStatus("Ready")
 			c.updateContextIndicator(newSess, c.executionModelID(), "", allowedToolsForSession(newSess))
 			return
@@ -2701,24 +2744,11 @@ func (c *Controller) switchToSessionLocked(idx int) {
 	c.registry = sess.ToolRegistry
 	c.app.SetSessionID(sess.ID)
 
-	// Clear and rebuild display
-	c.app.ClearScrollback()
-	c.app.WelcomeScreen()
-
 	statusMsg := fmt.Sprintf("Switched to session: %s", sess.ID)
 	if sess.Streaming {
 		statusMsg += " (response in progress)"
 	}
-	c.app.AddMessage(statusMsg, "system")
-
-	// Replay conversation to display
-	for _, msg := range sess.Conversation.Messages {
-		content := ""
-		if s, ok := msg.Content.(string); ok {
-			content = s
-		}
-		c.app.AddMessage(content, msg.Role)
-	}
+	c.app.SetChatMessages(c.buildChatMessages(sess, statusMsg, false))
 
 	if sess.Streaming {
 		c.app.SetStatus("Streaming...")

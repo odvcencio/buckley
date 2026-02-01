@@ -11,6 +11,7 @@ import (
 	"github.com/odvcencio/fluffyui/toast"
 	"github.com/odvcencio/fluffyui/widgets"
 
+	buckleywidgets "github.com/odvcencio/buckley/pkg/buckley/ui/widgets"
 	"github.com/odvcencio/buckley/pkg/diagnostics"
 )
 
@@ -353,28 +354,31 @@ func TestRunnerDiagnostics(t *testing.T) {
 	runner.SetDiagnostics(collector)
 }
 
-// TestRunnerWelcomeScreen verifies welcome screen can be shown.
-func TestRunnerWelcomeScreen(t *testing.T) {
+// TestRunnerSetChatMessages verifies chat history can be replaced.
+func TestRunnerSetChatMessages(t *testing.T) {
 	testBackend := newTestBackend(80, 24)
 	runner, err := NewRunner(RunnerConfig{Backend: testBackend})
 	if err != nil {
 		t.Fatalf("NewRunner failed: %v", err)
 	}
 
-	// Should not panic
-	runner.WelcomeScreen()
-}
-
-// TestRunnerClearScrollback verifies scrollback can be cleared.
-func TestRunnerClearScrollback(t *testing.T) {
-	testBackend := newTestBackend(80, 24)
-	runner, err := NewRunner(RunnerConfig{Backend: testBackend})
-	if err != nil {
-		t.Fatalf("NewRunner failed: %v", err)
+	now := time.Now()
+	messages := []buckleywidgets.ChatMessage{
+		{ID: 1, Content: "Hello", Source: "system", Time: now},
+		{ID: 2, Content: "Hey", Source: "user", Time: now.Add(time.Second)},
 	}
 
-	runner.AddMessage("Test message", "user")
-	runner.ClearScrollback()
+	runner.SetChatMessages(messages)
+	got := runner.state.ChatMessages.Get()
+	if len(got) != 2 {
+		t.Fatalf("expected 2 messages, got %d", len(got))
+	}
+	if got[0].Content != "Hello" || got[0].Source != "system" {
+		t.Errorf("unexpected first message: %+v", got[0])
+	}
+	if got[1].Content != "Hey" || got[1].Source != "user" {
+		t.Errorf("unexpected second message: %+v", got[1])
+	}
 }
 
 // TestRunnerShowModelPicker verifies model picker can be shown.

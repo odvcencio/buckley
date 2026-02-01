@@ -22,8 +22,7 @@ type App interface {
 	// Content
 	AddMessage(content, source string)
 	AppendToLastMessage(text string)
-	ClearScrollback()
-	WelcomeScreen()
+	SetChatMessages(messages []buckleywidgets.ChatMessage)
 
 	// Streaming
 	StreamChunk(sessionID, text string)

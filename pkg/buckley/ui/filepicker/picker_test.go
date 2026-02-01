@@ -244,6 +244,11 @@ func TestFilePicker(t *testing.T) {
 		if fp.SelectedIndex() != 0 {
 			t.Errorf("SelectedIndex() = %d, want 0 (shouldn't go negative)", fp.SelectedIndex())
 		}
+
+		fp.SetSelected(2)
+		if fp.SelectedIndex() != 2 {
+			t.Errorf("SelectedIndex() = %d, want 2", fp.SelectedIndex())
+		}
 	})
 
 	t.Run("append and backspace", func(t *testing.T) {
