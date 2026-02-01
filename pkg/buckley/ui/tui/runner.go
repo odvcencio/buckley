@@ -42,6 +42,9 @@ type RunnerConfig struct {
 	WebBaseURL      string
 	Audio           AudioConfig
 	AgentSocket     string
+	SidebarWidth    int
+	SidebarMinWidth int
+	SidebarMaxWidth int
 
 	// Callbacks
 	OnSubmit      func(text string)
@@ -120,11 +123,15 @@ func NewRunner(cfg RunnerConfig) (*Runner, error) {
 
 	styleCache := NewStyleCache()
 	appState := uitstate.NewAppState()
+	sidebarCfg := resolveSidebarConfig(cfg)
 	statusService := uiservices.NewStatusService(appState, nil)
 	chatService := uiservices.NewChatService(appState)
 	sidebarService := uiservices.NewSidebarService(appState)
 	appState.ModelName.Set(strings.TrimSpace(cfg.ModelName))
 	appState.SessionID.Set(strings.TrimSpace(cfg.SessionID))
+	if appState.SidebarWidth != nil {
+		appState.SidebarWidth.Set(sidebarCfg.Width)
+	}
 	chatService.SetModelName(cfg.ModelName)
 
 	r := &Runner{
@@ -246,6 +253,26 @@ func NewRunner(cfg RunnerConfig) (*Runner, error) {
 	return r, nil
 }
 
+func resolveSidebarConfig(cfg RunnerConfig) buckleywidgets.SidebarConfig {
+	sidebarCfg := buckleywidgets.DefaultSidebarConfig()
+	if cfg.SidebarMinWidth > 0 {
+		sidebarCfg.MinWidth = cfg.SidebarMinWidth
+	}
+	if cfg.SidebarMaxWidth > 0 {
+		sidebarCfg.MaxWidth = cfg.SidebarMaxWidth
+	}
+	if cfg.SidebarWidth > 0 {
+		sidebarCfg.Width = cfg.SidebarWidth
+	}
+	if sidebarCfg.Width < sidebarCfg.MinWidth {
+		sidebarCfg.Width = sidebarCfg.MinWidth
+	}
+	if sidebarCfg.Width > sidebarCfg.MaxWidth {
+		sidebarCfg.Width = sidebarCfg.MaxWidth
+	}
+	return sidebarCfg
+}
+
 // Run starts the TUI event loop.
 // Implements App interface.
 func (r *Runner) Run() error {
@@ -355,12 +382,14 @@ func (r *Runner) buildWidgets(cfg RunnerConfig, styleCache *StyleCache) {
 
 	// Sidebar
 	r.sidebar = buckleywidgets.NewSidebarWithBindings(
-		buckleywidgets.DefaultSidebarConfig(),
+		resolveSidebarConfig(cfg),
 		buckleywidgets.SidebarBindings{
 			State:           r.state.SidebarState,
 			ContextUsed:     r.state.ContextUsed,
 			ContextBudget:   r.state.ContextBudget,
 			ContextWindow:   r.state.ContextWindow,
+			Width:           r.state.SidebarWidth,
+			TabIndex:        r.state.SidebarTabIndex,
 			ShowCurrentTask: r.state.SidebarShowCurrentTask,
 			ShowPlan:        r.state.SidebarShowPlan,
 			ShowTools:       r.state.SidebarShowTools,
@@ -446,14 +475,21 @@ func (r *Runner) buildLayout() runtime.Widget {
 }
 
 func (r *Runner) bindLayoutSignals() {
-	if r == nil || r.app == nil || r.state == nil || r.state.SidebarVisible == nil {
+	if r == nil || r.app == nil || r.state == nil {
 		return
 	}
 	r.layoutSubs.Clear()
 	r.layoutSubs.SetScheduler(r.app.Services().Scheduler())
-	r.layoutSubs.Observe(r.state.SidebarVisible, func() {
-		r.rebuildLayout()
-	})
+	if r.state.SidebarVisible != nil {
+		r.layoutSubs.Observe(r.state.SidebarVisible, func() {
+			r.rebuildLayout()
+		})
+	}
+	if r.state.SidebarWidth != nil {
+		r.layoutSubs.Observe(r.state.SidebarWidth, func() {
+			r.rebuildLayout()
+		})
+	}
 }
 
 // wireInputCallbacks connects input area callbacks.

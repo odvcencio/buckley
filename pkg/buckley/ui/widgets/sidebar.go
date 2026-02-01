@@ -127,6 +127,8 @@ type SidebarBindings struct {
 	ContextUsed     state.Readable[int]
 	ContextBudget   state.Readable[int]
 	ContextWindow   state.Readable[int]
+	Width           state.Readable[int]
+	TabIndex        state.Readable[int]
 	ShowCurrentTask state.Readable[bool]
 	ShowPlan        state.Readable[bool]
 	ShowTools       state.Readable[bool]
@@ -160,6 +162,8 @@ type Sidebar struct {
 	contextUsedSig     state.Readable[int]
 	contextBudgetSig   state.Readable[int]
 	contextWindowSig   state.Readable[int]
+	widthSig           state.Readable[int]
+	tabIndexSig        state.Readable[int]
 	showCurrentTaskSig state.Readable[bool]
 	showPlanSig        state.Readable[bool]
 	showToolsSig       state.Readable[bool]
@@ -298,6 +302,8 @@ func NewSidebarWithBindings(cfg SidebarConfig, bindings SidebarBindings) *Sideba
 	s.contextUsedSig = bindings.ContextUsed
 	s.contextBudgetSig = bindings.ContextBudget
 	s.contextWindowSig = bindings.ContextWindow
+	s.widthSig = bindings.Width
+	s.tabIndexSig = bindings.TabIndex
 	s.showCurrentTaskSig = bindings.ShowCurrentTask
 	s.showPlanSig = bindings.ShowPlan
 	s.showToolsSig = bindings.ShowTools
@@ -347,6 +353,12 @@ func (s *Sidebar) subscribe() {
 	if s.contextWindowSig != nil {
 		s.subs.Observe(s.contextWindowSig, s.onContextChanged)
 	}
+	if s.widthSig != nil {
+		s.subs.Observe(s.widthSig, s.onWidthChanged)
+	}
+	if s.tabIndexSig != nil {
+		s.subs.Observe(s.tabIndexSig, s.onTabIndexChanged)
+	}
 	if s.showCurrentTaskSig != nil {
 		s.subs.Observe(s.showCurrentTaskSig, s.onVisibilityChanged)
 	}
@@ -376,6 +388,8 @@ func (s *Sidebar) subscribe() {
 	}
 	s.onStateChanged()
 	s.onContextChanged()
+	s.onWidthChanged()
+	s.onTabIndexChanged()
 	s.onVisibilityChanged()
 }
 
@@ -393,6 +407,27 @@ func (s *Sidebar) onContextChanged() {
 	}
 	s.applyContext()
 	s.requestInvalidate()
+}
+
+func (s *Sidebar) onWidthChanged() {
+	if s.widthSig == nil {
+		return
+	}
+	width := s.widthSig.Get()
+	normalized := s.normalizeWidth(width)
+	if normalized != width {
+		s.writeWidthSignal(normalized)
+	}
+	if s.setWidthLocal(normalized) {
+		s.requestRelayout()
+	}
+}
+
+func (s *Sidebar) onTabIndexChanged() {
+	if s.tabIndexSig == nil {
+		return
+	}
+	s.applyTabIndex(s.tabIndexSig.Get())
 }
 
 func (s *Sidebar) onVisibilityChanged() {
@@ -902,18 +937,108 @@ func (s *Sidebar) Measure(constraints runtime.Constraints) runtime.Size {
 
 // SetWidth changes the sidebar width within configured min/max bounds.
 func (s *Sidebar) SetWidth(width int) {
+	if s == nil {
+		return
+	}
+	if s.widthSig != nil {
+		s.writeWidthSignal(width)
+		return
+	}
+	if s.setWidthLocal(width) {
+		s.requestRelayout()
+	}
+}
+
+func (s *Sidebar) normalizeWidth(width int) int {
 	if width < s.config.MinWidth {
 		width = s.config.MinWidth
 	}
 	if width > s.config.MaxWidth {
 		width = s.config.MaxWidth
 	}
+	return width
+}
+
+func (s *Sidebar) setWidthLocal(width int) bool {
+	if s == nil {
+		return false
+	}
+	width = s.normalizeWidth(width)
+	if s.config.Width == width {
+		return false
+	}
 	s.config.Width = width
+	return true
+}
+
+func (s *Sidebar) writeWidthSignal(width int) {
+	if s == nil || s.widthSig == nil {
+		return
+	}
+	width = s.normalizeWidth(width)
+	if writable, ok := s.widthSig.(state.Writable[int]); ok && writable != nil {
+		writable.Set(width)
+	}
 }
 
 // Width returns the current sidebar width.
 func (s *Sidebar) Width() int {
 	return s.config.Width
+}
+
+// SetSelectedTab selects the sidebar tab index.
+func (s *Sidebar) SetSelectedTab(index int) {
+	if s == nil {
+		return
+	}
+	if s.tabIndexSig != nil {
+		s.writeTabIndex(index)
+		return
+	}
+	s.setSelectedTabLocal(index)
+}
+
+func (s *Sidebar) normalizeTabIndex(index int) int {
+	if s.tabs == nil || len(s.tabs.Tabs) == 0 {
+		return 0
+	}
+	if index < 0 {
+		return 0
+	}
+	if index >= len(s.tabs.Tabs) {
+		return len(s.tabs.Tabs) - 1
+	}
+	return index
+}
+
+func (s *Sidebar) setSelectedTabLocal(index int) {
+	if s.tabs == nil {
+		return
+	}
+	s.tabs.SetSelected(index)
+}
+
+func (s *Sidebar) writeTabIndex(index int) {
+	if s == nil || s.tabIndexSig == nil {
+		return
+	}
+	index = s.normalizeTabIndex(index)
+	if writable, ok := s.tabIndexSig.(state.Writable[int]); ok && writable != nil {
+		writable.Set(index)
+	}
+}
+
+func (s *Sidebar) applyTabIndex(index int) {
+	if s.tabs == nil {
+		return
+	}
+	normalized := s.normalizeTabIndex(index)
+	if normalized != index {
+		s.writeTabIndex(normalized)
+	}
+	if s.tabs.SelectedIndex() != normalized {
+		s.tabs.SetSelected(normalized)
+	}
 }
 
 // Grow increases the sidebar width by delta characters.
@@ -954,7 +1079,57 @@ func (s *Sidebar) HandleMessage(msg runtime.Message) runtime.HandleResult {
 	if s.tabs == nil {
 		return runtime.Unhandled()
 	}
-	return s.tabs.HandleMessage(msg)
+	if mouse, ok := msg.(runtime.MouseMsg); ok {
+		if mouse.Action == runtime.MousePress && mouse.Button == runtime.MouseLeft {
+			if s.handleTabClick(mouse.X, mouse.Y) {
+				return runtime.Handled()
+			}
+		}
+	}
+	before := s.tabs.SelectedIndex()
+	result := s.tabs.HandleMessage(msg)
+	if result.Handled {
+		after := s.tabs.SelectedIndex()
+		if after != before {
+			s.writeTabIndex(after)
+		}
+	}
+	return result
+}
+
+func (s *Sidebar) handleTabClick(x, y int) bool {
+	if s == nil || s.tabs == nil {
+		return false
+	}
+	content := s.tabs.ContentBounds()
+	if content.Width <= 0 || content.Height <= 0 {
+		return false
+	}
+	if y != content.Y {
+		return false
+	}
+	if x < content.X || x >= content.X+content.Width {
+		return false
+	}
+	cursor := content.X
+	maxX := content.X + content.Width
+	for i, tab := range s.tabs.Tabs {
+		label := " " + tab.Title + " "
+		labelWidth := len([]rune(label))
+		if cursor >= maxX {
+			break
+		}
+		if cursor+labelWidth > maxX {
+			labelWidth = max(0, maxX-cursor)
+		}
+		if x >= cursor && x < cursor+labelWidth {
+			s.tabs.SetSelected(i)
+			s.writeTabIndex(i)
+			return true
+		}
+		cursor += labelWidth
+	}
+	return false
 }
 
 // ChildWidgets returns child widgets for traversal.

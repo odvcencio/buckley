@@ -245,6 +245,42 @@ func TestSidebar_VisibilitySignals(t *testing.T) {
 	}
 }
 
+func TestSidebar_WidthSignal(t *testing.T) {
+	width := state.NewSignal(30)
+	s := NewSidebarWithBindings(DefaultSidebarConfig(), SidebarBindings{
+		Width: width,
+	})
+	if s.Width() != 30 {
+		t.Fatalf("expected width 30, got %d", s.Width())
+	}
+	width.Set(40)
+	if s.Width() != 40 {
+		t.Fatalf("expected width 40, got %d", s.Width())
+	}
+}
+
+func TestSidebar_TabIndexSignal(t *testing.T) {
+	tabIndex := state.NewSignal(1)
+	s := NewSidebarWithBindings(DefaultSidebarConfig(), SidebarBindings{
+		TabIndex: tabIndex,
+	})
+	if s.tabs == nil {
+		t.Fatal("expected tabs to be initialized")
+	}
+	if s.tabs.SelectedIndex() != 1 {
+		t.Fatalf("expected tab index 1, got %d", s.tabs.SelectedIndex())
+	}
+	tabIndex.Set(0)
+	if s.tabs.SelectedIndex() != 0 {
+		t.Fatalf("expected tab index 0, got %d", s.tabs.SelectedIndex())
+	}
+	s.tabs.Focus()
+	s.HandleMessage(runtime.KeyMsg{Key: terminal.KeyRight})
+	if tabIndex.Get() != 1 {
+		t.Fatalf("expected signal index 1, got %d", tabIndex.Get())
+	}
+}
+
 func TestSidebar_HandleMessage_TabSwitch(t *testing.T) {
 	s := NewSidebar()
 	if s.tabs == nil {
@@ -266,6 +302,27 @@ func TestSidebar_HandleMessage_TabSwitch(t *testing.T) {
 	}
 	if s.tabs.SelectedIndex() != 0 {
 		t.Fatalf("expected tab index 0, got %d", s.tabs.SelectedIndex())
+	}
+}
+
+func TestSidebar_HandleMessage_MouseTabClick(t *testing.T) {
+	s := NewSidebar()
+	if s.tabs == nil {
+		t.Fatal("expected tabs to be initialized")
+	}
+	s.Layout(runtime.Rect{X: 0, Y: 0, Width: 30, Height: 8})
+
+	result := s.HandleMessage(runtime.MouseMsg{
+		X:      9,
+		Y:      0,
+		Button: runtime.MouseLeft,
+		Action: runtime.MousePress,
+	})
+	if !result.Handled {
+		t.Fatal("expected mouse click to switch tabs")
+	}
+	if s.tabs.SelectedIndex() != 1 {
+		t.Fatalf("expected tab index 1, got %d", s.tabs.SelectedIndex())
 	}
 }
 

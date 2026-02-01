@@ -332,6 +332,9 @@ func NewController(cfg ControllerConfig) (*Controller, error) {
 	webBaseURL := ""
 	metadataMode := ""
 	audioCfg := AudioConfig{}
+	sidebarWidth := 0
+	sidebarMinWidth := 0
+	sidebarMaxWidth := 0
 	if cfg.Config != nil {
 		webBaseURL = resolveWebBaseURL(cfg.Config)
 		metadataMode = cfg.Config.UI.MessageMetadata
@@ -343,6 +346,9 @@ func NewController(cfg ControllerConfig) (*Controller, error) {
 			MusicVolume:  cfg.Config.UI.Audio.MusicVolume,
 			Muted:        cfg.Config.UI.Audio.Muted,
 		}
+		sidebarWidth = cfg.Config.UI.SidebarWidth
+		sidebarMinWidth = cfg.Config.UI.SidebarMinWidth
+		sidebarMaxWidth = cfg.Config.UI.SidebarMaxWidth
 	}
 	// Use fluffyui-native Runner by default (simpler, more maintainable)
 	var app App
@@ -359,6 +365,9 @@ func NewController(cfg ControllerConfig) (*Controller, error) {
 		WebBaseURL:      webBaseURL,
 		Audio:           audioCfg,
 		AgentSocket:     cfg.AgentSocket,
+		SidebarWidth:    sidebarWidth,
+		SidebarMinWidth: sidebarMinWidth,
+		SidebarMaxWidth: sidebarMaxWidth,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("create TUI app: %w", err)

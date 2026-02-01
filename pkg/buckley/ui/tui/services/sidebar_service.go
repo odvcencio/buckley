@@ -71,6 +71,64 @@ func (svc *SidebarService) ToggleRecentFiles() {
 	toggleBool(svc.state.SidebarShowRecentFiles)
 }
 
+// SetWidth sets the sidebar width in characters.
+func (svc *SidebarService) SetWidth(width int) {
+	if svc == nil || svc.state == nil || svc.state.SidebarWidth == nil {
+		return
+	}
+	svc.state.SidebarWidth.Set(width)
+}
+
+// Grow increases the sidebar width by delta characters.
+func (svc *SidebarService) Grow(delta int) {
+	if svc == nil || svc.state == nil || svc.state.SidebarWidth == nil {
+		return
+	}
+	if delta == 0 {
+		return
+	}
+	current := svc.state.SidebarWidth.Get()
+	svc.state.SidebarWidth.Set(current + delta)
+}
+
+// Shrink decreases the sidebar width by delta characters.
+func (svc *SidebarService) Shrink(delta int) {
+	if svc == nil || svc.state == nil || svc.state.SidebarWidth == nil {
+		return
+	}
+	if delta == 0 {
+		return
+	}
+	current := svc.state.SidebarWidth.Get()
+	svc.state.SidebarWidth.Set(current - delta)
+}
+
+// SetTabIndex selects the sidebar tab by index.
+func (svc *SidebarService) SetTabIndex(index int) {
+	if svc == nil || svc.state == nil || svc.state.SidebarTabIndex == nil {
+		return
+	}
+	svc.state.SidebarTabIndex.Set(index)
+}
+
+// NextTab advances the sidebar tab selection.
+func (svc *SidebarService) NextTab() {
+	if svc == nil || svc.state == nil || svc.state.SidebarTabIndex == nil {
+		return
+	}
+	current := svc.state.SidebarTabIndex.Get()
+	svc.state.SidebarTabIndex.Set(current + 1)
+}
+
+// PrevTab moves the sidebar tab selection backward.
+func (svc *SidebarService) PrevTab() {
+	if svc == nil || svc.state == nil || svc.state.SidebarTabIndex == nil {
+		return
+	}
+	current := svc.state.SidebarTabIndex.Get()
+	svc.state.SidebarTabIndex.Set(current - 1)
+}
+
 type boolSignal interface {
 	Get() bool
 	Set(bool) bool
