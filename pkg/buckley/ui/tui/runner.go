@@ -205,6 +205,10 @@ func NewRunner(cfg RunnerConfig) (*Runner, error) {
 			{Key: keybind.MustParseKeySequence("ctrl+g s"), Command: "buckley.toggle-sidebar"},
 			{Key: keybind.MustParseKeySequence("ctrl+g f"), Command: "buckley.search"},
 			{Key: keybind.MustParseKeySequence("ctrl+g i"), Command: "buckley.focus-input"},
+			{Key: keybind.MustParseKeySequence("ctrl+g ,"), Command: "buckley.sidebar.prev-tab"},
+			{Key: keybind.MustParseKeySequence("ctrl+g ."), Command: "buckley.sidebar.next-tab"},
+			{Key: keybind.MustParseKeySequence("ctrl+g ["), Command: "buckley.sidebar.shrink"},
+			{Key: keybind.MustParseKeySequence("ctrl+g ]"), Command: "buckley.sidebar.grow"},
 		},
 	}
 
@@ -273,6 +277,44 @@ func resolveSidebarConfig(cfg RunnerConfig) buckleywidgets.SidebarConfig {
 	return sidebarCfg
 }
 
+func (r *Runner) handleCodeAction(action, language, code string) {
+	if strings.TrimSpace(code) == "" {
+		return
+	}
+	switch action {
+	case "copy":
+		r.copyToClipboard(code, "Copied code block")
+	case "open":
+		if r.app == nil {
+			r.copyToClipboard(code, "Copied code block")
+			return
+		}
+		r.showCodePreview(language, code)
+	}
+}
+
+func (r *Runner) copyToClipboard(text, success string) {
+	if r.app == nil {
+		return
+	}
+	cb := r.app.Services().Clipboard()
+	if cb == nil || !cb.Available() {
+		if r.statusService != nil {
+			r.statusService.SetStatusOverride("Clipboard unavailable", 2*time.Second)
+		}
+		return
+	}
+	if err := cb.Write(text); err != nil {
+		if r.statusService != nil {
+			r.statusService.SetStatusOverride("Clipboard unavailable", 2*time.Second)
+		}
+		return
+	}
+	if r.statusService != nil {
+		r.statusService.SetStatusOverride(success, 2*time.Second)
+	}
+}
+
 // Run starts the TUI event loop.
 // Implements App interface.
 func (r *Runner) Run() error {
@@ -334,6 +376,7 @@ func (r *Runner) buildWidgets(cfg RunnerConfig, styleCache *StyleCache) {
 	)
 	mdRenderer := markdown.NewRenderer(th)
 	r.chatView.SetMarkdownRenderer(mdRenderer, styleCache.Get(mdRenderer.CodeBlockBackground()))
+	r.chatView.OnCodeAction(r.handleCodeAction)
 	r.chatView.OnScrollChange(func(top, total, viewHeight int) {
 		if r.statusService == nil {
 			return
@@ -652,6 +695,46 @@ func (r *Runner) registerKeyBindings(registry *keybind.CommandRegistry) {
 		Handler: func(ctx keybind.Context) {
 			if r.sidebarService != nil {
 				r.sidebarService.ToggleRecentFiles()
+			}
+		},
+	})
+
+	registry.Register(keybind.Command{
+		ID:    "buckley.sidebar.prev-tab",
+		Title: "Sidebar Previous Tab",
+		Handler: func(ctx keybind.Context) {
+			if r.sidebarService != nil {
+				r.sidebarService.PrevTab()
+			}
+		},
+	})
+
+	registry.Register(keybind.Command{
+		ID:    "buckley.sidebar.next-tab",
+		Title: "Sidebar Next Tab",
+		Handler: func(ctx keybind.Context) {
+			if r.sidebarService != nil {
+				r.sidebarService.NextTab()
+			}
+		},
+	})
+
+	registry.Register(keybind.Command{
+		ID:    "buckley.sidebar.shrink",
+		Title: "Sidebar Shrink",
+		Handler: func(ctx keybind.Context) {
+			if r.sidebarService != nil {
+				r.sidebarService.Shrink(2)
+			}
+		},
+	})
+
+	registry.Register(keybind.Command{
+		ID:    "buckley.sidebar.grow",
+		Title: "Sidebar Grow",
+		Handler: func(ctx keybind.Context) {
+			if r.sidebarService != nil {
+				r.sidebarService.Grow(2)
 			}
 		},
 	})

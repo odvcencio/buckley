@@ -102,6 +102,13 @@ func (c *ChatView) SetUIStyles(scrollbar, thumb, selection, search, background b
 	c.bgStyle = background
 }
 
+// OnCodeAction registers a handler for code block actions from the chat list.
+func (c *ChatView) OnCodeAction(fn func(action, language, code string)) {
+	if c.ChatMessages != nil {
+		c.ChatMessages.OnCodeAction(fn)
+	}
+}
+
 func (c *ChatView) ownsReasoning() bool {
 	if c == nil || c.reasoningTextSig == nil || c.reasoningPreviewSig == nil || c.reasoningVisibleSig == nil {
 		return false

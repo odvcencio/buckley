@@ -60,6 +60,44 @@ func TestNewRunner(t *testing.T) {
 	}
 }
 
+func TestRunnerSidebarWidthConfig(t *testing.T) {
+	testBackend := newTestBackend(80, 24)
+	cfg := RunnerConfig{
+		Backend:         testBackend,
+		SidebarWidth:    30,
+		SidebarMinWidth: 20,
+		SidebarMaxWidth: 40,
+	}
+	runner, err := NewRunner(cfg)
+	if err != nil {
+		t.Fatalf("NewRunner failed: %v", err)
+	}
+	if got := runner.state.SidebarWidth.Get(); got != 30 {
+		t.Fatalf("expected sidebar width signal 30, got %d", got)
+	}
+	if runner.sidebar.Width() != 30 {
+		t.Fatalf("expected sidebar width 30, got %d", runner.sidebar.Width())
+	}
+
+	testBackend = newTestBackend(80, 24)
+	cfg = RunnerConfig{
+		Backend:         testBackend,
+		SidebarWidth:    10,
+		SidebarMinWidth: 16,
+		SidebarMaxWidth: 30,
+	}
+	runner, err = NewRunner(cfg)
+	if err != nil {
+		t.Fatalf("NewRunner failed: %v", err)
+	}
+	if got := runner.state.SidebarWidth.Get(); got != 16 {
+		t.Fatalf("expected clamped width 16, got %d", got)
+	}
+	if runner.sidebar.Width() != 16 {
+		t.Fatalf("expected sidebar width 16, got %d", runner.sidebar.Width())
+	}
+}
+
 func TestRunnerToggleSidebar(t *testing.T) {
 	testBackend := newTestBackend(80, 24)
 	runner, err := NewRunner(RunnerConfig{Backend: testBackend})

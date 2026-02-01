@@ -76,9 +76,13 @@ type ChatMessages struct {
 	hoveredMessageID int
 	hoveredCodeStart int
 	hoveredCodeEnd   int
+	selecting        bool
+	scrollDragging   bool
+	scrollDragOffset int
 
 	// Callbacks
 	onScrollChange func(top, total, viewHeight int)
+	onCodeAction   func(action, language, code string)
 }
 
 type chatListAdapter struct {
@@ -248,6 +252,11 @@ func (m *ChatMessages) SetModelName(name string) {
 // OnScrollChange sets a callback for scroll position changes.
 func (m *ChatMessages) OnScrollChange(fn func(top, total, viewHeight int)) {
 	m.onScrollChange = fn
+}
+
+// OnCodeAction registers a handler for code header actions ("copy", "open").
+func (m *ChatMessages) OnCodeAction(fn func(action, language, code string)) {
+	m.onCodeAction = fn
 }
 
 func (m *ChatMessages) ownsMessages() bool {
@@ -604,6 +613,9 @@ func (m *ChatMessages) Clear() {
 	m.hoveredMessageID = 0
 	m.hoveredCodeStart = -1
 	m.hoveredCodeEnd = -1
+	m.selecting = false
+	m.scrollDragging = false
+	m.scrollDragOffset = 0
 	if m.list != nil {
 		m.list.ScrollToOffset(0)
 	}
@@ -997,6 +1009,42 @@ func (m *ChatMessages) handleMouse(evt runtime.MouseMsg) runtime.HandleResult {
 		return runtime.Handled()
 	}
 
+	switch evt.Action {
+	case runtime.MousePress:
+		if evt.Button == runtime.MouseLeft {
+			if m.startScrollbarDrag(evt.X, evt.Y) {
+				return runtime.Handled()
+			}
+			if action, language, code, ok := m.CodeHeaderActionAtPoint(evt.X, evt.Y); ok {
+				m.handleCodeAction(action, language, code)
+				return runtime.Handled()
+			}
+			if m.startSelectionAt(evt.X, evt.Y) {
+				return runtime.Handled()
+			}
+		}
+	case runtime.MouseMove:
+		if m.scrollDragging {
+			if m.updateScrollbarDrag(evt.Y) {
+				return runtime.Handled()
+			}
+		}
+		if m.selecting {
+			if m.updateSelectionAt(evt.X, evt.Y) {
+				return runtime.Handled()
+			}
+		}
+	case runtime.MouseRelease:
+		if evt.Button == runtime.MouseLeft && m.scrollDragging {
+			m.scrollDragging = false
+			return runtime.Handled()
+		}
+		if evt.Button == runtime.MouseLeft && m.selecting {
+			m.endSelection()
+			return runtime.Handled()
+		}
+	}
+
 	if evt.Button != runtime.MouseNone || (evt.Action != runtime.MouseRelease && evt.Action != runtime.MouseMove) {
 		return runtime.Unhandled()
 	}
@@ -1036,6 +1084,121 @@ func (m *ChatMessages) clearHover() runtime.HandleResult {
 	m.hoveredCodeEnd = -1
 	m.requestInvalidate()
 	return runtime.Handled()
+}
+
+func (m *ChatMessages) handleCodeAction(action, language, code string) {
+	if strings.TrimSpace(code) == "" {
+		return
+	}
+	if m.onCodeAction != nil {
+		m.onCodeAction(action, language, code)
+		return
+	}
+	if action == "copy" {
+		m.copyToClipboard(code)
+	}
+}
+
+func (m *ChatMessages) copyToClipboard(text string) bool {
+	if m.services == (runtime.Services{}) {
+		return false
+	}
+	cb := m.services.Clipboard()
+	if cb == nil || !cb.Available() {
+		return false
+	}
+	_ = cb.Write(text)
+	return true
+}
+
+func (m *ChatMessages) startSelectionAt(x, y int) bool {
+	line, col, ok := m.PositionForPoint(x, y)
+	if !ok {
+		return false
+	}
+	m.buffer.StartSelection(line, col)
+	m.selecting = true
+	m.requestInvalidate()
+	return true
+}
+
+func (m *ChatMessages) updateSelectionAt(x, y int) bool {
+	line, col, ok := m.PositionForPoint(x, y)
+	if !ok {
+		return false
+	}
+	m.buffer.UpdateSelection(line, col)
+	m.requestInvalidate()
+	return true
+}
+
+func (m *ChatMessages) endSelection() {
+	if m.selecting {
+		m.buffer.EndSelection()
+		m.selecting = false
+		m.requestInvalidate()
+	}
+}
+
+func (m *ChatMessages) startScrollbarDrag(x, y int) bool {
+	if m.listBounds.Width <= 0 || m.listBounds.Height <= 0 {
+		return false
+	}
+	scrollX := m.listBounds.X + m.listBounds.Width
+	if x != scrollX {
+		return false
+	}
+	top, total, viewH := m.buffer.ScrollPosition()
+	if total <= viewH || viewH <= 0 {
+		return false
+	}
+	thumbSize := max(1, (viewH*viewH)/total)
+	maxThumbPos := viewH - thumbSize
+	if maxThumbPos <= 0 {
+		return false
+	}
+	thumbPos := (top * maxThumbPos) / (total - viewH)
+	trackPos := y - m.listBounds.Y
+	if trackPos < 0 || trackPos >= viewH {
+		return false
+	}
+	if trackPos >= thumbPos && trackPos < thumbPos+thumbSize {
+		m.scrollDragOffset = trackPos - thumbPos
+	} else {
+		m.scrollDragOffset = thumbSize / 2
+	}
+	m.scrollDragging = true
+	return m.updateScrollbarDrag(y)
+}
+
+func (m *ChatMessages) updateScrollbarDrag(y int) bool {
+	top, total, viewH := m.buffer.ScrollPosition()
+	if total <= viewH || viewH <= 0 {
+		return false
+	}
+	thumbSize := max(1, (viewH*viewH)/total)
+	maxThumbPos := viewH - thumbSize
+	if maxThumbPos <= 0 {
+		return false
+	}
+	trackPos := y - m.listBounds.Y
+	thumbPos := trackPos - m.scrollDragOffset
+	if thumbPos < 0 {
+		thumbPos = 0
+	}
+	if thumbPos > maxThumbPos {
+		thumbPos = maxThumbPos
+	}
+	newTop := (thumbPos * (total - viewH)) / maxThumbPos
+	if newTop == top {
+		return true
+	}
+	if newTop > top {
+		m.ScrollDown(newTop - top)
+	} else {
+		m.ScrollUp(top - newTop)
+	}
+	return true
 }
 
 func (m *ChatMessages) styleForSource(source string) backend.Style {

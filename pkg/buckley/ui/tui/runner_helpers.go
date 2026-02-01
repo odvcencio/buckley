@@ -6,6 +6,7 @@ package tui
 import (
 	"strconv"
 
+	buckleywidgets "github.com/odvcencio/buckley/pkg/buckley/ui/widgets"
 	"github.com/odvcencio/fluffyui/backend"
 	"github.com/odvcencio/fluffyui/runtime"
 	uiwidgets "github.com/odvcencio/fluffyui/widgets"
@@ -87,6 +88,26 @@ func (r *Runner) showSlashCommandPalette() {
 
 	r.app.ExecuteCommand(runtime.PushOverlay{
 		Widget: palette,
+		Modal:  true,
+	})
+}
+
+// showCodePreview displays a modal code preview overlay.
+func (r *Runner) showCodePreview(language, code string) {
+	if r.app == nil {
+		return
+	}
+	preview := buckleywidgets.NewCodePreview(language, code)
+	if r.theme != nil && r.styleCache != nil {
+		preview.SetStyles(
+			r.styleCache.Get(r.theme.Border),
+			r.styleCache.Get(r.theme.Surface),
+			r.styleCache.Get(r.theme.TextMuted),
+			r.styleCache.Get(r.theme.TextPrimary),
+		)
+	}
+	r.app.ExecuteCommand(runtime.PushOverlay{
+		Widget: preview,
 		Modal:  true,
 	})
 }

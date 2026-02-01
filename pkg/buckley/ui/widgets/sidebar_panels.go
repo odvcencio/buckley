@@ -97,7 +97,7 @@ func (p *taskPanel) AdvanceSpinner() {
 
 type planPanel struct {
 	progress *uiwidgets.Progress
-	table    *uiwidgets.Table
+	table    *InteractiveTable
 	panel    *uiwidgets.Panel
 }
 
@@ -105,7 +105,7 @@ func newPlanPanel(border backend.Style) *planPanel {
 	progress := uiwidgets.NewProgress()
 	progress.Label = "Plan"
 	progress.ShowPercent = true
-	table := uiwidgets.NewTable(
+	table := NewInteractiveTable(
 		uiwidgets.TableColumn{Title: "Task"},
 		uiwidgets.TableColumn{Title: "Status"},
 	)
@@ -159,12 +159,12 @@ func (p *planPanel) Update(tasks []PlanTask) {
 }
 
 type toolsPanel struct {
-	table *uiwidgets.Table
+	table *InteractiveTable
 	panel *uiwidgets.Panel
 }
 
 func newToolsPanel(border backend.Style) *toolsPanel {
-	table := uiwidgets.NewTable(
+	table := NewInteractiveTable(
 		uiwidgets.TableColumn{Title: "Tool"},
 		uiwidgets.TableColumn{Title: "Status"},
 		uiwidgets.TableColumn{Title: "Detail"},
@@ -281,12 +281,12 @@ func (p *contextPanel) Update(label string, used, max int, ratio float64) {
 }
 
 type experimentPanel struct {
-	table *uiwidgets.Table
+	table *InteractiveTable
 	panel *uiwidgets.Panel
 }
 
 func newExperimentPanel(border backend.Style) *experimentPanel {
-	table := uiwidgets.NewTable(
+	table := NewInteractiveTable(
 		uiwidgets.TableColumn{Title: "Variant"},
 		uiwidgets.TableColumn{Title: "Status"},
 	)
@@ -328,12 +328,12 @@ func (p *experimentPanel) Update(name, status string, variants []ExperimentVaria
 }
 
 type rlmPanel struct {
-	table *uiwidgets.Table
+	table *InteractiveTable
 	panel *uiwidgets.Panel
 }
 
 func newRLMPanel(border backend.Style) *rlmPanel {
-	table := uiwidgets.NewTable(
+	table := NewInteractiveTable(
 		uiwidgets.TableColumn{Title: "Key"},
 		uiwidgets.TableColumn{Title: "Type"},
 		uiwidgets.TableColumn{Title: "Summary"},
@@ -500,12 +500,12 @@ func (p *breadcrumbPanel) Update(path string) {
 }
 
 type filesPanel struct {
-	tree  *uiwidgets.Tree
+	tree  *InteractiveTree
 	panel *uiwidgets.Panel
 }
 
 func newFilesPanel(border backend.Style) *filesPanel {
-	tree := uiwidgets.NewTree(&uiwidgets.TreeNode{Label: "(no files)"})
+	tree := NewInteractiveTree(&uiwidgets.TreeNode{Label: "(no files)"})
 	panel := uiwidgets.NewPanel(tree).WithBorder(border)
 	panel.SetTitle("Files")
 	return &filesPanel{tree: tree, panel: panel}
@@ -535,12 +535,12 @@ func (p *filesPanel) Update(paths []string, projectPath string) {
 }
 
 type touchesPanel struct {
-	tree  *uiwidgets.Tree
+	tree  *InteractiveTree
 	panel *uiwidgets.Panel
 }
 
 func newTouchesPanel(border backend.Style) *touchesPanel {
-	tree := uiwidgets.NewTree(&uiwidgets.TreeNode{Label: "(no touches)"})
+	tree := NewInteractiveTree(&uiwidgets.TreeNode{Label: "(no touches)"})
 	panel := uiwidgets.NewPanel(tree).WithBorder(border)
 	panel.SetTitle("Touches")
 	return &touchesPanel{tree: tree, panel: panel}
