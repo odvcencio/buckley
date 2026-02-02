@@ -29,8 +29,11 @@ type ChatMessage struct {
 
 // ChatMessagesConfig provides external state for message rendering.
 type ChatMessagesConfig struct {
-	Messages state.Readable[[]ChatMessage]
-	Thinking state.Readable[bool]
+	Messages  state.Readable[[]ChatMessage]
+	Thinking  state.Readable[bool]
+	ModelName state.Readable[string]
+	// MetadataMode controls metadata visibility ("always", "hover", "never").
+	MetadataMode state.Readable[string]
 }
 
 // ChatMessages renders the scrollback list of chat messages.
@@ -48,10 +51,14 @@ type ChatMessages struct {
 	services runtime.Services
 	subs     state.Subscriptions
 
-	messagesSig      state.Readable[[]ChatMessage]
-	thinkingSig      state.Readable[bool]
-	ownedMessagesSig *state.Signal[[]ChatMessage]
-	ownedThinkingSig *state.Signal[bool]
+	messagesSig       state.Readable[[]ChatMessage]
+	thinkingSig       state.Readable[bool]
+	ownedMessagesSig  *state.Signal[[]ChatMessage]
+	ownedThinkingSig  *state.Signal[bool]
+	modelNameSig      state.Readable[string]
+	metadataModeSig   state.Readable[string]
+	ownedModelNameSig *state.Signal[string]
+	ownedMetadataSig  *state.Signal[string]
 
 	// Styles for different message types
 	userStyle      backend.Style
@@ -179,6 +186,8 @@ func NewChatMessagesWithConfig(cfg ChatMessagesConfig) *ChatMessages {
 	m.transcript.onChange = m.syncListOffset
 	m.ownedMessagesSig = state.NewSignal([]ChatMessage{})
 	m.ownedThinkingSig = state.NewSignal(false)
+	m.ownedModelNameSig = state.NewSignal("")
+	m.ownedMetadataSig = state.NewSignal("always")
 	if cfg.Messages != nil {
 		m.messagesSig = cfg.Messages
 	} else {
@@ -188,6 +197,16 @@ func NewChatMessagesWithConfig(cfg ChatMessagesConfig) *ChatMessages {
 		m.thinkingSig = cfg.Thinking
 	} else {
 		m.thinkingSig = m.ownedThinkingSig
+	}
+	if cfg.ModelName != nil {
+		m.modelNameSig = cfg.ModelName
+	} else {
+		m.modelNameSig = m.ownedModelNameSig
+	}
+	if cfg.MetadataMode != nil {
+		m.metadataModeSig = cfg.MetadataMode
+	} else {
+		m.metadataModeSig = m.ownedMetadataSig
 	}
 	m.list = uiwidgets.NewVirtualList[scrollback.VisibleLine](chatListAdapter{messages: m})
 	m.list.SetItemHeight(1)
@@ -235,18 +254,32 @@ func (m *ChatMessages) SetMetadataStyle(style backend.Style) {
 
 // SetMessageMetadataMode configures metadata visibility ("always", "hover", "never").
 func (m *ChatMessages) SetMessageMetadataMode(mode string) {
+	if !m.ownsMetadataMode() {
+		return
+	}
+	if m.ownedMetadataSig != nil {
+		m.ownedMetadataSig.Set(normalizeMetadataMode(mode))
+	}
+}
+
+func normalizeMetadataMode(mode string) string {
 	mode = strings.ToLower(strings.TrimSpace(mode))
 	switch mode {
 	case "always", "hover", "never":
+		return mode
 	default:
-		mode = "always"
+		return "always"
 	}
-	m.metadataMode = mode
 }
 
 // SetModelName updates the model name for metadata display.
 func (m *ChatMessages) SetModelName(name string) {
-	m.modelName = strings.TrimSpace(name)
+	if !m.ownsModelName() {
+		return
+	}
+	if m.ownedModelNameSig != nil {
+		m.ownedModelNameSig.Set(strings.TrimSpace(name))
+	}
 }
 
 // OnScrollChange sets a callback for scroll position changes.
@@ -273,6 +306,22 @@ func (m *ChatMessages) ownsThinking() bool {
 	}
 	sig, ok := m.thinkingSig.(*state.Signal[bool])
 	return ok && sig == m.ownedThinkingSig
+}
+
+func (m *ChatMessages) ownsModelName() bool {
+	if m == nil || m.modelNameSig == nil || m.ownedModelNameSig == nil {
+		return false
+	}
+	sig, ok := m.modelNameSig.(*state.Signal[string])
+	return ok && sig == m.ownedModelNameSig
+}
+
+func (m *ChatMessages) ownsMetadataMode() bool {
+	if m == nil || m.metadataModeSig == nil || m.ownedMetadataSig == nil {
+		return false
+	}
+	sig, ok := m.metadataModeSig.(*state.Signal[string])
+	return ok && sig == m.ownedMetadataSig
 }
 
 // Bind stores app services for layout invalidation.
@@ -302,8 +351,16 @@ func (m *ChatMessages) subscribe() {
 	if m.thinkingSig != nil {
 		m.subs.Observe(m.thinkingSig, m.onThinkingChanged)
 	}
+	if m.modelNameSig != nil {
+		m.subs.Observe(m.modelNameSig, m.onModelNameChanged)
+	}
+	if m.metadataModeSig != nil {
+		m.subs.Observe(m.metadataModeSig, m.onMetadataModeChanged)
+	}
 	m.syncFromMessages()
 	m.syncThinking()
+	m.onModelNameChanged()
+	m.onMetadataModeChanged()
 }
 
 func (m *ChatMessages) onMessagesChanged() {
@@ -313,6 +370,22 @@ func (m *ChatMessages) onMessagesChanged() {
 
 func (m *ChatMessages) onThinkingChanged() {
 	m.syncThinking()
+	m.requestInvalidate()
+}
+
+func (m *ChatMessages) onModelNameChanged() {
+	if m.modelNameSig == nil {
+		return
+	}
+	m.modelName = strings.TrimSpace(m.modelNameSig.Get())
+	m.requestInvalidate()
+}
+
+func (m *ChatMessages) onMetadataModeChanged() {
+	if m.metadataModeSig == nil {
+		return
+	}
+	m.metadataMode = normalizeMetadataMode(m.metadataModeSig.Get())
 	m.requestInvalidate()
 }
 

@@ -31,6 +31,7 @@ import (
 	"github.com/odvcencio/buckley/pkg/execution"
 	"github.com/odvcencio/buckley/pkg/filewatch"
 	"github.com/odvcencio/buckley/pkg/mcp"
+	"github.com/odvcencio/buckley/pkg/mission"
 	"github.com/odvcencio/buckley/pkg/model"
 	"github.com/odvcencio/buckley/pkg/orchestrator"
 	"github.com/odvcencio/buckley/pkg/session"
@@ -78,6 +79,15 @@ type Controller struct {
 
 	// State
 	workDir string
+
+	approvalMu      sync.Mutex
+	approvalSeen    map[string]bool
+	approvalAllowMu sync.Mutex
+	approvalAllow   []approvalAllowRule
+
+	missionStore *mission.Store
+	missionMu    sync.Mutex
+	missionSeen  map[string]bool
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -353,6 +363,7 @@ func NewController(cfg ControllerConfig) (*Controller, error) {
 	}
 	// Use fluffyui-native Runner by default (simpler, more maintainable)
 	var app App
+	var ctrl *Controller
 	app, err = NewRunner(RunnerConfig{
 		Theme:           theme.DefaultTheme(),
 		ModelName:       cfg.Config.Models.Execution,
@@ -369,12 +380,17 @@ func NewController(cfg ControllerConfig) (*Controller, error) {
 		SidebarWidth:    sidebarWidth,
 		SidebarMinWidth: sidebarMinWidth,
 		SidebarMaxWidth: sidebarMaxWidth,
+		OnApproval: func(requestID string, approved, alwaysAllow bool) {
+			if ctrl != nil {
+				ctrl.handleApprovalDecision(requestID, approved, alwaysAllow)
+			}
+		},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("create TUI app: %w", err)
 	}
 
-	ctrl := &Controller{
+	ctrl = &Controller{
 		app:            app,
 		cfg:            cfg.Config,
 		modelMgr:       cfg.ModelManager,
@@ -464,6 +480,9 @@ func NewController(cfg ControllerConfig) (*Controller, error) {
 		ctrl.nextSession,
 		ctrl.prevSession,
 	)
+
+	ctrl.loadApprovalAllowRules()
+	ctrl.initApprovalObserver()
 
 	return ctrl, nil
 }
@@ -555,6 +574,10 @@ func (c *Controller) Run() error {
 		intro = fmt.Sprintf("Resuming session: %s (%d messages)", sess.ID, len(sess.Conversation.Messages))
 	}
 	c.app.SetChatMessages(c.buildChatMessages(sess, intro, true))
+	if sess != nil {
+		c.showPendingApprovals(sess.ID)
+	}
+	c.startMissionApprovalPolling()
 
 	c.updateContextIndicator(sess, c.executionModelID(), "", allowedToolsForSession(sess))
 
@@ -2756,6 +2779,7 @@ func (c *Controller) switchToSessionLocked(idx int) {
 		c.app.SetStatus("Ready")
 	}
 	c.app.SetStreaming(sess.Streaming)
+	c.showPendingApprovals(sess.ID)
 }
 
 // Stop gracefully stops the controller.

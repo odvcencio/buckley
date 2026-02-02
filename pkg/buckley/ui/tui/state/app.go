@@ -35,6 +35,7 @@ type AppState struct {
 	ReasoningText    *state.Signal[string]
 	ReasoningPreview *state.Signal[string]
 	ReasoningVisible *state.Signal[bool]
+	MessageMetadata  *state.Signal[string]
 
 	// Input
 	InputText *state.Signal[string]
@@ -80,6 +81,7 @@ func NewAppState() *AppState {
 		ReasoningText:          state.NewSignal(""),
 		ReasoningPreview:       state.NewSignal(""),
 		ReasoningVisible:       state.NewSignal(false),
+		MessageMetadata:        state.NewSignal("always"),
 		InputText:              state.NewSignal(""),
 		InputMode:              state.NewSignal(buckleywidgets.ModeNormal),
 		SidebarState:           state.NewSignal(buckleywidgets.SidebarState{}),

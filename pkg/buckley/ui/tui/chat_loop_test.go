@@ -202,6 +202,7 @@ func (r *recordingApp) CollapseReasoning(preview, full string)      {}
 
 func (r *recordingApp) ShowModelPicker(items []uiwidgets.PaletteItem, onSelect func(uiwidgets.PaletteItem)) {
 }
+func (r *recordingApp) ShowApproval(request buckleywidgets.ApprovalRequest) {}
 func (r *recordingApp) SetCallbacks(onSubmit func(string), onFileSelect func(string), onShellCmd func(string) string) {
 }
 func (r *recordingApp) SetSessionCallbacks(onNext, onPrev func())         {}

@@ -7,6 +7,7 @@ import (
 	"context"
 	"log"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/odvcencio/buckley/pkg/buckley/ui/filepicker"
@@ -103,7 +104,17 @@ type Runner struct {
 
 	// Agent server for real-time control
 	agentServer *AgentServer
+
+	approvalMu     sync.Mutex
+	approvalQueue  []buckleywidgets.ApprovalRequest
+	approvalActive bool
+
+	overlayKeymap *keybind.Keymap
+	overlayDepth  int
+	overlayStack  []bool
 }
+
+const overlayNoopCommand = "overlay.noop"
 
 // NewRunner creates a new fluffyui-native TUI runner.
 func NewRunner(cfg RunnerConfig) (*Runner, error) {
@@ -129,6 +140,12 @@ func NewRunner(cfg RunnerConfig) (*Runner, error) {
 	sidebarService := uiservices.NewSidebarService(appState)
 	appState.ModelName.Set(strings.TrimSpace(cfg.ModelName))
 	appState.SessionID.Set(strings.TrimSpace(cfg.SessionID))
+	if appState.MessageMetadata != nil {
+		meta := strings.TrimSpace(cfg.MessageMetadata)
+		if meta != "" {
+			appState.MessageMetadata.Set(meta)
+		}
+	}
 	if appState.SidebarWidth != nil {
 		appState.SidebarWidth.Set(sidebarCfg.Width)
 	}
@@ -191,6 +208,7 @@ func NewRunner(cfg RunnerConfig) (*Runner, error) {
 			{Key: keybind.MustParseKeySequence("alt+right"), Command: "buckley.next-session"},
 			{Key: keybind.MustParseKeySequence("alt+left"), Command: "buckley.prev-session"},
 			{Key: keybind.MustParseKeySequence("ctrl+f"), Command: "buckley.search"},
+			{Key: keybind.MustParseKeySequence("ctrl+p"), Command: "buckley.file-picker"},
 			{Key: keybind.MustParseKeySequence("ctrl+i"), Command: "buckley.focus-input"},
 			// Sidebar section toggles (when sidebar tabs focused)
 			{Key: keybind.MustParseKeySequence("1"), Command: "buckley.sidebar.toggle-task", When: whenSidebarFocused},
@@ -204,6 +222,7 @@ func NewRunner(cfg RunnerConfig) (*Runner, error) {
 			{Key: keybind.MustParseKeySequence("ctrl+g b"), Command: "buckley.scroll-bottom"},
 			{Key: keybind.MustParseKeySequence("ctrl+g s"), Command: "buckley.toggle-sidebar"},
 			{Key: keybind.MustParseKeySequence("ctrl+g f"), Command: "buckley.search"},
+			{Key: keybind.MustParseKeySequence("ctrl+g p"), Command: "buckley.file-picker"},
 			{Key: keybind.MustParseKeySequence("ctrl+g i"), Command: "buckley.focus-input"},
 			{Key: keybind.MustParseKeySequence("ctrl+g ,"), Command: "buckley.sidebar.prev-tab"},
 			{Key: keybind.MustParseKeySequence("ctrl+g ."), Command: "buckley.sidebar.next-tab"},
@@ -211,11 +230,13 @@ func NewRunner(cfg RunnerConfig) (*Runner, error) {
 			{Key: keybind.MustParseKeySequence("ctrl+g ]"), Command: "buckley.sidebar.grow"},
 		},
 	}
+	r.overlayKeymap = newOverlayKeymap()
 
 	// Build app options
 	opts := []fluffy.AppOption{
 		fluffy.WithRoot(root),
 		fluffy.WithUpdate(r.update),
+		fluffy.WithCommandHandler(r.handleCommand),
 		fluffy.WithTickRate(16 * time.Millisecond),
 		fluffy.WithKeyBindings(r.registerKeyBindings),
 		fluffy.WithKeymap(keymap),
@@ -356,6 +377,8 @@ func (r *Runner) buildWidgets(cfg RunnerConfig, styleCache *StyleCache) {
 		ReasoningText:    r.state.ReasoningText,
 		ReasoningPreview: r.state.ReasoningPreview,
 		ReasoningVisible: r.state.ReasoningVisible,
+		ModelName:        r.state.ModelName,
+		MetadataMode:     r.state.MessageMetadata,
 	})
 	r.chatView.SetStyles(
 		styleCache.Get(th.User),
@@ -364,9 +387,7 @@ func (r *Runner) buildWidgets(cfg RunnerConfig, styleCache *StyleCache) {
 		styleCache.Get(th.Tool),
 		styleCache.Get(th.Thinking),
 	)
-	r.chatView.SetModelName(cfg.ModelName)
 	r.chatView.SetMetadataStyle(styleCache.Get(th.TextMuted))
-	r.chatView.SetMessageMetadataMode(cfg.MessageMetadata)
 	r.chatView.SetUIStyles(
 		styleCache.Get(th.Scrollbar),
 		styleCache.Get(th.ScrollThumb),
@@ -503,7 +524,13 @@ func (r *Runner) buildLayout() runtime.Widget {
 		runtime.Flexible(r.chatView, 3),
 	)
 	if r.sidebar != nil && r.state != nil && r.state.SidebarVisible.Get() {
-		mainArea.Add(runtime.Sized(r.sidebar, r.sidebar.Width()))
+		width := 0
+		if r.state.SidebarWidth != nil {
+			width = r.state.SidebarWidth.Get()
+		}
+		if width > 0 {
+			mainArea.Add(runtime.Sized(r.sidebar, width))
+		}
 	}
 
 	// Full layout: Header, Main, Input, Status
@@ -573,8 +600,6 @@ func (r *Runner) handleSubmit(text string, mode buckleywidgets.InputMode) {
 			if result != "" {
 				if r.chatService != nil {
 					r.chatService.AddMessage(result, "system")
-				} else if r.chatView != nil {
-					r.chatView.AddMessage(result, "system")
 				}
 			}
 		}
@@ -593,6 +618,13 @@ func (r *Runner) registerKeyBindings(registry *keybind.CommandRegistry) {
 	keybind.RegisterStandardCommands(registry)
 	keybind.RegisterScrollCommands(registry)
 	keybind.RegisterClipboardCommands(registry)
+
+	registry.Register(keybind.Command{
+		ID:    overlayNoopCommand,
+		Title: "Overlay No-op",
+		Handler: func(ctx keybind.Context) {
+		},
+	})
 
 	// Register Buckley-specific commands
 	registry.Register(keybind.Command{
@@ -628,6 +660,14 @@ func (r *Runner) registerKeyBindings(registry *keybind.CommandRegistry) {
 		Title: "Search",
 		Handler: func(ctx keybind.Context) {
 			r.showSearchOverlay()
+		},
+	})
+
+	registry.Register(keybind.Command{
+		ID:    "buckley.file-picker",
+		Title: "File Picker",
+		Handler: func(ctx keybind.Context) {
+			r.showFilePicker()
 		},
 	})
 
@@ -768,12 +808,31 @@ func (r *Runner) registerKeyBindings(registry *keybind.CommandRegistry) {
 	})
 }
 
+func newOverlayKeymap() *keybind.Keymap {
+	return &keybind.Keymap{
+		Name: "buckley.overlay",
+		Bindings: []keybind.Binding{
+			{Key: keybind.MustParseKeySequence("ctrl+g g"), Command: overlayNoopCommand},
+			{Key: keybind.MustParseKeySequence("ctrl+g b"), Command: overlayNoopCommand},
+			{Key: keybind.MustParseKeySequence("ctrl+g s"), Command: overlayNoopCommand},
+			{Key: keybind.MustParseKeySequence("ctrl+g f"), Command: overlayNoopCommand},
+			{Key: keybind.MustParseKeySequence("ctrl+g p"), Command: overlayNoopCommand},
+			{Key: keybind.MustParseKeySequence("ctrl+g i"), Command: overlayNoopCommand},
+			{Key: keybind.MustParseKeySequence("ctrl+g ,"), Command: overlayNoopCommand},
+			{Key: keybind.MustParseKeySequence("ctrl+g ."), Command: overlayNoopCommand},
+			{Key: keybind.MustParseKeySequence("ctrl+g ["), Command: overlayNoopCommand},
+			{Key: keybind.MustParseKeySequence("ctrl+g ]"), Command: overlayNoopCommand},
+		},
+	}
+}
+
 // update handles messages in the event loop.
 // This is the Buckley-specific update function that processes domain messages.
 func (r *Runner) update(app *runtime.App, msg runtime.Message) bool {
 	if mouse, ok := msg.(runtime.MouseMsg); ok {
 		r.handleMouseFocus(app, mouse)
 	}
+	r.showNextApproval()
 	r.initFocusIfNeeded(app)
 
 	// First, let the default handler process terminal events
@@ -787,6 +846,74 @@ func (r *Runner) update(app *runtime.App, msg runtime.Message) bool {
 	}
 
 	return r.flushPending()
+}
+
+func (r *Runner) handleCommand(cmd runtime.Command) bool {
+	switch c := cmd.(type) {
+	case runtime.PushOverlay:
+		if r.app != nil {
+			if screen := r.app.Screen(); screen != nil {
+				screen.PushLayer(c.Widget, c.Modal)
+				r.noteOverlayPush(c.Modal)
+				return true
+			}
+		}
+		return false
+	case runtime.PopOverlay:
+		if r.app != nil {
+			if screen := r.app.Screen(); screen != nil {
+				if screen.PopLayer() {
+					r.noteOverlayPop()
+					return true
+				}
+				return false
+			}
+		}
+		return false
+	case runtime.FileSelected:
+		if r.onFileSelect != nil {
+			r.onFileSelect(c.Path)
+		}
+		return false
+	case buckleywidgets.ApprovalResponse:
+		return r.handleApprovalResponse(c)
+	default:
+		return false
+	}
+}
+
+func (r *Runner) handleApprovalResponse(resp buckleywidgets.ApprovalResponse) bool {
+	if r == nil {
+		return false
+	}
+	if r.onApproval != nil {
+		r.onApproval(resp.RequestID, resp.Approved, resp.AlwaysAllow)
+	}
+	if r.app != nil {
+		r.app.ExecuteCommand(runtime.PopOverlay{})
+	}
+
+	r.approvalMu.Lock()
+	r.approvalActive = false
+	r.approvalMu.Unlock()
+	r.showNextApproval()
+	return true
+}
+
+func (r *Runner) showNextApproval() {
+	if r == nil || r.app == nil || r.app.Screen() == nil {
+		return
+	}
+	r.approvalMu.Lock()
+	if r.approvalActive || len(r.approvalQueue) == 0 {
+		r.approvalMu.Unlock()
+		return
+	}
+	request := r.approvalQueue[0]
+	r.approvalQueue = r.approvalQueue[1:]
+	r.approvalActive = true
+	r.approvalMu.Unlock()
+	r.showApprovalOverlay(request)
 }
 
 func (r *Runner) flushPending() bool {
@@ -940,9 +1067,6 @@ func (r *Runner) SetModelName(name string) {
 	}
 	name = strings.TrimSpace(name)
 	r.state.ModelName.Set(name)
-	if r.chatView != nil {
-		r.chatView.SetModelName(name)
-	}
 	if r.chatService != nil {
 		r.chatService.SetModelName(name)
 	}
@@ -1021,6 +1145,17 @@ func (r *Runner) ShowModelPicker(items []uiwidgets.PaletteItem, onSelect func(it
 		Widget: r.modelPalette,
 		Modal:  true,
 	})
+}
+
+// ShowApproval displays a modal approval dialog.
+func (r *Runner) ShowApproval(request buckleywidgets.ApprovalRequest) {
+	if r == nil || strings.TrimSpace(request.ID) == "" {
+		return
+	}
+	r.approvalMu.Lock()
+	r.approvalQueue = append(r.approvalQueue, request)
+	r.approvalMu.Unlock()
+	r.showNextApproval()
 }
 
 // =============================================================================

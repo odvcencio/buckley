@@ -17,12 +17,26 @@ func (r *Runner) showFilePicker() {
 	if r.filePicker == nil || r.app == nil {
 		return
 	}
-
-	// For now, just trigger the callback with empty path
-	// The actual file picker implementation would be more complex
-	if r.onFileSelect != nil {
-		r.onFileSelect("")
+	if r.filePicker.IsActive() {
+		return
 	}
+
+	r.filePicker.Activate(0)
+	widget := buckleywidgets.NewFilePickerWidget(r.filePicker)
+	if r.theme != nil && r.styleCache != nil {
+		widget.SetStyles(
+			r.styleCache.Get(r.theme.SurfaceRaised),
+			r.styleCache.Get(r.theme.Border),
+			r.styleCache.Get(r.theme.TextPrimary),
+			r.styleCache.Get(r.theme.Selection),
+			r.styleCache.Get(r.theme.Accent),
+			r.styleCache.Get(r.theme.TextPrimary),
+		)
+	}
+	r.app.ExecuteCommand(runtime.PushOverlay{
+		Widget: widget,
+		Modal:  true,
+	})
 }
 
 // showSearchOverlay displays the search overlay.
@@ -110,6 +124,58 @@ func (r *Runner) showCodePreview(language, code string) {
 		Widget: preview,
 		Modal:  true,
 	})
+}
+
+// showApprovalOverlay displays a modal approval dialog.
+func (r *Runner) showApprovalOverlay(request buckleywidgets.ApprovalRequest) {
+	if r.app == nil {
+		return
+	}
+	dialog := buckleywidgets.NewApprovalWidget(request)
+	if r.theme != nil && r.styleCache != nil {
+		dialog.SetStyles(
+			r.styleCache.Get(r.theme.SurfaceRaised),
+			r.styleCache.Get(r.theme.Border),
+			r.styleCache.Get(r.theme.TextPrimary),
+			r.styleCache.Get(r.theme.TextPrimary),
+		)
+	}
+	r.app.ExecuteCommand(runtime.PushOverlay{
+		Widget: dialog,
+		Modal:  true,
+	})
+}
+
+func (r *Runner) noteOverlayPush(modal bool) {
+	if r == nil {
+		return
+	}
+	r.overlayStack = append(r.overlayStack, modal)
+	if !modal || r.bundle == nil || r.bundle.Keymaps == nil || r.overlayKeymap == nil {
+		return
+	}
+	if r.overlayDepth == 0 {
+		r.bundle.Keymaps.Push(r.overlayKeymap)
+	}
+	r.overlayDepth++
+}
+
+func (r *Runner) noteOverlayPop() {
+	if r == nil || len(r.overlayStack) == 0 {
+		return
+	}
+	modal := r.overlayStack[len(r.overlayStack)-1]
+	r.overlayStack = r.overlayStack[:len(r.overlayStack)-1]
+	if !modal || r.bundle == nil || r.bundle.Keymaps == nil {
+		return
+	}
+	if r.overlayDepth == 0 {
+		return
+	}
+	r.overlayDepth--
+	if r.overlayDepth == 0 {
+		r.bundle.Keymaps.Pop()
+	}
 }
 
 // jumpToBottom scrolls to the bottom of the chat.

@@ -411,6 +411,23 @@ CREATE TABLE IF NOT EXISTS approval_policies (
 
 CREATE INDEX IF NOT EXISTS idx_approval_policies_active ON approval_policies(is_active);
 
+-- Persisted approval allowlist rules
+CREATE TABLE IF NOT EXISTS approval_allowlist (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_path TEXT NOT NULL DEFAULT '',
+    tool_name TEXT NOT NULL DEFAULT '',
+    operation TEXT NOT NULL DEFAULT '',
+    command TEXT NOT NULL DEFAULT '',
+    file_path TEXT NOT NULL DEFAULT '',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_approval_allowlist_unique ON approval_allowlist(
+    project_path, tool_name, operation, command, file_path
+);
+
+CREATE INDEX IF NOT EXISTS idx_approval_allowlist_project ON approval_allowlist(project_path);
+
 -- Pending tool approvals queue
 CREATE TABLE IF NOT EXISTS pending_approvals (
     id TEXT PRIMARY KEY,

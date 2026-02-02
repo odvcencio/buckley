@@ -34,6 +34,17 @@ type PendingApproval struct {
 	CreatedAt      time.Time `json:"created_at"`
 }
 
+// ApprovalAllowRule represents a persisted rule for auto-approving tool calls.
+type ApprovalAllowRule struct {
+	ID          int64     `json:"id"`
+	ProjectPath string    `json:"project_path"`
+	ToolName    string    `json:"tool_name"`
+	Operation   string    `json:"operation"`
+	Command     string    `json:"command"`
+	FilePath    string    `json:"file_path"`
+	CreatedAt   time.Time `json:"created_at"`
+}
+
 // ToolAuditEntry represents a logged tool execution
 type ToolAuditEntry struct {
 	ID         int64     `json:"id"`
@@ -181,6 +192,64 @@ func (s *Store) ListPolicies() ([]*ApprovalPolicy, error) {
 	}
 
 	return policies, rows.Err()
+}
+
+// ListApprovalAllowRules returns persisted allowlist rules for a project.
+func (s *Store) ListApprovalAllowRules(projectPath string) ([]*ApprovalAllowRule, error) {
+	if s.db == nil {
+		return nil, ErrStoreClosed
+	}
+
+	projectPath = strings.TrimSpace(projectPath)
+	rows, err := s.db.Query(`
+		SELECT id, project_path, tool_name, operation, command, file_path, created_at
+		FROM approval_allowlist
+		WHERE project_path = ?
+		ORDER BY created_at DESC
+	`, projectPath)
+	if err != nil {
+		return nil, fmt.Errorf("list approval allow rules: %w", err)
+	}
+	defer rows.Close()
+
+	var rules []*ApprovalAllowRule
+	for rows.Next() {
+		var rule ApprovalAllowRule
+		if err := rows.Scan(&rule.ID, &rule.ProjectPath, &rule.ToolName, &rule.Operation, &rule.Command, &rule.FilePath, &rule.CreatedAt); err != nil {
+			return nil, fmt.Errorf("scan approval allow rule: %w", err)
+		}
+		rules = append(rules, &rule)
+	}
+
+	return rules, rows.Err()
+}
+
+// AddApprovalAllowRule persists an auto-approval rule (duplicates are ignored).
+func (s *Store) AddApprovalAllowRule(rule *ApprovalAllowRule) error {
+	if s.db == nil {
+		return ErrStoreClosed
+	}
+	if rule == nil {
+		return fmt.Errorf("approval allow rule is nil")
+	}
+
+	projectPath := strings.TrimSpace(rule.ProjectPath)
+	toolName := strings.TrimSpace(rule.ToolName)
+	operation := strings.TrimSpace(rule.Operation)
+	command := strings.TrimSpace(rule.Command)
+	filePath := strings.TrimSpace(rule.FilePath)
+	if projectPath == "" && toolName == "" && operation == "" && command == "" && filePath == "" {
+		return nil
+	}
+
+	_, err := s.db.Exec(`
+		INSERT OR IGNORE INTO approval_allowlist (project_path, tool_name, operation, command, file_path, created_at)
+		VALUES (?, ?, ?, ?, ?, ?)
+	`, projectPath, toolName, operation, command, filePath, time.Now())
+	if err != nil {
+		return fmt.Errorf("insert approval allow rule: %w", err)
+	}
+	return nil
 }
 
 // CreatePendingApproval creates a new pending approval

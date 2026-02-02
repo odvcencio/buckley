@@ -49,6 +49,7 @@ type App interface {
 
 	// Overlays
 	ShowModelPicker(items []uiwidgets.PaletteItem, onSelect func(item uiwidgets.PaletteItem))
+	ShowApproval(request buckleywidgets.ApprovalRequest)
 
 	// Callbacks
 	SetCallbacks(onSubmit func(string), onFileSelect func(string), onShellCmd func(string) string)
