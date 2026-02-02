@@ -24,6 +24,7 @@ import (
 	"github.com/odvcencio/fluffyui/runtime"
 	"github.com/odvcencio/fluffyui/scroll"
 	fstate "github.com/odvcencio/fluffyui/state"
+	"github.com/odvcencio/fluffyui/terminal"
 	"github.com/odvcencio/fluffyui/theme"
 	"github.com/odvcencio/fluffyui/toast"
 	uiwidgets "github.com/odvcencio/fluffyui/widgets"
@@ -834,11 +835,26 @@ func newOverlayKeymap() *keybind.Keymap {
 	}
 }
 
+func normalizeCtrlGChord(msg runtime.KeyMsg) runtime.KeyMsg {
+	if msg.Key != terminal.KeyNone || !msg.Ctrl {
+		return msg
+	}
+	if msg.Rune != 'g' && msg.Rune != 'G' {
+		return msg
+	}
+	msg.Key = terminal.KeyRune
+	msg.Rune = 'g'
+	return msg
+}
+
 // update handles messages in the event loop.
 // This is the Buckley-specific update function that processes domain messages.
 func (r *Runner) update(app *runtime.App, msg runtime.Message) bool {
 	if mouse, ok := msg.(runtime.MouseMsg); ok {
 		r.handleMouseFocus(app, mouse)
+	}
+	if key, ok := msg.(runtime.KeyMsg); ok {
+		msg = normalizeCtrlGChord(key)
 	}
 	r.showNextApproval()
 	r.initFocusIfNeeded(app)

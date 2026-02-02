@@ -189,13 +189,11 @@ func (s *InteractiveSearch) HandleMessage(msg runtime.Message) runtime.HandleRes
 			}
 			if s.onClose != nil {
 				s.onClose()
-				return runtime.Handled()
 			}
 			return runtime.WithCommand(runtime.PopOverlay{})
 		case terminal.KeyEnter:
 			if s.onClose != nil {
 				s.onClose()
-				return runtime.Handled()
 			}
 			return runtime.WithCommand(runtime.PopOverlay{})
 		case terminal.KeyUp:

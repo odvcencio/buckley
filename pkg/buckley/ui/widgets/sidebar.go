@@ -1,8 +1,6 @@
 package widgets
 
 import (
-	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 
@@ -207,8 +205,6 @@ type Sidebar struct {
 	contextBudget      int
 	contextWindow      int
 	contextUpdateDepth int
-	contextHistory     []float64
-	contextMax         int
 	showContext        bool
 
 	activeTouches []TouchSummary
@@ -299,7 +295,6 @@ func NewSidebarWithBindings(cfg SidebarConfig, bindings SidebarBindings) *Sideba
 		showRecentFiles: true,
 		showExperiment:  true,
 		showRLM:         true,
-		contextMax:      12,
 		borderStyle:     backend.DefaultStyle(),
 		headerStyle:     backend.DefaultStyle().Bold(true),
 		textStyle:       backend.DefaultStyle(),
@@ -607,19 +602,6 @@ func (s *Sidebar) applyContextUsage(used, budget, window int) {
 	s.contextUsed = used
 	s.contextBudget = budget
 	s.contextWindow = window
-	if budget > 0 || window > 0 {
-		ratio := s.contextRatio()
-		if ratio < 0 {
-			ratio = 0
-		}
-		if ratio > 1 {
-			ratio = 1
-		}
-		s.contextHistory = append(s.contextHistory, ratio)
-		if s.contextMax > 0 && len(s.contextHistory) > s.contextMax {
-			s.contextHistory = s.contextHistory[len(s.contextHistory)-s.contextMax:]
-		}
-	}
 	s.updateContextPanel()
 }
 
@@ -1445,95 +1427,6 @@ func (s *Sidebar) WebLinkAt(x, y int) (string, bool) {
 	return "", false
 }
 
-func clonePlanTasks(tasks []PlanTask) []PlanTask {
-	if len(tasks) == 0 {
-		return nil
-	}
-	cloned := make([]PlanTask, len(tasks))
-	copy(cloned, tasks)
-	return cloned
-}
-
-func cloneRunningTools(tools []RunningTool) []RunningTool {
-	if len(tools) == 0 {
-		return nil
-	}
-	cloned := make([]RunningTool, len(tools))
-	copy(cloned, tools)
-	return cloned
-}
-
-func cloneToolHistory(history []ToolHistoryEntry) []ToolHistoryEntry {
-	if len(history) == 0 {
-		return nil
-	}
-	cloned := make([]ToolHistoryEntry, len(history))
-	copy(cloned, history)
-	return cloned
-}
-
-func cloneTouchSummaries(touches []TouchSummary) []TouchSummary {
-	if len(touches) == 0 {
-		return nil
-	}
-	cloned := make([]TouchSummary, len(touches))
-	for i, touch := range touches {
-		cloned[i] = TouchSummary{
-			Path:      touch.Path,
-			Operation: touch.Operation,
-		}
-		if len(touch.Ranges) > 0 {
-			ranges := make([]TouchRange, len(touch.Ranges))
-			copy(ranges, touch.Ranges)
-			cloned[i].Ranges = ranges
-		}
-	}
-	return cloned
-}
-
-func cloneStrings(values []string) []string {
-	if len(values) == 0 {
-		return nil
-	}
-	cloned := make([]string, len(values))
-	copy(cloned, values)
-	return cloned
-}
-
-func cloneExperimentVariants(variants []ExperimentVariant) []ExperimentVariant {
-	if len(variants) == 0 {
-		return nil
-	}
-	cloned := make([]ExperimentVariant, len(variants))
-	copy(cloned, variants)
-	return cloned
-}
-
-func cloneScratchpadEntries(entries []RLMScratchpadEntry) []RLMScratchpadEntry {
-	if len(entries) == 0 {
-		return nil
-	}
-	cloned := make([]RLMScratchpadEntry, len(entries))
-	copy(cloned, entries)
-	return cloned
-}
-
-func cloneRLMStatus(status *RLMStatus) *RLMStatus {
-	if status == nil {
-		return nil
-	}
-	cloned := *status
-	return &cloned
-}
-
-func cloneCircuitStatus(status *CircuitStatus) *CircuitStatus {
-	if status == nil {
-		return nil
-	}
-	cloned := *status
-	return &cloned
-}
-
 func (s *Sidebar) rebuildStatus() {
 	if s.statusScroll == nil {
 		return
@@ -1666,146 +1559,6 @@ func (s *Sidebar) contextMaxValue() int {
 		return s.contextUsed
 	}
 	return 1
-}
-
-func summarizePlan(tasks []PlanTask) (completed, total int) {
-	for _, task := range tasks {
-		total++
-		if task.Status == TaskCompleted {
-			completed++
-		}
-	}
-	return completed, total
-}
-
-func taskStatusLabel(status TaskStatus) string {
-	switch status {
-	case TaskCompleted:
-		return "done"
-	case TaskInProgress:
-		return "running"
-	case TaskFailed:
-		return "failed"
-	default:
-		return "pending"
-	}
-}
-
-func clampPercent(progress int) int {
-	if progress < 0 {
-		return 0
-	}
-	if progress > 100 {
-		return 100
-	}
-	return progress
-}
-
-func formatContextLabel(used, budget, window int) string {
-	if budget > 0 {
-		return intToStr(used) + " / " + intToStr(budget)
-	}
-	if window > 0 {
-		return intToStr(used) + " / " + intToStr(window)
-	}
-	if used > 0 {
-		return intToStr(used)
-	}
-	return "0"
-}
-
-func splitPath(path string) []string {
-	clean := filepath.Clean(path)
-	if clean == "." || clean == string(filepath.Separator) {
-		return []string{path}
-	}
-	parts := strings.Split(clean, string(filepath.Separator))
-	if len(parts) == 0 {
-		return []string{path}
-	}
-	for i := range parts {
-		if parts[i] == "" {
-			parts[i] = string(filepath.Separator)
-		}
-	}
-	return parts
-}
-
-func buildTreeFromPaths(paths []string, rootLabel string) *uiwidgets.TreeNode {
-	label := "Files"
-	if strings.TrimSpace(rootLabel) != "" {
-		label = filepath.Base(rootLabel)
-	}
-	root := &uiwidgets.TreeNode{Label: label, Expanded: true}
-	if len(paths) == 0 {
-		root.Children = []*uiwidgets.TreeNode{{Label: "(none)"}}
-		return root
-	}
-	sorted := append([]string(nil), paths...)
-	sort.Strings(sorted)
-	for _, path := range sorted {
-		addPathNode(root, path)
-	}
-	return root
-}
-
-func buildTouchesTree(touches []TouchSummary) *uiwidgets.TreeNode {
-	root := &uiwidgets.TreeNode{Label: "Touches", Expanded: true}
-	if len(touches) == 0 {
-		root.Children = []*uiwidgets.TreeNode{{Label: "(none)"}}
-		return root
-	}
-	for _, touch := range touches {
-		label := touch.Path
-		if label == "" {
-			label = "(unknown)"
-		}
-		child := &uiwidgets.TreeNode{Label: label}
-		for _, r := range touch.Ranges {
-			child.Children = append(child.Children, &uiwidgets.TreeNode{Label: rangeLabel(r)})
-		}
-		root.Children = append(root.Children, child)
-	}
-	return root
-}
-
-func addPathNode(root *uiwidgets.TreeNode, path string) {
-	path = strings.TrimSpace(path)
-	if path == "" {
-		return
-	}
-	parts := strings.Split(path, string(filepath.Separator))
-	if len(parts) == 1 {
-		parts = strings.Split(path, "/")
-	}
-	cur := root
-	for _, part := range parts {
-		if part == "" {
-			continue
-		}
-		next := findChild(cur, part)
-		if next == nil {
-			next = &uiwidgets.TreeNode{Label: part}
-			cur.Children = append(cur.Children, next)
-		}
-		cur = next
-	}
-}
-
-func findChild(node *uiwidgets.TreeNode, label string) *uiwidgets.TreeNode {
-	for _, child := range node.Children {
-		if child.Label == label {
-			return child
-		}
-	}
-	return nil
-}
-
-func rangeLabel(r TouchRange) string {
-	if r.End > r.Start {
-		return "lines " + intToStr(r.Start) + "-" + intToStr(r.End)
-	}
-	return "line " + intToStr(r.Start)
 }
 
 var _ runtime.Widget = (*Sidebar)(nil)

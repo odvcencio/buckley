@@ -47,18 +47,36 @@ func (r *Runner) showSearchOverlay() {
 
 	// Create search widget
 	searchWidget := buckleywidgets.NewInteractiveSearch()
+	updateMatches := func() {
+		if r.chatView == nil {
+			return
+		}
+		current, total := r.chatView.SearchMatches()
+		searchWidget.SetMatchInfo(current, total)
+	}
 	searchWidget.SetOnSearch(func(query string) {
-		r.chatView.Search(query)
+		if r.chatView != nil {
+			r.chatView.Search(query)
+		}
+		updateMatches()
 	})
 	searchWidget.SetOnNavigate(func() {
-		r.chatView.NextMatch()
+		if r.chatView != nil {
+			r.chatView.NextMatch()
+		}
+		updateMatches()
 	}, func() {
-		r.chatView.PrevMatch()
+		if r.chatView != nil {
+			r.chatView.PrevMatch()
+		}
+		updateMatches()
 	})
 	searchWidget.SetOnClose(func() {
-		r.app.ExecuteCommand(runtime.PopOverlay{})
-		r.chatView.ClearSearch()
+		if r.chatView != nil {
+			r.chatView.ClearSearch()
+		}
 	})
+	updateMatches()
 
 	// Show as overlay
 	r.app.ExecuteCommand(runtime.PushOverlay{

@@ -267,6 +267,34 @@ func TestRunnerOverlayNonModalDoesNotAffectDepth(t *testing.T) {
 	}
 }
 
+func TestNormalizeCtrlGChord(t *testing.T) {
+	msg := runtime.KeyMsg{Key: terminal.KeyNone, Rune: 'g', Ctrl: true}
+	normalized := normalizeCtrlGChord(msg)
+	if normalized.Key != terminal.KeyRune {
+		t.Fatalf("expected KeyRune, got %v", normalized.Key)
+	}
+	if normalized.Rune != 'g' {
+		t.Fatalf("expected rune g, got %q", normalized.Rune)
+	}
+	if !normalized.Ctrl {
+		t.Fatal("expected ctrl flag to remain true")
+	}
+}
+
+func TestNormalizeCtrlGChord_IgnoresOtherCtrlKeys(t *testing.T) {
+	msg := runtime.KeyMsg{Key: terminal.KeyNone, Rune: 'a', Ctrl: true}
+	normalized := normalizeCtrlGChord(msg)
+	if normalized.Key != terminal.KeyNone {
+		t.Fatalf("expected KeyNone for non-g ctrl, got %v", normalized.Key)
+	}
+	if normalized.Rune != 'a' {
+		t.Fatalf("expected rune a, got %q", normalized.Rune)
+	}
+	if !normalized.Ctrl {
+		t.Fatal("expected ctrl flag to remain true")
+	}
+}
+
 // TestRunnerSetStatus verifies SetStatus updates status state.
 func TestRunnerSetStatus(t *testing.T) {
 	testBackend := newTestBackend(80, 24)

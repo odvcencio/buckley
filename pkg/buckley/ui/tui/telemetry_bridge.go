@@ -125,6 +125,22 @@ func cloneAndSortVariants(src []buckleywidgets.ExperimentVariant) []buckleywidge
 	return out
 }
 
+func cloneRLMStatus(status *buckleywidgets.RLMStatus) *buckleywidgets.RLMStatus {
+	if status == nil {
+		return nil
+	}
+	cloned := *status
+	return &cloned
+}
+
+func cloneCircuitStatus(status *buckleywidgets.CircuitStatus) *buckleywidgets.CircuitStatus {
+	if status == nil {
+		return nil
+	}
+	cloned := *status
+	return &cloned
+}
+
 func truncate(s string, maxLen int) string {
 	if len(s) <= maxLen {
 		return s
@@ -465,9 +481,9 @@ func (b *SimpleTelemetryBridge) buildSnapshot() buckleywidgets.SidebarState {
 		ToolHistory:        append([]buckleywidgets.ToolHistoryEntry(nil), b.toolHistory...),
 		ActiveTouches:      summarizeTouches(b.touchEntries, now),
 		RecentFiles:        append([]string(nil), b.recentFiles...),
-		RLMStatus:          b.rlmStatus,
+		RLMStatus:          cloneRLMStatus(b.rlmStatus),
 		RLMScratchpad:      append([]buckleywidgets.RLMScratchpadEntry(nil), b.rlmScratchpad...),
-		CircuitStatus:      b.circuitStatus,
+		CircuitStatus:      cloneCircuitStatus(b.circuitStatus),
 		Experiment:         b.experiment,
 		ExperimentStatus:   b.experimentStatus,
 		ExperimentVariants: cloneAndSortVariants(b.experimentVariants),
