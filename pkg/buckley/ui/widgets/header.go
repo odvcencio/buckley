@@ -66,23 +66,17 @@ func NewHeaderWithConfig(cfg HeaderConfig) *Header {
 // SetModelName updates the displayed model name.
 func (h *Header) SetModelName(name string) {
 	name = strings.TrimSpace(name)
-	if h.ownsModel() {
+	if h.ownsModel() && h.ownedModelSig != nil {
 		h.ownedModelSig.Set(name)
-		return
 	}
-	h.modelName = name
-	h.Invalidate()
 }
 
 // SetSessionID updates the displayed session ID.
 func (h *Header) SetSessionID(id string) {
 	id = strings.TrimSpace(id)
-	if h.ownsSession() {
+	if h.ownsSession() && h.ownedSessSig != nil {
 		h.ownedSessSig.Set(id)
-		return
 	}
-	h.sessionID = id
-	h.Invalidate()
 }
 
 // SetStyles sets the header styles.

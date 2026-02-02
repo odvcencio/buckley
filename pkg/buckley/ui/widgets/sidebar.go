@@ -127,6 +127,7 @@ type SidebarBindings struct {
 	ContextUsed     state.Readable[int]
 	ContextBudget   state.Readable[int]
 	ContextWindow   state.Readable[int]
+	ProjectPath     state.Readable[string]
 	Width           state.Readable[int]
 	TabIndex        state.Readable[int]
 	ShowCurrentTask state.Readable[bool]
@@ -162,6 +163,7 @@ type Sidebar struct {
 	contextUsedSig     state.Readable[int]
 	contextBudgetSig   state.Readable[int]
 	contextWindowSig   state.Readable[int]
+	projectPathSig     state.Readable[string]
 	widthSig           state.Readable[int]
 	tabIndexSig        state.Readable[int]
 	showCurrentTaskSig state.Readable[bool]
@@ -173,6 +175,11 @@ type Sidebar struct {
 	showExperimentSig  state.Readable[bool]
 	showRLMSig         state.Readable[bool]
 	showCircuitSig     state.Readable[bool]
+	ownedStateSig      *state.Signal[SidebarState]
+	ownedContextUsed   *state.Signal[int]
+	ownedContextBudget *state.Signal[int]
+	ownedContextWindow *state.Signal[int]
+	ownedProjectPath   *state.Signal[string]
 	ownedWidthSig      *state.Signal[int]
 	ownedTabIndexSig   *state.Signal[int]
 	ownedShowTaskSig   *state.Signal[bool]
@@ -196,12 +203,13 @@ type Sidebar struct {
 	toolHistory  []ToolHistoryEntry
 	showTools    bool
 
-	contextUsed    int
-	contextBudget  int
-	contextWindow  int
-	contextHistory []float64
-	contextMax     int
-	showContext    bool
+	contextUsed        int
+	contextBudget      int
+	contextWindow      int
+	contextUpdateDepth int
+	contextHistory     []float64
+	contextMax         int
+	showContext        bool
 
 	activeTouches []TouchSummary
 	showTouches   bool
@@ -309,10 +317,36 @@ func NewSidebarWithBindings(cfg SidebarConfig, bindings SidebarBindings) *Sideba
 		spinnerStyle:    backend.DefaultStyle(),
 		bgStyle:         backend.DefaultStyle(),
 	}
-	s.stateSig = bindings.State
-	s.contextUsedSig = bindings.ContextUsed
-	s.contextBudgetSig = bindings.ContextBudget
-	s.contextWindowSig = bindings.ContextWindow
+	if bindings.State != nil {
+		s.stateSig = bindings.State
+	} else {
+		s.ownedStateSig = state.NewSignal(SidebarState{})
+		s.stateSig = s.ownedStateSig
+	}
+	if bindings.ContextUsed != nil {
+		s.contextUsedSig = bindings.ContextUsed
+	} else {
+		s.ownedContextUsed = state.NewSignal(0)
+		s.contextUsedSig = s.ownedContextUsed
+	}
+	if bindings.ContextBudget != nil {
+		s.contextBudgetSig = bindings.ContextBudget
+	} else {
+		s.ownedContextBudget = state.NewSignal(0)
+		s.contextBudgetSig = s.ownedContextBudget
+	}
+	if bindings.ContextWindow != nil {
+		s.contextWindowSig = bindings.ContextWindow
+	} else {
+		s.ownedContextWindow = state.NewSignal(0)
+		s.contextWindowSig = s.ownedContextWindow
+	}
+	if bindings.ProjectPath != nil {
+		s.projectPathSig = bindings.ProjectPath
+	} else {
+		s.ownedProjectPath = state.NewSignal("")
+		s.projectPathSig = s.ownedProjectPath
+	}
 	if bindings.Width != nil {
 		s.widthSig = bindings.Width
 	} else {
@@ -419,6 +453,9 @@ func (s *Sidebar) subscribe() {
 	if s.contextWindowSig != nil {
 		s.subs.Observe(s.contextWindowSig, s.onContextChanged)
 	}
+	if s.projectPathSig != nil {
+		s.subs.Observe(s.projectPathSig, s.onProjectPathChanged)
+	}
 	if s.widthSig != nil {
 		s.subs.Observe(s.widthSig, s.onWidthChanged)
 	}
@@ -454,6 +491,7 @@ func (s *Sidebar) subscribe() {
 	}
 	s.onStateChanged()
 	s.onContextChanged()
+	s.onProjectPathChanged()
 	s.onWidthChanged()
 	s.onTabIndexChanged()
 	s.onVisibilityChanged()
@@ -471,7 +509,24 @@ func (s *Sidebar) onContextChanged() {
 	if s.contextUsedSig == nil && s.contextBudgetSig == nil && s.contextWindowSig == nil {
 		return
 	}
+	if s.contextUpdateDepth > 0 {
+		return
+	}
 	s.applyContext()
+	s.requestInvalidate()
+}
+
+func (s *Sidebar) onProjectPathChanged() {
+	if s.projectPathSig == nil {
+		return
+	}
+	path := strings.TrimSpace(s.projectPathSig.Get())
+	if s.projectPath == path {
+		return
+	}
+	s.projectPath = path
+	s.updateBreadcrumb()
+	s.updateFilesPanel()
 	s.requestInvalidate()
 }
 
@@ -509,16 +564,27 @@ func (s *Sidebar) onVisibilityChanged() {
 	}
 }
 
+func (s *Sidebar) updateState(fn func(SidebarState) SidebarState) bool {
+	if s == nil || s.stateSig == nil || fn == nil {
+		return false
+	}
+	if writable, ok := s.stateSig.(state.Writable[SidebarState]); ok && writable != nil {
+		writable.Update(fn)
+		return true
+	}
+	return false
+}
+
 func (s *Sidebar) applyState(state SidebarState) {
-	s.SetCurrentTask(state.CurrentTask, state.TaskProgress)
-	s.SetPlanTasks(state.PlanTasks)
-	s.SetRunningTools(state.RunningTools)
-	s.SetToolHistory(state.ToolHistory)
-	s.SetActiveTouches(state.ActiveTouches)
-	s.SetRecentFiles(state.RecentFiles)
-	s.SetExperiment(state.Experiment, state.ExperimentStatus, state.ExperimentVariants)
-	s.SetRLMStatus(state.RLMStatus, state.RLMScratchpad)
-	s.SetCircuitStatus(state.CircuitStatus)
+	s.applyCurrentTask(state.CurrentTask, state.TaskProgress)
+	s.applyPlanTasks(clonePlanTasks(state.PlanTasks))
+	s.applyRunningTools(cloneRunningTools(state.RunningTools))
+	s.applyToolHistory(cloneToolHistory(state.ToolHistory))
+	s.applyActiveTouches(cloneTouchSummaries(state.ActiveTouches))
+	s.applyRecentFiles(cloneStrings(state.RecentFiles))
+	s.applyExperiment(state.Experiment, state.ExperimentStatus, cloneExperimentVariants(state.ExperimentVariants))
+	s.applyRLMStatus(cloneRLMStatus(state.RLMStatus), cloneScratchpadEntries(state.RLMScratchpad))
+	s.applyCircuitStatus(cloneCircuitStatus(state.CircuitStatus))
 }
 
 func (s *Sidebar) applyContext() {
@@ -534,7 +600,27 @@ func (s *Sidebar) applyContext() {
 	if s.contextWindowSig != nil {
 		window = s.contextWindowSig.Get()
 	}
-	s.SetContextUsage(used, budget, window)
+	s.applyContextUsage(used, budget, window)
+}
+
+func (s *Sidebar) applyContextUsage(used, budget, window int) {
+	s.contextUsed = used
+	s.contextBudget = budget
+	s.contextWindow = window
+	if budget > 0 || window > 0 {
+		ratio := s.contextRatio()
+		if ratio < 0 {
+			ratio = 0
+		}
+		if ratio > 1 {
+			ratio = 1
+		}
+		s.contextHistory = append(s.contextHistory, ratio)
+		if s.contextMax > 0 && len(s.contextHistory) > s.contextMax {
+			s.contextHistory = s.contextHistory[len(s.contextHistory)-s.contextMax:]
+		}
+	}
+	s.updateContextPanel()
 }
 
 func (s *Sidebar) applyVisibility() (bool, bool) {
@@ -796,12 +882,39 @@ func (s *Sidebar) HasContent() bool {
 
 // SetProjectPath updates breadcrumb path display.
 func (s *Sidebar) SetProjectPath(path string) {
-	s.projectPath = strings.TrimSpace(path)
-	s.updateBreadcrumb()
+	if s == nil {
+		return
+	}
+	if s.ownsProjectPath() && s.ownedProjectPath != nil {
+		s.ownedProjectPath.Set(strings.TrimSpace(path))
+	}
+}
+
+func (s *Sidebar) ownsProjectPath() bool {
+	if s == nil || s.projectPathSig == nil || s.ownedProjectPath == nil {
+		return false
+	}
+	sig, ok := s.projectPathSig.(*state.Signal[string])
+	return ok && sig == s.ownedProjectPath
 }
 
 // SetCurrentTask updates the current task display.
 func (s *Sidebar) SetCurrentTask(name string, progress int) {
+	if s == nil {
+		return
+	}
+	progress = clampPercent(progress)
+	if s.updateState(func(state SidebarState) SidebarState {
+		state.CurrentTask = name
+		state.TaskProgress = progress
+		return state
+	}) {
+		return
+	}
+	s.applyCurrentTask(name, progress)
+}
+
+func (s *Sidebar) applyCurrentTask(name string, progress int) {
 	s.currentTask = name
 	s.taskProgress = clampPercent(progress)
 	s.updateTaskPanel()
@@ -831,6 +944,20 @@ func (s *Sidebar) ToggleCurrentTask() {
 
 // SetPlanTasks updates the plan task list.
 func (s *Sidebar) SetPlanTasks(tasks []PlanTask) {
+	if s == nil {
+		return
+	}
+	cloned := clonePlanTasks(tasks)
+	if s.updateState(func(state SidebarState) SidebarState {
+		state.PlanTasks = cloned
+		return state
+	}) {
+		return
+	}
+	s.applyPlanTasks(cloned)
+}
+
+func (s *Sidebar) applyPlanTasks(tasks []PlanTask) {
 	s.planTasks = tasks
 	s.updatePlanPanel()
 }
@@ -850,12 +977,40 @@ func (s *Sidebar) TogglePlan() {
 
 // SetRunningTools updates the running tools list.
 func (s *Sidebar) SetRunningTools(tools []RunningTool) {
+	if s == nil {
+		return
+	}
+	cloned := cloneRunningTools(tools)
+	if s.updateState(func(state SidebarState) SidebarState {
+		state.RunningTools = cloned
+		return state
+	}) {
+		return
+	}
+	s.applyRunningTools(cloned)
+}
+
+func (s *Sidebar) applyRunningTools(tools []RunningTool) {
 	s.runningTools = tools
 	s.updateToolsPanel()
 }
 
 // SetToolHistory updates recent tool history entries.
 func (s *Sidebar) SetToolHistory(history []ToolHistoryEntry) {
+	if s == nil {
+		return
+	}
+	cloned := cloneToolHistory(history)
+	if s.updateState(func(state SidebarState) SidebarState {
+		state.ToolHistory = cloned
+		return state
+	}) {
+		return
+	}
+	s.applyToolHistory(cloned)
+}
+
+func (s *Sidebar) applyToolHistory(history []ToolHistoryEntry) {
 	s.toolHistory = history
 	s.updateToolsPanel()
 }
@@ -875,23 +1030,33 @@ func (s *Sidebar) ToggleTools() {
 
 // SetContextUsage updates context usage values.
 func (s *Sidebar) SetContextUsage(used, budget, window int) {
-	s.contextUsed = used
-	s.contextBudget = budget
-	s.contextWindow = window
-	if budget > 0 || window > 0 {
-		ratio := s.contextRatio()
-		if ratio < 0 {
-			ratio = 0
-		}
-		if ratio > 1 {
-			ratio = 1
-		}
-		s.contextHistory = append(s.contextHistory, ratio)
-		if s.contextMax > 0 && len(s.contextHistory) > s.contextMax {
-			s.contextHistory = s.contextHistory[len(s.contextHistory)-s.contextMax:]
-		}
+	if s == nil {
+		return
 	}
-	s.updateContextPanel()
+	if s.contextUsedSig != nil || s.contextBudgetSig != nil || s.contextWindowSig != nil {
+		s.contextUpdateDepth++
+		defer func() {
+			s.contextUpdateDepth--
+			if s.contextUpdateDepth == 0 {
+				s.applyContextUsage(used, budget, window)
+				s.requestInvalidate()
+			}
+		}()
+		s.writeContextSignal(s.contextUsedSig, used)
+		s.writeContextSignal(s.contextBudgetSig, budget)
+		s.writeContextSignal(s.contextWindowSig, window)
+		return
+	}
+	s.applyContextUsage(used, budget, window)
+}
+
+func (s *Sidebar) writeContextSignal(sig state.Readable[int], value int) {
+	if sig == nil {
+		return
+	}
+	if writable, ok := sig.(state.Writable[int]); ok && writable != nil {
+		writable.Set(value)
+	}
 }
 
 // SetShowContext controls visibility of context section.
@@ -909,6 +1074,20 @@ func (s *Sidebar) ToggleContext() {
 
 // SetActiveTouches updates the active touches list.
 func (s *Sidebar) SetActiveTouches(touches []TouchSummary) {
+	if s == nil {
+		return
+	}
+	cloned := cloneTouchSummaries(touches)
+	if s.updateState(func(state SidebarState) SidebarState {
+		state.ActiveTouches = cloned
+		return state
+	}) {
+		return
+	}
+	s.applyActiveTouches(cloned)
+}
+
+func (s *Sidebar) applyActiveTouches(touches []TouchSummary) {
 	s.activeTouches = touches
 	s.updateTouchesPanel()
 }
@@ -928,6 +1107,20 @@ func (s *Sidebar) ToggleTouches() {
 
 // SetRecentFiles updates the recent files list.
 func (s *Sidebar) SetRecentFiles(files []string) {
+	if s == nil {
+		return
+	}
+	cloned := cloneStrings(files)
+	if s.updateState(func(state SidebarState) SidebarState {
+		state.RecentFiles = cloned
+		return state
+	}) {
+		return
+	}
+	s.applyRecentFiles(cloned)
+}
+
+func (s *Sidebar) applyRecentFiles(files []string) {
 	s.recentFiles = files
 	s.updateFilesPanel()
 }
@@ -939,6 +1132,22 @@ func (s *Sidebar) SetShowRecentFiles(show bool) {
 
 // SetExperiment updates the experiment summary.
 func (s *Sidebar) SetExperiment(name, status string, variants []ExperimentVariant) {
+	if s == nil {
+		return
+	}
+	cloned := cloneExperimentVariants(variants)
+	if s.updateState(func(state SidebarState) SidebarState {
+		state.Experiment = name
+		state.ExperimentStatus = status
+		state.ExperimentVariants = cloned
+		return state
+	}) {
+		return
+	}
+	s.applyExperiment(name, status, cloned)
+}
+
+func (s *Sidebar) applyExperiment(name, status string, variants []ExperimentVariant) {
 	s.experimentName = name
 	s.experimentStatus = status
 	s.experimentVariants = variants
@@ -947,17 +1156,47 @@ func (s *Sidebar) SetExperiment(name, status string, variants []ExperimentVarian
 
 // SetRLMStatus updates the RLM iteration status and scratchpad summaries.
 func (s *Sidebar) SetRLMStatus(status *RLMStatus, scratchpad []RLMScratchpadEntry) {
+	if s == nil {
+		return
+	}
+	clonedStatus := cloneRLMStatus(status)
+	clonedScratchpad := cloneScratchpadEntries(scratchpad)
+	if s.updateState(func(state SidebarState) SidebarState {
+		state.RLMStatus = clonedStatus
+		state.RLMScratchpad = clonedScratchpad
+		return state
+	}) {
+		return
+	}
+	s.applyRLMStatus(clonedStatus, clonedScratchpad)
+}
+
+func (s *Sidebar) applyRLMStatus(status *RLMStatus, scratchpad []RLMScratchpadEntry) {
 	s.rlmStatus = status
 	if scratchpad == nil {
 		s.rlmScratchpad = nil
 	} else {
-		s.rlmScratchpad = append([]RLMScratchpadEntry{}, scratchpad...)
+		s.rlmScratchpad = scratchpad
 	}
 	s.updateRLMPanel()
 }
 
 // SetCircuitStatus updates the circuit breaker status display.
 func (s *Sidebar) SetCircuitStatus(status *CircuitStatus) {
+	if s == nil {
+		return
+	}
+	cloned := cloneCircuitStatus(status)
+	if s.updateState(func(state SidebarState) SidebarState {
+		state.CircuitStatus = cloned
+		return state
+	}) {
+		return
+	}
+	s.applyCircuitStatus(cloned)
+}
+
+func (s *Sidebar) applyCircuitStatus(status *CircuitStatus) {
 	s.circuitStatus = status
 	s.updateCircuitPanel()
 }
@@ -1204,6 +1443,95 @@ func (s *Sidebar) ChildWidgets() []runtime.Widget {
 // WebLinkAt returns a sidebar web link hit if the point is inside one.
 func (s *Sidebar) WebLinkAt(x, y int) (string, bool) {
 	return "", false
+}
+
+func clonePlanTasks(tasks []PlanTask) []PlanTask {
+	if len(tasks) == 0 {
+		return nil
+	}
+	cloned := make([]PlanTask, len(tasks))
+	copy(cloned, tasks)
+	return cloned
+}
+
+func cloneRunningTools(tools []RunningTool) []RunningTool {
+	if len(tools) == 0 {
+		return nil
+	}
+	cloned := make([]RunningTool, len(tools))
+	copy(cloned, tools)
+	return cloned
+}
+
+func cloneToolHistory(history []ToolHistoryEntry) []ToolHistoryEntry {
+	if len(history) == 0 {
+		return nil
+	}
+	cloned := make([]ToolHistoryEntry, len(history))
+	copy(cloned, history)
+	return cloned
+}
+
+func cloneTouchSummaries(touches []TouchSummary) []TouchSummary {
+	if len(touches) == 0 {
+		return nil
+	}
+	cloned := make([]TouchSummary, len(touches))
+	for i, touch := range touches {
+		cloned[i] = TouchSummary{
+			Path:      touch.Path,
+			Operation: touch.Operation,
+		}
+		if len(touch.Ranges) > 0 {
+			ranges := make([]TouchRange, len(touch.Ranges))
+			copy(ranges, touch.Ranges)
+			cloned[i].Ranges = ranges
+		}
+	}
+	return cloned
+}
+
+func cloneStrings(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	cloned := make([]string, len(values))
+	copy(cloned, values)
+	return cloned
+}
+
+func cloneExperimentVariants(variants []ExperimentVariant) []ExperimentVariant {
+	if len(variants) == 0 {
+		return nil
+	}
+	cloned := make([]ExperimentVariant, len(variants))
+	copy(cloned, variants)
+	return cloned
+}
+
+func cloneScratchpadEntries(entries []RLMScratchpadEntry) []RLMScratchpadEntry {
+	if len(entries) == 0 {
+		return nil
+	}
+	cloned := make([]RLMScratchpadEntry, len(entries))
+	copy(cloned, entries)
+	return cloned
+}
+
+func cloneRLMStatus(status *RLMStatus) *RLMStatus {
+	if status == nil {
+		return nil
+	}
+	cloned := *status
+	return &cloned
+}
+
+func cloneCircuitStatus(status *CircuitStatus) *CircuitStatus {
+	if status == nil {
+		return nil
+	}
+	cloned := *status
+	return &cloned
 }
 
 func (s *Sidebar) rebuildStatus() {

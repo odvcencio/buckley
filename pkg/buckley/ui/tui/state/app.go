@@ -46,6 +46,7 @@ type AppState struct {
 	SidebarVisible         *state.Signal[bool]
 	SidebarWidth           *state.Signal[int]
 	SidebarTabIndex        *state.Signal[int]
+	SidebarProjectPath     *state.Signal[string]
 	SidebarShowCurrentTask *state.Signal[bool]
 	SidebarShowPlan        *state.Signal[bool]
 	SidebarShowTools       *state.Signal[bool]
@@ -88,6 +89,7 @@ func NewAppState() *AppState {
 		SidebarVisible:         state.NewSignal(true),
 		SidebarWidth:           state.NewSignal(buckleywidgets.DefaultSidebarConfig().Width),
 		SidebarTabIndex:        state.NewSignal(0),
+		SidebarProjectPath:     state.NewSignal(""),
 		SidebarShowCurrentTask: state.NewSignal(true),
 		SidebarShowPlan:        state.NewSignal(true),
 		SidebarShowTools:       state.NewSignal(true),

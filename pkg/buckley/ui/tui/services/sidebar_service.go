@@ -1,6 +1,8 @@
 package services
 
 import (
+	"strings"
+
 	"github.com/odvcencio/buckley/pkg/buckley/ui/tui/state"
 	buckleywidgets "github.com/odvcencio/buckley/pkg/buckley/ui/widgets"
 )
@@ -21,6 +23,14 @@ func (svc *SidebarService) SetSidebarState(snapshot buckleywidgets.SidebarState)
 		return
 	}
 	svc.state.SidebarState.Set(cloneSidebarState(snapshot))
+}
+
+// SetProjectPath updates the project root displayed in the sidebar.
+func (svc *SidebarService) SetProjectPath(path string) {
+	if svc == nil || svc.state == nil || svc.state.SidebarProjectPath == nil {
+		return
+	}
+	svc.state.SidebarProjectPath.Set(strings.TrimSpace(path))
 }
 
 // ToggleCurrentTask toggles the current task section visibility.

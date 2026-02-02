@@ -150,6 +150,9 @@ func NewRunner(cfg RunnerConfig) (*Runner, error) {
 		appState.SidebarWidth.Set(sidebarCfg.Width)
 	}
 	chatService.SetModelName(cfg.ModelName)
+	if sidebarService != nil {
+		sidebarService.SetProjectPath(projectRoot)
+	}
 
 	r := &Runner{
 		theme:          th,
@@ -452,6 +455,7 @@ func (r *Runner) buildWidgets(cfg RunnerConfig, styleCache *StyleCache) {
 			ContextUsed:     r.state.ContextUsed,
 			ContextBudget:   r.state.ContextBudget,
 			ContextWindow:   r.state.ContextWindow,
+			ProjectPath:     r.state.SidebarProjectPath,
 			Width:           r.state.SidebarWidth,
 			TabIndex:        r.state.SidebarTabIndex,
 			ShowCurrentTask: r.state.SidebarShowCurrentTask,
@@ -487,7 +491,6 @@ func (r *Runner) buildWidgets(cfg RunnerConfig, styleCache *StyleCache) {
 		styleCache.Get(th.TextMuted),
 	)
 	r.sidebar.SetSpinnerStyle(styleCache.Get(th.ElectricBlue))
-	r.sidebar.SetProjectPath(r.projectRoot)
 
 	// Toast stack
 	r.toastStack = buckleywidgets.NewSignalToastStack(r.state.Toasts)
@@ -812,6 +815,12 @@ func newOverlayKeymap() *keybind.Keymap {
 	return &keybind.Keymap{
 		Name: "buckley.overlay",
 		Bindings: []keybind.Binding{
+			{Key: keybind.MustParseKeySequence("ctrl+b"), Command: overlayNoopCommand},
+			{Key: keybind.MustParseKeySequence("alt+right"), Command: overlayNoopCommand},
+			{Key: keybind.MustParseKeySequence("alt+left"), Command: overlayNoopCommand},
+			{Key: keybind.MustParseKeySequence("ctrl+f"), Command: overlayNoopCommand},
+			{Key: keybind.MustParseKeySequence("ctrl+p"), Command: overlayNoopCommand},
+			{Key: keybind.MustParseKeySequence("ctrl+i"), Command: overlayNoopCommand},
 			{Key: keybind.MustParseKeySequence("ctrl+g g"), Command: overlayNoopCommand},
 			{Key: keybind.MustParseKeySequence("ctrl+g b"), Command: overlayNoopCommand},
 			{Key: keybind.MustParseKeySequence("ctrl+g s"), Command: overlayNoopCommand},
@@ -853,6 +862,14 @@ func (r *Runner) handleCommand(cmd runtime.Command) bool {
 	case runtime.PushOverlay:
 		if r.app != nil {
 			if screen := r.app.Screen(); screen != nil {
+				overlayCount := screen.LayerCount() - 1
+				if overlayCount < 0 {
+					overlayCount = 0
+				}
+				if overlayCount > len(r.overlayStack) {
+					r.noteOverlayPush(c.Modal)
+					return true
+				}
 				screen.PushLayer(c.Widget, c.Modal)
 				r.noteOverlayPush(c.Modal)
 				return true
@@ -862,6 +879,14 @@ func (r *Runner) handleCommand(cmd runtime.Command) bool {
 	case runtime.PopOverlay:
 		if r.app != nil {
 			if screen := r.app.Screen(); screen != nil {
+				overlayCount := screen.LayerCount() - 1
+				if overlayCount < 0 {
+					overlayCount = 0
+				}
+				if overlayCount < len(r.overlayStack) {
+					r.noteOverlayPop()
+					return true
+				}
 				if screen.PopLayer() {
 					r.noteOverlayPop()
 					return true
