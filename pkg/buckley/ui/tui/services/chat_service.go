@@ -16,22 +16,11 @@ type ChatService struct {
 	mu         sync.Mutex
 	nextID     int
 	lastUserAt time.Time
-	modelName  string
 }
 
 // NewChatService creates a new chat service.
 func NewChatService(s *state.AppState) *ChatService {
 	return &ChatService{state: s}
-}
-
-// SetModelName updates the model name for new assistant messages.
-func (svc *ChatService) SetModelName(name string) {
-	if svc == nil {
-		return
-	}
-	svc.mu.Lock()
-	svc.modelName = strings.TrimSpace(name)
-	svc.mu.Unlock()
 }
 
 // AddMessage adds a new message to the chat.
@@ -48,12 +37,16 @@ func (svc *ChatService) AddMessage(content, source string) {
 	defer svc.mu.Unlock()
 
 	svc.nextID++
+	modelName := ""
+	if svc.state.ModelName != nil {
+		modelName = strings.TrimSpace(svc.state.ModelName.Get())
+	}
 	msg := buckleywidgets.ChatMessage{
 		ID:      svc.nextID,
 		Content: content,
 		Source:  source,
 		Time:    time.Now(),
-		Model:   svc.modelName,
+		Model:   modelName,
 	}
 	if source == "user" {
 		svc.lastUserAt = msg.Time

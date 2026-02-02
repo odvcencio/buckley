@@ -95,7 +95,6 @@ func (r *Runner) showSlashCommandPalette() {
 	palette := buckleywidgets.NewInteractivePalette("Commands")
 	palette.SetItems(items)
 	palette.SetOnSelect(func(item uiwidgets.PaletteItem) {
-		r.app.ExecuteCommand(runtime.PopOverlay{})
 		// Insert the command into input
 		r.inputArea.InsertText(item.ID + " ")
 	})

@@ -149,7 +149,6 @@ func NewRunner(cfg RunnerConfig) (*Runner, error) {
 	if appState.SidebarWidth != nil {
 		appState.SidebarWidth.Set(sidebarCfg.Width)
 	}
-	chatService.SetModelName(cfg.ModelName)
 	if sidebarService != nil {
 		sidebarService.SetProjectPath(projectRoot)
 	}
@@ -914,9 +913,6 @@ func (r *Runner) handleApprovalResponse(resp buckleywidgets.ApprovalResponse) bo
 	if r.onApproval != nil {
 		r.onApproval(resp.RequestID, resp.Approved, resp.AlwaysAllow)
 	}
-	if r.app != nil {
-		r.app.ExecuteCommand(runtime.PopOverlay{})
-	}
 
 	r.approvalMu.Lock()
 	r.approvalActive = false
@@ -1092,9 +1088,6 @@ func (r *Runner) SetModelName(name string) {
 	}
 	name = strings.TrimSpace(name)
 	r.state.ModelName.Set(name)
-	if r.chatService != nil {
-		r.chatService.SetModelName(name)
-	}
 }
 
 // SetSessionID updates the displayed session ID.
@@ -1157,8 +1150,6 @@ func (r *Runner) ShowModelPicker(items []uiwidgets.PaletteItem, onSelect func(it
 
 	// Set the callback that dismisses the palette after selection
 	r.modelPalette.SetOnSelect(func(item uiwidgets.PaletteItem) {
-		// Dismiss the overlay via command
-		r.app.ExecuteCommand(runtime.PopOverlay{})
 		// Then call the user's callback
 		if onSelect != nil {
 			onSelect(item)

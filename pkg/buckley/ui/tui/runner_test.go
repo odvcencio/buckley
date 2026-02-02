@@ -7,6 +7,7 @@ import (
 
 	"github.com/odvcencio/fluffyui/backend"
 	"github.com/odvcencio/fluffyui/progress"
+	"github.com/odvcencio/fluffyui/runtime"
 	"github.com/odvcencio/fluffyui/terminal"
 	"github.com/odvcencio/fluffyui/toast"
 	"github.com/odvcencio/fluffyui/widgets"
@@ -118,6 +119,151 @@ func TestRunnerToggleSidebar(t *testing.T) {
 	runner.toggleSidebar()
 	if !runner.state.SidebarVisible.Get() {
 		t.Error("expected sidebar to be visible after second toggle")
+	}
+}
+
+func TestRunnerOverlayPopFromWidgetCommand(t *testing.T) {
+	testBackend := newTestBackend(80, 24)
+	runner, err := NewRunner(RunnerConfig{Backend: testBackend})
+	if err != nil {
+		t.Fatalf("NewRunner failed: %v", err)
+	}
+	cancel := startRunnerApp(t, runner)
+	defer cancel()
+
+	type overlaySnapshot struct {
+		layerCount int
+		stackLen   int
+		depth      int
+		popOK      bool
+		popHandled bool
+	}
+	var afterPush, afterPop, afterFinal overlaySnapshot
+
+	overlay := widgets.NewLabel("overlay")
+	callErr := runner.app.Call(context.Background(), func(app *runtime.App) error {
+		screen := app.Screen()
+		if screen == nil {
+			return nil
+		}
+		if ok := runner.handleCommand(runtime.PushOverlay{Widget: overlay, Modal: true}); !ok {
+			return nil
+		}
+		afterPush = overlaySnapshot{
+			layerCount: screen.LayerCount(),
+			stackLen:   len(runner.overlayStack),
+			depth:      runner.overlayDepth,
+		}
+
+		afterPop.popOK = screen.PopLayer()
+		afterPop.layerCount = screen.LayerCount()
+
+		afterFinal.popHandled = runner.handleCommand(runtime.PopOverlay{})
+		afterFinal.layerCount = screen.LayerCount()
+		afterFinal.stackLen = len(runner.overlayStack)
+		afterFinal.depth = runner.overlayDepth
+		return nil
+	})
+	if callErr != nil {
+		t.Fatalf("app call failed: %v", callErr)
+	}
+
+	if afterPush.layerCount != 2 {
+		t.Fatalf("expected 2 layers after push, got %d", afterPush.layerCount)
+	}
+	if afterPush.stackLen != 1 {
+		t.Fatalf("expected overlay stack size 1, got %d", afterPush.stackLen)
+	}
+	if afterPush.depth != 1 {
+		t.Fatalf("expected overlay depth 1, got %d", afterPush.depth)
+	}
+
+	if !afterPop.popOK {
+		t.Fatal("expected screen pop to succeed")
+	}
+	if afterPop.layerCount != 1 {
+		t.Fatalf("expected 1 layer after pop, got %d", afterPop.layerCount)
+	}
+
+	if !afterFinal.popHandled {
+		t.Fatal("expected pop overlay command to be handled")
+	}
+	if afterFinal.stackLen != 0 {
+		t.Fatalf("expected overlay stack size 0, got %d", afterFinal.stackLen)
+	}
+	if afterFinal.depth != 0 {
+		t.Fatalf("expected overlay depth 0, got %d", afterFinal.depth)
+	}
+	if afterFinal.layerCount != 1 {
+		t.Fatalf("expected base layer to remain, got %d", afterFinal.layerCount)
+	}
+}
+
+func TestRunnerOverlayNonModalDoesNotAffectDepth(t *testing.T) {
+	testBackend := newTestBackend(80, 24)
+	runner, err := NewRunner(RunnerConfig{Backend: testBackend})
+	if err != nil {
+		t.Fatalf("NewRunner failed: %v", err)
+	}
+	cancel := startRunnerApp(t, runner)
+	defer cancel()
+
+	type overlaySnapshot struct {
+		layerCount int
+		stackLen   int
+		depth      int
+		popOK      bool
+		popHandled bool
+	}
+	var afterPush, afterFinal overlaySnapshot
+
+	overlay := widgets.NewLabel("overlay")
+	callErr := runner.app.Call(context.Background(), func(app *runtime.App) error {
+		screen := app.Screen()
+		if screen == nil {
+			return nil
+		}
+		if ok := runner.handleCommand(runtime.PushOverlay{Widget: overlay, Modal: false}); !ok {
+			return nil
+		}
+		afterPush = overlaySnapshot{
+			layerCount: screen.LayerCount(),
+			stackLen:   len(runner.overlayStack),
+			depth:      runner.overlayDepth,
+		}
+
+		afterFinal.popOK = screen.PopLayer()
+		afterFinal.popHandled = runner.handleCommand(runtime.PopOverlay{})
+		afterFinal.layerCount = screen.LayerCount()
+		afterFinal.stackLen = len(runner.overlayStack)
+		afterFinal.depth = runner.overlayDepth
+		return nil
+	})
+	if callErr != nil {
+		t.Fatalf("app call failed: %v", callErr)
+	}
+
+	if afterPush.layerCount != 2 {
+		t.Fatalf("expected 2 layers after push, got %d", afterPush.layerCount)
+	}
+	if afterPush.stackLen != 1 {
+		t.Fatalf("expected overlay stack size 1, got %d", afterPush.stackLen)
+	}
+	if afterPush.depth != 0 {
+		t.Fatalf("expected overlay depth 0 for non-modal, got %d", afterPush.depth)
+	}
+
+	if !afterFinal.popOK {
+		t.Fatal("expected screen pop to succeed")
+	}
+	if !afterFinal.popHandled {
+		t.Fatal("expected pop overlay command to be handled")
+	}
+	if afterFinal.stackLen != 0 {
+		t.Fatalf("expected overlay stack size 0, got %d", afterFinal.stackLen)
+	}
+	if afterFinal.depth != 0 {
+		t.Fatalf("expected overlay depth 0 after pop, got %d", afterFinal.depth)
 	}
 }
 
@@ -462,6 +608,32 @@ func newTestBackend(width, height int) backend.Backend {
 		events: make(chan terminal.Event, 10),
 		width:  width,
 		height: height,
+	}
+}
+
+func startRunnerApp(t *testing.T, runner *Runner) func() {
+	t.Helper()
+	if runner == nil || runner.app == nil {
+		t.Fatal("expected runner app")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		_ = runner.app.Run(ctx)
+		close(done)
+	}()
+	deadline := time.Now().Add(200 * time.Millisecond)
+	for runner.app.Screen() == nil {
+		if time.Now().After(deadline) {
+			cancel()
+			<-done
+			t.Fatal("timed out waiting for app screen")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	return func() {
+		cancel()
+		<-done
 	}
 }
 

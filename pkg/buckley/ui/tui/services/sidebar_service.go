@@ -168,7 +168,7 @@ func cloneSidebarState(src buckleywidgets.SidebarState) buckleywidgets.SidebarSt
 		dst.ToolHistory = append([]buckleywidgets.ToolHistoryEntry(nil), src.ToolHistory...)
 	}
 	if src.ActiveTouches != nil {
-		dst.ActiveTouches = append([]buckleywidgets.TouchSummary(nil), src.ActiveTouches...)
+		dst.ActiveTouches = cloneTouches(src.ActiveTouches)
 	}
 	if src.RecentFiles != nil {
 		dst.RecentFiles = append([]string(nil), src.RecentFiles...)
@@ -188,4 +188,23 @@ func cloneSidebarState(src buckleywidgets.SidebarState) buckleywidgets.SidebarSt
 		dst.CircuitStatus = &copyStatus
 	}
 	return dst
+}
+
+func cloneTouches(touches []buckleywidgets.TouchSummary) []buckleywidgets.TouchSummary {
+	if len(touches) == 0 {
+		return nil
+	}
+	cloned := make([]buckleywidgets.TouchSummary, len(touches))
+	for i, touch := range touches {
+		cloned[i] = buckleywidgets.TouchSummary{
+			Path:      touch.Path,
+			Operation: touch.Operation,
+		}
+		if len(touch.Ranges) > 0 {
+			ranges := make([]buckleywidgets.TouchRange, len(touch.Ranges))
+			copy(ranges, touch.Ranges)
+			cloned[i].Ranges = ranges
+		}
+	}
+	return cloned
 }
