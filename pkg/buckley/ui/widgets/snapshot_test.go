@@ -16,8 +16,9 @@ import (
 var updateSnapshots = flag.Bool("update-snapshots", false, "Update golden snapshot files")
 
 // renderSnapshot renders via the simulation backend for snapshot comparison.
-func renderSnapshot(w runtime.Widget, width, height int) string {
-	be := uitesting.RenderWidget(w, width, height)
+func renderSnapshot(t *testing.T, w runtime.Widget, width, height int) string {
+	t.Helper()
+	be := uitesting.RenderWidgetOrFail(t, w, width, height)
 	output := be.Capture()
 	if !strings.HasSuffix(output, "\n") {
 		output += "\n"
@@ -70,7 +71,7 @@ func TestSnapshot_InputArea(t *testing.T) {
 	)
 	ia.Focus()
 
-	output := renderSnapshot(ia, 80, 3)
+	output := renderSnapshot(t, ia, 80, 3)
 	assertSnapshot(t, "inputarea", output)
 }
 
@@ -83,7 +84,7 @@ func TestSnapshot_Header(t *testing.T) {
 		backend.DefaultStyle(),
 	)
 
-	output := renderSnapshot(h, 80, 1)
+	output := renderSnapshot(t, h, 80, 1)
 	assertSnapshot(t, "header", output)
 }
 
@@ -103,7 +104,7 @@ func TestSnapshot_StatusBar(t *testing.T) {
 		ModeStyle:      backend.DefaultStyle(),
 	})
 
-	output := renderSnapshot(s, 80, 1)
+	output := renderSnapshot(t, s, 80, 1)
 	assertSnapshot(t, "statusbar", output)
 }
 
@@ -129,7 +130,7 @@ func TestSnapshot_Sidebar(t *testing.T) {
 		backend.DefaultStyle(),
 	)
 
-	output := renderSnapshot(s, 30, 20)
+	output := renderSnapshot(t, s, 30, 20)
 	assertSnapshot(t, "sidebar", output)
 }
 
@@ -150,7 +151,7 @@ func TestSnapshot_Approval(t *testing.T) {
 	)
 	a.Focus()
 
-	output := renderSnapshot(a, 60, 15)
+	output := renderSnapshot(t, a, 60, 15)
 	assertSnapshot(t, "approval", output)
 }
 
@@ -179,6 +180,6 @@ func TestSnapshot_ApprovalWithDiff(t *testing.T) {
 	)
 	a.Focus()
 
-	output := renderSnapshot(a, 60, 18)
+	output := renderSnapshot(t, a, 60, 18)
 	assertSnapshot(t, "approval_diff", output)
 }

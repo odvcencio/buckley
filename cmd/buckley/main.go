@@ -16,6 +16,7 @@ import (
 	"regexp"
 	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -33,12 +34,15 @@ import (
 	"github.com/odvcencio/buckley/pkg/ipc"
 	"github.com/odvcencio/buckley/pkg/ipc/command"
 	"github.com/odvcencio/buckley/pkg/model"
+	"github.com/odvcencio/buckley/pkg/oneshot"
 	"github.com/odvcencio/buckley/pkg/orchestrator"
 	rlmrunner "github.com/odvcencio/buckley/pkg/rlm/runner"
 	"github.com/odvcencio/buckley/pkg/setup"
 	"github.com/odvcencio/buckley/pkg/storage"
 	"github.com/odvcencio/buckley/pkg/telemetry"
+	buckleyterm "github.com/odvcencio/buckley/pkg/terminal"
 	"github.com/odvcencio/buckley/pkg/tool"
+	"github.com/odvcencio/buckley/pkg/toolrunner"
 	"github.com/odvcencio/buckley/pkg/buckley/ui/tui"
 )
 
@@ -281,6 +285,10 @@ func executeOneShot(prompt string, cfg *config.Config, mgr *model.Manager, store
 	if mgr != nil {
 		mgr.SetRequestTimeout(0)
 	}
+	if cfg == nil || mgr == nil {
+		fmt.Fprintln(os.Stderr, "Error: missing configuration or model manager")
+		return 1
+	}
 
 	// Get model ID
 	modelID := cfg.Models.Execution
@@ -304,35 +312,115 @@ func executeOneShot(prompt string, cfg *config.Config, mgr *model.Manager, store
 		{Role: "user", Content: prompt},
 	}
 
-	// Create request
-	req := model.ChatRequest{
-		Model:    modelID,
-		Messages: messages,
-		Stream:   true,
+	// Tool registry for one-shot runs (full access)
+	registry := tool.NewRegistry()
+	applyToolDefaults(registry, cfg, nil, "")
+	if err := registry.LoadDefaultPlugins(); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to load some plugins: %v\n", err)
+	}
+	if cwd, err := os.Getwd(); err == nil {
+		registry.SetWorkDir(cwd)
+		registry.ConfigureContainers(cfg, cwd)
+	}
+	registerMCPTools(cfg, registry)
+
+	stopSpinner := func() {}
+	if !quietMode && term.IsTerminal(int(os.Stderr.Fd())) {
+		spinner := buckleyterm.NewSpinnerWithOutput(os.Stderr, "processing")
+		spinner.Start()
+		stopSpinner = func() { spinner.Stop() }
 	}
 
-	// Stream response
 	ctx := context.Background()
-	chunkChan, errChan := mgr.ChatCompletionStream(ctx, req)
-
-	for {
-		select {
-		case chunk, ok := <-chunkChan:
-			if !ok {
-				fmt.Println() // Final newline
-				return 0
-			}
-			if len(chunk.Choices) > 0 && chunk.Choices[0].Delta.Content != "" {
-				fmt.Print(chunk.Choices[0].Delta.Content)
-			}
-		case err, ok := <-errChan:
-			if ok && err != nil {
-				fmt.Fprintf(os.Stderr, "\nError: %v\n", err)
-				return 1
-			}
+	mode := cfg.OneshotMode()
+	if mode == config.ExecutionModeRLM {
+		runner := oneshot.NewRLMRunner(oneshot.RLMRunnerConfig{
+			Models:   mgr,
+			Registry: registry,
+			ModelID:  modelID,
+		})
+		result, err := runner.Run(ctx, systemPrompt, prompt, nil)
+		stopSpinner()
+		stopSpinner = func() {}
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "\nError: %v\n", err)
+			return 1
 		}
+		if result != nil && result.Response != "" {
+			fmt.Print(result.Response)
+		}
+		fmt.Println()
+		return 0
 	}
+
+	runner, err := toolrunner.New(toolrunner.Config{
+		Models:   mgr,
+		Registry: registry,
+	})
+	if err != nil {
+		stopSpinner()
+		stopSpinner = func() {}
+		fmt.Fprintf(os.Stderr, "\nError: %v\n", err)
+		return 1
+	}
+
+	streamHandler := &oneshotStreamHandler{}
+	runner.SetStreamHandler(streamHandler)
+	result, err := runner.Run(ctx, toolrunner.Request{
+		Messages:        messages,
+		SelectionPrompt: prompt,
+		Model:           modelID,
+	})
+	stopSpinner()
+	stopSpinner = func() {}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "\nError: %v\n", err)
+		return 1
+	}
+	if result != nil && result.Content != "" && !streamHandler.HasOutput() {
+		fmt.Print(result.Content)
+	}
+	fmt.Println()
+	return 0
 }
+
+type oneshotStreamHandler struct {
+	mu    sync.Mutex
+	wrote bool
+}
+
+func (h *oneshotStreamHandler) HasOutput() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.wrote
+}
+
+func (h *oneshotStreamHandler) OnText(text string) {
+	if text == "" {
+		return
+	}
+	h.mu.Lock()
+	h.wrote = true
+	h.mu.Unlock()
+	fmt.Print(text)
+}
+
+func (h *oneshotStreamHandler) OnReasoning(reasoning string) {}
+
+func (h *oneshotStreamHandler) OnReasoningEnd() {}
+
+func (h *oneshotStreamHandler) OnToolStart(name string, arguments string) {}
+
+func (h *oneshotStreamHandler) OnToolEnd(name string, result string, err error) {}
+
+func (h *oneshotStreamHandler) OnError(err error) {
+	if err == nil {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "\nError: %v\n", err)
+}
+
+func (h *oneshotStreamHandler) OnComplete(result *toolrunner.Result) {}
 
 func buildOneShotSystemPrompt(projectContext *projectcontext.ProjectContext, budgetTokens int) string {
 	base := "You are Buckley, an AI development assistant. Be concise and helpful.\n\n"

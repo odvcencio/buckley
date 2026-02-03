@@ -229,8 +229,12 @@ func NewRunner(cfg RunnerConfig) (*Runner, error) {
 	whenSidebarFocused := keybind.WhenFocusedWidget(func(w runtime.Widget) bool {
 		return r.sidebar != nil && widgetInTree(r.sidebar, w)
 	})
+	// Ctrl+C should quit only when input is empty (otherwise, let widget handle it to clear text)
+	whenInputEmpty := func(ctx keybind.Context) bool {
+		return r.inputArea == nil || !r.inputArea.HasText()
+	}
 
-	defs := buckleyKeyBindings(whenScrollable, whenSidebarFocused)
+	defs := buckleyKeyBindings(whenScrollable, whenSidebarFocused, whenInputEmpty)
 	keymap := buildKeymap(defs)
 	r.overlayKeymap = newOverlayKeymap(defs)
 
@@ -242,6 +246,8 @@ func NewRunner(cfg RunnerConfig) (*Runner, error) {
 		fluffy.WithTickRate(16 * time.Millisecond),
 		fluffy.WithKeyBindings(r.registerKeyBindings),
 		fluffy.WithKeymap(keymap),
+		// Prefer the last focusable (InputArea) while keeping fallback focus logic.
+		fluffy.WithAutoFocusPolicy(runtime.AutoFocusLast),
 	}
 
 	if cfg.Backend != nil {
@@ -709,6 +715,17 @@ func (r *Runner) registerKeyBindings(registry *keybind.CommandRegistry) {
 	})
 
 	registry.Register(keybind.Command{
+		ID:    "buckley.debug-focus",
+		Title: "Debug Focus State",
+		Handler: func(ctx keybind.Context) {
+			debugInfo := r.DebugFocusState()
+			if r.statusService != nil {
+				r.statusService.SetStatusOverride(debugInfo, 5*time.Second)
+			}
+		},
+	})
+
+	registry.Register(keybind.Command{
 		ID:    "buckley.sidebar.toggle-task",
 		Title: "Toggle Current Task",
 		Handler: func(ctx keybind.Context) {
@@ -837,9 +854,10 @@ func (r *Runner) registerKeyBindings(registry *keybind.CommandRegistry) {
 	})
 }
 
-func buckleyKeyBindings(whenScrollable, whenSidebarFocused keybind.Condition) []keyBindingDef {
+func buckleyKeyBindings(whenScrollable, whenSidebarFocused, whenInputEmpty keybind.Condition) []keyBindingDef {
 	return []keyBindingDef{
 		{sequence: "ctrl+q", command: "app.quit", allowInModal: true},
+		{sequence: "ctrl+c", command: "app.quit", when: whenInputEmpty, allowInModal: true},
 		{sequence: "f5", command: "app.refresh", allowInModal: true},
 		{sequence: "tab", command: "focus.next", allowInModal: true},
 		{sequence: "shift+tab", command: "focus.prev", allowInModal: true},
@@ -875,6 +893,7 @@ func buckleyKeyBindings(whenScrollable, whenSidebarFocused keybind.Condition) []
 		{sequence: "ctrl+g .", command: "buckley.sidebar.next-tab"},
 		{sequence: "ctrl+g [", command: "buckley.sidebar.shrink"},
 		{sequence: "ctrl+g ]", command: "buckley.sidebar.grow"},
+		{sequence: "ctrl+g d", command: "buckley.debug-focus"},
 	}
 }
 

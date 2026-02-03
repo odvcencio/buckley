@@ -13,7 +13,7 @@ import (
 
 func renderStatusBar(t *testing.T, sb *StatusBar, width int) string {
 	t.Helper()
-	be := uitesting.RenderWidget(sb, width, 1)
+	be := uitesting.RenderWidgetOrFail(t, sb, width, 1)
 	return be.Capture()
 }
 

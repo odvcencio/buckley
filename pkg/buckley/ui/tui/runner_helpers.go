@@ -4,6 +4,7 @@
 package tui
 
 import (
+	"fmt"
 	"strconv"
 	"time"
 
@@ -364,24 +365,7 @@ func (r *Runner) rebuildLayout() {
 
 // ensureInputFocus ensures the input area has focus.
 func (r *Runner) ensureInputFocus() {
-	if r == nil || r.app == nil || r.inputArea == nil {
-		return
-	}
-	screen := r.app.Screen()
-	if screen == nil {
-		return
-	}
-	scope := screen.BaseFocusScope()
-	if scope == nil {
-		return
-	}
-	focusable, ok := interface{}(r.inputArea).(runtime.Focusable)
-	if !ok || !focusable.CanFocus() {
-		return
-	}
-	if scope.SetFocus(focusable) || scope.Current() == focusable {
-		r.app.Invalidate()
-	}
+	r.trySetInputFocus()
 }
 
 // setToastStyles configures the toast stack styles.
@@ -398,8 +382,69 @@ func (r *Runner) initFocusIfNeeded(app *runtime.App) {
 	if app == nil || app.Screen() == nil {
 		return
 	}
-	r.ensureInputFocus()
-	r.focusInitialized = true
+	// Only mark initialized if focus was successfully set to inputArea
+	if r.trySetInputFocus() {
+		r.focusInitialized = true
+	}
+}
+
+// trySetInputFocus attempts to focus the input area and returns true if successful.
+func (r *Runner) trySetInputFocus() bool {
+	if r == nil || r.app == nil || r.inputArea == nil {
+		return false
+	}
+	screen := r.app.Screen()
+	if screen == nil {
+		return false
+	}
+	scope := screen.BaseFocusScope()
+	if scope == nil {
+		return false
+	}
+	focusable, ok := interface{}(r.inputArea).(runtime.Focusable)
+	if !ok || !focusable.CanFocus() {
+		return false
+	}
+	// If inputArea is already focused, we're done
+	if scope.Current() == focusable {
+		return true
+	}
+	// Try to set focus
+	if scope.SetFocus(focusable) {
+		r.app.Invalidate()
+		return true
+	}
+	// SetFocus failed - inputArea might not be registered yet
+	// This can happen if focus registration hasn't completed
+	return false
+}
+
+// DebugFocusState logs the current focus state for debugging.
+func (r *Runner) DebugFocusState() string {
+	if r == nil || r.app == nil {
+		return "runner or app is nil"
+	}
+	screen := r.app.Screen()
+	if screen == nil {
+		return "screen is nil"
+	}
+	scope := screen.BaseFocusScope()
+	if scope == nil {
+		return "scope is nil"
+	}
+	current := scope.Current()
+	inputFocused := r.inputArea != nil && r.inputArea.IsFocused()
+	return "scope.Count=" + strconv.Itoa(scope.Count()) +
+		", current=" + widgetTypeName(current) +
+		", inputArea.IsFocused=" + strconv.FormatBool(inputFocused) +
+		", focusInitialized=" + strconv.FormatBool(r.focusInitialized)
+}
+
+func widgetTypeName(w interface{}) string {
+	if w == nil {
+		return "<nil>"
+	}
+	return fmt.Sprintf("%T", w)
 }
 
 func (r *Runner) handleMouseFocus(app *runtime.App, mouse runtime.MouseMsg) {

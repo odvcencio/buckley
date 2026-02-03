@@ -588,6 +588,107 @@ func TestRunnerRunWithContext(t *testing.T) {
 	}
 }
 
+// TestRunnerInputFocusAfterStartup verifies InputArea gets focus after app starts.
+func TestRunnerInputFocusAfterStartup(t *testing.T) {
+	testBackend := newTestBackend(80, 24)
+	runner, err := NewRunner(RunnerConfig{Backend: testBackend})
+	if err != nil {
+		t.Fatalf("NewRunner failed: %v", err)
+	}
+	cancel := startRunnerApp(t, runner)
+	defer cancel()
+
+	// Wait a bit for tick messages to trigger focus initialization
+	time.Sleep(50 * time.Millisecond)
+
+	// Check that InputArea has focus
+	var focused runtime.Widget
+	var inputIsFocused bool
+	callErr := runner.app.Call(context.Background(), func(app *runtime.App) error {
+		screen := app.Screen()
+		if screen == nil {
+			return nil
+		}
+		scope := screen.BaseFocusScope()
+		if scope == nil {
+			return nil
+		}
+		focused = scope.Current()
+		inputIsFocused = runner.inputArea.IsFocused()
+		return nil
+	})
+	if callErr != nil {
+		t.Fatalf("app call failed: %v", callErr)
+	}
+
+	// InputArea should be focused, not ChatView
+	if focused == nil {
+		t.Fatal("no widget has focus")
+	}
+	if focused != runner.inputArea {
+		t.Errorf("expected InputArea to have focus, got %T", focused)
+	}
+	if !inputIsFocused {
+		t.Error("InputArea.IsFocused() returned false even though scope says it's focused")
+	}
+}
+
+// TestRunnerKeyInputReachesInputArea verifies key events reach InputArea.
+func TestRunnerKeyInputReachesInputArea(t *testing.T) {
+	testBackend := newTestBackend(80, 24)
+	runner, err := NewRunner(RunnerConfig{Backend: testBackend})
+	if err != nil {
+		t.Fatalf("NewRunner failed: %v", err)
+	}
+	cancel := startRunnerApp(t, runner)
+	defer cancel()
+
+	// Wait for focus initialization
+	time.Sleep(50 * time.Millisecond)
+
+	// Check focus state before sending key
+	var focusedBefore runtime.Widget
+	var inputFocusedBefore bool
+	_ = runner.app.Call(context.Background(), func(app *runtime.App) error {
+		if scope := app.Screen().BaseFocusScope(); scope != nil {
+			focusedBefore = scope.Current()
+		}
+		inputFocusedBefore = runner.inputArea.IsFocused()
+		return nil
+	})
+	t.Logf("Before key: focused=%T, inputArea.IsFocused=%v", focusedBefore, inputFocusedBefore)
+
+	// Send a key event - need to set Key=KeyRune for regular characters
+	testBackend.(*testRunnerBackend).events <- terminal.KeyEvent{
+		Key:  terminal.KeyRune,
+		Rune: 'h',
+	}
+
+	// Wait for event to be processed
+	time.Sleep(50 * time.Millisecond)
+
+	// Check that InputArea received the key
+	var text string
+	var focusedAfter runtime.Widget
+	var inputFocusedAfter bool
+	callErr := runner.app.Call(context.Background(), func(app *runtime.App) error {
+		text = runner.inputArea.Text()
+		if scope := app.Screen().BaseFocusScope(); scope != nil {
+			focusedAfter = scope.Current()
+		}
+		inputFocusedAfter = runner.inputArea.IsFocused()
+		return nil
+	})
+	if callErr != nil {
+		t.Fatalf("app call failed: %v", callErr)
+	}
+	t.Logf("After key: focused=%T, inputArea.IsFocused=%v, text=%q", focusedAfter, inputFocusedAfter, text)
+
+	if text != "h" {
+		t.Errorf("expected InputArea text 'h', got %q", text)
+	}
+}
+
 // TestRunnerNilSafety verifies nil receiver methods don't panic.
 func TestRunnerNilSafety(t *testing.T) {
 	var runner *Runner
