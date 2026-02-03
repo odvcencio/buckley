@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	"github.com/odvcencio/fluffyui/backend"
+	"github.com/odvcencio/fluffyui/dragdrop"
 	"github.com/odvcencio/fluffyui/runtime"
 	uiwidgets "github.com/odvcencio/fluffyui/widgets"
 )
@@ -500,8 +501,9 @@ func (p *breadcrumbPanel) Update(path string) {
 }
 
 type filesPanel struct {
-	tree  *InteractiveTree
-	panel *uiwidgets.Panel
+	tree      *InteractiveTree
+	panel     *uiwidgets.Panel
+	nodePaths map[*uiwidgets.TreeNode]string
 }
 
 func newFilesPanel(border backend.Style) *filesPanel {
@@ -530,8 +532,19 @@ func (p *filesPanel) Update(paths []string, projectPath string) {
 	if p == nil || p.tree == nil {
 		return
 	}
-	root := buildTreeFromPaths(paths, projectPath)
+	root, nodePaths := buildTreeFromPathsWithMap(paths, projectPath)
+	p.nodePaths = nodePaths
 	p.tree.SetRoot(root)
+	p.tree.EnableDrag(func(node *uiwidgets.TreeNode) (dragdrop.DragData, bool) {
+		if node == nil {
+			return dragdrop.DragData{}, false
+		}
+		path := p.nodePaths[node]
+		if strings.TrimSpace(path) == "" {
+			return dragdrop.DragData{}, false
+		}
+		return dragdrop.DragData{Kind: "path", Payload: path}, true
+	})
 }
 
 type touchesPanel struct {

@@ -23,7 +23,6 @@ func (o *chatMessagesOverlay) Render(ctx runtime.RenderContext) {
 		return
 	}
 	o.owner.renderMetadataOverlay(ctx)
-	o.owner.renderScrollbar(ctx)
 }
 
 func (o *chatMessagesOverlay) HandleMessage(msg runtime.Message) runtime.HandleResult {

@@ -89,6 +89,25 @@ func buildTreeFromPaths(paths []string, rootLabel string) *uiwidgets.TreeNode {
 	return root
 }
 
+func buildTreeFromPathsWithMap(paths []string, rootLabel string) (*uiwidgets.TreeNode, map[*uiwidgets.TreeNode]string) {
+	label := "Files"
+	if strings.TrimSpace(rootLabel) != "" {
+		label = filepath.Base(rootLabel)
+	}
+	root := &uiwidgets.TreeNode{Label: label, Expanded: true}
+	nodePaths := make(map[*uiwidgets.TreeNode]string)
+	if len(paths) == 0 {
+		root.Children = []*uiwidgets.TreeNode{{Label: "(none)"}}
+		return root, nodePaths
+	}
+	sorted := append([]string(nil), paths...)
+	sort.Strings(sorted)
+	for _, path := range sorted {
+		addPathNodeWithMap(root, path, nodePaths)
+	}
+	return root, nodePaths
+}
+
 func buildTouchesTree(touches []TouchSummary) *uiwidgets.TreeNode {
 	root := &uiwidgets.TreeNode{Label: "Touches", Expanded: true}
 	if len(touches) == 0 {
@@ -129,6 +148,32 @@ func addPathNode(root *uiwidgets.TreeNode, path string) {
 			cur.Children = append(cur.Children, next)
 		}
 		cur = next
+	}
+}
+
+func addPathNodeWithMap(root *uiwidgets.TreeNode, path string, nodePaths map[*uiwidgets.TreeNode]string) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return
+	}
+	parts := strings.Split(path, string(filepath.Separator))
+	if len(parts) == 1 {
+		parts = strings.Split(path, "/")
+	}
+	cur := root
+	for i, part := range parts {
+		if part == "" {
+			continue
+		}
+		next := findChild(cur, part)
+		if next == nil {
+			next = &uiwidgets.TreeNode{Label: part}
+			cur.Children = append(cur.Children, next)
+		}
+		cur = next
+		if i == len(parts)-1 {
+			nodePaths[cur] = path
+		}
 	}
 }
 

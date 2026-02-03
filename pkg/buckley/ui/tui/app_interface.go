@@ -9,9 +9,27 @@ import (
 	buckleywidgets "github.com/odvcencio/buckley/pkg/buckley/ui/widgets"
 	"github.com/odvcencio/buckley/pkg/diagnostics"
 	"github.com/odvcencio/fluffyui/progress"
+	"github.com/odvcencio/fluffyui/state"
 	"github.com/odvcencio/fluffyui/toast"
 	uiwidgets "github.com/odvcencio/fluffyui/widgets"
 )
+
+// SidebarSignals exposes writable sidebar state signals.
+type SidebarSignals struct {
+	CurrentTask        state.Writable[string]
+	TaskProgress       state.Writable[int]
+	PlanTasks          state.Writable[[]buckleywidgets.PlanTask]
+	RunningTools       state.Writable[[]buckleywidgets.RunningTool]
+	ToolHistory        state.Writable[[]buckleywidgets.ToolHistoryEntry]
+	ActiveTouches      state.Writable[[]buckleywidgets.TouchSummary]
+	RecentFiles        state.Writable[[]string]
+	RLMStatus          state.Writable[*buckleywidgets.RLMStatus]
+	RLMScratchpad      state.Writable[[]buckleywidgets.RLMScratchpadEntry]
+	CircuitStatus      state.Writable[*buckleywidgets.CircuitStatus]
+	Experiment         state.Writable[string]
+	ExperimentStatus   state.Writable[string]
+	ExperimentVariants state.Writable[[]buckleywidgets.ExperimentVariant]
+}
 
 // App is the interface for the TUI application.
 type App interface {
@@ -50,6 +68,7 @@ type App interface {
 	// Overlays
 	ShowModelPicker(items []uiwidgets.PaletteItem, onSelect func(item uiwidgets.PaletteItem))
 	ShowApproval(request buckleywidgets.ApprovalRequest)
+	ShowSettings()
 
 	// Callbacks
 	SetCallbacks(onSubmit func(string), onFileSelect func(string), onShellCmd func(string) string)
@@ -57,9 +76,11 @@ type App interface {
 
 	// Progress and Toasts
 	SetProgress(items []progress.Progress)
-	SetSidebarState(state buckleywidgets.SidebarState)
 	SetToasts(toasts []*toast.Toast)
 	SetToastDismissHandler(onDismiss func(string))
+
+	// Sidebar signals
+	SidebarSignals() SidebarSignals
 
 	// Diagnostics
 	SetDiagnostics(collector *diagnostics.Collector)

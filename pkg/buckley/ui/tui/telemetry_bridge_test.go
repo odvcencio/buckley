@@ -1,46 +1,91 @@
 package tui
 
 import (
+	"strconv"
 	"testing"
 	"time"
 
 	buckleywidgets "github.com/odvcencio/buckley/pkg/buckley/ui/widgets"
 	"github.com/odvcencio/buckley/pkg/telemetry"
+	"github.com/odvcencio/buckley/pkg/touch"
+	"github.com/odvcencio/fluffyui/state"
 )
 
 // =============================================================================
 // SimpleTelemetryBridge Tests (for Runner)
 // =============================================================================
 
-// mockSidebarSink collects sidebar state updates for verification.
-type mockSidebarSink struct {
-	states []buckleywidgets.SidebarState
+type sidebarSignalHarness struct {
+	signals            SidebarSignals
+	currentTask        *state.Signal[string]
+	taskProgress       *state.Signal[int]
+	planTasks          *state.Signal[[]buckleywidgets.PlanTask]
+	runningTools       *state.Signal[[]buckleywidgets.RunningTool]
+	toolHistory        *state.Signal[[]buckleywidgets.ToolHistoryEntry]
+	activeTouches      *state.Signal[[]buckleywidgets.TouchSummary]
+	recentFiles        *state.Signal[[]string]
+	experiment         *state.Signal[string]
+	experimentStatus   *state.Signal[string]
+	experimentVariants *state.Signal[[]buckleywidgets.ExperimentVariant]
+	rlmStatus          *state.Signal[*buckleywidgets.RLMStatus]
+	rlmScratchpad      *state.Signal[[]buckleywidgets.RLMScratchpadEntry]
+	circuitStatus      *state.Signal[*buckleywidgets.CircuitStatus]
 }
 
-func (m *mockSidebarSink) SetSidebarState(state buckleywidgets.SidebarState) {
-	m.states = append(m.states, state)
+func newSidebarSignalHarness() *sidebarSignalHarness {
+	h := &sidebarSignalHarness{
+		currentTask:        state.NewSignal(""),
+		taskProgress:       state.NewSignal(0),
+		planTasks:          state.NewSignal([]buckleywidgets.PlanTask(nil)),
+		runningTools:       state.NewSignal([]buckleywidgets.RunningTool(nil)),
+		toolHistory:        state.NewSignal([]buckleywidgets.ToolHistoryEntry(nil)),
+		activeTouches:      state.NewSignal([]buckleywidgets.TouchSummary(nil)),
+		recentFiles:        state.NewSignal([]string(nil)),
+		experiment:         state.NewSignal(""),
+		experimentStatus:   state.NewSignal(""),
+		experimentVariants: state.NewSignal([]buckleywidgets.ExperimentVariant(nil)),
+		rlmStatus:          state.NewSignal[*buckleywidgets.RLMStatus](nil),
+		rlmScratchpad:      state.NewSignal([]buckleywidgets.RLMScratchpadEntry(nil)),
+		circuitStatus:      state.NewSignal[*buckleywidgets.CircuitStatus](nil),
+	}
+	h.signals = SidebarSignals{
+		CurrentTask:        h.currentTask,
+		TaskProgress:       h.taskProgress,
+		PlanTasks:          h.planTasks,
+		RunningTools:       h.runningTools,
+		ToolHistory:        h.toolHistory,
+		ActiveTouches:      h.activeTouches,
+		RecentFiles:        h.recentFiles,
+		Experiment:         h.experiment,
+		ExperimentStatus:   h.experimentStatus,
+		ExperimentVariants: h.experimentVariants,
+		RLMStatus:          h.rlmStatus,
+		RLMScratchpad:      h.rlmScratchpad,
+		CircuitStatus:      h.circuitStatus,
+	}
+	return h
 }
 
 func TestSimpleTelemetryBridge_New(t *testing.T) {
 	hub := telemetry.NewHub()
 	defer hub.Close()
 
-	sink := &mockSidebarSink{}
-	bridge := NewSimpleTelemetryBridge(hub, sink)
+	harness := newSidebarSignalHarness()
+	bridge := NewSimpleTelemetryBridge(hub, harness.signals)
 	if bridge == nil {
 		t.Fatal("expected non-nil bridge")
 	}
 	if bridge.hub != hub {
 		t.Error("hub not set correctly")
 	}
-	if bridge.sink != sink {
-		t.Error("sink not set correctly")
+	if bridge.signals.CurrentTask != harness.currentTask {
+		t.Error("signals not set correctly")
 	}
 }
 
 func TestSimpleTelemetryBridge_NewNilHub(t *testing.T) {
-	sink := &mockSidebarSink{}
-	bridge := NewSimpleTelemetryBridge(nil, sink)
+	harness := newSidebarSignalHarness()
+	bridge := NewSimpleTelemetryBridge(nil, harness.signals)
 	if bridge == nil {
 		t.Fatal("expected non-nil bridge even with nil hub")
 	}
@@ -53,8 +98,8 @@ func TestSimpleTelemetryBridge_HandleTaskEvents(t *testing.T) {
 	hub := telemetry.NewHub()
 	defer hub.Close()
 
-	sink := &mockSidebarSink{}
-	bridge := NewSimpleTelemetryBridge(hub, sink)
+	harness := newSidebarSignalHarness()
+	bridge := NewSimpleTelemetryBridge(hub, harness.signals)
 
 	bridge.handleEvent(telemetry.Event{
 		Type:   telemetry.EventTaskStarted,
@@ -62,11 +107,11 @@ func TestSimpleTelemetryBridge_HandleTaskEvents(t *testing.T) {
 		Data:   map[string]any{"name": "Build project"},
 	})
 
-	if bridge.currentTask != "Build project" {
-		t.Errorf("expected currentTask 'Build project', got %q", bridge.currentTask)
+	if harness.currentTask.Get() != "Build project" {
+		t.Errorf("expected currentTask 'Build project', got %q", harness.currentTask.Get())
 	}
-	if bridge.taskProgress != 0 {
-		t.Errorf("expected taskProgress 0, got %d", bridge.taskProgress)
+	if harness.taskProgress.Get() != 0 {
+		t.Errorf("expected taskProgress 0, got %d", harness.taskProgress.Get())
 	}
 }
 
@@ -74,8 +119,8 @@ func TestSimpleTelemetryBridge_HandleTaskCompleted(t *testing.T) {
 	hub := telemetry.NewHub()
 	defer hub.Close()
 
-	sink := &mockSidebarSink{}
-	bridge := NewSimpleTelemetryBridge(hub, sink)
+	harness := newSidebarSignalHarness()
+	bridge := NewSimpleTelemetryBridge(hub, harness.signals)
 
 	// Start a task first
 	bridge.handleEvent(telemetry.Event{
@@ -90,8 +135,8 @@ func TestSimpleTelemetryBridge_HandleTaskCompleted(t *testing.T) {
 		TaskID: "task-1",
 	})
 
-	if bridge.taskProgress != 100 {
-		t.Errorf("expected taskProgress 100, got %d", bridge.taskProgress)
+	if harness.taskProgress.Get() != 100 {
+		t.Errorf("expected taskProgress 100, got %d", harness.taskProgress.Get())
 	}
 }
 
@@ -99,8 +144,8 @@ func TestSimpleTelemetryBridge_HandleToolEvents(t *testing.T) {
 	hub := telemetry.NewHub()
 	defer hub.Close()
 
-	sink := &mockSidebarSink{}
-	bridge := NewSimpleTelemetryBridge(hub, sink)
+	harness := newSidebarSignalHarness()
+	bridge := NewSimpleTelemetryBridge(hub, harness.signals)
 
 	bridge.handleEvent(telemetry.Event{
 		Type:      telemetry.EventToolStarted,
@@ -109,11 +154,12 @@ func TestSimpleTelemetryBridge_HandleToolEvents(t *testing.T) {
 		Data:      map[string]any{"toolName": "bash", "command": "ls -la"},
 	})
 
-	if len(bridge.runningTools) != 1 {
-		t.Errorf("expected 1 running tool, got %d", len(bridge.runningTools))
+	running := harness.runningTools.Get()
+	if len(running) != 1 {
+		t.Errorf("expected 1 running tool, got %d", len(running))
 	}
-	if bridge.runningTools[0].Name != "bash" {
-		t.Errorf("expected tool name 'bash', got %q", bridge.runningTools[0].Name)
+	if running[0].Name != "bash" {
+		t.Errorf("expected tool name 'bash', got %q", running[0].Name)
 	}
 
 	// Complete the tool
@@ -123,8 +169,187 @@ func TestSimpleTelemetryBridge_HandleToolEvents(t *testing.T) {
 		Timestamp: time.Now(),
 	})
 
-	if len(bridge.runningTools) != 0 {
-		t.Errorf("expected 0 running tools after completion, got %d", len(bridge.runningTools))
+	running = harness.runningTools.Get()
+	if len(running) != 0 {
+		t.Errorf("expected 0 running tools after completion, got %d", len(running))
+	}
+}
+
+func TestSimpleTelemetryBridge_HandleTouchesAndRecentFiles(t *testing.T) {
+	hub := telemetry.NewHub()
+	defer hub.Close()
+
+	harness := newSidebarSignalHarness()
+	bridge := NewSimpleTelemetryBridge(hub, harness.signals)
+
+	now := time.Now()
+	bridge.handleEvent(telemetry.Event{
+		Type:      telemetry.EventToolStarted,
+		TaskID:    "tool-1",
+		Timestamp: now,
+		Data: map[string]any{
+			"toolName":      "write_file",
+			"operationType": "write",
+			"filePath":      "foo.txt",
+			"ranges":        []touch.LineRange{{Start: 1, End: 2}},
+			"expiresAt":     now.Add(2 * time.Minute),
+		},
+	})
+
+	touches := harness.activeTouches.Get()
+	if len(touches) != 1 {
+		t.Fatalf("expected 1 active touch, got %d", len(touches))
+	}
+	if touches[0].Path != "foo.txt" {
+		t.Errorf("expected touch path foo.txt, got %q", touches[0].Path)
+	}
+	if len(touches[0].Ranges) != 1 {
+		t.Errorf("expected 1 range, got %d", len(touches[0].Ranges))
+	}
+
+	files := harness.recentFiles.Get()
+	if len(files) != 1 || files[0] != "foo.txt" {
+		t.Errorf("expected recent files [foo.txt], got %v", files)
+	}
+
+	bridge.handleEvent(telemetry.Event{
+		Type:      telemetry.EventToolCompleted,
+		TaskID:    "tool-1",
+		Timestamp: now.Add(time.Second),
+		Data: map[string]any{
+			"toolName":      "write_file",
+			"operationType": "write",
+			"filePath":      "foo.txt",
+		},
+	})
+
+	touches = harness.activeTouches.Get()
+	if len(touches) != 0 {
+		t.Errorf("expected 0 active touches after completion, got %d", len(touches))
+	}
+	files = harness.recentFiles.Get()
+	if len(files) == 0 || files[0] != "foo.txt" {
+		t.Errorf("expected recent files to keep foo.txt, got %v", files)
+	}
+}
+
+func TestSimpleTelemetryBridge_RecentFilesCap(t *testing.T) {
+	hub := telemetry.NewHub()
+	defer hub.Close()
+
+	harness := newSidebarSignalHarness()
+	bridge := NewSimpleTelemetryBridge(hub, harness.signals)
+
+	now := time.Now()
+	for i := 0; i < maxRecentFiles+2; i++ {
+		path := "file" + strconv.Itoa(i) + ".txt"
+		bridge.handleEvent(telemetry.Event{
+			Type:      telemetry.EventToolStarted,
+			TaskID:    "tool-" + strconv.Itoa(i),
+			Timestamp: now.Add(time.Duration(i) * time.Second),
+			Data: map[string]any{
+				"toolName":      "read_file",
+				"operationType": "read",
+				"filePath":      path,
+			},
+		})
+	}
+
+	files := harness.recentFiles.Get()
+	if len(files) != maxRecentFiles {
+		t.Fatalf("expected %d recent files, got %d", maxRecentFiles, len(files))
+	}
+	if files[0] != "file6.txt" {
+		t.Errorf("expected most recent file6.txt, got %q", files[0])
+	}
+}
+
+func TestSimpleTelemetryBridge_HandleExperimentEvents(t *testing.T) {
+	hub := telemetry.NewHub()
+	defer hub.Close()
+
+	harness := newSidebarSignalHarness()
+	bridge := NewSimpleTelemetryBridge(hub, harness.signals)
+
+	bridge.handleEvent(telemetry.Event{
+		Type: telemetry.EventExperimentStarted,
+		Data: map[string]any{
+			"name":   "Experiment A",
+			"status": "running",
+			"variants": []any{
+				map[string]any{"id": "v1", "name": "Variant A", "model": "model-a"},
+				map[string]any{"id": "v2", "name": "Variant B", "model": "model-b"},
+			},
+		},
+	})
+
+	if harness.experiment.Get() != "Experiment A" {
+		t.Errorf("expected experiment name Experiment A, got %q", harness.experiment.Get())
+	}
+	if harness.experimentStatus.Get() != "running" {
+		t.Errorf("expected experiment status running, got %q", harness.experimentStatus.Get())
+	}
+	if len(harness.experimentVariants.Get()) != 2 {
+		t.Fatalf("expected 2 experiment variants, got %d", len(harness.experimentVariants.Get()))
+	}
+
+	bridge.handleEvent(telemetry.Event{
+		Type: telemetry.EventExperimentVariantStarted,
+		Data: map[string]any{
+			"experiment": "Experiment A",
+			"variant_id": "v1",
+			"variant":    "Variant A",
+			"model_id":   "model-a",
+		},
+	})
+
+	bridge.handleEvent(telemetry.Event{
+		Type: telemetry.EventExperimentVariantCompleted,
+		Data: map[string]any{
+			"experiment":       "Experiment A",
+			"variant_id":       "v1",
+			"variant":          "Variant A",
+			"model_id":         "model-a",
+			"status":           "completed",
+			"duration_ms":      1200,
+			"total_cost":       0.42,
+			"prompt_tokens":    10,
+			"completion_tokens": 20,
+		},
+	})
+
+	var found buckleywidgets.ExperimentVariant
+	ok := false
+	for _, variant := range harness.experimentVariants.Get() {
+		if variant.ID == "v1" {
+			found = variant
+			ok = true
+			break
+		}
+	}
+	if !ok {
+		t.Fatal("expected to find variant v1")
+	}
+	if found.Status != "completed" {
+		t.Errorf("expected variant status completed, got %q", found.Status)
+	}
+	if found.DurationMs != 1200 {
+		t.Errorf("expected duration 1200, got %d", found.DurationMs)
+	}
+	if found.TotalCost != 0.42 {
+		t.Errorf("expected total cost 0.42, got %f", found.TotalCost)
+	}
+
+	bridge.handleEvent(telemetry.Event{
+		Type: telemetry.EventExperimentCompleted,
+		Data: map[string]any{
+			"name":   "Experiment A",
+			"status": "completed",
+		},
+	})
+
+	if harness.experimentStatus.Get() != "completed" {
+		t.Errorf("expected experiment status completed, got %q", harness.experimentStatus.Get())
 	}
 }
 
@@ -132,8 +357,8 @@ func TestSimpleTelemetryBridge_HandleRLMIteration(t *testing.T) {
 	hub := telemetry.NewHub()
 	defer hub.Close()
 
-	sink := &mockSidebarSink{}
-	bridge := NewSimpleTelemetryBridge(hub, sink)
+	harness := newSidebarSignalHarness()
+	bridge := NewSimpleTelemetryBridge(hub, harness.signals)
 
 	bridge.handleEvent(telemetry.Event{
 		Type: telemetry.EventRLMIteration,
@@ -146,17 +371,18 @@ func TestSimpleTelemetryBridge_HandleRLMIteration(t *testing.T) {
 		},
 	})
 
-	if bridge.rlmStatus == nil {
+	status := harness.rlmStatus.Get()
+	if status == nil {
 		t.Fatal("expected rlmStatus to be set")
 	}
-	if bridge.rlmStatus.Iteration != 2 {
-		t.Errorf("expected iteration 2, got %d", bridge.rlmStatus.Iteration)
+	if status.Iteration != 2 {
+		t.Errorf("expected iteration 2, got %d", status.Iteration)
 	}
-	if !bridge.rlmStatus.Ready {
+	if !status.Ready {
 		t.Error("expected ready to be true")
 	}
-	if bridge.rlmStatus.TokensUsed != 1200 {
-		t.Errorf("expected tokens 1200, got %d", bridge.rlmStatus.TokensUsed)
+	if status.TokensUsed != 1200 {
+		t.Errorf("expected tokens 1200, got %d", status.TokensUsed)
 	}
 }
 
@@ -164,8 +390,8 @@ func TestSimpleTelemetryBridge_SetPlanTasks(t *testing.T) {
 	hub := telemetry.NewHub()
 	defer hub.Close()
 
-	sink := &mockSidebarSink{}
-	bridge := NewSimpleTelemetryBridge(hub, sink)
+	harness := newSidebarSignalHarness()
+	bridge := NewSimpleTelemetryBridge(hub, harness.signals)
 
 	tasks := []buckleywidgets.PlanTask{
 		{Name: "Task 1", Status: buckleywidgets.TaskPending},
@@ -173,34 +399,12 @@ func TestSimpleTelemetryBridge_SetPlanTasks(t *testing.T) {
 	}
 	bridge.SetPlanTasks(tasks)
 
-	if len(bridge.planTasks) != 2 {
-		t.Errorf("expected 2 plan tasks, got %d", len(bridge.planTasks))
+	plan := harness.planTasks.Get()
+	if len(plan) != 2 {
+		t.Errorf("expected 2 plan tasks, got %d", len(plan))
 	}
-	if bridge.planTasks[0].Name != "Task 1" {
-		t.Errorf("expected first task name 'Task 1', got %q", bridge.planTasks[0].Name)
-	}
-}
-
-func TestSimpleTelemetryBridge_PostsSnapshot(t *testing.T) {
-	hub := telemetry.NewHub()
-	defer hub.Close()
-
-	sink := &mockSidebarSink{}
-	bridge := NewSimpleTelemetryBridge(hub, sink)
-
-	// Handle an event - should post a snapshot
-	bridge.handleEvent(telemetry.Event{
-		Type:   telemetry.EventTaskStarted,
-		TaskID: "task-1",
-		Data:   map[string]any{"name": "Test"},
-	})
-	bridge.postSnapshot()
-
-	if len(sink.states) == 0 {
-		t.Error("expected at least one state update")
-	}
-	if sink.states[0].CurrentTask == "" {
-		t.Errorf("expected sidebar state to include current task")
+	if plan[0].Name != "Task 1" {
+		t.Errorf("expected first task name 'Task 1', got %q", plan[0].Name)
 	}
 }
 
@@ -208,8 +412,8 @@ func TestSimpleTelemetryBridge_HandlePlanUpdate(t *testing.T) {
 	hub := telemetry.NewHub()
 	defer hub.Close()
 
-	sink := &mockSidebarSink{}
-	bridge := NewSimpleTelemetryBridge(hub, sink)
+	harness := newSidebarSignalHarness()
+	bridge := NewSimpleTelemetryBridge(hub, harness.signals)
 
 	bridge.handleEvent(telemetry.Event{
 		Type: telemetry.EventPlanUpdated,
@@ -222,17 +426,18 @@ func TestSimpleTelemetryBridge_HandlePlanUpdate(t *testing.T) {
 		},
 	})
 
-	if len(bridge.planTasks) != 3 {
-		t.Fatalf("expected 3 plan tasks, got %d", len(bridge.planTasks))
+	plan := harness.planTasks.Get()
+	if len(plan) != 3 {
+		t.Fatalf("expected 3 plan tasks, got %d", len(plan))
 	}
-	if bridge.planTasks[0].Status != buckleywidgets.TaskCompleted {
-		t.Errorf("expected first task completed, got %d", bridge.planTasks[0].Status)
+	if plan[0].Status != buckleywidgets.TaskCompleted {
+		t.Errorf("expected first task completed, got %d", plan[0].Status)
 	}
-	if bridge.planTasks[1].Status != buckleywidgets.TaskInProgress {
-		t.Errorf("expected second task in progress, got %d", bridge.planTasks[1].Status)
+	if plan[1].Status != buckleywidgets.TaskInProgress {
+		t.Errorf("expected second task in progress, got %d", plan[1].Status)
 	}
-	if bridge.planTasks[2].Status != buckleywidgets.TaskPending {
-		t.Errorf("expected third task pending, got %d", bridge.planTasks[2].Status)
+	if plan[2].Status != buckleywidgets.TaskPending {
+		t.Errorf("expected third task pending, got %d", plan[2].Status)
 	}
 }
 

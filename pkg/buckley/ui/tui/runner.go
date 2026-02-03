@@ -17,6 +17,7 @@ import (
 	"github.com/odvcencio/buckley/pkg/diagnostics"
 	"github.com/odvcencio/fluffyui/accessibility"
 	"github.com/odvcencio/fluffyui/backend"
+	"github.com/odvcencio/fluffyui/dragdrop"
 	"github.com/odvcencio/fluffyui/fluffy"
 	"github.com/odvcencio/fluffyui/keybind"
 	"github.com/odvcencio/fluffyui/markdown"
@@ -32,21 +33,25 @@ import (
 
 // RunnerConfig configures the fluffyui-native TUI runner.
 type RunnerConfig struct {
-	Theme           *theme.Theme
-	ModelName       string
-	SessionID       string
-	WorkDir         string
-	ProjectRoot     string
-	ReduceMotion    bool
-	HighContrast    bool
-	UseTextLabels   bool
-	MessageMetadata string
-	WebBaseURL      string
-	Audio           AudioConfig
-	AgentSocket     string
-	SidebarWidth    int
-	SidebarMinWidth int
-	SidebarMaxWidth int
+	Theme             *theme.Theme
+	ThemeName         string
+	StylesheetPath    string
+	ModelName         string
+	SessionID         string
+	WorkDir           string
+	ProjectRoot       string
+	ReduceMotion      bool
+	HighContrast      bool
+	EffectsEnabled    bool
+	EffectsEnabledSet bool
+	UseTextLabels     bool
+	MessageMetadata   string
+	WebBaseURL        string
+	Audio             AudioConfig
+	AgentSocket       string
+	SidebarWidth      int
+	SidebarMinWidth   int
+	SidebarMaxWidth   int
 
 	// Callbacks
 	OnSubmit      func(text string)
@@ -56,6 +61,7 @@ type RunnerConfig struct {
 	OnNextSession func()
 	OnPrevSession func()
 	OnApproval    func(requestID string, approved, alwaysAllow bool)
+	OnSettings    func(settings UISettings)
 
 	// Testing
 	Backend backend.Backend
@@ -87,7 +93,9 @@ type Runner struct {
 	coalescer        *Coalescer
 	styleCache       *StyleCache
 	layoutSubs       fstate.Subscriptions
+	settingsSubs     fstate.Subscriptions
 	focusInitialized bool
+	styleWatchStop   func()
 
 	// Config
 	theme       *theme.Theme
@@ -102,6 +110,7 @@ type Runner struct {
 	onApproval    func(requestID string, approved, alwaysAllow bool)
 	onNextSession func()
 	onPrevSession func()
+	onSettings    func(settings UISettings)
 
 	// Agent server for real-time control
 	agentServer *AgentServer
@@ -110,12 +119,24 @@ type Runner struct {
 	approvalQueue  []buckleywidgets.ApprovalRequest
 	approvalActive bool
 
-	overlayKeymap *keybind.Keymap
-	overlayDepth  int
-	overlayStack  []bool
+	overlayKeymap       *keybind.Keymap
+	overlayKeymapActive bool
+
+	dragCandidate *dragCandidate
+	dragging      bool
+	dragData      dragdrop.DragData
+	dragSource    dragdrop.Draggable
+	dragTarget    dragdrop.DropTarget
 }
 
 const overlayNoopCommand = "overlay.noop"
+
+type keyBindingDef struct {
+	sequence     string
+	command      string
+	when         keybind.Condition
+	allowInModal bool
+}
 
 // NewRunner creates a new fluffyui-native TUI runner.
 func NewRunner(cfg RunnerConfig) (*Runner, error) {
@@ -123,6 +144,11 @@ func NewRunner(cfg RunnerConfig) (*Runner, error) {
 	if th == nil {
 		th = theme.DefaultTheme()
 	}
+	effectsEnabled := cfg.EffectsEnabled
+	if !cfg.EffectsEnabledSet {
+		effectsEnabled = true
+	}
+	cfg.EffectsEnabled = effectsEnabled
 
 	workDir := cfg.WorkDir
 	if workDir == "" {
@@ -147,6 +173,25 @@ func NewRunner(cfg RunnerConfig) (*Runner, error) {
 			appState.MessageMetadata.Set(meta)
 		}
 	}
+	if appState.ThemeName != nil {
+		themeName := strings.TrimSpace(cfg.ThemeName)
+		if themeName == "" {
+			themeName = "dark"
+		}
+		appState.ThemeName.Set(themeName)
+	}
+	if appState.StylesheetPath != nil {
+		appState.StylesheetPath.Set(strings.TrimSpace(cfg.StylesheetPath))
+	}
+	if appState.ReduceMotion != nil {
+		appState.ReduceMotion.Set(cfg.ReduceMotion)
+	}
+	if appState.HighContrast != nil {
+		appState.HighContrast.Set(cfg.HighContrast)
+	}
+	if appState.EffectsEnabled != nil {
+		appState.EffectsEnabled.Set(cfg.EffectsEnabled)
+	}
 	if appState.SidebarWidth != nil {
 		appState.SidebarWidth.Set(sidebarCfg.Width)
 	}
@@ -168,6 +213,7 @@ func NewRunner(cfg RunnerConfig) (*Runner, error) {
 		onFileSelect:   cfg.OnFileSelect,
 		onShellCmd:     cfg.OnShellCmd,
 		onApproval:     cfg.OnApproval,
+		onSettings:     cfg.OnSettings,
 	}
 
 	// Build widgets
@@ -184,56 +230,9 @@ func NewRunner(cfg RunnerConfig) (*Runner, error) {
 		return r.sidebar != nil && widgetInTree(r.sidebar, w)
 	})
 
-	// Create keymap with Buckley-specific bindings
-	// Note: Standard commands (quit, scroll, clipboard) are registered automatically
-	keymap := &keybind.Keymap{
-		Name: "buckley",
-		Bindings: []keybind.Binding{
-			// App commands (from RegisterStandardCommands)
-			{Key: keybind.MustParseKeySequence("ctrl+q"), Command: "app.quit"},
-			{Key: keybind.MustParseKeySequence("f5"), Command: "app.refresh"},
-			// Focus commands (from RegisterStandardCommands)
-			{Key: keybind.MustParseKeySequence("tab"), Command: "focus.next"},
-			{Key: keybind.MustParseKeySequence("shift+tab"), Command: "focus.prev"},
-			// Scroll commands (from RegisterScrollCommands)
-			{Key: keybind.MustParseKeySequence("ctrl+up"), Command: "scroll.up", When: whenScrollable},
-			{Key: keybind.MustParseKeySequence("ctrl+down"), Command: "scroll.down", When: whenScrollable},
-			{Key: keybind.MustParseKeySequence("pgup"), Command: "scroll.pageUp", When: whenScrollable},
-			{Key: keybind.MustParseKeySequence("pgdn"), Command: "scroll.pageDown", When: whenScrollable},
-			{Key: keybind.MustParseKeySequence("home"), Command: "scroll.home", When: whenScrollable},
-			{Key: keybind.MustParseKeySequence("end"), Command: "scroll.end", When: whenScrollable},
-			// Clipboard commands (from RegisterClipboardCommands)
-			{Key: keybind.MustParseKeySequence("ctrl+shift+c"), Command: "clipboard.copy", When: keybind.WhenFocusedClipboardTarget()},
-			{Key: keybind.MustParseKeySequence("ctrl+shift+x"), Command: "clipboard.cut", When: keybind.WhenFocusedClipboardTarget()},
-			{Key: keybind.MustParseKeySequence("ctrl+shift+v"), Command: "clipboard.paste", When: keybind.WhenFocusedClipboardTarget()},
-			// Buckley-specific commands
-			{Key: keybind.MustParseKeySequence("ctrl+b"), Command: "buckley.toggle-sidebar"},
-			{Key: keybind.MustParseKeySequence("alt+right"), Command: "buckley.next-session"},
-			{Key: keybind.MustParseKeySequence("alt+left"), Command: "buckley.prev-session"},
-			{Key: keybind.MustParseKeySequence("ctrl+f"), Command: "buckley.search"},
-			{Key: keybind.MustParseKeySequence("ctrl+p"), Command: "buckley.file-picker"},
-			{Key: keybind.MustParseKeySequence("ctrl+i"), Command: "buckley.focus-input"},
-			// Sidebar section toggles (when sidebar tabs focused)
-			{Key: keybind.MustParseKeySequence("1"), Command: "buckley.sidebar.toggle-task", When: whenSidebarFocused},
-			{Key: keybind.MustParseKeySequence("2"), Command: "buckley.sidebar.toggle-plan", When: whenSidebarFocused},
-			{Key: keybind.MustParseKeySequence("3"), Command: "buckley.sidebar.toggle-tools", When: whenSidebarFocused},
-			{Key: keybind.MustParseKeySequence("4"), Command: "buckley.sidebar.toggle-context", When: whenSidebarFocused},
-			{Key: keybind.MustParseKeySequence("5"), Command: "buckley.sidebar.toggle-touches", When: whenSidebarFocused},
-			{Key: keybind.MustParseKeySequence("6"), Command: "buckley.sidebar.toggle-files", When: whenSidebarFocused},
-			// Chord sequences (leader: ctrl+g)
-			{Key: keybind.MustParseKeySequence("ctrl+g g"), Command: "buckley.scroll-top"},
-			{Key: keybind.MustParseKeySequence("ctrl+g b"), Command: "buckley.scroll-bottom"},
-			{Key: keybind.MustParseKeySequence("ctrl+g s"), Command: "buckley.toggle-sidebar"},
-			{Key: keybind.MustParseKeySequence("ctrl+g f"), Command: "buckley.search"},
-			{Key: keybind.MustParseKeySequence("ctrl+g p"), Command: "buckley.file-picker"},
-			{Key: keybind.MustParseKeySequence("ctrl+g i"), Command: "buckley.focus-input"},
-			{Key: keybind.MustParseKeySequence("ctrl+g ,"), Command: "buckley.sidebar.prev-tab"},
-			{Key: keybind.MustParseKeySequence("ctrl+g ."), Command: "buckley.sidebar.next-tab"},
-			{Key: keybind.MustParseKeySequence("ctrl+g ["), Command: "buckley.sidebar.shrink"},
-			{Key: keybind.MustParseKeySequence("ctrl+g ]"), Command: "buckley.sidebar.grow"},
-		},
-	}
-	r.overlayKeymap = newOverlayKeymap()
+	defs := buckleyKeyBindings(whenScrollable, whenSidebarFocused)
+	keymap := buildKeymap(defs)
+	r.overlayKeymap = newOverlayKeymap(defs)
 
 	// Build app options
 	opts := []fluffy.AppOption{
@@ -264,6 +263,7 @@ func NewRunner(cfg RunnerConfig) (*Runner, error) {
 	r.bundle = bundle
 
 	r.bindLayoutSignals()
+	r.bindSettingsSignals()
 
 	r.coalescer = NewCoalescer(DefaultCoalescerConfig())
 
@@ -382,6 +382,10 @@ func (r *Runner) buildWidgets(cfg RunnerConfig, styleCache *StyleCache) {
 		ReasoningVisible: r.state.ReasoningVisible,
 		ModelName:        r.state.ModelName,
 		MetadataMode:     r.state.MessageMetadata,
+		SearchQuery:      r.state.ChatSearchQuery,
+		SearchMatches:    r.state.ChatSearchMatches,
+		SelectionText:    r.state.ChatSelectionText,
+		SelectionActive:  r.state.ChatSelectionActive,
 	})
 	r.chatView.SetStyles(
 		styleCache.Get(th.User),
@@ -442,6 +446,8 @@ func (r *Runner) buildWidgets(cfg RunnerConfig, styleCache *StyleCache) {
 		ScrollPos:      r.state.ScrollPos,
 		ProgressItems:  r.state.ProgressItems,
 		IsStreaming:    r.state.IsStreaming,
+		EffectsEnabled: r.state.EffectsEnabled,
+		ReduceMotion:   r.state.ReduceMotion,
 		BGStyle:        styleCache.Get(th.Surface),
 		TextStyle:      styleCache.Get(th.TextMuted),
 		ModeStyle:      styleCache.Get(th.Accent),
@@ -451,22 +457,34 @@ func (r *Runner) buildWidgets(cfg RunnerConfig, styleCache *StyleCache) {
 	r.sidebar = buckleywidgets.NewSidebarWithBindings(
 		resolveSidebarConfig(cfg),
 		buckleywidgets.SidebarBindings{
-			State:           r.state.SidebarState,
-			ContextUsed:     r.state.ContextUsed,
-			ContextBudget:   r.state.ContextBudget,
-			ContextWindow:   r.state.ContextWindow,
-			ProjectPath:     r.state.SidebarProjectPath,
-			Width:           r.state.SidebarWidth,
-			TabIndex:        r.state.SidebarTabIndex,
-			ShowCurrentTask: r.state.SidebarShowCurrentTask,
-			ShowPlan:        r.state.SidebarShowPlan,
-			ShowTools:       r.state.SidebarShowTools,
-			ShowContext:     r.state.SidebarShowContext,
-			ShowTouches:     r.state.SidebarShowTouches,
-			ShowRecentFiles: r.state.SidebarShowRecentFiles,
-			ShowExperiment:  r.state.SidebarShowExperiment,
-			ShowRLM:         r.state.SidebarShowRLM,
-			ShowCircuit:     r.state.SidebarShowCircuit,
+			CurrentTask:        r.state.SidebarCurrentTask,
+			TaskProgress:       r.state.SidebarTaskProgress,
+			PlanTasks:          r.state.SidebarPlanTasks,
+			RunningTools:       r.state.SidebarRunningTools,
+			ToolHistory:        r.state.SidebarToolHistory,
+			ActiveTouches:      r.state.SidebarActiveTouches,
+			RecentFiles:        r.state.SidebarRecentFiles,
+			RLMStatus:          r.state.SidebarRLMStatus,
+			RLMScratchpad:      r.state.SidebarRLMScratchpad,
+			CircuitStatus:      r.state.SidebarCircuitStatus,
+			Experiment:         r.state.SidebarExperiment,
+			ExperimentStatus:   r.state.SidebarExperimentStatus,
+			ExperimentVariants: r.state.SidebarExperimentVariants,
+			ContextUsed:        r.state.ContextUsed,
+			ContextBudget:      r.state.ContextBudget,
+			ContextWindow:      r.state.ContextWindow,
+			ProjectPath:        r.state.SidebarProjectPath,
+			Width:              r.state.SidebarWidth,
+			TabIndex:           r.state.SidebarTabIndex,
+			ShowCurrentTask:    r.state.SidebarShowCurrentTask,
+			ShowPlan:           r.state.SidebarShowPlan,
+			ShowTools:          r.state.SidebarShowTools,
+			ShowContext:        r.state.SidebarShowContext,
+			ShowTouches:        r.state.SidebarShowTouches,
+			ShowRecentFiles:    r.state.SidebarShowRecentFiles,
+			ShowExperiment:     r.state.SidebarShowExperiment,
+			ShowRLM:            r.state.SidebarShowRLM,
+			ShowCircuit:        r.state.SidebarShowCircuit,
 		},
 	)
 	r.sidebar.SetStyles(
@@ -494,7 +512,7 @@ func (r *Runner) buildWidgets(cfg RunnerConfig, styleCache *StyleCache) {
 
 	// Toast stack
 	r.toastStack = buckleywidgets.NewSignalToastStack(r.state.Toasts)
-	r.toastStack.SetAnimationsEnabled(!cfg.ReduceMotion)
+	r.toastStack.SetAnimationsEnabled(!cfg.ReduceMotion && cfg.EffectsEnabled)
 	r.toastStack.SetStyles(
 		styleCache.Get(th.SurfaceRaised),
 		styleCache.Get(th.TextPrimary),
@@ -675,6 +693,14 @@ func (r *Runner) registerKeyBindings(registry *keybind.CommandRegistry) {
 	})
 
 	registry.Register(keybind.Command{
+		ID:    "buckley.settings",
+		Title: "Settings",
+		Handler: func(ctx keybind.Context) {
+			r.showSettingsOverlay()
+		},
+	})
+
+	registry.Register(keybind.Command{
 		ID:    "buckley.focus-input",
 		Title: "Focus Input",
 		Handler: func(ctx keybind.Context) {
@@ -811,28 +837,71 @@ func (r *Runner) registerKeyBindings(registry *keybind.CommandRegistry) {
 	})
 }
 
-func newOverlayKeymap() *keybind.Keymap {
-	return &keybind.Keymap{
-		Name: "buckley.overlay",
-		Bindings: []keybind.Binding{
-			{Key: keybind.MustParseKeySequence("ctrl+b"), Command: overlayNoopCommand},
-			{Key: keybind.MustParseKeySequence("alt+right"), Command: overlayNoopCommand},
-			{Key: keybind.MustParseKeySequence("alt+left"), Command: overlayNoopCommand},
-			{Key: keybind.MustParseKeySequence("ctrl+f"), Command: overlayNoopCommand},
-			{Key: keybind.MustParseKeySequence("ctrl+p"), Command: overlayNoopCommand},
-			{Key: keybind.MustParseKeySequence("ctrl+i"), Command: overlayNoopCommand},
-			{Key: keybind.MustParseKeySequence("ctrl+g g"), Command: overlayNoopCommand},
-			{Key: keybind.MustParseKeySequence("ctrl+g b"), Command: overlayNoopCommand},
-			{Key: keybind.MustParseKeySequence("ctrl+g s"), Command: overlayNoopCommand},
-			{Key: keybind.MustParseKeySequence("ctrl+g f"), Command: overlayNoopCommand},
-			{Key: keybind.MustParseKeySequence("ctrl+g p"), Command: overlayNoopCommand},
-			{Key: keybind.MustParseKeySequence("ctrl+g i"), Command: overlayNoopCommand},
-			{Key: keybind.MustParseKeySequence("ctrl+g ,"), Command: overlayNoopCommand},
-			{Key: keybind.MustParseKeySequence("ctrl+g ."), Command: overlayNoopCommand},
-			{Key: keybind.MustParseKeySequence("ctrl+g ["), Command: overlayNoopCommand},
-			{Key: keybind.MustParseKeySequence("ctrl+g ]"), Command: overlayNoopCommand},
-		},
+func buckleyKeyBindings(whenScrollable, whenSidebarFocused keybind.Condition) []keyBindingDef {
+	return []keyBindingDef{
+		{sequence: "ctrl+q", command: "app.quit", allowInModal: true},
+		{sequence: "f5", command: "app.refresh", allowInModal: true},
+		{sequence: "tab", command: "focus.next", allowInModal: true},
+		{sequence: "shift+tab", command: "focus.prev", allowInModal: true},
+		{sequence: "ctrl+up", command: "scroll.up", when: whenScrollable, allowInModal: true},
+		{sequence: "ctrl+down", command: "scroll.down", when: whenScrollable, allowInModal: true},
+		{sequence: "pgup", command: "scroll.pageUp", when: whenScrollable, allowInModal: true},
+		{sequence: "pgdn", command: "scroll.pageDown", when: whenScrollable, allowInModal: true},
+		{sequence: "home", command: "scroll.home", when: whenScrollable, allowInModal: true},
+		{sequence: "end", command: "scroll.end", when: whenScrollable, allowInModal: true},
+		{sequence: "ctrl+shift+c", command: "clipboard.copy", when: keybind.WhenFocusedClipboardTarget(), allowInModal: true},
+		{sequence: "ctrl+shift+x", command: "clipboard.cut", when: keybind.WhenFocusedClipboardTarget(), allowInModal: true},
+		{sequence: "ctrl+shift+v", command: "clipboard.paste", when: keybind.WhenFocusedClipboardTarget(), allowInModal: true},
+		{sequence: "ctrl+b", command: "buckley.toggle-sidebar"},
+		{sequence: "alt+right", command: "buckley.next-session"},
+		{sequence: "alt+left", command: "buckley.prev-session"},
+		{sequence: "ctrl+f", command: "buckley.search"},
+		{sequence: "ctrl+p", command: "buckley.file-picker"},
+		{sequence: "ctrl+i", command: "buckley.focus-input"},
+		{sequence: "1", command: "buckley.sidebar.toggle-task", when: whenSidebarFocused},
+		{sequence: "2", command: "buckley.sidebar.toggle-plan", when: whenSidebarFocused},
+		{sequence: "3", command: "buckley.sidebar.toggle-tools", when: whenSidebarFocused},
+		{sequence: "4", command: "buckley.sidebar.toggle-context", when: whenSidebarFocused},
+		{sequence: "5", command: "buckley.sidebar.toggle-touches", when: whenSidebarFocused},
+		{sequence: "6", command: "buckley.sidebar.toggle-files", when: whenSidebarFocused},
+		{sequence: "ctrl+g g", command: "buckley.scroll-top"},
+		{sequence: "ctrl+g b", command: "buckley.scroll-bottom"},
+		{sequence: "ctrl+g s", command: "buckley.toggle-sidebar"},
+		{sequence: "ctrl+g f", command: "buckley.search"},
+		{sequence: "ctrl+g p", command: "buckley.file-picker"},
+		{sequence: "ctrl+g i", command: "buckley.focus-input"},
+		{sequence: "ctrl+g t", command: "buckley.settings"},
+		{sequence: "ctrl+g ,", command: "buckley.sidebar.prev-tab"},
+		{sequence: "ctrl+g .", command: "buckley.sidebar.next-tab"},
+		{sequence: "ctrl+g [", command: "buckley.sidebar.shrink"},
+		{sequence: "ctrl+g ]", command: "buckley.sidebar.grow"},
 	}
+}
+
+func buildKeymap(defs []keyBindingDef) *keybind.Keymap {
+	bindings := make([]keybind.Binding, 0, len(defs))
+	for _, def := range defs {
+		bindings = append(bindings, keybind.Binding{
+			Key:     keybind.MustParseKeySequence(def.sequence),
+			Command: def.command,
+			When:    def.when,
+		})
+	}
+	return &keybind.Keymap{Name: "buckley", Bindings: bindings}
+}
+
+func newOverlayKeymap(defs []keyBindingDef) *keybind.Keymap {
+	bindings := make([]keybind.Binding, 0, len(defs))
+	for _, def := range defs {
+		if def.allowInModal {
+			continue
+		}
+		bindings = append(bindings, keybind.Binding{
+			Key:     keybind.MustParseKeySequence(def.sequence),
+			Command: overlayNoopCommand,
+		})
+	}
+	return &keybind.Keymap{Name: "buckley.overlay", Bindings: bindings}
 }
 
 func normalizeCtrlGChord(msg runtime.KeyMsg) runtime.KeyMsg {
@@ -851,7 +920,14 @@ func normalizeCtrlGChord(msg runtime.KeyMsg) runtime.KeyMsg {
 // This is the Buckley-specific update function that processes domain messages.
 func (r *Runner) update(app *runtime.App, msg runtime.Message) bool {
 	if mouse, ok := msg.(runtime.MouseMsg); ok {
+		r.handleDragDrop(app, mouse)
 		r.handleMouseFocus(app, mouse)
+	}
+	if custom, ok := msg.(runtime.CustomMsg); ok {
+		if update, ok := custom.Value.(stylesheetUpdateMsg); ok {
+			r.handleStylesheetUpdate(update)
+			return true
+		}
 	}
 	if key, ok := msg.(runtime.KeyMsg); ok {
 		msg = normalizeCtrlGChord(key)
@@ -877,16 +953,9 @@ func (r *Runner) handleCommand(cmd runtime.Command) bool {
 	case runtime.PushOverlay:
 		if r.app != nil {
 			if screen := r.app.Screen(); screen != nil {
-				overlayCount := screen.LayerCount() - 1
-				if overlayCount < 0 {
-					overlayCount = 0
-				}
-				if overlayCount > len(r.overlayStack) {
-					r.noteOverlayPush(c.Modal)
-					return true
-				}
 				screen.PushLayer(c.Widget, c.Modal)
-				r.noteOverlayPush(c.Modal)
+				r.syncOverlayKeymap(screen)
+				r.focusTopLayer(screen)
 				return true
 			}
 		}
@@ -894,18 +963,18 @@ func (r *Runner) handleCommand(cmd runtime.Command) bool {
 	case runtime.PopOverlay:
 		if r.app != nil {
 			if screen := r.app.Screen(); screen != nil {
-				overlayCount := screen.LayerCount() - 1
-				if overlayCount < 0 {
-					overlayCount = 0
-				}
-				if overlayCount < len(r.overlayStack) {
-					r.noteOverlayPop()
+				if overlayCount(screen) == 0 {
+					r.syncOverlayKeymap(screen)
+					r.focusTopLayer(screen)
 					return true
 				}
 				if screen.PopLayer() {
-					r.noteOverlayPop()
+					r.syncOverlayKeymap(screen)
+					r.focusTopLayer(screen)
 					return true
 				}
+				r.syncOverlayKeymap(screen)
+				r.focusTopLayer(screen)
 				return false
 			}
 		}
@@ -1173,8 +1242,9 @@ func (r *Runner) ShowModelPicker(items []uiwidgets.PaletteItem, onSelect func(it
 	})
 
 	// Show as overlay via command
+	overlay := r.wrapModalOverlay(r.modelPalette, nil)
 	r.app.ExecuteCommand(runtime.PushOverlay{
-		Widget: r.modelPalette,
+		Widget: overlay,
 		Modal:  true,
 	})
 }
@@ -1188,6 +1258,14 @@ func (r *Runner) ShowApproval(request buckleywidgets.ApprovalRequest) {
 	r.approvalQueue = append(r.approvalQueue, request)
 	r.approvalMu.Unlock()
 	r.showNextApproval()
+}
+
+// ShowSettings displays the settings dialog.
+func (r *Runner) ShowSettings() {
+	if r == nil {
+		return
+	}
+	r.showSettingsOverlay()
 }
 
 // =============================================================================
@@ -1221,14 +1299,6 @@ func (r *Runner) SetProgress(items []progress.Progress) {
 	r.statusService.SetProgress(items)
 }
 
-// SetSidebarState updates sidebar snapshot state.
-func (r *Runner) SetSidebarState(state buckleywidgets.SidebarState) {
-	if r == nil || r.sidebarService == nil {
-		return
-	}
-	r.sidebarService.SetSidebarState(state)
-}
-
 // SetToasts updates the toast display.
 func (r *Runner) SetToasts(toasts []*toast.Toast) {
 	if r == nil || r.statusService == nil {
@@ -1252,4 +1322,26 @@ func (r *Runner) SetToastDismissHandler(onDismiss func(string)) {
 func (r *Runner) SetDiagnostics(collector *diagnostics.Collector) {
 	// Runner doesn't use diagnostics directly in the same way the legacy app did
 	// The telemetry bridge handles this through events
+}
+
+// SidebarSignals exposes writable signals for sidebar state.
+func (r *Runner) SidebarSignals() SidebarSignals {
+	if r == nil || r.state == nil {
+		return SidebarSignals{}
+	}
+	return SidebarSignals{
+		CurrentTask:        r.state.SidebarCurrentTask,
+		TaskProgress:       r.state.SidebarTaskProgress,
+		PlanTasks:          r.state.SidebarPlanTasks,
+		RunningTools:       r.state.SidebarRunningTools,
+		ToolHistory:        r.state.SidebarToolHistory,
+		ActiveTouches:      r.state.SidebarActiveTouches,
+		RecentFiles:        r.state.SidebarRecentFiles,
+		RLMStatus:          r.state.SidebarRLMStatus,
+		RLMScratchpad:      r.state.SidebarRLMScratchpad,
+		CircuitStatus:      r.state.SidebarCircuitStatus,
+		Experiment:         r.state.SidebarExperiment,
+		ExperimentStatus:   r.state.SidebarExperimentStatus,
+		ExperimentVariants: r.state.SidebarExperimentVariants,
+	}
 }

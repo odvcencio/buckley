@@ -7,6 +7,7 @@ import (
 
 	"github.com/odvcencio/buckley/pkg/buckley/ui/tui/state"
 	buckleywidgets "github.com/odvcencio/buckley/pkg/buckley/ui/widgets"
+	fstate "github.com/odvcencio/fluffyui/state"
 )
 
 // ChatService manages chat state updates.
@@ -89,11 +90,14 @@ func (svc *ChatService) SetMessages(messages []buckleywidgets.ChatMessage) {
 	}
 	svc.nextID = nextID
 	svc.lastUserAt = lastUserAt
-	svc.state.ChatMessages.Set(cloned)
+	fstate.Batch(func() {
+		svc.state.ChatMessages.Set(cloned)
+		svc.state.ChatThinking.Set(false)
+		svc.state.ReasoningText.Set("")
+		svc.state.ReasoningPreview.Set("")
+		svc.state.ReasoningVisible.Set(false)
+	})
 	svc.mu.Unlock()
-
-	svc.state.ChatThinking.Set(false)
-	svc.ClearReasoning()
 }
 
 // AppendToLastMessage appends text to the last message.
@@ -125,9 +129,13 @@ func (svc *ChatService) ClearMessages() {
 	svc.nextID = 0
 	svc.lastUserAt = time.Time{}
 	svc.mu.Unlock()
-	svc.state.ChatMessages.Set(nil)
-	svc.state.ChatThinking.Set(false)
-	svc.ClearReasoning()
+	fstate.Batch(func() {
+		svc.state.ChatMessages.Set(nil)
+		svc.state.ChatThinking.Set(false)
+		svc.state.ReasoningText.Set("")
+		svc.state.ReasoningPreview.Set("")
+		svc.state.ReasoningVisible.Set(false)
+	})
 }
 
 // ShowThinkingIndicator toggles the thinking indicator.
@@ -155,8 +163,10 @@ func (svc *ChatService) AppendReasoning(text string) {
 		return
 	}
 	current := svc.state.ReasoningText.Get()
-	svc.state.ReasoningText.Set(current + text)
-	svc.state.ReasoningVisible.Set(true)
+	fstate.Batch(func() {
+		svc.state.ReasoningText.Set(current + text)
+		svc.state.ReasoningVisible.Set(true)
+	})
 }
 
 // CollapseReasoning sets reasoning content and preview.
@@ -164,9 +174,11 @@ func (svc *ChatService) CollapseReasoning(preview, full string) {
 	if svc == nil || svc.state == nil {
 		return
 	}
-	svc.state.ReasoningPreview.Set(strings.TrimSpace(preview))
-	svc.state.ReasoningText.Set(full)
-	svc.state.ReasoningVisible.Set(true)
+	fstate.Batch(func() {
+		svc.state.ReasoningPreview.Set(strings.TrimSpace(preview))
+		svc.state.ReasoningText.Set(full)
+		svc.state.ReasoningVisible.Set(true)
+	})
 }
 
 // ClearReasoning clears reasoning state.
@@ -174,7 +186,9 @@ func (svc *ChatService) ClearReasoning() {
 	if svc == nil || svc.state == nil {
 		return
 	}
-	svc.state.ReasoningText.Set("")
-	svc.state.ReasoningPreview.Set("")
-	svc.state.ReasoningVisible.Set(false)
+	fstate.Batch(func() {
+		svc.state.ReasoningText.Set("")
+		svc.state.ReasoningPreview.Set("")
+		svc.state.ReasoningVisible.Set(false)
+	})
 }

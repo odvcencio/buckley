@@ -7,6 +7,7 @@ import (
 	"github.com/odvcencio/buckley/pkg/buckley/ui/tui/state"
 	"github.com/odvcencio/buckley/pkg/model"
 	"github.com/odvcencio/fluffyui/progress"
+	fstate "github.com/odvcencio/fluffyui/state"
 	"github.com/odvcencio/fluffyui/toast"
 )
 
@@ -68,8 +69,10 @@ func (svc *StatusService) SetTokenCount(tokens int, costCents float64) {
 	if svc == nil || svc.state == nil {
 		return
 	}
-	svc.state.StatusTokens.Set(tokens)
-	svc.state.StatusCost.Set(costCents)
+	fstate.Batch(func() {
+		svc.state.StatusTokens.Set(tokens)
+		svc.state.StatusCost.Set(costCents)
+	})
 }
 
 // UpdateTokens updates token and cost display from usage.
@@ -77,13 +80,15 @@ func (svc *StatusService) UpdateTokens(usage model.Usage, modelID string) {
 	if svc == nil || svc.state == nil {
 		return
 	}
-	svc.state.StatusTokens.Set(usage.TotalTokens)
-	if svc.modelMgr == nil {
-		return
-	}
-	if cost, err := svc.modelMgr.CalculateCost(modelID, usage); err == nil {
-		svc.state.StatusCost.Set(cost * 100)
-	}
+	fstate.Batch(func() {
+		svc.state.StatusTokens.Set(usage.TotalTokens)
+		if svc.modelMgr == nil {
+			return
+		}
+		if cost, err := svc.modelMgr.CalculateCost(modelID, usage); err == nil {
+			svc.state.StatusCost.Set(cost * 100)
+		}
+	})
 }
 
 // SetContextUsage updates context usage display.
@@ -91,9 +96,11 @@ func (svc *StatusService) SetContextUsage(used, budget, window int) {
 	if svc == nil || svc.state == nil {
 		return
 	}
-	svc.state.ContextUsed.Set(used)
-	svc.state.ContextBudget.Set(budget)
-	svc.state.ContextWindow.Set(window)
+	fstate.Batch(func() {
+		svc.state.ContextUsed.Set(used)
+		svc.state.ContextBudget.Set(budget)
+		svc.state.ContextWindow.Set(window)
+	})
 }
 
 // SetScrollPosition updates the scroll position indicator.

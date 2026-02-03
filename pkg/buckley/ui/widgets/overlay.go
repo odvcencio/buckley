@@ -1,9 +1,114 @@
 package widgets
 
 import (
+	"github.com/odvcencio/fluffyui/backend"
 	"github.com/odvcencio/fluffyui/runtime"
 	uiwidgets "github.com/odvcencio/fluffyui/widgets"
 )
+
+// ModalOverlay draws a backdrop and hosts a modal child widget.
+type ModalOverlay struct {
+	uiwidgets.Base
+	child            runtime.Widget
+	childBounds      runtime.Rect
+	backdropStyle    backend.Style
+	closeOnBackdrop  bool
+	onClose          func()
+}
+
+// NewModalOverlay creates a modal overlay wrapper.
+func NewModalOverlay(child runtime.Widget) *ModalOverlay {
+	return &ModalOverlay{child: child, closeOnBackdrop: true}
+}
+
+// SetBackdropStyle configures the backdrop fill style.
+func (o *ModalOverlay) SetBackdropStyle(style backend.Style) {
+	o.backdropStyle = style
+}
+
+// SetCloseOnBackdrop toggles click-to-close behavior.
+func (o *ModalOverlay) SetCloseOnBackdrop(close bool) {
+	o.closeOnBackdrop = close
+}
+
+// SetOnClose registers a callback invoked when the overlay closes.
+func (o *ModalOverlay) SetOnClose(fn func()) {
+	o.onClose = fn
+}
+
+// Measure returns the full available size.
+func (o *ModalOverlay) Measure(constraints runtime.Constraints) runtime.Size {
+	return runtime.Size{Width: constraints.MaxWidth, Height: constraints.MaxHeight}
+}
+
+// Layout assigns bounds and lets the child layout itself.
+func (o *ModalOverlay) Layout(bounds runtime.Rect) {
+	o.Base.Layout(bounds)
+	if o.child == nil {
+		o.childBounds = runtime.Rect{}
+		return
+	}
+	o.child.Layout(bounds)
+	if provider, ok := o.child.(runtime.BoundsProvider); ok {
+		o.childBounds = provider.Bounds()
+	} else {
+		o.childBounds = bounds
+	}
+}
+
+// Render draws the backdrop and child.
+func (o *ModalOverlay) Render(ctx runtime.RenderContext) {
+	bounds := o.Bounds()
+	if bounds.Width > 0 && bounds.Height > 0 {
+		ctx.Buffer.Fill(bounds, ' ', o.backdropStyle)
+	}
+	if o.child != nil {
+		o.child.Render(ctx.Sub(o.childBounds))
+	}
+}
+
+// HandleMessage closes on backdrop clicks and forwards input.
+func (o *ModalOverlay) HandleMessage(msg runtime.Message) runtime.HandleResult {
+	if mouse, ok := msg.(runtime.MouseMsg); ok && o.closeOnBackdrop {
+		if mouse.Action == runtime.MousePress && mouse.Button == runtime.MouseLeft {
+			if !o.childBounds.Contains(mouse.X, mouse.Y) {
+				if o.onClose != nil {
+					o.onClose()
+				}
+				return runtime.WithCommand(runtime.PopOverlay{})
+			}
+		}
+	}
+	if o.child == nil {
+		return runtime.Unhandled()
+	}
+	result := o.child.HandleMessage(msg)
+	if len(result.Commands) == 0 {
+		return result
+	}
+	for _, cmd := range result.Commands {
+		if _, ok := cmd.(runtime.PopOverlay); ok {
+			if o.onClose != nil {
+				o.onClose()
+			}
+			break
+		}
+	}
+	return result
+}
+
+// ChildWidgets returns the child widget for traversal.
+func (o *ModalOverlay) ChildWidgets() []runtime.Widget {
+	if o.child == nil {
+		return nil
+	}
+	return []runtime.Widget{o.child}
+}
+
+// HitSelf ensures backdrop receives mouse events.
+func (o *ModalOverlay) HitSelf() bool {
+	return true
+}
 
 // CenteredOverlay positions a child widget in the center of the available bounds.
 type CenteredOverlay struct {
@@ -138,3 +243,6 @@ var _ runtime.Widget = (*CenteredOverlay)(nil)
 var _ runtime.ChildProvider = (*CenteredOverlay)(nil)
 var _ runtime.Widget = (*PositionedOverlay)(nil)
 var _ runtime.ChildProvider = (*PositionedOverlay)(nil)
+var _ runtime.Widget = (*ModalOverlay)(nil)
+var _ runtime.ChildProvider = (*ModalOverlay)(nil)
+var _ runtime.HitSelfProvider = (*ModalOverlay)(nil)

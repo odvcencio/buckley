@@ -6,6 +6,7 @@ import (
 
 	"github.com/odvcencio/fluffyui/accessibility"
 	"github.com/odvcencio/fluffyui/backend"
+	"github.com/odvcencio/fluffyui/dragdrop"
 	"github.com/odvcencio/fluffyui/runtime"
 	"github.com/odvcencio/fluffyui/scroll"
 	"github.com/odvcencio/fluffyui/terminal"
@@ -25,6 +26,8 @@ type InteractiveTree struct {
 	flatCache     []treeRow
 	flatDirty     bool
 	rootRef       *uiwidgets.TreeNode
+	dragEnabled   bool
+	dragDataFn    func(node *uiwidgets.TreeNode) (dragdrop.DragData, bool)
 }
 
 // NewInteractiveTree creates a tree widget.
@@ -82,6 +85,15 @@ func (t *InteractiveTree) SetLabel(label string) {
 	}
 	t.label = label
 	t.syncA11y()
+}
+
+// EnableDrag configures drag payloads for tree nodes.
+func (t *InteractiveTree) EnableDrag(fn func(node *uiwidgets.TreeNode) (dragdrop.DragData, bool)) {
+	if t == nil {
+		return
+	}
+	t.dragEnabled = fn != nil
+	t.dragDataFn = fn
 }
 
 // SelectedIndex returns the currently selected row index.
@@ -383,6 +395,29 @@ func (t *InteractiveTree) ScrollToEnd() {
 	t.Invalidate()
 }
 
+// DragStart begins dragging the selected node.
+func (t *InteractiveTree) DragStart() dragdrop.DragData {
+	if t == nil || !t.dragEnabled || t.dragDataFn == nil {
+		return dragdrop.DragData{}
+	}
+	rows := t.flatten()
+	row := t.selectedRow(rows)
+	if row == nil || row.node == nil {
+		return dragdrop.DragData{}
+	}
+	data, ok := t.dragDataFn(row.node)
+	if !ok {
+		return dragdrop.DragData{}
+	}
+	if data.Source == nil {
+		data.Source = t
+	}
+	return data
+}
+
+// DragEnd finishes a drag gesture.
+func (t *InteractiveTree) DragEnd(cancelled bool) {}
+
 func (t *InteractiveTree) syncA11y() {
 	if t == nil {
 		return
@@ -413,3 +448,4 @@ func (t *InteractiveTree) syncA11y() {
 var _ scroll.Controller = (*InteractiveTree)(nil)
 var _ runtime.Widget = (*InteractiveTree)(nil)
 var _ runtime.Focusable = (*InteractiveTree)(nil)
+var _ dragdrop.Draggable = (*InteractiveTree)(nil)

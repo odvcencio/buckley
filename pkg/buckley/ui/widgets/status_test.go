@@ -54,19 +54,21 @@ func TestStatusBar_Render_WithTokensAndContext(t *testing.T) {
 	contextBudget := state.NewSignal(8000)
 	streaming := state.NewSignal(true)
 	progressItems := state.NewSignal([]progress.Progress{{ID: "p1", Label: "Run"}})
+	effects := state.NewSignal(false)
 
 	sb := NewStatusBar(StatusBarConfig{
-		StatusText:    status,
-		StatusMode:    mode,
-		Tokens:        tokens,
-		CostCents:     cost,
-		ContextUsed:   contextUsed,
-		ContextBudget: contextBudget,
-		IsStreaming:   streaming,
-		ProgressItems: progressItems,
-		BGStyle:       backend.DefaultStyle(),
-		TextStyle:     backend.DefaultStyle(),
-		ModeStyle:     backend.DefaultStyle().Bold(true),
+		StatusText:     status,
+		StatusMode:     mode,
+		Tokens:         tokens,
+		CostCents:      cost,
+		ContextUsed:    contextUsed,
+		ContextBudget:  contextBudget,
+		IsStreaming:    streaming,
+		ProgressItems:  progressItems,
+		EffectsEnabled: effects,
+		BGStyle:        backend.DefaultStyle(),
+		TextStyle:      backend.DefaultStyle(),
+		ModeStyle:      backend.DefaultStyle().Bold(true),
 	})
 
 	output := renderStatusBar(t, sb, 80)
@@ -94,17 +96,19 @@ func TestStatusBar_AccessibleDescription(t *testing.T) {
 	contextUsed := state.NewSignal(100)
 	contextBudget := state.NewSignal(1000)
 	streaming := state.NewSignal(true)
+	effects := state.NewSignal(false)
 
 	sb := NewStatusBar(StatusBarConfig{
-		StatusText:    status,
-		StatusMode:    mode,
-		Tokens:        tokens,
-		ContextUsed:   contextUsed,
-		ContextBudget: contextBudget,
-		IsStreaming:   streaming,
-		BGStyle:       backend.DefaultStyle(),
-		TextStyle:     backend.DefaultStyle(),
-		ModeStyle:     backend.DefaultStyle(),
+		StatusText:     status,
+		StatusMode:     mode,
+		Tokens:         tokens,
+		ContextUsed:    contextUsed,
+		ContextBudget:  contextBudget,
+		IsStreaming:    streaming,
+		EffectsEnabled: effects,
+		BGStyle:        backend.DefaultStyle(),
+		TextStyle:      backend.DefaultStyle(),
+		ModeStyle:      backend.DefaultStyle(),
 	})
 
 	desc := sb.AccessibleDescription()

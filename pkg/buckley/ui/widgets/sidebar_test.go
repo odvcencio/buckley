@@ -12,52 +12,61 @@ import (
 func TestSidebar_New(t *testing.T) {
 	s := NewSidebar()
 
-	if !s.showCurrentTask {
+	if s.status == nil || s.files == nil {
+		t.Fatal("expected status and files sections to be initialized")
+	}
+	if !s.status.showCurrentTask {
 		t.Error("showCurrentTask should be true by default")
 	}
-	if !s.showPlan {
+	if !s.status.showPlan {
 		t.Error("showPlan should be true by default")
 	}
-	if !s.showTools {
+	if !s.status.showTools {
 		t.Error("showTools should be true by default")
 	}
-	if !s.showContext {
+	if !s.status.showContext {
 		t.Error("showContext should be true by default")
 	}
-	if !s.showTouches {
+	if !s.files.showTouches {
 		t.Error("showTouches should be true by default")
 	}
-	if !s.showRecentFiles {
+	if !s.files.showRecentFiles {
 		t.Error("showRecentFiles should be true by default")
 	}
 }
 
 func TestSidebar_SetCurrentTask(t *testing.T) {
 	s := NewSidebar()
+	if s.status == nil {
+		t.Fatal("expected status section to be initialized")
+	}
 
 	s.SetCurrentTask("Implement auth", 50)
 
-	if s.currentTask != "Implement auth" {
-		t.Errorf("expected task 'Implement auth', got '%s'", s.currentTask)
+	if s.status.currentTask != "Implement auth" {
+		t.Errorf("expected task 'Implement auth', got '%s'", s.status.currentTask)
 	}
-	if s.taskProgress != 50 {
-		t.Errorf("expected progress 50, got %d", s.taskProgress)
+	if s.status.taskProgress != 50 {
+		t.Errorf("expected progress 50, got %d", s.status.taskProgress)
 	}
 
 	// Test bounds checking
 	s.SetCurrentTask("Test", -10)
-	if s.taskProgress != 0 {
-		t.Errorf("negative progress should be clamped to 0, got %d", s.taskProgress)
+	if s.status.taskProgress != 0 {
+		t.Errorf("negative progress should be clamped to 0, got %d", s.status.taskProgress)
 	}
 
 	s.SetCurrentTask("Test", 150)
-	if s.taskProgress != 100 {
-		t.Errorf("progress > 100 should be clamped to 100, got %d", s.taskProgress)
+	if s.status.taskProgress != 100 {
+		t.Errorf("progress > 100 should be clamped to 100, got %d", s.status.taskProgress)
 	}
 }
 
 func TestSidebar_SetPlanTasks(t *testing.T) {
 	s := NewSidebar()
+	if s.status == nil {
+		t.Fatal("expected status section to be initialized")
+	}
 
 	tasks := []PlanTask{
 		{Name: "Design API", Status: TaskCompleted},
@@ -67,16 +76,19 @@ func TestSidebar_SetPlanTasks(t *testing.T) {
 	}
 	s.SetPlanTasks(tasks)
 
-	if len(s.planTasks) != 4 {
-		t.Errorf("expected 4 tasks, got %d", len(s.planTasks))
+	if len(s.status.planTasks) != 4 {
+		t.Errorf("expected 4 tasks, got %d", len(s.status.planTasks))
 	}
-	if s.planTasks[2].Status != TaskInProgress {
+	if s.status.planTasks[2].Status != TaskInProgress {
 		t.Error("task 3 should be in progress")
 	}
 }
 
 func TestSidebar_SetRunningTools(t *testing.T) {
 	s := NewSidebar()
+	if s.status == nil {
+		t.Fatal("expected status section to be initialized")
+	}
 
 	tools := []RunningTool{
 		{ID: "1", Name: "run_shell", Command: "npm test"},
@@ -84,16 +96,19 @@ func TestSidebar_SetRunningTools(t *testing.T) {
 	}
 	s.SetRunningTools(tools)
 
-	if len(s.runningTools) != 2 {
-		t.Errorf("expected 2 tools, got %d", len(s.runningTools))
+	if len(s.status.runningTools) != 2 {
+		t.Errorf("expected 2 tools, got %d", len(s.status.runningTools))
 	}
-	if s.runningTools[0].Command != "npm test" {
-		t.Errorf("expected command 'npm test', got '%s'", s.runningTools[0].Command)
+	if s.status.runningTools[0].Command != "npm test" {
+		t.Errorf("expected command 'npm test', got '%s'", s.status.runningTools[0].Command)
 	}
 }
 
 func TestSidebar_SetRecentFiles(t *testing.T) {
 	s := NewSidebar()
+	if s.files == nil {
+		t.Fatal("expected files section to be initialized")
+	}
 
 	files := []string{
 		"pkg/api/server.go",
@@ -101,13 +116,16 @@ func TestSidebar_SetRecentFiles(t *testing.T) {
 	}
 	s.SetRecentFiles(files)
 
-	if len(s.recentFiles) != 2 {
-		t.Errorf("expected 2 files, got %d", len(s.recentFiles))
+	if len(s.files.recentFiles) != 2 {
+		t.Errorf("expected 2 files, got %d", len(s.files.recentFiles))
 	}
 }
 
 func TestSidebar_SetActiveTouches(t *testing.T) {
 	s := NewSidebar()
+	if s.files == nil {
+		t.Fatal("expected files section to be initialized")
+	}
 
 	touches := []TouchSummary{
 		{Path: "pkg/buckley/ui/widgets/sidebar.go", Operation: "write"},
@@ -115,24 +133,27 @@ func TestSidebar_SetActiveTouches(t *testing.T) {
 	}
 	s.SetActiveTouches(touches)
 
-	if len(s.activeTouches) != 2 {
-		t.Errorf("expected 2 touches, got %d", len(s.activeTouches))
+	if len(s.files.activeTouches) != 2 {
+		t.Errorf("expected 2 touches, got %d", len(s.files.activeTouches))
 	}
-	if s.activeTouches[0].Path != "pkg/buckley/ui/widgets/sidebar.go" {
-		t.Errorf("expected first touch path, got %s", s.activeTouches[0].Path)
+	if s.files.activeTouches[0].Path != "pkg/buckley/ui/widgets/sidebar.go" {
+		t.Errorf("expected first touch path, got %s", s.files.activeTouches[0].Path)
 	}
 }
 
 func TestSidebar_ToggleRecentFiles(t *testing.T) {
 	s := NewSidebar()
+	if s.files == nil {
+		t.Fatal("expected files section to be initialized")
+	}
 
 	s.ToggleRecentFiles()
-	if s.showRecentFiles {
+	if s.files.showRecentFiles {
 		t.Error("should be hidden after toggle")
 	}
 
 	s.ToggleRecentFiles()
-	if !s.showRecentFiles {
+	if !s.files.showRecentFiles {
 		t.Error("should be shown after second toggle")
 	}
 }
@@ -159,40 +180,43 @@ func TestSidebar_Measure(t *testing.T) {
 
 func TestSidebar_ToggleSections(t *testing.T) {
 	s := NewSidebar()
+	if s.status == nil || s.files == nil {
+		t.Fatal("expected status and files sections to be initialized")
+	}
 
 	// Toggle current task
 	s.ToggleCurrentTask()
-	if s.showCurrentTask {
+	if s.status.showCurrentTask {
 		t.Error("showCurrentTask should be false after toggle")
 	}
 
 	// Toggle plan
 	s.TogglePlan()
-	if s.showPlan {
+	if s.status.showPlan {
 		t.Error("showPlan should be false after toggle")
 	}
 
 	// Toggle tools
 	s.ToggleTools()
-	if s.showTools {
+	if s.status.showTools {
 		t.Error("showTools should be false after toggle")
 	}
 
 	// Toggle context
 	s.ToggleContext()
-	if s.showContext {
+	if s.status.showContext {
 		t.Error("showContext should be false after toggle")
 	}
 
 	// Toggle touches
 	s.ToggleTouches()
-	if s.showTouches {
+	if s.files.showTouches {
 		t.Error("showTouches should be false after toggle")
 	}
 
 	// Toggle recent files
 	s.ToggleRecentFiles()
-	if s.showRecentFiles {
+	if s.files.showRecentFiles {
 		t.Error("showRecentFiles should be false after toggle")
 	}
 }
@@ -220,27 +244,30 @@ func TestSidebar_VisibilitySignals(t *testing.T) {
 		ShowCircuit:     showCircuit,
 	})
 
-	if s.showCurrentTask {
+	if s.status == nil || s.files == nil {
+		t.Fatal("expected status and files sections to be initialized")
+	}
+	if s.status.showCurrentTask {
 		t.Error("showCurrentTask should follow signal false")
 	}
 
 	showPlan.Set(false)
-	if s.showPlan {
+	if s.status.showPlan {
 		t.Error("showPlan should follow signal false")
 	}
 
 	showTouches.Set(false)
-	if s.showTouches {
+	if s.files.showTouches {
 		t.Error("showTouches should follow signal false")
 	}
 
 	showRecent.Set(false)
-	if s.showRecentFiles {
+	if s.files.showRecentFiles {
 		t.Error("showRecentFiles should follow signal false")
 	}
 
 	showCircuit.Set(false)
-	if s.showCircuit {
+	if s.status.showCircuit {
 		t.Error("showCircuit should follow signal false")
 	}
 }
@@ -359,17 +386,17 @@ func TestSidebar_UpdatePlanTableRows(t *testing.T) {
 		{Name: "Beta", Status: TaskInProgress},
 	})
 
-	if s.planPanel == nil || s.planPanel.table == nil {
+	if s.status == nil || s.status.planPanel == nil || s.status.planPanel.table == nil {
 		t.Fatal("expected plan table to be initialized")
 	}
-	if len(s.planPanel.table.Rows) != 2 {
-		t.Fatalf("expected 2 plan rows, got %d", len(s.planPanel.table.Rows))
+	if len(s.status.planPanel.table.Rows) != 2 {
+		t.Fatalf("expected 2 plan rows, got %d", len(s.status.planPanel.table.Rows))
 	}
-	if s.planPanel.table.Rows[0][0] != "Alpha" {
-		t.Fatalf("expected first row Alpha, got %q", s.planPanel.table.Rows[0][0])
+	if s.status.planPanel.table.Rows[0][0] != "Alpha" {
+		t.Fatalf("expected first row Alpha, got %q", s.status.planPanel.table.Rows[0][0])
 	}
-	if s.planPanel.table.Rows[1][1] != "running" {
-		t.Fatalf("expected second row status running, got %q", s.planPanel.table.Rows[1][1])
+	if s.status.planPanel.table.Rows[1][1] != "running" {
+		t.Fatalf("expected second row status running, got %q", s.status.planPanel.table.Rows[1][1])
 	}
 }
 
@@ -378,13 +405,13 @@ func TestSidebar_UpdateFilesTree(t *testing.T) {
 	s.SetProjectPath("/tmp/buckley")
 	s.SetRecentFiles([]string{"pkg/main.go", "pkg/ui/sidebar.go"})
 
-	if s.filesPanel == nil || s.filesPanel.tree == nil || s.filesPanel.tree.Root == nil {
+	if s.files == nil || s.files.filesPanel == nil || s.files.filesPanel.tree == nil || s.files.filesPanel.tree.Root == nil {
 		t.Fatal("expected files tree root")
 	}
-	if s.filesPanel.tree.Root.Label != "buckley" {
-		t.Fatalf("expected root label buckley, got %q", s.filesPanel.tree.Root.Label)
+	if s.files.filesPanel.tree.Root.Label != "buckley" {
+		t.Fatalf("expected root label buckley, got %q", s.files.filesPanel.tree.Root.Label)
 	}
-	if len(s.filesPanel.tree.Root.Children) == 0 {
+	if len(s.files.filesPanel.tree.Root.Children) == 0 {
 		t.Fatal("expected file nodes under root")
 	}
 }
@@ -395,14 +422,14 @@ func TestSidebar_UpdateTouchesTree(t *testing.T) {
 		{Path: "pkg/main.go", Operation: "write", Ranges: []TouchRange{{Start: 1, End: 3}}},
 	})
 
-	if s.touchesPanel == nil || s.touchesPanel.tree == nil || s.touchesPanel.tree.Root == nil {
+	if s.files == nil || s.files.touchesPanel == nil || s.files.touchesPanel.tree == nil || s.files.touchesPanel.tree.Root == nil {
 		t.Fatal("expected touches tree root")
 	}
-	if len(s.touchesPanel.tree.Root.Children) == 0 {
+	if len(s.files.touchesPanel.tree.Root.Children) == 0 {
 		t.Fatal("expected touch children")
 	}
-	if s.touchesPanel.tree.Root.Children[0].Label != "pkg/main.go" {
-		t.Fatalf("expected touch label pkg/main.go, got %q", s.touchesPanel.tree.Root.Children[0].Label)
+	if s.files.touchesPanel.tree.Root.Children[0].Label != "pkg/main.go" {
+		t.Fatalf("expected touch label pkg/main.go, got %q", s.files.touchesPanel.tree.Root.Children[0].Label)
 	}
 }
 

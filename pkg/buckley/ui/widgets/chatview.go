@@ -37,6 +37,10 @@ type ChatViewConfig struct {
 	ReasoningVisible state.Readable[bool]
 	ModelName        state.Readable[string]
 	MetadataMode     state.Readable[string]
+	SearchQuery      state.Readable[string]
+	SearchMatches    state.Writable[SearchMatchState]
+	SelectionText    state.Writable[string]
+	SelectionActive  state.Writable[bool]
 }
 
 // NewChatView creates a new chat view widget.
@@ -48,10 +52,14 @@ func NewChatView() *ChatView {
 func NewChatViewWithConfig(cfg ChatViewConfig) *ChatView {
 	chat := &ChatView{}
 	chat.ChatMessages = NewChatMessagesWithConfig(ChatMessagesConfig{
-		Messages:     cfg.Messages,
-		Thinking:     cfg.Thinking,
-		ModelName:    cfg.ModelName,
-		MetadataMode: cfg.MetadataMode,
+		Messages:        cfg.Messages,
+		Thinking:        cfg.Thinking,
+		ModelName:       cfg.ModelName,
+		MetadataMode:    cfg.MetadataMode,
+		SearchQuery:     cfg.SearchQuery,
+		SearchMatches:   cfg.SearchMatches,
+		SelectionText:   cfg.SelectionText,
+		SelectionActive: cfg.SelectionActive,
 	})
 
 	chat.ownedReasoningTextSig = state.NewSignal("")

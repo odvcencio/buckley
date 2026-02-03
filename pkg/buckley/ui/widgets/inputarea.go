@@ -6,6 +6,7 @@ import (
 	"github.com/odvcencio/fluffyui/accessibility"
 	"github.com/odvcencio/fluffyui/backend"
 	"github.com/odvcencio/fluffyui/clipboard"
+	"github.com/odvcencio/fluffyui/dragdrop"
 	"github.com/odvcencio/fluffyui/runtime"
 	"github.com/odvcencio/fluffyui/state"
 	"github.com/odvcencio/fluffyui/terminal"
@@ -777,6 +778,48 @@ func (i *InputArea) AccessibleValue() *accessibility.ValueInfo {
 	return &accessibility.ValueInfo{Text: text}
 }
 
+// CanDrop reports whether the input accepts a drag payload.
+func (i *InputArea) CanDrop(data dragdrop.DragData) bool {
+	if i == nil {
+		return false
+	}
+	switch data.Kind {
+	case "path", "text":
+		return true
+	default:
+		return false
+	}
+}
+
+// Drop inserts the payload text into the input.
+func (i *InputArea) Drop(data dragdrop.DragData, position dragdrop.DropPosition) {
+	if i == nil {
+		return
+	}
+	var text string
+	switch data.Kind {
+	case "path":
+		if value, ok := data.Payload.(string); ok {
+			text = value
+		}
+	case "text":
+		if value, ok := data.Payload.(string); ok {
+			text = value
+		}
+	}
+	if strings.TrimSpace(text) == "" {
+		return
+	}
+	if i.Text() != "" {
+		text = " " + text
+	}
+	i.InsertText(text)
+	i.Focus()
+}
+
+// DropPreview is a no-op for now.
+func (i *InputArea) DropPreview(data dragdrop.DragData, position dragdrop.DropPosition) {}
+
 func measureTextHeight(text string, width int) int {
 	if width <= 0 {
 		return 1
@@ -803,3 +846,4 @@ func measureTextHeight(text string, width int) int {
 const maxConstraint = 10000
 
 var _ accessibility.Accessible = (*InputArea)(nil)
+var _ dragdrop.DropTarget = (*InputArea)(nil)

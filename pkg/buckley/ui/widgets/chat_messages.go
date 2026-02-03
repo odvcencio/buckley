@@ -27,11 +27,21 @@ type ChatMessage struct {
 	UserAt  time.Time
 }
 
+// SearchMatchState summarizes search match position.
+type SearchMatchState struct {
+	Current int
+	Total   int
+}
+
 // ChatMessagesConfig provides external state for message rendering.
 type ChatMessagesConfig struct {
-	Messages  state.Readable[[]ChatMessage]
-	Thinking  state.Readable[bool]
-	ModelName state.Readable[string]
+	Messages       state.Readable[[]ChatMessage]
+	Thinking       state.Readable[bool]
+	ModelName      state.Readable[string]
+	SearchQuery    state.Readable[string]
+	SearchMatches  state.Writable[SearchMatchState]
+	SelectionText  state.Writable[string]
+	SelectionActive state.Writable[bool]
 	// MetadataMode controls metadata visibility ("always", "hover", "never").
 	MetadataMode state.Readable[string]
 }
@@ -42,8 +52,8 @@ type ChatMessages struct {
 
 	buffer     *scrollback.Buffer
 	transcript *chatTranscript
-	list       *uiwidgets.VirtualList[scrollback.VisibleLine]
-	listView   runtime.Widget
+	virtual    *chatMessagesVirtual
+	scrollView *uiwidgets.ScrollView
 	listBounds runtime.Rect
 	stack      *uiwidgets.Stack
 	overlay    *chatMessagesOverlay
@@ -59,6 +69,14 @@ type ChatMessages struct {
 	metadataModeSig   state.Readable[string]
 	ownedModelNameSig *state.Signal[string]
 	ownedMetadataSig  *state.Signal[string]
+	searchQuerySig    state.Readable[string]
+	searchMatchesSig  state.Writable[SearchMatchState]
+	selectionTextSig  state.Writable[string]
+	selectionActiveSig state.Writable[bool]
+	ownedSearchQuerySig   *state.Signal[string]
+	ownedSearchMatchesSig *state.Signal[SearchMatchState]
+	ownedSelectionTextSig *state.Signal[string]
+	ownedSelectionActiveSig *state.Signal[bool]
 
 	// Styles for different message types
 	userStyle      backend.Style
@@ -80,82 +98,15 @@ type ChatMessages struct {
 	metadataStyle    backend.Style
 	metadataMode     string
 	modelName        string
+	searchQuery      string
 	hoveredMessageID int
 	hoveredCodeStart int
 	hoveredCodeEnd   int
 	selecting        bool
-	scrollDragging   bool
-	scrollDragOffset int
 
 	// Callbacks
 	onScrollChange func(top, total, viewHeight int)
 	onCodeAction   func(action, language, code string)
-}
-
-type chatListAdapter struct {
-	messages *ChatMessages
-}
-
-type passiveVirtualList struct {
-	list *uiwidgets.VirtualList[scrollback.VisibleLine]
-}
-
-func newPassiveVirtualList(list *uiwidgets.VirtualList[scrollback.VisibleLine]) *passiveVirtualList {
-	return &passiveVirtualList{list: list}
-}
-
-func (p *passiveVirtualList) Measure(constraints runtime.Constraints) runtime.Size {
-	if p == nil || p.list == nil {
-		return runtime.Size{}
-	}
-	return p.list.Measure(constraints)
-}
-
-func (p *passiveVirtualList) Layout(bounds runtime.Rect) {
-	if p == nil || p.list == nil {
-		return
-	}
-	p.list.Layout(bounds)
-}
-
-func (p *passiveVirtualList) Render(ctx runtime.RenderContext) {
-	if p == nil || p.list == nil {
-		return
-	}
-	p.list.Render(ctx)
-}
-
-func (p *passiveVirtualList) HandleMessage(msg runtime.Message) runtime.HandleResult {
-	return runtime.Unhandled()
-}
-
-func (p *passiveVirtualList) Bounds() runtime.Rect {
-	if p == nil || p.list == nil {
-		return runtime.Rect{}
-	}
-	return p.list.Bounds()
-}
-
-func (a chatListAdapter) Count() int {
-	if a.messages == nil || a.messages.buffer == nil {
-		return 0
-	}
-	return a.messages.buffer.RowCount()
-}
-
-func (a chatListAdapter) Item(index int) scrollback.VisibleLine {
-	if a.messages == nil || a.messages.buffer == nil {
-		return scrollback.VisibleLine{}
-	}
-	line, _ := a.messages.buffer.VisibleLineAtRow(index)
-	return line
-}
-
-func (a chatListAdapter) Render(item scrollback.VisibleLine, index int, selected bool, ctx runtime.RenderContext) {
-	if a.messages == nil {
-		return
-	}
-	a.messages.renderVisibleLine(ctx, item)
 }
 
 // NewChatMessages creates a new chat message list.
@@ -188,6 +139,10 @@ func NewChatMessagesWithConfig(cfg ChatMessagesConfig) *ChatMessages {
 	m.ownedThinkingSig = state.NewSignal(false)
 	m.ownedModelNameSig = state.NewSignal("")
 	m.ownedMetadataSig = state.NewSignal("always")
+	m.ownedSearchQuerySig = state.NewSignal("")
+	m.ownedSearchMatchesSig = state.NewSignal(SearchMatchState{})
+	m.ownedSelectionTextSig = state.NewSignal("")
+	m.ownedSelectionActiveSig = state.NewSignal(false)
 	if cfg.Messages != nil {
 		m.messagesSig = cfg.Messages
 	} else {
@@ -208,13 +163,32 @@ func NewChatMessagesWithConfig(cfg ChatMessagesConfig) *ChatMessages {
 	} else {
 		m.metadataModeSig = m.ownedMetadataSig
 	}
-	m.list = uiwidgets.NewVirtualList[scrollback.VisibleLine](chatListAdapter{messages: m})
-	m.list.SetItemHeight(1)
-	m.list.SetOverscan(4)
-	m.list.SetLabel("Chat messages")
-	m.listView = newPassiveVirtualList(m.list)
+	if cfg.SearchQuery != nil {
+		m.searchQuerySig = cfg.SearchQuery
+	} else {
+		m.searchQuerySig = m.ownedSearchQuerySig
+	}
+	if cfg.SearchMatches != nil {
+		m.searchMatchesSig = cfg.SearchMatches
+	} else {
+		m.searchMatchesSig = m.ownedSearchMatchesSig
+	}
+	if cfg.SelectionText != nil {
+		m.selectionTextSig = cfg.SelectionText
+	} else {
+		m.selectionTextSig = m.ownedSelectionTextSig
+	}
+	if cfg.SelectionActive != nil {
+		m.selectionActiveSig = cfg.SelectionActive
+	} else {
+		m.selectionActiveSig = m.ownedSelectionActiveSig
+	}
+	m.virtual = newChatMessagesVirtual(m)
+	m.scrollView = uiwidgets.NewScrollView(m.virtual)
+	m.scrollView.SetLabel("Chat messages")
+	m.scrollView.SetBehavior(scroll.ScrollBehavior{Vertical: scroll.ScrollAuto, Horizontal: scroll.ScrollNever, MouseWheel: 3, PageSize: 1})
 	m.overlay = &chatMessagesOverlay{owner: m}
-	m.stack = uiwidgets.NewStack(m.listView, m.overlay)
+	m.stack = uiwidgets.NewStack(m.scrollView, m.overlay)
 	m.subscribe()
 	return m
 }
@@ -235,9 +209,8 @@ func (m *ChatMessages) SetUIStyles(scrollbar, thumb, selection, search, backgrou
 	m.selectionStyle = selection
 	m.searchStyle = search
 	m.bgStyle = background
-	if m.list != nil {
-		m.list.SetStyle(background)
-		m.list.SetSelectedStyle(selection)
+	if m.scrollView != nil {
+		m.scrollView.SetStyle(background)
 	}
 }
 
@@ -357,10 +330,14 @@ func (m *ChatMessages) subscribe() {
 	if m.metadataModeSig != nil {
 		m.subs.Observe(m.metadataModeSig, m.onMetadataModeChanged)
 	}
+	if m.searchQuerySig != nil {
+		m.subs.Observe(m.searchQuerySig, m.onSearchQueryChanged)
+	}
 	m.syncFromMessages()
 	m.syncThinking()
 	m.onModelNameChanged()
 	m.onMetadataModeChanged()
+	m.onSearchQueryChanged()
 }
 
 func (m *ChatMessages) onMessagesChanged() {
@@ -389,6 +366,13 @@ func (m *ChatMessages) onMetadataModeChanged() {
 	m.requestInvalidate()
 }
 
+func (m *ChatMessages) onSearchQueryChanged() {
+	if m.searchQuerySig == nil {
+		return
+	}
+	m.applySearchQuery(m.searchQuerySig.Get(), false)
+}
+
 func (m *ChatMessages) requestInvalidate() {
 	if m == nil {
 		return
@@ -405,6 +389,14 @@ func (m *ChatMessages) syncFromMessages() {
 		return
 	}
 	m.transcript.syncFromMessages(m.messagesSig.Get(), m, thinkingLineStyle(m.thinkingStyle))
+	m.ClearSelection()
+	if m.searchQuerySig != nil {
+		m.applySearchQuery(m.searchQuerySig.Get(), true)
+	} else if m.searchQuery != "" {
+		m.applySearchQuery(m.searchQuery, true)
+	} else {
+		m.updateSearchMatches()
+	}
 }
 
 func (m *ChatMessages) syncThinking() {
@@ -687,166 +679,11 @@ func (m *ChatMessages) Clear() {
 	m.hoveredCodeStart = -1
 	m.hoveredCodeEnd = -1
 	m.selecting = false
-	m.scrollDragging = false
-	m.scrollDragOffset = 0
-	if m.list != nil {
-		m.list.ScrollToOffset(0)
+	m.ClearSelection()
+	m.setSearchQuery("")
+	if m.scrollView != nil {
+		m.scrollView.ScrollTo(0, 0)
 	}
-}
-
-// GetContent returns all text content from the chat view (last N lines).
-func (m *ChatMessages) GetContent(limit int) []string {
-	return m.buffer.GetAllContent(limit)
-}
-
-// ScrollUp scrolls up by n lines.
-func (m *ChatMessages) ScrollUp(n int) {
-	m.buffer.ScrollUp(n)
-	m.syncListOffset()
-	m.notifyScroll()
-}
-
-// ScrollDown scrolls down by n lines.
-func (m *ChatMessages) ScrollDown(n int) {
-	m.buffer.ScrollDown(n)
-	m.syncListOffset()
-	m.notifyScroll()
-}
-
-// PageUp scrolls up by one page.
-func (m *ChatMessages) PageUp() {
-	m.buffer.PageUp()
-	m.syncListOffset()
-	m.notifyScroll()
-}
-
-// PageDown scrolls down by one page.
-func (m *ChatMessages) PageDown() {
-	m.buffer.PageDown()
-	m.syncListOffset()
-	m.notifyScroll()
-}
-
-// ScrollToTop scrolls to the beginning.
-func (m *ChatMessages) ScrollToTop() {
-	m.buffer.ScrollToTop()
-	m.syncListOffset()
-	m.notifyScroll()
-}
-
-// ScrollToBottom scrolls to the end.
-func (m *ChatMessages) ScrollToBottom() {
-	m.buffer.ScrollToBottom()
-	m.syncListOffset()
-	m.notifyScroll()
-}
-
-// ScrollPosition returns scroll position info.
-func (m *ChatMessages) ScrollPosition() (top, total, viewHeight int) {
-	return m.buffer.ScrollPosition()
-}
-
-// PositionForPoint maps screen coordinates to a buffer position.
-func (m *ChatMessages) PositionForPoint(x, y int) (line, col int, ok bool) {
-	bounds := m.listBounds
-	if x < bounds.X || y < bounds.Y || y >= bounds.Y+bounds.Height {
-		return 0, 0, false
-	}
-	if x >= bounds.X+bounds.Width {
-		return 0, 0, false
-	}
-	row := y - bounds.Y
-	column := x - bounds.X
-	return m.buffer.PositionForView(row, column)
-}
-
-// CodeHeaderActionAtPoint returns a code header action if the point targets copy/open.
-func (m *ChatMessages) CodeHeaderActionAtPoint(x, y int) (action, language, code string, ok bool) {
-	lineIndex, col, ok := m.PositionForPoint(x, y)
-	if !ok {
-		return "", "", "", false
-	}
-
-	line, ok := m.buffer.LineAt(lineIndex)
-	if !ok || !line.IsCodeHeader {
-		return "", "", "", false
-	}
-	header := line.Content
-	if header == "" {
-		return "", "", "", false
-	}
-
-	copyIdx := strings.Index(header, "[copy]")
-	if copyIdx >= 0 && col >= copyIdx && col < copyIdx+len("[copy]") {
-		language, code, ok = m.buffer.CodeBlockAt(lineIndex)
-		if !ok {
-			return "", "", "", false
-		}
-		return "copy", language, code, true
-	}
-
-	openIdx := strings.Index(header, "[open]")
-	if openIdx >= 0 && col >= openIdx && col < openIdx+len("[open]") {
-		language, code, _ = m.buffer.CodeBlockAt(lineIndex)
-		return "open", language, code, true
-	}
-
-	return "", "", "", false
-}
-
-// StartSelection begins text selection.
-func (m *ChatMessages) StartSelection(line, col int) {
-	m.buffer.StartSelection(line, col)
-}
-
-// UpdateSelection extends the selection.
-func (m *ChatMessages) UpdateSelection(line, col int) {
-	m.buffer.UpdateSelection(line, col)
-}
-
-// EndSelection finishes selection.
-func (m *ChatMessages) EndSelection() {
-	m.buffer.EndSelection()
-}
-
-// ClearSelection clears any active selection.
-func (m *ChatMessages) ClearSelection() {
-	m.buffer.ClearSelection()
-}
-
-// HasSelection returns true if a selection exists.
-func (m *ChatMessages) HasSelection() bool {
-	return m.buffer.HasSelection()
-}
-
-// SelectionText returns the selected text.
-func (m *ChatMessages) SelectionText() string {
-	return m.buffer.GetSelection()
-}
-
-// Search highlights matching text.
-func (m *ChatMessages) Search(query string) {
-	m.buffer.Search(query)
-}
-
-// NextMatch moves to the next search match.
-func (m *ChatMessages) NextMatch() {
-	m.buffer.NextMatch()
-}
-
-// PrevMatch moves to the previous search match.
-func (m *ChatMessages) PrevMatch() {
-	m.buffer.PrevMatch()
-}
-
-// SearchMatches returns current and total matches.
-func (m *ChatMessages) SearchMatches() (current, total int) {
-	return m.buffer.SearchMatches()
-}
-
-// ClearSearch clears search highlighting.
-func (m *ChatMessages) ClearSearch() {
-	m.buffer.Search("")
 }
 
 // LatestCodeBlock returns the most recent code block content.
@@ -863,19 +700,13 @@ func (m *ChatMessages) Measure(constraints runtime.Constraints) runtime.Size {
 func (m *ChatMessages) Layout(bounds runtime.Rect) {
 	m.Base.Layout(bounds)
 	content := bounds
-	if content.Width > 0 {
-		content.Width -= 1
-	}
-	if content.Width < 0 {
-		content.Width = 0
-	}
 	if m.stack != nil {
 		m.stack.Layout(content)
-	} else if m.listView != nil {
-		m.listView.Layout(content)
+	} else if m.scrollView != nil {
+		m.scrollView.Layout(content)
 	}
-	if m.list != nil {
-		m.listBounds = m.list.Bounds()
+	if m.scrollView != nil {
+		m.listBounds = m.scrollView.ContentBounds()
 	} else {
 		m.listBounds = content
 	}
@@ -896,8 +727,8 @@ func (m *ChatMessages) Render(ctx runtime.RenderContext) {
 		m.stack.Render(ctx)
 		return
 	}
-	if m.listView != nil {
-		m.listView.Render(ctx)
+	if m.scrollView != nil {
+		m.scrollView.Render(ctx)
 	}
 }
 
@@ -1036,32 +867,6 @@ func (m *ChatMessages) renderVisibleLine(ctx runtime.RenderContext, line scrollb
 	}
 }
 
-func (m *ChatMessages) renderScrollbar(ctx runtime.RenderContext) {
-	bounds := m.listBounds
-	if bounds.Width <= 0 || bounds.Height <= 0 {
-		return
-	}
-	top, total, viewH := m.buffer.ScrollPosition()
-	if total <= viewH {
-		return
-	}
-	thumbSize := max(1, (viewH*viewH)/total)
-	thumbPos := (top * (viewH - thumbSize)) / (total - viewH)
-	scrollX := bounds.X + bounds.Width
-	for y := 0; y < bounds.Height; y++ {
-		var r rune
-		var style backend.Style
-		if y >= thumbPos && y < thumbPos+thumbSize {
-			r = '█'
-			style = m.scrollThumb
-		} else {
-			r = '░'
-			style = m.scrollbarStyle
-		}
-		ctx.Buffer.Set(scrollX, bounds.Y+y, r, style)
-	}
-}
-
 // HandleMessage processes input events.
 func (m *ChatMessages) HandleMessage(msg runtime.Message) runtime.HandleResult {
 	switch evt := msg.(type) {
@@ -1085,9 +890,6 @@ func (m *ChatMessages) handleMouse(evt runtime.MouseMsg) runtime.HandleResult {
 	switch evt.Action {
 	case runtime.MousePress:
 		if evt.Button == runtime.MouseLeft {
-			if m.startScrollbarDrag(evt.X, evt.Y) {
-				return runtime.Handled()
-			}
 			if action, language, code, ok := m.CodeHeaderActionAtPoint(evt.X, evt.Y); ok {
 				m.handleCodeAction(action, language, code)
 				return runtime.Handled()
@@ -1097,21 +899,12 @@ func (m *ChatMessages) handleMouse(evt runtime.MouseMsg) runtime.HandleResult {
 			}
 		}
 	case runtime.MouseMove:
-		if m.scrollDragging {
-			if m.updateScrollbarDrag(evt.Y) {
-				return runtime.Handled()
-			}
-		}
 		if m.selecting {
 			if m.updateSelectionAt(evt.X, evt.Y) {
 				return runtime.Handled()
 			}
 		}
 	case runtime.MouseRelease:
-		if evt.Button == runtime.MouseLeft && m.scrollDragging {
-			m.scrollDragging = false
-			return runtime.Handled()
-		}
 		if evt.Button == runtime.MouseLeft && m.selecting {
 			m.endSelection()
 			return runtime.Handled()
@@ -1148,17 +941,6 @@ func (m *ChatMessages) handleMouse(evt runtime.MouseMsg) runtime.HandleResult {
 	return runtime.Handled()
 }
 
-func (m *ChatMessages) clearHover() runtime.HandleResult {
-	if m.hoveredMessageID == 0 && m.hoveredCodeStart == -1 && m.hoveredCodeEnd == -1 {
-		return runtime.Unhandled()
-	}
-	m.hoveredMessageID = 0
-	m.hoveredCodeStart = -1
-	m.hoveredCodeEnd = -1
-	m.requestInvalidate()
-	return runtime.Handled()
-}
-
 func (m *ChatMessages) handleCodeAction(action, language, code string) {
 	if strings.TrimSpace(code) == "" {
 		return
@@ -1184,96 +966,6 @@ func (m *ChatMessages) copyToClipboard(text string) bool {
 	return true
 }
 
-func (m *ChatMessages) startSelectionAt(x, y int) bool {
-	line, col, ok := m.PositionForPoint(x, y)
-	if !ok {
-		return false
-	}
-	m.buffer.StartSelection(line, col)
-	m.selecting = true
-	m.requestInvalidate()
-	return true
-}
-
-func (m *ChatMessages) updateSelectionAt(x, y int) bool {
-	line, col, ok := m.PositionForPoint(x, y)
-	if !ok {
-		return false
-	}
-	m.buffer.UpdateSelection(line, col)
-	m.requestInvalidate()
-	return true
-}
-
-func (m *ChatMessages) endSelection() {
-	if m.selecting {
-		m.buffer.EndSelection()
-		m.selecting = false
-		m.requestInvalidate()
-	}
-}
-
-func (m *ChatMessages) startScrollbarDrag(x, y int) bool {
-	if m.listBounds.Width <= 0 || m.listBounds.Height <= 0 {
-		return false
-	}
-	scrollX := m.listBounds.X + m.listBounds.Width
-	if x != scrollX {
-		return false
-	}
-	top, total, viewH := m.buffer.ScrollPosition()
-	if total <= viewH || viewH <= 0 {
-		return false
-	}
-	thumbSize := max(1, (viewH*viewH)/total)
-	maxThumbPos := viewH - thumbSize
-	if maxThumbPos <= 0 {
-		return false
-	}
-	thumbPos := (top * maxThumbPos) / (total - viewH)
-	trackPos := y - m.listBounds.Y
-	if trackPos < 0 || trackPos >= viewH {
-		return false
-	}
-	if trackPos >= thumbPos && trackPos < thumbPos+thumbSize {
-		m.scrollDragOffset = trackPos - thumbPos
-	} else {
-		m.scrollDragOffset = thumbSize / 2
-	}
-	m.scrollDragging = true
-	return m.updateScrollbarDrag(y)
-}
-
-func (m *ChatMessages) updateScrollbarDrag(y int) bool {
-	top, total, viewH := m.buffer.ScrollPosition()
-	if total <= viewH || viewH <= 0 {
-		return false
-	}
-	thumbSize := max(1, (viewH*viewH)/total)
-	maxThumbPos := viewH - thumbSize
-	if maxThumbPos <= 0 {
-		return false
-	}
-	trackPos := y - m.listBounds.Y
-	thumbPos := trackPos - m.scrollDragOffset
-	if thumbPos < 0 {
-		thumbPos = 0
-	}
-	if thumbPos > maxThumbPos {
-		thumbPos = maxThumbPos
-	}
-	newTop := (thumbPos * (total - viewH)) / maxThumbPos
-	if newTop == top {
-		return true
-	}
-	if newTop > top {
-		m.ScrollDown(newTop - top)
-	} else {
-		m.ScrollUp(top - newTop)
-	}
-	return true
-}
-
 func (m *ChatMessages) styleForSource(source string) backend.Style {
 	switch source {
 	case "user":
@@ -1289,25 +981,6 @@ func (m *ChatMessages) styleForSource(source string) backend.Style {
 	default:
 		return m.assistantStyle
 	}
-}
-
-func (m *ChatMessages) notifyScroll() {
-	if m.onScrollChange != nil {
-		top, total, viewH := m.buffer.ScrollPosition()
-		m.onScrollChange(top, total, viewH)
-	}
-}
-
-func (m *ChatMessages) syncListOffset() {
-	if m.list == nil || m.buffer == nil {
-		return
-	}
-	top, _, _ := m.buffer.ScrollPosition()
-	if top < 0 {
-		top = 0
-	}
-	m.list.ScrollToOffset(top)
-	m.notifyScroll()
 }
 
 func (m *ChatMessages) roleStripPrefix(source string) []scrollback.Span {
@@ -1345,47 +1018,6 @@ func (m *ChatMessages) ClipboardCut() (string, bool) {
 
 func (m *ChatMessages) ClipboardPaste(text string) bool {
 	return false
-}
-
-func (m *ChatMessages) ScrollBy(dx, dy int) {
-	if dy < 0 {
-		m.ScrollUp(-dy)
-		return
-	}
-	if dy > 0 {
-		m.ScrollDown(dy)
-	}
-}
-
-func (m *ChatMessages) ScrollTo(x, y int) {
-	top, _, _ := m.ScrollPosition()
-	if y < top {
-		m.ScrollUp(top - y)
-		return
-	}
-	if y > top {
-		m.ScrollDown(y - top)
-	}
-}
-
-func (m *ChatMessages) PageBy(pages int) {
-	if pages < 0 {
-		for i := 0; i < -pages; i++ {
-			m.PageUp()
-		}
-		return
-	}
-	for i := 0; i < pages; i++ {
-		m.PageDown()
-	}
-}
-
-func (m *ChatMessages) ScrollToStart() {
-	m.ScrollToTop()
-}
-
-func (m *ChatMessages) ScrollToEnd() {
-	m.ScrollToBottom()
 }
 
 var _ clipboard.Target = (*ChatMessages)(nil)

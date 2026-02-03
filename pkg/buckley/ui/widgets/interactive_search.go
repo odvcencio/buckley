@@ -95,6 +95,18 @@ func (s *InteractiveSearch) Query() string {
 	return s.query
 }
 
+// SetQuery updates the search query and triggers callbacks.
+func (s *InteractiveSearch) SetQuery(query string) {
+	if s == nil {
+		return
+	}
+	s.query = query
+	s.syncA11y()
+	if s.onSearch != nil {
+		s.onSearch(query)
+	}
+}
+
 // Measure returns the preferred size (fixed height bar).
 func (s *InteractiveSearch) Measure(constraints runtime.Constraints) runtime.Size {
 	if s == nil {

@@ -12,6 +12,7 @@ import (
 	buckleywidgets "github.com/odvcencio/buckley/pkg/buckley/ui/widgets"
 	"github.com/odvcencio/buckley/pkg/telemetry"
 	"github.com/odvcencio/buckley/pkg/touch"
+	"github.com/odvcencio/fluffyui/state"
 )
 
 // TelemetryBridge is the common interface for telemetry bridges.
@@ -29,6 +30,7 @@ type touchEntry struct {
 }
 
 const maxTouchEntries = 5
+const maxRecentFiles = 5
 const maxRLMScratchpadEntries = 3
 const maxToolHistoryEntries = 20
 
@@ -52,15 +54,6 @@ func getString(m map[string]any, key string) string {
 	default:
 		return ""
 	}
-}
-
-func cloneRunningTools(src []buckleywidgets.RunningTool) []buckleywidgets.RunningTool {
-	if src == nil {
-		return nil
-	}
-	out := make([]buckleywidgets.RunningTool, len(src))
-	copy(out, src)
-	return out
 }
 
 func upsertRunningTool(tools []buckleywidgets.RunningTool, tool buckleywidgets.RunningTool) []buckleywidgets.RunningTool {
@@ -125,20 +118,28 @@ func cloneAndSortVariants(src []buckleywidgets.ExperimentVariant) []buckleywidge
 	return out
 }
 
-func cloneRLMStatus(status *buckleywidgets.RLMStatus) *buckleywidgets.RLMStatus {
-	if status == nil {
-		return nil
+func updateRecentFiles(current []string, paths []string) []string {
+	if len(paths) == 0 {
+		return current
 	}
-	cloned := *status
-	return &cloned
-}
-
-func cloneCircuitStatus(status *buckleywidgets.CircuitStatus) *buckleywidgets.CircuitStatus {
-	if status == nil {
-		return nil
+	updated := append([]string(nil), current...)
+	for i := len(paths) - 1; i >= 0; i-- {
+		path := strings.TrimSpace(paths[i])
+		if path == "" {
+			continue
+		}
+		for j := 0; j < len(updated); j++ {
+			if updated[j] == path {
+				updated = append(updated[:j], updated[j+1:]...)
+				j--
+			}
+		}
+		updated = append([]string{path}, updated...)
+		if len(updated) > maxRecentFiles {
+			updated = updated[:maxRecentFiles]
+		}
 	}
-	cloned := *status
-	return &cloned
+	return updated
 }
 
 func truncate(s string, maxLen int) string {
@@ -244,6 +245,22 @@ func getFloat(m map[string]any, key string) (float64, bool) {
 	return 0, false
 }
 
+func getSignal[T any](sig state.Readable[T]) T {
+	var zero T
+	if sig == nil {
+		return zero
+	}
+	return sig.Get()
+}
+
+func setSignal[T any](sig state.Writable[T], value T) bool {
+	if sig == nil {
+		return false
+	}
+	sig.Set(value)
+	return true
+}
+
 func parseRLMScratchpadEntries(raw any) []buckleywidgets.RLMScratchpadEntry {
 	if raw == nil {
 		return nil
@@ -276,6 +293,60 @@ func parseRLMScratchpadEntries(raw any) []buckleywidgets.RLMScratchpadEntry {
 	default:
 		return nil
 	}
+}
+
+func parseExperimentVariants(raw any, defaultStatus string) []buckleywidgets.ExperimentVariant {
+	if raw == nil {
+		return nil
+	}
+	switch list := raw.(type) {
+	case []map[string]any:
+		out := make([]buckleywidgets.ExperimentVariant, 0, len(list))
+		for _, entry := range list {
+			out = append(out, experimentVariantFromMap(entry, defaultStatus))
+		}
+		return out
+	case []any:
+		out := make([]buckleywidgets.ExperimentVariant, 0, len(list))
+		for _, item := range list {
+			entry, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			out = append(out, experimentVariantFromMap(entry, defaultStatus))
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
+func experimentVariantFromMap(entry map[string]any, defaultStatus string) buckleywidgets.ExperimentVariant {
+	if entry == nil {
+		return buckleywidgets.ExperimentVariant{}
+	}
+	variant := buckleywidgets.ExperimentVariant{
+		ID:      firstNonEmpty(getString(entry, "id"), getString(entry, "variant_id")),
+		Name:    firstNonEmpty(getString(entry, "name"), getString(entry, "variant")),
+		ModelID: firstNonEmpty(getString(entry, "model"), getString(entry, "model_id")),
+		Status:  getString(entry, "status"),
+	}
+	if variant.Status == "" {
+		variant.Status = defaultStatus
+	}
+	if value, ok := getNumber(entry, "duration_ms"); ok {
+		variant.DurationMs = value
+	}
+	if value, ok := getFloat(entry, "total_cost"); ok {
+		variant.TotalCost = value
+	}
+	if value, ok := getNumber(entry, "prompt_tokens"); ok {
+		variant.PromptTokens = value
+	}
+	if value, ok := getNumber(entry, "completion_tokens"); ok {
+		variant.CompletionTokens = value
+	}
+	return variant
 }
 
 func firstNonEmpty(values ...string) string {
@@ -370,54 +441,66 @@ func extractTime(data map[string]any, key string) time.Time {
 	return time.Time{}
 }
 
+func experimentStatusForEvent(event telemetry.Event) string {
+	if status := getString(event.Data, "status"); status != "" {
+		return status
+	}
+	switch event.Type {
+	case telemetry.EventExperimentStarted:
+		return "running"
+	case telemetry.EventExperimentCompleted:
+		return "completed"
+	case telemetry.EventExperimentFailed:
+		return "failed"
+	default:
+		return ""
+	}
+}
+
+func variantStatusForEvent(event telemetry.Event) string {
+	if status := getString(event.Data, "status"); status != "" {
+		return status
+	}
+	switch event.Type {
+	case telemetry.EventExperimentVariantStarted:
+		return "running"
+	case telemetry.EventExperimentVariantCompleted:
+		return "completed"
+	case telemetry.EventExperimentVariantFailed:
+		return "failed"
+	default:
+		return ""
+	}
+}
+
 // =============================================================================
 // SimpleTelemetryBridge - for Runner (no scheduler dependency)
 // =============================================================================
-
-// SidebarStateSink receives sidebar state updates.
-type SidebarStateSink interface {
-	SetSidebarState(state buckleywidgets.SidebarState)
-}
 
 // SimpleTelemetryBridge forwards telemetry events to the TUI without scheduler dependency.
 // Used by Runner which doesn't have direct access to the state scheduler.
 type SimpleTelemetryBridge struct {
 	hub         *telemetry.Hub
-	sink        SidebarStateSink
+	signals     SidebarSignals
 	eventCh     <-chan telemetry.Event
 	unsubscribe func()
 	cancel      context.CancelFunc
 	wg          sync.WaitGroup
-	mu          sync.Mutex
 
-	// State mirrors for snapshot generation
-	currentTask        string
-	taskProgress       int
-	planTasks          []buckleywidgets.PlanTask
-	runningTools       []buckleywidgets.RunningTool
-	toolHistory        []buckleywidgets.ToolHistoryEntry
-	touchEntries       []touchEntry
-	recentFiles        []string
-	rlmStatus          *buckleywidgets.RLMStatus
-	rlmScratchpad      []buckleywidgets.RLMScratchpadEntry
-	circuitStatus      *buckleywidgets.CircuitStatus
-	experiment         string
-	experimentStatus   string
-	experimentVariants []buckleywidgets.ExperimentVariant
+	mu           sync.Mutex
+	touchEntries []touchEntry
 }
 
-// NewSimpleTelemetryBridge creates a bridge from telemetry hub to a sidebar state sink.
-func NewSimpleTelemetryBridge(hub *telemetry.Hub, sink SidebarStateSink) *SimpleTelemetryBridge {
-	if hub == nil || sink == nil {
-		return &SimpleTelemetryBridge{}
+// NewSimpleTelemetryBridge creates a bridge from telemetry hub to sidebar signals.
+func NewSimpleTelemetryBridge(hub *telemetry.Hub, signals SidebarSignals) *SimpleTelemetryBridge {
+	bridge := &SimpleTelemetryBridge{hub: hub, signals: signals}
+	if hub == nil {
+		return bridge
 	}
 	eventCh, unsub := hub.Subscribe()
-	return &SimpleTelemetryBridge{
-		hub:         hub,
-		sink:        sink,
-		eventCh:     eventCh,
-		unsubscribe: unsub,
-	}
+	bridge.eventCh = eventCh
+	bridge.unsubscribe = unsub
+	return bridge
 }
 
 // Start begins forwarding telemetry events to the UI.
@@ -456,37 +539,7 @@ func (b *SimpleTelemetryBridge) forwardLoop(ctx context.Context) {
 				return
 			}
 			b.handleEvent(event)
-			b.postSnapshot()
 		}
-	}
-}
-
-func (b *SimpleTelemetryBridge) postSnapshot() {
-	if b.sink == nil {
-		return
-	}
-	b.mu.Lock()
-	snapshot := b.buildSnapshot()
-	b.mu.Unlock()
-	b.sink.SetSidebarState(snapshot)
-}
-
-func (b *SimpleTelemetryBridge) buildSnapshot() buckleywidgets.SidebarState {
-	now := time.Now()
-	return buckleywidgets.SidebarState{
-		CurrentTask:        b.currentTask,
-		TaskProgress:       b.taskProgress,
-		PlanTasks:          append([]buckleywidgets.PlanTask(nil), b.planTasks...),
-		RunningTools:       cloneRunningTools(b.runningTools),
-		ToolHistory:        append([]buckleywidgets.ToolHistoryEntry(nil), b.toolHistory...),
-		ActiveTouches:      summarizeTouches(b.touchEntries, now),
-		RecentFiles:        append([]string(nil), b.recentFiles...),
-		RLMStatus:          cloneRLMStatus(b.rlmStatus),
-		RLMScratchpad:      append([]buckleywidgets.RLMScratchpadEntry(nil), b.rlmScratchpad...),
-		CircuitStatus:      cloneCircuitStatus(b.circuitStatus),
-		Experiment:         b.experiment,
-		ExperimentStatus:   b.experimentStatus,
-		ExperimentVariants: cloneAndSortVariants(b.experimentVariants),
 	}
 }
 
@@ -496,42 +549,61 @@ func (b *SimpleTelemetryBridge) handleEvent(event telemetry.Event) {
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	state.Batch(func() {
+		b.pruneExpiredTouches()
+		switch event.Type {
+		case telemetry.EventTaskStarted:
+			name := event.TaskID
+			if data, ok := event.Data["name"].(string); ok {
+				name = data
+			}
+			setSignal(b.signals.CurrentTask, name)
+			setSignal(b.signals.TaskProgress, 0)
+			updated := append([]buckleywidgets.PlanTask(nil), getSignal(b.signals.PlanTasks)...)
+			updated = updateTaskStatus(updated, event.TaskID, buckleywidgets.TaskInProgress)
+			setSignal(b.signals.PlanTasks, updated)
 
-	b.pruneExpiredTouches()
+		case telemetry.EventTaskCompleted:
+			setSignal(b.signals.TaskProgress, 100)
+			updated := append([]buckleywidgets.PlanTask(nil), getSignal(b.signals.PlanTasks)...)
+			updated = updateTaskStatus(updated, event.TaskID, buckleywidgets.TaskCompleted)
+			setSignal(b.signals.PlanTasks, updated)
 
-	switch event.Type {
-	case telemetry.EventTaskStarted:
-		name := event.TaskID
-		if data, ok := event.Data["name"].(string); ok {
-			name = data
+		case telemetry.EventTaskFailed:
+			setSignal(b.signals.TaskProgress, 100)
+			updated := append([]buckleywidgets.PlanTask(nil), getSignal(b.signals.PlanTasks)...)
+			updated = updateTaskStatus(updated, event.TaskID, buckleywidgets.TaskFailed)
+			setSignal(b.signals.PlanTasks, updated)
+
+		case telemetry.EventPlanCreated, telemetry.EventPlanUpdated:
+			b.handlePlanUpdate(event)
+
+		case telemetry.EventEditorInline, telemetry.EventEditorPropose, telemetry.EventEditorApply:
+			b.handleRecentFiles(event)
+
+		case telemetry.EventToolStarted:
+			b.handleToolStarted(event)
+			b.handleTouchStarted(event)
+			b.handleRecentFiles(event)
+		case telemetry.EventToolCompleted, telemetry.EventToolFailed:
+			b.handleToolFinished(event)
+			b.handleTouchFinished(event)
+			b.handleRecentFiles(event)
+
+		case telemetry.EventRLMIteration:
+			b.handleRLMIteration(event)
+		case telemetry.EventCircuitFailure:
+			b.handleCircuitFailure(event)
+		case telemetry.EventCircuitStateChange:
+			b.handleCircuitStateChange(event)
+		case telemetry.EventExperimentStarted:
+			b.handleExperimentStarted(event)
+		case telemetry.EventExperimentCompleted, telemetry.EventExperimentFailed:
+			b.handleExperimentFinished(event)
+		case telemetry.EventExperimentVariantStarted, telemetry.EventExperimentVariantCompleted, telemetry.EventExperimentVariantFailed:
+			b.handleExperimentVariant(event)
 		}
-		b.currentTask = name
-		b.taskProgress = 0
-		b.planTasks = updateTaskStatus(b.planTasks, event.TaskID, buckleywidgets.TaskInProgress)
-
-	case telemetry.EventTaskCompleted:
-		b.taskProgress = 100
-		b.planTasks = updateTaskStatus(b.planTasks, event.TaskID, buckleywidgets.TaskCompleted)
-
-	case telemetry.EventTaskFailed:
-		b.taskProgress = 100
-		b.planTasks = updateTaskStatus(b.planTasks, event.TaskID, buckleywidgets.TaskFailed)
-
-	case telemetry.EventPlanCreated, telemetry.EventPlanUpdated:
-		b.handlePlanUpdate(event)
-
-	case telemetry.EventToolStarted:
-		b.handleToolStarted(event)
-	case telemetry.EventToolCompleted, telemetry.EventToolFailed:
-		b.handleToolFinished(event)
-
-	case telemetry.EventRLMIteration:
-		b.handleRLMIteration(event)
-	case telemetry.EventCircuitFailure:
-		b.handleCircuitFailure(event)
-	case telemetry.EventCircuitStateChange:
-		b.handleCircuitStateChange(event)
-	}
+	})
 }
 
 func (b *SimpleTelemetryBridge) handlePlanUpdate(event telemetry.Event) {
@@ -556,7 +628,7 @@ func (b *SimpleTelemetryBridge) handlePlanUpdate(event telemetry.Event) {
 				updated = append(updated, pt)
 			}
 		}
-		b.planTasks = updated
+		setSignal(b.signals.PlanTasks, updated)
 	}
 }
 
@@ -568,7 +640,9 @@ func (b *SimpleTelemetryBridge) handleToolStarted(event telemetry.Event) {
 	}
 	if toolName != "" && event.TaskID != "" {
 		tool := buckleywidgets.RunningTool{ID: event.TaskID, Name: toolName, Command: desc}
-		b.runningTools = upsertRunningTool(b.runningTools, tool)
+		tools := append([]buckleywidgets.RunningTool(nil), getSignal(b.signals.RunningTools)...)
+		tools = upsertRunningTool(tools, tool)
+		setSignal(b.signals.RunningTools, tools)
 	}
 	if toolName != "" || desc != "" {
 		entry := buckleywidgets.ToolHistoryEntry{
@@ -577,10 +651,12 @@ func (b *SimpleTelemetryBridge) handleToolStarted(event telemetry.Event) {
 			Detail: truncate(desc, 40),
 			When:   event.Timestamp,
 		}
-		b.toolHistory = append(b.toolHistory, entry)
-		if len(b.toolHistory) > maxToolHistoryEntries {
-			b.toolHistory = b.toolHistory[len(b.toolHistory)-maxToolHistoryEntries:]
+		history := append([]buckleywidgets.ToolHistoryEntry(nil), getSignal(b.signals.ToolHistory)...)
+		history = append(history, entry)
+		if len(history) > maxToolHistoryEntries {
+			history = history[len(history)-maxToolHistoryEntries:]
 		}
+		setSignal(b.signals.ToolHistory, history)
 	}
 }
 
@@ -590,63 +666,239 @@ func (b *SimpleTelemetryBridge) handleToolFinished(event telemetry.Event) {
 		status = "failed"
 	}
 	if event.TaskID != "" {
-		if tool, ok := findRunningTool(b.runningTools, event.TaskID); ok {
+		tools := append([]buckleywidgets.RunningTool(nil), getSignal(b.signals.RunningTools)...)
+		if tool, ok := findRunningTool(tools, event.TaskID); ok {
 			entry := buckleywidgets.ToolHistoryEntry{
 				Name:   firstNonEmpty(tool.Name, "tool"),
 				Status: status,
 				Detail: truncate(tool.Command, 40),
 				When:   event.Timestamp,
 			}
-			b.toolHistory = append(b.toolHistory, entry)
-			if len(b.toolHistory) > maxToolHistoryEntries {
-				b.toolHistory = b.toolHistory[len(b.toolHistory)-maxToolHistoryEntries:]
+			history := append([]buckleywidgets.ToolHistoryEntry(nil), getSignal(b.signals.ToolHistory)...)
+			history = append(history, entry)
+			if len(history) > maxToolHistoryEntries {
+				history = history[len(history)-maxToolHistoryEntries:]
 			}
+			setSignal(b.signals.ToolHistory, history)
 		}
-		b.runningTools = removeRunningTool(b.runningTools, event.TaskID)
+		tools = removeRunningTool(tools, event.TaskID)
+		setSignal(b.signals.RunningTools, tools)
+	}
+}
+
+func (b *SimpleTelemetryBridge) handleRecentFiles(event telemetry.Event) {
+	paths := extractPaths(event.Data)
+	if len(paths) == 0 {
+		return
+	}
+	current := getSignal(b.signals.RecentFiles)
+	updated := updateRecentFiles(current, paths)
+	setSignal(b.signals.RecentFiles, updated)
+}
+
+func (b *SimpleTelemetryBridge) handleTouchStarted(event telemetry.Event) {
+	if b == nil {
+		return
+	}
+	summary, expiresAt := touchSummaryFromEvent(event)
+	if strings.TrimSpace(summary.Path) == "" {
+		return
+	}
+	if expiresAt.IsZero() && summary.Operation != "" {
+		expiresAt = event.Timestamp.Add(touch.TTLForOperation(summary.Operation))
+	}
+	id := strings.TrimSpace(event.TaskID)
+	if id == "" {
+		id = summary.Path + ":" + summary.Operation
+	}
+	entry := touchEntry{
+		id:        id,
+		summary:   summary,
+		expiresAt: expiresAt,
+		startedAt: event.Timestamp,
+	}
+	updated := false
+	for i := range b.touchEntries {
+		if b.touchEntries[i].id == id {
+			b.touchEntries[i] = entry
+			updated = true
+			break
+		}
+	}
+	if !updated {
+		b.touchEntries = append(b.touchEntries, entry)
+	}
+	if len(b.touchEntries) > maxTouchEntries {
+		sort.Slice(b.touchEntries, func(i, j int) bool {
+			return b.touchEntries[i].startedAt.After(b.touchEntries[j].startedAt)
+		})
+		b.touchEntries = b.touchEntries[:maxTouchEntries]
+	}
+	setSignal(b.signals.ActiveTouches, summarizeTouches(b.touchEntries, time.Now()))
+}
+
+func (b *SimpleTelemetryBridge) handleTouchFinished(event telemetry.Event) {
+	if b == nil || strings.TrimSpace(event.TaskID) == "" {
+		return
+	}
+	updated := make([]touchEntry, 0, len(b.touchEntries))
+	for _, entry := range b.touchEntries {
+		if entry.id != event.TaskID {
+			updated = append(updated, entry)
+		}
+	}
+	b.touchEntries = updated
+	setSignal(b.signals.ActiveTouches, summarizeTouches(updated, time.Now()))
+}
+
+func (b *SimpleTelemetryBridge) handleExperimentStarted(event telemetry.Event) {
+	name := firstNonEmpty(getString(event.Data, "name"), getString(event.Data, "experiment"))
+	status := experimentStatusForEvent(event)
+	variants := parseExperimentVariants(event.Data["variants"], "pending")
+	setSignal(b.signals.Experiment, name)
+	if status != "" {
+		setSignal(b.signals.ExperimentStatus, status)
+	}
+	setSignal(b.signals.ExperimentVariants, cloneAndSortVariants(variants))
+}
+
+func (b *SimpleTelemetryBridge) handleExperimentFinished(event telemetry.Event) {
+	name := firstNonEmpty(getString(event.Data, "name"), getString(event.Data, "experiment"))
+	status := experimentStatusForEvent(event)
+	if name != "" {
+		setSignal(b.signals.Experiment, name)
+	}
+	if status != "" {
+		setSignal(b.signals.ExperimentStatus, status)
+	}
+}
+
+func (b *SimpleTelemetryBridge) handleExperimentVariant(event telemetry.Event) {
+	data := event.Data
+	name := firstNonEmpty(getString(data, "experiment"), getString(data, "name"))
+	if name != "" {
+		setSignal(b.signals.Experiment, name)
+	}
+	current := append([]buckleywidgets.ExperimentVariant(nil), getSignal(b.signals.ExperimentVariants)...)
+	status := variantStatusForEvent(event)
+	update := experimentVariantFromMap(data, status)
+	duration, hasDuration := getNumber(data, "duration_ms")
+	cost, hasCost := getFloat(data, "total_cost")
+	prompt, hasPrompt := getNumber(data, "prompt_tokens")
+	completion, hasCompletion := getNumber(data, "completion_tokens")
+	if update.ID == "" && update.Name == "" && update.ModelID == "" {
+		return
+	}
+	updated := false
+	for i := range current {
+		matchID := update.ID != "" && current[i].ID == update.ID
+		matchName := update.Name != "" && current[i].Name == update.Name
+		matchModel := update.ModelID != "" && current[i].ModelID == update.ModelID
+		if matchID || matchName || matchModel {
+			if update.ID != "" {
+				current[i].ID = update.ID
+			}
+			if update.Name != "" {
+				current[i].Name = update.Name
+			}
+			if update.ModelID != "" {
+				current[i].ModelID = update.ModelID
+			}
+			if update.Status != "" {
+				current[i].Status = update.Status
+			}
+			if hasDuration {
+				current[i].DurationMs = duration
+			}
+			if hasCost {
+				current[i].TotalCost = cost
+			}
+			if hasPrompt {
+				current[i].PromptTokens = prompt
+			}
+			if hasCompletion {
+				current[i].CompletionTokens = completion
+			}
+			updated = true
+			break
+		}
+	}
+	if !updated {
+		if hasDuration {
+			update.DurationMs = duration
+		}
+		if hasCost {
+			update.TotalCost = cost
+		}
+		if hasPrompt {
+			update.PromptTokens = prompt
+		}
+		if hasCompletion {
+			update.CompletionTokens = completion
+		}
+		current = append(current, update)
+	}
+	setSignal(b.signals.ExperimentVariants, cloneAndSortVariants(current))
+	if status == "running" {
+		currentStatus := strings.TrimSpace(getSignal(b.signals.ExperimentStatus))
+		if currentStatus == "" || currentStatus == "pending" {
+			setSignal(b.signals.ExperimentStatus, status)
+		}
 	}
 }
 
 func (b *SimpleTelemetryBridge) handleRLMIteration(event telemetry.Event) {
-	b.rlmStatus = &buckleywidgets.RLMStatus{
+	status := &buckleywidgets.RLMStatus{
 		Iteration:     getInt(event.Data, "iteration"),
 		MaxIterations: getInt(event.Data, "max_iterations"),
 		TokensUsed:    getInt(event.Data, "tokens_used"),
 		Summary:       getString(event.Data, "summary"),
 	}
 	if ready, ok := getBool(event.Data, "ready"); ok {
-		b.rlmStatus.Ready = ready
+		status.Ready = ready
 	}
-	b.rlmScratchpad = parseRLMScratchpadEntries(event.Data["scratchpad"])
-	if len(b.rlmScratchpad) > maxRLMScratchpadEntries {
-		b.rlmScratchpad = b.rlmScratchpad[:maxRLMScratchpadEntries]
+	scratchpad := parseRLMScratchpadEntries(event.Data["scratchpad"])
+	if len(scratchpad) > maxRLMScratchpadEntries {
+		scratchpad = scratchpad[:maxRLMScratchpadEntries]
 	}
+	setSignal(b.signals.RLMStatus, status)
+	setSignal(b.signals.RLMScratchpad, scratchpad)
 }
 
 func (b *SimpleTelemetryBridge) handleCircuitFailure(event telemetry.Event) {
-	if b.circuitStatus == nil {
-		b.circuitStatus = &buckleywidgets.CircuitStatus{
-			State:       "Closed",
-			MaxFailures: getInt(event.Data, "max_failures"),
-		}
+	current := getSignal(b.signals.CircuitStatus)
+	next := &buckleywidgets.CircuitStatus{}
+	if current != nil {
+		*next = *current
 	}
-	b.circuitStatus.ConsecutiveFailures = getInt(event.Data, "consecutive_num")
-	b.circuitStatus.LastError = getString(event.Data, "error")
+	if next.State == "" {
+		next.State = "Closed"
+	}
+	if maxFailures := getInt(event.Data, "max_failures"); maxFailures > 0 {
+		next.MaxFailures = maxFailures
+	}
+	next.ConsecutiveFailures = getInt(event.Data, "consecutive_num")
+	next.LastError = getString(event.Data, "error")
 	if willOpen, ok := getBool(event.Data, "will_open"); ok && willOpen {
-		b.circuitStatus.State = "Open"
+		next.State = "Open"
 	}
+	setSignal(b.signals.CircuitStatus, next)
 }
 
 func (b *SimpleTelemetryBridge) handleCircuitStateChange(event telemetry.Event) {
 	toState := getString(event.Data, "to")
-	if b.circuitStatus == nil {
-		b.circuitStatus = &buckleywidgets.CircuitStatus{}
+	current := getSignal(b.signals.CircuitStatus)
+	next := &buckleywidgets.CircuitStatus{}
+	if current != nil {
+		*next = *current
 	}
-	b.circuitStatus.State = toState
-	b.circuitStatus.LastError = getString(event.Data, "last_error")
+	next.State = toState
+	next.LastError = getString(event.Data, "last_error")
 	if toState == "Closed" {
-		b.circuitStatus.ConsecutiveFailures = 0
-		b.circuitStatus.LastError = ""
+		next.ConsecutiveFailures = 0
+		next.LastError = ""
 	}
+	setSignal(b.signals.CircuitStatus, next)
 }
 
 func (b *SimpleTelemetryBridge) pruneExpiredTouches() {
@@ -662,6 +914,7 @@ func (b *SimpleTelemetryBridge) pruneExpiredTouches() {
 		alive = append(alive, entry)
 	}
 	b.touchEntries = alive
+	setSignal(b.signals.ActiveTouches, summarizeTouches(alive, now))
 }
 
 // SetPlanTasks allows external code to set plan tasks directly.
@@ -670,7 +923,6 @@ func (b *SimpleTelemetryBridge) SetPlanTasks(tasks []buckleywidgets.PlanTask) {
 		return
 	}
 	b.mu.Lock()
-	b.planTasks = tasks
-	b.mu.Unlock()
-	b.postSnapshot()
+	defer b.mu.Unlock()
+	setSignal(b.signals.PlanTasks, tasks)
 }

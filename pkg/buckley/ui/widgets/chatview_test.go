@@ -441,9 +441,9 @@ func TestChatView_Render_WithScrollbar(t *testing.T) {
 	cv.Render(ctx)
 
 	// Check for scrollbar character on the right edge
-	// Either thumb '█' or track '░'
+	// Either thumb '#' or track '|'
 	cell := buf.Get(39, 2)
-	if cell.Rune != '█' && cell.Rune != '░' {
+	if cell.Rune != '#' && cell.Rune != '|' {
 		// Scrollbar might not be visible depending on scroll position
 		// This is fine - the test confirms no panic
 	}

@@ -91,14 +91,16 @@ func TestSnapshot_StatusBar(t *testing.T) {
 	status := state.NewSignal("Ready")
 	tokens := state.NewSignal(5000)
 	cost := state.NewSignal(0.25)
+	effects := state.NewSignal(false)
 
 	s := NewStatusBar(StatusBarConfig{
-		StatusText: status,
-		Tokens:     tokens,
-		CostCents:  cost,
-		BGStyle:    backend.DefaultStyle(),
-		TextStyle:  backend.DefaultStyle(),
-		ModeStyle:  backend.DefaultStyle(),
+		StatusText:     status,
+		Tokens:         tokens,
+		CostCents:      cost,
+		EffectsEnabled: effects,
+		BGStyle:        backend.DefaultStyle(),
+		TextStyle:      backend.DefaultStyle(),
+		ModeStyle:      backend.DefaultStyle(),
 	})
 
 	output := renderSnapshot(s, 80, 1)

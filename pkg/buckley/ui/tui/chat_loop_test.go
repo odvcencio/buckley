@@ -199,17 +199,18 @@ func (r *recordingApp) ShowThinkingIndicator()                      {}
 func (r *recordingApp) RemoveThinkingIndicator()                    {}
 func (r *recordingApp) AppendReasoning(text string)                 {}
 func (r *recordingApp) CollapseReasoning(preview, full string)      {}
+func (r *recordingApp) ShowSettings()                               {}
 
 func (r *recordingApp) ShowModelPicker(items []uiwidgets.PaletteItem, onSelect func(uiwidgets.PaletteItem)) {
 }
 func (r *recordingApp) ShowApproval(request buckleywidgets.ApprovalRequest) {}
 func (r *recordingApp) SetCallbacks(onSubmit func(string), onFileSelect func(string), onShellCmd func(string) string) {
 }
-func (r *recordingApp) SetSessionCallbacks(onNext, onPrev func())         {}
-func (r *recordingApp) SetProgress(items []progress.Progress)             {}
-func (r *recordingApp) SetSidebarState(state buckleywidgets.SidebarState) {}
-func (r *recordingApp) SetToasts(toasts []*toast.Toast)                   {}
-func (r *recordingApp) SetToastDismissHandler(onDismiss func(string))     {}
+func (r *recordingApp) SetSessionCallbacks(onNext, onPrev func())     {}
+func (r *recordingApp) SetProgress(items []progress.Progress)         {}
+func (r *recordingApp) SetToasts(toasts []*toast.Toast)               {}
+func (r *recordingApp) SetToastDismissHandler(onDismiss func(string)) {}
+func (r *recordingApp) SidebarSignals() SidebarSignals                { return SidebarSignals{} }
 
 func (r *recordingApp) SetDiagnostics(collector *diagnostics.Collector) {}
 

@@ -133,8 +133,7 @@ func TestRunnerOverlayPopFromWidgetCommand(t *testing.T) {
 
 	type overlaySnapshot struct {
 		layerCount int
-		stackLen   int
-		depth      int
+		keymapOn   bool
 		popOK      bool
 		popHandled bool
 	}
@@ -151,8 +150,7 @@ func TestRunnerOverlayPopFromWidgetCommand(t *testing.T) {
 		}
 		afterPush = overlaySnapshot{
 			layerCount: screen.LayerCount(),
-			stackLen:   len(runner.overlayStack),
-			depth:      runner.overlayDepth,
+			keymapOn:   runner.overlayKeymapActive,
 		}
 
 		afterPop.popOK = screen.PopLayer()
@@ -160,8 +158,7 @@ func TestRunnerOverlayPopFromWidgetCommand(t *testing.T) {
 
 		afterFinal.popHandled = runner.handleCommand(runtime.PopOverlay{})
 		afterFinal.layerCount = screen.LayerCount()
-		afterFinal.stackLen = len(runner.overlayStack)
-		afterFinal.depth = runner.overlayDepth
+		afterFinal.keymapOn = runner.overlayKeymapActive
 		return nil
 	})
 	if callErr != nil {
@@ -171,11 +168,8 @@ func TestRunnerOverlayPopFromWidgetCommand(t *testing.T) {
 	if afterPush.layerCount != 2 {
 		t.Fatalf("expected 2 layers after push, got %d", afterPush.layerCount)
 	}
-	if afterPush.stackLen != 1 {
-		t.Fatalf("expected overlay stack size 1, got %d", afterPush.stackLen)
-	}
-	if afterPush.depth != 1 {
-		t.Fatalf("expected overlay depth 1, got %d", afterPush.depth)
+	if !afterPush.keymapOn {
+		t.Fatalf("expected overlay keymap to be active after push")
 	}
 
 	if !afterPop.popOK {
@@ -188,11 +182,8 @@ func TestRunnerOverlayPopFromWidgetCommand(t *testing.T) {
 	if !afterFinal.popHandled {
 		t.Fatal("expected pop overlay command to be handled")
 	}
-	if afterFinal.stackLen != 0 {
-		t.Fatalf("expected overlay stack size 0, got %d", afterFinal.stackLen)
-	}
-	if afterFinal.depth != 0 {
-		t.Fatalf("expected overlay depth 0, got %d", afterFinal.depth)
+	if afterFinal.keymapOn {
+		t.Fatalf("expected overlay keymap to be inactive after pop")
 	}
 	if afterFinal.layerCount != 1 {
 		t.Fatalf("expected base layer to remain, got %d", afterFinal.layerCount)
@@ -210,8 +201,7 @@ func TestRunnerOverlayNonModalDoesNotAffectDepth(t *testing.T) {
 
 	type overlaySnapshot struct {
 		layerCount int
-		stackLen   int
-		depth      int
+		keymapOn   bool
 		popOK      bool
 		popHandled bool
 	}
@@ -228,15 +218,13 @@ func TestRunnerOverlayNonModalDoesNotAffectDepth(t *testing.T) {
 		}
 		afterPush = overlaySnapshot{
 			layerCount: screen.LayerCount(),
-			stackLen:   len(runner.overlayStack),
-			depth:      runner.overlayDepth,
+			keymapOn:   runner.overlayKeymapActive,
 		}
 
 		afterFinal.popOK = screen.PopLayer()
 		afterFinal.popHandled = runner.handleCommand(runtime.PopOverlay{})
 		afterFinal.layerCount = screen.LayerCount()
-		afterFinal.stackLen = len(runner.overlayStack)
-		afterFinal.depth = runner.overlayDepth
+		afterFinal.keymapOn = runner.overlayKeymapActive
 		return nil
 	})
 	if callErr != nil {
@@ -246,11 +234,8 @@ func TestRunnerOverlayNonModalDoesNotAffectDepth(t *testing.T) {
 	if afterPush.layerCount != 2 {
 		t.Fatalf("expected 2 layers after push, got %d", afterPush.layerCount)
 	}
-	if afterPush.stackLen != 1 {
-		t.Fatalf("expected overlay stack size 1, got %d", afterPush.stackLen)
-	}
-	if afterPush.depth != 0 {
-		t.Fatalf("expected overlay depth 0 for non-modal, got %d", afterPush.depth)
+	if afterPush.keymapOn {
+		t.Fatalf("expected overlay keymap to remain inactive for non-modal")
 	}
 
 	if !afterFinal.popOK {
@@ -259,11 +244,8 @@ func TestRunnerOverlayNonModalDoesNotAffectDepth(t *testing.T) {
 	if !afterFinal.popHandled {
 		t.Fatal("expected pop overlay command to be handled")
 	}
-	if afterFinal.stackLen != 0 {
-		t.Fatalf("expected overlay stack size 0, got %d", afterFinal.stackLen)
-	}
-	if afterFinal.depth != 0 {
-		t.Fatalf("expected overlay depth 0 after pop, got %d", afterFinal.depth)
+	if afterFinal.keymapOn {
+		t.Fatalf("expected overlay keymap to remain inactive after pop")
 	}
 }
 
@@ -650,14 +632,31 @@ func startRunnerApp(t *testing.T, runner *Runner) func() {
 		_ = runner.app.Run(ctx)
 		close(done)
 	}()
-	deadline := time.Now().Add(200 * time.Millisecond)
-	for runner.app.Screen() == nil {
-		if time.Now().After(deadline) {
-			cancel()
-			<-done
-			t.Fatal("timed out waiting for app screen")
+	// Wait for app to initialize using Call() which serializes with the event loop.
+	// This avoids racing with Run() on the screen field.
+	ready := make(chan struct{})
+	go func() {
+		deadline := time.Now().Add(200 * time.Millisecond)
+		for time.Now().Before(deadline) {
+			err := runner.app.Call(ctx, func(app *runtime.App) error {
+				if app.Screen() != nil {
+					return nil
+				}
+				return context.DeadlineExceeded
+			})
+			if err == nil {
+				close(ready)
+				return
+			}
+			time.Sleep(5 * time.Millisecond)
 		}
-		time.Sleep(5 * time.Millisecond)
+	}()
+	select {
+	case <-ready:
+	case <-time.After(250 * time.Millisecond):
+		cancel()
+		<-done
+		t.Fatal("timed out waiting for app screen")
 	}
 	return func() {
 		cancel()

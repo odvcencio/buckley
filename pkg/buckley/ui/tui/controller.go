@@ -41,7 +41,6 @@ import (
 	"github.com/odvcencio/buckley/pkg/tool"
 	"github.com/odvcencio/buckley/pkg/tool/builtin"
 	"github.com/odvcencio/fluffyui/progress"
-	"github.com/odvcencio/fluffyui/theme"
 	"github.com/odvcencio/fluffyui/toast"
 	"github.com/odvcencio/fluffyui/widgets"
 	"gopkg.in/yaml.v3"
@@ -265,6 +264,7 @@ func NewController(cfg ControllerConfig) (*Controller, error) {
 		if s.ProjectPath == workDir && s.Status == storage.SessionStatusActive {
 			sess, err := newSessionState(ctrlCtx, cfg.Config, cfg.Store, workDir, cfg.Telemetry, cfg.ModelManager, s.ID, true, progressMgr, toastMgr)
 			if err != nil {
+				ctrlCancel()
 				return nil, err
 			}
 			projectSessions = append(projectSessions, sess)
@@ -293,10 +293,12 @@ func NewController(cfg ControllerConfig) (*Controller, error) {
 				Status:      storage.SessionStatusActive,
 			}
 			if err := cfg.Store.CreateSession(sess); err != nil {
+				ctrlCancel()
 				return nil, fmt.Errorf("create session: %w", err)
 			}
 			sessState, err := newSessionState(ctrlCtx, cfg.Config, cfg.Store, workDir, cfg.Telemetry, cfg.ModelManager, sessionID, false, progressMgr, toastMgr)
 			if err != nil {
+				ctrlCancel()
 				return nil, err
 			}
 			projectSessions = []*SessionState{sessState}
@@ -321,10 +323,12 @@ func NewController(cfg ControllerConfig) (*Controller, error) {
 				Status:      storage.SessionStatusActive,
 			}
 			if err := cfg.Store.CreateSession(sess); err != nil {
+				ctrlCancel()
 				return nil, fmt.Errorf("create session: %w", err)
 			}
 			sessState, err := newSessionState(ctrlCtx, cfg.Config, cfg.Store, workDir, cfg.Telemetry, cfg.ModelManager, sessionID, false, progressMgr, toastMgr)
 			if err != nil {
+				ctrlCancel()
 				return nil, err
 			}
 			projectSessions = []*SessionState{sessState}
@@ -346,6 +350,14 @@ func NewController(cfg ControllerConfig) (*Controller, error) {
 	sidebarWidth := 0
 	sidebarMinWidth := 0
 	sidebarMaxWidth := 0
+	uiSettings := UISettings{
+		ThemeName:       "dark",
+		StylesheetPath:  "",
+		MessageMetadata: "",
+		HighContrast:    false,
+		ReduceMotion:    false,
+		EffectsEnabled:  true,
+	}
 	if cfg.Config != nil {
 		webBaseURL = resolveWebBaseURL(cfg.Config)
 		metadataMode = cfg.Config.UI.MessageMetadata
@@ -360,33 +372,72 @@ func NewController(cfg ControllerConfig) (*Controller, error) {
 		sidebarWidth = cfg.Config.UI.SidebarWidth
 		sidebarMinWidth = cfg.Config.UI.SidebarMinWidth
 		sidebarMaxWidth = cfg.Config.UI.SidebarMaxWidth
+		uiSettings.MessageMetadata = metadataMode
+		uiSettings.HighContrast = cfg.Config.UI.HighContrast
+		uiSettings.ReduceMotion = cfg.Config.UI.ReduceAnimation
 	}
+	if cfg.Store != nil {
+		loaded, err := cfg.Store.GetSettings([]string{
+			uiThemeSettingKey,
+			uiStylesheetSettingKey,
+			uiMetadataSettingKey,
+			uiHighContrastSettingKey,
+			uiReduceMotionSettingKey,
+			uiEffectsSettingKey,
+		})
+		if err == nil {
+			if value := strings.TrimSpace(loaded[uiThemeSettingKey]); value != "" {
+				uiSettings.ThemeName = value
+			}
+			if value := strings.TrimSpace(loaded[uiStylesheetSettingKey]); value != "" {
+				uiSettings.StylesheetPath = value
+			}
+			if value := strings.TrimSpace(loaded[uiMetadataSettingKey]); value != "" {
+				uiSettings.MessageMetadata = value
+			}
+			uiSettings.HighContrast = parseSettingBool(loaded[uiHighContrastSettingKey], uiSettings.HighContrast)
+			uiSettings.ReduceMotion = parseSettingBool(loaded[uiReduceMotionSettingKey], uiSettings.ReduceMotion)
+			uiSettings.EffectsEnabled = parseSettingBool(loaded[uiEffectsSettingKey], uiSettings.EffectsEnabled)
+		}
+	}
+	uiSettings = uiSettings.Normalized()
+	th := resolveTheme(uiSettings)
 	// Use fluffyui-native Runner by default (simpler, more maintainable)
 	var app App
 	var ctrl *Controller
 	app, err = NewRunner(RunnerConfig{
-		Theme:           theme.DefaultTheme(),
-		ModelName:       cfg.Config.Models.Execution,
-		SessionID:       currentSessionID,
-		WorkDir:         workDir,
-		ProjectRoot:     projectRoot,
-		ReduceMotion:    cfg.Config != nil && cfg.Config.UI.ReduceAnimation,
-		HighContrast:    cfg.Config != nil && cfg.Config.UI.HighContrast,
-		UseTextLabels:   cfg.Config != nil && cfg.Config.UI.UseTextLabels,
-		MessageMetadata: metadataMode,
-		WebBaseURL:      webBaseURL,
-		Audio:           audioCfg,
-		AgentSocket:     cfg.AgentSocket,
-		SidebarWidth:    sidebarWidth,
-		SidebarMinWidth: sidebarMinWidth,
-		SidebarMaxWidth: sidebarMaxWidth,
+		Theme:             th,
+		ThemeName:         uiSettings.ThemeName,
+		StylesheetPath:    uiSettings.StylesheetPath,
+		ModelName:         cfg.Config.Models.Execution,
+		SessionID:         currentSessionID,
+		WorkDir:           workDir,
+		ProjectRoot:       projectRoot,
+		ReduceMotion:      uiSettings.ReduceMotion,
+		HighContrast:      uiSettings.HighContrast,
+		EffectsEnabled:    uiSettings.EffectsEnabled,
+		EffectsEnabledSet: true,
+		UseTextLabels:     cfg.Config != nil && cfg.Config.UI.UseTextLabels,
+		MessageMetadata:   uiSettings.MessageMetadata,
+		WebBaseURL:        webBaseURL,
+		Audio:             audioCfg,
+		AgentSocket:       cfg.AgentSocket,
+		SidebarWidth:      sidebarWidth,
+		SidebarMinWidth:   sidebarMinWidth,
+		SidebarMaxWidth:   sidebarMaxWidth,
 		OnApproval: func(requestID string, approved, alwaysAllow bool) {
 			if ctrl != nil {
 				ctrl.handleApprovalDecision(requestID, approved, alwaysAllow)
 			}
 		},
+		OnSettings: func(settings UISettings) {
+			if ctrl != nil {
+				ctrl.handleSettingsUpdate(settings)
+			}
+		},
 	})
 	if err != nil {
+		ctrlCancel()
 		return nil, fmt.Errorf("create TUI app: %w", err)
 	}
 
@@ -462,7 +513,7 @@ func NewController(cfg ControllerConfig) (*Controller, error) {
 	// Create telemetry bridge for sidebar updates
 	if cfg.Telemetry != nil {
 		// Runner uses the simpler bridge without scheduler dependency
-		ctrl.telemetryBridge = NewSimpleTelemetryBridge(cfg.Telemetry, app)
+		ctrl.telemetryBridge = NewSimpleTelemetryBridge(cfg.Telemetry, app.SidebarSignals())
 
 		// Create and subscribe diagnostics collector
 		ctrl.diagnostics = diagnostics.NewCollector()
@@ -722,6 +773,7 @@ func (c *Controller) handleCommand(text string) {
   /skill [name|list]   - List or activate a skill
   /context             - Show context budget details
   /search [query]      - Search conversation history
+  /settings            - Edit UI settings
   /export [options]    - Export current session
   /import [file]       - Import conversation file
   /review              - Review current git diff
@@ -749,6 +801,9 @@ Shortcuts: Alt+Right (next), Alt+Left (prev), Ctrl+F (search)`, "system")
 	case "/search":
 		c.handleSearchCommand(args)
 
+	case "/settings":
+		c.app.ShowSettings()
+
 	case "/export":
 		c.handleExportCommand(args)
 
@@ -773,6 +828,19 @@ func (c *Controller) showModelPickerLocked() {
 		}
 		c.setExecutionModel(modelID)
 	})
+}
+
+func (c *Controller) handleSettingsUpdate(settings UISettings) {
+	if c == nil || c.store == nil {
+		return
+	}
+	settings = settings.Normalized()
+	_ = c.store.SetSetting(uiThemeSettingKey, settings.ThemeName)
+	_ = c.store.SetSetting(uiStylesheetSettingKey, settings.StylesheetPath)
+	_ = c.store.SetSetting(uiMetadataSettingKey, settings.MessageMetadata)
+	_ = c.store.SetSetting(uiHighContrastSettingKey, boolSettingValue(settings.HighContrast))
+	_ = c.store.SetSetting(uiReduceMotionSettingKey, boolSettingValue(settings.ReduceMotion))
+	_ = c.store.SetSetting(uiEffectsSettingKey, boolSettingValue(settings.EffectsEnabled))
 }
 
 func (c *Controller) showModelPicker() {

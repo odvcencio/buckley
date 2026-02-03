@@ -3,9 +3,13 @@ package widgets
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/odvcencio/fluffyui/accessibility"
+	"github.com/odvcencio/fluffyui/animation"
 	"github.com/odvcencio/fluffyui/backend"
+	"github.com/odvcencio/fluffyui/effects"
+	"github.com/odvcencio/fluffyui/graphics"
 	"github.com/odvcencio/fluffyui/progress"
 	"github.com/odvcencio/fluffyui/runtime"
 	"github.com/odvcencio/fluffyui/state"
@@ -27,10 +31,20 @@ type StatusBar struct {
 	scrollPos      state.Readable[string]
 	progressItems  state.Readable[[]progress.Progress]
 	isStreaming    state.Readable[bool]
+	effectsEnabled state.Readable[bool]
+	reduceMotion   state.Readable[bool]
 
 	bgStyle   backend.Style
 	textStyle backend.Style
 	modeStyle backend.Style
+
+	animator      *animation.Animator
+	shimmerPhase  float64
+	shimmerActive bool
+	shimmerTween  *animation.Tween
+	canvas        *graphics.Canvas
+	canvasW       int
+	canvasH       int
 }
 
 // StatusBarConfig configures the status bar.
@@ -46,6 +60,8 @@ type StatusBarConfig struct {
 	ScrollPos      state.Readable[string]
 	ProgressItems  state.Readable[[]progress.Progress]
 	IsStreaming    state.Readable[bool]
+	EffectsEnabled state.Readable[bool]
+	ReduceMotion   state.Readable[bool]
 
 	BGStyle   backend.Style
 	TextStyle backend.Style
@@ -80,6 +96,8 @@ func NewStatusBar(cfg StatusBarConfig) *StatusBar {
 		scrollPos:      readableOrDefault(cfg.ScrollPos, ""),
 		progressItems:  readableOrDefault(cfg.ProgressItems, []progress.Progress{}),
 		isStreaming:    readableOrDefault(cfg.IsStreaming, false),
+		effectsEnabled: readableOrDefault(cfg.EffectsEnabled, true),
+		reduceMotion:   readableOrDefault(cfg.ReduceMotion, false),
 		bgStyle:        bg,
 		textStyle:      text,
 		modeStyle:      mode,
@@ -89,6 +107,7 @@ func NewStatusBar(cfg StatusBarConfig) *StatusBar {
 // Bind attaches app services and subscriptions.
 func (s *StatusBar) Bind(services runtime.Services) {
 	s.Component.Bind(services)
+	s.animator = s.Services.Animator()
 	s.Subs.Clear()
 	invalidate := func() {
 		if s.Services != (runtime.Services{}) {
@@ -106,11 +125,28 @@ func (s *StatusBar) Bind(services runtime.Services) {
 	s.Observe(s.scrollPos, invalidate)
 	s.Observe(s.progressItems, invalidate)
 	s.Observe(s.isStreaming, invalidate)
+	s.Observe(s.effectsEnabled, s.onMotionChanged)
+	s.Observe(s.reduceMotion, s.onMotionChanged)
+	s.Observe(s.isStreaming, s.onMotionChanged)
+	s.onMotionChanged()
 }
 
 // Unbind releases subscriptions.
 func (s *StatusBar) Unbind() {
 	s.Component.Unbind()
+	s.animator = nil
+	s.stopShimmer()
+}
+
+// SetStyles updates core status bar styles.
+func (s *StatusBar) SetStyles(bg, text, mode backend.Style) {
+	if s == nil {
+		return
+	}
+	s.bgStyle = bg
+	s.textStyle = text
+	s.modeStyle = mode
+	s.Invalidate()
 }
 
 // Measure returns the preferred size.
@@ -124,6 +160,7 @@ func (s *StatusBar) Measure(constraints runtime.Constraints) runtime.Size {
 // Layout positions the status bar.
 func (s *StatusBar) Layout(bounds runtime.Rect) {
 	s.Base.Layout(bounds)
+	s.ensureCanvas(bounds)
 }
 
 // Render draws the status bar.
@@ -135,6 +172,7 @@ func (s *StatusBar) Render(ctx runtime.RenderContext) {
 
 	// Fill background
 	ctx.Buffer.Fill(bounds, ' ', s.bgStyle)
+	s.renderShimmer(ctx)
 
 	status := strings.TrimSpace(s.statusText.Get())
 	if override := strings.TrimSpace(s.statusOverride.Get()); override != "" {
@@ -179,6 +217,111 @@ func (s *StatusBar) Render(ctx runtime.RenderContext) {
 			ctx.Buffer.SetString(center, bounds.Y, scroll, s.textStyle)
 		}
 	}
+}
+
+func (s *StatusBar) renderShimmer(ctx runtime.RenderContext) {
+	if s == nil || !s.shimmerActive || s.canvas == nil {
+		return
+	}
+	bounds := s.Bounds()
+	if bounds.Width <= 0 || bounds.Height <= 0 {
+		return
+	}
+	s.canvas.Clear()
+	color := s.modeStyle.FG()
+	if color == backend.ColorDefault {
+		color = s.textStyle.FG()
+	}
+	if color == backend.ColorDefault {
+		color = backend.ColorRGB(255, 183, 77)
+	}
+	effects.Shimmer(s.canvas, 0, 0, bounds.Width, bounds.Height, s.shimmerPhase, color)
+	s.canvas.Render(ctx.Buffer, bounds.X, bounds.Y)
+}
+
+func (s *StatusBar) ensureCanvas(bounds runtime.Rect) {
+	if s == nil || bounds.Width <= 0 || bounds.Height <= 0 {
+		return
+	}
+	if s.canvas == nil || s.canvasW != bounds.Width || s.canvasH != bounds.Height {
+		s.canvas = graphics.NewCanvasWithBlitter(bounds.Width, bounds.Height, &graphics.HalfBlockBlitter{})
+		s.canvasW = bounds.Width
+		s.canvasH = bounds.Height
+	}
+}
+
+func (s *StatusBar) onMotionChanged() {
+	if s == nil {
+		return
+	}
+	streaming := false
+	if s.isStreaming != nil {
+		streaming = s.isStreaming.Get()
+	}
+	if streaming && s.motionAllowed() {
+		s.startShimmer()
+		return
+	}
+	s.stopShimmer()
+}
+
+func (s *StatusBar) motionAllowed() bool {
+	if s.effectsEnabled != nil && !s.effectsEnabled.Get() {
+		return false
+	}
+	if s.reduceMotion != nil && s.reduceMotion.Get() {
+		return false
+	}
+	return true
+}
+
+func (s *StatusBar) startShimmer() {
+	if s == nil || s.shimmerActive || s.animator == nil {
+		return
+	}
+	s.shimmerActive = true
+	s.shimmerPhase = 0
+	s.queueShimmer()
+}
+
+func (s *StatusBar) stopShimmer() {
+	if s == nil {
+		return
+	}
+	s.shimmerActive = false
+	if s.shimmerTween != nil {
+		s.shimmerTween.Stop()
+		s.shimmerTween = nil
+	}
+	s.shimmerPhase = 0
+}
+
+func (s *StatusBar) queueShimmer() {
+	if s == nil || !s.shimmerActive || s.animator == nil {
+		return
+	}
+	s.shimmerTween = s.animator.Animate(
+		s,
+		"statusbar.shimmer",
+		func() animation.Animatable {
+			return animation.Float64(s.shimmerPhase)
+		},
+		func(value animation.Animatable) {
+			s.shimmerPhase = float64(value.(animation.Float64))
+			s.Invalidate()
+		},
+		animation.Float64(1),
+		animation.TweenConfig{
+			Duration: 1100 * time.Millisecond,
+			Easing:   animation.Linear,
+			OnComplete: func() {
+				if s.shimmerActive {
+					s.shimmerPhase = 0
+					s.queueShimmer()
+				}
+			},
+		},
+	)
 }
 
 func joinRightSegments(ctxSegment, tokenSegment string, bounds runtime.Rect, left string) string {

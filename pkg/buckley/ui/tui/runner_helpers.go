@@ -5,10 +5,12 @@ package tui
 
 import (
 	"strconv"
+	"time"
 
 	buckleywidgets "github.com/odvcencio/buckley/pkg/buckley/ui/widgets"
 	"github.com/odvcencio/fluffyui/backend"
 	"github.com/odvcencio/fluffyui/runtime"
+	"github.com/odvcencio/fluffyui/state"
 	uiwidgets "github.com/odvcencio/fluffyui/widgets"
 )
 
@@ -33,8 +35,11 @@ func (r *Runner) showFilePicker() {
 			r.styleCache.Get(r.theme.TextPrimary),
 		)
 	}
+	overlay := r.wrapModalOverlay(widget, func() {
+		r.filePicker.Deactivate()
+	})
 	r.app.ExecuteCommand(runtime.PushOverlay{
-		Widget: widget,
+		Widget: overlay,
 		Modal:  true,
 	})
 }
@@ -47,12 +52,23 @@ func (r *Runner) showSearchOverlay() {
 
 	// Create search widget
 	searchWidget := buckleywidgets.NewInteractiveSearch()
+	var subs state.Subscriptions
+	if r.app != nil {
+		subs.SetScheduler(r.app.Services().Scheduler())
+	}
 	updateMatches := func() {
-		if r.chatView == nil {
+		if r.state != nil && r.state.ChatSearchMatches != nil {
+			info := r.state.ChatSearchMatches.Get()
+			searchWidget.SetMatchInfo(info.Current, info.Total)
 			return
 		}
-		current, total := r.chatView.SearchMatches()
-		searchWidget.SetMatchInfo(current, total)
+		if r.chatView != nil {
+			current, total := r.chatView.SearchMatches()
+			searchWidget.SetMatchInfo(current, total)
+		}
+	}
+	if r.state != nil && r.state.ChatSearchMatches != nil {
+		subs.Observe(r.state.ChatSearchMatches, updateMatches)
 	}
 	searchWidget.SetOnSearch(func(query string) {
 		if r.chatView != nil {
@@ -75,12 +91,22 @@ func (r *Runner) showSearchOverlay() {
 		if r.chatView != nil {
 			r.chatView.ClearSearch()
 		}
+		subs.Clear()
 	})
+	if r.state != nil && r.state.ChatSearchQuery != nil {
+		searchWidget.SetQuery(r.state.ChatSearchQuery.Get())
+	}
 	updateMatches()
 
 	// Show as overlay
+	overlay := r.wrapModalOverlay(searchWidget, func() {
+		if r.chatView != nil {
+			r.chatView.ClearSearch()
+		}
+		subs.Clear()
+	})
 	r.app.ExecuteCommand(runtime.PushOverlay{
-		Widget: searchWidget,
+		Widget: overlay,
 		Modal:  true,
 	})
 }
@@ -102,6 +128,7 @@ func (r *Runner) showSlashCommandPalette() {
 		{ID: "/skill", Label: "/skill", Description: "List or activate a skill"},
 		{ID: "/context", Label: "/context", Description: "Show context budget details"},
 		{ID: "/search", Label: "/search", Description: "Search conversation history"},
+		{ID: "/settings", Label: "/settings", Description: "Edit UI settings"},
 		{ID: "/export", Label: "/export", Description: "Export current session"},
 		{ID: "/import", Label: "/import", Description: "Import conversation file"},
 		{ID: "/review", Label: "/review", Description: "Review current git diff"},
@@ -117,8 +144,67 @@ func (r *Runner) showSlashCommandPalette() {
 		r.inputArea.InsertText(item.ID + " ")
 	})
 
+	overlay := r.wrapModalOverlay(palette, nil)
 	r.app.ExecuteCommand(runtime.PushOverlay{
-		Widget: palette,
+		Widget: overlay,
+		Modal:  true,
+	})
+}
+
+// showSettingsOverlay displays the settings dialog.
+func (r *Runner) showSettingsOverlay() {
+	if r.app == nil || r.state == nil {
+		return
+	}
+	values := buckleywidgets.SettingsValues{}
+	if r.state.ThemeName != nil {
+		values.Theme = r.state.ThemeName.Get()
+	}
+	if r.state.StylesheetPath != nil {
+		values.StylesheetPath = r.state.StylesheetPath.Get()
+	}
+	if r.state.MessageMetadata != nil {
+		values.MessageMetadata = r.state.MessageMetadata.Get()
+	}
+	if r.state.HighContrast != nil {
+		values.HighContrast = r.state.HighContrast.Get()
+	}
+	if r.state.ReduceMotion != nil {
+		values.ReduceMotion = r.state.ReduceMotion.Get()
+	}
+	if r.state.EffectsEnabled != nil {
+		values.EffectsEnabled = r.state.EffectsEnabled.Get()
+	}
+	dialog := buckleywidgets.NewSettingsDialog(buckleywidgets.SettingsDialogConfig{
+		Values: values,
+		OnSubmit: func(updated buckleywidgets.SettingsValues) {
+			r.applySettings(UISettings{
+				ThemeName:       updated.Theme,
+				StylesheetPath:  updated.StylesheetPath,
+				MessageMetadata: updated.MessageMetadata,
+				HighContrast:    updated.HighContrast,
+				ReduceMotion:    updated.ReduceMotion,
+				EffectsEnabled:  updated.EffectsEnabled,
+			})
+			if r.statusService != nil {
+				r.statusService.SetStatusOverride("Settings saved", 2*time.Second)
+			}
+		},
+	})
+	if r.theme != nil && r.styleCache != nil {
+		dialog.SetStyles(
+			r.styleCache.Get(r.theme.SurfaceRaised),
+			r.styleCache.Get(r.theme.Border),
+			r.styleCache.Get(r.theme.TextPrimary),
+			r.styleCache.Get(r.theme.TextPrimary),
+			r.styleCache.Get(r.theme.Selection),
+			r.styleCache.Get(r.theme.TextMuted),
+			r.styleCache.Get(r.theme.Error),
+		)
+	}
+	overlay := r.wrapModalOverlay(buckleywidgets.NewCenteredOverlay(dialog), nil)
+	r.app.ExecuteCommand(runtime.PushOverlay{
+		Widget: overlay,
 		Modal:  true,
 	})
 }
@@ -137,8 +223,9 @@ func (r *Runner) showCodePreview(language, code string) {
 			r.styleCache.Get(r.theme.TextPrimary),
 		)
 	}
+	overlay := r.wrapModalOverlay(preview, nil)
 	r.app.ExecuteCommand(runtime.PushOverlay{
-		Widget: preview,
+		Widget: overlay,
 		Modal:  true,
 	})
 }
@@ -157,42 +244,73 @@ func (r *Runner) showApprovalOverlay(request buckleywidgets.ApprovalRequest) {
 			r.styleCache.Get(r.theme.TextPrimary),
 		)
 	}
+	overlay := r.wrapModalOverlay(dialog, nil)
 	r.app.ExecuteCommand(runtime.PushOverlay{
-		Widget: dialog,
+		Widget: overlay,
 		Modal:  true,
 	})
 }
 
-func (r *Runner) noteOverlayPush(modal bool) {
-	if r == nil {
-		return
+func (r *Runner) wrapModalOverlay(child runtime.Widget, onClose func()) runtime.Widget {
+	overlay := buckleywidgets.NewModalOverlay(child)
+	if r.theme != nil && r.styleCache != nil {
+		overlay.SetBackdropStyle(r.styleCache.Get(r.theme.SurfaceDim))
 	}
-	r.overlayStack = append(r.overlayStack, modal)
-	if !modal || r.bundle == nil || r.bundle.Keymaps == nil || r.overlayKeymap == nil {
-		return
-	}
-	if r.overlayDepth == 0 {
-		r.bundle.Keymaps.Push(r.overlayKeymap)
-	}
-	r.overlayDepth++
+	overlay.SetOnClose(onClose)
+	overlay.SetCloseOnBackdrop(true)
+	return overlay
 }
 
-func (r *Runner) noteOverlayPop() {
-	if r == nil || len(r.overlayStack) == 0 {
+func (r *Runner) syncOverlayKeymap(screen *runtime.Screen) {
+	if r == nil || screen == nil || r.bundle == nil || r.bundle.Keymaps == nil || r.overlayKeymap == nil {
 		return
 	}
-	modal := r.overlayStack[len(r.overlayStack)-1]
-	r.overlayStack = r.overlayStack[:len(r.overlayStack)-1]
-	if !modal || r.bundle == nil || r.bundle.Keymaps == nil {
+	hasModal := false
+	for i := screen.LayerCount() - 1; i >= 0; i-- {
+		layer := screen.Layer(i)
+		if layer == nil {
+			continue
+		}
+		if layer.Modal {
+			hasModal = true
+			break
+		}
+	}
+	if hasModal && !r.overlayKeymapActive {
+		r.bundle.Keymaps.Push(r.overlayKeymap)
+		r.overlayKeymapActive = true
 		return
 	}
-	if r.overlayDepth == 0 {
+	if !hasModal && r.overlayKeymapActive {
+		if r.bundle.Keymaps.Current() == r.overlayKeymap {
+			r.bundle.Keymaps.Pop()
+		}
+		r.overlayKeymapActive = false
+	}
+}
+
+func (r *Runner) focusTopLayer(screen *runtime.Screen) {
+	if r == nil || screen == nil {
 		return
 	}
-	r.overlayDepth--
-	if r.overlayDepth == 0 {
-		r.bundle.Keymaps.Pop()
+	scope := screen.FocusScope()
+	if scope == nil || scope.Current() != nil {
+		return
 	}
+	if scope.FocusFirst() && r.app != nil {
+		r.app.Invalidate()
+	}
+}
+
+func overlayCount(screen *runtime.Screen) int {
+	if screen == nil {
+		return 0
+	}
+	count := screen.LayerCount() - 1
+	if count < 0 {
+		return 0
+	}
+	return count
 }
 
 // jumpToBottom scrolls to the bottom of the chat.
@@ -298,6 +416,11 @@ func (r *Runner) handleMouseFocus(app *runtime.App, mouse runtime.MouseMsg) {
 	target := screen.WidgetAt(mouse.X, mouse.Y)
 	if target == nil {
 		return
+	}
+	if top := screen.TopLayer(); top != nil && top.Modal && top.Root != nil {
+		if !widgetInTree(top.Root, target) {
+			return
+		}
 	}
 	scope, focusable := focusScopeForWidget(screen, target)
 	if scope == nil || focusable == nil || !focusable.CanFocus() {
