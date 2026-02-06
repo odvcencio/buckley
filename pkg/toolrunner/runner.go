@@ -540,7 +540,8 @@ func (r *Runner) Run(ctx context.Context, req Request) (*Result, error) {
 	result := &Result{}
 
 	// Apply model timeout if context doesn't have a deadline
-	ctx = r.withModelTimeout(ctx)
+	ctx, cancel := r.withModelTimeout(ctx)
+	defer cancel()
 
 	availableTools := r.availableTools(req.AllowedTools)
 
@@ -559,15 +560,14 @@ func (r *Runner) Run(ctx context.Context, req Request) (*Result, error) {
 }
 
 // withModelTimeout applies the configured model timeout if the context doesn't already have a deadline.
-func (r *Runner) withModelTimeout(ctx context.Context) context.Context {
+func (r *Runner) withModelTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	// Only apply timeout if context doesn't already have a deadline
 	if _, hasDeadline := ctx.Deadline(); !hasDeadline && r.config.ModelTimeout > 0 {
-		ctx, _ = context.WithTimeout(ctx, r.config.ModelTimeout)
+		return context.WithTimeout(ctx, r.config.ModelTimeout)
 	}
-	return ctx
+	return ctx, func() {}
 }
 
 func (r *Runner) availableTools(allowed []string) []tool.Tool {

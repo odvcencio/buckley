@@ -49,7 +49,7 @@ import (
 
 // Version information - set via ldflags during build
 var (
-	version   = "1.0.0-dev"
+	version   = "0.1.0-dev"
 	commit    = "unknown"
 	buildDate = "unknown"
 )
