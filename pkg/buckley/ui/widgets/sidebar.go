@@ -1548,7 +1548,7 @@ func (s *Sidebar) handleTabClick(x, y int) bool {
 	maxX := content.X + content.Width
 	for i, tab := range s.tabs.Tabs {
 		label := " " + tab.Title + " "
-		labelWidth := len([]rune(label))
+		labelWidth := textWidth(label)
 		if cursor >= maxX {
 			break
 		}

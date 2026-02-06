@@ -2,7 +2,9 @@
 
 ## Status
 
-Proposed
+Accepted
+
+**Implementation note:** Servo engine adapter complete in `apps/browserd/src/engine/servo.rs` with clipboard support, DOM/accessibility/hit-test observations, and input actions. Stub fallback available when building without the `servo` feature.
 
 ## Context
 

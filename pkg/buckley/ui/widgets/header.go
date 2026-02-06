@@ -184,16 +184,16 @@ func (h *Header) Render(ctx runtime.RenderContext) {
 	}
 	right := strings.Join(parts, " · ")
 	if right != "" {
-		x := bounds.X + bounds.Width - len(right)
-		if x > bounds.X+len(h.logo) {
+		x := bounds.X + bounds.Width - textWidth(right)
+		if x > bounds.X+textWidth(h.logo) {
 			ctx.Buffer.SetString(x, bounds.Y, right, h.textStyle)
 			if sessionStr != "" && modelStr != "" {
-				h.sessionBounds = runtime.Rect{X: x, Y: bounds.Y, Width: len(sessionStr), Height: 1}
-				h.modelBounds = runtime.Rect{X: x + len(sessionStr) + len(" · "), Y: bounds.Y, Width: len(modelStr), Height: 1}
+				h.sessionBounds = runtime.Rect{X: x, Y: bounds.Y, Width: textWidth(sessionStr), Height: 1}
+				h.modelBounds = runtime.Rect{X: x + textWidth(sessionStr) + textWidth(" · "), Y: bounds.Y, Width: textWidth(modelStr), Height: 1}
 			} else if sessionStr != "" {
-				h.sessionBounds = runtime.Rect{X: x, Y: bounds.Y, Width: len(sessionStr), Height: 1}
+				h.sessionBounds = runtime.Rect{X: x, Y: bounds.Y, Width: textWidth(sessionStr), Height: 1}
 			} else if modelStr != "" {
-				h.modelBounds = runtime.Rect{X: x, Y: bounds.Y, Width: len(modelStr), Height: 1}
+				h.modelBounds = runtime.Rect{X: x, Y: bounds.Y, Width: textWidth(modelStr), Height: 1}
 			}
 		}
 	}

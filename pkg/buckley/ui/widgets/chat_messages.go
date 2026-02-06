@@ -750,10 +750,10 @@ func (m *ChatMessages) renderMetadataOverlay(ctx runtime.RenderContext) {
 			}
 			if metaLine >= 0 && metaLine < m.listBounds.Height {
 				availableWidth := m.listBounds.Width
-				metaLen := len([]rune(meta))
+				metaLen := textWidth(meta)
 				if metaLen <= availableWidth {
 					content := strings.TrimRight(lines[metaLine].Content, " ")
-					contentLen := len([]rune(content))
+					contentLen := textWidth(content)
 					startX := m.listBounds.X + availableWidth - metaLen
 					if startX > m.listBounds.X+contentLen {
 						ctx.Buffer.SetString(startX, m.listBounds.Y+metaLine, meta, m.metadataStyle)
@@ -792,7 +792,7 @@ func (m *ChatMessages) renderVisibleLine(ctx runtime.RenderContext, line scrollb
 			text = string(runes[:bounds.Width])
 		}
 		ctx.Buffer.SetString(bounds.X, bounds.Y, text, m.selectionStyle)
-		for x := bounds.X + len([]rune(text)); x < maxX; x++ {
+		for x := bounds.X + textWidth(text); x < maxX; x++ {
 			ctx.Buffer.Set(x, bounds.Y, ' ', m.selectionStyle)
 		}
 		return
@@ -865,7 +865,7 @@ func (m *ChatMessages) renderVisibleLine(ctx runtime.RenderContext, line scrollb
 	ctx.Buffer.SetString(bounds.X, bounds.Y, text, style)
 	if line.IsCode {
 		fillStyle := m.codeBlockBG
-		for x := bounds.X + len([]rune(text)); x < maxX; x++ {
+		for x := bounds.X + textWidth(text); x < maxX; x++ {
 			ctx.Buffer.Set(x, bounds.Y, ' ', fillStyle)
 		}
 	}

@@ -65,6 +65,50 @@ Buckley has 40+ built-in tools. Here are the most important ones.
 
 ---
 
+## Browser Automation
+
+Buckley includes a self-contained Servo-based browser daemon (`browserd`) for agent-driven web interaction. No Chrome install required.
+
+| Tool | What It Does |
+|------|--------------|
+| `browser_start` | Start a browser session with viewport and security config |
+| `browser_navigate` | Navigate to a URL (validated against network allowlist) |
+| `browser_observe` | Get page state: DOM snapshot, accessibility tree, hit-test map |
+| `browser_act` | Perform actions: click, type, scroll, hover, key, focus |
+| `browser_screenshot` | Capture the current viewport as a PNG frame |
+| `browser_stream` | Subscribe to real-time frame/DOM/accessibility diffs |
+| `browser_clipboard` | Read or write the virtual clipboard |
+| `browser_close` | Close a browser session |
+
+**Security model:**
+- Process-isolated Servo engine per session
+- Virtual clipboard (no host access by default)
+- Network allowlists per session
+- Blocked schemes: `file:`, `data:`, `javascript:`
+
+**Example: browser_start**
+```json
+{
+  "session_id": "my-session",
+  "viewport": { "width": 1280, "height": 720 },
+  "initial_url": "https://example.com"
+}
+```
+
+**Example: browser_act**
+```json
+{
+  "session_id": "my-session",
+  "action": {
+    "type": "click",
+    "target": { "node_id": 42 },
+    "expected_state_version": 3
+  }
+}
+```
+
+---
+
 ## Git
 
 | Tool | What It Does |

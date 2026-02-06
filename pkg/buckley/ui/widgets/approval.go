@@ -179,7 +179,7 @@ func (a *ApprovalWidget) Render(ctx runtime.RenderContext) {
 
 	// Draw warning title
 	title := " Approval Required "
-	titleX := b.X + (b.Width-len(title))/2
+	titleX := b.X + (b.Width-textWidth(title))/2
 	ctx.Buffer.SetString(titleX, b.Y, title, a.titleStyle)
 
 	y := b.Y + 2
@@ -187,12 +187,12 @@ func (a *ApprovalWidget) Render(ctx runtime.RenderContext) {
 	// Draw tool and operation info
 	toolLabel := "Tool: "
 	ctx.Buffer.SetString(b.X+2, y, toolLabel, a.labelStyle)
-	ctx.Buffer.SetString(b.X+2+len(toolLabel), y, a.request.Tool, a.textStyle)
+	ctx.Buffer.SetString(b.X+2+textWidth(toolLabel), y, a.request.Tool, a.textStyle)
 	y++
 
 	opLabel := "Operation: "
 	ctx.Buffer.SetString(b.X+2, y, opLabel, a.labelStyle)
-	ctx.Buffer.SetString(b.X+2+len(opLabel), y, a.request.Operation, a.textStyle)
+	ctx.Buffer.SetString(b.X+2+textWidth(opLabel), y, a.request.Operation, a.textStyle)
 	y++
 
 	// Draw description if present
@@ -221,7 +221,7 @@ func (a *ApprovalWidget) Render(ctx runtime.RenderContext) {
 		y++
 		fileLabel := "File: "
 		ctx.Buffer.SetString(b.X+2, y, fileLabel, a.labelStyle)
-		ctx.Buffer.SetString(b.X+2+len(fileLabel), y, a.request.FilePath, a.textStyle)
+		ctx.Buffer.SetString(b.X+2+textWidth(fileLabel), y, a.request.FilePath, a.textStyle)
 		y++
 		y++
 		ctx.Buffer.SetString(b.X+2, y, "Changes:", a.labelStyle)
@@ -367,7 +367,7 @@ func (a *ApprovalWidget) drawButtons(buf *runtime.Buffer, b runtime.Rect) {
 	y := b.Y + b.Height - 2
 
 	buttons, _ := approvalButtonLayout()
-	x := b.X + (b.Width-len(buttons))/2
+	x := b.X + (b.Width-textWidth(buttons))/2
 
 	// Draw with highlights on key letters
 	for i, ch := range buttons {
@@ -540,8 +540,8 @@ func (a *ApprovalWidget) buttonActionAt(x, y int) (string, bool) {
 	if y != buttonY {
 		return "", false
 	}
-	startX := b.X + (b.Width-len(line))/2
-	if x < startX || x >= startX+len(line) {
+	startX := b.X + (b.Width-textWidth(line))/2
+	if x < startX || x >= startX+textWidth(line) {
 		return "", false
 	}
 	rel := x - startX

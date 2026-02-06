@@ -655,6 +655,7 @@ dependencies = [
  "prost-build",
  "prost-types",
  "rustls",
+ "serde",
  "serde_json",
  "surfman 0.9.8",
  "url",

@@ -44,7 +44,7 @@ func (m *ChatMessages) CodeHeaderActionAtPoint(x, y int) (action, language, code
 	}
 
 	copyIdx := strings.Index(header, "[copy]")
-	if copyIdx >= 0 && col >= copyIdx && col < copyIdx+len("[copy]") {
+	if copyIdx >= 0 && col >= copyIdx && col < copyIdx+textWidth("[copy]") {
 		language, code, ok = m.buffer.CodeBlockAt(lineIndex)
 		if !ok {
 			return "", "", "", false
@@ -53,7 +53,7 @@ func (m *ChatMessages) CodeHeaderActionAtPoint(x, y int) (action, language, code
 	}
 
 	openIdx := strings.Index(header, "[open]")
-	if openIdx >= 0 && col >= openIdx && col < openIdx+len("[open]") {
+	if openIdx >= 0 && col >= openIdx && col < openIdx+textWidth("[open]") {
 		language, code, _ = m.buffer.CodeBlockAt(lineIndex)
 		return "open", language, code, true
 	}

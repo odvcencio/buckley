@@ -67,6 +67,20 @@ smoke-plan-execute:
 	@echo "Running CLI plan/execute smoke (requires provider API key)..."
 	./scripts/smoke-plan-execute.sh
 
+# Browserd (Servo browser daemon) targets
+.PHONY: build-browserd build-browserd-stub test-browserd install-browserd
+build-browserd:
+	cd apps/browserd && cargo build --release --features servo
+
+build-browserd-stub:
+	cd apps/browserd && cargo build --release
+
+test-browserd:
+	cd apps/browserd && cargo test --features servo
+
+install-browserd: build-browserd
+	cp apps/browserd/target/release/browserd $(HOME)/.local/bin/browserd
+
 .PHONY: clean
 clean:
 	@echo "Cleaning build artifacts..."

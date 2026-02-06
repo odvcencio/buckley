@@ -198,7 +198,7 @@ func (s *StatusBar) Render(ctx runtime.RenderContext) {
 
 	if mode != "" {
 		prefix := " " + status + " · "
-		ctx.Buffer.SetString(bounds.X+len(prefix), bounds.Y, mode, s.modeStyle)
+		ctx.Buffer.SetString(bounds.X+textWidth(prefix), bounds.Y, mode, s.modeStyle)
 	}
 
 	ctxSegment := formatContextUsage(s.contextUsed.Get(), s.contextBudget.Get(), s.contextWindow.Get())
@@ -206,15 +206,15 @@ func (s *StatusBar) Render(ctx runtime.RenderContext) {
 	right := joinRightSegments(ctxSegment, tokenSegment, bounds, left)
 	if right != "" {
 		drawText := right + " "
-		x := bounds.X + bounds.Width - len(drawText)
-		if x > bounds.X+len(left) {
+		x := bounds.X + bounds.Width - textWidth(drawText)
+		if x > bounds.X+textWidth(left) {
 			ctx.Buffer.SetString(x, bounds.Y, drawText, s.textStyle)
 		}
 	}
 
 	if scroll := strings.TrimSpace(s.scrollPos.Get()); scroll != "" {
-		center := bounds.X + bounds.Width/2 - len(scroll)/2
-		if center > bounds.X+len(left) && center+len(scroll) < bounds.X+bounds.Width-len(right) {
+		center := bounds.X + bounds.Width/2 - textWidth(scroll)/2
+		if center > bounds.X+textWidth(left) && center+textWidth(scroll) < bounds.X+bounds.Width-textWidth(right) {
 			ctx.Buffer.SetString(center, bounds.Y, scroll, s.textStyle)
 		}
 	}
@@ -354,8 +354,8 @@ func formatTokenSegment(tokens int, costCents float64) string {
 }
 
 func fitsRight(bounds runtime.Rect, left, right string) bool {
-	x := bounds.X + bounds.Width - len(right)
-	return x > bounds.X+len(left)
+	x := bounds.X + bounds.Width - textWidth(right)
+	return x > bounds.X+textWidth(left)
 }
 
 func formatActivity(items []progress.Progress, streaming bool) string {

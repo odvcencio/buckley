@@ -103,7 +103,7 @@ func (f *FilePickerWidget) Render(ctx runtime.RenderContext) {
 
 	// Draw title
 	title := " File Search "
-	titleX := b.X + (b.Width-len(title))/2
+	titleX := b.X + (b.Width-textWidth(title))/2
 	ctx.Buffer.SetString(titleX, b.Y, title, f.borderStyle.Bold(true))
 
 	// Draw query line
@@ -172,7 +172,7 @@ func (f *FilePickerWidget) Render(ctx runtime.RenderContext) {
 	} else {
 		status = "indexing..."
 	}
-	ctx.Buffer.SetString(b.X+b.Width-2-len(status), b.Y+b.Height-1, status, f.borderStyle)
+	ctx.Buffer.SetString(b.X+b.Width-2-textWidth(status), b.Y+b.Height-1, status, f.borderStyle)
 }
 
 // renderMatch draws a path with character highlights.

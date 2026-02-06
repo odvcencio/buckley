@@ -84,7 +84,7 @@ First public release. AI development assistant that remembers what you're doing.
 - **IPC server**: HTTP/WebSocket for web UI (Mission Control). Vue-based frontend with approval modals, message bubbles, terminal pane. Token/basic auth, CORS, web push
 - **Telemetry hub**: Pub/sub event bus. Diagnostics collector with ring-buffered aggregation — API calls, tokens, latency, model/tool usage, circuit breaker states, error history
 - **Reasoning logger**: Daily-rotating log files for model thinking content
-- **Browser runtime**: Servo-based headless browser engine (Rust) with gRPC integration, session management, metrics instrumentation
+- **Browser runtime**: Servo-based headless browser engine (Rust) with 8 tools (`browser_start`, `browser_navigate`, `browser_observe`, `browser_act`, `browser_screenshot`, `browser_stream`, `browser_clipboard`, `browser_close`), virtual clipboard, network allowlists, process isolation
 - **Coordination**: Multi-agent primitives — P2P, pub/sub, service discovery, capabilities
 
 #### Configuration

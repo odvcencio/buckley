@@ -211,7 +211,7 @@ func (p *InteractivePalette) Render(ctx runtime.RenderContext) {
 	p.drawBorder(ctx.Buffer, b, borderStyle)
 
 	// Draw title
-	titleX := b.X + (b.Width-len(p.title))/2
+	titleX := b.X + (b.Width-textWidth(p.title))/2
 	ctx.Buffer.SetString(titleX, b.Y, " "+p.title+" ", titleStyle)
 
 	y := b.Y + 1

@@ -455,6 +455,182 @@ func TestRunner_Execute_AllowedToolsFilter(t *testing.T) {
 	}
 }
 
+// recordingStreamHandler captures all streaming events for verification.
+type recordingStreamHandler struct {
+	texts       []string
+	reasonings  []string
+	toolStarts  []string
+	toolEnds    []string
+	errors      []error
+	completed   bool
+}
+
+func (h *recordingStreamHandler) OnText(text string)                  { h.texts = append(h.texts, text) }
+func (h *recordingStreamHandler) OnReasoning(reasoning string)        { h.reasonings = append(h.reasonings, reasoning) }
+func (h *recordingStreamHandler) OnReasoningEnd()                     {}
+func (h *recordingStreamHandler) OnToolStart(name string, _ string)   { h.toolStarts = append(h.toolStarts, name) }
+func (h *recordingStreamHandler) OnToolEnd(name string, _ string, err error) {
+	h.toolEnds = append(h.toolEnds, name)
+	if err != nil {
+		h.errors = append(h.errors, err)
+	}
+}
+func (h *recordingStreamHandler) OnError(err error)        { h.errors = append(h.errors, err) }
+func (h *recordingStreamHandler) OnComplete(_ *Result)     { h.completed = true }
+
+func TestRunner_StreamHandler_ToolCallsAndContent(t *testing.T) {
+	mock := &MockModelClient{
+		Responses: []model.ChatResponse{
+			{
+				// Iteration 1: model calls a tool
+				Choices: []model.Choice{
+					{
+						Message: model.Message{
+							Content: "",
+							ToolCalls: []model.ToolCall{
+								{
+									ID: "call_1",
+									Function: model.FunctionCall{
+										Name:      "file_exists",
+										Arguments: `{"path": "/tmp/test.txt"}`,
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			{
+				// Iteration 2: model produces final text
+				Choices: []model.Choice{
+					{
+						Message: model.Message{
+							Content: "The file does not exist.",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	registry := emptyRegistry()
+	registry.Register(&builtin.FileExistsTool{})
+
+	runner, err := New(Config{
+		Models:               mock,
+		Registry:             registry,
+		DefaultMaxIterations: 10,
+	})
+	if err != nil {
+		t.Fatalf("failed to create runner: %v", err)
+	}
+
+	handler := &recordingStreamHandler{}
+	runner.SetStreamHandler(handler)
+
+	result, err := runner.Run(context.Background(), Request{
+		Messages: []model.Message{
+			{Role: "user", Content: "Does /tmp/test.txt exist?"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("execution failed: %v", err)
+	}
+
+	// Verify tool events were streamed
+	if len(handler.toolStarts) != 1 || handler.toolStarts[0] != "file_exists" {
+		t.Errorf("expected 1 tool start for file_exists, got %v", handler.toolStarts)
+	}
+	if len(handler.toolEnds) != 1 || handler.toolEnds[0] != "file_exists" {
+		t.Errorf("expected 1 tool end for file_exists, got %v", handler.toolEnds)
+	}
+
+	// Verify text was streamed
+	streamed := ""
+	for _, text := range handler.texts {
+		streamed += text
+	}
+	if streamed != "The file does not exist." {
+		t.Errorf("streamed text = %q, want %q", streamed, "The file does not exist.")
+	}
+
+	// Verify completion
+	if !handler.completed {
+		t.Error("expected OnComplete to be called")
+	}
+
+	// Verify result content matches streamed content
+	if result.Content != "The file does not exist." {
+		t.Errorf("result.Content = %q, want %q", result.Content, "The file does not exist.")
+	}
+
+	// Verify no errors
+	if len(handler.errors) > 0 {
+		t.Errorf("unexpected errors: %v", handler.errors)
+	}
+}
+
+func TestRunner_StreamHandler_NoToolCalls(t *testing.T) {
+	mock := &MockModelClient{
+		Responses: []model.ChatResponse{
+			{
+				Choices: []model.Choice{
+					{
+						Message: model.Message{
+							Content: "Simple response.",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	registry := emptyRegistry()
+
+	runner, err := New(Config{
+		Models:               mock,
+		Registry:             registry,
+		DefaultMaxIterations: 10,
+	})
+	if err != nil {
+		t.Fatalf("failed to create runner: %v", err)
+	}
+
+	handler := &recordingStreamHandler{}
+	runner.SetStreamHandler(handler)
+
+	result, err := runner.Run(context.Background(), Request{
+		Messages: []model.Message{
+			{Role: "user", Content: "Hello"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("execution failed: %v", err)
+	}
+
+	// No tools should have been called
+	if len(handler.toolStarts) != 0 {
+		t.Errorf("expected no tool calls, got %d", len(handler.toolStarts))
+	}
+
+	// Text should still be streamed
+	streamed := ""
+	for _, text := range handler.texts {
+		streamed += text
+	}
+	if streamed != "Simple response." {
+		t.Errorf("streamed text = %q, want %q", streamed, "Simple response.")
+	}
+
+	if !handler.completed {
+		t.Error("expected OnComplete")
+	}
+
+	if result.Content != "Simple response." {
+		t.Errorf("result.Content = %q, want %q", result.Content, "Simple response.")
+	}
+}
+
 func TestToolCallRecord_Fields(t *testing.T) {
 	record := ToolCallRecord{
 		ID:        "call_123",

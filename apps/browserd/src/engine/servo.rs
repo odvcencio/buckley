@@ -20,6 +20,8 @@ use servo::{
     SoftwareRenderingContext, WebView, WebViewBuilder, WebViewPoint, WheelDelta, WheelEvent,
     WheelMode,
 };
+use prost_types::{value, Struct, Value};
+use std::collections::BTreeMap;
 use url::Url;
 
 const DEFAULT_FRAME_RATE: u32 = 12;
@@ -35,6 +37,7 @@ const A11Y_MAX_DEPTH: usize = 5;
 const A11Y_MAX_CHILDREN: usize = 50;
 const A11Y_MAX_NAME_CHARS: usize = 120;
 const HIT_TEST_MAX_REGIONS: usize = 250;
+const DEFAULT_CLIPBOARD_MAX_BYTES: usize = 64 * 1024;
 
 pub struct ServoEngine {
     frame_rate: u32,
@@ -220,6 +223,12 @@ struct ServoState {
     viewport_height: u32,
     device_scale_factor: f32,
     last_hit_test: Option<pb::HitTestMap>,
+    clipboard_text: String,
+    clipboard_mode: pb::ClipboardMode,
+    clipboard_allow_read: bool,
+    clipboard_allow_write: bool,
+    clipboard_max_bytes: usize,
+    clipboard_read_allowlist: Vec<String>,
 }
 
 fn run_servo_runtime(
@@ -263,6 +272,26 @@ fn run_servo_runtime(
         .event_loop_waker(Box::new(HeadlessEventLoopWaker))
         .build();
 
+    let mut clipboard_mode = pb::ClipboardMode::Virtual;
+    let mut clipboard_allow_read = false;
+    let mut clipboard_allow_write = true;
+    let mut clipboard_max_bytes = DEFAULT_CLIPBOARD_MAX_BYTES;
+    let mut clipboard_read_allowlist = Vec::new();
+    if let Some(ref policy) = config.clipboard {
+        let mode = pb::ClipboardMode::try_from(policy.mode).unwrap_or(pb::ClipboardMode::Unspecified);
+        if mode != pb::ClipboardMode::Unspecified {
+            clipboard_mode = mode;
+        }
+        clipboard_allow_read = policy.allow_read;
+        clipboard_allow_write = policy.allow_write;
+        if policy.max_bytes > 0 {
+            clipboard_max_bytes = policy.max_bytes as usize;
+        }
+        if !policy.read_allowlist.is_empty() {
+            clipboard_read_allowlist = policy.read_allowlist.clone();
+        }
+    }
+
     let mut state = ServoState {
         servo,
         webview: None,
@@ -274,6 +303,12 @@ fn run_servo_runtime(
         viewport_height: height,
         device_scale_factor,
         last_hit_test: None,
+        clipboard_text: String::new(),
+        clipboard_mode,
+        clipboard_allow_read,
+        clipboard_allow_write,
+        clipboard_max_bytes,
+        clipboard_read_allowlist,
     };
 
     // Command loop
@@ -436,10 +471,51 @@ fn handle_act(
             send_mouse_button(webview, point, MouseButtonAction::Up);
         }
         pb::ActionType::ClipboardRead => {
-            log::debug!("Clipboard read action");
+            ensure_clipboard_read_allowed(state)?;
+            let bytes = state.clipboard_text.as_bytes().len();
+            if bytes > state.clipboard_max_bytes {
+                return Err(EngineError::new("clipboard_limit", "clipboard exceeds size limit"));
+            }
+            let observation = build_observation(state, &pb::ObserveOptions::default())?;
+            state.state_version += 1;
+            return Ok(pb::ActionResult {
+                state_version: state.state_version,
+                observation: Some(observation),
+                effects: vec![pb::Effect {
+                    kind: "clipboard_read".to_string(),
+                    summary: format!("clipboard read {} bytes", bytes),
+                    metadata: clipboard_metadata(
+                        Some(&state.clipboard_text),
+                        bytes,
+                        clipboard_mode_label(state.clipboard_mode),
+                        "virtual",
+                    ),
+                }],
+            });
         }
         pb::ActionType::ClipboardWrite => {
-            log::debug!("Clipboard write: {} bytes", action.text.len());
+            ensure_clipboard_write_allowed(state)?;
+            let bytes = action.text.as_bytes().len();
+            if bytes > state.clipboard_max_bytes {
+                return Err(EngineError::new("clipboard_limit", "clipboard exceeds size limit"));
+            }
+            state.clipboard_text = action.text.clone();
+            let observation = build_observation(state, &pb::ObserveOptions::default())?;
+            state.state_version += 1;
+            return Ok(pb::ActionResult {
+                state_version: state.state_version,
+                observation: Some(observation),
+                effects: vec![pb::Effect {
+                    kind: "clipboard_write".to_string(),
+                    summary: format!("clipboard wrote {} bytes", bytes),
+                    metadata: clipboard_metadata(
+                        None,
+                        bytes,
+                        clipboard_mode_label(state.clipboard_mode),
+                        "virtual",
+                    ),
+                }],
+            });
         }
         pb::ActionType::Unspecified => {
             return Err(EngineError::new(
@@ -466,7 +542,7 @@ fn handle_act(
 fn modifiers_from_action(action: &pb::Action) -> Modifiers {
     let mut modifiers = Modifiers::empty();
     for raw in &action.modifiers {
-        let modifier = pb::KeyModifier::from_i32(*raw).unwrap_or(pb::KeyModifier::Unspecified);
+        let modifier = pb::KeyModifier::try_from(*raw).unwrap_or(pb::KeyModifier::Unspecified);
         match modifier {
             pb::KeyModifier::Shift => modifiers.insert(Modifiers::SHIFT),
             pb::KeyModifier::Alt => modifiers.insert(Modifiers::ALT),
@@ -1296,6 +1372,123 @@ fn timestamp_now() -> prost_types::Timestamp {
         seconds: now.as_secs() as i64,
         nanos: now.subsec_nanos() as i32,
     }
+}
+
+fn ensure_clipboard_read_allowed(state: &ServoState) -> Result<(), EngineError> {
+    if !state.clipboard_allow_read {
+        return Err(EngineError::new("clipboard_denied", "clipboard read not allowed"));
+    }
+    if state.clipboard_read_allowlist.is_empty() {
+        return Ok(());
+    }
+    let parsed = Url::parse(&state.current_url)
+        .map_err(|_| EngineError::new("clipboard_denied", "clipboard read requires allowed domain"))?;
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| EngineError::new("clipboard_denied", "clipboard read requires allowed domain"))?;
+    if allowlist_allows(host, parsed.port_or_known_default(), &state.clipboard_read_allowlist) {
+        Ok(())
+    } else {
+        Err(EngineError::new(
+            "clipboard_denied",
+            "clipboard read denied by allowlist",
+        ))
+    }
+}
+
+fn ensure_clipboard_write_allowed(state: &ServoState) -> Result<(), EngineError> {
+    if !state.clipboard_allow_write {
+        return Err(EngineError::new("clipboard_denied", "clipboard write not allowed"));
+    }
+    Ok(())
+}
+
+fn allowlist_allows(host: &str, port: Option<u16>, allowlist: &[String]) -> bool {
+    let host = host.to_ascii_lowercase();
+    for entry in allowlist {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            continue;
+        }
+        if let Some(suffix) = entry.strip_prefix("*.") {
+            let suffix = suffix.to_ascii_lowercase();
+            if host == suffix || host.ends_with(&format!(".{suffix}")) {
+                return true;
+            }
+            continue;
+        }
+        let (entry_host, entry_port) = parse_allowlist_entry(entry);
+        if entry_host.is_empty() || entry_host != host {
+            continue;
+        }
+        if let Some(entry_port) = entry_port {
+            if let Some(port) = port {
+                if port == entry_port {
+                    return true;
+                }
+            }
+            continue;
+        }
+        return true;
+    }
+    false
+}
+
+fn parse_allowlist_entry(entry: &str) -> (String, Option<u16>) {
+    if entry.contains("://") {
+        if let Ok(url) = Url::parse(entry) {
+            if let Some(host) = url.host_str() {
+                return (host.to_ascii_lowercase(), url.port());
+            }
+        }
+    }
+    if let Some((host, port_str)) = entry.rsplit_once(':') {
+        if port_str.chars().all(|c| c.is_ascii_digit()) && !host.contains(']') {
+            if let Ok(port) = port_str.parse::<u16>() {
+                return (host.to_ascii_lowercase(), Some(port));
+            }
+        }
+    }
+    (entry.to_ascii_lowercase(), None)
+}
+
+fn clipboard_mode_label(mode: pb::ClipboardMode) -> &'static str {
+    match mode {
+        pb::ClipboardMode::Virtual => "virtual",
+        pb::ClipboardMode::Host => "host",
+        pb::ClipboardMode::Unspecified => "virtual",
+    }
+}
+
+fn clipboard_metadata(text: Option<&str>, bytes: usize, mode: &str, source: &str) -> Option<Struct> {
+    let mut fields = BTreeMap::new();
+    fields.insert(
+        "bytes".to_string(),
+        Value {
+            kind: Some(value::Kind::NumberValue(bytes as f64)),
+        },
+    );
+    fields.insert(
+        "mode".to_string(),
+        Value {
+            kind: Some(value::Kind::StringValue(mode.to_string())),
+        },
+    );
+    fields.insert(
+        "source".to_string(),
+        Value {
+            kind: Some(value::Kind::StringValue(source.to_string())),
+        },
+    );
+    if let Some(text) = text {
+        fields.insert(
+            "text".to_string(),
+            Value {
+                kind: Some(value::Kind::StringValue(text.to_string())),
+            },
+        );
+    }
+    Some(Struct { fields })
 }
 
 #[cfg(test)]

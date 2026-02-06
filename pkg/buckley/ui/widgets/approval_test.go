@@ -159,7 +159,7 @@ func TestApprovalWidget_HandleMouseAllow(t *testing.T) {
 		t.Fatal("expected approval button ranges")
 	}
 	bounds := w.Bounds()
-	x := bounds.X + (bounds.Width-len(line))/2 + ranges[0].start
+	x := bounds.X + (bounds.Width-textWidth(line))/2 + ranges[0].start
 	y := bounds.Y + bounds.Height - 2
 
 	result := w.HandleMessage(runtime.MouseMsg{

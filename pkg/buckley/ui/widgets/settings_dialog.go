@@ -171,7 +171,7 @@ func (d *SettingsDialog) Render(ctx runtime.RenderContext) {
 	d.drawBorder(ctx.Buffer, b)
 
 	title := " Settings "
-	titleX := b.X + (b.Width-len(title))/2
+	titleX := b.X + (b.Width-textWidth(title))/2
 	ctx.Buffer.SetString(titleX, b.Y, title, d.labelStyle)
 
 	y := b.Y + 2

@@ -100,6 +100,14 @@ ipc:
   basic_auth_username: ""
   basic_auth_password: ""
 
+# Browser automation (Servo-based browserd daemon).
+browser:
+  browserd_path: ""          # Path to browserd binary; empty = auto-detect
+  socket_dir: ""             # Unix socket directory; empty = /tmp/buckley
+  frame_rate: 12             # Target FPS for streaming (1-30)
+  connect_timeout: 10s       # Timeout waiting for browserd to start
+  operation_timeout: 30s     # Timeout per navigation/action
+
 # Clone safety policy for any operation that runs `git clone` (headless sessions, batch workers, etc).
 git_clone:
   allowed_schemes: [https, ssh]
