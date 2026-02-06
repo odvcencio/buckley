@@ -9,6 +9,13 @@ import (
 // PositionForPoint maps screen coordinates to a buffer position.
 func (m *ChatMessages) PositionForPoint(x, y int) (line, col int, ok bool) {
 	bounds := m.listBounds
+	// Fallback to widget bounds if listBounds is not set
+	if bounds.Width <= 0 || bounds.Height <= 0 {
+		bounds = m.Bounds()
+	}
+	if bounds.Width <= 0 || bounds.Height <= 0 {
+		return 0, 0, false
+	}
 	if x < bounds.X || y < bounds.Y || y >= bounds.Y+bounds.Height {
 		return 0, 0, false
 	}

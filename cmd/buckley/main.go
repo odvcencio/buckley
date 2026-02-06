@@ -43,6 +43,7 @@ import (
 	buckleyterm "github.com/odvcencio/buckley/pkg/terminal"
 	"github.com/odvcencio/buckley/pkg/tool"
 	"github.com/odvcencio/buckley/pkg/toolrunner"
+	"github.com/odvcencio/buckley/pkg/transparency"
 	"github.com/odvcencio/buckley/pkg/buckley/ui/tui"
 )
 
@@ -91,6 +92,7 @@ type startupOptions struct {
 	plainMode        bool
 	rlmMode          bool
 	agentSocket      string
+	verbose          bool
 }
 
 func main() {
@@ -208,16 +210,28 @@ func main() {
 
 	// Handle one-shot prompt mode (-p flag)
 	if promptFlag != "" {
-		// Prompt provided via -p flag
-		exitCode := executeOneShot(promptFlag, cfg, modelManager, store, projectContext, planStore)
+		// Check if stdin is also piped; if so, prepend as context
+		prompt := promptFlag
+		stat, stErr := os.Stdin.Stat()
+		if stErr == nil && (stat.Mode()&os.ModeCharDevice) == 0 {
+			scanner := bufio.NewScanner(os.Stdin)
+			var lines []string
+			for scanner.Scan() {
+				lines = append(lines, scanner.Text())
+			}
+			if len(lines) > 0 {
+				piped := strings.Join(lines, "\n")
+				prompt = "<stdin>\n" + piped + "\n</stdin>\n\n" + promptFlag
+			}
+		}
+		exitCode := executeOneShot(prompt, cfg, modelManager, store, projectContext, planStore, opts.verbose)
 		os.Exit(exitCode)
 	}
 
-	// Check if stdin has data (piped input with -p)
+	// Handle piped stdin (no -p flag)
 	if len(args) == 0 && plainMode {
 		stat, err := os.Stdin.Stat()
 		if err == nil && (stat.Mode()&os.ModeCharDevice) == 0 {
-			// Stdin is piped, read all input
 			scanner := bufio.NewScanner(os.Stdin)
 			var lines []string
 			for scanner.Scan() {
@@ -225,7 +239,7 @@ func main() {
 			}
 			if len(lines) > 0 {
 				prompt := strings.Join(lines, "\n")
-				exitCode := executeOneShot(prompt, cfg, modelManager, store, projectContext, planStore)
+				exitCode := executeOneShot(prompt, cfg, modelManager, store, projectContext, planStore, opts.verbose)
 				os.Exit(exitCode)
 			}
 		}
@@ -273,7 +287,8 @@ func main() {
 }
 
 // executeOneShot executes a single prompt and exits
-func executeOneShot(prompt string, cfg *config.Config, mgr *model.Manager, store *storage.Store, projectContext *projectcontext.ProjectContext, planStore orchestrator.PlanStore) int {
+func executeOneShot(prompt string, cfg *config.Config, mgr *model.Manager, store *storage.Store, projectContext *projectcontext.ProjectContext, planStore orchestrator.PlanStore, verbose bool) int {
+	stderrIsTTY := term.IsTerminal(int(os.Stderr.Fd()))
 	if !quietMode {
 		if cwd, err := os.Getwd(); err == nil {
 			fmt.Fprintf(os.Stderr, "workdir: %s\n", cwd)
@@ -324,14 +339,17 @@ func executeOneShot(prompt string, cfg *config.Config, mgr *model.Manager, store
 	}
 	registerMCPTools(cfg, registry)
 
-	stopSpinner := func() {}
-	if !quietMode && term.IsTerminal(int(os.Stderr.Fd())) {
-		spinner := buckleyterm.NewSpinnerWithOutput(os.Stderr, "processing")
+	// Set up spinner (used for both progress display and tool activity)
+	var spinner *buckleyterm.Spinner
+	if !quietMode && stderrIsTTY {
+		spinner = buckleyterm.NewSpinnerWithOutput(os.Stderr, "processing")
 		spinner.Start()
-		stopSpinner = func() { spinner.Stop() }
 	}
 
-	ctx := context.Background()
+	// Create cancellable context with signal handling
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
 	mode := cfg.OneshotMode()
 	if mode == config.ExecutionModeRLM {
 		runner := oneshot.NewRLMRunner(oneshot.RLMRunnerConfig{
@@ -340,8 +358,9 @@ func executeOneShot(prompt string, cfg *config.Config, mgr *model.Manager, store
 			ModelID:  modelID,
 		})
 		result, err := runner.Run(ctx, systemPrompt, prompt, nil)
-		stopSpinner()
-		stopSpinner = func() {}
+		if spinner != nil {
+			spinner.Stop()
+		}
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "\nError: %v\n", err)
 			return 1
@@ -350,6 +369,9 @@ func executeOneShot(prompt string, cfg *config.Config, mgr *model.Manager, store
 			fmt.Print(result.Response)
 		}
 		fmt.Println()
+		if result != nil && result.Trace != nil && !quietMode && stderrIsTTY {
+			printOneShotCost(result.Trace)
+		}
 		return 0
 	}
 
@@ -358,21 +380,24 @@ func executeOneShot(prompt string, cfg *config.Config, mgr *model.Manager, store
 		Registry: registry,
 	})
 	if err != nil {
-		stopSpinner()
-		stopSpinner = func() {}
+		if spinner != nil {
+			spinner.Stop()
+		}
 		fmt.Fprintf(os.Stderr, "\nError: %v\n", err)
 		return 1
 	}
 
-	streamHandler := &oneshotStreamHandler{}
+	streamHandler := &oneshotStreamHandler{
+		spinner: spinner,
+		verbose: verbose && stderrIsTTY,
+	}
 	runner.SetStreamHandler(streamHandler)
 	result, err := runner.Run(ctx, toolrunner.Request{
 		Messages:        messages,
 		SelectionPrompt: prompt,
 		Model:           modelID,
 	})
-	stopSpinner()
-	stopSpinner = func() {}
+	streamHandler.ensureSpinnerStopped()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "\nError: %v\n", err)
 		return 1
@@ -381,12 +406,64 @@ func executeOneShot(prompt string, cfg *config.Config, mgr *model.Manager, store
 		fmt.Print(result.Content)
 	}
 	fmt.Println()
+
+	// Show cost/token summary
+	if result != nil && !quietMode && stderrIsTTY {
+		printOneShotUsage(result.Usage, modelID, mgr)
+	}
 	return 0
 }
 
+// printOneShotUsage prints token/cost summary for toolrunner results.
+func printOneShotUsage(usage model.Usage, modelID string, mgr *model.Manager) {
+	total := usage.TotalTokens
+	if total == 0 {
+		total = usage.PromptTokens + usage.CompletionTokens
+	}
+	if total == 0 {
+		return
+	}
+	tokensLine := fmt.Sprintf("Tokens: %d in · %d out = %d total",
+		usage.PromptTokens, usage.CompletionTokens, total)
+	fmt.Fprintf(os.Stderr, "\033[2m%s\033[0m\n", tokensLine)
+
+	if mgr != nil {
+		if cost, err := mgr.CalculateCost(modelID, usage); err == nil && cost > 0 {
+			costLine := fmt.Sprintf("Cost: $%.4f", cost)
+			fmt.Fprintf(os.Stderr, "\033[2m%s\033[0m\n", costLine)
+		}
+	}
+}
+
+// printOneShotCost prints token/cost summary for RLM results that have a Trace.
+func printOneShotCost(trace *transparency.Trace) {
+	tokens := trace.Tokens
+	total := tokens.Total()
+	if total == 0 {
+		return
+	}
+	var tokensLine string
+	if tokens.Reasoning > 0 {
+		tokensLine = fmt.Sprintf("Tokens: %d in · %d out · %d reasoning = %d total",
+			tokens.Input, tokens.Output, tokens.Reasoning, total)
+	} else {
+		tokensLine = fmt.Sprintf("Tokens: %d in · %d out = %d total",
+			tokens.Input, tokens.Output, total)
+	}
+	fmt.Fprintf(os.Stderr, "\033[2m%s\033[0m\n", tokensLine)
+	if trace.Cost > 0 {
+		costLine := fmt.Sprintf("Cost: $%.4f", trace.Cost)
+		fmt.Fprintf(os.Stderr, "\033[2m%s\033[0m\n", costLine)
+	}
+}
+
 type oneshotStreamHandler struct {
-	mu    sync.Mutex
-	wrote bool
+	mu          sync.Mutex
+	wrote       bool
+	spinner     *buckleyterm.Spinner
+	stopOnce    sync.Once
+	verbose     bool
+	hasReasoned bool
 }
 
 func (h *oneshotStreamHandler) HasOutput() bool {
@@ -395,28 +472,68 @@ func (h *oneshotStreamHandler) HasOutput() bool {
 	return h.wrote
 }
 
+// ensureSpinnerStopped stops the spinner exactly once, clearing the line.
+func (h *oneshotStreamHandler) ensureSpinnerStopped() {
+	h.stopOnce.Do(func() {
+		if h.spinner != nil {
+			h.spinner.Stop()
+		}
+	})
+}
+
 func (h *oneshotStreamHandler) OnText(text string) {
 	if text == "" {
 		return
 	}
+	h.ensureSpinnerStopped()
 	h.mu.Lock()
 	h.wrote = true
 	h.mu.Unlock()
 	fmt.Print(text)
 }
 
-func (h *oneshotStreamHandler) OnReasoning(reasoning string) {}
+func (h *oneshotStreamHandler) OnReasoning(reasoning string) {
+	if reasoning == "" || !h.verbose {
+		return
+	}
+	h.ensureSpinnerStopped()
+	h.mu.Lock()
+	if !h.hasReasoned {
+		h.hasReasoned = true
+		h.mu.Unlock()
+		fmt.Fprint(os.Stderr, "\033[2m") // dim
+	} else {
+		h.mu.Unlock()
+	}
+	fmt.Fprint(os.Stderr, reasoning)
+}
 
-func (h *oneshotStreamHandler) OnReasoningEnd() {}
+func (h *oneshotStreamHandler) OnReasoningEnd() {
+	h.mu.Lock()
+	reasoned := h.hasReasoned
+	h.mu.Unlock()
+	if reasoned {
+		fmt.Fprint(os.Stderr, "\033[0m\n") // reset + newline
+	}
+}
 
-func (h *oneshotStreamHandler) OnToolStart(name string, arguments string) {}
+func (h *oneshotStreamHandler) OnToolStart(name string, _ string) {
+	if h.spinner != nil {
+		h.spinner.SetMessage(fmt.Sprintf("running: %s", name))
+	}
+}
 
-func (h *oneshotStreamHandler) OnToolEnd(name string, result string, err error) {}
+func (h *oneshotStreamHandler) OnToolEnd(_ string, _ string, _ error) {
+	if h.spinner != nil {
+		h.spinner.SetMessage("processing")
+	}
+}
 
 func (h *oneshotStreamHandler) OnError(err error) {
 	if err == nil {
 		return
 	}
+	h.ensureSpinnerStopped()
 	fmt.Fprintf(os.Stderr, "\nError: %v\n", err)
 }
 
@@ -784,6 +901,7 @@ func printHelp() {
 	fmt.Println("  --plain                          Use plain scrollback mode")
 	fmt.Println("  --rlm                            Use RLM execution mode (experimental)")
 	fmt.Println("  --agent-socket <addr>            Start agent API server (unix:/path or tcp:host:port)")
+	fmt.Println("  --verbose                        Stream model reasoning to stderr (one-shot)")
 	fmt.Println("  --encoding json|toon             Set serialization format")
 	fmt.Println("  --json                           Shortcut for --encoding json")
 	fmt.Println("  -v, --version                    Show version information")
@@ -1128,6 +1246,7 @@ _buckley() {
         '-q[Suppress non-essential output]' \
         '--quiet[Suppress non-essential output]' \
         '--no-color[Disable colored output]' \
+        '--verbose[Stream model reasoning to stderr]' \
         '--tui[Use rich TUI interface]' \
         '--plain[Use plain scrollback mode]' \
         '-v[Show version]' \
@@ -1365,6 +1484,8 @@ func parseStartupOptions(raw []string) (*startupOptions, error) {
 			opts.encodingOverride = "toon"
 		case "--encoding=json", "--json":
 			opts.encodingOverride = "json"
+		case "--verbose":
+			opts.verbose = true
 		case "--quiet", "-q":
 			opts.quiet = true
 		case "--no-color":

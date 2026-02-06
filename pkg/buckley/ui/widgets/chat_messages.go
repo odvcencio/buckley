@@ -692,8 +692,12 @@ func (m *ChatMessages) LatestCodeBlock() (language, code string, ok bool) {
 }
 
 // Measure returns the preferred size.
+// ChatMessages is a scrollable widget, so it returns minimal size to allow
+// flex containers to properly calculate available space for Expanded children.
+// When flex containers measure children with unbounded constraints (maxInt),
+// returning maxInt would cause the flex shrink algorithm to shrink this widget to 0.
 func (m *ChatMessages) Measure(constraints runtime.Constraints) runtime.Size {
-	return runtime.Size{Width: constraints.MaxWidth, Height: constraints.MaxHeight}
+	return constraints.Constrain(runtime.Size{Width: 1, Height: 1})
 }
 
 // Layout updates the scrollback buffer size.

@@ -370,3 +370,55 @@ func TestHub_EventDataPreservation(t *testing.T) {
 		t.Fatal("timeout waiting for event")
 	}
 }
+
+func TestHub_MachineEvents(t *testing.T) {
+	hub := newTestHub()
+	defer hub.Close()
+
+	ch, unsub := hub.Subscribe()
+	defer unsub()
+
+	hub.Publish(Event{
+		Type: EventMachineState,
+		Data: map[string]any{
+			"agent_id": "agent-1",
+			"from":     "idle",
+			"to":       "calling_model",
+		},
+	})
+
+	select {
+	case evt := <-ch:
+		assert.Equal(t, EventMachineState, evt.Type)
+		assert.Equal(t, "agent-1", evt.Data["agent_id"])
+		assert.Equal(t, "idle", evt.Data["from"])
+		assert.Equal(t, "calling_model", evt.Data["to"])
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for event")
+	}
+}
+
+func TestHub_MachineEventTypesUnique(t *testing.T) {
+	machineTypes := []EventType{
+		EventMachineSpawned,
+		EventMachineState,
+		EventMachineCompleted,
+		EventMachineFailed,
+		EventMachineSteering,
+		EventMachineLockAcquired,
+		EventMachineLockWaiting,
+		EventMachineLockReleased,
+		EventMachineLockStale,
+		EventMachineToolStart,
+		EventMachineToolComplete,
+		EventMachineReview,
+		EventMachineIteration,
+	}
+
+	seen := make(map[EventType]bool)
+	for _, et := range machineTypes {
+		assert.False(t, seen[et], "duplicate machine event type: %s", et)
+		seen[et] = true
+		assert.NotEmpty(t, string(et))
+	}
+}

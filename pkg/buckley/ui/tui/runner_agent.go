@@ -7,8 +7,11 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
+	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/odvcencio/fluffyui/agent"
@@ -21,12 +24,14 @@ const (
 
 // AgentServer provides real-time control of the Buckley TUI.
 type AgentServer struct {
-	server   *agent.WebSocketServer
+	server   *agent.RealTimeWebSocketServer
 	agent    *agent.Agent
 	ctx      context.Context
 	cancel   context.CancelFunc
 	done     chan struct{}
+	mu       sync.Mutex
 	addr     string
+	listener net.Listener
 	runner   *Runner
 }
 
@@ -61,79 +66,107 @@ func (r *Runner) initAgentServer(addr string) error {
 		return fmt.Errorf("invalid address format %q (must be unix:/path or tcp:host:port)", addr)
 	}
 
-	// Remove prefix for WebSocket server
+	// Remove prefix for net.Listen
 	listenAddr := addr
 	if strings.HasPrefix(addr, "unix:") {
-		listenAddr = addr[5:] // Remove "unix:" prefix
+		listenAddr = addr[5:]
 	} else if strings.HasPrefix(addr, "tcp:") {
-		listenAddr = addr[4:] // Remove "tcp:" prefix
+		listenAddr = addr[4:]
 	}
 
 	// Create agent that wraps the runtime.App
-	// This provides semantic access to the widget tree
 	cfg := agent.Config{
 		App:         r.app,
 		IncludeText: true,
 		TickRate:    50 * time.Millisecond,
 	}
-	
+
 	ag := agent.New(cfg)
 
 	// Create WebSocket server for real-time control
-	wsServer, err := agent.NewWebSocketServer(agent.ServerOptions{
-		Addr:            listenAddr,
-		Agent:           ag,
-		AllowText:       true,
-		SnapshotTimeout: 5 * time.Second,
+	opts := agent.DefaultEnhancedServerOptions()
+	opts.Addr = addr
+	opts.App = r.app
+	opts.Agent = ag
+	opts.AllowText = true
+	opts.SnapshotTimeout = 5 * time.Second
+	wsServer, err := agent.NewRealTimeWebSocketServer(agent.RealTimeWSOptions{
+		EnhancedServerOptions: opts,
 	})
 	if err != nil {
 		return fmt.Errorf("create agent server: %w", err)
 	}
 
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+
 	// Store reference
-	r.agentServer = &AgentServer{
+	srv := &AgentServer{
 		server: wsServer,
 		agent:  ag,
+		ctx:    ctx,
+		cancel: cancel,
+		done:   done,
 		runner: r,
 	}
+	r.agentServer = srv
 
-	// Start server in background
-	r.agentServer.ctx, r.agentServer.cancel = context.WithCancel(context.Background())
-	r.agentServer.done = make(chan struct{})
-	
+	// Start server in background — capture locals to avoid reading
+	// r.agentServer after stopAgentServer nils it.
 	go func() {
-		defer close(r.agentServer.done)
-		
+		defer close(done)
+
 		log.Printf("agent server starting on %s", addr)
-		
-		// The WebSocket server handles HTTP requests
-		httpServer := &http.Server{
-			Addr:    listenAddr,
-			Handler: nil, // Uses default mux with WebSocket handler
+
+		if err := wsServer.Start(); err != nil {
+			log.Printf("agent server start error: %v", err)
+			return
 		}
-		
-		// Start in goroutine
+
+		network := "tcp"
+		if strings.HasPrefix(addr, "unix:") {
+			network = "unix"
+			_ = os.Remove(listenAddr)
+		}
+		ln, err := net.Listen(network, listenAddr)
+		if err != nil {
+			log.Printf("agent server listen error: %v", err)
+			_ = wsServer.Stop()
+			return
+		}
+
+		// Publish listener and resolved address under the lock
+		srv.mu.Lock()
+		srv.listener = ln
+		if network == "tcp" {
+			srv.addr = "tcp:" + ln.Addr().String()
+		} else {
+			srv.addr = "unix:" + ln.Addr().String()
+		}
+		srv.mu.Unlock()
+
+		httpServer := &http.Server{Handler: wsServer}
+
 		go func() {
-			if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			if err := httpServer.Serve(ln); err != nil && err != http.ErrServerClosed {
 				log.Printf("agent server error: %v", err)
 			}
 		}()
-		
+
 		// Wait for shutdown signal
-		<-r.agentServer.ctx.Done()
-		
-		// Graceful shutdown
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), runnerAgentShutdownTimeout)
-		defer cancel()
-		
+		<-ctx.Done()
+
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), runnerAgentShutdownTimeout)
+		defer shutdownCancel()
+
 		if err := httpServer.Shutdown(shutdownCtx); err != nil {
 			log.Printf("agent server shutdown error: %v", err)
 		}
+		if err := wsServer.Stop(); err != nil {
+			log.Printf("agent server stop error: %v", err)
+		}
 	}()
 
-	// Store the actual address (may differ if port 0 was used)
-	r.agentServer.addr = addr
-	
 	log.Printf("agent server listening on %s", addr)
 	return nil
 }
@@ -144,18 +177,19 @@ func (r *Runner) stopAgentServer() {
 		return
 	}
 
-	if r.agentServer.cancel != nil {
-		r.agentServer.cancel()
+	srv := r.agentServer
+	r.agentServer = nil
+
+	if srv.cancel != nil {
+		srv.cancel()
 	}
 
 	select {
-	case <-r.agentServer.done:
+	case <-srv.done:
 		log.Printf("agent server stopped gracefully")
 	case <-time.After(runnerAgentShutdownTimeout):
 		log.Printf("agent server shutdown timed out after %s", runnerAgentShutdownTimeout)
 	}
-
-	r.agentServer = nil
 }
 
 // GetAgentSnapshot returns the current UI state for external control.
@@ -270,5 +304,8 @@ func (r *Runner) AgentAddr() string {
 	if r == nil || r.agentServer == nil {
 		return ""
 	}
-	return r.agentServer.addr
+	srv := r.agentServer
+	srv.mu.Lock()
+	defer srv.mu.Unlock()
+	return srv.addr
 }

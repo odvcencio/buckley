@@ -17,6 +17,7 @@ type sidebarStatus struct {
 	showExperiment  bool
 	showRLM         bool
 	showCircuit     bool
+	showAgents      bool
 
 	currentTask   string
 	taskProgress  int
@@ -36,16 +37,19 @@ type sidebarStatus struct {
 
 	circuitStatus *CircuitStatus
 
+	agents []AgentSummary
+
 	spinnerFrame int
 
-	taskPanel       *taskPanel
-	planPanel       *planPanel
-	toolsPanel      *toolsPanel
-	contextPanel    *contextPanel
-	experimentPanel *experimentPanel
-	rlmPanel        *rlmPanel
-	circuitPanel    *circuitPanel
-	calendarPanel   *calendarPanel
+	taskPanel        *taskPanel
+	planPanel        *planPanel
+	toolsPanel       *toolsPanel
+	contextPanel     *contextPanel
+	experimentPanel  *experimentPanel
+	rlmPanel         *rlmPanel
+	circuitPanel     *circuitPanel
+	agentsPanelInst  *agentsPanel
+	calendarPanel    *calendarPanel
 
 	content *runtime.Flex
 	scroll  *uiwidgets.ScrollView
@@ -60,6 +64,7 @@ func newSidebarStatus(border backend.Style) *sidebarStatus {
 		showExperiment:  true,
 		showRLM:         true,
 		showCircuit:     true,
+		showAgents:      true,
 	}
 	status.taskPanel = newTaskPanel(border)
 	status.planPanel = newPlanPanel(border)
@@ -68,6 +73,7 @@ func newSidebarStatus(border backend.Style) *sidebarStatus {
 	status.experimentPanel = newExperimentPanel(border)
 	status.rlmPanel = newRLMPanel(border)
 	status.circuitPanel = newCircuitPanel(border)
+	status.agentsPanelInst = newAgentsPanel(border)
 	status.calendarPanel = newCalendarPanel(border)
 
 	status.content = status.buildContent()
@@ -120,6 +126,11 @@ func (s *sidebarStatus) buildContent() *runtime.Flex {
 			children = append(children, runtime.Fixed(panel))
 		}
 	}
+	if s.showAgents {
+		if panel := s.agentsPanelInst.Panel(); panel != nil {
+			children = append(children, runtime.Fixed(panel))
+		}
+	}
 	if panel := s.calendarPanel.Panel(); panel != nil {
 		children = append(children, runtime.Fixed(panel))
 	}
@@ -134,7 +145,7 @@ func (s *sidebarStatus) rebuild() {
 	s.scroll.SetContent(s.content)
 }
 
-func (s *sidebarStatus) ApplyVisibility(showCurrentTask, showPlan, showTools, showContext, showExperiment, showRLM, showCircuit bool) bool {
+func (s *sidebarStatus) ApplyVisibility(showCurrentTask, showPlan, showTools, showContext, showExperiment, showRLM, showCircuit, showAgents bool) bool {
 	if s == nil {
 		return false
 	}
@@ -165,6 +176,10 @@ func (s *sidebarStatus) ApplyVisibility(showCurrentTask, showPlan, showTools, sh
 	}
 	if s.showCircuit != showCircuit {
 		s.showCircuit = showCircuit
+		changed = true
+	}
+	if s.showAgents != showAgents {
+		s.showAgents = showAgents
 		changed = true
 	}
 	if changed {
@@ -207,6 +222,9 @@ func (s *sidebarStatus) SetStyles(border, background, text backend.Style) {
 	}
 	if s.circuitPanel != nil {
 		s.circuitPanel.SetStyles(border, background)
+	}
+	if s.agentsPanelInst != nil {
+		s.agentsPanelInst.SetStyles(border, background)
 	}
 	if s.calendarPanel != nil {
 		s.calendarPanel.SetStyles(border, background)
@@ -269,6 +287,9 @@ func (s *sidebarStatus) HasContent() bool {
 		return true
 	}
 	if s.circuitStatus != nil {
+		return true
+	}
+	if len(s.agents) > 0 {
 		return true
 	}
 	return false
@@ -338,6 +359,14 @@ func (s *sidebarStatus) applyCircuitStatus(status *CircuitStatus) {
 	s.updateCircuitPanel()
 }
 
+func (s *sidebarStatus) applyAgents(agents []AgentSummary) {
+	if s == nil {
+		return
+	}
+	s.agents = agents
+	s.updateAgentsPanel()
+}
+
 func (s *sidebarStatus) updateAllPanels() {
 	s.updateTaskPanel()
 	s.updatePlanPanel()
@@ -346,6 +375,7 @@ func (s *sidebarStatus) updateAllPanels() {
 	s.updateExperimentPanel()
 	s.updateRLMPanel()
 	s.updateCircuitPanel()
+	s.updateAgentsPanel()
 }
 
 func (s *sidebarStatus) updateTaskPanel() {
@@ -407,6 +437,13 @@ func (s *sidebarStatus) updateCircuitPanel() {
 		return
 	}
 	s.circuitPanel.Update(s.circuitStatus)
+}
+
+func (s *sidebarStatus) updateAgentsPanel() {
+	if s == nil || s.agentsPanelInst == nil {
+		return
+	}
+	s.agentsPanelInst.Update(s.agents)
 }
 
 func (s *sidebarStatus) contextRatio() float64 {

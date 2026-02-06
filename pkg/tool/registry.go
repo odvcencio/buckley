@@ -31,6 +31,7 @@ const ToolCallIDParam = "__buckley_tool_call_id"
 type Registry struct {
 	mu          sync.RWMutex
 	tools       map[string]Tool
+	toolKinds   map[string]string // tool name → ACP tool_call kind
 	middlewares []Middleware
 	executor    Executor
 	hooks       *HookRegistry
@@ -50,6 +51,7 @@ type Registry struct {
 
 type registryOptions struct {
 	builtinFilter func(Tool) bool
+	kindOverrides map[string]string
 }
 
 // RegistryOption configures registry construction.
@@ -58,8 +60,9 @@ type RegistryOption func(*registryOptions)
 // NewEmptyRegistry creates a new empty tool registry without any built-in tools
 func NewEmptyRegistry() *Registry {
 	r := &Registry{
-		tools: make(map[string]Tool),
-		hooks: &HookRegistry{},
+		tools:     make(map[string]Tool),
+		toolKinds: make(map[string]string),
+		hooks:     &HookRegistry{},
 	}
 	r.rebuildExecutor()
 	return r
@@ -72,11 +75,16 @@ func NewRegistry(opts ...RegistryOption) *Registry {
 		opt(&cfg)
 	}
 	r := &Registry{
-		tools: make(map[string]Tool),
-		hooks: &HookRegistry{},
+		tools:     make(map[string]Tool),
+		toolKinds: make(map[string]string),
+		hooks:     &HookRegistry{},
 	}
 
 	r.registerBuiltins(cfg)
+	r.applyDefaultKinds()
+	for name, kind := range cfg.kindOverrides {
+		r.toolKinds[name] = kind
+	}
 	r.rebuildExecutor()
 
 	return r
@@ -180,6 +188,16 @@ func WithBuiltinFilter(filter func(Tool) bool) RegistryOption {
 	}
 }
 
+// WithKind sets the ACP tool_call kind for a tool during registry construction.
+func WithKind(toolName, kind string) RegistryOption {
+	return func(opts *registryOptions) {
+		if opts.kindOverrides == nil {
+			opts.kindOverrides = make(map[string]string)
+		}
+		opts.kindOverrides[toolName] = kind
+	}
+}
+
 func (r *Registry) registerBuiltins(cfg registryOptions) {
 	register := func(tool Tool) {
 		if cfg.builtinFilter == nil || cfg.builtinFilter(tool) {
@@ -260,6 +278,88 @@ func (r *Registry) registerBuiltins(cfg registryOptions) {
 	register(&builtin.FluffyAgentTool{})
 
 	// Note: TODO tool is registered separately with SetTodoStore()
+}
+
+// applyDefaultKinds sets ACP tool_call kinds for built-in tools.
+func (r *Registry) applyDefaultKinds() {
+	kinds := map[string]string{
+		// File read tools
+		"read_file":      "read",
+		"list_directory":  "read",
+		"find_files":      "search",
+		"file_exists":     "read",
+		"get_file_info":   "read",
+		"search_text":     "search",
+		"excel":           "read",
+		"lookup_context":  "read",
+
+		// File edit tools
+		"write_file":      "edit",
+		"edit_file":       "edit",
+		"insert_text":     "edit",
+		"delete_lines":    "delete",
+		"patch_file":      "edit",
+		"search_replace":  "edit",
+
+		// Git tools
+		"git_status":      "read",
+		"git_diff":        "read",
+		"git_log":         "read",
+		"git_blame":       "read",
+
+		// Code navigation
+		"find_symbol":           "search",
+		"find_references":       "search",
+		"get_function_signature": "read",
+
+		// Refactoring
+		"rename_symbol":    "edit",
+		"extract_function": "edit",
+
+		// Analysis
+		"analyze_complexity": "read",
+		"find_duplicates":    "search",
+
+		// Testing
+		"run_tests":      "execute",
+		"generate_test":  "edit",
+
+		// Documentation
+		"generate_docstring": "edit",
+		"explain_code":       "think",
+
+		// Shell
+		"run_shell": "execute",
+
+		// Browser
+		"browse_url":             "fetch",
+		"browser_start":          "execute",
+		"browser_navigate":       "fetch",
+		"browser_observe":        "read",
+		"browser_stream":         "read",
+		"browser_act":            "execute",
+		"browser_clipboard_read":  "read",
+		"browser_clipboard_write": "edit",
+		"browser_close":          "execute",
+
+		// Delegation
+		"codex":    "execute",
+		"claude":   "execute",
+		"buckley":  "execute",
+		"subagent": "execute",
+
+		// Misc
+		"create_skill":    "edit",
+		"terminal_editor": "execute",
+		"todo":            "edit",
+		"fluffy_agent":    "execute",
+	}
+
+	for name, kind := range kinds {
+		if _, exists := r.tools[name]; exists {
+			r.toolKinds[name] = kind
+		}
+	}
 }
 
 // EnableTelemetry wires telemetry events for selected built-in tools.
@@ -373,6 +473,28 @@ func (r *Registry) Remove(name string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	delete(r.tools, name)
+	delete(r.toolKinds, name)
+}
+
+// SetToolKind associates an ACP tool_call kind with a tool name.
+// Valid kinds are defined in pkg/acp/types.go (read, edit, delete, execute, etc.).
+func (r *Registry) SetToolKind(toolName, kind string) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.toolKinds[toolName] = kind
+}
+
+// ToolKind returns the ACP tool_call kind for a tool, or empty string if not set.
+func (r *Registry) ToolKind(toolName string) string {
+	if r == nil {
+		return ""
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.toolKinds[toolName]
 }
 
 // Filter removes tools that do not match the predicate.

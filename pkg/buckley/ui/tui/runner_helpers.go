@@ -9,9 +9,9 @@ import (
 	"time"
 
 	buckleywidgets "github.com/odvcencio/buckley/pkg/buckley/ui/widgets"
-	"github.com/odvcencio/fluffyui/backend"
 	"github.com/odvcencio/fluffyui/runtime"
 	"github.com/odvcencio/fluffyui/state"
+	"github.com/odvcencio/fluffyui/terminal"
 	uiwidgets "github.com/odvcencio/fluffyui/widgets"
 )
 
@@ -303,15 +303,11 @@ func (r *Runner) focusTopLayer(screen *runtime.Screen) {
 	}
 }
 
-func overlayCount(screen *runtime.Screen) int {
+func (r *Runner) overlayCount(screen *runtime.Screen) int {
 	if screen == nil {
 		return 0
 	}
-	count := screen.LayerCount() - 1
-	if count < 0 {
-		return 0
-	}
-	return count
+	return screen.OverlayCount()
 }
 
 // jumpToBottom scrolls to the bottom of the chat.
@@ -331,6 +327,29 @@ func (r *Runner) toggleSidebar() {
 	}
 	visible := r.state.SidebarVisible.Get()
 	r.state.SidebarVisible.Set(!visible)
+}
+
+// bindWidgets binds all widgets to app services so they can request redraws.
+func (r *Runner) bindWidgets() {
+	if r == nil || r.app == nil {
+		return
+	}
+	services := r.app.Services()
+	if r.chatView != nil {
+		r.chatView.Bind(services)
+	}
+	if r.sidebar != nil {
+		r.sidebar.Bind(services)
+	}
+	if r.header != nil {
+		r.header.Bind(services)
+	}
+	if r.inputArea != nil {
+		r.inputArea.Bind(services)
+	}
+	if r.statusBar != nil {
+		r.statusBar.Bind(services)
+	}
 }
 
 // rebuildLayout rebuilds the widget tree layout.
@@ -368,11 +387,13 @@ func (r *Runner) ensureInputFocus() {
 	r.trySetInputFocus()
 }
 
-// setToastStyles configures the toast stack styles.
-func (r *Runner) setToastStyles(bg, text, info, success, warn, err backend.Style) {
-	if r.toastStack != nil {
-		r.toastStack.SetStyles(bg, text, info, success, warn, err)
+// onAppReady is called once during Run, after the Screen is initialized.
+func (r *Runner) onAppReady(app *runtime.App) {
+	if r == nil || app == nil {
+		return
 	}
+	r.trySetInputFocus()
+	r.focusInitialized = true
 }
 
 func (r *Runner) initFocusIfNeeded(app *runtime.App) {
@@ -406,7 +427,8 @@ func (r *Runner) trySetInputFocus() bool {
 		return false
 	}
 	// If inputArea is already focused, we're done
-	if scope.Current() == focusable {
+	current := scope.Current()
+	if current == focusable {
 		return true
 	}
 	// Try to set focus
@@ -417,6 +439,52 @@ func (r *Runner) trySetInputFocus() bool {
 	// SetFocus failed - inputArea might not be registered yet
 	// This can happen if focus registration hasn't completed
 	return false
+}
+
+func (r *Runner) maybeCaptureInput(app *runtime.App, key runtime.KeyMsg) {
+	if r == nil || r.inputArea == nil || app == nil {
+		return
+	}
+	if !isTypingKey(key) {
+		return
+	}
+	screen := app.Screen()
+	if screen == nil {
+		return
+	}
+	if top := screen.TopLayer(); top != nil && top.Modal && screen.LayerCount() > 1 {
+		return
+	}
+	scope := screen.BaseFocusScope()
+	if scope == nil {
+		return
+	}
+	current := scope.Current()
+	if current == r.inputArea {
+		return
+	}
+	if current != nil && current != r.chatView {
+		return
+	}
+	if r.trySetInputFocus() {
+		r.focusInitialized = true
+		return
+	}
+	r.inputArea.Focus()
+	if r.app != nil {
+		r.app.Invalidate()
+	}
+}
+
+func isTypingKey(key runtime.KeyMsg) bool {
+	switch key.Key {
+	case terminal.KeyRune:
+		return key.Rune != 0
+	case terminal.KeyBackspace, terminal.KeyDelete:
+		return true
+	default:
+		return false
+	}
 }
 
 // DebugFocusState logs the current focus state for debugging.

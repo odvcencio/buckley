@@ -17,7 +17,8 @@ func newChatMessagesVirtual(owner *ChatMessages) *chatMessagesVirtual {
 }
 
 func (v *chatMessagesVirtual) Measure(constraints runtime.Constraints) runtime.Size {
-	return runtime.Size{Width: constraints.MaxWidth, Height: constraints.MaxHeight}
+	// Return minimal size - the ScrollView will expand this as needed
+	return constraints.Constrain(runtime.Size{Width: 1, Height: 1})
 }
 
 func (v *chatMessagesVirtual) Layout(bounds runtime.Rect) {

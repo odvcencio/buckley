@@ -128,8 +128,12 @@ func (c *ChatView) Clear() {
 }
 
 // Measure returns the preferred size.
+// ChatView is a scrollable widget, so it returns minimal size to allow
+// flex containers to properly calculate available space for Expanded children.
+// When flex containers measure children with unbounded constraints (maxInt),
+// returning maxInt would cause the flex shrink algorithm to shrink this widget to 0.
 func (c *ChatView) Measure(constraints runtime.Constraints) runtime.Size {
-	return runtime.Size{Width: constraints.MaxWidth, Height: constraints.MaxHeight}
+	return constraints.Constrain(runtime.Size{Width: 1, Height: 1})
 }
 
 // Layout updates the layout bounds.
@@ -221,6 +225,9 @@ func (c *ChatView) Bind(services runtime.Services) {
 		return
 	}
 	c.services = services
+	if c.ChatMessages != nil {
+		c.ChatMessages.Bind(services)
+	}
 	if c.reasoning != nil {
 		c.reasoning.Bind(services)
 	}
@@ -230,6 +237,9 @@ func (c *ChatView) Bind(services runtime.Services) {
 func (c *ChatView) Unbind() {
 	if c == nil {
 		return
+	}
+	if c.ChatMessages != nil {
+		c.ChatMessages.Unbind()
 	}
 	if c.reasoning != nil {
 		c.reasoning.Unbind()

@@ -12,14 +12,17 @@ import (
 type sidebarFiles struct {
 	showRecentFiles bool
 	showTouches     bool
+	showLocks       bool
 
 	recentFiles   []string
 	activeTouches []TouchSummary
+	fileLocks     []FileLockSummary
 	projectPath   string
 
 	breadcrumbPanel *breadcrumbPanel
 	filesPanel      *filesPanel
 	touchesPanel    *touchesPanel
+	locksPanelInst  *locksPanel
 
 	content *runtime.Flex
 	scroll  *uiwidgets.ScrollView
@@ -29,10 +32,12 @@ func newSidebarFiles(border backend.Style) *sidebarFiles {
 	files := &sidebarFiles{
 		showRecentFiles: true,
 		showTouches:     true,
+		showLocks:       true,
 	}
 	files.breadcrumbPanel = newBreadcrumbPanel(border)
 	files.filesPanel = newFilesPanel(border)
 	files.touchesPanel = newTouchesPanel(border)
+	files.locksPanelInst = newLocksPanel(border)
 	files.content = files.buildContent()
 	files.scroll = uiwidgets.NewScrollView(files.content)
 	files.scroll.SetBehavior(scroll.ScrollBehavior{Vertical: scroll.ScrollAuto, Horizontal: scroll.ScrollNever, MouseWheel: 3, PageSize: 1})
@@ -61,6 +66,11 @@ func (f *sidebarFiles) buildContent() *runtime.Flex {
 			children = append(children, runtime.Fixed(panel))
 		}
 	}
+	if f.showLocks {
+		if panel := f.locksPanelInst.Panel(); panel != nil {
+			children = append(children, runtime.Fixed(panel))
+		}
+	}
 	return runtime.VBox(children...).WithGap(1)
 }
 
@@ -72,7 +82,7 @@ func (f *sidebarFiles) rebuild() {
 	f.scroll.SetContent(f.content)
 }
 
-func (f *sidebarFiles) ApplyVisibility(showRecentFiles, showTouches bool) bool {
+func (f *sidebarFiles) ApplyVisibility(showRecentFiles, showTouches, showLocks bool) bool {
 	if f == nil {
 		return false
 	}
@@ -83,6 +93,10 @@ func (f *sidebarFiles) ApplyVisibility(showRecentFiles, showTouches bool) bool {
 	}
 	if f.showTouches != showTouches {
 		f.showTouches = showTouches
+		changed = true
+	}
+	if f.showLocks != showLocks {
+		f.showLocks = showLocks
 		changed = true
 	}
 	if changed {
@@ -117,6 +131,9 @@ func (f *sidebarFiles) SetStyles(border, background backend.Style) {
 	if f.touchesPanel != nil {
 		f.touchesPanel.SetStyles(border, background)
 	}
+	if f.locksPanelInst != nil {
+		f.locksPanelInst.SetStyles(border, background)
+	}
 }
 
 func (f *sidebarFiles) HasContent() bool {
@@ -127,6 +144,9 @@ func (f *sidebarFiles) HasContent() bool {
 		return true
 	}
 	if len(f.recentFiles) > 0 {
+		return true
+	}
+	if len(f.fileLocks) > 0 {
 		return true
 	}
 	return false
@@ -148,10 +168,19 @@ func (f *sidebarFiles) applyRecentFiles(files []string) {
 	f.updateFilesPanel()
 }
 
+func (f *sidebarFiles) applyFileLocks(locks []FileLockSummary) {
+	if f == nil {
+		return
+	}
+	f.fileLocks = locks
+	f.updateLocksPanel()
+}
+
 func (f *sidebarFiles) updateAllPanels() {
 	f.updateBreadcrumb()
 	f.updateFilesPanel()
 	f.updateTouchesPanel()
+	f.updateLocksPanel()
 }
 
 func (f *sidebarFiles) updateBreadcrumb() {
@@ -173,4 +202,11 @@ func (f *sidebarFiles) updateTouchesPanel() {
 		return
 	}
 	f.touchesPanel.Update(f.activeTouches)
+}
+
+func (f *sidebarFiles) updateLocksPanel() {
+	if f == nil || f.locksPanelInst == nil {
+		return
+	}
+	f.locksPanelInst.Update(f.fileLocks)
 }

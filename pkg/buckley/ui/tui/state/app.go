@@ -83,6 +83,15 @@ type AppState struct {
 	// Header
 	ModelName *state.Signal[string]
 	SessionID *state.Signal[string]
+
+	// Sidebar visibility for machine panels
+	SidebarShowAgents *state.Signal[bool]
+	SidebarShowLocks  *state.Signal[bool]
+
+	// Machine
+	MachineAgents   *state.Signal[[]buckleywidgets.AgentSummary]
+	MachineFileLocks *state.Signal[[]buckleywidgets.FileLockSummary]
+	MachineModality *state.Signal[string]
 }
 
 // NewAppState creates a new application state with defaults.
@@ -143,7 +152,12 @@ func NewAppState() *AppState {
 		SidebarShowExperiment:     state.NewSignal(true),
 		SidebarShowRLM:            state.NewSignal(true),
 		SidebarShowCircuit:        state.NewSignal(true),
+		SidebarShowAgents:         state.NewSignal(true),
+		SidebarShowLocks:          state.NewSignal(true),
 		ModelName:                 state.NewSignal(""),
 		SessionID:                 state.NewSignal(""),
+		MachineAgents:             state.NewSignal([]buckleywidgets.AgentSummary(nil)),
+		MachineFileLocks:          state.NewSignal([]buckleywidgets.FileLockSummary(nil)),
+		MachineModality:           state.NewSignal("classic"),
 	}
 }

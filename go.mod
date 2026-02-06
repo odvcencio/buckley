@@ -18,7 +18,7 @@ require (
 	github.com/mattn/go-runewidth v0.0.19
 	github.com/muesli/termenv v0.16.0
 	github.com/nats-io/nats.go v1.37.0
-	github.com/odvcencio/fluffyui v0.3.1
+	github.com/odvcencio/fluffyui v0.3.3
 	github.com/oklog/ulid/v2 v2.1.1
 	github.com/pkoukk/tiktoken-go v0.1.8
 	github.com/pmezard/go-difflib v1.0.0
@@ -32,7 +32,7 @@ require (
 	go.uber.org/mock v0.6.0
 	golang.org/x/net v0.47.0
 	golang.org/x/sync v0.19.0
-	golang.org/x/term v0.37.0
+	golang.org/x/term v0.39.0
 	golang.org/x/time v0.14.0
 	google.golang.org/grpc v1.67.1
 	google.golang.org/protobuf v1.36.10
@@ -43,6 +43,8 @@ require (
 	modernc.org/sqlite v1.34.4
 	nhooyr.io/websocket v1.8.17
 )
+
+replace github.com/odvcencio/fluffyui => ../fluffyui
 
 require (
 	dario.cat/mergo v1.0.0 // indirect
@@ -71,7 +73,7 @@ require (
 	github.com/emirpasic/gods v1.18.1 // indirect
 	github.com/evanphx/json-patch v4.12.0+incompatible // indirect
 	github.com/gdamore/encoding v1.0.1 // indirect
-	github.com/gdamore/tcell/v2 v2.13.7 // indirect
+	github.com/gdamore/tcell/v3 v3.1.2 // indirect
 	github.com/go-git/gcfg v1.5.1-0.20230307220236-3a3c6141e376 // indirect
 	github.com/go-git/go-billy/v5 v5.6.2 // indirect
 	github.com/go-logr/logr v1.4.3 // indirect
@@ -132,7 +134,7 @@ require (
 	golang.org/x/crypto v0.44.0 // indirect
 	golang.org/x/image v0.35.0 // indirect
 	golang.org/x/oauth2 v0.22.0 // indirect
-	golang.org/x/sys v0.38.0 // indirect
+	golang.org/x/sys v0.40.0 // indirect
 	golang.org/x/text v0.33.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20240814211410-ddb44dafa142 // indirect
 	gopkg.in/inf.v0 v0.9.1 // indirect

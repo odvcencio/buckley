@@ -66,6 +66,27 @@ const (
 	EventBrowserActionFailed   EventType = "browser.action_failed"
 	EventBrowserFrameDelivered EventType = "browser.frame_delivered"
 	EventBrowserStreamEvent    EventType = "browser.stream_event"
+
+	// Machine state events
+	EventMachineSpawned   EventType = "machine.spawned"
+	EventMachineState     EventType = "machine.state"
+	EventMachineCompleted EventType = "machine.completed"
+	EventMachineFailed    EventType = "machine.failed"
+	EventMachineSteering  EventType = "machine.steering"
+
+	// Machine lock events
+	EventMachineLockAcquired EventType = "machine.lock.acquired"
+	EventMachineLockWaiting  EventType = "machine.lock.waiting"
+	EventMachineLockReleased EventType = "machine.lock.released"
+	EventMachineLockStale    EventType = "machine.lock.stale"
+
+	// Machine tool events
+	EventMachineToolStart    EventType = "machine.tool.start"
+	EventMachineToolComplete EventType = "machine.tool.complete"
+
+	// Machine review events
+	EventMachineReview    EventType = "machine.review"
+	EventMachineIteration EventType = "machine.iteration"
 )
 
 // Event describes workflow telemetry that UIs and IPC clients can consume.

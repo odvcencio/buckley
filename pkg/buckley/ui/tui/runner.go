@@ -15,6 +15,7 @@ import (
 	uitstate "github.com/odvcencio/buckley/pkg/buckley/ui/tui/state"
 	buckleywidgets "github.com/odvcencio/buckley/pkg/buckley/ui/widgets"
 	"github.com/odvcencio/buckley/pkg/diagnostics"
+	"github.com/odvcencio/buckley/pkg/telemetry"
 	"github.com/odvcencio/fluffyui/accessibility"
 	"github.com/odvcencio/fluffyui/backend"
 	"github.com/odvcencio/fluffyui/dragdrop"
@@ -53,6 +54,9 @@ type RunnerConfig struct {
 	SidebarMinWidth   int
 	SidebarMaxWidth   int
 
+	// Machine integration
+	Hub *telemetry.Hub
+
 	// Callbacks
 	OnSubmit      func(text string)
 	OnQuit        func()
@@ -81,7 +85,7 @@ type Runner struct {
 	inputArea    *buckleywidgets.InputArea
 	statusBar    *buckleywidgets.StatusBar
 	sidebar      *buckleywidgets.Sidebar
-	toastStack   *buckleywidgets.SignalToastStack
+	toastManager *toast.ToastManager
 	filePicker   *filepicker.FilePicker
 	modelPalette *buckleywidgets.InteractivePalette
 
@@ -114,6 +118,10 @@ type Runner struct {
 
 	// Agent server for real-time control
 	agentServer *AgentServer
+
+	// Machine event subscription
+	machineHub   *telemetry.Hub
+	machineUnsub func()
 
 	approvalMu     sync.Mutex
 	approvalQueue  []buckleywidgets.ApprovalRequest
@@ -199,6 +207,8 @@ func NewRunner(cfg RunnerConfig) (*Runner, error) {
 		sidebarService.SetProjectPath(projectRoot)
 	}
 
+	toastManager := toast.NewToastManager()
+
 	r := &Runner{
 		theme:          th,
 		workDir:        workDir,
@@ -208,6 +218,7 @@ func NewRunner(cfg RunnerConfig) (*Runner, error) {
 		chatService:    chatService,
 		sidebarService: sidebarService,
 		styleCache:     styleCache,
+		toastManager:   toastManager,
 		onSubmit:       cfg.OnSubmit,
 		onQuit:         cfg.OnQuit,
 		onFileSelect:   cfg.OnFileSelect,
@@ -238,6 +249,10 @@ func NewRunner(cfg RunnerConfig) (*Runner, error) {
 	keymap := buildKeymap(defs)
 	r.overlayKeymap = newOverlayKeymap(defs)
 
+	if traceBackend := maybeWrapBackendForKeyTrace(&cfg); traceBackend != nil {
+		cfg.Backend = traceBackend
+	}
+
 	// Build app options
 	opts := []fluffy.AppOption{
 		fluffy.WithRoot(root),
@@ -246,8 +261,14 @@ func NewRunner(cfg RunnerConfig) (*Runner, error) {
 		fluffy.WithTickRate(16 * time.Millisecond),
 		fluffy.WithKeyBindings(r.registerKeyBindings),
 		fluffy.WithKeymap(keymap),
+		// Enable automatic focus registration so focusable widgets are discovered.
+		fluffy.WithFocusRegistration(runtime.FocusRegistrationAuto),
 		// Prefer the last focusable (InputArea) while keeping fallback focus logic.
 		fluffy.WithAutoFocusPolicy(runtime.AutoFocusLast),
+		// OnReady initializes focus once the screen exists.
+		fluffy.WithOnReady(r.onAppReady),
+		// Toast layer is pushed automatically during OnReady.
+		fluffy.WithToastLayer(toastManager),
 	}
 
 	if cfg.Backend != nil {
@@ -268,6 +289,21 @@ func NewRunner(cfg RunnerConfig) (*Runner, error) {
 	r.app = bundle.App
 	r.bundle = bundle
 
+	// Style the toast stack created by WithToastLayer
+	if bundle.ToastStack != nil && r.styleCache != nil {
+		th := r.theme
+		bundle.ToastStack.SetStyles(
+			styleCache.Get(th.SurfaceRaised),
+			styleCache.Get(th.TextPrimary),
+			styleCache.Get(th.Info),
+			styleCache.Get(th.Success),
+			styleCache.Get(th.Warning),
+			styleCache.Get(th.Error),
+		)
+		bundle.ToastStack.SetAnimationsEnabled(!cfg.ReduceMotion && cfg.EffectsEnabled)
+	}
+
+	r.bindWidgets()
 	r.bindLayoutSignals()
 	r.bindSettingsSignals()
 
@@ -282,6 +318,12 @@ func NewRunner(cfg RunnerConfig) (*Runner, error) {
 			// Log but don't fail - agent server is optional
 			log.Printf("warning: failed to start agent server: %v", err)
 		}
+	}
+
+	// Subscribe to machine events if Hub is provided
+	if cfg.Hub != nil {
+		r.machineHub = cfg.Hub
+		r.subscribeToMachineEvents(cfg.Hub)
 	}
 
 	return r, nil
@@ -351,7 +393,8 @@ func (r *Runner) Run() error {
 	if r == nil || r.app == nil {
 		return nil
 	}
-	defer r.stopAgentServer() // Ensure cleanup on exit
+	defer r.stopAgentServer()          // Ensure cleanup on exit
+	defer r.stopMachineSubscription()
 	return r.app.Run(context.Background())
 }
 
@@ -360,7 +403,8 @@ func (r *Runner) RunWithContext(ctx context.Context) error {
 	if r == nil || r.app == nil {
 		return nil
 	}
-	defer r.stopAgentServer() // Ensure cleanup on exit
+	defer r.stopAgentServer()          // Ensure cleanup on exit
+	defer r.stopMachineSubscription()
 	return r.app.Run(ctx)
 }
 
@@ -476,6 +520,8 @@ func (r *Runner) buildWidgets(cfg RunnerConfig, styleCache *StyleCache) {
 			Experiment:         r.state.SidebarExperiment,
 			ExperimentStatus:   r.state.SidebarExperimentStatus,
 			ExperimentVariants: r.state.SidebarExperimentVariants,
+			ActiveAgents:       r.state.MachineAgents,
+			FileLocks:          r.state.MachineFileLocks,
 			ContextUsed:        r.state.ContextUsed,
 			ContextBudget:      r.state.ContextBudget,
 			ContextWindow:      r.state.ContextWindow,
@@ -491,6 +537,8 @@ func (r *Runner) buildWidgets(cfg RunnerConfig, styleCache *StyleCache) {
 			ShowExperiment:     r.state.SidebarShowExperiment,
 			ShowRLM:            r.state.SidebarShowRLM,
 			ShowCircuit:        r.state.SidebarShowCircuit,
+			ShowAgents:         r.state.SidebarShowAgents,
+			ShowLocks:          r.state.SidebarShowLocks,
 		},
 	)
 	r.sidebar.SetStyles(
@@ -515,18 +563,6 @@ func (r *Runner) buildWidgets(cfg RunnerConfig, styleCache *StyleCache) {
 		styleCache.Get(th.TextMuted),
 	)
 	r.sidebar.SetSpinnerStyle(styleCache.Get(th.ElectricBlue))
-
-	// Toast stack
-	r.toastStack = buckleywidgets.NewSignalToastStack(r.state.Toasts)
-	r.toastStack.SetAnimationsEnabled(!cfg.ReduceMotion && cfg.EffectsEnabled)
-	r.toastStack.SetStyles(
-		styleCache.Get(th.SurfaceRaised),
-		styleCache.Get(th.TextPrimary),
-		styleCache.Get(th.Info),
-		styleCache.Get(th.Success),
-		styleCache.Get(th.Warning),
-		styleCache.Get(th.Error),
-	)
 
 	// File picker
 	r.filePicker = filepicker.NewFilePicker(r.projectRoot)
@@ -631,12 +667,48 @@ func (r *Runner) handleSubmit(text string, mode buckleywidgets.InputMode) {
 			}
 		}
 	default:
+		// Check for modality prefix commands
+		if modality, rest, ok := parseModalityPrefix(text); ok {
+			r.setModality(modality)
+			text = strings.TrimSpace(rest)
+			if text == "" {
+				r.inputArea.Clear()
+				return
+			}
+		}
 		if r.onSubmit != nil {
 			r.onSubmit(text)
 		}
 	}
 
 	r.inputArea.Clear()
+}
+
+// parseModalityPrefix checks for /classic, /rlm, /ralph prefixes.
+// Returns (modality, remaining text, matched).
+func parseModalityPrefix(text string) (string, string, bool) {
+	lower := strings.ToLower(text)
+	for _, prefix := range []string{"/classic", "/rlm", "/ralph"} {
+		if !strings.HasPrefix(lower, prefix) {
+			continue
+		}
+		rest := text[len(prefix):]
+		if rest == "" || rest[0] == ' ' {
+			modality := prefix[1:] // strip leading /
+			return modality, rest, true
+		}
+	}
+	return "", text, false
+}
+
+// setModality updates the machine modality signal and shows a status override.
+func (r *Runner) setModality(modality string) {
+	if r.state != nil && r.state.MachineModality != nil {
+		r.state.MachineModality.Set(modality)
+	}
+	if r.statusService != nil {
+		r.statusService.SetStatusOverride("Mode: "+modality, 2*time.Second)
+	}
 }
 
 // registerKeyBindings adds Buckley-specific key bindings.
@@ -924,13 +996,28 @@ func newOverlayKeymap(defs []keyBindingDef) *keybind.Keymap {
 }
 
 func normalizeCtrlGChord(msg runtime.KeyMsg) runtime.KeyMsg {
-	if msg.Key != terminal.KeyNone || !msg.Ctrl {
+	if msg.Key == terminal.KeyNone && msg.Rune == 7 {
+		msg.Key = terminal.KeyRune
+		msg.Rune = 'g'
+		msg.Ctrl = true
+		return msg
+	}
+	if msg.Key == terminal.KeyNone && msg.Ctrl && (msg.Rune == 'g' || msg.Rune == 'G') {
+		msg.Key = terminal.KeyRune
+		msg.Rune = 'g'
+		return msg
+	}
+	if msg.Key == terminal.KeyRune && msg.Rune == 7 {
+		msg.Rune = 'g'
+		msg.Ctrl = true
+		return msg
+	}
+	if msg.Key != terminal.KeyRune || !msg.Ctrl {
 		return msg
 	}
 	if msg.Rune != 'g' && msg.Rune != 'G' {
 		return msg
 	}
-	msg.Key = terminal.KeyRune
 	msg.Rune = 'g'
 	return msg
 }
@@ -949,10 +1036,11 @@ func (r *Runner) update(app *runtime.App, msg runtime.Message) bool {
 		}
 	}
 	if key, ok := msg.(runtime.KeyMsg); ok {
-		msg = normalizeCtrlGChord(key)
+		key = normalizeCtrlGChord(key)
+		msg = key
+		r.maybeCaptureInput(app, key)
 	}
 	r.showNextApproval()
-	r.initFocusIfNeeded(app)
 
 	// First, let the default handler process terminal events
 	if runtime.DefaultUpdate(app, msg) {
@@ -982,7 +1070,7 @@ func (r *Runner) handleCommand(cmd runtime.Command) bool {
 	case runtime.PopOverlay:
 		if r.app != nil {
 			if screen := r.app.Screen(); screen != nil {
-				if overlayCount(screen) == 0 {
+				if r.overlayCount(screen) == 0 {
 					r.syncOverlayKeymap(screen)
 					r.focusTopLayer(screen)
 					return true
@@ -1328,13 +1416,13 @@ func (r *Runner) SetToasts(toasts []*toast.Toast) {
 
 // SetToastDismissHandler sets the handler for dismissing toasts.
 func (r *Runner) SetToastDismissHandler(onDismiss func(string)) {
-	if r == nil {
+	if r == nil || r.bundle == nil {
 		return
 	}
-	if r.toastStack == nil {
+	if r.bundle.ToastStack == nil {
 		return
 	}
-	r.toastStack.SetOnDismiss(onDismiss)
+	r.bundle.ToastStack.SetOnDismiss(onDismiss)
 }
 
 // SetDiagnostics sets the diagnostics collector.

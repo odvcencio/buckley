@@ -176,8 +176,8 @@ func (r *Runner) applyTheme(th *theme.Theme) {
 		r.sidebar.SetSpinnerStyle(r.styleCache.Get(th.ElectricBlue))
 	}
 	// Toasts
-	if r.toastStack != nil {
-		r.toastStack.SetStyles(
+	if r.bundle != nil && r.bundle.ToastStack != nil {
+		r.bundle.ToastStack.SetStyles(
 			r.styleCache.Get(th.SurfaceRaised),
 			r.styleCache.Get(th.TextPrimary),
 			r.styleCache.Get(th.Info),
@@ -276,8 +276,8 @@ func (r *Runner) applyMotionSettings() {
 	if r.state.EffectsEnabled != nil {
 		effects = r.state.EffectsEnabled.Get()
 	}
-	if r.toastStack != nil {
-		r.toastStack.SetAnimationsEnabled(!reduce && effects)
+	if r.bundle != nil && r.bundle.ToastStack != nil {
+		r.bundle.ToastStack.SetAnimationsEnabled(!reduce && effects)
 	}
 	if r.app != nil {
 		r.app.Invalidate()

@@ -431,6 +431,100 @@ func (p *circuitPanel) Update(status *CircuitStatus) {
 	p.alert.Variant = variant
 }
 
+type agentsPanel struct {
+	table *InteractiveTable
+	panel *uiwidgets.Panel
+}
+
+func newAgentsPanel(border backend.Style) *agentsPanel {
+	table := NewInteractiveTable(
+		uiwidgets.TableColumn{Title: "Agent"},
+		uiwidgets.TableColumn{Title: "State"},
+		uiwidgets.TableColumn{Title: "Mode"},
+	)
+	panel := uiwidgets.NewPanel(table).WithBorder(border)
+	panel.SetTitle("Agents")
+	return &agentsPanel{table: table, panel: panel}
+}
+
+func (p *agentsPanel) Panel() *uiwidgets.Panel {
+	if p == nil {
+		return nil
+	}
+	return p.panel
+}
+
+func (p *agentsPanel) SetStyles(border, bg backend.Style) {
+	if p == nil || p.panel == nil {
+		return
+	}
+	p.panel.SetStyle(bg)
+	p.panel.WithBorder(border)
+}
+
+func (p *agentsPanel) Update(agents []AgentSummary) {
+	if p == nil || p.table == nil {
+		return
+	}
+	rows := make([][]string, 0, len(agents))
+	for _, a := range agents {
+		rows = append(rows, []string{truncateID(a.ID), a.State, a.Modality})
+	}
+	if len(rows) == 0 {
+		rows = [][]string{{"No agents", "", ""}}
+	}
+	p.table.SetRows(rows)
+}
+
+type locksPanel struct {
+	table *InteractiveTable
+	panel *uiwidgets.Panel
+}
+
+func newLocksPanel(border backend.Style) *locksPanel {
+	table := NewInteractiveTable(
+		uiwidgets.TableColumn{Title: "File"},
+		uiwidgets.TableColumn{Title: "Holder"},
+		uiwidgets.TableColumn{Title: "Mode"},
+	)
+	panel := uiwidgets.NewPanel(table).WithBorder(border)
+	panel.SetTitle("Locks")
+	return &locksPanel{table: table, panel: panel}
+}
+
+func (p *locksPanel) Panel() *uiwidgets.Panel {
+	if p == nil {
+		return nil
+	}
+	return p.panel
+}
+
+func (p *locksPanel) SetStyles(border, bg backend.Style) {
+	if p == nil || p.panel == nil {
+		return
+	}
+	p.panel.SetStyle(bg)
+	p.panel.WithBorder(border)
+}
+
+func (p *locksPanel) Update(locks []FileLockSummary) {
+	if p == nil || p.table == nil {
+		return
+	}
+	rows := make([][]string, 0, len(locks))
+	for _, l := range locks {
+		name := l.Path
+		if idx := strings.LastIndex(name, "/"); idx >= 0 {
+			name = name[idx+1:]
+		}
+		rows = append(rows, []string{name, truncateID(l.Holder), l.Mode})
+	}
+	if len(rows) == 0 {
+		rows = [][]string{{"No locks", "", ""}}
+	}
+	p.table.SetRows(rows)
+}
+
 type calendarPanel struct {
 	calendar *uiwidgets.Calendar
 	panel    *uiwidgets.Panel

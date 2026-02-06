@@ -149,10 +149,11 @@ func (h *Header) onSessionChanged() {
 
 // Measure returns the header size (1 row tall, full width).
 func (h *Header) Measure(constraints runtime.Constraints) runtime.Size {
-	return runtime.Size{
+	// Use Constrain to handle unbounded MaxWidth safely
+	return constraints.Constrain(runtime.Size{
 		Width:  constraints.MaxWidth,
 		Height: 1,
-	}
+	})
 }
 
 // Render draws the header.

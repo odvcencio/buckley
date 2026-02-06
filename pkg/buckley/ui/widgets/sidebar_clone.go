@@ -88,3 +88,21 @@ func cloneCircuitStatus(status *CircuitStatus) *CircuitStatus {
 	cloned := *status
 	return &cloned
 }
+
+func cloneAgentSummaries(agents []AgentSummary) []AgentSummary {
+	if len(agents) == 0 {
+		return nil
+	}
+	cloned := make([]AgentSummary, len(agents))
+	copy(cloned, agents)
+	return cloned
+}
+
+func cloneFileLockSummaries(locks []FileLockSummary) []FileLockSummary {
+	if len(locks) == 0 {
+		return nil
+	}
+	cloned := make([]FileLockSummary, len(locks))
+	copy(cloned, locks)
+	return cloned
+}

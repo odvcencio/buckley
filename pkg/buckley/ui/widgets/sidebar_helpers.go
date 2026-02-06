@@ -8,6 +8,13 @@ import (
 	uiwidgets "github.com/odvcencio/fluffyui/widgets"
 )
 
+func truncateID(id string) string {
+	if len(id) <= 8 {
+		return id
+	}
+	return id[:8]
+}
+
 func summarizePlan(tasks []PlanTask) (completed, total int) {
 	for _, task := range tasks {
 		total++

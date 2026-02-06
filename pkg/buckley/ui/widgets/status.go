@@ -151,10 +151,11 @@ func (s *StatusBar) SetStyles(bg, text, mode backend.Style) {
 
 // Measure returns the preferred size.
 func (s *StatusBar) Measure(constraints runtime.Constraints) runtime.Size {
-	return runtime.Size{
+	// Use Constrain to handle unbounded MaxWidth safely
+	return constraints.Constrain(runtime.Size{
 		Width:  constraints.MaxWidth,
 		Height: 1,
-	}
+	})
 }
 
 // Layout positions the status bar.

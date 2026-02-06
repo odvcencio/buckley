@@ -288,3 +288,69 @@ const (
 	ToolKindFetch   = "fetch"
 	ToolKindOther   = "other"
 )
+
+// --- Buckley Machine Extensions ---
+// These extend the ACP protocol with machine-specific operations
+// for coordinating parallel agents and modality switching.
+
+// SpawnAgentParams is the request body for "machine/spawn_agent".
+type SpawnAgentParams struct {
+	SessionID string `json:"sessionId"`
+	Task      string `json:"task"`
+	Modality  string `json:"modality,omitempty"` // "classic", "rlm", "ralph"
+	Model     string `json:"model,omitempty"`
+	Spec      string `json:"spec,omitempty"` // ralph spec text
+}
+
+// SpawnAgentResult is the response for "machine/spawn_agent".
+type SpawnAgentResult struct {
+	AgentID string `json:"agentId"`
+}
+
+// SteerAgentParams is the request body for "machine/steer_agent".
+type SteerAgentParams struct {
+	SessionID string `json:"sessionId"`
+	AgentID   string `json:"agentId"`
+	Content   string `json:"content"`
+}
+
+// SteerAgentResult is the response for "machine/steer_agent".
+type SteerAgentResult struct{}
+
+// ListAgentsParams is the request body for "machine/list_agents".
+type ListAgentsParams struct {
+	SessionID string `json:"sessionId"`
+}
+
+// AgentInfo describes a running agent for list_agents responses.
+type AgentInfo struct {
+	AgentID  string `json:"agentId"`
+	State    string `json:"state"`
+	Modality string `json:"modality"`
+	ParentID string `json:"parentId,omitempty"`
+}
+
+// ListAgentsResult is the response for "machine/list_agents".
+type ListAgentsResult struct {
+	Agents []AgentInfo `json:"agents"`
+}
+
+// EscalateModeParams is the request body for "machine/escalate_mode".
+type EscalateModeParams struct {
+	SessionID string `json:"sessionId"`
+	AgentID   string `json:"agentId"`
+	Modality  string `json:"modality"` // target modality
+}
+
+// EscalateModeResult is the response for "machine/escalate_mode".
+type EscalateModeResult struct {
+	PreviousModality string `json:"previousModality"`
+	NewModality      string `json:"newModality"`
+}
+
+// Machine event notification types for session/update.
+const (
+	SessionUpdateMachineState = "machine_state"
+	SessionUpdateMachineLock  = "machine_lock"
+	SessionUpdateMachineAgent = "machine_agent"
+)

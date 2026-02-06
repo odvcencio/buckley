@@ -93,6 +93,22 @@ type CircuitStatus struct {
 	RetryAfterSecs      int
 }
 
+// AgentSummary represents an active machine agent for the sidebar.
+type AgentSummary struct {
+	ID       string
+	State    string // machine state name (e.g., "calling_model", "executing_tools")
+	Modality string // "classic", "rlm", "ralph"
+	ParentID string // empty for root agents
+	Task     string // description of what the agent is doing
+}
+
+// FileLockSummary represents a file lock held by an agent.
+type FileLockSummary struct {
+	Path   string
+	Holder string // agent ID
+	Mode   string // "read" or "write"
+}
+
 // SidebarConfig holds configurable options for the sidebar.
 type SidebarConfig struct {
 	// Width is the sidebar width in characters. Default 24, min 16, max 60.
@@ -118,6 +134,8 @@ type SidebarBindings struct {
 	Experiment         state.Readable[string]
 	ExperimentStatus   state.Readable[string]
 	ExperimentVariants state.Readable[[]ExperimentVariant]
+	ActiveAgents       state.Readable[[]AgentSummary]
+	FileLocks          state.Readable[[]FileLockSummary]
 	ContextUsed        state.Readable[int]
 	ContextBudget      state.Readable[int]
 	ContextWindow      state.Readable[int]
@@ -133,6 +151,8 @@ type SidebarBindings struct {
 	ShowExperiment     state.Readable[bool]
 	ShowRLM            state.Readable[bool]
 	ShowCircuit        state.Readable[bool]
+	ShowAgents         state.Readable[bool]
+	ShowLocks          state.Readable[bool]
 }
 
 // DefaultSidebarConfig returns sensible defaults.
@@ -209,6 +229,14 @@ type Sidebar struct {
 	ownedShowExpSig            *state.Signal[bool]
 	ownedShowRLMSig            *state.Signal[bool]
 	ownedShowCircSig           *state.Signal[bool]
+	activeAgentsSig            state.Readable[[]AgentSummary]
+	fileLocksSig               state.Readable[[]FileLockSummary]
+	showAgentsSig              state.Readable[bool]
+	showLocksSig               state.Readable[bool]
+	ownedActiveAgentsSig       *state.Signal[[]AgentSummary]
+	ownedFileLocksSig          *state.Signal[[]FileLockSummary]
+	ownedShowAgentsSig         *state.Signal[bool]
+	ownedShowLocksSig          *state.Signal[bool]
 
 	contextUpdateDepth int
 	resizeHover        bool
@@ -444,6 +472,30 @@ func NewSidebarWithBindings(cfg SidebarConfig, bindings SidebarBindings) *Sideba
 		s.ownedShowCircSig = state.NewSignal(true)
 		s.showCircuitSig = s.ownedShowCircSig
 	}
+	if bindings.ActiveAgents != nil {
+		s.activeAgentsSig = bindings.ActiveAgents
+	} else {
+		s.ownedActiveAgentsSig = state.NewSignal([]AgentSummary(nil))
+		s.activeAgentsSig = s.ownedActiveAgentsSig
+	}
+	if bindings.FileLocks != nil {
+		s.fileLocksSig = bindings.FileLocks
+	} else {
+		s.ownedFileLocksSig = state.NewSignal([]FileLockSummary(nil))
+		s.fileLocksSig = s.ownedFileLocksSig
+	}
+	if bindings.ShowAgents != nil {
+		s.showAgentsSig = bindings.ShowAgents
+	} else {
+		s.ownedShowAgentsSig = state.NewSignal(true)
+		s.showAgentsSig = s.ownedShowAgentsSig
+	}
+	if bindings.ShowLocks != nil {
+		s.showLocksSig = bindings.ShowLocks
+	} else {
+		s.ownedShowLocksSig = state.NewSignal(true)
+		s.showLocksSig = s.ownedShowLocksSig
+	}
 
 	s.initWidgets()
 	s.updateAllPanels()
@@ -556,6 +608,18 @@ func (s *Sidebar) subscribe() {
 	if s.showCircuitSig != nil {
 		s.subs.Observe(s.showCircuitSig, s.onVisibilityChanged)
 	}
+	if s.showAgentsSig != nil {
+		s.subs.Observe(s.showAgentsSig, s.onVisibilityChanged)
+	}
+	if s.showLocksSig != nil {
+		s.subs.Observe(s.showLocksSig, s.onVisibilityChanged)
+	}
+	if s.activeAgentsSig != nil {
+		s.subs.Observe(s.activeAgentsSig, s.onActiveAgentsChanged)
+	}
+	if s.fileLocksSig != nil {
+		s.subs.Observe(s.fileLocksSig, s.onFileLocksChanged)
+	}
 	s.onCurrentTaskChanged()
 	s.onPlanTasksChanged()
 	s.onRunningToolsChanged()
@@ -570,6 +634,8 @@ func (s *Sidebar) subscribe() {
 	s.onWidthChanged()
 	s.onTabIndexChanged()
 	s.onVisibilityChanged()
+	s.onActiveAgentsChanged()
+	s.onFileLocksChanged()
 }
 
 func (s *Sidebar) onContextChanged() {
@@ -722,6 +788,34 @@ func (s *Sidebar) onExperimentChanged() {
 	s.requestRelayout()
 }
 
+func (s *Sidebar) onActiveAgentsChanged() {
+	if s.activeAgentsSig == nil {
+		return
+	}
+	s.applyActiveAgents(cloneAgentSummaries(s.activeAgentsSig.Get()))
+	s.requestRelayout()
+}
+
+func (s *Sidebar) onFileLocksChanged() {
+	if s.fileLocksSig == nil {
+		return
+	}
+	s.applyFileLocks(cloneFileLockSummaries(s.fileLocksSig.Get()))
+	s.requestRelayout()
+}
+
+func (s *Sidebar) applyActiveAgents(agents []AgentSummary) {
+	if s.status != nil {
+		s.status.applyAgents(agents)
+	}
+}
+
+func (s *Sidebar) applyFileLocks(locks []FileLockSummary) {
+	if s.files != nil {
+		s.files.applyFileLocks(locks)
+	}
+}
+
 func (s *Sidebar) applyContext() {
 	used := 0
 	budget := 0
@@ -757,12 +851,14 @@ func (s *Sidebar) applyVisibility() (bool, bool) {
 			readVisibility(s.showExperimentSig, s.status.showExperiment),
 			readVisibility(s.showRLMSig, s.status.showRLM),
 			readVisibility(s.showCircuitSig, s.status.showCircuit),
+			readVisibility(s.showAgentsSig, s.status.showAgents),
 		)
 	}
 	if s.files != nil {
 		filesChanged = s.files.ApplyVisibility(
 			readVisibility(s.showRecentFilesSig, s.files.showRecentFiles),
 			readVisibility(s.showTouchesSig, s.files.showTouches),
+			readVisibility(s.showLocksSig, s.files.showLocks),
 		)
 	}
 	return statusChanged, filesChanged
@@ -1203,6 +1299,40 @@ func (s *Sidebar) applyCircuitStatus(status *CircuitStatus) {
 // SetShowCircuit controls visibility of circuit breaker section.
 func (s *Sidebar) SetShowCircuit(show bool) {
 	s.setVisibility(s.showCircuitSig, show)
+}
+
+// SetActiveAgents updates the active agents display.
+func (s *Sidebar) SetActiveAgents(agents []AgentSummary) {
+	if s == nil {
+		return
+	}
+	cloned := cloneAgentSummaries(agents)
+	if writeSignal(s.activeAgentsSig, cloned) {
+		return
+	}
+	s.applyActiveAgents(cloned)
+}
+
+// SetFileLocks updates the file locks display.
+func (s *Sidebar) SetFileLocks(locks []FileLockSummary) {
+	if s == nil {
+		return
+	}
+	cloned := cloneFileLockSummaries(locks)
+	if writeSignal(s.fileLocksSig, cloned) {
+		return
+	}
+	s.applyFileLocks(cloned)
+}
+
+// SetShowAgents controls visibility of agents section.
+func (s *Sidebar) SetShowAgents(show bool) {
+	s.setVisibility(s.showAgentsSig, show)
+}
+
+// SetShowLocks controls visibility of file locks section.
+func (s *Sidebar) SetShowLocks(show bool) {
+	s.setVisibility(s.showLocksSig, show)
 }
 
 // SetShowRLM controls visibility of the RLM section.

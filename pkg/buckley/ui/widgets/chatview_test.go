@@ -380,11 +380,15 @@ func TestChatView_Measure(t *testing.T) {
 		MaxHeight: 24,
 	})
 
-	if size.Width != 80 {
-		t.Errorf("expected width 80, got %d", size.Width)
+	// ChatView is scrollable, so it returns minimal size to allow
+	// flex containers to properly allocate space for Expanded children.
+	// Returning maxInt when given unbounded constraints would cause
+	// the flex shrink algorithm to shrink this widget to 0.
+	if size.Width != 1 {
+		t.Errorf("expected width 1 (scrollable widget), got %d", size.Width)
 	}
-	if size.Height != 24 {
-		t.Errorf("expected height 24, got %d", size.Height)
+	if size.Height != 1 {
+		t.Errorf("expected height 1 (scrollable widget), got %d", size.Height)
 	}
 }
 
