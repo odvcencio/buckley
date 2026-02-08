@@ -114,6 +114,16 @@ func (p *InteractivePalette) SetStyles(bg, border, title, query, item, selected,
 	p.categoryStyle = category
 }
 
+// Reset clears the query and selection state for a fresh display.
+func (p *InteractivePalette) Reset() {
+	if p == nil {
+		return
+	}
+	p.query = ""
+	p.selected = 0
+	p.updateFiltered()
+}
+
 // Query returns the current query string.
 func (p *InteractivePalette) Query() string {
 	return p.query
@@ -355,7 +365,8 @@ func (p *InteractivePalette) HandleMessage(msg runtime.Message) runtime.HandleRe
 			return runtime.Handled()
 		case terminal.KeyBackspace:
 			if len(p.query) > 0 {
-				p.query = p.query[:len(p.query)-1]
+				runes := []rune(p.query)
+				p.query = string(runes[:len(runes)-1])
 				p.updateFiltered()
 				return runtime.Handled()
 			}
@@ -533,14 +544,15 @@ func (p *InteractivePalette) scoreMatch(text, query string) (int, bool) {
 	score := 0
 	qi := 0
 	consecutive := 0
-	for i, r := range textLower {
-		if qi >= len(queryLower) {
+	queryRunes := []rune(queryLower)
+	textRunes := []rune(textLower)
+	for i, r := range textRunes {
+		if qi >= len(queryRunes) {
 			break
 		}
-		qr := rune(queryLower[qi])
-		if r == qr {
+		if r == queryRunes[qi] {
 			score += 10
-			if i == 0 || isWordBoundary(rune(textLower[i-1])) {
+			if i == 0 || isWordBoundary(textRunes[i-1]) {
 				score += 5
 			}
 			if consecutive > 0 {
@@ -553,7 +565,7 @@ func (p *InteractivePalette) scoreMatch(text, query string) (int, bool) {
 		}
 	}
 
-	if qi < len(queryLower) {
+	if qi < len(queryRunes) {
 		return 0, false
 	}
 	return score, true

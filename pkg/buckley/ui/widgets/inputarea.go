@@ -830,12 +830,12 @@ func measureTextHeight(text string, width int) int {
 	lines := strings.Split(text, "\n")
 	height := 0
 	for _, line := range lines {
-		runes := len([]rune(line))
-		if runes == 0 {
+		w := textWidth(line)
+		if w == 0 {
 			height++
 			continue
 		}
-		height += (runes-1)/width + 1
+		height += (w-1)/width + 1
 	}
 	if height < 1 {
 		return 1

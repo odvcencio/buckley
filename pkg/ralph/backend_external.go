@@ -150,7 +150,11 @@ func (b *ExternalBackend) buildArgs(req BackendRequest) []string {
 
 	// Expand template variables in args
 	for _, arg := range b.args {
-		args = append(args, expandTemplateVars(arg, req))
+		expanded, err := expandTemplateVars(arg, req)
+		if err != nil {
+			return nil
+		}
+		args = append(args, expanded)
 	}
 
 	// Append options as --key value flags (sorted for determinism)
@@ -182,15 +186,20 @@ func (b *ExternalBackend) SetAvailable(available bool) {
 	b.available = available
 }
 
+const maxExpandedSize = 128 * 1024 // 128KB
+
 // expandTemplateVars replaces template variables in the input string.
-func expandTemplateVars(input string, req BackendRequest) string {
+func expandTemplateVars(input string, req BackendRequest) (string, error) {
 	result := input
 	result = strings.ReplaceAll(result, "{prompt}", req.Prompt)
 	result = strings.ReplaceAll(result, "{model}", req.Model)
 	result = strings.ReplaceAll(result, "{sandbox}", req.SandboxPath)
 	result = strings.ReplaceAll(result, "{iteration}", strconv.Itoa(req.Iteration))
 	result = strings.ReplaceAll(result, "{session_id}", req.SessionID)
-	return result
+	if len(result) > maxExpandedSize {
+		return "", fmt.Errorf("expanded template exceeds %d bytes", maxExpandedSize)
+	}
+	return result, nil
 }
 
 // gitChangedFiles returns a set of files that git reports as changed.

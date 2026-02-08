@@ -3,7 +3,9 @@ package machine
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
+	"time"
 
 	"github.com/odvcencio/buckley/pkg/machine/locks"
 	"github.com/odvcencio/buckley/pkg/telemetry"
@@ -26,16 +28,19 @@ type Compactor interface {
 	Compact(ctx context.Context, action Compact) (CompactionCompleted, error)
 }
 
+const defaultMaxDelegationDepth = 3
+
 // RuntimeConfig holds dependencies for the Runtime.
 type RuntimeConfig struct {
-	Hub            *telemetry.Hub
-	ModelClient    ModelCaller
-	ToolExecutor   ToolBatchExecutor
-	LockManager    *locks.Manager
-	Compactor      Compactor
-	CommitExecutor CommitExecutor
-	ShellExecutor  ShellExecutor
-	MaxIterations  int
+	Hub                *telemetry.Hub
+	ModelClient        ModelCaller
+	ToolExecutor       ToolBatchExecutor
+	LockManager        *locks.Manager
+	Compactor          Compactor
+	CommitExecutor     CommitExecutor
+	ShellExecutor      ShellExecutor
+	MaxIterations      int
+	MaxDelegationDepth int
 }
 
 // RuntimeResult is the output of a completed machine run.
@@ -48,7 +53,8 @@ type RuntimeResult struct {
 
 // Runtime drives a Machine through state transitions by executing Actions.
 type Runtime struct {
-	cfg RuntimeConfig
+	cfg   RuntimeConfig
+	depth int // current delegation nesting depth
 
 	mu       sync.Mutex
 	steering map[string]string // agentID → queued steering
@@ -58,6 +64,9 @@ type Runtime struct {
 func NewRuntime(cfg RuntimeConfig) *Runtime {
 	if cfg.MaxIterations <= 0 {
 		cfg.MaxIterations = defaultMaxIterations
+	}
+	if cfg.MaxDelegationDepth <= 0 {
+		cfg.MaxDelegationDepth = defaultMaxDelegationDepth
 	}
 	return &Runtime{
 		cfg:      cfg,
@@ -89,13 +98,17 @@ func (r *Runtime) Run(ctx context.Context, id string, modality Modality, input s
 		m.Transition(UserSteering{Content: s})
 	}
 
-	// Start with user input
+	return r.drive(ctx, m, input)
+}
+
+// drive executes the core machine loop. Shared by Run and runChild.
+func (r *Runtime) drive(ctx context.Context, m *Observable, input string) (*RuntimeResult, error) {
 	_, actions := m.Transition(UserInput{Content: input})
 
 	iterations := 0
 	for {
 		if err := ctx.Err(); err != nil {
-			return nil, fmt.Errorf("machine %s cancelled: %w", id, err)
+			return nil, fmt.Errorf("machine %s cancelled: %w", m.ID(), err)
 		}
 
 		iterations++
@@ -112,13 +125,18 @@ func (r *Runtime) Run(ctx context.Context, id string, modality Modality, input s
 		}
 
 		var event Event
-		var err error
 
-		// Execute actions and collect resulting events
+		// Execute actions and collect resulting events.
+		// Keep the first non-nil event as the transition trigger;
+		// subsequent actions (ReleaseLocks, EmitResult, etc.) are
+		// side-effects that must not overwrite it.
 		for _, action := range actions {
-			event, err = r.executeAction(ctx, m, action)
-			if err != nil {
-				return nil, fmt.Errorf("machine %s action failed: %w", id, err)
+			e, execErr := r.executeAction(ctx, m, action)
+			if execErr != nil {
+				return nil, fmt.Errorf("machine %s action failed: %w", m.ID(), execErr)
+			}
+			if event == nil && e != nil {
+				event = e
 			}
 		}
 
@@ -127,11 +145,11 @@ func (r *Runtime) Run(ctx context.Context, id string, modality Modality, input s
 			if m.State().IsTerminal() {
 				return r.buildResult(m, nil, iterations), nil
 			}
-			return nil, fmt.Errorf("machine %s stuck in state %s with no event", id, m.State())
+			return nil, fmt.Errorf("machine %s stuck in state %s with no event", m.ID(), m.State())
 		}
 
 		// Inject steering if queued
-		if s := r.consumeSteering(id); s != "" {
+		if s := r.consumeSteering(m.ID()); s != "" {
 			m.Transition(UserSteering{Content: s})
 		}
 
@@ -185,19 +203,10 @@ func (r *Runtime) executeAction(ctx context.Context, m *Observable, action Actio
 		return r.executeResetContext(act)
 
 	case DelegateToSubAgents:
-		// TODO: spawn child machines
-		var results []SubAgentResult
-		for _, task := range act.Tasks {
-			results = append(results, SubAgentResult{
-				AgentID: task.Task,
-				Summary: "pending implementation",
-				Success: true,
-			})
-		}
-		return SubAgentsCompleted{Results: results}, nil
+		return r.executeDelegation(ctx, m, act)
 
 	case ReviewSubAgentOutput:
-		return ReviewResult{Passed: true}, nil
+		return r.executeReview(act), nil
 
 	case SaveCheckpoint:
 		return CheckpointSaved{}, nil
@@ -212,6 +221,7 @@ func (r *Runtime) executeLockBatch(_ context.Context, m *Observable, act Acquire
 		return LocksAcquired{}, nil
 	}
 
+	var acquired []LockRequest
 	for _, lock := range act.Locks {
 		var err error
 		switch lock.Mode {
@@ -221,7 +231,15 @@ func (r *Runtime) executeLockBatch(_ context.Context, m *Observable, act Acquire
 			err = r.cfg.LockManager.AcquireWrite(m.ID(), lock.Path)
 		}
 		if err != nil {
-			// Could be a timeout — report as waiting
+			// Rollback any locks we already acquired in this batch
+			for _, held := range acquired {
+				switch held.Mode {
+				case LockRead:
+					r.cfg.LockManager.ReleaseRead(m.ID(), held.Path)
+				case LockWrite:
+					r.cfg.LockManager.ReleaseWrite(m.ID(), held.Path)
+				}
+			}
 			if conflictErr, ok := err.(*locks.LockConflictError); ok {
 				return LockWaiting{
 					Path:   conflictErr.Path,
@@ -231,9 +249,114 @@ func (r *Runtime) executeLockBatch(_ context.Context, m *Observable, act Acquire
 			}
 			return nil, err
 		}
+		acquired = append(acquired, lock)
 	}
 
 	return LocksAcquired{}, nil
+}
+
+// executeDelegation spawns child machines in parallel for each sub-agent task.
+func (r *Runtime) executeDelegation(ctx context.Context, parent *Observable, act DelegateToSubAgents) (Event, error) {
+	if len(act.Tasks) == 0 {
+		return SubAgentsCompleted{}, nil
+	}
+
+	if r.depth >= r.cfg.MaxDelegationDepth {
+		return SubAgentsCompleted{Results: []SubAgentResult{{
+			AgentID: parent.ID(),
+			Summary: fmt.Sprintf("delegation depth limit reached (%d)", r.cfg.MaxDelegationDepth),
+			Success: false,
+		}}}, nil
+	}
+
+	results := make([]SubAgentResult, len(act.Tasks))
+	var wg sync.WaitGroup
+
+	for i, task := range act.Tasks {
+		i, task := i, task
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+
+			// Append index to prevent collisions when tasks share names
+			childID := fmt.Sprintf("%s/%s-%d", parent.ID(), task.Task, i)
+			modality := task.Modality
+			if modality == 0 {
+				modality = Classic
+			}
+
+			// Apply budget constraints
+			childCtx := ctx
+			if task.Budget.MaxWallTime > 0 {
+				var cancel context.CancelFunc
+				childCtx, cancel = context.WithTimeout(ctx, time.Duration(task.Budget.MaxWallTime)*time.Second)
+				defer cancel()
+			}
+
+			// Create a child runtime with budget-scoped iteration limit and incremented depth
+			childCfg := r.cfg
+			if task.Budget.MaxIterations > 0 {
+				childCfg.MaxIterations = task.Budget.MaxIterations
+			}
+			childRT := &Runtime{cfg: childCfg, depth: r.depth + 1, steering: make(map[string]string)}
+
+			result, err := childRT.runChild(childCtx, childID, modality, parent.ID(), task)
+
+			// Release any locks held by this child
+			if r.cfg.LockManager != nil {
+				r.cfg.LockManager.ReleaseAll(childID)
+			}
+
+			if err != nil {
+				results[i] = SubAgentResult{
+					AgentID: childID,
+					Summary: fmt.Sprintf("failed: %v", err),
+					Success: false,
+				}
+			} else {
+				results[i] = SubAgentResult{
+					AgentID:    childID,
+					Summary:    result.Content,
+					TokensUsed: result.TokensUsed,
+					Success:    result.FinalState == Done,
+				}
+			}
+		}()
+	}
+
+	wg.Wait()
+	return SubAgentsCompleted{Results: results}, nil
+}
+
+// runChild creates and drives a child machine with parent telemetry tracking.
+func (r *Runtime) runChild(ctx context.Context, id string, modality Modality, parentID string, task SubAgentTask) (*RuntimeResult, error) {
+	m := NewObservableWithParent(id, modality, parentID, task.Task, task.Model, r.cfg.Hub)
+
+	input := task.Spec
+	if input == "" {
+		input = task.Task
+	}
+
+	return r.drive(ctx, m, input)
+}
+
+// executeReview checks sub-agent results and returns a pass/fail verdict.
+func (r *Runtime) executeReview(act ReviewSubAgentOutput) Event {
+	var failedAgents []string
+	for _, result := range act.Results {
+		if !result.Success {
+			failedAgents = append(failedAgents, result.AgentID)
+		}
+	}
+
+	if len(failedAgents) > 0 {
+		return ReviewResult{
+			Passed: false,
+			Reason: fmt.Sprintf("sub-agents failed: %s", strings.Join(failedAgents, ", ")),
+		}
+	}
+
+	return ReviewResult{Passed: true}
 }
 
 func (r *Runtime) buildResult(m *Observable, actions []Action, iterations int) *RuntimeResult {

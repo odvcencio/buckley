@@ -169,8 +169,11 @@ func (e *Executor) Run(ctx context.Context) error {
 		}
 
 		// Call session end handler (e.g., for PR creation)
+		// Use a fresh context since ctx may be cancelled (e.g., on timeout)
 		if e.onSessionEnd != nil {
-			if err := e.onSessionEnd(ctx); err != nil {
+			endCtx, endCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer endCancel()
+			if err := e.onSessionEnd(endCtx); err != nil {
 				e.writeProgress("  [SESSION-END] Handler failed: %v\n", err)
 			}
 		}
@@ -1101,22 +1104,24 @@ func (e *Executor) checkPromptReload() {
 
 	e.mu.Lock()
 	needsReload := info.ModTime().After(e.promptFileMtime)
+	if !needsReload {
+		e.mu.Unlock()
+		return
+	}
+
+	content, err := os.ReadFile(e.session.PromptFile)
+	if err != nil {
+		e.mu.Unlock()
+		return
+	}
+
+	e.promptFileMtime = info.ModTime()
 	e.mu.Unlock()
 
-	if needsReload {
-		content, err := os.ReadFile(e.session.PromptFile)
-		if err != nil {
-			return
-		}
+	e.session.SetPrompt(string(content))
 
-		e.session.SetPrompt(string(content))
-		e.mu.Lock()
-		e.promptFileMtime = info.ModTime()
-		e.mu.Unlock()
-
-		if e.logger != nil {
-			e.logger.LogPromptReload(e.session.PromptFile)
-		}
+	if e.logger != nil {
+		e.logger.LogPromptReload(e.session.PromptFile)
 	}
 }
 

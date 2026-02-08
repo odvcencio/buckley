@@ -4,8 +4,11 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -105,6 +108,32 @@ func (g *GzipCompressor) Name() string {
 	return "gzip"
 }
 
+func base64Encode(data []byte) string {
+	return base64.StdEncoding.EncodeToString(data)
+}
+
+// decompressSummary extracts and decompresses a summary that was stored with
+// the [COMPRESSED:<algo>]<base64-data> format.
+func decompressSummary(content string, compressor Compressor) (string, error) {
+	if compressor == nil {
+		return content, nil
+	}
+	prefix := fmt.Sprintf("[COMPRESSED:%s]", compressor.Name())
+	if !strings.HasPrefix(content, prefix) {
+		return content, nil
+	}
+	encoded := content[len(prefix):]
+	compressed, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		return "", fmt.Errorf("decoding compressed summary: %w", err)
+	}
+	raw, err := compressor.Decompress(compressed)
+	if err != nil {
+		return "", fmt.Errorf("decompressing summary: %w", err)
+	}
+	return string(raw), nil
+}
+
 // tokenEstimateCache provides cached token estimation for improved performance
 type tokenEstimateCache struct {
 	mu      sync.RWMutex
@@ -128,11 +157,16 @@ func newTokenEstimateCache(maxSize int) *tokenEstimateCache {
 	}
 }
 
+func textHash(text string) string {
+	h := sha256.Sum256([]byte(text))
+	return fmt.Sprintf("%x", h)
+}
+
 // Get retrieves a cached token count for the given text
 func (c *tokenEstimateCache) Get(text string) (int, bool) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	entry, ok := c.entries[text]
+	entry, ok := c.entries[textHash(text)]
 	if !ok {
 		return 0, false
 	}
@@ -153,7 +187,7 @@ func (c *tokenEstimateCache) Set(text string, tokens int) {
 		c.evictHalf()
 	}
 
-	c.entries[text] = cacheEntry{
+	c.entries[textHash(text)] = cacheEntry{
 		tokens:    tokens,
 		timestamp: time.Now(),
 	}
@@ -165,18 +199,13 @@ func (c *tokenEstimateCache) evictHalf() {
 		key   string
 		value cacheEntry
 	}
-	var sorted []kv
+	sorted := make([]kv, 0, len(c.entries))
 	for k, v := range c.entries {
 		sorted = append(sorted, kv{k, v})
 	}
-	// Sort by timestamp (oldest first)
-	for i := 0; i < len(sorted)-1; i++ {
-		for j := i + 1; j < len(sorted); j++ {
-			if sorted[i].value.timestamp.After(sorted[j].value.timestamp) {
-				sorted[i], sorted[j] = sorted[j], sorted[i]
-			}
-		}
-	}
+	sort.Slice(sorted, func(i, j int) bool {
+		return sorted[i].value.timestamp.Before(sorted[j].value.timestamp)
+	})
 	// Remove half
 	removeCount := len(sorted) / 2
 	for i := 0; i < removeCount && i < len(sorted); i++ {
@@ -336,6 +365,8 @@ func (cm *CompactionManager) SetConversation(conv *Conversation) {
 	if cm == nil {
 		return
 	}
+	cm.compactionMu.Lock()
+	defer cm.compactionMu.Unlock()
 	cm.conversation = conv
 }
 
@@ -344,6 +375,8 @@ func (cm *CompactionManager) SetOnComplete(handler func(*CompactionResult)) {
 	if cm == nil {
 		return
 	}
+	cm.compactionMu.Lock()
+	defer cm.compactionMu.Unlock()
 	cm.onComplete = handler
 }
 
@@ -352,6 +385,8 @@ func (cm *CompactionManager) SetCompressor(c Compressor) {
 	if cm == nil {
 		return
 	}
+	cm.compactionMu.Lock()
+	defer cm.compactionMu.Unlock()
 	cm.compressor = c
 }
 
@@ -360,6 +395,8 @@ func (cm *CompactionManager) SetWarningThresholdFn(fn func(float64)) {
 	if cm == nil {
 		return
 	}
+	cm.compactionMu.Lock()
+	defer cm.compactionMu.Unlock()
 	cm.warningThresholdFn = fn
 }
 
@@ -628,8 +665,8 @@ func (cm *CompactionManager) applySummary(conv *Conversation, summary string, to
 	if cm.compressor != nil && len(summaryContent) > 4096 {
 		compressed, err := cm.compressor.Compress([]byte(summaryContent))
 		if err == nil {
-			// Store compressed indicator prefix
-			summaryContent = fmt.Sprintf("[COMPRESSED:%s]%s", cm.compressor.Name(), string(compressed))
+			encoded := base64Encode(compressed)
+			summaryContent = fmt.Sprintf("[COMPRESSED:%s]%s", cm.compressor.Name(), encoded)
 		}
 	}
 

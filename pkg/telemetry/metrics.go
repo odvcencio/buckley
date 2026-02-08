@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"runtime/pprof"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -41,14 +42,14 @@ func (l Labels) String() string {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
-	result := ""
+	var b strings.Builder
 	for i, k := range keys {
 		if i > 0 {
-			result += ","
+			b.WriteByte(',')
 		}
-		result += fmt.Sprintf("%s=%s", k, l[k])
+		fmt.Fprintf(&b, "%s=%s", k, l[k])
 	}
-	return result
+	return b.String()
 }
 
 // Counter is a monotonically increasing metric.
@@ -306,16 +307,20 @@ func (h *Histogram) Observe(value float64) {
 		value = 0
 	}
 
-	// Find the bucket and increment
+	// Cumulative histogram: increment all buckets where value <= bucket
+	found := false
 	for i, bucket := range h.buckets {
 		if value <= bucket {
 			h.counts[i].Add(1)
-			break
+			found = true
 		}
-		// If we're at the last bucket, increment the +Inf bucket
-		if i == len(h.buckets)-1 {
-			h.counts[len(h.buckets)].Add(1)
-		}
+	}
+	// +Inf bucket: always incremented
+	if len(h.counts) > len(h.buckets) {
+		h.counts[len(h.buckets)].Add(1)
+	} else if !found && len(h.buckets) > 0 {
+		// Value exceeds all buckets but no +Inf slot exists
+		h.counts[len(h.buckets)-1].Add(1)
 	}
 
 	// Update sum and count (store seconds as nanoseconds for atomic operations)
@@ -376,10 +381,9 @@ func (h *Histogram) Percentile(p float64) float64 {
 		target = 1
 	}
 
-	cumulative := int64(0)
+	// With cumulative buckets, find the first bucket where count >= target
 	for i := range h.buckets {
-		cumulative += h.counts[i].Load()
-		if cumulative >= target {
+		if h.counts[i].Load() >= target {
 			return h.buckets[i]
 		}
 	}

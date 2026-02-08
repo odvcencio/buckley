@@ -720,24 +720,32 @@ func (s *Store) SaveMessagesBatch(messages []*Message) error {
 	defer stmt.Close()
 
 	now := time.Now()
-	totalTokens := 0
-	var sessionID string
-	var latest time.Time
+
+	type sessionStats struct {
+		count  int
+		tokens int
+		latest time.Time
+	}
+	perSession := make(map[string]*sessionStats)
 
 	for _, msg := range messages {
 		if msg == nil {
 			continue
 		}
-		if sessionID == "" {
-			sessionID = msg.SessionID
-		}
 		if msg.Timestamp.IsZero() {
 			msg.Timestamp = now
 		}
-		if msg.Timestamp.After(latest) {
-			latest = msg.Timestamp
+
+		ss := perSession[msg.SessionID]
+		if ss == nil {
+			ss = &sessionStats{}
+			perSession[msg.SessionID] = ss
 		}
-		totalTokens += msg.Tokens
+		ss.count++
+		ss.tokens += msg.Tokens
+		if msg.Timestamp.After(ss.latest) {
+			ss.latest = msg.Timestamp
+		}
 
 		result, err := stmt.Exec(
 			msg.SessionID,
@@ -764,8 +772,8 @@ func (s *Store) SaveMessagesBatch(messages []*Message) error {
 		msg.ID = id
 	}
 
-	// Update session stats in a single query
-	if sessionID != "" {
+	// Update session stats for all sessions
+	for sid, ss := range perSession {
 		update := `
 			UPDATE sessions
 			SET message_count = message_count + ?,
@@ -773,7 +781,7 @@ func (s *Store) SaveMessagesBatch(messages []*Message) error {
 			    last_active = ?
 			WHERE session_id = ?
 		`
-		if _, err := tx.Exec(update, len(messages), totalTokens, latest, sessionID); err != nil {
+		if _, err := tx.Exec(update, ss.count, ss.tokens, ss.latest, sid); err != nil {
 			_ = tx.Rollback()
 			return fmt.Errorf("update session stats: %w", err)
 		}
@@ -792,12 +800,12 @@ func (s *Store) SaveMessagesBatch(messages []*Message) error {
 		s.notify(newEvent(EventMessageCreated, msg.SessionID, msg.ID, msgCopy))
 	}
 
-	if sessionID != "" {
-		s.notify(newEvent(EventSessionUpdated, sessionID, sessionID, map[string]any{
+	for sid, ss := range perSession {
+		s.notify(newEvent(EventSessionUpdated, sid, sid, map[string]any{
 			"lastActive":    now,
-			"messageDelta":  len(messages),
-			"tokensDelta":   totalTokens,
-			"latestMessage": latest,
+			"messageDelta":  ss.count,
+			"tokensDelta":   ss.tokens,
+			"latestMessage": ss.latest,
 		}))
 	}
 

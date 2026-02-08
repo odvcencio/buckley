@@ -425,6 +425,7 @@ func NewController(cfg ControllerConfig) (*Controller, error) {
 		SidebarWidth:      sidebarWidth,
 		SidebarMinWidth:   sidebarMinWidth,
 		SidebarMaxWidth:   sidebarMaxWidth,
+		ToastManager:      toastMgr,
 		OnApproval: func(requestID string, approved, alwaysAllow bool) {
 			if ctrl != nil {
 				ctrl.handleApprovalDecision(requestID, approved, alwaysAllow)
@@ -1203,22 +1204,24 @@ func (c *Controller) handleModeCommand(mode string) error {
 	if err != nil {
 		return err
 	}
+	c.mu.Lock()
 	c.execStrategy = strategy
-	if c.execStrategy != nil {
-		c.app.SetExecutionMode(c.execStrategy.Name())
+	c.mu.Unlock()
+	if strategy != nil {
+		c.app.SetExecutionMode(strategy.Name())
 		if c.cfg != nil {
-			c.cfg.Execution.Mode = c.execStrategy.Name()
+			c.cfg.Execution.Mode = strategy.Name()
 		}
 	}
-	if setter, ok := c.execStrategy.(interface {
+	if setter, ok := strategy.(interface {
 		SetProgressManager(*progress.ProgressManager)
 	}); ok {
 		setter.SetProgressManager(c.progressMgr)
 	}
-	if setter, ok := c.execStrategy.(interface{ SetToastManager(*toast.ToastManager) }); ok {
+	if setter, ok := strategy.(interface{ SetToastManager(*toast.ToastManager) }); ok {
 		setter.SetToastManager(c.toastMgr)
 	}
-	c.app.AddMessage(fmt.Sprintf("Switched to %s mode", c.execStrategy.Name()), "system")
+	c.app.AddMessage(fmt.Sprintf("Switched to %s mode", strategy.Name()), "system")
 	return nil
 }
 
@@ -1299,7 +1302,6 @@ func preferredModelIDs(execID, planID, reviewID string, catalog map[string]model
 	add(execID)
 	add(planID)
 	add(reviewID)
-	add("moonshotai/kimi-k2.5")
 	return ids
 }
 
@@ -1312,8 +1314,11 @@ func (c *Controller) newSession() {
 	}
 	c.mu.Unlock()
 
-	// Mark old session as completed
+	// Cancel any active streaming and mark old session as completed
 	if oldSess != nil {
+		if oldSess.Cancel != nil {
+			oldSess.Cancel()
+		}
 		if oldSess.ID != "" {
 			_ = c.store.SetSessionStatus(oldSess.ID, storage.SessionStatusCompleted)
 		}
@@ -1665,6 +1670,14 @@ func (c *Controller) runToolLoop(ctx context.Context, sess *SessionState, modelI
 // runWithStrategy executes using the configured execution strategy.
 // This is the one true path for tool execution.
 func (c *Controller) runWithStrategy(ctx context.Context, sess *SessionState) (toolLoopOutcome, error) {
+	// Snapshot the execution strategy under lock to avoid racing with /mode command
+	c.mu.Lock()
+	strategy := c.execStrategy
+	c.mu.Unlock()
+	if strategy == nil {
+		return toolLoopOutcome{}, fmt.Errorf("execution strategy unavailable")
+	}
+
 	// Get the last user message as the prompt
 	prompt := ""
 	if sess.Conversation != nil {
@@ -1706,12 +1719,12 @@ func (c *Controller) runWithStrategy(ctx context.Context, sess *SessionState) (t
 		sess: sess,
 		ctrl: c,
 	}
-	if runner, ok := c.execStrategy.(interface{ SetStreamHandler(execution.StreamHandler) }); ok {
+	if runner, ok := strategy.(interface{ SetStreamHandler(execution.StreamHandler) }); ok {
 		runner.SetStreamHandler(handler)
 	}
 
 	// Execute
-	result, err := c.execStrategy.Execute(ctx, req)
+	result, err := strategy.Execute(ctx, req)
 	if err != nil {
 		return toolLoopOutcome{
 			streamed:      handler.hasStreamed(),
@@ -1772,8 +1785,10 @@ func (h *tuiStreamHandler) OnReasoning(reasoning string) {
 	if h == nil || h.app == nil {
 		return
 	}
+	h.mu.Lock()
 	h.reasoning.WriteString(reasoning)
 	h.hasReasoning = true
+	h.mu.Unlock()
 	h.app.AppendReasoning(reasoning)
 }
 
@@ -1781,16 +1796,22 @@ func (h *tuiStreamHandler) OnReasoningEnd() {
 	if h == nil || h.app == nil {
 		return
 	}
-	if h.hasReasoning {
-		full := h.reasoning.String()
-		preview := full
+	h.mu.Lock()
+	had := h.hasReasoning
+	var full, preview string
+	if had {
+		full = h.reasoning.String()
+		preview = full
 		if len(preview) > 40 {
 			preview = preview[:40]
 		}
-		h.app.CollapseReasoning(preview, full)
 	}
 	h.reasoning.Reset()
 	h.hasReasoning = false
+	h.mu.Unlock()
+	if had {
+		h.app.CollapseReasoning(preview, full)
+	}
 }
 
 func (h *tuiStreamHandler) OnToolStart(name string, arguments string) {
@@ -2035,9 +2056,12 @@ type ContextBudgetStats struct {
 }
 
 func (c *Controller) executionModelID() string {
+	c.mu.Lock()
+	cfg := c.cfg
+	c.mu.Unlock()
 	modelID := ""
-	if c.cfg != nil {
-		modelID = strings.TrimSpace(c.cfg.Models.Execution)
+	if cfg != nil {
+		modelID = strings.TrimSpace(cfg.Models.Execution)
 	}
 	if modelID == "" {
 		modelID = "openai/gpt-4o"
@@ -2692,6 +2716,11 @@ func (c *Controller) completeSessionByIndex(idx int) {
 	wasCurrent := idx == c.currentSession
 	onlySession := len(c.sessions) == 1
 
+	// Cancel any active streaming on this session
+	if sess.Cancel != nil {
+		sess.Cancel()
+	}
+
 	if !onlySession {
 		c.sessions = append(c.sessions[:idx], c.sessions[idx+1:]...)
 		if idx < c.currentSession {
@@ -2847,6 +2876,20 @@ func (c *Controller) switchToSessionLocked(idx int) {
 		c.app.SetStatus("Ready")
 	}
 	c.app.SetStreaming(sess.Streaming)
+
+	// Reset sidebar signals so stale data from previous session doesn't persist.
+	// The telemetry bridge will repopulate as new events arrive for the active session.
+	sigs := c.app.SidebarSignals()
+	sigs.CurrentTask.Set("")
+	sigs.TaskProgress.Set(0)
+	sigs.RunningTools.Set(nil)
+	sigs.ToolHistory.Set(nil)
+	sigs.ActiveTouches.Set(nil)
+	sigs.RecentFiles.Set(nil)
+	sigs.RLMStatus.Set(nil)
+	sigs.RLMScratchpad.Set(nil)
+	sigs.CircuitStatus.Set(nil)
+
 	c.showPendingApprovals(sess.ID)
 }
 
@@ -3699,11 +3742,14 @@ func (c *Controller) processMessageQueue(sess *SessionState) bool {
 	ctx, cancel := context.WithCancel(c.baseContext())
 	sess.Cancel = cancel
 	sess.Streaming = true
-	c.emitStreaming(sess.ID, true)
+	sessionID := sess.ID
 	c.mu.Unlock()
+	c.emitStreaming(sessionID, true)
 	c.app.SetStreaming(true)
 
-	// Stream response (this will recursively process remaining queue)
+	// Stream response for the queued message (reuses current goroutine).
+	// Each call processes one message; streamResponse's tail call to processMessageQueue
+	// handles the next, bounded by queue depth.
 	c.streamResponse(ctx, queued.Content, sess, queued.Attachments)
 	return true
 }

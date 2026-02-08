@@ -178,6 +178,10 @@ func removePreHook(hooks []PreHook, target PreHook) []PreHook {
 			out = append(out, hook)
 		}
 	}
+	// Nil out tail elements to allow GC of removed hooks
+	for i := len(out); i < len(hooks); i++ {
+		hooks[i] = nil
+	}
 	return out
 }
 
@@ -190,6 +194,10 @@ func removePostHook(hooks []PostHook, target PostHook) []PostHook {
 		if !sameHook(hook, target) {
 			out = append(out, hook)
 		}
+	}
+	// Nil out tail elements to allow GC of removed hooks
+	for i := len(out); i < len(hooks); i++ {
+		hooks[i] = nil
 	}
 	return out
 }

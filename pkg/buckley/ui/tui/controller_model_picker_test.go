@@ -54,10 +54,10 @@ func TestPreferredModelIDs(t *testing.T) {
 		"openai/gpt-4o":        {},
 	}
 	ids := preferredModelIDs("openai/gpt-4o", "", "", catalog)
-	if len(ids) != 2 {
-		t.Fatalf("expected 2 preferred models, got %d", len(ids))
+	if len(ids) != 1 {
+		t.Fatalf("expected 1 preferred model, got %d", len(ids))
 	}
-	if ids[0] != "openai/gpt-4o" || ids[1] != "moonshotai/kimi-k2.5" {
-		t.Fatalf("unexpected preferred model order: %v", ids)
+	if ids[0] != "openai/gpt-4o" {
+		t.Fatalf("unexpected preferred model: %v", ids)
 	}
 }

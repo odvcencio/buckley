@@ -113,7 +113,12 @@ func (a *ModelClientAdapter) Call(ctx context.Context, action CallModel) (Event,
 	for _, tc := range choice.Message.ToolCalls {
 		var params map[string]any
 		if tc.Function.Arguments != "" {
-			_ = json.Unmarshal([]byte(tc.Function.Arguments), &params)
+			if err := json.Unmarshal([]byte(tc.Function.Arguments), &params); err != nil {
+				return ModelFailed{
+					Err:       fmt.Errorf("invalid tool call arguments for %s: %w", tc.Function.Name, err),
+					Retryable: true,
+				}, nil
+			}
 		}
 		toolCalls = append(toolCalls, ToolCallRequest{
 			ID:     tc.ID,

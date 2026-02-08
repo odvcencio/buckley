@@ -51,8 +51,9 @@ func (ApprovalResponse) Command() {}
 type ApprovalWidget struct {
 	uiwidgets.FocusableBase
 
-	request      ApprovalRequest
-	scrollOffset int // For scrolling through diff
+	request          ApprovalRequest
+	scrollOffset     int // For scrolling through diff
+	diffVisibleLines int // Visible diff lines from last layout
 
 	// Styles
 	bgStyle       backend.Style
@@ -200,8 +201,8 @@ func (a *ApprovalWidget) Render(ctx runtime.RenderContext) {
 		y++
 		desc := a.request.Description
 		maxLen := b.Width - 4
-		if len(desc) > maxLen {
-			desc = desc[:maxLen-3] + "..."
+		if textWidth(desc) > maxLen {
+			desc = truncateString(desc, maxLen)
 		}
 		ctx.Buffer.SetString(b.X+2, y, desc, a.textStyle)
 		y++
@@ -273,8 +274,8 @@ func (a *ApprovalWidget) drawCommandBox(buf *runtime.Buffer, x, y, width int, cm
 	buf.Set(x, y, '│', a.borderStyle)
 	cmdDisplay := cmd
 	maxCmd := width - 4
-	if len(cmdDisplay) > maxCmd {
-		cmdDisplay = cmdDisplay[:maxCmd-3] + "..."
+	if textWidth(cmdDisplay) > maxCmd {
+		cmdDisplay = truncateString(cmdDisplay, maxCmd)
 	}
 	buf.SetString(x+2, y, cmdDisplay, a.commandStyle)
 	buf.Set(x+width-1, y, '│', a.borderStyle)
@@ -307,6 +308,7 @@ func (a *ApprovalWidget) drawDiffPreview(buf *runtime.Buffer, x, y, width, maxLi
 	if visibleLines > len(a.request.DiffLines) {
 		visibleLines = len(a.request.DiffLines)
 	}
+	a.diffVisibleLines = visibleLines
 
 	startIdx := a.scrollOffset
 	if startIdx+visibleLines > len(a.request.DiffLines) {
@@ -343,8 +345,8 @@ func (a *ApprovalWidget) drawDiffPreview(buf *runtime.Buffer, x, y, width, maxLi
 		// Draw line content
 		content := prefix + line.Content
 		maxContent := width - 3
-		if len(content) > maxContent {
-			content = content[:maxContent]
+		if textWidth(content) > maxContent {
+			content = truncateString(content, maxContent)
 		}
 		buf.SetString(x+1, y, content, style)
 		buf.Set(x+width-1, y, '│', a.borderStyle)
@@ -369,10 +371,21 @@ func (a *ApprovalWidget) drawButtons(buf *runtime.Buffer, b runtime.Rect) {
 	buttons, _ := approvalButtonLayout()
 	x := b.X + (b.Width-textWidth(buttons))/2
 
-	// Draw with highlights on key letters
+	// Draw with highlights on hotkey letters (characters inside brackets)
+	inBracket := false
 	for i, ch := range buttons {
 		style := a.buttonStyle
-		if ch == 'A' || ch == 'D' || ch == 'l' {
+		if ch == '[' {
+			inBracket = true
+			buf.Set(x+i, y, ch, style)
+			continue
+		}
+		if ch == ']' {
+			inBracket = false
+			buf.Set(x+i, y, ch, style)
+			continue
+		}
+		if inBracket {
 			style = a.buttonHlStyle
 		}
 		buf.Set(x+i, y, ch, style)
@@ -557,7 +570,11 @@ func (a *ApprovalWidget) scrollDiff(delta int) {
 	if a == nil || delta == 0 || len(a.request.DiffLines) == 0 {
 		return
 	}
-	maxScroll := len(a.request.DiffLines) - 5
+	visible := a.diffVisibleLines
+	if visible <= 0 {
+		visible = 5
+	}
+	maxScroll := len(a.request.DiffLines) - visible
 	if maxScroll < 0 {
 		maxScroll = 0
 	}

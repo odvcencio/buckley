@@ -275,6 +275,139 @@ func TestRuntime_Steering(t *testing.T) {
 	// steer before the machine processes it. For this test we just verify run completes.
 }
 
+func TestRuntime_DelegateToSubAgents(t *testing.T) {
+	hub := telemetry.NewHubWithConfig(&telemetry.Config{
+		EventQueueSize: 1000, BatchSize: 1, FlushInterval: 100 * time.Millisecond,
+		RateLimit: 10000, SubscriberChannelSize: 64,
+	})
+	defer hub.Close()
+
+	// Model for child agents: just return a result immediately
+	model := &mockModelCaller{
+		responses: []Event{
+			ModelCompleted{Content: "task-a done", FinishReason: "end_turn"},
+			ModelCompleted{Content: "task-b done", FinishReason: "end_turn"},
+		},
+	}
+	tools := &mockToolExecutor{}
+	lockMgr := locks.NewManager(hub)
+
+	rt := NewRuntime(RuntimeConfig{
+		Hub:          hub,
+		ModelClient:  model,
+		ToolExecutor: tools,
+		LockManager:  lockMgr,
+		Compactor:    &mockCompactor{},
+	})
+
+	act := DelegateToSubAgents{
+		Tasks: []SubAgentTask{
+			{Task: "task-a", Modality: Classic, Spec: "do task a"},
+			{Task: "task-b", Modality: Classic, Spec: "do task b"},
+		},
+	}
+
+	parent := NewObservable("parent", Classic, hub)
+	event, err := rt.executeDelegation(context.Background(), parent, act)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	completed, ok := event.(SubAgentsCompleted)
+	if !ok {
+		t.Fatalf("expected SubAgentsCompleted, got %T", event)
+	}
+
+	if len(completed.Results) != 2 {
+		t.Fatalf("expected 2 results, got %d", len(completed.Results))
+	}
+
+	for _, result := range completed.Results {
+		if !result.Success {
+			t.Errorf("agent %s failed: %s", result.AgentID, result.Summary)
+		}
+	}
+}
+
+func TestRuntime_DelegateWithBudget(t *testing.T) {
+	hub := telemetry.NewHubWithConfig(&telemetry.Config{
+		EventQueueSize: 1000, BatchSize: 1, FlushInterval: 100 * time.Millisecond,
+		RateLimit: 10000, SubscriberChannelSize: 64,
+	})
+	defer hub.Close()
+
+	// Slow model that blocks until context cancelled
+	slowModel := &blockingModelCaller{}
+	lockMgr := locks.NewManager(hub)
+
+	rt := NewRuntime(RuntimeConfig{
+		Hub:          hub,
+		ModelClient:  slowModel,
+		LockManager:  lockMgr,
+		Compactor:    &mockCompactor{},
+	})
+
+	act := DelegateToSubAgents{
+		Tasks: []SubAgentTask{
+			{Task: "slow-task", Modality: Classic, Spec: "do something slow", Budget: Budget{MaxWallTime: 1}},
+		},
+	}
+
+	parent := NewObservable("parent", Classic, hub)
+	event, err := rt.executeDelegation(context.Background(), parent, act)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	completed := event.(SubAgentsCompleted)
+	if len(completed.Results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(completed.Results))
+	}
+
+	// Should fail due to timeout
+	if completed.Results[0].Success {
+		t.Error("expected slow task to fail due to budget timeout")
+	}
+}
+
+type blockingModelCaller struct{}
+
+func (b *blockingModelCaller) Call(ctx context.Context, _ CallModel) (Event, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func TestRuntime_ReviewSubAgentOutput(t *testing.T) {
+	rt := &Runtime{cfg: RuntimeConfig{}, steering: make(map[string]string)}
+
+	// All pass
+	event := rt.executeReview(ReviewSubAgentOutput{
+		Results: []SubAgentResult{
+			{AgentID: "a", Success: true},
+			{AgentID: "b", Success: true},
+		},
+	})
+	result := event.(ReviewResult)
+	if !result.Passed {
+		t.Error("expected review to pass when all agents succeed")
+	}
+
+	// One fails
+	event = rt.executeReview(ReviewSubAgentOutput{
+		Results: []SubAgentResult{
+			{AgentID: "a", Success: true},
+			{AgentID: "b", Success: false},
+		},
+	})
+	result = event.(ReviewResult)
+	if result.Passed {
+		t.Error("expected review to fail when an agent fails")
+	}
+	if result.Reason == "" {
+		t.Error("expected reason to be set")
+	}
+}
+
 type steeringCapture struct {
 	onCall func(CallModel) Event
 }

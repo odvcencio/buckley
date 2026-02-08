@@ -150,24 +150,33 @@ func (c *ConflictDetector) AcquireWriteWithTimeout(taskID, path string, timeout 
 }
 
 // waitWithContext waits on the condition variable with context cancellation support.
-// Must be called with mu held. Returns error if context is done.
+// Must be called with mu held. Returns with mu held.
+// Returns error if context is done.
 func (c *ConflictDetector) waitWithContext(ctx context.Context) error {
-	// Use a channel to detect when Wait returns
-	done := make(chan struct{})
-	go func() {
-		c.cond.Wait()
-		close(done)
-	}()
-
-	select {
-	case <-done:
-		return nil
-	case <-ctx.Done():
-		// Broadcast to unblock the waiting goroutine
-		c.cond.Broadcast()
-		<-done // Wait for it to finish
+	// Check context before waiting
+	if ctx.Err() != nil {
 		return ctx.Err()
 	}
+
+	// Use a goroutine to signal when context is cancelled, which triggers
+	// a Broadcast to wake us from cond.Wait(). The caller holds c.mu, so
+	// cond.Wait() will atomically unlock, sleep, then re-lock on wake.
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			c.cond.Broadcast()
+		case <-done:
+		}
+	}()
+
+	c.cond.Wait() // caller holds c.mu; Wait unlocks, sleeps, re-locks
+	close(done)   // stop the context-watching goroutine
+
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	return nil
 }
 
 // ReleaseRead releases a read lock for a task on a path.

@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mattn/go-runewidth"
 	"github.com/odvcencio/buckley/pkg/buckley/ui/scrollback"
 	"github.com/odvcencio/fluffyui/accessibility"
 	"github.com/odvcencio/fluffyui/backend"
@@ -787,10 +788,7 @@ func (m *ChatMessages) renderVisibleLine(ctx runtime.RenderContext, line scrollb
 			}
 			text = string(runes)
 		}
-		runes := []rune(text)
-		if len(runes) > bounds.Width {
-			text = string(runes[:bounds.Width])
-		}
+		text = clipString(text, bounds.Width)
 		ctx.Buffer.SetString(bounds.X, bounds.Y, text, m.selectionStyle)
 		for x := bounds.X + textWidth(text); x < maxX; x++ {
 			ctx.Buffer.Set(x, bounds.Y, ' ', m.selectionStyle)
@@ -808,7 +806,11 @@ func (m *ChatMessages) renderVisibleLine(ctx runtime.RenderContext, line scrollb
 		pos := 0
 		for _, span := range line.Spans {
 			for _, r := range span.Text {
-				if x >= maxX {
+				rw := runewidth.RuneWidth(r)
+				if rw <= 0 {
+					rw = 1
+				}
+				if x+rw > maxX {
 					break
 				}
 				if hideLineNumbers && pos < line.CodeLineNumberWidth {
@@ -822,7 +824,14 @@ func (m *ChatMessages) renderVisibleLine(ctx runtime.RenderContext, line scrollb
 					style = m.searchStyle
 				}
 				ctx.Buffer.Set(x, bounds.Y, r, style)
-				x++
+				if rw > 1 {
+					for fill := 1; fill < rw; fill++ {
+						if x+fill < maxX {
+							ctx.Buffer.Set(x+fill, bounds.Y, ' ', style)
+						}
+					}
+				}
+				x += rw
 				pos++
 			}
 			if x >= maxX {
@@ -858,10 +867,7 @@ func (m *ChatMessages) renderVisibleLine(ctx runtime.RenderContext, line scrollb
 		}
 		text = string(runes)
 	}
-	runes := []rune(text)
-	if len(runes) > bounds.Width {
-		text = string(runes[:bounds.Width])
-	}
+	text = clipString(text, bounds.Width)
 	ctx.Buffer.SetString(bounds.X, bounds.Y, text, style)
 	if line.IsCode {
 		fillStyle := m.codeBlockBG

@@ -92,10 +92,12 @@ func (r *Runner) onMachineStateChange(data map[string]any) {
 
 	_ = r.app.Call(context.Background(), func(_ *runtime.App) error {
 		agents := r.state.MachineAgents.Get()
-		for i, a := range agents {
+		cloned := make([]buckleywidgets.AgentSummary, len(agents))
+		copy(cloned, agents)
+		for i, a := range cloned {
 			if a.ID == agentID {
-				agents[i].State = toState
-				r.state.MachineAgents.Set(agents)
+				cloned[i].State = toState
+				r.state.MachineAgents.Set(cloned)
 				return nil
 			}
 		}
@@ -111,7 +113,7 @@ func (r *Runner) onMachineTerminal(data map[string]any) {
 
 	_ = r.app.Call(context.Background(), func(_ *runtime.App) error {
 		agents := r.state.MachineAgents.Get()
-		filtered := agents[:0]
+		filtered := make([]buckleywidgets.AgentSummary, 0, len(agents))
 		for _, a := range agents {
 			if a.ID != agentID {
 				filtered = append(filtered, a)
@@ -149,7 +151,7 @@ func (r *Runner) onLockReleased(data map[string]any) {
 
 	_ = r.app.Call(context.Background(), func(_ *runtime.App) error {
 		locks := r.state.MachineFileLocks.Get()
-		filtered := locks[:0]
+		filtered := make([]buckleywidgets.FileLockSummary, 0, len(locks))
 		for _, l := range locks {
 			if !(l.Path == path && l.Holder == agentID) {
 				filtered = append(filtered, l)

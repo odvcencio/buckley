@@ -45,7 +45,7 @@ type StreamAccumulator struct {
 
 // NewStreamAccumulator creates a new accumulator for streaming responses.
 func NewStreamAccumulator() *StreamAccumulator {
-	return AcquireStreamAccumulator()
+	return &StreamAccumulator{}
 }
 
 // Add processes a streaming chunk and accumulates its contents.
@@ -187,8 +187,9 @@ var toolCallTokens = []string{
 var (
 	// Matches full tool call IDs: functions.something:0
 	toolCallIDPattern = regexp.MustCompile(`functions\.[\w_]+:\d+`)
-	// Matches orphaned tool name:index after functions. is stripped: something:0
-	orphanedIDPattern = regexp.MustCompile(`\b[\w_]+:\d+\b`)
+	// Matches orphaned tool name:index after functions. is stripped
+	// Anchored to require at least one underscore or "call" to avoid matching legitimate content
+	orphanedIDPattern = regexp.MustCompile(`\b(?:[\w]*_[\w]*|tool_call|function_call):\d+\b`)
 	// Matches partial token fragments
 	partialTokenPattern = regexp.MustCompile(`[_a-z]*call[_a-z]*\|?>?`)
 )

@@ -254,13 +254,13 @@ func (o *Orchestrator) executeCandidate(ctx context.Context, req BackendRequest,
 }
 
 func (o *Orchestrator) availableCandidates(req BackendRequest) ([]backendCandidate, time.Time) {
-	o.mu.RLock()
+	o.mu.Lock()
 	config := o.config
 	iteration := o.iteration
 	elapsedMinutes := int(time.Since(o.startTime).Minutes())
-	o.mu.RUnlock()
 
 	if config == nil || config.Backends == nil {
+		o.mu.Unlock()
 		return nil, time.Time{}
 	}
 
@@ -288,7 +288,7 @@ func (o *Orchestrator) availableCandidates(req BackendRequest) ([]backendCandida
 			}
 		}
 
-		state := o.ensureBackendState(name)
+		state := o.ensureBackendStateLocked(name)
 		if !cfg.Enabled {
 			state.status = BackendDisabled
 			continue
@@ -307,7 +307,7 @@ func (o *Orchestrator) availableCandidates(req BackendRequest) ([]backendCandida
 		}
 
 		model := o.resolveModel(name, cfg, state, iteration, elapsedMinutes)
-		if o.applyThresholds(now, cfg, state, promptTokens, model) {
+		if o.applyThresholdsLocked(now, cfg, state, promptTokens, model) {
 			nextAvailable = earliestTime(nextAvailable, state.parkedUntil)
 			continue
 		}
@@ -328,6 +328,7 @@ func (o *Orchestrator) availableCandidates(req BackendRequest) ([]backendCandida
 			model:   model,
 		})
 	}
+	o.mu.Unlock()
 
 	return candidates, nextAvailable
 }
@@ -360,10 +361,7 @@ func (o *Orchestrator) resolveModel(name string, cfg BackendConfig, state *backe
 	return model
 }
 
-func (o *Orchestrator) applyThresholds(now time.Time, cfg BackendConfig, state *backendState, promptTokens int, model string) bool {
-	o.mu.Lock()
-	defer o.mu.Unlock()
-
+func (o *Orchestrator) applyThresholdsLocked(now time.Time, cfg BackendConfig, state *backendState, promptTokens int, model string) bool {
 	thresholds := cfg.Thresholds
 	if state.windowStart.IsZero() || now.Sub(state.windowStart) >= defaultWindowDuration || (!state.windowReset.IsZero() && now.After(state.windowReset)) {
 		state.windowStart = now

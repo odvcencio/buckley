@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -56,6 +57,7 @@ type CircuitBreaker struct {
 	state          CircuitState
 	failureCount   uint32
 	lastFailureTime time.Time
+	halfOpenProbe  atomic.Bool
 
 	mu sync.RWMutex
 }
@@ -103,6 +105,11 @@ func (cb *CircuitBreaker) Call(fn func() error) error {
 	// Check if we should transition from open to half-open
 	if cb.state == CircuitOpen {
 		if time.Since(cb.lastFailureTime) >= cb.config.ResetTimeout {
+			// Only allow one goroutine to probe in half-open state
+			if !cb.halfOpenProbe.CompareAndSwap(false, true) {
+				cb.mu.Unlock()
+				return fmt.Errorf("circuit breaker is open (half-open probe in progress)")
+			}
 			cb.state = CircuitHalfOpen
 			cb.failureCount = 0
 			log.Printf("[circuit-breaker] transitioning from open to half-open after %v", cb.config.ResetTimeout)
@@ -139,6 +146,7 @@ func (cb *CircuitBreaker) recordFailure() {
 	case CircuitHalfOpen:
 		// Failure in half-open state goes back to open
 		cb.state = CircuitOpen
+		cb.halfOpenProbe.Store(false)
 		log.Printf("[circuit-breaker] transitioning from half-open to open (failure in test request)")
 	case CircuitClosed:
 		// Check if we should open the circuit
@@ -158,6 +166,7 @@ func (cb *CircuitBreaker) recordSuccess() {
 		cb.state = CircuitClosed
 		cb.failureCount = 0
 		cb.lastFailureTime = time.Time{}
+		cb.halfOpenProbe.Store(false)
 		log.Printf("[circuit-breaker] transitioning from half-open to closed (service recovered)")
 	case CircuitClosed:
 		// Reset failure count on success in closed state

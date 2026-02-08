@@ -82,6 +82,7 @@ type exportMessage struct {
 }
 
 type exportPayload struct {
+	Version    int              `json:"version"`
 	SessionID  string           `json:"session_id"`
 	ExportedAt time.Time        `json:"exported_at"`
 	Session    *storage.Session `json:"session,omitempty"`
@@ -109,6 +110,7 @@ func filterExportMessages(messages []storage.Message, opts ExportOptions) []stor
 func exportJSON(sessionID string, session *storage.Session, messages []storage.Message, opts ExportOptions) ([]byte, error) {
 	includeContentJSON := opts.IncludeMetadata || opts.IncludeToolCalls
 	payload := exportPayload{
+		Version:    1,
 		SessionID:  sessionID,
 		ExportedAt: time.Now(),
 		Messages:   make([]exportMessage, 0, len(messages)),

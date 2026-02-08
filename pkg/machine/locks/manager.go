@@ -283,16 +283,23 @@ func (m *Manager) cleanupLock(path string, lock *resourceLock) {
 func (m *Manager) waitWithContext(ctx context.Context) error {
 	done := make(chan struct{})
 	go func() {
+		m.mu.Lock()
 		m.cond.Wait()
+		m.mu.Unlock()
 		close(done)
 	}()
 
+	// Release lock so the goroutine can acquire it for cond.Wait
+	m.mu.Unlock()
+
 	select {
 	case <-done:
+		m.mu.Lock()
 		return nil
 	case <-ctx.Done():
 		m.cond.Broadcast()
 		<-done
+		m.mu.Lock()
 		return ctx.Err()
 	}
 }

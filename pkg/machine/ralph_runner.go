@@ -64,10 +64,10 @@ func (r *Runtime) executeVerification(ctx context.Context, act RunVerification) 
 }
 
 // executeResetContext handles the ResetContext action.
-func (r *Runtime) executeResetContext(_ ResetContext) (Event, error) {
+func (r *Runtime) executeResetContext(act ResetContext) (Event, error) {
 	// The ModelCaller adapter maintains conversation state. On ResetContext,
 	// the runtime signals the machine to clear its conversation and re-inject
 	// the spec + last error. The actual clearing happens in the model adapter
 	// when it receives the ContextResetDone event.
-	return ContextResetDone{Iteration: 0, LastError: ""}, nil
+	return ContextResetDone{Iteration: act.Iteration, LastError: act.LastError}, nil
 }

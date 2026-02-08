@@ -818,7 +818,10 @@ func TestExpandTemplateVars(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := expandTemplateVars(tt.input, tt.req)
+			got, err := expandTemplateVars(tt.input, tt.req)
+			if err != nil {
+				t.Fatalf("expandTemplateVars(%q) unexpected error: %v", tt.input, err)
+			}
 			if got != tt.expected {
 				t.Errorf("expandTemplateVars(%q) = %q, want %q", tt.input, got, tt.expected)
 			}

@@ -285,8 +285,21 @@ func (r *Runner) syncOverlayKeymap(screen *runtime.Screen) {
 	if !hasModal && r.overlayKeymapActive {
 		if r.bundle.Keymaps.Current() == r.overlayKeymap {
 			r.bundle.Keymaps.Pop()
+			r.overlayKeymapActive = false
+		} else {
+			// Keymap is buried under another push or was already removed.
+			// Check if it's still in the stack before clearing the flag.
+			found := false
+			for _, km := range r.bundle.Keymaps.All() {
+				if km == r.overlayKeymap {
+					found = true
+					break
+				}
+			}
+			if !found {
+				r.overlayKeymapActive = false
+			}
 		}
-		r.overlayKeymapActive = false
 	}
 }
 

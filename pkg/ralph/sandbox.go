@@ -2,6 +2,7 @@
 package ralph
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -14,6 +15,8 @@ import (
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/object"
 )
+
+var errLimitReached = fmt.Errorf("limit reached")
 
 // SandboxManager handles isolated workspace creation using go-git.
 type SandboxManager struct {
@@ -327,7 +330,7 @@ func GetCommitLog(repoPath string, limit int) ([]CommitInfo, error) {
 	count := 0
 	err = iter.ForEach(func(c *object.Commit) error {
 		if limit > 0 && count >= limit {
-			return fmt.Errorf("limit reached") // Stop iteration
+			return errLimitReached
 		}
 		commits = append(commits, CommitInfo{
 			Hash:    c.Hash.String(),
@@ -339,8 +342,7 @@ func GetCommitLog(repoPath string, limit int) ([]CommitInfo, error) {
 		count++
 		return nil
 	})
-	// Ignore "limit reached" error
-	if err != nil && err.Error() != "limit reached" {
+	if err != nil && !errors.Is(err, errLimitReached) {
 		return nil, err
 	}
 

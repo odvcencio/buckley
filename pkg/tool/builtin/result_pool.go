@@ -82,5 +82,9 @@ func ReleaseResultSlice(s []*Result) {
 	if cap(s) > 1024 {
 		return
 	}
+	// Nil out entries to avoid retaining references
+	for i := range s {
+		s[i] = nil
+	}
 	resultSlicePool.Put(&s)
 }

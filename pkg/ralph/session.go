@@ -43,12 +43,13 @@ type Session struct {
 	NoRefine      bool
 	GitWorkflow   GitWorkflowConfig
 
-	state         State
-	iteration     int
-	startTime     time.Time
-	totalTokens   int
-	totalCost     float64
-	filesModified []string
+	state            State
+	iteration        int
+	startTime        time.Time
+	totalTokens      int
+	totalCost        float64
+	filesModified    []string
+	filesModifiedSet map[string]struct{}
 }
 
 // NewSession creates a new Ralph session.
@@ -141,6 +142,13 @@ func (s *Session) AddTokens(tokens int, cost float64) {
 func (s *Session) AddModifiedFile(path string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.filesModifiedSet == nil {
+		s.filesModifiedSet = make(map[string]struct{})
+	}
+	if _, exists := s.filesModifiedSet[path]; exists {
+		return
+	}
+	s.filesModifiedSet[path] = struct{}{}
 	s.filesModified = append(s.filesModified, path)
 }
 

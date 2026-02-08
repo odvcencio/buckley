@@ -284,8 +284,7 @@ func runRalphCommand(args []string) error {
 		fs.PrintDefaults()
 		fmt.Fprintf(os.Stderr, "\nCommands:\n")
 		fmt.Fprintf(os.Stderr, "  list     List ralph sessions\n")
-		fmt.Fprintf(os.Stderr, "  watch    Watch and react to file changes (stub)\n")
-		fmt.Fprintf(os.Stderr, "  resume   Resume a previous session (stub)\n")
+		fmt.Fprintf(os.Stderr, "  resume   Resume a previous session\n")
 		fmt.Fprintf(os.Stderr, "  control  Manage Ralph control file settings\n")
 	}
 
@@ -312,12 +311,8 @@ func runRalphCommand(args []string) error {
 		switch remaining[0] {
 		case "list":
 			return runRalphList(remaining[1:])
-		case "watch":
-			fmt.Println("ralph watch: stub - not yet implemented")
-			return nil
 		case "resume":
-			fmt.Println("ralph resume: stub - not yet implemented")
-			return nil
+			return runRalphResume(remaining[1:])
 		case "control":
 			return runRalphControl(remaining[1:])
 		}
@@ -347,7 +342,10 @@ func runRalphCommand(args []string) error {
 	}
 
 	if *watch {
-		return fmt.Errorf("--watch not yet implemented")
+		if *promptFile == "" {
+			return fmt.Errorf("--watch requires --prompt-file")
+		}
+		return runRalphWatch(*promptFile, actualPrompt, workDir, *dir, *timeout, *maxIterations, *noRefine, *model, *autoCommit, *createPR)
 	}
 
 	// Initialize dependencies
@@ -1571,11 +1569,399 @@ func parseSessionLog(path string) (sessionInfo struct {
 			}
 		case "iteration_end":
 			sessionInfo.Iters = evt.Iteration
-			if cost, ok := evt.Data["cost"].(float64); ok {
+			// The executor writes "session_total_cost"; fall back to "cost"
+			if cost, ok := evt.Data["session_total_cost"].(float64); ok {
+				sessionInfo.Cost = cost
+			} else if cost, ok := evt.Data["cost"].(float64); ok {
 				sessionInfo.Cost = cost
 			}
 		}
 	}
 
 	return sessionInfo, scanner.Err()
+}
+
+// runRalphWatch polls a prompt file for changes and restarts ralph on each change.
+func runRalphWatch(promptFile, initialPrompt, workDir, dirFlag string, timeout time.Duration, maxIters int, noRefine bool, modelOverride string, autoCommit, createPR bool) error {
+	fmt.Printf("Watching %s for changes (Ctrl+C to stop)\n\n", promptFile)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(sigChan)
+	go func() {
+		<-sigChan
+		fmt.Fprintf(os.Stderr, "\nStopping watch...\n")
+		cancel()
+	}()
+
+	lastHash := hashFileContents(promptFile)
+	iteration := 0
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-time.After(time.Second):
+		}
+
+		currentHash := hashFileContents(promptFile)
+		if currentHash == lastHash && iteration > 0 {
+			continue
+		}
+		lastHash = currentHash
+		iteration++
+
+		// Read the current prompt
+		content, err := os.ReadFile(promptFile)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warning: reading prompt file: %v\n", err)
+			continue
+		}
+		prompt := strings.TrimSpace(string(content))
+		if prompt == "" {
+			continue
+		}
+
+		fmt.Printf("[watch] iteration %d: prompt file changed, starting ralph...\n", iteration)
+
+		// Build args for a normal ralph run
+		args := []string{"--prompt", prompt}
+		if dirFlag != "" {
+			args = append(args, "--dir", dirFlag)
+		}
+		if timeout > 0 {
+			args = append(args, "--timeout", timeout.String())
+		}
+		if maxIters > 0 {
+			args = append(args, "--max-iterations", strconv.Itoa(maxIters))
+		}
+		if noRefine {
+			args = append(args, "--no-refine")
+		}
+		if modelOverride != "" {
+			args = append(args, "--model", modelOverride)
+		}
+		if autoCommit {
+			args = append(args, "--auto-commit")
+		}
+		if createPR {
+			args = append(args, "--create-pr")
+		}
+
+		if err := runRalphCommand(args); err != nil {
+			fmt.Fprintf(os.Stderr, "[watch] ralph run failed: %v\n", err)
+		}
+
+		fmt.Printf("[watch] waiting for changes to %s...\n", promptFile)
+	}
+}
+
+// hashFileContents returns a simple hash of a file's content for change detection.
+func hashFileContents(path string) string {
+	info, err := os.Stat(path)
+	if err != nil {
+		return ""
+	}
+	// Use mtime + size as a fast change detector (same approach as ControlWatcher)
+	return fmt.Sprintf("%d:%d", info.ModTime().UnixNano(), info.Size())
+}
+
+// runRalphResume resumes a previous ralph session from where it left off.
+func runRalphResume(args []string) error {
+	fs := flag.NewFlagSet("ralph resume", flag.ContinueOnError)
+	fs.Usage = func() {
+		fmt.Fprintf(os.Stderr, "Usage: buckley ralph resume <session-id> [flags]\n\n")
+		fmt.Fprintf(os.Stderr, "Resume a previous Ralph session.\n\n")
+		fmt.Fprintf(os.Stderr, "Flags:\n")
+		fs.PrintDefaults()
+	}
+
+	project := fs.String("project", "", "Project name (default: auto-detect from cwd)")
+	modelOverride := fs.String("model", "", "Override model for resumed session")
+	extraIters := fs.Int("max-iterations", 0, "Additional iterations to run (0 = same as original)")
+
+	if err := fs.Parse(args); err != nil {
+		if err == flag.ErrHelp {
+			return nil
+		}
+		return err
+	}
+
+	remaining := fs.Args()
+	if len(remaining) == 0 {
+		return fmt.Errorf("session ID is required (use 'buckley ralph list --all' to see sessions)")
+	}
+	sessionID := remaining[0]
+
+	// Find the session's run directory
+	ralphDataDir, err := getRalphDataDir()
+	if err != nil {
+		return fmt.Errorf("get ralph data directory: %w", err)
+	}
+
+	projectName := *project
+	if projectName == "" {
+		cwd, err := os.Getwd()
+		if err != nil {
+			return fmt.Errorf("get working directory: %w", err)
+		}
+		projectName = getProjectName(cwd)
+	}
+
+	runDir := filepath.Join(ralphDataDir, "projects", projectName, "runs", sessionID)
+	if _, err := os.Stat(runDir); os.IsNotExist(err) {
+		// Try scanning all projects
+		runDir, projectName, err = findSessionRunDir(ralphDataDir, sessionID)
+		if err != nil {
+			return fmt.Errorf("session %s not found: %w", sessionID, err)
+		}
+	}
+
+	// Parse the session log to get state
+	logPath := filepath.Join(runDir, "log.jsonl")
+	info, err := parseSessionLog(logPath)
+	if err != nil {
+		return fmt.Errorf("parsing session log: %w", err)
+	}
+
+	// Read the original prompt
+	promptPath := filepath.Join(runDir, "prompt.md")
+	promptData, err := os.ReadFile(promptPath)
+	if err != nil {
+		return fmt.Errorf("reading prompt: %w", err)
+	}
+	prompt := string(promptData)
+
+	// Check if sandbox still exists
+	sandboxPath := filepath.Join(runDir, "sandbox")
+	sandboxExists := false
+	if stat, err := os.Stat(sandboxPath); err == nil && stat.IsDir() {
+		sandboxExists = true
+	}
+
+	fmt.Printf("Resuming Ralph session %s\n", sessionID)
+	fmt.Printf("  Project:    %s\n", projectName)
+	fmt.Printf("  Status:     %s\n", info.Status)
+	fmt.Printf("  Iterations: %d completed\n", info.Iters)
+	fmt.Printf("  Cost:       $%.4f\n", info.Cost)
+	if sandboxExists {
+		fmt.Printf("  Sandbox:    %s (exists)\n", sandboxPath)
+	} else {
+		fmt.Printf("  Sandbox:    %s (will recreate)\n", sandboxPath)
+	}
+	fmt.Println()
+
+	// Initialize dependencies
+	cfg, mgr, store, err := initDependenciesFn()
+	if err != nil {
+		return fmt.Errorf("initializing dependencies: %w", err)
+	}
+	defer store.Close()
+
+	if *modelOverride != "" {
+		cfg.Models.Execution = *modelOverride
+	}
+
+	// Recreate sandbox if needed
+	workDir, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("get working directory: %w", err)
+	}
+
+	if !sandboxExists {
+		if ralph.IsGitRepo(workDir) {
+			repoRoot, err := ralph.GetRepoRoot(workDir)
+			if err != nil {
+				return fmt.Errorf("get repo root: %w", err)
+			}
+			sandboxMgr := ralph.NewSandboxManager(repoRoot)
+			ralphBranch := fmt.Sprintf("ralph/%s", sessionID)
+			if err := sandboxMgr.CreateWorktree(sandboxPath, ralphBranch); err != nil {
+				return fmt.Errorf("recreate sandbox worktree: %w", err)
+			}
+			defer func() {
+				files, _ := sandboxMgr.GetModifiedFiles(sandboxPath)
+				if len(files) > 0 {
+					fmt.Fprintf(os.Stderr, "warning: preserving sandbox with uncommitted changes: %s\n", sandboxPath)
+					return
+				}
+				if err := sandboxMgr.RemoveWorktree(sandboxPath); err != nil {
+					fmt.Fprintf(os.Stderr, "warning: failed to remove worktree: %v\n", err)
+				}
+			}()
+		} else {
+			// Non-git project: create sandbox as a plain directory
+			if err := os.MkdirAll(sandboxPath, 0o755); err != nil {
+				return fmt.Errorf("recreate sandbox directory: %w", err)
+			}
+		}
+	}
+
+	// Setup logger (append to existing log)
+	logger, err := ralph.NewLogger(logPath)
+	if err != nil {
+		return fmt.Errorf("create logger: %w", err)
+	}
+	defer logger.Close()
+
+	// Determine iterations
+	maxIterations := *extraIters
+
+	// Create a new session with resumed state
+	resumeID := uuid.New().String()[:8]
+	session := ralph.NewSession(ralph.SessionConfig{
+		SessionID:     resumeID,
+		Prompt:        prompt,
+		Sandbox:       sandboxPath,
+		MaxIterations: maxIterations,
+	})
+
+	// Restore cost/iteration counters from the original session
+	session.AddTokens(0, info.Cost)
+	for i := 0; i < info.Iters; i++ {
+		session.IncrementIteration()
+	}
+
+	controlPath := filepath.Join(workDir, "ralph-control.yaml")
+	controlCfg, err := loadOrCreateControlConfig(controlPath)
+	if err != nil {
+		return err
+	}
+
+	// Create tool registry
+	registry := tool.NewRegistry()
+	registry.SetWorkDir(sandboxPath)
+	registry.ConfigureContainers(cfg, sandboxPath)
+	registry.SetSandboxConfig(cfg.Sandbox.ToSandboxConfig(sandboxPath))
+	registerMCPTools(cfg, registry)
+
+	fileWatcher := filewatch.NewFileWatcher(100)
+	fileWatcher.Subscribe("*", func(change filewatch.FileChange) {
+		if logger != nil {
+			logger.LogFileChange(change)
+		}
+		session.AddModifiedFile(change.Path)
+	})
+	registry.Use(tool.FileChangeTracking(fileWatcher))
+
+	// Create headless runner with new storage session ID
+	runner, err := newRalphHeadlessRunner(cfg, mgr, store, registry, logger, resumeID, sandboxPath, 0)
+	if err != nil {
+		return fmt.Errorf("creating headless runner: %w", err)
+	}
+	defer runner.Stop()
+
+	backendRegistry := ralph.NewBackendRegistry()
+	for name, backend := range controlCfg.Backends {
+		if backend.Type == ralph.BackendTypeInternal {
+			backendRegistry.Register(ralph.NewInternalBackend(name, runner, ralph.InternalOptions{
+				PromptTemplate: backend.PromptTemplate,
+			}))
+		} else {
+			backendRegistry.Register(ralph.NewExternalBackend(name, backend.Command, backend.Args, backend.Options))
+		}
+	}
+
+	orchestrator := ralph.NewOrchestrator(backendRegistry, controlCfg)
+	orchestrator.SetLogger(logger)
+	orchestrator.SetContextProvider(modelContextProvider{manager: mgr})
+
+	// Wire up memory, context processing, and project context (matching main ralph run)
+	var memoryStore *ralph.MemoryStore
+	if controlCfg.Memory.Enabled {
+		memoryPath := filepath.Join(runDir, "memory.db")
+		memoryStore, err = ralph.NewMemoryStore(memoryPath)
+		if err != nil {
+			return fmt.Errorf("create memory store: %w", err)
+		}
+		defer memoryStore.Close()
+		logger.SetEventSink(memoryStore)
+	}
+
+	if memoryStore != nil {
+		registry.Register(&builtin.SessionMemoryTool{
+			Store:     memoryStore,
+			SessionID: resumeID,
+		})
+	}
+
+	var contextProcessor *ralph.ContextProcessor
+	if strings.TrimSpace(controlCfg.ContextProcessing.Model) != "" {
+		maxTokens := controlCfg.ContextProcessing.MaxOutputTokens
+		if maxTokens <= 0 {
+			maxTokens = 500
+		}
+		contextProcessor = ralph.NewContextProcessor(mgr, controlCfg.ContextProcessing.Model, maxTokens)
+	}
+
+	var summaryGenerator *ralph.SummaryGenerator
+	if strings.TrimSpace(controlCfg.Memory.SummaryModel) != "" {
+		summaryGenerator = ralph.NewSummaryGenerator(mgr, controlCfg.Memory.SummaryModel, 500)
+	}
+
+	projectCtx := ralph.BuildProjectContext(workDir)
+
+	executorOpts := []ralph.ExecutorOption{
+		ralph.WithProgressWriter(os.Stdout),
+		ralph.WithOrchestrator(orchestrator),
+		ralph.WithMemoryStore(memoryStore),
+		ralph.WithContextProcessor(contextProcessor),
+		ralph.WithSummaryGenerator(summaryGenerator),
+		ralph.WithProjectContext(projectCtx),
+	}
+	executor := ralph.NewExecutor(session, runner, logger, executorOpts...)
+
+	// Setup signal handling
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(sigChan)
+	go func() {
+		<-sigChan
+		fmt.Fprintf(os.Stderr, "\nReceived interrupt, shutting down...\n")
+		runner.Stop()
+		cancel()
+	}()
+
+	fmt.Printf("Resumed as session %s (continuing from iteration %d)\n\n", resumeID, info.Iters)
+
+	if err := executor.Run(ctx); err != nil {
+		return fmt.Errorf("execution failed: %w", err)
+	}
+
+	stats := session.Stats()
+	fmt.Printf("\nRalph session %s completed (resumed from %s)\n", resumeID, sessionID)
+	fmt.Printf("  Iterations: %d\n", stats.Iteration)
+	fmt.Printf("  Tokens: %d\n", stats.TotalTokens)
+	fmt.Printf("  Cost: $%.4f\n", stats.TotalCost)
+	fmt.Printf("  Files modified: %d\n", stats.FilesModified)
+	fmt.Printf("  Elapsed: %s\n", stats.Elapsed.Round(time.Second))
+
+	return nil
+}
+
+// findSessionRunDir searches all projects for a session ID.
+func findSessionRunDir(ralphDataDir, sessionID string) (string, string, error) {
+	projectsDir := filepath.Join(ralphDataDir, "projects")
+	projects, err := os.ReadDir(projectsDir)
+	if err != nil {
+		return "", "", fmt.Errorf("reading projects: %w", err)
+	}
+
+	for _, proj := range projects {
+		if !proj.IsDir() {
+			continue
+		}
+		runDir := filepath.Join(projectsDir, proj.Name(), "runs", sessionID)
+		if _, err := os.Stat(runDir); err == nil {
+			return runDir, proj.Name(), nil
+		}
+	}
+
+	return "", "", fmt.Errorf("session %s not found in any project", sessionID)
 }

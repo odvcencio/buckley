@@ -44,7 +44,8 @@ func (m *Machine) transitionReviewing(event Event) (State, []Action, bool) {
 	case ReviewResult:
 		if e.Passed {
 			m.state = Synthesizing
-			return m.state, nil, true
+			// Produce a CallModel so the runtime can synthesize a final summary.
+			return m.state, []Action{CallModel{EnableReasoning: true}}, true
 		}
 		m.state = Rejecting
 		return m.state, nil, true
@@ -68,6 +69,16 @@ func (m *Machine) transitionSynthesizing(event Event) (State, []Action, bool) {
 			EmitResult{Content: e.Content},
 			SaveCheckpoint{Iteration: m.iteration},
 		}, true
+	case ModelCompleted:
+		// CallModel produces ModelCompleted; treat end_turn as synthesis done.
+		if e.FinishReason == "end_turn" || e.FinishReason == "" {
+			m.state = CheckpointingProgress
+			m.iteration++
+			return m.state, []Action{
+				EmitResult{Content: e.Content, TokensUsed: e.TokensUsed},
+				SaveCheckpoint{Iteration: m.iteration},
+			}, true
+		}
 	}
 	return m.state, nil, true
 }

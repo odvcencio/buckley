@@ -98,16 +98,22 @@ func (s *Store) SavePolicy(policy *ApprovalPolicy) error {
 
 	now := time.Now()
 
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+
 	// If this policy should be active, deactivate all others first
 	if policy.IsActive {
-		if _, err := s.db.Exec(`UPDATE approval_policies SET is_active = 0`); err != nil {
+		if _, err := tx.Exec(`UPDATE approval_policies SET is_active = 0`); err != nil {
 			return fmt.Errorf("deactivate policies: %w", err)
 		}
 	}
 
 	if policy.ID == 0 {
 		// Insert new policy
-		result, err := s.db.Exec(`
+		result, err := tx.Exec(`
 			INSERT INTO approval_policies (name, is_active, config, created_at, updated_at)
 			VALUES (?, ?, ?, ?, ?)
 		`, policy.Name, policy.IsActive, policy.Config, now, now)
@@ -119,7 +125,7 @@ func (s *Store) SavePolicy(policy *ApprovalPolicy) error {
 		policy.UpdatedAt = now
 	} else {
 		// Update existing policy
-		_, err := s.db.Exec(`
+		_, err := tx.Exec(`
 			UPDATE approval_policies
 			SET name = ?, is_active = ?, config = ?, updated_at = ?
 			WHERE id = ?
@@ -130,7 +136,7 @@ func (s *Store) SavePolicy(policy *ApprovalPolicy) error {
 		policy.UpdatedAt = now
 	}
 
-	return nil
+	return tx.Commit()
 }
 
 // GetPolicy returns a policy by ID
@@ -526,7 +532,8 @@ func (s *Store) CountPendingApprovals(sessionID string) (int, error) {
 	err := s.db.QueryRow(`
 		SELECT COUNT(*) FROM pending_approvals
 		WHERE session_id = ? AND status = 'pending'
-	`, sessionID).Scan(&count)
+		AND (expires_at IS NULL OR expires_at > ?)
+	`, sessionID, time.Now()).Scan(&count)
 	if err != nil {
 		return 0, fmt.Errorf("count pending approvals: %w", err)
 	}

@@ -158,7 +158,11 @@ func parseMarkdownImport(raw string) ([]importMessage, []string) {
 		if strings.HasPrefix(trimmed, "### ") {
 			flush()
 			header := strings.TrimSpace(strings.TrimPrefix(trimmed, "### "))
-			role := strings.ToLower(strings.Fields(header)[0])
+			fields := strings.Fields(header)
+			if len(fields) == 0 {
+				continue
+			}
+			role := strings.ToLower(fields[0])
 			if role == "" {
 				role = "user"
 			}

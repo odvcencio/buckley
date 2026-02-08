@@ -87,6 +87,8 @@ func NewAgent(name, version string, handlers AgentHandlers) *Agent {
 
 // SetMachineHandlers configures the Buckley machine extension handlers.
 func (a *Agent) SetMachineHandlers(h MachineHandlers) {
+	a.sessionsMu.Lock()
+	defer a.sessionsMu.Unlock()
 	a.machineHandlers = h
 }
 

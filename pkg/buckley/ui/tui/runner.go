@@ -67,6 +67,9 @@ type RunnerConfig struct {
 	OnApproval    func(requestID string, approved, alwaysAllow bool)
 	OnSettings    func(settings UISettings)
 
+	// Toast manager (optional, shared with controller)
+	ToastManager *toast.ToastManager
+
 	// Testing
 	Backend backend.Backend
 }
@@ -207,7 +210,10 @@ func NewRunner(cfg RunnerConfig) (*Runner, error) {
 		sidebarService.SetProjectPath(projectRoot)
 	}
 
-	toastManager := toast.NewToastManager()
+	toastManager := cfg.ToastManager
+	if toastManager == nil {
+		toastManager = toast.NewToastManager()
+	}
 
 	r := &Runner{
 		theme:          th,
@@ -1080,8 +1086,6 @@ func (r *Runner) handleCommand(cmd runtime.Command) bool {
 					r.focusTopLayer(screen)
 					return true
 				}
-				r.syncOverlayKeymap(screen)
-				r.focusTopLayer(screen)
 				return false
 			}
 		}
@@ -1137,7 +1141,12 @@ func (r *Runner) flushPending() bool {
 	if len(flushed) == 0 {
 		return false
 	}
+	currentSessionID := r.state.SessionID.Get()
 	for _, item := range flushed {
+		// Only append chunks belonging to the currently displayed session
+		if item.SessionID != currentSessionID {
+			continue
+		}
 		r.chatService.AppendToLastMessage(item.Text)
 	}
 	return true
@@ -1337,7 +1346,10 @@ func (r *Runner) ShowModelPicker(items []uiwidgets.PaletteItem, onSelect func(it
 		return
 	}
 
-	// Set the items
+	// Reset query and selection state for a fresh view
+	r.modelPalette.Reset()
+
+	// Set the items (also resets filtered list)
 	r.modelPalette.SetItems(items)
 
 	// Set the callback that dismisses the palette after selection

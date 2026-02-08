@@ -192,7 +192,7 @@ func (d *SettingsDialog) Render(ctx runtime.RenderContext) {
 		if d.editing && i == d.selected && field.kind == settingsFieldText {
 			value = d.editText + "|"
 		}
-		valueX := b.X + 2 + len(label) + 1
+		valueX := b.X + 2 + textWidth(label) + 1
 		maxValue := b.Width - (valueX - b.X) - 2
 		if maxValue < 0 {
 			maxValue = 0
@@ -323,7 +323,8 @@ func (d *SettingsDialog) handleKey(ev runtime.KeyMsg) runtime.HandleResult {
 	case terminal.KeyBackspace:
 		if d.editing {
 			if len(d.editText) > 0 {
-				d.editText = d.editText[:len(d.editText)-1]
+				runes := []rune(d.editText)
+				d.editText = string(runes[:len(runes)-1])
 				d.Invalidate()
 			}
 			return runtime.Handled()

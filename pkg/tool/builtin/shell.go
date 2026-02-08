@@ -558,8 +558,11 @@ func shellEscapeSingleQuotes(input string) string {
 
 func escapeAppleScript(cmd string) string {
 	replacer := strings.NewReplacer(
-		`"`, `\"`,
 		`\`, `\\`,
+		`"`, `\"`,
+		"\n", `\n`,
+		"\r", `\r`,
+		"\t", `\t`,
 	)
 	return replacer.Replace(cmd)
 }

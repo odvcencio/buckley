@@ -210,6 +210,7 @@ type Runtime struct {
 	// Async compaction channel
 	compactionCh chan struct{}
 	compactionWg sync.WaitGroup
+	closeOnce    sync.Once
 
 	// Token counting cache
 	tokenCacheMu sync.RWMutex
@@ -292,8 +293,13 @@ func (r *Runtime) Close() error {
 	if r == nil {
 		return nil
 	}
-	close(r.compactionCh)
+	r.closeOnce.Do(func() {
+		close(r.compactionCh)
+	})
 	r.compactionWg.Wait()
+	if r.scratchpadRAG != nil {
+		r.scratchpadRAG.Close()
+	}
 	return nil
 }
 
@@ -674,179 +680,8 @@ func (r *Runtime) Execute(ctx context.Context, task string) (*Answer, error) {
 		return nil, fmt.Errorf("task required")
 	}
 
-	start := time.Now()
 	answer := NewAnswer(0)
-	maxIterations := r.config.Coordinator.MaxIterations
-	if maxIterations <= 0 {
-		maxIterations = DefaultConfig().Coordinator.MaxIterations
-	}
-	maxTokens := r.config.Coordinator.MaxTokensBudget // 0 = unlimited
-	maxWallTime := r.config.Coordinator.MaxWallTime
-	if maxWallTime <= 0 {
-		maxWallTime = DefaultConfig().Coordinator.MaxWallTime
-	}
-	baseConfidenceThreshold := r.config.Coordinator.ConfidenceThreshold
-	if baseConfidenceThreshold <= 0 {
-		baseConfidenceThreshold = DefaultConfig().Coordinator.ConfidenceThreshold
-	}
-
-	runtimeDeadline := false
-	if maxWallTime > 0 {
-		desired := start.Add(maxWallTime)
-		if deadline, ok := ctx.Deadline(); !ok || deadline.After(desired) {
-			var cancel context.CancelFunc
-			ctx, cancel = context.WithDeadline(ctx, desired)
-			defer cancel()
-			runtimeDeadline = true
-		}
-	}
-
-	registry := r.buildCoordinatorRegistry(ctx, &answer)
-	toolDefs := toolRegistryDefinitions(registry)
-	toolChoice := "auto"
-	if len(toolDefs) == 0 {
-		toolChoice = "none"
-	}
-
-	budgetStatus := r.calculateBudgetStatus(answer.TokensUsed, maxTokens, start)
-	confidenceThreshold := r.adaptiveConfidenceThreshold(baseConfidenceThreshold, budgetStatus)
-
-	messages := []model.Message{
-		{Role: "system", Content: coordinatorSystemPrompt},
-		{Role: "user", Content: r.buildCoordinatorContext(ctx, task, &answer, start, maxTokens, confidenceThreshold)},
-	}
-
-	for answer.Iteration < maxIterations && !answer.Ready {
-		// Check context cancellation with early exit
-		if err := ctx.Err(); err != nil {
-			if err == context.DeadlineExceeded && runtimeDeadline {
-				answer.Ready = true
-				break
-			}
-			return &answer, err
-		}
-
-		// Rate limiting between iterations
-		if !r.rateLimitIteration(ctx) {
-			if err := ctx.Err(); err != nil {
-				if err == context.DeadlineExceeded && runtimeDeadline {
-					answer.Ready = true
-					break
-				}
-				return &answer, err
-			}
-		}
-
-		answer.Iteration++
-
-		// Create timeout context for model call
-		modelCtx, modelCancel := context.WithTimeout(ctx, r.modelCallTimeout)
-		resp, err := r.models.ChatCompletion(modelCtx, model.ChatRequest{
-			Model:      r.coordinatorModelID(),
-			Messages:   messages,
-			Tools:      toolDefs,
-			ToolChoice: toolChoice,
-		})
-		modelCancel()
-
-		// Handle timeout specifically
-		if err != nil {
-			if ctx.Err() != nil {
-				// Parent context cancelled
-				if ctx.Err() == context.DeadlineExceeded && runtimeDeadline {
-					answer.Ready = true
-					break
-				}
-				return &answer, ctx.Err()
-			}
-			// Model call timeout or other error
-			return &answer, fmt.Errorf("model call failed: %w", err)
-		}
-		answer.TokensUsed += resp.Usage.TotalTokens
-
-		if len(resp.Choices) == 0 {
-			return &answer, fmt.Errorf("no response from coordinator")
-		}
-
-		choice := resp.Choices[0]
-		if len(choice.Message.ToolCalls) == 0 {
-			content := extractText(choice.Message)
-			if content != "" {
-				answer.Content = strings.TrimSpace(content)
-				answer.Ready = true
-			}
-			summaries := r.collectScratchpadSummaries(ctx, 6)
-			budgetStatus := r.calculateBudgetStatus(answer.TokensUsed, maxTokens, start)
-			r.emitIteration(IterationEvent{
-				Iteration:      answer.Iteration,
-				MaxIterations:  maxIterations,
-				Ready:          answer.Ready,
-				TokensUsed:     answer.TokensUsed,
-				MaxTokens:      maxTokens,
-				Summary:        answer.Content,
-				Scratchpad:     summaries,
-				ReasoningTrace: content,
-				BudgetStatus:   budgetStatus,
-			})
-			break
-		}
-
-		// Extract reasoning trace from coordinator message (text before tool calls)
-		reasoningTrace := extractText(choice.Message)
-
-		messages = append(messages, model.Message{
-			Role:      "assistant",
-			Content:   choice.Message.Content,
-			ToolCalls: choice.Message.ToolCalls,
-		})
-		toolResults := r.executeCoordinatorTools(ctx, registry, choice.Message.ToolCalls)
-
-		// Track delegations for transparency
-		delegations := r.extractDelegationsFromToolResults(toolResults)
-
-		for _, result := range toolResults {
-			messages = append(messages, model.Message{
-				Role:       "tool",
-				ToolCallID: result.ID,
-				Name:       result.Name,
-				Content:    result.Result,
-			})
-		}
-
-		budgetStatus := r.calculateBudgetStatus(answer.TokensUsed, maxTokens, start)
-		confidenceThreshold = r.adaptiveConfidenceThreshold(baseConfidenceThreshold, budgetStatus)
-		if maxTokens > 0 && answer.TokensUsed >= maxTokens {
-			answer.Ready = true
-		}
-		if !answer.Ready && answer.Content != "" && answer.Confidence >= confidenceThreshold {
-			answer.Ready = true
-		}
-
-		summaries := r.collectScratchpadSummaries(ctx, 6)
-		r.emitIteration(IterationEvent{
-			Iteration:      answer.Iteration,
-			MaxIterations:  maxIterations,
-			Ready:          answer.Ready,
-			TokensUsed:     answer.TokensUsed,
-			MaxTokens:      maxTokens,
-			Summary:        answer.Content,
-			Scratchpad:     summaries,
-			ReasoningTrace: reasoningTrace,
-			Delegations:    delegations,
-			BudgetStatus:   budgetStatus,
-		})
-
-		if !answer.Ready {
-			messages = append(messages, model.Message{
-				Role:    "user",
-				Content: r.buildCoordinatorContext(ctx, task, &answer, start, maxTokens, confidenceThreshold),
-			})
-			messages = r.compactMessages(messages)
-		}
-	}
-
-	answer.Normalize()
-	return &answer, nil
+	return r.executeFromState(ctx, task, &answer)
 }
 
 func (r *Runtime) coordinatorModelID() string {

@@ -3,6 +3,7 @@ package ipc
 import (
 	"context"
 	"encoding/json"
+	"log"
 	"sync"
 	"time"
 
@@ -92,9 +93,10 @@ type wsConn interface {
 }
 
 type client struct {
-	conn   wsConn
-	send   chan Event
-	filter func(Event) bool
+	conn    wsConn
+	send    chan Event
+	filter  func(Event) bool
+	dropped int64
 }
 
 func (c *client) enqueue(event Event) bool {
@@ -105,6 +107,11 @@ func (c *client) enqueue(event Event) bool {
 	case c.send <- event:
 		return true
 	default:
+		c.dropped++
+		// Log every 100th drop to avoid spam under load
+		if c.dropped%100 == 1 {
+			log.Printf("ipc: dropping event %s for slow websocket client (total dropped: %d)", event.Type, c.dropped)
+		}
 		return false
 	}
 }

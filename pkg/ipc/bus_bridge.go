@@ -3,6 +3,7 @@ package ipc
 import (
 	"context"
 	"encoding/json"
+	"log"
 	"sync"
 	"time"
 
@@ -173,5 +174,7 @@ func (bf *BusForwarder) BroadcastEvent(event Event) {
 		subject = "buckley.ipc." + event.SessionID + ".events"
 	}
 
-	_ = bf.bus.Publish(bf.ctx, subject, data)
+	if err := bf.bus.Publish(bf.ctx, subject, data); err != nil {
+		log.Printf("ipc: bus publish to %s failed: %v", subject, err)
+	}
 }

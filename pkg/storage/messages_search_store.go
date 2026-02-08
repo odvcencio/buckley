@@ -58,6 +58,13 @@ func messageColumns(db *sql.DB) (map[string]bool, error) {
 }
 
 func ensureMessagesFTS(db *sql.DB) error {
+	// Check if the FTS table already exists to avoid unnecessary rebuilds
+	var ftsExists bool
+	err := db.QueryRow(`SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='messages_fts'`).Scan(&ftsExists)
+	if err != nil {
+		return fmt.Errorf("check messages_fts existence: %w", err)
+	}
+
 	if _, err := db.Exec(`CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
 		content,
 		content='messages',
@@ -83,8 +90,11 @@ func ensureMessagesFTS(db *sql.DB) error {
 		return fmt.Errorf("create messages_au trigger: %w", err)
 	}
 
-	if _, err := db.Exec(`INSERT INTO messages_fts(messages_fts) VALUES('rebuild')`); err != nil {
-		return fmt.Errorf("rebuild messages_fts: %w", err)
+	// Only rebuild on first creation
+	if !ftsExists {
+		if _, err := db.Exec(`INSERT INTO messages_fts(messages_fts) VALUES('rebuild')`); err != nil {
+			return fmt.Errorf("rebuild messages_fts: %w", err)
+		}
 	}
 
 	return nil

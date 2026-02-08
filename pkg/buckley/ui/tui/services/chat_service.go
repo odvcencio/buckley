@@ -90,6 +90,7 @@ func (svc *ChatService) SetMessages(messages []buckleywidgets.ChatMessage) {
 	}
 	svc.nextID = nextID
 	svc.lastUserAt = lastUserAt
+	svc.mu.Unlock()
 	fstate.Batch(func() {
 		svc.state.ChatMessages.Set(cloned)
 		svc.state.ChatThinking.Set(false)
@@ -97,7 +98,6 @@ func (svc *ChatService) SetMessages(messages []buckleywidgets.ChatMessage) {
 		svc.state.ReasoningPreview.Set("")
 		svc.state.ReasoningVisible.Set(false)
 	})
-	svc.mu.Unlock()
 }
 
 // AppendToLastMessage appends text to the last message.

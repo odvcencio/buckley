@@ -364,6 +364,8 @@ func (r *Registry) applyDefaultKinds() {
 
 // EnableTelemetry wires telemetry events for selected built-in tools.
 func (r *Registry) EnableTelemetry(hub *telemetry.Hub, sessionID string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.telemetryHub = hub
 	r.telemetrySession = sessionID
 }
@@ -377,6 +379,8 @@ func (r *Registry) EnableMissionControl(store *mission.Store, agentID string, re
 	if timeout <= 0 {
 		timeout = 10 * time.Minute
 	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.missionStore = store
 	r.missionAgent = agentID
 	r.missionTimeout = timeout
@@ -385,16 +389,22 @@ func (r *Registry) EnableMissionControl(store *mission.Store, agentID string, re
 
 // UpdateMissionSession updates the active session used when recording pending changes.
 func (r *Registry) UpdateMissionSession(sessionID string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.missionSession = strings.TrimSpace(sessionID)
 }
 
 // UpdateMissionAgent updates the agent identifier recorded alongside pending changes.
 func (r *Registry) UpdateMissionAgent(agentID string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.missionAgent = strings.TrimSpace(agentID)
 }
 
 // UpdateTelemetrySession updates the active session used for telemetry fan-out.
 func (r *Registry) UpdateTelemetrySession(sessionID string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.telemetrySession = sessionID
 }
 
@@ -617,8 +627,8 @@ func (r *Registry) rebuildExecutor() {
 
 func (r *Registry) rebuildExecutorLocked() {
 	base := r.baseExecutor()
-	middlewares := make([]Middleware, 0, len(r.middlewares)+3)
-	middlewares = append(middlewares, r.telemetryMiddleware(), Hooks(r.hooks), r.approvalMiddleware())
+	middlewares := make([]Middleware, 0, len(r.middlewares)+4)
+	middlewares = append(middlewares, PanicRecovery(), r.telemetryMiddleware(), Hooks(r.hooks), r.approvalMiddleware())
 	middlewares = append(middlewares, r.middlewares...)
 	r.executor = Chain(middlewares...)(base)
 }
@@ -683,12 +693,16 @@ func (r *Registry) executeTool(ctx *ExecutionContext, tool Tool, params map[stri
 
 // EnableContainers configures the registry to run tools inside containers.
 func (r *Registry) EnableContainers(composePath, workDir string) {
-	r.SetContainerContext(composePath, workDir)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.setContainerContextLocked(composePath, workDir)
 	r.containerExecute = true
 }
 
 // DisableContainers disables container execution
 func (r *Registry) DisableContainers() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.containerExecute = false
 	r.containerCompose = ""
 	r.containerWorkDir = ""
@@ -1102,12 +1116,20 @@ func summarizeBrowserEvent(event map[string]any) map[string]any {
 
 // SetContainerContext tracks compose/workdir metadata without forcing container execution.
 func (r *Registry) SetContainerContext(composePath, workDir string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.setContainerContextLocked(composePath, workDir)
+}
+
+func (r *Registry) setContainerContextLocked(composePath, workDir string) {
 	r.containerCompose = composePath
 	r.containerWorkDir = workDir
 }
 
 // ContainerInfo exposes whether container execution is enabled and the compose details.
 func (r *Registry) ContainerInfo() (enabled bool, composePath string, workDir string) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	return strings.TrimSpace(r.containerCompose) != "", r.containerCompose, r.containerWorkDir
 }
 

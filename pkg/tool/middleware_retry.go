@@ -21,10 +21,33 @@ type RetryConfig struct {
 	RetryableFunc func(error) bool
 }
 
+// mutatingTools lists tool names whose side effects must not be retried.
+var mutatingTools = map[string]bool{
+	"write_file":       true,
+	"edit_file":        true,
+	"apply_patch":      true,
+	"insert_text":      true,
+	"delete_lines":     true,
+	"search_replace":   true,
+	"patch_file":       true,
+	"rename_symbol":    true,
+	"extract_function": true,
+	"run_shell":        true,
+	"delete_file":      true,
+}
+
+func isMutatingTool(name string) bool {
+	return mutatingTools[strings.TrimSpace(name)]
+}
+
 // Retry retries tool execution with exponential backoff.
 func Retry(cfg RetryConfig) Middleware {
 	return func(next Executor) Executor {
 		return func(ctx *ExecutionContext) (*builtin.Result, error) {
+			if ctx != nil && isMutatingTool(ctx.ToolName) {
+				return next(ctx)
+			}
+
 			attempts := cfg.MaxAttempts
 			if attempts <= 0 {
 				attempts = 1

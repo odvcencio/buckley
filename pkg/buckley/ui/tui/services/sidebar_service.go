@@ -89,7 +89,14 @@ func (svc *SidebarService) Grow(delta int) {
 		return
 	}
 	current := svc.state.SidebarWidth.Get()
-	svc.state.SidebarWidth.Set(current + delta)
+	next := current + delta
+	if next < sidebarMinWidth {
+		next = sidebarMinWidth
+	}
+	if next > sidebarMaxWidth {
+		next = sidebarMaxWidth
+	}
+	svc.state.SidebarWidth.Set(next)
 }
 
 // Shrink decreases the sidebar width by delta characters.
@@ -101,8 +108,20 @@ func (svc *SidebarService) Shrink(delta int) {
 		return
 	}
 	current := svc.state.SidebarWidth.Get()
-	svc.state.SidebarWidth.Set(current - delta)
+	next := current - delta
+	if next < sidebarMinWidth {
+		next = sidebarMinWidth
+	}
+	if next > sidebarMaxWidth {
+		next = sidebarMaxWidth
+	}
+	svc.state.SidebarWidth.Set(next)
 }
+
+const (
+	sidebarMinWidth = 16
+	sidebarMaxWidth = 120
+)
 
 // SetTabIndex selects the sidebar tab by index.
 func (svc *SidebarService) SetTabIndex(index int) {
@@ -127,7 +146,11 @@ func (svc *SidebarService) PrevTab() {
 		return
 	}
 	current := svc.state.SidebarTabIndex.Get()
-	svc.state.SidebarTabIndex.Set(current - 1)
+	next := current - 1
+	if next < 0 {
+		next = 0
+	}
+	svc.state.SidebarTabIndex.Set(next)
 }
 
 type boolSignal interface {

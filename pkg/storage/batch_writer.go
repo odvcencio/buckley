@@ -18,14 +18,15 @@ import (
 // The writer is safe for concurrent use and handles errors by logging them
 // and continuing to accept new messages.
 type BatchWriter struct {
-	store   *Store
-	batch   []*Message
-	maxSize int
-	maxWait time.Duration
-	mu      sync.Mutex
-	timer   *time.Timer
-	done    chan struct{}
-	wg      sync.WaitGroup
+	store    *Store
+	batch    []*Message
+	maxSize  int
+	maxWait  time.Duration
+	mu       sync.Mutex
+	timer    *time.Timer
+	done     chan struct{}
+	wg       sync.WaitGroup
+	flushing bool
 }
 
 // NewBatchWriter creates a new batch writer with the specified batch size and
@@ -96,14 +97,30 @@ func (bw *BatchWriter) Close() error {
 	close(bw.done)
 	bw.wg.Wait()
 
-	// Final flush
-	return bw.Flush()
+	// Stop any pending timer so it won't fire during final flush
+	bw.mu.Lock()
+	if bw.timer != nil {
+		bw.timer.Stop()
+		bw.timer = nil
+	}
+	bw.mu.Unlock()
+
+	// Wait for any in-flight flush to complete, then do final flush
+	bw.mu.Lock()
+	for bw.flushing {
+		bw.mu.Unlock()
+		time.Sleep(1 * time.Millisecond)
+		bw.mu.Lock()
+	}
+	err := bw.flushLocked()
+	bw.mu.Unlock()
+	return err
 }
 
 // flushLocked flushes the batch while holding the lock.
 // Must be called with lock held.
 func (bw *BatchWriter) flushLocked() error {
-	if len(bw.batch) == 0 {
+	if len(bw.batch) == 0 || bw.flushing {
 		return nil
 	}
 
@@ -117,10 +134,15 @@ func (bw *BatchWriter) flushLocked() error {
 	batch := bw.batch
 	bw.batch = make([]*Message, 0, bw.maxSize)
 
+	// Guard against re-entrant calls during the mutex gap
+	bw.flushing = true
+
 	// Release lock during database operation
 	bw.mu.Unlock()
 	err := bw.store.SaveMessagesBatch(batch)
 	bw.mu.Lock()
+
+	bw.flushing = false
 
 	return err
 }

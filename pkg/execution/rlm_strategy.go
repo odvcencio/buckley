@@ -309,3 +309,11 @@ func (s *RLMStrategy) emitStreamComplete(result *ExecutionResult) {
 		adapter.OnComplete(result)
 	}
 }
+
+// Close releases resources held by the strategy's runtime.
+func (s *RLMStrategy) Close() error {
+	if s == nil || s.runtime == nil {
+		return nil
+	}
+	return s.runtime.Close()
+}

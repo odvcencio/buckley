@@ -1164,20 +1164,31 @@ func (b *Buffer) isRowSelected(lineIdx, wrapIdx int, content string) bool {
 }
 
 func (b *Buffer) getSearchHighlights(lineIdx, wrapIdx int, content string) []int {
+	if b.searchQuery == "" {
+		return nil
+	}
 	var highlights []int
-	queryLower := strings.ToLower(b.searchQuery)
-	contentLower := strings.ToLower(content)
-
-	offset := 0
-	for {
-		idx := strings.Index(contentLower[offset:], queryLower)
-		if idx == -1 {
-			break
-		}
-		highlights = append(highlights, offset+idx)
-		offset += idx + 1
+	queryRunes := []rune(strings.ToLower(b.searchQuery))
+	contentRunes := []rune(strings.ToLower(content))
+	qLen := len(queryRunes)
+	if qLen == 0 || len(contentRunes) < qLen {
+		return nil
 	}
 
+	for i := 0; i <= len(contentRunes)-qLen; i++ {
+		match := true
+		for j := 0; j < qLen; j++ {
+			if contentRunes[i+j] != queryRunes[j] {
+				match = false
+				break
+			}
+		}
+		if match {
+			for j := 0; j < qLen; j++ {
+				highlights = append(highlights, i+j)
+			}
+		}
+	}
 	return highlights
 }
 

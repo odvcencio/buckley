@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"math"
 	"net/url"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"connectrpc.com/connect"
@@ -50,7 +52,8 @@ type GRPCService struct {
 	maxSubscribersPerPrincipal int
 
 	// Event broadcast channel
-	eventCh chan Event
+	eventCh        chan Event
+	broadcastDrops int64
 }
 
 type connectedAgent struct {
@@ -150,7 +153,10 @@ func (s *GRPCService) BroadcastEvent(event Event) {
 	select {
 	case s.eventCh <- event:
 	default:
-		// Channel full, drop event
+		drops := atomic.AddInt64(&s.broadcastDrops, 1)
+		if drops%100 == 1 {
+			log.Printf("ipc: dropping event %s for full grpc broadcast channel (total dropped: %d)", event.Type, drops)
+		}
 	}
 }
 

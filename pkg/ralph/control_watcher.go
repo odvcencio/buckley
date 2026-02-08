@@ -206,14 +206,8 @@ func (w *ControlWatcher) notifySubscribers(cfg *ControlConfig) {
 		return
 	}
 
-	w.mu.RLock()
-	if !w.started {
-		w.mu.RUnlock()
-		return
-	}
 	w.subMu.RLock()
 	defer w.subMu.RUnlock()
-	defer w.mu.RUnlock()
 
 	for _, ch := range w.subscribers {
 		// Non-blocking send to avoid blocking the watcher
