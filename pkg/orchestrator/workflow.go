@@ -72,6 +72,7 @@ type WorkflowManager struct {
 	skillInjector func(string)
 
 	// Progress streaming
+	progressMu   sync.Mutex
 	progressChan chan string
 
 	telemetry *telemetry.Hub
@@ -878,11 +879,17 @@ func (w *WorkflowManager) GetActivitySummaries() []string {
 
 // SendProgress sends a progress update to subscribers (non-blocking)
 func (w *WorkflowManager) SendProgress(message string) {
-	if w == nil || w.progressChan == nil {
+	if w == nil {
+		return
+	}
+	w.progressMu.Lock()
+	ch := w.progressChan
+	w.progressMu.Unlock()
+	if ch == nil {
 		return
 	}
 	select {
-	case w.progressChan <- message:
+	case ch <- message:
 	default:
 		// Channel full or no listener - skip
 	}
@@ -997,24 +1004,32 @@ func (w *WorkflowManager) GetProgressChan() <-chan string {
 	if w == nil {
 		return nil
 	}
+	w.progressMu.Lock()
+	defer w.progressMu.Unlock()
 	return w.progressChan
 }
 
 // EnableProgressStreaming creates the progress channel
 func (w *WorkflowManager) EnableProgressStreaming() {
 	if w != nil {
+		w.progressMu.Lock()
 		if w.progressChan != nil {
 			close(w.progressChan)
 		}
 		w.progressChan = make(chan string, 100) // Buffered to prevent blocking
+		w.progressMu.Unlock()
 	}
 }
 
 // DisableProgressStreaming closes the progress channel
 func (w *WorkflowManager) DisableProgressStreaming() {
-	if w != nil && w.progressChan != nil {
-		close(w.progressChan)
-		w.progressChan = nil
+	if w != nil {
+		w.progressMu.Lock()
+		if w.progressChan != nil {
+			close(w.progressChan)
+			w.progressChan = nil
+		}
+		w.progressMu.Unlock()
 	}
 }
 

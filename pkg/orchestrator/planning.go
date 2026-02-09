@@ -151,6 +151,9 @@ func (p *PlanningCoordinator) StartBrainstorm(ctx context.Context, task string, 
 	} else if rec, ok := result.Data["recommended"].(float64); ok {
 		recommended = int(rec)
 	}
+	if recommended < 0 || recommended >= len(approaches) {
+		recommended = 0
+	}
 	reasoning := ""
 	if r, ok := result.Data["reasoning"].(string); ok {
 		reasoning = r
@@ -304,6 +307,9 @@ func (p *PlanningCoordinator) hasCleanWinner(approaches []builtin.Approach, reco
 	if len(approaches) < 2 {
 		return true
 	}
+	if recommended < 0 || recommended >= len(approaches) {
+		return true
+	}
 
 	rec := approaches[recommended]
 
@@ -408,6 +414,9 @@ func extractTodos(data any) []builtin.TodoInput {
 func FormatApproachesDisplay(approaches []builtin.Approach, recommended int, reasoning string) string {
 	if len(approaches) == 0 {
 		return "No approaches generated"
+	}
+	if recommended < 0 || recommended >= len(approaches) {
+		recommended = 0
 	}
 
 	var result string

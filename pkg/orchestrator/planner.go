@@ -637,65 +637,29 @@ func slugify(s string) string {
 
 // sanitizeJSONString fixes common invalid escape sequences from LLM responses
 func sanitizeJSONString(jsonStr string) string {
-	// First pass: fix common specific invalid escapes
-	replacements := map[string]string{
-		`\|`: `|`, // Vertical bar doesn't need escaping
-		`\(`: `(`, // Parentheses don't need escaping
-		`\)`: `)`,
-		`\[`: `[`, // Brackets don't need escaping
-		`\]`: `]`,
-		`\{`: `{`, // Braces are only valid when actually escaping JSON structure
-		`\}`: `}`,
-		`\<`: `<`, // Angle brackets don't need escaping
-		`\>`: `>`,
-		`\-`: `-`, // Dash doesn't need escaping
-		`\_`: `_`, // Underscore doesn't need escaping
-		`\*`: `*`, // Asterisk doesn't need escaping
-		`\#`: `#`, // Hash doesn't need escaping
-		`\@`: `@`, // At symbol doesn't need escaping
-		`\&`: `&`, // Ampersand doesn't need escaping in JSON strings
-		`\=`: `=`, // Equals doesn't need escaping
-		`\+`: `+`, // Plus doesn't need escaping
-		`\:`: `:`, // Colon doesn't need escaping
-		`\;`: `;`, // Semicolon doesn't need escaping
-		`\!`: `!`, // Exclamation doesn't need escaping
-		`\?`: `?`, // Question mark doesn't need escaping
-		`\.`: `.`, // Period doesn't need escaping
-		`\,`: `,`, // Comma doesn't need escaping (outside of JSON structure)
-	}
-
-	result := jsonStr
-	for invalid, valid := range replacements {
-		result = strings.ReplaceAll(result, invalid, valid)
-	}
-
-	// Second pass: catch any remaining invalid escapes using character class
+	// Single pass: catch invalid escapes character by character
 	// Valid JSON escapes are: \" \\ \/ \b \f \n \r \t \uXXXX
 	// Replace any \X where X is not one of these valid escape chars
 	var cleaned strings.Builder
 	i := 0
-	for i < len(result) {
-		if i < len(result)-1 && result[i] == '\\' {
-			next := result[i+1]
-			// Check if it's a valid JSON escape
+	for i < len(jsonStr) {
+		if i < len(jsonStr)-1 && jsonStr[i] == '\\' {
+			next := jsonStr[i+1]
 			if next == '"' || next == '\\' || next == '/' ||
 				next == 'b' || next == 'f' || next == 'n' ||
 				next == 'r' || next == 't' || next == 'u' {
-				// Valid escape, keep both characters
-				cleaned.WriteByte(result[i])
+				cleaned.WriteByte(jsonStr[i])
 				cleaned.WriteByte(next)
 				i += 2
 			} else {
-				// Invalid escape, skip the backslash
 				cleaned.WriteByte(next)
 				i += 2
 			}
 		} else {
-			cleaned.WriteByte(result[i])
+			cleaned.WriteByte(jsonStr[i])
 			i++
 		}
 	}
-
 	return cleaned.String()
 }
 

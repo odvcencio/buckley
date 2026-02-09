@@ -63,6 +63,7 @@ type Registry struct {
 	cleanupInterval time.Duration
 	maxIdleTime     time.Duration
 	stopChan        chan struct{}
+	stopOnce        sync.Once
 }
 
 const defaultHeadlessMaxOutputBytes = 100_000
@@ -126,7 +127,9 @@ func (r *Registry) Start(ctx context.Context) {
 
 // Stop shuts down all runners and stops the cleanup loop.
 func (r *Registry) Stop() {
-	close(r.stopChan)
+	r.stopOnce.Do(func() {
+		close(r.stopChan)
+	})
 
 	r.mu.Lock()
 	defer r.mu.Unlock()

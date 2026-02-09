@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/odvcencio/buckley/pkg/worktree"
@@ -88,6 +89,7 @@ type Orchestrator struct {
 	ctx             context.Context
 	cancel          context.CancelFunc
 	wg              sync.WaitGroup
+	stopOnce        sync.Once
 }
 
 // TaskExecutor executes a task in a worktree
@@ -154,10 +156,12 @@ func (o *Orchestrator) Start() {
 
 // Stop stops all agents and waits for completion
 func (o *Orchestrator) Stop() {
-	o.cancel()
-	close(o.tasks)
-	o.wg.Wait()
-	close(o.results)
+	o.stopOnce.Do(func() {
+		o.cancel()
+		close(o.tasks)
+		o.wg.Wait()
+		close(o.results)
+	})
 }
 
 // Submit submits a task for execution
@@ -320,8 +324,10 @@ func (o *Orchestrator) updateAgentStatus(agentID string, status AgentStatus, err
 	}
 }
 
+var taskIDCounter atomic.Int64
+
 func generateTaskID() string {
-	return fmt.Sprintf("task_%d", time.Now().UnixNano())
+	return fmt.Sprintf("task_%d", taskIDCounter.Add(1))
 }
 
 // BatchSubmit submits multiple tasks at once

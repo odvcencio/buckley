@@ -291,10 +291,16 @@ func NewRunner(cfg RunnerConfig) (*Runner, error) {
 }
 
 func (r *Runner) baseContext() context.Context {
-	if r == nil || r.ctx == nil {
+	if r == nil {
 		return context.Background()
 	}
-	return r.ctx
+	r.mu.RLock()
+	ctx := r.ctx
+	r.mu.RUnlock()
+	if ctx == nil {
+		return context.Background()
+	}
+	return ctx
 }
 
 // SetContext updates the base context for headless execution.
@@ -302,7 +308,9 @@ func (r *Runner) SetContext(ctx context.Context) {
 	if r == nil || ctx == nil {
 		return
 	}
+	r.mu.Lock()
 	r.ctx = ctx
+	r.mu.Unlock()
 }
 
 // SessionID returns the session identifier.
@@ -565,12 +573,17 @@ func (r *Runner) runConversationLoop() error {
 }
 
 func (r *Runner) executionModelID() string {
-	modelID := r.config.Models.Execution
+	r.mu.RLock()
+	override := r.modelOverride
+	cfg := r.config
+	r.mu.RUnlock()
+
+	modelID := cfg.Models.Execution
 	if modelID == "" {
-		modelID = r.config.Models.Planning
+		modelID = cfg.Models.Planning
 	}
-	if r.modelOverride != "" {
-		modelID = r.modelOverride
+	if override != "" {
+		modelID = override
 	}
 	return modelID
 }
@@ -1603,7 +1616,11 @@ func (r *Runner) runExecuteCommand(args []string) error {
 	}
 
 	r.setState(StateProcessing)
-	defer r.setState(StateIdle)
+	defer func() {
+		if r.State() != StatePaused {
+			r.setState(StateIdle)
+		}
+	}()
 
 	_ = r.persistSystemMessage("⏳ Executing…")
 
