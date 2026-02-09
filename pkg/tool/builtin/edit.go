@@ -153,7 +153,11 @@ func (t *EditFileTool) Execute(params map[string]any) (*Result, error) {
 	}
 
 	// Write the new content
-	if err := os.WriteFile(absPath, []byte(newContent), 0644); err != nil {
+	info, err := os.Stat(absPath)
+	if err != nil {
+		return &Result{Success: false, Error: fmt.Sprintf("failed to stat file: %v", err)}, nil
+	}
+	if err := os.WriteFile(absPath, []byte(newContent), info.Mode().Perm()); err != nil {
 		return &Result{
 			Success: false,
 			Error:   fmt.Sprintf("failed to write file: %v", err),
@@ -446,7 +450,11 @@ func (t *InsertTextTool) Execute(params map[string]any) (*Result, error) {
 	diffPreview := generateDiff(absPath, oldContent, newContent)
 
 	// Write file
-	if err := os.WriteFile(absPath, []byte(newContent), 0644); err != nil {
+	info, err := os.Stat(absPath)
+	if err != nil {
+		return &Result{Success: false, Error: fmt.Sprintf("failed to stat file: %v", err)}, nil
+	}
+	if err := os.WriteFile(absPath, []byte(newContent), info.Mode().Perm()); err != nil {
 		return &Result{
 			Success: false,
 			Error:   fmt.Sprintf("failed to write file: %v", err),
@@ -591,7 +599,11 @@ func (t *DeleteLinesTool) Execute(params map[string]any) (*Result, error) {
 	diffPreview := generateDiff(absPath, oldContent, newContent)
 
 	// Write file
-	if err := os.WriteFile(absPath, []byte(newContent), 0644); err != nil {
+	info, err := os.Stat(absPath)
+	if err != nil {
+		return &Result{Success: false, Error: fmt.Sprintf("failed to stat file: %v", err)}, nil
+	}
+	if err := os.WriteFile(absPath, []byte(newContent), info.Mode().Perm()); err != nil {
 		return &Result{
 			Success: false,
 			Error:   fmt.Sprintf("failed to write file: %v", err),

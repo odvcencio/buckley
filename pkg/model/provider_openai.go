@@ -245,7 +245,11 @@ func (p *OpenAIProvider) invokeStream(ctx context.Context, req ChatRequest, chun
 		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
 			continue
 		}
-		chunkChan <- chunk
+		select {
+		case chunkChan <- chunk:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 	}
 
 	return scanner.Err()

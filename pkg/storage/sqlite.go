@@ -45,31 +45,24 @@ func New(dbPath string) (*Store, error) {
 		}
 	}
 
+	pragmas := "_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)"
+	if strings.Contains(dbPath, "?") {
+		dbPath += "&" + pragmas
+	} else {
+		dbPath += "?" + pragmas
+	}
+
 	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
 
-	// Configure connection pool for SQLite
-	// SQLite supports one writer at a time, but multiple readers with WAL mode
-	db.SetMaxOpenConns(10)   // Allow multiple concurrent reads
-	db.SetMaxIdleConns(5)    // Keep connections alive for reuse
-	db.SetConnMaxLifetime(0) // Connections never expire
+	db.SetMaxOpenConns(10)
+	db.SetMaxIdleConns(5)
+	db.SetConnMaxLifetime(0)
 
-	// Enable WAL mode for better concurrent access
-	// WAL allows multiple readers and one writer simultaneously
 	if _, err := db.Exec("PRAGMA journal_mode = WAL"); err != nil {
 		return nil, fmt.Errorf("failed to enable WAL mode: %w", err)
-	}
-
-	// Set busy timeout to 5 seconds - wait instead of immediately returning SQLITE_BUSY
-	if _, err := db.Exec("PRAGMA busy_timeout = 5000"); err != nil {
-		return nil, fmt.Errorf("failed to set busy timeout: %w", err)
-	}
-
-	// Enable foreign keys
-	if _, err := db.Exec("PRAGMA foreign_keys = ON"); err != nil {
-		return nil, fmt.Errorf("failed to enable foreign keys: %w", err)
 	}
 
 	// Run migrations

@@ -215,10 +215,12 @@ func (m *Manager) ChatCompletion(ctx context.Context, req ChatRequest) (*ChatRes
 func (m *Manager) ChatCompletionStream(ctx context.Context, req ChatRequest) (<-chan StreamChunk, <-chan error) {
 	selectedModel, provider := m.resolveModel(req.Model)
 	if provider == nil {
+		chunkChan := make(chan StreamChunk)
+		close(chunkChan)
 		errChan := make(chan error, 1)
 		errChan <- fmt.Errorf("no provider configured for model %s", req.Model)
 		close(errChan)
-		return nil, errChan
+		return chunkChan, errChan
 	}
 	req.Model = selectedModel
 	req = applyProviderTransforms(req, provider.ID())

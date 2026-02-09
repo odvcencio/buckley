@@ -266,7 +266,11 @@ func (p *OllamaProvider) ChatCompletionStream(ctx context.Context, req ChatReque
 				stream.Usage = &usage
 			}
 
-			chunkChan <- stream
+			select {
+			case chunkChan <- stream:
+			case <-ctx.Done():
+				return
+			}
 		}
 	}()
 

@@ -345,7 +345,11 @@ func (p *LiteLLMProvider) invokeStream(ctx context.Context, req ChatRequest, chu
 		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
 			continue
 		}
-		chunkChan <- chunk
+		select {
+		case chunkChan <- chunk:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 	}
 
 	if err := scanner.Err(); err != nil {

@@ -21,6 +21,8 @@ type TelegramAdapter struct {
 	mu        sync.Mutex
 	running   bool
 	stopCh    chan struct{}
+	closeOnce sync.Once
+	done      chan struct{}
 
 	// Track pending events for response matching
 	pending map[string]*Event
@@ -51,6 +53,7 @@ func NewTelegramAdapter(cfg TelegramConfig) (*TelegramAdapter, error) {
 		responses: make(chan *Response, 100),
 		pending:   make(map[string]*Event),
 		stopCh:    make(chan struct{}),
+		done:      make(chan struct{}),
 	}, nil
 }
 
@@ -135,6 +138,7 @@ func (t *TelegramAdapter) ReceiveResponses(ctx context.Context) (<-chan *Respons
 }
 
 func (t *TelegramAdapter) pollUpdates(ctx context.Context) {
+	defer close(t.done)
 	offset := 0
 
 	for {
@@ -314,8 +318,14 @@ func (t *TelegramAdapter) sendRequest(method string, payload map[string]any) err
 
 // Close closes the adapter.
 func (t *TelegramAdapter) Close() error {
-	close(t.stopCh)
-	close(t.responses)
+	t.closeOnce.Do(func() {
+		close(t.stopCh)
+		select {
+		case <-t.done:
+		case <-time.After(5 * time.Second):
+		}
+		close(t.responses)
+	})
 	return nil
 }
 

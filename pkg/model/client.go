@@ -388,18 +388,17 @@ func (c *Client) ChatCompletion(ctx context.Context, req ChatRequest) (*ChatResp
 				lastErr = err
 				continue
 			}
-			defer resp.Body.Close()
-
 			if resp.StatusCode != http.StatusOK {
 				apiErr := c.parseError(resp)
+				resp.Body.Close()
 				lastErr = apiErr
 
-				// Only retry if error is retryable
 				if ae, ok := apiErr.(*APIError); ok && ae.Retryable {
 					continue
 				}
 				return apiErr
 			}
+			defer resp.Body.Close()
 
 			var chatResp ChatResponse
 			if err := json.NewDecoder(resp.Body).Decode(&chatResp); err != nil {
@@ -568,7 +567,11 @@ func (c *Client) parseSSEStream(ctx context.Context, r io.Reader, chunkChan chan
 			return fmt.Errorf("decoding chunk: %w", err)
 		}
 
-		chunkChan <- chunk
+		select {
+		case chunkChan <- chunk:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 	}
 
 	if err := scanner.Err(); err != nil {

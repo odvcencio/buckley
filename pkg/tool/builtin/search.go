@@ -367,7 +367,11 @@ func (t *SearchReplaceTool) Execute(params map[string]any) (*Result, error) {
 		}, nil
 	}
 
-	if err := os.WriteFile(absPath, []byte(replaced), 0644); err != nil {
+	info, err := os.Stat(absPath)
+	if err != nil {
+		return &Result{Success: false, Error: fmt.Sprintf("failed to stat file: %v", err)}, nil
+	}
+	if err := os.WriteFile(absPath, []byte(replaced), info.Mode().Perm()); err != nil {
 		return &Result{
 			Success: false,
 			Error:   fmt.Sprintf("failed to write file: %v", err),

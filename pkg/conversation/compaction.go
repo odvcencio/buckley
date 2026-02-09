@@ -355,8 +355,11 @@ func (cm *CompactionManager) processQueueRequest(req CompactionRequest) {
 		req.OnComplete(result)
 	}
 	// Also call global onComplete if set
-	if result != nil && cm.onComplete != nil {
-		cm.onComplete(result)
+	cm.compactionMu.Lock()
+	handler := cm.onComplete
+	cm.compactionMu.Unlock()
+	if result != nil && handler != nil {
+		handler(result)
 	}
 }
 
@@ -592,8 +595,11 @@ func (cm *CompactionManager) CompactAsync(ctx context.Context) {
 		if result == nil {
 			result = cm.compactFallback()
 		}
-		if result != nil && cm.onComplete != nil {
-			cm.onComplete(result)
+		cm.compactionMu.Lock()
+		handler := cm.onComplete
+		cm.compactionMu.Unlock()
+		if result != nil && handler != nil {
+			handler(result)
 		}
 	}()
 }
@@ -607,7 +613,9 @@ func (cm *CompactionManager) compactWith(ctx context.Context, modelID string) (*
 	if cm == nil {
 		return nil, fmt.Errorf("compaction manager unavailable")
 	}
+	cm.compactionMu.Lock()
 	conv := cm.conversation
+	cm.compactionMu.Unlock()
 	if conv == nil {
 		return nil, fmt.Errorf("conversation required")
 	}

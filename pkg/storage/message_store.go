@@ -404,7 +404,6 @@ func (s *Store) GetMessagesWithCursor(sessionID string, cursor *Cursor, limit in
 		return nil, nil, fmt.Errorf("iterating messages: %w", err)
 	}
 
-	// Generate next cursor if there are more results
 	var nextCursor *Cursor
 	if count > limit {
 		nextCursor = &Cursor{

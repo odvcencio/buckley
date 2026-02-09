@@ -87,7 +87,7 @@ func (a *dockerSandboxAdapter) Close() error {
 }
 
 func (r *Registry) enableShellContainerMode(composePath, service, workDir string) {
-	tool, ok := r.tools["run_shell"]
+	tool, ok := r.Get("run_shell")
 	if !ok {
 		return
 	}
@@ -97,7 +97,7 @@ func (r *Registry) enableShellContainerMode(composePath, service, workDir string
 }
 
 func (r *Registry) disableShellContainerMode() {
-	tool, ok := r.tools["run_shell"]
+	tool, ok := r.Get("run_shell")
 	if !ok {
 		return
 	}

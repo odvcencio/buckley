@@ -66,18 +66,26 @@ func (s *Store) CreateAPIToken(name, owner, scope, secret string) (*APIToken, er
 	hash := hashSecret(secret)
 	scope = normalizeScope(scope)
 
-	_, err := s.db.Exec(`
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, fmt.Errorf("beginning api token transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec(`
 		INSERT INTO api_tokens (id, name, token_hash, token_prefix, created_at, revoked)
 		VALUES (?, ?, ?, ?, ?, 0)
-	`, id, name, hash, prefix, now)
-	if err != nil {
+	`, id, name, hash, prefix, now); err != nil {
 		return nil, fmt.Errorf("inserting api token: %w", err)
 	}
-	if _, err := s.db.Exec(`
+	if _, err := tx.Exec(`
 		INSERT INTO api_token_metadata (token_id, owner, scope)
 		VALUES (?, ?, ?)
 	`, id, strings.TrimSpace(owner), scope); err != nil {
 		return nil, fmt.Errorf("inserting api token metadata: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("committing api token: %w", err)
 	}
 
 	return &APIToken{
