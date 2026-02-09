@@ -134,14 +134,16 @@ func runPRCommand(args []string) error {
 
 	// Run with optional timeout (0 = no timeout, for thinking models)
 	ctx := context.Background()
-	var cancel context.CancelFunc = func() {}
+	var cancel context.CancelFunc
 	if *timeout > 0 {
 		ctx, cancel = context.WithTimeout(ctx, *timeout)
+	} else {
+		ctx, cancel = context.WithCancel(ctx)
 	}
 	defer cancel()
 
 	// Show what we're doing
-	if !quietMode {
+	if !cliFlags.quiet {
 		termOut.Dim("Using model: %s", modelID)
 	}
 

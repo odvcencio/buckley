@@ -29,7 +29,7 @@ type Store struct {
 // ErrStoreClosed indicates the underlying database connection is unavailable.
 var ErrStoreClosed = errors.New("storage: closed")
 
-// New creates a new store and initializes the database
+// New creates a new Store backed by SQLite at the given path, initializing WAL mode, foreign keys, and all required tables.
 func New(dbPath string) (*Store, error) {
 	filePath, onDisk := sqliteFilePathFromDSN(dbPath)
 	if onDisk {
@@ -145,6 +145,12 @@ func (s *Store) AddObserver(observer Observer) {
 }
 
 // notify fans out events to observers without blocking the writer.
+//
+// Each observer is invoked in its own goroutine so that a slow handler cannot
+// stall the database write path. This is intentional best-effort delivery:
+// observers are expected to be fast (e.g. channel sends or lightweight
+// forwarding) and the total number of registered observers is small (typically
+// 1-3), so the unbounded goroutine spawning here is safe in practice.
 func (s *Store) notify(event Event) {
 	s.observerMu.RLock()
 	observers := append([]Observer(nil), s.observers...)
@@ -262,7 +268,7 @@ func getSchemaVersion(db *sql.DB) (int, error) {
 		if strings.Contains(err.Error(), "no such table") {
 			return 0, nil
 		}
-		return 0, err
+		return 0, fmt.Errorf("querying schema version: %w", err)
 	}
 	return version, nil
 }
@@ -273,7 +279,10 @@ func recordMigration(db *sql.DB, version int, name string) error {
 		"INSERT INTO schema_migrations (version, name) VALUES (?, ?)",
 		version, name,
 	)
-	return err
+	if err != nil {
+		return fmt.Errorf("recording schema migration %d: %w", version, err)
+	}
+	return nil
 }
 
 // GetSchemaVersion returns the current schema version for external use
@@ -289,7 +298,7 @@ func (s *Store) GetMigrationHistory() ([]struct {
 }, error) {
 	rows, err := s.db.Query("SELECT version, name, applied_at FROM schema_migrations ORDER BY version")
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("querying migration history: %w", err)
 	}
 	defer rows.Close()
 
@@ -305,11 +314,14 @@ func (s *Store) GetMigrationHistory() ([]struct {
 			AppliedAt string
 		}
 		if err := rows.Scan(&h.Version, &h.Name, &h.AppliedAt); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("scanning migration history: %w", err)
 		}
 		history = append(history, h)
 	}
-	return history, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating migration history: %w", err)
+	}
+	return history, nil
 }
 
 func ensureSessionSchema(db *sql.DB) error {
@@ -333,7 +345,7 @@ func ensureSessionSchema(db *sql.DB) error {
 	}
 
 	if err := rows.Err(); err != nil {
-		return err
+		return fmt.Errorf("iterating session columns: %w", err)
 	}
 
 	if !cols["status"] {
@@ -393,7 +405,7 @@ func ensureSessionsPrincipalSchema(db *sql.DB) error {
 	}
 
 	if err := rows.Err(); err != nil {
-		return err
+		return fmt.Errorf("iterating session principal columns: %w", err)
 	}
 
 	if cols["principal"] {
@@ -437,7 +449,7 @@ func ensureMessagesSchema(db *sql.DB) error {
 		cols[strings.ToLower(name)] = true
 	}
 	if err := rows.Err(); err != nil {
-		return err
+		return fmt.Errorf("iterating message columns: %w", err)
 	}
 
 	if !cols["content_json"] {

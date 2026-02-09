@@ -416,6 +416,39 @@ type SandboxConfig struct {
 
 	// MaxOutputBytes caps command output (0 = unlimited).
 	MaxOutputBytes int64 `yaml:"max_output_bytes"`
+
+	// DockerSandbox configures OS-level Docker container isolation.
+	DockerSandbox DockerSandboxConfig `yaml:"docker"`
+}
+
+// DockerSandboxConfig controls Docker-based OS-level sandboxing for tool execution.
+type DockerSandboxConfig struct {
+	Enabled          bool                 `yaml:"enabled"`
+	Image            string               `yaml:"image"`
+	WorkspaceMount   string               `yaml:"workspace_mount"`
+	ReadOnlyRoot     bool                 `yaml:"read_only_root"`
+	NetworkEnabled   *bool                `yaml:"network_enabled,omitempty"`
+	Resources        ResourceLimitsConfig `yaml:"resources"`
+	Security         SecurityConfig       `yaml:"security"`
+	KeepAlive        bool                 `yaml:"keep_alive"`
+	KeepAliveTimeout time.Duration        `yaml:"keep_alive_timeout"`
+}
+
+// ResourceLimitsConfig defines container resource constraints.
+type ResourceLimitsConfig struct {
+	CPUs      string `yaml:"cpus"`
+	Memory    string `yaml:"memory"`
+	PidsLimit int    `yaml:"pids_limit"`
+	TmpfsSize string `yaml:"tmpfs_size"`
+}
+
+// SecurityConfig defines container security settings.
+type SecurityConfig struct {
+	NoNewPrivileges  bool     `yaml:"no_new_privileges"`
+	DropCapabilities []string `yaml:"drop_capabilities"`
+	AddCapabilities  []string `yaml:"add_capabilities"`
+	SeccompProfile   string   `yaml:"seccomp_profile"`
+	AppArmorProfile  string   `yaml:"apparmor_profile"`
 }
 
 // ToSandboxConfig converts the config into a runtime sandbox configuration.
@@ -667,6 +700,24 @@ func defaultSandboxConfig() SandboxConfig {
 		AllowNetwork:   false,
 		Timeout:        5 * time.Minute,
 		MaxOutputBytes: 10 * 1024 * 1024,
+		DockerSandbox: DockerSandboxConfig{
+			Enabled:        false,
+			Image:          "ubuntu:24.04",
+			WorkspaceMount: "/workspace",
+			ReadOnlyRoot:   true,
+			KeepAlive:      true,
+			KeepAliveTimeout: 10 * time.Minute,
+			Resources: ResourceLimitsConfig{
+				CPUs:      "1.0",
+				Memory:    "512m",
+				PidsLimit: 256,
+				TmpfsSize: "64m",
+			},
+			Security: SecurityConfig{
+				NoNewPrivileges:  true,
+				DropCapabilities: []string{"ALL"},
+			},
+		},
 	}
 
 	if cwd, err := os.Getwd(); err == nil && strings.TrimSpace(cwd) != "" {
@@ -1120,14 +1171,14 @@ func Load() (*Config, error) {
 	}
 	if home != "" {
 		userConfigPath := filepath.Join(home, ".buckley", "config.yaml")
-		if err := loadAndMerge(cfg, userConfigPath); err != nil && !os.IsNotExist(err) {
+		if err := loadAndMerge(cfg, userConfigPath, false); err != nil && !os.IsNotExist(err) {
 			return nil, fmt.Errorf("loading user config: %w", err)
 		}
 	}
 
 	// Load project config (./.buckley/config.yaml)
 	projectConfigPath := filepath.Join(".", ".buckley", "config.yaml")
-	if err := loadAndMerge(cfg, projectConfigPath); err != nil && !os.IsNotExist(err) {
+	if err := loadAndMerge(cfg, projectConfigPath, true); err != nil && !os.IsNotExist(err) {
 		return nil, fmt.Errorf("loading project config: %w", err)
 	}
 
@@ -1150,7 +1201,7 @@ func LoadFromPath(path string) (*Config, error) {
 	configEnv := loadConfigEnvVars()
 
 	// Load from the specified path
-	if err := loadAndMerge(cfg, path); err != nil {
+	if err := loadAndMerge(cfg, path, false); err != nil {
 		return nil, fmt.Errorf("loading config from %s: %w", path, err)
 	}
 
@@ -1208,6 +1259,15 @@ func applyEnvOverrides(cfg *Config, configEnv map[string]string) {
 		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
 			cfg.Sandbox.MaxOutputBytes = n
 		}
+	}
+	if val, ok := envBool("BUCKLEY_DOCKER_SANDBOX_ENABLED"); ok {
+		cfg.Sandbox.DockerSandbox.Enabled = val
+	}
+	if v := os.Getenv("BUCKLEY_DOCKER_SANDBOX_IMAGE"); v != "" {
+		cfg.Sandbox.DockerSandbox.Image = v
+	}
+	if val, ok := envBool("BUCKLEY_DOCKER_SANDBOX_NETWORK"); ok {
+		cfg.Sandbox.DockerSandbox.NetworkEnabled = &val
 	}
 	if v := os.Getenv("BUCKLEY_EXECUTION_MODE"); v != "" {
 		cfg.Execution.Mode = v
@@ -1490,7 +1550,7 @@ func containsString(values []string, target string) bool {
 	return false
 }
 
-// Validate checks configuration validity
+// Validate checks configuration values for correctness and returns an error for any invalid settings.
 func (c *Config) Validate() error {
 	// Validate trust level
 	validTrustLevels := map[string]bool{
@@ -1535,6 +1595,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Sandbox.MaxOutputBytes < 0 {
 		return fmt.Errorf("sandbox.max_output_bytes must be >= 0")
+	}
+	if c.Sandbox.DockerSandbox.Enabled && strings.TrimSpace(c.Sandbox.DockerSandbox.Image) == "" {
+		return fmt.Errorf("sandbox.docker.image is required when docker sandbox is enabled")
 	}
 
 	if c.ToolMiddleware.DefaultTimeout < 0 {

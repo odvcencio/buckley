@@ -1,6 +1,7 @@
 package widgets
 
 import (
+	"github.com/odvcencio/fluffyui/accessibility"
 	"github.com/odvcencio/fluffyui/backend"
 	"github.com/odvcencio/fluffyui/runtime"
 	uiwidgets "github.com/odvcencio/fluffyui/widgets"
@@ -28,7 +29,7 @@ type PresenceStrip struct {
 
 // NewPresenceStrip creates a new presence strip widget.
 func NewPresenceStrip() *PresenceStrip {
-	return &PresenceStrip{
+	p := &PresenceStrip{
 		width:          2,
 		planPct:        -1,
 		borderStyle:    backend.DefaultStyle(),
@@ -38,10 +39,16 @@ func NewPresenceStrip() *PresenceStrip {
 		planStyle:      backend.DefaultStyle(),
 		bgStyle:        backend.DefaultStyle(),
 	}
+	p.Base.Role = accessibility.RoleStatus
+	p.Base.Live = accessibility.LivePolite
+	return p
 }
 
 // SetWidth updates the strip width (min 1).
 func (p *PresenceStrip) SetWidth(width int) {
+	if p == nil {
+		return
+	}
 	if width < 1 {
 		width = 1
 	}
@@ -50,6 +57,9 @@ func (p *PresenceStrip) SetWidth(width int) {
 
 // SetStyles configures the strip appearance.
 func (p *PresenceStrip) SetStyles(border, idle, active, attention, plan, background backend.Style) {
+	if p == nil {
+		return
+	}
 	p.borderStyle = border
 	p.idleStyle = idle
 	p.activeStyle = active
@@ -60,6 +70,9 @@ func (p *PresenceStrip) SetStyles(border, idle, active, attention, plan, backgro
 
 // SetActivity updates the activity state.
 func (p *PresenceStrip) SetActivity(active, attention, streaming bool) {
+	if p == nil {
+		return
+	}
 	p.active = active
 	p.attention = attention
 	p.streaming = streaming
@@ -67,6 +80,9 @@ func (p *PresenceStrip) SetActivity(active, attention, streaming bool) {
 
 // SetPlanProgress sets plan progress (0-100). Use -1 to hide.
 func (p *PresenceStrip) SetPlanProgress(percent int) {
+	if p == nil {
+		return
+	}
 	if percent < 0 {
 		p.planPct = -1
 		return
@@ -79,6 +95,9 @@ func (p *PresenceStrip) SetPlanProgress(percent int) {
 
 // SetPulseStep updates the pulse frame index.
 func (p *PresenceStrip) SetPulseStep(step int) {
+	if p == nil {
+		return
+	}
 	if step < 0 {
 		step = 0
 	}

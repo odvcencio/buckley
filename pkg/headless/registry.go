@@ -235,9 +235,17 @@ func (r *Registry) CreateSession(req CreateSessionRequest) (*SessionInfo, error)
 	r.runners[sessionID] = runner
 	r.mu.Unlock()
 
-	// If initial prompt provided, process it asynchronously
+	// If initial prompt provided, process it asynchronously.
+	// This goroutine is intentionally fire-and-forget so the HTTP handler
+	// can return the session info immediately. The runner owns its own
+	// lifecycle and will be cleaned up by Registry.Stop or the cleanup loop.
 	if req.Prompt != "" {
 		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					fmt.Fprintf(os.Stderr, "panic in async prompt handling for session %s: %v\n", sessionID, r)
+				}
+			}()
 			_ = runner.HandleSessionCommand(command.SessionCommand{
 				SessionID: sessionID,
 				Type:      "input",
@@ -315,6 +323,10 @@ func (r *Registry) EnsureSession(sessionID string) (*Runner, error) {
 	}
 
 	r.mu.Lock()
+	if existing, ok := r.runners[sessionID]; ok && existing != nil {
+		r.mu.Unlock()
+		return existing, nil
+	}
 	r.runners[sessionID] = runner
 	r.mu.Unlock()
 
@@ -355,6 +367,7 @@ func (r *Registry) buildToolRegistry(sessionID string, project string) *tool.Reg
 
 	if strings.TrimSpace(project) != "" && r.config != nil {
 		tools.ConfigureContainers(r.config, project)
+		tools.ConfigureDockerSandbox(r.config, project)
 	}
 	if r.store != nil {
 		tools.SetTodoStore(&todoStoreAdapter{store: r.store})

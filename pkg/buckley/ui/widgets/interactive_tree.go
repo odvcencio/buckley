@@ -19,6 +19,7 @@ type InteractiveTree struct {
 	Root          *uiwidgets.TreeNode
 	selectedIndex int
 	offset        int
+	services      runtime.Services
 	label         string
 	style         backend.Style
 	selectedStyle backend.Style
@@ -306,6 +307,22 @@ func (t *InteractiveTree) flatten() []treeRow {
 	return t.flatCache
 }
 
+// Bind attaches app services.
+func (t *InteractiveTree) Bind(services runtime.Services) {
+	if t == nil {
+		return
+	}
+	t.services = services
+}
+
+// Unbind releases app services.
+func (t *InteractiveTree) Unbind() {
+	if t == nil {
+		return
+	}
+	t.services = runtime.Services{}
+}
+
 func (t *InteractiveTree) setSelected(index int, count int) {
 	if count == 0 {
 		t.selectedIndex = 0
@@ -317,8 +334,17 @@ func (t *InteractiveTree) setSelected(index int, count int) {
 	if index >= count {
 		index = count - 1
 	}
+	prev := t.selectedIndex
 	t.selectedIndex = index
 	t.syncA11y()
+	if prev != index && t.services != (runtime.Services{}) {
+		if announcer := t.services.Announcer(); announcer != nil {
+			rows := t.flatten()
+			if row := t.selectedRow(rows); row != nil && row.node != nil {
+				announcer.Announce(row.node.Label, accessibility.PriorityPolite)
+			}
+		}
+	}
 }
 
 func (t *InteractiveTree) selectedRow(rows []treeRow) *treeRow {

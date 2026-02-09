@@ -87,6 +87,9 @@ func (s *Server) handlePTY(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// InsecureSkipVerify disables the library's built-in Origin check.
+	// Origin validation is already performed above via isWebSocketOriginAllowed,
+	// so the library's check would be redundant.
 	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
 		InsecureSkipVerify: true,
 	})
@@ -103,13 +106,17 @@ func (s *Server) handlePTY(w http.ResponseWriter, r *http.Request) {
 	if providedToken == "" {
 		token, err := s.readPTYAuthToken(ctx, conn)
 		if err != nil {
-			_ = conn.Write(ctx, websocket.MessageText, marshalPTYError(err))
+			if wErr := conn.Write(ctx, websocket.MessageText, marshalPTYError(err)); wErr != nil {
+				s.logger.Printf("[debug] pty: websocket write error (auth): %v", wErr)
+			}
 			conn.Close(websocket.StatusPolicyViolation, err.Error())
 			return
 		}
 		if !s.validateSessionTokenValue(sessionID, token) {
 			err := errors.New("invalid session token")
-			_ = conn.Write(ctx, websocket.MessageText, marshalPTYError(err))
+			if wErr := conn.Write(ctx, websocket.MessageText, marshalPTYError(err)); wErr != nil {
+				s.logger.Printf("[debug] pty: websocket write error (token): %v", wErr)
+			}
 			conn.Close(websocket.StatusPolicyViolation, err.Error())
 			return
 		}
@@ -118,7 +125,9 @@ func (s *Server) handlePTY(w http.ResponseWriter, r *http.Request) {
 	cmd := buildPTYCommand(r)
 	ptmx, err := startPTY(cmd, r)
 	if err != nil {
-		_ = conn.Write(ctx, websocket.MessageText, marshalPTYError(err))
+		if wErr := conn.Write(ctx, websocket.MessageText, marshalPTYError(err)); wErr != nil {
+			s.logger.Printf("[debug] pty: websocket write error (start): %v", wErr)
+		}
 		conn.Close(websocket.StatusInternalError, err.Error())
 		return
 	}
@@ -141,7 +150,9 @@ func (s *Server) handlePTY(w http.ResponseWriter, r *http.Request) {
 				}
 				if payload, mErr := json.Marshal(packet); mErr == nil {
 					writeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-					_ = conn.Write(writeCtx, websocket.MessageText, payload)
+					if wErr := conn.Write(writeCtx, websocket.MessageText, payload); wErr != nil {
+						s.logger.Printf("[debug] pty: websocket write error (data): %v", wErr)
+					}
 					cancel()
 				}
 			}
@@ -152,7 +163,9 @@ func (s *Server) handlePTY(w http.ResponseWriter, r *http.Request) {
 					Data: strconv.Itoa(exitStatus),
 				}
 				if payload, mErr := json.Marshal(packet); mErr == nil {
-					_ = conn.Write(ctx, websocket.MessageText, payload)
+					if wErr := conn.Write(ctx, websocket.MessageText, payload); wErr != nil {
+						s.logger.Printf("[debug] pty: websocket write error (exit): %v", wErr)
+					}
 				}
 				return
 			}
@@ -184,7 +197,9 @@ receiveLoop:
 			if err != nil {
 				continue
 			}
-			_, _ = ptmx.Write(bytes)
+			if _, wErr := ptmx.Write(bytes); wErr != nil {
+				s.logger.Printf("[debug] pty: write to pty failed: %v", wErr)
+			}
 		case "resize":
 			if msg.Rows <= 0 || msg.Cols <= 0 {
 				continue
@@ -207,7 +222,9 @@ receiveLoop:
 
 	cancel()
 	<-outputDone
-	_ = conn.Close(websocket.StatusNormalClosure, "pty closed")
+	if cErr := conn.Close(websocket.StatusNormalClosure, "pty closed"); cErr != nil {
+		s.logger.Printf("[debug] pty: websocket close error: %v", cErr)
+	}
 }
 
 func (s *Server) readPTYAuthToken(ctx context.Context, conn *websocket.Conn) (string, error) {

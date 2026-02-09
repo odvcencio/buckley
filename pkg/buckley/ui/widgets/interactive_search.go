@@ -21,6 +21,8 @@ type InteractiveSearch struct {
 	currentMatch int
 	label        string
 
+	services runtime.Services
+
 	// Callbacks
 	onSearch func(query string)
 	onClose  func()
@@ -55,22 +57,34 @@ func (s *InteractiveSearch) StyleType() string {
 
 // SetOnSearch sets the search callback.
 func (s *InteractiveSearch) SetOnSearch(fn func(query string)) {
+	if s == nil {
+		return
+	}
 	s.onSearch = fn
 }
 
 // SetOnClose sets the close callback.
 func (s *InteractiveSearch) SetOnClose(fn func()) {
+	if s == nil {
+		return
+	}
 	s.onClose = fn
 }
 
 // SetOnNavigate sets callbacks for navigating search matches.
 func (s *InteractiveSearch) SetOnNavigate(next, prev func()) {
+	if s == nil {
+		return
+	}
 	s.onNext = next
 	s.onPrev = prev
 }
 
 // SetStyles configures appearance.
 func (s *InteractiveSearch) SetStyles(bg, border, text, match backend.Style) {
+	if s == nil {
+		return
+	}
 	s.bgStyle = bg
 	s.borderStyle = border
 	s.textStyle = text
@@ -79,6 +93,9 @@ func (s *InteractiveSearch) SetStyles(bg, border, text, match backend.Style) {
 
 // SetMatchInfo updates the match count display.
 func (s *InteractiveSearch) SetMatchInfo(current, total int) {
+	if s == nil {
+		return
+	}
 	s.currentMatch = current
 	s.matchCount = total
 	s.syncA11y()
@@ -86,6 +103,9 @@ func (s *InteractiveSearch) SetMatchInfo(current, total int) {
 
 // SetLabel updates the accessibility label.
 func (s *InteractiveSearch) SetLabel(label string) {
+	if s == nil {
+		return
+	}
 	s.label = label
 	s.syncA11y()
 }
@@ -288,6 +308,22 @@ func (s *InteractiveSearch) syncA11y() {
 		s.Base.Value = nil
 	}
 	s.Base.Description = fmt.Sprintf("%d matches", s.matchCount)
+}
+
+// Bind attaches app services.
+func (s *InteractiveSearch) Bind(services runtime.Services) {
+	if s == nil {
+		return
+	}
+	s.services = services
+}
+
+// Unbind releases app services.
+func (s *InteractiveSearch) Unbind() {
+	if s == nil {
+		return
+	}
+	s.services = runtime.Services{}
 }
 
 var _ runtime.Widget = (*InteractiveSearch)(nil)

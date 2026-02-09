@@ -2,11 +2,17 @@ package widgets
 
 // GetContent returns all text content from the chat view (last N lines).
 func (m *ChatMessages) GetContent(limit int) []string {
+	if m == nil || m.buffer == nil {
+		return nil
+	}
 	return m.buffer.GetAllContent(limit)
 }
 
 // ScrollUp scrolls up by n lines.
 func (m *ChatMessages) ScrollUp(n int) {
+	if m == nil || m.buffer == nil {
+		return
+	}
 	m.buffer.ScrollUp(n)
 	m.syncListOffset()
 	m.notifyScroll()
@@ -14,6 +20,9 @@ func (m *ChatMessages) ScrollUp(n int) {
 
 // ScrollDown scrolls down by n lines.
 func (m *ChatMessages) ScrollDown(n int) {
+	if m == nil || m.buffer == nil {
+		return
+	}
 	m.buffer.ScrollDown(n)
 	m.syncListOffset()
 	m.notifyScroll()
@@ -21,6 +30,9 @@ func (m *ChatMessages) ScrollDown(n int) {
 
 // PageUp scrolls up by one page.
 func (m *ChatMessages) PageUp() {
+	if m == nil || m.buffer == nil {
+		return
+	}
 	m.buffer.PageUp()
 	m.syncListOffset()
 	m.notifyScroll()
@@ -28,6 +40,9 @@ func (m *ChatMessages) PageUp() {
 
 // PageDown scrolls down by one page.
 func (m *ChatMessages) PageDown() {
+	if m == nil || m.buffer == nil {
+		return
+	}
 	m.buffer.PageDown()
 	m.syncListOffset()
 	m.notifyScroll()
@@ -35,6 +50,9 @@ func (m *ChatMessages) PageDown() {
 
 // ScrollToTop scrolls to the beginning.
 func (m *ChatMessages) ScrollToTop() {
+	if m == nil || m.buffer == nil {
+		return
+	}
 	m.buffer.ScrollToTop()
 	m.syncListOffset()
 	m.notifyScroll()
@@ -42,6 +60,9 @@ func (m *ChatMessages) ScrollToTop() {
 
 // ScrollToBottom scrolls to the end.
 func (m *ChatMessages) ScrollToBottom() {
+	if m == nil || m.buffer == nil {
+		return
+	}
 	m.buffer.ScrollToBottom()
 	m.syncListOffset()
 	m.notifyScroll()
@@ -49,6 +70,9 @@ func (m *ChatMessages) ScrollToBottom() {
 
 // ScrollPosition returns scroll position info.
 func (m *ChatMessages) ScrollPosition() (top, total, viewHeight int) {
+	if m == nil || m.buffer == nil {
+		return 0, 0, 0
+	}
 	return m.buffer.ScrollPosition()
 }
 

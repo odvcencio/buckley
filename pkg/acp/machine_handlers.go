@@ -22,7 +22,7 @@ type MachineHandlers struct {
 func (a *Agent) handleMachineSpawnAgent(ctx context.Context, req *Request) {
 	params, err := ParseParams[SpawnAgentParams](req)
 	if err != nil {
-		_ = a.transport.SendError(req.ID, ErrCodeInvalidParams, "Invalid params", err.Error())
+		_ = a.transport.SendError(req.ID, ErrCodeInvalidParams, "invalid params", err.Error())
 		return
 	}
 
@@ -44,7 +44,7 @@ func (a *Agent) handleMachineSpawnAgent(ctx context.Context, req *Request) {
 func (a *Agent) handleMachineSteerAgent(ctx context.Context, req *Request) {
 	params, err := ParseParams[SteerAgentParams](req)
 	if err != nil {
-		_ = a.transport.SendError(req.ID, ErrCodeInvalidParams, "Invalid params", err.Error())
+		_ = a.transport.SendError(req.ID, ErrCodeInvalidParams, "invalid params", err.Error())
 		return
 	}
 
@@ -65,7 +65,7 @@ func (a *Agent) handleMachineSteerAgent(ctx context.Context, req *Request) {
 func (a *Agent) handleMachineListAgents(ctx context.Context, req *Request) {
 	params, err := ParseParams[ListAgentsParams](req)
 	if err != nil {
-		_ = a.transport.SendError(req.ID, ErrCodeInvalidParams, "Invalid params", err.Error())
+		_ = a.transport.SendError(req.ID, ErrCodeInvalidParams, "invalid params", err.Error())
 		return
 	}
 
@@ -87,7 +87,7 @@ func (a *Agent) handleMachineListAgents(ctx context.Context, req *Request) {
 func (a *Agent) handleMachineEscalateMode(ctx context.Context, req *Request) {
 	params, err := ParseParams[EscalateModeParams](req)
 	if err != nil {
-		_ = a.transport.SendError(req.ID, ErrCodeInvalidParams, "Invalid params", err.Error())
+		_ = a.transport.SendError(req.ID, ErrCodeInvalidParams, "invalid params", err.Error())
 		return
 	}
 

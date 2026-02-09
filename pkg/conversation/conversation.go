@@ -287,7 +287,7 @@ func (c *Conversation) LoadFromStorage(store *storage.Store) error {
 	// Get all messages for this session
 	messages, err := store.GetAllMessages(c.SessionID)
 	if err != nil {
-		return err
+		return fmt.Errorf("loading conversation from storage: %w", err)
 	}
 
 	// Convert storage messages to conversation messages

@@ -1,6 +1,7 @@
 package widgets
 
 import (
+	"github.com/odvcencio/fluffyui/accessibility"
 	"github.com/odvcencio/fluffyui/backend"
 	"github.com/odvcencio/fluffyui/runtime"
 	"github.com/odvcencio/fluffyui/state"
@@ -87,12 +88,17 @@ func NewChatViewWithConfig(cfg ChatViewConfig) *ChatView {
 		Visible: chat.reasoningVisibleSig,
 	})
 	chat.reasoning.SetOnVisibilityChange(chat.onReasoningVisibilityChange)
+	chat.FocusableBase.Base.Role = accessibility.RoleGroup
+	chat.FocusableBase.Base.Label = "Chat conversation"
 	chat.rebuildLayout()
 	return chat
 }
 
 // SetStyles configures the message styles.
 func (c *ChatView) SetStyles(user, assistant, system, tool, thinking backend.Style) {
+	if c == nil {
+		return
+	}
 	if c.ChatMessages != nil {
 		c.ChatMessages.SetStyles(user, assistant, system, tool, thinking)
 	}
@@ -103,6 +109,9 @@ func (c *ChatView) SetStyles(user, assistant, system, tool, thinking backend.Sty
 
 // SetUIStyles configures scrollbar, selection, and background styles.
 func (c *ChatView) SetUIStyles(scrollbar, thumb, selection, search, background backend.Style) {
+	if c == nil {
+		return
+	}
 	if c.ChatMessages != nil {
 		c.ChatMessages.SetUIStyles(scrollbar, thumb, selection, search, background)
 	}
@@ -114,6 +123,9 @@ func (c *ChatView) SetUIStyles(scrollbar, thumb, selection, search, background b
 
 // OnCodeAction registers a handler for code block actions from the chat list.
 func (c *ChatView) OnCodeAction(fn func(action, language, code string)) {
+	if c == nil {
+		return
+	}
 	if c.ChatMessages != nil {
 		c.ChatMessages.OnCodeAction(fn)
 	}
@@ -121,6 +133,9 @@ func (c *ChatView) OnCodeAction(fn func(action, language, code string)) {
 
 // Clear clears all messages.
 func (c *ChatView) Clear() {
+	if c == nil {
+		return
+	}
 	if c.ChatMessages != nil {
 		c.ChatMessages.Clear()
 	}

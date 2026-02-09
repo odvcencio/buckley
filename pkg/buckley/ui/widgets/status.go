@@ -45,6 +45,7 @@ type StatusBar struct {
 	canvas        *graphics.Canvas
 	canvasW       int
 	canvasH       int
+	prevStreaming bool
 }
 
 // StatusBarConfig configures the status bar.
@@ -84,7 +85,7 @@ func NewStatusBar(cfg StatusBarConfig) *StatusBar {
 		mode = text
 	}
 
-	return &StatusBar{
+	s := &StatusBar{
 		statusText:     readableOrDefault(cfg.StatusText, "Ready"),
 		statusOverride: readableOrDefault(cfg.StatusOverride, ""),
 		statusMode:     readableOrDefault(cfg.StatusMode, ""),
@@ -102,6 +103,9 @@ func NewStatusBar(cfg StatusBarConfig) *StatusBar {
 		textStyle:      text,
 		modeStyle:      mode,
 	}
+	s.Base.Role = accessibility.RoleStatus
+	s.Base.Live = accessibility.LivePolite
+	return s
 }
 
 // Bind attaches app services and subscriptions.
@@ -258,6 +262,19 @@ func (s *StatusBar) onMotionChanged() {
 	streaming := false
 	if s.isStreaming != nil {
 		streaming = s.isStreaming.Get()
+	}
+	s.Base.State.Busy = streaming
+	if streaming != s.prevStreaming {
+		s.prevStreaming = streaming
+		if s.Services != (runtime.Services{}) {
+			if announcer := s.Services.Announcer(); announcer != nil {
+				if streaming {
+					announcer.Announce("Model is thinking...", accessibility.PriorityPolite)
+				} else {
+					announcer.Announce("Response complete", accessibility.PriorityPolite)
+				}
+			}
+		}
 	}
 	if streaming && s.motionAllowed() {
 		s.startShimmer()

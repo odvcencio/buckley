@@ -84,7 +84,7 @@ func websocketSourcesForHost(r *http.Request) string {
 		return ""
 	}
 	// Check for injection characters BEFORE trimming to prevent bypass
-	if strings.ContainsAny(r.Host, " \t\r\n\"'") {
+	if strings.ContainsAny(r.Host, " \t\r\n\"';/<>") {
 		return ""
 	}
 	host := strings.TrimSpace(r.Host)

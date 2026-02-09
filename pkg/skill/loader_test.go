@@ -204,10 +204,8 @@ Test content.`
 		t.Fatalf("Failed to write test skill file: %v", err)
 	}
 
-	// Change to test directory
-	originalWd, _ := os.Getwd()
-	os.Chdir(tmpDir)
-	defer os.Chdir(originalWd)
+	// Change to test directory (auto-restored by t.Chdir)
+	t.Chdir(tmpDir)
 
 	// Load skills
 	loader := NewLoader()

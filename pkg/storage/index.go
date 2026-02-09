@@ -219,7 +219,6 @@ func (s *Store) SearchSymbols(ctx context.Context, symbol, pathGlob string, limi
 
 func globToLike(glob string) string {
 	glob = strings.ReplaceAll(glob, "\\", "/")
-	glob = strings.ReplaceAll(glob, "\\", "\\\\")
 	glob = strings.ReplaceAll(glob, "%", "\\%")
 	glob = strings.ReplaceAll(glob, "_", "\\_")
 	glob = strings.ReplaceAll(glob, "*", "%")

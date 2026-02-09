@@ -21,6 +21,11 @@ import (
 	"github.com/odvcencio/buckley/pkg/tool"
 )
 
+const (
+	maxToolIterations = 10
+	previewMaxChars   = 200
+)
+
 // BuilderAgent encapsulates implementation generation, tool execution, and telemetry.
 type BuilderAgent struct {
 	plan         *Plan
@@ -136,7 +141,7 @@ func (a *BuilderAgent) Build(task *Task) (*BuilderResult, error) {
 	a.sendProgress("🧠 Draft ready for %q", task.Title)
 
 	a.logEvent(task.ID, builderEventImplementation, map[string]string{
-		"preview": summarizeSnippet(impl, 200),
+		"preview": summarizeSnippet(impl, previewMaxChars),
 	})
 
 	files, err := parseFileBlocks(impl)
@@ -321,7 +326,7 @@ func (a *BuilderAgent) generateImplementation(task *Task) (string, error) {
 
 func (a *BuilderAgent) generateWithTools(req model.ChatRequest, task *Task) (string, error) {
 	ctx := a.baseContext()
-	maxIterations := 10 // Prevent infinite loops
+	maxIterations := maxToolIterations
 	messages := req.Messages
 	skillState := (*skill.RuntimeState)(nil)
 	var baseInjector func(string)
@@ -344,6 +349,13 @@ func (a *BuilderAgent) generateWithTools(req model.ChatRequest, task *Task) (str
 	}
 
 	for iter := 0; iter < maxIterations; iter++ {
+		// Check for cancellation
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		default:
+		}
+
 		allowedTools := []string{}
 		if skillState != nil {
 			allowedTools = skillState.ToolFilter()
@@ -387,7 +399,7 @@ func (a *BuilderAgent) generateWithTools(req model.ChatRequest, task *Task) (str
 		// Add assistant message with tool calls
 		for i := range choice.Message.ToolCalls {
 			if choice.Message.ToolCalls[i].ID == "" {
-				choice.Message.ToolCalls[i].ID = fmt.Sprintf("tool-%d", i+1)
+				choice.Message.ToolCalls[i].ID = fmt.Sprintf("call_%d_%d", iter, i+1)
 			}
 		}
 		messages = append(messages, choice.Message)

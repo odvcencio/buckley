@@ -11,7 +11,7 @@ import (
 )
 
 // loadAndMerge loads a YAML file and merges it into the config.
-func loadAndMerge(cfg *Config, path string) error {
+func loadAndMerge(cfg *Config, path string, projectScope bool) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return err
@@ -19,20 +19,20 @@ func loadAndMerge(cfg *Config, path string) error {
 
 	var override Config
 	if err := yaml.Unmarshal(data, &override); err != nil {
-		return fmt.Errorf("parsing YAML: %w", err)
+		return fmt.Errorf("parsing YAML from %s: %w", path, err)
 	}
 
 	var raw map[string]any
 	if err := yaml.Unmarshal(data, &raw); err != nil {
-		return fmt.Errorf("parsing YAML: %w", err)
+		return fmt.Errorf("parsing YAML from %s: %w", path, err)
 	}
 
-	mergeConfigs(cfg, &override, raw)
+	mergeConfigs(cfg, &override, raw, projectScope)
 	return nil
 }
 
 // mergeConfigs merges override into base.
-func mergeConfigs(base, override *Config, raw map[string]any) {
+func mergeConfigs(base, override *Config, raw map[string]any, projectScope bool) {
 	if override == nil {
 		return
 	}
@@ -397,8 +397,10 @@ func mergeConfigs(base, override *Config, raw map[string]any) {
 		base.RLM.Scratchpad.PersistDecisions = override.RLM.Scratchpad.PersistDecisions
 	}
 
-	if boolFieldSet(raw, "approval", "mode") {
-		base.Approval.Mode = override.Approval.Mode
+	if !projectScope {
+		if boolFieldSet(raw, "approval", "mode") {
+			base.Approval.Mode = override.Approval.Mode
+		}
 	}
 	if boolFieldSet(raw, "approval", "trusted_paths") {
 		base.Approval.TrustedPaths = append([]string{}, override.Approval.TrustedPaths...)
@@ -419,11 +421,13 @@ func mergeConfigs(base, override *Config, raw map[string]any) {
 		base.Approval.AutoApprovePatterns = append([]string{}, override.Approval.AutoApprovePatterns...)
 	}
 
-	if boolFieldSet(raw, "sandbox", "mode") {
-		base.Sandbox.Mode = override.Sandbox.Mode
-	}
-	if boolFieldSet(raw, "sandbox", "allow_unsafe") {
-		base.Sandbox.AllowUnsafe = override.Sandbox.AllowUnsafe
+	if !projectScope {
+		if boolFieldSet(raw, "sandbox", "mode") {
+			base.Sandbox.Mode = override.Sandbox.Mode
+		}
+		if boolFieldSet(raw, "sandbox", "allow_unsafe") {
+			base.Sandbox.AllowUnsafe = override.Sandbox.AllowUnsafe
+		}
 	}
 	if boolFieldSet(raw, "sandbox", "workspace_path") {
 		base.Sandbox.WorkspacePath = override.Sandbox.WorkspacePath
@@ -840,6 +844,15 @@ func mergeConfigs(base, override *Config, raw map[string]any) {
 	}
 	if override.UI.MessageMetadata != "" {
 		base.UI.MessageMetadata = override.UI.MessageMetadata
+	}
+	if override.UI.SidebarWidth != 0 {
+		base.UI.SidebarWidth = override.UI.SidebarWidth
+	}
+	if override.UI.SidebarMinWidth != 0 {
+		base.UI.SidebarMinWidth = override.UI.SidebarMinWidth
+	}
+	if override.UI.SidebarMaxWidth != 0 {
+		base.UI.SidebarMaxWidth = override.UI.SidebarMaxWidth
 	}
 	if boolFieldSet(raw, "ui", "audio", "enabled") {
 		base.UI.Audio.Enabled = override.UI.Audio.Enabled

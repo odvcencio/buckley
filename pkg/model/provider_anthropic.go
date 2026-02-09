@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -134,7 +135,8 @@ func (p *AnthropicProvider) ChatCompletion(ctx context.Context, req ChatRequest)
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("anthropic request failed: %s", resp.Status)
+		errBody, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("anthropic request failed (%d): %s", resp.StatusCode, string(errBody))
 	}
 
 	var anthropicResp anthropicResponse

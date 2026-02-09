@@ -32,8 +32,10 @@ type InteractivePalette struct {
 	placeholder string
 	maxVisible  int
 
+	services runtime.Services
+
 	// Styles
-	bgStyle       backend.Style
+	bgStyle  backend.Style
 	borderStyle   backend.Style
 	titleStyle    backend.Style
 	queryStyle    backend.Style
@@ -63,8 +65,25 @@ func NewInteractivePalette(title string) *InteractivePalette {
 	p.filterFn = p.defaultFilter
 	p.scoreFn = p.defaultScore
 	p.Base.Role = accessibility.RoleMenu
+	p.Base.State.Modal = true
 	p.syncA11y()
 	return p
+}
+
+// Bind attaches app services.
+func (p *InteractivePalette) Bind(services runtime.Services) {
+	if p == nil {
+		return
+	}
+	p.services = services
+}
+
+// Unbind releases app services.
+func (p *InteractivePalette) Unbind() {
+	if p == nil {
+		return
+	}
+	p.services = runtime.Services{}
 }
 
 // StyleType returns the selector type name.
@@ -74,37 +93,58 @@ func (p *InteractivePalette) StyleType() string {
 
 // SetItems sets the palette items.
 func (p *InteractivePalette) SetItems(items []uiwidgets.PaletteItem) {
+	if p == nil {
+		return
+	}
 	p.items = items
 	p.updateFiltered()
 }
 
 // SetOnSelect sets the callback for item selection.
 func (p *InteractivePalette) SetOnSelect(fn func(item uiwidgets.PaletteItem)) {
+	if p == nil {
+		return
+	}
 	p.onSelect = fn
 }
 
 // SetFilterFn sets a custom filter function.
 func (p *InteractivePalette) SetFilterFn(fn func(item uiwidgets.PaletteItem, query string) bool) {
+	if p == nil {
+		return
+	}
 	p.filterFn = fn
 }
 
 // SetScoreFn sets a custom scoring function.
 func (p *InteractivePalette) SetScoreFn(fn func(item uiwidgets.PaletteItem, query string) int) {
+	if p == nil {
+		return
+	}
 	p.scoreFn = fn
 }
 
 // SetPlaceholder sets the query placeholder text.
 func (p *InteractivePalette) SetPlaceholder(placeholder string) {
+	if p == nil {
+		return
+	}
 	p.placeholder = placeholder
 }
 
 // SetMaxVisible sets the maximum visible items.
 func (p *InteractivePalette) SetMaxVisible(max int) {
+	if p == nil {
+		return
+	}
 	p.maxVisible = max
 }
 
 // SetStyles configures the palette appearance.
 func (p *InteractivePalette) SetStyles(bg, border, title, query, item, selected, category backend.Style) {
+	if p == nil {
+		return
+	}
 	p.bgStyle = bg
 	p.borderStyle = border
 	p.titleStyle = title
@@ -594,8 +634,16 @@ func (p *InteractivePalette) setSelected(index int) {
 	if index >= len(p.filtered) {
 		index = len(p.filtered) - 1
 	}
+	prev := p.selected
 	p.selected = index
 	p.syncA11y()
+	if prev != index && p.services != (runtime.Services{}) {
+		if announcer := p.services.Announcer(); announcer != nil {
+			if item := p.SelectedItem(); item != nil {
+				announcer.Announce(item.Label, accessibility.PriorityPolite)
+			}
+		}
+	}
 	p.Invalidate()
 }
 

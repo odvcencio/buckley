@@ -82,7 +82,8 @@ func (c *Collector) record(event telemetry.Event) {
 
 	// Store event in ring buffer
 	if len(c.events) >= c.maxEvents {
-		c.events = c.events[1:]
+		copy(c.events, c.events[1:])
+		c.events = c.events[:len(c.events)-1]
 	}
 	c.events = append(c.events, event)
 

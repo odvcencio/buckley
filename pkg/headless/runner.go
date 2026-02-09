@@ -521,7 +521,7 @@ func (r *Runner) runConversationLoop() error {
 	})
 	if err != nil {
 		r.emitError("tool runner init failed", err)
-		return err
+		return fmt.Errorf("initializing tool runner: %w", err)
 	}
 
 	stopWatcher := make(chan struct{})
@@ -539,10 +539,10 @@ func (r *Runner) runConversationLoop() error {
 		}
 		var toolErr toolExecutionError
 		if errors.As(err, &toolErr) {
-			return err
+			return fmt.Errorf("tool execution: %w", err)
 		}
 		r.emitError("model call failed", err)
-		return err
+		return fmt.Errorf("running conversation loop: %w", err)
 	}
 
 	if result == nil || strings.TrimSpace(result.Content) == "" {
@@ -965,7 +965,7 @@ func (r *Runner) handleToolCalls(ctx context.Context, toolCalls []model.ToolCall
 		if r.requiresApproval(tc.Function.Name) {
 			approved, err := r.waitForApproval(ctx, tc.ID, tc.Function.Name, args)
 			if err != nil {
-				return err
+				return fmt.Errorf("waiting for tool approval %s: %w", tc.Function.Name, err)
 			}
 			if !approved {
 				message := "Tool execution rejected by user"
@@ -1455,7 +1455,7 @@ func (r *Runner) persistSystemMessage(content string) error {
 	msg := r.conv.Messages[len(r.conv.Messages)-1]
 	if err := r.conv.SaveMessage(r.store, msg); err != nil {
 		r.emitError("failed to save system message", err)
-		return err
+		return fmt.Errorf("persisting system message: %w", err)
 	}
 	return nil
 }
@@ -1561,7 +1561,7 @@ func resolveSessionConfig(cfg *config.Config, sess *storage.Session) *config.Con
 func (r *Runner) runPlanCommand(args []string) error {
 	orch, _, err := r.ensureOrchestrator()
 	if err != nil {
-		return err
+		return fmt.Errorf("initializing orchestrator for plan: %w", err)
 	}
 	if len(args) < 2 {
 		return fmt.Errorf("usage: /plan <feature-name> <description>")
@@ -1584,7 +1584,7 @@ func (r *Runner) runPlanCommand(args []string) error {
 		if handled := r.handleWorkflowPause(err); handled {
 			return nil
 		}
-		return err
+		return fmt.Errorf("creating feature plan: %w", err)
 	}
 
 	summary := formatPlanSummary(plan, r.config)
@@ -1595,7 +1595,7 @@ func (r *Runner) runPlanCommand(args []string) error {
 func (r *Runner) runExecuteCommand(args []string) error {
 	orch, _, err := r.ensureOrchestrator()
 	if err != nil {
-		return err
+		return fmt.Errorf("initializing orchestrator for execute: %w", err)
 	}
 
 	if orch.GetCurrentPlan() == nil {
@@ -1613,7 +1613,7 @@ func (r *Runner) runExecuteCommand(args []string) error {
 			if handled := r.handleWorkflowPause(err); handled {
 				return nil
 			}
-			return err
+			return fmt.Errorf("executing task %s: %w", taskID, err)
 		}
 		return r.persistSystemMessage(fmt.Sprintf("✓ Task %s completed.", taskID))
 	}
@@ -1622,7 +1622,7 @@ func (r *Runner) runExecuteCommand(args []string) error {
 		if handled := r.handleWorkflowPause(err); handled {
 			return nil
 		}
-		return err
+		return fmt.Errorf("executing plan: %w", err)
 	}
 	return r.persistSystemMessage("✓ Plan execution completed.")
 }
@@ -1630,7 +1630,7 @@ func (r *Runner) runExecuteCommand(args []string) error {
 func (r *Runner) runStatusCommand() error {
 	orch, wf, err := r.ensureOrchestrator()
 	if err != nil {
-		return err
+		return fmt.Errorf("initializing orchestrator for status: %w", err)
 	}
 	plan := orch.GetCurrentPlan()
 	if plan == nil {
@@ -1696,12 +1696,12 @@ func (r *Runner) runStatusCommand() error {
 func (r *Runner) runPlansCommand() error {
 	orch, _, err := r.ensureOrchestrator()
 	if err != nil {
-		return err
+		return fmt.Errorf("initializing orchestrator for plans list: %w", err)
 	}
 
 	plans, err := orch.ListPlans()
 	if err != nil {
-		return err
+		return fmt.Errorf("listing plans: %w", err)
 	}
 	if len(plans) == 0 {
 		return r.persistSystemMessage("No saved plans found. Use /plan to create one.")
@@ -1729,14 +1729,14 @@ func (r *Runner) runPlansCommand() error {
 func (r *Runner) runResumePlanCommand(args []string) error {
 	orch, _, err := r.ensureOrchestrator()
 	if err != nil {
-		return err
+		return fmt.Errorf("initializing orchestrator for resume: %w", err)
 	}
 	if len(args) == 0 {
 		return fmt.Errorf("usage: /resume <plan-id>")
 	}
 	planID := args[0]
 	if err := orch.ResumeFeature(planID); err != nil {
-		return err
+		return fmt.Errorf("resuming plan %s: %w", planID, err)
 	}
 	plan := orch.GetCurrentPlan()
 	if plan == nil {
@@ -1754,7 +1754,7 @@ func (r *Runner) runResumePlanCommand(args []string) error {
 func (r *Runner) runWorkflowCommand(args []string) error {
 	_, wf, err := r.ensureOrchestrator()
 	if err != nil {
-		return err
+		return fmt.Errorf("initializing orchestrator for workflow: %w", err)
 	}
 	if wf == nil {
 		return fmt.Errorf("workflow manager not initialized")
@@ -1774,7 +1774,7 @@ func (r *Runner) runWorkflowCommand(args []string) error {
 			reason = strings.Join(args[1:], " ")
 		}
 		if err := wf.Pause(reason, "Awaiting user instructions"); err != nil && !errors.Is(err, orchestrator.ErrWorkflowPaused) {
-			return err
+			return fmt.Errorf("pausing workflow: %w", err)
 		}
 		r.setState(StatePaused)
 		return r.persistSystemMessage(fmt.Sprintf("⚠ Workflow paused (%s)", reason))

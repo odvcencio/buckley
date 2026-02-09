@@ -93,12 +93,15 @@ func (s *Store) clearStmtCache() {
 }
 
 // EncodeCursor encodes a cursor to a base64 string for API use.
-func EncodeCursor(cursor *Cursor) string {
+func EncodeCursor(cursor *Cursor) (string, error) {
 	if cursor == nil {
-		return ""
+		return "", nil
 	}
-	data, _ := json.Marshal(cursor)
-	return base64.URLEncoding.EncodeToString(data)
+	data, err := json.Marshal(cursor)
+	if err != nil {
+		return "", fmt.Errorf("encoding cursor: %w", err)
+	}
+	return base64.URLEncoding.EncodeToString(data), nil
 }
 
 // DecodeCursor decodes a base64 string to a cursor.
@@ -121,7 +124,7 @@ func DecodeCursor(encoded string) (*Cursor, error) {
 func (s *Store) SaveMessage(msg *Message) error {
 	tx, err := s.db.Begin()
 	if err != nil {
-		return err
+		return fmt.Errorf("saving message: begin tx: %w", err)
 	}
 
 	now := time.Now()
@@ -143,13 +146,13 @@ func (s *Store) SaveMessage(msg *Message) error {
 	)
 	if err != nil {
 		_ = tx.Rollback()
-		return err
+		return fmt.Errorf("saving message: insert: %w", err)
 	}
 
 	id, err := result.LastInsertId()
 	if err != nil {
 		_ = tx.Rollback()
-		return err
+		return fmt.Errorf("saving message: last insert id: %w", err)
 	}
 	msg.ID = id
 
@@ -162,12 +165,12 @@ func (s *Store) SaveMessage(msg *Message) error {
 	`
 	if _, err := tx.Exec(update, msg.Tokens, now, msg.SessionID); err != nil {
 		_ = tx.Rollback()
-		return err
+		return fmt.Errorf("saving message: update session stats: %w", err)
 	}
 
 	if err := tx.Commit(); err != nil {
 		_ = tx.Rollback()
-		return err
+		return fmt.Errorf("saving message: commit: %w", err)
 	}
 
 	msgCopy := *msg
@@ -186,12 +189,12 @@ func (s *Store) SaveMessage(msg *Message) error {
 func (s *Store) ReplaceMessages(sessionID string, messages []Message) error {
 	tx, err := s.db.Begin()
 	if err != nil {
-		return err
+		return fmt.Errorf("replacing messages: begin tx: %w", err)
 	}
 
 	if _, err = tx.Exec(`DELETE FROM messages WHERE session_id = ?`, sessionID); err != nil {
 		_ = tx.Rollback()
-		return err
+		return fmt.Errorf("replacing messages: delete old: %w", err)
 	}
 
 	stmt, err := tx.Prepare(`
@@ -200,7 +203,7 @@ func (s *Store) ReplaceMessages(sessionID string, messages []Message) error {
 	`)
 	if err != nil {
 		_ = tx.Rollback()
-		return err
+		return fmt.Errorf("replacing messages: prepare insert: %w", err)
 	}
 	defer stmt.Close()
 
@@ -230,7 +233,7 @@ func (s *Store) ReplaceMessages(sessionID string, messages []Message) error {
 			msg.IsTruncated,
 		); err != nil {
 			_ = tx.Rollback()
-			return err
+			return fmt.Errorf("replacing messages: insert: %w", err)
 		}
 	}
 
@@ -245,11 +248,11 @@ func (s *Store) ReplaceMessages(sessionID string, messages []Message) error {
 		WHERE session_id = ?
 	`, len(messages), totalTokens, latest, sessionID); err != nil {
 		_ = tx.Rollback()
-		return err
+		return fmt.Errorf("replacing messages: update session stats: %w", err)
 	}
 
 	if err := tx.Commit(); err != nil {
-		return err
+		return fmt.Errorf("replacing messages: commit: %w", err)
 	}
 
 	s.notify(newEvent(EventSessionUpdated, sessionID, sessionID, map[string]any{
@@ -276,7 +279,7 @@ func (s *Store) GetMessages(sessionID string, limit int, offset int) ([]Message,
 	`
 	rows, err := s.db.Query(query, sessionID, limit, offset)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("querying messages: %w", err)
 	}
 	defer rows.Close()
 
@@ -303,7 +306,7 @@ func (s *Store) GetMessages(sessionID string, limit int, offset int) ([]Message,
 			&msg.IsSummary,
 			&msg.IsTruncated,
 		); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("scanning message: %w", err)
 		}
 		msg.ContentJSON = contentJSON.String
 		msg.ContentType = defaultContentType(contentType.String)
@@ -311,7 +314,10 @@ func (s *Store) GetMessages(sessionID string, limit int, offset int) ([]Message,
 		messages = append(messages, msg)
 	}
 
-	return messages, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating messages: %w", err)
+	}
+	return messages, nil
 }
 
 // GetMessagesWithCursor retrieves messages for a session using cursor-based pagination.
@@ -584,7 +590,7 @@ func (s *Store) GetLatestMessageByRole(sessionID, role string) (*Message, error)
 		if err == sql.ErrNoRows {
 			return nil, nil
 		}
-		return nil, err
+		return nil, fmt.Errorf("scanning latest message by role: %w", err)
 	}
 	msg.ContentJSON = contentJSON.String
 	msg.ContentType = defaultContentType(contentType.String)
@@ -604,7 +610,7 @@ func (s *Store) GetRecentMessagesByRole(role string, limit int) ([]Message, erro
 	`
 	rows, err := s.db.Query(query, role, limit)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("querying recent messages by role: %w", err)
 	}
 	defer rows.Close()
 
@@ -627,7 +633,7 @@ func (s *Store) GetRecentMessagesByRole(role string, limit int) ([]Message, erro
 			&msg.IsSummary,
 			&msg.IsTruncated,
 		); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("scanning recent message: %w", err)
 		}
 		msg.ContentJSON = contentJSON.String
 		msg.ContentType = defaultContentType(contentType.String)
@@ -635,7 +641,10 @@ func (s *Store) GetRecentMessagesByRole(role string, limit int) ([]Message, erro
 		messages = append(messages, msg)
 	}
 
-	return messages, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating recent messages: %w", err)
+	}
+	return messages, nil
 }
 
 // parseSQLiteTimestamp parses timestamps from SQLite which may be in various formats.

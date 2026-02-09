@@ -28,15 +28,6 @@ type MagicLinkResponse struct {
 	Label     string    `json:"label,omitempty"`
 }
 
-// setupMagicLinkRoutes adds magic link auth routes.
-func (s *Server) setupMagicLinkRoutes(r chi.Router) {
-	r.Route("/auth", func(r chi.Router) {
-		r.Post("/magic-link", s.handleCreateMagicLink)
-	})
-	// Public endpoint for redeeming magic links
-	r.Get("/auth/magic/{token}", s.handleRedeemMagicLink)
-}
-
 // handleCreateMagicLink generates a single-use magic link for authentication.
 func (s *Server) handleCreateMagicLink(w http.ResponseWriter, r *http.Request) {
 	principal, ok := requireScope(w, r, storage.TokenScopeMember)

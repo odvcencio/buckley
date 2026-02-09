@@ -522,6 +522,9 @@ func (s *Sidebar) Unbind() {
 	s.services = runtime.Services{}
 }
 
+// TODO: the 40+ signal observations below follow a repetitive pattern. Consider
+// a helper like observeIfSet(subs, sig, fn) to reduce boilerplate if more
+// signals are added. Not refactoring now to avoid risk.
 func (s *Sidebar) subscribe() {
 	s.subs.Clear()
 	if s.currentTaskSig != nil {
@@ -893,10 +896,15 @@ func (s *Sidebar) initWidgets() {
 		uiwidgets.Tab{Title: "Files", Content: s.files.ScrollView()},
 	)
 	s.Base.Role = accessibility.RoleGroup
+	s.Base.Landmark = accessibility.LandmarkComplementary
+	s.Base.Label = "Conversation sidebar"
 }
 
 // SetStyles configures the sidebar appearance.
 func (s *Sidebar) SetStyles(border, header, text, progressFull, progressEmpty, background backend.Style) {
+	if s == nil {
+		return
+	}
 	s.borderStyle = border
 	s.headerStyle = header
 	s.textStyle = text
@@ -917,11 +925,17 @@ func (s *Sidebar) SetStyles(border, header, text, progressFull, progressEmpty, b
 
 // SetProgressEdgeStyle configures the highlight style for active progress edges.
 func (s *Sidebar) SetProgressEdgeStyle(style backend.Style) {
+	if s == nil {
+		return
+	}
 	s.progressEdge = style
 }
 
 // SetStatusStyles configures styles for status indicators.
 func (s *Sidebar) SetStatusStyles(completed, active, pending, failed backend.Style) {
+	if s == nil {
+		return
+	}
 	s.completedStyle = completed
 	s.activeStyle = active
 	s.pendingStyle = pending
@@ -930,6 +944,9 @@ func (s *Sidebar) SetStatusStyles(completed, active, pending, failed backend.Sty
 
 // SetContextStyles configures styles for context usage indicators.
 func (s *Sidebar) SetContextStyles(active, warn, critical, muted backend.Style) {
+	if s == nil {
+		return
+	}
 	s.contextActive = active
 	s.contextWarn = warn
 	s.contextCritical = critical
@@ -941,6 +958,9 @@ func (s *Sidebar) SetContextStyles(active, warn, critical, muted backend.Style) 
 
 // SetSpinnerStyle configures the spinner style.
 func (s *Sidebar) SetSpinnerStyle(style backend.Style) {
+	if s == nil {
+		return
+	}
 	s.spinnerStyle = style
 	if s.status != nil {
 		s.status.SetSpinnerStyle(style)
@@ -1347,6 +1367,9 @@ func (s *Sidebar) SetShowExperiment(show bool) {
 
 // SetSpinnerFrame updates the spinner animation frame.
 func (s *Sidebar) SetSpinnerFrame(frame int) {
+	if s == nil {
+		return
+	}
 	if s.status != nil {
 		s.status.SetSpinnerFrame(frame)
 	}

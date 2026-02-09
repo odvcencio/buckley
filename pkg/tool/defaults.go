@@ -6,8 +6,6 @@ import (
 	"github.com/odvcencio/buckley/pkg/filewatch"
 	"github.com/odvcencio/buckley/pkg/mission"
 	"github.com/odvcencio/buckley/pkg/telemetry"
-	"github.com/odvcencio/fluffyui/progress"
-	"github.com/odvcencio/fluffyui/toast"
 )
 
 const (
@@ -22,8 +20,8 @@ const (
 
 // MiddlewareConfig configures the default middleware stack.
 type MiddlewareConfig struct {
-	ToastManager    *toast.ToastManager
-	ProgressManager *progress.ProgressManager
+	ToastManager    ToastNotifier
+	ProgressManager ProgressTracker
 	FileWatcher     *filewatch.FileWatcher
 
 	DefaultTimeout   time.Duration

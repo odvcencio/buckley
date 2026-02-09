@@ -13,9 +13,7 @@ import (
 func TestRunRalphList_NoLogDir(t *testing.T) {
 	// Create a temp directory with no .ralph-logs
 	dir := t.TempDir()
-	oldWd, _ := os.Getwd()
-	os.Chdir(dir)
-	defer os.Chdir(oldWd)
+	t.Chdir(dir)
 
 	// Should not error when no logs exist
 	err := runRalphList([]string{})
@@ -66,9 +64,7 @@ func TestRunRalphList_WithLogs(t *testing.T) {
 	}
 	f.Close()
 
-	oldWd, _ := os.Getwd()
-	os.Chdir(dir)
-	defer os.Chdir(oldWd)
+	t.Chdir(dir)
 
 	// Test with --all flag to show completed sessions
 	err = runRalphList([]string{"--all"})
@@ -131,9 +127,7 @@ func TestRunRalphList_RunningSession(t *testing.T) {
 	}
 	f.Close()
 
-	oldWd, _ := os.Getwd()
-	os.Chdir(dir)
-	defer os.Chdir(oldWd)
+	t.Chdir(dir)
 
 	// Should show running session without --all flag
 	err = runRalphList([]string{})

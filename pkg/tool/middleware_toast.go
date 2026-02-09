@@ -4,11 +4,15 @@ import (
 	"strings"
 
 	"github.com/odvcencio/buckley/pkg/tool/builtin"
-	"github.com/odvcencio/fluffyui/toast"
 )
 
+// ToastNotifier sends user-visible toast notifications.
+type ToastNotifier interface {
+	Error(title, message string)
+}
+
 // ToastNotifications emits toast messages for tool failures.
-func ToastNotifications(manager *toast.ToastManager) Middleware {
+func ToastNotifications(manager ToastNotifier) Middleware {
 	return func(next Executor) Executor {
 		return func(ctx *ExecutionContext) (*builtin.Result, error) {
 			res, err := next(ctx)

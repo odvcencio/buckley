@@ -1003,6 +1003,9 @@ func (w *WorkflowManager) GetProgressChan() <-chan string {
 // EnableProgressStreaming creates the progress channel
 func (w *WorkflowManager) EnableProgressStreaming() {
 	if w != nil {
+		if w.progressChan != nil {
+			close(w.progressChan)
+		}
 		w.progressChan = make(chan string, 100) // Buffered to prevent blocking
 	}
 }

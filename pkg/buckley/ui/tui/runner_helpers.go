@@ -9,6 +9,7 @@ import (
 	"time"
 
 	buckleywidgets "github.com/odvcencio/buckley/pkg/buckley/ui/widgets"
+	"github.com/odvcencio/fluffyui/accessibility"
 	"github.com/odvcencio/fluffyui/runtime"
 	"github.com/odvcencio/fluffyui/state"
 	"github.com/odvcencio/fluffyui/terminal"
@@ -340,6 +341,13 @@ func (r *Runner) toggleSidebar() {
 	}
 	visible := r.state.SidebarVisible.Get()
 	r.state.SidebarVisible.Set(!visible)
+	if announcer := r.app.Services().Announcer(); announcer != nil {
+		if visible {
+			announcer.Announce("Sidebar closed", accessibility.PriorityPolite)
+		} else {
+			announcer.Announce("Sidebar opened", accessibility.PriorityPolite)
+		}
+	}
 }
 
 // bindWidgets binds all widgets to app services so they can request redraws.
@@ -465,8 +473,16 @@ func (r *Runner) maybeCaptureInput(app *runtime.App, key runtime.KeyMsg) {
 	if screen == nil {
 		return
 	}
-	if top := screen.TopLayer(); top != nil && top.Modal && screen.LayerCount() > 1 {
-		return
+	// Check all layers for any modal overlay, not just the top layer.
+	// The toast layer (non-modal) may sit above a modal overlay, so
+	// checking only TopLayer() would miss the modal beneath it.
+	if screen.OverlayCount() > 0 {
+		for i := screen.LayerCount() - 1; i >= 0; i-- {
+			layer := screen.Layer(i)
+			if layer != nil && layer.Modal {
+				return
+			}
+		}
 	}
 	scope := screen.BaseFocusScope()
 	if scope == nil {

@@ -158,10 +158,16 @@ func (a *Agent) Start(ctx context.Context) error {
 		a.mu.Unlock()
 
 		if ok {
-			if err := handler(ctx, agentMsg); err != nil {
-				// Log error but don't crash
-				a.publishStatus(ctx, "error", err.Error())
-			}
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						a.publishStatus(ctx, "error", fmt.Sprintf("handler panic: %v", r))
+					}
+				}()
+				if err := handler(ctx, agentMsg); err != nil {
+					a.publishStatus(ctx, "error", err.Error())
+				}
+			}()
 		}
 
 		return nil
@@ -202,7 +208,7 @@ func (a *Agent) Run(ctx context.Context) error {
 			a.Cancel()
 			return timeoutCtx.Err()
 		case <-ticker.C:
-			if a.State == StateResolved || a.cancelled.Load() {
+			if a.getState() == StateResolved || a.cancelled.Load() {
 				return nil
 			}
 		}
@@ -338,6 +344,12 @@ func (a *Agent) setState(state State) {
 	a.State = state
 }
 
+func (a *Agent) getState() State {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.State
+}
+
 func (a *Agent) heartbeatLoop(ctx context.Context) {
 	ticker := time.NewTicker(a.Config.HeartbeatInterval)
 	defer ticker.Stop()
@@ -347,7 +359,7 @@ func (a *Agent) heartbeatLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if a.cancelled.Load() || a.State == StateResolved {
+			if a.cancelled.Load() || a.getState() == StateResolved {
 				return
 			}
 			a.publishStatus(ctx, "heartbeat", "")

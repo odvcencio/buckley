@@ -3,6 +3,7 @@ package widgets
 import (
 	"strings"
 
+	"github.com/odvcencio/fluffyui/accessibility"
 	"github.com/odvcencio/fluffyui/backend"
 	"github.com/odvcencio/fluffyui/runtime"
 	"github.com/odvcencio/fluffyui/terminal"
@@ -35,12 +36,15 @@ func NewCodePreview(language, code string) *CodePreview {
 	).WithGap(1)
 	panel := uiwidgets.NewPanel(layout)
 	panel.SetTitle(title)
-	return &CodePreview{
+	c := &CodePreview{
 		panel:  panel,
 		header: header,
 		text:   text,
 		scroll: scroll,
 	}
+	c.Base.Role = accessibility.RoleDocument
+	c.Base.Label = "Code preview"
+	return c
 }
 
 // SetStyles updates the preview styles.

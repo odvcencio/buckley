@@ -3,6 +3,7 @@ package widgets
 import (
 	"strings"
 
+	"github.com/odvcencio/fluffyui/accessibility"
 	"github.com/odvcencio/fluffyui/backend"
 	"github.com/odvcencio/fluffyui/runtime"
 	"github.com/odvcencio/fluffyui/state"
@@ -50,6 +51,10 @@ func NewChatReasoning(bindings ChatReasoningBindings) *ChatReasoning {
 	r.panel.SetTitle("Reasoning")
 
 	r.subscribe()
+	if r.panel != nil {
+		r.panel.Base.Role = accessibility.RoleGroup
+		r.panel.Base.Label = "Reasoning"
+	}
 	return r
 }
 
@@ -134,7 +139,17 @@ func (r *ChatReasoning) ToggleExpanded() bool {
 	if r == nil || !r.visible || r.section == nil {
 		return false
 	}
-	r.section.SetExpanded(!r.section.Expanded())
+	expanded := !r.section.Expanded()
+	r.section.SetExpanded(expanded)
+	if r.services != (runtime.Services{}) {
+		if announcer := r.services.Announcer(); announcer != nil {
+			if expanded {
+				announcer.Announce("Reasoning expanded", accessibility.PriorityPolite)
+			} else {
+				announcer.Announce("Reasoning collapsed", accessibility.PriorityPolite)
+			}
+		}
+	}
 	return true
 }
 

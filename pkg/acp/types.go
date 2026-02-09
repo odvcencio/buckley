@@ -14,7 +14,7 @@ const ProtocolVersion uint16 = 1
 
 type Request struct {
 	JSONRPC string          `json:"jsonrpc"`
-	ID      interface{}     `json:"id"`
+	ID      any     `json:"id"`
 	Method  string          `json:"method"`
 	Params  json.RawMessage `json:"params,omitempty"`
 }
@@ -27,15 +27,15 @@ type Notification struct {
 
 type Response struct {
 	JSONRPC string      `json:"jsonrpc"`
-	ID      interface{} `json:"id"`
-	Result  interface{} `json:"result,omitempty"`
+	ID      any `json:"id"`
+	Result  any `json:"result,omitempty"`
 	Error   *Error      `json:"error,omitempty"`
 }
 
 type Error struct {
 	Code    int         `json:"code"`
 	Message string      `json:"message"`
-	Data    interface{} `json:"data,omitempty"`
+	Data    any `json:"data,omitempty"`
 }
 
 // Standard JSON-RPC error codes.

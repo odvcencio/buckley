@@ -20,7 +20,7 @@ var (
 )
 
 // MessageHandler is a function that processes published messages
-type MessageHandler func(msg interface{})
+type MessageHandler func(msg any)
 
 // Subscription represents an active subscription to a topic
 type Subscription interface {
@@ -34,7 +34,7 @@ type Subscription interface {
 // PubSub defines the interface for publish/subscribe messaging
 type PubSub interface {
 	// Publish sends a message to all subscribers of the given topic
-	Publish(ctx context.Context, topic string, message interface{}) error
+	Publish(ctx context.Context, topic string, message any) error
 
 	// Subscribe registers a handler for messages on the given topic pattern
 	// Topic patterns support wildcards (*) for flexible matching
@@ -49,7 +49,7 @@ type subscription struct {
 	id      string
 	topic   string
 	handler MessageHandler
-	buffer  chan interface{}
+	buffer  chan any
 	ctx     context.Context
 	cancel  context.CancelFunc
 }
@@ -79,7 +79,7 @@ func NewInMemoryPubSub() *InMemoryPubSub {
 }
 
 // Publish sends a message to all subscribers whose topic patterns match
-func (ps *InMemoryPubSub) Publish(ctx context.Context, topic string, message interface{}) error {
+func (ps *InMemoryPubSub) Publish(ctx context.Context, topic string, message any) error {
 	if topic == "" {
 		return ErrEmptyTopic
 	}
@@ -124,7 +124,7 @@ func (ps *InMemoryPubSub) Subscribe(ctx context.Context, topic string, handler M
 		id:      fmt.Sprintf("sub-%d", ps.nextID),
 		topic:   topic,
 		handler: handler,
-		buffer:  make(chan interface{}, 100), // Buffered channel for burst handling
+		buffer:  make(chan any, 100), // Buffered channel for burst handling
 		ctx:     subCtx,
 		cancel:  cancel,
 	}

@@ -177,14 +177,6 @@ func (ct *Tracker) EstimateStreamingCost(modelID string, streamingTokens int) fl
 func (ct *Tracker) GetDailyCost() float64 {
 	ct.mu.RLock()
 	defer ct.mu.RUnlock()
-
-	// Refresh if it's a new day
-	if time.Since(ct.lastDailyUpdate) > 24*time.Hour {
-		ct.mu.RUnlock()
-		ct.loadCosts()
-		ct.mu.RLock()
-	}
-
 	return ct.dailyCost
 }
 

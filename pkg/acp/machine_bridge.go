@@ -61,6 +61,9 @@ func (b *MachineBridge) run(ch <-chan telemetry.Event) {
 		}
 
 		if b.agent.transport != nil {
+			// Notification errors are intentionally ignored: the bridge is
+			// best-effort and a send failure (e.g. closed transport) should
+			// not stop event processing for other subscribers.
 			_ = b.agent.transport.SendNotification("session/update", SessionUpdateNotification{
 				SessionID: b.sessionID,
 				Update:    update,

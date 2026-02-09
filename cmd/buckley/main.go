@@ -54,11 +54,18 @@ var (
 	buildDate = "unknown"
 )
 
-var encodingOverrideFlag string
-var quietMode bool
-var noColor bool
-var configPath string
-var rlmMode bool
+// defaultFallbackModel is the model used when no model is configured.
+const defaultFallbackModel = "openai/gpt-4o"
+
+// cliFlags holds mutable CLI state that was formerly package-level vars.
+// It is populated once by main() and read by initDependencies / executeOneShot.
+var cliFlags struct {
+	encodingOverride string
+	quiet            bool
+	noColor          bool
+	configPath       string
+	rlmMode          bool
+}
 
 // initDependenciesFn allows tests to stub dependency initialization without hitting the network.
 var initDependenciesFn = initDependencies
@@ -109,11 +116,11 @@ func main() {
 
 	ensureBuckleyRuntimeIgnored()
 
-	encodingOverrideFlag = opts.encodingOverride
-	quietMode = opts.quiet
-	noColor = opts.noColor
-	configPath = opts.configPath
-	rlmMode = opts.rlmMode
+	cliFlags.encodingOverride = opts.encodingOverride
+	cliFlags.quiet = opts.quiet
+	cliFlags.noColor = opts.noColor
+	cliFlags.configPath = opts.configPath
+	cliFlags.rlmMode = opts.rlmMode
 	os.Args = append([]string{os.Args[0]}, opts.args...)
 
 	if handled, exitCode := dispatchSubcommand(opts.args); handled {
@@ -139,8 +146,8 @@ func main() {
 
 	// Load configuration
 	var cfg *config.Config
-	if configPath != "" {
-		cfg, err = config.LoadFromPath(configPath)
+	if cliFlags.configPath != "" {
+		cfg, err = config.LoadFromPath(cliFlags.configPath)
 	} else {
 		cfg, err = config.Load()
 	}
@@ -289,7 +296,7 @@ func main() {
 // executeOneShot executes a single prompt and exits
 func executeOneShot(prompt string, cfg *config.Config, mgr *model.Manager, store *storage.Store, projectContext *projectcontext.ProjectContext, planStore orchestrator.PlanStore, verbose bool) int {
 	stderrIsTTY := term.IsTerminal(int(os.Stderr.Fd()))
-	if !quietMode {
+	if !cliFlags.quiet {
 		if cwd, err := os.Getwd(); err == nil {
 			fmt.Fprintf(os.Stderr, "workdir: %s\n", cwd)
 		}
@@ -308,7 +315,7 @@ func executeOneShot(prompt string, cfg *config.Config, mgr *model.Manager, store
 	// Get model ID
 	modelID := cfg.Models.Execution
 	if modelID == "" {
-		modelID = "openai/gpt-4o"
+		modelID = defaultFallbackModel
 	}
 
 	// Build system prompt with budgeted project context
@@ -336,12 +343,13 @@ func executeOneShot(prompt string, cfg *config.Config, mgr *model.Manager, store
 	if cwd, err := os.Getwd(); err == nil {
 		registry.SetWorkDir(cwd)
 		registry.ConfigureContainers(cfg, cwd)
+		registry.ConfigureDockerSandbox(cfg, cwd)
 	}
 	registerMCPTools(cfg, registry)
 
 	// Set up spinner (used for both progress display and tool activity)
 	var spinner *buckleyterm.Spinner
-	if !quietMode && stderrIsTTY {
+	if !cliFlags.quiet && stderrIsTTY {
 		spinner = buckleyterm.NewSpinnerWithOutput(os.Stderr, "processing")
 		spinner.Start()
 	}
@@ -369,7 +377,7 @@ func executeOneShot(prompt string, cfg *config.Config, mgr *model.Manager, store
 			fmt.Print(result.Response)
 		}
 		fmt.Println()
-		if result != nil && result.Trace != nil && !quietMode && stderrIsTTY {
+		if result != nil && result.Trace != nil && !cliFlags.quiet && stderrIsTTY {
 			printOneShotCost(result.Trace)
 		}
 		return 0
@@ -408,7 +416,7 @@ func executeOneShot(prompt string, cfg *config.Config, mgr *model.Manager, store
 	fmt.Println()
 
 	// Show cost/token summary
-	if result != nil && !quietMode && stderrIsTTY {
+	if result != nil && !cliFlags.quiet && stderrIsTTY {
 		printOneShotUsage(result.Usage, modelID, mgr)
 	}
 	return 0
@@ -541,25 +549,9 @@ func (h *oneshotStreamHandler) OnComplete(result *toolrunner.Result) {}
 
 func buildOneShotSystemPrompt(projectContext *projectcontext.ProjectContext, budgetTokens int) string {
 	base := "You are Buckley, an AI development assistant. Be concise and helpful.\n\n"
-	var b strings.Builder
-	used := 0
+	pb := newPromptBuilder(budgetTokens)
 
-	appendSection := func(content string, required bool) {
-		if strings.TrimSpace(content) == "" {
-			return
-		}
-		if !required && budgetTokens <= 0 {
-			return
-		}
-		tokens := conversation.CountTokens(content)
-		if budgetTokens > 0 && !required && used+tokens > budgetTokens {
-			return
-		}
-		b.WriteString(content)
-		used += tokens
-	}
-
-	appendSection(base, true)
+	pb.appendSection(base, true)
 
 	if projectContext != nil && projectContext.Loaded {
 		rawProject := strings.TrimSpace(projectContext.RawContent)
@@ -574,18 +566,18 @@ func buildOneShotSystemPrompt(projectContext *projectcontext.ProjectContext, bud
 				summarySection = "Project Context (summary):\n" + projectSummary + "\n\n"
 			}
 
-			remaining := budgetTokens - used
+			remaining := pb.remaining()
 			if remaining > 0 {
 				if projectSection != "" && conversation.CountTokens(projectSection) <= remaining {
-					appendSection(projectSection, false)
+					pb.appendSection(projectSection, false)
 				} else if summarySection != "" && conversation.CountTokens(summarySection) <= remaining {
-					appendSection(summarySection, false)
+					pb.appendSection(summarySection, false)
 				}
 			}
 		}
 	}
 
-	return strings.TrimSpace(b.String())
+	return strings.TrimSpace(pb.String())
 }
 
 func applyToolDefaults(registry *tool.Registry, cfg *config.Config, hub *telemetry.Hub, sessionID string) {
@@ -645,6 +637,7 @@ func runPlanCommand(args []string) error {
 	applyToolDefaults(registry, cfg, nil, "")
 	if cwd, err := os.Getwd(); err == nil {
 		registry.ConfigureContainers(cfg, cwd)
+		registry.ConfigureDockerSandbox(cfg, cwd)
 	}
 	registerMCPTools(cfg, registry)
 	planStore := orchestrator.NewFilePlanStore(cfg.Artifacts.PlanningDir)
@@ -687,6 +680,7 @@ func runExecuteCommand(args []string) error {
 	}
 	if cwd, err := os.Getwd(); err == nil {
 		registry.ConfigureContainers(cfg, cwd)
+		registry.ConfigureDockerSandbox(cfg, cwd)
 	}
 	registerMCPTools(cfg, registry)
 
@@ -761,6 +755,7 @@ func runExecuteTaskCommand(args []string) error {
 	}
 	if cwd, err := os.Getwd(); err == nil {
 		registry.ConfigureContainers(cfg, cwd)
+		registry.ConfigureDockerSandbox(cfg, cwd)
 	}
 	registerMCPTools(cfg, registry)
 
@@ -814,8 +809,8 @@ func initDependencies() (*config.Config, *model.Manager, *storage.Store, error) 
 	if err != nil {
 		return nil, nil, nil, withExitCode(fmt.Errorf("failed to load config: %w", err), 2)
 	}
-	if encodingOverrideFlag != "" {
-		cfg.Encoding.UseToon = encodingOverrideFlag != "json"
+	if cliFlags.encodingOverride != "" {
+		cfg.Encoding.UseToon = cliFlags.encodingOverride != "json"
 	}
 	applyRLMOverride(cfg)
 	tool.SetResultEncoding(cfg.Encoding.UseToon)
@@ -1571,7 +1566,7 @@ func applyRLMOverride(cfg *config.Config) {
 	if cfg == nil {
 		return
 	}
-	if rlmMode {
+	if cliFlags.rlmMode {
 		cfg.Execution.Mode = config.ExecutionModeRLM
 		cfg.Oneshot.Mode = config.ExecutionModeRLM
 	}
@@ -1659,7 +1654,7 @@ func startEmbeddedIPCServer(cfg *config.Config, store *storage.Store, telemetryH
 
 	token := strings.TrimSpace(os.Getenv("BUCKLEY_IPC_TOKEN"))
 	if ipcCfg.RequireToken && token == "" && !ipcCfg.BasicAuthEnabled {
-		return nil, "", fmt.Errorf("IPC token required (set BUCKLEY_IPC_TOKEN)")
+		return nil, "", fmt.Errorf("ipc token required (set BUCKLEY_IPC_TOKEN)")
 	}
 
 	projectRoot := config.ResolveProjectRoot(cfg)

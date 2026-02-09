@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/odvcencio/buckley/pkg/ralph"
@@ -163,7 +164,7 @@ func TestSetControlConfigValue(t *testing.T) {
 					t.Errorf("setControlConfigValue(%q) expected error containing %q, got nil", tc.kv, tc.errSubstr)
 					return
 				}
-				if tc.errSubstr != "" && !contains(err.Error(), tc.errSubstr) {
+				if tc.errSubstr != "" && !strings.Contains(err.Error(), tc.errSubstr) {
 					t.Errorf("setControlConfigValue(%q) error = %q, want error containing %q", tc.kv, err.Error(), tc.errSubstr)
 				}
 				return
@@ -179,19 +180,6 @@ func TestSetControlConfigValue(t *testing.T) {
 			}
 		})
 	}
-}
-
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsSubstr(s, substr))
-}
-
-func containsSubstr(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
 }
 
 func TestLoadOrCreateControlConfig(t *testing.T) {

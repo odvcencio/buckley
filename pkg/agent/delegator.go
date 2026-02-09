@@ -83,6 +83,10 @@ func (d *Delegator) Delegate(ctx context.Context, agentName string, task string)
 		return nil, fmt.Errorf("delegate call failed: %w", err)
 	}
 
+	if len(chatResp.Choices) == 0 {
+		return nil, fmt.Errorf("model returned empty response")
+	}
+
 	content, err := model.ExtractTextContent(chatResp.Choices[0].Message.Content)
 	if err != nil {
 		return nil, fmt.Errorf("delegate response parse failed: %w", err)

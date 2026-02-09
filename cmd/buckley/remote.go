@@ -68,12 +68,12 @@ type remoteAttachOptions struct {
 func runRemoteAttach(args []string) error {
 	opts, err := parseRemoteAttachFlags(args)
 	if err != nil {
-		return err
+		return fmt.Errorf("parsing attach flags: %w", err)
 	}
 
 	client, err := newRemoteClient(opts.remoteBaseOptions)
 	if err != nil {
-		return err
+		return fmt.Errorf("creating remote client: %w", err)
 	}
 	defer func() { _ = client.Close() }()
 
@@ -90,7 +90,7 @@ func runRemoteAttach(args []string) error {
 
 	sessionToken, err := client.issueSessionToken(ctx, opts.SessionID)
 	if err != nil {
-		return err
+		return fmt.Errorf("issuing session token: %w", err)
 	}
 
 	var activePlan string
@@ -132,11 +132,11 @@ func runRemoteAttach(args []string) error {
 func runRemoteSessions(args []string) error {
 	base, err := parseRemoteBaseFlags("sessions", args)
 	if err != nil {
-		return err
+		return fmt.Errorf("parsing sessions flags: %w", err)
 	}
 	client, err := newRemoteClient(base)
 	if err != nil {
-		return err
+		return fmt.Errorf("creating remote client: %w", err)
 	}
 	defer func() { _ = client.Close() }()
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
@@ -144,7 +144,7 @@ func runRemoteSessions(args []string) error {
 
 	sessions, err := client.listSessions(ctx)
 	if err != nil {
-		return err
+		return fmt.Errorf("listing sessions: %w", err)
 	}
 	if len(sessions) == 0 {
 		fmt.Println("No active sessions")
@@ -172,18 +172,18 @@ func runRemoteTokens(args []string) error {
 	case "list":
 		base, err := parseRemoteBaseFlags("tokens list", args[1:])
 		if err != nil {
-			return err
+			return fmt.Errorf("parsing token list flags: %w", err)
 		}
 		client, err := newRemoteClient(base)
 		if err != nil {
-			return err
+			return fmt.Errorf("creating remote client: %w", err)
 		}
 		defer func() { _ = client.Close() }()
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 		tokens, err := client.listAPITokens(ctx)
 		if err != nil {
-			return err
+			return fmt.Errorf("listing api tokens: %w", err)
 		}
 		fmt.Printf("%-8s %-12s %-10s %-12s %s\n", "ID", "NAME", "SCOPE", "LAST USED", "STATUS")
 		for _, tok := range tokens {
@@ -209,21 +209,21 @@ func runRemoteTokens(args []string) error {
 		owner := fs.String("owner", "", "Owner / contact")
 		scope := fs.String("scope", "member", "Scope (operator|member|viewer)")
 		if err := fs.Parse(args[1:]); err != nil {
-			return err
+			return fmt.Errorf("parsing token create flags: %w", err)
 		}
 		if strings.TrimSpace(base.BaseURL) == "" {
 			return fmt.Errorf("--url is required")
 		}
 		client, err := newRemoteClient(base)
 		if err != nil {
-			return err
+			return fmt.Errorf("creating remote client: %w", err)
 		}
 		defer func() { _ = client.Close() }()
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		token, record, err := client.createAPIToken(ctx, *name, *owner, *scope)
 		if err != nil {
-			return err
+			return fmt.Errorf("creating api token: %w", err)
 		}
 		fmt.Println("Token created. Store this secret safely:")
 		fmt.Printf("  %s\n", token)
@@ -234,14 +234,14 @@ func runRemoteTokens(args []string) error {
 		registerRemoteBaseFlags(fs, &base)
 		tokenID := fs.String("id", "", "Token ID to revoke")
 		if err := fs.Parse(args[1:]); err != nil {
-			return err
+			return fmt.Errorf("parsing token revoke flags: %w", err)
 		}
 		if strings.TrimSpace(base.BaseURL) == "" {
 			return fmt.Errorf("--url is required")
 		}
 		client, err := newRemoteClient(base)
 		if err != nil {
-			return err
+			return fmt.Errorf("creating remote client: %w", err)
 		}
 		defer func() { _ = client.Close() }()
 		if strings.TrimSpace(*tokenID) == "" {
@@ -250,7 +250,7 @@ func runRemoteTokens(args []string) error {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 		if err := client.revokeAPIToken(ctx, *tokenID); err != nil {
-			return err
+			return fmt.Errorf("revoking api token: %w", err)
 		}
 		fmt.Println("Token revoked.")
 	default:
@@ -275,18 +275,18 @@ type remoteConsoleOptions struct {
 func runRemoteLogin(args []string) error {
 	opts, err := parseRemoteLoginFlags(args)
 	if err != nil {
-		return err
+		return fmt.Errorf("parsing login flags: %w", err)
 	}
 	client, err := newRemoteClient(opts.remoteBaseOptions)
 	if err != nil {
-		return err
+		return fmt.Errorf("creating remote client: %w", err)
 	}
 	defer func() { _ = client.Close() }()
 	ctx, cancel := context.WithTimeout(context.Background(), opts.Timeout)
 	defer cancel()
 	ticket, err := client.createCliTicket(ctx, opts.Label)
 	if err != nil {
-		return err
+		return fmt.Errorf("creating cli ticket: %w", err)
 	}
 	fmt.Printf("📟 Ticket %s created. Secret stored locally.\n", ticket.Ticket)
 	fmt.Printf("Open this URL in a logged-in browser session to approve:\n  %s\n", ticket.LoginURL)
@@ -295,10 +295,10 @@ func runRemoteLogin(args []string) error {
 	}
 	fmt.Println("Waiting for approval… Press Ctrl+C to cancel.")
 	if err := client.waitForCliApproval(ctx, ticket.Ticket, ticket.Secret, 3*time.Second); err != nil {
-		return err
+		return fmt.Errorf("waiting for cli approval: %w", err)
 	}
 	if err := client.persistCookies(); err != nil {
-		return err
+		return fmt.Errorf("persisting auth cookies: %w", err)
 	}
 	fmt.Println("✅ Buckley CLI is now authenticated via your browser session.")
 	return nil
@@ -307,18 +307,18 @@ func runRemoteLogin(args []string) error {
 func runRemoteConsole(args []string) error {
 	opts, err := parseRemoteConsoleFlags(args)
 	if err != nil {
-		return err
+		return fmt.Errorf("parsing console flags: %w", err)
 	}
 	client, err := newRemoteClient(opts.remoteBaseOptions)
 	if err != nil {
-		return err
+		return fmt.Errorf("creating remote client: %w", err)
 	}
 	defer func() { _ = client.Close() }()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	sessionToken, err := client.issueSessionToken(ctx, opts.SessionID)
 	if err != nil {
-		return err
+		return fmt.Errorf("issuing session token: %w", err)
 	}
 	fmt.Printf("Opening remote console for session %s. Press Ctrl+C to exit.\n", opts.SessionID)
 	return client.openRemotePTY(ctx, opts.SessionID, sessionToken, opts.Command)
@@ -331,10 +331,10 @@ func parseRemoteAttachFlags(args []string) (remoteAttachOptions, error) {
 	fs.StringVar(&opts.SessionID, "session", "", "Session ID to attach to")
 
 	if err := fs.Parse(args); err != nil {
-		return remoteAttachOptions{}, err
+		return remoteAttachOptions{}, fmt.Errorf("parsing attach flags: %w", err)
 	}
 	if err := validateRemoteBaseOptions(opts.remoteBaseOptions); err != nil {
-		return remoteAttachOptions{}, err
+		return remoteAttachOptions{}, fmt.Errorf("validating remote options: %w", err)
 	}
 
 	if strings.TrimSpace(opts.BaseURL) == "" {
@@ -352,10 +352,10 @@ func parseRemoteBaseFlags(cmd string, args []string) (remoteBaseOptions, error) 
 	var opts remoteBaseOptions
 	registerRemoteBaseFlags(fs, &opts)
 	if err := fs.Parse(args); err != nil {
-		return remoteBaseOptions{}, err
+		return remoteBaseOptions{}, fmt.Errorf("parsing remote flags: %w", err)
 	}
 	if err := validateRemoteBaseOptions(opts); err != nil {
-		return remoteBaseOptions{}, err
+		return remoteBaseOptions{}, fmt.Errorf("validating remote options: %w", err)
 	}
 	if strings.TrimSpace(opts.BaseURL) == "" {
 		return remoteBaseOptions{}, fmt.Errorf("--url is required")
@@ -401,10 +401,10 @@ func parseRemoteLoginFlags(args []string) (remoteLoginOptions, error) {
 	fs.StringVar(&opts.BasicPass, "basic-auth-pass", defaultPass, "HTTP basic auth password")
 	fs.BoolVar(&opts.InsecureTLS, "insecure-skip-verify", false, "Skip TLS verification (development only)")
 	if err := fs.Parse(args); err != nil {
-		return remoteLoginOptions{}, err
+		return remoteLoginOptions{}, fmt.Errorf("parsing login flags: %w", err)
 	}
 	if err := validateRemoteBaseOptions(opts.remoteBaseOptions); err != nil {
-		return remoteLoginOptions{}, err
+		return remoteLoginOptions{}, fmt.Errorf("validating remote options: %w", err)
 	}
 	if strings.TrimSpace(opts.BaseURL) == "" {
 		return remoteLoginOptions{}, fmt.Errorf("--url is required")
@@ -426,10 +426,10 @@ func parseRemoteConsoleFlags(args []string) (remoteConsoleOptions, error) {
 	fs.StringVar(&opts.BasicPass, "basic-auth-pass", defaultPass, "HTTP basic auth password")
 	fs.BoolVar(&opts.InsecureTLS, "insecure-skip-verify", false, "Skip TLS verification (development only)")
 	if err := fs.Parse(args); err != nil {
-		return remoteConsoleOptions{}, err
+		return remoteConsoleOptions{}, fmt.Errorf("parsing console flags: %w", err)
 	}
 	if err := validateRemoteBaseOptions(opts.remoteBaseOptions); err != nil {
-		return remoteConsoleOptions{}, err
+		return remoteConsoleOptions{}, fmt.Errorf("validating remote options: %w", err)
 	}
 	if strings.TrimSpace(opts.BaseURL) == "" {
 		return remoteConsoleOptions{}, fmt.Errorf("--url is required")
@@ -594,7 +594,7 @@ func (c *remoteClient) attachCookies(header http.Header, rawURL string) {
 func (c *remoteClient) newRequest(ctx context.Context, method, p string, body io.Reader) (*http.Request, error) {
 	req, err := http.NewRequestWithContext(ctx, method, c.apiURL(p), body)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("building %s request for %s: %w", method, p, err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	if c.basicHeader != "" {
@@ -662,11 +662,11 @@ func (c *remoteClient) issueSessionToken(ctx context.Context, sessionID string) 
 	payload := strings.NewReader(`{}`)
 	req, err := c.newRequest(ctx, http.MethodPost, fmt.Sprintf("/sessions/%s/tokens", sessionID), payload)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("building session token request: %w", err)
 	}
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("sending session token request: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
@@ -687,7 +687,7 @@ func (c *remoteClient) issueSessionToken(ctx context.Context, sessionID string) 
 		Token string `json:"token"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return "", err
+		return "", fmt.Errorf("decoding session token response: %w", err)
 	}
 	if strings.TrimSpace(result.Token) == "" {
 		return "", fmt.Errorf("session token missing in response")
@@ -698,17 +698,17 @@ func (c *remoteClient) issueSessionToken(ctx context.Context, sessionID string) 
 func (c *remoteClient) sendWorkflowAction(ctx context.Context, sessionID string, sessionToken string, action workflowActionRequest) error {
 	body, err := json.Marshal(action)
 	if err != nil {
-		return err
+		return fmt.Errorf("marshaling workflow action: %w", err)
 	}
 
 	req, err := c.newRequest(ctx, http.MethodPost, fmt.Sprintf("/workflow/%s", sessionID), strings.NewReader(string(body)))
 	if err != nil {
-		return err
+		return fmt.Errorf("building workflow action request: %w", err)
 	}
 	req.Header.Set("X-Buckley-Session-Token", sessionToken)
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return err
+		return fmt.Errorf("sending workflow action: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
@@ -772,16 +772,16 @@ func (c *remoteClient) ptyURL(sessionID string, rows, cols int, cmd string) stri
 func (c *remoteClient) createCliTicket(ctx context.Context, label string) (*cliTicketInfo, error) {
 	body, err := json.Marshal(map[string]string{"label": label})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("marshaling cli ticket request: %w", err)
 	}
 	req, err := c.newRequest(ctx, http.MethodPost, "/cli/tickets", bytes.NewReader(body))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("building cli ticket request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("sending cli ticket request: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
@@ -800,7 +800,7 @@ func (c *remoteClient) createCliTicket(ctx context.Context, label string) (*cliT
 	}
 	var info cliTicketInfo
 	if err := json.NewDecoder(resp.Body).Decode(&info); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("decoding cli ticket response: %w", err)
 	}
 	return &info, nil
 }
@@ -809,12 +809,12 @@ func (c *remoteClient) pollCliTicket(ctx context.Context, ticket, secret string)
 	endpoint := fmt.Sprintf("/cli/tickets/%s", ticket)
 	req, err := c.newRequest(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("building ticket poll request: %w", err)
 	}
 	req.Header.Set("X-Buckley-CLI-Ticket-Secret", secret)
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("sending ticket poll request: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
@@ -833,7 +833,7 @@ func (c *remoteClient) pollCliTicket(ctx context.Context, ticket, secret string)
 	}
 	var status cliTicketStatus
 	if err := json.NewDecoder(resp.Body).Decode(&status); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("decoding ticket poll response: %w", err)
 	}
 	return &status, nil
 }
@@ -915,7 +915,7 @@ func (c *remoteClient) openRemotePTY(ctx context.Context, sessionID, sessionToke
 		return conn.Write(ctx, websocket.MessageText, payload)
 	}
 	if err := resize(rows, cols); err != nil {
-		return err
+		return fmt.Errorf("sending initial pty resize: %w", err)
 	}
 	sigCh := make(chan os.Signal, 1)
 	registerTerminalResize(sigCh)
@@ -959,7 +959,7 @@ func (c *remoteClient) openRemotePTY(ctx context.Context, sessionID, sessionToke
 			if err == io.EOF {
 				return nil
 			}
-			return err
+			return fmt.Errorf("pty input: %w", err)
 		default:
 		}
 		_, data, err := conn.Read(ctx)
@@ -967,7 +967,7 @@ func (c *remoteClient) openRemotePTY(ctx context.Context, sessionID, sessionToke
 			if websocket.CloseStatus(err) == websocket.StatusNormalClosure {
 				return nil
 			}
-			return err
+			return fmt.Errorf("reading pty data: %w", err)
 		}
 		var msg ptyMessage
 		if err := json.Unmarshal(data, &msg); err != nil {
@@ -1007,7 +1007,7 @@ func (c *remoteClient) streamEvents(ctx context.Context, sessionID string, event
 			fmt.Fprintln(os.Stderr, "Connect Subscribe unavailable; falling back to WebSocket event stream.")
 			return c.streamEventsWS(ctx, sessionID, events)
 		}
-		return err
+		return fmt.Errorf("streaming events: %w", err)
 	}
 	return nil
 }
@@ -1020,7 +1020,7 @@ func (c *remoteClient) streamEventsConnect(ctx context.Context, sessionID string
 
 	for {
 		if err := ctx.Err(); err != nil {
-			return err
+			return fmt.Errorf("connect event stream cancelled: %w", err)
 		}
 
 		req := connect.NewRequest(&ipcpb.SubscribeRequest{SessionId: strings.TrimSpace(sessionID)})
@@ -1146,7 +1146,7 @@ func (c *remoteClient) streamEventsWS(ctx context.Context, sessionID string, eve
 
 	for {
 		if err := ctx.Err(); err != nil {
-			return err
+			return fmt.Errorf("websocket event stream cancelled: %w", err)
 		}
 
 		// After too many consecutive errors, back off more aggressively
@@ -1265,7 +1265,7 @@ func (c *remoteClient) streamEventsWS(ctx context.Context, sessionID string, eve
 
 func formatWebSocketDialError(resp *http.Response, err error) error {
 	if resp == nil {
-		return err
+		return fmt.Errorf("websocket dial: %w", err)
 	}
 	if resp.Body != nil {
 		defer resp.Body.Close()
@@ -1293,11 +1293,11 @@ func formatWebSocketDialError(resp *http.Response, err error) error {
 func (c *remoteClient) listSessions(ctx context.Context) ([]remoteSessionSummary, error) {
 	req, err := c.newRequest(ctx, http.MethodGet, "/sessions?limit=50", nil)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("building list sessions request: %w", err)
 	}
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("sending list sessions request: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
@@ -1318,7 +1318,7 @@ func (c *remoteClient) listSessions(ctx context.Context) ([]remoteSessionSummary
 		Sessions []remoteSessionSummary `json:"sessions"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("decoding sessions response: %w", err)
 	}
 	return result.Sessions, nil
 }
@@ -1326,11 +1326,11 @@ func (c *remoteClient) listSessions(ctx context.Context) ([]remoteSessionSummary
 func (c *remoteClient) getSessionDetail(ctx context.Context, sessionID string) (*remoteSessionDetail, error) {
 	req, err := c.newRequest(ctx, http.MethodGet, fmt.Sprintf("/sessions/%s", sessionID), nil)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("building session detail request: %w", err)
 	}
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("sending session detail request: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
@@ -1349,7 +1349,7 @@ func (c *remoteClient) getSessionDetail(ctx context.Context, sessionID string) (
 	}
 	var detail remoteSessionDetail
 	if err := json.NewDecoder(resp.Body).Decode(&detail); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("decoding session detail response: %w", err)
 	}
 	return &detail, nil
 }
@@ -1357,11 +1357,11 @@ func (c *remoteClient) getSessionDetail(ctx context.Context, sessionID string) (
 func (c *remoteClient) fetchPlanLog(ctx context.Context, planID, kind string) ([]string, error) {
 	req, err := c.newRequest(ctx, http.MethodGet, fmt.Sprintf("/plans/%s/logs/%s?limit=50", planID, kind), nil)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("building plan log request: %w", err)
 	}
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("sending plan log request: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
@@ -1382,7 +1382,7 @@ func (c *remoteClient) fetchPlanLog(ctx context.Context, planID, kind string) ([
 		Entries []string `json:"entries"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("decoding plan log response: %w", err)
 	}
 	return payload.Entries, nil
 }
@@ -1390,11 +1390,11 @@ func (c *remoteClient) fetchPlanLog(ctx context.Context, planID, kind string) ([
 func (c *remoteClient) listAPITokens(ctx context.Context) ([]remoteAPIToken, error) {
 	req, err := c.newRequest(ctx, http.MethodGet, "/config/api-tokens", nil)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("building token list request: %w", err)
 	}
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("sending token list request: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
@@ -1415,7 +1415,7 @@ func (c *remoteClient) listAPITokens(ctx context.Context) ([]remoteAPIToken, err
 		Tokens []remoteAPIToken `json:"tokens"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("decoding token list response: %w", err)
 	}
 	return payload.Tokens, nil
 }
@@ -1425,11 +1425,11 @@ func (c *remoteClient) createAPIToken(ctx context.Context, name, owner, scope st
 	buf, _ := json.Marshal(body)
 	req, err := c.newRequest(ctx, http.MethodPost, "/config/api-tokens", strings.NewReader(string(buf)))
 	if err != nil {
-		return "", remoteAPIToken{}, err
+		return "", remoteAPIToken{}, fmt.Errorf("building token create request: %w", err)
 	}
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return "", remoteAPIToken{}, err
+		return "", remoteAPIToken{}, fmt.Errorf("sending token create request: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
@@ -1451,7 +1451,7 @@ func (c *remoteClient) createAPIToken(ctx context.Context, name, owner, scope st
 		Record remoteAPIToken `json:"record"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
-		return "", remoteAPIToken{}, err
+		return "", remoteAPIToken{}, fmt.Errorf("decoding token create response: %w", err)
 	}
 	return payload.Token, payload.Record, nil
 }
@@ -1459,11 +1459,11 @@ func (c *remoteClient) createAPIToken(ctx context.Context, name, owner, scope st
 func (c *remoteClient) revokeAPIToken(ctx context.Context, id string) error {
 	req, err := c.newRequest(ctx, http.MethodDelete, fmt.Sprintf("/config/api-tokens/%s", id), nil)
 	if err != nil {
-		return err
+		return fmt.Errorf("building token revoke request: %w", err)
 	}
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return err
+		return fmt.Errorf("sending token revoke request: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
@@ -1494,7 +1494,7 @@ func remoteInputLoop(ctx context.Context, client *remoteClient, sessionID string
 			if errors.Is(readErr, io.EOF) {
 				return nil
 			}
-			return readErr
+			return fmt.Errorf("reading remote input: %w", readErr)
 		}
 		line = strings.TrimSpace(line)
 		if line == "" {
@@ -1573,7 +1573,7 @@ func readLineWithContext(ctx context.Context, prompt string) (string, error) {
 	case <-ctx.Done():
 		return "", ctx.Err()
 	case err := <-errCh:
-		return "", err
+		return "", fmt.Errorf("reading input line: %w", err)
 	case line := <-lineCh:
 		return line, nil
 	}

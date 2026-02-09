@@ -126,10 +126,8 @@ func TestRunConfigCommandDispatchAndCompletion(t *testing.T) {
 func TestBuildViewProviderBestEffort(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	oldWd, _ := os.Getwd()
 	root := t.TempDir()
-	_ = os.Chdir(root)
-	t.Cleanup(func() { _ = os.Chdir(oldWd) })
+	t.Chdir(root)
 
 	prov, cleanup, err := buildViewProvider()
 	if err != nil {

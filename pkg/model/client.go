@@ -520,7 +520,7 @@ func (c *Client) executeStreamRequest(ctx context.Context, req ChatRequest, chun
 		// Note: Once streaming starts, we don't retry mid-stream
 		defer resp.Body.Close()
 		if err := c.parseSSEStream(ctx, resp.Body, chunkChan); err != nil {
-			return err
+			return fmt.Errorf("parsing SSE stream: %w", err)
 		}
 
 		// Stream completed successfully

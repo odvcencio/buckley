@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -132,7 +133,8 @@ func (p *GoogleProvider) ChatCompletion(ctx context.Context, req ChatRequest) (*
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("google request failed: %s", resp.Status)
+		errBody, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("google request failed (%d): %s", resp.StatusCode, string(errBody))
 	}
 
 	var genResp googleResponse

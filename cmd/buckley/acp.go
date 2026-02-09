@@ -79,7 +79,7 @@ func runACPCommand(args []string) error {
 		fmt.Fprintf(logger, "=== ACP agent started ===\n")
 	}
 
-	logf := func(format string, args ...interface{}) {
+	logf := func(format string, args ...any) {
 		if logger != nil {
 			fmt.Fprintf(logger, format+"\n", args...)
 		}
@@ -182,7 +182,7 @@ func makePromptHandler(
 	store *storage.Store,
 	projectContext *projectcontext.ProjectContext,
 	defaultWorkDir string,
-	logf func(string, ...interface{}),
+	logf func(string, ...any),
 ) func(context.Context, *acp.AgentSession, []acp.ContentBlock, acp.StreamFunc) (*acp.PromptResult, error) {
 	sessions := make(map[string]*acpSessionState)
 	var sessionsMu sync.Mutex
@@ -298,7 +298,7 @@ func getACPSessionState(
 	projectContext *projectcontext.ProjectContext,
 	cfg *config.Config,
 	defaultWorkDir string,
-	logf func(string, ...interface{}),
+	logf func(string, ...any),
 ) *acpSessionState {
 	mu.Lock()
 	defer mu.Unlock()
@@ -325,6 +325,7 @@ func getACPSessionState(
 	}
 	if workDir != "" {
 		registry.ConfigureContainers(cfg, workDir)
+		registry.ConfigureDockerSandbox(cfg, workDir)
 		registry.SetWorkDir(workDir)
 	}
 	if cfg != nil {
@@ -357,25 +358,9 @@ func getACPSessionState(
 }
 
 func buildACPSystemPromptWithBudget(projectContext *projectcontext.ProjectContext, workDir string, skills *skill.Registry, budgetTokens int) string {
-	var b strings.Builder
-	used := 0
+	pb := newPromptBuilder(budgetTokens)
 
-	appendSection := func(content string, required bool) {
-		if strings.TrimSpace(content) == "" {
-			return
-		}
-		if !required && budgetTokens <= 0 {
-			return
-		}
-		tokens := conversation.CountTokens(content)
-		if budgetTokens > 0 && !required && used+tokens > budgetTokens {
-			return
-		}
-		b.WriteString(content)
-		used += tokens
-	}
-
-	appendSection(defaultACPSystemPrompt, true)
+	pb.appendSection(defaultACPSystemPrompt, true)
 
 	rawProject := ""
 	projectSummary := ""
@@ -394,26 +379,26 @@ func buildACPSystemPromptWithBudget(projectContext *projectcontext.ProjectContex
 			summarySection = "\n\nProject Context (summary):\n" + projectSummary
 		}
 
-		remaining := budgetTokens - used
+		remaining := pb.remaining()
 		if remaining > 0 {
 			if projectSection != "" && conversation.CountTokens(projectSection) <= remaining {
-				appendSection(projectSection, false)
+				pb.appendSection(projectSection, false)
 			} else if summarySection != "" && conversation.CountTokens(summarySection) <= remaining {
-				appendSection(summarySection, false)
+				pb.appendSection(summarySection, false)
 			}
 		}
 	}
 
 	if strings.TrimSpace(workDir) != "" {
-		appendSection("\n\nWorking directory: "+workDir, true)
+		pb.appendSection("\n\nWorking directory: "+workDir, true)
 	}
 	if skills != nil {
 		if desc := strings.TrimSpace(skills.GetDescriptions()); desc != "" {
-			appendSection("\n\n"+desc, false)
+			pb.appendSection("\n\n"+desc, false)
 		}
 	}
 
-	return strings.TrimSpace(b.String())
+	return strings.TrimSpace(pb.String())
 }
 
 func trimACPConversationToBudget(conv *conversation.Conversation, budgetTokens int) *conversation.Conversation {
@@ -974,7 +959,7 @@ func toolCallOutputContents(result *builtin.Result, maxText int) []acp.ToolCallC
 
 func toolCallKind(name string) string {
 	switch name {
-	case "read_file", "list_directory", "find_files", "file_exists", "get_file_info",
+	case "read_file", "list_directory", "find_files", "file_exists",
 		"git_status", "git_diff", "git_log", "git_blame", "list_merge_conflicts":
 		return acp.ToolKindRead
 	case "search_text", "search_replace", "find_symbol", "find_references", "analyze_complexity", "find_duplicates":

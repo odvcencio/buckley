@@ -325,6 +325,14 @@ func (t *PatchFileTool) Execute(params map[string]any) (*Result, error) {
 		}, nil
 	}
 
+	const maxPatchBytes = 10 * 1024 * 1024 // 10MB
+	if len(rawPatch) > maxPatchBytes {
+		return &Result{
+			Success: false,
+			Error:   fmt.Sprintf("patch too large: %d bytes (max %d)", len(rawPatch), maxPatchBytes),
+		}, nil
+	}
+
 	strip := 0
 	if v, exists := params["strip"]; exists {
 		var parsedStrip int
@@ -496,7 +504,7 @@ func (t *FileExistsTool) Name() string {
 }
 
 func (t *FileExistsTool) Description() string {
-	return "Check if a file or directory exists and get basic metadata. Returns existence status, type, size, permissions, and modification time. Use this before reading/writing files or to verify paths."
+	return "Check if a file or directory exists and get metadata including name, size, type, permissions, and modification time. Use this before reading/writing files, to verify paths, or to inspect file metadata."
 }
 
 func (t *FileExistsTool) Parameters() ParameterSchema {
@@ -542,6 +550,7 @@ func (t *FileExistsTool) Execute(params map[string]any) (*Result, error) {
 		result["size"] = info.Size()
 		result["mode"] = info.Mode().String()
 		result["modified"] = info.ModTime().Format("2006-01-02 15:04:05")
+		result["name"] = info.Name()
 	}
 
 	return &Result{
@@ -550,64 +559,3 @@ func (t *FileExistsTool) Execute(params map[string]any) (*Result, error) {
 	}, nil
 }
 
-// GetFileInfoTool gets metadata about a file
-type GetFileInfoTool struct{ workDirAware }
-
-func (t *GetFileInfoTool) Name() string {
-	return "get_file_info"
-}
-
-func (t *GetFileInfoTool) Description() string {
-	return "Get detailed metadata about a file or directory including name, size, type, permissions, and last modification time. More detailed than file_exists. Use this for file statistics and metadata inspection."
-}
-
-func (t *GetFileInfoTool) Parameters() ParameterSchema {
-	return ParameterSchema{
-		Type: "object",
-		Properties: map[string]PropertySchema{
-			"path": {
-				Type:        "string",
-				Description: "Path to the file or directory",
-			},
-		},
-		Required: []string{"path"},
-	}
-}
-
-func (t *GetFileInfoTool) Execute(params map[string]any) (*Result, error) {
-	path, ok := params["path"].(string)
-	if !ok || path == "" {
-		return &Result{
-			Success: false,
-			Error:   "path parameter must be a non-empty string",
-		}, nil
-	}
-
-	absPath, err := resolvePath(t.workDir, path)
-	if err != nil {
-		return &Result{
-			Success: false,
-			Error:   err.Error(),
-		}, nil
-	}
-
-	info, err := os.Stat(absPath)
-	if err != nil {
-		return &Result{
-			Success: false,
-			Error:   fmt.Sprintf("failed to get file info: %v", err),
-		}, nil
-	}
-
-	return &Result{
-		Success: true,
-		Data: map[string]any{
-			"path":     absPath,
-			"name":     info.Name(),
-			"size":     info.Size(),
-			"is_dir":   info.IsDir(),
-			"mode":     info.Mode().String(),
-			"modified": info.ModTime().Format("2006-01-02 15:04:05"),
-		},
-	}, nil
-}

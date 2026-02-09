@@ -20,6 +20,15 @@ import (
 	"github.com/odvcencio/buckley/pkg/tool"
 )
 
+const (
+	reviewRequestTimeout      = 90 * time.Second
+	reviewLogPreviewMaxChars  = 400
+	reviewFileContentMaxChars = 8000
+	reviewFileContentMaxLines = 400
+	reviewImplMaxChars        = 6000
+	reviewImplMaxLines        = 200
+)
+
 // ReviewAgent delegates code review to a dedicated model and persists artifacts.
 type ReviewAgent struct {
 	plan            *Plan
@@ -195,7 +204,7 @@ func (a *ReviewAgent) Review(task *Task, builderResult *BuilderResult) (*ReviewR
 		}
 	}
 	systemPrompt := prompts.ReviewPrompt(time.Now(), personaProfile)
-	reqCtx, cancel := context.WithTimeout(a.baseContext(), 90*time.Second)
+	reqCtx, cancel := context.WithTimeout(a.baseContext(), reviewRequestTimeout)
 	defer cancel()
 
 	req := model.ChatRequest{
@@ -215,7 +224,7 @@ func (a *ReviewAgent) Review(task *Task, builderResult *BuilderResult) (*ReviewR
 		"files": fmt.Sprintf("%d", len(filePaths)),
 	})
 	a.logEvent(task.ID, reviewEventPrompt, map[string]string{
-		"preview": truncateForLog(prompt, 400),
+		"preview": truncateForLog(prompt, reviewLogPreviewMaxChars),
 	})
 
 	resp, err := a.modelClient.ChatCompletion(reqCtx, req)
@@ -354,7 +363,7 @@ func (a *ReviewAgent) loadFileContexts(paths []string) []reviewFileContext {
 
 		contexts = append(contexts, reviewFileContext{
 			Path:    path,
-			Content: truncateContent(content, 8000, 400),
+			Content: truncateContent(content, reviewFileContentMaxChars, reviewFileContentMaxLines),
 		})
 	}
 
@@ -385,7 +394,7 @@ func (a *ReviewAgent) buildReviewPrompt(task *Task, result *BuilderResult, conte
 
 	if strings.TrimSpace(result.Implementation) != "" {
 		b.WriteString("\nBuilder implementation proposal:\n")
-		b.WriteString(truncateContent(result.Implementation, 6000, 200))
+		b.WriteString(truncateContent(result.Implementation, reviewImplMaxChars, reviewImplMaxLines))
 		b.WriteString("\n")
 	}
 

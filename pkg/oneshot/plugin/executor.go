@@ -376,7 +376,7 @@ func (e *Executor) actionExec(action ActionDef, result *ExecuteResult) error {
 	}
 
 	// Interpolate result into command
-	cmdStr = strings.ReplaceAll(cmdStr, "${output}", result.Output)
+	cmdStr = strings.ReplaceAll(cmdStr, "${output}", shellEscape(result.Output))
 
 	cmd := exec.Command("sh", "-c", cmdStr)
 	cmd.Dir = e.workDir
@@ -384,6 +384,12 @@ func (e *Executor) actionExec(action ActionDef, result *ExecuteResult) error {
 	cmd.Stderr = os.Stderr
 
 	return cmd.Run()
+}
+
+// shellEscape wraps a string in single quotes for safe shell interpolation.
+// Single quotes inside the string are escaped as '\'' (end quote, escaped quote, start quote).
+func shellEscape(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }
 
 // PluginProcess represents a running plugin process that can be reused.

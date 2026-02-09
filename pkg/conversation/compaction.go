@@ -660,6 +660,15 @@ func (cm *CompactionManager) applySummary(conv *Conversation, summary string, to
 		return
 	}
 
+	// Guard against empty toKeep (can happen with ratio=1.0)
+	if len(toKeep) == 0 {
+		// No messages to keep alongside summary — use the last summarized message's timestamp
+		if len(toSummarize) > 0 {
+			toKeep = toSummarize[len(toSummarize)-1:]
+			toSummarize = toSummarize[:len(toSummarize)-1]
+		}
+	}
+
 	// Compress large summaries before storing
 	summaryContent := fmt.Sprintf("[Summary of %d previous messages]\n\n%s", len(toSummarize), summary)
 	if cm.compressor != nil && len(summaryContent) > 4096 {
@@ -789,6 +798,9 @@ func selectCompactionSegments(messages []Message, ratio float64) ([]Message, []M
 	if ratio <= 0 || ratio > 1 {
 		ratio = defaultCompactionRatio
 	}
+	if ratio >= 1.0 {
+		ratio = 0.9 // Never summarize ALL messages
+	}
 
 	var protected []Message
 	var candidate []Message
@@ -807,6 +819,28 @@ func selectCompactionSegments(messages []Message, ratio float64) ([]Message, []M
 	cutoff := int(float64(len(candidate)) * ratio)
 	if cutoff < 2 {
 		cutoff = 2 // Summarize at least 2 messages
+	}
+
+	// Adjust cutoff to preserve tool call/response pair boundaries.
+	// Never split an assistant tool-call from its matching tool responses.
+	for cutoff < len(candidate)-1 {
+		msg := candidate[cutoff-1]
+		if msg.Role == "assistant" && len(msg.ToolCalls) > 0 {
+			// This assistant message has tool calls — its responses follow.
+			// Include the responses in the same segment.
+			cutoff++
+			continue
+		}
+		if msg.Role == "tool" {
+			// This is a tool response — don't leave it orphaned.
+			// Pull it into toSummarize with its tool call.
+			cutoff++
+			continue
+		}
+		break
+	}
+	if cutoff >= len(candidate) {
+		cutoff = len(candidate) - 1 // Always keep at least one message
 	}
 
 	toSummarize := candidate[:cutoff]
@@ -866,6 +900,10 @@ func formatMessagesForSummary(messages []Message) string {
 	for i, msg := range messages {
 		b.WriteString(fmt.Sprintf("[Message %d - %s]\n", i+1, msg.Role))
 		b.WriteString(GetContentAsString(msg.Content))
+		if msg.Reasoning != "" {
+			b.WriteString("\n[Reasoning]\n")
+			b.WriteString(msg.Reasoning)
+		}
 		b.WriteString("\n\n")
 	}
 

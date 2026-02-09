@@ -2,17 +2,20 @@ package builtin
 
 import (
 	"context"
-
-	"github.com/odvcencio/buckley/pkg/conversation"
 )
+
+// Compactor triggers asynchronous conversation compaction.
+type Compactor interface {
+	CompactAsync(ctx context.Context)
+}
 
 // CompactContextTool triggers background conversation compaction.
 type CompactContextTool struct {
-	compactor *conversation.CompactionManager
+	compactor Compactor
 }
 
 // NewCompactContextTool creates a compact_context tool.
-func NewCompactContextTool(compactor *conversation.CompactionManager) *CompactContextTool {
+func NewCompactContextTool(compactor Compactor) *CompactContextTool {
 	return &CompactContextTool{compactor: compactor}
 }
 

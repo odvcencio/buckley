@@ -106,6 +106,10 @@ func readEnvelope(conn net.Conn) (*browserdpb.Envelope, error) {
 	if length == 0 {
 		return nil, fmt.Errorf("empty message")
 	}
+	const maxMessageSize = 16 << 20 // 16 MB
+	if length > maxMessageSize {
+		return nil, fmt.Errorf("message too large: %d bytes (max %d)", length, maxMessageSize)
+	}
 	data := make([]byte, int(length))
 	if _, err := io.ReadFull(conn, data); err != nil {
 		return nil, err

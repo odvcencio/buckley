@@ -31,7 +31,7 @@ func runDBBackup(args []string) error {
 	out := fs.String("out", "", "Output path for the backup .db file (required)")
 	dbPathFlag := fs.String("db", "", "Source DB path (defaults to BUCKLEY_DB_PATH/BUCKLEY_DATA_DIR)")
 	if err := fs.Parse(args); err != nil {
-		return err
+		return fmt.Errorf("parsing db backup flags: %w", err)
 	}
 
 	if strings.TrimSpace(*out) == "" {
@@ -42,18 +42,18 @@ func runDBBackup(args []string) error {
 	if dbPath == "" {
 		resolved, err := resolveDBPath()
 		if err != nil {
-			return err
+			return fmt.Errorf("resolving db path for backup: %w", err)
 		}
 		dbPath = resolved
 	}
 
 	outPath, err := expandHomePath(*out)
 	if err != nil {
-		return err
+		return fmt.Errorf("expanding backup output path: %w", err)
 	}
 	outPath, err = filepath.Abs(outPath)
 	if err != nil {
-		return err
+		return fmt.Errorf("resolving absolute backup path: %w", err)
 	}
 
 	if _, err := os.Stat(outPath); err == nil {
@@ -70,7 +70,7 @@ func runDBBackup(args []string) error {
 
 	if err := vacuumInto(dbPath, tmpPath); err != nil {
 		_ = os.Remove(tmpPath)
-		return err
+		return fmt.Errorf("db backup vacuum: %w", err)
 	}
 	if err := os.Rename(tmpPath, outPath); err != nil {
 		_ = os.Remove(tmpPath)
@@ -87,7 +87,7 @@ func runDBRestore(args []string) error {
 	dbPathFlag := fs.String("db", "", "Destination DB path (defaults to BUCKLEY_DB_PATH/BUCKLEY_DATA_DIR)")
 	force := fs.Bool("force", false, "Overwrite existing DB (required when destination exists)")
 	if err := fs.Parse(args); err != nil {
-		return err
+		return fmt.Errorf("parsing db restore flags: %w", err)
 	}
 
 	if strings.TrimSpace(*in) == "" {
@@ -96,11 +96,11 @@ func runDBRestore(args []string) error {
 
 	inPath, err := expandHomePath(*in)
 	if err != nil {
-		return err
+		return fmt.Errorf("expanding restore input path: %w", err)
 	}
 	inPath, err = filepath.Abs(inPath)
 	if err != nil {
-		return err
+		return fmt.Errorf("resolving absolute restore input path: %w", err)
 	}
 	if info, err := os.Stat(inPath); err != nil {
 		return fmt.Errorf("stat input: %w", err)
@@ -112,17 +112,17 @@ func runDBRestore(args []string) error {
 	if dbPath == "" {
 		resolved, err := resolveDBPath()
 		if err != nil {
-			return err
+			return fmt.Errorf("resolving db path for restore: %w", err)
 		}
 		dbPath = resolved
 	}
 	dbPath, err = expandHomePath(dbPath)
 	if err != nil {
-		return err
+		return fmt.Errorf("expanding restore db path: %w", err)
 	}
 	dbPath, err = filepath.Abs(dbPath)
 	if err != nil {
-		return err
+		return fmt.Errorf("resolving absolute restore db path: %w", err)
 	}
 
 	if err := os.MkdirAll(filepath.Dir(dbPath), 0o700); err != nil {
@@ -146,7 +146,7 @@ func runDBRestore(args []string) error {
 	_ = os.Remove(tmpPath)
 	if err := copyFile(inPath, tmpPath, 0o600); err != nil {
 		_ = os.Remove(tmpPath)
-		return err
+		return fmt.Errorf("copying restore file: %w", err)
 	}
 	if err := os.Rename(tmpPath, dbPath); err != nil {
 		_ = os.Remove(tmpPath)
@@ -184,7 +184,7 @@ func vacuumInto(dbPath string, outPath string) error {
 
 	stmt := fmt.Sprintf("VACUUM INTO '%s'", escapeSQLiteString(outPath))
 	if _, err := db.Exec(stmt); err != nil {
-		return fmt.Errorf("VACUUM INTO failed: %w", err)
+		return fmt.Errorf("vacuum into failed: %w", err)
 	}
 	return nil
 }

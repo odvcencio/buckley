@@ -18,15 +18,15 @@ import (
 // The writer is safe for concurrent use and handles errors by logging them
 // and continuing to accept new messages.
 type BatchWriter struct {
-	store    *Store
-	batch    []*Message
-	maxSize  int
-	maxWait  time.Duration
-	mu       sync.Mutex
-	timer    *time.Timer
-	done     chan struct{}
-	wg       sync.WaitGroup
-	flushing bool
+	store     *Store
+	batch     []*Message
+	maxSize   int
+	maxWait   time.Duration
+	mu        sync.Mutex
+	timer     *time.Timer
+	done      chan struct{}
+	flushing  bool
+	flushDone *sync.Cond
 }
 
 // NewBatchWriter creates a new batch writer with the specified batch size and
@@ -49,10 +49,7 @@ func (s *Store) NewBatchWriter(maxSize int, maxWait time.Duration) *BatchWriter 
 		maxWait: maxWait,
 		done:    make(chan struct{}),
 	}
-
-	// Start background flusher
-	bw.wg.Add(1)
-	go bw.flusher()
+	bw.flushDone = sync.NewCond(&bw.mu)
 
 	return bw
 }
@@ -95,7 +92,6 @@ func (bw *BatchWriter) Flush() error {
 // Close stops the batch writer and flushes any remaining messages.
 func (bw *BatchWriter) Close() error {
 	close(bw.done)
-	bw.wg.Wait()
 
 	// Stop any pending timer so it won't fire during final flush
 	bw.mu.Lock()
@@ -103,14 +99,10 @@ func (bw *BatchWriter) Close() error {
 		bw.timer.Stop()
 		bw.timer = nil
 	}
-	bw.mu.Unlock()
 
 	// Wait for any in-flight flush to complete, then do final flush
-	bw.mu.Lock()
 	for bw.flushing {
-		bw.mu.Unlock()
-		time.Sleep(1 * time.Millisecond)
-		bw.mu.Lock()
+		bw.flushDone.Wait()
 	}
 	err := bw.flushLocked()
 	bw.mu.Unlock()
@@ -143,6 +135,7 @@ func (bw *BatchWriter) flushLocked() error {
 	bw.mu.Lock()
 
 	bw.flushing = false
+	bw.flushDone.Broadcast()
 
 	return err
 }
@@ -161,12 +154,6 @@ func (bw *BatchWriter) startTimer() {
 	})
 }
 
-// flusher runs in the background to handle shutdown signals.
-func (bw *BatchWriter) flusher() {
-	defer bw.wg.Done()
-	<-bw.done
-}
-
 // BatchSize returns the current number of messages in the batch.
 func (bw *BatchWriter) BatchSize() int {
 	bw.mu.Lock()
@@ -174,8 +161,3 @@ func (bw *BatchWriter) BatchSize() int {
 	return len(bw.batch)
 }
 
-// MessageCount returns the total number of messages flushed so far.
-// Note: This is not currently tracked; returns 0.
-func (bw *BatchWriter) MessageCount() int {
-	return 0 // Could be extended to track total flushed count
-}

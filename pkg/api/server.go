@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -160,7 +161,7 @@ type Job struct {
 	Status    string                 `json:"status"` // pending, running, completed, failed
 	StartedAt time.Time              `json:"started_at"`
 	EndedAt   *time.Time             `json:"ended_at,omitempty"`
-	Result    map[string]interface{} `json:"result,omitempty"`
+	Result    map[string]any `json:"result,omitempty"`
 	Error     string                 `json:"error,omitempty"`
 	Trace     *transparency.Trace    `json:"trace,omitempty"`
 
@@ -171,7 +172,7 @@ type Job struct {
 // JobUpdate is a streaming update for a job.
 type JobUpdate struct {
 	Type    string      `json:"type"` // status, progress, result, error
-	Payload interface{} `json:"payload"`
+	Payload any `json:"payload"`
 }
 
 // Health check handlers
@@ -192,9 +193,9 @@ func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleListCommands(w http.ResponseWriter, r *http.Request) {
 	commands := s.registry.List()
 
-	result := make([]map[string]interface{}, len(commands))
+	result := make([]map[string]any, len(commands))
 	for i, cmd := range commands {
-		result[i] = map[string]interface{}{
+		result[i] = map[string]any{
 			"name":        cmd.Name,
 			"description": cmd.Description,
 			"builtin":     cmd.Builtin,
@@ -268,7 +269,7 @@ func (s *Server) handleRunCommand(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]interface{}{
+	writeJSON(w, http.StatusOK, map[string]any{
 		"result": result,
 		"trace":  trace,
 	})
@@ -322,7 +323,7 @@ func (s *Server) runCommandJob(job *Job, cmd *oneshot.Command, modelID string, f
 	close(job.updates)
 }
 
-func (s *Server) executeCommand(ctx context.Context, cmd *oneshot.Command, modelID string, flags map[string]string) (map[string]interface{}, *transparency.Trace, error) {
+func (s *Server) executeCommand(ctx context.Context, cmd *oneshot.Command, modelID string, flags map[string]string) (map[string]any, *transparency.Trace, error) {
 	if s.modelMgr == nil {
 		return nil, nil, fmt.Errorf("model manager not configured")
 	}
@@ -363,14 +364,14 @@ func (s *Server) executeCommand(ctx context.Context, cmd *oneshot.Command, model
 	}
 
 	if result.ToolCall != nil {
-		var toolResult map[string]interface{}
+		var toolResult map[string]any
 		if err := json.Unmarshal(result.ToolCall.Arguments, &toolResult); err != nil {
 			return nil, trace, err
 		}
 		return toolResult, trace, nil
 	}
 
-	return map[string]interface{}{"text": result.TextContent}, trace, nil
+	return map[string]any{"text": result.TextContent}, trace, nil
 }
 
 func (s *Server) handleGetJob(w http.ResponseWriter, r *http.Request) {
@@ -421,19 +422,19 @@ func (s *Server) handleStreamJob(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 	if s.modelMgr == nil {
-		writeJSON(w, http.StatusOK, []interface{}{})
+		writeJSON(w, http.StatusOK, []any{})
 		return
 	}
 
 	catalog := s.modelMgr.GetCatalog()
 	if catalog == nil {
-		writeJSON(w, http.StatusOK, []interface{}{})
+		writeJSON(w, http.StatusOK, []any{})
 		return
 	}
 	models := catalog.Data
-	result := make([]map[string]interface{}, len(models))
+	result := make([]map[string]any, len(models))
 	for i, m := range models {
-		result[i] = map[string]interface{}{
+		result[i] = map[string]any{
 			"id":          m.ID,
 			"name":        m.Name,
 			"context":     m.ContextLength,
@@ -447,9 +448,9 @@ func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleListPlugins(w http.ResponseWriter, r *http.Request) {
 	plugins := s.registry.ListPlugins()
-	result := make([]map[string]interface{}, len(plugins))
+	result := make([]map[string]any, len(plugins))
 	for i, p := range plugins {
-		result[i] = map[string]interface{}{
+		result[i] = map[string]any{
 			"name":        p.Name,
 			"description": p.Description,
 			"source":      p.Source,
@@ -483,7 +484,10 @@ func withLogging(next http.Handler) http.Handler {
 
 func withCORS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
+		origin := r.Header.Get("Origin")
+		if isAllowedOrigin(origin) {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+		}
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 
@@ -496,8 +500,25 @@ func withCORS(next http.Handler) http.Handler {
 	})
 }
 
+func isAllowedOrigin(origin string) bool {
+	if origin == "" {
+		return false
+	}
+	// Allow localhost origins on any port
+	for _, prefix := range []string{
+		"http://localhost", "https://localhost",
+		"http://127.0.0.1", "https://127.0.0.1",
+		"http://[::1]", "https://[::1]",
+	} {
+		if origin == prefix || strings.HasPrefix(origin, prefix+":") {
+			return true
+		}
+	}
+	return false
+}
+
 // Helpers
-func writeJSON(w http.ResponseWriter, status int, data interface{}) {
+func writeJSON(w http.ResponseWriter, status int, data any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(data)

@@ -1,6 +1,7 @@
 package widgets
 
 import (
+	"github.com/odvcencio/fluffyui/accessibility"
 	"github.com/odvcencio/fluffyui/backend"
 	"github.com/odvcencio/fluffyui/runtime"
 	uiwidgets "github.com/odvcencio/fluffyui/widgets"
@@ -18,21 +19,33 @@ type ModalOverlay struct {
 
 // NewModalOverlay creates a modal overlay wrapper.
 func NewModalOverlay(child runtime.Widget) *ModalOverlay {
-	return &ModalOverlay{child: child, closeOnBackdrop: true}
+	o := &ModalOverlay{child: child, closeOnBackdrop: true}
+	o.Base.Role = accessibility.RoleDialog
+	o.Base.State.Modal = true
+	return o
 }
 
 // SetBackdropStyle configures the backdrop fill style.
 func (o *ModalOverlay) SetBackdropStyle(style backend.Style) {
+	if o == nil {
+		return
+	}
 	o.backdropStyle = style
 }
 
 // SetCloseOnBackdrop toggles click-to-close behavior.
 func (o *ModalOverlay) SetCloseOnBackdrop(close bool) {
+	if o == nil {
+		return
+	}
 	o.closeOnBackdrop = close
 }
 
 // SetOnClose registers a callback invoked when the overlay closes.
 func (o *ModalOverlay) SetOnClose(fn func()) {
+	if o == nil {
+		return
+	}
 	o.onClose = fn
 }
 
@@ -119,7 +132,9 @@ type CenteredOverlay struct {
 
 // NewCenteredOverlay creates a new centered overlay wrapper.
 func NewCenteredOverlay(child runtime.Widget) *CenteredOverlay {
-	return &CenteredOverlay{child: child}
+	o := &CenteredOverlay{child: child}
+	o.Base.Role = accessibility.RolePresentation
+	return o
 }
 
 // Measure returns the full available size.
@@ -175,11 +190,16 @@ type PositionedOverlay struct {
 
 // NewPositionedOverlay creates a positioned overlay wrapper.
 func NewPositionedOverlay(child runtime.Widget, x, y int) *PositionedOverlay {
-	return &PositionedOverlay{child: child, x: x, y: y}
+	o := &PositionedOverlay{child: child, x: x, y: y}
+	o.Base.Role = accessibility.RolePresentation
+	return o
 }
 
 // SetPosition updates the overlay origin.
 func (o *PositionedOverlay) SetPosition(x, y int) {
+	if o == nil {
+		return
+	}
 	o.x = x
 	o.y = y
 }

@@ -6,8 +6,16 @@ import (
 	"github.com/oklog/ulid/v2"
 
 	"github.com/odvcencio/buckley/pkg/tool/builtin"
-	"github.com/odvcencio/fluffyui/progress"
 )
+
+// ProgressTracker reports start/done events for long-running tools.
+type ProgressTracker interface {
+	Start(id, label string, mode string, total int)
+	Done(id string)
+}
+
+// ProgressIndeterminate is the mode value for indeterminate progress bars.
+const ProgressIndeterminate = "indeterminate"
 
 // DefaultLongRunningTools lists tools that should trigger progress indicators.
 var DefaultLongRunningTools = map[string]string{
@@ -23,7 +31,7 @@ var DefaultLongRunningTools = map[string]string{
 }
 
 // Progress reports tool execution progress to the manager.
-func Progress(manager *progress.ProgressManager, longRunning map[string]string) Middleware {
+func Progress(manager ProgressTracker, longRunning map[string]string) Middleware {
 	return func(next Executor) Executor {
 		return func(ctx *ExecutionContext) (*builtin.Result, error) {
 			if manager == nil || ctx == nil {
@@ -44,7 +52,7 @@ func Progress(manager *progress.ProgressManager, longRunning map[string]string) 
 			if strings.TrimSpace(ctx.CallID) == "" {
 				ctx.CallID = ulid.Make().String()
 			}
-			manager.Start(ctx.CallID, label, progress.ProgressIndeterminate, 0)
+			manager.Start(ctx.CallID, label, ProgressIndeterminate, 0)
 			defer manager.Done(ctx.CallID)
 			return next(ctx)
 		}

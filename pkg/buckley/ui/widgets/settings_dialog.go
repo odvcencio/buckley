@@ -114,11 +114,15 @@ func NewSettingsDialog(cfg SettingsDialogConfig) *SettingsDialog {
 		dialog.width = 64
 	}
 	dialog.Base.Role = accessibility.RoleDialog
+	dialog.Base.State.Modal = true
 	return dialog
 }
 
 // SetStyles configures dialog styles.
 func (d *SettingsDialog) SetStyles(bg, border, label, text, selected, hint, err backend.Style) {
+	if d == nil {
+		return
+	}
 	d.bgStyle = bg
 	d.borderStyle = border
 	d.labelStyle = label

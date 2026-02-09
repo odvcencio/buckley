@@ -189,6 +189,7 @@ func NewChatMessagesWithConfig(cfg ChatMessagesConfig) *ChatMessages {
 	m.scrollView.SetLabel("Chat messages")
 	m.scrollView.SetBehavior(scroll.ScrollBehavior{Vertical: scroll.ScrollAuto, Horizontal: scroll.ScrollNever, MouseWheel: 3, PageSize: 1})
 	m.overlay = &chatMessagesOverlay{owner: m}
+	m.overlay.Base.Role = accessibility.RolePresentation
 	m.stack = uiwidgets.NewStack(m.scrollView, m.overlay)
 	m.subscribe()
 	return m
@@ -196,6 +197,9 @@ func NewChatMessagesWithConfig(cfg ChatMessagesConfig) *ChatMessages {
 
 // SetStyles configures the message styles.
 func (m *ChatMessages) SetStyles(user, assistant, system, tool, thinking backend.Style) {
+	if m == nil {
+		return
+	}
 	m.userStyle = user
 	m.assistantStyle = assistant
 	m.systemStyle = system
@@ -205,6 +209,9 @@ func (m *ChatMessages) SetStyles(user, assistant, system, tool, thinking backend
 
 // SetUIStyles configures scrollbar, selection, and background styles.
 func (m *ChatMessages) SetUIStyles(scrollbar, thumb, selection, search, background backend.Style) {
+	if m == nil {
+		return
+	}
 	m.scrollbarStyle = scrollbar
 	m.scrollThumb = thumb
 	m.selectionStyle = selection
@@ -217,12 +224,18 @@ func (m *ChatMessages) SetUIStyles(scrollbar, thumb, selection, search, backgrou
 
 // SetMarkdownRenderer configures markdown rendering for the chat list.
 func (m *ChatMessages) SetMarkdownRenderer(renderer *markdown.Renderer, codeBlockBG backend.Style) {
+	if m == nil {
+		return
+	}
 	m.mdRenderer = renderer
 	m.codeBlockBG = codeBlockBG
 }
 
 // SetMetadataStyle configures the metadata line style.
 func (m *ChatMessages) SetMetadataStyle(style backend.Style) {
+	if m == nil {
+		return
+	}
 	m.metadataStyle = style
 }
 
@@ -258,11 +271,17 @@ func (m *ChatMessages) SetModelName(name string) {
 
 // OnScrollChange sets a callback for scroll position changes.
 func (m *ChatMessages) OnScrollChange(fn func(top, total, viewHeight int)) {
+	if m == nil {
+		return
+	}
 	m.onScrollChange = fn
 }
 
 // OnCodeAction registers a handler for code header actions ("copy", "open").
 func (m *ChatMessages) OnCodeAction(fn func(action, language, code string)) {
+	if m == nil {
+		return
+	}
 	m.onCodeAction = fn
 }
 

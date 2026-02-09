@@ -68,10 +68,10 @@ func (s *SlackAdapter) Send(ctx context.Context, event *Event) error {
 		color = "#FF0000"
 	}
 
-	payload := map[string]interface{}{
+	payload := map[string]any{
 		"username":   "Buckley",
 		"icon_emoji": ":robot_face:",
-		"attachments": []map[string]interface{}{
+		"attachments": []map[string]any{
 			{
 				"color":     color,
 				"title":     fmt.Sprintf("%s %s", emoji, event.Title),
@@ -89,22 +89,22 @@ func (s *SlackAdapter) Send(ctx context.Context, event *Event) error {
 
 	// Add action buttons for options
 	if len(event.Options) > 0 {
-		var actions []map[string]interface{}
+		var actions []map[string]any
 		for _, opt := range event.Options {
-			actions = append(actions, map[string]interface{}{
+			actions = append(actions, map[string]any{
 				"type":  "button",
 				"text":  opt.Label,
 				"name":  "response",
 				"value": fmt.Sprintf("%s:%s", event.ID, opt.ID),
 			})
 		}
-		payload["attachments"].([]map[string]interface{})[0]["actions"] = actions
+		payload["attachments"].([]map[string]any)[0]["actions"] = actions
 	}
 
 	return s.sendWebhook(payload)
 }
 
-func (s *SlackAdapter) sendWebhook(payload map[string]interface{}) error {
+func (s *SlackAdapter) sendWebhook(payload map[string]any) error {
 	data, err := json.Marshal(payload)
 	if err != nil {
 		return err

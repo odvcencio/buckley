@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"time"
 
@@ -33,7 +34,7 @@ const (
 func GenerateAPITokenValue() (string, error) {
 	var buf [32]byte
 	if _, err := rand.Read(buf[:]); err != nil {
-		return "", err
+		return "", fmt.Errorf("generating api token: %w", err)
 	}
 	return hex.EncodeToString(buf[:]), nil
 }
@@ -70,13 +71,13 @@ func (s *Store) CreateAPIToken(name, owner, scope, secret string) (*APIToken, er
 		VALUES (?, ?, ?, ?, ?, 0)
 	`, id, name, hash, prefix, now)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("inserting api token: %w", err)
 	}
 	if _, err := s.db.Exec(`
 		INSERT INTO api_token_metadata (token_id, owner, scope)
 		VALUES (?, ?, ?)
 	`, id, strings.TrimSpace(owner), scope); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("inserting api token metadata: %w", err)
 	}
 
 	return &APIToken{
@@ -102,7 +103,7 @@ func (s *Store) ListAPITokens() ([]APIToken, error) {
 		ORDER BY created_at DESC
 	`)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("querying api tokens: %w", err)
 	}
 	defer rows.Close()
 
@@ -111,7 +112,7 @@ func (s *Store) ListAPITokens() ([]APIToken, error) {
 		var tok APIToken
 		var lastUsed sql.NullTime
 		if err := rows.Scan(&tok.ID, &tok.Name, &tok.Owner, &tok.Scope, &tok.Prefix, &tok.CreatedAt, &lastUsed, &tok.Revoked); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("scanning api token: %w", err)
 		}
 		if tok.Scope == "" {
 			tok.Scope = TokenScopeMember
@@ -122,7 +123,10 @@ func (s *Store) ListAPITokens() ([]APIToken, error) {
 		}
 		tokens = append(tokens, tok)
 	}
-	return tokens, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating api tokens: %w", err)
+	}
+	return tokens, nil
 }
 
 // RevokeAPIToken marks the token as revoked.
@@ -131,7 +135,10 @@ func (s *Store) RevokeAPIToken(id string) error {
 		return ErrStoreClosed
 	}
 	_, err := s.db.Exec(`UPDATE api_tokens SET revoked = 1 WHERE id = ?`, strings.TrimSpace(id))
-	return err
+	if err != nil {
+		return fmt.Errorf("revoking api token: %w", err)
+	}
+	return nil
 }
 
 // ValidateAPIToken verifies a token secret and updates last_used_at.
@@ -152,7 +159,7 @@ func (s *Store) ValidateAPIToken(secret string) (*APIToken, error) {
 		if err == sql.ErrNoRows {
 			return nil, nil
 		}
-		return nil, err
+		return nil, fmt.Errorf("validating api token: %w", err)
 	}
 	if lastUsed.Valid {
 		ts := lastUsed.Time
@@ -160,7 +167,7 @@ func (s *Store) ValidateAPIToken(secret string) (*APIToken, error) {
 	}
 	tok.Revoked = false
 	if err := s.touchAPIToken(tok.ID); err != nil {
-		return &tok, err
+		return &tok, fmt.Errorf("touching api token: %w", err)
 	}
 	if tok.Scope == "" {
 		tok.Scope = TokenScopeMember
@@ -170,7 +177,10 @@ func (s *Store) ValidateAPIToken(secret string) (*APIToken, error) {
 
 func (s *Store) touchAPIToken(id string) error {
 	_, err := s.db.Exec(`UPDATE api_tokens SET last_used_at = CURRENT_TIMESTAMP WHERE id = ?`, id)
-	return err
+	if err != nil {
+		return fmt.Errorf("updating api token last_used_at: %w", err)
+	}
+	return nil
 }
 
 func tokenPrefix(secret string) string {
@@ -185,7 +195,7 @@ func tokenPrefix(secret string) string {
 func (s *Store) ExportAPITokens() ([]byte, error) {
 	tokens, err := s.ListAPITokens()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("exporting api tokens: %w", err)
 	}
 	return json.Marshal(tokens)
 }

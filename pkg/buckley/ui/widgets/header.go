@@ -3,6 +3,7 @@ package widgets
 import (
 	"strings"
 
+	"github.com/odvcencio/fluffyui/accessibility"
 	"github.com/odvcencio/fluffyui/backend"
 	"github.com/odvcencio/fluffyui/runtime"
 	"github.com/odvcencio/fluffyui/state"
@@ -59,12 +60,17 @@ func NewHeaderWithConfig(cfg HeaderConfig) *Header {
 	} else {
 		h.sessionSig = h.ownedSessSig
 	}
+	h.Base.Landmark = accessibility.LandmarkBanner
 	h.subscribe()
+	h.syncA11y()
 	return h
 }
 
 // SetModelName updates the displayed model name.
 func (h *Header) SetModelName(name string) {
+	if h == nil {
+		return
+	}
 	name = strings.TrimSpace(name)
 	if h.ownsModel() && h.ownedModelSig != nil {
 		h.ownedModelSig.Set(name)
@@ -73,6 +79,9 @@ func (h *Header) SetModelName(name string) {
 
 // SetSessionID updates the displayed session ID.
 func (h *Header) SetSessionID(id string) {
+	if h == nil {
+		return
+	}
 	id = strings.TrimSpace(id)
 	if h.ownsSession() && h.ownedSessSig != nil {
 		h.ownedSessSig.Set(id)
@@ -81,6 +90,9 @@ func (h *Header) SetSessionID(id string) {
 
 // SetStyles sets the header styles.
 func (h *Header) SetStyles(bg, logo, text backend.Style) {
+	if h == nil {
+		return
+	}
 	h.bgStyle = bg
 	h.logoStyle = logo
 	h.textStyle = text
@@ -88,13 +100,20 @@ func (h *Header) SetStyles(bg, logo, text backend.Style) {
 
 // Bind attaches app services and subscriptions.
 func (h *Header) Bind(services runtime.Services) {
+	if h == nil {
+		return
+	}
 	h.services = services
 	h.subs.SetScheduler(services.Scheduler())
 	h.subscribe()
+	h.syncA11y()
 }
 
 // Unbind releases app services and subscriptions.
 func (h *Header) Unbind() {
+	if h == nil {
+		return
+	}
 	h.subs.Clear()
 	h.services = runtime.Services{}
 }
@@ -132,6 +151,7 @@ func (h *Header) onModelChanged() {
 		return
 	}
 	h.modelName = strings.TrimSpace(h.modelSig.Get())
+	h.syncA11y()
 	if h.services != (runtime.Services{}) {
 		h.services.Invalidate()
 	}
@@ -142,9 +162,24 @@ func (h *Header) onSessionChanged() {
 		return
 	}
 	h.sessionID = strings.TrimSpace(h.sessionSig.Get())
+	h.syncA11y()
 	if h.services != (runtime.Services{}) {
 		h.services.Invalidate()
 	}
+}
+
+func (h *Header) syncA11y() {
+	if h == nil {
+		return
+	}
+	label := "Buckley"
+	if h.modelName != "" {
+		label += " · " + h.modelName
+	}
+	if h.sessionID != "" {
+		label += " · " + formatSessionLabel(h.sessionID)
+	}
+	h.Base.Label = label
 }
 
 // Measure returns the header size (1 row tall, full width).

@@ -71,9 +71,7 @@ func TestNewExecutor(t *testing.T) {
 
 func TestExecutor_ExecuteTask_PreconditionValidation(t *testing.T) {
 	tmpDir := t.TempDir()
-	oldWd, _ := os.Getwd()
-	os.Chdir(tmpDir)
-	defer os.Chdir(oldWd)
+	t.Chdir(tmpDir)
 
 	// Create a simple project structure
 	os.WriteFile("go.mod", []byte("module test\n\ngo 1.21"), 0644)
@@ -130,9 +128,7 @@ func TestExecutor_VerifyOutcomes(t *testing.T) {
 	defer ctrl.Finish()
 
 	tmpDir := t.TempDir()
-	oldWd, _ := os.Getwd()
-	os.Chdir(tmpDir)
-	defer os.Chdir(oldWd)
+	t.Chdir(tmpDir)
 
 	// Create a test file
 	testFile := "test_output.txt"
@@ -268,9 +264,7 @@ func TestExecutor_PersistExecutionContext(t *testing.T) {
 
 func TestExecutor_HandleError(t *testing.T) {
 	tmpDir := t.TempDir()
-	oldWd, _ := os.Getwd()
-	os.Chdir(tmpDir)
-	defer os.Chdir(oldWd)
+	t.Chdir(tmpDir)
 
 	ctrl, mockModel := setupMockModel(t)
 	defer ctrl.Finish()
@@ -329,9 +323,7 @@ func TestExecutor_HandleError(t *testing.T) {
 
 func TestExecutor_HandleError_FirstAttemptNotLoop(t *testing.T) {
 	tmpDir := t.TempDir()
-	oldWd, _ := os.Getwd()
-	os.Chdir(tmpDir)
-	defer os.Chdir(oldWd)
+	t.Chdir(tmpDir)
 
 	ctrl, mockModel := setupMockModel(t)
 	defer ctrl.Finish()
@@ -375,9 +367,7 @@ func TestExecutor_HandleError_FirstAttemptNotLoop(t *testing.T) {
 
 func TestExecutor_HandleError_LoopDetectedOnRepeatedError(t *testing.T) {
 	tmpDir := t.TempDir()
-	oldWd, _ := os.Getwd()
-	os.Chdir(tmpDir)
-	defer os.Chdir(oldWd)
+	t.Chdir(tmpDir)
 
 	ctrl, mockModel := setupMockModel(t)
 	defer ctrl.Finish()
@@ -424,9 +414,7 @@ func TestExecutor_HandleError_LoopDetectedOnRepeatedError(t *testing.T) {
 
 func TestExecutor_SelfHealing(t *testing.T) {
 	tmpDir := t.TempDir()
-	oldWd, _ := os.Getwd()
-	os.Chdir(tmpDir)
-	defer os.Chdir(oldWd)
+	t.Chdir(tmpDir)
 
 	// Create project structure
 	os.WriteFile("go.mod", []byte("module test\n\ngo 1.21"), 0644)

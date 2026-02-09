@@ -111,7 +111,10 @@ func TestCursorEncodeDecode(t *testing.T) {
 		Timestamp: time.Date(2024, 1, 15, 10, 30, 0, 0, time.UTC),
 	}
 
-	encoded := EncodeCursor(original)
+	encoded, err := EncodeCursor(original)
+	if err != nil {
+		t.Fatalf("encode cursor: %v", err)
+	}
 	if encoded == "" {
 		t.Fatal("expected non-empty encoded cursor")
 	}
@@ -129,7 +132,10 @@ func TestCursorEncodeDecode(t *testing.T) {
 	}
 
 	// Test empty cursor
-	emptyEncoded := EncodeCursor(nil)
+	emptyEncoded, err := EncodeCursor(nil)
+	if err != nil {
+		t.Fatalf("encode nil cursor: %v", err)
+	}
 	if emptyEncoded != "" {
 		t.Errorf("expected empty string for nil cursor, got %q", emptyEncoded)
 	}

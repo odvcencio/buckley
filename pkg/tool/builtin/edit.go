@@ -84,6 +84,16 @@ func (t *EditFileTool) Execute(params map[string]any) (*Result, error) {
 		return &Result{Success: false, Error: err.Error()}, nil
 	}
 
+	// Check file size before reading
+	if t.maxFileSizeBytes > 0 {
+		if info, err := os.Stat(absPath); err == nil && info.Size() > t.maxFileSizeBytes {
+			return &Result{
+				Success: false,
+				Error:   fmt.Sprintf("file too large to edit: %d bytes (max %d)", info.Size(), t.maxFileSizeBytes),
+			}, nil
+		}
+	}
+
 	// Read existing file
 	content, err := os.ReadFile(absPath)
 	if err != nil {
@@ -92,7 +102,6 @@ func (t *EditFileTool) Execute(params map[string]any) (*Result, error) {
 			Error:   fmt.Sprintf("failed to read file: %v", err),
 		}, nil
 	}
-
 	oldContent := string(content)
 
 	// Check if old_string exists in content
@@ -396,6 +405,16 @@ func (t *InsertTextTool) Execute(params map[string]any) (*Result, error) {
 		return &Result{Success: false, Error: err.Error()}, nil
 	}
 
+	// Check file size before reading
+	if t.maxFileSizeBytes > 0 {
+		if info, err := os.Stat(absPath); err == nil && info.Size() > t.maxFileSizeBytes {
+			return &Result{
+				Success: false,
+				Error:   fmt.Sprintf("file too large to edit: %d bytes (max %d)", info.Size(), t.maxFileSizeBytes),
+			}, nil
+		}
+	}
+
 	content, err := os.ReadFile(absPath)
 	if err != nil {
 		return &Result{
@@ -525,6 +544,16 @@ func (t *DeleteLinesTool) Execute(params map[string]any) (*Result, error) {
 	absPath, err := resolvePath(t.workDir, path)
 	if err != nil {
 		return &Result{Success: false, Error: err.Error()}, nil
+	}
+
+	// Check file size before reading
+	if t.maxFileSizeBytes > 0 {
+		if info, err := os.Stat(absPath); err == nil && info.Size() > t.maxFileSizeBytes {
+			return &Result{
+				Success: false,
+				Error:   fmt.Sprintf("file too large to edit: %d bytes (max %d)", info.Size(), t.maxFileSizeBytes),
+			}, nil
+		}
 	}
 
 	content, err := os.ReadFile(absPath)

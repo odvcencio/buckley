@@ -281,10 +281,13 @@ func (m *Manager) cleanupLock(path string, lock *resourceLock) {
 }
 
 func (m *Manager) waitWithContext(ctx context.Context) error {
+	cancelled := false
 	done := make(chan struct{})
 	go func() {
 		m.mu.Lock()
-		m.cond.Wait()
+		if !cancelled {
+			m.cond.Wait()
+		}
 		m.mu.Unlock()
 		close(done)
 	}()
@@ -297,7 +300,10 @@ func (m *Manager) waitWithContext(ctx context.Context) error {
 		m.mu.Lock()
 		return nil
 	case <-ctx.Done():
+		m.mu.Lock()
+		cancelled = true
 		m.cond.Broadcast()
+		m.mu.Unlock()
 		<-done
 		m.mu.Lock()
 		return ctx.Err()

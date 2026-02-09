@@ -7,6 +7,19 @@ import (
 	"github.com/odvcencio/fluffyui/progress"
 )
 
+// testProgressAdapter wraps *progress.ProgressManager to satisfy ProgressTracker.
+type testProgressAdapter struct {
+	mgr *progress.ProgressManager
+}
+
+func (a *testProgressAdapter) Start(id, label string, mode string, total int) {
+	a.mgr.Start(id, label, progress.ProgressType(mode), total)
+}
+
+func (a *testProgressAdapter) Done(id string) {
+	a.mgr.Done(id)
+}
+
 func TestProgressMiddlewareTracksLongRunningTools(t *testing.T) {
 	manager := progress.NewProgressManager()
 	var snapshots [][]progress.Progress
@@ -16,7 +29,7 @@ func TestProgressMiddlewareTracksLongRunningTools(t *testing.T) {
 		snapshots = append(snapshots, copied)
 	})
 
-	mw := Progress(manager, map[string]string{"run_shell": "Shell command"})
+	mw := Progress(&testProgressAdapter{mgr: manager}, map[string]string{"run_shell": "Shell command"})
 	exec := mw(func(ctx *ExecutionContext) (*builtin.Result, error) {
 		return &builtin.Result{Success: true}, nil
 	})
@@ -48,7 +61,7 @@ func TestProgressMiddlewareSkipsUnknownTools(t *testing.T) {
 		snapshots = append(snapshots, copied)
 	})
 
-	mw := Progress(manager, map[string]string{"run_shell": "Shell command"})
+	mw := Progress(&testProgressAdapter{mgr: manager}, map[string]string{"run_shell": "Shell command"})
 	exec := mw(func(ctx *ExecutionContext) (*builtin.Result, error) {
 		return &builtin.Result{Success: true}, nil
 	})

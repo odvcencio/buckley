@@ -1,6 +1,7 @@
 package widgets
 
 import (
+	"github.com/odvcencio/fluffyui/accessibility"
 	"github.com/odvcencio/fluffyui/backend"
 	"github.com/odvcencio/fluffyui/runtime"
 	uiwidgets "github.com/odvcencio/fluffyui/widgets"
@@ -20,20 +21,29 @@ type AlertBanner struct {
 func NewAlertBanner(alert *uiwidgets.Alert) *AlertBanner {
 	panel := uiwidgets.NewPanel(alert).WithBorder(backend.DefaultStyle())
 	panel.SetTitle("Alert")
-	return &AlertBanner{
+	b := &AlertBanner{
 		alert:   alert,
 		panel:   panel,
 		offsetY: 1,
 	}
+	b.Base.Role = accessibility.RoleAlert
+	b.Base.Live = accessibility.LiveAssertive
+	return b
 }
 
 // SetVisible controls visibility.
 func (b *AlertBanner) SetVisible(visible bool) {
+	if b == nil {
+		return
+	}
 	b.visible = visible
 }
 
 // SetOffsetY changes the vertical offset from the top.
 func (b *AlertBanner) SetOffsetY(offset int) {
+	if b == nil {
+		return
+	}
 	if offset < 0 {
 		offset = 0
 	}
@@ -42,6 +52,9 @@ func (b *AlertBanner) SetOffsetY(offset int) {
 
 // SetBorderStyle updates the banner border style.
 func (b *AlertBanner) SetBorderStyle(style backend.Style) {
+	if b == nil {
+		return
+	}
 	if b.panel != nil {
 		b.panel.WithBorder(style)
 	}

@@ -53,7 +53,7 @@ func TestDefaultMiddlewareStack_ProgressAndToast(t *testing.T) {
 	cfg.MaxOutputBytes = 0
 	cfg.Middleware.DefaultTimeout = 0
 	cfg.Middleware.MaxResultBytes = 0
-	cfg.Middleware.ProgressManager = progressMgr
+	cfg.Middleware.ProgressManager = &testProgressAdapter{mgr: progressMgr}
 	cfg.Middleware.ToastManager = toastMgr
 	ApplyRegistryConfig(registry, cfg)
 

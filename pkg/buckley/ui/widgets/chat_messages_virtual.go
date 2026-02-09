@@ -2,6 +2,7 @@ package widgets
 
 import (
 	"github.com/odvcencio/buckley/pkg/buckley/ui/scrollback"
+	"github.com/odvcencio/fluffyui/accessibility"
 	"github.com/odvcencio/fluffyui/runtime"
 	"github.com/odvcencio/fluffyui/scroll"
 	uiwidgets "github.com/odvcencio/fluffyui/widgets"
@@ -13,7 +14,9 @@ type chatMessagesVirtual struct {
 }
 
 func newChatMessagesVirtual(owner *ChatMessages) *chatMessagesVirtual {
-	return &chatMessagesVirtual{owner: owner}
+	v := &chatMessagesVirtual{owner: owner}
+	v.Base.Role = accessibility.RolePresentation
+	return v
 }
 
 func (v *chatMessagesVirtual) Measure(constraints runtime.Constraints) runtime.Size {

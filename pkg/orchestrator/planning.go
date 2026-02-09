@@ -11,6 +11,8 @@ import (
 	"github.com/odvcencio/buckley/pkg/tool/builtin"
 )
 
+const defaultComplexityThreshold = 0.6
+
 // PlanningCoordinator manages the brainstorm → refine → commit flow
 type PlanningCoordinator struct {
 	config           *config.PlanningConfig
@@ -76,7 +78,7 @@ func NewPlanningCoordinator(
 ) *PlanningCoordinator {
 	threshold := cfg.ComplexityThreshold
 	if threshold <= 0 {
-		threshold = 0.6
+		threshold = defaultComplexityThreshold
 	}
 
 	return &PlanningCoordinator{

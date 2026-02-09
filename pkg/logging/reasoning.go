@@ -26,7 +26,7 @@ func NewReasoningLogger(dir string) (*ReasoningLogger, error) {
 
 	l := &ReasoningLogger{dir: dir}
 	if err := l.rotate(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("initializing reasoning logger: %w", err)
 	}
 	return l, nil
 }
@@ -39,7 +39,7 @@ func (l *ReasoningLogger) Write(content string) error {
 	today := time.Now().Format("2006-01-02")
 	if today != l.lastDay {
 		if err := l.rotateLocked(); err != nil {
-			return err
+			return fmt.Errorf("rotating reasoning log: %w", err)
 		}
 	}
 
@@ -48,8 +48,10 @@ func (l *ReasoningLogger) Write(content string) error {
 	}
 
 	timestamp := time.Now().Format("15:04:05")
-	_, err := fmt.Fprintf(l.file, "[%s] %s\n", timestamp, content)
-	return err
+	if _, err := fmt.Fprintf(l.file, "[%s] %s\n", timestamp, content); err != nil {
+		return fmt.Errorf("writing reasoning log entry: %w", err)
+	}
+	return nil
 }
 
 // WriteBlock writes a reasoning block with header.
@@ -60,7 +62,7 @@ func (l *ReasoningLogger) WriteBlock(model, sessionID, content string) error {
 	today := time.Now().Format("2006-01-02")
 	if today != l.lastDay {
 		if err := l.rotateLocked(); err != nil {
-			return err
+			return fmt.Errorf("rotating reasoning log: %w", err)
 		}
 	}
 
@@ -71,13 +73,15 @@ func (l *ReasoningLogger) WriteBlock(model, sessionID, content string) error {
 	timestamp := time.Now().Format("15:04:05")
 	header := fmt.Sprintf("\n=== [%s] model=%s session=%s ===\n", timestamp, model, sessionID)
 	if _, err := l.file.WriteString(header); err != nil {
-		return err
+		return fmt.Errorf("writing reasoning block header: %w", err)
 	}
 	if _, err := l.file.WriteString(content); err != nil {
-		return err
+		return fmt.Errorf("writing reasoning block content: %w", err)
 	}
-	_, err := l.file.WriteString("\n")
-	return err
+	if _, err := l.file.WriteString("\n"); err != nil {
+		return fmt.Errorf("writing reasoning block footer: %w", err)
+	}
+	return nil
 }
 
 // Path returns the current log file path.
@@ -95,7 +99,10 @@ func (l *ReasoningLogger) Close() error {
 	if l.file != nil {
 		err := l.file.Close()
 		l.file = nil
-		return err
+		if err != nil {
+			return fmt.Errorf("closing reasoning log: %w", err)
+		}
+		return nil
 	}
 	return nil
 }

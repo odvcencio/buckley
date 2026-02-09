@@ -30,6 +30,8 @@ type Compactor interface {
 
 const defaultMaxDelegationDepth = 3
 
+const maxConcurrentDelegations = 8
+
 // RuntimeConfig holds dependencies for the Runtime.
 type RuntimeConfig struct {
 	Hub                *telemetry.Hub
@@ -271,12 +273,15 @@ func (r *Runtime) executeDelegation(ctx context.Context, parent *Observable, act
 
 	results := make([]SubAgentResult, len(act.Tasks))
 	var wg sync.WaitGroup
+	sem := make(chan struct{}, maxConcurrentDelegations)
 
 	for i, task := range act.Tasks {
 		i, task := i, task
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
 
 			// Append index to prevent collisions when tasks share names
 			childID := fmt.Sprintf("%s/%s-%d", parent.ID(), task.Task, i)

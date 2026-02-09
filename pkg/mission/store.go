@@ -80,7 +80,7 @@ func (s *Store) GetPendingChange(id string) (*PendingChange, error) {
 // ListPendingChanges lists pending changes, optionally filtered by status
 func (s *Store) ListPendingChanges(status string, limit int) ([]*PendingChange, error) {
 	var query string
-	var args []interface{}
+	var args []any
 
 	if status != "" {
 		query = `
@@ -90,7 +90,7 @@ func (s *Store) ListPendingChanges(status string, limit int) ([]*PendingChange, 
 			ORDER BY created_at DESC
 			LIMIT ?
 		`
-		args = []interface{}{status, limit}
+		args = []any{status, limit}
 	} else {
 		query = `
 			SELECT id, agent_id, session_id, file_path, diff, reason, status, created_at, reviewed_at, reviewed_by
@@ -98,7 +98,7 @@ func (s *Store) ListPendingChanges(status string, limit int) ([]*PendingChange, 
 			ORDER BY created_at DESC
 			LIMIT ?
 		`
-		args = []interface{}{limit}
+		args = []any{limit}
 	}
 
 	rows, err := s.db.Query(query, args...)

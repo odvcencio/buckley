@@ -1047,6 +1047,17 @@ func (r *Runner) executeToolCallsParallel(ctx context.Context, calls []model.Too
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
+				defer func() {
+					if rec := recover(); rec != nil {
+						records[idx] = ToolCallRecord{
+							ID:      calls[idx].ID,
+							Name:    calls[idx].Function.Name,
+							Error:   fmt.Sprintf("tool panicked: %v", rec),
+							Result:  fmt.Sprintf("tool panicked: %v", rec),
+							Success: false,
+						}
+					}
+				}()
 				sem <- struct{}{}
 				record := r.executeSingleToolCall(ctx, calls[idx], toolMap)
 				<-sem
@@ -1279,7 +1290,7 @@ func toolCallsConflict(a, b toolCallMeta) bool {
 
 func toolAccessMode(name string) string {
 	switch name {
-	case "read_file", "list_directory", "find_files", "file_exists", "get_file_info", "search_text":
+	case "read_file", "list_directory", "find_files", "file_exists", "search_text":
 		return "read"
 	case "write_file", "patch_file", "edit_file", "edit_file_terminal", "insert_text", "delete_lines", "search_replace", "rename_symbol", "extract_function", "mark_resolved":
 		return "write"

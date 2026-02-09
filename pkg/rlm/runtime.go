@@ -864,8 +864,39 @@ func (r *Runtime) compactMessages(messages []model.Message) []model.Message {
 	}
 
 	system := messages[0]
-	recent := messages[len(messages)-coordinatorKeepMessages:]
-	removed := messages[1 : len(messages)-coordinatorKeepMessages]
+	splitIdx := len(messages) - coordinatorKeepMessages
+
+	// Adjust split point to avoid breaking tool call/response pairs.
+	// Walk forward if the split lands on a tool response or an assistant with tool calls.
+	for splitIdx < len(messages)-1 {
+		msg := messages[splitIdx]
+		if msg.Role == "tool" {
+			// This tool response's assistant+tool_call is in the removed set;
+			// include it in removed too by advancing the split.
+			splitIdx++
+			continue
+		}
+		// Check if the previous message (last in removed set) is an assistant with tool calls
+		// whose tool responses start at splitIdx.
+		if splitIdx > 1 {
+			prev := messages[splitIdx-1]
+			if prev.Role == "assistant" && len(prev.ToolCalls) > 0 {
+				// The assistant's tool calls are in removed, but responses might be in recent.
+				// Pull the assistant back into recent by moving split back.
+				splitIdx--
+				break
+			}
+		}
+		break
+	}
+
+	// Ensure we keep at least system + 1 message in removed
+	if splitIdx <= 1 {
+		return messages
+	}
+
+	recent := messages[splitIdx:]
+	removed := messages[1:splitIdx]
 
 	toolCount := 0
 	for _, msg := range removed {

@@ -15,7 +15,8 @@ import (
 type FilePickerWidget struct {
 	uiwidgets.FocusableBase
 
-	picker *filepicker.FilePicker
+	services runtime.Services
+	picker   *filepicker.FilePicker
 
 	// Styles
 	bgStyle        backend.Style
@@ -41,6 +42,9 @@ func NewFilePickerWidget(picker *filepicker.FilePicker) *FilePickerWidget {
 
 // SetStyles configures the widget appearance.
 func (f *FilePickerWidget) SetStyles(bg, border, text, selected, highlight, query backend.Style) {
+	if f == nil {
+		return
+	}
 	f.bgStyle = bg
 	f.borderStyle = border
 	f.textStyle = text
@@ -189,6 +193,22 @@ func (f *FilePickerWidget) renderMatch(buf *runtime.Buffer, x, y int, path strin
 		}
 		buf.Set(x+i, y, ch, style)
 	}
+}
+
+// Bind attaches app services.
+func (f *FilePickerWidget) Bind(services runtime.Services) {
+	if f == nil {
+		return
+	}
+	f.services = services
+}
+
+// Unbind releases app services.
+func (f *FilePickerWidget) Unbind() {
+	if f == nil {
+		return
+	}
+	f.services = runtime.Services{}
 }
 
 func (f *FilePickerWidget) AccessibleRole() accessibility.Role {

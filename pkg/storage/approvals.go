@@ -316,7 +316,9 @@ func (s *Store) GetPendingApproval(id string) (*PendingApproval, error) {
 	}
 
 	if riskReasonsJSON != "" {
-		json.Unmarshal([]byte(riskReasonsJSON), &approval.RiskReasons)
+		if err := json.Unmarshal([]byte(riskReasonsJSON), &approval.RiskReasons); err != nil {
+			return nil, fmt.Errorf("unmarshal risk reasons: %w", err)
+		}
 	}
 	if decidedBy.Valid {
 		approval.DecidedBy = decidedBy.String
@@ -337,12 +339,12 @@ func (s *Store) UpdatePendingApproval(approval *PendingApproval) error {
 		return ErrStoreClosed
 	}
 
-	var decidedAt interface{}
+	var decidedAt any
 	if !approval.DecidedAt.IsZero() {
 		decidedAt = approval.DecidedAt
 	}
 
-	var decisionReason interface{}
+	var decisionReason any
 	if strings.TrimSpace(approval.DecisionReason) != "" {
 		decisionReason = strings.TrimSpace(approval.DecisionReason)
 	}
@@ -379,7 +381,7 @@ func (s *Store) ListPendingApprovals(sessionID string) ([]*PendingApproval, erro
 				FROM pending_approvals
 				WHERE status = 'pending' AND expires_at >= ?
 		`
-	args := []interface{}{now}
+	args := []any{now}
 
 	if sessionID != "" {
 		query += ` AND session_id = ?`
@@ -408,8 +410,10 @@ func (s *Store) ListPendingApprovals(sessionID string) ([]*PendingApproval, erro
 			return nil, fmt.Errorf("scan pending approval: %w", err)
 		}
 
-		if riskReasonsJSON != "" {
-			json.Unmarshal([]byte(riskReasonsJSON), &approval.RiskReasons)
+			if riskReasonsJSON != "" {
+			if err := json.Unmarshal([]byte(riskReasonsJSON), &approval.RiskReasons); err != nil {
+				return nil, fmt.Errorf("unmarshal risk reasons: %w", err)
+			}
 		}
 		if decidedBy.Valid {
 			approval.DecidedBy = decidedBy.String
@@ -453,7 +457,7 @@ func (s *Store) LogToolExecution(entry *ToolAuditEntry) error {
 		return ErrStoreClosed
 	}
 
-	var approvalID interface{}
+	var approvalID any
 	if entry.ApprovalID != "" {
 		approvalID = entry.ApprovalID
 	}

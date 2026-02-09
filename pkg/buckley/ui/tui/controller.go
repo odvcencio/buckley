@@ -516,6 +516,14 @@ func NewController(cfg ControllerConfig) (*Controller, error) {
 		// Runner uses the simpler bridge without scheduler dependency
 		ctrl.telemetryBridge = NewSimpleTelemetryBridge(cfg.Telemetry, app.SidebarSignals())
 
+		// Wire UI-thread dispatch so signal mutations from the telemetry
+		// goroutine are safe with respect to the render loop.
+		if dispatcher, ok := app.(interface{ Dispatch(func()) }); ok {
+			if bridge, ok := ctrl.telemetryBridge.(*SimpleTelemetryBridge); ok {
+				bridge.SetDispatch(dispatcher.Dispatch)
+			}
+		}
+
 		// Create and subscribe diagnostics collector
 		ctrl.diagnostics = diagnostics.NewCollector()
 		ctrl.diagnostics.Subscribe(cfg.Telemetry)
@@ -1493,6 +1501,7 @@ func (c *Controller) streamResponse(ctx context.Context, prompt string, sess *Se
 	c.app.RemoveThinkingIndicator()
 	if err != nil {
 		if ctx.Err() == context.Canceled {
+			c.clearMessageQueue(sess)
 			c.app.SetStatus("Cancelled")
 			return
 		}
@@ -1534,10 +1543,24 @@ func (c *Controller) streamResponse(ctx context.Context, prompt string, sess *Se
 	c.app.SetTokenCount(tokens, costCents)
 	c.updateContextIndicator(sess, modelID, "", allowedToolsForSession(sess))
 
-	// Check for queued messages and process them
-	if c.processMessageQueue(sess) {
-		// processMessageQueue started a new stream, don't set Ready status
-		return
+	// Process any queued messages iteratively (avoids recursive stack growth)
+	for {
+		queued, ok := c.dequeueMessage(sess)
+		if !ok {
+			break
+		}
+
+		// Start new stream for the queued message
+		c.mu.Lock()
+		ctx, cancel := context.WithCancel(c.baseContext())
+		sess.Cancel = cancel
+		sess.Streaming = true
+		sessionID := sess.ID
+		c.mu.Unlock()
+		c.emitStreaming(sessionID, true)
+		c.app.SetStreaming(true)
+
+		c.streamResponse(ctx, queued.Content, sess, queued.Attachments)
 	}
 
 	// Update status only if no more queued messages
@@ -1733,7 +1756,7 @@ func (c *Controller) runWithStrategy(ctx context.Context, sess *SessionState) (t
 	}
 
 	// Update conversation with result
-	if result.Content != "" {
+	if result.Content != "" || result.Reasoning != "" {
 		sess.Conversation.AddAssistantMessageWithReasoning(result.Content, result.Reasoning)
 		c.saveLastMessage(sess)
 	}
@@ -2515,6 +2538,19 @@ func (c *Controller) handleShellCmd(cmd string) string {
 const defaultTUIMaxOutputBytes = 100_000
 const defaultTUIAttachmentMaxBytes = 50_000
 
+// progressTrackerAdapter wraps *progress.ProgressManager to satisfy tool.ProgressTracker.
+type progressTrackerAdapter struct {
+	mgr *progress.ProgressManager
+}
+
+func (a *progressTrackerAdapter) Start(id, label string, mode string, total int) {
+	a.mgr.Start(id, label, progress.ProgressType(mode), total)
+}
+
+func (a *progressTrackerAdapter) Done(id string) {
+	a.mgr.Done(id)
+}
+
 // buildRegistry creates the tool registry with all available tools.
 func buildRegistry(ctx context.Context, cfg *config.Config, store *storage.Store, workDir string, hub *telemetry.Hub, sessionID string, progressMgr *progress.ProgressManager, toastMgr *toast.ToastManager) *tool.Registry {
 	registry := tool.NewRegistry()
@@ -2538,7 +2574,7 @@ func buildRegistry(ctx context.Context, cfg *config.Config, store *storage.Store
 	}
 	registryCfg.TelemetryHub = hub
 	registryCfg.TelemetrySessionID = sessionID
-	registryCfg.Middleware.ProgressManager = progressMgr
+	registryCfg.Middleware.ProgressManager = &progressTrackerAdapter{mgr: progressMgr}
 	registryCfg.Middleware.ToastManager = toastMgr
 	registryCfg.Middleware.FileWatcher = filewatch.NewFileWatcher(100)
 	tool.ApplyRegistryConfig(registry, registryCfg)
@@ -2549,6 +2585,7 @@ func buildRegistry(ctx context.Context, cfg *config.Config, store *storage.Store
 	// Configure container execution if enabled
 	if cfg != nil && workDir != "" {
 		registry.ConfigureContainers(cfg, workDir)
+		registry.ConfigureDockerSandbox(cfg, workDir)
 	}
 
 	// Enable todo tracking
@@ -3712,20 +3749,19 @@ func (c *Controller) clearMessageQueue(sess *SessionState) int {
 	return count
 }
 
-// processMessageQueue handles queued messages after streaming completes.
-// Returns true if there are messages to process, starting a new stream.
-func (c *Controller) processMessageQueue(sess *SessionState) bool {
+// dequeueMessage pops the next queued message from the session, if any.
+// Returns the message and true if one was available, or zero value and false.
+func (c *Controller) dequeueMessage(sess *SessionState) (QueuedMessage, bool) {
 	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	if len(sess.MessageQueue) == 0 {
-		c.mu.Unlock()
-		return false
+		return QueuedMessage{}, false
 	}
 
 	// Pop the first queued message
 	queued := sess.MessageQueue[0]
 	sess.MessageQueue = sess.MessageQueue[1:]
-
-	// Mark as acknowledged
 	queued.Acknowledged = true
 
 	// Show acknowledgment in UI
@@ -3735,21 +3771,6 @@ func (c *Controller) processMessageQueue(sess *SessionState) bool {
 		ackMsg += fmt.Sprintf(" (%d more queued)", remaining)
 	}
 	c.app.AddMessage(ackMsg, "system")
-	c.mu.Unlock()
 
-	// Start new stream for the queued message
-	c.mu.Lock()
-	ctx, cancel := context.WithCancel(c.baseContext())
-	sess.Cancel = cancel
-	sess.Streaming = true
-	sessionID := sess.ID
-	c.mu.Unlock()
-	c.emitStreaming(sessionID, true)
-	c.app.SetStreaming(true)
-
-	// Stream response for the queued message (reuses current goroutine).
-	// Each call processes one message; streamResponse's tail call to processMessageQueue
-	// handles the next, bounded by queue depth.
-	c.streamResponse(ctx, queued.Content, sess, queued.Attachments)
-	return true
+	return queued, true
 }

@@ -5,6 +5,7 @@ package parallel
 import (
 	"context"
 	"fmt"
+	"os"
 	"sync"
 	"time"
 
@@ -215,6 +216,12 @@ func (o *Orchestrator) ActiveAgents() int {
 // worker processes tasks from the queue
 func (o *Orchestrator) worker(id int) {
 	defer o.wg.Done()
+	defer func() {
+		if r := recover(); r != nil {
+			// Log but don't crash the program
+			fmt.Fprintf(os.Stderr, "worker %d panic: %v\n", id, r)
+		}
+	}()
 
 	agentID := fmt.Sprintf("agent-%d", id)
 
@@ -242,7 +249,10 @@ func (o *Orchestrator) worker(id int) {
 func (o *Orchestrator) executeTask(agentID string, task *AgentTask) *AgentResult {
 	start := time.Now()
 
-	// Register agent
+	// Register agent. The Worktree field is set in a separate critical section
+	// below because worktree creation is a blocking I/O operation that should
+	// not be performed under the lock. Readers should handle Worktree == nil
+	// gracefully during the window between registration and worktree assignment.
 	o.mu.Lock()
 	o.agents[agentID] = &Agent{
 		ID:        agentID,
@@ -252,7 +262,7 @@ func (o *Orchestrator) executeTask(agentID string, task *AgentTask) *AgentResult
 	}
 	o.mu.Unlock()
 
-	// Create worktree
+	// Create worktree (blocking I/O, intentionally outside lock)
 	wt, err := o.worktreeManager.Create(task.Branch)
 	if err != nil {
 		o.updateAgentStatus(agentID, StatusFailed, err)

@@ -7,6 +7,11 @@ import (
 	"time"
 )
 
+const (
+	decisionContextDisplayMax   = 60
+	decisionReasoningDisplayMax = 80
+)
+
 // DecisionStore persists planning decisions to storage
 type DecisionStore interface {
 	SaveDecision(decision *Decision) error
@@ -48,7 +53,10 @@ func (s *SQLiteDecisionStore) ensureSchema() error {
 		CREATE INDEX IF NOT EXISTS idx_decisions_timestamp ON planning_decisions(timestamp);
 	`
 	_, err := s.db.Exec(schema)
-	return err
+	if err != nil {
+		return fmt.Errorf("executing decision schema: %w", err)
+	}
+	return nil
 }
 
 // SaveDecision saves a decision to the database
@@ -71,7 +79,10 @@ func (s *SQLiteDecisionStore) SaveDecision(decision *Decision) error {
 		decision.Reasoning,
 		decision.AutoDecided,
 	)
-	return err
+	if err != nil {
+		return fmt.Errorf("inserting decision for session %s: %w", decision.SessionID, err)
+	}
+	return nil
 }
 
 // GetDecisions retrieves all decisions for a session
@@ -96,7 +107,7 @@ func (s *SQLiteDecisionStore) GetRecentDecisions(sessionID string, limit int) ([
 	`
 	decisions, err := s.queryDecisions(query, sessionID, limit)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("querying recent decisions for session %s: %w", sessionID, err)
 	}
 
 	// Reverse to get chronological order
@@ -109,14 +120,17 @@ func (s *SQLiteDecisionStore) GetRecentDecisions(sessionID string, limit int) ([
 // ClearDecisions removes all decisions for a session
 func (s *SQLiteDecisionStore) ClearDecisions(sessionID string) error {
 	_, err := s.db.Exec("DELETE FROM planning_decisions WHERE session_id = ?", sessionID)
-	return err
+	if err != nil {
+		return fmt.Errorf("clearing decisions for session %s: %w", sessionID, err)
+	}
+	return nil
 }
 
 // queryDecisions executes a query and returns decisions
 func (s *SQLiteDecisionStore) queryDecisions(query string, args ...any) ([]Decision, error) {
 	rows, err := s.db.Query(query, args...)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("querying decisions: %w", err)
 	}
 	defer rows.Close()
 
@@ -136,7 +150,7 @@ func (s *SQLiteDecisionStore) queryDecisions(query string, args ...any) ([]Decis
 			&autoDecided,
 		)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("scanning decision row: %w", err)
 		}
 
 		if err := json.Unmarshal([]byte(optionsJSON), &d.Options); err != nil {
@@ -219,7 +233,7 @@ func FormatDecisionSummary(decisions []Decision) string {
 
 	for i, d := range decisions {
 		result += fmt.Sprintf("%d. %s\n", i+1, d.Timestamp.Format(time.RFC822))
-		result += fmt.Sprintf("   Task: %s\n", truncateStringForDisplay(d.Context, 60))
+		result += fmt.Sprintf("   Task: %s\n", truncateStringForDisplay(d.Context, decisionContextDisplayMax))
 
 		if len(d.Options) > 0 {
 			result += "   Options:\n"
@@ -233,7 +247,7 @@ func FormatDecisionSummary(decisions []Decision) string {
 		}
 
 		if d.Reasoning != "" {
-			result += fmt.Sprintf("   Reasoning: %s\n", truncateStringForDisplay(d.Reasoning, 80))
+			result += fmt.Sprintf("   Reasoning: %s\n", truncateStringForDisplay(d.Reasoning, decisionReasoningDisplayMax))
 		}
 
 		if d.AutoDecided {

@@ -487,6 +487,11 @@ type SimpleTelemetryBridge struct {
 	cancel      context.CancelFunc
 	wg          sync.WaitGroup
 
+	// dispatch, when non-nil, schedules a function to run on the UI thread.
+	// Signal mutations must happen on the UI thread to avoid data races with
+	// the render loop. When nil (e.g. in tests), handleEvent runs inline.
+	dispatch func(func())
+
 	mu           sync.Mutex
 	touchEntries []touchEntry
 }
@@ -501,6 +506,17 @@ func NewSimpleTelemetryBridge(hub *telemetry.Hub, signals SidebarSignals) *Simpl
 	bridge.eventCh = eventCh
 	bridge.unsubscribe = unsub
 	return bridge
+}
+
+// SetDispatch sets a function that schedules work on the UI thread.
+// Must be called before Start. When set, all signal mutations from the
+// telemetry goroutine are dispatched through this function to ensure
+// thread safety with the render loop.
+func (b *SimpleTelemetryBridge) SetDispatch(fn func(func())) {
+	if b == nil {
+		return
+	}
+	b.dispatch = fn
 }
 
 // Start begins forwarding telemetry events to the UI.
@@ -538,7 +554,17 @@ func (b *SimpleTelemetryBridge) forwardLoop(ctx context.Context) {
 			if !ok {
 				return
 			}
-			b.handleEvent(event)
+			if b.dispatch != nil {
+				// Schedule signal mutations on the UI thread to avoid
+				// data races between the telemetry goroutine and the
+				// render loop.
+				evt := event
+				b.dispatch(func() {
+					b.handleEvent(evt)
+				})
+			} else {
+				b.handleEvent(event)
+			}
 		}
 	}
 }

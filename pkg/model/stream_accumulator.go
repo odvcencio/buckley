@@ -15,15 +15,13 @@ var streamAccumulatorPool = sync.Pool{
 }
 
 // AcquireStreamAccumulator retrieves a StreamAccumulator from the pool.
-// The accumulator is reset and ready for use.
 func AcquireStreamAccumulator() *StreamAccumulator {
 	a := streamAccumulatorPool.Get().(*StreamAccumulator)
 	a.Reset()
 	return a
 }
 
-// ReleaseStreamAccumulator returns a StreamAccumulator to the pool for reuse.
-// The accumulator should not be used after this call.
+// ReleaseStreamAccumulator returns a StreamAccumulator to the pool after resetting it.
 func ReleaseStreamAccumulator(a *StreamAccumulator) {
 	if a == nil {
 		return
@@ -194,8 +192,7 @@ var (
 	partialTokenPattern = regexp.MustCompile(`[_a-z]*call[_a-z]*\|?>?`)
 )
 
-// FilterToolCallTokens removes Kimi K2 style tool call tokens from streaming content.
-// This prevents special tokens from being displayed to users during streaming.
+// FilterToolCallTokens removes tool call markup tokens from streamed content.
 func FilterToolCallTokens(content string) string {
 	// Quick check - if no special markers, return as-is
 	if !strings.Contains(content, "<|") && !strings.Contains(content, "|>") &&
@@ -235,9 +232,7 @@ var (
 	toolCallPattern        = regexp.MustCompile(`<\|tool_call_begin\|>\s*(?P<id>[\w\.]+:\d+)\s*<\|tool_call_argument_begin\|>\s*(?P<args>.*?)\s*<\|tool_call_end\|>`)
 )
 
-// ParseToolCallsFromContent extracts tool calls from Kimi K2's special token format.
-// This is a fallback for when the provider doesn't parse these tokens server-side.
-// Returns the extracted tool calls and the content with tool call tokens stripped.
+// ParseToolCallsFromContent extracts tool calls embedded in text content.
 func ParseToolCallsFromContent(content string) ([]ToolCall, string) {
 	if !strings.Contains(content, toolCallSectionBegin) {
 		return nil, content

@@ -89,7 +89,7 @@ type FunctionCall struct {
 	Arguments string `json:"arguments"` // JSON string
 }
 
-// ReasoningConfig represents the reasoning configuration for models that support it
+// ReasoningConfig controls extended thinking behavior for models that support it.
 type ReasoningConfig struct {
 	Effort string `json:"effort,omitempty"` // "low", "medium", "high"
 }
@@ -101,7 +101,7 @@ type PromptCache struct {
 	TailMessages   int
 }
 
-// ChatRequest represents a request to the chat completion API
+// ChatRequest represents a chat completion request to an LLM provider.
 type ChatRequest struct {
 	Model                string           `json:"model"`
 	Messages             []Message        `json:"messages"`
@@ -117,7 +117,7 @@ type ChatRequest struct {
 	PromptCache          *PromptCache     `json:"-"`
 }
 
-// ChatResponse represents a non-streaming chat completion response
+// ChatResponse represents a non-streaming chat completion response.
 type ChatResponse struct {
 	ID      string   `json:"id"`
 	Model   string   `json:"model"`
@@ -132,7 +132,7 @@ type Choice struct {
 	FinishReason string  `json:"finish_reason"`
 }
 
-// StreamChunk represents a streaming response chunk
+// StreamChunk represents a single chunk from a streaming chat completion.
 type StreamChunk struct {
 	ID      string         `json:"id"`
 	Model   string         `json:"model"`
@@ -180,7 +180,7 @@ type FunctionCallDelta struct {
 	Arguments string `json:"arguments,omitempty"`
 }
 
-// Usage represents token usage information
+// Usage tracks token consumption for a single request.
 type Usage struct {
 	PromptTokens     int `json:"prompt_tokens"`
 	CompletionTokens int `json:"completion_tokens"`

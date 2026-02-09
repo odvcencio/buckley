@@ -18,7 +18,7 @@ mod proto {
     include!(concat!(env!("OUT_DIR"), "/buckley.browserd.v1.rs"));
 }
 
-use engine::{BrowserEngine, EngineError};
+use engine::{allowlist_allows, BrowserEngine, EngineError};
 use proto as pb;
 
 const DEFAULT_SOCKET: &str = "/tmp/buckley/browserd.sock";
@@ -469,7 +469,7 @@ fn resolve_session_id(requested: &str, default_session_id: &str) -> String {
 }
 
 fn insert_session(sessions: &SharedSessions, entry: SessionEntry) {
-    let mut map = sessions.lock().unwrap();
+    let mut map = sessions.lock().unwrap_or_else(|e| e.into_inner());
     map.insert(entry.session_id.clone(), entry);
 }
 
@@ -477,13 +477,13 @@ fn with_session<T, F>(sessions: &SharedSessions, session_id: &str, op: F) -> Opt
 where
     F: FnOnce(&mut SessionEntry) -> T,
 {
-    let mut map = sessions.lock().unwrap();
+    let mut map = sessions.lock().unwrap_or_else(|e| e.into_inner());
     let entry = map.get_mut(session_id)?;
     Some(op(entry))
 }
 
 fn remove_session(sessions: &SharedSessions, session_id: &str) -> bool {
-    let mut map = sessions.lock().unwrap();
+    let mut map = sessions.lock().unwrap_or_else(|e| e.into_inner());
     map.remove(session_id).is_some()
 }
 
@@ -591,55 +591,6 @@ fn validate_url(url: &str, allowlist: &[String]) -> Result<(), String> {
     } else {
         Err("host not in allowlist".to_string())
     }
-}
-
-fn allowlist_allows(host: &str, port: Option<u16>, allowlist: &[String]) -> bool {
-    let host = host.to_ascii_lowercase();
-    for entry in allowlist {
-        let entry = entry.trim();
-        if entry.is_empty() {
-            continue;
-        }
-        if let Some(suffix) = entry.strip_prefix("*.") {
-            let suffix = suffix.to_ascii_lowercase();
-            if host == suffix || host.ends_with(&format!(".{suffix}")) {
-                return true;
-            }
-            continue;
-        }
-        let (entry_host, entry_port) = parse_allowlist_entry(entry);
-        if entry_host.is_empty() || entry_host != host {
-            continue;
-        }
-        if let Some(entry_port) = entry_port {
-            if let Some(port) = port {
-                if port == entry_port {
-                    return true;
-                }
-            }
-            continue;
-        }
-        return true;
-    }
-    false
-}
-
-fn parse_allowlist_entry(entry: &str) -> (String, Option<u16>) {
-    if entry.contains("://") {
-        if let Ok(url) = Url::parse(entry) {
-            if let Some(host) = url.host_str() {
-                return (host.to_ascii_lowercase(), url.port());
-            }
-        }
-    }
-    if let Some((host, port_str)) = entry.rsplit_once(':') {
-        if port_str.chars().all(|c| c.is_ascii_digit()) && !host.contains(']') {
-            if let Ok(port) = port_str.parse::<u16>() {
-                return (host.to_ascii_lowercase(), Some(port));
-            }
-        }
-    }
-    (entry.to_ascii_lowercase(), None)
 }
 
 fn apply_security_config(cfg: &SecurityConfig) -> io::Result<()> {
@@ -858,6 +809,8 @@ fn error_response(request_id: &str, session_id: &str, code: &str, message: &str)
 }
 
 fn read_envelope(stream: &mut UnixStream) -> io::Result<Option<pb::Envelope>> {
+    const MAX_MESSAGE_SIZE: usize = 16 * 1024 * 1024; // 16 MB
+
     let mut len_buf = [0u8; 4];
     if let Err(err) = stream.read_exact(&mut len_buf) {
         if err.kind() == io::ErrorKind::UnexpectedEof {
@@ -868,6 +821,12 @@ fn read_envelope(stream: &mut UnixStream) -> io::Result<Option<pb::Envelope>> {
     let len = u32::from_be_bytes(len_buf) as usize;
     if len == 0 {
         return Ok(None);
+    }
+    if len > MAX_MESSAGE_SIZE {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("message too large: {} bytes (max {})", len, MAX_MESSAGE_SIZE),
+        ));
     }
     let mut buf = vec![0u8; len];
     stream.read_exact(&mut buf)?;

@@ -111,7 +111,7 @@ func (r *Runner) initRuntime() error {
 		UseToon:   r.cfg != nil && r.cfg.Encoding.UseToon,
 	})
 	if err != nil {
-		return err
+		return fmt.Errorf("creating rlm runtime: %w", err)
 	}
 
 	r.runtime = runtime
@@ -136,7 +136,7 @@ func (r *Runner) PlanFeature(featureName, description string) (*orchestrator.Pla
 
 	plan, err := r.planner.GeneratePlan(featureName, description)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("generating plan: %w", err)
 	}
 
 	// Store the plan
@@ -161,7 +161,7 @@ func (r *Runner) LoadPlan(planID string) (*orchestrator.Plan, error) {
 
 	plan, err := r.planStore.LoadPlan(planID)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("loading plan %s: %w", planID, err)
 	}
 
 	r.mu.Lock()
@@ -210,7 +210,7 @@ func (r *Runner) ExecutePlan() error {
 	// Execute independent tasks in parallel via the RLM coordinator
 	if len(independent) > 0 {
 		if err := r.executeTaskBatch(plan, independent); err != nil {
-			return err
+			return fmt.Errorf("executing task batch: %w", err)
 		}
 	}
 
@@ -261,7 +261,7 @@ func (r *Runner) ExecuteTask(taskID string) error {
 
 	if err := r.executeSingleTask(plan, task); err != nil {
 		r.updateTaskStatus(plan, taskID, orchestrator.TaskFailed)
-		return err
+		return fmt.Errorf("executing task %s: %w", taskID, err)
 	}
 
 	// Save updated plan
@@ -409,7 +409,7 @@ func (r *Runner) executeSingleTask(plan *orchestrator.Plan, task *orchestrator.T
 
 	answer, err := r.runtime.Execute(ctx, sb.String())
 	if err != nil {
-		return err
+		return fmt.Errorf("executing task %s: %w", task.ID, err)
 	}
 
 	// Determine success based on answer
@@ -476,7 +476,7 @@ func (r *Runner) ListPlans() ([]*orchestrator.Plan, error) {
 	}
 	plans, err := r.planStore.ListPlans()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("listing plans: %w", err)
 	}
 	// Convert []Plan to []*Plan
 	result := make([]*orchestrator.Plan, len(plans))
@@ -489,5 +489,8 @@ func (r *Runner) ListPlans() ([]*orchestrator.Plan, error) {
 // ResumeFeature loads a plan by ID and sets it as current.
 func (r *Runner) ResumeFeature(planID string) error {
 	_, err := r.LoadPlan(planID)
-	return err
+	if err != nil {
+		return fmt.Errorf("resuming feature %s: %w", planID, err)
+	}
+	return nil
 }

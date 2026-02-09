@@ -1040,6 +1040,12 @@ func (r *Runner) update(app *runtime.App, msg runtime.Message) bool {
 			r.handleStylesheetUpdate(update)
 			return true
 		}
+		if d, ok := custom.Value.(dispatchFunc); ok {
+			if d.fn != nil {
+				d.fn()
+			}
+			return true
+		}
 	}
 	if key, ok := msg.(runtime.KeyMsg); ok {
 		key = normalizeCtrlGChord(key)
@@ -1441,6 +1447,20 @@ func (r *Runner) SetToastDismissHandler(onDismiss func(string)) {
 func (r *Runner) SetDiagnostics(collector *diagnostics.Collector) {
 	// Runner doesn't use diagnostics directly in the same way the legacy app did
 	// The telemetry bridge handles this through events
+}
+
+// dispatchFunc is a wrapper for posting arbitrary functions to the event loop
+// via runtime.CustomMsg.
+type dispatchFunc struct{ fn func() }
+
+// Dispatch schedules fn to run on the UI event loop. It is non-blocking:
+// if the event loop is full or the app is shut down, fn is silently dropped.
+// This is safe to call from any goroutine.
+func (r *Runner) Dispatch(fn func()) {
+	if r == nil || r.app == nil || fn == nil {
+		return
+	}
+	r.app.Post(runtime.CustomMsg{Value: dispatchFunc{fn: fn}})
 }
 
 // SidebarSignals exposes writable signals for sidebar state.

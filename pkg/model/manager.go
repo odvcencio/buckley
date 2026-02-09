@@ -84,7 +84,7 @@ func (m *Manager) Initialize() error {
 	close(errCh)
 	for err := range errCh {
 		if err != nil {
-			return err
+			return fmt.Errorf("initializing provider catalog: %w", err)
 		}
 	}
 
@@ -93,7 +93,7 @@ func (m *Manager) Initialize() error {
 	m.modelProviders = modelProviders
 
 	if err := m.ensureConfiguredModels(); err != nil {
-		return err
+		return fmt.Errorf("ensuring configured models: %w", err)
 	}
 	return nil
 }
@@ -108,6 +108,11 @@ func fetchCatalogWithTimeout(provider Provider, timeout time.Duration) (*ModelCa
 	}
 	resCh := make(chan result, 1)
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				resCh <- result{cat: nil, err: fmt.Errorf("panic during catalog fetch: %v", r)}
+			}
+		}()
 		cat, err := provider.FetchCatalog()
 		resCh <- result{cat: cat, err: err}
 	}()
@@ -635,7 +640,7 @@ func (m *Manager) DescribeImage(ctx context.Context, imageURL string) (string, e
 	return ExtractTextContent(resp.Choices[0].Message.Content)
 }
 
-// ExtractTextContent extracts text from a message content field
+// ExtractTextContent extracts plain text from message content, handling both string and multimodal formats.
 func ExtractTextContent(content any) (string, error) {
 	switch v := content.(type) {
 	case string:
@@ -718,7 +723,7 @@ func extractTextValue(raw any) string {
 	return ""
 }
 
-// ExtractTextContentOrEmpty extracts text from content, returning empty string on error
+// ExtractTextContentOrEmpty extracts plain text from message content, returning empty string on error.
 func ExtractTextContentOrEmpty(content any) string {
 	text, _ := ExtractTextContent(content)
 	return text
@@ -728,9 +733,7 @@ func ExtractTextContentOrEmpty(content any) string {
 // Kimi K2 and other reasoning models embed thinking in these tags.
 var thinkTagPattern = regexp.MustCompile(`(?s)<think>(.*?)</think>`)
 
-// ExtractThinkingContent separates thinking/reasoning from the main content.
-// Returns (thinking, content) where thinking is the content of <think> tags
-// and content is the remaining text with thinking tags removed.
+// ExtractThinkingContent extracts thinking/reasoning text from message content parts.
 func ExtractThinkingContent(text string) (thinking string, content string) {
 	matches := thinkTagPattern.FindAllStringSubmatch(text, -1)
 	if len(matches) == 0 {

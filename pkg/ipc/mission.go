@@ -87,7 +87,7 @@ func (s *Server) handleListAgents(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	json.NewEncoder(w).Encode(map[string]any{
 		"agents": agents,
 		"count":  len(agents),
 	})
@@ -173,7 +173,7 @@ func (s *Server) handleGetAgentActivity(w http.ResponseWriter, r *http.Request) 
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	json.NewEncoder(w).Encode(map[string]any{
 		"agentId":    agentID,
 		"activities": activities,
 		"count":      len(activities),
@@ -257,7 +257,7 @@ func (s *Server) handleSendAgentMessage(w http.ResponseWriter, r *http.Request) 
 	s.broadcastAgentStatus(agentID)
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	json.NewEncoder(w).Encode(map[string]any{
 		"success":   true,
 		"agentId":   agentID,
 		"sessionId": sessionID,
@@ -293,7 +293,7 @@ func (s *Server) handleListPendingChanges(w http.ResponseWriter, r *http.Request
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	json.NewEncoder(w).Encode(map[string]any{
 		"changes": changes,
 		"count":   len(changes),
 	})
@@ -364,7 +364,7 @@ func (s *Server) handleApproveChange(w http.ResponseWriter, r *http.Request) {
 	s.broadcastAgentStatus(change.AgentID)
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	json.NewEncoder(w).Encode(map[string]any{
 		"success":    true,
 		"changeId":   changeID,
 		"status":     "approved",
@@ -415,7 +415,7 @@ func (s *Server) handleRejectChange(w http.ResponseWriter, r *http.Request) {
 	s.hub.Broadcast(Event{
 		Type:      mission.EventChangeRejected,
 		SessionID: change.SessionID,
-		Payload: map[string]interface{}{
+		Payload: map[string]any{
 			"change":  change,
 			"comment": req.Comment,
 		},
@@ -424,7 +424,7 @@ func (s *Server) handleRejectChange(w http.ResponseWriter, r *http.Request) {
 	s.broadcastAgentStatus(change.AgentID)
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	json.NewEncoder(w).Encode(map[string]any{
 		"success":    true,
 		"changeId":   changeID,
 		"status":     "rejected",
@@ -470,6 +470,9 @@ func (s *Server) handleMissionEvents(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// InsecureSkipVerify disables the library's built-in Origin check.
+	// Origin validation is already performed above via isWebSocketOriginAllowed,
+	// so the library's check would be redundant.
 	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
 		InsecureSkipVerify: true,
 	})

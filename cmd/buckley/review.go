@@ -22,7 +22,6 @@ func runReviewCommand(args []string) error {
 	projectMode := fs.Bool("project", false, "review the entire project instead of branch diff")
 	baseBranch := fs.String("base", "", "base branch to compare against (default: auto-detect main/master)")
 	includeUnstaged := fs.Bool("unstaged", true, "include unstaged changes in review")
-	verbose := fs.Bool("verbose", false, "stream model reasoning as it happens")
 	trace := fs.Bool("trace", false, "show context audit and reasoning trace after completion")
 	showCost := fs.Bool("cost", true, "show token/cost breakdown")
 	modelFlag := fs.String("model", "", "model to use (default: BUCKLEY_MODEL_REVIEW or execution model)")
@@ -71,6 +70,7 @@ func runReviewCommand(args []string) error {
 	registry := tool.NewRegistry()
 	if cwd, err := os.Getwd(); err == nil {
 		registry.ConfigureContainers(cfg, cwd)
+		registry.ConfigureDockerSandbox(cfg, cwd)
 		registry.SetSandboxConfig(cfg.Sandbox.ToSandboxConfig(cwd))
 	}
 	registerMCPTools(cfg, registry)
@@ -88,7 +88,7 @@ func runReviewCommand(args []string) error {
 	defer cancel()
 
 	// Show what we're doing
-	if !quietMode {
+	if !cliFlags.quiet {
 		termOut.Dim("Using model: %s", modelID)
 	}
 
@@ -138,9 +138,6 @@ func runReviewCommand(args []string) error {
 	if *trace && result.ContextAudit != nil {
 		printReviewContextAudit(result.ContextAudit)
 	}
-
-	// Note: --verbose flag reserved for future streaming support
-	_ = verbose
 
 	// Check for errors
 	if result.Error != nil {

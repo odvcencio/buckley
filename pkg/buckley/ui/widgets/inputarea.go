@@ -224,6 +224,9 @@ func (i *InputArea) resetHistoryNav() {
 
 // SetStyles sets the input area styles.
 func (i *InputArea) SetStyles(bg, text, border backend.Style) {
+	if i == nil {
+		return
+	}
 	i.bgStyle = bg
 	i.textStyle = text
 	i.borderStyle = border
@@ -242,6 +245,9 @@ func (i *InputArea) SetStyles(bg, text, border backend.Style) {
 
 // SetModeStyles sets the mode indicator styles.
 func (i *InputArea) SetModeStyles(normal, shell, env, search backend.Style) {
+	if i == nil {
+		return
+	}
 	i.normalMode = normal
 	i.shellMode = shell
 	i.envMode = env
@@ -252,6 +258,9 @@ func (i *InputArea) SetModeStyles(normal, shell, env, search backend.Style) {
 // SetCursorStyle sets the style used for the soft cursor.
 // This forwards the style to the internal textarea so it can render its own cursor.
 func (i *InputArea) SetCursorStyle(style backend.Style) {
+	if i == nil {
+		return
+	}
 	i.cursorStyle = style
 	i.cursorStyleSet = true
 	// Forward to textarea so it renders its cursor with this style
@@ -262,42 +271,66 @@ func (i *InputArea) SetCursorStyle(style backend.Style) {
 
 // ClearCursorStyle resets to the default cursor styling.
 func (i *InputArea) ClearCursorStyle() {
+	if i == nil {
+		return
+	}
 	i.cursorStyleSet = false
 }
 
 // SetHeightLimits sets min/max height.
 func (i *InputArea) SetHeightLimits(min, max int) {
+	if i == nil {
+		return
+	}
 	i.minHeight = min
 	i.maxHeight = max
 }
 
 // OnSubmit sets the submit callback.
 func (i *InputArea) OnSubmit(fn func(text string, mode InputMode)) {
+	if i == nil {
+		return
+	}
 	i.onSubmit = fn
 }
 
 // OnChange sets the text change callback.
 func (i *InputArea) OnChange(fn func(text string)) {
+	if i == nil {
+		return
+	}
 	i.onChange = fn
 }
 
 // OnModeChange sets the mode change callback.
 func (i *InputArea) OnModeChange(fn func(mode InputMode)) {
+	if i == nil {
+		return
+	}
 	i.onModeChange = fn
 }
 
 // OnTriggerPicker sets the file picker trigger callback.
 func (i *InputArea) OnTriggerPicker(fn func()) {
+	if i == nil {
+		return
+	}
 	i.onTriggerPicker = fn
 }
 
 // OnTriggerSearch sets the search trigger callback.
 func (i *InputArea) OnTriggerSearch(fn func()) {
+	if i == nil {
+		return
+	}
 	i.onTriggerSearch = fn
 }
 
 // OnTriggerSlashCommand sets the slash command trigger callback.
 func (i *InputArea) OnTriggerSlashCommand(fn func()) {
+	if i == nil {
+		return
+	}
 	i.onTriggerSlashCommand = fn
 }
 
@@ -601,6 +634,9 @@ func (i *InputArea) ClipboardPaste(text string) bool {
 
 // Bind attaches app services.
 func (i *InputArea) Bind(services runtime.Services) {
+	if i == nil {
+		return
+	}
 	i.services = services
 	i.subs.SetScheduler(services.Scheduler())
 	i.subscribe()
@@ -611,6 +647,9 @@ func (i *InputArea) Bind(services runtime.Services) {
 
 // Unbind releases app services.
 func (i *InputArea) Unbind() {
+	if i == nil {
+		return
+	}
 	i.subs.Clear()
 	i.services = runtime.Services{}
 	if i.textarea != nil {
@@ -695,8 +734,28 @@ func (i *InputArea) setMode(mode InputMode) {
 	i.mode = mode
 	i.syncModeIndicator()
 	i.setModeSignal(mode)
+	if i.services != (runtime.Services{}) {
+		if announcer := i.services.Announcer(); announcer != nil {
+			announcer.Announce(i.modeName(mode), accessibility.PriorityPolite)
+		}
+	}
 	if i.onModeChange != nil {
 		i.onModeChange(mode)
+	}
+}
+
+func (i *InputArea) modeName(mode InputMode) string {
+	switch mode {
+	case ModeShell:
+		return "Shell mode"
+	case ModeEnv:
+		return "Environment mode"
+	case ModeSearch:
+		return "Search mode"
+	case ModePicker:
+		return "Picker mode"
+	default:
+		return "Normal mode"
 	}
 }
 

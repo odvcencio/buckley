@@ -158,7 +158,10 @@ func (p *SizedBufferPool) Put(b []byte) {
 	case cap(b) <= MediumBufferSize:
 		p.medium.Put(&b)
 	default:
-		p.large.Put(&b)
+		if cap(b) <= LargeBufferSize*2 {
+			p.large.Put(&b)
+		}
+		// else: drop oversized buffer, let GC collect it
 	}
 }
 

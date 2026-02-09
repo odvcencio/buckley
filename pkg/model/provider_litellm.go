@@ -272,7 +272,7 @@ func (p *LiteLLMProvider) invoke(ctx context.Context, req ChatRequest) (*ChatRes
 
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", p.baseURL+"/chat/completions", bytes.NewReader(body))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("creating litellm chat request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	if p.apiKey != "" {
@@ -281,7 +281,7 @@ func (p *LiteLLMProvider) invoke(ctx context.Context, req ChatRequest) (*ChatRes
 
 	resp, err := p.httpClient.Do(httpReq)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("executing litellm chat request: %w", err)
 	}
 	defer resp.Body.Close()
 
@@ -305,7 +305,7 @@ func (p *LiteLLMProvider) invokeStream(ctx context.Context, req ChatRequest, chu
 
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", p.baseURL+"/chat/completions", bytes.NewReader(body))
 	if err != nil {
-		return err
+		return fmt.Errorf("creating litellm stream request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Accept", "text/event-stream")
@@ -315,7 +315,7 @@ func (p *LiteLLMProvider) invokeStream(ctx context.Context, req ChatRequest, chu
 
 	resp, err := p.httpClient.Do(httpReq)
 	if err != nil {
-		return err
+		return fmt.Errorf("executing litellm stream request: %w", err)
 	}
 	defer resp.Body.Close()
 
@@ -325,6 +325,7 @@ func (p *LiteLLMProvider) invokeStream(ctx context.Context, req ChatRequest, chu
 	}
 
 	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024) // 1MB max line
 	for scanner.Scan() {
 		select {
 		case <-ctx.Done():
@@ -348,7 +349,7 @@ func (p *LiteLLMProvider) invokeStream(ctx context.Context, req ChatRequest, chu
 	}
 
 	if err := scanner.Err(); err != nil {
-		return err
+		return fmt.Errorf("reading litellm stream: %w", err)
 	}
 	return nil
 }

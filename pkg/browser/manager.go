@@ -100,10 +100,15 @@ func (m *Manager) CreateSession(ctx context.Context, cfg SessionConfig) (Browser
 		m.mu.Unlock()
 		return nil, fmt.Errorf("session already exists: %s", cfg.SessionID)
 	}
+	// Insert nil placeholder to reserve the ID while unlocked
+	m.sessions[cfg.SessionID] = nil
 	m.mu.Unlock()
 
 	sess, err := m.runtime.NewSession(ctx, cfg)
 	if err != nil {
+		m.mu.Lock()
+		delete(m.sessions, cfg.SessionID)
+		m.mu.Unlock()
 		return nil, err
 	}
 

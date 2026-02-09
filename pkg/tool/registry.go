@@ -13,10 +13,8 @@ import (
 	"github.com/pmezard/go-difflib/difflib"
 
 	"github.com/odvcencio/buckley/pkg/containerexec"
-	"github.com/odvcencio/buckley/pkg/conversation"
 	"github.com/odvcencio/buckley/pkg/embeddings"
 	"github.com/odvcencio/buckley/pkg/mission"
-	"github.com/odvcencio/buckley/pkg/sandbox"
 	"github.com/odvcencio/buckley/pkg/storage"
 	"github.com/odvcencio/buckley/pkg/telemetry"
 	"github.com/odvcencio/buckley/pkg/tool/builtin"
@@ -39,6 +37,7 @@ type Registry struct {
 	containerCompose string
 	containerWorkDir string
 	containerExecute bool
+	sandbox          SandboxExecutor
 	telemetryHub     *telemetry.Hub
 	telemetrySession string
 
@@ -54,7 +53,7 @@ type registryOptions struct {
 	kindOverrides map[string]string
 }
 
-// RegistryOption configures registry construction.
+// RegistryOption configures optional settings for a Registry.
 type RegistryOption func(*registryOptions)
 
 // NewEmptyRegistry creates a new empty tool registry without any built-in tools
@@ -169,13 +168,16 @@ func (r *Registry) SetMaxOutputBytes(max int) {
 }
 
 // SetSandboxConfig configures command sandboxing for tools that support it.
-func (r *Registry) SetSandboxConfig(cfg sandbox.Config) {
+// The cfg value is passed through to each tool that implements a
+// SetSandboxConfig method, allowing the tool package to remain decoupled
+// from the concrete sandbox.Config type.
+func (r *Registry) SetSandboxConfig(cfg any) {
 	if r == nil {
 		return
 	}
 	tools := r.snapshotTools()
 	for _, t := range tools {
-		if setter, ok := t.(interface{ SetSandboxConfig(sandbox.Config) }); ok {
+		if setter, ok := t.(interface{ SetSandboxConfig(any) }); ok {
 			setter.SetSandboxConfig(cfg)
 		}
 	}
@@ -214,7 +216,6 @@ func (r *Registry) registerBuiltins(cfg registryOptions) {
 	register(&builtin.SearchReplaceTool{})
 	register(&builtin.FindFilesTool{})
 	register(&builtin.FileExistsTool{})
-	register(&builtin.GetFileInfoTool{})
 	register(&builtin.ExcelTool{})
 
 	// Register built-in edit tools (with diff preview)
@@ -288,7 +289,6 @@ func (r *Registry) applyDefaultKinds() {
 		"list_directory":  "read",
 		"find_files":      "search",
 		"file_exists":     "read",
-		"get_file_info":   "read",
 		"search_text":     "search",
 		"excel":           "read",
 		"lookup_context":  "read",
@@ -413,8 +413,13 @@ func (r *Registry) SetTodoStore(store builtin.TodoStore) {
 	r.Register(&builtin.TodoTool{Store: store})
 }
 
+// Compactor triggers asynchronous conversation compaction.
+type Compactor interface {
+	CompactAsync(ctx context.Context)
+}
+
 // SetCompactionManager registers the compact_context tool.
-func (r *Registry) SetCompactionManager(compactor *conversation.CompactionManager) {
+func (r *Registry) SetCompactionManager(compactor Compactor) {
 	if r == nil || compactor == nil {
 		return
 	}
@@ -708,6 +713,21 @@ func (r *Registry) DisableContainers() {
 	r.containerWorkDir = ""
 }
 
+// Close releases resources held by the registry, including sandbox containers.
+func (r *Registry) Close() error {
+	if r == nil {
+		return nil
+	}
+	r.mu.Lock()
+	sb := r.sandbox
+	r.sandbox = nil
+	r.mu.Unlock()
+	if sb != nil {
+		return sb.Close()
+	}
+	return nil
+}
+
 func (r *Registry) executeWithShellTelemetry(execFn func(map[string]any) (*builtin.Result, error), params map[string]any) (*builtin.Result, error) {
 	command := sanitizeShellCommand(params)
 	interactive := false
@@ -770,28 +790,38 @@ func (r *Registry) executeWithMissionWrite(ctx context.Context, params map[strin
 	if !ok || strings.TrimSpace(path) == "" {
 		return &builtin.Result{Success: false, Error: "path parameter is required"}, nil
 	}
-	content, ok := params["content"].(string)
-	if !ok {
-		return &builtin.Result{Success: false, Error: "content parameter must be a string"}, nil
-	}
 
 	absPath, err := filepath.Abs(path)
 	if err != nil {
 		return &builtin.Result{Success: false, Error: fmt.Sprintf("invalid path: %v", err)}, nil
 	}
 
-	oldContent := ""
-	if existing, err := os.ReadFile(absPath); err == nil {
-		oldContent = string(existing)
-	}
-
-	if oldContent == content {
-		return execFn(params)
-	}
-
-	diffText, err := r.buildUnifiedDiff(absPath, oldContent, content)
-	if err != nil {
-		return &builtin.Result{Success: false, Error: fmt.Sprintf("failed to build diff: %v", err)}, nil
+	// Build a diff description based on available parameters.
+	// write_file provides "content", edit_file provides "old_string"/"new_string", etc.
+	var diffText string
+	if content, ok := params["content"].(string); ok {
+		oldContent := ""
+		if existing, err := os.ReadFile(absPath); err == nil {
+			oldContent = string(existing)
+		}
+		if oldContent == content {
+			return execFn(params)
+		}
+		diffText, err = r.buildUnifiedDiff(absPath, oldContent, content)
+		if err != nil {
+			return &builtin.Result{Success: false, Error: fmt.Sprintf("failed to build diff: %v", err)}, nil
+		}
+	} else if oldStr, ok := params["old_string"].(string); ok {
+		newStr, _ := params["new_string"].(string)
+		diffText = fmt.Sprintf("edit_file %s:\n- %s\n+ %s", absPath, oldStr, newStr)
+	} else if text, ok := params["text"].(string); ok {
+		line, _ := params["line"].(float64)
+		diffText = fmt.Sprintf("insert_text %s at line %d:\n+ %s", absPath, int(line), text)
+	} else if startLine, ok := params["start_line"].(float64); ok {
+		endLine, _ := params["end_line"].(float64)
+		diffText = fmt.Sprintf("delete_lines %s: lines %d-%d", absPath, int(startLine), int(endLine))
+	} else {
+		diffText = fmt.Sprintf("file modification: %s (params: %v)", absPath, params)
 	}
 
 	changeID, err := r.recordPendingChange(absPath, diffText, "write_file")
@@ -809,7 +839,6 @@ func (r *Registry) executeWithMissionWrite(ctx context.Context, params map[strin
 
 	return execFn(params)
 }
-
 func (r *Registry) executeWithMissionPatch(ctx context.Context, params map[string]any, execFn func(map[string]any) (*builtin.Result, error)) (*builtin.Result, error) {
 	rawPatch, ok := params["patch"].(string)
 	if !ok || strings.TrimSpace(rawPatch) == "" {

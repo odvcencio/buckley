@@ -99,11 +99,17 @@ func defaultShellTimeoutSeconds() int {
 }
 
 // SetSandboxConfig configures command sandboxing.
-func (t *ShellCommandTool) SetSandboxConfig(cfg sandbox.Config) {
+// Accepts any value and type-asserts to sandbox.Config so that the
+// registry can pass the config without importing the sandbox package.
+func (t *ShellCommandTool) SetSandboxConfig(cfg any) {
 	if t == nil {
 		return
 	}
-	t.sandboxConfig = cfg
+	sc, ok := cfg.(sandbox.Config)
+	if !ok {
+		return
+	}
+	t.sandboxConfig = sc
 	t.sandboxEnabled = true
 }
 

@@ -177,17 +177,17 @@ func TestInitIPCStore(t *testing.T) {
 
 func TestEncodingOverrideFlagApplied(t *testing.T) {
 	// Test that encoding override flag affects config
-	origFlag := encodingOverrideFlag
-	t.Cleanup(func() { encodingOverrideFlag = origFlag })
+	origFlag := cliFlags.encodingOverride
+	t.Cleanup(func() { cliFlags.encodingOverride = origFlag })
 
 	// Test json encoding
-	encodingOverrideFlag = "json"
+	cliFlags.encodingOverride = "json"
 	cfg := config.DefaultConfig()
 	cfg.Encoding.UseToon = true
 
 	// The actual override happens in initDependencies, verify the logic
-	if encodingOverrideFlag != "" {
-		cfg.Encoding.UseToon = encodingOverrideFlag != "json"
+	if cliFlags.encodingOverride != "" {
+		cfg.Encoding.UseToon = cliFlags.encodingOverride != "json"
 	}
 
 	if cfg.Encoding.UseToon {
@@ -195,10 +195,10 @@ func TestEncodingOverrideFlagApplied(t *testing.T) {
 	}
 
 	// Test toon encoding
-	encodingOverrideFlag = "toon"
+	cliFlags.encodingOverride = "toon"
 	cfg.Encoding.UseToon = false
-	if encodingOverrideFlag != "" {
-		cfg.Encoding.UseToon = encodingOverrideFlag != "json"
+	if cliFlags.encodingOverride != "" {
+		cfg.Encoding.UseToon = cliFlags.encodingOverride != "json"
 	}
 
 	if !cfg.Encoding.UseToon {

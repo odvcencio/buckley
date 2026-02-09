@@ -568,6 +568,7 @@ func extractMessageText(msg model.Message) string {
 func (s *Server) buildRLMRuntime(sessionID, agentID string) (*rlm.Runtime, func(), error) {
 	registry := tool.NewRegistry()
 	registry.ConfigureContainers(s.cfg, s.projectRoot)
+	registry.ConfigureDockerSandbox(s.cfg, s.projectRoot)
 
 	missionStore := mission.NewStore(s.store.DB())
 	requireApproval := strings.ToLower(s.cfg.Orchestrator.TrustLevel) != "autonomous"
@@ -648,6 +649,7 @@ func resolveRLMConfig(cfg *config.Config) rlm.Config {
 func (s *Server) buildOrchestratorContext(sessionID, agentID string) (*orchestrator.Orchestrator, func(), error) {
 	registry := tool.NewRegistry()
 	registry.ConfigureContainers(s.cfg, s.projectRoot)
+	registry.ConfigureDockerSandbox(s.cfg, s.projectRoot)
 
 	missionStore := mission.NewStore(s.store.DB())
 	requireApproval := strings.ToLower(s.cfg.Orchestrator.TrustLevel) != "autonomous"
@@ -838,6 +840,7 @@ func (s *Server) RequestToolExecution(req *acppb.ToolExecutionRequest, stream ac
 
 	registry := tool.NewRegistry()
 	registry.ConfigureContainers(s.cfg, s.projectRoot)
+	registry.ConfigureDockerSandbox(s.cfg, s.projectRoot)
 	missionStore := mission.NewStore(s.store.DB())
 	requireApproval := strings.ToLower(s.cfg.Orchestrator.TrustLevel) != "autonomous"
 	registry.EnableMissionControl(missionStore, req.AgentId, requireApproval, 15*time.Minute)

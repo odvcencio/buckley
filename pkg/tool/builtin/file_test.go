@@ -298,56 +298,6 @@ func TestFileExistsTool(t *testing.T) {
 	})
 }
 
-func TestGetFileInfoTool(t *testing.T) {
-	tool := &GetFileInfoTool{}
-
-	t.Run("metadata", func(t *testing.T) {
-		if tool.Name() != "get_file_info" {
-			t.Errorf("Name() = %q, want %q", tool.Name(), "get_file_info")
-		}
-	})
-
-	t.Run("get info for existing file", func(t *testing.T) {
-		tmpDir := t.TempDir()
-		testFile := filepath.Join(tmpDir, "info.txt")
-		content := "some content"
-		if err := os.WriteFile(testFile, []byte(content), 0644); err != nil {
-			t.Fatal(err)
-		}
-
-		result, err := tool.Execute(map[string]any{"path": testFile})
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if !result.Success {
-			t.Errorf("expected success, got error: %s", result.Error)
-		}
-
-		if size, ok := result.Data["size"].(int64); !ok || size != int64(len(content)) {
-			t.Errorf("expected size=%d, got %v", len(content), result.Data["size"])
-		}
-	})
-
-	t.Run("missing path parameter", func(t *testing.T) {
-		result, err := tool.Execute(map[string]any{})
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if result.Success {
-			t.Error("expected failure for missing path")
-		}
-	})
-
-	t.Run("nonexistent file", func(t *testing.T) {
-		result, err := tool.Execute(map[string]any{"path": "/nonexistent/file.txt"})
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if result.Success {
-			t.Error("expected failure for nonexistent file")
-		}
-	})
-}
 
 func TestPatchFileTool(t *testing.T) {
 	tool := &PatchFileTool{}

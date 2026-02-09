@@ -149,7 +149,7 @@ func coordinationEventFromTelemetry(event telemetry.Event) coordevents.Event {
 		metadata["experiment_id"] = id
 	}
 
-	data := make(map[string]interface{}, len(event.Data))
+	data := make(map[string]any, len(event.Data))
 	for k, v := range event.Data {
 		data[k] = v
 	}

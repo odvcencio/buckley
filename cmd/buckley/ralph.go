@@ -149,9 +149,9 @@ func (r *ralphHeadlessRunner) WaitForIdle(ctx context.Context) error {
 			return ctx.Err()
 		case <-maxWait:
 			if sawNonIdle {
-				return nil // Timed out but saw processing, treat as done
+				return fmt.Errorf("WaitForIdle: timed out after %v while processing", 5*time.Minute)
 			}
-			return fmt.Errorf("timeout waiting for runner to start processing")
+			return fmt.Errorf("WaitForIdle: timed out after %v waiting for processing to start", 5*time.Minute)
 		case <-ticker.C:
 		}
 	}
@@ -275,6 +275,185 @@ func newRalphHeadlessRunner(
 	return &ralphHeadlessRunner{runner: runner, store: store, sessionID: sessionID}, nil
 }
 
+// ralphRuntime holds the shared infrastructure components used by both
+// runRalphCommand and runRalphResume. Call setupRalphRuntime to create one
+// and Close when finished.
+type ralphRuntime struct {
+	cfg              *config.Config
+	mgr              *model.Manager
+	store            *storage.Store
+	registry         *tool.Registry
+	runner           *ralphHeadlessRunner
+	backendRegistry  *ralph.BackendRegistry
+	orchestrator     *ralph.Orchestrator
+	memoryStore      *ralph.MemoryStore
+	contextProcessor *ralph.ContextProcessor
+	summaryGenerator *ralph.SummaryGenerator
+	projectCtx       string
+	logger           *ralph.Logger
+}
+
+// ralphRuntimeConfig contains the parameters needed to build a ralphRuntime.
+type ralphRuntimeConfig struct {
+	cfg         *config.Config
+	mgr         *model.Manager
+	store       *storage.Store
+	controlCfg  *ralph.ControlConfig
+	logger      *ralph.Logger
+	session     *ralph.Session
+	sessionID   string
+	sandboxPath string
+	workDir     string
+	runDir      string
+	timeout     time.Duration
+}
+
+// setupRalphRuntime creates the shared tool registry, headless runner,
+// orchestrator, memory store, context processor, summary generator and
+// project context that are identical between runRalphCommand and
+// runRalphResume. The caller is responsible for calling Close.
+func setupRalphRuntime(rc ralphRuntimeConfig) (*ralphRuntime, error) {
+	rt := &ralphRuntime{
+		cfg:   rc.cfg,
+		mgr:   rc.mgr,
+		store: rc.store,
+	}
+
+	// Tool registry
+	rt.registry = tool.NewRegistry()
+	rt.registry.SetWorkDir(rc.sandboxPath)
+	rt.registry.ConfigureContainers(rc.cfg, rc.sandboxPath)
+	rt.registry.ConfigureDockerSandbox(rc.cfg, rc.sandboxPath)
+	rt.registry.SetSandboxConfig(rc.cfg.Sandbox.ToSandboxConfig(rc.sandboxPath))
+	registerMCPTools(rc.cfg, rt.registry)
+
+	fileWatcher := filewatch.NewFileWatcher(100)
+	fileWatcher.Subscribe("*", func(change filewatch.FileChange) {
+		if rc.logger != nil {
+			rc.logger.LogFileChange(change)
+		}
+		if rc.session != nil && strings.TrimSpace(change.Path) != "" {
+			rc.session.AddModifiedFile(change.Path)
+		}
+	})
+	rt.registry.Use(tool.FileChangeTracking(fileWatcher))
+
+	// Memory store
+	if rc.controlCfg.Memory.Enabled {
+		memoryPath := filepath.Join(rc.runDir, "memory.db")
+		ms, err := ralph.NewMemoryStore(memoryPath)
+		if err != nil {
+			return nil, fmt.Errorf("create memory store: %w", err)
+		}
+		rt.memoryStore = ms
+		rc.logger.SetEventSink(ms)
+	}
+
+	if rt.memoryStore != nil {
+		rt.registry.Register(&builtin.SessionMemoryTool{
+			Store:     rt.memoryStore,
+			SessionID: rc.sessionID,
+		})
+	}
+
+	// Headless runner
+	runner, err := newRalphHeadlessRunner(rc.cfg, rc.mgr, rc.store, rt.registry, rc.logger, rc.sessionID, rc.sandboxPath, rc.timeout)
+	if err != nil {
+		rt.Close()
+		return nil, fmt.Errorf("creating headless runner: %w", err)
+	}
+	rt.runner = runner
+
+	// Backend registry + orchestrator
+	backendRegistry := ralph.NewBackendRegistry()
+	for name, backend := range rc.controlCfg.Backends {
+		if backend.Type == ralph.BackendTypeInternal {
+			backendRegistry.Register(ralph.NewInternalBackend(name, runner, ralph.InternalOptions{
+				PromptTemplate: backend.PromptTemplate,
+			}))
+		} else {
+			backendRegistry.Register(ralph.NewExternalBackend(name, backend.Command, backend.Args, backend.Options))
+		}
+	}
+
+	rt.backendRegistry = backendRegistry
+	rt.orchestrator = ralph.NewOrchestrator(backendRegistry, rc.controlCfg)
+	rt.orchestrator.SetLogger(rc.logger)
+	rt.orchestrator.SetContextProvider(modelContextProvider{manager: rc.mgr})
+
+	// Context processor
+	if strings.TrimSpace(rc.controlCfg.ContextProcessing.Model) != "" {
+		maxTokens := rc.controlCfg.ContextProcessing.MaxOutputTokens
+		if maxTokens <= 0 {
+			maxTokens = 500
+		}
+		rt.contextProcessor = ralph.NewContextProcessor(rc.mgr, rc.controlCfg.ContextProcessing.Model, maxTokens)
+	}
+
+	// Summary generator
+	if strings.TrimSpace(rc.controlCfg.Memory.SummaryModel) != "" {
+		rt.summaryGenerator = ralph.NewSummaryGenerator(rc.mgr, rc.controlCfg.Memory.SummaryModel, 500)
+	}
+
+	// Project context
+	rt.projectCtx = ralph.BuildProjectContext(rc.workDir)
+	rt.logger = rc.logger
+
+	return rt, nil
+}
+
+// baseExecutorOpts returns the common executor options shared by both
+// runRalphCommand and runRalphResume.
+func (rt *ralphRuntime) baseExecutorOpts() []ralph.ExecutorOption {
+	return []ralph.ExecutorOption{
+		ralph.WithProgressWriter(os.Stdout),
+		ralph.WithOrchestrator(rt.orchestrator),
+		ralph.WithMemoryStore(rt.memoryStore),
+		ralph.WithContextProcessor(rt.contextProcessor),
+		ralph.WithSummaryGenerator(rt.summaryGenerator),
+		ralph.WithProjectContext(rt.projectCtx),
+	}
+}
+
+// runWithSignalHandler creates a cancellable context, registers signal
+// handling, runs fn, and prints a completion summary.
+func (rt *ralphRuntime) runWithSignalHandler(fn func(ctx context.Context) error) error {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(sigChan)
+	go func() {
+		<-sigChan
+		fmt.Fprintf(os.Stderr, "\nReceived interrupt, shutting down...\n")
+		rt.runner.Stop()
+		cancel()
+	}()
+
+	return fn(ctx)
+}
+
+// Close releases resources owned by the runtime.
+func (rt *ralphRuntime) Close() {
+	if rt.runner != nil {
+		rt.runner.Stop()
+	}
+	if rt.memoryStore != nil {
+		rt.memoryStore.Close()
+	}
+}
+
+// printSessionStats prints the standard completion summary.
+func printSessionStats(label string, stats ralph.SessionStats) {
+	fmt.Printf("\n%s\n", label)
+	fmt.Printf("  Iterations: %d\n", stats.Iteration)
+	fmt.Printf("  Tokens: %d\n", stats.TotalTokens)
+	fmt.Printf("  Cost: $%.4f\n", stats.TotalCost)
+	fmt.Printf("  Files modified: %d\n", stats.FilesModified)
+	fmt.Printf("  Elapsed: %s\n", stats.Elapsed.Round(time.Second))
+}
+
 func runRalphCommand(args []string) error {
 	fs := flag.NewFlagSet("ralph", flag.ContinueOnError)
 	fs.Usage = func() {
@@ -345,7 +524,17 @@ func runRalphCommand(args []string) error {
 		if *promptFile == "" {
 			return fmt.Errorf("--watch requires --prompt-file")
 		}
-		return runRalphWatch(*promptFile, actualPrompt, workDir, *dir, *timeout, *maxIterations, *noRefine, *model, *autoCommit, *createPR)
+		return runRalphWatch(watchOptions{
+			promptFile:    *promptFile,
+			workDir:       workDir,
+			dirFlag:       *dir,
+			timeout:       *timeout,
+			maxIterations: *maxIterations,
+			noRefine:      *noRefine,
+			modelOverride: *model,
+			autoCommit:    *autoCommit,
+			createPR:      *createPR,
+		})
 	}
 
 	// Initialize dependencies
@@ -388,7 +577,7 @@ func runRalphCommand(args []string) error {
 
 	// Create run directory: ~/.buckley/ralph/projects/<project>/runs/<session>/
 	runDir := filepath.Join(ralphDataDir, "projects", projectName, "runs", sessionID)
-	if err := os.MkdirAll(runDir, 0755); err != nil {
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
 		return fmt.Errorf("create run directory: %w", err)
 	}
 
@@ -462,7 +651,7 @@ func runRalphCommand(args []string) error {
 
 	// Save prompt to run directory
 	promptPath := filepath.Join(runDir, "prompt.md")
-	if err := os.WriteFile(promptPath, []byte(actualPrompt), 0644); err != nil {
+	if err := os.WriteFile(promptPath, []byte(actualPrompt), 0o644); err != nil {
 		return fmt.Errorf("save prompt file: %w", err)
 	}
 
@@ -473,17 +662,6 @@ func runRalphCommand(args []string) error {
 		return fmt.Errorf("create logger: %w", err)
 	}
 	defer logger.Close()
-
-	var memoryStore *ralph.MemoryStore
-	if controlCfg.Memory.Enabled {
-		memoryPath := filepath.Join(runDir, "memory.db")
-		memoryStore, err = ralph.NewMemoryStore(memoryPath)
-		if err != nil {
-			return fmt.Errorf("create memory store: %w", err)
-		}
-		defer memoryStore.Close()
-		logger.SetEventSink(memoryStore)
-	}
 
 	// Determine max iterations (CLI flag takes precedence over config)
 	effectiveMaxIterations := *maxIterations
@@ -508,76 +686,33 @@ func runRalphCommand(args []string) error {
 		},
 	})
 
-	projectCtx := ralph.BuildProjectContext(workDir)
-
-	// Create tool registry configured for the sandbox
-	registry := tool.NewRegistry()
-	registry.SetWorkDir(sandboxPath)
-	registry.ConfigureContainers(cfg, sandboxPath)
-	registry.SetSandboxConfig(cfg.Sandbox.ToSandboxConfig(sandboxPath))
-	registerMCPTools(cfg, registry)
-
-	fileWatcher := filewatch.NewFileWatcher(100)
-	fileWatcher.Subscribe("*", func(change filewatch.FileChange) {
-		if logger != nil {
-			logger.LogFileChange(change)
-		}
-		if session != nil && strings.TrimSpace(change.Path) != "" {
-			session.AddModifiedFile(change.Path)
-		}
+	// Build shared runtime (registry, runner, orchestrator, memory, etc.)
+	rt, err := setupRalphRuntime(ralphRuntimeConfig{
+		cfg:         cfg,
+		mgr:         mgr,
+		store:       store,
+		controlCfg:  controlCfg,
+		logger:      logger,
+		session:     session,
+		sessionID:   sessionID,
+		sandboxPath: sandboxPath,
+		workDir:     workDir,
+		runDir:      runDir,
+		timeout:     *timeout,
 	})
-	registry.Use(tool.FileChangeTracking(fileWatcher))
-
-	if memoryStore != nil {
-		registry.Register(&builtin.SessionMemoryTool{
-			Store:     memoryStore,
-			SessionID: sessionID,
-		})
-	}
-
-	// Create headless runner
-	runner, err := newRalphHeadlessRunner(cfg, mgr, store, registry, logger, sessionID, sandboxPath, *timeout)
 	if err != nil {
-		return fmt.Errorf("creating headless runner: %w", err)
+		return err
 	}
-	defer runner.Stop()
-
-	backendRegistry := ralph.NewBackendRegistry()
-	for name, backend := range controlCfg.Backends {
-		if backend.Type == ralph.BackendTypeInternal {
-			backendRegistry.Register(ralph.NewInternalBackend(name, runner, ralph.InternalOptions{
-				PromptTemplate: backend.PromptTemplate,
-			}))
-		} else {
-			backendRegistry.Register(ralph.NewExternalBackend(name, backend.Command, backend.Args, backend.Options))
-		}
-	}
-
-	orchestrator := ralph.NewOrchestrator(backendRegistry, controlCfg)
-	orchestrator.SetLogger(logger)
-	orchestrator.SetContextProvider(modelContextProvider{manager: mgr})
-
-	var contextProcessor *ralph.ContextProcessor
-	if strings.TrimSpace(controlCfg.ContextProcessing.Model) != "" {
-		maxTokens := controlCfg.ContextProcessing.MaxOutputTokens
-		if maxTokens <= 0 {
-			maxTokens = 500
-		}
-		contextProcessor = ralph.NewContextProcessor(mgr, controlCfg.ContextProcessing.Model, maxTokens)
-	}
-
-	var summaryGenerator *ralph.SummaryGenerator
-	if strings.TrimSpace(controlCfg.Memory.SummaryModel) != "" {
-		summaryGenerator = ralph.NewSummaryGenerator(mgr, controlCfg.Memory.SummaryModel, 500)
-	}
+	defer rt.Close()
 
 	// Find or create commit backend for auto-commit
 	var commitBackend ralph.Backend
 	if *autoCommit {
 		// Look for a commit backend in the config (buckley-commit, codex-commit, etc.)
+		// Use suffix/exact match to avoid false positives (e.g. "uncommitted-check").
 		for name, bcfg := range controlCfg.Backends {
-			if strings.Contains(name, "commit") && bcfg.Enabled {
-				if b, ok := backendRegistry.Get(name); ok {
+			if isCommitBackendName(name) && bcfg.Enabled {
+				if b, ok := rt.backendRegistry.Get(name); ok {
 					commitBackend = b
 					break
 				}
@@ -585,7 +720,7 @@ func runRalphCommand(args []string) error {
 		}
 		// Fall back to creating an internal commit backend if none found
 		if commitBackend == nil {
-			commitBackend = ralph.NewInternalBackend("auto-commit", runner, ralph.InternalOptions{
+			commitBackend = ralph.NewInternalBackend("auto-commit", rt.runner, ralph.InternalOptions{
 				PromptTemplate: `Stage and commit the files modified during this Ralph session.
 
 Files to commit:
@@ -622,21 +757,14 @@ Create a concise commit message describing what was accomplished.
 	}
 
 	// Create executor with progress feedback
-	executorOpts := []ralph.ExecutorOption{
-		ralph.WithProgressWriter(os.Stdout),
-		ralph.WithOrchestrator(orchestrator),
-		ralph.WithMemoryStore(memoryStore),
-		ralph.WithContextProcessor(contextProcessor),
-		ralph.WithSummaryGenerator(summaryGenerator),
-		ralph.WithProjectContext(projectCtx),
-	}
+	executorOpts := rt.baseExecutorOpts()
 	if commitBackend != nil {
 		executorOpts = append(executorOpts, ralph.WithCommitBackend(commitBackend))
 	}
 	if sessionEndHandler != nil {
 		executorOpts = append(executorOpts, ralph.WithSessionEndHandler(sessionEndHandler))
 	}
-	executor := ralph.NewExecutor(session, runner, logger, executorOpts...)
+	executor := ralph.NewExecutor(session, rt.runner, logger, executorOpts...)
 
 	var controlWatcher *ralph.ControlWatcher
 	var stopWatcher chan struct{}
@@ -660,7 +788,7 @@ Create a concise commit message describing what was accomplished.
 						}
 						continue
 					}
-					orchestrator.UpdateConfig(cfg)
+					rt.orchestrator.UpdateConfig(cfg)
 				case <-stopWatcher:
 					return
 				}
@@ -669,23 +797,6 @@ Create a concise commit message describing what was accomplished.
 		defer controlWatcher.Stop()
 	} else if err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("stat control file: %w", err)
-	}
-
-	// Setup signal handling
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
-	go func() {
-		<-sigChan
-		fmt.Fprintf(os.Stderr, "\nReceived interrupt, shutting down...\n")
-		runner.Stop()
-		cancel()
-	}()
-
-	if stopWatcher != nil {
-		defer close(stopWatcher)
 	}
 
 	// Print startup info
@@ -700,19 +811,21 @@ Create a concise commit message describing what was accomplished.
 	}
 	fmt.Println()
 
-	// Run executor
-	if err := executor.Run(ctx); err != nil {
+	if stopWatcher != nil {
+		defer close(stopWatcher)
+	}
+
+	// Run executor with signal handling
+	if err := rt.runWithSignalHandler(func(ctx context.Context) error {
+		return executor.Run(ctx)
+	}); err != nil {
 		return fmt.Errorf("execution failed: %w", err)
 	}
 
-	// Print completion summary
-	stats := session.Stats()
-	fmt.Printf("\nRalph session %s completed\n", sessionID)
-	fmt.Printf("  Iterations: %d\n", stats.Iteration)
-	fmt.Printf("  Tokens: %d\n", stats.TotalTokens)
-	fmt.Printf("  Cost: $%.4f\n", stats.TotalCost)
-	fmt.Printf("  Files modified: %d\n", stats.FilesModified)
-	fmt.Printf("  Elapsed: %s\n", stats.Elapsed.Round(time.Second))
+	printSessionStats(
+		fmt.Sprintf("Ralph session %s completed", sessionID),
+		session.Stats(),
+	)
 
 	return nil
 }
@@ -836,7 +949,7 @@ func saveControlConfig(path string, cfg *ralph.ControlConfig) error {
 	if err != nil {
 		return fmt.Errorf("marshaling control config: %w", err)
 	}
-	if err := os.WriteFile(path, data, 0644); err != nil {
+	if err := os.WriteFile(path, data, 0o644); err != nil {
 		return fmt.Errorf("writing control config: %w", err)
 	}
 	return nil
@@ -1336,16 +1449,6 @@ func runRalphList(args []string) error {
 		return fmt.Errorf("reading runs directory: %w", err)
 	}
 
-	type sessionInfo struct {
-		ID        string
-		StartTime time.Time
-		EndTime   time.Time
-		Status    string
-		Prompt    string
-		Iters     int
-		Cost      float64
-	}
-
 	var sessions []sessionInfo
 
 	for _, entry := range entries {
@@ -1423,16 +1526,6 @@ func listAllProjectSessions(ralphDataDir string, showAll bool) error {
 	projects, err := os.ReadDir(projectsDir)
 	if err != nil {
 		return fmt.Errorf("reading projects directory: %w", err)
-	}
-
-	type sessionInfo struct {
-		Project   string
-		ID        string
-		StartTime time.Time
-		Status    string
-		Iters     int
-		Cost      float64
-		Prompt    string
 	}
 
 	var allSessions []sessionInfo
@@ -1527,18 +1620,11 @@ func listAllProjectSessions(ralphDataDir string, showAll bool) error {
 }
 
 // parseSessionLog reads a ralph log file and extracts session info.
-func parseSessionLog(path string) (sessionInfo struct {
-	ID        string
-	StartTime time.Time
-	EndTime   time.Time
-	Status    string
-	Prompt    string
-	Iters     int
-	Cost      float64
-}, err error) {
+func parseSessionLog(path string) (sessionInfo, error) {
+	var info sessionInfo
 	f, err := os.Open(path)
 	if err != nil {
-		return sessionInfo, err
+		return info, err
 	}
 	defer f.Close()
 
@@ -1551,39 +1637,52 @@ func parseSessionLog(path string) (sessionInfo struct {
 
 		switch evt.Event {
 		case "session_start":
-			sessionInfo.StartTime = evt.Timestamp
+			info.StartTime = evt.Timestamp
 			if p, ok := evt.Data["prompt"].(string); ok {
-				sessionInfo.Prompt = p
+				info.Prompt = p
 			}
-			sessionInfo.Status = "running"
+			info.Status = "running"
 		case "session_end":
-			sessionInfo.EndTime = evt.Timestamp
+			info.EndTime = evt.Timestamp
 			if reason, ok := evt.Data["reason"].(string); ok {
-				sessionInfo.Status = reason
+				info.Status = reason
 			}
 			if iters, ok := evt.Data["iterations"].(float64); ok {
-				sessionInfo.Iters = int(iters)
+				info.Iters = int(iters)
 			}
 			if cost, ok := evt.Data["total_cost"].(float64); ok {
-				sessionInfo.Cost = cost
+				info.Cost = cost
 			}
 		case "iteration_end":
-			sessionInfo.Iters = evt.Iteration
+			info.Iters = evt.Iteration
 			// The executor writes "session_total_cost"; fall back to "cost"
 			if cost, ok := evt.Data["session_total_cost"].(float64); ok {
-				sessionInfo.Cost = cost
+				info.Cost = cost
 			} else if cost, ok := evt.Data["cost"].(float64); ok {
-				sessionInfo.Cost = cost
+				info.Cost = cost
 			}
 		}
 	}
 
-	return sessionInfo, scanner.Err()
+	return info, scanner.Err()
+}
+
+// watchOptions bundles parameters for runRalphWatch.
+type watchOptions struct {
+	promptFile    string
+	workDir       string
+	dirFlag       string
+	timeout       time.Duration
+	maxIterations int
+	noRefine      bool
+	modelOverride string
+	autoCommit    bool
+	createPR      bool
 }
 
 // runRalphWatch polls a prompt file for changes and restarts ralph on each change.
-func runRalphWatch(promptFile, initialPrompt, workDir, dirFlag string, timeout time.Duration, maxIters int, noRefine bool, modelOverride string, autoCommit, createPR bool) error {
-	fmt.Printf("Watching %s for changes (Ctrl+C to stop)\n\n", promptFile)
+func runRalphWatch(opts watchOptions) error {
+	fmt.Printf("Watching %s for changes (Ctrl+C to stop)\n\n", opts.promptFile)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -1597,7 +1696,7 @@ func runRalphWatch(promptFile, initialPrompt, workDir, dirFlag string, timeout t
 		cancel()
 	}()
 
-	lastHash := hashFileContents(promptFile)
+	lastHash := hashFileContents(opts.promptFile)
 	iteration := 0
 
 	for {
@@ -1607,7 +1706,7 @@ func runRalphWatch(promptFile, initialPrompt, workDir, dirFlag string, timeout t
 		case <-time.After(time.Second):
 		}
 
-		currentHash := hashFileContents(promptFile)
+		currentHash := hashFileContents(opts.promptFile)
 		if currentHash == lastHash && iteration > 0 {
 			continue
 		}
@@ -1615,7 +1714,7 @@ func runRalphWatch(promptFile, initialPrompt, workDir, dirFlag string, timeout t
 		iteration++
 
 		// Read the current prompt
-		content, err := os.ReadFile(promptFile)
+		content, err := os.ReadFile(opts.promptFile)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "warning: reading prompt file: %v\n", err)
 			continue
@@ -1629,25 +1728,25 @@ func runRalphWatch(promptFile, initialPrompt, workDir, dirFlag string, timeout t
 
 		// Build args for a normal ralph run
 		args := []string{"--prompt", prompt}
-		if dirFlag != "" {
-			args = append(args, "--dir", dirFlag)
+		if opts.dirFlag != "" {
+			args = append(args, "--dir", opts.dirFlag)
 		}
-		if timeout > 0 {
-			args = append(args, "--timeout", timeout.String())
+		if opts.timeout > 0 {
+			args = append(args, "--timeout", opts.timeout.String())
 		}
-		if maxIters > 0 {
-			args = append(args, "--max-iterations", strconv.Itoa(maxIters))
+		if opts.maxIterations > 0 {
+			args = append(args, "--max-iterations", strconv.Itoa(opts.maxIterations))
 		}
-		if noRefine {
+		if opts.noRefine {
 			args = append(args, "--no-refine")
 		}
-		if modelOverride != "" {
-			args = append(args, "--model", modelOverride)
+		if opts.modelOverride != "" {
+			args = append(args, "--model", opts.modelOverride)
 		}
-		if autoCommit {
+		if opts.autoCommit {
 			args = append(args, "--auto-commit")
 		}
-		if createPR {
+		if opts.createPR {
 			args = append(args, "--create-pr")
 		}
 
@@ -1655,7 +1754,7 @@ func runRalphWatch(promptFile, initialPrompt, workDir, dirFlag string, timeout t
 			fmt.Fprintf(os.Stderr, "[watch] ralph run failed: %v\n", err)
 		}
 
-		fmt.Printf("[watch] waiting for changes to %s...\n", promptFile)
+		fmt.Printf("[watch] waiting for changes to %s...\n", opts.promptFile)
 	}
 }
 
@@ -1831,116 +1930,39 @@ func runRalphResume(args []string) error {
 		return err
 	}
 
-	// Create tool registry
-	registry := tool.NewRegistry()
-	registry.SetWorkDir(sandboxPath)
-	registry.ConfigureContainers(cfg, sandboxPath)
-	registry.SetSandboxConfig(cfg.Sandbox.ToSandboxConfig(sandboxPath))
-	registerMCPTools(cfg, registry)
-
-	fileWatcher := filewatch.NewFileWatcher(100)
-	fileWatcher.Subscribe("*", func(change filewatch.FileChange) {
-		if logger != nil {
-			logger.LogFileChange(change)
-		}
-		session.AddModifiedFile(change.Path)
+	// Build shared runtime (registry, runner, orchestrator, memory, etc.)
+	rt, err := setupRalphRuntime(ralphRuntimeConfig{
+		cfg:         cfg,
+		mgr:         mgr,
+		store:       store,
+		controlCfg:  controlCfg,
+		logger:      logger,
+		session:     session,
+		sessionID:   resumeID,
+		sandboxPath: sandboxPath,
+		workDir:     workDir,
+		runDir:      runDir,
+		timeout:     0,
 	})
-	registry.Use(tool.FileChangeTracking(fileWatcher))
-
-	// Create headless runner with new storage session ID
-	runner, err := newRalphHeadlessRunner(cfg, mgr, store, registry, logger, resumeID, sandboxPath, 0)
 	if err != nil {
-		return fmt.Errorf("creating headless runner: %w", err)
+		return err
 	}
-	defer runner.Stop()
+	defer rt.Close()
 
-	backendRegistry := ralph.NewBackendRegistry()
-	for name, backend := range controlCfg.Backends {
-		if backend.Type == ralph.BackendTypeInternal {
-			backendRegistry.Register(ralph.NewInternalBackend(name, runner, ralph.InternalOptions{
-				PromptTemplate: backend.PromptTemplate,
-			}))
-		} else {
-			backendRegistry.Register(ralph.NewExternalBackend(name, backend.Command, backend.Args, backend.Options))
-		}
-	}
-
-	orchestrator := ralph.NewOrchestrator(backendRegistry, controlCfg)
-	orchestrator.SetLogger(logger)
-	orchestrator.SetContextProvider(modelContextProvider{manager: mgr})
-
-	// Wire up memory, context processing, and project context (matching main ralph run)
-	var memoryStore *ralph.MemoryStore
-	if controlCfg.Memory.Enabled {
-		memoryPath := filepath.Join(runDir, "memory.db")
-		memoryStore, err = ralph.NewMemoryStore(memoryPath)
-		if err != nil {
-			return fmt.Errorf("create memory store: %w", err)
-		}
-		defer memoryStore.Close()
-		logger.SetEventSink(memoryStore)
-	}
-
-	if memoryStore != nil {
-		registry.Register(&builtin.SessionMemoryTool{
-			Store:     memoryStore,
-			SessionID: resumeID,
-		})
-	}
-
-	var contextProcessor *ralph.ContextProcessor
-	if strings.TrimSpace(controlCfg.ContextProcessing.Model) != "" {
-		maxTokens := controlCfg.ContextProcessing.MaxOutputTokens
-		if maxTokens <= 0 {
-			maxTokens = 500
-		}
-		contextProcessor = ralph.NewContextProcessor(mgr, controlCfg.ContextProcessing.Model, maxTokens)
-	}
-
-	var summaryGenerator *ralph.SummaryGenerator
-	if strings.TrimSpace(controlCfg.Memory.SummaryModel) != "" {
-		summaryGenerator = ralph.NewSummaryGenerator(mgr, controlCfg.Memory.SummaryModel, 500)
-	}
-
-	projectCtx := ralph.BuildProjectContext(workDir)
-
-	executorOpts := []ralph.ExecutorOption{
-		ralph.WithProgressWriter(os.Stdout),
-		ralph.WithOrchestrator(orchestrator),
-		ralph.WithMemoryStore(memoryStore),
-		ralph.WithContextProcessor(contextProcessor),
-		ralph.WithSummaryGenerator(summaryGenerator),
-		ralph.WithProjectContext(projectCtx),
-	}
-	executor := ralph.NewExecutor(session, runner, logger, executorOpts...)
-
-	// Setup signal handling
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
-	defer signal.Stop(sigChan)
-	go func() {
-		<-sigChan
-		fmt.Fprintf(os.Stderr, "\nReceived interrupt, shutting down...\n")
-		runner.Stop()
-		cancel()
-	}()
+	executor := ralph.NewExecutor(session, rt.runner, logger, rt.baseExecutorOpts()...)
 
 	fmt.Printf("Resumed as session %s (continuing from iteration %d)\n\n", resumeID, info.Iters)
 
-	if err := executor.Run(ctx); err != nil {
+	if err := rt.runWithSignalHandler(func(ctx context.Context) error {
+		return executor.Run(ctx)
+	}); err != nil {
 		return fmt.Errorf("execution failed: %w", err)
 	}
 
-	stats := session.Stats()
-	fmt.Printf("\nRalph session %s completed (resumed from %s)\n", resumeID, sessionID)
-	fmt.Printf("  Iterations: %d\n", stats.Iteration)
-	fmt.Printf("  Tokens: %d\n", stats.TotalTokens)
-	fmt.Printf("  Cost: $%.4f\n", stats.TotalCost)
-	fmt.Printf("  Files modified: %d\n", stats.FilesModified)
-	fmt.Printf("  Elapsed: %s\n", stats.Elapsed.Round(time.Second))
+	printSessionStats(
+		fmt.Sprintf("Ralph session %s completed (resumed from %s)", resumeID, sessionID),
+		session.Stats(),
+	)
 
 	return nil
 }
@@ -1964,4 +1986,11 @@ func findSessionRunDir(ralphDataDir, sessionID string) (string, string, error) {
 	}
 
 	return "", "", fmt.Errorf("session %s not found in any project", sessionID)
+}
+
+// isCommitBackendName returns true if the backend name identifies a commit
+// backend. It checks for exact match ("commit") or a "-commit" suffix to
+// avoid false positives from names that merely contain "commit" as a substring.
+func isCommitBackendName(name string) bool {
+	return name == "commit" || strings.HasSuffix(name, "-commit")
 }

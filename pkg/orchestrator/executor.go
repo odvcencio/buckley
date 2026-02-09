@@ -169,7 +169,7 @@ func (e *Executor) Execute() error {
 			if e.workflow != nil {
 				e.workflow.SendProgress(fmt.Sprintf("⏹️ Execution cancelled: %v", err))
 			}
-			return err
+			return fmt.Errorf("execution cancelled: %w", err)
 		}
 
 		// Skip if already completed
@@ -201,7 +201,7 @@ func (e *Executor) Execute() error {
 
 func (e *Executor) executeTask(task *Task) error {
 	if err := e.ctx.Err(); err != nil {
-		return err
+		return fmt.Errorf("task %s cancelled: %w", task.ID, err)
 	}
 	if e.batchCoordinator != nil && e.batchCoordinator.Enabled() {
 		return e.executeTaskInBatch(task)
@@ -304,7 +304,7 @@ func (e *Executor) runBuilderPhase(task *Task) (*BuilderResult, error) {
 	result, err := e.runBuilder(task)
 	if err != nil {
 		e.sendProgress("❌ Builder agent failed for %q: %v", task.Title, err)
-		return nil, err
+		return nil, fmt.Errorf("builder phase for %q: %w", task.Title, err)
 	}
 	e.sendProgress("✅ Builder agent completed %q (%d file(s))", task.Title, len(result.Files))
 	return result, nil
@@ -316,13 +316,13 @@ func (e *Executor) runVerificationPhase(task *Task) (*VerifyResult, error) {
 	if err := e.verifier.VerifyOutcomes(task, verifyResult); err != nil {
 		e.sendProgress("⚠️ Verification errors for %q: %v", task.Title, err)
 		if err := e.handleError(task, err); err != nil {
-			return verifyResult, err
+			return verifyResult, fmt.Errorf("self-heal for %q: %w", task.Title, err)
 		}
 		// Self-heal succeeded; refresh verification results for downstream reporting.
 		verifyResult = &VerifyResult{}
 		if err := e.verifier.VerifyOutcomes(task, verifyResult); err != nil {
 			e.sendProgress("⚠️ Verification errors after self-heal for %q: %v", task.Title, err)
-			return verifyResult, err
+			return verifyResult, fmt.Errorf("verification after self-heal for %q: %w", task.Title, err)
 		}
 	}
 	if !verifyResult.Passed {
@@ -348,7 +348,7 @@ func formatVerificationFailure(result *VerifyResult) string {
 func (e *Executor) runReviewPhase(task *Task, builderResult *BuilderResult) error {
 	if err := e.review(task, builderResult); err != nil {
 		e.sendProgress("⚠️ Review agent blocked progress on %q: %v", task.Title, err)
-		return err
+		return fmt.Errorf("review phase for %q: %w", task.Title, err)
 	}
 	e.sendProgress("📬 Review agent completed for %q", task.Title)
 	return nil
@@ -366,7 +366,7 @@ func (e *Executor) failExecution(exec *taskExecution, task *Task, verifyResult *
 	}
 	e.recordExecutionComplete(exec.id, task, "failed", exec.validationErrors, verificationSummary, artifacts, exec.startTime, e.retryCount)
 	e.emitTaskEvent(task, telemetry.EventTaskFailed)
-	return err
+	return fmt.Errorf("task %s execution failed: %w", task.ID, err)
 }
 
 func (e *Executor) completeExecution(exec *taskExecution, task *Task, verifyResult *VerifyResult) error {
@@ -393,7 +393,7 @@ func (e *Executor) runBuilder(task *Task) (*BuilderResult, error) {
 
 	result, err := e.builder.Build(task)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("building task %s: %w", task.ID, err)
 	}
 
 	return result, nil
@@ -413,12 +413,12 @@ func (e *Executor) recordExecutionStart(task *Task, startTime time.Time) (int64,
 	`, e.plan.ID, task.ID, startTime, e.retryCount)
 
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("inserting execution record for task %s: %w", task.ID, err)
 	}
 
 	id, err := result.LastInsertId()
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("retrieving execution id for task %s: %w", task.ID, err)
 	}
 
 	return id, nil
@@ -446,7 +446,10 @@ func (e *Executor) recordExecutionComplete(executionID int64, task *Task, status
 		WHERE id = ?
 	`, status, validationErrors, verificationResults, artifacts, time.Now(), executionTime, retryCount, executionID)
 
-	return err
+	if err != nil {
+		return fmt.Errorf("updating execution record %d: %w", executionID, err)
+	}
+	return nil
 }
 
 func (e *Executor) emitTaskEvent(task *Task, eventType telemetry.EventType) {
@@ -505,7 +508,7 @@ func (e *Executor) review(task *Task, builderResult *BuilderResult) error {
 				fmt.Printf("Warning: review skipped due to error: %v\n", err)
 				return nil
 			}
-			return err
+			return fmt.Errorf("reviewing task %s: %w", task.ID, err)
 		}
 		if result == nil {
 			return fmt.Errorf("review result unavailable")
@@ -656,7 +659,7 @@ func (e *Executor) analyzeAndFix(task *Task, err error) (string, error) {
 
 	resp, err := e.modelClient.ChatCompletion(e.baseContext(), req)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("analyzing error for task %s: %w", task.Title, err)
 	}
 	if len(resp.Choices) == 0 {
 		return "", fmt.Errorf("no response choices from model")
@@ -675,12 +678,12 @@ func (e *Executor) applyReviewFixes(task *Task, review *ReviewResult) (*BuilderR
 
 	fix, err := e.generateReviewFix(task, review)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("generating review fix for %q: %w", task.Title, err)
 	}
 
 	files, err := e.builder.ApplyImplementation(task, fix, "review_fix")
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("applying review fix for %q: %w", task.Title, err)
 	}
 
 	now := time.Now()
@@ -695,7 +698,7 @@ func (e *Executor) applyReviewFixes(task *Task, review *ReviewResult) (*BuilderR
 func (e *Executor) generateReviewFix(task *Task, review *ReviewResult) (string, error) {
 	issuesData, err := e.issuesCodec.Marshal(review.Issues)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("marshaling review issues for %q: %w", task.Title, err)
 	}
 	prompt := fmt.Sprintf(
 		"Task %q failed review.\n\nReview summary:\n%s\n\nIssues (TOON):\n%s\n\nUpdate the necessary files to resolve every blocking issue. Respond using the same code block format as the builder agent:\n```filepath:path/to/file.go\n<contents>\n```",
@@ -721,7 +724,7 @@ func (e *Executor) generateReviewFix(task *Task, review *ReviewResult) (string, 
 
 	resp, err := e.modelClient.ChatCompletion(e.baseContext(), req)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("generating review fix for %q: %w", task.Title, err)
 	}
 	if len(resp.Choices) == 0 {
 		return "", fmt.Errorf("no response choices from model")
@@ -874,7 +877,10 @@ func (e *Executor) RecordExecutionContext(ctx ExecutionContext) error {
 		0,
 		0,
 	)
-	return err
+	if err != nil {
+		return fmt.Errorf("recording execution context for task %s: %w", ctx.TaskID, err)
+	}
+	return nil
 }
 
 func (e *Executor) GetProgress() (completed int, total int) {
@@ -966,7 +972,7 @@ func (e *Executor) executeTaskInBatch(task *Task) error {
 		task.Status = TaskFailed
 		e.recordExecutionComplete(executionID, task, "failed", validationErrors, "", "", startTime, e.retryCount)
 		e.emitTaskEvent(task, telemetry.EventTaskFailed)
-		return err
+		return fmt.Errorf("business ambiguity in batch task %s: %w", task.ID, err)
 	}
 
 	ctx, cancel := context.WithTimeout(e.baseContext(), 2*time.Hour)

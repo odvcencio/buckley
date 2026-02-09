@@ -3,6 +3,7 @@ package widgets
 import (
 	"strings"
 
+	"github.com/odvcencio/fluffyui/accessibility"
 	"github.com/odvcencio/fluffyui/backend"
 	"github.com/odvcencio/fluffyui/runtime"
 	uiwidgets "github.com/odvcencio/fluffyui/widgets"
@@ -18,10 +19,12 @@ type TextBlock struct {
 
 // NewTextBlock creates a new text block widget.
 func NewTextBlock(text string) *TextBlock {
-	return &TextBlock{
+	t := &TextBlock{
 		text:  text,
 		style: backend.DefaultStyle(),
 	}
+	t.Base.Role = accessibility.RoleText
+	return t
 }
 
 // SetText updates the text content.

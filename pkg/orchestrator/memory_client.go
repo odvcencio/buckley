@@ -8,6 +8,8 @@ import (
 	"github.com/odvcencio/buckley/pkg/model"
 )
 
+const memoryContextMaxChars = 800
+
 // memoryAwareModelClient wraps a ModelClient and injects relevant episodic memories.
 type memoryAwareModelClient struct {
 	base        ModelClient
@@ -72,8 +74,8 @@ func (m *memoryAwareModelClient) ChatCompletion(ctx context.Context, req model.C
 				if text == "" {
 					continue
 				}
-				if len(text) > 800 {
-					text = text[:800] + "..."
+				if len(text) > memoryContextMaxChars {
+					text = text[:memoryContextMaxChars] + "..."
 				}
 				b.WriteString("- " + text + "\n")
 			}

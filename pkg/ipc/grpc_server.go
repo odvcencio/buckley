@@ -54,6 +54,9 @@ type GRPCService struct {
 	// Event broadcast channel
 	eventCh        chan Event
 	broadcastDrops int64
+
+	// done is closed by Close to signal runEventForwarder to exit.
+	done chan struct{}
 }
 
 type connectedAgent struct {
@@ -135,6 +138,7 @@ func NewGRPCService(server *Server) *GRPCService {
 		subsByPrincipal: make(map[string]int),
 		sessionOwners:   make(map[string]string),
 		eventCh:         make(chan Event, 256),
+		done:            make(chan struct{}),
 
 		subscribeLimiter:           newRateLimiter(200 * time.Millisecond),
 		maxSubscribersTotal:        maxGRPCSubscribersTotal,
@@ -145,6 +149,17 @@ func NewGRPCService(server *Server) *GRPCService {
 	go svc.runEventForwarder()
 
 	return svc
+}
+
+// Close signals the event forwarder goroutine to stop and waits for it to
+// drain. It is safe to call multiple times; only the first call has an effect.
+func (s *GRPCService) Close() {
+	select {
+	case <-s.done:
+		// Already closed.
+	default:
+		close(s.done)
+	}
 }
 
 // BroadcastEvent sends an event to all gRPC subscribers.
@@ -161,35 +176,44 @@ func (s *GRPCService) BroadcastEvent(event Event) {
 }
 
 // runEventForwarder distributes events to subscribers.
+// It exits when s.done is closed.
 func (s *GRPCService) runEventForwarder() {
-	for event := range s.eventCh {
-		s.noteSessionOwner(event)
-		owner := s.sessionOwner(event.SessionID)
+	for {
+		select {
+		case <-s.done:
+			return
+		case event, ok := <-s.eventCh:
+			if !ok {
+				return
+			}
+			s.noteSessionOwner(event)
+			owner := s.sessionOwner(event.SessionID)
 
-		var protoEvent *ipcpb.Event
-		s.subscribersMu.RLock()
-		for _, sub := range s.subscribers {
-			if !s.subscriberAllowsEvent(sub, event, owner) {
-				continue
+			var protoEvent *ipcpb.Event
+			s.subscribersMu.RLock()
+			for _, sub := range s.subscribers {
+				if !s.subscriberAllowsEvent(sub, event, owner) {
+					continue
+				}
+				if !matchesEventFilter(event, sub.filter) {
+					continue
+				}
+				if protoEvent == nil {
+					protoEvent = convertToProtoEvent(event)
+				}
+				// Events are immutable after conversion; share to avoid per-subscriber cloning.
+				select {
+				case sub.events <- protoEvent:
+				default:
+					// Slow subscriber: drop and record backpressure signal.
+					sub.recordDrop()
+				}
 			}
-			if !matchesEventFilter(event, sub.filter) {
-				continue
-			}
-			if protoEvent == nil {
-				protoEvent = convertToProtoEvent(event)
-			}
-			// Events are immutable after conversion; share to avoid per-subscriber cloning.
-			select {
-			case sub.events <- protoEvent:
-			default:
-				// Slow subscriber: drop and record backpressure signal.
-				sub.recordDrop()
-			}
-		}
-		s.subscribersMu.RUnlock()
+			s.subscribersMu.RUnlock()
 
-		if event.Type == string(storage.EventSessionDeleted) && event.SessionID != "" {
-			s.forgetSessionOwner(event.SessionID)
+			if event.Type == string(storage.EventSessionDeleted) && event.SessionID != "" {
+				s.forgetSessionOwner(event.SessionID)
+			}
 		}
 	}
 }

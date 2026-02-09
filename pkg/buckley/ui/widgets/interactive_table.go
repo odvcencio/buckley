@@ -19,6 +19,7 @@ type InteractiveTable struct {
 	Rows          [][]string
 	selected      int
 	offset        int
+	services      runtime.Services
 	label         string
 	style         backend.Style
 	headerStyle   backend.Style
@@ -304,6 +305,22 @@ func (t *InteractiveTable) selectRowAt(x, y int) bool {
 	return true
 }
 
+// Bind attaches app services.
+func (t *InteractiveTable) Bind(services runtime.Services) {
+	if t == nil {
+		return
+	}
+	t.services = services
+}
+
+// Unbind releases app services.
+func (t *InteractiveTable) Unbind() {
+	if t == nil {
+		return
+	}
+	t.services = runtime.Services{}
+}
+
 func (t *InteractiveTable) setSelected(index int) {
 	if t == nil {
 		return
@@ -318,8 +335,16 @@ func (t *InteractiveTable) setSelected(index int) {
 	if index >= len(t.Rows) {
 		index = len(t.Rows) - 1
 	}
+	prev := t.selected
 	t.selected = index
 	t.syncA11y()
+	if prev != index && t.services != (runtime.Services{}) {
+		if announcer := t.services.Announcer(); announcer != nil {
+			if summary := t.selectedRowSummary(); summary != "" {
+				announcer.Announce(summary, accessibility.PriorityPolite)
+			}
+		}
+	}
 }
 
 func (t *InteractiveTable) syncA11y() {

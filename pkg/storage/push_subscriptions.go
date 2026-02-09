@@ -1,7 +1,9 @@
 package storage
 
 import (
+	"crypto/rand"
 	"database/sql"
+	"fmt"
 	"strings"
 	"time"
 )
@@ -32,8 +34,10 @@ func (s *Store) SavePushSubscription(sub *PushSubscription) error {
 			principal = excluded.principal,
 			user_agent = excluded.user_agent
 	`, sub.ID, sub.Endpoint, sub.P256dh, sub.Auth, sub.Principal, sub.UserAgent, sub.CreatedAt.UTC())
-
-	return err
+	if err != nil {
+		return fmt.Errorf("saving push subscription: %w", err)
+	}
+	return nil
 }
 
 // GetPushSubscription retrieves a subscription by ID.
@@ -54,7 +58,7 @@ func (s *Store) GetPushSubscription(id string) (*PushSubscription, error) {
 		return nil, nil
 	}
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("scanning push subscription: %w", err)
 	}
 
 	if userAgent.Valid {
@@ -87,7 +91,7 @@ func (s *Store) GetPushSubscriptionByEndpoint(endpoint string) (*PushSubscriptio
 		return nil, nil
 	}
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("scanning push subscription by endpoint: %w", err)
 	}
 
 	if userAgent.Valid {
@@ -108,7 +112,7 @@ func (s *Store) GetPushSubscriptionsByPrincipal(principal string) ([]*PushSubscr
 		FROM push_subscriptions WHERE principal = ?
 	`, principal)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("querying push subscriptions by principal: %w", err)
 	}
 	defer rows.Close()
 
@@ -117,7 +121,7 @@ func (s *Store) GetPushSubscriptionsByPrincipal(principal string) ([]*PushSubscr
 		var sub PushSubscription
 		var userAgent sql.NullString
 		if err := rows.Scan(&sub.ID, &sub.Endpoint, &sub.P256dh, &sub.Auth, &sub.Principal, &userAgent, &sub.CreatedAt); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("scanning push subscription: %w", err)
 		}
 		if userAgent.Valid {
 			sub.UserAgent = userAgent.String
@@ -125,7 +129,10 @@ func (s *Store) GetPushSubscriptionsByPrincipal(principal string) ([]*PushSubscr
 		subs = append(subs, &sub)
 	}
 
-	return subs, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating push subscriptions: %w", err)
+	}
+	return subs, nil
 }
 
 // DeletePushSubscription removes a subscription by ID.
@@ -135,7 +142,10 @@ func (s *Store) DeletePushSubscription(id string) error {
 	}
 
 	_, err := s.db.Exec(`DELETE FROM push_subscriptions WHERE id = ?`, id)
-	return err
+	if err != nil {
+		return fmt.Errorf("deleting push subscription: %w", err)
+	}
+	return nil
 }
 
 // DeletePushSubscriptionByEndpoint removes a subscription by endpoint.
@@ -145,7 +155,10 @@ func (s *Store) DeletePushSubscriptionByEndpoint(endpoint string) error {
 	}
 
 	_, err := s.db.Exec(`DELETE FROM push_subscriptions WHERE endpoint = ?`, endpoint)
-	return err
+	if err != nil {
+		return fmt.Errorf("deleting push subscription by endpoint: %w", err)
+	}
+	return nil
 }
 
 // ListPushSubscriptions retrieves all push subscriptions.
@@ -160,7 +173,7 @@ func (s *Store) ListPushSubscriptions() ([]*PushSubscription, error) {
 		ORDER BY created_at DESC
 	`)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("listing push subscriptions: %w", err)
 	}
 	defer rows.Close()
 
@@ -169,7 +182,7 @@ func (s *Store) ListPushSubscriptions() ([]*PushSubscription, error) {
 		var sub PushSubscription
 		var userAgent sql.NullString
 		if err := rows.Scan(&sub.ID, &sub.Endpoint, &sub.P256dh, &sub.Auth, &sub.Principal, &userAgent, &sub.CreatedAt); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("scanning push subscription: %w", err)
 		}
 		if userAgent.Valid {
 			sub.UserAgent = userAgent.String
@@ -177,7 +190,10 @@ func (s *Store) ListPushSubscriptions() ([]*PushSubscription, error) {
 		subs = append(subs, &sub)
 	}
 
-	return subs, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating push subscriptions: %w", err)
+	}
+	return subs, nil
 }
 
 // VAPIDKeys represents the VAPID key pair for Web Push.
@@ -201,7 +217,7 @@ func (s *Store) GetVAPIDKeys() (*VAPIDKeys, error) {
 		return nil, nil
 	}
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("scanning vapid keys: %w", err)
 	}
 
 	return &keys, nil
@@ -221,8 +237,10 @@ func (s *Store) SaveVAPIDKeys(publicKey, privateKey string) error {
 			private_key = excluded.private_key,
 			created_at = excluded.created_at
 	`, publicKey, privateKey)
-
-	return err
+	if err != nil {
+		return fmt.Errorf("saving vapid keys: %w", err)
+	}
+	return nil
 }
 
 // CreatePushSubscription creates a new push subscription and returns the ID.
@@ -243,7 +261,7 @@ func (s *Store) CreatePushSubscription(principal, endpoint, p256dh, auth, userAg
 	}
 
 	if err := s.SavePushSubscription(sub); err != nil {
-		return "", err
+		return "", fmt.Errorf("creating push subscription: %w", err)
 	}
 
 	return id, nil
@@ -253,7 +271,7 @@ func (s *Store) CreatePushSubscription(principal, endpoint, p256dh, auth, userAg
 func (s *Store) GetVAPIDPublicKey() (string, error) {
 	keys, err := s.GetVAPIDKeys()
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("getting vapid public key: %w", err)
 	}
 	if keys == nil {
 		return "", nil
@@ -263,6 +281,10 @@ func (s *Store) GetVAPIDPublicKey() (string, error) {
 
 // generateID generates a unique ID for push subscriptions
 func generateID() string {
-	// Simple timestamp-based ID for now
-	return time.Now().Format("20060102150405.000000000")
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		// Fallback to timestamp if crypto/rand fails
+		return time.Now().Format("20060102150405.000000000")
+	}
+	return fmt.Sprintf("%x", b)
 }

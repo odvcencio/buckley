@@ -47,10 +47,23 @@ type ApprovalResponse struct {
 
 func (ApprovalResponse) Command() {}
 
+// approvalResult builds a HandleResult that emits an ApprovalResponse and pops the overlay.
+func approvalResult(requestID string, approved, alwaysAllow bool) runtime.HandleResult {
+	return runtime.WithCommands(
+		ApprovalResponse{
+			RequestID:   requestID,
+			Approved:    approved,
+			AlwaysAllow: alwaysAllow,
+		},
+		runtime.PopOverlay{},
+	)
+}
+
 // ApprovalWidget displays a modal dialog for tool approval.
 type ApprovalWidget struct {
 	uiwidgets.FocusableBase
 
+	services         runtime.Services
 	request          ApprovalRequest
 	scrollOffset     int // For scrolling through diff
 	diffVisibleLines int // Visible diff lines from last layout
@@ -90,7 +103,7 @@ const approvalButtonSep = "    "
 
 // NewApprovalWidget creates a new approval dialog widget.
 func NewApprovalWidget(req ApprovalRequest) *ApprovalWidget {
-	return &ApprovalWidget{
+	w := &ApprovalWidget{
 		request:       req,
 		bgStyle:       backend.DefaultStyle(),
 		borderStyle:   backend.DefaultStyle(),
@@ -104,10 +117,16 @@ func NewApprovalWidget(req ApprovalRequest) *ApprovalWidget {
 		buttonStyle:   backend.DefaultStyle(),
 		buttonHlStyle: backend.DefaultStyle().Bold(true).Reverse(true),
 	}
+	w.Base.Role = accessibility.RoleAlert
+	w.Base.Live = accessibility.LiveAssertive
+	return w
 }
 
 // SetStyles configures the widget appearance.
 func (a *ApprovalWidget) SetStyles(bg, border, title, text backend.Style) {
+	if a == nil {
+		return
+	}
 	a.bgStyle = bg
 	a.borderStyle = border
 	a.titleStyle = title
@@ -429,14 +448,7 @@ func (a *ApprovalWidget) HandleMessage(msg runtime.Message) runtime.HandleResult
 	switch key.Key {
 	case terminal.KeyEscape:
 		// Escape = Deny
-		return runtime.WithCommands(
-			ApprovalResponse{
-				RequestID:   a.request.ID,
-				Approved:    false,
-				AlwaysAllow: false,
-			},
-			runtime.PopOverlay{},
-		)
+		return approvalResult(a.request.ID, false, false)
 
 	case terminal.KeyUp:
 		a.scrollDiff(-1)
@@ -449,34 +461,13 @@ func (a *ApprovalWidget) HandleMessage(msg runtime.Message) runtime.HandleResult
 	case terminal.KeyRune:
 		switch key.Rune {
 		case 'a', 'A', 'y', 'Y': // Allow / Yes
-			return runtime.WithCommands(
-				ApprovalResponse{
-					RequestID:   a.request.ID,
-					Approved:    true,
-					AlwaysAllow: false,
-				},
-				runtime.PopOverlay{},
-			)
+			return approvalResult(a.request.ID, true, false)
 
 		case 'd', 'D', 'n', 'N': // Deny / No
-			return runtime.WithCommands(
-				ApprovalResponse{
-					RequestID:   a.request.ID,
-					Approved:    false,
-					AlwaysAllow: false,
-				},
-				runtime.PopOverlay{},
-			)
+			return approvalResult(a.request.ID, false, false)
 
 		case 'l', 'L': // Always allow
-			return runtime.WithCommands(
-				ApprovalResponse{
-					RequestID:   a.request.ID,
-					Approved:    true,
-					AlwaysAllow: true,
-				},
-				runtime.PopOverlay{},
-			)
+			return approvalResult(a.request.ID, true, true)
 		}
 	}
 
@@ -511,32 +502,11 @@ func (a *ApprovalWidget) handleMouse(msg runtime.MouseMsg) runtime.HandleResult 
 		}
 		switch action {
 		case "allow":
-			return runtime.WithCommands(
-				ApprovalResponse{
-					RequestID:   a.request.ID,
-					Approved:    true,
-					AlwaysAllow: false,
-				},
-				runtime.PopOverlay{},
-			)
+			return approvalResult(a.request.ID, true, false)
 		case "deny":
-			return runtime.WithCommands(
-				ApprovalResponse{
-					RequestID:   a.request.ID,
-					Approved:    false,
-					AlwaysAllow: false,
-				},
-				runtime.PopOverlay{},
-			)
+			return approvalResult(a.request.ID, false, false)
 		case "always":
-			return runtime.WithCommands(
-				ApprovalResponse{
-					RequestID:   a.request.ID,
-					Approved:    true,
-					AlwaysAllow: true,
-				},
-				runtime.PopOverlay{},
-			)
+			return approvalResult(a.request.ID, true, true)
 		}
 		return runtime.Handled()
 	}
@@ -604,6 +574,29 @@ func formatDiffSummary(added, removed int) string {
 		return "no changes"
 	}
 	return strings.Join(parts, ", ")
+}
+
+// Bind attaches app services and announces the approval request.
+func (a *ApprovalWidget) Bind(services runtime.Services) {
+	if a == nil {
+		return
+	}
+	a.services = services
+	if announcer := services.Announcer(); announcer != nil {
+		msg := "Tool approval required"
+		if a.request.Tool != "" {
+			msg += ": " + a.request.Tool
+		}
+		announcer.Announce(msg, accessibility.PriorityAssertive)
+	}
+}
+
+// Unbind releases app services.
+func (a *ApprovalWidget) Unbind() {
+	if a == nil {
+		return
+	}
+	a.services = runtime.Services{}
 }
 
 func (a *ApprovalWidget) AccessibleRole() accessibility.Role {

@@ -327,6 +327,11 @@ func (s *Server) Start(ctx context.Context) error {
 		}()
 	}
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				s.logger.Printf("panic in IPC server goroutine: %v", r)
+			}
+		}()
 		s.logger.Printf("serving IPC on %s", s.cfg.BindAddress)
 		if s.cfg.EnableBrowser {
 			if s.cfg.StaticDir != "" {
