@@ -2,12 +2,17 @@
 package ralph
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -186,6 +191,11 @@ func (e *Executor) Run(ctx context.Context) error {
 		default:
 		}
 
+		// Check override pause
+		if e.waitWhilePaused(ctx) {
+			return nil // ctx cancelled while paused
+		}
+
 		// Check max iterations
 		if e.session.MaxIterations > 0 && e.session.Iteration() >= e.session.MaxIterations {
 			return nil
@@ -245,6 +255,11 @@ func (e *Executor) runIteration(ctx context.Context) error {
 	// Use orchestrator if available, otherwise fall back to direct runner
 	if e.orchestrator != nil {
 		e.orchestrator.NextIteration()
+
+		// Check for manual override action (e.g., ralph control --next-backend)
+		if action := e.orchestrator.ConsumeNextAction(); action != nil {
+			e.handleScheduleAction(action)
+		}
 
 		// Check for schedule actions
 		if action := e.orchestrator.EvaluateSchedule(e.lastError); action != nil {
@@ -307,6 +322,9 @@ func (e *Executor) runIteration(ctx context.Context) error {
 			e.lastError = err
 		}
 	}
+
+	// Run verification command if configured
+	e.runVerification(ctx, iteration, results)
 
 	// Show completion summary
 	duration := time.Since(startTime)
@@ -389,6 +407,89 @@ Stage and commit only the files listed above.`, iteration, strings.Join(modified
 	}
 
 	e.writeProgress("  [AUTO-COMMIT] Done\n")
+}
+
+// runVerification runs the session's verify command and updates results.
+func (e *Executor) runVerification(ctx context.Context, iteration int, results []*BackendResult) {
+	if e.session.VerifyCommand == "" {
+		return
+	}
+
+	e.writeProgress("\n  [VERIFY] Running: %s\n", e.session.VerifyCommand)
+
+	cmd := exec.CommandContext(ctx, "sh", "-c", e.session.VerifyCommand)
+	if e.session.Sandbox != "" {
+		cmd.Dir = e.session.Sandbox
+	}
+
+	var output bytes.Buffer
+	cmd.Stdout = &output
+	cmd.Stderr = &output
+
+	err := cmd.Run()
+	outStr := output.String()
+	passed, failed := parseTestResults(outStr)
+
+	// Update the first non-nil result with test counts
+	for _, r := range results {
+		if r != nil {
+			r.TestsPassed = passed
+			r.TestsFailed = failed
+			break
+		}
+	}
+
+	if e.logger != nil {
+		e.logger.LogVerification(iteration, passed, failed, outStr, err)
+	}
+
+	if err != nil {
+		e.writeProgress("  [VERIFY] FAILED (%d passed, %d failed)\n", passed, failed)
+		e.lastError = fmt.Errorf("verification failed: %w; output: %s", err, truncateForDisplay(outStr, 500))
+	} else {
+		e.writeProgress("  [VERIFY] PASSED (%d passed, %d failed)\n", passed, failed)
+		// Clear last error on successful verification
+		e.lastError = nil
+	}
+}
+
+var (
+	// Go test output: "ok  pkg/foo  0.5s"
+	reGoTestOK = regexp.MustCompile(`(?m)^ok\s+\S+`)
+	// Go test output: "FAIL  pkg/foo  0.5s"
+	reGoTestFail = regexp.MustCompile(`(?m)^FAIL\s+\S+`)
+	// Generic "N passed" / "N failed" patterns
+	reGenericPassed = regexp.MustCompile(`(?i)(\d+)\s+(?:tests?\s+)?passed`)
+	reGenericFailed = regexp.MustCompile(`(?i)(\d+)\s+(?:tests?\s+)?failed`)
+)
+
+// parseTestResults extracts pass/fail counts from test command output.
+func parseTestResults(output string) (passed, failed int) {
+	// Try Go test format first
+	passed = len(reGoTestOK.FindAllString(output, -1))
+	failed = len(reGoTestFail.FindAllString(output, -1))
+
+	if passed > 0 || failed > 0 {
+		return passed, failed
+	}
+
+	// Try generic "N passed" / "N failed" patterns
+	scanner := bufio.NewScanner(strings.NewReader(output))
+	for scanner.Scan() {
+		line := scanner.Text()
+		if m := reGenericPassed.FindStringSubmatch(line); len(m) == 2 {
+			if n, err := strconv.Atoi(m[1]); err == nil {
+				passed += n
+			}
+		}
+		if m := reGenericFailed.FindStringSubmatch(line); len(m) == 2 {
+			if n, err := strconv.Atoi(m[1]); err == nil {
+				failed += n
+			}
+		}
+	}
+
+	return passed, failed
 }
 
 // predictNextBackend returns the backend and model that will likely be used next.
@@ -1122,6 +1223,41 @@ func (e *Executor) checkPromptReload() {
 
 	if e.logger != nil {
 		e.logger.LogPromptReload(e.session.PromptFile)
+	}
+}
+
+// waitWhilePaused blocks while the control config override has paused=true.
+// Returns true if ctx was cancelled (caller should return), false to continue.
+func (e *Executor) waitWhilePaused(ctx context.Context) bool {
+	cfg := e.currentControlConfig()
+	if cfg == nil || !cfg.Override.Paused {
+		return false
+	}
+
+	e.writeProgress("  [PAUSED] Execution paused via control override. Waiting...\n")
+	e.session.TransitionTo(StatePaused)
+	if e.logger != nil {
+		e.logger.LogStateChange(StateRunning, StatePaused, "control_override")
+	}
+
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return true
+		case <-ticker.C:
+			cfg = e.currentControlConfig()
+			if cfg == nil || !cfg.Override.Paused {
+				e.writeProgress("  [RESUMED] Execution resumed\n")
+				e.session.TransitionTo(StateRunning)
+				if e.logger != nil {
+					e.logger.LogStateChange(StatePaused, StateRunning, "control_override")
+				}
+				return false
+			}
+		}
 	}
 }
 

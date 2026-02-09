@@ -27,6 +27,7 @@ type SessionConfig struct {
 	Timeout       time.Duration
 	MaxIterations int
 	NoRefine      bool
+	VerifyCommand string
 	GitWorkflow   GitWorkflowConfig
 }
 
@@ -41,6 +42,7 @@ type Session struct {
 	Timeout       time.Duration
 	MaxIterations int
 	NoRefine      bool
+	VerifyCommand string
 	GitWorkflow   GitWorkflowConfig
 
 	state            State
@@ -62,6 +64,7 @@ func NewSession(cfg SessionConfig) *Session {
 		Timeout:       cfg.Timeout,
 		MaxIterations: cfg.MaxIterations,
 		NoRefine:      cfg.NoRefine,
+		VerifyCommand: cfg.VerifyCommand,
 		GitWorkflow:   cfg.GitWorkflow,
 		state:         StateInit,
 	}

@@ -122,6 +122,7 @@ func ensurePrivateSQLiteFile(path string) error {
 
 // Close closes the database connection
 func (s *Store) Close() error {
+	s.clearStmtCache()
 	return s.db.Close()
 }
 

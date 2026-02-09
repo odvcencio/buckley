@@ -5,6 +5,7 @@ import (
 	"context"
 	"os"
 	"reflect"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -235,5 +236,122 @@ func TestExecutor_HandleScheduleAction_BackendActions(t *testing.T) {
 				t.Errorf("expected currentBackend reset to 0, got %d", orch.currentBackend)
 			}
 		})
+	}
+}
+
+func TestExecutor_OverridePaused(t *testing.T) {
+	cfg := &ControlConfig{
+		Mode: ModeSequential,
+		Backends: map[string]BackendConfig{
+			"test": {Type: BackendTypeInternal, Enabled: true},
+		},
+		Override: OverrideConfig{Paused: true},
+	}
+
+	orch := NewOrchestrator(NewBackendRegistry(), cfg)
+	sess := NewSession(SessionConfig{
+		SessionID:     "test-pause-override",
+		Prompt:        "test",
+		Sandbox:       t.TempDir(),
+		MaxIterations: 2,
+	})
+
+	mock := &mockHeadlessRunner{}
+	exec := NewExecutor(sess, mock, nil, WithOrchestrator(orch))
+
+	// Start executor in a goroutine; it should block on pause
+	done := make(chan struct{})
+	go func() {
+		exec.Run(context.Background())
+		close(done)
+	}()
+
+	// Give it time to enter the pause loop
+	time.Sleep(100 * time.Millisecond)
+
+	// Verify no iterations ran while paused
+	if mock.processCount != 0 {
+		t.Errorf("expected 0 iterations while paused, got %d", mock.processCount)
+	}
+
+	// Unpause
+	orch.UpdateConfig(&ControlConfig{
+		Mode: ModeSequential,
+		Backends: map[string]BackendConfig{
+			"test": {Type: BackendTypeInternal, Enabled: true},
+		},
+		Override: OverrideConfig{Paused: false},
+	})
+
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("executor did not complete after unpause")
+	}
+}
+
+func TestExecutor_Verification(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses sh -c")
+	}
+
+	sess := NewSession(SessionConfig{
+		SessionID:     "test-verify",
+		Prompt:        "Build something",
+		Sandbox:       t.TempDir(),
+		MaxIterations: 1,
+		VerifyCommand: `echo "ok  pkg/foo  0.5s" && echo "ok  pkg/bar  0.2s" && echo "FAIL  pkg/baz  0.3s"`,
+	})
+
+	mock := &mockHeadlessRunner{}
+	exec := NewExecutor(sess, mock, nil)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	err := exec.Run(ctx)
+	if err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+
+	// Since we're running without an orchestrator, results slice is empty.
+	// The verify command still runs and sets lastError on failure.
+	// With 2 ok + 1 FAIL, the verify command itself succeeds (exit 0),
+	// but the fail count should be tracked.
+}
+
+func TestParseTestResults_GoFormat(t *testing.T) {
+	output := `ok  	github.com/foo/bar/pkg/a	0.5s
+ok  	github.com/foo/bar/pkg/b	0.2s
+FAIL	github.com/foo/bar/pkg/c	0.3s
+ok  	github.com/foo/bar/pkg/d	(cached)
+`
+	passed, failed := parseTestResults(output)
+	if passed != 3 {
+		t.Errorf("expected 3 passed, got %d", passed)
+	}
+	if failed != 1 {
+		t.Errorf("expected 1 failed, got %d", failed)
+	}
+}
+
+func TestParseTestResults_GenericFormat(t *testing.T) {
+	output := `Running tests...
+42 tests passed
+3 tests failed
+Done.`
+	passed, failed := parseTestResults(output)
+	if passed != 42 {
+		t.Errorf("expected 42 passed, got %d", passed)
+	}
+	if failed != 3 {
+		t.Errorf("expected 3 failed, got %d", failed)
+	}
+}
+
+func TestParseTestResults_Empty(t *testing.T) {
+	passed, failed := parseTestResults("")
+	if passed != 0 || failed != 0 {
+		t.Errorf("expected 0/0, got %d/%d", passed, failed)
 	}
 }

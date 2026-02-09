@@ -453,6 +453,26 @@ func (l *Logger) LogModelSwitch(backend, from, to, reason string) {
 	})
 }
 
+// LogVerification logs the result of a post-iteration verification command.
+func (l *Logger) LogVerification(iteration, passed, failed int, output string, err error) {
+	if l == nil {
+		return
+	}
+	data := map[string]any{
+		"tests_passed": passed,
+		"tests_failed": failed,
+		"output":       truncate(output, 2000),
+	}
+	if err != nil {
+		data["error"] = err.Error()
+	}
+	l.write(LogEvent{
+		Event:     "verification",
+		Iteration: iteration,
+		Data:      data,
+	})
+}
+
 // LogScheduleAction logs when a schedule rule triggers.
 func (l *Logger) LogScheduleAction(action *ScheduleAction, trigger string) {
 	if l == nil || action == nil {

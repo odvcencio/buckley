@@ -475,6 +475,7 @@ func runRalphCommand(args []string) error {
 	noRefine := fs.Bool("no-refine", false, "Skip prompt refinement phase")
 	watch := fs.Bool("watch", false, "Watch prompt file for changes")
 	model := fs.String("model", "", "Model to use for execution")
+	verify := fs.String("verify", "", "Command to run after each iteration for verification (e.g., 'go test ./...')")
 	autoCommit := fs.Bool("auto-commit", false, "Automatically commit changes after each iteration")
 	createPR := fs.Bool("create-pr", false, "Create a PR when the session completes")
 
@@ -532,6 +533,7 @@ func runRalphCommand(args []string) error {
 			maxIterations: *maxIterations,
 			noRefine:      *noRefine,
 			modelOverride: *model,
+			verifyCommand: *verify,
 			autoCommit:    *autoCommit,
 			createPR:      *createPR,
 		})
@@ -670,6 +672,14 @@ func runRalphCommand(args []string) error {
 	}
 
 	// Create session with git workflow config
+	// Save verify command for resume
+	if *verify != "" {
+		verifyPath := filepath.Join(runDir, "verify.txt")
+		if err := os.WriteFile(verifyPath, []byte(*verify), 0o600); err != nil {
+			return fmt.Errorf("save verify command: %w", err)
+		}
+	}
+
 	session := ralph.NewSession(ralph.SessionConfig{
 		SessionID:     sessionID,
 		Prompt:        actualPrompt,
@@ -678,6 +688,7 @@ func runRalphCommand(args []string) error {
 		Timeout:       *timeout,
 		MaxIterations: effectiveMaxIterations,
 		NoRefine:      *noRefine,
+		VerifyCommand: *verify,
 		GitWorkflow: ralph.GitWorkflowConfig{
 			AutoCommit:   *autoCommit,
 			CreatePR:     *createPR,
@@ -1676,6 +1687,7 @@ type watchOptions struct {
 	maxIterations int
 	noRefine      bool
 	modelOverride string
+	verifyCommand string
 	autoCommit    bool
 	createPR      bool
 }
@@ -1743,6 +1755,9 @@ func runRalphWatch(opts watchOptions) error {
 		if opts.modelOverride != "" {
 			args = append(args, "--model", opts.modelOverride)
 		}
+		if opts.verifyCommand != "" {
+			args = append(args, "--verify", opts.verifyCommand)
+		}
 		if opts.autoCommit {
 			args = append(args, "--auto-commit")
 		}
@@ -1781,6 +1796,7 @@ func runRalphResume(args []string) error {
 	project := fs.String("project", "", "Project name (default: auto-detect from cwd)")
 	modelOverride := fs.String("model", "", "Override model for resumed session")
 	extraIters := fs.Int("max-iterations", 0, "Additional iterations to run (0 = same as original)")
+	verifyOverride := fs.String("verify", "", "Command to run after each iteration for verification")
 
 	if err := fs.Parse(args); err != nil {
 		if err == flag.ErrHelp {
@@ -1910,12 +1926,21 @@ func runRalphResume(args []string) error {
 	maxIterations := *extraIters
 
 	// Create a new session with resumed state
+	// Resolve verify command: CLI flag takes precedence, then saved value
+	verifyCmd := *verifyOverride
+	if verifyCmd == "" {
+		if data, err := os.ReadFile(filepath.Join(runDir, "verify.txt")); err == nil {
+			verifyCmd = strings.TrimSpace(string(data))
+		}
+	}
+
 	resumeID := uuid.New().String()[:8]
 	session := ralph.NewSession(ralph.SessionConfig{
 		SessionID:     resumeID,
 		Prompt:        prompt,
 		Sandbox:       sandboxPath,
 		MaxIterations: maxIterations,
+		VerifyCommand: verifyCmd,
 	})
 
 	// Restore cost/iteration counters from the original session

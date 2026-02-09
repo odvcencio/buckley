@@ -1123,6 +1123,141 @@ func TestOrchestrator_GetAvailableBackends(t *testing.T) {
 	}
 }
 
+func TestOrchestrator_ConsumeNextAction(t *testing.T) {
+	registry := NewBackendRegistry()
+	config := &ControlConfig{
+		Mode: ModeSequential,
+		Backends: map[string]BackendConfig{
+			"claude": {Command: "claude", Enabled: true},
+			"codex":  {Command: "codex", Enabled: true},
+		},
+		Override: OverrideConfig{NextAction: "codex"},
+	}
+
+	o := NewOrchestrator(registry, config)
+
+	// First call should return the action and clear it
+	action := o.ConsumeNextAction()
+	if action == nil {
+		t.Fatal("expected action from ConsumeNextAction")
+	}
+	if action.Action != "set_backend" {
+		t.Errorf("expected action 'set_backend', got %q", action.Action)
+	}
+	if action.Backend != "codex" {
+		t.Errorf("expected backend 'codex', got %q", action.Backend)
+	}
+
+	// Verify it was cleared
+	if o.Config().Override.NextAction != "" {
+		t.Errorf("expected NextAction to be cleared, got %q", o.Config().Override.NextAction)
+	}
+
+	// Second call should return nil
+	action = o.ConsumeNextAction()
+	if action != nil {
+		t.Errorf("expected nil on second call, got %v", action)
+	}
+}
+
+func TestOrchestrator_ConsumeNextAction_Empty(t *testing.T) {
+	registry := NewBackendRegistry()
+	config := &ControlConfig{
+		Mode: ModeSequential,
+		Backends: map[string]BackendConfig{
+			"test": {Command: "test", Enabled: true},
+		},
+	}
+
+	o := NewOrchestrator(registry, config)
+	action := o.ConsumeNextAction()
+	if action != nil {
+		t.Errorf("expected nil for empty NextAction, got %v", action)
+	}
+}
+
+func TestOrchestrator_ConsumeNextAction_NilReceiver(t *testing.T) {
+	var o *Orchestrator
+	action := o.ConsumeNextAction()
+	if action != nil {
+		t.Errorf("expected nil for nil orchestrator, got %v", action)
+	}
+}
+
+func TestOrchestrator_ResolveModel_BackendOptions(t *testing.T) {
+	registry := NewBackendRegistry()
+	registry.Register(&mockBackend{name: "claude", available: true})
+
+	config := &ControlConfig{
+		Mode: ModeSequential,
+		Backends: map[string]BackendConfig{
+			"claude": {
+				Command: "claude",
+				Enabled: true,
+				Models: BackendModels{
+					Default: "opus",
+				},
+			},
+		},
+		Override: OverrideConfig{
+			BackendOptions: map[string]map[string]string{
+				"claude": {"model": "sonnet"},
+			},
+		},
+	}
+
+	o := NewOrchestrator(registry, config)
+	req := BackendRequest{Prompt: "test"}
+
+	results, err := o.Execute(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+	if len(results) == 0 {
+		t.Fatal("expected results")
+	}
+
+	// The model should be "sonnet" (overridden) not "opus" (default)
+	if results[0].Model != "sonnet" {
+		t.Errorf("expected model 'sonnet' from override, got %q", results[0].Model)
+	}
+}
+
+func TestOrchestrator_ResolveModel_BackendOptions_Empty(t *testing.T) {
+	registry := NewBackendRegistry()
+	registry.Register(&mockBackend{name: "claude", available: true})
+
+	config := &ControlConfig{
+		Mode: ModeSequential,
+		Backends: map[string]BackendConfig{
+			"claude": {
+				Command: "claude",
+				Enabled: true,
+				Models: BackendModels{
+					Default: "opus",
+				},
+			},
+		},
+		// No override set
+	}
+
+	o := NewOrchestrator(registry, config)
+	req := BackendRequest{Prompt: "test"}
+
+	results, err := o.Execute(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+	if len(results) == 0 {
+		t.Fatal("expected results")
+	}
+
+	// Without override, should use default model
+	if results[0].Model != "opus" {
+		t.Errorf("expected model 'opus' (default), got %q", results[0].Model)
+	}
+}
+
 // Helper to check if error message contains substring
 func containsSubstring(s, substr string) bool {
 	return strings.Contains(strings.ToLower(s), strings.ToLower(substr))

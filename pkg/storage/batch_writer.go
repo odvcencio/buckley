@@ -27,6 +27,7 @@ type BatchWriter struct {
 	done      chan struct{}
 	flushing  bool
 	flushDone *sync.Cond
+	closeOnce sync.Once
 }
 
 // NewBatchWriter creates a new batch writer with the specified batch size and
@@ -91,21 +92,22 @@ func (bw *BatchWriter) Flush() error {
 
 // Close stops the batch writer and flushes any remaining messages.
 func (bw *BatchWriter) Close() error {
-	close(bw.done)
+	var err error
+	bw.closeOnce.Do(func() {
+		close(bw.done)
 
-	// Stop any pending timer so it won't fire during final flush
-	bw.mu.Lock()
-	if bw.timer != nil {
-		bw.timer.Stop()
-		bw.timer = nil
-	}
+		bw.mu.Lock()
+		if bw.timer != nil {
+			bw.timer.Stop()
+			bw.timer = nil
+		}
 
-	// Wait for any in-flight flush to complete, then do final flush
-	for bw.flushing {
-		bw.flushDone.Wait()
-	}
-	err := bw.flushLocked()
-	bw.mu.Unlock()
+		for bw.flushing {
+			bw.flushDone.Wait()
+		}
+		err = bw.flushLocked()
+		bw.mu.Unlock()
+	})
 	return err
 }
 
@@ -149,7 +151,10 @@ func (bw *BatchWriter) startTimer() {
 
 	bw.timer = time.AfterFunc(bw.maxWait, func() {
 		bw.mu.Lock()
-		_ = bw.flushLocked()
+		if err := bw.flushLocked(); err != nil {
+			// Log but don't propagate -- timer callback has no caller to return to
+			_ = err // flushLocked already resets state; batch is lost
+		}
 		bw.mu.Unlock()
 	})
 }

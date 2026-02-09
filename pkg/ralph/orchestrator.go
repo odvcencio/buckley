@@ -306,7 +306,7 @@ func (o *Orchestrator) availableCandidates(req BackendRequest) ([]backendCandida
 			continue
 		}
 
-		model := o.resolveModel(name, cfg, state, iteration, elapsedMinutes)
+		model := o.resolveModel(name, cfg, state, iteration, elapsedMinutes, config.Override.BackendOptions)
 		if o.applyThresholdsLocked(now, cfg, state, promptTokens, model) {
 			nextAvailable = earliestTime(nextAvailable, state.parkedUntil)
 			continue
@@ -333,7 +333,7 @@ func (o *Orchestrator) availableCandidates(req BackendRequest) ([]backendCandida
 	return candidates, nextAvailable
 }
 
-func (o *Orchestrator) resolveModel(name string, cfg BackendConfig, state *backendState, iteration int, elapsedMinutes int) string {
+func (o *Orchestrator) resolveModel(name string, cfg BackendConfig, state *backendState, iteration int, elapsedMinutes int, backendOptions map[string]map[string]string) string {
 	model := strings.TrimSpace(cfg.Models.Default)
 	if model == "" {
 		if value, ok := cfg.Options["model"]; ok {
@@ -355,6 +355,13 @@ func (o *Orchestrator) resolveModel(name string, cfg BackendConfig, state *backe
 		if EvalWhen(rule.When, ctx) {
 			model = rule.Model
 			break
+		}
+	}
+
+	// Override.BackendOptions takes highest precedence
+	if opts, ok := backendOptions[name]; ok {
+		if override := strings.TrimSpace(opts["model"]); override != "" {
+			model = override
 		}
 	}
 
@@ -631,6 +638,32 @@ func (o *Orchestrator) ContextProvider() ModelContextProvider {
 	o.mu.RLock()
 	defer o.mu.RUnlock()
 	return o.contextProvider
+}
+
+// ConsumeNextAction checks if a manual override action is pending and returns
+// it, clearing the override so it fires only once. This is used by
+// `ralph control --next-backend` to inject a one-shot backend switch.
+func (o *Orchestrator) ConsumeNextAction() *ScheduleAction {
+	if o == nil {
+		return nil
+	}
+
+	o.mu.Lock()
+	defer o.mu.Unlock()
+
+	if o.config == nil {
+		return nil
+	}
+	next := strings.TrimSpace(o.config.Override.NextAction)
+	if next == "" {
+		return nil
+	}
+
+	o.config.Override.NextAction = ""
+	return &ScheduleAction{
+		Action:  "set_backend",
+		Backend: next,
+	}
 }
 
 // EvaluateSchedule checks schedule rules and returns action to take (if any).

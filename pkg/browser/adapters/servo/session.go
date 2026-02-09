@@ -324,7 +324,11 @@ func (s *Session) reconnect(ctx context.Context) error {
 
 // sendWithReconnect sends a request with automatic reconnection on connection errors.
 func (s *Session) sendWithReconnect(ctx context.Context, req *browserdpb.Request) (*browserdpb.Response, error) {
-	resp, err := s.client.send(ctx, req)
+	s.mu.Lock()
+	c := s.client
+	s.mu.Unlock()
+
+	resp, err := c.send(ctx, req)
 	if err == nil {
 		return resp, nil
 	}
@@ -334,7 +338,11 @@ func (s *Session) sendWithReconnect(ctx context.Context, req *browserdpb.Request
 	if err := s.reconnect(ctx); err != nil {
 		return nil, err
 	}
-	return s.client.send(ctx, req)
+
+	s.mu.Lock()
+	c = s.client
+	s.mu.Unlock()
+	return c.send(ctx, req)
 }
 
 func isNetworkError(err error) bool {

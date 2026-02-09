@@ -274,21 +274,14 @@ func (h *Hub) flushBatch() {
 	h.batch = make([]Event, 0, h.config.BatchSize)
 	h.batchMu.Unlock()
 
-	// Dispatch to all subscribers
 	h.subscriberMu.RLock()
-	subscribers := make([]*subscriber, 0, len(h.subscribers))
-	for _, sub := range h.subscribers {
-		subscribers = append(subscribers, sub)
-	}
-	h.subscriberMu.RUnlock()
+	defer h.subscriberMu.RUnlock()
 
-	for _, sub := range subscribers {
+	for _, sub := range h.subscribers {
 		for _, event := range batch {
 			select {
 			case sub.ch <- event:
 			default:
-				// Drop if subscriber's buffer is full
-				// This prevents slow subscribers from blocking the entire hub
 			}
 		}
 	}

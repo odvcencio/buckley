@@ -1,5 +1,6 @@
 # Binaries
 /buckley
+/buckley-test
 *.exe
 *.dll
 *.so
