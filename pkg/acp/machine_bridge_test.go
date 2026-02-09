@@ -19,7 +19,6 @@ func TestMachineBridge_TranslatesSpawned(t *testing.T) {
 	agent.transport = NewTransport(strings.NewReader(""), &buf)
 
 	bridge := NewMachineBridge(agent, hub, "sess-1")
-	defer bridge.Close()
 
 	hub.Publish(telemetry.Event{
 		Type:      telemetry.EventMachineSpawned,
@@ -27,8 +26,9 @@ func TestMachineBridge_TranslatesSpawned(t *testing.T) {
 		Data:      map[string]any{"agent_id": "a1", "modality": "classic"},
 	})
 
-	// Give the bridge goroutine time to process
+	// Give the bridge goroutine time to process, then close to synchronize
 	time.Sleep(200 * time.Millisecond)
+	bridge.Close()
 
 	output := buf.String()
 	if output == "" {
@@ -64,7 +64,6 @@ func TestMachineBridge_TranslatesStateChange(t *testing.T) {
 	agent.transport = NewTransport(strings.NewReader(""), &buf)
 
 	bridge := NewMachineBridge(agent, hub, "sess-1")
-	defer bridge.Close()
 
 	hub.Publish(telemetry.Event{
 		Type:      telemetry.EventMachineState,
@@ -73,6 +72,7 @@ func TestMachineBridge_TranslatesStateChange(t *testing.T) {
 	})
 
 	time.Sleep(200 * time.Millisecond)
+	bridge.Close()
 
 	output := buf.String()
 	if output == "" {
@@ -98,7 +98,6 @@ func TestMachineBridge_TranslatesLockAcquired(t *testing.T) {
 	agent.transport = NewTransport(strings.NewReader(""), &buf)
 
 	bridge := NewMachineBridge(agent, hub, "sess-1")
-	defer bridge.Close()
 
 	hub.Publish(telemetry.Event{
 		Type:      telemetry.EventMachineLockAcquired,
@@ -107,6 +106,7 @@ func TestMachineBridge_TranslatesLockAcquired(t *testing.T) {
 	})
 
 	time.Sleep(200 * time.Millisecond)
+	bridge.Close()
 
 	output := buf.String()
 	if output == "" {
@@ -132,7 +132,6 @@ func TestMachineBridge_IgnoresUnrelatedEvents(t *testing.T) {
 	agent.transport = NewTransport(strings.NewReader(""), &buf)
 
 	bridge := NewMachineBridge(agent, hub, "sess-1")
-	defer bridge.Close()
 
 	hub.Publish(telemetry.Event{
 		Type:      telemetry.EventToolStarted,
@@ -141,6 +140,7 @@ func TestMachineBridge_IgnoresUnrelatedEvents(t *testing.T) {
 	})
 
 	time.Sleep(200 * time.Millisecond)
+	bridge.Close()
 
 	if buf.String() != "" {
 		t.Errorf("expected no output for unrelated events, got %q", buf.String())

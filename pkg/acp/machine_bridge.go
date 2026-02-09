@@ -16,6 +16,7 @@ type MachineBridge struct {
 	mu     sync.Mutex
 	closed bool
 	unsub  func()
+	wg     sync.WaitGroup
 }
 
 // NewMachineBridge creates a bridge that forwards machine events from the Hub
@@ -29,6 +30,7 @@ func NewMachineBridge(agent *Agent, hub *telemetry.Hub, sessionID string) *Machi
 	ch, unsub := hub.Subscribe()
 	b.unsub = unsub
 
+	b.wg.Add(1)
 	go b.run(ch)
 	return b
 }
@@ -36,17 +38,20 @@ func NewMachineBridge(agent *Agent, hub *telemetry.Hub, sessionID string) *Machi
 // Close stops the bridge and unsubscribes from the Hub.
 func (b *MachineBridge) Close() {
 	b.mu.Lock()
-	defer b.mu.Unlock()
 	if b.closed {
+		b.mu.Unlock()
 		return
 	}
 	b.closed = true
 	if b.unsub != nil {
 		b.unsub()
 	}
+	b.mu.Unlock()
+	b.wg.Wait()
 }
 
 func (b *MachineBridge) run(ch <-chan telemetry.Event) {
+	defer b.wg.Done()
 	for evt := range ch {
 		b.mu.Lock()
 		closed := b.closed

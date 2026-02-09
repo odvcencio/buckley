@@ -268,14 +268,15 @@ func (s *Session) ensureOpen() error {
 	if s == nil {
 		return browser.ErrSessionClosed
 	}
-	if s.client == nil {
-		return browser.ErrUnavailable
-	}
 	s.mu.Lock()
 	closed := s.closed
+	client := s.client
 	s.mu.Unlock()
 	if closed {
 		return browser.ErrSessionClosed
+	}
+	if client == nil {
+		return browser.ErrUnavailable
 	}
 	return nil
 }
