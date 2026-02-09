@@ -114,6 +114,13 @@ const (
 // MessageHandlerFunc processes incoming messages.
 type MessageHandlerFunc func(ctx context.Context, msg AgentMessage) error
 
+func safePrefix(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n]
+}
+
 // NewAgent creates a new agent instance.
 func NewAgent(taskID string, role Role, b bus.MessageBus, models *model.Manager, tools *tool.Registry, cfg AgentConfig) *Agent {
 	if cfg.Timeout == 0 {
@@ -121,7 +128,7 @@ func NewAgent(taskID string, role Role, b bus.MessageBus, models *model.Manager,
 	}
 
 	return &Agent{
-		ID:       fmt.Sprintf("%s-%s-%s", role, taskID[:8], ulid.Make().String()[:8]),
+		ID:       fmt.Sprintf("%s-%s-%s", role, safePrefix(taskID, 8), ulid.Make().String()[:8]),
 		Role:     role,
 		TaskID:   taskID,
 		State:    StateStarting,

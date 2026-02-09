@@ -110,9 +110,7 @@ func NewScratchpadRAGWithConfig(scratchpad *Scratchpad, embedder EmbeddingProvid
 	}
 
 	// Start background cleanup goroutine
-	r.cleanupOnce.Do(func() {
-		go r.cleanupLoop()
-	})
+	go r.cleanupLoop()
 
 	return r
 }
@@ -457,12 +455,9 @@ func (r *ScratchpadRAG) Close() {
 	if r == nil {
 		return
 	}
-	select {
-	case <-r.stopCleanup:
-		// Already closed
-	default:
+	r.cleanupOnce.Do(func() {
 		close(r.stopCleanup)
-	}
+	})
 }
 
 func (r *ScratchpadRAG) isClosed() bool {

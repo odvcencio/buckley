@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"nhooyr.io/websocket"
@@ -78,6 +79,7 @@ func (h *Hub) register(conn wsConn, filter func(Event) bool) *client {
 
 // removeClient disconnects and removes a client.
 func (h *Hub) removeClient(c *client) {
+	c.closed.Store(true)
 	h.mu.Lock()
 	if _, ok := h.clients[c]; ok {
 		delete(h.clients, c)
@@ -96,10 +98,14 @@ type client struct {
 	conn    wsConn
 	send    chan Event
 	filter  func(Event) bool
-	dropped int64
+	dropped atomic.Int64
+	closed  atomic.Bool
 }
 
 func (c *client) enqueue(event Event) bool {
+	if c.closed.Load() {
+		return false
+	}
 	if c.filter != nil && !c.filter(event) {
 		return true
 	}
@@ -107,10 +113,9 @@ func (c *client) enqueue(event Event) bool {
 	case c.send <- event:
 		return true
 	default:
-		c.dropped++
-		// Log every 100th drop to avoid spam under load
-		if c.dropped%100 == 1 {
-			log.Printf("ipc: dropping event %s for slow websocket client (total dropped: %d)", event.Type, c.dropped)
+		n := c.dropped.Add(1)
+		if n%100 == 1 {
+			log.Printf("ipc: dropping event %s for slow websocket client (total dropped: %d)", event.Type, n)
 		}
 		return false
 	}

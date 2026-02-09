@@ -221,7 +221,9 @@ receiveLoop:
 	}
 
 	cancel()
+	_ = ptmx.Close() // Unblock Read in output goroutine
 	<-outputDone
+	_ = cmd.Wait() // Reap child process to prevent zombies
 	if cErr := conn.Close(websocket.StatusNormalClosure, "pty closed"); cErr != nil {
 		s.logger.Printf("[debug] pty: websocket close error: %v", cErr)
 	}

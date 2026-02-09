@@ -748,6 +748,18 @@ func defaultSandboxConfig() SandboxConfig {
 	return cfg
 }
 
+func defaultDeniedPaths() []string {
+	paths := []string{"/etc", "/var"}
+	if home, err := os.UserHomeDir(); err == nil && strings.TrimSpace(home) != "" {
+		paths = append(paths,
+			filepath.Join(home, ".ssh"),
+			filepath.Join(home, ".gnupg"),
+			filepath.Join(home, ".aws"),
+		)
+	}
+	return paths
+}
+
 func defaultNATSURL() string {
 	if os.Getenv("KUBERNETES_SERVICE_HOST") != "" {
 		return "nats://nats:4222"
@@ -938,13 +950,7 @@ func DefaultConfig() *Config {
 		Approval: ApprovalConfig{
 			Mode:         "safe", // Safe by default - workspace writes, read-only shell
 			TrustedPaths: []string{},
-			DeniedPaths: []string{
-				"~/.ssh",
-				"~/.gnupg",
-				"~/.aws",
-				"/etc",
-				"/var",
-			},
+			DeniedPaths:  defaultDeniedPaths(),
 			AllowNetwork: false,
 			AllowedTools: []string{
 				"read_file",
