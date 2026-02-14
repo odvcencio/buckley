@@ -22,6 +22,7 @@ func runReviewCommand(args []string) error {
 	projectMode := fs.Bool("project", false, "review the entire project instead of branch diff")
 	baseBranch := fs.String("base", "", "base branch to compare against (default: auto-detect main/master)")
 	includeUnstaged := fs.Bool("unstaged", true, "include unstaged changes in review")
+	minimalOutput := fs.Bool("minimal-output", false, "minimize output (prints review text and critical errors only)")
 	trace := fs.Bool("trace", false, "show context audit and reasoning trace after completion")
 	showCost := fs.Bool("cost", true, "show token/cost breakdown")
 	modelFlag := fs.String("model", "", "model to use (default: BUCKLEY_MODEL_REVIEW or execution model)")
@@ -33,9 +34,13 @@ func runReviewCommand(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	compactOutput := *minimalOutput || oneshotMinimalOutputEnabled()
 
 	// Handle -no-interactive flag
 	if *noInteractive {
+		*interactive = false
+	}
+	if compactOutput {
 		*interactive = false
 	}
 
@@ -88,7 +93,7 @@ func runReviewCommand(args []string) error {
 	defer cancel()
 
 	// Show what we're doing
-	if !cliFlags.quiet {
+	if !compactOutput {
 		termOut.Dim("Using model: %s", modelID)
 	}
 
@@ -97,36 +102,42 @@ func runReviewCommand(args []string) error {
 
 	if *projectMode {
 		// Review entire project
-		spinner := terminal.NewSpinner("Analyzing project...")
-		spinner.Start()
-
 		opts := review.DefaultProjectContextOptions()
-		result, runErr = runner.ReviewProject(ctx, opts)
-
-		if runErr != nil {
-			spinner.StopWithError(runErr.Error())
-		} else if result.Error != nil {
-			spinner.StopWithError(result.Error.Error())
+		if compactOutput {
+			result, runErr = runner.ReviewProject(ctx, opts)
 		} else {
-			spinner.StopWithSuccess("Project review complete")
+			spinner := terminal.NewSpinner("Analyzing project...")
+			spinner.Start()
+			result, runErr = runner.ReviewProject(ctx, opts)
+
+			if runErr != nil {
+				spinner.StopWithError(runErr.Error())
+			} else if result.Error != nil {
+				spinner.StopWithError(result.Error.Error())
+			} else {
+				spinner.StopWithSuccess("Project review complete")
+			}
 		}
 	} else {
 		// Review branch against base
-		spinner := terminal.NewSpinner("Analyzing branch changes...")
-		spinner.Start()
-
 		opts := review.DefaultBranchContextOptions()
 		opts.BaseBranch = *baseBranch
 		opts.IncludeUnstaged = *includeUnstaged
 
-		result, runErr = runner.ReviewBranch(ctx, opts)
-
-		if runErr != nil {
-			spinner.StopWithError(runErr.Error())
-		} else if result.Error != nil {
-			spinner.StopWithError(result.Error.Error())
+		if compactOutput {
+			result, runErr = runner.ReviewBranch(ctx, opts)
 		} else {
-			spinner.StopWithSuccess("Branch review complete")
+			spinner := terminal.NewSpinner("Analyzing branch changes...")
+			spinner.Start()
+			result, runErr = runner.ReviewBranch(ctx, opts)
+
+			if runErr != nil {
+				spinner.StopWithError(runErr.Error())
+			} else if result.Error != nil {
+				spinner.StopWithError(result.Error.Error())
+			} else {
+				spinner.StopWithSuccess("Branch review complete")
+			}
 		}
 	}
 
@@ -135,13 +146,15 @@ func runReviewCommand(args []string) error {
 	}
 
 	// Show context audit (--trace flag)
-	if *trace && result.ContextAudit != nil {
+	if *trace && result.ContextAudit != nil && !compactOutput {
 		printReviewContextAudit(result.ContextAudit)
 	}
 
 	// Check for errors
 	if result.Error != nil {
-		printReviewError(result.Error, result.Trace)
+		if !compactOutput {
+			printReviewError(result.Error, result.Trace)
+		}
 		return result.Error
 	}
 
@@ -155,18 +168,20 @@ func runReviewCommand(args []string) error {
 		if err := os.WriteFile(*outputFile, []byte(result.Review), 0o644); err != nil {
 			return fmt.Errorf("failed to write output file: %w", err)
 		}
-		termOut.Success("Review written to %s", *outputFile)
+		if !compactOutput {
+			termOut.Success("Review written to %s", *outputFile)
+		}
 	} else {
-		printReview(result.Review)
+		printReview(result.Review, compactOutput)
 	}
 
 	// Show cost
-	if *showCost && result.Trace != nil {
+	if *showCost && result.Trace != nil && !compactOutput {
 		printReviewCost(result.Trace, ledger)
 	}
 
 	// Interactive menu for fixing findings
-	if *interactive && *outputFile == "" {
+	if *interactive && *outputFile == "" && !compactOutput {
 		parsed := result.Parse()
 		if parsed != nil && len(parsed.Findings) > 0 {
 			runReviewMenu(ctx, parsed, mgr, registry, modelID, ledger, *timeout)
@@ -192,7 +207,11 @@ func printReviewContextAudit(audit *transparency.ContextAudit) {
 	termOut.List(items)
 }
 
-func printReview(review string) {
+func printReview(review string, compactOutput bool) {
+	if compactOutput {
+		fmt.Println(review)
+		return
+	}
 	termOut.Newline()
 	termOut.Header("CODE REVIEW")
 	termOut.Newline()

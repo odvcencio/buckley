@@ -39,17 +39,20 @@ func DefaultCompactionConfig() CompactionConfig {
 // Compactor handles artifact compaction
 type Compactor struct {
 	config       CompactionConfig
-	modelClient  ModelClient // Interface to call compaction models
+	modelClient  CompactionClient // Interface to call compaction models
 	tokenCounter TokenCounter
 }
 
-// ModelClient is an interface for calling LLM models
+// CompactionClient is an interface for calling LLM models.
 //
 //go:generate mockgen -package=artifact -destination=mock_model_client_test.go github.com/odvcencio/buckley/pkg/artifact ModelClient
-type ModelClient interface {
+type CompactionClient interface {
 	// Complete sends a prompt to the model and returns the response
 	Complete(ctx context.Context, model string, prompt string) (string, error)
 }
+
+// ModelClient is retained as a backwards-compatible alias.
+type ModelClient = CompactionClient
 
 // TokenCounter is an interface for counting tokens in text
 //
@@ -60,7 +63,7 @@ type TokenCounter interface {
 }
 
 // NewCompactor creates a new artifact compactor
-func NewCompactor(config CompactionConfig, modelClient ModelClient, tokenCounter TokenCounter) *Compactor {
+func NewCompactor(config CompactionConfig, modelClient CompactionClient, tokenCounter TokenCounter) *Compactor {
 	return &Compactor{
 		config:       config,
 		modelClient:  modelClient,

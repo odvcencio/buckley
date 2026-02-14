@@ -32,10 +32,7 @@ var DefaultExtractionPatterns = []ExtractionPattern{
 }
 
 // ModelClient describes the model interface used for memory extraction.
-type ModelClient interface {
-	ChatCompletion(ctx context.Context, req model.ChatRequest) (*model.ChatResponse, error)
-	GetExecutionModel() string
-}
+type ModelClient = model.ContextualCompletionClient
 
 // MemoryExtractor extracts durable memories from messages.
 type MemoryExtractor struct {

@@ -20,6 +20,7 @@ type FileLockManager struct {
 	defaultTTL  time.Duration
 	onConflict  func(lock *FileLock, waiter string) // Called when lock contention occurs
 	stopChan    chan struct{}
+	stopOnce    sync.Once
 }
 
 // FileLock represents an active lock on a file.
@@ -382,12 +383,11 @@ func (m *FileLockManager) Close() {
 	if m == nil {
 		return
 	}
-	select {
-	case <-m.stopChan:
-		// Already closed
-	default:
-		close(m.stopChan)
-	}
+	m.stopOnce.Do(func() {
+		if m.stopChan != nil {
+			close(m.stopChan)
+		}
+	})
 }
 
 // cleanup removes expired locks and notifies waiters.

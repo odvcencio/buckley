@@ -126,16 +126,7 @@ type StreamHandler interface {
 
 // ModelClient defines the interface for LLM interactions used by strategies.
 // This allows strategies to be tested with mock implementations.
-type ModelClient interface {
-	// ChatCompletion sends a chat request and returns the response.
-	ChatCompletion(ctx context.Context, req model.ChatRequest) (*model.ChatResponse, error)
-
-	// ChatCompletionStream sends a streaming chat request.
-	ChatCompletionStream(ctx context.Context, req model.ChatRequest) (<-chan model.StreamChunk, <-chan error)
-
-	// GetExecutionModel returns the model ID to use for execution.
-	GetExecutionModel() string
-}
+type ModelClient = model.ExecutionClient
 
 // StrategyConfig provides configuration for strategy creation.
 type StrategyConfig struct {

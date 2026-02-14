@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -32,6 +34,7 @@ func runCommitCommand(args []string) error {
 	yes := fs.Bool("yes", false, "skip confirmation prompts and run git commit")
 	pushFlag := fs.Bool("push", true, "push current branch after committing")
 	verbose := fs.Bool("verbose", false, "stream model reasoning as it happens")
+	minimalOutput := fs.Bool("minimal-output", false, "minimize output (prints commit message and critical errors only)")
 	trace := fs.Bool("trace", false, "show context audit and reasoning trace after completion")
 	showCost := fs.Bool("cost", true, "show token/cost breakdown")
 	modelFlag := fs.String("model", "", "model to use (default: BUCKLEY_MODEL_COMMIT or execution model)")
@@ -40,6 +43,7 @@ func runCommitCommand(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	compactOutput := *minimalOutput || oneshotMinimalOutputEnabled()
 
 	// Initialize dependencies
 	cfg, mgr, store, err := initDependenciesFn()
@@ -89,7 +93,7 @@ func runCommitCommand(args []string) error {
 	// Set up streaming callback if verbose mode is enabled
 	var streamCallback oneshot.StreamCallback
 	var reasoningLog *logging.ReasoningLogger
-	streamingEnabled := *verbose && stdinIsTerminalFn()
+	streamingEnabled := *verbose && stdinIsTerminalFn() && !compactOutput
 
 	if streamingEnabled {
 		// Initialize reasoning logger
@@ -139,7 +143,7 @@ func runCommitCommand(args []string) error {
 	defer cancel()
 
 	// Show what we're doing
-	if !cliFlags.quiet {
+	if !compactOutput {
 		termOut.Dim("Using model: %s", modelID)
 	}
 
@@ -151,16 +155,20 @@ func runCommitCommand(args []string) error {
 		result, err = runner.Run(ctx, commitgen.DefaultContextOptions())
 		termOut.StreamEnd() // End the streaming line
 	} else {
-		// Non-streaming mode: use spinner
-		spinner := terminal.NewSpinner("Generating commit message...")
-		spinner.Start()
-		result, err = runner.Run(ctx, commitgen.DefaultContextOptions())
-		if err != nil {
-			spinner.StopWithError(err.Error())
-		} else if result.Error != nil {
-			spinner.StopWithError(result.Error.Error())
+		if compactOutput {
+			result, err = runner.Run(ctx, commitgen.DefaultContextOptions())
 		} else {
-			spinner.StopWithSuccess("Generated commit message")
+			// Non-streaming mode: use spinner
+			spinner := terminal.NewSpinner("Generating commit message...")
+			spinner.Start()
+			result, err = runner.Run(ctx, commitgen.DefaultContextOptions())
+			if err != nil {
+				spinner.StopWithError(err.Error())
+			} else if result.Error != nil {
+				spinner.StopWithError(result.Error.Error())
+			} else {
+				spinner.StopWithSuccess("Generated commit message")
+			}
 		}
 	}
 	if err != nil {
@@ -168,23 +176,25 @@ func runCommitCommand(args []string) error {
 	}
 
 	// Show warnings about potentially unintended files
-	if len(result.Warnings) > 0 {
+	if len(result.Warnings) > 0 && !compactOutput {
 		printWarnings(result.Warnings)
 	}
 
 	// Show context audit (--trace flag)
-	if *trace && result.ContextAudit != nil {
+	if *trace && result.ContextAudit != nil && !compactOutput {
 		printContextAudit(result.ContextAudit)
 	}
 
 	// Show reasoning trace (--trace flag)
-	if *trace && result.Trace != nil && result.Trace.Reasoning != "" {
+	if *trace && result.Trace != nil && result.Trace.Reasoning != "" && !compactOutput {
 		printReasoning(result.Trace.Reasoning)
 	}
 
 	// Check for errors
 	if result.Error != nil {
-		printError(result.Error, result.Trace)
+		if !compactOutput {
+			printError(result.Error, result.Trace)
+		}
 		return result.Error
 	}
 
@@ -194,10 +204,10 @@ func runCommitCommand(args []string) error {
 	}
 
 	message := result.Commit.Format()
-	printCommitMessage(message)
+	printCommitMessage(message, compactOutput)
 
 	// Show cost
-	if *showCost && result.Trace != nil {
+	if *showCost && result.Trace != nil && !compactOutput {
 		printCost(result.Trace, ledger)
 	}
 
@@ -223,7 +233,7 @@ func runCommitCommand(args []string) error {
 				return fmt.Errorf("aborted")
 			case "regenerate":
 				message = newMessage
-				printCommitMessage(message)
+				printCommitMessage(message, compactOutput)
 				continue
 			}
 		}
@@ -231,13 +241,13 @@ func runCommitCommand(args []string) error {
 doCommit:
 
 	// Create the commit
-	if err := createCommit(message); err != nil {
+	if err := createCommit(message, compactOutput); err != nil {
 		return err
 	}
 
 	// Push if requested
 	if *pushFlag {
-		if err := pushChanges(); err != nil {
+		if err := pushChanges(compactOutput); err != nil {
 			return err
 		}
 	}
@@ -388,8 +398,8 @@ func printReasoning(reasoning string) {
 	termOut.Dim("%s", strings.Join(displayLines, "\n"))
 }
 
-func printCommitMessage(message string) {
-	if stdinIsTerminalFn() {
+func printCommitMessage(message string, compactOutput bool) {
+	if stdinIsTerminalFn() && !compactOutput {
 		// In a TTY, show styled commit message
 		termOut.Newline()
 		termOut.CommitMessage(message)
@@ -465,7 +475,7 @@ func printWarnings(warnings []commitgen.Warning) {
 	}
 }
 
-func createCommit(message string) error {
+func createCommit(message string, compactOutput bool) error {
 	// Write message to temp file
 	tmp, err := os.CreateTemp("", "buckley-commit-*.txt")
 	if err != nil {
@@ -481,22 +491,37 @@ func createCommit(message string) error {
 
 	// Run git commit
 	cmd := exec.Command("git", "commit", "-F", tmpPath)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("git commit failed: %w", err)
+	if compactOutput {
+		var stderr bytes.Buffer
+		cmd.Stdout = io.Discard
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err != nil {
+			detail := strings.TrimSpace(stderr.String())
+			if detail != "" {
+				return fmt.Errorf("git commit failed: %w: %s", err, detail)
+			}
+			return fmt.Errorf("git commit failed: %w", err)
+		}
+	} else {
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("git commit failed: %w", err)
+		}
 	}
 
 	// Show commit hash
-	hash, _ := exec.Command("git", "rev-parse", "HEAD").Output()
-	if len(hash) > 0 {
-		termOut.Success("Committed: %s", strings.TrimSpace(string(hash)))
+	if !compactOutput {
+		hash, _ := exec.Command("git", "rev-parse", "HEAD").Output()
+		if len(hash) > 0 {
+			termOut.Success("Committed: %s", strings.TrimSpace(string(hash)))
+		}
 	}
 
 	return nil
 }
 
-func pushChanges() error {
+func pushChanges(compactOutput bool) error {
 	// Get current branch
 	branch, err := exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD").Output()
 	if err != nil {
@@ -514,13 +539,33 @@ func pushChanges() error {
 	}
 
 	// Push
-	cmd := exec.Command("git", "push", "-u", remote, branchName)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("git push failed: %w", err)
+	var cmd *exec.Cmd
+	if compactOutput {
+		cmd = exec.Command("git", "push", "--quiet", "-u", remote, branchName)
+	} else {
+		cmd = exec.Command("git", "push", "-u", remote, branchName)
+	}
+	if compactOutput {
+		var stderr bytes.Buffer
+		cmd.Stdout = io.Discard
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err != nil {
+			detail := strings.TrimSpace(stderr.String())
+			if detail != "" {
+				return fmt.Errorf("git push failed: %w: %s", err, detail)
+			}
+			return fmt.Errorf("git push failed: %w", err)
+		}
+	} else {
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("git push failed: %w", err)
+		}
 	}
 
-	termOut.Success("Pushed to %s/%s", remote, branchName)
+	if !compactOutput {
+		termOut.Success("Pushed to %s/%s", remote, branchName)
+	}
 	return nil
 }

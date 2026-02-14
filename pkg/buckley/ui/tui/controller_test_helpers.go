@@ -34,7 +34,7 @@ func (c *Controller) RegisterTool(t tool.Tool) {
 		return
 	}
 	c.registry.Register(t)
-	
+
 	// Also register on current session's tool registry if different
 	c.mu.Lock()
 	defer c.mu.Unlock()

@@ -2,6 +2,7 @@ package parallel
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -276,6 +277,37 @@ func TestNewFileLockManager(t *testing.T) {
 	m := NewFileLockManager(cfg)
 	if m == nil {
 		t.Fatal("NewFileLockManager() returned nil")
+	}
+}
+
+func TestFileLockManager_Close_Concurrent(t *testing.T) {
+	cfg := DefaultFileLockConfig()
+	cfg.CleanupPeriod = 0 // Avoid background goroutines in this stress test
+
+	const (
+		iterations = 200
+		callers    = 8
+	)
+
+	for i := 0; i < iterations; i++ {
+		m := NewFileLockManager(cfg)
+
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		for j := 0; j < callers; j++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				m.Close()
+			}()
+		}
+
+		close(start)
+		wg.Wait()
+
+		// Repeated close after concurrent callers should remain safe.
+		m.Close()
 	}
 }
 

@@ -457,26 +457,30 @@ func TestRunner_Execute_AllowedToolsFilter(t *testing.T) {
 
 // recordingStreamHandler captures all streaming events for verification.
 type recordingStreamHandler struct {
-	texts       []string
-	reasonings  []string
-	toolStarts  []string
-	toolEnds    []string
-	errors      []error
-	completed   bool
+	texts      []string
+	reasonings []string
+	toolStarts []string
+	toolEnds   []string
+	errors     []error
+	completed  bool
 }
 
-func (h *recordingStreamHandler) OnText(text string)                  { h.texts = append(h.texts, text) }
-func (h *recordingStreamHandler) OnReasoning(reasoning string)        { h.reasonings = append(h.reasonings, reasoning) }
-func (h *recordingStreamHandler) OnReasoningEnd()                     {}
-func (h *recordingStreamHandler) OnToolStart(name string, _ string)   { h.toolStarts = append(h.toolStarts, name) }
+func (h *recordingStreamHandler) OnText(text string) { h.texts = append(h.texts, text) }
+func (h *recordingStreamHandler) OnReasoning(reasoning string) {
+	h.reasonings = append(h.reasonings, reasoning)
+}
+func (h *recordingStreamHandler) OnReasoningEnd() {}
+func (h *recordingStreamHandler) OnToolStart(name string, _ string) {
+	h.toolStarts = append(h.toolStarts, name)
+}
 func (h *recordingStreamHandler) OnToolEnd(name string, _ string, err error) {
 	h.toolEnds = append(h.toolEnds, name)
 	if err != nil {
 		h.errors = append(h.errors, err)
 	}
 }
-func (h *recordingStreamHandler) OnError(err error)        { h.errors = append(h.errors, err) }
-func (h *recordingStreamHandler) OnComplete(_ *Result)     { h.completed = true }
+func (h *recordingStreamHandler) OnError(err error)    { h.errors = append(h.errors, err) }
+func (h *recordingStreamHandler) OnComplete(_ *Result) { h.completed = true }
 
 func TestRunner_StreamHandler_ToolCallsAndContent(t *testing.T) {
 	mock := &MockModelClient{

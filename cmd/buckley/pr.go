@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -26,6 +28,7 @@ func runPRCommand(args []string) error {
 	pushFlag := fs.Bool("push", true, "push current branch before creating PR")
 	baseFlag := fs.String("base", "", "base branch (default: auto-detect main/master)")
 	verbose := fs.Bool("verbose", false, "stream model reasoning as it happens")
+	minimalOutput := fs.Bool("minimal-output", false, "minimize output (prints generated PR content and critical errors only)")
 	trace := fs.Bool("trace", false, "show context audit and reasoning trace after completion")
 	showCost := fs.Bool("cost", true, "show token/cost breakdown")
 	modelFlag := fs.String("model", "", "model to use (default: BUCKLEY_MODEL_PR or execution model)")
@@ -34,6 +37,7 @@ func runPRCommand(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	compactOutput := *minimalOutput || oneshotMinimalOutputEnabled()
 
 	// Initialize dependencies
 	cfg, mgr, store, err := initDependenciesFn()
@@ -83,7 +87,7 @@ func runPRCommand(args []string) error {
 	// Set up streaming callback if verbose mode is enabled
 	var streamCallback oneshot.StreamCallback
 	var reasoningLog *logging.ReasoningLogger
-	streamingEnabled := *verbose && stdinIsTerminalFn()
+	streamingEnabled := *verbose && stdinIsTerminalFn() && !compactOutput
 
 	if streamingEnabled {
 		// Initialize reasoning logger
@@ -143,7 +147,7 @@ func runPRCommand(args []string) error {
 	defer cancel()
 
 	// Show what we're doing
-	if !cliFlags.quiet {
+	if !compactOutput {
 		termOut.Dim("Using model: %s", modelID)
 	}
 
@@ -155,16 +159,20 @@ func runPRCommand(args []string) error {
 		result, err = runner.Run(ctx, opts)
 		termOut.StreamEnd() // End the streaming line
 	} else {
-		// Non-streaming mode: use spinner
-		spinner := terminal.NewSpinner("Generating PR...")
-		spinner.Start()
-		result, err = runner.Run(ctx, opts)
-		if err != nil {
-			spinner.StopWithError(err.Error())
-		} else if result.Error != nil {
-			spinner.StopWithError(result.Error.Error())
+		if compactOutput {
+			result, err = runner.Run(ctx, opts)
 		} else {
-			spinner.StopWithSuccess("Generated PR")
+			// Non-streaming mode: use spinner
+			spinner := terminal.NewSpinner("Generating PR...")
+			spinner.Start()
+			result, err = runner.Run(ctx, opts)
+			if err != nil {
+				spinner.StopWithError(err.Error())
+			} else if result.Error != nil {
+				spinner.StopWithError(result.Error.Error())
+			} else {
+				spinner.StopWithSuccess("Generated PR")
+			}
 		}
 	}
 
@@ -173,12 +181,12 @@ func runPRCommand(args []string) error {
 	}
 
 	// Show context audit (--trace flag)
-	if *trace && result.ContextAudit != nil {
+	if *trace && result.ContextAudit != nil && !compactOutput {
 		printContextAudit(result.ContextAudit)
 	}
 
 	// Show reasoning trace (--trace flag)
-	if *trace && result.Trace != nil && result.Trace.Reasoning != "" {
+	if *trace && result.Trace != nil && result.Trace.Reasoning != "" && !compactOutput {
 		printReasoning(result.Trace.Reasoning)
 	}
 
@@ -193,10 +201,10 @@ func runPRCommand(args []string) error {
 		return fmt.Errorf("no PR generated")
 	}
 
-	printPR(result.PR, result.Context)
+	printPR(result.PR, result.Context, compactOutput)
 
 	// Show cost
-	if *showCost && result.Trace != nil {
+	if *showCost && result.Trace != nil && !compactOutput {
 		printCost(result.Trace, ledger)
 	}
 
@@ -220,20 +228,26 @@ func runPRCommand(args []string) error {
 
 	// Push if requested
 	if *pushFlag {
-		if err := pushCurrentBranch(); err != nil {
+		if err := pushCurrentBranch(compactOutput); err != nil {
 			return err
 		}
 	}
 
 	// Create the PR
-	if err := createPR(result.PR, result.Context); err != nil {
+	if err := createPR(result.PR, result.Context, compactOutput); err != nil {
 		return err
 	}
 
 	return nil
 }
 
-func printPR(pr *prgen.PRResult, ctx *prgen.Context) {
+func printPR(pr *prgen.PRResult, ctx *prgen.Context, compactOutput bool) {
+	if compactOutput {
+		fmt.Println("Title:", pr.Title)
+		fmt.Println()
+		fmt.Println(pr.FormatBody())
+		return
+	}
 	termOut.Newline()
 	termOut.Header(fmt.Sprintf("PULL REQUEST: %s → %s", ctx.Branch, ctx.BaseBranch))
 
@@ -259,7 +273,7 @@ func printPR(pr *prgen.PRResult, ctx *prgen.Context) {
 	fmt.Println(pr.FormatBody())
 }
 
-func pushCurrentBranch() error {
+func pushCurrentBranch(compactOutput bool) error {
 	branch, err := exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD").Output()
 	if err != nil {
 		return fmt.Errorf("failed to get current branch: %w", err)
@@ -271,28 +285,42 @@ func pushCurrentBranch() error {
 		remote = "origin"
 	}
 
+	var cmd *exec.Cmd
+	if compactOutput {
+		cmd = exec.Command("git", "push", "--quiet", "-u", remote, branchName)
+	} else {
+		cmd = exec.Command("git", "push", "-u", remote, branchName)
+	}
+	if compactOutput {
+		var stderr bytes.Buffer
+		cmd.Stdout = io.Discard
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err != nil {
+			detail := strings.TrimSpace(stderr.String())
+			if detail != "" {
+				return fmt.Errorf("git push failed: %w: %s", err, detail)
+			}
+			return fmt.Errorf("git push failed: %w", err)
+		}
+		return nil
+	}
+
 	spinner := terminal.NewSpinner(fmt.Sprintf("Pushing to %s/%s...", remote, branchName))
 	spinner.Start()
-
-	cmd := exec.Command("git", "push", "-u", remote, branchName)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		spinner.StopWithError(fmt.Sprintf("push failed: %s", strings.TrimSpace(string(output))))
 		return fmt.Errorf("git push failed: %w", err)
 	}
-
 	spinner.StopWithSuccess(fmt.Sprintf("Pushed to %s/%s", remote, branchName))
 	return nil
 }
 
-func createPR(pr *prgen.PRResult, ctx *prgen.Context) error {
+func createPR(pr *prgen.PRResult, ctx *prgen.Context, compactOutput bool) error {
 	// Check for gh CLI
 	if _, err := exec.LookPath("gh"); err != nil {
 		return fmt.Errorf("gh CLI not found (install from https://cli.github.com)")
 	}
-
-	spinner := terminal.NewSpinner("Creating PR...")
-	spinner.Start()
 
 	// Create PR using gh
 	body := pr.FormatBody()
@@ -302,6 +330,19 @@ func createPR(pr *prgen.PRResult, ctx *prgen.Context) error {
 		"--body", body,
 		"--base", ctx.BaseBranch,
 	)
+	if compactOutput {
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("gh pr create failed: %w: %s", err, strings.TrimSpace(string(output)))
+		}
+		if prURL := strings.TrimSpace(string(output)); prURL != "" {
+			fmt.Println(prURL)
+		}
+		return nil
+	}
+
+	spinner := terminal.NewSpinner("Creating PR...")
+	spinner.Start()
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		spinner.StopWithError(fmt.Sprintf("failed: %s", strings.TrimSpace(string(output))))

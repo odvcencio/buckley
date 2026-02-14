@@ -5,15 +5,11 @@ import (
 	"fmt"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/odvcencio/buckley/pkg/conversation"
 	"github.com/odvcencio/buckley/pkg/model"
 	"github.com/odvcencio/buckley/pkg/rlm"
-	"github.com/odvcencio/buckley/pkg/storage"
 	"github.com/odvcencio/buckley/pkg/telemetry"
-	"github.com/odvcencio/fluffyui/progress"
-	"github.com/odvcencio/fluffyui/toast"
 )
 
 // RLMStrategy uses the coordinator/sub-agent pattern for execution.
@@ -35,34 +31,6 @@ type RLMStrategy struct {
 	telemetry     *telemetry.Hub
 	streamMu      sync.Mutex
 	streamAdapter *RLMStreamAdapter
-}
-
-// RLMStrategyConfig extends StrategyConfig with RLM-specific options.
-type RLMStrategyConfig struct {
-	StrategyConfig
-
-	// ModelManager is the concrete manager needed by RLM runtime.
-	// This is separate from StrategyConfig.Models because the RLM
-	// runtime requires the full Manager, not just the ModelClient interface.
-	ModelManager *model.Manager
-
-	// Store provides persistence for scratchpad entries
-	Store *storage.Store
-
-	// Telemetry receives iteration events
-	Telemetry *telemetry.Hub
-
-	// CoordinatorModel overrides the model used for coordination (optional)
-	CoordinatorModel string
-
-	// MaxWallTime limits total execution time (default 30m)
-	MaxWallTime time.Duration
-
-	// MaxTokensBudget limits total tokens across all iterations
-	MaxTokensBudget int
-
-	// SubAgentMaxConcurrent overrides the default sub-agent parallelism
-	SubAgentMaxConcurrent int
 }
 
 // NewRLMStrategy creates a strategy using the RLM coordinator pattern.
@@ -249,30 +217,6 @@ func (s *RLMStrategy) SetStreamHandler(handler StreamHandler) {
 		return
 	}
 	adapter.SetHandler(handler)
-}
-
-// SetProgressManager attaches a progress manager for iteration updates.
-func (s *RLMStrategy) SetProgressManager(manager *progress.ProgressManager) {
-	if s == nil {
-		return
-	}
-	adapter := s.ensureStreamAdapter()
-	if adapter == nil {
-		return
-	}
-	adapter.SetProgressManager(manager)
-}
-
-// SetToastManager attaches a toast manager for budget warnings.
-func (s *RLMStrategy) SetToastManager(manager *toast.ToastManager) {
-	if s == nil {
-		return
-	}
-	adapter := s.ensureStreamAdapter()
-	if adapter == nil {
-		return
-	}
-	adapter.SetToastManager(manager)
 }
 
 // OnIteration registers a callback for iteration events.

@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -230,6 +231,14 @@ func (r *recordingApp) GetStreamChunks() []recordedStreamChunk {
 	return result
 }
 
+func (r *recordingApp) GetStatusUpdates() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	result := make([]string, len(r.statusUpdates))
+	copy(result, r.statusUpdates)
+	return result
+}
+
 // TestTUIStreamHandler_MessageOrder verifies the correct order of streaming messages.
 func TestTUIStreamHandler_MessageOrder(t *testing.T) {
 	app := &recordingApp{}
@@ -331,6 +340,44 @@ func TestTUIStreamHandler_ConcurrentOnText(t *testing.T) {
 
 	if assistantCount != 1 {
 		t.Errorf("Expected 1 assistant message (race condition?), got %d", assistantCount)
+	}
+}
+
+func TestTUIStreamHandler_InactiveSession_NoRenderUpdates(t *testing.T) {
+	app := &recordingApp{}
+
+	active := &SessionState{ID: "active"}
+	inactive := &SessionState{ID: "inactive"}
+	ctrl := &Controller{
+		app:            app,
+		sessions:       []*SessionState{active, inactive},
+		currentSession: 0,
+	}
+
+	handler := &tuiStreamHandler{
+		app:  app,
+		sess: inactive,
+		ctrl: ctrl,
+	}
+
+	handler.OnToolStart("run_shell", "{}")
+	handler.OnReasoning("thinking")
+	handler.OnReasoningEnd()
+	handler.OnText("hidden")
+	handler.OnError(errors.New("boom"))
+	handler.OnComplete(&execution.ExecutionResult{})
+
+	if got := len(app.GetMessages()); got != 0 {
+		t.Fatalf("expected no rendered messages for inactive session, got %d", got)
+	}
+	if got := len(app.GetStreamChunks()); got != 0 {
+		t.Fatalf("expected no streamed chunks for inactive session, got %d", got)
+	}
+	if got := len(app.GetStatusUpdates()); got != 0 {
+		t.Fatalf("expected no status updates for inactive session, got %d", got)
+	}
+	if !handler.errorWasReported() {
+		t.Fatal("expected error to be tracked even when not rendered")
 	}
 }
 

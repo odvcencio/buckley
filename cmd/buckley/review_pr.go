@@ -18,6 +18,7 @@ import (
 func runReviewPRCommand(args []string) error {
 	fs := flag.NewFlagSet("review-pr", flag.ContinueOnError)
 	verbose := fs.Bool("verbose", false, "show full context and reasoning")
+	minimalOutput := fs.Bool("minimal-output", false, "minimize output (prints review text and critical errors only)")
 	showCost := fs.Bool("cost", true, "show token/cost breakdown")
 	modelFlag := fs.String("model", "", "model to use (default: BUCKLEY_MODEL_REVIEW or execution model)")
 	timeout := fs.Duration("timeout", 5*time.Minute, "timeout for model request")
@@ -26,6 +27,7 @@ func runReviewPRCommand(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	compactOutput := *minimalOutput || oneshotMinimalOutputEnabled()
 
 	// Get PR identifier (number or URL)
 	prArg := ""
@@ -85,33 +87,42 @@ func runReviewPRCommand(args []string) error {
 	defer cancel()
 
 	// Show what we're doing
-	if !cliFlags.quiet {
+	if !compactOutput {
 		termOut.Dim("Using model: %s", modelID)
 		termOut.Dim("Reviewing PR: %s", prArg)
 	}
 
-	spinner := terminal.NewSpinner("Fetching PR details...")
-	spinner.Start()
-
-	result, runErr := runner.ReviewPR(ctx, prArg)
-
-	if runErr != nil {
-		spinner.StopWithError(runErr.Error())
-		return fmt.Errorf("review failed: %w", runErr)
-	} else if result.Error != nil {
-		spinner.StopWithError(result.Error.Error())
+	var result *review.RunResult
+	var runErr error
+	if compactOutput {
+		result, runErr = runner.ReviewPR(ctx, prArg)
 	} else {
-		spinner.StopWithSuccess("PR review complete")
+		spinner := terminal.NewSpinner("Fetching PR details...")
+		spinner.Start()
+		result, runErr = runner.ReviewPR(ctx, prArg)
+		if runErr != nil {
+			spinner.StopWithError(runErr.Error())
+			return fmt.Errorf("review failed: %w", runErr)
+		} else if result.Error != nil {
+			spinner.StopWithError(result.Error.Error())
+		} else {
+			spinner.StopWithSuccess("PR review complete")
+		}
+	}
+	if runErr != nil {
+		return fmt.Errorf("review failed: %w", runErr)
 	}
 
 	// Show context audit if verbose
-	if *verbose && result.ContextAudit != nil {
+	if *verbose && result.ContextAudit != nil && !compactOutput {
 		printReviewContextAudit(result.ContextAudit)
 	}
 
 	// Check for errors
 	if result.Error != nil {
-		printReviewError(result.Error, result.Trace)
+		if !compactOutput {
+			printReviewError(result.Error, result.Trace)
+		}
 		return result.Error
 	}
 
@@ -125,20 +136,26 @@ func runReviewPRCommand(args []string) error {
 		if err := os.WriteFile(*outputFile, []byte(result.Review), 0o644); err != nil {
 			return fmt.Errorf("failed to write output file: %w", err)
 		}
-		termOut.Success("Review written to %s", *outputFile)
+		if !compactOutput {
+			termOut.Success("Review written to %s", *outputFile)
+		}
 	} else {
-		printPRReview(result.Review, result.PRInfo)
+		printPRReview(result.Review, result.PRInfo, compactOutput)
 	}
 
 	// Show cost
-	if *showCost && result.Trace != nil {
+	if *showCost && result.Trace != nil && !compactOutput {
 		printReviewCost(result.Trace, ledger)
 	}
 
 	return nil
 }
 
-func printPRReview(reviewText string, prInfo *review.PRInfo) {
+func printPRReview(reviewText string, prInfo *review.PRInfo, compactOutput bool) {
+	if compactOutput {
+		fmt.Println(reviewText)
+		return
+	}
 	termOut.Newline()
 	if prInfo != nil {
 		termOut.Header(fmt.Sprintf("PR #%d: %s", prInfo.Number, prInfo.Title))

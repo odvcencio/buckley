@@ -6,8 +6,6 @@ import (
 	"sync"
 
 	"github.com/odvcencio/buckley/pkg/rlm"
-	"github.com/odvcencio/fluffyui/progress"
-	"github.com/odvcencio/fluffyui/toast"
 )
 
 const rlmProgressID = "rlm-iterations"
@@ -16,18 +14,18 @@ const rlmProgressID = "rlm-iterations"
 type RLMStreamAdapter struct {
 	mu             sync.Mutex
 	handler        StreamHandler
-	toasts         *toast.ToastManager
-	progress       *progress.ProgressManager
+	toasts         ToastNotifier
+	progress       ProgressReporter
 	progressActive bool
 	lastWarning    string
 }
 
 // NewRLMStreamAdapter creates a new adapter for RLM iteration events.
-func NewRLMStreamAdapter(handler StreamHandler, progressMgr *progress.ProgressManager, toastMgr *toast.ToastManager) *RLMStreamAdapter {
+func NewRLMStreamAdapter(handler StreamHandler, progressReporter ProgressReporter, toastNotifier ToastNotifier) *RLMStreamAdapter {
 	return &RLMStreamAdapter{
 		handler:  handler,
-		progress: progressMgr,
-		toasts:   toastMgr,
+		progress: progressReporter,
+		toasts:   toastNotifier,
 	}
 }
 
@@ -41,23 +39,23 @@ func (a *RLMStreamAdapter) SetHandler(handler StreamHandler) {
 	a.mu.Unlock()
 }
 
-// SetProgressManager updates the progress manager.
-func (a *RLMStreamAdapter) SetProgressManager(manager *progress.ProgressManager) {
+// SetProgressReporter updates the progress reporter.
+func (a *RLMStreamAdapter) SetProgressReporter(reporter ProgressReporter) {
 	if a == nil {
 		return
 	}
 	a.mu.Lock()
-	a.progress = manager
+	a.progress = reporter
 	a.mu.Unlock()
 }
 
-// SetToastManager updates the toast manager.
-func (a *RLMStreamAdapter) SetToastManager(manager *toast.ToastManager) {
+// SetToastNotifier updates the toast notifier.
+func (a *RLMStreamAdapter) SetToastNotifier(notifier ToastNotifier) {
 	if a == nil {
 		return
 	}
 	a.mu.Lock()
-	a.toasts = manager
+	a.toasts = notifier
 	a.mu.Unlock()
 }
 
@@ -95,8 +93,8 @@ func (a *RLMStreamAdapter) OnRLMEvent(event rlm.IterationEvent) {
 
 	a.mu.Lock()
 	handler := a.handler
-	progressMgr := a.progress
-	toastMgr := a.toasts
+	progressReporter := a.progress
+	toastNotifier := a.toasts
 	a.mu.Unlock()
 
 	if handler != nil {
@@ -108,12 +106,12 @@ func (a *RLMStreamAdapter) OnRLMEvent(event rlm.IterationEvent) {
 		handler.OnToolEnd("rlm_iteration", strings.TrimSpace(event.Summary), nil)
 	}
 
-	a.updateProgress(progressMgr, event)
-	a.handleBudgetWarning(toastMgr, event.BudgetStatus)
+	a.updateProgress(progressReporter, event)
+	a.handleBudgetWarning(toastNotifier, event.BudgetStatus)
 }
 
-func (a *RLMStreamAdapter) updateProgress(manager *progress.ProgressManager, event rlm.IterationEvent) {
-	if manager == nil {
+func (a *RLMStreamAdapter) updateProgress(reporter ProgressReporter, event rlm.IterationEvent) {
+	if reporter == nil {
 		return
 	}
 
@@ -135,27 +133,27 @@ func (a *RLMStreamAdapter) updateProgress(manager *progress.ProgressManager, eve
 	a.mu.Unlock()
 
 	if start {
-		ptype := progress.ProgressIndeterminate
+		mode := ProgressModeIndeterminate
 		if max > 0 {
-			ptype = progress.ProgressSteps
+			mode = ProgressModeSteps
 		}
-		manager.Start(rlmProgressID, "RLM iterations", ptype, max)
+		reporter.Start(rlmProgressID, "RLM iterations", mode, max)
 	}
 
 	if max > 0 {
-		manager.Update(rlmProgressID, event.Iteration)
+		reporter.Update(rlmProgressID, event.Iteration)
 	}
 
 	if finished {
-		manager.Done(rlmProgressID)
+		reporter.Done(rlmProgressID)
 		a.mu.Lock()
 		a.progressActive = false
 		a.mu.Unlock()
 	}
 }
 
-func (a *RLMStreamAdapter) handleBudgetWarning(manager *toast.ToastManager, status rlm.BudgetStatus) {
-	if manager == nil {
+func (a *RLMStreamAdapter) handleBudgetWarning(notifier ToastNotifier, status rlm.BudgetStatus) {
+	if notifier == nil {
 		return
 	}
 	warning := strings.TrimSpace(status.Warning)
@@ -173,11 +171,9 @@ func (a *RLMStreamAdapter) handleBudgetWarning(manager *toast.ToastManager, stat
 	a.lastWarning = warning
 	a.mu.Unlock()
 
-	level := toast.ToastWarning
 	title := "RLM budget warning"
 	switch strings.ToLower(warning) {
 	case "critical":
-		level = toast.ToastError
 		title = "RLM budget critical"
 	case "low":
 		title = "RLM budget low"
@@ -187,8 +183,11 @@ func (a *RLMStreamAdapter) handleBudgetWarning(manager *toast.ToastManager, stat
 	if strings.TrimSpace(message) == "" {
 		message = "budget threshold reached"
 	}
-
-	manager.Show(level, title, message, toast.DefaultToastDuration)
+	if strings.EqualFold(warning, "critical") {
+		notifier.ShowError(title, message)
+		return
+	}
+	notifier.ShowWarning(title, message)
 }
 
 func buildBudgetMessage(status rlm.BudgetStatus) string {

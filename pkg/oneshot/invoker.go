@@ -13,14 +13,12 @@ import (
 
 // ModelClient is the interface for making model requests.
 // This matches the model.Manager interface for easy integration.
-type ModelClient interface {
-	ChatCompletion(ctx context.Context, req model.ChatRequest) (*model.ChatResponse, error)
-}
+type ModelClient = model.CompletionClient
 
 // StreamingModelClient extends ModelClient with streaming support.
 type StreamingModelClient interface {
-	ModelClient
-	ChatCompletionStream(ctx context.Context, req model.ChatRequest) (<-chan model.StreamChunk, <-chan error)
+	model.CompletionClient
+	model.StreamingClient
 }
 
 // StreamCallback is called for each streaming chunk.
