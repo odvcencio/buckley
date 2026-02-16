@@ -36,6 +36,8 @@ func dispatchSubcommand(args []string) (bool, int) {
 		return true, runCommand(runExecuteTaskCommand, args[1:])
 	case "commit":
 		return true, runCommand(runCommitCommand, args[1:])
+	case "image":
+		return true, runCommand(runImageCommand, args[1:])
 	case "pr":
 		return true, runCommand(runPRCommand, args[1:])
 	case "review":
