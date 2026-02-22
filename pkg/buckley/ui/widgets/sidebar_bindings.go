@@ -28,107 +28,49 @@ func (s *Sidebar) Unbind() {
 	s.services = runtime.Services{}
 }
 
-// TODO: the 40+ signal observations below follow a repetitive pattern. Consider
-// a helper like observeIfSet(subs, sig, fn) to reduce boilerplate if more
-// signals are added. Not refactoring now to avoid risk.
+// observeSignal subscribes to sig using subs if sig is non-nil.
+func observeSignal[T any](subs *state.Subscriptions, sig state.Readable[T], fn func()) {
+	if sig != nil {
+		subs.Observe(sig, fn)
+	}
+}
+
 func (s *Sidebar) subscribe() {
 	s.subs.Clear()
-	if s.currentTaskSig != nil {
-		s.subs.Observe(s.currentTaskSig, s.onCurrentTaskChanged)
-	}
-	if s.taskProgressSig != nil {
-		s.subs.Observe(s.taskProgressSig, s.onCurrentTaskChanged)
-	}
-	if s.planTasksSig != nil {
-		s.subs.Observe(s.planTasksSig, s.onPlanTasksChanged)
-	}
-	if s.runningToolsSig != nil {
-		s.subs.Observe(s.runningToolsSig, s.onRunningToolsChanged)
-	}
-	if s.toolHistorySig != nil {
-		s.subs.Observe(s.toolHistorySig, s.onToolHistoryChanged)
-	}
-	if s.activeTouchesSig != nil {
-		s.subs.Observe(s.activeTouchesSig, s.onActiveTouchesChanged)
-	}
-	if s.recentFilesSig != nil {
-		s.subs.Observe(s.recentFilesSig, s.onRecentFilesChanged)
-	}
-	if s.rlmStatusSig != nil {
-		s.subs.Observe(s.rlmStatusSig, s.onRLMStatusChanged)
-	}
-	if s.rlmScratchpadSig != nil {
-		s.subs.Observe(s.rlmScratchpadSig, s.onRLMStatusChanged)
-	}
-	if s.circuitStatusSig != nil {
-		s.subs.Observe(s.circuitStatusSig, s.onCircuitStatusChanged)
-	}
-	if s.experimentSig != nil {
-		s.subs.Observe(s.experimentSig, s.onExperimentChanged)
-	}
-	if s.experimentStatusSig != nil {
-		s.subs.Observe(s.experimentStatusSig, s.onExperimentChanged)
-	}
-	if s.experimentVariantsSig != nil {
-		s.subs.Observe(s.experimentVariantsSig, s.onExperimentChanged)
-	}
-	if s.contextUsedSig != nil {
-		s.subs.Observe(s.contextUsedSig, s.onContextChanged)
-	}
-	if s.contextBudgetSig != nil {
-		s.subs.Observe(s.contextBudgetSig, s.onContextChanged)
-	}
-	if s.contextWindowSig != nil {
-		s.subs.Observe(s.contextWindowSig, s.onContextChanged)
-	}
-	if s.projectPathSig != nil {
-		s.subs.Observe(s.projectPathSig, s.onProjectPathChanged)
-	}
-	if s.widthSig != nil {
-		s.subs.Observe(s.widthSig, s.onWidthChanged)
-	}
-	if s.tabIndexSig != nil {
-		s.subs.Observe(s.tabIndexSig, s.onTabIndexChanged)
-	}
-	if s.showCurrentTaskSig != nil {
-		s.subs.Observe(s.showCurrentTaskSig, s.onVisibilityChanged)
-	}
-	if s.showPlanSig != nil {
-		s.subs.Observe(s.showPlanSig, s.onVisibilityChanged)
-	}
-	if s.showToolsSig != nil {
-		s.subs.Observe(s.showToolsSig, s.onVisibilityChanged)
-	}
-	if s.showContextSig != nil {
-		s.subs.Observe(s.showContextSig, s.onVisibilityChanged)
-	}
-	if s.showTouchesSig != nil {
-		s.subs.Observe(s.showTouchesSig, s.onVisibilityChanged)
-	}
-	if s.showRecentFilesSig != nil {
-		s.subs.Observe(s.showRecentFilesSig, s.onVisibilityChanged)
-	}
-	if s.showExperimentSig != nil {
-		s.subs.Observe(s.showExperimentSig, s.onVisibilityChanged)
-	}
-	if s.showRLMSig != nil {
-		s.subs.Observe(s.showRLMSig, s.onVisibilityChanged)
-	}
-	if s.showCircuitSig != nil {
-		s.subs.Observe(s.showCircuitSig, s.onVisibilityChanged)
-	}
-	if s.showAgentsSig != nil {
-		s.subs.Observe(s.showAgentsSig, s.onVisibilityChanged)
-	}
-	if s.showLocksSig != nil {
-		s.subs.Observe(s.showLocksSig, s.onVisibilityChanged)
-	}
-	if s.activeAgentsSig != nil {
-		s.subs.Observe(s.activeAgentsSig, s.onActiveAgentsChanged)
-	}
-	if s.fileLocksSig != nil {
-		s.subs.Observe(s.fileLocksSig, s.onFileLocksChanged)
-	}
+
+	observeSignal(&s.subs, s.currentTaskSig, s.onCurrentTaskChanged)
+	observeSignal(&s.subs, s.taskProgressSig, s.onCurrentTaskChanged)
+	observeSignal(&s.subs, s.planTasksSig, s.onPlanTasksChanged)
+	observeSignal(&s.subs, s.runningToolsSig, s.onRunningToolsChanged)
+	observeSignal(&s.subs, s.toolHistorySig, s.onToolHistoryChanged)
+	observeSignal(&s.subs, s.activeTouchesSig, s.onActiveTouchesChanged)
+	observeSignal(&s.subs, s.recentFilesSig, s.onRecentFilesChanged)
+	observeSignal(&s.subs, s.rlmStatusSig, s.onRLMStatusChanged)
+	observeSignal(&s.subs, s.rlmScratchpadSig, s.onRLMStatusChanged)
+	observeSignal(&s.subs, s.circuitStatusSig, s.onCircuitStatusChanged)
+	observeSignal(&s.subs, s.experimentSig, s.onExperimentChanged)
+	observeSignal(&s.subs, s.experimentStatusSig, s.onExperimentChanged)
+	observeSignal(&s.subs, s.experimentVariantsSig, s.onExperimentChanged)
+	observeSignal(&s.subs, s.contextUsedSig, s.onContextChanged)
+	observeSignal(&s.subs, s.contextBudgetSig, s.onContextChanged)
+	observeSignal(&s.subs, s.contextWindowSig, s.onContextChanged)
+	observeSignal(&s.subs, s.projectPathSig, s.onProjectPathChanged)
+	observeSignal(&s.subs, s.widthSig, s.onWidthChanged)
+	observeSignal(&s.subs, s.tabIndexSig, s.onTabIndexChanged)
+	observeSignal(&s.subs, s.showCurrentTaskSig, s.onVisibilityChanged)
+	observeSignal(&s.subs, s.showPlanSig, s.onVisibilityChanged)
+	observeSignal(&s.subs, s.showToolsSig, s.onVisibilityChanged)
+	observeSignal(&s.subs, s.showContextSig, s.onVisibilityChanged)
+	observeSignal(&s.subs, s.showTouchesSig, s.onVisibilityChanged)
+	observeSignal(&s.subs, s.showRecentFilesSig, s.onVisibilityChanged)
+	observeSignal(&s.subs, s.showExperimentSig, s.onVisibilityChanged)
+	observeSignal(&s.subs, s.showRLMSig, s.onVisibilityChanged)
+	observeSignal(&s.subs, s.showCircuitSig, s.onVisibilityChanged)
+	observeSignal(&s.subs, s.showAgentsSig, s.onVisibilityChanged)
+	observeSignal(&s.subs, s.showLocksSig, s.onVisibilityChanged)
+	observeSignal(&s.subs, s.activeAgentsSig, s.onActiveAgentsChanged)
+	observeSignal(&s.subs, s.fileLocksSig, s.onFileLocksChanged)
+
 	s.onCurrentTaskChanged()
 	s.onPlanTasksChanged()
 	s.onRunningToolsChanged()

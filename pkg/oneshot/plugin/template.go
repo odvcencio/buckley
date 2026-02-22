@@ -5,6 +5,9 @@ import (
 	"fmt"
 	"strings"
 	"text/template"
+
+	"golang.org/x/text/cases"
+	"golang.org/x/text/language"
 )
 
 // TemplateEngine renders output using a template.
@@ -63,7 +66,7 @@ func templateFuncs() template.FuncMap {
 	return template.FuncMap{
 		"upper": strings.ToUpper,
 		"lower": strings.ToLower,
-		"title": strings.Title,
+		"title": cases.Title(language.English).String,
 		"trim":  strings.TrimSpace,
 		"join": func(sep string, items []interface{}) string {
 			strs := make([]string, len(items))

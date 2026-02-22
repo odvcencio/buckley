@@ -42,21 +42,19 @@ type WorkflowManager struct {
 	executionTracker *artifact.ExecutionTracker
 
 	// Current workflow state
-	currentPhase      WorkflowPhase
-	feature           string
-	planningArtifact  *artifact.PlanningArtifact
-	executionArtifact *artifact.ExecutionArtifact
-	reviewArtifact    *artifact.ReviewArtifact
+	stateMu              sync.RWMutex // Protects currentPhase, feature, planningArtifact, planRef, planID, currentAgent, reviewArtifact, latestResearchBrief, steeringNotes, autonomyLevel, skillMessages, sessionID
+	currentPhase         WorkflowPhase
+	feature              string
+	planningArtifact     *artifact.PlanningArtifact
+	reviewArtifact       *artifact.ReviewArtifact
+	currentAgent         string
+	latestResearchBrief  *artifact.ResearchBrief
 
 	// Activity tracking
 	activityTracker *tool.ActivityTracker
 	intentHistory   *tool.IntentHistory
 
 	researchAgent *ResearchAgent
-
-	latestResearchBrief *artifact.ResearchBrief
-
-	currentAgent  string
 	pauseMu       sync.RWMutex // Protects pause state
 	paused        bool
 	pauseReason   string
@@ -153,7 +151,9 @@ func NewWorkflowManager(
 	}
 	w.skillRegistry = skills
 	w.skillInjector = func(msg string) {
+		w.stateMu.Lock()
 		w.skillMessages = append(w.skillMessages, msg)
+		w.stateMu.Unlock()
 	}
 	w.skillState = skill.NewRuntimeState(w.skillInjector)
 	w.skillManager = NewSkillManager(skills, w.skillState)
@@ -178,7 +178,9 @@ func (w *WorkflowManager) SetSessionID(sessionID string) {
 	if w == nil {
 		return
 	}
+	w.stateMu.Lock()
 	w.sessionID = strings.TrimSpace(sessionID)
+	w.stateMu.Unlock()
 	w.loadSteeringSettings()
 	w.RestorePauseStateFromSession()
 }
@@ -188,13 +190,19 @@ func (w *WorkflowManager) SetCurrentPlan(plan *Plan) {
 	if w == nil {
 		return
 	}
+	w.stateMu.Lock()
 	w.planRef = plan
+	var planID string
 	if plan != nil {
 		w.planID = plan.ID
-		if w.store != nil && w.sessionID != "" {
-			if err := w.store.LinkSessionToPlan(w.sessionID, plan.ID); err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: failed to link session %s to plan %s: %v\n", w.sessionID, plan.ID, err)
-			}
+		planID = plan.ID
+	}
+	sessionID := w.sessionID
+	w.stateMu.Unlock()
+
+	if planID != "" && w.store != nil && sessionID != "" {
+		if err := w.store.LinkSessionToPlan(sessionID, planID); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to link session %s to plan %s: %v\n", sessionID, planID, err)
 		}
 	}
 }
@@ -222,6 +230,8 @@ func (w *WorkflowManager) StartPlanning(ctx context.Context, featureName, userGo
 
 // AddPlanningContext adds context information discovered during planning
 func (w *WorkflowManager) AddPlanningContext(patterns []string, archStyle string, files []string) {
+	w.stateMu.Lock()
+	defer w.stateMu.Unlock()
 	if w.planningArtifact != nil {
 		w.planningArtifact.Context.ExistingPatterns = patterns
 		w.planningArtifact.Context.ArchitectureStyle = archStyle
@@ -231,6 +241,8 @@ func (w *WorkflowManager) AddPlanningContext(patterns []string, archStyle string
 
 // AddArchitectureDecision adds an ADR to the planning artifact
 func (w *WorkflowManager) AddArchitectureDecision(decision artifact.ArchitectureDecision) {
+	w.stateMu.Lock()
+	defer w.stateMu.Unlock()
 	if w.planningArtifact != nil {
 		w.planningArtifact.Decisions = append(w.planningArtifact.Decisions, decision)
 	}
@@ -238,6 +250,8 @@ func (w *WorkflowManager) AddArchitectureDecision(decision artifact.Architecture
 
 // AddCodeContract adds a code contract to the planning artifact
 func (w *WorkflowManager) AddCodeContract(contract artifact.CodeContract) {
+	w.stateMu.Lock()
+	defer w.stateMu.Unlock()
 	if w.planningArtifact != nil {
 		w.planningArtifact.CodeContracts = append(w.planningArtifact.CodeContracts, contract)
 	}
@@ -245,6 +259,8 @@ func (w *WorkflowManager) AddCodeContract(contract artifact.CodeContract) {
 
 // SetLayerMap sets the layer mapping for the planning artifact
 func (w *WorkflowManager) SetLayerMap(layerMap artifact.LayerMap) {
+	w.stateMu.Lock()
+	defer w.stateMu.Unlock()
 	if w.planningArtifact != nil {
 		w.planningArtifact.LayerMap = layerMap
 	}
@@ -252,6 +268,8 @@ func (w *WorkflowManager) SetLayerMap(layerMap artifact.LayerMap) {
 
 // AddTask adds a task to the planning artifact
 func (w *WorkflowManager) AddTask(task artifact.TaskBreakdown) {
+	w.stateMu.Lock()
+	defer w.stateMu.Unlock()
 	if w.planningArtifact != nil {
 		w.planningArtifact.Tasks = append(w.planningArtifact.Tasks, task)
 	}
@@ -259,6 +277,8 @@ func (w *WorkflowManager) AddTask(task artifact.TaskBreakdown) {
 
 // SetCrossCuttingConcerns sets cross-cutting concerns for the planning artifact
 func (w *WorkflowManager) SetCrossCuttingConcerns(concerns artifact.CrossCuttingConcerns) {
+	w.stateMu.Lock()
+	defer w.stateMu.Unlock()
 	if w.planningArtifact != nil {
 		w.planningArtifact.CrossCuttingScope = concerns
 	}
@@ -266,18 +286,22 @@ func (w *WorkflowManager) SetCrossCuttingConcerns(concerns artifact.CrossCutting
 
 // FinalizePlanning generates and saves the planning artifact
 func (w *WorkflowManager) FinalizePlanning() (string, error) {
-	if w.planningArtifact == nil {
+	w.stateMu.Lock()
+	pa := w.planningArtifact
+	if pa == nil {
+		w.stateMu.Unlock()
 		return "", fmt.Errorf("no planning artifact to finalize")
 	}
 
-	w.planningArtifact.Status = "completed"
-	w.planningArtifact.UpdatedAt = time.Now()
+	pa.Status = "completed"
+	pa.UpdatedAt = time.Now()
+	w.stateMu.Unlock()
 
 	// Generate artifact file
 	if w.artifacts == nil {
 		return "", fmt.Errorf("artifact pipeline unavailable")
 	}
-	filePath, err := w.artifacts.planningGenerator().Generate(w.planningArtifact)
+	filePath, err := w.artifacts.planningGenerator().Generate(pa)
 	if err != nil {
 		return "", fmt.Errorf("failed to generate planning artifact: %w", err)
 	}
@@ -339,6 +363,8 @@ func (w *WorkflowManager) StartReview(planningPath, executionPath string) error 
 
 // SetValidationStrategy sets the validation strategy for review
 func (w *WorkflowManager) SetValidationStrategy(strategy artifact.ValidationStrategy) {
+	w.stateMu.Lock()
+	defer w.stateMu.Unlock()
 	if w.reviewArtifact != nil {
 		w.reviewArtifact.ValidationStrategy = strategy
 	}
@@ -346,6 +372,8 @@ func (w *WorkflowManager) SetValidationStrategy(strategy artifact.ValidationStra
 
 // AddValidationResult adds a validation result to the review
 func (w *WorkflowManager) AddValidationResult(result artifact.ValidationResult) {
+	w.stateMu.Lock()
+	defer w.stateMu.Unlock()
 	if w.reviewArtifact != nil {
 		w.reviewArtifact.ValidationResults = append(w.reviewArtifact.ValidationResults, result)
 	}
@@ -353,6 +381,8 @@ func (w *WorkflowManager) AddValidationResult(result artifact.ValidationResult) 
 
 // AddIssue adds an issue found during review
 func (w *WorkflowManager) AddIssue(issue artifact.Issue) {
+	w.stateMu.Lock()
+	defer w.stateMu.Unlock()
 	if w.reviewArtifact != nil {
 		w.reviewArtifact.IssuesFound = append(w.reviewArtifact.IssuesFound, issue)
 	}
@@ -360,6 +390,8 @@ func (w *WorkflowManager) AddIssue(issue artifact.Issue) {
 
 // AddReviewIteration adds a review iteration record
 func (w *WorkflowManager) AddReviewIteration(iteration artifact.ReviewIteration) {
+	w.stateMu.Lock()
+	defer w.stateMu.Unlock()
 	if w.reviewArtifact != nil {
 		w.reviewArtifact.Iterations = append(w.reviewArtifact.Iterations, iteration)
 	}
@@ -367,6 +399,8 @@ func (w *WorkflowManager) AddReviewIteration(iteration artifact.ReviewIteration)
 
 // AddOpportunisticImprovement adds an opportunistic improvement suggestion
 func (w *WorkflowManager) AddOpportunisticImprovement(improvement artifact.Improvement) {
+	w.stateMu.Lock()
+	defer w.stateMu.Unlock()
 	if w.reviewArtifact != nil {
 		w.reviewArtifact.OpportunisticImprovements = append(w.reviewArtifact.OpportunisticImprovements, improvement)
 	}
@@ -374,7 +408,9 @@ func (w *WorkflowManager) AddOpportunisticImprovement(improvement artifact.Impro
 
 // ApproveReview marks the review as approved
 func (w *WorkflowManager) ApproveReview(approval artifact.Approval) error {
+	w.stateMu.Lock()
 	if w.reviewArtifact == nil {
+		w.stateMu.Unlock()
 		return fmt.Errorf("no review in progress")
 	}
 
@@ -382,11 +418,15 @@ func (w *WorkflowManager) ApproveReview(approval artifact.Approval) error {
 	w.reviewArtifact.Status = "approved"
 	w.reviewArtifact.UpdatedAt = time.Now()
 
-	// Generate review artifact
+	// Copy artifact for I/O operation
+	ra := w.reviewArtifact
+	w.stateMu.Unlock()
+
+	// Generate review artifact (I/O operation - do not hold lock)
 	if w.artifacts == nil {
 		return fmt.Errorf("artifact pipeline unavailable")
 	}
-	_, err := w.artifacts.reviewGenerator().Generate(w.reviewArtifact)
+	_, err := w.artifacts.reviewGenerator().Generate(ra)
 	if err != nil {
 		return fmt.Errorf("failed to generate review artifact: %w", err)
 	}
@@ -396,22 +436,38 @@ func (w *WorkflowManager) ApproveReview(approval artifact.Approval) error {
 
 // GetReviewArtifact exposes the current review artifact for read-only consumers.
 func (w *WorkflowManager) GetReviewArtifact() *artifact.ReviewArtifact {
+	w.stateMu.RLock()
+	defer w.stateMu.RUnlock()
 	return w.reviewArtifact
 }
 
 // GetCurrentPhase returns the current workflow phase
 func (w *WorkflowManager) GetCurrentPhase() WorkflowPhase {
+	w.stateMu.RLock()
+	defer w.stateMu.RUnlock()
 	return w.currentPhase
 }
 
 // GetSystemPrompt generates the appropriate system prompt for the current phase
 func (w *WorkflowManager) GetSystemPrompt() string {
 	systemTime := time.Now()
+
+	// Snapshot state under read lock to avoid holding it during prompt generation
+	w.stateMu.RLock()
 	steering := w.steeringNotes
 	autonomy := w.autonomyLevel
+	phase := w.currentPhase
+	var planPath string
+	if w.planningArtifact != nil {
+		planPath = w.planningArtifact.FilePath
+	}
+	// Copy skillMessages slice to avoid holding lock during iteration
+	skillMsgsCopy := make([]string, len(w.skillMessages))
+	copy(skillMsgsCopy, w.skillMessages)
+	w.stateMu.RUnlock()
 
 	var prompt string
-	switch w.currentPhase {
+	switch phase {
 	case WorkflowPhasePlanning:
 		prompt = w.promptGenerator.Generate(prompts.PromptConfig{
 			Phase:         prompts.PhasePlanning,
@@ -420,10 +476,6 @@ func (w *WorkflowManager) GetSystemPrompt() string {
 			AutonomyLevel: autonomy,
 		})
 	case WorkflowPhaseExecution:
-		planPath := ""
-		if w.planningArtifact != nil {
-			planPath = w.planningArtifact.FilePath
-		}
 		prompt = w.promptGenerator.Generate(prompts.PromptConfig{
 			Phase:            prompts.PhaseExecution,
 			SystemTime:       systemTime,
@@ -432,11 +484,7 @@ func (w *WorkflowManager) GetSystemPrompt() string {
 			AutonomyLevel:    autonomy,
 		})
 	case WorkflowPhaseReview:
-		planPath := ""
 		execPath := ""
-		if w.planningArtifact != nil {
-			planPath = w.planningArtifact.FilePath
-		}
 		if w.executionTracker != nil {
 			execPath = w.executionTracker.GetFilePath()
 		}
@@ -462,7 +510,7 @@ func (w *WorkflowManager) GetSystemPrompt() string {
 			prompt += "\n\n" + desc
 		}
 	}
-	for _, msg := range w.skillMessages {
+	for _, msg := range skillMsgsCopy {
 		if strings.TrimSpace(msg) == "" {
 			continue
 		}

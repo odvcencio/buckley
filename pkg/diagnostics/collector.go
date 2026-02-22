@@ -2,6 +2,7 @@
 package diagnostics
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -19,6 +20,8 @@ type Collector struct {
 	mu        sync.RWMutex
 	events    []telemetry.Event
 	maxEvents int
+	pos       int // next write position in the circular buffer
+	count     int // number of events currently stored
 
 	// Aggregated stats
 	apiCalls      int
@@ -30,8 +33,9 @@ type Collector struct {
 	circuitStates map[string]string
 	recentErrors  []errorEntry
 
-	// Subscription
+	// Subscription lifecycle
 	unsubscribe func()
+	cancel      context.CancelFunc
 	started     time.Time
 }
 
@@ -44,7 +48,7 @@ type errorEntry struct {
 // NewCollector creates a new diagnostic collector.
 func NewCollector() *Collector {
 	return &Collector{
-		events:        make([]telemetry.Event, 0, MaxEvents),
+		events:        make([]telemetry.Event, MaxEvents),
 		maxEvents:     MaxEvents,
 		modelCalls:    make(map[string]int),
 		toolCalls:     make(map[string]int),
@@ -55,22 +59,38 @@ func NewCollector() *Collector {
 }
 
 // Subscribe starts collecting events from a telemetry hub.
-func (c *Collector) Subscribe(hub *telemetry.Hub) {
+// The provided context controls the goroutine lifecycle; when ctx is
+// cancelled (or Close is called), the collection goroutine exits.
+func (c *Collector) Subscribe(ctx context.Context, hub *telemetry.Hub) {
 	if hub == nil {
 		return
 	}
 	ch, unsub := hub.Subscribe()
 	c.unsubscribe = unsub
 
+	ctx, cancel := context.WithCancel(ctx)
+	c.cancel = cancel
+
 	go func() {
-		for event := range ch {
-			c.record(event)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case event, ok := <-ch:
+				if !ok {
+					return
+				}
+				c.record(event)
+			}
 		}
 	}()
 }
 
 // Close stops collecting events.
 func (c *Collector) Close() {
+	if c.cancel != nil {
+		c.cancel()
+	}
 	if c.unsubscribe != nil {
 		c.unsubscribe()
 	}
@@ -80,12 +100,12 @@ func (c *Collector) record(event telemetry.Event) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// Store event in ring buffer
-	if len(c.events) >= c.maxEvents {
-		copy(c.events, c.events[1:])
-		c.events = c.events[:len(c.events)-1]
+	// Store event in circular buffer — O(1) per insert
+	c.events[c.pos] = event
+	c.pos = (c.pos + 1) % c.maxEvents
+	if c.count < c.maxEvents {
+		c.count++
 	}
-	c.events = append(c.events, event)
 
 	// Update aggregated stats based on event type
 	switch event.Type {
@@ -142,6 +162,24 @@ func (c *Collector) addError(errType, msg string) {
 		Type:    errType,
 		Message: msg,
 	})
+}
+
+// orderedEvents returns stored events from oldest to newest.
+// Caller must hold at least a read lock.
+func (c *Collector) orderedEvents() []telemetry.Event {
+	if c.count == 0 {
+		return nil
+	}
+	out := make([]telemetry.Event, c.count)
+	if c.count < c.maxEvents {
+		// Buffer not yet full: events occupy [0, count).
+		copy(out, c.events[:c.count])
+	} else {
+		// Buffer full: oldest is at c.pos, wrap around.
+		n := copy(out, c.events[c.pos:c.maxEvents])
+		copy(out[n:], c.events[:c.pos])
+	}
+	return out
 }
 
 // Dump returns a formatted diagnostic report.
@@ -205,11 +243,12 @@ func (c *Collector) Dump() string {
 
 	// Recent events (last 20)
 	sb.WriteString("=== Recent Events (last 20) ===\n")
-	start := len(c.events) - 20
+	ordered := c.orderedEvents()
+	start := len(ordered) - 20
 	if start < 0 {
 		start = 0
 	}
-	for _, event := range c.events[start:] {
+	for _, event := range ordered[start:] {
 		data := ""
 		if len(event.Data) > 0 {
 			if b, err := json.Marshal(event.Data); err == nil {
@@ -238,7 +277,7 @@ func (c *Collector) Stats() map[string]any {
 		"api_calls":      c.apiCalls,
 		"api_errors":     c.apiErrors,
 		"total_tokens":   c.totalTokens,
-		"event_count":    len(c.events),
+		"event_count":    c.count,
 		"model_calls":    c.modelCalls,
 		"tool_calls":     c.toolCalls,
 		"circuit_states": c.circuitStates,

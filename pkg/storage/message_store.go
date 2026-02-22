@@ -126,6 +126,12 @@ func (s *Store) SaveMessage(msg *Message) error {
 	if err != nil {
 		return fmt.Errorf("saving message: begin tx: %w", err)
 	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
 
 	now := time.Now()
 	insert := `
@@ -145,13 +151,11 @@ func (s *Store) SaveMessage(msg *Message) error {
 		msg.IsTruncated,
 	)
 	if err != nil {
-		_ = tx.Rollback()
 		return fmt.Errorf("saving message: insert: %w", err)
 	}
 
 	id, err := result.LastInsertId()
 	if err != nil {
-		_ = tx.Rollback()
 		return fmt.Errorf("saving message: last insert id: %w", err)
 	}
 	msg.ID = id
@@ -164,14 +168,13 @@ func (s *Store) SaveMessage(msg *Message) error {
 		WHERE session_id = ?
 	`
 	if _, err := tx.Exec(update, msg.Tokens, now, msg.SessionID); err != nil {
-		_ = tx.Rollback()
 		return fmt.Errorf("saving message: update session stats: %w", err)
 	}
 
 	if err := tx.Commit(); err != nil {
-		_ = tx.Rollback()
 		return fmt.Errorf("saving message: commit: %w", err)
 	}
+	committed = true
 
 	msgCopy := *msg
 	s.notify(newEvent(EventMessageCreated, msg.SessionID, msg.ID, msgCopy))
@@ -191,9 +194,14 @@ func (s *Store) ReplaceMessages(sessionID string, messages []Message) error {
 	if err != nil {
 		return fmt.Errorf("replacing messages: begin tx: %w", err)
 	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
 
 	if _, err = tx.Exec(`DELETE FROM messages WHERE session_id = ?`, sessionID); err != nil {
-		_ = tx.Rollback()
 		return fmt.Errorf("replacing messages: delete old: %w", err)
 	}
 
@@ -202,7 +210,6 @@ func (s *Store) ReplaceMessages(sessionID string, messages []Message) error {
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`)
 	if err != nil {
-		_ = tx.Rollback()
 		return fmt.Errorf("replacing messages: prepare insert: %w", err)
 	}
 	defer stmt.Close()
@@ -232,7 +239,6 @@ func (s *Store) ReplaceMessages(sessionID string, messages []Message) error {
 			msg.IsSummary,
 			msg.IsTruncated,
 		); err != nil {
-			_ = tx.Rollback()
 			return fmt.Errorf("replacing messages: insert: %w", err)
 		}
 	}
@@ -247,13 +253,13 @@ func (s *Store) ReplaceMessages(sessionID string, messages []Message) error {
 		SET message_count = ?, total_tokens = ?, last_active = ?
 		WHERE session_id = ?
 	`, len(messages), totalTokens, latest, sessionID); err != nil {
-		_ = tx.Rollback()
 		return fmt.Errorf("replacing messages: update session stats: %w", err)
 	}
 
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("replacing messages: commit: %w", err)
 	}
+	committed = true
 
 	s.notify(newEvent(EventSessionUpdated, sessionID, sessionID, map[string]any{
 		"messageCount": len(messages),
@@ -283,10 +289,7 @@ func (s *Store) GetMessages(sessionID string, limit int, offset int) ([]Message,
 	}
 	defer rows.Close()
 
-	capHint := limit
-	if capHint < 0 {
-		capHint = 0
-	}
+	capHint := max(limit, 0)
 	messages := make([]Message, 0, capHint)
 	for rows.Next() {
 		var msg Message
@@ -330,9 +333,7 @@ func (s *Store) GetMessagesWithCursor(sessionID string, cursor *Cursor, limit in
 	if limit <= 0 {
 		limit = 100
 	}
-	if limit > 1000 {
-		limit = 1000 // Cap to prevent excessive memory usage
-	}
+	limit = min(limit, 1000) // Cap to prevent excessive memory usage
 
 	var query string
 	var args []any
@@ -716,13 +717,18 @@ func (s *Store) SaveMessagesBatch(messages []*Message) error {
 	if err != nil {
 		return fmt.Errorf("begin batch transaction: %w", err)
 	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
 
 	stmt, err := tx.Prepare(`
 		INSERT INTO messages (session_id, role, content, content_json, content_type, reasoning, timestamp, tokens, is_summary, is_truncated)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`)
 	if err != nil {
-		_ = tx.Rollback()
 		return fmt.Errorf("prepare batch insert: %w", err)
 	}
 	defer stmt.Close()
@@ -768,13 +774,11 @@ func (s *Store) SaveMessagesBatch(messages []*Message) error {
 			msg.IsTruncated,
 		)
 		if err != nil {
-			_ = tx.Rollback()
 			return fmt.Errorf("batch insert message: %w", err)
 		}
 
 		id, err := result.LastInsertId()
 		if err != nil {
-			_ = tx.Rollback()
 			return fmt.Errorf("get last insert id: %w", err)
 		}
 		msg.ID = id
@@ -790,7 +794,6 @@ func (s *Store) SaveMessagesBatch(messages []*Message) error {
 			WHERE session_id = ?
 		`
 		if _, err := tx.Exec(update, ss.count, ss.tokens, ss.latest, sid); err != nil {
-			_ = tx.Rollback()
 			return fmt.Errorf("update session stats: %w", err)
 		}
 	}
@@ -798,6 +801,7 @@ func (s *Store) SaveMessagesBatch(messages []*Message) error {
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit batch transaction: %w", err)
 	}
+	committed = true
 
 	// Notify after successful commit
 	for _, msg := range messages {

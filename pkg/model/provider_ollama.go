@@ -158,123 +158,111 @@ func (p *OllamaProvider) ChatCompletionStream(ctx context.Context, req ChatReque
 	chunkChan := make(chan StreamChunk, 10)
 	errChan := make(chan error, 1)
 
+	go func() {
+		defer close(chunkChan)
+		defer close(errChan)
+		if err := p.invokeStream(ctx, req, chunkChan); err != nil {
+			errChan <- err
+		}
+	}()
+
+	return chunkChan, errChan
+}
+
+func (p *OllamaProvider) invokeStream(ctx context.Context, req ChatRequest, chunkChan chan<- StreamChunk) error {
 	ollamaReq, err := p.buildRequest(req, true)
 	if err != nil {
-		errChan <- err
-		close(chunkChan)
-		close(errChan)
-		return chunkChan, errChan
+		return err
 	}
 
 	body, err := json.Marshal(ollamaReq)
 	if err != nil {
-		errChan <- fmt.Errorf("marshal ollama request: %w", err)
-		close(chunkChan)
-		close(errChan)
-		return chunkChan, errChan
+		return fmt.Errorf("marshal ollama request: %w", err)
 	}
 
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", p.baseURL+"/api/chat", bytes.NewReader(body))
 	if err != nil {
-		errChan <- err
-		close(chunkChan)
-		close(errChan)
-		return chunkChan, errChan
+		return err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 
 	resp, err := p.httpClient.Do(httpReq)
 	if err != nil {
-		errChan <- err
-		close(chunkChan)
-		close(errChan)
-		return chunkChan, errChan
+		return err
 	}
+	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		errChan <- fmt.Errorf("ollama stream failed (%d): %s", resp.StatusCode, string(body))
-		close(chunkChan)
-		close(errChan)
-		return chunkChan, errChan
+		return fmt.Errorf("ollama stream failed (%d): %s", resp.StatusCode, string(body))
 	}
 
-	go func() {
-		defer resp.Body.Close()
-		defer close(chunkChan)
-		defer close(errChan)
-
-		reader := bufio.NewReader(resp.Body)
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			default:
-			}
-
-			line, err := reader.ReadBytes('\n')
-			if err != nil {
-				if err == io.EOF {
-					return
-				}
-				errChan <- err
-				return
-			}
-
-			line = bytes.TrimSpace(line)
-			if len(line) == 0 {
-				continue
-			}
-
-			var chunkResp ollamaChatResponse
-			if err := json.Unmarshal(line, &chunkResp); err != nil {
-				continue
-			}
-
-			delta := MessageDelta{
-				Role:    chunkResp.Message.Role,
-				Content: chunkResp.Message.Content,
-			}
-			if len(chunkResp.Message.ToolCalls) > 0 {
-				delta.ToolCalls = toToolCallDeltas(chunkResp.Message.ToolCalls)
-			}
-
-			var finish *string
-			if chunkResp.Done {
-				reason := finishReason(chunkResp.DoneReason)
-				finish = &reason
-			}
-
-			if delta.Role == "" && delta.Content == "" && len(delta.ToolCalls) == 0 && finish == nil {
-				continue
-			}
-
-			stream := StreamChunk{
-				Model: chunkResp.Model,
-				Choices: []StreamChoice{
-					{
-						Index:        0,
-						Delta:        delta,
-						FinishReason: finish,
-					},
-				},
-			}
-
-			if chunkResp.Done {
-				usage := usageFromOllama(chunkResp.PromptEvalCount, chunkResp.EvalCount)
-				stream.Usage = &usage
-			}
-
-			select {
-			case chunkChan <- stream:
-			case <-ctx.Done():
-				return
-			}
+	reader := bufio.NewReader(resp.Body)
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		default:
 		}
-	}()
 
-	return chunkChan, errChan
+		line, err := reader.ReadBytes('\n')
+		if err != nil {
+			if err == io.EOF {
+				return nil
+			}
+			return err
+		}
+
+		line = bytes.TrimSpace(line)
+		if len(line) == 0 {
+			continue
+		}
+
+		var chunkResp ollamaChatResponse
+		if err := json.Unmarshal(line, &chunkResp); err != nil {
+			continue
+		}
+
+		delta := MessageDelta{
+			Role:    chunkResp.Message.Role,
+			Content: chunkResp.Message.Content,
+		}
+		if len(chunkResp.Message.ToolCalls) > 0 {
+			delta.ToolCalls = toToolCallDeltas(chunkResp.Message.ToolCalls)
+		}
+
+		var finish *string
+		if chunkResp.Done {
+			reason := finishReason(chunkResp.DoneReason)
+			finish = &reason
+		}
+
+		if delta.Role == "" && delta.Content == "" && len(delta.ToolCalls) == 0 && finish == nil {
+			continue
+		}
+
+		stream := StreamChunk{
+			Model: chunkResp.Model,
+			Choices: []StreamChoice{
+				{
+					Index:        0,
+					Delta:        delta,
+					FinishReason: finish,
+				},
+			},
+		}
+
+		if chunkResp.Done {
+			usage := usageFromOllama(chunkResp.PromptEvalCount, chunkResp.EvalCount)
+			stream.Usage = &usage
+		}
+
+		select {
+		case chunkChan <- stream:
+		case <-ctx.Done():
+			return nil
+		}
+	}
 }
 
 // SetTimeout updates the Ollama client timeout (0 disables timeout).

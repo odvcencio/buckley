@@ -80,9 +80,12 @@ func (w *WorkflowManager) pauseWorkflow(reason, question string) error {
 	w.pauseAt = now
 	w.pauseMu.Unlock()
 
-	// Persist pause state to database for recovery across restarts
-	if w.store != nil && w.sessionID != "" {
-		if err := w.store.UpdateSessionPauseState(w.sessionID, reason, question, &now); err != nil {
+	// Persist pause state to database for recovery across restarts (copy sessionID under lock before I/O)
+	w.stateMu.RLock()
+	sessionID := w.sessionID
+	w.stateMu.RUnlock()
+	if w.store != nil && sessionID != "" {
+		if err := w.store.UpdateSessionPauseState(sessionID, reason, question, &now); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: failed to persist pause state: %v\n", err)
 		}
 	}

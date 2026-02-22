@@ -90,7 +90,7 @@ func (e *Executor) ExecuteWithContext(ctx context.Context, def *Definition, flag
 		return result, execErr
 	case <-ctx.Done():
 		// Context was cancelled or timed out
-		return nil, fmt.Errorf("plugin execution %w: %v", ctx.Err(), ctx.Err())
+		return nil, fmt.Errorf("plugin execution: %w", ctx.Err())
 	}
 }
 

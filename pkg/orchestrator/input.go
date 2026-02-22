@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 )
 
@@ -274,24 +275,12 @@ func isRegularFile(path string) bool {
 
 func isImageFile(path string) bool {
 	ext := strings.ToLower(filepath.Ext(path))
-	imageExts := []string{".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
-	for _, e := range imageExts {
-		if ext == e {
-			return true
-		}
-	}
-	return false
+	return slices.Contains([]string{".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}, ext)
 }
 
 func isVideoFile(path string) bool {
 	ext := strings.ToLower(filepath.Ext(path))
-	videoExts := []string{".mp4", ".avi", ".mov", ".mkv", ".webm", ".m4v"}
-	for _, e := range videoExts {
-		if ext == e {
-			return true
-		}
-	}
-	return false
+	return slices.Contains([]string{".mp4", ".avi", ".mov", ".mkv", ".webm", ".m4v"}, ext)
 }
 
 func getMimeType(path string) string {

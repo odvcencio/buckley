@@ -8,6 +8,9 @@ import (
 	"sort"
 	"strings"
 
+	"golang.org/x/text/cases"
+	"golang.org/x/text/language"
+
 	"github.com/odvcencio/buckley/pkg/config"
 	projectcontext "github.com/odvcencio/buckley/pkg/context"
 	"github.com/odvcencio/buckley/pkg/orchestrator"
@@ -281,14 +284,15 @@ func renderPersonaSection(provider *personality.PersonaProvider) string {
 	for _, profile := range profiles {
 		b.WriteString(fmt.Sprintf("| %s | %s | %s |\n", profile.ID, profile.Name, profile.Summary))
 	}
+	titleCase := cases.Title(language.English)
 	b.WriteString("\nPhase assignments:\n")
-	for _, stage := range orchestrator.PersonaStages {
+	for _, stage := range orchestrator.PersonaStages() {
 		profile := provider.PersonaForPhase(stage)
 		label := "default persona"
 		if profile != nil {
 			label = fmt.Sprintf("%s (%s)", profile.Name, profile.ID)
 		}
-		b.WriteString(fmt.Sprintf("- %s → %s\n", strings.Title(stage), label))
+		b.WriteString(fmt.Sprintf("- %s → %s\n", titleCase.String(stage), label))
 	}
 	return strings.TrimSpace(b.String()) + "\n"
 }
@@ -297,14 +301,15 @@ func renderTaskPhaseSection(phases []orchestrator.TaskPhase) string {
 	if len(phases) == 0 {
 		return "## Task Phases\n\nBuilder → Verify → Review. Customize via `workflow.task_phases` in config.\n"
 	}
+	titleCase := cases.Title(language.English)
 	var b strings.Builder
 	b.WriteString("## Task Phases\n\n")
 	for _, phase := range phases {
 		title := phase.Name
 		if strings.TrimSpace(title) == "" {
-			title = strings.Title(phase.Stage)
+			title = titleCase.String(phase.Stage)
 		}
-		b.WriteString(fmt.Sprintf("### %s (%s)\n", title, strings.Title(phase.Stage)))
+		b.WriteString(fmt.Sprintf("### %s (%s)\n", title, titleCase.String(phase.Stage)))
 		if strings.TrimSpace(phase.Description) != "" {
 			b.WriteString(phase.Description + "\n")
 		}
@@ -364,7 +369,7 @@ func renderTechStackSection(ctx *projectcontext.ProjectContext) string {
 	}
 	sort.Strings(keys)
 	for _, key := range keys {
-		b.WriteString(fmt.Sprintf("- **%s:** %s\n", strings.Title(key), ctx.TechStack[key]))
+		b.WriteString(fmt.Sprintf("- **%s:** %s\n", cases.Title(language.English).String(key), ctx.TechStack[key]))
 	}
 	return strings.TrimSpace(b.String()) + "\n"
 }
@@ -393,7 +398,7 @@ style:
   tone: %s
   quirk_probability: %.2f
   response_length: concise
-`, displayName, strings.Title(slug), displayName, tone, quirk)
+`, displayName, cases.Title(language.English).String(slug), displayName, tone, quirk)
 }
 
 func renderSkillBlueprint(displayName, slug string) string {
@@ -427,7 +432,7 @@ todo_template: |
 - [ ] Criteria 1
 - [ ] Criteria 2
 - [ ] Criteria 3
-`, slug, displayName, strings.Title(displayName))
+`, slug, displayName, cases.Title(language.English).String(displayName))
 }
 
 func renderPluginManifest(slug string) string {

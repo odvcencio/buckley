@@ -433,7 +433,7 @@ func formatWebSocketDialError(resp *http.Response, err error) error {
 		return fmt.Errorf("websocket connection failed (%s): %s", resp.Status, body)
 	}
 	if err != nil {
-		return fmt.Errorf("websocket connection failed (%s): %v", resp.Status, err)
+		return fmt.Errorf("websocket connection failed (%s): %w", resp.Status, err)
 	}
 	return fmt.Errorf("websocket connection failed (%s)", resp.Status)
 }

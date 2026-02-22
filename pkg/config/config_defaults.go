@@ -43,19 +43,22 @@ func defaultSandboxConfig() SandboxConfig {
 		},
 	}
 
-	if cwd, err := os.Getwd(); err == nil && strings.TrimSpace(cwd) != "" {
-		cfg.WorkspacePath = cwd
-		cfg.AllowedPaths = []string{cwd}
+	cwd, err := os.Getwd()
+	if err != nil || strings.TrimSpace(cwd) == "" {
+		cwd = "."
 	}
+	cfg.WorkspacePath = cwd
+	cfg.AllowedPaths = []string{cwd}
 
-	home, err := os.UserHomeDir()
-	if err == nil && strings.TrimSpace(home) != "" {
-		cfg.DeniedPaths = append(cfg.DeniedPaths,
-			filepath.Join(home, ".ssh"),
-			filepath.Join(home, ".gnupg"),
-			filepath.Join(home, ".aws"),
-		)
+	home, homeErr := os.UserHomeDir()
+	if homeErr != nil || strings.TrimSpace(home) == "" {
+		home = filepath.Join(string(os.PathSeparator), "root")
 	}
+	cfg.DeniedPaths = append(cfg.DeniedPaths,
+		filepath.Join(home, ".ssh"),
+		filepath.Join(home, ".gnupg"),
+		filepath.Join(home, ".aws"),
+	)
 	cfg.DeniedPaths = append(cfg.DeniedPaths, "/etc", "/var", "/usr", "/bin", "/sbin")
 	cfg.DeniedCommands = []string{
 		"rm -rf /",
@@ -73,13 +76,15 @@ func defaultSandboxConfig() SandboxConfig {
 
 func defaultDeniedPaths() []string {
 	paths := []string{"/etc", "/var"}
-	if home, err := os.UserHomeDir(); err == nil && strings.TrimSpace(home) != "" {
-		paths = append(paths,
-			filepath.Join(home, ".ssh"),
-			filepath.Join(home, ".gnupg"),
-			filepath.Join(home, ".aws"),
-		)
+	home, err := os.UserHomeDir()
+	if err != nil || strings.TrimSpace(home) == "" {
+		home = filepath.Join(string(os.PathSeparator), "root")
 	}
+	paths = append(paths,
+		filepath.Join(home, ".ssh"),
+		filepath.Join(home, ".gnupg"),
+		filepath.Join(home, ".aws"),
+	)
 	return paths
 }
 

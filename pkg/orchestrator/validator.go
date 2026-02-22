@@ -35,13 +35,6 @@ func NewValidator(registry *tool.Registry, projectRoot string) *Validator {
 	}
 }
 
-func (v *Validator) baseContext() context.Context {
-	if v == nil || v.ctx == nil {
-		return context.Background()
-	}
-	return v.ctx
-}
-
 // SetContext updates the validator context for downstream commands.
 func (v *Validator) SetContext(ctx context.Context) {
 	if v == nil || ctx == nil {
@@ -164,8 +157,7 @@ func (v *Validator) extractRequiredTools(task *Task) []string {
 	}
 
 	// Exact word matching for known tool names in the description.
-	words := strings.Fields(lowerDesc)
-	for _, word := range words {
+	for word := range strings.FieldsSeq(lowerDesc) {
 		clean := strings.Trim(word, ".,:;")
 		for _, p := range patterns {
 			target := strings.TrimSpace(p.pattern)
@@ -288,33 +280,54 @@ func (v *Validator) detectProjectEnvironment() *envdetect.EnvironmentProfile {
 	return profile
 }
 
-// getRequiredEnvironmentVars determines required env vars based on task
-func (v *Validator) getRequiredEnvironmentVars(task *Task) []string {
-	var required []string
+// credentialRequirement maps a keyword found in task descriptions to the
+// environment variables that must be set when that keyword is present.
+type credentialRequirement struct {
+	keyword string
+	envVars []string
+}
 
-	desc := strings.ToLower(task.Description)
-
+// credentialRequirements is the authoritative table of keyword-to-credential
+// mappings used by getRequiredEnvironmentVars. Edit this slice to add, remove,
+// or correct credential detection rules.
+var credentialRequirements = []credentialRequirement{
 	// Model API keys
-	if strings.Contains(desc, "model") || strings.Contains(desc, "openai") ||
-		strings.Contains(desc, "anthropic") || strings.Contains(desc, "openrouter") {
-		required = append(required, "OPENROUTER_API_KEY")
-	}
+	{"model", []string{"OPENROUTER_API_KEY"}},
+	{"openai", []string{"OPENROUTER_API_KEY", "OPENAI_API_KEY"}},
+	{"anthropic", []string{"ANTHROPIC_API_KEY"}},
+	{"openrouter", []string{"OPENROUTER_API_KEY"}},
 
 	// Database credentials
-	if strings.Contains(desc, "database") || strings.Contains(desc, "postgres") ||
-		strings.Contains(desc, "mysql") || strings.Contains(desc, "mongodb") {
-		required = append(required, "DB_HOST", "DB_USER", "DB_PASSWORD")
-	}
+	{"database", []string{"DB_HOST", "DB_USER", "DB_PASSWORD"}},
+	{"postgres", []string{"DB_HOST", "DB_USER", "DB_PASSWORD"}},
+	{"mysql", []string{"DB_HOST", "DB_USER", "DB_PASSWORD"}},
+	{"mongodb", []string{"DB_HOST", "DB_USER", "DB_PASSWORD"}},
 
 	// Cloud providers
-	if strings.Contains(desc, "aws") || strings.Contains(desc, "amazon") {
-		required = append(required, "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY")
-	}
-	if strings.Contains(desc, "gcp") || strings.Contains(desc, "google") {
-		required = append(required, "GOOGLE_APPLICATION_CREDENTIALS")
-	}
-	if strings.Contains(desc, "azure") || strings.Contains(desc, "microsoft") {
-		required = append(required, "AZURE_SUBSCRIPTION_ID")
+	{"aws", []string{"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"}},
+	{"amazon", []string{"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"}},
+	{"gcp", []string{"GOOGLE_APPLICATION_CREDENTIALS"}},
+	{"google", []string{"GOOGLE_APPLICATION_CREDENTIALS"}},
+	{"azure", []string{"AZURE_SUBSCRIPTION_ID"}},
+	{"microsoft", []string{"AZURE_SUBSCRIPTION_ID"}},
+}
+
+// getRequiredEnvironmentVars determines required env vars based on task
+func (v *Validator) getRequiredEnvironmentVars(task *Task) []string {
+	desc := strings.ToLower(task.Description)
+
+	seen := make(map[string]bool)
+	var required []string
+
+	for _, req := range credentialRequirements {
+		if strings.Contains(desc, req.keyword) {
+			for _, envVar := range req.envVars {
+				if !seen[envVar] {
+					seen[envVar] = true
+					required = append(required, envVar)
+				}
+			}
+		}
 	}
 
 	return required
@@ -690,7 +703,7 @@ func (v *Verifier) verifyFiles(task *Task, result *VerifyResult) error {
 func (v *Verifier) runVerificationSteps(task *Task, result *VerifyResult) error {
 	for _, verification := range task.Verification {
 		if err := v.runVerificationStep(verification, result); err != nil {
-			return fmt.Errorf("verification step failed: %s: %v", verification, err)
+			return fmt.Errorf("verification step failed: %s: %w", verification, err)
 		}
 	}
 	return nil
@@ -797,7 +810,7 @@ func (v *Verifier) detectTestCommands() []string {
 }
 
 // checkQuality runs code quality checks
-func (v *Verifier) checkQuality(task *Task, result *VerifyResult) error {
+func (v *Verifier) checkQuality(_ *Task, result *VerifyResult) error {
 	// Run linter if available
 	linterCommands := v.detectLinterCommands()
 	for _, cmd := range linterCommands {
@@ -830,7 +843,7 @@ func (v *Verifier) detectLinterCommands() []string {
 }
 
 // collectArtifacts collects generated artifacts for tracking
-func (v *Verifier) collectArtifacts(task *Task, result *VerifyResult) {
+func (v *Verifier) collectArtifacts(_ *Task, result *VerifyResult) {
 	// Find test result files
 	if _, err := os.Stat("coverage.out"); err == nil {
 		result.Artifacts = append(result.Artifacts, Artifact{

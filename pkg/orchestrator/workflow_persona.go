@@ -61,7 +61,9 @@ func (w *WorkflowManager) SetSteeringNotes(notes string) {
 	if w == nil {
 		return
 	}
+	w.stateMu.Lock()
 	w.steeringNotes = strings.TrimSpace(notes)
+	w.stateMu.Unlock()
 	w.persistSteeringSettings()
 }
 
@@ -70,7 +72,9 @@ func (w *WorkflowManager) SetAutonomyLevel(level string) {
 	if w == nil {
 		return
 	}
+	w.stateMu.Lock()
 	w.autonomyLevel = strings.TrimSpace(level)
+	w.stateMu.Unlock()
 	w.persistSteeringSettings()
 }
 
@@ -113,8 +117,9 @@ func (w *WorkflowManager) loadPersonaOverrides() {
 	if w == nil || w.personaProvider == nil || w.store == nil {
 		return
 	}
-	keys := make([]string, len(PersonaStages))
-	for i, stage := range PersonaStages {
+	stages := PersonaStages()
+	keys := make([]string, len(stages))
+	for i, stage := range stages {
 		keys[i] = PersonaSettingKey(stage)
 	}
 	existing, err := w.store.GetSettings(keys)
@@ -122,7 +127,7 @@ func (w *WorkflowManager) loadPersonaOverrides() {
 		fmt.Fprintf(os.Stderr, "Warning: failed to load persona overrides: %v\n", err)
 		return
 	}
-	for _, stage := range PersonaStages {
+	for _, stage := range stages {
 		key := PersonaSettingKey(stage)
 		value := strings.TrimSpace(existing[key])
 		_ = w.personaProvider.SetRuntimeOverride(stage, value)

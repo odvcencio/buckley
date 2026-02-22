@@ -2,7 +2,7 @@ package model
 
 import (
 	"fmt"
-	"log"
+	"log/slog"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -93,7 +93,7 @@ func (cb *CircuitBreaker) Reset() {
 	cb.lastFailureTime = time.Time{}
 
 	if oldState != CircuitClosed {
-		log.Printf("[circuit-breaker] manually reset from %s to closed", oldState.String())
+		slog.Warn("circuit breaker manually reset", "old_state", oldState.String(), "new_state", "closed")
 	}
 }
 
@@ -112,7 +112,7 @@ func (cb *CircuitBreaker) Call(fn func() error) error {
 			}
 			cb.state = CircuitHalfOpen
 			cb.failureCount = 0
-			log.Printf("[circuit-breaker] transitioning from open to half-open after %v", cb.config.ResetTimeout)
+			slog.Warn("circuit breaker state transition", "old_state", "open", "new_state", "half-open", "reset_timeout", cb.config.ResetTimeout)
 		} else {
 			cb.mu.Unlock()
 			return fmt.Errorf("circuit breaker is open (last failure: %v ago)", time.Since(cb.lastFailureTime))
@@ -147,12 +147,12 @@ func (cb *CircuitBreaker) recordFailure() {
 		// Failure in half-open state goes back to open
 		cb.state = CircuitOpen
 		cb.halfOpenProbe.Store(false)
-		log.Printf("[circuit-breaker] transitioning from half-open to open (failure in test request)")
+		slog.Warn("circuit breaker state transition", "old_state", "half-open", "new_state", "open", "reason", "failure in test request")
 	case CircuitClosed:
 		// Check if we should open the circuit
 		if cb.failureCount >= cb.config.MaxFailures {
 			cb.state = CircuitOpen
-			log.Printf("[circuit-breaker] transitioning from closed to open after %d consecutive failures", cb.config.MaxFailures)
+			slog.Warn("circuit breaker state transition", "old_state", "closed", "new_state", "open", "consecutive_failures", cb.config.MaxFailures)
 		}
 	}
 }
@@ -167,12 +167,12 @@ func (cb *CircuitBreaker) recordSuccess() {
 		cb.failureCount = 0
 		cb.lastFailureTime = time.Time{}
 		cb.halfOpenProbe.Store(false)
-		log.Printf("[circuit-breaker] transitioning from half-open to closed (service recovered)")
+		slog.Warn("circuit breaker state transition", "old_state", "half-open", "new_state", "closed", "reason", "service recovered")
 	case CircuitClosed:
 		// Reset failure count on success in closed state
 		if cb.failureCount > 0 {
 			cb.failureCount = 0
-			log.Printf("[circuit-breaker] failure count reset after successful call")
+			slog.Debug("circuit breaker failure count reset", "reason", "successful call")
 		}
 	}
 }

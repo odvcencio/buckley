@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"log/slog"
 	"sync"
 	"time"
 )
@@ -153,7 +154,7 @@ func (bw *BatchWriter) startTimer() {
 		bw.mu.Lock()
 		if err := bw.flushLocked(); err != nil {
 			// Log but don't propagate -- timer callback has no caller to return to
-			_ = err // flushLocked already resets state; batch is lost
+			slog.Warn("batch writer flush failed", "error", err)
 		}
 		bw.mu.Unlock()
 	})

@@ -196,14 +196,12 @@ func (c *Client) calculateBackoff(attempt int) time.Duration {
 
 	// Calculate exponential delay: InitialInterval * Multiplier^attempt
 	delay := float64(c.retryConfig.InitialInterval)
-	for i := 0; i < attempt; i++ {
+	for range attempt {
 		delay *= c.retryConfig.Multiplier
 	}
 
 	// Cap at MaxInterval
-	if delay > float64(c.retryConfig.MaxInterval) {
-		delay = float64(c.retryConfig.MaxInterval)
-	}
+	delay = min(delay, float64(c.retryConfig.MaxInterval))
 
 	// Add jitter: random value between 0 and delay/2
 	// This helps prevent thundering herd when multiple clients retry simultaneously
@@ -283,18 +281,6 @@ func (c *Client) DoWithRetry(req *http.Request) (*http.Response, error) {
 		return nil, fmt.Errorf("max retries (%d) exceeded: %w", c.retryConfig.MaxRetries, lastErr)
 	}
 	return nil, fmt.Errorf("max retries (%d) exceeded", c.retryConfig.MaxRetries)
-}
-
-// doWithRateLimit executes an HTTP request with proactive rate limiting.
-// Deprecated: Use DoWithRetry for idempotent requests or direct httpClient.Do for non-idempotent.
-func (c *Client) doWithRateLimit(ctx context.Context, req *http.Request) (*http.Response, error) {
-	// Wait for rate limiter (this is the proactive part - we wait BEFORE hitting the API)
-	if c.rateLimiter != nil {
-		if err := c.rateLimiter.Wait(ctx); err != nil {
-			return nil, fmt.Errorf("rate limit wait: %w", err)
-		}
-	}
-	return c.httpClient.Do(req)
 }
 
 // FetchCatalog fetches the model catalog from OpenRouter
@@ -383,7 +369,15 @@ func (c *Client) ChatCompletion(ctx context.Context, req ChatRequest) (*ChatResp
 			c.setHeaders(httpReq)
 			httpReq.Header.Set("Content-Type", "application/json")
 
-			resp, err := c.doWithRateLimit(ctx, httpReq)
+			// Wait for rate limiter
+			if c.rateLimiter != nil {
+				if err := c.rateLimiter.Wait(ctx); err != nil {
+					lastErr = fmt.Errorf("rate limit wait: %w", err)
+					continue
+				}
+			}
+
+			resp, err := c.httpClient.Do(httpReq)
 			if err != nil {
 				lastErr = err
 				continue
@@ -422,10 +416,7 @@ func (c *Client) ChatCompletion(ctx context.Context, req ChatRequest) (*ChatResp
 func (c *Client) calculateRetryDelay(attempt int, lastErr error) time.Duration {
 	// Check if error has Retry-After header
 	if apiErr, ok := lastErr.(*APIError); ok && apiErr.RetryAfter > 0 {
-		if apiErr.RetryAfter > maxRetryDelay {
-			return maxRetryDelay
-		}
-		return apiErr.RetryAfter
+		return min(apiErr.RetryAfter, maxRetryDelay)
 	}
 
 	if attempt <= 0 {
@@ -437,10 +428,7 @@ func (c *Client) calculateRetryDelay(attempt int, lastErr error) time.Duration {
 	for i := 0; i < attempt-1; i++ {
 		multiplier *= 2
 	}
-	delay := baseRetryDelay * time.Duration(multiplier)
-	if delay > maxRetryDelay {
-		delay = maxRetryDelay
-	}
+	delay := min(baseRetryDelay*time.Duration(multiplier), maxRetryDelay)
 
 	return delay
 }
@@ -497,7 +485,15 @@ func (c *Client) executeStreamRequest(ctx context.Context, req ChatRequest, chun
 		httpReq.Header.Set("Content-Type", "application/json")
 		httpReq.Header.Set("Accept", "text/event-stream")
 
-		resp, err := c.doWithRateLimit(ctx, httpReq)
+		// Wait for rate limiter
+		if c.rateLimiter != nil {
+			if err := c.rateLimiter.Wait(ctx); err != nil {
+				lastErr = fmt.Errorf("rate limit wait: %w", err)
+				continue
+			}
+		}
+
+		resp, err := c.httpClient.Do(httpReq)
 		if err != nil {
 			lastErr = err
 			continue

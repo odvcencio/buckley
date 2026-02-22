@@ -22,7 +22,12 @@ func (s *Store) SaveAPICall(call *APICall) error {
 	if err != nil {
 		return fmt.Errorf("begin transaction: %w", err)
 	}
-	defer tx.Rollback()
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
 
 	timestamp := call.Timestamp.UTC().Format("2006-01-02 15:04:05")
 	query := `
@@ -56,7 +61,11 @@ func (s *Store) SaveAPICall(call *APICall) error {
 		return fmt.Errorf("update session cost: %w", err)
 	}
 
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit api call: %w", err)
+	}
+	committed = true
+	return nil
 }
 
 // GetDailyCost returns the total API cost accrued today.

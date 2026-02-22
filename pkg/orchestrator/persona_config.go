@@ -2,13 +2,18 @@ package orchestrator
 
 import "strings"
 
-// PersonaStages enumerates supported persona phases/stages.
-var PersonaStages = []string{"planning", "execution", "review", "builder", "verify", "reviewer"}
+// personaStages enumerates supported persona phases/stages.
+var personaStages = []string{"planning", "execution", "review", "builder", "verify", "reviewer"}
+
+// PersonaStages returns a copy of the supported persona phases/stages.
+func PersonaStages() []string {
+	return append([]string{}, personaStages...)
+}
 
 // NormalizePersonaStage trims and lowercases a stage name.
 func NormalizePersonaStage(stage string) string {
 	s := strings.ToLower(strings.TrimSpace(stage))
-	for _, allowed := range PersonaStages {
+	for _, allowed := range personaStages {
 		if s == allowed {
 			return s
 		}

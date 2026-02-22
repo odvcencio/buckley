@@ -2,6 +2,7 @@ package telemetry
 
 import (
 	"context"
+	"log"
 	"sync"
 	"time"
 )
@@ -110,7 +111,9 @@ func (p *Persister) flush() {
 	p.batchMu.Unlock()
 
 	// Best-effort write — don't block the subscriber loop
-	_ = p.store.Append(context.Background(), p.streamID, batch)
+	if err := p.store.Append(context.Background(), p.streamID, batch); err != nil {
+		log.Printf("warning: telemetry persist failed: %v", err)
+	}
 }
 
 // Flush forces an immediate write of buffered events to SQLite.

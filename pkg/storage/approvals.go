@@ -102,7 +102,12 @@ func (s *Store) SavePolicy(policy *ApprovalPolicy) error {
 	if err != nil {
 		return fmt.Errorf("begin transaction: %w", err)
 	}
-	defer tx.Rollback()
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
 
 	// If this policy should be active, deactivate all others first
 	if policy.IsActive {
@@ -136,7 +141,11 @@ func (s *Store) SavePolicy(policy *ApprovalPolicy) error {
 		policy.UpdatedAt = now
 	}
 
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit save policy: %w", err)
+	}
+	committed = true
+	return nil
 }
 
 // GetPolicy returns a policy by ID

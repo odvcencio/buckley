@@ -85,20 +85,3 @@ type App interface {
 	// Diagnostics
 	SetDiagnostics(collector *diagnostics.Collector)
 }
-
-// LayoutSpec defines the layout configuration for the TUI.
-type LayoutSpec struct {
-	SidebarVisible  bool
-	PresenceVisible bool
-	SidebarWidth    int
-	ShowHeader      bool
-	ShowStatus      bool
-}
-
-// RenderMetrics tracks rendering performance statistics.
-type RenderMetrics struct {
-	FrameCount      int64
-	DroppedFrames   int64
-	TotalRenderTime time.Duration
-	LastFrameTime   time.Duration
-}

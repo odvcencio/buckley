@@ -178,7 +178,7 @@ func RenderProgressBar(progress *ProgressInfo, width int) string {
 	var bar strings.Builder
 	bar.WriteString("[")
 
-	for i := 0; i < barWidth; i++ {
+	for i := range barWidth {
 		if i < filledWidth {
 			bar.WriteString("█")
 		} else if i == filledWidth && progress.InProgressTasks > 0 {

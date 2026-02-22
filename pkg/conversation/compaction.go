@@ -208,7 +208,7 @@ func (c *tokenEstimateCache) evictHalf() {
 	})
 	// Remove half
 	removeCount := len(sorted) / 2
-	for i := 0; i < removeCount && i < len(sorted); i++ {
+	for i := range min(removeCount, len(sorted)) {
 		delete(c.entries, sorted[i].key)
 	}
 }
@@ -324,29 +324,25 @@ func (cm *CompactionManager) processQueueRequest(req CompactionRequest) {
 		ctx = context.Background()
 	}
 
-	// Set conversation temporarily
 	cm.compactionMu.Lock()
-	oldConv := cm.conversation
-	cm.conversation = req.Conv
 	cm.compacting = true
 	cm.compactionMu.Unlock()
 
-	result, err := cm.Compact(ctx)
+	// Pass the conversation directly to avoid swapping cm.conversation
+	result, err := cm.compactWithConv(ctx, primaryCompactionModel, req.Conv)
 	if err != nil {
 		for _, model := range cm.fallbackModels() {
-			result, err = cm.compactWith(ctx, model)
+			result, err = cm.compactWithConv(ctx, model, req.Conv)
 			if err == nil {
 				break
 			}
 		}
 	}
 	if err != nil {
-		result = cm.compactFallback()
+		result = cm.compactFallbackConv(req.Conv)
 	}
 
-	// Restore original conversation
 	cm.compactionMu.Lock()
-	cm.conversation = oldConv
 	cm.compacting = false
 	cm.compactionMu.Unlock()
 
@@ -575,7 +571,7 @@ func (cm *CompactionManager) CompactAsync(ctx context.Context) {
 	cm.compactionMu.Unlock()
 
 	// Use the queue for processing
-	go func() {
+	cm.queueWG.Go(func() {
 		defer func() {
 			cm.compactionMu.Lock()
 			cm.compacting = false
@@ -601,7 +597,7 @@ func (cm *CompactionManager) CompactAsync(ctx context.Context) {
 		if result != nil && handler != nil {
 			handler(result)
 		}
-	}()
+	})
 }
 
 // Compact compacts a conversation by summarizing old messages.
@@ -616,6 +612,16 @@ func (cm *CompactionManager) compactWith(ctx context.Context, modelID string) (*
 	cm.compactionMu.Lock()
 	conv := cm.conversation
 	cm.compactionMu.Unlock()
+	return cm.compactWithConv(ctx, modelID, conv)
+}
+
+// compactWithConv performs compaction on the provided conversation without
+// reading from cm.conversation. This avoids the race condition where
+// processQueueRequest previously had to swap cm.conversation.
+func (cm *CompactionManager) compactWithConv(ctx context.Context, modelID string, conv *Conversation) (*CompactionResult, error) {
+	if cm == nil {
+		return nil, fmt.Errorf("compaction manager unavailable")
+	}
 	if conv == nil {
 		return nil, fmt.Errorf("conversation required")
 	}
@@ -644,7 +650,16 @@ func (cm *CompactionManager) compactWith(ctx context.Context, modelID string) (*
 }
 
 func (cm *CompactionManager) compactFallback() *CompactionResult {
+	cm.compactionMu.Lock()
 	conv := cm.conversation
+	cm.compactionMu.Unlock()
+	return cm.compactFallbackConv(conv)
+}
+
+// compactFallbackConv performs a fallback compaction on the provided conversation
+// without reading from cm.conversation. This avoids the race condition where
+// processQueueRequest previously had to swap cm.conversation.
+func (cm *CompactionManager) compactFallbackConv(conv *Conversation) *CompactionResult {
 	if conv == nil || len(conv.Messages) < 4 {
 		return nil
 	}
@@ -757,7 +772,7 @@ func (cm *CompactionManager) generateSummaryWithRetry(ctx context.Context, model
 
 	maxRetries := 3
 	var lastErr error
-	for attempt := 0; attempt < maxRetries; attempt++ {
+	for attempt := range maxRetries {
 		if ctx != nil {
 			if err := ctx.Err(); err != nil {
 				return "", err
@@ -824,10 +839,7 @@ func selectCompactionSegments(messages []Message, ratio float64) ([]Message, []M
 		return nil, nil, fmt.Errorf("not enough non-system messages to summarize")
 	}
 
-	cutoff := int(float64(len(candidate)) * ratio)
-	if cutoff < 2 {
-		cutoff = 2 // Summarize at least 2 messages
-	}
+	cutoff := max(int(float64(len(candidate))*ratio), 2) // Summarize at least 2 messages
 
 	// Adjust cutoff to preserve tool call/response pair boundaries.
 	// Never split an assistant tool-call from its matching tool responses.
@@ -927,14 +939,11 @@ func (cm *CompactionManager) EstimateTokensSaved(conv *Conversation) int {
 	}
 
 	ratio := cm.compactionConfig().CompactionRatio
-	cutoff := int(float64(len(conv.Messages)) * ratio)
-	if cutoff < 2 {
-		cutoff = 2
-	}
+	cutoff := max(int(float64(len(conv.Messages))*ratio), 2)
 
 	// Calculate tokens in messages that would be summarized
 	tokensBefore := 0
-	for i := 0; i < cutoff; i++ {
+	for i := range cutoff {
 		tokensBefore += conv.Messages[i].Tokens
 	}
 

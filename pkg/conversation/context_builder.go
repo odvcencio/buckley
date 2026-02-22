@@ -177,20 +177,16 @@ func (cb *ContextBuilder) estimateUsage(conv *Conversation, budget int) float64 
 	}
 
 	total := 0
-	tokenCount := 0
-	for i := range conv.Messages {
-		tokens := conv.Messages[i].Tokens
+	for _, msg := range conv.Messages {
+		tokens := msg.Tokens
 		if tokens <= 0 {
-			tokens = cb.messageTokens(conv.Messages[i]) - contextMessageOverheadTokens
+			tokens = cb.messageTokens(msg) - contextMessageOverheadTokens
 			if tokens < 0 {
 				tokens = 0
 			}
-			conv.Messages[i].Tokens = tokens
 		}
-		tokenCount += tokens
 		total += tokens + contextMessageOverheadTokens
 	}
-	conv.TokenCount = tokenCount
 
 	if total == 0 {
 		return 0

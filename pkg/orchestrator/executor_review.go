@@ -259,7 +259,10 @@ func (e *Executor) ensureReviewInitialized() {
 	if e.workflow == nil {
 		return
 	}
-	if e.workflow.reviewArtifact != nil {
+	e.workflow.stateMu.RLock()
+	reviewExists := e.workflow.reviewArtifact != nil
+	e.workflow.stateMu.RUnlock()
+	if reviewExists {
 		return
 	}
 

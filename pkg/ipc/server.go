@@ -2058,15 +2058,16 @@ func (s *Server) loadPersonaOverridesFromStore() map[string]string {
 	if s == nil || s.store == nil {
 		return result
 	}
-	keys := make([]string, len(orchestrator.PersonaStages))
-	for i, stage := range orchestrator.PersonaStages {
+	stages := orchestrator.PersonaStages()
+	keys := make([]string, len(stages))
+	for i, stage := range stages {
 		keys[i] = orchestrator.PersonaSettingKey(stage)
 	}
 	values, err := s.store.GetSettings(keys)
 	if err != nil {
 		return result
 	}
-	for _, stage := range orchestrator.PersonaStages {
+	for _, stage := range stages {
 		val := strings.TrimSpace(values[orchestrator.PersonaSettingKey(stage)])
 		if val != "" {
 			result[stage] = val

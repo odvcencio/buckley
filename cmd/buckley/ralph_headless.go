@@ -101,9 +101,9 @@ func (r *ralphHeadlessRunner) WaitForIdle(ctx context.Context) error {
 			return ctx.Err()
 		case <-maxWait:
 			if sawNonIdle {
-				return fmt.Errorf("WaitForIdle: timed out after %v while processing", 5*time.Minute)
+				return fmt.Errorf("waitForIdle: timed out after %v while processing", 5*time.Minute)
 			}
-			return fmt.Errorf("WaitForIdle: timed out after %v waiting for processing to start", 5*time.Minute)
+			return fmt.Errorf("waitForIdle: timed out after %v waiting for processing to start", 5*time.Minute)
 		case <-ticker.C:
 		}
 	}

@@ -324,13 +324,6 @@ func (r *Runner) overlayCount(screen *runtime.Screen) int {
 	return screen.OverlayCount()
 }
 
-// jumpToBottom scrolls to the bottom of the chat.
-func (r *Runner) jumpToBottom() {
-	if r.chatView != nil {
-		r.chatView.ScrollToBottom()
-	}
-}
-
 // toggleSidebar toggles the sidebar visibility.
 func (r *Runner) toggleSidebar() {
 	if r == nil {
@@ -415,19 +408,6 @@ func (r *Runner) onAppReady(app *runtime.App) {
 	}
 	r.trySetInputFocus()
 	r.focusInitialized = true
-}
-
-func (r *Runner) initFocusIfNeeded(app *runtime.App) {
-	if r == nil || r.focusInitialized {
-		return
-	}
-	if app == nil || app.Screen() == nil {
-		return
-	}
-	// Only mark initialized if focus was successfully set to inputArea
-	if r.trySetInputFocus() {
-		r.focusInitialized = true
-	}
 }
 
 // trySetInputFocus attempts to focus the input area and returns true if successful.

@@ -70,7 +70,12 @@ func (s *Store) CreateAPIToken(name, owner, scope, secret string) (*APIToken, er
 	if err != nil {
 		return nil, fmt.Errorf("beginning api token transaction: %w", err)
 	}
-	defer tx.Rollback()
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
 
 	if _, err := tx.Exec(`
 		INSERT INTO api_tokens (id, name, token_hash, token_prefix, created_at, revoked)
@@ -87,6 +92,7 @@ func (s *Store) CreateAPIToken(name, owner, scope, secret string) (*APIToken, er
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("committing api token: %w", err)
 	}
+	committed = true
 
 	return &APIToken{
 		ID:        id,

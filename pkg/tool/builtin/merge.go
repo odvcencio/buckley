@@ -100,7 +100,7 @@ func summarizeConflicts(path string, workDir string) (map[string]any, error) {
 	}
 	file, err := os.Open(openPath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to open %s: %v", path, err)
+		return nil, fmt.Errorf("failed to open %s: %w", path, err)
 	}
 	defer file.Close()
 
@@ -150,7 +150,7 @@ func summarizeConflicts(path string, workDir string) (map[string]any, error) {
 	}
 
 	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("failed to read %s: %v", path, err)
+		return nil, fmt.Errorf("failed to read %s: %w", path, err)
 	}
 
 	conflicts := make([]map[string]any, 0, len(sections))

@@ -329,11 +329,9 @@ func (cg *CommitGenerator) parseCommitMessage(content string) (*CommitInfo, erro
 			}
 			// Check for issue references
 			if strings.Contains(line, "Closes #") || strings.Contains(line, "Fixes #") {
-				// Extract issue numbers
-				words := strings.Fields(line)
-				for _, word := range words {
-					if strings.HasPrefix(word, "#") {
-						commit.Issues = append(commit.Issues, strings.TrimPrefix(word, "#"))
+				for word := range strings.FieldsSeq(line) {
+					if num, ok := strings.CutPrefix(word, "#"); ok {
+						commit.Issues = append(commit.Issues, num)
 					}
 				}
 			}
@@ -437,7 +435,7 @@ func (cg *CommitGenerator) getChangedFiles() ([]string, error) {
 	}
 
 	files := []string{}
-	for _, line := range strings.Split(string(output), "\n") {
+	for line := range strings.SplitSeq(string(output), "\n") {
 		line = strings.TrimSpace(line)
 		if line != "" {
 			files = append(files, line)
@@ -455,7 +453,7 @@ func (cg *CommitGenerator) getDiffStats() (diffStats, error) {
 	}
 
 	stats := diffStats{}
-	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
+	for line := range strings.SplitSeq(strings.TrimSpace(string(output)), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue

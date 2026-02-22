@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"fmt"
+	"maps"
 	"os"
 	"strings"
 
@@ -29,11 +30,15 @@ func (w *WorkflowManager) emitTelemetry(event telemetry.Event) {
 	if w == nil || w.telemetry == nil {
 		return
 	}
+	w.stateMu.RLock()
+	sessionID := w.sessionID
+	planID := w.planID
+	w.stateMu.RUnlock()
 	if event.SessionID == "" {
-		event.SessionID = w.sessionID
+		event.SessionID = sessionID
 	}
-	if event.PlanID == "" && w.planID != "" {
-		event.PlanID = w.planID
+	if event.PlanID == "" && planID != "" {
+		event.PlanID = planID
 	}
 	w.telemetry.Publish(event)
 }
@@ -68,9 +73,12 @@ func (w *WorkflowManager) EmitTaskEvent(task *Task, eventType telemetry.EventTyp
 		"title":  task.Title,
 		"status": task.Status,
 	}
+	w.stateMu.RLock()
+	pid := w.planID
+	w.stateMu.RUnlock()
 	w.emitTelemetry(telemetry.Event{
 		Type:   eventType,
-		PlanID: w.planID,
+		PlanID: pid,
 		TaskID: task.ID,
 		Data:   data,
 	})
@@ -89,17 +97,18 @@ func (w *WorkflowManager) EmitBuilderEvent(task *Task, eventType telemetry.Event
 	if w == nil {
 		return
 	}
-	data := make(map[string]any)
-	for k, v := range details {
-		data[k] = v
-	}
+	data := make(map[string]any, len(details))
+	maps.Copy(data, details)
 	if task != nil {
 		data["taskId"] = task.ID
 		data["title"] = task.Title
 	}
+	w.stateMu.RLock()
+	pid := w.planID
+	w.stateMu.RUnlock()
 	w.emitTelemetry(telemetry.Event{
 		Type:   eventType,
-		PlanID: w.planID,
+		PlanID: pid,
 		TaskID: func() string {
 			if task != nil {
 				return task.ID
@@ -115,16 +124,17 @@ func (w *WorkflowManager) EmitResearchEvent(feature string, eventType telemetry.
 	if w == nil {
 		return
 	}
-	data := make(map[string]any)
-	for k, v := range details {
-		data[k] = v
-	}
+	data := make(map[string]any, len(details))
+	maps.Copy(data, details)
 	if feature != "" {
 		data["feature"] = feature
 	}
+	w.stateMu.RLock()
+	pid := w.planID
+	w.stateMu.RUnlock()
 	w.emitTelemetry(telemetry.Event{
 		Type:   eventType,
-		PlanID: w.planID,
+		PlanID: pid,
 		Data:   data,
 	})
 }

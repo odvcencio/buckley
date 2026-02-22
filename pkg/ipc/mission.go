@@ -55,7 +55,7 @@ func (s *Server) handleListAgents(w http.ResponseWriter, r *http.Request) {
 
 	agents, err := s.missionStore.ListActiveAgents(since)
 	if err != nil {
-		respondError(w, http.StatusInternalServerError, errors.New("Failed to list agents"))
+		respondError(w, http.StatusInternalServerError, errors.New("failed to list agents"))
 		return
 	}
 	if !isOperatorPrincipal(principal) {
@@ -168,7 +168,7 @@ func (s *Server) handleGetAgentActivity(w http.ResponseWriter, r *http.Request) 
 
 	activities, err := s.missionStore.GetAgentActivity(agentID, limit)
 	if err != nil {
-		respondError(w, http.StatusInternalServerError, errors.New("Failed to get agent activity"))
+		respondError(w, http.StatusInternalServerError, errors.New("failed to get agent activity"))
 		return
 	}
 
@@ -195,7 +195,7 @@ func (s *Server) handleSendAgentMessage(w http.ResponseWriter, r *http.Request) 
 	}
 
 	if req.Message == "" {
-		respondError(w, http.StatusBadRequest, errors.New("Message cannot be empty"))
+		respondError(w, http.StatusBadRequest, errors.New("message cannot be empty"))
 		return
 	}
 
@@ -228,7 +228,7 @@ func (s *Server) handleSendAgentMessage(w http.ResponseWriter, r *http.Request) 
 			Content:   req.Message,
 		}
 		if err := s.commandGW.Dispatch(cmd); err != nil {
-			respondError(w, http.StatusServiceUnavailable, errors.New("Failed to dispatch message to session"))
+			respondError(w, http.StatusServiceUnavailable, errors.New("failed to dispatch message to session"))
 			return
 		}
 	}
@@ -244,7 +244,7 @@ func (s *Server) handleSendAgentMessage(w http.ResponseWriter, r *http.Request) 
 	}
 
 	if err := s.missionStore.RecordAgentActivity(activity); err != nil {
-		respondError(w, http.StatusInternalServerError, errors.New("Failed to record activity"))
+		respondError(w, http.StatusInternalServerError, errors.New("failed to record activity"))
 		return
 	}
 
@@ -273,7 +273,7 @@ func (s *Server) handleListPendingChanges(w http.ResponseWriter, r *http.Request
 	// Get status filter from query param
 	statusFilter := r.URL.Query().Get("status")
 	if statusFilter != "" && statusFilter != "pending" && statusFilter != "approved" && statusFilter != "rejected" {
-		respondError(w, http.StatusBadRequest, errors.New("Invalid status filter"))
+		respondError(w, http.StatusBadRequest, errors.New("invalid status filter"))
 		return
 	}
 
@@ -288,7 +288,7 @@ func (s *Server) handleListPendingChanges(w http.ResponseWriter, r *http.Request
 
 	changes, err := s.missionStore.ListPendingChanges(statusFilter, limit)
 	if err != nil {
-		respondError(w, http.StatusInternalServerError, errors.New("Failed to list changes"))
+		respondError(w, http.StatusInternalServerError, errors.New("failed to list changes"))
 		return
 	}
 

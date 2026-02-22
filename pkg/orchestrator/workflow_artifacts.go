@@ -15,7 +15,10 @@ func (w *WorkflowManager) GetArtifactChain() (*artifact.Chain, error) {
 	if w.artifacts == nil {
 		return nil, fmt.Errorf("artifact pipeline unavailable")
 	}
-	return w.artifacts.chainManager().FindChain(w.feature)
+	w.stateMu.RLock()
+	feat := w.feature
+	w.stateMu.RUnlock()
+	return w.artifacts.chainManager().FindChain(feat)
 }
 
 // UpdateArtifactLinks updates links in the artifact chain
@@ -33,14 +36,20 @@ func (w *WorkflowManager) Pause(reason, question string) error {
 
 // GetResearchHighlights returns summary + top risks from the latest brief.
 func (w *WorkflowManager) GetResearchHighlights() (string, []string) {
-	if w == nil || w.latestResearchBrief == nil {
+	if w == nil {
 		return "", nil
 	}
-	summary := strings.TrimSpace(w.latestResearchBrief.Summary)
-	if summary == "" {
-		summary = fmt.Sprintf("Research completed for %s", w.latestResearchBrief.Feature)
+	w.stateMu.RLock()
+	brief := w.latestResearchBrief
+	w.stateMu.RUnlock()
+	if brief == nil {
+		return "", nil
 	}
-	risks := w.latestResearchBrief.Risks
+	summary := strings.TrimSpace(brief.Summary)
+	if summary == "" {
+		summary = fmt.Sprintf("Research completed for %s", brief.Feature)
+	}
+	risks := brief.Risks
 	if len(risks) > 3 {
 		risks = risks[:3]
 	}
@@ -49,6 +58,8 @@ func (w *WorkflowManager) GetResearchHighlights() (string, []string) {
 
 // GetResearchBrief returns the last generated brief, if any.
 func (w *WorkflowManager) GetResearchBrief() *artifact.ResearchBrief {
+	w.stateMu.RLock()
+	defer w.stateMu.RUnlock()
 	return w.latestResearchBrief
 }
 
@@ -61,7 +72,10 @@ func (w *WorkflowManager) EnrichPlan(plan *Plan) {
 	if summary, risks := w.GetResearchHighlights(); summary != "" {
 		plan.Context.ResearchSummary = summary
 		plan.Context.ResearchRisks = append([]string{}, risks...)
-		if brief := w.latestResearchBrief; brief != nil && !brief.Updated.IsZero() {
+		w.stateMu.RLock()
+		brief := w.latestResearchBrief
+		w.stateMu.RUnlock()
+		if brief != nil && !brief.Updated.IsZero() {
 			plan.Context.ResearchLoggedAt = brief.Updated
 		} else if plan.Context.ResearchLoggedAt.IsZero() {
 			plan.Context.ResearchLoggedAt = time.Now()
@@ -70,11 +84,14 @@ func (w *WorkflowManager) EnrichPlan(plan *Plan) {
 }
 
 func (w *WorkflowManager) steeringSettingKeys() (string, string) {
-	if w.sessionID == "" {
+	w.stateMu.RLock()
+	sessionID := w.sessionID
+	w.stateMu.RUnlock()
+	if sessionID == "" {
 		return "", ""
 	}
-	return fmt.Sprintf("session.%s.steering_notes", w.sessionID),
-		fmt.Sprintf("session.%s.autonomy_level", w.sessionID)
+	return fmt.Sprintf("session.%s.steering_notes", sessionID),
+		fmt.Sprintf("session.%s.autonomy_level", sessionID)
 }
 
 func (w *WorkflowManager) loadSteeringSettings() {
@@ -89,12 +106,14 @@ func (w *WorkflowManager) loadSteeringSettings() {
 	if err != nil {
 		return
 	}
+	w.stateMu.Lock()
 	if val, ok := settings[steerKey]; ok {
 		w.steeringNotes = strings.TrimSpace(val)
 	}
 	if val, ok := settings[autoKey]; ok {
 		w.autonomyLevel = strings.TrimSpace(val)
 	}
+	w.stateMu.Unlock()
 }
 
 func (w *WorkflowManager) persistSteeringSettings() {
@@ -105,8 +124,13 @@ func (w *WorkflowManager) persistSteeringSettings() {
 	if steerKey == "" {
 		return
 	}
-	_ = w.store.SetSetting(steerKey, w.steeringNotes)
-	_ = w.store.SetSetting(autoKey, w.autonomyLevel)
+	// Copy values under lock before I/O
+	w.stateMu.RLock()
+	steeringNotes := w.steeringNotes
+	autonomyLevel := w.autonomyLevel
+	w.stateMu.RUnlock()
+	_ = w.store.SetSetting(steerKey, steeringNotes)
+	_ = w.store.SetSetting(autoKey, autonomyLevel)
 }
 
 func researchLogPath(feature string) string {

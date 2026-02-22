@@ -239,7 +239,7 @@ func NewController(cfg ControllerConfig) (*Controller, error) {
 
 		// Create and subscribe diagnostics collector
 		ctrl.diagnostics = diagnostics.NewCollector()
-		ctrl.diagnostics.Subscribe(cfg.Telemetry)
+		ctrl.diagnostics.Subscribe(context.Background(), cfg.Telemetry)
 		app.SetDiagnostics(ctrl.diagnostics)
 	}
 

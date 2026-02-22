@@ -5,6 +5,8 @@ import (
 	"strings"
 )
 
+var filePathPattern = regexp.MustCompile(`(?:^|[^/\w])(?:[\w-]+/)+[\w.-]+\.\w+`)
+
 // ComplexityMode represents whether to use direct execution or planning mode
 type ComplexityMode int
 
@@ -154,7 +156,6 @@ func (d *ComplexityDetector) Analyze(input string, context *AnalysisContext) *Co
 	}
 
 	// File path mentions - multiple files suggest coordinated changes
-	filePathPattern := regexp.MustCompile(`(?:^|[^/\w])(?:[\w-]+/)+[\w.-]+\.\w+`)
 	fileMatches := filePathPattern.FindAllString(input, -1)
 	if len(fileMatches) >= 3 {
 		signal.Score += 0.2

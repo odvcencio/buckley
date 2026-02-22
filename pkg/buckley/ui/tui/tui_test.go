@@ -62,16 +62,6 @@ func TestCoalescerConfig(t *testing.T) {
 	}
 }
 
-func TestRenderMetricsZeroValue(t *testing.T) {
-	var m RenderMetrics
-	if m.FrameCount != 0 {
-		t.Error("FrameCount should be 0")
-	}
-	if m.DroppedFrames != 0 {
-		t.Error("DroppedFrames should be 0")
-	}
-}
-
 func TestInputAreaImplementsFocusable(t *testing.T) {
 	inputArea := buckleywidgets.NewInputArea()
 

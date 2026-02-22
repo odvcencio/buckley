@@ -12,14 +12,6 @@ import (
 	"github.com/odvcencio/buckley/pkg/tool"
 )
 
-var issuesCodec = toon.New(true)
-
-var validTaskStages = map[string]struct{}{
-	"builder": {},
-	"verify":  {},
-	"review":  {},
-}
-
 type reviewerAgent interface {
 	Review(task *Task, builderResult *BuilderResult) (*ReviewResult, error)
 	SetPersonaProvider(provider *personality.PersonaProvider)

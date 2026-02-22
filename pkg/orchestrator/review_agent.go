@@ -131,8 +131,12 @@ func NewReviewAgent(plan *Plan, cfg *config.Config, client ModelClient, registry
 		return nil
 	}
 
-	if workflow != nil && workflow.feature == "" {
-		workflow.feature = plan.FeatureName
+	if workflow != nil {
+		workflow.stateMu.Lock()
+		if workflow.feature == "" {
+			workflow.feature = plan.FeatureName
+		}
+		workflow.stateMu.Unlock()
 	}
 
 	outputDir := cfg.Artifacts.ReviewDir

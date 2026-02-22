@@ -18,7 +18,7 @@ require (
 	github.com/mattn/go-runewidth v0.0.19
 	github.com/muesli/termenv v0.16.0
 	github.com/nats-io/nats.go v1.37.0
-	github.com/odvcencio/fluffyui v0.4.0
+	github.com/odvcencio/fluffyui v0.5.0
 	github.com/oklog/ulid/v2 v2.1.1
 	github.com/pkoukk/tiktoken-go v0.1.8
 	github.com/pmezard/go-difflib v1.0.0
@@ -30,9 +30,10 @@ require (
 	go.opentelemetry.io/otel/sdk v1.38.0
 	go.opentelemetry.io/otel/trace v1.38.0
 	go.uber.org/mock v0.6.0
-	golang.org/x/net v0.47.0
+	golang.org/x/net v0.49.0
 	golang.org/x/sync v0.19.0
-	golang.org/x/term v0.39.0
+	golang.org/x/term v0.40.0
+	golang.org/x/text v0.34.0
 	golang.org/x/time v0.14.0
 	google.golang.org/grpc v1.67.1
 	google.golang.org/protobuf v1.36.10
@@ -129,11 +130,10 @@ require (
 	github.com/yuin/goldmark-emoji v1.0.1 // indirect
 	go.opentelemetry.io/auto/sdk v1.1.0 // indirect
 	go.opentelemetry.io/otel/metric v1.38.0 // indirect
-	golang.org/x/crypto v0.44.0 // indirect
+	golang.org/x/crypto v0.48.0 // indirect
 	golang.org/x/image v0.35.0 // indirect
 	golang.org/x/oauth2 v0.22.0 // indirect
-	golang.org/x/sys v0.40.0 // indirect
-	golang.org/x/text v0.33.0 // indirect
+	golang.org/x/sys v0.41.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20240814211410-ddb44dafa142 // indirect
 	gopkg.in/inf.v0 v0.9.1 // indirect
 	gopkg.in/warnings.v0 v0.1.2 // indirect

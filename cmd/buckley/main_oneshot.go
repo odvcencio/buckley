@@ -49,7 +49,7 @@ func executeOneShot(prompt string, cfg *config.Config, mgr *model.Manager, store
 	// Get model ID
 	modelID := cfg.Models.Execution
 	if modelID == "" {
-		modelID = defaultFallbackModel
+		modelID = getDefaultModel()
 	}
 
 	// Build system prompt with budgeted project context

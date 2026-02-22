@@ -16,9 +16,13 @@ func (w *WorkflowManager) SetActiveAgent(agent string) {
 	}
 	agent = strings.TrimSpace(agent)
 	if agent == "" {
+		w.stateMu.RLock()
 		agent = string(w.currentPhase)
+		w.stateMu.RUnlock()
 	}
+	w.stateMu.Lock()
 	w.currentAgent = agent
+	w.stateMu.Unlock()
 }
 
 // GetActiveAgent returns the current agent label.
@@ -26,6 +30,8 @@ func (w *WorkflowManager) GetActiveAgent() string {
 	if w == nil {
 		return ""
 	}
+	w.stateMu.RLock()
+	defer w.stateMu.RUnlock()
 	if w.currentAgent == "" {
 		return string(w.currentPhase)
 	}
@@ -44,9 +50,12 @@ func (w *WorkflowManager) ClearPause() {
 	w.pauseAt = time.Time{}
 	w.pauseMu.Unlock()
 
-	// Clear pause state from database
-	if w.store != nil && w.sessionID != "" {
-		if err := w.store.UpdateSessionPauseState(w.sessionID, "", "", nil); err != nil {
+	// Clear pause state from database (copy sessionID under lock before I/O)
+	w.stateMu.RLock()
+	sessionID := w.sessionID
+	w.stateMu.RUnlock()
+	if w.store != nil && sessionID != "" {
+		if err := w.store.UpdateSessionPauseState(sessionID, "", "", nil); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: failed to clear pause state: %v\n", err)
 		}
 	}
@@ -68,11 +77,18 @@ func (w *WorkflowManager) GetPauseInfo() (bool, string, string, time.Time) {
 // RestorePauseStateFromSession loads pause state from the database session.
 // Call this after SetSessionID to restore pause state across restarts.
 func (w *WorkflowManager) RestorePauseStateFromSession() {
-	if w == nil || w.store == nil || w.sessionID == "" {
+	if w == nil || w.store == nil {
 		return
 	}
 
-	session, err := w.store.GetSession(w.sessionID)
+	w.stateMu.RLock()
+	sessionID := w.sessionID
+	w.stateMu.RUnlock()
+	if sessionID == "" {
+		return
+	}
+
+	session, err := w.store.GetSession(sessionID)
 	if err != nil || session == nil {
 		return
 	}
@@ -99,6 +115,8 @@ func (w *WorkflowManager) GetCurrentPlan() *Plan {
 	if w == nil {
 		return nil
 	}
+	w.stateMu.RLock()
+	defer w.stateMu.RUnlock()
 	return w.planRef
 }
 

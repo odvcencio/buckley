@@ -20,7 +20,12 @@ func (s *Store) LinkSessionToPlan(sessionID, planID string) error {
 	if err != nil {
 		return fmt.Errorf("failed to start feature session tx: %w", err)
 	}
-	defer tx.Rollback()
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
 
 	if _, err := tx.Exec(`DELETE FROM feature_sessions WHERE session_id = ?`, sessionID); err != nil {
 		return fmt.Errorf("failed to clear previous feature session: %w", err)
@@ -30,7 +35,11 @@ func (s *Store) LinkSessionToPlan(sessionID, planID string) error {
 		return fmt.Errorf("failed to link session to plan: %w", err)
 	}
 
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit feature session link: %w", err)
+	}
+	committed = true
+	return nil
 }
 
 // GetSessionPlanID returns the most recent plan attached to the session, or empty string if none.

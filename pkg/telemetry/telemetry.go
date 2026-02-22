@@ -3,7 +3,9 @@ package telemetry
 import (
 	"context"
 	"fmt"
+	"log"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/time/rate"
@@ -170,6 +172,10 @@ type Hub struct {
 	// Rate limiting
 	rateLimiter *rate.Limiter
 
+	// Drop tracking
+	droppedEvents int64
+	lastDropWarn  int64 // unix nano timestamp of last drop warning log
+
 	// Lifecycle
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -246,7 +252,8 @@ func (h *Hub) processEvents() {
 func (h *Hub) handleEvent(event Event) {
 	// Check rate limit
 	if !h.rateLimiter.Allow() {
-		// Rate limit exceeded, drop event
+		atomic.AddInt64(&h.droppedEvents, 1)
+		h.logDropWarning("rate limit exceeded")
 		return
 	}
 
@@ -282,6 +289,8 @@ func (h *Hub) flushBatch() {
 			select {
 			case sub.ch <- event:
 			default:
+				atomic.AddInt64(&h.droppedEvents, 1)
+				h.logDropWarning("subscriber channel full")
 			}
 		}
 	}
@@ -436,10 +445,34 @@ func (h *Hub) GetStats() Stats {
 	subscriberCount := len(h.subscribers)
 	h.subscriberMu.RUnlock()
 
+	h.batchMu.Lock()
+	batchSize := len(h.batch)
+	h.batchMu.Unlock()
+
 	return Stats{
 		SubscriberCount: subscriberCount,
 		QueueSize:       len(h.eventCh),
-		BatchSize:       len(h.batch),
+		BatchSize:       batchSize,
 		RateLimit:       h.config.RateLimit,
+	}
+}
+
+// DroppedEvents returns the total number of events dropped due to rate
+// limiting or full subscriber channels.
+func (h *Hub) DroppedEvents() int64 {
+	return atomic.LoadInt64(&h.droppedEvents)
+}
+
+// logDropWarning emits a log warning when events are dropped, rate-limited
+// to at most once per second to avoid log spam.
+func (h *Hub) logDropWarning(reason string) {
+	now := time.Now().UnixNano()
+	last := atomic.LoadInt64(&h.lastDropWarn)
+	if now-last < int64(time.Second) {
+		return
+	}
+	if atomic.CompareAndSwapInt64(&h.lastDropWarn, last, now) {
+		dropped := atomic.LoadInt64(&h.droppedEvents)
+		log.Printf("telemetry: dropping events (%s), total dropped: %d", reason, dropped)
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -298,7 +299,12 @@ func (a *BuilderAgent) generateImplementation(task *Task) (string, error) {
 		},
 	}
 	if a.workflow != nil {
-		for _, msg := range a.workflow.skillMessages {
+		// Copy skillMessages under lock to avoid holding it during iteration
+		a.workflow.stateMu.RLock()
+		skillMsgsCopy := make([]string, len(a.workflow.skillMessages))
+		copy(skillMsgsCopy, a.workflow.skillMessages)
+		a.workflow.stateMu.RUnlock()
+		for _, msg := range skillMsgsCopy {
 			if strings.TrimSpace(msg) == "" {
 				continue
 			}
@@ -348,7 +354,7 @@ func (a *BuilderAgent) generateWithTools(req model.ChatRequest, task *Task) (str
 		}
 	}
 
-	for iter := 0; iter < maxIterations; iter++ {
+	for iter := range maxIterations {
 		// Check for cancellation
 		select {
 		case <-ctx.Done():
@@ -739,12 +745,13 @@ func buildImplementationPrompt(task *Task) string {
 	return b.String()
 }
 
+// fileBlockPattern matches markdown code blocks with optional filepath: prefix.
+var fileBlockPattern = regexp.MustCompile("(?s)```(?:filepath:)?([^\\n`]+)?\\n(.*?)```")
+
 // parseFileBlocks extracts file paths and contents from markdown code blocks.
 func parseFileBlocks(text string) (map[string]string, error) {
 	files := make(map[string]string)
-
-	re := regexp.MustCompile("(?s)```(?:filepath:)?([^\\n`]+)?\\n(.*?)```")
-	matches := re.FindAllStringSubmatch(text, -1)
+	matches := fileBlockPattern.FindAllStringSubmatch(text, -1)
 
 	for _, match := range matches {
 		if len(match) < 3 {
@@ -759,7 +766,7 @@ func parseFileBlocks(text string) (map[string]string, error) {
 			filepath = header
 		} else {
 			lines := strings.Split(content, "\n")
-			for i := 0; i < min(5, len(lines)); i++ {
+			for i := range min(5, len(lines)) {
 				line := strings.TrimSpace(lines[i])
 				if strings.HasPrefix(line, "// File:") || strings.HasPrefix(line, "# File:") {
 					filepath = strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(line, "//"), "#"))
@@ -780,20 +787,7 @@ func parseFileBlocks(text string) (map[string]string, error) {
 
 func isLanguageName(s string) bool {
 	languages := []string{"go", "python", "javascript", "typescript", "rust", "java", "c", "cpp", "bash", "sh", "yaml", "json", "md", "markdown"}
-	lower := strings.ToLower(s)
-	for _, lang := range languages {
-		if lower == lang {
-			return true
-		}
-	}
-	return false
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
+	return slices.Contains(languages, strings.ToLower(s))
 }
 
 func parseTaskID(id string) int {

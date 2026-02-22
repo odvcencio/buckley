@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"time"
 )
 
@@ -111,9 +112,7 @@ func (s *SQLiteDecisionStore) GetRecentDecisions(sessionID string, limit int) ([
 	}
 
 	// Reverse to get chronological order
-	for i, j := 0, len(decisions)-1; i < j; i, j = i+1, j-1 {
-		decisions[i], decisions[j] = decisions[j], decisions[i]
-	}
+	slices.Reverse(decisions)
 	return decisions, nil
 }
 

@@ -22,13 +22,6 @@ func (e *Executor) dependenciesMet(task *Task) bool {
 	return true
 }
 
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
-}
-
 func (e *Executor) detectBusinessAmbiguity(task *Task) error {
 	if e.workflow == nil || e.config == nil || !e.config.Workflow.PauseOnBusinessAmbiguity {
 		return nil

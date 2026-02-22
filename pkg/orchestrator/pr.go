@@ -282,7 +282,7 @@ func (pc *PRCreator) getCommitsSince(baseBranch string) ([]string, error) {
 	}
 
 	commits := []string{}
-	for _, line := range strings.Split(string(output), "\n") {
+	for line := range strings.SplitSeq(string(output), "\n") {
 		line = strings.TrimSpace(line)
 		if line != "" {
 			commits = append(commits, line)

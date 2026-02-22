@@ -20,8 +20,10 @@ func newPlanningController(manager *WorkflowManager) *planningController {
 
 func (c *planningController) start(ctx context.Context, featureName, userGoal string) error {
 	w := c.manager
+	w.stateMu.Lock()
 	w.currentPhase = WorkflowPhasePlanning
 	w.feature = featureName
+	w.stateMu.Unlock()
 	w.ClearPause()
 	w.SetActiveAgent("Planning")
 
@@ -31,7 +33,7 @@ func (c *planningController) start(ctx context.Context, featureName, userGoal st
 		}
 	}
 
-	w.planningArtifact = &artifact.PlanningArtifact{
+	pa := &artifact.PlanningArtifact{
 		Artifact: artifact.Artifact{
 			Type:      artifact.ArtifactTypePlanning,
 			Feature:   featureName,
@@ -43,6 +45,9 @@ func (c *planningController) start(ctx context.Context, featureName, userGoal st
 			UserGoal: userGoal,
 		},
 	}
+	w.stateMu.Lock()
+	w.planningArtifact = pa
+	w.stateMu.Unlock()
 
 	if w.researchAgent != nil {
 		researchCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
@@ -59,20 +64,22 @@ func (c *planningController) start(ctx context.Context, featureName, userGoal st
 			for _, rf := range brief.RelevantFiles {
 				files = append(files, rf.Path)
 			}
-			w.planningArtifact.Context.RelevantFiles = files
-			w.latestResearchBrief = brief
 			summary := strings.TrimSpace(brief.Summary)
 			if summary == "" {
 				summary = fmt.Sprintf("Research completed for %s", featureName)
 			}
-			w.planningArtifact.Context.ResearchSummary = summary
 			risks := brief.Risks
 			if len(risks) > 3 {
 				risks = risks[:3]
 			}
+			w.stateMu.Lock()
+			w.planningArtifact.Context.RelevantFiles = files
+			w.latestResearchBrief = brief
+			w.planningArtifact.Context.ResearchSummary = summary
 			w.planningArtifact.Context.ResearchRisks = append([]string{}, risks...)
 			w.planningArtifact.Context.ResearchLogPath = researchLogPath(featureName)
 			w.planningArtifact.Context.ResearchLoggedAt = time.Now()
+			w.stateMu.Unlock()
 		}
 	}
 	return nil
@@ -88,11 +95,16 @@ func newExecutionController(manager *WorkflowManager) *executionController {
 
 func (c *executionController) start(planningArtifactPath string) error {
 	w := c.manager
-	if w.planningArtifact == nil {
+	w.stateMu.RLock()
+	pa := w.planningArtifact
+	w.stateMu.RUnlock()
+	if pa == nil {
 		return fmt.Errorf("no planning artifact available")
 	}
 
+	w.stateMu.Lock()
 	w.currentPhase = WorkflowPhaseExecution
+	w.stateMu.Unlock()
 	w.ClearPause()
 	w.SetActiveAgent("Execution")
 
@@ -105,11 +117,14 @@ func (c *executionController) start(planningArtifactPath string) error {
 		}
 	}
 
+	w.stateMu.RLock()
 	totalTasks := len(w.planningArtifact.Tasks)
+	feat := w.feature
+	w.stateMu.RUnlock()
 	w.executionTracker = artifact.NewExecutionTracker(
 		w.config.Artifacts.ExecutionDir,
 		planningArtifactPath,
-		w.feature,
+		feat,
 		totalTasks,
 	)
 
@@ -130,7 +145,10 @@ func newReviewController(manager *WorkflowManager) *reviewController {
 
 func (c *reviewController) start(planningPath, executionPath string) error {
 	w := c.manager
+	w.stateMu.Lock()
 	w.currentPhase = WorkflowPhaseReview
+	feat := w.feature
+	w.stateMu.Unlock()
 	w.SetActiveAgent("Review")
 
 	if w.skillManager != nil {
@@ -142,10 +160,11 @@ func (c *reviewController) start(planningPath, executionPath string) error {
 		}
 	}
 
+	w.stateMu.Lock()
 	w.reviewArtifact = &artifact.ReviewArtifact{
 		Artifact: artifact.Artifact{
 			Type:      artifact.ArtifactTypeReview,
-			Feature:   w.feature,
+			Feature:   feat,
 			CreatedAt: time.Now(),
 			UpdatedAt: time.Now(),
 			Status:    "in_progress",
@@ -155,5 +174,6 @@ func (c *reviewController) start(planningPath, executionPath string) error {
 		ReviewedAt:            time.Now(),
 		ReviewerModel:         w.config.Models.Review,
 	}
+	w.stateMu.Unlock()
 	return nil
 }

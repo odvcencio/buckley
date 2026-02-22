@@ -28,8 +28,19 @@ var (
 	buildDate = "unknown"
 )
 
-// defaultFallbackModel is the model used when no model is configured.
+// defaultFallbackModel is the compile-time fallback model used when no model
+// is configured and BUCKLEY_DEFAULT_MODEL is not set.
 const defaultFallbackModel = "openai/gpt-4o"
+
+// getDefaultModel returns the default model to use when none is configured.
+// It checks the BUCKLEY_DEFAULT_MODEL environment variable first, falling back
+// to the compile-time defaultFallbackModel constant.
+func getDefaultModel() string {
+	if m := os.Getenv("BUCKLEY_DEFAULT_MODEL"); m != "" {
+		return m
+	}
+	return defaultFallbackModel
+}
 
 // cliFlags holds mutable CLI state that was formerly package-level vars.
 // It is populated once by main() and read by initDependencies / executeOneShot.
@@ -183,7 +194,12 @@ func main() {
 	}
 
 	if resumeSessionID != "" {
-		if sess, err := store.GetSession(resumeSessionID); err != nil || sess == nil {
+		sess, err := store.GetSession(resumeSessionID)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: looking up session %s: %v\n", resumeSessionID, err)
+			os.Exit(1)
+		}
+		if sess == nil {
 			fmt.Fprintf(os.Stderr, "Error: session not found: %s\n", resumeSessionID)
 			os.Exit(1)
 		}

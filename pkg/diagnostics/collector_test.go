@@ -1,6 +1,7 @@
 package diagnostics
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
@@ -21,7 +22,7 @@ func TestNewCollector(t *testing.T) {
 func TestCollectorSubscribe(t *testing.T) {
 	hub := telemetry.NewHub()
 	c := NewCollector()
-	c.Subscribe(hub)
+	c.Subscribe(context.Background(), hub)
 
 	// Publish some events
 	hub.Publish(telemetry.Event{
@@ -107,7 +108,7 @@ func TestCollectorDump(t *testing.T) {
 func TestCollectorSubscribeNilHub(t *testing.T) {
 	c := NewCollector()
 	// Should not panic
-	c.Subscribe(nil)
+	c.Subscribe(context.Background(), nil)
 	c.Close()
 }
 

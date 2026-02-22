@@ -147,7 +147,9 @@ func (p *AnthropicProvider) ChatCompletion(ctx context.Context, req ChatRequest)
 	return anthropicResp.toChatResponse()
 }
 
-// ChatCompletionStream falls back to non-streaming implementation for now.
+// ChatCompletionStream implements the Provider interface but does not perform true streaming.
+// It calls ChatCompletion synchronously and wraps the full response as a single StreamChunk.
+// This is a compatibility fallback; true streaming requires native API support.
 func (p *AnthropicProvider) ChatCompletionStream(ctx context.Context, req ChatRequest) (<-chan StreamChunk, <-chan error) {
 	chunkChan := make(chan StreamChunk, 1)
 	errChan := make(chan error, 1)
@@ -249,10 +251,7 @@ func (p *AnthropicProvider) toAnthropicRequest(req ChatRequest, stream bool) (*a
 	}
 
 	if cacheEnabled && cache.TailMessages > 0 && len(anthReq.Messages) > 0 {
-		start := len(anthReq.Messages) - cache.TailMessages
-		if start < 0 {
-			start = 0
-		}
+		start := max(len(anthReq.Messages)-cache.TailMessages, 0)
 		for i := start; i < len(anthReq.Messages); i++ {
 			for j := range anthReq.Messages[i].Content {
 				anthReq.Messages[i].Content[j].CacheControl = promptCacheControl()
