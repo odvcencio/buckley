@@ -54,8 +54,8 @@ func TestCounter_AddNegative(t *testing.T) {
 
 func TestCounter_NilReceiver(t *testing.T) {
 	var c *Counter
-	c.Inc()      // Should not panic
-	c.Add(5)     // Should not panic
+	c.Inc()  // Should not panic
+	c.Add(5) // Should not panic
 	assert.Equal(t, int64(0), c.Get())
 }
 
@@ -154,10 +154,10 @@ func TestGauge_Add(t *testing.T) {
 
 func TestGauge_NilReceiver(t *testing.T) {
 	var g *Gauge
-	g.Set(10)  // Should not panic
-	g.Inc()    // Should not panic
-	g.Dec()    // Should not panic
-	g.Add(5)   // Should not panic
+	g.Set(10) // Should not panic
+	g.Inc()   // Should not panic
+	g.Dec()   // Should not panic
+	g.Add(5)  // Should not panic
 	assert.Equal(t, int64(0), g.Get())
 	assert.Equal(t, 0.0, g.GetFloat64())
 }
@@ -236,18 +236,18 @@ func TestHistogram_CustomBuckets(t *testing.T) {
 func TestHistogram_Observe(t *testing.T) {
 	h := NewHistogram("test", nil, nil)
 
-	h.Observe(0.05)  // 50ms
-	h.Observe(0.1)   // 100ms
-	h.Observe(0.15)  // 150ms
+	h.Observe(0.05) // 50ms
+	h.Observe(0.1)  // 100ms
+	h.Observe(0.15) // 150ms
 
 	assert.Equal(t, int64(3), h.GetCount())
 	assert.InDelta(t, 0.3, h.GetSum(), 0.001)
 
 	buckets := h.GetBuckets()
 	require.Equal(t, len(DefaultHistogramBuckets)+1, len(buckets))
-	assert.True(t, buckets[4] >= 1)  // 50ms bucket
-	assert.True(t, buckets[5] >= 1)  // 100ms bucket
-	assert.True(t, buckets[6] >= 1)  // 250ms bucket
+	assert.True(t, buckets[4] >= 1) // 50ms bucket
+	assert.True(t, buckets[5] >= 1) // 100ms bucket
+	assert.True(t, buckets[6] >= 1) // 250ms bucket
 }
 
 func TestHistogram_ObserveDuration(t *testing.T) {
@@ -297,7 +297,7 @@ func TestHistogram_PercentileBounds(t *testing.T) {
 
 func TestHistogram_NilReceiver(t *testing.T) {
 	var h *Histogram
-	h.Observe(0.1)              // Should not panic
+	h.Observe(0.1)                 // Should not panic
 	h.ObserveDuration(time.Second) // Should not panic
 	assert.Equal(t, int64(0), h.GetCount())
 	assert.Equal(t, 0.0, h.GetSum())
@@ -756,11 +756,11 @@ func TestTimer_Observe(t *testing.T) {
 
 func TestTimer_NilReceiver(t *testing.T) {
 	var timer *Timer
-	timer.Start()                  // Should not panic
+	timer.Start() // Should not panic
 	assert.Equal(t, time.Duration(0), timer.Elapsed())
 
 	h := NewHistogram("test", nil, nil)
-	timer.Observe(h)               // Should not panic
+	timer.Observe(h) // Should not panic
 	assert.Equal(t, int64(0), h.GetCount())
 }
 
@@ -813,7 +813,7 @@ func BenchmarkRegistry_RegisterCounter(b *testing.B) {
 	r := NewRegistry()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		r.RegisterCounter("counter", Labels{"i": string(rune(i % 26 + 'a'))})
+		r.RegisterCounter("counter", Labels{"i": string(rune(i%26 + 'a'))})
 	}
 }
 
@@ -912,5 +912,3 @@ func TestExportStructure(t *testing.T) {
 	counters := result["counters"].(map[string]any)
 	assert.Contains(t, counters, "c1")
 }
-
-

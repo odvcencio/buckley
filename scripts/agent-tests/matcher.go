@@ -30,14 +30,14 @@ const (
 
 // MatchCriteria defines what to look for in a widget.
 type MatchCriteria struct {
-	Role           string
-	Label          string
-	Description    string
-	Keywords       []string
-	Strategy       MatchStrategy
-	MinConfidence  float64 // 0.0 to 1.0
-	NearWidgetID   string  // For spatial matching
-	PreferredArea  string  // "top", "bottom", "left", "right", "center"
+	Role          string
+	Label         string
+	Description   string
+	Keywords      []string
+	Strategy      MatchStrategy
+	MinConfidence float64 // 0.0 to 1.0
+	NearWidgetID  string  // For spatial matching
+	PreferredArea string  // "top", "bottom", "left", "right", "center"
 }
 
 // MatchResult represents a successful match with confidence score.
@@ -51,7 +51,7 @@ type MatchResult struct {
 // It tries multiple strategies and returns the best match.
 func FindWidgetSemantic(snap *Snapshot, criteria MatchCriteria) *MatchResult {
 	candidates := collectWidgets(snap.Widgets)
-	
+
 	var results []MatchResult
 
 	// Strategy 1: Exact match
@@ -111,7 +111,7 @@ func matchExact(widgets []WidgetInfo, criteria MatchCriteria) *MatchResult {
 		w := &widgets[i]
 		roleMatch := criteria.Role == "" || strings.EqualFold(w.Role, criteria.Role)
 		labelMatch := criteria.Label == "" || strings.EqualFold(w.Label, criteria.Label)
-		
+
 		if roleMatch && labelMatch {
 			return &MatchResult{
 				Widget:     w,
@@ -215,7 +215,7 @@ func matchKeywords(widgets []WidgetInfo, criteria MatchCriteria) *MatchResult {
 func keywordScore(w *WidgetInfo, keywords []string) float64 {
 	text := strings.ToLower(w.Label + " " + w.Description + " " + w.Value)
 	matches := 0
-	
+
 	for _, kw := range keywords {
 		kwLower := strings.ToLower(kw)
 		if strings.Contains(text, kwLower) {
@@ -352,9 +352,9 @@ func levenshteinDistance(a, b string) int {
 			}
 
 			curr[j+1] = min(
-				prev[j+1]+1,    // deletion
-				curr[j]+1,      // insertion
-				prev[j]+cost,   // substitution
+				prev[j+1]+1,  // deletion
+				curr[j]+1,    // insertion
+				prev[j]+cost, // substitution
 			)
 		}
 
@@ -368,13 +368,13 @@ func levenshteinDistance(a, b string) int {
 func normalizeString(s string) string {
 	var b strings.Builder
 	b.Grow(len(s))
-	
+
 	for _, r := range s {
 		if unicode.IsLetter(r) || unicode.IsDigit(r) {
 			b.WriteRune(unicode.ToLower(r))
 		}
 	}
-	
+
 	return b.String()
 }
 
@@ -396,23 +396,23 @@ func min(a, b, c int) int {
 func SelfHealingFind(snap *Snapshot, goal string) (*MatchResult, error) {
 	// Parse goal into criteria
 	criteria := parseGoal(goal)
-	
+
 	// Try to find with increasing tolerance
 	criteria.MinConfidence = 0.8
 	if result := FindWidgetSemantic(snap, criteria); result != nil {
 		return result, nil
 	}
-	
+
 	criteria.MinConfidence = 0.6
 	if result := FindWidgetSemantic(snap, criteria); result != nil {
 		return result, nil
 	}
-	
+
 	criteria.MinConfidence = 0.4
 	if result := FindWidgetSemantic(snap, criteria); result != nil {
 		return result, nil
 	}
-	
+
 	return nil, nil
 }
 

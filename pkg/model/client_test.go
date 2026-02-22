@@ -970,8 +970,8 @@ func TestClient_SetRetryConfig(t *testing.T) {
 // TestIsIdempotentMethod tests the idempotent method detection
 func TestIsIdempotentMethod(t *testing.T) {
 	tests := []struct {
-		method    string
-		expected  bool
+		method   string
+		expected bool
 	}{
 		{"GET", true},
 		{"HEAD", true},
@@ -980,7 +980,7 @@ func TestIsIdempotentMethod(t *testing.T) {
 		{"DELETE", true},
 		{"POST", false},
 		{"PATCH", false},
-		{"get", true},  // case insensitive
+		{"get", true}, // case insensitive
 		{"post", false},
 		{"UNKNOWN", false}, // conservative default
 	}

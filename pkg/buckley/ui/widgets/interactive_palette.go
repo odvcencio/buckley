@@ -35,7 +35,7 @@ type InteractivePalette struct {
 	services runtime.Services
 
 	// Styles
-	bgStyle  backend.Style
+	bgStyle       backend.Style
 	borderStyle   backend.Style
 	titleStyle    backend.Style
 	queryStyle    backend.Style

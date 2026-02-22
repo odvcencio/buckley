@@ -280,30 +280,30 @@ func TestPluginProcessHealth(t *testing.T) {
 		{
 			name: "healthy process",
 			process: &PluginProcess{
-				healthy:   true,
-				UseCount:  0,
-				maxUses:   10,
-				Cmd:       &exec.Cmd{},
+				healthy:  true,
+				UseCount: 0,
+				maxUses:  10,
+				Cmd:      &exec.Cmd{},
 			},
 			wantHealthy: true,
 		},
 		{
 			name: "unhealthy flag set",
 			process: &PluginProcess{
-				healthy:   false,
-				UseCount:  0,
-				maxUses:   10,
-				Cmd:       &exec.Cmd{},
+				healthy:  false,
+				UseCount: 0,
+				maxUses:  10,
+				Cmd:      &exec.Cmd{},
 			},
 			wantHealthy: false,
 		},
 		{
 			name: "max uses reached",
 			process: &PluginProcess{
-				healthy:   true,
-				UseCount:  10,
-				maxUses:   10,
-				Cmd:       &exec.Cmd{},
+				healthy:  true,
+				UseCount: 10,
+				maxUses:  10,
+				Cmd:      &exec.Cmd{},
 			},
 			wantHealthy: false,
 		},
@@ -336,7 +336,7 @@ func TestPluginProcessPoolCleanup(t *testing.T) {
 	unhealthyProc := &PluginProcess{
 		PluginID: "test-plugin",
 		Cmd:      dummyCmd,
-		healthy:  false, // Mark as unhealthy
+		healthy:  false,                      // Mark as unhealthy
 		LastUsed: time.Now().Add(-time.Hour), // Very old
 	}
 

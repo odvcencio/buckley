@@ -28,10 +28,10 @@ func New(id string, modality Modality) *Machine {
 	}
 }
 
-func (m *Machine) ID() string           { return m.id }
-func (m *Machine) Modality() Modality    { return m.modality }
-func (m *Machine) State() State          { return m.state }
-func (m *Machine) Iteration() int        { return m.iteration }
+func (m *Machine) ID() string               { return m.id }
+func (m *Machine) Modality() Modality       { return m.modality }
+func (m *Machine) State() State             { return m.state }
+func (m *Machine) Iteration() int           { return m.iteration }
 func (m *Machine) HasPendingSteering() bool { return m.pendingSteering != "" }
 
 // Transition applies an event to the machine and returns the new state

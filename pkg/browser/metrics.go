@@ -96,12 +96,12 @@ func (m *Metrics) RecordObserve(browserSessionID string, latency time.Duration, 
 	}
 	m.ObserveCount.Add(1)
 	m.publishEvent(telemetry.EventBrowserObserve, map[string]any{
-		"browser_session_id":     browserSessionID,
-		"latency_ms":             latency.Milliseconds(),
-		"include_frame":          opts.IncludeFrame,
-		"include_dom_snapshot":   opts.IncludeDOMSnapshot,
-		"include_accessibility":  opts.IncludeAccessibility,
-		"include_hit_test":       opts.IncludeHitTest,
+		"browser_session_id":    browserSessionID,
+		"latency_ms":            latency.Milliseconds(),
+		"include_frame":         opts.IncludeFrame,
+		"include_dom_snapshot":  opts.IncludeDOMSnapshot,
+		"include_accessibility": opts.IncludeAccessibility,
+		"include_hit_test":      opts.IncludeHitTest,
 	})
 }
 
@@ -174,18 +174,18 @@ func (m *Metrics) Snapshot() MetricsSnapshot {
 		successRate = float64(successCount) / float64(total)
 	}
 	return MetricsSnapshot{
-		SessionsCreated:        m.SessionsCreated.Load(),
-		SessionsClosed:         m.SessionsClosed.Load(),
-		ActiveSessions:         m.ActiveSessions.Load(),
-		NavigateCount:          m.NavigateCount.Load(),
-		ObserveCount:           m.ObserveCount.Load(),
-		ActionCount:            m.ActionCount.Load(),
-		StreamCount:            m.StreamCount.Load(),
-		ActionSuccessCount:     successCount,
-		ActionFailureCount:     failCount,
-		ActionSuccessRate:      successRate,
-		FramesDelivered:        m.FramesDelivered.Load(),
-		AverageFrameLatency:    avgFrameLatency,
+		SessionsCreated:     m.SessionsCreated.Load(),
+		SessionsClosed:      m.SessionsClosed.Load(),
+		ActiveSessions:      m.ActiveSessions.Load(),
+		NavigateCount:       m.NavigateCount.Load(),
+		ObserveCount:        m.ObserveCount.Load(),
+		ActionCount:         m.ActionCount.Load(),
+		StreamCount:         m.StreamCount.Load(),
+		ActionSuccessCount:  successCount,
+		ActionFailureCount:  failCount,
+		ActionSuccessRate:   successRate,
+		FramesDelivered:     m.FramesDelivered.Load(),
+		AverageFrameLatency: avgFrameLatency,
 	}
 }
 

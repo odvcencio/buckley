@@ -42,13 +42,13 @@ type WorkflowManager struct {
 	executionTracker *artifact.ExecutionTracker
 
 	// Current workflow state
-	stateMu              sync.RWMutex // Protects currentPhase, feature, planningArtifact, planRef, planID, currentAgent, reviewArtifact, latestResearchBrief, steeringNotes, autonomyLevel, skillMessages, sessionID
-	currentPhase         WorkflowPhase
-	feature              string
-	planningArtifact     *artifact.PlanningArtifact
-	reviewArtifact       *artifact.ReviewArtifact
-	currentAgent         string
-	latestResearchBrief  *artifact.ResearchBrief
+	stateMu             sync.RWMutex // Protects currentPhase, feature, planningArtifact, planRef, planID, currentAgent, reviewArtifact, latestResearchBrief, steeringNotes, autonomyLevel, skillMessages, sessionID
+	currentPhase        WorkflowPhase
+	feature             string
+	planningArtifact    *artifact.PlanningArtifact
+	reviewArtifact      *artifact.ReviewArtifact
+	currentAgent        string
+	latestResearchBrief *artifact.ResearchBrief
 
 	// Activity tracking
 	activityTracker *tool.ActivityTracker

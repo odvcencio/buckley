@@ -387,23 +387,23 @@ func (e *Executor) actionExec(action ActionDef, result *ExecuteResult) error {
 }
 
 // shellEscape wraps a string in single quotes for safe shell interpolation.
-// Single quotes inside the string are escaped as '\'' (end quote, escaped quote, start quote).
+// Single quotes inside the string are escaped as '\” (end quote, escaped quote, start quote).
 func shellEscape(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }
 
 // PluginProcess represents a running plugin process that can be reused.
 type PluginProcess struct {
-	PluginID   string
-	Cmd        *exec.Cmd
-	Stdin      *json.Encoder
-	Stdout     *json.Decoder
-	Stderr     *bufio.Reader
-	LastUsed   time.Time
-	UseCount   int
-	mu         sync.RWMutex
-	healthy    bool
-	maxUses    int
+	PluginID string
+	Cmd      *exec.Cmd
+	Stdin    *json.Encoder
+	Stdout   *json.Decoder
+	Stderr   *bufio.Reader
+	LastUsed time.Time
+	UseCount int
+	mu       sync.RWMutex
+	healthy  bool
+	maxUses  int
 }
 
 // PluginRequest is the request format for plugin processes.
@@ -742,11 +742,11 @@ func (p *PluginProcessPool) Shutdown() {
 
 // PoolStats returns statistics about the process pool.
 type PoolStats struct {
-	TotalPlugins    int
-	TotalProcesses  int
-	AvailableCount  int
-	InUseCount      int
-	UnhealthyCount  int
+	TotalPlugins   int
+	TotalProcesses int
+	AvailableCount int
+	InUseCount     int
+	UnhealthyCount int
 }
 
 // Stats returns current pool statistics.

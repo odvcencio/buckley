@@ -151,14 +151,14 @@ type StreamChoice struct {
 type MessageDelta struct {
 	Role             string            `json:"role,omitempty"`
 	Content          string            `json:"content,omitempty"`
-	Reasoning        string            `json:"reasoning,omitempty"`          // For thinking/reasoning models
+	Reasoning        string            `json:"reasoning,omitempty"`         // For thinking/reasoning models
 	ReasoningDetails []ReasoningDetail `json:"reasoning_details,omitempty"` // OpenRouter's reasoning_details format
 	ToolCalls        []ToolCallDelta   `json:"tool_calls,omitempty"`
 }
 
 // ReasoningDetail represents a reasoning block from OpenRouter's reasoning_details format.
 type ReasoningDetail struct {
-	Type    string `json:"type"`              // "reasoning.text", "reasoning.summary", "reasoning.encrypted"
+	Type    string `json:"type"` // "reasoning.text", "reasoning.summary", "reasoning.encrypted"
 	ID      string `json:"id,omitempty"`
 	Index   int    `json:"index,omitempty"`
 	Text    string `json:"text,omitempty"`    // For reasoning.text

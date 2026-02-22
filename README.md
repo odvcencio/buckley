@@ -46,6 +46,7 @@ buckley pr        # AI-generated PR description
 buckley review    # Code review current changes
 buckley hunt      # Scan codebase for improvements
 buckley dream     # Architectural analysis
+buckley image     # Generate images via AI models
 ```
 
 ---

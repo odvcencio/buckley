@@ -146,7 +146,7 @@ jobs:
             exit 0
           fi
 
-          files="$(git diff --name-only "$base" "$HEAD_SHA" -- '*.go' || true)"
+          files="$(git diff --diff-filter=d --name-only "$base" "$HEAD_SHA" -- '*.go' || true)"
           if [ -z "$files" ]; then
             echo "No Go files changed."
             exit 0

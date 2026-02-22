@@ -240,18 +240,18 @@ func (g *Gauge) MarshalJSON() ([]byte, error) {
 // DefaultHistogramBuckets are the default latency buckets in milliseconds.
 // Buckets: 1ms, 5ms, 10ms, 25ms, 50ms, 100ms, 250ms, 500ms, 1s, 2.5s, 5s, 10s
 var DefaultHistogramBuckets = []float64{
-	0.001,  // 1ms
-	0.005,  // 5ms
-	0.01,   // 10ms
-	0.025,  // 25ms
-	0.05,   // 50ms
-	0.1,    // 100ms
-	0.25,   // 250ms
-	0.5,    // 500ms
-	1.0,    // 1s
-	2.5,    // 2.5s
-	5.0,    // 5s
-	10.0,   // 10s
+	0.001, // 1ms
+	0.005, // 5ms
+	0.01,  // 10ms
+	0.025, // 25ms
+	0.05,  // 50ms
+	0.1,   // 100ms
+	0.25,  // 250ms
+	0.5,   // 500ms
+	1.0,   // 1s
+	2.5,   // 2.5s
+	5.0,   // 5s
+	10.0,  // 10s
 }
 
 // Histogram is a metric that samples observations and counts them in buckets.
@@ -758,20 +758,20 @@ func WriteHeapProfile(w io.Writer) error {
 
 // MemoryStats holds key memory statistics.
 type MemoryStats struct {
-	Alloc         uint64 `json:"alloc"`
-	TotalAlloc    uint64 `json:"total_alloc"`
-	Sys           uint64 `json:"sys"`
-	NumGC         uint32 `json:"num_gc"`
-	HeapAlloc     uint64 `json:"heap_alloc"`
-	HeapSys       uint64 `json:"heap_sys"`
-	HeapIdle      uint64 `json:"heap_idle"`
-	HeapInuse     uint64 `json:"heap_inuse"`
-	HeapReleased  uint64 `json:"heap_released"`
-	HeapObjects   uint64 `json:"heap_objects"`
-	StackInuse    uint64 `json:"stack_inuse"`
-	StackSys      uint64 `json:"stack_sys"`
-	Goroutines    int    `json:"goroutines"`
-	Timestamp     int64  `json:"timestamp"`
+	Alloc        uint64 `json:"alloc"`
+	TotalAlloc   uint64 `json:"total_alloc"`
+	Sys          uint64 `json:"sys"`
+	NumGC        uint32 `json:"num_gc"`
+	HeapAlloc    uint64 `json:"heap_alloc"`
+	HeapSys      uint64 `json:"heap_sys"`
+	HeapIdle     uint64 `json:"heap_idle"`
+	HeapInuse    uint64 `json:"heap_inuse"`
+	HeapReleased uint64 `json:"heap_released"`
+	HeapObjects  uint64 `json:"heap_objects"`
+	StackInuse   uint64 `json:"stack_inuse"`
+	StackSys     uint64 `json:"stack_sys"`
+	Goroutines   int    `json:"goroutines"`
+	Timestamp    int64  `json:"timestamp"`
 }
 
 // GetMemoryStats returns current memory statistics.

@@ -54,10 +54,10 @@ func DefaultCircuitBreakerConfig() CircuitBreakerConfig {
 type CircuitBreaker struct {
 	config CircuitBreakerConfig
 
-	state          CircuitState
-	failureCount   uint32
+	state           CircuitState
+	failureCount    uint32
 	lastFailureTime time.Time
-	halfOpenProbe  atomic.Bool
+	halfOpenProbe   atomic.Bool
 
 	mu sync.RWMutex
 }

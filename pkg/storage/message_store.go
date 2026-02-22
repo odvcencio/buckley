@@ -35,12 +35,12 @@ type Cursor struct {
 
 // SessionStats contains aggregated statistics for a session without loading all messages.
 type SessionStats struct {
-	SessionID     string    `json:"sessionId"`
-	MessageCount  int       `json:"messageCount"`
-	TotalTokens   int       `json:"totalTokens"`
-	FirstMessage  time.Time `json:"firstMessage"`
-	LastMessage   time.Time `json:"lastMessage"`
-	RoleCounts    map[string]int `json:"roleCounts,omitempty"`
+	SessionID    string         `json:"sessionId"`
+	MessageCount int            `json:"messageCount"`
+	TotalTokens  int            `json:"totalTokens"`
+	FirstMessage time.Time      `json:"firstMessage"`
+	LastMessage  time.Time      `json:"lastMessage"`
+	RoleCounts   map[string]int `json:"roleCounts,omitempty"`
 }
 
 // stmtCache stores prepared statements for reuse across transactions.
@@ -273,8 +273,9 @@ func (s *Store) ReplaceMessages(sessionID string, messages []Message) error {
 // GetMessages retrieves messages for a session using limit/offset pagination.
 //
 // Recommended indexes for optimal performance:
-//   CREATE INDEX idx_messages_session_time ON messages(session_id, timestamp);
-//   CREATE INDEX idx_messages_session_role ON messages(session_id, role);
+//
+//	CREATE INDEX idx_messages_session_time ON messages(session_id, timestamp);
+//	CREATE INDEX idx_messages_session_role ON messages(session_id, role);
 func (s *Store) GetMessages(sessionID string, limit int, offset int) ([]Message, error) {
 	query := `
 		SELECT id, session_id, role, content, content_json, content_type, reasoning, timestamp, tokens, is_summary, COALESCE(is_truncated, FALSE)
@@ -328,7 +329,8 @@ func (s *Store) GetMessages(sessionID string, limit int, offset int) ([]Message,
 // Pass nil cursor to get the first page.
 //
 // Recommended indexes for optimal performance:
-//   CREATE INDEX idx_messages_session_time ON messages(session_id, timestamp);
+//
+//	CREATE INDEX idx_messages_session_time ON messages(session_id, timestamp);
 func (s *Store) GetMessagesWithCursor(sessionID string, cursor *Cursor, limit int) ([]Message, *Cursor, error) {
 	if limit <= 0 {
 		limit = 100
@@ -426,7 +428,8 @@ func (s *Store) GetAllMessages(sessionID string) ([]Message, error) {
 // Returns a map of sessionID -> messages for that session.
 //
 // Recommended indexes for optimal performance:
-//   CREATE INDEX idx_messages_session_time ON messages(session_id, timestamp);
+//
+//	CREATE INDEX idx_messages_session_time ON messages(session_id, timestamp);
 func (s *Store) GetMessagesWithSessions(sessionIDs []string) (map[string][]Message, error) {
 	if len(sessionIDs) == 0 {
 		return make(map[string][]Message), nil
@@ -495,8 +498,9 @@ func (s *Store) GetMessagesWithSessions(sessionIDs []string) (map[string][]Messa
 // This is useful for displaying session metadata in list views.
 //
 // Recommended indexes for optimal performance:
-//   CREATE INDEX idx_messages_session_time ON messages(session_id, timestamp);
-//   CREATE INDEX idx_messages_session_role ON messages(session_id, role);
+//
+//	CREATE INDEX idx_messages_session_time ON messages(session_id, timestamp);
+//	CREATE INDEX idx_messages_session_role ON messages(session_id, role);
 func (s *Store) GetSessionStats(sessionID string) (*SessionStats, error) {
 	query := `
 		SELECT 

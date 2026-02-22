@@ -57,9 +57,9 @@ func DefaultTransport() *http.Transport {
 		TLSHandshakeTimeout:   10 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
 		// Additional recommended settings
-		ForceAttemptHTTP2:     true,
-		DisableKeepAlives:     false,
-		DisableCompression:    false,
+		ForceAttemptHTTP2:  true,
+		DisableKeepAlives:  false,
+		DisableCompression: false,
 	}
 }
 

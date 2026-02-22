@@ -26,11 +26,11 @@ import (
 	"testing"
 	"time"
 
-	projectcontext "github.com/odvcencio/buckley/pkg/context"
+	"github.com/odvcencio/buckley/pkg/buckley/ui/tui"
 	"github.com/odvcencio/buckley/pkg/config"
+	projectcontext "github.com/odvcencio/buckley/pkg/context"
 	"github.com/odvcencio/buckley/pkg/model"
 	"github.com/odvcencio/buckley/pkg/storage"
-	"github.com/odvcencio/buckley/pkg/buckley/ui/tui"
 	"github.com/odvcencio/buckley/pkg/tool"
 )
 
@@ -54,7 +54,7 @@ type tuiAPICall struct {
 func (ct *tuiCostTracker) Record(model string, tokensIn, tokensOut int, cost float64, prompt string) {
 	ct.totalCost.Add(cost)
 	ct.totalTokens.Add(int64(tokensIn + tokensOut))
-	
+
 	ct.mu.Lock()
 	defer ct.mu.Unlock()
 	ct.calls = append(ct.calls, tuiAPICall{
@@ -70,7 +70,7 @@ func (ct *tuiCostTracker) Record(model string, tokensIn, tokensOut int, cost flo
 func (ct *tuiCostTracker) Report() string {
 	ct.mu.Lock()
 	defer ct.mu.Unlock()
-	
+
 	var b strings.Builder
 	b.WriteString(fmt.Sprintf("Total Cost: $%.4f\n", ct.totalCost.Load()))
 	b.WriteString(fmt.Sprintf("Total Tokens: %d\n", ct.totalTokens.Load()))
@@ -91,7 +91,7 @@ func (ct *tuiCostTracker) CheckBudget(t *testing.T) {
 			maxCost = f
 		}
 	}
-	
+
 	if cost := ct.totalCost.Load(); cost > maxCost {
 		t.Fatalf("TEST ABORTED: Exceeded max test cost $%.2f (spent $%.4f)",
 			maxCost, cost)
@@ -110,20 +110,20 @@ func skipWithoutOpenRouter(t *testing.T) string {
 // createTestController creates a TUI controller for testing
 func createTestController(t *testing.T, apiKey string) (*tui.Controller, *storage.Store, *tuiCostTracker) {
 	t.Helper()
-	
+
 	tracker := &tuiCostTracker{}
-	
+
 	// Create config
 	cfg := config.DefaultConfig()
 	cfg.Providers.OpenRouter.APIKey = apiKey
 	cfg.Models.Execution = "openai/gpt-4o-mini" // Use cheap model
-	
+
 	// Create model manager
 	modelMgr := model.NewManager(cfg)
 	if err := modelMgr.Initialize(); err != nil {
 		t.Fatalf("Failed to initialize model manager: %v", err)
 	}
-	
+
 	// Wrap the model client to track costs
 	originalClient := modelMgr.GetClient("openrouter")
 	if originalClient != nil {
@@ -133,23 +133,23 @@ func createTestController(t *testing.T, apiKey string) (*tui.Controller, *storag
 		}
 		modelMgr.SetClient("openrouter", wrappedClient)
 	}
-	
+
 	// Create temp storage
 	tempDir := t.TempDir()
 	store, err := storage.New(tempDir + "/buckley.db")
 	if err != nil {
 		t.Fatalf("Failed to create storage: %v", err)
 	}
-	
+
 	// Create project context
 	projectCtx := &projectcontext.ProjectContext{
 		Loaded: false, // Minimal context for tests
 	}
-	
+
 	// Create controller
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	
+
 	ctrl, err := tui.NewController(tui.ControllerConfig{
 		Config:       cfg,
 		ModelManager: modelMgr,
@@ -162,53 +162,53 @@ func createTestController(t *testing.T, apiKey string) (*tui.Controller, *storag
 		store.Close()
 		t.Fatalf("Failed to create controller: %v", err)
 	}
-	
+
 	return ctrl, store, tracker
 }
 
 // TestTUI_SimpleResponse tests a simple response without tools
 func TestTUI_SimpleResponse(t *testing.T) {
 	apiKey := skipWithoutOpenRouter(t)
-	
+
 	ctrl, store, tracker := createTestController(t, apiKey)
 	defer store.Close()
 	defer ctrl.Stop()
-	
+
 	// Send a simple prompt that shouldn't require tools
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	
+
 	prompt := "Say 'Hello from test' and nothing else."
-	
+
 	t.Logf("Sending prompt: %s", prompt)
 	start := time.Now()
-	
+
 	// Use the controller's handleSubmit via the app interface
 	ctrl.App().AddMessage(prompt, "user")
-	
+
 	// Wait for response (poll for a while)
 	var responseReceived bool
 	for i := 0; i < 60; i++ {
 		time.Sleep(500 * time.Millisecond)
-		
+
 		// Check if we got a response by looking at the chat view
 		// This is a heuristic - in real tests we'd query the app state
 		if time.Since(start) > 25*time.Second {
 			break
 		}
-		
+
 		// Check streaming status
 		if !ctrl.App().IsStreaming() {
 			responseReceived = true
 			break
 		}
 	}
-	
+
 	duration := time.Since(start)
 	t.Logf("Response received: %v, duration: %v", responseReceived, duration)
 	t.Logf("\n%s", tracker.Report())
 	tracker.CheckBudget(t)
-	
+
 	if !responseReceived {
 		t.Error("Did not receive response within timeout")
 	}
@@ -217,50 +217,50 @@ func TestTUI_SimpleResponse(t *testing.T) {
 // TestTUI_ToolUse_Single tests a single tool call
 func TestTUI_ToolUse_Single(t *testing.T) {
 	apiKey := skipWithoutOpenRouter(t)
-	
+
 	ctrl, store, tracker := createTestController(t, apiKey)
 	defer store.Close()
 	defer ctrl.Stop()
-	
+
 	// Register a simple test tool
 	testTool := &testCalculatorTool{}
 	ctrl.RegisterTool(testTool)
-	
+
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
-	
+
 	prompt := "Calculate 15 + 27 using the calculator tool."
-	
+
 	t.Logf("Sending prompt: %s", prompt)
 	start := time.Now()
-	
+
 	ctrl.App().AddMessage(prompt, "user")
-	
+
 	// Wait for response
 	var responseReceived bool
 	for i := 0; i < 90; i++ {
 		time.Sleep(500 * time.Millisecond)
-		
+
 		if time.Since(start) > 40*time.Second {
 			break
 		}
-		
+
 		if !ctrl.App().IsStreaming() {
 			responseReceived = true
 			break
 		}
 	}
-	
+
 	duration := time.Since(start)
 	t.Logf("Response received: %v, duration: %v", responseReceived, duration)
 	t.Logf("Tool was called: %v", testTool.WasCalled())
 	t.Logf("\n%s", tracker.Report())
 	tracker.CheckBudget(t)
-	
+
 	if !responseReceived {
 		t.Error("Did not receive response within timeout")
 	}
-	
+
 	if !testTool.WasCalled() {
 		t.Error("Calculator tool was not called")
 	}
@@ -269,45 +269,45 @@ func TestTUI_ToolUse_Single(t *testing.T) {
 // TestTUI_ToolUse_ErrorRecovery tests tool error handling
 func TestTUI_ToolUse_ErrorRecovery(t *testing.T) {
 	apiKey := skipWithoutOpenRouter(t)
-	
+
 	ctrl, store, tracker := createTestController(t, apiKey)
 	defer store.Close()
 	defer ctrl.Stop()
-	
+
 	// Register a tool that returns an error
 	testTool := &testErrorTool{}
 	ctrl.RegisterTool(testTool)
-	
+
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
-	
+
 	prompt := "Try to use the error_tool. It will fail, but you should handle it gracefully."
-	
+
 	t.Logf("Sending prompt: %s", prompt)
 	start := time.Now()
-	
+
 	ctrl.App().AddMessage(prompt, "user")
-	
+
 	// Wait for response
 	var responseReceived bool
 	for i := 0; i < 90; i++ {
 		time.Sleep(500 * time.Millisecond)
-		
+
 		if time.Since(start) > 40*time.Second {
 			break
 		}
-		
+
 		if !ctrl.App().IsStreaming() {
 			responseReceived = true
 			break
 		}
 	}
-	
+
 	duration := time.Since(start)
 	t.Logf("Response received: %v, duration: %v", responseReceived, duration)
 	t.Logf("\n%s", tracker.Report())
 	tracker.CheckBudget(t)
-	
+
 	if !responseReceived {
 		t.Error("Did not receive response within timeout")
 	}
@@ -316,42 +316,42 @@ func TestTUI_ToolUse_ErrorRecovery(t *testing.T) {
 // TestTUI_StreamingResponse tests streaming behavior
 func TestTUI_StreamingResponse(t *testing.T) {
 	apiKey := skipWithoutOpenRouter(t)
-	
+
 	ctrl, store, tracker := createTestController(t, apiKey)
 	defer store.Close()
 	defer ctrl.Stop()
-	
+
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	
+
 	prompt := "Write a 3-sentence story about a cat."
-	
+
 	t.Logf("Sending prompt: %s", prompt)
 	start := time.Now()
-	
+
 	ctrl.App().AddMessage(prompt, "user")
-	
+
 	// Track streaming state changes
 	streamingStates := []bool{}
 	for i := 0; i < 60; i++ {
 		time.Sleep(500 * time.Millisecond)
 		streamingStates = append(streamingStates, ctrl.App().IsStreaming())
-		
+
 		if time.Since(start) > 25*time.Second {
 			break
 		}
-		
+
 		if !ctrl.App().IsStreaming() && i > 5 {
 			break
 		}
 	}
-	
+
 	duration := time.Since(start)
 	t.Logf("Duration: %v", duration)
 	t.Logf("Streaming states: %v", streamingStates)
 	t.Logf("\n%s", tracker.Report())
 	tracker.CheckBudget(t)
-	
+
 	// Verify we saw streaming (true) and then stopped (false)
 	hasStreaming := false
 	hasStopped := false
@@ -364,7 +364,7 @@ func TestTUI_StreamingResponse(t *testing.T) {
 			break
 		}
 	}
-	
+
 	if !hasStreaming {
 		t.Log("Warning: Did not observe streaming state")
 	}
@@ -373,30 +373,30 @@ func TestTUI_StreamingResponse(t *testing.T) {
 // TestTUI_ContextCancellation tests that context cancellation works
 func TestTUI_ContextCancellation(t *testing.T) {
 	apiKey := skipWithoutOpenRouter(t)
-	
+
 	ctrl, store, tracker := createTestController(t, apiKey)
 	defer store.Close()
 	defer ctrl.Stop()
-	
+
 	// Use a very short timeout
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	
+
 	prompt := "Write a long story about a dragon." // Something that takes time
-	
+
 	t.Logf("Sending prompt with 3s timeout: %s", prompt)
 	start := time.Now()
-	
+
 	ctrl.App().AddMessage(prompt, "user")
-	
+
 	// Wait for context to cancel
 	<-ctx.Done()
-	
+
 	duration := time.Since(start)
 	t.Logf("Test completed in %v", duration)
 	t.Logf("\n%s", tracker.Report())
 	tracker.CheckBudget(t)
-	
+
 	// Verify cancellation happened
 	if ctx.Err() != context.DeadlineExceeded {
 		t.Errorf("Expected deadline exceeded, got: %v", ctx.Err())
@@ -414,7 +414,7 @@ func (tmc *trackingTUIClient) ChatCompletion(ctx context.Context, req model.Chat
 	if err != nil {
 		return resp, err
 	}
-	
+
 	if resp != nil && resp.Usage.TotalTokens > 0 {
 		// Estimate cost (gpt-4o-mini pricing)
 		cost := float64(resp.Usage.PromptTokens)*0.15/1e6 + float64(resp.Usage.CompletionTokens)*0.60/1e6
@@ -427,7 +427,7 @@ func (tmc *trackingTUIClient) ChatCompletion(ctx context.Context, req model.Chat
 		}
 		tmc.tracker.Record(req.Model, resp.Usage.PromptTokens, resp.Usage.CompletionTokens, cost, promptPreview)
 	}
-	
+
 	return resp, err
 }
 
@@ -461,12 +461,12 @@ func (t *testCalculatorTool) Parameters() tool.ParameterSchema {
 
 func (t *testCalculatorTool) Execute(params map[string]any) (*tool.Result, error) {
 	t.called.Store(true)
-	
+
 	expression, ok := params["expression"].(string)
 	if !ok {
 		return nil, fmt.Errorf("expression parameter required")
 	}
-	
+
 	// Simple evaluation - just return the expression for testing
 	return &tool.Result{
 		Content: fmt.Sprintf("Result of %s = 42 (test value)", expression),

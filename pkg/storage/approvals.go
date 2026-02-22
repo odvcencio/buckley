@@ -419,7 +419,7 @@ func (s *Store) ListPendingApprovals(sessionID string) ([]*PendingApproval, erro
 			return nil, fmt.Errorf("scan pending approval: %w", err)
 		}
 
-			if riskReasonsJSON != "" {
+		if riskReasonsJSON != "" {
 			if err := json.Unmarshal([]byte(riskReasonsJSON), &approval.RiskReasons); err != nil {
 				return nil, fmt.Errorf("unmarshal risk reasons: %w", err)
 			}

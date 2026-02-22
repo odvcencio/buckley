@@ -12,9 +12,9 @@ import (
 //
 // Usage:
 //
-	// writer := store.NewBatchWriter(100, 100*time.Millisecond)
-	// defer writer.Close()
-	// writer.Add(msg) // messages are batched and flushed automatically
+// writer := store.NewBatchWriter(100, 100*time.Millisecond)
+// defer writer.Close()
+// writer.Add(msg) // messages are batched and flushed automatically
 //
 // The writer is safe for concurrent use and handles errors by logging them
 // and continuing to accept new messages.
@@ -166,4 +166,3 @@ func (bw *BatchWriter) BatchSize() int {
 	defer bw.mu.Unlock()
 	return len(bw.batch)
 }
-

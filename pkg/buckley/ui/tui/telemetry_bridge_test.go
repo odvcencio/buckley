@@ -306,14 +306,14 @@ func TestSimpleTelemetryBridge_HandleExperimentEvents(t *testing.T) {
 	bridge.handleEvent(telemetry.Event{
 		Type: telemetry.EventExperimentVariantCompleted,
 		Data: map[string]any{
-			"experiment":       "Experiment A",
-			"variant_id":       "v1",
-			"variant":          "Variant A",
-			"model_id":         "model-a",
-			"status":           "completed",
-			"duration_ms":      1200,
-			"total_cost":       0.42,
-			"prompt_tokens":    10,
+			"experiment":        "Experiment A",
+			"variant_id":        "v1",
+			"variant":           "Variant A",
+			"model_id":          "model-a",
+			"status":            "completed",
+			"duration_ms":       1200,
+			"total_cost":        0.42,
+			"prompt_tokens":     10,
 			"completion_tokens": 20,
 		},
 	})

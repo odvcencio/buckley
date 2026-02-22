@@ -6,13 +6,13 @@ import (
 )
 
 var (
-	ErrUnavailable    = errors.New("browser runtime unavailable")
-	ErrNotImplemented = errors.New("browser runtime not implemented")
-	ErrSessionClosed  = errors.New("browser session closed")
-	ErrStaleState     = errors.New("stale state version")
-	ErrConnectionLost = errors.New("browserd connection lost")
+	ErrUnavailable      = errors.New("browser runtime unavailable")
+	ErrNotImplemented   = errors.New("browser runtime not implemented")
+	ErrSessionClosed    = errors.New("browser session closed")
+	ErrStaleState       = errors.New("stale state version")
+	ErrConnectionLost   = errors.New("browserd connection lost")
 	ErrOperationTimeout = errors.New("operation timeout")
-	ErrReconnectFailed = errors.New("reconnection failed")
+	ErrReconnectFailed  = errors.New("reconnection failed")
 )
 
 // BrowserdError wraps errors from the browserd daemon with additional context.

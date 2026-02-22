@@ -89,9 +89,9 @@ type AppState struct {
 	SidebarShowLocks  *state.Signal[bool]
 
 	// Machine
-	MachineAgents   *state.Signal[[]buckleywidgets.AgentSummary]
+	MachineAgents    *state.Signal[[]buckleywidgets.AgentSummary]
 	MachineFileLocks *state.Signal[[]buckleywidgets.FileLockSummary]
-	MachineModality *state.Signal[string]
+	MachineModality  *state.Signal[string]
 }
 
 // NewAppState creates a new application state with defaults.

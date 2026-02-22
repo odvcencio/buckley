@@ -22,8 +22,8 @@ const (
 	CheckpointingProgress // Persisting iteration state
 
 	// Ralph states
-	CommittingWork  // Auto-commit after mutations (uses commit tool)
-	Verifying       // Running acceptance criteria
+	CommittingWork   // Auto-commit after mutations (uses commit tool)
+	Verifying        // Running acceptance criteria
 	ResettingContext // Wipe conversation, preserve spec + verification result
 
 	// Terminal states

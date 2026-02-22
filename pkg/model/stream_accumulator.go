@@ -255,8 +255,8 @@ func ParseToolCallsFromContent(content string) ([]ToolCall, string) {
 				continue
 			}
 
-			toolCallID := match[1]   // e.g., "functions.get_weather:0"
-			arguments := match[2]    // JSON arguments
+			toolCallID := match[1] // e.g., "functions.get_weather:0"
+			arguments := match[2]  // JSON arguments
 
 			// Extract function name from ID (format: functions.{name}:{idx})
 			funcName := extractFunctionName(toolCallID)

@@ -10,11 +10,11 @@ import (
 // ModalOverlay draws a backdrop and hosts a modal child widget.
 type ModalOverlay struct {
 	uiwidgets.Base
-	child            runtime.Widget
-	childBounds      runtime.Rect
-	backdropStyle    backend.Style
-	closeOnBackdrop  bool
-	onClose          func()
+	child           runtime.Widget
+	childBounds     runtime.Rect
+	backdropStyle   backend.Style
+	closeOnBackdrop bool
+	onClose         func()
 }
 
 // NewModalOverlay creates a modal overlay wrapper.

@@ -177,10 +177,10 @@ type Hub struct {
 	lastDropWarn  int64 // unix nano timestamp of last drop warning log
 
 	// Lifecycle
-	ctx    context.Context
-	cancel context.CancelFunc
-	wg     sync.WaitGroup
-	closed bool
+	ctx     context.Context
+	cancel  context.CancelFunc
+	wg      sync.WaitGroup
+	closed  bool
 	closeMu sync.RWMutex
 }
 

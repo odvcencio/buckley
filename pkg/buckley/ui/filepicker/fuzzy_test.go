@@ -102,8 +102,8 @@ func TestFuzzyMatch_FilenameBonus(t *testing.T) {
 	// Actually verify that the scoring algorithm works by checking a case where
 	// the only difference is filename vs non-filename position.
 	// Use longer paths to equalize depth/length penalties.
-	scoreInFilename, _ := fuzzyMatch("aaa/bbb/xoo.go", "x")   // x at pos 8, filenameStart=8 -> filename bonus
-	scoreInDir, _ := fuzzyMatch("aaa/xbb/ooo.go", "x")         // x at pos 4, filenameStart=8 -> no filename bonus
+	scoreInFilename, _ := fuzzyMatch("aaa/bbb/xoo.go", "x") // x at pos 8, filenameStart=8 -> filename bonus
+	scoreInDir, _ := fuzzyMatch("aaa/xbb/ooo.go", "x")      // x at pos 4, filenameStart=8 -> no filename bonus
 
 	if scoreInFilename == 0 || scoreInDir == 0 {
 		t.Fatalf("both should match: inFilename=%d, inDir=%d", scoreInFilename, scoreInDir)

@@ -31,7 +31,7 @@ func TestClient_Generate_Success(t *testing.T) {
 			Choices: []imageChoice{{
 				Index: 0,
 				Message: responseMsg{
-					Role:    "assistant",
+					Role: "assistant",
 					Content: mustMarshal(t, []contentPart{
 						{Type: "text", Text: "A cat in a hat"},
 						{Type: "image_url", ImageURL: &imageURL{URL: "data:image/png;base64,AAAA"}},

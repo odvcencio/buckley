@@ -383,7 +383,6 @@ func TestInvokerWithTools_ToolLoop(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-
 	if content != "The file contains main function." {
 		t.Errorf("content = %q, want %q", content, "The file contains main function.")
 	}

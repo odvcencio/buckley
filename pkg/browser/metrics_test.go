@@ -232,9 +232,9 @@ func TestMetrics_Snapshot_SuccessRate(t *testing.T) {
 
 func TestMetrics_Snapshot_AverageFrameLatency(t *testing.T) {
 	tests := []struct {
-		name       string
-		latencies  []time.Duration
-		wantAvgNs  int64
+		name      string
+		latencies []time.Duration
+		wantAvgNs int64
 	}{
 		{
 			name:      "no frames gives zero latency",

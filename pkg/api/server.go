@@ -156,14 +156,14 @@ func (s *Server) Shutdown(ctx context.Context) error {
 
 // Job represents an async command execution.
 type Job struct {
-	ID        string                 `json:"id"`
-	Command   string                 `json:"command"`
-	Status    string                 `json:"status"` // pending, running, completed, failed
-	StartedAt time.Time              `json:"started_at"`
-	EndedAt   *time.Time             `json:"ended_at,omitempty"`
-	Result    map[string]any `json:"result,omitempty"`
-	Error     string                 `json:"error,omitempty"`
-	Trace     *transparency.Trace    `json:"trace,omitempty"`
+	ID        string              `json:"id"`
+	Command   string              `json:"command"`
+	Status    string              `json:"status"` // pending, running, completed, failed
+	StartedAt time.Time           `json:"started_at"`
+	EndedAt   *time.Time          `json:"ended_at,omitempty"`
+	Result    map[string]any      `json:"result,omitempty"`
+	Error     string              `json:"error,omitempty"`
+	Trace     *transparency.Trace `json:"trace,omitempty"`
 
 	// For streaming
 	updates chan JobUpdate
@@ -171,8 +171,8 @@ type Job struct {
 
 // JobUpdate is a streaming update for a job.
 type JobUpdate struct {
-	Type    string      `json:"type"` // status, progress, result, error
-	Payload any `json:"payload"`
+	Type    string `json:"type"` // status, progress, result, error
+	Payload any    `json:"payload"`
 }
 
 // Health check handlers

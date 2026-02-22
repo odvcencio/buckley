@@ -409,7 +409,7 @@ func demoMode(d *Driver) {
 		log.Printf("Found input at (%d, %d)", input.Bounds.X, input.Bounds.Y)
 		centerX := input.Bounds.X + input.Bounds.Width/2
 		centerY := input.Bounds.Y + input.Bounds.Height/2
-		
+
 		log.Printf("Clicking input at (%d, %d)", centerX, centerY)
 		if err := d.Click(centerX, centerY); err != nil {
 			log.Printf("Click failed: %v", err)
@@ -493,22 +493,22 @@ func runScenario(d *Driver, scenarioFile string) error {
 
 // Scenario represents a test scenario.
 type Scenario struct {
-	Name  string       `json:"name"`
+	Name  string         `json:"name"`
 	Steps []ScenarioStep `json:"steps"`
 }
 
 // ScenarioStep represents a single step in a scenario.
 type ScenarioStep struct {
-	Goal        string   `json:"goal"`
-	Action      string   `json:"action"`
-	Target      string   `json:"target,omitempty"`
-	Text        string   `json:"text,omitempty"`
-	Key         string   `json:"key,omitempty"`
-	Keys        []string `json:"keys,omitempty"`
-	Condition   string   `json:"condition,omitempty"`
-	Value       string   `json:"value,omitempty"`
-	DurationMs  int      `json:"duration_ms,omitempty"`
-	TimeoutSec  int      `json:"timeout_sec,omitempty"`
+	Goal       string   `json:"goal"`
+	Action     string   `json:"action"`
+	Target     string   `json:"target,omitempty"`
+	Text       string   `json:"text,omitempty"`
+	Key        string   `json:"key,omitempty"`
+	Keys       []string `json:"keys,omitempty"`
+	Condition  string   `json:"condition,omitempty"`
+	Value      string   `json:"value,omitempty"`
+	DurationMs int      `json:"duration_ms,omitempty"`
+	TimeoutSec int      `json:"timeout_sec,omitempty"`
 }
 
 func focusWidget(d *Driver, target string) error {
@@ -523,7 +523,7 @@ func focusWidget(d *Driver, target string) error {
 		Keywords:      []string{target},
 		MinConfidence: 0.5,
 	}
-	
+
 	if result := FindWidgetSemantic(snap, criteria); result != nil {
 		centerX := result.Widget.Bounds.X + result.Widget.Bounds.Width/2
 		centerY := result.Widget.Bounds.Y + result.Widget.Bounds.Height/2

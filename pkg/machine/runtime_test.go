@@ -31,9 +31,9 @@ func (m *mockModelCaller) Call(_ context.Context, action CallModel) (Event, erro
 }
 
 type mockToolExecutor struct {
-	mu       sync.Mutex
-	calls    int
-	results  []ToolsCompleted
+	mu      sync.Mutex
+	calls   int
+	results []ToolsCompleted
 }
 
 func (m *mockToolExecutor) Execute(_ context.Context, calls []ToolCallRequest) ToolsCompleted {
@@ -341,10 +341,10 @@ func TestRuntime_DelegateWithBudget(t *testing.T) {
 	lockMgr := locks.NewManager(hub)
 
 	rt := NewRuntime(RuntimeConfig{
-		Hub:          hub,
-		ModelClient:  slowModel,
-		LockManager:  lockMgr,
-		Compactor:    &mockCompactor{},
+		Hub:         hub,
+		ModelClient: slowModel,
+		LockManager: lockMgr,
+		Compactor:   &mockCompactor{},
 	})
 
 	act := DelegateToSubAgents{

@@ -41,15 +41,15 @@ type sidebarStatus struct {
 
 	spinnerFrame int
 
-	taskPanel        *taskPanel
-	planPanel        *planPanel
-	toolsPanel       *toolsPanel
-	contextPanel     *contextPanel
-	experimentPanel  *experimentPanel
-	rlmPanel         *rlmPanel
-	circuitPanel     *circuitPanel
-	agentsPanelInst  *agentsPanel
-	calendarPanel    *calendarPanel
+	taskPanel       *taskPanel
+	planPanel       *planPanel
+	toolsPanel      *toolsPanel
+	contextPanel    *contextPanel
+	experimentPanel *experimentPanel
+	rlmPanel        *rlmPanel
+	circuitPanel    *circuitPanel
+	agentsPanelInst *agentsPanel
+	calendarPanel   *calendarPanel
 
 	content *runtime.Flex
 	scroll  *uiwidgets.ScrollView

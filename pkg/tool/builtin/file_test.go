@@ -298,7 +298,6 @@ func TestFileExistsTool(t *testing.T) {
 	})
 }
 
-
 func TestPatchFileTool(t *testing.T) {
 	tool := &PatchFileTool{}
 

@@ -558,4 +558,3 @@ func (t *FileExistsTool) Execute(params map[string]any) (*Result, error) {
 		Data:    result,
 	}, nil
 }
-

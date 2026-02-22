@@ -104,8 +104,8 @@ func (b *MachineBridge) translate(evt telemetry.Event) (SessionUpdate, bool) {
 		return SessionUpdate{
 			SessionUpdate: SessionUpdateMachineAgent,
 			Content: map[string]any{
-				"event":     "completed",
-				"agentId":   dataStr(evt.Data, "agent_id"),
+				"event":      "completed",
+				"agentId":    dataStr(evt.Data, "agent_id"),
 				"tokensUsed": evt.Data["tokens_used"],
 			},
 		}, true

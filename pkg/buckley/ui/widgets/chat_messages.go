@@ -36,12 +36,12 @@ type SearchMatchState struct {
 
 // ChatMessagesConfig provides external state for message rendering.
 type ChatMessagesConfig struct {
-	Messages       state.Readable[[]ChatMessage]
-	Thinking       state.Readable[bool]
-	ModelName      state.Readable[string]
-	SearchQuery    state.Readable[string]
-	SearchMatches  state.Writable[SearchMatchState]
-	SelectionText  state.Writable[string]
+	Messages        state.Readable[[]ChatMessage]
+	Thinking        state.Readable[bool]
+	ModelName       state.Readable[string]
+	SearchQuery     state.Readable[string]
+	SearchMatches   state.Writable[SearchMatchState]
+	SelectionText   state.Writable[string]
 	SelectionActive state.Writable[bool]
 	// MetadataMode controls metadata visibility ("always", "hover", "never").
 	MetadataMode state.Readable[string]
@@ -62,21 +62,21 @@ type ChatMessages struct {
 	services runtime.Services
 	subs     state.Subscriptions
 
-	messagesSig       state.Readable[[]ChatMessage]
-	thinkingSig       state.Readable[bool]
-	ownedMessagesSig  *state.Signal[[]ChatMessage]
-	ownedThinkingSig  *state.Signal[bool]
-	modelNameSig      state.Readable[string]
-	metadataModeSig   state.Readable[string]
-	ownedModelNameSig *state.Signal[string]
-	ownedMetadataSig  *state.Signal[string]
-	searchQuerySig    state.Readable[string]
-	searchMatchesSig  state.Writable[SearchMatchState]
-	selectionTextSig  state.Writable[string]
-	selectionActiveSig state.Writable[bool]
-	ownedSearchQuerySig   *state.Signal[string]
-	ownedSearchMatchesSig *state.Signal[SearchMatchState]
-	ownedSelectionTextSig *state.Signal[string]
+	messagesSig             state.Readable[[]ChatMessage]
+	thinkingSig             state.Readable[bool]
+	ownedMessagesSig        *state.Signal[[]ChatMessage]
+	ownedThinkingSig        *state.Signal[bool]
+	modelNameSig            state.Readable[string]
+	metadataModeSig         state.Readable[string]
+	ownedModelNameSig       *state.Signal[string]
+	ownedMetadataSig        *state.Signal[string]
+	searchQuerySig          state.Readable[string]
+	searchMatchesSig        state.Writable[SearchMatchState]
+	selectionTextSig        state.Writable[string]
+	selectionActiveSig      state.Writable[bool]
+	ownedSearchQuerySig     *state.Signal[string]
+	ownedSearchMatchesSig   *state.Signal[SearchMatchState]
+	ownedSelectionTextSig   *state.Signal[string]
 	ownedSelectionActiveSig *state.Signal[bool]
 
 	// Styles for different message types

@@ -37,21 +37,21 @@ type AgentServer struct {
 
 // AgentCommand represents a command that can be sent to the TUI.
 type AgentCommand struct {
-	Type    string            `json:"type"`
-	Action  string            `json:"action"`
-	Params  map[string]string `json:"params,omitempty"`
-	ID      string            `json:"id,omitempty"`
-	Text    string            `json:"text,omitempty"`
+	Type   string            `json:"type"`
+	Action string            `json:"action"`
+	Params map[string]string `json:"params,omitempty"`
+	ID     string            `json:"id,omitempty"`
+	Text   string            `json:"text,omitempty"`
 }
 
 // AgentResponse represents a response from the TUI.
 type AgentResponse struct {
-	Success   bool              `json:"success"`
-	Message   string            `json:"message,omitempty"`
-	Error     string            `json:"error,omitempty"`
-	Snapshot  *agent.Snapshot   `json:"snapshot,omitempty"`
+	Success   bool               `json:"success"`
+	Message   string             `json:"message,omitempty"`
+	Error     string             `json:"error,omitempty"`
+	Snapshot  *agent.Snapshot    `json:"snapshot,omitempty"`
 	Widgets   []agent.WidgetInfo `json:"widgets,omitempty"`
-	Timestamp time.Time         `json:"timestamp"`
+	Timestamp time.Time          `json:"timestamp"`
 }
 
 // initAgentServer initializes the agent server for real-time TUI control.

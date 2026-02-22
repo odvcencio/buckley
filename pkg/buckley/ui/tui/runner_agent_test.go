@@ -54,7 +54,7 @@ func TestRunnerAgentExecuteCommand_UnknownType(t *testing.T) {
 	// but it tests the command routing logic
 	cmd := AgentCommand{Type: "unknown", Text: "test"}
 	resp, _ := r.AgentExecuteCommand(cmd)
-	
+
 	if resp != nil && resp.Success {
 		t.Error("expected failure for unknown command type")
 	}
@@ -115,7 +115,7 @@ func TestRunnerAgentExecuteCommand_Validation(t *testing.T) {
 func TestAgentServer_Lifecycle(t *testing.T) {
 	// This is a minimal test - full lifecycle testing would require
 	// a running TUI which is better suited for integration tests
-	
+
 	// Test that stopAgentServer doesn't panic when not initialized
 	r := &Runner{}
 	r.stopAgentServer() // Should not panic
@@ -125,7 +125,7 @@ func TestAgentServer_Lifecycle(t *testing.T) {
 		done: make(chan struct{}),
 	}
 	close(r.agentServer.done) // Pre-close the channel
-	r.stopAgentServer() // Should handle gracefully
+	r.stopAgentServer()       // Should handle gracefully
 }
 
 func TestAgentCommandTypes(t *testing.T) {
@@ -147,7 +147,7 @@ func TestAgentCommandTypes(t *testing.T) {
 			ID:     "test-id",
 			Params: map[string]string{"key": "value"},
 		}
-		
+
 		if cmd.Type != cmdType {
 			t.Errorf("command type mismatch: %s", cmdType)
 		}

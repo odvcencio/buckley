@@ -26,6 +26,7 @@ import (
 
 	"connectrpc.com/connect"
 
+	"github.com/odvcencio/buckley/pkg/buckley/ui/viewmodel"
 	"github.com/odvcencio/buckley/pkg/config"
 	projectcontext "github.com/odvcencio/buckley/pkg/context"
 	"github.com/odvcencio/buckley/pkg/ipc/command"
@@ -41,7 +42,6 @@ import (
 	"github.com/odvcencio/buckley/pkg/session"
 	"github.com/odvcencio/buckley/pkg/storage"
 	"github.com/odvcencio/buckley/pkg/telemetry"
-	"github.com/odvcencio/buckley/pkg/buckley/ui/viewmodel"
 )
 
 var allowedSettingKeys = []string{"remote.base_url", "remote.notes"}
