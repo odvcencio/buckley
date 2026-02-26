@@ -13,11 +13,7 @@ import (
 
 func TestReviewAgentReviewApproved(t *testing.T) {
 	tmpDir := t.TempDir()
-	origWD, _ := os.Getwd()
-	if err := os.Chdir(tmpDir); err != nil {
-		t.Fatalf("chdir: %v", err)
-	}
-	defer os.Chdir(origWD)
+	t.Chdir(tmpDir)
 
 	// Prepare file under review.
 	if err := os.MkdirAll("pkg", 0o755); err != nil {

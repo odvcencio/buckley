@@ -662,6 +662,7 @@ func TestWithCORS(t *testing.T) {
 	wrapped := withCORS(handler)
 
 	req := httptest.NewRequest("GET", "/test", nil)
+	req.Header.Set("Origin", "http://localhost:3000")
 	w := httptest.NewRecorder()
 	wrapped.ServeHTTP(w, req)
 
@@ -670,8 +671,8 @@ func TestWithCORS(t *testing.T) {
 	}
 
 	// Check CORS headers
-	if w.Header().Get("Access-Control-Allow-Origin") != "*" {
-		t.Error("Expected CORS origin header")
+	if w.Header().Get("Access-Control-Allow-Origin") != "http://localhost:3000" {
+		t.Error("Expected CORS origin header to be http://localhost:3000")
 	}
 	if w.Header().Get("Access-Control-Allow-Methods") == "" {
 		t.Error("Expected CORS methods header")
@@ -690,6 +691,7 @@ func TestWithCORS_Preflight(t *testing.T) {
 	wrapped := withCORS(handler)
 
 	req := httptest.NewRequest("OPTIONS", "/test", nil)
+	req.Header.Set("Origin", "http://localhost:8080")
 	w := httptest.NewRecorder()
 	wrapped.ServeHTTP(w, req)
 
@@ -704,6 +706,34 @@ func TestWithCORS_Preflight(t *testing.T) {
 }
 
 // Tests for helper functions
+
+func TestIsAllowedOrigin(t *testing.T) {
+	tests := []struct {
+		name     string
+		origin   string
+		expected bool
+	}{
+		{"localhost http", "http://localhost", true},
+		{"localhost https", "https://localhost", true},
+		{"localhost with port", "http://localhost:3000", true},
+		{"127.0.0.1", "http://127.0.0.1", true},
+		{"127.0.0.1 with port", "http://127.0.0.1:8080", true},
+		{"ipv6 localhost", "http://[::1]", true},
+		{"ipv6 with port", "http://[::1]:3000", true},
+		{"empty", "", false},
+		{"external domain", "http://example.com", false},
+		{"external with localhost in path", "http://example.com/localhost", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := isAllowedOrigin(tt.origin)
+			if result != tt.expected {
+				t.Errorf("isAllowedOrigin(%q) = %v, expected %v", tt.origin, result, tt.expected)
+			}
+		})
+	}
+}
 
 func TestWriteJSON(t *testing.T) {
 	w := httptest.NewRecorder()

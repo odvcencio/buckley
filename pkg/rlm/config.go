@@ -2,17 +2,6 @@ package rlm
 
 import "time"
 
-// Weight identifies a subagent tier.
-type Weight string
-
-const (
-	WeightTrivial   Weight = "trivial"
-	WeightLight     Weight = "light"
-	WeightMedium    Weight = "medium"
-	WeightHeavy     Weight = "heavy"
-	WeightReasoning Weight = "reasoning"
-)
-
 // CoordinatorConfig controls coordinator behavior.
 type CoordinatorConfig struct {
 	Model               string
@@ -21,17 +10,19 @@ type CoordinatorConfig struct {
 	MaxWallTime         time.Duration
 	ConfidenceThreshold float64
 	StreamPartials      bool
+	// History compaction settings
+	HistoryMaxItems   int // Max items before compaction (default 8)
+	HistoryCompactN   int // Number of old items to compact together (default 3)
+	HistoryKeepRecent int // Always keep this many recent items uncompacted (default 3)
 }
 
-// TierConfig controls model routing for subagents in a weight tier.
-type TierConfig struct {
-	Model             string
-	Provider          string
-	Models            []string
-	MaxCostPerMillion float64
-	MinContextWindow  int
-	Prefer            []string
-	Requires          []string
+// SubAgentConfig controls sub-agent execution.
+// Simplified from the original 5-tier system - all sub-agents use the same model.
+// Patterns will emerge from usage; add tiers back when data shows need.
+type SubAgentConfig struct {
+	Model         string        // Model for all sub-agents (default: execution model)
+	MaxConcurrent int           // Parallel execution limit
+	Timeout       time.Duration // Per-task timeout
 }
 
 // ScratchpadConfig controls scratchpad retention and limits.
@@ -45,9 +36,10 @@ type ScratchpadConfig struct {
 }
 
 // Config is the top-level configuration for RLM.
+// Simplified: orchestrator + single sub-agent class (no tiers).
 type Config struct {
 	Coordinator CoordinatorConfig
-	Tiers       map[Weight]TierConfig
+	SubAgent    SubAgentConfig
 	Scratchpad  ScratchpadConfig
 }
 
@@ -57,12 +49,19 @@ func DefaultConfig() Config {
 		Coordinator: CoordinatorConfig{
 			Model:               "auto",
 			MaxIterations:       10,
-			MaxTokensBudget:     100000,
+			MaxTokensBudget:     0, // 0 = unlimited, let the model work until done
 			MaxWallTime:         10 * time.Minute,
 			ConfidenceThreshold: 0.95,
 			StreamPartials:      true,
+			HistoryMaxItems:     8,
+			HistoryCompactN:     3,
+			HistoryKeepRecent:   3,
 		},
-		Tiers: DefaultTiers(),
+		SubAgent: SubAgentConfig{
+			Model:         "", // Empty = use execution model
+			MaxConcurrent: 5,
+			Timeout:       5 * time.Minute,
+		},
 		Scratchpad: ScratchpadConfig{
 			MaxEntriesMemory:  1000,
 			MaxRawBytesMemory: 50 * 1024 * 1024,
@@ -74,63 +73,35 @@ func DefaultConfig() Config {
 	}
 }
 
-// DefaultTiers returns the default tier configuration.
-func DefaultTiers() map[Weight]TierConfig {
-	return map[Weight]TierConfig{
-		WeightTrivial: {
-			MaxCostPerMillion: 0.50,
-			MinContextWindow:  8000,
-			Prefer:            []string{"speed", "cost"},
-		},
-		WeightLight: {
-			MaxCostPerMillion: 3.00,
-			MinContextWindow:  16000,
-			Prefer:            []string{"cost", "quality"},
-		},
-		WeightMedium: {
-			MaxCostPerMillion: 10.00,
-			MinContextWindow:  32000,
-			Prefer:            []string{"quality", "cost"},
-		},
-		WeightHeavy: {
-			MaxCostPerMillion: 30.00,
-			MinContextWindow:  64000,
-			Prefer:            []string{"quality"},
-		},
-		WeightReasoning: {
-			MinContextWindow: 100000,
-			Prefer:           []string{"quality"},
-			Requires:         []string{"extended_thinking"},
-		},
-	}
-}
-
 // Normalize fills missing defaults.
 func (c *Config) Normalize() {
 	if c == nil {
 		return
 	}
-	if c.Tiers == nil {
-		c.Tiers = DefaultTiers()
-	} else {
-		defaults := DefaultTiers()
-		for key, tier := range defaults {
-			if _, ok := c.Tiers[key]; !ok {
-				c.Tiers[key] = tier
-			}
-		}
-	}
 	if c.Coordinator.MaxIterations <= 0 {
 		c.Coordinator.MaxIterations = 10
 	}
-	if c.Coordinator.MaxTokensBudget <= 0 {
-		c.Coordinator.MaxTokensBudget = 100000
-	}
+	// MaxTokensBudget 0 = unlimited (don't override)
 	if c.Coordinator.MaxWallTime <= 0 {
 		c.Coordinator.MaxWallTime = 10 * time.Minute
 	}
 	if c.Coordinator.ConfidenceThreshold <= 0 {
 		c.Coordinator.ConfidenceThreshold = 0.95
+	}
+	if c.Coordinator.HistoryMaxItems <= 0 {
+		c.Coordinator.HistoryMaxItems = 8
+	}
+	if c.Coordinator.HistoryCompactN <= 0 {
+		c.Coordinator.HistoryCompactN = 3
+	}
+	if c.Coordinator.HistoryKeepRecent <= 0 {
+		c.Coordinator.HistoryKeepRecent = 3
+	}
+	if c.SubAgent.MaxConcurrent <= 0 {
+		c.SubAgent.MaxConcurrent = 5
+	}
+	if c.SubAgent.Timeout <= 0 {
+		c.SubAgent.Timeout = 5 * time.Minute
 	}
 	if c.Scratchpad.MaxEntriesMemory <= 0 {
 		c.Scratchpad.MaxEntriesMemory = 1000
@@ -143,16 +114,5 @@ func (c *Config) Normalize() {
 	}
 	if c.Scratchpad.EvictionPolicy == "" {
 		c.Scratchpad.EvictionPolicy = "lru"
-	}
-}
-
-// Weights returns weight tiers in stable order.
-func Weights() []Weight {
-	return []Weight{
-		WeightTrivial,
-		WeightLight,
-		WeightMedium,
-		WeightHeavy,
-		WeightReasoning,
 	}
 }

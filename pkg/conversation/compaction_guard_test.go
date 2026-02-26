@@ -11,7 +11,7 @@ func TestSelectCompactionSegmentsProtectsSystemMessages(t *testing.T) {
 		{Role: "assistant", Content: "reply"},
 	}
 
-	toSummarize, toKeep, err := selectCompactionSegments(msgs)
+	toSummarize, toKeep, err := selectCompactionSegments(msgs, defaultCompactionRatio)
 	if err != nil {
 		t.Fatalf("selectCompactionSegments error: %v", err)
 	}

@@ -118,10 +118,3 @@ func RegisterBuiltin(name, description string, tool tools.Definition) error {
 		Builtin:     true,
 	})
 }
-
-// MustRegisterBuiltin registers a builtin command and panics on error.
-func MustRegisterBuiltin(name, description string, tool tools.Definition) {
-	if err := RegisterBuiltin(name, description, tool); err != nil {
-		panic(err)
-	}
-}

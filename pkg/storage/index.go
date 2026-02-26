@@ -66,7 +66,12 @@ func (s *Store) ReplaceSymbols(ctx context.Context, filePath string, symbols []S
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
 
 	if _, err := tx.ExecContext(ctx, `DELETE FROM fs_symbols WHERE file_path = ?`, filePath); err != nil {
 		return err
@@ -89,7 +94,11 @@ func (s *Store) ReplaceSymbols(ctx context.Context, filePath string, symbols []S
 		}
 	}
 
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit replace symbols: %w", err)
+	}
+	committed = true
+	return nil
 }
 
 // ReplaceImports replaces all imports for a given file.
@@ -102,7 +111,12 @@ func (s *Store) ReplaceImports(ctx context.Context, filePath string, imports []I
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
 
 	if _, err := tx.ExecContext(ctx, `DELETE FROM fs_imports WHERE file_path = ?`, filePath); err != nil {
 		return err
@@ -125,7 +139,11 @@ func (s *Store) ReplaceImports(ctx context.Context, filePath string, imports []I
 		}
 	}
 
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit replace imports: %w", err)
+	}
+	committed = true
+	return nil
 }
 
 // SearchFiles performs a basic LIKE search across file metadata.
@@ -219,7 +237,6 @@ func (s *Store) SearchSymbols(ctx context.Context, symbol, pathGlob string, limi
 
 func globToLike(glob string) string {
 	glob = strings.ReplaceAll(glob, "\\", "/")
-	glob = strings.ReplaceAll(glob, "\\", "\\\\")
 	glob = strings.ReplaceAll(glob, "%", "\\%")
 	glob = strings.ReplaceAll(glob, "_", "\\_")
 	glob = strings.ReplaceAll(glob, "*", "%")
@@ -259,7 +276,12 @@ func (s *Store) DeleteFileRecord(ctx context.Context, filePath string) error {
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
 
 	if _, err := tx.ExecContext(ctx, `DELETE FROM fs_symbols WHERE file_path = ?`, filePath); err != nil {
 		return err
@@ -271,5 +293,9 @@ func (s *Store) DeleteFileRecord(ctx context.Context, filePath string) error {
 		return err
 	}
 
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit delete file record: %w", err)
+	}
+	committed = true
+	return nil
 }

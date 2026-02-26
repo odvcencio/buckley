@@ -19,6 +19,8 @@ type FileLockManager struct {
 	maxWaitTime time.Duration
 	defaultTTL  time.Duration
 	onConflict  func(lock *FileLock, waiter string) // Called when lock contention occurs
+	stopChan    chan struct{}
+	stopOnce    sync.Once
 }
 
 // FileLock represents an active lock on a file.
@@ -75,6 +77,7 @@ func NewFileLockManager(cfg FileLockConfig) *FileLockManager {
 		waiters:     make(map[string][]chan struct{}),
 		maxWaitTime: cfg.MaxWaitTime,
 		defaultTTL:  cfg.DefaultTTL,
+		stopChan:    make(chan struct{}),
 	}
 
 	// Start background cleanup
@@ -365,9 +368,26 @@ func (m *FileLockManager) cleanupLoop(period time.Duration) {
 	ticker := time.NewTicker(period)
 	defer ticker.Stop()
 
-	for range ticker.C {
-		m.cleanup()
+	for {
+		select {
+		case <-ticker.C:
+			m.cleanup()
+		case <-m.stopChan:
+			return
+		}
 	}
+}
+
+// Close stops the background cleanup goroutine.
+func (m *FileLockManager) Close() {
+	if m == nil {
+		return
+	}
+	m.stopOnce.Do(func() {
+		if m.stopChan != nil {
+			close(m.stopChan)
+		}
+	})
 }
 
 // cleanup removes expired locks and notifies waiters.

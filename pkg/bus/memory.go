@@ -180,8 +180,9 @@ func (b *MemoryBus) Close() error {
 	// Close all subscriptions
 	for _, subs := range b.subscriptions {
 		for _, sub := range subs {
-			sub.closed.Store(true)
-			close(sub.messages)
+			if !sub.closed.Swap(true) {
+				close(sub.messages)
+			}
 		}
 	}
 
@@ -218,6 +219,7 @@ func (s *memorySubscription) Unsubscribe() error {
 			break
 		}
 	}
+	close(s.messages)
 
 	return nil
 }

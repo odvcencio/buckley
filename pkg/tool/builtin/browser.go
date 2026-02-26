@@ -18,7 +18,7 @@ func (t *HeadlessBrowseTool) Name() string {
 }
 
 func (t *HeadlessBrowseTool) Description() string {
-	return "**WEB RESEARCH** when user asks about external docs, APIs, libraries, or comparisons. Trigger phrases: 'check the docs', 'look up', 'what does the API say', 'compare with', 'research'. Fetches web pages and extracts clean text. ALWAYS use this instead of hallucinating documentation or guessing API details. Essential for accurate, up-to-date information from official sources."
+	return "Fetch a web page and extract its text content. Supports CSS selectors to narrow results."
 }
 
 func (t *HeadlessBrowseTool) Parameters() ParameterSchema {

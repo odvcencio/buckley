@@ -4,12 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/odvcencio/buckley/pkg/config"
 	"github.com/odvcencio/buckley/pkg/tool/builtin"
 )
+
+const defaultComplexityThreshold = 0.6
 
 // PlanningCoordinator manages the brainstorm → refine → commit flow
 type PlanningCoordinator struct {
@@ -76,7 +79,7 @@ func NewPlanningCoordinator(
 ) *PlanningCoordinator {
 	threshold := cfg.ComplexityThreshold
 	if threshold <= 0 {
-		threshold = 0.6
+		threshold = defaultComplexityThreshold
 	}
 
 	return &PlanningCoordinator{
@@ -148,6 +151,9 @@ func (p *PlanningCoordinator) StartBrainstorm(ctx context.Context, task string, 
 		recommended = rec
 	} else if rec, ok := result.Data["recommended"].(float64); ok {
 		recommended = int(rec)
+	}
+	if recommended < 0 || recommended >= len(approaches) {
+		recommended = 0
 	}
 	reasoning := ""
 	if r, ok := result.Data["reasoning"].(string); ok {
@@ -302,6 +308,9 @@ func (p *PlanningCoordinator) hasCleanWinner(approaches []builtin.Approach, reco
 	if len(approaches) < 2 {
 		return true
 	}
+	if recommended < 0 || recommended >= len(approaches) {
+		return true
+	}
 
 	rec := approaches[recommended]
 
@@ -407,31 +416,32 @@ func FormatApproachesDisplay(approaches []builtin.Approach, recommended int, rea
 	if len(approaches) == 0 {
 		return "No approaches generated"
 	}
+	if recommended < 0 || recommended >= len(approaches) {
+		recommended = 0
+	}
 
-	var result string
-	result = "📋 **Planning Analysis**\n\n"
+	var b strings.Builder
+	b.WriteString("📋 **Planning Analysis**\n\n")
 
 	for i, a := range approaches {
 		marker := "  "
 		if i == recommended {
 			marker = "→ "
 		}
-		result += fmt.Sprintf("%s**%d. %s** (%d steps, %s risk)\n",
+		fmt.Fprintf(&b, "%s**%d. %s** (%d steps, %s risk)\n",
 			marker, i+1, a.Name, a.Steps, a.Risk)
-		result += fmt.Sprintf("   %s\n", a.Description)
-		if len(a.Tradeoffs) > 0 {
-			for _, t := range a.Tradeoffs {
-				result += fmt.Sprintf("   • %s\n", t)
-			}
+		fmt.Fprintf(&b, "   %s\n", a.Description)
+		for _, t := range a.Tradeoffs {
+			fmt.Fprintf(&b, "   • %s\n", t)
 		}
-		result += "\n"
+		b.WriteString("\n")
 	}
 
-	result += fmt.Sprintf("**Recommendation:** %s\n", approaches[recommended].Name)
-	result += fmt.Sprintf("**Reasoning:** %s\n", reasoning)
-	result += "\nReply with a number (1-" + fmt.Sprintf("%d", len(approaches)) + ") to select an approach, or describe adjustments."
+	fmt.Fprintf(&b, "**Recommendation:** %s\n", approaches[recommended].Name)
+	fmt.Fprintf(&b, "**Reasoning:** %s\n", reasoning)
+	fmt.Fprintf(&b, "\nReply with a number (1-%d) to select an approach, or describe adjustments.", len(approaches))
 
-	return result
+	return b.String()
 }
 
 // FormatTodosDisplay formats TODOs for user confirmation
@@ -440,13 +450,14 @@ func FormatTodosDisplay(todos []builtin.TodoInput, approachName string) string {
 		return "No TODOs generated"
 	}
 
-	result := fmt.Sprintf("📝 **Generated TODOs for \"%s\"**\n\n", approachName)
+	var b strings.Builder
+	fmt.Fprintf(&b, "📝 **Generated TODOs for \"%s\"**\n\n", approachName)
 
 	for i, t := range todos {
-		result += fmt.Sprintf("%d. %s\n", i+1, t.Content)
+		fmt.Fprintf(&b, "%d. %s\n", i+1, t.Content)
 	}
 
-	result += "\nReply 'yes' to commit these TODOs, or describe changes."
+	b.WriteString("\nReply 'yes' to commit these TODOs, or describe changes.")
 
-	return result
+	return b.String()
 }

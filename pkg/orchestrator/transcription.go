@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 )
@@ -49,13 +50,7 @@ var audioExtensions = []string{".mp3", ".mp4", ".mpeg", ".mpga", ".m4a", ".wav",
 
 // IsAudioFile checks if a file is a supported audio format
 func IsAudioFile(path string) bool {
-	ext := strings.ToLower(filepath.Ext(path))
-	for _, audioExt := range audioExtensions {
-		if ext == audioExt {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(audioExtensions, strings.ToLower(filepath.Ext(path)))
 }
 
 // WhisperTranscriber implements Transcriber using OpenAI's Whisper API
@@ -102,7 +97,7 @@ func (w *WhisperTranscriber) Transcribe(ctx context.Context, audioPath string) (
 	}
 
 	if w.apiKey == "" {
-		return "", fmt.Errorf("OpenAI API key not configured for transcription")
+		return "", fmt.Errorf("openai api key not configured for transcription")
 	}
 
 	// Open the audio file

@@ -73,7 +73,7 @@ func runExperimentRun(args []string) error {
 
 	name, remaining := extractExperimentName(args)
 	if err := fs.Parse(remaining); err != nil {
-		return err
+		return fmt.Errorf("parsing experiment run flags: %w", err)
 	}
 	if name == "" && fs.NArg() > 0 {
 		name = fs.Arg(0)
@@ -84,7 +84,7 @@ func runExperimentRun(args []string) error {
 
 	cfg, mgr, store, err := initDependenciesFn()
 	if err != nil {
-		return err
+		return fmt.Errorf("initializing experiment dependencies: %w", err)
 	}
 	if !cfg.Experiment.Enabled {
 		return withExitCode(fmt.Errorf("experiments are disabled (set experiment.enabled=true or BUCKLEY_EXPERIMENT_ENABLED=1)"), 2)
@@ -92,11 +92,11 @@ func runExperimentRun(args []string) error {
 
 	cwd, err := os.Getwd()
 	if err != nil {
-		return err
+		return fmt.Errorf("getting working directory: %w", err)
 	}
 	projectCtx, err := projectcontext.NewLoader(cwd).Load()
 	if err != nil {
-		return err
+		return fmt.Errorf("loading project context: %w", err)
 	}
 
 	root := strings.TrimSpace(cfg.Experiment.WorktreeRoot)
@@ -105,7 +105,7 @@ func runExperimentRun(args []string) error {
 	}
 	worktreeManager, err := worktree.NewManager(cwd, root)
 	if err != nil {
-		return err
+		return fmt.Errorf("creating worktree manager: %w", err)
 	}
 
 	exp := experiment.Experiment{
@@ -135,7 +135,7 @@ func runExperimentRun(args []string) error {
 
 	criteria, err := parseCriteriaFlags(criteriaFlags)
 	if err != nil {
-		return err
+		return fmt.Errorf("parsing success criteria: %w", err)
 	}
 	exp.Criteria = criteria
 
@@ -158,7 +158,7 @@ func runExperimentRun(args []string) error {
 		Store:          experiment.NewStoreFromStorage(store),
 	})
 	if err != nil {
-		return err
+		return fmt.Errorf("creating experiment runner: %w", err)
 	}
 
 	ctx := context.Background()
@@ -170,7 +170,10 @@ func runExperimentRun(args []string) error {
 		fmt.Println(report)
 	}
 
-	return runErr
+	if runErr != nil {
+		return fmt.Errorf("running experiment: %w", runErr)
+	}
+	return nil
 }
 
 func runExperimentList(args []string) error {
@@ -178,12 +181,12 @@ func runExperimentList(args []string) error {
 	statusFilter := fs.String("status", "", "Filter by status (pending|running|completed|failed|cancelled)")
 	limit := fs.Int("limit", 20, "Maximum experiments to list")
 	if err := fs.Parse(args); err != nil {
-		return err
+		return fmt.Errorf("parsing experiment list flags: %w", err)
 	}
 
 	store, err := initExperimentStore()
 	if err != nil {
-		return err
+		return fmt.Errorf("opening experiment store: %w", err)
 	}
 	expStore := experiment.NewStoreFromStorage(store)
 	if expStore == nil {
@@ -192,12 +195,12 @@ func runExperimentList(args []string) error {
 
 	status, err := parseExperimentStatus(*statusFilter)
 	if err != nil {
-		return err
+		return fmt.Errorf("parsing status filter: %w", err)
 	}
 
 	experiments, err := expStore.ListExperiments(*limit, status)
 	if err != nil {
-		return err
+		return fmt.Errorf("listing experiments: %w", err)
 	}
 	if len(experiments) == 0 {
 		fmt.Println("No experiments found.")
@@ -217,7 +220,7 @@ func runExperimentShow(args []string) error {
 	fs := flag.NewFlagSet("experiment show", flag.ContinueOnError)
 	format := fs.String("format", "auto", "Output format: auto, terminal, markdown, compact")
 	if err := fs.Parse(args); err != nil {
-		return err
+		return fmt.Errorf("parsing experiment show flags: %w", err)
 	}
 	if fs.NArg() < 1 {
 		return fmt.Errorf("usage: buckley experiment show <id|name> [--format auto|terminal|markdown|compact]")
@@ -226,7 +229,7 @@ func runExperimentShow(args []string) error {
 
 	store, err := initExperimentStore()
 	if err != nil {
-		return err
+		return fmt.Errorf("opening experiment store: %w", err)
 	}
 	expStore := experiment.NewStoreFromStorage(store)
 	if expStore == nil {
@@ -235,12 +238,12 @@ func runExperimentShow(args []string) error {
 
 	exp, err := expStore.GetExperiment(identifier)
 	if err != nil {
-		return err
+		return fmt.Errorf("fetching experiment by id: %w", err)
 	}
 	if exp == nil {
 		exp, err = expStore.FindExperimentByName(identifier)
 		if err != nil {
-			return err
+			return fmt.Errorf("fetching experiment by name: %w", err)
 		}
 	}
 	if exp == nil {
@@ -263,13 +266,13 @@ func runExperimentShow(args []string) error {
 	switch outputFormat {
 	case "terminal":
 		termReporter := experiment.NewTerminalReporter(comparator)
-		if noColor {
+		if cliFlags.noColor {
 			termReporter.SetNoColor(true)
 		}
 		return termReporter.RenderReport(exp)
 	case "compact":
 		termReporter := experiment.NewTerminalReporter(comparator)
-		if noColor {
+		if cliFlags.noColor {
 			termReporter.SetNoColor(true)
 		}
 		return termReporter.RenderCompact(exp)
@@ -277,7 +280,7 @@ func runExperimentShow(args []string) error {
 		reporter := experiment.NewReporterWithComparator(comparator)
 		report, err := reporter.ComparisonMarkdown(exp)
 		if err != nil {
-			return err
+			return fmt.Errorf("generating comparison markdown: %w", err)
 		}
 		fmt.Println(report)
 		return nil
@@ -291,7 +294,7 @@ func runExperimentDiff(args []string) error {
 	showOutput := fs.Bool("output", false, "Show full output comparison (can be long)")
 	maxOutputLen := fs.Int("max-output", 500, "Maximum output length per variant")
 	if err := fs.Parse(args); err != nil {
-		return err
+		return fmt.Errorf("parsing experiment diff flags: %w", err)
 	}
 	if fs.NArg() < 1 {
 		return fmt.Errorf("usage: buckley experiment diff <id|name> [--output] [--max-output N]")
@@ -300,7 +303,7 @@ func runExperimentDiff(args []string) error {
 
 	store, err := initExperimentStore()
 	if err != nil {
-		return err
+		return fmt.Errorf("opening experiment store: %w", err)
 	}
 	expStore := experiment.NewStoreFromStorage(store)
 	if expStore == nil {
@@ -309,12 +312,12 @@ func runExperimentDiff(args []string) error {
 
 	exp, err := expStore.GetExperiment(identifier)
 	if err != nil {
-		return err
+		return fmt.Errorf("fetching experiment by id: %w", err)
 	}
 	if exp == nil {
 		exp, err = expStore.FindExperimentByName(identifier)
 		if err != nil {
-			return err
+			return fmt.Errorf("fetching experiment by name: %w", err)
 		}
 	}
 	if exp == nil {
@@ -323,7 +326,7 @@ func runExperimentDiff(args []string) error {
 
 	runs, err := expStore.ListRuns(exp.ID)
 	if err != nil {
-		return err
+		return fmt.Errorf("listing experiment runs: %w", err)
 	}
 	if len(runs) == 0 {
 		fmt.Println("No runs found for this experiment.")
@@ -427,7 +430,7 @@ func runExperimentReplay(args []string) error {
 	fs.StringVar(&temperatureRaw, "temperature", "", "Temperature override")
 	deterministic := fs.Bool("deterministic-tools", false, "Replay tool calls deterministically (best-effort)")
 	if err := fs.Parse(args); err != nil {
-		return err
+		return fmt.Errorf("parsing experiment replay flags: %w", err)
 	}
 	if fs.NArg() < 1 {
 		return fmt.Errorf("usage: buckley experiment replay <session-id> -m <model>")
@@ -442,7 +445,7 @@ func runExperimentReplay(args []string) error {
 
 	cfg, mgr, store, err := initDependenciesFn()
 	if err != nil {
-		return err
+		return fmt.Errorf("initializing replay dependencies: %w", err)
 	}
 	if !cfg.Experiment.Enabled {
 		return withExitCode(fmt.Errorf("experiments are disabled (set experiment.enabled=true or BUCKLEY_EXPERIMENT_ENABLED=1)"), 2)
@@ -450,11 +453,11 @@ func runExperimentReplay(args []string) error {
 
 	cwd, err := os.Getwd()
 	if err != nil {
-		return err
+		return fmt.Errorf("getting working directory: %w", err)
 	}
 	projectCtx, err := projectcontext.NewLoader(cwd).Load()
 	if err != nil {
-		return err
+		return fmt.Errorf("loading project context: %w", err)
 	}
 
 	root := strings.TrimSpace(cfg.Experiment.WorktreeRoot)
@@ -463,7 +466,7 @@ func runExperimentReplay(args []string) error {
 	}
 	worktreeManager, err := worktree.NewManager(cwd, root)
 	if err != nil {
-		return err
+		return fmt.Errorf("creating worktree manager: %w", err)
 	}
 
 	runnerCfg := experiment.RunnerConfig{
@@ -481,7 +484,7 @@ func runExperimentReplay(args []string) error {
 		Store:          experiment.NewStoreFromStorage(store),
 	})
 	if err != nil {
-		return err
+		return fmt.Errorf("creating experiment runner: %w", err)
 	}
 
 	if providerID == "" {
@@ -497,14 +500,14 @@ func runExperimentReplay(args []string) error {
 	if strings.TrimSpace(temperatureRaw) != "" {
 		value, err := parseFloatFlag(temperatureRaw)
 		if err != nil {
-			return err
+			return fmt.Errorf("parsing temperature flag: %w", err)
 		}
 		tempOverride = &value
 	}
 
 	replayer, err := experiment.NewReplayer(store, runner)
 	if err != nil {
-		return err
+		return fmt.Errorf("creating experiment replayer: %w", err)
 	}
 	_, err = replayer.Replay(context.Background(), experiment.ReplayConfig{
 		SourceSessionID:    sourceSessionID,
@@ -514,7 +517,10 @@ func runExperimentReplay(args []string) error {
 		NewTemperature:     tempOverride,
 		DeterministicTools: *deterministic,
 	})
-	return err
+	if err != nil {
+		return fmt.Errorf("replaying experiment: %w", err)
+	}
+	return nil
 }
 
 func extractExperimentName(args []string) (string, []string) {
@@ -595,7 +601,7 @@ func parseCriteriaFlags(values []string) ([]experiment.SuccessCriterion, error) 
 func initExperimentStore() (*storage.Store, error) {
 	dbPath, err := resolveDBPath()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("resolving database path: %w", err)
 	}
 	return storage.New(dbPath)
 }

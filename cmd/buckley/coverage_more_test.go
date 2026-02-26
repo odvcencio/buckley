@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -44,21 +43,21 @@ func TestStartEmbeddedIPCServerGuardsAndTokenError(t *testing.T) {
 	cfg.IPC.Bind = "127.0.0.1:4488"
 	t.Setenv("BUCKLEY_IPC_TOKEN", "")
 	_, _, err = startEmbeddedIPCServer(cfg, nil, nil, nil, nil, nil, nil)
-	if err == nil || !strings.Contains(err.Error(), "IPC token required") {
+	if err == nil || !strings.Contains(err.Error(), "ipc token required") {
 		t.Fatalf("expected token required error, got %v", err)
 	}
 }
 
 func TestStartACPServerGuardsAndErrors(t *testing.T) {
 	cfg := config.DefaultConfig()
-	stop, err := startACPServer(cfg, nil, nil)
+	stop, err := startACPServer(cfg, nil, nil, nil)
 	if err != nil || stop != nil {
 		t.Fatalf("expected empty listen to noop, got stopSet=%v err=%v", stop != nil, err)
 	}
 
 	cfg = config.DefaultConfig()
 	cfg.ACP.Listen = "0.0.0.0:5555"
-	_, err = startACPServer(cfg, nil, nil)
+	_, err = startACPServer(cfg, nil, nil, nil)
 	if err == nil || !strings.Contains(err.Error(), "requires mTLS") {
 		t.Fatalf("expected tls/loopback guard error, got %v", err)
 	}
@@ -67,10 +66,8 @@ func TestStartACPServerGuardsAndErrors(t *testing.T) {
 func TestInitDependenciesFailsWithoutProviderKeys(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	oldWd, _ := os.Getwd()
 	tmp := t.TempDir()
-	_ = os.Chdir(tmp)
-	t.Cleanup(func() { _ = os.Chdir(oldWd) })
+	t.Chdir(tmp)
 
 	t.Setenv("OPENROUTER_API_KEY", "")
 	t.Setenv("OPENAI_API_KEY", "")

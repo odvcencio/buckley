@@ -1,10 +1,11 @@
 package orchestrator
 
 import (
-	"fmt"
 	"strings"
 
 	"github.com/odvcencio/buckley/pkg/config"
+	"golang.org/x/text/cases"
+	"golang.org/x/text/language"
 )
 
 // TaskPhase represents a configured execution phase.
@@ -61,7 +62,7 @@ func resolveTaskPhases(cfg *config.Config) []TaskPhase {
 		}
 		name := strings.TrimSpace(phase.Name)
 		if name == "" {
-			name = strings.Title(stage)
+			name = cases.Title(language.English).String(stage)
 		}
 		phases = append(phases, TaskPhase{
 			Stage:       stage,
@@ -102,15 +103,5 @@ func (p TaskPhase) Title() string {
 	if strings.TrimSpace(p.Name) != "" {
 		return p.Name
 	}
-	return strings.Title(p.Stage)
-}
-
-func normalizeStage(stage string) (string, error) {
-	n := strings.ToLower(strings.TrimSpace(stage))
-	switch n {
-	case "builder", "verify", "review":
-		return n, nil
-	default:
-		return "", fmt.Errorf("unknown stage: %s", stage)
-	}
+	return cases.Title(language.English).String(p.Stage)
 }

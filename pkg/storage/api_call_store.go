@@ -1,6 +1,9 @@
 package storage
 
-import "time"
+import (
+	"fmt"
+	"time"
+)
 
 // APICall represents an API cost tracking record.
 type APICall struct {
@@ -15,12 +18,23 @@ type APICall struct {
 
 // SaveAPICall records an API call and updates the owning session's total cost.
 func (s *Store) SaveAPICall(call *APICall) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin transaction: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
 	timestamp := call.Timestamp.UTC().Format("2006-01-02 15:04:05")
 	query := `
 		INSERT INTO api_calls (session_id, model, prompt_tokens, completion_tokens, cost, timestamp)
 		VALUES (?, ?, ?, ?, ?, ?)
 	`
-	result, err := s.db.Exec(query,
+	result, err := tx.Exec(query,
 		call.SessionID,
 		call.Model,
 		call.PromptTokens,
@@ -29,12 +43,12 @@ func (s *Store) SaveAPICall(call *APICall) error {
 		timestamp,
 	)
 	if err != nil {
-		return err
+		return fmt.Errorf("insert api call: %w", err)
 	}
 
 	id, err := result.LastInsertId()
 	if err != nil {
-		return err
+		return fmt.Errorf("get last insert id: %w", err)
 	}
 	call.ID = id
 
@@ -43,8 +57,15 @@ func (s *Store) SaveAPICall(call *APICall) error {
 		SET total_cost = total_cost + ?
 		WHERE session_id = ?
 	`
-	_, err = s.db.Exec(updateQuery, call.Cost, call.SessionID)
-	return err
+	if _, err := tx.Exec(updateQuery, call.Cost, call.SessionID); err != nil {
+		return fmt.Errorf("update session cost: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit api call: %w", err)
+	}
+	committed = true
+	return nil
 }
 
 // GetDailyCost returns the total API cost accrued today.

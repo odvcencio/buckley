@@ -17,13 +17,30 @@ import (
 type CommitGenerator struct {
 	modelClient ModelClient
 	cfg         *config.Config
+	ctx         context.Context
 }
 
 func NewCommitGenerator(mgr ModelClient, cfg *config.Config) *CommitGenerator {
 	return &CommitGenerator{
 		modelClient: mgr,
 		cfg:         cfg,
+		ctx:         context.Background(),
 	}
+}
+
+func (cg *CommitGenerator) baseContext() context.Context {
+	if cg == nil || cg.ctx == nil {
+		return context.Background()
+	}
+	return cg.ctx
+}
+
+// SetContext updates the base context for commit generation.
+func (cg *CommitGenerator) SetContext(ctx context.Context) {
+	if cg == nil || ctx == nil {
+		return
+	}
+	cg.ctx = ctx
 }
 
 type CommitInfo struct {
@@ -97,7 +114,7 @@ func (cg *CommitGenerator) Generate(task *Task) (*CommitInfo, error) {
 	// Generate commit message
 	prompt := cg.buildCommitPrompt(task, diff, files, stats, detail)
 
-	reqCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	reqCtx, cancel := context.WithTimeout(cg.baseContext(), 30*time.Second)
 	defer cancel()
 
 	req := model.ChatRequest{
@@ -312,11 +329,9 @@ func (cg *CommitGenerator) parseCommitMessage(content string) (*CommitInfo, erro
 			}
 			// Check for issue references
 			if strings.Contains(line, "Closes #") || strings.Contains(line, "Fixes #") {
-				// Extract issue numbers
-				words := strings.Fields(line)
-				for _, word := range words {
-					if strings.HasPrefix(word, "#") {
-						commit.Issues = append(commit.Issues, strings.TrimPrefix(word, "#"))
+				for word := range strings.FieldsSeq(line) {
+					if num, ok := strings.CutPrefix(word, "#"); ok {
+						commit.Issues = append(commit.Issues, num)
 					}
 				}
 			}
@@ -420,7 +435,7 @@ func (cg *CommitGenerator) getChangedFiles() ([]string, error) {
 	}
 
 	files := []string{}
-	for _, line := range strings.Split(string(output), "\n") {
+	for line := range strings.SplitSeq(string(output), "\n") {
 		line = strings.TrimSpace(line)
 		if line != "" {
 			files = append(files, line)
@@ -438,7 +453,7 @@ func (cg *CommitGenerator) getDiffStats() (diffStats, error) {
 	}
 
 	stats := diffStats{}
-	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
+	for line := range strings.SplitSeq(strings.TrimSpace(string(output)), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue

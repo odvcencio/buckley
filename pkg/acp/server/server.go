@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
-	"net"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -16,7 +15,6 @@ import (
 
 	"github.com/oklog/ulid/v2"
 	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/emptypb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
@@ -33,10 +31,6 @@ import (
 	"github.com/odvcencio/buckley/pkg/storage"
 	"github.com/odvcencio/buckley/pkg/telemetry"
 	"github.com/odvcencio/buckley/pkg/tool"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials"
-	"google.golang.org/grpc/metadata"
-	"google.golang.org/grpc/peer"
 )
 
 // Server implements the Zed ACP gRPC service.
@@ -347,7 +341,7 @@ func (s *Server) UpdateSessionContext(_ context.Context, req *acppb.ContextDelta
 }
 
 // SendMessage handles a simple request/response for editor integrations.
-func (s *Server) SendMessage(_ context.Context, req *acppb.SendMessageRequest) (*acppb.SendMessageResponse, error) {
+func (s *Server) SendMessage(ctx context.Context, req *acppb.SendMessageRequest) (*acppb.SendMessageResponse, error) {
 	if req.GetMessage() == nil || strings.TrimSpace(req.Message.Content) == "" {
 		return nil, statusError(codes.InvalidArgument, "message required")
 	}
@@ -367,7 +361,7 @@ func (s *Server) SendMessage(_ context.Context, req *acppb.SendMessageRequest) (
 			},
 			Temperature: 0.2,
 		}
-		resp, err := s.models.ChatCompletion(context.Background(), chatReq)
+		resp, err := s.models.ChatCompletion(ctx, chatReq)
 		if err != nil {
 			return nil, statusError(codes.Internal, err.Error())
 		}
@@ -387,7 +381,7 @@ func (s *Server) SendMessage(_ context.Context, req *acppb.SendMessageRequest) (
 		sessionID := ulid.Make().String()
 		runtime, cleanup, err := s.buildRLMRuntime(sessionID, req.AgentId)
 		if err == nil && runtime != nil {
-			answer, execErr := runtime.Execute(context.Background(), req.Message.Content)
+			answer, execErr := runtime.Execute(ctx, req.Message.Content)
 			if cleanup != nil {
 				cleanup()
 			}
@@ -418,10 +412,10 @@ func (s *Server) SendMessage(_ context.Context, req *acppb.SendMessageRequest) (
 
 	featureName := fmt.Sprintf("acp-send-%s", sessionID)
 	desc := req.Message.Content
-	if _, err := orch.PlanFeature(featureName, desc); err != nil {
+	if _, err := orch.PlanFeatureWithContext(ctx, featureName, desc); err != nil {
 		return nil, statusError(codes.Internal, err.Error())
 	}
-	if err := orch.ExecutePlan(); err != nil {
+	if err := orch.ExecutePlanWithContext(ctx); err != nil {
 		return nil, statusError(codes.Internal, err.Error())
 	}
 
@@ -511,7 +505,7 @@ func (s *Server) StreamTask(req *acppb.TaskStreamRequest, stream acppb.AgentComm
 		featureName = "acp-task"
 	}
 
-	if _, err := orch.PlanFeature(featureName, req.Query); err != nil {
+	if _, err := orch.PlanFeatureWithContext(ctx, featureName, req.Query); err != nil {
 		_ = stream.Send(&acppb.TaskEvent{TaskId: req.TaskId, Message: fmt.Sprintf("Plan failed: %v", err)})
 		return statusError(codes.Internal, err.Error())
 	}
@@ -522,7 +516,7 @@ func (s *Server) StreamTask(req *acppb.TaskStreamRequest, stream acppb.AgentComm
 
 	execDone := make(chan error, 1)
 	go func() {
-		execDone <- orch.ExecutePlan()
+		execDone <- orch.ExecutePlanWithContext(ctx)
 	}()
 
 	select {
@@ -568,6 +562,7 @@ func extractMessageText(msg model.Message) string {
 func (s *Server) buildRLMRuntime(sessionID, agentID string) (*rlm.Runtime, func(), error) {
 	registry := tool.NewRegistry()
 	registry.ConfigureContainers(s.cfg, s.projectRoot)
+	registry.ConfigureDockerSandbox(s.cfg, s.projectRoot)
 
 	missionStore := mission.NewStore(s.store.DB())
 	requireApproval := strings.ToLower(s.cfg.Orchestrator.TrustLevel) != "autonomous"
@@ -630,45 +625,17 @@ func resolveRLMConfig(cfg *config.Config) rlm.Config {
 	base.Scratchpad.PersistArtifacts = rlmCfg.Scratchpad.PersistArtifacts
 	base.Scratchpad.PersistDecisions = rlmCfg.Scratchpad.PersistDecisions
 
-	if len(rlmCfg.Tiers) > 0 {
-		if base.Tiers == nil {
-			base.Tiers = make(map[rlm.Weight]rlm.TierConfig)
-		}
-		for name, tier := range rlmCfg.Tiers {
-			weight := rlm.Weight(strings.ToLower(strings.TrimSpace(name)))
-			if weight == "" {
-				continue
-			}
-			base.Tiers[weight] = mergeRLMConfigTier(base.Tiers[weight], tier)
-		}
+	if strings.TrimSpace(rlmCfg.SubAgent.Model) != "" {
+		base.SubAgent.Model = rlmCfg.SubAgent.Model
+	}
+	if rlmCfg.SubAgent.MaxConcurrent != 0 {
+		base.SubAgent.MaxConcurrent = rlmCfg.SubAgent.MaxConcurrent
+	}
+	if rlmCfg.SubAgent.Timeout != 0 {
+		base.SubAgent.Timeout = rlmCfg.SubAgent.Timeout
 	}
 
 	base.Normalize()
-	return base
-}
-
-func mergeRLMConfigTier(base rlm.TierConfig, override config.RLMTierConfig) rlm.TierConfig {
-	if strings.TrimSpace(override.Model) != "" {
-		base.Model = override.Model
-	}
-	if strings.TrimSpace(override.Provider) != "" {
-		base.Provider = override.Provider
-	}
-	if override.Models != nil {
-		base.Models = append([]string{}, override.Models...)
-	}
-	if override.MaxCostPerMillion != 0 {
-		base.MaxCostPerMillion = override.MaxCostPerMillion
-	}
-	if override.MinContextWindow != 0 {
-		base.MinContextWindow = override.MinContextWindow
-	}
-	if override.Prefer != nil {
-		base.Prefer = append([]string{}, override.Prefer...)
-	}
-	if override.Requires != nil {
-		base.Requires = append([]string{}, override.Requires...)
-	}
 	return base
 }
 
@@ -676,6 +643,7 @@ func mergeRLMConfigTier(base rlm.TierConfig, override config.RLMTierConfig) rlm.
 func (s *Server) buildOrchestratorContext(sessionID, agentID string) (*orchestrator.Orchestrator, func(), error) {
 	registry := tool.NewRegistry()
 	registry.ConfigureContainers(s.cfg, s.projectRoot)
+	registry.ConfigureDockerSandbox(s.cfg, s.projectRoot)
 
 	missionStore := mission.NewStore(s.store.DB())
 	requireApproval := strings.ToLower(s.cfg.Orchestrator.TrustLevel) != "autonomous"
@@ -866,6 +834,7 @@ func (s *Server) RequestToolExecution(req *acppb.ToolExecutionRequest, stream ac
 
 	registry := tool.NewRegistry()
 	registry.ConfigureContainers(s.cfg, s.projectRoot)
+	registry.ConfigureDockerSandbox(s.cfg, s.projectRoot)
 	missionStore := mission.NewStore(s.store.DB())
 	requireApproval := strings.ToLower(s.cfg.Orchestrator.TrustLevel) != "autonomous"
 	registry.EnableMissionControl(missionStore, req.AgentId, requireApproval, 15*time.Minute)
@@ -1667,268 +1636,4 @@ func clampText(s string, max int) string {
 		return s
 	}
 	return s[:max]
-}
-
-func (s *Server) recordActivity(agentID, sessionID, action, details, status string) {
-	if s.store == nil || strings.TrimSpace(agentID) == "" {
-		return
-	}
-	mStore := mission.NewStore(s.store.DB())
-	_ = mStore.RecordAgentActivity(&mission.AgentActivity{
-		AgentID:   agentID,
-		SessionID: sessionID,
-		AgentType: "editor",
-		Action:    action,
-		Details:   details,
-		Status:    status,
-		Timestamp: time.Now(),
-	})
-}
-
-// publishUsage emits telemetry for token/cost usage when available.
-func (s *Server) publishUsage(modelID string, usage *model.Usage, sessionID, planID string) {
-	if s.telemetryHub == nil || usage == nil {
-		return
-	}
-
-	data := map[string]any{
-		"model":             modelID,
-		"prompt_tokens":     usage.PromptTokens,
-		"completion_tokens": usage.CompletionTokens,
-		"total_tokens":      usage.TotalTokens,
-	}
-
-	if price, err := s.models.GetPricing(modelID); err == nil && price != nil {
-		promptCost := price.Prompt * float64(usage.PromptTokens) / 1_000_000.0
-		completionCost := price.Completion * float64(usage.CompletionTokens) / 1_000_000.0
-		data["cost"] = promptCost + completionCost
-	}
-
-	s.telemetryHub.Publish(telemetry.Event{
-		Type:      telemetry.EventTokenUsageUpdated,
-		SessionID: sessionID,
-		PlanID:    planID,
-		Data:      data,
-	})
-}
-
-func (s *Server) publishTelemetry(eventType telemetry.EventType, sessionID, planID string, data map[string]any) {
-	if s.telemetryHub == nil {
-		return
-	}
-	s.telemetryHub.Publish(telemetry.Event{
-		Type:      eventType,
-		SessionID: sessionID,
-		PlanID:    planID,
-		Data:      data,
-	})
-}
-
-// CreateContextHandle stores context data and returns a handle for later retrieval.
-func (s *Server) CreateContextHandle(_ context.Context, req *acppb.ContextHandleRequest) (*acppb.ContextHandle, error) {
-	if req == nil {
-		return nil, statusError(codes.InvalidArgument, "request required")
-	}
-	if strings.TrimSpace(req.Type) == "" {
-		return nil, statusError(codes.InvalidArgument, "type required")
-	}
-
-	handleID := ulid.Make().String()
-	now := time.Now()
-
-	// Store the context data
-	s.contextHandleMux.Lock()
-	s.contextHandles[handleID] = &ContextHandleData{
-		HandleID:  handleID,
-		Type:      req.Type,
-		Data:      req.Data,
-		CreatedAt: now,
-	}
-	s.contextHandleMux.Unlock()
-
-	return &acppb.ContextHandle{
-		HandleId:  handleID,
-		Type:      req.Type,
-		SizeBytes: int64(len(req.Data)),
-		CreatedAt: timestamppb.New(now),
-	}, nil
-}
-
-// ResolveContextHandle retrieves the stored data for a context handle.
-func (s *Server) ResolveContextHandle(_ context.Context, req *acppb.ContextHandle) (*acppb.ContextData, error) {
-	if req == nil {
-		return nil, statusError(codes.InvalidArgument, "request required")
-	}
-	if strings.TrimSpace(req.HandleId) == "" {
-		return nil, statusError(codes.InvalidArgument, "handle_id required")
-	}
-
-	s.contextHandleMux.RLock()
-	handle, exists := s.contextHandles[req.HandleId]
-	s.contextHandleMux.RUnlock()
-
-	if !exists {
-		return nil, statusError(codes.NotFound, fmt.Sprintf("context handle %s not found", req.HandleId))
-	}
-
-	return &acppb.ContextData{
-		Type: handle.Type,
-		Data: handle.Data,
-	}, nil
-}
-
-// DeleteContextHandle removes a context handle from storage.
-func (s *Server) DeleteContextHandle(handleID string) bool {
-	s.contextHandleMux.Lock()
-	defer s.contextHandleMux.Unlock()
-
-	if _, exists := s.contextHandles[handleID]; !exists {
-		return false
-	}
-	delete(s.contextHandles, handleID)
-	return true
-}
-
-// Helpers for status errors without importing grpc/status everywhere.
-func statusError(code codes.Code, msg string) error {
-	return status.Error(code, msg)
-}
-
-// UnaryAuthInterceptor enforces mTLS identity and injects claims.
-func (s *Server) UnaryAuthInterceptor(ctx context.Context, req interface{}, _ *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
-	authCtx, err := s.authorizeContext(ctx, req)
-	if err != nil {
-		return nil, err
-	}
-	return handler(authCtx, req)
-}
-
-// StreamAuthInterceptor enforces mTLS identity for streaming RPCs.
-func (s *Server) StreamAuthInterceptor(srv interface{}, stream grpc.ServerStream, _ *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
-	authCtx, err := s.authorizeContext(stream.Context(), nil)
-	if err != nil {
-		return err
-	}
-	wrapped := &authStream{ServerStream: stream, ctx: authCtx}
-	return handler(srv, wrapped)
-}
-
-type authStream struct {
-	grpc.ServerStream
-	ctx context.Context
-}
-
-func (s *authStream) Context() context.Context {
-	return s.ctx
-}
-
-func (s *Server) authorizeContext(ctx context.Context, req interface{}) (context.Context, error) {
-	peerID, err := s.peerAgentID(ctx, req)
-	if err != nil {
-		return nil, statusError(codes.Unauthenticated, err.Error())
-	}
-
-	if reqID := requestAgentID(req); reqID != "" && peerID != reqID {
-		return nil, statusError(codes.PermissionDenied, fmt.Sprintf("agent mismatch: peer %s cannot act as %s", peerID, reqID))
-	}
-
-	caps := s.agentCapabilities(ctx, peerID)
-	claims := &security.Claims{
-		AgentID:      peerID,
-		Capabilities: caps,
-	}
-	return security.ContextWithClaims(ctx, claims), nil
-}
-
-func (s *Server) agentCapabilities(ctx context.Context, agentID string) []string {
-	if s.coordinator == nil || strings.TrimSpace(agentID) == "" {
-		return nil
-	}
-	agent, err := s.coordinator.GetAgent(ctx, agentID)
-	if err != nil || agent == nil {
-		return nil
-	}
-	return agent.Capabilities
-}
-
-func requestAgentID(req interface{}) string {
-	switch v := req.(type) {
-	case *acppb.RegisterAgentRequest:
-		return v.GetAgentId()
-	case *acppb.GetAgentInfoRequest:
-		return v.GetAgentId()
-	case *acppb.TaskStreamRequest:
-		return v.GetAgentId()
-	case *acppb.ToolExecutionRequest:
-		return v.GetAgentId()
-	case *acppb.CreateSessionRequest:
-		return v.GetAgentId()
-	case *acppb.InlineCompletionRequest:
-		return v.GetAgentId()
-	case *acppb.ProposeEditsRequest:
-		return v.GetAgentId()
-	case *acppb.ApplyEditsRequest:
-		return v.GetAgentId()
-	case *acppb.UpdateEditorStateRequest:
-		return v.GetAgentId()
-	default:
-		return ""
-	}
-}
-
-const insecureAgentIDMetadataKey = "x-buckley-agent-id"
-
-func (s *Server) peerAgentID(ctx context.Context, req interface{}) (string, error) {
-	if ctx == nil {
-		return "", fmt.Errorf("missing context")
-	}
-	p, ok := peer.FromContext(ctx)
-	if !ok {
-		return "", fmt.Errorf("missing peer info")
-	}
-	tlsInfo, ok := p.AuthInfo.(credentials.TLSInfo)
-	if ok && len(tlsInfo.State.PeerCertificates) > 0 {
-		return tlsInfo.State.PeerCertificates[0].Subject.CommonName, nil
-	}
-
-	if s == nil || s.cfg == nil || !s.cfg.ACP.AllowInsecureLocal {
-		return "", fmt.Errorf("client certificate required")
-	}
-	if !isLoopbackPeer(p.Addr) {
-		return "", fmt.Errorf("insecure ACP requires loopback client")
-	}
-	if md, ok := metadata.FromIncomingContext(ctx); ok {
-		if vals := md.Get(insecureAgentIDMetadataKey); len(vals) > 0 {
-			if agentID := strings.TrimSpace(vals[0]); agentID != "" {
-				return agentID, nil
-			}
-		}
-	}
-	if agentID := strings.TrimSpace(requestAgentID(req)); agentID != "" {
-		return agentID, nil
-	}
-	return "local", nil
-}
-
-func isLoopbackPeer(addr net.Addr) bool {
-	if addr == nil {
-		return false
-	}
-	if tcp, ok := addr.(*net.TCPAddr); ok && tcp.IP != nil {
-		return tcp.IP.IsLoopback()
-	}
-	host := strings.TrimSpace(addr.String())
-	if host == "" {
-		return false
-	}
-	if h, _, err := net.SplitHostPort(host); err == nil {
-		host = strings.TrimSpace(h)
-	}
-	if ip := net.ParseIP(host); ip != nil {
-		return ip.IsLoopback()
-	}
-	if strings.EqualFold(host, "localhost") {
-		return true
-	}
-	return false
 }

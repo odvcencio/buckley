@@ -31,7 +31,7 @@ func (a *Agent) Plan(ctx context.Context, feature, description string) (*orchest
 	if a.orchestrator == nil {
 		return nil, fmt.Errorf("orchestrator not configured")
 	}
-	return a.orchestrator.PlanFeature(feature, description)
+	return a.orchestrator.PlanFeatureWithContext(ctx, feature, description)
 }
 
 // LoadPlan loads a plan into the orchestrator.
@@ -52,7 +52,7 @@ func (a *Agent) ExecutePlan(ctx context.Context, planID string) error {
 			return err
 		}
 	}
-	return a.orchestrator.ExecutePlan()
+	return a.orchestrator.ExecutePlanWithContext(ctx)
 }
 
 // ListPlans returns all persisted plans.

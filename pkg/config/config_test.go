@@ -55,16 +55,7 @@ personality:
 		t.Fatalf("write project config: %v", err)
 	}
 
-	oldWD, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	t.Cleanup(func() {
-		_ = os.Chdir(oldWD)
-	})
-	if err := os.Chdir(project); err != nil {
-		t.Fatalf("chdir project: %v", err)
-	}
+	t.Chdir(project)
 
 	t.Setenv("BUCKLEY_MODEL_REVIEW", "env/review")
 
@@ -91,17 +82,8 @@ func TestInvalidTrustLevelFailsValidation(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 
-	oldWD, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	t.Cleanup(func() {
-		_ = os.Chdir(oldWD)
-	})
 	project := t.TempDir()
-	if err := os.Chdir(project); err != nil {
-		t.Fatalf("chdir project: %v", err)
-	}
+	t.Chdir(project)
 
 	t.Setenv("BUCKLEY_TRUST_LEVEL", "chaotic")
 
@@ -193,16 +175,7 @@ func TestLoadAlignsModelsToOpenAIWhenOpenRouterDisabled(t *testing.T) {
 
 	t.Setenv("HOME", home)
 
-	oldWD, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	t.Cleanup(func() {
-		_ = os.Chdir(oldWD)
-	})
-	if err := os.Chdir(project); err != nil {
-		t.Fatalf("chdir project: %v", err)
-	}
+	t.Chdir(project)
 
 	t.Setenv("OPENROUTER_API_KEY", "")
 	t.Setenv("OPENAI_API_KEY", "test-openai")
@@ -214,7 +187,7 @@ func TestLoadAlignsModelsToOpenAIWhenOpenRouterDisabled(t *testing.T) {
 		t.Fatalf("config.Load returned error: %v", err)
 	}
 
-	expected := "openai/gpt-5.1-codex"
+	expected := "openai/gpt-5.2-codex-xhigh"
 	if cfg.Models.Planning != expected {
 		t.Fatalf("expected planning model to fall back to %s, got %s", expected, cfg.Models.Planning)
 	}
@@ -235,16 +208,7 @@ func TestLoadPrefersOpenRouterWhenAvailable(t *testing.T) {
 
 	t.Setenv("HOME", home)
 
-	oldWD, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	t.Cleanup(func() {
-		_ = os.Chdir(oldWD)
-	})
-	if err := os.Chdir(project); err != nil {
-		t.Fatalf("chdir project: %v", err)
-	}
+	t.Chdir(project)
 
 	t.Setenv("OPENROUTER_API_KEY", "test-openrouter")
 	t.Setenv("OPENAI_API_KEY", "test-openai")
@@ -281,16 +245,7 @@ func TestLoadReadsConfigEnvForOpenRouterKey(t *testing.T) {
 		t.Fatalf("write config.env: %v", err)
 	}
 
-	oldWD, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	t.Cleanup(func() {
-		_ = os.Chdir(oldWD)
-	})
-	if err := os.Chdir(project); err != nil {
-		t.Fatalf("chdir project: %v", err)
-	}
+	t.Chdir(project)
 
 	cfg, err := config.Load()
 	if err != nil {
@@ -357,16 +312,7 @@ diagnostics:
 		t.Fatalf("write project config: %v", err)
 	}
 
-	oldWD, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	t.Cleanup(func() {
-		_ = os.Chdir(oldWD)
-	})
-	if err := os.Chdir(project); err != nil {
-		t.Fatalf("chdir project: %v", err)
-	}
+	t.Chdir(project)
 
 	cfg, err := config.Load()
 	if err != nil {

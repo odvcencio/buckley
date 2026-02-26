@@ -225,12 +225,8 @@ func TestGitToolsInIsolatedRepo(t *testing.T) {
 	// Create isolated test repo
 	repoDir := createTestGitRepo(t)
 
-	// Save and restore working directory
-	originalWd, _ := os.Getwd()
-	if err := os.Chdir(repoDir); err != nil {
-		t.Fatalf("failed to change to test repo: %v", err)
-	}
-	defer os.Chdir(originalWd)
+	// Change to test repo directory (auto-restored by t.Chdir)
+	t.Chdir(repoDir)
 
 	t.Run("git_status in test repo", func(t *testing.T) {
 		tool := &GitStatusTool{}

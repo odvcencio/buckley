@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -134,7 +135,8 @@ func (p *AnthropicProvider) ChatCompletion(ctx context.Context, req ChatRequest)
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("anthropic request failed: %s", resp.Status)
+		errBody, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("anthropic request failed (%d): %s", resp.StatusCode, string(errBody))
 	}
 
 	var anthropicResp anthropicResponse
@@ -145,7 +147,9 @@ func (p *AnthropicProvider) ChatCompletion(ctx context.Context, req ChatRequest)
 	return anthropicResp.toChatResponse()
 }
 
-// ChatCompletionStream falls back to non-streaming implementation for now.
+// ChatCompletionStream implements the Provider interface but does not perform true streaming.
+// It calls ChatCompletion synchronously and wraps the full response as a single StreamChunk.
+// This is a compatibility fallback; true streaming requires native API support.
 func (p *AnthropicProvider) ChatCompletionStream(ctx context.Context, req ChatRequest) (<-chan StreamChunk, <-chan error) {
 	chunkChan := make(chan StreamChunk, 1)
 	errChan := make(chan error, 1)
@@ -203,6 +207,9 @@ func (p *AnthropicProvider) toAnthropicRequest(req ChatRequest, stream bool) (*a
 		anthReq.MaxTokens = 4096
 	}
 
+	cache := req.PromptCache
+	cacheEnabled := cache != nil && cache.Enabled
+
 	var systemParts []string
 	for _, msg := range req.Messages {
 		text := messageContentToText(msg.Content)
@@ -225,16 +232,44 @@ func (p *AnthropicProvider) toAnthropicRequest(req ChatRequest, stream bool) (*a
 	}
 
 	if len(systemParts) > 0 {
-		anthReq.System = strings.Join(systemParts, "\n\n")
+		if cacheEnabled && cache.SystemMessages > 0 {
+			systemBlocks := make([]anthropicContent, len(systemParts))
+			for i, part := range systemParts {
+				block := anthropicContent{
+					Type: "text",
+					Text: part,
+				}
+				if i < cache.SystemMessages {
+					block.CacheControl = promptCacheControl()
+				}
+				systemBlocks[i] = block
+			}
+			anthReq.System = systemBlocks
+		} else {
+			anthReq.System = strings.Join(systemParts, "\n\n")
+		}
+	}
+
+	if cacheEnabled && cache.TailMessages > 0 && len(anthReq.Messages) > 0 {
+		start := max(len(anthReq.Messages)-cache.TailMessages, 0)
+		for i := start; i < len(anthReq.Messages); i++ {
+			for j := range anthReq.Messages[i].Content {
+				anthReq.Messages[i].Content[j].CacheControl = promptCacheControl()
+			}
+		}
 	}
 
 	return anthReq, nil
 }
 
+func promptCacheControl() *anthropicCacheControl {
+	return &anthropicCacheControl{Type: "ephemeral"}
+}
+
 // anthropicRequest maps to Anthropics messages payload.
 type anthropicRequest struct {
 	Model       string             `json:"model"`
-	System      string             `json:"system,omitempty"`
+	System      any                `json:"system,omitempty"`
 	Messages    []anthropicMessage `json:"messages"`
 	MaxTokens   int                `json:"max_tokens"`
 	Temperature float64            `json:"temperature,omitempty"`
@@ -250,8 +285,13 @@ type anthropicMessage struct {
 }
 
 type anthropicContent struct {
+	Type         string                 `json:"type"`
+	Text         string                 `json:"text"`
+	CacheControl *anthropicCacheControl `json:"cache_control,omitempty"`
+}
+
+type anthropicCacheControl struct {
 	Type string `json:"type"`
-	Text string `json:"text"`
 }
 
 type anthropicResponse struct {

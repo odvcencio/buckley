@@ -781,7 +781,7 @@ const file_types_proto_rawDesc = "" +
 	"\tcharacter\x18\x02 \x01(\x05R\tcharacter\"c\n" +
 	"\x05Range\x12.\n" +
 	"\x05start\x18\x01 \x01(\v2\x18.buckley.acp.v1.PositionR\x05start\x12*\n" +
-	"\x03end\x18\x02 \x01(\v2\x18.buckley.acp.v1.PositionR\x03endB.Z,github.com/odvcencio/buckley/pkg/acp/proto;acppbb\x06proto3"
+	"\x03end\x18\x02 \x01(\v2\x18.buckley.acp.v1.PositionR\x03endB2Z0github.com/odvcencio/buckley/pkg/acp/proto;acppbb\x06proto3"
 
 var (
 	file_types_proto_rawDescOnce sync.Once

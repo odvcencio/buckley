@@ -2,6 +2,7 @@ package pr
 
 import (
 	"fmt"
+	"log"
 	"strings"
 
 	"github.com/odvcencio/buckley/pkg/oneshot"
@@ -133,12 +134,16 @@ func (pr PRResult) FormatBody() string {
 
 func init() {
 	// Register the tool in the tools registry
-	tools.MustRegister(GeneratePRTool)
+	if err := tools.Register(GeneratePRTool); err != nil {
+		log.Printf("register pr tool: %v", err)
+	}
 
 	// Register the command in the oneshot registry
-	oneshot.MustRegisterBuiltin(
+	if err := oneshot.RegisterBuiltin(
 		"pr",
 		"Generate a structured pull request from branch changes",
 		GeneratePRTool,
-	)
+	); err != nil {
+		log.Printf("register pr command: %v", err)
+	}
 }

@@ -20,7 +20,7 @@ func (t *EditFileTool) Name() string {
 }
 
 func (t *EditFileTool) Description() string {
-	return "Make targeted edits to a file by replacing exact text. The old_string must match exactly (including whitespace and indentation). Use this for precise code modifications. Shows a diff preview before applying changes."
+	return "Edit a file by replacing exact text matches. Shows diff preview."
 }
 
 func (t *EditFileTool) Parameters() ParameterSchema {
@@ -33,7 +33,7 @@ func (t *EditFileTool) Parameters() ParameterSchema {
 			},
 			"old_string": {
 				Type:        "string",
-				Description: "Exact text to find and replace (must match exactly including whitespace)",
+				Description: "Text to find (exact match)",
 			},
 			"new_string": {
 				Type:        "string",
@@ -41,7 +41,7 @@ func (t *EditFileTool) Parameters() ParameterSchema {
 			},
 			"replace_all": {
 				Type:        "boolean",
-				Description: "If true, replace all occurrences. If false (default), only replace the first occurrence",
+				Description: "Replace all occurrences (default: first only)",
 				Default:     false,
 			},
 		},
@@ -84,6 +84,16 @@ func (t *EditFileTool) Execute(params map[string]any) (*Result, error) {
 		return &Result{Success: false, Error: err.Error()}, nil
 	}
 
+	// Check file size before reading
+	if t.maxFileSizeBytes > 0 {
+		if info, err := os.Stat(absPath); err == nil && info.Size() > t.maxFileSizeBytes {
+			return &Result{
+				Success: false,
+				Error:   fmt.Sprintf("file too large to edit: %d bytes (max %d)", info.Size(), t.maxFileSizeBytes),
+			}, nil
+		}
+	}
+
 	// Read existing file
 	content, err := os.ReadFile(absPath)
 	if err != nil {
@@ -92,7 +102,6 @@ func (t *EditFileTool) Execute(params map[string]any) (*Result, error) {
 			Error:   fmt.Sprintf("failed to read file: %v", err),
 		}, nil
 	}
-
 	oldContent := string(content)
 
 	// Check if old_string exists in content
@@ -144,7 +153,11 @@ func (t *EditFileTool) Execute(params map[string]any) (*Result, error) {
 	}
 
 	// Write the new content
-	if err := os.WriteFile(absPath, []byte(newContent), 0644); err != nil {
+	info, err := os.Stat(absPath)
+	if err != nil {
+		return &Result{Success: false, Error: fmt.Sprintf("failed to stat file: %v", err)}, nil
+	}
+	if err := os.WriteFile(absPath, []byte(newContent), info.Mode().Perm()); err != nil {
 		return &Result{
 			Success: false,
 			Error:   fmt.Sprintf("failed to write file: %v", err),
@@ -337,7 +350,7 @@ func (t *InsertTextTool) Name() string {
 }
 
 func (t *InsertTextTool) Description() string {
-	return "Insert text at a specific line number in a file. Use this to add new code without replacing existing content. Line numbers are 1-indexed."
+	return "Insert text at a specific line number in a file without replacing existing content. Line numbers are 1-indexed. The new text is inserted before the specified line, pushing existing content down. Use this to add imports, new functions, or code blocks at specific locations."
 }
 
 func (t *InsertTextTool) Parameters() ParameterSchema {
@@ -396,6 +409,16 @@ func (t *InsertTextTool) Execute(params map[string]any) (*Result, error) {
 		return &Result{Success: false, Error: err.Error()}, nil
 	}
 
+	// Check file size before reading
+	if t.maxFileSizeBytes > 0 {
+		if info, err := os.Stat(absPath); err == nil && info.Size() > t.maxFileSizeBytes {
+			return &Result{
+				Success: false,
+				Error:   fmt.Sprintf("file too large to edit: %d bytes (max %d)", info.Size(), t.maxFileSizeBytes),
+			}, nil
+		}
+	}
+
 	content, err := os.ReadFile(absPath)
 	if err != nil {
 		return &Result{
@@ -427,7 +450,11 @@ func (t *InsertTextTool) Execute(params map[string]any) (*Result, error) {
 	diffPreview := generateDiff(absPath, oldContent, newContent)
 
 	// Write file
-	if err := os.WriteFile(absPath, []byte(newContent), 0644); err != nil {
+	info, err := os.Stat(absPath)
+	if err != nil {
+		return &Result{Success: false, Error: fmt.Sprintf("failed to stat file: %v", err)}, nil
+	}
+	if err := os.WriteFile(absPath, []byte(newContent), info.Mode().Perm()); err != nil {
 		return &Result{
 			Success: false,
 			Error:   fmt.Sprintf("failed to write file: %v", err),
@@ -463,7 +490,7 @@ func (t *DeleteLinesTool) Name() string {
 }
 
 func (t *DeleteLinesTool) Description() string {
-	return "Delete a range of lines from a file. Line numbers are 1-indexed and inclusive."
+	return "Delete a range of lines from a file. Line numbers are 1-indexed and inclusive (start and end lines are both deleted). Shows the deleted content before removal. Use this to remove dead code, old comments, or unwanted sections."
 }
 
 func (t *DeleteLinesTool) Parameters() ParameterSchema {
@@ -527,6 +554,16 @@ func (t *DeleteLinesTool) Execute(params map[string]any) (*Result, error) {
 		return &Result{Success: false, Error: err.Error()}, nil
 	}
 
+	// Check file size before reading
+	if t.maxFileSizeBytes > 0 {
+		if info, err := os.Stat(absPath); err == nil && info.Size() > t.maxFileSizeBytes {
+			return &Result{
+				Success: false,
+				Error:   fmt.Sprintf("file too large to edit: %d bytes (max %d)", info.Size(), t.maxFileSizeBytes),
+			}, nil
+		}
+	}
+
 	content, err := os.ReadFile(absPath)
 	if err != nil {
 		return &Result{
@@ -562,7 +599,11 @@ func (t *DeleteLinesTool) Execute(params map[string]any) (*Result, error) {
 	diffPreview := generateDiff(absPath, oldContent, newContent)
 
 	// Write file
-	if err := os.WriteFile(absPath, []byte(newContent), 0644); err != nil {
+	info, err := os.Stat(absPath)
+	if err != nil {
+		return &Result{Success: false, Error: fmt.Sprintf("failed to stat file: %v", err)}, nil
+	}
+	if err := os.WriteFile(absPath, []byte(newContent), info.Mode().Perm()); err != nil {
 		return &Result{
 			Success: false,
 			Error:   fmt.Sprintf("failed to write file: %v", err),

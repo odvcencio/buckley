@@ -1,5 +1,6 @@
 # Binaries
 /buckley
+/buckley-test
 *.exe
 *.dll
 *.so
@@ -49,6 +50,10 @@ apps/desktop/.vite/
 docs/site/node_modules/
 docs/site/docs/.vitepress/cache/
 docs/site/docs/.vitepress/dist/
+
+# Rust/Servo builds
+apps/browserd/target/
+**/target/
 
 # OS
 .DS_Store

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -21,6 +22,11 @@ import (
 	"github.com/odvcencio/buckley/pkg/tool"
 )
 
+const (
+	maxToolIterations = 10
+	previewMaxChars   = 200
+)
+
 // BuilderAgent encapsulates implementation generation, tool execution, and telemetry.
 type BuilderAgent struct {
 	plan         *Plan
@@ -30,6 +36,7 @@ type BuilderAgent struct {
 	workflow     *WorkflowManager
 	logger       *builderLogger
 	resultCodec  *toon.Codec
+	ctx          context.Context
 }
 
 // BuilderResult captures the outcome of a builder run.
@@ -85,7 +92,23 @@ func NewBuilderAgent(plan *Plan, cfg *config.Config, client ModelClient, registr
 		workflow:     workflow,
 		logger:       newBuilderLogger(plan),
 		resultCodec:  toon.New(cfg.Encoding.UseToon),
+		ctx:          context.Background(),
 	}
+}
+
+func (a *BuilderAgent) baseContext() context.Context {
+	if a == nil || a.ctx == nil {
+		return context.Background()
+	}
+	return a.ctx
+}
+
+// SetContext updates the base context for builder operations.
+func (a *BuilderAgent) SetContext(ctx context.Context) {
+	if a == nil || ctx == nil {
+		return
+	}
+	a.ctx = ctx
 }
 
 // Build generates and applies an implementation for the provided task.
@@ -119,7 +142,7 @@ func (a *BuilderAgent) Build(task *Task) (*BuilderResult, error) {
 	a.sendProgress("🧠 Draft ready for %q", task.Title)
 
 	a.logEvent(task.ID, builderEventImplementation, map[string]string{
-		"preview": summarizeSnippet(impl, 200),
+		"preview": summarizeSnippet(impl, previewMaxChars),
 	})
 
 	files, err := parseFileBlocks(impl)
@@ -276,7 +299,12 @@ func (a *BuilderAgent) generateImplementation(task *Task) (string, error) {
 		},
 	}
 	if a.workflow != nil {
-		for _, msg := range a.workflow.skillMessages {
+		// Copy skillMessages under lock to avoid holding it during iteration
+		a.workflow.stateMu.RLock()
+		skillMsgsCopy := make([]string, len(a.workflow.skillMessages))
+		copy(skillMsgsCopy, a.workflow.skillMessages)
+		a.workflow.stateMu.RUnlock()
+		for _, msg := range skillMsgsCopy {
 			if strings.TrimSpace(msg) == "" {
 				continue
 			}
@@ -303,8 +331,8 @@ func (a *BuilderAgent) generateImplementation(task *Task) (string, error) {
 }
 
 func (a *BuilderAgent) generateWithTools(req model.ChatRequest, task *Task) (string, error) {
-	ctx := context.Background()
-	maxIterations := 10 // Prevent infinite loops
+	ctx := a.baseContext()
+	maxIterations := maxToolIterations
 	messages := req.Messages
 	skillState := (*skill.RuntimeState)(nil)
 	var baseInjector func(string)
@@ -326,7 +354,14 @@ func (a *BuilderAgent) generateWithTools(req model.ChatRequest, task *Task) (str
 		}
 	}
 
-	for iter := 0; iter < maxIterations; iter++ {
+	for iter := range maxIterations {
+		// Check for cancellation
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		default:
+		}
+
 		allowedTools := []string{}
 		if skillState != nil {
 			allowedTools = skillState.ToolFilter()
@@ -370,7 +405,7 @@ func (a *BuilderAgent) generateWithTools(req model.ChatRequest, task *Task) (str
 		// Add assistant message with tool calls
 		for i := range choice.Message.ToolCalls {
 			if choice.Message.ToolCalls[i].ID == "" {
-				choice.Message.ToolCalls[i].ID = fmt.Sprintf("tool-%d", i+1)
+				choice.Message.ToolCalls[i].ID = fmt.Sprintf("call_%d_%d", iter, i+1)
 			}
 		}
 		messages = append(messages, choice.Message)
@@ -710,12 +745,13 @@ func buildImplementationPrompt(task *Task) string {
 	return b.String()
 }
 
+// fileBlockPattern matches markdown code blocks with optional filepath: prefix.
+var fileBlockPattern = regexp.MustCompile("(?s)```(?:filepath:)?([^\\n`]+)?\\n(.*?)```")
+
 // parseFileBlocks extracts file paths and contents from markdown code blocks.
 func parseFileBlocks(text string) (map[string]string, error) {
 	files := make(map[string]string)
-
-	re := regexp.MustCompile("(?s)```(?:filepath:)?([^\\n`]+)?\\n(.*?)```")
-	matches := re.FindAllStringSubmatch(text, -1)
+	matches := fileBlockPattern.FindAllStringSubmatch(text, -1)
 
 	for _, match := range matches {
 		if len(match) < 3 {
@@ -730,7 +766,7 @@ func parseFileBlocks(text string) (map[string]string, error) {
 			filepath = header
 		} else {
 			lines := strings.Split(content, "\n")
-			for i := 0; i < min(5, len(lines)); i++ {
+			for i := range min(5, len(lines)) {
 				line := strings.TrimSpace(lines[i])
 				if strings.HasPrefix(line, "// File:") || strings.HasPrefix(line, "# File:") {
 					filepath = strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(line, "//"), "#"))
@@ -751,20 +787,7 @@ func parseFileBlocks(text string) (map[string]string, error) {
 
 func isLanguageName(s string) bool {
 	languages := []string{"go", "python", "javascript", "typescript", "rust", "java", "c", "cpp", "bash", "sh", "yaml", "json", "md", "markdown"}
-	lower := strings.ToLower(s)
-	for _, lang := range languages {
-		if lower == lang {
-			return true
-		}
-	}
-	return false
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
+	return slices.Contains(languages, strings.ToLower(s))
 }
 
 func parseTaskID(id string) int {

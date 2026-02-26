@@ -13,6 +13,17 @@ import (
 	"time"
 )
 
+// Pre-compiled regex patterns for test output parsing.
+var (
+	goTestPassedRe = regexp.MustCompile(`--- PASS:`)
+	goTestFailedRe = regexp.MustCompile(`--- FAIL:`)
+	goTestSkipRe   = regexp.MustCompile(`--- SKIP:`)
+	jestResultsRe  = regexp.MustCompile(`Tests:\s+(?:(\d+)\s+failed,\s*)?(?:(\d+)\s+passed,\s*)?(?:(\d+)\s+skipped)?`)
+	pytestResultRe = regexp.MustCompile(`(\d+)\s+(\w+)`)
+	cargoResultRe  = regexp.MustCompile(`(\d+)\s+passed;\s+(\d+)\s+failed;\s+(\d+)\s+ignored`)
+	goPackageRe    = regexp.MustCompile(`package\s+(\w+)`)
+)
+
 // RunTestsTool runs tests with smart filtering and reporting
 type RunTestsTool struct{ workDirAware }
 
@@ -24,7 +35,7 @@ func (t *RunTestsTool) Name() string {
 }
 
 func (t *RunTestsTool) Description() string {
-	return "Run tests with smart filtering by path, pattern, or name. Auto-detects test framework (Go, Jest, pytest, etc.) and provides formatted results with pass/fail counts, timing, and coverage info when available. Use this to verify code changes or run specific test suites."
+	return "Run tests with optional path and pattern filtering. Auto-detects test framework."
 }
 
 func (t *RunTestsTool) Parameters() ParameterSchema {
@@ -61,6 +72,10 @@ func (t *RunTestsTool) Parameters() ParameterSchema {
 }
 
 func (t *RunTestsTool) Execute(params map[string]any) (*Result, error) {
+	return t.ExecuteWithContext(context.Background(), params)
+}
+
+func (t *RunTestsTool) ExecuteWithContext(ctx context.Context, params map[string]any) (*Result, error) {
 	testPath := "."
 	if p, ok := params["path"].(string); ok && p != "" {
 		testPath = p
@@ -95,10 +110,12 @@ func (t *RunTestsTool) Execute(params map[string]any) (*Result, error) {
 		timeout = int(to)
 	}
 
-	ctx := context.Background()
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if timeout > 0 {
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(context.Background(), time.Duration(timeout)*time.Second)
+		ctx, cancel = context.WithTimeout(ctx, time.Duration(timeout)*time.Second)
 		defer cancel()
 	}
 
@@ -295,22 +312,14 @@ func (t *RunTestsTool) parseTestResults(framework, output string) (passed, faile
 }
 
 func (t *RunTestsTool) parseGoTestResults(output string) (passed, failed, skipped int) {
-	// Go test output patterns
-	passedRe := regexp.MustCompile(`--- PASS:`)
-	failedRe := regexp.MustCompile(`--- FAIL:`)
-	skippedRe := regexp.MustCompile(`--- SKIP:`)
-
-	passed = len(passedRe.FindAllString(output, -1))
-	failed = len(failedRe.FindAllString(output, -1))
-	skipped = len(skippedRe.FindAllString(output, -1))
-
+	passed = len(goTestPassedRe.FindAllString(output, -1))
+	failed = len(goTestFailedRe.FindAllString(output, -1))
+	skipped = len(goTestSkipRe.FindAllString(output, -1))
 	return
 }
 
 func (t *RunTestsTool) parseJestResults(output string) (passed, failed, skipped int) {
-	// Jest summary line: "Tests: 5 failed, 10 passed, 15 total"
-	re := regexp.MustCompile(`Tests:\s+(?:(\d+)\s+failed,\s*)?(?:(\d+)\s+passed,\s*)?(?:(\d+)\s+skipped)?`)
-	matches := re.FindStringSubmatch(output)
+	matches := jestResultsRe.FindStringSubmatch(output)
 	if len(matches) > 1 {
 		fmt.Sscanf(matches[1], "%d", &failed)
 		fmt.Sscanf(matches[2], "%d", &passed)
@@ -320,9 +329,7 @@ func (t *RunTestsTool) parseJestResults(output string) (passed, failed, skipped 
 }
 
 func (t *RunTestsTool) parsePytestResults(output string) (passed, failed, skipped int) {
-	// Pytest summary: "5 failed, 10 passed, 2 skipped"
-	re := regexp.MustCompile(`(\d+)\s+(\w+)`)
-	matches := re.FindAllStringSubmatch(output, -1)
+	matches := pytestResultRe.FindAllStringSubmatch(output, -1)
 	for _, match := range matches {
 		if len(match) == 3 {
 			count := 0
@@ -341,9 +348,7 @@ func (t *RunTestsTool) parsePytestResults(output string) (passed, failed, skippe
 }
 
 func (t *RunTestsTool) parseCargoResults(output string) (passed, failed, skipped int) {
-	// Cargo test output: "test result: ok. 5 passed; 0 failed; 0 ignored"
-	re := regexp.MustCompile(`(\d+)\s+passed;\s+(\d+)\s+failed;\s+(\d+)\s+ignored`)
-	matches := re.FindStringSubmatch(output)
+	matches := cargoResultRe.FindStringSubmatch(output)
 	if len(matches) == 4 {
 		fmt.Sscanf(matches[1], "%d", &passed)
 		fmt.Sscanf(matches[2], "%d", &failed)
@@ -531,8 +536,7 @@ func (t *GenerateTestTool) generateGoTest(sourceFile, functionName string) (stri
 		return "", err
 	}
 
-	packageRe := regexp.MustCompile(`package\s+(\w+)`)
-	matches := packageRe.FindStringSubmatch(string(content))
+	matches := goPackageRe.FindStringSubmatch(string(content))
 	packageName := "main"
 	if len(matches) > 1 {
 		packageName = matches[1]

@@ -2,6 +2,8 @@
 package commit
 
 import (
+	"log"
+
 	"github.com/odvcencio/buckley/pkg/oneshot"
 	"github.com/odvcencio/buckley/pkg/tools"
 )
@@ -47,7 +49,7 @@ var GenerateCommitTool = tools.Definition{
 			),
 			"subject": {
 				Type:        "string",
-				Description: "Short summary of the change, imperative mood, no period, max 50 chars",
+				Description: "Short summary of the change, imperative mood, no period. The FULL header (action + scope + subject) must be <= 72 chars total, so budget accordingly (e.g., 'add(ui): ' is 9 chars, leaving 63 for subject)",
 				MaxLength:   72,
 			},
 			"body": tools.ArrayProperty(
@@ -133,12 +135,16 @@ func (e *ValidationError) Error() string {
 
 func init() {
 	// Register the tool in the tools registry
-	tools.MustRegister(GenerateCommitTool)
+	if err := tools.Register(GenerateCommitTool); err != nil {
+		log.Printf("register commit tool: %v", err)
+	}
 
 	// Register the command in the oneshot registry
-	oneshot.MustRegisterBuiltin(
+	if err := oneshot.RegisterBuiltin(
 		"commit",
 		"Generate a structured git commit message from staged changes",
 		GenerateCommitTool,
-	)
+	); err != nil {
+		log.Printf("register commit command: %v", err)
+	}
 }

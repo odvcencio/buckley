@@ -360,8 +360,8 @@ func TestManagerChatCompletionStream_NoProvider(t *testing.T) {
 
 	chunkChan, errChan := manager.ChatCompletionStream(ctx, req)
 
-	if chunkChan != nil {
-		t.Error("Expected nil chunk channel for missing provider")
+	if chunkChan == nil {
+		t.Error("Expected non-nil (closed) chunk channel for missing provider")
 	}
 
 	// Should receive error

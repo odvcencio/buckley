@@ -17,7 +17,7 @@ type InMemoryStore struct {
 
 type snapshot struct {
 	Version int64
-	State   interface{}
+	State   any
 }
 
 // NewInMemoryStore creates a new in-memory event store
@@ -97,7 +97,7 @@ func (s *InMemoryStore) Subscribe(ctx context.Context, streamID string, handler 
 }
 
 // Snapshot saves a state snapshot
-func (s *InMemoryStore) Snapshot(ctx context.Context, streamID string, version int64, state interface{}) error {
+func (s *InMemoryStore) Snapshot(ctx context.Context, streamID string, version int64, state any) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -109,7 +109,7 @@ func (s *InMemoryStore) Snapshot(ctx context.Context, streamID string, version i
 }
 
 // LoadSnapshot retrieves the latest snapshot
-func (s *InMemoryStore) LoadSnapshot(ctx context.Context, streamID string) (interface{}, int64, error) {
+func (s *InMemoryStore) LoadSnapshot(ctx context.Context, streamID string) (any, int64, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 

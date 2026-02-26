@@ -4,6 +4,9 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+
+	"golang.org/x/text/cases"
+	"golang.org/x/text/language"
 )
 
 // PersonaProvider exposes persona profiles for different workflow phases.
@@ -81,7 +84,7 @@ func (p *PersonaProvider) buildProfile(id string, def PersonaDefinition, base Co
 	}
 
 	if profile.Name == "" {
-		profile.Name = strings.Title(strings.ReplaceAll(profile.ID, "-", " "))
+		profile.Name = cases.Title(language.English).String(strings.ReplaceAll(profile.ID, "-", " "))
 	}
 	if profile.Summary == "" {
 		profile.Summary = def.Description

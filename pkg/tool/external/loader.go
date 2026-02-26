@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // DiscoverPlugins scans a directory for plugin manifests and returns loaded tools
@@ -35,6 +36,14 @@ func DiscoverPlugins(pluginDir string) ([]*ExternalTool, error) {
 			// Resolve executable path relative to manifest directory
 			manifestDir := filepath.Dir(path)
 			execPath := filepath.Join(manifestDir, manifest.Executable)
+
+			// Prevent path traversal outside plugin directory
+			absManifestDir, _ := filepath.Abs(manifestDir)
+			absExecPath, _ := filepath.Abs(execPath)
+			if !strings.HasPrefix(absExecPath, absManifestDir+string(filepath.Separator)) && absExecPath != absManifestDir {
+				fmt.Fprintf(os.Stderr, "Warning: executable path escapes plugin directory for %s: %s\n", manifest.Name, execPath)
+				return nil
+			}
 
 			// Validate executable exists
 			if _, err := os.Stat(execPath); err != nil {

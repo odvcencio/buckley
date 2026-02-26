@@ -15,7 +15,7 @@ func TestMergeConfigsPreservesBooleanDefaults(t *testing.T) {
 		},
 	}
 
-	mergeConfigs(base, override, raw)
+	mergeConfigs(base, override, raw, false)
 
 	if !base.Providers.OpenRouter.Enabled {
 		t.Fatalf("OpenRouter enabled flag should remain true when not overridden")
@@ -37,7 +37,7 @@ func TestMergeConfigsRespectsBooleanOverrides(t *testing.T) {
 		},
 	}
 
-	mergeConfigs(base, override, raw)
+	mergeConfigs(base, override, raw, false)
 
 	if base.Providers.OpenRouter.Enabled {
 		t.Fatalf("expected OpenRouter enabled flag to update when override is explicit")
@@ -54,7 +54,7 @@ func TestMergeConfigsHandlesEncodingOverride(t *testing.T) {
 		},
 	}
 
-	mergeConfigs(base, override, raw)
+	mergeConfigs(base, override, raw, false)
 
 	if base.Encoding.UseToon {
 		t.Fatalf("expected encoding.use_toon to update when override provided")
@@ -75,7 +75,7 @@ func TestMergeConfigsRespectsApprovalListOverrides(t *testing.T) {
 		},
 	}
 
-	mergeConfigs(base, override, raw)
+	mergeConfigs(base, override, raw, false)
 
 	if len(base.Approval.AllowedTools) != 0 {
 		t.Fatalf("expected approval.allowed_tools to be overridden to empty list")
@@ -104,7 +104,7 @@ func TestMergeConfigsRespectsBatchOverrides(t *testing.T) {
 		},
 	}
 
-	mergeConfigs(base, override, raw)
+	mergeConfigs(base, override, raw, false)
 
 	if !base.Batch.Enabled {
 		t.Fatalf("expected batch.enabled to update when override is explicit")
@@ -135,7 +135,7 @@ func TestMergeConfigsRespectsInputOverrides(t *testing.T) {
 		},
 	}
 
-	mergeConfigs(base, override, raw)
+	mergeConfigs(base, override, raw, false)
 
 	if !base.Input.Video.Enabled {
 		t.Fatalf("expected input.video.enabled to update when override is explicit")
@@ -181,7 +181,7 @@ func TestMergeConfigsRespectsModelUtilityOverrides(t *testing.T) {
 		},
 	}
 
-	mergeConfigs(base, override, raw)
+	mergeConfigs(base, override, raw, false)
 
 	if base.Models.DefaultProvider != "openai" {
 		t.Fatalf("expected models.default_provider to be overridden")

@@ -34,8 +34,10 @@ OUTPUT REQUIREMENTS (plain text only):
   - Use "!" ONLY for breaking changes. If you use "!", include a footer:
     BREAKING CHANGE: <explanation>
 - Summary rules:
+  - The FULL header line (action + scope + summary) MUST be <= 72 characters total.
+  - Budget accordingly: "refactor(execution): " is 21 chars, leaving 51 for summary.
   - Match the breadth of the diff (avoid overfitting to a single file when many change).
-  - Concise, no trailing period, ideally <= 72 characters.
+  - Concise, no trailing period.
   - Prefer a noun phrase that focuses on the thing changed (e.g., "workflow summary").
   - Prefer describing the human-authored change; ignore generated noise (e.g., *.pb.go, built web assets) when choosing the summary.
 - Body (REQUIRED):

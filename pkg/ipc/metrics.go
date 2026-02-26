@@ -14,11 +14,6 @@ import (
 )
 
 var (
-	metricActiveSessions = promauto.NewGauge(prometheus.GaugeOpts{
-		Namespace: "buckley",
-		Name:      "sessions_active_total",
-		Help:      "Number of active Buckley workflow sessions.",
-	})
 	metricAuthSessions = promauto.NewGauge(prometheus.GaugeOpts{
 		Namespace: "buckley",
 		Name:      "web_sessions_total",

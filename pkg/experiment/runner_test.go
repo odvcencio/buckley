@@ -594,7 +594,7 @@ func TestPersistResult(t *testing.T) {
 			TotalCost: 0.05,
 		}
 
-		err := runner.persistResult(exp, result, runIDs, startTimes)
+		err := runner.persistResult(context.Background(), exp, result, runIDs, startTimes)
 		if err != nil {
 			t.Errorf("persistResult() error = %v", err)
 		}
@@ -619,7 +619,7 @@ func TestPersistResult(t *testing.T) {
 		// Need a new run ID since we're saving again
 		delete(runIDs, "var-1")
 
-		err := runner.persistResult(exp, result, runIDs, startTimes)
+		err := runner.persistResult(context.Background(), exp, result, runIDs, startTimes)
 		if err != nil {
 			t.Errorf("persistResult() error = %v", err)
 		}

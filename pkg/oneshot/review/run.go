@@ -290,7 +290,7 @@ func (r *Runner) FixFinding(ctx context.Context, finding *Finding, prompt string
 	result := &FixResult{}
 
 	if r.rlmRunner == nil {
-		result.Error = fmt.Errorf("RLM not configured - cannot apply fixes")
+		result.Error = fmt.Errorf("rlm not configured - cannot apply fixes")
 		return result, nil
 	}
 

@@ -1,0 +1,17 @@
+# Build artifacts
+.bin/
+*.log
+
+# Test results
+results/
+coverage.out
+
+# Temporary files
+*.tmp
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db

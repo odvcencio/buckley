@@ -239,9 +239,7 @@ func TestVerifier_VerifyOutcomes_Files(t *testing.T) {
 
 func TestVerifier_DetectTestCommands(t *testing.T) {
 	tmpDir := t.TempDir()
-	oldWd, _ := os.Getwd()
-	os.Chdir(tmpDir)
-	defer os.Chdir(oldWd)
+	t.Chdir(tmpDir)
 
 	tests := []struct {
 		name         string
@@ -308,9 +306,7 @@ func TestVerifier_DetectTestCommands(t *testing.T) {
 
 func TestVerifier_DetectLinterCommands(t *testing.T) {
 	tmpDir := t.TempDir()
-	oldWd, _ := os.Getwd()
-	os.Chdir(tmpDir)
-	defer os.Chdir(oldWd)
+	t.Chdir(tmpDir)
 
 	tests := []struct {
 		name         string
@@ -398,9 +394,7 @@ func TestVerifier_RunVerificationStep(t *testing.T) {
 
 func TestVerifier_CollectArtifacts(t *testing.T) {
 	tmpDir := t.TempDir()
-	oldWd, _ := os.Getwd()
-	os.Chdir(tmpDir)
-	defer os.Chdir(oldWd)
+	t.Chdir(tmpDir)
 
 	// Create test artifacts
 	artifacts := []struct {

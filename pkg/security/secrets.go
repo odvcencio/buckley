@@ -12,6 +12,21 @@ import (
 	"time"
 )
 
+var (
+	hexEncodedPattern  = regexp.MustCompile(`^[0-9a-fA-F]+$`)
+	base64ValuePattern = regexp.MustCompile(`^[a-zA-Z0-9/+]+={0,2}$`)
+	secretVarRegexes   = []*regexp.Regexp{
+		regexp.MustCompile(`(?i)(secret|token|key|password|passwd|pwd|credential|auth)`),
+		regexp.MustCompile(`(?i)(api[_-]?|private[_-]?|private|access[_-]?|private)`),
+		regexp.MustCompile(`(?i)(jwt[_-]?|oauth[_-]?|bearer[_-]?)`),
+	}
+	quoteRegexes = []*regexp.Regexp{
+		regexp.MustCompile(`"([^"]{20,})"`), // Double-quoted strings
+		regexp.MustCompile(`'([^']{20,})'`), // Single-quoted strings
+		regexp.MustCompile("`([^`]{20,})`"), // Backtick strings
+	}
+)
+
 // SecretsAnalyzer detects exposed secrets in code
 type SecretsAnalyzer struct {
 	config           Config
@@ -22,6 +37,7 @@ type SecretsAnalyzer struct {
 // secretPattern represents patterns to detect secrets
 type secretPattern struct {
 	pattern     string
+	regex       *regexp.Regexp
 	category    Category
 	severity    Severity
 	title       string
@@ -267,6 +283,13 @@ func NewSecretsAnalyzer(config Config) *SecretsAnalyzer {
 			},
 		},
 	}
+	for i := range analyzer.secretPatterns {
+		compiled, err := regexp.Compile(analyzer.secretPatterns[i].pattern)
+		if err != nil {
+			continue
+		}
+		analyzer.secretPatterns[i].regex = compiled
+	}
 
 	return analyzer
 }
@@ -399,7 +422,7 @@ func (a *SecretsAnalyzer) analyzeFile(path string) ([]SecurityFinding, error) {
 
 		// Check against known secret patterns
 		for _, pattern := range a.secretPatterns {
-			matched, matches := a.matchPattern(line, pattern.pattern)
+			matched, matches := a.matchPattern(line, pattern)
 			if matched {
 				if pattern.validator == nil || pattern.validator(matches[0]) {
 					finding := a.createFinding(path, lineNum, line, pattern, matches)
@@ -424,19 +447,6 @@ func (a *SecretsAnalyzer) analyzeFile(path string) ([]SecurityFinding, error) {
 func (a *SecretsAnalyzer) findHighEntropyStrings(rootPath string) ([]SecurityFinding, error) {
 	var findings []SecurityFinding
 
-	// Common variable names that might contain secrets
-	secretVarPatterns := []string{
-		`(?i)(secret|token|key|password|passwd|pwd|credential|auth)`,
-		`(?i)(api[_-]?|private[_-]?|private|access[_-]?|private)`,
-		`(?i)(jwt[_-]?|oauth[_-]?|bearer[_-]?)`,
-	}
-
-	quotePatterns := []string{
-		`"([^"]{20,})"`, // Double-quoted strings
-		`'([^']{20,})'`, // Single-quoted strings
-		"`([^`]{20,})`", // Backtick strings
-	}
-
 	visited := make(map[string]bool)
 
 	err := filepath.Walk(rootPath, func(path string, info os.FileInfo, err error) error {
@@ -459,8 +469,8 @@ func (a *SecretsAnalyzer) findHighEntropyStrings(rootPath string) ([]SecurityFin
 		for lineNum, line := range lines {
 			// Check if line contains suspicious variable names
 			hasSecretVar := false
-			for _, varPattern := range secretVarPatterns {
-				if matched, _ := regexp.MatchString(varPattern, line); matched {
+			for _, varPattern := range secretVarRegexes {
+				if varPattern.MatchString(line) {
 					hasSecretVar = true
 					break
 				}
@@ -471,9 +481,8 @@ func (a *SecretsAnalyzer) findHighEntropyStrings(rootPath string) ([]SecurityFin
 			}
 
 			// Check for quoted strings
-			for _, quotePattern := range quotePatterns {
-				re := regexp.MustCompile(quotePattern)
-				matches := re.FindAllStringSubmatch(line, -1)
+			for _, quotePattern := range quoteRegexes {
+				matches := quotePattern.FindAllStringSubmatch(line, -1)
 
 				for _, match := range matches {
 					if len(match) > 1 {
@@ -613,13 +622,13 @@ func (a *SecretsAnalyzer) isPlaceholder(s string) bool {
 
 // isHexEncodedData checks if string might be hex-encoded common data
 func (a *SecretsAnalyzer) isHexEncodedData(s string) bool {
-	return regexp.MustCompile(`^[0-9a-fA-F]+$`).MatchString(s)
+	return hexEncodedPattern.MatchString(s)
 }
 
 // isBase64OfCommonData checks if base64 decodes to common data
 func (a *SecretsAnalyzer) isBase64OfCommonData(s string) bool {
 	// Check if it looks like base64
-	if !regexp.MustCompile(`^[a-zA-Z0-9/+]+={0,2}$`).MatchString(s) {
+	if !base64ValuePattern.MatchString(s) {
 		return false
 	}
 
@@ -710,12 +719,15 @@ func (a *SecretsAnalyzer) hasMixedAlphanumericSymbols(s string) bool {
 }
 
 // matchPattern checks if a line matches a pattern
-func (a *SecretsAnalyzer) matchPattern(line, pattern string) (bool, []string) {
-	re, err := regexp.Compile(pattern)
-	if err != nil {
-		return false, nil
+func (a *SecretsAnalyzer) matchPattern(line string, pattern secretPattern) (bool, []string) {
+	re := pattern.regex
+	if re == nil {
+		compiled, err := regexp.Compile(pattern.pattern)
+		if err != nil {
+			return false, nil
+		}
+		re = compiled
 	}
-
 	matches := re.FindStringSubmatch(line)
 	return matches != nil, matches
 }

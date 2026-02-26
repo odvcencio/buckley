@@ -15,10 +15,10 @@ import (
 
 	acppb "github.com/odvcencio/buckley/pkg/acp/proto"
 	"github.com/odvcencio/buckley/pkg/agentserver"
+	"github.com/odvcencio/buckley/pkg/buckley/ui/viewmodel"
 	"github.com/odvcencio/buckley/pkg/config"
 	"github.com/odvcencio/buckley/pkg/orchestrator"
 	"github.com/odvcencio/buckley/pkg/storage"
-	"github.com/odvcencio/buckley/pkg/ui/viewmodel"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"

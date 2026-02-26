@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -132,7 +133,8 @@ func (p *GoogleProvider) ChatCompletion(ctx context.Context, req ChatRequest) (*
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("google request failed: %s", resp.Status)
+		errBody, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("google request failed (%d): %s", resp.StatusCode, string(errBody))
 	}
 
 	var genResp googleResponse
@@ -143,7 +145,9 @@ func (p *GoogleProvider) ChatCompletion(ctx context.Context, req ChatRequest) (*
 	return genResp.toChatResponse(payload.Model)
 }
 
-// ChatCompletionStream proxies to non-streaming variant (Gemini streaming handled later).
+// ChatCompletionStream implements the Provider interface but does not perform true streaming.
+// It calls ChatCompletion synchronously and wraps the full response as a single StreamChunk.
+// This is a compatibility fallback; true streaming requires native API support.
 func (p *GoogleProvider) ChatCompletionStream(ctx context.Context, req ChatRequest) (<-chan StreamChunk, <-chan error) {
 	chunkChan := make(chan StreamChunk, 1)
 	errChan := make(chan error, 1)

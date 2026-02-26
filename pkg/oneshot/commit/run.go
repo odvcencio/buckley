@@ -10,21 +10,27 @@ import (
 
 // Runner executes the commit generation flow.
 type Runner struct {
-	invoker *oneshot.DefaultInvoker
-	ledger  *transparency.CostLedger
+	invoker        *oneshot.DefaultInvoker
+	ledger         *transparency.CostLedger
+	streamCallback oneshot.StreamCallback
 }
 
 // RunnerConfig configures the commit runner.
 type RunnerConfig struct {
 	Invoker *oneshot.DefaultInvoker
 	Ledger  *transparency.CostLedger
+
+	// StreamCallback is called for each streaming chunk (optional).
+	// When set, enables streaming mode to show thinking progress.
+	StreamCallback oneshot.StreamCallback
 }
 
 // NewRunner creates a commit runner.
 func NewRunner(cfg RunnerConfig) *Runner {
 	return &Runner{
-		invoker: cfg.Invoker,
-		ledger:  cfg.Ledger,
+		invoker:        cfg.Invoker,
+		ledger:         cfg.Ledger,
+		streamCallback: cfg.StreamCallback,
 	}
 }
 
@@ -62,8 +68,14 @@ func (r *Runner) Run(ctx context.Context, opts ContextOptions) (*RunResult, erro
 	userPrompt := BuildPrompt(commitCtx)
 	systemPrompt := SystemPrompt()
 
-	// 3. Invoke model with tool
-	invokeResult, trace, err := r.invoker.InvokeWithRetry(ctx, systemPrompt, userPrompt, GenerateCommitTool, audit)
+	// 3. Invoke model with tool (streaming if callback provided)
+	var invokeResult *oneshot.Result
+	var trace *transparency.Trace
+	if r.streamCallback != nil {
+		invokeResult, trace, err = r.invoker.InvokeStream(ctx, systemPrompt, userPrompt, GenerateCommitTool, audit, r.streamCallback)
+	} else {
+		invokeResult, trace, err = r.invoker.InvokeWithRetry(ctx, systemPrompt, userPrompt, GenerateCommitTool, audit)
+	}
 	result.Trace = trace
 
 	if err != nil {

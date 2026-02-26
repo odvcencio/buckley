@@ -20,6 +20,15 @@ import (
 	"github.com/odvcencio/buckley/pkg/tool"
 )
 
+const (
+	reviewRequestTimeout      = 90 * time.Second
+	reviewLogPreviewMaxChars  = 400
+	reviewFileContentMaxChars = 8000
+	reviewFileContentMaxLines = 400
+	reviewImplMaxChars        = 6000
+	reviewImplMaxLines        = 200
+)
+
 // ReviewAgent delegates code review to a dedicated model and persists artifacts.
 type ReviewAgent struct {
 	plan            *Plan
@@ -31,6 +40,7 @@ type ReviewAgent struct {
 	logger          *reviewLogger
 	schemaBlock     string
 	personaProvider *personality.PersonaProvider
+	ctx             context.Context
 }
 
 // SetPersonaProvider swaps the persona provider for upcoming review cycles.
@@ -121,8 +131,12 @@ func NewReviewAgent(plan *Plan, cfg *config.Config, client ModelClient, registry
 		return nil
 	}
 
-	if workflow != nil && workflow.feature == "" {
-		workflow.feature = plan.FeatureName
+	if workflow != nil {
+		workflow.stateMu.Lock()
+		if workflow.feature == "" {
+			workflow.feature = plan.FeatureName
+		}
+		workflow.stateMu.Unlock()
 	}
 
 	outputDir := cfg.Artifacts.ReviewDir
@@ -150,7 +164,23 @@ func NewReviewAgent(plan *Plan, cfg *config.Config, client ModelClient, registry
 		logger:          newReviewLogger(plan),
 		schemaBlock:     reviewSchemaBlock(useToon),
 		personaProvider: personaProvider,
+		ctx:             context.Background(),
 	}
+}
+
+func (a *ReviewAgent) baseContext() context.Context {
+	if a == nil || a.ctx == nil {
+		return context.Background()
+	}
+	return a.ctx
+}
+
+// SetContext updates the base context for review operations.
+func (a *ReviewAgent) SetContext(ctx context.Context) {
+	if a == nil || ctx == nil {
+		return
+	}
+	a.ctx = ctx
 }
 
 // Review runs the review loop for a single task implementation.
@@ -178,7 +208,7 @@ func (a *ReviewAgent) Review(task *Task, builderResult *BuilderResult) (*ReviewR
 		}
 	}
 	systemPrompt := prompts.ReviewPrompt(time.Now(), personaProfile)
-	reqCtx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	reqCtx, cancel := context.WithTimeout(a.baseContext(), reviewRequestTimeout)
 	defer cancel()
 
 	req := model.ChatRequest{
@@ -198,7 +228,7 @@ func (a *ReviewAgent) Review(task *Task, builderResult *BuilderResult) (*ReviewR
 		"files": fmt.Sprintf("%d", len(filePaths)),
 	})
 	a.logEvent(task.ID, reviewEventPrompt, map[string]string{
-		"preview": truncateForLog(prompt, 400),
+		"preview": truncateForLog(prompt, reviewLogPreviewMaxChars),
 	})
 
 	resp, err := a.modelClient.ChatCompletion(reqCtx, req)
@@ -337,7 +367,7 @@ func (a *ReviewAgent) loadFileContexts(paths []string) []reviewFileContext {
 
 		contexts = append(contexts, reviewFileContext{
 			Path:    path,
-			Content: truncateContent(content, 8000, 400),
+			Content: truncateContent(content, reviewFileContentMaxChars, reviewFileContentMaxLines),
 		})
 	}
 
@@ -368,7 +398,7 @@ func (a *ReviewAgent) buildReviewPrompt(task *Task, result *BuilderResult, conte
 
 	if strings.TrimSpace(result.Implementation) != "" {
 		b.WriteString("\nBuilder implementation proposal:\n")
-		b.WriteString(truncateContent(result.Implementation, 6000, 200))
+		b.WriteString(truncateContent(result.Implementation, reviewImplMaxChars, reviewImplMaxLines))
 		b.WriteString("\n")
 	}
 

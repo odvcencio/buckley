@@ -51,7 +51,8 @@ func (s *FilePlanStore) SavePlan(plan *Plan) error {
 
 	assignPlanLogs(plan)
 
-	jsonPath := filepath.Join(s.planDir, plan.ID+".json")
+	safeID := filepath.Base(plan.ID)
+	jsonPath := filepath.Join(s.planDir, safeID+".json")
 	data, err := json.MarshalIndent(plan, "", "  ")
 	if err != nil {
 		return fmt.Errorf("failed to marshal plan: %w", err)
@@ -60,7 +61,7 @@ func (s *FilePlanStore) SavePlan(plan *Plan) error {
 		return fmt.Errorf("failed to write JSON plan: %w", err)
 	}
 
-	mdPath := filepath.Join(s.planDir, plan.ID+".md")
+	mdPath := filepath.Join(s.planDir, safeID+".md")
 	content, err := renderPlanTemplate(plan)
 	if err != nil {
 		return fmt.Errorf("failed to render plan template: %w", err)
@@ -77,6 +78,7 @@ func (s *FilePlanStore) LoadPlan(planID string) (*Plan, error) {
 	if strings.TrimSpace(planID) == "" {
 		return nil, fmt.Errorf("plan id required")
 	}
+	planID = filepath.Base(planID)
 	path := filepath.Join(s.planDir, planID+".json")
 	content, err := os.ReadFile(path)
 	if err != nil {

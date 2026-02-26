@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -543,6 +544,44 @@ func TestWorkflowManager_SendProgress_NilChannel(t *testing.T) {
 	w := &WorkflowManager{}
 	// Should not panic when channel is nil
 	w.SendProgress("test")
+}
+
+func TestWorkflowManager_SendProgress_ConcurrentEnableDisable(t *testing.T) {
+	w := &WorkflowManager{}
+	w.EnableProgressStreaming()
+	defer w.DisableProgressStreaming()
+
+	const (
+		senders    = 8
+		iterations = 1000
+	)
+
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+
+	for i := 0; i < senders; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			for j := 0; j < iterations; j++ {
+				w.SendProgress("concurrent progress")
+			}
+		}()
+	}
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		<-start
+		for i := 0; i < iterations; i++ {
+			w.DisableProgressStreaming()
+			w.EnableProgressStreaming()
+		}
+	}()
+
+	close(start)
+	wg.Wait()
 }
 
 func TestWorkflowManager_EnableDisableProgressStreaming(t *testing.T) {

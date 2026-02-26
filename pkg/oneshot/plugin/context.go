@@ -266,7 +266,7 @@ func (g *ContextGatherer) gatherAgentsMD(source ContextSource) (string, error) {
 	if source.Optional {
 		return "", nil
 	}
-	return "", fmt.Errorf("AGENTS.md not found")
+	return "", fmt.Errorf("agents.md not found")
 }
 
 func (g *ContextGatherer) gatherEnv(source ContextSource) (string, error) {

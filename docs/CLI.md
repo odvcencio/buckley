@@ -101,6 +101,22 @@ buckley execute-task --plan <plan-id> --task <task-id> [OPTIONS]
 buckley execute-task --plan user-auth --task implement-jwt --remote-branch feature/auth
 ```
 
+### ralph
+
+Run Ralph autonomous sessions for long-running tasks.
+
+```bash
+buckley ralph --prompt "Audit the repo for flaky tests" --timeout 45m
+buckley ralph --prompt-file ./prompt.txt --dir /path/to/worktree
+```
+
+**Session management:**
+```bash
+buckley ralph list
+buckley ralph control --status
+buckley ralph control --set backends.buckley.enabled=false
+```
+
 ### commit
 
 Generate and create a conventional commit from staged changes.

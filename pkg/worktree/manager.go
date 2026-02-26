@@ -115,6 +115,12 @@ func (wm *Manager) Create(branchName string) (*Worktree, error) {
 	// Get the worktree path
 	wtPath := wm.getWorktreePath(branchName)
 
+	absRoot, _ := filepath.Abs(wm.worktreeRoot)
+	absWtPath, _ := filepath.Abs(wtPath)
+	if !strings.HasPrefix(absWtPath, absRoot+string(filepath.Separator)) {
+		return nil, fmt.Errorf("invalid branch name: path escapes worktree root")
+	}
+
 	// Check if worktree path already exists
 	if _, err := os.Stat(wtPath); err == nil {
 		return nil, fmt.Errorf("worktree path already exists: %s", wtPath)

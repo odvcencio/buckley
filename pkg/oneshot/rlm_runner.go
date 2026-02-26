@@ -76,7 +76,7 @@ func (r *RLMRunner) Run(ctx context.Context, systemPrompt, task string, allowedT
 	modelToUse := r.modelID
 
 	// Create sub-agent configuration
-	agentCfg := rlm.SubAgentConfig{
+	agentCfg := rlm.SubAgentInstanceConfig{
 		ID:            fmt.Sprintf("oneshot-%d", time.Now().UnixNano()),
 		Model:         modelToUse,
 		SystemPrompt:  systemPrompt,

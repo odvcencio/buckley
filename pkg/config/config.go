@@ -1,21 +1,16 @@
 package config
 
 import (
-	"fmt"
-	"net"
-	"os"
-	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/odvcencio/buckley/pkg/giturl"
 	"github.com/odvcencio/buckley/pkg/personality"
-	corev1 "k8s.io/api/core/v1"
+	"github.com/odvcencio/buckley/pkg/sandbox"
 )
 
 const (
-	defaultOpenRouterModel = "moonshotai/kimi-k2-thinking"
+	defaultOpenRouterModel = "moonshotai/kimi-k2.5"
 	defaultOpenAIModel     = "openai/gpt-5.2-codex-xhigh"
 	defaultAnthropicModel  = "anthropic/claude-sonnet-4-5"
 	defaultGoogleModel     = "google/gemini-3-pro"
@@ -30,7 +25,7 @@ const (
 	DefaultExecutionModel   = defaultOpenRouterModel
 	DefaultReviewModel      = defaultOpenRouterModel
 	DefaultProvider         = "openrouter"
-	DefaultExecutionMode    = ExecutionModeRLM
+	DefaultExecutionMode    = ExecutionModeClassic // RLM is experimental
 	DefaultOneshotMode      = ExecutionModeClassic
 	DefaultTrustLevel       = "balanced"
 	DefaultApprovalMode     = "safe"
@@ -38,7 +33,7 @@ const (
 	DefaultDailyBudget      = 20.00
 	DefaultMonthlyBudget    = 200.00
 	DefaultIPCBind          = "127.0.0.1:4488"
-	DefaultCompactThreshold = 0.9
+	DefaultCompactThreshold = 0.75
 	DefaultMaxSelfHeal      = 3
 	DefaultMaxReviewCycles  = 3
 )
@@ -52,33 +47,38 @@ var providerDefaultModels = map[string]string{
 
 // Config represents the complete Buckley configuration
 type Config struct {
-	Models         ModelConfig         `yaml:"models"`
-	Providers      ProviderConfig      `yaml:"providers"`
-	Encoding       EncodingConfig      `yaml:"encoding"`
-	Personality    PersonalityConfig   `yaml:"personality"`
-	Memory         MemoryConfig        `yaml:"memory"`
-	Orchestrator   OrchestratorConfig  `yaml:"orchestrator"`
-	Execution      ExecutionModeConfig `yaml:"execution"`
-	Oneshot        OneshotModeConfig   `yaml:"oneshot"`
-	RLM            RLMConfig           `yaml:"rlm"`
-	Approval       ApprovalConfig      `yaml:"approval"`
-	ACP            ACPConfig           `yaml:"acp"`
-	Worktrees      WorktreeConfig      `yaml:"worktrees"`
-	Experiment     ExperimentConfig    `yaml:"experiment"`
-	Batch          BatchConfig         `yaml:"batch"`
-	GitClone       giturl.ClonePolicy  `yaml:"git_clone"`
-	IPC            IPCConfig           `yaml:"ipc"`
-	CostManagement CostConfig          `yaml:"cost_management"`
-	RetryPolicy    RetryPolicy         `yaml:"retry_policy"`
-	Artifacts      ArtifactsConfig     `yaml:"artifacts"`
-	Workflow       WorkflowConfig      `yaml:"workflow"`
-	Compaction     CompactionConfig    `yaml:"compaction"`
-	UI             UIConfig            `yaml:"ui"`
-	Commenting     CommentingConfig    `yaml:"commenting"`
-	GitEvents      GitEventsConfig     `yaml:"git_events"`
-	Input          InputConfig         `yaml:"input"`
-	Diagnostics    DiagnosticsConfig   `yaml:"diagnostics"`
-	Notify         NotifyConfig        `yaml:"notify"`
+	Models         ModelConfig          `yaml:"models"`
+	Providers      ProviderConfig       `yaml:"providers"`
+	PromptCache    PromptCacheConfig    `yaml:"prompt_cache"`
+	Encoding       EncodingConfig       `yaml:"encoding"`
+	Personality    PersonalityConfig    `yaml:"personality"`
+	Memory         MemoryConfig         `yaml:"memory"`
+	Orchestrator   OrchestratorConfig   `yaml:"orchestrator"`
+	Execution      ExecutionModeConfig  `yaml:"execution"`
+	Oneshot        OneshotModeConfig    `yaml:"oneshot"`
+	RLM            RLMConfig            `yaml:"rlm"`
+	Approval       ApprovalConfig       `yaml:"approval"`
+	Sandbox        SandboxConfig        `yaml:"sandbox"`
+	ToolMiddleware ToolMiddlewareConfig `yaml:"tool_middleware"`
+	MCP            MCPConfig            `yaml:"mcp"`
+	ACP            ACPConfig            `yaml:"acp"`
+	Worktrees      WorktreeConfig       `yaml:"worktrees"`
+	Experiment     ExperimentConfig     `yaml:"experiment"`
+	Batch          BatchConfig          `yaml:"batch"`
+	GitClone       giturl.ClonePolicy   `yaml:"git_clone"`
+	IPC            IPCConfig            `yaml:"ipc"`
+	CostManagement CostConfig           `yaml:"cost_management"`
+	RetryPolicy    RetryPolicy          `yaml:"retry_policy"`
+	Artifacts      ArtifactsConfig      `yaml:"artifacts"`
+	Workflow       WorkflowConfig       `yaml:"workflow"`
+	Compaction     CompactionConfig     `yaml:"compaction"`
+	UI             UIConfig             `yaml:"ui"`
+	WebUI          WebUIConfig          `yaml:"web_ui"`
+	Commenting     CommentingConfig     `yaml:"commenting"`
+	GitEvents      GitEventsConfig      `yaml:"git_events"`
+	Input          InputConfig          `yaml:"input"`
+	Diagnostics    DiagnosticsConfig    `yaml:"diagnostics"`
+	Notify         NotifyConfig         `yaml:"notify"`
 }
 
 // NotifyConfig controls async notifications for human-in-the-loop workflows
@@ -196,6 +196,16 @@ type LiteLLMRouterConfig struct {
 	FallbackModels []string `yaml:"fallback_models"`
 }
 
+// PromptCacheConfig controls provider prompt caching options.
+type PromptCacheConfig struct {
+	Enabled        bool     `yaml:"enabled"`
+	Providers      []string `yaml:"providers"`
+	SystemMessages int      `yaml:"system_messages"`
+	TailMessages   int      `yaml:"tail_messages"`
+	Key            string   `yaml:"key"`
+	Retention      string   `yaml:"retention"`
+}
+
 // EncodingConfig controls serialization preferences.
 type EncodingConfig struct {
 	UseToon bool `yaml:"use_toon"`
@@ -250,9 +260,9 @@ type OneshotModeConfig struct {
 
 // RLMConfig controls the Recursive Language Model runtime.
 type RLMConfig struct {
-	Coordinator RLMCoordinatorConfig     `yaml:"coordinator"`
-	Tiers       map[string]RLMTierConfig `yaml:"tiers"`
-	Scratchpad  RLMScratchpadConfig      `yaml:"scratchpad"`
+	Coordinator RLMCoordinatorConfig `yaml:"coordinator"`
+	SubAgent    RLMSubAgentConfig    `yaml:"sub_agent"`
+	Scratchpad  RLMScratchpadConfig  `yaml:"scratchpad"`
 }
 
 // RLMCoordinatorConfig controls coordinator behavior.
@@ -265,15 +275,11 @@ type RLMCoordinatorConfig struct {
 	StreamPartials      bool          `yaml:"stream_partials"`
 }
 
-// RLMTierConfig controls per-tier model routing.
-type RLMTierConfig struct {
-	Model             string   `yaml:"model"`
-	Provider          string   `yaml:"provider"`
-	Models            []string `yaml:"models"`
-	MaxCostPerMillion float64  `yaml:"max_cost_per_million"`
-	MinContextWindow  int      `yaml:"min_context_window"`
-	Prefer            []string `yaml:"prefer"`
-	Requires          []string `yaml:"requires"`
+// RLMSubAgentConfig controls sub-agent behavior.
+type RLMSubAgentConfig struct {
+	Model         string        `yaml:"model"`          // Model for all sub-agents (default: execution model)
+	MaxConcurrent int           `yaml:"max_concurrent"` // Parallel execution limit
+	Timeout       time.Duration `yaml:"timeout"`        // Per-task timeout
 }
 
 // RLMScratchpadConfig controls scratchpad retention.
@@ -294,7 +300,9 @@ func (c RLMConfig) IsZero() bool {
 		c.Coordinator.MaxWallTime == 0 &&
 		c.Coordinator.ConfidenceThreshold == 0 &&
 		!c.Coordinator.StreamPartials &&
-		len(c.Tiers) == 0 &&
+		c.SubAgent.Model == "" &&
+		c.SubAgent.MaxConcurrent == 0 &&
+		c.SubAgent.Timeout == 0 &&
 		c.Scratchpad.MaxEntriesMemory == 0 &&
 		c.Scratchpad.MaxRawBytesMemory == 0 &&
 		c.Scratchpad.EvictionPolicy == "" &&
@@ -371,6 +379,105 @@ type ApprovalConfig struct {
 	AutoApprovePatterns []string `yaml:"auto_approve_patterns"`
 }
 
+// SandboxConfig controls command sandboxing for tool execution.
+type SandboxConfig struct {
+	// Mode sets the sandbox level: disabled, readonly, workspace, strict
+	Mode string `yaml:"mode"`
+
+	// AllowUnsafe must be true to allow mode=disabled.
+	AllowUnsafe bool `yaml:"allow_unsafe"`
+
+	// WorkspacePath is the default working directory for sandbox checks.
+	WorkspacePath string `yaml:"workspace_path"`
+
+	// AllowedPaths are additional allowed paths (overrides default when set).
+	AllowedPaths []string `yaml:"allowed_paths"`
+
+	// DeniedPaths are paths that are never allowed.
+	DeniedPaths []string `yaml:"denied_paths"`
+
+	// AllowedCommands are explicit allowlist entries for strict mode.
+	AllowedCommands []string `yaml:"allowed_commands"`
+
+	// DeniedCommands are explicit denylist entries.
+	DeniedCommands []string `yaml:"denied_commands"`
+
+	// AllowNetwork permits network access when true.
+	AllowNetwork bool `yaml:"allow_network"`
+
+	// Timeout caps command runtime (0 = no timeout).
+	Timeout time.Duration `yaml:"timeout"`
+
+	// MaxOutputBytes caps command output (0 = unlimited).
+	MaxOutputBytes int64 `yaml:"max_output_bytes"`
+
+	// DockerSandbox configures OS-level Docker container isolation.
+	DockerSandbox DockerSandboxConfig `yaml:"docker"`
+}
+
+// DockerSandboxConfig controls Docker-based OS-level sandboxing for tool execution.
+type DockerSandboxConfig struct {
+	Enabled          bool                 `yaml:"enabled"`
+	Image            string               `yaml:"image"`
+	WorkspaceMount   string               `yaml:"workspace_mount"`
+	ReadOnlyRoot     bool                 `yaml:"read_only_root"`
+	NetworkEnabled   *bool                `yaml:"network_enabled,omitempty"`
+	Resources        ResourceLimitsConfig `yaml:"resources"`
+	Security         SecurityConfig       `yaml:"security"`
+	KeepAlive        bool                 `yaml:"keep_alive"`
+	KeepAliveTimeout time.Duration        `yaml:"keep_alive_timeout"`
+}
+
+// ResourceLimitsConfig defines container resource constraints.
+type ResourceLimitsConfig struct {
+	CPUs      string `yaml:"cpus"`
+	Memory    string `yaml:"memory"`
+	PidsLimit int    `yaml:"pids_limit"`
+	TmpfsSize string `yaml:"tmpfs_size"`
+}
+
+// SecurityConfig defines container security settings.
+type SecurityConfig struct {
+	NoNewPrivileges  bool     `yaml:"no_new_privileges"`
+	DropCapabilities []string `yaml:"drop_capabilities"`
+	AddCapabilities  []string `yaml:"add_capabilities"`
+	SeccompProfile   string   `yaml:"seccomp_profile"`
+	AppArmorProfile  string   `yaml:"apparmor_profile"`
+}
+
+// ToSandboxConfig converts the config into a runtime sandbox configuration.
+func (c SandboxConfig) ToSandboxConfig(workDir string) sandbox.Config {
+	mode, err := parseSandboxMode(c.Mode)
+	if err != nil {
+		mode = sandbox.ModeWorkspace
+	}
+
+	cfg := sandbox.Config{
+		Mode:            mode,
+		WorkspacePath:   strings.TrimSpace(c.WorkspacePath),
+		AllowedPaths:    append([]string{}, c.AllowedPaths...),
+		DeniedPaths:     append([]string{}, c.DeniedPaths...),
+		AllowedCommands: append([]string{}, c.AllowedCommands...),
+		DeniedCommands:  append([]string{}, c.DeniedCommands...),
+		AllowNetwork:    c.AllowNetwork,
+		Timeout:         c.Timeout,
+		MaxOutputSize:   c.MaxOutputBytes,
+	}
+
+	if cfg.WorkspacePath == "" && strings.TrimSpace(workDir) != "" {
+		cfg.WorkspacePath = strings.TrimSpace(workDir)
+	}
+	if cfg.WorkspacePath != "" {
+		if len(cfg.AllowedPaths) == 0 {
+			cfg.AllowedPaths = []string{cfg.WorkspacePath}
+		} else if !containsString(cfg.AllowedPaths, cfg.WorkspacePath) {
+			cfg.AllowedPaths = append(cfg.AllowedPaths, cfg.WorkspacePath)
+		}
+	}
+
+	return cfg
+}
+
 // WorktreeConfig controls git worktree behavior
 type WorktreeConfig struct {
 	UseContainers    bool   `yaml:"use_containers"`
@@ -443,6 +550,39 @@ type RetryPolicy struct {
 	Multiplier     float64       `yaml:"multiplier"`
 }
 
+// ToolRetryConfig defines retry behavior for tool execution.
+type ToolRetryConfig struct {
+	MaxAttempts  int           `yaml:"max_attempts"`
+	InitialDelay time.Duration `yaml:"initial_delay"`
+	MaxDelay     time.Duration `yaml:"max_delay"`
+	Multiplier   float64       `yaml:"multiplier"`
+	Jitter       float64       `yaml:"jitter"`
+}
+
+// ToolMiddlewareConfig defines middleware defaults for tool execution.
+type ToolMiddlewareConfig struct {
+	DefaultTimeout  time.Duration            `yaml:"default_timeout"`
+	PerToolTimeouts map[string]time.Duration `yaml:"per_tool_timeouts"`
+	MaxResultBytes  int                      `yaml:"max_result_bytes"`
+	Retry           ToolRetryConfig          `yaml:"retry"`
+}
+
+// MCPConfig defines MCP server settings for tool integration.
+type MCPConfig struct {
+	Enabled bool              `yaml:"enabled"`
+	Servers []MCPServerConfig `yaml:"servers"`
+}
+
+// MCPServerConfig describes a single MCP server.
+type MCPServerConfig struct {
+	Name     string            `yaml:"name"`
+	Command  string            `yaml:"command"`
+	Args     []string          `yaml:"args"`
+	Env      map[string]string `yaml:"env"`
+	Timeout  time.Duration     `yaml:"timeout"`
+	Disabled bool              `yaml:"disabled"`
+}
+
 // ArtifactsConfig defines artifact storage locations
 type ArtifactsConfig struct {
 	PlanningDir          string `yaml:"planning_dir"`
@@ -480,11 +620,23 @@ type TaskPhaseConfig struct {
 // CompactionConfig defines artifact compaction behavior
 type CompactionConfig struct {
 	ContextThreshold float64  `yaml:"context_threshold"`
+	RLMAutoTrigger   float64  `yaml:"rlm_auto_trigger"`
+	CompactionRatio  float64  `yaml:"compaction_ratio"`
 	TaskInterval     int      `yaml:"task_interval"`
 	TokenThreshold   int      `yaml:"token_threshold"`
 	TargetReduction  float64  `yaml:"target_reduction"`
 	PreserveCommands bool     `yaml:"preserve_commands"`
 	Models           []string `yaml:"models"`
+}
+
+// UIAudioConfig defines audio settings for the TUI.
+type UIAudioConfig struct {
+	Enabled      bool   `yaml:"enabled"`
+	AssetsPath   string `yaml:"assets_path"`
+	MasterVolume int    `yaml:"master_volume"`
+	SFXVolume    int    `yaml:"sfx_volume"`
+	MusicVolume  int    `yaml:"music_volume"`
+	Muted        bool   `yaml:"muted"`
 }
 
 // UIConfig defines UI behavior
@@ -494,10 +646,21 @@ type UIConfig struct {
 	ToolGroupingWindowSeconds int    `yaml:"tool_grouping_window_seconds"`
 	ShowToolCosts             bool   `yaml:"show_tool_costs"`
 	ShowIntentStatements      bool   `yaml:"show_intent_statements"`
+	// Sidebar settings
+	SidebarWidth    int `yaml:"sidebar_width"`     // Sidebar width in characters (16-60, default 24)
+	SidebarMinWidth int `yaml:"sidebar_min_width"` // Minimum sidebar width (default 16)
+	SidebarMaxWidth int `yaml:"sidebar_max_width"` // Maximum sidebar width (default 60)
 	// Accessibility settings
-	HighContrast    bool `yaml:"high_contrast"`    // Use high-contrast color scheme
-	UseTextLabels   bool `yaml:"use_text_labels"`  // Add text labels to color-only indicators
-	ReduceAnimation bool `yaml:"reduce_animation"` // Reduce or disable animations
+	HighContrast    bool          `yaml:"high_contrast"`    // Use high-contrast color scheme
+	UseTextLabels   bool          `yaml:"use_text_labels"`  // Add text labels to color-only indicators
+	ReduceAnimation bool          `yaml:"reduce_animation"` // Reduce or disable animations
+	MessageMetadata string        `yaml:"message_metadata"` // "always", "hover", or "never"
+	Audio           UIAudioConfig `yaml:"audio"`
+}
+
+// WebUIConfig defines web UI integration settings.
+type WebUIConfig struct {
+	BaseURL string `yaml:"base_url"`
 }
 
 // CommentingConfig defines code commenting requirements
@@ -515,1028 +678,4 @@ type GitEventsConfig struct {
 	RegressionCommand  string `yaml:"regression_command"`
 	ReleaseCommand     string `yaml:"release_command"`
 	FailureCommand     string `yaml:"failure_command"`
-}
-
-func defaultACPStore() string {
-	if os.Getenv("KUBERNETES_SERVICE_HOST") != "" {
-		return "nats"
-	}
-	return "sqlite"
-}
-
-func defaultNATSURL() string {
-	if os.Getenv("KUBERNETES_SERVICE_HOST") != "" {
-		return "nats://nats:4222"
-	}
-	return "nats://127.0.0.1:4222"
-}
-
-// BatchConfig controls containerized task execution
-type BatchConfig struct {
-	Enabled           bool                    `yaml:"enabled"`
-	Namespace         string                  `yaml:"namespace"`
-	Kubeconfig        string                  `yaml:"kubeconfig"`
-	WaitForCompletion bool                    `yaml:"wait_for_completion"`
-	FollowLogs        bool                    `yaml:"follow_logs"`
-	JobTemplate       BatchJobTemplateConfig  `yaml:"job_template"`
-	RemoteBranch      BatchRemoteBranchConfig `yaml:"remote_branch"`
-}
-
-// BatchJobTemplateConfig defines the job template for each task container
-type BatchJobTemplateConfig struct {
-	Image                   string                      `yaml:"image"`
-	ImagePullPolicy         string                      `yaml:"image_pull_policy"`
-	ServiceAccount          string                      `yaml:"service_account"`
-	Command                 []string                    `yaml:"command"`
-	Args                    []string                    `yaml:"args"`
-	Env                     map[string]string           `yaml:"env"`
-	EnvFromSecrets          []string                    `yaml:"env_from_secrets"`
-	EnvFromConfigMaps       []string                    `yaml:"env_from_configmaps"`
-	WorkspaceClaim          string                      `yaml:"workspace_claim"`
-	WorkspaceMountPath      string                      `yaml:"workspace_mount_path"`
-	WorkspaceVolumeTemplate *BatchVolumeTemplateConfig  `yaml:"workspace_volume_template"`
-	SharedConfigClaim       string                      `yaml:"shared_config_claim"`
-	SharedConfigMountPath   string                      `yaml:"shared_config_mount_path"`
-	TTLSecondsAfterFinished int32                       `yaml:"ttl_seconds_after_finished"`
-	BackoffLimit            int32                       `yaml:"backoff_limit"`
-	ImagePullSecrets        []string                    `yaml:"image_pull_secrets"`
-	Resources               corev1.ResourceRequirements `yaml:"resources"`
-	NodeSelector            map[string]string           `yaml:"node_selector"`
-	Tolerations             []corev1.Toleration         `yaml:"tolerations"`
-	Affinity                *corev1.Affinity            `yaml:"affinity"`
-	ConfigMap               string                      `yaml:"config_map"`
-	ConfigMapMountPath      string                      `yaml:"config_map_mount_path"`
-}
-
-// BatchVolumeTemplateConfig defines ephemeral PVC templates mounted per task.
-type BatchVolumeTemplateConfig struct {
-	StorageClass string   `yaml:"storage_class"`
-	AccessModes  []string `yaml:"access_modes"`
-	Size         string   `yaml:"size"`
-}
-
-// BatchRemoteBranchConfig describes how remote feature branches are generated
-type BatchRemoteBranchConfig struct {
-	Enabled    bool   `yaml:"enabled"`
-	Prefix     string `yaml:"prefix"`
-	RemoteName string `yaml:"remote_name"`
-}
-
-// DefaultConfig returns sensible defaults
-func DefaultConfig() *Config {
-	return &Config{
-		Models: ModelConfig{
-			Planning:  defaultOpenRouterModel,
-			Execution: defaultOpenRouterModel,
-			Review:    defaultOpenRouterModel,
-			VisionFallback: []string{
-				"openai/gpt-5.2-mini",
-				"google/gemini-3-flash",
-			},
-			FallbackChains:  map[string][]string{},
-			DefaultProvider: "openrouter",
-			Utility: UtilityModelConfig{
-				Commit:     DefaultUtilityModel,
-				PR:         DefaultUtilityModel,
-				Compaction: DefaultUtilityModel,
-				TodoPlan:   DefaultUtilityModel,
-			},
-		},
-		Providers: ProviderConfig{
-			OpenRouter: ProviderSettings{
-				Enabled: true,
-				BaseURL: "https://openrouter.ai/api/v1",
-			},
-			OpenAI: ProviderSettings{
-				Enabled: false,
-				BaseURL: "https://api.openai.com/v1",
-			},
-			Anthropic: ProviderSettings{
-				Enabled: false,
-				BaseURL: "https://api.anthropic.com/v1",
-			},
-			Google: ProviderSettings{
-				Enabled: false,
-				BaseURL: "https://generativelanguage.googleapis.com/v1beta",
-			},
-			Ollama: ProviderSettings{
-				Enabled: false,
-				BaseURL: "http://localhost:11434",
-			},
-			LiteLLM: LiteLLMConfig{
-				Enabled: false,
-				BaseURL: "http://localhost:4000",
-			},
-			ModelRouting: map[string]string{
-				"openai/":    "openai",
-				"anthropic/": "anthropic",
-				"google/":    "google",
-				"ollama/":    "ollama",
-				"litellm/":   "litellm",
-				"gpt-":       "openai",
-				"claude-":    "anthropic",
-				"gemini-":    "google",
-				"o1-":        "openai",
-				"o3-":        "openai",
-				"chatgpt-":   "openai",
-			},
-		},
-		Encoding: EncodingConfig{
-			UseToon: true,
-		},
-		Diagnostics: DiagnosticsConfig{
-			NetworkLogsEnabled: false,
-		},
-		Personality: PersonalityConfig{
-			Enabled:          true,
-			QuirkProbability: 0.15,
-			Tone:             "friendly",
-		},
-		Memory: MemoryConfig{
-			AutoCompactThreshold: 0.9,
-			MaxCompactions:       0,  // 0 = unlimited
-			SummaryTimeoutSecs:   30, // 30 second timeout for compaction
-			RetrievalEnabled:     true,
-			RetrievalLimit:       5,
-			RetrievalMaxTokens:   1200,
-		},
-		Orchestrator: OrchestratorConfig{
-			MaxSelfHealAttempts: 3,
-			MaxReviewCycles:     3,
-			TrustLevel:          "balanced",
-			AutoWorkflow:        false,
-			Planning: PlanningConfig{
-				Enabled:             true, // Orchestrator-first: planning enabled by default
-				ComplexityThreshold: 0.5,  // Lower threshold = more tasks get planned
-				LongRunEnabled:      true, // Auto-decide when clear winner
-				LongRunMaxMinutes:   30,
-				LongRunLogDecisions: true,
-				LongRunPauseOnRisk:  true,
-			},
-		},
-		Execution: ExecutionModeConfig{
-			Mode: DefaultExecutionMode,
-		},
-		Oneshot: OneshotModeConfig{
-			Mode: DefaultOneshotMode,
-		},
-		RLM: RLMConfig{
-			Coordinator: RLMCoordinatorConfig{
-				Model:               "auto",
-				MaxIterations:       10,
-				MaxTokensBudget:     100000,
-				MaxWallTime:         10 * time.Minute,
-				ConfidenceThreshold: 0.95,
-				StreamPartials:      true,
-			},
-			Tiers: map[string]RLMTierConfig{
-				"trivial": {
-					MaxCostPerMillion: 0.50,
-					MinContextWindow:  8000,
-					Prefer:            []string{"speed", "cost"},
-				},
-				"light": {
-					MaxCostPerMillion: 3.00,
-					MinContextWindow:  16000,
-					Prefer:            []string{"cost", "quality"},
-				},
-				"medium": {
-					MaxCostPerMillion: 10.00,
-					MinContextWindow:  32000,
-					Prefer:            []string{"quality", "cost"},
-				},
-				"heavy": {
-					MaxCostPerMillion: 30.00,
-					MinContextWindow:  64000,
-					Prefer:            []string{"quality"},
-				},
-				"reasoning": {
-					MinContextWindow: 100000,
-					Prefer:           []string{"quality"},
-					Requires:         []string{"extended_thinking"},
-				},
-			},
-			Scratchpad: RLMScratchpadConfig{
-				MaxEntriesMemory:  1000,
-				MaxRawBytesMemory: 50 * 1024 * 1024,
-				EvictionPolicy:    "lru",
-				DefaultTTL:        time.Hour,
-				PersistArtifacts:  true,
-				PersistDecisions:  true,
-			},
-		},
-		Approval: ApprovalConfig{
-			Mode:         "safe", // Safe by default - workspace writes, read-only shell
-			TrustedPaths: []string{},
-			DeniedPaths: []string{
-				"~/.ssh",
-				"~/.gnupg",
-				"~/.aws",
-				"/etc",
-				"/var",
-			},
-			AllowNetwork: false,
-			AllowedTools: []string{
-				"read_file",
-				"list_files",
-				"search_files",
-				"semantic_search",
-			},
-			DeniedTools: []string{},
-			AutoApprovePatterns: []string{
-				"go test",
-				"go build",
-				"go fmt",
-				"go vet",
-				"npm test",
-				"npm run build",
-				"make test",
-				"make build",
-				"cargo test",
-				"cargo build",
-				"pytest",
-			},
-		},
-		ACP: ACPConfig{
-			EventStore:         defaultACPStore(),
-			Listen:             "",
-			AllowInsecureLocal: false,
-			TLSCertFile:        "",
-			TLSKeyFile:         "",
-			TLSClientCAFile:    "",
-			NATS: NATSConfig{
-				URL:            defaultNATSURL(),
-				StreamPrefix:   "acp",
-				SnapshotBucket: "acp_snapshots",
-				ConnectTimeout: 5 * time.Second,
-				RequestTimeout: 5 * time.Second,
-			},
-		},
-		Worktrees: WorktreeConfig{
-			UseContainers:    false,
-			RootPath:         "",
-			ContainerService: "dev",
-		},
-		Experiment: ExperimentConfig{
-			Enabled:         true,
-			MaxConcurrent:   4,
-			DefaultTimeout:  30 * time.Minute,
-			WorktreeRoot:    ".buckley/experiments",
-			CleanupOnDone:   true,
-			MaxCostPerRun:   1.00,
-			MaxTokensPerRun: 100000,
-		},
-		Batch: BatchConfig{
-			Enabled:           false,
-			Namespace:         "",
-			Kubeconfig:        "",
-			WaitForCompletion: true,
-			FollowLogs:        true,
-			JobTemplate: BatchJobTemplateConfig{
-				Image:                   "", // Uses deployment image by default
-				ImagePullPolicy:         "IfNotPresent",
-				ServiceAccount:          "",
-				Command:                 []string{"buckley"},
-				Args:                    []string{"execute-task", "--plan", "{{PLAN_ID}}", "--task", "{{TASK_ID}}"},
-				Env:                     map[string]string{"BUCKLEY_PLAIN_MODE": "1"},
-				WorkspaceClaim:          "",
-				WorkspaceMountPath:      "/workspace",
-				SharedConfigClaim:       "",
-				SharedConfigMountPath:   "/buckley/shared",
-				TTLSecondsAfterFinished: 600,
-				BackoffLimit:            1,
-				ImagePullSecrets:        []string{},
-			},
-			RemoteBranch: BatchRemoteBranchConfig{
-				Enabled:    true,
-				Prefix:     "automation/",
-				RemoteName: "origin",
-			},
-		},
-		GitClone: giturl.ClonePolicy{
-			AllowedSchemes:       []string{"https", "ssh"},
-			AllowedHosts:         nil, // allow all
-			DeniedHosts:          nil,
-			DenyPrivateNetworks:  false,
-			ResolveDNS:           true,
-			DenySCPSyntax:        false,
-			DNSResolveTimeoutSec: 2,
-		},
-		IPC: IPCConfig{
-			Enabled:           false,
-			Bind:              "127.0.0.1:4488",
-			EnableBrowser:     false,
-			AllowedOrigins:    []string{"http://localhost", "http://127.0.0.1"},
-			PublicMetrics:     false,
-			RequireToken:      false,
-			BasicAuthEnabled:  false,
-			BasicAuthUsername: "",
-			BasicAuthPassword: "",
-		},
-		CostManagement: CostConfig{
-			SessionBudget: 10.00,
-			DailyBudget:   20.00,
-			MonthlyBudget: 200.00,
-			AutoStopAt:    50.00,
-		},
-		RetryPolicy: RetryPolicy{
-			MaxRetries:     3,
-			InitialBackoff: 1 * time.Second,
-			MaxBackoff:     30 * time.Second,
-			Multiplier:     2.0,
-		},
-		Artifacts: ArtifactsConfig{
-			PlanningDir:          "docs/plans",
-			ExecutionDir:         "docs/execution",
-			ReviewDir:            "docs/reviews",
-			ArchiveDir:           "docs/archive",
-			ArchiveByMonth:       true,
-			AutoArchiveOnPRMerge: true,
-		},
-		Workflow: WorkflowConfig{
-			PlanningQuestionsMin:              5,
-			PlanningQuestionsMax:              10,
-			IncrementalApproval:               true,
-			PauseOnBusinessAmbiguity:          true,
-			PauseOnArchitecturalConflict:      true,
-			PauseOnComplexityExplosion:        true,
-			PauseOnEnvironmentMismatch:        true,
-			ReviewIterationsMax:               5,
-			AllowNitsInApproval:               true,
-			GenerateOpportunisticImprovements: true,
-			TaskPhaseLoop:                     []string{"builder", "verify", "review"},
-			TaskPhases: []TaskPhaseConfig{
-				{
-					Stage:       "builder",
-					Name:        "Builder",
-					Description: "Generate and apply code changes for the current task.",
-					Targets:     []string{"Translate plan pseudocode into code", "Run necessary tools/commands"},
-				},
-				{
-					Stage:       "verify",
-					Name:        "Verifier",
-					Description: "Validate results locally before review.",
-					Targets:     []string{"Run tests/linters", "Check for edge cases"},
-				},
-				{
-					Stage:       "review",
-					Name:        "Reviewer",
-					Description: "Review artifacts and enforce quality gates.",
-					Targets:     []string{"Catch regressions", "Ensure conventions/tests"},
-				},
-			},
-		},
-		Compaction: CompactionConfig{
-			ContextThreshold: 0.80,
-			TaskInterval:     20,
-			TokenThreshold:   15000,
-			TargetReduction:  0.70,
-			PreserveCommands: true,
-			Models: []string{
-				"moonshotai/kimi-k2-thinking",
-				"qwen/qwen3-coder",
-				"openai/gpt-5.2-mini",
-				"google/gemini-3-flash",
-			},
-		},
-		UI: UIConfig{
-			ActivityPanelDefault:      "collapsed",
-			DiffViewerDefault:         "collapsed",
-			ToolGroupingWindowSeconds: 30,
-			ShowToolCosts:             true,
-			ShowIntentStatements:      true,
-		},
-		Commenting: CommentingConfig{
-			RequireFunctionDocs:           true,
-			RequireBlockCommentsOverLines: 10,
-			CommentNonObviousOnly:         true,
-		},
-	}
-}
-
-// Load loads configuration from default locations with proper precedence
-func Load() (*Config, error) {
-	// Start with defaults
-	cfg := DefaultConfig()
-
-	configEnv := loadConfigEnvVars()
-
-	// Load user config (~/.buckley/config.yaml)
-	home, err := os.UserHomeDir()
-	if err != nil {
-		// Fall back to HOME env var if UserHomeDir fails
-		home = os.Getenv("HOME")
-	}
-	if home != "" {
-		userConfigPath := filepath.Join(home, ".buckley", "config.yaml")
-		if err := loadAndMerge(cfg, userConfigPath); err != nil && !os.IsNotExist(err) {
-			return nil, fmt.Errorf("loading user config: %w", err)
-		}
-	}
-
-	// Load project config (./.buckley/config.yaml)
-	projectConfigPath := filepath.Join(".", ".buckley", "config.yaml")
-	if err := loadAndMerge(cfg, projectConfigPath); err != nil && !os.IsNotExist(err) {
-		return nil, fmt.Errorf("loading project config: %w", err)
-	}
-
-	// Apply environment variable overrides
-	applyEnvOverrides(cfg, configEnv)
-	cfg.alignModelDefaultsWithProviders()
-
-	// Validate
-	if err := cfg.Validate(); err != nil {
-		return nil, fmt.Errorf("config validation: %w", err)
-	}
-
-	return cfg, nil
-}
-
-// LoadFromPath loads configuration from a specific file path
-func LoadFromPath(path string) (*Config, error) {
-	cfg := DefaultConfig()
-
-	configEnv := loadConfigEnvVars()
-
-	// Load from the specified path
-	if err := loadAndMerge(cfg, path); err != nil {
-		return nil, fmt.Errorf("loading config from %s: %w", path, err)
-	}
-
-	// Apply environment variable overrides
-	applyEnvOverrides(cfg, configEnv)
-	cfg.alignModelDefaultsWithProviders()
-
-	// Validate
-	if err := cfg.Validate(); err != nil {
-		return nil, fmt.Errorf("config validation: %w", err)
-	}
-
-	return cfg, nil
-}
-
-// ApplyEnvOverridesForTest exposes env override logic for tests without file I/O.
-func ApplyEnvOverridesForTest(cfg *Config) {
-	applyEnvOverrides(cfg, nil)
-	cfg.alignModelDefaultsWithProviders()
-}
-
-// applyEnvOverrides applies environment variable overrides
-func applyEnvOverrides(cfg *Config, configEnv map[string]string) {
-	// Model selection
-	if v := os.Getenv("BUCKLEY_MODEL_PLANNING"); v != "" {
-		cfg.Models.Planning = v
-	}
-	if v := os.Getenv("BUCKLEY_MODEL_EXECUTION"); v != "" {
-		cfg.Models.Execution = v
-	}
-	if v := os.Getenv("BUCKLEY_MODEL_REVIEW"); v != "" {
-		cfg.Models.Review = v
-	}
-	if v := os.Getenv("BUCKLEY_TRUST_LEVEL"); v != "" {
-		cfg.Orchestrator.TrustLevel = v
-	}
-	if v := os.Getenv("BUCKLEY_APPROVAL_MODE"); v != "" {
-		cfg.Approval.Mode = v
-	}
-	if v := os.Getenv("BUCKLEY_EXECUTION_MODE"); v != "" {
-		cfg.Execution.Mode = v
-	}
-	if v := os.Getenv("BUCKLEY_ONESHOT_MODE"); v != "" {
-		cfg.Oneshot.Mode = v
-	}
-
-	if val, ok := envBool("BUCKLEY_USE_TOON"); ok {
-		cfg.Encoding.UseToon = val
-	} else if val, ok := envBool("BUCKLEY_DISABLE_TOON"); ok {
-		if val {
-			cfg.Encoding.UseToon = false
-		}
-	}
-
-	if val, ok := envBool("BUCKLEY_NETWORK_LOGS_ENABLED"); ok {
-		cfg.Diagnostics.NetworkLogsEnabled = val
-	} else if val, ok := envBool("BUCKLEY_DISABLE_NETWORK_LOGS"); ok && val {
-		cfg.Diagnostics.NetworkLogsEnabled = false
-	}
-
-	// Provider API keys
-	if v := os.Getenv("OPENROUTER_API_KEY"); v != "" {
-		cfg.Providers.OpenRouter.APIKey = v
-	} else if cfg.Providers.OpenRouter.APIKey == "" {
-		if v := configEnv["OPENROUTER_API_KEY"]; v != "" {
-			cfg.Providers.OpenRouter.APIKey = v
-		}
-	}
-	if v := os.Getenv("OPENAI_API_KEY"); v != "" {
-		cfg.Providers.OpenAI.APIKey = v
-		cfg.Providers.OpenAI.Enabled = true
-	}
-	if v := os.Getenv("ANTHROPIC_API_KEY"); v != "" {
-		cfg.Providers.Anthropic.APIKey = v
-		cfg.Providers.Anthropic.Enabled = true
-	}
-	if v := os.Getenv("GOOGLE_API_KEY"); v != "" {
-		cfg.Providers.Google.APIKey = v
-		cfg.Providers.Google.Enabled = true
-	}
-
-	if v, ok := envBool("BUCKLEY_OLLAMA_ENABLED"); ok {
-		cfg.Providers.Ollama.Enabled = v
-	}
-	if v := os.Getenv("BUCKLEY_OLLAMA_BASE_URL"); v != "" {
-		cfg.Providers.Ollama.BaseURL = v
-		cfg.Providers.Ollama.Enabled = true
-	}
-
-	if v, ok := envBool("BUCKLEY_LITELLM_ENABLED"); ok {
-		cfg.Providers.LiteLLM.Enabled = v
-	}
-	if v := os.Getenv("BUCKLEY_LITELLM_BASE_URL"); v != "" {
-		cfg.Providers.LiteLLM.BaseURL = v
-		cfg.Providers.LiteLLM.Enabled = true
-	} else if v := os.Getenv("LITELLM_BASE_URL"); v != "" && cfg.Providers.LiteLLM.BaseURL == "" {
-		cfg.Providers.LiteLLM.BaseURL = v
-	}
-	if v := os.Getenv("BUCKLEY_LITELLM_API_KEY"); v != "" {
-		cfg.Providers.LiteLLM.APIKey = v
-		cfg.Providers.LiteLLM.Enabled = true
-	} else if v := os.Getenv("LITELLM_API_KEY"); v != "" && cfg.Providers.LiteLLM.APIKey == "" {
-		cfg.Providers.LiteLLM.APIKey = v
-		cfg.Providers.LiteLLM.Enabled = true
-	}
-
-	if v, ok := envBool("BUCKLEY_EXPERIMENT_ENABLED"); ok {
-		cfg.Experiment.Enabled = v
-	}
-	if v := strings.TrimSpace(os.Getenv("BUCKLEY_EXPERIMENT_MAX_CONCURRENT")); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			cfg.Experiment.MaxConcurrent = n
-		}
-	}
-	if v := strings.TrimSpace(os.Getenv("BUCKLEY_EXPERIMENT_DEFAULT_TIMEOUT")); v != "" {
-		if d, err := time.ParseDuration(v); err == nil && d > 0 {
-			cfg.Experiment.DefaultTimeout = d
-		}
-	}
-	if v := os.Getenv("BUCKLEY_EXPERIMENT_WORKTREE_ROOT"); v != "" {
-		cfg.Experiment.WorktreeRoot = v
-	}
-	if v, ok := envBool("BUCKLEY_EXPERIMENT_CLEANUP_ON_DONE"); ok {
-		cfg.Experiment.CleanupOnDone = v
-	}
-	if v := strings.TrimSpace(os.Getenv("BUCKLEY_EXPERIMENT_MAX_COST_PER_RUN")); v != "" {
-		if n, err := strconv.ParseFloat(v, 64); err == nil && n > 0 {
-			cfg.Experiment.MaxCostPerRun = n
-		}
-	}
-	if v := strings.TrimSpace(os.Getenv("BUCKLEY_EXPERIMENT_MAX_TOKENS_PER_RUN")); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			cfg.Experiment.MaxTokensPerRun = n
-		}
-	}
-
-	if v, ok := envBool("BUCKLEY_BASIC_AUTH_ENABLED"); ok {
-		cfg.IPC.BasicAuthEnabled = v
-	}
-	if v := os.Getenv("BUCKLEY_BASIC_AUTH_USER"); v != "" {
-		cfg.IPC.BasicAuthUsername = v
-	}
-	if v := os.Getenv("BUCKLEY_BASIC_AUTH_PASSWORD"); v != "" {
-		cfg.IPC.BasicAuthPassword = v
-	}
-	if v, ok := envBool("BUCKLEY_PUBLIC_METRICS"); ok {
-		cfg.IPC.PublicMetrics = v
-	}
-	if cfg.IPC.BasicAuthUsername != "" && cfg.IPC.BasicAuthPassword != "" && !cfg.IPC.BasicAuthEnabled {
-		cfg.IPC.BasicAuthEnabled = true
-	}
-	if v := os.Getenv("BUCKLEY_PUSH_SUBJECT"); v != "" {
-		cfg.IPC.PushSubject = v
-	}
-
-	if v, ok := envBool("BUCKLEY_BATCH_ENABLED"); ok {
-		cfg.Batch.Enabled = v
-	}
-
-	// Notify config
-	if v, ok := envBool("BUCKLEY_NOTIFY_ENABLED"); ok {
-		cfg.Notify.Enabled = v
-	}
-	if v, ok := envBool("BUCKLEY_TELEGRAM_ENABLED"); ok {
-		cfg.Notify.Telegram.Enabled = v
-	}
-	if v := os.Getenv("BUCKLEY_TELEGRAM_BOT_TOKEN"); v != "" {
-		cfg.Notify.Telegram.BotToken = v
-		if !cfg.Notify.Telegram.Enabled {
-			cfg.Notify.Telegram.Enabled = true
-		}
-	}
-	if v := os.Getenv("BUCKLEY_TELEGRAM_CHAT_ID"); v != "" {
-		cfg.Notify.Telegram.ChatID = v
-	}
-	if v, ok := envBool("BUCKLEY_SLACK_ENABLED"); ok {
-		cfg.Notify.Slack.Enabled = v
-	}
-	if v := os.Getenv("BUCKLEY_SLACK_WEBHOOK_URL"); v != "" {
-		cfg.Notify.Slack.WebhookURL = v
-		if !cfg.Notify.Slack.Enabled {
-			cfg.Notify.Slack.Enabled = true
-		}
-	}
-	if v := os.Getenv("BUCKLEY_SLACK_CHANNEL"); v != "" {
-		cfg.Notify.Slack.Channel = v
-	}
-
-	if v := os.Getenv("BUCKLEY_GIT_ALLOWED_SCHEMES"); v != "" {
-		cfg.GitClone.AllowedSchemes = splitCommaList(v)
-	}
-	if v := os.Getenv("BUCKLEY_GIT_ALLOWED_HOSTS"); v != "" {
-		cfg.GitClone.AllowedHosts = splitCommaList(v)
-	}
-	if v := os.Getenv("BUCKLEY_GIT_DENIED_HOSTS"); v != "" {
-		cfg.GitClone.DeniedHosts = splitCommaList(v)
-	}
-	if v, ok := envBool("BUCKLEY_GIT_DENY_PRIVATE_NETWORKS"); ok {
-		cfg.GitClone.DenyPrivateNetworks = v
-	}
-	if v, ok := envBool("BUCKLEY_GIT_RESOLVE_DNS"); ok {
-		cfg.GitClone.ResolveDNS = v
-	}
-	if v, ok := envBool("BUCKLEY_GIT_DENY_SCP_SYNTAX"); ok {
-		cfg.GitClone.DenySCPSyntax = v
-	}
-	if v := strings.TrimSpace(os.Getenv("BUCKLEY_GIT_DNS_TIMEOUT_SECONDS")); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			cfg.GitClone.DNSResolveTimeoutSec = n
-		}
-	}
-}
-
-func splitCommaList(raw string) []string {
-	parts := strings.Split(raw, ",")
-	out := make([]string, 0, len(parts))
-	for _, part := range parts {
-		part = strings.TrimSpace(part)
-		if part == "" {
-			continue
-		}
-		out = append(out, part)
-	}
-	return out
-}
-
-func envBool(key string) (bool, bool) {
-	val := os.Getenv(key)
-	if val == "" {
-		return false, false
-	}
-	switch strings.ToLower(val) {
-	case "1", "true", "yes", "on":
-		return true, true
-	case "0", "false", "no", "off":
-		return false, true
-	default:
-		return false, false
-	}
-}
-
-func isLoopbackBindAddress(addr string) bool {
-	addr = strings.TrimSpace(addr)
-	if addr == "" {
-		return false
-	}
-
-	host, _, err := net.SplitHostPort(addr)
-	if err != nil {
-		host = addr
-	}
-	host = strings.TrimSpace(host)
-	if host == "" {
-		return false
-	}
-	switch strings.ToLower(host) {
-	case "localhost":
-		return true
-	case "0.0.0.0", "::":
-		return false
-	default:
-		ip := net.ParseIP(host)
-		if ip == nil {
-			return false
-		}
-		return ip.IsLoopback()
-	}
-}
-
-// ExecutionMode returns the normalized execution mode.
-func (c *Config) ExecutionMode() string {
-	if c == nil {
-		return DefaultExecutionMode
-	}
-	return normalizeMode(c.Execution.Mode, DefaultExecutionMode)
-}
-
-// OneshotMode returns the normalized oneshot mode.
-func (c *Config) OneshotMode() string {
-	if c == nil {
-		return DefaultOneshotMode
-	}
-	return normalizeMode(c.Oneshot.Mode, DefaultOneshotMode)
-}
-
-func normalizeMode(mode, fallback string) string {
-	mode = strings.ToLower(strings.TrimSpace(mode))
-	if mode == "" {
-		return fallback
-	}
-	return mode
-}
-
-// Validate checks configuration validity
-func (c *Config) Validate() error {
-	// Validate trust level
-	validTrustLevels := map[string]bool{
-		"conservative": true,
-		"balanced":     true,
-		"autonomous":   true,
-	}
-	if !validTrustLevels[c.Orchestrator.TrustLevel] {
-		return fmt.Errorf("invalid trust level: %s (must be conservative, balanced, or autonomous)", c.Orchestrator.TrustLevel)
-	}
-
-	validModes := map[string]bool{
-		"classic": true,
-		"rlm":     true,
-	}
-	if strings.TrimSpace(c.Execution.Mode) != "" && !validModes[strings.ToLower(c.Execution.Mode)] {
-		return fmt.Errorf("invalid execution mode: %s (valid: classic, rlm)", c.Execution.Mode)
-	}
-	if strings.TrimSpace(c.Oneshot.Mode) != "" && !validModes[strings.ToLower(c.Oneshot.Mode)] {
-		return fmt.Errorf("invalid oneshot mode: %s (valid: classic, rlm)", c.Oneshot.Mode)
-	}
-
-	// Validate approval mode
-	validApprovalModes := map[string]bool{
-		"ask": true, "explicit": true, "manual": true,
-		"safe": true, "readonly": true,
-		"auto": true, "automatic": true,
-		"yolo": true, "full": true, "dangerous": true,
-	}
-	if c.Approval.Mode != "" && !validApprovalModes[strings.ToLower(c.Approval.Mode)] {
-		return fmt.Errorf("invalid approval mode: %s (valid: ask, safe, auto, yolo)", c.Approval.Mode)
-	}
-
-	// Validate quirk probability
-	if c.Personality.QuirkProbability < 0 || c.Personality.QuirkProbability > 1 {
-		return fmt.Errorf("quirk probability must be between 0 and 1, got %f", c.Personality.QuirkProbability)
-	}
-
-	// Validate compaction threshold
-	if c.Memory.AutoCompactThreshold < 0 || c.Memory.AutoCompactThreshold > 1 {
-		return fmt.Errorf("auto compact threshold must be between 0 and 1, got %f", c.Memory.AutoCompactThreshold)
-	}
-
-	// Validate batch config
-	if c.Batch.Enabled {
-		if strings.TrimSpace(c.Batch.JobTemplate.Image) == "" {
-			return fmt.Errorf("batch.job_template.image is required when batch execution is enabled")
-		}
-		if len(c.Batch.JobTemplate.Command) == 0 {
-			return fmt.Errorf("batch.job_template.command must include at least one element")
-		}
-		if len(c.Batch.JobTemplate.Args) == 0 {
-			return fmt.Errorf("batch.job_template.args must include at least one element containing placeholders for plan/task IDs")
-		}
-		if strings.TrimSpace(c.Batch.JobTemplate.WorkspaceMountPath) == "" {
-			return fmt.Errorf("batch.job_template.workspace_mount_path cannot be empty")
-		}
-		if c.Batch.RemoteBranch.Enabled && strings.TrimSpace(c.Batch.RemoteBranch.Prefix) == "" {
-			return fmt.Errorf("batch.remote_branch.prefix cannot be empty when remote branches are enabled")
-		}
-		if c.Batch.RemoteBranch.Enabled && strings.TrimSpace(c.Batch.RemoteBranch.RemoteName) == "" {
-			c.Batch.RemoteBranch.RemoteName = "origin"
-		}
-	}
-
-	if c.IPC.BasicAuthEnabled {
-		if strings.TrimSpace(c.IPC.BasicAuthUsername) == "" {
-			return fmt.Errorf("ipc.basic_auth_username is required when basic auth is enabled")
-		}
-		if strings.TrimSpace(c.IPC.BasicAuthPassword) == "" {
-			return fmt.Errorf("ipc.basic_auth_password is required when basic auth is enabled")
-		}
-	}
-	if c.IPC.Enabled && strings.TrimSpace(c.IPC.Bind) != "" && !isLoopbackBindAddress(c.IPC.Bind) {
-		if !c.IPC.RequireToken && !c.IPC.BasicAuthEnabled {
-			return fmt.Errorf("ipc.bind %q is not loopback: enable ipc.require_token or ipc.basic_auth_enabled", c.IPC.Bind)
-		}
-	}
-
-	// Validate worktree path writability hint
-	if c.Worktrees.RootPath != "" && c.Worktrees.UseContainers {
-		expanded := expandHomeDir(c.Worktrees.RootPath)
-		if !filepath.IsAbs(expanded) {
-			return fmt.Errorf("worktrees.root_path should be an absolute path when use_containers is enabled, got: %s", c.Worktrees.RootPath)
-		}
-	}
-
-	// Validate max compactions
-	if c.Memory.MaxCompactions < 0 {
-		return fmt.Errorf("max compactions must be >= 0, got %d", c.Memory.MaxCompactions)
-	}
-	if c.Memory.RetrievalLimit < 0 {
-		return fmt.Errorf("retrieval_limit must be >= 0, got %d", c.Memory.RetrievalLimit)
-	}
-	if c.Memory.RetrievalMaxTokens < 0 {
-		return fmt.Errorf("retrieval_max_tokens must be >= 0, got %d", c.Memory.RetrievalMaxTokens)
-	}
-
-	return nil
-}
-
-// ValidationWarnings returns non-fatal warnings about the configuration.
-// These don't prevent operation but indicate potential security or usability issues.
-func (c *Config) ValidationWarnings() []string {
-	var warnings []string
-
-	// Warn about API keys stored in config (prefer env vars)
-	if c.Providers.OpenRouter.APIKey != "" && os.Getenv("OPENROUTER_API_KEY") == "" {
-		warnings = append(warnings, "SECURITY: OpenRouter API key is stored in config file. Consider using OPENROUTER_API_KEY environment variable instead.")
-	}
-	if c.Providers.OpenAI.APIKey != "" && os.Getenv("OPENAI_API_KEY") == "" {
-		warnings = append(warnings, "SECURITY: OpenAI API key is stored in config file. Consider using OPENAI_API_KEY environment variable instead.")
-	}
-	if c.Providers.Anthropic.APIKey != "" && os.Getenv("ANTHROPIC_API_KEY") == "" {
-		warnings = append(warnings, "SECURITY: Anthropic API key is stored in config file. Consider using ANTHROPIC_API_KEY environment variable instead.")
-	}
-	if c.Providers.Google.APIKey != "" && os.Getenv("GOOGLE_API_KEY") == "" {
-		warnings = append(warnings, "SECURITY: Google API key is stored in config file. Consider using GOOGLE_API_KEY environment variable instead.")
-	}
-	if c.Providers.LiteLLM.APIKey != "" && os.Getenv("BUCKLEY_LITELLM_API_KEY") == "" && os.Getenv("LITELLM_API_KEY") == "" {
-		warnings = append(warnings, "SECURITY: LiteLLM API key is stored in config file. Consider using BUCKLEY_LITELLM_API_KEY or LITELLM_API_KEY environment variables instead.")
-	}
-
-	// Warn about basic auth password in config
-	if c.IPC.BasicAuthPassword != "" && os.Getenv("BUCKLEY_BASIC_AUTH_PASSWORD") == "" {
-		warnings = append(warnings, "SECURITY: IPC basic auth password is stored in config file. Consider using BUCKLEY_BASIC_AUTH_PASSWORD environment variable instead.")
-	}
-
-	// Warn about NATS credentials in config
-	if c.ACP.NATS.Password != "" {
-		warnings = append(warnings, "SECURITY: NATS password is stored in config file. Consider using environment variables for sensitive credentials.")
-	}
-	if c.ACP.NATS.Token != "" {
-		warnings = append(warnings, "SECURITY: NATS token is stored in config file. Consider using environment variables for sensitive credentials.")
-	}
-
-	// Warn about webhook secret in config
-	if c.GitEvents.Secret != "" {
-		warnings = append(warnings, "SECURITY: Git webhook secret is stored in config file. Consider using environment variables for sensitive credentials.")
-	}
-
-	// Warn about Telegram bot token in config
-	if c.Notify.Telegram.BotToken != "" && os.Getenv("BUCKLEY_TELEGRAM_BOT_TOKEN") == "" {
-		warnings = append(warnings, "SECURITY: Telegram bot token is stored in config file. Consider using BUCKLEY_TELEGRAM_BOT_TOKEN environment variable instead.")
-	}
-
-	// Warn about Slack webhook URL in config
-	if c.Notify.Slack.WebhookURL != "" && os.Getenv("BUCKLEY_SLACK_WEBHOOK_URL") == "" {
-		warnings = append(warnings, "SECURITY: Slack webhook URL is stored in config file. Consider using BUCKLEY_SLACK_WEBHOOK_URL environment variable instead.")
-	}
-
-	// Warn about short IPC tokens
-	if token := os.Getenv("BUCKLEY_IPC_TOKEN"); c.IPC.RequireToken && token != "" && len(token) < MinTokenLength {
-		warnings = append(warnings, fmt.Sprintf("SECURITY: IPC token is shorter than recommended minimum (%d characters). Consider using a longer token for better security.", MinTokenLength))
-	}
-
-	// Warn about yolo mode
-	if strings.ToLower(c.Approval.Mode) == "yolo" {
-		warnings = append(warnings, "WARNING: Approval mode is set to 'yolo'. This grants full autonomy and should only be used in controlled environments.")
-	}
-
-	// Warn about network request/response logging
-	if c.Diagnostics.NetworkLogsEnabled {
-		warnings = append(warnings, "SECURITY: Network request/response logging is enabled. This may capture prompts and code in network.jsonl under BUCKLEY_LOG_DIR (default: .buckley/logs/network.jsonl); disable it when not actively debugging.")
-	}
-
-	return warnings
-}
-
-// ReadyProviders returns identifiers for providers that have usable configuration.
-func (p *ProviderConfig) ReadyProviders() []string {
-	var providers []string
-	for _, providerID := range []string{"openrouter", "openai", "anthropic", "google", "ollama", "litellm"} {
-		if p.ready(providerID) {
-			providers = append(providers, providerID)
-		}
-	}
-	return providers
-}
-
-// HasReadyProvider returns true when at least one provider can be used.
-func (p *ProviderConfig) HasReadyProvider() bool {
-	return len(p.ReadyProviders()) > 0
-}
-
-func (p *ProviderConfig) ready(providerID string) bool {
-	switch providerID {
-	case "openrouter":
-		return p.OpenRouter.Enabled && p.OpenRouter.APIKey != ""
-	case "openai":
-		return p.OpenAI.Enabled && p.OpenAI.APIKey != ""
-	case "anthropic":
-		return p.Anthropic.Enabled && p.Anthropic.APIKey != ""
-	case "google":
-		return p.Google.Enabled && p.Google.APIKey != ""
-	case "ollama":
-		return p.Ollama.Enabled
-	case "litellm":
-		return p.LiteLLM.Enabled
-	default:
-		return false
-	}
-}
-
-func (c *Config) alignModelDefaultsWithProviders() {
-	if c.Providers.ready("openrouter") {
-		if c.Models.DefaultProvider == "" {
-			c.Models.DefaultProvider = "openrouter"
-		}
-		return
-	}
-
-	fallbackProvider := c.preferredReadyProvider()
-	if fallbackProvider == "" {
-		return
-	}
-
-	if c.Models.DefaultProvider == "" || c.Models.DefaultProvider == "openrouter" {
-		c.Models.DefaultProvider = fallbackProvider
-	}
-
-	fallbackModel := providerDefaultModels[fallbackProvider]
-	if fallbackModel == "" {
-		return
-	}
-
-	c.replaceModelIfDefault(&c.Models.Planning, fallbackModel)
-	c.replaceModelIfDefault(&c.Models.Execution, fallbackModel)
-	c.replaceModelIfDefault(&c.Models.Review, fallbackModel)
-}
-
-func (c *Config) preferredReadyProvider() string {
-	if c.Providers.ready(c.Models.DefaultProvider) {
-		return c.Models.DefaultProvider
-	}
-
-	for _, providerID := range []string{"openai", "anthropic", "google", "litellm", "ollama"} {
-		if c.Providers.ready(providerID) {
-			return providerID
-		}
-	}
-
-	return ""
-}
-
-func (c *Config) replaceModelIfDefault(field *string, fallback string) {
-	if *field == "" || *field == defaultOpenRouterModel {
-		*field = fallback
-	}
-}
-
-func loadConfigEnvVars() map[string]string {
-	home, err := os.UserHomeDir()
-	if err != nil || home == "" {
-		return nil
-	}
-
-	path := filepath.Join(home, ".buckley", "config.env")
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil
-	}
-
-	vars := make(map[string]string)
-	lines := strings.Split(string(data), "\n")
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		line = strings.TrimPrefix(line, "export ")
-		line = strings.TrimSpace(line)
-		parts := strings.SplitN(line, "=", 2)
-		if len(parts) != 2 {
-			continue
-		}
-		key := strings.TrimSpace(parts[0])
-		value := strings.TrimSpace(parts[1])
-		if key == "" {
-			continue
-		}
-		value = strings.Trim(value, "\"'")
-		vars[key] = value
-	}
-	return vars
 }

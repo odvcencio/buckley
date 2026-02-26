@@ -2,6 +2,7 @@ package storage
 
 import (
 	"database/sql"
+	"fmt"
 	"strings"
 	"time"
 )
@@ -23,7 +24,10 @@ func (s *Store) CreateAuthSession(id, principal, scope, tokenID string, expires 
         INSERT INTO web_sessions (id, principal, scope, token_id, expires_at, created_at, last_seen_at)
         VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
     `, id, strings.TrimSpace(principal), strings.TrimSpace(scope), strings.TrimSpace(tokenID), expires.UTC())
-	return err
+	if err != nil {
+		return fmt.Errorf("creating auth session: %w", err)
+	}
+	return nil
 }
 
 func (s *Store) TouchAuthSession(id string) error {
@@ -31,7 +35,10 @@ func (s *Store) TouchAuthSession(id string) error {
 		return ErrStoreClosed
 	}
 	_, err := s.db.Exec(`UPDATE web_sessions SET last_seen_at = CURRENT_TIMESTAMP WHERE id = ?`, id)
-	return err
+	if err != nil {
+		return fmt.Errorf("touching auth session: %w", err)
+	}
+	return nil
 }
 
 func (s *Store) GetAuthSession(id string) (*AuthSession, error) {
@@ -44,7 +51,7 @@ func (s *Store) GetAuthSession(id string) (*AuthSession, error) {
 		if err == sql.ErrNoRows {
 			return nil, nil
 		}
-		return nil, err
+		return nil, fmt.Errorf("scanning auth session: %w", err)
 	}
 	return &sess, nil
 }
@@ -54,7 +61,10 @@ func (s *Store) DeleteAuthSession(id string) error {
 		return ErrStoreClosed
 	}
 	_, err := s.db.Exec(`DELETE FROM web_sessions WHERE id = ?`, id)
-	return err
+	if err != nil {
+		return fmt.Errorf("deleting auth session: %w", err)
+	}
+	return nil
 }
 
 func (s *Store) CleanupExpiredAuthSessions(now time.Time) (int64, error) {
@@ -63,7 +73,7 @@ func (s *Store) CleanupExpiredAuthSessions(now time.Time) (int64, error) {
 	}
 	res, err := s.db.Exec(`DELETE FROM web_sessions WHERE expires_at <= ?`, now.UTC())
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("cleaning up expired auth sessions: %w", err)
 	}
 	rows, _ := res.RowsAffected()
 	return rows, nil
@@ -75,5 +85,8 @@ func (s *Store) CountActiveAuthSessions(now time.Time) (int, error) {
 	}
 	var count int
 	err := s.db.QueryRow(`SELECT COUNT(1) FROM web_sessions WHERE expires_at > ?`, now.UTC()).Scan(&count)
-	return count, err
+	if err != nil {
+		return 0, fmt.Errorf("counting active auth sessions: %w", err)
+	}
+	return count, nil
 }

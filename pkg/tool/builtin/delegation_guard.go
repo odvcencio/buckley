@@ -186,9 +186,44 @@ func (g *DelegationGuard) ConfigureCommand(cmd *exec.Cmd) {
 
 // CheckAndRecord performs the full delegation check and records it if allowed
 func (g *DelegationGuard) CheckAndRecord(toolName string) error {
-	if err := g.CanDelegate(toolName); err != nil {
-		return err
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	currentDepth := g.GetCurrentDepth()
+	if currentDepth >= MaxDelegationDepth {
+		return fmt.Errorf("delegation depth limit exceeded (current: %d, max: %d). "+
+			"This prevents infinite recursion. Consider breaking the task into smaller pieces "+
+			"or handling it directly instead of delegating", currentDepth, MaxDelegationDepth)
 	}
-	g.RecordDelegation(toolName)
+
+	now := time.Now()
+	cutoff := now.Add(-DelegationRateWindow)
+
+	validTimes := make([]time.Time, 0)
+	for _, t := range g.delegationTimes {
+		if t.After(cutoff) {
+			validTimes = append(validTimes, t)
+		}
+	}
+	g.delegationTimes = validTimes
+
+	if len(g.delegationTimes) >= MaxDelegationsPerWindow {
+		return fmt.Errorf("delegation rate limit exceeded (%d delegations in %v). "+
+			"Wait before delegating again to prevent resource exhaustion",
+			MaxDelegationsPerWindow, DelegationRateWindow)
+	}
+
+	if lastTime, ok := g.lastDelegation[toolName]; ok {
+		elapsed := now.Sub(lastTime)
+		if elapsed < DelegationCooldown {
+			remaining := DelegationCooldown - elapsed
+			return fmt.Errorf("cooldown active for %s (%.1fs remaining). "+
+				"This prevents rapid-fire delegations to the same tool",
+				toolName, remaining.Seconds())
+		}
+	}
+
+	g.delegationTimes = append(g.delegationTimes, now)
+	g.lastDelegation[toolName] = now
 	return nil
 }

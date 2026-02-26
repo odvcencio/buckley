@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"sync"
 	"sync/atomic"
@@ -125,6 +126,7 @@ func NewClient(cfg Config) (*Client, error) {
 
 	// Set up environment
 	if len(cfg.Env) > 0 {
+		cmd.Env = os.Environ()
 		for k, v := range cfg.Env {
 			cmd.Env = append(cmd.Env, fmt.Sprintf("%s=%s", k, v))
 		}
@@ -166,6 +168,7 @@ func NewClient(cfg Config) (*Client, error) {
 
 func (c *Client) readResponses() {
 	scanner := bufio.NewScanner(c.stdout)
+	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024) // 10MB max line
 	for scanner.Scan() {
 		line := scanner.Bytes()
 		if len(line) == 0 {
@@ -230,7 +233,10 @@ func (c *Client) call(ctx context.Context, method string, params any) (*Message,
 	}
 
 	select {
-	case resp := <-respCh:
+	case resp, ok := <-respCh:
+		if !ok || resp == nil {
+			return nil, fmt.Errorf("client closed")
+		}
 		return resp, nil
 	case <-ctx.Done():
 		c.mu.Lock()
@@ -425,7 +431,9 @@ func (c *Client) Close() error {
 	select {
 	case <-done:
 	case <-time.After(5 * time.Second):
-		c.cmd.Process.Kill()
+		if c.cmd.Process != nil {
+			c.cmd.Process.Kill()
+		}
 	}
 
 	return nil

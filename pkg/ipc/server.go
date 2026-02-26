@@ -26,6 +26,7 @@ import (
 
 	"connectrpc.com/connect"
 
+	"github.com/odvcencio/buckley/pkg/buckley/ui/viewmodel"
 	"github.com/odvcencio/buckley/pkg/config"
 	projectcontext "github.com/odvcencio/buckley/pkg/context"
 	"github.com/odvcencio/buckley/pkg/ipc/command"
@@ -41,7 +42,6 @@ import (
 	"github.com/odvcencio/buckley/pkg/session"
 	"github.com/odvcencio/buckley/pkg/storage"
 	"github.com/odvcencio/buckley/pkg/telemetry"
-	"github.com/odvcencio/buckley/pkg/ui/viewmodel"
 )
 
 var allowedSettingKeys = []string{"remote.base_url", "remote.notes"}
@@ -327,6 +327,11 @@ func (s *Server) Start(ctx context.Context) error {
 		}()
 	}
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				s.logger.Printf("panic in IPC server goroutine: %v", r)
+			}
+		}()
 		s.logger.Printf("serving IPC on %s", s.cfg.BindAddress)
 		if s.cfg.EnableBrowser {
 			if s.cfg.StaticDir != "" {
@@ -2053,15 +2058,16 @@ func (s *Server) loadPersonaOverridesFromStore() map[string]string {
 	if s == nil || s.store == nil {
 		return result
 	}
-	keys := make([]string, len(orchestrator.PersonaStages))
-	for i, stage := range orchestrator.PersonaStages {
+	stages := orchestrator.PersonaStages()
+	keys := make([]string, len(stages))
+	for i, stage := range stages {
 		keys[i] = orchestrator.PersonaSettingKey(stage)
 	}
 	values, err := s.store.GetSettings(keys)
 	if err != nil {
 		return result
 	}
-	for _, stage := range orchestrator.PersonaStages {
+	for _, stage := range stages {
 		val := strings.TrimSpace(values[orchestrator.PersonaSettingKey(stage)])
 		if val != "" {
 			result[stage] = val

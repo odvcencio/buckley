@@ -151,8 +151,15 @@ func getString(m map[string]any, key string) string {
 
 // RegisterMCPTools registers all MCP tools with a tool registry
 func RegisterMCPTools(manager *Manager, register func(name string, tool any)) {
+	if manager == nil {
+		return
+	}
 	for _, twt := range manager.AllTools() {
-		adapter := NewToolAdapter(manager, twt.Server, twt.Tool, 60*time.Second)
+		timeout := 60 * time.Second
+		if cfg, ok := manager.configs[twt.Server]; ok && cfg.Timeout > 0 {
+			timeout = cfg.Timeout
+		}
+		adapter := NewToolAdapter(manager, twt.Server, twt.Tool, timeout)
 		register(adapter.Name(), adapter)
 	}
 }

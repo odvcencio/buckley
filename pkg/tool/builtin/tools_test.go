@@ -22,7 +22,6 @@ func TestToolMetadata(t *testing.T) {
 		{&SearchReplaceTool{}, "search_replace"},
 		{&FindFilesTool{}, "find_files"},
 		{&FileExistsTool{}, "file_exists"},
-		{&GetFileInfoTool{}, "get_file_info"},
 		{&GitStatusTool{}, "git_status"},
 		{&GitDiffTool{}, "git_diff"},
 		{&GitLogTool{}, "git_log"},

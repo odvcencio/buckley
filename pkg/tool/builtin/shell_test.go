@@ -1,6 +1,7 @@
 package builtin
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
@@ -380,7 +381,7 @@ func TestParseBoolParam(t *testing.T) {
 
 func TestTimeoutContext(t *testing.T) {
 	t.Run("zero timeout", func(t *testing.T) {
-		ctx, cancel := timeoutContext(0)
+		ctx, cancel := timeoutContext(context.Background(), 0)
 		defer cancel()
 		if _, ok := ctx.Deadline(); ok {
 			t.Error("zero timeout should not set deadline")
@@ -388,7 +389,7 @@ func TestTimeoutContext(t *testing.T) {
 	})
 
 	t.Run("negative timeout", func(t *testing.T) {
-		ctx, cancel := timeoutContext(-1)
+		ctx, cancel := timeoutContext(context.Background(), -1)
 		defer cancel()
 		if _, ok := ctx.Deadline(); ok {
 			t.Error("negative timeout should not set deadline")
@@ -396,7 +397,7 @@ func TestTimeoutContext(t *testing.T) {
 	})
 
 	t.Run("positive timeout", func(t *testing.T) {
-		ctx, cancel := timeoutContext(60)
+		ctx, cancel := timeoutContext(context.Background(), 60)
 		defer cancel()
 		if _, ok := ctx.Deadline(); !ok {
 			t.Error("positive timeout should set deadline")

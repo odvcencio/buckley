@@ -1,5 +1,11 @@
 package rlm
 
+import (
+	"strings"
+
+	"github.com/odvcencio/buckley/pkg/encoding/toon"
+)
+
 // Answer represents the coordinator's evolving response state.
 type Answer struct {
 	Content    string
@@ -19,7 +25,7 @@ func NewAnswer(iteration int) Answer {
 	return Answer{Iteration: iteration}
 }
 
-// Normalize clamps fields into safe ranges.
+// Normalize clamps fields into safe ranges and sanitizes content for display.
 func (a *Answer) Normalize() {
 	a.Confidence = clampConfidence(a.Confidence)
 	if a.Iteration < 0 {
@@ -28,6 +34,9 @@ func (a *Answer) Normalize() {
 	if a.TokensUsed < 0 {
 		a.TokensUsed = 0
 	}
+	// Sanitize any TOON fragments that may have leaked into the output.
+	// TOON is great for wire efficiency but should never appear in user-facing content.
+	a.Content = strings.TrimSpace(toon.SanitizeOutput(a.Content))
 }
 
 func clampConfidence(v float64) float64 {

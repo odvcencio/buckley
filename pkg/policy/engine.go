@@ -40,7 +40,9 @@ func NewEngine(store Store) *Engine {
 // LoadPolicy loads the active policy from the store
 func (e *Engine) LoadPolicy() error {
 	if e.store == nil {
+		e.mu.Lock()
 		e.policy = DefaultPolicy()
+		e.mu.Unlock()
 		return nil
 	}
 
@@ -50,8 +52,7 @@ func (e *Engine) LoadPolicy() error {
 	}
 
 	if policy == nil {
-		e.policy = DefaultPolicy()
-		return nil
+		policy = DefaultPolicy()
 	}
 
 	e.mu.Lock()

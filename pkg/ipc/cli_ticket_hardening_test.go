@@ -77,7 +77,7 @@ func TestHandleMetricsRequiresBearerWhenRequireTokenAndNotPublic(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("expected ok, got %d: %s", rr.Code, rr.Body.String())
 	}
-	if body := rr.Body.String(); !strings.Contains(body, "buckley_sessions_active_total") {
+	if body := rr.Body.String(); !strings.Contains(body, "buckley_web_sessions_total") {
 		t.Fatalf("expected metrics body, got %q", body)
 	}
 }
@@ -103,7 +103,7 @@ func TestHandleMetricsIsUnauthenticatedWhenPublicMetrics(t *testing.T) {
 	if rrMissing.Code != http.StatusOK {
 		t.Fatalf("expected ok, got %d: %s", rrMissing.Code, rrMissing.Body.String())
 	}
-	if body := rrMissing.Body.String(); !strings.Contains(body, "buckley_sessions_active_total") {
+	if body := rrMissing.Body.String(); !strings.Contains(body, "buckley_web_sessions_total") {
 		t.Fatalf("expected metrics body, got %q", body)
 	}
 }

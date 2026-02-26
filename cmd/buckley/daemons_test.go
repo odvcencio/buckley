@@ -381,9 +381,7 @@ func containsString(items []string, want string) bool {
 
 func TestRunWorktreeCommandCreateInTempRepo(t *testing.T) {
 	repo := initTempGitRepo(t)
-	oldWd, _ := os.Getwd()
-	_ = os.Chdir(repo)
-	t.Cleanup(func() { _ = os.Chdir(oldWd) })
+	t.Chdir(repo)
 
 	rootOverride := filepath.Join(t.TempDir(), "worktrees")
 	out := captureStdout(t, func() {

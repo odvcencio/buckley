@@ -1,6 +1,8 @@
 package tool
 
 import (
+	"fmt"
+	"sync"
 	"testing"
 
 	"github.com/odvcencio/buckley/pkg/telemetry"
@@ -376,4 +378,44 @@ func TestRegistry_BuiltinsIncludeExpectedTools(t *testing.T) {
 			t.Errorf("expected built-in tool %q to be registered", name)
 		}
 	}
+}
+
+type concurrentTool struct {
+	name string
+}
+
+func (t concurrentTool) Name() string {
+	return t.name
+}
+
+func (t concurrentTool) Description() string {
+	return "concurrent tool"
+}
+
+func (t concurrentTool) Parameters() builtin.ParameterSchema {
+	return builtin.ParameterSchema{Type: "object"}
+}
+
+func (t concurrentTool) Execute(params map[string]any) (*builtin.Result, error) {
+	return &builtin.Result{Success: true}, nil
+}
+
+func TestRegistry_ConcurrentAccess(t *testing.T) {
+	r := NewEmptyRegistry()
+
+	var wg sync.WaitGroup
+	for i := 0; i < 5; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			for j := 0; j < 100; j++ {
+				name := fmt.Sprintf("tool-%d-%d", id, j)
+				r.Register(concurrentTool{name: name})
+				r.Get(name)
+				r.List()
+				r.Count()
+			}
+		}(i)
+	}
+	wg.Wait()
 }

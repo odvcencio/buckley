@@ -2,6 +2,7 @@ package storage
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"time"
 )
@@ -24,18 +25,21 @@ func (s *Store) GetSettings(keys []string) (map[string]string, error) {
 
 	rows, err := s.db.Query(query, args...)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("querying settings: %w", err)
 	}
 	defer rows.Close()
 
 	for rows.Next() {
 		var key, value string
 		if err := rows.Scan(&key, &value); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("scanning setting: %w", err)
 		}
 		result[key] = value
 	}
-	return result, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating settings: %w", err)
+	}
+	return result, nil
 }
 
 // SetSetting upserts a setting value. Empty value deletes the row.
@@ -50,14 +54,20 @@ func (s *Store) SetSetting(key, value string) error {
 	value = strings.TrimSpace(value)
 	if value == "" {
 		_, err := s.db.Exec(`DELETE FROM settings WHERE key = ?`, key)
-		return err
+		if err != nil {
+			return fmt.Errorf("deleting setting %s: %w", key, err)
+		}
+		return nil
 	}
 	_, err := s.db.Exec(`
 		INSERT INTO settings (key, value, updated_at)
 		VALUES (?, ?, CURRENT_TIMESTAMP)
 		ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP
 	`, key, value)
-	return err
+	if err != nil {
+		return fmt.Errorf("setting %s: %w", key, err)
+	}
+	return nil
 }
 
 // RecordAuditLog stores an operator action for later review.
@@ -75,7 +85,10 @@ func (s *Store) RecordAuditLog(actor, scope, action string, payload any) error {
 		INSERT INTO audit_logs (actor, scope, action, payload, created_at)
 		VALUES (?, ?, ?, ?, ?)
 	`, strings.TrimSpace(actor), strings.TrimSpace(scope), strings.TrimSpace(action), data, time.Now().UTC())
-	return err
+	if err != nil {
+		return fmt.Errorf("recording audit log: %w", err)
+	}
+	return nil
 }
 
 // ListAuditLogs returns recent audit entries.
@@ -93,7 +106,7 @@ func (s *Store) ListAuditLogs(limit int) ([]map[string]any, error) {
 		LIMIT ?
 	`, limit)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("querying audit logs: %w", err)
 	}
 	defer rows.Close()
 
@@ -102,7 +115,7 @@ func (s *Store) ListAuditLogs(limit int) ([]map[string]any, error) {
 		var actor, scope, action, payload string
 		var created time.Time
 		if err := rows.Scan(&actor, &scope, &action, &payload, &created); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("scanning audit log: %w", err)
 		}
 		var data any
 		if payload != "" {
@@ -116,5 +129,8 @@ func (s *Store) ListAuditLogs(limit int) ([]map[string]any, error) {
 			"createdAt": created,
 		})
 	}
-	return entries, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating audit logs: %w", err)
+	}
+	return entries, nil
 }

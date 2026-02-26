@@ -59,8 +59,11 @@ func TestTelemetryBusBridge_ForwardsEvents(t *testing.T) {
 		Data:      map[string]any{"output": "success"},
 	})
 
-	// Wait for events
-	time.Sleep(100 * time.Millisecond)
+	// Flush events to ensure immediate delivery (needed for async batching hub)
+	telemetryHub.Flush()
+
+	// Wait for events to be processed and forwarded
+	time.Sleep(200 * time.Millisecond)
 
 	mu.Lock()
 	count := len(received)

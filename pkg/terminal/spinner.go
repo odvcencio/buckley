@@ -17,7 +17,9 @@ type Spinner struct {
 	frames    []string
 	current   int
 	done      chan struct{}
+	wg        sync.WaitGroup
 	mu        sync.Mutex
+	stopOnce  sync.Once
 	style     lipgloss.Style
 	startTime time.Time
 	showTime  bool
@@ -69,10 +71,12 @@ func (s *Spinner) SetMessage(message string) {
 // Start begins the spinner animation.
 func (s *Spinner) Start() {
 	s.startTime = time.Now()
+	s.wg.Add(1)
 	go s.run()
 }
 
 func (s *Spinner) run() {
+	defer s.wg.Done()
 	ticker := time.NewTicker(80 * time.Millisecond)
 	defer ticker.Stop()
 
@@ -107,16 +111,22 @@ func (s *Spinner) Elapsed() time.Duration {
 	return time.Since(s.startTime)
 }
 
+// stop signals the run goroutine to exit (idempotent).
+func (s *Spinner) stop() {
+	s.stopOnce.Do(func() { close(s.done) })
+	s.wg.Wait()
+}
+
 // Stop stops the spinner and clears the line.
 func (s *Spinner) Stop() {
-	close(s.done)
+	s.stop()
 	// Clear the line
 	fmt.Fprintf(s.out, "\r\033[K")
 }
 
 // StopWithMessage stops and prints a final message.
 func (s *Spinner) StopWithMessage(message string) {
-	close(s.done)
+	s.stop()
 	fmt.Fprintf(s.out, "\r\033[K%s\n", message)
 }
 
@@ -125,7 +135,7 @@ func (s *Spinner) StopWithSuccess(message string) {
 	elapsed := s.Elapsed().Round(time.Millisecond)
 	successStyle := lipgloss.NewStyle().
 		Foreground(lipgloss.AdaptiveColor{Light: "#008000", Dark: "#55FF55"})
-	close(s.done)
+	s.stop()
 	if s.showTime && elapsed > 0 {
 		fmt.Fprintf(s.out, "\r\033[K%s %s (%s)\n", successStyle.Render("✓"), message, elapsed)
 	} else {
@@ -139,7 +149,7 @@ func (s *Spinner) StopWithError(message string) {
 	errorStyle := lipgloss.NewStyle().
 		Foreground(lipgloss.AdaptiveColor{Light: "#D00000", Dark: "#FF5555"}).
 		Bold(true)
-	close(s.done)
+	s.stop()
 	if s.showTime && elapsed > 0 {
 		fmt.Fprintf(s.out, "\r\033[K%s %s (%s)\n", errorStyle.Render("✗"), message, elapsed)
 	} else {

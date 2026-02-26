@@ -81,7 +81,7 @@ func FromURL(url string) (*Image, error) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("HTTP error: %s", resp.Status)
+		return nil, fmt.Errorf("http error: %s", resp.Status)
 	}
 
 	data, err := io.ReadAll(resp.Body)
