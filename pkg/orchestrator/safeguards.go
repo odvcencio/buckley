@@ -1,7 +1,6 @@
 package orchestrator
 
 import (
-	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -48,8 +47,7 @@ type RiskAssessment struct {
 
 // RiskDetector analyzes operations for potential risks
 type RiskDetector struct {
-	patterns []riskPattern
-	engine   *rules.Engine // Optional arbiter rules engine
+	engine *rules.Engine // Optional arbiter rules engine
 }
 
 // RiskDetectorOption configures the risk detector.
@@ -62,71 +60,9 @@ func WithRiskRulesEngine(e *rules.Engine) RiskDetectorOption {
 	}
 }
 
-type riskPattern struct {
-	pattern     *regexp.Regexp
-	level       RiskLevel
-	description string
-	suggestion  string
-}
-
-// NewRiskDetector creates a risk detector with default patterns
+// NewRiskDetector creates a risk detector
 func NewRiskDetector(opts ...RiskDetectorOption) *RiskDetector {
-	d := &RiskDetector{
-		patterns: []riskPattern{
-			// Critical: Irreversible destructive operations
-			{
-				pattern:     regexp.MustCompile(`(?i)\b(rm\s+-rf|drop\s+database|truncate\s+table|delete\s+from\s+\w+\s+where\s+1=1)\b`),
-				level:       RiskCritical,
-				description: "destructive command detected",
-				suggestion:  "Review carefully before executing",
-			},
-			{
-				pattern:     regexp.MustCompile(`(?i)\bgit\s+push\s+.*--force\b`),
-				level:       RiskCritical,
-				description: "force push detected",
-				suggestion:  "Force push can overwrite remote history",
-			},
-			{
-				pattern:     regexp.MustCompile(`(?i)\bgit\s+reset\s+--hard\b`),
-				level:       RiskHigh,
-				description: "hard reset detected",
-				suggestion:  "This will discard uncommitted changes",
-			},
-			// High: Operations affecting production or credentials
-			{
-				pattern:     regexp.MustCompile(`(?i)\b(production|prod)\b.*\b(deploy|push|update|delete)\b`),
-				level:       RiskHigh,
-				description: "production operation detected",
-				suggestion:  "Verify you're targeting the correct environment",
-			},
-			{
-				pattern:     regexp.MustCompile(`(?i)\b(api[_-]?key|secret|password|token|credential)\b.*\b(commit|push|write|save)\b`),
-				level:       RiskHigh,
-				description: "potential credential exposure",
-				suggestion:  "Ensure secrets are not being committed",
-			},
-			// Medium: Bulk operations
-			{
-				pattern:     regexp.MustCompile(`(?i)\b(all|every|each)\s+(file|record|row|document)s?\b`),
-				level:       RiskMedium,
-				description: "bulk operation detected",
-				suggestion:  "Consider processing in batches",
-			},
-			{
-				pattern:     regexp.MustCompile(`(?i)\bdelete\b.*\bwhere\b`),
-				level:       RiskMedium,
-				description: "delete with condition detected",
-				suggestion:  "Verify the WHERE clause is correct",
-			},
-			// Low: Operations that might need review
-			{
-				pattern:     regexp.MustCompile(`(?i)\b(refactor|rewrite|replace)\s+(all|every|entire)\b`),
-				level:       RiskLow,
-				description: "large-scale refactoring detected",
-				suggestion:  "Consider incremental changes",
-			},
-		},
-	}
+	d := &RiskDetector{}
 	for _, opt := range opts {
 		opt(d)
 	}
@@ -135,35 +71,18 @@ func NewRiskDetector(opts ...RiskDetectorOption) *RiskDetector {
 
 // Analyze examines text for potential risks
 func (d *RiskDetector) Analyze(text string) *RiskAssessment {
-	// Try arbiter rules engine first if available
+	// Use arbiter rules engine if available
 	if d.engine != nil {
 		if result := d.evalArbiterRisk(text); result != nil {
 			return result
 		}
-		// Arbiter eval failed or returned no matches — fall through to pattern matching
 	}
 
-	assessment := &RiskAssessment{
+	// No engine or arbiter returned no matches — conservative default
+	return &RiskAssessment{
 		Level:   RiskNone,
 		Reasons: []string{},
 	}
-
-	for _, p := range d.patterns {
-		if p.pattern.MatchString(text) {
-			if p.level > assessment.Level {
-				assessment.Level = p.level
-			}
-			assessment.Reasons = append(assessment.Reasons, p.description)
-			if p.suggestion != "" {
-				assessment.Suggestions = append(assessment.Suggestions, p.suggestion)
-			}
-		}
-	}
-
-	// Require pause for high/critical risks
-	assessment.RequiresPause = assessment.Level >= RiskHigh
-
-	return assessment
 }
 
 // evalArbiterRisk attempts risk evaluation via the arbiter rules engine.

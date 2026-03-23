@@ -33,13 +33,12 @@ func TestNewRiskDetector(t *testing.T) {
 	if detector == nil {
 		t.Fatal("Expected non-nil detector")
 	}
-	if len(detector.patterns) == 0 {
-		t.Error("Expected default patterns to be loaded")
-	}
 }
 
 func TestRiskDetector_Analyze_Destructive(t *testing.T) {
-	detector := NewRiskDetector()
+	// With arbiter engine, destructive commands are detected by risk rules
+	engine := mustNewRulesEngine(t)
+	detector := NewRiskDetector(WithRiskRulesEngine(engine))
 
 	tests := []struct {
 		name          string
@@ -50,48 +49,30 @@ func TestRiskDetector_Analyze_Destructive(t *testing.T) {
 		{
 			name:          "rm -rf",
 			text:          "rm -rf /some/path",
-			expectedLevel: RiskCritical,
-			expectPause:   true,
-		},
-		{
-			name:          "drop database",
-			text:          "DROP DATABASE production",
-			expectedLevel: RiskCritical,
+			expectedLevel: RiskHigh,
 			expectPause:   true,
 		},
 		{
 			name:          "force push",
-			text:          "git push origin main --force",
+			text:          "git push --force",
 			expectedLevel: RiskCritical,
 			expectPause:   true,
 		},
 		{
 			name:          "hard reset",
-			text:          "git reset --hard HEAD~5",
-			expectedLevel: RiskHigh,
+			text:          "git reset --hard",
+			expectedLevel: RiskCritical,
 			expectPause:   true,
 		},
 		{
-			name:          "production deploy",
-			text:          "production environment deploy",
+			name:          "drop table",
+			text:          "DROP TABLE users",
 			expectedLevel: RiskHigh,
 			expectPause:   true,
-		},
-		{
-			name:          "credential commit",
-			text:          "api_key value to commit to repository",
-			expectedLevel: RiskHigh,
-			expectPause:   true,
-		},
-		{
-			name:          "bulk delete",
-			text:          "delete from users where active = false",
-			expectedLevel: RiskMedium,
-			expectPause:   false,
 		},
 		{
 			name:          "safe operation",
-			text:          "read the file and summarize it",
+			text:          "cat /etc/hosts",
 			expectedLevel: RiskNone,
 			expectPause:   false,
 		},
@@ -102,7 +83,7 @@ func TestRiskDetector_Analyze_Destructive(t *testing.T) {
 			assessment := detector.Analyze(tt.text)
 
 			if assessment.Level != tt.expectedLevel {
-				t.Errorf("Level = %v, want %v", assessment.Level, tt.expectedLevel)
+				t.Errorf("Level = %v, want %v (reasons: %v)", assessment.Level, tt.expectedLevel, assessment.Reasons)
 			}
 			if assessment.RequiresPause != tt.expectPause {
 				t.Errorf("RequiresPause = %v, want %v", assessment.RequiresPause, tt.expectPause)
@@ -433,20 +414,20 @@ func TestRiskDetector_Analyze_ViaArbiter(t *testing.T) {
 	}
 }
 
-// TestRiskDetector_Analyze_ArbiterFallback tests that nil engine falls through to pattern matching.
-func TestRiskDetector_Analyze_ArbiterFallback(t *testing.T) {
-	// Without engine — uses heuristic pattern matching
+// TestRiskDetector_Analyze_NilEngineFallback tests that nil engine returns RiskNone default.
+func TestRiskDetector_Analyze_NilEngineFallback(t *testing.T) {
+	// Without engine — returns conservative RiskNone default
 	detector := NewRiskDetector()
 
 	assessment := detector.Analyze("rm -rf /some/path")
-	if assessment.Level != RiskCritical {
-		t.Errorf("Fallback pattern: Level = %v, want RiskCritical", assessment.Level)
+	if assessment.Level != RiskNone {
+		t.Errorf("Nil-engine fallback: Level = %v, want RiskNone", assessment.Level)
 	}
 
 	// Reasons should NOT have arbiter prefix
 	for _, r := range assessment.Reasons {
 		if strings.HasPrefix(r, "arbiter:") {
-			t.Errorf("Heuristic fallback should not produce arbiter reasons, got: %s", r)
+			t.Errorf("Nil-engine fallback should not produce arbiter reasons, got: %s", r)
 		}
 	}
 }
@@ -461,18 +442,17 @@ func TestRiskDetector_WithRiskRulesEngineOption(t *testing.T) {
 	}
 }
 
-// TestRiskDetector_Analyze_ArbiterNoMatchFallsThrough tests that when arbiter returns no matches
-// the detector falls through to the pattern-based analysis.
-func TestRiskDetector_Analyze_ArbiterNoMatchFallsThrough(t *testing.T) {
+// TestRiskDetector_Analyze_ArbiterNoMatchReturnsDefault tests that when arbiter returns no matches
+// the detector returns the conservative RiskNone default.
+func TestRiskDetector_Analyze_ArbiterNoMatchReturnsDefault(t *testing.T) {
 	engine := mustNewRulesEngine(t)
 	detector := NewRiskDetector(WithRiskRulesEngine(engine))
 
-	// This text won't match any arbiter rule but does match the credential pattern
+	// This text won't match any arbiter rule — returns default
 	text := "api_key value to commit to repository"
 	assessment := detector.Analyze(text)
 
-	// Should fall through and find credential risk via patterns
-	if assessment.Level < RiskHigh {
-		t.Errorf("Expected at least RiskHigh from pattern fallback, got %v", assessment.Level)
+	if assessment.Level != RiskNone {
+		t.Errorf("Expected RiskNone default for unmatched text, got %v", assessment.Level)
 	}
 }

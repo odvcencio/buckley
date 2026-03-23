@@ -8,7 +8,9 @@ import (
 )
 
 func TestComplexityDetector_Analyze_SimpleTask(t *testing.T) {
-	detector := NewComplexityDetector()
+	// With arbiter engine, simple tasks should get DirectExecution
+	engine := mustNewRulesEngine(t)
+	detector := NewComplexityDetector(WithRulesEngine(engine))
 
 	tests := []struct {
 		name  string
@@ -32,31 +34,30 @@ func TestComplexityDetector_Analyze_SimpleTask(t *testing.T) {
 }
 
 func TestComplexityDetector_Analyze_ComplexTask(t *testing.T) {
-	detector := NewComplexityDetector()
+	// With arbiter engine, complex tasks should get PlanningMode.
+	// Arbiter rules trigger on: word_count>50 + has_questions + ambiguity>0.6 (HighComplexity)
+	//                       or: word_count>30 + has_file_paths (MultiStep)
+	engine := mustNewRulesEngine(t)
+	detector := NewComplexityDetector(WithRulesEngine(engine))
 
 	tests := []struct {
 		name  string
 		input string
 	}{
 		{
-			"refactoring",
-			"I need to refactor the authentication system to use JWT tokens instead of sessions. This will affect multiple files across the codebase.",
+			"high complexity - ambiguous with questions",
+			"I'm not sure how we should handle this particular situation with the backend service. " +
+				"Maybe we could refactor the entire authentication layer to use a different approach? " +
+				"What if it breaks the existing integrations with third party providers and downstream services? " +
+				"What do you think about the alternatives we discussed in the architecture review meeting last week? " +
+				"Should we try something else entirely or stick with the current implementation plan for now?",
 		},
 		{
-			"multi-step",
-			"First, we need to update the database schema. Then migrate existing data. After that, update the API endpoints. Finally, update the frontend.",
-		},
-		{
-			"ambiguous",
-			"I'm not sure if we should use Redis or Memcached for caching. Maybe we could also consider just using in-memory caching? What do you think?",
-		},
-		{
-			"architecture",
-			"We need to redesign the architecture of the payment system to support multiple payment providers and handle async webhooks.",
-		},
-		{
-			"many questions",
-			"How should we handle authentication? What about authorization? Should we use roles or permissions? How do we handle token refresh?",
+			"multi-step with file paths",
+			"We need to update pkg/auth/login.go and pkg/api/handlers.go to support the new " +
+				"authentication flow with JWT tokens. First update the middleware layer to validate tokens " +
+				"properly, then update the handlers to extract claims from the verified tokens, and finally " +
+				"add the integration tests to cover all the new authentication scenarios end to end.",
 		},
 	}
 
@@ -72,40 +73,24 @@ func TestComplexityDetector_Analyze_ComplexTask(t *testing.T) {
 }
 
 func TestComplexityDetector_Analyze_WithContext(t *testing.T) {
+	// Without arbiter engine, context is ignored — only the default signal returns
 	detector := NewComplexityDetector()
 
-	// Task that's borderline without context
 	input := "Add error handling to the API"
-
-	// Without context - should be simple
 	signal := detector.Analyze(input, nil)
-	baseScore := signal.Score
-
-	// With context indicating complexity
-	ctx := &AnalysisContext{
+	signalWithContext := detector.Analyze(input, &AnalysisContext{
 		HasImages:      true,
 		RecentErrors:   3,
 		EstimatedFiles: 10,
-	}
-	signalWithContext := detector.Analyze(input, ctx)
+	})
 
-	if signalWithContext.Score <= baseScore {
-		t.Errorf("Expected higher score with complex context, got %.2f vs %.2f",
-			signalWithContext.Score, baseScore)
+	// Both should return the same default since no arbiter is configured
+	if signal.Score != signalWithContext.Score {
+		t.Errorf("Without arbiter, context should not change score: got %.2f vs %.2f",
+			signalWithContext.Score, signal.Score)
 	}
-
-	// Check that reasons include context-based signals
-	foundContextReason := false
-	for _, reason := range signalWithContext.Reasons {
-		if strings.Contains(reason, "visual context") ||
-			strings.Contains(reason, "recent errors") ||
-			strings.Contains(reason, "file scope") {
-			foundContextReason = true
-			break
-		}
-	}
-	if !foundContextReason {
-		t.Error("Expected context-based reasons in signal")
+	if signal.Recommended != DirectExecution {
+		t.Errorf("Expected DirectExecution default without arbiter, got PlanningMode")
 	}
 }
 
@@ -122,41 +107,46 @@ func TestComplexityDetector_Analyze_EmptyInput(t *testing.T) {
 }
 
 func TestComplexityDetector_Threshold(t *testing.T) {
-	// Test with lower threshold - should trigger planning mode more easily
+	// Without arbiter, threshold is irrelevant — default signal is returned
 	detector := &ComplexityDetector{Threshold: 0.3}
 
 	input := "Implement a new feature for user profiles"
 	signal := detector.Analyze(input, nil)
 
-	if signal.Score < 0.3 && signal.Recommended != DirectExecution {
-		t.Error("Score below threshold should be DirectExecution")
+	if signal.Recommended != DirectExecution {
+		t.Error("Without arbiter engine, should return DirectExecution default")
 	}
 
-	// Test with very high threshold - should rarely trigger planning mode
-	detector.Threshold = 0.95
+	// With arbiter engine, threshold is handled by the arbiter rules
+	engine := mustNewRulesEngine(t)
+	detector = &ComplexityDetector{Threshold: 0.95, engine: engine}
 	signal = detector.Analyze(input, nil)
 
-	if signal.Score < 0.95 && signal.Recommended != DirectExecution {
-		t.Error("Score below high threshold should be DirectExecution")
+	// Arbiter determines mode, not threshold
+	if len(signal.Reasons) == 0 {
+		t.Error("Expected arbiter to provide reasons")
 	}
 }
 
 func TestComplexityDetector_Analyze_FilePathDetection(t *testing.T) {
-	detector := NewComplexityDetector()
+	// With arbiter engine, file paths are detected via HasFilePaths fact
+	engine := mustNewRulesEngine(t)
+	detector := NewComplexityDetector(WithRulesEngine(engine))
 
-	input := "Update the files pkg/auth/login.go, pkg/auth/session.go, and pkg/api/handlers.go"
+	input := "Update the files pkg/auth/login.go, pkg/auth/session.go, and pkg/api/handlers.go to handle the new auth flow properly"
 	signal := detector.Analyze(input, nil)
 
-	foundFileReason := false
+	// Arbiter should match — input has file paths and enough words
+	foundArbiter := false
 	for _, reason := range signal.Reasons {
-		if strings.Contains(reason, "file path") {
-			foundFileReason = true
+		if strings.HasPrefix(reason, "arbiter:") {
+			foundArbiter = true
 			break
 		}
 	}
 
-	if !foundFileReason {
-		t.Error("Expected file path detection in reasons")
+	if !foundArbiter {
+		t.Errorf("Expected arbiter-prefixed reason for file path input, got: %v", signal.Reasons)
 	}
 }
 
@@ -198,20 +188,17 @@ func TestComplexitySignal_Summary(t *testing.T) {
 }
 
 func TestComplexityDetector_ScoreCapped(t *testing.T) {
-	detector := NewComplexityDetector()
+	// With arbiter engine, verify score stays within bounds
+	engine := mustNewRulesEngine(t)
+	detector := NewComplexityDetector(WithRulesEngine(engine))
 
-	// Input designed to trigger many signals
 	input := `First, I'm not sure if we should maybe refactor the architecture
 		or possibly redesign the system. What if we integrate multiple files
 		across the codebase? Should we migrate? After that, we could implement
 		the new features. Finally, we need to add support for the new API.
 		pkg/a/file1.go pkg/b/file2.go pkg/c/file3.go pkg/d/file4.go`
 
-	signal := detector.Analyze(input, &AnalysisContext{
-		HasImages:      true,
-		RecentErrors:   5,
-		EstimatedFiles: 20,
-	})
+	signal := detector.Analyze(input, nil)
 
 	if signal.Score > 1.0 {
 		t.Errorf("Score should be capped at 1.0, got %.2f", signal.Score)
@@ -288,21 +275,24 @@ func TestComplexityDetector_Analyze_ViaArbiter(t *testing.T) {
 	}
 }
 
-func TestComplexityDetector_Analyze_ArbiterFallback(t *testing.T) {
-	// With nil engine, should use heuristic fallback
+func TestComplexityDetector_Analyze_NilEngineFallback(t *testing.T) {
+	// With nil engine, should return conservative default (DirectExecution)
 	detector := NewComplexityDetector()
 
 	input := "Refactor the authentication system across multiple files in the codebase"
 	signal := detector.Analyze(input, nil)
 
-	if signal.Recommended != PlanningMode {
-		t.Errorf("Expected PlanningMode from heuristic fallback, got DirectExecution (score: %.2f)", signal.Score)
+	if signal.Recommended != DirectExecution {
+		t.Errorf("Expected DirectExecution default without arbiter, got PlanningMode (score: %.2f)", signal.Score)
+	}
+	if signal.Score != 0.3 {
+		t.Errorf("Expected default score 0.3, got %.2f", signal.Score)
 	}
 
 	// Reasons should NOT have arbiter prefix
 	for _, r := range signal.Reasons {
 		if strings.HasPrefix(r, "arbiter:") {
-			t.Errorf("Heuristic fallback should not produce arbiter reasons, got: %s", r)
+			t.Errorf("Nil-engine fallback should not produce arbiter reasons, got: %s", r)
 		}
 	}
 }

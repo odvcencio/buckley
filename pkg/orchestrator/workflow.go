@@ -688,32 +688,12 @@ func isSafeCommand(cmd string) bool {
 		return true
 	}
 
-	// Safe command prefixes that don't require authorization
 	safeCommands := []string{
-		"go test",
-		"go build",
-		"go run",
-		"go mod",
-		"go get",
-		"npm test",
-		"npm run",
-		"npm install",
-		"cargo test",
-		"cargo build",
-		"make test",
-		"pytest",
-		"python -m pytest",
-		"jest",
-		"mocha",
 		"ls",
-		"cat",
-		"grep",
-		"find",
-		"echo",
-		"pwd",
-		"which",
+		"cat ",
+		"echo ",
 		"git ",
-		"gh ",
+		"go test",
 	}
 
 	for _, safe := range safeCommands {

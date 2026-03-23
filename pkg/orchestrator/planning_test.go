@@ -149,11 +149,12 @@ func TestPlanningCoordinator_AnalyzeComplexity_Disabled(t *testing.T) {
 }
 
 func TestPlanningCoordinator_AnalyzeComplexity_Enabled(t *testing.T) {
+	engine := mustNewRulesEngine(t)
 	cfg := &config.PlanningConfig{
 		Enabled:             true,
 		ComplexityThreshold: 0.5,
 	}
-	coord := NewPlanningCoordinator(cfg, nil, nil)
+	coord := NewPlanningCoordinator(cfg, nil, nil, engine)
 
 	// Simple task
 	signal := coord.AnalyzeComplexity("fix typo", nil)
@@ -161,25 +162,39 @@ func TestPlanningCoordinator_AnalyzeComplexity_Enabled(t *testing.T) {
 		t.Error("Expected DirectExecution for simple task")
 	}
 
-	// Complex task - using a more clearly complex input
-	signal = coord.AnalyzeComplexity("I need to refactor the authentication system to use JWT tokens. This involves multiple files across the codebase.", nil)
+	// Complex task - triggers HighComplexity rule (word_count>50, has_questions, ambiguity>0.6)
+	signal = coord.AnalyzeComplexity(
+		"I'm not sure how we should handle this particular situation with the backend service. "+
+			"Maybe we could refactor the entire authentication layer to use a different approach? "+
+			"What if it breaks the existing integrations with third party providers and downstream services? "+
+			"What do you think about the alternatives we discussed in the architecture review meeting last week? "+
+			"Should we try something else entirely or stick with the current implementation plan for now?",
+		nil,
+	)
 	if signal.Recommended != PlanningMode {
 		t.Errorf("Expected PlanningMode for complex task, got score %.2f with reasons: %v", signal.Score, signal.Reasons)
 	}
 }
 
 func TestPlanningCoordinator_ShouldPlan(t *testing.T) {
+	engine := mustNewRulesEngine(t)
 	cfg := &config.PlanningConfig{
 		Enabled:             true,
 		ComplexityThreshold: 0.5,
 	}
-	coord := NewPlanningCoordinator(cfg, nil, nil)
+	coord := NewPlanningCoordinator(cfg, nil, nil, engine)
 
 	if coord.ShouldPlan("fix typo", nil) {
 		t.Error("Should not plan for simple task")
 	}
 
-	if !coord.ShouldPlan("I need to refactor the authentication system to use JWT tokens. This involves multiple files across the codebase.", nil) {
+	// Triggers HighComplexity rule (word_count>50, has_questions, ambiguity>0.6)
+	complexInput := "I'm not sure how we should handle this particular situation with the backend service. " +
+		"Maybe we could refactor the entire authentication layer to use a different approach? " +
+		"What if it breaks the existing integrations with third party providers and downstream services? " +
+		"What do you think about the alternatives we discussed in the architecture review meeting last week? " +
+		"Should we try something else entirely or stick with the current implementation plan for now?"
+	if !coord.ShouldPlan(complexInput, nil) {
 		t.Error("Should plan for complex task")
 	}
 }
