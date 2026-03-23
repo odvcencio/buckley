@@ -30,7 +30,15 @@ func runCommitCommand(args []string) error {
 	dryRun := fs.Bool("dry-run", false, "print the generated commit message without committing")
 	yes := fs.Bool("yes", false, "skip confirmation prompts and run git commit")
 	pushFlag := fs.Bool("push", true, "push current branch after committing")
+<<<<<<< Updated upstream
 	verbose := fs.Bool("verbose", false, "show model reasoning and full trace")
+=======
+	verbose := fs.Bool("verbose", false, "stream model reasoning as it happens")
+	minimalOutput := fs.Bool("minimal-output", false, "minimize output (prints commit message and critical errors only)")
+	minAlias := fs.Bool("min", false, "alias for --minimal-output")
+	graftMode := fs.Bool("graft", false, "use graft commit/push instead of git")
+	trace := fs.Bool("trace", false, "show context audit and reasoning trace after completion")
+>>>>>>> Stashed changes
 	showCost := fs.Bool("cost", true, "show token/cost breakdown")
 	modelFlag := fs.String("model", "", "model to use (default: BUCKLEY_MODEL_COMMIT or execution model)")
 	timeout := fs.Duration("timeout", 2*time.Minute, "timeout for model request")
@@ -38,6 +46,19 @@ func runCommitCommand(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+<<<<<<< Updated upstream
+=======
+	compactOutput := *minimalOutput || *minAlias || oneshotMinimalOutputEnabled()
+	useGraft := *graftMode || os.Getenv("BUCKLEY_USE_GRAFT") == "1"
+	filesToStage := fs.Args() // remaining positional args are files to stage
+
+	// Stage files if provided
+	if len(filesToStage) > 0 {
+		if err := stageFiles(filesToStage, useGraft, compactOutput); err != nil {
+			return fmt.Errorf("staging failed: %w", err)
+		}
+	}
+>>>>>>> Stashed changes
 
 	// Initialize dependencies
 	cfg, mgr, store, err := initDependenciesFn()
@@ -187,13 +208,21 @@ func runCommitCommand(args []string) error {
 doCommit:
 
 	// Create the commit
+<<<<<<< Updated upstream
 	if err := createCommit(message); err != nil {
+=======
+	if err := createCommit(message, compactOutput, useGraft); err != nil {
+>>>>>>> Stashed changes
 		return err
 	}
 
 	// Push if requested
 	if *pushFlag {
+<<<<<<< Updated upstream
 		if err := pushChanges(); err != nil {
+=======
+		if err := pushChanges(compactOutput, useGraft); err != nil {
+>>>>>>> Stashed changes
 			return err
 		}
 	}
@@ -421,7 +450,72 @@ func printWarnings(warnings []commitgen.Warning) {
 	}
 }
 
+<<<<<<< Updated upstream
 func createCommit(message string) error {
+=======
+// stageFiles stages the given files with the appropriate VCS.
+// In graft mode: graft add (with entity extraction) first, then git add as mirror.
+// In git mode: git add only.
+func stageFiles(files []string, useGraft bool, compactOutput bool) error {
+	if useGraft {
+		// Graft is primary — stage with full entity extraction
+		args := append([]string{"add"}, files...)
+		cmd := exec.Command("graft", args...)
+		if compactOutput {
+			cmd.Stdout = io.Discard
+			cmd.Stderr = io.Discard
+		} else {
+			cmd.Stdout = os.Stdout
+			cmd.Stderr = os.Stderr
+		}
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("graft add: %w", err)
+		}
+	}
+	// Always mirror to git (buckley needs git diff for context)
+	gitArgs := append([]string{"add"}, files...)
+	gitCmd := exec.Command("git", gitArgs...)
+	gitCmd.Stdout = io.Discard
+	gitCmd.Stderr = io.Discard
+	if err := gitCmd.Run(); err != nil {
+		return fmt.Errorf("git add: %w", err)
+	}
+	return nil
+}
+
+// stageForGraft mirrors the git staging index into graft by running graft add
+// on all files that git reports as staged.
+func stageForGraft(compactOutput bool) error {
+	// Get list of git-staged files
+	out, err := exec.Command("git", "diff", "--cached", "--name-only").Output()
+	if err != nil {
+		return fmt.Errorf("list staged files: %w", err)
+	}
+	files := strings.Split(strings.TrimSpace(string(out)), "\n")
+	var toAdd []string
+	for _, f := range files {
+		f = strings.TrimSpace(f)
+		if f != "" {
+			toAdd = append(toAdd, f)
+		}
+	}
+	if len(toAdd) == 0 {
+		return nil
+	}
+	args := append([]string{"add"}, toAdd...)
+	cmd := exec.Command("graft", args...)
+	if compactOutput {
+		cmd.Stdout = io.Discard
+		cmd.Stderr = io.Discard
+	} else {
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+	}
+	return cmd.Run()
+}
+
+func createCommit(message string, compactOutput bool, useGraft bool) error {
+>>>>>>> Stashed changes
 	// Write message to temp file
 	tmp, err := os.CreateTemp("", "buckley-commit-*.txt")
 	if err != nil {
@@ -435,26 +529,106 @@ func createCommit(message string) error {
 		return fmt.Errorf("write commit message: %w", err)
 	}
 
+<<<<<<< Updated upstream
 	// Run git commit
 	cmd := exec.Command("git", "commit", "-F", tmpPath)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("git commit failed: %w", err)
+=======
+	vcs := "git"
+	if useGraft {
+		vcs = "graft"
+	}
+
+	// Stage files in graft if graft mode is enabled
+	if useGraft {
+		if err := stageForGraft(compactOutput); err != nil {
+			return fmt.Errorf("graft staging failed: %w", err)
+		}
+	}
+
+	// Run commit — graft uses -m, git uses -F for file-based messages
+	var cmd *exec.Cmd
+	if useGraft {
+		cmd = exec.Command("graft", "commit", "-m", message)
+	} else {
+		cmd = exec.Command("git", "commit", "-F", tmpPath)
+	}
+	if compactOutput {
+		var stderr bytes.Buffer
+		cmd.Stdout = io.Discard
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err != nil {
+			detail := strings.TrimSpace(stderr.String())
+			if detail != "" {
+				return fmt.Errorf("%s commit failed: %w: %s", vcs, err, detail)
+			}
+			return fmt.Errorf("%s commit failed: %w", vcs, err)
+		}
+	} else {
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("%s commit failed: %w", vcs, err)
+		}
+>>>>>>> Stashed changes
+	}
+
+	// Mirror to git when in graft mode (git is the compatibility layer)
+	if useGraft {
+		gitCmd := exec.Command("git", "commit", "-F", tmpPath)
+		if compactOutput {
+			gitCmd.Stdout = io.Discard
+			gitCmd.Stderr = io.Discard
+		} else {
+			gitCmd.Stdout = io.Discard
+			gitCmd.Stderr = io.Discard
+		}
+		_ = gitCmd.Run() // best-effort mirror, don't fail if git commit fails
 	}
 
 	// Show commit hash
+<<<<<<< Updated upstream
 	hash, _ := exec.Command("git", "rev-parse", "HEAD").Output()
 	if len(hash) > 0 {
 		termOut.Success("Committed: %s", strings.TrimSpace(string(hash)))
+=======
+	if !compactOutput {
+		var hash []byte
+		if useGraft {
+			hash, _ = exec.Command("graft", "log", "--format=%H", "-1").Output()
+		} else {
+			hash, _ = exec.Command("git", "rev-parse", "HEAD").Output()
+		}
+		if len(hash) > 0 {
+			termOut.Success("Committed: %s", strings.TrimSpace(string(hash)))
+		}
+>>>>>>> Stashed changes
 	}
 
 	return nil
 }
 
+<<<<<<< Updated upstream
 func pushChanges() error {
+=======
+func pushChanges(compactOutput bool, useGraft bool) error {
+	vcs := "git"
+	if useGraft {
+		vcs = "graft"
+	}
+
+>>>>>>> Stashed changes
 	// Get current branch
-	branch, err := exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD").Output()
+	var branch []byte
+	var err error
+	if useGraft {
+		branch, err = exec.Command("graft", "branch", "--show-current").Output()
+	} else {
+		branch, err = exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD").Output()
+	}
 	if err != nil {
 		return nil // Skip push if we can't get branch
 	}
@@ -470,6 +644,7 @@ func pushChanges() error {
 	}
 
 	// Push
+<<<<<<< Updated upstream
 	cmd := exec.Command("git", "push", "-u", remote, branchName)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -478,5 +653,45 @@ func pushChanges() error {
 	}
 
 	termOut.Success("Pushed to %s/%s", remote, branchName)
+=======
+	var cmd *exec.Cmd
+	if useGraft {
+		cmd = exec.Command("graft", "push", remote, branchName)
+	} else if compactOutput {
+		cmd = exec.Command("git", "push", "--quiet", "-u", remote, branchName)
+	} else {
+		cmd = exec.Command("git", "push", "-u", remote, branchName)
+	}
+	if compactOutput {
+		var stderr bytes.Buffer
+		cmd.Stdout = io.Discard
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err != nil {
+			detail := strings.TrimSpace(stderr.String())
+			if detail != "" {
+				return fmt.Errorf("%s push failed: %w: %s", vcs, err, detail)
+			}
+			return fmt.Errorf("%s push failed: %w", vcs, err)
+		}
+	} else {
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("%s push failed: %w", vcs, err)
+		}
+	}
+
+	// Mirror push to git when in graft mode
+	if useGraft {
+		gitPush := exec.Command("git", "push", "--quiet", "-u", remote, branchName)
+		gitPush.Stdout = io.Discard
+		gitPush.Stderr = io.Discard
+		_ = gitPush.Run() // best-effort mirror
+	}
+
+	if !compactOutput {
+		termOut.Success("Pushed to %s/%s", remote, branchName)
+	}
+>>>>>>> Stashed changes
 	return nil
 }
