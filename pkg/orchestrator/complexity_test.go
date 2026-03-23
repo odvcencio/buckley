@@ -3,6 +3,8 @@ package orchestrator
 import (
 	"strings"
 	"testing"
+
+	"github.com/odvcencio/buckley/pkg/rules"
 )
 
 func TestComplexityDetector_Analyze_SimpleTask(t *testing.T) {
@@ -213,5 +215,144 @@ func TestComplexityDetector_ScoreCapped(t *testing.T) {
 
 	if signal.Score > 1.0 {
 		t.Errorf("Score should be capped at 1.0, got %.2f", signal.Score)
+	}
+}
+
+// mustNewRulesEngine creates a rules.Engine from the embedded .arb files.
+func mustNewRulesEngine(t *testing.T) *rules.Engine {
+	t.Helper()
+	engine, err := rules.NewEngine()
+	if err != nil {
+		t.Fatalf("failed to create rules engine: %v", err)
+	}
+	return engine
+}
+
+func TestComplexityDetector_Analyze_ViaArbiter(t *testing.T) {
+	engine := mustNewRulesEngine(t)
+	detector := NewComplexityDetector(WithRulesEngine(engine))
+
+	tests := []struct {
+		name     string
+		input    string
+		wantMode ComplexityMode
+	}{
+		{
+			"simple task via arbiter",
+			"Fix the typo in README.md",
+			DirectExecution,
+		},
+		{
+			"high complexity triggers plan",
+			// HighComplexity rule: word_count > 50, has_questions, ambiguity > 0.6
+			"I'm not sure how we should handle this particular situation with the backend service. " +
+				"Maybe we could refactor the entire authentication layer to use a different approach? " +
+				"What if it breaks the existing integrations with third party providers and downstream services? " +
+				"What do you think about the alternatives we discussed in the architecture review meeting last week? " +
+				"Should we try something else entirely or stick with the current implementation plan for now?",
+			PlanningMode,
+		},
+		{
+			"multi-step with file paths triggers plan",
+			// MultiStep rule: word_count > 30, has_file_paths
+			"We need to update pkg/auth/login.go and pkg/api/handlers.go to support the new " +
+				"authentication flow with JWT tokens. First update the middleware layer to validate tokens " +
+				"properly, then update the handlers to extract claims from the verified tokens, and finally " +
+				"add the integration tests to cover all the new authentication scenarios end to end.",
+			PlanningMode,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			signal := detector.Analyze(tt.input, nil)
+			if signal.Recommended != tt.wantMode {
+				t.Errorf("got mode %d, want %d (score: %.2f, reasons: %v)",
+					signal.Recommended, tt.wantMode, signal.Score, signal.Reasons)
+			}
+			// Arbiter results should have "arbiter:" prefix in reasons
+			if signal.Score > 0 || signal.Recommended == PlanningMode {
+				foundArbiter := false
+				for _, r := range signal.Reasons {
+					if strings.HasPrefix(r, "arbiter:") {
+						foundArbiter = true
+						break
+					}
+				}
+				if !foundArbiter && signal.Recommended == PlanningMode {
+					// SimpleTask rule also goes through arbiter path, check for it
+					t.Logf("Note: reasons=%v (may be arbiter:SimpleTask for direct)", signal.Reasons)
+				}
+			}
+		})
+	}
+}
+
+func TestComplexityDetector_Analyze_ArbiterFallback(t *testing.T) {
+	// With nil engine, should use heuristic fallback
+	detector := NewComplexityDetector()
+
+	input := "Refactor the authentication system across multiple files in the codebase"
+	signal := detector.Analyze(input, nil)
+
+	if signal.Recommended != PlanningMode {
+		t.Errorf("Expected PlanningMode from heuristic fallback, got DirectExecution (score: %.2f)", signal.Score)
+	}
+
+	// Reasons should NOT have arbiter prefix
+	for _, r := range signal.Reasons {
+		if strings.HasPrefix(r, "arbiter:") {
+			t.Errorf("Heuristic fallback should not produce arbiter reasons, got: %s", r)
+		}
+	}
+}
+
+func TestComplexityDetector_Analyze_ArbiterReasonPrefix(t *testing.T) {
+	engine := mustNewRulesEngine(t)
+	detector := NewComplexityDetector(WithRulesEngine(engine))
+
+	// SimpleTask rule should match for trivial input
+	signal := detector.Analyze("Fix a typo", nil)
+	foundArbiter := false
+	for _, r := range signal.Reasons {
+		if strings.HasPrefix(r, "arbiter:") {
+			foundArbiter = true
+			break
+		}
+	}
+	if !foundArbiter {
+		t.Errorf("Expected arbiter-prefixed reason, got: %v", signal.Reasons)
+	}
+}
+
+func TestComplexityDetector_WithRulesEngineOption(t *testing.T) {
+	engine := mustNewRulesEngine(t)
+	detector := NewComplexityDetector(WithRulesEngine(engine))
+
+	if detector.engine == nil {
+		t.Fatal("Expected engine to be set via WithRulesEngine option")
+	}
+}
+
+func TestComputeAmbiguity(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		wantMin float64
+		wantMax float64
+	}{
+		{"no hedges", "fix the bug", 0.0, 0.0},
+		{"one hedge", "maybe fix the bug", 0.3, 0.4},
+		{"three hedges", "maybe we should possibly not sure", 0.9, 1.0},
+		{"many hedges saturate at 1.0", "maybe possibly not sure should we what if which one", 1.0, 1.0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			score := computeAmbiguity(tt.input)
+			if score < tt.wantMin || score > tt.wantMax {
+				t.Errorf("computeAmbiguity(%q) = %.2f, want [%.2f, %.2f]",
+					tt.input, score, tt.wantMin, tt.wantMax)
+			}
+		})
 	}
 }

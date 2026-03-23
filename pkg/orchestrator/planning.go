@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/odvcencio/buckley/pkg/config"
+	"github.com/odvcencio/buckley/pkg/rules"
 	"github.com/odvcencio/buckley/pkg/tool/builtin"
 )
 
@@ -73,15 +74,24 @@ func NewPlanningCoordinator(
 	cfg *config.PlanningConfig,
 	todoTool *builtin.TodoTool,
 	modelClient ModelClient,
+	engine ...*rules.Engine,
 ) *PlanningCoordinator {
 	threshold := cfg.ComplexityThreshold
 	if threshold <= 0 {
 		threshold = 0.6
 	}
 
+	var opts []ComplexityOption
+	if len(engine) > 0 && engine[0] != nil {
+		opts = append(opts, WithRulesEngine(engine[0]))
+	}
+
+	det := NewComplexityDetector(opts...)
+	det.Threshold = threshold
+
 	return &PlanningCoordinator{
 		config:           cfg,
-		complexityDetect: &ComplexityDetector{Threshold: threshold},
+		complexityDetect: det,
 		todoTool:         todoTool,
 		modelClient:      modelClient,
 		decisionLog:      &DecisionLog{},
