@@ -13,6 +13,7 @@ import (
 	"github.com/odvcencio/buckley/pkg/encoding/toon"
 	"github.com/odvcencio/buckley/pkg/model"
 	"github.com/odvcencio/buckley/pkg/personality"
+	"github.com/odvcencio/buckley/pkg/rules"
 	"github.com/odvcencio/buckley/pkg/storage"
 	"github.com/odvcencio/buckley/pkg/telemetry"
 	"github.com/odvcencio/buckley/pkg/tool"
@@ -52,6 +53,7 @@ type Executor struct {
 	workflow         *WorkflowManager
 	batchCoordinator *BatchCoordinator
 	issuesCodec      *toon.Codec
+	engine           *rules.Engine
 
 	maxRetries      int
 	maxReviewCycles int
@@ -82,7 +84,7 @@ type RetryContext struct {
 	FilesBefore   map[string]bool
 }
 
-func NewExecutor(plan *Plan, store *storage.Store, mgr ModelClient, registry *tool.Registry, cfg *config.Config, planner *Planner, workflow *WorkflowManager, batchCoordinator *BatchCoordinator) *Executor {
+func NewExecutor(plan *Plan, store *storage.Store, mgr ModelClient, registry *tool.Registry, cfg *config.Config, planner *Planner, workflow *WorkflowManager, batchCoordinator *BatchCoordinator, engine ...*rules.Engine) *Executor {
 	phases := resolveTaskPhases(cfg)
 	ctx, cancel := context.WithCancel(context.Background())
 	var reviewer reviewerAgent
@@ -92,6 +94,10 @@ func NewExecutor(plan *Plan, store *storage.Store, mgr ModelClient, registry *to
 	var verifier verifierAgent
 	if v := NewVerifier(registry); v != nil {
 		verifier = v
+	}
+	var eng *rules.Engine
+	if len(engine) > 0 && engine[0] != nil {
+		eng = engine[0]
 	}
 	return &Executor{
 		plan:         plan,
@@ -111,6 +117,7 @@ func NewExecutor(plan *Plan, store *storage.Store, mgr ModelClient, registry *to
 		reviewer:         reviewer,
 		workflow:         workflow,
 		batchCoordinator: batchCoordinator,
+		engine:           eng,
 		maxRetries:       cfg.Orchestrator.MaxSelfHealAttempts,
 		maxReviewCycles:  cfg.Orchestrator.MaxReviewCycles,
 		issuesCodec:      toon.New(cfg.Encoding.UseToon),
@@ -462,8 +469,72 @@ type ExecutionContext struct {
 	Artifacts           string
 }
 
+// trustLevelToApprovalMode maps the legacy TrustLevel config value to the
+// approval mode used by the arbiter approval_gate strategy.
+func trustLevelToApprovalMode(trustLevel string) string {
+	switch strings.ToLower(strings.TrimSpace(trustLevel)) {
+	case "autonomous":
+		return "yolo"
+	case "balanced":
+		return "auto"
+	case "conservative":
+		return "safe"
+	default:
+		return "ask"
+	}
+}
+
+// shouldAutoApprove evaluates the arbiter approval_gate strategy to decide
+// whether an operation at the given risk level should proceed without user
+// confirmation. When the rules engine is unavailable it falls back to the
+// hardcoded TrustLevel comparison.
+func (e *Executor) shouldAutoApprove(riskLevel string) bool {
+	approvalMode := trustLevelToApprovalMode(e.config.Orchestrator.TrustLevel)
+
+	if e.engine != nil {
+		facts := map[string]any{
+			"approval": map[string]any{"mode": approvalMode},
+			"risk":     map[string]any{"level": riskLevel},
+		}
+		result, err := e.engine.EvalStrategy("approval", "approval_gate", facts)
+		if err == nil {
+			action, _ := result.Params["action"].(string)
+			return action == "allow"
+		}
+		// Strategy evaluation failed — fall through to legacy logic.
+	}
+
+	// Fallback: replicate the old hardcoded behaviour.
+	return e.config.Orchestrator.TrustLevel == "autonomous"
+}
+
+// shouldSkipReviewErrors returns true when a review-agent error should be
+// swallowed rather than propagated. Uses the approval strategy when available.
+func (e *Executor) shouldSkipReviewErrors() bool {
+	approvalMode := trustLevelToApprovalMode(e.config.Orchestrator.TrustLevel)
+
+	if e.engine != nil {
+		// Treat review errors as low-risk: auto/yolo modes tolerate them.
+		facts := map[string]any{
+			"approval": map[string]any{"mode": approvalMode},
+			"risk":     map[string]any{"level": "low"},
+		}
+		result, err := e.engine.EvalStrategy("approval", "approval_gate", facts)
+		if err == nil {
+			action, _ := result.Params["action"].(string)
+			return action == "allow"
+		}
+	}
+
+	// Fallback: balanced mode skips review errors.
+	return e.config.Orchestrator.TrustLevel == "balanced"
+}
+
 func (e *Executor) review(task *Task, builderResult *BuilderResult) error {
-	if e.config.Orchestrator.TrustLevel == "autonomous" || e.reviewer == nil {
+	// Skipping review entirely is a high-trust decision: only yolo mode
+	// should pass this gate. We evaluate with "high" risk so only yolo
+	// (which ignores risk) will return "allow".
+	if e.shouldAutoApprove("high") || e.reviewer == nil {
 		return nil
 	}
 	if builderResult == nil {
@@ -478,7 +549,7 @@ func (e *Executor) review(task *Task, builderResult *BuilderResult) error {
 		}
 		result, err := e.reviewer.Review(task, builderResult)
 		if err != nil {
-			if e.config.Orchestrator.TrustLevel == "balanced" {
+			if e.shouldSkipReviewErrors() {
 				fmt.Printf("Warning: review skipped due to error: %v\n", err)
 				return nil
 			}

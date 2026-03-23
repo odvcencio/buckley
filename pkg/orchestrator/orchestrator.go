@@ -138,7 +138,7 @@ func (o *Orchestrator) ExecutePlan() error {
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	o.cancelPlan = cancel
-	o.executor = NewExecutor(o.currentPlan, o.store, o.modelClient, o.toolRegistry, o.config, o.planner, o.workflow, o.batchCoordinator)
+	o.executor = NewExecutor(o.currentPlan, o.store, o.modelClient, o.toolRegistry, o.config, o.planner, o.workflow, o.batchCoordinator, o.engine)
 	o.executor.SetContext(ctx)
 
 	// Execute all tasks
@@ -176,7 +176,7 @@ func (o *Orchestrator) ExecuteTask(taskID string) error {
 		}
 		ctx, cancel := context.WithCancel(ctx)
 		o.cancelPlan = cancel
-		o.executor = NewExecutor(o.currentPlan, o.store, o.modelClient, o.toolRegistry, o.config, o.planner, o.workflow, o.batchCoordinator)
+		o.executor = NewExecutor(o.currentPlan, o.store, o.modelClient, o.toolRegistry, o.config, o.planner, o.workflow, o.batchCoordinator, o.engine)
 		o.executor.SetContext(ctx)
 	}
 
