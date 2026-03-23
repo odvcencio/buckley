@@ -1,0 +1,34 @@
+outcome ModelChoice {
+    action: string
+    model: string
+}
+
+strategy model_select returns ModelChoice {
+    when {
+        task.phase == "planning"
+        and model.supports_reasoning
+    } then PlanningReasoner {
+        action: "use",
+        model: "claude-opus-4-20250514",
+    }
+
+    when {
+        task.phase == "execution"
+    } then ExecutionModel {
+        action: "use",
+        model: "claude-sonnet-4-20250514",
+    }
+
+    when {
+        task.phase == "review"
+        and model.supports_reasoning
+    } then ReviewReasoner {
+        action: "use",
+        model: "claude-opus-4-20250514",
+    }
+
+    else DefaultModel {
+        action: "use",
+        model: "claude-sonnet-4-20250514",
+    }
+}

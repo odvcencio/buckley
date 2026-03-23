@@ -1,0 +1,47 @@
+rule OOMCooldown priority 100 {
+    when {
+        gts.last_oom
+    }
+    then BaselineOnly {
+        action: "baseline_only",
+    }
+}
+
+rule RefactorContext priority 80 {
+    when {
+        task.type == "refactor"
+    }
+    then Enrich {
+        action: "enrich",
+        tools: ["callgraph", "dead", "impact"],
+    }
+}
+
+rule BugfixContext priority 80 {
+    when {
+        task.type == "bugfix"
+    }
+    then Enrich {
+        action: "enrich",
+        tools: ["scope", "callgraph", "context"],
+    }
+}
+
+rule ReviewContext priority 70 {
+    when {
+        task.type == "review"
+    }
+    then Enrich {
+        action: "enrich",
+        tools: ["impact", "hotspot"],
+    }
+}
+
+rule SimpleContext priority 10 {
+    when {
+        true
+    }
+    then BaselineOnly {
+        action: "baseline_only",
+    }
+}

@@ -1,0 +1,27 @@
+rule CompactNow priority 80 {
+    when {
+        usage_ratio > 0.9
+    }
+    then Compact {
+        action: "compact",
+        target_reduction: 0.70,
+    }
+}
+
+rule CompactWarning priority 50 {
+    when {
+        usage_ratio > 0.75
+    }
+    then Warn {
+        action: "warn",
+    }
+}
+
+rule ContextOK priority 10 {
+    when {
+        true
+    }
+    then Continue {
+        action: "continue",
+    }
+}

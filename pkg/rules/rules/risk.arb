@@ -1,0 +1,50 @@
+rule DestructiveGit priority 100 {
+    when {
+        is_git_op
+        and command in ["git reset --hard", "git push --force", "git clean -f"]
+    }
+    then Block {
+        action: "block",
+        level: "critical",
+    }
+}
+
+rule RmRecursive priority 95 {
+    when {
+        command starts_with "rm -r"
+    }
+    then Pause {
+        action: "pause",
+        level: "high",
+    }
+}
+
+rule DangerousOps priority 90 {
+    when {
+        command starts_with "DROP "
+        or command starts_with "DELETE "
+        or command starts_with "TRUNCATE "
+    }
+    then Pause {
+        action: "pause",
+        level: "high",
+    }
+}
+
+rule SafeRead priority 10 {
+    when {
+        command starts_with "cat "
+        or command starts_with "ls"
+        or command starts_with "git status"
+        or command starts_with "git log"
+        or command starts_with "git diff"
+        or command starts_with "go test"
+        or command starts_with "go build"
+        or command starts_with "npm test"
+        or command starts_with "cargo test"
+    }
+    then Allow {
+        action: "allow",
+        level: "none",
+    }
+}

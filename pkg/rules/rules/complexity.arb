@@ -1,0 +1,32 @@
+rule HighComplexity priority 90 {
+    when {
+        word_count > 50
+        and has_questions
+        and ambiguity > 0.6
+    }
+    then Plan {
+        action: "plan",
+        confidence: 0.9,
+    }
+}
+
+rule MultiStep priority 80 {
+    when {
+        word_count > 30
+        and has_file_paths
+    }
+    then Plan {
+        action: "plan",
+        confidence: 0.7,
+    }
+}
+
+rule SimpleTask priority 10 {
+    when {
+        true
+    }
+    then Direct {
+        action: "direct",
+        confidence: 0.3,
+    }
+}

@@ -1,0 +1,29 @@
+outcome ApprovalDecision {
+    action: string
+}
+
+strategy approval_gate returns ApprovalDecision {
+    when {
+        approval.mode == "yolo"
+    } then YoloAllow {
+        action: "allow",
+    }
+
+    when {
+        approval.mode == "auto"
+        and risk.level in ["none", "low"]
+    } then AutoAllow {
+        action: "allow",
+    }
+
+    when {
+        approval.mode == "safe"
+        and risk.level == "none"
+    } then SafeAllow {
+        action: "allow",
+    }
+
+    else DefaultAsk {
+        action: "ask",
+    }
+}

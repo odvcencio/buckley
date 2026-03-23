@@ -1,0 +1,31 @@
+rule DeadEnd priority 100 {
+    when {
+        same_error
+        and no_file_changes
+        and attempt > 1
+    }
+    then Abort {
+        action: "abort",
+        reason: "dead_end_loop",
+    }
+}
+
+rule BudgetExceeded priority 90 {
+    when {
+        attempt >= max_attempts
+    }
+    then Abort {
+        action: "abort",
+        reason: "budget_exhausted",
+    }
+}
+
+rule RetryWithGuidance priority 50 {
+    when {
+        attempt < max_attempts
+    }
+    then Retry {
+        action: "retry",
+        escalate: true,
+    }
+}

@@ -1,0 +1,42 @@
+outcome OneshotConfig {
+    action: string
+    max_retries: number
+    context_budget: number
+    use_rlm: bool
+}
+
+strategy oneshot_policy returns OneshotConfig {
+    when {
+        command == "commit"
+    } then CommitConfig {
+        action: "configure",
+        max_retries: 3,
+        context_budget: 8000,
+        use_rlm: false,
+    }
+
+    when {
+        command == "pr"
+    } then PRConfig {
+        action: "configure",
+        max_retries: 3,
+        context_budget: 16000,
+        use_rlm: false,
+    }
+
+    when {
+        command == "review"
+    } then ReviewConfig {
+        action: "configure",
+        max_retries: 1,
+        context_budget: 32000,
+        use_rlm: true,
+    }
+
+    else DefaultConfig {
+        action: "configure",
+        max_retries: 2,
+        context_budget: 8000,
+        use_rlm: false,
+    }
+}

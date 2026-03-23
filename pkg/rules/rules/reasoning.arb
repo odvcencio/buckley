@@ -1,0 +1,42 @@
+outcome ReasoningConfig {
+    action: string
+    effort: string
+}
+
+strategy reasoning_mode returns ReasoningConfig {
+    when {
+        reasoning.config == "off"
+    } then ReasoningOff {
+        action: "set",
+        effort: "none",
+    }
+
+    when {
+        reasoning.config == "high"
+        and model.supports_reasoning
+    } then ReasoningHigh {
+        action: "set",
+        effort: "high",
+    }
+
+    when {
+        task.phase == "planning"
+        and model.supports_reasoning
+    } then PlanningReasoning {
+        action: "set",
+        effort: "high",
+    }
+
+    when {
+        task.phase == "review"
+        and model.supports_reasoning
+    } then ReviewReasoning {
+        action: "set",
+        effort: "high",
+    }
+
+    else ReasoningDefault {
+        action: "set",
+        effort: "none",
+    }
+}
