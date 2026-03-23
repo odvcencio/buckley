@@ -7,6 +7,7 @@ import (
 
 	"github.com/odvcencio/buckley/pkg/config"
 	"github.com/odvcencio/buckley/pkg/personality"
+	"github.com/odvcencio/buckley/pkg/rules"
 	"github.com/odvcencio/buckley/pkg/storage"
 	"github.com/odvcencio/buckley/pkg/telemetry"
 	"github.com/odvcencio/buckley/pkg/tool"
@@ -23,6 +24,7 @@ type Orchestrator struct {
 	config           *config.Config
 	workflow         *WorkflowManager
 	batchCoordinator *BatchCoordinator
+	engine           *rules.Engine
 
 	currentPlan *Plan
 	executor    *Executor
@@ -51,7 +53,7 @@ func (o *Orchestrator) RefreshPersonaProvider(provider *personality.PersonaProvi
 }
 
 // NewOrchestrator creates a new orchestrator
-func NewOrchestrator(store *storage.Store, mgr ModelClient, registry *tool.Registry, cfg *config.Config, workflow *WorkflowManager, planStore PlanStore) *Orchestrator {
+func NewOrchestrator(store *storage.Store, mgr ModelClient, registry *tool.Registry, cfg *config.Config, workflow *WorkflowManager, planStore PlanStore, engine *rules.Engine) *Orchestrator {
 	var batchCoordinator *BatchCoordinator
 	if cfg != nil && cfg.Batch.Enabled {
 		if bc, err := NewBatchCoordinator(cfg.Batch, workflow); err != nil {
@@ -71,6 +73,7 @@ func NewOrchestrator(store *storage.Store, mgr ModelClient, registry *tool.Regis
 		config:           cfg,
 		workflow:         workflow,
 		batchCoordinator: batchCoordinator,
+		engine:           engine,
 	}
 }
 

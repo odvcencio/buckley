@@ -17,7 +17,7 @@ type Agent struct {
 
 // NewAgent constructs an SDK agent. Provide the same dependencies you would pass to orchestrator.NewOrchestrator.
 func NewAgent(store *storage.Store, modelClient orchestrator.ModelClient, registry *tool.Registry, cfg *config.Config, workflow *orchestrator.WorkflowManager, planStore orchestrator.PlanStore) *Agent {
-	orch := orchestrator.NewOrchestrator(store, modelClient, registry, cfg, workflow, planStore)
+	orch := orchestrator.NewOrchestrator(store, modelClient, registry, cfg, workflow, planStore, nil)
 	return &Agent{orchestrator: orch}
 }
 

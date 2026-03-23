@@ -34,6 +34,7 @@ import (
 	"github.com/odvcencio/buckley/pkg/model"
 	"github.com/odvcencio/buckley/pkg/orchestrator"
 	rlmrunner "github.com/odvcencio/buckley/pkg/rlm/runner"
+	"github.com/odvcencio/buckley/pkg/rules"
 	"github.com/odvcencio/buckley/pkg/setup"
 	"github.com/odvcencio/buckley/pkg/storage"
 	"github.com/odvcencio/buckley/pkg/telemetry"
@@ -67,10 +68,22 @@ type orchestratorRunner interface {
 
 // newOrchestratorFn allows tests to stub orchestrator construction.
 var newOrchestratorFn = func(store *storage.Store, mgr *model.Manager, registry *tool.Registry, cfg *config.Config, workflow *orchestrator.WorkflowManager, planStore orchestrator.PlanStore) orchestratorRunner {
+	// Create rules engine (graceful degradation if it fails).
+	var arbEngine *rules.Engine
+	if home, err := os.UserHomeDir(); err == nil {
+		configDir := filepath.Join(home, ".buckley")
+		if e, err := rules.NewEngine(
+			rules.WithUserOverrides(filepath.Join(configDir, "rules")),
+		); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to initialize rules engine: %v\n", err)
+		} else {
+			arbEngine = e
+		}
+	}
 	if cfg != nil && cfg.ExecutionMode() == config.ExecutionModeRLM {
 		return rlmrunner.New(store, mgr, registry, cfg, workflow, planStore)
 	}
-	return orchestrator.NewOrchestrator(store, mgr, registry, cfg, workflow, planStore)
+	return orchestrator.NewOrchestrator(store, mgr, registry, cfg, workflow, planStore, arbEngine)
 }
 
 type startupOptions struct {

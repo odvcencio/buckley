@@ -696,7 +696,7 @@ func (s *Server) buildOrchestratorContext(sessionID, agentID string) (*orchestra
 		s.liveMux.Unlock()
 	}
 
-	orch := orchestrator.NewOrchestrator(s.store, s.models, registry, s.cfg, workflow, planStore)
+	orch := orchestrator.NewOrchestrator(s.store, s.models, registry, s.cfg, workflow, planStore, nil)
 
 	cleanup := func() {}
 	return orch, cleanup, nil

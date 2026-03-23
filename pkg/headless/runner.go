@@ -1165,7 +1165,7 @@ func (r *Runner) ensureOrchestrator() (*orchestrator.Orchestrator, *orchestrator
 		fmt.Fprintf(os.Stderr, "Warning: failed to initialize docs hierarchy: %v\n", err)
 	}
 
-	orch := orchestrator.NewOrchestrator(r.store, r.modelManager, r.tools, cfg, wf, nil)
+	orch := orchestrator.NewOrchestrator(r.store, r.modelManager, r.tools, cfg, wf, nil, nil)
 
 	r.mu.Lock()
 	r.workflow = wf
