@@ -5,6 +5,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/odvcencio/buckley/pkg/rules"
 )
 
 // RiskLevel represents the severity of a detected risk
@@ -47,6 +49,17 @@ type RiskAssessment struct {
 // RiskDetector analyzes operations for potential risks
 type RiskDetector struct {
 	patterns []riskPattern
+	engine   *rules.Engine // Optional arbiter rules engine
+}
+
+// RiskDetectorOption configures the risk detector.
+type RiskDetectorOption func(*RiskDetector)
+
+// WithRiskRulesEngine sets the arbiter rules engine for risk evaluation.
+func WithRiskRulesEngine(e *rules.Engine) RiskDetectorOption {
+	return func(d *RiskDetector) {
+		d.engine = e
+	}
 }
 
 type riskPattern struct {
@@ -57,8 +70,8 @@ type riskPattern struct {
 }
 
 // NewRiskDetector creates a risk detector with default patterns
-func NewRiskDetector() *RiskDetector {
-	return &RiskDetector{
+func NewRiskDetector(opts ...RiskDetectorOption) *RiskDetector {
+	d := &RiskDetector{
 		patterns: []riskPattern{
 			// Critical: Irreversible destructive operations
 			{
@@ -114,10 +127,22 @@ func NewRiskDetector() *RiskDetector {
 			},
 		},
 	}
+	for _, opt := range opts {
+		opt(d)
+	}
+	return d
 }
 
 // Analyze examines text for potential risks
 func (d *RiskDetector) Analyze(text string) *RiskAssessment {
+	// Try arbiter rules engine first if available
+	if d.engine != nil {
+		if result := d.evalArbiterRisk(text); result != nil {
+			return result
+		}
+		// Arbiter eval failed or returned no matches — fall through to pattern matching
+	}
+
 	assessment := &RiskAssessment{
 		Level:   RiskNone,
 		Reasons: []string{},
@@ -137,6 +162,49 @@ func (d *RiskDetector) Analyze(text string) *RiskAssessment {
 
 	// Require pause for high/critical risks
 	assessment.RequiresPause = assessment.Level >= RiskHigh
+
+	return assessment
+}
+
+// evalArbiterRisk attempts risk evaluation via the arbiter rules engine.
+// Returns nil if evaluation fails or yields no matches, signalling the caller
+// to fall through to pattern-based analysis.
+func (d *RiskDetector) evalArbiterRisk(text string) *RiskAssessment {
+	// Build CommandFacts with pre-processed boolean flags
+	facts := rules.CommandFacts{
+		Command:       text,
+		IsGitOp:       strings.HasPrefix(text, "git "),
+		IsForceOp:     strings.Contains(text, "--force") || strings.Contains(text, "-f"),
+		IsRmRecursive: strings.Contains(text, "rm -r"),
+	}
+
+	matches, err := rules.Eval(d.engine, "risk", facts)
+	if err != nil || len(matches) == 0 {
+		return nil
+	}
+
+	// The first match is highest priority (arbiter sorts by priority desc)
+	top := matches[0]
+
+	// Map action label to RiskLevel
+	var level RiskLevel
+	switch top.Action {
+	case "Block":
+		level = RiskCritical
+	case "Pause":
+		level = RiskHigh
+	case "Allow":
+		level = RiskNone
+	default:
+		// Unknown action — fall through to pattern-based logic
+		return nil
+	}
+
+	assessment := &RiskAssessment{
+		Level:         level,
+		Reasons:       []string{"arbiter:" + top.Name},
+		RequiresPause: level >= RiskHigh,
+	}
 
 	return assessment
 }

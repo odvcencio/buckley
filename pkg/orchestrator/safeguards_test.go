@@ -1,6 +1,7 @@
 package orchestrator
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -339,5 +340,139 @@ func TestLongRunGuard_NeedsCheckIn(t *testing.T) {
 	guard.lastCheckIn = time.Now()
 	if guard.NeedsCheckIn() {
 		t.Error("Expected not to need check-in immediately after update")
+	}
+}
+
+// TestRiskDetector_Analyze_ViaArbiter tests the arbiter-backed risk detection path.
+func TestRiskDetector_Analyze_ViaArbiter(t *testing.T) {
+	engine := mustNewRulesEngine(t)
+	detector := NewRiskDetector(WithRiskRulesEngine(engine))
+
+	// These commands match arbiter rules exactly (starts_with or in-list exact match).
+	// Commands with trailing args (e.g. "git reset --hard HEAD~1") may fall through
+	// to pattern-based analysis since the DestructiveGit rule uses exact `in` matching.
+	tests := []struct {
+		name      string
+		command   string
+		wantLevel RiskLevel
+		wantPause bool
+	}{
+		{
+			// DestructiveGit rule: is_git_op && command in [...] — exact match
+			name:      "git reset --hard exact match is Block (critical)",
+			command:   "git reset --hard",
+			wantLevel: RiskCritical,
+			wantPause: true,
+		},
+		{
+			// DestructiveGit rule: is_git_op && command in [...] — exact match
+			name:      "git push --force exact match is Block (critical)",
+			command:   "git push --force",
+			wantLevel: RiskCritical,
+			wantPause: true,
+		},
+		{
+			// RmRecursive rule: command starts_with "rm -r"
+			name:      "rm -r is Pause (high)",
+			command:   "rm -r ./old-dir",
+			wantLevel: RiskHigh,
+			wantPause: true,
+		},
+		{
+			// DangerousOps rule: command starts_with "DROP "
+			name:      "DROP is Pause (high)",
+			command:   "DROP TABLE users",
+			wantLevel: RiskHigh,
+			wantPause: true,
+		},
+		{
+			// SafeRead rule: command starts_with "git status"
+			name:      "git status is Allow (none)",
+			command:   "git status",
+			wantLevel: RiskNone,
+			wantPause: false,
+		},
+		{
+			// SafeRead rule: command starts_with "go test"
+			name:      "go test is Allow (none)",
+			command:   "go test ./...",
+			wantLevel: RiskNone,
+			wantPause: false,
+		},
+		{
+			// SafeRead rule: command starts_with "cat "
+			name:      "cat file is Allow (none)",
+			command:   "cat /etc/hosts",
+			wantLevel: RiskNone,
+			wantPause: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assessment := detector.Analyze(tt.command)
+
+			if assessment.Level != tt.wantLevel {
+				t.Errorf("Level = %v, want %v (reasons: %v)", assessment.Level, tt.wantLevel, assessment.Reasons)
+			}
+			if assessment.RequiresPause != tt.wantPause {
+				t.Errorf("RequiresPause = %v, want %v", assessment.RequiresPause, tt.wantPause)
+			}
+			// Arbiter results should have "arbiter:" prefix in reasons
+			foundArbiter := false
+			for _, r := range assessment.Reasons {
+				if strings.HasPrefix(r, "arbiter:") {
+					foundArbiter = true
+					break
+				}
+			}
+			if !foundArbiter {
+				t.Errorf("Expected arbiter-prefixed reason, got: %v", assessment.Reasons)
+			}
+		})
+	}
+}
+
+// TestRiskDetector_Analyze_ArbiterFallback tests that nil engine falls through to pattern matching.
+func TestRiskDetector_Analyze_ArbiterFallback(t *testing.T) {
+	// Without engine — uses heuristic pattern matching
+	detector := NewRiskDetector()
+
+	assessment := detector.Analyze("rm -rf /some/path")
+	if assessment.Level != RiskCritical {
+		t.Errorf("Fallback pattern: Level = %v, want RiskCritical", assessment.Level)
+	}
+
+	// Reasons should NOT have arbiter prefix
+	for _, r := range assessment.Reasons {
+		if strings.HasPrefix(r, "arbiter:") {
+			t.Errorf("Heuristic fallback should not produce arbiter reasons, got: %s", r)
+		}
+	}
+}
+
+// TestRiskDetector_WithRiskRulesEngineOption tests that the option sets the engine field.
+func TestRiskDetector_WithRiskRulesEngineOption(t *testing.T) {
+	engine := mustNewRulesEngine(t)
+	detector := NewRiskDetector(WithRiskRulesEngine(engine))
+
+	if detector.engine == nil {
+		t.Fatal("Expected engine to be set via WithRiskRulesEngine option")
+	}
+}
+
+// TestRiskDetector_Analyze_ArbiterNoMatchFallsThrough tests that when arbiter returns no matches
+// the detector falls through to the pattern-based analysis.
+func TestRiskDetector_Analyze_ArbiterNoMatchFallsThrough(t *testing.T) {
+	engine := mustNewRulesEngine(t)
+	detector := NewRiskDetector(WithRiskRulesEngine(engine))
+
+	// This text won't match any arbiter rule but does match the credential pattern
+	text := "api_key value to commit to repository"
+	assessment := detector.Analyze(text)
+
+	// Should fall through and find credential risk via patterns
+	if assessment.Level < RiskHigh {
+		t.Errorf("Expected at least RiskHigh from pattern fallback, got %v", assessment.Level)
 	}
 }
