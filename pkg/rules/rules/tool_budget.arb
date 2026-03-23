@@ -1,0 +1,41 @@
+rule ReadOnlyTools priority 90 {
+    when {
+        tool_tier == "read_only"
+    }
+    then Restrict {
+        action: "filter",
+        allowed: ["read_file", "list_directory", "find_files", "file_exists", "search_text", "get_file_info"],
+        max_calls: 30,
+    }
+}
+
+rule StandardTools priority 50 {
+    when {
+        tool_tier == "standard"
+    }
+    then Allow {
+        action: "allow_standard",
+        denied: ["delete_lines", "rename_symbol"],
+        max_calls: 50,
+    }
+}
+
+rule FullTools priority 40 {
+    when {
+        tool_tier == "full"
+    }
+    then AllowAll {
+        action: "allow_all",
+        max_calls: 100,
+    }
+}
+
+rule ToolCallExceeded priority 100 {
+    when {
+        agent.tool_calls >= agent.max_tool_calls
+    }
+    then HaltAgent {
+        action: "halt",
+        reason: "tool call budget exceeded",
+    }
+}

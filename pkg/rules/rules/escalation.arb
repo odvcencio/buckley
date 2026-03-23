@@ -1,0 +1,57 @@
+outcome EscalationDecision {
+    action: string
+    reason: string
+    target_weight: string
+}
+
+strategy escalation_policy returns EscalationDecision {
+    when {
+        failure.type == "tool_error"
+        and failure.attempt < 3
+    } then RetryWithSameModel {
+        action: "retry",
+        reason: "transient tool error",
+        target_weight: "",
+    }
+
+    when {
+        failure.type == "quality"
+        and failure.model_weight in ["light", "trivial"]
+    } then EscalateModel {
+        action: "escalate",
+        reason: "quality below threshold on lightweight model",
+        target_weight: "heavy",
+    }
+
+    when {
+        failure.type == "quality"
+        and failure.model_weight == "medium"
+        and failure.attempt < 2
+    } then EscalateToReasoning {
+        action: "escalate",
+        reason: "quality issue, try reasoning model",
+        target_weight: "reasoning",
+    }
+
+    when {
+        failure.type == "budget_exceeded"
+    } then AbortTask {
+        action: "abort",
+        reason: "budget exhausted",
+        target_weight: "",
+    }
+
+    when {
+        failure.attempt >= 3
+    } then EscalateToHuman {
+        action: "escalate_human",
+        reason: "max retries on automated escalation",
+        target_weight: "",
+    }
+
+    else DefaultRetry {
+        action: "retry",
+        reason: "unclassified failure",
+        target_weight: "",
+    }
+}

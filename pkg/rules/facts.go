@@ -82,3 +82,27 @@ type OneshotFacts struct {
 	Command    string `arb:"command"`
 	TokenCount int    `arb:"token_count"`
 }
+
+// SpawningFacts carries signals for subagent configuration decisions.
+type SpawningFacts struct {
+	TaskType     string `arb:"task.type"`
+	FileCount    int    `arb:"task.file_count"`
+	EstTokens    int    `arb:"task.estimated_tokens"`
+	SubtaskCount int    `arb:"task.subtask_count"`
+	ParentWeight string `arb:"parent.weight"`
+	Depth        int    `arb:"spawn.depth"`
+}
+
+// CoordinatorFacts carries signals for coordinator budget tuning.
+type CoordinatorFacts struct {
+	SubtaskCount    int `arb:"task.subtask_count"`
+	EstimatedTokens int `arb:"task.estimated_tokens"`
+	PlanStepCount   int `arb:"task.plan_step_count"`
+}
+
+// ToolBudgetFacts carries signals for tool access governance.
+type ToolBudgetFacts struct {
+	ToolTier  string `arb:"tool_tier"`
+	ToolCalls int    `arb:"agent.tool_calls"`
+	MaxCalls  int    `arb:"agent.max_tool_calls"`
+}

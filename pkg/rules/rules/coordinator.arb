@@ -1,0 +1,34 @@
+rule LargeTaskBudget priority 80 {
+    when {
+        task.subtask_count > 5
+        or task.estimated_tokens > 50000
+    }
+    then ExpandedBudget {
+        max_iterations: 15,
+        max_tokens: 200000,
+        confidence_threshold: 0.9,
+    }
+}
+
+rule SmallTaskBudget priority 70 {
+    when {
+        task.subtask_count <= 2
+        and task.estimated_tokens <= 20000
+    }
+    then TightBudget {
+        max_iterations: 5,
+        max_tokens: 50000,
+        confidence_threshold: 0.95,
+    }
+}
+
+rule DefaultBudget priority 10 {
+    when {
+        true
+    }
+    then StandardBudget {
+        max_iterations: 10,
+        max_tokens: 100000,
+        confidence_threshold: 0.95,
+    }
+}

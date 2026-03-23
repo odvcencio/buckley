@@ -1,0 +1,45 @@
+rule ComplexRefactor priority 90 {
+    when {
+        task.type == "refactor"
+        and task.file_count > 5
+    }
+    then HeavyAgent {
+        weight: "heavy",
+        max_iterations: 40,
+        tool_tier: "full",
+    }
+}
+
+rule CodeReview priority 85 {
+    when {
+        task.type == "review"
+    }
+    then ReadOnlyAgent {
+        weight: "medium",
+        max_iterations: 15,
+        tool_tier: "read_only",
+    }
+}
+
+rule SimpleFix priority 70 {
+    when {
+        task.type == "bugfix"
+        and task.file_count <= 2
+    }
+    then LightAgent {
+        weight: "light",
+        max_iterations: 15,
+        tool_tier: "standard",
+    }
+}
+
+rule DefaultTask priority 10 {
+    when {
+        true
+    }
+    then MediumAgent {
+        weight: "medium",
+        max_iterations: 25,
+        tool_tier: "standard",
+    }
+}

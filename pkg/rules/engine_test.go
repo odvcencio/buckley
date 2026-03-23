@@ -763,3 +763,300 @@ func TestEngine_EvalMap_UnknownDomain(t *testing.T) {
 		t.Fatal("expected error for unknown domain")
 	}
 }
+
+// --- spawning ---
+
+func TestEngine_EvalSpawning_AllScenarios(t *testing.T) {
+	e := mustNewTestEngine(t)
+
+	tests := []struct {
+		name           string
+		facts          SpawningFacts
+		wantAction     string
+		wantWeight     string
+		wantIterations float64
+	}{
+		{
+			name: "complex refactor: heavy agent",
+			facts: SpawningFacts{
+				TaskType:  "refactor",
+				FileCount: 10,
+			},
+			wantAction:     "HeavyAgent",
+			wantWeight:     "heavy",
+			wantIterations: 40,
+		},
+		{
+			name: "code review: read-only agent",
+			facts: SpawningFacts{
+				TaskType: "review",
+			},
+			wantAction:     "ReadOnlyAgent",
+			wantWeight:     "medium",
+			wantIterations: 15,
+		},
+		{
+			name: "simple bugfix: light agent",
+			facts: SpawningFacts{
+				TaskType:  "bugfix",
+				FileCount: 1,
+			},
+			wantAction:     "LightAgent",
+			wantWeight:     "light",
+			wantIterations: 15,
+		},
+		{
+			name: "unknown task: default medium agent",
+			facts: SpawningFacts{
+				TaskType: "general",
+			},
+			wantAction:     "MediumAgent",
+			wantWeight:     "medium",
+			wantIterations: 25,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			matched, err := Eval(e, "spawning", tt.facts)
+			if err != nil {
+				t.Fatalf("Eval: %v", err)
+			}
+			if len(matched) == 0 {
+				t.Fatal("expected at least one matched rule")
+			}
+			if matched[0].Action != tt.wantAction {
+				t.Errorf("got action %q, want %q", matched[0].Action, tt.wantAction)
+			}
+			if w, ok := matched[0].Params["weight"].(string); !ok || w != tt.wantWeight {
+				t.Errorf("got weight %v, want %q", matched[0].Params["weight"], tt.wantWeight)
+			}
+			if mi, ok := matched[0].Params["max_iterations"].(float64); !ok || mi != tt.wantIterations {
+				t.Errorf("got max_iterations %v, want %v", matched[0].Params["max_iterations"], tt.wantIterations)
+			}
+		})
+	}
+}
+
+// --- escalation (strategy) ---
+
+func TestEngine_EvalStrategy_Escalation_AllScenarios(t *testing.T) {
+	e := mustNewTestEngine(t)
+
+	tests := []struct {
+		name       string
+		facts      map[string]any
+		wantAction string
+	}{
+		{
+			name: "tool error with retries left: retry",
+			facts: map[string]any{
+				"failure": map[string]any{
+					"type":         "tool_error",
+					"model_weight": "medium",
+					"attempt":      1,
+				},
+			},
+			wantAction: "retry",
+		},
+		{
+			name: "quality issue on light model: escalate",
+			facts: map[string]any{
+				"failure": map[string]any{
+					"type":         "quality",
+					"model_weight": "light",
+					"attempt":      1,
+				},
+			},
+			wantAction: "escalate",
+		},
+		{
+			name: "quality issue on medium model first attempt: escalate to reasoning",
+			facts: map[string]any{
+				"failure": map[string]any{
+					"type":         "quality",
+					"model_weight": "medium",
+					"attempt":      1,
+				},
+			},
+			wantAction: "escalate",
+		},
+		{
+			name: "budget exceeded: abort",
+			facts: map[string]any{
+				"failure": map[string]any{
+					"type":         "budget_exceeded",
+					"model_weight": "medium",
+					"attempt":      1,
+				},
+			},
+			wantAction: "abort",
+		},
+		{
+			name: "max retries reached: escalate to human",
+			facts: map[string]any{
+				"failure": map[string]any{
+					"type":         "unknown",
+					"model_weight": "heavy",
+					"attempt":      3,
+				},
+			},
+			wantAction: "escalate_human",
+		},
+		{
+			name: "unclassified failure: default retry",
+			facts: map[string]any{
+				"failure": map[string]any{
+					"type":         "unknown",
+					"model_weight": "medium",
+					"attempt":      1,
+				},
+			},
+			wantAction: "retry",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := e.EvalStrategy("escalation", "escalation_policy", tt.facts)
+			if err != nil {
+				t.Fatalf("EvalStrategy: %v", err)
+			}
+			action, ok := result.Params["action"]
+			if !ok {
+				t.Fatal("expected 'action' in result params")
+			}
+			if action != tt.wantAction {
+				t.Errorf("got action %q, want %q", action, tt.wantAction)
+			}
+		})
+	}
+}
+
+// --- coordinator ---
+
+func TestEngine_EvalCoordinator_AllScenarios(t *testing.T) {
+	e := mustNewTestEngine(t)
+
+	tests := []struct {
+		name           string
+		facts          CoordinatorFacts
+		wantAction     string
+		wantIterations float64
+	}{
+		{
+			name: "large task: expanded budget",
+			facts: CoordinatorFacts{
+				SubtaskCount:    8,
+				EstimatedTokens: 60000,
+			},
+			wantAction:     "ExpandedBudget",
+			wantIterations: 15,
+		},
+		{
+			name: "small task: tight budget",
+			facts: CoordinatorFacts{
+				SubtaskCount:    1,
+				EstimatedTokens: 10000,
+			},
+			wantAction:     "TightBudget",
+			wantIterations: 5,
+		},
+		{
+			name: "medium task: default budget",
+			facts: CoordinatorFacts{
+				SubtaskCount:    3,
+				EstimatedTokens: 30000,
+			},
+			wantAction:     "StandardBudget",
+			wantIterations: 10,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			matched, err := Eval(e, "coordinator", tt.facts)
+			if err != nil {
+				t.Fatalf("Eval: %v", err)
+			}
+			if len(matched) == 0 {
+				t.Fatal("expected at least one matched rule")
+			}
+			if matched[0].Action != tt.wantAction {
+				t.Errorf("got action %q, want %q", matched[0].Action, tt.wantAction)
+			}
+			if mi, ok := matched[0].Params["max_iterations"].(float64); !ok || mi != tt.wantIterations {
+				t.Errorf("got max_iterations %v, want %v", matched[0].Params["max_iterations"], tt.wantIterations)
+			}
+		})
+	}
+}
+
+// --- tool_budget ---
+
+func TestEngine_EvalToolBudget_AllScenarios(t *testing.T) {
+	e := mustNewTestEngine(t)
+
+	tests := []struct {
+		name       string
+		facts      ToolBudgetFacts
+		wantAction string
+	}{
+		{
+			name: "read-only tier: filter",
+			facts: ToolBudgetFacts{
+				ToolTier: "read_only",
+			},
+			wantAction: "Restrict",
+		},
+		{
+			name: "standard tier: allow standard",
+			facts: ToolBudgetFacts{
+				ToolTier: "standard",
+			},
+			wantAction: "Allow",
+		},
+		{
+			name: "full tier: allow all",
+			facts: ToolBudgetFacts{
+				ToolTier: "full",
+			},
+			wantAction: "AllowAll",
+		},
+		{
+			name: "tool calls exceeded: halt present",
+			facts: ToolBudgetFacts{
+				ToolTier:  "standard",
+				ToolCalls: 50,
+				MaxCalls:  50,
+			},
+			wantAction: "HaltAgent",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			matched, err := Eval(e, "tool_budget", tt.facts)
+			if err != nil {
+				t.Fatalf("Eval: %v", err)
+			}
+			if len(matched) == 0 {
+				t.Fatal("expected at least one matched rule")
+			}
+			found := false
+			for _, m := range matched {
+				if m.Action == tt.wantAction {
+					found = true
+					break
+				}
+			}
+			if !found {
+				actions := make([]string, len(matched))
+				for i, m := range matched {
+					actions[i] = m.Action
+				}
+				t.Errorf("action %q not found in matched rules %v", tt.wantAction, actions)
+			}
+		})
+	}
+}

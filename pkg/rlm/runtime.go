@@ -12,6 +12,7 @@ import (
 	"github.com/odvcencio/buckley/pkg/coordination/security"
 	"github.com/odvcencio/buckley/pkg/encoding/toon"
 	"github.com/odvcencio/buckley/pkg/model"
+	"github.com/odvcencio/buckley/pkg/rules"
 	"github.com/odvcencio/buckley/pkg/storage"
 	"github.com/odvcencio/buckley/pkg/telemetry"
 	"github.com/odvcencio/buckley/pkg/tool"
@@ -113,6 +114,7 @@ type RuntimeDeps struct {
 	Telemetry    *telemetry.Hub
 	SessionID    string
 	UseToon      bool // Use TOON encoding for compact tool results
+	Engine       *rules.Engine
 }
 
 // Runtime is the RLM execution engine.
@@ -128,6 +130,7 @@ type Runtime struct {
 	telemetry   *telemetry.Hub
 	sessionID   string
 	resultCodec *toon.Codec // TOON encoding for compact tool results
+	engine      *rules.Engine
 
 	hooksMu sync.RWMutex
 	hooks   []IterationHook
@@ -161,6 +164,7 @@ func NewRuntime(cfg Config, deps RuntimeDeps) (*Runtime, error) {
 		Conflicts:  conflicts,
 		Approver:   deps.ToolApprover,
 		Bus:        deps.Bus,
+		Engine:     deps.Engine,
 	})
 	if err != nil {
 		return nil, err
@@ -178,6 +182,7 @@ func NewRuntime(cfg Config, deps RuntimeDeps) (*Runtime, error) {
 		telemetry:   deps.Telemetry,
 		sessionID:   strings.TrimSpace(deps.SessionID),
 		resultCodec: toon.New(deps.UseToon),
+		engine:      deps.Engine,
 	}, nil
 }
 
@@ -217,6 +222,24 @@ func (r *Runtime) Execute(ctx context.Context, task string) (*Answer, error) {
 	confidenceThreshold := r.config.Coordinator.ConfidenceThreshold
 	if confidenceThreshold <= 0 {
 		confidenceThreshold = DefaultConfig().Coordinator.ConfidenceThreshold
+	}
+
+	// Evaluate coordinator budget rules to override defaults.
+	if r.engine != nil {
+		matched, evalErr := rules.Eval(r.engine, "coordinator", rules.CoordinatorFacts{
+			EstimatedTokens: maxTokens,
+		})
+		if evalErr == nil && len(matched) > 0 {
+			if mi, ok := matched[0].Params["max_iterations"].(float64); ok && int(mi) > 0 {
+				maxIterations = int(mi)
+			}
+			if mt, ok := matched[0].Params["max_tokens"].(float64); ok && int(mt) > 0 {
+				maxTokens = int(mt)
+			}
+			if ct, ok := matched[0].Params["confidence_threshold"].(float64); ok && ct > 0 {
+				confidenceThreshold = ct
+			}
+		}
 	}
 
 	runtimeDeadline := false
