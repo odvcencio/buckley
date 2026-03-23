@@ -8,6 +8,7 @@ import (
 
 	"github.com/odvcencio/buckley/pkg/config"
 	"github.com/odvcencio/buckley/pkg/gts"
+	"github.com/odvcencio/buckley/pkg/model"
 	"github.com/odvcencio/buckley/pkg/personality"
 	"github.com/odvcencio/buckley/pkg/rules"
 	"github.com/odvcencio/buckley/pkg/storage"
@@ -28,6 +29,7 @@ type Orchestrator struct {
 	batchCoordinator *BatchCoordinator
 	engine           *rules.Engine
 	gtsPipeline      *gts.Pipeline
+	resolver         *model.Resolver
 
 	currentPlan *Plan
 	executor    *Executor
@@ -161,8 +163,21 @@ func NewOrchestrator(store *storage.Store, mgr ModelClient, registry *tool.Regis
 		}
 	}
 
+	// Build central model resolver with arbiter routing strategy.
+	var resolver *model.Resolver
+	if cfg != nil {
+		resolver = model.NewResolver(engine, model.ResolverConfig{
+			Planning:  cfg.Models.Planning,
+			Execution: cfg.Models.Execution,
+			Review:    cfg.Models.Review,
+		}, mgr)
+	}
+
+	planner := NewPlanner(mgr, cfg, store, workflow, planStore)
+	planner.SetResolver(resolver)
+
 	return &Orchestrator{
-		planner:          NewPlanner(mgr, cfg, store, workflow, planStore),
+		planner:          planner,
 		commitGenerator:  NewCommitGenerator(mgr, cfg),
 		prCreator:        NewPRCreator(mgr, cfg),
 		store:            store,
@@ -173,6 +188,7 @@ func NewOrchestrator(store *storage.Store, mgr ModelClient, registry *tool.Regis
 		batchCoordinator: batchCoordinator,
 		engine:           engine,
 		gtsPipeline:      pipeline,
+		resolver:         resolver,
 	}
 }
 
@@ -239,6 +255,7 @@ func (o *Orchestrator) ExecutePlan() error {
 	o.cancelPlan = cancel
 	o.executor = NewExecutor(o.currentPlan, o.store, o.modelClient, o.toolRegistry, o.config, o.planner, o.workflow, o.batchCoordinator, o.engine)
 	o.executor.SetContext(ctx)
+	o.executor.SetResolver(o.resolver)
 	if o.gtsPipeline != nil && o.executor.builder != nil {
 		o.executor.builder.SetEnricher(o.enrichWithGTS)
 	}
@@ -280,6 +297,7 @@ func (o *Orchestrator) ExecuteTask(taskID string) error {
 		o.cancelPlan = cancel
 		o.executor = NewExecutor(o.currentPlan, o.store, o.modelClient, o.toolRegistry, o.config, o.planner, o.workflow, o.batchCoordinator, o.engine)
 		o.executor.SetContext(ctx)
+		o.executor.SetResolver(o.resolver)
 		if o.gtsPipeline != nil && o.executor.builder != nil {
 			o.executor.builder.SetEnricher(o.enrichWithGTS)
 		}

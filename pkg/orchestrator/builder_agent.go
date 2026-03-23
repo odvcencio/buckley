@@ -35,6 +35,7 @@ type BuilderAgent struct {
 	logger       *builderLogger
 	resultCodec  *toon.Codec
 	enricher     ContextEnricher
+	resolver     *model.Resolver
 }
 
 // BuilderResult captures the outcome of a builder run.
@@ -91,6 +92,22 @@ func NewBuilderAgent(plan *Plan, cfg *config.Config, client ModelClient, registr
 		logger:       newBuilderLogger(plan),
 		resultCodec:  toon.New(cfg.Encoding.UseToon),
 	}
+}
+
+// SetResolver attaches a model resolver for arbiter-based model selection.
+func (a *BuilderAgent) SetResolver(r *model.Resolver) {
+	if a == nil {
+		return
+	}
+	a.resolver = r
+}
+
+// resolveModel returns the model ID for the execution phase.
+func (a *BuilderAgent) resolveModel() string {
+	if a.resolver != nil {
+		return a.resolver.Resolve("execution")
+	}
+	return a.config.Models.Execution
 }
 
 // SetEnricher attaches an optional code-intelligence enricher.
@@ -312,7 +329,7 @@ func (a *BuilderAgent) generateImplementation(task *Task) (string, error) {
 	})
 
 	req := model.ChatRequest{
-		Model:       a.config.Models.Execution,
+		Model:       a.resolveModel(),
 		Messages:    messages,
 		ToolChoice:  "auto",
 		Temperature: 0.2,

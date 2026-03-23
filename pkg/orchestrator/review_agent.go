@@ -33,6 +33,23 @@ type ReviewAgent struct {
 	schemaBlock     string
 	personaProvider *personality.PersonaProvider
 	engine          *rules.Engine
+	resolver        *model.Resolver
+}
+
+// SetResolver attaches a model resolver for arbiter-based model selection.
+func (a *ReviewAgent) SetResolver(r *model.Resolver) {
+	if a == nil {
+		return
+	}
+	a.resolver = r
+}
+
+// resolveModel returns the model ID for the review phase.
+func (a *ReviewAgent) resolveModel() string {
+	if a.resolver != nil {
+		return a.resolver.Resolve("review")
+	}
+	return a.config.Models.Review
 }
 
 // SetPersonaProvider swaps the persona provider for upcoming review cycles.
@@ -169,7 +186,7 @@ func (a *ReviewAgent) resolveReasoningEffort() string {
 	result, err := a.engine.EvalStrategy("reasoning", "reasoning_mode", map[string]any{
 		"reasoning": map[string]any{"config": "auto"},
 		"task":      map[string]any{"phase": "review"},
-		"model":     map[string]any{"supports_reasoning": a.modelClient.SupportsReasoning(a.config.Models.Review)},
+		"model":     map[string]any{"supports_reasoning": a.modelClient.SupportsReasoning(a.resolveModel())},
 	})
 	if err != nil {
 		return ""
@@ -190,6 +207,8 @@ func (a *ReviewAgent) Review(task *Task, builderResult *BuilderResult) (*ReviewR
 		return nil, fmt.Errorf("builder result is required for review")
 	}
 
+	reviewModel := a.resolveModel()
+
 	filePaths := a.combineFilePaths(task, builderResult)
 	a.sendProgress("🕵️ Review agent evaluating %q (%d file(s))", task.Title, len(filePaths))
 	contexts := a.loadFileContexts(filePaths)
@@ -207,7 +226,7 @@ func (a *ReviewAgent) Review(task *Task, builderResult *BuilderResult) (*ReviewR
 	defer cancel()
 
 	req := model.ChatRequest{
-		Model: a.config.Models.Review,
+		Model: reviewModel,
 		Messages: []model.Message{
 			{Role: "system", Content: systemPrompt},
 			{Role: "user", Content: prompt},
@@ -217,7 +236,7 @@ func (a *ReviewAgent) Review(task *Task, builderResult *BuilderResult) (*ReviewR
 
 	if effort := a.resolveReasoningEffort(); effort != "" && effort != "none" {
 		req.Reasoning = &model.ReasoningConfig{Effort: effort}
-	} else if a.modelClient.SupportsReasoning(a.config.Models.Review) {
+	} else if a.modelClient.SupportsReasoning(reviewModel) {
 		req.Reasoning = &model.ReasoningConfig{Effort: "high"}
 	}
 
@@ -433,7 +452,7 @@ func (a *ReviewAgent) buildArtifact(resp reviewAgentResponse, now time.Time) *ar
 		PlanningArtifactPath:  planningPath,
 		ExecutionArtifactPath: executionPath,
 		ReviewedAt:            now,
-		ReviewerModel:         a.config.Models.Review,
+		ReviewerModel:         a.resolveModel(),
 		ValidationStrategy: artifact.ValidationStrategy{
 			CriticalPath:  append([]string{}, resp.ValidationStrategy.CriticalPath...),
 			HighRiskAreas: append([]string{}, resp.ValidationStrategy.HighRiskAreas...),

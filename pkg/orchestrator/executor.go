@@ -54,12 +54,21 @@ type Executor struct {
 	batchCoordinator *BatchCoordinator
 	issuesCodec      *toon.Codec
 	engine           *rules.Engine
+	resolver         *model.Resolver
 
 	maxRetries      int
 	maxReviewCycles int
 	retryCount      int
 	retryContext    *RetryContext
 	taskPhases      []TaskPhase
+}
+
+// resolveExecutionModel returns the model ID for the execution phase.
+func (e *Executor) resolveExecutionModel() string {
+	if e.resolver != nil {
+		return e.resolver.Resolve("execution")
+	}
+	return e.config.Models.Execution
 }
 
 // SetPersonaProvider updates sub-agents with refreshed persona definitions.
@@ -124,6 +133,20 @@ func NewExecutor(plan *Plan, store *storage.Store, mgr ModelClient, registry *to
 		taskPhases:       phases,
 		ctx:              ctx,
 		cancel:           cancel,
+	}
+}
+
+// SetResolver propagates a model resolver to builder and reviewer sub-agents.
+func (e *Executor) SetResolver(r *model.Resolver) {
+	if e == nil {
+		return
+	}
+	e.resolver = r
+	if e.builder != nil {
+		e.builder.SetResolver(r)
+	}
+	if ra, ok := e.reviewer.(*ReviewAgent); ok {
+		ra.SetResolver(r)
 	}
 }
 
@@ -708,7 +731,7 @@ func (e *Executor) analyzeAndFix(task *Task, err error) (string, error) {
 		task.Title, err.Error())
 
 	req := model.ChatRequest{
-		Model: e.config.Models.Execution,
+		Model: e.resolveExecutionModel(),
 		Messages: []model.Message{
 			{
 				Role:    "system",
@@ -773,7 +796,7 @@ func (e *Executor) generateReviewFix(task *Task, review *ReviewResult) (string, 
 	)
 
 	req := model.ChatRequest{
-		Model: e.config.Models.Execution,
+		Model: e.resolveExecutionModel(),
 		Messages: []model.Message{
 			{
 				Role:    "system",

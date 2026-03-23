@@ -27,6 +27,7 @@ type Planner struct {
 	systemPrompt    string
 	personaProvider *personality.PersonaProvider
 	engine          *rules.Engine
+	resolver        *model.Resolver
 }
 
 type Plan struct {
@@ -186,7 +187,7 @@ func (p *Planner) resolveReasoningEffort(phase string) string {
 	result, err := p.engine.EvalStrategy("reasoning", "reasoning_mode", map[string]any{
 		"reasoning": map[string]any{"config": "auto"},
 		"task":      map[string]any{"phase": phase},
-		"model":     map[string]any{"supports_reasoning": p.modelClient.SupportsReasoning(p.config.Models.Planning)},
+		"model":     map[string]any{"supports_reasoning": p.modelClient.SupportsReasoning(p.resolveModel())},
 	})
 	if err != nil {
 		return ""
@@ -203,6 +204,8 @@ func (p *Planner) GeneratePlan(featureName, description string) (*Plan, error) {
 	if description == "" {
 		return nil, fmt.Errorf("description cannot be empty")
 	}
+
+	planningModel := p.resolveModel()
 
 	p.sendProgress("🧭 Planning %q – gathering project context", featureName)
 
@@ -222,7 +225,7 @@ func (p *Planner) GeneratePlan(featureName, description string) (*Plan, error) {
 	// 3. Call planning model (no timeout - let it run as long as needed)
 	reqCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	p.sendProgress("🤖 Asking %s to draft the plan…", safeModelName(p.config.Models.Planning))
+	p.sendProgress("🤖 Asking %s to draft the plan…", safeModelName(planningModel))
 
 	systemPrompt := p.systemPrompt
 	if strings.TrimSpace(systemPrompt) == "" {
@@ -234,7 +237,7 @@ func (p *Planner) GeneratePlan(featureName, description string) (*Plan, error) {
 	}
 
 	req := model.ChatRequest{
-		Model: p.config.Models.Planning,
+		Model: planningModel,
 		Messages: []model.Message{
 			{Role: "system", Content: systemPrompt},
 			{Role: "user", Content: prompt},
@@ -245,7 +248,7 @@ func (p *Planner) GeneratePlan(featureName, description string) (*Plan, error) {
 	// Enable reasoning for planning models that support it
 	if effort := p.resolveReasoningEffort("planning"); effort != "" && effort != "none" {
 		req.Reasoning = &model.ReasoningConfig{Effort: effort}
-	} else if p.modelClient.SupportsReasoning(p.config.Models.Planning) {
+	} else if p.modelClient.SupportsReasoning(planningModel) {
 		req.Reasoning = &model.ReasoningConfig{Effort: "high"}
 	}
 
@@ -746,6 +749,23 @@ func containsValidationKeywords(title, description string) bool {
 		}
 	}
 	return false
+}
+
+// SetResolver attaches a model resolver for arbiter-based model selection.
+func (p *Planner) SetResolver(r *model.Resolver) {
+	if p == nil {
+		return
+	}
+	p.resolver = r
+}
+
+// resolveModel returns the model ID for the planning phase.
+// Uses the resolver when available, otherwise falls back to config.
+func (p *Planner) resolveModel() string {
+	if p.resolver != nil {
+		return p.resolver.Resolve("planning")
+	}
+	return p.config.Models.Planning
 }
 
 // SetPersonaProvider updates the planner to use a refreshed persona profile.
