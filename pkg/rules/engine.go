@@ -135,3 +135,16 @@ func (e *Engine) Domains() []string {
 	}
 	return domains
 }
+
+// EvalMap evaluates a rule-based domain against a flat map of facts.
+// It is intended for CLI tooling where facts come from JSON rather than typed structs.
+func EvalMap(e *Engine, domain string, facts map[string]any) ([]vm.MatchedRule, error) {
+	e.mu.RLock()
+	cr, ok := e.compiled[domain]
+	e.mu.RUnlock()
+	if !ok {
+		return nil, fmt.Errorf("unknown rule domain: %s", domain)
+	}
+	dc := arbiter.DataFromMap(facts, cr.Ruleset)
+	return arbiter.Eval(cr.Ruleset, dc)
+}

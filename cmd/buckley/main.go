@@ -581,6 +581,9 @@ func printHelp() {
 	fmt.Println("  doctor                           Quick system health check (alias for config check)")
 	fmt.Println("  completion [bash|zsh|fish]       Generate shell completions")
 	fmt.Println("  worktree create [--container]    Create git worktree")
+	fmt.Println("  rules list                       List loaded rule domains (embedded vs user override)")
+	fmt.Println("  rules check <file.arb>           Validate an .arb file compiles")
+	fmt.Println("  rules eval <domain> <facts.json> Evaluate a domain with JSON facts, print matched rules")
 	fmt.Println("  migrate                          Apply database migrations")
 	fmt.Println("  db backup --out <path>           Create a consistent SQLite backup (VACUUM INTO)")
 	fmt.Println("  db restore --in <path> --force   Restore SQLite backup (stop Buckley first)")
@@ -1099,6 +1102,8 @@ func dispatchSubcommand(args []string) (bool, int) {
 	case "doctor":
 		// Alias for config check - quick system health check
 		return true, runCommand(runConfigCommand, []string{"check"})
+	case "rules":
+		return true, runCommand(runRulesCommand, args[1:])
 	case "completion":
 		return true, runCommand(runCompletionCommand, args[1:])
 	default:
