@@ -93,9 +93,11 @@ func (t *LoggingTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 	// Detect streaming requests - don't buffer these
 	isStreaming := req.Header.Get("Accept") == "text/event-stream"
 
+	const maxBodySize = 50 * 1024 * 1024 // 50MB
+
 	// Capture request body if present
 	if req.Body != nil && req.Body != http.NoBody {
-		bodyBytes, err := io.ReadAll(req.Body)
+		bodyBytes, err := io.ReadAll(io.LimitReader(req.Body, maxBodySize))
 		if err == nil {
 			entry.RequestBody = truncateBody(string(bodyBytes))
 			// Restore the body for the actual request
@@ -119,7 +121,7 @@ func (t *LoggingTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 	// Skip response body capture for streaming requests - this would block
 	// until the entire stream completes, defeating the purpose of streaming
 	if !isStreaming && resp.Body != nil {
-		bodyBytes, readErr := io.ReadAll(resp.Body)
+		bodyBytes, readErr := io.ReadAll(io.LimitReader(resp.Body, maxBodySize))
 		if readErr == nil {
 			entry.ResponseBody = truncateBody(string(bodyBytes))
 			// Restore the body for the caller

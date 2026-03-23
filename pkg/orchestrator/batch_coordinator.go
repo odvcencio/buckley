@@ -157,7 +157,8 @@ func (b *BatchCoordinator) collectJobLogs(ctx context.Context, jobName string) (
 		return "", err
 	}
 	defer stream.Close()
-	data, err := io.ReadAll(stream)
+	const maxPodLogSize = 10 * 1024 * 1024 // 10MB
+	data, err := io.ReadAll(io.LimitReader(stream, maxPodLogSize))
 	if err != nil {
 		return "", err
 	}

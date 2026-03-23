@@ -13,6 +13,8 @@ import (
 	"strings"
 )
 
+const maxWalkDepth = 20
+
 // TODOAnalyzer scans for TODO/FIXME/BUG/HACK comments
 type TODOAnalyzer struct{}
 
@@ -33,6 +35,8 @@ func (a *TODOAnalyzer) Analyze(rootPath string) ([]ImprovementSuggestion, error)
 
 	todoRegex := regexp.MustCompile(`(?i)//\s*(TODO|FIXME|BUG|HACK):?\s*(.*)`)
 
+	rootDepth := strings.Count(filepath.Clean(rootPath), string(os.PathSeparator))
+
 	err := filepath.Walk(rootPath, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return nil // Skip files we can't read
@@ -40,6 +44,10 @@ func (a *TODOAnalyzer) Analyze(rootPath string) ([]ImprovementSuggestion, error)
 
 		// Skip directories and non-Go files for now
 		if info.IsDir() {
+			depth := strings.Count(path, string(os.PathSeparator)) - rootDepth
+			if depth > maxWalkDepth {
+				return filepath.SkipDir
+			}
 			if strings.HasPrefix(info.Name(), ".") || info.Name() == "vendor" {
 				return filepath.SkipDir
 			}

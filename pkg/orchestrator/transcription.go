@@ -156,7 +156,8 @@ func (w *WhisperTranscriber) Transcribe(ctx context.Context, audioPath string) (
 	defer resp.Body.Close()
 
 	// Read response
-	body, err := io.ReadAll(resp.Body)
+	const maxTranscriptionResponseSize = 10 * 1024 * 1024 // 10MB
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxTranscriptionResponseSize))
 	if err != nil {
 		return "", fmt.Errorf("failed to read response: %w", err)
 	}

@@ -427,10 +427,13 @@ func oneshotMinimalOutputEnabled() bool {
 // In graft mode: graft add (with entity extraction) first, then git add as mirror.
 // In git mode: git add only.
 func stageFiles(files []string, useGraft bool, compactOutput bool) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
 	if useGraft {
 		// Graft is primary — stage with full entity extraction
 		args := append([]string{"add"}, files...)
-		cmd := exec.Command("graft", args...)
+		cmd := exec.CommandContext(ctx, "graft", args...)
 		if compactOutput {
 			cmd.Stdout = io.Discard
 			cmd.Stderr = io.Discard
@@ -444,7 +447,7 @@ func stageFiles(files []string, useGraft bool, compactOutput bool) error {
 	}
 	// Always mirror to git (buckley needs git diff for context)
 	gitArgs := append([]string{"add"}, files...)
-	gitCmd := exec.Command("git", gitArgs...)
+	gitCmd := exec.CommandContext(ctx, "git", gitArgs...)
 	gitCmd.Stdout = io.Discard
 	gitCmd.Stderr = io.Discard
 	if err := gitCmd.Run(); err != nil {
@@ -456,8 +459,11 @@ func stageFiles(files []string, useGraft bool, compactOutput bool) error {
 // stageForGraft mirrors the git staging index into graft by running graft add
 // on all files that git reports as staged.
 func stageForGraft(compactOutput bool) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
 	// Get list of git-staged files
-	out, err := exec.Command("git", "diff", "--cached", "--name-only").Output()
+	out, err := exec.CommandContext(ctx, "git", "diff", "--cached", "--name-only").Output()
 	if err != nil {
 		return fmt.Errorf("list staged files: %w", err)
 	}
@@ -473,7 +479,7 @@ func stageForGraft(compactOutput bool) error {
 		return nil
 	}
 	args := append([]string{"add"}, toAdd...)
-	cmd := exec.Command("graft", args...)
+	cmd := exec.CommandContext(ctx, "graft", args...)
 	if compactOutput {
 		cmd.Stdout = io.Discard
 		cmd.Stderr = io.Discard
@@ -485,6 +491,9 @@ func stageForGraft(compactOutput bool) error {
 }
 
 func createCommit(message string, compactOutput bool, useGraft bool) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
 	// Write message to temp file
 	tmp, err := os.CreateTemp("", "buckley-commit-*.txt")
 	if err != nil {
@@ -513,9 +522,9 @@ func createCommit(message string, compactOutput bool, useGraft bool) error {
 	// Run commit — graft uses -m, git uses -F for file-based messages
 	var cmd *exec.Cmd
 	if useGraft {
-		cmd = exec.Command("graft", "commit", "-m", message)
+		cmd = exec.CommandContext(ctx, "graft", "commit", "-m", message)
 	} else {
-		cmd = exec.Command("git", "commit", "-F", tmpPath)
+		cmd = exec.CommandContext(ctx, "git", "commit", "-F", tmpPath)
 	}
 	if compactOutput {
 		var stderr bytes.Buffer
@@ -538,7 +547,7 @@ func createCommit(message string, compactOutput bool, useGraft bool) error {
 
 	// Mirror to git when in graft mode (git is the compatibility layer)
 	if useGraft {
-		gitCmd := exec.Command("git", "commit", "-F", tmpPath)
+		gitCmd := exec.CommandContext(ctx, "git", "commit", "-F", tmpPath)
 		if compactOutput {
 			gitCmd.Stdout = io.Discard
 			gitCmd.Stderr = io.Discard
@@ -553,9 +562,9 @@ func createCommit(message string, compactOutput bool, useGraft bool) error {
 	if !compactOutput {
 		var hash []byte
 		if useGraft {
-			hash, _ = exec.Command("graft", "log", "--format=%H", "-1").Output()
+			hash, _ = exec.CommandContext(ctx, "graft", "log", "--format=%H", "-1").Output()
 		} else {
-			hash, _ = exec.Command("git", "rev-parse", "HEAD").Output()
+			hash, _ = exec.CommandContext(ctx, "git", "rev-parse", "HEAD").Output()
 		}
 		if len(hash) > 0 {
 			termOut.Success("Committed: %s", strings.TrimSpace(string(hash)))
@@ -571,13 +580,16 @@ func pushChanges(compactOutput bool, useGraft bool) error {
 		vcs = "graft"
 	}
 
-	// Get current branch
+	// Get current branch (local git op: 30s)
+	branchCtx, branchCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer branchCancel()
+
 	var branch []byte
 	var err error
 	if useGraft {
-		branch, err = exec.Command("graft", "branch", "--show-current").Output()
+		branch, err = exec.CommandContext(branchCtx, "graft", "branch", "--show-current").Output()
 	} else {
-		branch, err = exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD").Output()
+		branch, err = exec.CommandContext(branchCtx, "git", "rev-parse", "--abbrev-ref", "HEAD").Output()
 	}
 	if err != nil {
 		return nil // Skip push if we can't get branch
@@ -593,14 +605,17 @@ func pushChanges(compactOutput bool, useGraft bool) error {
 		remote = "origin"
 	}
 
-	// Push
+	// Push (network op: 60s)
+	pushCtx, pushCancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer pushCancel()
+
 	var cmd *exec.Cmd
 	if useGraft {
-		cmd = exec.Command("graft", "push", remote, branchName)
+		cmd = exec.CommandContext(pushCtx, "graft", "push", remote, branchName)
 	} else if compactOutput {
-		cmd = exec.Command("git", "push", "--quiet", "-u", remote, branchName)
+		cmd = exec.CommandContext(pushCtx, "git", "push", "--quiet", "-u", remote, branchName)
 	} else {
-		cmd = exec.Command("git", "push", "-u", remote, branchName)
+		cmd = exec.CommandContext(pushCtx, "git", "push", "-u", remote, branchName)
 	}
 	if compactOutput {
 		var stderr bytes.Buffer
@@ -623,7 +638,7 @@ func pushChanges(compactOutput bool, useGraft bool) error {
 
 	// Mirror push to git when in graft mode
 	if useGraft {
-		gitPush := exec.Command("git", "push", "--quiet", "-u", remote, branchName)
+		gitPush := exec.CommandContext(pushCtx, "git", "push", "--quiet", "-u", remote, branchName)
 		gitPush.Stdout = io.Discard
 		gitPush.Stderr = io.Discard
 		_ = gitPush.Run() // best-effort mirror

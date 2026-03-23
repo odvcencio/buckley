@@ -15,6 +15,12 @@ import (
 	"github.com/odvcencio/buckley/pkg/transparency"
 )
 
+const (
+	gitLocalTimeout  = 30 * time.Second
+	gitPushTimeout   = 60 * time.Second
+	ghAPITimeout     = 120 * time.Second
+)
+
 // runPRCommand generates a structured PR via tool-use.
 func runPRCommand(args []string) error {
 	fs := flag.NewFlagSet("pr", flag.ContinueOnError)
@@ -196,7 +202,10 @@ func runPRCommand(args []string) error {
 
 // detectPRBranches returns the current branch and base branch for PR display.
 func detectPRBranches(baseFlag string) (branch, baseBranch string) {
-	if out, err := exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD").Output(); err == nil {
+	ctx, cancel := context.WithTimeout(context.Background(), gitLocalTimeout)
+	defer cancel()
+
+	if out, err := exec.CommandContext(ctx, "git", "rev-parse", "--abbrev-ref", "HEAD").Output(); err == nil {
 		branch = strings.TrimSpace(string(out))
 	}
 	if baseFlag != "" {
@@ -204,7 +213,7 @@ func detectPRBranches(baseFlag string) (branch, baseBranch string) {
 	} else {
 		// Auto-detect main/master
 		for _, candidate := range []string{"main", "master", "develop"} {
-			if err := exec.Command("git", "rev-parse", "--verify", candidate).Run(); err == nil {
+			if err := exec.CommandContext(ctx, "git", "rev-parse", "--verify", candidate).Run(); err == nil {
 				baseBranch = candidate
 				break
 			}
@@ -243,7 +252,10 @@ func printPR(pr *commands.PRResult, branch, baseBranch string) {
 }
 
 func pushCurrentBranch() error {
-	branch, err := exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD").Output()
+	branchCtx, branchCancel := context.WithTimeout(context.Background(), gitLocalTimeout)
+	defer branchCancel()
+
+	branch, err := exec.CommandContext(branchCtx, "git", "rev-parse", "--abbrev-ref", "HEAD").Output()
 	if err != nil {
 		return fmt.Errorf("failed to get current branch: %w", err)
 	}
@@ -257,7 +269,10 @@ func pushCurrentBranch() error {
 	spinner := terminal.NewSpinner(fmt.Sprintf("Pushing to %s/%s...", remote, branchName))
 	spinner.Start()
 
-	cmd := exec.Command("git", "push", "-u", remote, branchName)
+	pushCtx, pushCancel := context.WithTimeout(context.Background(), gitPushTimeout)
+	defer pushCancel()
+
+	cmd := exec.CommandContext(pushCtx, "git", "push", "-u", remote, branchName)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		spinner.StopWithError(fmt.Sprintf("push failed: %s", strings.TrimSpace(string(output))))
@@ -277,10 +292,13 @@ func createPR(pr *commands.PRResult, baseBranch string) error {
 	spinner := terminal.NewSpinner("Creating PR...")
 	spinner.Start()
 
+	ctx, cancel := context.WithTimeout(context.Background(), ghAPITimeout)
+	defer cancel()
+
 	// Create PR using gh
 	body := pr.FormatBody()
 
-	cmd := exec.Command("gh", "pr", "create",
+	cmd := exec.CommandContext(ctx, "gh", "pr", "create",
 		"--title", pr.Title,
 		"--body", body,
 		"--base", baseBranch,

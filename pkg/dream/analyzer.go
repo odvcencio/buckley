@@ -69,6 +69,9 @@ func (a *Analyzer) Analyze() (*CodebaseAnalysis, error) {
 
 // scanDirectory scans the directory structure
 func (a *Analyzer) scanDirectory(analysis *CodebaseAnalysis) error {
+	const maxWalkDepth = 20
+	rootDepth := strings.Count(filepath.Clean(a.rootPath), string(os.PathSeparator))
+
 	return filepath.Walk(a.rootPath, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return nil // Skip errors
@@ -76,6 +79,10 @@ func (a *Analyzer) scanDirectory(analysis *CodebaseAnalysis) error {
 
 		// Skip vendor and hidden directories
 		if info.IsDir() {
+			depth := strings.Count(path, string(os.PathSeparator)) - rootDepth
+			if depth > maxWalkDepth {
+				return filepath.SkipDir
+			}
 			if strings.HasPrefix(info.Name(), ".") || info.Name() == "vendor" || info.Name() == "node_modules" {
 				return filepath.SkipDir
 			}

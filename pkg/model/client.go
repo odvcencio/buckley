@@ -365,7 +365,8 @@ func (c *Client) setHeaders(req *http.Request) {
 // parseError parses an error response and wraps it with additional context
 func (c *Client) parseError(resp *http.Response) error {
 	// Read the body for debugging
-	body, readErr := io.ReadAll(resp.Body)
+	const maxErrorResponseSize = 50 * 1024 * 1024 // 50MB
+	body, readErr := io.ReadAll(io.LimitReader(resp.Body, maxErrorResponseSize))
 	if readErr != nil {
 		return &APIError{
 			StatusCode: resp.StatusCode,
