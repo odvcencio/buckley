@@ -21,6 +21,10 @@ import (
 	"github.com/odvcencio/buckley/pkg/tool"
 )
 
+// ContextEnricher produces an optional code-intelligence section for LLM prompts.
+// If nil or if it returns an empty string, no enrichment is appended.
+type ContextEnricher func(ctx context.Context, taskType string, files []string) string
+
 // BuilderAgent encapsulates implementation generation, tool execution, and telemetry.
 type BuilderAgent struct {
 	plan         *Plan
@@ -30,6 +34,7 @@ type BuilderAgent struct {
 	workflow     *WorkflowManager
 	logger       *builderLogger
 	resultCodec  *toon.Codec
+	enricher     ContextEnricher
 }
 
 // BuilderResult captures the outcome of a builder run.
@@ -86,6 +91,14 @@ func NewBuilderAgent(plan *Plan, cfg *config.Config, client ModelClient, registr
 		logger:       newBuilderLogger(plan),
 		resultCodec:  toon.New(cfg.Encoding.UseToon),
 	}
+}
+
+// SetEnricher attaches an optional code-intelligence enricher.
+func (a *BuilderAgent) SetEnricher(fn ContextEnricher) {
+	if a == nil {
+		return
+	}
+	a.enricher = fn
 }
 
 // Build generates and applies an implementation for the provided task.
@@ -256,6 +269,13 @@ func (a *BuilderAgent) emitBuilderEvent(task *Task, eventType telemetry.EventTyp
 
 func (a *BuilderAgent) generateImplementation(task *Task) (string, error) {
 	prompt := buildImplementationPrompt(task)
+
+	// Append GTS code intelligence if available
+	if a.enricher != nil {
+		if section := a.enricher(context.Background(), "implementation", task.Files); section != "" {
+			prompt += "\n\n" + section
+		}
+	}
 
 	systemMessage := "You are an expert software engineer. Use the available tools to implement tasks. Run commands with run_shell, read/write files with file tools, check git status, etc. Prefer running actual commands over generating fake output.\n\nFor analysis tasks: Just run the commands and report results - you don't need to create files.\nFor implementation tasks: After running any necessary commands, provide code in markdown blocks with filepath: headers."
 	if a.workflow != nil {

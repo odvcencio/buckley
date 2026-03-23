@@ -4,8 +4,10 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/odvcencio/buckley/pkg/config"
+	"github.com/odvcencio/buckley/pkg/gts"
 	"github.com/odvcencio/buckley/pkg/personality"
 	"github.com/odvcencio/buckley/pkg/rules"
 	"github.com/odvcencio/buckley/pkg/storage"
@@ -25,6 +27,7 @@ type Orchestrator struct {
 	workflow         *WorkflowManager
 	batchCoordinator *BatchCoordinator
 	engine           *rules.Engine
+	gtsPipeline      *gts.Pipeline
 
 	currentPlan *Plan
 	executor    *Executor
@@ -37,6 +40,101 @@ func (o *Orchestrator) GetWorkflow() *WorkflowManager {
 		return nil
 	}
 	return o.workflow
+}
+
+// GTSPipeline returns the GTS context pipeline, if configured.
+func (o *Orchestrator) GTSPipeline() *gts.Pipeline {
+	if o == nil {
+		return nil
+	}
+	return o.gtsPipeline
+}
+
+// enrichWithGTS runs the GTS context pipeline and formats the results as a
+// markdown section suitable for appending to an LLM prompt. Returns an empty
+// string when the pipeline is nil or enrichment fails.
+func (o *Orchestrator) enrichWithGTS(ctx context.Context, taskType string, files []string) string {
+	if o == nil || o.gtsPipeline == nil {
+		return ""
+	}
+
+	facts := rules.GTSFacts{
+		TaskType:  taskType,
+		FileCount: len(files),
+	}
+
+	enrichment, err := o.gtsPipeline.Enrich(ctx, facts, files)
+	if err != nil || enrichment == nil {
+		return ""
+	}
+
+	return formatEnrichment(enrichment)
+}
+
+// formatEnrichment converts a ContextEnrichment into a markdown section.
+func formatEnrichment(e *gts.ContextEnrichment) string {
+	if e == nil {
+		return ""
+	}
+
+	var b strings.Builder
+
+	if len(e.Map) > 0 {
+		b.WriteString("## Code Intelligence\n\n")
+		b.WriteString("### File Structure\n")
+		for _, m := range e.Map {
+			b.WriteString(fmt.Sprintf("- **%s**", m.File))
+			if len(m.Symbols) > 0 {
+				names := make([]string, 0, len(m.Symbols))
+				for _, s := range m.Symbols {
+					names = append(names, fmt.Sprintf("%s (%s)", s.Name, s.Kind))
+				}
+				b.WriteString(": " + strings.Join(names, ", "))
+			}
+			b.WriteString("\n")
+		}
+		b.WriteString("\n")
+	}
+
+	if e.Scope != nil && len(e.Scope.InScope) > 0 {
+		b.WriteString("### Scope\n")
+		b.WriteString(fmt.Sprintf("At %s:%d:\n", e.Scope.File, e.Scope.Line))
+		for _, s := range e.Scope.InScope {
+			b.WriteString(fmt.Sprintf("- %s (%s) at %s:%d\n", s.Name, s.Kind, s.File, s.Line))
+		}
+		b.WriteString("\n")
+	}
+
+	if e.Callgraph != nil && len(e.Callgraph.Edges) > 0 {
+		b.WriteString("### Call Graph\n")
+		b.WriteString(fmt.Sprintf("Root: %s (depth %d)\n", e.Callgraph.Root, e.Callgraph.Depth))
+		for _, edge := range e.Callgraph.Edges {
+			b.WriteString(fmt.Sprintf("- %s -> %s\n", edge.Caller, edge.Callee))
+		}
+		b.WriteString("\n")
+	}
+
+	if len(e.DeadCode) > 0 {
+		b.WriteString("### Dead Code\n")
+		for _, s := range e.DeadCode {
+			b.WriteString(fmt.Sprintf("- %s (%s) at %s:%d\n", s.Name, s.Kind, s.File, s.Line))
+		}
+		b.WriteString("\n")
+	}
+
+	if len(e.Impact) > 0 {
+		b.WriteString("### Impact\n")
+		for _, s := range e.Impact {
+			b.WriteString(fmt.Sprintf("- %s (%s) at %s:%d\n", s.Name, s.Kind, s.File, s.Line))
+		}
+		b.WriteString("\n")
+	}
+
+	if e.Degraded && b.Len() > 0 {
+		b.WriteString("*Note: Code intelligence results may be incomplete (degraded mode).*\n\n")
+	}
+
+	return b.String()
 }
 
 // RefreshPersonaProvider propagates persona updates to planner/executor components.
@@ -53,7 +151,7 @@ func (o *Orchestrator) RefreshPersonaProvider(provider *personality.PersonaProvi
 }
 
 // NewOrchestrator creates a new orchestrator
-func NewOrchestrator(store *storage.Store, mgr ModelClient, registry *tool.Registry, cfg *config.Config, workflow *WorkflowManager, planStore PlanStore, engine *rules.Engine) *Orchestrator {
+func NewOrchestrator(store *storage.Store, mgr ModelClient, registry *tool.Registry, cfg *config.Config, workflow *WorkflowManager, planStore PlanStore, engine *rules.Engine, pipeline *gts.Pipeline) *Orchestrator {
 	var batchCoordinator *BatchCoordinator
 	if cfg != nil && cfg.Batch.Enabled {
 		if bc, err := NewBatchCoordinator(cfg.Batch, workflow); err != nil {
@@ -74,6 +172,7 @@ func NewOrchestrator(store *storage.Store, mgr ModelClient, registry *tool.Regis
 		workflow:         workflow,
 		batchCoordinator: batchCoordinator,
 		engine:           engine,
+		gtsPipeline:      pipeline,
 	}
 }
 
@@ -140,6 +239,9 @@ func (o *Orchestrator) ExecutePlan() error {
 	o.cancelPlan = cancel
 	o.executor = NewExecutor(o.currentPlan, o.store, o.modelClient, o.toolRegistry, o.config, o.planner, o.workflow, o.batchCoordinator, o.engine)
 	o.executor.SetContext(ctx)
+	if o.gtsPipeline != nil && o.executor.builder != nil {
+		o.executor.builder.SetEnricher(o.enrichWithGTS)
+	}
 
 	// Execute all tasks
 	if err := o.executor.Execute(); err != nil {
@@ -178,6 +280,9 @@ func (o *Orchestrator) ExecuteTask(taskID string) error {
 		o.cancelPlan = cancel
 		o.executor = NewExecutor(o.currentPlan, o.store, o.modelClient, o.toolRegistry, o.config, o.planner, o.workflow, o.batchCoordinator, o.engine)
 		o.executor.SetContext(ctx)
+		if o.gtsPipeline != nil && o.executor.builder != nil {
+			o.executor.builder.SetEnricher(o.enrichWithGTS)
+		}
 	}
 
 	// Execute task

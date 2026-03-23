@@ -26,6 +26,7 @@ import (
 	acppb "github.com/odvcencio/buckley/pkg/acp/proto"
 	acpserver "github.com/odvcencio/buckley/pkg/acp/server"
 	"github.com/odvcencio/buckley/pkg/config"
+	"github.com/odvcencio/buckley/pkg/gts"
 	projectcontext "github.com/odvcencio/buckley/pkg/context"
 	coordination "github.com/odvcencio/buckley/pkg/coordination/coordinator"
 	coordevents "github.com/odvcencio/buckley/pkg/coordination/events"
@@ -80,10 +81,18 @@ var newOrchestratorFn = func(store *storage.Store, mgr *model.Manager, registry 
 			arbEngine = e
 		}
 	}
+
+	// Create GTS context pipeline if the gts binary is available.
+	var gtsPipeline *gts.Pipeline
+	if gtsBinary, err := exec.LookPath("gts"); err == nil {
+		runner := gts.NewRunner(gts.WithBinary(gtsBinary), gts.WithTimeout(30*time.Second), gts.WithMemLimit(2048))
+		gtsPipeline = gts.NewPipeline(runner, arbEngine, nil)
+	}
+
 	if cfg != nil && cfg.ExecutionMode() == config.ExecutionModeRLM {
 		return rlmrunner.New(store, mgr, registry, cfg, workflow, planStore)
 	}
-	return orchestrator.NewOrchestrator(store, mgr, registry, cfg, workflow, planStore, arbEngine)
+	return orchestrator.NewOrchestrator(store, mgr, registry, cfg, workflow, planStore, arbEngine, gtsPipeline)
 }
 
 type startupOptions struct {
