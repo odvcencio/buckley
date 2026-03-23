@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
@@ -30,15 +32,11 @@ func runCommitCommand(args []string) error {
 	dryRun := fs.Bool("dry-run", false, "print the generated commit message without committing")
 	yes := fs.Bool("yes", false, "skip confirmation prompts and run git commit")
 	pushFlag := fs.Bool("push", true, "push current branch after committing")
-<<<<<<< Updated upstream
-	verbose := fs.Bool("verbose", false, "show model reasoning and full trace")
-=======
 	verbose := fs.Bool("verbose", false, "stream model reasoning as it happens")
 	minimalOutput := fs.Bool("minimal-output", false, "minimize output (prints commit message and critical errors only)")
 	minAlias := fs.Bool("min", false, "alias for --minimal-output")
 	graftMode := fs.Bool("graft", false, "use graft commit/push instead of git")
 	trace := fs.Bool("trace", false, "show context audit and reasoning trace after completion")
->>>>>>> Stashed changes
 	showCost := fs.Bool("cost", true, "show token/cost breakdown")
 	modelFlag := fs.String("model", "", "model to use (default: BUCKLEY_MODEL_COMMIT or execution model)")
 	timeout := fs.Duration("timeout", 2*time.Minute, "timeout for model request")
@@ -46,8 +44,6 @@ func runCommitCommand(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-<<<<<<< Updated upstream
-=======
 	compactOutput := *minimalOutput || *minAlias || oneshotMinimalOutputEnabled()
 	useGraft := *graftMode || os.Getenv("BUCKLEY_USE_GRAFT") == "1"
 	filesToStage := fs.Args() // remaining positional args are files to stage
@@ -58,7 +54,6 @@ func runCommitCommand(args []string) error {
 			return fmt.Errorf("staging failed: %w", err)
 		}
 	}
->>>>>>> Stashed changes
 
 	// Initialize dependencies
 	cfg, mgr, store, err := initDependenciesFn()
@@ -150,12 +145,12 @@ func runCommitCommand(args []string) error {
 	}
 
 	// Show context audit (what was sent)
-	if *verbose && result.ContextAudit != nil {
+	if (*verbose || *trace) && result.ContextAudit != nil {
 		printContextAudit(result.ContextAudit)
 	}
 
 	// Show reasoning (for thinking models)
-	if *verbose && result.Trace != nil && result.Trace.Reasoning != "" {
+	if (*verbose || *trace) && result.Trace != nil && result.Trace.Reasoning != "" {
 		printReasoning(result.Trace.Reasoning)
 	}
 
@@ -208,21 +203,13 @@ func runCommitCommand(args []string) error {
 doCommit:
 
 	// Create the commit
-<<<<<<< Updated upstream
-	if err := createCommit(message); err != nil {
-=======
 	if err := createCommit(message, compactOutput, useGraft); err != nil {
->>>>>>> Stashed changes
 		return err
 	}
 
 	// Push if requested
 	if *pushFlag {
-<<<<<<< Updated upstream
-		if err := pushChanges(); err != nil {
-=======
 		if err := pushChanges(compactOutput, useGraft); err != nil {
->>>>>>> Stashed changes
 			return err
 		}
 	}
@@ -450,9 +437,12 @@ func printWarnings(warnings []commitgen.Warning) {
 	}
 }
 
-<<<<<<< Updated upstream
-func createCommit(message string) error {
-=======
+// oneshotMinimalOutputEnabled checks if minimal output is enabled via environment.
+func oneshotMinimalOutputEnabled() bool {
+	v := os.Getenv("BUCKLEY_MINIMAL_OUTPUT")
+	return v == "1" || v == "true"
+}
+
 // stageFiles stages the given files with the appropriate VCS.
 // In graft mode: graft add (with entity extraction) first, then git add as mirror.
 // In git mode: git add only.
@@ -515,7 +505,6 @@ func stageForGraft(compactOutput bool) error {
 }
 
 func createCommit(message string, compactOutput bool, useGraft bool) error {
->>>>>>> Stashed changes
 	// Write message to temp file
 	tmp, err := os.CreateTemp("", "buckley-commit-*.txt")
 	if err != nil {
@@ -529,14 +518,6 @@ func createCommit(message string, compactOutput bool, useGraft bool) error {
 		return fmt.Errorf("write commit message: %w", err)
 	}
 
-<<<<<<< Updated upstream
-	// Run git commit
-	cmd := exec.Command("git", "commit", "-F", tmpPath)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("git commit failed: %w", err)
-=======
 	vcs := "git"
 	if useGraft {
 		vcs = "graft"
@@ -573,7 +554,6 @@ func createCommit(message string, compactOutput bool, useGraft bool) error {
 		if err := cmd.Run(); err != nil {
 			return fmt.Errorf("%s commit failed: %w", vcs, err)
 		}
->>>>>>> Stashed changes
 	}
 
 	// Mirror to git when in graft mode (git is the compatibility layer)
@@ -590,11 +570,6 @@ func createCommit(message string, compactOutput bool, useGraft bool) error {
 	}
 
 	// Show commit hash
-<<<<<<< Updated upstream
-	hash, _ := exec.Command("git", "rev-parse", "HEAD").Output()
-	if len(hash) > 0 {
-		termOut.Success("Committed: %s", strings.TrimSpace(string(hash)))
-=======
 	if !compactOutput {
 		var hash []byte
 		if useGraft {
@@ -605,22 +580,17 @@ func createCommit(message string, compactOutput bool, useGraft bool) error {
 		if len(hash) > 0 {
 			termOut.Success("Committed: %s", strings.TrimSpace(string(hash)))
 		}
->>>>>>> Stashed changes
 	}
 
 	return nil
 }
 
-<<<<<<< Updated upstream
-func pushChanges() error {
-=======
 func pushChanges(compactOutput bool, useGraft bool) error {
 	vcs := "git"
 	if useGraft {
 		vcs = "graft"
 	}
 
->>>>>>> Stashed changes
 	// Get current branch
 	var branch []byte
 	var err error
@@ -644,16 +614,6 @@ func pushChanges(compactOutput bool, useGraft bool) error {
 	}
 
 	// Push
-<<<<<<< Updated upstream
-	cmd := exec.Command("git", "push", "-u", remote, branchName)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("git push failed: %w", err)
-	}
-
-	termOut.Success("Pushed to %s/%s", remote, branchName)
-=======
 	var cmd *exec.Cmd
 	if useGraft {
 		cmd = exec.Command("graft", "push", remote, branchName)
@@ -692,6 +652,5 @@ func pushChanges(compactOutput bool, useGraft bool) error {
 	if !compactOutput {
 		termOut.Success("Pushed to %s/%s", remote, branchName)
 	}
->>>>>>> Stashed changes
 	return nil
 }
