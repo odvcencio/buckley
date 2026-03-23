@@ -13,16 +13,33 @@ const defaultMaxRetries = 3
 
 // Framework provides a single execution engine for all oneshot commands.
 // It replaces the duplicated Runner types in commit/, pr/, and rlm/.
+//
+// The framework routes execution based on which interface a definition implements:
+//   - Definition    -> single-tool invoke+retry (commit, PR)
+//   - RLMDefinition -> full RLM sub-agent with multi-turn tool access (review)
 type Framework struct {
-	invoker *DefaultInvoker
-	engine  *rules.Engine
+	invoker   *DefaultInvoker
+	rlmRunner *RLMRunner
+	engine    *rules.Engine
 }
 
 // NewFramework creates a new oneshot framework.
+// The invoker is required for Definition-based commands.
+// Use WithRLMRunner to enable RLMDefinition-based commands.
 func NewFramework(invoker *DefaultInvoker, engine *rules.Engine) *Framework {
 	return &Framework{
 		invoker: invoker,
 		engine:  engine,
+	}
+}
+
+// WithRLMRunner returns a copy of the framework with the given RLM runner.
+// This enables execution of RLMDefinition-based commands (e.g., review).
+func (f *Framework) WithRLMRunner(runner *RLMRunner) *Framework {
+	return &Framework{
+		invoker:   f.invoker,
+		rlmRunner: runner,
+		engine:    f.engine,
 	}
 }
 
@@ -126,6 +143,58 @@ func (f *Framework) Run(ctx context.Context, def Definition, opts RunOpts) (*Run
 		Trace:        lastTrace,
 		ContextAudit: audit,
 	}, fmt.Errorf("failed after %d attempts for command %q", maxRetries, def.Name())
+}
+
+// RLMRunOpts configures an RLM framework execution.
+type RLMRunOpts struct {
+	// UserPrompt is the task prompt sent to the RLM agent.
+	UserPrompt string
+
+	// Audit is an optional pre-built context audit for transparency.
+	Audit *transparency.ContextAudit
+}
+
+// RunRLM executes an RLM-based oneshot command using the full sub-agent pipeline:
+//  1. Validate the RLM runner is configured
+//  2. Execute the sub-agent with multi-turn tool access
+//  3. Parse the free-form response into typed output
+//  4. Return the parsed result with transparency data
+func (f *Framework) RunRLM(ctx context.Context, def RLMDefinition, opts RLMRunOpts) (*RunResult, error) {
+	if f.rlmRunner == nil {
+		return nil, fmt.Errorf("RLM runner is required for command %q (configure with WithRLMRunner)", def.Name())
+	}
+
+	// Build audit if not provided
+	audit := opts.Audit
+	if audit == nil {
+		audit = transparency.NewContextAudit()
+	}
+	if opts.UserPrompt != "" {
+		audit.Add("user prompt", contextEstimateTokens(opts.UserPrompt))
+	}
+
+	// Execute with RLM sub-agent
+	rlmResult, err := f.rlmRunner.Run(ctx, def.SystemPrompt(), opts.UserPrompt, def.AllowedTools())
+	if err != nil {
+		return &RunResult{
+			ContextAudit: audit,
+		}, fmt.Errorf("RLM execution failed for %q: %w", def.Name(), err)
+	}
+
+	// Parse the free-form response
+	value, err := def.ParseResult(rlmResult.Response)
+	if err != nil {
+		return &RunResult{
+			Trace:        rlmResult.Trace,
+			ContextAudit: audit,
+		}, fmt.Errorf("parse result for %q: %w", def.Name(), err)
+	}
+
+	return &RunResult{
+		Value:        value,
+		Trace:        rlmResult.Trace,
+		ContextAudit: audit,
+	}, nil
 }
 
 // resolveMaxRetries determines the retry count from opts, arbiter, or defaults.

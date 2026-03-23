@@ -10,7 +10,8 @@ import (
 	"time"
 
 	"github.com/odvcencio/buckley/pkg/model"
-	"github.com/odvcencio/buckley/pkg/oneshot/review"
+	"github.com/odvcencio/buckley/pkg/oneshot"
+	"github.com/odvcencio/buckley/pkg/oneshot/commands"
 	"github.com/odvcencio/buckley/pkg/terminal"
 	"github.com/odvcencio/buckley/pkg/tool"
 	"github.com/odvcencio/buckley/pkg/transparency"
@@ -72,13 +73,16 @@ func runReviewCommand(args []string) error {
 		registry.ConfigureContainers(cfg, cwd)
 	}
 
-	// Create runner with RLM for full tool access
-	runner := review.NewRunner(review.RunnerConfig{
+	// Create RLM runner for the framework
+	rlmRunner := oneshot.NewRLMRunner(oneshot.RLMRunnerConfig{
 		Models:   mgr,
 		Registry: registry,
-		ModelID:  modelID,
 		Ledger:   ledger,
+		ModelID:  modelID,
 	})
+
+	// Create unified framework with RLM support
+	framework := oneshot.NewFramework(nil, nil).WithRLMRunner(rlmRunner)
 
 	// Run with timeout
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
@@ -89,82 +93,108 @@ func runReviewCommand(args []string) error {
 		termOut.Dim("Using model: %s", modelID)
 	}
 
-	var result *review.RunResult
-	var runErr error
+	var reviewText string
+	var parsed *commands.ParsedReview
+	var trace *transparency.Trace
+	var contextAudit *transparency.ContextAudit
 
 	if *projectMode {
 		// Review entire project
 		spinner := terminal.NewSpinner("Analyzing project...")
 		spinner.Start()
 
-		opts := review.DefaultProjectContextOptions()
-		result, runErr = runner.ReviewProject(ctx, opts)
+		opts := commands.DefaultProjectContextOptions()
+		projectCtx, audit, err := commands.AssembleProjectContext(opts)
+		if err != nil {
+			spinner.StopWithError(err.Error())
+			return fmt.Errorf("assemble context: %w", err)
+		}
+		contextAudit = audit
+
+		userPrompt := commands.BuildProjectPrompt(projectCtx)
+		fwResult, runErr := framework.RunRLM(ctx, commands.ReviewProjectDef{}, oneshot.RLMRunOpts{
+			UserPrompt: userPrompt,
+			Audit:      audit,
+		})
 
 		if runErr != nil {
 			spinner.StopWithError(runErr.Error())
-		} else if result.Error != nil {
-			spinner.StopWithError(result.Error.Error())
-		} else {
-			spinner.StopWithSuccess("Project review complete")
+			return fmt.Errorf("review failed: %w", runErr)
 		}
+
+		spinner.StopWithSuccess("Project review complete")
+
+		if rlmResult, ok := fwResult.Value.(*commands.ReviewRLMResult); ok {
+			reviewText = rlmResult.Review
+			parsed = rlmResult.Parsed
+		}
+		trace = fwResult.Trace
 	} else {
 		// Review branch against base
 		spinner := terminal.NewSpinner("Analyzing branch changes...")
 		spinner.Start()
 
-		opts := review.DefaultBranchContextOptions()
+		opts := commands.DefaultBranchContextOptions()
 		opts.BaseBranch = *baseBranch
 		opts.IncludeUnstaged = *includeUnstaged
 
-		result, runErr = runner.ReviewBranch(ctx, opts)
+		branchCtx, audit, err := commands.AssembleBranchContext(opts)
+		if err != nil {
+			spinner.StopWithError(err.Error())
+			return fmt.Errorf("assemble context: %w", err)
+		}
+		contextAudit = audit
+
+		userPrompt := commands.BuildBranchPrompt(branchCtx)
+		fwResult, runErr := framework.RunRLM(ctx, commands.ReviewBranchDef{}, oneshot.RLMRunOpts{
+			UserPrompt: userPrompt,
+			Audit:      audit,
+		})
 
 		if runErr != nil {
 			spinner.StopWithError(runErr.Error())
-		} else if result.Error != nil {
-			spinner.StopWithError(result.Error.Error())
-		} else {
-			spinner.StopWithSuccess("Branch review complete")
+			return fmt.Errorf("review failed: %w", runErr)
 		}
-	}
 
-	if runErr != nil {
-		return fmt.Errorf("review failed: %w", runErr)
+		spinner.StopWithSuccess("Branch review complete")
+
+		if rlmResult, ok := fwResult.Value.(*commands.ReviewRLMResult); ok {
+			reviewText = rlmResult.Review
+			parsed = rlmResult.Parsed
+		}
+		trace = fwResult.Trace
 	}
 
 	// Show context audit if verbose
-	if *verbose && result.ContextAudit != nil {
-		printReviewContextAudit(result.ContextAudit)
-	}
-
-	// Check for errors
-	if result.Error != nil {
-		printReviewError(result.Error, result.Trace)
-		return result.Error
+	if *verbose && contextAudit != nil {
+		printReviewContextAudit(contextAudit)
 	}
 
 	// Output review
-	if result.Review == "" {
+	if reviewText == "" {
 		return fmt.Errorf("no review generated")
 	}
 
 	// Write to file or stdout
 	if *outputFile != "" {
-		if err := os.WriteFile(*outputFile, []byte(result.Review), 0o644); err != nil {
+		if err := os.WriteFile(*outputFile, []byte(reviewText), 0o644); err != nil {
 			return fmt.Errorf("failed to write output file: %w", err)
 		}
 		termOut.Success("Review written to %s", *outputFile)
 	} else {
-		printReview(result.Review)
+		printReview(reviewText)
 	}
 
 	// Show cost
-	if *showCost && result.Trace != nil {
-		printReviewCost(result.Trace, ledger)
+	if *showCost && trace != nil {
+		printReviewCost(trace, ledger)
 	}
 
 	// Interactive menu for fixing findings
 	if *interactive && *outputFile == "" {
-		parsed := result.Parse()
+		if parsed == nil && reviewText != "" {
+			parsed = commands.ParseReview(reviewText)
+		}
 		if parsed != nil && len(parsed.Findings) > 0 {
 			runReviewMenu(ctx, parsed, mgr, registry, modelID, ledger, *timeout)
 		}
@@ -227,7 +257,7 @@ func printReviewError(err error, trace *transparency.Trace) {
 }
 
 // runReviewMenu displays an interactive menu to fix findings.
-func runReviewMenu(ctx context.Context, parsed *review.ParsedReview, mgr *model.Manager, registry *tool.Registry, modelID string, ledger *transparency.CostLedger, timeout time.Duration) {
+func runReviewMenu(ctx context.Context, parsed *commands.ParsedReview, mgr *model.Manager, registry *tool.Registry, modelID string, ledger *transparency.CostLedger, timeout time.Duration) {
 	// Print grade summary
 	printGradeSummary(parsed)
 
@@ -286,20 +316,20 @@ func runReviewMenu(ctx context.Context, parsed *review.ParsedReview, mgr *model.
 }
 
 // printGradeSummary shows the grade and finding counts.
-func printGradeSummary(parsed *review.ParsedReview) {
+func printGradeSummary(parsed *commands.ParsedReview) {
 	termOut.Newline()
 	termOut.Divider()
 
 	// Grade with color
 	gradeColor := ""
 	switch parsed.Grade {
-	case review.GradeA:
+	case commands.GradeA:
 		gradeColor = "✓"
-	case review.GradeB:
+	case commands.GradeB:
 		gradeColor = "●"
-	case review.GradeC, review.GradeD:
+	case commands.GradeC, commands.GradeD:
 		gradeColor = "!"
-	case review.GradeF:
+	case commands.GradeF:
 		gradeColor = "✗"
 	}
 
@@ -326,7 +356,7 @@ func printGradeSummary(parsed *review.ParsedReview) {
 }
 
 // buildReviewMenuItems creates menu items from findings.
-func buildReviewMenuItems(parsed *review.ParsedReview) []terminal.MenuItem {
+func buildReviewMenuItems(parsed *commands.ParsedReview) []terminal.MenuItem {
 	var items []terminal.MenuItem
 
 	// Add individual findings
@@ -370,8 +400,8 @@ func buildReviewMenuItems(parsed *review.ParsedReview) []terminal.MenuItem {
 	return items
 }
 
-// fixFinding uses RLM to apply a fix for a finding.
-func fixFinding(ctx context.Context, finding *review.Finding, mgr *model.Manager, registry *tool.Registry, modelID string, ledger *transparency.CostLedger, timeout time.Duration) error {
+// fixFinding uses the framework's RLM execution to apply a fix for a finding.
+func fixFinding(ctx context.Context, finding *commands.Finding, mgr *model.Manager, registry *tool.Registry, modelID string, ledger *transparency.CostLedger, timeout time.Duration) error {
 	termOut.Newline()
 	termOut.Header(fmt.Sprintf("Fixing %s: %s", finding.ID, finding.Title))
 
@@ -385,40 +415,38 @@ func fixFinding(ctx context.Context, finding *review.Finding, mgr *model.Manager
 	// Build fix prompt
 	prompt := buildFixPrompt(finding)
 
-	// Create runner
-	runner := review.NewRunner(review.RunnerConfig{
+	// Create RLM runner for fix
+	rlmRunner := oneshot.NewRLMRunner(oneshot.RLMRunnerConfig{
 		Models:   mgr,
 		Registry: registry,
 		ModelID:  modelID,
 		Ledger:   ledger,
 	})
+	framework := oneshot.NewFramework(nil, nil).WithRLMRunner(rlmRunner)
 
-	// Execute fix using RLM
-	result, err := runner.FixFinding(fixCtx, finding, prompt)
+	// Execute fix using framework's RLM path
+	fwResult, err := framework.RunRLM(fixCtx, commands.FixFindingDef{}, oneshot.RLMRunOpts{
+		UserPrompt: prompt,
+	})
 	if err != nil {
 		spinner.StopWithError(err.Error())
 		return err
 	}
 
-	if result.Error != nil {
-		spinner.StopWithError(result.Error.Error())
-		return result.Error
-	}
-
 	spinner.StopWithSuccess("Fix applied")
 
 	// Show what was done
-	if result.Summary != "" {
+	if fixResult, ok := fwResult.Value.(*commands.FixResult); ok && fixResult.Summary != "" {
 		termOut.Newline()
 		termOut.Info("Changes made:")
-		termOut.Println(result.Summary)
+		termOut.Println(fixResult.Summary)
 	}
 
 	return nil
 }
 
 // buildFixPrompt creates the prompt for fixing a finding.
-func buildFixPrompt(finding *review.Finding) string {
+func buildFixPrompt(finding *commands.Finding) string {
 	var sb strings.Builder
 
 	sb.WriteString("Fix the following code review finding:\n\n")

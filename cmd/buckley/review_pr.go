@@ -8,7 +8,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/odvcencio/buckley/pkg/oneshot/review"
+	"github.com/odvcencio/buckley/pkg/oneshot"
+	"github.com/odvcencio/buckley/pkg/oneshot/commands"
 	"github.com/odvcencio/buckley/pkg/terminal"
 	"github.com/odvcencio/buckley/pkg/tool"
 	"github.com/odvcencio/buckley/pkg/transparency"
@@ -69,13 +70,16 @@ func runReviewPRCommand(args []string) error {
 		registry.ConfigureContainers(cfg, cwd)
 	}
 
-	// Create runner with RLM for full tool access
-	runner := review.NewRunner(review.RunnerConfig{
+	// Create RLM runner for the framework
+	rlmRunner := oneshot.NewRLMRunner(oneshot.RLMRunnerConfig{
 		Models:   mgr,
 		Registry: registry,
-		ModelID:  modelID,
 		Ledger:   ledger,
+		ModelID:  modelID,
 	})
+
+	// Create unified framework with RLM support
+	framework := oneshot.NewFramework(nil, nil).WithRLMRunner(rlmRunner)
 
 	// Run with timeout
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
@@ -90,52 +94,61 @@ func runReviewPRCommand(args []string) error {
 	spinner := terminal.NewSpinner("Fetching PR details...")
 	spinner.Start()
 
-	result, runErr := runner.ReviewPR(ctx, prArg)
+	// Assemble PR context
+	prCtx, audit, err := commands.AssemblePRContext(prArg)
+	if err != nil {
+		spinner.StopWithError(err.Error())
+		return fmt.Errorf("assemble PR context: %w", err)
+	}
+
+	// Build prompt and run through framework
+	userPrompt := commands.BuildPRPrompt(prCtx)
+	fwResult, runErr := framework.RunRLM(ctx, commands.ReviewPRDef{}, oneshot.RLMRunOpts{
+		UserPrompt: userPrompt,
+		Audit:      audit,
+	})
 
 	if runErr != nil {
 		spinner.StopWithError(runErr.Error())
 		return fmt.Errorf("review failed: %w", runErr)
-	} else if result.Error != nil {
-		spinner.StopWithError(result.Error.Error())
-	} else {
-		spinner.StopWithSuccess("PR review complete")
+	}
+
+	spinner.StopWithSuccess("PR review complete")
+
+	var reviewText string
+	if rlmResult, ok := fwResult.Value.(*commands.ReviewRLMResult); ok {
+		reviewText = rlmResult.Review
 	}
 
 	// Show context audit if verbose
-	if *verbose && result.ContextAudit != nil {
-		printReviewContextAudit(result.ContextAudit)
-	}
-
-	// Check for errors
-	if result.Error != nil {
-		printReviewError(result.Error, result.Trace)
-		return result.Error
+	if *verbose && audit != nil {
+		printReviewContextAudit(audit)
 	}
 
 	// Output review
-	if result.Review == "" {
+	if reviewText == "" {
 		return fmt.Errorf("no review generated")
 	}
 
 	// Write to file or stdout
 	if *outputFile != "" {
-		if err := os.WriteFile(*outputFile, []byte(result.Review), 0o644); err != nil {
+		if err := os.WriteFile(*outputFile, []byte(reviewText), 0o644); err != nil {
 			return fmt.Errorf("failed to write output file: %w", err)
 		}
 		termOut.Success("Review written to %s", *outputFile)
 	} else {
-		printPRReview(result.Review, result.PRInfo)
+		printPRReview(reviewText, prCtx.PR)
 	}
 
 	// Show cost
-	if *showCost && result.Trace != nil {
-		printReviewCost(result.Trace, ledger)
+	if *showCost && fwResult.Trace != nil {
+		printReviewCost(fwResult.Trace, ledger)
 	}
 
 	return nil
 }
 
-func printPRReview(reviewText string, prInfo *review.PRInfo) {
+func printPRReview(reviewText string, prInfo *commands.PRInfo) {
 	termOut.Newline()
 	if prInfo != nil {
 		termOut.Header(fmt.Sprintf("PR #%d: %s", prInfo.Number, prInfo.Title))

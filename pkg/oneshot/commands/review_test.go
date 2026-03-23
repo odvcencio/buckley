@@ -1,10 +1,9 @@
-package review
+package commands
 
 import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 func TestDefaultBranchContextOptions(t *testing.T) {
@@ -13,7 +12,7 @@ func TestDefaultBranchContextOptions(t *testing.T) {
 	assert.Equal(t, 200_000, opts.MaxDiffBytes)
 	assert.True(t, opts.IncludeUnstaged)
 	assert.True(t, opts.IncludeAgents)
-	assert.Empty(t, opts.BaseBranch) // Auto-detect
+	assert.Empty(t, opts.BaseBranch)
 }
 
 func TestDefaultProjectContextOptions(t *testing.T) {
@@ -131,12 +130,12 @@ func TestEstimateTokens(t *testing.T) {
 		{"abc", 1},
 		{"abcd", 1},
 		{"abcde", 2},
-		{"Hello, World!", 4}, // 13 chars -> (13+3)/4 = 4
+		{"Hello, World!", 4},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {
-			assert.Equal(t, tt.expected, estimateTokens(tt.input))
+			assert.Equal(t, tt.expected, reviewEstimateTokens(tt.input))
 		})
 	}
 }
@@ -159,7 +158,7 @@ func TestBuildBranchPrompt(t *testing.T) {
 		RecentLog: "abc123 Some commit",
 	}
 
-	prompt := buildBranchPrompt(ctx)
+	prompt := BuildBranchPrompt(ctx)
 
 	assert.Contains(t, prompt, "Repository Information")
 	assert.Contains(t, prompt, "/home/user/project")
@@ -183,7 +182,7 @@ func TestBuildBranchPrompt_WithUnstaged(t *testing.T) {
 		Unstaged:   "unstaged changes here",
 	}
 
-	prompt := buildBranchPrompt(ctx)
+	prompt := BuildBranchPrompt(ctx)
 
 	assert.Contains(t, prompt, "Unstaged Changes")
 	assert.Contains(t, prompt, "unstaged changes here")
@@ -198,7 +197,7 @@ func TestBuildBranchPrompt_WithAgentsMD(t *testing.T) {
 		AgentsMD:   "# Project Guidelines\n\nFollow these rules...",
 	}
 
-	prompt := buildBranchPrompt(ctx)
+	prompt := BuildBranchPrompt(ctx)
 
 	assert.Contains(t, prompt, "Project Guidelines (AGENTS.md)")
 	assert.Contains(t, prompt, "Follow these rules")
@@ -213,7 +212,7 @@ func TestBuildProjectPrompt(t *testing.T) {
 		RecentLog: "abc123 Initial commit",
 	}
 
-	prompt := buildProjectPrompt(ctx)
+	prompt := BuildProjectPrompt(ctx)
 
 	assert.Contains(t, prompt, "Repository Information")
 	assert.Contains(t, prompt, "/home/user/project")
@@ -238,7 +237,7 @@ func TestBuildProjectPrompt_WithAllFields(t *testing.T) {
 		RecentLog:   "commits",
 	}
 
-	prompt := buildProjectPrompt(ctx)
+	prompt := BuildProjectPrompt(ctx)
 
 	assert.Contains(t, prompt, "develop")
 	assert.Contains(t, prompt, "directory tree")
@@ -249,48 +248,6 @@ func TestBuildProjectPrompt_WithAllFields(t *testing.T) {
 	assert.Contains(t, prompt, "Project README")
 	assert.Contains(t, prompt, "AGENTS.md")
 	assert.Contains(t, prompt, "AGENTS guidelines")
-}
-
-func TestNewRunner(t *testing.T) {
-	cfg := RunnerConfig{
-		Invoker: nil, // Will be nil in tests
-		Ledger:  nil,
-	}
-
-	runner := NewRunner(cfg)
-	require.NotNil(t, runner)
-}
-
-func TestGetDiffStats(t *testing.T) {
-	// This test verifies the parsing logic, not the git command
-	// We can't easily test the git command without a real repo
-
-	// Test the stats parsing with mock data
-	output := "10\t5\tfile1.go\n20\t3\tfile2.go\n-\t-\tbinary.bin"
-
-	// Simulate what getDiffStats does internally
-	var stats DiffStats
-	for _, line := range []string{"10\t5\tfile1.go", "20\t3\tfile2.go", "-\t-\tbinary.bin"} {
-		parts := []string{}
-		for _, p := range []string{"10", "5", "file1.go"} {
-			parts = append(parts, p)
-		}
-		if line == "10\t5\tfile1.go" {
-			stats.Files++
-			stats.Insertions += 10
-			stats.Deletions += 5
-		} else if line == "20\t3\tfile2.go" {
-			stats.Files++
-			stats.Insertions += 20
-			stats.Deletions += 3
-		}
-		// binary.bin would be skipped due to "-" values
-	}
-
-	_ = output // Just to use it
-	assert.Equal(t, 2, stats.Files)
-	assert.Equal(t, 30, stats.Insertions)
-	assert.Equal(t, 8, stats.Deletions)
 }
 
 func TestFileChange(t *testing.T) {
@@ -351,64 +308,165 @@ func TestProjectContext_Fields(t *testing.T) {
 	assert.NotEmpty(t, ctx.RecentLog)
 }
 
-func TestRunResult_Fields(t *testing.T) {
-	result := RunResult{
-		Review:       "Some review content",
-		Trace:        nil,
-		ContextAudit: nil,
-		Error:        nil,
+func TestReviewRLMResult_Fields(t *testing.T) {
+	result := ReviewRLMResult{
+		Review: "Some review content",
+		Parsed: nil,
 	}
 
 	assert.Equal(t, "Some review content", result.Review)
-	assert.Nil(t, result.Trace)
-	assert.Nil(t, result.ContextAudit)
-	assert.Nil(t, result.Error)
+	assert.Nil(t, result.Parsed)
 }
 
-func TestVerificationTools_Definitions(t *testing.T) {
-	tools := NewVerificationTools("/tmp")
-	defs := tools.Definitions()
+func TestReviewBranchDef_Interface(t *testing.T) {
+	def := ReviewBranchDef{}
 
-	// Should have 5 verification tools
-	assert.Len(t, defs, 5)
+	assert.Equal(t, "review", def.Name())
+	assert.NotEmpty(t, def.SystemPrompt())
+	assert.Contains(t, def.AllowedTools(), "read")
+	assert.Contains(t, def.AllowedTools(), "bash")
+	assert.Contains(t, def.AllowedTools(), "write")
 
-	// Check tool names
-	names := make(map[string]bool)
-	for _, d := range defs {
-		names[d.Name] = true
+	result, err := def.ParseResult("## Grade: A\n\nLooks good")
+	assert.NoError(t, err)
+	assert.NotNil(t, result)
+
+	rlmResult, ok := result.(*ReviewRLMResult)
+	assert.True(t, ok)
+	assert.Equal(t, "## Grade: A\n\nLooks good", rlmResult.Review)
+	assert.NotNil(t, rlmResult.Parsed)
+	assert.Equal(t, GradeA, rlmResult.Parsed.Grade)
+}
+
+func TestReviewProjectDef_Interface(t *testing.T) {
+	def := ReviewProjectDef{}
+
+	assert.Equal(t, "review-project", def.Name())
+	assert.NotEmpty(t, def.SystemPrompt())
+	assert.Contains(t, def.AllowedTools(), "read")
+	assert.NotContains(t, def.AllowedTools(), "write")
+}
+
+func TestReviewPRDef_Interface(t *testing.T) {
+	def := ReviewPRDef{}
+
+	assert.Equal(t, "review-pr", def.Name())
+	assert.NotEmpty(t, def.SystemPrompt())
+	assert.Contains(t, def.AllowedTools(), "bash")
+	assert.NotContains(t, def.AllowedTools(), "write")
+}
+
+func TestFixFindingDef_Interface(t *testing.T) {
+	def := FixFindingDef{}
+
+	assert.Equal(t, "fix-finding", def.Name())
+	assert.NotEmpty(t, def.SystemPrompt())
+	assert.Contains(t, def.AllowedTools(), "write")
+
+	result, err := def.ParseResult("Fixed the bug")
+	assert.NoError(t, err)
+	fixResult, ok := result.(*FixResult)
+	assert.True(t, ok)
+	assert.Equal(t, "Fixed the bug", fixResult.Summary)
+}
+
+func TestParseReview_Grade(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected Grade
+	}{
+		{"## Grade: A\n\nGreat code", GradeA},
+		{"## Grade: B\n\nGood code", GradeB},
+		{"## Grade: C\n\nOk code", GradeC},
+		{"## Grade: D\n\nNeeds work", GradeD},
+		{"## Grade: F\n\nBroken", GradeF},
+		{"No grade here", ""},
 	}
 
-	assert.True(t, names["read_file"])
-	assert.True(t, names["search_code"])
-	assert.True(t, names["verify_build"])
-	assert.True(t, names["run_tests"])
-	assert.True(t, names["list_files"])
+	for _, tt := range tests {
+		t.Run(string(tt.expected), func(t *testing.T) {
+			parsed := ParseReview(tt.input)
+			assert.Equal(t, tt.expected, parsed.Grade)
+		})
+	}
 }
 
-func TestVerificationTools_Execute_UnknownTool(t *testing.T) {
-	tools := NewVerificationTools("/tmp")
-	_, err := tools.Execute("unknown_tool", []byte(`{}`))
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "unknown tool")
+func TestParseReview_Findings(t *testing.T) {
+	review := `## Grade: C
+
+## Summary
+Code has issues.
+
+## Findings
+
+### FINDING-001: [CRITICAL] SQL injection vulnerability
+- **File**: pkg/db/query.go:42
+- **Evidence**: Uses string concatenation
+- **Impact**: Data breach risk
+- **Fix**: Use parameterized queries
+
+### FINDING-002: [MINOR] Missing error check
+- **File**: pkg/api/handler.go:15
+- **Evidence**: err is ignored
+- **Impact**: Silent failures
+- **Fix**: Check and handle error
+
+## Verdict
+- **Approved**: NO
+- **Blockers**: FINDING-001
+- **Suggestions**: FINDING-002
+`
+
+	parsed := ParseReview(review)
+
+	assert.Equal(t, GradeC, parsed.Grade)
+	assert.Len(t, parsed.Findings, 2)
+
+	assert.Equal(t, "FINDING-001", parsed.Findings[0].ID)
+	assert.Equal(t, SeverityCritical, parsed.Findings[0].Severity)
+	assert.Equal(t, "SQL injection vulnerability", parsed.Findings[0].Title)
+	assert.Equal(t, "pkg/db/query.go", parsed.Findings[0].File)
+	assert.Equal(t, 42, parsed.Findings[0].Line)
+
+	assert.Equal(t, "FINDING-002", parsed.Findings[1].ID)
+	assert.Equal(t, SeverityMinor, parsed.Findings[1].Severity)
+
+	assert.False(t, parsed.Approved)
+	assert.Equal(t, []string{"FINDING-001"}, parsed.Blockers)
+	assert.Equal(t, []string{"FINDING-002"}, parsed.Suggestions)
 }
 
-func TestVerificationTools_Execute_ReadFile_PathRequired(t *testing.T) {
-	tools := NewVerificationTools("/tmp")
-	_, err := tools.Execute("read_file", []byte(`{}`))
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "path is required")
+func TestParsedReview_FilterMethods(t *testing.T) {
+	parsed := &ParsedReview{
+		Findings: []Finding{
+			{ID: "FINDING-001", Severity: SeverityCritical},
+			{ID: "FINDING-002", Severity: SeverityMajor},
+			{ID: "FINDING-003", Severity: SeverityMinor},
+			{ID: "FINDING-004", Severity: SeverityMinor},
+		},
+	}
+
+	assert.Len(t, parsed.CriticalFindings(), 1)
+	assert.Len(t, parsed.MajorFindings(), 1)
+	assert.Len(t, parsed.MinorFindings(), 2)
+	assert.Len(t, parsed.BlockingFindings(), 2)
+	assert.True(t, parsed.HasBlockers())
+
+	f := parsed.FindingByID("FINDING-002")
+	assert.NotNil(t, f)
+	assert.Equal(t, SeverityMajor, f.Severity)
+
+	f = parsed.FindingByID("FINDING-999")
+	assert.Nil(t, f)
 }
 
-func TestVerificationTools_Execute_SearchCode_PatternRequired(t *testing.T) {
-	tools := NewVerificationTools("/tmp")
-	_, err := tools.Execute("search_code", []byte(`{}`))
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "pattern is required")
-}
+func TestParsedReview_NoBlockers(t *testing.T) {
+	parsed := &ParsedReview{
+		Findings: []Finding{
+			{ID: "FINDING-001", Severity: SeverityMinor},
+		},
+	}
 
-func TestVerificationTools_Execute_ListFiles_PatternRequired(t *testing.T) {
-	tools := NewVerificationTools("/tmp")
-	_, err := tools.Execute("list_files", []byte(`{}`))
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "pattern is required")
+	assert.False(t, parsed.HasBlockers())
+	assert.Len(t, parsed.BlockingFindings(), 0)
 }

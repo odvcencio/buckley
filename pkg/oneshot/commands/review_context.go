@@ -1,4 +1,4 @@
-package review
+package commands
 
 import (
 	"fmt"
@@ -59,7 +59,7 @@ type BranchContextOptions struct {
 	MaxDiffBytes    int
 	IncludeUnstaged bool
 	IncludeAgents   bool
-	BaseBranch      string // Defaults to main or master
+	BaseBranch      string
 }
 
 // DefaultBranchContextOptions returns sensible defaults.
@@ -68,7 +68,7 @@ func DefaultBranchContextOptions() BranchContextOptions {
 		MaxDiffBytes:    200_000,
 		IncludeUnstaged: true,
 		IncludeAgents:   true,
-		BaseBranch:      "", // Auto-detect
+		BaseBranch:      "",
 	}
 }
 
@@ -91,81 +91,71 @@ func AssembleBranchContext(opts BranchContextOptions) (*BranchContext, *transpar
 	audit := transparency.NewContextAudit()
 	ctx := &BranchContext{}
 
-	// Get repo root
-	root, err := gitOutput("rev-parse", "--show-toplevel")
+	root, err := reviewGitOutput("rev-parse", "--show-toplevel")
 	if err != nil {
 		return nil, nil, fmt.Errorf("not in a git repository: %w", err)
 	}
 	ctx.RepoRoot = strings.TrimSpace(root)
 
-	// Get current branch
-	branch, _ := gitOutput("rev-parse", "--abbrev-ref", "HEAD")
+	branch, _ := reviewGitOutput("rev-parse", "--abbrev-ref", "HEAD")
 	ctx.Branch = strings.TrimSpace(branch)
-	audit.Add("branch", estimateTokens(ctx.Branch))
+	audit.Add("branch", reviewEstimateTokens(ctx.Branch))
 
-	// Determine base branch
 	ctx.BaseBranch = opts.BaseBranch
 	if ctx.BaseBranch == "" {
 		ctx.BaseBranch = detectBaseBranch()
 	}
-	audit.Add("base branch", estimateTokens(ctx.BaseBranch))
+	audit.Add("base branch", reviewEstimateTokens(ctx.BaseBranch))
 
-	// Get files changed from base
-	nameStatus, err := gitOutput("diff", "--name-status", ctx.BaseBranch+"...HEAD")
+	nameStatus, err := reviewGitOutput("diff", "--name-status", ctx.BaseBranch+"...HEAD")
 	if err != nil {
-		// Try without ...HEAD syntax
-		nameStatus, err = gitOutput("diff", "--name-status", ctx.BaseBranch)
+		nameStatus, err = reviewGitOutput("diff", "--name-status", ctx.BaseBranch)
 		if err != nil {
 			return nil, nil, fmt.Errorf("failed to get changed files: %w", err)
 		}
 	}
 	ctx.Files = parseNameStatus(nameStatus)
-	audit.Add("changed files", estimateTokens(nameStatus))
+	audit.Add("changed files", reviewEstimateTokens(nameStatus))
 
-	// Get diff from base
-	diff, truncated, err := gitOutputLimited(opts.MaxDiffBytes, "diff", ctx.BaseBranch+"...HEAD")
+	diff, truncated, err := reviewGitOutputLimited(opts.MaxDiffBytes, "diff", ctx.BaseBranch+"...HEAD")
 	if err != nil {
-		diff, truncated, err = gitOutputLimited(opts.MaxDiffBytes, "diff", ctx.BaseBranch)
+		diff, truncated, err = reviewGitOutputLimited(opts.MaxDiffBytes, "diff", ctx.BaseBranch)
 	}
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to get diff: %w", err)
 	}
 	ctx.Diff = diff
-	diffTokens := estimateTokens(diff)
+	diffTokens := reviewEstimateTokens(diff)
 	if truncated {
 		audit.AddTruncated("git diff", diffTokens, opts.MaxDiffBytes/4)
 	} else {
 		audit.Add("git diff", diffTokens)
 	}
 
-	// Get stats
 	ctx.Stats = getDiffStats(ctx.BaseBranch)
 	if ctx.Stats.Files == 0 {
 		ctx.Stats.Files = len(ctx.Files)
 	}
 
-	// Get unstaged changes if requested
 	if opts.IncludeUnstaged {
-		unstaged, _ := gitOutput("diff")
+		unstaged, _ := reviewGitOutput("diff")
 		if strings.TrimSpace(unstaged) != "" {
 			ctx.Unstaged = unstaged
-			audit.Add("unstaged changes", estimateTokens(unstaged))
+			audit.Add("unstaged changes", reviewEstimateTokens(unstaged))
 		}
 	}
 
-	// Get recent log
-	log, _ := gitOutput("log", "--oneline", "-20", ctx.BaseBranch+"..HEAD")
+	log, _ := reviewGitOutput("log", "--oneline", "-20", ctx.BaseBranch+"..HEAD")
 	if strings.TrimSpace(log) != "" {
 		ctx.RecentLog = log
-		audit.Add("recent commits", estimateTokens(log))
+		audit.Add("recent commits", reviewEstimateTokens(log))
 	}
 
-	// Load AGENTS.md
 	if opts.IncludeAgents {
 		agentsPath := filepath.Join(ctx.RepoRoot, "AGENTS.md")
-		if content, err := readFileLimited(agentsPath, 10_000); err == nil && content != "" {
+		if content, err := reviewReadFileLimited(agentsPath, 10_000); err == nil && content != "" {
 			ctx.AgentsMD = content
-			audit.Add("AGENTS.md", estimateTokens(content))
+			audit.Add("AGENTS.md", reviewEstimateTokens(content))
 		}
 	}
 
@@ -177,85 +167,174 @@ func AssembleProjectContext(opts ProjectContextOptions) (*ProjectContext, *trans
 	audit := transparency.NewContextAudit()
 	ctx := &ProjectContext{}
 
-	// Get repo root
-	root, err := gitOutput("rev-parse", "--show-toplevel")
+	root, err := reviewGitOutput("rev-parse", "--show-toplevel")
 	if err != nil {
 		return nil, nil, fmt.Errorf("not in a git repository: %w", err)
 	}
 	ctx.RepoRoot = strings.TrimSpace(root)
 
-	// Get current branch
-	branch, _ := gitOutput("rev-parse", "--abbrev-ref", "HEAD")
+	branch, _ := reviewGitOutput("rev-parse", "--abbrev-ref", "HEAD")
 	ctx.Branch = strings.TrimSpace(branch)
-	audit.Add("branch", estimateTokens(ctx.Branch))
+	audit.Add("branch", reviewEstimateTokens(ctx.Branch))
 
-	// Get directory tree
 	tree, _ := getTree(ctx.RepoRoot, opts.MaxTreeDepth)
 	if tree != "" {
 		ctx.Tree = tree
-		audit.Add("directory tree", estimateTokens(tree))
+		audit.Add("directory tree", reviewEstimateTokens(tree))
 	}
 
-	// Load key config files
 	goModPath := filepath.Join(ctx.RepoRoot, "go.mod")
-	if content, err := readFileLimited(goModPath, 5_000); err == nil && content != "" {
+	if content, err := reviewReadFileLimited(goModPath, 5_000); err == nil && content != "" {
 		ctx.GoMod = content
-		audit.Add("go.mod", estimateTokens(content))
+		audit.Add("go.mod", reviewEstimateTokens(content))
 	}
 
 	pkgJSONPath := filepath.Join(ctx.RepoRoot, "package.json")
-	if content, err := readFileLimited(pkgJSONPath, 5_000); err == nil && content != "" {
+	if content, err := reviewReadFileLimited(pkgJSONPath, 5_000); err == nil && content != "" {
 		ctx.PackageJSON = content
-		audit.Add("package.json", estimateTokens(content))
+		audit.Add("package.json", reviewEstimateTokens(content))
 	}
 
-	// Load README
 	readmePath := filepath.Join(ctx.RepoRoot, "README.md")
-	if content, err := readFileLimited(readmePath, 20_000); err == nil && content != "" {
+	if content, err := reviewReadFileLimited(readmePath, 20_000); err == nil && content != "" {
 		ctx.ReadmeMD = content
-		audit.Add("README.md", estimateTokens(content))
+		audit.Add("README.md", reviewEstimateTokens(content))
 	}
 
-	// Load AGENTS.md
 	if opts.IncludeAgents {
 		agentsPath := filepath.Join(ctx.RepoRoot, "AGENTS.md")
-		if content, err := readFileLimited(agentsPath, 10_000); err == nil && content != "" {
+		if content, err := reviewReadFileLimited(agentsPath, 10_000); err == nil && content != "" {
 			ctx.AgentsMD = content
-			audit.Add("AGENTS.md", estimateTokens(content))
+			audit.Add("AGENTS.md", reviewEstimateTokens(content))
 		}
 	}
 
-	// Get recent log
-	log, _ := gitOutput("log", "--oneline", "-30")
+	log, _ := reviewGitOutput("log", "--oneline", "-30")
 	if strings.TrimSpace(log) != "" {
 		ctx.RecentLog = log
-		audit.Add("recent commits", estimateTokens(log))
+		audit.Add("recent commits", reviewEstimateTokens(log))
 	}
 
 	return ctx, audit, nil
 }
 
-// detectBaseBranch tries to find main or master branch.
-func detectBaseBranch() string {
-	// Check if main exists
-	if _, err := gitOutput("rev-parse", "--verify", "main"); err == nil {
-		return "main"
+// BuildBranchPrompt builds the user prompt for branch review.
+func BuildBranchPrompt(ctx *BranchContext) string {
+	var sb strings.Builder
+
+	sb.WriteString("## Repository Information\n\n")
+	sb.WriteString(fmt.Sprintf("- **Root**: %s\n", ctx.RepoRoot))
+	sb.WriteString(fmt.Sprintf("- **Branch**: %s\n", ctx.Branch))
+	sb.WriteString(fmt.Sprintf("- **Base Branch**: %s\n", ctx.BaseBranch))
+	sb.WriteString("\n")
+
+	if ctx.RecentLog != "" {
+		sb.WriteString("## Commits on this Branch\n\n")
+		sb.WriteString("```\n")
+		sb.WriteString(ctx.RecentLog)
+		sb.WriteString("\n```\n\n")
 	}
-	// Check if master exists
-	if _, err := gitOutput("rev-parse", "--verify", "master"); err == nil {
-		return "master"
+
+	sb.WriteString("## Files Changed\n\n")
+	sb.WriteString(fmt.Sprintf("**Summary**: %d files, +%d/-%d lines\n\n",
+		ctx.Stats.Files, ctx.Stats.Insertions, ctx.Stats.Deletions))
+
+	sb.WriteString("```\n")
+	for _, f := range ctx.Files {
+		sb.WriteString(fmt.Sprintf("%s\t%s\n", f.Status, f.Path))
 	}
-	// Check remote
-	if _, err := gitOutput("rev-parse", "--verify", "origin/main"); err == nil {
-		return "origin/main"
+	sb.WriteString("```\n\n")
+
+	sb.WriteString("## Full Diff\n\n")
+	sb.WriteString("```diff\n")
+	sb.WriteString(ctx.Diff)
+	sb.WriteString("\n```\n\n")
+
+	if ctx.Unstaged != "" {
+		sb.WriteString("## Unstaged Changes (not yet committed)\n\n")
+		sb.WriteString("```diff\n")
+		sb.WriteString(ctx.Unstaged)
+		sb.WriteString("\n```\n\n")
 	}
-	if _, err := gitOutput("rev-parse", "--verify", "origin/master"); err == nil {
-		return "origin/master"
+
+	if ctx.AgentsMD != "" {
+		sb.WriteString("## Project Guidelines (AGENTS.md)\n\n")
+		sb.WriteString(ctx.AgentsMD)
+		sb.WriteString("\n\n")
 	}
-	return "main" // Default
+
+	return sb.String()
 }
 
-// parseNameStatus parses git diff --name-status output.
+// BuildProjectPrompt builds the user prompt for project review.
+func BuildProjectPrompt(ctx *ProjectContext) string {
+	var sb strings.Builder
+
+	sb.WriteString("## Repository Information\n\n")
+	sb.WriteString(fmt.Sprintf("- **Root**: %s\n", ctx.RepoRoot))
+	sb.WriteString(fmt.Sprintf("- **Branch**: %s\n", ctx.Branch))
+	sb.WriteString("\n")
+
+	if ctx.Tree != "" {
+		sb.WriteString("## Project Structure\n\n")
+		sb.WriteString("```\n")
+		sb.WriteString(ctx.Tree)
+		sb.WriteString("\n```\n\n")
+	}
+
+	if ctx.GoMod != "" {
+		sb.WriteString("## go.mod\n\n")
+		sb.WriteString("```\n")
+		sb.WriteString(ctx.GoMod)
+		sb.WriteString("\n```\n\n")
+	}
+
+	if ctx.PackageJSON != "" {
+		sb.WriteString("## package.json\n\n")
+		sb.WriteString("```json\n")
+		sb.WriteString(ctx.PackageJSON)
+		sb.WriteString("\n```\n\n")
+	}
+
+	if ctx.ReadmeMD != "" {
+		sb.WriteString("## README.md\n\n")
+		sb.WriteString(ctx.ReadmeMD)
+		sb.WriteString("\n\n")
+	}
+
+	if ctx.AgentsMD != "" {
+		sb.WriteString("## AGENTS.md\n\n")
+		sb.WriteString(ctx.AgentsMD)
+		sb.WriteString("\n\n")
+	}
+
+	if ctx.RecentLog != "" {
+		sb.WriteString("## Recent Git History\n\n")
+		sb.WriteString("```\n")
+		sb.WriteString(ctx.RecentLog)
+		sb.WriteString("\n```\n\n")
+	}
+
+	return sb.String()
+}
+
+// detectBaseBranch tries to find main or master branch.
+func detectBaseBranch() string {
+	if _, err := reviewGitOutput("rev-parse", "--verify", "main"); err == nil {
+		return "main"
+	}
+	if _, err := reviewGitOutput("rev-parse", "--verify", "master"); err == nil {
+		return "master"
+	}
+	if _, err := reviewGitOutput("rev-parse", "--verify", "origin/main"); err == nil {
+		return "origin/main"
+	}
+	if _, err := reviewGitOutput("rev-parse", "--verify", "origin/master"); err == nil {
+		return "origin/master"
+	}
+	return "main"
+}
+
 func parseNameStatus(output string) []FileChange {
 	var changes []FileChange
 	for _, line := range strings.Split(output, "\n") {
@@ -280,11 +359,10 @@ func parseNameStatus(output string) []FileChange {
 	return changes
 }
 
-// getDiffStats extracts diff statistics.
 func getDiffStats(base string) DiffStats {
-	output, err := gitOutput("diff", "--numstat", base+"...HEAD")
+	output, err := reviewGitOutput("diff", "--numstat", base+"...HEAD")
 	if err != nil {
-		output, _ = gitOutput("diff", "--numstat", base)
+		output, _ = reviewGitOutput("diff", "--numstat", base)
 	}
 	if output == "" {
 		return DiffStats{}
@@ -312,14 +390,12 @@ func getDiffStats(base string) DiffStats {
 	return stats
 }
 
-// getTree generates a directory tree.
 func getTree(root string, maxDepth int) (string, error) {
 	args := []string{"-L", strconv.Itoa(maxDepth), "-I", "node_modules|.git|vendor|__pycache__|.venv|target", "--dirsfirst"}
 	cmd := exec.Command("tree", args...)
 	cmd.Dir = root
 	output, err := cmd.Output()
 	if err != nil {
-		// Fallback to find if tree not installed
 		cmd := exec.Command("find", ".", "-maxdepth", strconv.Itoa(maxDepth), "-type", "d", "-not", "-path", "*/.*", "-not", "-path", "*/node_modules/*", "-not", "-path", "*/vendor/*")
 		cmd.Dir = root
 		output, err = cmd.Output()
@@ -330,16 +406,14 @@ func getTree(root string, maxDepth int) (string, error) {
 	return string(output), nil
 }
 
-// estimateTokens provides a rough token estimate.
-func estimateTokens(s string) int {
+func reviewEstimateTokens(s string) int {
 	if s == "" {
 		return 0
 	}
 	return (len(s) + 3) / 4
 }
 
-// gitOutput runs a git command and returns output.
-func gitOutput(args ...string) (string, error) {
+func reviewGitOutput(args ...string) (string, error) {
 	cmd := exec.Command("git", append([]string{"--no-pager"}, args...)...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -348,8 +422,7 @@ func gitOutput(args ...string) (string, error) {
 	return strings.TrimSpace(string(output)), nil
 }
 
-// gitOutputLimited runs git with output limit.
-func gitOutputLimited(maxBytes int, args ...string) (string, bool, error) {
+func reviewGitOutputLimited(maxBytes int, args ...string) (string, bool, error) {
 	cmd := exec.Command("git", append([]string{"--no-pager"}, args...)...)
 	output, err := cmd.Output()
 	if err != nil {
@@ -362,8 +435,7 @@ func gitOutputLimited(maxBytes int, args ...string) (string, bool, error) {
 	return strings.TrimSpace(string(output)), false, nil
 }
 
-// readFileLimited reads a file up to maxBytes.
-func readFileLimited(path string, maxBytes int) (string, error) {
+func reviewReadFileLimited(path string, maxBytes int) (string, error) {
 	cmd := exec.Command("head", "-c", strconv.Itoa(maxBytes), path)
 	output, err := cmd.Output()
 	if err != nil {

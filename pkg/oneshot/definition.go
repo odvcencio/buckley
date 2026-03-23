@@ -58,3 +58,26 @@ type Definition interface {
 	// Unmarshal deserializes the raw tool call result into a typed value.
 	Unmarshal(result json.RawMessage) (any, error)
 }
+
+// RLMDefinition describes a oneshot command that requires full RLM sub-agent
+// execution with multi-turn tool access (read, write, bash, grep, glob).
+//
+// Commands implementing this interface are dispatched through RunRLM instead
+// of the single-tool invoke+retry loop used by Definition.
+//
+// The framework detects which interface a definition implements and routes:
+//   - Definition     -> single-tool invoke+retry (commit, PR)
+//   - RLMDefinition  -> full RLM sub-agent execution (review)
+type RLMDefinition interface {
+	// Name returns the command name.
+	Name() string
+
+	// SystemPrompt returns the system prompt for the RLM agent.
+	SystemPrompt() string
+
+	// AllowedTools returns tool names the agent may use (e.g., "read", "bash").
+	AllowedTools() []string
+
+	// ParseResult processes the free-form agent response into typed output.
+	ParseResult(response string) (any, error)
+}
