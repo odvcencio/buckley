@@ -641,8 +641,28 @@ func (e *Executor) handleError(task *Task, err error) error {
 	e.retryCount++
 	e.retryContext.Attempt++
 
-	// Check if we're stuck in a loop with the same error
 	currentError := err.Error()
+
+	// Arbiter-based retry evaluation
+	if e.engine != nil {
+		matched, evalErr := rules.Eval(e.engine, "retry", rules.RetryFacts{
+			Attempt:       e.retryContext.Attempt,
+			MaxAttempts:   e.maxRetries,
+			SameError:     e.retryContext.PreviousError == currentError,
+			NoFileChanges: !e.retryContext.Changed,
+			ErrorText:     currentError,
+		})
+		if evalErr == nil && len(matched) > 0 {
+			if matched[0].Action == "Abort" {
+				reason, _ := matched[0].Params["reason"].(string)
+				return fmt.Errorf("arbiter retry abort (%s): %w", reason, err)
+			}
+			// Action == "Retry" — fall through to fix-and-retry below
+		}
+		// Eval error or no matches — fall through to legacy logic
+	}
+
+	// Legacy fallback: check if we're stuck in a loop with the same error
 	if e.retryContext.Attempt > 1 && e.retryContext.PreviousError == currentError && !e.retryContext.Changed {
 		// Same error and no changes - we're in a dead-end loop
 		return fmt.Errorf("retry loop detected: same error '%s' repeated without progress after %d attempts", currentError, e.retryContext.Attempt)

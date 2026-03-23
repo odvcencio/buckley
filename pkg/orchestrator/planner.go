@@ -14,6 +14,7 @@ import (
 	"github.com/odvcencio/buckley/pkg/config"
 	"github.com/odvcencio/buckley/pkg/model"
 	"github.com/odvcencio/buckley/pkg/personality"
+	"github.com/odvcencio/buckley/pkg/rules"
 	"github.com/odvcencio/buckley/pkg/storage"
 )
 
@@ -25,6 +26,7 @@ type Planner struct {
 	planStore       PlanStore
 	systemPrompt    string
 	personaProvider *personality.PersonaProvider
+	engine          *rules.Engine
 }
 
 type Plan struct {
@@ -132,7 +134,7 @@ func defaultPlanningSystemPrompt(useToon bool, personaSection string) string {
 	return b.String()
 }
 
-func NewPlanner(mgr ModelClient, cfg *config.Config, store *storage.Store, workflow *WorkflowManager, planStore PlanStore) *Planner {
+func NewPlanner(mgr ModelClient, cfg *config.Config, store *storage.Store, workflow *WorkflowManager, planStore PlanStore, engine ...*rules.Engine) *Planner {
 	if planStore == nil {
 		planDir := cfg.Artifacts.PlanningDir
 		if strings.TrimSpace(planDir) == "" {
@@ -159,6 +161,10 @@ func NewPlanner(mgr ModelClient, cfg *config.Config, store *storage.Store, workf
 	if personaProvider != nil {
 		personaSection = personaProvider.SectionForPhase("planning")
 	}
+	var eng *rules.Engine
+	if len(engine) > 0 && engine[0] != nil {
+		eng = engine[0]
+	}
 	return &Planner{
 		modelClient:     mgr,
 		config:          cfg,
@@ -167,7 +173,26 @@ func NewPlanner(mgr ModelClient, cfg *config.Config, store *storage.Store, workf
 		planStore:       planStore,
 		systemPrompt:    defaultPlanningSystemPrompt(useToon, personaSection),
 		personaProvider: personaProvider,
+		engine:          eng,
 	}
+}
+
+// resolveReasoningEffort uses the arbiter reasoning strategy to determine
+// the reasoning effort level. Returns "" if the engine is nil or evaluation fails.
+func (p *Planner) resolveReasoningEffort(phase string) string {
+	if p.engine == nil {
+		return ""
+	}
+	result, err := p.engine.EvalStrategy("reasoning", "reasoning_mode", map[string]any{
+		"reasoning": map[string]any{"config": "auto"},
+		"task":      map[string]any{"phase": phase},
+		"model":     map[string]any{"supports_reasoning": p.modelClient.SupportsReasoning(p.config.Models.Planning)},
+	})
+	if err != nil {
+		return ""
+	}
+	effort, _ := result.Params["effort"].(string)
+	return effort
 }
 
 func (p *Planner) GeneratePlan(featureName, description string) (*Plan, error) {
@@ -218,7 +243,9 @@ func (p *Planner) GeneratePlan(featureName, description string) (*Plan, error) {
 	}
 
 	// Enable reasoning for planning models that support it
-	if p.modelClient.SupportsReasoning(p.config.Models.Planning) {
+	if effort := p.resolveReasoningEffort("planning"); effort != "" && effort != "none" {
+		req.Reasoning = &model.ReasoningConfig{Effort: effort}
+	} else if p.modelClient.SupportsReasoning(p.config.Models.Planning) {
 		req.Reasoning = &model.ReasoningConfig{Effort: "high"}
 	}
 

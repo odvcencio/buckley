@@ -17,6 +17,7 @@ import (
 	"github.com/odvcencio/buckley/pkg/paths"
 	"github.com/odvcencio/buckley/pkg/personality"
 	"github.com/odvcencio/buckley/pkg/prompts"
+	"github.com/odvcencio/buckley/pkg/rules"
 	"github.com/odvcencio/buckley/pkg/tool"
 )
 
@@ -31,6 +32,7 @@ type ReviewAgent struct {
 	logger          *reviewLogger
 	schemaBlock     string
 	personaProvider *personality.PersonaProvider
+	engine          *rules.Engine
 }
 
 // SetPersonaProvider swaps the persona provider for upcoming review cycles.
@@ -116,7 +118,7 @@ func reviewSchemaBlock(useToon bool) string {
 }
 
 // NewReviewAgent builds a reviewer for the given plan.
-func NewReviewAgent(plan *Plan, cfg *config.Config, client ModelClient, registry *tool.Registry, workflow *WorkflowManager) *ReviewAgent {
+func NewReviewAgent(plan *Plan, cfg *config.Config, client ModelClient, registry *tool.Registry, workflow *WorkflowManager, engine ...*rules.Engine) *ReviewAgent {
 	if plan == nil || cfg == nil || client == nil {
 		return nil
 	}
@@ -140,6 +142,10 @@ func NewReviewAgent(plan *Plan, cfg *config.Config, client ModelClient, registry
 	if workflow != nil && workflow.PersonaProvider() != nil {
 		personaProvider = workflow.PersonaProvider()
 	}
+	var eng *rules.Engine
+	if len(engine) > 0 && engine[0] != nil {
+		eng = engine[0]
+	}
 	return &ReviewAgent{
 		plan:            plan,
 		config:          cfg,
@@ -150,7 +156,26 @@ func NewReviewAgent(plan *Plan, cfg *config.Config, client ModelClient, registry
 		logger:          newReviewLogger(plan),
 		schemaBlock:     reviewSchemaBlock(useToon),
 		personaProvider: personaProvider,
+		engine:          eng,
 	}
+}
+
+// resolveReasoningEffort uses the arbiter reasoning strategy to determine
+// the reasoning effort level. Returns "" if the engine is nil or evaluation fails.
+func (a *ReviewAgent) resolveReasoningEffort() string {
+	if a.engine == nil {
+		return ""
+	}
+	result, err := a.engine.EvalStrategy("reasoning", "reasoning_mode", map[string]any{
+		"reasoning": map[string]any{"config": "auto"},
+		"task":      map[string]any{"phase": "review"},
+		"model":     map[string]any{"supports_reasoning": a.modelClient.SupportsReasoning(a.config.Models.Review)},
+	})
+	if err != nil {
+		return ""
+	}
+	effort, _ := result.Params["effort"].(string)
+	return effort
 }
 
 // Review runs the review loop for a single task implementation.
@@ -190,7 +215,9 @@ func (a *ReviewAgent) Review(task *Task, builderResult *BuilderResult) (*ReviewR
 		Temperature: 0.2,
 	}
 
-	if a.modelClient.SupportsReasoning(a.config.Models.Review) {
+	if effort := a.resolveReasoningEffort(); effort != "" && effort != "none" {
+		req.Reasoning = &model.ReasoningConfig{Effort: effort}
+	} else if a.modelClient.SupportsReasoning(a.config.Models.Review) {
 		req.Reasoning = &model.ReasoningConfig{Effort: "high"}
 	}
 

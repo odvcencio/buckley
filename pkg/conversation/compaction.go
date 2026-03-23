@@ -8,6 +8,7 @@ import (
 
 	"github.com/odvcencio/buckley/pkg/config"
 	"github.com/odvcencio/buckley/pkg/model"
+	"github.com/odvcencio/buckley/pkg/rules"
 )
 
 // CompactionManager handles conversation compaction
@@ -15,23 +16,44 @@ type CompactionManager struct {
 	modelManager   *model.Manager
 	cfg            *config.Config
 	summaryTimeout time.Duration
+	engine         *rules.Engine
 }
 
 // NewCompactionManager creates a new compaction manager
-func NewCompactionManager(mgr *model.Manager, cfg *config.Config) *CompactionManager {
+func NewCompactionManager(mgr *model.Manager, cfg *config.Config, engine ...*rules.Engine) *CompactionManager {
 	timeout := 30 * time.Second
 	if cfg != nil && cfg.Memory.SummaryTimeoutSecs > 0 {
 		timeout = time.Duration(cfg.Memory.SummaryTimeoutSecs) * time.Second
 	}
-	return &CompactionManager{
+	cm := &CompactionManager{
 		modelManager:   mgr,
 		cfg:            cfg,
 		summaryTimeout: timeout,
 	}
+	if len(engine) > 0 && engine[0] != nil {
+		cm.engine = engine[0]
+	}
+	return cm
 }
 
 // ShouldCompact checks if a conversation should be compacted
 func (cm *CompactionManager) ShouldCompact(conv *Conversation, maxTokens int) bool {
+	// Arbiter-based compaction evaluation
+	if cm.engine != nil && maxTokens > 0 {
+		ratio := float64(conv.TokenCount) / float64(maxTokens)
+		matched, err := rules.Eval(cm.engine, "compaction", rules.ContextFacts{
+			TokenCount:   conv.TokenCount,
+			MaxTokens:    maxTokens,
+			UsageRatio:   ratio,
+			MessageCount: len(conv.Messages),
+		})
+		if err == nil && len(matched) > 0 {
+			return matched[0].Action == "Compact"
+		}
+		// Eval error or no matches — fall through to legacy logic
+	}
+
+	// Legacy fallback
 	thresholdRatio := 0.9
 	if cm.cfg != nil && cm.cfg.Memory.AutoCompactThreshold > 0 && cm.cfg.Memory.AutoCompactThreshold <= 1 {
 		thresholdRatio = cm.cfg.Memory.AutoCompactThreshold
