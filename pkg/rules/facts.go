@@ -106,3 +106,9 @@ type ToolBudgetFacts struct {
 	ToolCalls int    `arb:"agent.tool_calls"`
 	MaxCalls  int    `arb:"agent.max_tool_calls"`
 }
+
+// RolePermissionFacts carries signals for role-based tool access.
+type RolePermissionFacts struct {
+	Role string `arb:"role"` // "coordinator", "subagent"
+	Tier string `arb:"tier"` // "read_only", "standard", "full" (subagents only)
+}

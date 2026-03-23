@@ -1060,3 +1060,171 @@ func TestEngine_EvalToolBudget_AllScenarios(t *testing.T) {
 		})
 	}
 }
+
+// --- role_permissions ---
+
+func TestEngine_EvalRolePermissions_AllScenarios(t *testing.T) {
+	e := mustNewTestEngine(t)
+
+	tests := []struct {
+		name       string
+		facts      RolePermissionFacts
+		wantAction string
+		wantWrite  bool
+		wantShell  bool
+	}{
+		{
+			name: "coordinator: restricted to 4 tools, no write, no shell",
+			facts: RolePermissionFacts{
+				Role: "coordinator",
+			},
+			wantAction: "CoordinatorTools",
+			wantWrite:  false,
+			wantShell:  false,
+		},
+		{
+			name: "subagent read_only: restricted, no write, no shell",
+			facts: RolePermissionFacts{
+				Role: "subagent",
+				Tier: "read_only",
+			},
+			wantAction: "ReadOnlyTools",
+			wantWrite:  false,
+			wantShell:  false,
+		},
+		{
+			name: "subagent standard: write allowed, shell denied",
+			facts: RolePermissionFacts{
+				Role: "subagent",
+				Tier: "standard",
+			},
+			wantAction: "StandardTools",
+			wantWrite:  true,
+			wantShell:  false,
+		},
+		{
+			name: "subagent full: everything allowed",
+			facts: RolePermissionFacts{
+				Role: "subagent",
+				Tier: "full",
+			},
+			wantAction: "FullTools",
+			wantWrite:  true,
+			wantShell:  true,
+		},
+		{
+			name: "unknown role: default deny",
+			facts: RolePermissionFacts{
+				Role: "unknown",
+			},
+			wantAction: "Deny",
+			wantWrite:  false,
+			wantShell:  false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			matched, err := Eval(e, "role_permissions", tt.facts)
+			if err != nil {
+				t.Fatalf("Eval: %v", err)
+			}
+			if len(matched) == 0 {
+				t.Fatal("expected at least one matched rule")
+			}
+			if matched[0].Action != tt.wantAction {
+				t.Errorf("got action %q, want %q", matched[0].Action, tt.wantAction)
+			}
+			if canWrite, ok := matched[0].Params["can_write"].(bool); ok {
+				if canWrite != tt.wantWrite {
+					t.Errorf("can_write: got %v, want %v", canWrite, tt.wantWrite)
+				}
+			}
+			if canShell, ok := matched[0].Params["can_shell"].(bool); ok {
+				if canShell != tt.wantShell {
+					t.Errorf("can_shell: got %v, want %v", canShell, tt.wantShell)
+				}
+			}
+		})
+	}
+}
+
+func TestEngine_EvalRolePermissions_CoordinatorAllowedTools(t *testing.T) {
+	e := mustNewTestEngine(t)
+
+	matched, err := Eval(e, "role_permissions", RolePermissionFacts{
+		Role: "coordinator",
+	})
+	if err != nil {
+		t.Fatalf("Eval: %v", err)
+	}
+	if len(matched) == 0 {
+		t.Fatal("expected at least one matched rule")
+	}
+
+	allowed, ok := matched[0].Params["allowed"].([]any)
+	if !ok {
+		t.Fatal("expected 'allowed' list in result params")
+	}
+	wantAllowed := map[string]bool{
+		"delegate":       false,
+		"delegate_batch": false,
+		"inspect":        false,
+		"set_answer":     false,
+	}
+	for _, item := range allowed {
+		if s, ok := item.(string); ok {
+			if _, expected := wantAllowed[s]; expected {
+				wantAllowed[s] = true
+			}
+		}
+	}
+	for tool, found := range wantAllowed {
+		if !found {
+			t.Errorf("coordinator allowed list missing %q", tool)
+		}
+	}
+	if len(allowed) != 4 {
+		t.Errorf("coordinator allowed list has %d tools, want 4", len(allowed))
+	}
+}
+
+func TestEngine_EvalRolePermissions_ReadOnlyDeniedTools(t *testing.T) {
+	e := mustNewTestEngine(t)
+
+	matched, err := Eval(e, "role_permissions", RolePermissionFacts{
+		Role: "subagent",
+		Tier: "read_only",
+	})
+	if err != nil {
+		t.Fatalf("Eval: %v", err)
+	}
+	if len(matched) == 0 {
+		t.Fatal("expected at least one matched rule")
+	}
+
+	denied, ok := matched[0].Params["denied"].([]any)
+	if !ok {
+		t.Fatal("expected 'denied' list in result params")
+	}
+	wantDenied := map[string]bool{
+		"write_file":   false,
+		"patch_file":   false,
+		"edit_file":    false,
+		"delete_lines": false,
+		"shell":        false,
+		"bash":         false,
+	}
+	for _, item := range denied {
+		if s, ok := item.(string); ok {
+			if _, expected := wantDenied[s]; expected {
+				wantDenied[s] = true
+			}
+		}
+	}
+	for tool, found := range wantDenied {
+		if !found {
+			t.Errorf("read_only denied list missing %q", tool)
+		}
+	}
+}

@@ -1,0 +1,61 @@
+rule CoordinatorRole priority 100 {
+    when {
+        role == "coordinator"
+    }
+    then CoordinatorTools {
+        action: "restrict",
+        allowed: ["delegate", "delegate_batch", "inspect", "set_answer"],
+        can_write: false,
+        can_shell: false,
+    }
+}
+
+rule SubagentReadOnly priority 90 {
+    when {
+        role == "subagent"
+        and tier == "read_only"
+    }
+    then ReadOnlyTools {
+        action: "restrict",
+        allowed: ["read_file", "list_directory", "find_files", "file_exists", "search_text", "get_file_info", "glob", "grep"],
+        denied: ["write_file", "patch_file", "edit_file", "delete_lines", "shell", "bash"],
+        can_write: false,
+        can_shell: false,
+    }
+}
+
+rule SubagentStandard priority 80 {
+    when {
+        role == "subagent"
+        and tier == "standard"
+    }
+    then StandardTools {
+        action: "restrict",
+        denied: ["delete_lines", "rename_symbol", "shell"],
+        can_write: true,
+        can_shell: false,
+    }
+}
+
+rule SubagentFull priority 70 {
+    when {
+        role == "subagent"
+        and tier == "full"
+    }
+    then FullTools {
+        action: "allow_all",
+        can_write: true,
+        can_shell: true,
+    }
+}
+
+rule DefaultDeny priority 10 {
+    when {
+        true
+    }
+    then Deny {
+        action: "deny",
+        can_write: false,
+        can_shell: false,
+    }
+}

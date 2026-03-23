@@ -23,7 +23,7 @@ func TestLoader_LoadAllDomains(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Domains: %v", err)
 	}
-	expected := []string{"approval", "compaction", "complexity", "coordinator", "escalation", "gts_context", "oneshot", "reasoning", "retry", "risk", "routing", "spawning", "tool_budget"}
+	expected := []string{"approval", "compaction", "complexity", "coordinator", "escalation", "gts_context", "oneshot", "reasoning", "retry", "risk", "role_permissions", "routing", "spawning", "tool_budget"}
 	if len(domains) != len(expected) {
 		t.Fatalf("got %d domains, want %d: %v", len(domains), len(expected), domains)
 	}

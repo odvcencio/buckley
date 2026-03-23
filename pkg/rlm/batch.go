@@ -271,18 +271,24 @@ func (d *BatchDispatcher) executeTask(ctx context.Context, task SubTask, taskInd
 			allowedTools = filtered
 		}
 	}
+	// Apply role-based permissions from arbiter rules.
+	if d.engine != nil {
+		allowedTools = d.applyRolePermissions(toolTier, allowedTools)
+	}
 	agent, err := NewSubAgent(SubAgentConfig{
 		ID:            agentID,
 		Model:         modelID,
 		SystemPrompt:  task.SystemPrompt,
 		MaxIterations: maxIterations,
 		AllowedTools:  allowedTools,
+		ToolTier:      toolTier,
 	}, SubAgentDeps{
 		Models:     d.models,
 		Registry:   d.registry,
 		Scratchpad: d.scratchpad,
 		Conflicts:  d.conflicts,
 		Approver:   d.approver,
+		Engine:     d.engine,
 	})
 	if err != nil {
 		res.Error = err.Error()
@@ -375,12 +381,14 @@ func (d *BatchDispatcher) executeTask(ctx context.Context, task SubTask, taskInd
 							SystemPrompt:  task.SystemPrompt,
 							MaxIterations: maxIterations,
 							AllowedTools:  allowedTools,
+							ToolTier:      toolTier,
 						}, SubAgentDeps{
 							Models:     d.models,
 							Registry:   d.registry,
 							Scratchpad: d.scratchpad,
 							Conflicts:  d.conflicts,
 							Approver:   d.approver,
+							Engine:     d.engine,
 						})
 						if err != nil {
 							res.Error = err.Error()
@@ -490,6 +498,96 @@ func (d *BatchDispatcher) filterToolsByTier(toolTier string, current []string) [
 		}
 	}
 	return current
+}
+
+// applyRolePermissions evaluates role_permissions rules to filter allowed tools for a subagent.
+func (d *BatchDispatcher) applyRolePermissions(toolTier string, allowedTools []string) []string {
+	if d.engine == nil {
+		return allowedTools
+	}
+	matched, err := rules.Eval(d.engine, "role_permissions", rules.RolePermissionFacts{
+		Role: "subagent",
+		Tier: toolTier,
+	})
+	if err != nil || len(matched) == 0 {
+		return allowedTools
+	}
+	params := matched[0].Params
+
+	// Apply denied list.
+	if denied, ok := params["denied"]; ok {
+		allowedTools = filterOutDenied(allowedTools, denied)
+	}
+	// Check can_write flag.
+	if canWrite, ok := params["can_write"].(bool); ok && !canWrite {
+		allowedTools = filterOutWriteTools(allowedTools)
+	}
+	// Check can_shell flag.
+	if canShell, ok := params["can_shell"].(bool); ok && !canShell {
+		allowedTools = removeFromList(allowedTools, "shell", "bash")
+	}
+	return allowedTools
+}
+
+// filterOutDenied removes any tools in the denied list from the allowed tools.
+func filterOutDenied(tools []string, denied any) []string {
+	deniedList, ok := denied.([]any)
+	if !ok || len(deniedList) == 0 {
+		return tools
+	}
+	denySet := make(map[string]struct{}, len(deniedList))
+	for _, item := range deniedList {
+		if s, ok := item.(string); ok {
+			denySet[s] = struct{}{}
+		}
+	}
+	if len(denySet) == 0 {
+		return tools
+	}
+	result := make([]string, 0, len(tools))
+	for _, t := range tools {
+		if _, blocked := denySet[t]; !blocked {
+			result = append(result, t)
+		}
+	}
+	return result
+}
+
+// filterOutWriteTools removes known write-capable tools from the list.
+func filterOutWriteTools(tools []string) []string {
+	writeTools := map[string]struct{}{
+		"write_file":       {},
+		"patch_file":       {},
+		"edit_file":        {},
+		"insert_text":      {},
+		"delete_lines":     {},
+		"search_replace":   {},
+		"rename_symbol":    {},
+		"extract_function": {},
+		"mark_resolved":    {},
+	}
+	result := make([]string, 0, len(tools))
+	for _, t := range tools {
+		if _, isWrite := writeTools[t]; !isWrite {
+			result = append(result, t)
+		}
+	}
+	return result
+}
+
+// removeFromList removes specific tool names from the list.
+func removeFromList(tools []string, remove ...string) []string {
+	removeSet := make(map[string]struct{}, len(remove))
+	for _, r := range remove {
+		removeSet[r] = struct{}{}
+	}
+	result := make([]string, 0, len(tools))
+	for _, t := range tools {
+		if _, skip := removeSet[t]; !skip {
+			result = append(result, t)
+		}
+	}
+	return result
 }
 
 func (d *BatchDispatcher) publishGraftDebug(ctx context.Context, format string, args ...any) {

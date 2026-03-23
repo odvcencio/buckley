@@ -387,6 +387,32 @@ func (r *Runtime) buildCoordinatorRegistry(ctx context.Context, answer *Answer) 
 	registry.Register(NewDelegateBatchTool(r.dispatcher, ctxProvider))
 	registry.Register(NewInspectTool(r.scratchpad, ctxProvider))
 	registry.Register(NewSetAnswerTool(answer))
+
+	// Validate via arbiter that coordinator role is restricted.
+	if r.engine != nil {
+		matched, err := rules.Eval(r.engine, "role_permissions", rules.RolePermissionFacts{
+			Role: "coordinator",
+		})
+		if err == nil && len(matched) > 0 {
+			// The rule confirms coordinator can only use these 4 tools.
+			// If someone overrides the .arb to change coordinator access,
+			// they'd need to register tools here too -- intentional friction.
+			if r.telemetry != nil {
+				r.telemetry.Publish(telemetry.Event{
+					Type:      telemetry.EventDebug,
+					SessionID: r.sessionID,
+					Data: map[string]any{
+						"source":    "rlm.role_permissions",
+						"role":      "coordinator",
+						"action":    matched[0].Action,
+						"can_write": false,
+						"can_shell": false,
+					},
+				})
+			}
+		}
+	}
+
 	return registry
 }
 

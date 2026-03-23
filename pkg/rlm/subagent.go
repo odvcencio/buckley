@@ -9,6 +9,7 @@ import (
 
 	"github.com/odvcencio/buckley/pkg/coordination/security"
 	"github.com/odvcencio/buckley/pkg/model"
+	"github.com/odvcencio/buckley/pkg/rules"
 	"github.com/odvcencio/buckley/pkg/tool"
 	"github.com/odvcencio/buckley/pkg/tool/builtin"
 )
@@ -63,12 +64,14 @@ type SubAgent struct {
 	systemPrompt  string
 	maxIterations int
 	allowedTools  map[string]struct{}
+	toolTier      string
 
 	client     *model.Manager
 	registry   *tool.Registry
 	scratchpad ScratchpadWriter
 	conflicts  *ConflictDetector
 	approver   *security.ToolApprover
+	engine     *rules.Engine
 }
 
 // SubAgentConfig configures a sub-agent execution.
@@ -78,6 +81,7 @@ type SubAgentConfig struct {
 	SystemPrompt  string
 	MaxIterations int
 	AllowedTools  []string
+	ToolTier      string // role_permissions tier for runtime validation
 }
 
 // SubAgentDeps provides shared dependencies.
@@ -87,6 +91,7 @@ type SubAgentDeps struct {
 	Scratchpad ScratchpadWriter
 	Conflicts  *ConflictDetector
 	Approver   *security.ToolApprover
+	Engine     *rules.Engine
 }
 
 // SubAgentResult captures the outcome of a sub-agent task.
@@ -151,11 +156,13 @@ func NewSubAgent(cfg SubAgentConfig, deps SubAgentDeps) (*SubAgent, error) {
 		systemPrompt:  prompt,
 		maxIterations: maxIterations,
 		allowedTools:  allowedTools,
+		toolTier:      cfg.ToolTier,
 		client:        deps.Models,
 		registry:      deps.Registry,
 		scratchpad:    deps.Scratchpad,
 		conflicts:     deps.Conflicts,
 		approver:      deps.Approver,
+		engine:        deps.Engine,
 	}, nil
 }
 
@@ -327,6 +334,15 @@ func (a *SubAgent) executeTools(ctx context.Context, calls []model.ToolCall, reg
 			}
 		}
 
+		// Runtime guard: validate tool call against role_permissions rules.
+		// Defense in depth -- tool list is filtered at spawn time, but this
+		// validates at execution time (e.g., for kill-switch overrides).
+		if a.engine != nil && a.toolTier != "" {
+			if err := a.checkRolePermission(name); err != nil {
+				return nil, err
+			}
+		}
+
 		var args map[string]any
 		if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil {
 			toolResults = append(toolResults, SubAgentToolCall{
@@ -372,6 +388,54 @@ func (a *SubAgent) executeTools(ctx context.Context, calls []model.ToolCall, reg
 	}
 
 	return toolResults, nil
+}
+
+// checkRolePermission validates a tool call against role_permissions arbiter rules.
+func (a *SubAgent) checkRolePermission(toolName string) error {
+	matched, err := rules.Eval(a.engine, "role_permissions", rules.RolePermissionFacts{
+		Role: "subagent",
+		Tier: a.toolTier,
+	})
+	if err != nil || len(matched) == 0 {
+		return nil // fail open if rules unavailable
+	}
+	params := matched[0].Params
+
+	// Check explicit deny list.
+	if denied, ok := params["denied"].([]any); ok {
+		for _, d := range denied {
+			if s, ok := d.(string); ok && s == toolName {
+				return fmt.Errorf("tool %q denied by role_permissions rule for tier %q", toolName, a.toolTier)
+			}
+		}
+	}
+
+	// Check write capability.
+	if canWrite, ok := params["can_write"].(bool); ok && !canWrite {
+		if isWriteTool(toolName) {
+			return fmt.Errorf("tool %q denied: write not permitted for tier %q", toolName, a.toolTier)
+		}
+	}
+
+	// Check shell capability.
+	if canShell, ok := params["can_shell"].(bool); ok && !canShell {
+		if toolName == "shell" || toolName == "bash" {
+			return fmt.Errorf("tool %q denied: shell not permitted for tier %q", toolName, a.toolTier)
+		}
+	}
+
+	return nil
+}
+
+// isWriteTool returns true if the tool is a write-capable tool.
+func isWriteTool(name string) bool {
+	switch name {
+	case "write_file", "patch_file", "edit_file", "insert_text", "delete_lines",
+		"search_replace", "rename_symbol", "extract_function", "mark_resolved":
+		return true
+	default:
+		return false
+	}
 }
 
 func (a *SubAgent) acquireLock(name string, args map[string]any) func() {
