@@ -26,10 +26,11 @@ import (
 	acppb "github.com/odvcencio/buckley/pkg/acp/proto"
 	acpserver "github.com/odvcencio/buckley/pkg/acp/server"
 	"github.com/odvcencio/buckley/pkg/config"
-	"github.com/odvcencio/buckley/pkg/gts"
 	projectcontext "github.com/odvcencio/buckley/pkg/context"
 	coordination "github.com/odvcencio/buckley/pkg/coordination/coordinator"
 	coordevents "github.com/odvcencio/buckley/pkg/coordination/events"
+	"github.com/odvcencio/buckley/pkg/graft"
+	"github.com/odvcencio/buckley/pkg/gts"
 	"github.com/odvcencio/buckley/pkg/ipc"
 	"github.com/odvcencio/buckley/pkg/ipc/command"
 	"github.com/odvcencio/buckley/pkg/model"
@@ -90,7 +91,11 @@ var newOrchestratorFn = func(store *storage.Store, mgr *model.Manager, registry 
 	}
 
 	if cfg != nil && cfg.ExecutionMode() == config.ExecutionModeRLM {
-		return rlmrunner.New(store, mgr, registry, cfg, workflow, planStore)
+		r := rlmrunner.New(store, mgr, registry, cfg, workflow, planStore)
+		workDir := config.ResolveProjectRoot(cfg)
+		graftClient := graft.NewClient(workDir, "buckley")
+		r.SetGraftClient(graftClient)
+		return r
 	}
 	return orchestrator.NewOrchestrator(store, mgr, registry, cfg, workflow, planStore, arbEngine, gtsPipeline)
 }

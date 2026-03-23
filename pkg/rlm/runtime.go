@@ -11,6 +11,7 @@ import (
 	"github.com/odvcencio/buckley/pkg/bus"
 	"github.com/odvcencio/buckley/pkg/coordination/security"
 	"github.com/odvcencio/buckley/pkg/encoding/toon"
+	"github.com/odvcencio/buckley/pkg/graft"
 	"github.com/odvcencio/buckley/pkg/model"
 	"github.com/odvcencio/buckley/pkg/rules"
 	"github.com/odvcencio/buckley/pkg/storage"
@@ -115,6 +116,7 @@ type RuntimeDeps struct {
 	SessionID    string
 	UseToon      bool // Use TOON encoding for compact tool results
 	Engine       *rules.Engine
+	GraftClient  *graft.Client // Optional graft coordination client
 }
 
 // Runtime is the RLM execution engine.
@@ -131,6 +133,7 @@ type Runtime struct {
 	sessionID   string
 	resultCodec *toon.Codec // TOON encoding for compact tool results
 	engine      *rules.Engine
+	graftClient *graft.Client
 
 	hooksMu sync.RWMutex
 	hooks   []IterationHook
@@ -157,14 +160,15 @@ func NewRuntime(cfg Config, deps RuntimeDeps) (*Runtime, error) {
 	scratchpad := NewScratchpad(deps.Store, deps.Summarizer, cfg.Scratchpad)
 
 	dispatcher, err := NewBatchDispatcher(BatchDispatcherConfig{}, BatchDispatcherDeps{
-		Router:     router,
-		Models:     deps.Models,
-		Registry:   registry,
-		Scratchpad: scratchpad,
-		Conflicts:  conflicts,
-		Approver:   deps.ToolApprover,
-		Bus:        deps.Bus,
-		Engine:     deps.Engine,
+		Router:      router,
+		Models:      deps.Models,
+		Registry:    registry,
+		Scratchpad:  scratchpad,
+		Conflicts:   conflicts,
+		Approver:    deps.ToolApprover,
+		Bus:         deps.Bus,
+		Engine:      deps.Engine,
+		GraftClient: deps.GraftClient,
 	})
 	if err != nil {
 		return nil, err
@@ -183,6 +187,7 @@ func NewRuntime(cfg Config, deps RuntimeDeps) (*Runtime, error) {
 		sessionID:   strings.TrimSpace(deps.SessionID),
 		resultCodec: toon.New(deps.UseToon),
 		engine:      deps.Engine,
+		graftClient: deps.GraftClient,
 	}, nil
 }
 
@@ -203,6 +208,19 @@ func (r *Runtime) Execute(ctx context.Context, task string) (*Answer, error) {
 	}
 	if strings.TrimSpace(task) == "" {
 		return nil, fmt.Errorf("task required")
+	}
+
+	// Register coordinator agent with graft coordination.
+	if r.graftClient != nil && r.graftClient.Available() {
+		if err := r.graftClient.Coordination.Join(ctx); err != nil {
+			r.publishGraftDebug("graft coordinator join failed: %v", err)
+		} else {
+			defer func() {
+				if err := r.graftClient.Coordination.Leave(ctx); err != nil {
+					r.publishGraftDebug("graft coordinator leave failed: %v", err)
+				}
+			}()
+		}
 	}
 
 	start := time.Now()
@@ -527,6 +545,20 @@ func extractText(msg model.Message) string {
 		return fmt.Sprintf("%v", msg.Content)
 	}
 	return content
+}
+
+func (r *Runtime) publishGraftDebug(format string, args ...any) {
+	if r.telemetry == nil {
+		return
+	}
+	r.telemetry.Publish(telemetry.Event{
+		Type:      telemetry.EventDebug,
+		SessionID: r.sessionID,
+		Data: map[string]any{
+			"source":  "rlm.graft",
+			"message": fmt.Sprintf(format, args...),
+		},
+	})
 }
 
 func formatScratchpadSummaries(summaries []EntrySummary) []map[string]any {

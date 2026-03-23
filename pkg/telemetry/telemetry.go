@@ -43,6 +43,7 @@ const (
 	EventExperimentVariantCompleted EventType = "experiment.variant.completed"
 	EventExperimentVariantFailed    EventType = "experiment.variant.failed"
 	EventRLMIteration               EventType = "rlm.iteration"
+	EventDebug                      EventType = "debug"
 )
 
 // Event describes workflow telemetry that UIs and IPC clients can consume.

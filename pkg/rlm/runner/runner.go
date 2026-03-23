@@ -15,6 +15,7 @@ import (
 
 	"github.com/odvcencio/buckley/pkg/bus"
 	"github.com/odvcencio/buckley/pkg/config"
+	"github.com/odvcencio/buckley/pkg/graft"
 	"github.com/odvcencio/buckley/pkg/model"
 	"github.com/odvcencio/buckley/pkg/orchestrator"
 	"github.com/odvcencio/buckley/pkg/rlm"
@@ -39,6 +40,7 @@ type Runner struct {
 	runtime     *rlm.Runtime
 	currentPlan *orchestrator.Plan
 	planner     *orchestrator.Planner
+	graftClient *graft.Client
 }
 
 // New constructs an RLM runner with the full runtime wired.
@@ -80,6 +82,13 @@ func (r *Runner) SetBus(b bus.MessageBus) {
 	r.bus = b
 }
 
+// SetGraftClient configures graft coordination for subagent lifecycle.
+func (r *Runner) SetGraftClient(client *graft.Client) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.graftClient = client
+}
+
 func (r *Runner) initRuntime() error {
 	if r.models == nil {
 		return fmt.Errorf("model manager required")
@@ -100,12 +109,13 @@ func (r *Runner) initRuntime() error {
 	}
 
 	runtime, err := rlm.NewRuntime(rlmCfg, rlm.RuntimeDeps{
-		Models:    r.models,
-		Store:     r.store,
-		Registry:  r.registry,
-		Bus:       r.bus,
-		Telemetry: r.telemetry,
-		UseToon:   r.cfg != nil && r.cfg.Encoding.UseToon,
+		Models:      r.models,
+		Store:       r.store,
+		Registry:    r.registry,
+		Bus:         r.bus,
+		Telemetry:   r.telemetry,
+		UseToon:     r.cfg != nil && r.cfg.Encoding.UseToon,
+		GraftClient: r.graftClient,
 	})
 	if err != nil {
 		return err

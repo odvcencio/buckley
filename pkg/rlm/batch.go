@@ -12,6 +12,7 @@ import (
 	"github.com/odvcencio/buckley/pkg/bus"
 	"github.com/odvcencio/buckley/pkg/coordination/reliability"
 	"github.com/odvcencio/buckley/pkg/coordination/security"
+	"github.com/odvcencio/buckley/pkg/graft"
 	"github.com/odvcencio/buckley/pkg/model"
 	"github.com/odvcencio/buckley/pkg/rules"
 	"github.com/odvcencio/buckley/pkg/tool"
@@ -20,6 +21,14 @@ import (
 )
 
 const defaultBatchConcurrency = 4
+
+// treeSpecies provides agent names for graft coordination.
+var treeSpecies = []string{"birch", "cedar", "maple", "oak", "elm", "pine", "willow", "ash", "beech", "holly"}
+
+// agentName generates a graft agent name from a task index.
+func agentName(taskIndex int) string {
+	return fmt.Sprintf("%s-%d", treeSpecies[taskIndex%len(treeSpecies)], taskIndex)
+}
 
 // SubTask is a single delegated task.
 type SubTask struct {
@@ -62,6 +71,7 @@ type BatchDispatcher struct {
 	breaker     *reliability.CircuitBreaker
 	bus         bus.MessageBus
 	engine      *rules.Engine
+	graftClient *graft.Client
 }
 
 // BatchDispatcherConfig configures dispatcher behavior.
@@ -74,14 +84,15 @@ type BatchDispatcherConfig struct {
 
 // BatchDispatcherDeps supplies dependencies for dispatcher creation.
 type BatchDispatcherDeps struct {
-	Router     *ModelRouter
-	Models     *model.Manager
-	Registry   *tool.Registry
-	Scratchpad ScratchpadWriter
-	Conflicts  *ConflictDetector
-	Approver   *security.ToolApprover
-	Bus        bus.MessageBus
-	Engine     *rules.Engine
+	Router      *ModelRouter
+	Models      *model.Manager
+	Registry    *tool.Registry
+	Scratchpad  ScratchpadWriter
+	Conflicts   *ConflictDetector
+	Approver    *security.ToolApprover
+	Bus         bus.MessageBus
+	Engine      *rules.Engine
+	GraftClient *graft.Client
 }
 
 // NewBatchDispatcher creates a dispatcher with the given configuration.
@@ -123,6 +134,7 @@ func NewBatchDispatcher(cfg BatchDispatcherConfig, deps BatchDispatcherDeps) (*B
 		breaker:     breaker,
 		bus:         deps.Bus,
 		engine:      deps.Engine,
+		graftClient: deps.GraftClient,
 	}, nil
 }
 
@@ -140,8 +152,8 @@ func (d *BatchDispatcher) Execute(ctx context.Context, req BatchRequest) ([]Batc
 func (d *BatchDispatcher) executeSequential(ctx context.Context, tasks []SubTask) ([]BatchResult, error) {
 	results := make([]BatchResult, 0, len(tasks))
 	var combinedErr error
-	for _, task := range tasks {
-		res, err := d.executeTask(ctx, task)
+	for idx, task := range tasks {
+		res, err := d.executeTask(ctx, task, idx)
 		results = append(results, res)
 		if err != nil {
 			combinedErr = errors.Join(combinedErr, err)
@@ -166,7 +178,7 @@ func (d *BatchDispatcher) executeParallel(ctx context.Context, tasks []SubTask) 
 				d.semaphore <- struct{}{}
 				defer func() { <-d.semaphore }()
 			}
-			res, err := d.executeTask(ctx, task)
+			res, err := d.executeTask(ctx, task, idx)
 			mu.Lock()
 			results[idx] = res
 			if err != nil {
@@ -180,7 +192,7 @@ func (d *BatchDispatcher) executeParallel(ctx context.Context, tasks []SubTask) 
 	return results, combinedErr
 }
 
-func (d *BatchDispatcher) executeTask(ctx context.Context, task SubTask) (BatchResult, error) {
+func (d *BatchDispatcher) executeTask(ctx context.Context, task SubTask, taskIndex int) (BatchResult, error) {
 	res := BatchResult{TaskID: task.ID}
 	if strings.TrimSpace(task.Prompt) == "" {
 		res.Error = "task prompt required"
@@ -188,6 +200,23 @@ func (d *BatchDispatcher) executeTask(ctx context.Context, task SubTask) (BatchR
 	}
 	if res.TaskID == "" {
 		res.TaskID = ulid.Make().String()
+	}
+
+	// Register subagent with graft coordination.
+	var agentGraft *graft.Client
+	if d.graftClient != nil && d.graftClient.Available() {
+		name := agentName(taskIndex)
+		agentGraft = graft.NewClient(d.graftClient.WorkDir(), name)
+		if err := agentGraft.Coordination.Join(ctx); err != nil {
+			d.publishGraftDebug(ctx, "graft subagent join failed for %s: %v", name, err)
+			agentGraft = nil // disable further coordination for this task
+		} else {
+			defer func() {
+				if err := agentGraft.Coordination.Leave(ctx); err != nil {
+					d.publishGraftDebug(ctx, "graft subagent leave failed for %s: %v", name, err)
+				}
+			}()
+		}
 	}
 
 	weight := task.Weight
@@ -258,6 +287,15 @@ func (d *BatchDispatcher) executeTask(ctx context.Context, task SubTask) (BatchR
 	if err != nil {
 		res.Error = err.Error()
 		return res, err
+	}
+
+	// Check graft coordination for conflicts before execution.
+	if agentGraft != nil {
+		if clear, err := agentGraft.Coordination.CheckConflicts(ctx); err != nil {
+			d.publishGraftDebug(ctx, "graft conflict check failed: %v", err)
+		} else if !clear {
+			d.publishGraftDebug(ctx, "graft conflict detected for task %s", res.TaskID)
+		}
 	}
 
 	const maxEscalationAttempts = 4
@@ -452,6 +490,15 @@ func (d *BatchDispatcher) filterToolsByTier(toolTier string, current []string) [
 		}
 	}
 	return current
+}
+
+func (d *BatchDispatcher) publishGraftDebug(ctx context.Context, format string, args ...any) {
+	if d.bus == nil {
+		return
+	}
+	d.publishEvent(ctx, "buckley.rlm.graft.debug", map[string]any{
+		"message": fmt.Sprintf(format, args...),
+	})
 }
 
 func (d *BatchDispatcher) publishEvent(ctx context.Context, subject string, payload map[string]any) {

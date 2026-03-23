@@ -12,6 +12,7 @@ type Client struct {
 	Coordination *Coordinator
 	runner       *Runner
 	available    bool
+	workDir      string
 }
 
 // NewClient creates a graft Client for the given working directory and agent name.
@@ -21,6 +22,7 @@ func NewClient(workDir string, agentName string) *Client {
 	if err != nil {
 		return &Client{
 			available:    false,
+			workDir:      workDir,
 			VCS:          &VCS{runner: &Runner{}},
 			Coordination: &Coordinator{agent: agentName},
 		}
@@ -30,6 +32,7 @@ func NewClient(workDir string, agentName string) *Client {
 	return &Client{
 		runner:       runner,
 		available:    true,
+		workDir:      workDir,
 		VCS:          NewVCS(runner),
 		Coordination: NewCoordinator(runner, agentName),
 	}
@@ -38,4 +41,12 @@ func NewClient(workDir string, agentName string) *Client {
 // Available reports whether the graft binary was found.
 func (c *Client) Available() bool {
 	return c.available
+}
+
+// WorkDir returns the working directory configured for this client.
+func (c *Client) WorkDir() string {
+	if c == nil {
+		return ""
+	}
+	return c.workDir
 }

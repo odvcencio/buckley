@@ -26,6 +26,7 @@ import (
 	"github.com/odvcencio/buckley/pkg/config"
 	"github.com/odvcencio/buckley/pkg/coordination/coordinator"
 	"github.com/odvcencio/buckley/pkg/coordination/security"
+	"github.com/odvcencio/buckley/pkg/graft"
 	"github.com/odvcencio/buckley/pkg/mission"
 	"github.com/odvcencio/buckley/pkg/model"
 	"github.com/odvcencio/buckley/pkg/orchestrator"
@@ -574,6 +575,8 @@ func (s *Server) buildRLMRuntime(sessionID, agentID string) (*rlm.Runtime, func(
 	registry.EnableMissionControl(missionStore, agentID, requireApproval, 15*time.Minute)
 	registry.UpdateMissionSession(sessionID)
 
+	graftClient := graft.NewClient(s.projectRoot, "buckley-acp")
+
 	runtime, err := rlm.NewRuntime(resolveRLMConfig(s.cfg), rlm.RuntimeDeps{
 		Models:       s.models,
 		Store:        s.store,
@@ -582,6 +585,7 @@ func (s *Server) buildRLMRuntime(sessionID, agentID string) (*rlm.Runtime, func(
 		Bus:          s.messageBus,
 		Telemetry:    s.telemetryHub,
 		SessionID:    sessionID,
+		GraftClient:  graftClient,
 	})
 	if err != nil {
 		return nil, nil, err
