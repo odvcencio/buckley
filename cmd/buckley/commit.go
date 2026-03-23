@@ -11,10 +11,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/odvcencio/buckley/pkg/config"
 	"github.com/odvcencio/buckley/pkg/oneshot"
-	commitgen "github.com/odvcencio/buckley/pkg/oneshot/commit"
-	oneshotrlm "github.com/odvcencio/buckley/pkg/oneshot/rlm"
+	"github.com/odvcencio/buckley/pkg/oneshot/commands"
 	"github.com/odvcencio/buckley/pkg/terminal"
 	"github.com/odvcencio/buckley/pkg/transparency"
 )
@@ -22,8 +20,40 @@ import (
 // termOut is the terminal writer for styled output.
 var termOut = terminal.New()
 
+// commitRunResult adapts the new framework's RunResult for use by the CLI.
+type commitRunResult struct {
+	Commit       *commands.CommitResult
+	Trace        *transparency.Trace
+	ContextAudit *transparency.ContextAudit
+	Error        error
+}
+
 type commitRunner interface {
-	Run(ctx context.Context, opts commitgen.ContextOptions) (*commitgen.RunResult, error)
+	Run(ctx context.Context) (*commitRunResult, error)
+}
+
+// frameworkCommitRunner adapts oneshot.Framework to the commitRunner interface.
+type frameworkCommitRunner struct {
+	framework *oneshot.Framework
+}
+
+func (r *frameworkCommitRunner) Run(ctx context.Context) (*commitRunResult, error) {
+	fwResult, err := r.framework.Run(ctx, commands.CommitDefinition{}, oneshot.RunOpts{})
+	if err != nil {
+		return &commitRunResult{Error: err}, nil
+	}
+	result := &commitRunResult{
+		Trace:        fwResult.Trace,
+		ContextAudit: fwResult.ContextAudit,
+	}
+	if fwResult.Value != nil {
+		if cr, ok := fwResult.Value.(*commands.CommitResult); ok {
+			result.Commit = cr
+		} else {
+			result.Error = fmt.Errorf("unexpected result type: %T", fwResult.Value)
+		}
+	}
+	return result, nil
 }
 
 // runCommitCommand generates a structured commit via tool-use.
@@ -100,18 +130,9 @@ func runCommitCommand(args []string) error {
 		Ledger:   ledger,
 	})
 
-	var runner commitRunner
-	if cfg != nil && cfg.OneshotMode() == config.ExecutionModeRLM {
-		runner = oneshotrlm.NewCommitRunner(oneshotrlm.CommitRunnerConfig{
-			Invoker: invoker,
-			Ledger:  ledger,
-		})
-	} else {
-		runner = commitgen.NewRunner(commitgen.RunnerConfig{
-			Invoker: invoker,
-			Ledger:  ledger,
-		})
-	}
+	// Create unified framework runner
+	framework := oneshot.NewFramework(invoker, nil)
+	var runner commitRunner = &frameworkCommitRunner{framework: framework}
 
 	// Run with timeout
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
@@ -126,7 +147,7 @@ func runCommitCommand(args []string) error {
 	spinner := terminal.NewSpinner("Generating commit message...")
 	spinner.Start()
 
-	result, err := runner.Run(ctx, commitgen.DefaultContextOptions())
+	result, err := runner.Run(ctx)
 
 	if err != nil {
 		spinner.StopWithError(err.Error())
@@ -137,11 +158,6 @@ func runCommitCommand(args []string) error {
 	}
 	if err != nil {
 		return fmt.Errorf("commit generation failed: %w", err)
-	}
-
-	// Show warnings about potentially unintended files
-	if len(result.Warnings) > 0 {
-		printWarnings(result.Warnings)
 	}
 
 	// Show context audit (what was sent)
@@ -234,7 +250,7 @@ func handleCommitPrompt(message string, runner commitRunner, ctx context.Context
 		spinner := terminal.NewSpinner("Regenerating commit message...")
 		spinner.Start()
 
-		result, err := runner.Run(ctx, commitgen.DefaultContextOptions())
+		result, err := runner.Run(ctx)
 		if err != nil {
 			spinner.StopWithError(err.Error())
 			termOut.Error("Regeneration failed: %v", err)
@@ -398,42 +414,6 @@ func printError(err error, trace *transparency.Trace) {
 	if trace != nil {
 		termOut.Dim("Tokens used: %d · Cost: $%.4f (still charged)",
 			trace.Tokens.Total(), trace.Cost)
-	}
-}
-
-func printWarnings(warnings []commitgen.Warning) {
-	termOut.Newline()
-
-	hasErrors := false
-	for _, w := range warnings {
-		if w.Severity == "error" {
-			hasErrors = true
-			break
-		}
-	}
-
-	if hasErrors {
-		termOut.Error("STAGED FILES MAY CONTAIN SECRETS")
-	} else {
-		termOut.Warn("Potentially unintended files staged:")
-	}
-
-	for _, w := range warnings {
-		var prefix string
-		switch w.Severity {
-		case "error":
-			prefix = "✗"
-		case "warning":
-			prefix = "⚠"
-		default:
-			prefix = "•"
-		}
-		termOut.Dim("  %s %s - %s", prefix, w.Path, w.Message)
-	}
-
-	if hasErrors {
-		termOut.Newline()
-		termOut.Warn("Use 'git reset HEAD <file>' to unstage sensitive files.")
 	}
 }
 

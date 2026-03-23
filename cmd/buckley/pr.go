@@ -9,10 +9,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/odvcencio/buckley/pkg/config"
 	"github.com/odvcencio/buckley/pkg/oneshot"
-	prgen "github.com/odvcencio/buckley/pkg/oneshot/pr"
-	oneshotrlm "github.com/odvcencio/buckley/pkg/oneshot/rlm"
+	"github.com/odvcencio/buckley/pkg/oneshot/commands"
 	"github.com/odvcencio/buckley/pkg/terminal"
 	"github.com/odvcencio/buckley/pkg/transparency"
 )
@@ -78,28 +76,9 @@ func runPRCommand(args []string) error {
 		Ledger:   ledger,
 	})
 
-	type prRunner interface {
-		Run(ctx context.Context, opts prgen.ContextOptions) (*prgen.RunResult, error)
-	}
-
-	var runner prRunner
-	if cfg != nil && cfg.OneshotMode() == config.ExecutionModeRLM {
-		runner = oneshotrlm.NewPRRunner(oneshotrlm.PRRunnerConfig{
-			Invoker: invoker,
-			Ledger:  ledger,
-		})
-	} else {
-		runner = prgen.NewRunner(prgen.RunnerConfig{
-			Invoker: invoker,
-			Ledger:  ledger,
-		})
-	}
-
-	// Context options
-	opts := prgen.DefaultContextOptions()
-	if *baseFlag != "" {
-		opts.BaseBranch = *baseFlag
-	}
+	// Create unified framework runner
+	framework := oneshot.NewFramework(invoker, nil)
+	def := commands.PRDefinition{BaseBranch: *baseFlag}
 
 	// Run with timeout
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
@@ -114,7 +93,30 @@ func runPRCommand(args []string) error {
 	spinner := terminal.NewSpinner("Generating PR...")
 	spinner.Start()
 
-	result, err := runner.Run(ctx, opts)
+	fwResult, err := framework.Run(ctx, def, oneshot.RunOpts{})
+
+	// Adapt to local result shape
+	type prRunResult struct {
+		PR           *commands.PRResult
+		Trace        *transparency.Trace
+		ContextAudit *transparency.ContextAudit
+		Error        error
+	}
+	result := &prRunResult{}
+	if fwResult != nil {
+		result.Trace = fwResult.Trace
+		result.ContextAudit = fwResult.ContextAudit
+		if fwResult.Value != nil {
+			if pr, ok := fwResult.Value.(*commands.PRResult); ok {
+				result.PR = pr
+			} else {
+				result.Error = fmt.Errorf("unexpected result type: %T", fwResult.Value)
+			}
+		}
+	}
+	if err != nil {
+		result.Error = err
+	}
 
 	if err != nil {
 		spinner.StopWithError(err.Error())
@@ -149,7 +151,10 @@ func runPRCommand(args []string) error {
 		return fmt.Errorf("no PR generated")
 	}
 
-	printPR(result.PR, result.Context)
+	// Detect branch metadata for display and PR creation
+	branch, baseBranch := detectPRBranches(*baseFlag)
+
+	printPR(result.PR, branch, baseBranch)
 
 	// Show cost
 	if *showCost && result.Trace != nil {
@@ -182,16 +187,38 @@ func runPRCommand(args []string) error {
 	}
 
 	// Create the PR
-	if err := createPR(result.PR, result.Context); err != nil {
+	if err := createPR(result.PR, baseBranch); err != nil {
 		return err
 	}
 
 	return nil
 }
 
-func printPR(pr *prgen.PRResult, ctx *prgen.Context) {
+// detectPRBranches returns the current branch and base branch for PR display.
+func detectPRBranches(baseFlag string) (branch, baseBranch string) {
+	if out, err := exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD").Output(); err == nil {
+		branch = strings.TrimSpace(string(out))
+	}
+	if baseFlag != "" {
+		baseBranch = baseFlag
+	} else {
+		// Auto-detect main/master
+		for _, candidate := range []string{"main", "master", "develop"} {
+			if err := exec.Command("git", "rev-parse", "--verify", candidate).Run(); err == nil {
+				baseBranch = candidate
+				break
+			}
+		}
+		if baseBranch == "" {
+			baseBranch = "main"
+		}
+	}
+	return
+}
+
+func printPR(pr *commands.PRResult, branch, baseBranch string) {
 	termOut.Newline()
-	termOut.Header(fmt.Sprintf("PULL REQUEST: %s → %s", ctx.Branch, ctx.BaseBranch))
+	termOut.Header(fmt.Sprintf("PULL REQUEST: %s → %s", branch, baseBranch))
 
 	// Build content for the box
 	var content strings.Builder
@@ -241,7 +268,7 @@ func pushCurrentBranch() error {
 	return nil
 }
 
-func createPR(pr *prgen.PRResult, ctx *prgen.Context) error {
+func createPR(pr *commands.PRResult, baseBranch string) error {
 	// Check for gh CLI
 	if _, err := exec.LookPath("gh"); err != nil {
 		return fmt.Errorf("gh CLI not found (install from https://cli.github.com)")
@@ -256,7 +283,7 @@ func createPR(pr *prgen.PRResult, ctx *prgen.Context) error {
 	cmd := exec.Command("gh", "pr", "create",
 		"--title", pr.Title,
 		"--body", body,
-		"--base", ctx.BaseBranch,
+		"--base", baseBranch,
 	)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
