@@ -1,0 +1,42 @@
+outcome DelegationDecision {
+    action: string
+    timeout_seconds: number
+    max_iterations: number
+    reason: string
+}
+
+strategy delegation_policy returns DelegationDecision {
+    when {
+        delegation_depth >= 2
+    } then MaxDepthReached {
+        action: "deny",
+        timeout_seconds: 0,
+        max_iterations: 0,
+        reason: "max delegation depth reached",
+    }
+
+    when {
+        role == "subagent" and tier == "light"
+    } then LightSubagent {
+        action: "allow",
+        timeout_seconds: 120,
+        max_iterations: 15,
+        reason: "",
+    }
+
+    when {
+        role == "subagent" and tier == "heavy"
+    } then HeavySubagent {
+        action: "allow",
+        timeout_seconds: 300,
+        max_iterations: 30,
+        reason: "",
+    }
+
+    else DefaultDelegation {
+        action: "allow",
+        timeout_seconds: 120,
+        max_iterations: 25,
+        reason: "",
+    }
+}

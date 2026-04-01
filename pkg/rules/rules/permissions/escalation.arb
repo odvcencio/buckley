@@ -1,0 +1,39 @@
+outcome PermissionDecision {
+    action: string
+    new_tier: string
+    reason: string
+}
+
+strategy permission_escalation_policy returns PermissionDecision {
+    when {
+        role == "subagent" and required_tier == "full_access"
+    } then DenySubagentFull {
+        action: "deny",
+        new_tier: "",
+        reason: "subagents cannot escalate to full access",
+    }
+
+    when {
+        required_tier == "full_access" and risk_score > 0.8
+    } then PromptHumanDanger {
+        action: "prompt_human",
+        new_tier: "",
+        reason: "high-risk full access request",
+    }
+
+    when {
+        role == "coordinator"
+        and required_tier == "shell_exec"
+        and tool == "spawn_subagent"
+    } then GrantCoordinatorSpawn {
+        action: "grant_temporary",
+        new_tier: "shell_exec",
+        reason: "coordinator spawn escalation",
+    }
+
+    else DefaultDeny {
+        action: "deny",
+        new_tier: "",
+        reason: "no matching escalation rule",
+    }
+}

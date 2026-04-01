@@ -1,0 +1,32 @@
+outcome SandboxConfig {
+    level: string
+    network: bool
+}
+
+strategy sandbox_level returns SandboxConfig {
+    when {
+        tool == "bash" and role == "subagent"
+    } then ShellSubagent {
+        level: "workspace",
+        network: false,
+    }
+
+    when {
+        tool == "bash" and role == "coordinator"
+    } then ShellCoordinator {
+        level: "workspace",
+        network: false,
+    }
+
+    when {
+        tool == "web_fetch"
+    } then Browser {
+        level: "none",
+        network: true,
+    }
+
+    else DefaultSandbox {
+        level: "none",
+        network: true,
+    }
+}
