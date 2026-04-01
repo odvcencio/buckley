@@ -94,6 +94,86 @@ func TestNewWatcher_KeepsPreviousOnCompileError(t *testing.T) {
 	_ = before
 }
 
+func TestWatcher_SubdirectoryReload(t *testing.T) {
+	dir := t.TempDir()
+	permDir := filepath.Join(dir, "permissions")
+	if err := os.MkdirAll(permDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write initial valid override for permissions/escalation.
+	// Must include at least one when arm before else to satisfy the arbiter compiler.
+	arbFile := filepath.Join(permDir, "escalation.arb")
+	initial := []byte(`outcome PermissionDecision {
+    action: string
+    new_tier: string
+    reason: string
+}
+
+strategy permission_escalation_policy returns PermissionDecision {
+    when {
+        role == "subagent" and required_tier == "full_access"
+    } then DenySubagentFull {
+        action: "deny",
+        new_tier: "",
+        reason: "subagents cannot escalate to full access",
+    }
+
+    else DefaultDeny {
+        action: "deny",
+        new_tier: "",
+        reason: "v1 override",
+    }
+}
+`)
+	if err := os.WriteFile(arbFile, initial, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	engine, err := NewEngine(WithUserOverrides(dir))
+	if err != nil {
+		t.Fatalf("creating engine: %v", err)
+	}
+
+	w, err := NewWatcher(engine, dir)
+	if err != nil {
+		t.Fatalf("creating watcher: %v", err)
+	}
+	defer w.Close()
+
+	// Modify subdirectory file — watcher should extract "permissions/escalation" as domain.
+	updated := []byte(`outcome PermissionDecision {
+    action: string
+    new_tier: string
+    reason: string
+}
+
+strategy permission_escalation_policy returns PermissionDecision {
+    when {
+        role == "subagent" and required_tier == "full_access"
+    } then DenySubagentFull {
+        action: "deny",
+        new_tier: "",
+        reason: "subagents cannot escalate to full access",
+    }
+
+    else DefaultDeny {
+        action: "deny",
+        new_tier: "",
+        reason: "v2 override",
+    }
+}
+`)
+	if err := os.WriteFile(arbFile, updated, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Allow time for fsnotify
+	time.Sleep(200 * time.Millisecond)
+	// Success = no panic. The watcher should extract "permissions/escalation" as the domain
+	// and call engine.Reload() without error.
+}
+
 func TestWatcher_Close(t *testing.T) {
 	dir := t.TempDir()
 
