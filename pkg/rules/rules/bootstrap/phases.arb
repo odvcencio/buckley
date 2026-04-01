@@ -1,0 +1,48 @@
+outcome PhaseDecision {
+    action: string
+    reason: string
+}
+
+strategy phase_gate returns PhaseDecision {
+    when {
+        phase == "mode_route"
+        and execution_mode == "daemon"
+        and environment == "ci"
+    } then GateDaemonCI {
+        action: "deny",
+        reason: "daemon mode not permitted in CI",
+    }
+
+    when {
+        phase == "auth_resolve"
+    } then RequireAuth {
+        action: "require",
+        reason: "",
+    }
+
+    when {
+        phase == "gts_init" and execution_mode == "oneshot"
+    } then SkipGTSOneshot {
+        action: "skip",
+        reason: "gts not needed in oneshot mode",
+    }
+
+    when {
+        phase == "gts_init" and gts_binary == false
+    } then SkipGTSMissing {
+        action: "skip",
+        reason: "gts binary not found",
+    }
+
+    when {
+        phase == "storage_init" and permission_tier == "read_only"
+    } then SkipStorageReadOnly {
+        action: "skip",
+        reason: "storage not needed in read-only mode",
+    }
+
+    else AllowPhase {
+        action: "allow",
+        reason: "",
+    }
+}

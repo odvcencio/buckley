@@ -1,0 +1,65 @@
+outcome TimeoutChoice {
+    timeout_seconds: number
+}
+
+strategy timeout_policy returns TimeoutChoice {
+    when {
+        tool == "bash" and role == "coordinator"
+    } then ShellCoordinator {
+        timeout_seconds: 60,
+    }
+
+    when {
+        tool == "bash"
+    } then ShellDefault {
+        timeout_seconds: 120,
+    }
+
+    when {
+        tool in ["invoke_codex", "invoke_claude", "invoke_buckley"]
+        and tier == "heavy"
+    } then DelegateHeavy {
+        timeout_seconds: 300,
+    }
+
+    when {
+        tool in ["invoke_codex", "invoke_claude", "invoke_buckley"]
+        and tier == "light"
+    } then DelegateLight {
+        timeout_seconds: 120,
+    }
+
+    when {
+        tool == "spawn_subagent"
+    } then SubagentSpawn {
+        timeout_seconds: 300,
+    }
+
+    when {
+        tool == "web_fetch"
+    } then WebFetch {
+        timeout_seconds: 15,
+    }
+
+    when {
+        tool == "git_push"
+    } then GitPush {
+        timeout_seconds: 60,
+    }
+
+    when {
+        tool in ["git_status", "git_diff", "git_log"]
+    } then GitLocal {
+        timeout_seconds: 30,
+    }
+
+    when {
+        tool == "model_call"
+    } then ModelCall {
+        timeout_seconds: 300,
+    }
+
+    else DefaultTimeout {
+        timeout_seconds: 120,
+    }
+}

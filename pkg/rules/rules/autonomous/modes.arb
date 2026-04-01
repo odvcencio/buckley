@@ -1,0 +1,62 @@
+outcome ModeChoice {
+    action: string
+    mode: string
+    role: string
+    permission_tier: string
+    max_turns: number
+    max_cost_usd: number
+    session_isolation: bool
+    sandbox_default: string
+    allowed_channels: string
+    reason: string
+}
+
+strategy mode_policy returns ModeChoice {
+    when {
+        requested_mode == "daemon" and environment == "ci"
+    } then DenyDaemonCI {
+        action: "deny",
+        mode: "", role: "", permission_tier: "",
+        max_turns: 0, max_cost_usd: 0, session_isolation: false,
+        sandbox_default: "", allowed_channels: "",
+        reason: "daemon mode not permitted in CI",
+    }
+
+    when {
+        requested_mode == "daemon" and environment == "server"
+    } then DaemonServer {
+        action: "allow",
+        mode: "daemon", role: "worker", permission_tier: "workspace_write",
+        max_turns: 10, max_cost_usd: 1.00, session_isolation: true,
+        sandbox_default: "workspace", allowed_channels: "local,sse,file",
+        reason: "",
+    }
+
+    when {
+        requested_mode == "daemon" and environment == "local"
+    } then DaemonLocal {
+        action: "allow",
+        mode: "daemon", role: "worker", permission_tier: "workspace_write",
+        max_turns: 10, max_cost_usd: 1.00, session_isolation: true,
+        sandbox_default: "workspace", allowed_channels: "local,file",
+        reason: "",
+    }
+
+    when {
+        has_prompt == true and requested_mode != "daemon"
+    } then OneshotPrompt {
+        action: "allow",
+        mode: "oneshot", role: "worker", permission_tier: "workspace_write",
+        max_turns: 5, max_cost_usd: 2.00, session_isolation: false,
+        sandbox_default: "workspace", allowed_channels: "local",
+        reason: "",
+    }
+
+    else InteractiveDefault {
+        action: "allow",
+        mode: "interactive", role: "interactive", permission_tier: "full_access",
+        max_turns: 0, max_cost_usd: 0, session_isolation: false,
+        sandbox_default: "none", allowed_channels: "local",
+        reason: "",
+    }
+}

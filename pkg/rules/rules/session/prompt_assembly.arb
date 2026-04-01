@@ -1,0 +1,37 @@
+outcome AssemblyConfig {
+    omit_git_diff: bool
+    include_gts_context: bool
+    max_chars: number
+}
+
+strategy assembly_policy returns AssemblyConfig {
+    when {
+        instruction_chars > 12000
+    } then BudgetCap {
+        omit_git_diff: false,
+        include_gts_context: false,
+        max_chars: 12000,
+    }
+
+    when {
+        model_tier == "fast" and git_diff_lines > 500
+    } then OmitDiffForFast {
+        omit_git_diff: true,
+        include_gts_context: false,
+        max_chars: 12000,
+    }
+
+    when {
+        task_type == "coding" and gts_available == true
+    } then IncludeGTSForCoding {
+        omit_git_diff: false,
+        include_gts_context: true,
+        max_chars: 12000,
+    }
+
+    else DefaultAssembly {
+        omit_git_diff: false,
+        include_gts_context: false,
+        max_chars: 12000,
+    }
+}

@@ -1,0 +1,57 @@
+outcome CompactionChoice {
+    strategy: string
+    preserve_recent: number
+    include_pending_work: bool
+    include_tool_timeline: bool
+    include_files: bool
+}
+
+strategy compaction_strategy returns CompactionChoice {
+    when {
+        task_type == "debugging" and token_util > 0.8
+    } then DebuggingPreserve {
+        strategy: "llm",
+        preserve_recent: 8,
+        include_pending_work: true,
+        include_tool_timeline: true,
+        include_files: true,
+    }
+
+    when {
+        token_util > 0.9 and pending_work_count == 0
+    } then AggressiveCompact {
+        strategy: "heuristic",
+        preserve_recent: 2,
+        include_pending_work: false,
+        include_tool_timeline: false,
+        include_files: false,
+    }
+
+    when {
+        token_util > 0.85 and pending_work_count > 0
+    } then CarefulCompactWithWork {
+        strategy: "llm",
+        preserve_recent: 6,
+        include_pending_work: true,
+        include_tool_timeline: false,
+        include_files: true,
+    }
+
+    when {
+        task_type == "planning" and token_util > 0.75
+    } then PlanningCompact {
+        strategy: "heuristic",
+        preserve_recent: 4,
+        include_pending_work: false,
+        include_tool_timeline: false,
+        include_files: true,
+    }
+
+    else DefaultCompact {
+        strategy: "llm",
+        preserve_recent: 4,
+        include_pending_work: false,
+        include_tool_timeline: false,
+        include_files: false,
+    }
+}

@@ -1,0 +1,39 @@
+outcome ConditionConfig {
+    timeout_seconds: number
+    retry_interval_ms: number
+}
+
+strategy condition_policy returns ConditionConfig {
+    when {
+        condition_type == "port_ready"
+    } then PortReady {
+        timeout_seconds: 60,
+        retry_interval_ms: 500,
+    }
+
+    when {
+        condition_type == "process_ready"
+    } then ProcessReady {
+        timeout_seconds: 300,
+        retry_interval_ms: 1000,
+    }
+
+    when {
+        condition_type == "http_ready"
+    } then HttpReady {
+        timeout_seconds: 60,
+        retry_interval_ms: 2000,
+    }
+
+    when {
+        condition_type == "dns_lookup"
+    } then DnsLookup {
+        timeout_seconds: 60,
+        retry_interval_ms: 5000,
+    }
+
+    else DefaultCondition {
+        timeout_seconds: 60,
+        retry_interval_ms: 1000,
+    }
+}

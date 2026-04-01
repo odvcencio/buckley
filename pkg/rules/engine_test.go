@@ -1315,3 +1315,33 @@ func TestEngine_EvalStrategy_CostBudgets(t *testing.T) {
 		})
 	}
 }
+
+func TestEngine_AllSubdirectoryStrategiesCompile(t *testing.T) {
+	engine := mustNewTestEngine(t)
+	strategies := map[string]string{
+		"permissions/escalation":  "permission_escalation_policy",
+		"permissions/sandbox":     "sandbox_level",
+		"permissions/delegation":  "delegation_policy",
+		"cost/budgets":            "cost_policy",
+		"cost/pricing":            "pricing_policy",
+		"cost/rate_limits":        "rate_policy",
+		"runtime/timeouts":        "timeout_policy",
+		"runtime/concurrency":     "pool_policy",
+		"runtime/conditions":      "condition_policy",
+		"session/compaction":      "compaction_strategy",
+		"session/memory":          "memory_policy",
+		"session/prompt_assembly": "assembly_policy",
+		"bootstrap/phases":        "phase_gate",
+		"autonomous/modes":        "mode_policy",
+		"autonomous/channels":     "channel_policy",
+		"autonomous/sessions":     "intake_policy",
+	}
+	for domain, strat := range strategies {
+		t.Run(domain, func(t *testing.T) {
+			_, err := engine.EvalStrategy(domain, strat, map[string]any{})
+			if err != nil {
+				t.Errorf("domain %s strategy %s: %v", domain, strat, err)
+			}
+		})
+	}
+}

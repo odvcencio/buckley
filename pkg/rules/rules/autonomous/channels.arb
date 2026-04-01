@@ -1,0 +1,37 @@
+outcome ChannelDecision {
+    action: string
+    max_connections: number
+    reason: string
+}
+
+strategy channel_policy returns ChannelDecision {
+    when {
+        channel == "websocket" and environment != "server"
+    } then DenyWebsocketLocal {
+        action: "deny",
+        max_connections: 0,
+        reason: "websocket channels require server environment",
+    }
+
+    when {
+        channel == "websocket" and environment == "server"
+    } then AllowWebsocketServer {
+        action: "allow",
+        max_connections: 5,
+        reason: "",
+    }
+
+    when {
+        channel == "sse"
+    } then AllowSSE {
+        action: "allow",
+        max_connections: 10,
+        reason: "",
+    }
+
+    else AllowLocalChannel {
+        action: "allow",
+        max_connections: 0,
+        reason: "",
+    }
+}

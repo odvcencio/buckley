@@ -1,0 +1,57 @@
+outcome PoolChoice {
+    mode: string
+    include_mcp: bool
+    exclude_tools: string
+    max_concurrent: number
+    queue_size: number
+}
+
+strategy pool_policy returns PoolChoice {
+    when {
+        role == "coordinator"
+    } then CoordinatorPool {
+        mode: "simple",
+        include_mcp: false,
+        exclude_tools: "bash,write_file",
+        max_concurrent: 1,
+        queue_size: 10,
+    }
+
+    when {
+        role == "subagent" and task_type == "read_only"
+    } then SubagentReadOnly {
+        mode: "read_only",
+        include_mcp: false,
+        exclude_tools: "",
+        max_concurrent: 4,
+        queue_size: 100,
+    }
+
+    when {
+        role == "subagent"
+    } then SubagentStandard {
+        mode: "standard",
+        include_mcp: false,
+        exclude_tools: "",
+        max_concurrent: 4,
+        queue_size: 100,
+    }
+
+    when {
+        budget_util > 0.7
+    } then BudgetConstrained {
+        mode: "standard",
+        include_mcp: false,
+        exclude_tools: "",
+        max_concurrent: 2,
+        queue_size: 50,
+    }
+
+    else InteractivePool {
+        mode: "full",
+        include_mcp: true,
+        exclude_tools: "",
+        max_concurrent: 4,
+        queue_size: 100,
+    }
+}

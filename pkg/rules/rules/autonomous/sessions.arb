@@ -1,0 +1,42 @@
+outcome IntakeDecision {
+    action: string
+    max_turns: number
+    delay_seconds: number
+    reason: string
+}
+
+strategy intake_policy returns IntakeDecision {
+    when {
+        budget_util >= 0.95
+    } then RejectOverBudget {
+        action: "reject",
+        max_turns: 0,
+        delay_seconds: 0,
+        reason: "budget nearly exhausted",
+    }
+
+    when {
+        active_tasks >= 4 and priority <= 5
+    } then RejectLowPriority {
+        action: "reject",
+        max_turns: 0,
+        delay_seconds: 0,
+        reason: "system at capacity for low-priority tasks",
+    }
+
+    when {
+        active_tasks >= 4 and priority > 5
+    } then QueueHighLoad {
+        action: "queue",
+        max_turns: 10,
+        delay_seconds: 30,
+        reason: "",
+    }
+
+    else AcceptTask {
+        action: "accept",
+        max_turns: 10,
+        delay_seconds: 0,
+        reason: "",
+    }
+}

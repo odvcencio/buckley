@@ -1,0 +1,15 @@
+outcome MemoryDecision {
+    action: string
+}
+
+strategy memory_policy returns MemoryDecision {
+    when {
+        session_age_hours > 24 and has_unsaved_work == false
+    } then ArchiveStale {
+        action: "archive",
+    }
+
+    else RetainSession {
+        action: "retain",
+    }
+}
