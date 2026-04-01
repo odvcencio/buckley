@@ -1,0 +1,37 @@
+outcome CostDecision {
+    action: string
+    target_tier: string
+    reason: string
+}
+
+strategy cost_policy returns CostDecision {
+    when {
+        session_spend >= session_budget
+    } then HaltOnBudget {
+        action: "halt",
+        target_tier: "",
+        reason: "session budget exhausted",
+    }
+
+    when {
+        budget_util > 0.9 and current_model_cost > 5.0
+    } then DowngradeOnBudget {
+        action: "downgrade_model",
+        target_tier: "light",
+        reason: "budget nearly exhausted, downgrading",
+    }
+
+    when {
+        budget_util > 0.8
+    } then WarnSessionBudget {
+        action: "warn",
+        target_tier: "",
+        reason: "session budget 80% consumed",
+    }
+
+    else AllowSpend {
+        action: "allow",
+        target_tier: "",
+        reason: "",
+    }
+}

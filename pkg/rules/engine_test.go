@@ -1268,3 +1268,50 @@ func TestCostFacts_ToMap(t *testing.T) {
 		t.Errorf("turn_count = %v, want 3", m["turn_count"])
 	}
 }
+
+func TestEngine_EvalStrategy_CostBudgets(t *testing.T) {
+	engine := mustNewTestEngine(t)
+
+	tests := []struct {
+		name       string
+		facts      map[string]any
+		wantAction string
+	}{
+		{
+			name: "halt on exhausted budget",
+			facts: map[string]any{
+				"session_spend": 10.0, "session_budget": 10.0,
+				"budget_util": 1.0, "current_model_cost": 3.0,
+			},
+			wantAction: "halt",
+		},
+		{
+			name: "warn at 80%",
+			facts: map[string]any{
+				"session_spend": 8.0, "session_budget": 10.0,
+				"budget_util": 0.85, "current_model_cost": 3.0,
+			},
+			wantAction: "warn",
+		},
+		{
+			name: "allow under budget",
+			facts: map[string]any{
+				"session_spend": 2.0, "session_budget": 10.0,
+				"budget_util": 0.2, "current_model_cost": 3.0,
+			},
+			wantAction: "allow",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := engine.EvalStrategy("cost/budgets", "cost_policy", tt.facts)
+			if err != nil {
+				t.Fatalf("EvalStrategy: %v", err)
+			}
+			if result.Params["action"] != tt.wantAction {
+				t.Errorf("action = %v, want %s", result.Params["action"], tt.wantAction)
+			}
+		})
+	}
+}

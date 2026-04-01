@@ -1,0 +1,33 @@
+outcome RateDecision {
+    action: string
+    backoff_ms: number
+    backoff_strategy: string
+    target_provider: string
+}
+
+strategy rate_policy returns RateDecision {
+    when {
+        utilization > 0.95 and consecutive_errors > 2
+    } then SwitchProvider {
+        action: "failover",
+        backoff_ms: 0,
+        backoff_strategy: "",
+        target_provider: "secondary",
+    }
+
+    when {
+        utilization > 0.85
+    } then BackoffHighUtil {
+        action: "backoff",
+        backoff_ms: 500,
+        backoff_strategy: "exponential",
+        target_provider: "",
+    }
+
+    else AllowRate {
+        action: "allow",
+        backoff_ms: 0,
+        backoff_strategy: "",
+        target_provider: "",
+    }
+}

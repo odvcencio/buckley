@@ -1,0 +1,29 @@
+outcome PricingDecision {
+    action: string
+    routing_bonus: string
+    weight: number
+}
+
+strategy pricing_policy returns PricingDecision {
+    when {
+        current_model_cost > 15.0 and task_type != "planning"
+    } then ExpensiveModelGate {
+        action: "require_justification",
+        routing_bonus: "",
+        weight: 0,
+    }
+
+    when {
+        cache_hit_ratio > 0.6
+    } then PreferCached {
+        action: "allow",
+        routing_bonus: "cache_friendly",
+        weight: 2,
+    }
+
+    else DefaultPricing {
+        action: "allow",
+        routing_bonus: "",
+        weight: 0,
+    }
+}
