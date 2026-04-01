@@ -1228,3 +1228,43 @@ func TestEngine_EvalRolePermissions_ReadOnlyDeniedTools(t *testing.T) {
 		}
 	}
 }
+
+func TestPermissionEscalationFacts_ToMap(t *testing.T) {
+	facts := PermissionEscalationFacts{
+		ToolName:     "bash",
+		CurrentTier:  "workspace_write",
+		RequiredTier: "shell_exec",
+		AgentRole:    "subagent",
+		Reason:       "need shell",
+		RiskScore:    0.5,
+	}
+	m := facts.ToMap()
+	if m["tool"] != "bash" {
+		t.Errorf("tool = %v, want bash", m["tool"])
+	}
+	if m["role"] != "subagent" {
+		t.Errorf("role = %v, want subagent", m["role"])
+	}
+	if m["risk_score"] != 0.5 {
+		t.Errorf("risk_score = %v, want 0.5", m["risk_score"])
+	}
+}
+
+func TestCostFacts_ToMap(t *testing.T) {
+	facts := CostFacts{
+		SessionSpendUSD:   5.0,
+		SessionBudgetUSD:  10.0,
+		BudgetUtilization: 0.5,
+		TurnCount:         3,
+	}
+	m := facts.ToMap()
+	if m["session_spend"] != 5.0 {
+		t.Errorf("session_spend = %v, want 5.0", m["session_spend"])
+	}
+	if m["budget_util"] != 0.5 {
+		t.Errorf("budget_util = %v, want 0.5", m["budget_util"])
+	}
+	if m["turn_count"] != 3 {
+		t.Errorf("turn_count = %v, want 3", m["turn_count"])
+	}
+}
