@@ -9,6 +9,7 @@ import (
 	"github.com/odvcencio/buckley/pkg/config"
 	"github.com/odvcencio/buckley/pkg/model"
 	"github.com/odvcencio/buckley/pkg/rules"
+	"github.com/odvcencio/buckley/pkg/types"
 )
 
 // CompactionManager handles conversation compaction
@@ -17,6 +18,7 @@ type CompactionManager struct {
 	cfg            *config.Config
 	summaryTimeout time.Duration
 	engine         *rules.Engine
+	evaluator      types.RuleEvaluator
 }
 
 // NewCompactionManager creates a new compaction manager
@@ -34,6 +36,16 @@ func NewCompactionManager(mgr *model.Manager, cfg *config.Config, engine ...*rul
 		cm.engine = engine[0]
 	}
 	return cm
+}
+
+// SetEvaluator configures a strategy evaluator for enriched compaction decisions.
+// When set, ShouldCompact extracts semantic signals from the conversation and
+// evaluates the session/compaction strategy for compaction mode selection.
+func (cm *CompactionManager) SetEvaluator(eval types.RuleEvaluator) {
+	if cm == nil {
+		return
+	}
+	cm.evaluator = eval
 }
 
 // ShouldCompact checks if a conversation should be compacted
@@ -60,6 +72,55 @@ func (cm *CompactionManager) ShouldCompact(conv *Conversation, maxTokens int) bo
 	}
 	threshold := float64(maxTokens) * thresholdRatio
 	return float64(conv.TokenCount) >= threshold
+}
+
+// CompactionStrategy returns the compaction mode and how many recent messages
+// to preserve, consulting the session/compaction arbiter strategy when an
+// evaluator is configured. Falls back to defaults otherwise.
+func (cm *CompactionManager) CompactionStrategy(conv *Conversation, maxTokens int) (strategy string, preserveRecent int) {
+	strategy = "heuristic"
+	preserveRecent = 0
+
+	if cm == nil || cm.evaluator == nil || maxTokens <= 0 {
+		return
+	}
+
+	signals := ExtractSignals(conv.Messages)
+	if maxTokens > 0 {
+		signals.TokenUtilization = float64(conv.TokenCount) / float64(maxTokens)
+	}
+
+	facts := rules.CompactionFacts{
+		TokenUtilization: signals.TokenUtilization,
+		MessageCount:     signals.MessageCount,
+		PendingWorkCount: len(signals.PendingWorkItems),
+		UniqueFilesCount: len(uniqueStrings(signals.ReferencedFiles)),
+		ToolsUsedCount:   len(signals.ToolTimeline),
+	}
+	result, err := cm.evaluator.EvalStrategy("session/compaction", "compaction_strategy", facts.ToMap())
+	if err != nil {
+		return
+	}
+	if s := result.String("strategy"); s != "" {
+		strategy = s
+	}
+	if n := result.Int("preserve_recent"); n > 0 {
+		preserveRecent = n
+	}
+	return
+}
+
+// uniqueStrings returns a deduplicated copy of ss.
+func uniqueStrings(ss []string) []string {
+	seen := make(map[string]struct{}, len(ss))
+	out := make([]string, 0, len(ss))
+	for _, s := range ss {
+		if _, ok := seen[s]; !ok {
+			seen[s] = struct{}{}
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // Compact compacts a conversation by summarizing old messages
