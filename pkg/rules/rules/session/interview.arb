@@ -1,0 +1,61 @@
+outcome InterviewDecision {
+    should_interview: bool
+    max_questions: number
+    reason: string
+}
+
+strategy interview_policy returns InterviewDecision {
+    when {
+        mode == "oneshot"
+    } then SkipOneshot {
+        should_interview: false,
+        max_questions: 0,
+        reason: "oneshot mode skips interview",
+    }
+
+    when {
+        task_type == "simple_question"
+    } then SkipSimpleQuestion {
+        should_interview: false,
+        max_questions: 0,
+        reason: "simple question needs no interview",
+    }
+
+    when {
+        ambiguity > 0.6 and task_type == "feature"
+    } then DeepInterview {
+        should_interview: true,
+        max_questions: 5,
+        reason: "ambiguous feature request needs scoping",
+    }
+
+    when {
+        task_type == "feature" or task_type == "refactor"
+    } then StandardInterview {
+        should_interview: true,
+        max_questions: 3,
+        reason: "new work benefits from clarification",
+    }
+
+    when {
+        task_type == "debugging" and ambiguity > 0.4
+    } then DebugInterview {
+        should_interview: true,
+        max_questions: 2,
+        reason: "unclear bug report needs details",
+    }
+
+    when {
+        file_count > 5
+    } then MultiFileInterview {
+        should_interview: true,
+        max_questions: 3,
+        reason: "multi-file changes benefit from scoping",
+    }
+
+    else SkipInterview {
+        should_interview: false,
+        max_questions: 0,
+        reason: "task is clear enough to proceed",
+    }
+}

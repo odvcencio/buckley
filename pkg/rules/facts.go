@@ -276,3 +276,24 @@ type ChannelFacts struct {
 }
 
 func (f ChannelFacts) ToMap() map[string]any { return structToMap(f) }
+
+// InterviewFacts carries signals for interview behavior decisions.
+type InterviewFacts struct {
+	Mode      string  `arb:"mode"`       // "interactive", "oneshot", "daemon"
+	TaskType  string  `arb:"task_type"`  // "feature", "bugfix", "refactor", "review", "simple_question", "debugging"
+	Ambiguity float64 `arb:"ambiguity"`  // 0.0-1.0 from complexity analysis
+	FileCount int     `arb:"file_count"` // estimated files affected
+	WordCount int     `arb:"word_count"` // user prompt length
+}
+
+func (f InterviewFacts) ToMap() map[string]any { return structToMap(f) }
+
+// IntelligenceFacts carries signals for structural intelligence tool selection.
+type IntelligenceFacts struct {
+	TaskType  string `arb:"task_type"`  // "debugging", "review", "refactor", "feature", "security"
+	HasGTS    bool   `arb:"has_gts"`    // whether gts binary is available
+	Language  string `arb:"language"`   // primary language of the task
+	FileCount int    `arb:"file_count"` // estimated files involved
+}
+
+func (f IntelligenceFacts) ToMap() map[string]any { return structToMap(f) }

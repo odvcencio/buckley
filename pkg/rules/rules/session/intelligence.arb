@@ -1,0 +1,61 @@
+outcome IntelligenceConfig {
+    tools: string
+    depth: string
+    reason: string
+}
+
+strategy intelligence_policy returns IntelligenceConfig {
+    when {
+        task_type == "debugging" and has_gts == true
+    } then DebuggingIntelligence {
+        tools: "callgraph,impact,scope,refs",
+        depth: "deep",
+        reason: "debugging benefits from call chains and blast radius",
+    }
+
+    when {
+        task_type == "review" and has_gts == true
+    } then ReviewIntelligence {
+        tools: "dead,complexity,hotspot,refs",
+        depth: "broad",
+        reason: "review benefits from quality metrics and dead code detection",
+    }
+
+    when {
+        task_type == "refactor" and has_gts == true
+    } then RefactorIntelligence {
+        tools: "refs,scope,impact,callgraph,dead",
+        depth: "deep",
+        reason: "refactoring needs reference tracking and blast radius",
+    }
+
+    when {
+        task_type == "feature" and has_gts == true
+    } then FeatureIntelligence {
+        tools: "map,scope,context,refs",
+        depth: "standard",
+        reason: "new features need structural context and scope awareness",
+    }
+
+    when {
+        task_type == "security" and has_gts == true
+    } then SecurityIntelligence {
+        tools: "capa,imports,refs,callgraph",
+        depth: "deep",
+        reason: "security analysis needs capability detection and data flow",
+    }
+
+    when {
+        has_gts == true
+    } then DefaultIntelligence {
+        tools: "map,scope",
+        depth: "standard",
+        reason: "baseline structural awareness",
+    }
+
+    else NoIntelligence {
+        tools: "",
+        depth: "none",
+        reason: "gts not available",
+    }
+}

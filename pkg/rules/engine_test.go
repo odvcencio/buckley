@@ -1335,6 +1335,8 @@ func TestEngine_AllSubdirectoryStrategiesCompile(t *testing.T) {
 		"autonomous/modes":        "mode_policy",
 		"autonomous/channels":     "channel_policy",
 		"autonomous/sessions":     "intake_policy",
+		"session/interview":       "interview_policy",
+		"session/intelligence":    "intelligence_policy",
 	}
 	for domain, strat := range strategies {
 		t.Run(domain, func(t *testing.T) {
