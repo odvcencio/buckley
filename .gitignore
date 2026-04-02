@@ -50,6 +50,9 @@ docs/site/node_modules/
 docs/site/docs/.vitepress/cache/
 docs/site/docs/.vitepress/dist/
 
+# Rust build artifacts
+**/target/
+
 # OS
 .DS_Store
 Thumbs.db
