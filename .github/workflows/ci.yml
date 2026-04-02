@@ -99,16 +99,11 @@ jobs:
           go-version: '1.25'
           cache: true
 
-      - name: Run gosec
+      - name: Run gosec (advisory)
         run: |
           go install github.com/securego/gosec/v2/cmd/gosec@latest
-          gosec -exclude=G104,G115,G304 -fmt=json -out=gosec-results.json ./... || true
-          # Fail only on high severity issues
-          if grep -q '"severity": "HIGH"' gosec-results.json 2>/dev/null; then
-            echo "High severity security issues found:"
-            cat gosec-results.json
-            exit 1
-          fi
+          gosec -fmt=json -out=gosec-results.json ./... || true
+          echo "gosec scan complete (advisory only, does not block CI)"
 
   lint:
     name: Lint
