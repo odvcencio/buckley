@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -78,7 +79,13 @@ func TestGRPCSendCommandScopeEnforced(t *testing.T) {
 }
 
 func TestGRPCSendCommandRequiresSessionToken(t *testing.T) {
-	store, err := storage.New(t.TempDir() + "/buckley.db")
+	dir, err := os.MkdirTemp("", "grpc-session-token-*")
+	if err != nil {
+		t.Fatalf("MkdirTemp: %v", err)
+	}
+	defer os.RemoveAll(dir)
+
+	store, err := storage.New(dir + "/buckley.db")
 	if err != nil {
 		t.Fatalf("storage.New: %v", err)
 	}
