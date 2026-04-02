@@ -19,6 +19,13 @@ strategy sandbox_level returns SandboxConfig {
     }
 
     when {
+        tool == "bash" and role == "worker"
+    } then ShellWorker {
+        level: "workspace",
+        network: false,
+    }
+
+    when {
         tool == "web_fetch"
     } then Browser {
         level: "none",

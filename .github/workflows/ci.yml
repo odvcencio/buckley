@@ -1,8 +1,10 @@
 name: CI
 
-# Temporarily manual-only while GitHub Actions minutes are exhausted.
-# Re-enable push/pull_request triggers for the OSS launch gate.
 on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
