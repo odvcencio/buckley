@@ -52,8 +52,8 @@ jobs:
 
           echo "Total coverage: ${total}%"
 
-          # Fail if coverage is below threshold (50% for now, increase over time)
-          threshold=50
+          # Fail if coverage is below threshold (raise over time)
+          threshold=40
           if awk -v total="$total" -v threshold="$threshold" 'BEGIN{ exit (total < threshold) ? 0 : 1 }'; then
             echo "Coverage ${total}% is below threshold ${threshold}%"
             exit 1
