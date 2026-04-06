@@ -1,10 +1,16 @@
 # Buckley
 
-AI dev assistant that remembers what you're doing.
+Buckley is a tool-first AI agent harness for serious repository work.
 
-Sessions survive crashes. Four trust levels. Loop detection. Multi-model support.
+It combines resumable sessions, Arbiter-governed model and tool selection, Claude-style repository instructions, and multiple operator surfaces: terminal, browser, one-shot, ACP, and LSP.
 
----
+## Why Buckley
+
+- One shared runtime powers TUI chat, `buckley -p`, headless sessions, ACP editor flows, and browser control.
+- Arbiter governs planning/execution/review model routing, reasoning effort, tool pools, timeouts, approvals, and escalation.
+- Runtime prompt assembly automatically pulls in `AGENTS.md`, `CLAUDE.md`, `.claude/instructions.md`, project context, and active skills.
+- Tool use is first-class. Buckley ships with 38 built-in tool entry points plus skills, plugins, telemetry, approvals, and SQLite-backed persistence.
+- Sessions survive crashes. Plans, approvals, telemetry, and artifacts stay resumable.
 
 ## Quick Start
 
@@ -14,124 +20,57 @@ export OPENROUTER_API_KEY="your-key"
 buckley
 ```
 
-No Docker. No database setup. Just Go and an API key.
+OpenAI, Anthropic, Google, and Ollama are also supported. OpenRouter is the default path when available.
 
----
+## Interfaces
 
-## Three Ways to Use It
+| Surface | Command | Use case |
+| --- | --- | --- |
+| TUI | `buckley` | Interactive coding with approvals, streaming, and history |
+| One-shot | `buckley -p "inspect this repo and fix the failing tests"` | Fast task execution from the terminal |
+| Browser UI | `buckley serve --browser` | Mission Control, approvals, and remote session control |
+| ACP agent | `buckley acp` | Editor agent for ACP-compatible clients |
+| LSP bridge | `buckley lsp` | LSP editor integration on stdio |
 
-| Mode | Command | Use Case |
-|------|---------|----------|
-| **TUI** | `buckley` | Interactive terminal with streaming and approvals |
-| **Web** | `buckley serve --browser` | Browser-based Mission Control |
-| **API** | `buckley api` | Headless for CI/CD integration |
-
----
-
-## The Workflow
-
-1. **Plan** — `/plan "add user auth"` breaks work into tasks
-2. **Execute** — `/execute` runs tasks with self-healing retries
-3. **Review** — AI reviews changes before you merge
-
-The orchestrator coordinates builder, review, and research agents. Tasks persist to SQLite. Crash? Resume where you left off.
-
----
-
-## One-Shot Commands
+## Core Workflow
 
 ```bash
-buckley commit    # AI-generated commit message from staged changes
-buckley pr        # AI-generated PR description
-buckley review    # Code review current changes
-buckley hunt      # Scan codebase for improvements
-buckley dream     # Architectural analysis
+buckley plan "add auth" "support email/password login"
+buckley execute <plan-id>
+buckley review
 ```
 
----
+The planner, builder, review, and runtime layers share the same governance stack, persistence, and tool registry.
 
-## Skills
+## What 1.1.0 Adds
 
-Skills are workflow playbooks. Buckley ships with 8:
+- Fully integrated Arbiter runtime across one-shot, TUI, ACP, and headless execution paths.
+- Shared runtime prompt assembly for repo instructions, project context, working directory, and skills.
+- Governed tool exposure with role/task-aware pool filtering before tool calls are shown to the model.
+- Anthropic tool calling and tool-result round-tripping, so Claude-class models can participate in the same tool loop.
+- Better model resolution for routed raw IDs such as unqualified Claude model names.
 
-- **test-driven-development** — Write tests before code
-- **systematic-debugging** — Reproduce, isolate, fix, verify
-- **code-review** — Review checklist
-- **planning** — Break work into tasks
-
-Skills activate by phase. Create your own in `.buckley/skills/`.
-
----
-
-## Tools
-
-46+ built-in tools:
-
-| Category | Tools |
-|----------|-------|
-| Files | `read_file`, `edit_file`, `create_file` |
-| Search | `search_text`, `semantic_search`, `find_files` |
-| Shell | `run_shell` (with timeout and output limits) |
-| Git | `git_status`, `git_diff`, `git_commit`, etc. |
-| Quality | `run_tests`, `lint` |
-
-Add custom tools via YAML plugin manifests.
-
----
-
-## Trust Levels
-
-Four modes from manual to full auto:
-
-| Level | Behavior |
-|-------|----------|
-| **Conservative** | Approve everything |
-| **Balanced** | Approve file changes and shell |
-| **Standard** | Auto-approve safe operations |
-| **Autonomous** | Full auto (careful) |
-
-Configure per-project in `.buckley/config.yaml`.
-
----
-
-## Multi-Model
-
-Different models for different jobs:
-
-```yaml
-models:
-  planning: anthropic/claude-sonnet-4-20250514
-  execution: moonshotai/kimi-k2
-  review: anthropic/claude-sonnet-4-20250514
-```
-
-Supports OpenRouter (100+ models), Anthropic, OpenAI, Google, Ollama.
-
----
-
-## Experiments
-
-Compare models on the same task:
+## Commands People Actually Use
 
 ```bash
-buckley experiment run "add-dark-mode" \
-    -m moonshotai/kimi-k2-thinking \
-    -m anthropic/claude-sonnet-4-5 \
-    -p "Add dark mode toggle"
+buckley commit
+buckley pr
+buckley review
+buckley hunt
+buckley dream
+buckley experiment run "compare-routing" -m moonshotai/kimi-k2-thinking -m anthropic/claude-sonnet-4-5 -p "Implement feature X"
 ```
 
-Each model runs in an isolated git worktree. Results compared automatically.
-
----
+`buckley commit` and `buckley pr` use transparent tool-first workflows rather than opaque text-only prompting.
 
 ## Configuration
 
-Hierarchical config:
+Configuration is layered:
 
-```
-~/.buckley/config.yaml    (user defaults)
-./.buckley/config.yaml    (project overrides)
-Environment variables     (highest priority)
+```text
+~/.buckley/config.yaml
+./.buckley/config.yaml
+environment variables
 ```
 
 Minimal setup:
@@ -142,60 +81,30 @@ providers:
     api_key: ${OPENROUTER_API_KEY}
 ```
 
----
-
-## Notifications
-
-Get pinged when Buckley needs you:
+Buckley supports separate planning, execution, and review models:
 
 ```yaml
-notify:
-  telegram:
-    bot_token: ${TELEGRAM_BOT_TOKEN}
-    chat_id: ${TELEGRAM_CHAT_ID}
+models:
+  planning: anthropic/claude-sonnet-4-5
+  execution: moonshotai/kimi-k2-thinking
+  review: openai/gpt-5.2-codex-xhigh
 ```
 
-Supports Telegram, Slack, NATS.
+## Skills And Instructions
 
----
+Buckley ships with 8 bundled skills, including planning, code review, systematic debugging, refactoring, test-driven development, API design, git workflow, and creative writing.
 
-## Documentation
-
-| Page | Description |
-|------|-------------|
-| [CLI Reference](https://buckley.draco.quest/CLI) | Commands and flags |
-| [Configuration](https://buckley.draco.quest/CONFIGURATION) | All config options |
-| [Skills](https://buckley.draco.quest/SKILLS) | Workflow guidance system |
-| [Tools](https://buckley.draco.quest/TOOLS) | Built-in tools reference |
-| [Orchestration](https://buckley.draco.quest/ORCHESTRATION) | Multi-agent coordination |
-
-Full docs at [buckley.draco.quest](https://buckley.draco.quest)
-
----
-
-## Requirements
-
-- Go 1.25.1+
-- API key (OpenRouter recommended)
-- Git (for worktree features)
-- Optional: Docker, Ollama
-
----
+Skills layer on top of repository instructions. If a repo already uses `AGENTS.md` or `CLAUDE.md`, Buckley consumes them automatically and applies the same guidance across terminal, headless, and editor sessions.
 
 ## Development
 
 ```bash
-./scripts/test.sh          # Run tests
-./scripts/test.sh -race    # With race detector
-go test ./pkg/orchestrator # Specific package
+./scripts/test.sh
+go build ./cmd/buckley
 ```
 
----
+Primary repo docs live under [`docs/`](/home/draco/work/buckley/docs).
 
 ## License
 
 MIT. See [LICENSE](LICENSE).
-
----
-
-*Named after a very good dog.*

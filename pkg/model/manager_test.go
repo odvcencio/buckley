@@ -352,3 +352,49 @@ func TestSupportsHelpersAndCostCalculation(t *testing.T) {
 		t.Fatalf("unexpected cost: %f", cost)
 	}
 }
+
+func TestGetModelInfoAcceptsUnqualifiedRoutedModelID(t *testing.T) {
+	cfg := &config.Config{
+		Models: config.ModelConfig{
+			DefaultProvider: "anthropic",
+			FallbackChains:  map[string][]string{},
+		},
+		Providers: config.ProviderConfig{
+			ModelRouting: map[string]string{},
+		},
+	}
+	prov := &stubProvider{
+		id: "anthropic",
+		catalog: ModelCatalog{
+			Data: []ModelInfo{
+				{
+					ID:                  "anthropic/claude-3.5-sonnet",
+					ContextLength:       200_000,
+					SupportedParameters: []string{"tools", "functions"},
+				},
+			},
+		},
+	}
+	mgr := &Manager{
+		config:         cfg,
+		providers:      map[string]Provider{"anthropic": prov},
+		providerOrder:  []string{"anthropic"},
+		catalog:        make(map[string]ModelInfo),
+		providerModels: make(map[string][]string),
+		modelProviders: make(map[string]string),
+	}
+	if err := mgr.Initialize(); err != nil {
+		t.Fatalf("Initialize() error = %v", err)
+	}
+
+	info, err := mgr.GetModelInfo("claude-3.5-sonnet")
+	if err != nil {
+		t.Fatalf("GetModelInfo() error = %v", err)
+	}
+	if info.ID != "anthropic/claude-3.5-sonnet" {
+		t.Fatalf("expected anthropic-prefixed model, got %q", info.ID)
+	}
+	if !mgr.SupportsTools("claude-3.5-sonnet") {
+		t.Fatal("expected SupportsTools() to resolve unqualified model IDs")
+	}
+}

@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	pb "github.com/odvcencio/buckley/pkg/acp/proto"
+	buckleyversion "github.com/odvcencio/buckley/pkg/version"
 )
 
 func TestNewLSPBridge(t *testing.T) {
@@ -122,8 +123,8 @@ func TestLSPBridge_Initialize(t *testing.T) {
 	if result.ServerInfo.Name != "buckley-acp-bridge" {
 		t.Errorf("ServerInfo.Name = %q, want %q", result.ServerInfo.Name, "buckley-acp-bridge")
 	}
-	if result.ServerInfo.Version != "1.0.0" {
-		t.Errorf("ServerInfo.Version = %q, want %q", result.ServerInfo.Version, "1.0.0")
+	if result.ServerInfo.Version != buckleyversion.Release {
+		t.Errorf("ServerInfo.Version = %q, want %q", result.ServerInfo.Version, buckleyversion.Release)
 	}
 
 	// Verify capabilities

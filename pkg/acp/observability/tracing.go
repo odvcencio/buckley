@@ -11,6 +11,8 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.4.0"
 	"go.opentelemetry.io/otel/trace"
+
+	buckleyversion "github.com/odvcencio/buckley/pkg/version"
 )
 
 const (
@@ -37,7 +39,7 @@ func NewTracerProvider(serviceName string) (*TracerProvider, error) {
 		context.Background(),
 		resource.WithAttributes(
 			semconv.ServiceNameKey.String(serviceName),
-			semconv.ServiceVersionKey.String("1.0.0"),
+			semconv.ServiceVersionKey.String(buckleyversion.Release),
 			attribute.String("environment", "development"),
 		),
 	)

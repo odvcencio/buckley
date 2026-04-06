@@ -27,6 +27,7 @@ import (
 	acpserver "github.com/odvcencio/buckley/pkg/acp/server"
 	"github.com/odvcencio/buckley/pkg/config"
 	projectcontext "github.com/odvcencio/buckley/pkg/context"
+	projectconversation "github.com/odvcencio/buckley/pkg/conversation"
 	coordination "github.com/odvcencio/buckley/pkg/coordination/coordinator"
 	coordevents "github.com/odvcencio/buckley/pkg/coordination/events"
 	"github.com/odvcencio/buckley/pkg/graft"
@@ -38,15 +39,18 @@ import (
 	rlmrunner "github.com/odvcencio/buckley/pkg/rlm/runner"
 	"github.com/odvcencio/buckley/pkg/rules"
 	"github.com/odvcencio/buckley/pkg/setup"
+	"github.com/odvcencio/buckley/pkg/skill"
 	"github.com/odvcencio/buckley/pkg/storage"
 	"github.com/odvcencio/buckley/pkg/telemetry"
 	"github.com/odvcencio/buckley/pkg/tool"
+	"github.com/odvcencio/buckley/pkg/tool/builtin"
 	"github.com/odvcencio/buckley/pkg/ui/tui"
+	buckleyversion "github.com/odvcencio/buckley/pkg/version"
 )
 
 // Version information - set via ldflags during build
 var (
-	version   = "1.0.0-dev"
+	version   = buckleyversion.Release
 	commit    = "unknown"
 	buildDate = "unknown"
 )
@@ -281,64 +285,71 @@ func main() {
 
 // executeOneShot executes a single prompt and exits
 func executeOneShot(prompt string, cfg *config.Config, mgr *model.Manager, store *storage.Store, projectContext *projectcontext.ProjectContext, planStore orchestrator.PlanStore) int {
+	_ = store
+	_ = planStore
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		return 1
+	}
+
+	engine, err := rules.NewDefaultEngine()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to initialize rules engine: %v\n", err)
+		engine = nil
+	}
+
+	resolvedModel := model.ResolvePhaseModel(cfg, mgr, engine, "execution", "")
+	if resolvedModel == "" {
+		resolvedModel = "openai/gpt-4o"
+	}
+
 	if !quietMode {
-		if cwd, err := os.Getwd(); err == nil {
-			fmt.Fprintf(os.Stderr, "workdir: %s\n", cwd)
-		}
-		if modelID := strings.TrimSpace(cfg.Models.Execution); modelID != "" {
-			fmt.Fprintf(os.Stderr, "model: %s\n", modelID)
-		}
+		fmt.Fprintf(os.Stderr, "workdir: %s\n", cwd)
+		fmt.Fprintf(os.Stderr, "model: %s\n", resolvedModel)
 	}
 	if mgr != nil {
 		mgr.SetRequestTimeout(0)
 	}
 
-	// Build system prompt
-	systemPrompt := "You are Buckley, an AI development assistant. Be concise and helpful."
-	if projectContext != nil && projectContext.RawContent != "" {
-		systemPrompt += "\n\nProject Context:\n" + projectContext.RawContent
+	skills := skill.NewRegistry()
+	if err := skills.LoadAll(); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to load skills: %v\n", err)
+	}
+	conv := projectconversation.New("oneshot")
+	skillState := skill.NewRuntimeState(conv.AddSystemMessage)
+
+	registry := tool.NewRegistry()
+	if err := registry.LoadDefaultPlugins(); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to load some plugins: %v\n", err)
+	}
+	registry.ConfigureContainers(cfg, cwd)
+	registry.SetWorkDir(cwd)
+	registry.Register(&builtin.SkillActivationTool{
+		Registry:     skills,
+		Conversation: skillState,
+	})
+	createTool := &builtin.CreateSkillTool{Registry: skills}
+	createTool.SetWorkDir(cwd)
+	registry.Register(createTool)
+
+	conv.AddSystemMessage(buildACPSystemPrompt(projectContext, cwd, skills, engine))
+	conv.AddUserMessage(prompt)
+
+	responseText, err := runACPLoop(context.Background(), cfg, mgr, conv, registry, skillState, engine, resolvedModel, nil)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "\nError: %v\n", err)
+		return 1
 	}
 
-	// Build messages
-	messages := []model.Message{
-		{Role: "system", Content: systemPrompt},
-		{Role: "user", Content: prompt},
+	if responseText != "" {
+		fmt.Print(responseText)
 	}
-
-	// Get model ID
-	modelID := cfg.Models.Execution
-	if modelID == "" {
-		modelID = "openai/gpt-4o"
+	if !strings.HasSuffix(responseText, "\n") {
+		fmt.Println()
 	}
-
-	// Create request
-	req := model.ChatRequest{
-		Model:    modelID,
-		Messages: messages,
-		Stream:   true,
-	}
-
-	// Stream response
-	ctx := context.Background()
-	chunkChan, errChan := mgr.ChatCompletionStream(ctx, req)
-
-	for {
-		select {
-		case chunk, ok := <-chunkChan:
-			if !ok {
-				fmt.Println() // Final newline
-				return 0
-			}
-			if len(chunk.Choices) > 0 && chunk.Choices[0].Delta.Content != "" {
-				fmt.Print(chunk.Choices[0].Delta.Content)
-			}
-		case err, ok := <-errChan:
-			if ok && err != nil {
-				fmt.Fprintf(os.Stderr, "\nError: %v\n", err)
-				return 1
-			}
-		}
-	}
+	return 0
 }
 
 func runPlanCommand(args []string) error {

@@ -95,15 +95,25 @@ func (m *Manager) Initialize() error {
 
 // GetModelInfo returns information about a model
 func (m *Manager) GetModelInfo(modelID string) (*ModelInfo, error) {
-	if info, ok := m.catalog[modelID]; ok {
-		return &info, nil
+	for _, candidate := range m.modelInfoCandidates(modelID) {
+		if info, ok := m.catalog[candidate]; ok {
+			return &info, nil
+		}
 	}
 
 	provider := m.providerForModel(modelID)
 	if provider == nil {
 		return nil, fmt.Errorf("no provider configured for model %s", modelID)
 	}
-	return provider.GetModelInfo(modelID)
+
+	for _, candidate := range m.modelInfoCandidates(modelID) {
+		info, err := provider.GetModelInfo(candidate)
+		if err == nil {
+			return info, nil
+		}
+	}
+
+	return nil, fmt.Errorf("model not found: %s", modelID)
 }
 
 // GetCatalog returns the merged model catalog
@@ -336,8 +346,12 @@ func (m *Manager) firstModelForProvider(providerID string) (string, bool) {
 }
 
 func (m *Manager) modelAvailable(modelID string) bool {
-	_, ok := m.catalog[modelID]
-	return ok
+	for _, candidate := range m.modelInfoCandidates(modelID) {
+		if _, ok := m.catalog[candidate]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 // GetContextLength returns the context length for a model
@@ -434,6 +448,44 @@ func (m *Manager) GetVisionFallbackModel() string {
 
 	// Return first preference even if not validated
 	return fallbacks[0]
+}
+
+func (m *Manager) modelInfoCandidates(modelID string) []string {
+	modelID = strings.TrimSpace(modelID)
+	if modelID == "" {
+		return nil
+	}
+
+	seen := map[string]struct{}{}
+	candidates := make([]string, 0, 4)
+	add := func(candidate string) {
+		candidate = strings.TrimSpace(candidate)
+		if candidate == "" {
+			return
+		}
+		if _, ok := seen[candidate]; ok {
+			return
+		}
+		seen[candidate] = struct{}{}
+		candidates = append(candidates, candidate)
+	}
+
+	add(modelID)
+	if strings.Contains(modelID, "/") {
+		return candidates
+	}
+
+	if providerID := m.ProviderIDForModel(modelID); providerID != "" {
+		add(providerID + "/" + modelID)
+	}
+
+	for knownModelID := range m.catalog {
+		if strings.HasSuffix(knownModelID, "/"+modelID) {
+			add(knownModelID)
+		}
+	}
+
+	return candidates
 }
 
 // DescribeImage uses a vision model to describe an image

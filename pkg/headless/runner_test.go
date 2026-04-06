@@ -147,13 +147,13 @@ func TestToolApprovalRequired(t *testing.T) {
 	safeTools := []string{"read_file", "list_directory", "git_status"}
 
 	for _, tool := range dangerousTools {
-		if !runner.requiresApproval(tool) {
+		if !runner.requiresApproval(tool, nil) {
 			t.Errorf("expected %s to require approval", tool)
 		}
 	}
 
 	for _, tool := range safeTools {
-		if runner.requiresApproval(tool) {
+		if runner.requiresApproval(tool, nil) {
 			t.Errorf("expected %s to not require approval", tool)
 		}
 	}
@@ -166,7 +166,7 @@ func TestToolApprovalRequiredRespectsToolPolicyList(t *testing.T) {
 		},
 	}
 
-	if !runner.requiresApproval("read_file") {
+	if !runner.requiresApproval("read_file", nil) {
 		t.Fatalf("expected read_file to require approval")
 	}
 }

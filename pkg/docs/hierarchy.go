@@ -26,6 +26,10 @@ func (h *HierarchyManager) Initialize() error {
 		h.rootDir,
 		filepath.Join(h.rootDir, "architecture"),
 		filepath.Join(h.rootDir, "architecture", "decisions"),
+		filepath.Join(h.rootDir, "plans"),
+		filepath.Join(h.rootDir, "execution"),
+		filepath.Join(h.rootDir, "reviews"),
+		filepath.Join(h.rootDir, "archive"),
 	}
 
 	for _, dir := range dirs {
@@ -54,6 +58,13 @@ func (h *HierarchyManager) Initialize() error {
 	adrReadmePath := filepath.Join(h.rootDir, "architecture", "decisions", "README.md")
 	if !fileExists(adrReadmePath) {
 		if err := h.createADRReadme(adrReadmePath); err != nil {
+			return err
+		}
+	}
+
+	archiveReadmePath := filepath.Join(h.rootDir, "archive", "README.md")
+	if !fileExists(archiveReadmePath) {
+		if err := h.createArchiveReadme(archiveReadmePath); err != nil {
 			return err
 		}
 	}
@@ -113,6 +124,16 @@ ADRs capture important architectural decisions with context and consequences.
 	return os.WriteFile(path, []byte(content), 0644)
 }
 
+func (h *HierarchyManager) createArchiveReadme(path string) error {
+	content := `# Archive
+
+Archived plans, execution artifacts, and reviews live here.
+
+Artifacts are organized by archive policy and linked from active documentation when moved.
+`
+	return os.WriteFile(path, []byte(content), 0644)
+}
+
 // Exists checks if the documentation hierarchy exists
 func (h *HierarchyManager) Exists() bool {
 	// Check if key directories exist
@@ -139,6 +160,7 @@ func (h *HierarchyManager) ValidateStructure() error {
 	requiredFiles := []string{
 		filepath.Join(h.rootDir, "README.md"),
 		filepath.Join(h.rootDir, "architecture", "overview.md"),
+		filepath.Join(h.rootDir, "archive", "README.md"),
 	}
 
 	for _, file := range requiredFiles {

@@ -18,6 +18,8 @@ import (
 	projectcontext "github.com/odvcencio/buckley/pkg/context"
 	"github.com/odvcencio/buckley/pkg/conversation"
 	"github.com/odvcencio/buckley/pkg/model"
+	"github.com/odvcencio/buckley/pkg/prompts"
+	"github.com/odvcencio/buckley/pkg/rules"
 	"github.com/odvcencio/buckley/pkg/skill"
 	"github.com/odvcencio/buckley/pkg/storage"
 	"github.com/odvcencio/buckley/pkg/tool"
@@ -214,7 +216,7 @@ func makePromptHandler(
 		}
 
 		modelOverride := resolveACPModelOverride(cfg, mgr, session.Mode)
-		responseText, err := runACPLoop(ctx, cfg, mgr, state.conv, state.registry, state.skillState, modelOverride, stream)
+		responseText, err := runACPLoop(ctx, cfg, mgr, state.conv, state.registry, state.skillState, state.engine, modelOverride, stream)
 		if err != nil {
 			logf("prompt error: %v", err)
 			stream(acp.NewAgentMessageChunk(fmt.Sprintf("\n\nError: %v", err)))
@@ -235,6 +237,7 @@ type acpSessionState struct {
 	registry   *tool.Registry
 	skills     *skill.Registry
 	skillState *skill.RuntimeState
+	engine     *rules.Engine
 }
 
 type acpEmbeddedResource struct {
@@ -338,32 +341,52 @@ func getACPSessionState(
 	// Wire todo persistence for the ACP session
 	registry.SetTodoStore(&acpTodoStoreAdapter{sessionID: session.ID})
 
-	conv.AddSystemMessage(buildACPSystemPrompt(projectContext, workDir, skills))
+	var engine *rules.Engine
+	if e, err := rules.NewDefaultEngine(); err != nil {
+		if logf != nil {
+			logf("rules engine warning: %v", err)
+		}
+	} else {
+		engine = e
+	}
+
+	conv.AddSystemMessage(buildACPSystemPrompt(projectContext, workDir, skills, engine))
 
 	state := &acpSessionState{
 		conv:       conv,
 		registry:   registry,
 		skills:     skills,
 		skillState: skillState,
+		engine:     engine,
 	}
 	sessions[session.ID] = state
 	return state
 }
 
-func buildACPSystemPrompt(projectContext *projectcontext.ProjectContext, workDir string, skills *skill.Registry) string {
-	prompt := defaultACPSystemPrompt
-	if projectContext != nil && strings.TrimSpace(projectContext.RawContent) != "" {
-		prompt += "\n\nProject Context:\n" + projectContext.RawContent
+func buildACPSystemPrompt(projectContext *projectcontext.ProjectContext, workDir string, skills *skill.Registry, engine *rules.Engine) string {
+	var evaluator *rules.EngineAdapter
+	if engine != nil {
+		evaluator = rules.NewEngineAdapter(engine)
 	}
-	if strings.TrimSpace(workDir) != "" {
-		prompt += "\n\nWorking directory: " + workDir
+
+	projectRaw := ""
+	if projectContext != nil {
+		projectRaw = projectContext.RawContent
 	}
+	skillDescriptions := ""
 	if skills != nil {
-		if desc := strings.TrimSpace(skills.GetDescriptions()); desc != "" {
-			prompt += "\n\n" + desc
-		}
+		skillDescriptions = skills.GetDescriptions()
 	}
-	return prompt
+
+	return prompts.BuildRuntimeSystemPrompt(prompts.RuntimePromptInput{
+		Evaluator:         evaluator,
+		BasePrompt:        defaultACPSystemPrompt,
+		ProjectContext:    projectRaw,
+		WorkDir:           workDir,
+		RootDir:           workDir,
+		SkillsDescription: skillDescriptions,
+		TaskType:          "coding",
+	})
 }
 
 func handleACPUserSkillCommand(prompt string, state *acpSessionState) (bool, string) {
@@ -564,18 +587,21 @@ func runACPLoop(
 	conv *conversation.Conversation,
 	registry *tool.Registry,
 	skillState *skill.RuntimeState,
+	engine *rules.Engine,
 	modelOverride string,
 	stream acp.StreamFunc,
 ) (string, error) {
-	modelID := strings.TrimSpace(modelOverride)
+	modelID := model.ResolvePhaseModel(cfg, mgr, engine, "execution", modelOverride)
 	if modelID == "" {
-		modelID = cfg.Models.Execution
-		if modelID == "" {
-			modelID = cfg.Models.Planning
-		}
+		modelID = "openai/gpt-4o"
 	}
 
-	useTools := registry != nil
+	var evaluator *rules.EngineAdapter
+	if engine != nil {
+		evaluator = rules.NewEngineAdapter(engine)
+	}
+
+	useTools := registry != nil && (mgr == nil || mgr.SupportsTools(modelID))
 	toolChoice := "auto"
 
 	maxNudges := 2
@@ -594,7 +620,7 @@ func runACPLoop(
 			allowedTools = skillState.ToolFilter()
 		}
 		if useTools && registry != nil {
-			tools = registry.ToOpenAIFunctionsFiltered(allowedTools)
+			tools = registry.ToOpenAIFunctionsGoverned(evaluator, "interactive", "coding", allowedTools, 0)
 			if len(tools) == 0 {
 				useTools = false
 			}
@@ -609,8 +635,8 @@ func runACPLoop(
 			req.Tools = tools
 			req.ToolChoice = toolChoice
 		}
-		if reasoning := strings.TrimSpace(cfg.Models.Reasoning); reasoning != "" && mgr.SupportsReasoning(modelID) {
-			req.Reasoning = &model.ReasoningConfig{Effort: reasoning}
+		if effort := model.ResolveReasoningEffort(cfg, mgr, engine, modelID, "execution"); effort != "" {
+			req.Reasoning = &model.ReasoningConfig{Effort: effort}
 		}
 
 		resp, err := mgr.ChatCompletion(ctx, req)

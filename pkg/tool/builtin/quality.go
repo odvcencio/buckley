@@ -58,6 +58,12 @@ func (t *AnalyzeComplexityTool) Execute(params map[string]any) (*Result, error) 
 		}
 		path = abs
 	}
+	if _, err := os.Stat(path); err != nil {
+		return &Result{
+			Success: false,
+			Error:   fmt.Sprintf("path does not exist: %s", path),
+		}, nil
+	}
 
 	threshold := 10
 	if th, ok := params["threshold"].(float64); ok {

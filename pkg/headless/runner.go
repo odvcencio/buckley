@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -16,16 +17,20 @@ import (
 	"time"
 
 	"github.com/odvcencio/buckley/pkg/config"
+	projectcontext "github.com/odvcencio/buckley/pkg/context"
 	"github.com/odvcencio/buckley/pkg/conversation"
 	"github.com/odvcencio/buckley/pkg/ipc/command"
 	"github.com/odvcencio/buckley/pkg/model"
 	"github.com/odvcencio/buckley/pkg/orchestrator"
 	"github.com/odvcencio/buckley/pkg/policy"
+	"github.com/odvcencio/buckley/pkg/prompts"
 	"github.com/odvcencio/buckley/pkg/push"
+	"github.com/odvcencio/buckley/pkg/rules"
 	"github.com/odvcencio/buckley/pkg/storage"
 	"github.com/odvcencio/buckley/pkg/telemetry"
 	"github.com/odvcencio/buckley/pkg/tool"
 	"github.com/odvcencio/buckley/pkg/tool/builtin"
+	"github.com/odvcencio/buckley/pkg/types"
 )
 
 // RunnerState represents the current state of a headless session.
@@ -102,6 +107,11 @@ type Runner struct {
 	emitter       EventEmitter
 	telemetry     *telemetry.Hub
 	modelOverride string
+	projectCtx    *projectcontext.ProjectContext
+	rulesEngine   *rules.Engine
+	evaluator     types.RuleEvaluator
+	resolver      *model.Resolver
+	riskDetector  *orchestrator.RiskDetector
 
 	workflow     *orchestrator.WorkflowManager
 	orchestrator *orchestrator.Orchestrator
@@ -189,15 +199,6 @@ func NewRunner(cfg RunnerConfig) (*Runner, error) {
 		conv = conversation.New(cfg.Session.ID)
 	}
 
-	// Inject system prompt if this is a fresh conversation (no messages yet)
-	if len(conv.Messages) == 0 {
-		systemPrompt := cfg.SystemPrompt
-		if systemPrompt == "" {
-			systemPrompt = defaultHeadlessSystemPrompt
-		}
-		conv.AddSystemMessage(systemPrompt)
-	}
-
 	tools := cfg.Tools
 	if tools == nil {
 		tools = tool.NewRegistry()
@@ -208,6 +209,27 @@ func NewRunner(cfg RunnerConfig) (*Runner, error) {
 		baseCfg = config.DefaultConfig()
 	}
 	sessionCfg := resolveSessionConfig(baseCfg, cfg.Session)
+
+	projectCtx := loadRunnerProjectContext(cfg.Session)
+	var rulesEngine *rules.Engine
+	if e, err := rules.NewDefaultEngine(); err == nil {
+		rulesEngine = e
+	}
+	var evaluator types.RuleEvaluator
+	if rulesEngine != nil {
+		evaluator = rules.NewEngineAdapter(rulesEngine)
+	}
+	resolver := model.NewResolver(rulesEngine, model.ResolverConfig{
+		Planning:  sessionCfg.Models.Planning,
+		Execution: sessionCfg.Models.Execution,
+		Review:    sessionCfg.Models.Review,
+	}, cfg.ModelManager)
+	riskDetector := orchestrator.NewRiskDetector(orchestrator.WithRiskRulesEngine(rulesEngine))
+
+	// Inject system prompt if this is a fresh conversation (no messages yet)
+	if len(conv.Messages) == 0 {
+		conv.AddSystemMessage(buildHeadlessSystemPrompt(cfg.SystemPrompt, projectCtx, cfg.Session, evaluator))
+	}
 
 	// Initialize policy engine if not provided
 	policyEngine := cfg.PolicyEngine
@@ -243,6 +265,11 @@ func NewRunner(cfg RunnerConfig) (*Runner, error) {
 		emitter:               cfg.Emitter,
 		telemetry:             cfg.Telemetry,
 		modelOverride:         cfg.ModelOverride,
+		projectCtx:            projectCtx,
+		rulesEngine:           rulesEngine,
+		evaluator:             evaluator,
+		resolver:              resolver,
+		riskDetector:          riskDetector,
 		policyEngine:          policyEngine,
 		pushWorker:            cfg.PushWorker,
 		toolPolicy:            cfg.ToolPolicy,
@@ -494,19 +521,21 @@ func (r *Runner) runConversationLoop() error {
 }
 
 func (r *Runner) buildChatRequest() model.ChatRequest {
-	modelID := r.config.Models.Execution
-	if modelID == "" {
-		modelID = r.config.Models.Planning
-	}
-	if r.modelOverride != "" {
-		modelID = r.modelOverride
-	}
-
-	return model.ChatRequest{
+	modelID := r.resolveExecutionModel()
+	req := model.ChatRequest{
 		Model:    modelID,
 		Messages: r.conv.ToModelMessages(),
-		Tools:    r.tools.ToOpenAIFunctions(),
 	}
+	if r.tools != nil && r.modelManager != nil && r.modelManager.SupportsTools(modelID) {
+		req.Tools = r.tools.ToOpenAIFunctionsGoverned(r.evaluator, "interactive", "coding", nil, 0)
+		if len(req.Tools) > 0 {
+			req.ToolChoice = "auto"
+		}
+	}
+	if effort := model.ResolveReasoningEffort(r.config, r.modelManager, r.rulesEngine, modelID, "execution"); effort != "" {
+		req.Reasoning = &model.ReasoningConfig{Effort: effort}
+	}
+	return req
 }
 
 func (r *Runner) callModel(ctx context.Context, req model.ChatRequest) (*model.ChatResponse, error) {
@@ -625,7 +654,7 @@ func (r *Runner) handleToolCalls(ctx context.Context, toolCalls []model.ToolCall
 		r.clampToolTimeoutArgs(tc.Function.Name, args)
 
 		// Check if tool requires approval
-		if r.requiresApproval(tc.Function.Name) {
+		if r.requiresApproval(tc.Function.Name, args) {
 			approved, err := r.waitForApproval(ctx, tc.ID, tc.Function.Name, args)
 			if err != nil {
 				return err
@@ -759,11 +788,23 @@ func (r *Runner) evaluatePolicy(toolName string, args map[string]any) policy.Eva
 	return r.policyEngine.Evaluate(call)
 }
 
-func (r *Runner) requiresApproval(toolName string) bool {
+func (r *Runner) requiresApproval(toolName string, args map[string]any) bool {
 	toolName = strings.TrimSpace(strings.ToLower(toolName))
 	if toolName != "" && len(r.requiredApprovalTools) > 0 {
 		if _, ok := r.requiredApprovalTools[toolName]; ok {
 			return true
+		}
+	}
+
+	if r.rulesEngine != nil {
+		assessment := r.assessToolRisk(toolName, args)
+		result, err := r.rulesEngine.EvalStrategy("approval", "approval_gate", map[string]any{
+			"approval": map[string]any{"mode": r.approvalMode()},
+			"risk":     map[string]any{"level": assessment.Level},
+		})
+		if err == nil {
+			action, _ := result.Params["action"].(string)
+			return action != "allow"
 		}
 	}
 
@@ -851,10 +892,14 @@ func anyToInt(value any) (int, bool) {
 }
 
 func (r *Runner) waitForApproval(ctx context.Context, toolCallID, toolName string, args map[string]any) (bool, error) {
-	// Evaluate policy for risk score
+	// Evaluate approval risk for display and audit storage.
 	var riskScore int
 	var riskReasons []string
-	if r.policyEngine != nil {
+	if r.rulesEngine != nil {
+		assessment := r.assessToolRisk(toolName, args)
+		riskScore = assessment.Score
+		riskReasons = assessment.Reasons
+	} else if r.policyEngine != nil {
 		result := r.evaluatePolicy(toolName, args)
 		riskScore = result.RiskScore
 		riskReasons = result.RiskReasons
@@ -1579,6 +1624,174 @@ func formatWorkflowPhases(phases []orchestrator.TaskPhase) string {
 		}
 	}
 	return b.String()
+}
+
+func (r *Runner) resolveExecutionModel() string {
+	if r == nil {
+		return ""
+	}
+	if resolved := model.ResolvePhaseModel(r.config, r.modelManager, r.rulesEngine, "execution", r.modelOverride); strings.TrimSpace(resolved) != "" {
+		return resolved
+	}
+	return "openai/gpt-4o"
+}
+
+type toolRiskAssessment struct {
+	Level   string
+	Score   int
+	Reasons []string
+}
+
+func (r *Runner) assessToolRisk(toolName string, args map[string]any) toolRiskAssessment {
+	assessment := toolRiskAssessment{
+		Level: "none",
+		Score: 0,
+	}
+
+	if r != nil && r.riskDetector != nil && strings.EqualFold(strings.TrimSpace(toolName), "run_shell") {
+		command := extractCommandArg(args)
+		result := r.riskDetector.Analyze(command)
+		assessment.Level = strings.ToLower(result.Level.String())
+		assessment.Score = riskLevelScore(assessment.Level)
+		assessment.Reasons = append(assessment.Reasons, result.Reasons...)
+		if len(assessment.Reasons) == 0 && command != "" {
+			assessment.Reasons = append(assessment.Reasons, "shell command: "+command)
+		}
+		return assessment
+	}
+
+	if r != nil && r.tools != nil {
+		if t, ok := r.tools.Get(toolName); ok {
+			switch tool.RequiredTierForTool(t) {
+			case types.TierShellExec, types.TierFullAccess:
+				assessment.Level = "high"
+				assessment.Score = 75
+				assessment.Reasons = []string{"shell-level tool"}
+			case types.TierWorkspaceWrite:
+				assessment.Level = "low"
+				assessment.Score = 25
+				assessment.Reasons = []string{"workspace modification"}
+			default:
+				assessment.Level = "none"
+				assessment.Score = 0
+				assessment.Reasons = []string{"read-only tool"}
+			}
+		}
+	}
+
+	if len(assessment.Reasons) == 0 {
+		assessment.Reasons = []string{"default tool risk"}
+	}
+	return assessment
+}
+
+func (r *Runner) approvalMode() string {
+	if r == nil || r.config == nil {
+		return "ask"
+	}
+
+	mode := strings.ToLower(strings.TrimSpace(r.config.Approval.Mode))
+	switch mode {
+	case "safe", "auto", "yolo", "ask":
+		return mode
+	case "readonly":
+		return "safe"
+	case "automatic":
+		return "auto"
+	case "full", "dangerous":
+		return "yolo"
+	}
+
+	switch strings.ToLower(strings.TrimSpace(r.config.Orchestrator.TrustLevel)) {
+	case "autonomous":
+		return "yolo"
+	case "balanced":
+		return "auto"
+	case "conservative":
+		return "safe"
+	default:
+		return "ask"
+	}
+}
+
+func buildHeadlessSystemPrompt(basePrompt string, projectCtx *projectcontext.ProjectContext, sess *storage.Session, evaluator types.RuleEvaluator) string {
+	projectRaw := ""
+	if projectCtx != nil {
+		projectRaw = projectCtx.RawContent
+	}
+
+	workDir := ""
+	rootDir := ""
+	if sess != nil {
+		workDir = strings.TrimSpace(sess.ProjectPath)
+		rootDir = workDir
+	}
+
+	return prompts.BuildRuntimeSystemPrompt(prompts.RuntimePromptInput{
+		Evaluator:      evaluator,
+		BasePrompt:     defaultIfEmpty(basePrompt, defaultHeadlessSystemPrompt),
+		ProjectContext: projectRaw,
+		WorkDir:        workDir,
+		RootDir:        rootDir,
+		TaskType:       "coding",
+		ModelTier:      model.InferModelTier(""),
+		GTSAvailable:   binaryAvailable("gts"),
+	})
+}
+
+func loadRunnerProjectContext(sess *storage.Session) *projectcontext.ProjectContext {
+	if sess == nil {
+		return nil
+	}
+	root := strings.TrimSpace(sess.ProjectPath)
+	if root == "" {
+		return nil
+	}
+	ctx, err := projectcontext.NewLoader(root).Load()
+	if err != nil {
+		return nil
+	}
+	return ctx
+}
+
+func extractCommandArg(args map[string]any) string {
+	if args == nil {
+		return ""
+	}
+	for _, key := range []string{"command", "cmd"} {
+		if value, ok := args[key].(string); ok {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
+func riskLevelScore(level string) int {
+	switch strings.ToLower(strings.TrimSpace(level)) {
+	case "low":
+		return 25
+	case "medium":
+		return 50
+	case "high":
+		return 75
+	case "critical":
+		return 100
+	default:
+		return 0
+	}
+}
+
+func binaryAvailable(name string) bool {
+	_, err := exec.LookPath(name)
+	return err == nil
+}
+
+func defaultIfEmpty(value, fallback string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return fallback
+	}
+	return value
 }
 
 func truncateOutput(s string, maxLen int) string {

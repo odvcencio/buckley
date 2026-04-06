@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	pb "github.com/odvcencio/buckley/pkg/acp/proto"
+	buckleyversion "github.com/odvcencio/buckley/pkg/version"
 	"github.com/oklog/ulid/v2"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -167,7 +168,7 @@ func (b *Bridge) Initialize(ctx context.Context, params InitializeParams) (*Init
 		Capabilities: capabilities,
 		ServerInfo: &ServerInfo{
 			Name:    "buckley-acp-bridge",
-			Version: "1.0.0",
+			Version: buckleyversion.Release,
 		},
 	}
 

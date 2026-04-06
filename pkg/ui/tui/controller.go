@@ -17,12 +17,15 @@ import (
 	projectcontext "github.com/odvcencio/buckley/pkg/context"
 	"github.com/odvcencio/buckley/pkg/conversation"
 	"github.com/odvcencio/buckley/pkg/model"
+	"github.com/odvcencio/buckley/pkg/prompts"
+	"github.com/odvcencio/buckley/pkg/rules"
 	"github.com/odvcencio/buckley/pkg/session"
 	"github.com/odvcencio/buckley/pkg/skill"
 	"github.com/odvcencio/buckley/pkg/storage"
 	"github.com/odvcencio/buckley/pkg/telemetry"
 	"github.com/odvcencio/buckley/pkg/tool"
 	"github.com/odvcencio/buckley/pkg/tool/builtin"
+	"github.com/odvcencio/buckley/pkg/types"
 	"github.com/odvcencio/buckley/pkg/ui/theme"
 	"github.com/odvcencio/buckley/pkg/ui/widgets"
 	"gopkg.in/yaml.v3"
@@ -43,6 +46,9 @@ type Controller struct {
 	registry     *tool.Registry
 	conversation *conversation.Conversation
 	telemetry    *telemetry.Hub
+	rulesEngine  *rules.Engine
+	evaluator    types.RuleEvaluator
+	resolver     *model.Resolver
 
 	// Event bridge for sidebar updates
 	telemetryBridge *TelemetryUIBridge
@@ -215,6 +221,22 @@ func NewController(cfg ControllerConfig) (*Controller, error) {
 	// Determine project root
 	projectRoot := workDir
 
+	var rulesEngine *rules.Engine
+	if engine, err := rules.NewDefaultEngine(); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to initialize rules engine: %v\n", err)
+	} else {
+		rulesEngine = engine
+	}
+	var evaluator types.RuleEvaluator
+	if rulesEngine != nil {
+		evaluator = rules.NewEngineAdapter(rulesEngine)
+	}
+	resolver := model.NewResolver(rulesEngine, model.ResolverConfig{
+		Planning:  cfg.Config.Models.Planning,
+		Execution: cfg.Config.Models.Execution,
+		Review:    cfg.Config.Models.Review,
+	}, cfg.ModelManager)
+
 	// Create TUI app
 	app, err := NewWidgetApp(WidgetAppConfig{
 		Theme:       theme.DefaultTheme(),
@@ -235,6 +257,9 @@ func NewController(cfg ControllerConfig) (*Controller, error) {
 		registry:       projectSessions[currentIdx].ToolRegistry,
 		conversation:   projectSessions[currentIdx].Conversation,
 		telemetry:      cfg.Telemetry,
+		rulesEngine:    rulesEngine,
+		evaluator:      evaluator,
+		resolver:       resolver,
 		workDir:        workDir,
 		sessions:       projectSessions,
 		currentSession: currentIdx,
@@ -887,7 +912,7 @@ func (c *Controller) streamResponse(ctx context.Context, prompt string, sess *Se
 	sess.Conversation.AddUserMessage(prompt)
 	c.saveMessage(sess.ID, "user", prompt)
 
-	modelID := c.cfg.Models.Execution
+	modelID := model.ResolvePhaseModel(c.cfg, c.modelMgr, c.rulesEngine, "execution", "")
 	if modelID == "" {
 		modelID = "openai/gpt-4o"
 	}
@@ -950,7 +975,7 @@ func (c *Controller) runToolLoop(ctx context.Context, sess *SessionState, modelI
 		return "", nil, fmt.Errorf("session unavailable")
 	}
 
-	useTools := sess.ToolRegistry != nil
+	useTools := sess.ToolRegistry != nil && c.modelMgr.SupportsTools(modelID)
 	toolChoice := "auto"
 	maxIterations := 10
 	totalUsage := model.Usage{}
@@ -970,7 +995,7 @@ func (c *Controller) runToolLoop(ctx context.Context, sess *SessionState, modelI
 			Messages: c.buildMessagesForSession(sess),
 		}
 		if useTools && sess.ToolRegistry != nil {
-			tools := sess.ToolRegistry.ToOpenAIFunctionsFiltered(allowedTools)
+			tools := sess.ToolRegistry.ToOpenAIFunctionsGoverned(c.evaluator, "interactive", "coding", allowedTools, 0)
 			if len(tools) > 0 {
 				req.Tools = tools
 				req.ToolChoice = toolChoice
@@ -978,8 +1003,8 @@ func (c *Controller) runToolLoop(ctx context.Context, sess *SessionState, modelI
 				useTools = false
 			}
 		}
-		if reasoning := strings.TrimSpace(c.cfg.Models.Reasoning); reasoning != "" && c.modelMgr.SupportsReasoning(modelID) {
-			req.Reasoning = &model.ReasoningConfig{Effort: reasoning}
+		if effort := model.ResolveReasoningEffort(c.cfg, c.modelMgr, c.rulesEngine, modelID, "execution"); effort != "" {
+			req.Reasoning = &model.ReasoningConfig{Effort: effort}
 		}
 
 		resp, err := c.modelMgr.ChatCompletion(ctx, req)
@@ -1168,24 +1193,26 @@ func (c *Controller) buildMessagesForSession(sess *SessionState) []model.Message
 
 // buildSystemPrompt constructs the system prompt.
 func (c *Controller) buildSystemPrompt(sess *SessionState) string {
-	prompt := "You are Buckley, an AI development assistant. "
-	prompt += "You help users with software engineering tasks including writing code, debugging, and explaining concepts. "
-	prompt += "Be concise and helpful.\n\n"
-
-	if c.projectCtx != nil && c.projectCtx.RawContent != "" {
-		prompt += "Project Context:\n" + c.projectCtx.RawContent + "\n\n"
+	basePrompt := prompts.DefaultToolUseSystemPrompt + "\n\nIf the user asks to create a new skill, call create_skill to save it."
+	projectRaw := ""
+	if c.projectCtx != nil {
+		projectRaw = c.projectCtx.RawContent
 	}
-
-	prompt += fmt.Sprintf("Working directory: %s\n", c.workDir)
-	prompt += "If the user asks to create a new skill, draft name/description/body and call create_skill to save it.\n"
-
+	skillDescriptions := ""
 	if sess != nil && sess.SkillRegistry != nil {
-		if desc := strings.TrimSpace(sess.SkillRegistry.GetDescriptions()); desc != "" {
-			prompt += "\n" + desc + "\n"
-		}
+		skillDescriptions = sess.SkillRegistry.GetDescriptions()
 	}
-
-	return prompt
+	return prompts.BuildRuntimeSystemPrompt(prompts.RuntimePromptInput{
+		Evaluator:         c.evaluator,
+		BasePrompt:        basePrompt,
+		ProjectContext:    projectRaw,
+		WorkDir:           c.workDir,
+		RootDir:           c.workDir,
+		SkillsDescription: skillDescriptions,
+		TaskType:          "coding",
+		ModelTier:         model.InferModelTier(model.ResolvePhaseModel(c.cfg, c.modelMgr, c.rulesEngine, "execution", "")),
+		GTSAvailable:      commandAvailable("gts"),
+	})
 }
 
 // handleFileSelect processes file selection from the picker.
@@ -1211,6 +1238,11 @@ func (c *Controller) handleShellCmd(cmd string) string {
 	// For now, just indicate what would be executed
 	// Full shell execution would need sandboxing considerations
 	return fmt.Sprintf("Would execute: %s", cmd)
+}
+
+func commandAvailable(name string) bool {
+	_, err := exec.LookPath(name)
+	return err == nil
 }
 
 // defaultTUIMaxOutputBytes limits tool output in TUI mode.
