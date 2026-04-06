@@ -227,7 +227,7 @@ func getMaxTimeout(conditions []Condition) time.Duration {
 // runCommand is a helper to create exec commands
 func runCommand(ctx context.Context, name string, args ...string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, name, args...)
-	cmd.Env = []string{} // Inherit environment
+	cmd.Env = nil // Inherit parent environment
 	return cmd
 }
 

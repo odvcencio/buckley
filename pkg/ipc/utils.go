@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	stdliberrors "errors"
 	"fmt"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -44,6 +45,17 @@ func (r *rateLimiter) Allow(key string) bool {
 		}
 	}
 	r.last[key] = now
+
+	// Periodic cleanup to prevent unbounded growth
+	if len(r.last) > 10000 {
+		staleThreshold := r.interval * 10
+		for k, v := range r.last {
+			if now.Sub(v) > staleThreshold {
+				delete(r.last, k)
+			}
+		}
+	}
+
 	return true
 }
 
@@ -67,7 +79,9 @@ func respondJSON(w http.ResponseWriter, payload any) {
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
-	_ = enc.Encode(payload)
+	if err := enc.Encode(payload); err != nil {
+		log.Printf("[debug] ipc: respondJSON encode error: %v", err)
+	}
 }
 
 // respondError sends a structured JSON error response.
@@ -123,7 +137,9 @@ func respondError(w http.ResponseWriter, status int, err error) {
 	}
 
 	response.Error = response.Message
-	_ = json.NewEncoder(w).Encode(response)
+	if err := json.NewEncoder(w).Encode(response); err != nil {
+		log.Printf("[debug] ipc: respondError encode error: %v", err)
+	}
 }
 
 // defaultRemediation provides helpful remediation steps for common errors.

@@ -154,8 +154,9 @@ func (b *NATSBus) Queue(name string) TaskQueue {
 	}
 
 	q := &natsQueue{
-		name: name,
-		js:   b.js,
+		name:     name,
+		js:       b.js,
+		inflight: make(map[string]jetstream.Msg),
 	}
 	b.queues[name] = q
 	return q
@@ -195,13 +196,15 @@ func (s *natsSubscription) Subject() string {
 
 // natsQueue implements TaskQueue using JetStream.
 type natsQueue struct {
-	name     string
-	js       jetstream.JetStream
-	stream   jetstream.Stream
-	consumer jetstream.Consumer
-	mu       sync.Mutex
-	init     sync.Once
-	initErr  error
+	name       string
+	js         jetstream.JetStream
+	stream     jetstream.Stream
+	consumer   jetstream.Consumer
+	mu         sync.Mutex
+	init       sync.Once
+	initErr    error
+	inflightMu sync.Mutex
+	inflight   map[string]jetstream.Msg
 }
 
 func (q *natsQueue) ensureStream(ctx context.Context) error {
@@ -263,8 +266,12 @@ func (q *natsQueue) Pull(ctx context.Context) (*Task, error) {
 		if err != nil {
 			continue
 		}
+		taskID := fmt.Sprintf("%d:%d", meta.Sequence.Stream, meta.Sequence.Consumer)
+		q.inflightMu.Lock()
+		q.inflight[taskID] = msg
+		q.inflightMu.Unlock()
 		return &Task{
-			ID:   fmt.Sprintf("%d:%d", meta.Sequence.Stream, meta.Sequence.Consumer),
+			ID:   taskID,
 			Data: msg.Data(),
 		}, nil
 	}
@@ -277,14 +284,31 @@ func (q *natsQueue) Pull(ctx context.Context) (*Task, error) {
 }
 
 func (q *natsQueue) Ack(ctx context.Context, taskID string) error {
-	// In JetStream, ack is done on the message itself during Pull
-	// This is a simplified implementation; real impl would track messages
-	return nil
+	q.inflightMu.Lock()
+	msg, ok := q.inflight[taskID]
+	if ok {
+		delete(q.inflight, taskID)
+	}
+	q.inflightMu.Unlock()
+
+	if !ok {
+		return nil
+	}
+	return msg.Ack()
 }
 
 func (q *natsQueue) Nack(ctx context.Context, taskID string) error {
-	// Similarly, nack/nak is done on the message
-	return nil
+	q.inflightMu.Lock()
+	msg, ok := q.inflight[taskID]
+	if ok {
+		delete(q.inflight, taskID)
+	}
+	q.inflightMu.Unlock()
+
+	if !ok {
+		return nil
+	}
+	return msg.Nak()
 }
 
 func (q *natsQueue) Len(ctx context.Context) (int, error) {

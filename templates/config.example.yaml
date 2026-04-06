@@ -1,13 +1,12 @@
 models:
-  planning: moonshotai/kimi-k2-thinking
-  execution: openai/gpt-4-turbo
-  review: anthropic/claude-sonnet-4-5
+  planning: moonshotai/kimi-k2.5
+  execution: moonshotai/kimi-k2.5
+  review: moonshotai/kimi-k2.5
   fallback_chains:
-    moonshotai/kimi-k2-thinking:
-      - openai/o1-preview
-      - anthropic/claude-opus-4
+    moonshotai/kimi-k2.5:
+      - anthropic/claude-opus-4.5
     openai/gpt-4-turbo:
-      - anthropic/claude-sonnet-4-5
+      - anthropic/claude-sonnet-4.5
 
 personality:
   enabled: true
@@ -100,6 +99,14 @@ ipc:
   basic_auth_enabled: false
   basic_auth_username: ""
   basic_auth_password: ""
+
+# Browser automation (Servo-based browserd daemon).
+browser:
+  browserd_path: ""          # Path to browserd binary; empty = auto-detect
+  socket_dir: ""             # Unix socket directory; empty = /tmp/buckley
+  frame_rate: 12             # Target FPS for streaming (1-30)
+  connect_timeout: 10s       # Timeout waiting for browserd to start
+  operation_timeout: 30s     # Timeout per navigation/action
 
 # Clone safety policy for any operation that runs `git clone` (headless sessions, batch workers, etc).
 git_clone:

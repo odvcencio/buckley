@@ -84,6 +84,9 @@ type SubAgentConfig struct {
 	ToolTier      string // role_permissions tier for runtime validation
 }
 
+// SubAgentInstanceConfig preserves the merged oneshot runner API.
+type SubAgentInstanceConfig = SubAgentConfig
+
 // SubAgentDeps provides shared dependencies.
 type SubAgentDeps struct {
 	Models     *model.Manager

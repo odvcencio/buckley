@@ -21,6 +21,8 @@ type TelegramAdapter struct {
 	mu        sync.Mutex
 	running   bool
 	stopCh    chan struct{}
+	closeOnce sync.Once
+	done      chan struct{}
 
 	// Track pending events for response matching
 	pending map[string]*Event
@@ -51,6 +53,7 @@ func NewTelegramAdapter(cfg TelegramConfig) (*TelegramAdapter, error) {
 		responses: make(chan *Response, 100),
 		pending:   make(map[string]*Event),
 		stopCh:    make(chan struct{}),
+		done:      make(chan struct{}),
 	}, nil
 }
 
@@ -89,7 +92,7 @@ func (t *TelegramAdapter) Send(ctx context.Context, event *Event) error {
 	msg.WriteString("_")
 
 	// Build request
-	payload := map[string]interface{}{
+	payload := map[string]any{
 		"chat_id":    t.chatID,
 		"text":       msg.String(),
 		"parse_mode": "Markdown",
@@ -106,7 +109,7 @@ func (t *TelegramAdapter) Send(ctx context.Context, event *Event) error {
 				},
 			})
 		}
-		payload["reply_markup"] = map[string]interface{}{
+		payload["reply_markup"] = map[string]any{
 			"inline_keyboard": buttons,
 		}
 
@@ -135,6 +138,7 @@ func (t *TelegramAdapter) ReceiveResponses(ctx context.Context) (<-chan *Respons
 }
 
 func (t *TelegramAdapter) pollUpdates(ctx context.Context) {
+	defer close(t.done)
 	offset := 0
 
 	for {
@@ -195,7 +199,7 @@ type telegramUser struct {
 }
 
 func (t *TelegramAdapter) getUpdates(offset int) ([]telegramUpdate, error) {
-	payload := map[string]interface{}{
+	payload := map[string]any{
 		"offset":  offset,
 		"timeout": 30,
 	}
@@ -236,7 +240,7 @@ func (t *TelegramAdapter) handleCallback(query *telegramCallbackQuery) {
 	optionID := parts[1]
 
 	// Answer callback query
-	t.sendRequest("answerCallbackQuery", map[string]interface{}{
+	t.sendRequest("answerCallbackQuery", map[string]any{
 		"callback_query_id": query.ID,
 		"text":              "Response received!",
 	})
@@ -291,7 +295,7 @@ func (t *TelegramAdapter) handleMessage(msg *telegramMessage) {
 	}
 }
 
-func (t *TelegramAdapter) sendRequest(method string, payload map[string]interface{}) error {
+func (t *TelegramAdapter) sendRequest(method string, payload map[string]any) error {
 	data, err := json.Marshal(payload)
 	if err != nil {
 		return err
@@ -314,8 +318,14 @@ func (t *TelegramAdapter) sendRequest(method string, payload map[string]interfac
 
 // Close closes the adapter.
 func (t *TelegramAdapter) Close() error {
-	close(t.stopCh)
-	close(t.responses)
+	t.closeOnce.Do(func() {
+		close(t.stopCh)
+		select {
+		case <-t.done:
+		case <-time.After(5 * time.Second):
+		}
+		close(t.responses)
+	})
 	return nil
 }
 

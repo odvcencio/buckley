@@ -289,6 +289,24 @@ func (s *Store) UpdateSessionActivity(sessionID string) error {
 	return nil
 }
 
+// UpdateSessionProjectPath updates the project path for a session.
+func (s *Store) UpdateSessionProjectPath(sessionID, projectPath string) error {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return fmt.Errorf("session id required")
+	}
+	projectPath = strings.TrimSpace(projectPath)
+	query := `UPDATE sessions SET project_path = ? WHERE session_id = ?`
+	if _, err := s.db.Exec(query, projectPath, sessionID); err != nil {
+		return err
+	}
+
+	s.notify(newEvent(EventSessionUpdated, sessionID, sessionID, map[string]any{
+		"projectPath": projectPath,
+	}))
+	return nil
+}
+
 // UpdateSessionStats updates message count, tokens, and cost.
 func (s *Store) UpdateSessionStats(sessionID string, messageCount, totalTokens int, totalCost float64) error {
 	query := `

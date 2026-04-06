@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"time"
 )
@@ -183,7 +184,8 @@ func (p *OpenAIProvider) invoke(ctx context.Context, req ChatRequest) (*ChatResp
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("openai request failed: %s", resp.Status)
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("openai request failed (%d): %s", resp.StatusCode, string(body))
 	}
 
 	var chatResp ChatResponse
@@ -214,11 +216,19 @@ func (p *OpenAIProvider) invokeStream(ctx context.Context, req ChatRequest, chun
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("openai streaming request failed: %s", resp.Status)
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("openai streaming request failed (%d): %s", resp.StatusCode, string(body))
 	}
 
 	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024) // 1MB max line
 	for scanner.Scan() {
+		select {
+		case <-ctx.Done():
+			return nil
+		default:
+		}
+
 		data := scanner.Text()
 		if data == "" {
 			continue
@@ -233,9 +243,13 @@ func (p *OpenAIProvider) invokeStream(ctx context.Context, req ChatRequest, chun
 
 		var chunk StreamChunk
 		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
-			return fmt.Errorf("decoding chunk: %w", err)
+			continue
 		}
-		chunkChan <- chunk
+		select {
+		case chunkChan <- chunk:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 	}
 
 	return scanner.Err()

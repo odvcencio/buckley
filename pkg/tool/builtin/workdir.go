@@ -65,10 +65,17 @@ func (w *workDirAware) SetMaxOutputBytes(max int) {
 }
 
 func (w *workDirAware) execContext() (context.Context, context.CancelFunc) {
-	if w == nil || w.maxExecTime <= 0 {
-		return context.Background(), func() {}
+	return w.execContextWithParent(context.Background())
+}
+
+func (w *workDirAware) execContextWithParent(parent context.Context) (context.Context, context.CancelFunc) {
+	if parent == nil {
+		parent = context.Background()
 	}
-	return context.WithTimeout(context.Background(), w.maxExecTime)
+	if w == nil || w.maxExecTime <= 0 {
+		return parent, func() {}
+	}
+	return context.WithTimeout(parent, w.maxExecTime)
 }
 
 func resolvePath(workDir, raw string) (string, error) {

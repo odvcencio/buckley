@@ -1,0 +1,486 @@
+package widgets
+
+import (
+	"testing"
+
+	"github.com/odvcencio/fluffyui/backend"
+	"github.com/odvcencio/fluffyui/runtime"
+	"github.com/odvcencio/fluffyui/state"
+	"github.com/odvcencio/fluffyui/terminal"
+)
+
+func TestSidebar_New(t *testing.T) {
+	s := NewSidebar()
+
+	if s.status == nil || s.files == nil {
+		t.Fatal("expected status and files sections to be initialized")
+	}
+	if !s.status.showCurrentTask {
+		t.Error("showCurrentTask should be true by default")
+	}
+	if !s.status.showPlan {
+		t.Error("showPlan should be true by default")
+	}
+	if !s.status.showTools {
+		t.Error("showTools should be true by default")
+	}
+	if !s.status.showContext {
+		t.Error("showContext should be true by default")
+	}
+	if !s.files.showTouches {
+		t.Error("showTouches should be true by default")
+	}
+	if !s.files.showRecentFiles {
+		t.Error("showRecentFiles should be true by default")
+	}
+}
+
+func TestSidebar_SetCurrentTask(t *testing.T) {
+	s := NewSidebar()
+	if s.status == nil {
+		t.Fatal("expected status section to be initialized")
+	}
+
+	s.SetCurrentTask("Implement auth", 50)
+
+	if s.status.currentTask != "Implement auth" {
+		t.Errorf("expected task 'Implement auth', got '%s'", s.status.currentTask)
+	}
+	if s.status.taskProgress != 50 {
+		t.Errorf("expected progress 50, got %d", s.status.taskProgress)
+	}
+
+	// Test bounds checking
+	s.SetCurrentTask("Test", -10)
+	if s.status.taskProgress != 0 {
+		t.Errorf("negative progress should be clamped to 0, got %d", s.status.taskProgress)
+	}
+
+	s.SetCurrentTask("Test", 150)
+	if s.status.taskProgress != 100 {
+		t.Errorf("progress > 100 should be clamped to 100, got %d", s.status.taskProgress)
+	}
+}
+
+func TestSidebar_SetPlanTasks(t *testing.T) {
+	s := NewSidebar()
+	if s.status == nil {
+		t.Fatal("expected status section to be initialized")
+	}
+
+	tasks := []PlanTask{
+		{Name: "Design API", Status: TaskCompleted},
+		{Name: "Write tests", Status: TaskCompleted},
+		{Name: "Implement", Status: TaskInProgress},
+		{Name: "Review", Status: TaskPending},
+	}
+	s.SetPlanTasks(tasks)
+
+	if len(s.status.planTasks) != 4 {
+		t.Errorf("expected 4 tasks, got %d", len(s.status.planTasks))
+	}
+	if s.status.planTasks[2].Status != TaskInProgress {
+		t.Error("task 3 should be in progress")
+	}
+}
+
+func TestSidebar_SetRunningTools(t *testing.T) {
+	s := NewSidebar()
+	if s.status == nil {
+		t.Fatal("expected status section to be initialized")
+	}
+
+	tools := []RunningTool{
+		{ID: "1", Name: "run_shell", Command: "npm test"},
+		{ID: "2", Name: "read_file"},
+	}
+	s.SetRunningTools(tools)
+
+	if len(s.status.runningTools) != 2 {
+		t.Errorf("expected 2 tools, got %d", len(s.status.runningTools))
+	}
+	if s.status.runningTools[0].Command != "npm test" {
+		t.Errorf("expected command 'npm test', got '%s'", s.status.runningTools[0].Command)
+	}
+}
+
+func TestSidebar_SetRecentFiles(t *testing.T) {
+	s := NewSidebar()
+	if s.files == nil {
+		t.Fatal("expected files section to be initialized")
+	}
+
+	files := []string{
+		"pkg/api/server.go",
+		"pkg/buckley/ui/widgets/sidebar.go",
+	}
+	s.SetRecentFiles(files)
+
+	if len(s.files.recentFiles) != 2 {
+		t.Errorf("expected 2 files, got %d", len(s.files.recentFiles))
+	}
+}
+
+func TestSidebar_SetActiveTouches(t *testing.T) {
+	s := NewSidebar()
+	if s.files == nil {
+		t.Fatal("expected files section to be initialized")
+	}
+
+	touches := []TouchSummary{
+		{Path: "pkg/buckley/ui/widgets/sidebar.go", Operation: "write"},
+		{Path: "pkg/buckley/ui/tui/app_widget.go", Operation: "read"},
+	}
+	s.SetActiveTouches(touches)
+
+	if len(s.files.activeTouches) != 2 {
+		t.Errorf("expected 2 touches, got %d", len(s.files.activeTouches))
+	}
+	if s.files.activeTouches[0].Path != "pkg/buckley/ui/widgets/sidebar.go" {
+		t.Errorf("expected first touch path, got %s", s.files.activeTouches[0].Path)
+	}
+}
+
+func TestSidebar_ToggleRecentFiles(t *testing.T) {
+	s := NewSidebar()
+	if s.files == nil {
+		t.Fatal("expected files section to be initialized")
+	}
+
+	s.ToggleRecentFiles()
+	if s.files.showRecentFiles {
+		t.Error("should be hidden after toggle")
+	}
+
+	s.ToggleRecentFiles()
+	if !s.files.showRecentFiles {
+		t.Error("should be shown after second toggle")
+	}
+}
+
+func TestSidebar_Measure(t *testing.T) {
+	s := NewSidebar()
+
+	size := s.Measure(runtime.Constraints{MaxWidth: 40, MaxHeight: 30})
+
+	// Default width is 24
+	if size.Width != 24 {
+		t.Errorf("expected width 24, got %d", size.Width)
+	}
+	if size.Height != 30 {
+		t.Errorf("expected height 30, got %d", size.Height)
+	}
+
+	// Constrained width
+	size = s.Measure(runtime.Constraints{MaxWidth: 15, MaxHeight: 20})
+	if size.Width != 15 {
+		t.Errorf("expected constrained width 15, got %d", size.Width)
+	}
+}
+
+func TestSidebar_ToggleSections(t *testing.T) {
+	s := NewSidebar()
+	if s.status == nil || s.files == nil {
+		t.Fatal("expected status and files sections to be initialized")
+	}
+
+	// Toggle current task
+	s.ToggleCurrentTask()
+	if s.status.showCurrentTask {
+		t.Error("showCurrentTask should be false after toggle")
+	}
+
+	// Toggle plan
+	s.TogglePlan()
+	if s.status.showPlan {
+		t.Error("showPlan should be false after toggle")
+	}
+
+	// Toggle tools
+	s.ToggleTools()
+	if s.status.showTools {
+		t.Error("showTools should be false after toggle")
+	}
+
+	// Toggle context
+	s.ToggleContext()
+	if s.status.showContext {
+		t.Error("showContext should be false after toggle")
+	}
+
+	// Toggle touches
+	s.ToggleTouches()
+	if s.files.showTouches {
+		t.Error("showTouches should be false after toggle")
+	}
+
+	// Toggle recent files
+	s.ToggleRecentFiles()
+	if s.files.showRecentFiles {
+		t.Error("showRecentFiles should be false after toggle")
+	}
+}
+
+func TestSidebar_VisibilitySignals(t *testing.T) {
+	showTask := state.NewSignal(false)
+	showPlan := state.NewSignal(true)
+	showTools := state.NewSignal(true)
+	showContext := state.NewSignal(true)
+	showTouches := state.NewSignal(true)
+	showRecent := state.NewSignal(true)
+	showExperiment := state.NewSignal(true)
+	showRLM := state.NewSignal(true)
+	showCircuit := state.NewSignal(true)
+
+	s := NewSidebarWithBindings(DefaultSidebarConfig(), SidebarBindings{
+		ShowCurrentTask: showTask,
+		ShowPlan:        showPlan,
+		ShowTools:       showTools,
+		ShowContext:     showContext,
+		ShowTouches:     showTouches,
+		ShowRecentFiles: showRecent,
+		ShowExperiment:  showExperiment,
+		ShowRLM:         showRLM,
+		ShowCircuit:     showCircuit,
+	})
+
+	if s.status == nil || s.files == nil {
+		t.Fatal("expected status and files sections to be initialized")
+	}
+	if s.status.showCurrentTask {
+		t.Error("showCurrentTask should follow signal false")
+	}
+
+	showPlan.Set(false)
+	if s.status.showPlan {
+		t.Error("showPlan should follow signal false")
+	}
+
+	showTouches.Set(false)
+	if s.files.showTouches {
+		t.Error("showTouches should follow signal false")
+	}
+
+	showRecent.Set(false)
+	if s.files.showRecentFiles {
+		t.Error("showRecentFiles should follow signal false")
+	}
+
+	showCircuit.Set(false)
+	if s.status.showCircuit {
+		t.Error("showCircuit should follow signal false")
+	}
+}
+
+func TestSidebar_WidthSignal(t *testing.T) {
+	width := state.NewSignal(30)
+	s := NewSidebarWithBindings(DefaultSidebarConfig(), SidebarBindings{
+		Width: width,
+	})
+	if s.Width() != 30 {
+		t.Fatalf("expected width 30, got %d", s.Width())
+	}
+	width.Set(40)
+	if s.Width() != 40 {
+		t.Fatalf("expected width 40, got %d", s.Width())
+	}
+}
+
+func TestSidebar_TabIndexSignal(t *testing.T) {
+	tabIndex := state.NewSignal(1)
+	s := NewSidebarWithBindings(DefaultSidebarConfig(), SidebarBindings{
+		TabIndex: tabIndex,
+	})
+	if s.tabs == nil {
+		t.Fatal("expected tabs to be initialized")
+	}
+	if s.tabs.SelectedIndex() != 1 {
+		t.Fatalf("expected tab index 1, got %d", s.tabs.SelectedIndex())
+	}
+	tabIndex.Set(0)
+	if s.tabs.SelectedIndex() != 0 {
+		t.Fatalf("expected tab index 0, got %d", s.tabs.SelectedIndex())
+	}
+	s.tabs.Focus()
+	s.HandleMessage(runtime.KeyMsg{Key: terminal.KeyRight})
+	if tabIndex.Get() != 1 {
+		t.Fatalf("expected signal index 1, got %d", tabIndex.Get())
+	}
+}
+
+func TestSidebar_HandleMessage_TabSwitch(t *testing.T) {
+	s := NewSidebar()
+	if s.tabs == nil {
+		t.Fatal("expected tabs to be initialized")
+	}
+	s.tabs.Focus()
+
+	result := s.HandleMessage(runtime.KeyMsg{Key: terminal.KeyRight})
+	if !result.Handled {
+		t.Fatal("expected right key to switch tabs")
+	}
+	if s.tabs.SelectedIndex() != 1 {
+		t.Fatalf("expected tab index 1, got %d", s.tabs.SelectedIndex())
+	}
+
+	result = s.HandleMessage(runtime.KeyMsg{Key: terminal.KeyLeft})
+	if !result.Handled {
+		t.Fatal("expected left key to switch tabs")
+	}
+	if s.tabs.SelectedIndex() != 0 {
+		t.Fatalf("expected tab index 0, got %d", s.tabs.SelectedIndex())
+	}
+}
+
+func TestSidebar_HandleMessage_MouseTabClick(t *testing.T) {
+	s := NewSidebar()
+	if s.tabs == nil {
+		t.Fatal("expected tabs to be initialized")
+	}
+	s.Layout(runtime.Rect{X: 0, Y: 0, Width: 30, Height: 8})
+
+	result := s.HandleMessage(runtime.MouseMsg{
+		X:      9,
+		Y:      0,
+		Button: runtime.MouseLeft,
+		Action: runtime.MousePress,
+	})
+	if !result.Handled {
+		t.Fatal("expected mouse click to switch tabs")
+	}
+	if s.tabs.SelectedIndex() != 1 {
+		t.Fatalf("expected tab index 1, got %d", s.tabs.SelectedIndex())
+	}
+}
+
+func TestSidebar_Render(t *testing.T) {
+	s := NewSidebar()
+	s.SetCurrentTask("Implement feature", 75)
+	s.SetPlanTasks([]PlanTask{
+		{Name: "Design", Status: TaskCompleted},
+		{Name: "Implement", Status: TaskInProgress},
+		{Name: "Test", Status: TaskPending},
+	})
+	s.SetRunningTools([]RunningTool{
+		{ID: "1", Name: "run_shell", Command: "npm test"},
+	})
+	s.Layout(runtime.Rect{X: 0, Y: 0, Width: 30, Height: 25})
+
+	buf := runtime.NewBuffer(30, 25)
+	ctx := runtime.RenderContext{Buffer: buf}
+
+	// Should not panic
+	s.Render(ctx)
+
+	// Check for left border
+	cell := buf.Get(0, 0)
+	if cell.Rune != '│' {
+		t.Errorf("expected left border '│', got '%c'", cell.Rune)
+	}
+}
+
+func TestSidebar_UpdatePlanTableRows(t *testing.T) {
+	s := NewSidebar()
+	s.SetPlanTasks([]PlanTask{
+		{Name: "Alpha", Status: TaskPending},
+		{Name: "Beta", Status: TaskInProgress},
+	})
+
+	if s.status == nil || s.status.planPanel == nil || s.status.planPanel.table == nil {
+		t.Fatal("expected plan table to be initialized")
+	}
+	if len(s.status.planPanel.table.Rows) != 2 {
+		t.Fatalf("expected 2 plan rows, got %d", len(s.status.planPanel.table.Rows))
+	}
+	if s.status.planPanel.table.Rows[0][0] != "Alpha" {
+		t.Fatalf("expected first row Alpha, got %q", s.status.planPanel.table.Rows[0][0])
+	}
+	if s.status.planPanel.table.Rows[1][1] != "running" {
+		t.Fatalf("expected second row status running, got %q", s.status.planPanel.table.Rows[1][1])
+	}
+}
+
+func TestSidebar_UpdateFilesTree(t *testing.T) {
+	s := NewSidebar()
+	s.SetProjectPath("/tmp/buckley")
+	s.SetRecentFiles([]string{"pkg/main.go", "pkg/ui/sidebar.go"})
+
+	if s.files == nil || s.files.filesPanel == nil || s.files.filesPanel.tree == nil || s.files.filesPanel.tree.Root == nil {
+		t.Fatal("expected files tree root")
+	}
+	if s.files.filesPanel.tree.Root.Label != "buckley" {
+		t.Fatalf("expected root label buckley, got %q", s.files.filesPanel.tree.Root.Label)
+	}
+	if len(s.files.filesPanel.tree.Root.Children) == 0 {
+		t.Fatal("expected file nodes under root")
+	}
+}
+
+func TestSidebar_UpdateTouchesTree(t *testing.T) {
+	s := NewSidebar()
+	s.SetActiveTouches([]TouchSummary{
+		{Path: "pkg/main.go", Operation: "write", Ranges: []TouchRange{{Start: 1, End: 3}}},
+	})
+
+	if s.files == nil || s.files.touchesPanel == nil || s.files.touchesPanel.tree == nil || s.files.touchesPanel.tree.Root == nil {
+		t.Fatal("expected touches tree root")
+	}
+	if len(s.files.touchesPanel.tree.Root.Children) == 0 {
+		t.Fatal("expected touch children")
+	}
+	if s.files.touchesPanel.tree.Root.Children[0].Label != "pkg/main.go" {
+		t.Fatalf("expected touch label pkg/main.go, got %q", s.files.touchesPanel.tree.Root.Children[0].Label)
+	}
+}
+
+func TestSidebar_RenderBackgroundFill(t *testing.T) {
+	s := NewSidebar()
+	bg := backend.DefaultStyle().Background(backend.ColorRGB(8, 9, 10))
+	s.SetStyles(
+		backend.DefaultStyle(),
+		backend.DefaultStyle(),
+		backend.DefaultStyle(),
+		backend.DefaultStyle(),
+		backend.DefaultStyle(),
+		bg,
+	)
+
+	bounds := runtime.Rect{X: 0, Y: 0, Width: 12, Height: 5}
+	s.Layout(bounds)
+
+	buf := runtime.NewBuffer(bounds.Width, bounds.Height)
+	ctx := runtime.RenderContext{Buffer: buf, Bounds: bounds}
+	s.Render(ctx)
+
+	cell := buf.Get(1, 0)
+	if cell.Style.BG() != bg.BG() {
+		t.Fatalf("expected background color %v, got %v", bg.BG(), cell.Style.BG())
+	}
+}
+
+func TestSidebar_Render_SmallBounds(t *testing.T) {
+	s := NewSidebar()
+	s.Layout(runtime.Rect{X: 0, Y: 0, Width: 5, Height: 3})
+
+	buf := runtime.NewBuffer(5, 3)
+	ctx := runtime.RenderContext{Buffer: buf}
+
+	// Should not panic with small bounds
+	s.Render(ctx)
+}
+
+func TestTaskStatus_Values(t *testing.T) {
+	// Verify task status constants
+	if TaskPending != 0 {
+		t.Errorf("expected TaskPending=0, got %d", TaskPending)
+	}
+	if TaskInProgress != 1 {
+		t.Errorf("expected TaskInProgress=1, got %d", TaskInProgress)
+	}
+	if TaskCompleted != 2 {
+		t.Errorf("expected TaskCompleted=2, got %d", TaskCompleted)
+	}
+	if TaskFailed != 3 {
+		t.Errorf("expected TaskFailed=3, got %d", TaskFailed)
+	}
+}

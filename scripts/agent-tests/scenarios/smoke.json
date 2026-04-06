@@ -1,0 +1,33 @@
+{
+  "name": "Smoke Test - Basic Chat Flow",
+  "description": "Verifies basic chat functionality by sending a message and checking for response",
+  "steps": [
+    {
+      "goal": "Wait for UI to be ready",
+      "action": "sleep",
+      "duration_ms": 500
+    },
+    {
+      "goal": "Focus the input area",
+      "action": "focus",
+      "target": "input"
+    },
+    {
+      "goal": "Type a test message",
+      "action": "type",
+      "text": "Say 'pong' if you receive this"
+    },
+    {
+      "goal": "Submit the message",
+      "action": "key",
+      "key": "enter"
+    },
+    {
+      "goal": "Wait for response to appear",
+      "action": "wait_for",
+      "condition": "text_contains",
+      "value": "pong",
+      "timeout_sec": 30
+    }
+  ]
+}

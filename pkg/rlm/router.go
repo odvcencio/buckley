@@ -81,6 +81,13 @@ func NewModelRouterWithCatalog(catalog *model.ModelCatalog, cfg Config, opts Rou
 			router.pins[weight] = tier.Model
 		}
 	}
+	if fallback := strings.TrimSpace(cfg.SubAgent.Model); fallback != "" {
+		for _, weight := range Weights() {
+			if strings.TrimSpace(router.pins[weight]) == "" {
+				router.pins[weight] = fallback
+			}
+		}
+	}
 
 	return router, nil
 }

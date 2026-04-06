@@ -59,7 +59,11 @@ func TestManager_RecordAndRetrieveRelevant(t *testing.T) {
 		t.Fatalf("record beta: %v", err)
 	}
 
-	results, err := mgr.RetrieveRelevant(ctx, sessionID, "alpha please", 2, 0)
+	results, err := mgr.RetrieveRelevant(ctx, "alpha please", RecallOptions{
+		Scope:     RecallScopeSession,
+		SessionID: sessionID,
+		Limit:     2,
+	})
 	if err != nil {
 		t.Fatalf("retrieve: %v", err)
 	}
@@ -68,5 +72,50 @@ func TestManager_RecordAndRetrieveRelevant(t *testing.T) {
 	}
 	if !strings.Contains(results[0].Content, "alpha") {
 		t.Fatalf("expected alpha first, got %q", results[0].Content)
+	}
+}
+
+func TestManager_RetrieveRelevant_ProjectScope(t *testing.T) {
+	store, err := storage.New(filepath.Join(t.TempDir(), "mem.db"))
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	defer store.Close()
+
+	mgr := NewManager(store, stubProvider{})
+	if mgr == nil {
+		t.Fatal("expected manager")
+	}
+
+	ctx := context.Background()
+	sessionID := "sess-1"
+	projectPath := "/tmp/project"
+
+	if err := store.CreateSession(&storage.Session{
+		ID:         sessionID,
+		CreatedAt:  time.Now(),
+		LastActive: time.Now(),
+		Status:     storage.SessionStatusActive,
+	}); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	if err := mgr.RecordWithScope(ctx, sessionID, "summary", "alpha project decision", nil, projectPath); err != nil {
+		t.Fatalf("record project memory: %v", err)
+	}
+
+	results, err := mgr.RetrieveRelevant(ctx, "alpha", RecallOptions{
+		Scope:       RecallScopeProject,
+		ProjectPath: projectPath,
+		Limit:       2,
+	})
+	if err != nil {
+		t.Fatalf("retrieve: %v", err)
+	}
+	if len(results) == 0 {
+		t.Fatal("expected results")
+	}
+	if results[0].ProjectPath != projectPath {
+		t.Fatalf("expected project path, got %q", results[0].ProjectPath)
 	}
 }

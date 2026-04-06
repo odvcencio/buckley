@@ -144,14 +144,14 @@ type Result struct {
 
 // Check evaluates whether an operation should be allowed, denied, or prompted.
 func Check(mode Mode, req Request, ctx Context) Result {
-	// Yolo mode allows everything
-	if mode == ModeYolo {
-		return Result{Decision: DecisionAllow, Reason: "yolo mode", Request: req}
-	}
-
-	// Check denied paths first (applies to all modes)
+	// Check denied paths first (applies to ALL modes including yolo)
 	if req.Path != "" && isPathDenied(req.Path, ctx) {
 		return Result{Decision: DecisionDeny, Reason: "path is in denied list", Request: req}
+	}
+
+	// Yolo mode allows everything else
+	if mode == ModeYolo {
+		return Result{Decision: DecisionAllow, Reason: "yolo mode", Request: req}
 	}
 
 	switch req.Operation {
@@ -306,7 +306,7 @@ func isPathInWorkspace(path string, ctx Context) bool {
 	// Check workspace
 	if ctx.WorkspacePath != "" {
 		wsAbs, err := filepath.Abs(ctx.WorkspacePath)
-		if err == nil && strings.HasPrefix(absPath, wsAbs) {
+		if err == nil && (absPath == wsAbs || strings.HasPrefix(absPath, wsAbs+string(filepath.Separator))) {
 			return true
 		}
 	}
@@ -314,7 +314,7 @@ func isPathInWorkspace(path string, ctx Context) bool {
 	// Check trusted paths
 	for _, trusted := range ctx.TrustedPaths {
 		trustedAbs, err := filepath.Abs(trusted)
-		if err == nil && strings.HasPrefix(absPath, trustedAbs) {
+		if err == nil && (absPath == trustedAbs || strings.HasPrefix(absPath, trustedAbs+string(filepath.Separator))) {
 			return true
 		}
 	}
@@ -335,7 +335,7 @@ func isPathDenied(path string, ctx Context) bool {
 
 	for _, denied := range ctx.DeniedPaths {
 		deniedAbs, err := filepath.Abs(denied)
-		if err == nil && strings.HasPrefix(absPath, deniedAbs) {
+		if err == nil && (absPath == deniedAbs || strings.HasPrefix(absPath, deniedAbs+string(filepath.Separator))) {
 			return true
 		}
 	}
@@ -350,6 +350,13 @@ func isReadOnlyCommand(cmd string) bool {
 	// Check for output redirection which makes any command a write
 	if strings.Contains(cmdLower, ">") || strings.Contains(cmdLower, ">>") {
 		return false
+	}
+
+	// Check for command chaining operators which could execute arbitrary commands
+	for _, sep := range []string{";", "&&", "||", "|", "`", "$(", "\n"} {
+		if strings.Contains(cmdLower, sep) {
+			return false
+		}
 	}
 
 	readOnlyPrefixes := []string{

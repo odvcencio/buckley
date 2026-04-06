@@ -23,12 +23,13 @@ type Store struct {
 	db         *sql.DB
 	observers  []Observer
 	observerMu sync.RWMutex
+	stmtCache  stmtCache
 }
 
 // ErrStoreClosed indicates the underlying database connection is unavailable.
 var ErrStoreClosed = errors.New("storage: closed")
 
-// New creates a new store and initializes the database
+// New creates a new Store backed by SQLite at the given path, initializing WAL mode, foreign keys, and all required tables.
 func New(dbPath string) (*Store, error) {
 	filePath, onDisk := sqliteFilePathFromDSN(dbPath)
 	if onDisk {
@@ -44,31 +45,24 @@ func New(dbPath string) (*Store, error) {
 		}
 	}
 
+	pragmas := "_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)"
+	if strings.Contains(dbPath, "?") {
+		dbPath += "&" + pragmas
+	} else {
+		dbPath += "?" + pragmas
+	}
+
 	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
 
-	// Configure connection pool for SQLite
-	// SQLite supports one writer at a time, but multiple readers with WAL mode
-	db.SetMaxOpenConns(10)   // Allow multiple concurrent reads
-	db.SetMaxIdleConns(5)    // Keep connections alive for reuse
-	db.SetConnMaxLifetime(0) // Connections never expire
+	db.SetMaxOpenConns(10)
+	db.SetMaxIdleConns(5)
+	db.SetConnMaxLifetime(0)
 
-	// Enable WAL mode for better concurrent access
-	// WAL allows multiple readers and one writer simultaneously
 	if _, err := db.Exec("PRAGMA journal_mode = WAL"); err != nil {
 		return nil, fmt.Errorf("failed to enable WAL mode: %w", err)
-	}
-
-	// Set busy timeout to 5 seconds - wait instead of immediately returning SQLITE_BUSY
-	if _, err := db.Exec("PRAGMA busy_timeout = 5000"); err != nil {
-		return nil, fmt.Errorf("failed to set busy timeout: %w", err)
-	}
-
-	// Enable foreign keys
-	if _, err := db.Exec("PRAGMA foreign_keys = ON"); err != nil {
-		return nil, fmt.Errorf("failed to enable foreign keys: %w", err)
 	}
 
 	// Run migrations
@@ -128,6 +122,7 @@ func ensurePrivateSQLiteFile(path string) error {
 
 // Close closes the database connection
 func (s *Store) Close() error {
+	s.clearStmtCache()
 	return s.db.Close()
 }
 
@@ -144,6 +139,12 @@ func (s *Store) AddObserver(observer Observer) {
 }
 
 // notify fans out events to observers without blocking the writer.
+//
+// Each observer is invoked in its own goroutine so that a slow handler cannot
+// stall the database write path. This is intentional best-effort delivery:
+// observers are expected to be fast (e.g. channel sends or lightweight
+// forwarding) and the total number of registered observers is small (typically
+// 1-3), so the unbounded goroutine spawning here is safe in practice.
 func (s *Store) notify(event Event) {
 	s.observerMu.RLock()
 	observers := append([]Observer(nil), s.observers...)
@@ -173,11 +174,29 @@ var migrations = []Migration{
 	{7, "session_principal", ensureSessionsPrincipalSchema},
 	{8, "session_principal_backfill", backfillSessionsPrincipal},
 	{9, "rlm_scratchpad_entries", ensureScratchpadSchema},
+	{10, "messages_search", ensureMessagesSearchSchema},
+	{11, "memories_project_path", ensureMemoriesSchema},
 }
 
 // runMigrations runs the schema migrations with version tracking
 func runMigrations(db *sql.DB) error {
-	// First apply the base schema (idempotent via CREATE TABLE IF NOT EXISTS)
+	// First, ensure the schema_migrations table exists so we can track versions
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS schema_migrations (
+		version INTEGER PRIMARY KEY,
+		name TEXT NOT NULL,
+		applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+	)`); err != nil {
+		return fmt.Errorf("create schema_migrations: %w", err)
+	}
+
+	// Run pre-schema migrations to add any missing columns to existing tables.
+	// This must happen BEFORE applying the base schema because schema.sql
+	// may contain indexes that reference columns added by migrations.
+	if err := runPreSchemaMigrations(db); err != nil {
+		return fmt.Errorf("pre-schema migrations: %w", err)
+	}
+
+	// Now apply the base schema (idempotent via CREATE TABLE IF NOT EXISTS)
 	if _, err := db.Exec(schemaSQL); err != nil {
 		return fmt.Errorf("apply base schema: %w", err)
 	}
@@ -206,6 +225,34 @@ func runMigrations(db *sql.DB) error {
 	return nil
 }
 
+// runPreSchemaMigrations adds missing columns to existing tables before the
+// base schema is applied. This prevents failures when schema.sql references
+// columns that don't exist in old databases.
+func runPreSchemaMigrations(db *sql.DB) error {
+	// Check if sessions table exists and add missing columns
+	if tableExists(db, "sessions") {
+		if err := ensureSessionSchema(db); err != nil {
+			return fmt.Errorf("ensure session schema: %w", err)
+		}
+	}
+
+	// Check if memories table exists and add missing columns
+	if tableExists(db, "memories") {
+		if err := ensureMemoriesSchema(db); err != nil {
+			return fmt.Errorf("ensure memories schema: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// tableExists checks if a table exists in the database
+func tableExists(db *sql.DB, tableName string) bool {
+	var count int
+	err := db.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?", tableName).Scan(&count)
+	return err == nil && count > 0
+}
+
 // getSchemaVersion returns the current schema version (0 if no migrations applied)
 func getSchemaVersion(db *sql.DB) (int, error) {
 	var version int
@@ -215,7 +262,7 @@ func getSchemaVersion(db *sql.DB) (int, error) {
 		if strings.Contains(err.Error(), "no such table") {
 			return 0, nil
 		}
-		return 0, err
+		return 0, fmt.Errorf("querying schema version: %w", err)
 	}
 	return version, nil
 }
@@ -226,7 +273,10 @@ func recordMigration(db *sql.DB, version int, name string) error {
 		"INSERT INTO schema_migrations (version, name) VALUES (?, ?)",
 		version, name,
 	)
-	return err
+	if err != nil {
+		return fmt.Errorf("recording schema migration %d: %w", version, err)
+	}
+	return nil
 }
 
 // GetSchemaVersion returns the current schema version for external use
@@ -242,7 +292,7 @@ func (s *Store) GetMigrationHistory() ([]struct {
 }, error) {
 	rows, err := s.db.Query("SELECT version, name, applied_at FROM schema_migrations ORDER BY version")
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("querying migration history: %w", err)
 	}
 	defer rows.Close()
 
@@ -258,11 +308,14 @@ func (s *Store) GetMigrationHistory() ([]struct {
 			AppliedAt string
 		}
 		if err := rows.Scan(&h.Version, &h.Name, &h.AppliedAt); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("scanning migration history: %w", err)
 		}
 		history = append(history, h)
 	}
-	return history, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating migration history: %w", err)
+	}
+	return history, nil
 }
 
 func ensureSessionSchema(db *sql.DB) error {
@@ -286,7 +339,7 @@ func ensureSessionSchema(db *sql.DB) error {
 	}
 
 	if err := rows.Err(); err != nil {
-		return err
+		return fmt.Errorf("iterating session columns: %w", err)
 	}
 
 	if !cols["status"] {
@@ -301,6 +354,24 @@ func ensureSessionSchema(db *sql.DB) error {
 	if !cols["completed_at"] {
 		if _, err := db.Exec(`ALTER TABLE sessions ADD COLUMN completed_at TIMESTAMP`); err != nil {
 			return fmt.Errorf("add session completed_at: %w", err)
+		}
+	}
+
+	if !cols["project_path"] {
+		if _, err := db.Exec(`ALTER TABLE sessions ADD COLUMN project_path TEXT`); err != nil {
+			return fmt.Errorf("add session project_path: %w", err)
+		}
+	}
+
+	if !cols["git_repo"] {
+		if _, err := db.Exec(`ALTER TABLE sessions ADD COLUMN git_repo TEXT`); err != nil {
+			return fmt.Errorf("add session git_repo: %w", err)
+		}
+	}
+
+	if !cols["git_branch"] {
+		if _, err := db.Exec(`ALTER TABLE sessions ADD COLUMN git_branch TEXT`); err != nil {
+			return fmt.Errorf("add session git_branch: %w", err)
 		}
 	}
 
@@ -328,7 +399,7 @@ func ensureSessionsPrincipalSchema(db *sql.DB) error {
 	}
 
 	if err := rows.Err(); err != nil {
-		return err
+		return fmt.Errorf("iterating session principal columns: %w", err)
 	}
 
 	if cols["principal"] {
@@ -372,7 +443,7 @@ func ensureMessagesSchema(db *sql.DB) error {
 		cols[strings.ToLower(name)] = true
 	}
 	if err := rows.Err(); err != nil {
-		return err
+		return fmt.Errorf("iterating message columns: %w", err)
 	}
 
 	if !cols["content_json"] {

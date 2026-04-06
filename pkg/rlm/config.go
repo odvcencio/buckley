@@ -34,6 +34,13 @@ type TierConfig struct {
 	Requires          []string
 }
 
+// SubAgentRuntimeConfig provides a global compatibility layer for sub-agent defaults.
+type SubAgentRuntimeConfig struct {
+	Model         string
+	MaxConcurrent int
+	Timeout       time.Duration
+}
+
 // ScratchpadConfig controls scratchpad retention and limits.
 type ScratchpadConfig struct {
 	MaxEntriesMemory  int
@@ -47,6 +54,7 @@ type ScratchpadConfig struct {
 // Config is the top-level configuration for RLM.
 type Config struct {
 	Coordinator CoordinatorConfig
+	SubAgent    SubAgentRuntimeConfig
 	Tiers       map[Weight]TierConfig
 	Scratchpad  ScratchpadConfig
 }
@@ -61,6 +69,10 @@ func DefaultConfig() Config {
 			MaxWallTime:         10 * time.Minute,
 			ConfidenceThreshold: 0.95,
 			StreamPartials:      true,
+		},
+		SubAgent: SubAgentRuntimeConfig{
+			MaxConcurrent: defaultBatchConcurrency,
+			Timeout:       5 * time.Minute,
 		},
 		Tiers: DefaultTiers(),
 		Scratchpad: ScratchpadConfig{
@@ -131,6 +143,12 @@ func (c *Config) Normalize() {
 	}
 	if c.Coordinator.ConfidenceThreshold <= 0 {
 		c.Coordinator.ConfidenceThreshold = 0.95
+	}
+	if c.SubAgent.MaxConcurrent <= 0 {
+		c.SubAgent.MaxConcurrent = defaultBatchConcurrency
+	}
+	if c.SubAgent.Timeout <= 0 {
+		c.SubAgent.Timeout = 5 * time.Minute
 	}
 	if c.Scratchpad.MaxEntriesMemory <= 0 {
 		c.Scratchpad.MaxEntriesMemory = 1000

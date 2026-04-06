@@ -55,7 +55,12 @@ func (m *memoryAwareModelClient) ChatCompletion(ctx context.Context, req model.C
 
 	query := lastUserQuery(req.Messages)
 	if strings.TrimSpace(query) != "" {
-		recs, err := m.memories.RetrieveRelevant(ctx, m.sessionID, query, m.limit, m.maxTokens)
+		recs, err := m.memories.RetrieveRelevant(ctx, query, memory.RecallOptions{
+			Scope:     memory.RecallScopeSession,
+			SessionID: m.sessionID,
+			Limit:     m.limit,
+			MaxTokens: m.maxTokens,
+		})
 		if err == nil && len(recs) > 0 {
 			var b strings.Builder
 			b.WriteString("Relevant prior context from this session:\n")

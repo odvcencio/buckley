@@ -12,7 +12,7 @@ type Event struct {
 	StreamID  string
 	Type      string
 	Version   int64
-	Data      map[string]interface{}
+	Data      map[string]any
 	Metadata  map[string]string
 	Timestamp time.Time
 }
@@ -37,8 +37,8 @@ type EventStore interface {
 	Subscribe(ctx context.Context, streamID string, handler EventHandler) (Subscription, error)
 
 	// Snapshot saves a state snapshot
-	Snapshot(ctx context.Context, streamID string, version int64, state interface{}) error
+	Snapshot(ctx context.Context, streamID string, version int64, state any) error
 
 	// LoadSnapshot retrieves the latest snapshot
-	LoadSnapshot(ctx context.Context, streamID string) (state interface{}, version int64, err error)
+	LoadSnapshot(ctx context.Context, streamID string) (state any, version int64, err error)
 }

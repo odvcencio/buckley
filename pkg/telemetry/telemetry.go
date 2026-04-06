@@ -36,6 +36,7 @@ const (
 	EventEditorInline               EventType = "editor.inline"
 	EventEditorPropose              EventType = "editor.propose"
 	EventEditorApply                EventType = "editor.apply"
+	EventUICommand                  EventType = "ui.command"
 	EventExperimentStarted          EventType = "experiment.started"
 	EventExperimentCompleted        EventType = "experiment.completed"
 	EventExperimentFailed           EventType = "experiment.failed"
@@ -43,6 +44,45 @@ const (
 	EventExperimentVariantCompleted EventType = "experiment.variant.completed"
 	EventExperimentVariantFailed    EventType = "experiment.variant.failed"
 	EventRLMIteration               EventType = "rlm.iteration"
+	EventCircuitFailure             EventType = "circuit.failure"
+	EventCircuitStateChange         EventType = "circuit.state_change"
+
+	// RLM transparency events.
+	EventRLMEscalation    EventType = "rlm.escalation"
+	EventRLMToolCall      EventType = "rlm.tool_call"
+	EventRLMReasoning     EventType = "rlm.reasoning"
+	EventRLMBudgetWarning EventType = "rlm.budget_warning"
+
+	// Browser runtime events.
+	EventBrowserSessionCreated EventType = "browser.session_created"
+	EventBrowserSessionClosed  EventType = "browser.session_closed"
+	EventBrowserNavigate       EventType = "browser.navigate"
+	EventBrowserObserve        EventType = "browser.observe"
+	EventBrowserAction         EventType = "browser.action"
+	EventBrowserActionFailed   EventType = "browser.action_failed"
+	EventBrowserFrameDelivered EventType = "browser.frame_delivered"
+	EventBrowserStreamEvent    EventType = "browser.stream_event"
+
+	// Machine state events.
+	EventMachineSpawned   EventType = "machine.spawned"
+	EventMachineState     EventType = "machine.state"
+	EventMachineCompleted EventType = "machine.completed"
+	EventMachineFailed    EventType = "machine.failed"
+	EventMachineSteering  EventType = "machine.steering"
+
+	// Machine lock events.
+	EventMachineLockAcquired EventType = "machine.lock.acquired"
+	EventMachineLockWaiting  EventType = "machine.lock.waiting"
+	EventMachineLockReleased EventType = "machine.lock.released"
+	EventMachineLockStale    EventType = "machine.lock.stale"
+
+	// Machine tool events.
+	EventMachineToolStart    EventType = "machine.tool.start"
+	EventMachineToolComplete EventType = "machine.tool.complete"
+
+	// Machine review events.
+	EventMachineReview    EventType = "machine.review"
+	EventMachineIteration EventType = "machine.iteration"
 	EventDebug                      EventType = "debug"
 )
 

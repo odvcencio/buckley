@@ -1,6 +1,7 @@
 package builtin
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"strings"
@@ -35,6 +36,10 @@ func (t *TerminalEditorTool) Parameters() ParameterSchema {
 }
 
 func (t *TerminalEditorTool) Execute(params map[string]any) (*Result, error) {
+	return t.ExecuteWithContext(context.Background(), params)
+}
+
+func (t *TerminalEditorTool) ExecuteWithContext(ctx context.Context, params map[string]any) (*Result, error) {
 	rawPath, ok := params["path"].(string)
 	if !ok || strings.TrimSpace(rawPath) == "" {
 		return &Result{Success: false, Error: "path parameter must be a non-empty string"}, nil
@@ -52,7 +57,11 @@ func (t *TerminalEditorTool) Execute(params map[string]any) (*Result, error) {
 	}
 
 	editor := strings.TrimSpace(getString(params["editor"]))
-	if editor == "" {
+	if editor != "" {
+		if err := validateEditor(editor); err != nil {
+			return &Result{Success: false, Error: err.Error()}, nil
+		}
+	} else {
 		editor = firstNonEmpty(
 			os.Getenv("BUCKLEY_TERMINAL_EDITOR"),
 			os.Getenv("VISUAL"),
@@ -63,7 +72,10 @@ func (t *TerminalEditorTool) Execute(params map[string]any) (*Result, error) {
 
 	shell := &ShellCommandTool{}
 	command := fmt.Sprintf("%s %s", editor, shellEscapeSingleQuotes(absPath))
-	result, err := shell.runInteractiveCommand(command, 0)
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	result, err := shell.runInteractiveCommand(ctx, command, 0)
 	if err != nil {
 		return &Result{Success: false, Error: fmt.Sprintf("failed to open editor: %v", err)}, nil
 	}
@@ -106,4 +118,25 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+// validateEditor rejects editor values that contain shell metacharacters,
+// path separators, or spaces. Editor names should be simple command names
+// (e.g. "vim", "nano", "emacs"). Multi-word editors should be configured
+// via the BUCKLEY_TERMINAL_EDITOR environment variable.
+func validateEditor(editor string) error {
+	if editor == "" {
+		return fmt.Errorf("editor must not be empty")
+	}
+	const forbidden = ";|&$`(){}[]<>'\"\n\r\t"
+	if strings.ContainsAny(editor, forbidden) {
+		return fmt.Errorf("editor %q contains disallowed characters", editor)
+	}
+	if strings.ContainsAny(editor, "/\\") {
+		return fmt.Errorf("editor %q must be a command name, not a path", editor)
+	}
+	if strings.Contains(editor, " ") {
+		return fmt.Errorf("editor %q contains spaces; use BUCKLEY_TERMINAL_EDITOR for multi-word editors", editor)
+	}
+	return nil
 }

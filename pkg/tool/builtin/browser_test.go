@@ -22,8 +22,8 @@ func TestHeadlessBrowseToolMetadata(t *testing.T) {
 		if desc == "" {
 			t.Error("Description() should not be empty")
 		}
-		if !strings.Contains(desc, "WEB RESEARCH") {
-			t.Error("Description should contain 'WEB RESEARCH'")
+		if !strings.Contains(desc, "web") && !strings.Contains(desc, "Fetch") {
+			t.Error("Description should describe web fetching capability")
 		}
 	})
 

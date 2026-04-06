@@ -1,0 +1,33 @@
+{
+  "name": "Model Switch Test",
+  "description": "Tests switching between different models",
+  "steps": [
+    {
+      "goal": "Wait for UI to be ready",
+      "action": "sleep",
+      "duration_ms": 500
+    },
+    {
+      "goal": "Open model selector with Ctrl+M",
+      "action": "key_combo",
+      "keys": ["ctrl", "m"]
+    },
+    {
+      "goal": "Wait for model selector to appear",
+      "action": "wait_for",
+      "condition": "widget_exists",
+      "value": "model",
+      "timeout_sec": 5
+    },
+    {
+      "goal": "Select first model with Enter",
+      "action": "key",
+      "key": "enter"
+    },
+    {
+      "goal": "Wait for selection",
+      "action": "sleep",
+      "duration_ms": 500
+    }
+  ]
+}

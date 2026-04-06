@@ -10,6 +10,20 @@ import (
 	"strings"
 )
 
+// Pre-compiled regex patterns for complexity analysis.
+var (
+	gocycloOutputRe      = regexp.MustCompile(`(\d+)\s+(\S+)\s+(\S+):(\d+)`)
+	whitespaceNormalizer = regexp.MustCompile(`\s+`)
+	complexityIndicators = regexp.MustCompile(`\b(if|for|while|case|catch|\&\&|\|\|)\b`)
+	funcPatterns         = []*regexp.Regexp{
+		regexp.MustCompile(`^\s*func\s+(\w+)`),                               // Go
+		regexp.MustCompile(`^\s*function\s+(\w+)`),                           // JavaScript
+		regexp.MustCompile(`^\s*(\w+)\s*:\s*function`),                       // JavaScript
+		regexp.MustCompile(`^\s*def\s+(\w+)`),                                // Python
+		regexp.MustCompile(`^\s*(?:public|private|protected)?\s*(\w+)\s*\(`), // Various
+	}
+)
+
 // AnalyzeComplexityTool analyzes cyclomatic complexity of code
 type AnalyzeComplexityTool struct{ workDirAware }
 
@@ -177,11 +191,10 @@ func (t *AnalyzeComplexityTool) analyzeGoComplexity(path string) ([]map[string]a
 }
 
 func (t *AnalyzeComplexityTool) parseGocycloOutput(output string) []map[string]any {
-	// gocyclo output format: "complexity function_name file:line"
-	re := regexp.MustCompile(`(\d+)\s+(\S+)\s+(\S+):(\d+)`)
+	re := gocycloOutputRe
 	functions := []map[string]any{}
 
-	for _, line := range strings.Split(output, "\n") {
+	for line := range strings.SplitSeq(output, "\n") {
 		matches := re.FindStringSubmatch(line)
 		if len(matches) == 5 {
 			var complexity int
@@ -246,7 +259,7 @@ func (t *AnalyzeComplexityTool) analyzeGenericComplexity(path string) ([]map[str
 
 	var files []string
 	if info.IsDir() {
-		filepath.Walk(path, func(p string, info os.FileInfo, err error) error {
+		_ = filepath.Walk(path, func(p string, info os.FileInfo, err error) error {
 			if err == nil && !info.IsDir() && t.isCodeFile(p) {
 				files = append(files, p)
 			}
@@ -283,17 +296,7 @@ func (t *AnalyzeComplexityTool) analyzeSingleFile(filepath string) ([]map[string
 	functionLine := 0
 	complexity := 1 // Base complexity
 
-	// Simple patterns for function detection
-	funcPatterns := []*regexp.Regexp{
-		regexp.MustCompile(`^\s*func\s+(\w+)`),                               // Go
-		regexp.MustCompile(`^\s*function\s+(\w+)`),                           // JavaScript
-		regexp.MustCompile(`^\s*(\w+)\s*:\s*function`),                       // JavaScript
-		regexp.MustCompile(`^\s*def\s+(\w+)`),                                // Python
-		regexp.MustCompile(`^\s*(?:public|private|protected)?\s*(\w+)\s*\(`), // Various
-	}
-
-	// Complexity indicators (if, for, while, case, etc.)
-	complexityIndicators := regexp.MustCompile(`\b(if|for|while|case|catch|\&\&|\|\|)\b`)
+	// Use pre-compiled patterns for function detection and complexity indicators
 
 	for scanner.Scan() {
 		lineNum++
@@ -457,7 +460,7 @@ func (t *FindDuplicatesTool) findSimpleDuplicates(path string, minLines int) ([]
 
 	var files []string
 	if info.IsDir() {
-		filepath.Walk(path, func(p string, info os.FileInfo, err error) error {
+		_ = filepath.Walk(path, func(p string, info os.FileInfo, err error) error {
 			if err == nil && !info.IsDir() && t.isCodeFile(p) {
 				files = append(files, p)
 			}
@@ -535,7 +538,7 @@ func (t *FindDuplicatesTool) isSignificantBlock(lines []string) bool {
 
 func (t *FindDuplicatesTool) hashCode(code string) string {
 	// Normalize code for comparison (remove whitespace variations)
-	normalized := regexp.MustCompile(`\s+`).ReplaceAllString(code, " ")
+	normalized := whitespaceNormalizer.ReplaceAllString(code, " ")
 	return fmt.Sprintf("%x", normalized)
 }
 

@@ -56,6 +56,44 @@ func TestGetString(t *testing.T) {
 	}
 }
 
+func TestValidateEditor(t *testing.T) {
+	tests := []struct {
+		name    string
+		editor  string
+		wantErr bool
+	}{
+		{name: "simple name", editor: "vim", wantErr: false},
+		{name: "nano", editor: "nano", wantErr: false},
+		{name: "emacs", editor: "emacs", wantErr: false},
+		{name: "empty", editor: "", wantErr: true},
+		{name: "semicolon injection", editor: "vim;rm -rf /", wantErr: true},
+		{name: "pipe injection", editor: "vim|cat", wantErr: true},
+		{name: "ampersand", editor: "vim&", wantErr: true},
+		{name: "dollar expansion", editor: "vim$HOME", wantErr: true},
+		{name: "backtick", editor: "`rm -rf /`", wantErr: true},
+		{name: "subshell", editor: "$(rm -rf /)", wantErr: true},
+		{name: "path with slash", editor: "/usr/bin/vim", wantErr: true},
+		{name: "relative path", editor: "bin/vim", wantErr: true},
+		{name: "backslash", editor: "bin\\vim", wantErr: true},
+		{name: "spaces", editor: "my editor", wantErr: true},
+		{name: "newline", editor: "vim\nrm", wantErr: true},
+		{name: "single quotes", editor: "vim'", wantErr: true},
+		{name: "double quotes", editor: "vim\"", wantErr: true},
+		{name: "angle brackets", editor: "vim>out", wantErr: true},
+		{name: "braces", editor: "vim{}", wantErr: true},
+		{name: "hyphenated name", editor: "nvim-qt", wantErr: false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateEditor(tc.editor)
+			if (err != nil) != tc.wantErr {
+				t.Errorf("validateEditor(%q) error = %v, wantErr %v", tc.editor, err, tc.wantErr)
+			}
+		})
+	}
+}
+
 func TestFirstNonEmpty(t *testing.T) {
 	tests := []struct {
 		name   string

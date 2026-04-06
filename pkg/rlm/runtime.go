@@ -159,7 +159,9 @@ func NewRuntime(cfg Config, deps RuntimeDeps) (*Runtime, error) {
 	conflicts := NewConflictDetector()
 	scratchpad := NewScratchpad(deps.Store, deps.Summarizer, cfg.Scratchpad)
 
-	dispatcher, err := NewBatchDispatcher(BatchDispatcherConfig{}, BatchDispatcherDeps{
+	dispatcher, err := NewBatchDispatcher(BatchDispatcherConfig{
+		MaxConcurrent: cfg.SubAgent.MaxConcurrent,
+	}, BatchDispatcherDeps{
 		Router:      router,
 		Models:      deps.Models,
 		Registry:    registry,

@@ -21,7 +21,8 @@ type Agent struct {
 	sessionsMu sync.RWMutex
 
 	// Callbacks for Buckley integration
-	handlers AgentHandlers
+	handlers        AgentHandlers
+	machineHandlers MachineHandlers
 
 	// Cancellation for active prompts
 	activePrompts   map[string]context.CancelFunc
@@ -84,6 +85,13 @@ func NewAgent(name, version string, handlers AgentHandlers) *Agent {
 	}
 }
 
+// SetMachineHandlers configures the Buckley machine extension handlers.
+func (a *Agent) SetMachineHandlers(h MachineHandlers) {
+	a.sessionsMu.Lock()
+	defer a.sessionsMu.Unlock()
+	a.machineHandlers = h
+}
+
 // Serve starts the agent on the given reader/writer (typically stdin/stdout).
 // It blocks until the context is cancelled or an error occurs.
 func (a *Agent) Serve(ctx context.Context, reader io.Reader, writer io.Writer) error {
@@ -132,6 +140,14 @@ func (a *Agent) handleRequest(ctx context.Context, req *Request) {
 		a.handleSessionCancel(ctx, req)
 	case "shutdown":
 		a.handleShutdown(ctx, req)
+	case "machine/spawn_agent":
+		a.handleMachineSpawnAgent(ctx, req)
+	case "machine/steer_agent":
+		a.handleMachineSteerAgent(ctx, req)
+	case "machine/list_agents":
+		a.handleMachineListAgents(ctx, req)
+	case "machine/escalate_mode":
+		a.handleMachineEscalateMode(ctx, req)
 	default:
 		if !IsNotification(req) {
 			_ = a.transport.SendError(req.ID, ErrCodeMethodNotFound, "Method not found", req.Method)

@@ -114,6 +114,13 @@ const (
 // MessageHandlerFunc processes incoming messages.
 type MessageHandlerFunc func(ctx context.Context, msg AgentMessage) error
 
+func safePrefix(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n]
+}
+
 // NewAgent creates a new agent instance.
 func NewAgent(taskID string, role Role, b bus.MessageBus, models *model.Manager, tools *tool.Registry, cfg AgentConfig) *Agent {
 	if cfg.Timeout == 0 {
@@ -121,7 +128,7 @@ func NewAgent(taskID string, role Role, b bus.MessageBus, models *model.Manager,
 	}
 
 	return &Agent{
-		ID:       fmt.Sprintf("%s-%s-%s", role, taskID[:8], ulid.Make().String()[:8]),
+		ID:       fmt.Sprintf("%s-%s-%s", role, safePrefix(taskID, 8), ulid.Make().String()[:8]),
 		Role:     role,
 		TaskID:   taskID,
 		State:    StateStarting,
@@ -158,10 +165,16 @@ func (a *Agent) Start(ctx context.Context) error {
 		a.mu.Unlock()
 
 		if ok {
-			if err := handler(ctx, agentMsg); err != nil {
-				// Log error but don't crash
-				a.publishStatus(ctx, "error", err.Error())
-			}
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						a.publishStatus(ctx, "error", fmt.Sprintf("handler panic: %v", r))
+					}
+				}()
+				if err := handler(ctx, agentMsg); err != nil {
+					a.publishStatus(ctx, "error", err.Error())
+				}
+			}()
 		}
 
 		return nil
@@ -202,7 +215,7 @@ func (a *Agent) Run(ctx context.Context) error {
 			a.Cancel()
 			return timeoutCtx.Err()
 		case <-ticker.C:
-			if a.State == StateResolved || a.cancelled.Load() {
+			if a.getState() == StateResolved || a.cancelled.Load() {
 				return nil
 			}
 		}
@@ -338,6 +351,12 @@ func (a *Agent) setState(state State) {
 	a.State = state
 }
 
+func (a *Agent) getState() State {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.State
+}
+
 func (a *Agent) heartbeatLoop(ctx context.Context) {
 	ticker := time.NewTicker(a.Config.HeartbeatInterval)
 	defer ticker.Stop()
@@ -347,7 +366,7 @@ func (a *Agent) heartbeatLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if a.cancelled.Load() || a.State == StateResolved {
+			if a.cancelled.Load() || a.getState() == StateResolved {
 				return
 			}
 			a.publishStatus(ctx, "heartbeat", "")

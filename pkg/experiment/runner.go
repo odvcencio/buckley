@@ -231,7 +231,7 @@ func (r *Runner) RunExperiment(ctx context.Context, exp *Experiment) ([]*paralle
 			}
 			if result != nil {
 				if r.store != nil {
-					if err := r.persistResult(exp, result, runIDs, startTimes); err != nil {
+					if err := r.persistResult(ctx, exp, result, runIDs, startTimes); err != nil {
 						return results, err
 					}
 				}
@@ -284,7 +284,7 @@ func copyContext(input map[string]string) map[string]string {
 	return out
 }
 
-func (r *Runner) persistResult(exp *Experiment, result *parallel.AgentResult, runIDs map[string]string, startTimes map[string]time.Time) error {
+func (r *Runner) persistResult(ctx context.Context, exp *Experiment, result *parallel.AgentResult, runIDs map[string]string, startTimes map[string]time.Time) error {
 	runID := runIDs[result.TaskID]
 	if runID == "" {
 		runID = ulid.Make().String()
@@ -342,7 +342,7 @@ func (r *Runner) persistResult(exp *Experiment, result *parallel.AgentResult, ru
 		if evalTimeout <= 0 {
 			evalTimeout = r.cfg.DefaultTimeout
 		}
-		evalCtx, cancel := context.WithTimeout(context.Background(), evalTimeout)
+		evalCtx, cancel := context.WithTimeout(ctx, evalTimeout)
 		defer cancel()
 
 		evals := EvaluateCriteria(evalCtx, result.WorktreePath, exp.Task.WorkingDir, result.Output, exp.Criteria)

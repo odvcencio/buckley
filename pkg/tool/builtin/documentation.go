@@ -8,6 +8,9 @@ import (
 	"strings"
 )
 
+// parensContentRe extracts content within parentheses for parameter parsing.
+var parensContentRe = regexp.MustCompile(`\(([^)]*)\)`)
+
 // GenerateDocstringTool generates documentation comments for functions
 type GenerateDocstringTool struct{ workDirAware }
 
@@ -305,15 +308,13 @@ func (t *GenerateDocstringTool) generatePythonDoc(functionName, signature, descr
 }
 
 func (t *GenerateDocstringTool) extractGoParams(signature string) []string {
-	// Extract parameters from Go function signature
-	re := regexp.MustCompile(`\(([^)]*)\)`)
-	matches := re.FindStringSubmatch(signature)
+	matches := parensContentRe.FindStringSubmatch(signature)
 	if len(matches) < 2 {
 		return []string{}
 	}
 
 	params := []string{}
-	for _, param := range strings.Split(matches[1], ",") {
+	for param := range strings.SplitSeq(matches[1], ",") {
 		param = strings.TrimSpace(param)
 		if param != "" {
 			// Extract param name (before type)
@@ -328,33 +329,28 @@ func (t *GenerateDocstringTool) extractGoParams(signature string) []string {
 }
 
 func (t *GenerateDocstringTool) extractGoReturnType(signature string) string {
-	// Simple return type extraction
-	if strings.Contains(signature, ")") {
-		parts := strings.Split(signature, ")")
-		if len(parts) > 1 {
-			returnType := strings.TrimSpace(parts[1])
-			if returnType != "" && returnType != "{" {
-				return returnType
-			}
+	if _, after, ok := strings.Cut(signature, ")"); ok {
+		returnType := strings.TrimSpace(after)
+		if returnType != "" && returnType != "{" {
+			return returnType
 		}
 	}
 	return ""
 }
 
 func (t *GenerateDocstringTool) extractJSParams(signature string) []string {
-	re := regexp.MustCompile(`\(([^)]*)\)`)
-	matches := re.FindStringSubmatch(signature)
+	matches := parensContentRe.FindStringSubmatch(signature)
 	if len(matches) < 2 {
 		return []string{}
 	}
 
 	params := []string{}
-	for _, param := range strings.Split(matches[1], ",") {
+	for param := range strings.SplitSeq(matches[1], ",") {
 		param = strings.TrimSpace(param)
 		if param != "" {
 			// Remove default values and type annotations
-			param = strings.Split(param, "=")[0]
-			param = strings.Split(param, ":")[0]
+			param, _, _ = strings.Cut(param, "=")
+			param, _, _ = strings.Cut(param, ":")
 			params = append(params, strings.TrimSpace(param))
 		}
 	}
@@ -363,19 +359,18 @@ func (t *GenerateDocstringTool) extractJSParams(signature string) []string {
 }
 
 func (t *GenerateDocstringTool) extractPythonParams(signature string) []string {
-	re := regexp.MustCompile(`\(([^)]*)\)`)
-	matches := re.FindStringSubmatch(signature)
+	matches := parensContentRe.FindStringSubmatch(signature)
 	if len(matches) < 2 {
 		return []string{}
 	}
 
 	params := []string{}
-	for _, param := range strings.Split(matches[1], ",") {
+	for param := range strings.SplitSeq(matches[1], ",") {
 		param = strings.TrimSpace(param)
 		if param != "" && param != "self" && param != "cls" {
 			// Remove type hints and default values
-			param = strings.Split(param, ":")[0]
-			param = strings.Split(param, "=")[0]
+			param, _, _ = strings.Cut(param, ":")
+			param, _, _ = strings.Cut(param, "=")
 			params = append(params, strings.TrimSpace(param))
 		}
 	}

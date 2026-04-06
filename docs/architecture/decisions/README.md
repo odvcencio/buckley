@@ -22,8 +22,9 @@ Each ADR should include:
 - [ADR 0006: Tiered Approval Modes](0006-tiered-approval-modes.md) – Accepted
 - [ADR 0007: TOON Encoding for Tool Outputs](0007-toon-encoding-for-tool-outputs.md) – Accepted
 - [ADR 0008: Event-Driven Telemetry](0008-event-driven-telemetry.md) – Accepted
-- [ADR 0009: Recursive Language Model Runtime](0009-recursive-language-model-runtime.md) – Accepted
+- [ADR 0009: Recursive Language Model Runtime](0009-recursive-language-model-runtime.md) – Accepted (Revised: execution modes, escalation, RAG)
 - [ADR 0010: Custom TUI Runtime](0010-custom-tui-runtime.md) – Accepted
+- [ADR 0011: Servo Embedder Browser Runtime](0011-servo-embedder-browser-runtime.md) – Proposed
 
 ---
 

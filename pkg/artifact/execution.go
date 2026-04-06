@@ -6,6 +6,9 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"golang.org/x/text/cases"
+	"golang.org/x/text/language"
 )
 
 // ExecutionTracker manages execution artifacts with incremental updates
@@ -136,7 +139,7 @@ func (t *ExecutionTracker) generateMarkdown() string {
 		t.relativePath(t.artifact.PlanningArtifactPath)))
 	b.WriteString(fmt.Sprintf("**Started:** %s\n", t.artifact.StartedAt.Format(time.RFC3339)))
 	b.WriteString(fmt.Sprintf("**Status:** %s (Task %d/%d)\n\n",
-		strings.Title(t.artifact.Status), t.artifact.CurrentTask, t.artifact.TotalTasks))
+		cases.Title(language.English).String(t.artifact.Status), t.artifact.CurrentTask, t.artifact.TotalTasks))
 
 	// Progress Log
 	if len(t.artifact.ProgressLog) > 0 {

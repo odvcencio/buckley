@@ -32,7 +32,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	payload, err := io.ReadAll(r.Body)
+	payload, err := io.ReadAll(io.LimitReader(r.Body, 10<<20))
 	if err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return

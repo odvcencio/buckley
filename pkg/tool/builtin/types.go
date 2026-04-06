@@ -9,9 +9,11 @@ type ParameterSchema struct {
 
 // PropertySchema defines a single parameter
 type PropertySchema struct {
-	Type        string `json:"type"`
-	Description string `json:"description"`
-	Default     any    `json:"default,omitempty"`
+	Type        string          `json:"type"`
+	Description string          `json:"description"`
+	Default     any             `json:"default,omitempty"`
+	Items       *PropertySchema `json:"items,omitempty"` // For array types
+	Enum        []string        `json:"enum,omitempty"`  // For string types with fixed options
 }
 
 // Result represents the result of a tool execution

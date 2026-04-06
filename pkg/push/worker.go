@@ -53,6 +53,7 @@ type Worker struct {
 	subject  string // mailto: or https:// URL
 	running  bool
 	done     chan struct{}
+	stopOnce sync.Once
 	sendFn   func(context.Context, *storage.PushSubscription, []byte) error
 }
 
@@ -163,11 +164,9 @@ func (w *Worker) Start(ctx context.Context) error {
 
 // Stop stops the push worker.
 func (w *Worker) Stop() {
-	w.mu.Lock()
-	if w.running {
+	w.stopOnce.Do(func() {
 		close(w.done)
-	}
-	w.mu.Unlock()
+	})
 }
 
 // handleEvent processes storage events and sends notifications.

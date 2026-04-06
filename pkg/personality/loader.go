@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 
+	"golang.org/x/text/cases"
+	"golang.org/x/text/language"
 	"gopkg.in/yaml.v3"
 )
 
@@ -41,7 +43,7 @@ func LoadDefinitionsFromDirs(dirs []string) (map[string]PersonaDefinition, error
 			}
 			id := strings.TrimSuffix(entry.Name(), ext)
 			if strings.TrimSpace(def.Name) == "" {
-				def.Name = strings.Title(strings.ReplaceAll(id, "-", " "))
+				def.Name = cases.Title(language.English).String(strings.ReplaceAll(id, "-", " "))
 			}
 			result[id] = def
 		}
