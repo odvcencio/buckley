@@ -213,6 +213,11 @@ func main() {
 		os.Exit(1)
 	}
 
+	if _, _, err := ensureProjectTrust(cfg, cwd); err != nil {
+		fmt.Fprintf(os.Stderr, "Error applying project trust: %v\n", err)
+		os.Exit(1)
+	}
+
 	loader := projectcontext.NewLoader(cwd)
 	projectContext, err := loader.Load()
 	if err != nil {
@@ -603,6 +608,7 @@ func printHelp() {
 	fmt.Println("  hunt [--dir path]                Scan codebase for improvement suggestions")
 	fmt.Println("  dream [--dir path] [--plan]      Analyze architecture and identify gaps")
 	fmt.Println("  config [check|show|path]         Manage configuration")
+	fmt.Println("  trust [status|allow|deny|reset]  Inspect or change project trust")
 	fmt.Println("  doctor                           Quick system health check (alias for config check)")
 	fmt.Println("  completion [bash|zsh|fish]       Generate shell completions")
 	fmt.Println("  worktree create [--container]    Create git worktree")
@@ -804,6 +810,9 @@ func runConfigShow() error {
 	fmt.Printf("Orchestrator:\n")
 	fmt.Printf("  Trust level: %s\n", cfg.Orchestrator.TrustLevel)
 	fmt.Printf("  Auto workflow: %v\n", cfg.Orchestrator.AutoWorkflow)
+	if status, _, _, err := projectTrustStatusForPath(""); err == nil {
+		fmt.Printf("  Project trust: %s\n", status)
+	}
 	fmt.Println()
 	fmt.Printf("Providers:\n")
 	for _, p := range cfg.Providers.ReadyProviders() {
@@ -818,6 +827,9 @@ func runConfigPath() error {
 	fmt.Printf("  User:    %s\n", filepath.Join(home, ".buckley", "config.yaml"))
 	fmt.Printf("  Project: %s\n", ".buckley/config.yaml")
 	fmt.Printf("  Env:     %s\n", filepath.Join(home, ".buckley", "config.env"))
+	if trustPath, err := resolveProjectTrustPath(); err == nil {
+		fmt.Printf("  Trust:   %s\n", trustPath)
+	}
 	dbPath, err := resolveDBPath()
 	if err != nil {
 		dbPath = fmt.Sprintf("error: %v", err)
@@ -1124,6 +1136,8 @@ func dispatchSubcommand(args []string) (bool, int) {
 		return true, runCommand(runDreamCommand, args[1:])
 	case "config":
 		return true, runCommand(runConfigCommand, args[1:])
+	case "trust":
+		return true, runCommand(runTrustCommand, args[1:])
 	case "doctor":
 		// Alias for config check - quick system health check
 		return true, runCommand(runConfigCommand, []string{"check"})

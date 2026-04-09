@@ -931,6 +931,8 @@ func (c *Controller) streamResponse(ctx context.Context, prompt string, sess *Se
 
 	if fullResponse != "" {
 		c.app.AddMessage(fullResponse, "assistant")
+	} else {
+		c.app.AddMessage("(empty response from model)", "system")
 	}
 
 	// Update token count and cost
@@ -1026,6 +1028,10 @@ func (c *Controller) runToolLoop(ctx context.Context, sess *SessionState, modelI
 			text, err := model.ExtractTextContent(msg.Content)
 			if err != nil {
 				return "", nil, err
+			}
+			// If model put its reply in reasoning with empty content, use reasoning
+			if text == "" && strings.TrimSpace(msg.Reasoning) != "" {
+				text = msg.Reasoning
 			}
 			sess.Conversation.AddAssistantMessageWithReasoning(text, msg.Reasoning)
 			c.saveMessage(sess.ID, "assistant", text)

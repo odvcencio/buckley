@@ -476,12 +476,12 @@ func TestExtractGlobParams(t *testing.T) {
 
 func TestReplaceLimited(t *testing.T) {
 	tests := []struct {
-		name            string
-		pattern         string
-		input           string
-		replacement     string
-		limit           int
-		wantOutput      string
+		name             string
+		pattern          string
+		input            string
+		replacement      string
+		limit            int
+		wantOutput       string
 		wantReplacements int
 	}{
 		{

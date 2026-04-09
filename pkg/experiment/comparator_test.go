@@ -337,38 +337,38 @@ func TestRankVariants(t *testing.T) {
 
 func TestSummarize(t *testing.T) {
 	tests := []struct {
-		name     string
-		exp      *Experiment
-		rankings []Ranking
-		reports  []VariantReport
+		name      string
+		exp       *Experiment
+		rankings  []Ranking
+		reports   []VariantReport
 		wantEmpty bool
 	}{
 		{
-			name:     "nil experiment returns empty",
-			exp:      nil,
-			rankings: []Ranking{{VariantID: "v1"}},
-			reports:  []VariantReport{{VariantID: "v1"}},
+			name:      "nil experiment returns empty",
+			exp:       nil,
+			rankings:  []Ranking{{VariantID: "v1"}},
+			reports:   []VariantReport{{VariantID: "v1"}},
 			wantEmpty: true,
 		},
 		{
-			name:     "empty rankings returns empty",
-			exp:      &Experiment{},
-			rankings: nil,
-			reports:  []VariantReport{{VariantID: "v1"}},
+			name:      "empty rankings returns empty",
+			exp:       &Experiment{},
+			rankings:  nil,
+			reports:   []VariantReport{{VariantID: "v1"}},
 			wantEmpty: true,
 		},
 		{
-			name:     "missing report returns empty",
-			exp:      &Experiment{},
-			rankings: []Ranking{{VariantID: "v1"}},
-			reports:  []VariantReport{{VariantID: "v2"}}, // different ID
+			name:      "missing report returns empty",
+			exp:       &Experiment{},
+			rankings:  []Ranking{{VariantID: "v1"}},
+			reports:   []VariantReport{{VariantID: "v2"}}, // different ID
 			wantEmpty: true,
 		},
 		{
-			name:     "valid inputs returns summary",
-			exp:      &Experiment{},
-			rankings: []Ranking{{VariantID: "v1", Score: 0.85}},
-			reports:  []VariantReport{{VariantID: "v1", VariantName: "best-variant", CriteriaScore: 0.85}},
+			name:      "valid inputs returns summary",
+			exp:       &Experiment{},
+			rankings:  []Ranking{{VariantID: "v1", Score: 0.85}},
+			reports:   []VariantReport{{VariantID: "v1", VariantName: "best-variant", CriteriaScore: 0.85}},
 			wantEmpty: false,
 		},
 	}

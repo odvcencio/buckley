@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/odvcencio/buckley/pkg/coordination/events"
 	"github.com/gorilla/websocket"
+	"github.com/odvcencio/buckley/pkg/coordination/events"
 )
 
 func TestEventStream_Subscribe(t *testing.T) {

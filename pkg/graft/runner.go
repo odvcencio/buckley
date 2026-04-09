@@ -8,7 +8,6 @@ import (
 	"io"
 	"os/exec"
 	"strings"
-	"syscall"
 	"time"
 )
 
@@ -76,7 +75,7 @@ func (r *Runner) Run(ctx context.Context, args ...string) ([]byte, error) {
 		cmd.Dir = r.workDir
 	}
 
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.SysProcAttr = sysProcAttr()
 
 	var stdout limitWriter
 	stdout.limit = maxOutputBytes
@@ -98,11 +97,8 @@ func (r *Runner) classifyError(ctx context.Context, err error, stderrOut []byte)
 	}
 
 	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) {
-		status, ok := exitErr.Sys().(syscall.WaitStatus)
-		if ok && (status.Signal() == syscall.SIGKILL || status.ExitStatus() == 137) {
-			return fmt.Errorf("%w: %s", ErrGraftKilled, string(stderrOut))
-		}
+	if errors.As(err, &exitErr) && isKillSignal(exitErr) {
+		return fmt.Errorf("%w: %s", ErrGraftKilled, string(stderrOut))
 	}
 
 	return fmt.Errorf("graft: %w: %s", err, string(stderrOut))

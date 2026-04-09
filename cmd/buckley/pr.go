@@ -16,9 +16,9 @@ import (
 )
 
 const (
-	gitLocalTimeout  = 30 * time.Second
-	gitPushTimeout   = 60 * time.Second
-	ghAPITimeout     = 120 * time.Second
+	gitLocalTimeout = 30 * time.Second
+	gitPushTimeout  = 60 * time.Second
+	ghAPITimeout    = 120 * time.Second
 )
 
 // runPRCommand generates a structured PR via tool-use.

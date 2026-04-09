@@ -79,9 +79,9 @@ Report each finding in this EXACT format:
 - **Evidence**: Code snippet or observation proving the issue
 - **Business Impact**: How this affects users/product/operations
 - **Fix**: Specific change required
-` + "```" + `suggested
+`+"```"+`suggested
 // exact replacement code here
-` + "```" + `
+`+"```"+`
 
 Continue with FINDING-002, FINDING-003, etc.
 
@@ -160,9 +160,9 @@ Report each finding in this EXACT format (machine-parseable):
 - **Evidence**: Exact code or tool output proving the issue
 - **Impact**: What happens if not fixed
 - **Fix**: Specific code change required
-` + "```" + `suggested
+`+"```"+`suggested
 // exact replacement code here
-` + "```" + `
+`+"```"+`
 
 Continue with FINDING-002, FINDING-003, etc.
 

@@ -27,6 +27,11 @@ coverage.out
 .buckley/memory.db
 .buckley/cache/
 .buckley/*.db
+docs/plans/
+docs/execution/
+docs/reviews/
+docs/archive/
+docs/superpowers/
 
 # Logs (any location)
 **/logs/

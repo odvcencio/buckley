@@ -150,7 +150,7 @@ func BenchmarkBuffer_RenderCycle(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		// Simulate widget rendering
-		buf.Fill(Rect{0, 0, 120, 1}, ' ', style)  // Header
+		buf.Fill(Rect{0, 0, 120, 1}, ' ', style) // Header
 		buf.SetString(2, 0, "Buckley", style)
 
 		buf.Fill(Rect{0, 1, 120, 38}, ' ', style) // Main area

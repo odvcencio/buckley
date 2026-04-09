@@ -13,14 +13,14 @@ type Phase int
 const (
 	PhaseCliParse Phase = iota
 	PhaseConfigLoad
-	PhaseArbiterInit    // rules engine loaded — governance begins
+	PhaseArbiterInit // rules engine loaded — governance begins
 	PhaseAuthResolve
 	PhaseModelInit
 	PhaseStorageInit
 	PhaseSessionResolve
 	PhaseToolRegistry
 	PhaseGTSInit
-	PhaseModeRoute      // arbiter decides: interactive / oneshot / daemon
+	PhaseModeRoute // arbiter decides: interactive / oneshot / daemon
 	PhaseRuntimeInit
 	PhaseReady
 )

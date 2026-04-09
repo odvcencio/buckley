@@ -8,8 +8,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/odvcencio/buckley/pkg/coordination/events"
 	"github.com/gorilla/websocket"
+	"github.com/odvcencio/buckley/pkg/coordination/events"
 )
 
 // SubscribeMessage represents a subscription request from a client

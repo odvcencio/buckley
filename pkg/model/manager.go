@@ -697,6 +697,8 @@ func (m *Manager) DescribeImage(ctx context.Context, imageURL string) (string, e
 // ExtractTextContent extracts plain text from message content, handling both string and multimodal formats.
 func ExtractTextContent(content any) (string, error) {
 	switch v := content.(type) {
+	case nil:
+		return "", nil
 	case string:
 		return v, nil
 	case []ContentPart:
@@ -727,7 +729,7 @@ func ExtractTextContent(content any) (string, error) {
 		}
 	}
 
-	return "", fmt.Errorf("unexpected content format")
+	return "", fmt.Errorf("unexpected content format: %T", content)
 }
 
 func extractTextFromContentParts(parts []ContentPart) string {
