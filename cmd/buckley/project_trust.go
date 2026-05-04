@@ -181,7 +181,7 @@ func (s *projectTrustStore) save() error {
 	}
 	if err := os.Rename(tmpPath, s.path); err != nil {
 		if writeErr := os.WriteFile(s.path, payload, 0o644); writeErr != nil {
-			return fmt.Errorf("replace project trust store: %w", err)
+			return fmt.Errorf("replace project trust store: %w", writeErr)
 		}
 		_ = os.Remove(tmpPath)
 	}
@@ -240,17 +240,21 @@ func ensureProjectTrust(cfg *config.Config, workDir string) (projectTrustStatus,
 		return projectTrustUnknown, "", err
 	}
 
-	if status == projectTrustUnknown && stdinIsTerminalFn() {
-		store, err := loadProjectTrustStore(storePath)
-		if err != nil {
-			return projectTrustUnknown, root, err
-		}
-		status, err = promptProjectTrustFn(root)
-		if err != nil {
-			return projectTrustUnknown, root, err
-		}
-		if err := store.Set(root, status); err != nil {
-			return status, root, fmt.Errorf("save project trust: %w", err)
+	if status == projectTrustUnknown {
+		if stdinIsTerminalFn() {
+			store, err := loadProjectTrustStore(storePath)
+			if err != nil {
+				return projectTrustUnknown, root, err
+			}
+			status, err = promptProjectTrustFn(root)
+			if err != nil {
+				return projectTrustUnknown, root, err
+			}
+			if err := store.Set(root, status); err != nil {
+				return status, root, fmt.Errorf("save project trust: %w", err)
+			}
+		} else {
+			status = projectTrustRestricted
 		}
 	}
 

@@ -241,6 +241,68 @@ func TestEnsureProjectTrustRestrictedDecisionClampsConfig(t *testing.T) {
 	}
 }
 
+func TestEnsureProjectTrustUnknownNonInteractiveRestrictsConfig(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	repoRoot := t.TempDir()
+	if err := os.Mkdir(filepath.Join(repoRoot, ".git"), 0o755); err != nil {
+		t.Fatalf("mkdir .git: %v", err)
+	}
+
+	oldTerminal := stdinIsTerminalFn
+	stdinIsTerminalFn = func() bool { return false }
+	t.Cleanup(func() { stdinIsTerminalFn = oldTerminal })
+
+	oldPrompt := promptProjectTrustFn
+	promptCalled := false
+	promptProjectTrustFn = func(string) (projectTrustStatus, error) {
+		promptCalled = true
+		return projectTrustTrusted, nil
+	}
+	t.Cleanup(func() { promptProjectTrustFn = oldPrompt })
+
+	cfg := config.DefaultConfig()
+	cfg.Approval.Mode = "yolo"
+	cfg.Orchestrator.TrustLevel = "autonomous"
+	cfg.Approval.AllowNetwork = true
+	cfg.Sandbox.AllowNetwork = true
+
+	status, gotRoot, err := ensureProjectTrust(cfg, repoRoot)
+	if err != nil {
+		t.Fatalf("ensureProjectTrust: %v", err)
+	}
+	if promptCalled {
+		t.Fatal("prompt should not be called in non-interactive mode")
+	}
+	if status != projectTrustRestricted {
+		t.Fatalf("status=%s want %s", status, projectTrustRestricted)
+	}
+	if gotRoot != repoRoot {
+		t.Fatalf("root=%q want %q", gotRoot, repoRoot)
+	}
+	if cfg.Approval.Mode != "safe" {
+		t.Fatalf("approval mode=%q want safe", cfg.Approval.Mode)
+	}
+	if cfg.Orchestrator.TrustLevel != "conservative" {
+		t.Fatalf("trust level=%q want conservative", cfg.Orchestrator.TrustLevel)
+	}
+	if cfg.Approval.AllowNetwork {
+		t.Fatal("allow network should be disabled for non-interactive unknown project")
+	}
+	if cfg.Sandbox.AllowNetwork {
+		t.Fatal("sandbox network should be disabled for non-interactive unknown project")
+	}
+
+	persisted, _, _, err := projectTrustStatusForPath(repoRoot)
+	if err != nil {
+		t.Fatalf("projectTrustStatusForPath: %v", err)
+	}
+	if persisted != projectTrustUnknown {
+		t.Fatalf("persisted status=%s want unknown", persisted)
+	}
+}
+
 func TestRunTrustCommandAllowStatusReset(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
