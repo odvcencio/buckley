@@ -220,7 +220,7 @@ func TestMessageContentToText(t *testing.T) {
 		{
 			name:     "nil_content",
 			content:  nil,
-			expected: "<nil>",
+			expected: "",
 		},
 		{
 			name:     "number_content",

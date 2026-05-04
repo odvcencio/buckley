@@ -79,6 +79,8 @@ func normalizeModelForProvider(modelID, providerID string) string {
 
 func messageContentToText(content any) string {
 	switch v := content.(type) {
+	case nil:
+		return ""
 	case string:
 		return v
 	case []ContentPart:
