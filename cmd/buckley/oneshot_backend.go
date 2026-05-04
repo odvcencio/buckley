@@ -63,6 +63,15 @@ func initOneshotDependencies(backend string) (*config.Config, *model.Manager, *s
 		cfg.Encoding.UseToon = encodingOverrideFlag != "json"
 	}
 	tool.SetResultEncoding(cfg.Encoding.UseToon)
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if _, _, err := ensureProjectTrust(cfg, cwd); err != nil {
+		return nil, nil, nil, fmt.Errorf("applying project trust: %w", err)
+	}
+
 	return cfg, nil, nil, nil
 }
 
