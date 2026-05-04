@@ -171,6 +171,16 @@ func main() {
 	applySandboxOverride(cfg)
 	tool.SetResultEncoding(cfg.Encoding.UseToon)
 
+	cwd, err := os.Getwd()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	if _, _, err := ensureProjectTrust(cfg, cwd); err != nil {
+		fmt.Fprintf(os.Stderr, "Error applying project trust: %v\n", err)
+		os.Exit(1)
+	}
+
 	if !cfg.Providers.HasReadyProvider() {
 		fmt.Fprintln(os.Stderr, "Error: configure at least one provider (OPENROUTER_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, GOOGLE_API_KEY, BUCKLEY_OLLAMA_ENABLED=1, or BUCKLEY_LITELLM_ENABLED=1).")
 		os.Exit(2)
@@ -207,17 +217,6 @@ func main() {
 	defer store.Close()
 
 	// Load project context (AGENTS.md)
-	cwd, err := os.Getwd()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
-	}
-
-	if _, _, err := ensureProjectTrust(cfg, cwd); err != nil {
-		fmt.Fprintf(os.Stderr, "Error applying project trust: %v\n", err)
-		os.Exit(1)
-	}
-
 	loader := projectcontext.NewLoader(cwd)
 	projectContext, err := loader.Load()
 	if err != nil {
@@ -544,6 +543,14 @@ func initDependencies() (*config.Config, *model.Manager, *storage.Store, error) 
 		cfg.Encoding.UseToon = encodingOverrideFlag != "json"
 	}
 	tool.SetResultEncoding(cfg.Encoding.UseToon)
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if _, _, err := ensureProjectTrust(cfg, cwd); err != nil {
+		return nil, nil, nil, fmt.Errorf("applying project trust: %w", err)
+	}
 
 	if !cfg.Providers.HasReadyProvider() {
 		return nil, nil, nil, withExitCode(fmt.Errorf("no providers configured; set OPENROUTER_API_KEY (recommended) or enable BUCKLEY_OLLAMA_ENABLED / BUCKLEY_LITELLM_ENABLED"), 2)
