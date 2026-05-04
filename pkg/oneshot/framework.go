@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/odvcencio/buckley/pkg/rules"
+	"github.com/odvcencio/buckley/pkg/tools"
 	"github.com/odvcencio/buckley/pkg/transparency"
 )
 
@@ -18,15 +19,20 @@ const defaultMaxRetries = 3
 //   - Definition    -> single-tool invoke+retry (commit, PR)
 //   - RLMDefinition -> full RLM sub-agent with multi-turn tool access (review)
 type Framework struct {
-	invoker   *DefaultInvoker
+	invoker   ToolInvoker
 	rlmRunner *RLMRunner
 	engine    *rules.Engine
+}
+
+// ToolInvoker runs a single tool-shaped one-shot model invocation.
+type ToolInvoker interface {
+	Invoke(ctx context.Context, systemPrompt, userPrompt string, tool tools.Definition, audit *transparency.ContextAudit) (*Result, *transparency.Trace, error)
 }
 
 // NewFramework creates a new oneshot framework.
 // The invoker is required for Definition-based commands.
 // Use WithRLMRunner to enable RLMDefinition-based commands.
-func NewFramework(invoker *DefaultInvoker, engine *rules.Engine) *Framework {
+func NewFramework(invoker ToolInvoker, engine *rules.Engine) *Framework {
 	return &Framework{
 		invoker: invoker,
 		engine:  engine,

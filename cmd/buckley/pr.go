@@ -30,15 +30,20 @@ func runPRCommand(args []string) error {
 	baseFlag := fs.String("base", "", "base branch (default: auto-detect main/master)")
 	verbose := fs.Bool("verbose", false, "show model reasoning and full trace")
 	showCost := fs.Bool("cost", true, "show token/cost breakdown")
-	modelFlag := fs.String("model", "", "model to use (default: BUCKLEY_MODEL_PR or execution model)")
+	modelFlag := fs.String("model", "", "model to use (default: BUCKLEY_MODEL_PR or models.utility.pr for API backend)")
+	backendFlag := fs.String("backend", "", "backend to use: api, codex, or claude (default: BUCKLEY_PR_BACKEND, BUCKLEY_ONESHOT_BACKEND, or api)")
 	timeout := fs.Duration("timeout", 2*time.Minute, "timeout for model request")
 
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	backend, err := resolveOneshotBackend("pr", *backendFlag)
+	if err != nil {
+		return err
+	}
 
 	// Initialize dependencies
-	cfg, mgr, store, err := initDependenciesFn()
+	cfg, mgr, store, err := initOneshotDependencies(backend)
 	if store != nil {
 		defer store.Close()
 	}
@@ -47,15 +52,9 @@ func runPRCommand(args []string) error {
 	}
 
 	// Determine model
-	modelID := strings.TrimSpace(*modelFlag)
-	if modelID == "" {
-		modelID = strings.TrimSpace(os.Getenv("BUCKLEY_MODEL_PR"))
-	}
-	if modelID == "" && cfg != nil {
-		modelID = cfg.Models.Execution
-	}
-	if modelID == "" {
-		return fmt.Errorf("no model configured (set BUCKLEY_MODEL_PR or configure models.execution)")
+	modelID := resolvePRModelID(*modelFlag, cfg, backend)
+	if backend == oneshotBackendAPI && modelID == "" {
+		return fmt.Errorf("no model configured (set BUCKLEY_MODEL_PR or configure models.utility.pr)")
 	}
 
 	// Get model pricing for cost calculation
@@ -63,7 +62,7 @@ func runPRCommand(args []string) error {
 		InputPerMillion:  3.0,
 		OutputPerMillion: 15.0,
 	}
-	if mgr != nil {
+	if backend == oneshotBackendAPI && mgr != nil {
 		if info, err := mgr.GetModelInfo(modelID); err == nil {
 			pricing.InputPerMillion = info.Pricing.Prompt
 			pricing.OutputPerMillion = info.Pricing.Completion
@@ -74,13 +73,10 @@ func runPRCommand(args []string) error {
 	ledger := transparency.NewCostLedger()
 
 	// Create invoker
-	invoker := oneshot.NewInvoker(oneshot.InvokerConfig{
-		Client:   mgr,
-		Model:    modelID,
-		Provider: "openrouter",
-		Pricing:  pricing,
-		Ledger:   ledger,
-	})
+	invoker, err := newOneshotToolInvoker(backend, modelID, mgr, pricing, ledger)
+	if err != nil {
+		return err
+	}
 
 	// Create unified framework runner
 	framework := oneshot.NewFramework(invoker, nil)
@@ -92,7 +88,7 @@ func runPRCommand(args []string) error {
 
 	// Show what we're doing
 	if !quietMode {
-		termOut.Dim("Using model: %s", modelID)
+		termOut.Dim("Using %s", describeOneshotBackend(backend, modelID))
 	}
 
 	// Execute the PR generation with spinner

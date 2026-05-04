@@ -68,10 +68,15 @@ func runCommitCommand(args []string) error {
 	graftMode := fs.Bool("graft", false, "use graft commit/push instead of git")
 	trace := fs.Bool("trace", false, "show context audit and reasoning trace after completion")
 	showCost := fs.Bool("cost", true, "show token/cost breakdown")
-	modelFlag := fs.String("model", "", "model to use (default: BUCKLEY_MODEL_COMMIT or execution model)")
+	modelFlag := fs.String("model", "", "model to use (default: BUCKLEY_MODEL_COMMIT or models.utility.commit for API backend)")
+	backendFlag := fs.String("backend", "", "backend to use: api, codex, or claude (default: BUCKLEY_COMMIT_BACKEND, BUCKLEY_ONESHOT_BACKEND, or api)")
 	timeout := fs.Duration("timeout", 2*time.Minute, "timeout for model request")
 
 	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	backend, err := resolveOneshotBackend("commit", *backendFlag)
+	if err != nil {
 		return err
 	}
 	compactOutput := *minimalOutput || *minAlias || oneshotMinimalOutputEnabled()
@@ -86,7 +91,7 @@ func runCommitCommand(args []string) error {
 	}
 
 	// Initialize dependencies
-	cfg, mgr, store, err := initDependenciesFn()
+	cfg, mgr, store, err := initOneshotDependencies(backend)
 	if store != nil {
 		defer store.Close()
 	}
@@ -95,15 +100,9 @@ func runCommitCommand(args []string) error {
 	}
 
 	// Determine model
-	modelID := strings.TrimSpace(*modelFlag)
-	if modelID == "" {
-		modelID = strings.TrimSpace(os.Getenv("BUCKLEY_MODEL_COMMIT"))
-	}
-	if modelID == "" && cfg != nil {
-		modelID = cfg.Models.Execution
-	}
-	if modelID == "" {
-		return fmt.Errorf("no model configured (set BUCKLEY_MODEL_COMMIT or configure models.execution)")
+	modelID := resolveCommitModelID(*modelFlag, cfg, backend)
+	if backend == oneshotBackendAPI && modelID == "" {
+		return fmt.Errorf("no model configured (set BUCKLEY_MODEL_COMMIT or configure models.utility.commit)")
 	}
 
 	// Get model pricing for cost calculation
@@ -111,7 +110,7 @@ func runCommitCommand(args []string) error {
 		InputPerMillion:  3.0, // Default pricing, will be overridden if we can fetch
 		OutputPerMillion: 15.0,
 	}
-	if mgr != nil {
+	if backend == oneshotBackendAPI && mgr != nil {
 		if info, err := mgr.GetModelInfo(modelID); err == nil {
 			pricing.InputPerMillion = info.Pricing.Prompt
 			pricing.OutputPerMillion = info.Pricing.Completion
@@ -122,13 +121,10 @@ func runCommitCommand(args []string) error {
 	ledger := transparency.NewCostLedger()
 
 	// Create invoker
-	invoker := oneshot.NewInvoker(oneshot.InvokerConfig{
-		Client:   mgr,
-		Model:    modelID,
-		Provider: "openrouter",
-		Pricing:  pricing,
-		Ledger:   ledger,
-	})
+	invoker, err := newOneshotToolInvoker(backend, modelID, mgr, pricing, ledger)
+	if err != nil {
+		return err
+	}
 
 	// Create unified framework runner
 	framework := oneshot.NewFramework(invoker, nil)
@@ -140,7 +136,7 @@ func runCommitCommand(args []string) error {
 
 	// Show what we're doing
 	if !quietMode {
-		termOut.Dim("Using model: %s", modelID)
+		termOut.Dim("Using %s", describeOneshotBackend(backend, modelID))
 	}
 
 	// Execute the commit generation with spinner
