@@ -26,12 +26,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/odvcencio/buckley/pkg/buckley/ui/tui"
 	"github.com/odvcencio/buckley/pkg/config"
 	projectcontext "github.com/odvcencio/buckley/pkg/context"
 	"github.com/odvcencio/buckley/pkg/model"
 	"github.com/odvcencio/buckley/pkg/storage"
 	"github.com/odvcencio/buckley/pkg/tool"
+	"github.com/odvcencio/buckley/pkg/ui/tui"
 )
 
 // tuiCostTracker tracks costs for TUI tests
