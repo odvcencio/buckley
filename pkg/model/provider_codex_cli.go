@@ -98,7 +98,7 @@ func (p *CodexCLIProvider) ChatCompletion(ctx context.Context, req ChatRequest) 
 	defer cleanup()
 
 	workDir, _ := os.Getwd()
-	args := p.buildExecArgs(req.Model, outFile, workDir)
+	args := p.buildExecArgs(req.Model, outFile, workDir, req.Reasoning)
 	result, err := p.runner(ctx, CodexCLICommand{
 		Name:  p.command,
 		Args:  args,
@@ -168,7 +168,7 @@ func (p *CodexCLIProvider) ChatCompletionStream(ctx context.Context, req ChatReq
 	return chunkChan, errChan
 }
 
-func (p *CodexCLIProvider) buildExecArgs(modelID, outputPath, workDir string) []string {
+func (p *CodexCLIProvider) buildExecArgs(modelID, outputPath, workDir string, reasoning *ReasoningConfig) []string {
 	args := []string{"exec", "--color", "never", "--ephemeral", "--output-last-message", outputPath}
 	if model := codexCLIModelArg(modelID); model != "" {
 		args = append(args, "--model", model)
@@ -177,6 +177,7 @@ func (p *CodexCLIProvider) buildExecArgs(modelID, outputPath, workDir string) []
 		args = append(args, "--sandbox", sandboxMode)
 	}
 	args = append(args, codexApprovalConfigArgs(p.approval.Mode)...)
+	args = append(args, codexReasoningConfigArgs(reasoning)...)
 	if strings.TrimSpace(workDir) != "" {
 		args = append(args, "--cd", workDir)
 	}
@@ -262,6 +263,9 @@ func codexModelCatalog(models []string) []ModelInfo {
 			Name:          strings.TrimPrefix(modelID, "codex/"),
 			ContextLength: 200000,
 			Architecture:  Architecture{Modality: "text"},
+			SupportedParameters: []string{
+				"reasoning",
+			},
 		})
 	}
 	return out
@@ -331,6 +335,21 @@ func codexApprovalConfigArgs(mode string) []string {
 		policy = "untrusted"
 	}
 	return []string{"-c", fmt.Sprintf("approval_policy=%q", policy)}
+}
+
+func codexReasoningConfigArgs(reasoning *ReasoningConfig) []string {
+	if reasoning == nil {
+		return nil
+	}
+	effort := strings.ToLower(strings.TrimSpace(reasoning.Effort))
+	switch effort {
+	case "", "auto", "off", "none":
+		return nil
+	case "low", "medium", "high", "xhigh":
+		return []string{"-c", fmt.Sprintf("model_reasoning_effort=%q", effort)}
+	default:
+		return nil
+	}
 }
 
 func estimateCodexUsage(messages []Message, output string) Usage {

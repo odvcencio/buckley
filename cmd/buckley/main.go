@@ -639,7 +639,7 @@ func printHelp() {
 	fmt.Println("  --no-color                       Disable colored output")
 	fmt.Println("  --tui                            Use rich TUI interface")
 	fmt.Println("  --plain                          Use plain scrollback mode")
-	fmt.Println("  -m, --model <id>                 Use model for this chat session (for example codex/gpt-5.4-mini-xhigh)")
+	fmt.Println("  -m, --model <id>                 Use model for this chat session (for example codex/gpt-5.4-mini)")
 	fmt.Println("  --encoding json|toon             Set serialization format")
 	fmt.Println("  --json                           Shortcut for --encoding json")
 	fmt.Println("  -v, --version                    Show version information")
@@ -681,7 +681,7 @@ func printHelp() {
 	fmt.Println("CONFIGURATION:")
 	fmt.Println("  User config:    ~/.buckley/config.yaml")
 	fmt.Println("  Project config: ./.buckley/config.yaml")
-	fmt.Println("  Codex chat:     set models.execution: codex/gpt-5.4-mini-xhigh")
+	fmt.Println("  Codex chat:     set models.execution: codex/gpt-5.4 and models.reasoning: xhigh")
 	fmt.Println("  Run 'buckley config check' to validate your setup")
 	fmt.Println()
 	fmt.Println("GETTING STARTED:")
@@ -1327,7 +1327,7 @@ func applyStartupModelOverride(cfg *config.Config, modelID string) {
 	if cfg == nil {
 		return
 	}
-	modelID = strings.TrimSpace(modelID)
+	modelID = normalizeModelIDWithReasoning(cfg, modelID)
 	if modelID == "" {
 		return
 	}
@@ -1336,19 +1336,44 @@ func applyStartupModelOverride(cfg *config.Config, modelID string) {
 	if strings.HasPrefix(modelID, "codex/") {
 		cfg.Providers.Codex.Enabled = true
 		cfg.Models.DefaultProvider = "codex"
+		if strings.TrimSpace(cfg.Models.Reasoning) == "" {
+			cfg.Models.Reasoning = "xhigh"
+		}
 		if cfg.Models.Planning == "" || cfg.Models.Planning == config.DefaultPlanningModel {
 			cfg.Models.Planning = modelID
 		}
 		if cfg.Models.Review == "" || cfg.Models.Review == config.DefaultReviewModel {
 			cfg.Models.Review = modelID
 		}
+	} else if strings.HasPrefix(modelID, "openai/gpt-5") || strings.HasPrefix(modelID, "gpt-5") {
+		if strings.TrimSpace(cfg.Models.Reasoning) == "" {
+			cfg.Models.Reasoning = "xhigh"
+		}
 	}
+}
+
+func normalizeModelIDWithReasoning(cfg *config.Config, modelID string) string {
+	modelID = strings.TrimSpace(modelID)
+	if modelID == "" {
+		return ""
+	}
+	normalized, effort := config.SplitReasoningSuffix(modelID)
+	if normalized != "" {
+		modelID = normalized
+	}
+	if cfg != nil && effort != "" {
+		cfg.Models.Reasoning = effort
+	}
+	return modelID
 }
 
 func applyCommandModelOverride(modelID string) func() {
 	modelID = strings.TrimSpace(modelID)
 	previous := modelOverrideFlag
 	if modelID != "" {
+		if normalized, _ := config.SplitReasoningSuffix(modelID); normalized != "" {
+			modelID = normalized
+		}
 		modelOverrideFlag = modelID
 	}
 	return func() {

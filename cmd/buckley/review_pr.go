@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/odvcencio/buckley/pkg/model"
 	"github.com/odvcencio/buckley/pkg/oneshot"
 	"github.com/odvcencio/buckley/pkg/oneshot/commands"
 	"github.com/odvcencio/buckley/pkg/terminal"
@@ -50,9 +51,9 @@ func runReviewPRCommand(args []string) error {
 	}
 
 	// Determine model
-	modelID := strings.TrimSpace(*modelFlag)
+	modelID := strings.TrimSpace(modelOverrideFlag)
 	if modelID == "" {
-		modelID = strings.TrimSpace(os.Getenv("BUCKLEY_MODEL_REVIEW"))
+		modelID = normalizeModelIDWithReasoning(cfg, os.Getenv("BUCKLEY_MODEL_REVIEW"))
 	}
 	if modelID == "" && cfg != nil {
 		modelID = cfg.Models.Review
@@ -63,6 +64,7 @@ func runReviewPRCommand(args []string) error {
 	if modelID == "" {
 		return fmt.Errorf("no model configured (set BUCKLEY_MODEL_REVIEW or configure models.review)")
 	}
+	reasoningEffort := model.ResolveReasoningEffort(cfg, mgr, nil, modelID, "review")
 
 	// Create cost ledger
 	ledger := transparency.NewCostLedger()
@@ -75,10 +77,11 @@ func runReviewPRCommand(args []string) error {
 
 	// Create RLM runner for the framework
 	rlmRunner := oneshot.NewRLMRunner(oneshot.RLMRunnerConfig{
-		Models:   mgr,
-		Registry: registry,
-		Ledger:   ledger,
-		ModelID:  modelID,
+		Models:          mgr,
+		Registry:        registry,
+		Ledger:          ledger,
+		ModelID:         modelID,
+		ReasoningEffort: reasoningEffort,
 	})
 
 	// Create unified framework with RLM support

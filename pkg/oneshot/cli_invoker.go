@@ -39,10 +39,11 @@ type CLICommandRunner func(ctx context.Context, cmd CLICommand) (CLICommandResul
 
 // CLIInvokerConfig configures a CLI-backed one-shot invoker.
 type CLIInvokerConfig struct {
-	Backend string
-	Command string
-	Model   string
-	WorkDir string
+	Backend         string
+	Command         string
+	Model           string
+	ReasoningEffort string
+	WorkDir         string
 
 	ExtraArgs []string
 	Runner    CLICommandRunner
@@ -54,6 +55,7 @@ type CLIInvoker struct {
 	backend   string
 	command   string
 	model     string
+	reasoning string
 	workDir   string
 	extraArgs []string
 	runner    CLICommandRunner
@@ -83,6 +85,7 @@ func NewCLIInvoker(cfg CLIInvokerConfig) (*CLIInvoker, error) {
 		backend:   backend,
 		command:   command,
 		model:     strings.TrimSpace(cfg.Model),
+		reasoning: normalizeCLIReasoningEffort(cfg.ReasoningEffort),
 		workDir:   cfg.WorkDir,
 		extraArgs: append([]string(nil), cfg.ExtraArgs...),
 		runner:    runner,
@@ -196,6 +199,9 @@ func (inv *CLIInvoker) buildCodexCommand(tool tools.Definition, prompt string, s
 	if inv.model != "" {
 		args = append(args, "--model", inv.model)
 	}
+	if inv.reasoning != "" {
+		args = append(args, "-c", fmt.Sprintf("model_reasoning_effort=%q", inv.reasoning))
+	}
 	args = append(args, inv.extraArgs...)
 	args = append(args, "-")
 
@@ -205,6 +211,15 @@ func (inv *CLIInvoker) buildCodexCommand(tool tools.Definition, prompt string, s
 		Stdin: prompt,
 		Dir:   inv.workDir,
 	}, cleanup, nil
+}
+
+func normalizeCLIReasoningEffort(effort string) string {
+	switch strings.ToLower(strings.TrimSpace(effort)) {
+	case "low", "medium", "high", "xhigh":
+		return strings.ToLower(strings.TrimSpace(effort))
+	default:
+		return ""
+	}
 }
 
 func (inv *CLIInvoker) buildClaudeCommand(prompt string, schemaJSON []byte) (CLICommand, func(), error) {

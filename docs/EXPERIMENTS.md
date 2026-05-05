@@ -7,13 +7,13 @@ Run the same task across multiple AI models and compare results.
 ```bash
 # Compare GPT-4 and Claude on a refactoring task
 buckley experiment run refactor-auth \
-  -m gpt-5.5-xhigh \
+  -m gpt-5.5 \
   -m claude-sonnet-4-5-20241022 \
   -p "Refactor the auth module to use JWT tokens"
 
 # Add success criteria
 buckley experiment run add-tests \
-  -m gpt-5.5-xhigh \
+  -m gpt-5.5 \
   -m claude-sonnet-4-5-20241022 \
   -p "Add unit tests for the user service" \
   --criteria "test_pass:go test ./..." \
@@ -40,7 +40,7 @@ buckley experiment run <name> [flags]
 **Example:**
 ```bash
 buckley experiment run optimize-queries \
-  -m gpt-5.5-xhigh \
+  -m gpt-5.5 \
   -m claude-sonnet-4-5-20241022 \
   -m qwen3-coder \
   -p "Optimize the database queries in pkg/storage/queries.go" \
@@ -108,7 +108,7 @@ Define how success is measured for each variant.
 **Multiple Criteria:**
 ```bash
 buckley experiment run full-check \
-  -m gpt-5.5-xhigh \
+  -m gpt-5.5 \
   -p "Implement user authentication" \
   --criteria "test_pass:go test ./..." \
   --criteria "file_exists:pkg/auth/jwt.go" \
@@ -183,15 +183,15 @@ Experiment: optimize-queries (completed)
 
 Model               | Score | Cost    | Duration | Tokens
 claude-sonnet-4-5   | 100%  | $0.0234 | 3m 42s   | 4,231
-gpt-5.5-xhigh              | 100%  | $0.0156 | 2m 18s   | 3,102
+gpt-5.5              | 100%  | $0.0156 | 2m 18s   | 3,102
 qwen3-coder       |  60%  | $0.00   | 5m 12s   | 8,445
 
 Cost Comparison:
 claude-sonnet-4-5  ████████████████████████ $0.0234
-gpt-5.5-xhigh      ████████████████ $0.0156
+gpt-5.5      ████████████████ $0.0156
 qwen3-coder   ▏ $0.00
 
-Winner: gpt-5.5-xhigh (100% score, lowest cost)
+Winner: gpt-5.5 (100% score, lowest cost)
 ```
 
 **Ranking Factors (in order):**
@@ -212,7 +212,7 @@ Winner: gpt-5.5-xhigh (100% score, lowest cost)
 **Compare local vs cloud models:**
 ```bash
 buckley experiment run local-vs-cloud \
-  -m gpt-5.5-xhigh \
+  -m gpt-5.5 \
   -m ollama/llama3:70b \
   -p "Implement the feature described in SPEC.md"
 ```

@@ -43,7 +43,7 @@ func ResolveReasoningEffort(cfg *config.Config, checker ReasoningChecker, engine
 			configured = "auto"
 		case "off", "none":
 			configured = "off"
-		case "low", "medium", "high":
+		case "low", "medium", "high", "xhigh":
 			configured = strings.ToLower(strings.TrimSpace(cfg.Models.Reasoning))
 		default:
 			configured = "auto"
@@ -69,7 +69,7 @@ func ResolveReasoningEffort(cfg *config.Config, checker ReasoningChecker, engine
 	switch configured {
 	case "off":
 		return ""
-	case "low", "medium", "high":
+	case "low", "medium", "high", "xhigh":
 		return configured
 	default:
 		if phase == "planning" || phase == "review" {

@@ -62,6 +62,7 @@ type SubAgent struct {
 	id            string
 	model         string
 	systemPrompt  string
+	reasoning     string
 	maxIterations int
 	allowedTools  map[string]struct{}
 	toolTier      string
@@ -78,6 +79,7 @@ type SubAgent struct {
 type SubAgentConfig struct {
 	ID            string
 	Model         string
+	Reasoning     string
 	SystemPrompt  string
 	MaxIterations int
 	AllowedTools  []string
@@ -157,6 +159,7 @@ func NewSubAgent(cfg SubAgentConfig, deps SubAgentDeps) (*SubAgent, error) {
 		id:            cfg.ID,
 		model:         cfg.Model,
 		systemPrompt:  prompt,
+		reasoning:     normalizeSubAgentReasoning(cfg.Reasoning),
 		maxIterations: maxIterations,
 		allowedTools:  allowedTools,
 		toolTier:      cfg.ToolTier,
@@ -167,6 +170,15 @@ func NewSubAgent(cfg SubAgentConfig, deps SubAgentDeps) (*SubAgent, error) {
 		approver:      deps.Approver,
 		engine:        deps.Engine,
 	}, nil
+}
+
+func normalizeSubAgentReasoning(effort string) string {
+	switch strings.ToLower(strings.TrimSpace(effort)) {
+	case "low", "medium", "high", "xhigh":
+		return strings.ToLower(strings.TrimSpace(effort))
+	default:
+		return ""
+	}
 }
 
 // Execute runs the task to completion and returns a summary for the coordinator.
@@ -190,7 +202,7 @@ func (a *SubAgent) Execute(ctx context.Context, task string) (*SubAgentResult, e
 	}
 
 	for i := 0; i < a.maxIterations; i++ {
-		resp, err := a.client.ChatCompletion(ctx, model.ChatRequest{
+		req := model.ChatRequest{
 			Model:    a.model,
 			Messages: messages,
 			Tools:    toolDefs,
@@ -200,7 +212,11 @@ func (a *SubAgent) Execute(ctx context.Context, task string) (*SubAgentResult, e
 				}
 				return "auto"
 			}(),
-		})
+		}
+		if a.reasoning != "" {
+			req.Reasoning = &model.ReasoningConfig{Effort: a.reasoning}
+		}
+		resp, err := a.client.ChatCompletion(ctx, req)
 		if err != nil {
 			result.Duration = time.Since(start)
 			return result, err

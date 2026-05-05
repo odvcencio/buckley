@@ -53,9 +53,9 @@ func runReviewCommand(args []string) error {
 	}
 
 	// Determine model
-	modelID := strings.TrimSpace(*modelFlag)
+	modelID := strings.TrimSpace(modelOverrideFlag)
 	if modelID == "" {
-		modelID = strings.TrimSpace(os.Getenv("BUCKLEY_MODEL_REVIEW"))
+		modelID = normalizeModelIDWithReasoning(cfg, os.Getenv("BUCKLEY_MODEL_REVIEW"))
 	}
 	if modelID == "" && cfg != nil {
 		modelID = cfg.Models.Review
@@ -66,6 +66,7 @@ func runReviewCommand(args []string) error {
 	if modelID == "" {
 		return fmt.Errorf("no model configured (set BUCKLEY_MODEL_REVIEW or configure models.review)")
 	}
+	reasoningEffort := model.ResolveReasoningEffort(cfg, mgr, nil, modelID, "review")
 
 	// Create cost ledger
 	ledger := transparency.NewCostLedger()
@@ -78,10 +79,11 @@ func runReviewCommand(args []string) error {
 
 	// Create RLM runner for the framework
 	rlmRunner := oneshot.NewRLMRunner(oneshot.RLMRunnerConfig{
-		Models:   mgr,
-		Registry: registry,
-		Ledger:   ledger,
-		ModelID:  modelID,
+		Models:          mgr,
+		Registry:        registry,
+		Ledger:          ledger,
+		ModelID:         modelID,
+		ReasoningEffort: reasoningEffort,
 	})
 
 	// Create unified framework with RLM support
@@ -199,7 +201,7 @@ func runReviewCommand(args []string) error {
 			parsed = commands.ParseReview(reviewText)
 		}
 		if parsed != nil && len(parsed.Findings) > 0 {
-			runReviewMenu(ctx, parsed, mgr, registry, modelID, ledger, *timeout)
+			runReviewMenu(ctx, parsed, mgr, registry, modelID, reasoningEffort, ledger, *timeout)
 		}
 	}
 
@@ -260,7 +262,7 @@ func printReviewError(err error, trace *transparency.Trace) {
 }
 
 // runReviewMenu displays an interactive menu to fix findings.
-func runReviewMenu(ctx context.Context, parsed *commands.ParsedReview, mgr *model.Manager, registry *tool.Registry, modelID string, ledger *transparency.CostLedger, timeout time.Duration) {
+func runReviewMenu(ctx context.Context, parsed *commands.ParsedReview, mgr *model.Manager, registry *tool.Registry, modelID, reasoningEffort string, ledger *transparency.CostLedger, timeout time.Duration) {
 	// Print grade summary
 	printGradeSummary(parsed)
 
@@ -290,7 +292,7 @@ func runReviewMenu(ctx context.Context, parsed *commands.ParsedReview, mgr *mode
 				continue
 			}
 			for _, f := range blockers {
-				if err := fixFinding(ctx, &f, mgr, registry, modelID, ledger, timeout); err != nil {
+				if err := fixFinding(ctx, &f, mgr, registry, modelID, reasoningEffort, ledger, timeout); err != nil {
 					termOut.Error("Failed to fix %s: %v", f.ID, err)
 				}
 			}
@@ -302,7 +304,7 @@ func runReviewMenu(ctx context.Context, parsed *commands.ParsedReview, mgr *mode
 				continue
 			}
 			for _, f := range minor {
-				if err := fixFinding(ctx, &f, mgr, registry, modelID, ledger, timeout); err != nil {
+				if err := fixFinding(ctx, &f, mgr, registry, modelID, reasoningEffort, ledger, timeout); err != nil {
 					termOut.Error("Failed to fix %s: %v", f.ID, err)
 				}
 			}
@@ -310,7 +312,7 @@ func runReviewMenu(ctx context.Context, parsed *commands.ParsedReview, mgr *mode
 			// Fix specific finding by number
 			if idx, err := strconv.Atoi(choice); err == nil && idx > 0 && idx <= len(parsed.Findings) {
 				finding := &parsed.Findings[idx-1]
-				if err := fixFinding(ctx, finding, mgr, registry, modelID, ledger, timeout); err != nil {
+				if err := fixFinding(ctx, finding, mgr, registry, modelID, reasoningEffort, ledger, timeout); err != nil {
 					termOut.Error("Failed to fix %s: %v", finding.ID, err)
 				}
 			}
@@ -404,7 +406,7 @@ func buildReviewMenuItems(parsed *commands.ParsedReview) []terminal.MenuItem {
 }
 
 // fixFinding uses the framework's RLM execution to apply a fix for a finding.
-func fixFinding(ctx context.Context, finding *commands.Finding, mgr *model.Manager, registry *tool.Registry, modelID string, ledger *transparency.CostLedger, timeout time.Duration) error {
+func fixFinding(ctx context.Context, finding *commands.Finding, mgr *model.Manager, registry *tool.Registry, modelID, reasoningEffort string, ledger *transparency.CostLedger, timeout time.Duration) error {
 	termOut.Newline()
 	termOut.Header(fmt.Sprintf("Fixing %s: %s", finding.ID, finding.Title))
 
@@ -420,10 +422,11 @@ func fixFinding(ctx context.Context, finding *commands.Finding, mgr *model.Manag
 
 	// Create RLM runner for fix
 	rlmRunner := oneshot.NewRLMRunner(oneshot.RLMRunnerConfig{
-		Models:   mgr,
-		Registry: registry,
-		ModelID:  modelID,
-		Ledger:   ledger,
+		Models:          mgr,
+		Registry:        registry,
+		ModelID:         modelID,
+		ReasoningEffort: reasoningEffort,
+		Ledger:          ledger,
 	})
 	framework := oneshot.NewFramework(nil, nil).WithRLMRunner(rlmRunner)
 

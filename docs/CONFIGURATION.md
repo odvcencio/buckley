@@ -73,7 +73,7 @@ models:
   default_provider: openrouter  # openrouter | openai | anthropic | google | codex
 
   # Reasoning effort level
-  reasoning: medium  # off | low | medium | high | "" (auto-detect)
+  reasoning: medium  # off | low | medium | high | xhigh | "" (auto-detect)
 
   # Vision model fallback chain (tried in order)
   vision_fallback:
@@ -84,14 +84,14 @@ models:
   fallback_chains:
     anthropic/claude-sonnet-4-5:
       - anthropic/claude-3-haiku
-      - openai/gpt-5.4-mini-xhigh
+      - openai/gpt-5.4-mini
 
   # Utility models for lightweight tasks
   utility:
-    commit: openai/gpt-5.4-mini-xhigh
-    pr: openai/gpt-5.4-mini-xhigh
-    compaction: openai/gpt-5.4-mini-xhigh
-    todo_plan: openai/gpt-5.4-mini-xhigh
+    commit: openai/gpt-5.4-mini
+    pr: openai/gpt-5.4-mini
+    compaction: openai/gpt-5.4-mini
+    todo_plan: openai/gpt-5.4-mini
 ```
 
 **Defaults:**
@@ -572,7 +572,7 @@ compaction:
   preserve_commands: true
   models:
     - deepseek/deepseek-chat
-    - openai/gpt-5.4-mini-xhigh
+    - openai/gpt-5.4-mini
 ```
 
 ### ui

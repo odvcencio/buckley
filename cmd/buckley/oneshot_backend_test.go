@@ -51,8 +51,8 @@ func TestResolveCommitModelIDUsesUtilityOnlyForAPI(t *testing.T) {
 	if got := resolveCommitModelID("", cfg, oneshotBackendAPI); got != "openai/gpt-test" {
 		t.Fatalf("API model = %q, want utility commit model", got)
 	}
-	if got := resolveCommitModelID("", cfg, oneshot.CLIBackendCodex); got != "" {
-		t.Fatalf("CLI model = %q, want empty default", got)
+	if got := resolveCommitModelID("", cfg, oneshot.CLIBackendCodex); got != "gpt-5.4-mini" {
+		t.Fatalf("CLI model = %q, want gpt-5.4-mini default", got)
 	}
 	if got := resolveCommitModelID("openai/gpt-explicit", cfg, oneshot.CLIBackendCodex); got != "gpt-explicit" {
 		t.Fatalf("explicit CLI model = %q, want stripped provider prefix", got)

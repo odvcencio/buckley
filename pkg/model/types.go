@@ -91,7 +91,7 @@ type FunctionCall struct {
 
 // ReasoningConfig controls extended thinking behavior for models that support it.
 type ReasoningConfig struct {
-	Effort string `json:"effort,omitempty"` // "low", "medium", "high"
+	Effort string `json:"effort,omitempty"` // "low", "medium", "high", "xhigh"
 }
 
 // PromptCache configures provider-specific prompt caching behavior.

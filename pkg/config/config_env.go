@@ -19,6 +19,11 @@ func applyEnvOverrides(cfg *Config, configEnv map[string]string) {
 	if v := os.Getenv("BUCKLEY_MODEL_REVIEW"); v != "" {
 		cfg.Models.Review = v
 	}
+	if v := os.Getenv("BUCKLEY_MODEL_REASONING"); v != "" {
+		cfg.Models.Reasoning = v
+	} else if v := os.Getenv("BUCKLEY_REASONING"); v != "" {
+		cfg.Models.Reasoning = v
+	}
 	if v := os.Getenv("BUCKLEY_TRUST_LEVEL"); v != "" {
 		cfg.Orchestrator.TrustLevel = v
 	}
@@ -131,6 +136,15 @@ func applyEnvOverrides(cfg *Config, configEnv map[string]string) {
 	if codexModel != "" {
 		cfg.Providers.Codex.Models = []string{codexModel}
 		cfg.Providers.Codex.Enabled = true
+		if cfg.Models.Execution == "" || cfg.Models.Execution == defaultOpenRouterModel {
+			cfg.Models.Execution = codexModel
+		}
+		if cfg.Models.Planning == "" || cfg.Models.Planning == defaultOpenRouterModel {
+			cfg.Models.Planning = codexModel
+		}
+		if cfg.Models.Review == "" || cfg.Models.Review == defaultOpenRouterModel {
+			cfg.Models.Review = codexModel
+		}
 	}
 
 	if v, ok := envBool("BUCKLEY_EXPERIMENT_ENABLED"); ok {

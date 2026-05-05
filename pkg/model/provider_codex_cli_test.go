@@ -13,7 +13,7 @@ func TestCodexCLIProviderChatCompletionUsesExecLastMessage(t *testing.T) {
 	provider := NewCodexCLIProvider(
 		config.CodexConfig{
 			Command: "codex",
-			Models:  []string{"codex/gpt-5.4-mini-xhigh"},
+			Models:  []string{"codex/gpt-5.4-mini"},
 		},
 		config.SandboxConfig{Mode: "workspace"},
 		config.ApprovalConfig{Mode: "safe"},
@@ -33,7 +33,8 @@ func TestCodexCLIProviderChatCompletionUsesExecLastMessage(t *testing.T) {
 	}
 
 	resp, err := provider.ChatCompletion(context.Background(), ChatRequest{
-		Model: "codex/gpt-5.4-mini-xhigh",
+		Model:     "codex/gpt-5.4-mini",
+		Reasoning: &ReasoningConfig{Effort: "xhigh"},
 		Messages: []Message{
 			{Role: "system", Content: "system prompt"},
 			{Role: "user", Content: "hello"},
@@ -49,7 +50,7 @@ func TestCodexCLIProviderChatCompletionUsesExecLastMessage(t *testing.T) {
 	if !containsArgs(got.Args, "exec", "--color", "never") {
 		t.Fatalf("unexpected codex args: %v", got.Args)
 	}
-	if !containsSubsequence(got.Args, []string{"--model", "gpt-5.4-mini-xhigh"}) {
+	if !containsSubsequence(got.Args, []string{"--model", "gpt-5.4-mini"}) {
 		t.Fatalf("codex args missing model: %v", got.Args)
 	}
 	if !containsSubsequence(got.Args, []string{"--sandbox", "workspace-write"}) {
@@ -60,6 +61,9 @@ func TestCodexCLIProviderChatCompletionUsesExecLastMessage(t *testing.T) {
 	}
 	if !containsSubsequence(got.Args, []string{"-c", `approval_policy="never"`}) {
 		t.Fatalf("codex args missing approval policy: %v", got.Args)
+	}
+	if !containsSubsequence(got.Args, []string{"-c", `model_reasoning_effort="xhigh"`}) {
+		t.Fatalf("codex args missing reasoning effort: %v", got.Args)
 	}
 	if got.Args[len(got.Args)-1] != "-" {
 		t.Fatalf("codex prompt should be read from stdin, args: %v", got.Args)
@@ -104,7 +108,7 @@ func TestCodexCLIProviderDefaultModelOmitsModelArg(t *testing.T) {
 
 func TestCodexCLIProviderCatalogIncludesConfiguredModels(t *testing.T) {
 	provider := NewCodexCLIProvider(
-		config.CodexConfig{Models: []string{"gpt-5.4-mini-xhigh"}},
+		config.CodexConfig{Models: []string{"gpt-5.4-mini"}},
 		config.SandboxConfig{},
 		config.ApprovalConfig{},
 	)
@@ -117,11 +121,14 @@ func TestCodexCLIProviderCatalogIncludesConfiguredModels(t *testing.T) {
 	if len(catalog.Data) != 2 {
 		t.Fatalf("catalog size=%d want 2: %+v", len(catalog.Data), catalog.Data)
 	}
-	if catalog.Data[0].ID != "codex/default" || catalog.Data[1].ID != "codex/gpt-5.4-mini-xhigh" {
+	if catalog.Data[0].ID != "codex/default" || catalog.Data[1].ID != "codex/gpt-5.4-mini" {
 		t.Fatalf("unexpected catalog: %+v", catalog.Data)
 	}
-	if provider.SupportsToolsForTest("codex/gpt-5.4-mini-xhigh") {
+	if provider.SupportsToolsForTest("codex/gpt-5.4-mini") {
 		t.Fatal("codex provider catalog should not advertise OpenAI-style tool calling")
+	}
+	if !provider.SupportsReasoningForTest("codex/gpt-5.4-mini") {
+		t.Fatal("codex provider catalog should advertise reasoning support")
 	}
 }
 
@@ -132,6 +139,19 @@ func (p *CodexCLIProvider) SupportsToolsForTest(modelID string) bool {
 	}
 	for _, param := range info.SupportedParameters {
 		if param == "tools" || param == "functions" {
+			return true
+		}
+	}
+	return false
+}
+
+func (p *CodexCLIProvider) SupportsReasoningForTest(modelID string) bool {
+	info, err := p.GetModelInfo(modelID)
+	if err != nil {
+		return false
+	}
+	for _, param := range info.SupportedParameters {
+		if param == "reasoning" {
 			return true
 		}
 	}

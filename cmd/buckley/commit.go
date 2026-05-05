@@ -121,7 +121,7 @@ func runCommitCommand(args []string) error {
 	ledger := transparency.NewCostLedger()
 
 	// Create invoker
-	invoker, err := newOneshotToolInvoker(backend, modelID, mgr, pricing, ledger)
+	invoker, err := newOneshotToolInvoker(backend, modelID, cfg, mgr, pricing, ledger)
 	if err != nil {
 		return err
 	}

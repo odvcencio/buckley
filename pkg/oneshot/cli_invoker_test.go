@@ -17,9 +17,10 @@ func TestCLIInvokerCodexUsesOutputSchemaFile(t *testing.T) {
 	var schemaPath string
 
 	inv, err := NewCLIInvoker(CLIInvokerConfig{
-		Backend: CLIBackendCodex,
-		Model:   "gpt-5.4-mini-xhigh",
-		TempDir: tempDir,
+		Backend:         CLIBackendCodex,
+		Model:           "gpt-5.4-mini",
+		ReasoningEffort: "xhigh",
+		TempDir:         tempDir,
 		Runner: func(ctx context.Context, cmd CLICommand) (CLICommandResult, error) {
 			got = cmd
 			for i, arg := range cmd.Args {
@@ -63,8 +64,11 @@ func TestCLIInvokerCodexUsesOutputSchemaFile(t *testing.T) {
 	if !containsSubsequence(got.Args, []string{"exec", "--output-schema"}) {
 		t.Fatalf("unexpected codex args: %v", got.Args)
 	}
-	if !containsSubsequence(got.Args, []string{"--model", "gpt-5.4-mini-xhigh"}) {
+	if !containsSubsequence(got.Args, []string{"--model", "gpt-5.4-mini"}) {
 		t.Fatalf("codex args missing model: %v", got.Args)
+	}
+	if !containsSubsequence(got.Args, []string{"-c", `model_reasoning_effort="xhigh"`}) {
+		t.Fatalf("codex args missing reasoning effort: %v", got.Args)
 	}
 	if got.Args[len(got.Args)-1] != "-" {
 		t.Fatalf("codex prompt should be read from stdin, args: %v", got.Args)

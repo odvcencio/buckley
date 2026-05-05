@@ -34,7 +34,7 @@ models:
   review: moonshotai/kimi-k2-thinking
 ```
 
-Buckley’s compaction summaries currently use `openai/gpt-5.4-mini-xhigh` internally for cost control.
+Buckley’s compaction summaries currently use `openai/gpt-5.4-mini` internally for cost control, with reasoning effort configured separately.
 
 Implementation:
 - Validate model availability against OpenRouter catalog at startup

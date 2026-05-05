@@ -11,13 +11,17 @@ import (
 
 const (
 	defaultOpenRouterModel      = "moonshotai/kimi-k2.5"
-	defaultOpenAIPlanningModel  = "openai/gpt-5.5-xhigh"
-	defaultOpenAIExecutionModel = "openai/gpt-5.4-xhigh"
-	defaultOpenAIReviewModel    = "openai/gpt-5.5-xhigh"
-	defaultOpenAIUtilityModel   = "openai/gpt-5.4-mini-xhigh"
+	defaultOpenAIPlanningModel  = "openai/gpt-5.5"
+	defaultOpenAIExecutionModel = "openai/gpt-5.4"
+	defaultOpenAIReviewModel    = "openai/gpt-5.5"
+	defaultOpenAIUtilityModel   = "openai/gpt-5.4-mini"
+	defaultOpenAIReasoning      = "xhigh"
 	defaultAnthropicModel       = "anthropic/claude-sonnet-4-5"
 	defaultGoogleModel          = "google/gemini-3-pro"
-	defaultCodexModel           = "codex/gpt-5.4-mini-xhigh"
+	defaultCodexPlanningModel   = "codex/gpt-5.5"
+	defaultCodexExecutionModel  = "codex/gpt-5.4"
+	defaultCodexReviewModel     = "codex/gpt-5.5"
+	defaultCodexModel           = "codex/gpt-5.4-mini"
 
 	// MinTokenLength is the minimum recommended length for IPC authentication tokens
 	MinTokenLength = 32
@@ -40,6 +44,7 @@ const (
 	DefaultCompactThreshold = 0.75
 	DefaultMaxSelfHeal      = 3
 	DefaultMaxReviewCycles  = 3
+	DefaultCodexModel       = defaultCodexModel
 )
 
 type providerModelDefaults struct {
@@ -65,7 +70,20 @@ var providerDefaultModels = map[string]providerModelDefaults{
 	},
 	"anthropic": providerDefaults(defaultAnthropicModel),
 	"google":    providerDefaults(defaultGoogleModel),
-	"codex":     providerDefaults(defaultCodexModel),
+	"codex": {
+		Planning:          defaultCodexPlanningModel,
+		Execution:         defaultCodexExecutionModel,
+		Review:            defaultCodexReviewModel,
+		UtilityCommit:     defaultCodexModel,
+		UtilityPR:         defaultCodexModel,
+		UtilityCompaction: defaultCodexModel,
+		UtilityTodoPlan:   defaultCodexModel,
+	},
+}
+
+var providerDefaultReasoning = map[string]string{
+	"openai": defaultOpenAIReasoning,
+	"codex":  defaultOpenAIReasoning,
 }
 
 func providerDefaults(modelID string) providerModelDefaults {
@@ -146,7 +164,7 @@ type ModelConfig struct {
 	VisionFallback  []string            `yaml:"vision_fallback"` // Ordered list of vision models to try
 	FallbackChains  map[string][]string `yaml:"fallback_chains"`
 	DefaultProvider string              `yaml:"default_provider"` // Default provider (openrouter, openai, anthropic, google, codex)
-	Reasoning       string              `yaml:"reasoning"`        // Reasoning level: "off", "low", "medium", "high", or "" for auto-detect
+	Reasoning       string              `yaml:"reasoning"`        // Reasoning level: "off", "low", "medium", "high", "xhigh", or "" for auto-detect
 
 	// Utility models for utility tasks.
 	Utility UtilityModelConfig `yaml:"utility"`

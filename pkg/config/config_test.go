@@ -187,17 +187,20 @@ func TestLoadAlignsModelsToOpenAIWhenOpenRouterDisabled(t *testing.T) {
 		t.Fatalf("config.Load returned error: %v", err)
 	}
 
-	if cfg.Models.Planning != "openai/gpt-5.5-xhigh" {
-		t.Fatalf("expected planning model to fall back to openai/gpt-5.5-xhigh, got %s", cfg.Models.Planning)
+	if cfg.Models.Planning != "openai/gpt-5.5" {
+		t.Fatalf("expected planning model to fall back to openai/gpt-5.5, got %s", cfg.Models.Planning)
 	}
-	if cfg.Models.Execution != "openai/gpt-5.4-xhigh" {
-		t.Fatalf("expected execution model to fall back to openai/gpt-5.4-xhigh, got %s", cfg.Models.Execution)
+	if cfg.Models.Execution != "openai/gpt-5.4" {
+		t.Fatalf("expected execution model to fall back to openai/gpt-5.4, got %s", cfg.Models.Execution)
 	}
-	if cfg.Models.Review != "openai/gpt-5.5-xhigh" {
-		t.Fatalf("expected review model to fall back to openai/gpt-5.5-xhigh, got %s", cfg.Models.Review)
+	if cfg.Models.Review != "openai/gpt-5.5" {
+		t.Fatalf("expected review model to fall back to openai/gpt-5.5, got %s", cfg.Models.Review)
 	}
-	if cfg.Models.Utility.Commit != "openai/gpt-5.4-mini-xhigh" {
-		t.Fatalf("expected commit utility model to fall back to openai/gpt-5.4-mini-xhigh, got %s", cfg.Models.Utility.Commit)
+	if cfg.Models.Utility.Commit != "openai/gpt-5.4-mini" {
+		t.Fatalf("expected commit utility model to fall back to openai/gpt-5.4-mini, got %s", cfg.Models.Utility.Commit)
+	}
+	if cfg.Models.Reasoning != "xhigh" {
+		t.Fatalf("expected openai reasoning to default to xhigh, got %s", cfg.Models.Reasoning)
 	}
 	if cfg.Models.DefaultProvider != "openai" {
 		t.Fatalf("expected default provider to switch to openai, got %s", cfg.Models.DefaultProvider)
@@ -284,7 +287,7 @@ func TestEnvOverridesConfigureCodexProvider(t *testing.T) {
 	t.Setenv("ANTHROPIC_API_KEY", "")
 	t.Setenv("GOOGLE_API_KEY", "")
 	t.Setenv("BUCKLEY_CODEX_ENABLED", "1")
-	t.Setenv("BUCKLEY_CODEX_MODEL", "gpt-5.4-mini-xhigh")
+	t.Setenv("BUCKLEY_CODEX_MODEL", "gpt-5.4-mini")
 	t.Setenv("BUCKLEY_CODEX_COMMAND", "/opt/bin/codex")
 
 	cfg := config.DefaultConfig()
@@ -296,14 +299,36 @@ func TestEnvOverridesConfigureCodexProvider(t *testing.T) {
 	if cfg.Providers.Codex.Command != "/opt/bin/codex" {
 		t.Fatalf("codex command=%q want /opt/bin/codex", cfg.Providers.Codex.Command)
 	}
-	if len(cfg.Providers.Codex.Models) != 1 || cfg.Providers.Codex.Models[0] != "codex/gpt-5.4-mini-xhigh" {
-		t.Fatalf("codex models=%v want codex/gpt-5.4-mini-xhigh", cfg.Providers.Codex.Models)
+	if len(cfg.Providers.Codex.Models) != 1 || cfg.Providers.Codex.Models[0] != "codex/gpt-5.4-mini" {
+		t.Fatalf("codex models=%v want codex/gpt-5.4-mini", cfg.Providers.Codex.Models)
 	}
 	if cfg.Models.DefaultProvider != "codex" {
 		t.Fatalf("default provider=%q want codex", cfg.Models.DefaultProvider)
 	}
-	if cfg.Models.Execution != "codex/gpt-5.4-mini-xhigh" {
-		t.Fatalf("execution model=%q want codex/gpt-5.4-mini-xhigh", cfg.Models.Execution)
+	if cfg.Models.Execution != "codex/gpt-5.4-mini" {
+		t.Fatalf("execution model=%q want codex/gpt-5.4-mini", cfg.Models.Execution)
+	}
+	if cfg.Models.Reasoning != "xhigh" {
+		t.Fatalf("reasoning=%q want xhigh", cfg.Models.Reasoning)
+	}
+}
+
+func TestEnvOverridesSplitLegacyReasoningModelSuffix(t *testing.T) {
+	t.Setenv("OPENROUTER_API_KEY", "")
+	t.Setenv("OPENAI_API_KEY", "")
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("GOOGLE_API_KEY", "")
+	t.Setenv("BUCKLEY_CODEX_ENABLED", "1")
+	t.Setenv("BUCKLEY_CODEX_MODEL", "gpt-5.4-mini-xhigh")
+
+	cfg := config.DefaultConfig()
+	config.ApplyEnvOverridesForTest(cfg)
+
+	if len(cfg.Providers.Codex.Models) != 1 || cfg.Providers.Codex.Models[0] != "codex/gpt-5.4-mini" {
+		t.Fatalf("codex models=%v want codex/gpt-5.4-mini", cfg.Providers.Codex.Models)
+	}
+	if cfg.Models.Reasoning != "xhigh" {
+		t.Fatalf("reasoning=%q want xhigh", cfg.Models.Reasoning)
 	}
 }
 
@@ -342,8 +367,14 @@ models:
 	if cfg.Models.DefaultProvider != "codex" {
 		t.Fatalf("default provider=%q want codex", cfg.Models.DefaultProvider)
 	}
-	if cfg.Models.Execution != "codex/gpt-5.4-mini-xhigh" {
-		t.Fatalf("execution model=%q want codex/gpt-5.4-mini-xhigh", cfg.Models.Execution)
+	if cfg.Models.Planning != "codex/gpt-5.5" {
+		t.Fatalf("planning model=%q want codex/gpt-5.5", cfg.Models.Planning)
+	}
+	if cfg.Models.Execution != "codex/gpt-5.4" {
+		t.Fatalf("execution model=%q want codex/gpt-5.4", cfg.Models.Execution)
+	}
+	if cfg.Models.Review != "codex/gpt-5.5" {
+		t.Fatalf("review model=%q want codex/gpt-5.5", cfg.Models.Review)
 	}
 }
 
@@ -363,7 +394,7 @@ func TestLoadEnablesCodexFromExecutionModelConfig(t *testing.T) {
 	}
 	projectCfg := `
 models:
-  execution: codex/gpt-5.4-mini-xhigh
+  execution: codex/gpt-5.4-mini
 `
 	if err := os.WriteFile(filepath.Join(projectCfgDir, "config.yaml"), []byte(projectCfg), 0o644); err != nil {
 		t.Fatalf("write project config: %v", err)
@@ -382,11 +413,14 @@ models:
 	if cfg.Models.DefaultProvider != "codex" {
 		t.Fatalf("default provider=%q want codex", cfg.Models.DefaultProvider)
 	}
-	if cfg.Models.Execution != "codex/gpt-5.4-mini-xhigh" {
-		t.Fatalf("execution model=%q want codex/gpt-5.4-mini-xhigh", cfg.Models.Execution)
+	if cfg.Models.Execution != "codex/gpt-5.4-mini" {
+		t.Fatalf("execution model=%q want codex/gpt-5.4-mini", cfg.Models.Execution)
 	}
-	if cfg.Models.Planning != "codex/gpt-5.4-mini-xhigh" || cfg.Models.Review != "codex/gpt-5.4-mini-xhigh" {
-		t.Fatalf("planning/review should fall back to codex/gpt-5.4-mini-xhigh, got %q/%q", cfg.Models.Planning, cfg.Models.Review)
+	if cfg.Models.Planning != "codex/gpt-5.5" || cfg.Models.Review != "codex/gpt-5.5" {
+		t.Fatalf("planning/review should fall back to codex/gpt-5.5, got %q/%q", cfg.Models.Planning, cfg.Models.Review)
+	}
+	if cfg.Models.Reasoning != "xhigh" {
+		t.Fatalf("reasoning=%q want xhigh", cfg.Models.Reasoning)
 	}
 }
 
