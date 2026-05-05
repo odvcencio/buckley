@@ -176,9 +176,7 @@ func (p *CodexCLIProvider) buildExecArgs(modelID, outputPath, workDir string) []
 	if sandboxMode := codexSandboxMode(p.sandbox, p.approval); sandboxMode != "" {
 		args = append(args, "--sandbox", sandboxMode)
 	}
-	if approvalPolicy := codexApprovalPolicy(p.approval.Mode); approvalPolicy != "" {
-		args = append(args, "--ask-for-approval", approvalPolicy)
-	}
+	args = append(args, codexApprovalConfigArgs(p.approval.Mode)...)
 	if strings.TrimSpace(workDir) != "" {
 		args = append(args, "--cd", workDir)
 	}
@@ -326,13 +324,13 @@ func codexSandboxMode(sandboxCfg config.SandboxConfig, approvalCfg config.Approv
 	}
 }
 
-func codexApprovalPolicy(mode string) string {
+func codexApprovalConfigArgs(mode string) []string {
+	policy := "never"
 	switch strings.ToLower(strings.TrimSpace(mode)) {
 	case "ask", "explicit", "manual":
-		return "untrusted"
-	default:
-		return "never"
+		policy = "untrusted"
 	}
+	return []string{"-c", fmt.Sprintf("approval_policy=%q", policy)}
 }
 
 func estimateCodexUsage(messages []Message, output string) Usage {

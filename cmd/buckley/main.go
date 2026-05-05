@@ -1345,6 +1345,17 @@ func applyStartupModelOverride(cfg *config.Config, modelID string) {
 	}
 }
 
+func applyCommandModelOverride(modelID string) func() {
+	modelID = strings.TrimSpace(modelID)
+	previous := modelOverrideFlag
+	if modelID != "" {
+		modelOverrideFlag = modelID
+	}
+	return func() {
+		modelOverrideFlag = previous
+	}
+}
+
 func isInteractiveTerminal() bool {
 	return term.IsTerminal(int(os.Stdin.Fd())) &&
 		term.IsTerminal(int(os.Stdout.Fd()))

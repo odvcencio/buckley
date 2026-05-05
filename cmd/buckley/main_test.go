@@ -178,6 +178,24 @@ func TestApplyStartupModelOverrideEnablesCodex(t *testing.T) {
 	}
 }
 
+func TestApplyCommandModelOverrideRestoresPreviousValue(t *testing.T) {
+	previous := modelOverrideFlag
+	modelOverrideFlag = "openai/gpt-5.4-xhigh"
+	defer func() {
+		modelOverrideFlag = previous
+	}()
+
+	restore := applyCommandModelOverride(" codex/gpt-5.5-xhigh ")
+	if modelOverrideFlag != "codex/gpt-5.5-xhigh" {
+		t.Fatalf("modelOverrideFlag=%q want codex/gpt-5.5-xhigh", modelOverrideFlag)
+	}
+
+	restore()
+	if modelOverrideFlag != "openai/gpt-5.4-xhigh" {
+		t.Fatalf("modelOverrideFlag=%q want previous value", modelOverrideFlag)
+	}
+}
+
 func TestNetworkHelpers(t *testing.T) {
 	if !hasACPTLS(config.ACPConfig{TLSCertFile: "a", TLSKeyFile: "b", TLSClientCAFile: "c"}) {
 		t.Fatalf("expected hasACPTLS true")

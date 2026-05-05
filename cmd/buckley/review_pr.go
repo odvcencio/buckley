@@ -37,6 +37,9 @@ func runReviewPRCommand(args []string) error {
 		return fmt.Errorf("usage: buckley review-pr <pr-number-or-url>\n\nExamples:\n  buckley review-pr 123\n  buckley review-pr https://github.com/owner/repo/pull/123")
 	}
 
+	restoreModelOverride := applyCommandModelOverride(*modelFlag)
+	defer restoreModelOverride()
+
 	// Initialize dependencies
 	cfg, mgr, store, err := initDependenciesFn()
 	if store != nil {

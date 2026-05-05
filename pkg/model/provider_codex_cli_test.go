@@ -55,7 +55,10 @@ func TestCodexCLIProviderChatCompletionUsesExecLastMessage(t *testing.T) {
 	if !containsSubsequence(got.Args, []string{"--sandbox", "workspace-write"}) {
 		t.Fatalf("codex args missing workspace sandbox: %v", got.Args)
 	}
-	if !containsSubsequence(got.Args, []string{"--ask-for-approval", "never"}) {
+	if containsArgs(got.Args, "--ask-for-approval") {
+		t.Fatalf("codex args should not use removed approval flag: %v", got.Args)
+	}
+	if !containsSubsequence(got.Args, []string{"-c", `approval_policy="never"`}) {
 		t.Fatalf("codex args missing approval policy: %v", got.Args)
 	}
 	if got.Args[len(got.Args)-1] != "-" {
@@ -91,7 +94,10 @@ func TestCodexCLIProviderDefaultModelOmitsModelArg(t *testing.T) {
 	if !containsSubsequence(got.Args, []string{"--sandbox", "read-only"}) {
 		t.Fatalf("codex args missing read-only sandbox: %v", got.Args)
 	}
-	if !containsSubsequence(got.Args, []string{"--ask-for-approval", "untrusted"}) {
+	if containsArgs(got.Args, "--ask-for-approval") {
+		t.Fatalf("codex args should not use removed approval flag: %v", got.Args)
+	}
+	if !containsSubsequence(got.Args, []string{"-c", `approval_policy="untrusted"`}) {
 		t.Fatalf("codex args missing untrusted approval: %v", got.Args)
 	}
 }

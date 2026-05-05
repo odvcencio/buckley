@@ -40,6 +40,9 @@ func runReviewCommand(args []string) error {
 		*interactive = false
 	}
 
+	restoreModelOverride := applyCommandModelOverride(*modelFlag)
+	defer restoreModelOverride()
+
 	// Initialize dependencies
 	cfg, mgr, store, err := initDependenciesFn()
 	if store != nil {
