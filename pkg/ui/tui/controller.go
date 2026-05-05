@@ -1042,6 +1042,9 @@ func (c *Controller) runToolLoop(ctx context.Context, sess *SessionState, modelI
 			if msg.ToolCalls[i].ID == "" {
 				msg.ToolCalls[i].ID = fmt.Sprintf("tool-%d", i+1)
 			}
+			if repairedName, ok := resolveToolCallName(sess.ToolRegistry, msg.ToolCalls[i].Function.Name, allowedTools); ok {
+				msg.ToolCalls[i].Function.Name = repairedName
+			}
 		}
 		sess.Conversation.AddToolCallMessage(msg.ToolCalls)
 
@@ -1162,6 +1165,26 @@ func isToolUnsupportedError(err error) bool {
 		return true
 	}
 	return false
+}
+
+func resolveToolCallName(registry *tool.Registry, name string, allowed []string) (string, bool) {
+	name = strings.TrimSpace(name)
+	if registry == nil || name == "" {
+		return name, false
+	}
+	if _, ok := registry.Get(name); ok && tool.IsToolAllowed(name, allowed) {
+		return name, true
+	}
+	for _, candidate := range registry.List() {
+		if candidate == nil {
+			continue
+		}
+		candidateName := candidate.Name()
+		if strings.EqualFold(candidateName, name) && tool.IsToolAllowed(candidateName, allowed) {
+			return candidateName, true
+		}
+	}
+	return name, false
 }
 
 func (c *Controller) emitStreaming(sessionID string, streaming bool) {

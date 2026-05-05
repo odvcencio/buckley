@@ -240,10 +240,10 @@ func (m *Manager) ChatCompletionStream(ctx context.Context, req ChatRequest) (<-
 }
 
 func applyProviderTransforms(req ChatRequest, providerID string) ChatRequest {
-	if providerID != "openrouter" || len(req.Transforms) > 0 {
-		return req
+	req = normalizeProviderChatRequest(req, providerID)
+	if providerID == "openrouter" && len(req.Transforms) == 0 {
+		req.Transforms = []string{"middle-out"}
 	}
-	req.Transforms = []string{"middle-out"}
 	return req
 }
 
