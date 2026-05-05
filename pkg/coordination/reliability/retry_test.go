@@ -314,52 +314,35 @@ func TestIsRetriable_NonGRPCError(t *testing.T) {
 
 // TestRetryStrategy_Jitter verifies that jitter is applied to prevent thundering herd.
 func TestRetryStrategy_Jitter(t *testing.T) {
-	strategy := &RetryStrategy{
-		MaxRetries: 3,
-		BaseDelay:  50 * time.Millisecond,
-		MaxDelay:   500 * time.Millisecond,
-		Multiplier: 2.0,
+	previousRand := retryRandFloat64
+	defer func() {
+		retryRandFloat64 = previousRand
+	}()
+
+	values := []float64{0, 0.5, 1}
+	next := 0
+	retryRandFloat64 = func() float64 {
+		value := values[next]
+		next++
+		return value
 	}
 
-	// Run multiple executions and verify delays have some variance
-	delays := []time.Duration{}
-	for i := 0; i < 5; i++ {
-		attempts := 0
-		attemptTimes := []time.Time{}
-		fn := func() error {
-			attempts++
-			attemptTimes = append(attemptTimes, time.Now())
-			if attempts < 2 {
-				return status.Error(codes.Unavailable, "unavailable")
-			}
-			return nil
+	baseDelay := 100 * time.Millisecond
+	delays := []time.Duration{
+		retryDelayWithJitter(baseDelay),
+		retryDelayWithJitter(baseDelay),
+		retryDelayWithJitter(baseDelay),
+	}
+	want := []time.Duration{
+		75 * time.Millisecond,
+		100 * time.Millisecond,
+		125 * time.Millisecond,
+	}
+
+	for i := range want {
+		if delays[i] != want[i] {
+			t.Fatalf("delay[%d] = %v, want %v", i, delays[i], want[i])
 		}
-
-		ctx := context.Background()
-		strategy.Execute(ctx, fn)
-
-		if len(attemptTimes) >= 2 {
-			delays = append(delays, attemptTimes[1].Sub(attemptTimes[0]))
-		}
-	}
-
-	// Verify delays are not all identical (jitter is working)
-	if len(delays) < 3 {
-		t.Fatal("not enough delay samples collected")
-	}
-
-	allSame := true
-	firstDelay := delays[0]
-	for _, d := range delays[1:] {
-		// Allow 5ms tolerance for timing precision
-		if d < firstDelay-5*time.Millisecond || d > firstDelay+5*time.Millisecond {
-			allSame = false
-			break
-		}
-	}
-
-	if allSame {
-		t.Error("all delays are identical, jitter not working")
 	}
 }
 

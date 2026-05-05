@@ -21,6 +21,13 @@ func cryptoRandFloat64() float64 {
 	return float64(n) / float64(uint64(1)<<53)
 }
 
+var retryRandFloat64 = cryptoRandFloat64
+
+func retryDelayWithJitter(delay time.Duration) time.Duration {
+	jitterFactor := 0.75 + retryRandFloat64()*0.5
+	return time.Duration(float64(delay) * jitterFactor)
+}
+
 // RetryStrategy implements exponential backoff with jitter for retrying failed operations.
 // It supports automatic retry for retriable errors (network failures, timeouts, rate limits)
 // while failing fast on non-retriable errors (invalid arguments, auth failures).
@@ -59,8 +66,7 @@ func (s *RetryStrategy) Execute(ctx context.Context, fn func() error) error {
 		// Wait before retry (skip on first attempt)
 		if attempt > 0 {
 			// Apply jitter: add random variance of ±25% to prevent thundering herd
-			jitterFactor := 0.75 + cryptoRandFloat64()*0.5
-			jitter := time.Duration(float64(delay) * jitterFactor)
+			jitter := retryDelayWithJitter(delay)
 
 			select {
 			case <-time.After(jitter):
