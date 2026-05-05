@@ -20,7 +20,7 @@ func runReviewPRCommand(args []string) error {
 	fs := flag.NewFlagSet("review-pr", flag.ContinueOnError)
 	verbose := fs.Bool("verbose", false, "show full context and reasoning")
 	showCost := fs.Bool("cost", true, "show token/cost breakdown")
-	modelFlag := fs.String("model", "", "model to use (default: BUCKLEY_MODEL_REVIEW or execution model)")
+	modelFlag := fs.String("model", "", "model to use (default: BUCKLEY_MODEL_REVIEW, models.review, or execution model)")
 	timeout := fs.Duration("timeout", 5*time.Minute, "timeout for model request")
 	outputFile := fs.String("output", "", "write review to file instead of stdout")
 

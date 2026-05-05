@@ -10,11 +10,14 @@ import (
 )
 
 const (
-	defaultOpenRouterModel = "moonshotai/kimi-k2.5"
-	defaultOpenAIModel     = "openai/gpt-5.2-codex-xhigh"
-	defaultAnthropicModel  = "anthropic/claude-sonnet-4-5"
-	defaultGoogleModel     = "google/gemini-3-pro"
-	defaultCodexModel      = "codex/default"
+	defaultOpenRouterModel      = "moonshotai/kimi-k2.5"
+	defaultOpenAIPlanningModel  = "openai/gpt-5.5-xhigh"
+	defaultOpenAIExecutionModel = "openai/gpt-5.4-xhigh"
+	defaultOpenAIReviewModel    = "openai/gpt-5.5-xhigh"
+	defaultOpenAIUtilityModel   = "openai/gpt-5.4-mini-xhigh"
+	defaultAnthropicModel       = "anthropic/claude-sonnet-4-5"
+	defaultGoogleModel          = "google/gemini-3-pro"
+	defaultCodexModel           = "codex/gpt-5.4-mini-xhigh"
 
 	// MinTokenLength is the minimum recommended length for IPC authentication tokens
 	MinTokenLength = 32
@@ -39,12 +42,42 @@ const (
 	DefaultMaxReviewCycles  = 3
 )
 
-var providerDefaultModels = map[string]string{
-	"openrouter": defaultOpenRouterModel,
-	"openai":     defaultOpenAIModel,
-	"anthropic":  defaultAnthropicModel,
-	"google":     defaultGoogleModel,
-	"codex":      defaultCodexModel,
+type providerModelDefaults struct {
+	Planning          string
+	Execution         string
+	Review            string
+	UtilityCommit     string
+	UtilityPR         string
+	UtilityCompaction string
+	UtilityTodoPlan   string
+}
+
+var providerDefaultModels = map[string]providerModelDefaults{
+	"openrouter": providerDefaults(defaultOpenRouterModel),
+	"openai": {
+		Planning:          defaultOpenAIPlanningModel,
+		Execution:         defaultOpenAIExecutionModel,
+		Review:            defaultOpenAIReviewModel,
+		UtilityCommit:     defaultOpenAIUtilityModel,
+		UtilityPR:         defaultOpenAIUtilityModel,
+		UtilityCompaction: defaultOpenAIUtilityModel,
+		UtilityTodoPlan:   defaultOpenAIUtilityModel,
+	},
+	"anthropic": providerDefaults(defaultAnthropicModel),
+	"google":    providerDefaults(defaultGoogleModel),
+	"codex":     providerDefaults(defaultCodexModel),
+}
+
+func providerDefaults(modelID string) providerModelDefaults {
+	return providerModelDefaults{
+		Planning:          modelID,
+		Execution:         modelID,
+		Review:            modelID,
+		UtilityCommit:     modelID,
+		UtilityPR:         modelID,
+		UtilityCompaction: modelID,
+		UtilityTodoPlan:   modelID,
+	}
 }
 
 // Config represents the complete Buckley configuration
@@ -112,7 +145,7 @@ type ModelConfig struct {
 	Curated         []string            `yaml:"curated"`
 	VisionFallback  []string            `yaml:"vision_fallback"` // Ordered list of vision models to try
 	FallbackChains  map[string][]string `yaml:"fallback_chains"`
-	DefaultProvider string              `yaml:"default_provider"` // Default provider (openrouter, openai, anthropic, google)
+	DefaultProvider string              `yaml:"default_provider"` // Default provider (openrouter, openai, anthropic, google, codex)
 	Reasoning       string              `yaml:"reasoning"`        // Reasoning level: "off", "low", "medium", "high", or "" for auto-detect
 
 	// Utility models for utility tasks.

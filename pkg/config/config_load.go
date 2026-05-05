@@ -35,6 +35,7 @@ func Load() (*Config, error) {
 
 	// Apply environment variable overrides
 	applyEnvOverrides(cfg, configEnv)
+	cfg.applyConfiguredProviderHints()
 	cfg.alignModelDefaultsWithProviders()
 
 	// Validate
@@ -58,6 +59,7 @@ func LoadFromPath(path string) (*Config, error) {
 
 	// Apply environment variable overrides
 	applyEnvOverrides(cfg, configEnv)
+	cfg.applyConfiguredProviderHints()
 	cfg.alignModelDefaultsWithProviders()
 
 	// Validate
@@ -71,6 +73,7 @@ func LoadFromPath(path string) (*Config, error) {
 // ApplyEnvOverridesForTest exposes env override logic for tests without file I/O.
 func ApplyEnvOverridesForTest(cfg *Config) {
 	applyEnvOverrides(cfg, nil)
+	cfg.applyConfiguredProviderHints()
 	cfg.alignModelDefaultsWithProviders()
 }
 func loadConfigEnvVars() map[string]string {

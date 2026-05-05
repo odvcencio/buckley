@@ -87,7 +87,7 @@ Buckley supports separate planning, execution, and review models:
 models:
   planning: anthropic/claude-sonnet-4-5
   execution: moonshotai/kimi-k2-thinking
-  review: openai/gpt-5.2-codex-xhigh
+  review: openai/gpt-5.5-xhigh
 ```
 
 ## Skills And Instructions

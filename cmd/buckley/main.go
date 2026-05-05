@@ -59,6 +59,7 @@ var encodingOverrideFlag string
 var quietMode bool
 var noColor bool
 var configPath string
+var modelOverrideFlag string
 
 // initDependenciesFn allows tests to stub dependency initialization without hitting the network.
 var initDependenciesFn = initDependencies
@@ -112,6 +113,7 @@ type startupOptions struct {
 	quiet            bool
 	noColor          bool
 	configPath       string
+	modelOverride    string
 	plainModeSet     bool
 	plainMode        bool
 }
@@ -134,6 +136,7 @@ func main() {
 	quietMode = opts.quiet
 	noColor = opts.noColor
 	configPath = opts.configPath
+	modelOverrideFlag = opts.modelOverride
 	os.Args = append([]string{os.Args[0]}, opts.args...)
 
 	if handled, exitCode := dispatchSubcommand(opts.args); handled {
@@ -169,6 +172,7 @@ func main() {
 		os.Exit(2)
 	}
 	applySandboxOverride(cfg)
+	applyStartupModelOverride(cfg, modelOverrideFlag)
 	tool.SetResultEncoding(cfg.Encoding.UseToon)
 
 	cwd, err := os.Getwd()
@@ -542,6 +546,7 @@ func initDependencies() (*config.Config, *model.Manager, *storage.Store, error) 
 	if encodingOverrideFlag != "" {
 		cfg.Encoding.UseToon = encodingOverrideFlag != "json"
 	}
+	applyStartupModelOverride(cfg, modelOverrideFlag)
 	tool.SetResultEncoding(cfg.Encoding.UseToon)
 
 	cwd, err := os.Getwd()
@@ -634,6 +639,7 @@ func printHelp() {
 	fmt.Println("  --no-color                       Disable colored output")
 	fmt.Println("  --tui                            Use rich TUI interface")
 	fmt.Println("  --plain                          Use plain scrollback mode")
+	fmt.Println("  -m, --model <id>                 Use model for this chat session (for example codex/gpt-5.4-mini-xhigh)")
 	fmt.Println("  --encoding json|toon             Set serialization format")
 	fmt.Println("  --json                           Shortcut for --encoding json")
 	fmt.Println("  -v, --version                    Show version information")
@@ -649,7 +655,6 @@ func printHelp() {
 	fmt.Println("  BUCKLEY_MODEL_REVIEW             Override review model")
 	fmt.Println("  BUCKLEY_MODEL_COMMIT             Override model for `buckley commit`")
 	fmt.Println("  BUCKLEY_MODEL_PR                 Override model for `buckley pr`")
-	fmt.Println("  BUCKLEY_CHAT_BACKEND             Override chat backend: api or codex")
 	fmt.Println("  BUCKLEY_ONESHOT_BACKEND          Override one-shot backend: api, codex, or claude")
 	fmt.Println("  BUCKLEY_COMMIT_BACKEND           Override backend for `buckley commit`")
 	fmt.Println("  BUCKLEY_PR_BACKEND               Override backend for `buckley pr`")
@@ -676,6 +681,7 @@ func printHelp() {
 	fmt.Println("CONFIGURATION:")
 	fmt.Println("  User config:    ~/.buckley/config.yaml")
 	fmt.Println("  Project config: ./.buckley/config.yaml")
+	fmt.Println("  Codex chat:     set models.execution: codex/gpt-5.4-mini-xhigh")
 	fmt.Println("  Run 'buckley config check' to validate your setup")
 	fmt.Println()
 	fmt.Println("GETTING STARTED:")
@@ -1192,6 +1198,8 @@ func parseStartupOptions(raw []string) (*startupOptions, error) {
 	var nextPrompt bool
 	var nextEncoding bool
 	var nextConfig bool
+	var nextModel bool
+	var modelFlagSeen bool
 
 	for _, arg := range raw {
 		if nextPrompt {
@@ -1207,6 +1215,11 @@ func parseStartupOptions(raw []string) (*startupOptions, error) {
 		if nextConfig {
 			opts.configPath = arg
 			nextConfig = false
+			continue
+		}
+		if nextModel {
+			opts.modelOverride = strings.TrimSpace(arg)
+			nextModel = false
 			continue
 		}
 
@@ -1231,9 +1244,19 @@ func parseStartupOptions(raw []string) (*startupOptions, error) {
 			opts.noColor = true
 		case "--config", "-c":
 			nextConfig = true
+		case "--model", "-m":
+			if len(filtered) == 0 {
+				nextModel = true
+				modelFlagSeen = true
+			} else {
+				filtered = append(filtered, arg)
+			}
 		default:
 			if strings.HasPrefix(arg, "--config=") {
 				opts.configPath = strings.TrimPrefix(arg, "--config=")
+			} else if strings.HasPrefix(arg, "--model=") && len(filtered) == 0 {
+				opts.modelOverride = strings.TrimSpace(strings.TrimPrefix(arg, "--model="))
+				modelFlagSeen = true
 			} else {
 				filtered = append(filtered, arg)
 			}
@@ -1248,6 +1271,9 @@ func parseStartupOptions(raw []string) (*startupOptions, error) {
 	}
 	if nextConfig {
 		return nil, fmt.Errorf("--config requires a path argument")
+	}
+	if nextModel || modelFlagSeen && strings.TrimSpace(opts.modelOverride) == "" {
+		return nil, fmt.Errorf("--model requires a value")
 	}
 
 	opts.args = filtered
@@ -1294,6 +1320,28 @@ func applySandboxOverride(cfg *config.Config) {
 		cfg.Worktrees.UseContainers = true
 	case "host", "off", "disable", "disabled", "false", "no":
 		cfg.Worktrees.UseContainers = false
+	}
+}
+
+func applyStartupModelOverride(cfg *config.Config, modelID string) {
+	if cfg == nil {
+		return
+	}
+	modelID = strings.TrimSpace(modelID)
+	if modelID == "" {
+		return
+	}
+
+	cfg.Models.Execution = modelID
+	if strings.HasPrefix(modelID, "codex/") {
+		cfg.Providers.Codex.Enabled = true
+		cfg.Models.DefaultProvider = "codex"
+		if cfg.Models.Planning == "" || cfg.Models.Planning == config.DefaultPlanningModel {
+			cfg.Models.Planning = modelID
+		}
+		if cfg.Models.Review == "" || cfg.Models.Review == config.DefaultReviewModel {
+			cfg.Models.Review = modelID
+		}
 	}
 }
 

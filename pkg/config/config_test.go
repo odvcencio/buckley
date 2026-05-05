@@ -187,15 +187,17 @@ func TestLoadAlignsModelsToOpenAIWhenOpenRouterDisabled(t *testing.T) {
 		t.Fatalf("config.Load returned error: %v", err)
 	}
 
-	expected := "openai/gpt-5.2-codex-xhigh"
-	if cfg.Models.Planning != expected {
-		t.Fatalf("expected planning model to fall back to %s, got %s", expected, cfg.Models.Planning)
+	if cfg.Models.Planning != "openai/gpt-5.5-xhigh" {
+		t.Fatalf("expected planning model to fall back to openai/gpt-5.5-xhigh, got %s", cfg.Models.Planning)
 	}
-	if cfg.Models.Execution != expected {
-		t.Fatalf("expected execution model to fall back to %s, got %s", expected, cfg.Models.Execution)
+	if cfg.Models.Execution != "openai/gpt-5.4-xhigh" {
+		t.Fatalf("expected execution model to fall back to openai/gpt-5.4-xhigh, got %s", cfg.Models.Execution)
 	}
-	if cfg.Models.Review != expected {
-		t.Fatalf("expected review model to fall back to %s, got %s", expected, cfg.Models.Review)
+	if cfg.Models.Review != "openai/gpt-5.5-xhigh" {
+		t.Fatalf("expected review model to fall back to openai/gpt-5.5-xhigh, got %s", cfg.Models.Review)
+	}
+	if cfg.Models.Utility.Commit != "openai/gpt-5.4-mini-xhigh" {
+		t.Fatalf("expected commit utility model to fall back to openai/gpt-5.4-mini-xhigh, got %s", cfg.Models.Utility.Commit)
 	}
 	if cfg.Models.DefaultProvider != "openai" {
 		t.Fatalf("expected default provider to switch to openai, got %s", cfg.Models.DefaultProvider)
@@ -276,9 +278,13 @@ func TestEnvOverridesEnableProviders(t *testing.T) {
 	}
 }
 
-func TestEnvOverridesEnableCodexChatBackend(t *testing.T) {
-	t.Setenv("BUCKLEY_CHAT_BACKEND", "codex")
-	t.Setenv("BUCKLEY_CODEX_MODEL", "gpt-5.2-codex")
+func TestEnvOverridesConfigureCodexProvider(t *testing.T) {
+	t.Setenv("OPENROUTER_API_KEY", "")
+	t.Setenv("OPENAI_API_KEY", "")
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("GOOGLE_API_KEY", "")
+	t.Setenv("BUCKLEY_CODEX_ENABLED", "1")
+	t.Setenv("BUCKLEY_CODEX_MODEL", "gpt-5.4-mini-xhigh")
 	t.Setenv("BUCKLEY_CODEX_COMMAND", "/opt/bin/codex")
 
 	cfg := config.DefaultConfig()
@@ -290,14 +296,97 @@ func TestEnvOverridesEnableCodexChatBackend(t *testing.T) {
 	if cfg.Providers.Codex.Command != "/opt/bin/codex" {
 		t.Fatalf("codex command=%q want /opt/bin/codex", cfg.Providers.Codex.Command)
 	}
-	if len(cfg.Providers.Codex.Models) != 1 || cfg.Providers.Codex.Models[0] != "codex/gpt-5.2-codex" {
-		t.Fatalf("codex models=%v want codex/gpt-5.2-codex", cfg.Providers.Codex.Models)
+	if len(cfg.Providers.Codex.Models) != 1 || cfg.Providers.Codex.Models[0] != "codex/gpt-5.4-mini-xhigh" {
+		t.Fatalf("codex models=%v want codex/gpt-5.4-mini-xhigh", cfg.Providers.Codex.Models)
 	}
 	if cfg.Models.DefaultProvider != "codex" {
 		t.Fatalf("default provider=%q want codex", cfg.Models.DefaultProvider)
 	}
-	if cfg.Models.Execution != "codex/gpt-5.2-codex" {
-		t.Fatalf("execution model=%q want codex/gpt-5.2-codex", cfg.Models.Execution)
+	if cfg.Models.Execution != "codex/gpt-5.4-mini-xhigh" {
+		t.Fatalf("execution model=%q want codex/gpt-5.4-mini-xhigh", cfg.Models.Execution)
+	}
+}
+
+func TestLoadEnablesCodexFromDefaultProviderConfig(t *testing.T) {
+	home := t.TempDir()
+	project := t.TempDir()
+
+	t.Setenv("HOME", home)
+	t.Setenv("OPENROUTER_API_KEY", "test-openrouter")
+	t.Setenv("OPENAI_API_KEY", "")
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("GOOGLE_API_KEY", "")
+
+	projectCfgDir := filepath.Join(project, ".buckley")
+	if err := os.MkdirAll(projectCfgDir, 0o755); err != nil {
+		t.Fatalf("mkdir project config: %v", err)
+	}
+	projectCfg := `
+models:
+  default_provider: codex
+`
+	if err := os.WriteFile(filepath.Join(projectCfgDir, "config.yaml"), []byte(projectCfg), 0o644); err != nil {
+		t.Fatalf("write project config: %v", err)
+	}
+
+	t.Chdir(project)
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("config.Load returned error: %v", err)
+	}
+
+	if !cfg.Providers.Codex.Enabled {
+		t.Fatalf("codex provider should be enabled from models.default_provider")
+	}
+	if cfg.Models.DefaultProvider != "codex" {
+		t.Fatalf("default provider=%q want codex", cfg.Models.DefaultProvider)
+	}
+	if cfg.Models.Execution != "codex/gpt-5.4-mini-xhigh" {
+		t.Fatalf("execution model=%q want codex/gpt-5.4-mini-xhigh", cfg.Models.Execution)
+	}
+}
+
+func TestLoadEnablesCodexFromExecutionModelConfig(t *testing.T) {
+	home := t.TempDir()
+	project := t.TempDir()
+
+	t.Setenv("HOME", home)
+	t.Setenv("OPENROUTER_API_KEY", "")
+	t.Setenv("OPENAI_API_KEY", "")
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("GOOGLE_API_KEY", "")
+
+	projectCfgDir := filepath.Join(project, ".buckley")
+	if err := os.MkdirAll(projectCfgDir, 0o755); err != nil {
+		t.Fatalf("mkdir project config: %v", err)
+	}
+	projectCfg := `
+models:
+  execution: codex/gpt-5.4-mini-xhigh
+`
+	if err := os.WriteFile(filepath.Join(projectCfgDir, "config.yaml"), []byte(projectCfg), 0o644); err != nil {
+		t.Fatalf("write project config: %v", err)
+	}
+
+	t.Chdir(project)
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("config.Load returned error: %v", err)
+	}
+
+	if !cfg.Providers.Codex.Enabled {
+		t.Fatalf("codex provider should be enabled from models.execution")
+	}
+	if cfg.Models.DefaultProvider != "codex" {
+		t.Fatalf("default provider=%q want codex", cfg.Models.DefaultProvider)
+	}
+	if cfg.Models.Execution != "codex/gpt-5.4-mini-xhigh" {
+		t.Fatalf("execution model=%q want codex/gpt-5.4-mini-xhigh", cfg.Models.Execution)
+	}
+	if cfg.Models.Planning != "codex/gpt-5.4-mini-xhigh" || cfg.Models.Review != "codex/gpt-5.4-mini-xhigh" {
+		t.Fatalf("planning/review should fall back to codex/gpt-5.4-mini-xhigh, got %q/%q", cfg.Models.Planning, cfg.Models.Review)
 	}
 }
 

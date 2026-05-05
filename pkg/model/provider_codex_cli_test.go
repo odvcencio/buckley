@@ -13,7 +13,7 @@ func TestCodexCLIProviderChatCompletionUsesExecLastMessage(t *testing.T) {
 	provider := NewCodexCLIProvider(
 		config.CodexConfig{
 			Command: "codex",
-			Models:  []string{"codex/gpt-5.2-codex"},
+			Models:  []string{"codex/gpt-5.4-mini-xhigh"},
 		},
 		config.SandboxConfig{Mode: "workspace"},
 		config.ApprovalConfig{Mode: "safe"},
@@ -33,7 +33,7 @@ func TestCodexCLIProviderChatCompletionUsesExecLastMessage(t *testing.T) {
 	}
 
 	resp, err := provider.ChatCompletion(context.Background(), ChatRequest{
-		Model: "codex/gpt-5.2-codex",
+		Model: "codex/gpt-5.4-mini-xhigh",
 		Messages: []Message{
 			{Role: "system", Content: "system prompt"},
 			{Role: "user", Content: "hello"},
@@ -49,7 +49,7 @@ func TestCodexCLIProviderChatCompletionUsesExecLastMessage(t *testing.T) {
 	if !containsArgs(got.Args, "exec", "--color", "never") {
 		t.Fatalf("unexpected codex args: %v", got.Args)
 	}
-	if !containsSubsequence(got.Args, []string{"--model", "gpt-5.2-codex"}) {
+	if !containsSubsequence(got.Args, []string{"--model", "gpt-5.4-mini-xhigh"}) {
 		t.Fatalf("codex args missing model: %v", got.Args)
 	}
 	if !containsSubsequence(got.Args, []string{"--sandbox", "workspace-write"}) {
@@ -98,7 +98,7 @@ func TestCodexCLIProviderDefaultModelOmitsModelArg(t *testing.T) {
 
 func TestCodexCLIProviderCatalogIncludesConfiguredModels(t *testing.T) {
 	provider := NewCodexCLIProvider(
-		config.CodexConfig{Models: []string{"gpt-5.2-codex"}},
+		config.CodexConfig{Models: []string{"gpt-5.4-mini-xhigh"}},
 		config.SandboxConfig{},
 		config.ApprovalConfig{},
 	)
@@ -111,10 +111,10 @@ func TestCodexCLIProviderCatalogIncludesConfiguredModels(t *testing.T) {
 	if len(catalog.Data) != 2 {
 		t.Fatalf("catalog size=%d want 2: %+v", len(catalog.Data), catalog.Data)
 	}
-	if catalog.Data[0].ID != "codex/default" || catalog.Data[1].ID != "codex/gpt-5.2-codex" {
+	if catalog.Data[0].ID != "codex/default" || catalog.Data[1].ID != "codex/gpt-5.4-mini-xhigh" {
 		t.Fatalf("unexpected catalog: %+v", catalog.Data)
 	}
-	if provider.SupportsToolsForTest("codex/gpt-5.2-codex") {
+	if provider.SupportsToolsForTest("codex/gpt-5.4-mini-xhigh") {
 		t.Fatal("codex provider catalog should not advertise OpenAI-style tool calling")
 	}
 }

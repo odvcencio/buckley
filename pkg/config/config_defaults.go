@@ -103,7 +103,7 @@ func DefaultConfig() *Config {
 			Execution: defaultOpenRouterModel,
 			Review:    defaultOpenRouterModel,
 			VisionFallback: []string{
-				"openai/gpt-5.2-mini",
+				"openai/gpt-5.4-mini-xhigh",
 				"google/gemini-3-flash",
 			},
 			FallbackChains:  map[string][]string{},
@@ -412,7 +412,7 @@ func DefaultConfig() *Config {
 			Models: []string{
 				"moonshotai/kimi-k2.5",
 				"qwen/qwen3-coder",
-				"openai/gpt-5.2-mini",
+				"openai/gpt-5.4-mini-xhigh",
 			},
 		},
 		UI: UIConfig{

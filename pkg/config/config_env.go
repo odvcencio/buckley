@@ -126,25 +126,11 @@ func applyEnvOverrides(cfg *Config, configEnv map[string]string) {
 	}
 	if v := strings.TrimSpace(os.Getenv("BUCKLEY_CODEX_COMMAND")); v != "" {
 		cfg.Providers.Codex.Command = v
+		cfg.Providers.Codex.Enabled = true
 	}
 	if codexModel != "" {
 		cfg.Providers.Codex.Models = []string{codexModel}
-	}
-	if strings.EqualFold(strings.TrimSpace(os.Getenv("BUCKLEY_CHAT_BACKEND")), "codex") {
 		cfg.Providers.Codex.Enabled = true
-		cfg.Models.DefaultProvider = "codex"
-		if codexModel == "" {
-			codexModel = defaultCodexModel
-		}
-		if os.Getenv("BUCKLEY_MODEL_PLANNING") == "" {
-			cfg.Models.Planning = codexModel
-		}
-		if os.Getenv("BUCKLEY_MODEL_EXECUTION") == "" {
-			cfg.Models.Execution = codexModel
-		}
-		if os.Getenv("BUCKLEY_MODEL_REVIEW") == "" {
-			cfg.Models.Review = codexModel
-		}
 	}
 
 	if v, ok := envBool("BUCKLEY_EXPERIMENT_ENABLED"); ok {
