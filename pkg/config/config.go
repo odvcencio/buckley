@@ -14,6 +14,7 @@ const (
 	defaultOpenAIModel     = "openai/gpt-5.2-codex-xhigh"
 	defaultAnthropicModel  = "anthropic/claude-sonnet-4-5"
 	defaultGoogleModel     = "google/gemini-3-pro"
+	defaultCodexModel      = "codex/default"
 
 	// MinTokenLength is the minimum recommended length for IPC authentication tokens
 	MinTokenLength = 32
@@ -43,6 +44,7 @@ var providerDefaultModels = map[string]string{
 	"openai":     defaultOpenAIModel,
 	"anthropic":  defaultAnthropicModel,
 	"google":     defaultGoogleModel,
+	"codex":      defaultCodexModel,
 }
 
 // Config represents the complete Buckley configuration
@@ -168,6 +170,7 @@ type ProviderConfig struct {
 	Google       ProviderSettings  `yaml:"google"`
 	Ollama       ProviderSettings  `yaml:"ollama"`
 	LiteLLM      LiteLLMConfig     `yaml:"litellm"`
+	Codex        CodexConfig       `yaml:"codex"`
 	ModelRouting map[string]string `yaml:"model_routing"` // Maps model prefix to provider
 }
 
@@ -186,6 +189,13 @@ type LiteLLMConfig struct {
 	Models    []string             `yaml:"models"`
 	Fallbacks map[string][]string  `yaml:"fallbacks"`
 	Router    *LiteLLMRouterConfig `yaml:"router"`
+}
+
+// CodexConfig configures Codex CLI as a chat provider.
+type CodexConfig struct {
+	Enabled bool     `yaml:"enabled"`
+	Command string   `yaml:"command"`
+	Models  []string `yaml:"models"`
 }
 
 // LiteLLMRouterConfig defines routing behavior for LiteLLM proxies.

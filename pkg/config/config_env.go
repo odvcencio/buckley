@@ -120,6 +120,33 @@ func applyEnvOverrides(cfg *Config, configEnv map[string]string) {
 		cfg.Providers.LiteLLM.Enabled = true
 	}
 
+	codexModel := normalizeCodexModel(os.Getenv("BUCKLEY_CODEX_MODEL"))
+	if v, ok := envBool("BUCKLEY_CODEX_ENABLED"); ok {
+		cfg.Providers.Codex.Enabled = v
+	}
+	if v := strings.TrimSpace(os.Getenv("BUCKLEY_CODEX_COMMAND")); v != "" {
+		cfg.Providers.Codex.Command = v
+	}
+	if codexModel != "" {
+		cfg.Providers.Codex.Models = []string{codexModel}
+	}
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("BUCKLEY_CHAT_BACKEND")), "codex") {
+		cfg.Providers.Codex.Enabled = true
+		cfg.Models.DefaultProvider = "codex"
+		if codexModel == "" {
+			codexModel = defaultCodexModel
+		}
+		if os.Getenv("BUCKLEY_MODEL_PLANNING") == "" {
+			cfg.Models.Planning = codexModel
+		}
+		if os.Getenv("BUCKLEY_MODEL_EXECUTION") == "" {
+			cfg.Models.Execution = codexModel
+		}
+		if os.Getenv("BUCKLEY_MODEL_REVIEW") == "" {
+			cfg.Models.Review = codexModel
+		}
+	}
+
 	if v, ok := envBool("BUCKLEY_EXPERIMENT_ENABLED"); ok {
 		cfg.Experiment.Enabled = v
 	}
@@ -228,6 +255,17 @@ func applyEnvOverrides(cfg *Config, configEnv map[string]string) {
 			cfg.GitClone.DNSResolveTimeoutSec = n
 		}
 	}
+}
+
+func normalizeCodexModel(modelID string) string {
+	modelID = strings.TrimSpace(modelID)
+	if modelID == "" {
+		return ""
+	}
+	if strings.HasPrefix(modelID, "codex/") {
+		return modelID
+	}
+	return "codex/" + modelID
 }
 
 func splitCommaList(raw string) []string {

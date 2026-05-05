@@ -276,6 +276,31 @@ func TestEnvOverridesEnableProviders(t *testing.T) {
 	}
 }
 
+func TestEnvOverridesEnableCodexChatBackend(t *testing.T) {
+	t.Setenv("BUCKLEY_CHAT_BACKEND", "codex")
+	t.Setenv("BUCKLEY_CODEX_MODEL", "gpt-5.2-codex")
+	t.Setenv("BUCKLEY_CODEX_COMMAND", "/opt/bin/codex")
+
+	cfg := config.DefaultConfig()
+	config.ApplyEnvOverridesForTest(cfg)
+
+	if !cfg.Providers.Codex.Enabled {
+		t.Fatalf("codex provider should be enabled: %+v", cfg.Providers.Codex)
+	}
+	if cfg.Providers.Codex.Command != "/opt/bin/codex" {
+		t.Fatalf("codex command=%q want /opt/bin/codex", cfg.Providers.Codex.Command)
+	}
+	if len(cfg.Providers.Codex.Models) != 1 || cfg.Providers.Codex.Models[0] != "codex/gpt-5.2-codex" {
+		t.Fatalf("codex models=%v want codex/gpt-5.2-codex", cfg.Providers.Codex.Models)
+	}
+	if cfg.Models.DefaultProvider != "codex" {
+		t.Fatalf("default provider=%q want codex", cfg.Models.DefaultProvider)
+	}
+	if cfg.Models.Execution != "codex/gpt-5.2-codex" {
+		t.Fatalf("execution model=%q want codex/gpt-5.2-codex", cfg.Models.Execution)
+	}
+}
+
 func TestReadyProvidersOrdering(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.Providers.OpenRouter.Enabled = false
@@ -284,9 +309,10 @@ func TestReadyProvidersOrdering(t *testing.T) {
 	cfg.Providers.OpenAI.APIKey = "k1"
 	cfg.Providers.Anthropic.Enabled = true
 	cfg.Providers.Anthropic.APIKey = "k2"
+	cfg.Providers.Codex.Enabled = true
 
 	providers := cfg.Providers.ReadyProviders()
-	if len(providers) != 2 || providers[0] != "openai" || providers[1] != "anthropic" {
+	if len(providers) != 3 || providers[0] != "openai" || providers[1] != "anthropic" || providers[2] != "codex" {
 		t.Fatalf("unexpected ready providers: %v", providers)
 	}
 	if !cfg.Providers.HasReadyProvider() {

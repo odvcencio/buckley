@@ -191,6 +191,20 @@ func mergeProviderConfig(base, override *Config, raw map[string]any) {
 		base.Providers.LiteLLM.Enabled = true
 	}
 
+	codexEnabledSet := boolFieldSet(raw, "providers", "codex", "enabled")
+	if override.Providers.Codex.Command != "" {
+		base.Providers.Codex.Command = override.Providers.Codex.Command
+	}
+	if boolFieldSet(raw, "providers", "codex", "models") {
+		base.Providers.Codex.Models = append([]string{}, override.Providers.Codex.Models...)
+	}
+	if codexEnabledSet {
+		base.Providers.Codex.Enabled = override.Providers.Codex.Enabled
+	} else if override.Providers.Codex.Command != "" ||
+		boolFieldSet(raw, "providers", "codex", "models") {
+		base.Providers.Codex.Enabled = true
+	}
+
 	if len(override.Providers.ModelRouting) > 0 {
 		for k, v := range override.Providers.ModelRouting {
 			base.Providers.ModelRouting[k] = v

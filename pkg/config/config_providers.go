@@ -3,7 +3,7 @@ package config
 // ReadyProviders returns identifiers for providers that have usable configuration.
 func (p *ProviderConfig) ReadyProviders() []string {
 	var providers []string
-	for _, providerID := range []string{"openrouter", "openai", "anthropic", "google", "ollama", "litellm"} {
+	for _, providerID := range []string{"openrouter", "openai", "anthropic", "google", "ollama", "litellm", "codex"} {
 		if p.ready(providerID) {
 			providers = append(providers, providerID)
 		}
@@ -30,6 +30,8 @@ func (p *ProviderConfig) ready(providerID string) bool {
 		return p.Ollama.Enabled
 	case "litellm":
 		return p.LiteLLM.Enabled
+	case "codex":
+		return p.Codex.Enabled
 	default:
 		return false
 	}
@@ -67,7 +69,7 @@ func (c *Config) preferredReadyProvider() string {
 		return c.Models.DefaultProvider
 	}
 
-	for _, providerID := range []string{"openai", "anthropic", "google", "litellm", "ollama"} {
+	for _, providerID := range []string{"openai", "anthropic", "google", "litellm", "ollama", "codex"} {
 		if c.Providers.ready(providerID) {
 			return providerID
 		}

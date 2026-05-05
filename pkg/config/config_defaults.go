@@ -140,12 +140,18 @@ func DefaultConfig() *Config {
 				Enabled: false,
 				BaseURL: "http://localhost:4000",
 			},
+			Codex: CodexConfig{
+				Enabled: false,
+				Command: "codex",
+				Models:  []string{defaultCodexModel},
+			},
 			ModelRouting: map[string]string{
 				"openai/":    "openai",
 				"anthropic/": "anthropic",
 				"google/":    "google",
 				"ollama/":    "ollama",
 				"litellm/":   "litellm",
+				"codex/":     "codex",
 				"gpt-":       "openai",
 				"claude-":    "anthropic",
 				"gemini-":    "google",
