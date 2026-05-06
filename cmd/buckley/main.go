@@ -532,7 +532,15 @@ func pushBranch(remote, branch string) error {
 		remote = "origin"
 	}
 	fmt.Printf("Pushing HEAD to %s:%s\n", remote, branch)
-	return runGitCommand("push", remote, fmt.Sprintf("HEAD:%s", branch))
+	if err := runGitCommand("push", remote, fmt.Sprintf("HEAD:%s", branch)); err != nil {
+		return err
+	}
+	hashCtx, hashCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer hashCancel()
+	if hash := currentHeadHash(hashCtx, false); hash != "" {
+		fmt.Printf("Pushed: %s\n", hash)
+	}
+	return nil
 }
 
 func initDependencies() (*config.Config, *model.Manager, *storage.Store, error) {
