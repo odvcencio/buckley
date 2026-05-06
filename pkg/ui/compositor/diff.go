@@ -225,11 +225,11 @@ func (r *Renderer) RenderRegion(region Region) string {
 // DiffStats returns statistics about what changed between frames.
 // Useful for debugging and performance monitoring.
 type DiffStats struct {
-	TotalCells    int
-	ChangedCells  int
-	SkippedCells  int // Continuation cells
-	StyleChanges  int
-	CursorJumps   int
+	TotalCells   int
+	ChangedCells int
+	SkippedCells int // Continuation cells
+	StyleChanges int
+	CursorJumps  int
 }
 
 // ComputeDiffStats analyzes the current vs previous buffer without rendering.

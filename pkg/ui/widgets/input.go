@@ -12,10 +12,10 @@ import (
 type Input struct {
 	FocusableBase
 
-	text       strings.Builder
-	cursorPos  int
-	style      backend.Style
-	focusStyle backend.Style
+	text        strings.Builder
+	cursorPos   int
+	style       backend.Style
+	focusStyle  backend.Style
 	placeholder string
 
 	// Callbacks
@@ -281,11 +281,11 @@ func (i *Input) wordBoundaryRight() int {
 type MultilineInput struct {
 	FocusableBase
 
-	lines     []string
-	cursorX   int
-	cursorY   int
-	scrollY   int // First visible line
-	style     backend.Style
+	lines      []string
+	cursorX    int
+	cursorY    int
+	scrollY    int // First visible line
+	style      backend.Style
 	focusStyle backend.Style
 
 	onSubmit func(text string)

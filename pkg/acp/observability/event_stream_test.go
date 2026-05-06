@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/odvcencio/buckley/pkg/coordination/events"
 	"github.com/gorilla/websocket"
+	"github.com/odvcencio/buckley/pkg/coordination/events"
 )
 
 func TestEventStream_Subscribe(t *testing.T) {
@@ -311,18 +311,28 @@ func TestEventStream_ConnectionMetrics(t *testing.T) {
 	}
 
 	// Check active connections increased
-	if stream.ActiveConnections() != 1 {
+	if !waitForActiveConnections(stream, 1, time.Second) {
 		t.Errorf("Expected 1 active connection, got %d", stream.ActiveConnections())
 	}
 
 	// Close connection
 	ws.Close()
-	time.Sleep(100 * time.Millisecond) // Allow cleanup
 
 	// Check active connections decreased
-	if stream.ActiveConnections() != 0 {
+	if !waitForActiveConnections(stream, 0, time.Second) {
 		t.Errorf("Expected 0 active connections after close, got %d", stream.ActiveConnections())
 	}
+}
+
+func waitForActiveConnections(stream *EventStream, want int, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if stream.ActiveConnections() == want {
+			return true
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return stream.ActiveConnections() == want
 }
 
 func TestEventStream_Backpressure(t *testing.T) {

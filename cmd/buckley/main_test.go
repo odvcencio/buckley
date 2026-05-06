@@ -39,7 +39,7 @@ func TestParseBoolEnv(t *testing.T) {
 
 func TestParseStartupOptionsFlagsAndFiltering(t *testing.T) {
 	t.Setenv("BUCKLEY_QUIET", "1")
-	raw := []string{"--encoding=json", "-p", "hello", "--config=proj.yaml", "plan", "feat", "do", "thing"}
+	raw := []string{"--encoding=json", "--model", "codex/gpt-5.4-mini", "-p", "hello", "--config=proj.yaml", "plan", "feat", "do", "thing"}
 	opts, err := parseStartupOptions(raw)
 	if err != nil {
 		t.Fatalf("parseStartupOptions error: %v", err)
@@ -55,6 +55,9 @@ func TestParseStartupOptionsFlagsAndFiltering(t *testing.T) {
 	}
 	if opts.configPath != "proj.yaml" {
 		t.Fatalf("configPath=%q want proj.yaml", opts.configPath)
+	}
+	if opts.modelOverride != "codex/gpt-5.4-mini" {
+		t.Fatalf("modelOverride=%q want codex/gpt-5.4-mini", opts.modelOverride)
 	}
 	if got := opts.args; len(got) != 4 || got[0] != "plan" {
 		t.Fatalf("args=%v want plan feat do thing", got)
@@ -73,6 +76,18 @@ func TestParseStartupOptionsMissingValues(t *testing.T) {
 	_, err = parseStartupOptions([]string{"--config"})
 	if err == nil {
 		t.Fatalf("expected error for missing --config value")
+	}
+	_, err = parseStartupOptions([]string{"--model"})
+	if err == nil {
+		t.Fatalf("expected error for missing --model value")
+	}
+	_, err = parseStartupOptions([]string{"--model="})
+	if err == nil {
+		t.Fatalf("expected error for empty --model value")
+	}
+	_, err = parseStartupOptions([]string{"-p", "hello", "--model="})
+	if err == nil {
+		t.Fatalf("expected error for empty --model value after prompt")
 	}
 }
 
@@ -94,6 +109,19 @@ func TestParseStartupOptionsPlainAndTUIFlags(t *testing.T) {
 	}
 	if !opts.plainModeSet || opts.plainMode {
 		t.Fatalf("expected tui override (plain=false), got set=%v plain=%v", opts.plainModeSet, opts.plainMode)
+	}
+}
+
+func TestParseStartupOptionsLeavesSubcommandModelFlag(t *testing.T) {
+	opts, err := parseStartupOptions([]string{"commit", "--model", "openai/gpt-5.4-mini"})
+	if err != nil {
+		t.Fatalf("parseStartupOptions error: %v", err)
+	}
+	if opts.modelOverride != "" {
+		t.Fatalf("modelOverride=%q want empty", opts.modelOverride)
+	}
+	if got := opts.args; len(got) != 3 || got[0] != "commit" || got[1] != "--model" || got[2] != "openai/gpt-5.4-mini" {
+		t.Fatalf("args=%v want commit --model openai/gpt-5.4-mini", got)
 	}
 }
 
@@ -128,6 +156,46 @@ func TestApplySandboxOverride(t *testing.T) {
 	applySandboxOverride(cfg)
 	if !cfg.Worktrees.UseContainers {
 		t.Fatalf("expected UseContainers=true")
+	}
+}
+
+func TestApplyStartupModelOverrideEnablesCodex(t *testing.T) {
+	cfg := config.DefaultConfig()
+
+	applyStartupModelOverride(cfg, "codex/gpt-5.4-mini")
+
+	if !cfg.Providers.Codex.Enabled {
+		t.Fatalf("codex provider should be enabled")
+	}
+	if cfg.Models.DefaultProvider != "codex" {
+		t.Fatalf("default provider=%q want codex", cfg.Models.DefaultProvider)
+	}
+	if cfg.Models.Execution != "codex/gpt-5.4-mini" {
+		t.Fatalf("execution=%q want codex/gpt-5.4-mini", cfg.Models.Execution)
+	}
+	if cfg.Models.Planning != "codex/gpt-5.4-mini" || cfg.Models.Review != "codex/gpt-5.4-mini" {
+		t.Fatalf("planning/review=%q/%q want codex/gpt-5.4-mini", cfg.Models.Planning, cfg.Models.Review)
+	}
+	if cfg.Models.Reasoning != "xhigh" {
+		t.Fatalf("reasoning=%q want xhigh", cfg.Models.Reasoning)
+	}
+}
+
+func TestApplyCommandModelOverrideRestoresPreviousValue(t *testing.T) {
+	previous := modelOverrideFlag
+	modelOverrideFlag = "openai/gpt-5.4"
+	defer func() {
+		modelOverrideFlag = previous
+	}()
+
+	restore := applyCommandModelOverride(" codex/gpt-5.5 ")
+	if modelOverrideFlag != "codex/gpt-5.5" {
+		t.Fatalf("modelOverrideFlag=%q want codex/gpt-5.5", modelOverrideFlag)
+	}
+
+	restore()
+	if modelOverrideFlag != "openai/gpt-5.4" {
+		t.Fatalf("modelOverrideFlag=%q want previous value", modelOverrideFlag)
 	}
 }
 

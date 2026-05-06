@@ -22,11 +22,11 @@ func TestNewLimitedBuffer(t *testing.T) {
 
 func TestLimitedBufferWrite(t *testing.T) {
 	tests := []struct {
-		name           string
-		max            int
-		writes         []string
-		wantContent    string
-		wantTruncated  bool
+		name          string
+		max           int
+		writes        []string
+		wantContent   string
+		wantTruncated bool
 	}{
 		{
 			name:          "no limit",

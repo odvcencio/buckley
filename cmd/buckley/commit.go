@@ -121,7 +121,7 @@ func runCommitCommand(args []string) error {
 	ledger := transparency.NewCostLedger()
 
 	// Create invoker
-	invoker, err := newOneshotToolInvoker(backend, modelID, mgr, pricing, ledger)
+	invoker, err := newOneshotToolInvoker(backend, modelID, cfg, mgr, pricing, ledger)
 	if err != nil {
 		return err
 	}
@@ -556,18 +556,27 @@ func createCommit(message string, compactOutput bool, useGraft bool) error {
 
 	// Show commit hash
 	if !compactOutput {
-		var hash []byte
-		if useGraft {
-			hash, _ = exec.CommandContext(ctx, "graft", "log", "--format=%H", "-1").Output()
-		} else {
-			hash, _ = exec.CommandContext(ctx, "git", "rev-parse", "HEAD").Output()
-		}
-		if len(hash) > 0 {
-			termOut.Success("Committed: %s", strings.TrimSpace(string(hash)))
+		if hash := currentHeadHash(ctx, useGraft); hash != "" {
+			termOut.Success("Committed: %s", hash)
 		}
 	}
 
 	return nil
+}
+
+func currentHeadHash(ctx context.Context, useGraft bool) string {
+	if useGraft {
+		if hash, err := exec.CommandContext(ctx, "graft", "log", "--format=%H", "-1").Output(); err == nil {
+			if trimmed := strings.TrimSpace(string(hash)); trimmed != "" {
+				return trimmed
+			}
+		}
+	}
+	hash, err := exec.CommandContext(ctx, "git", "rev-parse", "HEAD").Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(hash))
 }
 
 func pushChanges(compactOutput bool, useGraft bool) error {
@@ -640,7 +649,16 @@ func pushChanges(compactOutput bool, useGraft bool) error {
 		_ = gitPush.Run() // best-effort mirror
 	}
 
-	if !compactOutput {
+	hashCtx, hashCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer hashCancel()
+	hash := currentHeadHash(hashCtx, useGraft)
+	if compactOutput {
+		if hash != "" {
+			fmt.Printf("Pushed: %s\n", hash)
+		}
+	} else if hash != "" {
+		termOut.Success("Pushed: %s to %s/%s", hash, remote, branchName)
+	} else {
 		termOut.Success("Pushed to %s/%s", remote, branchName)
 	}
 	return nil

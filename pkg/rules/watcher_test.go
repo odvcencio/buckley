@@ -68,6 +68,10 @@ func TestNewWatcher_KeepsPreviousOnCompileError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Eval before watcher: %v", err)
 	}
+	if len(before) == 0 {
+		t.Fatal("expected pre-reload domain to match at least one rule")
+	}
+	beforeCompiled := compiledResultForTest(t, e, "complexity")
 
 	w, err := NewWatcher(e, dir)
 	if err != nil {
@@ -83,15 +87,29 @@ func TestNewWatcher_KeepsPreviousOnCompileError(t *testing.T) {
 
 	time.Sleep(200 * time.Millisecond)
 
-	// Domain must still be functional (previous version kept).
+	// Domain must still point at the previous compiled version.
+	afterCompiled := compiledResultForTest(t, e, "complexity")
+	if afterCompiled != beforeCompiled {
+		t.Fatal("expected failed reload to keep previous compiled domain")
+	}
+
+	// Domain should still be evaluable after the failed reload.
 	after, err := Eval(e, "complexity", TaskFacts{WordCount: 3})
 	if err != nil {
 		t.Fatalf("Eval after bad write: %v", err)
 	}
-	if len(after) == 0 {
-		t.Fatal("expected domain to still work after failed reload")
+	_ = after
+}
+
+func compiledResultForTest(t *testing.T, e *Engine, domain string) any {
+	t.Helper()
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	cr := e.compiled[domain]
+	if cr == nil {
+		t.Fatalf("compiled domain %q is missing", domain)
 	}
-	_ = before
+	return cr
 }
 
 func TestWatcher_SubdirectoryReload(t *testing.T) {

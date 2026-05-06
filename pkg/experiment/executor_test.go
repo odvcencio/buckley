@@ -341,10 +341,10 @@ func TestMergeFiles(t *testing.T) {
 
 func TestParseFloat(t *testing.T) {
 	tests := []struct {
-		name    string
-		raw     string
-		want    float64
-		wantOK  bool
+		name   string
+		raw    string
+		want   float64
+		wantOK bool
 	}{
 		{
 			name:   "empty string",

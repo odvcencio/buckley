@@ -19,6 +19,11 @@ func applyEnvOverrides(cfg *Config, configEnv map[string]string) {
 	if v := os.Getenv("BUCKLEY_MODEL_REVIEW"); v != "" {
 		cfg.Models.Review = v
 	}
+	if v := os.Getenv("BUCKLEY_MODEL_REASONING"); v != "" {
+		cfg.Models.Reasoning = v
+	} else if v := os.Getenv("BUCKLEY_REASONING"); v != "" {
+		cfg.Models.Reasoning = v
+	}
 	if v := os.Getenv("BUCKLEY_TRUST_LEVEL"); v != "" {
 		cfg.Orchestrator.TrustLevel = v
 	}
@@ -118,6 +123,28 @@ func applyEnvOverrides(cfg *Config, configEnv map[string]string) {
 	} else if v := os.Getenv("LITELLM_API_KEY"); v != "" && cfg.Providers.LiteLLM.APIKey == "" {
 		cfg.Providers.LiteLLM.APIKey = v
 		cfg.Providers.LiteLLM.Enabled = true
+	}
+
+	codexModel := normalizeCodexModel(os.Getenv("BUCKLEY_CODEX_MODEL"))
+	if v, ok := envBool("BUCKLEY_CODEX_ENABLED"); ok {
+		cfg.Providers.Codex.Enabled = v
+	}
+	if v := strings.TrimSpace(os.Getenv("BUCKLEY_CODEX_COMMAND")); v != "" {
+		cfg.Providers.Codex.Command = v
+		cfg.Providers.Codex.Enabled = true
+	}
+	if codexModel != "" {
+		cfg.Providers.Codex.Models = []string{codexModel}
+		cfg.Providers.Codex.Enabled = true
+		if cfg.Models.Execution == "" || cfg.Models.Execution == defaultOpenRouterModel {
+			cfg.Models.Execution = codexModel
+		}
+		if cfg.Models.Planning == "" || cfg.Models.Planning == defaultOpenRouterModel {
+			cfg.Models.Planning = codexModel
+		}
+		if cfg.Models.Review == "" || cfg.Models.Review == defaultOpenRouterModel {
+			cfg.Models.Review = codexModel
+		}
 	}
 
 	if v, ok := envBool("BUCKLEY_EXPERIMENT_ENABLED"); ok {
@@ -228,6 +255,17 @@ func applyEnvOverrides(cfg *Config, configEnv map[string]string) {
 			cfg.GitClone.DNSResolveTimeoutSec = n
 		}
 	}
+}
+
+func normalizeCodexModel(modelID string) string {
+	modelID = strings.TrimSpace(modelID)
+	if modelID == "" {
+		return ""
+	}
+	if strings.HasPrefix(modelID, "codex/") {
+		return modelID
+	}
+	return "codex/" + modelID
 }
 
 func splitCommaList(raw string) []string {

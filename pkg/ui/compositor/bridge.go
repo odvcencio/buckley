@@ -17,14 +17,14 @@ import (
 // StreamRenderer provides flicker-free rendering for a streaming text area.
 // It tracks the previous content and outputs only the delta.
 type StreamRenderer struct {
-	mu           sync.Mutex
-	width        int
-	height       int
-	lastContent  string
-	lastLines    []string
-	screen       *Screen
-	renderer     *Renderer
-	initialized  bool
+	mu          sync.Mutex
+	width       int
+	height      int
+	lastContent string
+	lastLines   []string
+	screen      *Screen
+	renderer    *Renderer
+	initialized bool
 }
 
 // NewStreamRenderer creates a renderer for streaming content.

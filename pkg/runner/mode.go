@@ -35,7 +35,7 @@ func parseMode(s string) RunnerMode {
 type ChannelType int
 
 const (
-	ChannelLocal     ChannelType = iota
+	ChannelLocal ChannelType = iota
 	ChannelSSE
 	ChannelWebSocket
 	ChannelFile

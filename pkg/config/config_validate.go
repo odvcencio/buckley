@@ -31,6 +31,16 @@ func (c *Config) Validate() error {
 	if strings.TrimSpace(c.Oneshot.Mode) != "" && !validModes[strings.ToLower(c.Oneshot.Mode)] {
 		return fmt.Errorf("invalid oneshot mode: %s (valid: classic, rlm)", c.Oneshot.Mode)
 	}
+	if reasoning := strings.ToLower(strings.TrimSpace(c.Models.Reasoning)); reasoning != "" {
+		validReasoning := map[string]bool{
+			"auto": true,
+			"off":  true, "none": true,
+			"low": true, "medium": true, "high": true, "xhigh": true,
+		}
+		if !validReasoning[reasoning] {
+			return fmt.Errorf("invalid reasoning level: %s (valid: auto, off, low, medium, high, xhigh)", c.Models.Reasoning)
+		}
+	}
 
 	// Validate approval mode
 	validApprovalModes := map[string]bool{

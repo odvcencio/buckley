@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/odvcencio/buckley/pkg/model"
@@ -28,11 +29,12 @@ type StreamCallback func(reasoningChunk, contentChunk string)
 
 // DefaultInvoker implements Invoker using the model client.
 type DefaultInvoker struct {
-	client   ModelClient
-	model    string
-	provider string
-	ledger   *transparency.CostLedger
-	pricing  transparency.ModelPricing
+	client    ModelClient
+	model     string
+	provider  string
+	reasoning string
+	ledger    *transparency.CostLedger
+	pricing   transparency.ModelPricing
 }
 
 // InvokerConfig configures the invoker.
@@ -45,6 +47,9 @@ type InvokerConfig struct {
 
 	// Provider name (for tracing)
 	Provider string
+
+	// ReasoningEffort requests extended reasoning when the selected model supports it.
+	ReasoningEffort string
 
 	// Pricing for cost calculation
 	Pricing transparency.ModelPricing
@@ -59,11 +64,28 @@ func NewInvoker(cfg InvokerConfig) *DefaultInvoker {
 		cfg.Provider = "openrouter"
 	}
 	return &DefaultInvoker{
-		client:   cfg.Client,
-		model:    cfg.Model,
-		provider: cfg.Provider,
-		pricing:  cfg.Pricing,
-		ledger:   cfg.Ledger,
+		client:    cfg.Client,
+		model:     cfg.Model,
+		provider:  cfg.Provider,
+		reasoning: normalizeInvokerReasoningEffort(cfg.ReasoningEffort),
+		pricing:   cfg.Pricing,
+		ledger:    cfg.Ledger,
+	}
+}
+
+func (inv *DefaultInvoker) requestReasoning() *model.ReasoningConfig {
+	if inv == nil || inv.reasoning == "" {
+		return nil
+	}
+	return &model.ReasoningConfig{Effort: inv.reasoning}
+}
+
+func normalizeInvokerReasoningEffort(effort string) string {
+	switch strings.ToLower(strings.TrimSpace(effort)) {
+	case "low", "medium", "high", "xhigh":
+		return strings.ToLower(strings.TrimSpace(effort))
+	default:
+		return ""
 	}
 }
 
@@ -85,6 +107,7 @@ func (inv *DefaultInvoker) Invoke(ctx context.Context, systemPrompt, userPrompt 
 		},
 		Tools:      []map[string]any{tool.ToOpenAIFormat()},
 		ToolChoice: "auto",
+		Reasoning:  inv.requestReasoning(),
 	}
 
 	// Capture request for tracing
@@ -188,6 +211,7 @@ func (inv *DefaultInvoker) InvokeStream(ctx context.Context, systemPrompt, userP
 		Tools:      []map[string]any{tool.ToOpenAIFormat()},
 		ToolChoice: "auto",
 		Stream:     true,
+		Reasoning:  inv.requestReasoning(),
 	}
 
 	// Capture request for tracing
@@ -308,6 +332,7 @@ func (inv *DefaultInvoker) InvokeText(ctx context.Context, systemPrompt, userPro
 			{Role: "system", Content: systemPrompt},
 			{Role: "user", Content: userPrompt},
 		},
+		Reasoning: inv.requestReasoning(),
 	}
 
 	// Capture request for tracing
@@ -457,6 +482,7 @@ func (inv *DefaultInvoker) InvokeWithTools(ctx context.Context, systemPrompt, us
 			Messages:   messages,
 			Tools:      toolSpecs,
 			ToolChoice: "auto",
+			Reasoning:  inv.requestReasoning(),
 		}
 
 		resp, err := inv.client.ChatCompletion(ctx, req)

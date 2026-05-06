@@ -103,7 +103,7 @@ func DefaultConfig() *Config {
 			Execution: defaultOpenRouterModel,
 			Review:    defaultOpenRouterModel,
 			VisionFallback: []string{
-				"openai/gpt-5.2-mini",
+				"openai/gpt-5.4-mini",
 				"google/gemini-3-flash",
 			},
 			FallbackChains:  map[string][]string{},
@@ -140,12 +140,18 @@ func DefaultConfig() *Config {
 				Enabled: false,
 				BaseURL: "http://localhost:4000",
 			},
+			Codex: CodexConfig{
+				Enabled: false,
+				Command: "codex",
+				Models:  []string{defaultCodexModel},
+			},
 			ModelRouting: map[string]string{
 				"openai/":    "openai",
 				"anthropic/": "anthropic",
 				"google/":    "google",
 				"ollama/":    "ollama",
 				"litellm/":   "litellm",
+				"codex/":     "codex",
 				"gpt-":       "openai",
 				"claude-":    "anthropic",
 				"gemini-":    "google",
@@ -406,7 +412,7 @@ func DefaultConfig() *Config {
 			Models: []string{
 				"moonshotai/kimi-k2.5",
 				"qwen/qwen3-coder",
-				"openai/gpt-5.2-mini",
+				"openai/gpt-5.4-mini",
 			},
 		},
 		UI: UIConfig{

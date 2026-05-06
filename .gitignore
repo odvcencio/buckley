@@ -20,6 +20,7 @@ coverage.out
 .idea/
 *.swp
 *.swo
+.claude/
 
 # Buckley runtime
 .buckley/sessions/
@@ -27,6 +28,12 @@ coverage.out
 .buckley/memory.db
 .buckley/cache/
 .buckley/*.db
+docs/plans/
+docs/blog-outlines/
+docs/execution/
+docs/reviews/
+docs/archive/
+docs/superpowers/
 
 # Logs (any location)
 **/logs/
@@ -50,6 +57,7 @@ docs/site/node_modules/
 docs/site/docs/.vitepress/cache/
 docs/site/docs/.vitepress/dist/
 docs/plans/
+docs/blog-outlines/
 docs/execution/
 docs/reviews/
 docs/archive/

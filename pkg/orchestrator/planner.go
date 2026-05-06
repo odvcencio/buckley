@@ -178,22 +178,12 @@ func NewPlanner(mgr ModelClient, cfg *config.Config, store *storage.Store, workf
 	}
 }
 
-// resolveReasoningEffort uses the arbiter reasoning strategy to determine
-// the reasoning effort level. Returns "" if the engine is nil or evaluation fails.
+// resolveReasoningEffort determines the configured reasoning effort for a phase.
 func (p *Planner) resolveReasoningEffort(phase string) string {
-	if p.engine == nil {
+	if p == nil {
 		return ""
 	}
-	result, err := p.engine.EvalStrategy("reasoning", "reasoning_mode", map[string]any{
-		"reasoning": map[string]any{"config": "auto"},
-		"task":      map[string]any{"phase": phase},
-		"model":     map[string]any{"supports_reasoning": p.modelClient.SupportsReasoning(p.resolveModel())},
-	})
-	if err != nil {
-		return ""
-	}
-	effort, _ := result.Params["effort"].(string)
-	return effort
+	return model.ResolveReasoningEffort(p.config, p.modelClient, p.engine, p.resolveModel(), phase)
 }
 
 func (p *Planner) GeneratePlan(featureName, description string) (*Plan, error) {
@@ -248,8 +238,6 @@ func (p *Planner) GeneratePlan(featureName, description string) (*Plan, error) {
 	// Enable reasoning for planning models that support it
 	if effort := p.resolveReasoningEffort("planning"); effort != "" && effort != "none" {
 		req.Reasoning = &model.ReasoningConfig{Effort: effort}
-	} else if p.modelClient.SupportsReasoning(planningModel) {
-		req.Reasoning = &model.ReasoningConfig{Effort: "high"}
 	}
 
 	resp, err := p.modelClient.ChatCompletion(reqCtx, req)

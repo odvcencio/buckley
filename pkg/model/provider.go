@@ -60,8 +60,14 @@ func providerFactory(cfg *config.Config) (map[string]Provider, error) {
 		providers["litellm"] = NewLiteLLMProvider(cfg.Providers.LiteLLM, networkLogsEnabled)
 	}
 
+	if cfg.Providers.Codex.Enabled {
+		codexCfg := cfg.Providers.Codex
+		codexCfg.Models = append(codexCfg.Models, codexModelsFromConfig(cfg.Models)...)
+		providers["codex"] = NewCodexCLIProvider(codexCfg, cfg.Sandbox, cfg.Approval)
+	}
+
 	if len(providers) == 0 {
-		return nil, fmt.Errorf("no providers configured; set an API key (OPENROUTER_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, GOOGLE_API_KEY) or enable BUCKLEY_OLLAMA_ENABLED/BUCKLEY_LITELLM_ENABLED")
+		return nil, fmt.Errorf("no providers configured; set an API key (OPENROUTER_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, GOOGLE_API_KEY) or enable BUCKLEY_OLLAMA_ENABLED/BUCKLEY_LITELLM_ENABLED/BUCKLEY_CODEX_ENABLED")
 	}
 
 	return providers, nil
@@ -79,6 +85,8 @@ func normalizeModelForProvider(modelID, providerID string) string {
 
 func messageContentToText(content any) string {
 	switch v := content.(type) {
+	case nil:
+		return ""
 	case string:
 		return v
 	case []ContentPart:

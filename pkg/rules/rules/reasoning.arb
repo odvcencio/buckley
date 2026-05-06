@@ -12,11 +12,35 @@ strategy reasoning_mode returns ReasoningConfig {
     }
 
     when {
+        reasoning.config == "low"
+        and model.supports_reasoning
+    } then ReasoningLow {
+        action: "set",
+        effort: "low",
+    }
+
+    when {
+        reasoning.config == "medium"
+        and model.supports_reasoning
+    } then ReasoningMedium {
+        action: "set",
+        effort: "medium",
+    }
+
+    when {
         reasoning.config == "high"
         and model.supports_reasoning
     } then ReasoningHigh {
         action: "set",
         effort: "high",
+    }
+
+    when {
+        reasoning.config == "xhigh"
+        and model.supports_reasoning
+    } then ReasoningXHigh {
+        action: "set",
+        effort: "xhigh",
     }
 
     when {

@@ -92,7 +92,6 @@ func (e *mockExecutor) Execute(ctx context.Context, task *AgentTask, wtPath stri
 	}, nil
 }
 
-
 func TestAgentStatus_String(t *testing.T) {
 	tests := []struct {
 		status AgentStatus

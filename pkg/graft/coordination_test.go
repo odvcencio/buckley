@@ -48,7 +48,7 @@ func TestVCS_Add_EmptyFiles(t *testing.T) {
 	vcs := NewVCS(runner)
 
 	// Adding zero files should be a no-op.
-	err := vcs.Add(t.Context(), /* no files */)
+	err := vcs.Add(t.Context() /* no files */)
 	if err != nil {
 		t.Fatalf("unexpected error adding zero files: %v", err)
 	}

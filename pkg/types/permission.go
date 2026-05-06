@@ -4,7 +4,7 @@ package types
 type PermissionTier int
 
 const (
-	TierReadOnly       PermissionTier = iota
+	TierReadOnly PermissionTier = iota
 	TierWorkspaceWrite
 	TierShellExec
 	TierFullAccess
@@ -32,7 +32,7 @@ func ParsePermissionTier(s string) PermissionTier {
 type SandboxLevel int
 
 const (
-	SandboxNone       SandboxLevel = iota
+	SandboxNone SandboxLevel = iota
 	SandboxWorkspace
 	SandboxNetworkOff
 	SandboxFull

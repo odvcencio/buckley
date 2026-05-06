@@ -5,6 +5,7 @@ import (
 	"log"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/fsnotify/fsnotify"
 )
@@ -74,6 +75,7 @@ func (w *Watcher) loop() {
 						continue
 					}
 					domain := strings.TrimSuffix(rel, ".arb")
+					time.Sleep(50 * time.Millisecond)
 					if err := w.engine.Reload(domain); err != nil {
 						log.Printf("rules: hot reload failed for domain %q, keeping previous version: %v", domain, err)
 					} else {

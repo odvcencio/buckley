@@ -3,6 +3,7 @@ package oneshot
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/odvcencio/buckley/pkg/model"
@@ -15,27 +16,30 @@ import (
 // This provides access to all built-in tools (read, write, bash, glob, grep, etc.)
 // instead of limited custom tool definitions.
 type RLMRunner struct {
-	models   *model.Manager
-	registry *tool.Registry
-	ledger   *transparency.CostLedger
-	modelID  string
+	models    *model.Manager
+	registry  *tool.Registry
+	ledger    *transparency.CostLedger
+	modelID   string
+	reasoning string
 }
 
 // RLMRunnerConfig configures the RLM runner.
 type RLMRunnerConfig struct {
-	Models   *model.Manager
-	Registry *tool.Registry
-	Ledger   *transparency.CostLedger
-	ModelID  string
+	Models          *model.Manager
+	Registry        *tool.Registry
+	Ledger          *transparency.CostLedger
+	ModelID         string
+	ReasoningEffort string
 }
 
 // NewRLMRunner creates an RLM-based runner.
 func NewRLMRunner(cfg RLMRunnerConfig) *RLMRunner {
 	return &RLMRunner{
-		models:   cfg.Models,
-		registry: cfg.Registry,
-		ledger:   cfg.Ledger,
-		modelID:  cfg.ModelID,
+		models:    cfg.Models,
+		registry:  cfg.Registry,
+		ledger:    cfg.Ledger,
+		modelID:   cfg.ModelID,
+		reasoning: normalizeRLMReasoningEffort(cfg.ReasoningEffort),
 	}
 }
 
@@ -79,6 +83,7 @@ func (r *RLMRunner) Run(ctx context.Context, systemPrompt, task string, allowedT
 	agentCfg := rlm.SubAgentInstanceConfig{
 		ID:            fmt.Sprintf("oneshot-%d", time.Now().UnixNano()),
 		Model:         modelToUse,
+		Reasoning:     r.reasoning,
 		SystemPrompt:  systemPrompt,
 		MaxIterations: 25, // Allow more iterations for complex tasks
 		AllowedTools:  allowedTools,
@@ -156,6 +161,15 @@ func (r *RLMRunner) Run(ctx context.Context, systemPrompt, task string, allowedT
 	}
 
 	return result, nil
+}
+
+func normalizeRLMReasoningEffort(effort string) string {
+	switch strings.ToLower(strings.TrimSpace(effort)) {
+	case "low", "medium", "high", "xhigh":
+		return strings.ToLower(strings.TrimSpace(effort))
+	default:
+		return ""
+	}
 }
 
 // RunWithAudit executes a task and includes context audit in the trace.

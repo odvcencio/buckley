@@ -73,7 +73,7 @@ func runPRCommand(args []string) error {
 	ledger := transparency.NewCostLedger()
 
 	// Create invoker
-	invoker, err := newOneshotToolInvoker(backend, modelID, mgr, pricing, ledger)
+	invoker, err := newOneshotToolInvoker(backend, modelID, cfg, mgr, pricing, ledger)
 	if err != nil {
 		return err
 	}
@@ -275,7 +275,13 @@ func pushCurrentBranch() error {
 		return fmt.Errorf("git push failed: %w", err)
 	}
 
-	spinner.StopWithSuccess(fmt.Sprintf("Pushed to %s/%s", remote, branchName))
+	hashCtx, hashCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer hashCancel()
+	if hash := currentHeadHash(hashCtx, false); hash != "" {
+		spinner.StopWithSuccess(fmt.Sprintf("Pushed: %s to %s/%s", hash, remote, branchName))
+	} else {
+		spinner.StopWithSuccess(fmt.Sprintf("Pushed to %s/%s", remote, branchName))
+	}
 	return nil
 }
 
