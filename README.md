@@ -4,6 +4,10 @@ Buckley is a tool-first AI agent harness for serious repository work.
 
 It combines resumable sessions, Arbiter-governed model and tool selection, Claude-style repository instructions, and multiple operator surfaces: terminal, browser, one-shot, ACP, and LSP.
 
+## Agent Skill
+
+Agents working with Buckley should use the [using-buckley](https://github.com/odvcencio/m31labs-skills/blob/main/skills/using-buckley/SKILL.md) skill.
+
 ## Why Buckley
 
 - One shared runtime powers TUI chat, `buckley -p`, headless sessions, ACP editor flows, and browser control.
