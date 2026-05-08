@@ -36,8 +36,8 @@ type ComplexitySignal struct {
 
 // ComplexityDetector analyzes input to determine if planning mode is warranted
 type ComplexityDetector struct {
-	Threshold float64        // Score above this triggers planning mode (default: 0.6)
-	engine    *rules.Engine  // Optional arbiter rules engine
+	Threshold float64       // Score above this triggers planning mode (default: 0.6)
+	engine    *rules.Engine // Optional arbiter rules engine
 }
 
 // ComplexityOption configures the complexity detector.

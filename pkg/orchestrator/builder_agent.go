@@ -110,6 +110,13 @@ func (a *BuilderAgent) resolveModel() string {
 	return a.config.Models.Execution
 }
 
+func (a *BuilderAgent) resolveReasoningEffort() string {
+	if a == nil {
+		return ""
+	}
+	return model.ResolveReasoningEffort(a.config, a.modelClient, nil, a.resolveModel(), "execution")
+}
+
 // SetEnricher attaches an optional code-intelligence enricher.
 func (a *BuilderAgent) SetEnricher(fn ContextEnricher) {
 	if a == nil {
@@ -333,6 +340,9 @@ func (a *BuilderAgent) generateImplementation(task *Task) (string, error) {
 		Messages:    messages,
 		ToolChoice:  "auto",
 		Temperature: 0.2,
+	}
+	if effort := a.resolveReasoningEffort(); effort != "" {
+		req.Reasoning = &model.ReasoningConfig{Effort: effort}
 	}
 
 	// Use streaming to handle tool calls

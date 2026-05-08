@@ -403,7 +403,7 @@ func (w *Writer) Menu(title string, items []MenuItem) string {
 			key := keyStyle.Render(fmt.Sprintf("[%s]", item.Key))
 			line := fmt.Sprintf("  %s %s", key, item.Label)
 			if item.Description != "" {
-				line += w.dimStyle.Render(" - "+item.Description)
+				line += w.dimStyle.Render(" - " + item.Description)
 			}
 			fmt.Fprintln(w.out, line)
 		}

@@ -21,9 +21,9 @@ type Theme struct {
 	TextInverse   compositor.Style // Text on accent backgrounds
 
 	// Accent colors
-	Accent      compositor.Style // Primary action, highlights
-	AccentDim   compositor.Style // Subtle accent usage
-	AccentGlow  compositor.Style // Emphasis, active states
+	Accent     compositor.Style // Primary action, highlights
+	AccentDim  compositor.Style // Subtle accent usage
+	AccentGlow compositor.Style // Emphasis, active states
 
 	// Semantic colors
 	Success compositor.Style
@@ -39,12 +39,12 @@ type Theme struct {
 	Thinking  compositor.Style
 
 	// UI elements
-	Border       compositor.Style
-	BorderFocus  compositor.Style
-	Selection    compositor.Style
-	SearchMatch  compositor.Style
-	Scrollbar    compositor.Style
-	ScrollThumb  compositor.Style
+	Border      compositor.Style
+	BorderFocus compositor.Style
+	Selection   compositor.Style
+	SearchMatch compositor.Style
+	Scrollbar   compositor.Style
+	ScrollThumb compositor.Style
 
 	// Mode indicators
 	ModeNormal compositor.Style
@@ -113,15 +113,15 @@ func DefaultTheme() *Theme {
 // Symbols provides consistent iconography.
 var Symbols = struct {
 	// Bullets and markers
-	Bullet       string
-	BulletEmpty  string
-	Arrow        string
-	ArrowRight   string
-	ArrowDown    string
-	Check        string
-	Cross        string
-	Dot          string
-	Ring         string
+	Bullet      string
+	BulletEmpty string
+	Arrow       string
+	ArrowRight  string
+	ArrowDown   string
+	Check       string
+	Cross       string
+	Dot         string
+	Ring        string
 
 	// Borders (rounded)
 	BorderTopLeft     string
@@ -152,15 +152,15 @@ var Symbols = struct {
 	ModeSearch string
 
 	// File types
-	FileDefault   string
-	FileFolder    string
-	FileGo        string
-	FileJS        string
-	FileTS        string
-	FilePython    string
-	FileMarkdown  string
-	FileYAML      string
-	FileJSON      string
+	FileDefault  string
+	FileFolder   string
+	FileGo       string
+	FileJS       string
+	FileTS       string
+	FilePython   string
+	FileMarkdown string
+	FileYAML     string
+	FileJSON     string
 }{
 	// Bullets and markers
 	Bullet:      "●",

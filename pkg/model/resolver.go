@@ -19,13 +19,13 @@ type ResolverConfig struct {
 
 // Resolver selects models by consulting arbiter rules with config fallback.
 type Resolver struct {
-	engine         *rules.Engine
-	config         ResolverConfig
-	checker        ReasoningChecker
-	usageTracker   *transparency.UsageTracker
-	sessionBudget  float64
-	dailyBudget    float64
-	monthlyBudget  float64
+	engine        *rules.Engine
+	config        ResolverConfig
+	checker       ReasoningChecker
+	usageTracker  *transparency.UsageTracker
+	sessionBudget float64
+	dailyBudget   float64
+	monthlyBudget float64
 }
 
 // NewResolver creates a Resolver. engine and checker may be nil; the resolver

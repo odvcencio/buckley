@@ -10,10 +10,18 @@ import (
 )
 
 const (
-	defaultOpenRouterModel = "moonshotai/kimi-k2.5"
-	defaultOpenAIModel     = "openai/gpt-5.2-codex-xhigh"
-	defaultAnthropicModel  = "anthropic/claude-sonnet-4-5"
-	defaultGoogleModel     = "google/gemini-3-pro"
+	defaultOpenRouterModel      = "moonshotai/kimi-k2.5"
+	defaultOpenAIPlanningModel  = "openai/gpt-5.5"
+	defaultOpenAIExecutionModel = "openai/gpt-5.4"
+	defaultOpenAIReviewModel    = "openai/gpt-5.5"
+	defaultOpenAIUtilityModel   = "openai/gpt-5.4-mini"
+	defaultOpenAIReasoning      = "xhigh"
+	defaultAnthropicModel       = "anthropic/claude-sonnet-4-5"
+	defaultGoogleModel          = "google/gemini-3-pro"
+	defaultCodexPlanningModel   = "codex/gpt-5.5"
+	defaultCodexExecutionModel  = "codex/gpt-5.4"
+	defaultCodexReviewModel     = "codex/gpt-5.5"
+	defaultCodexModel           = "codex/gpt-5.4-mini"
 
 	// MinTokenLength is the minimum recommended length for IPC authentication tokens
 	MinTokenLength = 32
@@ -36,13 +44,58 @@ const (
 	DefaultCompactThreshold = 0.75
 	DefaultMaxSelfHeal      = 3
 	DefaultMaxReviewCycles  = 3
+	DefaultCodexModel       = defaultCodexModel
 )
 
-var providerDefaultModels = map[string]string{
-	"openrouter": defaultOpenRouterModel,
-	"openai":     defaultOpenAIModel,
-	"anthropic":  defaultAnthropicModel,
-	"google":     defaultGoogleModel,
+type providerModelDefaults struct {
+	Planning          string
+	Execution         string
+	Review            string
+	UtilityCommit     string
+	UtilityPR         string
+	UtilityCompaction string
+	UtilityTodoPlan   string
+}
+
+var providerDefaultModels = map[string]providerModelDefaults{
+	"openrouter": providerDefaults(defaultOpenRouterModel),
+	"openai": {
+		Planning:          defaultOpenAIPlanningModel,
+		Execution:         defaultOpenAIExecutionModel,
+		Review:            defaultOpenAIReviewModel,
+		UtilityCommit:     defaultOpenAIUtilityModel,
+		UtilityPR:         defaultOpenAIUtilityModel,
+		UtilityCompaction: defaultOpenAIUtilityModel,
+		UtilityTodoPlan:   defaultOpenAIUtilityModel,
+	},
+	"anthropic": providerDefaults(defaultAnthropicModel),
+	"google":    providerDefaults(defaultGoogleModel),
+	"codex": {
+		Planning:          defaultCodexPlanningModel,
+		Execution:         defaultCodexExecutionModel,
+		Review:            defaultCodexReviewModel,
+		UtilityCommit:     defaultCodexModel,
+		UtilityPR:         defaultCodexModel,
+		UtilityCompaction: defaultCodexModel,
+		UtilityTodoPlan:   defaultCodexModel,
+	},
+}
+
+var providerDefaultReasoning = map[string]string{
+	"openai": defaultOpenAIReasoning,
+	"codex":  defaultOpenAIReasoning,
+}
+
+func providerDefaults(modelID string) providerModelDefaults {
+	return providerModelDefaults{
+		Planning:          modelID,
+		Execution:         modelID,
+		Review:            modelID,
+		UtilityCommit:     modelID,
+		UtilityPR:         modelID,
+		UtilityCompaction: modelID,
+		UtilityTodoPlan:   modelID,
+	}
 }
 
 // Config represents the complete Buckley configuration
@@ -110,8 +163,8 @@ type ModelConfig struct {
 	Curated         []string            `yaml:"curated"`
 	VisionFallback  []string            `yaml:"vision_fallback"` // Ordered list of vision models to try
 	FallbackChains  map[string][]string `yaml:"fallback_chains"`
-	DefaultProvider string              `yaml:"default_provider"` // Default provider (openrouter, openai, anthropic, google)
-	Reasoning       string              `yaml:"reasoning"`        // Reasoning level: "off", "low", "medium", "high", or "" for auto-detect
+	DefaultProvider string              `yaml:"default_provider"` // Default provider (openrouter, openai, anthropic, google, codex)
+	Reasoning       string              `yaml:"reasoning"`        // Reasoning level: "off", "low", "medium", "high", "xhigh", or "" for auto-detect
 
 	// Utility models for utility tasks.
 	Utility UtilityModelConfig `yaml:"utility"`
@@ -168,6 +221,7 @@ type ProviderConfig struct {
 	Google       ProviderSettings  `yaml:"google"`
 	Ollama       ProviderSettings  `yaml:"ollama"`
 	LiteLLM      LiteLLMConfig     `yaml:"litellm"`
+	Codex        CodexConfig       `yaml:"codex"`
 	ModelRouting map[string]string `yaml:"model_routing"` // Maps model prefix to provider
 }
 
@@ -186,6 +240,13 @@ type LiteLLMConfig struct {
 	Models    []string             `yaml:"models"`
 	Fallbacks map[string][]string  `yaml:"fallbacks"`
 	Router    *LiteLLMRouterConfig `yaml:"router"`
+}
+
+// CodexConfig configures Codex CLI as a chat provider.
+type CodexConfig struct {
+	Enabled bool     `yaml:"enabled"`
+	Command string   `yaml:"command"`
+	Models  []string `yaml:"models"`
 }
 
 // LiteLLMRouterConfig defines routing behavior for LiteLLM proxies.

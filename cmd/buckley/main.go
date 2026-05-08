@@ -59,6 +59,7 @@ var encodingOverrideFlag string
 var quietMode bool
 var noColor bool
 var configPath string
+var modelOverrideFlag string
 
 // initDependenciesFn allows tests to stub dependency initialization without hitting the network.
 var initDependenciesFn = initDependencies
@@ -112,6 +113,7 @@ type startupOptions struct {
 	quiet            bool
 	noColor          bool
 	configPath       string
+	modelOverride    string
 	plainModeSet     bool
 	plainMode        bool
 }
@@ -134,6 +136,7 @@ func main() {
 	quietMode = opts.quiet
 	noColor = opts.noColor
 	configPath = opts.configPath
+	modelOverrideFlag = opts.modelOverride
 	os.Args = append([]string{os.Args[0]}, opts.args...)
 
 	if handled, exitCode := dispatchSubcommand(opts.args); handled {
@@ -169,7 +172,18 @@ func main() {
 		os.Exit(2)
 	}
 	applySandboxOverride(cfg)
+	applyStartupModelOverride(cfg, modelOverrideFlag)
 	tool.SetResultEncoding(cfg.Encoding.UseToon)
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	if _, _, err := ensureProjectTrust(cfg, cwd); err != nil {
+		fmt.Fprintf(os.Stderr, "Error applying project trust: %v\n", err)
+		os.Exit(1)
+	}
 
 	if !cfg.Providers.HasReadyProvider() {
 		fmt.Fprintln(os.Stderr, "Error: configure at least one provider (OPENROUTER_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, GOOGLE_API_KEY, BUCKLEY_OLLAMA_ENABLED=1, or BUCKLEY_LITELLM_ENABLED=1).")
@@ -207,12 +221,6 @@ func main() {
 	defer store.Close()
 
 	// Load project context (AGENTS.md)
-	cwd, err := os.Getwd()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
-	}
-
 	loader := projectcontext.NewLoader(cwd)
 	projectContext, err := loader.Load()
 	if err != nil {
@@ -524,7 +532,15 @@ func pushBranch(remote, branch string) error {
 		remote = "origin"
 	}
 	fmt.Printf("Pushing HEAD to %s:%s\n", remote, branch)
-	return runGitCommand("push", remote, fmt.Sprintf("HEAD:%s", branch))
+	if err := runGitCommand("push", remote, fmt.Sprintf("HEAD:%s", branch)); err != nil {
+		return err
+	}
+	hashCtx, hashCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer hashCancel()
+	if hash := currentHeadHash(hashCtx, false); hash != "" {
+		fmt.Printf("Pushed: %s\n", hash)
+	}
+	return nil
 }
 
 func initDependencies() (*config.Config, *model.Manager, *storage.Store, error) {
@@ -538,7 +554,16 @@ func initDependencies() (*config.Config, *model.Manager, *storage.Store, error) 
 	if encodingOverrideFlag != "" {
 		cfg.Encoding.UseToon = encodingOverrideFlag != "json"
 	}
+	applyStartupModelOverride(cfg, modelOverrideFlag)
 	tool.SetResultEncoding(cfg.Encoding.UseToon)
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if _, _, err := ensureProjectTrust(cfg, cwd); err != nil {
+		return nil, nil, nil, fmt.Errorf("applying project trust: %w", err)
+	}
 
 	if !cfg.Providers.HasReadyProvider() {
 		return nil, nil, nil, withExitCode(fmt.Errorf("no providers configured; set OPENROUTER_API_KEY (recommended) or enable BUCKLEY_OLLAMA_ENABLED / BUCKLEY_LITELLM_ENABLED"), 2)
@@ -603,6 +628,7 @@ func printHelp() {
 	fmt.Println("  hunt [--dir path]                Scan codebase for improvement suggestions")
 	fmt.Println("  dream [--dir path] [--plan]      Analyze architecture and identify gaps")
 	fmt.Println("  config [check|show|path]         Manage configuration")
+	fmt.Println("  trust [status|allow|deny|reset]  Inspect or change project trust")
 	fmt.Println("  doctor                           Quick system health check (alias for config check)")
 	fmt.Println("  completion [bash|zsh|fish]       Generate shell completions")
 	fmt.Println("  worktree create [--container]    Create git worktree")
@@ -621,6 +647,7 @@ func printHelp() {
 	fmt.Println("  --no-color                       Disable colored output")
 	fmt.Println("  --tui                            Use rich TUI interface")
 	fmt.Println("  --plain                          Use plain scrollback mode")
+	fmt.Println("  -m, --model <id>                 Use model for this chat session (for example codex/gpt-5.4-mini)")
 	fmt.Println("  --encoding json|toon             Set serialization format")
 	fmt.Println("  --json                           Shortcut for --encoding json")
 	fmt.Println("  -v, --version                    Show version information")
@@ -639,6 +666,8 @@ func printHelp() {
 	fmt.Println("  BUCKLEY_ONESHOT_BACKEND          Override one-shot backend: api, codex, or claude")
 	fmt.Println("  BUCKLEY_COMMIT_BACKEND           Override backend for `buckley commit`")
 	fmt.Println("  BUCKLEY_PR_BACKEND               Override backend for `buckley pr`")
+	fmt.Println("  BUCKLEY_CODEX_ENABLED            Enable Codex CLI as a chat provider")
+	fmt.Println("  BUCKLEY_CODEX_MODEL              Override Codex CLI chat model")
 	fmt.Println("  BUCKLEY_CODEX_COMMAND            Override Codex CLI command path")
 	fmt.Println("  BUCKLEY_CLAUDE_COMMAND           Override Claude CLI command path")
 	fmt.Println("  BUCKLEY_PROMPT_COMMIT            Override prompt template for `buckley commit`")
@@ -660,6 +689,7 @@ func printHelp() {
 	fmt.Println("CONFIGURATION:")
 	fmt.Println("  User config:    ~/.buckley/config.yaml")
 	fmt.Println("  Project config: ./.buckley/config.yaml")
+	fmt.Println("  Codex chat:     set models.execution: codex/gpt-5.4 and models.reasoning: xhigh")
 	fmt.Println("  Run 'buckley config check' to validate your setup")
 	fmt.Println()
 	fmt.Println("GETTING STARTED:")
@@ -809,6 +839,9 @@ func runConfigShow() error {
 	fmt.Printf("Orchestrator:\n")
 	fmt.Printf("  Trust level: %s\n", cfg.Orchestrator.TrustLevel)
 	fmt.Printf("  Auto workflow: %v\n", cfg.Orchestrator.AutoWorkflow)
+	if status, _, _, err := projectTrustStatusForPath(""); err == nil {
+		fmt.Printf("  Project trust: %s\n", status)
+	}
 	fmt.Println()
 	fmt.Printf("Providers:\n")
 	for _, p := range cfg.Providers.ReadyProviders() {
@@ -823,6 +856,9 @@ func runConfigPath() error {
 	fmt.Printf("  User:    %s\n", filepath.Join(home, ".buckley", "config.yaml"))
 	fmt.Printf("  Project: %s\n", ".buckley/config.yaml")
 	fmt.Printf("  Env:     %s\n", filepath.Join(home, ".buckley", "config.env"))
+	if trustPath, err := resolveProjectTrustPath(); err == nil {
+		fmt.Printf("  Trust:   %s\n", trustPath)
+	}
 	dbPath, err := resolveDBPath()
 	if err != nil {
 		dbPath = fmt.Sprintf("error: %v", err)
@@ -1129,6 +1165,8 @@ func dispatchSubcommand(args []string) (bool, int) {
 		return true, runCommand(runDreamCommand, args[1:])
 	case "config":
 		return true, runCommand(runConfigCommand, args[1:])
+	case "trust":
+		return true, runCommand(runTrustCommand, args[1:])
 	case "doctor":
 		// Alias for config check - quick system health check
 		return true, runCommand(runConfigCommand, []string{"check"})
@@ -1168,6 +1206,8 @@ func parseStartupOptions(raw []string) (*startupOptions, error) {
 	var nextPrompt bool
 	var nextEncoding bool
 	var nextConfig bool
+	var nextModel bool
+	var modelFlagSeen bool
 
 	for _, arg := range raw {
 		if nextPrompt {
@@ -1183,6 +1223,11 @@ func parseStartupOptions(raw []string) (*startupOptions, error) {
 		if nextConfig {
 			opts.configPath = arg
 			nextConfig = false
+			continue
+		}
+		if nextModel {
+			opts.modelOverride = strings.TrimSpace(arg)
+			nextModel = false
 			continue
 		}
 
@@ -1207,9 +1252,19 @@ func parseStartupOptions(raw []string) (*startupOptions, error) {
 			opts.noColor = true
 		case "--config", "-c":
 			nextConfig = true
+		case "--model", "-m":
+			if len(filtered) == 0 {
+				nextModel = true
+				modelFlagSeen = true
+			} else {
+				filtered = append(filtered, arg)
+			}
 		default:
 			if strings.HasPrefix(arg, "--config=") {
 				opts.configPath = strings.TrimPrefix(arg, "--config=")
+			} else if strings.HasPrefix(arg, "--model=") && len(filtered) == 0 {
+				opts.modelOverride = strings.TrimSpace(strings.TrimPrefix(arg, "--model="))
+				modelFlagSeen = true
 			} else {
 				filtered = append(filtered, arg)
 			}
@@ -1224,6 +1279,9 @@ func parseStartupOptions(raw []string) (*startupOptions, error) {
 	}
 	if nextConfig {
 		return nil, fmt.Errorf("--config requires a path argument")
+	}
+	if nextModel || modelFlagSeen && strings.TrimSpace(opts.modelOverride) == "" {
+		return nil, fmt.Errorf("--model requires a value")
 	}
 
 	opts.args = filtered
@@ -1270,6 +1328,64 @@ func applySandboxOverride(cfg *config.Config) {
 		cfg.Worktrees.UseContainers = true
 	case "host", "off", "disable", "disabled", "false", "no":
 		cfg.Worktrees.UseContainers = false
+	}
+}
+
+func applyStartupModelOverride(cfg *config.Config, modelID string) {
+	if cfg == nil {
+		return
+	}
+	modelID = normalizeModelIDWithReasoning(cfg, modelID)
+	if modelID == "" {
+		return
+	}
+
+	cfg.Models.Execution = modelID
+	if strings.HasPrefix(modelID, "codex/") {
+		cfg.Providers.Codex.Enabled = true
+		cfg.Models.DefaultProvider = "codex"
+		if strings.TrimSpace(cfg.Models.Reasoning) == "" {
+			cfg.Models.Reasoning = "xhigh"
+		}
+		if cfg.Models.Planning == "" || cfg.Models.Planning == config.DefaultPlanningModel {
+			cfg.Models.Planning = modelID
+		}
+		if cfg.Models.Review == "" || cfg.Models.Review == config.DefaultReviewModel {
+			cfg.Models.Review = modelID
+		}
+	} else if strings.HasPrefix(modelID, "openai/gpt-5") || strings.HasPrefix(modelID, "gpt-5") {
+		if strings.TrimSpace(cfg.Models.Reasoning) == "" {
+			cfg.Models.Reasoning = "xhigh"
+		}
+	}
+}
+
+func normalizeModelIDWithReasoning(cfg *config.Config, modelID string) string {
+	modelID = strings.TrimSpace(modelID)
+	if modelID == "" {
+		return ""
+	}
+	normalized, effort := config.SplitReasoningSuffix(modelID)
+	if normalized != "" {
+		modelID = normalized
+	}
+	if cfg != nil && effort != "" {
+		cfg.Models.Reasoning = effort
+	}
+	return modelID
+}
+
+func applyCommandModelOverride(modelID string) func() {
+	modelID = strings.TrimSpace(modelID)
+	previous := modelOverrideFlag
+	if modelID != "" {
+		if normalized, _ := config.SplitReasoningSuffix(modelID); normalized != "" {
+			modelID = normalized
+		}
+		modelOverrideFlag = modelID
+	}
+	return func() {
+		modelOverrideFlag = previous
 	}
 }
 

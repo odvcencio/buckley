@@ -71,6 +71,13 @@ func (e *Executor) resolveExecutionModel() string {
 	return e.config.Models.Execution
 }
 
+func (e *Executor) resolveReasoningEffort(phase string) string {
+	if e == nil {
+		return ""
+	}
+	return model.ResolveReasoningEffort(e.config, e.modelClient, e.engine, e.resolveExecutionModel(), phase)
+}
+
 // SetPersonaProvider updates sub-agents with refreshed persona definitions.
 func (e *Executor) SetPersonaProvider(provider *personality.PersonaProvider) {
 	if e == nil || e.reviewer == nil {
@@ -744,6 +751,9 @@ func (e *Executor) analyzeAndFix(task *Task, err error) (string, error) {
 		},
 		Temperature: 0.2,
 	}
+	if effort := e.resolveReasoningEffort("execution"); effort != "" {
+		req.Reasoning = &model.ReasoningConfig{Effort: effort}
+	}
 
 	resp, err := e.modelClient.ChatCompletion(context.Background(), req)
 	if err != nil {
@@ -808,6 +818,9 @@ func (e *Executor) generateReviewFix(task *Task, review *ReviewResult) (string, 
 			},
 		},
 		Temperature: 0.2,
+	}
+	if effort := e.resolveReasoningEffort("execution"); effort != "" {
+		req.Reasoning = &model.ReasoningConfig{Effort: effort}
 	}
 
 	resp, err := e.modelClient.ChatCompletion(context.Background(), req)

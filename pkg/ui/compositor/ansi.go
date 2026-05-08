@@ -8,17 +8,17 @@ import (
 
 // ANSI escape sequences.
 const (
-	ANSIEscape       = "\x1b["
-	ANSIClearScreen  = "\x1b[2J"
-	ANSIClearLine    = "\x1b[2K"
-	ANSICursorHome   = "\x1b[H"
-	ANSICursorHide   = "\x1b[?25l"
-	ANSICursorShow   = "\x1b[?25h"
-	ANSIReset        = "\x1b[0m"
-	ANSISaveCursor   = "\x1b[s"
+	ANSIEscape        = "\x1b["
+	ANSIClearScreen   = "\x1b[2J"
+	ANSIClearLine     = "\x1b[2K"
+	ANSICursorHome    = "\x1b[H"
+	ANSICursorHide    = "\x1b[?25l"
+	ANSICursorShow    = "\x1b[?25h"
+	ANSIReset         = "\x1b[0m"
+	ANSISaveCursor    = "\x1b[s"
 	ANSIRestoreCursor = "\x1b[u"
-	ANSIAltScreen    = "\x1b[?1049h"
-	ANSIMainScreen   = "\x1b[?1049l"
+	ANSIAltScreen     = "\x1b[?1049h"
+	ANSIMainScreen    = "\x1b[?1049l"
 )
 
 // CursorTo returns ANSI sequence to move cursor to (x, y).

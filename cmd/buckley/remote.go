@@ -1549,6 +1549,12 @@ func remoteInputLoop(ctx context.Context, client *remoteClient, sessionID string
 }
 
 func readLineWithContext(ctx context.Context, prompt string) (string, error) {
+	select {
+	case <-ctx.Done():
+		return "", ctx.Err()
+	default:
+	}
+
 	lineCh := make(chan string, 1)
 	errCh := make(chan error, 1)
 

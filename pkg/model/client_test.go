@@ -553,7 +553,7 @@ func TestExtractTextContent(t *testing.T) {
 			name:    "nil_content",
 			content: nil,
 			want:    "",
-			wantErr: true,
+			wantErr: false,
 		},
 	}
 

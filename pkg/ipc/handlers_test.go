@@ -172,8 +172,8 @@ func TestHandleCreateAPIToken_Success(t *testing.T) {
 	}
 
 	var resp struct {
-		Token  string             `json:"token"`
-		Record storage.APIToken   `json:"record"`
+		Token  string           `json:"token"`
+		Record storage.APIToken `json:"record"`
 	}
 	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("failed to decode response: %v", err)
@@ -925,8 +925,8 @@ func TestParseIntDefault(t *testing.T) {
 		{"", 10, 10},
 		{"5", 10, 5},
 		{"invalid", 10, 10},
-		{"0", 10, 10},    // 0 is not > 0, so returns default
-		{"-5", 10, 10},   // negative is not > 0
+		{"0", 10, 10},  // 0 is not > 0, so returns default
+		{"-5", 10, 10}, // negative is not > 0
 		{"100", 10, 100},
 	}
 

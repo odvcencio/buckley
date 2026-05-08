@@ -21,7 +21,7 @@ type Executable interface {
 type ExecutableKind int
 
 const (
-	ToolKind    ExecutableKind = iota
+	ToolKind ExecutableKind = iota
 	CommandKind
 )
 

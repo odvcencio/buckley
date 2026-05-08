@@ -224,8 +224,8 @@ func (s *Screen) handleCommand(cmd Command) {
 type RenderContext struct {
 	Buffer  *Buffer
 	Theme   *theme.Theme
-	Focused bool   // Is the containing layer focused?
-	Bounds  Rect   // Widget's allocated bounds
+	Focused bool // Is the containing layer focused?
+	Bounds  Rect // Widget's allocated bounds
 }
 
 // Sub creates a new context for a child widget with adjusted bounds.

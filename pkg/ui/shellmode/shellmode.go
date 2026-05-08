@@ -30,10 +30,10 @@ type Handler struct {
 	maxHistory   int
 
 	// Execution
-	workDir     string
-	timeout     time.Duration
-	running     bool
-	cancelFunc  context.CancelFunc
+	workDir    string
+	timeout    time.Duration
+	running    bool
+	cancelFunc context.CancelFunc
 
 	// Output callback
 	onOutput func(output string, isError bool)

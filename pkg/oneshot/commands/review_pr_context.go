@@ -189,10 +189,10 @@ func getPRInfo(prNumber int) (*PRInfo, error) {
 		Author struct {
 			Login string `json:"login"`
 		} `json:"author"`
-		State   string `json:"state"`
-		URL     string `json:"url"`
-		Body    string `json:"body"`
-		Labels  []struct {
+		State  string `json:"state"`
+		URL    string `json:"url"`
+		Body   string `json:"body"`
+		Labels []struct {
 			Name string `json:"name"`
 		} `json:"labels"`
 		BaseRefName  string `json:"baseRefName"`

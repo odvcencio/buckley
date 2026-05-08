@@ -617,6 +617,15 @@ func TestEngine_EvalStrategy_Reasoning_AllScenarios(t *testing.T) {
 			wantEffort: "high",
 		},
 		{
+			name: "reasoning config xhigh + model supports: xhigh",
+			facts: map[string]any{
+				"reasoning": map[string]any{"config": "xhigh"},
+				"task":      map[string]any{"phase": "execution"},
+				"model":     map[string]any{"supports_reasoning": true},
+			},
+			wantEffort: "xhigh",
+		},
+		{
 			name: "planning phase + model supports: high",
 			facts: map[string]any{
 				"reasoning": map[string]any{"config": "auto"},

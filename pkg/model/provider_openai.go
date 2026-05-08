@@ -23,6 +23,33 @@ type OpenAIProvider struct {
 // openAIModels enumerates a curated subset of models with pricing/context info.
 var openAIModels = []ModelInfo{
 	{
+		ID:            "openai/gpt-5.5",
+		Name:          "GPT-5.5",
+		ContextLength: 400000,
+		Architecture: Architecture{
+			Modality: "text+image",
+		},
+		SupportedParameters: []string{"tools", "reasoning"},
+	},
+	{
+		ID:            "openai/gpt-5.4",
+		Name:          "GPT-5.4",
+		ContextLength: 400000,
+		Architecture: Architecture{
+			Modality: "text+image",
+		},
+		SupportedParameters: []string{"tools", "reasoning"},
+	},
+	{
+		ID:            "openai/gpt-5.4-mini",
+		Name:          "GPT-5.4 mini",
+		ContextLength: 400000,
+		Architecture: Architecture{
+			Modality: "text+image",
+		},
+		SupportedParameters: []string{"tools", "reasoning"},
+	},
+	{
 		ID:            "openai/gpt-4.1",
 		Name:          "GPT-4.1",
 		ContextLength: 128000,

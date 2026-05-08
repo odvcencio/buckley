@@ -240,10 +240,10 @@ func (m *Manager) ChatCompletionStream(ctx context.Context, req ChatRequest) (<-
 }
 
 func applyProviderTransforms(req ChatRequest, providerID string) ChatRequest {
-	if providerID != "openrouter" || len(req.Transforms) > 0 {
-		return req
+	req = normalizeProviderChatRequest(req, providerID)
+	if providerID == "openrouter" && len(req.Transforms) == 0 {
+		req.Transforms = []string{"middle-out"}
 	}
-	req.Transforms = []string{"middle-out"}
 	return req
 }
 
@@ -697,6 +697,8 @@ func (m *Manager) DescribeImage(ctx context.Context, imageURL string) (string, e
 // ExtractTextContent extracts plain text from message content, handling both string and multimodal formats.
 func ExtractTextContent(content any) (string, error) {
 	switch v := content.(type) {
+	case nil:
+		return "", nil
 	case string:
 		return v, nil
 	case []ContentPart:
@@ -727,7 +729,7 @@ func ExtractTextContent(content any) (string, error) {
 		}
 	}
 
-	return "", fmt.Errorf("unexpected content format")
+	return "", fmt.Errorf("unexpected content format: %T", content)
 }
 
 func extractTextFromContentParts(parts []ContentPart) string {

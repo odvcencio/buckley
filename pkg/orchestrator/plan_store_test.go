@@ -467,11 +467,11 @@ func TestFilePlanStore_SavePlan_TableDriven(t *testing.T) {
 
 func TestFilePlanStore_LoadPlan_TableDriven(t *testing.T) {
 	tests := []struct {
-		name       string
-		planID     string
-		setupPlan  *Plan
-		wantErr    bool
-		errSubstr  string
+		name      string
+		planID    string
+		setupPlan *Plan
+		wantErr   bool
+		errSubstr string
 	}{
 		{
 			name:      "empty plan ID",

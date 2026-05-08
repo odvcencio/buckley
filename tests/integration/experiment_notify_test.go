@@ -20,9 +20,9 @@ import (
 
 // mockNotifyAdapter captures notifications for testing
 type mockNotifyAdapter struct {
-	mu       sync.Mutex
-	events   []capturedEvent
-	name     string
+	mu     sync.Mutex
+	events []capturedEvent
+	name   string
 }
 
 type capturedEvent struct {

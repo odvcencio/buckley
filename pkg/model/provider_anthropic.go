@@ -219,17 +219,23 @@ func (p *AnthropicProvider) toAnthropicRequest(req ChatRequest, stream bool) (*a
 				Content: content,
 			})
 		case "tool":
-			text := messageContentToText(msg.Content)
-			anthReq.Messages = append(anthReq.Messages, anthropicMessage{
-				Role: "user",
-				Content: []anthropicContent{
-					{
-						Type:      "tool_result",
-						ToolUseID: msg.ToolCallID,
-						Content:   text,
-					},
-				},
-			})
+			// Anthropic requires tool_result blocks in a user message.
+			// Merge consecutive tool results into the preceding user message
+			// to maintain required user/assistant alternation.
+			toolResult := anthropicContent{
+				Type:      "tool_result",
+				ToolUseID: msg.ToolCallID,
+				Content:   messageContentToText(msg.Content),
+			}
+			n := len(anthReq.Messages)
+			if n > 0 && anthReq.Messages[n-1].Role == "user" {
+				anthReq.Messages[n-1].Content = append(anthReq.Messages[n-1].Content, toolResult)
+			} else {
+				anthReq.Messages = append(anthReq.Messages, anthropicMessage{
+					Role:    "user",
+					Content: []anthropicContent{toolResult},
+				})
+			}
 		}
 	}
 

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/odvcencio/buckley/pkg/model"
 	"github.com/odvcencio/buckley/pkg/oneshot"
 	"github.com/odvcencio/buckley/pkg/oneshot/commands"
 	"github.com/odvcencio/buckley/pkg/terminal"
@@ -20,7 +21,7 @@ func runReviewPRCommand(args []string) error {
 	fs := flag.NewFlagSet("review-pr", flag.ContinueOnError)
 	verbose := fs.Bool("verbose", false, "show full context and reasoning")
 	showCost := fs.Bool("cost", true, "show token/cost breakdown")
-	modelFlag := fs.String("model", "", "model to use (default: BUCKLEY_MODEL_REVIEW or execution model)")
+	modelFlag := fs.String("model", "", "model to use (default: BUCKLEY_MODEL_REVIEW, models.review, or execution model)")
 	timeout := fs.Duration("timeout", 5*time.Minute, "timeout for model request")
 	outputFile := fs.String("output", "", "write review to file instead of stdout")
 
@@ -37,6 +38,9 @@ func runReviewPRCommand(args []string) error {
 		return fmt.Errorf("usage: buckley review-pr <pr-number-or-url>\n\nExamples:\n  buckley review-pr 123\n  buckley review-pr https://github.com/owner/repo/pull/123")
 	}
 
+	restoreModelOverride := applyCommandModelOverride(*modelFlag)
+	defer restoreModelOverride()
+
 	// Initialize dependencies
 	cfg, mgr, store, err := initDependenciesFn()
 	if store != nil {
@@ -47,9 +51,9 @@ func runReviewPRCommand(args []string) error {
 	}
 
 	// Determine model
-	modelID := strings.TrimSpace(*modelFlag)
+	modelID := strings.TrimSpace(modelOverrideFlag)
 	if modelID == "" {
-		modelID = strings.TrimSpace(os.Getenv("BUCKLEY_MODEL_REVIEW"))
+		modelID = normalizeModelIDWithReasoning(cfg, os.Getenv("BUCKLEY_MODEL_REVIEW"))
 	}
 	if modelID == "" && cfg != nil {
 		modelID = cfg.Models.Review
@@ -60,6 +64,7 @@ func runReviewPRCommand(args []string) error {
 	if modelID == "" {
 		return fmt.Errorf("no model configured (set BUCKLEY_MODEL_REVIEW or configure models.review)")
 	}
+	reasoningEffort := model.ResolveReasoningEffort(cfg, mgr, nil, modelID, "review")
 
 	// Create cost ledger
 	ledger := transparency.NewCostLedger()
@@ -72,10 +77,11 @@ func runReviewPRCommand(args []string) error {
 
 	// Create RLM runner for the framework
 	rlmRunner := oneshot.NewRLMRunner(oneshot.RLMRunnerConfig{
-		Models:   mgr,
-		Registry: registry,
-		Ledger:   ledger,
-		ModelID:  modelID,
+		Models:          mgr,
+		Registry:        registry,
+		Ledger:          ledger,
+		ModelID:         modelID,
+		ReasoningEffort: reasoningEffort,
 	})
 
 	// Create unified framework with RLM support

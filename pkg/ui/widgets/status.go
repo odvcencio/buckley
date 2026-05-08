@@ -8,12 +8,12 @@ import (
 // StatusBar is the Buckley status bar widget.
 type StatusBar struct {
 	Base
-	status     string
-	tokens     int
-	costCents  float64
-	scrollPos  string // "TOP", "END", or percentage
-	bgStyle    backend.Style
-	textStyle  backend.Style
+	status    string
+	tokens    int
+	costCents float64
+	scrollPos string // "TOP", "END", or percentage
+	bgStyle   backend.Style
+	textStyle backend.Style
 }
 
 // NewStatusBar creates a new status bar widget.

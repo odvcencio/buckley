@@ -35,7 +35,11 @@ func Load() (*Config, error) {
 
 	// Apply environment variable overrides
 	applyEnvOverrides(cfg, configEnv)
+	cfg.normalizeReasoningModelIDs()
+	cfg.applyConfiguredProviderHints()
 	cfg.alignModelDefaultsWithProviders()
+	cfg.normalizeReasoningModelIDs()
+	cfg.applyProviderReasoningDefaults()
 
 	// Validate
 	if err := cfg.Validate(); err != nil {
@@ -58,7 +62,11 @@ func LoadFromPath(path string) (*Config, error) {
 
 	// Apply environment variable overrides
 	applyEnvOverrides(cfg, configEnv)
+	cfg.normalizeReasoningModelIDs()
+	cfg.applyConfiguredProviderHints()
 	cfg.alignModelDefaultsWithProviders()
+	cfg.normalizeReasoningModelIDs()
+	cfg.applyProviderReasoningDefaults()
 
 	// Validate
 	if err := cfg.Validate(); err != nil {
@@ -71,7 +79,11 @@ func LoadFromPath(path string) (*Config, error) {
 // ApplyEnvOverridesForTest exposes env override logic for tests without file I/O.
 func ApplyEnvOverridesForTest(cfg *Config) {
 	applyEnvOverrides(cfg, nil)
+	cfg.normalizeReasoningModelIDs()
+	cfg.applyConfiguredProviderHints()
 	cfg.alignModelDefaultsWithProviders()
+	cfg.normalizeReasoningModelIDs()
+	cfg.applyProviderReasoningDefaults()
 }
 func loadConfigEnvVars() map[string]string {
 	home, err := os.UserHomeDir()

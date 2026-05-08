@@ -18,10 +18,10 @@ type SectionItem struct {
 type Section struct {
 	FocusableBase
 
-	title     string
-	items     []SectionItem
-	expanded  bool
-	maxItems  int // Max items to show when expanded (0 = all)
+	title    string
+	items    []SectionItem
+	expanded bool
+	maxItems int // Max items to show when expanded (0 = all)
 
 	// Styles
 	headerStyle   backend.Style

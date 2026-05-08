@@ -29,7 +29,7 @@ type FilePicker struct {
 	maxResults int
 
 	// Dimensions
-	width, height   int
+	width, height    int
 	offsetX, offsetY int // Position in screen
 }
 

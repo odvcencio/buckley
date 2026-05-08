@@ -47,6 +47,20 @@ func TestProviderFactory(t *testing.T) {
 			expectError:   false,
 		},
 		{
+			name: "codex_provider",
+			cfg: &config.Config{
+				Providers: config.ProviderConfig{
+					Codex: config.CodexConfig{
+						Enabled: true,
+						Command: "codex",
+					},
+				},
+			},
+			expectedCount: 1,
+			expectedIDs:   []string{"codex"},
+			expectError:   false,
+		},
+		{
 			name: "all_providers",
 			cfg: &config.Config{
 				Providers: config.ProviderConfig{
@@ -220,7 +234,7 @@ func TestMessageContentToText(t *testing.T) {
 		{
 			name:     "nil_content",
 			content:  nil,
-			expected: "<nil>",
+			expected: "",
 		},
 		{
 			name:     "number_content",

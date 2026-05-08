@@ -177,22 +177,12 @@ func NewReviewAgent(plan *Plan, cfg *config.Config, client ModelClient, registry
 	}
 }
 
-// resolveReasoningEffort uses the arbiter reasoning strategy to determine
-// the reasoning effort level. Returns "" if the engine is nil or evaluation fails.
+// resolveReasoningEffort determines the configured reasoning effort for review.
 func (a *ReviewAgent) resolveReasoningEffort() string {
-	if a.engine == nil {
+	if a == nil {
 		return ""
 	}
-	result, err := a.engine.EvalStrategy("reasoning", "reasoning_mode", map[string]any{
-		"reasoning": map[string]any{"config": "auto"},
-		"task":      map[string]any{"phase": "review"},
-		"model":     map[string]any{"supports_reasoning": a.modelClient.SupportsReasoning(a.resolveModel())},
-	})
-	if err != nil {
-		return ""
-	}
-	effort, _ := result.Params["effort"].(string)
-	return effort
+	return model.ResolveReasoningEffort(a.config, a.modelClient, a.engine, a.resolveModel(), "review")
 }
 
 // Review runs the review loop for a single task implementation.
@@ -236,8 +226,6 @@ func (a *ReviewAgent) Review(task *Task, builderResult *BuilderResult) (*ReviewR
 
 	if effort := a.resolveReasoningEffort(); effort != "" && effort != "none" {
 		req.Reasoning = &model.ReasoningConfig{Effort: effort}
-	} else if a.modelClient.SupportsReasoning(reviewModel) {
-		req.Reasoning = &model.ReasoningConfig{Effort: "high"}
 	}
 
 	a.logEvent(task.ID, reviewEventStart, map[string]string{

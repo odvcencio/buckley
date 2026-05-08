@@ -75,6 +75,47 @@ func TestAnthropicProvider_ToAnthropicRequest_WithTools(t *testing.T) {
 	}
 }
 
+func TestAnthropicProvider_ToAnthropicRequest_ToolCallWithoutText(t *testing.T) {
+	provider := &AnthropicProvider{}
+
+	req := ChatRequest{
+		Model: "anthropic/claude-3.5-sonnet",
+		Messages: []Message{
+			{Role: "user", Content: "inspect the repo"},
+			{
+				Role: "assistant",
+				ToolCalls: []ToolCall{
+					{
+						ID:   "call_1",
+						Type: "function",
+						Function: FunctionCall{
+							Name:      "read_file",
+							Arguments: `{"path":"README.md"}`,
+						},
+					},
+				},
+			},
+			{Role: "tool", ToolCallID: "call_1", Content: "file contents"},
+		},
+	}
+
+	anthReq, err := provider.toAnthropicRequest(req, false)
+	if err != nil {
+		t.Fatalf("toAnthropicRequest() error = %v", err)
+	}
+
+	if len(anthReq.Messages) != 3 {
+		t.Fatalf("expected 3 messages, got %d", len(anthReq.Messages))
+	}
+	assistant := anthReq.Messages[1]
+	if len(assistant.Content) != 1 {
+		t.Fatalf("expected only tool_use content, got %+v", assistant.Content)
+	}
+	if got := assistant.Content[0].Type; got != "tool_use" {
+		t.Fatalf("expected tool_use content block, got %q", got)
+	}
+}
+
 func TestAnthropicResponse_ToChatResponse_WithToolUse(t *testing.T) {
 	resp, err := anthropicResponse{
 		ID:    "msg_1",

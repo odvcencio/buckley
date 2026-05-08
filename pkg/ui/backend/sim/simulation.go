@@ -5,10 +5,10 @@ import (
 	"strings"
 	"sync"
 
+	tcellv2 "github.com/gdamore/tcell/v2"
 	"github.com/odvcencio/buckley/pkg/ui/backend"
 	"github.com/odvcencio/buckley/pkg/ui/backend/tcell"
 	"github.com/odvcencio/buckley/pkg/ui/terminal"
-	tcellv2 "github.com/gdamore/tcell/v2"
 )
 
 // Backend is a testable backend using tcell's simulation screen.

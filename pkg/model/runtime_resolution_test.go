@@ -44,6 +44,21 @@ func TestResolveReasoningEffort_DisablesWhenConfigOff(t *testing.T) {
 	}
 }
 
+func TestResolveReasoningEffort_UsesConfiguredXHigh(t *testing.T) {
+	engine := mustNewTestEngine(t)
+	checker := &stubReasoningChecker{models: map[string]bool{"reasoning-model": true}}
+	cfg := &config.Config{
+		Models: config.ModelConfig{
+			Reasoning: "xhigh",
+		},
+	}
+
+	got := ResolveReasoningEffort(cfg, checker, engine, "reasoning-model", "execution")
+	if got != "xhigh" {
+		t.Fatalf("ResolveReasoningEffort() = %q, want xhigh", got)
+	}
+}
+
 func TestInferModelTier(t *testing.T) {
 	tests := []struct {
 		modelID string

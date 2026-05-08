@@ -37,15 +37,15 @@ type PaletteWidget struct {
 	maxVisible  int
 
 	// Styles
-	bgStyle          backend.Style
-	borderStyle      backend.Style
-	titleStyle       backend.Style
-	queryStyle       backend.Style
-	itemStyle        backend.Style
-	selectedStyle    backend.Style
-	categoryStyle    backend.Style
-	descStyle        backend.Style
-	shortcutStyle    backend.Style
+	bgStyle       backend.Style
+	borderStyle   backend.Style
+	titleStyle    backend.Style
+	queryStyle    backend.Style
+	itemStyle     backend.Style
+	selectedStyle backend.Style
+	categoryStyle backend.Style
+	descStyle     backend.Style
+	shortcutStyle backend.Style
 }
 
 // NewPaletteWidget creates a new palette widget.

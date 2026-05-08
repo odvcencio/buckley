@@ -70,10 +70,10 @@ models:
   review: anthropic/claude-sonnet-4-5
 
   # Default provider when model prefix doesn't specify
-  default_provider: openrouter  # openrouter | openai | anthropic | google
+  default_provider: openrouter  # openrouter | openai | anthropic | google | codex
 
   # Reasoning effort level
-  reasoning: medium  # off | low | medium | high | "" (auto-detect)
+  reasoning: medium  # off | low | medium | high | xhigh | "" (auto-detect)
 
   # Vision model fallback chain (tried in order)
   vision_fallback:
@@ -84,29 +84,29 @@ models:
   fallback_chains:
     anthropic/claude-sonnet-4-5:
       - anthropic/claude-3-haiku
-      - openai/gpt-5.2-codex-xhigh-mini
+      - openai/gpt-5.4-mini
 
   # Utility models for lightweight tasks
   utility:
-    commit: openai/gpt-5.2-codex-xhigh-mini
-    pr: openai/gpt-5.2-codex-xhigh-mini
-    compaction: openai/gpt-5.2-codex-xhigh-mini
-    todo_plan: openai/gpt-5.2-codex-xhigh-mini
+    commit: openai/gpt-5.4-mini
+    pr: openai/gpt-5.4-mini
+    compaction: openai/gpt-5.4-mini
+    todo_plan: openai/gpt-5.4-mini
 ```
 
 **Defaults:**
 
 | Field | Default |
 |-------|---------|
-| `planning` | `moonshotai/kimi-k2-thinking` |
-| `execution` | `moonshotai/kimi-k2-thinking` |
-| `review` | `moonshotai/kimi-k2-thinking` |
+| `planning` | `moonshotai/kimi-k2.5` |
+| `execution` | `moonshotai/kimi-k2.5` |
+| `review` | `moonshotai/kimi-k2.5` |
 | `default_provider` | `openrouter` |
 | `reasoning` | `""` (auto-detect) |
-| `utility.commit` | `openai/gpt-5.2-codex-xhigh-mini` |
-| `utility.pr` | `openai/gpt-5.2-codex-xhigh-mini` |
-| `utility.compaction` | `openai/gpt-5.2-codex-xhigh-mini` |
-| `utility.todo_plan` | `openai/gpt-5.2-codex-xhigh-mini` |
+| `utility.commit` | `moonshotai/kimi-k2.5` |
+| `utility.pr` | `moonshotai/kimi-k2.5` |
+| `utility.compaction` | `moonshotai/kimi-k2.5` |
+| `utility.todo_plan` | `moonshotai/kimi-k2.5` |
 
 ### providers
 
@@ -572,7 +572,7 @@ compaction:
   preserve_commands: true
   models:
     - deepseek/deepseek-chat
-    - openai/gpt-5.2-codex-xhigh-mini
+    - openai/gpt-5.4-mini
 ```
 
 ### ui
