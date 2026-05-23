@@ -91,8 +91,17 @@ func (c *Config) preferredReadyProvider() string {
 }
 
 func (c *Config) replaceModelIfDefault(field *string, fallback string) {
-	if *field == "" || *field == defaultOpenRouterModel {
+	if *field == "" || isOpenRouterDefaultModel(*field) {
 		*field = fallback
+	}
+}
+
+func isOpenRouterDefaultModel(modelID string) bool {
+	switch strings.TrimSpace(modelID) {
+	case defaultOpenRouterChatModel, defaultOpenRouterUtilityModel, legacyOpenRouterModel:
+		return true
+	default:
+		return false
 	}
 }
 

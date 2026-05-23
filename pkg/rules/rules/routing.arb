@@ -9,14 +9,14 @@ strategy model_select returns ModelChoice {
         and model.supports_reasoning
     } then PlanningReasoner {
         action: "use",
-        model: "claude-opus-4-20250514",
+        model: "qwen/qwen3.6-max-preview",
     }
 
     when {
         task.phase == "execution"
     } then ExecutionModel {
         action: "use",
-        model: "claude-sonnet-4-20250514",
+        model: "qwen/qwen3.6-max-preview",
     }
 
     when {
@@ -24,11 +24,11 @@ strategy model_select returns ModelChoice {
         and model.supports_reasoning
     } then ReviewReasoner {
         action: "use",
-        model: "claude-opus-4-20250514",
+        model: "qwen/qwen3.6-max-preview",
     }
 
     else DefaultModel {
         action: "use",
-        model: "claude-sonnet-4-20250514",
+        model: "qwen/qwen3.6-max-preview",
     }
 }

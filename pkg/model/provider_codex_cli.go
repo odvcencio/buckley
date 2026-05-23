@@ -345,7 +345,7 @@ func codexReasoningConfigArgs(reasoning *ReasoningConfig) []string {
 	switch effort {
 	case "", "auto", "off", "none":
 		return nil
-	case "low", "medium", "high", "xhigh":
+	case "minimal", "low", "medium", "high", "xhigh":
 		return []string{"-c", fmt.Sprintf("model_reasoning_effort=%q", effort)}
 	default:
 		return nil

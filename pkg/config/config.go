@@ -10,18 +10,21 @@ import (
 )
 
 const (
-	defaultOpenRouterModel      = "moonshotai/kimi-k2.5"
-	defaultOpenAIPlanningModel  = "openai/gpt-5.5"
-	defaultOpenAIExecutionModel = "openai/gpt-5.4"
-	defaultOpenAIReviewModel    = "openai/gpt-5.5"
-	defaultOpenAIUtilityModel   = "openai/gpt-5.4-mini"
-	defaultOpenAIReasoning      = "xhigh"
-	defaultAnthropicModel       = "anthropic/claude-sonnet-4-5"
-	defaultGoogleModel          = "google/gemini-3-pro"
-	defaultCodexPlanningModel   = "codex/gpt-5.5"
-	defaultCodexExecutionModel  = "codex/gpt-5.4"
-	defaultCodexReviewModel     = "codex/gpt-5.5"
-	defaultCodexModel           = "codex/gpt-5.4-mini"
+	defaultOpenRouterModel        = defaultOpenRouterChatModel
+	defaultOpenRouterChatModel    = "qwen/qwen3.6-max-preview"
+	defaultOpenRouterUtilityModel = "qwen/qwen3.6-flash"
+	legacyOpenRouterModel         = "moonshotai/kimi-k2.5"
+	defaultOpenAIPlanningModel    = "openai/gpt-5.5"
+	defaultOpenAIExecutionModel   = "openai/gpt-5.4"
+	defaultOpenAIReviewModel      = "openai/gpt-5.5"
+	defaultOpenAIUtilityModel     = "openai/gpt-5.4-mini"
+	defaultOpenAIReasoning        = "xhigh"
+	defaultAnthropicModel         = "anthropic/claude-sonnet-4-5"
+	defaultGoogleModel            = "google/gemini-3-pro"
+	defaultCodexPlanningModel     = "codex/gpt-5.5"
+	defaultCodexExecutionModel    = "codex/gpt-5.4"
+	defaultCodexReviewModel       = "codex/gpt-5.5"
+	defaultCodexModel             = "codex/gpt-5.4-mini"
 
 	// MinTokenLength is the minimum recommended length for IPC authentication tokens
 	MinTokenLength = 32
@@ -58,7 +61,15 @@ type providerModelDefaults struct {
 }
 
 var providerDefaultModels = map[string]providerModelDefaults{
-	"openrouter": providerDefaults(defaultOpenRouterModel),
+	"openrouter": {
+		Planning:          defaultOpenRouterChatModel,
+		Execution:         defaultOpenRouterChatModel,
+		Review:            defaultOpenRouterChatModel,
+		UtilityCommit:     defaultOpenRouterUtilityModel,
+		UtilityPR:         defaultOpenRouterUtilityModel,
+		UtilityCompaction: defaultOpenRouterUtilityModel,
+		UtilityTodoPlan:   defaultOpenRouterUtilityModel,
+	},
 	"openai": {
 		Planning:          defaultOpenAIPlanningModel,
 		Execution:         defaultOpenAIExecutionModel,
@@ -164,7 +175,7 @@ type ModelConfig struct {
 	VisionFallback  []string            `yaml:"vision_fallback"` // Ordered list of vision models to try
 	FallbackChains  map[string][]string `yaml:"fallback_chains"`
 	DefaultProvider string              `yaml:"default_provider"` // Default provider (openrouter, openai, anthropic, google, codex)
-	Reasoning       string              `yaml:"reasoning"`        // Reasoning level: "off", "low", "medium", "high", "xhigh", or "" for auto-detect
+	Reasoning       string              `yaml:"reasoning"`        // Reasoning level: "off", "minimal", "low", "medium", "high", "xhigh", or "" for auto-detect
 
 	// Utility models for utility tasks.
 	Utility UtilityModelConfig `yaml:"utility"`
@@ -179,7 +190,7 @@ type UtilityModelConfig struct {
 }
 
 // DefaultUtilityModel is the default model for utility tasks.
-const DefaultUtilityModel = defaultOpenRouterModel
+const DefaultUtilityModel = defaultOpenRouterUtilityModel
 
 // GetUtilityCommitModel returns the model for commit message generation
 func (c *Config) GetUtilityCommitModel() string {

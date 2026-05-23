@@ -582,6 +582,7 @@ func (c *Client) setHeaders(req *http.Request) {
 	req.Header.Set("Authorization", "Bearer "+c.apiKey)
 	req.Header.Set("HTTP-Referer", "https://github.com/odvcencio/buckley")
 	req.Header.Set("X-Title", "Buckley")
+	req.Header.Set("X-OpenRouter-Experimental-Metadata", "enabled")
 }
 
 // parseError parses an error response and wraps it with additional context

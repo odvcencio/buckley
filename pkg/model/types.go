@@ -9,39 +9,46 @@ import (
 
 // Message represents a chat message
 type Message struct {
-	Role       string     `json:"role"`                   // user, assistant, system, tool
-	Content    any        `json:"content,omitempty"`      // Can be string or []ContentPart for multimodal
-	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`   // For assistant messages with tool calls
-	ToolCallID string     `json:"tool_call_id,omitempty"` // For tool response messages
-	Name       string     `json:"name,omitempty"`         // Tool name for tool messages
-	Reasoning  string     `json:"-"`                      // Reasoning/thinking content (never sent in requests; decoded from responses when present)
+	Role             string            `json:"role"`                        // user, assistant, system, tool
+	Content          any               `json:"content,omitempty"`           // Can be string or []ContentPart for multimodal
+	ToolCalls        []ToolCall        `json:"tool_calls,omitempty"`        // For assistant messages with tool calls
+	ToolCallID       string            `json:"tool_call_id,omitempty"`      // For tool response messages
+	Name             string            `json:"name,omitempty"`              // Tool name for tool messages
+	Reasoning        string            `json:"reasoning,omitempty"`         // Reasoning/thinking content for reasoning continuity
+	ReasoningDetails []ReasoningDetail `json:"reasoning_details,omitempty"` // OpenRouter reasoning_details blocks
 }
 
 func (m Message) MarshalJSON() ([]byte, error) {
-	type messageNoReasoning struct {
-		Role       string     `json:"role"`
-		Content    any        `json:"content,omitempty"`
-		ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
-		ToolCallID string     `json:"tool_call_id,omitempty"`
-		Name       string     `json:"name,omitempty"`
+	type messageAlias struct {
+		Role             string            `json:"role"`
+		Content          any               `json:"content,omitempty"`
+		ToolCalls        []ToolCall        `json:"tool_calls,omitempty"`
+		ToolCallID       string            `json:"tool_call_id,omitempty"`
+		Name             string            `json:"name,omitempty"`
+		Reasoning        string            `json:"reasoning,omitempty"`
+		ReasoningDetails []ReasoningDetail `json:"reasoning_details,omitempty"`
 	}
-	return json.Marshal(messageNoReasoning{
-		Role:       m.Role,
-		Content:    m.Content,
-		ToolCalls:  m.ToolCalls,
-		ToolCallID: m.ToolCallID,
-		Name:       m.Name,
+	return json.Marshal(messageAlias{
+		Role:             m.Role,
+		Content:          m.Content,
+		ToolCalls:        m.ToolCalls,
+		ToolCallID:       m.ToolCallID,
+		Name:             m.Name,
+		Reasoning:        m.Reasoning,
+		ReasoningDetails: m.ReasoningDetails,
 	})
 }
 
 func (m *Message) UnmarshalJSON(data []byte) error {
 	type messageWithReasoning struct {
-		Role       string     `json:"role"`
-		Content    any        `json:"content,omitempty"`
-		ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
-		ToolCallID string     `json:"tool_call_id,omitempty"`
-		Name       string     `json:"name,omitempty"`
-		Reasoning  string     `json:"reasoning,omitempty"`
+		Role             string            `json:"role"`
+		Content          any               `json:"content,omitempty"`
+		ToolCalls        []ToolCall        `json:"tool_calls,omitempty"`
+		ToolCallID       string            `json:"tool_call_id,omitempty"`
+		Name             string            `json:"name,omitempty"`
+		Reasoning        string            `json:"reasoning,omitempty"`
+		ReasoningContent string            `json:"reasoning_content,omitempty"`
+		ReasoningDetails []ReasoningDetail `json:"reasoning_details,omitempty"`
 	}
 	var aux messageWithReasoning
 	if err := json.Unmarshal(data, &aux); err != nil {
@@ -53,6 +60,10 @@ func (m *Message) UnmarshalJSON(data []byte) error {
 	m.ToolCallID = aux.ToolCallID
 	m.Name = aux.Name
 	m.Reasoning = aux.Reasoning
+	if m.Reasoning == "" {
+		m.Reasoning = aux.ReasoningContent
+	}
+	m.ReasoningDetails = aux.ReasoningDetails
 	return nil
 }
 
@@ -74,6 +85,7 @@ type ImageURL struct {
 // CacheControl marks content blocks for prompt caching.
 type CacheControl struct {
 	Type string `json:"type"`
+	TTL  string `json:"ttl,omitempty"`
 }
 
 // ToolCall represents a function/tool call from the assistant
@@ -91,7 +103,10 @@ type FunctionCall struct {
 
 // ReasoningConfig controls extended thinking behavior for models that support it.
 type ReasoningConfig struct {
-	Effort string `json:"effort,omitempty"` // "low", "medium", "high", "xhigh"
+	Effort    string `json:"effort,omitempty"`     // "minimal", "low", "medium", "high", "xhigh"
+	MaxTokens int    `json:"max_tokens,omitempty"` // Reasoning token budget for supported providers
+	Enabled   *bool  `json:"enabled,omitempty"`    // Enable provider default reasoning mode
+	Exclude   *bool  `json:"exclude,omitempty"`    // Use hidden reasoning without returning reasoning tokens
 }
 
 // PromptCache configures provider-specific prompt caching behavior.
@@ -103,18 +118,30 @@ type PromptCache struct {
 
 // ChatRequest represents a chat completion request to an LLM provider.
 type ChatRequest struct {
-	Model                string           `json:"model"`
-	Messages             []Message        `json:"messages"`
-	Temperature          float64          `json:"temperature,omitempty"`
-	MaxTokens            int              `json:"max_tokens,omitempty"`
-	Stream               bool             `json:"stream"`
-	Tools                []map[string]any `json:"tools,omitempty"`                  // OpenAI function definitions
-	ToolChoice           string           `json:"tool_choice,omitempty"`            // "auto", "none", or specific function
-	Reasoning            *ReasoningConfig `json:"reasoning,omitempty"`              // Reasoning config for supported models
-	Transforms           []string         `json:"transforms,omitempty"`             // Provider-specific prompt transforms (e.g., OpenRouter)
-	PromptCacheKey       string           `json:"prompt_cache_key,omitempty"`       // OpenAI prompt caching key
-	PromptCacheRetention string           `json:"prompt_cache_retention,omitempty"` // OpenAI prompt cache retention
-	PromptCache          *PromptCache     `json:"-"`
+	Model                string            `json:"model"`
+	Models               []string          `json:"models,omitempty"` // OpenRouter fallback model list
+	Messages             []Message         `json:"messages"`
+	Temperature          float64           `json:"temperature,omitempty"`
+	MaxTokens            int               `json:"max_tokens,omitempty"`
+	MaxCompletionTokens  int               `json:"max_completion_tokens,omitempty"`
+	Stream               bool              `json:"stream"`
+	Tools                []map[string]any  `json:"tools,omitempty"`               // OpenAI function definitions
+	ToolChoice           string            `json:"tool_choice,omitempty"`         // "auto", "none", or specific function
+	ParallelToolCalls    *bool             `json:"parallel_tool_calls,omitempty"` // OpenRouter/OpenAI parallel tool calls
+	Reasoning            *ReasoningConfig  `json:"reasoning,omitempty"`           // Reasoning config for supported models
+	IncludeReasoning     *bool             `json:"include_reasoning,omitempty"`   // OpenRouter legacy reasoning toggle
+	Transforms           []string          `json:"transforms,omitempty"`          // Provider-specific prompt transforms (e.g., OpenRouter)
+	Provider             map[string]any    `json:"provider,omitempty"`            // OpenRouter provider routing preferences
+	ResponseFormat       map[string]any    `json:"response_format,omitempty"`     // JSON mode or JSON schema
+	Seed                 *int              `json:"seed,omitempty"`
+	ServiceTier          string            `json:"service_tier,omitempty"`
+	SessionID            string            `json:"session_id,omitempty"`             // OpenRouter observability/session grouping
+	Metadata             map[string]string `json:"metadata,omitempty"`               // OpenRouter request metadata
+	Trace                map[string]string `json:"trace,omitempty"`                  // OpenRouter tracing metadata
+	CacheControl         *CacheControl     `json:"cache_control,omitempty"`          // OpenRouter top-level prompt caching
+	PromptCacheKey       string            `json:"prompt_cache_key,omitempty"`       // OpenAI prompt caching key
+	PromptCacheRetention string            `json:"prompt_cache_retention,omitempty"` // OpenAI prompt cache retention
+	PromptCache          *PromptCache      `json:"-"`
 }
 
 // ChatResponse represents a non-streaming chat completion response.
@@ -158,12 +185,68 @@ type MessageDelta struct {
 
 // ReasoningDetail represents a reasoning block from OpenRouter's reasoning_details format.
 type ReasoningDetail struct {
-	Type    string `json:"type"` // "reasoning.text", "reasoning.summary", "reasoning.encrypted"
-	ID      string `json:"id,omitempty"`
-	Index   int    `json:"index,omitempty"`
-	Text    string `json:"text,omitempty"`    // For reasoning.text
-	Summary string `json:"summary,omitempty"` // For reasoning.summary
-	Format  string `json:"format,omitempty"`
+	Type      string                     `json:"type"` // "reasoning.text", "reasoning.summary", "reasoning.encrypted"
+	ID        string                     `json:"id,omitempty"`
+	Index     int                        `json:"index,omitempty"`
+	HasIndex  bool                       `json:"-"`
+	Text      string                     `json:"text,omitempty"`      // For reasoning.text
+	Summary   string                     `json:"summary,omitempty"`   // For reasoning.summary
+	Data      string                     `json:"data,omitempty"`      // For reasoning.encrypted
+	Signature *string                    `json:"signature,omitempty"` // For signed reasoning.text
+	Format    string                     `json:"format,omitempty"`
+	Extra     map[string]json.RawMessage `json:"-"`
+}
+
+func (d *ReasoningDetail) UnmarshalJSON(data []byte) error {
+	type alias ReasoningDetail
+	var aux alias
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	_, aux.HasIndex = raw["index"]
+	for _, key := range []string{"type", "id", "index", "text", "summary", "data", "format"} {
+		delete(raw, key)
+	}
+	aux.Extra = raw
+	*d = ReasoningDetail(aux)
+	return nil
+}
+
+func (d ReasoningDetail) MarshalJSON() ([]byte, error) {
+	fields := make(map[string]any, len(d.Extra)+8)
+	for key, value := range d.Extra {
+		fields[key] = value
+	}
+	if d.Type != "" {
+		fields["type"] = d.Type
+	}
+	if d.ID != "" {
+		fields["id"] = d.ID
+	}
+	if d.HasIndex || d.Index != 0 {
+		fields["index"] = d.Index
+	}
+	if d.Text != "" {
+		fields["text"] = d.Text
+	}
+	if d.Summary != "" {
+		fields["summary"] = d.Summary
+	}
+	if d.Data != "" {
+		fields["data"] = d.Data
+	}
+	if d.Signature != nil {
+		fields["signature"] = d.Signature
+	}
+	if d.Format != "" {
+		fields["format"] = d.Format
+	}
+	return json.Marshal(fields)
 }
 
 // ToolCallDelta represents incremental tool call data in streaming

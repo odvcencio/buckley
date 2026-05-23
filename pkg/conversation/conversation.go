@@ -12,16 +12,17 @@ import (
 
 // Message represents a conversation message
 type Message struct {
-	Role        string
-	Content     any // Can be string or []model.ContentPart for multimodal
-	Timestamp   time.Time
-	Tokens      int              // Estimated for Phase 1, accurate in Phase 3
-	ToolCalls   []model.ToolCall // For assistant messages with tool calls
-	ToolCallID  string           // For tool response messages
-	Name        string           // Tool name for tool messages
-	IsSummary   bool             // Indicates this message is a summary created by compaction
-	IsTruncated bool             // Indicates this message was interrupted/incomplete
-	Reasoning   string           // Reasoning/thinking content for reasoning models
+	Role             string
+	Content          any // Can be string or []model.ContentPart for multimodal
+	Timestamp        time.Time
+	Tokens           int                     // Estimated for Phase 1, accurate in Phase 3
+	ToolCalls        []model.ToolCall        // For assistant messages with tool calls
+	ToolCallID       string                  // For tool response messages
+	Name             string                  // Tool name for tool messages
+	IsSummary        bool                    // Indicates this message is a summary created by compaction
+	IsTruncated      bool                    // Indicates this message was interrupted/incomplete
+	Reasoning        string                  // Reasoning/thinking content for reasoning models
+	ReasoningDetails []model.ReasoningDetail // Structured reasoning blocks for reasoning continuity
 }
 
 // Conversation manages a conversation with the LLM
@@ -105,14 +106,20 @@ func (c *Conversation) AddAssistantMessage(content string) {
 
 // AddAssistantMessageWithReasoning adds an assistant message with reasoning content
 func (c *Conversation) AddAssistantMessageWithReasoning(content string, reasoning string) {
+	c.AddAssistantMessageWithReasoningDetails(content, reasoning, nil)
+}
+
+// AddAssistantMessageWithReasoningDetails adds an assistant message with reasoning details.
+func (c *Conversation) AddAssistantMessageWithReasoningDetails(content string, reasoning string, reasoningDetails []model.ReasoningDetail) {
 	tokens := estimateTokens(content) + estimateTokens(reasoning)
 	msg := Message{
-		Role:      "assistant",
-		Content:   content,
-		Timestamp: time.Now(),
-		Tokens:    tokens,
-		IsSummary: false,
-		Reasoning: reasoning,
+		Role:             "assistant",
+		Content:          content,
+		Timestamp:        time.Now(),
+		Tokens:           tokens,
+		IsSummary:        false,
+		Reasoning:        reasoning,
+		ReasoningDetails: cloneReasoningDetails(reasoningDetails),
 	}
 	c.Messages = append(c.Messages, msg)
 	c.TokenCount += msg.Tokens
@@ -133,13 +140,20 @@ func (c *Conversation) AddSystemMessage(content string) {
 
 // AddToolCallMessage adds an assistant message with tool calls
 func (c *Conversation) AddToolCallMessage(toolCalls []model.ToolCall) {
+	c.AddToolCallMessageWithReasoning(toolCalls, "", nil)
+}
+
+// AddToolCallMessageWithReasoning adds an assistant tool-call message with reasoning state.
+func (c *Conversation) AddToolCallMessageWithReasoning(toolCalls []model.ToolCall, reasoning string, reasoningDetails []model.ReasoningDetail) {
 	msg := Message{
-		Role:      "assistant",
-		Content:   "", // Tool calls don't have content
-		Timestamp: time.Now(),
-		Tokens:    estimateToolCallTokens(toolCalls),
-		ToolCalls: toolCalls,
-		IsSummary: false,
+		Role:             "assistant",
+		Content:          "", // Tool calls don't have content
+		Timestamp:        time.Now(),
+		Tokens:           estimateToolCallTokens(toolCalls) + estimateTokens(reasoning),
+		ToolCalls:        toolCalls,
+		IsSummary:        false,
+		Reasoning:        reasoning,
+		ReasoningDetails: cloneReasoningDetails(reasoningDetails),
 	}
 	c.Messages = append(c.Messages, msg)
 	c.TokenCount += msg.Tokens
@@ -189,12 +203,13 @@ func (c *Conversation) ToModelMessages() []model.Message {
 		}
 
 		msgs[i] = model.Message{
-			Role:       msg.Role,
-			Content:    content, // Will be nil if empty, triggering omitempty
-			ToolCalls:  msg.ToolCalls,
-			ToolCallID: msg.ToolCallID,
-			Name:       msg.Name,
-			Reasoning:  msg.Reasoning, // Pass reasoning back to model for continuity
+			Role:             msg.Role,
+			Content:          content, // Will be nil if empty, triggering omitempty
+			ToolCalls:        msg.ToolCalls,
+			ToolCallID:       msg.ToolCallID,
+			Name:             msg.Name,
+			Reasoning:        msg.Reasoning, // Pass reasoning back to model for continuity
+			ReasoningDetails: cloneReasoningDetails(msg.ReasoningDetails),
 		}
 	}
 	return msgs
@@ -267,13 +282,14 @@ func (c *Conversation) LoadFromStorage(store *storage.Store) error {
 
 	for i, msg := range messages {
 		c.Messages[i] = Message{
-			Role:        msg.Role,
-			Content:     materializeMessageContent(msg),
-			Timestamp:   msg.Timestamp,
-			Tokens:      msg.Tokens,
-			IsSummary:   msg.IsSummary,
-			IsTruncated: msg.IsTruncated,
-			Reasoning:   msg.Reasoning,
+			Role:             msg.Role,
+			Content:          materializeMessageContent(msg),
+			Timestamp:        msg.Timestamp,
+			Tokens:           msg.Tokens,
+			IsSummary:        msg.IsSummary,
+			IsTruncated:      msg.IsTruncated,
+			Reasoning:        msg.Reasoning,
+			ReasoningDetails: decodeReasoningDetails(msg.ReasoningDetails),
 		}
 		totalTokens += msg.Tokens
 		if msg.IsSummary {
@@ -294,16 +310,17 @@ func (c *Conversation) SaveMessage(store *storage.Store, msg Message) error {
 	}
 
 	storageMsg := &storage.Message{
-		SessionID:   c.SessionID,
-		Role:        msg.Role,
-		Content:     contentText,
-		ContentJSON: contentJSON,
-		ContentType: contentType,
-		Reasoning:   msg.Reasoning,
-		Timestamp:   msg.Timestamp,
-		Tokens:      msg.Tokens,
-		IsSummary:   msg.IsSummary,
-		IsTruncated: msg.IsTruncated,
+		SessionID:        c.SessionID,
+		Role:             msg.Role,
+		Content:          contentText,
+		ContentJSON:      contentJSON,
+		ContentType:      contentType,
+		Reasoning:        msg.Reasoning,
+		ReasoningDetails: encodeReasoningDetails(msg.ReasoningDetails),
+		Timestamp:        msg.Timestamp,
+		Tokens:           msg.Tokens,
+		IsSummary:        msg.IsSummary,
+		IsTruncated:      msg.IsTruncated,
 	}
 
 	return store.SaveMessage(storageMsg)
@@ -318,19 +335,49 @@ func (c *Conversation) SaveAllMessages(store *storage.Store) error {
 			return fmt.Errorf("serialize message %d: %w", i, err)
 		}
 		messages[i] = storage.Message{
-			SessionID:   c.SessionID,
-			Role:        msg.Role,
-			Content:     contentText,
-			ContentJSON: contentJSON,
-			ContentType: contentType,
-			Reasoning:   msg.Reasoning,
-			Timestamp:   msg.Timestamp,
-			Tokens:      msg.Tokens,
-			IsSummary:   msg.IsSummary,
-			IsTruncated: msg.IsTruncated,
+			SessionID:        c.SessionID,
+			Role:             msg.Role,
+			Content:          contentText,
+			ContentJSON:      contentJSON,
+			ContentType:      contentType,
+			Reasoning:        msg.Reasoning,
+			ReasoningDetails: encodeReasoningDetails(msg.ReasoningDetails),
+			Timestamp:        msg.Timestamp,
+			Tokens:           msg.Tokens,
+			IsSummary:        msg.IsSummary,
+			IsTruncated:      msg.IsTruncated,
 		}
 	}
 	return store.ReplaceMessages(c.SessionID, messages)
+}
+
+func cloneReasoningDetails(details []model.ReasoningDetail) []model.ReasoningDetail {
+	if len(details) == 0 {
+		return nil
+	}
+	return append([]model.ReasoningDetail(nil), details...)
+}
+
+func encodeReasoningDetails(details []model.ReasoningDetail) string {
+	if len(details) == 0 {
+		return ""
+	}
+	data, err := json.Marshal(details)
+	if err != nil {
+		return ""
+	}
+	return string(data)
+}
+
+func decodeReasoningDetails(raw string) []model.ReasoningDetail {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	var details []model.ReasoningDetail
+	if err := json.Unmarshal([]byte(raw), &details); err != nil {
+		return nil
+	}
+	return details
 }
 
 func serializeMessageContent(content any) (text string, jsonData string, messageType string, err error) {

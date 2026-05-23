@@ -34,11 +34,12 @@ func ReleaseStreamAccumulator(a *StreamAccumulator) {
 // It handles tool call delta accumulation following the OpenAI-compatible pattern
 // used by Kimi K2 and other models.
 type StreamAccumulator struct {
-	content   strings.Builder
-	reasoning strings.Builder
-	toolCalls []ToolCall
-	usage     *Usage
-	role      string
+	content          strings.Builder
+	reasoning        strings.Builder
+	reasoningDetails []ReasoningDetail
+	toolCalls        []ToolCall
+	usage            *Usage
+	role             string
 }
 
 // NewStreamAccumulator creates a new accumulator for streaming responses.
@@ -68,6 +69,9 @@ func (a *StreamAccumulator) Add(chunk StreamChunk) {
 	// Accumulate reasoning/thinking content
 	if delta.Reasoning != "" {
 		a.reasoning.WriteString(delta.Reasoning)
+	}
+	if len(delta.ReasoningDetails) > 0 {
+		a.reasoningDetails = append(a.reasoningDetails, delta.ReasoningDetails...)
 	}
 
 	// Accumulate tool calls by index
@@ -122,10 +126,11 @@ func (a *StreamAccumulator) accumulateToolCall(delta ToolCallDelta) {
 // Message returns the accumulated message.
 func (a *StreamAccumulator) Message() Message {
 	return Message{
-		Role:      a.role,
-		Content:   a.content.String(),
-		Reasoning: a.reasoning.String(),
-		ToolCalls: a.toolCalls,
+		Role:             a.role,
+		Content:          a.content.String(),
+		Reasoning:        a.reasoning.String(),
+		ReasoningDetails: a.reasoningDetails,
+		ToolCalls:        a.toolCalls,
 	}
 }
 
@@ -137,6 +142,11 @@ func (a *StreamAccumulator) Content() string {
 // Reasoning returns the accumulated reasoning/thinking content.
 func (a *StreamAccumulator) Reasoning() string {
 	return a.reasoning.String()
+}
+
+// ReasoningDetails returns accumulated OpenRouter reasoning detail blocks.
+func (a *StreamAccumulator) ReasoningDetails() []ReasoningDetail {
+	return a.reasoningDetails
 }
 
 // ToolCalls returns the accumulated tool calls.
@@ -158,6 +168,7 @@ func (a *StreamAccumulator) Usage() *Usage {
 func (a *StreamAccumulator) Reset() {
 	a.content.Reset()
 	a.reasoning.Reset()
+	a.reasoningDetails = nil
 	a.toolCalls = nil
 	a.usage = nil
 	a.role = ""
@@ -310,9 +321,10 @@ func (a *StreamAccumulator) FinalizeWithTokenParsing() Message {
 	content = FilterToolCallTokens(content)
 
 	return Message{
-		Role:      a.role,
-		Content:   content,
-		Reasoning: a.reasoning.String(),
-		ToolCalls: toolCalls,
+		Role:             a.role,
+		Content:          content,
+		Reasoning:        a.reasoning.String(),
+		ReasoningDetails: a.reasoningDetails,
+		ToolCalls:        toolCalls,
 	}
 }

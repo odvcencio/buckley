@@ -311,6 +311,9 @@ func TestClient_ChatCompletion(t *testing.T) {
 				if r.Header.Get("Content-Type") != "application/json" {
 					t.Errorf("Content-Type = %q, want application/json", r.Header.Get("Content-Type"))
 				}
+				if r.Header.Get("X-OpenRouter-Experimental-Metadata") != "enabled" {
+					t.Errorf("X-OpenRouter-Experimental-Metadata = %q, want enabled", r.Header.Get("X-OpenRouter-Experimental-Metadata"))
+				}
 
 				w.WriteHeader(tt.statusCode)
 				w.Write([]byte(tt.response))

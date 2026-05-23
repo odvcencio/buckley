@@ -308,7 +308,7 @@ func executeOneShot(prompt string, cfg *config.Config, mgr *model.Manager, store
 		engine = nil
 	}
 
-	resolvedModel := model.ResolvePhaseModel(cfg, mgr, engine, "execution", "")
+	resolvedModel := model.ResolvePhaseModel(cfg, mgr, engine, "execution", modelOverrideFlag)
 	if resolvedModel == "" {
 		resolvedModel = "openai/gpt-4o"
 	}

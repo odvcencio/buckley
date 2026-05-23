@@ -215,7 +215,7 @@ func (inv *CLIInvoker) buildCodexCommand(tool tools.Definition, prompt string, s
 
 func normalizeCLIReasoningEffort(effort string) string {
 	switch strings.ToLower(strings.TrimSpace(effort)) {
-	case "low", "medium", "high", "xhigh":
+	case "minimal", "low", "medium", "high", "xhigh":
 		return strings.ToLower(strings.TrimSpace(effort))
 	default:
 		return ""

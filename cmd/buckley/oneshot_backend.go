@@ -180,7 +180,7 @@ func cliReasoningEffort(cfg *config.Config, backend string) string {
 	switch strings.ToLower(strings.TrimSpace(cfg.Models.Reasoning)) {
 	case "off", "none":
 		return ""
-	case "low", "medium", "high", "xhigh":
+	case "minimal", "low", "medium", "high", "xhigh":
 		return strings.ToLower(strings.TrimSpace(cfg.Models.Reasoning))
 	default:
 		return "xhigh"

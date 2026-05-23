@@ -136,13 +136,13 @@ func applyEnvOverrides(cfg *Config, configEnv map[string]string) {
 	if codexModel != "" {
 		cfg.Providers.Codex.Models = []string{codexModel}
 		cfg.Providers.Codex.Enabled = true
-		if cfg.Models.Execution == "" || cfg.Models.Execution == defaultOpenRouterModel {
+		if cfg.Models.Execution == "" || isOpenRouterDefaultModel(cfg.Models.Execution) {
 			cfg.Models.Execution = codexModel
 		}
-		if cfg.Models.Planning == "" || cfg.Models.Planning == defaultOpenRouterModel {
+		if cfg.Models.Planning == "" || isOpenRouterDefaultModel(cfg.Models.Planning) {
 			cfg.Models.Planning = codexModel
 		}
-		if cfg.Models.Review == "" || cfg.Models.Review == defaultOpenRouterModel {
+		if cfg.Models.Review == "" || isOpenRouterDefaultModel(cfg.Models.Review) {
 			cfg.Models.Review = codexModel
 		}
 	}

@@ -628,8 +628,9 @@ func runACPLoop(
 		toolsEnabled := len(tools) > 0
 
 		req := model.ChatRequest{
-			Model:    modelID,
-			Messages: conv.ToModelMessages(),
+			Model:     modelID,
+			Messages:  conv.ToModelMessages(),
+			SessionID: conv.SessionID,
 		}
 		if useTools {
 			req.Tools = tools
@@ -663,7 +664,7 @@ func runACPLoop(
 				continue
 			}
 			sendACPPhaseUpdate(stream, lastPhase, "Finalizing response…")
-			conv.AddAssistantMessageWithReasoning(text, msg.Reasoning)
+			conv.AddAssistantMessageWithReasoningDetails(text, msg.Reasoning, msg.ReasoningDetails)
 			return text, nil
 		}
 
@@ -674,7 +675,7 @@ func runACPLoop(
 				msg.ToolCalls[i].ID = fmt.Sprintf("tool-%d", i+1)
 			}
 		}
-		conv.AddToolCallMessage(msg.ToolCalls)
+		conv.AddToolCallMessageWithReasoning(msg.ToolCalls, msg.Reasoning, msg.ReasoningDetails)
 
 		for i, tc := range msg.ToolCalls {
 			params, err := parseACPToolParams(tc.Function.Arguments)

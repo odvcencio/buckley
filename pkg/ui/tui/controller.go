@@ -993,8 +993,9 @@ func (c *Controller) runToolLoop(ctx context.Context, sess *SessionState, modelI
 		}
 
 		req := model.ChatRequest{
-			Model:    modelID,
-			Messages: c.buildMessagesForSession(sess),
+			Model:     modelID,
+			Messages:  c.buildMessagesForSession(sess),
+			SessionID: sess.ID,
 		}
 		if useTools && sess.ToolRegistry != nil {
 			tools := sess.ToolRegistry.ToOpenAIFunctionsGoverned(c.evaluator, "interactive", "coding", allowedTools, 0)
@@ -1033,8 +1034,8 @@ func (c *Controller) runToolLoop(ctx context.Context, sess *SessionState, modelI
 			if text == "" && strings.TrimSpace(msg.Reasoning) != "" {
 				text = msg.Reasoning
 			}
-			sess.Conversation.AddAssistantMessageWithReasoning(text, msg.Reasoning)
-			c.saveMessage(sess.ID, "assistant", text)
+			sess.Conversation.AddAssistantMessageWithReasoningDetails(text, msg.Reasoning, msg.ReasoningDetails)
+			c.saveMessageWithReasoning(sess.ID, "assistant", text, msg.Reasoning, msg.ReasoningDetails)
 			return text, &totalUsage, nil
 		}
 
@@ -1046,7 +1047,7 @@ func (c *Controller) runToolLoop(ctx context.Context, sess *SessionState, modelI
 				msg.ToolCalls[i].Function.Name = repairedName
 			}
 		}
-		sess.Conversation.AddToolCallMessage(msg.ToolCalls)
+		sess.Conversation.AddToolCallMessageWithReasoning(msg.ToolCalls, msg.Reasoning, msg.ReasoningDetails)
 
 		for _, tc := range msg.ToolCalls {
 			params, err := parseToolParams(tc.Function.Arguments)
@@ -1425,14 +1426,26 @@ func (c *Controller) Stop() {
 
 // saveMessage persists a message to storage.
 func (c *Controller) saveMessage(sessionID, role, content string) {
+	c.saveMessageWithReasoning(sessionID, role, content, "", nil)
+}
+
+func (c *Controller) saveMessageWithReasoning(sessionID, role, content, reasoning string, details []model.ReasoningDetail) {
 	if c.store == nil {
 		return
 	}
+	reasoningDetails := ""
+	if len(details) > 0 {
+		if data, err := json.Marshal(details); err == nil {
+			reasoningDetails = string(data)
+		}
+	}
 	msg := &storage.Message{
-		SessionID: sessionID,
-		Role:      role,
-		Content:   content,
-		Timestamp: time.Now(),
+		SessionID:        sessionID,
+		Role:             role,
+		Content:          content,
+		Reasoning:        reasoning,
+		ReasoningDetails: reasoningDetails,
+		Timestamp:        time.Now(),
 	}
 	_ = c.store.SaveMessage(msg) // Ignore errors for now
 }

@@ -166,11 +166,19 @@ func TestMessage_UnmarshalJSONCapturesReasoning(t *testing.T) {
 	}
 }
 
-func TestMessage_MarshalJSONOmitsReasoning(t *testing.T) {
+func TestMessage_MarshalJSONPreservesReasoning(t *testing.T) {
 	msg := Message{
 		Role:      "assistant",
 		Content:   "add: thing",
-		Reasoning: "should not be sent",
+		Reasoning: "reasoned through it",
+		ReasoningDetails: []ReasoningDetail{
+			{
+				Type:     "reasoning.text",
+				Text:     "reasoned through it",
+				Format:   "anthropic-claude-v1",
+				HasIndex: true,
+			},
+		},
 	}
 	blob, err := json.Marshal(msg)
 	if err != nil {
@@ -179,10 +187,76 @@ func TestMessage_MarshalJSONOmitsReasoning(t *testing.T) {
 	if !json.Valid(blob) {
 		t.Fatalf("expected valid JSON, got %q", string(blob))
 	}
-	if strings.Contains(string(blob), "reasoning") {
-		t.Fatalf("unexpected reasoning field present: %s", string(blob))
+	if !strings.Contains(string(blob), `"reasoning":"reasoned through it"`) {
+		t.Fatalf("expected reasoning field, got: %s", string(blob))
 	}
-	if string(blob) != `{"role":"assistant","content":"add: thing"}` {
-		t.Fatalf("json = %q, want %q", string(blob), `{"role":"assistant","content":"add: thing"}`)
+	if !strings.Contains(string(blob), `"reasoning_details"`) {
+		t.Fatalf("expected reasoning_details field, got: %s", string(blob))
+	}
+	if !strings.Contains(string(blob), `"index":0`) {
+		t.Fatalf("expected zero index to be preserved, got: %s", string(blob))
+	}
+}
+
+func TestReasoningDetail_RoundTripsUnknownFields(t *testing.T) {
+	raw := `{"type":"reasoning.encrypted","data":"abc","signature":null,"id":"r1","format":"anthropic-claude-v1","index":0,"provider_field":{"x":1}}`
+	var detail ReasoningDetail
+	if err := json.Unmarshal([]byte(raw), &detail); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !detail.HasIndex || detail.Index != 0 {
+		t.Fatalf("expected index presence to be preserved")
+	}
+	blob, err := json.Marshal(detail)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	out := string(blob)
+	for _, want := range []string{`"type":"reasoning.encrypted"`, `"data":"abc"`, `"signature":null`, `"index":0`, `"provider_field":{"x":1}`} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected %s in %s", want, out)
+		}
+	}
+}
+
+func TestChatRequest_MarshalsOpenRouterFields(t *testing.T) {
+	parallel := true
+	seed := 7
+	enabled := true
+	req := ChatRequest{
+		Model:               "qwen/qwen3.6-max-preview",
+		Models:              []string{"qwen/qwen3.6-max-preview", "qwen/qwen3.6-flash"},
+		Messages:            []Message{{Role: "user", Content: "hello"}},
+		MaxCompletionTokens: 128,
+		ParallelToolCalls:   &parallel,
+		Reasoning:           &ReasoningConfig{Enabled: &enabled, Effort: "minimal"},
+		Provider:            map[string]any{"allow_fallbacks": true, "data_collection": "deny"},
+		ResponseFormat:      map[string]any{"type": "json_object"},
+		Seed:                &seed,
+		ServiceTier:         "auto",
+		SessionID:           "session-1",
+		Metadata:            map[string]string{"surface": "test"},
+		Trace:               map[string]string{"trace_id": "trace-1"},
+		CacheControl:        &CacheControl{Type: "ephemeral", TTL: "1h"},
+	}
+
+	blob, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	out := string(blob)
+	for _, want := range []string{
+		`"models":["qwen/qwen3.6-max-preview","qwen/qwen3.6-flash"]`,
+		`"max_completion_tokens":128`,
+		`"parallel_tool_calls":true`,
+		`"provider":{"allow_fallbacks":true,"data_collection":"deny"}`,
+		`"response_format":{"type":"json_object"}`,
+		`"service_tier":"auto"`,
+		`"session_id":"session-1"`,
+		`"cache_control":{"type":"ephemeral","ttl":"1h"}`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected %s in %s", want, out)
+		}
 	}
 }

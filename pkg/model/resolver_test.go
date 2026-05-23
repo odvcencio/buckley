@@ -43,25 +43,25 @@ func TestResolver_Resolve(t *testing.T) {
 		want    string
 	}{
 		{
-			name:    "planning phase with reasoning routes to opus via arbiter",
+			name:    "planning phase with reasoning routes to qwen max via arbiter",
 			engine:  engine,
 			checker: &stubReasoningChecker{models: map[string]bool{"config-planning-model": true}},
 			phase:   "planning",
-			want:    "claude-opus-4-20250514",
+			want:    "qwen/qwen3.6-max-preview",
 		},
 		{
-			name:    "execution phase routes to sonnet via arbiter",
+			name:    "execution phase routes to qwen max via arbiter",
 			engine:  engine,
 			checker: &stubReasoningChecker{},
 			phase:   "execution",
-			want:    "claude-sonnet-4-20250514",
+			want:    "qwen/qwen3.6-max-preview",
 		},
 		{
-			name:    "review phase with reasoning routes to opus via arbiter",
+			name:    "review phase with reasoning routes to qwen max via arbiter",
 			engine:  engine,
 			checker: &stubReasoningChecker{models: map[string]bool{"config-review-model": true}},
 			phase:   "review",
-			want:    "claude-opus-4-20250514",
+			want:    "qwen/qwen3.6-max-preview",
 		},
 		{
 			name:    "nil engine falls back to config planning",
@@ -92,11 +92,11 @@ func TestResolver_Resolve(t *testing.T) {
 			want:    "config-execution-model",
 		},
 		{
-			name:    "review without reasoning support routes to sonnet default via arbiter",
+			name:    "review without reasoning support routes to qwen max default via arbiter",
 			engine:  engine,
 			checker: &stubReasoningChecker{},
 			phase:   "review",
-			want:    "claude-sonnet-4-20250514",
+			want:    "qwen/qwen3.6-max-preview",
 		},
 	}
 

@@ -461,6 +461,11 @@ func ensureMessagesSchema(db *sql.DB) error {
 			return fmt.Errorf("add messages.reasoning: %w", err)
 		}
 	}
+	if !cols["reasoning_details"] {
+		if _, err := db.Exec(`ALTER TABLE messages ADD COLUMN reasoning_details TEXT`); err != nil {
+			return fmt.Errorf("add messages.reasoning_details: %w", err)
+		}
+	}
 	if !cols["is_truncated"] {
 		if _, err := db.Exec(`ALTER TABLE messages ADD COLUMN is_truncated BOOLEAN DEFAULT FALSE`); err != nil {
 			return fmt.Errorf("add messages.is_truncated: %w", err)

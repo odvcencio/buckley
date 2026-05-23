@@ -209,4 +209,39 @@ func TestApplyProviderTransformsDropsEmptyAssistantMessages(t *testing.T) {
 	if got.Messages[1].Role != "assistant" || got.Messages[1].Content != "reasoned answer" {
 		t.Fatalf("expected reasoning-backed assistant message at index 1, got %+v", got.Messages[1])
 	}
+	if got.Messages[1].Reasoning != "" {
+		t.Fatalf("expected direct OpenAI request to strip reasoning metadata, got %+v", got.Messages[1])
+	}
+}
+
+func TestApplyProviderTransformsPreservesOpenRouterReasoningDetails(t *testing.T) {
+	req := ChatRequest{
+		Model: "qwen/qwen3.6-max-preview",
+		Messages: []Message{
+			{Role: "user", Content: "start"},
+			{
+				Role:      "assistant",
+				Content:   "answer",
+				Reasoning: "thinking",
+				ReasoningDetails: []ReasoningDetail{{
+					Type:     "reasoning.text",
+					Text:     "thinking",
+					HasIndex: true,
+				}},
+			},
+			{Role: "user", Content: "next"},
+		},
+	}
+
+	got := applyProviderTransforms(req, "openrouter")
+
+	if len(got.Messages) != 3 {
+		t.Fatalf("expected 3 messages, got %d", len(got.Messages))
+	}
+	if got.Messages[1].Reasoning != "thinking" {
+		t.Fatalf("expected reasoning to be preserved, got %+v", got.Messages[1])
+	}
+	if len(got.Messages[1].ReasoningDetails) != 1 || got.Messages[1].ReasoningDetails[0].Text != "thinking" {
+		t.Fatalf("expected reasoning details to be preserved, got %+v", got.Messages[1].ReasoningDetails)
+	}
 }

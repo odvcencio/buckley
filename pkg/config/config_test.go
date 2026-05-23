@@ -14,6 +14,15 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.Models.Planning == "" || cfg.Models.Execution == "" || cfg.Models.Review == "" {
 		t.Fatalf("default models should be populated: %+v", cfg.Models)
 	}
+	if cfg.Models.Execution != "qwen/qwen3.6-max-preview" {
+		t.Fatalf("expected default execution/chat model to be qwen/qwen3.6-max-preview, got %s", cfg.Models.Execution)
+	}
+	if cfg.Models.Review != "qwen/qwen3.6-max-preview" {
+		t.Fatalf("expected default review model to be qwen/qwen3.6-max-preview, got %s", cfg.Models.Review)
+	}
+	if cfg.Models.Utility.Commit != "qwen/qwen3.6-flash" {
+		t.Fatalf("expected default commit model to be qwen/qwen3.6-flash, got %s", cfg.Models.Utility.Commit)
+	}
 	if cfg.Personality.QuirkProbability <= 0 || cfg.Personality.QuirkProbability >= 1 {
 		t.Fatalf("unexpected quirk probability: %f", cfg.Personality.QuirkProbability)
 	}

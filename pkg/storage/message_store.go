@@ -12,18 +12,19 @@ import (
 
 // Message represents a conversation message stored for a session.
 type Message struct {
-	ID          int64     `json:"id"`
-	SessionID   string    `json:"sessionId"`
-	Role        string    `json:"role"`
-	Content     string    `json:"content"`
-	ContentJSON string    `json:"contentJson,omitempty"`
-	ContentType string    `json:"contentType,omitempty"`
-	Reasoning   string    `json:"reasoning,omitempty"` // Reasoning/thinking content for reasoning models
-	Embedding   []byte    `json:"embedding,omitempty"`
-	Timestamp   time.Time `json:"timestamp"`
-	Tokens      int       `json:"tokens"`
-	IsSummary   bool      `json:"isSummary"`
-	IsTruncated bool      `json:"isTruncated"` // True if message was interrupted/incomplete
+	ID               int64     `json:"id"`
+	SessionID        string    `json:"sessionId"`
+	Role             string    `json:"role"`
+	Content          string    `json:"content"`
+	ContentJSON      string    `json:"contentJson,omitempty"`
+	ContentType      string    `json:"contentType,omitempty"`
+	Reasoning        string    `json:"reasoning,omitempty"`        // Reasoning/thinking content for reasoning models
+	ReasoningDetails string    `json:"reasoningDetails,omitempty"` // JSON reasoning_details blocks
+	Embedding        []byte    `json:"embedding,omitempty"`
+	Timestamp        time.Time `json:"timestamp"`
+	Tokens           int       `json:"tokens"`
+	IsSummary        bool      `json:"isSummary"`
+	IsTruncated      bool      `json:"isTruncated"` // True if message was interrupted/incomplete
 }
 
 // Cursor represents a pagination cursor for efficient message retrieval.
@@ -135,8 +136,8 @@ func (s *Store) SaveMessage(msg *Message) error {
 
 	now := time.Now()
 	insert := `
-		INSERT INTO messages (session_id, role, content, content_json, content_type, reasoning, timestamp, tokens, is_summary, is_truncated)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO messages (session_id, role, content, content_json, content_type, reasoning, reasoning_details, timestamp, tokens, is_summary, is_truncated)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`
 	result, err := tx.Exec(insert,
 		msg.SessionID,
@@ -145,6 +146,7 @@ func (s *Store) SaveMessage(msg *Message) error {
 		nullIfEmpty(msg.ContentJSON),
 		defaultContentType(msg.ContentType),
 		nullIfEmpty(msg.Reasoning),
+		nullIfEmpty(msg.ReasoningDetails),
 		msg.Timestamp,
 		msg.Tokens,
 		msg.IsSummary,
@@ -206,8 +208,8 @@ func (s *Store) ReplaceMessages(sessionID string, messages []Message) error {
 	}
 
 	stmt, err := tx.Prepare(`
-		INSERT INTO messages (session_id, role, content, content_json, content_type, reasoning, timestamp, tokens, is_summary, is_truncated)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO messages (session_id, role, content, content_json, content_type, reasoning, reasoning_details, timestamp, tokens, is_summary, is_truncated)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`)
 	if err != nil {
 		return fmt.Errorf("replacing messages: prepare insert: %w", err)
@@ -234,6 +236,7 @@ func (s *Store) ReplaceMessages(sessionID string, messages []Message) error {
 			nullIfEmpty(msg.ContentJSON),
 			defaultContentType(msg.ContentType),
 			nullIfEmpty(msg.Reasoning),
+			nullIfEmpty(msg.ReasoningDetails),
 			ts,
 			msg.Tokens,
 			msg.IsSummary,
@@ -278,7 +281,7 @@ func (s *Store) ReplaceMessages(sessionID string, messages []Message) error {
 //	CREATE INDEX idx_messages_session_role ON messages(session_id, role);
 func (s *Store) GetMessages(sessionID string, limit int, offset int) ([]Message, error) {
 	query := `
-		SELECT id, session_id, role, content, content_json, content_type, reasoning, timestamp, tokens, is_summary, COALESCE(is_truncated, FALSE)
+		SELECT id, session_id, role, content, content_json, content_type, reasoning, reasoning_details, timestamp, tokens, is_summary, COALESCE(is_truncated, FALSE)
 		FROM messages
 		WHERE session_id = ?
 		ORDER BY timestamp ASC
@@ -297,6 +300,7 @@ func (s *Store) GetMessages(sessionID string, limit int, offset int) ([]Message,
 		var contentJSON sql.NullString
 		var contentType sql.NullString
 		var reasoning sql.NullString
+		var reasoningDetails sql.NullString
 		if err := rows.Scan(
 			&msg.ID,
 			&msg.SessionID,
@@ -305,6 +309,7 @@ func (s *Store) GetMessages(sessionID string, limit int, offset int) ([]Message,
 			&contentJSON,
 			&contentType,
 			&reasoning,
+			&reasoningDetails,
 			&msg.Timestamp,
 			&msg.Tokens,
 			&msg.IsSummary,
@@ -315,6 +320,7 @@ func (s *Store) GetMessages(sessionID string, limit int, offset int) ([]Message,
 		msg.ContentJSON = contentJSON.String
 		msg.ContentType = defaultContentType(contentType.String)
 		msg.Reasoning = reasoning.String
+		msg.ReasoningDetails = reasoningDetails.String
 		messages = append(messages, msg)
 	}
 
@@ -343,7 +349,7 @@ func (s *Store) GetMessagesWithCursor(sessionID string, cursor *Cursor, limit in
 	if cursor == nil {
 		// First page: no cursor filter
 		query = `
-			SELECT id, session_id, role, content, content_json, content_type, reasoning, timestamp, tokens, is_summary, COALESCE(is_truncated, FALSE)
+			SELECT id, session_id, role, content, content_json, content_type, reasoning, reasoning_details, timestamp, tokens, is_summary, COALESCE(is_truncated, FALSE)
 			FROM messages
 			WHERE session_id = ?
 			ORDER BY timestamp ASC, id ASC
@@ -353,7 +359,7 @@ func (s *Store) GetMessagesWithCursor(sessionID string, cursor *Cursor, limit in
 	} else {
 		// Subsequent pages: filter by cursor (timestamp, id)
 		query = `
-			SELECT id, session_id, role, content, content_json, content_type, reasoning, timestamp, tokens, is_summary, COALESCE(is_truncated, FALSE)
+			SELECT id, session_id, role, content, content_json, content_type, reasoning, reasoning_details, timestamp, tokens, is_summary, COALESCE(is_truncated, FALSE)
 			FROM messages
 			WHERE session_id = ? AND (timestamp > ? OR (timestamp = ? AND id > ?))
 			ORDER BY timestamp ASC, id ASC
@@ -377,6 +383,7 @@ func (s *Store) GetMessagesWithCursor(sessionID string, cursor *Cursor, limit in
 		var contentJSON sql.NullString
 		var contentType sql.NullString
 		var reasoning sql.NullString
+		var reasoningDetails sql.NullString
 		if err := rows.Scan(
 			&msg.ID,
 			&msg.SessionID,
@@ -385,6 +392,7 @@ func (s *Store) GetMessagesWithCursor(sessionID string, cursor *Cursor, limit in
 			&contentJSON,
 			&contentType,
 			&reasoning,
+			&reasoningDetails,
 			&msg.Timestamp,
 			&msg.Tokens,
 			&msg.IsSummary,
@@ -395,6 +403,7 @@ func (s *Store) GetMessagesWithCursor(sessionID string, cursor *Cursor, limit in
 		msg.ContentJSON = contentJSON.String
 		msg.ContentType = defaultContentType(contentType.String)
 		msg.Reasoning = reasoning.String
+		msg.ReasoningDetails = reasoningDetails.String
 
 		if count < limit {
 			messages = append(messages, msg)
@@ -444,7 +453,7 @@ func (s *Store) GetMessagesWithSessions(sessionIDs []string) (map[string][]Messa
 	}
 
 	query := fmt.Sprintf(`
-		SELECT id, session_id, role, content, content_json, content_type, reasoning, timestamp, tokens, is_summary, COALESCE(is_truncated, FALSE)
+		SELECT id, session_id, role, content, content_json, content_type, reasoning, reasoning_details, timestamp, tokens, is_summary, COALESCE(is_truncated, FALSE)
 		FROM messages
 		WHERE session_id IN (%s)
 		ORDER BY session_id, timestamp ASC
@@ -466,6 +475,7 @@ func (s *Store) GetMessagesWithSessions(sessionIDs []string) (map[string][]Messa
 		var contentJSON sql.NullString
 		var contentType sql.NullString
 		var reasoning sql.NullString
+		var reasoningDetails sql.NullString
 		if err := rows.Scan(
 			&msg.ID,
 			&msg.SessionID,
@@ -474,6 +484,7 @@ func (s *Store) GetMessagesWithSessions(sessionIDs []string) (map[string][]Messa
 			&contentJSON,
 			&contentType,
 			&reasoning,
+			&reasoningDetails,
 			&msg.Timestamp,
 			&msg.Tokens,
 			&msg.IsSummary,
@@ -484,6 +495,7 @@ func (s *Store) GetMessagesWithSessions(sessionIDs []string) (map[string][]Messa
 		msg.ContentJSON = contentJSON.String
 		msg.ContentType = defaultContentType(contentType.String)
 		msg.Reasoning = reasoning.String
+		msg.ReasoningDetails = reasoningDetails.String
 		result[msg.SessionID] = append(result[msg.SessionID], msg)
 	}
 
@@ -566,7 +578,7 @@ func (s *Store) GetSessionStats(sessionID string) (*SessionStats, error) {
 // GetLatestMessageByRole returns the most recent message for a role in a session.
 func (s *Store) GetLatestMessageByRole(sessionID, role string) (*Message, error) {
 	query := `
-		SELECT id, session_id, role, content, content_json, content_type, reasoning, timestamp, tokens, is_summary, COALESCE(is_truncated, FALSE)
+		SELECT id, session_id, role, content, content_json, content_type, reasoning, reasoning_details, timestamp, tokens, is_summary, COALESCE(is_truncated, FALSE)
 		FROM messages
 		WHERE session_id = ? AND role = ?
 		ORDER BY id DESC
@@ -578,6 +590,7 @@ func (s *Store) GetLatestMessageByRole(sessionID, role string) (*Message, error)
 	var contentJSON sql.NullString
 	var contentType sql.NullString
 	var reasoning sql.NullString
+	var reasoningDetails sql.NullString
 	if err := row.Scan(
 		&msg.ID,
 		&msg.SessionID,
@@ -586,6 +599,7 @@ func (s *Store) GetLatestMessageByRole(sessionID, role string) (*Message, error)
 		&contentJSON,
 		&contentType,
 		&reasoning,
+		&reasoningDetails,
 		&msg.Timestamp,
 		&msg.Tokens,
 		&msg.IsSummary,
@@ -599,6 +613,7 @@ func (s *Store) GetLatestMessageByRole(sessionID, role string) (*Message, error)
 	msg.ContentJSON = contentJSON.String
 	msg.ContentType = defaultContentType(contentType.String)
 	msg.Reasoning = reasoning.String
+	msg.ReasoningDetails = reasoningDetails.String
 
 	return &msg, nil
 }
@@ -606,7 +621,7 @@ func (s *Store) GetLatestMessageByRole(sessionID, role string) (*Message, error)
 // GetRecentMessagesByRole returns the most recent messages for a role across sessions.
 func (s *Store) GetRecentMessagesByRole(role string, limit int) ([]Message, error) {
 	query := `
-		SELECT id, session_id, role, content, content_json, content_type, reasoning, timestamp, tokens, is_summary, COALESCE(is_truncated, FALSE)
+		SELECT id, session_id, role, content, content_json, content_type, reasoning, reasoning_details, timestamp, tokens, is_summary, COALESCE(is_truncated, FALSE)
 		FROM messages
 		WHERE role = ?
 		ORDER BY timestamp DESC
@@ -624,6 +639,7 @@ func (s *Store) GetRecentMessagesByRole(role string, limit int) ([]Message, erro
 		var contentJSON sql.NullString
 		var contentType sql.NullString
 		var reasoning sql.NullString
+		var reasoningDetails sql.NullString
 		if err := rows.Scan(
 			&msg.ID,
 			&msg.SessionID,
@@ -632,6 +648,7 @@ func (s *Store) GetRecentMessagesByRole(role string, limit int) ([]Message, erro
 			&contentJSON,
 			&contentType,
 			&reasoning,
+			&reasoningDetails,
 			&msg.Timestamp,
 			&msg.Tokens,
 			&msg.IsSummary,
@@ -642,6 +659,7 @@ func (s *Store) GetRecentMessagesByRole(role string, limit int) ([]Message, erro
 		msg.ContentJSON = contentJSON.String
 		msg.ContentType = defaultContentType(contentType.String)
 		msg.Reasoning = reasoning.String
+		msg.ReasoningDetails = reasoningDetails.String
 		messages = append(messages, msg)
 	}
 
@@ -729,8 +747,8 @@ func (s *Store) SaveMessagesBatch(messages []*Message) error {
 	}()
 
 	stmt, err := tx.Prepare(`
-		INSERT INTO messages (session_id, role, content, content_json, content_type, reasoning, timestamp, tokens, is_summary, is_truncated)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO messages (session_id, role, content, content_json, content_type, reasoning, reasoning_details, timestamp, tokens, is_summary, is_truncated)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`)
 	if err != nil {
 		return fmt.Errorf("prepare batch insert: %w", err)
@@ -772,6 +790,7 @@ func (s *Store) SaveMessagesBatch(messages []*Message) error {
 			nullIfEmpty(msg.ContentJSON),
 			defaultContentType(msg.ContentType),
 			nullIfEmpty(msg.Reasoning),
+			nullIfEmpty(msg.ReasoningDetails),
 			msg.Timestamp,
 			msg.Tokens,
 			msg.IsSummary,

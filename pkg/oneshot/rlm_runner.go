@@ -165,7 +165,7 @@ func (r *RLMRunner) Run(ctx context.Context, systemPrompt, task string, allowedT
 
 func normalizeRLMReasoningEffort(effort string) string {
 	switch strings.ToLower(strings.TrimSpace(effort)) {
-	case "low", "medium", "high", "xhigh":
+	case "minimal", "low", "medium", "high", "xhigh":
 		return strings.ToLower(strings.TrimSpace(effort))
 	default:
 		return ""

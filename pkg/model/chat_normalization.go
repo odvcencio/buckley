@@ -96,10 +96,23 @@ func normalizeChatMessages(messages []Message, providerID, modelID string) []Mes
 			}
 		}
 
+		if !preservesReasoningMessages(providerID) {
+			msg.Reasoning = ""
+			msg.ReasoningDetails = nil
+		}
 		normalized = append(normalized, msg)
 	}
 
 	return repairToolMessageSequence(normalized)
+}
+
+func preservesReasoningMessages(providerID string) bool {
+	switch strings.ToLower(strings.TrimSpace(providerID)) {
+	case "openrouter":
+		return true
+	default:
+		return false
+	}
 }
 
 func cloneMessage(msg Message) Message {

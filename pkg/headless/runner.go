@@ -488,7 +488,7 @@ func (r *Runner) runConversationLoop() error {
 
 		// Check for tool calls
 		if len(msg.ToolCalls) > 0 {
-			if err := r.handleToolCalls(ctx, msg.ToolCalls); err != nil {
+			if err := r.handleToolCalls(ctx, msg); err != nil {
 				if err == context.Canceled {
 					return nil
 				}
@@ -499,7 +499,7 @@ func (r *Runner) runConversationLoop() error {
 
 		// Regular text response - add to conversation and finish
 		if content != "" {
-			r.conv.AddAssistantMessageWithReasoning(content, reasoning)
+			r.conv.AddAssistantMessageWithReasoningDetails(content, reasoning, msg.ReasoningDetails)
 			assistantMsg := r.conv.Messages[len(r.conv.Messages)-1]
 			if err := r.conv.SaveMessage(r.store, assistantMsg); err != nil {
 				r.emitError("failed to save assistant message", err)
@@ -523,8 +523,9 @@ func (r *Runner) runConversationLoop() error {
 func (r *Runner) buildChatRequest() model.ChatRequest {
 	modelID := r.resolveExecutionModel()
 	req := model.ChatRequest{
-		Model:    modelID,
-		Messages: r.conv.ToModelMessages(),
+		Model:     modelID,
+		Messages:  r.conv.ToModelMessages(),
+		SessionID: r.sessionID,
 	}
 	if r.tools != nil && r.modelManager != nil && r.modelManager.SupportsTools(modelID) {
 		req.Tools = r.tools.ToOpenAIFunctionsGoverned(r.evaluator, "interactive", "coding", nil, 0)
@@ -581,9 +582,10 @@ func (r *Runner) callModel(ctx context.Context, req model.ChatRequest) (*model.C
 	return resp, err
 }
 
-func (r *Runner) handleToolCalls(ctx context.Context, toolCalls []model.ToolCall) error {
+func (r *Runner) handleToolCalls(ctx context.Context, msg model.Message) error {
+	toolCalls := msg.ToolCalls
 	// Add the tool call message to conversation
-	r.conv.AddToolCallMessage(toolCalls)
+	r.conv.AddToolCallMessageWithReasoning(toolCalls, msg.Reasoning, msg.ReasoningDetails)
 
 	for _, tc := range toolCalls {
 		decision := "auto"

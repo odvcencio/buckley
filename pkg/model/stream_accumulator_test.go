@@ -54,6 +54,42 @@ func TestStreamAccumulator_Reasoning(t *testing.T) {
 	}
 }
 
+func TestStreamAccumulator_ReasoningDetails(t *testing.T) {
+	acc := NewStreamAccumulator()
+
+	acc.Add(StreamChunk{
+		Choices: []StreamChoice{{
+			Delta: MessageDelta{
+				ReasoningDetails: []ReasoningDetail{{
+					Type:     "reasoning.text",
+					Text:     "first",
+					HasIndex: true,
+				}},
+			},
+		}},
+	})
+	acc.Add(StreamChunk{
+		Choices: []StreamChoice{{
+			Delta: MessageDelta{
+				ReasoningDetails: []ReasoningDetail{{
+					Type:    "reasoning.summary",
+					Index:   1,
+					Summary: "second",
+				}},
+			},
+		}},
+	})
+
+	details := acc.ReasoningDetails()
+	if len(details) != 2 {
+		t.Fatalf("len(ReasoningDetails()) = %d, want 2", len(details))
+	}
+	msg := acc.Message()
+	if len(msg.ReasoningDetails) != 2 || msg.ReasoningDetails[0].Text != "first" || msg.ReasoningDetails[1].Summary != "second" {
+		t.Fatalf("unexpected message reasoning details: %+v", msg.ReasoningDetails)
+	}
+}
+
 func TestStreamAccumulator_SingleToolCall(t *testing.T) {
 	acc := NewStreamAccumulator()
 

@@ -359,13 +359,15 @@ func TestHandleToolCallsLogsAuditDecisionMetadata(t *testing.T) {
 
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- runner.handleToolCalls(context.Background(), []model.ToolCall{
-			{
-				ID:   "tc1",
-				Type: "function",
-				Function: model.FunctionCall{
-					Name:      "write_file",
-					Arguments: "{}",
+		errCh <- runner.handleToolCalls(context.Background(), model.Message{
+			ToolCalls: []model.ToolCall{
+				{
+					ID:   "tc1",
+					Type: "function",
+					Function: model.FunctionCall{
+						Name:      "write_file",
+						Arguments: "{}",
+					},
 				},
 			},
 		})

@@ -46,6 +46,7 @@ CREATE TABLE IF NOT EXISTS messages (
     content_json TEXT,
     content_type TEXT NOT NULL DEFAULT 'text',
     reasoning TEXT,
+    reasoning_details TEXT,
     embedding BLOB,
     timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     tokens INT DEFAULT 0,

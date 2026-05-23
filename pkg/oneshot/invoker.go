@@ -82,7 +82,7 @@ func (inv *DefaultInvoker) requestReasoning() *model.ReasoningConfig {
 
 func normalizeInvokerReasoningEffort(effort string) string {
 	switch strings.ToLower(strings.TrimSpace(effort)) {
-	case "low", "medium", "high", "xhigh":
+	case "minimal", "low", "medium", "high", "xhigh":
 		return strings.ToLower(strings.TrimSpace(effort))
 	default:
 		return ""
@@ -108,6 +108,8 @@ func (inv *DefaultInvoker) Invoke(ctx context.Context, systemPrompt, userPrompt 
 		Tools:      []map[string]any{tool.ToOpenAIFormat()},
 		ToolChoice: "auto",
 		Reasoning:  inv.requestReasoning(),
+		SessionID:  traceID,
+		Trace:      map[string]string{"trace_id": traceID, "trace_name": "oneshot"},
 	}
 
 	// Capture request for tracing
@@ -212,6 +214,8 @@ func (inv *DefaultInvoker) InvokeStream(ctx context.Context, systemPrompt, userP
 		ToolChoice: "auto",
 		Stream:     true,
 		Reasoning:  inv.requestReasoning(),
+		SessionID:  traceID,
+		Trace:      map[string]string{"trace_id": traceID, "trace_name": "oneshot"},
 	}
 
 	// Capture request for tracing
@@ -333,6 +337,8 @@ func (inv *DefaultInvoker) InvokeText(ctx context.Context, systemPrompt, userPro
 			{Role: "user", Content: userPrompt},
 		},
 		Reasoning: inv.requestReasoning(),
+		SessionID: traceID,
+		Trace:     map[string]string{"trace_id": traceID, "trace_name": "oneshot"},
 	}
 
 	// Capture request for tracing
@@ -483,6 +489,8 @@ func (inv *DefaultInvoker) InvokeWithTools(ctx context.Context, systemPrompt, us
 			Tools:      toolSpecs,
 			ToolChoice: "auto",
 			Reasoning:  inv.requestReasoning(),
+			SessionID:  traceID,
+			Trace:      map[string]string{"trace_id": traceID, "trace_name": "oneshot-tools"},
 		}
 
 		resp, err := inv.client.ChatCompletion(ctx, req)

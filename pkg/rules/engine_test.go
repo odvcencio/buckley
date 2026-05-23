@@ -530,44 +530,44 @@ func TestEngine_EvalStrategy_Routing_AllScenarios(t *testing.T) {
 		wantModel string
 	}{
 		{
-			name: "planning + reasoning supported: opus",
+			name: "planning + reasoning supported: qwen max",
 			facts: map[string]any{
 				"task":  map[string]any{"phase": "planning"},
 				"model": map[string]any{"supports_reasoning": true},
 			},
-			wantModel: "claude-opus-4-20250514",
+			wantModel: "qwen/qwen3.6-max-preview",
 		},
 		{
-			name: "execution phase: sonnet",
+			name: "execution phase: qwen max",
 			facts: map[string]any{
 				"task":  map[string]any{"phase": "execution"},
 				"model": map[string]any{"supports_reasoning": false},
 			},
-			wantModel: "claude-sonnet-4-20250514",
+			wantModel: "qwen/qwen3.6-max-preview",
 		},
 		{
-			name: "review + reasoning supported: opus",
+			name: "review + reasoning supported: qwen max",
 			facts: map[string]any{
 				"task":  map[string]any{"phase": "review"},
 				"model": map[string]any{"supports_reasoning": true},
 			},
-			wantModel: "claude-opus-4-20250514",
+			wantModel: "qwen/qwen3.6-max-preview",
 		},
 		{
-			name: "planning + no reasoning: default sonnet",
+			name: "planning + no reasoning: default qwen max",
 			facts: map[string]any{
 				"task":  map[string]any{"phase": "planning"},
 				"model": map[string]any{"supports_reasoning": false},
 			},
-			wantModel: "claude-sonnet-4-20250514",
+			wantModel: "qwen/qwen3.6-max-preview",
 		},
 		{
-			name: "unknown phase: default sonnet",
+			name: "unknown phase: default qwen max",
 			facts: map[string]any{
 				"task":  map[string]any{"phase": "unknown"},
 				"model": map[string]any{"supports_reasoning": true},
 			},
-			wantModel: "claude-sonnet-4-20250514",
+			wantModel: "qwen/qwen3.6-max-preview",
 		},
 	}
 

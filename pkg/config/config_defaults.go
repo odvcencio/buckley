@@ -149,6 +149,7 @@ func DefaultConfig() *Config {
 				"openai/":    "openai",
 				"anthropic/": "anthropic",
 				"google/":    "google",
+				"qwen/":      "openrouter",
 				"ollama/":    "ollama",
 				"litellm/":   "litellm",
 				"codex/":     "codex",

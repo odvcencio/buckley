@@ -65,7 +65,12 @@ func TestAddAssistantMessage(t *testing.T) {
 
 func TestAddAssistantMessageWithReasoning(t *testing.T) {
 	conv := New("test")
-	conv.AddAssistantMessageWithReasoning("Here's the plan", "chain-of-thought")
+	details := []model.ReasoningDetail{{
+		Type:     "reasoning.summary",
+		Summary:  "planned next step",
+		HasIndex: true,
+	}}
+	conv.AddAssistantMessageWithReasoningDetails("Here's the plan", "chain-of-thought", details)
 
 	if len(conv.Messages) != 1 {
 		t.Fatalf("Expected 1 message, got %d", len(conv.Messages))
@@ -80,6 +85,9 @@ func TestAddAssistantMessageWithReasoning(t *testing.T) {
 	modelMsgs := conv.ToModelMessages()
 	if modelMsgs[0].Reasoning != "chain-of-thought" {
 		t.Fatalf("expected reasoning to flow into model message")
+	}
+	if len(modelMsgs[0].ReasoningDetails) != 1 || modelMsgs[0].ReasoningDetails[0].Summary != "planned next step" {
+		t.Fatalf("expected reasoning_details to flow into model message: %+v", modelMsgs[0].ReasoningDetails)
 	}
 }
 
@@ -128,6 +136,45 @@ func TestAddToolCallMessage(t *testing.T) {
 	}
 }
 
+func TestAddToolCallMessageWithReasoningPreservesMultiTurnState(t *testing.T) {
+	conv := New("test")
+	toolCalls := []model.ToolCall{
+		{
+			ID:   "call_123",
+			Type: "function",
+			Function: model.FunctionCall{
+				Name:      "read_file",
+				Arguments: `{"path":"/test/file.txt"}`,
+			},
+		},
+	}
+	details := []model.ReasoningDetail{{
+		Type:     "reasoning.text",
+		Text:     "Need to inspect the file before answering.",
+		Format:   "anthropic-claude-v1",
+		HasIndex: true,
+	}}
+
+	conv.AddUserMessage("Review this file")
+	conv.AddToolCallMessageWithReasoning(toolCalls, "Need to inspect the file before answering.", details)
+	conv.AddToolResponseMessage("call_123", "read_file", "file contents")
+
+	modelMsgs := conv.ToModelMessages()
+	if len(modelMsgs) != 3 {
+		t.Fatalf("expected 3 model messages, got %d", len(modelMsgs))
+	}
+	assistant := modelMsgs[1]
+	if assistant.Role != "assistant" || len(assistant.ToolCalls) != 1 {
+		t.Fatalf("expected assistant tool-call message, got %+v", assistant)
+	}
+	if assistant.Reasoning == "" {
+		t.Fatalf("expected assistant reasoning to be preserved")
+	}
+	if len(assistant.ReasoningDetails) != 1 || assistant.ReasoningDetails[0].Text == "" {
+		t.Fatalf("expected assistant reasoning_details to be preserved: %+v", assistant.ReasoningDetails)
+	}
+}
+
 func TestAddToolResponseMessage(t *testing.T) {
 	conv := New("test")
 	conv.AddToolResponseMessage("call_123", "read_file", "File contents here")
@@ -145,6 +192,54 @@ func TestAddToolResponseMessage(t *testing.T) {
 	}
 	if msg.Name != "read_file" {
 		t.Errorf("Expected name 'read_file', got '%s'", msg.Name)
+	}
+}
+
+func TestConversationStoragePreservesReasoningDetails(t *testing.T) {
+	dir := t.TempDir()
+	store, err := storage.New(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatalf("storage.New: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = store.Close()
+	})
+
+	sessionID := "session-reasoning-details"
+	if err := store.CreateSession(&storage.Session{
+		ID:         sessionID,
+		CreatedAt:  time.Now(),
+		LastActive: time.Now(),
+		Status:     storage.SessionStatusActive,
+	}); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	conv := New(sessionID)
+	conv.AddAssistantMessageWithReasoningDetails("Done", "reasoning", []model.ReasoningDetail{{
+		Type:     "reasoning.encrypted",
+		Data:     "opaque",
+		Format:   "anthropic-claude-v1",
+		HasIndex: true,
+	}})
+	if err := conv.SaveAllMessages(store); err != nil {
+		t.Fatalf("save messages: %v", err)
+	}
+
+	loaded := New(sessionID)
+	if err := loaded.LoadFromStorage(store); err != nil {
+		t.Fatalf("load messages: %v", err)
+	}
+	if len(loaded.Messages) != 1 {
+		t.Fatalf("expected 1 loaded message, got %d", len(loaded.Messages))
+	}
+	details := loaded.Messages[0].ReasoningDetails
+	if len(details) != 1 || details[0].Data != "opaque" {
+		t.Fatalf("expected reasoning details to round-trip, got %+v", details)
+	}
+	modelMsgs := loaded.ToModelMessages()
+	if len(modelMsgs[0].ReasoningDetails) != 1 || modelMsgs[0].ReasoningDetails[0].Data != "opaque" {
+		t.Fatalf("expected model messages to include reasoning details, got %+v", modelMsgs[0].ReasoningDetails)
 	}
 }
 
