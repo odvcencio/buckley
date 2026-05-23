@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-05-23
+
+### Added
+- OpenRouter request support for fallback model lists, provider routing preferences, response formats, service tiers, seeds, session IDs, metadata, traces, parallel tool calls, cache control, and expanded reasoning controls.
+- OpenRouter `reasoning_details` preservation across streaming, conversation history, SQLite storage, ACP, headless, one-shot, RLM, and TUI tool-call loops.
+- Storage migration for persisted assistant reasoning details.
+
+### Changed
+- Default OpenRouter chat, planning, review, and interactive execution model is now `qwen/qwen3.6-max-preview`.
+- Default utility model, including commit generation, is now `qwen/qwen3.6-flash`.
+- Arbiter model routing now selects the Qwen OpenRouter default and routes `qwen/` model IDs through OpenRouter.
+- Non-OpenRouter provider normalization strips unsupported reasoning metadata while preserving reasoning-only assistant text as content.
+
+### Fixed
+- `buckley -p -m <model>` now honors the explicit model override through one-shot execution resolution.
+- Multi-turn tool-call chats now carry assistant reasoning details forward instead of dropping them between turns.
+
 ## [1.1.0] - 2026-04-05
 
 ### Added
@@ -67,6 +84,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Telemetry is local-only by default.
 - Plugin discovery limited to local paths only.
 
-[Unreleased]: https://github.com/odvcencio/buckley/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/odvcencio/buckley/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/odvcencio/buckley/releases/tag/v1.2.0
 [1.1.0]: https://github.com/odvcencio/buckley/releases/tag/v1.1.0
 [1.0.0]: https://github.com/odvcencio/buckley/releases/tag/v1.0.0
