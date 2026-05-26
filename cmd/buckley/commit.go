@@ -90,6 +90,18 @@ func runCommitCommand(args []string) error {
 		}
 	}
 
+	// Pre-flight: require non-empty staged content before spending LLM tokens.
+	// Without staged content, the unified oneshot framework drops the empty
+	// git_diff:staged source silently and the prompt collapses to AGENTS.md
+	// only — the model then faithfully summarizes project guidelines as the
+	// "change" and the downstream `git commit -F` fails with exit 1 anyway.
+	// Fail fast here with a clear, actionable error instead.
+	if hasStaged, checkErr := hasStagedChanges(); checkErr != nil {
+		return fmt.Errorf("check staged changes: %w", checkErr)
+	} else if !hasStaged {
+		return fmt.Errorf("no staged changes — stage files with `git add <files>` first, or pass them as positional arguments (e.g. `buckley commit --yes -- file.go`)")
+	}
+
 	// Initialize dependencies
 	cfg, mgr, store, err := initOneshotDependencies(backend)
 	if store != nil {
@@ -422,6 +434,29 @@ func oneshotMinimalOutputEnabled() bool {
 // stageFiles stages the given files with the appropriate VCS.
 // In graft mode: graft add (with entity extraction) first, then git add as mirror.
 // In git mode: git add only.
+// hasStagedChanges reports whether the git index has any staged content.
+// Uses `git diff --cached --quiet`, which exits 0 when no diff is present
+// and 1 when staged changes exist. Any other error (e.g. not in a git
+// repository) is propagated so the caller can decide how to surface it.
+func hasStagedChanges() (bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", "diff", "--cached", "--quiet")
+	err := cmd.Run()
+	if err == nil {
+		return false, nil
+	}
+	if exitErr, ok := err.(*exec.ExitError); ok {
+		// Exit 1 from `git diff --quiet` means "differences detected" —
+		// i.e. there ARE staged changes. Anything else is a real error.
+		if exitErr.ExitCode() == 1 {
+			return true, nil
+		}
+		return false, fmt.Errorf("git diff --cached: exit %d", exitErr.ExitCode())
+	}
+	return false, fmt.Errorf("git diff --cached: %w", err)
+}
+
 func stageFiles(files []string, useGraft bool, compactOutput bool) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
