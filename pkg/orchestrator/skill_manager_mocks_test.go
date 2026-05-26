@@ -12,7 +12,7 @@ package orchestrator
 import (
 	reflect "reflect"
 
-	"github.com/odvcencio/buckley/pkg/skill"
+	"m31labs.dev/buckley/pkg/skill"
 	gomock "go.uber.org/mock/gomock"
 )
 

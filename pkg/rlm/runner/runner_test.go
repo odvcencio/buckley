@@ -3,8 +3,8 @@ package runner
 import (
 	"testing"
 
-	"github.com/odvcencio/buckley/pkg/config"
-	"github.com/odvcencio/buckley/pkg/orchestrator"
+	"m31labs.dev/buckley/pkg/config"
+	"m31labs.dev/buckley/pkg/orchestrator"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

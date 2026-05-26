@@ -3,7 +3,7 @@ package widgets
 import (
 	"path/filepath"
 
-	"github.com/odvcencio/buckley/pkg/buckley/ui/filepicker"
+	"m31labs.dev/buckley/pkg/buckley/ui/filepicker"
 	"github.com/odvcencio/fluffyui/accessibility"
 	"github.com/odvcencio/fluffyui/backend"
 	"github.com/odvcencio/fluffyui/runtime"

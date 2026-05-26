@@ -8,9 +8,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/odvcencio/buckley/pkg/bus"
-	"github.com/odvcencio/buckley/pkg/model"
-	"github.com/odvcencio/buckley/pkg/tool"
+	"m31labs.dev/buckley/pkg/bus"
+	"m31labs.dev/buckley/pkg/model"
+	"m31labs.dev/buckley/pkg/tool"
 )
 
 // WorkerPool manages a pool of executor agents pulling from a TaskQueue.

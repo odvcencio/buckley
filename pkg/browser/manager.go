@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/odvcencio/buckley/pkg/telemetry"
+	"m31labs.dev/buckley/pkg/telemetry"
 )
 
 // Manager tracks active browser sessions for a runtime.

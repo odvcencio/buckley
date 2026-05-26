@@ -3,7 +3,7 @@ package oneshot
 import (
 	"testing"
 
-	"github.com/odvcencio/buckley/pkg/tools"
+	"m31labs.dev/buckley/pkg/tools"
 )
 
 func TestRegistry(t *testing.T) {

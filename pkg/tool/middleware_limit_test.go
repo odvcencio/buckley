@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/odvcencio/buckley/pkg/tool/builtin"
+	"m31labs.dev/buckley/pkg/tool/builtin"
 )
 
 func TestResultSizeLimitTruncates(t *testing.T) {

@@ -3,8 +3,8 @@ package runtime
 import (
 	"testing"
 
-	"github.com/odvcencio/buckley/pkg/ui/backend"
-	"github.com/odvcencio/buckley/pkg/ui/terminal"
+	"m31labs.dev/buckley/pkg/ui/backend"
+	"m31labs.dev/buckley/pkg/ui/terminal"
 )
 
 // mockWidget is a test widget.

@@ -7,10 +7,10 @@ import (
 	"testing"
 	"time"
 
-	acppb "github.com/odvcencio/buckley/pkg/acp/proto"
-	"github.com/odvcencio/buckley/pkg/config"
-	"github.com/odvcencio/buckley/pkg/coordination/coordinator"
-	"github.com/odvcencio/buckley/pkg/coordination/events"
+	acppb "m31labs.dev/buckley/pkg/acp/proto"
+	"m31labs.dev/buckley/pkg/config"
+	"m31labs.dev/buckley/pkg/coordination/coordinator"
+	"m31labs.dev/buckley/pkg/coordination/events"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )

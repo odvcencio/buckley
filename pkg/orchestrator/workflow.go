@@ -10,16 +10,16 @@ import (
 	"sync"
 	"time"
 
-	"github.com/odvcencio/buckley/pkg/artifact"
-	"github.com/odvcencio/buckley/pkg/config"
-	"github.com/odvcencio/buckley/pkg/paths"
-	"github.com/odvcencio/buckley/pkg/personality"
-	"github.com/odvcencio/buckley/pkg/prompts"
-	"github.com/odvcencio/buckley/pkg/skill"
-	"github.com/odvcencio/buckley/pkg/storage"
-	"github.com/odvcencio/buckley/pkg/telemetry"
-	"github.com/odvcencio/buckley/pkg/tool"
-	"github.com/odvcencio/buckley/pkg/tool/builtin"
+	"m31labs.dev/buckley/pkg/artifact"
+	"m31labs.dev/buckley/pkg/config"
+	"m31labs.dev/buckley/pkg/paths"
+	"m31labs.dev/buckley/pkg/personality"
+	"m31labs.dev/buckley/pkg/prompts"
+	"m31labs.dev/buckley/pkg/skill"
+	"m31labs.dev/buckley/pkg/storage"
+	"m31labs.dev/buckley/pkg/telemetry"
+	"m31labs.dev/buckley/pkg/tool"
+	"m31labs.dev/buckley/pkg/tool/builtin"
 )
 
 // WorkflowPhase represents the current phase of the workflow

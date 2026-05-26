@@ -12,7 +12,7 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/odvcencio/buckley/pkg/tool/builtin"
+	"m31labs.dev/buckley/pkg/tool/builtin"
 )
 
 // ExternalTool wraps an external executable as a Tool

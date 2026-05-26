@@ -12,10 +12,10 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
-	"github.com/odvcencio/buckley/pkg/config"
-	"github.com/odvcencio/buckley/pkg/ipc/command"
-	"github.com/odvcencio/buckley/pkg/orchestrator"
-	"github.com/odvcencio/buckley/pkg/storage"
+	"m31labs.dev/buckley/pkg/config"
+	"m31labs.dev/buckley/pkg/ipc/command"
+	"m31labs.dev/buckley/pkg/orchestrator"
+	"m31labs.dev/buckley/pkg/storage"
 )
 
 // testServer creates a test server with a temporary database.

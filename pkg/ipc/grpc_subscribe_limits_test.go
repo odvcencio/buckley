@@ -10,9 +10,9 @@ import (
 	"connectrpc.com/connect"
 	"github.com/go-chi/chi/v5"
 
-	ipcpb "github.com/odvcencio/buckley/pkg/ipc/proto"
-	"github.com/odvcencio/buckley/pkg/ipc/proto/ipcpbconnect"
-	"github.com/odvcencio/buckley/pkg/storage"
+	ipcpb "m31labs.dev/buckley/pkg/ipc/proto"
+	"m31labs.dev/buckley/pkg/ipc/proto/ipcpbconnect"
+	"m31labs.dev/buckley/pkg/storage"
 )
 
 func TestGRPCSubscribeEnforcesSubscriberLimit(t *testing.T) {

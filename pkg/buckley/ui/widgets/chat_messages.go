@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/mattn/go-runewidth"
-	"github.com/odvcencio/buckley/pkg/buckley/ui/scrollback"
+	"m31labs.dev/buckley/pkg/buckley/ui/scrollback"
 	"github.com/odvcencio/fluffyui/accessibility"
 	"github.com/odvcencio/fluffyui/backend"
 	"github.com/odvcencio/fluffyui/clipboard"

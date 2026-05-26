@@ -10,7 +10,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/odvcencio/buckley/pkg/config"
+	"m31labs.dev/buckley/pkg/config"
 )
 
 const projectTrustFileName = "project-trust.json"

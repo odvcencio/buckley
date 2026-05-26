@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/odvcencio/buckley/pkg/config"
+	"m31labs.dev/buckley/pkg/config"
 )
 
 // TestCompactionManager_ShouldCompact_EdgeCases tests edge cases for compaction decision

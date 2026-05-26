@@ -11,7 +11,7 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 
-	"github.com/odvcencio/buckley/pkg/storage"
+	"m31labs.dev/buckley/pkg/storage"
 )
 
 // NATSPublisher publishes approval events to NATS JetStream for distributed processing.

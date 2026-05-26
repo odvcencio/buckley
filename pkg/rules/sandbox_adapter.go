@@ -3,7 +3,7 @@ package rules
 import (
 	"log/slog"
 
-	"github.com/odvcencio/buckley/pkg/types"
+	"m31labs.dev/buckley/pkg/types"
 )
 
 type ArbiterSandboxResolver struct{ evaluator types.RuleEvaluator }

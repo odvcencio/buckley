@@ -7,11 +7,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/odvcencio/buckley/pkg/coordination/security"
-	"github.com/odvcencio/buckley/pkg/model"
-	"github.com/odvcencio/buckley/pkg/rules"
-	"github.com/odvcencio/buckley/pkg/tool"
-	"github.com/odvcencio/buckley/pkg/tool/builtin"
+	"m31labs.dev/buckley/pkg/coordination/security"
+	"m31labs.dev/buckley/pkg/model"
+	"m31labs.dev/buckley/pkg/rules"
+	"m31labs.dev/buckley/pkg/tool"
+	"m31labs.dev/buckley/pkg/tool/builtin"
 )
 
 const (

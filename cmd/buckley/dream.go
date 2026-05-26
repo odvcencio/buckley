@@ -6,7 +6,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/odvcencio/buckley/pkg/dream"
+	"m31labs.dev/buckley/pkg/dream"
 )
 
 // runDreamCommand analyzes a codebase and suggests architectural improvements.

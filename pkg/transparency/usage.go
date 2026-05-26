@@ -4,7 +4,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/odvcencio/buckley/pkg/rules"
+	"m31labs.dev/buckley/pkg/rules"
 )
 
 // UsageSnapshot is the cumulative state at any point.

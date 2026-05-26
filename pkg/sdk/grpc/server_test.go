@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/odvcencio/buckley/pkg/sdk"
+	"m31labs.dev/buckley/pkg/sdk"
 	"google.golang.org/protobuf/types/known/emptypb"
 )
 

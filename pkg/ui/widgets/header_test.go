@@ -3,8 +3,8 @@ package widgets
 import (
 	"testing"
 
-	"github.com/odvcencio/buckley/pkg/ui/backend"
-	"github.com/odvcencio/buckley/pkg/ui/runtime"
+	"m31labs.dev/buckley/pkg/ui/backend"
+	"m31labs.dev/buckley/pkg/ui/runtime"
 )
 
 func TestNewHeader(t *testing.T) {

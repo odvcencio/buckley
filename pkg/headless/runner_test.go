@@ -5,9 +5,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/odvcencio/buckley/pkg/conversation"
-	"github.com/odvcencio/buckley/pkg/model"
-	"github.com/odvcencio/buckley/pkg/storage"
+	"m31labs.dev/buckley/pkg/conversation"
+	"m31labs.dev/buckley/pkg/model"
+	"m31labs.dev/buckley/pkg/storage"
 )
 
 // mockEmitter captures events for testing.

@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/odvcencio/buckley/pkg/coordination/reliability"
+	"m31labs.dev/buckley/pkg/coordination/reliability"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

@@ -3,8 +3,8 @@ package widgets
 import (
 	"strings"
 
-	"github.com/odvcencio/buckley/pkg/ui/backend"
-	"github.com/odvcencio/buckley/pkg/ui/runtime"
+	"m31labs.dev/buckley/pkg/ui/backend"
+	"m31labs.dev/buckley/pkg/ui/runtime"
 )
 
 // Text is a simple text display widget.

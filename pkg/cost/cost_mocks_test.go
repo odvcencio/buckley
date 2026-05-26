@@ -14,7 +14,7 @@ import (
 
 	gomock "go.uber.org/mock/gomock"
 
-	storage "github.com/odvcencio/buckley/pkg/storage"
+	storage "m31labs.dev/buckley/pkg/storage"
 )
 
 // MockcostStore is a mock of costStore interface.

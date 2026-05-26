@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/odvcencio/buckley/pkg/browser"
-	"github.com/odvcencio/buckley/pkg/browser/adapters/servo"
+	"m31labs.dev/buckley/pkg/browser"
+	"m31labs.dev/buckley/pkg/browser/adapters/servo"
 )
 
 // TestBrowserRuntimeLifecycle tests the full browser session lifecycle with stub engine.

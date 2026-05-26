@@ -9,7 +9,7 @@ import (
 	"strings"
 
 	"github.com/odvcencio/arbiter"
-	"github.com/odvcencio/buckley/pkg/rules"
+	"m31labs.dev/buckley/pkg/rules"
 )
 
 // runRulesCommand dispatches buckley rules subcommands.

@@ -8,8 +8,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/odvcencio/buckley/pkg/model"
-	"github.com/odvcencio/buckley/pkg/tool"
+	"m31labs.dev/buckley/pkg/model"
+	"m31labs.dev/buckley/pkg/tool"
 )
 
 // executeWithTools uses streaming for real-time output and proper tool call accumulation.

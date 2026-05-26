@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/odvcencio/buckley/pkg/personality"
+	"m31labs.dev/buckley/pkg/personality"
 )
 
 // ReviewBranchWithToolsPrompt returns the prompt for local branch review with verification tools.

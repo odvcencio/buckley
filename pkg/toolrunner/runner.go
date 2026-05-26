@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/odvcencio/buckley/pkg/tool"
+	"m31labs.dev/buckley/pkg/tool"
 )
 
 const (

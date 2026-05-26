@@ -3,12 +3,12 @@ package widgets
 import (
 	"strings"
 
-	"github.com/odvcencio/buckley/pkg/ui/backend"
-	"github.com/odvcencio/buckley/pkg/ui/compositor"
-	"github.com/odvcencio/buckley/pkg/ui/markdown"
-	"github.com/odvcencio/buckley/pkg/ui/runtime"
-	"github.com/odvcencio/buckley/pkg/ui/scrollback"
-	"github.com/odvcencio/buckley/pkg/ui/terminal"
+	"m31labs.dev/buckley/pkg/ui/backend"
+	"m31labs.dev/buckley/pkg/ui/compositor"
+	"m31labs.dev/buckley/pkg/ui/markdown"
+	"m31labs.dev/buckley/pkg/ui/runtime"
+	"m31labs.dev/buckley/pkg/ui/scrollback"
+	"m31labs.dev/buckley/pkg/ui/terminal"
 )
 
 // ChatView displays the conversation history with scrolling.

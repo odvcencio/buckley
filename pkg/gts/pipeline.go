@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/odvcencio/buckley/pkg/rules"
+	"m31labs.dev/buckley/pkg/rules"
 )
 
 // Pipeline orchestrates arbiter-governed gts context enrichment.

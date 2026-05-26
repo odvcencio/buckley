@@ -2,8 +2,8 @@
 package widgets
 
 import (
-	"github.com/odvcencio/buckley/pkg/ui/backend"
-	"github.com/odvcencio/buckley/pkg/ui/runtime"
+	"m31labs.dev/buckley/pkg/ui/backend"
+	"m31labs.dev/buckley/pkg/ui/runtime"
 )
 
 // Base provides common functionality for widgets.

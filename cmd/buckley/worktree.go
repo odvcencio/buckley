@@ -6,8 +6,8 @@ import (
 	"os"
 	"strings"
 
-	"github.com/odvcencio/buckley/pkg/config"
-	"github.com/odvcencio/buckley/pkg/worktree"
+	"m31labs.dev/buckley/pkg/config"
+	"m31labs.dev/buckley/pkg/worktree"
 )
 
 func runWorktreeCommand(args []string) error {

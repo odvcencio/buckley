@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/odvcencio/buckley/pkg/tool/builtin"
+	"m31labs.dev/buckley/pkg/tool/builtin"
 )
 
 // sandboxedTools are tool names that should be routed through the Docker sandbox.

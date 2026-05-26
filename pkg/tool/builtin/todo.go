@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/odvcencio/buckley/pkg/config"
-	"github.com/odvcencio/buckley/pkg/model"
+	"m31labs.dev/buckley/pkg/config"
+	"m31labs.dev/buckley/pkg/model"
 )
 
 // PlanningClient defines the LLM interface for brainstorming and planning

@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/odvcencio/buckley/pkg/config"
+	"m31labs.dev/buckley/pkg/config"
 )
 
 // Provider defines the behavior required for an LLM backend/provider.

@@ -6,8 +6,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/odvcencio/buckley/pkg/embeddings"
-	"github.com/odvcencio/buckley/pkg/storage"
+	"m31labs.dev/buckley/pkg/embeddings"
+	"m31labs.dev/buckley/pkg/storage"
 )
 
 type stubEmbeddingProvider struct{}

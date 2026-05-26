@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/odvcencio/buckley/pkg/config"
-	"github.com/odvcencio/buckley/pkg/setup"
-	"github.com/odvcencio/buckley/pkg/telemetry"
+	"m31labs.dev/buckley/pkg/config"
+	"m31labs.dev/buckley/pkg/setup"
+	"m31labs.dev/buckley/pkg/telemetry"
 )
 
 func TestResolveDependenciesWhenNothingMissing(t *testing.T) {

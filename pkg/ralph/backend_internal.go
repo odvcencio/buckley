@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/odvcencio/buckley/pkg/conversation"
+	"m31labs.dev/buckley/pkg/conversation"
 )
 
 // InternalOptions configures the internal Buckley backend.

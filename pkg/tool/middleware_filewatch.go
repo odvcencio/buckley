@@ -7,9 +7,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/odvcencio/buckley/pkg/filewatch"
-	"github.com/odvcencio/buckley/pkg/tool/builtin"
-	"github.com/odvcencio/buckley/pkg/touch"
+	"m31labs.dev/buckley/pkg/filewatch"
+	"m31labs.dev/buckley/pkg/tool/builtin"
+	"m31labs.dev/buckley/pkg/touch"
 )
 
 // FileChangeTracking emits file change notifications for write/edit tools.

@@ -14,14 +14,14 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/odvcencio/buckley/pkg/config"
-	"github.com/odvcencio/buckley/pkg/headless"
-	"github.com/odvcencio/buckley/pkg/ipc"
-	"github.com/odvcencio/buckley/pkg/ipc/command"
-	"github.com/odvcencio/buckley/pkg/model"
-	"github.com/odvcencio/buckley/pkg/orchestrator"
-	"github.com/odvcencio/buckley/pkg/storage"
-	"github.com/odvcencio/buckley/pkg/telemetry"
+	"m31labs.dev/buckley/pkg/config"
+	"m31labs.dev/buckley/pkg/headless"
+	"m31labs.dev/buckley/pkg/ipc"
+	"m31labs.dev/buckley/pkg/ipc/command"
+	"m31labs.dev/buckley/pkg/model"
+	"m31labs.dev/buckley/pkg/orchestrator"
+	"m31labs.dev/buckley/pkg/storage"
+	"m31labs.dev/buckley/pkg/telemetry"
 )
 
 type ipcServer interface {

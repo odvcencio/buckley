@@ -1,7 +1,7 @@
 package widgets
 
 import (
-	"github.com/odvcencio/buckley/pkg/buckley/ui/scrollback"
+	"m31labs.dev/buckley/pkg/buckley/ui/scrollback"
 	"github.com/odvcencio/fluffyui/accessibility"
 	"github.com/odvcencio/fluffyui/runtime"
 	"github.com/odvcencio/fluffyui/scroll"

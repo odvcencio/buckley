@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/odvcencio/buckley/pkg/transparency"
+	"m31labs.dev/buckley/pkg/transparency"
 )
 
 // ContextGatherer collects context from various sources for plugin execution.

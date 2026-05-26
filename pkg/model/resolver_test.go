@@ -3,7 +3,7 @@ package model
 import (
 	"testing"
 
-	"github.com/odvcencio/buckley/pkg/rules"
+	"m31labs.dev/buckley/pkg/rules"
 )
 
 type stubReasoningChecker struct {

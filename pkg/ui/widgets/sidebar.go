@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/odvcencio/buckley/pkg/ui/backend"
-	"github.com/odvcencio/buckley/pkg/ui/runtime"
-	"github.com/odvcencio/buckley/pkg/ui/terminal"
+	"m31labs.dev/buckley/pkg/ui/backend"
+	"m31labs.dev/buckley/pkg/ui/runtime"
+	"m31labs.dev/buckley/pkg/ui/terminal"
 )
 
 // TaskStatus represents the status of a task in the plan.

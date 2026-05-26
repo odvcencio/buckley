@@ -8,7 +8,7 @@ import (
 	context "context"
 	reflect "reflect"
 
-	model "github.com/odvcencio/buckley/pkg/model"
+	model "m31labs.dev/buckley/pkg/model"
 	gomock "go.uber.org/mock/gomock"
 )
 

@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/odvcencio/buckley/pkg/transparency"
+	"m31labs.dev/buckley/pkg/transparency"
 )
 
 // PRInfo contains parsed PR metadata.

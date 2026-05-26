@@ -3,8 +3,8 @@ package model
 import (
 	"strings"
 
-	"github.com/odvcencio/buckley/pkg/config"
-	"github.com/odvcencio/buckley/pkg/rules"
+	"m31labs.dev/buckley/pkg/config"
+	"m31labs.dev/buckley/pkg/rules"
 )
 
 // ResolvePhaseModel selects the model for a runtime phase, honoring an explicit override.

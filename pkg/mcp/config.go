@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/odvcencio/buckley/pkg/config"
+	"m31labs.dev/buckley/pkg/config"
 )
 
 // ManagerFromConfig builds and connects an MCP manager from config.

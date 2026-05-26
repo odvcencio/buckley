@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/odvcencio/buckley/pkg/ui/compositor"
-	"github.com/odvcencio/buckley/pkg/ui/theme"
+	"m31labs.dev/buckley/pkg/ui/compositor"
+	"m31labs.dev/buckley/pkg/ui/theme"
 	"github.com/yuin/goldmark/ast"
 	extast "github.com/yuin/goldmark/extension/ast"
 )

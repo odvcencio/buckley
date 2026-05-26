@@ -12,12 +12,12 @@ import (
 
 	"github.com/oklog/ulid/v2"
 
-	"github.com/odvcencio/buckley/pkg/config"
-	projectcontext "github.com/odvcencio/buckley/pkg/context"
-	"github.com/odvcencio/buckley/pkg/experiment"
-	"github.com/odvcencio/buckley/pkg/notify"
-	"github.com/odvcencio/buckley/pkg/storage"
-	"github.com/odvcencio/buckley/pkg/worktree"
+	"m31labs.dev/buckley/pkg/config"
+	projectcontext "m31labs.dev/buckley/pkg/context"
+	"m31labs.dev/buckley/pkg/experiment"
+	"m31labs.dev/buckley/pkg/notify"
+	"m31labs.dev/buckley/pkg/storage"
+	"m31labs.dev/buckley/pkg/worktree"
 )
 
 type stringSliceFlag []string

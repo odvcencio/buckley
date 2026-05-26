@@ -6,8 +6,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/odvcencio/buckley/pkg/model"
-	"github.com/odvcencio/buckley/pkg/storage"
+	"m31labs.dev/buckley/pkg/model"
+	"m31labs.dev/buckley/pkg/storage"
 )
 
 // Message represents a conversation message

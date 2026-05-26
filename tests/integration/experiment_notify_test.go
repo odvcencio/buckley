@@ -10,12 +10,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/odvcencio/buckley/pkg/config"
-	"github.com/odvcencio/buckley/pkg/experiment"
-	"github.com/odvcencio/buckley/pkg/model"
-	"github.com/odvcencio/buckley/pkg/notify"
-	"github.com/odvcencio/buckley/pkg/storage"
-	"github.com/odvcencio/buckley/pkg/worktree"
+	"m31labs.dev/buckley/pkg/config"
+	"m31labs.dev/buckley/pkg/experiment"
+	"m31labs.dev/buckley/pkg/model"
+	"m31labs.dev/buckley/pkg/notify"
+	"m31labs.dev/buckley/pkg/storage"
+	"m31labs.dev/buckley/pkg/worktree"
 )
 
 // mockNotifyAdapter captures notifications for testing

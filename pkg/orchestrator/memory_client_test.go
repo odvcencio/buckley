@@ -9,11 +9,11 @@ import (
 
 	"go.uber.org/mock/gomock"
 
-	orchestratorMocks "github.com/odvcencio/buckley/pkg/orchestrator/mocks"
+	orchestratorMocks "m31labs.dev/buckley/pkg/orchestrator/mocks"
 
-	"github.com/odvcencio/buckley/pkg/memory"
-	"github.com/odvcencio/buckley/pkg/model"
-	"github.com/odvcencio/buckley/pkg/storage"
+	"m31labs.dev/buckley/pkg/memory"
+	"m31labs.dev/buckley/pkg/model"
+	"m31labs.dev/buckley/pkg/storage"
 )
 
 type memoryStubProvider struct{}

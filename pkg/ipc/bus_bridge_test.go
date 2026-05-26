@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/odvcencio/buckley/pkg/bus"
+	"m31labs.dev/buckley/pkg/bus"
 )
 
 // mockEventCollector collects events for testing

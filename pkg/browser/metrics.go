@@ -5,7 +5,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/odvcencio/buckley/pkg/telemetry"
+	"m31labs.dev/buckley/pkg/telemetry"
 )
 
 // Metrics tracks browser runtime performance counters.

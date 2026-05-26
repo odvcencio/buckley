@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/odvcencio/buckley/pkg/config"
-	"github.com/odvcencio/buckley/pkg/orchestrator/mocks"
-	"github.com/odvcencio/buckley/pkg/storage"
+	"m31labs.dev/buckley/pkg/config"
+	"m31labs.dev/buckley/pkg/orchestrator/mocks"
+	"m31labs.dev/buckley/pkg/storage"
 	"go.uber.org/mock/gomock"
 )
 

@@ -10,12 +10,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/odvcencio/buckley/pkg/artifact"
-	"github.com/odvcencio/buckley/pkg/encoding/toon"
-	"github.com/odvcencio/buckley/pkg/model"
-	"github.com/odvcencio/buckley/pkg/paths"
-	"github.com/odvcencio/buckley/pkg/storage"
-	"github.com/odvcencio/buckley/pkg/telemetry"
+	"m31labs.dev/buckley/pkg/artifact"
+	"m31labs.dev/buckley/pkg/encoding/toon"
+	"m31labs.dev/buckley/pkg/model"
+	"m31labs.dev/buckley/pkg/paths"
+	"m31labs.dev/buckley/pkg/storage"
+	"m31labs.dev/buckley/pkg/telemetry"
 )
 
 // ResearchAgent builds research briefs before planning/execution.

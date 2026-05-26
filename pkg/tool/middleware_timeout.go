@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/odvcencio/buckley/pkg/tool/builtin"
+	"m31labs.dev/buckley/pkg/tool/builtin"
 )
 
 // Timeout applies a per-tool or default timeout by updating the context.

@@ -3,7 +3,7 @@ package runtime
 import (
 	"testing"
 
-	"github.com/odvcencio/buckley/pkg/ui/backend"
+	"m31labs.dev/buckley/pkg/ui/backend"
 )
 
 func TestBuffer_New(t *testing.T) {

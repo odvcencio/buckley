@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/odvcencio/buckley/pkg/types"
+	"m31labs.dev/buckley/pkg/types"
 )
 
 // DefaultToolUseSystemPrompt is the shared Buckley operating contract for tool-first sessions.

@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/odvcencio/buckley/pkg/encoding/toon"
+	"m31labs.dev/buckley/pkg/encoding/toon"
 )
 
 // renderSchema encodes structured examples using TOON when enabled, falling

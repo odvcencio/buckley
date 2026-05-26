@@ -5,7 +5,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/odvcencio/buckley/pkg/tool/builtin"
+	"m31labs.dev/buckley/pkg/tool/builtin"
 )
 
 // HookResult describes how a pre-hook wants to adjust execution.

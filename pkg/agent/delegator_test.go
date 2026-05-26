@@ -4,9 +4,9 @@ import (
 	"context"
 	"testing"
 
-	pkgcontext "github.com/odvcencio/buckley/pkg/context"
-	"github.com/odvcencio/buckley/pkg/model"
-	"github.com/odvcencio/buckley/pkg/tool"
+	pkgcontext "m31labs.dev/buckley/pkg/context"
+	"m31labs.dev/buckley/pkg/model"
+	"m31labs.dev/buckley/pkg/tool"
 )
 
 func TestNewDelegator(t *testing.T) {

@@ -8,16 +8,16 @@ import (
 	"sync"
 	"time"
 
-	"github.com/odvcencio/buckley/pkg/bus"
-	"github.com/odvcencio/buckley/pkg/coordination/security"
-	"github.com/odvcencio/buckley/pkg/encoding/toon"
-	"github.com/odvcencio/buckley/pkg/graft"
-	"github.com/odvcencio/buckley/pkg/model"
-	"github.com/odvcencio/buckley/pkg/rules"
-	"github.com/odvcencio/buckley/pkg/storage"
-	"github.com/odvcencio/buckley/pkg/telemetry"
-	"github.com/odvcencio/buckley/pkg/tool"
-	"github.com/odvcencio/buckley/pkg/tool/builtin"
+	"m31labs.dev/buckley/pkg/bus"
+	"m31labs.dev/buckley/pkg/coordination/security"
+	"m31labs.dev/buckley/pkg/encoding/toon"
+	"m31labs.dev/buckley/pkg/graft"
+	"m31labs.dev/buckley/pkg/model"
+	"m31labs.dev/buckley/pkg/rules"
+	"m31labs.dev/buckley/pkg/storage"
+	"m31labs.dev/buckley/pkg/telemetry"
+	"m31labs.dev/buckley/pkg/tool"
+	"m31labs.dev/buckley/pkg/tool/builtin"
 )
 
 const coordinatorSystemPrompt = `You are the Buckley RLM Coordinator - an orchestration layer that delegates work to specialized sub-agents while maintaining strategic oversight.

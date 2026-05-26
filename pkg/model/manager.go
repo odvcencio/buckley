@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/odvcencio/buckley/pkg/config"
+	"m31labs.dev/buckley/pkg/config"
 )
 
 const catalogFetchTimeout = 30 * time.Second

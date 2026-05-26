@@ -1,6 +1,6 @@
 package rules
 
-import "github.com/odvcencio/buckley/pkg/types"
+import "m31labs.dev/buckley/pkg/types"
 
 // EngineAdapter wraps *Engine to implement types.RuleEvaluator.
 type EngineAdapter struct{ engine *Engine }

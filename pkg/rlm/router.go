@@ -5,7 +5,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/odvcencio/buckley/pkg/model"
+	"m31labs.dev/buckley/pkg/model"
 )
 
 // CatalogProvider supplies the model catalog for routing decisions.

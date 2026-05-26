@@ -6,8 +6,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/odvcencio/buckley/pkg/telemetry"
-	"github.com/odvcencio/buckley/pkg/touch"
+	"m31labs.dev/buckley/pkg/telemetry"
+	"m31labs.dev/buckley/pkg/touch"
 )
 
 const maxRecentFiles = 5

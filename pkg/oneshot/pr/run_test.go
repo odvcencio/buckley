@@ -6,9 +6,9 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/odvcencio/buckley/pkg/model"
-	"github.com/odvcencio/buckley/pkg/oneshot"
-	"github.com/odvcencio/buckley/pkg/transparency"
+	"m31labs.dev/buckley/pkg/model"
+	"m31labs.dev/buckley/pkg/oneshot"
+	"m31labs.dev/buckley/pkg/transparency"
 )
 
 // mockModelClient implements oneshot.ModelClient for testing.

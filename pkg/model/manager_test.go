@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/odvcencio/buckley/pkg/config"
+	"m31labs.dev/buckley/pkg/config"
 )
 
 type stubProvider struct {

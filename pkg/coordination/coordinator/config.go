@@ -1,7 +1,7 @@
 package coordinator
 
 import (
-	"github.com/odvcencio/buckley/pkg/coordination/capabilities"
+	"m31labs.dev/buckley/pkg/coordination/capabilities"
 )
 
 // Config holds coordinator configuration

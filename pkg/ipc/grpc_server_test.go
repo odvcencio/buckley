@@ -12,12 +12,12 @@ import (
 	"connectrpc.com/connect"
 	"google.golang.org/protobuf/types/known/emptypb"
 
-	"github.com/odvcencio/buckley/pkg/config"
-	"github.com/odvcencio/buckley/pkg/headless"
-	"github.com/odvcencio/buckley/pkg/ipc/command"
-	ipcpb "github.com/odvcencio/buckley/pkg/ipc/proto"
-	"github.com/odvcencio/buckley/pkg/orchestrator"
-	"github.com/odvcencio/buckley/pkg/storage"
+	"m31labs.dev/buckley/pkg/config"
+	"m31labs.dev/buckley/pkg/headless"
+	"m31labs.dev/buckley/pkg/ipc/command"
+	ipcpb "m31labs.dev/buckley/pkg/ipc/proto"
+	"m31labs.dev/buckley/pkg/orchestrator"
+	"m31labs.dev/buckley/pkg/storage"
 )
 
 func TestGRPCSendCommandScopeEnforced(t *testing.T) {

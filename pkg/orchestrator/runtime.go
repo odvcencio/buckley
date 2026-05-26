@@ -6,7 +6,7 @@ import (
 	"log/slog"
 	"strings"
 
-	"github.com/odvcencio/buckley/pkg/types"
+	"m31labs.dev/buckley/pkg/types"
 )
 
 // EventType identifies streaming event kinds.

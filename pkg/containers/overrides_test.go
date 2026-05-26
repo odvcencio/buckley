@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/odvcencio/buckley/pkg/envdetect"
+	"m31labs.dev/buckley/pkg/envdetect"
 	"gopkg.in/yaml.v3"
 )
 

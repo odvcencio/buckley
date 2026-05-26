@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/odvcencio/buckley/pkg/conversation"
+	"m31labs.dev/buckley/pkg/conversation"
 )
 
 func TestLoaderParsesStructuredSections(t *testing.T) {

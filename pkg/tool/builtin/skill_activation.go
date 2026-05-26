@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/odvcencio/buckley/pkg/skill"
+	"m31labs.dev/buckley/pkg/skill"
 )
 
 // SkillActivationTool allows the AI to activate and deactivate workflow skills

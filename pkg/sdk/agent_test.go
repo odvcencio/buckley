@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/odvcencio/buckley/pkg/orchestrator"
+	"m31labs.dev/buckley/pkg/orchestrator"
 )
 
 func TestAgent_Orchestrator(t *testing.T) {

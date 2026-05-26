@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	pb "github.com/odvcencio/buckley/pkg/acp/proto"
+	pb "m31labs.dev/buckley/pkg/acp/proto"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"

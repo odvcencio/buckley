@@ -9,7 +9,7 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/odvcencio/buckley/pkg/storage"
+	"m31labs.dev/buckley/pkg/storage"
 )
 
 // corsMiddleware adds CORS headers based on allowed origins configuration.

@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/odvcencio/buckley/pkg/filewatch"
+	"m31labs.dev/buckley/pkg/filewatch"
 )
 
 // LogEvent represents a single event in the JSONL log.

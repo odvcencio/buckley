@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/odvcencio/buckley/pkg/tools"
+	"m31labs.dev/buckley/pkg/tools"
 )
 
 func TestTrace(t *testing.T) {

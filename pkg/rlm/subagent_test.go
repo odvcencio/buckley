@@ -3,7 +3,7 @@ package rlm
 import (
 	"testing"
 
-	"github.com/odvcencio/buckley/pkg/tool"
+	"m31labs.dev/buckley/pkg/tool"
 )
 
 func TestNewSubAgentValidation(t *testing.T) {

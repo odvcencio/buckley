@@ -12,11 +12,11 @@ import (
 	semconv "go.opentelemetry.io/otel/semconv/v1.4.0"
 	"go.opentelemetry.io/otel/trace"
 
-	buckleyversion "github.com/odvcencio/buckley/pkg/version"
+	buckleyversion "m31labs.dev/buckley/pkg/version"
 )
 
 const (
-	tracerName = "github.com/odvcencio/buckley/pkg/acp"
+	tracerName = "m31labs.dev/buckley/pkg/acp"
 )
 
 // TracerProvider holds the OpenTelemetry tracer provider

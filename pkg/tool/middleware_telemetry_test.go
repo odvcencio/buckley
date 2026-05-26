@@ -4,8 +4,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/odvcencio/buckley/pkg/telemetry"
-	"github.com/odvcencio/buckley/pkg/tool/builtin"
+	"m31labs.dev/buckley/pkg/telemetry"
+	"m31labs.dev/buckley/pkg/tool/builtin"
 )
 
 type telemetryTool struct{}

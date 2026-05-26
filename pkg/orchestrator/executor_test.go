@@ -8,12 +8,12 @@ import (
 
 	"go.uber.org/mock/gomock"
 
-	orchestratorMocks "github.com/odvcencio/buckley/pkg/orchestrator/mocks"
+	orchestratorMocks "m31labs.dev/buckley/pkg/orchestrator/mocks"
 
-	"github.com/odvcencio/buckley/pkg/config"
-	"github.com/odvcencio/buckley/pkg/model"
-	"github.com/odvcencio/buckley/pkg/storage"
-	"github.com/odvcencio/buckley/pkg/tool"
+	"m31labs.dev/buckley/pkg/config"
+	"m31labs.dev/buckley/pkg/model"
+	"m31labs.dev/buckley/pkg/storage"
+	"m31labs.dev/buckley/pkg/tool"
 )
 
 func setupMockModel(t *testing.T) (*gomock.Controller, *orchestratorMocks.MockModelClient) {

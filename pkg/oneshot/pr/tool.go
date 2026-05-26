@@ -5,8 +5,8 @@ import (
 	"log"
 	"strings"
 
-	"github.com/odvcencio/buckley/pkg/oneshot"
-	"github.com/odvcencio/buckley/pkg/tools"
+	"m31labs.dev/buckley/pkg/oneshot"
+	"m31labs.dev/buckley/pkg/tools"
 )
 
 // GeneratePRTool defines the structured contract for PR generation.

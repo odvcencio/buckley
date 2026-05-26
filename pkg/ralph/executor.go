@@ -17,7 +17,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/odvcencio/buckley/pkg/conversation"
+	"m31labs.dev/buckley/pkg/conversation"
 )
 
 // HeadlessRunner defines the interface for executing prompts.

@@ -6,11 +6,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/odvcencio/buckley/pkg/model"
-	"github.com/odvcencio/buckley/pkg/oneshot"
-	"github.com/odvcencio/buckley/pkg/prompts"
-	"github.com/odvcencio/buckley/pkg/tool"
-	"github.com/odvcencio/buckley/pkg/transparency"
+	"m31labs.dev/buckley/pkg/model"
+	"m31labs.dev/buckley/pkg/oneshot"
+	"m31labs.dev/buckley/pkg/prompts"
+	"m31labs.dev/buckley/pkg/tool"
+	"m31labs.dev/buckley/pkg/transparency"
 )
 
 // Runner executes the review flow.

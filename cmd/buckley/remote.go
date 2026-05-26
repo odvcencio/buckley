@@ -26,9 +26,9 @@ import (
 	"golang.org/x/term"
 	"nhooyr.io/websocket"
 
-	ipcpb "github.com/odvcencio/buckley/pkg/ipc/proto"
-	"github.com/odvcencio/buckley/pkg/ipc/proto/ipcpbconnect"
-	"github.com/odvcencio/buckley/pkg/telemetry"
+	ipcpb "m31labs.dev/buckley/pkg/ipc/proto"
+	"m31labs.dev/buckley/pkg/ipc/proto/ipcpbconnect"
+	"m31labs.dev/buckley/pkg/telemetry"
 )
 
 func runRemoteCommand(args []string) error {

@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	browserdpb "github.com/odvcencio/buckley/pkg/browser/adapters/servo/proto"
+	browserdpb "m31labs.dev/buckley/pkg/browser/adapters/servo/proto"
 	"google.golang.org/protobuf/proto"
 )
 

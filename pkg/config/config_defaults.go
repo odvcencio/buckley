@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/odvcencio/buckley/pkg/giturl"
+	"m31labs.dev/buckley/pkg/giturl"
 )
 
 func defaultACPStore() string {

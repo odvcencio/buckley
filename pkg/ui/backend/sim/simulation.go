@@ -6,9 +6,9 @@ import (
 	"sync"
 
 	tcellv2 "github.com/gdamore/tcell/v2"
-	"github.com/odvcencio/buckley/pkg/ui/backend"
-	"github.com/odvcencio/buckley/pkg/ui/backend/tcell"
-	"github.com/odvcencio/buckley/pkg/ui/terminal"
+	"m31labs.dev/buckley/pkg/ui/backend"
+	"m31labs.dev/buckley/pkg/ui/backend/tcell"
+	"m31labs.dev/buckley/pkg/ui/terminal"
 )
 
 // Backend is a testable backend using tcell's simulation screen.

@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/odvcencio/buckley/pkg/worktree"
+	"m31labs.dev/buckley/pkg/worktree"
 )
 
 // ==== Scope Validator Tests ====

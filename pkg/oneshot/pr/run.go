@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/odvcencio/buckley/pkg/oneshot"
-	"github.com/odvcencio/buckley/pkg/transparency"
+	"m31labs.dev/buckley/pkg/oneshot"
+	"m31labs.dev/buckley/pkg/transparency"
 )
 
 // Runner executes the PR generation flow.

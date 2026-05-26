@@ -3,7 +3,7 @@ package model
 import (
 	"testing"
 
-	"github.com/odvcencio/buckley/pkg/config"
+	"m31labs.dev/buckley/pkg/config"
 )
 
 func TestApplyPromptCache_OpenAICompatibleProviders(t *testing.T) {

@@ -3,7 +3,7 @@ package scrollback
 import (
 	"testing"
 
-	"github.com/odvcencio/buckley/pkg/ui/compositor"
+	"m31labs.dev/buckley/pkg/ui/compositor"
 )
 
 func TestDefaultRenderConfig(t *testing.T) {

@@ -9,7 +9,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/odvcencio/buckley/pkg/acp/lsp"
+	"m31labs.dev/buckley/pkg/acp/lsp"
 )
 
 // runLSPCommand starts the LSP bridge server on stdio

@@ -1,8 +1,8 @@
 package model
 
 import (
-	"github.com/odvcencio/buckley/pkg/rules"
-	"github.com/odvcencio/buckley/pkg/transparency"
+	"m31labs.dev/buckley/pkg/rules"
+	"m31labs.dev/buckley/pkg/transparency"
 )
 
 // ReasoningChecker tests whether a model supports reasoning parameters.

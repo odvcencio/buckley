@@ -3,7 +3,7 @@ package tui
 import (
 	"testing"
 
-	"github.com/odvcencio/buckley/pkg/model"
+	"m31labs.dev/buckley/pkg/model"
 )
 
 func TestModelGroupKey(t *testing.T) {

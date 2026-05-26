@@ -5,8 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/odvcencio/buckley/pkg/config"
-	"github.com/odvcencio/buckley/pkg/oneshot"
+	"m31labs.dev/buckley/pkg/config"
+	"m31labs.dev/buckley/pkg/oneshot"
 )
 
 func TestResolveOneshotBackendPrecedence(t *testing.T) {

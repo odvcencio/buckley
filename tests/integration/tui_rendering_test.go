@@ -12,7 +12,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/odvcencio/buckley/pkg/buckley/ui/widgets"
+	"m31labs.dev/buckley/pkg/buckley/ui/widgets"
 	"github.com/odvcencio/fluffyui/backend"
 	"github.com/odvcencio/fluffyui/backend/sim"
 	"github.com/odvcencio/fluffyui/runtime"

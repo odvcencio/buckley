@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/odvcencio/buckley/pkg/prompts"
-	"github.com/odvcencio/buckley/pkg/transparency"
+	"m31labs.dev/buckley/pkg/prompts"
+	"m31labs.dev/buckley/pkg/transparency"
 )
 
 // PRInfo contains parsed PR metadata.

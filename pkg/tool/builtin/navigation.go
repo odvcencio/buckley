@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/odvcencio/buckley/pkg/storage"
+	"m31labs.dev/buckley/pkg/storage"
 )
 
 // FindSymbolTool finds where symbols are defined

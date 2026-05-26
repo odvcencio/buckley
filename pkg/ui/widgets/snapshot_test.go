@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/odvcencio/buckley/pkg/ui/backend"
-	"github.com/odvcencio/buckley/pkg/ui/runtime"
+	"m31labs.dev/buckley/pkg/ui/backend"
+	"m31labs.dev/buckley/pkg/ui/runtime"
 )
 
 var updateSnapshots = flag.Bool("update-snapshots", false, "Update golden snapshot files")

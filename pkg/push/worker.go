@@ -12,7 +12,7 @@ import (
 
 	webpush "github.com/SherClockHolmes/webpush-go"
 
-	"github.com/odvcencio/buckley/pkg/storage"
+	"m31labs.dev/buckley/pkg/storage"
 )
 
 // NotificationType represents the type of push notification.

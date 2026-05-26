@@ -9,8 +9,8 @@ import (
 	"strings"
 	"sync"
 
-	pb "github.com/odvcencio/buckley/pkg/acp/proto"
-	buckleyversion "github.com/odvcencio/buckley/pkg/version"
+	pb "m31labs.dev/buckley/pkg/acp/proto"
+	buckleyversion "m31labs.dev/buckley/pkg/version"
 	"github.com/oklog/ulid/v2"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"

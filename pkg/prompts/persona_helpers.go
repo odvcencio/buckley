@@ -3,7 +3,7 @@ package prompts
 import (
 	"strings"
 
-	"github.com/odvcencio/buckley/pkg/personality"
+	"m31labs.dev/buckley/pkg/personality"
 )
 
 func renderPersonaGuidance(phase Phase, persona *personality.PersonaProfile, fallback []string) string {

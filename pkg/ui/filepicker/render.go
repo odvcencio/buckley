@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/odvcencio/buckley/pkg/ui/compositor"
+	"m31labs.dev/buckley/pkg/ui/compositor"
 )
 
 // RenderConfig holds styling configuration.

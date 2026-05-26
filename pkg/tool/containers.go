@@ -5,10 +5,10 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/odvcencio/buckley/pkg/config"
-	"github.com/odvcencio/buckley/pkg/dockersandbox"
-	"github.com/odvcencio/buckley/pkg/tool/builtin"
-	"github.com/odvcencio/buckley/pkg/worktree"
+	"m31labs.dev/buckley/pkg/config"
+	"m31labs.dev/buckley/pkg/dockersandbox"
+	"m31labs.dev/buckley/pkg/tool/builtin"
+	"m31labs.dev/buckley/pkg/worktree"
 )
 
 // ConfigureContainers wires container support for shell execution when enabled.

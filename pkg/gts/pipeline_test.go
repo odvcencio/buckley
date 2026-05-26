@@ -3,7 +3,7 @@ package gts
 import (
 	"testing"
 
-	"github.com/odvcencio/buckley/pkg/rules"
+	"m31labs.dev/buckley/pkg/rules"
 )
 
 func TestContextEnrichment_TypesCompile(t *testing.T) {

@@ -3,7 +3,7 @@ package rules
 import (
 	"testing"
 
-	"github.com/odvcencio/buckley/pkg/types"
+	"m31labs.dev/buckley/pkg/types"
 )
 
 func TestArbiterSandboxResolver_ShellSubagent(t *testing.T) {

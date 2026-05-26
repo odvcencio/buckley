@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/odvcencio/buckley/pkg/ui/compositor"
+	"m31labs.dev/buckley/pkg/ui/compositor"
 )
 
 func TestFuzzyMatch(t *testing.T) {

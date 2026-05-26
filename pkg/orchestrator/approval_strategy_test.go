@@ -3,9 +3,9 @@ package orchestrator
 import (
 	"testing"
 
-	"github.com/odvcencio/buckley/pkg/config"
-	"github.com/odvcencio/buckley/pkg/personality"
-	"github.com/odvcencio/buckley/pkg/rules"
+	"m31labs.dev/buckley/pkg/config"
+	"m31labs.dev/buckley/pkg/personality"
+	"m31labs.dev/buckley/pkg/rules"
 )
 
 // mustNewApprovalEngine creates a rules.Engine that includes the approval domain.

@@ -12,8 +12,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/odvcencio/buckley/pkg/oneshot"
-	"github.com/odvcencio/buckley/pkg/transparency"
+	"m31labs.dev/buckley/pkg/oneshot"
+	"m31labs.dev/buckley/pkg/transparency"
 )
 
 // Executor runs plugin commands.

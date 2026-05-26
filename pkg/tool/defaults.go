@@ -3,9 +3,9 @@ package tool
 import (
 	"time"
 
-	"github.com/odvcencio/buckley/pkg/filewatch"
-	"github.com/odvcencio/buckley/pkg/mission"
-	"github.com/odvcencio/buckley/pkg/telemetry"
+	"m31labs.dev/buckley/pkg/filewatch"
+	"m31labs.dev/buckley/pkg/mission"
+	"m31labs.dev/buckley/pkg/telemetry"
 )
 
 const (

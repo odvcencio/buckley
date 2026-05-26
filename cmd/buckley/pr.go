@@ -9,10 +9,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/odvcencio/buckley/pkg/oneshot"
-	"github.com/odvcencio/buckley/pkg/oneshot/commands"
-	"github.com/odvcencio/buckley/pkg/terminal"
-	"github.com/odvcencio/buckley/pkg/transparency"
+	"m31labs.dev/buckley/pkg/oneshot"
+	"m31labs.dev/buckley/pkg/oneshot/commands"
+	"m31labs.dev/buckley/pkg/terminal"
+	"m31labs.dev/buckley/pkg/transparency"
 )
 
 const (

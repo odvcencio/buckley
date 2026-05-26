@@ -8,8 +8,8 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
-	"github.com/odvcencio/buckley/pkg/ipc/push"
-	"github.com/odvcencio/buckley/pkg/storage"
+	"m31labs.dev/buckley/pkg/ipc/push"
+	"m31labs.dev/buckley/pkg/storage"
 )
 
 // pushStoreAdapter adapts storage.Store to push.Store interface.

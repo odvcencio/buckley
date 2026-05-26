@@ -10,7 +10,7 @@ import (
 	"text/template"
 	"time"
 
-	"github.com/odvcencio/buckley/pkg/paths"
+	"m31labs.dev/buckley/pkg/paths"
 )
 
 // PlanStore defines persistence helpers for plans and related logs.

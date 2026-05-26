@@ -1,6 +1,6 @@
 package config
 
-import "github.com/odvcencio/buckley/pkg/personality"
+import "m31labs.dev/buckley/pkg/personality"
 
 func mergeACPConfig(base, override *Config, raw map[string]any) {
 	if override.ACP.EventStore != "" {

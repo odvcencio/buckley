@@ -3,7 +3,7 @@
 package theme
 
 import (
-	"github.com/odvcencio/buckley/pkg/ui/compositor"
+	"m31labs.dev/buckley/pkg/ui/compositor"
 )
 
 // Theme defines the complete visual language for the TUI.

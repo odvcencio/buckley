@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/odvcencio/buckley/pkg/embeddings"
+	"m31labs.dev/buckley/pkg/embeddings"
 )
 
 // SemanticSearchTool provides semantic code search using embeddings

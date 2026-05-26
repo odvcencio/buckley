@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/odvcencio/buckley/pkg/config"
+	"m31labs.dev/buckley/pkg/config"
 	"go.uber.org/mock/gomock"
 )
 

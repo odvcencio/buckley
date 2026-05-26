@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/odvcencio/buckley/pkg/worktree"
+	"m31labs.dev/buckley/pkg/worktree"
 )
 
 // mockWorktreeManager implements a minimal worktree manager for testing

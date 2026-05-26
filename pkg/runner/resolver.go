@@ -3,7 +3,7 @@ package runner
 import (
 	"fmt"
 
-	"github.com/odvcencio/buckley/pkg/types"
+	"m31labs.dev/buckley/pkg/types"
 )
 
 // ResolveRunnerConfig evaluates autonomous/modes.arb to determine runner configuration.

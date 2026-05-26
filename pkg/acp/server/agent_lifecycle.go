@@ -3,8 +3,8 @@ package server
 import (
 	"context"
 
-	acppb "github.com/odvcencio/buckley/pkg/acp/proto"
-	"github.com/odvcencio/buckley/pkg/coordination/coordinator"
+	acppb "m31labs.dev/buckley/pkg/acp/proto"
+	"m31labs.dev/buckley/pkg/coordination/coordinator"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/emptypb"

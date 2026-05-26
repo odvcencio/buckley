@@ -6,14 +6,14 @@ import (
 	"os"
 	"strings"
 
-	"github.com/odvcencio/buckley/pkg/config"
-	"github.com/odvcencio/buckley/pkg/gts"
-	"github.com/odvcencio/buckley/pkg/model"
-	"github.com/odvcencio/buckley/pkg/personality"
-	"github.com/odvcencio/buckley/pkg/rules"
-	"github.com/odvcencio/buckley/pkg/storage"
-	"github.com/odvcencio/buckley/pkg/telemetry"
-	"github.com/odvcencio/buckley/pkg/tool"
+	"m31labs.dev/buckley/pkg/config"
+	"m31labs.dev/buckley/pkg/gts"
+	"m31labs.dev/buckley/pkg/model"
+	"m31labs.dev/buckley/pkg/personality"
+	"m31labs.dev/buckley/pkg/rules"
+	"m31labs.dev/buckley/pkg/storage"
+	"m31labs.dev/buckley/pkg/telemetry"
+	"m31labs.dev/buckley/pkg/tool"
 )
 
 // Orchestrator manages the complete feature development workflow

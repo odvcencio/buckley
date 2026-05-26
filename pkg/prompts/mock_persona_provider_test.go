@@ -12,7 +12,7 @@ package prompts
 import (
 	reflect "reflect"
 
-	personality "github.com/odvcencio/buckley/pkg/personality"
+	personality "m31labs.dev/buckley/pkg/personality"
 	gomock "go.uber.org/mock/gomock"
 )
 

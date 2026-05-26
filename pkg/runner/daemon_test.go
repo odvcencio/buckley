@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/odvcencio/buckley/pkg/orchestrator"
-	"github.com/odvcencio/buckley/pkg/types"
+	"m31labs.dev/buckley/pkg/orchestrator"
+	"m31labs.dev/buckley/pkg/types"
 )
 
 func TestDaemonRunner_AcceptsTask(t *testing.T) {

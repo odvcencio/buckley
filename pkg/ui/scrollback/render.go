@@ -1,7 +1,7 @@
 package scrollback
 
 import (
-	"github.com/odvcencio/buckley/pkg/ui/compositor"
+	"m31labs.dev/buckley/pkg/ui/compositor"
 )
 
 // RenderConfig holds styling for the scrollback buffer.

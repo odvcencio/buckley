@@ -6,10 +6,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/odvcencio/buckley/pkg/config"
-	"github.com/odvcencio/buckley/pkg/model"
-	"github.com/odvcencio/buckley/pkg/rules"
-	"github.com/odvcencio/buckley/pkg/types"
+	"m31labs.dev/buckley/pkg/config"
+	"m31labs.dev/buckley/pkg/model"
+	"m31labs.dev/buckley/pkg/rules"
+	"m31labs.dev/buckley/pkg/types"
 )
 
 // CompactionManager handles conversation compaction

@@ -3,7 +3,7 @@ package commands
 import (
 	"time"
 
-	"github.com/odvcencio/buckley/pkg/prompts"
+	"m31labs.dev/buckley/pkg/prompts"
 )
 
 // ReviewBranchDef implements oneshot.RLMDefinition for branch code review.

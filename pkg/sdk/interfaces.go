@@ -3,7 +3,7 @@ package sdk
 import (
 	"context"
 
-	"github.com/odvcencio/buckley/pkg/orchestrator"
+	"m31labs.dev/buckley/pkg/orchestrator"
 )
 
 // Planner can generate high-level development plans for a feature.

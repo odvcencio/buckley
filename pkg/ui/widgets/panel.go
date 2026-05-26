@@ -1,8 +1,8 @@
 package widgets
 
 import (
-	"github.com/odvcencio/buckley/pkg/ui/backend"
-	"github.com/odvcencio/buckley/pkg/ui/runtime"
+	"m31labs.dev/buckley/pkg/ui/backend"
+	"m31labs.dev/buckley/pkg/ui/runtime"
 )
 
 // Panel is a container widget with optional border and background.

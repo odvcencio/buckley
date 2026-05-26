@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/odvcencio/buckley/pkg/config"
-	"github.com/odvcencio/buckley/pkg/gitwatcher"
+	"m31labs.dev/buckley/pkg/config"
+	"m31labs.dev/buckley/pkg/gitwatcher"
 )
 
 type Pipeline struct {

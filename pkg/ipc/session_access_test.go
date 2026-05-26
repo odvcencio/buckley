@@ -3,7 +3,7 @@ package ipc
 import (
 	"testing"
 
-	"github.com/odvcencio/buckley/pkg/storage"
+	"m31labs.dev/buckley/pkg/storage"
 )
 
 func TestIsOperatorPrincipal(t *testing.T) {

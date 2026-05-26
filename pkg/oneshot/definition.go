@@ -3,7 +3,7 @@ package oneshot
 import (
 	"encoding/json"
 
-	"github.com/odvcencio/buckley/pkg/tools"
+	"m31labs.dev/buckley/pkg/tools"
 )
 
 // ContextSource describes a source of context for a oneshot command.

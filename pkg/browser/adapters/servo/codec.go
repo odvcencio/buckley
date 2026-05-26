@@ -4,8 +4,8 @@ import (
 	"encoding/json"
 	"time"
 
-	"github.com/odvcencio/buckley/pkg/browser"
-	browserdpb "github.com/odvcencio/buckley/pkg/browser/adapters/servo/proto"
+	"m31labs.dev/buckley/pkg/browser"
+	browserdpb "m31labs.dev/buckley/pkg/browser/adapters/servo/proto"
 	"google.golang.org/protobuf/types/known/structpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )

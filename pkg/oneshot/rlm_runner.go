@@ -6,10 +6,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/odvcencio/buckley/pkg/model"
-	"github.com/odvcencio/buckley/pkg/rlm"
-	"github.com/odvcencio/buckley/pkg/tool"
-	"github.com/odvcencio/buckley/pkg/transparency"
+	"m31labs.dev/buckley/pkg/model"
+	"m31labs.dev/buckley/pkg/rlm"
+	"m31labs.dev/buckley/pkg/tool"
+	"m31labs.dev/buckley/pkg/transparency"
 )
 
 // RLMRunner executes oneshot tasks using the full RLM tool ecosystem.

@@ -4,11 +4,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/odvcencio/buckley/pkg/embeddings"
-	"github.com/odvcencio/buckley/pkg/mission"
-	"github.com/odvcencio/buckley/pkg/storage"
-	"github.com/odvcencio/buckley/pkg/telemetry"
-	"github.com/odvcencio/buckley/pkg/tool/builtin"
+	"m31labs.dev/buckley/pkg/embeddings"
+	"m31labs.dev/buckley/pkg/mission"
+	"m31labs.dev/buckley/pkg/storage"
+	"m31labs.dev/buckley/pkg/telemetry"
+	"m31labs.dev/buckley/pkg/tool/builtin"
 )
 
 func (r *Registry) registerBuiltins(cfg registryOptions) {

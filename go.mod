@@ -1,4 +1,4 @@
-module github.com/odvcencio/buckley
+module m31labs.dev/buckley
 
 go 1.25.1
 

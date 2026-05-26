@@ -4,7 +4,7 @@ import (
 	"context"
 	"log/slog"
 
-	"github.com/odvcencio/buckley/pkg/types"
+	"m31labs.dev/buckley/pkg/types"
 )
 
 type ArbiterEscalator struct{ evaluator types.RuleEvaluator }

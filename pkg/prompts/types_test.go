@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/odvcencio/buckley/pkg/personality"
+	"m31labs.dev/buckley/pkg/personality"
 	"go.uber.org/mock/gomock"
 )
 

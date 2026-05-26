@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/odvcencio/buckley/pkg/artifact"
+	"m31labs.dev/buckley/pkg/artifact"
 )
 
 type planningController struct {

@@ -6,10 +6,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/odvcencio/buckley/pkg/config"
-	"github.com/odvcencio/buckley/pkg/model"
-	"github.com/odvcencio/buckley/pkg/parallel"
-	"github.com/odvcencio/buckley/pkg/worktree"
+	"m31labs.dev/buckley/pkg/config"
+	"m31labs.dev/buckley/pkg/model"
+	"m31labs.dev/buckley/pkg/parallel"
+	"m31labs.dev/buckley/pkg/worktree"
 )
 
 // mockWorktreeManager implements parallel.WorktreeManager for testing

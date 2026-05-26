@@ -8,8 +8,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/odvcencio/buckley/pkg/browser"
-	browserdpb "github.com/odvcencio/buckley/pkg/browser/adapters/servo/proto"
+	"m31labs.dev/buckley/pkg/browser"
+	browserdpb "m31labs.dev/buckley/pkg/browser/adapters/servo/proto"
 )
 
 // Session manages a browserd-backed session.

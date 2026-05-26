@@ -14,8 +14,8 @@ import (
 	"sync"
 	"time"
 
-	apperrors "github.com/odvcencio/buckley/pkg/errors"
-	"github.com/odvcencio/buckley/pkg/storage"
+	apperrors "m31labs.dev/buckley/pkg/errors"
+	"m31labs.dev/buckley/pkg/storage"
 )
 
 // rateLimiter provides simple per-key rate limiting.

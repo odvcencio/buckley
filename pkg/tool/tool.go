@@ -3,8 +3,8 @@ package tool
 import (
 	"encoding/json"
 
-	"github.com/odvcencio/buckley/pkg/encoding/toon"
-	"github.com/odvcencio/buckley/pkg/tool/builtin"
+	"m31labs.dev/buckley/pkg/encoding/toon"
+	"m31labs.dev/buckley/pkg/tool/builtin"
 )
 
 var resultCodec = toon.New(true)

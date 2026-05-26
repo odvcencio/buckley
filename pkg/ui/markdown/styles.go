@@ -3,8 +3,8 @@
 package markdown
 
 import (
-	"github.com/odvcencio/buckley/pkg/ui/compositor"
-	"github.com/odvcencio/buckley/pkg/ui/theme"
+	"m31labs.dev/buckley/pkg/ui/compositor"
+	"m31labs.dev/buckley/pkg/ui/theme"
 )
 
 // StyledSpan represents a span of text with consistent styling.

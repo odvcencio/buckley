@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/odvcencio/buckley/pkg/session"
-	"github.com/odvcencio/buckley/pkg/storage"
+	"m31labs.dev/buckley/pkg/session"
+	"m31labs.dev/buckley/pkg/storage"
 )
 
 // TestStorageSessionLifecycle tests creating, retrieving, and managing sessions

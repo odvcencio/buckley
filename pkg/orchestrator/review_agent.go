@@ -11,14 +11,14 @@ import (
 	"sync"
 	"time"
 
-	"github.com/odvcencio/buckley/pkg/artifact"
-	"github.com/odvcencio/buckley/pkg/config"
-	"github.com/odvcencio/buckley/pkg/model"
-	"github.com/odvcencio/buckley/pkg/paths"
-	"github.com/odvcencio/buckley/pkg/personality"
-	"github.com/odvcencio/buckley/pkg/prompts"
-	"github.com/odvcencio/buckley/pkg/rules"
-	"github.com/odvcencio/buckley/pkg/tool"
+	"m31labs.dev/buckley/pkg/artifact"
+	"m31labs.dev/buckley/pkg/config"
+	"m31labs.dev/buckley/pkg/model"
+	"m31labs.dev/buckley/pkg/paths"
+	"m31labs.dev/buckley/pkg/personality"
+	"m31labs.dev/buckley/pkg/prompts"
+	"m31labs.dev/buckley/pkg/rules"
+	"m31labs.dev/buckley/pkg/tool"
 )
 
 // ReviewAgent delegates code review to a dedicated model and persists artifacts.

@@ -11,8 +11,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/odvcencio/buckley/pkg/embeddings"
-	"github.com/odvcencio/buckley/pkg/storage"
+	"m31labs.dev/buckley/pkg/embeddings"
+	"m31labs.dev/buckley/pkg/storage"
 )
 
 // Record represents an episodic memory item.

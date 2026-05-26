@@ -5,8 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/odvcencio/buckley/pkg/config"
-	projectcontext "github.com/odvcencio/buckley/pkg/context"
+	"m31labs.dev/buckley/pkg/config"
+	projectcontext "m31labs.dev/buckley/pkg/context"
 )
 
 func TestGeneratePersonaCreatesSluggedFile(t *testing.T) {

@@ -6,7 +6,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/odvcencio/buckley/pkg/ralph"
+	"m31labs.dev/buckley/pkg/ralph"
 )
 
 // SessionMemoryTool exposes Ralph session memory queries to the agent.

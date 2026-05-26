@@ -3,7 +3,7 @@ package ipc
 import (
 	"strings"
 
-	"github.com/odvcencio/buckley/pkg/storage"
+	"m31labs.dev/buckley/pkg/storage"
 )
 
 func isOperatorPrincipal(principal *requestPrincipal) bool {

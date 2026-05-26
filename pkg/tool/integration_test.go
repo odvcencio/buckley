@@ -7,10 +7,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/odvcencio/buckley/pkg/mission"
-	"github.com/odvcencio/buckley/pkg/storage"
-	"github.com/odvcencio/buckley/pkg/telemetry"
-	"github.com/odvcencio/buckley/pkg/tool/builtin"
+	"m31labs.dev/buckley/pkg/mission"
+	"m31labs.dev/buckley/pkg/storage"
+	"m31labs.dev/buckley/pkg/telemetry"
+	"m31labs.dev/buckley/pkg/tool/builtin"
 	"github.com/odvcencio/fluffyui/progress"
 	"github.com/odvcencio/fluffyui/toast"
 )

@@ -8,8 +8,8 @@ import (
 	"connectrpc.com/connect"
 	"github.com/go-chi/chi/v5"
 
-	ipcpb "github.com/odvcencio/buckley/pkg/ipc/proto"
-	"github.com/odvcencio/buckley/pkg/ipc/proto/ipcpbconnect"
+	ipcpb "m31labs.dev/buckley/pkg/ipc/proto"
+	"m31labs.dev/buckley/pkg/ipc/proto/ipcpbconnect"
 )
 
 func TestGRPCSubscribeUnauthenticatedUsesConnectError(t *testing.T) {

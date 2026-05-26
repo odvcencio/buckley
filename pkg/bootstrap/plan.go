@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/odvcencio/buckley/pkg/types"
+	"m31labs.dev/buckley/pkg/types"
 )
 
 // Phase represents a bootstrap initialization phase.

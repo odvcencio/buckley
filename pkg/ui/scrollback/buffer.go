@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/odvcencio/buckley/pkg/ui/backend"
+	"m31labs.dev/buckley/pkg/ui/backend"
 )
 
 // Buffer stores conversation history with efficient scrolling and selection.

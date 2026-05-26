@@ -3,10 +3,10 @@ package widgets
 import (
 	"testing"
 
-	"github.com/odvcencio/buckley/pkg/ui/backend"
-	"github.com/odvcencio/buckley/pkg/ui/filepicker"
-	"github.com/odvcencio/buckley/pkg/ui/runtime"
-	"github.com/odvcencio/buckley/pkg/ui/terminal"
+	"m31labs.dev/buckley/pkg/ui/backend"
+	"m31labs.dev/buckley/pkg/ui/filepicker"
+	"m31labs.dev/buckley/pkg/ui/runtime"
+	"m31labs.dev/buckley/pkg/ui/terminal"
 )
 
 func TestFilePickerWidget_Measure(t *testing.T) {

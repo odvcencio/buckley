@@ -4,8 +4,8 @@ package commit
 import (
 	"log"
 
-	"github.com/odvcencio/buckley/pkg/oneshot"
-	"github.com/odvcencio/buckley/pkg/tools"
+	"m31labs.dev/buckley/pkg/oneshot"
+	"m31labs.dev/buckley/pkg/tools"
 )
 
 // CommitActions are the allowed action verbs for commits.

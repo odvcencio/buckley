@@ -13,17 +13,17 @@ import (
 	"sync"
 	"syscall"
 
-	"github.com/odvcencio/buckley/pkg/acp"
-	"github.com/odvcencio/buckley/pkg/config"
-	projectcontext "github.com/odvcencio/buckley/pkg/context"
-	"github.com/odvcencio/buckley/pkg/conversation"
-	"github.com/odvcencio/buckley/pkg/model"
-	"github.com/odvcencio/buckley/pkg/prompts"
-	"github.com/odvcencio/buckley/pkg/rules"
-	"github.com/odvcencio/buckley/pkg/skill"
-	"github.com/odvcencio/buckley/pkg/storage"
-	"github.com/odvcencio/buckley/pkg/tool"
-	"github.com/odvcencio/buckley/pkg/tool/builtin"
+	"m31labs.dev/buckley/pkg/acp"
+	"m31labs.dev/buckley/pkg/config"
+	projectcontext "m31labs.dev/buckley/pkg/context"
+	"m31labs.dev/buckley/pkg/conversation"
+	"m31labs.dev/buckley/pkg/model"
+	"m31labs.dev/buckley/pkg/prompts"
+	"m31labs.dev/buckley/pkg/rules"
+	"m31labs.dev/buckley/pkg/skill"
+	"m31labs.dev/buckley/pkg/storage"
+	"m31labs.dev/buckley/pkg/tool"
+	"m31labs.dev/buckley/pkg/tool/builtin"
 )
 
 const defaultACPSystemPrompt = `You are Buckley, an AI development assistant with access to tools.

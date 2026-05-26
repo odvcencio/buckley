@@ -7,7 +7,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/odvcencio/buckley/pkg/skill"
+	"m31labs.dev/buckley/pkg/skill"
 	"gopkg.in/yaml.v3"
 )
 

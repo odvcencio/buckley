@@ -4,8 +4,8 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/odvcencio/buckley/pkg/config"
-	"github.com/odvcencio/buckley/pkg/personality"
+	"m31labs.dev/buckley/pkg/config"
+	"m31labs.dev/buckley/pkg/personality"
 )
 
 type failingReviewer struct{}

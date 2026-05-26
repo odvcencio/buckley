@@ -6,8 +6,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/odvcencio/buckley/pkg/mission"
-	"github.com/odvcencio/buckley/pkg/telemetry"
+	"m31labs.dev/buckley/pkg/mission"
+	"m31labs.dev/buckley/pkg/telemetry"
 )
 
 // ToolCallIDParam allows callers to attach a stable tool call ID for telemetry.

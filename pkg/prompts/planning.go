@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/odvcencio/buckley/pkg/personality"
+	"m31labs.dev/buckley/pkg/personality"
 )
 
 // PlanningPrompt generates the system prompt for the planning model

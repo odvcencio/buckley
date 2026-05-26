@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/odvcencio/buckley/pkg/telemetry"
+	"m31labs.dev/buckley/pkg/telemetry"
 )
 
 func TestMachineBridge_TranslatesSpawned(t *testing.T) {

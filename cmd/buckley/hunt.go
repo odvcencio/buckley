@@ -6,7 +6,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/odvcencio/buckley/pkg/hunt"
+	"m31labs.dev/buckley/pkg/hunt"
 )
 
 // runHuntCommand scans the codebase for improvement suggestions.

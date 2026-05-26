@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/odvcencio/buckley/pkg/rules"
-	"github.com/odvcencio/buckley/pkg/types"
+	"m31labs.dev/buckley/pkg/rules"
+	"m31labs.dev/buckley/pkg/types"
 )
 
 // mustNewFullEngine creates an engine with all embedded .arb files.

@@ -1,6 +1,6 @@
 package grpcsdk
 
-import "github.com/odvcencio/buckley/pkg/orchestrator"
+import "m31labs.dev/buckley/pkg/orchestrator"
 
 // PlanRequest contains inputs for creating a plan.
 type PlanRequest struct {

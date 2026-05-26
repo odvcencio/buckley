@@ -13,9 +13,9 @@ import (
 	"github.com/oklog/ulid/v2"
 	"nhooyr.io/websocket"
 
-	"github.com/odvcencio/buckley/pkg/ipc/command"
-	"github.com/odvcencio/buckley/pkg/mission"
-	"github.com/odvcencio/buckley/pkg/storage"
+	"m31labs.dev/buckley/pkg/ipc/command"
+	"m31labs.dev/buckley/pkg/mission"
+	"m31labs.dev/buckley/pkg/storage"
 )
 
 // setupMissionRoutes sets up Mission Control API routes

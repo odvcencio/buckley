@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/odvcencio/buckley/pkg/parallel"
+	"m31labs.dev/buckley/pkg/parallel"
 )
 
 // Reporter formats experiment results for humans.

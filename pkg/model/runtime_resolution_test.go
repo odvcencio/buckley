@@ -3,7 +3,7 @@ package model
 import (
 	"testing"
 
-	"github.com/odvcencio/buckley/pkg/config"
+	"m31labs.dev/buckley/pkg/config"
 )
 
 func TestResolvePhaseModel_UsesExplicitOverride(t *testing.T) {

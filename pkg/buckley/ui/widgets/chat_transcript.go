@@ -3,7 +3,7 @@ package widgets
 import (
 	"time"
 
-	"github.com/odvcencio/buckley/pkg/buckley/ui/scrollback"
+	"m31labs.dev/buckley/pkg/buckley/ui/scrollback"
 )
 
 type chatTranscriptRenderer interface {

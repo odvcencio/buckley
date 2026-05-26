@@ -1,7 +1,7 @@
 package runner
 
 import (
-	"github.com/odvcencio/buckley/pkg/types"
+	"m31labs.dev/buckley/pkg/types"
 )
 
 // RunnerMode identifies the execution mode.

@@ -8,7 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/odvcencio/buckley/pkg/tool"
+	"m31labs.dev/buckley/pkg/tool"
 )
 
 // toolSelectionCache is an efficient LRU cache with TTL expiration and statistics.

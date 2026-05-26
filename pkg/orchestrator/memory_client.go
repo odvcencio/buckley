@@ -4,8 +4,8 @@ import (
 	"context"
 	"strings"
 
-	"github.com/odvcencio/buckley/pkg/memory"
-	"github.com/odvcencio/buckley/pkg/model"
+	"m31labs.dev/buckley/pkg/memory"
+	"m31labs.dev/buckley/pkg/model"
 )
 
 // memoryAwareModelClient wraps a ModelClient and injects relevant episodic memories.

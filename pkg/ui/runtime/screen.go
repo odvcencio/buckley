@@ -1,6 +1,6 @@
 package runtime
 
-import "github.com/odvcencio/buckley/pkg/ui/theme"
+import "m31labs.dev/buckley/pkg/ui/theme"
 
 // Layer represents a layer in the modal stack.
 // Each layer has its own widget tree and focus scope.

@@ -8,10 +8,10 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/odvcencio/buckley/pkg/config"
-	projectcontext "github.com/odvcencio/buckley/pkg/context"
-	"github.com/odvcencio/buckley/pkg/orchestrator"
-	"github.com/odvcencio/buckley/pkg/personality"
+	"m31labs.dev/buckley/pkg/config"
+	projectcontext "m31labs.dev/buckley/pkg/context"
+	"m31labs.dev/buckley/pkg/orchestrator"
+	"m31labs.dev/buckley/pkg/personality"
 )
 
 // AgentsOptions configures AGENTS.md scaffolding.

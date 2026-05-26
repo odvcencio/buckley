@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/odvcencio/buckley/pkg/bus"
+	"m31labs.dev/buckley/pkg/bus"
 )
 
 func TestNewWorkerPool(t *testing.T) {

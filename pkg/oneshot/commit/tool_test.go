@@ -3,7 +3,7 @@ package commit
 import (
 	"testing"
 
-	"github.com/odvcencio/buckley/pkg/tools"
+	"m31labs.dev/buckley/pkg/tools"
 )
 
 func TestGenerateCommitToolRegistered(t *testing.T) {

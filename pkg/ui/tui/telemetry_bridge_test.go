@@ -5,9 +5,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/odvcencio/buckley/pkg/telemetry"
-	"github.com/odvcencio/buckley/pkg/touch"
-	"github.com/odvcencio/buckley/pkg/ui/widgets"
+	"m31labs.dev/buckley/pkg/telemetry"
+	"m31labs.dev/buckley/pkg/touch"
+	"m31labs.dev/buckley/pkg/ui/widgets"
 )
 
 func TestTelemetryUIBridge_New(t *testing.T) {

@@ -3,7 +3,7 @@ package rlm
 import (
 	"testing"
 
-	"github.com/odvcencio/buckley/pkg/model"
+	"m31labs.dev/buckley/pkg/model"
 )
 
 type stubResolver struct {

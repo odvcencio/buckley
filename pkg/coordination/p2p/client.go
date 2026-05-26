@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/odvcencio/buckley/pkg/coordination/reliability"
+	"m31labs.dev/buckley/pkg/coordination/reliability"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )

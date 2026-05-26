@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/odvcencio/buckley/pkg/rules"
-	"github.com/odvcencio/buckley/pkg/tools"
-	"github.com/odvcencio/buckley/pkg/transparency"
+	"m31labs.dev/buckley/pkg/rules"
+	"m31labs.dev/buckley/pkg/tools"
+	"m31labs.dev/buckley/pkg/transparency"
 )
 
 const defaultMaxRetries = 3

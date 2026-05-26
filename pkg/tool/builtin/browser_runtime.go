@@ -10,9 +10,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/odvcencio/buckley/pkg/browser"
-	"github.com/odvcencio/buckley/pkg/browser/adapters/servo"
-	"github.com/odvcencio/buckley/pkg/session"
+	"m31labs.dev/buckley/pkg/browser"
+	"m31labs.dev/buckley/pkg/browser/adapters/servo"
+	"m31labs.dev/buckley/pkg/session"
 )
 
 var (

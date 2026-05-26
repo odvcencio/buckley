@@ -5,7 +5,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/odvcencio/buckley/pkg/tool/external"
+	"m31labs.dev/buckley/pkg/tool/external"
 )
 
 // LoadExternal loads external plugin tools from a directory

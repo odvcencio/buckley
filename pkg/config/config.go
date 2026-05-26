@@ -4,9 +4,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/odvcencio/buckley/pkg/giturl"
-	"github.com/odvcencio/buckley/pkg/personality"
-	"github.com/odvcencio/buckley/pkg/sandbox"
+	"m31labs.dev/buckley/pkg/giturl"
+	"m31labs.dev/buckley/pkg/personality"
+	"m31labs.dev/buckley/pkg/sandbox"
 )
 
 const (

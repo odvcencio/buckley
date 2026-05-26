@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"net"
 
-	"github.com/odvcencio/buckley/pkg/sdk"
+	"m31labs.dev/buckley/pkg/sdk"
 	"google.golang.org/grpc"
 	"google.golang.org/protobuf/types/known/emptypb"
 )

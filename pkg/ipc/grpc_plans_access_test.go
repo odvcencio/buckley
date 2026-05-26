@@ -8,10 +8,10 @@ import (
 
 	"connectrpc.com/connect"
 
-	"github.com/odvcencio/buckley/pkg/config"
-	ipcpb "github.com/odvcencio/buckley/pkg/ipc/proto"
-	"github.com/odvcencio/buckley/pkg/orchestrator"
-	"github.com/odvcencio/buckley/pkg/storage"
+	"m31labs.dev/buckley/pkg/config"
+	ipcpb "m31labs.dev/buckley/pkg/ipc/proto"
+	"m31labs.dev/buckley/pkg/orchestrator"
+	"m31labs.dev/buckley/pkg/storage"
 )
 
 func TestGRPCListPlansFiltersByPrincipal(t *testing.T) {

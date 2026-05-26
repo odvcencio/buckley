@@ -3,7 +3,7 @@
 // simulation backends (testing), enabling golden-frame tests.
 package backend
 
-import "github.com/odvcencio/buckley/pkg/ui/terminal"
+import "m31labs.dev/buckley/pkg/ui/terminal"
 
 // Backend is the terminal abstraction layer.
 // Implementations handle terminal I/O, input events, and screen rendering.

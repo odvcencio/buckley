@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/odvcencio/buckley/pkg/approval"
+	"m31labs.dev/buckley/pkg/approval"
 	"github.com/pmezard/go-difflib/difflib"
 )
 

@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/odvcencio/buckley/pkg/types"
+	"m31labs.dev/buckley/pkg/types"
 )
 
 func TestArbiterEscalator_DenySubagentFull(t *testing.T) {

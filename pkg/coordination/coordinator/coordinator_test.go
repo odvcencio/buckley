@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/odvcencio/buckley/pkg/coordination/capabilities"
-	"github.com/odvcencio/buckley/pkg/coordination/events"
+	"m31labs.dev/buckley/pkg/coordination/capabilities"
+	"m31labs.dev/buckley/pkg/coordination/events"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
