@@ -1,6 +1,6 @@
 package widgets
 
-import "github.com/odvcencio/fluffyui/state"
+import "m31labs.dev/fluffyui/state"
 
 // Search highlights matching text.
 func (m *ChatMessages) Search(query string) {

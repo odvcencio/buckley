@@ -1,10 +1,10 @@
 package widgets
 
 import (
-	"github.com/odvcencio/fluffyui/runtime"
-	"github.com/odvcencio/fluffyui/scroll"
-	"github.com/odvcencio/fluffyui/state"
-	uiwidgets "github.com/odvcencio/fluffyui/widgets"
+	"m31labs.dev/fluffyui/runtime"
+	"m31labs.dev/fluffyui/scroll"
+	"m31labs.dev/fluffyui/state"
+	uiwidgets "m31labs.dev/fluffyui/widgets"
 )
 
 // Measure returns the preferred size.

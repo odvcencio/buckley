@@ -1,10 +1,10 @@
 package widgets
 
 import (
-	"github.com/odvcencio/fluffyui/accessibility"
-	"github.com/odvcencio/fluffyui/backend"
-	"github.com/odvcencio/fluffyui/runtime"
-	uiwidgets "github.com/odvcencio/fluffyui/widgets"
+	"m31labs.dev/fluffyui/accessibility"
+	"m31labs.dev/fluffyui/backend"
+	"m31labs.dev/fluffyui/runtime"
+	uiwidgets "m31labs.dev/fluffyui/widgets"
 )
 
 // AlertBanner renders an alert widget centered near the top of the screen.

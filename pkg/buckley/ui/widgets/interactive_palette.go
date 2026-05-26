@@ -6,11 +6,11 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/odvcencio/fluffyui/accessibility"
-	"github.com/odvcencio/fluffyui/backend"
-	"github.com/odvcencio/fluffyui/runtime"
-	"github.com/odvcencio/fluffyui/terminal"
-	uiwidgets "github.com/odvcencio/fluffyui/widgets"
+	"m31labs.dev/fluffyui/accessibility"
+	"m31labs.dev/fluffyui/backend"
+	"m31labs.dev/fluffyui/runtime"
+	"m31labs.dev/fluffyui/terminal"
+	uiwidgets "m31labs.dev/fluffyui/widgets"
 )
 
 // InteractivePalette provides a fuzzy-filtering command palette with mouse support.

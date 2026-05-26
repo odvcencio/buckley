@@ -4,10 +4,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/odvcencio/fluffyui/backend"
-	"github.com/odvcencio/fluffyui/markdown"
-	"github.com/odvcencio/fluffyui/runtime"
-	"github.com/odvcencio/fluffyui/theme"
+	"m31labs.dev/fluffyui/backend"
+	"m31labs.dev/fluffyui/markdown"
+	"m31labs.dev/fluffyui/runtime"
+	"m31labs.dev/fluffyui/theme"
 )
 
 func TestChatMessages_MouseSelection(t *testing.T) {

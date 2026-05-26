@@ -3,7 +3,7 @@ package widgets
 import (
 	"strings"
 
-	"github.com/odvcencio/fluffyui/state"
+	"m31labs.dev/fluffyui/state"
 )
 
 func (c *ChatView) ownsReasoning() bool {

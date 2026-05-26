@@ -5,15 +5,15 @@ import (
 	"strings"
 	"time"
 
-	"github.com/odvcencio/fluffyui/accessibility"
-	"github.com/odvcencio/fluffyui/animation"
-	"github.com/odvcencio/fluffyui/backend"
-	"github.com/odvcencio/fluffyui/effects"
-	"github.com/odvcencio/fluffyui/graphics"
-	"github.com/odvcencio/fluffyui/progress"
-	"github.com/odvcencio/fluffyui/runtime"
-	"github.com/odvcencio/fluffyui/state"
-	uiwidgets "github.com/odvcencio/fluffyui/widgets"
+	"m31labs.dev/fluffyui/accessibility"
+	"m31labs.dev/fluffyui/animation"
+	"m31labs.dev/fluffyui/backend"
+	"m31labs.dev/fluffyui/effects"
+	"m31labs.dev/fluffyui/graphics"
+	"m31labs.dev/fluffyui/progress"
+	"m31labs.dev/fluffyui/runtime"
+	"m31labs.dev/fluffyui/state"
+	uiwidgets "m31labs.dev/fluffyui/widgets"
 )
 
 // StatusBar displays status information at the bottom of the screen.

@@ -3,10 +3,10 @@ package widgets
 import (
 	"strings"
 
-	"github.com/odvcencio/fluffyui/backend"
-	"github.com/odvcencio/fluffyui/dragdrop"
-	"github.com/odvcencio/fluffyui/runtime"
-	uiwidgets "github.com/odvcencio/fluffyui/widgets"
+	"m31labs.dev/fluffyui/backend"
+	"m31labs.dev/fluffyui/dragdrop"
+	"m31labs.dev/fluffyui/runtime"
+	uiwidgets "m31labs.dev/fluffyui/widgets"
 )
 
 type taskPanel struct {

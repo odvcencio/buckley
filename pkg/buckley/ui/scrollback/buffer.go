@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/odvcencio/fluffyui/backend"
+	"m31labs.dev/fluffyui/backend"
 )
 
 // Buffer stores conversation history with efficient scrolling and selection.

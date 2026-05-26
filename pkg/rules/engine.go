@@ -4,10 +4,10 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/odvcencio/arbiter"
-	"github.com/odvcencio/arbiter/govern"
-	"github.com/odvcencio/arbiter/strategy"
-	"github.com/odvcencio/arbiter/vm"
+	"m31labs.dev/arbiter"
+	"m31labs.dev/arbiter/govern"
+	"m31labs.dev/arbiter/strategy"
+	"m31labs.dev/arbiter/vm"
 )
 
 // Engine compiles all .arb domains at startup and provides typed evaluation.

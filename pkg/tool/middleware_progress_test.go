@@ -4,7 +4,7 @@ import (
 	"testing"
 
 	"m31labs.dev/buckley/pkg/tool/builtin"
-	"github.com/odvcencio/fluffyui/progress"
+	"m31labs.dev/fluffyui/progress"
 )
 
 // testProgressAdapter wraps *progress.ProgressManager to satisfy ProgressTracker.

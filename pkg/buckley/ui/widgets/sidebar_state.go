@@ -3,8 +3,8 @@ package widgets
 import (
 	"strings"
 
-	"github.com/odvcencio/fluffyui/backend"
-	"github.com/odvcencio/fluffyui/state"
+	"m31labs.dev/fluffyui/backend"
+	"m31labs.dev/fluffyui/state"
 )
 
 func (s *Sidebar) applyActiveAgents(agents []AgentSummary) {

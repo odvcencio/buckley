@@ -3,10 +3,10 @@ package widgets
 import (
 	"strings"
 
-	"github.com/odvcencio/fluffyui/backend"
-	"github.com/odvcencio/fluffyui/runtime"
-	"github.com/odvcencio/fluffyui/scroll"
-	uiwidgets "github.com/odvcencio/fluffyui/widgets"
+	"m31labs.dev/fluffyui/backend"
+	"m31labs.dev/fluffyui/runtime"
+	"m31labs.dev/fluffyui/scroll"
+	uiwidgets "m31labs.dev/fluffyui/widgets"
 )
 
 type sidebarStatus struct {

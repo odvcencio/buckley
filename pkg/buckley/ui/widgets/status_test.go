@@ -4,11 +4,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/odvcencio/fluffyui/backend"
-	"github.com/odvcencio/fluffyui/progress"
-	"github.com/odvcencio/fluffyui/runtime"
-	"github.com/odvcencio/fluffyui/state"
-	uitesting "github.com/odvcencio/fluffyui/testing"
+	"m31labs.dev/fluffyui/backend"
+	"m31labs.dev/fluffyui/progress"
+	"m31labs.dev/fluffyui/runtime"
+	"m31labs.dev/fluffyui/state"
+	uitesting "m31labs.dev/fluffyui/testing"
 )
 
 func renderStatusBar(t *testing.T, sb *StatusBar, width int) string {

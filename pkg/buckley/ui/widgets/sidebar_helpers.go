@@ -5,7 +5,7 @@ import (
 	"sort"
 	"strings"
 
-	uiwidgets "github.com/odvcencio/fluffyui/widgets"
+	uiwidgets "m31labs.dev/fluffyui/widgets"
 )
 
 func truncateID(id string) string {

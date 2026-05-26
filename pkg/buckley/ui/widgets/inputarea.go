@@ -3,14 +3,14 @@ package widgets
 import (
 	"strings"
 
-	"github.com/odvcencio/fluffyui/accessibility"
-	"github.com/odvcencio/fluffyui/backend"
-	"github.com/odvcencio/fluffyui/clipboard"
-	"github.com/odvcencio/fluffyui/dragdrop"
-	"github.com/odvcencio/fluffyui/runtime"
-	"github.com/odvcencio/fluffyui/state"
-	"github.com/odvcencio/fluffyui/terminal"
-	uiwidgets "github.com/odvcencio/fluffyui/widgets"
+	"m31labs.dev/fluffyui/accessibility"
+	"m31labs.dev/fluffyui/backend"
+	"m31labs.dev/fluffyui/clipboard"
+	"m31labs.dev/fluffyui/dragdrop"
+	"m31labs.dev/fluffyui/runtime"
+	"m31labs.dev/fluffyui/state"
+	"m31labs.dev/fluffyui/terminal"
+	uiwidgets "m31labs.dev/fluffyui/widgets"
 )
 
 // InputMode represents the current input mode.

@@ -3,10 +3,10 @@ package widgets
 import (
 	"time"
 
-	"github.com/odvcencio/fluffyui/backend"
-	"github.com/odvcencio/fluffyui/runtime"
-	"github.com/odvcencio/fluffyui/state"
-	uiwidgets "github.com/odvcencio/fluffyui/widgets"
+	"m31labs.dev/fluffyui/backend"
+	"m31labs.dev/fluffyui/runtime"
+	"m31labs.dev/fluffyui/state"
+	uiwidgets "m31labs.dev/fluffyui/widgets"
 )
 
 // TaskStatus represents the status of a task in the plan.

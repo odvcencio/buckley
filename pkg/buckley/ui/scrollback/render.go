@@ -1,7 +1,7 @@
 package scrollback
 
 import (
-	"github.com/odvcencio/fluffyui/compositor"
+	"m31labs.dev/fluffyui/compositor"
 )
 
 // RenderConfig holds styling for the scrollback buffer.

@@ -3,7 +3,7 @@ package widgets
 import (
 	"strings"
 
-	"github.com/odvcencio/fluffyui/runtime"
+	"m31labs.dev/fluffyui/runtime"
 )
 
 // PositionForPoint maps screen coordinates to a buffer position.

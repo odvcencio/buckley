@@ -7,15 +7,15 @@ import (
 
 	"github.com/mattn/go-runewidth"
 	"m31labs.dev/buckley/pkg/buckley/ui/scrollback"
-	"github.com/odvcencio/fluffyui/accessibility"
-	"github.com/odvcencio/fluffyui/backend"
-	"github.com/odvcencio/fluffyui/clipboard"
-	"github.com/odvcencio/fluffyui/markdown"
-	"github.com/odvcencio/fluffyui/runtime"
-	"github.com/odvcencio/fluffyui/scroll"
-	"github.com/odvcencio/fluffyui/state"
-	uistyle "github.com/odvcencio/fluffyui/style"
-	uiwidgets "github.com/odvcencio/fluffyui/widgets"
+	"m31labs.dev/fluffyui/accessibility"
+	"m31labs.dev/fluffyui/backend"
+	"m31labs.dev/fluffyui/clipboard"
+	"m31labs.dev/fluffyui/markdown"
+	"m31labs.dev/fluffyui/runtime"
+	"m31labs.dev/fluffyui/scroll"
+	"m31labs.dev/fluffyui/state"
+	uistyle "m31labs.dev/fluffyui/style"
+	uiwidgets "m31labs.dev/fluffyui/widgets"
 )
 
 // ChatMessage represents a single chat entry.

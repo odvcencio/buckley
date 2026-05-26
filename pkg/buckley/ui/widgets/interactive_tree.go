@@ -4,13 +4,13 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/odvcencio/fluffyui/accessibility"
-	"github.com/odvcencio/fluffyui/backend"
-	"github.com/odvcencio/fluffyui/dragdrop"
-	"github.com/odvcencio/fluffyui/runtime"
-	"github.com/odvcencio/fluffyui/scroll"
-	"github.com/odvcencio/fluffyui/terminal"
-	uiwidgets "github.com/odvcencio/fluffyui/widgets"
+	"m31labs.dev/fluffyui/accessibility"
+	"m31labs.dev/fluffyui/backend"
+	"m31labs.dev/fluffyui/dragdrop"
+	"m31labs.dev/fluffyui/runtime"
+	"m31labs.dev/fluffyui/scroll"
+	"m31labs.dev/fluffyui/terminal"
+	uiwidgets "m31labs.dev/fluffyui/widgets"
 )
 
 // InteractiveTree renders a tree with mouse selection support.

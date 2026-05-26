@@ -3,8 +3,8 @@ package widgets
 import (
 	"testing"
 
-	"github.com/odvcencio/fluffyui/runtime"
-	uiwidgets "github.com/odvcencio/fluffyui/widgets"
+	"m31labs.dev/fluffyui/runtime"
+	uiwidgets "m31labs.dev/fluffyui/widgets"
 )
 
 func TestInteractiveTree_MouseSelectionAndToggle(t *testing.T) {

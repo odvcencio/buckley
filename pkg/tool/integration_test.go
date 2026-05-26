@@ -11,8 +11,8 @@ import (
 	"m31labs.dev/buckley/pkg/storage"
 	"m31labs.dev/buckley/pkg/telemetry"
 	"m31labs.dev/buckley/pkg/tool/builtin"
-	"github.com/odvcencio/fluffyui/progress"
-	"github.com/odvcencio/fluffyui/toast"
+	"m31labs.dev/fluffyui/progress"
+	"m31labs.dev/fluffyui/toast"
 )
 
 type failingTool struct{}

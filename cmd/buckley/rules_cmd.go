@@ -8,7 +8,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/odvcencio/arbiter"
+	"m31labs.dev/arbiter"
 	"m31labs.dev/buckley/pkg/rules"
 )
 

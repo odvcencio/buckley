@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/odvcencio/fluffyui/compositor"
+	"m31labs.dev/fluffyui/compositor"
 )
 
 // RenderConfig holds styling configuration.

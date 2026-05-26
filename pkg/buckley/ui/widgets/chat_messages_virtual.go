@@ -2,10 +2,10 @@ package widgets
 
 import (
 	"m31labs.dev/buckley/pkg/buckley/ui/scrollback"
-	"github.com/odvcencio/fluffyui/accessibility"
-	"github.com/odvcencio/fluffyui/runtime"
-	"github.com/odvcencio/fluffyui/scroll"
-	uiwidgets "github.com/odvcencio/fluffyui/widgets"
+	"m31labs.dev/fluffyui/accessibility"
+	"m31labs.dev/fluffyui/runtime"
+	"m31labs.dev/fluffyui/scroll"
+	uiwidgets "m31labs.dev/fluffyui/widgets"
 )
 
 type chatMessagesVirtual struct {

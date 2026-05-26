@@ -1,8 +1,8 @@
 package widgets
 
 import (
-	"github.com/odvcencio/fluffyui/runtime"
-	uiwidgets "github.com/odvcencio/fluffyui/widgets"
+	"m31labs.dev/fluffyui/runtime"
+	uiwidgets "m31labs.dev/fluffyui/widgets"
 )
 
 type chatMessagesOverlay struct {

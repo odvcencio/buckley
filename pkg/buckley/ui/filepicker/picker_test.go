@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/odvcencio/fluffyui/compositor"
+	"m31labs.dev/fluffyui/compositor"
 )
 
 func TestFuzzyMatch(t *testing.T) {

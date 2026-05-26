@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/odvcencio/fluffyui/compositor"
+	"m31labs.dev/fluffyui/compositor"
 )
 
 func TestBuffer(t *testing.T) {
