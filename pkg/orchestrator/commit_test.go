@@ -123,8 +123,12 @@ func TestCommitGeneratorFormatCommitMessage(t *testing.T) {
 	if !strings.Contains(msg, "BREAKING CHANGE: Provide a human-readable summary") {
 		t.Fatalf("expected breaking change footer, got %q", msg)
 	}
-	if !strings.Contains(msg, "Closes #88") || !strings.Contains(msg, "Closes #102") {
+	if !strings.Contains(msg, "Refs #88") || !strings.Contains(msg, "Refs #102") {
 		t.Fatalf("expected issue references, got %q", msg)
+	}
+	// Related issues must never be rendered as GitHub close directives.
+	if strings.Contains(msg, "Closes #") || strings.Contains(msg, "Fixes #") || strings.Contains(msg, "Resolves #") {
+		t.Fatalf("commit message must not contain a close directive, got %q", msg)
 	}
 }
 

@@ -4,6 +4,7 @@ package commit
 import (
 	"log"
 
+	"m31labs.dev/buckley/pkg/commitmsg"
 	"m31labs.dev/buckley/pkg/oneshot"
 	"m31labs.dev/buckley/pkg/tools"
 )
@@ -60,7 +61,10 @@ var GenerateCommitTool = tools.Definition{
 				"Whether this commit introduces a breaking change",
 			),
 			"issues": tools.ArrayProperty(
-				"Related issue numbers without # prefix (e.g., '123', '456')",
+				"Issue numbers this change RELATES TO, without # prefix (e.g., '123', '456'). "+
+					"These are rendered as references ('Refs #N'), NOT as close directives — "+
+					"populating this does not and must not close any issue. Do not add an issue "+
+					"number just because it appears in the diff text (e.g. a changelog '(roadmap: #14)').",
 				tools.StringProperty("Issue number"),
 			),
 		},
@@ -88,11 +92,18 @@ func (cr CommitResult) Header() string {
 }
 
 // Format returns the full commit message.
+//
+// Related issues are rendered in a reference-only form ("Refs #N"), never
+// as a GitHub close directive: the model's issues field carries issues
+// the change relates to, not issues it is declared to close, and emitting
+// "Closes #N" here has silently auto-closed unrelated issues/PRs on merge.
+// Body bullets are sanitized for the same reason, in case a close keyword
+// slips into free text. See pkg/commitmsg.
 func (cr CommitResult) Format() string {
 	msg := cr.Header() + "\n\n"
 
 	for _, bullet := range cr.Body {
-		msg += "- " + bullet + "\n"
+		msg += "- " + commitmsg.NeutralizeCloseDirectives(bullet) + "\n"
 	}
 
 	if cr.Breaking {
@@ -102,7 +113,7 @@ func (cr CommitResult) Format() string {
 	if len(cr.Issues) > 0 {
 		msg += "\n"
 		for _, issue := range cr.Issues {
-			msg += "Closes #" + issue + "\n"
+			msg += commitmsg.IssueRefLine(issue) + "\n"
 		}
 	}
 

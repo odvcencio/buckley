@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"m31labs.dev/buckley/pkg/commitmsg"
 	"m31labs.dev/buckley/pkg/config"
 	"m31labs.dev/buckley/pkg/model"
 )
@@ -53,7 +54,10 @@ Rules:
 - Summary: concise, no period, ~50 chars
 - Body: REQUIRED. Explain what and why, not how. Prefer a bullet list and match detail to diff size.
 - Breaking changes: add BREAKING CHANGE: in footer
-- Reference issues: Closes #123
+- The "issues" field lists issues this change RELATES TO. They are rendered as
+  references ("Refs #N") and do NOT close anything. Never write "Closes #N",
+  "Fixes #N", or "Resolves #N", and do not list an issue number just because it
+  appears in the diff text (e.g. a changelog "(roadmap: #123)" attribution).
 
 Output JSON:
 {
@@ -488,9 +492,10 @@ func (cg *CommitGenerator) FormatCommitMessage(commit *CommitInfo) string {
 		b.WriteString("\n")
 	}
 
-	// Body
+	// Body. Sanitized so a stray close keyword in model-authored text cannot
+	// become a GitHub auto-close directive. See pkg/commitmsg.
 	if commit.Body != "" {
-		b.WriteString(commit.Body)
+		b.WriteString(commitmsg.NeutralizeCloseDirectives(commit.Body))
 		b.WriteString("\n")
 	}
 
@@ -501,10 +506,11 @@ func (cg *CommitGenerator) FormatCommitMessage(commit *CommitInfo) string {
 		b.WriteString("\n")
 	}
 
+	// Related issues render as references, never as close directives.
 	if len(commit.Issues) > 0 {
 		b.WriteString("\n")
 		for _, issue := range commit.Issues {
-			b.WriteString(fmt.Sprintf("Closes #%s\n", issue))
+			b.WriteString(commitmsg.IssueRefLine(issue) + "\n")
 		}
 	}
 

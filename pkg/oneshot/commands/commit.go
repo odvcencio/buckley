@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"m31labs.dev/buckley/pkg/commitmsg"
 	"m31labs.dev/buckley/pkg/oneshot"
 	"m31labs.dev/buckley/pkg/tools"
 )
@@ -39,10 +40,14 @@ func (cr CommitResult) Header() string {
 }
 
 // Format returns the full commit message.
+//
+// Related issues render as references ("Refs #N"), never as GitHub close
+// directives, and body bullets are sanitized for stray close keywords.
+// See pkg/commitmsg for why.
 func (cr CommitResult) Format() string {
 	msg := cr.Header() + "\n\n"
 	for _, bullet := range cr.Body {
-		msg += "- " + bullet + "\n"
+		msg += "- " + commitmsg.NeutralizeCloseDirectives(bullet) + "\n"
 	}
 	if cr.Breaking {
 		msg += "\nBREAKING CHANGE: " + cr.Subject + "\n"
@@ -50,7 +55,7 @@ func (cr CommitResult) Format() string {
 	if len(cr.Issues) > 0 {
 		msg += "\n"
 		for _, issue := range cr.Issues {
-			msg += "Closes #" + issue + "\n"
+			msg += commitmsg.IssueRefLine(issue) + "\n"
 		}
 	}
 	return msg
@@ -84,7 +89,9 @@ func (CommitDefinition) Tool() tools.Definition {
 					"Whether this commit introduces a breaking change",
 				),
 				"issues": tools.ArrayProperty(
-					"Related issue numbers without # prefix",
+					"Issue numbers this change RELATES TO, without # prefix. Rendered as "+
+						"references ('Refs #N'), never as close directives — this does not close "+
+						"any issue. Do not add a number just because it appears in the diff text.",
 					tools.StringProperty("Issue number"),
 				),
 			},

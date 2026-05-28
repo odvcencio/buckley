@@ -143,11 +143,41 @@ func TestCommitResultFormatWithIssues(t *testing.T) {
 
 	formatted := result.Format()
 
-	if !contains(formatted, "Closes #123") {
-		t.Error("expected 'Closes #123' in formatted message")
+	// Related issues render as references, never as GitHub close directives.
+	if !contains(formatted, "Refs #123") {
+		t.Error("expected 'Refs #123' in formatted message")
 	}
-	if !contains(formatted, "Closes #456") {
-		t.Error("expected 'Closes #456' in formatted message")
+	if !contains(formatted, "Refs #456") {
+		t.Error("expected 'Refs #456' in formatted message")
+	}
+	if contains(formatted, "Closes #") || contains(formatted, "Fixes #") || contains(formatted, "Resolves #") {
+		t.Errorf("commit message must not contain a close directive, got %q", formatted)
+	}
+}
+
+func TestCommitResultFormatSanitizesBodyCloseDirective(t *testing.T) {
+	// A close directive that slips into a free-text body bullet must be
+	// neutralized so merging the commit cannot auto-close an issue.
+	result := CommitResult{
+		Action:  "add",
+		Subject: "remote import lockfile",
+		Body: []string{
+			"Add lockfile machinery (roadmap: #14)",
+			"Closes #14",
+		},
+	}
+
+	formatted := result.Format()
+
+	if contains(formatted, "Closes #14") {
+		t.Errorf("body close directive must be neutralized, got %q", formatted)
+	}
+	if !contains(formatted, "Refs #14") {
+		t.Errorf("expected neutralized reference 'Refs #14', got %q", formatted)
+	}
+	// Incidental references in prose stay intact.
+	if !contains(formatted, "(roadmap: #14)") {
+		t.Errorf("expected roadmap attribution preserved, got %q", formatted)
 	}
 }
 
