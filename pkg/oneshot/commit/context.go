@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	"m31labs.dev/buckley/pkg/diffsignal"
 	"m31labs.dev/buckley/pkg/transparency"
 )
 
@@ -100,14 +101,17 @@ func AssembleContext(opts ContextOptions) (*Context, *transparency.ContextAudit,
 	}
 	audit.Add("staged files", estimateTokens(nameStatus))
 
-	// Get diff
-	diff, truncated, err := gitOutputLimited(opts.MaxDiffBytes, "diff", "--cached")
+	// Get diff. The raw staged diff is reshaped by diffsignal so low-signal
+	// bulk (binary, generated, minified files) becomes summary lines instead
+	// of starving hand-written changes out of the byte budget.
+	diff, rawTruncated, err := gitOutputLimited(diffsignal.MaxParseBytes, "diff", "--cached")
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to get diff: %w", err)
 	}
-	ctx.Diff = diff
-	diffTokens := estimateTokens(diff)
-	if truncated {
+	diffRes := diffsignal.Prioritize(diff, opts.MaxDiffBytes)
+	ctx.Diff = diffRes.Context
+	diffTokens := estimateTokens(ctx.Diff)
+	if rawTruncated || diffRes.Truncated {
 		audit.AddTruncated("git diff", diffTokens, opts.MaxDiffTokens)
 	} else {
 		audit.Add("git diff", diffTokens)

@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"m31labs.dev/buckley/pkg/diffsignal"
 )
 
 // ContextOpts configures context building behavior.
@@ -109,6 +111,10 @@ func gatherSource(src ContextSource, opts ContextOpts) (string, error) {
 }
 
 // gatherGitDiff runs git diff with appropriate flags.
+//
+// The raw diff is reshaped by diffsignal before it reaches the model:
+// low-signal bulk (binary, generated, minified files) is reduced to summary
+// lines so it cannot starve hand-written changes out of the byte budget.
 func gatherGitDiff(params map[string]string, opts ContextOpts) (string, error) {
 	args := []string{"diff"}
 
@@ -118,19 +124,21 @@ func gatherGitDiff(params map[string]string, opts ContextOpts) (string, error) {
 		args = append(args, base+"...HEAD")
 	}
 
-	output, truncated, err := contextGitOutputLimited(opts.MaxDiffBytes, args...)
+	output, rawTruncated, err := contextGitOutputLimited(diffsignal.MaxParseBytes, args...)
 	if err != nil {
 		// Retry without ...HEAD for base diff
 		if base := params["base"]; base != "" {
 			args = []string{"diff", base}
-			output, truncated, err = contextGitOutputLimited(opts.MaxDiffBytes, args...)
+			output, rawTruncated, err = contextGitOutputLimited(diffsignal.MaxParseBytes, args...)
 		}
 		if err != nil {
 			return "", err
 		}
 	}
 
-	if truncated {
+	res := diffsignal.Prioritize(output, opts.MaxDiffBytes)
+	output = res.Context
+	if rawTruncated || res.Truncated {
 		output += "\n... (truncated)"
 	}
 	return output, nil

@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	"m31labs.dev/buckley/pkg/diffsignal"
 	"m31labs.dev/buckley/pkg/transparency"
 )
 
@@ -270,6 +271,9 @@ func getCIStatus(prNumber int) string {
 	return "no checks"
 }
 
+// prDiffMaxBytes is the total budget for a PR review diff.
+const prDiffMaxBytes = 200_000
+
 func getPRDiff(prNumber int) (string, error) {
 	cmd := exec.Command("gh", "pr", "diff", strconv.Itoa(prNumber))
 	output, err := cmd.Output()
@@ -277,9 +281,10 @@ func getPRDiff(prNumber int) (string, error) {
 		return "", err
 	}
 
-	diff := string(output)
-	if len(diff) > 200000 {
-		diff = diff[:200000] + "\n... (truncated)"
+	res := diffsignal.Prioritize(string(output), prDiffMaxBytes)
+	diff := res.Context
+	if res.Truncated {
+		diff += "\n... (truncated)"
 	}
 	return diff, nil
 }

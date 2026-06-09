@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"m31labs.dev/buckley/pkg/diffsignal"
 	"m31labs.dev/buckley/pkg/transparency"
 )
 
@@ -164,7 +165,8 @@ func (g *ContextGatherer) gatherGitDiff(source ContextSource) (string, error) {
 		return "", nil
 	}
 
-	return fmt.Sprintf("<git_diff>\n%s</git_diff>", strings.TrimSpace(string(output))), nil
+	diff := diffsignal.Prioritize(string(output), diffBudget(source.MaxBytes)).Context
+	return fmt.Sprintf("<git_diff>\n%s</git_diff>", diff), nil
 }
 
 func (g *ContextGatherer) gatherGitDiffStaged(source ContextSource) (string, error) {
@@ -183,7 +185,18 @@ func (g *ContextGatherer) gatherGitDiffStaged(source ContextSource) (string, err
 		return "", nil
 	}
 
-	return fmt.Sprintf("<git_diff_staged>\n%s</git_diff_staged>", strings.TrimSpace(string(output))), nil
+	diff := diffsignal.Prioritize(string(output), diffBudget(source.MaxBytes)).Context
+	return fmt.Sprintf("<git_diff_staged>\n%s</git_diff_staged>", diff), nil
+}
+
+// diffBudget leaves headroom for the wrapper tags so Gather's MaxBytes
+// truncation does not chop the assembled diff context.
+func diffBudget(maxBytes int) int {
+	const tagOverhead = 64
+	if maxBytes > 2*tagOverhead {
+		return maxBytes - tagOverhead
+	}
+	return maxBytes
 }
 
 func (g *ContextGatherer) gatherGitStatus(source ContextSource) (string, error) {

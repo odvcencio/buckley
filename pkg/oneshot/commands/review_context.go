@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	"m31labs.dev/buckley/pkg/diffsignal"
 	"m31labs.dev/buckley/pkg/transparency"
 )
 
@@ -117,16 +118,17 @@ func AssembleBranchContext(opts BranchContextOptions) (*BranchContext, *transpar
 	ctx.Files = parseNameStatus(nameStatus)
 	audit.Add("changed files", reviewEstimateTokens(nameStatus))
 
-	diff, truncated, err := reviewGitOutputLimited(opts.MaxDiffBytes, "diff", ctx.BaseBranch+"...HEAD")
+	diff, rawTruncated, err := reviewGitOutputLimited(diffsignal.MaxParseBytes, "diff", ctx.BaseBranch+"...HEAD")
 	if err != nil {
-		diff, truncated, err = reviewGitOutputLimited(opts.MaxDiffBytes, "diff", ctx.BaseBranch)
+		diff, rawTruncated, err = reviewGitOutputLimited(diffsignal.MaxParseBytes, "diff", ctx.BaseBranch)
 	}
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to get diff: %w", err)
 	}
-	ctx.Diff = diff
-	diffTokens := reviewEstimateTokens(diff)
-	if truncated {
+	diffRes := diffsignal.Prioritize(diff, opts.MaxDiffBytes)
+	ctx.Diff = diffRes.Context
+	diffTokens := reviewEstimateTokens(ctx.Diff)
+	if rawTruncated || diffRes.Truncated {
 		audit.AddTruncated("git diff", diffTokens, opts.MaxDiffBytes/4)
 	} else {
 		audit.Add("git diff", diffTokens)
@@ -138,10 +140,10 @@ func AssembleBranchContext(opts BranchContextOptions) (*BranchContext, *transpar
 	}
 
 	if opts.IncludeUnstaged {
-		unstaged, _ := reviewGitOutput("diff")
+		unstaged, _, _ := reviewGitOutputLimited(diffsignal.MaxParseBytes, "diff")
 		if strings.TrimSpace(unstaged) != "" {
-			ctx.Unstaged = unstaged
-			audit.Add("unstaged changes", reviewEstimateTokens(unstaged))
+			ctx.Unstaged = diffsignal.Prioritize(unstaged, opts.MaxDiffBytes).Context
+			audit.Add("unstaged changes", reviewEstimateTokens(ctx.Unstaged))
 		}
 	}
 

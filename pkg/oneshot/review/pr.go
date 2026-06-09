@@ -10,24 +10,25 @@ import (
 	"strings"
 	"time"
 
+	"m31labs.dev/buckley/pkg/diffsignal"
 	"m31labs.dev/buckley/pkg/prompts"
 	"m31labs.dev/buckley/pkg/transparency"
 )
 
 // PRInfo contains parsed PR metadata.
 type PRInfo struct {
-	Number    int
-	Title     string
-	Author    string
-	State     string
-	URL       string
-	Body      string
-	CIStatus  string
-	Labels    []string
-	BaseBranch string
-	HeadBranch string
-	Additions int
-	Deletions int
+	Number       int
+	Title        string
+	Author       string
+	State        string
+	URL          string
+	Body         string
+	CIStatus     string
+	Labels       []string
+	BaseBranch   string
+	HeadBranch   string
+	Additions    int
+	Deletions    int
 	ChangedFiles int
 }
 
@@ -219,15 +220,15 @@ func getPRInfo(prNumber int) (*PRInfo, error) {
 	}
 
 	var data struct {
-		Number       int    `json:"number"`
-		Title        string `json:"title"`
-		Author       struct {
+		Number int    `json:"number"`
+		Title  string `json:"title"`
+		Author struct {
 			Login string `json:"login"`
 		} `json:"author"`
-		State        string `json:"state"`
-		URL          string `json:"url"`
-		Body         string `json:"body"`
-		Labels       []struct {
+		State  string `json:"state"`
+		URL    string `json:"url"`
+		Body   string `json:"body"`
+		Labels []struct {
 			Name string `json:"name"`
 		} `json:"labels"`
 		BaseRefName  string `json:"baseRefName"`
@@ -307,6 +308,9 @@ func getCIStatus(prNumber int) string {
 	return "no checks"
 }
 
+// prDiffMaxBytes is the total budget for a PR review diff.
+const prDiffMaxBytes = 200_000
+
 // getPRDiff fetches the PR diff.
 func getPRDiff(prNumber int) (string, error) {
 	cmd := exec.Command("gh", "pr", "diff", strconv.Itoa(prNumber))
@@ -315,10 +319,11 @@ func getPRDiff(prNumber int) (string, error) {
 		return "", err
 	}
 
-	// Truncate if too large
-	diff := string(output)
-	if len(diff) > 200000 {
-		diff = diff[:200000] + "\n... (truncated)"
+	// Prioritize signal and truncate if too large
+	res := diffsignal.Prioritize(string(output), prDiffMaxBytes)
+	diff := res.Context
+	if res.Truncated {
+		diff += "\n... (truncated)"
 	}
 	return diff, nil
 }
