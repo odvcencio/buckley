@@ -426,12 +426,16 @@ func parseHeaderPaths(header string) (oldPath, newPath string) {
 	rest = strings.TrimSpace(rest)
 
 	// Quoted form: "a/..." "b/..."
+	// consumeQuoted returns the token WITH surrounding quotes, so we must
+	// unquote/unescape first (which strips the outer quotes) and only then
+	// strip the a/ / b/ prefix.  Doing TrimPrefix before unquoting is a
+	// no-op because the string starts with '"', not 'a'.
 	if strings.HasPrefix(rest, `"`) {
 		aQuoted, afterA := consumeQuoted(rest)
 		afterA = strings.TrimLeft(afterA, " ")
 		bQuoted, _ := consumeQuoted(afterA)
-		oldPath = unquotePath(strings.TrimPrefix(aQuoted, "a/"))
-		newPath = unquotePath(strings.TrimPrefix(bQuoted, "b/"))
+		oldPath = strings.TrimPrefix(unquotePath(aQuoted), "a/")
+		newPath = strings.TrimPrefix(unquotePath(bQuoted), "b/")
 		return oldPath, newPath
 	}
 

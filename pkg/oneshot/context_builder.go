@@ -137,7 +137,7 @@ func gatherGitDiff(params map[string]string, opts ContextOpts) (string, error) {
 	}
 
 	// Reserve space for the truncation marker so appending it never pushes the
-	// output past MaxDiffBytes (off-by-18 fix: marker is 18 bytes).
+	// output past MaxDiffBytes (marker is 16 bytes: "\n... (truncated)").
 	const truncMarker = "\n... (truncated)"
 	budget := opts.MaxDiffBytes
 	if budget > len(truncMarker) {

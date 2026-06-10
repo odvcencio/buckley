@@ -438,7 +438,8 @@ func TestFileBeyondMaxParseBytes_StillGetsSummary(t *testing.T) {
 }
 
 // Minor-1: git-quoted header/hunk paths (non-ASCII or control-char filenames)
-// must not produce an empty Path ("") → anonymous summary line.
+// must not produce an empty Path ("") → anonymous summary line, and the a/ /
+// b/ prefix must be stripped even when the header has no +++/--- lines.
 func TestQuotedPathParsing(t *testing.T) {
 	// Git quotes paths that contain non-ASCII or special characters with
 	// C-style escaping.  Example: a file named "café.go" or "src/über/init.go".
@@ -455,12 +456,10 @@ index aaaaaaa..bbbbbbb 100644
 	if len(files) != 1 {
 		t.Fatalf("got %d files, want 1", len(files))
 	}
-	if files[0].Path == "" {
-		t.Errorf("Path is empty — quoted diff --git header not parsed")
+	// Path must be the clean unquoted form without the b/ prefix.
+	if got := files[0].Path; got != "src/café.go" {
+		t.Errorf("Path = %q, want %q — a//b/ prefix leaked or unescape failed", got, "src/café.go")
 	}
-	// The path must contain something meaningful (the unescaped or raw-escaped
-	// representation is acceptable; the key requirement is non-empty).
-	t.Logf("parsed path: %q", files[0].Path)
 
 	// Prioritize must produce a non-empty path in the summary line.
 	res := Prioritize(strings.TrimSpace(quotedDiff), 80_000)
@@ -471,6 +470,58 @@ index aaaaaaa..bbbbbbb 100644
 				t.Errorf("summary line has empty path: %q", line)
 			}
 		}
+	}
+}
+
+// TestQuotedPathHeaderOnly covers the header-only form (no +++/--- lines),
+// which is produced for binary files, pure renames, and deletions.  In this
+// case parseSegment never overwrites the path set by parseHeaderPaths, so the
+// a/ prefix leak is visible directly.
+func TestQuotedPathHeaderOnly(t *testing.T) {
+	// Simulate a binary deletion: only the "diff --git" header, no +++ / ---.
+	headerOnlyDiff := `diff --git "a/assets/caf\303\251.png" "b/assets/caf\303\251.png"
+index aaaaaaa..bbbbbbb 100644
+Binary files a/assets/caf\303\251.png and b/assets/caf\303\251.png differ
+`
+	files := Split(strings.TrimSpace(headerOnlyDiff))
+	if len(files) != 1 {
+		t.Fatalf("got %d files, want 1", len(files))
+	}
+	const wantPath = "assets/café.png"
+	if got := files[0].Path; got != wantPath {
+		t.Errorf("header-only quoted path: got %q, want %q (a/ prefix not stripped or unescape failed)", got, wantPath)
+	}
+}
+
+// TestScanBoundariesBeyondQuotedPath verifies that scanBoundariesBeyond (used
+// for over-budget files) strips the a//b/ prefix from quoted paths so that
+// summary lines in the prioritized output show the clean file name.
+func TestScanBoundariesBeyondQuotedPath(t *testing.T) {
+	// Build a diff where the first file fills the parse cap and a second
+	// quoted-path file falls beyond it.  We force this by constructing a
+	// raw string and calling Prioritize with a tiny budget.
+	header := `diff --git "a/src/caf\303\251.go" "b/src/caf\303\251.go"
+index aaaaaaa..bbbbbbb 100644
+--- "a/src/caf\303\251.go"
++++ "b/src/caf\303\251.go"
+@@ -1,2 +1,2 @@
+ package main
+-func Old() {}
++func New() {}
+`
+	// Prepend a large filler file so the quoted file is pushed beyond the cap.
+	filler := "diff --git a/filler.go b/filler.go\nindex 0000000..1111111 100644\n--- a/filler.go\n+++ b/filler.go\n@@ -1 +1 @@\n-old\n+new\n"
+	filler += strings.Repeat("// padding line\n", MaxParseBytes/16)
+	raw := filler + header
+
+	res := Prioritize(raw, 200_000)
+	// The quoted file is beyond the parse cap, so scanBoundariesBeyond handles
+	// it.  Its summary entry must NOT contain the raw b/ prefix.
+	if strings.Contains(res.Context, `b/src/`) {
+		t.Errorf("scanBoundariesBeyond left b/ prefix in summary line:\n%.500s", res.Context)
+	}
+	if strings.Contains(res.Context, `"src/`) {
+		t.Errorf("scanBoundariesBeyond left surrounding quotes in summary line:\n%.500s", res.Context)
 	}
 }
 

@@ -142,10 +142,17 @@ func AssembleBranchContext(opts BranchContextOptions) (*BranchContext, *transpar
 	if opts.IncludeUnstaged {
 		unstaged, unstagedRawTrunc, _ := reviewGitOutputLimited(diffsignal.MaxParseBytes, "diff")
 		if strings.TrimSpace(unstaged) != "" {
-			unstagedRes := diffsignal.Prioritize(unstaged, opts.MaxDiffBytes)
+			// Reserve space for the truncation marker so appending it never
+			// pushes ctx.Unstaged past MaxDiffBytes (marker is 16 bytes).
+			const truncMarker = "\n... (truncated)"
+			unstagedBudget := opts.MaxDiffBytes
+			if unstagedBudget > len(truncMarker) {
+				unstagedBudget -= len(truncMarker)
+			}
+			unstagedRes := diffsignal.Prioritize(unstaged, unstagedBudget)
 			ctx.Unstaged = unstagedRes.Context
 			if unstagedRawTrunc || unstagedRes.Truncated {
-				ctx.Unstaged += "\n... (truncated)"
+				ctx.Unstaged += truncMarker
 				audit.AddTruncated("unstaged changes", reviewEstimateTokens(ctx.Unstaged), opts.MaxDiffBytes/4)
 			} else {
 				audit.Add("unstaged changes", reviewEstimateTokens(ctx.Unstaged))
