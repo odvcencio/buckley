@@ -66,7 +66,7 @@ type BranchContextOptions struct {
 // DefaultBranchContextOptions returns sensible defaults.
 func DefaultBranchContextOptions() BranchContextOptions {
 	return BranchContextOptions{
-		MaxDiffBytes:    200_000,
+		MaxDiffBytes:    diffsignal.ReviewDiffBudget,
 		IncludeUnstaged: true,
 		IncludeAgents:   true,
 		BaseBranch:      "",
@@ -140,10 +140,16 @@ func AssembleBranchContext(opts BranchContextOptions) (*BranchContext, *transpar
 	}
 
 	if opts.IncludeUnstaged {
-		unstaged, _, _ := reviewGitOutputLimited(diffsignal.MaxParseBytes, "diff")
+		unstaged, unstagedRawTrunc, _ := reviewGitOutputLimited(diffsignal.MaxParseBytes, "diff")
 		if strings.TrimSpace(unstaged) != "" {
-			ctx.Unstaged = diffsignal.Prioritize(unstaged, opts.MaxDiffBytes).Context
-			audit.Add("unstaged changes", reviewEstimateTokens(ctx.Unstaged))
+			unstagedRes := diffsignal.Prioritize(unstaged, opts.MaxDiffBytes)
+			ctx.Unstaged = unstagedRes.Context
+			if unstagedRawTrunc || unstagedRes.Truncated {
+				ctx.Unstaged += "\n... (truncated)"
+				audit.AddTruncated("unstaged changes", reviewEstimateTokens(ctx.Unstaged), opts.MaxDiffBytes/4)
+			} else {
+				audit.Add("unstaged changes", reviewEstimateTokens(ctx.Unstaged))
+			}
 		}
 	}
 

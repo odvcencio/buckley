@@ -36,9 +36,13 @@ const (
 	// MaxParseBytes is the hard ceiling on raw diff input fed to the parser.
 	MaxParseBytes = 8_000_000
 
-	// summaryLineReserve is the per-summary-line byte estimate used when
-	// reserving budget for the low-signal section during assembly.
-	summaryLineReserve = 112
+	// CommitDiffBudget is the output budget for commit-message generation paths.
+	// Shared by the CLI oneshot path and the TUI /commit command.
+	CommitDiffBudget = 80_000
+
+	// ReviewDiffBudget is the output budget for code-review paths.
+	// Shared by the CLI oneshot path and the TUI /review command.
+	ReviewDiffBudget = 200_000
 )
 
 // summaryHeader introduces the low-signal section of the assembled context.
@@ -111,10 +115,17 @@ func Split(raw string) []FileDiff {
 // caps and low-signal summarization still apply).
 func Prioritize(raw string, maxBytes int) Result {
 	truncated := false
+
+	// Important-1b: before cutting at MaxParseBytes, scan the FULL input for
+	// file boundaries beyond the cap so those files still get summary lines
+	// rather than vanishing entirely.
+	var overBudgetFiles []FileDiff
 	if len(raw) > MaxParseBytes {
+		overBudgetFiles = scanBoundariesBeyond(raw, MaxParseBytes)
 		raw = cutAtLineBoundary(raw, MaxParseBytes)
 		truncated = true
 	}
+
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return Result{}
@@ -129,6 +140,10 @@ func Prioritize(raw string, maxBytes int) Result {
 		return Result{Context: raw, Truncated: truncated}
 	}
 
+	// Append stub entries for files that were beyond MaxParseBytes so they
+	// appear as summary lines.
+	files = append(files, overBudgetFiles...)
+
 	// Partition while preserving git's emission order within each class.
 	var normal []int
 	summarized := 0
@@ -140,14 +155,39 @@ func Prioritize(raw string, maxBytes int) Result {
 		}
 	}
 
+	// Compute exact summary line sizes upfront so budget accounting is precise.
+	// summaryLineSize[i] is the byte length of summaryLine(files[i])+"\n".
+	summaryLineSize := make([]int, len(files))
+	for i, f := range files {
+		if f.LowSignal() {
+			summaryLineSize[i] = len(summaryLine(f)) + 1 // +1 for '\n'
+		}
+	}
+
+	// exactSummaryReserve computes the byte cost of the summary section for
+	// the given set of file indices.  It uses actual rendered line lengths,
+	// not an estimate.
+	exactSummaryBytes := func() int {
+		n := 0
+		for i, f := range files {
+			if f.LowSignal() {
+				n += summaryLineSize[i]
+			}
+		}
+		if n == 0 {
+			return 0
+		}
+		return len(summaryHeader) + 2 + n // header + "\n\n" prefix
+	}
+
 	// Assemble high-signal content first, demoting whole files to summary
-	// lines once the budget (minus a reserve for the summary section) runs
+	// lines once the budget (minus exact space for the summary section) runs
 	// out. Per-file caps bound the demotion granularity.
 	var content strings.Builder
 	content.WriteString(preamble)
 	used := len(preamble)
 
-	for i, idx := range normal {
+	for _, idx := range normal {
 		f := files[idx]
 		seg := f.Segment
 		if len(seg) > MaxFileDiffBytes {
@@ -156,11 +196,12 @@ func Prioritize(raw string, maxBytes int) Result {
 			truncated = true
 		}
 		if maxBytes > 0 {
-			remainingNormal := len(normal) - i - 1
-			if len(seg) > maxBytes-used-summaryReserve(summarized+remainingNormal) {
+			reserve := exactSummaryBytes()
+			if len(seg) > maxBytes-used-reserve {
 				// Demote this and let later (possibly smaller) files try;
 				// they fall through to summaries too if they don't fit.
 				files[idx].Reason = ReasonOverBudget
+				summaryLineSize[idx] = len(summaryLine(files[idx])) + 1
 				summarized++
 				truncated = true
 				continue
@@ -183,31 +224,97 @@ func Prioritize(raw string, maxBytes int) Result {
 		}
 		sb.WriteString(summaryHeader)
 		sb.WriteString("\n")
+
+		// Write summary lines, but respect the budget. If the summary section
+		// itself overflows (pathological long-path case), stop and append an
+		// explicit "... and N more" line rather than silently cutting.
+		remaining := maxBytes
+		if remaining > 0 {
+			remaining -= sb.Len()
+		}
+		skipped := 0
 		for _, f := range files {
-			if f.LowSignal() {
-				sb.WriteString(summaryLine(f))
-				sb.WriteString("\n")
+			if !f.LowSignal() {
+				continue
 			}
+			line := summaryLine(f) + "\n"
+			if maxBytes > 0 && remaining > 0 && len(line) > remaining {
+				// Budget exhausted mid-summary: count remaining low-signal
+				// files and emit a single "N more" line instead.
+				skipped++
+				continue
+			}
+			if skipped > 0 {
+				// A prior line already didn't fit; skip the rest too.
+				skipped++
+				continue
+			}
+			sb.WriteString(line)
+			if maxBytes > 0 {
+				remaining -= len(line)
+			}
+		}
+		if skipped > 0 {
+			more := fmt.Sprintf("... and %d more changed files (truncated)\n", skipped)
+			sb.WriteString(more)
+			truncated = true
 		}
 		out = sb.String()
 	}
 
 	out = strings.TrimRight(out, "\n")
-	if maxBytes > 0 && len(out) > maxBytes {
-		out = cutAtLineBoundary(out, maxBytes)
-		truncated = true
-	}
-
 	return Result{Context: out, Truncated: truncated, LowSignal: summarized}
 }
 
-// summaryReserve estimates the bytes needed for a summary section holding n
-// entries, so content packing leaves room for it.
-func summaryReserve(n int) int {
-	if n == 0 {
-		return 0
+// scanBoundariesBeyond finds all "diff --git" file headers that start at or
+// after byteOffset in s.  It returns stub FileDiff entries (no segment content,
+// just path and [over budget] reason) so those files still appear as summary
+// lines even though their diff content was discarded.
+func scanBoundariesBeyond(s string, byteOffset int) []FileDiff {
+	var result []FileDiff
+	tail := s[byteOffset:]
+	// Find every "\ndiff --git " (or start-of-string) in the tail.
+	start := 0
+	for {
+		var lineStart int
+		if start == 0 && strings.HasPrefix(tail[start:], diffBoundary) {
+			lineStart = start
+		} else {
+			j := strings.Index(tail[start:], "\n"+diffBoundary)
+			if j < 0 {
+				break
+			}
+			lineStart = start + j + 1 // skip the '\n'
+		}
+
+		// Extract the header line.
+		end := strings.IndexByte(tail[lineStart:], '\n')
+		var headerLine string
+		if end < 0 {
+			headerLine = tail[lineStart:]
+		} else {
+			headerLine = tail[lineStart : lineStart+end]
+		}
+		oldPath, newPath := parseHeaderPaths(headerLine)
+		if newPath == "" {
+			newPath = oldPath
+		}
+		fd := FileDiff{
+			Path:    newPath,
+			OldPath: oldPath,
+			Reason:  "over budget",
+		}
+		if fd.OldPath == fd.Path {
+			fd.OldPath = ""
+		}
+		result = append(result, fd)
+
+		if end < 0 {
+			break
+		}
+		start = lineStart + end + 1
 	}
-	return len(summaryHeader) + 2 + n*summaryLineReserve
+	return result
 }
 
 // summaryLine renders the one-line representation of a suppressed file:
@@ -273,8 +380,16 @@ func parseSegment(seg string) FileDiff {
 			switch {
 			case strings.HasPrefix(line, "@@"):
 				inHunks = true
+			case strings.HasPrefix(line, `+++ "b/`):
+				// Quoted form: +++ "b/path"
+				fd.Path = unquotePath(strings.TrimPrefix(strings.TrimRight(line, "\t "), `+++ `))
+				fd.Path = strings.TrimPrefix(fd.Path, "b/")
 			case strings.HasPrefix(line, "+++ b/"):
 				fd.Path = unquotePath(strings.TrimPrefix(line, "+++ b/"))
+			case strings.HasPrefix(line, `--- "a/`):
+				// Quoted form: --- "a/path"
+				fd.OldPath = unquotePath(strings.TrimPrefix(strings.TrimRight(line, "\t "), `--- `))
+				fd.OldPath = strings.TrimPrefix(fd.OldPath, "a/")
 			case strings.HasPrefix(line, "--- a/"):
 				fd.OldPath = unquotePath(strings.TrimPrefix(line, "--- a/"))
 			case strings.HasPrefix(line, "rename to "):
@@ -303,8 +418,24 @@ func parseSegment(seg string) FileDiff {
 }
 
 // parseHeaderPaths extracts the a/ and b/ paths from a "diff --git" line.
+// It handles both the unquoted form ("diff --git a/foo b/foo") and git's
+// C-quoted form ("diff --git \"a/foo\" \"b/foo\"") used for paths containing
+// non-ASCII characters or special bytes.
 func parseHeaderPaths(header string) (oldPath, newPath string) {
 	rest := strings.TrimPrefix(header, diffBoundary)
+	rest = strings.TrimSpace(rest)
+
+	// Quoted form: "a/..." "b/..."
+	if strings.HasPrefix(rest, `"`) {
+		aQuoted, afterA := consumeQuoted(rest)
+		afterA = strings.TrimLeft(afterA, " ")
+		bQuoted, _ := consumeQuoted(afterA)
+		oldPath = unquotePath(strings.TrimPrefix(aQuoted, "a/"))
+		newPath = unquotePath(strings.TrimPrefix(bQuoted, "b/"))
+		return oldPath, newPath
+	}
+
+	// Unquoted form: a/... b/...
 	if i := strings.Index(rest, " b/"); i >= 0 {
 		oldPath = unquotePath(strings.TrimPrefix(rest[:i], "a/"))
 		newPath = unquotePath(rest[i+3:])
@@ -312,13 +443,82 @@ func parseHeaderPaths(header string) (oldPath, newPath string) {
 	return oldPath, newPath
 }
 
-// unquotePath strips trailing terminators and git's quoting from a path.
+// consumeQuoted returns the content inside the leading double-quoted token
+// (including the quotes) and the remainder of s after the closing quote.
+// If s does not start with '"', it returns ("", s).
+func consumeQuoted(s string) (quoted, rest string) {
+	if !strings.HasPrefix(s, `"`) {
+		return "", s
+	}
+	i := 1
+	for i < len(s) {
+		if s[i] == '\\' {
+			i += 2 // skip escape sequence
+			continue
+		}
+		if s[i] == '"' {
+			return s[:i+1], s[i+1:]
+		}
+		i++
+	}
+	return s, "" // unterminated quote
+}
+
+// unquotePath strips trailing terminators and git's C-style quoting from a
+// path token.  For quoted paths it removes the surrounding double-quotes and
+// decodes octal escape sequences (\nnn) that git uses for non-ASCII bytes,
+// producing a displayable (UTF-8) representation.  Full fidelity is not
+// required; the goal is a non-empty, recognizable path string.
 func unquotePath(p string) string {
 	p = strings.TrimRight(p, "\t ")
 	if len(p) >= 2 && strings.HasPrefix(p, `"`) && strings.HasSuffix(p, `"`) {
-		p = p[1 : len(p)-1]
+		inner := p[1 : len(p)-1]
+		p = unescapeGitPath(inner)
 	}
 	return p
+}
+
+// unescapeGitPath decodes the C-style escape sequences that git inserts into
+// quoted path strings.  Only octal sequences (\nnn) and common single-char
+// escapes are handled; full C-string unescaping is not required.
+func unescapeGitPath(s string) string {
+	if !strings.ContainsRune(s, '\\') {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	i := 0
+	for i < len(s) {
+		if s[i] != '\\' || i+1 >= len(s) {
+			b.WriteByte(s[i])
+			i++
+			continue
+		}
+		next := s[i+1]
+		switch {
+		case next >= '0' && next <= '7' && i+3 < len(s) && s[i+2] >= '0' && s[i+2] <= '7' && s[i+3] >= '0' && s[i+3] <= '7':
+			// Octal escape \nnn
+			val := (int(next-'0') << 6) | (int(s[i+2]-'0') << 3) | int(s[i+3]-'0')
+			b.WriteByte(byte(val))
+			i += 4
+		case next == 'n':
+			b.WriteByte('\n')
+			i += 2
+		case next == 't':
+			b.WriteByte('\t')
+			i += 2
+		case next == '\\':
+			b.WriteByte('\\')
+			i += 2
+		case next == '"':
+			b.WriteByte('"')
+			i += 2
+		default:
+			b.WriteByte(s[i])
+			i++
+		}
+	}
+	return b.String()
 }
 
 // classify sets fd.Reason for low-signal files. Precedence: binary content

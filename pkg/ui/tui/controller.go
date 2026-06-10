@@ -13,9 +13,11 @@ import (
 	"sync"
 	"time"
 
+	"gopkg.in/yaml.v3"
 	"m31labs.dev/buckley/pkg/config"
 	projectcontext "m31labs.dev/buckley/pkg/context"
 	"m31labs.dev/buckley/pkg/conversation"
+	"m31labs.dev/buckley/pkg/diffsignal"
 	"m31labs.dev/buckley/pkg/model"
 	"m31labs.dev/buckley/pkg/prompts"
 	"m31labs.dev/buckley/pkg/rules"
@@ -28,7 +30,6 @@ import (
 	"m31labs.dev/buckley/pkg/types"
 	"m31labs.dev/buckley/pkg/ui/theme"
 	"m31labs.dev/buckley/pkg/ui/widgets"
-	"gopkg.in/yaml.v3"
 )
 
 // Controller connects the TUI to Buckley's backend services.
@@ -1464,6 +1465,9 @@ func (c *Controller) handleReview() {
 		return
 	}
 
+	// Shape through diffsignal: low-signal noise summarised, budget enforced.
+	diff = shapeDiff(diff, diffsignal.ReviewDiffBudget)
+
 	// Build review prompt
 	prompt := fmt.Sprintf(`Please review the following code changes and provide feedback:
 
@@ -1503,6 +1507,9 @@ func (c *Controller) handleCommit() {
 		c.app.AddMessage("No staged changes. Use `git add` to stage files first.", "system")
 		return
 	}
+
+	// Shape through diffsignal: low-signal noise summarised, budget enforced.
+	diff = shapeDiff(diff, diffsignal.CommitDiffBudget)
 
 	// Get recent commit messages for style reference
 	recentCommits := c.getRecentCommits(5)

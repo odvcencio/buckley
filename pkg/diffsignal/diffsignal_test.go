@@ -359,6 +359,121 @@ func TestSplitSegmentsRoundTrip(t *testing.T) {
 	}
 }
 
+// Important-1a: long-path summaries must never be silently cut by the final
+// hard-cut when the summaryLineReserve underestimates actual line lengths.
+//
+// Regression probe: a tight budget lets a small source file "sneak in" via the
+// underestimated reserve, causing assembled output to exceed budget, and the
+// trailing summary lines to get chopped silently.
+//
+// After the fix: every path must appear in the output OR a single explicit
+// "... and N more changed files (truncated)" line accounts for exactly the
+// remainder.
+func TestNeverDropSummaryLine_LongPaths(t *testing.T) {
+	const nSummary = 40
+	// Paths with 155-char lengths produce ~197-byte summary lines vs the old
+	// 112-byte reserve — gap of ~85 bytes per file (3440 bytes for 40 files).
+	base := "src/very/long/generated/path/monorepo/packages/feature/"
+	suffix := ".go"
+	padding := strings.Repeat("x", 155-len(base)-len(suffix)-2) // -2 for 2-digit index
+
+	src1 := sourceFileDiff("pkg/real/handler.go", "real-sentinel")
+	// budget chosen so that the underestimated reserve admits src2 but the
+	// accurate reserve would have demoted it.  This causes the assembled output
+	// to exceed budget and the hard-cut to chop trailing summary lines.
+	budget := len(src1) + 5031
+
+	var raw strings.Builder
+	raw.WriteString(src1)
+	raw.WriteString(sourceFileDiff("pkg/sneaky/file.go", "small-sneaky-content-1234567890abcdef"))
+	paths := make([]string, nSummary)
+	for i := 0; i < nSummary; i++ {
+		path := fmt.Sprintf("%s%s%02d%s", base, padding, i, suffix)
+		paths[i] = path
+		raw.WriteString(minifiedFileDiff(path, 5_000))
+	}
+
+	res := Prioritize(strings.TrimSpace(raw.String()), budget)
+
+	// Each path must appear, OR there must be a "... and N more changed files (truncated)"
+	// line that accounts for exactly the missing remainder.
+	missing := 0
+	for _, p := range paths {
+		if !strings.Contains(res.Context, p) {
+			missing++
+		}
+	}
+	if missing > 0 {
+		needle := fmt.Sprintf("... and %d more changed files (truncated)", missing)
+		if !strings.Contains(res.Context, needle) {
+			t.Errorf("%d summary paths silently dropped (no explicit truncation line).\nwanted: %q\ncontext tail:\n%.2000s",
+				missing, needle, res.Context[max(0, len(res.Context)-2000):])
+		}
+		if !res.Truncated {
+			t.Errorf("Truncated = false, want true when summary lines overflow budget")
+		}
+	}
+}
+
+// Important-1b: files beyond MaxParseBytes must still appear as summary lines
+// with an "[over budget]" reason — they must never vanish silently.
+func TestFileBeyondMaxParseBytes_StillGetsSummary(t *testing.T) {
+	// Build a diff whose second file starts after MaxParseBytes.
+	// First file: just over MaxParseBytes bytes.
+	const bigPath = "pkg/big/generated_file.go"
+	const smallPath = "pkg/small/real_change.go"
+
+	bigSeg := largeSourceDiff(bigPath, MaxParseBytes+1_000)
+	smallSeg := sourceFileDiff(smallPath, "late-file-sentinel")
+	raw := bigSeg + smallSeg
+
+	// The small file starts well beyond MaxParseBytes.
+	res := Prioritize(strings.TrimSpace(raw), 10_000_000)
+
+	// small file must be visible somehow.
+	if !strings.Contains(res.Context, smallPath) {
+		t.Errorf("file beyond MaxParseBytes (%q) missing from output — must appear as summary\ncontext:\n%.2000s",
+			smallPath, res.Context)
+	}
+}
+
+// Minor-1: git-quoted header/hunk paths (non-ASCII or control-char filenames)
+// must not produce an empty Path ("") → anonymous summary line.
+func TestQuotedPathParsing(t *testing.T) {
+	// Git quotes paths that contain non-ASCII or special characters with
+	// C-style escaping.  Example: a file named "café.go" or "src/über/init.go".
+	quotedDiff := `diff --git "a/src/caf\303\251.go" "b/src/caf\303\251.go"
+index aaaaaaa..bbbbbbb 100644
+--- "a/src/caf\303\251.go"
++++ "b/src/caf\303\251.go"
+@@ -1,3 +1,4 @@
+ package main
++// quoted path change
+ func main() {}
+`
+	files := Split(strings.TrimSpace(quotedDiff))
+	if len(files) != 1 {
+		t.Fatalf("got %d files, want 1", len(files))
+	}
+	if files[0].Path == "" {
+		t.Errorf("Path is empty — quoted diff --git header not parsed")
+	}
+	// The path must contain something meaningful (the unescaped or raw-escaped
+	// representation is acceptable; the key requirement is non-empty).
+	t.Logf("parsed path: %q", files[0].Path)
+
+	// Prioritize must produce a non-empty path in the summary line.
+	res := Prioritize(strings.TrimSpace(quotedDiff), 80_000)
+	if strings.Contains(res.Context, " |") {
+		// If there's a summary line, it must not start with " | " (empty path).
+		for _, line := range strings.Split(res.Context, "\n") {
+			if strings.HasPrefix(line, " | ") {
+				t.Errorf("summary line has empty path: %q", line)
+			}
+		}
+	}
+}
+
 // Minified classification via the bytes-per-line ratio (no single huge line,
 // but relentlessly dense content).
 func TestClassifyMinifiedByRatio(t *testing.T) {

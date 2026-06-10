@@ -136,10 +136,17 @@ func gatherGitDiff(params map[string]string, opts ContextOpts) (string, error) {
 		}
 	}
 
-	res := diffsignal.Prioritize(output, opts.MaxDiffBytes)
+	// Reserve space for the truncation marker so appending it never pushes the
+	// output past MaxDiffBytes (off-by-18 fix: marker is 18 bytes).
+	const truncMarker = "\n... (truncated)"
+	budget := opts.MaxDiffBytes
+	if budget > len(truncMarker) {
+		budget -= len(truncMarker)
+	}
+	res := diffsignal.Prioritize(output, budget)
 	output = res.Context
 	if rawTruncated || res.Truncated {
-		output += "\n... (truncated)"
+		output += truncMarker
 	}
 	return output, nil
 }

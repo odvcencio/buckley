@@ -165,7 +165,16 @@ func (g *ContextGatherer) gatherGitDiff(source ContextSource) (string, error) {
 		return "", nil
 	}
 
-	diff := diffsignal.Prioritize(string(output), diffBudget(source.MaxBytes)).Context
+	res := diffsignal.Prioritize(string(output), diffBudget(source.MaxBytes))
+	diff := res.Context
+	if res.Truncated {
+		diff += "\n... (truncated)"
+		// Record in audit: diff was truncated by content budget.
+		g.audit.AddTruncated("git_diff", len(diff)/4, source.MaxBytes/4)
+	} else if res.LowSignal > 0 {
+		// Low-signal files were demoted to summaries — audit records this.
+		g.audit.AddTruncated("git_diff (summarized)", len(diff)/4, len(string(output))/4)
+	}
 	return fmt.Sprintf("<git_diff>\n%s</git_diff>", diff), nil
 }
 
@@ -185,7 +194,16 @@ func (g *ContextGatherer) gatherGitDiffStaged(source ContextSource) (string, err
 		return "", nil
 	}
 
-	diff := diffsignal.Prioritize(string(output), diffBudget(source.MaxBytes)).Context
+	res := diffsignal.Prioritize(string(output), diffBudget(source.MaxBytes))
+	diff := res.Context
+	if res.Truncated {
+		diff += "\n... (truncated)"
+		// Record in audit: diff was truncated by content budget.
+		g.audit.AddTruncated("git_diff_staged", len(diff)/4, source.MaxBytes/4)
+	} else if res.LowSignal > 0 {
+		// Low-signal files were demoted to summaries — audit records this.
+		g.audit.AddTruncated("git_diff_staged (summarized)", len(diff)/4, len(string(output))/4)
+	}
 	return fmt.Sprintf("<git_diff_staged>\n%s</git_diff_staged>", diff), nil
 }
 

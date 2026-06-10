@@ -66,7 +66,7 @@ type ContextOptions struct {
 // DefaultContextOptions returns sensible defaults.
 func DefaultContextOptions() ContextOptions {
 	return ContextOptions{
-		MaxDiffBytes:  80_000,
+		MaxDiffBytes:  diffsignal.CommitDiffBudget,
 		MaxDiffTokens: 20_000,
 		IncludeAgents: true,
 	}

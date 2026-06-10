@@ -67,3 +67,35 @@ func TestBuildContextStagedDiffPrioritized(t *testing.T) {
 		t.Errorf("context length %d exceeds MaxDiffBytes budget", len(diff))
 	}
 }
+
+// TestBuildContextBudgetIncludesTruncationMarker checks that the truncation
+// marker appended when output is cut does not push the result over MaxDiffBytes
+// (off-by-18 regression: "\n... (truncated)" is 18 bytes).
+func TestBuildContextBudgetIncludesTruncationMarker(t *testing.T) {
+	dir := t.TempDir()
+	gitIn(t, dir, "init", "-q")
+
+	// Create a file that is exactly at the budget edge.
+	// We write enough content that Prioritize will both truncate and append the
+	// marker, and the combined result could exceed MaxDiffBytes.
+	const budget = 5_000
+	// Use a source file large enough to trigger truncation after diffsignal.
+	content := strings.Repeat("// line\n", budget)
+	if err := os.WriteFile(filepath.Join(dir, "big.go"), []byte("package p\n"+content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitIn(t, dir, "add", ".")
+	t.Chdir(dir)
+
+	ctx, err := BuildContext([]ContextSource{
+		{Type: "git_diff", Params: map[string]string{"staged": "true"}},
+	}, ContextOpts{MaxDiffBytes: budget})
+	if err != nil {
+		t.Fatalf("BuildContext: %v", err)
+	}
+
+	diff := ctx.Sources["git_diff:staged"]
+	if len(diff) > budget {
+		t.Errorf("context length %d exceeds MaxDiffBytes %d (truncation marker not accounted for)", len(diff), budget)
+	}
+}

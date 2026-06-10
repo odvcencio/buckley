@@ -271,9 +271,6 @@ func getCIStatus(prNumber int) string {
 	return "no checks"
 }
 
-// prDiffMaxBytes is the total budget for a PR review diff.
-const prDiffMaxBytes = 200_000
-
 func getPRDiff(prNumber int) (string, error) {
 	cmd := exec.Command("gh", "pr", "diff", strconv.Itoa(prNumber))
 	output, err := cmd.Output()
@@ -281,10 +278,13 @@ func getPRDiff(prNumber int) (string, error) {
 		return "", err
 	}
 
-	res := diffsignal.Prioritize(string(output), prDiffMaxBytes)
+	// Reserve space for the truncation marker so output stays within budget.
+	const truncMarker = "\n... (truncated)"
+	budget := diffsignal.ReviewDiffBudget - len(truncMarker)
+	res := diffsignal.Prioritize(string(output), budget)
 	diff := res.Context
 	if res.Truncated {
-		diff += "\n... (truncated)"
+		diff += truncMarker
 	}
 	return diff, nil
 }
