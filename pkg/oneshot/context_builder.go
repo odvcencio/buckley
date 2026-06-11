@@ -124,11 +124,29 @@ func gatherGitDiff(params map[string]string, opts ContextOpts) (string, error) {
 		args = append(args, base+"...HEAD")
 	}
 
+	// Optional pathspec: "paths" param is a NUL-separated list of paths.
+	var pathsArgs []string
+	if rawPaths := params["paths"]; rawPaths != "" {
+		for _, p := range strings.Split(rawPaths, "\x00") {
+			if p != "" {
+				pathsArgs = append(pathsArgs, p)
+			}
+		}
+	}
+	if len(pathsArgs) > 0 {
+		args = append(args, "--")
+		args = append(args, pathsArgs...)
+	}
+
 	output, rawTruncated, err := contextGitOutputLimited(diffsignal.MaxParseBytes, args...)
 	if err != nil {
 		// Retry without ...HEAD for base diff
 		if base := params["base"]; base != "" {
 			args = []string{"diff", base}
+			if len(pathsArgs) > 0 {
+				args = append(args, "--")
+				args = append(args, pathsArgs...)
+			}
 			output, rawTruncated, err = contextGitOutputLimited(diffsignal.MaxParseBytes, args...)
 		}
 		if err != nil {
@@ -178,11 +196,29 @@ func gatherGitFiles(params map[string]string) (string, error) {
 		args = append(args, base+"...HEAD")
 	}
 
+	// Optional pathspec: "paths" param is a NUL-separated list of paths.
+	var pathsArgs []string
+	if rawPaths := params["paths"]; rawPaths != "" {
+		for _, p := range strings.Split(rawPaths, "\x00") {
+			if p != "" {
+				pathsArgs = append(pathsArgs, p)
+			}
+		}
+	}
+	if len(pathsArgs) > 0 {
+		args = append(args, "--")
+		args = append(args, pathsArgs...)
+	}
+
 	output, err := contextGitOutput(args...)
 	if err != nil {
 		// Retry without ...HEAD for base
 		if base := params["base"]; base != "" {
 			args = []string{"diff", "--name-status", base}
+			if len(pathsArgs) > 0 {
+				args = append(args, "--")
+				args = append(args, pathsArgs...)
+			}
 			output, err = contextGitOutput(args...)
 		}
 		if err != nil {

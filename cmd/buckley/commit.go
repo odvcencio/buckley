@@ -17,6 +17,23 @@ import (
 	"m31labs.dev/buckley/pkg/transparency"
 )
 
+// scopedCommitDefinition wraps CommitDefinition and restricts diff/file
+// context sources to the provided pathspecs.
+type scopedCommitDefinition struct {
+	commands.CommitDefinition
+	paths []string
+}
+
+func (s scopedCommitDefinition) ContextSources() []oneshot.ContextSource {
+	// NUL-separated pathspec list, understood by gatherGitDiff / gatherGitFiles.
+	pathsParam := strings.Join(s.paths, "\x00")
+	return []oneshot.ContextSource{
+		{Type: "git_diff", Params: map[string]string{"staged": "true", "paths": pathsParam}},
+		{Type: "git_files", Params: map[string]string{"staged": "true", "paths": pathsParam}},
+		{Type: "agents_md"},
+	}
+}
+
 // termOut is the terminal writer for styled output.
 var termOut = terminal.New()
 
@@ -35,10 +52,15 @@ type commitRunner interface {
 // frameworkCommitRunner adapts oneshot.Framework to the commitRunner interface.
 type frameworkCommitRunner struct {
 	framework *oneshot.Framework
+	def       oneshot.Definition
 }
 
 func (r *frameworkCommitRunner) Run(ctx context.Context) (*commitRunResult, error) {
-	fwResult, err := r.framework.Run(ctx, commands.CommitDefinition{}, oneshot.RunOpts{})
+	def := r.def
+	if def == nil {
+		def = commands.CommitDefinition{}
+	}
+	fwResult, err := r.framework.Run(ctx, def, oneshot.RunOpts{})
 	if err != nil {
 		return &commitRunResult{Error: err}, nil
 	}
@@ -71,6 +93,9 @@ func runCommitCommand(args []string) error {
 	modelFlag := fs.String("model", "", "model to use (default: BUCKLEY_MODEL_COMMIT or models.utility.commit for API backend)")
 	backendFlag := fs.String("backend", "", "backend to use: api, codex, or claude (default: BUCKLEY_COMMIT_BACKEND, BUCKLEY_ONESHOT_BACKEND, or api)")
 	timeout := fs.Duration("timeout", 2*time.Minute, "timeout for model request")
+	var pathsFlag stringSliceFlag
+	fs.Var(&pathsFlag, "paths", "scope commit to these paths only (repeatable); other staged files remain staged")
+	exclusive := fs.Bool("exclusive", false, "with --paths: error if any staged file falls outside the given paths")
 
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -82,6 +107,11 @@ func runCommitCommand(args []string) error {
 	compactOutput := *minimalOutput || *minAlias || oneshotMinimalOutputEnabled()
 	useGraft := *graftMode || os.Getenv("BUCKLEY_USE_GRAFT") == "1"
 	filesToStage := fs.Args() // remaining positional args are files to stage
+
+	// --paths + --graft is not supported: graft commit doesn't accept pathspecs.
+	if len(pathsFlag) > 0 && useGraft {
+		return fmt.Errorf("--paths is not supported with --graft (graft commit cannot scope by pathspec)")
+	}
 
 	// Stage files if provided
 	if len(filesToStage) > 0 {
@@ -100,6 +130,29 @@ func runCommitCommand(args []string) error {
 		return fmt.Errorf("check staged changes: %w", checkErr)
 	} else if !hasStaged {
 		return fmt.Errorf("no staged changes — stage files with `git add <files>` first, or pass them as positional arguments (e.g. `buckley commit --yes -- file.go`)")
+	}
+
+	// --paths validation: check that at least one staged file matches.
+	if len(pathsFlag) > 0 {
+		matched, err := stagedFilesMatchingPaths(pathsFlag)
+		if err != nil {
+			return fmt.Errorf("check staged paths: %w", err)
+		}
+		if len(matched) == 0 {
+			return fmt.Errorf("--paths matched no staged files (paths: %s)", strings.Join(pathsFlag, ", "))
+		}
+
+		// --exclusive: ensure no staged file falls outside the given paths.
+		if *exclusive {
+			outsiders, err := stagedFilesOutsidePaths(pathsFlag)
+			if err != nil {
+				return fmt.Errorf("check exclusive paths: %w", err)
+			}
+			if len(outsiders) > 0 {
+				return fmt.Errorf("--exclusive: staged file(s) outside given paths (commit nothing):\n  %s",
+					strings.Join(outsiders, "\n  "))
+			}
+		}
 	}
 
 	// Initialize dependencies
@@ -138,9 +191,15 @@ func runCommitCommand(args []string) error {
 		return err
 	}
 
+	// Build the definition: scoped when --paths given, full otherwise.
+	var def oneshot.Definition = commands.CommitDefinition{}
+	if len(pathsFlag) > 0 {
+		def = scopedCommitDefinition{paths: pathsFlag}
+	}
+
 	// Create unified framework runner
 	framework := oneshot.NewFramework(invoker, nil)
-	var runner commitRunner = &frameworkCommitRunner{framework: framework}
+	var runner commitRunner = &frameworkCommitRunner{framework: framework, def: def}
 
 	// Run with timeout
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
@@ -165,6 +224,7 @@ func runCommitCommand(args []string) error {
 		spinner.StopWithSuccess("Generated commit message")
 	}
 	if err != nil {
+		printStagedIndexOnError()
 		return fmt.Errorf("commit generation failed: %w", err)
 	}
 
@@ -181,11 +241,13 @@ func runCommitCommand(args []string) error {
 	// Check for errors
 	if result.Error != nil {
 		printError(result.Error, result.Trace)
+		printStagedIndexOnError()
 		return result.Error
 	}
 
 	// Show the commit message
 	if result.Commit == nil {
+		printStagedIndexOnError()
 		return fmt.Errorf("no commit generated")
 	}
 
@@ -226,8 +288,9 @@ func runCommitCommand(args []string) error {
 	}
 doCommit:
 
-	// Create the commit
-	if err := createCommit(message, compactOutput, useGraft); err != nil {
+	// Create the commit (scoped to paths when --paths was given).
+	if err := createCommit(message, compactOutput, useGraft, pathsFlag); err != nil {
+		printStagedIndexOnError()
 		return err
 	}
 
@@ -431,6 +494,80 @@ func oneshotMinimalOutputEnabled() bool {
 	return v == "1" || v == "true"
 }
 
+// listStagedFiles returns the names of all currently staged files.
+func listStagedFiles() ([]string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "git", "diff", "--cached", "--name-only").Output()
+	if err != nil {
+		return nil, err
+	}
+	var files []string
+	for _, f := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		f = strings.TrimSpace(f)
+		if f != "" {
+			files = append(files, f)
+		}
+	}
+	return files, nil
+}
+
+// stagedFilesMatchingPaths returns staged files that are under any of the given paths.
+// A file matches if it equals a path, starts with "<path>/", or the path is a prefix
+// of the file (allowing both "dir/" and "dir" spellings).
+func stagedFilesMatchingPaths(paths []string) ([]string, error) {
+	all, err := listStagedFiles()
+	if err != nil {
+		return nil, err
+	}
+	var matched []string
+	for _, f := range all {
+		if fileMatchesPaths(f, paths) {
+			matched = append(matched, f)
+		}
+	}
+	return matched, nil
+}
+
+// stagedFilesOutsidePaths returns staged files that do NOT match any of the given paths.
+func stagedFilesOutsidePaths(paths []string) ([]string, error) {
+	all, err := listStagedFiles()
+	if err != nil {
+		return nil, err
+	}
+	var outside []string
+	for _, f := range all {
+		if !fileMatchesPaths(f, paths) {
+			outside = append(outside, f)
+		}
+	}
+	return outside, nil
+}
+
+// fileMatchesPaths reports whether the file matches at least one of the given
+// pathspecs. Matching is prefix-based: "a" matches "a/foo.go" and "a" itself.
+func fileMatchesPaths(file string, paths []string) bool {
+	for _, p := range paths {
+		p = strings.TrimRight(p, "/")
+		if file == p || strings.HasPrefix(file, p+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+// printStagedIndexOnError prints the current staged index to stderr.
+// Called before returning errors that occur after staging has already happened,
+// so the operator can see what state the index is in.
+func printStagedIndexOnError() {
+	files, err := listStagedFiles()
+	if err != nil || len(files) == 0 {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "buckley: aborted; staged index contains: %s\n",
+		strings.Join(files, ", "))
+}
+
 // stageFiles stages the given files with the appropriate VCS.
 // In graft mode: graft add (with entity extraction) first, then git add as mirror.
 // In git mode: git add only.
@@ -521,7 +658,7 @@ func stageForGraft(compactOutput bool) error {
 	return cmd.Run()
 }
 
-func createCommit(message string, compactOutput bool, useGraft bool) error {
+func createCommit(message string, compactOutput bool, useGraft bool, paths []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -550,10 +687,16 @@ func createCommit(message string, compactOutput bool, useGraft bool) error {
 		}
 	}
 
-	// Run commit — graft uses -m, git uses -F for file-based messages
+	// Run commit — graft uses -m, git uses -F for file-based messages.
+	// When paths are given (non-graft only), commit only those paths; other
+	// staged files remain staged and untouched.
 	var cmd *exec.Cmd
 	if useGraft {
 		cmd = exec.CommandContext(ctx, "graft", "commit", "-m", message)
+	} else if len(paths) > 0 {
+		// git commit -F <msg> -- <paths...>
+		commitArgs := append([]string{"commit", "-F", tmpPath, "--"}, paths...)
+		cmd = exec.CommandContext(ctx, "git", commitArgs...)
 	} else {
 		cmd = exec.CommandContext(ctx, "git", "commit", "-F", tmpPath)
 	}
@@ -573,6 +716,21 @@ func createCommit(message string, compactOutput bool, useGraft bool) error {
 		cmd.Stderr = os.Stderr
 		if err := cmd.Run(); err != nil {
 			return fmt.Errorf("%s commit failed: %w", vcs, err)
+		}
+	}
+
+	// Print notice about remaining staged files when scoped commit was used.
+	if len(paths) > 0 && !useGraft {
+		if remaining, rErr := listStagedFiles(); rErr == nil && len(remaining) > 0 {
+			preview := remaining
+			const maxPreview = 3
+			suffix := ""
+			if len(preview) > maxPreview {
+				suffix = fmt.Sprintf(" (and %d more)", len(preview)-maxPreview)
+				preview = preview[:maxPreview]
+			}
+			fmt.Fprintf(os.Stderr, "buckley: leaving %d other staged file(s) untouched: %s%s\n",
+				len(remaining), strings.Join(preview, ", "), suffix)
 		}
 	}
 
