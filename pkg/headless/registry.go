@@ -57,6 +57,7 @@ type Registry struct {
 	projectRoot  string
 	telemetry    *telemetry.Hub
 	emitter      EventEmitter
+	agentProfile string
 
 	// Cleanup settings
 	cleanupInterval time.Duration
@@ -86,6 +87,7 @@ type RegistryConfig struct {
 	ProjectRoot     string
 	Telemetry       *telemetry.Hub
 	Emitter         EventEmitter
+	AgentProfile    string
 	CleanupInterval time.Duration
 	MaxIdleTime     time.Duration
 }
@@ -110,6 +112,7 @@ func NewRegistry(cfg RegistryConfig) *Registry {
 		projectRoot:     strings.TrimSpace(cfg.ProjectRoot),
 		telemetry:       cfg.Telemetry,
 		emitter:         cfg.Emitter,
+		agentProfile:    strings.TrimSpace(cfg.AgentProfile),
 		cleanupInterval: cleanupInterval,
 		maxIdleTime:     maxIdleTime,
 		stopChan:        make(chan struct{}),
@@ -224,6 +227,7 @@ func (r *Registry) CreateSession(req CreateSessionRequest) (*SessionInfo, error)
 		ModelOverride: modelID,
 		ToolPolicy:    req.ToolPolicy,
 		MaxRuntime:    maxRuntime,
+		AgentProfile:  r.agentProfile,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("create runner: %w", err)
@@ -308,6 +312,7 @@ func (r *Registry) EnsureSession(sessionID string) (*Runner, error) {
 		Telemetry:     r.telemetry,
 		IdleTimeout:   idleTimeout,
 		ModelOverride: modelID,
+		AgentProfile:  r.agentProfile,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("create runner: %w", err)

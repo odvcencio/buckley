@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"google.golang.org/grpc"
 	acppb "m31labs.dev/buckley/pkg/acp/proto"
 	"m31labs.dev/buckley/pkg/agentserver"
 	"m31labs.dev/buckley/pkg/config"
@@ -19,7 +20,6 @@ import (
 	"m31labs.dev/buckley/pkg/orchestrator"
 	"m31labs.dev/buckley/pkg/storage"
 	"m31labs.dev/buckley/pkg/telemetry"
-	"google.golang.org/grpc"
 )
 
 type fakeBatchCoordinator struct {
@@ -367,6 +367,64 @@ func TestRunServeCommandValidationAndSeams(t *testing.T) {
 	}
 	if !containsString(server.cfg.AllowedOrigins, "http://example.com") {
 		t.Fatalf("expected allow-origin applied, got %v", server.cfg.AllowedOrigins)
+	}
+}
+
+func TestRunServeCommandAppliesStartupAgentProfile(t *testing.T) {
+	origLoad := serveLoadConfigFn
+	origInit := serveInitStoreFn
+	origNew := serveNewServerFn
+	origAgent := agentProfileFlag
+	origModel := modelOverrideFlag
+	t.Cleanup(func() {
+		serveLoadConfigFn = origLoad
+		serveInitStoreFn = origInit
+		serveNewServerFn = origNew
+		agentProfileFlag = origAgent
+		modelOverrideFlag = origModel
+	})
+
+	serveLoadConfigFn = func() (*config.Config, error) {
+		return config.DefaultConfig(), nil
+	}
+	serveInitStoreFn = func() (*storage.Store, error) {
+		return storage.New(filepath.Join(t.TempDir(), "ipc.db"))
+	}
+
+	var server *fakeIPCServer
+	var capturedCfg *config.Config
+	serveNewServerFn = func(cfg ipc.Config, store *storage.Store, telemetryHub *telemetry.Hub, commandGateway *command.Gateway, planStore orchestrator.PlanStore, appCfg *config.Config, workflow *orchestrator.WorkflowManager, models *model.Manager) ipcServer {
+		server = &fakeIPCServer{cfg: cfg}
+		capturedCfg = appCfg
+		return server
+	}
+
+	agentPath := filepath.Join(t.TempDir(), "agent.yaml")
+	if err := os.WriteFile(agentPath, []byte(`version: buckley.agent/v1
+name: serve-agent
+instructions:
+  prompt: Prefer API-visible progress.
+models:
+  chat: openrouter/z-ai/glm-5.2
+`), 0o600); err != nil {
+		t.Fatalf("write agent spec: %v", err)
+	}
+	agentProfileFlag = agentPath
+
+	if err := runServeCommand([]string{"--auth-token", "tok"}); err != nil {
+		t.Fatalf("runServeCommand: %v", err)
+	}
+	if server == nil || !server.startCalled {
+		t.Fatalf("expected Start called")
+	}
+	if !strings.Contains(server.cfg.AgentProfile, "Agent: serve-agent") {
+		t.Fatalf("agent profile not passed to IPC config: %q", server.cfg.AgentProfile)
+	}
+	if !strings.Contains(server.cfg.AgentProfile, "Prefer API-visible progress.") {
+		t.Fatalf("agent instructions not passed to IPC config: %q", server.cfg.AgentProfile)
+	}
+	if capturedCfg == nil || capturedCfg.Models.Execution != "openrouter/z-ai/glm-5.2" {
+		t.Fatalf("execution model=%q want openrouter/z-ai/glm-5.2", capturedCfg.Models.Execution)
 	}
 }
 

@@ -25,6 +25,7 @@ import (
 
 	acppb "m31labs.dev/buckley/pkg/acp/proto"
 	acpserver "m31labs.dev/buckley/pkg/acp/server"
+	"m31labs.dev/buckley/pkg/agentspec"
 	"m31labs.dev/buckley/pkg/config"
 	projectcontext "m31labs.dev/buckley/pkg/context"
 	projectconversation "m31labs.dev/buckley/pkg/conversation"
@@ -60,6 +61,7 @@ var quietMode bool
 var noColor bool
 var configPath string
 var modelOverrideFlag string
+var agentProfileFlag string
 
 // initDependenciesFn allows tests to stub dependency initialization without hitting the network.
 var initDependenciesFn = initDependencies
@@ -114,6 +116,7 @@ type startupOptions struct {
 	noColor          bool
 	configPath       string
 	modelOverride    string
+	agentPath        string
 	plainModeSet     bool
 	plainMode        bool
 }
@@ -137,6 +140,7 @@ func main() {
 	noColor = opts.noColor
 	configPath = opts.configPath
 	modelOverrideFlag = opts.modelOverride
+	agentProfileFlag = opts.agentPath
 	os.Args = append([]string{os.Args[0]}, opts.args...)
 
 	if handled, exitCode := dispatchSubcommand(opts.args); handled {
@@ -172,6 +176,14 @@ func main() {
 		os.Exit(2)
 	}
 	applySandboxOverride(cfg)
+	agentProfile, err := loadStartupAgentProfile(agentProfileFlag)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error loading agent spec: %v\n", err)
+		os.Exit(2)
+	}
+	if agentProfile != nil {
+		agentProfile.ApplyToConfig(cfg)
+	}
 	applyStartupModelOverride(cfg, modelOverrideFlag)
 	tool.SetResultEncoding(cfg.Encoding.UseToon)
 
@@ -238,7 +250,7 @@ func main() {
 	// Handle one-shot prompt mode (-p flag)
 	if promptFlag != "" {
 		// Prompt provided via -p flag
-		exitCode := executeOneShot(promptFlag, cfg, modelManager, store, projectContext, planStore)
+		exitCode := executeOneShot(promptFlag, cfg, modelManager, store, projectContext, planStore, agentProfile)
 		os.Exit(exitCode)
 	}
 
@@ -254,7 +266,7 @@ func main() {
 			}
 			if len(lines) > 0 {
 				prompt := strings.Join(lines, "\n")
-				exitCode := executeOneShot(prompt, cfg, modelManager, store, projectContext, planStore)
+				exitCode := executeOneShot(prompt, cfg, modelManager, store, projectContext, planStore, agentProfile)
 				os.Exit(exitCode)
 			}
 		}
@@ -271,6 +283,7 @@ func main() {
 		ProjectCtx:   projectContext,
 		Telemetry:    telemetryHub,
 		SessionID:    resumeSessionID,
+		AgentProfile: agentPromptSection(agentProfile),
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error creating TUI: %v\n", err)
@@ -292,7 +305,7 @@ func main() {
 }
 
 // executeOneShot executes a single prompt and exits
-func executeOneShot(prompt string, cfg *config.Config, mgr *model.Manager, store *storage.Store, projectContext *projectcontext.ProjectContext, planStore orchestrator.PlanStore) int {
+func executeOneShot(prompt string, cfg *config.Config, mgr *model.Manager, store *storage.Store, projectContext *projectcontext.ProjectContext, planStore orchestrator.PlanStore, agentProfile *agentspec.RuntimeProfile) int {
 	_ = store
 	_ = planStore
 
@@ -342,7 +355,7 @@ func executeOneShot(prompt string, cfg *config.Config, mgr *model.Manager, store
 	createTool.SetWorkDir(cwd)
 	registry.Register(createTool)
 
-	conv.AddSystemMessage(buildACPSystemPrompt(projectContext, cwd, skills, engine))
+	conv.AddSystemMessage(buildACPSystemPrompt(projectContext, cwd, skills, engine, agentPromptSection(agentProfile)))
 	conv.AddUserMessage(prompt)
 
 	responseText, err := runACPLoop(context.Background(), cfg, mgr, conv, registry, skillState, engine, resolvedModel, nil)
@@ -554,6 +567,13 @@ func initDependencies() (*config.Config, *model.Manager, *storage.Store, error) 
 	if encodingOverrideFlag != "" {
 		cfg.Encoding.UseToon = encodingOverrideFlag != "json"
 	}
+	agentProfile, err := loadStartupAgentProfile(agentProfileFlag)
+	if err != nil {
+		return nil, nil, nil, withExitCode(fmt.Errorf("loading agent spec: %w", err), 2)
+	}
+	if agentProfile != nil {
+		agentProfile.ApplyToConfig(cfg)
+	}
 	applyStartupModelOverride(cfg, modelOverrideFlag)
 	tool.SetResultEncoding(cfg.Encoding.UseToon)
 
@@ -650,6 +670,7 @@ func printHelp() {
 	fmt.Println("  --no-color                       Disable colored output")
 	fmt.Println("  --tui                            Use rich TUI interface")
 	fmt.Println("  --plain                          Use plain scrollback mode")
+	fmt.Println("  --agent <path>                   Load a buckley.agent/v1 runtime profile for this session")
 	fmt.Println("  -m, --model <id>                 Use model for this chat session (for example codex/gpt-5.4-mini)")
 	fmt.Println("  --encoding json|toon             Set serialization format")
 	fmt.Println("  --json                           Shortcut for --encoding json")
@@ -937,7 +958,7 @@ func printBashCompletion() {
 
     case "${prev}" in
         buckley)
-            COMPREPLY=( $(compgen -W "${commands} --help --version --tui --plain --quiet --no-color --config" -- "${cur}") )
+            COMPREPLY=( $(compgen -W "${commands} --help --version --tui --plain --quiet --no-color --config --agent" -- "${cur}") )
             return 0
             ;;
         batch)
@@ -968,7 +989,7 @@ func printBashCompletion() {
             COMPREPLY=( $(compgen -W "list check eval facts" -- "${cur}") )
             return 0
             ;;
-        --config|-c)
+        --config|-c|--agent)
             COMPREPLY=( $(compgen -f -- "${cur}") )
             return 0
             ;;
@@ -1016,6 +1037,7 @@ _buckley() {
         '-p[Run prompt in one-shot mode]:prompt:' \
         '-c[Use custom config file]:config file:_files' \
         '--config[Use custom config file]:config file:_files' \
+        '--agent[Load a buckley.agent/v1 runtime profile]:agent spec:_files' \
         '-q[Suppress non-essential output]' \
         '--quiet[Suppress non-essential output]' \
         '--no-color[Disable colored output]' \
@@ -1092,6 +1114,7 @@ complete -c buckley -n __fish_use_subcommand -a version -d 'Show version informa
 # Global flags
 complete -c buckley -s p -d 'Run prompt in one-shot mode'
 complete -c buckley -s c -l config -d 'Use custom config file' -r
+complete -c buckley -l agent -d 'Load a buckley.agent/v1 runtime profile' -r
 complete -c buckley -s q -l quiet -d 'Suppress non-essential output'
 complete -c buckley -l no-color -d 'Disable colored output'
 complete -c buckley -l tui -d 'Use rich TUI interface'
@@ -1224,7 +1247,11 @@ func parseStartupOptions(raw []string) (*startupOptions, error) {
 	var nextEncoding bool
 	var nextConfig bool
 	var nextModel bool
+	var nextAgent bool
 	var modelFlagSeen bool
+	var agentFlagSeen bool
+
+	opts.agentPath = strings.TrimSpace(os.Getenv("BUCKLEY_AGENT"))
 
 	for _, arg := range raw {
 		if nextPrompt {
@@ -1245,6 +1272,11 @@ func parseStartupOptions(raw []string) (*startupOptions, error) {
 		if nextModel {
 			opts.modelOverride = strings.TrimSpace(arg)
 			nextModel = false
+			continue
+		}
+		if nextAgent {
+			opts.agentPath = strings.TrimSpace(arg)
+			nextAgent = false
 			continue
 		}
 
@@ -1276,12 +1308,22 @@ func parseStartupOptions(raw []string) (*startupOptions, error) {
 			} else {
 				filtered = append(filtered, arg)
 			}
+		case "--agent":
+			if len(filtered) == 0 {
+				nextAgent = true
+				agentFlagSeen = true
+			} else {
+				filtered = append(filtered, arg)
+			}
 		default:
 			if strings.HasPrefix(arg, "--config=") {
 				opts.configPath = strings.TrimPrefix(arg, "--config=")
 			} else if strings.HasPrefix(arg, "--model=") && len(filtered) == 0 {
 				opts.modelOverride = strings.TrimSpace(strings.TrimPrefix(arg, "--model="))
 				modelFlagSeen = true
+			} else if strings.HasPrefix(arg, "--agent=") && len(filtered) == 0 {
+				opts.agentPath = strings.TrimSpace(strings.TrimPrefix(arg, "--agent="))
+				agentFlagSeen = true
 			} else {
 				filtered = append(filtered, arg)
 			}
@@ -1299,6 +1341,9 @@ func parseStartupOptions(raw []string) (*startupOptions, error) {
 	}
 	if nextModel || modelFlagSeen && strings.TrimSpace(opts.modelOverride) == "" {
 		return nil, fmt.Errorf("--model requires a value")
+	}
+	if nextAgent || agentFlagSeen && strings.TrimSpace(opts.agentPath) == "" {
+		return nil, fmt.Errorf("--agent requires a path")
 	}
 
 	opts.args = filtered
@@ -1375,6 +1420,21 @@ func applyStartupModelOverride(cfg *config.Config, modelID string) {
 			cfg.Models.Reasoning = "xhigh"
 		}
 	}
+}
+
+func loadStartupAgentProfile(path string) (*agentspec.RuntimeProfile, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return nil, nil
+	}
+	return agentspec.LoadRuntimeProfile(path)
+}
+
+func agentPromptSection(profile *agentspec.RuntimeProfile) string {
+	if profile == nil {
+		return ""
+	}
+	return profile.PromptSection()
 }
 
 func normalizeModelIDWithReasoning(cfg *config.Config, modelID string) string {

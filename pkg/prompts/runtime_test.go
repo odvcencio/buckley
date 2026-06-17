@@ -19,6 +19,7 @@ func TestBuildRuntimeSystemPrompt_IncludesRuntimeContext(t *testing.T) {
 
 	prompt := BuildRuntimeSystemPrompt(RuntimePromptInput{
 		BasePrompt:        "Base prompt",
+		AgentProfile:      "Agent: verifier\nAgent Instructions:\nRun tests.",
 		ProjectContext:    "Project context block",
 		WorkDir:           workDir,
 		RootDir:           root,
@@ -29,6 +30,8 @@ func TestBuildRuntimeSystemPrompt_IncludesRuntimeContext(t *testing.T) {
 
 	for _, want := range []string{
 		"Base prompt",
+		"Agent Profile:\nAgent: verifier",
+		"Agent Instructions:\nRun tests.",
 		"Repository Instructions:",
 		"Use focused edits.",
 		"Project Context:\nProject context block",

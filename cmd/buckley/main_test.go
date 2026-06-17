@@ -39,7 +39,7 @@ func TestParseBoolEnv(t *testing.T) {
 
 func TestParseStartupOptionsFlagsAndFiltering(t *testing.T) {
 	t.Setenv("BUCKLEY_QUIET", "1")
-	raw := []string{"--encoding=json", "--model", "codex/gpt-5.4-mini", "-p", "hello", "--config=proj.yaml", "plan", "feat", "do", "thing"}
+	raw := []string{"--encoding=json", "--model", "codex/gpt-5.4-mini", "--agent", "agent.yaml", "-p", "hello", "--config=proj.yaml", "plan", "feat", "do", "thing"}
 	opts, err := parseStartupOptions(raw)
 	if err != nil {
 		t.Fatalf("parseStartupOptions error: %v", err)
@@ -58,6 +58,9 @@ func TestParseStartupOptionsFlagsAndFiltering(t *testing.T) {
 	}
 	if opts.modelOverride != "codex/gpt-5.4-mini" {
 		t.Fatalf("modelOverride=%q want codex/gpt-5.4-mini", opts.modelOverride)
+	}
+	if opts.agentPath != "agent.yaml" {
+		t.Fatalf("agentPath=%q want agent.yaml", opts.agentPath)
 	}
 	if got := opts.args; len(got) != 4 || got[0] != "plan" {
 		t.Fatalf("args=%v want plan feat do thing", got)
@@ -89,6 +92,14 @@ func TestParseStartupOptionsMissingValues(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected error for empty --model value after prompt")
 	}
+	_, err = parseStartupOptions([]string{"--agent"})
+	if err == nil {
+		t.Fatalf("expected error for missing --agent value")
+	}
+	_, err = parseStartupOptions([]string{"--agent="})
+	if err == nil {
+		t.Fatalf("expected error for empty --agent value")
+	}
 }
 
 func TestParseStartupOptionsPlainAndTUIFlags(t *testing.T) {
@@ -113,15 +124,37 @@ func TestParseStartupOptionsPlainAndTUIFlags(t *testing.T) {
 }
 
 func TestParseStartupOptionsLeavesSubcommandModelFlag(t *testing.T) {
-	opts, err := parseStartupOptions([]string{"commit", "--model", "openai/gpt-5.4-mini"})
+	opts, err := parseStartupOptions([]string{"commit", "--model", "openai/gpt-5.4-mini", "--agent", "agent.yaml"})
 	if err != nil {
 		t.Fatalf("parseStartupOptions error: %v", err)
 	}
 	if opts.modelOverride != "" {
 		t.Fatalf("modelOverride=%q want empty", opts.modelOverride)
 	}
-	if got := opts.args; len(got) != 3 || got[0] != "commit" || got[1] != "--model" || got[2] != "openai/gpt-5.4-mini" {
-		t.Fatalf("args=%v want commit --model openai/gpt-5.4-mini", got)
+	if opts.agentPath != "" {
+		t.Fatalf("agentPath=%q want empty", opts.agentPath)
+	}
+	if got := opts.args; len(got) != 5 || got[0] != "commit" || got[1] != "--model" || got[2] != "openai/gpt-5.4-mini" || got[3] != "--agent" || got[4] != "agent.yaml" {
+		t.Fatalf("args=%v want commit --model openai/gpt-5.4-mini --agent agent.yaml", got)
+	}
+}
+
+func TestParseStartupOptionsAgentEnvDefault(t *testing.T) {
+	t.Setenv("BUCKLEY_AGENT", "env-agent.yaml")
+	opts, err := parseStartupOptions([]string{"--plain"})
+	if err != nil {
+		t.Fatalf("parseStartupOptions error: %v", err)
+	}
+	if opts.agentPath != "env-agent.yaml" {
+		t.Fatalf("agentPath=%q want env-agent.yaml", opts.agentPath)
+	}
+
+	opts, err = parseStartupOptions([]string{"--agent=flag-agent.yaml"})
+	if err != nil {
+		t.Fatalf("parseStartupOptions error: %v", err)
+	}
+	if opts.agentPath != "flag-agent.yaml" {
+		t.Fatalf("agentPath=%q want flag-agent.yaml", opts.agentPath)
 	}
 }
 

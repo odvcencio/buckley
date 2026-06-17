@@ -46,6 +46,14 @@ func runServeCommand(args []string) error {
 	if err != nil {
 		return withExitCode(err, 2)
 	}
+	agentProfile, err := loadStartupAgentProfile(agentProfileFlag)
+	if err != nil {
+		return withExitCode(fmt.Errorf("loading agent spec: %w", err), 2)
+	}
+	if agentProfile != nil {
+		agentProfile.ApplyToConfig(appCfg)
+	}
+	applyStartupModelOverride(appCfg, modelOverrideFlag)
 
 	ipcDefaults := appCfg.IPC
 	if strings.TrimSpace(ipcDefaults.Bind) == "" {
@@ -185,6 +193,7 @@ func runServeCommand(args []string) error {
 		BasicAuthUsername: appCfg.IPC.BasicAuthUsername,
 		BasicAuthPassword: appCfg.IPC.BasicAuthPassword,
 		ProjectRoot:       projectRoot,
+		AgentProfile:      agentPromptSection(agentProfile),
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

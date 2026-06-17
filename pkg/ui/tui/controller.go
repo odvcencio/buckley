@@ -55,7 +55,8 @@ type Controller struct {
 	telemetryBridge *TelemetryUIBridge
 
 	// State
-	workDir string
+	workDir      string
+	agentProfile string
 
 	// Multi-session support - each session runs independently
 	sessions       []*SessionState // Active sessions for this project
@@ -90,6 +91,7 @@ type ControllerConfig struct {
 	ProjectCtx   *projectcontext.ProjectContext
 	Telemetry    *telemetry.Hub
 	SessionID    string // Resume session, empty for new
+	AgentProfile string
 }
 
 func newSessionState(cfg *config.Config, store *storage.Store, workDir string, hub *telemetry.Hub, sessionID string, loadMessages bool) (*SessionState, error) {
@@ -263,6 +265,7 @@ func NewController(cfg ControllerConfig) (*Controller, error) {
 		evaluator:      evaluator,
 		resolver:       resolver,
 		workDir:        workDir,
+		agentProfile:   strings.TrimSpace(cfg.AgentProfile),
 		sessions:       projectSessions,
 		currentSession: currentIdx,
 	}
@@ -1428,6 +1431,7 @@ func (c *Controller) buildSystemPrompt(sess *SessionState) string {
 	return prompts.BuildRuntimeSystemPrompt(prompts.RuntimePromptInput{
 		Evaluator:         c.evaluator,
 		BasePrompt:        basePrompt,
+		AgentProfile:      c.agentProfile,
 		ProjectContext:    projectRaw,
 		WorkDir:           c.workDir,
 		RootDir:           c.workDir,

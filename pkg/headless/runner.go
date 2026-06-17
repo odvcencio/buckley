@@ -172,6 +172,7 @@ type RunnerConfig struct {
 	ToolPolicy    *ToolPolicy
 	MaxRuntime    time.Duration
 	SystemPrompt  string // If empty, uses default system prompt for tool-using agents
+	AgentProfile  string // Optional rendered buckley.agent/v1 prompt section
 }
 
 // NewRunner creates a new headless session runner.
@@ -228,7 +229,7 @@ func NewRunner(cfg RunnerConfig) (*Runner, error) {
 
 	// Inject system prompt if this is a fresh conversation (no messages yet)
 	if len(conv.Messages) == 0 {
-		conv.AddSystemMessage(buildHeadlessSystemPrompt(cfg.SystemPrompt, projectCtx, cfg.Session, evaluator))
+		conv.AddSystemMessage(buildHeadlessSystemPrompt(cfg.SystemPrompt, cfg.AgentProfile, projectCtx, cfg.Session, evaluator))
 	}
 
 	// Initialize policy engine if not provided
@@ -1731,7 +1732,7 @@ func (r *Runner) approvalMode() string {
 	}
 }
 
-func buildHeadlessSystemPrompt(basePrompt string, projectCtx *projectcontext.ProjectContext, sess *storage.Session, evaluator types.RuleEvaluator) string {
+func buildHeadlessSystemPrompt(basePrompt string, agentProfile string, projectCtx *projectcontext.ProjectContext, sess *storage.Session, evaluator types.RuleEvaluator) string {
 	projectRaw := ""
 	if projectCtx != nil {
 		projectRaw = projectCtx.RawContent
@@ -1747,6 +1748,7 @@ func buildHeadlessSystemPrompt(basePrompt string, projectCtx *projectcontext.Pro
 	return prompts.BuildRuntimeSystemPrompt(prompts.RuntimePromptInput{
 		Evaluator:      evaluator,
 		BasePrompt:     defaultIfEmpty(basePrompt, defaultHeadlessSystemPrompt),
+		AgentProfile:   agentProfile,
 		ProjectContext: projectRaw,
 		WorkDir:        workDir,
 		RootDir:        rootDir,

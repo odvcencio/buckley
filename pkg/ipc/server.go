@@ -104,6 +104,7 @@ type Config struct {
 	BasicAuthPassword string
 	ProjectRoot       string
 	ExternalURL       string // External URL for generating links (magic links, QR codes)
+	AgentProfile      string // Optional rendered buckley.agent/v1 prompt section for headless sessions
 }
 
 // Server hosts a JSON/HTTP + WebSocket API for external UIs.

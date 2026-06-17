@@ -2,6 +2,7 @@ package headless
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -197,6 +198,19 @@ func TestToolApprovalRequiredRespectsToolPolicyList(t *testing.T) {
 
 	if !runner.requiresApproval("read_file", nil) {
 		t.Fatalf("expected read_file to require approval")
+	}
+}
+
+func TestBuildHeadlessSystemPromptIncludesAgentProfile(t *testing.T) {
+	prompt := buildHeadlessSystemPrompt("", "Agent: browser\nAgent Instructions:\nUse approval gates.", nil, &storage.Session{ProjectPath: "/tmp/project"}, nil)
+	for _, want := range []string{
+		"Agent Profile:\nAgent: browser",
+		"Agent Instructions:\nUse approval gates.",
+		"Working Directory: /tmp/project",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("prompt missing %q:\n%s", want, prompt)
+		}
 	}
 }
 

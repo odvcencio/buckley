@@ -350,7 +350,7 @@ func getACPSessionState(
 		engine = e
 	}
 
-	conv.AddSystemMessage(buildACPSystemPrompt(projectContext, workDir, skills, engine))
+	conv.AddSystemMessage(buildACPSystemPrompt(projectContext, workDir, skills, engine, ""))
 
 	state := &acpSessionState{
 		conv:       conv,
@@ -363,7 +363,7 @@ func getACPSessionState(
 	return state
 }
 
-func buildACPSystemPrompt(projectContext *projectcontext.ProjectContext, workDir string, skills *skill.Registry, engine *rules.Engine) string {
+func buildACPSystemPrompt(projectContext *projectcontext.ProjectContext, workDir string, skills *skill.Registry, engine *rules.Engine, agentProfile string) string {
 	var evaluator *rules.EngineAdapter
 	if engine != nil {
 		evaluator = rules.NewEngineAdapter(engine)
@@ -381,6 +381,7 @@ func buildACPSystemPrompt(projectContext *projectcontext.ProjectContext, workDir
 	return prompts.BuildRuntimeSystemPrompt(prompts.RuntimePromptInput{
 		Evaluator:         evaluator,
 		BasePrompt:        defaultACPSystemPrompt,
+		AgentProfile:      agentProfile,
 		ProjectContext:    projectRaw,
 		WorkDir:           workDir,
 		RootDir:           workDir,

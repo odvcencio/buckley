@@ -37,6 +37,7 @@ func TestNewRegistry(t *testing.T) {
 		registry := NewRegistry(RegistryConfig{
 			Store:           store,
 			ModelManager:    mgr,
+			AgentProfile:    " Agent: registry ",
 			CleanupInterval: 10 * time.Minute,
 			MaxIdleTime:     1 * time.Hour,
 		})
@@ -47,6 +48,9 @@ func TestNewRegistry(t *testing.T) {
 		}
 		if registry.maxIdleTime != 1*time.Hour {
 			t.Errorf("maxIdleTime = %v, want 1h", registry.maxIdleTime)
+		}
+		if registry.agentProfile != "Agent: registry" {
+			t.Errorf("agentProfile=%q want Agent: registry", registry.agentProfile)
 		}
 	})
 }

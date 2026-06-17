@@ -388,6 +388,7 @@ func (s *Server) InitHeadlessRegistry(ctx context.Context) *headless.Registry {
 		ProjectRoot:  s.projectRoot,
 		Telemetry:    s.telemetry,
 		Emitter:      s.NewHeadlessEmitter(),
+		AgentProfile: s.cfg.AgentProfile,
 	})
 
 	registry.Start(ctx)

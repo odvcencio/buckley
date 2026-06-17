@@ -24,6 +24,7 @@ Operate like a disciplined senior engineer:
 type RuntimePromptInput struct {
 	Evaluator         types.RuleEvaluator
 	BasePrompt        string
+	AgentProfile      string
 	ProjectContext    string
 	WorkDir           string
 	RootDir           string
@@ -43,6 +44,11 @@ func BuildRuntimeSystemPrompt(input RuntimePromptInput) string {
 		basePrompt = DefaultToolUseSystemPrompt
 	}
 	builder.AddSection("system", basePrompt, false)
+
+	agentProfile := strings.TrimSpace(input.AgentProfile)
+	if agentProfile != "" {
+		builder.AddSection("agent_profile", "Agent Profile:\n"+agentProfile, true)
+	}
 
 	rootDir := strings.TrimSpace(input.RootDir)
 	workDir := strings.TrimSpace(input.WorkDir)
@@ -80,7 +86,7 @@ func BuildRuntimeSystemPrompt(input RuntimePromptInput) string {
 		ModelTier:        defaultString(input.ModelTier, "standard"),
 		TaskType:         defaultString(input.TaskType, "coding"),
 		GitDiffLines:     input.GitDiffLines,
-		InstructionChars: len(instructionsSection) + len(projectContext),
+		InstructionChars: len(agentProfile) + len(instructionsSection) + len(projectContext),
 		GTSAvailable:     input.GTSAvailable,
 	})
 
