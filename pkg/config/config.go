@@ -11,8 +11,11 @@ import (
 
 const (
 	defaultOpenRouterModel        = defaultOpenRouterChatModel
-	defaultOpenRouterChatModel    = "qwen/qwen3.6-max-preview"
+	defaultOpenRouterChatModel    = "z-ai/glm-5.2"
 	defaultOpenRouterUtilityModel = "qwen/qwen3.6-flash"
+	defaultOpenRouterKimiCode     = "moonshotai/kimi-k2.7-code"
+	defaultOpenRouterQwenMax      = "qwen/qwen3.7-max"
+	legacyOpenRouterChatModel     = "qwen/qwen3.6-max-preview"
 	legacyOpenRouterModel         = "moonshotai/kimi-k2.5"
 	defaultOpenAIPlanningModel    = "openai/gpt-5.5"
 	defaultOpenAIExecutionModel   = "openai/gpt-5.4"

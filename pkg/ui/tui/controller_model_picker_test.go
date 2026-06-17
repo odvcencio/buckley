@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"strings"
 	"testing"
 
 	"m31labs.dev/buckley/pkg/model"
@@ -50,14 +51,31 @@ func TestModelRoleTags(t *testing.T) {
 
 func TestPreferredModelIDs(t *testing.T) {
 	catalog := map[string]model.ModelInfo{
-		"moonshotai/kimi-k2-thinking": {},
-		"openai/gpt-4o":               {},
+		"moonshotai/kimi-k2.7-code": {},
+		"openai/gpt-4o":             {},
+		"qwen/qwen3.7-max":          {},
+		"z-ai/glm-5.2":              {},
 	}
 	ids := preferredModelIDs("openai/gpt-4o", "", "", catalog)
-	if len(ids) != 2 {
-		t.Fatalf("expected 2 preferred models, got %d", len(ids))
+	if len(ids) != 4 {
+		t.Fatalf("expected 4 preferred models, got %d", len(ids))
 	}
-	if ids[0] != "openai/gpt-4o" || ids[1] != "moonshotai/kimi-k2-thinking" {
-		t.Fatalf("unexpected preferred model order: %v", ids)
+	want := []string{"openai/gpt-4o", "z-ai/glm-5.2", "moonshotai/kimi-k2.7-code", "qwen/qwen3.7-max"}
+	for i := range want {
+		if ids[i] != want[i] {
+			t.Fatalf("unexpected preferred model order: %v", ids)
+		}
+	}
+}
+
+func TestModelProcessStatus(t *testing.T) {
+	got := modelProcessStatus("z-ai/glm-5.2", 0, 12, nil)
+	if got != "Thinking with z-ai/glm-5.2 - 12 tools" {
+		t.Fatalf("modelProcessStatus() = %q", got)
+	}
+
+	got = modelProcessStatus("very/long-model-name-that-will-not-fit-in-the-status-bar", 1, 0, nil)
+	if !strings.HasPrefix(got, "Thinking after tools with very/long-model-name") {
+		t.Fatalf("unexpected model process status: %q", got)
 	}
 }

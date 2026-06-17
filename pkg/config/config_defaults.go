@@ -102,6 +102,11 @@ func DefaultConfig() *Config {
 			Planning:  defaultOpenRouterModel,
 			Execution: defaultOpenRouterModel,
 			Review:    defaultOpenRouterModel,
+			Curated: []string{
+				defaultOpenRouterChatModel,
+				defaultOpenRouterKimiCode,
+				defaultOpenRouterQwenMax,
+			},
 			VisionFallback: []string{
 				"openai/gpt-5.4-mini",
 				"google/gemini-3-flash",
@@ -411,9 +416,7 @@ func DefaultConfig() *Config {
 			TargetReduction:  0.70,
 			PreserveCommands: true,
 			Models: []string{
-				"moonshotai/kimi-k2.5",
-				"qwen/qwen3-coder",
-				"openai/gpt-5.4-mini",
+				defaultOpenRouterUtilityModel,
 			},
 		},
 		UI: UIConfig{

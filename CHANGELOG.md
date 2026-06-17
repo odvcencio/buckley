@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- TUI chat now shows animated elapsed process indicators while waiting on model API calls and tool executions.
+
+### Changed
+- Default OpenRouter chat, planning, review, and interactive execution model is now `z-ai/glm-5.2`.
+- Default curated premium reasoning candidates now include `z-ai/glm-5.2`, `moonshotai/kimi-k2.7-code`, and `qwen/qwen3.7-max`.
+- Live-gated multi-turn headless harness coverage now defaults to `xiaomi/mimo-v2.5-pro`.
+
 ## [1.4.1] - 2026-06-17
 
 ### Fixed

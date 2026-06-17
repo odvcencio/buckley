@@ -30,6 +30,11 @@ func (s *StatusBar) SetStatus(text string) {
 	s.status = text
 }
 
+// Status returns the current status text.
+func (s *StatusBar) Status() string {
+	return s.status
+}
+
 // SetTokens updates the token count and cost.
 func (s *StatusBar) SetTokens(tokens int, costCents float64) {
 	s.tokens = tokens

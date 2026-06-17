@@ -847,7 +847,9 @@ func preferredModelIDs(execID, planID, reviewID string, catalog map[string]model
 	add(execID)
 	add(planID)
 	add(reviewID)
-	add("moonshotai/kimi-k2-thinking")
+	add("z-ai/glm-5.2")
+	add("moonshotai/kimi-k2.7-code")
+	add("qwen/qwen3.7-max")
 	return ids
 }
 
@@ -906,7 +908,7 @@ func (c *Controller) streamResponse(ctx context.Context, prompt string, sess *Se
 		c.emitStreaming(sess.ID, false)
 	}()
 
-	c.app.SetStatus("Thinking...")
+	c.app.SetStatus("Preparing request")
 	c.app.ShowThinkingIndicator()
 
 	// Add user message to session's conversation and persist
@@ -1011,9 +1013,12 @@ func (c *Controller) runToolLoop(ctx context.Context, sess *SessionState, modelI
 			req.Reasoning = &model.ReasoningConfig{Effort: effort}
 		}
 
+		c.app.StartProcessStatus(modelProcessStatus(modelID, iter, len(req.Tools), req.Reasoning))
 		resp, err := c.modelMgr.ChatCompletion(ctx, req)
+		c.app.StopProcessStatus()
 		if err != nil {
 			if useTools && isToolUnsupportedError(err) {
+				c.app.SetStatus("Retrying without tools")
 				useTools = false
 				continue
 			}
@@ -1027,6 +1032,7 @@ func (c *Controller) runToolLoop(ctx context.Context, sess *SessionState, modelI
 
 		msg := resp.Choices[0].Message
 		if len(msg.ToolCalls) == 0 {
+			c.app.SetStatus("Finalizing response")
 			text, err := model.ExtractTextContent(msg.Content)
 			if err != nil {
 				return "", nil, err
@@ -1048,10 +1054,11 @@ func (c *Controller) runToolLoop(ctx context.Context, sess *SessionState, modelI
 				msg.ToolCalls[i].Function.Name = repairedName
 			}
 		}
+		c.app.SetStatus(fmt.Sprintf("Model requested %d tool call(s)", len(msg.ToolCalls)))
 		sess.Conversation.AddToolCallMessageWithReasoning(msg.ToolCalls, msg.Reasoning, msg.ReasoningDetails)
 		c.saveLatestConversationMessage(sess)
 
-		for _, tc := range msg.ToolCalls {
+		for i, tc := range msg.ToolCalls {
 			params, err := parseToolParams(tc.Function.Arguments)
 			if err != nil {
 				toolText := fmt.Sprintf("Error: invalid tool arguments: %v", err)
@@ -1078,7 +1085,9 @@ func (c *Controller) runToolLoop(ctx context.Context, sess *SessionState, modelI
 				params[tool.ToolCallIDParam] = tc.ID
 			}
 
+			c.app.StartProcessStatus(fmt.Sprintf("Running %s (%d/%d)", compactStatusText(tc.Function.Name, 36), i+1, len(msg.ToolCalls)))
 			result, execErr := sess.ToolRegistry.Execute(tc.Function.Name, params)
+			c.app.StopProcessStatus()
 			toolText := formatToolResultForModel(result, execErr)
 			sess.Conversation.AddToolResponseMessage(tc.ID, tc.Function.Name, toolText)
 			c.saveLatestConversationMessage(sess)
@@ -1090,6 +1099,38 @@ func (c *Controller) runToolLoop(ctx context.Context, sess *SessionState, modelI
 	}
 
 	return "", &totalUsage, fmt.Errorf("max tool calling iterations (%d) exceeded", maxIterations)
+}
+
+func modelProcessStatus(modelID string, iteration, toolCount int, reasoning *model.ReasoningConfig) string {
+	phase := "Thinking with " + compactStatusText(modelID, 44)
+	if iteration > 0 {
+		phase = "Thinking after tools with " + compactStatusText(modelID, 34)
+	}
+	var details []string
+	if toolCount > 0 {
+		details = append(details, fmt.Sprintf("%d tools", toolCount))
+	}
+	if reasoning != nil && strings.TrimSpace(reasoning.Effort) != "" {
+		details = append(details, "reasoning "+strings.TrimSpace(reasoning.Effort))
+	}
+	if len(details) > 0 {
+		phase += " - " + strings.Join(details, ", ")
+	}
+	return phase
+}
+
+func compactStatusText(text string, maxLen int) string {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return "model"
+	}
+	if maxLen <= 0 || len(text) <= maxLen {
+		return text
+	}
+	if maxLen <= 3 {
+		return text[:maxLen]
+	}
+	return text[:maxLen-3] + "..."
 }
 
 func parseToolParams(raw string) (map[string]any, error) {

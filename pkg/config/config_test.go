@@ -14,11 +14,20 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.Models.Planning == "" || cfg.Models.Execution == "" || cfg.Models.Review == "" {
 		t.Fatalf("default models should be populated: %+v", cfg.Models)
 	}
-	if cfg.Models.Execution != "qwen/qwen3.6-max-preview" {
-		t.Fatalf("expected default execution/chat model to be qwen/qwen3.6-max-preview, got %s", cfg.Models.Execution)
+	if cfg.Models.Execution != "z-ai/glm-5.2" {
+		t.Fatalf("expected default execution/chat model to be z-ai/glm-5.2, got %s", cfg.Models.Execution)
 	}
-	if cfg.Models.Review != "qwen/qwen3.6-max-preview" {
-		t.Fatalf("expected default review model to be qwen/qwen3.6-max-preview, got %s", cfg.Models.Review)
+	if cfg.Models.Review != "z-ai/glm-5.2" {
+		t.Fatalf("expected default review model to be z-ai/glm-5.2, got %s", cfg.Models.Review)
+	}
+	wantCurated := []string{"z-ai/glm-5.2", "moonshotai/kimi-k2.7-code", "qwen/qwen3.7-max"}
+	if len(cfg.Models.Curated) != len(wantCurated) {
+		t.Fatalf("expected curated defaults %v, got %v", wantCurated, cfg.Models.Curated)
+	}
+	for i, want := range wantCurated {
+		if cfg.Models.Curated[i] != want {
+			t.Fatalf("expected curated[%d] to be %s, got %s", i, want, cfg.Models.Curated[i])
+		}
 	}
 	if cfg.Models.Utility.Commit != "qwen/qwen3.6-flash" {
 		t.Fatalf("expected default commit model to be qwen/qwen3.6-flash, got %s", cfg.Models.Utility.Commit)

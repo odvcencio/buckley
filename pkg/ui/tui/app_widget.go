@@ -33,9 +33,12 @@ type RenderMetrics struct {
 }
 
 const (
-	minInputHeight = 2
-	minChatHeight  = 4
+	minInputHeight    = 2
+	minChatHeight     = 4
+	processStatusTick = 250 * time.Millisecond
 )
+
+var processSpinnerFrames = [...]string{"-", "\\", "|", "/"}
 
 // WidgetApp is the main TUI application using the widget tree architecture.
 type WidgetApp struct {
@@ -76,6 +79,11 @@ type WidgetApp struct {
 	statusText          string
 	statusOverride      string
 	statusOverrideUntil time.Time
+	processActive       bool
+	processText         string
+	processStarted      time.Time
+	processLastTick     time.Time
+	processFrame        int
 	unreadCount         int
 	scrollIndicator     string
 	inputMeasuredHeight int
@@ -656,11 +664,18 @@ func (a *WidgetApp) updateAnimations(now time.Time) bool {
 	if a.statusOverride != "" && !now.Before(a.statusOverrideUntil) {
 		a.statusOverride = ""
 		a.statusOverrideUntil = time.Time{}
-		a.statusBar.SetStatus(a.statusText)
+		a.statusBar.SetStatus(a.currentStatusText(now))
 		dirty = true
 	}
 	if !a.ctrlCArmedUntil.IsZero() && !now.Before(a.ctrlCArmedUntil) {
 		a.ctrlCArmedUntil = time.Time{}
+	}
+
+	if a.processActive && (a.processLastTick.IsZero() || now.Sub(a.processLastTick) >= processStatusTick) {
+		a.statusBar.SetStatus(a.formatProcessStatus(now))
+		a.processFrame = (a.processFrame + 1) % len(processSpinnerFrames)
+		a.processLastTick = now
+		dirty = true
 	}
 
 	if a.inputArea.IsFocused() {
@@ -736,7 +751,46 @@ func (a *WidgetApp) update(msg Message) bool {
 		if a.statusOverride == "" || time.Now().After(a.statusOverrideUntil) {
 			a.statusOverride = ""
 			a.statusOverrideUntil = time.Time{}
-			a.statusBar.SetStatus(m.Text)
+			a.statusBar.SetStatus(a.currentStatusText(time.Now()))
+			return true
+		}
+		return false
+
+	case ProcessStatusMsg:
+		now := time.Now()
+		if m.Active {
+			text := strings.TrimSpace(m.Text)
+			if text == "" {
+				text = "Working"
+			}
+			if !a.processActive || m.ResetElapsed || a.processText != text {
+				a.processStarted = now
+				a.processLastTick = time.Time{}
+				a.processFrame = 0
+			}
+			a.processActive = true
+			a.processText = text
+			if a.statusOverride == "" || now.After(a.statusOverrideUntil) {
+				a.statusOverride = ""
+				a.statusOverrideUntil = time.Time{}
+				a.statusBar.SetStatus(a.formatProcessStatus(now))
+				return true
+			}
+			return false
+		}
+
+		if !a.processActive {
+			return false
+		}
+		a.processActive = false
+		a.processText = ""
+		a.processStarted = time.Time{}
+		a.processLastTick = time.Time{}
+		a.processFrame = 0
+		if a.statusOverride == "" || now.After(a.statusOverrideUntil) {
+			a.statusOverride = ""
+			a.statusOverrideUntil = time.Time{}
+			a.statusBar.SetStatus(a.statusText)
 			return true
 		}
 		return false
@@ -1271,6 +1325,36 @@ func (a *WidgetApp) setStatusOverride(text string, duration time.Duration) {
 	a.statusBar.SetStatus(text)
 }
 
+func (a *WidgetApp) currentStatusText(now time.Time) string {
+	if a.processActive {
+		return a.formatProcessStatus(now)
+	}
+	return a.statusText
+}
+
+func (a *WidgetApp) formatProcessStatus(now time.Time) string {
+	text := strings.TrimSpace(a.processText)
+	if text == "" {
+		text = "Working"
+	}
+	if a.processStarted.IsZero() {
+		a.processStarted = now
+	}
+	frame := processSpinnerFrames[a.processFrame%len(processSpinnerFrames)]
+	return fmt.Sprintf("%s %s (%s)", frame, text, formatProcessElapsed(now.Sub(a.processStarted)))
+}
+
+func formatProcessElapsed(elapsed time.Duration) string {
+	if elapsed < 0 {
+		elapsed = 0
+	}
+	seconds := int(elapsed.Round(time.Second) / time.Second)
+	if seconds < 60 {
+		return fmt.Sprintf("%ds", seconds)
+	}
+	return fmt.Sprintf("%dm%02ds", seconds/60, seconds%60)
+}
+
 // Public API methods
 
 // Refresh forces a re-render.
@@ -1311,6 +1395,21 @@ func (a *WidgetApp) StreamEnd(sessionID, fullText string) {
 // SetStatus updates status. Thread-safe via message passing.
 func (a *WidgetApp) SetStatus(text string) {
 	a.Post(StatusMsg{Text: text})
+}
+
+// StartProcessStatus starts an animated status with elapsed time.
+func (a *WidgetApp) StartProcessStatus(text string) {
+	a.Post(ProcessStatusMsg{Text: text, Active: true, ResetElapsed: true})
+}
+
+// UpdateProcessStatus updates the animated status label.
+func (a *WidgetApp) UpdateProcessStatus(text string) {
+	a.Post(ProcessStatusMsg{Text: text, Active: true})
+}
+
+// StopProcessStatus stops the animated status and restores the base status.
+func (a *WidgetApp) StopProcessStatus() {
+	a.Post(ProcessStatusMsg{Active: false})
 }
 
 // SetTokenCount updates token display. Thread-safe via message passing.

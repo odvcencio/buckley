@@ -1,12 +1,15 @@
 models:
-  planning: moonshotai/kimi-k2.5
-  execution: moonshotai/kimi-k2.5
-  review: moonshotai/kimi-k2.5
+  planning: z-ai/glm-5.2
+  execution: z-ai/glm-5.2
+  review: moonshotai/kimi-k2.7-code
+  curated:
+    - z-ai/glm-5.2
+    - moonshotai/kimi-k2.7-code
+    - qwen/qwen3.7-max
   fallback_chains:
-    moonshotai/kimi-k2.5:
-      - anthropic/claude-opus-4.5
-    openai/gpt-4-turbo:
-      - anthropic/claude-sonnet-4.5
+    z-ai/glm-5.2:
+      - moonshotai/kimi-k2.7-code
+      - qwen/qwen3.7-max
 
 personality:
   enabled: true

@@ -19,6 +19,7 @@ func TestMessages_ImplementInterface(t *testing.T) {
 		QuitMsg{},
 		RefreshMsg{},
 		StatusMsg{Text: "Ready"},
+		ProcessStatusMsg{Text: "Thinking", Active: true},
 		TokensMsg{Tokens: 100, CostCent: 0.01},
 		ModelMsg{Name: "gpt-4"},
 		AddMessageMsg{Content: "hi", Source: "user"},
@@ -54,6 +55,7 @@ func TestMessages_IsMessageMethods(t *testing.T) {
 	QuitMsg{}.isMessage()
 	RefreshMsg{}.isMessage()
 	StatusMsg{}.isMessage()
+	ProcessStatusMsg{}.isMessage()
 	TokensMsg{}.isMessage()
 	ModelMsg{}.isMessage()
 	AddMessageMsg{}.isMessage()
@@ -142,6 +144,11 @@ func TestUIMessages(t *testing.T) {
 	status := StatusMsg{Text: "Ready"}
 	if status.Text != "Ready" {
 		t.Errorf("expected Text='Ready', got %s", status.Text)
+	}
+
+	process := ProcessStatusMsg{Text: "Thinking", Active: true, ResetElapsed: true}
+	if process.Text != "Thinking" || !process.Active || !process.ResetElapsed {
+		t.Errorf("unexpected ProcessStatusMsg: %+v", process)
 	}
 
 	tokens := TokensMsg{Tokens: 1000, CostCent: 0.05}

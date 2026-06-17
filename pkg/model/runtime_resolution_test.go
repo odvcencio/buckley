@@ -66,6 +66,9 @@ func TestInferModelTier(t *testing.T) {
 	}{
 		{modelID: "openai/gpt-5-mini", want: "fast"},
 		{modelID: "anthropic/claude-opus-4", want: "premium"},
+		{modelID: "z-ai/glm-5.2", want: "premium"},
+		{modelID: "moonshotai/kimi-k2.7-code", want: "premium"},
+		{modelID: "qwen/qwen3.7-max", want: "premium"},
 		{modelID: "openai/gpt-4o", want: "standard"},
 	}
 

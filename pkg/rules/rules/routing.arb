@@ -9,14 +9,14 @@ strategy model_select returns ModelChoice {
         and model.supports_reasoning
     } then PlanningReasoner {
         action: "use",
-        model: "qwen/qwen3.6-max-preview",
+        model: "z-ai/glm-5.2",
     }
 
     when {
         task.phase == "execution"
     } then ExecutionModel {
         action: "use",
-        model: "qwen/qwen3.6-max-preview",
+        model: "z-ai/glm-5.2",
     }
 
     when {
@@ -24,11 +24,11 @@ strategy model_select returns ModelChoice {
         and model.supports_reasoning
     } then ReviewReasoner {
         action: "use",
-        model: "qwen/qwen3.6-max-preview",
+        model: "z-ai/glm-5.2",
     }
 
     else DefaultModel {
         action: "use",
-        model: "qwen/qwen3.6-max-preview",
+        model: "z-ai/glm-5.2",
     }
 }

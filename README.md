@@ -62,7 +62,7 @@ buckley pr
 buckley review
 buckley hunt
 buckley dream
-buckley experiment run "compare-routing" -m moonshotai/kimi-k2-thinking -m anthropic/claude-sonnet-4-5 -p "Implement feature X"
+buckley experiment run "compare-routing" -m z-ai/glm-5.2 -m moonshotai/kimi-k2.7-code -p "Implement feature X"
 ```
 
 `buckley commit` and `buckley pr` use transparent tool-first workflows rather than opaque text-only prompting.
@@ -89,9 +89,9 @@ Buckley supports separate planning, execution, and review models:
 
 ```yaml
 models:
-  planning: anthropic/claude-sonnet-4-5
-  execution: moonshotai/kimi-k2-thinking
-  review: openai/gpt-5.5
+  planning: z-ai/glm-5.2
+  execution: z-ai/glm-5.2
+  review: moonshotai/kimi-k2.7-code
   reasoning: xhigh
 ```
 

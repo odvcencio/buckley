@@ -65,9 +65,9 @@ Model selection for different workflow phases.
 ```yaml
 models:
   # Primary models for each phase
-  planning: anthropic/claude-sonnet-4-5
-  execution: anthropic/claude-sonnet-4-5
-  review: anthropic/claude-sonnet-4-5
+  planning: z-ai/glm-5.2
+  execution: z-ai/glm-5.2
+  review: moonshotai/kimi-k2.7-code
 
   # Default provider when model prefix doesn't specify
   default_provider: openrouter  # openrouter | openai | anthropic | google | codex
@@ -88,25 +88,25 @@ models:
 
   # Utility models for lightweight tasks
   utility:
-    commit: openai/gpt-5.4-mini
-    pr: openai/gpt-5.4-mini
-    compaction: openai/gpt-5.4-mini
-    todo_plan: openai/gpt-5.4-mini
+    commit: qwen/qwen3.6-flash
+    pr: qwen/qwen3.6-flash
+    compaction: qwen/qwen3.6-flash
+    todo_plan: qwen/qwen3.6-flash
 ```
 
 **Defaults:**
 
 | Field | Default |
 |-------|---------|
-| `planning` | `moonshotai/kimi-k2.5` |
-| `execution` | `moonshotai/kimi-k2.5` |
-| `review` | `moonshotai/kimi-k2.5` |
+| `planning` | `z-ai/glm-5.2` |
+| `execution` | `z-ai/glm-5.2` |
+| `review` | `z-ai/glm-5.2` |
 | `default_provider` | `openrouter` |
 | `reasoning` | `""` (auto-detect) |
-| `utility.commit` | `moonshotai/kimi-k2.5` |
-| `utility.pr` | `moonshotai/kimi-k2.5` |
-| `utility.compaction` | `moonshotai/kimi-k2.5` |
-| `utility.todo_plan` | `moonshotai/kimi-k2.5` |
+| `utility.commit` | `qwen/qwen3.6-flash` |
+| `utility.pr` | `qwen/qwen3.6-flash` |
+| `utility.compaction` | `qwen/qwen3.6-flash` |
+| `utility.todo_plan` | `qwen/qwen3.6-flash` |
 
 ### providers
 
@@ -571,8 +571,7 @@ compaction:
   target_reduction: 0.70
   preserve_commands: true
   models:
-    - deepseek/deepseek-chat
-    - openai/gpt-5.4-mini
+    - qwen/qwen3.6-flash
 ```
 
 ### ui

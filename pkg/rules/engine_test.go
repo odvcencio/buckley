@@ -530,44 +530,44 @@ func TestEngine_EvalStrategy_Routing_AllScenarios(t *testing.T) {
 		wantModel string
 	}{
 		{
-			name: "planning + reasoning supported: qwen max",
+			name: "planning + reasoning supported: glm",
 			facts: map[string]any{
 				"task":  map[string]any{"phase": "planning"},
 				"model": map[string]any{"supports_reasoning": true},
 			},
-			wantModel: "qwen/qwen3.6-max-preview",
+			wantModel: "z-ai/glm-5.2",
 		},
 		{
-			name: "execution phase: qwen max",
+			name: "execution phase: glm",
 			facts: map[string]any{
 				"task":  map[string]any{"phase": "execution"},
 				"model": map[string]any{"supports_reasoning": false},
 			},
-			wantModel: "qwen/qwen3.6-max-preview",
+			wantModel: "z-ai/glm-5.2",
 		},
 		{
-			name: "review + reasoning supported: qwen max",
+			name: "review + reasoning supported: glm",
 			facts: map[string]any{
 				"task":  map[string]any{"phase": "review"},
 				"model": map[string]any{"supports_reasoning": true},
 			},
-			wantModel: "qwen/qwen3.6-max-preview",
+			wantModel: "z-ai/glm-5.2",
 		},
 		{
-			name: "planning + no reasoning: default qwen max",
+			name: "planning + no reasoning: default glm",
 			facts: map[string]any{
 				"task":  map[string]any{"phase": "planning"},
 				"model": map[string]any{"supports_reasoning": false},
 			},
-			wantModel: "qwen/qwen3.6-max-preview",
+			wantModel: "z-ai/glm-5.2",
 		},
 		{
-			name: "unknown phase: default qwen max",
+			name: "unknown phase: default glm",
 			facts: map[string]any{
 				"task":  map[string]any{"phase": "unknown"},
 				"model": map[string]any{"supports_reasoning": true},
 			},
-			wantModel: "qwen/qwen3.6-max-preview",
+			wantModel: "z-ai/glm-5.2",
 		},
 	}
 

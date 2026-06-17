@@ -97,6 +97,9 @@ func InferModelTier(modelID string) string {
 		strings.Contains(lower, "o1"),
 		strings.Contains(lower, "o3"),
 		strings.Contains(lower, "gpt-5"),
+		strings.Contains(lower, "glm-5.2"),
+		strings.Contains(lower, "kimi-k2.7-code"),
+		strings.Contains(lower, "qwen3.7-max"),
 		strings.Contains(lower, "thinking"),
 		strings.Contains(lower, "pro"):
 		return "premium"

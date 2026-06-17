@@ -111,6 +111,15 @@ type StatusMsg struct {
 
 func (StatusMsg) isMessage() {}
 
+// ProcessStatusMsg starts, updates, or stops an animated status indicator.
+type ProcessStatusMsg struct {
+	Text         string
+	Active       bool
+	ResetElapsed bool
+}
+
+func (ProcessStatusMsg) isMessage() {}
+
 // TokensMsg updates token/cost display.
 type TokensMsg struct {
 	Tokens   int

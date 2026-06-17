@@ -16,7 +16,7 @@ import (
 	"m31labs.dev/buckley/pkg/storage"
 )
 
-func TestHeadlessQwenFlashMultiTurnConversation(t *testing.T) {
+func TestHeadlessXiaomiMiMoV25ProMultiTurnConversation(t *testing.T) {
 	cfg, err := config.Load()
 	if err != nil {
 		t.Fatalf("config.Load: %v", err)
@@ -25,9 +25,9 @@ func TestHeadlessQwenFlashMultiTurnConversation(t *testing.T) {
 		t.Skip("OpenRouter API key not configured in Buckley config or OPENROUTER_API_KEY")
 	}
 
-	modelID := strings.TrimSpace(os.Getenv("BUCKLEY_QWEN_FLASH_MODEL"))
+	modelID := strings.TrimSpace(os.Getenv("BUCKLEY_LIVE_TEST_MODEL"))
 	if modelID == "" {
-		modelID = "qwen/qwen3.6-flash"
+		modelID = "xiaomi/mimo-v2.5-pro"
 	}
 
 	cfg.Models.Execution = modelID
@@ -53,7 +53,7 @@ func TestHeadlessQwenFlashMultiTurnConversation(t *testing.T) {
 		_ = store.Close()
 	})
 
-	sessionID := "qwen-flash-multiturn"
+	sessionID := "xiaomi-mimo-v25-pro-multiturn"
 	now := time.Now()
 	if err := store.CreateSession(&storage.Session{
 		ID:         sessionID,
@@ -76,7 +76,7 @@ func TestHeadlessQwenFlashMultiTurnConversation(t *testing.T) {
 	}
 	t.Cleanup(runner.Stop)
 
-	marker := "qwen-flash-memory-marker-7319"
+	marker := "xiaomi-mimo-memory-marker-7319"
 	sendAndWaitForAssistant(t, runner, store, sessionID, 1, "Remember this marker for the next turn: "+marker+". Reply with only: stored")
 	sendAndWaitForAssistant(t, runner, store, sessionID, 2, "What marker did I ask you to remember? Reply with only the marker.")
 
@@ -100,7 +100,7 @@ func sendAndWaitForAssistant(t *testing.T, runner *headless.Runner, store *stora
 		t.Fatalf("HandleSessionCommand: %v", err)
 	}
 
-	deadline := time.Now().Add(90 * time.Second)
+	deadline := time.Now().Add(120 * time.Second)
 	for time.Now().Before(deadline) {
 		messages, err := store.GetAllMessages(sessionID)
 		if err != nil {

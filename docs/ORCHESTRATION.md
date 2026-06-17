@@ -98,7 +98,7 @@ buckley plans
 # .buckley/config.yaml
 orchestrator:
   planning_model: "anthropic/claude-sonnet-4-20250514"
-  execution_model: "moonshotai/kimi-k2.5"
+  execution_model: "z-ai/glm-5.2"
   review_model: "anthropic/claude-sonnet-4-20250514"
 
   # Self-healing retries

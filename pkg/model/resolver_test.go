@@ -43,25 +43,25 @@ func TestResolver_Resolve(t *testing.T) {
 		want    string
 	}{
 		{
-			name:    "planning phase with reasoning routes to qwen max via arbiter",
+			name:    "planning phase with reasoning routes to glm via arbiter",
 			engine:  engine,
 			checker: &stubReasoningChecker{models: map[string]bool{"config-planning-model": true}},
 			phase:   "planning",
-			want:    "qwen/qwen3.6-max-preview",
+			want:    "z-ai/glm-5.2",
 		},
 		{
-			name:    "execution phase routes to qwen max via arbiter",
+			name:    "execution phase routes to glm via arbiter",
 			engine:  engine,
 			checker: &stubReasoningChecker{},
 			phase:   "execution",
-			want:    "qwen/qwen3.6-max-preview",
+			want:    "z-ai/glm-5.2",
 		},
 		{
-			name:    "review phase with reasoning routes to qwen max via arbiter",
+			name:    "review phase with reasoning routes to glm via arbiter",
 			engine:  engine,
 			checker: &stubReasoningChecker{models: map[string]bool{"config-review-model": true}},
 			phase:   "review",
-			want:    "qwen/qwen3.6-max-preview",
+			want:    "z-ai/glm-5.2",
 		},
 		{
 			name:    "nil engine falls back to config planning",
@@ -92,11 +92,11 @@ func TestResolver_Resolve(t *testing.T) {
 			want:    "config-execution-model",
 		},
 		{
-			name:    "review without reasoning support routes to qwen max default via arbiter",
+			name:    "review without reasoning support routes to glm default via arbiter",
 			engine:  engine,
 			checker: &stubReasoningChecker{},
 			phase:   "review",
-			want:    "qwen/qwen3.6-max-preview",
+			want:    "z-ai/glm-5.2",
 		},
 	}
 

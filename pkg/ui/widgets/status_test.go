@@ -32,6 +32,9 @@ func TestStatusBar_SetStatus(t *testing.T) {
 	if sb.status != "Processing..." {
 		t.Errorf("expected 'Processing...', got '%s'", sb.status)
 	}
+	if sb.Status() != "Processing..." {
+		t.Errorf("expected Status() 'Processing...', got '%s'", sb.Status())
+	}
 }
 
 func TestStatusBar_SetStatus_Empty(t *testing.T) {
