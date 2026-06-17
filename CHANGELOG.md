@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-06-17
+
 ### Added
 - TUI chat now shows animated elapsed process indicators while waiting on model API calls and tool executions.
 
@@ -116,7 +118,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Telemetry is local-only by default.
 - Plugin discovery limited to local paths only.
 
-[Unreleased]: https://github.com/odvcencio/buckley/compare/v1.4.1...HEAD
+[Unreleased]: https://github.com/odvcencio/buckley/compare/v1.5.0...HEAD
+[1.5.0]: https://github.com/odvcencio/buckley/compare/v1.4.1...v1.5.0
 [1.4.1]: https://github.com/odvcencio/buckley/compare/v1.4.0...v1.4.1
 [1.4.0]: https://github.com/odvcencio/buckley/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/odvcencio/buckley/releases/tag/v1.3.0
