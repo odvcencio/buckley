@@ -17,9 +17,12 @@ import (
 )
 
 func TestHeadlessQwenFlashMultiTurnConversation(t *testing.T) {
-	apiKey := strings.TrimSpace(os.Getenv("OPENROUTER_API_KEY"))
-	if apiKey == "" {
-		t.Skip("OPENROUTER_API_KEY not set")
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+	if strings.TrimSpace(cfg.Providers.OpenRouter.APIKey) == "" {
+		t.Skip("OpenRouter API key not configured in Buckley config or OPENROUTER_API_KEY")
 	}
 
 	modelID := strings.TrimSpace(os.Getenv("BUCKLEY_QWEN_FLASH_MODEL"))
@@ -27,14 +30,12 @@ func TestHeadlessQwenFlashMultiTurnConversation(t *testing.T) {
 		modelID = "qwen/qwen3.6-flash"
 	}
 
-	cfg := config.DefaultConfig()
 	cfg.Models.Execution = modelID
 	cfg.Models.Planning = modelID
 	cfg.Models.Review = modelID
 	cfg.Models.DefaultProvider = "openrouter"
 	cfg.Models.Reasoning = "off"
 	cfg.Providers.OpenRouter.Enabled = true
-	cfg.Providers.OpenRouter.APIKey = apiKey
 
 	mgr, err := model.NewManager(cfg)
 	if err != nil {
