@@ -1225,7 +1225,13 @@ func wrapPlainLine(text string, width int, isCode bool) []WrappedLine {
 			}
 		}
 
-		lines = append(lines, WrappedLine{Text: string(runes[:end])})
+		segment := runes[:end]
+		if trimSpaces {
+			for len(segment) > 0 && segment[len(segment)-1] == ' ' {
+				segment = segment[:len(segment)-1]
+			}
+		}
+		lines = append(lines, WrappedLine{Text: string(segment)})
 		runes = runes[end:]
 
 		if trimSpaces {
@@ -1273,6 +1279,11 @@ func wrapStyledLine(text string, spans, prefix []Span, width int, isCode bool) [
 		}
 
 		segment := runes[:end]
+		if trimSpaces {
+			for len(segment) > 0 && segment[len(segment)-1].r == ' ' {
+				segment = segment[:len(segment)-1]
+			}
+		}
 		runes = runes[end:]
 
 		if trimSpaces {

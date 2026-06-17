@@ -1,12 +1,14 @@
 package widgets
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 
 	"m31labs.dev/fluffyui/backend"
 	"m31labs.dev/fluffyui/markdown"
 	"m31labs.dev/fluffyui/runtime"
+	"m31labs.dev/fluffyui/state"
 	"m31labs.dev/fluffyui/theme"
 )
 
@@ -91,5 +93,63 @@ func TestChatMessages_CodeHeaderClick(t *testing.T) {
 	}
 	if !strings.Contains(code, "fmt.Println") {
 		t.Fatalf("expected code content, got %q", code)
+	}
+}
+
+func TestChatMessages_StateTranscriptMatchesWrappedRows(t *testing.T) {
+	content := "2. God files are candidates for decomposition and the IPC server continues onto another visual row."
+	renderer := markdown.NewRenderer(theme.DefaultTheme())
+
+	direct := NewChatMessages()
+	direct.SetMessageMetadataMode("never")
+	direct.SetMarkdownRenderer(renderer, backend.DefaultStyle())
+	direct.AddMessage(content, "assistant")
+	direct.Layout(runtime.Rect{X: 0, Y: 0, Width: 38, Height: 10})
+	directRows := chatMessagesRows(direct, "assistant")
+	assertWrappedOrderedListRows(t, directRows, "▍ 2. ")
+
+	messages := state.NewSignal([]ChatMessage{{ID: 1, Content: content, Source: "assistant"}})
+	metadataMode := state.NewSignal("never")
+	synced := NewChatMessagesWithConfig(ChatMessagesConfig{
+		Messages:     messages,
+		MetadataMode: metadataMode,
+	})
+	synced.SetMarkdownRenderer(renderer, backend.DefaultStyle())
+	synced.syncFromMessages()
+	synced.Layout(runtime.Rect{X: 0, Y: 0, Width: 38, Height: 10})
+	syncedRows := chatMessagesRows(synced, "assistant")
+
+	if !reflect.DeepEqual(syncedRows, directRows) {
+		t.Fatalf("state transcript rows should match direct rows\nsynced: %#v\ndirect: %#v", syncedRows, directRows)
+	}
+}
+
+func chatMessagesRows(m *ChatMessages, source string) []string {
+	var rows []string
+	for _, line := range m.buffer.GetVisibleLines() {
+		if line.Source != source || strings.TrimSpace(line.Content) == "" {
+			continue
+		}
+		rows = append(rows, line.Content)
+	}
+	return rows
+}
+
+func assertWrappedOrderedListRows(t *testing.T, rows []string, firstPrefix string) {
+	t.Helper()
+	if len(rows) < 2 {
+		t.Fatalf("expected wrapped list rows, got %#v", rows)
+	}
+	if !strings.HasPrefix(rows[0], firstPrefix) {
+		t.Fatalf("first row should keep ordered-list prefix %q, got %q", firstPrefix, rows[0])
+	}
+	indent := strings.Repeat(" ", len([]rune(firstPrefix)))
+	for _, row := range rows[1:] {
+		if !strings.HasPrefix(row, indent) {
+			t.Fatalf("continuation row should preserve indent %q, got %q", indent, row)
+		}
+		if strings.HasPrefix(strings.TrimLeft(row, " "), "2.") {
+			t.Fatalf("continuation row should not repeat ordered-list marker, got %q", row)
+		}
 	}
 }

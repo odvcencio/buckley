@@ -4,10 +4,10 @@ import (
 	"fmt"
 	"strings"
 
-	"m31labs.dev/buckley/pkg/ui/compositor"
-	"m31labs.dev/buckley/pkg/ui/theme"
 	"github.com/yuin/goldmark/ast"
 	extast "github.com/yuin/goldmark/extension/ast"
+	"m31labs.dev/buckley/pkg/ui/compositor"
+	"m31labs.dev/buckley/pkg/ui/theme"
 )
 
 // Renderer turns markdown into styled lines for the TUI.
@@ -179,6 +179,13 @@ func (s *renderState) withBaseStyle(base compositor.Style, fn func()) {
 func (r *Renderer) renderBlock(node ast.Node, state *renderState, tight bool) {
 	switch n := node.(type) {
 	case *ast.Paragraph:
+		r.renderInlineChildren(n, state, state.baseStyle)
+		state.flushLine(false, false, "")
+		if !tight {
+			state.addSpacer()
+		}
+
+	case *ast.TextBlock:
 		r.renderInlineChildren(n, state, state.baseStyle)
 		state.flushLine(false, false, "")
 		if !tight {

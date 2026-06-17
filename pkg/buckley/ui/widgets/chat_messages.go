@@ -229,6 +229,13 @@ func (m *ChatMessages) SetMarkdownRenderer(renderer *markdown.Renderer, codeBloc
 	}
 	m.mdRenderer = renderer
 	m.codeBlockBG = codeBlockBG
+	if m.transcript != nil && m.messagesSig != nil {
+		messages := m.messagesSig.Get()
+		m.transcript.rebuildFromMessages(messages, m, thinkingLineStyle(m.thinkingStyle))
+		m.transcript.lastMessages = cloneMessages(messages)
+		m.syncThinking()
+		m.requestInvalidate()
+	}
 }
 
 // SetMetadataStyle configures the metadata line style.

@@ -1,11 +1,15 @@
 package widgets
 
 import (
+	"reflect"
+	"strings"
 	"testing"
 
 	"m31labs.dev/buckley/pkg/ui/backend"
+	"m31labs.dev/buckley/pkg/ui/markdown"
 	"m31labs.dev/buckley/pkg/ui/runtime"
 	"m31labs.dev/buckley/pkg/ui/terminal"
+	"m31labs.dev/buckley/pkg/ui/theme"
 )
 
 func TestNewChatView(t *testing.T) {
@@ -451,6 +455,80 @@ func TestChatView_Render_WithScrollbar(t *testing.T) {
 	if cell.Rune != '█' && cell.Rune != '░' {
 		// Scrollbar might not be visible depending on scroll position
 		// This is fine - the test confirms no panic
+	}
+}
+
+func TestChatView_MarkdownWrappedListTranscriptMatchesRender(t *testing.T) {
+	cv := NewChatView()
+	cv.SetMarkdownRenderer(markdown.NewRenderer(theme.DefaultTheme()), backend.DefaultStyle())
+	cv.Layout(runtime.Rect{X: 0, Y: 0, Width: 34, Height: 10})
+
+	cv.AddMessage("1. God files are candidates for decomposition and the IPC server continues onto another visual row.", "assistant")
+
+	transcriptRows := chatViewRows(cv, "assistant")
+	if len(transcriptRows) == 0 {
+		t.Fatalf("expected assistant rows, got visible lines %#v", cv.buffer.GetVisibleLines())
+	}
+	assertWrappedOrderedListRows(t, transcriptRows, "1. ")
+
+	buf := runtime.NewBuffer(34, 10)
+	buf.Clear()
+	cv.Render(runtime.RenderContext{Buffer: buf})
+	renderedRows := renderedBufferRows(buf)
+
+	if !reflect.DeepEqual(renderedRows, transcriptRows) {
+		t.Fatalf("rendered rows should match transcript rows\nrendered:   %#v\ntranscript: %#v", renderedRows, transcriptRows)
+	}
+}
+
+func chatViewRows(cv *ChatView, source string) []string {
+	var rows []string
+	for _, line := range cv.buffer.GetVisibleLines() {
+		if line.Source != source || strings.TrimSpace(line.Content) == "" {
+			continue
+		}
+		rows = append(rows, line.Content)
+	}
+	return rows
+}
+
+func renderedBufferRows(buf *runtime.Buffer) []string {
+	width, height := buf.Size()
+	rows := make([]string, 0, height)
+	for y := 0; y < height; y++ {
+		var b strings.Builder
+		for x := 0; x < width-1; x++ {
+			r := buf.Get(x, y).Rune
+			if r == 0 {
+				r = ' '
+			}
+			b.WriteRune(r)
+		}
+		row := strings.TrimRight(b.String(), " ")
+		if strings.TrimSpace(row) != "" {
+			rows = append(rows, row)
+		}
+	}
+	return rows
+}
+
+func assertWrappedOrderedListRows(t *testing.T, rows []string, firstPrefix string) {
+	t.Helper()
+	if len(rows) < 2 {
+		t.Fatalf("expected wrapped list rows, got %#v", rows)
+	}
+	if !strings.HasPrefix(rows[0], firstPrefix) {
+		t.Fatalf("first row should keep ordered-list prefix %q, got %q", firstPrefix, rows[0])
+	}
+	marker := strings.TrimSpace(firstPrefix)
+	indent := strings.Repeat(" ", len([]rune(firstPrefix)))
+	for _, row := range rows[1:] {
+		if !strings.HasPrefix(row, indent) {
+			t.Fatalf("continuation row should preserve indent %q, got %q", indent, row)
+		}
+		if strings.HasPrefix(strings.TrimLeft(row, " "), marker) {
+			t.Fatalf("continuation row should not repeat ordered-list marker, got %q", row)
+		}
 	}
 }
 

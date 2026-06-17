@@ -49,6 +49,20 @@ func TestRenderer_RenderCodeBlock(t *testing.T) {
 	}
 }
 
+func TestRenderer_RenderOrderedListItem(t *testing.T) {
+	r := NewRenderer(theme.DefaultTheme())
+	lines := r.Render("assistant", "1. God files are candidates for decomposition")
+	if len(lines) == 0 {
+		t.Fatal("expected ordered list line")
+	}
+	if got := spansText(lines[0].Prefix); got != "1. " {
+		t.Fatalf("prefix = %q, want %q", got, "1. ")
+	}
+	if got := spansText(lines[0].Spans); got != "God files are candidates for decomposition" {
+		t.Fatalf("content = %q", got)
+	}
+}
+
 func spansText(spans []StyledSpan) string {
 	var b strings.Builder
 	for _, span := range spans {
