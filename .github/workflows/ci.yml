@@ -127,18 +127,8 @@ jobs:
           go-version: '1.25'
           cache: true
 
-      - name: Cross-compile release targets
+      - name: Build CLI
         run: |
           set -euo pipefail
           mkdir -p dist/check-builds
-          while read -r goos goarch ext; do
-            echo "building ${goos}/${goarch}"
-            CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \
-              go build -o "dist/check-builds/buckley-${goos}-${goarch}${ext}" ./cmd/buckley
-          done <<'TARGETS'
-          linux amd64
-          linux arm64
-          darwin amd64
-          darwin arm64
-          windows amd64 .exe
-          TARGETS
+          CGO_ENABLED=0 go build -o dist/check-builds/buckley ./cmd/buckley
