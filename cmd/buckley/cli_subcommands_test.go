@@ -129,6 +129,29 @@ func TestParseAgentRunArgs(t *testing.T) {
 		t.Fatalf("unexpected flag opts: %+v", opts)
 	}
 
+	opts, err = parseAgentRunArgs([]string{"--subagent", "probe", "--no-tools", "agent.yaml", "answer", "directly"})
+	if err != nil {
+		t.Fatalf("parseAgentRunArgs no-tools form: %v", err)
+	}
+	if opts.toolTier != "none" || opts.task != "answer directly" {
+		t.Fatalf("unexpected no-tools opts: %+v", opts)
+	}
+
+	opts, err = parseAgentRunArgs([]string{"--tool-tier", "read_only", "agent.yaml", "reviewer", "inspect"})
+	if err != nil {
+		t.Fatalf("parseAgentRunArgs tool-tier form: %v", err)
+	}
+	if opts.toolTier != "read_only" {
+		t.Fatalf("toolTier=%q want read_only", opts.toolTier)
+	}
+
+	if _, err := parseAgentRunArgs([]string{"--tool-tier", "root", "agent.yaml", "reviewer", "inspect"}); err == nil {
+		t.Fatalf("expected invalid tool-tier error")
+	}
+	if _, err := parseAgentRunArgs([]string{"--no-tools", "--tool-tier", "full", "agent.yaml", "reviewer", "inspect"}); err == nil {
+		t.Fatalf("expected conflicting tool flags error")
+	}
+
 	if _, err := parseAgentRunArgs([]string{"agent.yaml", "reviewer"}); err == nil {
 		t.Fatalf("expected usage error for missing task")
 	}

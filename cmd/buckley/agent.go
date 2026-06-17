@@ -51,6 +51,7 @@ type agentRunOptions struct {
 	subagent  string
 	task      string
 	model     string
+	toolTier  string
 }
 
 func runAgentRun(args []string) error {
@@ -66,6 +67,9 @@ func runAgentRun(args []string) error {
 	subProfile, err := profile.SubagentProfile(opts.subagent)
 	if err != nil {
 		return err
+	}
+	if opts.toolTier != "" {
+		subProfile.Spec.Tools.Tier = opts.toolTier
 	}
 
 	cfg, mgr, store, err := initDependenciesFn()
@@ -106,6 +110,8 @@ func parseAgentRunArgs(args []string) (agentRunOptions, error) {
 	fs.SetOutput(os.Stderr)
 	subagent := fs.String("subagent", "", "subagent name from the agent spec")
 	modelID := fs.String("model", "", "override model for this subagent task")
+	toolTier := fs.String("tool-tier", "", "override tool tier: none, read_only, standard, or full")
+	noTools := fs.Bool("no-tools", false, "run without tools")
 	if err := fs.Parse(args); err != nil {
 		return agentRunOptions{}, err
 	}
@@ -114,6 +120,16 @@ func parseAgentRunArgs(args []string) (agentRunOptions, error) {
 	opts := agentRunOptions{
 		subagent: strings.TrimSpace(*subagent),
 		model:    strings.TrimSpace(*modelID),
+		toolTier: strings.TrimSpace(*toolTier),
+	}
+	if *noTools {
+		if opts.toolTier != "" && opts.toolTier != "none" {
+			return agentRunOptions{}, fmt.Errorf("--no-tools conflicts with --tool-tier %s", opts.toolTier)
+		}
+		opts.toolTier = "none"
+	}
+	if opts.toolTier != "" && !validAgentRunToolTier(opts.toolTier) {
+		return agentRunOptions{}, fmt.Errorf("tool tier must be none, read_only, standard, or full")
 	}
 	if opts.subagent != "" {
 		if len(rest) < 2 {
@@ -139,6 +155,15 @@ func parseAgentRunArgs(args []string) (agentRunOptions, error) {
 		return agentRunOptions{}, fmt.Errorf("subagent task is required")
 	}
 	return opts, nil
+}
+
+func validAgentRunToolTier(tier string) bool {
+	switch strings.TrimSpace(tier) {
+	case "none", "read_only", "standard", "full":
+		return true
+	default:
+		return false
+	}
 }
 
 func formatSubagentTask(subagent, task string) string {
