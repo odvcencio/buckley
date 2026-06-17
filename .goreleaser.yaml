@@ -64,6 +64,7 @@ nfpms:
 
 homebrew_casks:
   - name: buckley
+    skip_upload: true
     ids:
       - default
     binaries:
@@ -81,6 +82,7 @@ homebrew_casks:
 
 scoops:
   - name: buckley
+    skip_upload: true
     repository:
       owner: odvcencio
       name: buckley

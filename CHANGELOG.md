@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.1] - 2026-06-17
+
+### Fixed
+- Release workflow now keeps generated Homebrew Cask and Scoop manifests in the GoReleaser `dist` output instead of trying to push them directly to protected `main`.
+
 ## [1.4.0] - 2026-06-17
 
 ### Added
@@ -103,7 +108,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Telemetry is local-only by default.
 - Plugin discovery limited to local paths only.
 
-[Unreleased]: https://github.com/odvcencio/buckley/compare/v1.4.0...HEAD
+[Unreleased]: https://github.com/odvcencio/buckley/compare/v1.4.1...HEAD
+[1.4.1]: https://github.com/odvcencio/buckley/compare/v1.4.0...v1.4.1
 [1.4.0]: https://github.com/odvcencio/buckley/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/odvcencio/buckley/releases/tag/v1.3.0
 [1.2.0]: https://github.com/odvcencio/buckley/releases/tag/v1.2.0
