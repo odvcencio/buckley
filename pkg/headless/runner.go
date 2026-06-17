@@ -586,6 +586,7 @@ func (r *Runner) handleToolCalls(ctx context.Context, msg model.Message) error {
 	toolCalls := msg.ToolCalls
 	// Add the tool call message to conversation
 	r.conv.AddToolCallMessageWithReasoning(toolCalls, msg.Reasoning, msg.ReasoningDetails)
+	r.persistLatestConversationMessage()
 
 	for _, tc := range toolCalls {
 		decision := "auto"
@@ -615,6 +616,7 @@ func (r *Runner) handleToolCalls(ctx context.Context, msg model.Message) error {
 				message := "Tool execution denied: interactive shell sessions are not supported in headless mode"
 				decision = "rejected"
 				r.conv.AddToolResponseMessage(tc.ID, tc.Function.Name, message)
+				r.persistLatestConversationMessage()
 				r.emit(RunnerEvent{
 					Type:      EventToolCallComplete,
 					SessionID: r.sessionID,
@@ -665,6 +667,7 @@ func (r *Runner) handleToolCalls(ctx context.Context, msg model.Message) error {
 				message := "Tool execution rejected by user"
 				decision = "rejected"
 				r.conv.AddToolResponseMessage(tc.ID, tc.Function.Name, message)
+				r.persistLatestConversationMessage()
 				r.emit(RunnerEvent{
 					Type:      EventToolCallComplete,
 					SessionID: r.sessionID,
@@ -722,6 +725,7 @@ func (r *Runner) handleToolCalls(ctx context.Context, msg model.Message) error {
 			auditEntry.ToolOutput = errorResult
 
 			r.conv.AddToolResponseMessage(tc.ID, tc.Function.Name, errorResult)
+			r.persistLatestConversationMessage()
 			r.emit(RunnerEvent{
 				Type:      EventToolCallComplete,
 				SessionID: r.sessionID,
@@ -746,6 +750,7 @@ func (r *Runner) handleToolCalls(ctx context.Context, msg model.Message) error {
 		auditEntry.ToolOutput = truncateOutput(resultContent, 10000)
 
 		r.conv.AddToolResponseMessage(tc.ID, tc.Function.Name, resultContent)
+		r.persistLatestConversationMessage()
 
 		r.emit(RunnerEvent{
 			Type:      EventToolCallComplete,
@@ -1168,6 +1173,16 @@ func (r *Runner) persistSystemMessage(content string) error {
 		return err
 	}
 	return nil
+}
+
+func (r *Runner) persistLatestConversationMessage() {
+	if r == nil || r.conv == nil || r.store == nil || len(r.conv.Messages) == 0 {
+		return
+	}
+	msg := r.conv.Messages[len(r.conv.Messages)-1]
+	if err := r.conv.SaveMessage(r.store, msg); err != nil {
+		r.emitError("failed to save conversation message", err)
+	}
 }
 
 func (r *Runner) ensureOrchestrator() (*orchestrator.Orchestrator, *orchestrator.WorkflowManager, error) {

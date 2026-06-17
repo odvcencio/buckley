@@ -8,6 +8,8 @@ import (
 	"m31labs.dev/buckley/pkg/conversation"
 	"m31labs.dev/buckley/pkg/model"
 	"m31labs.dev/buckley/pkg/storage"
+	"m31labs.dev/buckley/pkg/tool"
+	"m31labs.dev/buckley/pkg/tool/builtin"
 )
 
 // mockEmitter captures events for testing.
@@ -17,6 +19,33 @@ type mockEmitter struct {
 
 func (m *mockEmitter) Emit(event RunnerEvent) {
 	m.events = append(m.events, event)
+}
+
+type fakeEchoTool struct{}
+
+func (fakeEchoTool) Name() string { return "echo_tool" }
+
+func (fakeEchoTool) Description() string { return "returns the provided text" }
+
+func (fakeEchoTool) Parameters() builtin.ParameterSchema {
+	return builtin.ParameterSchema{
+		Type: "object",
+		Properties: map[string]builtin.PropertySchema{
+			"text": {Type: "string", Description: "text to echo"},
+		},
+		Required: []string{"text"},
+	}
+}
+
+func (fakeEchoTool) Execute(params map[string]any) (*builtin.Result, error) {
+	text, _ := params["text"].(string)
+	return &builtin.Result{
+		Success: true,
+		Data:    map[string]any{"text": text},
+		DisplayData: map[string]any{
+			"message": text,
+		},
+	}, nil
 }
 
 func TestRunnerStateTransitions(t *testing.T) {
@@ -415,6 +444,74 @@ func TestHandleToolCallsLogsAuditDecisionMetadata(t *testing.T) {
 	}
 	if entry.RiskScore != 42 {
 		t.Fatalf("riskScore=%d want 42", entry.RiskScore)
+	}
+}
+
+func TestHandleToolCallsPersistsModelVisibleToolTurns(t *testing.T) {
+	store, err := storage.New(t.TempDir() + "/buckley.db")
+	if err != nil {
+		t.Fatalf("storage.New: %v", err)
+	}
+	defer store.Close()
+
+	now := time.Now()
+	if err := store.CreateSession(&storage.Session{
+		ID:         "s1",
+		CreatedAt:  now,
+		LastActive: now,
+		Status:     storage.SessionStatusActive,
+	}); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	registry := tool.NewEmptyRegistry()
+	registry.Register(fakeEchoTool{})
+	runner := &Runner{
+		sessionID: "s1",
+		session:   &storage.Session{ID: "s1"},
+		conv:      conversation.New("s1"),
+		store:     store,
+		tools:     registry,
+	}
+
+	msg := model.Message{
+		Reasoning: "Need to call echo_tool so the next turn sees the result.",
+		ToolCalls: []model.ToolCall{{
+			ID:   "tc1",
+			Type: "function",
+			Function: model.FunctionCall{
+				Name:      "echo_tool",
+				Arguments: `{"text":"hello from tool"}`,
+			},
+		}},
+	}
+	if err := runner.handleToolCalls(context.Background(), msg); err != nil {
+		t.Fatalf("handleToolCalls: %v", err)
+	}
+
+	loaded := conversation.New("s1")
+	if err := loaded.LoadFromStorage(store); err != nil {
+		t.Fatalf("LoadFromStorage: %v", err)
+	}
+	if len(loaded.Messages) != 2 {
+		t.Fatalf("expected assistant tool call and tool response, got %d messages: %+v", len(loaded.Messages), loaded.Messages)
+	}
+	if loaded.Messages[0].Role != "assistant" || len(loaded.Messages[0].ToolCalls) != 1 {
+		t.Fatalf("expected persisted assistant tool-call message, got %+v", loaded.Messages[0])
+	}
+	if loaded.Messages[1].Role != "tool" || loaded.Messages[1].ToolCallID != "tc1" || loaded.Messages[1].Name != "echo_tool" {
+		t.Fatalf("expected persisted tool response metadata, got %+v", loaded.Messages[1])
+	}
+
+	modelMsgs := loaded.ToModelMessages()
+	if len(modelMsgs) != 2 {
+		t.Fatalf("expected 2 model messages, got %d", len(modelMsgs))
+	}
+	if len(modelMsgs[0].ToolCalls) != 1 || modelMsgs[0].ToolCalls[0].ID != "tc1" {
+		t.Fatalf("assistant tool call missing after reload: %+v", modelMsgs[0])
+	}
+	if modelMsgs[1].ToolCallID != "tc1" || modelMsgs[1].Name != "echo_tool" {
+		t.Fatalf("tool response missing correlation metadata after reload: %+v", modelMsgs[1])
 	}
 }
 

@@ -911,7 +911,7 @@ func (c *Controller) streamResponse(ctx context.Context, prompt string, sess *Se
 
 	// Add user message to session's conversation and persist
 	sess.Conversation.AddUserMessage(prompt)
-	c.saveMessage(sess.ID, "user", prompt)
+	c.saveLatestConversationMessage(sess)
 
 	modelID := model.ResolvePhaseModel(c.cfg, c.modelMgr, c.rulesEngine, "execution", "")
 	if modelID == "" {
@@ -1036,7 +1036,7 @@ func (c *Controller) runToolLoop(ctx context.Context, sess *SessionState, modelI
 				text = msg.Reasoning
 			}
 			sess.Conversation.AddAssistantMessageWithReasoningDetails(text, msg.Reasoning, msg.ReasoningDetails)
-			c.saveMessageWithReasoning(sess.ID, "assistant", text, msg.Reasoning, msg.ReasoningDetails)
+			c.saveLatestConversationMessage(sess)
 			return text, &totalUsage, nil
 		}
 
@@ -1049,22 +1049,26 @@ func (c *Controller) runToolLoop(ctx context.Context, sess *SessionState, modelI
 			}
 		}
 		sess.Conversation.AddToolCallMessageWithReasoning(msg.ToolCalls, msg.Reasoning, msg.ReasoningDetails)
+		c.saveLatestConversationMessage(sess)
 
 		for _, tc := range msg.ToolCalls {
 			params, err := parseToolParams(tc.Function.Arguments)
 			if err != nil {
 				toolText := fmt.Sprintf("Error: invalid tool arguments: %v", err)
 				sess.Conversation.AddToolResponseMessage(tc.ID, tc.Function.Name, toolText)
+				c.saveLatestConversationMessage(sess)
 				continue
 			}
 			if sess.ToolRegistry == nil {
 				toolText := "Error: tool registry unavailable"
 				sess.Conversation.AddToolResponseMessage(tc.ID, tc.Function.Name, toolText)
+				c.saveLatestConversationMessage(sess)
 				continue
 			}
 			if !tool.IsToolAllowed(tc.Function.Name, allowedTools) {
 				toolText := fmt.Sprintf("Error: tool %s not allowed by active skills", tc.Function.Name)
 				sess.Conversation.AddToolResponseMessage(tc.ID, tc.Function.Name, toolText)
+				c.saveLatestConversationMessage(sess)
 				continue
 			}
 			if params == nil {
@@ -1077,6 +1081,7 @@ func (c *Controller) runToolLoop(ctx context.Context, sess *SessionState, modelI
 			result, execErr := sess.ToolRegistry.Execute(tc.Function.Name, params)
 			toolText := formatToolResultForModel(result, execErr)
 			sess.Conversation.AddToolResponseMessage(tc.ID, tc.Function.Name, toolText)
+			c.saveLatestConversationMessage(sess)
 
 			if display := toolDisplayMessage(tc.Function.Name, result, execErr); display != "" {
 				c.app.AddMessage(display, "system")
@@ -1425,30 +1430,18 @@ func (c *Controller) Stop() {
 	c.app.Quit()
 }
 
-// saveMessage persists a message to storage.
-func (c *Controller) saveMessage(sessionID, role, content string) {
-	c.saveMessageWithReasoning(sessionID, role, content, "", nil)
-}
-
-func (c *Controller) saveMessageWithReasoning(sessionID, role, content, reasoning string, details []model.ReasoningDetail) {
-	if c.store == nil {
+// saveLatestConversationMessage persists the newest model-visible turn for a session.
+func (c *Controller) saveLatestConversationMessage(sess *SessionState) {
+	if c == nil || c.store == nil || sess == nil || sess.Conversation == nil {
 		return
 	}
-	reasoningDetails := ""
-	if len(details) > 0 {
-		if data, err := json.Marshal(details); err == nil {
-			reasoningDetails = string(data)
-		}
+	if len(sess.Conversation.Messages) == 0 {
+		return
 	}
-	msg := &storage.Message{
-		SessionID:        sessionID,
-		Role:             role,
-		Content:          content,
-		Reasoning:        reasoning,
-		ReasoningDetails: reasoningDetails,
-		Timestamp:        time.Now(),
+	msg := sess.Conversation.Messages[len(sess.Conversation.Messages)-1]
+	if err := sess.Conversation.SaveMessage(c.store, msg); err != nil {
+		c.app.AddMessage("Error saving chat turn: "+err.Error(), "system")
 	}
-	_ = c.store.SaveMessage(msg) // Ignore errors for now
 }
 
 // handleReview reviews the current git diff in conversation.

@@ -149,6 +149,7 @@ func TestBuildBranchPrompt(t *testing.T) {
 		RepoRoot:   "/home/user/project",
 		Branch:     "feature/new-feature",
 		BaseBranch: "main",
+		Scope:      ReviewScopeBranch,
 		Files: []FileChange{
 			{Status: "M", Path: "file1.go"},
 			{Status: "A", Path: "file2.go"},
@@ -168,6 +169,8 @@ func TestBuildBranchPrompt(t *testing.T) {
 	assert.Contains(t, prompt, "/home/user/project")
 	assert.Contains(t, prompt, "feature/new-feature")
 	assert.Contains(t, prompt, "main")
+	assert.Contains(t, prompt, "Review Scope")
+	assert.Contains(t, prompt, ReviewScopeBranch)
 	assert.Contains(t, prompt, "Files Changed")
 	assert.Contains(t, prompt, "2 files, +50/-10 lines")
 	assert.Contains(t, prompt, "file1.go")
@@ -175,6 +178,41 @@ func TestBuildBranchPrompt(t *testing.T) {
 	assert.Contains(t, prompt, "Full Diff")
 	assert.Contains(t, prompt, "Commits on this Branch")
 	assert.Contains(t, prompt, "abc123 Some commit")
+}
+
+func TestNormalizeReviewScope(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"", ReviewScopeWorktree},
+		{"worktree", ReviewScopeWorktree},
+		{"branch", ReviewScopeBranch},
+		{"commits", ReviewScopeBranch},
+		{"changes", ReviewScopeChanges},
+		{"local", ReviewScopeChanges},
+		{"unknown", ReviewScopeWorktree},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			assert.Equal(t, tt.want, normalizeReviewScope(tt.input))
+		})
+	}
+}
+
+func TestMergeFileChangesDedupes(t *testing.T) {
+	base := []FileChange{{Status: "M", Path: "a.go"}}
+	extra := []FileChange{
+		{Status: "M", Path: "a.go"},
+		{Status: "A", Path: "b.go"},
+	}
+
+	got := mergeFileChanges(base, extra)
+	assert.Equal(t, []FileChange{
+		{Status: "M", Path: "a.go"},
+		{Status: "A", Path: "b.go"},
+	}, got)
 }
 
 func TestBuildBranchPrompt_WithUnstaged(t *testing.T) {

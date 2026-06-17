@@ -29,7 +29,7 @@ func (s *Store) GetMessagesWithEmbeddings(ctx context.Context, sessionID string)
 		return nil, nil
 	}
 	query := `
-		SELECT id, session_id, role, content, content_json, content_type, reasoning, reasoning_details, timestamp, tokens, is_summary, COALESCE(is_truncated, FALSE), embedding
+		SELECT id, session_id, role, content, content_json, content_type, tool_calls, tool_call_id, name, reasoning, reasoning_details, timestamp, tokens, is_summary, COALESCE(is_truncated, FALSE), embedding
 		FROM messages
 		WHERE session_id = ? AND embedding IS NOT NULL
 		ORDER BY timestamp ASC
@@ -45,6 +45,9 @@ func (s *Store) GetMessagesWithEmbeddings(ctx context.Context, sessionID string)
 		var msg Message
 		var contentJSON sql.NullString
 		var contentType sql.NullString
+		var toolCalls sql.NullString
+		var toolCallID sql.NullString
+		var name sql.NullString
 		var reasoning sql.NullString
 		var reasoningDetails sql.NullString
 		var embedding []byte
@@ -55,6 +58,9 @@ func (s *Store) GetMessagesWithEmbeddings(ctx context.Context, sessionID string)
 			&msg.Content,
 			&contentJSON,
 			&contentType,
+			&toolCalls,
+			&toolCallID,
+			&name,
 			&reasoning,
 			&reasoningDetails,
 			&msg.Timestamp,
@@ -67,6 +73,9 @@ func (s *Store) GetMessagesWithEmbeddings(ctx context.Context, sessionID string)
 		}
 		msg.ContentJSON = contentJSON.String
 		msg.ContentType = defaultContentType(contentType.String)
+		msg.ToolCalls = toolCalls.String
+		msg.ToolCallID = toolCallID.String
+		msg.Name = name.String
 		msg.Reasoning = reasoning.String
 		msg.ReasoningDetails = reasoningDetails.String
 		msg.Embedding = embedding
@@ -89,7 +98,7 @@ func (s *Store) GetMessagesMissingEmbeddings(ctx context.Context, sessionID stri
 		limit = 200
 	}
 	query := `
-		SELECT id, session_id, role, content, content_json, content_type, reasoning, reasoning_details, timestamp, tokens, is_summary, COALESCE(is_truncated, FALSE)
+		SELECT id, session_id, role, content, content_json, content_type, tool_calls, tool_call_id, name, reasoning, reasoning_details, timestamp, tokens, is_summary, COALESCE(is_truncated, FALSE)
 		FROM messages
 		WHERE session_id = ? AND embedding IS NULL
 		ORDER BY timestamp ASC
@@ -106,6 +115,9 @@ func (s *Store) GetMessagesMissingEmbeddings(ctx context.Context, sessionID stri
 		var msg Message
 		var contentJSON sql.NullString
 		var contentType sql.NullString
+		var toolCalls sql.NullString
+		var toolCallID sql.NullString
+		var name sql.NullString
 		var reasoning sql.NullString
 		var reasoningDetails sql.NullString
 		if err := rows.Scan(
@@ -115,6 +127,9 @@ func (s *Store) GetMessagesMissingEmbeddings(ctx context.Context, sessionID stri
 			&msg.Content,
 			&contentJSON,
 			&contentType,
+			&toolCalls,
+			&toolCallID,
+			&name,
 			&reasoning,
 			&reasoningDetails,
 			&msg.Timestamp,
@@ -126,6 +141,9 @@ func (s *Store) GetMessagesMissingEmbeddings(ctx context.Context, sessionID stri
 		}
 		msg.ContentJSON = contentJSON.String
 		msg.ContentType = defaultContentType(contentType.String)
+		msg.ToolCalls = toolCalls.String
+		msg.ToolCallID = toolCallID.String
+		msg.Name = name.String
 		msg.Reasoning = reasoning.String
 		msg.ReasoningDetails = reasoningDetails.String
 		messages = append(messages, msg)
@@ -149,7 +167,7 @@ func (s *Store) SearchMessagesFTS(ctx context.Context, query, sessionID string, 
 	sessionID = strings.TrimSpace(sessionID)
 
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT m.id, m.session_id, m.role, m.content, m.content_json, m.content_type, m.reasoning, m.reasoning_details, m.timestamp, m.tokens, m.is_summary, COALESCE(m.is_truncated, FALSE),
+		SELECT m.id, m.session_id, m.role, m.content, m.content_json, m.content_type, m.tool_calls, m.tool_call_id, m.name, m.reasoning, m.reasoning_details, m.timestamp, m.tokens, m.is_summary, COALESCE(m.is_truncated, FALSE),
 			snippet(messages_fts, 0, '', '', '...', 12) AS snippet,
 			bm25(messages_fts) AS rank
 		FROM messages_fts
@@ -169,6 +187,9 @@ func (s *Store) SearchMessagesFTS(ctx context.Context, query, sessionID string, 
 		var msg Message
 		var contentJSON sql.NullString
 		var contentType sql.NullString
+		var toolCalls sql.NullString
+		var toolCallID sql.NullString
+		var name sql.NullString
 		var reasoning sql.NullString
 		var reasoningDetails sql.NullString
 		var snippet sql.NullString
@@ -180,6 +201,9 @@ func (s *Store) SearchMessagesFTS(ctx context.Context, query, sessionID string, 
 			&msg.Content,
 			&contentJSON,
 			&contentType,
+			&toolCalls,
+			&toolCallID,
+			&name,
 			&reasoning,
 			&reasoningDetails,
 			&msg.Timestamp,
@@ -193,6 +217,9 @@ func (s *Store) SearchMessagesFTS(ctx context.Context, query, sessionID string, 
 		}
 		msg.ContentJSON = contentJSON.String
 		msg.ContentType = defaultContentType(contentType.String)
+		msg.ToolCalls = toolCalls.String
+		msg.ToolCallID = toolCallID.String
+		msg.Name = name.String
 		msg.Reasoning = reasoning.String
 		msg.ReasoningDetails = reasoningDetails.String
 		score := ftsScore(rank)

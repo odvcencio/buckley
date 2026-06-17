@@ -176,6 +176,7 @@ var migrations = []Migration{
 	{9, "rlm_scratchpad_entries", ensureScratchpadSchema},
 	{10, "messages_search", ensureMessagesSearchSchema},
 	{11, "memories_project_path", ensureMemoriesSchema},
+	{12, "message_tool_turns", ensureMessagesSchema},
 }
 
 // runMigrations runs the schema migrations with version tracking
@@ -240,6 +241,11 @@ func runPreSchemaMigrations(db *sql.DB) error {
 	if tableExists(db, "memories") {
 		if err := ensureMemoriesSchema(db); err != nil {
 			return fmt.Errorf("ensure memories schema: %w", err)
+		}
+	}
+	if tableExists(db, "messages") {
+		if err := ensureMessagesSchema(db); err != nil {
+			return fmt.Errorf("ensure messages schema: %w", err)
 		}
 	}
 
@@ -454,6 +460,21 @@ func ensureMessagesSchema(db *sql.DB) error {
 	if !cols["content_type"] {
 		if _, err := db.Exec(`ALTER TABLE messages ADD COLUMN content_type TEXT NOT NULL DEFAULT 'text'`); err != nil {
 			return fmt.Errorf("add messages.content_type: %w", err)
+		}
+	}
+	if !cols["tool_calls"] {
+		if _, err := db.Exec(`ALTER TABLE messages ADD COLUMN tool_calls TEXT`); err != nil {
+			return fmt.Errorf("add messages.tool_calls: %w", err)
+		}
+	}
+	if !cols["tool_call_id"] {
+		if _, err := db.Exec(`ALTER TABLE messages ADD COLUMN tool_call_id TEXT`); err != nil {
+			return fmt.Errorf("add messages.tool_call_id: %w", err)
+		}
+	}
+	if !cols["name"] {
+		if _, err := db.Exec(`ALTER TABLE messages ADD COLUMN name TEXT`); err != nil {
+			return fmt.Errorf("add messages.name: %w", err)
 		}
 	}
 	if !cols["reasoning"] {

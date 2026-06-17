@@ -243,6 +243,69 @@ func TestConversationStoragePreservesReasoningDetails(t *testing.T) {
 	}
 }
 
+func TestConversationStoragePreservesToolTurns(t *testing.T) {
+	dir := t.TempDir()
+	store, err := storage.New(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatalf("storage.New: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = store.Close()
+	})
+
+	sessionID := "session-tool-turns"
+	if err := store.CreateSession(&storage.Session{
+		ID:         sessionID,
+		CreatedAt:  time.Now(),
+		LastActive: time.Now(),
+		Status:     storage.SessionStatusActive,
+	}); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	toolCalls := []model.ToolCall{{
+		ID:   "call_123",
+		Type: "function",
+		Function: model.FunctionCall{
+			Name:      "read_file",
+			Arguments: `{"path":"README.md"}`,
+		},
+	}}
+
+	conv := New(sessionID)
+	conv.AddUserMessage("Read README.md and summarize it")
+	conv.AddToolCallMessageWithReasoning(toolCalls, "Need the file contents first.", nil)
+	conv.AddToolResponseMessage("call_123", "read_file", "Buckley is a tool-first harness.")
+	conv.AddAssistantMessage("Buckley is a tool-first harness.")
+	if err := conv.SaveAllMessages(store); err != nil {
+		t.Fatalf("SaveAllMessages: %v", err)
+	}
+
+	loaded := New(sessionID)
+	if err := loaded.LoadFromStorage(store); err != nil {
+		t.Fatalf("LoadFromStorage: %v", err)
+	}
+	if len(loaded.Messages) != 4 {
+		t.Fatalf("expected 4 loaded messages, got %d", len(loaded.Messages))
+	}
+	assistantToolCall := loaded.Messages[1]
+	if len(assistantToolCall.ToolCalls) != 1 {
+		t.Fatalf("expected assistant tool call to round-trip, got %+v", assistantToolCall)
+	}
+	if assistantToolCall.ToolCalls[0].ID != "call_123" || assistantToolCall.ToolCalls[0].Function.Name != "read_file" {
+		t.Fatalf("unexpected tool call after load: %+v", assistantToolCall.ToolCalls[0])
+	}
+	toolResult := loaded.Messages[2]
+	if toolResult.Role != "tool" || toolResult.ToolCallID != "call_123" || toolResult.Name != "read_file" {
+		t.Fatalf("expected tool response metadata to round-trip, got %+v", toolResult)
+	}
+
+	modelMsgs := loaded.ToModelMessages()
+	if len(modelMsgs[1].ToolCalls) != 1 || modelMsgs[2].ToolCallID != "call_123" || modelMsgs[2].Name != "read_file" {
+		t.Fatalf("expected model-visible tool chain after load, got %+v", modelMsgs)
+	}
+}
+
 func TestGetContentAsString(t *testing.T) {
 	tests := []struct {
 		name     string

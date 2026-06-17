@@ -11,11 +11,18 @@ import (
 	"m31labs.dev/buckley/pkg/transparency"
 )
 
+const (
+	ReviewScopeBranch   = "branch"
+	ReviewScopeChanges  = "changes"
+	ReviewScopeWorktree = "worktree"
+)
+
 // BranchContext contains context for branch review.
 type BranchContext struct {
 	RepoRoot   string
 	Branch     string
 	BaseBranch string
+	Scope      string
 	Files      []FileChange
 	Stats      DiffStats
 	Diff       string
@@ -61,6 +68,7 @@ type BranchContextOptions struct {
 	IncludeUnstaged bool
 	IncludeAgents   bool
 	BaseBranch      string
+	Scope           string
 }
 
 // DefaultBranchContextOptions returns sensible defaults.
@@ -70,6 +78,7 @@ func DefaultBranchContextOptions() BranchContextOptions {
 		IncludeUnstaged: true,
 		IncludeAgents:   true,
 		BaseBranch:      "",
+		Scope:           ReviewScopeWorktree,
 	}
 }
 
@@ -102,60 +111,93 @@ func AssembleBranchContext(opts BranchContextOptions) (*BranchContext, *transpar
 	ctx.Branch = strings.TrimSpace(branch)
 	audit.Add("branch", reviewEstimateTokens(ctx.Branch))
 
+	ctx.Scope = normalizeReviewScope(opts.Scope)
+	audit.Add("review scope", reviewEstimateTokens(ctx.Scope))
+
 	ctx.BaseBranch = opts.BaseBranch
-	if ctx.BaseBranch == "" {
+	if ctx.BaseBranch == "" && ctx.Scope != ReviewScopeChanges {
 		ctx.BaseBranch = detectBaseBranch()
 	}
-	audit.Add("base branch", reviewEstimateTokens(ctx.BaseBranch))
+	if ctx.Scope == ReviewScopeChanges {
+		ctx.BaseBranch = "(local changes)"
+	}
+	if ctx.BaseBranch != "" {
+		audit.Add("base branch", reviewEstimateTokens(ctx.BaseBranch))
+	}
 
-	nameStatus, err := reviewGitOutput("diff", "--name-status", ctx.BaseBranch+"...HEAD")
-	if err != nil {
-		nameStatus, err = reviewGitOutput("diff", "--name-status", ctx.BaseBranch)
+	if ctx.Scope == ReviewScopeChanges {
+		nameStatus := localNameStatus(opts.IncludeUnstaged)
+		ctx.Files = parseNameStatus(nameStatus)
+		audit.Add("changed files", reviewEstimateTokens(nameStatus))
+
+		diff, rawTruncated, err := localDiff(opts.MaxDiffBytes, opts.IncludeUnstaged)
 		if err != nil {
-			return nil, nil, fmt.Errorf("failed to get changed files: %w", err)
+			return nil, nil, fmt.Errorf("failed to get local diff: %w", err)
 		}
-	}
-	ctx.Files = parseNameStatus(nameStatus)
-	audit.Add("changed files", reviewEstimateTokens(nameStatus))
+		diffRes := diffsignal.Prioritize(diff, opts.MaxDiffBytes)
+		ctx.Diff = diffRes.Context
+		diffTokens := reviewEstimateTokens(ctx.Diff)
+		if rawTruncated || diffRes.Truncated {
+			audit.AddTruncated("local changes", diffTokens, opts.MaxDiffBytes/4)
+		} else {
+			audit.Add("local changes", diffTokens)
+		}
 
-	diff, rawTruncated, err := reviewGitOutputLimited(diffsignal.MaxParseBytes, "diff", ctx.BaseBranch+"...HEAD")
-	if err != nil {
-		diff, rawTruncated, err = reviewGitOutputLimited(diffsignal.MaxParseBytes, "diff", ctx.BaseBranch)
-	}
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to get diff: %w", err)
-	}
-	diffRes := diffsignal.Prioritize(diff, opts.MaxDiffBytes)
-	ctx.Diff = diffRes.Context
-	diffTokens := reviewEstimateTokens(ctx.Diff)
-	if rawTruncated || diffRes.Truncated {
-		audit.AddTruncated("git diff", diffTokens, opts.MaxDiffBytes/4)
+		ctx.Stats = getLocalDiffStats(opts.IncludeUnstaged)
 	} else {
-		audit.Add("git diff", diffTokens)
-	}
-
-	ctx.Stats = getDiffStats(ctx.BaseBranch)
-	if ctx.Stats.Files == 0 {
-		ctx.Stats.Files = len(ctx.Files)
-	}
-
-	if opts.IncludeUnstaged {
-		unstaged, unstagedRawTrunc, _ := reviewGitOutputLimited(diffsignal.MaxParseBytes, "diff")
-		if strings.TrimSpace(unstaged) != "" {
-			// Reserve space for the truncation marker so appending it never
-			// pushes ctx.Unstaged past MaxDiffBytes (marker is 16 bytes).
-			const truncMarker = "\n... (truncated)"
-			unstagedBudget := opts.MaxDiffBytes
-			if unstagedBudget > len(truncMarker) {
-				unstagedBudget -= len(truncMarker)
+		nameStatus, err := reviewGitOutput("diff", "--name-status", ctx.BaseBranch+"...HEAD")
+		if err != nil {
+			nameStatus, err = reviewGitOutput("diff", "--name-status", ctx.BaseBranch)
+			if err != nil {
+				return nil, nil, fmt.Errorf("failed to get changed files: %w", err)
 			}
-			unstagedRes := diffsignal.Prioritize(unstaged, unstagedBudget)
-			ctx.Unstaged = unstagedRes.Context
-			if unstagedRawTrunc || unstagedRes.Truncated {
-				ctx.Unstaged += truncMarker
-				audit.AddTruncated("unstaged changes", reviewEstimateTokens(ctx.Unstaged), opts.MaxDiffBytes/4)
-			} else {
-				audit.Add("unstaged changes", reviewEstimateTokens(ctx.Unstaged))
+		}
+		ctx.Files = parseNameStatus(nameStatus)
+		audit.Add("changed files", reviewEstimateTokens(nameStatus))
+
+		diff, rawTruncated, err := reviewGitOutputLimited(diffsignal.MaxParseBytes, "diff", ctx.BaseBranch+"...HEAD")
+		if err != nil {
+			diff, rawTruncated, err = reviewGitOutputLimited(diffsignal.MaxParseBytes, "diff", ctx.BaseBranch)
+		}
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to get diff: %w", err)
+		}
+		diffRes := diffsignal.Prioritize(diff, opts.MaxDiffBytes)
+		ctx.Diff = diffRes.Context
+		diffTokens := reviewEstimateTokens(ctx.Diff)
+		if rawTruncated || diffRes.Truncated {
+			audit.AddTruncated("git diff", diffTokens, opts.MaxDiffBytes/4)
+		} else {
+			audit.Add("git diff", diffTokens)
+		}
+
+		ctx.Stats = getDiffStats(ctx.BaseBranch)
+		if ctx.Stats.Files == 0 {
+			ctx.Stats.Files = len(ctx.Files)
+		}
+
+		if opts.IncludeUnstaged && ctx.Scope == ReviewScopeWorktree {
+			unstagedNameStatus, _ := reviewGitOutput("diff", "--name-status")
+			if strings.TrimSpace(unstagedNameStatus) != "" {
+				ctx.Files = mergeFileChanges(ctx.Files, parseNameStatus(unstagedNameStatus))
+			}
+			unstaged, unstagedRawTrunc, _ := reviewGitOutputLimited(diffsignal.MaxParseBytes, "diff")
+			if strings.TrimSpace(unstaged) != "" {
+				// Reserve space for the truncation marker so appending it never
+				// pushes ctx.Unstaged past MaxDiffBytes (marker is 16 bytes).
+				const truncMarker = "\n... (truncated)"
+				unstagedBudget := opts.MaxDiffBytes
+				if unstagedBudget > len(truncMarker) {
+					unstagedBudget -= len(truncMarker)
+				}
+				unstagedRes := diffsignal.Prioritize(unstaged, unstagedBudget)
+				ctx.Unstaged = unstagedRes.Context
+				if unstagedRawTrunc || unstagedRes.Truncated {
+					ctx.Unstaged += truncMarker
+					audit.AddTruncated("unstaged changes", reviewEstimateTokens(ctx.Unstaged), opts.MaxDiffBytes/4)
+				} else {
+					audit.Add("unstaged changes", reviewEstimateTokens(ctx.Unstaged))
+				}
 			}
 		}
 	}
@@ -241,6 +283,7 @@ func BuildBranchPrompt(ctx *BranchContext) string {
 	sb.WriteString(fmt.Sprintf("- **Root**: %s\n", ctx.RepoRoot))
 	sb.WriteString(fmt.Sprintf("- **Branch**: %s\n", ctx.Branch))
 	sb.WriteString(fmt.Sprintf("- **Base Branch**: %s\n", ctx.BaseBranch))
+	sb.WriteString(fmt.Sprintf("- **Review Scope**: %s\n", defaultIfEmpty(ctx.Scope, ReviewScopeWorktree)))
 	sb.WriteString("\n")
 
 	if ctx.RecentLog != "" {
@@ -374,6 +417,23 @@ func parseNameStatus(output string) []FileChange {
 	return changes
 }
 
+func mergeFileChanges(base, extra []FileChange) []FileChange {
+	if len(extra) == 0 {
+		return base
+	}
+	seen := make(map[string]struct{}, len(base)+len(extra))
+	merged := make([]FileChange, 0, len(base)+len(extra))
+	for _, change := range append(base, extra...) {
+		key := change.Status + "\x00" + change.OldPath + "\x00" + change.Path
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		merged = append(merged, change)
+	}
+	return merged
+}
+
 func getDiffStats(base string) DiffStats {
 	output, err := reviewGitOutput("diff", "--numstat", base+"...HEAD")
 	if err != nil {
@@ -403,6 +463,115 @@ func getDiffStats(base string) DiffStats {
 		}
 	}
 	return stats
+}
+
+func getLocalDiffStats(includeUnstaged bool) DiffStats {
+	stats := parseDiffStats(localNumstat("--cached"))
+	if includeUnstaged {
+		unstaged := parseDiffStats(localNumstat())
+		stats.Files += unstaged.Files
+		stats.Insertions += unstaged.Insertions
+		stats.Deletions += unstaged.Deletions
+	}
+	return stats
+}
+
+func localNumstat(args ...string) string {
+	fullArgs := append([]string{"diff", "--numstat"}, args...)
+	output, _ := reviewGitOutput(fullArgs...)
+	return output
+}
+
+func parseDiffStats(output string) DiffStats {
+	if output == "" {
+		return DiffStats{}
+	}
+
+	var stats DiffStats
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		parts := strings.Split(line, "\t")
+		if len(parts) < 3 {
+			continue
+		}
+		stats.Files++
+
+		ins, errIns := strconv.Atoi(parts[0])
+		del, errDel := strconv.Atoi(parts[1])
+		if errIns == nil && errDel == nil {
+			stats.Insertions += ins
+			stats.Deletions += del
+		}
+	}
+	return stats
+}
+
+func localNameStatus(includeUnstaged bool) string {
+	var parts []string
+	if staged, err := reviewGitOutput("diff", "--name-status", "--cached"); err == nil && strings.TrimSpace(staged) != "" {
+		parts = append(parts, staged)
+	}
+	if includeUnstaged {
+		if unstaged, err := reviewGitOutput("diff", "--name-status"); err == nil && strings.TrimSpace(unstaged) != "" {
+			parts = append(parts, unstaged)
+		}
+	}
+	return strings.Join(parts, "\n")
+}
+
+func localDiff(maxBytes int, includeUnstaged bool) (string, bool, error) {
+	var parts []string
+	var truncated bool
+
+	staged, stagedTruncated, err := reviewGitOutputLimited(diffsignal.MaxParseBytes, "diff", "--cached")
+	if err != nil {
+		return "", false, err
+	}
+	if strings.TrimSpace(staged) != "" {
+		parts = append(parts, staged)
+	}
+	truncated = truncated || stagedTruncated
+
+	if includeUnstaged {
+		unstaged, unstagedTruncated, err := reviewGitOutputLimited(diffsignal.MaxParseBytes, "diff")
+		if err != nil {
+			return "", false, err
+		}
+		if strings.TrimSpace(unstaged) != "" {
+			parts = append(parts, unstaged)
+		}
+		truncated = truncated || unstagedTruncated
+	}
+
+	diff := strings.Join(parts, "\n")
+	if maxBytes > 0 && len(diff) > maxBytes {
+		diff = diff[:maxBytes]
+		truncated = true
+	}
+	return diff, truncated, nil
+}
+
+func normalizeReviewScope(scope string) string {
+	switch strings.ToLower(strings.TrimSpace(scope)) {
+	case "", ReviewScopeWorktree:
+		return ReviewScopeWorktree
+	case ReviewScopeBranch, "commits":
+		return ReviewScopeBranch
+	case ReviewScopeChanges, "change", "local", "working-tree":
+		return ReviewScopeChanges
+	default:
+		return ReviewScopeWorktree
+	}
+}
+
+func defaultIfEmpty(value, fallback string) string {
+	if strings.TrimSpace(value) == "" {
+		return fallback
+	}
+	return value
 }
 
 func getTree(root string, maxDepth int) (string, error) {

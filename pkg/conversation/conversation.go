@@ -286,6 +286,9 @@ func (c *Conversation) LoadFromStorage(store *storage.Store) error {
 			Content:          materializeMessageContent(msg),
 			Timestamp:        msg.Timestamp,
 			Tokens:           msg.Tokens,
+			ToolCalls:        decodeToolCalls(msg.ToolCalls),
+			ToolCallID:       msg.ToolCallID,
+			Name:             msg.Name,
 			IsSummary:        msg.IsSummary,
 			IsTruncated:      msg.IsTruncated,
 			Reasoning:        msg.Reasoning,
@@ -317,6 +320,9 @@ func (c *Conversation) SaveMessage(store *storage.Store, msg Message) error {
 		ContentType:      contentType,
 		Reasoning:        msg.Reasoning,
 		ReasoningDetails: encodeReasoningDetails(msg.ReasoningDetails),
+		ToolCalls:        encodeToolCalls(msg.ToolCalls),
+		ToolCallID:       msg.ToolCallID,
+		Name:             msg.Name,
 		Timestamp:        msg.Timestamp,
 		Tokens:           msg.Tokens,
 		IsSummary:        msg.IsSummary,
@@ -342,6 +348,9 @@ func (c *Conversation) SaveAllMessages(store *storage.Store) error {
 			ContentType:      contentType,
 			Reasoning:        msg.Reasoning,
 			ReasoningDetails: encodeReasoningDetails(msg.ReasoningDetails),
+			ToolCalls:        encodeToolCalls(msg.ToolCalls),
+			ToolCallID:       msg.ToolCallID,
+			Name:             msg.Name,
 			Timestamp:        msg.Timestamp,
 			Tokens:           msg.Tokens,
 			IsSummary:        msg.IsSummary,
@@ -378,6 +387,28 @@ func decodeReasoningDetails(raw string) []model.ReasoningDetail {
 		return nil
 	}
 	return details
+}
+
+func encodeToolCalls(toolCalls []model.ToolCall) string {
+	if len(toolCalls) == 0 {
+		return ""
+	}
+	data, err := json.Marshal(toolCalls)
+	if err != nil {
+		return ""
+	}
+	return string(data)
+}
+
+func decodeToolCalls(raw string) []model.ToolCall {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	var toolCalls []model.ToolCall
+	if err := json.Unmarshal([]byte(raw), &toolCalls); err != nil {
+		return nil
+	}
+	return toolCalls
 }
 
 func serializeMessageContent(content any) (text string, jsonData string, messageType string, err error) {

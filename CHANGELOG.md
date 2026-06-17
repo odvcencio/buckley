@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-06-17
+
+### Added
+- Live-gated `qwen/qwen3.6-flash` multi-turn headless harness test under `tests/live` for validating real OpenRouter chat continuity when credentials are available.
+- `buckley review --scope worktree|branch|changes` for explicit review context selection across branch commits, local changes, and combined worktree state.
+
+### Changed
+- `buckley review` now reports the selected review scope in prompts and includes local changed files in worktree-scope file lists.
+- GoReleaser metadata now describes Buckley as a governed AI agent harness rather than a generic terminal assistant.
+
+### Fixed
+- TUI and headless chat sessions now persist assistant tool-call messages and tool response correlation metadata so multi-turn tool conversations survive reconnects, resumes, and API-driven session reloads.
+- SQLite session storage now round-trips `tool_calls`, `tool_call_id`, and tool `name` fields for model-visible chat history.
+
+## [1.3.0] - 2026-05-25
+
+### Changed
+- Go module and import paths migrated to `m31labs.dev/buckley`.
+
 ## [1.2.0] - 2026-05-23
 
 ### Added
@@ -84,7 +103,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Telemetry is local-only by default.
 - Plugin discovery limited to local paths only.
 
-[Unreleased]: https://github.com/odvcencio/buckley/compare/v1.2.0...HEAD
+[Unreleased]: https://github.com/odvcencio/buckley/compare/v1.4.0...HEAD
+[1.4.0]: https://github.com/odvcencio/buckley/compare/v1.3.0...v1.4.0
+[1.3.0]: https://github.com/odvcencio/buckley/releases/tag/v1.3.0
 [1.2.0]: https://github.com/odvcencio/buckley/releases/tag/v1.2.0
 [1.1.0]: https://github.com/odvcencio/buckley/releases/tag/v1.1.0
 [1.0.0]: https://github.com/odvcencio/buckley/releases/tag/v1.0.0

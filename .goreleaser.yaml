@@ -55,7 +55,7 @@ nfpms:
     vendor: Buckley Contributors
     homepage: https://github.com/odvcencio/buckley
     maintainer: Buckley Contributors <maintainers@buckley.dev>
-    description: AI-powered development assistant for your terminal.
+    description: Governed AI agent harness for serious repository work.
     license: MIT
     formats:
       - deb
@@ -76,7 +76,7 @@ homebrew_casks:
       name: Buckley Release Bot
       email: buckley-bot@users.noreply.github.com
     homepage: https://github.com/odvcencio/buckley
-    description: AI-powered development assistant for your terminal.
+    description: Governed AI agent harness for serious repository work.
     license: MIT
 
 scoops:
@@ -90,7 +90,7 @@ scoops:
       name: Buckley Release Bot
       email: buckley-bot@users.noreply.github.com
     homepage: https://github.com/odvcencio/buckley
-    description: AI-powered development assistant for your terminal.
+    description: Governed AI agent harness for serious repository work.
     license: MIT
 
 checksum:
@@ -112,7 +112,7 @@ dockers_v2:
       - linux/arm64
     labels:
       org.opencontainers.image.title: "{{ .ProjectName }}"
-      org.opencontainers.image.description: AI-powered development assistant for your terminal.
+      org.opencontainers.image.description: Governed AI agent harness for serious repository work.
       org.opencontainers.image.url: https://github.com/odvcencio/buckley
       org.opencontainers.image.source: https://github.com/odvcencio/buckley
       org.opencontainers.image.version: "{{ .Version }}"
@@ -132,7 +132,7 @@ dockers_v2:
       - linux/arm64
     labels:
       org.opencontainers.image.title: "{{ .ProjectName }} Worker"
-      org.opencontainers.image.description: AI-powered development assistant worker image (includes build tools).
+      org.opencontainers.image.description: Governed AI agent harness worker image (includes build tools).
       org.opencontainers.image.url: https://github.com/odvcencio/buckley
       org.opencontainers.image.source: https://github.com/odvcencio/buckley
       org.opencontainers.image.version: "{{ .Version }}"
@@ -179,7 +179,7 @@ release:
   header: |
     ## Buckley {{ .Version }}
 
-    AI-powered development assistant for your terminal.
+    Governed AI agent harness for serious repository work.
   footer: |
     **Full Changelog**: https://github.com/odvcencio/buckley/compare/{{ .PreviousTag }}...{{ .Tag }}
 

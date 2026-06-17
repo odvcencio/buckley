@@ -21,6 +21,7 @@ import (
 func runReviewCommand(args []string) error {
 	fs := flag.NewFlagSet("review", flag.ContinueOnError)
 	projectMode := fs.Bool("project", false, "review the entire project instead of branch diff")
+	scope := fs.String("scope", commands.ReviewScopeWorktree, "review scope: worktree, branch, or changes")
 	baseBranch := fs.String("base", "", "base branch to compare against (default: auto-detect main/master)")
 	includeUnstaged := fs.Bool("unstaged", true, "include unstaged changes in review")
 	verbose := fs.Bool("verbose", false, "show full context and reasoning")
@@ -135,13 +136,14 @@ func runReviewCommand(args []string) error {
 		}
 		trace = fwResult.Trace
 	} else {
-		// Review branch against base
-		spinner := terminal.NewSpinner("Analyzing branch changes...")
+		reviewScope := normalizeReviewCommandScope(*scope)
+		spinner := terminal.NewSpinner(fmt.Sprintf("Analyzing %s changes...", reviewScope))
 		spinner.Start()
 
 		opts := commands.DefaultBranchContextOptions()
 		opts.BaseBranch = *baseBranch
 		opts.IncludeUnstaged = *includeUnstaged
+		opts.Scope = reviewScope
 
 		branchCtx, audit, err := commands.AssembleBranchContext(opts)
 		if err != nil {
@@ -161,7 +163,7 @@ func runReviewCommand(args []string) error {
 			return fmt.Errorf("review failed: %w", runErr)
 		}
 
-		spinner.StopWithSuccess("Branch review complete")
+		spinner.StopWithSuccess(fmt.Sprintf("%s review complete", titleReviewScope(reviewScope)))
 
 		if rlmResult, ok := fwResult.Value.(*commands.ReviewRLMResult); ok {
 			reviewText = rlmResult.Review
@@ -206,6 +208,27 @@ func runReviewCommand(args []string) error {
 	}
 
 	return nil
+}
+
+func normalizeReviewCommandScope(scope string) string {
+	switch strings.ToLower(strings.TrimSpace(scope)) {
+	case "", commands.ReviewScopeWorktree:
+		return commands.ReviewScopeWorktree
+	case commands.ReviewScopeBranch, "commits":
+		return commands.ReviewScopeBranch
+	case commands.ReviewScopeChanges, "change", "local", "working-tree":
+		return commands.ReviewScopeChanges
+	default:
+		return commands.ReviewScopeWorktree
+	}
+}
+
+func titleReviewScope(scope string) string {
+	scope = strings.TrimSpace(scope)
+	if scope == "" {
+		return "Worktree"
+	}
+	return strings.ToUpper(scope[:1]) + scope[1:]
 }
 
 func printReviewContextAudit(audit *transparency.ContextAudit) {
