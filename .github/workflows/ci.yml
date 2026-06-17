@@ -55,6 +55,8 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -62,10 +64,34 @@ jobs:
           go-version: '1.25'
           cache: true
 
-      - name: Check gofmt
+      - name: Check gofmt (changed files)
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          unformatted="$(gofmt -l $(git ls-files '*.go') || true)"
+
+          base="$PR_BASE_SHA"
+          if [ -z "$base" ]; then
+            base="$PUSH_BEFORE_SHA"
+          fi
+          if [ -z "$base" ]; then
+            echo "No base SHA available; skipping gofmt check."
+            exit 0
+          fi
+          if [ "$base" = "0000000000000000000000000000000000000000" ]; then
+            echo "Base SHA is empty (new branch); skipping gofmt check."
+            exit 0
+          fi
+
+          files="$(git diff --diff-filter=d --name-only "$base" "$HEAD_SHA" -- '*.go' || true)"
+          if [ -z "$files" ]; then
+            echo "No Go files changed."
+            exit 0
+          fi
+
+          unformatted="$(gofmt -l $files || true)"
           if [ -n "$unformatted" ]; then
             echo "gofmt required on:"
             echo "$unformatted"
