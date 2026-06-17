@@ -650,7 +650,7 @@ func runACPLoop(
 			return "", err
 		}
 		if len(resp.Choices) == 0 {
-			return "", fmt.Errorf("no response choices")
+			return "", model.NoResponseChoicesError(req, resp)
 		}
 
 		msg := resp.Choices[0].Message

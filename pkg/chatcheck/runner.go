@@ -149,7 +149,7 @@ func (r Runner) Run(ctx context.Context, scenario Scenario) (*Result, error) {
 		}
 		turnResult.Usage = resp.Usage
 		if len(resp.Choices) == 0 {
-			err := fmt.Errorf("turn %d returned no response choices from model %s", i+1, emptyDefault(resp.Model, scenario.Model))
+			err := fmt.Errorf("turn %d chat completion: %w", i+1, model.NoResponseChoicesError(req, resp))
 			turnResult.Err = err.Error()
 			result.Turns = append(result.Turns, turnResult)
 			return result, err
@@ -235,12 +235,4 @@ func normalizeScenario(scenario Scenario) Scenario {
 		scenario.Turns = defaults.Turns
 	}
 	return scenario
-}
-
-func emptyDefault(value, fallback string) string {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return fallback
-	}
-	return value
 }

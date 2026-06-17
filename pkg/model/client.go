@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"math/rand"
@@ -413,14 +412,7 @@ func (c *Client) ChatCompletion(ctx context.Context, req ChatRequest) (*ChatResp
 				}
 			}
 			if len(chatResp.Choices) == 0 {
-				details := "provider returned no response choices"
-				if strings.TrimSpace(chatResp.ID) != "" {
-					details += " for response " + strings.TrimSpace(chatResp.ID)
-				}
-				if strings.TrimSpace(chatResp.Model) != "" {
-					details += " from model " + strings.TrimSpace(chatResp.Model)
-				}
-				return errors.New(details)
+				return NoResponseChoicesError(req, &chatResp)
 			}
 
 			result = &chatResp

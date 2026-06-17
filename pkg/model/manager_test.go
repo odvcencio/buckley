@@ -3,6 +3,7 @@ package model
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 
 	"m31labs.dev/buckley/pkg/config"
@@ -12,6 +13,7 @@ type stubProvider struct {
 	id          string
 	catalog     ModelCatalog
 	lastRequest ChatRequest
+	response    *ChatResponse
 }
 
 func (s *stubProvider) ID() string { return s.id }
@@ -31,7 +33,17 @@ func (s *stubProvider) GetModelInfo(modelID string) (*ModelInfo, error) {
 
 func (s *stubProvider) ChatCompletion(ctx context.Context, req ChatRequest) (*ChatResponse, error) {
 	s.lastRequest = req
-	return &ChatResponse{}, nil
+	if s.response != nil {
+		resp := *s.response
+		return &resp, nil
+	}
+	return &ChatResponse{
+		Model: req.Model,
+		Choices: []Choice{{
+			Message:      Message{Content: "ok"},
+			FinishReason: "stop",
+		}},
+	}, nil
 }
 
 func (s *stubProvider) ChatCompletionStream(ctx context.Context, req ChatRequest) (<-chan StreamChunk, <-chan error) {
@@ -253,6 +265,51 @@ func TestChatCompletionNormalizesModelID(t *testing.T) {
 
 	if prov.lastRequest.Model != "model-a" {
 		t.Fatalf("expected model to be normalized to provider local ID, got %q", prov.lastRequest.Model)
+	}
+}
+
+func TestChatCompletionRejectsEmptyChoices(t *testing.T) {
+	cfg := &config.Config{
+		Models: config.ModelConfig{
+			Execution:       "p1/model-a",
+			DefaultProvider: "p1",
+			FallbackChains:  map[string][]string{},
+		},
+		Providers: config.ProviderConfig{
+			ModelRouting: map[string]string{},
+		},
+	}
+	prov := &stubProvider{
+		id: "p1",
+		catalog: ModelCatalog{
+			Data: []ModelInfo{{ID: "p1/model-a", ContextLength: 8_000}},
+		},
+		response: &ChatResponse{ID: "resp-empty", Model: "model-a"},
+	}
+	mgr := &Manager{
+		config:         cfg,
+		providers:      map[string]Provider{"p1": prov},
+		providerOrder:  []string{"p1"},
+		catalog:        make(map[string]ModelInfo),
+		providerModels: make(map[string][]string),
+		modelProviders: make(map[string]string),
+	}
+	if err := mgr.Initialize(); err != nil {
+		t.Fatalf("Initialize() error = %v", err)
+	}
+
+	_, err := mgr.ChatCompletion(context.Background(), ChatRequest{
+		Model:     "p1/model-a",
+		Messages:  []Message{{Role: "user", Content: "hello"}},
+		SessionID: "sess-empty",
+	})
+	if err == nil {
+		t.Fatal("expected empty choices error")
+	}
+	for _, want := range []string{"no response choices", "response_id=resp-empty", "messages=1", "session=sess-empty"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error missing %q: %v", want, err)
+		}
 	}
 }
 

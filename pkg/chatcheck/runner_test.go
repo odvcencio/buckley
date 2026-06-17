@@ -65,8 +65,8 @@ func TestRunnerRunNoChoices(t *testing.T) {
 		Model: "test-model",
 		Turns: []Turn{{User: "hello"}},
 	})
-	if err == nil || !strings.Contains(err.Error(), "no response choices") {
-		t.Fatalf("err=%v want no response choices", err)
+	if err == nil || !strings.Contains(err.Error(), "no response choices") || !strings.Contains(err.Error(), "messages=1") {
+		t.Fatalf("err=%v want no response choices with request shape", err)
 	}
 	if result == nil || len(result.Turns) != 1 || result.Turns[0].Err == "" {
 		t.Fatalf("result did not capture failure: %+v", result)

@@ -1083,7 +1083,7 @@ func (c *Controller) runToolLoop(ctx context.Context, sess *SessionState, modelI
 		totalUsage = addUsage(totalUsage, resp.Usage)
 
 		if len(resp.Choices) == 0 {
-			return "", nil, fmt.Errorf("no response choices")
+			return "", nil, model.NoResponseChoicesError(req, resp)
 		}
 
 		msg := resp.Choices[0].Message
