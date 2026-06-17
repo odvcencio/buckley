@@ -622,6 +622,8 @@ func printHelp() {
 	fmt.Println("  remote <subcommand>              Remote session operations (attach, sessions, tokens, login, console)")
 	fmt.Println("  batch prune-workspaces           Garbage-collect stale batch workspaces (k8s/CI)")
 	fmt.Println("  git-webhook                      Listen for merge webhooks and run regression/release commands")
+	fmt.Println("  agent check <agent.yaml>         Validate a Buckley agent spec")
+	fmt.Println("  agent show <agent.yaml>          Show a Buckley agent spec summary")
 	fmt.Println("  agent-server                     HTTP proxy for ACP editor workflows (inline propose/apply)")
 	fmt.Println("  lsp [--coordinator addr]         Start LSP server on stdio (editor integration)")
 	fmt.Println("  acp [--workdir dir] [--log file] Start ACP agent on stdio (Zed/JetBrains/Neovim)")
@@ -635,6 +637,7 @@ func printHelp() {
 	fmt.Println("  rules list                       List loaded rule domains (embedded vs user override)")
 	fmt.Println("  rules check <file.arb>           Validate an .arb file compiles")
 	fmt.Println("  rules eval <domain> <facts.json> Evaluate a domain with JSON facts, print matched rules")
+	fmt.Println("  rules facts [domain]             List Buckley Arbiter fact contracts")
 	fmt.Println("  migrate                          Apply database migrations")
 	fmt.Println("  db backup --out <path>           Create a consistent SQLite backup (VACUUM INTO)")
 	fmt.Println("  db restore --in <path> --force   Restore SQLite backup (stop Buckley first)")
@@ -930,7 +933,7 @@ func printBashCompletion() {
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
 
-    commands="plan execute execute-task commit pr experiment serve remote batch git-webhook agent-server lsp acp config doctor completion worktree migrate db resume help version"
+    commands="plan execute execute-task commit pr experiment serve remote batch git-webhook agent agent-server lsp acp config doctor completion worktree rules migrate db resume help version"
 
     case "${prev}" in
         buckley)
@@ -939,6 +942,10 @@ func printBashCompletion() {
             ;;
         batch)
             COMPREPLY=( $(compgen -W "prune-workspaces" -- "${cur}") )
+            return 0
+            ;;
+        agent)
+            COMPREPLY=( $(compgen -W "check show" -- "${cur}") )
             return 0
             ;;
         config)
@@ -955,6 +962,10 @@ func printBashCompletion() {
             ;;
         db)
             COMPREPLY=( $(compgen -W "backup restore" -- "${cur}") )
+            return 0
+            ;;
+        rules)
+            COMPREPLY=( $(compgen -W "list check eval facts" -- "${cur}") )
             return 0
             ;;
         --config|-c)
@@ -985,12 +996,14 @@ _buckley() {
         'remote:Remote session management'
         'batch:Batch helpers (k8s/CI)'
         'git-webhook:Run regression/release webhooks daemon'
+        'agent:Validate and inspect Buckley agent specs'
         'agent-server:Run ACP HTTP proxy for editor workflows'
         'lsp:Start LSP server on stdio for editor integration'
         'acp:Start ACP agent on stdio for Zed/JetBrains/Neovim'
         'config:Manage configuration'
         'completion:Generate shell completions'
         'worktree:Git worktree management'
+        'rules:Inspect Arbiter rules and fact contracts'
         'migrate:Apply database migrations'
         'db:Backup/restore SQLite DB'
         'resume:Resume a previous session'
@@ -1061,12 +1074,14 @@ complete -c buckley -n __fish_use_subcommand -a serve -d 'Start local server'
 complete -c buckley -n __fish_use_subcommand -a remote -d 'Remote session management'
 complete -c buckley -n __fish_use_subcommand -a batch -d 'Batch helpers (k8s/CI)'
 complete -c buckley -n __fish_use_subcommand -a git-webhook -d 'Run regression/release webhooks daemon'
+complete -c buckley -n __fish_use_subcommand -a agent -d 'Validate and inspect Buckley agent specs'
 complete -c buckley -n __fish_use_subcommand -a agent-server -d 'Run ACP HTTP proxy for editor workflows'
 complete -c buckley -n __fish_use_subcommand -a lsp -d 'Start LSP server on stdio'
 complete -c buckley -n __fish_use_subcommand -a acp -d 'Start ACP agent on stdio (Zed/JetBrains/Neovim)'
 complete -c buckley -n __fish_use_subcommand -a config -d 'Manage configuration'
 complete -c buckley -n __fish_use_subcommand -a completion -d 'Generate shell completions'
 complete -c buckley -n __fish_use_subcommand -a worktree -d 'Git worktree management'
+complete -c buckley -n __fish_use_subcommand -a rules -d 'Inspect Arbiter rules and fact contracts'
 complete -c buckley -n __fish_use_subcommand -a migrate -d 'Apply database migrations'
 complete -c buckley -n __fish_use_subcommand -a db -d 'Backup/restore SQLite DB'
 complete -c buckley -n __fish_use_subcommand -a resume -d 'Resume a previous session'
@@ -1127,6 +1142,8 @@ func dispatchSubcommand(args []string) (bool, int) {
 		return true, runCommand(runBatchCommand, args[1:])
 	case "git-webhook":
 		return true, runCommand(runGitWebhookCommand, args[1:])
+	case "agent":
+		return true, runCommand(runAgentCommand, args[1:])
 	case "execute-task":
 		return true, runCommand(runExecuteTaskCommand, args[1:])
 	case "commit":

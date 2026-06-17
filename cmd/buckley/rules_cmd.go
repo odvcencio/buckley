@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -15,7 +16,7 @@ import (
 // runRulesCommand dispatches buckley rules subcommands.
 func runRulesCommand(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: buckley rules <list|check|eval> [args...]")
+		return fmt.Errorf("usage: buckley rules <list|check|eval|facts> [args...]")
 	}
 	switch args[0] {
 	case "list":
@@ -24,8 +25,10 @@ func runRulesCommand(args []string) error {
 		return runRulesCheck(args[1:])
 	case "eval":
 		return runRulesEval(args[1:])
+	case "facts":
+		return runRulesFacts(args[1:])
 	default:
-		return fmt.Errorf("unknown rules subcommand: %s (use list, check, or eval)", args[0])
+		return fmt.Errorf("unknown rules subcommand: %s (use list, check, eval, or facts)", args[0])
 	}
 }
 
@@ -135,4 +138,51 @@ func runRulesEval(args []string) error {
 		fmt.Println()
 	}
 	return nil
+}
+
+func runRulesFacts(args []string) error {
+	fs := flag.NewFlagSet("rules facts", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	format := fs.String("format", "text", "output format: text or json")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() > 1 {
+		return fmt.Errorf("usage: buckley rules facts [--format text|json] [domain]")
+	}
+	domain := ""
+	if fs.NArg() == 1 {
+		domain = fs.Arg(0)
+	}
+	contracts := rules.FactContractsForDomain(domain)
+	if domain != "" && len(contracts) == 0 {
+		return fmt.Errorf("unknown fact contract domain: %s", domain)
+	}
+	switch strings.ToLower(strings.TrimSpace(*format)) {
+	case "", "text":
+		printRuleFactContracts(contracts)
+	case "json":
+		data, err := json.MarshalIndent(contracts, "", "  ")
+		if err != nil {
+			return fmt.Errorf("encoding fact contracts: %w", err)
+		}
+		fmt.Println(string(data))
+	default:
+		return fmt.Errorf("unknown format %q (use text or json)", *format)
+	}
+	return nil
+}
+
+func printRuleFactContracts(contracts []rules.FactContract) {
+	for i, contract := range contracts {
+		if i > 0 {
+			fmt.Println()
+		}
+		fmt.Printf("domain:  %s\n", contract.Domain)
+		fmt.Printf("purpose: %s\n", contract.Purpose)
+		fmt.Println("facts:")
+		for _, fact := range contract.Facts {
+			fmt.Printf("  %-24s %s\n", fact.Key, fact.Type)
+		}
+	}
 }

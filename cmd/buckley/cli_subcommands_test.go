@@ -51,6 +51,77 @@ func TestRunExecuteTaskCommandUsageError(t *testing.T) {
 	}
 }
 
+func TestRunAgentCommandCheckAndShow(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "agent.yaml")
+	spec := []byte(`
+version: buckley.agent/v1
+name: review-agent
+runtime:
+  driver: buckley
+policies:
+  domains: [approval, risk]
+`)
+	if err := os.WriteFile(path, spec, 0o644); err != nil {
+		t.Fatalf("write spec: %v", err)
+	}
+
+	checkOut := captureStdout(t, func() {
+		if err := runAgentCommand([]string{"check", path}); err != nil {
+			t.Fatalf("runAgentCommand check: %v", err)
+		}
+	})
+	if !strings.Contains(checkOut, "valid Buckley agent spec") {
+		t.Fatalf("unexpected check output: %q", checkOut)
+	}
+
+	showOut := captureStdout(t, func() {
+		if err := runAgentCommand([]string{"show", "--format", "json", path}); err != nil {
+			t.Fatalf("runAgentCommand show: %v", err)
+		}
+	})
+	for _, want := range []string{`"name": "review-agent"`, `"valid": true`} {
+		if !strings.Contains(showOut, want) {
+			t.Fatalf("show output missing %q in:\n%s", want, showOut)
+		}
+	}
+}
+
+func TestRunAgentCommandInvalidSpec(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "agent.yaml")
+	spec := []byte("version: nope\n")
+	if err := os.WriteFile(path, spec, 0o644); err != nil {
+		t.Fatalf("write spec: %v", err)
+	}
+
+	out := captureStdout(t, func() {
+		err := runAgentCommand([]string{"check", path})
+		if err == nil {
+			t.Fatal("expected validation error")
+		}
+		if !strings.Contains(err.Error(), "validation errors") {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+	if !strings.Contains(out, "unsupported version") {
+		t.Fatalf("expected diagnostics, got:\n%s", out)
+	}
+}
+
+func TestRunRulesFacts(t *testing.T) {
+	out := captureStdout(t, func() {
+		if err := runRulesCommand([]string{"facts", "approval"}); err != nil {
+			t.Fatalf("runRulesCommand facts: %v", err)
+		}
+	})
+	for _, want := range []string{"domain:  approval", "approval.mode", "risk.level"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("facts output missing %q in:\n%s", want, out)
+		}
+	}
+}
+
 func TestDispatchSubcommandResumePassthrough(t *testing.T) {
 	// Resume should not be handled by dispatchSubcommand (returns to main flow)
 	handled, _ := dispatchSubcommand([]string{"resume", "sess123"})
