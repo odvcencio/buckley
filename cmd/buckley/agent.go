@@ -75,10 +75,13 @@ func runAgentRun(args []string) error {
 	defer store.Close()
 
 	subProfile.ApplyToConfig(cfg)
+	modelOverride := strings.TrimSpace(subProfile.Spec.Models.Execution)
 	if opts.model != "" {
 		applyStartupModelOverride(cfg, opts.model)
+		modelOverride = opts.model
 	} else if modelOverrideFlag != "" {
 		applyStartupModelOverride(cfg, modelOverrideFlag)
+		modelOverride = modelOverrideFlag
 	}
 
 	cwd, err := os.Getwd()
@@ -91,7 +94,7 @@ func runAgentRun(args []string) error {
 	}
 	planStore := orchestrator.NewFilePlanStore(cfg.Artifacts.PlanningDir)
 	allowedTools := append([]string(nil), subProfile.Spec.Tools.Allow...)
-	exitCode := executeOneShot(formatSubagentTask(opts.subagent, opts.task), cfg, mgr, store, projectCtx, planStore, subProfile, allowedTools)
+	exitCode := executeOneShot(formatSubagentTask(opts.subagent, opts.task), cfg, mgr, store, projectCtx, planStore, subProfile, modelOverride, allowedTools)
 	if exitCode != 0 {
 		return withExitCode(fmt.Errorf("agent run failed"), exitCode)
 	}

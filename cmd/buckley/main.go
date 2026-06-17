@@ -45,6 +45,7 @@ import (
 	"m31labs.dev/buckley/pkg/telemetry"
 	"m31labs.dev/buckley/pkg/tool"
 	"m31labs.dev/buckley/pkg/tool/builtin"
+	"m31labs.dev/buckley/pkg/types"
 	"m31labs.dev/buckley/pkg/ui/tui"
 	buckleyversion "m31labs.dev/buckley/pkg/version"
 )
@@ -250,7 +251,7 @@ func main() {
 	// Handle one-shot prompt mode (-p flag)
 	if promptFlag != "" {
 		// Prompt provided via -p flag
-		exitCode := executeOneShot(promptFlag, cfg, modelManager, store, projectContext, planStore, agentProfile, nil)
+		exitCode := executeOneShot(promptFlag, cfg, modelManager, store, projectContext, planStore, agentProfile, modelOverrideFlag, nil)
 		os.Exit(exitCode)
 	}
 
@@ -266,7 +267,7 @@ func main() {
 			}
 			if len(lines) > 0 {
 				prompt := strings.Join(lines, "\n")
-				exitCode := executeOneShot(prompt, cfg, modelManager, store, projectContext, planStore, agentProfile, nil)
+				exitCode := executeOneShot(prompt, cfg, modelManager, store, projectContext, planStore, agentProfile, modelOverrideFlag, nil)
 				os.Exit(exitCode)
 			}
 		}
@@ -305,7 +306,7 @@ func main() {
 }
 
 // executeOneShot executes a single prompt and exits
-func executeOneShot(prompt string, cfg *config.Config, mgr *model.Manager, store *storage.Store, projectContext *projectcontext.ProjectContext, planStore orchestrator.PlanStore, agentProfile *agentspec.RuntimeProfile, allowedTools []string) int {
+func executeOneShot(prompt string, cfg *config.Config, mgr *model.Manager, store *storage.Store, projectContext *projectcontext.ProjectContext, planStore orchestrator.PlanStore, agentProfile *agentspec.RuntimeProfile, modelOverride string, allowedTools []string) int {
 	_ = store
 	_ = planStore
 
@@ -321,7 +322,7 @@ func executeOneShot(prompt string, cfg *config.Config, mgr *model.Manager, store
 		engine = nil
 	}
 
-	resolvedModel := model.ResolvePhaseModel(cfg, mgr, engine, "execution", modelOverrideFlag)
+	resolvedModel := model.ResolvePhaseModel(cfg, mgr, engine, "execution", modelOverride)
 	if resolvedModel == "" {
 		resolvedModel = "openai/gpt-4o"
 	}
@@ -340,7 +341,6 @@ func executeOneShot(prompt string, cfg *config.Config, mgr *model.Manager, store
 	}
 	conv := projectconversation.New("oneshot")
 	skillState := skill.NewRuntimeState(conv.AddSystemMessage)
-	skillState.SetToolFilter(allowedTools)
 
 	registry := tool.NewRegistry()
 	if err := registry.LoadDefaultPlugins(); err != nil {
@@ -355,6 +355,7 @@ func executeOneShot(prompt string, cfg *config.Config, mgr *model.Manager, store
 	createTool := &builtin.CreateSkillTool{Registry: skills}
 	createTool.SetWorkDir(cwd)
 	registry.Register(createTool)
+	skillState.SetToolFilter(resolveOneShotToolFilter(agentProfile, registry, allowedTools))
 
 	conv.AddSystemMessage(buildACPSystemPrompt(projectContext, cwd, skills, engine, agentPromptSection(agentProfile)))
 	conv.AddUserMessage(prompt)
@@ -1455,6 +1456,88 @@ func agentPromptSection(profile *agentspec.RuntimeProfile) string {
 		return ""
 	}
 	return profile.PromptSection()
+}
+
+func resolveOneShotToolFilter(profile *agentspec.RuntimeProfile, registry *tool.Registry, explicitAllowed []string) []string {
+	allowed := cleanToolNames(explicitAllowed)
+	var denied []string
+	tier := ""
+	if profile != nil && profile.Spec != nil {
+		denied = cleanToolNames(profile.Spec.Tools.Deny)
+		tier = strings.TrimSpace(profile.Spec.Tools.Tier)
+		if len(allowed) == 0 {
+			allowed = cleanToolNames(profile.Spec.Tools.Allow)
+		}
+	}
+	if len(allowed) == 0 {
+		allowed = toolsForTier(registry, tier)
+	}
+	if len(allowed) == 0 && len(denied) == 0 {
+		return nil
+	}
+	return subtractToolNames(allowed, denied)
+}
+
+func toolsForTier(registry *tool.Registry, tier string) []string {
+	tier = strings.TrimSpace(tier)
+	if tier == "" || tier == "full" || registry == nil {
+		return nil
+	}
+
+	var maxTier types.PermissionTier
+	switch tier {
+	case "read_only":
+		maxTier = types.TierReadOnly
+	case "standard":
+		maxTier = types.TierWorkspaceWrite
+	default:
+		return nil
+	}
+
+	allowed := []string{}
+	for _, candidate := range registry.List() {
+		if tool.RequiredTierForTool(candidate) <= maxTier {
+			allowed = append(allowed, candidate.Name())
+		}
+	}
+	return cleanToolNames(allowed)
+}
+
+func cleanToolNames(values []string) []string {
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	return out
+}
+
+func subtractToolNames(values, denied []string) []string {
+	if len(denied) == 0 {
+		return cleanToolNames(values)
+	}
+	blocked := map[string]struct{}{}
+	for _, value := range denied {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			blocked[value] = struct{}{}
+		}
+	}
+	out := []string{}
+	for _, value := range cleanToolNames(values) {
+		if _, ok := blocked[value]; !ok {
+			out = append(out, value)
+		}
+	}
+	return out
 }
 
 func normalizeModelIDWithReasoning(cfg *config.Config, modelID string) string {

@@ -6,7 +6,10 @@ import (
 	"strings"
 	"testing"
 
+	"m31labs.dev/buckley/pkg/agentspec"
 	"m31labs.dev/buckley/pkg/config"
+	"m31labs.dev/buckley/pkg/tool"
+	"m31labs.dev/buckley/pkg/tool/builtin"
 )
 
 func TestRunPlanCommandUsageError(t *testing.T) {
@@ -159,6 +162,51 @@ func TestFormatSubagentTask(t *testing.T) {
 		}
 	}
 }
+
+func TestResolveOneShotToolFilterRespectsAgentTierAndDeny(t *testing.T) {
+	registry := tool.NewEmptyRegistry()
+	registry.Register(metadataTool{name: "read_file", metadata: tool.ToolMetadata{Impact: tool.ImpactReadOnly, Category: tool.CategoryFilesystem}})
+	registry.Register(metadataTool{name: "write_file", metadata: tool.ToolMetadata{Impact: tool.ImpactModifying, Category: tool.CategoryFilesystem}})
+	registry.Register(metadataTool{name: "run_shell", metadata: tool.ToolMetadata{Impact: tool.ImpactDestructive, Category: tool.CategoryShell}})
+
+	profile := &agentspec.RuntimeProfile{Spec: &agentspec.Spec{Tools: agentspec.ToolSpec{Tier: "read_only"}}}
+	got := resolveOneShotToolFilter(profile, registry, nil)
+	if strings.Join(got, ",") != "read_file" {
+		t.Fatalf("read_only filter=%v want read_file", got)
+	}
+
+	profile.Spec.Tools.Tier = "standard"
+	profile.Spec.Tools.Deny = []string{"write_file"}
+	got = resolveOneShotToolFilter(profile, registry, nil)
+	if strings.Join(got, ",") != "read_file" {
+		t.Fatalf("standard deny filter=%v want read_file", got)
+	}
+
+	profile.Spec.Tools.Allow = []string{"run_shell", "read_file"}
+	got = resolveOneShotToolFilter(profile, registry, []string{"read_file", "read_file"})
+	if strings.Join(got, ",") != "read_file" {
+		t.Fatalf("explicit filter=%v want read_file", got)
+	}
+}
+
+type metadataTool struct {
+	name     string
+	metadata tool.ToolMetadata
+}
+
+func (t metadataTool) Name() string { return t.name }
+
+func (t metadataTool) Description() string { return t.name }
+
+func (t metadataTool) Parameters() builtin.ParameterSchema {
+	return builtin.ParameterSchema{Type: "object"}
+}
+
+func (t metadataTool) Execute(map[string]any) (*builtin.Result, error) {
+	return &builtin.Result{Success: true}, nil
+}
+
+func (t metadataTool) Metadata() tool.ToolMetadata { return t.metadata }
 
 func TestRunRulesFacts(t *testing.T) {
 	out := captureStdout(t, func() {
