@@ -651,7 +651,7 @@ func printHelp() {
 	fmt.Println("  dream [--dir path] [--plan]      Analyze architecture and identify gaps")
 	fmt.Println("  config [check|show|path]         Manage configuration")
 	fmt.Println("  trust [status|allow|deny|reset]  Inspect or change project trust")
-	fmt.Println("  doctor                           Quick system health check (alias for config check)")
+	fmt.Println("  doctor [chat]                    Quick system health and chat checks")
 	fmt.Println("  completion [bash|zsh|fish]       Generate shell completions")
 	fmt.Println("  worktree create [--container]    Create git worktree")
 	fmt.Println("  rules list                       List loaded rule domains (embedded vs user override)")
@@ -973,6 +973,10 @@ func printBashCompletion() {
             COMPREPLY=( $(compgen -W "check show path" -- "${cur}") )
             return 0
             ;;
+        doctor)
+            COMPREPLY=( $(compgen -W "check chat" -- "${cur}") )
+            return 0
+            ;;
         experiment)
             COMPREPLY=( $(compgen -W "run" -- "${cur}") )
             return 0
@@ -1028,7 +1032,7 @@ _buckley() {
         'migrate:Apply database migrations'
         'db:Backup/restore SQLite DB'
         'resume:Resume a previous session'
-        'doctor:Quick system health check'
+        'doctor:Quick system and chat health checks'
         'help:Show help information'
         'version:Show version information'
     )
@@ -1064,6 +1068,9 @@ _buckley() {
                     ;;
                 config)
                     _values 'config command' check show path
+                    ;;
+                doctor)
+                    _values 'doctor command' check chat
                     ;;
                 completion)
                     _values 'shell' bash zsh fish
@@ -1107,7 +1114,7 @@ complete -c buckley -n __fish_use_subcommand -a rules -d 'Inspect Arbiter rules 
 complete -c buckley -n __fish_use_subcommand -a migrate -d 'Apply database migrations'
 complete -c buckley -n __fish_use_subcommand -a db -d 'Backup/restore SQLite DB'
 complete -c buckley -n __fish_use_subcommand -a resume -d 'Resume a previous session'
-complete -c buckley -n __fish_use_subcommand -a doctor -d 'Quick system health check'
+complete -c buckley -n __fish_use_subcommand -a doctor -d 'Quick system and chat health checks'
 complete -c buckley -n __fish_use_subcommand -a help -d 'Show help information'
 complete -c buckley -n __fish_use_subcommand -a version -d 'Show version information'
 
@@ -1126,6 +1133,10 @@ complete -c buckley -s h -l help -d 'Show help'
 complete -c buckley -n '__fish_seen_subcommand_from config' -a check -d 'Validate configuration'
 complete -c buckley -n '__fish_seen_subcommand_from config' -a show -d 'Show current configuration'
 complete -c buckley -n '__fish_seen_subcommand_from config' -a path -d 'Show config file paths'
+
+# Doctor subcommands
+complete -c buckley -n '__fish_seen_subcommand_from doctor' -a check -d 'Validate configuration'
+complete -c buckley -n '__fish_seen_subcommand_from doctor' -a chat -d 'Run multi-turn chat health check'
 
 # Experiment subcommands
 complete -c buckley -n '__fish_seen_subcommand_from experiment' -a run -d 'Run an experiment'
@@ -1208,8 +1219,7 @@ func dispatchSubcommand(args []string) (bool, int) {
 	case "trust":
 		return true, runCommand(runTrustCommand, args[1:])
 	case "doctor":
-		// Alias for config check - quick system health check
-		return true, runCommand(runConfigCommand, []string{"check"})
+		return true, runCommand(runDoctorCommand, args[1:])
 	case "rules":
 		return true, runCommand(runRulesCommand, args[1:])
 	case "completion":
