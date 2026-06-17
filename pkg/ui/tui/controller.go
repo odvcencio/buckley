@@ -976,7 +976,7 @@ func (c *Controller) streamResponse(ctx context.Context, prompt string, sess *Se
 		modelID = "openai/gpt-4o"
 	}
 
-	fullResponse, usage, err := c.runToolLoop(ctx, sess, modelID)
+	fullResponse, usage, finishReason, err := c.runToolLoop(ctx, sess, modelID)
 	c.app.RemoveThinkingIndicator()
 	if err != nil {
 		if ctx.Err() == context.Canceled {
@@ -992,6 +992,9 @@ func (c *Controller) streamResponse(ctx context.Context, prompt string, sess *Se
 		c.app.AddMessage(fullResponse, "assistant")
 	} else {
 		c.app.AddMessage("(empty response from model)", "system")
+	}
+	if notice := modelFinishReasonNotice(finishReason); notice != "" {
+		c.app.AddMessage(notice, "system")
 	}
 
 	// Update token count and cost
@@ -1025,15 +1028,15 @@ func (c *Controller) streamResponse(ctx context.Context, prompt string, sess *Se
 	}
 
 	// Update status only if no more queued messages
-	c.app.SetStatus("Ready")
+	c.app.SetStatus(readyStatusForFinishReason(finishReason))
 }
 
-func (c *Controller) runToolLoop(ctx context.Context, sess *SessionState, modelID string) (string, *model.Usage, error) {
+func (c *Controller) runToolLoop(ctx context.Context, sess *SessionState, modelID string) (string, *model.Usage, string, error) {
 	if c.modelMgr == nil {
-		return "", nil, fmt.Errorf("model manager unavailable")
+		return "", nil, "", fmt.Errorf("model manager unavailable")
 	}
 	if sess == nil || sess.Conversation == nil {
-		return "", nil, fmt.Errorf("session unavailable")
+		return "", nil, "", fmt.Errorf("session unavailable")
 	}
 
 	useTools := sess.ToolRegistry != nil && c.modelMgr.SupportsTools(modelID)
@@ -1043,7 +1046,7 @@ func (c *Controller) runToolLoop(ctx context.Context, sess *SessionState, modelI
 
 	for iter := 0; iter < maxIterations; iter++ {
 		if ctx.Err() != nil {
-			return "", nil, ctx.Err()
+			return "", nil, "", ctx.Err()
 		}
 
 		var allowedTools []string
@@ -1078,20 +1081,21 @@ func (c *Controller) runToolLoop(ctx context.Context, sess *SessionState, modelI
 				useTools = false
 				continue
 			}
-			return "", nil, err
+			return "", nil, "", err
 		}
 		totalUsage = addUsage(totalUsage, resp.Usage)
 
 		if len(resp.Choices) == 0 {
-			return "", nil, model.NoResponseChoicesError(req, resp)
+			return "", nil, "", model.NoResponseChoicesError(req, resp)
 		}
 
-		msg := resp.Choices[0].Message
+		choice := resp.Choices[0]
+		msg := choice.Message
 		if len(msg.ToolCalls) == 0 {
 			c.app.SetStatus("Finalizing response")
 			text, err := model.ExtractTextContent(msg.Content)
 			if err != nil {
-				return "", nil, err
+				return "", nil, "", err
 			}
 			// If model put its reply in reasoning with empty content, use reasoning
 			if text == "" && strings.TrimSpace(msg.Reasoning) != "" {
@@ -1099,7 +1103,7 @@ func (c *Controller) runToolLoop(ctx context.Context, sess *SessionState, modelI
 			}
 			sess.Conversation.AddAssistantMessageWithReasoningDetails(text, msg.Reasoning, msg.ReasoningDetails)
 			c.saveLatestConversationMessage(sess)
-			return text, &totalUsage, nil
+			return text, &totalUsage, choice.FinishReason, nil
 		}
 
 		for i := range msg.ToolCalls {
@@ -1154,7 +1158,7 @@ func (c *Controller) runToolLoop(ctx context.Context, sess *SessionState, modelI
 		}
 	}
 
-	return "", &totalUsage, fmt.Errorf("max tool calling iterations (%d) exceeded", maxIterations)
+	return "", &totalUsage, "", fmt.Errorf("max tool calling iterations (%d) exceeded", maxIterations)
 }
 
 func modelProcessStatus(modelID string, iteration, toolCount int, reasoning *model.ReasoningConfig) string {
@@ -1173,6 +1177,36 @@ func modelProcessStatus(modelID string, iteration, toolCount int, reasoning *mod
 		phase += " - " + strings.Join(details, ", ")
 	}
 	return phase
+}
+
+func modelFinishReasonNotice(reason string) string {
+	trimmed := strings.TrimSpace(reason)
+	switch strings.ToLower(trimmed) {
+	case "", "stop", "tool_calls":
+		return ""
+	case "length", "max_tokens", "max_output_tokens", "token_limit":
+		return "Response stopped because the provider reported finish_reason=" + trimmed + ", which usually means the output token limit was reached. Ask Buckley to continue, reduce context, or raise the chat max_tokens setting."
+	case "content_filter", "safety":
+		return "Response stopped because the provider reported finish_reason=" + trimmed + "."
+	default:
+		return fmt.Sprintf("Response stopped with provider finish_reason=%q.", trimmed)
+	}
+}
+
+func readyStatusForFinishReason(reason string) string {
+	if isTokenLimitFinishReason(reason) {
+		return "Ready - output token limit reached"
+	}
+	return "Ready"
+}
+
+func isTokenLimitFinishReason(reason string) bool {
+	switch strings.ToLower(strings.TrimSpace(reason)) {
+	case "length", "max_tokens", "max_output_tokens", "token_limit":
+		return true
+	default:
+		return false
+	}
 }
 
 func compactStatusText(text string, maxLen int) string {

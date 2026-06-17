@@ -79,3 +79,22 @@ func TestModelProcessStatus(t *testing.T) {
 		t.Fatalf("unexpected model process status: %q", got)
 	}
 }
+
+func TestModelFinishReasonNotice(t *testing.T) {
+	if got := modelFinishReasonNotice("stop"); got != "" {
+		t.Fatalf("stop should not produce a notice, got %q", got)
+	}
+
+	got := modelFinishReasonNotice("length")
+	if !strings.Contains(got, "output token limit") {
+		t.Fatalf("length notice should mention output token limit, got %q", got)
+	}
+	if status := readyStatusForFinishReason("length"); status != "Ready - output token limit reached" {
+		t.Fatalf("ready status for length = %q", status)
+	}
+
+	got = modelFinishReasonNotice("content_filter")
+	if !strings.Contains(got, "content_filter") {
+		t.Fatalf("content_filter notice should include reason, got %q", got)
+	}
+}
