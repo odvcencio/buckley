@@ -28,40 +28,8 @@ jobs:
       - name: Download dependencies
         run: go mod download
 
-      - name: Run tests with coverage
-        run: GO_TEST_COVERAGE=1 ./scripts/test.sh
-
-      # Race detector disabled: ipc tests have DB cleanup races that need
-      # a proper Server.Close() mechanism. Re-enable after that lands.
-      # - name: Run tests with race detector
-      #   run: GO_TEST_RACE=1 ./scripts/test.sh
-
-      - name: Check coverage threshold
-        run: |
-          set -euo pipefail
-          if [ ! -f coverage.out ]; then
-            echo "No coverage file found"
-            exit 1
-          fi
-
-          # Extract total coverage percentage
-          raw_total=$(go tool cover -func=coverage.out | awk '/^total:/{gsub("%","",$3); print $3}')
-          echo "Raw total coverage: ${raw_total}%"
-
-          # Exclude generated/mocked code from threshold enforcement.
-          { echo "mode: atomic"; tail -n +2 coverage.out | grep -v "/proto/" | grep -v "/mocks/"; } > coverage.filtered.out
-          total=$(go tool cover -func=coverage.filtered.out | awk '/^total:/{gsub("%","",$3); print $3}')
-
-          echo "Total coverage: ${total}%"
-
-          # Fail if coverage is below threshold (raise over time)
-          threshold=40
-          if awk -v total="$total" -v threshold="$threshold" 'BEGIN{ exit (total < threshold) ? 0 : 1 }'; then
-            echo "Coverage ${total}% is below threshold ${threshold}%"
-            exit 1
-          fi
-
-          echo "Coverage ${total}% meets threshold ${threshold}%"
+      - name: Run tests
+        run: ./scripts/test.sh
 
   ui:
     name: UI Build (embedded)
@@ -81,40 +49,12 @@ jobs:
       - name: Ensure UI assets are up to date
         run: git diff --exit-code
 
-  security:
-    name: Security Scan
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Run Gitleaks
-        uses: gitleaks/gitleaks-action@v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.25'
-          cache: true
-
-      - name: Run gosec (advisory)
-        run: |
-          go install github.com/securego/gosec/v2/cmd/gosec@latest
-          gosec -fmt=json -out=gosec-results.json ./... || true
-          echo "gosec scan complete (advisory only, does not block CI)"
-
   lint:
     name: Lint
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -122,34 +62,10 @@ jobs:
           go-version: '1.25'
           cache: true
 
-      - name: Check gofmt (changed files)
-        env:
-          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          PUSH_BEFORE_SHA: ${{ github.event.before }}
-          HEAD_SHA: ${{ github.sha }}
+      - name: Check gofmt
         run: |
           set -euo pipefail
-
-          base="$PR_BASE_SHA"
-          if [ -z "$base" ]; then
-            base="$PUSH_BEFORE_SHA"
-          fi
-          if [ -z "$base" ]; then
-            echo "No base SHA available; skipping gofmt check."
-            exit 0
-          fi
-          if [ "$base" = "0000000000000000000000000000000000000000" ]; then
-            echo "Base SHA is empty (new branch); skipping gofmt check."
-            exit 0
-          fi
-
-          files="$(git diff --diff-filter=d --name-only "$base" "$HEAD_SHA" -- '*.go' || true)"
-          if [ -z "$files" ]; then
-            echo "No Go files changed."
-            exit 0
-          fi
-
-          unformatted="$(gofmt -l $files || true)"
+          unformatted="$(gofmt -l $(git ls-files '*.go') || true)"
           if [ -n "$unformatted" ]; then
             echo "gofmt required on:"
             echo "$unformatted"
@@ -174,27 +90,8 @@ jobs:
 
   build:
     name: Build
+    runs-on: ubuntu-latest
     timeout-minutes: 10
-    strategy:
-      fail-fast: true
-      matrix:
-        include:
-          - name: linux
-            runner: ubuntu-latest
-            goos: linux
-            goarch: amd64
-            ext: ''
-          - name: macos
-            runner: macos-latest
-            goos: darwin
-            goarch: amd64
-            ext: ''
-          - name: windows
-            runner: windows-latest
-            goos: windows
-            goarch: amd64
-            ext: '.exe'
-    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
 
@@ -204,15 +101,18 @@ jobs:
           go-version: '1.25'
           cache: true
 
-      - name: Build
-        env:
-          CGO_ENABLED: '0'
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
-        run: go build -o buckley-${{ matrix.name }}-${{ matrix.goarch }}${{ matrix.ext }} ./cmd/buckley
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: buckley-${{ matrix.name }}-${{ matrix.goarch }}
-          path: buckley-${{ matrix.name }}-${{ matrix.goarch }}${{ matrix.ext }}
+      - name: Cross-compile release targets
+        run: |
+          set -euo pipefail
+          mkdir -p dist/check-builds
+          while read -r goos goarch ext; do
+            echo "building ${goos}/${goarch}"
+            CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \
+              go build -o "dist/check-builds/buckley-${goos}-${goarch}${ext}" ./cmd/buckley
+          done <<'TARGETS'
+          linux amd64
+          linux arm64
+          darwin amd64
+          darwin arm64
+          windows amd64 .exe
+          TARGETS

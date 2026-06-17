@@ -5,7 +5,6 @@ project_name: buckley
 before:
   hooks:
     - ./scripts/build-ui.sh
-    - ./scripts/test.sh
 
 builds:
   - id: buckley

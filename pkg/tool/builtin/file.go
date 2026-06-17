@@ -410,7 +410,7 @@ func (t *FindFilesTool) Name() string {
 }
 
 func (t *FindFilesTool) Description() string {
-	return "Find files matching a glob pattern. Searches recursively from base directory. Patterns like '*.go' match files by extension, 'test_*.py' by prefix. Use this to locate specific files or file types across the codebase."
+	return "Find files matching a glob pattern. Searches recursively from base directory while skipping common dependency and build-output directories. Patterns like '*.go' match files by extension, 'test_*.py' by prefix. Use this to locate specific files or file types across the codebase."
 }
 
 func (t *FindFilesTool) Parameters() ParameterSchema {
@@ -459,6 +459,9 @@ func (t *FindFilesTool) Execute(params map[string]any) (*Result, error) {
 			return nil // Skip errors
 		}
 		if info.IsDir() {
+			if shouldSkipFindFilesDir(path, absBasePath) {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 
@@ -486,14 +489,44 @@ func (t *FindFilesTool) Execute(params map[string]any) (*Result, error) {
 		}, nil
 	}
 
-	return &Result{
+	result := &Result{
 		Success: true,
 		Data: map[string]any{
 			"pattern": pattern,
 			"matches": matches,
 			"count":   len(matches),
 		},
-	}, nil
+	}
+
+	const maxDisplayMatches = 200
+	if len(matches) > maxDisplayMatches {
+		result.ShouldAbridge = true
+		result.DisplayData = map[string]any{
+			"pattern": pattern,
+			"matches": matches[:maxDisplayMatches],
+			"count":   len(matches),
+			"summary": fmt.Sprintf("Found %d files matching %q (showing first %d)", len(matches), pattern, maxDisplayMatches),
+		}
+	}
+
+	return result, nil
+}
+
+func shouldSkipFindFilesDir(path, base string) bool {
+	name := filepath.Base(path)
+	if path == base {
+		return false
+	}
+	switch name {
+	case ".git", ".hg", ".svn",
+		"node_modules", "bower_components",
+		"target", ".next", ".nuxt", ".turbo", ".cache",
+		"dist", "coverage",
+		".venv", "venv", "__pycache__":
+		return true
+	default:
+		return false
+	}
 }
 
 // FileExistsTool checks if a file exists

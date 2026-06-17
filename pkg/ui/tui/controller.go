@@ -1154,11 +1154,50 @@ func formatToolResultForModel(result *builtin.Result, execErr error) string {
 	if result == nil {
 		return "No result"
 	}
-	encoded, err := tool.ToJSON(result)
+	encoded, err := tool.ToJSON(modelFacingToolResult(result))
 	if err != nil {
 		return fmt.Sprintf("{\"success\":%t}", result.Success)
 	}
-	return encoded
+	return truncateModelToolOutput(encoded, defaultTUIToolModelMaxBytes)
+}
+
+func modelFacingToolResult(result *builtin.Result) *builtin.Result {
+	if result == nil {
+		return nil
+	}
+	if !result.ShouldAbridge || len(result.DisplayData) == 0 {
+		return result
+	}
+	abridged := *result
+	abridged.Data = cloneAnyMap(result.DisplayData)
+	abridged.DisplayData = nil
+	abridged.ShouldAbridge = false
+	return &abridged
+}
+
+func cloneAnyMap(input map[string]any) map[string]any {
+	if len(input) == 0 {
+		return nil
+	}
+	output := make(map[string]any, len(input))
+	for k, v := range input {
+		output[k] = v
+	}
+	return output
+}
+
+func truncateModelToolOutput(content string, maxBytes int) string {
+	if maxBytes <= 0 || len(content) <= maxBytes {
+		return content
+	}
+	marker := fmt.Sprintf("\n\n... tool output truncated for chat context (%d bytes omitted). Ask for a narrower query/path or inspect a specific file range. ...\n\n", len(content)-maxBytes)
+	if len(marker) >= maxBytes {
+		return takePrefixBytes(marker, maxBytes)
+	}
+	available := maxBytes - len(marker)
+	headBytes := available * 2 / 3
+	tailBytes := available - headBytes
+	return takePrefixBytes(content, headBytes) + marker + takeSuffixBytes(content, tailBytes)
 }
 
 func toolDisplayMessage(name string, result *builtin.Result, execErr error) string {
@@ -1265,7 +1304,61 @@ func (c *Controller) buildMessagesForSession(sess *SessionState) []model.Message
 		messages = append(messages, sess.Conversation.ToModelMessages()...)
 	}
 
+	return truncateModelToolMessages(messages, defaultTUIToolModelMaxBytes)
+}
+
+func truncateModelToolMessages(messages []model.Message, maxBytes int) []model.Message {
+	if maxBytes <= 0 {
+		return messages
+	}
+	for i := range messages {
+		if messages[i].Role != "tool" {
+			continue
+		}
+		content, ok := messages[i].Content.(string)
+		if !ok {
+			continue
+		}
+		messages[i].Content = truncateModelToolOutput(content, maxBytes)
+	}
 	return messages
+}
+
+func takePrefixBytes(s string, n int) string {
+	if n <= 0 {
+		return ""
+	}
+	if len(s) <= n {
+		return s
+	}
+	cut := 0
+	for i := range s {
+		if i > n {
+			break
+		}
+		cut = i
+	}
+	if cut == 0 {
+		return ""
+	}
+	return s[:cut]
+}
+
+func takeSuffixBytes(s string, n int) string {
+	if n <= 0 {
+		return ""
+	}
+	if len(s) <= n {
+		return s
+	}
+	start := len(s)
+	for i := range s {
+		if len(s)-i <= n {
+			start = i
+			break
+		}
+	}
+	return s[start:]
 }
 
 // buildSystemPrompt constructs the system prompt.
@@ -1324,6 +1417,9 @@ func commandAvailable(name string) bool {
 
 // defaultTUIMaxOutputBytes limits tool output in TUI mode.
 const defaultTUIMaxOutputBytes = 100_000
+
+// defaultTUIToolModelMaxBytes limits each tool result sent back to the model.
+const defaultTUIToolModelMaxBytes = 24 * 1024
 
 // buildRegistry creates the tool registry with all available tools.
 func buildRegistry(cfg *config.Config, store *storage.Store, workDir string, hub *telemetry.Hub, sessionID string) *tool.Registry {

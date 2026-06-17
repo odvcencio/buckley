@@ -1,6 +1,7 @@
 package builtin
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -428,6 +429,67 @@ func TestFindFilesTool(t *testing.T) {
 		}
 		if len(matches) != 1 {
 			t.Errorf("expected 1 match, got %d", len(matches))
+		}
+	})
+
+	t.Run("skips dependency directories", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		srcDir := filepath.Join(tmpDir, "src")
+		depDir := filepath.Join(tmpDir, "node_modules", "pkg")
+		if err := os.MkdirAll(srcDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(depDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(srcDir, "package.json"), []byte("{}"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(depDir, "package.json"), []byte("{}"), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		result, err := tool.Execute(map[string]any{
+			"pattern":   "package.json",
+			"base_path": tmpDir,
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		matches := result.Data["matches"].([]string)
+		if len(matches) != 1 || matches[0] != filepath.Join("src", "package.json") {
+			t.Fatalf("matches = %#v, want only src/package.json", matches)
+		}
+	})
+
+	t.Run("abridges large result sets", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		for i := 0; i < 205; i++ {
+			name := fmt.Sprintf("file-%03d.go", i)
+			if err := os.WriteFile(filepath.Join(tmpDir, name), []byte("package main"), 0644); err != nil {
+				t.Fatal(err)
+			}
+		}
+
+		result, err := tool.Execute(map[string]any{
+			"pattern":   "*.go",
+			"base_path": tmpDir,
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !result.ShouldAbridge {
+			t.Fatal("expected large result set to be abridged")
+		}
+		if result.Data["count"].(int) != 205 {
+			t.Fatalf("full result count = %v, want 205", result.Data["count"])
+		}
+		displayMatches, ok := result.DisplayData["matches"].([]string)
+		if !ok {
+			t.Fatalf("display matches type = %T, want []string", result.DisplayData["matches"])
+		}
+		if len(displayMatches) != 200 {
+			t.Fatalf("display matches length = %d, want 200", len(displayMatches))
 		}
 	})
 }

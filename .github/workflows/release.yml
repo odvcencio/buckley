@@ -9,6 +9,11 @@ on:
         description: "Git tag to release (e.g. v1.0.0)"
         required: true
         type: string
+      full:
+        description: "Build/sign containers and SBOMs"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: write
@@ -32,6 +37,7 @@ jobs:
           cache: true
 
       - name: Install release tooling (syft, cosign)
+        if: ${{ inputs.full }}
         run: |
           set -euo pipefail
           go install github.com/anchore/syft/cmd/syft@v1.38.2
@@ -44,9 +50,11 @@ jobs:
           bun-version: '1.2.21'
 
       - name: Set up Docker Buildx
+        if: ${{ inputs.full }}
         uses: docker/setup-buildx-action@v3
 
       - name: Log in to GitHub Container Registry
+        if: ${{ inputs.full }}
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -54,6 +62,17 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Run GoReleaser
+        if: ${{ !inputs.full }}
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: v2.13.1
+          args: release --clean --skip=docker
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Run GoReleaser with containers
+        if: ${{ inputs.full }}
         uses: goreleaser/goreleaser-action@v6
         with:
           distribution: goreleaser
@@ -63,6 +82,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Generate SBOMs (source + container)
+        if: ${{ inputs.full }}
         run: |
           set -euo pipefail
           tag="${{ inputs.tag }}"
@@ -72,6 +92,7 @@ jobs:
           syft "ghcr.io/${GITHUB_REPOSITORY_OWNER}/buckley:${version}" -o cyclonedx-json=dist/sbom-image.cdx.json
 
       - name: Sign checksums + SBOMs (keyless)
+        if: ${{ inputs.full }}
         env:
           COSIGN_YES: "true"
         run: |
@@ -87,6 +108,7 @@ jobs:
             --output-certificate dist/sbom-image.cdx.json.pem
 
       - name: Sign container image (keyless)
+        if: ${{ inputs.full }}
         env:
           COSIGN_YES: "true"
         run: |
@@ -99,6 +121,7 @@ jobs:
           fi
 
       - name: Upload signatures + SBOMs to GitHub Release
+        if: ${{ inputs.full }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
