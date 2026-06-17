@@ -69,14 +69,30 @@ func TestPreferredModelIDs(t *testing.T) {
 }
 
 func TestModelProcessStatus(t *testing.T) {
-	got := modelProcessStatus("z-ai/glm-5.2", 0, 12, nil)
-	if got != "Thinking with z-ai/glm-5.2 - 12 tools" {
+	got := modelProcessStatus("z-ai/glm-5.2", 0, 50, 12, nil)
+	if got != "Thinking with z-ai/glm-5.2 - round 1/50, 12 tools" {
 		t.Fatalf("modelProcessStatus() = %q", got)
 	}
 
-	got = modelProcessStatus("very/long-model-name-that-will-not-fit-in-the-status-bar", 1, 0, nil)
+	got = modelProcessStatus("very/long-model-name-that-will-not-fit-in-the-status-bar", 1, 50, 0, nil)
 	if !strings.HasPrefix(got, "Thinking after tools with very/long-model-name") {
 		t.Fatalf("unexpected model process status: %q", got)
+	}
+	if !strings.Contains(got, "round 2/50") {
+		t.Fatalf("expected round indicator in status: %q", got)
+	}
+}
+
+func TestMaxToolIterationsError(t *testing.T) {
+	err := maxToolIterationsError(50)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "50 model/tool rounds") {
+		t.Fatalf("expected model/tool round count, got %q", err.Error())
+	}
+	if strings.Contains(err.Error(), "max tool calling iterations") {
+		t.Fatalf("error should be user-facing, got %q", err.Error())
 	}
 }
 

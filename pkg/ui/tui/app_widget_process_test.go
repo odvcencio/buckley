@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"m31labs.dev/buckley/pkg/ui/backend/sim"
+	"m31labs.dev/buckley/pkg/ui/widgets"
 )
 
 func TestFormatProcessElapsed(t *testing.T) {
@@ -53,5 +54,36 @@ func TestWidgetAppProcessStatusAnimates(t *testing.T) {
 	}
 	if got := app.statusBar.Status(); got != "Ready" {
 		t.Fatalf("expected status to restore to Ready, got %q", got)
+	}
+}
+
+func TestWidgetAppSidebarDoesNotAutoShowForTransientTools(t *testing.T) {
+	be := sim.New(120, 24)
+	app, err := NewWidgetApp(WidgetAppConfig{Backend: be})
+	if err != nil {
+		t.Fatalf("NewWidgetApp: %v", err)
+	}
+	app.minWidthForSidebar = 1
+
+	if app.IsSidebarVisible() {
+		t.Fatal("sidebar should start hidden when it has no content")
+	}
+
+	app.SetRunningTools([]widgets.RunningTool{{ID: "tool-1", Name: "read_file", Command: "AGENTS.md"}})
+	if app.IsSidebarVisible() {
+		t.Fatal("transient tool telemetry should not auto-show sidebar")
+	}
+	if !app.sidebar.HasContent() {
+		t.Fatal("sidebar should retain telemetry content while hidden")
+	}
+
+	app.SetSidebarVisible(true)
+	if !app.IsSidebarVisible() {
+		t.Fatal("explicit sidebar visibility should show sidebar at wide terminal widths")
+	}
+
+	app.SetRunningTools(nil)
+	if !app.IsSidebarVisible() {
+		t.Fatal("sidebar should not auto-hide when transient telemetry clears")
 	}
 }

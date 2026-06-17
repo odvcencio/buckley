@@ -57,6 +57,7 @@ type WidgetApp struct {
 
 	// Sidebar state
 	sidebarVisible     bool
+	sidebarWanted      bool
 	minWidthForSidebar int // Auto-hide below this width
 
 	// File picker
@@ -277,6 +278,7 @@ func NewWidgetApp(cfg WidgetAppConfig) (*WidgetApp, error) {
 		root:                root,
 		mainArea:            mainArea,
 		sidebarVisible:      sidebarVisible,
+		sidebarWanted:       sidebarVisible,
 		minWidthForSidebar:  100,
 		filePicker:          fp,
 		theme:               th,
@@ -1052,7 +1054,7 @@ func (a *WidgetApp) refreshInputLayout() {
 
 func (a *WidgetApp) updateSidebarVisibility() {
 	w, _ := a.screen.Size()
-	shouldShow := w >= a.minWidthForSidebar && a.sidebar.HasContent()
+	shouldShow := a.sidebarWanted && w >= a.minWidthForSidebar
 	if shouldShow == a.sidebarVisible {
 		return
 	}
@@ -1468,13 +1470,13 @@ func (a *WidgetApp) RequestApproval(req ApprovalRequestMsg) {
 
 // toggleSidebar toggles the sidebar visibility and rebuilds the layout.
 func (a *WidgetApp) toggleSidebar() {
-	a.sidebarVisible = !a.sidebarVisible
+	a.sidebarWanted = !a.sidebarWanted
+	a.updateSidebarVisibility()
 	if a.sidebarVisible {
 		a.setStatusOverride("Sidebar shown", 2*time.Second)
 	} else {
 		a.setStatusOverride("Sidebar hidden", 2*time.Second)
 	}
-	a.rebuildLayout()
 }
 
 // rebuildLayout rebuilds the main area layout based on sidebar visibility.
@@ -1512,10 +1514,8 @@ func (a *WidgetApp) rebuildLayout() {
 
 // SetSidebarVisible sets the sidebar visibility.
 func (a *WidgetApp) SetSidebarVisible(visible bool) {
-	if a.sidebarVisible != visible {
-		a.sidebarVisible = visible
-		a.rebuildLayout()
-	}
+	a.sidebarWanted = visible
+	a.updateSidebarVisibility()
 }
 
 // IsSidebarVisible returns the sidebar visibility state.

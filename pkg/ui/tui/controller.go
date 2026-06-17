@@ -83,6 +83,8 @@ type SessionState struct {
 	MessageQueue  []QueuedMessage // Messages queued while streaming
 }
 
+const interactiveMaxToolIterations = 50
+
 // ControllerConfig configures the controller.
 type ControllerConfig struct {
 	Config       *config.Config
@@ -1041,7 +1043,7 @@ func (c *Controller) runToolLoop(ctx context.Context, sess *SessionState, modelI
 
 	useTools := sess.ToolRegistry != nil && c.modelMgr.SupportsTools(modelID)
 	toolChoice := "auto"
-	maxIterations := 10
+	maxIterations := interactiveMaxToolIterations
 	totalUsage := model.Usage{}
 
 	for iter := 0; iter < maxIterations; iter++ {
@@ -1072,7 +1074,7 @@ func (c *Controller) runToolLoop(ctx context.Context, sess *SessionState, modelI
 			req.Reasoning = &model.ReasoningConfig{Effort: effort}
 		}
 
-		c.app.StartProcessStatus(modelProcessStatus(modelID, iter, len(req.Tools), req.Reasoning))
+		c.app.StartProcessStatus(modelProcessStatus(modelID, iter, maxIterations, len(req.Tools), req.Reasoning))
 		resp, err := c.modelMgr.ChatCompletion(ctx, req)
 		c.app.StopProcessStatus()
 		if err != nil {
@@ -1158,15 +1160,18 @@ func (c *Controller) runToolLoop(ctx context.Context, sess *SessionState, modelI
 		}
 	}
 
-	return "", &totalUsage, "", fmt.Errorf("max tool calling iterations (%d) exceeded", maxIterations)
+	return "", &totalUsage, "", maxToolIterationsError(maxIterations)
 }
 
-func modelProcessStatus(modelID string, iteration, toolCount int, reasoning *model.ReasoningConfig) string {
+func modelProcessStatus(modelID string, iteration, maxIterations, toolCount int, reasoning *model.ReasoningConfig) string {
 	phase := "Thinking with " + compactStatusText(modelID, 44)
 	if iteration > 0 {
 		phase = "Thinking after tools with " + compactStatusText(modelID, 34)
 	}
 	var details []string
+	if maxIterations > 0 {
+		details = append(details, fmt.Sprintf("round %d/%d", iteration+1, maxIterations))
+	}
 	if toolCount > 0 {
 		details = append(details, fmt.Sprintf("%d tools", toolCount))
 	}
@@ -1177,6 +1182,10 @@ func modelProcessStatus(modelID string, iteration, toolCount int, reasoning *mod
 		phase += " - " + strings.Join(details, ", ")
 	}
 	return phase
+}
+
+func maxToolIterationsError(maxIterations int) error {
+	return fmt.Errorf("stopped after %d model/tool rounds because the model kept requesting tools instead of returning a final answer; ask it to continue with a narrower request or run a no-tools follow-up if it already has enough context", maxIterations)
 }
 
 func modelFinishReasonNotice(reason string) string {
