@@ -77,6 +77,7 @@ type SessionState struct {
 	SkillRegistry *skill.Registry
 	SkillState    *skill.RuntimeState
 	Streaming     bool
+	Compacting    bool
 	Cancel        context.CancelFunc
 	MessageQueue  []QueuedMessage // Messages queued while streaming
 }
@@ -319,9 +320,6 @@ func (c *Controller) Run() error {
 
 // handleSubmit processes user input submission.
 func (c *Controller) handleSubmit(text string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
 	if text == "" {
 		return
 	}
@@ -332,8 +330,16 @@ func (c *Controller) handleSubmit(text string) {
 		return
 	}
 
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	// Get current session
 	sess := c.sessions[c.currentSession]
+
+	if sess.Compacting {
+		c.app.AddMessage("Context compaction is running. Wait for it to finish before sending another message.", "system")
+		return
+	}
 
 	// If session is streaming, queue the message instead of starting new stream
 	if sess.Streaming {
@@ -370,8 +376,11 @@ func (c *Controller) handleCommand(text string) {
 	cmd := strings.ToLower(parts[0])
 
 	switch cmd {
-	case "/new", "/clear", "/reset":
+	case "/new":
 		c.newSession()
+
+	case "/clear", "/reset":
+		c.clearCurrentSession()
 
 	case "/sessions", "/tabs":
 		c.listSessions()
@@ -390,20 +399,51 @@ func (c *Controller) handleCommand(text string) {
 				return
 			}
 			modelID := strings.TrimSpace(strings.Join(parts[1:], " "))
-			c.setExecutionModelLocked(modelID)
+			c.setExecutionModel(modelID)
 		} else {
+			c.mu.Lock()
 			c.showModelPickerLocked()
+			c.mu.Unlock()
 		}
+
+	case "/tokens", "/context", "/usage", "/status":
+		c.showContextReport()
+
+	case "/history":
+		c.showHistory(parts[1:])
+
+	case "/export":
+		c.exportCurrentSession(parts[1:])
+
+	case "/compact", "/summarize":
+		c.compactCurrentSession()
+
+	case "/cancel", "/stop":
+		c.cancelCurrentStream()
+
+	case "/plans":
+		c.showPlans()
+
+	case "/config":
+		c.showConfigSummary()
 
 	case "/help":
 		c.app.AddMessage(`Commands:
-  /new, /clear, /reset - Start a new session
+  /new                 - Start a new session
+  /clear, /reset       - Clear the current session
+  /tokens, /context    - Show context, token, and tool-output budget
+  /compact             - Summarize older context in the current session
+  /history             - Show recent conversation turns
+  /export [file]       - Export the current conversation to Markdown
+  /cancel, /stop       - Cancel the current response and clear queued input
   /sessions, /tabs     - List active sessions
   /next, /n            - Switch to next session
   /prev, /p            - Switch to previous session
   /model [id]          - Pick or set the execution model
   /model curate        - Curate models for ACP/editor pickers
   /skill [name|list]   - List or activate a skill
+  /plans               - List saved plans
+  /config              - Show active Buckley config summary
   /review              - Review current git diff
   /commit              - Generate commit message for staged changes
   /help                - Show this help
@@ -524,7 +564,9 @@ func (c *Controller) collectModelPickerItemsLocked(curated map[string]struct{}) 
 
 func (c *Controller) handleModelCurate(args []string) {
 	if len(args) == 0 {
+		c.mu.Lock()
 		c.showModelCuratePickerLocked()
+		c.mu.Unlock()
 		return
 	}
 
@@ -855,8 +897,19 @@ func preferredModelIDs(execID, planID, reviewID string, catalog map[string]model
 
 // newSession creates a new session, clearing the current conversation.
 func (c *Controller) newSession() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	// Mark old session as completed
 	oldSess := c.sessions[c.currentSession]
+	if oldSess.Compacting {
+		c.app.AddMessage("Context compaction is running. Wait for it to finish before starting a new session.", "system")
+		return
+	}
+	if oldSess.Streaming {
+		c.app.AddMessage("A response is still running. Use /cancel before starting a new session.", "system")
+		return
+	}
 	if oldSess.ID != "" {
 		_ = c.store.SetSessionStatus(oldSess.ID, storage.SessionStatusCompleted)
 	}
@@ -1612,16 +1665,7 @@ Focus on:
 
 Be specific with file:line references. Flag critical issues first.`, "```diff\n"+diff+"\n```")
 
-	// Display as user message and stream response
-	c.app.AddMessage("/review", "user")
-
-	sess := c.sessions[c.currentSession]
-	ctx, cancel := context.WithCancel(context.Background())
-	sess.Cancel = cancel
-	sess.Streaming = true
-	c.emitStreaming(sess.ID, true)
-
-	go c.streamResponse(ctx, prompt, sess)
+	c.startSessionPrompt("/review", prompt)
 }
 
 // handleCommit generates a commit message for staged changes.
@@ -1661,20 +1705,13 @@ Requirements:
 
 Output ONLY the commit message, nothing else.`, "```diff\n"+diff+"\n```", recentCommits)
 
-	// Display as user message and stream response
-	c.app.AddMessage("/commit", "user")
-
-	sess := c.sessions[c.currentSession]
-	ctx, cancel := context.WithCancel(context.Background())
-	sess.Cancel = cancel
-	sess.Streaming = true
-	c.emitStreaming(sess.ID, true)
-
-	go c.streamResponse(ctx, prompt, sess)
+	c.startSessionPrompt("/commit", prompt)
 }
 
 func (c *Controller) handleSkillCommand(args []string) {
+	c.mu.Lock()
 	sess := c.sessions[c.currentSession]
+	c.mu.Unlock()
 	if sess == nil || sess.SkillRegistry == nil || sess.SkillState == nil {
 		c.app.AddMessage("Skill system unavailable in this session.", "system")
 		return

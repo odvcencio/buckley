@@ -439,6 +439,8 @@ func (a *WidgetApp) showCommandPalette() {
 		{ID: "clear", Category: "Session", Label: "Clear Messages", Shortcut: "/clear"},
 		{ID: "history", Category: "Session", Label: "View History", Shortcut: "/history"},
 		{ID: "export", Category: "Session", Label: "Export Conversation", Shortcut: "/export"},
+		{ID: "compact", Category: "Session", Label: "Compact Context", Shortcut: "/compact"},
+		{ID: "cancel", Category: "Session", Label: "Cancel Response", Shortcut: "/cancel"},
 
 		// Navigation commands
 		{ID: "toggle-sidebar", Category: "View", Label: "Toggle Sidebar", Shortcut: "Ctrl+B"},
@@ -449,11 +451,11 @@ func (a *WidgetApp) showCommandPalette() {
 
 		// Model commands
 		{ID: "models", Category: "Model", Label: "Select Model", Shortcut: "/model"},
-		{ID: "usage", Category: "Model", Label: "Show Usage Stats", Shortcut: "/usage"},
+		{ID: "usage", Category: "Model", Label: "Show Context Tokens", Shortcut: "/tokens"},
 
 		// Plan commands
 		{ID: "plans", Category: "Plan", Label: "List Plans", Shortcut: "/plans"},
-		{ID: "status", Category: "Plan", Label: "Plan Status", Shortcut: "/status"},
+		{ID: "status", Category: "Plan", Label: "Session Status", Shortcut: "/status"},
 
 		// System commands
 		{ID: "help", Category: "System", Label: "Show Help", Shortcut: "/help"},
@@ -482,7 +484,7 @@ func (a *WidgetApp) showCommandPalette() {
 func (a *WidgetApp) showSlashCommandPalette() {
 	palette := widgets.NewPaletteWidget("Commands")
 	palette.SetPlaceholder("/")
-	palette.SetMaxVisible(10)
+	palette.SetMaxVisible(14)
 
 	// Slash command items
 	items := []widgets.PaletteItem{
@@ -490,11 +492,18 @@ func (a *WidgetApp) showSlashCommandPalette() {
 		{ID: "/commit", Label: "/commit", Description: "Generate commit message"},
 		{ID: "/new", Label: "/new", Description: "Start a new session"},
 		{ID: "/clear", Label: "/clear", Description: "Clear current session"},
+		{ID: "/tokens", Label: "/tokens", Description: "Show context and token budget"},
+		{ID: "/compact", Label: "/compact", Description: "Summarize older context"},
+		{ID: "/history", Label: "/history", Description: "Show recent turns"},
+		{ID: "/export", Label: "/export", Description: "Export conversation to Markdown"},
+		{ID: "/cancel", Label: "/cancel", Description: "Cancel current response"},
 		{ID: "/sessions", Label: "/sessions", Description: "List active sessions"},
 		{ID: "/next", Label: "/next", Description: "Switch to next session"},
 		{ID: "/prev", Label: "/prev", Description: "Switch to previous session"},
 		{ID: "/model", Label: "/model", Description: "Select execution model"},
 		{ID: "/model curate", Label: "/model curate", Description: "Curate models for ACP/editor pickers"},
+		{ID: "/plans", Label: "/plans", Description: "List saved plans"},
+		{ID: "/config", Label: "/config", Description: "Show config summary"},
 		{ID: "/help", Label: "/help", Description: "Show available commands"},
 		{ID: "/quit", Label: "/quit", Description: "Exit Buckley"},
 	}
@@ -1154,10 +1163,13 @@ func (a *WidgetApp) handlePaletteCommand(id string) {
 	switch id {
 	// Session commands
 	case "new":
-		a.ClearScrollback()
-		a.AddMessage("Started new conversation", "system")
+		if a.onSubmit != nil {
+			a.onSubmit("/new")
+		}
 	case "clear":
-		a.ClearScrollback()
+		if a.onSubmit != nil {
+			a.onSubmit("/clear")
+		}
 	case "history":
 		// Submit /history command
 		if a.onSubmit != nil {
@@ -1166,6 +1178,14 @@ func (a *WidgetApp) handlePaletteCommand(id string) {
 	case "export":
 		if a.onSubmit != nil {
 			a.onSubmit("/export")
+		}
+	case "compact":
+		if a.onSubmit != nil {
+			a.onSubmit("/compact")
+		}
+	case "cancel":
+		if a.onSubmit != nil {
+			a.onSubmit("/cancel")
 		}
 
 	// View commands
@@ -1188,7 +1208,7 @@ func (a *WidgetApp) handlePaletteCommand(id string) {
 		}
 	case "usage":
 		if a.onSubmit != nil {
-			a.onSubmit("/usage")
+			a.onSubmit("/tokens")
 		}
 
 	// Plan commands
