@@ -104,6 +104,49 @@ func TestGitLogTool(t *testing.T) {
 		}
 		_ = result
 	})
+
+	t.Run("path overrides non-repo workdir", func(t *testing.T) {
+		repoDir := createTestGitRepo(t)
+		tool := &GitLogTool{}
+		tool.SetWorkDir(filepath.Dir(repoDir))
+
+		result, err := tool.Execute(map[string]any{
+			"path":  repoDir,
+			"count": float64(1),
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !result.Success {
+			t.Fatalf("expected success with explicit repo path: %s", result.Error)
+		}
+		commits, ok := result.Data["commits"].([]string)
+		if !ok || len(commits) != 1 {
+			t.Fatalf("expected one commit, got %#v", result.Data["commits"])
+		}
+	})
+
+	t.Run("git failure includes stderr", func(t *testing.T) {
+		if _, err := exec.LookPath("git"); err != nil {
+			t.Skipf("git not installed: %v", err)
+		}
+		tool := &GitLogTool{}
+		tool.SetWorkDir(t.TempDir())
+
+		result, err := tool.Execute(map[string]any{})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if result.Success {
+			t.Fatal("expected git log to fail outside a git repo")
+		}
+		if !strings.Contains(result.Error, "git command failed") {
+			t.Fatalf("expected wrapped git failure, got %q", result.Error)
+		}
+		if !strings.Contains(result.Error, "not a git repository") && !strings.Contains(result.Error, "fatal:") {
+			t.Fatalf("expected stderr details, got %q", result.Error)
+		}
+	})
 }
 
 func TestGitBlameTool(t *testing.T) {

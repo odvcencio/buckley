@@ -29,6 +29,16 @@ func TestDefaultConfig(t *testing.T) {
 			t.Fatalf("expected curated[%d] to be %s, got %s", i, want, cfg.Models.Curated[i])
 		}
 	}
+	wantFallback := []string{"moonshotai/kimi-k2.7-code", "qwen/qwen3.7-max", "qwen/qwen3.6-flash"}
+	gotFallback := cfg.Models.FallbackChains["z-ai/glm-5.2"]
+	if len(gotFallback) != len(wantFallback) {
+		t.Fatalf("expected GLM fallback chain %v, got %v", wantFallback, gotFallback)
+	}
+	for i, want := range wantFallback {
+		if gotFallback[i] != want {
+			t.Fatalf("expected GLM fallback[%d] to be %s, got %s", i, want, gotFallback[i])
+		}
+	}
 	if cfg.Models.Utility.Commit != "qwen/qwen3.6-flash" {
 		t.Fatalf("expected default commit model to be qwen/qwen3.6-flash, got %s", cfg.Models.Utility.Commit)
 	}

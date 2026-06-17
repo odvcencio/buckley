@@ -19,19 +19,33 @@ func (t *GitStatusTool) Description() string {
 
 func (t *GitStatusTool) Parameters() ParameterSchema {
 	return ParameterSchema{
-		Type:       "object",
-		Properties: map[string]PropertySchema{},
-		Required:   []string{},
+		Type: "object",
+		Properties: map[string]PropertySchema{
+			"path": {
+				Type:        "string",
+				Description: "Optional repository or directory path to inspect. Defaults to Buckley's current workdir.",
+			},
+			"repo_path": {
+				Type:        "string",
+				Description: "Optional repository or directory path to inspect. Alias for path.",
+			},
+		},
+		Required: []string{},
 	}
 }
 
 func (t *GitStatusTool) Execute(params map[string]any) (*Result, error) {
+	dir, err := gitCommandDir(t.workDir, params)
+	if err != nil {
+		return &Result{Success: false, Error: err.Error()}, nil
+	}
+
 	ctx, cancel := t.execContext()
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, "git", "status", "--porcelain")
-	if strings.TrimSpace(t.workDir) != "" {
-		cmd.Dir = strings.TrimSpace(t.workDir)
+	if strings.TrimSpace(dir) != "" {
+		cmd.Dir = strings.TrimSpace(dir)
 	}
 	cmd.Env = mergeEnv(cmd.Env, t.env)
 	output, err := cmd.CombinedOutput()
@@ -46,7 +60,7 @@ func (t *GitStatusTool) Execute(params map[string]any) (*Result, error) {
 	if err != nil {
 		return &Result{
 			Success: false,
-			Error:   fmt.Sprintf("git command failed: %v", err),
+			Error:   formatGitFailure(err, string(output)),
 		}, nil
 	}
 
@@ -82,12 +96,25 @@ func (t *GitDiffTool) Parameters() ParameterSchema {
 				Type:        "string",
 				Description: "Limit diff to specific file",
 			},
+			"path": {
+				Type:        "string",
+				Description: "Optional repository or directory path to run git diff in. Defaults to Buckley's current workdir.",
+			},
+			"repo_path": {
+				Type:        "string",
+				Description: "Optional repository or directory path to run git diff in. Alias for path.",
+			},
 		},
 		Required: []string{},
 	}
 }
 
 func (t *GitDiffTool) Execute(params map[string]any) (*Result, error) {
+	dir, err := gitCommandDir(t.workDir, params)
+	if err != nil {
+		return &Result{Success: false, Error: err.Error()}, nil
+	}
+
 	args := []string{"diff"}
 
 	if staged, ok := params["staged"].(bool); ok && staged {
@@ -95,8 +122,8 @@ func (t *GitDiffTool) Execute(params map[string]any) (*Result, error) {
 	}
 
 	if file, ok := params["file"].(string); ok && file != "" {
-		if strings.TrimSpace(t.workDir) != "" {
-			_, rel, err := resolveRelPath(t.workDir, file)
+		if strings.TrimSpace(dir) != "" {
+			_, rel, err := resolveRelPath(dir, file)
 			if err != nil {
 				return &Result{Success: false, Error: err.Error()}, nil
 			}
@@ -109,8 +136,8 @@ func (t *GitDiffTool) Execute(params map[string]any) (*Result, error) {
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, "git", args...)
-	if strings.TrimSpace(t.workDir) != "" {
-		cmd.Dir = strings.TrimSpace(t.workDir)
+	if strings.TrimSpace(dir) != "" {
+		cmd.Dir = strings.TrimSpace(dir)
 	}
 	cmd.Env = mergeEnv(cmd.Env, t.env)
 	stdout := newLimitedBuffer(t.maxOutputBytes)
@@ -118,7 +145,7 @@ func (t *GitDiffTool) Execute(params map[string]any) (*Result, error) {
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 
-	err := cmd.Run()
+	err = cmd.Run()
 
 	if ctx.Err() != nil {
 		return &Result{
@@ -130,7 +157,7 @@ func (t *GitDiffTool) Execute(params map[string]any) (*Result, error) {
 	if err != nil {
 		return &Result{
 			Success: false,
-			Error:   fmt.Sprintf("git command failed: %v", err),
+			Error:   formatGitFailure(err, stderr.String()),
 		}, nil
 	}
 
@@ -178,20 +205,39 @@ func (t *GitLogTool) Parameters() ParameterSchema {
 				Description: "Show one line per commit",
 				Default:     true,
 			},
+			"path": {
+				Type:        "string",
+				Description: "Optional repository or directory path to show log for. Defaults to Buckley's current workdir.",
+			},
+			"repo_path": {
+				Type:        "string",
+				Description: "Optional repository or directory path to show log for. Alias for path.",
+			},
 		},
 		Required: []string{},
 	}
 }
 
 func (t *GitLogTool) Execute(params map[string]any) (*Result, error) {
+	dir, err := gitCommandDir(t.workDir, params)
+	if err != nil {
+		return &Result{Success: false, Error: err.Error()}, nil
+	}
+
 	count := 10
 	if c, ok := params["count"].(float64); ok {
 		count = int(c)
+	} else if c, ok := params["count"].(int); ok {
+		count = c
 	}
 
 	args := []string{"log", fmt.Sprintf("-n%d", count)}
 
-	if oneline, ok := params["oneline"].(bool); ok && oneline {
+	oneline := true
+	if configured, ok := params["oneline"].(bool); ok {
+		oneline = configured
+	}
+	if oneline {
 		args = append(args, "--oneline")
 	}
 
@@ -199,8 +245,8 @@ func (t *GitLogTool) Execute(params map[string]any) (*Result, error) {
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, "git", args...)
-	if strings.TrimSpace(t.workDir) != "" {
-		cmd.Dir = strings.TrimSpace(t.workDir)
+	if strings.TrimSpace(dir) != "" {
+		cmd.Dir = strings.TrimSpace(dir)
 	}
 	cmd.Env = mergeEnv(cmd.Env, t.env)
 	output, err := cmd.CombinedOutput()
@@ -215,7 +261,7 @@ func (t *GitLogTool) Execute(params map[string]any) (*Result, error) {
 	if err != nil {
 		return &Result{
 			Success: false,
-			Error:   fmt.Sprintf("git command failed: %v", err),
+			Error:   formatGitFailure(err, string(output)),
 		}, nil
 	}
 
@@ -256,13 +302,24 @@ func (t *GitBlameTool) Parameters() ParameterSchema {
 				Type:        "string",
 				Description: "File to show blame for",
 			},
+			"path": {
+				Type:        "string",
+				Description: "File to show blame for. Kept for compatibility; prefer file.",
+			},
+			"repo_path": {
+				Type:        "string",
+				Description: "Optional repository or directory path to run git blame in. Defaults to Buckley's current workdir.",
+			},
 		},
-		Required: []string{"file"},
+		Required: []string{},
 	}
 }
 
 func (t *GitBlameTool) Execute(params map[string]any) (*Result, error) {
 	file, ok := params["file"].(string)
+	if !ok || strings.TrimSpace(file) == "" {
+		file, ok = params["path"].(string)
+	}
 	if !ok {
 		return &Result{
 			Success: false,
@@ -270,8 +327,13 @@ func (t *GitBlameTool) Execute(params map[string]any) (*Result, error) {
 		}, nil
 	}
 
-	if strings.TrimSpace(t.workDir) != "" {
-		_, rel, err := resolveRelPath(t.workDir, file)
+	dir, err := gitCommandDir(t.workDir, map[string]any{"repo_path": params["repo_path"]})
+	if err != nil {
+		return &Result{Success: false, Error: err.Error()}, nil
+	}
+
+	if strings.TrimSpace(dir) != "" {
+		_, rel, err := resolveRelPath(dir, file)
 		if err != nil {
 			return &Result{Success: false, Error: err.Error()}, nil
 		}
@@ -282,8 +344,8 @@ func (t *GitBlameTool) Execute(params map[string]any) (*Result, error) {
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, "git", "blame", file)
-	if strings.TrimSpace(t.workDir) != "" {
-		cmd.Dir = strings.TrimSpace(t.workDir)
+	if strings.TrimSpace(dir) != "" {
+		cmd.Dir = strings.TrimSpace(dir)
 	}
 	cmd.Env = mergeEnv(cmd.Env, t.env)
 	output, err := cmd.CombinedOutput()
@@ -298,7 +360,7 @@ func (t *GitBlameTool) Execute(params map[string]any) (*Result, error) {
 	if err != nil {
 		return &Result{
 			Success: false,
-			Error:   fmt.Sprintf("git command failed: %v", err),
+			Error:   formatGitFailure(err, string(output)),
 		}, nil
 	}
 
@@ -309,4 +371,30 @@ func (t *GitBlameTool) Execute(params map[string]any) (*Result, error) {
 			"blame": string(output),
 		},
 	}, nil
+}
+
+func gitCommandDir(workDir string, params map[string]any) (string, error) {
+	dir := strings.TrimSpace(workDir)
+	raw, _ := params["repo_path"].(string)
+	if strings.TrimSpace(raw) == "" {
+		raw, _ = params["path"].(string)
+	}
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return dir, nil
+	}
+	resolved, err := resolvePath(workDir, raw)
+	if err != nil {
+		return "", err
+	}
+	return resolved, nil
+}
+
+func formatGitFailure(err error, output string) string {
+	message := fmt.Sprintf("git command failed: %v", err)
+	output = strings.TrimSpace(output)
+	if output == "" {
+		return message
+	}
+	return message + ": " + output
 }

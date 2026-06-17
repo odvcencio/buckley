@@ -111,7 +111,23 @@ func DefaultConfig() *Config {
 				"openai/gpt-5.4-mini",
 				"google/gemini-3-flash",
 			},
-			FallbackChains:  map[string][]string{},
+			FallbackChains: map[string][]string{
+				defaultOpenRouterChatModel: {
+					defaultOpenRouterKimiCode,
+					defaultOpenRouterQwenMax,
+					defaultOpenRouterUtilityModel,
+				},
+				defaultOpenRouterKimiCode: {
+					defaultOpenRouterQwenMax,
+					defaultOpenRouterChatModel,
+					defaultOpenRouterUtilityModel,
+				},
+				defaultOpenRouterQwenMax: {
+					defaultOpenRouterChatModel,
+					defaultOpenRouterKimiCode,
+					defaultOpenRouterUtilityModel,
+				},
+			},
 			DefaultProvider: "openrouter",
 			Utility: UtilityModelConfig{
 				Commit:     DefaultUtilityModel,

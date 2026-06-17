@@ -292,6 +292,18 @@ func TestClient_ChatCompletion(t *testing.T) {
 			response:    `{"error": {"message": "rate limit exceeded"}}`,
 			expectError: true,
 		},
+		{
+			name:        "ok_status_error_body",
+			statusCode:  http.StatusOK,
+			response:    `{"error": {"message": "upstream model failed", "type": "provider_error", "code": "upstream_error"}}`,
+			expectError: true,
+		},
+		{
+			name:        "ok_status_empty_choices",
+			statusCode:  http.StatusOK,
+			response:    `{"id": "empty-id", "model": "test/model", "choices": []}`,
+			expectError: true,
+		},
 	}
 
 	for _, tt := range tests {

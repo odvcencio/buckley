@@ -256,6 +256,61 @@ func TestChatCompletionNormalizesModelID(t *testing.T) {
 	}
 }
 
+func TestChatCompletionAppliesOpenRouterFallbackChain(t *testing.T) {
+	cfg := &config.Config{
+		Models: config.ModelConfig{
+			Execution:       "z-ai/glm-5.2",
+			DefaultProvider: "openrouter",
+			FallbackChains: map[string][]string{
+				"z-ai/glm-5.2": {
+					"moonshotai/kimi-k2.7-code",
+					"qwen/qwen3.7-max",
+					"qwen/qwen3.7-max",
+				},
+			},
+		},
+		Providers: config.ProviderConfig{
+			ModelRouting: map[string]string{},
+		},
+	}
+	prov := &stubProvider{
+		id: "openrouter",
+		catalog: ModelCatalog{
+			Data: []ModelInfo{
+				{ID: "z-ai/glm-5.2", ContextLength: 128_000},
+				{ID: "moonshotai/kimi-k2.7-code", ContextLength: 128_000},
+				{ID: "qwen/qwen3.7-max", ContextLength: 128_000},
+			},
+		},
+	}
+	mgr := &Manager{
+		config:         cfg,
+		providers:      map[string]Provider{"openrouter": prov},
+		providerOrder:  []string{"openrouter"},
+		catalog:        make(map[string]ModelInfo),
+		providerModels: make(map[string][]string),
+		modelProviders: make(map[string]string),
+	}
+	if err := mgr.Initialize(); err != nil {
+		t.Fatalf("Initialize() error = %v", err)
+	}
+
+	_, err := mgr.ChatCompletion(context.Background(), ChatRequest{
+		Model: "z-ai/glm-5.2",
+	})
+	if err != nil {
+		t.Fatalf("ChatCompletion() error = %v", err)
+	}
+
+	want := []string{"z-ai/glm-5.2", "moonshotai/kimi-k2.7-code", "qwen/qwen3.7-max"}
+	if fmt.Sprint(prov.lastRequest.Models) != fmt.Sprint(want) {
+		t.Fatalf("fallback models=%v want %v", prov.lastRequest.Models, want)
+	}
+	if prov.lastRequest.Provider["allow_fallbacks"] != true {
+		t.Fatalf("expected allow_fallbacks=true, got %#v", prov.lastRequest.Provider)
+	}
+}
+
 func TestVisionFallbackPrefersAvailableModel(t *testing.T) {
 	cfg := &config.Config{
 		Models: config.ModelConfig{

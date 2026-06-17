@@ -146,10 +146,11 @@ type ChatRequest struct {
 
 // ChatResponse represents a non-streaming chat completion response.
 type ChatResponse struct {
-	ID      string   `json:"id"`
-	Model   string   `json:"model"`
-	Choices []Choice `json:"choices"`
-	Usage   Usage    `json:"usage"`
+	ID      string       `json:"id"`
+	Model   string       `json:"model"`
+	Choices []Choice     `json:"choices"`
+	Usage   Usage        `json:"usage"`
+	Error   *ErrorDetail `json:"error,omitempty"`
 }
 
 // Choice represents a completion choice

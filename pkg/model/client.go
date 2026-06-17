@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math/rand"
@@ -397,6 +398,29 @@ func (c *Client) ChatCompletion(ctx context.Context, req ChatRequest) (*ChatResp
 			var chatResp ChatResponse
 			if err := json.NewDecoder(resp.Body).Decode(&chatResp); err != nil {
 				return fmt.Errorf("decoding response: %w", err)
+			}
+			if chatResp.Error != nil {
+				message := strings.TrimSpace(chatResp.Error.Message)
+				if message == "" {
+					message = "provider returned an error response"
+				}
+				return &APIError{
+					StatusCode: resp.StatusCode,
+					Message:    message,
+					Type:       chatResp.Error.Type,
+					Code:       chatResp.Error.Code,
+					Retryable:  false,
+				}
+			}
+			if len(chatResp.Choices) == 0 {
+				details := "provider returned no response choices"
+				if strings.TrimSpace(chatResp.ID) != "" {
+					details += " for response " + strings.TrimSpace(chatResp.ID)
+				}
+				if strings.TrimSpace(chatResp.Model) != "" {
+					details += " from model " + strings.TrimSpace(chatResp.Model)
+				}
+				return errors.New(details)
 			}
 
 			result = &chatResp

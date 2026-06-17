@@ -211,6 +211,7 @@ func (m *Manager) ChatCompletion(ctx context.Context, req ChatRequest) (*ChatRes
 		return nil, fmt.Errorf("no provider configured for model %s", req.Model)
 	}
 	req.Model = selectedModel
+	req = m.applyFallbackChain(req, selectedModel, provider.ID())
 	req = applyProviderTransforms(req, provider.ID())
 	req = m.applyPromptCache(req, provider.ID())
 	req.Model = normalizeModelForProvider(req.Model, provider.ID())
@@ -233,10 +234,56 @@ func (m *Manager) ChatCompletionStream(ctx context.Context, req ChatRequest) (<-
 		return chunkChan, errChan
 	}
 	req.Model = selectedModel
+	req = m.applyFallbackChain(req, selectedModel, provider.ID())
 	req = applyProviderTransforms(req, provider.ID())
 	req = m.applyPromptCache(req, provider.ID())
 	req.Model = normalizeModelForProvider(req.Model, provider.ID())
 	return provider.ChatCompletionStream(ctx, req)
+}
+
+func (m *Manager) applyFallbackChain(req ChatRequest, selectedModel, providerID string) ChatRequest {
+	if m == nil || m.config == nil || providerID != "openrouter" || len(req.Models) > 0 {
+		return req
+	}
+
+	chain := m.config.Models.FallbackChains[strings.TrimSpace(selectedModel)]
+	if len(chain) == 0 {
+		return req
+	}
+
+	seen := make(map[string]struct{}, len(chain)+1)
+	models := make([]string, 0, len(chain)+1)
+	add := func(modelID string) {
+		const maxOpenRouterFallbackModels = 3
+		if len(models) >= maxOpenRouterFallbackModels {
+			return
+		}
+		modelID = strings.TrimSpace(modelID)
+		if modelID == "" {
+			return
+		}
+		if _, ok := seen[modelID]; ok {
+			return
+		}
+		seen[modelID] = struct{}{}
+		models = append(models, modelID)
+	}
+	add(selectedModel)
+	for _, modelID := range chain {
+		add(modelID)
+	}
+	if len(models) <= 1 {
+		return req
+	}
+
+	req.Models = models
+	if req.Provider == nil {
+		req.Provider = map[string]any{}
+	}
+	if _, ok := req.Provider["allow_fallbacks"]; !ok {
+		req.Provider["allow_fallbacks"] = true
+	}
+	return req
 }
 
 func applyProviderTransforms(req ChatRequest, providerID string) ChatRequest {
