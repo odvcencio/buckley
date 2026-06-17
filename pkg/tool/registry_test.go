@@ -5,9 +5,9 @@ import (
 	"sync"
 	"testing"
 
+	"go.uber.org/mock/gomock"
 	"m31labs.dev/buckley/pkg/telemetry"
 	"m31labs.dev/buckley/pkg/tool/builtin"
-	"go.uber.org/mock/gomock"
 )
 
 func TestNewEmptyRegistry(t *testing.T) {
@@ -53,6 +53,19 @@ func TestNewRegistry_WithBuiltinFilter(t *testing.T) {
 	_, ok = r.Get("write_file")
 	if ok {
 		t.Error("expected write_file tool to NOT be registered")
+	}
+}
+
+func TestRegistry_ToOpenAIFunctionsFilteredDistinguishesNilAndEmpty(t *testing.T) {
+	r := NewEmptyRegistry()
+	r.Register(&governedTestTool{name: "read_file"})
+	r.Register(&governedTestTool{name: "write_file"})
+
+	if got := r.ToOpenAIFunctionsFiltered(nil); len(got) != 2 {
+		t.Fatalf("nil filter returned %d functions, want 2", len(got))
+	}
+	if got := r.ToOpenAIFunctionsFiltered([]string{}); len(got) != 0 {
+		t.Fatalf("empty filter returned %d functions, want 0", len(got))
 	}
 }
 

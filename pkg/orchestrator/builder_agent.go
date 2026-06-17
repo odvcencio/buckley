@@ -374,7 +374,7 @@ func (a *BuilderAgent) generateWithTools(req model.ChatRequest, task *Task) (str
 	}
 
 	for iter := 0; iter < maxIterations; iter++ {
-		allowedTools := []string{}
+		var allowedTools []string
 		if skillState != nil {
 			allowedTools = skillState.ToolFilter()
 		}

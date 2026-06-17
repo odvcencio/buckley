@@ -11,9 +11,9 @@ func (r *Registry) ToOpenAIFunctions() []map[string]any {
 }
 
 // ToOpenAIFunctionsFiltered converts only allowed tools to OpenAI function format.
-// If allowed is empty, all tools are returned.
+// A nil allowed list returns all tools; an explicitly empty list returns none.
 func (r *Registry) ToOpenAIFunctionsFiltered(allowed []string) []map[string]any {
-	if len(allowed) == 0 {
+	if allowed == nil {
 		return r.ToOpenAIFunctions()
 	}
 	tools := r.snapshotTools()

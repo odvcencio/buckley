@@ -616,7 +616,7 @@ func runACPLoop(
 		lastPhase = sendACPPhaseUpdate(stream, lastPhase, "Thinking…")
 
 		var tools []map[string]any
-		allowedTools := []string{}
+		var allowedTools []string
 		if skillState != nil {
 			allowedTools = skillState.ToolFilter()
 		}

@@ -88,3 +88,14 @@ func TestRegistry_ToOpenAIFunctionsGoverned_RespectsAllowedTools(t *testing.T) {
 		t.Fatalf("unexpected function name: %+v", functionDef)
 	}
 }
+
+func TestRegistry_ToOpenAIFunctionsGoverned_EmptyAllowedMeansNoTools(t *testing.T) {
+	registry := NewEmptyRegistry()
+	registry.Register(&governedTestTool{name: "read_file"})
+	registry.Register(&governedTestTool{name: "write_file"})
+
+	functions := registry.ToOpenAIFunctionsGoverned(nil, "interactive", "coding", []string{}, 0)
+	if len(functions) != 0 {
+		t.Fatalf("expected no functions for empty allowed list, got %d", len(functions))
+	}
+}

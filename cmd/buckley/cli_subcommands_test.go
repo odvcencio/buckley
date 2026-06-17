@@ -156,7 +156,7 @@ subagents:
 
 func TestFormatSubagentTask(t *testing.T) {
 	got := formatSubagentTask("reviewer", "inspect this")
-	for _, want := range []string{`Subagent "reviewer" task:`, "inspect this", "remaining risks"} {
+	for _, want := range []string{`Subagent "reviewer" task:`, "inspect this", "Complete the task directly", "remaining risks", "do not claim unperformed actions"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("task prompt missing %q: %s", want, got)
 		}
@@ -169,8 +169,14 @@ func TestResolveOneShotToolFilterRespectsAgentTierAndDeny(t *testing.T) {
 	registry.Register(metadataTool{name: "write_file", metadata: tool.ToolMetadata{Impact: tool.ImpactModifying, Category: tool.CategoryFilesystem}})
 	registry.Register(metadataTool{name: "run_shell", metadata: tool.ToolMetadata{Impact: tool.ImpactDestructive, Category: tool.CategoryShell}})
 
-	profile := &agentspec.RuntimeProfile{Spec: &agentspec.Spec{Tools: agentspec.ToolSpec{Tier: "read_only"}}}
+	profile := &agentspec.RuntimeProfile{Spec: &agentspec.Spec{Tools: agentspec.ToolSpec{Tier: "none"}}}
 	got := resolveOneShotToolFilter(profile, registry, nil)
+	if got == nil || len(got) != 0 {
+		t.Fatalf("none filter=%v want explicit empty list", got)
+	}
+
+	profile = &agentspec.RuntimeProfile{Spec: &agentspec.Spec{Tools: agentspec.ToolSpec{Tier: "read_only"}}}
+	got = resolveOneShotToolFilter(profile, registry, nil)
 	if strings.Join(got, ",") != "read_file" {
 		t.Fatalf("read_only filter=%v want read_file", got)
 	}

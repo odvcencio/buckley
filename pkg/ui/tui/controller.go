@@ -1046,7 +1046,7 @@ func (c *Controller) runToolLoop(ctx context.Context, sess *SessionState, modelI
 			return "", nil, ctx.Err()
 		}
 
-		allowedTools := []string{}
+		var allowedTools []string
 		if sess.SkillState != nil {
 			allowedTools = sess.SkillState.ToolFilter()
 		}

@@ -142,7 +142,7 @@ func parseAgentRunArgs(args []string) (agentRunOptions, error) {
 }
 
 func formatSubagentTask(subagent, task string) string {
-	return fmt.Sprintf("Subagent %q task:\n\n%s\n\nReport actions taken, findings, validation, and remaining risks.", strings.TrimSpace(subagent), strings.TrimSpace(task))
+	return fmt.Sprintf("Subagent %q task:\n\n%s\n\nComplete the task directly. If you use tools, inspect files, run commands, or change anything, report what you did, validation performed, and remaining risks. If the task only needs an answer, answer directly and do not claim unperformed actions.", strings.TrimSpace(subagent), strings.TrimSpace(task))
 }
 
 func runAgentShow(args []string) error {

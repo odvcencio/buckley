@@ -34,7 +34,7 @@ sandbox:
   mode: workspace
 subagents:
   - name: verifier
-    tool_tier: read_only
+    tool_tier: none
 terminals:
   - name: tests
     command: [go, test, ./...]

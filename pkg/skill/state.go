@@ -5,10 +5,11 @@ import "sync"
 // RuntimeState tracks active skill metadata and tool filtering for a session.
 // It implements the SkillConversation interfaces used by skill activation.
 type RuntimeState struct {
-	mu         sync.RWMutex
-	toolFilter []string
-	metadata   map[string]any
-	inject     func(string)
+	mu            sync.RWMutex
+	toolFilter    []string
+	toolFilterSet bool
+	metadata      map[string]any
+	inject        func(string)
 }
 
 // NewRuntimeState creates a skill runtime state with an optional injector.
@@ -39,12 +40,8 @@ func (s *RuntimeState) SetToolFilter(allowedTools []string) {
 		return
 	}
 	s.mu.Lock()
-	if len(allowedTools) == 0 {
-		s.toolFilter = nil
-		s.mu.Unlock()
-		return
-	}
 	s.toolFilter = append([]string{}, allowedTools...)
+	s.toolFilterSet = true
 	s.mu.Unlock()
 }
 
@@ -55,6 +52,7 @@ func (s *RuntimeState) ClearToolFilter() {
 	}
 	s.mu.Lock()
 	s.toolFilter = nil
+	s.toolFilterSet = false
 	s.mu.Unlock()
 }
 
@@ -65,7 +63,7 @@ func (s *RuntimeState) ToolFilter() []string {
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	if len(s.toolFilter) == 0 {
+	if !s.toolFilterSet {
 		return nil
 	}
 	return append([]string{}, s.toolFilter...)

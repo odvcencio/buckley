@@ -327,9 +327,9 @@ func validateToolTier(d *diagnostics, path, tier string) {
 		return
 	}
 	switch tier {
-	case "read_only", "standard", "full":
+	case "none", "read_only", "standard", "full":
 	default:
-		d.add(SeverityError, path, "tool tier must be read_only, standard, or full")
+		d.add(SeverityError, path, "tool tier must be none, read_only, standard, or full")
 	}
 }
 

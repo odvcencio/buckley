@@ -47,6 +47,7 @@ func GovernedToolNames(registry *Registry, evaluator types.RuleEvaluator, role, 
 		return nil
 	}
 
+	hasBaseFilter := baseAllowed != nil
 	allowed := make(map[string]struct{}, len(baseAllowed))
 	for _, name := range baseAllowed {
 		name = strings.TrimSpace(name)
@@ -75,6 +76,9 @@ func GovernedToolNames(registry *Registry, evaluator types.RuleEvaluator, role, 
 			}
 		}
 	}
+	if hasBaseFilter && len(allowed) == 0 {
+		return []string{}
+	}
 
 	names := make([]string, 0, registry.Count())
 	for _, candidate := range registry.List() {
@@ -85,7 +89,7 @@ func GovernedToolNames(registry *Registry, evaluator types.RuleEvaluator, role, 
 		if name == "" {
 			continue
 		}
-		if len(allowed) > 0 {
+		if hasBaseFilter {
 			if _, ok := allowed[name]; !ok {
 				continue
 			}

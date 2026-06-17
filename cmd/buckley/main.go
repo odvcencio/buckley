@@ -1469,6 +1469,9 @@ func resolveOneShotToolFilter(profile *agentspec.RuntimeProfile, registry *tool.
 			allowed = cleanToolNames(profile.Spec.Tools.Allow)
 		}
 	}
+	if tier == "none" {
+		return []string{}
+	}
 	if len(allowed) == 0 {
 		allowed = toolsForTier(registry, tier)
 	}
@@ -1480,6 +1483,9 @@ func resolveOneShotToolFilter(profile *agentspec.RuntimeProfile, registry *tool.
 
 func toolsForTier(registry *tool.Registry, tier string) []string {
 	tier = strings.TrimSpace(tier)
+	if tier == "none" {
+		return []string{}
+	}
 	if tier == "" || tier == "full" || registry == nil {
 		return nil
 	}
