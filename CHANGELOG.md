@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.6.1] - 2026-06-17
+
+### Fixed
+- Removed a stray external harness name from an invalid agent-spec test fixture.
+
 ## [1.6.0] - 2026-06-17
 
 ### Added
@@ -125,7 +130,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Telemetry is local-only by default.
 - Plugin discovery limited to local paths only.
 
-[Unreleased]: https://github.com/odvcencio/buckley/compare/v1.6.0...HEAD
+[Unreleased]: https://github.com/odvcencio/buckley/compare/v1.6.1...HEAD
+[1.6.1]: https://github.com/odvcencio/buckley/compare/v1.6.0...v1.6.1
 [1.6.0]: https://github.com/odvcencio/buckley/compare/v1.5.0...v1.6.0
 [1.5.0]: https://github.com/odvcencio/buckley/compare/v1.4.1...v1.5.0
 [1.4.1]: https://github.com/odvcencio/buckley/compare/v1.4.0...v1.4.1
