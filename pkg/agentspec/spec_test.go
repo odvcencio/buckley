@@ -54,7 +54,7 @@ labels:
 
 func TestValidateInvalidSpec(t *testing.T) {
 	spec, err := Parse([]byte(`
-version: omnigent.agent/v1
+version: other.agent/v1
 name: ""
 runtime:
   driver: external
