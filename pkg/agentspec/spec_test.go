@@ -135,10 +135,14 @@ func TestRenderTextAndJSON(t *testing.T) {
 		Name:    "builder",
 		Runtime: RuntimeSpec{Driver: "external", Adapter: "opencode"},
 		Models:  ModelSpec{Chat: "qwen/qwen-flash"},
+		Subagents: []SubagentSpec{
+			{Name: "reviewer", Persona: "strict", Model: "review-model", ToolTier: "read_only"},
+			{Name: "coder", Skills: []string{"implementation"}},
+		},
 	}
 	diagnostics := spec.Validate()
 	out := RenderText(spec, diagnostics)
-	for _, want := range []string{"Agent: builder", "Runtime: external/opencode", "chat=qwen/qwen-flash"} {
+	for _, want := range []string{"Agent: builder", "Runtime: external/opencode", "chat=qwen/qwen-flash", "Subagents:", "  - coder (skills=implementation)", "  - reviewer (persona=strict, model=review-model, tool_tier=read_only)"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("RenderText missing %q in:\n%s", want, out)
 		}

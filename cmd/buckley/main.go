@@ -250,7 +250,7 @@ func main() {
 	// Handle one-shot prompt mode (-p flag)
 	if promptFlag != "" {
 		// Prompt provided via -p flag
-		exitCode := executeOneShot(promptFlag, cfg, modelManager, store, projectContext, planStore, agentProfile)
+		exitCode := executeOneShot(promptFlag, cfg, modelManager, store, projectContext, planStore, agentProfile, nil)
 		os.Exit(exitCode)
 	}
 
@@ -266,7 +266,7 @@ func main() {
 			}
 			if len(lines) > 0 {
 				prompt := strings.Join(lines, "\n")
-				exitCode := executeOneShot(prompt, cfg, modelManager, store, projectContext, planStore, agentProfile)
+				exitCode := executeOneShot(prompt, cfg, modelManager, store, projectContext, planStore, agentProfile, nil)
 				os.Exit(exitCode)
 			}
 		}
@@ -305,7 +305,7 @@ func main() {
 }
 
 // executeOneShot executes a single prompt and exits
-func executeOneShot(prompt string, cfg *config.Config, mgr *model.Manager, store *storage.Store, projectContext *projectcontext.ProjectContext, planStore orchestrator.PlanStore, agentProfile *agentspec.RuntimeProfile) int {
+func executeOneShot(prompt string, cfg *config.Config, mgr *model.Manager, store *storage.Store, projectContext *projectcontext.ProjectContext, planStore orchestrator.PlanStore, agentProfile *agentspec.RuntimeProfile, allowedTools []string) int {
 	_ = store
 	_ = planStore
 
@@ -340,6 +340,7 @@ func executeOneShot(prompt string, cfg *config.Config, mgr *model.Manager, store
 	}
 	conv := projectconversation.New("oneshot")
 	skillState := skill.NewRuntimeState(conv.AddSystemMessage)
+	skillState.SetToolFilter(allowedTools)
 
 	registry := tool.NewRegistry()
 	if err := registry.LoadDefaultPlugins(); err != nil {
@@ -642,7 +643,7 @@ func printHelp() {
 	fmt.Println("  remote <subcommand>              Remote session operations (attach, sessions, tokens, login, console)")
 	fmt.Println("  batch prune-workspaces           Garbage-collect stale batch workspaces (k8s/CI)")
 	fmt.Println("  git-webhook                      Listen for merge webhooks and run regression/release commands")
-	fmt.Println("  agent check <agent.yaml>         Validate a Buckley agent spec")
+	fmt.Println("  agent check/show/run             Validate, inspect, or invoke Buckley agent specs")
 	fmt.Println("  agent show <agent.yaml>          Show a Buckley agent spec summary")
 	fmt.Println("  agent-server                     HTTP proxy for ACP editor workflows (inline propose/apply)")
 	fmt.Println("  lsp [--coordinator addr]         Start LSP server on stdio (editor integration)")
@@ -966,7 +967,7 @@ func printBashCompletion() {
             return 0
             ;;
         agent)
-            COMPREPLY=( $(compgen -W "check show" -- "${cur}") )
+            COMPREPLY=( $(compgen -W "check show run invoke" -- "${cur}") )
             return 0
             ;;
         config)
@@ -1021,7 +1022,7 @@ _buckley() {
         'remote:Remote session management'
         'batch:Batch helpers (k8s/CI)'
         'git-webhook:Run regression/release webhooks daemon'
-        'agent:Validate and inspect Buckley agent specs'
+        'agent:Validate, inspect, and invoke Buckley agent specs'
         'agent-server:Run ACP HTTP proxy for editor workflows'
         'lsp:Start LSP server on stdio for editor integration'
         'acp:Start ACP agent on stdio for Zed/JetBrains/Neovim'
@@ -1063,6 +1064,9 @@ _buckley() {
                 batch)
                     _values 'batch command' prune-workspaces
                     ;;
+                agent)
+                    _values 'agent command' check show run invoke
+                    ;;
                 experiment)
                     _values 'experiment command' run
                     ;;
@@ -1103,7 +1107,7 @@ complete -c buckley -n __fish_use_subcommand -a serve -d 'Start local server'
 complete -c buckley -n __fish_use_subcommand -a remote -d 'Remote session management'
 complete -c buckley -n __fish_use_subcommand -a batch -d 'Batch helpers (k8s/CI)'
 complete -c buckley -n __fish_use_subcommand -a git-webhook -d 'Run regression/release webhooks daemon'
-complete -c buckley -n __fish_use_subcommand -a agent -d 'Validate and inspect Buckley agent specs'
+complete -c buckley -n __fish_use_subcommand -a agent -d 'Validate, inspect, and invoke Buckley agent specs'
 complete -c buckley -n __fish_use_subcommand -a agent-server -d 'Run ACP HTTP proxy for editor workflows'
 complete -c buckley -n __fish_use_subcommand -a lsp -d 'Start LSP server on stdio'
 complete -c buckley -n __fish_use_subcommand -a acp -d 'Start ACP agent on stdio (Zed/JetBrains/Neovim)'
@@ -1133,6 +1137,12 @@ complete -c buckley -s h -l help -d 'Show help'
 complete -c buckley -n '__fish_seen_subcommand_from config' -a check -d 'Validate configuration'
 complete -c buckley -n '__fish_seen_subcommand_from config' -a show -d 'Show current configuration'
 complete -c buckley -n '__fish_seen_subcommand_from config' -a path -d 'Show config file paths'
+
+# Agent subcommands
+complete -c buckley -n '__fish_seen_subcommand_from agent' -a check -d 'Validate agent spec'
+complete -c buckley -n '__fish_seen_subcommand_from agent' -a show -d 'Inspect agent spec'
+complete -c buckley -n '__fish_seen_subcommand_from agent' -a run -d 'Invoke a named subagent'
+complete -c buckley -n '__fish_seen_subcommand_from agent' -a invoke -d 'Invoke a named subagent'
 
 # Doctor subcommands
 complete -c buckley -n '__fish_seen_subcommand_from doctor' -a check -d 'Validate configuration'

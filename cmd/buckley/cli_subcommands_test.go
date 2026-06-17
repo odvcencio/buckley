@@ -109,6 +109,57 @@ func TestRunAgentCommandInvalidSpec(t *testing.T) {
 	}
 }
 
+func TestParseAgentRunArgs(t *testing.T) {
+	opts, err := parseAgentRunArgs([]string{"agent.yaml", "reviewer", "inspect", "this"})
+	if err != nil {
+		t.Fatalf("parseAgentRunArgs: %v", err)
+	}
+	if opts.agentPath != "agent.yaml" || opts.subagent != "reviewer" || opts.task != "inspect this" {
+		t.Fatalf("unexpected opts: %+v", opts)
+	}
+
+	opts, err = parseAgentRunArgs([]string{"--subagent", "coder", "--model", "test-model", "agent.yaml", "fix", "bug"})
+	if err != nil {
+		t.Fatalf("parseAgentRunArgs flag form: %v", err)
+	}
+	if opts.agentPath != "agent.yaml" || opts.subagent != "coder" || opts.model != "test-model" || opts.task != "fix bug" {
+		t.Fatalf("unexpected flag opts: %+v", opts)
+	}
+
+	if _, err := parseAgentRunArgs([]string{"agent.yaml", "reviewer"}); err == nil {
+		t.Fatalf("expected usage error for missing task")
+	}
+}
+
+func TestRunAgentRunMissingSubagent(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "agent.yaml")
+	spec := []byte(`
+version: buckley.agent/v1
+name: daily
+subagents:
+  - name: coder
+    persona: implementer
+`)
+	if err := os.WriteFile(path, spec, 0o644); err != nil {
+		t.Fatalf("write spec: %v", err)
+	}
+
+	err := runAgentRun([]string{path, "reviewer", "inspect this"})
+	if err == nil || !strings.Contains(err.Error(), "available: coder") {
+		t.Fatalf("err=%v want available subagents", err)
+	}
+}
+
+func TestFormatSubagentTask(t *testing.T) {
+	got := formatSubagentTask("reviewer", "inspect this")
+	for _, want := range []string{`Subagent "reviewer" task:`, "inspect this", "remaining risks"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("task prompt missing %q: %s", want, got)
+		}
+	}
+}
+
 func TestRunRulesFacts(t *testing.T) {
 	out := captureStdout(t, func() {
 		if err := runRulesCommand([]string{"facts", "approval"}); err != nil {

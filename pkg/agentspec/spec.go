@@ -95,12 +95,13 @@ type SandboxSpec struct {
 }
 
 type SubagentSpec struct {
-	Name     string     `yaml:"name" json:"name"`
-	Persona  string     `yaml:"persona,omitempty" json:"persona,omitempty"`
-	Model    string     `yaml:"model,omitempty" json:"model,omitempty"`
-	ToolTier string     `yaml:"tool_tier,omitempty" json:"tool_tier,omitempty"`
-	Skills   []string   `yaml:"skills,omitempty" json:"skills,omitempty"`
-	Policies PolicySpec `yaml:"policies,omitempty" json:"policies,omitempty"`
+	Name         string     `yaml:"name" json:"name"`
+	Persona      string     `yaml:"persona,omitempty" json:"persona,omitempty"`
+	Model        string     `yaml:"model,omitempty" json:"model,omitempty"`
+	ToolTier     string     `yaml:"tool_tier,omitempty" json:"tool_tier,omitempty"`
+	Skills       []string   `yaml:"skills,omitempty" json:"skills,omitempty"`
+	Instructions string     `yaml:"instructions,omitempty" json:"instructions,omitempty"`
+	Policies     PolicySpec `yaml:"policies,omitempty" json:"policies,omitempty"`
 }
 
 type TerminalSpec struct {
@@ -236,7 +237,15 @@ func RenderText(spec *Spec, diagnostics []Diagnostic) string {
 		fmt.Fprintf(&b, "Rule packs: %d\n", len(spec.Policies.RulePacks))
 	}
 	if len(spec.Subagents) > 0 {
-		fmt.Fprintf(&b, "Subagents: %d\n", len(spec.Subagents))
+		b.WriteString("Subagents:\n")
+		for _, sub := range sortedSubagents(spec.Subagents) {
+			details := subagentSummary(sub)
+			if details != "" {
+				fmt.Fprintf(&b, "  - %s (%s)\n", sub.Name, details)
+			} else {
+				fmt.Fprintf(&b, "  - %s\n", sub.Name)
+			}
+		}
 	}
 	if len(spec.Terminals) > 0 {
 		fmt.Fprintf(&b, "Terminals: %d\n", len(spec.Terminals))
@@ -448,6 +457,31 @@ func modelSummary(models ModelSpec) string {
 	}
 	if models.Reasoning != "" {
 		parts = append(parts, "reasoning="+models.Reasoning)
+	}
+	return strings.Join(parts, ", ")
+}
+
+func sortedSubagents(subagents []SubagentSpec) []SubagentSpec {
+	out := append([]SubagentSpec(nil), subagents...)
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].Name < out[j].Name
+	})
+	return out
+}
+
+func subagentSummary(sub SubagentSpec) string {
+	parts := []string{}
+	if sub.Persona != "" {
+		parts = append(parts, "persona="+sub.Persona)
+	}
+	if sub.Model != "" {
+		parts = append(parts, "model="+sub.Model)
+	}
+	if sub.ToolTier != "" {
+		parts = append(parts, "tool_tier="+sub.ToolTier)
+	}
+	if len(sub.Skills) > 0 {
+		parts = append(parts, "skills="+strings.Join(sub.Skills, ","))
 	}
 	return strings.Join(parts, ", ")
 }
