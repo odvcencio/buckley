@@ -59,7 +59,7 @@ type Line struct {
 	Timestamp    time.Time
 	Source       string // "user", "assistant", "system", "tool"
 	Spans        []Span
-	Prefix       []Span        // Repeated prefix for wrapped lines
+	Prefix       []Span        // Prefix for the first wrapped row; continuations keep its indent
 	Wrapped      []WrappedLine // Pre-computed wrapped lines
 	IsCode       bool
 	IsCodeHeader bool
@@ -873,6 +873,7 @@ func wrapStyledLine(text string, spans, prefix []Span, width int, isCode bool) [
 	prefixText := spansText(prefix)
 	prefixWidth := len([]rune(prefixText))
 	available := max(1, width-prefixWidth)
+	continuationPrefix := blankPrefix(prefix)
 
 	runes := styledRunesFromSpans(text, spans)
 	if len(runes) == 0 && text == "" {
@@ -903,9 +904,13 @@ func wrapStyledLine(text string, spans, prefix []Span, width int, isCode bool) [
 			}
 		}
 
-		lineSpans := make([]Span, 0, len(prefix)+len(segment))
-		if len(prefix) > 0 {
-			lineSpans = append(lineSpans, prefix...)
+		linePrefix := prefix
+		if len(lines) > 0 {
+			linePrefix = continuationPrefix
+		}
+		lineSpans := make([]Span, 0, len(linePrefix)+len(segment))
+		if len(linePrefix) > 0 {
+			lineSpans = append(lineSpans, linePrefix...)
 		}
 		lineSpans = append(lineSpans, spansFromRunes(segment)...)
 		lines = append(lines, WrappedLine{Text: spansText(lineSpans), Spans: lineSpans})
@@ -915,6 +920,14 @@ func wrapStyledLine(text string, spans, prefix []Span, width int, isCode bool) [
 		lines = []WrappedLine{{Text: prefixText, Spans: append([]Span{}, prefix...)}}
 	}
 	return lines
+}
+
+func blankPrefix(prefix []Span) []Span {
+	prefixText := spansText(prefix)
+	if prefixText == "" {
+		return nil
+	}
+	return []Span{{Text: strings.Repeat(" ", len([]rune(prefixText)))}}
 }
 
 func styledRunesFromSpans(text string, spans []Span) []styledRune {

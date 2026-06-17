@@ -340,6 +340,24 @@ func TestWrapLine(t *testing.T) {
 	}
 }
 
+func TestWrapStyledLineContinuationUsesBlankPrefix(t *testing.T) {
+	text := "God files are candidates for decomposition"
+	lines := wrapStyledLine(text, []Span{{Text: text}}, []Span{{Text: "2. "}}, 16, false)
+
+	if len(lines) < 2 {
+		t.Fatalf("expected wrapping, got %d line(s): %#v", len(lines), lines)
+	}
+	if !strings.HasPrefix(lines[0].Text, "2. ") {
+		t.Fatalf("first line should keep list prefix, got %q", lines[0].Text)
+	}
+	if !strings.HasPrefix(lines[1].Text, "   ") {
+		t.Fatalf("continuation line should preserve prefix indent, got %q", lines[1].Text)
+	}
+	if strings.HasPrefix(strings.TrimLeft(lines[1].Text, " "), "2.") {
+		t.Fatalf("continuation line should not repeat list prefix, got %q", lines[1].Text)
+	}
+}
+
 func TestResize(t *testing.T) {
 	buf := NewBuffer(80, 24)
 	buf.AppendLine("This is a test line that might wrap", LineStyle{}, "user")
