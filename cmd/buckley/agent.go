@@ -4,11 +4,13 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 
 	"m31labs.dev/buckley/pkg/agentspec"
 	projectcontext "m31labs.dev/buckley/pkg/context"
 	"m31labs.dev/buckley/pkg/orchestrator"
+	"m31labs.dev/buckley/pkg/tool"
 )
 
 func runAgentCommand(args []string) error {
@@ -52,6 +54,7 @@ type agentRunOptions struct {
 	task      string
 	model     string
 	toolTier  string
+	dryRun    bool
 }
 
 func runAgentRun(args []string) error {
@@ -70,6 +73,10 @@ func runAgentRun(args []string) error {
 	}
 	if opts.toolTier != "" {
 		subProfile.Spec.Tools.Tier = opts.toolTier
+	}
+	if opts.dryRun {
+		fmt.Print(renderAgentRunPreview(opts, subProfile))
+		return nil
 	}
 
 	cfg, mgr, store, err := initDependenciesFn()
@@ -112,6 +119,7 @@ func parseAgentRunArgs(args []string) (agentRunOptions, error) {
 	modelID := fs.String("model", "", "override model for this subagent task")
 	toolTier := fs.String("tool-tier", "", "override tool tier: none, read_only, standard, or full")
 	noTools := fs.Bool("no-tools", false, "run without tools")
+	dryRun := fs.Bool("dry-run", false, "show resolved subagent invocation without calling the model")
 	if err := fs.Parse(args); err != nil {
 		return agentRunOptions{}, err
 	}
@@ -121,6 +129,7 @@ func parseAgentRunArgs(args []string) (agentRunOptions, error) {
 		subagent: strings.TrimSpace(*subagent),
 		model:    strings.TrimSpace(*modelID),
 		toolTier: strings.TrimSpace(*toolTier),
+		dryRun:   *dryRun,
 	}
 	if *noTools {
 		if opts.toolTier != "" && opts.toolTier != "none" {
@@ -155,6 +164,90 @@ func parseAgentRunArgs(args []string) (agentRunOptions, error) {
 		return agentRunOptions{}, fmt.Errorf("subagent task is required")
 	}
 	return opts, nil
+}
+
+func renderAgentRunPreview(opts agentRunOptions, profile *agentspec.RuntimeProfile) string {
+	var b strings.Builder
+	b.WriteString("Agent run preview\n")
+	if profile != nil && strings.TrimSpace(profile.SourcePath) != "" {
+		fmt.Fprintf(&b, "Source: %s\n", strings.TrimSpace(profile.SourcePath))
+	}
+	if profile != nil && profile.Spec != nil {
+		fmt.Fprintf(&b, "Agent: %s\n", strings.TrimSpace(profile.Spec.Name))
+	}
+	fmt.Fprintf(&b, "Subagent: %s\n", strings.TrimSpace(opts.subagent))
+	fmt.Fprintf(&b, "Model: %s\n", previewAgentRunModel(opts, profile))
+	fmt.Fprintf(&b, "Tool tier: %s\n", previewAgentRunToolTier(profile))
+	fmt.Fprintf(&b, "Tool filter: %s\n", previewAgentRunToolFilter(profile))
+	if profile != nil && profile.Spec != nil {
+		if len(profile.Spec.Tools.Deny) > 0 {
+			fmt.Fprintf(&b, "Denied tools: %s\n", strings.Join(cleanToolNames(profile.Spec.Tools.Deny), ", "))
+		}
+		if len(profile.Spec.Skills) > 0 {
+			fmt.Fprintf(&b, "Skills: %s\n", strings.Join(profile.Spec.Skills, ", "))
+		}
+		if mode := strings.TrimSpace(profile.Spec.Policies.ApprovalMode); mode != "" {
+			fmt.Fprintf(&b, "Approval mode: %s\n", mode)
+		}
+		if strings.TrimSpace(profile.Spec.Instructions.Prompt) != "" {
+			b.WriteString("Instructions: yes\n")
+		}
+	}
+	fmt.Fprintf(&b, "Task: %s\n", strings.TrimSpace(opts.task))
+	return b.String()
+}
+
+func previewAgentRunModel(opts agentRunOptions, profile *agentspec.RuntimeProfile) string {
+	if opts.model != "" {
+		return opts.model + " (flag override)"
+	}
+	if modelOverrideFlag != "" {
+		return strings.TrimSpace(modelOverrideFlag) + " (global override)"
+	}
+	if profile != nil && profile.Spec != nil {
+		if modelID := strings.TrimSpace(profile.Spec.Models.Execution); modelID != "" {
+			return modelID
+		}
+		if modelID := strings.TrimSpace(profile.Spec.Models.Chat); modelID != "" {
+			return modelID
+		}
+	}
+	return "(configured execution model)"
+}
+
+func previewAgentRunToolTier(profile *agentspec.RuntimeProfile) string {
+	if profile == nil || profile.Spec == nil {
+		return "full"
+	}
+	if tier := strings.TrimSpace(profile.Spec.Tools.Tier); tier != "" {
+		return tier
+	}
+	return "full"
+}
+
+func previewAgentRunToolFilter(profile *agentspec.RuntimeProfile) string {
+	if profile == nil || profile.Spec == nil {
+		return "unrestricted"
+	}
+	allowed := resolveOneShotToolFilter(profile, tool.NewRegistry(), append([]string(nil), profile.Spec.Tools.Allow...))
+	switch {
+	case allowed == nil:
+		return "unrestricted"
+	case len(allowed) == 0:
+		return "none"
+	default:
+		return summarizeToolNames(allowed)
+	}
+}
+
+func summarizeToolNames(names []string) string {
+	names = cleanToolNames(names)
+	sort.Strings(names)
+	const maxPreviewTools = 12
+	if len(names) <= maxPreviewTools {
+		return strings.Join(names, ", ")
+	}
+	return fmt.Sprintf("%d tools (%s, ...)", len(names), strings.Join(names[:maxPreviewTools], ", "))
 }
 
 func validAgentRunToolTier(tier string) bool {

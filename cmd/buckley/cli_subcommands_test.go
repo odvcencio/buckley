@@ -129,6 +129,14 @@ func TestParseAgentRunArgs(t *testing.T) {
 		t.Fatalf("unexpected flag opts: %+v", opts)
 	}
 
+	opts, err = parseAgentRunArgs([]string{"--dry-run", "agent.yaml", "reviewer", "inspect"})
+	if err != nil {
+		t.Fatalf("parseAgentRunArgs dry-run form: %v", err)
+	}
+	if !opts.dryRun || opts.task != "inspect" {
+		t.Fatalf("unexpected dry-run opts: %+v", opts)
+	}
+
 	opts, err = parseAgentRunArgs([]string{"--subagent", "probe", "--no-tools", "agent.yaml", "answer", "directly"})
 	if err != nil {
 		t.Fatalf("parseAgentRunArgs no-tools form: %v", err)
@@ -174,6 +182,51 @@ subagents:
 	err := runAgentRun([]string{path, "reviewer", "inspect this"})
 	if err == nil || !strings.Contains(err.Error(), "available: coder") {
 		t.Fatalf("err=%v want available subagents", err)
+	}
+}
+
+func TestRunAgentRunDryRunPreview(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "agent.yaml")
+	spec := []byte(`
+version: buckley.agent/v1
+name: daily
+tools:
+  deny: [run_shell]
+subagents:
+  - name: reviewer
+    model: xiaomi/mimo-v2.5-pro
+    tool_tier: read_only
+    skills: [code-review]
+    policies:
+      approval_mode: safe
+    instructions: Review carefully.
+`)
+	if err := os.WriteFile(path, spec, 0o644); err != nil {
+		t.Fatalf("write spec: %v", err)
+	}
+
+	out := captureStdout(t, func() {
+		if err := runAgentRun([]string{"--dry-run", "--model", "override/model", "--tool-tier", "none", path, "reviewer", "inspect", "this"}); err != nil {
+			t.Fatalf("runAgentRun dry-run: %v", err)
+		}
+	})
+	for _, want := range []string{
+		"Agent run preview",
+		"Agent: daily/reviewer",
+		"Subagent: reviewer",
+		"Model: override/model (flag override)",
+		"Tool tier: none",
+		"Tool filter: none",
+		"Denied tools: run_shell",
+		"Skills: code-review",
+		"Approval mode: safe",
+		"Instructions: yes",
+		"Task: inspect this",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("dry-run output missing %q:\n%s", want, out)
+		}
 	}
 }
 

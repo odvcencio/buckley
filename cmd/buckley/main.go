@@ -646,6 +646,7 @@ func printHelp() {
 	fmt.Println("  git-webhook                      Listen for merge webhooks and run regression/release commands")
 	fmt.Println("  agent check/show/run             Validate, inspect, or invoke Buckley agent specs")
 	fmt.Println("  agent show <agent.yaml>          Show a Buckley agent spec summary")
+	fmt.Println("  agent run [--dry-run|--no-tools] Invoke or preview a named subagent")
 	fmt.Println("  agent-server                     HTTP proxy for ACP editor workflows (inline propose/apply)")
 	fmt.Println("  lsp [--coordinator addr]         Start LSP server on stdio (editor integration)")
 	fmt.Println("  acp [--workdir dir] [--log file] Start ACP agent on stdio (Zed/JetBrains/Neovim)")
