@@ -219,7 +219,10 @@ func (m *Manager) ChatCompletion(ctx context.Context, req ChatRequest) (*ChatRes
 	if err != nil {
 		return nil, err
 	}
-	if resp != nil && len(resp.Choices) == 0 {
+	if resp == nil {
+		return nil, NilChatResponseError(req)
+	}
+	if len(resp.Choices) == 0 {
 		return nil, NoResponseChoicesError(req, resp)
 	}
 	return resp, nil

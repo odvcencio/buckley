@@ -10,9 +10,10 @@ import (
 )
 
 type fakeClient struct {
-	responses []model.ChatResponse
-	errs      []error
-	requests  []model.ChatRequest
+	responses    []model.ChatResponse
+	errs         []error
+	nilResponses map[int]bool
+	requests     []model.ChatRequest
 }
 
 func (f *fakeClient) ChatCompletion(_ context.Context, req model.ChatRequest) (*model.ChatResponse, error) {
@@ -20,6 +21,9 @@ func (f *fakeClient) ChatCompletion(_ context.Context, req model.ChatRequest) (*
 	idx := len(f.requests) - 1
 	if idx < len(f.errs) && f.errs[idx] != nil {
 		return nil, f.errs[idx]
+	}
+	if f.nilResponses != nil && f.nilResponses[idx] {
+		return nil, nil
 	}
 	if idx >= len(f.responses) {
 		return nil, errors.New("unexpected request")
@@ -67,6 +71,22 @@ func TestRunnerRunNoChoices(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "no response choices") || !strings.Contains(err.Error(), "messages=1") {
 		t.Fatalf("err=%v want no response choices with request shape", err)
+	}
+	if result == nil || len(result.Turns) != 1 || result.Turns[0].Err == "" {
+		t.Fatalf("result did not capture failure: %+v", result)
+	}
+}
+
+func TestRunnerRunNilResponse(t *testing.T) {
+	client := &fakeClient{nilResponses: map[int]bool{0: true}}
+	runner := Runner{Client: client}
+
+	result, err := runner.Run(context.Background(), Scenario{
+		Model: "test-model",
+		Turns: []Turn{{User: "hello"}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "nil chat response") || !strings.Contains(err.Error(), "messages=1") {
+		t.Fatalf("err=%v want nil response with request shape", err)
 	}
 	if result == nil || len(result.Turns) != 1 || result.Turns[0].Err == "" {
 		t.Fatalf("result did not capture failure: %+v", result)

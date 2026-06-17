@@ -13,15 +13,21 @@ func NoResponseChoicesError(req ChatRequest, resp *ChatResponse) error {
 	return errors.New(NoResponseChoicesMessage(req, resp))
 }
 
-func NoResponseChoicesMessage(req ChatRequest, resp *ChatResponse) string {
-	modelID := strings.TrimSpace(req.Model)
-	if modelID == "" && resp != nil {
-		modelID = strings.TrimSpace(resp.Model)
-	}
-	if modelID == "" {
-		modelID = "unknown"
-	}
+// NilChatResponseError describes a provider/client bug where no error and no
+// response were returned. The message includes request shape, not prompt text.
+func NilChatResponseError(req ChatRequest) error {
+	return errors.New(NilChatResponseMessage(req))
+}
 
+func NilChatResponseMessage(req ChatRequest) string {
+	modelID := requestModelID(req, nil)
+	parts := []string{fmt.Sprintf("model %s returned nil chat response", modelID)}
+	parts = append(parts, chatRequestShapeParts(req)...)
+	return strings.Join(parts, " ")
+}
+
+func NoResponseChoicesMessage(req ChatRequest, resp *ChatResponse) string {
+	modelID := requestModelID(req, resp)
 	parts := []string{fmt.Sprintf("model %s returned no response choices", modelID)}
 	if resp != nil {
 		if id := strings.TrimSpace(resp.ID); id != "" {
@@ -31,6 +37,23 @@ func NoResponseChoicesMessage(req ChatRequest, resp *ChatResponse) string {
 			parts = append(parts, "response_model="+responseModel)
 		}
 	}
+	parts = append(parts, chatRequestShapeParts(req)...)
+	return strings.Join(parts, " ")
+}
+
+func requestModelID(req ChatRequest, resp *ChatResponse) string {
+	modelID := strings.TrimSpace(req.Model)
+	if modelID == "" && resp != nil {
+		modelID = strings.TrimSpace(resp.Model)
+	}
+	if modelID == "" {
+		modelID = "unknown"
+	}
+	return modelID
+}
+
+func chatRequestShapeParts(req ChatRequest) []string {
+	parts := []string{}
 	parts = append(parts, fmt.Sprintf("messages=%d", len(req.Messages)))
 	if len(req.Tools) > 0 {
 		parts = append(parts, fmt.Sprintf("tools=%d", len(req.Tools)))
@@ -54,5 +77,5 @@ func NoResponseChoicesMessage(req ChatRequest, resp *ChatResponse) string {
 	if sessionID := strings.TrimSpace(req.SessionID); sessionID != "" {
 		parts = append(parts, "session="+sessionID)
 	}
-	return strings.Join(parts, " ")
+	return parts
 }

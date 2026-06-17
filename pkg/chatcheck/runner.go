@@ -139,7 +139,7 @@ func (r Runner) Run(ctx context.Context, scenario Scenario) (*Result, error) {
 			return result, fmt.Errorf("turn %d chat completion: %w", i+1, err)
 		}
 		if resp == nil {
-			err := fmt.Errorf("turn %d returned nil response", i+1)
+			err := fmt.Errorf("turn %d chat completion: %w", i+1, model.NilChatResponseError(req))
 			turnResult.Err = err.Error()
 			result.Turns = append(result.Turns, turnResult)
 			return result, err

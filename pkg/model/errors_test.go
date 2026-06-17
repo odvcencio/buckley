@@ -39,3 +39,26 @@ func TestNoResponseChoicesMessageIncludesRequestShape(t *testing.T) {
 		t.Fatalf("message leaked prompt content:\n%s", msg)
 	}
 }
+
+func TestNilChatResponseMessageIncludesRequestShape(t *testing.T) {
+	msg := NilChatResponseMessage(ChatRequest{
+		Model:     "xiaomi/mimo-v2.5-pro",
+		Messages:  []Message{{Role: "user", Content: "private prompt"}},
+		MaxTokens: 128,
+		SessionID: "chat-check",
+	})
+
+	for _, want := range []string{
+		"model xiaomi/mimo-v2.5-pro returned nil chat response",
+		"messages=1",
+		"max_tokens=128",
+		"session=chat-check",
+	} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("message missing %q:\n%s", want, msg)
+		}
+	}
+	if strings.Contains(msg, "private prompt") {
+		t.Fatalf("message leaked prompt content:\n%s", msg)
+	}
+}
