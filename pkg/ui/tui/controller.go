@@ -68,6 +68,7 @@ type QueuedMessage struct {
 	Content      string
 	Timestamp    time.Time
 	Acknowledged bool
+	DisableTools bool
 }
 
 // SessionState holds the state for a single session.
@@ -81,9 +82,15 @@ type SessionState struct {
 	Compacting    bool
 	Cancel        context.CancelFunc
 	MessageQueue  []QueuedMessage // Messages queued while streaming
+
+	DisableToolsNextTurn     bool
+	AwaitingToolLoopDecision bool
 }
 
-const interactiveMaxToolIterations = 50
+const (
+	interactiveMaxToolIterations   = 50
+	toolLoopCheckpointFinishReason = "tool_round_checkpoint"
+)
 
 // ControllerConfig configures the controller.
 type ControllerConfig struct {
@@ -340,6 +347,7 @@ func (c *Controller) handleSubmit(text string) {
 
 	// Get current session
 	sess := c.sessions[c.currentSession]
+	disableTools := shouldDisableToolsForPrompt(text)
 
 	if sess.Compacting {
 		c.app.AddMessage("Context compaction is running. Wait for it to finish before sending another message.", "system")
@@ -349,8 +357,9 @@ func (c *Controller) handleSubmit(text string) {
 	// If session is streaming, queue the message instead of starting new stream
 	if sess.Streaming {
 		sess.MessageQueue = append(sess.MessageQueue, QueuedMessage{
-			Content:   text,
-			Timestamp: time.Now(),
+			Content:      text,
+			Timestamp:    time.Now(),
+			DisableTools: disableTools,
 		})
 		// Show queued message with indicator
 		c.app.AddMessage(text+" (queued)", "user")
@@ -360,6 +369,18 @@ func (c *Controller) handleSubmit(text string) {
 
 	// Add user message to display
 	c.app.AddMessage(text, "user")
+	if sess.AwaitingToolLoopDecision && isStopToolLoopDecision(text) {
+		sess.AwaitingToolLoopDecision = false
+		sess.Conversation.AddUserMessage(text)
+		c.saveLatestConversationMessage(sess)
+		c.app.AddMessage("Stopped at the tool-loop checkpoint. Type a new request when ready.", "system")
+		c.app.SetStatus("Ready")
+		return
+	}
+	sess.AwaitingToolLoopDecision = false
+	if disableTools {
+		sess.DisableToolsNextTurn = true
+	}
 
 	// Create context with cancellation for this session
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1041,7 +1062,8 @@ func (c *Controller) runToolLoop(ctx context.Context, sess *SessionState, modelI
 		return "", nil, "", fmt.Errorf("session unavailable")
 	}
 
-	useTools := sess.ToolRegistry != nil && c.modelMgr.SupportsTools(modelID)
+	disableTools := c.consumeDisableToolsNextTurn(sess)
+	useTools := !disableTools && sess.ToolRegistry != nil && c.modelMgr.SupportsTools(modelID)
 	toolChoice := "auto"
 	maxIterations := interactiveMaxToolIterations
 	totalUsage := model.Usage{}
@@ -1105,6 +1127,7 @@ func (c *Controller) runToolLoop(ctx context.Context, sess *SessionState, modelI
 			}
 			sess.Conversation.AddAssistantMessageWithReasoningDetails(text, msg.Reasoning, msg.ReasoningDetails)
 			c.saveLatestConversationMessage(sess)
+			c.setAwaitingToolLoopDecision(sess, false)
 			return text, &totalUsage, choice.FinishReason, nil
 		}
 
@@ -1160,7 +1183,11 @@ func (c *Controller) runToolLoop(ctx context.Context, sess *SessionState, modelI
 		}
 	}
 
-	return "", &totalUsage, "", maxToolIterationsError(maxIterations)
+	checkpoint := maxToolIterationsCheckpoint(maxIterations)
+	sess.Conversation.AddAssistantMessage(checkpoint)
+	c.saveLatestConversationMessage(sess)
+	c.setAwaitingToolLoopDecision(sess, true)
+	return checkpoint, &totalUsage, toolLoopCheckpointFinishReason, nil
 }
 
 func modelProcessStatus(modelID string, iteration, maxIterations, toolCount int, reasoning *model.ReasoningConfig) string {
@@ -1184,14 +1211,14 @@ func modelProcessStatus(modelID string, iteration, maxIterations, toolCount int,
 	return phase
 }
 
-func maxToolIterationsError(maxIterations int) error {
-	return fmt.Errorf("stopped after %d model/tool rounds because the model kept requesting tools instead of returning a final answer; ask it to continue with a narrower request or run a no-tools follow-up if it already has enough context", maxIterations)
+func maxToolIterationsCheckpoint(maxIterations int) string {
+	return fmt.Sprintf("I reached Buckley's interactive checkpoint after %d model/tool rounds without a final answer.\n\nReply with one of:\n- continue: keep going with tools\n- continue without tools: synthesize from the current context only\n- stop: leave this session here", maxIterations)
 }
 
 func modelFinishReasonNotice(reason string) string {
 	trimmed := strings.TrimSpace(reason)
 	switch strings.ToLower(trimmed) {
-	case "", "stop", "tool_calls":
+	case "", "stop", "tool_calls", toolLoopCheckpointFinishReason:
 		return ""
 	case "length", "max_tokens", "max_output_tokens", "token_limit":
 		return "Response stopped because the provider reported finish_reason=" + trimmed + ", which usually means the output token limit was reached. Ask Buckley to continue, reduce context, or raise the chat max_tokens setting."
@@ -1203,10 +1230,87 @@ func modelFinishReasonNotice(reason string) string {
 }
 
 func readyStatusForFinishReason(reason string) string {
+	if strings.EqualFold(strings.TrimSpace(reason), toolLoopCheckpointFinishReason) {
+		return "Ready - needs direction"
+	}
 	if isTokenLimitFinishReason(reason) {
 		return "Ready - output token limit reached"
 	}
 	return "Ready"
+}
+
+func shouldDisableToolsForPrompt(prompt string) bool {
+	lower := strings.ToLower(strings.TrimSpace(prompt))
+	if lower == "" {
+		return false
+	}
+	normalized := strings.Trim(lower, " \t\r\n.!?")
+	switch normalized {
+	case "no tools", "without tools", "with no tools", "tools off", "tool-free":
+		return true
+	}
+	if strings.Contains(lower, "tools off") {
+		return true
+	}
+
+	toolFreePhrases := []string{
+		"without tools",
+		"with no tools",
+		"no tools",
+		"tool-free",
+	}
+	for _, phrase := range toolFreePhrases {
+		if strings.Contains(lower, phrase) && containsToolFreeDirective(lower) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsToolFreeDirective(prompt string) bool {
+	directives := []string{
+		"continue",
+		"proceed",
+		"answer",
+		"respond",
+		"synthesize",
+		"summarize",
+		"finish",
+		"follow-up",
+		"follow up",
+		"this one",
+	}
+	for _, directive := range directives {
+		if strings.Contains(prompt, directive) {
+			return true
+		}
+	}
+	return false
+}
+
+func isStopToolLoopDecision(prompt string) bool {
+	lower := strings.ToLower(strings.TrimSpace(prompt))
+	return lower == "stop" || lower == "no" || lower == "leave it" || lower == "leave it here"
+}
+
+func (c *Controller) consumeDisableToolsNextTurn(sess *SessionState) bool {
+	if c == nil || sess == nil {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	disable := sess.DisableToolsNextTurn
+	sess.DisableToolsNextTurn = false
+	return disable
+}
+
+func (c *Controller) setAwaitingToolLoopDecision(sess *SessionState, awaiting bool) {
+	if c == nil || sess == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	sess.AwaitingToolLoopDecision = awaiting
 }
 
 func isTokenLimitFinishReason(reason string) bool {
@@ -1889,6 +1993,8 @@ func (c *Controller) processMessageQueue(sess *SessionState) bool {
 
 	// Mark as acknowledged
 	queued.Acknowledged = true
+	sess.DisableToolsNextTurn = queued.DisableTools
+	sess.AwaitingToolLoopDecision = false
 
 	// Show acknowledgment in UI
 	remaining := len(sess.MessageQueue)

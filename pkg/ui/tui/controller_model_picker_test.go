@@ -83,16 +83,16 @@ func TestModelProcessStatus(t *testing.T) {
 	}
 }
 
-func TestMaxToolIterationsError(t *testing.T) {
-	err := maxToolIterationsError(50)
-	if err == nil {
-		t.Fatal("expected error")
+func TestMaxToolIterationsCheckpoint(t *testing.T) {
+	got := maxToolIterationsCheckpoint(50)
+	if !strings.Contains(got, "50 model/tool rounds") {
+		t.Fatalf("expected model/tool round count, got %q", got)
 	}
-	if !strings.Contains(err.Error(), "50 model/tool rounds") {
-		t.Fatalf("expected model/tool round count, got %q", err.Error())
+	if !strings.Contains(got, "continue without tools") {
+		t.Fatalf("expected no-tools continuation option, got %q", got)
 	}
-	if strings.Contains(err.Error(), "max tool calling iterations") {
-		t.Fatalf("error should be user-facing, got %q", err.Error())
+	if strings.Contains(got, "Error:") || strings.Contains(got, "max tool calling iterations") {
+		t.Fatalf("checkpoint should not read like an internal error, got %q", got)
 	}
 }
 
@@ -112,5 +112,46 @@ func TestModelFinishReasonNotice(t *testing.T) {
 	got = modelFinishReasonNotice("content_filter")
 	if !strings.Contains(got, "content_filter") {
 		t.Fatalf("content_filter notice should include reason, got %q", got)
+	}
+}
+
+func TestToolLoopCheckpointFinishReason(t *testing.T) {
+	if got := modelFinishReasonNotice(toolLoopCheckpointFinishReason); got != "" {
+		t.Fatalf("checkpoint should not add a provider notice, got %q", got)
+	}
+	if got := readyStatusForFinishReason(toolLoopCheckpointFinishReason); got != "Ready - needs direction" {
+		t.Fatalf("checkpoint ready status = %q", got)
+	}
+}
+
+func TestShouldDisableToolsForPrompt(t *testing.T) {
+	tests := []struct {
+		prompt string
+		want   bool
+	}{
+		{prompt: "continue without tools", want: true},
+		{prompt: "please do a no tools follow-up", want: true},
+		{prompt: "tools off for this one", want: true},
+		{prompt: "continue with tools", want: false},
+		{prompt: "inspect the tool registry", want: false},
+		{prompt: "why do we want no tools runs?", want: false},
+	}
+
+	for _, tt := range tests {
+		if got := shouldDisableToolsForPrompt(tt.prompt); got != tt.want {
+			t.Fatalf("shouldDisableToolsForPrompt(%q) = %v, want %v", tt.prompt, got, tt.want)
+		}
+	}
+}
+
+func TestConsumeDisableToolsNextTurn(t *testing.T) {
+	ctrl := &Controller{}
+	sess := &SessionState{DisableToolsNextTurn: true}
+
+	if !ctrl.consumeDisableToolsNextTurn(sess) {
+		t.Fatal("expected first consume to disable tools")
+	}
+	if ctrl.consumeDisableToolsNextTurn(sess) {
+		t.Fatal("expected second consume to be false")
 	}
 }
