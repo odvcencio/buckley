@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,12 +11,13 @@ import (
 
 	"m31labs.dev/arbiter"
 	"m31labs.dev/buckley/pkg/rules"
+	"m31labs.dev/buckley/pkg/rules/interop"
 )
 
 // runRulesCommand dispatches buckley rules subcommands.
 func runRulesCommand(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: buckley rules <list|check|eval> [args...]")
+		return fmt.Errorf("usage: buckley rules <list|check|eval|import-omnigent> [args...]")
 	}
 	switch args[0] {
 	case "list":
@@ -24,8 +26,10 @@ func runRulesCommand(args []string) error {
 		return runRulesCheck(args[1:])
 	case "eval":
 		return runRulesEval(args[1:])
+	case "import-omnigent":
+		return runRulesImportOmnigent(args[1:])
 	default:
-		return fmt.Errorf("unknown rules subcommand: %s (use list, check, or eval)", args[0])
+		return fmt.Errorf("unknown rules subcommand: %s (use list, check, eval, or import-omnigent)", args[0])
 	}
 }
 
@@ -133,6 +137,42 @@ func runRulesEval(args []string) error {
 			}
 		}
 		fmt.Println()
+	}
+	return nil
+}
+
+func runRulesImportOmnigent(args []string) error {
+	fs := flag.NewFlagSet("import-omnigent", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	format := fs.String("format", "text", "output format: text or json")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return fmt.Errorf("usage: buckley rules import-omnigent [--format text|json] <config.yaml>")
+	}
+
+	path := fs.Arg(0)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("reading %s: %w", path, err)
+	}
+	result, err := interop.ImportOmnigentPolicies(data)
+	if err != nil {
+		return err
+	}
+
+	switch strings.ToLower(strings.TrimSpace(*format)) {
+	case "", "text":
+		fmt.Print(interop.RenderText(result))
+	case "json":
+		out, err := interop.JSON(result)
+		if err != nil {
+			return fmt.Errorf("encoding import result: %w", err)
+		}
+		fmt.Println(string(out))
+	default:
+		return fmt.Errorf("unknown format %q (use text or json)", *format)
 	}
 	return nil
 }

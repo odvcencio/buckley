@@ -51,6 +51,33 @@ func TestRunExecuteTaskCommandUsageError(t *testing.T) {
 	}
 }
 
+func TestRunRulesImportOmnigent(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "agent.yaml")
+	data := []byte(`
+policies:
+  limit_tools:
+    type: function
+    handler: omnigent.policies.builtins.safety.max_tool_calls_per_session
+    factory_params:
+      limit: 12
+`)
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	out := captureStdout(t, func() {
+		if err := runRulesImportOmnigent([]string{path}); err != nil {
+			t.Fatalf("runRulesImportOmnigent: %v", err)
+		}
+	})
+	for _, want := range []string{"Omnigent policy interop", "limit_tools", "tool_budget", "agent.max_tool_calls"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("output missing %q in:\n%s", want, out)
+		}
+	}
+}
+
 func TestDispatchSubcommandResumePassthrough(t *testing.T) {
 	// Resume should not be handled by dispatchSubcommand (returns to main flow)
 	handled, _ := dispatchSubcommand([]string{"resume", "sess123"})
