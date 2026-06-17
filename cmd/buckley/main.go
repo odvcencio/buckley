@@ -635,7 +635,6 @@ func printHelp() {
 	fmt.Println("  rules list                       List loaded rule domains (embedded vs user override)")
 	fmt.Println("  rules check <file.arb>           Validate an .arb file compiles")
 	fmt.Println("  rules eval <domain> <facts.json> Evaluate a domain with JSON facts, print matched rules")
-	fmt.Println("  rules import-omnigent <yaml>     Map Omnigent policies to Buckley Arbiter domains")
 	fmt.Println("  migrate                          Apply database migrations")
 	fmt.Println("  db backup --out <path>           Create a consistent SQLite backup (VACUUM INTO)")
 	fmt.Println("  db restore --in <path> --force   Restore SQLite backup (stop Buckley first)")
@@ -931,7 +930,7 @@ func printBashCompletion() {
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
 
-    commands="plan execute execute-task commit pr experiment serve remote batch git-webhook agent-server lsp acp config doctor completion worktree rules migrate db resume help version"
+    commands="plan execute execute-task commit pr experiment serve remote batch git-webhook agent-server lsp acp config doctor completion worktree migrate db resume help version"
 
     case "${prev}" in
         buckley)
@@ -956,10 +955,6 @@ func printBashCompletion() {
             ;;
         db)
             COMPREPLY=( $(compgen -W "backup restore" -- "${cur}") )
-            return 0
-            ;;
-        rules)
-            COMPREPLY=( $(compgen -W "list check eval import-omnigent" -- "${cur}") )
             return 0
             ;;
         --config|-c)
@@ -996,7 +991,6 @@ _buckley() {
         'config:Manage configuration'
         'completion:Generate shell completions'
         'worktree:Git worktree management'
-        'rules:Inspect and import Arbiter rules'
         'migrate:Apply database migrations'
         'db:Backup/restore SQLite DB'
         'resume:Resume a previous session'
@@ -1073,7 +1067,6 @@ complete -c buckley -n __fish_use_subcommand -a acp -d 'Start ACP agent on stdio
 complete -c buckley -n __fish_use_subcommand -a config -d 'Manage configuration'
 complete -c buckley -n __fish_use_subcommand -a completion -d 'Generate shell completions'
 complete -c buckley -n __fish_use_subcommand -a worktree -d 'Git worktree management'
-complete -c buckley -n __fish_use_subcommand -a rules -d 'Inspect and import Arbiter rules'
 complete -c buckley -n __fish_use_subcommand -a migrate -d 'Apply database migrations'
 complete -c buckley -n __fish_use_subcommand -a db -d 'Backup/restore SQLite DB'
 complete -c buckley -n __fish_use_subcommand -a resume -d 'Resume a previous session'

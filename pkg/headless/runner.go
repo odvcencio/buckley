@@ -808,7 +808,6 @@ func (r *Runner) requiresApproval(toolName string, args map[string]any) bool {
 		result, err := r.rulesEngine.EvalStrategy("approval", "approval_gate", map[string]any{
 			"approval": map[string]any{"mode": r.approvalMode()},
 			"risk":     map[string]any{"level": assessment.Level},
-			"tool":     map[string]any{"name": toolName},
 		})
 		if err == nil {
 			action, _ := result.Params["action"].(string)
