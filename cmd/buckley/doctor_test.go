@@ -704,6 +704,85 @@ func TestRunDoctorChatInitCreatesProjectScenario(t *testing.T) {
 	}
 }
 
+func TestRunEvalInitCreatesProjectEvalScenario(t *testing.T) {
+	dir := t.TempDir()
+
+	out := captureStdout(t, func() {
+		if err := runEvalCommand([]string{
+			"init",
+			"--path", dir,
+			"--description", "Project eval smoke.",
+			"--tag", "smoke,regression",
+			"chat/memory",
+		}); err != nil {
+			t.Fatalf("runEvalCommand init: %v", err)
+		}
+	})
+	for _, want := range []string{"Created chat eval scenario chat/memory", "evals/", filepath.Join("evals", "chat", "memory.yaml"), "Next: buckley eval list"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("eval init output missing %q:\n%s", want, out)
+		}
+	}
+	scenarioPath := filepath.Join(dir, "evals", "chat", "memory.yaml")
+	data, err := os.ReadFile(scenarioPath)
+	if err != nil {
+		t.Fatalf("read generated eval scenario: %v", err)
+	}
+	for _, want := range []string{`description: "Project eval smoke."`, `name: "chat/memory"`, `model: "xiaomi/mimo-v2.5-pro"`, `BUCKLEY_CHAT_CHECK_ONE`, `BUCKLEY_CHAT_CHECK_TWO`} {
+		if !strings.Contains(string(data), want) {
+			t.Fatalf("generated eval scenario missing %q:\n%s", want, string(data))
+		}
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".buckley")); !os.IsNotExist(err) {
+		t.Fatalf("eval init should not create .buckley dir, stat err=%v", err)
+	}
+
+	nested := filepath.Join(dir, "src", "feature")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatalf("mkdir nested project dir: %v", err)
+	}
+	t.Chdir(nested)
+
+	origInit := initDependenciesFn
+	t.Cleanup(func() { initDependenciesFn = origInit })
+	called := false
+	initDependenciesFn = func() (*config.Config, *model.Manager, *storage.Store, error) {
+		called = true
+		return nil, nil, nil, errors.New("dependency initialization should not run")
+	}
+
+	listOut := captureStdout(t, func() {
+		if err := runEvalCommand([]string{"list", "--tag", "regression"}); err != nil {
+			t.Fatalf("runEvalCommand list: %v", err)
+		}
+	})
+	if called {
+		t.Fatal("eval list initialized dependencies")
+	}
+	for _, want := range []string{"Chat check scenarios: 1", "chat/memory", "tags=regression,smoke"} {
+		if !strings.Contains(listOut, want) {
+			t.Fatalf("eval list output missing %q:\n%s", want, listOut)
+		}
+	}
+
+	dryDir := filepath.Join(dir, "dry")
+	jsonOut := captureStdout(t, func() {
+		if err := runEvalCommand([]string{"init", "--dry-run", "--json", "--path", dryDir, "smoke"}); err != nil {
+			t.Fatalf("runEvalCommand init dry-run: %v", err)
+		}
+	})
+	var result doctorChatInitResult
+	if err := json.Unmarshal([]byte(jsonOut), &result); err != nil {
+		t.Fatalf("unmarshal eval init json: %v\n%s", err, jsonOut)
+	}
+	if !result.DryRun || result.Name != "smoke" || !strings.HasSuffix(result.Path, filepath.Join("evals", "smoke.yaml")) {
+		t.Fatalf("unexpected eval init dry-run result: %+v", result)
+	}
+	if _, err := os.Stat(filepath.Join(dryDir, "evals")); !os.IsNotExist(err) {
+		t.Fatalf("dry-run should not create evals dir, stat err=%v", err)
+	}
+}
+
 func TestRunDoctorChatCommandProjectListUsesEvalFallback(t *testing.T) {
 	dir := t.TempDir()
 	projectDir := filepath.Join(dir, "evals", "chat")
@@ -770,6 +849,13 @@ turns:
 `), 0o644); err != nil {
 		t.Fatalf("write scenario: %v", err)
 	}
+	legacyDir := filepath.Join(dir, ".buckley", "chatchecks")
+	if err := os.MkdirAll(legacyDir, 0o755); err != nil {
+		t.Fatalf("mkdir legacy scenarios: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(legacyDir, "legacy.json"), []byte(`{"name":"legacy","tags":["smoke"],"turns":[{"user":"say LEGACY","want_contains":["LEGACY"]}]}`), 0o644); err != nil {
+		t.Fatalf("write legacy scenario: %v", err)
+	}
 
 	origInit := initDependenciesFn
 	t.Cleanup(func() { initDependenciesFn = origInit })
@@ -793,6 +879,9 @@ turns:
 		if !strings.Contains(out, want) {
 			t.Fatalf("output missing %q: %s", want, out)
 		}
+	}
+	if strings.Contains(out, "legacy") {
+		t.Fatalf("eval list should prefer evals over legacy chatchecks:\n%s", out)
 	}
 
 	jsonOut := captureStdout(t, func() {

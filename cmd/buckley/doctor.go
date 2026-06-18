@@ -21,6 +21,8 @@ const projectChatCheckScenarioDir = ".buckley/chatchecks"
 const projectEvalScenarioDir = "evals"
 const defaultChatCheckArtifactRoot = ".buckley/chatchecks/runs"
 
+type doctorChatProjectResolver func(string) (string, error)
+
 func runDoctorCommand(args []string) error {
 	subCmd := "check"
 	if len(args) > 0 {
@@ -51,21 +53,21 @@ func runEvalCommand(args []string) error {
 	}
 	switch strings.TrimSpace(args[0]) {
 	case "init":
-		return runDoctorChatInitCommand(args[1:])
+		return runEvalInitCommand(args[1:])
 	case "list":
-		return runDoctorChatCommand(evalDoctorChatArgs(append([]string{"-list"}, args[1:]...)))
+		return runDoctorChatCommandWithResolver(evalDoctorChatArgs(append([]string{"-list"}, args[1:]...)), findProjectEvalScenarioDir)
 	case "run":
-		return runDoctorChatCommand(evalDoctorChatArgs(args[1:]))
+		return runDoctorChatCommandWithResolver(evalDoctorChatArgs(args[1:]), findProjectEvalScenarioDir)
 	case "runs", "artifacts":
 		rest := args[1:]
 		if len(rest) > 0 && strings.TrimSpace(rest[0]) == "show" {
-			return runDoctorChatRunShowCommand(evalDoctorChatRunsArgs(rest[1:]))
+			return runDoctorChatRunShowCommandWithResolver(evalDoctorChatRunsArgs(rest[1:]), findProjectEvalScenarioDir)
 		}
-		return runDoctorChatRunsCommand(evalDoctorChatRunsArgs(rest))
+		return runDoctorChatRunsCommandWithResolver(evalDoctorChatRunsArgs(rest), findProjectEvalScenarioDir)
 	case "show":
-		return runDoctorChatRunShowCommand(evalDoctorChatRunsArgs(args[1:]))
+		return runDoctorChatRunShowCommandWithResolver(evalDoctorChatRunsArgs(args[1:]), findProjectEvalScenarioDir)
 	default:
-		return runDoctorChatCommand(evalDoctorChatArgs(args))
+		return runDoctorChatCommandWithResolver(evalDoctorChatArgs(args), findProjectEvalScenarioDir)
 	}
 }
 
@@ -129,6 +131,7 @@ type doctorChatInitResult struct {
 
 type doctorChatInitOptions struct {
 	Root        string
+	ScenarioDir string
 	Name        string
 	Description string
 	Model       string
@@ -193,6 +196,7 @@ func runDoctorChatInitCommand(args []string) error {
 	}
 	result, err := initProjectChatCheck(doctorChatInitOptions{
 		Root:        *pathFlag,
+		ScenarioDir: projectChatCheckScenarioDir,
 		Name:        fs.Arg(0),
 		Description: *description,
 		Model:       *modelID,
@@ -212,9 +216,56 @@ func runDoctorChatInitCommand(args []string) error {
 	return nil
 }
 
+func runEvalInitCommand(args []string) error {
+	fs := flag.NewFlagSet("eval init", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	pathFlag := fs.String("path", ".", "project root where evals should be created")
+	description := fs.String("description", "", "scenario description")
+	modelID := fs.String("model", chatcheck.DefaultModel, "model to use when running this scenario")
+	var tags stringListFlag
+	fs.Var(&tags, "tag", "scenario tag (repeatable, comma-separated)")
+	force := fs.Bool("force", false, "overwrite scenario file if it already exists")
+	dryRun := fs.Bool("dry-run", false, "show what would be created without writing files")
+	jsonOutput := fs.Bool("json", false, "print machine-readable JSON")
+	format := fs.String("format", "text", "output format: text or json")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return fmt.Errorf("usage: buckley eval init [--path <dir>] [--description <text>] [--model <id>] [--tag <tag>] [--force] [--dry-run] [--json|--format json] <scenario>")
+	}
+	if err := normalizeJSONFormatFlag(*format, jsonOutput); err != nil {
+		return err
+	}
+	result, err := initProjectChatCheck(doctorChatInitOptions{
+		Root:        *pathFlag,
+		ScenarioDir: projectEvalScenarioDir,
+		Name:        fs.Arg(0),
+		Description: *description,
+		Model:       *modelID,
+		Tags:        tags.Values(),
+		Force:       *force,
+		DryRun:      *dryRun,
+	})
+	if err != nil {
+		return err
+	}
+	if *jsonOutput {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(result)
+	}
+	printEvalInitResult(os.Stdout, result)
+	return nil
+}
+
 func runDoctorChatRunsCommand(args []string) error {
+	return runDoctorChatRunsCommandWithResolver(args, findProjectChatCheckScenarioDir)
+}
+
+func runDoctorChatRunsCommandWithResolver(args []string, resolver doctorChatProjectResolver) error {
 	if len(args) > 0 && strings.TrimSpace(args[0]) == "show" {
-		return runDoctorChatRunShowCommand(args[1:])
+		return runDoctorChatRunShowCommandWithResolver(args[1:], resolver)
 	}
 
 	fs := flag.NewFlagSet("doctor chat runs", flag.ContinueOnError)
@@ -239,7 +290,7 @@ func runDoctorChatRunsCommand(args []string) error {
 	if err := normalizeJSONFormatFlag(*format, jsonOutput); err != nil {
 		return err
 	}
-	root, err := resolveDoctorChatRunsRoot(*pathFlag, *projectRuns)
+	root, err := resolveDoctorChatRunsRootWithResolver(*pathFlag, *projectRuns, resolver)
 	if err != nil {
 		return err
 	}
@@ -257,6 +308,10 @@ func runDoctorChatRunsCommand(args []string) error {
 }
 
 func runDoctorChatRunShowCommand(args []string) error {
+	return runDoctorChatRunShowCommandWithResolver(args, findProjectChatCheckScenarioDir)
+}
+
+func runDoctorChatRunShowCommandWithResolver(args []string, resolver doctorChatProjectResolver) error {
 	fs := flag.NewFlagSet("doctor chat runs show", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	pathFlag := fs.String("path", "", "chat check artifact root to inspect")
@@ -280,7 +335,7 @@ func runDoctorChatRunShowCommand(args []string) error {
 	if fs.NArg() == 1 {
 		runID = fs.Arg(0)
 	}
-	root, err := resolveDoctorChatRunsRoot(*pathFlag, *projectRuns)
+	root, err := resolveDoctorChatRunsRootWithResolver(*pathFlag, *projectRuns, resolver)
 	if err != nil {
 		return err
 	}
@@ -298,6 +353,10 @@ func runDoctorChatRunShowCommand(args []string) error {
 }
 
 func runDoctorChatCommand(args []string) error {
+	return runDoctorChatCommandWithResolver(args, findProjectChatCheckScenarioDir)
+}
+
+func runDoctorChatCommandWithResolver(args []string, resolver doctorChatProjectResolver) error {
 	defaultModel := strings.TrimSpace(os.Getenv(envBuckleyChatCheckModel))
 	if defaultModel == "" {
 		defaultModel = chatcheck.DefaultModel
@@ -332,7 +391,7 @@ func runDoctorChatCommand(args []string) error {
 	if *listScenarios && *writeArtifacts {
 		return fmt.Errorf("doctor chat -artifacts cannot be used with -list")
 	}
-	resolvedScenarioPath, err := resolveDoctorChatScenarioPath(*scenarioPath, *projectScenarios)
+	resolvedScenarioPath, err := resolveDoctorChatScenarioPathWithResolver(*scenarioPath, *projectScenarios, resolver)
 	if err != nil {
 		return err
 	}
@@ -427,6 +486,10 @@ func runDoctorChatCommand(args []string) error {
 }
 
 func resolveDoctorChatScenarioPath(scenarioPath string, useProject bool) (string, error) {
+	return resolveDoctorChatScenarioPathWithResolver(scenarioPath, useProject, findProjectChatCheckScenarioDir)
+}
+
+func resolveDoctorChatScenarioPathWithResolver(scenarioPath string, useProject bool, resolver doctorChatProjectResolver) (string, error) {
 	scenarioPath = strings.TrimSpace(scenarioPath)
 	if !useProject {
 		return scenarioPath, nil
@@ -434,10 +497,21 @@ func resolveDoctorChatScenarioPath(scenarioPath string, useProject bool) (string
 	if scenarioPath != "" {
 		return "", fmt.Errorf("doctor chat -project cannot be combined with -scenario")
 	}
-	return findProjectChatCheckScenarioDir(".")
+	if resolver == nil {
+		resolver = findProjectChatCheckScenarioDir
+	}
+	return resolver(".")
 }
 
 func findProjectChatCheckScenarioDir(start string) (string, error) {
+	return findProjectScenarioDir(start, []string{projectChatCheckScenarioDir, projectEvalScenarioDir})
+}
+
+func findProjectEvalScenarioDir(start string) (string, error) {
+	return findProjectScenarioDir(start, []string{projectEvalScenarioDir, projectChatCheckScenarioDir})
+}
+
+func findProjectScenarioDir(start string, rels []string) (string, error) {
 	start = strings.TrimSpace(start)
 	if start == "" {
 		start = "."
@@ -455,7 +529,7 @@ func findProjectChatCheckScenarioDir(start string) (string, error) {
 	}
 
 	for {
-		for _, rel := range []string{projectChatCheckScenarioDir, projectEvalScenarioDir} {
+		for _, rel := range rels {
 			candidate := filepath.Join(dir, rel)
 			info, err := os.Stat(candidate)
 			if err == nil {
@@ -498,7 +572,11 @@ func initProjectChatCheck(opts doctorChatInitOptions) (doctorChatInitResult, err
 		return doctorChatInitResult{}, fmt.Errorf("stat chat check init path: %w", err)
 	}
 
-	scenarioDir := filepath.Join(absRoot, projectChatCheckScenarioDir)
+	scenarioRel, err := cleanProjectScenarioDir(opts.ScenarioDir)
+	if err != nil {
+		return doctorChatInitResult{}, err
+	}
+	scenarioDir := filepath.Join(absRoot, filepath.FromSlash(scenarioRel))
 	scenarioFile := filepath.Join(scenarioDir, filepath.FromSlash(name)+".yaml")
 	result := doctorChatInitResult{
 		Name:   name,
@@ -509,7 +587,7 @@ func initProjectChatCheck(opts doctorChatInitOptions) (doctorChatInitResult, err
 	if _, _, _, err := ensureChatCheckInitPath(absRoot, "", true, false, opts.DryRun); err != nil {
 		return doctorChatInitResult{}, err
 	}
-	for _, dir := range []string{filepath.Join(absRoot, ".buckley"), scenarioDir, filepath.Dir(scenarioFile)} {
+	for _, dir := range scenarioInitDirs(absRoot, scenarioRel, scenarioFile) {
 		created, existing, _, err := ensureChatCheckInitPath(dir, "", true, false, opts.DryRun)
 		if err != nil {
 			return doctorChatInitResult{}, err
@@ -537,6 +615,38 @@ func initProjectChatCheck(opts doctorChatInitOptions) (doctorChatInitResult, err
 		result.Existing = append(result.Existing, rel)
 	}
 	return result, nil
+}
+
+func cleanProjectScenarioDir(value string) (string, error) {
+	value = filepath.ToSlash(strings.TrimSpace(value))
+	if value == "" {
+		value = projectChatCheckScenarioDir
+	}
+	value = strings.Trim(value, "/")
+	value = filepath.ToSlash(filepath.Clean(value))
+	if value == "." || value == "" || strings.HasPrefix(value, "../") || value == ".." || filepath.IsAbs(value) {
+		return "", fmt.Errorf("invalid project scenario directory: %s", value)
+	}
+	return value, nil
+}
+
+func scenarioInitDirs(root, scenarioRel, scenarioFile string) []string {
+	dirs := []string{}
+	if strings.HasPrefix(filepath.ToSlash(scenarioRel), ".buckley/") {
+		dirs = append(dirs, filepath.Join(root, ".buckley"))
+	}
+	dirs = append(dirs, filepath.Join(root, filepath.FromSlash(scenarioRel)), filepath.Dir(scenarioFile))
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(dirs))
+	for _, dir := range dirs {
+		dir = filepath.Clean(dir)
+		if _, ok := seen[dir]; ok {
+			continue
+		}
+		seen[dir] = struct{}{}
+		out = append(out, dir)
+	}
+	return out
 }
 
 func ensureChatCheckInitPath(path, content string, dir, force, dryRun bool) (created bool, existing bool, overwritten bool, err error) {
@@ -678,6 +788,18 @@ func printDoctorChatInitResult(w io.Writer, result doctorChatInitResult) {
 	fmt.Fprintln(w, "Next: buckley doctor chat -project -list")
 }
 
+func printEvalInitResult(w io.Writer, result doctorChatInitResult) {
+	action := "Created"
+	if result.DryRun {
+		action = "Would create"
+	}
+	fmt.Fprintf(w, "%s chat eval scenario %s at %s\n", action, result.Name, result.Path)
+	printPathList(w, "Created", "Would create", result.Created, result.DryRun)
+	printPathList(w, "Overwritten", "Would overwrite", result.Overwritten, result.DryRun)
+	printPathList(w, "Existing", "Existing", result.Existing, false)
+	fmt.Fprintln(w, "Next: buckley eval list")
+}
+
 func resolveChatCheckArtifactRoot(configured string, useProject bool, scenarioPath string, explicit bool) string {
 	configured = strings.TrimSpace(configured)
 	if explicit || !useProject {
@@ -691,9 +813,16 @@ func resolveChatCheckArtifactRoot(configured string, useProject bool, scenarioPa
 }
 
 func resolveDoctorChatRunsRoot(path string, project bool) (string, error) {
+	return resolveDoctorChatRunsRootWithResolver(path, project, findProjectChatCheckScenarioDir)
+}
+
+func resolveDoctorChatRunsRootWithResolver(path string, project bool, resolver doctorChatProjectResolver) (string, error) {
 	path = strings.TrimSpace(path)
 	if project {
-		scenarioRoot, err := findProjectChatCheckScenarioDir(".")
+		if resolver == nil {
+			resolver = findProjectChatCheckScenarioDir
+		}
+		scenarioRoot, err := resolver(".")
 		if err != nil {
 			return "", err
 		}
