@@ -154,6 +154,17 @@ func TestParseStartupOptionsLeavesSubcommandModelFlag(t *testing.T) {
 	}
 }
 
+func TestParseStartupOptionsLeavesSkillsFlags(t *testing.T) {
+	opts, err := parseStartupOptions([]string{"skills", "list", "--source", "agent", "--format", "json"})
+	if err != nil {
+		t.Fatalf("parseStartupOptions error: %v", err)
+	}
+	want := []string{"skills", "list", "--source", "agent", "--format", "json"}
+	if strings.Join(opts.args, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("args=%v want %v", opts.args, want)
+	}
+}
+
 func TestParseStartupOptionsAgentEnvDefault(t *testing.T) {
 	t.Setenv("BUCKLEY_AGENT", "env-agent.yaml")
 	opts, err := parseStartupOptions([]string{"--plain"})

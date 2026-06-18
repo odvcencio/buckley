@@ -150,6 +150,86 @@ tools:
 	}
 }
 
+func TestRunSkillsCommandListsAndShowsAgentSkills(t *testing.T) {
+	dir := t.TempDir()
+	skillDir := filepath.Join(dir, "agent", "skills", "triage")
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatalf("mkdir agent skill: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(`
+---
+description: Triage ambiguous repo work before changing files.
+allowed_tools: [read_file, search_text]
+---
+
+# Triage
+
+Inspect the current state before editing.
+`), 0o644); err != nil {
+		t.Fatalf("write agent skill: %v", err)
+	}
+	nested := filepath.Join(dir, "pkg", "feature")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatalf("mkdir nested: %v", err)
+	}
+	oldWd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(oldWd) })
+	if err := os.Chdir(nested); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+
+	textOut := captureStdout(t, func() {
+		if err := runSkillsCommand([]string{"list", "--source", "agent"}); err != nil {
+			t.Fatalf("runSkillsCommand list: %v", err)
+		}
+	})
+	for _, want := range []string{"Skills: 1", "triage [agent]", "Triage ambiguous repo work", "allowed_tools=read_file,search_text"} {
+		if !strings.Contains(textOut, want) {
+			t.Fatalf("skills list output missing %q:\n%s", want, textOut)
+		}
+	}
+
+	jsonOut := captureStdout(t, func() {
+		if err := runSkillsCommand([]string{"--json", "--source", "agent"}); err != nil {
+			t.Fatalf("runSkillsCommand json: %v", err)
+		}
+	})
+	var list skillsCommandList
+	if err := json.Unmarshal([]byte(jsonOut), &list); err != nil {
+		t.Fatalf("unmarshal skills json: %v\n%s", err, jsonOut)
+	}
+	if list.Count != 1 || list.Available[0].Name != "triage" || list.Available[0].Source != "agent" {
+		t.Fatalf("unexpected skills json: %+v", list)
+	}
+
+	showOut := captureStdout(t, func() {
+		if err := runSkillsCommand([]string{"show", "triage"}); err != nil {
+			t.Fatalf("runSkillsCommand show: %v", err)
+		}
+	})
+	for _, want := range []string{"Skill: triage", "Source: agent", "Allowed tools: read_file, search_text", "Inspect the current state before editing."} {
+		if !strings.Contains(showOut, want) {
+			t.Fatalf("skills show output missing %q:\n%s", want, showOut)
+		}
+	}
+
+	dispatchOut := captureStdout(t, func() {
+		handled, code := dispatchSubcommand([]string{"skills", "list", "--source", "agent"})
+		if !handled {
+			t.Fatal("skills should be handled")
+		}
+		if code != 0 {
+			t.Fatalf("skills list should succeed, got code %d", code)
+		}
+	})
+	if !strings.Contains(dispatchOut, "triage [agent]") {
+		t.Fatalf("skills dispatch output missing agent skill:\n%s", dispatchOut)
+	}
+}
+
 func TestRunAgentCommandInvalidSpec(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "agent.yaml")
@@ -584,6 +664,9 @@ func TestCompletionShells(t *testing.T) {
 		})
 		if out == "" {
 			t.Errorf("expected %s completion output", shell)
+		}
+		if !strings.Contains(out, "skills") {
+			t.Errorf("expected %s completion to include skills command", shell)
 		}
 	}
 

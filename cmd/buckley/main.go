@@ -671,6 +671,7 @@ func printHelp() {
 	fmt.Println("  hunt [--dir path]                Scan codebase for improvement suggestions")
 	fmt.Println("  dream [--dir path] [--plan]      Analyze architecture and identify gaps")
 	fmt.Println("  info [--json|--format json]      Inspect resolved harness configuration and capabilities")
+	fmt.Println("  skills [list|show]               List or inspect loaded workflow skills")
 	fmt.Println("  config [check|show|path]         Manage configuration")
 	fmt.Println("  trust [status|allow|deny|reset]  Inspect or change project trust")
 	fmt.Println("  doctor [chat]                    Quick system health and chat checks")
@@ -976,7 +977,7 @@ func printBashCompletion() {
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
 
-    commands="plan execute execute-task commit pr experiment serve remote batch git-webhook agent agent-server lsp acp info config doctor completion worktree rules migrate db resume help version"
+    commands="plan execute execute-task commit pr experiment serve remote batch git-webhook agent skills skill agent-server lsp acp info config doctor completion worktree rules migrate db resume help version"
 
     case "${prev}" in
         buckley)
@@ -989,6 +990,10 @@ func printBashCompletion() {
             ;;
         agent)
             COMPREPLY=( $(compgen -W "list check show run invoke" -- "${cur}") )
+            return 0
+            ;;
+        skills|skill)
+            COMPREPLY=( $(compgen -W "list show" -- "${cur}") )
             return 0
             ;;
         config)
@@ -1044,6 +1049,8 @@ _buckley() {
         'batch:Batch helpers (k8s/CI)'
         'git-webhook:Run regression/release webhooks daemon'
         'agent:Validate, inspect, and invoke Buckley agent specs'
+        'skills:List or inspect loaded workflow skills'
+        'skill:Alias for skills'
         'agent-server:Run ACP HTTP proxy for editor workflows'
         'lsp:Start LSP server on stdio for editor integration'
         'acp:Start ACP agent on stdio for Zed/JetBrains/Neovim'
@@ -1089,6 +1096,9 @@ _buckley() {
                 agent)
                     _values 'agent command' list check show run invoke
                     ;;
+                skills|skill)
+                    _values 'skills command' list show
+                    ;;
                 experiment)
                     _values 'experiment command' run
                     ;;
@@ -1130,6 +1140,8 @@ complete -c buckley -n __fish_use_subcommand -a remote -d 'Remote session manage
 complete -c buckley -n __fish_use_subcommand -a batch -d 'Batch helpers (k8s/CI)'
 complete -c buckley -n __fish_use_subcommand -a git-webhook -d 'Run regression/release webhooks daemon'
 complete -c buckley -n __fish_use_subcommand -a agent -d 'Validate, inspect, and invoke Buckley agent specs'
+complete -c buckley -n __fish_use_subcommand -a skills -d 'List or inspect loaded workflow skills'
+complete -c buckley -n __fish_use_subcommand -a skill -d 'Alias for skills'
 complete -c buckley -n __fish_use_subcommand -a agent-server -d 'Run ACP HTTP proxy for editor workflows'
 complete -c buckley -n __fish_use_subcommand -a lsp -d 'Start LSP server on stdio'
 complete -c buckley -n __fish_use_subcommand -a acp -d 'Start ACP agent on stdio (Zed/JetBrains/Neovim)'
@@ -1167,6 +1179,10 @@ complete -c buckley -n '__fish_seen_subcommand_from agent' -a list -d 'List disc
 complete -c buckley -n '__fish_seen_subcommand_from agent' -a show -d 'Inspect agent spec'
 complete -c buckley -n '__fish_seen_subcommand_from agent' -a run -d 'Invoke a named subagent'
 complete -c buckley -n '__fish_seen_subcommand_from agent' -a invoke -d 'Invoke a named subagent'
+
+# Skills subcommands
+complete -c buckley -n '__fish_seen_subcommand_from skills skill' -a list -d 'List loaded workflow skills'
+complete -c buckley -n '__fish_seen_subcommand_from skills skill' -a show -d 'Inspect a loaded workflow skill'
 
 # Doctor subcommands
 complete -c buckley -n '__fish_seen_subcommand_from doctor' -a check -d 'Validate configuration'
@@ -1250,6 +1266,8 @@ func dispatchSubcommand(args []string) (bool, int) {
 		return true, runCommand(runDreamCommand, args[1:])
 	case "info":
 		return true, runCommand(runInfoCommand, args[1:])
+	case "skills", "skill":
+		return true, runCommand(runSkillsCommand, args[1:])
 	case "config":
 		return true, runCommand(runConfigCommand, args[1:])
 	case "trust":
