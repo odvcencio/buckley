@@ -27,6 +27,16 @@ type SearchWidget struct {
 	matchStyle  backend.Style
 }
 
+type searchKeyHandler func(*SearchWidget, runtime.KeyMsg) runtime.HandleResult
+
+var searchKeyHandlers = map[terminal.Key]searchKeyHandler{
+	terminal.KeyEscape:    (*SearchWidget).handleEscapeKey,
+	terminal.KeyEnter:     (*SearchWidget).handleEnterKey,
+	terminal.KeyUp:        (*SearchWidget).handleUpKey,
+	terminal.KeyDown:      (*SearchWidget).handleDownKey,
+	terminal.KeyBackspace: (*SearchWidget).handleBackspaceKey,
+}
+
 // NewSearchWidget creates a new search widget.
 func NewSearchWidget() *SearchWidget {
 	return &SearchWidget{
@@ -95,39 +105,72 @@ func (s *SearchWidget) Render(ctx runtime.RenderContext) {
 	b := s.bounds
 	buf := ctx.Buffer
 
-	// Fill background
+	s.renderBackground(buf, b)
+	s.renderPrefix(buf, b)
+	query := s.renderQuery(buf, b)
+	s.renderCursor(buf, b, query)
+	s.renderMatchInfo(buf, b)
+}
+
+func (s *SearchWidget) renderBackground(buf *runtime.Buffer, b runtime.Rect) {
 	for x := b.X; x < b.X+b.Width; x++ {
 		buf.Set(x, b.Y, ' ', s.bgStyle)
 	}
+}
 
-	// Draw "/ " prefix
+func (s *SearchWidget) renderPrefix(buf *runtime.Buffer, b runtime.Rect) {
 	buf.SetString(b.X, b.Y, "/ ", s.borderStyle)
+}
 
-	// Draw query
+func (s *SearchWidget) renderQuery(buf *runtime.Buffer, b runtime.Rect) string {
 	queryX := b.X + 2
-	maxQuery := b.Width - 20
-	query := s.query
-	if len(query) > maxQuery {
-		query = query[len(query)-maxQuery:]
-	}
+	query := suffixRunes(s.query, searchQueryWidth(b.Width))
 	buf.SetString(queryX, b.Y, query, s.textStyle)
+	return query
+}
 
-	// Draw cursor
-	cursorX := queryX + len(query)
+func (s *SearchWidget) renderCursor(buf *runtime.Buffer, b runtime.Rect, query string) {
+	queryX := b.X + 2
+	cursorX := queryX + runeLen(query)
 	if cursorX < b.X+b.Width-15 && s.focused {
 		buf.Set(cursorX, b.Y, '█', s.textStyle)
 	}
+}
 
-	// Draw match count on the right
-	if s.matchCount > 0 {
-		matchInfo := intToStr(s.currentMatch+1) + "/" + intToStr(s.matchCount)
-		infoX := b.X + b.Width - len(matchInfo) - 2
-		buf.SetString(infoX, b.Y, matchInfo, s.matchStyle)
-	} else if s.query != "" {
-		noMatch := "No matches"
-		infoX := b.X + b.Width - len(noMatch) - 2
-		buf.SetString(infoX, b.Y, noMatch, s.matchStyle)
+func (s *SearchWidget) renderMatchInfo(buf *runtime.Buffer, b runtime.Rect) {
+	info := s.matchInfoText()
+	if info == "" {
+		return
 	}
+	infoX := b.X + b.Width - runeLen(info) - 2
+	if infoX >= b.X+2 {
+		buf.SetString(infoX, b.Y, info, s.matchStyle)
+	}
+}
+
+func (s *SearchWidget) matchInfoText() string {
+	if s.matchCount > 0 {
+		return intToStr(s.currentMatch+1) + "/" + intToStr(s.matchCount)
+	}
+	if s.query != "" {
+		return "No matches"
+	}
+	return ""
+}
+
+func searchQueryWidth(width int) int {
+	return max(0, width-20)
+}
+
+func suffixRunes(value string, maxWidth int) string {
+	if maxWidth <= 0 {
+		return ""
+	}
+	runes := []rune(value)
+	if len(runes) <= maxWidth {
+		return value
+	}
+	return string(runes[len(runes)-maxWidth:])
 }
 
 // HandleMessage processes keyboard input.
@@ -137,46 +180,64 @@ func (s *SearchWidget) HandleMessage(msg runtime.Message) runtime.HandleResult {
 		return runtime.Unhandled()
 	}
 
-	switch key.Key {
-	case terminal.KeyEscape:
-		s.query = ""
-		if s.onSearch != nil {
-			s.onSearch("")
-		}
-		return runtime.WithCommand(runtime.PopOverlay{})
-
-	case terminal.KeyEnter:
-		// Close search bar but keep highlighting
-		return runtime.WithCommand(runtime.PopOverlay{})
-
-	case terminal.KeyUp:
-		if s.onPrev != nil {
-			s.onPrev()
-		}
-		return runtime.Handled()
-
-	case terminal.KeyDown:
-		if s.onNext != nil {
-			s.onNext()
-		}
-		return runtime.Handled()
-
-	case terminal.KeyBackspace:
-		if len(s.query) > 0 {
-			s.query = s.query[:len(s.query)-1]
-			if s.onSearch != nil {
-				s.onSearch(s.query)
-			}
-		}
-		return runtime.Handled()
-
-	case terminal.KeyRune:
-		s.query += string(key.Rune)
-		if s.onSearch != nil {
-			s.onSearch(s.query)
-		}
-		return runtime.Handled()
+	if key.Key == terminal.KeyRune {
+		return s.handleRuneKey(key)
+	}
+	if handler, ok := searchKeyHandlers[key.Key]; ok {
+		return handler(s, key)
 	}
 
 	return runtime.Unhandled()
+}
+
+func (s *SearchWidget) handleEscapeKey(_ runtime.KeyMsg) runtime.HandleResult {
+	s.query = ""
+	s.notifySearch()
+	s.notifyClose()
+	return runtime.WithCommand(runtime.PopOverlay{})
+}
+
+func (s *SearchWidget) handleEnterKey(_ runtime.KeyMsg) runtime.HandleResult {
+	s.notifyClose()
+	return runtime.WithCommand(runtime.PopOverlay{})
+}
+
+func (s *SearchWidget) handleUpKey(_ runtime.KeyMsg) runtime.HandleResult {
+	if s.onPrev != nil {
+		s.onPrev()
+	}
+	return runtime.Handled()
+}
+
+func (s *SearchWidget) handleDownKey(_ runtime.KeyMsg) runtime.HandleResult {
+	if s.onNext != nil {
+		s.onNext()
+	}
+	return runtime.Handled()
+}
+
+func (s *SearchWidget) handleBackspaceKey(_ runtime.KeyMsg) runtime.HandleResult {
+	if s.query != "" {
+		s.query = dropLastRune(s.query)
+		s.notifySearch()
+	}
+	return runtime.Handled()
+}
+
+func (s *SearchWidget) handleRuneKey(key runtime.KeyMsg) runtime.HandleResult {
+	s.query += string(key.Rune)
+	s.notifySearch()
+	return runtime.Handled()
+}
+
+func (s *SearchWidget) notifySearch() {
+	if s.onSearch != nil {
+		s.onSearch(s.query)
+	}
+}
+
+func (s *SearchWidget) notifyClose() {
+	if s.onClose != nil {
+		s.onClose()
+	}
 }

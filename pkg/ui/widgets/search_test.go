@@ -55,8 +55,26 @@ func TestSearchWidget_Backspace(t *testing.T) {
 	}
 }
 
+func TestSearchWidget_BackspaceUnicode(t *testing.T) {
+	s := NewSearchWidget()
+
+	for _, r := range "模型" {
+		s.HandleMessage(runtime.KeyMsg{Key: terminal.KeyRune, Rune: r})
+	}
+
+	s.HandleMessage(runtime.KeyMsg{Key: terminal.KeyBackspace})
+
+	if s.Query() != "模" {
+		t.Fatalf("expected query '模', got %q", s.Query())
+	}
+}
+
 func TestSearchWidget_Escape(t *testing.T) {
 	s := NewSearchWidget()
+	var closed bool
+	s.SetOnClose(func() {
+		closed = true
+	})
 
 	// Type something
 	s.HandleMessage(runtime.KeyMsg{Key: terminal.KeyRune, Rune: 'a'})
@@ -70,10 +88,17 @@ func TestSearchWidget_Escape(t *testing.T) {
 	if len(result.Commands) != 1 {
 		t.Errorf("expected 1 command (PopOverlay), got %d", len(result.Commands))
 	}
+	if !closed {
+		t.Error("expected close callback")
+	}
 }
 
 func TestSearchWidget_Enter(t *testing.T) {
 	s := NewSearchWidget()
+	var closed bool
+	s.SetOnClose(func() {
+		closed = true
+	})
 
 	// Type something
 	s.HandleMessage(runtime.KeyMsg{Key: terminal.KeyRune, Rune: 'a'})
@@ -86,6 +111,9 @@ func TestSearchWidget_Enter(t *testing.T) {
 	}
 	if len(result.Commands) != 1 {
 		t.Errorf("expected 1 command (PopOverlay), got %d", len(result.Commands))
+	}
+	if !closed {
+		t.Error("expected close callback")
 	}
 }
 
@@ -137,5 +165,49 @@ func TestSearchWidget_Render(t *testing.T) {
 	cell := buf.Get(0, 23)
 	if cell.Rune != '/' {
 		t.Errorf("expected '/' at start, got '%c'", cell.Rune)
+	}
+}
+
+func TestSearchWidget_RenderUnicodeCursorUsesRuneColumns(t *testing.T) {
+	s := NewSearchWidget()
+	s.Focus()
+	for _, r := range "模型" {
+		s.HandleMessage(runtime.KeyMsg{Key: terminal.KeyRune, Rune: r})
+	}
+
+	s.Layout(runtime.Rect{X: 0, Y: 0, Width: 40, Height: 4})
+	buf := runtime.NewBuffer(40, 4)
+	s.Render(runtime.RenderContext{Buffer: buf})
+
+	if got := readBufferRunes(buf, 0, 3, 5); got != "/ 模型█" {
+		t.Fatalf("rendered search query = %q, want %q", got, "/ 模型█")
+	}
+}
+
+func TestSearchWidget_RenderLongUnicodeQueryShowsSuffix(t *testing.T) {
+	s := NewSearchWidget()
+	s.Focus()
+	for _, r := range "abcdef模型路径" {
+		s.HandleMessage(runtime.KeyMsg{Key: terminal.KeyRune, Rune: r})
+	}
+
+	s.Layout(runtime.Rect{X: 0, Y: 0, Width: 24, Height: 4}) // query width = 4
+	buf := runtime.NewBuffer(24, 4)
+	s.Render(runtime.RenderContext{Buffer: buf})
+
+	if got := readBufferRunes(buf, 2, 3, 4); got != "模型路径" {
+		t.Fatalf("rendered suffix = %q, want %q", got, "模型路径")
+	}
+}
+
+func TestSuffixRunes(t *testing.T) {
+	if got := suffixRunes("abcdef", 3); got != "def" {
+		t.Fatalf("suffixRunes ascii = %q, want %q", got, "def")
+	}
+	if got := suffixRunes("abc模型", 2); got != "模型" {
+		t.Fatalf("suffixRunes unicode = %q, want %q", got, "模型")
+	}
+	if got := suffixRunes("abc", 0); got != "" {
+		t.Fatalf("suffixRunes zero = %q, want empty", got)
 	}
 }
