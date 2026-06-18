@@ -592,20 +592,9 @@ func runACPLoop(
 	modelOverride string,
 	stream acp.StreamFunc,
 ) (string, error) {
-	modelID := model.ResolvePhaseModel(cfg, mgr, engine, "execution", modelOverride)
-	if modelID == "" {
-		modelID = "openai/gpt-4o"
-	}
-
-	var evaluator *rules.EngineAdapter
-	if engine != nil {
-		evaluator = rules.NewEngineAdapter(engine)
-	}
-
-	useTools := registry != nil && (mgr == nil || mgr.SupportsTools(modelID))
-	toolChoice := "auto"
-
-	maxNudges := 2
+	modelID := resolveACPExecutionModel(cfg, mgr, engine, modelOverride)
+	evaluator := newACPEvaluator(engine)
+	useTools := acpModelCanUseTools(registry, mgr, modelID)
 	nudgeCount := 0
 	lastPhase := ""
 	for {
@@ -615,31 +604,9 @@ func runACPLoop(
 
 		lastPhase = sendACPPhaseUpdate(stream, lastPhase, "Thinking…")
 
-		var tools []map[string]any
-		var allowedTools []string
-		if skillState != nil {
-			allowedTools = skillState.ToolFilter()
-		}
-		if useTools && registry != nil {
-			tools = registry.ToOpenAIFunctionsGoverned(evaluator, "interactive", "coding", allowedTools, 0)
-			if len(tools) == 0 {
-				useTools = false
-			}
-		}
-		toolsEnabled := len(tools) > 0
-
-		req := model.ChatRequest{
-			Model:     modelID,
-			Messages:  conv.ToModelMessages(),
-			SessionID: conv.SessionID,
-		}
-		if useTools {
-			req.Tools = tools
-			req.ToolChoice = toolChoice
-		}
-		if effort := model.ResolveReasoningEffort(cfg, mgr, engine, modelID, "execution"); effort != "" {
-			req.Reasoning = &model.ReasoningConfig{Effort: effort}
-		}
+		toolTurn := buildACPToolTurn(registry, skillState, evaluator, useTools)
+		useTools = toolTurn.UseTools
+		req := buildACPChatRequest(cfg, mgr, engine, conv, modelID, toolTurn)
 
 		resp, err := mgr.ChatCompletion(ctx, req)
 		if err != nil {
@@ -659,7 +626,7 @@ func runACPLoop(
 			if err != nil {
 				return "", err
 			}
-			if useTools && toolsEnabled && nudgeCount < maxNudges && shouldNudgeForTools(text) {
+			if shouldNudgeACPToolUse(useTools, toolTurn.Enabled, nudgeCount, text) {
 				nudgeCount++
 				conv.AddUserMessage("Use tools to take action now. Pick a tool and call it; do not answer with prose alone.")
 				continue
@@ -670,52 +637,132 @@ func runACPLoop(
 		}
 
 		lastPhase = sendACPPhaseUpdate(stream, lastPhase, fmt.Sprintf("Executing %d tool call(s)…", len(msg.ToolCalls)))
-
-		for i := range msg.ToolCalls {
-			if msg.ToolCalls[i].ID == "" {
-				msg.ToolCalls[i].ID = fmt.Sprintf("tool-%d", i+1)
-			}
-		}
+		normalizeACPToolCallIDs(msg.ToolCalls)
 		conv.AddToolCallMessageWithReasoning(msg.ToolCalls, msg.Reasoning, msg.ReasoningDetails)
+		lastPhase = executeACPToolCalls(conv, registry, stream, msg.ToolCalls, toolTurn.AllowedTools, lastPhase)
+	}
+}
 
-		for i, tc := range msg.ToolCalls {
-			params, err := parseACPToolParams(tc.Function.Arguments)
-			if err != nil {
-				rawParams := map[string]any{"raw": tc.Function.Arguments}
-				lastPhase = sendACPPhaseUpdate(stream, lastPhase, fmt.Sprintf("Running %s (%d/%d)…", toolCallTitle(tc.Function.Name, nil), i+1, len(msg.ToolCalls)))
-				sendACPToolCallStart(stream, tc, rawParams)
-				toolText := fmt.Sprintf("Error: invalid tool arguments: %v", err)
-				conv.AddToolResponseMessage(tc.ID, tc.Function.Name, toolText)
-				sendACPToolCallUpdate(stream, tc, rawParams, acp.ToolCallStatusFailed, toolText, map[string]any{
-					"error": err.Error(),
-				}, nil)
-				continue
-			}
+const acpMaxToolNudges = 2
 
-			lastPhase = sendACPPhaseUpdate(stream, lastPhase, fmt.Sprintf("Running %s (%d/%d)…", toolCallTitle(tc.Function.Name, params), i+1, len(msg.ToolCalls)))
-			sendACPToolCallStart(stream, tc, params)
+type acpToolTurn struct {
+	Tools        []map[string]any
+	AllowedTools []string
+	UseTools     bool
+	Enabled      bool
+}
 
-			if !tool.IsToolAllowed(tc.Function.Name, allowedTools) {
-				toolText := fmt.Sprintf("Error: tool %s not allowed by active skills", tc.Function.Name)
-				conv.AddToolResponseMessage(tc.ID, tc.Function.Name, toolText)
-				sendACPToolCallUpdate(stream, tc, params, acp.ToolCallStatusFailed, toolText, map[string]any{
-					"error": toolText,
-				}, nil)
-				continue
-			}
+func resolveACPExecutionModel(cfg *config.Config, mgr *model.Manager, engine *rules.Engine, modelOverride string) string {
+	modelID := model.ResolvePhaseModel(cfg, acpReasoningChecker(mgr), engine, "execution", modelOverride)
+	if modelID == "" {
+		return "openai/gpt-4o"
+	}
+	return modelID
+}
 
-			result, execErr := executeACPToolCall(registry, tc.Function.Name, params, tc.ID)
-			toolText := formatACPToolResult(result, execErr)
-			displayText := formatACPToolDisplay(result, execErr)
-			conv.AddToolResponseMessage(tc.ID, tc.Function.Name, toolText)
+func acpReasoningChecker(mgr *model.Manager) model.ReasoningChecker {
+	if mgr == nil {
+		return nil
+	}
+	return mgr
+}
 
-			status := acp.ToolCallStatusCompleted
-			if execErr != nil || (result != nil && !result.Success) {
-				status = acp.ToolCallStatusFailed
-			}
-			sendACPToolCallUpdate(stream, tc, params, status, displayText, toolCallRawOutput(result, execErr), result)
+func newACPEvaluator(engine *rules.Engine) *rules.EngineAdapter {
+	if engine == nil {
+		return nil
+	}
+	return rules.NewEngineAdapter(engine)
+}
+
+func acpModelCanUseTools(registry *tool.Registry, mgr *model.Manager, modelID string) bool {
+	return registry != nil && (mgr == nil || mgr.SupportsTools(modelID))
+}
+
+func buildACPToolTurn(registry *tool.Registry, skillState *skill.RuntimeState, evaluator *rules.EngineAdapter, useTools bool) acpToolTurn {
+	turn := acpToolTurn{UseTools: useTools}
+	if skillState != nil {
+		turn.AllowedTools = skillState.ToolFilter()
+	}
+	if !useTools || registry == nil {
+		turn.UseTools = false
+		return turn
+	}
+	turn.Tools = registry.ToOpenAIFunctionsGoverned(evaluator, "interactive", "coding", turn.AllowedTools, 0)
+	if len(turn.Tools) == 0 {
+		turn.UseTools = false
+		return turn
+	}
+	turn.Enabled = true
+	return turn
+}
+
+func buildACPChatRequest(cfg *config.Config, mgr *model.Manager, engine *rules.Engine, conv *conversation.Conversation, modelID string, turn acpToolTurn) model.ChatRequest {
+	req := model.ChatRequest{
+		Model:     modelID,
+		Messages:  conv.ToModelMessages(),
+		SessionID: conv.SessionID,
+	}
+	if turn.UseTools {
+		req.Tools = turn.Tools
+		req.ToolChoice = "auto"
+	}
+	if effort := model.ResolveReasoningEffort(cfg, acpReasoningChecker(mgr), engine, modelID, "execution"); effort != "" {
+		req.Reasoning = &model.ReasoningConfig{Effort: effort}
+	}
+	return req
+}
+
+func shouldNudgeACPToolUse(useTools, toolsEnabled bool, nudgeCount int, text string) bool {
+	return useTools && toolsEnabled && nudgeCount < acpMaxToolNudges && shouldNudgeForTools(text)
+}
+
+func normalizeACPToolCallIDs(calls []model.ToolCall) {
+	for i := range calls {
+		if calls[i].ID == "" {
+			calls[i].ID = fmt.Sprintf("tool-%d", i+1)
 		}
 	}
+}
+
+func executeACPToolCalls(conv *conversation.Conversation, registry *tool.Registry, stream acp.StreamFunc, calls []model.ToolCall, allowedTools []string, lastPhase string) string {
+	for i, tc := range calls {
+		params, err := parseACPToolParams(tc.Function.Arguments)
+		if err != nil {
+			rawParams := map[string]any{"raw": tc.Function.Arguments}
+			lastPhase = sendACPPhaseUpdate(stream, lastPhase, fmt.Sprintf("Running %s (%d/%d)…", toolCallTitle(tc.Function.Name, nil), i+1, len(calls)))
+			sendACPToolCallStart(stream, tc, rawParams)
+			toolText := fmt.Sprintf("Error: invalid tool arguments: %v", err)
+			conv.AddToolResponseMessage(tc.ID, tc.Function.Name, toolText)
+			sendACPToolCallUpdate(stream, tc, rawParams, acp.ToolCallStatusFailed, toolText, map[string]any{
+				"error": err.Error(),
+			}, nil)
+			continue
+		}
+
+		lastPhase = sendACPPhaseUpdate(stream, lastPhase, fmt.Sprintf("Running %s (%d/%d)…", toolCallTitle(tc.Function.Name, params), i+1, len(calls)))
+		sendACPToolCallStart(stream, tc, params)
+
+		if !tool.IsToolAllowed(tc.Function.Name, allowedTools) {
+			toolText := fmt.Sprintf("Error: tool %s not allowed by active skills", tc.Function.Name)
+			conv.AddToolResponseMessage(tc.ID, tc.Function.Name, toolText)
+			sendACPToolCallUpdate(stream, tc, params, acp.ToolCallStatusFailed, toolText, map[string]any{
+				"error": toolText,
+			}, nil)
+			continue
+		}
+
+		result, execErr := executeACPToolCall(registry, tc.Function.Name, params, tc.ID)
+		toolText := formatACPToolResult(result, execErr)
+		displayText := formatACPToolDisplay(result, execErr)
+		conv.AddToolResponseMessage(tc.ID, tc.Function.Name, toolText)
+
+		status := acp.ToolCallStatusCompleted
+		if execErr != nil || (result != nil && !result.Success) {
+			status = acp.ToolCallStatusFailed
+		}
+		sendACPToolCallUpdate(stream, tc, params, status, displayText, toolCallRawOutput(result, execErr), result)
+	}
+	return lastPhase
 }
 
 func parseACPToolParams(raw string) (map[string]any, error) {
