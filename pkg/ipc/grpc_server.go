@@ -21,13 +21,13 @@ import (
 	"google.golang.org/protobuf/types/known/structpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	"m31labs.dev/buckley/pkg/buckley/ui/viewmodel"
 	"m31labs.dev/buckley/pkg/giturl"
 	"m31labs.dev/buckley/pkg/headless"
 	"m31labs.dev/buckley/pkg/ipc/command"
 	ipcpb "m31labs.dev/buckley/pkg/ipc/proto"
 	"m31labs.dev/buckley/pkg/orchestrator"
 	"m31labs.dev/buckley/pkg/storage"
+	"m31labs.dev/buckley/pkg/ui/viewmodel"
 )
 
 // GRPCService implements the BuckleyIPC Connect service.

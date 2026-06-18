@@ -131,3 +131,10 @@ func centerString(s string, width int) string {
 	copy(result[padding:], s)
 	return string(result)
 }
+
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}

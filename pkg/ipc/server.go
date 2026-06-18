@@ -26,7 +26,6 @@ import (
 
 	"connectrpc.com/connect"
 
-	"m31labs.dev/buckley/pkg/buckley/ui/viewmodel"
 	"m31labs.dev/buckley/pkg/config"
 	projectcontext "m31labs.dev/buckley/pkg/context"
 	"m31labs.dev/buckley/pkg/ipc/command"
@@ -42,6 +41,7 @@ import (
 	"m31labs.dev/buckley/pkg/session"
 	"m31labs.dev/buckley/pkg/storage"
 	"m31labs.dev/buckley/pkg/telemetry"
+	"m31labs.dev/buckley/pkg/ui/viewmodel"
 )
 
 var allowedSettingKeys = []string{"remote.base_url", "remote.notes"}

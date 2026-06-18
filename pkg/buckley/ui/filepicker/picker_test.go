@@ -92,7 +92,7 @@ func TestMultiPatternMatch(t *testing.T) {
 	}{
 		{"pkg/api/handler.go", []string{"api", "han"}, true},
 		{"pkg/api/handler.go", []string{"api", "xyz"}, false},
-		{"pkg/buckley/ui/viewmodel/viewmodel.go", []string{"ui", "model"}, true},
+		{"pkg/ui/viewmodel/viewmodel.go", []string{"ui", "model"}, true},
 		{"config.yaml", []string{"config", "yaml"}, true},
 	}
 
@@ -162,7 +162,7 @@ func TestFilePicker(t *testing.T) {
 		"pkg/api/handler.go",
 		"pkg/api/routes.go",
 		"pkg/config/config.go",
-		"pkg/buckley/ui/viewmodel/viewmodel.go",
+		"pkg/ui/viewmodel/viewmodel.go",
 		"README.md",
 	}
 
