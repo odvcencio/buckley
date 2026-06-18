@@ -23,6 +23,7 @@ type infoSnapshot struct {
 	Models      infoModels     `json:"models"`
 	Providers   []infoProvider `json:"providers"`
 	Agent       *infoAgent     `json:"agent,omitempty"`
+	ChatChecks  infoChatChecks `json:"chat_checks"`
 	Skills      infoSkills     `json:"skills"`
 	Tools       infoTools      `json:"tools"`
 	Diagnostics []string       `json:"diagnostics,omitempty"`
@@ -84,6 +85,14 @@ type infoAgent struct {
 	Path      string   `json:"path"`
 	Name      string   `json:"name,omitempty"`
 	Subagents []string `json:"subagents,omitempty"`
+}
+
+type infoChatChecks struct {
+	Found         bool                        `json:"found"`
+	Path          string                      `json:"path,omitempty"`
+	ScenarioCount int                         `json:"scenario_count"`
+	Scenarios     []doctorChatScenarioSummary `json:"scenarios,omitempty"`
+	Error         string                      `json:"error,omitempty"`
 }
 
 type infoSkills struct {
@@ -190,6 +199,8 @@ func buildInfoSnapshot() (infoSnapshot, error) {
 	diagnostics = append(diagnostics, skillDiagnostics...)
 	tools, toolDiagnostics := inspectTools(cfg, cwd, skills.registry)
 	diagnostics = append(diagnostics, toolDiagnostics...)
+	chatChecks, chatCheckDiagnostics := inspectProjectChatChecks(cwd)
+	diagnostics = append(diagnostics, chatCheckDiagnostics...)
 
 	return infoSnapshot{
 		Version: infoVersion{
@@ -219,6 +230,7 @@ func buildInfoSnapshot() (infoSnapshot, error) {
 		Models:      inspectModels(cfg),
 		Providers:   inspectProviders(cfg),
 		Agent:       inspectAgent(agentProfile),
+		ChatChecks:  chatChecks,
 		Skills:      skills.snapshot,
 		Tools:       tools,
 		Diagnostics: diagnostics,
@@ -375,6 +387,28 @@ func inspectAgent(profile *agentspec.RuntimeProfile) *infoAgent {
 	return agent
 }
 
+func inspectProjectChatChecks(cwd string) (infoChatChecks, []string) {
+	path, err := findProjectChatCheckScenarioDir(cwd)
+	if err != nil {
+		return infoChatChecks{Error: err.Error()}, nil
+	}
+	scenarios, err := resolveDoctorChatScenarios("", 0, path, false, false)
+	if err != nil {
+		return infoChatChecks{
+			Found: true,
+			Path:  path,
+			Error: err.Error(),
+		}, []string{fmt.Sprintf("project chat checks invalid: %v", err)}
+	}
+	inventory := buildDoctorChatScenarioInventory(scenarios)
+	return infoChatChecks{
+		Found:         true,
+		Path:          path,
+		ScenarioCount: inventory.ScenarioCount,
+		Scenarios:     inventory.Scenarios,
+	}, nil
+}
+
 type inspectedSkills struct {
 	registry *skill.Registry
 	snapshot infoSkills
@@ -479,6 +513,7 @@ func renderInfoSnapshot(snapshot infoSnapshot) string {
 	if snapshot.Agent != nil {
 		fmt.Fprintf(&b, "Agent:        %s (%s)\n", defaultText(snapshot.Agent.Name, "unnamed"), snapshot.Agent.Path)
 	}
+	fmt.Fprintf(&b, "Chat checks:  %s\n", renderInfoChatChecks(snapshot.ChatChecks))
 	fmt.Fprintf(&b, "Skills:       %d", snapshot.Skills.Count)
 	if len(snapshot.Skills.BySource) > 0 {
 		fmt.Fprintf(&b, " (%s)", renderCounts(snapshot.Skills.BySource))
@@ -497,6 +532,16 @@ func renderInfoSnapshot(snapshot infoSnapshot) string {
 	}
 	fmt.Fprintf(&b, "\nUse `buckley info --json` for the full manifest.\n")
 	return b.String()
+}
+
+func renderInfoChatChecks(checks infoChatChecks) string {
+	if checks.Found {
+		if checks.Error != "" {
+			return fmt.Sprintf("error (%s)", checks.Path)
+		}
+		return fmt.Sprintf("%d (%s)", checks.ScenarioCount, checks.Path)
+	}
+	return "0 (not found)"
 }
 
 func readyProviderNames(providers []infoProvider) []string {

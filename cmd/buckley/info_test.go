@@ -43,6 +43,9 @@ func TestRunInfoCommandJSON(t *testing.T) {
 	if !toolPresent(snapshot.Tools.Available, "activate_skill") {
 		t.Fatalf("expected activate_skill tool in manifest")
 	}
+	if snapshot.ChatChecks.Found || snapshot.ChatChecks.ScenarioCount != 0 {
+		t.Fatalf("expected no project chat checks in empty test env: %+v", snapshot.ChatChecks)
+	}
 }
 
 func TestRunInfoCommandTextAndDispatch(t *testing.T) {
@@ -54,7 +57,7 @@ func TestRunInfoCommandTextAndDispatch(t *testing.T) {
 			t.Fatalf("dispatch info handled=%v code=%d", handled, code)
 		}
 	})
-	for _, want := range []string{"Buckley Info", "Project root:", "Tools:", "Use `buckley info --json`"} {
+	for _, want := range []string{"Buckley Info", "Project root:", "Chat checks:", "Tools:", "Use `buckley info --json`"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("info output missing %q:\n%s", want, out)
 		}
@@ -108,7 +111,48 @@ func TestInfoConfigSourcesExplicitConfigIncludesEnv(t *testing.T) {
 	}
 }
 
-func setupInfoTestEnv(t *testing.T) {
+func TestRunInfoCommandJSONIncludesProjectChatChecks(t *testing.T) {
+	workDir := setupInfoTestEnv(t)
+	projectDir := filepath.Join(workDir, ".buckley", "chatchecks", "tools")
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatalf("mkdir project chat checks: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(projectDir, "no-tools.json"), []byte(`{"tags":["smoke"],"turns":[{"user":"say READY","want_contains":["READY"],"max_tool_calls":0}]}`), 0o644); err != nil {
+		t.Fatalf("write project chat check: %v", err)
+	}
+	nested := filepath.Join(workDir, "src", "feature")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatalf("mkdir nested workdir: %v", err)
+	}
+	if err := os.Chdir(nested); err != nil {
+		t.Fatalf("chdir nested workdir: %v", err)
+	}
+
+	out := captureStdout(t, func() {
+		if err := runInfoCommand([]string{"--json"}); err != nil {
+			t.Fatalf("runInfoCommand: %v", err)
+		}
+	})
+	var snapshot infoSnapshot
+	if err := json.Unmarshal([]byte(out), &snapshot); err != nil {
+		t.Fatalf("unmarshal info json: %v\n%s", err, out)
+	}
+	if !snapshot.ChatChecks.Found {
+		t.Fatalf("expected project chat checks to be discovered: %+v", snapshot.ChatChecks)
+	}
+	if want := filepath.Join(workDir, ".buckley", "chatchecks"); snapshot.ChatChecks.Path != want {
+		t.Fatalf("chat check path=%q want %q", snapshot.ChatChecks.Path, want)
+	}
+	if snapshot.ChatChecks.ScenarioCount != 1 || len(snapshot.ChatChecks.Scenarios) != 1 {
+		t.Fatalf("unexpected chat check inventory: %+v", snapshot.ChatChecks)
+	}
+	scenario := snapshot.ChatChecks.Scenarios[0]
+	if scenario.Name != "tools/no-tools" || scenario.Turns != 1 || scenario.MaxToolChecks != 1 {
+		t.Fatalf("unexpected chat check scenario summary: %+v", scenario)
+	}
+}
+
+func setupInfoTestEnv(t *testing.T) string {
 	t.Helper()
 
 	home := t.TempDir()
@@ -139,6 +183,7 @@ func setupInfoTestEnv(t *testing.T) {
 	modelOverrideFlag = ""
 	agentProfileFlag = ""
 	encodingOverrideFlag = ""
+	return workDir
 }
 
 func providerReady(providers []infoProvider, name string) bool {
