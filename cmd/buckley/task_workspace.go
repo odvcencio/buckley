@@ -21,95 +21,118 @@ const (
 	envBuckleyRepoDir     = "BUCKLEY_REPO_DIR"
 )
 
+type taskWorkspaceOptions struct {
+	workdir string
+	repoURL string
+	repoRef string
+	repoDir string
+}
+
 func prepareTaskWorkspace(workdirFlag, repoURLFlag, repoRefFlag, repoDirFlag string) (string, error) {
-	workdir := firstNonEmpty(workdirFlag, os.Getenv(envBuckleyTaskWorkdir))
-	repoURL := firstNonEmpty(repoURLFlag, os.Getenv(envBuckleyRepoURL), os.Getenv(envBuckleyPlanRepoURL))
-	repoRef := firstNonEmpty(repoRefFlag, os.Getenv(envBuckleyRepoRef), os.Getenv("BUCKLEY_GIT_BRANCH"))
-	repoDir := firstNonEmpty(repoDirFlag, os.Getenv(envBuckleyRepoDir))
+	opts := resolveTaskWorkspaceOptions(workdirFlag, repoURLFlag, repoRefFlag, repoDirFlag)
 
-	workdir = strings.TrimSpace(workdir)
-	repoURL = strings.TrimSpace(repoURL)
-	repoRef = strings.TrimSpace(repoRef)
-	repoDir = strings.TrimSpace(repoDir)
-	if strings.EqualFold(repoRef, "unknown") {
-		repoRef = ""
+	if err := enterTaskWorkdir(opts); err != nil {
+		return "", err
 	}
 
-	if workdir != "" {
-		if _, err := os.Stat(workdir); err != nil {
-			if os.IsNotExist(err) && repoURL != "" {
-				if err := os.MkdirAll(workdir, 0o755); err != nil {
-					return "", fmt.Errorf("create workdir %s: %w", workdir, err)
-				}
-			} else {
-				return "", fmt.Errorf("stat workdir %s: %w", workdir, err)
-			}
-		}
-		if err := os.Chdir(workdir); err != nil {
-			return "", fmt.Errorf("chdir to workdir %s: %w", workdir, err)
-		}
+	if repoRoot, ok, err := enterExistingTaskRepo(); ok || err != nil {
+		return repoRoot, err
 	}
 
-	if repoRoot, ok := findGitRepoRoot("."); ok {
-		if repoRoot != "." {
-			if err := os.Chdir(repoRoot); err != nil {
-				return "", fmt.Errorf("chdir to repo root %s: %w", repoRoot, err)
-			}
-		}
-		repoRootAbs := absPath(repoRoot)
-		_ = configureGitSafeDirectory(repoRootAbs)
-		return repoRootAbs, nil
-	}
-
-	if repoRoot, ok := findSingleChildGitRepo("."); ok {
-		if err := os.Chdir(repoRoot); err != nil {
-			return "", fmt.Errorf("chdir to repo root %s: %w", repoRoot, err)
-		}
-		repoRootAbs := absPath(repoRoot)
-		_ = configureGitSafeDirectory(repoRootAbs)
-		return repoRootAbs, nil
-	}
-
-	if repoURL == "" {
+	if opts.repoURL == "" {
 		return "", fmt.Errorf("no git repository found (set %s or mount a repo into %s)", envBuckleyRepoURL, envBuckleyTaskWorkdir)
 	}
 
+	if err := validateTaskRepoURL(opts.repoURL); err != nil {
+		return "", err
+	}
+
+	cloneTarget, err := selectTaskCloneTarget(opts.repoDir)
+	if err != nil {
+		return "", err
+	}
+
+	if repoRoot, ok, err := enterGitRepoRoot(cloneTarget); ok || err != nil {
+		return repoRoot, err
+	}
+
+	return cloneAndEnterTaskRepo(opts, cloneTarget)
+}
+
+func resolveTaskWorkspaceOptions(workdirFlag, repoURLFlag, repoRefFlag, repoDirFlag string) taskWorkspaceOptions {
+	repoRef := firstNonEmpty(repoRefFlag, os.Getenv(envBuckleyRepoRef), os.Getenv("BUCKLEY_GIT_BRANCH"))
+	if strings.EqualFold(repoRef, "unknown") {
+		repoRef = ""
+	}
+	return taskWorkspaceOptions{
+		workdir: firstNonEmpty(workdirFlag, os.Getenv(envBuckleyTaskWorkdir)),
+		repoURL: firstNonEmpty(repoURLFlag, os.Getenv(envBuckleyRepoURL), os.Getenv(envBuckleyPlanRepoURL)),
+		repoRef: strings.TrimSpace(repoRef),
+		repoDir: firstNonEmpty(repoDirFlag, os.Getenv(envBuckleyRepoDir)),
+	}
+}
+
+func enterTaskWorkdir(opts taskWorkspaceOptions) error {
+	if opts.workdir == "" {
+		return nil
+	}
+	if _, err := os.Stat(opts.workdir); err != nil {
+		if os.IsNotExist(err) && opts.repoURL != "" {
+			if err := os.MkdirAll(opts.workdir, 0o755); err != nil {
+				return fmt.Errorf("create workdir %s: %w", opts.workdir, err)
+			}
+		} else {
+			return fmt.Errorf("stat workdir %s: %w", opts.workdir, err)
+		}
+	}
+	if err := os.Chdir(opts.workdir); err != nil {
+		return fmt.Errorf("chdir to workdir %s: %w", opts.workdir, err)
+	}
+	return nil
+}
+
+func enterExistingTaskRepo() (string, bool, error) {
+	if repoRoot, ok, err := enterGitRepoRoot("."); ok || err != nil {
+		return repoRoot, ok, err
+	}
+	if repoRoot, ok := findSingleChildGitRepo("."); ok {
+		return chdirAndConfigureRepoRoot(repoRoot)
+	}
+	return "", false, nil
+}
+
+func validateTaskRepoURL(repoURL string) error {
 	policy := giturl.ClonePolicy{}
 	if cfg, err := config.Load(); err == nil && cfg != nil {
 		policy = cfg.GitClone
 	}
 	if err := giturl.ValidateCloneURL(policy, repoURL); err != nil {
-		return "", fmt.Errorf("repo URL rejected by git_clone policy: %w", err)
+		return fmt.Errorf("repo URL rejected by git_clone policy: %w", err)
 	}
+	return nil
+}
 
-	cloneTarget := "."
+func selectTaskCloneTarget(repoDir string) (string, error) {
 	if repoDir != "" {
-		cloneTarget = repoDir
-	} else {
-		empty, err := dirIsEmpty(".")
-		if err != nil {
-			return "", fmt.Errorf("check workspace emptiness: %w", err)
-		}
-		if !empty {
-			cloneTarget = "repo"
-		}
+		return repoDir, nil
 	}
-
-	if repoRoot, ok := findGitRepoRoot(cloneTarget); ok {
-		if err := os.Chdir(repoRoot); err != nil {
-			return "", fmt.Errorf("chdir to repo root %s: %w", repoRoot, err)
-		}
-		repoRootAbs := absPath(repoRoot)
-		_ = configureGitSafeDirectory(repoRootAbs)
-		return repoRootAbs, nil
+	empty, err := dirIsEmpty(".")
+	if err != nil {
+		return "", fmt.Errorf("check workspace emptiness: %w", err)
 	}
+	if !empty {
+		return "repo", nil
+	}
+	return ".", nil
+}
 
+func cloneAndEnterTaskRepo(opts taskWorkspaceOptions, cloneTarget string) (string, error) {
 	if err := ensureCloneTargetReady(cloneTarget); err != nil {
 		return "", err
 	}
 
 	fmt.Printf("Cloning repository into %s\n", cloneTarget)
-	if err := runGitCommand("clone", repoURL, cloneTarget); err != nil {
+	if err := runGitCommand("clone", opts.repoURL, cloneTarget); err != nil {
 		return "", err
 	}
 
@@ -119,25 +142,37 @@ func prepareTaskWorkspace(workdirFlag, repoURLFlag, repoRefFlag, repoDirFlag str
 		}
 	}
 
-	if strings.TrimSpace(repoRef) != "" {
-		fmt.Printf("Checking out %s\n", repoRef)
-		if err := runGitCommand("checkout", repoRef); err != nil {
+	if opts.repoRef != "" {
+		fmt.Printf("Checking out %s\n", opts.repoRef)
+		if err := runGitCommand("checkout", opts.repoRef); err != nil {
 			return "", err
 		}
 	}
 
-	repoRoot, ok := findGitRepoRoot(".")
+	if repoRoot, ok, err := enterGitRepoRoot("."); ok || err != nil {
+		return repoRoot, err
+	}
+	return "", fmt.Errorf("git repository not found after clone into %s", cloneTarget)
+}
+
+func enterGitRepoRoot(start string) (string, bool, error) {
+	repoRoot, ok := findGitRepoRoot(start)
 	if !ok {
-		return "", fmt.Errorf("git repository not found after clone into %s", cloneTarget)
+		return "", false, nil
 	}
-	if repoRoot != "." {
-		if err := os.Chdir(repoRoot); err != nil {
-			return "", fmt.Errorf("chdir to repo root %s: %w", repoRoot, err)
-		}
-	}
+	return chdirAndConfigureRepoRoot(repoRoot)
+}
+
+func chdirAndConfigureRepoRoot(repoRoot string) (string, bool, error) {
 	repoRootAbs := absPath(repoRoot)
+	if repoRootAbs == "" {
+		return "", false, fmt.Errorf("repo root cannot be empty")
+	}
+	if err := os.Chdir(repoRootAbs); err != nil {
+		return "", true, fmt.Errorf("chdir to repo root %s: %w", repoRootAbs, err)
+	}
 	_ = configureGitSafeDirectory(repoRootAbs)
-	return repoRootAbs, nil
+	return repoRootAbs, true, nil
 }
 
 func ensureCloneTargetReady(path string) error {
