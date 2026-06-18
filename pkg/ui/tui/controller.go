@@ -1442,30 +1442,14 @@ Output ONLY the commit message, nothing else.`, "```diff\n"+diff+"\n```", recent
 }
 
 func (c *Controller) handleSkillCommand(args []string) {
-	c.mu.Lock()
-	sess := c.sessions[c.currentSession]
-	c.mu.Unlock()
+	sess := c.currentSessionState()
 	if sess == nil || sess.SkillRegistry == nil || sess.SkillState == nil {
 		c.app.AddMessage("Skill system unavailable in this session.", "system")
 		return
 	}
 
 	if len(args) == 0 || strings.EqualFold(args[0], "list") {
-		names := make([]string, 0)
-		for _, s := range sess.SkillRegistry.List() {
-			names = append(names, s.GetName())
-		}
-		sort.Strings(names)
-		if len(names) == 0 {
-			c.app.AddMessage("No skills available.", "system")
-			return
-		}
-		var b strings.Builder
-		b.WriteString("Available skills:\n")
-		for _, name := range names {
-			b.WriteString("- " + name + "\n")
-		}
-		c.app.AddMessage(strings.TrimSpace(b.String()), "system")
+		c.app.AddMessage(formatSkillList(sess.SkillRegistry), "system")
 		return
 	}
 
@@ -1475,6 +1459,43 @@ func (c *Controller) handleSkillCommand(args []string) {
 		return
 	}
 
+	content, err := activateSessionSkill(sess, name)
+	if err != nil {
+		c.app.AddMessage(err.Error(), "system")
+		return
+	}
+	c.app.AddMessage(content, "system")
+}
+
+func (c *Controller) currentSessionState() *SessionState {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.currentSession < 0 || c.currentSession >= len(c.sessions) {
+		return nil
+	}
+	return c.sessions[c.currentSession]
+}
+
+func formatSkillList(registry *skill.Registry) string {
+	names := make([]string, 0)
+	for _, s := range registry.List() {
+		names = append(names, s.GetName())
+	}
+	sort.Strings(names)
+	if len(names) == 0 {
+		return "No skills available."
+	}
+
+	var b strings.Builder
+	b.WriteString("Available skills:\n")
+	for _, name := range names {
+		b.WriteString("- " + name + "\n")
+	}
+	return strings.TrimSpace(b.String())
+}
+
+func activateSessionSkill(sess *SessionState, name string) (string, error) {
 	tool := &builtin.SkillActivationTool{
 		Registry:     sess.SkillRegistry,
 		Conversation: sess.SkillState,
@@ -1485,33 +1506,35 @@ func (c *Controller) handleSkillCommand(args []string) {
 		"scope":  "user request",
 	})
 	if err != nil {
-		c.app.AddMessage(fmt.Sprintf("Error activating skill %q: %v", name, err), "system")
-		return
+		return "", fmt.Errorf("Error activating skill %q: %v", name, err)
 	}
+	content, ok := formatSkillActivationResult(name, result)
+	if !ok {
+		return "", fmt.Errorf("Error activating skill %q.", name)
+	}
+	return content, nil
+}
+
+func formatSkillActivationResult(name string, result *builtin.Result) (string, bool) {
 	if result == nil || !result.Success {
 		if result != nil && result.Error != "" {
-			c.app.AddMessage(fmt.Sprintf("Error activating skill %q: %s", name, result.Error), "system")
-			return
+			return fmt.Sprintf("Error activating skill %q: %s", name, result.Error), true
 		}
-		c.app.AddMessage(fmt.Sprintf("Error activating skill %q.", name), "system")
-		return
+		return "", false
 	}
 
 	message, _ := result.Data["message"].(string)
 	content, _ := result.Data["content"].(string)
 	if content != "" && message != "" {
-		c.app.AddMessage(message+"\n\n"+content, "system")
-		return
+		return message + "\n\n" + content, true
 	}
 	if content != "" {
-		c.app.AddMessage(content, "system")
-		return
+		return content, true
 	}
 	if message != "" {
-		c.app.AddMessage(message, "system")
-		return
+		return message, true
 	}
-	c.app.AddMessage(fmt.Sprintf("Skill %q activated.", name), "system")
+	return fmt.Sprintf("Skill %q activated.", name), true
 }
 
 // getGitDiff returns the combined staged and unstaged diff.
