@@ -156,78 +156,9 @@ func NewController(cfg ControllerConfig) (*Controller, error) {
 		return nil, fmt.Errorf("get working directory: %w", err)
 	}
 
-	// Collect all active sessions for this project and load their messages
-	var projectSessions []*SessionState
-	allSessions, _ := cfg.Store.ListSessions(100)
-	for _, s := range allSessions {
-		if s.ProjectPath == workDir && s.Status == storage.SessionStatusActive {
-			sess, err := newSessionState(cfg.Config, cfg.Store, workDir, cfg.Telemetry, s.ID, true)
-			if err != nil {
-				return nil, err
-			}
-			projectSessions = append(projectSessions, sess)
-		}
-	}
-
-	// Get or create session
-	sessionID := cfg.SessionID
-	currentIdx := 0
-	if sessionID == "" {
-		if len(projectSessions) > 0 {
-			// Resume most recent active session - sessionID is available via projectSessions[0].ID
-			// currentIdx is already 0
-		} else {
-			// Create a new session
-			baseID := session.DetermineSessionID(workDir)
-			timestamp := time.Now().Format("0102-150405") // MMDD-HHMMSS
-			sessionID = fmt.Sprintf("%s-%s", baseID, timestamp)
-
-			now := time.Now()
-			sess := &storage.Session{
-				ID:          sessionID,
-				ProjectPath: workDir,
-				CreatedAt:   now,
-				LastActive:  now,
-				Status:      storage.SessionStatusActive,
-			}
-			if err := cfg.Store.CreateSession(sess); err != nil {
-				return nil, fmt.Errorf("create session: %w", err)
-			}
-			sessState, err := newSessionState(cfg.Config, cfg.Store, workDir, cfg.Telemetry, sessionID, false)
-			if err != nil {
-				return nil, err
-			}
-			projectSessions = []*SessionState{sessState}
-		}
-	} else {
-		// Find index of specified session
-		found := false
-		for i, s := range projectSessions {
-			if s.ID == sessionID {
-				currentIdx = i
-				found = true
-				break
-			}
-		}
-		if !found && len(projectSessions) == 0 {
-			now := time.Now()
-			sess := &storage.Session{
-				ID:          sessionID,
-				ProjectPath: workDir,
-				CreatedAt:   now,
-				LastActive:  now,
-				Status:      storage.SessionStatusActive,
-			}
-			if err := cfg.Store.CreateSession(sess); err != nil {
-				return nil, fmt.Errorf("create session: %w", err)
-			}
-			sessState, err := newSessionState(cfg.Config, cfg.Store, workDir, cfg.Telemetry, sessionID, false)
-			if err != nil {
-				return nil, err
-			}
-			projectSessions = []*SessionState{sessState}
-			currentIdx = 0
-		}
+	projectSessions, currentIdx, err := loadOrCreateControllerSessions(cfg, workDir)
+	if err != nil {
+		return nil, err
 	}
 
 	// Determine project root
@@ -295,6 +226,81 @@ func NewController(cfg ControllerConfig) (*Controller, error) {
 	)
 
 	return ctrl, nil
+}
+
+func loadOrCreateControllerSessions(cfg ControllerConfig, workDir string) ([]*SessionState, int, error) {
+	projectSessions, err := loadActiveProjectSessions(cfg, workDir)
+	if err != nil {
+		return nil, 0, err
+	}
+	return resolveControllerSession(cfg, workDir, projectSessions)
+}
+
+func loadActiveProjectSessions(cfg ControllerConfig, workDir string) ([]*SessionState, error) {
+	var projectSessions []*SessionState
+	allSessions, _ := cfg.Store.ListSessions(100)
+	for _, s := range allSessions {
+		if s.ProjectPath != workDir || s.Status != storage.SessionStatusActive {
+			continue
+		}
+		sess, err := newSessionState(cfg.Config, cfg.Store, workDir, cfg.Telemetry, s.ID, true)
+		if err != nil {
+			return nil, err
+		}
+		projectSessions = append(projectSessions, sess)
+	}
+	return projectSessions, nil
+}
+
+func resolveControllerSession(cfg ControllerConfig, workDir string, projectSessions []*SessionState) ([]*SessionState, int, error) {
+	sessionID := cfg.SessionID
+	if sessionID == "" {
+		if len(projectSessions) > 0 {
+			return projectSessions, 0, nil
+		}
+		sess, err := createControllerSession(cfg, workDir, generatedControllerSessionID(workDir))
+		if err != nil {
+			return nil, 0, err
+		}
+		return []*SessionState{sess}, 0, nil
+	}
+
+	for i, s := range projectSessions {
+		if s.ID == sessionID {
+			return projectSessions, i, nil
+		}
+	}
+
+	if len(projectSessions) > 0 {
+		return projectSessions, 0, nil
+	}
+
+	sess, err := createControllerSession(cfg, workDir, sessionID)
+	if err != nil {
+		return nil, 0, err
+	}
+	return []*SessionState{sess}, 0, nil
+}
+
+func generatedControllerSessionID(workDir string) string {
+	baseID := session.DetermineSessionID(workDir)
+	timestamp := time.Now().Format("0102-150405") // MMDD-HHMMSS
+	return fmt.Sprintf("%s-%s", baseID, timestamp)
+}
+
+func createControllerSession(cfg ControllerConfig, workDir, sessionID string) (*SessionState, error) {
+	now := time.Now()
+	sess := &storage.Session{
+		ID:          sessionID,
+		ProjectPath: workDir,
+		CreatedAt:   now,
+		LastActive:  now,
+		Status:      storage.SessionStatusActive,
+	}
+	if err := cfg.Store.CreateSession(sess); err != nil {
+		return nil, fmt.Errorf("create session: %w", err)
+	}
+	return newSessionState(cfg.Config, cfg.Store, workDir, cfg.Telemetry, sessionID, false)
 }
 
 // Run starts the TUI controller.
