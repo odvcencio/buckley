@@ -67,36 +67,76 @@ func (s *StatusBar) Render(ctx runtime.RenderContext) {
 		return
 	}
 
-	// Fill background
 	ctx.Buffer.Fill(bounds, ' ', s.bgStyle)
+	left := s.renderLeftSegment(ctx.Buffer, bounds)
+	right := s.renderRightSegment(ctx.Buffer, bounds, left)
+	s.renderScrollSegment(ctx.Buffer, bounds, left, right)
+}
 
-	// Left side: status
-	left := " " + s.status
-	ctx.Buffer.SetString(bounds.X, bounds.Y, left, s.textStyle)
+func (s *StatusBar) renderLeftSegment(buf *runtime.Buffer, bounds runtime.Rect) statusSegment {
+	text := truncateString(" "+s.status, bounds.Width)
+	segment := newStatusSegment(bounds.X, text)
+	buf.SetString(segment.x, bounds.Y, segment.text, s.textStyle)
+	return segment
+}
 
-	// Right side: tokens + cost
-	right := ""
-	if s.tokens > 0 {
-		right = formatTokens(s.tokens)
-		if s.costCents > 0 {
-			right += " · $" + formatCost(s.costCents)
-		}
-		right += " "
-	}
-	if right != "" {
-		x := bounds.X + bounds.Width - len(right)
-		if x > bounds.X+len(left) {
-			ctx.Buffer.SetString(x, bounds.Y, right, s.textStyle)
-		}
+func (s *StatusBar) renderRightSegment(buf *runtime.Buffer, bounds runtime.Rect, left statusSegment) statusSegment {
+	text := s.rightText()
+	if text == "" {
+		return statusSegment{}
 	}
 
-	// Center: scroll position
-	if s.scrollPos != "" {
-		center := bounds.X + bounds.Width/2 - len(s.scrollPos)/2
-		if center > bounds.X+len(left) && center+len(s.scrollPos) < bounds.X+bounds.Width-len(right) {
-			ctx.Buffer.SetString(center, bounds.Y, s.scrollPos, s.textStyle)
-		}
+	segment := newStatusSegment(bounds.X+bounds.Width-runeLen(text), text)
+	if segment.x <= left.end() {
+		return statusSegment{}
 	}
+
+	buf.SetString(segment.x, bounds.Y, segment.text, s.textStyle)
+	return segment
+}
+
+func (s *StatusBar) renderScrollSegment(buf *runtime.Buffer, bounds runtime.Rect, left, right statusSegment) {
+	if s.scrollPos == "" {
+		return
+	}
+
+	text := truncateString(s.scrollPos, bounds.Width)
+	segment := newStatusSegment(bounds.X+bounds.Width/2-runeLen(text)/2, text)
+	rightEdge := bounds.X + bounds.Width
+	if right.text != "" {
+		rightEdge = right.x
+	}
+	if segment.x <= left.end() || segment.end() >= rightEdge {
+		return
+	}
+
+	buf.SetString(segment.x, bounds.Y, segment.text, s.textStyle)
+}
+
+func (s *StatusBar) rightText() string {
+	if s.tokens <= 0 {
+		return ""
+	}
+
+	text := formatTokens(s.tokens)
+	if s.costCents > 0 {
+		text += " · $" + formatCost(s.costCents)
+	}
+	return text + " "
+}
+
+type statusSegment struct {
+	x     int
+	text  string
+	width int
+}
+
+func newStatusSegment(x int, text string) statusSegment {
+	return statusSegment{x: x, text: text, width: runeLen(text)}
+}
+
+func (s statusSegment) end() int {
+	return s.x + s.width
 }
 
 // formatTokens formats a token count with K/M suffixes.

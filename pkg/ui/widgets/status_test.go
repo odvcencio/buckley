@@ -209,9 +209,11 @@ func TestStatusBar_Render_WithTokens(t *testing.T) {
 
 	sb.Render(ctx)
 
-	// Token count should be on the right side
-	// "1.0K " at the end
-	// Should not panic
+	expected := "1.0K "
+	start := 40 - runeLen(expected)
+	if got := readBufferRunes(buf, start, 0, runeLen(expected)); got != expected {
+		t.Fatalf("right token segment = %q, want %q", got, expected)
+	}
 }
 
 func TestStatusBar_Render_WithTokensAndCost(t *testing.T) {
@@ -225,8 +227,11 @@ func TestStatusBar_Render_WithTokensAndCost(t *testing.T) {
 
 	sb.Render(ctx)
 
-	// Token count and cost should be on the right
-	// "5.0K · $0.50 "
+	expected := "5.0K · $0.50 "
+	start := 60 - runeLen(expected)
+	if got := readBufferRunes(buf, start, 0, runeLen(expected)); got != expected {
+		t.Fatalf("right token/cost segment = %q, want %q", got, expected)
+	}
 }
 
 func TestStatusBar_Render_WithScrollPosition(t *testing.T) {
@@ -240,8 +245,30 @@ func TestStatusBar_Render_WithScrollPosition(t *testing.T) {
 
 	sb.Render(ctx)
 
-	// Scroll position should be in center
-	// Just verify no panic
+	start := 60/2 - runeLen("TOP")/2
+	if got := readBufferRunes(buf, start, 0, 3); got != "TOP" {
+		t.Fatalf("scroll segment = %q, want %q", got, "TOP")
+	}
+}
+
+func TestStatusBar_Render_UnicodeStatusUsesRuneColumns(t *testing.T) {
+	sb := NewStatusBar()
+	sb.SetStatus("模型")
+	sb.SetScrollPosition("END")
+	sb.Layout(runtime.Rect{X: 0, Y: 0, Width: 24, Height: 1})
+
+	buf := runtime.NewBuffer(24, 1)
+	ctx := runtime.RenderContext{Buffer: buf}
+
+	sb.Render(ctx)
+
+	if got := readBufferRunes(buf, 0, 0, 3); got != " 模型" {
+		t.Fatalf("left status segment = %q, want %q", got, " 模型")
+	}
+	start := 24/2 - runeLen("END")/2
+	if got := readBufferRunes(buf, start, 0, 3); got != "END" {
+		t.Fatalf("scroll segment = %q, want %q", got, "END")
+	}
 }
 
 func TestStatusBar_Render_WithOffset(t *testing.T) {
