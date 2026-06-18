@@ -41,27 +41,26 @@ var serveNewServerFn = func(cfg ipc.Config, store *storage.Store, telemetryHub *
 	return ipc.NewServer(cfg, store, telemetryHub, commandGateway, planStore, appCfg, workflow, models)
 }
 
-func runServeCommand(args []string) error {
-	appCfg, err := serveLoadConfigFn()
-	if err != nil {
-		return withExitCode(err, 2)
-	}
-	agentProfile, err := loadStartupAgentProfile(agentProfileFlag)
-	if err != nil {
-		return withExitCode(fmt.Errorf("loading agent spec: %w", err), 2)
-	}
-	if agentProfile != nil {
-		agentProfile.ApplyToConfig(appCfg)
-	}
-	applyStartupModelOverride(appCfg, modelOverrideFlag)
+type serveCommandOptions struct {
+	bind           string
+	assetPath      string
+	enableBrowser  bool
+	requireToken   bool
+	publicMetrics  bool
+	authToken      string
+	tokenFile      string
+	generateToken  bool
+	printToken     bool
+	basicAuthUser  string
+	basicAuthPass  string
+	allowedOrigins []string
+}
 
-	ipcDefaults := appCfg.IPC
+func parseServeCommandOptions(args []string, ipcDefaults config.IPCConfig) (serveCommandOptions, error) {
 	if strings.TrimSpace(ipcDefaults.Bind) == "" {
 		ipcDefaults.Bind = "127.0.0.1:4488"
 	}
-
 	allowedOrigins := append([]string{}, ipcDefaults.AllowedOrigins...)
-
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	bind := fs.String("bind", ipcDefaults.Bind, "address to bind the IPC server")
 	assetPath := fs.String("assets", "", "path to built frontend assets (served when --browser)")
@@ -77,7 +76,7 @@ func runServeCommand(args []string) error {
 	fs.Var(&stringListValue{target: &allowedOrigins}, "allow-origin", "additional allowed Origin (repeatable, accepts comma-separated list)")
 
 	if err := fs.Parse(args); err != nil {
-		return err
+		return serveCommandOptions{}, err
 	}
 
 	token := strings.TrimSpace(*authTokenFlag)
@@ -94,72 +93,116 @@ func runServeCommand(args []string) error {
 		printTokenFinal = v
 	}
 
-	tokenFilePath := strings.TrimSpace(*tokenFile)
+	return serveCommandOptions{
+		bind:           strings.TrimSpace(*bind),
+		assetPath:      strings.TrimSpace(*assetPath),
+		enableBrowser:  *enableBrowser,
+		requireToken:   *requireToken,
+		publicMetrics:  *publicMetrics,
+		authToken:      token,
+		tokenFile:      strings.TrimSpace(*tokenFile),
+		generateToken:  generateTokenFinal,
+		printToken:     printTokenFinal,
+		basicAuthUser:  strings.TrimSpace(*basicAuthUser),
+		basicAuthPass:  strings.TrimSpace(*basicAuthPass),
+		allowedOrigins: allowedOrigins,
+	}, nil
+}
+
+func finalizeServeCommandOptions(appCfg *config.Config, opts *serveCommandOptions) error {
+	tokenFilePath, err := resolveServeTokenFilePath(opts.tokenFile)
+	if err != nil {
+		return err
+	}
+	opts.tokenFile = tokenFilePath
+
+	if err := ensureServeAuthToken(opts); err != nil {
+		return err
+	}
+	if err := finalizeServeAssetPath(opts); err != nil {
+		return err
+	}
+	if err := applyServeBasicAuth(appCfg, *opts); err != nil {
+		return err
+	}
+	return validateServeBindAuth(appCfg, *opts)
+}
+
+func resolveServeTokenFilePath(rawPath string) (string, error) {
+	tokenFilePath := strings.TrimSpace(rawPath)
 	if tokenFilePath == "" {
 		tokenFilePath = strings.TrimSpace(os.Getenv(envBuckleyIPCTokenFile))
 	}
 	if tokenFilePath != "" {
-		expanded, err := expandHomePath(tokenFilePath)
-		if err != nil {
-			return err
-		}
-		tokenFilePath = expanded
-	} else if dir := strings.TrimSpace(os.Getenv(envBuckleyDataDir)); dir != "" {
+		return expandHomePath(tokenFilePath)
+	}
+	if dir := strings.TrimSpace(os.Getenv(envBuckleyDataDir)); dir != "" {
 		expanded, err := expandHomePath(dir)
 		if err != nil {
-			return err
+			return "", err
 		}
-		tokenFilePath = filepath.Join(expanded, "ipc-token")
+		return filepath.Join(expanded, "ipc-token"), nil
 	}
+	return "", nil
+}
 
-	if *requireToken && token == "" {
-		if tokenFilePath != "" {
-			stored, readErr := readTokenFile(tokenFilePath)
-			switch {
-			case readErr == nil:
-				token = stored
-			case errors.Is(readErr, iofs.ErrNotExist):
-				if !generateTokenFinal {
-					return fmt.Errorf("--require-token set but no token provided (set BUCKLEY_IPC_TOKEN, --auth-token, or use --generate-token with --token-file)")
-				}
-				generated, err := generateTokenFile(tokenFilePath)
-				if err != nil {
-					return err
-				}
-				fmt.Fprintf(os.Stderr, "Saved IPC token to %s\n", tokenFilePath)
-				if printTokenFinal {
-					fmt.Fprintf(os.Stderr, "Generated IPC token (store this securely): %s\n", generated)
-				}
-				token = generated
-			default:
-				return readErr
-			}
-		} else if generateTokenFinal {
+func ensureServeAuthToken(opts *serveCommandOptions) error {
+	if !opts.requireToken {
+		return nil
+	}
+	if opts.authToken != "" {
+		return nil
+	}
+	if opts.tokenFile == "" {
+		if opts.generateToken {
 			return fmt.Errorf("--generate-token requires --token-file or BUCKLEY_DATA_DIR to be set")
 		}
-	}
-
-	if *requireToken && token == "" {
 		return fmt.Errorf("--require-token set but no token provided (set BUCKLEY_IPC_TOKEN or --auth-token)")
 	}
 
-	staticDir := strings.TrimSpace(*assetPath)
-	if staticDir != "" {
-		abs, err := filepath.Abs(staticDir)
+	stored, readErr := readTokenFile(opts.tokenFile)
+	switch {
+	case readErr == nil:
+		opts.authToken = stored
+		return nil
+	case errors.Is(readErr, iofs.ErrNotExist):
+		if !opts.generateToken {
+			return fmt.Errorf("--require-token set but no token provided (set BUCKLEY_IPC_TOKEN, --auth-token, or use --generate-token with --token-file)")
+		}
+		generated, err := generateTokenFile(opts.tokenFile)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(os.Stderr, "Saved IPC token to %s\n", opts.tokenFile)
+		if opts.printToken {
+			fmt.Fprintf(os.Stderr, "Generated IPC token (store this securely): %s\n", generated)
+		}
+		opts.authToken = generated
+		return nil
+	default:
+		return readErr
+	}
+}
+
+func finalizeServeAssetPath(opts *serveCommandOptions) error {
+	if opts.assetPath != "" {
+		abs, err := filepath.Abs(opts.assetPath)
 		if err != nil {
 			return fmt.Errorf("invalid assets path: %w", err)
 		}
-		staticDir = abs
+		opts.assetPath = abs
 	}
+	opts.enableBrowser = opts.enableBrowser || opts.assetPath != ""
+	return nil
+}
 
-	enableBrowserFinal := *enableBrowser || staticDir != ""
-
-	if strings.TrimSpace(*basicAuthUser) != "" || strings.TrimSpace(*basicAuthPass) != "" {
-		if strings.TrimSpace(*basicAuthUser) == "" || strings.TrimSpace(*basicAuthPass) == "" {
+func applyServeBasicAuth(appCfg *config.Config, opts serveCommandOptions) error {
+	if opts.basicAuthUser != "" || opts.basicAuthPass != "" {
+		if opts.basicAuthUser == "" || opts.basicAuthPass == "" {
 			return fmt.Errorf("--basic-auth-user and --basic-auth-pass must be set together")
 		}
-		appCfg.IPC.BasicAuthUsername = strings.TrimSpace(*basicAuthUser)
-		appCfg.IPC.BasicAuthPassword = strings.TrimSpace(*basicAuthPass)
+		appCfg.IPC.BasicAuthUsername = opts.basicAuthUser
+		appCfg.IPC.BasicAuthPassword = opts.basicAuthPass
 		appCfg.IPC.BasicAuthEnabled = true
 	}
 	if appCfg.IPC.BasicAuthEnabled {
@@ -167,10 +210,39 @@ func runServeCommand(args []string) error {
 			return fmt.Errorf("basic auth enabled but username/password missing")
 		}
 	}
-	if !isLoopbackAddress(strings.TrimSpace(*bind)) {
-		if !*requireToken && !appCfg.IPC.BasicAuthEnabled {
-			return fmt.Errorf("refusing to bind IPC to %q without authentication (set --require-token or basic auth)", strings.TrimSpace(*bind))
-		}
+	return nil
+}
+
+func validateServeBindAuth(appCfg *config.Config, opts serveCommandOptions) error {
+	if isLoopbackAddress(opts.bind) {
+		return nil
+	}
+	if opts.requireToken || appCfg.IPC.BasicAuthEnabled {
+		return nil
+	}
+	return fmt.Errorf("refusing to bind IPC to %q without authentication (set --require-token or basic auth)", opts.bind)
+}
+
+func runServeCommand(args []string) error {
+	appCfg, err := serveLoadConfigFn()
+	if err != nil {
+		return withExitCode(err, 2)
+	}
+	agentProfile, err := loadStartupAgentProfile(agentProfileFlag)
+	if err != nil {
+		return withExitCode(fmt.Errorf("loading agent spec: %w", err), 2)
+	}
+	if agentProfile != nil {
+		agentProfile.ApplyToConfig(appCfg)
+	}
+	applyStartupModelOverride(appCfg, modelOverrideFlag)
+
+	opts, err := parseServeCommandOptions(args, appCfg.IPC)
+	if err != nil {
+		return err
+	}
+	if err := finalizeServeCommandOptions(appCfg, &opts); err != nil {
+		return err
 	}
 
 	store, err := serveInitStoreFn()
@@ -179,23 +251,6 @@ func runServeCommand(args []string) error {
 	}
 	defer store.Close()
 
-	projectRoot := config.ResolveProjectRoot(appCfg)
-	cfg := ipc.Config{
-		BindAddress:       *bind,
-		StaticDir:         staticDir,
-		EnableBrowser:     enableBrowserFinal,
-		AuthToken:         token,
-		AllowedOrigins:    allowedOrigins,
-		PublicMetrics:     *publicMetrics,
-		RequireToken:      *requireToken,
-		Version:           version,
-		BasicAuthEnabled:  appCfg.IPC.BasicAuthEnabled,
-		BasicAuthUsername: appCfg.IPC.BasicAuthUsername,
-		BasicAuthPassword: appCfg.IPC.BasicAuthPassword,
-		ProjectRoot:       projectRoot,
-		AgentProfile:      agentPromptSection(agentProfile),
-	}
-
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
@@ -203,37 +258,15 @@ func runServeCommand(args []string) error {
 	defer telemetryHub.Close()
 	commandGateway := command.NewGateway()
 	planStore := orchestrator.NewFilePlanStore(appCfg.Artifacts.PlanningDir)
+	models := initServeModels(appCfg)
 
-	var models *model.Manager
-	if appCfg != nil && appCfg.Providers.HasReadyProvider() {
-		mgr, err := model.NewManager(appCfg)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "warning: failed to initialize models (headless disabled): %v\n", err)
-		} else if err := mgr.Initialize(); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: failed to initialize models (headless disabled): %v\n", err)
-		} else {
-			models = mgr
-		}
-	} else {
-		fmt.Fprintf(os.Stderr, "warning: no provider API keys configured; headless sessions disabled\n")
-	}
-
-	autoACP := false
-	if appCfg != nil && strings.TrimSpace(appCfg.ACP.Listen) == "" && isLoopbackAddress(strings.TrimSpace(*bind)) {
-		appCfg.ACP.Listen = "127.0.0.1:50051"
-		appCfg.ACP.AllowInsecureLocal = true
-		autoACP = true
-	}
-	if stopACP, err := startACPServer(appCfg, models, store); err != nil {
-		if autoACP {
-			fmt.Fprintf(os.Stderr, "warning: failed to start ACP server: %v\n", err)
-		} else {
-			return err
-		}
+	if stopACP, err := maybeStartServeACP(appCfg, models, store, opts.bind); err != nil {
+		return err
 	} else if stopACP != nil {
 		defer stopACP()
 	}
 
+	cfg := buildServeIPCConfig(appCfg, opts, agentPromptSection(agentProfile))
 	server := serveNewServerFn(cfg, store, telemetryHub, commandGateway, planStore, appCfg, nil, models)
 	if models != nil {
 		if registryInit, ok := server.(interface {
@@ -245,6 +278,59 @@ func runServeCommand(args []string) error {
 		}
 	}
 	return server.Start(ctx)
+}
+
+func initServeModels(appCfg *config.Config) *model.Manager {
+	if appCfg == nil || !appCfg.Providers.HasReadyProvider() {
+		fmt.Fprintf(os.Stderr, "warning: no provider API keys configured; headless sessions disabled\n")
+		return nil
+	}
+	mgr, err := model.NewManager(appCfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: failed to initialize models (headless disabled): %v\n", err)
+		return nil
+	}
+	if err := mgr.Initialize(); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: failed to initialize models (headless disabled): %v\n", err)
+		return nil
+	}
+	return mgr
+}
+
+func maybeStartServeACP(appCfg *config.Config, models *model.Manager, store *storage.Store, bind string) (func(), error) {
+	autoACP := false
+	if appCfg != nil && strings.TrimSpace(appCfg.ACP.Listen) == "" && isLoopbackAddress(bind) {
+		appCfg.ACP.Listen = "127.0.0.1:50051"
+		appCfg.ACP.AllowInsecureLocal = true
+		autoACP = true
+	}
+	stopACP, err := startACPServer(appCfg, models, store)
+	if err != nil {
+		if autoACP {
+			fmt.Fprintf(os.Stderr, "warning: failed to start ACP server: %v\n", err)
+			return nil, nil
+		}
+		return nil, err
+	}
+	return stopACP, nil
+}
+
+func buildServeIPCConfig(appCfg *config.Config, opts serveCommandOptions, agentProfile string) ipc.Config {
+	return ipc.Config{
+		BindAddress:       opts.bind,
+		StaticDir:         opts.assetPath,
+		EnableBrowser:     opts.enableBrowser,
+		AuthToken:         opts.authToken,
+		AllowedOrigins:    opts.allowedOrigins,
+		PublicMetrics:     opts.publicMetrics,
+		RequireToken:      opts.requireToken,
+		Version:           version,
+		BasicAuthEnabled:  appCfg.IPC.BasicAuthEnabled,
+		BasicAuthUsername: appCfg.IPC.BasicAuthUsername,
+		BasicAuthPassword: appCfg.IPC.BasicAuthPassword,
+		ProjectRoot:       config.ResolveProjectRoot(appCfg),
+		AgentProfile:      agentProfile,
+	}
 }
 
 func readTokenFile(path string) (string, error) {
