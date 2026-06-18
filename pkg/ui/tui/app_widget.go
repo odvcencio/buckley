@@ -12,7 +12,6 @@ import (
 
 	"m31labs.dev/buckley/pkg/ui/backend"
 	"m31labs.dev/buckley/pkg/ui/backend/tcell"
-	"m31labs.dev/buckley/pkg/ui/compositor"
 	"m31labs.dev/buckley/pkg/ui/filepicker"
 	"m31labs.dev/buckley/pkg/ui/markdown"
 	"m31labs.dev/buckley/pkg/ui/runtime"
@@ -1425,70 +1424,6 @@ func (a *WidgetApp) WelcomeScreen() {
 	for _, tip := range tips {
 		a.chatView.AddMessage(tip, "system")
 	}
-}
-
-// themeToBackendStyle converts a compositor.Style to backend.Style.
-func themeToBackendStyle(cs compositor.Style) backend.Style {
-	style := backend.DefaultStyle()
-
-	// Convert foreground
-	if cs.FG.Mode == compositor.ColorModeRGB {
-		r := uint8((cs.FG.Value >> 16) & 0xFF)
-		g := uint8((cs.FG.Value >> 8) & 0xFF)
-		b := uint8(cs.FG.Value & 0xFF)
-		style = style.Foreground(backend.ColorRGB(r, g, b))
-	} else if cs.FG.Mode != compositor.ColorModeDefault {
-		style = style.Foreground(backend.Color(cs.FG.Value & 0xFF))
-	}
-
-	// Convert background
-	if cs.BG.Mode == compositor.ColorModeRGB {
-		r := uint8((cs.BG.Value >> 16) & 0xFF)
-		g := uint8((cs.BG.Value >> 8) & 0xFF)
-		b := uint8(cs.BG.Value & 0xFF)
-		style = style.Background(backend.ColorRGB(r, g, b))
-	} else if cs.BG.Mode != compositor.ColorModeDefault {
-		style = style.Background(backend.Color(cs.BG.Value & 0xFF))
-	}
-
-	// Attributes
-	if cs.Bold {
-		style = style.Bold(true)
-	}
-	if cs.Italic {
-		style = style.Italic(true)
-	}
-	if cs.Underline {
-		style = style.Underline(true)
-	}
-	if cs.Dim {
-		style = style.Dim(true)
-	}
-
-	return style
-}
-
-func blendColor(a, b backend.Color, t float64) backend.Color {
-	if t <= 0 {
-		return a
-	}
-	if t >= 1 {
-		return b
-	}
-	if !a.IsRGB() || !b.IsRGB() {
-		if t < 0.5 {
-			return a
-		}
-		return b
-	}
-
-	ar, ag, ab := a.RGB()
-	br, bg, bb := b.RGB()
-
-	r := uint8(float64(ar) + (float64(br)-float64(ar))*t + 0.5)
-	g := uint8(float64(ag) + (float64(bg)-float64(ag))*t + 0.5)
-	bv := uint8(float64(ab) + (float64(bb)-float64(ab))*t + 0.5)
-	return backend.ColorRGB(r, g, bv)
 }
 
 func copyToClipboard(text string) error {
