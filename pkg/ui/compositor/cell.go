@@ -1,6 +1,4 @@
-// Package compositor provides a flicker-free terminal rendering system.
-// It maintains a virtual screen buffer and outputs only changed cells,
-// inspired by Textual's compositor architecture.
+// Package compositor provides terminal style and screen primitives.
 package compositor
 
 // ColorMode defines how a color is represented.
