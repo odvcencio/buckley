@@ -403,28 +403,35 @@ func (i *InputArea) cursorLineCol(lines []inputLine) (line, col int) {
 	if len(lines) == 0 {
 		return 0, 0
 	}
-	textLen := i.text.Len()
-	pos := i.cursorPos
-	if pos < 0 {
-		pos = 0
-	}
-	if pos > textLen {
-		pos = textLen
+
+	pos := i.clampedCursorPos()
+	idx, input, ok := inputLineForBytePos(lines, pos)
+	if ok {
+		return idx, inputLineRuneCol(input, pos)
 	}
 
+	return lastInputLineCol(lines)
+}
+
+func (i *InputArea) clampedCursorPos() int {
+	return clampInt(i.cursorPos, 0, i.text.Len())
+}
+
+func inputLineForBytePos(lines []inputLine, pos int) (int, inputLine, bool) {
 	for idx, line := range lines {
 		if pos <= line.end {
-			col = runeColForByteOffset(line.text, pos-line.start)
-			if col < 0 {
-				col = 0
-			}
-			if col > runeLen(line.text) {
-				col = runeLen(line.text)
-			}
-			return idx, col
+			return idx, line, true
 		}
 	}
+	return 0, inputLine{}, false
+}
 
+func inputLineRuneCol(line inputLine, pos int) int {
+	col := runeColForByteOffset(line.text, pos-line.start)
+	return clampInt(col, 0, runeLen(line.text))
+}
+
+func lastInputLineCol(lines []inputLine) (line, col int) {
 	last := lines[len(lines)-1]
 	return len(lines) - 1, runeLen(last.text)
 }
@@ -536,6 +543,16 @@ func byteOffsetForRuneCol(s string, col int) int {
 		runeCount++
 	}
 	return len(s)
+}
+
+func clampInt(value, minValue, maxValue int) int {
+	if value < minValue {
+		return minValue
+	}
+	if value > maxValue {
+		return maxValue
+	}
+	return value
 }
 
 // HandleMessage processes keyboard input.

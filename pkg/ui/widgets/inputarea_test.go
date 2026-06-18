@@ -329,6 +329,24 @@ func TestInputArea_CursorPositionUsesRuneColumns(t *testing.T) {
 	}
 }
 
+func TestInputArea_CursorLineCol_ClampsOutOfRange(t *testing.T) {
+	ia := NewInputArea()
+	ia.SetText("模型abc")
+	lines := ia.inputLines(3)
+
+	ia.cursorPos = -20
+	line, col := ia.cursorLineCol(lines)
+	if line != 0 || col != 0 {
+		t.Fatalf("negative cursor = (%d,%d), want (0,0)", line, col)
+	}
+
+	ia.cursorPos = 999
+	line, col = ia.cursorLineCol(lines)
+	if line != 1 || col != 2 {
+		t.Fatalf("oversized cursor = (%d,%d), want (1,2)", line, col)
+	}
+}
+
 func TestInputArea_RenderModeSymbolUsesFullRune(t *testing.T) {
 	ia := NewInputArea()
 	ia.Focus()
