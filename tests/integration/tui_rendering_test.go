@@ -2,7 +2,7 @@
 
 // Package integration provides integration tests for the TUI rendering pipeline.
 //
-// These tests use fluffy-ui's simulation backend to verify widget rendering
+// These tests use Buckley's simulation backend to verify widget rendering
 // without requiring a real terminal.
 //
 // Run with: go test -tags=integration ./tests/integration -v -run TestTUI
@@ -12,11 +12,11 @@ import (
 	"strings"
 	"testing"
 
-	"m31labs.dev/buckley/pkg/buckley/ui/widgets"
-	"m31labs.dev/fluffyui/backend"
-	"m31labs.dev/fluffyui/backend/sim"
-	"m31labs.dev/fluffyui/runtime"
-	"m31labs.dev/fluffyui/theme"
+	"m31labs.dev/buckley/pkg/ui/backend"
+	"m31labs.dev/buckley/pkg/ui/backend/sim"
+	"m31labs.dev/buckley/pkg/ui/runtime"
+	"m31labs.dev/buckley/pkg/ui/theme"
+	"m31labs.dev/buckley/pkg/ui/widgets"
 )
 
 // TestTUI_HeaderRendering tests that the header widget renders correctly.
@@ -128,14 +128,12 @@ func TestTUI_SidebarRendering(t *testing.T) {
 	sidebar.SetRunningTools([]widgets.RunningTool{
 		{ID: "1", Name: "shell", Command: "go test ./..."},
 	})
-	sidebar.SetContextUsage(4700, 10000, 0)
 	sidebar.SetRecentFiles([]string{"pkg/main.go", "pkg/utils.go"})
 	sidebar.SetStyles(
 		backend.DefaultStyle(),
 		backend.DefaultStyle().Bold(true),
 		backend.DefaultStyle(),
 		backend.DefaultStyle().Foreground(backend.ColorGreen),
-		backend.DefaultStyle(),
 		backend.DefaultStyle(),
 	)
 
