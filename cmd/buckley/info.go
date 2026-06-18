@@ -23,6 +23,7 @@ type infoSnapshot struct {
 	Models      infoModels     `json:"models"`
 	Providers   []infoProvider `json:"providers"`
 	Agent       *infoAgent     `json:"agent,omitempty"`
+	AgentSpecs  infoAgentSpecs `json:"agent_specs"`
 	ChatChecks  infoChatChecks `json:"chat_checks"`
 	Skills      infoSkills     `json:"skills"`
 	Tools       infoTools      `json:"tools"`
@@ -85,6 +86,24 @@ type infoAgent struct {
 	Path      string   `json:"path"`
 	Name      string   `json:"name,omitempty"`
 	Subagents []string `json:"subagents,omitempty"`
+}
+
+type infoAgentSpecs struct {
+	Found bool                 `json:"found"`
+	Root  string               `json:"root,omitempty"`
+	Count int                  `json:"count"`
+	Specs []infoAgentSpecEntry `json:"specs,omitempty"`
+	Error string               `json:"error,omitempty"`
+}
+
+type infoAgentSpecEntry struct {
+	Path        string                 `json:"path"`
+	Name        string                 `json:"name,omitempty"`
+	Summary     string                 `json:"summary,omitempty"`
+	Subagents   []string               `json:"subagents,omitempty"`
+	Valid       bool                   `json:"valid"`
+	Error       string                 `json:"error,omitempty"`
+	Diagnostics []agentspec.Diagnostic `json:"diagnostics,omitempty"`
 }
 
 type infoChatChecks struct {
@@ -199,6 +218,8 @@ func buildInfoSnapshot() (infoSnapshot, error) {
 	diagnostics = append(diagnostics, skillDiagnostics...)
 	tools, toolDiagnostics := inspectTools(cfg, cwd, skills.registry)
 	diagnostics = append(diagnostics, toolDiagnostics...)
+	agentSpecs, agentSpecDiagnostics := inspectProjectAgentSpecs(cwd)
+	diagnostics = append(diagnostics, agentSpecDiagnostics...)
 	chatChecks, chatCheckDiagnostics := inspectProjectChatChecks(cwd)
 	diagnostics = append(diagnostics, chatCheckDiagnostics...)
 
@@ -230,6 +251,7 @@ func buildInfoSnapshot() (infoSnapshot, error) {
 		Models:      inspectModels(cfg),
 		Providers:   inspectProviders(cfg),
 		Agent:       inspectAgent(agentProfile),
+		AgentSpecs:  agentSpecs,
 		ChatChecks:  chatChecks,
 		Skills:      skills.snapshot,
 		Tools:       tools,
@@ -387,6 +409,40 @@ func inspectAgent(profile *agentspec.RuntimeProfile) *infoAgent {
 	return agent
 }
 
+func inspectProjectAgentSpecs(cwd string) (infoAgentSpecs, []string) {
+	discovery, err := agentspec.DiscoverProjectSpecs(cwd)
+	if err != nil {
+		return infoAgentSpecs{Error: err.Error()}, []string{fmt.Sprintf("project agent specs unavailable: %v", err)}
+	}
+	entries := make([]infoAgentSpecEntry, 0, len(discovery.Specs))
+	diagnostics := []string{}
+	for _, spec := range discovery.Specs {
+		entry := infoAgentSpecEntry{
+			Path:        spec.Path,
+			Name:        spec.Name,
+			Summary:     spec.Summary,
+			Subagents:   append([]string(nil), spec.Subagents...),
+			Valid:       spec.Valid,
+			Error:       spec.Error,
+			Diagnostics: append([]agentspec.Diagnostic(nil), spec.Diagnostics...),
+		}
+		entries = append(entries, entry)
+		if spec.Error != "" {
+			diagnostics = append(diagnostics, fmt.Sprintf("project agent spec unreadable: %s: %s", spec.Path, spec.Error))
+			continue
+		}
+		if !spec.Valid {
+			diagnostics = append(diagnostics, fmt.Sprintf("project agent spec invalid: %s", spec.Path))
+		}
+	}
+	return infoAgentSpecs{
+		Found: len(entries) > 0,
+		Root:  discovery.Root,
+		Count: len(entries),
+		Specs: entries,
+	}, diagnostics
+}
+
 func inspectProjectChatChecks(cwd string) (infoChatChecks, []string) {
 	path, err := findProjectChatCheckScenarioDir(cwd)
 	if err != nil {
@@ -513,6 +569,7 @@ func renderInfoSnapshot(snapshot infoSnapshot) string {
 	if snapshot.Agent != nil {
 		fmt.Fprintf(&b, "Agent:        %s (%s)\n", defaultText(snapshot.Agent.Name, "unnamed"), snapshot.Agent.Path)
 	}
+	fmt.Fprintf(&b, "Agent specs:  %s\n", renderInfoAgentSpecs(snapshot.AgentSpecs))
 	fmt.Fprintf(&b, "Chat checks:  %s\n", renderInfoChatChecks(snapshot.ChatChecks))
 	fmt.Fprintf(&b, "Skills:       %d", snapshot.Skills.Count)
 	if len(snapshot.Skills.BySource) > 0 {
@@ -532,6 +589,25 @@ func renderInfoSnapshot(snapshot infoSnapshot) string {
 	}
 	fmt.Fprintf(&b, "\nUse `buckley info --json` for the full manifest.\n")
 	return b.String()
+}
+
+func renderInfoAgentSpecs(specs infoAgentSpecs) string {
+	if specs.Found {
+		if specs.Error != "" {
+			return fmt.Sprintf("error (%s)", specs.Root)
+		}
+		invalid := 0
+		for _, spec := range specs.Specs {
+			if !spec.Valid || spec.Error != "" {
+				invalid++
+			}
+		}
+		if invalid > 0 {
+			return fmt.Sprintf("%d (%s, invalid=%d)", specs.Count, specs.Root, invalid)
+		}
+		return fmt.Sprintf("%d (%s)", specs.Count, specs.Root)
+	}
+	return "0 (not found)"
 }
 
 func renderInfoChatChecks(checks infoChatChecks) string {

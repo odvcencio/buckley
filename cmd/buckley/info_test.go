@@ -57,7 +57,7 @@ func TestRunInfoCommandTextAndDispatch(t *testing.T) {
 			t.Fatalf("dispatch info handled=%v code=%d", handled, code)
 		}
 	})
-	for _, want := range []string{"Buckley Info", "Project root:", "Chat checks:", "Tools:", "Use `buckley info --json`"} {
+	for _, want := range []string{"Buckley Info", "Project root:", "Agent specs:", "Chat checks:", "Tools:", "Use `buckley info --json`"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("info output missing %q:\n%s", want, out)
 		}
@@ -108,6 +108,65 @@ func TestInfoConfigSourcesExplicitConfigIncludesEnv(t *testing.T) {
 	}
 	if sources[0].Kind != "env" || sources[1].Kind != "explicit" {
 		t.Fatalf("sources = %+v, want env then explicit", sources)
+	}
+}
+
+func TestRunInfoCommandJSONIncludesProjectAgentSpecs(t *testing.T) {
+	workDir := setupInfoTestEnv(t)
+	agentDir := filepath.Join(workDir, ".buckley", "agents")
+	if err := os.MkdirAll(agentDir, 0o755); err != nil {
+		t.Fatalf("mkdir project agent specs: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(workDir, ".buckley", "agent.yaml"), []byte(`
+version: buckley.agent/v1
+name: project-agent
+summary: Default project runtime profile
+subagents:
+  - name: reviewer
+  - name: builder
+`), 0o644); err != nil {
+		t.Fatalf("write root agent spec: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(agentDir, "strict-reviewer.yaml"), []byte(`
+version: buckley.agent/v1
+name: strict-reviewer
+summary: Review-only profile
+tools:
+  tier: read_only
+`), 0o644); err != nil {
+		t.Fatalf("write named agent spec: %v", err)
+	}
+	nested := filepath.Join(workDir, "src", "feature")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatalf("mkdir nested workdir: %v", err)
+	}
+	if err := os.Chdir(nested); err != nil {
+		t.Fatalf("chdir nested workdir: %v", err)
+	}
+
+	out := captureStdout(t, func() {
+		if err := runInfoCommand([]string{"--json"}); err != nil {
+			t.Fatalf("runInfoCommand: %v", err)
+		}
+	})
+	var snapshot infoSnapshot
+	if err := json.Unmarshal([]byte(out), &snapshot); err != nil {
+		t.Fatalf("unmarshal info json: %v\n%s", err, out)
+	}
+	if !snapshot.AgentSpecs.Found || snapshot.AgentSpecs.Count != 2 {
+		t.Fatalf("expected project agent specs to be discovered: %+v", snapshot.AgentSpecs)
+	}
+	if snapshot.AgentSpecs.Root != workDir {
+		t.Fatalf("agent spec root=%q want %q", snapshot.AgentSpecs.Root, workDir)
+	}
+	if snapshot.AgentSpecs.Specs[0].Name != "project-agent" || !snapshot.AgentSpecs.Specs[0].Valid {
+		t.Fatalf("unexpected root agent spec: %+v", snapshot.AgentSpecs.Specs[0])
+	}
+	if strings.Join(snapshot.AgentSpecs.Specs[0].Subagents, ",") != "builder,reviewer" {
+		t.Fatalf("unexpected subagents: %+v", snapshot.AgentSpecs.Specs[0].Subagents)
+	}
+	if snapshot.AgentSpecs.Specs[1].Name != "strict-reviewer" || snapshot.AgentSpecs.Specs[1].Summary != "Review-only profile" {
+		t.Fatalf("unexpected named agent spec: %+v", snapshot.AgentSpecs.Specs[1])
 	}
 }
 

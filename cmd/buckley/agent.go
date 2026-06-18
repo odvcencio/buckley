@@ -1,8 +1,10 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"sort"
 	"strings"
@@ -15,9 +17,11 @@ import (
 
 func runAgentCommand(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: buckley agent <check|show|run> [args...]")
+		return fmt.Errorf("usage: buckley agent <list|check|show|run> [args...]")
 	}
 	switch args[0] {
+	case "list":
+		return runAgentList(args[1:])
 	case "check":
 		return runAgentCheck(args[1:])
 	case "show":
@@ -25,7 +29,88 @@ func runAgentCommand(args []string) error {
 	case "run", "invoke":
 		return runAgentRun(args[1:])
 	default:
-		return fmt.Errorf("unknown agent subcommand: %s (use check, show, or run)", args[0])
+		return fmt.Errorf("unknown agent subcommand: %s (use list, check, show, or run)", args[0])
+	}
+}
+
+type agentListSnapshot struct {
+	Found bool                       `json:"found"`
+	Root  string                     `json:"root,omitempty"`
+	Count int                        `json:"count"`
+	Specs []agentspec.DiscoveredSpec `json:"specs,omitempty"`
+}
+
+func runAgentList(args []string) error {
+	fs := flag.NewFlagSet("agent list", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	jsonOutput := fs.Bool("json", false, "print machine-readable JSON")
+	format := fs.String("format", "text", "output format: text or json")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("usage: buckley agent list [--json|--format json]")
+	}
+
+	snapshot, err := buildAgentListSnapshot(".")
+	if err != nil {
+		return err
+	}
+	switch strings.ToLower(strings.TrimSpace(*format)) {
+	case "", "text":
+	case "json":
+		*jsonOutput = true
+	default:
+		return fmt.Errorf("unknown format %q (use text or json)", *format)
+	}
+	if *jsonOutput {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(snapshot)
+	}
+	printAgentListText(os.Stdout, snapshot)
+	return nil
+}
+
+func buildAgentListSnapshot(start string) (agentListSnapshot, error) {
+	discovery, err := agentspec.DiscoverProjectSpecs(start)
+	if err != nil {
+		return agentListSnapshot{}, err
+	}
+	return agentListSnapshot{
+		Found: len(discovery.Specs) > 0,
+		Root:  discovery.Root,
+		Count: len(discovery.Specs),
+		Specs: discovery.Specs,
+	}, nil
+}
+
+func printAgentListText(w io.Writer, snapshot agentListSnapshot) {
+	if !snapshot.Found {
+		fmt.Fprintln(w, "Agent specs: 0 (not found)")
+		return
+	}
+	fmt.Fprintf(w, "Agent specs: %d (%s)\n", snapshot.Count, snapshot.Root)
+	for _, spec := range snapshot.Specs {
+		status := "valid"
+		if !spec.Valid || spec.Error != "" {
+			status = "invalid"
+		}
+		name := strings.TrimSpace(spec.Name)
+		if name == "" {
+			name = "(unnamed)"
+		}
+		fmt.Fprintf(w, "  - %s (%s): %s", name, status, spec.Path)
+		if len(spec.Subagents) > 0 {
+			fmt.Fprintf(w, ", subagents=%s", strings.Join(spec.Subagents, ","))
+		}
+		if spec.Summary != "" {
+			fmt.Fprintf(w, ", summary=%q", spec.Summary)
+		}
+		if spec.Error != "" {
+			fmt.Fprintf(w, ", error=%s", spec.Error)
+		}
+		fmt.Fprintln(w)
 	}
 }
 

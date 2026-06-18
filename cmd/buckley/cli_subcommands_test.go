@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -87,6 +88,65 @@ policies:
 		if !strings.Contains(showOut, want) {
 			t.Fatalf("show output missing %q in:\n%s", want, showOut)
 		}
+	}
+}
+
+func TestRunAgentCommandList(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".buckley", "agents"), 0o755); err != nil {
+		t.Fatalf("mkdir agent specs: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".buckley", "agent.yaml"), []byte(`
+version: buckley.agent/v1
+name: daily
+summary: Main daily-driver profile
+subagents:
+  - name: reviewer
+  - name: coder
+`), 0o644); err != nil {
+		t.Fatalf("write root spec: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".buckley", "agents", "read-only.yaml"), []byte(`
+version: buckley.agent/v1
+name: read-only
+tools:
+  tier: read_only
+`), 0o644); err != nil {
+		t.Fatalf("write named spec: %v", err)
+	}
+	oldWd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chdir(oldWd)
+	})
+	if err := os.Chdir(dir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+
+	textOut := captureStdout(t, func() {
+		if err := runAgentCommand([]string{"list"}); err != nil {
+			t.Fatalf("runAgentCommand list: %v", err)
+		}
+	})
+	for _, want := range []string{"Agent specs: 2", "daily (valid)", "subagents=coder,reviewer", "read-only (valid)"} {
+		if !strings.Contains(textOut, want) {
+			t.Fatalf("agent list output missing %q:\n%s", want, textOut)
+		}
+	}
+
+	jsonOut := captureStdout(t, func() {
+		if err := runAgentCommand([]string{"list", "--json"}); err != nil {
+			t.Fatalf("runAgentCommand list json: %v", err)
+		}
+	})
+	var snapshot agentListSnapshot
+	if err := json.Unmarshal([]byte(jsonOut), &snapshot); err != nil {
+		t.Fatalf("unmarshal agent list json: %v\n%s", err, jsonOut)
+	}
+	if !snapshot.Found || snapshot.Count != 2 || snapshot.Specs[0].Name != "daily" || snapshot.Specs[1].Name != "read-only" {
+		t.Fatalf("unexpected agent list snapshot: %+v", snapshot)
 	}
 }
 

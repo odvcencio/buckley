@@ -661,6 +661,7 @@ func printHelp() {
 	fmt.Println("  remote <subcommand>              Remote session operations (attach, sessions, tokens, login, console)")
 	fmt.Println("  batch prune-workspaces           Garbage-collect stale batch workspaces (k8s/CI)")
 	fmt.Println("  git-webhook                      Listen for merge webhooks and run regression/release commands")
+	fmt.Println("  agent list                       List discovered project Buckley agent specs")
 	fmt.Println("  agent check/show/run             Validate, inspect, or invoke Buckley agent specs")
 	fmt.Println("  agent show <agent.yaml>          Show a Buckley agent spec summary")
 	fmt.Println("  agent run [--dry-run|--no-tools] Invoke or preview a named subagent")
@@ -987,7 +988,7 @@ func printBashCompletion() {
             return 0
             ;;
         agent)
-            COMPREPLY=( $(compgen -W "check show run invoke" -- "${cur}") )
+            COMPREPLY=( $(compgen -W "list check show run invoke" -- "${cur}") )
             return 0
             ;;
         config)
@@ -1086,7 +1087,7 @@ _buckley() {
                     _values 'batch command' prune-workspaces
                     ;;
                 agent)
-                    _values 'agent command' check show run invoke
+                    _values 'agent command' list check show run invoke
                     ;;
                 experiment)
                     _values 'experiment command' run
@@ -1162,6 +1163,7 @@ complete -c buckley -n '__fish_seen_subcommand_from config' -a path -d 'Show con
 
 # Agent subcommands
 complete -c buckley -n '__fish_seen_subcommand_from agent' -a check -d 'Validate agent spec'
+complete -c buckley -n '__fish_seen_subcommand_from agent' -a list -d 'List discovered project agent specs'
 complete -c buckley -n '__fish_seen_subcommand_from agent' -a show -d 'Inspect agent spec'
 complete -c buckley -n '__fish_seen_subcommand_from agent' -a run -d 'Invoke a named subagent'
 complete -c buckley -n '__fish_seen_subcommand_from agent' -a invoke -d 'Invoke a named subagent'
