@@ -216,8 +216,11 @@ func TestStorageSessionDeletion(t *testing.T) {
 	}
 
 	// Verify session is deleted
-	_, err = store.GetSession(sessionID)
-	if err == nil {
+	deleted, err := store.GetSession(sessionID)
+	if err != nil {
+		t.Fatalf("Failed to query deleted session: %v", err)
+	}
+	if deleted != nil {
 		t.Error("Session still exists after deletion")
 	}
 
