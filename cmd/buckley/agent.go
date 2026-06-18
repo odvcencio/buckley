@@ -256,6 +256,12 @@ func runAgentSubagentInit(args []string) error {
 	fs.SetOutput(os.Stderr)
 	pathFlag := fs.String("path", ".", "project root where agent/subagents should be created")
 	description := fs.String("description", "", "model-facing role description for the subagent")
+	persona := fs.String("persona", "", "persona to apply when this subagent runs")
+	modelID := fs.String("model", "", "model to use for this subagent")
+	toolTier := fs.String("tool-tier", "", "tool tier for this subagent: none, read_only, standard, or full")
+	skills := fs.String("skill", "", "comma-separated additional skill names for this subagent")
+	approvalMode := fs.String("approval-mode", "", "approval mode for this subagent: ask, safe, auto, or yolo")
+	maxToolCalls := fs.Int("max-tool-calls", 0, "maximum tool calls allowed for this subagent")
 	force := fs.Bool("force", false, "overwrite generated subagent instructions.md if it already exists")
 	dryRun := fs.Bool("dry-run", false, "show what would be created without writing files")
 	jsonOutput := fs.Bool("json", false, "print machine-readable JSON")
@@ -264,17 +270,32 @@ func runAgentSubagentInit(args []string) error {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return fmt.Errorf("usage: buckley agent subagent init [--path <dir>] [--description <text>] [--force] [--dry-run] [--json|--format json] <subagent>")
+		return fmt.Errorf("usage: buckley agent subagent init [--path <dir>] [--description <text>] [--persona <id>] [--model <id>] [--tool-tier <tier>] [--skill a,b] [--approval-mode <mode>] [--max-tool-calls n] [--force] [--dry-run] [--json|--format json] <subagent>")
 	}
 	if err := normalizeJSONFormatFlag(*format, jsonOutput); err != nil {
 		return err
 	}
+	if *toolTier != "" && !validAgentRunToolTier(*toolTier) {
+		return fmt.Errorf("tool tier must be none, read_only, standard, or full")
+	}
+	if *approvalMode != "" && !validAgentApprovalMode(*approvalMode) {
+		return fmt.Errorf("approval mode must be ask, safe, auto, or yolo")
+	}
+	if *maxToolCalls < 0 {
+		return fmt.Errorf("max tool calls must be non-negative")
+	}
 	result, err := initFilesystemSubagentLayout(agentSubagentInitOptions{
-		Root:        *pathFlag,
-		Name:        fs.Arg(0),
-		Description: *description,
-		Force:       *force,
-		DryRun:      *dryRun,
+		Root:         *pathFlag,
+		Name:         fs.Arg(0),
+		Description:  *description,
+		Persona:      *persona,
+		Model:        *modelID,
+		ToolTier:     *toolTier,
+		Skills:       splitCommaList(*skills),
+		ApprovalMode: *approvalMode,
+		MaxToolCalls: *maxToolCalls,
+		Force:        *force,
+		DryRun:       *dryRun,
 	})
 	if err != nil {
 		return err
@@ -590,11 +611,17 @@ func formatAgentFilesystemSlots(slots []agentspec.FilesystemSlot) string {
 }
 
 type agentSubagentInitOptions struct {
-	Root        string
-	Name        string
-	Description string
-	Force       bool
-	DryRun      bool
+	Root         string
+	Name         string
+	Description  string
+	Persona      string
+	Model        string
+	ToolTier     string
+	Skills       []string
+	ApprovalMode string
+	MaxToolCalls int
+	Force        bool
+	DryRun       bool
 }
 
 func initFilesystemSubagentLayout(opts agentSubagentInitOptions) (agentSubagentInitResult, error) {
@@ -643,6 +670,18 @@ func initFilesystemSubagentLayout(opts agentSubagentInitOptions) (agentSubagentI
 		{path: filepath.Join(subagentDir, "instructions.md"), content: renderSubagentInstructions(name, opts.Description), force: opts.Force},
 		{path: filepath.Join(subagentDir, "skills"), dir: true},
 	}
+	if filesystemSubagentConfigRequested(opts) {
+		paths = append(paths, struct {
+			path    string
+			content string
+			dir     bool
+			force   bool
+		}{
+			path:    filepath.Join(subagentDir, "agent.yaml"),
+			content: renderSubagentConfigYAML(opts),
+			force:   opts.Force,
+		})
+	}
 	for _, item := range paths {
 		created, existing, err := ensureAgentInitPath(item.path, item.content, item.dir, item.force, opts.DryRun)
 		if err != nil {
@@ -656,6 +695,15 @@ func initFilesystemSubagentLayout(opts agentSubagentInitOptions) (agentSubagentI
 		}
 	}
 	return result, nil
+}
+
+func filesystemSubagentConfigRequested(opts agentSubagentInitOptions) bool {
+	return strings.TrimSpace(opts.Persona) != "" ||
+		strings.TrimSpace(opts.Model) != "" ||
+		strings.TrimSpace(opts.ToolTier) != "" ||
+		len(cleanToolNames(opts.Skills)) > 0 ||
+		strings.TrimSpace(opts.ApprovalMode) != "" ||
+		opts.MaxToolCalls > 0
 }
 
 func cleanAgentSubagentName(value string) (string, error) {
@@ -681,6 +729,37 @@ func cleanAgentSubagentName(value string) (string, error) {
 	return value, nil
 }
 
+func renderSubagentConfigYAML(opts agentSubagentInitOptions) string {
+	var b strings.Builder
+	if persona := strings.TrimSpace(opts.Persona); persona != "" {
+		fmt.Fprintf(&b, "persona: %s\n", quoteYAMLString(persona))
+	}
+	if model := strings.TrimSpace(opts.Model); model != "" {
+		fmt.Fprintf(&b, "model: %s\n", quoteYAMLString(model))
+	}
+	if tier := strings.TrimSpace(opts.ToolTier); tier != "" {
+		fmt.Fprintf(&b, "tool_tier: %s\n", quoteYAMLString(tier))
+	}
+	skills := cleanToolNames(opts.Skills)
+	sort.Strings(skills)
+	if len(skills) > 0 {
+		b.WriteString("skills:\n")
+		for _, skillName := range skills {
+			fmt.Fprintf(&b, "  - %s\n", quoteYAMLString(skillName))
+		}
+	}
+	if mode := strings.TrimSpace(opts.ApprovalMode); mode != "" || opts.MaxToolCalls > 0 {
+		b.WriteString("policies:\n")
+		if mode != "" {
+			fmt.Fprintf(&b, "  approval_mode: %s\n", quoteYAMLString(mode))
+		}
+		if opts.MaxToolCalls > 0 {
+			fmt.Fprintf(&b, "  max_tool_calls: %d\n", opts.MaxToolCalls)
+		}
+	}
+	return b.String()
+}
+
 func renderSubagentInstructions(name, description string) string {
 	description = strings.TrimSpace(description)
 	if description == "" {
@@ -697,6 +776,15 @@ func renderSubagentInstructions(name, description string) string {
 func defaultSubagentDescription(name string) string {
 	label := strings.ToLower(skillTitle(name))
 	return fmt.Sprintf("Handle focused %s tasks for this Buckley project.", label)
+}
+
+func validAgentApprovalMode(mode string) bool {
+	switch strings.TrimSpace(mode) {
+	case "ask", "safe", "auto", "yolo":
+		return true
+	default:
+		return false
+	}
 }
 
 func printAgentSubagentInitResult(w io.Writer, result agentSubagentInitResult) {

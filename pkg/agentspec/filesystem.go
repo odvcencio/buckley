@@ -8,6 +8,8 @@ import (
 	"sort"
 	"strings"
 	"unicode"
+
+	"gopkg.in/yaml.v3"
 )
 
 func LoadFilesystemRuntimeProfile(agentRoot string) (*RuntimeProfile, error) {
@@ -201,17 +203,73 @@ func filesystemSubagents(agentRoot string, d *diagnostics) ([]SubagentSpec, erro
 		if err != nil {
 			return nil, err
 		}
+		config, err := loadFilesystemSubagentConfig(root)
+		if err != nil {
+			return nil, err
+		}
+		mergedSkills := appendUnique(skills, config.Skills...)
+		sort.Strings(mergedSkills)
 		filesystemWarnUnsupportedSubagentSlots(name, root, d)
 		subagents = append(subagents, SubagentSpec{
 			Name:         name,
-			Skills:       skills,
-			Instructions: instructions,
+			Persona:      config.Persona,
+			Model:        config.Model,
+			ToolTier:     config.ToolTier,
+			Skills:       mergedSkills,
+			Instructions: appendPrompt(config.Instructions, instructions),
+			Policies:     config.Policies,
 		})
 	}
 	sort.Slice(subagents, func(i, j int) bool {
 		return subagents[i].Name < subagents[j].Name
 	})
 	return subagents, nil
+}
+
+type filesystemSubagentConfig struct {
+	Persona      string     `yaml:"persona"`
+	Model        string     `yaml:"model"`
+	ToolTier     string     `yaml:"tool_tier"`
+	Skills       []string   `yaml:"skills"`
+	Instructions string     `yaml:"instructions"`
+	Policies     PolicySpec `yaml:"policies"`
+}
+
+func loadFilesystemSubagentConfig(root string) (filesystemSubagentConfig, error) {
+	path, ok, err := firstExistingFile(filepath.Join(root, "agent.yaml"), filepath.Join(root, "agent.yml"))
+	if err != nil || !ok {
+		return filesystemSubagentConfig{}, err
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return filesystemSubagentConfig{}, fmt.Errorf("reading filesystem subagent config %s: %w", path, err)
+	}
+	var config filesystemSubagentConfig
+	if err := yaml.Unmarshal(data, &config); err != nil {
+		return filesystemSubagentConfig{}, fmt.Errorf("parsing filesystem subagent config %s: %w", path, err)
+	}
+	config.Persona = strings.TrimSpace(config.Persona)
+	config.Model = strings.TrimSpace(config.Model)
+	config.ToolTier = strings.TrimSpace(config.ToolTier)
+	config.Instructions = strings.TrimSpace(config.Instructions)
+	config.Skills = appendUnique(nil, config.Skills...)
+	return config, nil
+}
+
+func firstExistingFile(paths ...string) (string, bool, error) {
+	for _, path := range paths {
+		info, err := os.Stat(path)
+		if err == nil {
+			if info.IsDir() {
+				return "", false, fmt.Errorf("filesystem config path is a directory: %s", path)
+			}
+			return path, true, nil
+		}
+		if !os.IsNotExist(err) {
+			return "", false, fmt.Errorf("stat filesystem config path: %w", err)
+		}
+	}
+	return "", false, nil
 }
 
 func readFilesystemInstructionBundle(root string, paths []string) (string, error) {

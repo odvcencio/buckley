@@ -101,6 +101,16 @@ func TestLoadFilesystemRuntimeProfile(t *testing.T) {
 	writeFilesystemFile(t, filepath.Join(root, "agent", "skills", "research", "SKILL.md"), "Research before answering.")
 	writeFilesystemFile(t, filepath.Join(root, "agent", "skills", "research", "references", "checklist.md"), "This is package support material.")
 	writeFilesystemFile(t, filepath.Join(root, "agent", "subagents", "coder", "instructions.md"), "Write focused patches.")
+	writeFilesystemFile(t, filepath.Join(root, "agent", "subagents", "coder", "agent.yaml"), `
+persona: implementer
+model: xiaomi/mimo-v2.5-pro
+tool_tier: standard
+skills:
+  - code-review
+policies:
+  approval_mode: safe
+  max_tool_calls: 7
+`)
 	writeFilesystemFile(t, filepath.Join(root, "agent", "subagents", "coder", "skills", "patching", "SKILL.md"), "Patch in small steps.")
 	writeFilesystemFile(t, filepath.Join(root, "agent", "subagents", "coder", "skills", "patching", "references", "checklist.md"), "This is package support material.")
 
@@ -130,8 +140,14 @@ func TestLoadFilesystemRuntimeProfile(t *testing.T) {
 	if !strings.Contains(sub.Spec.Instructions.Prompt, "Write focused patches.") {
 		t.Fatalf("subagent instructions missing:\n%s", sub.Spec.Instructions.Prompt)
 	}
-	if strings.Join(sub.Spec.Skills, ",") != "forecast,research,patching" {
-		t.Fatalf("subagent skills=%v want forecast,research,patching", sub.Spec.Skills)
+	if sub.Spec.Persona != "implementer" || sub.Spec.Models.Execution != "xiaomi/mimo-v2.5-pro" || sub.Spec.Tools.Tier != "standard" {
+		t.Fatalf("subagent runtime fields not applied: %+v", sub.Spec)
+	}
+	if sub.Spec.Policies.ApprovalMode != "safe" || sub.Spec.Policies.MaxToolCalls != 7 {
+		t.Fatalf("subagent policies not applied: %+v", sub.Spec.Policies)
+	}
+	if strings.Join(sub.Spec.Skills, ",") != "forecast,research,code-review,patching" {
+		t.Fatalf("subagent skills=%v want forecast,research,code-review,patching", sub.Spec.Skills)
 	}
 }
 

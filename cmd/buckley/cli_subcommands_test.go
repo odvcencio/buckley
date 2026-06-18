@@ -191,7 +191,18 @@ func TestRunAgentCommandSubagentInitCreatesFilesystemSubagent(t *testing.T) {
 	project := filepath.Join(dir, "new-project")
 
 	out := captureStdout(t, func() {
-		if err := runAgentCommand([]string{"subagents", "init", "--path", project, "--description", "Investigate ambiguous questions before implementation.", "researcher"}); err != nil {
+		if err := runAgentCommand([]string{
+			"subagents", "init",
+			"--path", project,
+			"--description", "Investigate ambiguous questions before implementation.",
+			"--persona", "researcher",
+			"--model", "xiaomi/mimo-v2.5-pro",
+			"--tool-tier", "read_only",
+			"--skill", "code-review,planning",
+			"--approval-mode", "safe",
+			"--max-tool-calls", "5",
+			"researcher",
+		}); err != nil {
 			t.Fatalf("runAgentCommand subagents init: %v", err)
 		}
 	})
@@ -201,6 +212,7 @@ func TestRunAgentCommandSubagentInitCreatesFilesystemSubagent(t *testing.T) {
 		"agent/subagents/researcher/",
 		"agent/subagents/researcher/instructions.md",
 		"agent/subagents/researcher/skills/",
+		"agent/subagents/researcher/agent.yaml",
 		"evals/",
 		"Next: buckley agent run --project researcher <task>",
 	} {
@@ -216,6 +228,24 @@ func TestRunAgentCommandSubagentInitCreatesFilesystemSubagent(t *testing.T) {
 	for _, want := range []string{"You are the Researcher subagent.", "Investigate ambiguous questions before implementation."} {
 		if !strings.Contains(string(data), want) {
 			t.Fatalf("generated subagent instructions missing %q:\n%s", want, string(data))
+		}
+	}
+	configPath := filepath.Join(project, "agent", "subagents", "researcher", "agent.yaml")
+	configData, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read generated subagent config: %v", err)
+	}
+	for _, want := range []string{
+		`persona: "researcher"`,
+		`model: "xiaomi/mimo-v2.5-pro"`,
+		`tool_tier: "read_only"`,
+		`  - "code-review"`,
+		`  - "planning"`,
+		`  approval_mode: "safe"`,
+		`  max_tool_calls: 5`,
+	} {
+		if !strings.Contains(string(configData), want) {
+			t.Fatalf("generated subagent config missing %q:\n%s", want, string(configData))
 		}
 	}
 
@@ -269,12 +299,17 @@ func TestRunAgentCommandSubagentInitCreatesFilesystemSubagent(t *testing.T) {
 			t.Fatalf("subagents output missing %q:\n%s", want, listOut)
 		}
 	}
+	for _, want := range []string{"model=xiaomi/mimo-v2.5-pro", "tool_tier=read_only", "persona=researcher", "skills=code-review,planning", "approval=safe", "max_tool_calls=5"} {
+		if !strings.Contains(listOut, want) {
+			t.Fatalf("subagents output missing configured field %q:\n%s", want, listOut)
+		}
+	}
 	previewOut := captureStdout(t, func() {
 		if err := runAgentCommand([]string{"run", "--project", "--dry-run", "researcher", "inspect", "this"}); err != nil {
 			t.Fatalf("runAgentCommand subagent dry-run: %v", err)
 		}
 	})
-	for _, want := range []string{"Agent run preview", "Agent: new-project/researcher", "Subagent: researcher", "Instructions: yes", "Task: inspect this"} {
+	for _, want := range []string{"Agent run preview", "Agent: new-project/researcher", "Subagent: researcher", "Model: xiaomi/mimo-v2.5-pro", "Tool tier: read_only", "Skills: code-review, planning", "Approval mode: safe", "Instructions: yes", "Task: inspect this"} {
 		if !strings.Contains(previewOut, want) {
 			t.Fatalf("subagent dry-run output missing %q:\n%s", want, previewOut)
 		}
@@ -282,6 +317,9 @@ func TestRunAgentCommandSubagentInitCreatesFilesystemSubagent(t *testing.T) {
 
 	if err := runAgentCommand([]string{"subagent", "init", "--path", project, "agent"}); err == nil || !strings.Contains(err.Error(), "reserved") {
 		t.Fatalf("expected reserved subagent name error, got %v", err)
+	}
+	if err := runAgentCommand([]string{"subagent", "init", "--path", project, "--tool-tier", "root", "bad"}); err == nil || !strings.Contains(err.Error(), "tool tier") {
+		t.Fatalf("expected invalid tool tier error, got %v", err)
 	}
 }
 
