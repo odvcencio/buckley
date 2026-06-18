@@ -1173,6 +1173,9 @@ func TestCompletionShells(t *testing.T) {
 		if !strings.Contains(out, "runs") {
 			t.Errorf("expected %s completion to include doctor chat runs", shell)
 		}
+		if !strings.Contains(out, "eval") {
+			t.Errorf("expected %s completion to include eval command", shell)
+		}
 	}
 
 	// Unknown shell should error

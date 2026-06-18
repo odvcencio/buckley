@@ -45,6 +45,74 @@ func runDoctorCommand(args []string) error {
 	}
 }
 
+func runEvalCommand(args []string) error {
+	if len(args) == 0 {
+		return runDoctorChatCommand(evalDoctorChatArgs(nil))
+	}
+	switch strings.TrimSpace(args[0]) {
+	case "init":
+		return runDoctorChatInitCommand(args[1:])
+	case "list":
+		return runDoctorChatCommand(evalDoctorChatArgs(append([]string{"-list"}, args[1:]...)))
+	case "run":
+		return runDoctorChatCommand(evalDoctorChatArgs(args[1:]))
+	case "runs", "artifacts":
+		return runDoctorChatRunsCommand(evalDoctorChatRunsArgs(args[1:]))
+	case "show":
+		return runDoctorChatRunShowCommand(evalDoctorChatRunsArgs(args[1:]))
+	default:
+		return runDoctorChatCommand(evalDoctorChatArgs(args))
+	}
+}
+
+func evalDoctorChatArgs(args []string) []string {
+	out := append([]string(nil), args...)
+	if doctorChatArgsSpecifyScenarioRoot(out) {
+		return out
+	}
+	return append([]string{"-project"}, out...)
+}
+
+func evalDoctorChatRunsArgs(args []string) []string {
+	out := append([]string(nil), args...)
+	if doctorChatRunsArgsSpecifyRoot(out) {
+		return out
+	}
+	return append([]string{"-project"}, out...)
+}
+
+func doctorChatArgsSpecifyScenarioRoot(args []string) bool {
+	for _, arg := range args {
+		switch {
+		case arg == "-project" || arg == "--project":
+			return true
+		case arg == "-scenario" || arg == "--scenario":
+			return true
+		case strings.HasPrefix(arg, "-scenario=") || strings.HasPrefix(arg, "--scenario="):
+			return true
+		case strings.HasPrefix(arg, "-project=") || strings.HasPrefix(arg, "--project="):
+			return true
+		}
+	}
+	return false
+}
+
+func doctorChatRunsArgsSpecifyRoot(args []string) bool {
+	for _, arg := range args {
+		switch {
+		case arg == "-project" || arg == "--project":
+			return true
+		case arg == "-path" || arg == "--path":
+			return true
+		case strings.HasPrefix(arg, "-project=") || strings.HasPrefix(arg, "--project="):
+			return true
+		case strings.HasPrefix(arg, "-path=") || strings.HasPrefix(arg, "--path="):
+			return true
+		}
+	}
+	return false
+}
+
 type doctorChatInitResult struct {
 	Name        string   `json:"name"`
 	Root        string   `json:"root"`

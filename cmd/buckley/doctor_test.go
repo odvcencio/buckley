@@ -750,6 +750,66 @@ turns:
 	}
 }
 
+func TestRunEvalCommandListDefaultsToProjectEvals(t *testing.T) {
+	dir := t.TempDir()
+	projectDir := filepath.Join(dir, "evals", "chat")
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatalf("mkdir eval scenarios: %v", err)
+	}
+	nested := filepath.Join(dir, "src", "feature")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatalf("mkdir nested project dir: %v", err)
+	}
+	t.Chdir(nested)
+	if err := os.WriteFile(filepath.Join(projectDir, "memory.eval.yaml"), []byte(`
+tags:
+  - smoke
+turns:
+  - user: say READY
+    want_contains: [READY]
+`), 0o644); err != nil {
+		t.Fatalf("write scenario: %v", err)
+	}
+
+	origInit := initDependenciesFn
+	t.Cleanup(func() { initDependenciesFn = origInit })
+	called := false
+	initDependenciesFn = func() (*config.Config, *model.Manager, *storage.Store, error) {
+		called = true
+		return nil, nil, nil, errors.New("dependency initialization should not run")
+	}
+
+	var runErr error
+	out := captureStdout(t, func() {
+		runErr = runEvalCommand([]string{"list", "--tag", "smoke"})
+	})
+	if runErr != nil {
+		t.Fatalf("runEvalCommand list: %v", runErr)
+	}
+	if called {
+		t.Fatal("eval list initialized dependencies")
+	}
+	for _, want := range []string{"Chat check scenarios: 1", "chat/memory", "tags=smoke"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("output missing %q: %s", want, out)
+		}
+	}
+
+	jsonOut := captureStdout(t, func() {
+		runErr = runEvalCommand([]string{"list", "--json"})
+	})
+	if runErr != nil {
+		t.Fatalf("runEvalCommand list json: %v", runErr)
+	}
+	var inventory doctorChatScenarioInventory
+	if err := json.Unmarshal([]byte(jsonOut), &inventory); err != nil {
+		t.Fatalf("unmarshal eval inventory: %v\n%s", err, jsonOut)
+	}
+	if inventory.ScenarioCount != 1 || inventory.Scenarios[0].Name != "chat/memory" {
+		t.Fatalf("unexpected eval inventory: %+v", inventory)
+	}
+}
+
 func TestRunDoctorChatCommandProjectListFiltersByID(t *testing.T) {
 	dir := t.TempDir()
 	projectDir := filepath.Join(dir, ".buckley", "chatchecks")

@@ -657,6 +657,7 @@ func printHelp() {
 	fmt.Println("  experiment show <id|name>        Show experiment results (--format terminal|markdown)")
 	fmt.Println("  experiment diff <id|name>        Compare variant outputs side-by-side")
 	fmt.Println("  experiment replay <session-id>   Replay a session with a new model")
+	fmt.Println("  eval [list|run|init|runs|show]   Run project chat eval scenarios")
 	fmt.Println("  serve [--bind host:port]         Start local HTTP/WebSocket server")
 	fmt.Println("  remote <subcommand>              Remote session operations (attach, sessions, tokens, login, console)")
 	fmt.Println("  batch prune-workspaces           Garbage-collect stale batch workspaces (k8s/CI)")
@@ -980,7 +981,7 @@ func printBashCompletion() {
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
 
-    commands="plan execute execute-task commit pr experiment serve remote batch git-webhook agent skills skill agent-server lsp acp info config doctor completion worktree rules migrate db resume help version"
+    commands="plan execute execute-task commit pr experiment eval serve remote batch git-webhook agent skills skill agent-server lsp acp info config doctor completion worktree rules migrate db resume help version"
 
     case "${prev}" in
         buckley)
@@ -1019,6 +1020,10 @@ func printBashCompletion() {
             COMPREPLY=( $(compgen -W "run" -- "${cur}") )
             return 0
             ;;
+        eval)
+            COMPREPLY=( $(compgen -W "init list run runs show artifacts" -- "${cur}") )
+            return 0
+            ;;
         completion)
             COMPREPLY=( $(compgen -W "bash zsh fish" -- "${cur}") )
             return 0
@@ -1055,6 +1060,7 @@ _buckley() {
         'commit:Create action-style commit'
         'pr:Create pull request'
         'experiment:Run model comparison experiments'
+        'eval:Run project chat eval scenarios'
         'serve:Start local server'
         'remote:Remote session management'
         'batch:Batch helpers (k8s/CI)'
@@ -1113,6 +1119,9 @@ _buckley() {
                 experiment)
                     _values 'experiment command' run
                     ;;
+                eval)
+                    _values 'eval command' init list run runs show artifacts
+                    ;;
                 config)
                     _values 'config command' check show path
                     ;;
@@ -1152,6 +1161,7 @@ complete -c buckley -n __fish_use_subcommand -a execute-task -d 'Execute single 
 complete -c buckley -n __fish_use_subcommand -a commit -d 'Create action-style commit'
 complete -c buckley -n __fish_use_subcommand -a pr -d 'Create pull request'
 complete -c buckley -n __fish_use_subcommand -a experiment -d 'Run model comparison experiments'
+complete -c buckley -n __fish_use_subcommand -a eval -d 'Run project chat eval scenarios'
 complete -c buckley -n __fish_use_subcommand -a serve -d 'Start local server'
 complete -c buckley -n __fish_use_subcommand -a remote -d 'Remote session management'
 complete -c buckley -n __fish_use_subcommand -a batch -d 'Batch helpers (k8s/CI)'
@@ -1216,6 +1226,14 @@ complete -c buckley -n '__fish_seen_subcommand_from doctor; and __fish_seen_subc
 # Experiment subcommands
 complete -c buckley -n '__fish_seen_subcommand_from experiment' -a run -d 'Run an experiment'
 
+# Eval subcommands
+complete -c buckley -n '__fish_seen_subcommand_from eval' -a init -d 'Create a project chat eval scenario'
+complete -c buckley -n '__fish_seen_subcommand_from eval' -a list -d 'List project chat eval scenarios'
+complete -c buckley -n '__fish_seen_subcommand_from eval' -a run -d 'Run project chat eval scenarios'
+complete -c buckley -n '__fish_seen_subcommand_from eval' -a runs -d 'List chat eval artifact runs'
+complete -c buckley -n '__fish_seen_subcommand_from eval' -a show -d 'Show a chat eval artifact run'
+complete -c buckley -n '__fish_seen_subcommand_from eval' -a artifacts -d 'List chat eval artifact runs'
+
 # Completion subcommands
 complete -c buckley -n '__fish_seen_subcommand_from completion' -a bash -d 'Generate bash completion'
 complete -c buckley -n '__fish_seen_subcommand_from completion' -a zsh -d 'Generate zsh completion'
@@ -1265,6 +1283,8 @@ func dispatchSubcommand(args []string) (bool, int) {
 		return true, runCommand(runReviewPRCommand, args[1:])
 	case "experiment":
 		return true, runCommand(runExperimentCommand, args[1:])
+	case "eval":
+		return true, runCommand(runEvalCommand, args[1:])
 	case "serve":
 		return true, runCommand(runServeCommand, args[1:])
 	case "migrate":
