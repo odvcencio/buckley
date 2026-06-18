@@ -359,6 +359,89 @@ subagents:
 	}
 }
 
+func TestRunAgentCommandInfoDefaultsToProject(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".buckley"), 0o755); err != nil {
+		t.Fatalf("mkdir project config: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".buckley", "agent.yaml"), []byte(`
+version: buckley.agent/v1
+name: daily
+summary: Daily driver profile
+models:
+  execution: root-model
+tools:
+  allow: [read_file]
+subagents:
+  - name: reviewer
+    model: review-model
+    tool_tier: read_only
+    instructions: Review changes before merge.
+`), 0o644); err != nil {
+		t.Fatalf("write agent spec: %v", err)
+	}
+	nested := filepath.Join(dir, "src")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatalf("mkdir nested: %v", err)
+	}
+	oldWd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(oldWd) })
+	if err := os.Chdir(nested); err != nil {
+		t.Fatalf("chdir nested: %v", err)
+	}
+
+	origInit := initDependenciesFn
+	t.Cleanup(func() { initDependenciesFn = origInit })
+	called := false
+	initDependenciesFn = func() (*config.Config, *model.Manager, *storage.Store, error) {
+		called = true
+		return nil, nil, nil, errors.New("dependency initialization should not run")
+	}
+
+	textOut := captureStdout(t, func() {
+		if err := runAgentCommand([]string{"info"}); err != nil {
+			t.Fatalf("runAgentCommand info: %v", err)
+		}
+	})
+	if called {
+		t.Fatal("agent info initialized dependencies")
+	}
+	for _, want := range []string{
+		"Agent info",
+		"Valid: true",
+		"Agent: daily",
+		"Summary: Daily driver profile",
+		"Runnable subagents:",
+		"reviewer: model=review-model",
+		"tool_tier=read_only",
+		"tools=read_file",
+		"invoke: buckley agent run --project reviewer <task>",
+	} {
+		if !strings.Contains(textOut, want) {
+			t.Fatalf("agent info output missing %q:\n%s", want, textOut)
+		}
+	}
+
+	jsonOut := captureStdout(t, func() {
+		if err := runAgentCommand([]string{"info", "--json"}); err != nil {
+			t.Fatalf("runAgentCommand info json: %v", err)
+		}
+	})
+	var snapshot agentInfoSnapshot
+	if err := json.Unmarshal([]byte(jsonOut), &snapshot); err != nil {
+		t.Fatalf("unmarshal agent info json: %v\n%s", err, jsonOut)
+	}
+	if !snapshot.Valid || snapshot.Spec == nil || snapshot.Spec.Name != "daily" || len(snapshot.Subagents) != 1 {
+		t.Fatalf("unexpected agent info snapshot: %+v", snapshot)
+	}
+	if snapshot.Subagents[0].Invoke != "buckley agent run --project reviewer <task>" {
+		t.Fatalf("unexpected invocation example: %+v", snapshot.Subagents[0])
+	}
+}
+
 func TestRunAgentCommandList(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(dir, ".buckley", "agents"), 0o755); err != nil {
