@@ -172,7 +172,27 @@ func TestWriteChatCheckArtifactsSuite(t *testing.T) {
 		},
 	}
 
-	runDir, err := writeChatCheckArtifacts(root, result, now)
+	artifactContext := doctorChatArtifactContext{
+		WorkDir:      "/repo",
+		ScenarioPath: "/repo/.buckley/chatchecks",
+		Project:      true,
+		ArtifactRoot: root,
+		Selector: doctorChatArtifactSelector{
+			IDs:          []string{"tools"},
+			Tags:         []string{"smoke"},
+			NameContains: []string{"no tools"},
+		},
+		ScenarioCount: 2,
+		Scenarios: []doctorChatScenarioSummary{
+			{Name: "tools/no-tools", Turns: 1, Model: "test-model"},
+			{Name: "tools/needs-token", Turns: 2, Model: "test-model"},
+		},
+		Git: &doctorChatArtifactGitContext{
+			Branch: "main",
+			SHA:    "abc123",
+		},
+	}
+	runDir, err := writeChatCheckArtifacts(root, result, now, artifactContext)
 	if err != nil {
 		t.Fatalf("writeChatCheckArtifacts: %v", err)
 	}
@@ -204,6 +224,21 @@ func TestWriteChatCheckArtifactsSuite(t *testing.T) {
 	if summary.Report != "report.json" || len(summary.Results) != 2 {
 		t.Fatalf("unexpected summary artifact: %+v", summary)
 	}
+	if summary.Artifacts.Summary != "summary.json" || summary.Artifacts.ResultsDir != "results" {
+		t.Fatalf("unexpected artifact locations: %+v", summary.Artifacts)
+	}
+	if summary.Context.WorkDir != "/repo" || summary.Context.ScenarioPath != "/repo/.buckley/chatchecks" || !summary.Context.Project {
+		t.Fatalf("summary context missing run source: %+v", summary.Context)
+	}
+	if summary.Context.ArtifactRoot != root || summary.Context.ScenarioCount != 2 || len(summary.Context.Scenarios) != 2 {
+		t.Fatalf("summary context missing scenario inventory: %+v", summary.Context)
+	}
+	if strings.Join(summary.Context.Selector.IDs, ",") != "tools" || strings.Join(summary.Context.Selector.Tags, ",") != "smoke" || strings.Join(summary.Context.Selector.NameContains, ",") != "no tools" {
+		t.Fatalf("summary context selector = %+v", summary.Context.Selector)
+	}
+	if summary.Context.Git == nil || summary.Context.Git.Branch != "main" || summary.Context.Git.SHA != "abc123" {
+		t.Fatalf("summary context git = %+v", summary.Context.Git)
+	}
 	if summary.Results[0].Path != "results/tools/no-tools.json" || summary.Results[1].Path != "results/tools/no-tools-2.json" {
 		t.Fatalf("unexpected result artifact paths: %+v", summary.Results)
 	}
@@ -211,6 +246,43 @@ func TestWriteChatCheckArtifactsSuite(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(runDir, filepath.FromSlash(path))); err != nil {
 			t.Fatalf("missing result artifact %s: %v", path, err)
 		}
+	}
+}
+
+func TestBuildDoctorChatArtifactContext(t *testing.T) {
+	context := buildDoctorChatArtifactContext(
+		"/repo",
+		"/repo/.buckley/chatchecks",
+		"/repo/.buckley/chatchecks/runs",
+		true,
+		chatcheck.ScenarioSelector{
+			IDs:          []string{"chat"},
+			Tags:         []string{"smoke"},
+			NameContains: []string{"continuity"},
+		},
+		[]chatcheck.Scenario{
+			chatcheck.NormalizeScenario(chatcheck.Scenario{
+				Name:      "chat/continuity",
+				Tags:      []string{"smoke"},
+				Model:     "test-model",
+				Timeout:   time.Second,
+				MaxTokens: 64,
+				Turns: []chatcheck.Turn{{
+					User:         "say READY",
+					WantContains: []string{"READY"},
+				}},
+			}),
+		},
+	)
+
+	if context.WorkDir != "/repo" || !context.Project || context.ArtifactRoot != "/repo/.buckley/chatchecks/runs" {
+		t.Fatalf("unexpected context: %+v", context)
+	}
+	if strings.Join(context.Selector.IDs, ",") != "chat" || strings.Join(context.Selector.Tags, ",") != "smoke" || strings.Join(context.Selector.NameContains, ",") != "continuity" {
+		t.Fatalf("unexpected selector: %+v", context.Selector)
+	}
+	if context.ScenarioCount != 1 || len(context.Scenarios) != 1 || context.Scenarios[0].Name != "chat/continuity" {
+		t.Fatalf("unexpected scenarios: %+v", context.Scenarios)
 	}
 }
 

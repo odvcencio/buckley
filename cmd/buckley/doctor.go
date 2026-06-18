@@ -127,7 +127,12 @@ func runDoctorChatCommand(args []string) error {
 	if *writeArtifacts {
 		var err error
 		artifactRoot := resolveChatCheckArtifactRoot(*artifactsDir, *projectScenarios, resolvedScenarioPath, flagWasSet(fs, "artifacts-dir"))
-		artifactRunDir, err = writeChatCheckArtifacts(artifactRoot, report, time.Now())
+		cwd, err := os.Getwd()
+		if err != nil {
+			return fmt.Errorf("get working directory: %w", err)
+		}
+		artifactContext := buildDoctorChatArtifactContext(cwd, resolvedScenarioPath, artifactRoot, *projectScenarios, selector, scenarios)
+		artifactRunDir, err = writeChatCheckArtifacts(artifactRoot, report, time.Now(), artifactContext)
 		if err != nil {
 			return err
 		}
@@ -243,9 +248,39 @@ type junitFailure struct {
 }
 
 type doctorChatArtifactsManifest struct {
-	GeneratedAt time.Time                 `json:"generated_at"`
-	Report      string                    `json:"report"`
-	Results     []doctorChatArtifactEntry `json:"results"`
+	GeneratedAt time.Time                  `json:"generated_at"`
+	Context     doctorChatArtifactContext  `json:"context"`
+	Report      string                     `json:"report"`
+	Results     []doctorChatArtifactEntry  `json:"results"`
+	Artifacts   doctorChatArtifactLocation `json:"artifacts"`
+}
+
+type doctorChatArtifactContext struct {
+	WorkDir       string                        `json:"workdir,omitempty"`
+	ScenarioPath  string                        `json:"scenario_path,omitempty"`
+	Project       bool                          `json:"project"`
+	ArtifactRoot  string                        `json:"artifact_root,omitempty"`
+	Selector      doctorChatArtifactSelector    `json:"selector"`
+	ScenarioCount int                           `json:"scenario_count"`
+	Scenarios     []doctorChatScenarioSummary   `json:"scenarios,omitempty"`
+	Git           *doctorChatArtifactGitContext `json:"git,omitempty"`
+}
+
+type doctorChatArtifactSelector struct {
+	IDs          []string `json:"ids,omitempty"`
+	Tags         []string `json:"tags,omitempty"`
+	NameContains []string `json:"name_contains,omitempty"`
+}
+
+type doctorChatArtifactGitContext struct {
+	Branch string `json:"branch,omitempty"`
+	SHA    string `json:"sha,omitempty"`
+}
+
+type doctorChatArtifactLocation struct {
+	Report     string `json:"report"`
+	Summary    string `json:"summary"`
+	ResultsDir string `json:"results_dir"`
 }
 
 type doctorChatArtifactEntry struct {
@@ -348,6 +383,38 @@ func buildDoctorChatScenarioInventory(scenarios []chatcheck.Scenario) doctorChat
 		inventory.Scenarios = append(inventory.Scenarios, summary)
 	}
 	return inventory
+}
+
+func buildDoctorChatArtifactContext(workDir, scenarioPath, artifactRoot string, project bool, selector chatcheck.ScenarioSelector, scenarios []chatcheck.Scenario) doctorChatArtifactContext {
+	inventory := buildDoctorChatScenarioInventory(scenarios)
+	return doctorChatArtifactContext{
+		WorkDir:      strings.TrimSpace(workDir),
+		ScenarioPath: strings.TrimSpace(scenarioPath),
+		Project:      project,
+		ArtifactRoot: strings.TrimSpace(artifactRoot),
+		Selector: doctorChatArtifactSelector{
+			IDs:          append([]string(nil), selector.IDs...),
+			Tags:         append([]string(nil), selector.Tags...),
+			NameContains: append([]string(nil), selector.NameContains...),
+		},
+		ScenarioCount: inventory.ScenarioCount,
+		Scenarios:     inventory.Scenarios,
+		Git:           resolveDoctorChatArtifactGitContext(),
+	}
+}
+
+func resolveDoctorChatArtifactGitContext() *doctorChatArtifactGitContext {
+	sha, _ := gitOutput("rev-parse", "HEAD")
+	branch, _ := gitOutput("rev-parse", "--abbrev-ref", "HEAD")
+	branch = strings.TrimSpace(branch)
+	if branch == "HEAD" {
+		branch = ""
+	}
+	sha = strings.TrimSpace(sha)
+	if branch == "" && sha == "" {
+		return nil
+	}
+	return &doctorChatArtifactGitContext{Branch: branch, SHA: sha}
 }
 
 type stringListFlag []string
@@ -584,7 +651,7 @@ func writeChatCheckJUnitReport(path string, report any) error {
 	return nil
 }
 
-func writeChatCheckArtifacts(root string, report any, now time.Time) (string, error) {
+func writeChatCheckArtifacts(root string, report any, now time.Time, artifactContext doctorChatArtifactContext) (string, error) {
 	if report == nil {
 		return "", nil
 	}
@@ -609,8 +676,17 @@ func writeChatCheckArtifacts(root string, report any, now time.Time) (string, er
 	}
 	manifest := doctorChatArtifactsManifest{
 		GeneratedAt: now.UTC(),
+		Context:     artifactContext,
 		Report:      "report.json",
 		Results:     make([]doctorChatArtifactEntry, 0, len(results)),
+		Artifacts: doctorChatArtifactLocation{
+			Report:     "report.json",
+			Summary:    "summary.json",
+			ResultsDir: "results",
+		},
+	}
+	if strings.TrimSpace(manifest.Context.ArtifactRoot) == "" {
+		manifest.Context.ArtifactRoot = root
 	}
 	seenResultPaths := map[string]int{}
 	for _, result := range results {
