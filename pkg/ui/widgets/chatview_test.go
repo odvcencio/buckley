@@ -68,6 +68,42 @@ func TestChatView_AddMessage_Assistant(t *testing.T) {
 	}
 }
 
+func TestChatView_BuildMessageLines_UserSeparatorAndPrefix(t *testing.T) {
+	cv := NewChatView()
+
+	userLines := cv.buildMessageLines("hello", "user")
+	if len(userLines) != 2 {
+		t.Fatalf("user lines = %d, want 2", len(userLines))
+	}
+	if userLines[0].Content != "" || userLines[0].Source != "user" {
+		t.Fatalf("user separator = %#v, want empty user line", userLines[0])
+	}
+	if got := spansText(userLines[1].Prefix); got != "▶ " {
+		t.Fatalf("user prefix = %q, want %q", got, "▶ ")
+	}
+}
+
+func TestChatView_BuildMessageLines_AssistantSeparator(t *testing.T) {
+	cv := NewChatView()
+
+	assistantLines := cv.buildMessageLines("hello", "assistant")
+	if len(assistantLines) != 2 {
+		t.Fatalf("assistant lines = %d, want 2", len(assistantLines))
+	}
+	if assistantLines[0].Content != "" || assistantLines[0].Source != "assistant" {
+		t.Fatalf("assistant separator = %#v, want empty assistant line", assistantLines[0])
+	}
+}
+
+func TestChatView_BuildMessageLines_SystemHasNoSeparator(t *testing.T) {
+	cv := NewChatView()
+
+	systemLines := cv.buildMessageLines("hello", "system")
+	if len(systemLines) != 1 {
+		t.Fatalf("system lines = %d, want 1", len(systemLines))
+	}
+}
+
 func TestChatView_AddMessage_Thinking(t *testing.T) {
 	cv := NewChatView()
 	cv.Layout(runtime.Rect{X: 0, Y: 0, Width: 80, Height: 24})

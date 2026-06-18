@@ -114,32 +114,50 @@ func (c *ChatView) AppendText(text string) {
 }
 
 func (c *ChatView) buildMessageLines(content, source string) []scrollback.Line {
-	var lines []scrollback.Line
-	if c.mdRenderer != nil {
-		lines = c.renderMarkdownLines(content, source)
-	} else {
-		lines = c.renderPlainLines(content, source)
-	}
-
-	if source == "user" || source == "assistant" {
-		lines = append([]scrollback.Line{{Content: "", Source: source}}, lines...)
-	}
-
-	if len(lines) == 0 {
-		lines = []scrollback.Line{{Content: "", Source: source}}
-	}
-
-	if source == "user" {
-		prefix := []scrollback.Span{{Text: "▶ ", Style: c.userStyle.Bold(true)}}
-		for i := range lines {
-			if i == 0 && lines[i].Content == "" {
-				continue
-			}
-			lines[i].Prefix = prependPrefix(lines[i].Prefix, prefix)
-		}
-	}
-
+	lines := c.messageBodyLines(content, source)
+	lines = prependConversationSeparator(lines, source)
+	lines = ensureMessageLines(lines, source)
+	c.applyUserPromptPrefix(lines, source)
 	return lines
+}
+
+func (c *ChatView) messageBodyLines(content, source string) []scrollback.Line {
+	if c.mdRenderer != nil {
+		return c.renderMarkdownLines(content, source)
+	}
+	return c.renderPlainLines(content, source)
+}
+
+func prependConversationSeparator(lines []scrollback.Line, source string) []scrollback.Line {
+	if !isConversationSource(source) {
+		return lines
+	}
+	return append([]scrollback.Line{{Content: "", Source: source}}, lines...)
+}
+
+func isConversationSource(source string) bool {
+	return source == "user" || source == "assistant"
+}
+
+func ensureMessageLines(lines []scrollback.Line, source string) []scrollback.Line {
+	if len(lines) == 0 {
+		return []scrollback.Line{{Content: "", Source: source}}
+	}
+	return lines
+}
+
+func (c *ChatView) applyUserPromptPrefix(lines []scrollback.Line, source string) {
+	if source != "user" {
+		return
+	}
+
+	prefix := []scrollback.Span{{Text: "▶ ", Style: c.userStyle.Bold(true)}}
+	for idx := range lines {
+		if idx == 0 && lines[idx].Content == "" {
+			continue
+		}
+		lines[idx].Prefix = prependPrefix(lines[idx].Prefix, prefix)
+	}
 }
 
 func (c *ChatView) renderPlainLines(content, source string) []scrollback.Line {
