@@ -672,7 +672,7 @@ func printHelp() {
 	fmt.Println("  hunt [--dir path]                Scan codebase for improvement suggestions")
 	fmt.Println("  dream [--dir path] [--plan]      Analyze architecture and identify gaps")
 	fmt.Println("  info [--json|--format json]      Inspect resolved harness configuration and capabilities")
-	fmt.Println("  skills [list|show]               List or inspect loaded workflow skills")
+	fmt.Println("  skills [init|list|show]          Create, list, or inspect workflow skills")
 	fmt.Println("  config [check|show|path]         Manage configuration")
 	fmt.Println("  trust [status|allow|deny|reset]  Inspect or change project trust")
 	fmt.Println("  doctor [chat]                    Quick system health and chat checks")
@@ -994,7 +994,7 @@ func printBashCompletion() {
             return 0
             ;;
         skills|skill)
-            COMPREPLY=( $(compgen -W "list show" -- "${cur}") )
+            COMPREPLY=( $(compgen -W "init list show" -- "${cur}") )
             return 0
             ;;
         config)
@@ -1098,7 +1098,7 @@ _buckley() {
                     _values 'agent command' init list check show run invoke
                     ;;
                 skills|skill)
-                    _values 'skills command' list show
+                    _values 'skills command' init list show
                     ;;
                 experiment)
                     _values 'experiment command' run
@@ -1183,6 +1183,7 @@ complete -c buckley -n '__fish_seen_subcommand_from agent' -a run -d 'Invoke a n
 complete -c buckley -n '__fish_seen_subcommand_from agent' -a invoke -d 'Invoke a named subagent'
 
 # Skills subcommands
+complete -c buckley -n '__fish_seen_subcommand_from skills skill' -a init -d 'Create a project workflow skill'
 complete -c buckley -n '__fish_seen_subcommand_from skills skill' -a list -d 'List loaded workflow skills'
 complete -c buckley -n '__fish_seen_subcommand_from skills skill' -a show -d 'Inspect a loaded workflow skill'
 

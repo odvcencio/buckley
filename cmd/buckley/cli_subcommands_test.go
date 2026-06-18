@@ -403,6 +403,116 @@ Inspect the current state before editing.
 	}
 }
 
+func TestRunSkillsCommandInitCreatesAgentSkill(t *testing.T) {
+	dir := t.TempDir()
+	oldWd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(oldWd) })
+	if err := os.Chdir(dir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+
+	out := captureStdout(t, func() {
+		if err := runSkillsCommand([]string{
+			"init",
+			"--description", "Use when preparing releases.",
+			"--allowed-tools", "read_file, search_text",
+			"release-checklist",
+		}); err != nil {
+			t.Fatalf("runSkillsCommand init: %v", err)
+		}
+	})
+	for _, want := range []string{"Created agent skill release-checklist", "agent/skills/release-checklist/", "agent/skills/release-checklist/SKILL.md", "Next: buckley skills show release-checklist"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("skills init output missing %q:\n%s", want, out)
+		}
+	}
+	skillPath := filepath.Join(dir, "agent", "skills", "release-checklist", "SKILL.md")
+	data, err := os.ReadFile(skillPath)
+	if err != nil {
+		t.Fatalf("read generated skill: %v", err)
+	}
+	for _, want := range []string{`description: "Use when preparing releases."`, `  - "read_file"`, `  - "search_text"`, "# Release Checklist"} {
+		if !strings.Contains(string(data), want) {
+			t.Fatalf("generated skill missing %q:\n%s", want, string(data))
+		}
+	}
+
+	nested := filepath.Join(dir, "src", "feature")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatalf("mkdir nested: %v", err)
+	}
+	if err := os.Chdir(nested); err != nil {
+		t.Fatalf("chdir nested: %v", err)
+	}
+	listOut := captureStdout(t, func() {
+		if err := runSkillsCommand([]string{"list", "--source", "agent"}); err != nil {
+			t.Fatalf("runSkillsCommand list generated: %v", err)
+		}
+	})
+	for _, want := range []string{"Skills: 1", "release-checklist [agent]", "Use when preparing releases.", "allowed_tools=read_file,search_text"} {
+		if !strings.Contains(listOut, want) {
+			t.Fatalf("skills list generated output missing %q:\n%s", want, listOut)
+		}
+	}
+	showOut := captureStdout(t, func() {
+		if err := runSkillsCommand([]string{"show", "release-checklist"}); err != nil {
+			t.Fatalf("runSkillsCommand show generated: %v", err)
+		}
+	})
+	if !strings.Contains(showOut, "Skill: release-checklist") || !strings.Contains(showOut, "Allowed tools: read_file, search_text") {
+		t.Fatalf("skills show generated output unexpected:\n%s", showOut)
+	}
+
+	custom := "custom skill body\n"
+	if err := os.WriteFile(skillPath, []byte(custom), 0o644); err != nil {
+		t.Fatalf("write custom skill: %v", err)
+	}
+	if err := runSkillsCommand([]string{"init", "--path", dir, "--description", "Replacement workflow.", "release-checklist"}); err != nil {
+		t.Fatalf("rerun skills init: %v", err)
+	}
+	data, err = os.ReadFile(skillPath)
+	if err != nil {
+		t.Fatalf("read preserved skill: %v", err)
+	}
+	if string(data) != custom {
+		t.Fatalf("skills init should preserve existing skill, got:\n%s", string(data))
+	}
+	if err := runSkillsCommand([]string{"init", "--path", dir, "--force", "--description", "Replacement workflow.", "release-checklist"}); err != nil {
+		t.Fatalf("force skills init: %v", err)
+	}
+	data, err = os.ReadFile(skillPath)
+	if err != nil {
+		t.Fatalf("read overwritten skill: %v", err)
+	}
+	if string(data) == custom || !strings.Contains(string(data), "Replacement workflow.") {
+		t.Fatalf("skills init --force should overwrite skill, got:\n%s", string(data))
+	}
+
+	dryDir := filepath.Join(dir, "dry")
+	jsonOut := captureStdout(t, func() {
+		if err := runSkillsCommand([]string{"init", "--dry-run", "--json", "--path", dryDir, "nested/triage"}); err != nil {
+			t.Fatalf("runSkillsCommand init dry-run: %v", err)
+		}
+	})
+	var result skillsInitResult
+	if err := json.Unmarshal([]byte(jsonOut), &result); err != nil {
+		t.Fatalf("unmarshal skills init json: %v\n%s", err, jsonOut)
+	}
+	if !result.DryRun || result.Name != "nested/triage" || !strings.HasSuffix(result.Path, filepath.Join("agent", "skills", "nested", "triage", "SKILL.md")) {
+		t.Fatalf("unexpected skills init dry-run result: %+v", result)
+	}
+	if _, err := os.Stat(filepath.Join(dryDir, "agent")); !os.IsNotExist(err) {
+		t.Fatalf("dry-run should not create agent dir, stat err=%v", err)
+	}
+
+	if err := runSkillsCommand([]string{"init", "../escape"}); err == nil {
+		t.Fatalf("expected invalid skill name error")
+	}
+}
+
 func TestRunAgentCommandInvalidSpec(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "agent.yaml")
