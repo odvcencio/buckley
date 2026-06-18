@@ -303,6 +303,53 @@ func TestApprovalWidget_WithDiff(t *testing.T) {
 	}
 }
 
+func TestApprovalWidget_DrawDiffPreview_UnicodeTruncatesByRune(t *testing.T) {
+	req := ApprovalRequest{
+		ID:   "unicode-diff",
+		Tool: "write_file",
+		DiffLines: []DiffLine{
+			{Type: DiffAdd, Content: "模型文件路径超长"},
+		},
+	}
+	w := NewApprovalWidget(req)
+
+	buf := runtime.NewBuffer(12, 4)
+	endY := w.drawDiffPreview(buf, 0, 0, 10, 3)
+
+	if endY != 3 {
+		t.Fatalf("endY = %d, want 3", endY)
+	}
+	if got := readBufferRunes(buf, 1, 1, 7); got != "+ 模型文件路" {
+		t.Fatalf("diff content = %q, want %q", got, "+ 模型文件路")
+	}
+	if got := buf.Get(9, 1).Rune; got != '│' {
+		t.Fatalf("right border = %q, want %q", got, '│')
+	}
+}
+
+func TestApprovalWidget_DiffViewport_ClampsScroll(t *testing.T) {
+	req := ApprovalRequest{
+		ID:   "diff-scroll-clamp",
+		Tool: "write_file",
+		DiffLines: []DiffLine{
+			{Type: DiffContext, Content: "one"},
+			{Type: DiffContext, Content: "two"},
+			{Type: DiffContext, Content: "three"},
+			{Type: DiffContext, Content: "four"},
+		},
+	}
+	w := NewApprovalWidget(req)
+	w.scrollOffset = 10
+
+	viewport := w.diffViewport(2)
+	if viewport.start != 2 {
+		t.Fatalf("viewport.start = %d, want 2", viewport.start)
+	}
+	if viewport.visibleLines != 2 {
+		t.Fatalf("viewport.visibleLines = %d, want 2", viewport.visibleLines)
+	}
+}
+
 func TestFormatDiffSummary(t *testing.T) {
 	tests := []struct {
 		added    int

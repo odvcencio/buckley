@@ -148,7 +148,7 @@ func (a *ApprovalWidget) Render(ctx runtime.RenderContext) {
 
 	// Draw warning title
 	title := " Approval Required "
-	titleX := b.X + (b.Width-len(title))/2
+	titleX := b.X + (b.Width-runeLen(title))/2
 	ctx.Buffer.SetString(titleX, b.Y, title, a.titleStyle)
 
 	y := b.Y + 2
@@ -156,22 +156,18 @@ func (a *ApprovalWidget) Render(ctx runtime.RenderContext) {
 	// Draw tool and operation info
 	toolLabel := "Tool: "
 	ctx.Buffer.SetString(b.X+2, y, toolLabel, a.labelStyle)
-	ctx.Buffer.SetString(b.X+2+len(toolLabel), y, a.request.Tool, a.textStyle)
+	ctx.Buffer.SetString(b.X+2+runeLen(toolLabel), y, a.request.Tool, a.textStyle)
 	y++
 
 	opLabel := "Operation: "
 	ctx.Buffer.SetString(b.X+2, y, opLabel, a.labelStyle)
-	ctx.Buffer.SetString(b.X+2+len(opLabel), y, a.request.Operation, a.textStyle)
+	ctx.Buffer.SetString(b.X+2+runeLen(opLabel), y, a.request.Operation, a.textStyle)
 	y++
 
 	// Draw description if present
 	if a.request.Description != "" {
 		y++
-		desc := a.request.Description
-		maxLen := b.Width - 4
-		if len(desc) > maxLen {
-			desc = desc[:maxLen-3] + "..."
-		}
+		desc := truncateString(a.request.Description, b.Width-4)
 		ctx.Buffer.SetString(b.X+2, y, desc, a.textStyle)
 		y++
 	}
@@ -190,7 +186,8 @@ func (a *ApprovalWidget) Render(ctx runtime.RenderContext) {
 		y++
 		fileLabel := "File: "
 		ctx.Buffer.SetString(b.X+2, y, fileLabel, a.labelStyle)
-		ctx.Buffer.SetString(b.X+2+len(fileLabel), y, a.request.FilePath, a.textStyle)
+		filePath := truncateString(a.request.FilePath, b.Width-4-runeLen(fileLabel))
+		ctx.Buffer.SetString(b.X+2+runeLen(fileLabel), y, filePath, a.textStyle)
 		y++
 		y++
 		ctx.Buffer.SetString(b.X+2, y, "Changes:", a.labelStyle)
@@ -230,105 +227,106 @@ func (a *ApprovalWidget) drawBorder(buf *runtime.Buffer, b runtime.Rect) {
 
 // drawCommandBox draws a command in a styled box.
 func (a *ApprovalWidget) drawCommandBox(buf *runtime.Buffer, x, y, width int, cmd string) {
-	// Top border
-	buf.Set(x, y, '┌', a.borderStyle)
-	for i := 1; i < width-1; i++ {
-		buf.Set(x+i, y, '─', a.borderStyle)
-	}
-	buf.Set(x+width-1, y, '┐', a.borderStyle)
+	a.drawBoxEdge(buf, x, y, width, '┌', '┐')
 
 	// Command content (truncate if needed)
 	y++
 	buf.Set(x, y, '│', a.borderStyle)
-	cmdDisplay := cmd
-	maxCmd := width - 4
-	if len(cmdDisplay) > maxCmd {
-		cmdDisplay = cmdDisplay[:maxCmd-3] + "..."
-	}
+	cmdDisplay := truncateString(cmd, width-4)
 	buf.SetString(x+2, y, cmdDisplay, a.commandStyle)
 	buf.Set(x+width-1, y, '│', a.borderStyle)
 
-	// Bottom border
 	y++
-	buf.Set(x, y, '└', a.borderStyle)
-	for i := 1; i < width-1; i++ {
-		buf.Set(x+i, y, '─', a.borderStyle)
-	}
-	buf.Set(x+width-1, y, '┘', a.borderStyle)
+	a.drawBoxEdge(buf, x, y, width, '└', '┘')
 }
 
 // drawDiffPreview renders the diff lines in a scrollable area.
 func (a *ApprovalWidget) drawDiffPreview(buf *runtime.Buffer, x, y, width, maxLines int) int {
-	if maxLines <= 0 {
+	if maxLines < 2 || width < 3 {
 		return y
 	}
 
-	// Top border
-	buf.Set(x, y, '┌', a.borderStyle)
-	for i := 1; i < width-1; i++ {
-		buf.Set(x+i, y, '─', a.borderStyle)
-	}
-	buf.Set(x+width-1, y, '┐', a.borderStyle)
+	a.drawBoxEdge(buf, x, y, width, '┌', '┐')
 	y++
 
-	// Draw visible lines
-	visibleLines := maxLines - 2 // Account for borders
-	if visibleLines > len(a.request.DiffLines) {
-		visibleLines = len(a.request.DiffLines)
-	}
-
-	startIdx := a.scrollOffset
-	if startIdx+visibleLines > len(a.request.DiffLines) {
-		startIdx = len(a.request.DiffLines) - visibleLines
-		if startIdx < 0 {
-			startIdx = 0
-		}
-	}
-
-	for i := 0; i < visibleLines; i++ {
-		lineIdx := startIdx + i
+	viewport := a.diffViewport(maxLines - 2)
+	for i := 0; i < viewport.visibleLines; i++ {
+		lineIdx := viewport.start + i
 		if lineIdx >= len(a.request.DiffLines) {
 			break
 		}
-
-		line := a.request.DiffLines[lineIdx]
-		buf.Set(x, y, '│', a.borderStyle)
-
-		// Determine prefix and style
-		var prefix string
-		var style backend.Style
-		switch line.Type {
-		case DiffAdd:
-			prefix = "+ "
-			style = a.addStyle
-		case DiffRemove:
-			prefix = "- "
-			style = a.removeStyle
-		default:
-			prefix = "  "
-			style = a.contextStyle
-		}
-
-		// Draw line content
-		content := prefix + line.Content
-		maxContent := width - 3
-		if len(content) > maxContent {
-			content = content[:maxContent]
-		}
-		buf.SetString(x+1, y, content, style)
-		buf.Set(x+width-1, y, '│', a.borderStyle)
+		a.drawDiffLine(buf, x, y, width, a.request.DiffLines[lineIdx])
 		y++
 	}
 
-	// Bottom border
-	buf.Set(x, y, '└', a.borderStyle)
-	for i := 1; i < width-1; i++ {
-		buf.Set(x+i, y, '─', a.borderStyle)
-	}
-	buf.Set(x+width-1, y, '┘', a.borderStyle)
+	a.drawBoxEdge(buf, x, y, width, '└', '┘')
 	y++
 
 	return y
+}
+
+type diffViewport struct {
+	start        int
+	visibleLines int
+}
+
+func (a *ApprovalWidget) diffViewport(maxVisible int) diffViewport {
+	visible := maxVisible
+	if visible > len(a.request.DiffLines) {
+		visible = len(a.request.DiffLines)
+	}
+	if visible < 0 {
+		visible = 0
+	}
+
+	start := a.scrollOffset
+	if start+visible > len(a.request.DiffLines) {
+		start = len(a.request.DiffLines) - visible
+	}
+	if start < 0 {
+		start = 0
+	}
+
+	return diffViewport{start: start, visibleLines: visible}
+}
+
+func (a *ApprovalWidget) drawDiffLine(buf *runtime.Buffer, x, y, width int, line DiffLine) {
+	prefix, style := a.diffLinePrefixAndStyle(line.Type)
+	content := truncateRunes(prefix+line.Content, width-3)
+
+	buf.Set(x, y, '│', a.borderStyle)
+	buf.SetString(x+1, y, content, style)
+	buf.Set(x+width-1, y, '│', a.borderStyle)
+}
+
+func (a *ApprovalWidget) diffLinePrefixAndStyle(lineType DiffLineType) (string, backend.Style) {
+	switch lineType {
+	case DiffAdd:
+		return "+ ", a.addStyle
+	case DiffRemove:
+		return "- ", a.removeStyle
+	default:
+		return "  ", a.contextStyle
+	}
+}
+
+func (a *ApprovalWidget) drawBoxEdge(buf *runtime.Buffer, x, y, width int, left, right rune) {
+	buf.Set(x, y, left, a.borderStyle)
+	for i := 1; i < width-1; i++ {
+		buf.Set(x+i, y, '─', a.borderStyle)
+	}
+	buf.Set(x+width-1, y, right, a.borderStyle)
+}
+
+func truncateRunes(value string, maxWidth int) string {
+	if maxWidth <= 0 {
+		return ""
+	}
+	runes := []rune(value)
+	if len(runes) <= maxWidth {
+		return value
+	}
+	return string(runes[:maxWidth])
 }
 
 // drawButtons renders the action buttons at the bottom.
@@ -336,15 +334,17 @@ func (a *ApprovalWidget) drawButtons(buf *runtime.Buffer, b runtime.Rect) {
 	y := b.Y + b.Height - 2
 
 	buttons := "[A]llow    [D]eny    A[l]ways allow"
-	x := b.X + (b.Width-len(buttons))/2
+	x := b.X + (b.Width-runeLen(buttons))/2
 
 	// Draw with highlights on key letters
-	for i, ch := range buttons {
+	col := 0
+	for _, ch := range buttons {
 		style := a.buttonStyle
 		if ch == 'A' || ch == 'D' || ch == 'l' {
 			style = a.buttonHlStyle
 		}
-		buf.Set(x+i, y, ch, style)
+		buf.Set(x+col, y, ch, style)
+		col++
 	}
 }
 
