@@ -5,19 +5,23 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"strings"
 	"time"
 
-	"m31labs.dev/buckley/pkg/model"
 	"m31labs.dev/buckley/pkg/oneshot"
 	"m31labs.dev/buckley/pkg/oneshot/commands"
 	"m31labs.dev/buckley/pkg/terminal"
-	"m31labs.dev/buckley/pkg/tool"
-	"m31labs.dev/buckley/pkg/transparency"
 )
 
-// runReviewPRCommand reviews a remote PR using gh CLI integration.
-func runReviewPRCommand(args []string) error {
+type reviewPRCommandOptions struct {
+	verbose    bool
+	showCost   bool
+	model      string
+	timeout    time.Duration
+	outputFile string
+	prRef      string
+}
+
+func parseReviewPRCommandOptions(args []string) (reviewPRCommandOptions, error) {
 	fs := flag.NewFlagSet("review-pr", flag.ContinueOnError)
 	verbose := fs.Bool("verbose", false, "show full context and reasoning")
 	showCost := fs.Bool("cost", true, "show token/cost breakdown")
@@ -26,22 +30,40 @@ func runReviewPRCommand(args []string) error {
 	outputFile := fs.String("output", "", "write review to file instead of stdout")
 
 	if err := fs.Parse(args); err != nil {
-		return err
+		return reviewPRCommandOptions{}, err
 	}
 
-	// Get PR identifier (number or URL)
 	prArg := ""
 	if fs.NArg() > 0 {
 		prArg = fs.Arg(0)
 	}
 	if prArg == "" {
-		return fmt.Errorf("usage: buckley review-pr <pr-number-or-url>\n\nExamples:\n  buckley review-pr 123\n  buckley review-pr https://github.com/owner/repo/pull/123")
+		return reviewPRCommandOptions{}, reviewPRUsageError()
+	}
+	return reviewPRCommandOptions{
+		verbose:    *verbose,
+		showCost:   *showCost,
+		model:      *modelFlag,
+		timeout:    *timeout,
+		outputFile: *outputFile,
+		prRef:      prArg,
+	}, nil
+}
+
+func reviewPRUsageError() error {
+	return fmt.Errorf("usage: buckley review-pr <pr-number-or-url>\n\nExamples:\n  buckley review-pr 123\n  buckley review-pr https://github.com/owner/repo/pull/123")
+}
+
+// runReviewPRCommand reviews a remote PR using gh CLI integration.
+func runReviewPRCommand(args []string) error {
+	opts, err := parseReviewPRCommandOptions(args)
+	if err != nil {
+		return err
 	}
 
-	restoreModelOverride := applyCommandModelOverride(*modelFlag)
+	restoreModelOverride := applyCommandModelOverride(opts.model)
 	defer restoreModelOverride()
 
-	// Initialize dependencies
 	cfg, mgr, store, err := initDependenciesFn()
 	if store != nil {
 		defer store.Close()
@@ -50,64 +72,53 @@ func runReviewPRCommand(args []string) error {
 		return fmt.Errorf("init dependencies: %w", err)
 	}
 
-	// Determine model
-	modelID := strings.TrimSpace(modelOverrideFlag)
-	if modelID == "" {
-		modelID = normalizeModelIDWithReasoning(cfg, os.Getenv("BUCKLEY_MODEL_REVIEW"))
-	}
-	if modelID == "" && cfg != nil {
-		modelID = cfg.Models.Review
-	}
-	if modelID == "" && cfg != nil {
-		modelID = cfg.Models.Execution
-	}
-	if modelID == "" {
+	runtime, err := newReviewCommandRuntime(cfg, mgr)
+	if err != nil {
 		return fmt.Errorf("no model configured (set BUCKLEY_MODEL_REVIEW or configure models.review)")
 	}
-	reasoningEffort := model.ResolveReasoningEffort(cfg, mgr, nil, modelID, "review")
 
-	// Create cost ledger
-	ledger := transparency.NewCostLedger()
-
-	// Create tool registry for full RLM access
-	registry := tool.NewRegistry()
-	if cwd, err := os.Getwd(); err == nil {
-		registry.ConfigureContainers(cfg, cwd)
-	}
-
-	// Create RLM runner for the framework
-	rlmRunner := oneshot.NewRLMRunner(oneshot.RLMRunnerConfig{
-		Models:          mgr,
-		Registry:        registry,
-		Ledger:          ledger,
-		ModelID:         modelID,
-		ReasoningEffort: reasoningEffort,
-	})
-
-	// Create unified framework with RLM support
-	framework := oneshot.NewFramework(nil, nil).WithRLMRunner(rlmRunner)
-
-	// Run with timeout
-	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+	ctx, cancel := context.WithTimeout(context.Background(), opts.timeout)
 	defer cancel()
 
-	// Show what we're doing
 	if !quietMode {
-		termOut.Dim("Using model: %s", modelID)
-		termOut.Dim("Reviewing PR: %s", prArg)
+		termOut.Dim("Using model: %s", runtime.modelID)
+		termOut.Dim("Reviewing PR: %s", opts.prRef)
 	}
 
+	result, prInfo, err := runPRReview(ctx, opts.prRef, runtime.framework)
+	if err != nil {
+		return err
+	}
+
+	if opts.verbose && result.contextAudit != nil {
+		printReviewContextAudit(result.contextAudit)
+	}
+
+	if result.reviewText == "" {
+		return fmt.Errorf("no review generated")
+	}
+
+	if err := writePRReviewOutput(opts.outputFile, result.reviewText, prInfo); err != nil {
+		return err
+	}
+
+	if opts.showCost && result.trace != nil {
+		printReviewCost(result.trace, runtime.ledger)
+	}
+
+	return nil
+}
+
+func runPRReview(ctx context.Context, prRef string, framework *oneshot.Framework) (*reviewCommandResult, *commands.PRInfo, error) {
 	spinner := terminal.NewSpinner("Fetching PR details...")
 	spinner.Start()
 
-	// Assemble PR context
-	prCtx, audit, err := commands.AssemblePRContext(prArg)
+	prCtx, audit, err := commands.AssemblePRContext(prRef)
 	if err != nil {
 		spinner.StopWithError(err.Error())
-		return fmt.Errorf("assemble PR context: %w", err)
+		return nil, nil, fmt.Errorf("assemble PR context: %w", err)
 	}
 
-	// Build prompt and run through framework
 	userPrompt := commands.BuildPRPrompt(prCtx)
 	fwResult, runErr := framework.RunRLM(ctx, commands.ReviewPRDef{}, oneshot.RLMRunOpts{
 		UserPrompt: userPrompt,
@@ -116,41 +127,22 @@ func runReviewPRCommand(args []string) error {
 
 	if runErr != nil {
 		spinner.StopWithError(runErr.Error())
-		return fmt.Errorf("review failed: %w", runErr)
+		return nil, prCtx.PR, fmt.Errorf("review failed: %w", runErr)
 	}
 
 	spinner.StopWithSuccess("PR review complete")
+	return reviewResultFromRLM(fwResult, audit), prCtx.PR, nil
+}
 
-	var reviewText string
-	if rlmResult, ok := fwResult.Value.(*commands.ReviewRLMResult); ok {
-		reviewText = rlmResult.Review
-	}
-
-	// Show context audit if verbose
-	if *verbose && audit != nil {
-		printReviewContextAudit(audit)
-	}
-
-	// Output review
-	if reviewText == "" {
-		return fmt.Errorf("no review generated")
-	}
-
-	// Write to file or stdout
-	if *outputFile != "" {
-		if err := os.WriteFile(*outputFile, []byte(reviewText), 0o644); err != nil {
+func writePRReviewOutput(outputFile, reviewText string, prInfo *commands.PRInfo) error {
+	if outputFile != "" {
+		if err := os.WriteFile(outputFile, []byte(reviewText), 0o644); err != nil {
 			return fmt.Errorf("failed to write output file: %w", err)
 		}
-		termOut.Success("Review written to %s", *outputFile)
-	} else {
-		printPRReview(reviewText, prCtx.PR)
+		termOut.Success("Review written to %s", outputFile)
+		return nil
 	}
-
-	// Show cost
-	if *showCost && fwResult.Trace != nil {
-		printReviewCost(fwResult.Trace, ledger)
-	}
-
+	printPRReview(reviewText, prInfo)
 	return nil
 }
 
