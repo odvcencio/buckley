@@ -110,12 +110,13 @@ type agentSubagentsSnapshot struct {
 }
 
 type agentInfoSnapshot struct {
-	Source      string                 `json:"source,omitempty"`
-	Project     bool                   `json:"project,omitempty"`
-	Spec        *agentspec.Spec        `json:"spec,omitempty"`
-	Valid       bool                   `json:"valid"`
-	Diagnostics []agentspec.Diagnostic `json:"diagnostics,omitempty"`
-	Subagents   []agentSubagentSummary `json:"subagents,omitempty"`
+	Source      string                     `json:"source,omitempty"`
+	Project     bool                       `json:"project,omitempty"`
+	Spec        *agentspec.Spec            `json:"spec,omitempty"`
+	Valid       bool                       `json:"valid"`
+	Diagnostics []agentspec.Diagnostic     `json:"diagnostics,omitempty"`
+	Slots       []agentspec.FilesystemSlot `json:"slots,omitempty"`
+	Subagents   []agentSubagentSummary     `json:"subagents,omitempty"`
 }
 
 type agentSubagentSummary struct {
@@ -269,6 +270,9 @@ func printAgentListText(w io.Writer, snapshot agentListSnapshot) {
 			fmt.Fprintf(w, ", error=%s", spec.Error)
 		}
 		fmt.Fprintln(w)
+		if slots := formatAgentFilesystemSlots(spec.Slots); slots != "" {
+			fmt.Fprintf(w, "    slots: %s\n", slots)
+		}
 		printAgentListDiagnostics(w, spec.Diagnostics)
 	}
 }
@@ -333,6 +337,18 @@ func buildAgentInfoSnapshot(path string, project bool, selector string) (agentIn
 		Spec:        spec,
 		Valid:       !hasAgentSpecErrors(diagnostics),
 		Diagnostics: diagnostics,
+	}
+	if info, err := os.Stat(path); err == nil && info.IsDir() {
+		surface, err := agentspec.InspectFilesystemSurface(path)
+		if err != nil {
+			snapshot.Diagnostics = append(snapshot.Diagnostics, agentspec.Diagnostic{
+				Severity: agentspec.SeverityWarning,
+				Path:     "layout",
+				Message:  fmt.Sprintf("could not inspect filesystem slots: %v", err),
+			})
+		} else {
+			snapshot.Slots = surface.Slots
+		}
 	}
 	if snapshot.Valid {
 		profile, err := agentspec.LoadRuntimeProfile(path)
@@ -448,6 +464,10 @@ func printAgentInfoText(w io.Writer, snapshot agentInfoSnapshot) {
 	}
 	fmt.Fprintf(w, "Valid: %t\n\n", snapshot.Valid)
 	fmt.Fprint(w, agentspec.RenderText(snapshot.Spec, snapshot.Diagnostics))
+	if slots := formatAgentFilesystemSlots(snapshot.Slots); slots != "" {
+		fmt.Fprintln(w)
+		fmt.Fprintf(w, "Filesystem slots: %s\n", slots)
+	}
 	if len(snapshot.Subagents) == 0 {
 		return
 	}
@@ -475,6 +495,38 @@ func printAgentInfoText(w io.Writer, snapshot agentInfoSnapshot) {
 		}
 		fmt.Fprintln(w)
 	}
+}
+
+func formatAgentFilesystemSlots(slots []agentspec.FilesystemSlot) string {
+	if len(slots) == 0 {
+		return ""
+	}
+	supported := []string{}
+	unsupported := []string{}
+	for _, slot := range slots {
+		item := strings.TrimSpace(slot.Name)
+		if item == "" {
+			continue
+		}
+		if slot.Count > 0 {
+			item = fmt.Sprintf("%s=%d", item, slot.Count)
+		}
+		if slot.Supported {
+			supported = append(supported, item)
+		} else {
+			unsupported = append(unsupported, item)
+		}
+	}
+	sort.Strings(supported)
+	sort.Strings(unsupported)
+	parts := []string{}
+	if len(supported) > 0 {
+		parts = append(parts, strings.Join(supported, ", "))
+	}
+	if len(unsupported) > 0 {
+		parts = append(parts, "unsupported: "+strings.Join(unsupported, ", "))
+	}
+	return strings.Join(parts, "; ")
 }
 
 func initFilesystemAgentLayout(target string, force, dryRun bool) (agentInitResult, error) {
@@ -508,6 +560,7 @@ func initFilesystemAgentLayout(target string, force, dryRun bool) (agentInitResu
 		{path: filepath.Join(result.AgentDir, "instructions.md"), content: defaultAgentInstructions(), force: force},
 		{path: filepath.Join(result.AgentDir, "skills"), dir: true},
 		{path: filepath.Join(result.AgentDir, "subagents"), dir: true},
+		{path: filepath.Join(root, projectEvalScenarioDir), dir: true},
 	}
 	for _, item := range paths {
 		created, existing, err := ensureAgentInitPath(item.path, item.content, item.dir, item.force, dryRun)

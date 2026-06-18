@@ -14,6 +14,7 @@ func TestDiscoverProjectSpecsFindsFilesystemAgentLayout(t *testing.T) {
 	writeFilesystemFile(t, filepath.Join(root, "agent", "skills", "forecast.md"), "Forecast carefully.")
 	writeFilesystemFile(t, filepath.Join(root, "agent", "tools", "get_weather.ts"), "export default {}")
 	writeFilesystemFile(t, filepath.Join(root, "agent", "subagents", "researcher", "instructions.md"), "Research before answering.")
+	writeFilesystemFile(t, filepath.Join(root, "evals", "weather", "smoke.yaml"), "name: weather/smoke")
 	nested := filepath.Join(root, "src", "feature")
 	if err := os.MkdirAll(nested, 0o755); err != nil {
 		t.Fatalf("mkdir nested: %v", err)
@@ -39,6 +40,12 @@ func TestDiscoverProjectSpecsFindsFilesystemAgentLayout(t *testing.T) {
 	if strings.Join(spec.Subagents, ",") != "agent,researcher" {
 		t.Fatalf("subagents=%v", spec.Subagents)
 	}
+	if slot, ok := findFilesystemSlot(spec.Slots, "evals"); !ok || !slot.Supported || slot.Count != 1 {
+		t.Fatalf("evals slot=%+v ok=%t", slot, ok)
+	}
+	if slot, ok := findFilesystemSlot(spec.Slots, "tools"); !ok || slot.Supported || slot.Count != 1 {
+		t.Fatalf("tools slot=%+v ok=%t", slot, ok)
+	}
 	var warned bool
 	for _, diag := range spec.Diagnostics {
 		if diag.Path == "tools" && strings.Contains(diag.Message, "does not execute this slot yet") {
@@ -48,6 +55,40 @@ func TestDiscoverProjectSpecsFindsFilesystemAgentLayout(t *testing.T) {
 	}
 	if !warned {
 		t.Fatalf("expected unsupported tools slot warning, got:%+v", spec.Diagnostics)
+	}
+}
+
+func TestInspectFilesystemSurface(t *testing.T) {
+	root := t.TempDir()
+	writeFilesystemFile(t, filepath.Join(root, "agent", "instructions.md"), "Use care.")
+	writeFilesystemFile(t, filepath.Join(root, "agent", "instructions", "review.md"), "Review before editing.")
+	writeFilesystemFile(t, filepath.Join(root, "agent", "skills", "forecast.md"), "Forecast carefully.")
+	writeFilesystemFile(t, filepath.Join(root, "agent", "subagents", "coder", "instructions.md"), "Write patches.")
+	writeFilesystemFile(t, filepath.Join(root, "agent", "agent.ts"), "export default {}")
+	writeFilesystemFile(t, filepath.Join(root, "evals", "chat.yaml"), "name: chat")
+
+	surface, err := InspectFilesystemSurface(filepath.Join(root, "agent"))
+	if err != nil {
+		t.Fatalf("InspectFilesystemSurface: %v", err)
+	}
+	for _, tc := range []struct {
+		name      string
+		supported bool
+		count     int
+	}{
+		{name: "instructions", supported: true, count: 2},
+		{name: "skills", supported: true, count: 1},
+		{name: "subagents", supported: true, count: 1},
+		{name: "evals", supported: true, count: 1},
+		{name: "agent.ts", supported: false, count: 1},
+	} {
+		slot, ok := findFilesystemSlot(surface.Slots, tc.name)
+		if !ok {
+			t.Fatalf("slot %q not found in %+v", tc.name, surface.Slots)
+		}
+		if slot.Supported != tc.supported || slot.Count != tc.count {
+			t.Fatalf("slot %q=%+v want supported=%t count=%d", tc.name, slot, tc.supported, tc.count)
+		}
 	}
 }
 
@@ -115,4 +156,13 @@ func writeFilesystemFile(t *testing.T, path string, data string) {
 	if err := os.WriteFile(path, []byte(strings.TrimSpace(data)+"\n"), 0o644); err != nil {
 		t.Fatalf("write %s: %v", path, err)
 	}
+}
+
+func findFilesystemSlot(slots []FilesystemSlot, name string) (FilesystemSlot, bool) {
+	for _, slot := range slots {
+		if slot.Name == name {
+			return slot, true
+		}
+	}
+	return FilesystemSlot{}, false
 }

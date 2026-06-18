@@ -21,14 +21,15 @@ type ProjectDiscovery struct {
 }
 
 type DiscoveredSpec struct {
-	Path        string       `json:"path"`
-	Kind        string       `json:"kind,omitempty"`
-	Name        string       `json:"name,omitempty"`
-	Summary     string       `json:"summary,omitempty"`
-	Subagents   []string     `json:"subagents,omitempty"`
-	Valid       bool         `json:"valid"`
-	Error       string       `json:"error,omitempty"`
-	Diagnostics []Diagnostic `json:"diagnostics,omitempty"`
+	Path        string           `json:"path"`
+	Kind        string           `json:"kind,omitempty"`
+	Name        string           `json:"name,omitempty"`
+	Summary     string           `json:"summary,omitempty"`
+	Subagents   []string         `json:"subagents,omitempty"`
+	Slots       []FilesystemSlot `json:"slots,omitempty"`
+	Valid       bool             `json:"valid"`
+	Error       string           `json:"error,omitempty"`
+	Diagnostics []Diagnostic     `json:"diagnostics,omitempty"`
 }
 
 func DiscoverProjectSpecs(start string) (ProjectDiscovery, error) {
@@ -142,6 +143,17 @@ func loadDiscoveredSpecs(root string, candidates []projectSpecCandidate) Project
 		entry.Subagents = SubagentNames(spec)
 		entry.Valid = !hasErrors(diagnostics)
 		entry.Diagnostics = diagnostics
+		if candidate.kind == DiscoveredKindFilesystem {
+			if surface, err := InspectFilesystemSurface(candidate.path); err == nil {
+				entry.Slots = surface.Slots
+			} else {
+				entry.Diagnostics = append(entry.Diagnostics, Diagnostic{
+					Severity: SeverityWarning,
+					Path:     "layout",
+					Message:  fmt.Sprintf("could not inspect filesystem slots: %v", err),
+				})
+			}
+		}
 		discovery.Specs = append(discovery.Specs, entry)
 	}
 	return discovery

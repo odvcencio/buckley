@@ -103,7 +103,7 @@ func TestRunAgentCommandInitCreatesFilesystemLayout(t *testing.T) {
 			t.Fatalf("runAgentCommand init: %v", err)
 		}
 	})
-	for _, want := range []string{"Created filesystem agent layout", "agent/", "agent/instructions.md", "agent/skills/", "agent/subagents/", "Next: buckley agent show --project"} {
+	for _, want := range []string{"Created filesystem agent layout", "agent/", "agent/instructions.md", "agent/skills/", "agent/subagents/", "evals/", "Next: buckley agent show --project"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("agent init output missing %q:\n%s", want, out)
 		}
@@ -116,7 +116,7 @@ func TestRunAgentCommandInitCreatesFilesystemLayout(t *testing.T) {
 	if !strings.Contains(string(data), "careful coding agent") {
 		t.Fatalf("unexpected generated instructions:\n%s", string(data))
 	}
-	for _, path := range []string{filepath.Join(project, "agent", "skills"), filepath.Join(project, "agent", "subagents")} {
+	for _, path := range []string{filepath.Join(project, "agent", "skills"), filepath.Join(project, "agent", "subagents"), filepath.Join(project, "evals")} {
 		info, err := os.Stat(path)
 		if err != nil {
 			t.Fatalf("stat generated path %s: %v", path, err)
@@ -214,6 +214,12 @@ subagents:
 	if err := os.WriteFile(filepath.Join(dir, "agent", "subagents", "researcher", "instructions.md"), []byte("Research carefully.\n"), 0o644); err != nil {
 		t.Fatalf("write filesystem subagent instructions: %v", err)
 	}
+	if err := os.MkdirAll(filepath.Join(dir, "evals"), 0o755); err != nil {
+		t.Fatalf("mkdir evals: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "evals", "smoke.yaml"), []byte("name: smoke\n"), 0o644); err != nil {
+		t.Fatalf("write eval: %v", err)
+	}
 	nested := filepath.Join(dir, "src")
 	if err := os.MkdirAll(nested, 0o755); err != nil {
 		t.Fatalf("mkdir nested: %v", err)
@@ -264,6 +270,34 @@ subagents:
 	}
 	if !payload.Valid || payload.Spec.Name != "daily-agent" || payload.Spec.Metadata["layout"] != agentspec.DiscoveredKindFilesystem {
 		t.Fatalf("unexpected filesystem show json: %+v", payload)
+	}
+
+	infoOut := captureStdout(t, func() {
+		if err := runAgentCommand([]string{"info", "--spec", "filesystem"}); err != nil {
+			t.Fatalf("runAgentCommand filesystem info: %v", err)
+		}
+	})
+	for _, want := range []string{
+		"Filesystem slots: evals=1, instructions=1, subagents=1",
+		"Runnable subagents:",
+		"researcher:",
+	} {
+		if !strings.Contains(infoOut, want) {
+			t.Fatalf("filesystem info output missing %q:\n%s", want, infoOut)
+		}
+	}
+
+	infoJSON := captureStdout(t, func() {
+		if err := runAgentCommand([]string{"info", "--json", "--spec", "filesystem"}); err != nil {
+			t.Fatalf("runAgentCommand filesystem info json: %v", err)
+		}
+	})
+	var infoSnapshot agentInfoSnapshot
+	if err := json.Unmarshal([]byte(infoJSON), &infoSnapshot); err != nil {
+		t.Fatalf("unmarshal filesystem info json: %v\n%s", err, infoJSON)
+	}
+	if len(infoSnapshot.Slots) == 0 {
+		t.Fatalf("filesystem info missing slots: %+v", infoSnapshot)
 	}
 }
 
@@ -512,6 +546,12 @@ func TestRunAgentCommandListShowsFilesystemDiagnostics(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "agent", "tools", "inspect.ts"), []byte("export default {}\n"), 0o644); err != nil {
 		t.Fatalf("write unsupported tool slot: %v", err)
 	}
+	if err := os.MkdirAll(filepath.Join(dir, "evals"), 0o755); err != nil {
+		t.Fatalf("mkdir evals: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "evals", "smoke.yaml"), []byte("name: smoke\n"), 0o644); err != nil {
+		t.Fatalf("write eval: %v", err)
+	}
 
 	oldWd, err := os.Getwd()
 	if err != nil {
@@ -533,6 +573,7 @@ func TestRunAgentCommandListShowsFilesystemDiagnostics(t *testing.T) {
 		"Agent specs: 1",
 		"(valid)",
 		"kind=filesystem",
+		"slots: evals=1, instructions=1; unsupported: tools=1",
 		"warning tools: authored code slot discovered",
 		"does not execute this slot yet",
 	} {
