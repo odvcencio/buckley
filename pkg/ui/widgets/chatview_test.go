@@ -458,6 +458,21 @@ func TestChatView_Render_WithScrollbar(t *testing.T) {
 	}
 }
 
+func TestChatView_Render_PlainUnicodeRowsUseRuneColumns(t *testing.T) {
+	cv := NewChatView()
+	cv.Layout(runtime.Rect{X: 0, Y: 0, Width: 24, Height: 4})
+	cv.AddMessage("", "thinking")
+
+	buf := runtime.NewBuffer(24, 4)
+	cv.Render(runtime.RenderContext{Buffer: buf})
+
+	for x, want := range []rune("  ◦ thinking...") {
+		if got := buf.Get(x, 0).Rune; got != want {
+			t.Fatalf("cell %d = %q, want %q", x, got, want)
+		}
+	}
+}
+
 func TestChatView_MarkdownWrappedListTranscriptMatchesRender(t *testing.T) {
 	cv := NewChatView()
 	cv.SetMarkdownRenderer(markdown.NewRenderer(theme.DefaultTheme()), backend.DefaultStyle())

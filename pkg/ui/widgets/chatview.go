@@ -372,90 +372,115 @@ func (c *ChatView) Render(ctx runtime.RenderContext) {
 		return
 	}
 
-	// Get visible lines from scrollback
-	lines := c.buffer.GetVisibleLines()
+	c.renderVisibleLines(ctx, c.buffer.GetVisibleLines(), bounds)
+	c.renderScrollbar(ctx)
+}
 
+func (c *ChatView) renderVisibleLines(ctx runtime.RenderContext, lines []scrollback.VisibleLine, bounds runtime.Rect) {
 	for i, line := range lines {
 		if i >= bounds.Height {
 			break
 		}
-		y := bounds.Y + i
-		maxX := bounds.X + bounds.Width - 1
+		c.renderVisibleLine(ctx, bounds, line, bounds.Y+i)
+	}
+}
 
-		if line.Selected {
-			text := line.Content
-			if len([]rune(text)) > bounds.Width-1 {
-				text = string([]rune(text)[:bounds.Width-1])
-			}
-			ctx.Buffer.SetString(bounds.X, y, text, c.selectionStyle)
-			for x := bounds.X + len([]rune(text)); x < maxX; x++ {
-				ctx.Buffer.Set(x, y, ' ', c.selectionStyle)
-			}
-			continue
-		}
+func (c *ChatView) renderVisibleLine(ctx runtime.RenderContext, bounds runtime.Rect, line scrollback.VisibleLine, y int) {
+	if line.Selected {
+		c.renderSelectedLine(ctx, bounds, line, y)
+		return
+	}
+	if len(line.Spans) > 0 {
+		c.renderSpanLine(ctx, bounds, line, y)
+		return
+	}
+	c.renderPlainLine(ctx, bounds, line, y)
+}
 
-		if len(line.Spans) > 0 {
-			highlightSet := make(map[int]bool, len(line.SearchHighlights))
-			for _, idx := range line.SearchHighlights {
-				highlightSet[idx] = true
-			}
+func (c *ChatView) renderSelectedLine(ctx runtime.RenderContext, bounds runtime.Rect, line scrollback.VisibleLine, y int) {
+	maxX := chatContentMaxX(bounds)
+	x := renderChatText(ctx.Buffer, bounds.X, y, maxX, line.Content, c.selectionStyle)
+	fillChatRow(ctx.Buffer, x, y, maxX, c.selectionStyle)
+}
 
-			x := bounds.X
-			pos := 0
-			for _, span := range line.Spans {
-				for _, r := range span.Text {
-					if x >= maxX {
-						break
-					}
-					style := span.Style
-					if highlightSet[pos] {
-						style = c.searchStyle
-					}
-					ctx.Buffer.Set(x, y, r, style)
-					x++
-					pos++
-				}
-				if x >= maxX {
-					break
-				}
-			}
+func (c *ChatView) renderSpanLine(ctx runtime.RenderContext, bounds runtime.Rect, line scrollback.VisibleLine, y int) {
+	maxX := chatContentMaxX(bounds)
+	highlightSet := searchHighlightSet(line.SearchHighlights)
 
-			if line.IsCode {
-				fillStyle := c.codeBlockBG
-				for ; x < maxX; x++ {
-					ctx.Buffer.Set(x, y, ' ', fillStyle)
-				}
+	x := bounds.X
+	pos := 0
+	for _, span := range line.Spans {
+		for _, r := range span.Text {
+			if x >= maxX {
+				break
 			}
-			continue
-		}
-
-		// Fallback for plain lines
-		style := c.styleForSource(line.Source)
-		if line.Style.Bold {
-			style = style.Bold(true)
-		}
-		if line.Style.Italic {
-			style = style.Italic(true)
-		}
-		if line.Style.Dim {
-			style = style.Dim(true)
-		}
-
-		text := line.Content
-		if len([]rune(text)) > bounds.Width-1 {
-			text = string([]rune(text)[:bounds.Width-1])
-		}
-		ctx.Buffer.SetString(bounds.X, y, text, style)
-		if line.IsCode {
-			fillStyle := c.codeBlockBG
-			for x := bounds.X + len([]rune(text)); x < maxX; x++ {
-				ctx.Buffer.Set(x, y, ' ', fillStyle)
+			style := span.Style
+			if highlightSet[pos] {
+				style = c.searchStyle
 			}
+			ctx.Buffer.Set(x, y, r, style)
+			x++
+			pos++
+		}
+		if x >= maxX {
+			break
 		}
 	}
 
-	// Draw scrollbar
-	c.renderScrollbar(ctx)
+	if line.IsCode {
+		fillChatRow(ctx.Buffer, x, y, maxX, c.codeBlockBG)
+	}
+}
+
+func (c *ChatView) renderPlainLine(ctx runtime.RenderContext, bounds runtime.Rect, line scrollback.VisibleLine, y int) {
+	maxX := chatContentMaxX(bounds)
+	x := renderChatText(ctx.Buffer, bounds.X, y, maxX, line.Content, c.plainLineStyle(line))
+	if line.IsCode {
+		fillChatRow(ctx.Buffer, x, y, maxX, c.codeBlockBG)
+	}
+}
+
+func (c *ChatView) plainLineStyle(line scrollback.VisibleLine) backend.Style {
+	style := c.styleForSource(line.Source)
+	if line.Style.Bold {
+		style = style.Bold(true)
+	}
+	if line.Style.Italic {
+		style = style.Italic(true)
+	}
+	if line.Style.Dim {
+		style = style.Dim(true)
+	}
+	return style
+}
+
+func chatContentMaxX(bounds runtime.Rect) int {
+	return bounds.X + max(0, bounds.Width-1)
+}
+
+func searchHighlightSet(highlights []int) map[int]bool {
+	highlightSet := make(map[int]bool, len(highlights))
+	for _, idx := range highlights {
+		highlightSet[idx] = true
+	}
+	return highlightSet
+}
+
+func renderChatText(buf *runtime.Buffer, x, y, maxX int, text string, style backend.Style) int {
+	for _, r := range text {
+		if x >= maxX {
+			break
+		}
+		buf.Set(x, y, r, style)
+		x++
+	}
+	return x
+}
+
+func fillChatRow(buf *runtime.Buffer, x, y, maxX int, style backend.Style) {
+	for ; x < maxX; x++ {
+		buf.Set(x, y, ' ', style)
+	}
 }
 
 // renderScrollbar draws the scrollbar on the right edge.
