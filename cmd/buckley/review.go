@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"m31labs.dev/buckley/pkg/config"
 	"m31labs.dev/buckley/pkg/model"
 	"m31labs.dev/buckley/pkg/oneshot"
 	"m31labs.dev/buckley/pkg/oneshot/commands"
@@ -17,8 +18,36 @@ import (
 	"m31labs.dev/buckley/pkg/transparency"
 )
 
-// runReviewCommand performs code review on a branch or project.
-func runReviewCommand(args []string) error {
+type reviewCommandOptions struct {
+	projectMode     bool
+	scope           string
+	baseBranch      string
+	includeUnstaged bool
+	verbose         bool
+	showCost        bool
+	model           string
+	timeout         time.Duration
+	outputFile      string
+	interactive     bool
+}
+
+type reviewCommandRuntime struct {
+	mgr             *model.Manager
+	registry        *tool.Registry
+	ledger          *transparency.CostLedger
+	framework       *oneshot.Framework
+	modelID         string
+	reasoningEffort string
+}
+
+type reviewCommandResult struct {
+	reviewText   string
+	parsed       *commands.ParsedReview
+	trace        *transparency.Trace
+	contextAudit *transparency.ContextAudit
+}
+
+func parseReviewCommandOptions(args []string) (reviewCommandOptions, error) {
 	fs := flag.NewFlagSet("review", flag.ContinueOnError)
 	projectMode := fs.Bool("project", false, "review the entire project instead of branch diff")
 	scope := fs.String("scope", commands.ReviewScopeWorktree, "review scope: worktree, branch, or changes")
@@ -33,18 +62,37 @@ func runReviewCommand(args []string) error {
 	noInteractive := fs.Bool("no-interactive", false, "disable interactive mode")
 
 	if err := fs.Parse(args); err != nil {
+		return reviewCommandOptions{}, err
+	}
+
+	opts := reviewCommandOptions{
+		projectMode:     *projectMode,
+		scope:           *scope,
+		baseBranch:      *baseBranch,
+		includeUnstaged: *includeUnstaged,
+		verbose:         *verbose,
+		showCost:        *showCost,
+		model:           *modelFlag,
+		timeout:         *timeout,
+		outputFile:      *outputFile,
+		interactive:     *interactive,
+	}
+	if *noInteractive {
+		opts.interactive = false
+	}
+	return opts, nil
+}
+
+// runReviewCommand performs code review on a branch or project.
+func runReviewCommand(args []string) error {
+	opts, err := parseReviewCommandOptions(args)
+	if err != nil {
 		return err
 	}
 
-	// Handle -no-interactive flag
-	if *noInteractive {
-		*interactive = false
-	}
-
-	restoreModelOverride := applyCommandModelOverride(*modelFlag)
+	restoreModelOverride := applyCommandModelOverride(opts.model)
 	defer restoreModelOverride()
 
-	// Initialize dependencies
 	cfg, mgr, store, err := initDependenciesFn()
 	if store != nil {
 		defer store.Close()
@@ -53,7 +101,84 @@ func runReviewCommand(args []string) error {
 		return fmt.Errorf("init dependencies: %w", err)
 	}
 
-	// Determine model
+	runtime, err := newReviewCommandRuntime(cfg, mgr)
+	if err != nil {
+		return fmt.Errorf("no model configured (set BUCKLEY_MODEL_REVIEW or configure models.review)")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), opts.timeout)
+	defer cancel()
+
+	if !quietMode {
+		termOut.Dim("Using model: %s", runtime.modelID)
+	}
+
+	result, err := runReview(ctx, opts, runtime.framework)
+	if err != nil {
+		return err
+	}
+
+	if opts.verbose && result.contextAudit != nil {
+		printReviewContextAudit(result.contextAudit)
+	}
+
+	if result.reviewText == "" {
+		return fmt.Errorf("no review generated")
+	}
+
+	if err := writeReviewOutput(opts.outputFile, result.reviewText); err != nil {
+		return err
+	}
+
+	if opts.showCost && result.trace != nil {
+		printReviewCost(result.trace, runtime.ledger)
+	}
+
+	if opts.interactive && opts.outputFile == "" {
+		parsed := result.parsed
+		if parsed == nil {
+			parsed = commands.ParseReview(result.reviewText)
+		}
+		if parsed != nil && len(parsed.Findings) > 0 {
+			runReviewMenu(ctx, parsed, runtime.mgr, runtime.registry, runtime.modelID, runtime.reasoningEffort, runtime.ledger, opts.timeout)
+		}
+	}
+
+	return nil
+}
+
+func newReviewCommandRuntime(cfg *config.Config, mgr *model.Manager) (*reviewCommandRuntime, error) {
+	modelID := resolveReviewModel(cfg)
+	if modelID == "" {
+		return nil, fmt.Errorf("no review model configured")
+	}
+	reasoningEffort := model.ResolveReasoningEffort(cfg, mgr, nil, modelID, "review")
+
+	ledger := transparency.NewCostLedger()
+	registry := tool.NewRegistry()
+	if cwd, err := os.Getwd(); err == nil {
+		registry.ConfigureContainers(cfg, cwd)
+	}
+
+	rlmRunner := oneshot.NewRLMRunner(oneshot.RLMRunnerConfig{
+		Models:          mgr,
+		Registry:        registry,
+		Ledger:          ledger,
+		ModelID:         modelID,
+		ReasoningEffort: reasoningEffort,
+	})
+
+	return &reviewCommandRuntime{
+		mgr:             mgr,
+		registry:        registry,
+		ledger:          ledger,
+		framework:       oneshot.NewFramework(nil, nil).WithRLMRunner(rlmRunner),
+		modelID:         modelID,
+		reasoningEffort: reasoningEffort,
+	}, nil
+}
+
+func resolveReviewModel(cfg *config.Config) string {
 	modelID := strings.TrimSpace(modelOverrideFlag)
 	if modelID == "" {
 		modelID = normalizeModelIDWithReasoning(cfg, os.Getenv("BUCKLEY_MODEL_REVIEW"))
@@ -64,149 +189,93 @@ func runReviewCommand(args []string) error {
 	if modelID == "" && cfg != nil {
 		modelID = cfg.Models.Execution
 	}
-	if modelID == "" {
-		return fmt.Errorf("no model configured (set BUCKLEY_MODEL_REVIEW or configure models.review)")
+	return modelID
+}
+
+func runReview(ctx context.Context, opts reviewCommandOptions, framework *oneshot.Framework) (*reviewCommandResult, error) {
+	if opts.projectMode {
+		return runProjectReview(ctx, framework)
 	}
-	reasoningEffort := model.ResolveReasoningEffort(cfg, mgr, nil, modelID, "review")
+	return runBranchReview(ctx, opts, framework)
+}
 
-	// Create cost ledger
-	ledger := transparency.NewCostLedger()
+func runProjectReview(ctx context.Context, framework *oneshot.Framework) (*reviewCommandResult, error) {
+	spinner := terminal.NewSpinner("Analyzing project...")
+	spinner.Start()
 
-	// Create tool registry for full RLM access
-	registry := tool.NewRegistry()
-	if cwd, err := os.Getwd(); err == nil {
-		registry.ConfigureContainers(cfg, cwd)
+	opts := commands.DefaultProjectContextOptions()
+	projectCtx, audit, err := commands.AssembleProjectContext(opts)
+	if err != nil {
+		spinner.StopWithError(err.Error())
+		return nil, fmt.Errorf("assemble context: %w", err)
 	}
 
-	// Create RLM runner for the framework
-	rlmRunner := oneshot.NewRLMRunner(oneshot.RLMRunnerConfig{
-		Models:          mgr,
-		Registry:        registry,
-		Ledger:          ledger,
-		ModelID:         modelID,
-		ReasoningEffort: reasoningEffort,
+	userPrompt := commands.BuildProjectPrompt(projectCtx)
+	fwResult, runErr := framework.RunRLM(ctx, commands.ReviewProjectDef{}, oneshot.RLMRunOpts{
+		UserPrompt: userPrompt,
+		Audit:      audit,
 	})
-
-	// Create unified framework with RLM support
-	framework := oneshot.NewFramework(nil, nil).WithRLMRunner(rlmRunner)
-
-	// Run with timeout
-	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
-	defer cancel()
-
-	// Show what we're doing
-	if !quietMode {
-		termOut.Dim("Using model: %s", modelID)
+	if runErr != nil {
+		spinner.StopWithError(runErr.Error())
+		return nil, fmt.Errorf("review failed: %w", runErr)
 	}
 
-	var reviewText string
-	var parsed *commands.ParsedReview
-	var trace *transparency.Trace
-	var contextAudit *transparency.ContextAudit
+	spinner.StopWithSuccess("Project review complete")
+	return reviewResultFromRLM(fwResult, audit), nil
+}
 
-	if *projectMode {
-		// Review entire project
-		spinner := terminal.NewSpinner("Analyzing project...")
-		spinner.Start()
+func runBranchReview(ctx context.Context, opts reviewCommandOptions, framework *oneshot.Framework) (*reviewCommandResult, error) {
+	reviewScope := normalizeReviewCommandScope(opts.scope)
+	spinner := terminal.NewSpinner(fmt.Sprintf("Analyzing %s changes...", reviewScope))
+	spinner.Start()
 
-		opts := commands.DefaultProjectContextOptions()
-		projectCtx, audit, err := commands.AssembleProjectContext(opts)
-		if err != nil {
-			spinner.StopWithError(err.Error())
-			return fmt.Errorf("assemble context: %w", err)
-		}
-		contextAudit = audit
+	contextOpts := commands.DefaultBranchContextOptions()
+	contextOpts.BaseBranch = opts.baseBranch
+	contextOpts.IncludeUnstaged = opts.includeUnstaged
+	contextOpts.Scope = reviewScope
 
-		userPrompt := commands.BuildProjectPrompt(projectCtx)
-		fwResult, runErr := framework.RunRLM(ctx, commands.ReviewProjectDef{}, oneshot.RLMRunOpts{
-			UserPrompt: userPrompt,
-			Audit:      audit,
-		})
-
-		if runErr != nil {
-			spinner.StopWithError(runErr.Error())
-			return fmt.Errorf("review failed: %w", runErr)
-		}
-
-		spinner.StopWithSuccess("Project review complete")
-
-		if rlmResult, ok := fwResult.Value.(*commands.ReviewRLMResult); ok {
-			reviewText = rlmResult.Review
-			parsed = rlmResult.Parsed
-		}
-		trace = fwResult.Trace
-	} else {
-		reviewScope := normalizeReviewCommandScope(*scope)
-		spinner := terminal.NewSpinner(fmt.Sprintf("Analyzing %s changes...", reviewScope))
-		spinner.Start()
-
-		opts := commands.DefaultBranchContextOptions()
-		opts.BaseBranch = *baseBranch
-		opts.IncludeUnstaged = *includeUnstaged
-		opts.Scope = reviewScope
-
-		branchCtx, audit, err := commands.AssembleBranchContext(opts)
-		if err != nil {
-			spinner.StopWithError(err.Error())
-			return fmt.Errorf("assemble context: %w", err)
-		}
-		contextAudit = audit
-
-		userPrompt := commands.BuildBranchPrompt(branchCtx)
-		fwResult, runErr := framework.RunRLM(ctx, commands.ReviewBranchDef{}, oneshot.RLMRunOpts{
-			UserPrompt: userPrompt,
-			Audit:      audit,
-		})
-
-		if runErr != nil {
-			spinner.StopWithError(runErr.Error())
-			return fmt.Errorf("review failed: %w", runErr)
-		}
-
-		spinner.StopWithSuccess(fmt.Sprintf("%s review complete", titleReviewScope(reviewScope)))
-
-		if rlmResult, ok := fwResult.Value.(*commands.ReviewRLMResult); ok {
-			reviewText = rlmResult.Review
-			parsed = rlmResult.Parsed
-		}
-		trace = fwResult.Trace
+	branchCtx, audit, err := commands.AssembleBranchContext(contextOpts)
+	if err != nil {
+		spinner.StopWithError(err.Error())
+		return nil, fmt.Errorf("assemble context: %w", err)
 	}
 
-	// Show context audit if verbose
-	if *verbose && contextAudit != nil {
-		printReviewContextAudit(contextAudit)
+	userPrompt := commands.BuildBranchPrompt(branchCtx)
+	fwResult, runErr := framework.RunRLM(ctx, commands.ReviewBranchDef{}, oneshot.RLMRunOpts{
+		UserPrompt: userPrompt,
+		Audit:      audit,
+	})
+	if runErr != nil {
+		spinner.StopWithError(runErr.Error())
+		return nil, fmt.Errorf("review failed: %w", runErr)
 	}
 
-	// Output review
-	if reviewText == "" {
-		return fmt.Errorf("no review generated")
-	}
+	spinner.StopWithSuccess(fmt.Sprintf("%s review complete", titleReviewScope(reviewScope)))
+	return reviewResultFromRLM(fwResult, audit), nil
+}
 
-	// Write to file or stdout
-	if *outputFile != "" {
-		if err := os.WriteFile(*outputFile, []byte(reviewText), 0o644); err != nil {
-			return fmt.Errorf("failed to write output file: %w", err)
-		}
-		termOut.Success("Review written to %s", *outputFile)
-	} else {
+func reviewResultFromRLM(fwResult *oneshot.RunResult, audit *transparency.ContextAudit) *reviewCommandResult {
+	result := &reviewCommandResult{contextAudit: audit}
+	if fwResult == nil {
+		return result
+	}
+	if rlmResult, ok := fwResult.Value.(*commands.ReviewRLMResult); ok {
+		result.reviewText = rlmResult.Review
+		result.parsed = rlmResult.Parsed
+	}
+	result.trace = fwResult.Trace
+	return result
+}
+
+func writeReviewOutput(outputFile, reviewText string) error {
+	if outputFile == "" {
 		printReview(reviewText)
+		return nil
 	}
-
-	// Show cost
-	if *showCost && trace != nil {
-		printReviewCost(trace, ledger)
+	if err := os.WriteFile(outputFile, []byte(reviewText), 0o644); err != nil {
+		return fmt.Errorf("failed to write output file: %w", err)
 	}
-
-	// Interactive menu for fixing findings
-	if *interactive && *outputFile == "" {
-		if parsed == nil && reviewText != "" {
-			parsed = commands.ParseReview(reviewText)
-		}
-		if parsed != nil && len(parsed.Findings) > 0 {
-			runReviewMenu(ctx, parsed, mgr, registry, modelID, reasoningEffort, ledger, *timeout)
-		}
-	}
-
+	termOut.Success("Review written to %s", outputFile)
 	return nil
 }
 
