@@ -271,6 +271,17 @@ func TestSidebar_Render(t *testing.T) {
 	}
 }
 
+func TestSidebar_RenderProgressBar_PercentFits(t *testing.T) {
+	s := NewSidebar()
+	buf := runtime.NewBuffer(30, 1)
+
+	s.renderProgressBar(buf, 0, 0, 25, 65)
+
+	if got := readBufferRunes(buf, 22, 0, 3); got != "65%" {
+		t.Fatalf("progress percent = %q, want %q", got, "65%")
+	}
+}
+
 func TestSidebar_Render_SmallBounds(t *testing.T) {
 	s := NewSidebar()
 	s.Layout(runtime.Rect{X: 0, Y: 0, Width: 5, Height: 3})
@@ -296,4 +307,26 @@ func TestTaskStatus_Values(t *testing.T) {
 	if TaskFailed != 3 {
 		t.Errorf("expected TaskFailed=3, got %d", TaskFailed)
 	}
+}
+
+func TestTruncateSidebarText_Unicode(t *testing.T) {
+	got := truncateSidebarText("模型文件路径", 5)
+	if got != "模型..." {
+		t.Fatalf("truncateSidebarText() = %q, want %q", got, "模型...")
+	}
+}
+
+func TestTruncateRecentFileName_Unicode(t *testing.T) {
+	got := truncateRecentFileName("pkg/界面/模型文件路径.go", 8)
+	if got != "模型文件路..." {
+		t.Fatalf("truncateRecentFileName() = %q, want %q", got, "模型文件路...")
+	}
+}
+
+func readBufferRunes(buf *runtime.Buffer, x, y, width int) string {
+	runes := make([]rune, 0, width)
+	for col := 0; col < width; col++ {
+		runes = append(runes, buf.Get(x+col, y).Rune)
+	}
+	return string(runes)
 }

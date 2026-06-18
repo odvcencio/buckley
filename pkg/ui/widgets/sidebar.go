@@ -2,6 +2,7 @@ package widgets
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	"m31labs.dev/buckley/pkg/ui/backend"
@@ -71,6 +72,33 @@ type RLMScratchpadEntry struct {
 	Key     string
 	Type    string
 	Summary string
+}
+
+type sidebarSection int
+
+const (
+	sidebarSectionCurrentTask sidebarSection = iota
+	sidebarSectionPlan
+	sidebarSectionTools
+	sidebarSectionRLM
+	sidebarSectionExperiment
+	sidebarSectionTouches
+	sidebarSectionRecentFiles
+)
+
+type sidebarSectionCandidate struct {
+	section sidebarSection
+	visible func(*Sidebar) bool
+}
+
+var sidebarSectionCandidates = []sidebarSectionCandidate{
+	{section: sidebarSectionCurrentTask, visible: hasCurrentTaskSection},
+	{section: sidebarSectionPlan, visible: hasPlanSection},
+	{section: sidebarSectionTools, visible: hasToolsSection},
+	{section: sidebarSectionRLM, visible: hasRLMSection},
+	{section: sidebarSectionExperiment, visible: hasExperimentSection},
+	{section: sidebarSectionTouches, visible: hasTouchesSection},
+	{section: sidebarSectionRecentFiles, visible: hasRecentFilesSection},
 }
 
 // Sidebar displays task progress, plan, and running tools.
@@ -158,28 +186,7 @@ func (s *Sidebar) SetStyles(border, header, text, progressFull, progressEmpty ba
 
 // HasContent returns true when any sidebar section has data to render.
 func (s *Sidebar) HasContent() bool {
-	if s.showCurrentTask && strings.TrimSpace(s.currentTask) != "" {
-		return true
-	}
-	if s.showPlan && len(s.planTasks) > 0 {
-		return true
-	}
-	if s.showTools && len(s.runningTools) > 0 {
-		return true
-	}
-	if s.showExperiment && (strings.TrimSpace(s.experimentName) != "" || len(s.experimentVariants) > 0) {
-		return true
-	}
-	if s.showRLM && (s.rlmStatus != nil || len(s.rlmScratchpad) > 0) {
-		return true
-	}
-	if s.showTouches && len(s.activeTouches) > 0 {
-		return true
-	}
-	if len(s.recentFiles) > 0 {
-		return true
-	}
-	return false
+	return len(s.visibleSections()) > 0
 }
 
 // SetCurrentTask updates the current task display.
@@ -302,48 +309,80 @@ func (s *Sidebar) Render(ctx runtime.RenderContext) {
 		return
 	}
 
-	// Draw left border
-	for y := b.Y; y < b.Y+b.Height; y++ {
-		ctx.Buffer.Set(b.X, y, '│', s.borderStyle)
-	}
+	s.renderLeftBorder(ctx.Buffer, b)
 
 	y := b.Y
 	contentX := b.X + 1
 	contentWidth := b.Width - 1
+	bottom := b.Y + b.Height
 
-	// Current Task Section
-	if s.showCurrentTask && s.currentTask != "" {
-		y = s.renderCurrentTask(ctx.Buffer, contentX, y, contentWidth)
+	for _, section := range s.visibleSections() {
+		y = s.renderSection(section, ctx.Buffer, contentX, y, contentWidth, bottom)
 	}
+}
 
-	// Plan Section
-	if s.showPlan && len(s.planTasks) > 0 {
-		y = s.renderPlan(ctx.Buffer, contentX, y, contentWidth, b.Y+b.Height-y)
+func (s *Sidebar) visibleSections() []sidebarSection {
+	sections := make([]sidebarSection, 0, len(sidebarSectionCandidates))
+	for _, candidate := range sidebarSectionCandidates {
+		if candidate.visible(s) {
+			sections = append(sections, candidate.section)
+		}
 	}
+	return sections
+}
 
-	// Running Tools Section
-	if s.showTools && len(s.runningTools) > 0 {
-		y = s.renderTools(ctx.Buffer, contentX, y, contentWidth)
+func hasCurrentTaskSection(s *Sidebar) bool {
+	return s.showCurrentTask && strings.TrimSpace(s.currentTask) != ""
+}
+
+func hasPlanSection(s *Sidebar) bool {
+	return s.showPlan && len(s.planTasks) > 0
+}
+
+func hasToolsSection(s *Sidebar) bool {
+	return s.showTools && len(s.runningTools) > 0
+}
+
+func hasRLMSection(s *Sidebar) bool {
+	return s.showRLM && (s.rlmStatus != nil || len(s.rlmScratchpad) > 0)
+}
+
+func hasExperimentSection(s *Sidebar) bool {
+	return s.showExperiment && (strings.TrimSpace(s.experimentName) != "" || len(s.experimentVariants) > 0)
+}
+
+func hasTouchesSection(s *Sidebar) bool {
+	return s.showTouches && len(s.activeTouches) > 0
+}
+
+func hasRecentFilesSection(s *Sidebar) bool {
+	return len(s.recentFiles) > 0
+}
+
+func (s *Sidebar) renderSection(section sidebarSection, buf *runtime.Buffer, x, y, width, bottom int) int {
+	switch section {
+	case sidebarSectionCurrentTask:
+		return s.renderCurrentTask(buf, x, y, width)
+	case sidebarSectionPlan:
+		return s.renderPlan(buf, x, y, width, bottom-y)
+	case sidebarSectionTools:
+		return s.renderTools(buf, x, y, width)
+	case sidebarSectionRLM:
+		return s.renderRLM(buf, x, y, width)
+	case sidebarSectionExperiment:
+		return s.renderExperiment(buf, x, y, width)
+	case sidebarSectionTouches:
+		return s.renderTouches(buf, x, y, width)
+	case sidebarSectionRecentFiles:
+		return s.renderRecentFiles(buf, x, y, width)
+	default:
+		return y
 	}
+}
 
-	// RLM Section
-	if s.showRLM && (s.rlmStatus != nil || len(s.rlmScratchpad) > 0) {
-		y = s.renderRLM(ctx.Buffer, contentX, y, contentWidth)
-	}
-
-	// Experiments Section
-	if s.showExperiment && (s.experimentName != "" || len(s.experimentVariants) > 0) {
-		y = s.renderExperiment(ctx.Buffer, contentX, y, contentWidth)
-	}
-
-	// Active Touches Section
-	if s.showTouches && len(s.activeTouches) > 0 {
-		y = s.renderTouches(ctx.Buffer, contentX, y, contentWidth)
-	}
-
-	// Recent Files Section
-	if len(s.recentFiles) > 0 {
-		s.renderRecentFiles(ctx.Buffer, contentX, y, contentWidth)
+func (s *Sidebar) renderLeftBorder(buf *runtime.Buffer, b runtime.Rect) {
+	for y := b.Y; y < b.Y+b.Height; y++ {
+		buf.Set(b.X, y, '│', s.borderStyle)
 	}
 }
 
@@ -359,10 +398,7 @@ func (s *Sidebar) renderCurrentTask(buf *runtime.Buffer, x, y, width int) int {
 	y++
 
 	// Task name
-	taskName := s.currentTask
-	if len(taskName) > width-2 {
-		taskName = taskName[:width-5] + "..."
-	}
+	taskName := truncateSidebarText(s.currentTask, width-2)
 	buf.SetString(x+2, y, taskName, s.textStyle)
 	y++
 
@@ -375,9 +411,17 @@ func (s *Sidebar) renderCurrentTask(buf *runtime.Buffer, x, y, width int) int {
 
 // renderProgressBar draws a progress bar.
 func (s *Sidebar) renderProgressBar(buf *runtime.Buffer, x, y, width, percent int) int {
-	filled := (width * percent) / 100
+	percentStr := intToStr(percent) + "%"
+	percentWidth := runeLen(percentStr)
+	barWidth := width - percentWidth - 1
+	if barWidth < 1 {
+		barWidth = width
+		percentStr = ""
+	}
 
-	for i := 0; i < width; i++ {
+	filled := (barWidth * percent) / 100
+
+	for i := 0; i < barWidth; i++ {
 		ch := '░'
 		style := s.progressEmpty
 		if i < filled {
@@ -387,9 +431,9 @@ func (s *Sidebar) renderProgressBar(buf *runtime.Buffer, x, y, width, percent in
 		buf.Set(x+i, y, ch, style)
 	}
 
-	// Show percentage
-	percentStr := intToStr(percent) + "%"
-	buf.SetString(x+width+1, y, percentStr, s.textStyle)
+	if percentStr != "" {
+		buf.SetString(x+barWidth+1, y, percentStr, s.textStyle)
+	}
 
 	return y + 1
 }
@@ -448,11 +492,7 @@ func (s *Sidebar) renderPlan(buf *runtime.Buffer, x, y, width, maxHeight int) in
 		buf.Set(x+3, y, ' ', s.textStyle)
 
 		// Task name
-		name := task.Name
-		maxName := width - 5
-		if len(name) > maxName {
-			name = name[:maxName-3] + "..."
-		}
+		name := truncateSidebarText(task.Name, width-5)
 
 		textStyle := s.textStyle
 		if task.Status == TaskInProgress {
@@ -477,20 +517,13 @@ func (s *Sidebar) renderTools(buf *runtime.Buffer, x, y, width int) int {
 		buf.Set(x+2, y, '⟳', s.activeStyle)
 		buf.Set(x+3, y, ' ', s.textStyle)
 
-		name := tool.Name
-		maxName := width - 5
-		if len(name) > maxName {
-			name = name[:maxName-3] + "..."
-		}
+		name := truncateSidebarText(tool.Name, width-5)
 		buf.SetString(x+4, y, name, s.textStyle)
 		y++
 
 		// Command detail if present
 		if tool.Command != "" {
-			cmd := "  " + tool.Command
-			if len(cmd) > width-4 {
-				cmd = cmd[:width-7] + "..."
-			}
+			cmd := truncateSidebarLine("  "+tool.Command, width-4)
 			buf.SetString(x+4, y, cmd, s.textStyle)
 			y++
 		}
@@ -513,55 +546,71 @@ func (s *Sidebar) renderRLM(buf *runtime.Buffer, x, y, width int) int {
 	}
 
 	if s.rlmStatus != nil {
-		iterLine := "Iter " + intToStr(s.rlmStatus.Iteration)
-		if s.rlmStatus.MaxIterations > 0 {
-			iterLine += "/" + intToStr(s.rlmStatus.MaxIterations)
-		}
-		if s.rlmStatus.Ready {
-			iterLine += " ✓"
-		}
-		buf.SetString(x+2, y, truncateSidebarText(iterLine, width-2), s.textStyle)
-		y++
-
-		if s.rlmStatus.TokensUsed > 0 {
-			tokenLine := "Tokens " + intToStr(s.rlmStatus.TokensUsed)
-			buf.SetString(x+2, y, truncateSidebarText(tokenLine, width-2), s.textStyle)
-			y++
-		}
-
-		summary := strings.TrimSpace(s.rlmStatus.Summary)
-		if summary != "" {
-			buf.SetString(x+2, y, truncateSidebarText(summary, width-2), s.textStyle)
-			y++
-		}
+		y = s.renderRLMStatus(buf, x, y, width)
 	}
 
 	if len(s.rlmScratchpad) > 0 {
-		buf.SetString(x+2, y, "Scratchpad", s.headerStyle)
-		y++
-		maxEntries := len(s.rlmScratchpad)
-		if maxEntries > 3 {
-			maxEntries = 3
-		}
-		for i := 0; i < maxEntries; i++ {
-			entry := s.rlmScratchpad[i]
-			line := strings.TrimSpace(entry.Type)
-			if entry.Summary != "" {
-				if line != "" {
-					line += ": "
-				}
-				line += entry.Summary
-			}
-			if line == "" {
-				line = entry.Key
-			}
-			line = truncateSidebarText(line, width-4)
-			buf.SetString(x+4, y, line, s.textStyle)
-			y++
-		}
+		y = s.renderRLMScratchpad(buf, x, y, width)
 	}
 
 	return y
+}
+
+func (s *Sidebar) renderRLMStatus(buf *runtime.Buffer, x, y, width int) int {
+	iterLine := "Iter " + intToStr(s.rlmStatus.Iteration)
+	if s.rlmStatus.MaxIterations > 0 {
+		iterLine += "/" + intToStr(s.rlmStatus.MaxIterations)
+	}
+	if s.rlmStatus.Ready {
+		iterLine += " ✓"
+	}
+	buf.SetString(x+2, y, truncateSidebarText(iterLine, width-2), s.textStyle)
+	y++
+
+	if s.rlmStatus.TokensUsed > 0 {
+		tokenLine := "Tokens " + intToStr(s.rlmStatus.TokensUsed)
+		buf.SetString(x+2, y, truncateSidebarText(tokenLine, width-2), s.textStyle)
+		y++
+	}
+
+	summary := strings.TrimSpace(s.rlmStatus.Summary)
+	if summary != "" {
+		buf.SetString(x+2, y, truncateSidebarText(summary, width-2), s.textStyle)
+		y++
+	}
+
+	return y
+}
+
+func (s *Sidebar) renderRLMScratchpad(buf *runtime.Buffer, x, y, width int) int {
+	buf.SetString(x+2, y, "Scratchpad", s.headerStyle)
+	y++
+
+	maxEntries := len(s.rlmScratchpad)
+	if maxEntries > 3 {
+		maxEntries = 3
+	}
+	for i := 0; i < maxEntries; i++ {
+		line := rlmScratchpadLine(s.rlmScratchpad[i])
+		buf.SetString(x+4, y, truncateSidebarText(line, width-4), s.textStyle)
+		y++
+	}
+
+	return y
+}
+
+func rlmScratchpadLine(entry RLMScratchpadEntry) string {
+	line := strings.TrimSpace(entry.Type)
+	if entry.Summary != "" {
+		if line != "" {
+			line += ": "
+		}
+		line += entry.Summary
+	}
+	if line == "" {
+		line = entry.Key
+	}
+	return line
 }
 
 // renderTouches draws the active touches section.
@@ -579,9 +628,7 @@ func (s *Sidebar) renderTouches(buf *runtime.Buffer, x, y, width int) int {
 		if touch.Operation != "" {
 			label = label + " (" + touch.Operation + ")"
 		}
-		if len(label) > width-4 {
-			label = label[:width-7] + "..."
-		}
+		label = truncateSidebarText(label, width-4)
 		buf.SetString(x+4, y, label, s.textStyle)
 		y++
 	}
@@ -638,19 +685,7 @@ func (s *Sidebar) renderRecentFiles(buf *runtime.Buffer, x, y, width int) int {
 	}
 
 	for _, file := range s.recentFiles {
-		name := file
-		if len(name) > width-4 {
-			// Show just filename
-			for i := len(name) - 1; i >= 0; i-- {
-				if name[i] == '/' {
-					name = name[i+1:]
-					break
-				}
-			}
-			if len(name) > width-4 {
-				name = name[:width-7] + "..."
-			}
-		}
+		name := truncateRecentFileName(file, width-4)
 		buf.SetString(x+4, y, name, s.textStyle)
 		y++
 	}
@@ -739,14 +774,27 @@ func experimentStatusStyle(status string, s *Sidebar) backend.Style {
 
 func truncateSidebarText(value string, max int) string {
 	value = strings.TrimSpace(value)
+	return truncateSidebarLine(value, max)
+}
+
+func truncateSidebarLine(value string, max int) string {
 	if value == "" || max <= 0 {
 		return ""
 	}
-	if len(value) <= max {
+	runes := []rune(value)
+	if len(runes) <= max {
 		return value
 	}
 	if max <= 3 {
-		return value[:max]
+		return string(runes[:max])
 	}
-	return value[:max-3] + "..."
+	return string(runes[:max-3]) + "..."
+}
+
+func truncateRecentFileName(path string, max int) string {
+	name := path
+	if runeLen(name) > max {
+		name = filepath.Base(path)
+	}
+	return truncateSidebarText(name, max)
 }
