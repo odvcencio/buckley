@@ -2,6 +2,9 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -13,6 +16,57 @@ func TestRunDoctorCommandUnknown(t *testing.T) {
 	err := runDoctorCommand([]string{"bogus"})
 	if err == nil || !strings.Contains(err.Error(), "unknown doctor command") {
 		t.Fatalf("err=%v want unknown doctor command", err)
+	}
+}
+
+func TestPrintChatCheckJSON(t *testing.T) {
+	var out bytes.Buffer
+	result := &chatcheck.Result{
+		Name:      "multi-turn-chat",
+		Model:     "test-model",
+		SessionID: "session-1",
+		Passed:    true,
+		Turns: []chatcheck.TurnResult{{
+			Index:         1,
+			Model:         "test-model",
+			LatencyMillis: 12,
+			CharLength:    32,
+			Passed:        true,
+			Checks:        []chatcheck.CheckResult{{Name: "contains", Passed: true}},
+		}},
+	}
+	if err := printChatCheckJSON(&out, result); err != nil {
+		t.Fatalf("printChatCheckJSON: %v", err)
+	}
+	var got chatcheck.Result
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("json output did not parse: %v\n%s", err, out.String())
+	}
+	if !got.Passed || got.Turns[0].LatencyMillis != 12 {
+		t.Fatalf("unexpected json result: %+v", got)
+	}
+}
+
+func TestWriteChatCheckReport(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "reports", "chat.json")
+	result := &chatcheck.Result{
+		Name:   "multi-turn-chat",
+		Model:  "test-model",
+		Passed: true,
+	}
+	if err := writeChatCheckReport(path, result); err != nil {
+		t.Fatalf("writeChatCheckReport: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read report: %v", err)
+	}
+	var got chatcheck.Result
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("report did not parse: %v\n%s", err, string(data))
+	}
+	if got.Name != "multi-turn-chat" || !got.Passed {
+		t.Fatalf("unexpected report: %+v", got)
 	}
 }
 

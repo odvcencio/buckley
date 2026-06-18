@@ -31,24 +31,39 @@ type Turn struct {
 }
 
 type Result struct {
-	Name      string
-	Model     string
-	SessionID string
-	Turns     []TurnResult
+	Name           string       `json:"name"`
+	Model          string       `json:"model"`
+	SessionID      string       `json:"session_id"`
+	Passed         bool         `json:"passed"`
+	Error          string       `json:"error,omitempty"`
+	StartedAt      time.Time    `json:"started_at"`
+	CompletedAt    time.Time    `json:"completed_at"`
+	DurationMillis int64        `json:"duration_ms"`
+	Usage          model.Usage  `json:"usage"`
+	Turns          []TurnResult `json:"turns"`
 }
 
 type TurnResult struct {
-	Index      int
-	User       string
-	Text       string
-	Model      string
-	Latency    time.Duration
-	Usage      model.Usage
-	Finish     string
-	Err        string
-	ToolCalls  int
-	Reasoning  bool
-	CharLength int
+	Index         int           `json:"index"`
+	User          string        `json:"user"`
+	Text          string        `json:"text"`
+	Model         string        `json:"model"`
+	Latency       time.Duration `json:"-"`
+	LatencyMillis int64         `json:"latency_ms"`
+	Usage         model.Usage   `json:"usage"`
+	Finish        string        `json:"finish,omitempty"`
+	Err           string        `json:"error,omitempty"`
+	ToolCalls     int           `json:"tool_calls"`
+	Reasoning     bool          `json:"reasoning"`
+	CharLength    int           `json:"char_length"`
+	Passed        bool          `json:"passed"`
+	Checks        []CheckResult `json:"checks,omitempty"`
+}
+
+type CheckResult struct {
+	Name    string `json:"name"`
+	Passed  bool   `json:"passed"`
+	Message string `json:"message,omitempty"`
 }
 
 type Runner struct {
@@ -90,12 +105,15 @@ func (r Runner) Run(ctx context.Context, scenario Scenario) (*Result, error) {
 		return nil, fmt.Errorf("chat check client is required")
 	}
 	scenario = normalizeScenario(scenario)
+	started := time.Now()
 	result := &Result{
 		Name:      scenario.Name,
 		Model:     scenario.Model,
 		SessionID: scenario.SessionID,
+		StartedAt: started,
 		Turns:     make([]TurnResult, 0, len(scenario.Turns)),
 	}
+	defer finalizeResult(result, started)
 
 	messages := make([]model.Message, 0, len(scenario.Turns)*2+1)
 	if strings.TrimSpace(scenario.SystemPrompt) != "" {
@@ -106,8 +124,7 @@ func (r Runner) Run(ctx context.Context, scenario Scenario) (*Result, error) {
 		turn.User = strings.TrimSpace(turn.User)
 		if turn.User == "" {
 			err := fmt.Errorf("turn %d user prompt is required", i+1)
-			result.Turns = append(result.Turns, TurnResult{Index: i + 1, Err: err.Error()})
-			return result, err
+			return failTurn(result, TurnResult{Index: i + 1}, err)
 		}
 
 		messages = append(messages, model.Message{Role: "user", Content: turn.User})
@@ -133,35 +150,32 @@ func (r Runner) Run(ctx context.Context, scenario Scenario) (*Result, error) {
 			Model:   scenario.Model,
 			Latency: time.Since(start),
 		}
+		turnResult.LatencyMillis = turnResult.Latency.Milliseconds()
 		if err != nil {
-			turnResult.Err = err.Error()
-			result.Turns = append(result.Turns, turnResult)
-			return result, fmt.Errorf("turn %d chat completion: %w", i+1, err)
+			return failTurn(result, turnResult, fmt.Errorf("turn %d chat completion: %w", i+1, err))
 		}
 		if resp == nil {
 			err := fmt.Errorf("turn %d chat completion: %w", i+1, model.NilChatResponseError(req))
-			turnResult.Err = err.Error()
-			result.Turns = append(result.Turns, turnResult)
-			return result, err
+			return failTurn(result, turnResult, err)
 		}
 		if strings.TrimSpace(resp.Model) != "" {
 			turnResult.Model = resp.Model
 		}
 		turnResult.Usage = resp.Usage
+		result.Usage.PromptTokens += resp.Usage.PromptTokens
+		result.Usage.CompletionTokens += resp.Usage.CompletionTokens
+		result.Usage.TotalTokens += resp.Usage.TotalTokens
 		if len(resp.Choices) == 0 {
 			err := fmt.Errorf("turn %d chat completion: %w", i+1, model.NoResponseChoicesError(req, resp))
-			turnResult.Err = err.Error()
-			result.Turns = append(result.Turns, turnResult)
-			return result, err
+			return failTurn(result, turnResult, err)
 		}
 
 		choice := resp.Choices[0]
 		msg := choice.Message
 		text, extractErr := model.ExtractTextContent(msg.Content)
 		if extractErr != nil && strings.TrimSpace(msg.Reasoning) == "" {
-			turnResult.Err = extractErr.Error()
-			result.Turns = append(result.Turns, turnResult)
-			return result, fmt.Errorf("turn %d extract response text: %w", i+1, extractErr)
+			err := fmt.Errorf("turn %d extract response text: %w", i+1, extractErr)
+			return failTurn(result, turnResult, err)
 		}
 		if strings.TrimSpace(text) == "" && strings.TrimSpace(msg.Reasoning) != "" {
 			text = strings.TrimSpace(msg.Reasoning)
@@ -175,15 +189,29 @@ func (r Runner) Run(ctx context.Context, scenario Scenario) (*Result, error) {
 
 		if text == "" {
 			err := fmt.Errorf("turn %d returned empty assistant text", i+1)
-			turnResult.Err = err.Error()
-			result.Turns = append(result.Turns, turnResult)
-			return result, err
+			turnResult.Checks = append(turnResult.Checks, CheckResult{
+				Name:    "non_empty_text",
+				Passed:  false,
+				Message: "assistant text was empty",
+			})
+			return failTurn(result, turnResult, err)
 		}
+		turnResult.Checks = append(turnResult.Checks, CheckResult{Name: "non_empty_text", Passed: true})
 		if turn.MinChars > 0 && len(text) < turn.MinChars {
 			err := fmt.Errorf("turn %d response too short: got %d chars, want at least %d", i+1, len(text), turn.MinChars)
-			turnResult.Err = err.Error()
-			result.Turns = append(result.Turns, turnResult)
-			return result, err
+			turnResult.Checks = append(turnResult.Checks, CheckResult{
+				Name:    "min_chars",
+				Passed:  false,
+				Message: fmt.Sprintf("got %d chars, want at least %d", len(text), turn.MinChars),
+			})
+			return failTurn(result, turnResult, err)
+		}
+		if turn.MinChars > 0 {
+			turnResult.Checks = append(turnResult.Checks, CheckResult{
+				Name:    "min_chars",
+				Passed:  true,
+				Message: fmt.Sprintf("got %d chars, want at least %d", len(text), turn.MinChars),
+			})
 		}
 		for _, want := range turn.WantContains {
 			want = strings.TrimSpace(want)
@@ -192,12 +220,21 @@ func (r Runner) Run(ctx context.Context, scenario Scenario) (*Result, error) {
 			}
 			if !strings.Contains(text, want) {
 				err := fmt.Errorf("turn %d response missing %q", i+1, want)
-				turnResult.Err = err.Error()
-				result.Turns = append(result.Turns, turnResult)
-				return result, err
+				turnResult.Checks = append(turnResult.Checks, CheckResult{
+					Name:    "contains",
+					Passed:  false,
+					Message: fmt.Sprintf("missing %q", want),
+				})
+				return failTurn(result, turnResult, err)
 			}
+			turnResult.Checks = append(turnResult.Checks, CheckResult{
+				Name:    "contains",
+				Passed:  true,
+				Message: fmt.Sprintf("found %q", want),
+			})
 		}
 
+		turnResult.Passed = true
 		result.Turns = append(result.Turns, turnResult)
 		messages = append(messages, model.Message{
 			Role:             "assistant",
@@ -208,6 +245,39 @@ func (r Runner) Run(ctx context.Context, scenario Scenario) (*Result, error) {
 	}
 
 	return result, nil
+}
+
+func failTurn(result *Result, turn TurnResult, err error) (*Result, error) {
+	if err == nil {
+		err = fmt.Errorf("chat check failed")
+	}
+	turn.Err = err.Error()
+	turn.Passed = false
+	if result != nil {
+		result.Error = err.Error()
+		result.Turns = append(result.Turns, turn)
+	}
+	return result, err
+}
+
+func finalizeResult(result *Result, started time.Time) {
+	if result == nil {
+		return
+	}
+	completed := time.Now()
+	result.CompletedAt = completed
+	result.DurationMillis = completed.Sub(started).Milliseconds()
+	if result.Error != "" || len(result.Turns) == 0 {
+		result.Passed = false
+		return
+	}
+	for _, turn := range result.Turns {
+		if !turn.Passed || strings.TrimSpace(turn.Err) != "" {
+			result.Passed = false
+			return
+		}
+	}
+	result.Passed = true
 }
 
 func normalizeScenario(scenario Scenario) Scenario {

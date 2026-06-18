@@ -2,6 +2,7 @@ package chatcheck
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -46,6 +47,18 @@ func TestRunnerRunMultiTurn(t *testing.T) {
 	if len(result.Turns) != 2 {
 		t.Fatalf("turns=%d want 2", len(result.Turns))
 	}
+	if !result.Passed || result.Error != "" {
+		t.Fatalf("result pass/error = %v/%q", result.Passed, result.Error)
+	}
+	if result.DurationMillis < 0 || result.CompletedAt.Before(result.StartedAt) {
+		t.Fatalf("invalid timing in result: %+v", result)
+	}
+	if result.Usage.TotalTokens != 20 {
+		t.Fatalf("total tokens = %d, want 20", result.Usage.TotalTokens)
+	}
+	if !result.Turns[0].Passed || len(result.Turns[0].Checks) == 0 || result.Turns[0].LatencyMillis < 0 {
+		t.Fatalf("first turn report missing pass/check/timing data: %+v", result.Turns[0])
+	}
 	if len(client.requests) != 2 {
 		t.Fatalf("requests=%d want 2", len(client.requests))
 	}
@@ -58,6 +71,14 @@ func TestRunnerRunMultiTurn(t *testing.T) {
 	}
 	if second[2].Role != "assistant" || second[2].Content != "BUCKLEY_CHAT_CHECK_ONE" {
 		t.Fatalf("first assistant turn missing from second request: %+v", second)
+	}
+
+	data, err := json.Marshal(result)
+	if err != nil {
+		t.Fatalf("marshal result: %v", err)
+	}
+	if strings.Contains(string(data), "Latency") {
+		t.Fatalf("json result should expose latency_ms, not Go duration field: %s", data)
 	}
 }
 
@@ -74,6 +95,9 @@ func TestRunnerRunNoChoices(t *testing.T) {
 	}
 	if result == nil || len(result.Turns) != 1 || result.Turns[0].Err == "" {
 		t.Fatalf("result did not capture failure: %+v", result)
+	}
+	if result.Passed || result.Error == "" || result.Turns[0].Passed {
+		t.Fatalf("failure result should be marked failed: %+v", result)
 	}
 }
 
@@ -97,7 +121,7 @@ func TestRunnerRunMissingExpectedText(t *testing.T) {
 	client := &fakeClient{responses: []model.ChatResponse{response("test-model", "different text")}}
 	runner := Runner{Client: client}
 
-	_, err := runner.Run(context.Background(), Scenario{
+	result, err := runner.Run(context.Background(), Scenario{
 		Model: "test-model",
 		Turns: []Turn{{
 			User:         "hello",
@@ -106,6 +130,13 @@ func TestRunnerRunMissingExpectedText(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "missing") {
 		t.Fatalf("err=%v want missing expected text", err)
+	}
+	if result == nil || len(result.Turns) != 1 || len(result.Turns[0].Checks) == 0 {
+		t.Fatalf("missing text result should include failed checks: %+v", result)
+	}
+	lastCheck := result.Turns[0].Checks[len(result.Turns[0].Checks)-1]
+	if lastCheck.Passed || !strings.Contains(lastCheck.Message, "expected token") {
+		t.Fatalf("unexpected failed check: %+v", lastCheck)
 	}
 }
 
@@ -127,6 +158,25 @@ func TestRunnerRunReasoningFallback(t *testing.T) {
 	}
 	if !result.Turns[0].Reasoning || result.Turns[0].Text != "visible fallback" {
 		t.Fatalf("unexpected turn result: %+v", result.Turns[0])
+	}
+}
+
+func TestRunnerRunProviderErrorCapturesFailedTurn(t *testing.T) {
+	client := &fakeClient{errs: []error{errors.New("provider unavailable")}}
+	runner := Runner{Client: client}
+
+	result, err := runner.Run(context.Background(), Scenario{
+		Model: "test-model",
+		Turns: []Turn{{User: "hello"}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "provider unavailable") {
+		t.Fatalf("err=%v want provider error", err)
+	}
+	if result == nil || result.Passed || result.Error == "" {
+		t.Fatalf("result should be failed with error: %+v", result)
+	}
+	if len(result.Turns) != 1 || result.Turns[0].Err == "" || result.Turns[0].Passed {
+		t.Fatalf("failed turn not captured: %+v", result.Turns)
 	}
 }
 

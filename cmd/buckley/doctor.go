@@ -2,10 +2,12 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -39,6 +41,8 @@ func runDoctorChatCommand(args []string) error {
 	fs := flag.NewFlagSet("doctor chat", flag.ContinueOnError)
 	modelID := fs.String("model", defaultModel, "model to use for the multi-turn chat check")
 	timeout := fs.Duration("timeout", 45*time.Second, "per-turn timeout")
+	jsonOutput := fs.Bool("json", false, "print machine-readable JSON report")
+	outPath := fs.String("out", "", "write machine-readable JSON report to a file")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -55,13 +59,30 @@ func runDoctorChatCommand(args []string) error {
 	scenario := chatcheck.DefaultScenario(*modelID)
 	scenario.Timeout = *timeout
 
-	fmt.Printf("Running chat health check with %s (%d turns)\n", scenario.Model, len(scenario.Turns))
+	if *jsonOutput {
+		fmt.Fprintf(os.Stderr, "Running chat health check with %s (%d turns)\n", scenario.Model, len(scenario.Turns))
+	} else {
+		fmt.Printf("Running chat health check with %s (%d turns)\n", scenario.Model, len(scenario.Turns))
+	}
 	result, runErr := (chatcheck.Runner{Client: mgr}).Run(context.Background(), scenario)
-	printChatCheckResult(os.Stdout, result)
+	if *outPath != "" {
+		if err := writeChatCheckReport(*outPath, result); err != nil {
+			return err
+		}
+	}
+	if *jsonOutput {
+		if err := printChatCheckJSON(os.Stdout, result); err != nil {
+			return err
+		}
+	} else {
+		printChatCheckResult(os.Stdout, result)
+	}
 	if runErr != nil {
 		return withExitCode(runErr, 1)
 	}
-	fmt.Println("Chat health check passed")
+	if !*jsonOutput {
+		fmt.Println("Chat health check passed")
+	}
 	return nil
 }
 
@@ -92,4 +113,34 @@ func printChatCheckResult(w io.Writer, result *chatcheck.Result) {
 		}
 		fmt.Fprintln(w)
 	}
+}
+
+func printChatCheckJSON(w io.Writer, result *chatcheck.Result) error {
+	if result == nil {
+		return nil
+	}
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	return enc.Encode(result)
+}
+
+func writeChatCheckReport(path string, result *chatcheck.Result) error {
+	path = strings.TrimSpace(path)
+	if path == "" || result == nil {
+		return nil
+	}
+	if dir := filepath.Dir(path); dir != "." && dir != "" {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return fmt.Errorf("create chat check report directory: %w", err)
+		}
+	}
+	data, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal chat check report: %w", err)
+	}
+	data = append(data, '\n')
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		return fmt.Errorf("write chat check report: %w", err)
+	}
+	return nil
 }
