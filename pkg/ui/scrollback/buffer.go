@@ -834,34 +834,12 @@ func wrapPlainLine(text string, width int, isCode bool) []WrappedLine {
 
 	var lines []WrappedLine
 	runes := []rune(text)
-	wrapAtWord := !isCode
-	trimSpaces := !isCode
+	opts := newWrapOptions(width, isCode)
 
 	for len(runes) > 0 {
-		end := min(len(runes), width)
-		if wrapAtWord && end < len(runes) {
-			for i := end - 1; i > end-20 && i > 0; i-- {
-				if runes[i] == ' ' {
-					end = i + 1
-					break
-				}
-			}
-		}
-
-		segment := runes[:end]
-		if trimSpaces {
-			for len(segment) > 0 && segment[len(segment)-1] == ' ' {
-				segment = segment[:len(segment)-1]
-			}
-		}
+		var segment []rune
+		segment, runes = nextRuneWrapSegment(runes, opts)
 		lines = append(lines, WrappedLine{Text: string(segment)})
-		runes = runes[end:]
-
-		if trimSpaces {
-			for len(runes) > 0 && runes[0] == ' ' {
-				runes = runes[1:]
-			}
-		}
 	}
 
 	if len(lines) == 0 {
@@ -887,33 +865,11 @@ func wrapStyledLine(text string, spans, prefix []Span, width int, isCode bool) [
 	}
 
 	var lines []WrappedLine
-	wrapAtWord := !isCode
-	trimSpaces := !isCode
+	opts := newWrapOptions(available, isCode)
 
 	for len(runes) > 0 {
-		end := min(len(runes), available)
-		if wrapAtWord && end < len(runes) {
-			for i := end - 1; i > end-20 && i > 0; i-- {
-				if runes[i].r == ' ' {
-					end = i + 1
-					break
-				}
-			}
-		}
-
-		segment := runes[:end]
-		if trimSpaces {
-			for len(segment) > 0 && segment[len(segment)-1].r == ' ' {
-				segment = segment[:len(segment)-1]
-			}
-		}
-		runes = runes[end:]
-
-		if trimSpaces {
-			for len(runes) > 0 && runes[0].r == ' ' {
-				runes = runes[1:]
-			}
-		}
+		var segment []styledRune
+		segment, runes = nextStyledWrapSegment(runes, opts)
 
 		linePrefix := prefix
 		if len(lines) > 0 {
@@ -931,6 +887,91 @@ func wrapStyledLine(text string, spans, prefix []Span, width int, isCode bool) [
 		lines = []WrappedLine{{Text: prefixText, Spans: append([]Span{}, prefix...)}}
 	}
 	return lines
+}
+
+type wrapOptions struct {
+	width      int
+	wrapAtWord bool
+	trimSpaces bool
+}
+
+func newWrapOptions(width int, isCode bool) wrapOptions {
+	return wrapOptions{
+		width:      width,
+		wrapAtWord: !isCode,
+		trimSpaces: !isCode,
+	}
+}
+
+func nextRuneWrapSegment(runes []rune, opts wrapOptions) ([]rune, []rune) {
+	end := wrapSegmentEnd(len(runes), opts.width, opts.wrapAtWord, func(i int) bool {
+		return runes[i] == ' '
+	})
+	segment := trimTrailingRunes(runes[:end], opts.trimSpaces)
+	remaining := trimLeadingRunes(runes[end:], opts.trimSpaces)
+	return segment, remaining
+}
+
+func nextStyledWrapSegment(runes []styledRune, opts wrapOptions) ([]styledRune, []styledRune) {
+	end := wrapSegmentEnd(len(runes), opts.width, opts.wrapAtWord, func(i int) bool {
+		return runes[i].r == ' '
+	})
+	segment := trimTrailingStyledRunes(runes[:end], opts.trimSpaces)
+	remaining := trimLeadingStyledRunes(runes[end:], opts.trimSpaces)
+	return segment, remaining
+}
+
+func wrapSegmentEnd(length, width int, wrapAtWord bool, isSpace func(int) bool) int {
+	end := min(length, width)
+	if !wrapAtWord || end >= length {
+		return end
+	}
+	for i := end - 1; i > end-20 && i > 0; i-- {
+		if isSpace(i) {
+			return i + 1
+		}
+	}
+	return end
+}
+
+func trimTrailingRunes(runes []rune, trim bool) []rune {
+	if !trim {
+		return runes
+	}
+	for len(runes) > 0 && runes[len(runes)-1] == ' ' {
+		runes = runes[:len(runes)-1]
+	}
+	return runes
+}
+
+func trimLeadingRunes(runes []rune, trim bool) []rune {
+	if !trim {
+		return runes
+	}
+	for len(runes) > 0 && runes[0] == ' ' {
+		runes = runes[1:]
+	}
+	return runes
+}
+
+func trimTrailingStyledRunes(runes []styledRune, trim bool) []styledRune {
+	if !trim {
+		return runes
+	}
+	for len(runes) > 0 && runes[len(runes)-1].r == ' ' {
+		runes = runes[:len(runes)-1]
+	}
+	return runes
+}
+
+func trimLeadingStyledRunes(runes []styledRune, trim bool) []styledRune {
+	if !trim {
+		return runes
+	}
+	for len(runes) > 0 && runes[0].r == ' ' {
+		runes = runes[1:]
+	}
+	return runes
 }
 
 func blankPrefix(prefix []Span) []Span {

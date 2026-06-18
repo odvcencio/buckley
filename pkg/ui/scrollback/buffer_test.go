@@ -1,6 +1,7 @@
 package scrollback
 
 import (
+	"slices"
 	"strings"
 	"testing"
 
@@ -340,6 +341,46 @@ func TestWrapLine(t *testing.T) {
 	}
 }
 
+func TestWrapPlainLine_TextSegments(t *testing.T) {
+	tests := []struct {
+		name     string
+		text     string
+		width    int
+		isCode   bool
+		expected []string
+	}{
+		{
+			name:     "word wrap trims boundary spaces",
+			text:     "a b c d e f",
+			width:    3,
+			expected: []string{"a", "b", "c", "d", "e f"},
+		},
+		{
+			name:     "code wrap preserves spaces",
+			text:     "a b ",
+			width:    3,
+			isCode:   true,
+			expected: []string{"a b", " "},
+		},
+		{
+			name:     "long word hard wraps",
+			text:     "abcdefghij",
+			width:    5,
+			expected: []string{"abcde", "fghij"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			lines := wrapPlainLine(tt.text, tt.width, tt.isCode)
+			got := wrappedLineTexts(lines)
+			if !slices.Equal(got, tt.expected) {
+				t.Fatalf("wrapped lines = %#v, want %#v", got, tt.expected)
+			}
+		})
+	}
+}
+
 func TestWrapStyledLineContinuationUsesBlankPrefix(t *testing.T) {
 	text := "God files are candidates for decomposition"
 	lines := wrapStyledLine(text, []Span{{Text: text}}, []Span{{Text: "2. "}}, 16, false)
@@ -356,6 +397,14 @@ func TestWrapStyledLineContinuationUsesBlankPrefix(t *testing.T) {
 	if strings.HasPrefix(strings.TrimLeft(lines[1].Text, " "), "2.") {
 		t.Fatalf("continuation line should not repeat list prefix, got %q", lines[1].Text)
 	}
+}
+
+func wrappedLineTexts(lines []WrappedLine) []string {
+	texts := make([]string, len(lines))
+	for i, line := range lines {
+		texts[i] = line.Text
+	}
+	return texts
 }
 
 func TestResize(t *testing.T) {
