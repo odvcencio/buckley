@@ -1,8 +1,11 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 	"testing"
+
+	"m31labs.dev/buckley/pkg/ui/backend/sim"
 )
 
 func TestModelProcessStatus(t *testing.T) {
@@ -90,5 +93,34 @@ func TestConsumeDisableToolsNextTurn(t *testing.T) {
 	}
 	if ctrl.consumeDisableToolsNextTurn(sess) {
 		t.Fatal("expected second consume to be false")
+	}
+}
+
+func TestHandleToolLoopModelError_RetriesWithoutTools(t *testing.T) {
+	app, err := NewWidgetApp(WidgetAppConfig{Backend: sim.New(80, 24)})
+	if err != nil {
+		t.Fatalf("NewWidgetApp: %v", err)
+	}
+	ctrl := &Controller{app: app}
+	state := &toolLoopState{useTools: true}
+
+	if err := ctrl.handleToolLoopModelError(fmt.Errorf("model does not support tool calling"), state); err != nil {
+		t.Fatalf("expected unsupported tools error to be consumed, got %v", err)
+	}
+	if state.useTools {
+		t.Fatal("useTools should be disabled after unsupported tools error")
+	}
+	select {
+	case msg := <-app.messages:
+		status, ok := msg.(StatusMsg)
+		if !ok || status.Text != "Retrying without tools" {
+			t.Fatalf("posted message = %#v, want retrying status", msg)
+		}
+	default:
+		t.Fatal("expected retrying status message to be posted")
+	}
+
+	if err := ctrl.handleToolLoopModelError(fmt.Errorf("provider unavailable"), state); err == nil {
+		t.Fatal("non-tool errors should be returned")
 	}
 }

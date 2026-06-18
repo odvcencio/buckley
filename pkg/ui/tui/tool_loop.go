@@ -11,53 +11,99 @@ import (
 	"m31labs.dev/buckley/pkg/tool/builtin"
 )
 
+type toolLoopState struct {
+	useTools   bool
+	totalUsage model.Usage
+}
+
+type toolLoopIterationResult struct {
+	done         bool
+	message      model.Message
+	finishReason string
+}
+
 func (c *Controller) runToolLoop(ctx context.Context, sess *SessionState, modelID string) (string, *model.Usage, string, error) {
+	if err := c.validateToolLoopInputs(sess); err != nil {
+		return "", nil, "", err
+	}
+
+	maxIterations := interactiveMaxToolIterations
+	state := c.newToolLoopState(sess, modelID)
+	for iter := 0; iter < maxIterations; iter++ {
+		result, err := c.runToolLoopIteration(ctx, sess, modelID, iter, maxIterations, &state)
+		if err != nil {
+			return "", nil, "", err
+		}
+		if result.done {
+			return c.finishToolLoopResponse(sess, result.message, state.totalUsage, result.finishReason)
+		}
+	}
+
+	return c.checkpointToolLoop(sess, state.totalUsage, maxIterations)
+}
+
+func (c *Controller) validateToolLoopInputs(sess *SessionState) error {
 	if c.modelMgr == nil {
-		return "", nil, "", fmt.Errorf("model manager unavailable")
+		return fmt.Errorf("model manager unavailable")
 	}
 	if sess == nil || sess.Conversation == nil {
-		return "", nil, "", fmt.Errorf("session unavailable")
+		return fmt.Errorf("session unavailable")
+	}
+	return nil
+}
+
+func (c *Controller) newToolLoopState(sess *SessionState, modelID string) toolLoopState {
+	return toolLoopState{
+		useTools: !c.consumeDisableToolsNextTurn(sess) &&
+			sess.ToolRegistry != nil &&
+			c.modelMgr.SupportsTools(modelID),
+	}
+}
+
+func (c *Controller) runToolLoopIteration(ctx context.Context, sess *SessionState, modelID string, iteration, maxIterations int, state *toolLoopState) (toolLoopIterationResult, error) {
+	if ctx.Err() != nil {
+		return toolLoopIterationResult{}, ctx.Err()
 	}
 
-	useTools := !c.consumeDisableToolsNextTurn(sess) && sess.ToolRegistry != nil && c.modelMgr.SupportsTools(modelID)
-	maxIterations := interactiveMaxToolIterations
-	totalUsage := model.Usage{}
+	allowedTools := toolLoopAllowedTools(sess)
+	req, nextUseTools := c.buildToolLoopRequest(sess, modelID, state.useTools, allowedTools)
+	state.useTools = nextUseTools
 
-	for iter := 0; iter < maxIterations; iter++ {
-		if ctx.Err() != nil {
-			return "", nil, "", ctx.Err()
+	resp, err := c.callToolLoopModel(ctx, req, modelID, iteration, maxIterations)
+	if err != nil {
+		return toolLoopIterationResult{}, c.handleToolLoopModelError(err, state)
+	}
+	state.totalUsage = addUsage(state.totalUsage, resp.Usage)
+
+	choice, err := firstToolLoopChoice(req, resp)
+	if err != nil {
+		return toolLoopIterationResult{}, err
+	}
+	return c.handleToolLoopChoice(sess, choice.Message, allowedTools, choice.FinishReason), nil
+}
+
+func (c *Controller) handleToolLoopModelError(err error, state *toolLoopState) error {
+	if state != nil && state.useTools && isToolUnsupportedError(err) {
+		c.app.SetStatus("Retrying without tools")
+		state.useTools = false
+		return nil
+	}
+	return err
+}
+
+func (c *Controller) handleToolLoopChoice(sess *SessionState, msg model.Message, allowedTools []string, finishReason string) toolLoopIterationResult {
+	if len(msg.ToolCalls) == 0 {
+		return toolLoopIterationResult{
+			done:         true,
+			message:      msg,
+			finishReason: finishReason,
 		}
-
-		allowedTools := toolLoopAllowedTools(sess)
-		req, nextUseTools := c.buildToolLoopRequest(sess, modelID, useTools, allowedTools)
-		useTools = nextUseTools
-
-		resp, err := c.callToolLoopModel(ctx, req, modelID, iter, maxIterations)
-		if err != nil {
-			if useTools && isToolUnsupportedError(err) {
-				c.app.SetStatus("Retrying without tools")
-				useTools = false
-				continue
-			}
-			return "", nil, "", err
-		}
-		totalUsage = addUsage(totalUsage, resp.Usage)
-
-		choice, err := firstToolLoopChoice(req, resp)
-		if err != nil {
-			return "", nil, "", err
-		}
-		msg := choice.Message
-		if len(msg.ToolCalls) == 0 {
-			return c.finishToolLoopResponse(sess, msg, totalUsage, choice.FinishReason)
-		}
-
-		toolCalls := normalizeToolLoopCalls(sess.ToolRegistry, msg.ToolCalls, allowedTools)
-		c.recordToolLoopCalls(sess, toolCalls, msg)
-		c.executeToolLoopCalls(sess, toolCalls, allowedTools)
 	}
 
-	return c.checkpointToolLoop(sess, totalUsage, maxIterations)
+	toolCalls := normalizeToolLoopCalls(sess.ToolRegistry, msg.ToolCalls, allowedTools)
+	c.recordToolLoopCalls(sess, toolCalls, msg)
+	c.executeToolLoopCalls(sess, toolCalls, allowedTools)
+	return toolLoopIterationResult{}
 }
 
 func toolLoopAllowedTools(sess *SessionState) []string {
