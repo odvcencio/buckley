@@ -47,29 +47,6 @@ func TestGetStyleForSource(t *testing.T) {
 	}
 }
 
-func TestItoa(t *testing.T) {
-	tests := []struct {
-		input    int
-		expected string
-	}{
-		{0, "0"},
-		{1, "1"},
-		{10, "10"},
-		{100, "100"},
-		{12345, "12345"},
-		{-1, "-1"},
-		{-100, "-100"},
-		{-12345, "-12345"},
-	}
-
-	for _, tt := range tests {
-		got := itoa(tt.input)
-		if got != tt.expected {
-			t.Errorf("itoa(%d) = %q, want %q", tt.input, got, tt.expected)
-		}
-	}
-}
-
 func TestRender_NilInputs(t *testing.T) {
 	// Should not panic with nil inputs
 	screen := compositor.NewScreen(80, 24)

@@ -1,6 +1,8 @@
 package scrollback
 
 import (
+	"strconv"
+
 	"m31labs.dev/buckley/pkg/ui/compositor"
 )
 
@@ -181,7 +183,7 @@ func RenderStatusLine(buf *Buffer, screen *compositor.Screen, x, y, width int, s
 		status = "Bot"
 	} else {
 		pct := 100 * top / (total - viewHeight)
-		status = itoa(pct) + "%"
+		status = strconv.Itoa(pct) + "%"
 	}
 
 	// Right-align status
@@ -190,34 +192,7 @@ func RenderStatusLine(buf *Buffer, screen *compositor.Screen, x, y, width int, s
 
 	// Show search status if active
 	if current, total := buf.SearchMatches(); total > 0 {
-		searchStatus := itoa(current) + "/" + itoa(total)
+		searchStatus := strconv.Itoa(current) + "/" + strconv.Itoa(total)
 		screen.SetString(x+1, y, searchStatus, style)
 	}
-}
-
-// itoa converts int to string without fmt.
-func itoa(i int) string {
-	if i == 0 {
-		return "0"
-	}
-
-	var buf [20]byte
-	pos := len(buf)
-	neg := i < 0
-	if neg {
-		i = -i
-	}
-
-	for i > 0 {
-		pos--
-		buf[pos] = byte('0' + i%10)
-		i /= 10
-	}
-
-	if neg {
-		pos--
-		buf[pos] = '-'
-	}
-
-	return string(buf[pos:])
 }

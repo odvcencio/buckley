@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -91,7 +92,7 @@ func TestCoalescer_ConcurrentSessions(t *testing.T) {
 
 	for i := 0; i < chunksPerSession; i++ {
 		for s := 0; s < numSessions; s++ {
-			sessionID := "session-" + intToString(s)
+			sessionID := "session-" + strconv.Itoa(s)
 			c.Add(sessionID, "X")
 		}
 	}
@@ -100,7 +101,7 @@ func TestCoalescer_ConcurrentSessions(t *testing.T) {
 
 	// Verify each session got its data
 	for s := 0; s < numSessions; s++ {
-		sessionID := "session-" + intToString(s)
+		sessionID := "session-" + strconv.Itoa(s)
 		expected := strings.Repeat("X", chunksPerSession)
 		if sessionData[sessionID] != expected {
 			t.Errorf("session %s: expected %d chars, got %d",
@@ -170,17 +171,4 @@ func TestCoalescer_MemoryPressure(t *testing.T) {
 	if maxBufferSize > cfg.MaxChars*2 {
 		t.Errorf("buffer grew too large: %d (max configured: %d)", maxBufferSize, cfg.MaxChars)
 	}
-}
-
-// intToString converts int to string without fmt.
-func intToString(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	digits := ""
-	for n > 0 {
-		digits = string(rune('0'+n%10)) + digits
-		n /= 10
-	}
-	return digits
 }
