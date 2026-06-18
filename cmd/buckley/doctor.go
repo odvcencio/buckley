@@ -86,6 +86,18 @@ type doctorChatRunSummary struct {
 	Error           string `json:"error,omitempty"`
 }
 
+type doctorChatRunDetail struct {
+	Run         doctorChatRunSummary        `json:"run"`
+	Manifest    doctorChatArtifactsManifest `json:"manifest"`
+	Transcripts []doctorChatTranscriptView  `json:"transcripts,omitempty"`
+}
+
+type doctorChatTranscriptView struct {
+	Name    string `json:"name"`
+	Path    string `json:"path"`
+	Content string `json:"content,omitempty"`
+}
+
 func runDoctorChatInitCommand(args []string) error {
 	fs := flag.NewFlagSet("doctor chat init", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
@@ -129,6 +141,10 @@ func runDoctorChatInitCommand(args []string) error {
 }
 
 func runDoctorChatRunsCommand(args []string) error {
+	if len(args) > 0 && strings.TrimSpace(args[0]) == "show" {
+		return runDoctorChatRunShowCommand(args[1:])
+	}
+
 	fs := flag.NewFlagSet("doctor chat runs", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	pathFlag := fs.String("path", "", "chat check artifact root to inspect")
@@ -165,6 +181,47 @@ func runDoctorChatRunsCommand(args []string) error {
 		return enc.Encode(inventory)
 	}
 	printDoctorChatRunsInventory(os.Stdout, inventory)
+	return nil
+}
+
+func runDoctorChatRunShowCommand(args []string) error {
+	fs := flag.NewFlagSet("doctor chat runs show", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	pathFlag := fs.String("path", "", "chat check artifact root to inspect")
+	projectRuns := fs.Bool("project", false, "inspect project chat check runs from .buckley/chatchecks/runs")
+	includeTranscript := fs.Bool("transcript", false, "include transcript content in the output")
+	jsonOutput := fs.Bool("json", false, "print machine-readable JSON")
+	format := fs.String("format", "text", "output format: text or json")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() > 1 {
+		return fmt.Errorf("usage: buckley doctor chat runs show [--project|--path <dir>] [--transcript] [--json|--format json] [run-id|latest]")
+	}
+	if strings.TrimSpace(*pathFlag) != "" && *projectRuns {
+		return fmt.Errorf("doctor chat runs show --path cannot be combined with --project")
+	}
+	if err := normalizeJSONFormatFlag(*format, jsonOutput); err != nil {
+		return err
+	}
+	runID := "latest"
+	if fs.NArg() == 1 {
+		runID = fs.Arg(0)
+	}
+	root, err := resolveDoctorChatRunsRoot(*pathFlag, *projectRuns)
+	if err != nil {
+		return err
+	}
+	detail, err := loadDoctorChatRunDetail(root, runID, *includeTranscript)
+	if err != nil {
+		return err
+	}
+	if *jsonOutput {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(detail)
+	}
+	printDoctorChatRunDetail(os.Stdout, detail, *includeTranscript)
 	return nil
 }
 
@@ -693,14 +750,9 @@ func readDoctorChatRunSummary(root, id string) doctorChatRunSummary {
 		Path:    runPath,
 		Summary: filepath.Join(runPath, "summary.json"),
 	}
-	data, err := os.ReadFile(summary.Summary)
+	manifest, err := readDoctorChatRunManifest(runPath)
 	if err != nil {
-		summary.Error = fmt.Sprintf("read summary: %v", err)
-		return summary
-	}
-	var manifest doctorChatArtifactsManifest
-	if err := json.Unmarshal(data, &manifest); err != nil {
-		summary.Error = fmt.Sprintf("parse summary: %v", err)
+		summary.Error = err.Error()
 		return summary
 	}
 	summary.Project = manifest.Context.Project
@@ -726,6 +778,84 @@ func readDoctorChatRunSummary(root, id string) doctorChatRunSummary {
 	}
 	summary.Passed = summary.Error == "" && summary.FailedScenarios == 0 && len(manifest.Results) > 0
 	return summary
+}
+
+func readDoctorChatRunManifest(runPath string) (doctorChatArtifactsManifest, error) {
+	summaryPath := filepath.Join(runPath, "summary.json")
+	data, err := os.ReadFile(summaryPath)
+	if err != nil {
+		return doctorChatArtifactsManifest{}, fmt.Errorf("read summary: %w", err)
+	}
+	var manifest doctorChatArtifactsManifest
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		return doctorChatArtifactsManifest{}, fmt.Errorf("parse summary: %w", err)
+	}
+	return manifest, nil
+}
+
+func loadDoctorChatRunDetail(root, id string, includeTranscript bool) (doctorChatRunDetail, error) {
+	root = strings.TrimSpace(root)
+	if root == "" {
+		root = defaultChatCheckArtifactRoot
+	}
+	absRoot, err := filepath.Abs(root)
+	if err != nil {
+		return doctorChatRunDetail{}, fmt.Errorf("resolve chat check runs root: %w", err)
+	}
+	runID, err := resolveDoctorChatRunID(absRoot, id)
+	if err != nil {
+		return doctorChatRunDetail{}, err
+	}
+	runPath := filepath.Join(absRoot, runID)
+	summary := readDoctorChatRunSummary(absRoot, runID)
+	if summary.Error != "" {
+		return doctorChatRunDetail{}, fmt.Errorf("chat check run %s is invalid: %s", runID, summary.Error)
+	}
+	manifest, err := readDoctorChatRunManifest(runPath)
+	if err != nil {
+		return doctorChatRunDetail{}, err
+	}
+	detail := doctorChatRunDetail{
+		Run:      summary,
+		Manifest: manifest,
+	}
+	for _, result := range manifest.Results {
+		if strings.TrimSpace(result.Transcript) == "" {
+			continue
+		}
+		path := filepath.Join(runPath, filepath.FromSlash(result.Transcript))
+		view := doctorChatTranscriptView{
+			Name: result.Name,
+			Path: path,
+		}
+		if includeTranscript {
+			data, err := os.ReadFile(path)
+			if err != nil {
+				return doctorChatRunDetail{}, fmt.Errorf("read transcript %s: %w", path, err)
+			}
+			view.Content = string(data)
+		}
+		detail.Transcripts = append(detail.Transcripts, view)
+	}
+	return detail, nil
+}
+
+func resolveDoctorChatRunID(root, id string) (string, error) {
+	id = strings.TrimSpace(id)
+	if id == "" || id == "latest" {
+		inventory, err := listDoctorChatRuns(root, 1)
+		if err != nil {
+			return "", err
+		}
+		if len(inventory.Runs) == 0 {
+			return "", fmt.Errorf("no chat check runs found: %s", inventory.Root)
+		}
+		return inventory.Runs[0].ID, nil
+	}
+	if id == "." || id == ".." || strings.Contains(filepath.ToSlash(id), "/") {
+		return "", fmt.Errorf("invalid chat check run id: %s", id)
+	}
+	return id, nil
 }
 
 func printDoctorChatRunsInventory(w io.Writer, inventory doctorChatRunsInventory) {
@@ -754,6 +884,60 @@ func printDoctorChatRunsInventory(w io.Writer, inventory doctorChatRunsInventory
 			fmt.Fprintf(w, ", error=%s", run.Error)
 		}
 		fmt.Fprintln(w)
+	}
+}
+
+func printDoctorChatRunDetail(w io.Writer, detail doctorChatRunDetail, includeTranscript bool) {
+	run := detail.Run
+	status := "pass"
+	if strings.TrimSpace(run.Error) != "" {
+		status = "invalid"
+	} else if !run.Passed {
+		status = "fail"
+	}
+	fmt.Fprintf(w, "Chat check run: %s (%s)\n", run.ID, status)
+	fmt.Fprintf(w, "Path: %s\n", run.Path)
+	if run.GeneratedAt != "" {
+		fmt.Fprintf(w, "Generated: %s\n", run.GeneratedAt)
+	}
+	fmt.Fprintf(w, "Scenarios: %d (passed=%d failed=%d)\n", run.ScenarioCount, run.PassedScenarios, run.FailedScenarios)
+	if run.Project {
+		fmt.Fprintln(w, "Project: true")
+	}
+	if run.Report != "" {
+		fmt.Fprintf(w, "Report: %s\n", run.Report)
+	}
+	if run.Summary != "" {
+		fmt.Fprintf(w, "Summary: %s\n", run.Summary)
+	}
+	if len(detail.Manifest.Results) > 0 {
+		fmt.Fprintln(w, "Results:")
+		for _, result := range detail.Manifest.Results {
+			status := "pass"
+			if !result.Passed {
+				status = "fail"
+			}
+			fmt.Fprintf(w, "  - %s: %s, turns=%d, duration=%dms", result.Name, status, result.Turns, result.DurationMillis)
+			if result.Error != "" {
+				fmt.Fprintf(w, ", error=%s", result.Error)
+			}
+			if result.Path != "" {
+				fmt.Fprintf(w, ", result=%s", filepath.Join(run.Path, filepath.FromSlash(result.Path)))
+			}
+			if result.Transcript != "" {
+				fmt.Fprintf(w, ", transcript=%s", filepath.Join(run.Path, filepath.FromSlash(result.Transcript)))
+			}
+			fmt.Fprintln(w)
+		}
+	}
+	if includeTranscript && len(detail.Transcripts) > 0 {
+		for _, transcript := range detail.Transcripts {
+			fmt.Fprintf(w, "\n--- Transcript: %s (%s) ---\n", transcript.Name, transcript.Path)
+			fmt.Fprint(w, transcript.Content)
+			if !strings.HasSuffix(transcript.Content, "\n") {
+				fmt.Fprintln(w)
+			}
+		}
 	}
 }
 

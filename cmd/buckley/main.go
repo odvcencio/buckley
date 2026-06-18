@@ -1009,6 +1009,10 @@ func printBashCompletion() {
             COMPREPLY=( $(compgen -W "init runs artifacts" -- "${cur}") )
             return 0
             ;;
+        runs|artifacts)
+            COMPREPLY=( $(compgen -W "show" -- "${cur}") )
+            return 0
+            ;;
         experiment)
             COMPREPLY=( $(compgen -W "run" -- "${cur}") )
             return 0
@@ -1116,6 +1120,9 @@ _buckley() {
                 chat)
                     _values 'doctor chat command' init runs artifacts
                     ;;
+                runs|artifacts)
+                    _values 'doctor chat runs command' show
+                    ;;
                 completion)
                     _values 'shell' bash zsh fish
                     ;;
@@ -1200,6 +1207,7 @@ complete -c buckley -n '__fish_seen_subcommand_from doctor' -a chat -d 'Run mult
 complete -c buckley -n '__fish_seen_subcommand_from doctor; and __fish_seen_subcommand_from chat' -a init -d 'Create a project chat check scenario'
 complete -c buckley -n '__fish_seen_subcommand_from doctor; and __fish_seen_subcommand_from chat' -a runs -d 'List chat check artifact runs'
 complete -c buckley -n '__fish_seen_subcommand_from doctor; and __fish_seen_subcommand_from chat' -a artifacts -d 'List chat check artifact runs'
+complete -c buckley -n '__fish_seen_subcommand_from doctor; and __fish_seen_subcommand_from chat; and __fish_seen_subcommand_from runs artifacts' -a show -d 'Show a chat check artifact run'
 
 # Experiment subcommands
 complete -c buckley -n '__fish_seen_subcommand_from experiment' -a run -d 'Run an experiment'

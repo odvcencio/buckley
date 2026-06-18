@@ -349,6 +349,48 @@ func TestRunDoctorChatRunsCommandListsArtifacts(t *testing.T) {
 	if inventory.Runs[0].ID != filepath.Base(newRun) || inventory.Runs[0].Passed || inventory.Runs[0].FailedScenarios != 1 {
 		t.Fatalf("unexpected run summary: %+v", inventory.Runs[0])
 	}
+
+	showOut := captureStdout(t, func() {
+		if err := runDoctorChatRunsCommand([]string{"show", "--path", root}); err != nil {
+			t.Fatalf("runDoctorChatRunsCommand show: %v", err)
+		}
+	})
+	for _, want := range []string{
+		"Chat check run: " + filepath.Base(newRun) + " (fail)",
+		"Scenarios: 1 (passed=0 failed=1)",
+		"Results:",
+		"chat/fail: fail",
+		"result=" + filepath.Join(newRun, "results", "chat", "fail.json"),
+		"transcript=" + filepath.Join(newRun, "transcripts", "chat", "fail.md"),
+	} {
+		if !strings.Contains(showOut, want) {
+			t.Fatalf("show output missing %q:\n%s", want, showOut)
+		}
+	}
+
+	transcriptOut := captureStdout(t, func() {
+		if err := runDoctorChatRunsCommand([]string{"show", "--path", root, "--transcript", filepath.Base(newRun)}); err != nil {
+			t.Fatalf("runDoctorChatRunsCommand show transcript: %v", err)
+		}
+	})
+	for _, want := range []string{"--- Transcript: chat/fail", "# Chat Check Transcript: chat/fail", "say TOKEN", "wrong", `missing "TOKEN"`} {
+		if !strings.Contains(transcriptOut, want) {
+			t.Fatalf("transcript output missing %q:\n%s", want, transcriptOut)
+		}
+	}
+
+	jsonShow := captureStdout(t, func() {
+		if err := runDoctorCommand([]string{"chat", "artifacts", "show", "--path", root, "--json", filepath.Base(oldRun)}); err != nil {
+			t.Fatalf("runDoctorCommand artifacts show json: %v", err)
+		}
+	})
+	var detail doctorChatRunDetail
+	if err := json.Unmarshal([]byte(jsonShow), &detail); err != nil {
+		t.Fatalf("unmarshal run detail json: %v\n%s", err, jsonShow)
+	}
+	if detail.Run.ID != filepath.Base(oldRun) || !detail.Run.Passed || detail.Manifest.Context.ArtifactRoot != root || len(detail.Transcripts) != 1 {
+		t.Fatalf("unexpected run detail: %+v", detail)
+	}
 }
 
 func TestRunDoctorChatRunsCommandUsesProjectRoot(t *testing.T) {
