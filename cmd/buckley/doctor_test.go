@@ -143,6 +143,77 @@ func TestWriteChatCheckJUnitReportSuite(t *testing.T) {
 	}
 }
 
+func TestWriteChatCheckArtifactsSuite(t *testing.T) {
+	root := t.TempDir()
+	now := time.Date(2026, 6, 18, 1, 2, 3, 4, time.UTC)
+	result := &chatcheck.SuiteResult{
+		Name:            "chat-suite",
+		Passed:          false,
+		ScenarioCount:   2,
+		PassedScenarios: 1,
+		FailedScenarios: 1,
+		DurationMillis:  350,
+		Results: []chatcheck.Result{
+			{
+				Name:           "tools/no-tools",
+				Passed:         true,
+				DurationMillis: 100,
+				Turns: []chatcheck.TurnResult{{
+					Index:  1,
+					Passed: true,
+				}},
+			},
+			{
+				Name:           "tools/no-tools",
+				Passed:         false,
+				Error:          "missing token",
+				DurationMillis: 250,
+			},
+		},
+	}
+
+	runDir, err := writeChatCheckArtifacts(root, result, now)
+	if err != nil {
+		t.Fatalf("writeChatCheckArtifacts: %v", err)
+	}
+	wantDir := filepath.Join(root, "20260618T010203.000000004Z")
+	if runDir != wantDir {
+		t.Fatalf("runDir=%q want %q", runDir, wantDir)
+	}
+
+	reportData, err := os.ReadFile(filepath.Join(runDir, "report.json"))
+	if err != nil {
+		t.Fatalf("read report artifact: %v", err)
+	}
+	var gotReport chatcheck.SuiteResult
+	if err := json.Unmarshal(reportData, &gotReport); err != nil {
+		t.Fatalf("report artifact did not parse: %v\n%s", err, string(reportData))
+	}
+	if gotReport.Name != "chat-suite" || gotReport.FailedScenarios != 1 {
+		t.Fatalf("unexpected report artifact: %+v", gotReport)
+	}
+
+	summaryData, err := os.ReadFile(filepath.Join(runDir, "summary.json"))
+	if err != nil {
+		t.Fatalf("read summary artifact: %v", err)
+	}
+	var summary doctorChatArtifactsManifest
+	if err := json.Unmarshal(summaryData, &summary); err != nil {
+		t.Fatalf("summary artifact did not parse: %v\n%s", err, string(summaryData))
+	}
+	if summary.Report != "report.json" || len(summary.Results) != 2 {
+		t.Fatalf("unexpected summary artifact: %+v", summary)
+	}
+	if summary.Results[0].Path != "results/tools/no-tools.json" || summary.Results[1].Path != "results/tools/no-tools-2.json" {
+		t.Fatalf("unexpected result artifact paths: %+v", summary.Results)
+	}
+	for _, path := range []string{summary.Results[0].Path, summary.Results[1].Path} {
+		if _, err := os.Stat(filepath.Join(runDir, filepath.FromSlash(path))); err != nil {
+			t.Fatalf("missing result artifact %s: %v", path, err)
+		}
+	}
+}
+
 func TestResolveDoctorChatScenarioFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "scenario.json")
 	data := `{
@@ -368,6 +439,19 @@ func TestResolveDoctorChatScenarioPathProjectFindsAncestor(t *testing.T) {
 	}
 }
 
+func TestResolveChatCheckArtifactRoot(t *testing.T) {
+	projectScenarios := filepath.Join(t.TempDir(), ".buckley", "chatchecks")
+	if got := resolveChatCheckArtifactRoot(defaultChatCheckArtifactRoot, true, projectScenarios, false); got != filepath.Join(projectScenarios, "runs") {
+		t.Fatalf("project artifact root=%q", got)
+	}
+	if got := resolveChatCheckArtifactRoot("custom", true, projectScenarios, true); got != "custom" {
+		t.Fatalf("explicit artifact root=%q want custom", got)
+	}
+	if got := resolveChatCheckArtifactRoot(defaultChatCheckArtifactRoot, false, projectScenarios, false); got != defaultChatCheckArtifactRoot {
+		t.Fatalf("non-project artifact root=%q", got)
+	}
+}
+
 func TestRunDoctorChatCommandListRejectsEmptyFilter(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "chat.json"), []byte(`{"name":"offline","tags":["smoke"],"turns":[{"user":"say READY"}]}`), 0o644); err != nil {
@@ -384,6 +468,13 @@ func TestRunDoctorChatCommandListRejectsJUnit(t *testing.T) {
 	err := runDoctorChatCommand([]string{"-list", "-junit", filepath.Join(t.TempDir(), "chat.xml")})
 	if err == nil || !strings.Contains(err.Error(), "cannot be used with -list") {
 		t.Fatalf("err=%v want list junit conflict", err)
+	}
+}
+
+func TestRunDoctorChatCommandListRejectsArtifacts(t *testing.T) {
+	err := runDoctorChatCommand([]string{"-list", "-artifacts"})
+	if err == nil || !strings.Contains(err.Error(), "cannot be used with -list") {
+		t.Fatalf("err=%v want list artifacts conflict", err)
 	}
 }
 

@@ -17,6 +17,7 @@ import (
 
 const envBuckleyChatCheckModel = "BUCKLEY_CHAT_CHECK_MODEL"
 const projectChatCheckScenarioDir = ".buckley/chatchecks"
+const defaultChatCheckArtifactRoot = ".buckley/chatchecks/runs"
 
 func runDoctorCommand(args []string) error {
 	subCmd := "check"
@@ -57,11 +58,16 @@ func runDoctorChatCommand(args []string) error {
 	jsonOutput := fs.Bool("json", false, "print machine-readable JSON report")
 	outPath := fs.String("out", "", "write machine-readable JSON report to a file")
 	junitPath := fs.String("junit", "", "write JUnit XML report to a file")
+	writeArtifacts := fs.Bool("artifacts", false, "write run artifacts under .buckley/chatchecks/runs")
+	artifactsDir := fs.String("artifacts-dir", defaultChatCheckArtifactRoot, "directory for chat check run artifacts")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if *listScenarios && strings.TrimSpace(*junitPath) != "" {
 		return fmt.Errorf("doctor chat -junit cannot be used with -list")
+	}
+	if *listScenarios && *writeArtifacts {
+		return fmt.Errorf("doctor chat -artifacts cannot be used with -list")
 	}
 	resolvedScenarioPath, err := resolveDoctorChatScenarioPath(*scenarioPath, *projectScenarios)
 	if err != nil {
@@ -117,12 +123,27 @@ func runDoctorChatCommand(args []string) error {
 			return err
 		}
 	}
+	artifactRunDir := ""
+	if *writeArtifacts {
+		var err error
+		artifactRoot := resolveChatCheckArtifactRoot(*artifactsDir, *projectScenarios, resolvedScenarioPath, flagWasSet(fs, "artifacts-dir"))
+		artifactRunDir, err = writeChatCheckArtifacts(artifactRoot, report, time.Now())
+		if err != nil {
+			return err
+		}
+	}
 	if *jsonOutput {
+		if artifactRunDir != "" {
+			fmt.Fprintf(os.Stderr, "Artifacts: %s\n", artifactRunDir)
+		}
 		if err := printChatCheckJSON(os.Stdout, report); err != nil {
 			return err
 		}
 	} else {
 		printChatCheckReport(os.Stdout, report)
+		if artifactRunDir != "" {
+			fmt.Fprintf(os.Stdout, "Artifacts: %s\n", artifactRunDir)
+		}
 	}
 	if runErr != nil {
 		return withExitCode(runErr, 1)
@@ -186,6 +207,18 @@ func findProjectChatCheckScenarioDir(start string) (string, error) {
 	return "", fmt.Errorf("project chat check scenarios not found: %s", projectChatCheckScenarioDir)
 }
 
+func resolveChatCheckArtifactRoot(configured string, useProject bool, scenarioPath string, explicit bool) string {
+	configured = strings.TrimSpace(configured)
+	if explicit || !useProject {
+		return configured
+	}
+	scenarioPath = strings.TrimSpace(scenarioPath)
+	if scenarioPath == "" {
+		return configured
+	}
+	return filepath.Join(scenarioPath, "runs")
+}
+
 type junitTestSuite struct {
 	XMLName   xml.Name        `xml:"testsuite"`
 	Name      string          `xml:"name,attr"`
@@ -207,6 +240,21 @@ type junitTestCase struct {
 type junitFailure struct {
 	Message string `xml:"message,attr"`
 	Text    string `xml:",chardata"`
+}
+
+type doctorChatArtifactsManifest struct {
+	GeneratedAt time.Time                 `json:"generated_at"`
+	Report      string                    `json:"report"`
+	Results     []doctorChatArtifactEntry `json:"results"`
+}
+
+type doctorChatArtifactEntry struct {
+	Name           string `json:"name"`
+	Path           string `json:"path"`
+	Passed         bool   `json:"passed"`
+	Error          string `json:"error,omitempty"`
+	Turns          int    `json:"turns"`
+	DurationMillis int64  `json:"duration_ms"`
 }
 
 func resolveDoctorChatScenario(modelID string, timeout time.Duration, scenarioPath string, modelSet bool, timeoutSet bool) (chatcheck.Scenario, error) {
@@ -534,6 +582,140 @@ func writeChatCheckJUnitReport(path string, report any) error {
 		return fmt.Errorf("write chat check JUnit report: %w", err)
 	}
 	return nil
+}
+
+func writeChatCheckArtifacts(root string, report any, now time.Time) (string, error) {
+	if report == nil {
+		return "", nil
+	}
+	root = strings.TrimSpace(root)
+	if root == "" {
+		root = defaultChatCheckArtifactRoot
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	runDir := filepath.Join(root, now.UTC().Format("20060102T150405.000000000Z"))
+	if err := os.MkdirAll(filepath.Join(runDir, "results"), 0o755); err != nil {
+		return "", fmt.Errorf("create chat check artifact directory: %w", err)
+	}
+	if err := writeChatCheckReport(filepath.Join(runDir, "report.json"), report); err != nil {
+		return "", err
+	}
+
+	results, err := chatCheckReportResults(report)
+	if err != nil {
+		return "", err
+	}
+	manifest := doctorChatArtifactsManifest{
+		GeneratedAt: now.UTC(),
+		Report:      "report.json",
+		Results:     make([]doctorChatArtifactEntry, 0, len(results)),
+	}
+	seenResultPaths := map[string]int{}
+	for _, result := range results {
+		relPath := filepath.Join("results", chatCheckResultArtifactPath(result.Name))
+		relPath = uniqueChatCheckArtifactPath(relPath, seenResultPaths)
+		if err := writeChatCheckReport(filepath.Join(runDir, relPath), result); err != nil {
+			return "", err
+		}
+		manifest.Results = append(manifest.Results, doctorChatArtifactEntry{
+			Name:           result.Name,
+			Path:           filepath.ToSlash(relPath),
+			Passed:         result.Passed,
+			Error:          result.Error,
+			Turns:          len(result.Turns),
+			DurationMillis: result.DurationMillis,
+		})
+	}
+	if err := writeChatCheckReport(filepath.Join(runDir, "summary.json"), manifest); err != nil {
+		return "", err
+	}
+	return runDir, nil
+}
+
+func chatCheckReportResults(report any) ([]chatcheck.Result, error) {
+	switch result := report.(type) {
+	case *chatcheck.Result:
+		if result == nil {
+			return nil, fmt.Errorf("chat check result is nil")
+		}
+		return []chatcheck.Result{*result}, nil
+	case *chatcheck.SuiteResult:
+		if result == nil {
+			return nil, fmt.Errorf("chat check suite result is nil")
+		}
+		return append([]chatcheck.Result(nil), result.Results...), nil
+	default:
+		return nil, fmt.Errorf("unsupported chat check report type %T", report)
+	}
+}
+
+func chatCheckResultArtifactPath(name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		name = "chat-check"
+	}
+	parts := strings.Split(filepath.ToSlash(name), "/")
+	clean := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if segment := safeArtifactPathSegment(part); segment != "" {
+			clean = append(clean, segment)
+		}
+	}
+	if len(clean) == 0 {
+		clean = append(clean, "chat-check")
+	}
+	clean[len(clean)-1] += ".json"
+	return filepath.Join(clean...)
+}
+
+func uniqueChatCheckArtifactPath(path string, seen map[string]int) string {
+	if seen == nil {
+		return path
+	}
+	count := seen[path]
+	if count == 0 {
+		seen[path] = 1
+		return path
+	}
+	ext := filepath.Ext(path)
+	base := strings.TrimSuffix(path, ext)
+	for {
+		count++
+		candidate := fmt.Sprintf("%s-%d%s", base, count, ext)
+		if seen[candidate] == 0 {
+			seen[path] = count
+			seen[candidate] = 1
+			return candidate
+		}
+	}
+}
+
+func safeArtifactPathSegment(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" || value == "." || value == ".." {
+		return ""
+	}
+	var b strings.Builder
+	lastDash := false
+	for _, r := range value {
+		ok := (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' || r == '-' || r == '.'
+		if ok {
+			b.WriteRune(r)
+			lastDash = false
+			continue
+		}
+		if !lastDash {
+			b.WriteByte('-')
+			lastDash = true
+		}
+	}
+	segment := strings.Trim(b.String(), ".-")
+	if segment == "" || segment == "." || segment == ".." {
+		return ""
+	}
+	return segment
 }
 
 func chatCheckJUnitSuite(report any) (junitTestSuite, error) {
