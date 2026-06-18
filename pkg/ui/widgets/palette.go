@@ -1,6 +1,7 @@
 package widgets
 
 import (
+	"strconv"
 	"strings"
 
 	"m31labs.dev/buckley/pkg/ui/backend"
@@ -293,7 +294,7 @@ func (p *PaletteWidget) renderResultCount(buf *runtime.Buffer, b runtime.Rect) {
 	if len(p.filtered) <= max(0, b.Height-4) {
 		return
 	}
-	countStr := intToStr(len(p.filtered)) + " results"
+	countStr := strconv.Itoa(len(p.filtered)) + " results"
 	countStr = truncateString(countStr, b.Width-4)
 	buf.SetString(b.X+b.Width-2-runeLen(countStr), b.Y+b.Height-1, countStr, p.borderStyle)
 }

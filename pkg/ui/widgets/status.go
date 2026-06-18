@@ -1,6 +1,9 @@
 package widgets
 
 import (
+	"fmt"
+	"strconv"
+
 	"m31labs.dev/buckley/pkg/ui/backend"
 	"m31labs.dev/buckley/pkg/ui/runtime"
 )
@@ -142,47 +145,16 @@ func (s statusSegment) end() int {
 // formatTokens formats a token count with K/M suffixes.
 func formatTokens(n int) string {
 	if n >= 1000000 {
-		return itoa(n/1000000) + "." + itoa((n%1000000)/100000) + "M"
+		return strconv.Itoa(n/1000000) + "." + strconv.Itoa((n%1000000)/100000) + "M"
 	}
 	if n >= 1000 {
-		return itoa(n/1000) + "." + itoa((n%1000)/100) + "K"
+		return strconv.Itoa(n/1000) + "." + strconv.Itoa((n%1000)/100) + "K"
 	}
-	return itoa(n)
+	return strconv.Itoa(n)
 }
 
 // formatCost formats cents as dollars.
 func formatCost(cents float64) string {
-	if cents >= 100 {
-		return itoa(int(cents/100)) + "." + padZero(int(cents)%100)
-	}
-	return "0." + padZero(int(cents))
-}
-
-func padZero(n int) string {
-	if n < 10 {
-		return "0" + itoa(n)
-	}
-	return itoa(n)
-}
-
-func itoa(i int) string {
-	if i == 0 {
-		return "0"
-	}
-	var buf [20]byte
-	pos := len(buf)
-	neg := i < 0
-	if neg {
-		i = -i
-	}
-	for i > 0 {
-		pos--
-		buf[pos] = byte('0' + i%10)
-		i /= 10
-	}
-	if neg {
-		pos--
-		buf[pos] = '-'
-	}
-	return string(buf[pos:])
+	wholeCents := int(cents)
+	return fmt.Sprintf("%d.%02d", wholeCents/100, wholeCents%100)
 }

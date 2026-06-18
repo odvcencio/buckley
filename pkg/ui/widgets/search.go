@@ -1,6 +1,8 @@
 package widgets
 
 import (
+	"strconv"
+
 	"m31labs.dev/buckley/pkg/ui/backend"
 	"m31labs.dev/buckley/pkg/ui/runtime"
 	"m31labs.dev/buckley/pkg/ui/terminal"
@@ -150,7 +152,7 @@ func (s *SearchWidget) renderMatchInfo(buf *runtime.Buffer, b runtime.Rect) {
 
 func (s *SearchWidget) matchInfoText() string {
 	if s.matchCount > 0 {
-		return intToStr(s.currentMatch+1) + "/" + intToStr(s.matchCount)
+		return strconv.Itoa(s.currentMatch+1) + "/" + strconv.Itoa(s.matchCount)
 	}
 	if s.query != "" {
 		return "No matches"

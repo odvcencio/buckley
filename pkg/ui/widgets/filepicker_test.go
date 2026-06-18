@@ -391,57 +391,13 @@ func TestFormatFileCount(t *testing.T) {
 		{1234, "1,234"},
 		{10000, "10,000"},
 		{100000, "100,000"},
+		{1000000, "1,000,000"},
 	}
 
 	for _, tc := range tests {
 		got := formatFileCount(tc.input)
 		if got != tc.expected {
 			t.Errorf("formatFileCount(%d) = %q, want %q", tc.input, got, tc.expected)
-		}
-	}
-}
-
-// Test intToStr helper function
-func TestIntToStr(t *testing.T) {
-	tests := []struct {
-		input    int
-		expected string
-	}{
-		{0, "0"},
-		{1, "1"},
-		{10, "10"},
-		{123, "123"},
-		{9999, "9999"},
-	}
-
-	for _, tc := range tests {
-		got := intToStr(tc.input)
-		if got != tc.expected {
-			t.Errorf("intToStr(%d) = %q, want %q", tc.input, got, tc.expected)
-		}
-	}
-}
-
-// Test padLeftStr helper function
-func TestPadLeftStr(t *testing.T) {
-	tests := []struct {
-		s        string
-		length   int
-		pad      byte
-		expected string
-	}{
-		{"1", 3, '0', "001"},
-		{"12", 3, '0', "012"},
-		{"123", 3, '0', "123"},
-		{"1234", 3, '0', "1234"},
-		{"", 3, '0', "000"},
-		{"x", 5, ' ', "    x"},
-	}
-
-	for _, tc := range tests {
-		got := padLeftStr(tc.s, tc.length, tc.pad)
-		if got != tc.expected {
-			t.Errorf("padLeftStr(%q, %d, %c) = %q, want %q", tc.s, tc.length, tc.pad, got, tc.expected)
 		}
 	}
 }

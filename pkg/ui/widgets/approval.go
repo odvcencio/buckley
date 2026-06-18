@@ -1,6 +1,7 @@
 package widgets
 
 import (
+	"strconv"
 	"strings"
 
 	"m31labs.dev/buckley/pkg/ui/backend"
@@ -426,10 +427,10 @@ func (a *ApprovalWidget) HandleMessage(msg runtime.Message) runtime.HandleResult
 func formatDiffSummary(added, removed int) string {
 	var parts []string
 	if added > 0 {
-		parts = append(parts, "+"+intToStr(added)+" lines")
+		parts = append(parts, "+"+strconv.Itoa(added)+" lines")
 	}
 	if removed > 0 {
-		parts = append(parts, "-"+intToStr(removed)+" lines")
+		parts = append(parts, "-"+strconv.Itoa(removed)+" lines")
 	}
 	if len(parts) == 0 {
 		return "no changes"

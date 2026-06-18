@@ -3,6 +3,7 @@ package widgets
 import (
 	"fmt"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"m31labs.dev/buckley/pkg/ui/backend"
@@ -411,7 +412,7 @@ func (s *Sidebar) renderCurrentTask(buf *runtime.Buffer, x, y, width int) int {
 
 // renderProgressBar draws a progress bar.
 func (s *Sidebar) renderProgressBar(buf *runtime.Buffer, x, y, width, percent int) int {
-	percentStr := intToStr(percent) + "%"
+	percentStr := strconv.Itoa(percent) + "%"
 	percentWidth := runeLen(percentStr)
 	barWidth := width - percentWidth - 1
 	if barWidth < 1 {
@@ -453,7 +454,7 @@ func (s *Sidebar) renderPlan(buf *runtime.Buffer, x, y, width, maxHeight int) in
 			completed++
 		}
 	}
-	header := "Plan (" + intToStr(completed) + "/" + intToStr(len(s.planTasks)) + ")"
+	header := "Plan (" + strconv.Itoa(completed) + "/" + strconv.Itoa(len(s.planTasks)) + ")"
 	buf.SetString(x+2, y, header, s.headerStyle)
 	y++
 
@@ -557,9 +558,9 @@ func (s *Sidebar) renderRLM(buf *runtime.Buffer, x, y, width int) int {
 }
 
 func (s *Sidebar) renderRLMStatus(buf *runtime.Buffer, x, y, width int) int {
-	iterLine := "Iter " + intToStr(s.rlmStatus.Iteration)
+	iterLine := "Iter " + strconv.Itoa(s.rlmStatus.Iteration)
 	if s.rlmStatus.MaxIterations > 0 {
-		iterLine += "/" + intToStr(s.rlmStatus.MaxIterations)
+		iterLine += "/" + strconv.Itoa(s.rlmStatus.MaxIterations)
 	}
 	if s.rlmStatus.Ready {
 		iterLine += " ✓"
@@ -568,7 +569,7 @@ func (s *Sidebar) renderRLMStatus(buf *runtime.Buffer, x, y, width int) int {
 	y++
 
 	if s.rlmStatus.TokensUsed > 0 {
-		tokenLine := "Tokens " + intToStr(s.rlmStatus.TokensUsed)
+		tokenLine := "Tokens " + strconv.Itoa(s.rlmStatus.TokensUsed)
 		buf.SetString(x+2, y, truncateSidebarText(tokenLine, width-2), s.textStyle)
 		y++
 	}

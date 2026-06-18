@@ -2,6 +2,8 @@ package widgets
 
 import (
 	"path/filepath"
+	"strconv"
+	"strings"
 
 	"m31labs.dev/buckley/pkg/ui/backend"
 	"m31labs.dev/buckley/pkg/ui/filepicker"
@@ -299,29 +301,25 @@ func formatCount(total, shown int) string {
 
 // formatFileCount adds thousand separators.
 func formatFileCount(n int) string {
-	if n < 1000 {
-		return intToStr(n)
+	if n < 0 {
+		return "-" + formatFileCount(-n)
 	}
-	return intToStr(n/1000) + "," + padLeftStr(intToStr(n%1000), 3, '0')
-}
+	digits := strconv.Itoa(n)
+	if len(digits) <= 3 {
+		return digits
+	}
 
-func intToStr(n int) string {
-	if n == 0 {
-		return "0"
+	first := len(digits) % 3
+	if first == 0 {
+		first = 3
 	}
-	var buf [20]byte
-	i := len(buf)
-	for n > 0 {
-		i--
-		buf[i] = byte('0' + n%10)
-		n /= 10
-	}
-	return string(buf[i:])
-}
 
-func padLeftStr(s string, length int, pad byte) string {
-	for len(s) < length {
-		s = string(pad) + s
+	var b strings.Builder
+	b.Grow(len(digits) + len(digits)/3)
+	b.WriteString(digits[:first])
+	for i := first; i < len(digits); i += 3 {
+		b.WriteByte(',')
+		b.WriteString(digits[i : i+3])
 	}
-	return s
+	return b.String()
 }
