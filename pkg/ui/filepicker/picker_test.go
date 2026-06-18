@@ -3,6 +3,7 @@ package filepicker
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -79,6 +80,15 @@ func TestFuzzyMatchHighlights(t *testing.T) {
 		if highlights[i] != exp {
 			t.Errorf("highlight[%d] = %d, want %d", i, highlights[i], exp)
 		}
+	}
+}
+
+func TestFuzzyMatchHighlights_Unicode(t *testing.T) {
+	_, highlights := fuzzyMatch("src/模型文件.go", "模文")
+	expected := []int{4, 6}
+
+	if !slices.Equal(highlights, expected) {
+		t.Fatalf("highlights = %v, want %v", highlights, expected)
 	}
 }
 
@@ -271,6 +281,26 @@ func TestFilePicker(t *testing.T) {
 		}
 		if fp.IsActive() {
 			t.Error("should deactivate after backspace on empty query")
+		}
+	})
+
+	t.Run("unicode backspace", func(t *testing.T) {
+		fp.Activate(0)
+		fp.AppendQuery('模')
+		fp.AppendQuery('型')
+
+		if fp.Query() != "模型" {
+			t.Errorf("Query() = %q, want '模型'", fp.Query())
+		}
+
+		fp.Backspace()
+		if fp.Query() != "模" {
+			t.Errorf("Query() = %q after backspace, want '模'", fp.Query())
+		}
+
+		fp.Backspace()
+		if fp.Query() != "" {
+			t.Errorf("Query() = %q after second backspace, want empty", fp.Query())
 		}
 	})
 }

@@ -92,84 +92,70 @@ func (f *FilePickerWidget) Render(ctx runtime.RenderContext) {
 		return
 	}
 
-	// Draw background
 	ctx.Buffer.Fill(b, ' ', f.bgStyle)
-
-	// Draw border
 	f.drawBorder(ctx.Buffer, b)
+	f.renderTitle(ctx.Buffer, b)
+	f.renderQuery(ctx.Buffer, b)
+	f.renderSeparator(ctx.Buffer, b)
+	f.renderMatches(ctx.Buffer, b)
+	f.renderStatus(ctx.Buffer, b)
+}
 
-	// Draw title
+func (f *FilePickerWidget) renderTitle(buf *runtime.Buffer, b runtime.Rect) {
 	title := " File Search "
-	titleX := b.X + (b.Width-len(title))/2
-	ctx.Buffer.SetString(titleX, b.Y, title, f.borderStyle.Bold(true))
+	title = truncateString(title, b.Width-2)
+	titleX := b.X + (b.Width-runeLen(title))/2
+	buf.SetString(titleX, b.Y, title, f.borderStyle.Bold(true))
+}
 
-	// Draw query line
+func (f *FilePickerWidget) renderQuery(buf *runtime.Buffer, b runtime.Rect) {
 	query := f.picker.Query()
-	queryLine := "@ " + query
-	if len(queryLine) > b.Width-4 {
-		queryLine = queryLine[:b.Width-4]
-	}
-	ctx.Buffer.SetString(b.X+2, b.Y+1, queryLine, f.queryStyle)
+	queryLine := truncateString("@ "+query, b.Width-4)
+	buf.SetString(b.X+2, b.Y+1, queryLine, f.queryStyle)
 
-	// Draw cursor after query
-	cursorX := b.X + 2 + len(queryLine)
+	cursorX := b.X + 2 + runeLen(queryLine)
 	if cursorX < b.X+b.Width-2 && f.focused {
-		ctx.Buffer.Set(cursorX, b.Y+1, '█', f.queryStyle)
+		buf.Set(cursorX, b.Y+1, '█', f.queryStyle)
 	}
+}
 
-	// Draw separator
+func (f *FilePickerWidget) renderSeparator(buf *runtime.Buffer, b runtime.Rect) {
 	for x := b.X + 1; x < b.X+b.Width-1; x++ {
-		ctx.Buffer.Set(x, b.Y+2, '─', f.borderStyle)
+		buf.Set(x, b.Y+2, '─', f.borderStyle)
 	}
+}
 
-	// Draw matches
+func (f *FilePickerWidget) renderMatches(buf *runtime.Buffer, b runtime.Rect) {
 	matches := f.picker.GetMatches()
 	selected := f.picker.SelectedIndex()
 
 	startY := b.Y + 3
-	maxResults := b.Height - 4 // Account for chrome
+	maxResults := b.Height - 4
 
 	for i := 0; i < maxResults && i < len(matches); i++ {
 		match := matches[i]
 		y := startY + i
 
-		// Determine style
 		style := f.textStyle
 		if i == selected {
 			style = f.selectedStyle
 		}
 
-		// Truncate path if needed
-		path := match.Path
-		maxLen := b.Width - 4
-		if len(path) > maxLen {
-			// Show filename + as much dir as fits
-			dir, file := filepath.Split(path)
-			if len(file) > maxLen {
-				path = file[:maxLen]
-			} else {
-				remaining := maxLen - len(file) - 3 // "..."
-				if remaining > 0 && len(dir) > remaining {
-					path = "..." + dir[len(dir)-remaining:] + file
-				} else {
-					path = file
-				}
-			}
-		}
-
-		// Draw with highlights
-		f.renderMatch(ctx.Buffer, b.X+2, y, path, match.Highlights, style, i == selected)
+		path, highlights := truncateFilePickerPath(match.Path, match.Highlights, b.Width-4)
+		f.renderMatch(buf, b.X+2, y, path, highlights, style, i == selected)
 	}
+}
 
-	// Draw file count
+func (f *FilePickerWidget) renderStatus(buf *runtime.Buffer, b runtime.Rect) {
 	count := f.picker.FileCount()
+	shown := len(f.picker.GetMatches())
 	status := ""
 	if f.picker.IsIndexReady() {
-		status = formatCount(count, len(matches))
+		status = formatCount(count, shown)
 	} else {
 		status = "indexing..."
 	}
-	ctx.Buffer.SetString(b.X+b.Width-2-len(status), b.Y+b.Height-1, status, f.borderStyle)
+	buf.SetString(b.X+b.Width-2-runeLen(status), b.Y+b.Height-1, status, f.borderStyle)
 }
 
 // renderMatch draws a path with character highlights.
@@ -179,13 +165,58 @@ func (f *FilePickerWidget) renderMatch(buf *runtime.Buffer, x, y int, path strin
 		highlightSet[h] = true
 	}
 
-	for i, ch := range path {
+	col := 0
+	for _, ch := range path {
 		style := baseStyle
-		if highlightSet[i] && !selected {
+		if highlightSet[col] && !selected {
 			style = f.highlightStyle
 		}
-		buf.Set(x+i, y, ch, style)
+		buf.Set(x+col, y, ch, style)
+		col++
 	}
+}
+
+func truncateFilePickerPath(path string, highlights []int, maxWidth int) (string, []int) {
+	if maxWidth <= 0 {
+		return "", nil
+	}
+
+	pathRunes := []rune(path)
+	if len(pathRunes) <= maxWidth {
+		return path, filterHighlights(highlights, 0, len(pathRunes), 0)
+	}
+
+	dir, file := filepath.Split(path)
+	dirRunes := []rune(dir)
+	fileRunes := []rune(file)
+	dirLen := len(dirRunes)
+
+	if len(fileRunes) >= maxWidth {
+		visibleFileRunes := maxWidth
+		if maxWidth > 3 {
+			visibleFileRunes = maxWidth - 3
+		}
+		return truncateString(file, maxWidth), filterHighlights(highlights, dirLen, dirLen+visibleFileRunes, -dirLen)
+	}
+
+	remainingDirWidth := maxWidth - len(fileRunes) - 3
+	if remainingDirWidth > 0 && len(dirRunes) > remainingDirWidth {
+		start := len(dirRunes) - remainingDirWidth
+		display := "..." + string(dirRunes[start:]) + file
+		return display, filterHighlights(highlights, start, len(pathRunes), 3-start)
+	}
+
+	return file, filterHighlights(highlights, dirLen, len(pathRunes), -dirLen)
+}
+
+func filterHighlights(highlights []int, start, end, delta int) []int {
+	filtered := make([]int, 0, len(highlights))
+	for _, h := range highlights {
+		if h >= start && h < end {
+			filtered = append(filtered, h+delta)
+		}
+	}
+	return filtered
 }
 
 // drawBorder draws a box border.

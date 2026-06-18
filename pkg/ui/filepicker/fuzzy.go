@@ -19,7 +19,6 @@ func fuzzyMatch(path, query string) (int, []int) {
 
 	// Extract filename for bonus scoring
 	filename := strings.ToLower(filepath.Base(path))
-	filenameStart := len(pathLower) - len(filename)
 
 	score := 0
 	highlights := make([]int, 0, len(query))
@@ -27,6 +26,7 @@ func fuzzyMatch(path, query string) (int, []int) {
 	pathRunes := []rune(pathLower)
 	queryRunes := []rune(queryLower)
 	originalRunes := []rune(path)
+	filenameStart := len(pathRunes) - len([]rune(filename))
 
 	qi := 0         // Query index
 	lastMatch := -1 // Last matched position
@@ -85,7 +85,7 @@ func fuzzyMatch(path, query string) (int, []int) {
 	score -= depthPenalty
 
 	// Bonus for shorter overall length
-	score -= len(path) / 5
+	score -= len(pathRunes) / 5
 
 	// Bonus for exact filename match
 	if strings.HasPrefix(filename, queryLower) {

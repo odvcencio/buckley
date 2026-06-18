@@ -111,7 +111,7 @@ func (fp *FilePicker) Backspace() bool {
 		return false
 	}
 
-	fp.query = fp.query[:len(fp.query)-1]
+	fp.query = dropLastRune(fp.query)
 	fp.updateMatches()
 	return true
 }
@@ -271,7 +271,7 @@ func (fp *FilePicker) updateMatches() {
 			return results[i].score > results[j].score
 		}
 		// Tie-breaker: shorter path first
-		return len(results[i].match.Path) < len(results[j].match.Path)
+		return len([]rune(results[i].match.Path)) < len([]rune(results[j].match.Path))
 	})
 
 	// Take top N results
@@ -371,4 +371,12 @@ func (fp *FilePicker) ProjectRoot() string {
 	fp.mu.RLock()
 	defer fp.mu.RUnlock()
 	return fp.projectRoot
+}
+
+func dropLastRune(s string) string {
+	if s == "" {
+		return ""
+	}
+	runes := []rune(s)
+	return string(runes[:len(runes)-1])
 }
