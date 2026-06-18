@@ -669,6 +669,7 @@ func printHelp() {
 	fmt.Println("  acp [--workdir dir] [--log file] Start ACP agent on stdio (Zed/JetBrains/Neovim)")
 	fmt.Println("  hunt [--dir path]                Scan codebase for improvement suggestions")
 	fmt.Println("  dream [--dir path] [--plan]      Analyze architecture and identify gaps")
+	fmt.Println("  info [--json|--format json]      Inspect resolved harness configuration and capabilities")
 	fmt.Println("  config [check|show|path]         Manage configuration")
 	fmt.Println("  trust [status|allow|deny|reset]  Inspect or change project trust")
 	fmt.Println("  doctor [chat]                    Quick system health and chat checks")
@@ -974,7 +975,7 @@ func printBashCompletion() {
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
 
-    commands="plan execute execute-task commit pr experiment serve remote batch git-webhook agent agent-server lsp acp config doctor completion worktree rules migrate db resume help version"
+    commands="plan execute execute-task commit pr experiment serve remote batch git-webhook agent agent-server lsp acp info config doctor completion worktree rules migrate db resume help version"
 
     case "${prev}" in
         buckley)
@@ -1045,6 +1046,7 @@ _buckley() {
         'agent-server:Run ACP HTTP proxy for editor workflows'
         'lsp:Start LSP server on stdio for editor integration'
         'acp:Start ACP agent on stdio for Zed/JetBrains/Neovim'
+        'info:Inspect resolved harness configuration and capabilities'
         'config:Manage configuration'
         'completion:Generate shell completions'
         'worktree:Git worktree management'
@@ -1130,6 +1132,7 @@ complete -c buckley -n __fish_use_subcommand -a agent -d 'Validate, inspect, and
 complete -c buckley -n __fish_use_subcommand -a agent-server -d 'Run ACP HTTP proxy for editor workflows'
 complete -c buckley -n __fish_use_subcommand -a lsp -d 'Start LSP server on stdio'
 complete -c buckley -n __fish_use_subcommand -a acp -d 'Start ACP agent on stdio (Zed/JetBrains/Neovim)'
+complete -c buckley -n __fish_use_subcommand -a info -d 'Inspect resolved harness configuration and capabilities'
 complete -c buckley -n __fish_use_subcommand -a config -d 'Manage configuration'
 complete -c buckley -n __fish_use_subcommand -a completion -d 'Generate shell completions'
 complete -c buckley -n __fish_use_subcommand -a worktree -d 'Git worktree management'
@@ -1243,6 +1246,8 @@ func dispatchSubcommand(args []string) (bool, int) {
 		return true, runCommand(runHuntCommand, args[1:])
 	case "dream":
 		return true, runCommand(runDreamCommand, args[1:])
+	case "info":
+		return true, runCommand(runInfoCommand, args[1:])
 	case "config":
 		return true, runCommand(runConfigCommand, args[1:])
 	case "trust":
@@ -1339,10 +1344,19 @@ func (s *startupFlagState) consumeStartupFlag(opts *startupOptions, arg string, 
 	case "-p":
 		s.pending = startupPendingPrompt
 	case "--encoding":
+		if !beforeCommand {
+			return false
+		}
 		s.pending = startupPendingEncoding
 	case "--encoding=toon":
+		if !beforeCommand {
+			return false
+		}
 		opts.encodingOverride = "toon"
 	case "--encoding=json", "--json":
+		if !beforeCommand {
+			return false
+		}
 		opts.encodingOverride = "json"
 	case "--quiet", "-q":
 		opts.quiet = true
