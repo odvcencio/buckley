@@ -170,6 +170,57 @@ tools:
 	}
 }
 
+func TestRunInfoCommandJSONIncludesProjectAgentSkills(t *testing.T) {
+	workDir := setupInfoTestEnv(t)
+	skillDir := filepath.Join(workDir, "agent", "skills", "triage")
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatalf("mkdir agent skill: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(`
+---
+description: Triage ambiguous repo work before changing files.
+---
+
+# Triage
+
+Inspect the repo state and identify the next smallest useful slice.
+`), 0o644); err != nil {
+		t.Fatalf("write agent skill: %v", err)
+	}
+	nested := filepath.Join(workDir, "pkg", "feature")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatalf("mkdir nested workdir: %v", err)
+	}
+	if err := os.Chdir(nested); err != nil {
+		t.Fatalf("chdir nested workdir: %v", err)
+	}
+
+	out := captureStdout(t, func() {
+		if err := runInfoCommand([]string{"--json"}); err != nil {
+			t.Fatalf("runInfoCommand: %v", err)
+		}
+	})
+	var snapshot infoSnapshot
+	if err := json.Unmarshal([]byte(out), &snapshot); err != nil {
+		t.Fatalf("unmarshal info json: %v\n%s", err, out)
+	}
+	if snapshot.Skills.BySource["agent"] != 1 {
+		t.Fatalf("agent skill source count=%d, skills=%+v", snapshot.Skills.BySource["agent"], snapshot.Skills)
+	}
+	var found bool
+	for _, entry := range snapshot.Skills.Available {
+		if entry.Name == "triage" {
+			found = true
+			if entry.Source != "agent" || entry.Description != "Triage ambiguous repo work before changing files." {
+				t.Fatalf("unexpected triage entry: %+v", entry)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("triage skill not reported: %+v", snapshot.Skills.Available)
+	}
+}
+
 func TestRunInfoCommandJSONIncludesProjectChatChecks(t *testing.T) {
 	workDir := setupInfoTestEnv(t)
 	projectDir := filepath.Join(workDir, ".buckley", "chatchecks", "tools")

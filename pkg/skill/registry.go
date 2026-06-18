@@ -59,6 +59,10 @@ func (r *Registry) LoadAll() error {
 		return fmt.Errorf("failed to load personal skills: %w", err)
 	}
 
+	if err := r.loader.LoadProjectAgent(r.skills); err != nil {
+		return fmt.Errorf("failed to load project agent skills: %w", err)
+	}
+
 	if err := r.loader.LoadProject(r.skills); err != nil {
 		return fmt.Errorf("failed to load project skills: %w", err)
 	}

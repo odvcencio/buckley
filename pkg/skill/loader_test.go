@@ -233,6 +233,96 @@ Test content.`
 	}
 }
 
+func TestLoadProjectAgent(t *testing.T) {
+	root := t.TempDir()
+	writeSkillTestFile(t, filepath.Join(root, "agent", "skills", "forecast.md"), `
+# Forecast workflow
+
+Use weather data before answering forecast questions.
+`)
+	writeSkillTestFile(t, filepath.Join(root, "agent", "skills", "research", "SKILL.md"), `
+---
+description: Research unfamiliar topics before answering.
+---
+
+# Research
+
+Gather evidence before responding.
+`)
+	writeSkillTestFile(t, filepath.Join(root, "agent", "skills", "research", "references", "checklist.md"), `
+# Support material
+
+This should not be registered as a separate skill.
+`)
+	nested := filepath.Join(root, "src", "feature")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatalf("mkdir nested: %v", err)
+	}
+	t.Chdir(nested)
+
+	loader := NewLoader()
+	skills := make(map[string]*Skill)
+	if err := loader.LoadProjectAgent(skills); err != nil {
+		t.Fatalf("LoadProjectAgent: %v", err)
+	}
+
+	forecast, ok := skills["forecast"]
+	if !ok {
+		t.Fatalf("forecast skill not loaded: %+v", skills)
+	}
+	if forecast.Source != "agent" {
+		t.Fatalf("forecast source=%q want agent", forecast.Source)
+	}
+	if forecast.Description != "Forecast workflow" {
+		t.Fatalf("forecast description=%q", forecast.Description)
+	}
+
+	research, ok := skills["research"]
+	if !ok {
+		t.Fatalf("research skill not loaded: %+v", skills)
+	}
+	if research.Name != "research" || research.Description != "Research unfamiliar topics before answering." {
+		t.Fatalf("unexpected research skill: %+v", research)
+	}
+	if _, ok := skills["research/references/checklist"]; ok {
+		t.Fatalf("packaged skill support file registered as skill: %+v", skills["research/references/checklist"])
+	}
+}
+
+func TestLoadAllProjectSkillsOverrideAgentSkills(t *testing.T) {
+	root := t.TempDir()
+	writeSkillTestFile(t, filepath.Join(root, "agent", "skills", "release.md"), `
+# Agent release workflow
+
+Use the filesystem-agent release workflow.
+`)
+	writeSkillTestFile(t, filepath.Join(root, ".buckley", "skills", "release.md"), `
+---
+name: release
+description: Buckley project release workflow
+priority: 7
+---
+
+Use the Buckley-specific release workflow.
+`)
+	t.Chdir(root)
+
+	registry := NewRegistry()
+	if err := registry.LoadAll(); err != nil {
+		t.Fatalf("LoadAll: %v", err)
+	}
+	release := registry.GetSkill("release")
+	if release == nil {
+		t.Fatal("release skill not loaded")
+	}
+	if release.Source != "project" {
+		t.Fatalf("release source=%q want project override", release.Source)
+	}
+	if release.Description != "Buckley project release workflow" || release.Priority != 7 {
+		t.Fatalf("unexpected release override: %+v", release)
+	}
+}
+
 func TestLoadFromDirectory_Precedence(t *testing.T) {
 	// Create temporary directory with multiple skill files
 	tmpDir := t.TempDir()
@@ -705,6 +795,16 @@ func TestLoadBundled(t *testing.T) {
 		if skill.LoadedAt.IsZero() {
 			t.Errorf("Skill %s has zero LoadedAt timestamp", name)
 		}
+	}
+}
+
+func writeSkillTestFile(t *testing.T, path string, data string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", filepath.Dir(path), err)
+	}
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		t.Fatalf("write %s: %v", path, err)
 	}
 }
 

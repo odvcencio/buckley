@@ -121,6 +121,22 @@ func (l *Loader) LoadProject(skills map[string]*Skill) error {
 	return l.loadFromDirectory(projectDir, "project", skills)
 }
 
+// LoadProjectAgent loads Agent Skills-compatible files from an ancestor agent/skills directory.
+func (l *Loader) LoadProjectAgent(skills map[string]*Skill) error {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return nil // Not an error if cwd can't be determined
+	}
+	skillsDir, ok, err := findProjectAgentSkillsDir(cwd)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return nil
+	}
+	return l.loadAgentSkillDirectory(skillsDir, "agent", skills)
+}
+
 // loadFromDirectory loads all SKILL.md files from a directory
 func (l *Loader) loadFromDirectory(dir, source string, skills map[string]*Skill) error {
 	entries, err := os.ReadDir(dir)
@@ -151,6 +167,127 @@ func (l *Loader) loadFromDirectory(dir, source string, skills map[string]*Skill)
 	return nil
 }
 
+func findProjectAgentSkillsDir(start string) (string, bool, error) {
+	start = strings.TrimSpace(start)
+	if start == "" {
+		start = "."
+	}
+	dir, err := filepath.Abs(start)
+	if err != nil {
+		return "", false, fmt.Errorf("resolve project agent skills start: %w", err)
+	}
+	info, err := os.Stat(dir)
+	if err != nil {
+		return "", false, fmt.Errorf("stat project agent skills start: %w", err)
+	}
+	if !info.IsDir() {
+		dir = filepath.Dir(dir)
+	}
+
+	for {
+		candidate := filepath.Join(dir, "agent", "skills")
+		info, err := os.Stat(candidate)
+		if err == nil {
+			if !info.IsDir() {
+				return "", false, fmt.Errorf("project agent skills path is not a directory: %s", candidate)
+			}
+			return candidate, true, nil
+		}
+		if !os.IsNotExist(err) {
+			return "", false, fmt.Errorf("stat project agent skills: %w", err)
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+	return "", false, nil
+}
+
+func (l *Loader) loadAgentSkillDirectory(dir, source string, skills map[string]*Skill) error {
+	info, err := os.Stat(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("agent skills path is not a directory: %s", dir)
+	}
+
+	if err := filepath.WalkDir(dir, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() {
+			if path == dir {
+				return nil
+			}
+			if hasAgentSkillPackage(path) {
+				name, err := agentSkillNameFromPath(dir, path)
+				if err != nil {
+					return err
+				}
+				if err := l.loadAgentSkillFile(filepath.Join(path, "SKILL.md"), source, name, skills); err != nil {
+					return filepath.SkipDir
+				}
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.EqualFold(filepath.Ext(entry.Name()), ".md") {
+			return nil
+		}
+		if strings.EqualFold(entry.Name(), "SKILL.md") {
+			return nil
+		}
+		name, err := agentSkillNameFromPath(dir, strings.TrimSuffix(path, filepath.Ext(path)))
+		if err != nil {
+			return err
+		}
+		_ = l.loadAgentSkillFile(path, source, name, skills)
+		return nil
+	}); err != nil {
+		return fmt.Errorf("read project agent skills: %w", err)
+	}
+	return nil
+}
+
+func hasAgentSkillPackage(dir string) bool {
+	info, err := os.Stat(filepath.Join(dir, "SKILL.md"))
+	return err == nil && !info.IsDir()
+}
+
+func agentSkillNameFromPath(root, path string) (string, error) {
+	rel, err := filepath.Rel(root, path)
+	if err != nil {
+		return "", fmt.Errorf("resolve agent skill name: %w", err)
+	}
+	return filepath.ToSlash(rel), nil
+}
+
+func (l *Loader) loadAgentSkillFile(path, source, fallbackName string, skills map[string]*Skill) error {
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	skill, err := l.parseAgentSkillFile(string(content), fallbackName)
+	if err != nil {
+		return fmt.Errorf("failed to parse %s: %w", path, err)
+	}
+
+	skill.Source = source
+	skill.FilePath = path
+	skill.LoadedAt = time.Now()
+	if err := skill.Validate(); err != nil {
+		return err
+	}
+	skills[skill.Name] = skill
+	return nil
+}
+
 // loadSkillFile loads a single skill file
 func (l *Loader) loadSkillFile(path, source string, skills map[string]*Skill) error {
 	content, err := os.ReadFile(path)
@@ -173,6 +310,75 @@ func (l *Loader) loadSkillFile(path, source string, skills map[string]*Skill) er
 
 	skills[skill.Name] = skill
 	return nil
+}
+
+func (l *Loader) parseAgentSkillFile(content, fallbackName string) (*Skill, error) {
+	frontmatter, body, ok, err := splitOptionalYAMLFrontmatter(content)
+	if err != nil {
+		return nil, err
+	}
+
+	var skill Skill
+	if ok {
+		if err := yaml.Unmarshal([]byte(frontmatter), &skill); err != nil {
+			return nil, fmt.Errorf("failed to parse YAML frontmatter: %w", err)
+		}
+	}
+	skill.Content = strings.TrimSpace(body)
+	if strings.TrimSpace(skill.Name) == "" {
+		skill.Name = strings.TrimSpace(fallbackName)
+	}
+	if strings.TrimSpace(skill.Description) == "" {
+		skill.Description = descriptionFromMarkdown(skill.Content, skill.Name)
+	}
+	return &skill, nil
+}
+
+func splitOptionalYAMLFrontmatter(content string) (string, string, bool, error) {
+	trimmed := strings.TrimLeft(content, "\ufeff \t\r\n")
+	if !strings.HasPrefix(trimmed, "---") {
+		return "", content, false, nil
+	}
+	if len(trimmed) > 3 && trimmed[3] != '\n' && trimmed[3] != '\r' {
+		return "", content, false, nil
+	}
+	parts := strings.SplitN(trimmed, "---", 3)
+	if len(parts) < 3 {
+		return "", "", false, fmt.Errorf("invalid skill file: unterminated YAML frontmatter")
+	}
+	return parts[1], parts[2], true, nil
+}
+
+func descriptionFromMarkdown(content, name string) string {
+	inFence := false
+	for _, line := range strings.Split(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "```") || strings.HasPrefix(trimmed, "~~~") {
+			inFence = !inFence
+			continue
+		}
+		if inFence || trimmed == "" {
+			continue
+		}
+		trimmed = strings.TrimLeft(trimmed, "#>*- \t")
+		trimmed = strings.TrimSpace(trimmed)
+		if trimmed != "" {
+			return limitSkillDescription(trimmed)
+		}
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		name = "project"
+	}
+	return fmt.Sprintf("Instructions for the %s skill.", name)
+}
+
+func limitSkillDescription(value string) string {
+	const maxDescriptionChars = 1024
+	if len(value) <= maxDescriptionChars {
+		return value
+	}
+	return value[:maxDescriptionChars]
 }
 
 // parseSkillFile parses a SKILL.md file with YAML frontmatter
