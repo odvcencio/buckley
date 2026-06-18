@@ -279,6 +279,117 @@ func TestWriteChatCheckArtifactsSuite(t *testing.T) {
 	}
 }
 
+func TestRunDoctorChatRunsCommandListsArtifacts(t *testing.T) {
+	root := t.TempDir()
+	oldRun, err := writeChatCheckArtifacts(root, &chatcheck.Result{
+		Name:           "chat/pass",
+		Passed:         true,
+		DurationMillis: 12,
+		Turns: []chatcheck.TurnResult{{
+			Index:  1,
+			User:   "say READY",
+			Text:   "READY",
+			Passed: true,
+		}},
+	}, time.Date(2026, 6, 17, 1, 2, 3, 0, time.UTC), doctorChatArtifactContext{
+		WorkDir:       "/repo",
+		ArtifactRoot:  root,
+		ScenarioCount: 1,
+	})
+	if err != nil {
+		t.Fatalf("write old run: %v", err)
+	}
+	newRun, err := writeChatCheckArtifacts(root, &chatcheck.Result{
+		Name:           "chat/fail",
+		Passed:         false,
+		Error:          "missing token",
+		DurationMillis: 34,
+		Turns: []chatcheck.TurnResult{{
+			Index:  1,
+			User:   "say TOKEN",
+			Text:   "wrong",
+			Err:    `missing "TOKEN"`,
+			Passed: false,
+		}},
+	}, time.Date(2026, 6, 18, 1, 2, 3, 0, time.UTC), doctorChatArtifactContext{
+		WorkDir:       "/repo",
+		ArtifactRoot:  root,
+		ScenarioCount: 1,
+	})
+	if err != nil {
+		t.Fatalf("write new run: %v", err)
+	}
+
+	out := captureStdout(t, func() {
+		if err := runDoctorChatRunsCommand([]string{"--path", root}); err != nil {
+			t.Fatalf("runDoctorChatRunsCommand: %v", err)
+		}
+	})
+	for _, want := range []string{"Chat check runs: 2", filepath.Base(newRun), "fail, scenarios=1, passed=0, failed=1", "report=" + filepath.Join(newRun, "report.json"), "transcript=" + filepath.Join(newRun, "transcripts", "chat", "fail.md"), filepath.Base(oldRun)} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("runs output missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Index(out, filepath.Base(newRun)) > strings.Index(out, filepath.Base(oldRun)) {
+		t.Fatalf("newest run should be listed first:\n%s", out)
+	}
+
+	jsonOut := captureStdout(t, func() {
+		if err := runDoctorChatRunsCommand([]string{"--path", root, "--limit", "1", "--json"}); err != nil {
+			t.Fatalf("runDoctorChatRunsCommand json: %v", err)
+		}
+	})
+	var inventory doctorChatRunsInventory
+	if err := json.Unmarshal([]byte(jsonOut), &inventory); err != nil {
+		t.Fatalf("unmarshal runs json: %v\n%s", err, jsonOut)
+	}
+	if inventory.Root != root || inventory.Count != 1 || len(inventory.Runs) != 1 {
+		t.Fatalf("unexpected runs inventory: %+v", inventory)
+	}
+	if inventory.Runs[0].ID != filepath.Base(newRun) || inventory.Runs[0].Passed || inventory.Runs[0].FailedScenarios != 1 {
+		t.Fatalf("unexpected run summary: %+v", inventory.Runs[0])
+	}
+}
+
+func TestRunDoctorChatRunsCommandUsesProjectRoot(t *testing.T) {
+	root := t.TempDir()
+	runsRoot := filepath.Join(root, ".buckley", "chatchecks", "runs")
+	if _, err := writeChatCheckArtifacts(runsRoot, &chatcheck.Result{
+		Name:   "project-chat",
+		Passed: true,
+		Turns: []chatcheck.TurnResult{{
+			Index:  1,
+			User:   "say READY",
+			Text:   "READY",
+			Passed: true,
+		}},
+	}, time.Date(2026, 6, 18, 1, 2, 3, 0, time.UTC), doctorChatArtifactContext{
+		WorkDir:       root,
+		ScenarioPath:  filepath.Join(root, ".buckley", "chatchecks"),
+		Project:       true,
+		ArtifactRoot:  runsRoot,
+		ScenarioCount: 1,
+	}); err != nil {
+		t.Fatalf("write project run: %v", err)
+	}
+	nested := filepath.Join(root, "pkg", "feature")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatalf("mkdir nested: %v", err)
+	}
+	t.Chdir(nested)
+
+	out := captureStdout(t, func() {
+		if err := runDoctorCommand([]string{"chat", "runs", "--project"}); err != nil {
+			t.Fatalf("runDoctorCommand chat runs project: %v", err)
+		}
+	})
+	for _, want := range []string{"Chat check runs: 1", runsRoot, "project=true", "project-chat"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("project runs output missing %q:\n%s", want, out)
+		}
+	}
+}
+
 func TestBuildDoctorChatArtifactContext(t *testing.T) {
 	context := buildDoctorChatArtifactContext(
 		"/repo",

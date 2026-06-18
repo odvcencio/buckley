@@ -675,7 +675,7 @@ func printHelp() {
 	fmt.Println("  skills [init|list|show]          Create, list, or inspect workflow skills")
 	fmt.Println("  config [check|show|path]         Manage configuration")
 	fmt.Println("  trust [status|allow|deny|reset]  Inspect or change project trust")
-	fmt.Println("  doctor chat [init|-project]      Create or run chat health checks")
+	fmt.Println("  doctor chat [init|runs|-project] Create, inspect, or run chat health checks")
 	fmt.Println("  completion [bash|zsh|fish]       Generate shell completions")
 	fmt.Println("  worktree create [--container]    Create git worktree")
 	fmt.Println("  rules list                       List loaded rule domains (embedded vs user override)")
@@ -1006,7 +1006,7 @@ func printBashCompletion() {
             return 0
             ;;
         chat)
-            COMPREPLY=( $(compgen -W "init" -- "${cur}") )
+            COMPREPLY=( $(compgen -W "init runs artifacts" -- "${cur}") )
             return 0
             ;;
         experiment)
@@ -1114,7 +1114,7 @@ _buckley() {
                     _values 'doctor command' check chat
                     ;;
                 chat)
-                    _values 'doctor chat command' init
+                    _values 'doctor chat command' init runs artifacts
                     ;;
                 completion)
                     _values 'shell' bash zsh fish
@@ -1198,6 +1198,8 @@ complete -c buckley -n '__fish_seen_subcommand_from skills skill' -a show -d 'In
 complete -c buckley -n '__fish_seen_subcommand_from doctor' -a check -d 'Validate configuration'
 complete -c buckley -n '__fish_seen_subcommand_from doctor' -a chat -d 'Run multi-turn chat health check'
 complete -c buckley -n '__fish_seen_subcommand_from doctor; and __fish_seen_subcommand_from chat' -a init -d 'Create a project chat check scenario'
+complete -c buckley -n '__fish_seen_subcommand_from doctor; and __fish_seen_subcommand_from chat' -a runs -d 'List chat check artifact runs'
+complete -c buckley -n '__fish_seen_subcommand_from doctor; and __fish_seen_subcommand_from chat' -a artifacts -d 'List chat check artifact runs'
 
 # Experiment subcommands
 complete -c buckley -n '__fish_seen_subcommand_from experiment' -a run -d 'Run an experiment'

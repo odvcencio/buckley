@@ -992,6 +992,9 @@ func TestCompletionShells(t *testing.T) {
 		if !strings.Contains(out, "skills") {
 			t.Errorf("expected %s completion to include skills command", shell)
 		}
+		if !strings.Contains(out, "runs") {
+			t.Errorf("expected %s completion to include doctor chat runs", shell)
+		}
 	}
 
 	// Unknown shell should error

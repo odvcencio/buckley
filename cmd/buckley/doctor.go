@@ -31,8 +31,13 @@ func runDoctorCommand(args []string) error {
 	case "", "check", "config":
 		return runConfigCommand([]string{"check"})
 	case "chat":
-		if len(args) > 1 && strings.TrimSpace(args[1]) == "init" {
-			return runDoctorChatInitCommand(args[2:])
+		if len(args) > 1 {
+			switch strings.TrimSpace(args[1]) {
+			case "init":
+				return runDoctorChatInitCommand(args[2:])
+			case "runs", "artifacts":
+				return runDoctorChatRunsCommand(args[2:])
+			}
 		}
 		return runDoctorChatCommand(args[1:])
 	default:
@@ -58,6 +63,27 @@ type doctorChatInitOptions struct {
 	Tags        []string
 	Force       bool
 	DryRun      bool
+}
+
+type doctorChatRunsInventory struct {
+	Root  string                 `json:"root"`
+	Count int                    `json:"count"`
+	Runs  []doctorChatRunSummary `json:"runs,omitempty"`
+}
+
+type doctorChatRunSummary struct {
+	ID              string `json:"id"`
+	Path            string `json:"path"`
+	GeneratedAt     string `json:"generated_at,omitempty"`
+	Passed          bool   `json:"passed"`
+	Project         bool   `json:"project,omitempty"`
+	ScenarioCount   int    `json:"scenario_count"`
+	PassedScenarios int    `json:"passed_scenarios"`
+	FailedScenarios int    `json:"failed_scenarios"`
+	Report          string `json:"report,omitempty"`
+	Summary         string `json:"summary,omitempty"`
+	FirstTranscript string `json:"first_transcript,omitempty"`
+	Error           string `json:"error,omitempty"`
 }
 
 func runDoctorChatInitCommand(args []string) error {
@@ -99,6 +125,46 @@ func runDoctorChatInitCommand(args []string) error {
 		return enc.Encode(result)
 	}
 	printDoctorChatInitResult(os.Stdout, result)
+	return nil
+}
+
+func runDoctorChatRunsCommand(args []string) error {
+	fs := flag.NewFlagSet("doctor chat runs", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	pathFlag := fs.String("path", "", "chat check artifact root to inspect")
+	projectRuns := fs.Bool("project", false, "inspect project chat check runs from .buckley/chatchecks/runs")
+	limit := fs.Int("limit", 10, "maximum runs to list (0 for all)")
+	jsonOutput := fs.Bool("json", false, "print machine-readable JSON")
+	format := fs.String("format", "text", "output format: text or json")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("usage: buckley doctor chat runs [--project|--path <dir>] [--limit n] [--json|--format json]")
+	}
+	if strings.TrimSpace(*pathFlag) != "" && *projectRuns {
+		return fmt.Errorf("doctor chat runs --path cannot be combined with --project")
+	}
+	if *limit < 0 {
+		return fmt.Errorf("doctor chat runs --limit cannot be negative")
+	}
+	if err := normalizeJSONFormatFlag(*format, jsonOutput); err != nil {
+		return err
+	}
+	root, err := resolveDoctorChatRunsRoot(*pathFlag, *projectRuns)
+	if err != nil {
+		return err
+	}
+	inventory, err := listDoctorChatRuns(root, *limit)
+	if err != nil {
+		return err
+	}
+	if *jsonOutput {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(inventory)
+	}
+	printDoctorChatRunsInventory(os.Stdout, inventory)
 	return nil
 }
 
@@ -495,6 +561,25 @@ func resolveChatCheckArtifactRoot(configured string, useProject bool, scenarioPa
 	return filepath.Join(scenarioPath, "runs")
 }
 
+func resolveDoctorChatRunsRoot(path string, project bool) (string, error) {
+	path = strings.TrimSpace(path)
+	if project {
+		scenarioRoot, err := findProjectChatCheckScenarioDir(".")
+		if err != nil {
+			return "", err
+		}
+		return filepath.Join(scenarioRoot, "runs"), nil
+	}
+	if path == "" {
+		path = defaultChatCheckArtifactRoot
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", fmt.Errorf("resolve chat check runs path: %w", err)
+	}
+	return abs, nil
+}
+
 type junitTestSuite struct {
 	XMLName   xml.Name        `xml:"testsuite"`
 	Name      string          `xml:"name,attr"`
@@ -563,6 +648,113 @@ type doctorChatArtifactEntry struct {
 	Error          string `json:"error,omitempty"`
 	Turns          int    `json:"turns"`
 	DurationMillis int64  `json:"duration_ms"`
+}
+
+func listDoctorChatRuns(root string, limit int) (doctorChatRunsInventory, error) {
+	root = strings.TrimSpace(root)
+	if root == "" {
+		root = defaultChatCheckArtifactRoot
+	}
+	absRoot, err := filepath.Abs(root)
+	if err != nil {
+		return doctorChatRunsInventory{}, fmt.Errorf("resolve chat check runs root: %w", err)
+	}
+	inventory := doctorChatRunsInventory{Root: absRoot}
+	entries, err := os.ReadDir(absRoot)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return inventory, nil
+		}
+		return doctorChatRunsInventory{}, fmt.Errorf("read chat check runs: %w", err)
+	}
+	runDirs := make([]os.DirEntry, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() {
+			runDirs = append(runDirs, entry)
+		}
+	}
+	sort.Slice(runDirs, func(i, j int) bool {
+		return runDirs[i].Name() > runDirs[j].Name()
+	})
+	if limit > 0 && len(runDirs) > limit {
+		runDirs = runDirs[:limit]
+	}
+	for _, entry := range runDirs {
+		inventory.Runs = append(inventory.Runs, readDoctorChatRunSummary(absRoot, entry.Name()))
+	}
+	inventory.Count = len(inventory.Runs)
+	return inventory, nil
+}
+
+func readDoctorChatRunSummary(root, id string) doctorChatRunSummary {
+	runPath := filepath.Join(root, id)
+	summary := doctorChatRunSummary{
+		ID:      id,
+		Path:    runPath,
+		Summary: filepath.Join(runPath, "summary.json"),
+	}
+	data, err := os.ReadFile(summary.Summary)
+	if err != nil {
+		summary.Error = fmt.Sprintf("read summary: %v", err)
+		return summary
+	}
+	var manifest doctorChatArtifactsManifest
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		summary.Error = fmt.Sprintf("parse summary: %v", err)
+		return summary
+	}
+	summary.Project = manifest.Context.Project
+	summary.ScenarioCount = manifest.Context.ScenarioCount
+	if summary.ScenarioCount == 0 {
+		summary.ScenarioCount = len(manifest.Results)
+	}
+	if !manifest.GeneratedAt.IsZero() {
+		summary.GeneratedAt = manifest.GeneratedAt.Format(time.RFC3339Nano)
+	}
+	if strings.TrimSpace(manifest.Report) != "" {
+		summary.Report = filepath.Join(runPath, filepath.FromSlash(manifest.Report))
+	}
+	for _, result := range manifest.Results {
+		if result.Passed {
+			summary.PassedScenarios++
+		} else {
+			summary.FailedScenarios++
+		}
+		if summary.FirstTranscript == "" && strings.TrimSpace(result.Transcript) != "" {
+			summary.FirstTranscript = filepath.Join(runPath, filepath.FromSlash(result.Transcript))
+		}
+	}
+	summary.Passed = summary.Error == "" && summary.FailedScenarios == 0 && len(manifest.Results) > 0
+	return summary
+}
+
+func printDoctorChatRunsInventory(w io.Writer, inventory doctorChatRunsInventory) {
+	fmt.Fprintf(w, "Chat check runs: %d (%s)\n", inventory.Count, inventory.Root)
+	for _, run := range inventory.Runs {
+		status := "pass"
+		if strings.TrimSpace(run.Error) != "" {
+			status = "invalid"
+		} else if !run.Passed {
+			status = "fail"
+		}
+		fmt.Fprintf(w, "  - %s: %s, scenarios=%d, passed=%d, failed=%d", run.ID, status, run.ScenarioCount, run.PassedScenarios, run.FailedScenarios)
+		if run.GeneratedAt != "" {
+			fmt.Fprintf(w, ", generated=%s", run.GeneratedAt)
+		}
+		if run.Project {
+			fmt.Fprint(w, ", project=true")
+		}
+		if run.Report != "" {
+			fmt.Fprintf(w, ", report=%s", run.Report)
+		}
+		if run.FirstTranscript != "" {
+			fmt.Fprintf(w, ", transcript=%s", run.FirstTranscript)
+		}
+		if run.Error != "" {
+			fmt.Fprintf(w, ", error=%s", run.Error)
+		}
+		fmt.Fprintln(w)
+	}
 }
 
 func resolveDoctorChatScenario(modelID string, timeout time.Duration, scenarioPath string, modelSet bool, timeoutSet bool) (chatcheck.Scenario, error) {
