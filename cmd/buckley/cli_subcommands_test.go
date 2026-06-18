@@ -1011,6 +1011,9 @@ func TestParseAgentRunArgs(t *testing.T) {
 	if _, err := parseAgentRunArgs([]string{"--no-tools", "--tool-tier", "full", "agent.yaml", "reviewer", "inspect"}); err == nil {
 		t.Fatalf("expected conflicting tool flags error")
 	}
+	if _, err := parseAgentRunArgs([]string{"--json", "agent.yaml", "reviewer", "inspect"}); err == nil || !strings.Contains(err.Error(), "requires --dry-run") {
+		t.Fatalf("expected json without dry-run error, got %v", err)
+	}
 
 	if _, err := parseAgentRunArgs([]string{"agent.yaml", "reviewer"}); err == nil {
 		t.Fatalf("expected usage error for missing task")
@@ -1082,6 +1085,25 @@ subagents:
 		if !strings.Contains(out, want) {
 			t.Fatalf("dry-run output missing %q:\n%s", want, out)
 		}
+	}
+
+	jsonOut := captureStdout(t, func() {
+		if err := runAgentRun([]string{"--dry-run", "--json", "--model", "override/model", "--tool-tier", "none", path, "reviewer", "inspect", "json"}); err != nil {
+			t.Fatalf("runAgentRun dry-run json: %v", err)
+		}
+	})
+	var preview agentRunPreviewSnapshot
+	if err := json.Unmarshal([]byte(jsonOut), &preview); err != nil {
+		t.Fatalf("unmarshal agent run preview json: %v\n%s", err, jsonOut)
+	}
+	if preview.Agent != "daily/reviewer" || preview.Subagent != "reviewer" || preview.Model != "override/model (flag override)" || preview.ToolTier != "none" || preview.ToolFilter != "none" || preview.Task != "inspect json" {
+		t.Fatalf("unexpected dry-run preview json: %+v", preview)
+	}
+	if preview.AllowedTools == nil || len(preview.AllowedTools) != 0 {
+		t.Fatalf("allowed tools=%v want explicit empty list", preview.AllowedTools)
+	}
+	if strings.Join(preview.DeniedTools, ",") != "run_shell" || strings.Join(preview.Skills, ",") != "code-review" || preview.ApprovalMode != "safe" || !preview.Instructions {
+		t.Fatalf("unexpected preview details: %+v", preview)
 	}
 }
 

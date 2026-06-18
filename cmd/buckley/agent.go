@@ -1006,6 +1006,26 @@ type agentRunOptions struct {
 	model      string
 	toolTier   string
 	dryRun     bool
+	jsonOutput bool
+}
+
+type agentRunPreviewSnapshot struct {
+	Source       string   `json:"source,omitempty"`
+	Agent        string   `json:"agent,omitempty"`
+	Subagent     string   `json:"subagent"`
+	Project      bool     `json:"project,omitempty"`
+	SpecSelector string   `json:"spec_selector,omitempty"`
+	AgentPath    string   `json:"agent_path,omitempty"`
+	Model        string   `json:"model"`
+	ToolTier     string   `json:"tool_tier"`
+	ToolFilter   string   `json:"tool_filter"`
+	AllowedTools []string `json:"allowed_tools"`
+	DeniedTools  []string `json:"denied_tools,omitempty"`
+	Skills       []string `json:"skills,omitempty"`
+	ApprovalMode string   `json:"approval_mode,omitempty"`
+	MaxToolCalls int      `json:"max_tool_calls,omitempty"`
+	Instructions bool     `json:"instructions"`
+	Task         string   `json:"task"`
 }
 
 func runAgentRun(args []string) error {
@@ -1026,6 +1046,11 @@ func runAgentRun(args []string) error {
 		subProfile.Spec.Tools.Tier = opts.toolTier
 	}
 	if opts.dryRun {
+		if opts.jsonOutput {
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			return enc.Encode(buildAgentRunPreviewSnapshot(opts, subProfile))
+		}
 		fmt.Print(renderAgentRunPreview(opts, subProfile))
 		return nil
 	}
@@ -1073,7 +1098,12 @@ func parseAgentRunArgs(args []string) (agentRunOptions, error) {
 	toolTier := fs.String("tool-tier", "", "override tool tier: none, read_only, standard, or full")
 	noTools := fs.Bool("no-tools", false, "run without tools")
 	dryRun := fs.Bool("dry-run", false, "show resolved subagent invocation without calling the model")
+	jsonOutput := fs.Bool("json", false, "print machine-readable JSON dry-run preview")
+	format := fs.String("format", "text", "output format for dry-run preview: text or json")
 	if err := fs.Parse(args); err != nil {
+		return agentRunOptions{}, err
+	}
+	if err := normalizeJSONFormatFlag(*format, jsonOutput); err != nil {
 		return agentRunOptions{}, err
 	}
 
@@ -1085,6 +1115,10 @@ func parseAgentRunArgs(args []string) (agentRunOptions, error) {
 		model:      strings.TrimSpace(*modelID),
 		toolTier:   strings.TrimSpace(*toolTier),
 		dryRun:     *dryRun,
+		jsonOutput: *jsonOutput,
+	}
+	if opts.jsonOutput && !opts.dryRun {
+		return agentRunOptions{}, fmt.Errorf("agent run --json requires --dry-run")
 	}
 	if *noTools {
 		if opts.toolTier != "" && opts.toolTier != "none" {
@@ -1225,34 +1259,66 @@ func projectAgentSpecRelativePaths(path string) []string {
 }
 
 func renderAgentRunPreview(opts agentRunOptions, profile *agentspec.RuntimeProfile) string {
+	snapshot := buildAgentRunPreviewSnapshot(opts, profile)
 	var b strings.Builder
 	b.WriteString("Agent run preview\n")
-	if profile != nil && strings.TrimSpace(profile.SourcePath) != "" {
-		fmt.Fprintf(&b, "Source: %s\n", strings.TrimSpace(profile.SourcePath))
+	if snapshot.Source != "" {
+		fmt.Fprintf(&b, "Source: %s\n", snapshot.Source)
 	}
-	if profile != nil && profile.Spec != nil {
-		fmt.Fprintf(&b, "Agent: %s\n", strings.TrimSpace(profile.Spec.Name))
+	if snapshot.Agent != "" {
+		fmt.Fprintf(&b, "Agent: %s\n", snapshot.Agent)
 	}
-	fmt.Fprintf(&b, "Subagent: %s\n", strings.TrimSpace(opts.subagent))
-	fmt.Fprintf(&b, "Model: %s\n", previewAgentRunModel(opts, profile))
-	fmt.Fprintf(&b, "Tool tier: %s\n", previewAgentRunToolTier(profile))
-	fmt.Fprintf(&b, "Tool filter: %s\n", previewAgentRunToolFilter(profile))
-	if profile != nil && profile.Spec != nil {
-		if len(profile.Spec.Tools.Deny) > 0 {
-			fmt.Fprintf(&b, "Denied tools: %s\n", strings.Join(cleanToolNames(profile.Spec.Tools.Deny), ", "))
-		}
-		if len(profile.Spec.Skills) > 0 {
-			fmt.Fprintf(&b, "Skills: %s\n", strings.Join(profile.Spec.Skills, ", "))
-		}
-		if mode := strings.TrimSpace(profile.Spec.Policies.ApprovalMode); mode != "" {
-			fmt.Fprintf(&b, "Approval mode: %s\n", mode)
-		}
-		if strings.TrimSpace(profile.Spec.Instructions.Prompt) != "" {
-			b.WriteString("Instructions: yes\n")
-		}
+	fmt.Fprintf(&b, "Subagent: %s\n", snapshot.Subagent)
+	fmt.Fprintf(&b, "Model: %s\n", snapshot.Model)
+	fmt.Fprintf(&b, "Tool tier: %s\n", snapshot.ToolTier)
+	fmt.Fprintf(&b, "Tool filter: %s\n", snapshot.ToolFilter)
+	if len(snapshot.DeniedTools) > 0 {
+		fmt.Fprintf(&b, "Denied tools: %s\n", strings.Join(snapshot.DeniedTools, ", "))
 	}
-	fmt.Fprintf(&b, "Task: %s\n", strings.TrimSpace(opts.task))
+	if len(snapshot.Skills) > 0 {
+		fmt.Fprintf(&b, "Skills: %s\n", strings.Join(snapshot.Skills, ", "))
+	}
+	if snapshot.ApprovalMode != "" {
+		fmt.Fprintf(&b, "Approval mode: %s\n", snapshot.ApprovalMode)
+	}
+	if snapshot.MaxToolCalls > 0 {
+		fmt.Fprintf(&b, "Max tool calls: %d\n", snapshot.MaxToolCalls)
+	}
+	if snapshot.Instructions {
+		b.WriteString("Instructions: yes\n")
+	}
+	fmt.Fprintf(&b, "Task: %s\n", snapshot.Task)
 	return b.String()
+}
+
+func buildAgentRunPreviewSnapshot(opts agentRunOptions, profile *agentspec.RuntimeProfile) agentRunPreviewSnapshot {
+	snapshot := agentRunPreviewSnapshot{
+		Subagent:     strings.TrimSpace(opts.subagent),
+		Project:      opts.project,
+		SpecSelector: strings.TrimSpace(opts.specSelect),
+		AgentPath:    strings.TrimSpace(opts.agentPath),
+		Model:        previewAgentRunModel(opts, profile),
+		ToolTier:     previewAgentRunToolTier(profile),
+		Task:         strings.TrimSpace(opts.task),
+	}
+	if profile != nil {
+		snapshot.Source = strings.TrimSpace(profile.SourcePath)
+	}
+	if profile != nil && profile.Spec != nil {
+		snapshot.Agent = strings.TrimSpace(profile.Spec.Name)
+		snapshot.AllowedTools = agentRunAllowedTools(profile)
+		snapshot.ToolFilter = summarizeAgentRunAllowedTools(snapshot.AllowedTools)
+		snapshot.DeniedTools = cleanToolNames(profile.Spec.Tools.Deny)
+		sort.Strings(snapshot.DeniedTools)
+		snapshot.Skills = append([]string(nil), profile.Spec.Skills...)
+		sort.Strings(snapshot.Skills)
+		snapshot.ApprovalMode = strings.TrimSpace(profile.Spec.Policies.ApprovalMode)
+		snapshot.MaxToolCalls = profile.Spec.Policies.MaxToolCalls
+		snapshot.Instructions = strings.TrimSpace(profile.Spec.Instructions.Prompt) != ""
+	} else {
+		snapshot.ToolFilter = "unrestricted"
+	}
+	return snapshot
 }
 
 func previewAgentRunModel(opts agentRunOptions, profile *agentspec.RuntimeProfile) string {
@@ -1284,10 +1350,21 @@ func previewAgentRunToolTier(profile *agentspec.RuntimeProfile) string {
 }
 
 func previewAgentRunToolFilter(profile *agentspec.RuntimeProfile) string {
+	return summarizeAgentRunAllowedTools(agentRunAllowedTools(profile))
+}
+
+func agentRunAllowedTools(profile *agentspec.RuntimeProfile) []string {
 	if profile == nil || profile.Spec == nil {
-		return "unrestricted"
+		return nil
 	}
 	allowed := resolveOneShotToolFilter(profile, tool.NewRegistry(), append([]string(nil), profile.Spec.Tools.Allow...))
+	if allowed != nil {
+		sort.Strings(allowed)
+	}
+	return allowed
+}
+
+func summarizeAgentRunAllowedTools(allowed []string) string {
 	switch {
 	case allowed == nil:
 		return "unrestricted"
