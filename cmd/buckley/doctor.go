@@ -281,14 +281,16 @@ type doctorChatArtifactGitContext struct {
 }
 
 type doctorChatArtifactLocation struct {
-	Report     string `json:"report"`
-	Summary    string `json:"summary"`
-	ResultsDir string `json:"results_dir"`
+	Report         string `json:"report"`
+	Summary        string `json:"summary"`
+	ResultsDir     string `json:"results_dir"`
+	TranscriptsDir string `json:"transcripts_dir,omitempty"`
 }
 
 type doctorChatArtifactEntry struct {
 	Name           string `json:"name"`
 	Path           string `json:"path"`
+	Transcript     string `json:"transcript,omitempty"`
 	Passed         bool   `json:"passed"`
 	Error          string `json:"error,omitempty"`
 	Turns          int    `json:"turns"`
@@ -669,6 +671,9 @@ func writeChatCheckArtifacts(root string, report any, now time.Time, artifactCon
 	if err := os.MkdirAll(filepath.Join(runDir, "results"), 0o755); err != nil {
 		return "", fmt.Errorf("create chat check artifact directory: %w", err)
 	}
+	if err := os.MkdirAll(filepath.Join(runDir, "transcripts"), 0o755); err != nil {
+		return "", fmt.Errorf("create chat check transcript directory: %w", err)
+	}
 	if err := writeChatCheckReport(filepath.Join(runDir, "report.json"), report); err != nil {
 		return "", err
 	}
@@ -683,24 +688,32 @@ func writeChatCheckArtifacts(root string, report any, now time.Time, artifactCon
 		Report:      "report.json",
 		Results:     make([]doctorChatArtifactEntry, 0, len(results)),
 		Artifacts: doctorChatArtifactLocation{
-			Report:     "report.json",
-			Summary:    "summary.json",
-			ResultsDir: "results",
+			Report:         "report.json",
+			Summary:        "summary.json",
+			ResultsDir:     "results",
+			TranscriptsDir: "transcripts",
 		},
 	}
 	if strings.TrimSpace(manifest.Context.ArtifactRoot) == "" {
 		manifest.Context.ArtifactRoot = root
 	}
 	seenResultPaths := map[string]int{}
+	seenTranscriptPaths := map[string]int{}
 	for _, result := range results {
 		relPath := filepath.Join("results", chatCheckResultArtifactPath(result.Name))
 		relPath = uniqueChatCheckArtifactPath(relPath, seenResultPaths)
 		if err := writeChatCheckReport(filepath.Join(runDir, relPath), result); err != nil {
 			return "", err
 		}
+		transcriptPath := filepath.Join("transcripts", chatCheckTranscriptArtifactPath(result.Name))
+		transcriptPath = uniqueChatCheckArtifactPath(transcriptPath, seenTranscriptPaths)
+		if err := writeChatCheckTranscript(filepath.Join(runDir, transcriptPath), result); err != nil {
+			return "", err
+		}
 		manifest.Results = append(manifest.Results, doctorChatArtifactEntry{
 			Name:           result.Name,
 			Path:           filepath.ToSlash(relPath),
+			Transcript:     filepath.ToSlash(transcriptPath),
 			Passed:         result.Passed,
 			Error:          result.Error,
 			Turns:          len(result.Turns),
@@ -711,6 +724,106 @@ func writeChatCheckArtifacts(root string, report any, now time.Time, artifactCon
 		return "", err
 	}
 	return runDir, nil
+}
+
+func writeChatCheckTranscript(path string, result chatcheck.Result) error {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return nil
+	}
+	if err := ensureParentDir(path, "chat check transcript"); err != nil {
+		return err
+	}
+	if err := os.WriteFile(path, []byte(chatCheckTranscriptMarkdown(result)), 0o644); err != nil {
+		return fmt.Errorf("write chat check transcript: %w", err)
+	}
+	return nil
+}
+
+func chatCheckTranscriptMarkdown(result chatcheck.Result) string {
+	var b strings.Builder
+	name := strings.TrimSpace(result.Name)
+	if name == "" {
+		name = "chat-check"
+	}
+	fmt.Fprintf(&b, "# Chat Check Transcript: %s\n\n", name)
+	fmt.Fprintf(&b, "- Passed: %t\n", result.Passed)
+	if result.Model != "" {
+		fmt.Fprintf(&b, "- Model: %s\n", result.Model)
+	}
+	if result.SessionID != "" {
+		fmt.Fprintf(&b, "- Session: %s\n", result.SessionID)
+	}
+	if result.DurationMillis > 0 {
+		fmt.Fprintf(&b, "- Duration: %d ms\n", result.DurationMillis)
+	}
+	if result.Usage.TotalTokens > 0 {
+		fmt.Fprintf(&b, "- Tokens: prompt=%d completion=%d total=%d\n", result.Usage.PromptTokens, result.Usage.CompletionTokens, result.Usage.TotalTokens)
+	}
+	if strings.TrimSpace(result.Error) != "" {
+		fmt.Fprintf(&b, "- Error: %s\n", strings.TrimSpace(result.Error))
+	}
+	b.WriteString("\n")
+	for _, turn := range result.Turns {
+		fmt.Fprintf(&b, "## Turn %d\n\n", turn.Index)
+		if turn.Model != "" {
+			fmt.Fprintf(&b, "- Model: %s\n", turn.Model)
+		}
+		if turn.LatencyMillis > 0 {
+			fmt.Fprintf(&b, "- Latency: %d ms\n", turn.LatencyMillis)
+		}
+		if turn.Finish != "" {
+			fmt.Fprintf(&b, "- Finish: %s\n", turn.Finish)
+		}
+		fmt.Fprintf(&b, "- Tool calls: %d\n", turn.ToolCalls)
+		if turn.Reasoning {
+			b.WriteString("- Reasoning: true\n")
+		}
+		if strings.TrimSpace(turn.Err) != "" {
+			fmt.Fprintf(&b, "- Error: %s\n", strings.TrimSpace(turn.Err))
+		}
+		b.WriteString("\n### User\n\n")
+		writeTranscriptBlock(&b, turn.User)
+		b.WriteString("\n### Assistant\n\n")
+		writeTranscriptBlock(&b, turn.Text)
+		if len(turn.Checks) > 0 {
+			b.WriteString("\n### Checks\n\n")
+			for _, check := range turn.Checks {
+				marker := " "
+				if check.Passed {
+					marker = "x"
+				}
+				fmt.Fprintf(&b, "- [%s] %s", marker, transcriptLabel(check.Name, "check"))
+				if strings.TrimSpace(check.Message) != "" {
+					fmt.Fprintf(&b, ": %s", strings.TrimSpace(check.Message))
+				}
+				b.WriteString("\n")
+			}
+		}
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
+func writeTranscriptBlock(b *strings.Builder, text string) {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		text = "(empty)"
+	}
+	b.WriteString("```text\n")
+	b.WriteString(text)
+	if !strings.HasSuffix(text, "\n") {
+		b.WriteString("\n")
+	}
+	b.WriteString("```\n")
+}
+
+func transcriptLabel(value string, fallback string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return fallback
+	}
+	return value
 }
 
 func chatCheckReportResults(report any) ([]chatcheck.Result, error) {
@@ -731,6 +844,14 @@ func chatCheckReportResults(report any) ([]chatcheck.Result, error) {
 }
 
 func chatCheckResultArtifactPath(name string) string {
+	return chatCheckNamedArtifactPath(name, ".json")
+}
+
+func chatCheckTranscriptArtifactPath(name string) string {
+	return chatCheckNamedArtifactPath(name, ".md")
+}
+
+func chatCheckNamedArtifactPath(name string, ext string) string {
 	name = strings.TrimSpace(name)
 	if name == "" {
 		name = "chat-check"
@@ -745,7 +866,10 @@ func chatCheckResultArtifactPath(name string) string {
 	if len(clean) == 0 {
 		clean = append(clean, "chat-check")
 	}
-	clean[len(clean)-1] += ".json"
+	if strings.TrimSpace(ext) == "" {
+		ext = ".json"
+	}
+	clean[len(clean)-1] += ext
 	return filepath.Join(clean...)
 }
 

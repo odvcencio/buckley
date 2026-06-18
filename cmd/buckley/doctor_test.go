@@ -159,8 +159,14 @@ func TestWriteChatCheckArtifactsSuite(t *testing.T) {
 				Passed:         true,
 				DurationMillis: 100,
 				Turns: []chatcheck.TurnResult{{
-					Index:  1,
-					Passed: true,
+					Index:         1,
+					User:          "say READY",
+					Text:          "READY",
+					Model:         "test-model",
+					LatencyMillis: 25,
+					Finish:        "stop",
+					Passed:        true,
+					Checks:        []chatcheck.CheckResult{{Name: "contains", Passed: true, Message: `found "READY"`}},
 				}},
 			},
 			{
@@ -168,6 +174,14 @@ func TestWriteChatCheckArtifactsSuite(t *testing.T) {
 				Passed:         false,
 				Error:          "missing token",
 				DurationMillis: 250,
+				Turns: []chatcheck.TurnResult{{
+					Index:  1,
+					User:   "say TOKEN",
+					Text:   "wrong",
+					Err:    `turn 1 response missing "TOKEN"`,
+					Passed: false,
+					Checks: []chatcheck.CheckResult{{Name: "contains", Passed: false, Message: `missing "TOKEN"`}},
+				}},
 			},
 		},
 	}
@@ -224,7 +238,7 @@ func TestWriteChatCheckArtifactsSuite(t *testing.T) {
 	if summary.Report != "report.json" || len(summary.Results) != 2 {
 		t.Fatalf("unexpected summary artifact: %+v", summary)
 	}
-	if summary.Artifacts.Summary != "summary.json" || summary.Artifacts.ResultsDir != "results" {
+	if summary.Artifacts.Summary != "summary.json" || summary.Artifacts.ResultsDir != "results" || summary.Artifacts.TranscriptsDir != "transcripts" {
 		t.Fatalf("unexpected artifact locations: %+v", summary.Artifacts)
 	}
 	if summary.Context.WorkDir != "/repo" || summary.Context.ScenarioPath != "/repo/.buckley/chatchecks" || !summary.Context.Project {
@@ -242,9 +256,23 @@ func TestWriteChatCheckArtifactsSuite(t *testing.T) {
 	if summary.Results[0].Path != "results/tools/no-tools.json" || summary.Results[1].Path != "results/tools/no-tools-2.json" {
 		t.Fatalf("unexpected result artifact paths: %+v", summary.Results)
 	}
+	if summary.Results[0].Transcript != "transcripts/tools/no-tools.md" || summary.Results[1].Transcript != "transcripts/tools/no-tools-2.md" {
+		t.Fatalf("unexpected transcript artifact paths: %+v", summary.Results)
+	}
 	for _, path := range []string{summary.Results[0].Path, summary.Results[1].Path} {
 		if _, err := os.Stat(filepath.Join(runDir, filepath.FromSlash(path))); err != nil {
 			t.Fatalf("missing result artifact %s: %v", path, err)
+		}
+	}
+	transcriptPath := filepath.Join(runDir, filepath.FromSlash(summary.Results[1].Transcript))
+	transcriptData, err := os.ReadFile(transcriptPath)
+	if err != nil {
+		t.Fatalf("read transcript artifact: %v", err)
+	}
+	transcript := string(transcriptData)
+	for _, want := range []string{"# Chat Check Transcript: tools/no-tools", "## Turn 1", "say TOKEN", "wrong", `missing "TOKEN"`} {
+		if !strings.Contains(transcript, want) {
+			t.Fatalf("transcript missing %q:\n%s", want, transcript)
 		}
 	}
 }
