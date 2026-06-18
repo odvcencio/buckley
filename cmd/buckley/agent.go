@@ -18,9 +18,11 @@ import (
 
 func runAgentCommand(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: buckley agent <list|check|show|run> [args...]")
+		return fmt.Errorf("usage: buckley agent <init|list|check|show|run> [args...]")
 	}
 	switch args[0] {
+	case "init":
+		return runAgentInit(args[1:])
 	case "list":
 		return runAgentList(args[1:])
 	case "check":
@@ -30,8 +32,62 @@ func runAgentCommand(args []string) error {
 	case "run", "invoke":
 		return runAgentRun(args[1:])
 	default:
-		return fmt.Errorf("unknown agent subcommand: %s (use list, check, show, or run)", args[0])
+		return fmt.Errorf("unknown agent subcommand: %s (use init, list, check, show, or run)", args[0])
 	}
+}
+
+type agentInitResult struct {
+	Root     string   `json:"root"`
+	AgentDir string   `json:"agent_dir"`
+	Created  []string `json:"created,omitempty"`
+	Existing []string `json:"existing,omitempty"`
+	DryRun   bool     `json:"dry_run,omitempty"`
+}
+
+func runAgentInit(args []string) error {
+	fs := flag.NewFlagSet("agent init", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	pathFlag := fs.String("path", ".", "project root where agent/ should be created")
+	force := fs.Bool("force", false, "overwrite generated instructions.md if it already exists")
+	dryRun := fs.Bool("dry-run", false, "show what would be created without writing files")
+	jsonOutput := fs.Bool("json", false, "print machine-readable JSON")
+	format := fs.String("format", "text", "output format: text or json")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() > 1 {
+		return fmt.Errorf("usage: buckley agent init [--path <dir>] [--force] [--dry-run] [--json|--format json]")
+	}
+	target := strings.TrimSpace(*pathFlag)
+	if fs.NArg() == 1 {
+		if target != "." {
+			return fmt.Errorf("usage: buckley agent init [--path <dir>] [--force] [--dry-run] [--json|--format json]")
+		}
+		target = strings.TrimSpace(fs.Arg(0))
+	}
+	if target == "" {
+		target = "."
+	}
+	formatValue := strings.ToLower(strings.TrimSpace(*format))
+	switch formatValue {
+	case "", "text":
+	case "json":
+		*jsonOutput = true
+	default:
+		return fmt.Errorf("unknown format %q (use text or json)", *format)
+	}
+
+	result, err := initFilesystemAgentLayout(target, *force, *dryRun)
+	if err != nil {
+		return err
+	}
+	if *jsonOutput {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(result)
+	}
+	printAgentInitResult(os.Stdout, result)
+	return nil
 }
 
 type agentListSnapshot struct {
@@ -116,6 +172,138 @@ func printAgentListText(w io.Writer, snapshot agentListSnapshot) {
 		}
 		fmt.Fprintln(w)
 	}
+}
+
+func initFilesystemAgentLayout(target string, force, dryRun bool) (agentInitResult, error) {
+	root, err := filepath.Abs(strings.TrimSpace(target))
+	if err != nil {
+		return agentInitResult{}, fmt.Errorf("resolve agent init path: %w", err)
+	}
+	if info, err := os.Stat(root); err == nil {
+		if !info.IsDir() {
+			return agentInitResult{}, fmt.Errorf("agent init path is not a directory: %s", root)
+		}
+	} else if !os.IsNotExist(err) {
+		return agentInitResult{}, fmt.Errorf("stat agent init path: %w", err)
+	}
+
+	result := agentInitResult{
+		Root:     root,
+		AgentDir: filepath.Join(root, "agent"),
+		DryRun:   dryRun,
+	}
+	if _, _, err := ensureAgentInitPath(root, "", true, false, dryRun); err != nil {
+		return agentInitResult{}, err
+	}
+	paths := []struct {
+		path    string
+		content string
+		dir     bool
+		force   bool
+	}{
+		{path: result.AgentDir, dir: true},
+		{path: filepath.Join(result.AgentDir, "instructions.md"), content: defaultAgentInstructions(), force: force},
+		{path: filepath.Join(result.AgentDir, "skills"), dir: true},
+		{path: filepath.Join(result.AgentDir, "subagents"), dir: true},
+	}
+	for _, item := range paths {
+		created, existing, err := ensureAgentInitPath(item.path, item.content, item.dir, item.force, dryRun)
+		if err != nil {
+			return agentInitResult{}, err
+		}
+		rel := agentInitRelativePath(root, item.path, item.dir)
+		if created {
+			result.Created = append(result.Created, rel)
+		} else if existing {
+			result.Existing = append(result.Existing, rel)
+		}
+	}
+	return result, nil
+}
+
+func ensureAgentInitPath(path, content string, dir, force, dryRun bool) (created bool, existing bool, err error) {
+	info, statErr := os.Stat(path)
+	if statErr == nil {
+		if dir {
+			if !info.IsDir() {
+				return false, false, fmt.Errorf("agent init path exists and is not a directory: %s", path)
+			}
+			return false, true, nil
+		}
+		if info.IsDir() {
+			return false, false, fmt.Errorf("agent init path exists and is a directory: %s", path)
+		}
+		if !force {
+			return false, true, nil
+		}
+		if dryRun {
+			return true, false, nil
+		}
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			return false, false, fmt.Errorf("write agent init file: %w", err)
+		}
+		return true, false, nil
+	}
+	if !os.IsNotExist(statErr) {
+		return false, false, fmt.Errorf("stat agent init path: %w", statErr)
+	}
+	if dryRun {
+		return true, false, nil
+	}
+	if dir {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			return false, false, fmt.Errorf("create agent init directory: %w", err)
+		}
+		return true, false, nil
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return false, false, fmt.Errorf("create agent init parent directory: %w", err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		return false, false, fmt.Errorf("write agent init file: %w", err)
+	}
+	return true, false, nil
+}
+
+func agentInitRelativePath(root, path string, dir bool) string {
+	rel, err := filepath.Rel(root, path)
+	if err != nil || rel == "." {
+		rel = path
+	}
+	rel = filepath.ToSlash(rel)
+	if dir && !strings.HasSuffix(rel, "/") {
+		rel += "/"
+	}
+	return rel
+}
+
+func defaultAgentInstructions() string {
+	return strings.TrimSpace(`You are a careful coding agent for this repository.
+
+Inspect the current state before editing. Prefer small, well-tested changes. Follow repository instructions, use project-local skills when relevant, and report validation plus any remaining risks.`) + "\n"
+}
+
+func printAgentInitResult(w io.Writer, result agentInitResult) {
+	action := "Created"
+	createdLabel := "Created"
+	if result.DryRun {
+		action = "Would create"
+		createdLabel = "Would create"
+	}
+	fmt.Fprintf(w, "%s filesystem agent layout at %s\n", action, result.AgentDir)
+	if len(result.Created) > 0 {
+		fmt.Fprintf(w, "%s:\n", createdLabel)
+		for _, path := range result.Created {
+			fmt.Fprintf(w, "  - %s\n", path)
+		}
+	}
+	if len(result.Existing) > 0 {
+		fmt.Fprintln(w, "Existing:")
+		for _, path := range result.Existing {
+			fmt.Fprintf(w, "  - %s\n", path)
+		}
+	}
+	fmt.Fprintln(w, "Next: buckley agent show --project")
 }
 
 func runAgentCheck(args []string) error {

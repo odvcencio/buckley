@@ -661,6 +661,7 @@ func printHelp() {
 	fmt.Println("  remote <subcommand>              Remote session operations (attach, sessions, tokens, login, console)")
 	fmt.Println("  batch prune-workspaces           Garbage-collect stale batch workspaces (k8s/CI)")
 	fmt.Println("  git-webhook                      Listen for merge webhooks and run regression/release commands")
+	fmt.Println("  agent init [path]                Create a filesystem-first agent/ layout")
 	fmt.Println("  agent list                       List discovered project agent profiles")
 	fmt.Println("  agent check [--project|path]     Validate a Buckley agent profile")
 	fmt.Println("  agent show [--project|path]      Show a project agent profile summary")
@@ -989,7 +990,7 @@ func printBashCompletion() {
             return 0
             ;;
         agent)
-            COMPREPLY=( $(compgen -W "list check show run invoke" -- "${cur}") )
+            COMPREPLY=( $(compgen -W "init list check show run invoke" -- "${cur}") )
             return 0
             ;;
         skills|skill)
@@ -1094,7 +1095,7 @@ _buckley() {
                     _values 'batch command' prune-workspaces
                     ;;
                 agent)
-                    _values 'agent command' list check show run invoke
+                    _values 'agent command' init list check show run invoke
                     ;;
                 skills|skill)
                     _values 'skills command' list show
@@ -1175,6 +1176,7 @@ complete -c buckley -n '__fish_seen_subcommand_from config' -a path -d 'Show con
 
 # Agent subcommands
 complete -c buckley -n '__fish_seen_subcommand_from agent' -a check -d 'Validate agent spec'
+complete -c buckley -n '__fish_seen_subcommand_from agent' -a init -d 'Create a filesystem-first agent layout'
 complete -c buckley -n '__fish_seen_subcommand_from agent' -a list -d 'List discovered project agent specs'
 complete -c buckley -n '__fish_seen_subcommand_from agent' -a show -d 'Inspect agent spec'
 complete -c buckley -n '__fish_seen_subcommand_from agent' -a run -d 'Invoke a named subagent'

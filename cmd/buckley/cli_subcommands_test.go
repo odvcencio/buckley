@@ -91,6 +91,98 @@ policies:
 	}
 }
 
+func TestRunAgentCommandInitCreatesFilesystemLayout(t *testing.T) {
+	dir := t.TempDir()
+	project := filepath.Join(dir, "new-project")
+
+	out := captureStdout(t, func() {
+		if err := runAgentCommand([]string{"init", project}); err != nil {
+			t.Fatalf("runAgentCommand init: %v", err)
+		}
+	})
+	for _, want := range []string{"Created filesystem agent layout", "agent/", "agent/instructions.md", "agent/skills/", "agent/subagents/", "Next: buckley agent show --project"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("agent init output missing %q:\n%s", want, out)
+		}
+	}
+	instructionsPath := filepath.Join(project, "agent", "instructions.md")
+	data, err := os.ReadFile(instructionsPath)
+	if err != nil {
+		t.Fatalf("read generated instructions: %v", err)
+	}
+	if !strings.Contains(string(data), "careful coding agent") {
+		t.Fatalf("unexpected generated instructions:\n%s", string(data))
+	}
+	for _, path := range []string{filepath.Join(project, "agent", "skills"), filepath.Join(project, "agent", "subagents")} {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatalf("stat generated path %s: %v", path, err)
+		}
+		if !info.IsDir() {
+			t.Fatalf("generated path is not a directory: %s", path)
+		}
+	}
+
+	oldWd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(oldWd) })
+	if err := os.Chdir(project); err != nil {
+		t.Fatalf("chdir project: %v", err)
+	}
+	showOut := captureStdout(t, func() {
+		if err := runAgentCommand([]string{"show", "--project"}); err != nil {
+			t.Fatalf("runAgentCommand show generated project: %v", err)
+		}
+	})
+	if !strings.Contains(showOut, "Agent: new-project") || !strings.Contains(showOut, "Subagents:") {
+		t.Fatalf("generated project show output unexpected:\n%s", showOut)
+	}
+
+	custom := "Keep this custom prompt.\n"
+	if err := os.WriteFile(instructionsPath, []byte(custom), 0o644); err != nil {
+		t.Fatalf("write custom instructions: %v", err)
+	}
+	if err := runAgentCommand([]string{"init", project}); err != nil {
+		t.Fatalf("rerun agent init: %v", err)
+	}
+	data, err = os.ReadFile(instructionsPath)
+	if err != nil {
+		t.Fatalf("read preserved instructions: %v", err)
+	}
+	if string(data) != custom {
+		t.Fatalf("agent init should preserve existing instructions, got:\n%s", string(data))
+	}
+	if err := runAgentCommand([]string{"init", "--force", project}); err != nil {
+		t.Fatalf("force agent init: %v", err)
+	}
+	data, err = os.ReadFile(instructionsPath)
+	if err != nil {
+		t.Fatalf("read overwritten instructions: %v", err)
+	}
+	if string(data) == custom || !strings.Contains(string(data), "careful coding agent") {
+		t.Fatalf("agent init --force should restore generated instructions, got:\n%s", string(data))
+	}
+
+	dryProject := filepath.Join(dir, "dry-project")
+	jsonOut := captureStdout(t, func() {
+		if err := runAgentCommand([]string{"init", "--dry-run", "--json", dryProject}); err != nil {
+			t.Fatalf("runAgentCommand init dry-run: %v", err)
+		}
+	})
+	var result agentInitResult
+	if err := json.Unmarshal([]byte(jsonOut), &result); err != nil {
+		t.Fatalf("unmarshal dry-run json: %v\n%s", err, jsonOut)
+	}
+	if !result.DryRun || result.AgentDir != filepath.Join(dryProject, "agent") || len(result.Created) == 0 {
+		t.Fatalf("unexpected dry-run result: %+v", result)
+	}
+	if _, err := os.Stat(filepath.Join(dryProject, "agent")); !os.IsNotExist(err) {
+		t.Fatalf("dry-run should not create agent dir, stat err=%v", err)
+	}
+}
+
 func TestRunAgentCommandProjectCheckAndShow(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(dir, ".buckley"), 0o755); err != nil {
