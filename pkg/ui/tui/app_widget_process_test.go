@@ -57,6 +57,72 @@ func TestWidgetAppProcessStatusAnimates(t *testing.T) {
 	}
 }
 
+func TestWidgetAppHandleStatusMsg_RespectsActiveOverride(t *testing.T) {
+	be := sim.New(80, 24)
+	app, err := NewWidgetApp(WidgetAppConfig{Backend: be})
+	if err != nil {
+		t.Fatalf("NewWidgetApp: %v", err)
+	}
+
+	now := time.Unix(100, 0)
+	app.statusOverride = "Copied"
+	app.statusOverrideUntil = now.Add(time.Second)
+	app.statusBar.SetStatus("Copied")
+
+	if app.handleStatusMsg(StatusMsg{Text: "Ready"}, now) {
+		t.Fatal("active override should not dirty the app")
+	}
+	if app.statusText != "Ready" {
+		t.Fatalf("statusText = %q, want Ready", app.statusText)
+	}
+	if got := app.statusBar.Status(); got != "Copied" {
+		t.Fatalf("status bar = %q, want active override", got)
+	}
+
+	if !app.handleStatusMsg(StatusMsg{Text: "Ready"}, now.Add(2*time.Second)) {
+		t.Fatal("expired override should dirty the app")
+	}
+	if app.statusOverride != "" || !app.statusOverrideUntil.IsZero() {
+		t.Fatal("expired override should be cleared")
+	}
+	if got := app.statusBar.Status(); got != "Ready" {
+		t.Fatalf("status bar = %q, want Ready", got)
+	}
+}
+
+func TestWidgetAppHandleProcessStatusMsg_DefaultsAndStops(t *testing.T) {
+	be := sim.New(80, 24)
+	app, err := NewWidgetApp(WidgetAppConfig{Backend: be})
+	if err != nil {
+		t.Fatalf("NewWidgetApp: %v", err)
+	}
+
+	now := time.Unix(200, 0)
+	if !app.handleProcessStatusMsg(ProcessStatusMsg{Active: true}, now) {
+		t.Fatal("starting process status should dirty the app")
+	}
+	if !app.processActive {
+		t.Fatal("process status should be active")
+	}
+	if app.processText != "Working" {
+		t.Fatalf("processText = %q, want Working", app.processText)
+	}
+	if got := app.statusBar.Status(); !strings.Contains(got, "Working") || !strings.Contains(got, "(0s)") {
+		t.Fatalf("status bar = %q, want Working with elapsed time", got)
+	}
+
+	app.statusText = "Ready"
+	if !app.handleProcessStatusMsg(ProcessStatusMsg{Active: false}, now.Add(time.Second)) {
+		t.Fatal("stopping active process status should dirty the app")
+	}
+	if app.processActive || app.processText != "" || !app.processStarted.IsZero() {
+		t.Fatalf("process state was not cleared: active=%v text=%q started=%v", app.processActive, app.processText, app.processStarted)
+	}
+	if got := app.statusBar.Status(); got != "Ready" {
+		t.Fatalf("status bar = %q, want Ready", got)
+	}
+}
+
 func TestWidgetAppSidebarDoesNotAutoShowForTransientTools(t *testing.T) {
 	be := sim.New(120, 24)
 	app, err := NewWidgetApp(WidgetAppConfig{Backend: be})
