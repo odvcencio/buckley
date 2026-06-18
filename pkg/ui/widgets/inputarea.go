@@ -2,6 +2,7 @@ package widgets
 
 import (
 	"strings"
+	"unicode/utf8"
 
 	"m31labs.dev/buckley/pkg/ui/backend"
 	"m31labs.dev/buckley/pkg/ui/runtime"
@@ -155,7 +156,7 @@ func (i *InputArea) Text() string {
 func (i *InputArea) SetText(text string) {
 	i.text.Reset()
 	i.text.WriteString(text)
-	i.cursorPos = i.text.Len()
+	i.cursorPos = len(text)
 }
 
 // Clear clears the input.
@@ -177,11 +178,12 @@ func (i *InputArea) InsertText(s string) {
 		return
 	}
 	current := i.text.String()
+	cursor := clampByteOffset(current, i.cursorPos)
 	i.text.Reset()
-	i.text.WriteString(current[:i.cursorPos])
+	i.text.WriteString(current[:cursor])
 	i.text.WriteString(s)
-	i.text.WriteString(current[i.cursorPos:])
-	i.cursorPos += len(s)
+	i.text.WriteString(current[cursor:])
+	i.cursorPos = cursor + len(s)
 	i.notifyChange()
 }
 
@@ -193,16 +195,11 @@ func (i *InputArea) Mode() InputMode {
 // CursorPosition returns screen coordinates for the cursor.
 func (i *InputArea) CursorPosition() (x, y int) {
 	bounds := i.bounds
-	availWidth := bounds.Width - 4 // mode indicator + padding
-	if availWidth < 10 {
-		availWidth = 10
-	}
-
-	lines := i.inputLines(availWidth)
+	lines := i.inputLines(inputContentWidth(bounds.Width))
 	cursorLine, cursorCol := i.cursorLineCol(lines)
 
 	// Account for scrolling in tall input
-	maxVisibleLines := bounds.Height - 1 // minus border
+	maxVisibleLines := inputVisibleLineCount(bounds.Height)
 	if maxVisibleLines < 1 {
 		return bounds.X + 3, bounds.Y + 1
 	}
@@ -226,10 +223,7 @@ func (i *InputArea) moveCursorVertical(delta int) bool {
 	if delta == 0 {
 		return false
 	}
-	availWidth := i.bounds.Width - 4
-	if availWidth < 10 {
-		availWidth = 10
-	}
+	availWidth := inputContentWidth(i.bounds.Width)
 	if availWidth <= 0 {
 		return false
 	}
@@ -244,21 +238,16 @@ func (i *InputArea) moveCursorVertical(delta int) bool {
 		return false
 	}
 	target := lines[targetLine]
-	if col > len(target.text) {
-		col = len(target.text)
+	if col > runeLen(target.text) {
+		col = runeLen(target.text)
 	}
-	i.cursorPos = target.start + col
+	i.cursorPos = target.start + byteOffsetForRuneCol(target.text, col)
 	return true
 }
 
 // Measure returns the preferred size based on content.
 func (i *InputArea) Measure(constraints runtime.Constraints) runtime.Size {
-	availWidth := constraints.MaxWidth - 4
-	if availWidth < 10 {
-		availWidth = 10
-	}
-
-	lines := i.inputLines(availWidth)
+	lines := i.inputLines(inputContentWidth(constraints.MaxWidth))
 	lineCount := len(lines)
 	if lineCount == 0 {
 		lineCount = 1
@@ -286,63 +275,87 @@ func (i *InputArea) Render(ctx runtime.RenderContext) {
 		return
 	}
 
-	// Fill background
 	ctx.Buffer.Fill(bounds, ' ', i.bgStyle)
+	i.renderTopBorder(ctx.Buffer, bounds)
+	i.renderModeIndicator(ctx.Buffer, bounds)
 
-	// Draw top border
+	lines := i.inputLines(inputContentWidth(bounds.Width))
+	startLine := i.visibleStartLine(lines, bounds.Height)
+	i.renderInputLines(ctx.Buffer, bounds, lines, startLine)
+
+	if i.focused {
+		i.renderCursor(ctx.Buffer, bounds)
+	}
+}
+
+func (i *InputArea) renderTopBorder(buf *runtime.Buffer, bounds runtime.Rect) {
 	for x := 0; x < bounds.Width; x++ {
-		ctx.Buffer.Set(bounds.X+x, bounds.Y, '─', i.borderStyle)
+		buf.Set(bounds.X+x, bounds.Y, '─', i.borderStyle)
 	}
+}
 
-	// Draw mode indicator
+func (i *InputArea) renderModeIndicator(buf *runtime.Buffer, bounds runtime.Rect) {
 	modeStyle, modeChar := i.modeIndicator()
-	ctx.Buffer.Set(bounds.X+1, bounds.Y+1, rune(modeChar[0]), modeStyle)
+	buf.Set(bounds.X+1, bounds.Y+1, firstRune(modeChar), modeStyle)
+}
 
-	// Draw text with wrapping
-	availWidth := bounds.Width - 4
-	if availWidth < 10 {
-		availWidth = 10
+func (i *InputArea) visibleStartLine(lines []inputLine, height int) int {
+	maxVisibleLines := inputVisibleLineCount(height)
+	if maxVisibleLines <= 0 {
+		return 0
 	}
-
-	lines := i.inputLines(availWidth)
-	if len(lines) == 0 {
-		lines = []inputLine{{text: "", start: 0, end: 0}}
-	}
-
-	// Calculate scroll
-	maxVisibleLines := bounds.Height - 1
 	cursorLine, _ := i.cursorLineCol(lines)
-	startLine := 0
-	if cursorLine >= startLine+maxVisibleLines {
-		startLine = cursorLine - maxVisibleLines + 1
+	if cursorLine >= maxVisibleLines {
+		return cursorLine - maxVisibleLines + 1
 	}
+	return 0
+}
 
-	// Render visible lines
+func (i *InputArea) renderInputLines(buf *runtime.Buffer, bounds runtime.Rect, lines []inputLine, startLine int) {
+	maxVisibleLines := inputVisibleLineCount(bounds.Height)
 	for j := 0; j < maxVisibleLines && startLine+j < len(lines); j++ {
 		line := lines[startLine+j]
 		y := bounds.Y + 1 + j
-		ctx.Buffer.SetString(bounds.X+3, y, line.text, i.textStyle)
+		buf.SetString(bounds.X+3, y, line.text, i.textStyle)
 	}
+}
 
-	// Draw cursor if focused
-	if i.focused {
-		cursorX, cursorY := i.CursorPosition()
-		if cursorX >= bounds.X && cursorX < bounds.X+bounds.Width &&
-			cursorY >= bounds.Y && cursorY < bounds.Y+bounds.Height {
-			var ch rune = ' '
-			if i.cursorPos < i.text.Len() {
-				ch = rune(i.text.String()[i.cursorPos])
-				if ch == '\n' {
-					ch = ' '
-				}
-			}
-			cursorStyle := i.textStyle.Reverse(true)
-			if i.cursorStyleSet {
-				cursorStyle = i.cursorStyle
-			}
-			ctx.Buffer.Set(cursorX, cursorY, ch, cursorStyle)
-		}
+func (i *InputArea) renderCursor(buf *runtime.Buffer, bounds runtime.Rect) {
+	cursorX, cursorY := i.CursorPosition()
+	if cursorX < bounds.X || cursorX >= bounds.X+bounds.Width ||
+		cursorY < bounds.Y || cursorY >= bounds.Y+bounds.Height {
+		return
 	}
+	buf.Set(cursorX, cursorY, i.cursorRune(), i.currentCursorStyle())
+}
+
+func (i *InputArea) cursorRune() rune {
+	if r, ok := runeAtByteOffset(i.text.String(), i.cursorPos); ok && r != '\n' {
+		return r
+	}
+	return ' '
+}
+
+func (i *InputArea) currentCursorStyle() backend.Style {
+	if i.cursorStyleSet {
+		return i.cursorStyle
+	}
+	return i.textStyle.Reverse(true)
+}
+
+func inputContentWidth(totalWidth int) int {
+	width := totalWidth - 4
+	if width < 10 {
+		return 10
+	}
+	return width
+}
+
+func inputVisibleLineCount(height int) int {
+	if height <= 1 {
+		return 0
+	}
+	return height - 1
 }
 
 func (i *InputArea) inputLines(width int) []inputLine {
@@ -359,21 +372,7 @@ func (i *InputArea) inputLines(width int) []inputLine {
 	for idx := 0; idx <= len(text); idx++ {
 		if idx == len(text) || text[idx] == '\n' {
 			segment := text[lineStart:idx]
-			if segment == "" {
-				lines = append(lines, inputLine{text: "", start: lineStart, end: lineStart})
-			} else {
-				for segStart := 0; segStart < len(segment); segStart += width {
-					segEnd := segStart + width
-					if segEnd > len(segment) {
-						segEnd = len(segment)
-					}
-					lines = append(lines, inputLine{
-						text:  segment[segStart:segEnd],
-						start: lineStart + segStart,
-						end:   lineStart + segEnd,
-					})
-				}
-			}
+			lines = appendWrappedInputSegment(lines, segment, lineStart, width)
 			lineStart = idx + 1
 		}
 	}
@@ -399,19 +398,128 @@ func (i *InputArea) cursorLineCol(lines []inputLine) (line, col int) {
 
 	for idx, line := range lines {
 		if pos <= line.end {
-			col = pos - line.start
+			col = runeColForByteOffset(line.text, pos-line.start)
 			if col < 0 {
 				col = 0
 			}
-			if col > len(line.text) {
-				col = len(line.text)
+			if col > runeLen(line.text) {
+				col = runeLen(line.text)
 			}
 			return idx, col
 		}
 	}
 
 	last := lines[len(lines)-1]
-	return len(lines) - 1, len(last.text)
+	return len(lines) - 1, runeLen(last.text)
+}
+
+func appendWrappedInputSegment(lines []inputLine, segment string, baseOffset, width int) []inputLine {
+	if width <= 0 {
+		width = 1
+	}
+	if segment == "" {
+		return append(lines, inputLine{text: "", start: baseOffset, end: baseOffset})
+	}
+
+	chunkStart := 0
+	runeCount := 0
+	for byteOffset := range segment {
+		if runeCount == width {
+			lines = append(lines, inputLine{
+				text:  segment[chunkStart:byteOffset],
+				start: baseOffset + chunkStart,
+				end:   baseOffset + byteOffset,
+			})
+			chunkStart = byteOffset
+			runeCount = 0
+		}
+		runeCount++
+	}
+	if chunkStart < len(segment) {
+		lines = append(lines, inputLine{
+			text:  segment[chunkStart:],
+			start: baseOffset + chunkStart,
+			end:   baseOffset + len(segment),
+		})
+	}
+	return lines
+}
+
+func firstRune(s string) rune {
+	r, _ := utf8.DecodeRuneInString(s)
+	if r == utf8.RuneError && s == "" {
+		return ' '
+	}
+	return r
+}
+
+func previousRuneOffset(s string, pos int) int {
+	pos = clampByteOffset(s, pos)
+	if pos <= 0 {
+		return 0
+	}
+	previous := 0
+	for offset := range s {
+		if offset >= pos {
+			break
+		}
+		previous = offset
+	}
+	return previous
+}
+
+func nextRuneOffset(s string, pos int) int {
+	pos = clampByteOffset(s, pos)
+	if pos >= len(s) {
+		return len(s)
+	}
+	for offset := range s {
+		if offset > pos {
+			return offset
+		}
+	}
+	return len(s)
+}
+
+func clampByteOffset(s string, pos int) int {
+	if pos <= 0 {
+		return 0
+	}
+	if pos >= len(s) {
+		return len(s)
+	}
+	for pos > 0 && !utf8.RuneStart(s[pos]) {
+		pos--
+	}
+	return pos
+}
+
+func runeAtByteOffset(s string, pos int) (rune, bool) {
+	pos = clampByteOffset(s, pos)
+	if pos >= len(s) {
+		return 0, false
+	}
+	r, _ := utf8.DecodeRuneInString(s[pos:])
+	return r, true
+}
+
+func runeColForByteOffset(s string, pos int) int {
+	pos = clampByteOffset(s, pos)
+	return runeLen(s[:pos])
+}
+
+func byteOffsetForRuneCol(s string, col int) int {
+	if col <= 0 {
+		return 0
+	}
+	runeCount := 0
+	for offset := range s {
+		if runeCount == col {
+			return offset
+		}
+		runeCount++
+	}
+	return len(s)
 }
 
 // HandleMessage processes keyboard input.
@@ -440,10 +548,11 @@ func (i *InputArea) HandleMessage(msg runtime.Message) runtime.HandleResult {
 	case terminal.KeyBackspace:
 		if i.cursorPos > 0 {
 			text := i.text.String()
+			prev := previousRuneOffset(text, i.cursorPos)
 			i.text.Reset()
-			i.text.WriteString(text[:i.cursorPos-1])
+			i.text.WriteString(text[:prev])
 			i.text.WriteString(text[i.cursorPos:])
-			i.cursorPos--
+			i.cursorPos = prev
 			i.checkModeChange()
 			i.notifyChange()
 		}
@@ -452,22 +561,23 @@ func (i *InputArea) HandleMessage(msg runtime.Message) runtime.HandleResult {
 	case terminal.KeyDelete:
 		text := i.text.String()
 		if i.cursorPos < len(text) {
+			next := nextRuneOffset(text, i.cursorPos)
 			i.text.Reset()
 			i.text.WriteString(text[:i.cursorPos])
-			i.text.WriteString(text[i.cursorPos+1:])
+			i.text.WriteString(text[next:])
 			i.notifyChange()
 		}
 		return runtime.Handled()
 
 	case terminal.KeyLeft:
 		if i.cursorPos > 0 {
-			i.cursorPos--
+			i.cursorPos = previousRuneOffset(i.text.String(), i.cursorPos)
 		}
 		return runtime.Handled()
 
 	case terminal.KeyRight:
 		if i.cursorPos < i.text.Len() {
-			i.cursorPos++
+			i.cursorPos = nextRuneOffset(i.text.String(), i.cursorPos)
 		}
 		return runtime.Handled()
 
@@ -545,11 +655,12 @@ func (i *InputArea) handleRune(r rune) runtime.HandleResult {
 
 	// Insert character
 	text := i.text.String()
+	cursor := clampByteOffset(text, i.cursorPos)
 	i.text.Reset()
-	i.text.WriteString(text[:i.cursorPos])
+	i.text.WriteString(text[:cursor])
 	i.text.WriteRune(r)
-	i.text.WriteString(text[i.cursorPos:])
-	i.cursorPos++
+	i.text.WriteString(text[cursor:])
+	i.cursorPos = cursor + len(string(r))
 	i.notifyChange()
 
 	return runtime.Handled()

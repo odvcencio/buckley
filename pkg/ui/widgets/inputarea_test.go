@@ -34,6 +34,22 @@ func TestInputArea_Typing(t *testing.T) {
 	}
 }
 
+func TestInputArea_TypingUnicode(t *testing.T) {
+	ia := NewInputArea()
+	ia.Focus()
+
+	for _, r := range "模型" {
+		ia.HandleMessage(runtime.KeyMsg{Key: terminal.KeyRune, Rune: r})
+	}
+
+	if ia.Text() != "模型" {
+		t.Fatalf("expected unicode text, got %q", ia.Text())
+	}
+	if ia.cursorPos != len("模型") {
+		t.Fatalf("cursorPos = %d, want byte length %d", ia.cursorPos, len("模型"))
+	}
+}
+
 func TestInputArea_InsertText(t *testing.T) {
 	ia := NewInputArea()
 	ia.Focus()
@@ -62,6 +78,22 @@ func TestInputArea_InsertText_AtCursor(t *testing.T) {
 	expected := "hello beautiful world"
 	if ia.Text() != expected {
 		t.Errorf("expected '%s', got '%s'", expected, ia.Text())
+	}
+}
+
+func TestInputArea_InsertText_UnicodeAtCursor(t *testing.T) {
+	ia := NewInputArea()
+	ia.Focus()
+
+	ia.SetText("A型")
+	ia.cursorPos = len("A")
+	ia.InsertText("模")
+
+	if ia.Text() != "A模型" {
+		t.Fatalf("Text() = %q, want %q", ia.Text(), "A模型")
+	}
+	if ia.cursorPos != len("A模") {
+		t.Fatalf("cursorPos = %d, want %d", ia.cursorPos, len("A模"))
 	}
 }
 
@@ -146,6 +178,37 @@ func TestInputArea_Backspace(t *testing.T) {
 	}
 }
 
+func TestInputArea_BackspaceUnicode(t *testing.T) {
+	ia := NewInputArea()
+	ia.Focus()
+
+	ia.SetText("A模型")
+	ia.HandleMessage(runtime.KeyMsg{Key: terminal.KeyBackspace})
+
+	if ia.Text() != "A模" {
+		t.Fatalf("Text() = %q, want %q", ia.Text(), "A模")
+	}
+	if ia.cursorPos != len("A模") {
+		t.Fatalf("cursorPos = %d, want %d", ia.cursorPos, len("A模"))
+	}
+}
+
+func TestInputArea_DeleteUnicode(t *testing.T) {
+	ia := NewInputArea()
+	ia.Focus()
+
+	ia.SetText("A模型B")
+	ia.cursorPos = len("A模")
+	ia.HandleMessage(runtime.KeyMsg{Key: terminal.KeyDelete})
+
+	if ia.Text() != "A模B" {
+		t.Fatalf("Text() = %q, want %q", ia.Text(), "A模B")
+	}
+	if ia.cursorPos != len("A模") {
+		t.Fatalf("cursorPos = %d, want %d", ia.cursorPos, len("A模"))
+	}
+}
+
 func TestInputArea_CursorMovement(t *testing.T) {
 	ia := NewInputArea()
 	ia.Focus()
@@ -176,6 +239,26 @@ func TestInputArea_CursorMovement(t *testing.T) {
 	}
 }
 
+func TestInputArea_CursorMovementUnicode(t *testing.T) {
+	ia := NewInputArea()
+	ia.Focus()
+
+	ia.SetText("A模型B")
+
+	ia.HandleMessage(runtime.KeyMsg{Key: terminal.KeyLeft})
+	if ia.cursorPos != len("A模型") {
+		t.Fatalf("cursor after first left = %d, want %d", ia.cursorPos, len("A模型"))
+	}
+	ia.HandleMessage(runtime.KeyMsg{Key: terminal.KeyLeft})
+	if ia.cursorPos != len("A模") {
+		t.Fatalf("cursor after second left = %d, want %d", ia.cursorPos, len("A模"))
+	}
+	ia.HandleMessage(runtime.KeyMsg{Key: terminal.KeyRight})
+	if ia.cursorPos != len("A模型") {
+		t.Fatalf("cursor after right = %d, want %d", ia.cursorPos, len("A模型"))
+	}
+}
+
 func TestInputArea_CursorVerticalMovement(t *testing.T) {
 	ia := NewInputArea()
 	ia.Focus()
@@ -197,6 +280,18 @@ func TestInputArea_CursorVerticalMovement(t *testing.T) {
 	}
 }
 
+func TestInputArea_CursorVerticalMovementUnicode(t *testing.T) {
+	ia := NewInputArea()
+	ia.Focus()
+	ia.Layout(runtime.Rect{X: 0, Y: 0, Width: 14, Height: 4}) // avail width = 10
+	ia.SetText("模型abcdefghijk")
+
+	ia.HandleMessage(runtime.KeyMsg{Key: terminal.KeyUp})
+	if ia.cursorPos != len("模型a") {
+		t.Fatalf("cursorPos after up = %d, want %d", ia.cursorPos, len("模型a"))
+	}
+}
+
 func TestInputArea_CursorVerticalMovement_SingleLine(t *testing.T) {
 	ia := NewInputArea()
 	ia.Focus()
@@ -206,5 +301,43 @@ func TestInputArea_CursorVerticalMovement_SingleLine(t *testing.T) {
 	result := ia.HandleMessage(runtime.KeyMsg{Key: terminal.KeyUp})
 	if result.Handled {
 		t.Error("expected KeyUp to be unhandled for single-line input")
+	}
+}
+
+func TestInputArea_InputLinesWrapByRuneColumns(t *testing.T) {
+	ia := NewInputArea()
+	ia.SetText("模型abc")
+
+	lines := ia.inputLines(3)
+	if len(lines) != 2 {
+		t.Fatalf("inputLines = %d lines, want 2", len(lines))
+	}
+	if lines[0].text != "模型a" || lines[1].text != "bc" {
+		t.Fatalf("wrapped lines = %#v, want 模型a/bc", lines)
+	}
+}
+
+func TestInputArea_CursorPositionUsesRuneColumns(t *testing.T) {
+	ia := NewInputArea()
+	ia.Focus()
+	ia.Layout(runtime.Rect{X: 10, Y: 5, Width: 20, Height: 4})
+	ia.SetText("λx")
+
+	x, y := ia.CursorPosition()
+	if x != 15 || y != 6 {
+		t.Fatalf("CursorPosition() = (%d,%d), want (15,6)", x, y)
+	}
+}
+
+func TestInputArea_RenderModeSymbolUsesFullRune(t *testing.T) {
+	ia := NewInputArea()
+	ia.Focus()
+	ia.Layout(runtime.Rect{X: 0, Y: 0, Width: 20, Height: 3})
+
+	buf := runtime.NewBuffer(20, 3)
+	ia.Render(runtime.RenderContext{Buffer: buf})
+
+	if got := buf.Get(1, 1).Rune; got != 'λ' {
+		t.Fatalf("mode symbol = %q, want λ", got)
 	}
 }
