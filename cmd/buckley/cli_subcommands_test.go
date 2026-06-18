@@ -186,6 +186,105 @@ func TestRunAgentCommandInitCreatesFilesystemLayout(t *testing.T) {
 	}
 }
 
+func TestRunAgentCommandSubagentInitCreatesFilesystemSubagent(t *testing.T) {
+	dir := t.TempDir()
+	project := filepath.Join(dir, "new-project")
+
+	out := captureStdout(t, func() {
+		if err := runAgentCommand([]string{"subagents", "init", "--path", project, "--description", "Investigate ambiguous questions before implementation.", "researcher"}); err != nil {
+			t.Fatalf("runAgentCommand subagents init: %v", err)
+		}
+	})
+	for _, want := range []string{
+		"Created filesystem subagent researcher",
+		"agent/instructions.md",
+		"agent/subagents/researcher/",
+		"agent/subagents/researcher/instructions.md",
+		"agent/subagents/researcher/skills/",
+		"evals/",
+		"Next: buckley agent run --project researcher <task>",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("subagent init output missing %q:\n%s", want, out)
+		}
+	}
+	instructionsPath := filepath.Join(project, "agent", "subagents", "researcher", "instructions.md")
+	data, err := os.ReadFile(instructionsPath)
+	if err != nil {
+		t.Fatalf("read generated subagent instructions: %v", err)
+	}
+	for _, want := range []string{"You are the Researcher subagent.", "Investigate ambiguous questions before implementation."} {
+		if !strings.Contains(string(data), want) {
+			t.Fatalf("generated subagent instructions missing %q:\n%s", want, string(data))
+		}
+	}
+
+	custom := "Keep this specialist prompt.\n"
+	if err := os.WriteFile(instructionsPath, []byte(custom), 0o644); err != nil {
+		t.Fatalf("write custom subagent instructions: %v", err)
+	}
+	if err := runAgentCommand([]string{"subagent", "init", "--path", project, "researcher"}); err != nil {
+		t.Fatalf("rerun subagent init: %v", err)
+	}
+	data, err = os.ReadFile(instructionsPath)
+	if err != nil {
+		t.Fatalf("read preserved subagent instructions: %v", err)
+	}
+	if string(data) != custom {
+		t.Fatalf("subagent init should preserve existing instructions, got:\n%s", string(data))
+	}
+
+	dryProject := filepath.Join(dir, "dry-project")
+	jsonOut := captureStdout(t, func() {
+		if err := runAgentCommand([]string{"subagent", "init", "--dry-run", "--json", "--path", dryProject, "coder"}); err != nil {
+			t.Fatalf("runAgentCommand subagent init dry-run: %v", err)
+		}
+	})
+	var result agentSubagentInitResult
+	if err := json.Unmarshal([]byte(jsonOut), &result); err != nil {
+		t.Fatalf("unmarshal subagent init dry-run json: %v\n%s", err, jsonOut)
+	}
+	if !result.DryRun || result.Name != "coder" || result.SubagentDir != filepath.Join(dryProject, "agent", "subagents", "coder") || len(result.Created) == 0 {
+		t.Fatalf("unexpected subagent dry-run result: %+v", result)
+	}
+	if _, err := os.Stat(filepath.Join(dryProject, "agent")); !os.IsNotExist(err) {
+		t.Fatalf("dry-run should not create agent dir, stat err=%v", err)
+	}
+
+	oldWd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(oldWd) })
+	if err := os.Chdir(project); err != nil {
+		t.Fatalf("chdir project: %v", err)
+	}
+	listOut := captureStdout(t, func() {
+		if err := runAgentCommand([]string{"subagents"}); err != nil {
+			t.Fatalf("runAgentCommand subagents: %v", err)
+		}
+	})
+	for _, want := range []string{"Agent subagents: 2", "researcher:", "invoke: buckley agent run --project researcher <task>"} {
+		if !strings.Contains(listOut, want) {
+			t.Fatalf("subagents output missing %q:\n%s", want, listOut)
+		}
+	}
+	previewOut := captureStdout(t, func() {
+		if err := runAgentCommand([]string{"run", "--project", "--dry-run", "researcher", "inspect", "this"}); err != nil {
+			t.Fatalf("runAgentCommand subagent dry-run: %v", err)
+		}
+	})
+	for _, want := range []string{"Agent run preview", "Agent: new-project/researcher", "Subagent: researcher", "Instructions: yes", "Task: inspect this"} {
+		if !strings.Contains(previewOut, want) {
+			t.Fatalf("subagent dry-run output missing %q:\n%s", want, previewOut)
+		}
+	}
+
+	if err := runAgentCommand([]string{"subagent", "init", "--path", project, "agent"}); err == nil || !strings.Contains(err.Error(), "reserved") {
+		t.Fatalf("expected reserved subagent name error, got %v", err)
+	}
+}
+
 func TestRunAgentCommandProjectCheckAndShow(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(dir, ".buckley"), 0o755); err != nil {

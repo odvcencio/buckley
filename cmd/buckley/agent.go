@@ -19,7 +19,7 @@ import (
 
 func runAgentCommand(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: buckley agent <init|list|check|show|info|subagents|run> [args...]")
+		return fmt.Errorf("usage: buckley agent <init|list|check|show|info|subagent|subagents|run> [args...]")
 	}
 	switch args[0] {
 	case "init":
@@ -32,12 +32,12 @@ func runAgentCommand(args []string) error {
 		return runAgentShow(args[1:])
 	case "info":
 		return runAgentInfo(args[1:])
-	case "subagents":
-		return runAgentSubagents(args[1:])
+	case "subagent", "subagents":
+		return runAgentSubagentsCommand(args[1:])
 	case "run", "invoke":
 		return runAgentRun(args[1:])
 	default:
-		return fmt.Errorf("unknown agent subcommand: %s (use init, list, check, show, info, subagents, or run)", args[0])
+		return fmt.Errorf("unknown agent subcommand: %s (use init, list, check, show, info, subagent, subagents, or run)", args[0])
 	}
 }
 
@@ -107,6 +107,15 @@ type agentSubagentsSnapshot struct {
 	Agent     string                 `json:"agent,omitempty"`
 	Count     int                    `json:"count"`
 	Subagents []agentSubagentSummary `json:"subagents,omitempty"`
+}
+
+type agentSubagentInitResult struct {
+	Name        string   `json:"name"`
+	Root        string   `json:"root"`
+	SubagentDir string   `json:"subagent_dir"`
+	Created     []string `json:"created,omitempty"`
+	Existing    []string `json:"existing,omitempty"`
+	DryRun      bool     `json:"dry_run,omitempty"`
 }
 
 type agentInfoSnapshot struct {
@@ -225,6 +234,57 @@ func runAgentInfo(args []string) error {
 		return enc.Encode(snapshot)
 	}
 	printAgentInfoText(os.Stdout, snapshot)
+	return nil
+}
+
+func runAgentSubagentsCommand(args []string) error {
+	if len(args) == 0 {
+		return runAgentSubagents(args)
+	}
+	switch strings.TrimSpace(args[0]) {
+	case "init", "create", "new":
+		return runAgentSubagentInit(args[1:])
+	case "list", "ls":
+		return runAgentSubagents(args[1:])
+	default:
+		return runAgentSubagents(args)
+	}
+}
+
+func runAgentSubagentInit(args []string) error {
+	fs := flag.NewFlagSet("agent subagent init", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	pathFlag := fs.String("path", ".", "project root where agent/subagents should be created")
+	description := fs.String("description", "", "model-facing role description for the subagent")
+	force := fs.Bool("force", false, "overwrite generated subagent instructions.md if it already exists")
+	dryRun := fs.Bool("dry-run", false, "show what would be created without writing files")
+	jsonOutput := fs.Bool("json", false, "print machine-readable JSON")
+	format := fs.String("format", "text", "output format: text or json")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return fmt.Errorf("usage: buckley agent subagent init [--path <dir>] [--description <text>] [--force] [--dry-run] [--json|--format json] <subagent>")
+	}
+	if err := normalizeJSONFormatFlag(*format, jsonOutput); err != nil {
+		return err
+	}
+	result, err := initFilesystemSubagentLayout(agentSubagentInitOptions{
+		Root:        *pathFlag,
+		Name:        fs.Arg(0),
+		Description: *description,
+		Force:       *force,
+		DryRun:      *dryRun,
+	})
+	if err != nil {
+		return err
+	}
+	if *jsonOutput {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(result)
+	}
+	printAgentSubagentInitResult(os.Stdout, result)
 	return nil
 }
 
@@ -527,6 +587,139 @@ func formatAgentFilesystemSlots(slots []agentspec.FilesystemSlot) string {
 		parts = append(parts, "unsupported: "+strings.Join(unsupported, ", "))
 	}
 	return strings.Join(parts, "; ")
+}
+
+type agentSubagentInitOptions struct {
+	Root        string
+	Name        string
+	Description string
+	Force       bool
+	DryRun      bool
+}
+
+func initFilesystemSubagentLayout(opts agentSubagentInitOptions) (agentSubagentInitResult, error) {
+	name, err := cleanAgentSubagentName(opts.Name)
+	if err != nil {
+		return agentSubagentInitResult{}, err
+	}
+	root := strings.TrimSpace(opts.Root)
+	if root == "" {
+		root = "."
+	}
+	absRoot, err := filepath.Abs(root)
+	if err != nil {
+		return agentSubagentInitResult{}, fmt.Errorf("resolve subagent init path: %w", err)
+	}
+	if info, err := os.Stat(absRoot); err == nil {
+		if !info.IsDir() {
+			return agentSubagentInitResult{}, fmt.Errorf("subagent init path is not a directory: %s", absRoot)
+		}
+	} else if !os.IsNotExist(err) {
+		return agentSubagentInitResult{}, fmt.Errorf("stat subagent init path: %w", err)
+	}
+
+	subagentDir := filepath.Join(absRoot, "agent", "subagents", name)
+	result := agentSubagentInitResult{
+		Name:        name,
+		Root:        absRoot,
+		SubagentDir: subagentDir,
+		DryRun:      opts.DryRun,
+	}
+	if _, _, err := ensureAgentInitPath(absRoot, "", true, false, opts.DryRun); err != nil {
+		return agentSubagentInitResult{}, err
+	}
+	paths := []struct {
+		path    string
+		content string
+		dir     bool
+		force   bool
+	}{
+		{path: filepath.Join(absRoot, "agent"), dir: true},
+		{path: filepath.Join(absRoot, "agent", "instructions.md"), content: defaultAgentInstructions()},
+		{path: filepath.Join(absRoot, "agent", "skills"), dir: true},
+		{path: filepath.Join(absRoot, "agent", "subagents"), dir: true},
+		{path: filepath.Join(absRoot, projectEvalScenarioDir), dir: true},
+		{path: subagentDir, dir: true},
+		{path: filepath.Join(subagentDir, "instructions.md"), content: renderSubagentInstructions(name, opts.Description), force: opts.Force},
+		{path: filepath.Join(subagentDir, "skills"), dir: true},
+	}
+	for _, item := range paths {
+		created, existing, err := ensureAgentInitPath(item.path, item.content, item.dir, item.force, opts.DryRun)
+		if err != nil {
+			return agentSubagentInitResult{}, err
+		}
+		rel := agentInitRelativePath(absRoot, item.path, item.dir)
+		if created {
+			result.Created = append(result.Created, rel)
+		} else if existing {
+			result.Existing = append(result.Existing, rel)
+		}
+	}
+	return result, nil
+}
+
+func cleanAgentSubagentName(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", fmt.Errorf("subagent name is required")
+	}
+	if filepath.ToSlash(value) != value || strings.Contains(value, "/") || strings.Contains(value, `\`) {
+		return "", fmt.Errorf("invalid subagent name %q: filesystem subagents must be immediate agent/subagents/<name> directories", value)
+	}
+	if value == "." || value == ".." {
+		return "", fmt.Errorf("invalid subagent name %q", value)
+	}
+	if value == "agent" {
+		return "", fmt.Errorf("subagent name %q is reserved for the built-in self-copy agent", value)
+	}
+	for _, r := range value {
+		if r == '-' || r == '_' || r == '.' || (r >= '0' && r <= '9') || (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') {
+			continue
+		}
+		return "", fmt.Errorf("invalid subagent name %q: use letters, digits, dots, dashes, or underscores", value)
+	}
+	return value, nil
+}
+
+func renderSubagentInstructions(name, description string) string {
+	description = strings.TrimSpace(description)
+	if description == "" {
+		description = defaultSubagentDescription(name)
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "You are the %s subagent.\n\n", skillTitle(name))
+	b.WriteString(description)
+	b.WriteString("\n\n")
+	b.WriteString("Work on focused delegated tasks. Inspect the relevant context, keep changes scoped, and report validation performed plus any remaining risks.\n")
+	return b.String()
+}
+
+func defaultSubagentDescription(name string) string {
+	label := strings.ToLower(skillTitle(name))
+	return fmt.Sprintf("Handle focused %s tasks for this Buckley project.", label)
+}
+
+func printAgentSubagentInitResult(w io.Writer, result agentSubagentInitResult) {
+	action := "Created"
+	createdLabel := "Created"
+	if result.DryRun {
+		action = "Would create"
+		createdLabel = "Would create"
+	}
+	fmt.Fprintf(w, "%s filesystem subagent %s at %s\n", action, result.Name, result.SubagentDir)
+	if len(result.Created) > 0 {
+		fmt.Fprintf(w, "%s:\n", createdLabel)
+		for _, path := range result.Created {
+			fmt.Fprintf(w, "  - %s\n", path)
+		}
+	}
+	if len(result.Existing) > 0 {
+		fmt.Fprintln(w, "Existing:")
+		for _, path := range result.Existing {
+			fmt.Fprintf(w, "  - %s\n", path)
+		}
+	}
+	fmt.Fprintf(w, "Next: buckley agent run --project %s <task>\n", shellQuote(result.Name))
 }
 
 func initFilesystemAgentLayout(target string, force, dryRun bool) (agentInitResult, error) {
