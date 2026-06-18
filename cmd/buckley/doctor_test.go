@@ -70,6 +70,37 @@ func TestWriteChatCheckReport(t *testing.T) {
 	}
 }
 
+func TestResolveDoctorChatScenarioFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "scenario.json")
+	data := `{
+  "name": "custom-chat",
+  "model": "file-model",
+  "timeout": "2s",
+  "turns": [
+    {"user": "say TOKEN", "want_contains": ["TOKEN"]}
+  ]
+}`
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		t.Fatalf("write scenario: %v", err)
+	}
+
+	got, err := resolveDoctorChatScenario("default-model", 45*time.Second, path, false, false)
+	if err != nil {
+		t.Fatalf("resolveDoctorChatScenario: %v", err)
+	}
+	if got.Name != "custom-chat" || got.Model != "file-model" || got.Timeout != 2*time.Second {
+		t.Fatalf("scenario file values not preserved: %+v", got)
+	}
+
+	got, err = resolveDoctorChatScenario("override-model", 3*time.Second, path, true, true)
+	if err != nil {
+		t.Fatalf("resolveDoctorChatScenario override: %v", err)
+	}
+	if got.Model != "override-model" || got.Timeout != 3*time.Second {
+		t.Fatalf("explicit flags should override scenario values: %+v", got)
+	}
+}
+
 func TestPrintChatCheckResult(t *testing.T) {
 	var out bytes.Buffer
 	printChatCheckResult(&out, &chatcheck.Result{

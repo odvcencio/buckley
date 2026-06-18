@@ -1,8 +1,12 @@
 package chatcheck
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
+	"os"
 	"strings"
 	"time"
 
@@ -15,19 +19,19 @@ const (
 )
 
 type Scenario struct {
-	Name         string
-	Model        string
-	SystemPrompt string
-	Turns        []Turn
-	Timeout      time.Duration
-	MaxTokens    int
-	SessionID    string
+	Name         string        `json:"name,omitempty"`
+	Model        string        `json:"model,omitempty"`
+	SystemPrompt string        `json:"system_prompt,omitempty"`
+	Turns        []Turn        `json:"turns,omitempty"`
+	Timeout      time.Duration `json:"-"`
+	MaxTokens    int           `json:"max_tokens,omitempty"`
+	SessionID    string        `json:"session_id,omitempty"`
 }
 
 type Turn struct {
-	User         string
-	WantContains []string
-	MinChars     int
+	User         string   `json:"user"`
+	WantContains []string `json:"want_contains,omitempty"`
+	MinChars     int      `json:"min_chars,omitempty"`
 }
 
 type Result struct {
@@ -70,6 +74,17 @@ type Runner struct {
 	Client model.CompletionClient
 }
 
+type scenarioFile struct {
+	Name          string `json:"name"`
+	Model         string `json:"model"`
+	SystemPrompt  string `json:"system_prompt"`
+	Turns         []Turn `json:"turns"`
+	Timeout       string `json:"timeout"`
+	TimeoutMillis int64  `json:"timeout_ms"`
+	MaxTokens     int    `json:"max_tokens"`
+	SessionID     string `json:"session_id"`
+}
+
 func DefaultScenario(modelID string) Scenario {
 	modelID = strings.TrimSpace(modelID)
 	if modelID == "" {
@@ -100,11 +115,66 @@ func DefaultScenario(modelID string) Scenario {
 	}
 }
 
+func LoadScenarioFile(path string) (Scenario, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return Scenario{}, fmt.Errorf("chat check scenario path is required")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return Scenario{}, fmt.Errorf("read chat check scenario: %w", err)
+	}
+
+	var file scenarioFile
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&file); err != nil {
+		return Scenario{}, fmt.Errorf("parse chat check scenario: %w", err)
+	}
+	var extra any
+	if err := dec.Decode(&extra); err != io.EOF {
+		if err == nil {
+			err = fmt.Errorf("multiple JSON values are not supported")
+		}
+		return Scenario{}, fmt.Errorf("parse chat check scenario: %w", err)
+	}
+	if file.TimeoutMillis < 0 {
+		return Scenario{}, fmt.Errorf("chat check scenario timeout_ms cannot be negative")
+	}
+	if file.MaxTokens < 0 {
+		return Scenario{}, fmt.Errorf("chat check scenario max_tokens cannot be negative")
+	}
+	for i, turn := range file.Turns {
+		if strings.TrimSpace(turn.User) == "" {
+			return Scenario{}, fmt.Errorf("chat check scenario turn %d user prompt is required", i+1)
+		}
+		if turn.MinChars < 0 {
+			return Scenario{}, fmt.Errorf("chat check scenario turn %d min_chars cannot be negative", i+1)
+		}
+	}
+	timeout, err := parseScenarioTimeout(file.Timeout, file.TimeoutMillis)
+	if err != nil {
+		return Scenario{}, err
+	}
+	if len(file.Turns) == 0 {
+		return Scenario{}, fmt.Errorf("chat check scenario must define at least one turn")
+	}
+	return Scenario{
+		Name:         file.Name,
+		Model:        file.Model,
+		SystemPrompt: file.SystemPrompt,
+		Turns:        file.Turns,
+		Timeout:      timeout,
+		MaxTokens:    file.MaxTokens,
+		SessionID:    file.SessionID,
+	}, nil
+}
+
 func (r Runner) Run(ctx context.Context, scenario Scenario) (*Result, error) {
 	if r.Client == nil {
 		return nil, fmt.Errorf("chat check client is required")
 	}
-	scenario = normalizeScenario(scenario)
+	scenario = NormalizeScenario(scenario)
 	started := time.Now()
 	result := &Result{
 		Name:      scenario.Name,
@@ -280,7 +350,7 @@ func finalizeResult(result *Result, started time.Time) {
 	result.Passed = true
 }
 
-func normalizeScenario(scenario Scenario) Scenario {
+func NormalizeScenario(scenario Scenario) Scenario {
 	scenario.Name = strings.TrimSpace(scenario.Name)
 	if scenario.Name == "" {
 		scenario.Name = "chat-check"
@@ -305,4 +375,22 @@ func normalizeScenario(scenario Scenario) Scenario {
 		scenario.Turns = defaults.Turns
 	}
 	return scenario
+}
+
+func parseScenarioTimeout(timeoutText string, timeoutMillis int64) (time.Duration, error) {
+	timeoutText = strings.TrimSpace(timeoutText)
+	if timeoutText != "" && timeoutMillis > 0 {
+		return 0, fmt.Errorf("chat check scenario cannot set both timeout and timeout_ms")
+	}
+	if timeoutText != "" {
+		timeout, err := time.ParseDuration(timeoutText)
+		if err != nil {
+			return 0, fmt.Errorf("parse chat check scenario timeout: %w", err)
+		}
+		return timeout, nil
+	}
+	if timeoutMillis > 0 {
+		return time.Duration(timeoutMillis) * time.Millisecond, nil
+	}
+	return 0, nil
 }

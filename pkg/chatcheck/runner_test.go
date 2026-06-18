@@ -4,8 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"m31labs.dev/buckley/pkg/model"
 )
@@ -177,6 +180,86 @@ func TestRunnerRunProviderErrorCapturesFailedTurn(t *testing.T) {
 	}
 	if len(result.Turns) != 1 || result.Turns[0].Err == "" || result.Turns[0].Passed {
 		t.Fatalf("failed turn not captured: %+v", result.Turns)
+	}
+}
+
+func TestLoadScenarioFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "scenario.json")
+	data := `{
+  "name": "repo-smoke",
+  "model": "file-model",
+  "system_prompt": "Be terse.",
+  "timeout": "2s",
+  "max_tokens": 128,
+  "session_id": "session-from-file",
+  "turns": [
+    {
+      "user": "say ALPHA",
+      "want_contains": ["ALPHA"],
+      "min_chars": 5
+    }
+  ]
+}`
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		t.Fatalf("write scenario: %v", err)
+	}
+
+	scenario, err := LoadScenarioFile(path)
+	if err != nil {
+		t.Fatalf("LoadScenarioFile: %v", err)
+	}
+	if scenario.Name != "repo-smoke" || scenario.Model != "file-model" {
+		t.Fatalf("unexpected scenario identity: %+v", scenario)
+	}
+	if scenario.Timeout != 2*time.Second {
+		t.Fatalf("timeout=%s want 2s", scenario.Timeout)
+	}
+	if scenario.MaxTokens != 128 || scenario.SessionID != "session-from-file" {
+		t.Fatalf("unexpected scenario config: %+v", scenario)
+	}
+	if len(scenario.Turns) != 1 || scenario.Turns[0].User != "say ALPHA" || scenario.Turns[0].WantContains[0] != "ALPHA" {
+		t.Fatalf("unexpected turns: %+v", scenario.Turns)
+	}
+}
+
+func TestLoadScenarioFileRejectsInvalidShape(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want string
+	}{
+		{
+			name: "unknown field",
+			body: `{"turns":[{"user":"hello"}],"extra":true}`,
+			want: "unknown field",
+		},
+		{
+			name: "no turns",
+			body: `{"name":"empty"}`,
+			want: "at least one turn",
+		},
+		{
+			name: "conflicting timeout fields",
+			body: `{"timeout":"1s","timeout_ms":1000,"turns":[{"user":"hello"}]}`,
+			want: "both timeout and timeout_ms",
+		},
+		{
+			name: "blank prompt",
+			body: `{"turns":[{"user":"  "}]}`,
+			want: "user prompt is required",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "scenario.json")
+			if err := os.WriteFile(path, []byte(tt.body), 0o644); err != nil {
+				t.Fatalf("write scenario: %v", err)
+			}
+			_, err := LoadScenarioFile(path)
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("err=%v want %q", err, tt.want)
+			}
+		})
 	}
 }
 

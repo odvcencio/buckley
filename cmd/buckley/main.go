@@ -1271,6 +1271,9 @@ func dispatchSubcommand(args []string) (bool, int) {
 
 func runCommand(handler func([]string) error, args []string) int {
 	if err := handler(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		return exitCodeForError(err)
 	}

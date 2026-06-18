@@ -41,6 +41,7 @@ func runDoctorChatCommand(args []string) error {
 	fs := flag.NewFlagSet("doctor chat", flag.ContinueOnError)
 	modelID := fs.String("model", defaultModel, "model to use for the multi-turn chat check")
 	timeout := fs.Duration("timeout", 45*time.Second, "per-turn timeout")
+	scenarioPath := fs.String("scenario", "", "JSON scenario file for the chat check")
 	jsonOutput := fs.Bool("json", false, "print machine-readable JSON report")
 	outPath := fs.String("out", "", "write machine-readable JSON report to a file")
 	if err := fs.Parse(args); err != nil {
@@ -56,8 +57,10 @@ func runDoctorChatCommand(args []string) error {
 	}
 	defer store.Close()
 
-	scenario := chatcheck.DefaultScenario(*modelID)
-	scenario.Timeout = *timeout
+	scenario, err := resolveDoctorChatScenario(*modelID, *timeout, *scenarioPath, flagWasSet(fs, "model"), flagWasSet(fs, "timeout"))
+	if err != nil {
+		return err
+	}
 
 	if *jsonOutput {
 		fmt.Fprintf(os.Stderr, "Running chat health check with %s (%d turns)\n", scenario.Model, len(scenario.Turns))
@@ -84,6 +87,39 @@ func runDoctorChatCommand(args []string) error {
 		fmt.Println("Chat health check passed")
 	}
 	return nil
+}
+
+func resolveDoctorChatScenario(modelID string, timeout time.Duration, scenarioPath string, modelSet bool, timeoutSet bool) (chatcheck.Scenario, error) {
+	scenario := chatcheck.DefaultScenario(modelID)
+	scenario.Timeout = timeout
+	if strings.TrimSpace(scenarioPath) == "" {
+		return chatcheck.NormalizeScenario(scenario), nil
+	}
+
+	loaded, err := chatcheck.LoadScenarioFile(scenarioPath)
+	if err != nil {
+		return chatcheck.Scenario{}, err
+	}
+	if modelSet || strings.TrimSpace(loaded.Model) == "" {
+		loaded.Model = modelID
+	}
+	if timeoutSet || loaded.Timeout <= 0 {
+		loaded.Timeout = timeout
+	}
+	return chatcheck.NormalizeScenario(loaded), nil
+}
+
+func flagWasSet(fs *flag.FlagSet, name string) bool {
+	if fs == nil {
+		return false
+	}
+	wasSet := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == name {
+			wasSet = true
+		}
+	})
+	return wasSet
 }
 
 func printChatCheckResult(w io.Writer, result *chatcheck.Result) {

@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"flag"
 	"io"
 	"net/http/httptest"
 	"os"
@@ -376,6 +377,20 @@ func TestRunCommandUsesExitCodeOverrides(t *testing.T) {
 	})
 	if !strings.Contains(errOut, "bad config") {
 		t.Fatalf("expected error output, got %q", errOut)
+	}
+}
+
+func TestRunCommandTreatsFlagHelpAsSuccess(t *testing.T) {
+	errOut := captureStderr(t, func() {
+		code := runCommand(func(_ []string) error {
+			return flag.ErrHelp
+		}, nil)
+		if code != 0 {
+			t.Fatalf("exitCode=%d want 0", code)
+		}
+	})
+	if strings.TrimSpace(errOut) != "" {
+		t.Fatalf("expected no error output for help, got %q", errOut)
 	}
 }
 
