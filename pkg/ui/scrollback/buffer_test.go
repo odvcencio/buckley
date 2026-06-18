@@ -272,6 +272,30 @@ func TestSearch(t *testing.T) {
 	})
 }
 
+func TestGetVisibleLines_Metadata(t *testing.T) {
+	buf := NewBuffer(80, 24)
+	buf.AppendLine("Hello World Hello", LineStyle{}, "user")
+
+	buf.StartSelection(0, 0)
+	buf.UpdateSelection(0, 5)
+	buf.EndSelection()
+	buf.Search("Hello")
+
+	lines := buf.GetVisibleLines()
+	if len(lines) != 1 {
+		t.Fatalf("expected 1 visible line, got %d", len(lines))
+	}
+	if !lines[0].Selected {
+		t.Fatal("expected visible line to include selection metadata")
+	}
+	if !slices.Equal(lines[0].SearchHighlights, []int{0, 12}) {
+		t.Fatalf("search highlights = %#v, want %#v", lines[0].SearchHighlights, []int{0, 12})
+	}
+	if lines[0].LineIndex != 0 || lines[0].WrapIndex != 0 || lines[0].RowIndex != 0 {
+		t.Fatalf("unexpected visible indices: line=%d wrap=%d row=%d", lines[0].LineIndex, lines[0].WrapIndex, lines[0].RowIndex)
+	}
+}
+
 func TestLatestCodeBlock(t *testing.T) {
 	buf := NewBuffer(80, 24)
 	buf.AppendLine("plain", LineStyle{}, "user")

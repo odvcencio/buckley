@@ -587,45 +587,60 @@ func (b *Buffer) GetVisibleLines() []VisibleLine {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 
-	var result []VisibleLine
+	return b.visibleLines(visibleRowRange{
+		start: b.scrollTop,
+		end:   b.scrollTop + b.height,
+	})
+}
+
+type visibleRowRange struct {
+	start int
+	end   int
+}
+
+func (r visibleRowRange) contains(row int) bool {
+	return row >= r.start && row < r.end
+}
+
+func (b *Buffer) visibleLines(rows visibleRowRange) []VisibleLine {
+	var lines []VisibleLine
 	rowIndex := 0
 
 	for lineIdx, line := range b.lines {
 		for wrapIdx, wrapped := range line.Wrapped {
-			if rowIndex >= b.scrollTop && rowIndex < b.scrollTop+b.height {
-				vl := VisibleLine{
-					Content:   wrapped.Text,
-					Spans:     wrapped.Spans,
-					Style:     line.Style,
-					Source:    line.Source,
-					LineIndex: lineIdx,
-					WrapIndex: wrapIdx,
-					RowIndex:  rowIndex - b.scrollTop,
-					IsCode:    line.IsCode,
-					Language:  line.Language,
-				}
-
-				// Check selection
-				if b.hasSelection {
-					vl.Selected = b.isRowSelected(lineIdx, wrapIdx, wrapped.Text)
-				}
-
-				// Check search highlight
-				if b.searchQuery != "" {
-					vl.SearchHighlights = b.getSearchHighlights(lineIdx, wrapIdx, wrapped.Text)
-				}
-
-				result = append(result, vl)
+			if rows.contains(rowIndex) {
+				lines = append(lines, b.visibleLine(lineIdx, line, wrapIdx, wrapped, rowIndex-rows.start))
 			}
 			rowIndex++
-
-			if rowIndex >= b.scrollTop+b.height {
-				return result
+			if rowIndex >= rows.end {
+				return lines
 			}
 		}
 	}
 
-	return result
+	return lines
+}
+
+func (b *Buffer) visibleLine(lineIdx int, line Line, wrapIdx int, wrapped WrappedLine, rowIndex int) VisibleLine {
+	vl := VisibleLine{
+		Content:   wrapped.Text,
+		Spans:     wrapped.Spans,
+		Style:     line.Style,
+		Source:    line.Source,
+		LineIndex: lineIdx,
+		WrapIndex: wrapIdx,
+		RowIndex:  rowIndex,
+		IsCode:    line.IsCode,
+		Language:  line.Language,
+	}
+
+	if b.hasSelection {
+		vl.Selected = b.isRowSelected(lineIdx, wrapIdx, wrapped.Text)
+	}
+	if b.searchQuery != "" {
+		vl.SearchHighlights = b.getSearchHighlights(lineIdx, wrapIdx, wrapped.Text)
+	}
+	return vl
 }
 
 // VisibleLine represents a line ready for rendering.
