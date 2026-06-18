@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"gopkg.in/yaml.v3"
 	"m31labs.dev/buckley/pkg/model"
 )
 
@@ -22,25 +23,25 @@ const (
 )
 
 type Scenario struct {
-	Description  string        `json:"description,omitempty"`
-	Name         string        `json:"name,omitempty"`
-	Tags         []string      `json:"tags,omitempty"`
-	Model        string        `json:"model,omitempty"`
-	SystemPrompt string        `json:"system_prompt,omitempty"`
-	Turns        []Turn        `json:"turns,omitempty"`
+	Description  string        `json:"description,omitempty" yaml:"description,omitempty"`
+	Name         string        `json:"name,omitempty" yaml:"name,omitempty"`
+	Tags         []string      `json:"tags,omitempty" yaml:"tags,omitempty"`
+	Model        string        `json:"model,omitempty" yaml:"model,omitempty"`
+	SystemPrompt string        `json:"system_prompt,omitempty" yaml:"system_prompt,omitempty"`
+	Turns        []Turn        `json:"turns,omitempty" yaml:"turns,omitempty"`
 	Timeout      time.Duration `json:"-"`
-	MaxTokens    int           `json:"max_tokens,omitempty"`
-	SessionID    string        `json:"session_id,omitempty"`
+	MaxTokens    int           `json:"max_tokens,omitempty" yaml:"max_tokens,omitempty"`
+	SessionID    string        `json:"session_id,omitempty" yaml:"session_id,omitempty"`
 }
 
 type Turn struct {
-	User            string   `json:"user"`
-	WantContains    []string `json:"want_contains,omitempty"`
-	WantNotContains []string `json:"want_not_contains,omitempty"`
-	WantRegex       []string `json:"want_regex,omitempty"`
-	MinChars        int      `json:"min_chars,omitempty"`
-	MaxChars        int      `json:"max_chars,omitempty"`
-	MaxToolCalls    *int     `json:"max_tool_calls,omitempty"`
+	User            string   `json:"user" yaml:"user"`
+	WantContains    []string `json:"want_contains,omitempty" yaml:"want_contains,omitempty"`
+	WantNotContains []string `json:"want_not_contains,omitempty" yaml:"want_not_contains,omitempty"`
+	WantRegex       []string `json:"want_regex,omitempty" yaml:"want_regex,omitempty"`
+	MinChars        int      `json:"min_chars,omitempty" yaml:"min_chars,omitempty"`
+	MaxChars        int      `json:"max_chars,omitempty" yaml:"max_chars,omitempty"`
+	MaxToolCalls    *int     `json:"max_tool_calls,omitempty" yaml:"max_tool_calls,omitempty"`
 }
 
 type Result struct {
@@ -104,16 +105,16 @@ type ScenarioSelector struct {
 }
 
 type scenarioFile struct {
-	Description   string   `json:"description"`
-	Name          string   `json:"name"`
-	Tags          []string `json:"tags"`
-	Model         string   `json:"model"`
-	SystemPrompt  string   `json:"system_prompt"`
-	Turns         []Turn   `json:"turns"`
-	Timeout       string   `json:"timeout"`
-	TimeoutMillis int64    `json:"timeout_ms"`
-	MaxTokens     int      `json:"max_tokens"`
-	SessionID     string   `json:"session_id"`
+	Description   string   `json:"description" yaml:"description"`
+	Name          string   `json:"name" yaml:"name"`
+	Tags          []string `json:"tags" yaml:"tags"`
+	Model         string   `json:"model" yaml:"model"`
+	SystemPrompt  string   `json:"system_prompt" yaml:"system_prompt"`
+	Turns         []Turn   `json:"turns" yaml:"turns"`
+	Timeout       string   `json:"timeout" yaml:"timeout"`
+	TimeoutMillis int64    `json:"timeout_ms" yaml:"timeout_ms"`
+	MaxTokens     int      `json:"max_tokens" yaml:"max_tokens"`
+	SessionID     string   `json:"session_id" yaml:"session_id"`
 }
 
 func DefaultScenario(modelID string) Scenario {
@@ -158,18 +159,9 @@ func LoadScenarioFile(path string) (Scenario, error) {
 		return Scenario{}, fmt.Errorf("read chat check scenario: %w", err)
 	}
 
-	var file scenarioFile
-	dec := json.NewDecoder(bytes.NewReader(data))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&file); err != nil {
-		return Scenario{}, fmt.Errorf("parse chat check scenario: %w", err)
-	}
-	var extra any
-	if err := dec.Decode(&extra); err != io.EOF {
-		if err == nil {
-			err = fmt.Errorf("multiple JSON values are not supported")
-		}
-		return Scenario{}, fmt.Errorf("parse chat check scenario: %w", err)
+	file, err := parseScenarioFile(path, data)
+	if err != nil {
+		return Scenario{}, err
 	}
 	if file.TimeoutMillis < 0 {
 		return Scenario{}, fmt.Errorf("chat check scenario timeout_ms cannot be negative")
@@ -227,7 +219,13 @@ func LoadScenarios(path string) ([]Scenario, error) {
 		if walkErr != nil {
 			return walkErr
 		}
-		if entry.IsDir() || strings.ToLower(filepath.Ext(entry.Name())) != ".json" {
+		if entry.IsDir() {
+			if file != path && strings.EqualFold(entry.Name(), "runs") {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !isScenarioFileName(entry.Name()) {
 			return nil
 		}
 		files = append(files, file)
@@ -237,7 +235,7 @@ func LoadScenarios(path string) ([]Scenario, error) {
 	}
 	sort.Strings(files)
 	if len(files) == 0 {
-		return nil, fmt.Errorf("chat check scenario directory contains no JSON scenarios: %s", path)
+		return nil, fmt.Errorf("chat check scenario directory contains no JSON or YAML scenarios: %s", path)
 	}
 
 	scenarios := make([]Scenario, 0, len(files))
@@ -267,12 +265,69 @@ func scenarioNameFromPath(root, path string) string {
 		}
 	}
 	rel = filepath.ToSlash(rel)
-	rel = strings.TrimSuffix(rel, filepath.Ext(rel))
+	rel = stripScenarioFileSuffix(rel)
 	rel = strings.Trim(rel, "/")
 	if rel == "" || rel == "." {
 		return "chat-check"
 	}
 	return rel
+}
+
+func parseScenarioFile(path string, data []byte) (scenarioFile, error) {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".yaml", ".yml":
+		return parseYAMLScenarioFile(data)
+	default:
+		return parseJSONScenarioFile(data)
+	}
+}
+
+func parseJSONScenarioFile(data []byte) (scenarioFile, error) {
+	var file scenarioFile
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&file); err != nil {
+		return scenarioFile{}, fmt.Errorf("parse chat check scenario: %w", err)
+	}
+	var extra any
+	if err := dec.Decode(&extra); err != io.EOF {
+		if err == nil {
+			err = fmt.Errorf("multiple JSON values are not supported")
+		}
+		return scenarioFile{}, fmt.Errorf("parse chat check scenario: %w", err)
+	}
+	return file, nil
+}
+
+func parseYAMLScenarioFile(data []byte) (scenarioFile, error) {
+	var file scenarioFile
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	dec.KnownFields(true)
+	if err := dec.Decode(&file); err != nil {
+		return scenarioFile{}, fmt.Errorf("parse chat check scenario: %w", err)
+	}
+	var extra any
+	if err := dec.Decode(&extra); err != io.EOF {
+		if err == nil {
+			err = fmt.Errorf("multiple YAML documents are not supported")
+		}
+		return scenarioFile{}, fmt.Errorf("parse chat check scenario: %w", err)
+	}
+	return file, nil
+}
+
+func isScenarioFileName(name string) bool {
+	switch strings.ToLower(filepath.Ext(name)) {
+	case ".json", ".yaml", ".yml":
+		return true
+	default:
+		return false
+	}
+}
+
+func stripScenarioFileSuffix(path string) string {
+	path = strings.TrimSuffix(path, filepath.Ext(path))
+	return strings.TrimSuffix(path, ".eval")
 }
 
 func validateTurn(turn Turn, index int) error {
@@ -727,7 +782,7 @@ func normalizeSelectorIDs(ids []string) []string {
 	for _, id := range ids {
 		id = filepath.ToSlash(strings.ToLower(strings.TrimSpace(id)))
 		id = strings.Trim(id, "/")
-		id = strings.TrimSuffix(id, ".json")
+		id = stripScenarioFileSuffix(id)
 		if id == "" || id == "." {
 			continue
 		}

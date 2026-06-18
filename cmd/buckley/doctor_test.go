@@ -416,6 +416,52 @@ func TestRunDoctorChatCommandProjectList(t *testing.T) {
 	}
 }
 
+func TestRunDoctorChatCommandProjectListUsesEvalFallback(t *testing.T) {
+	dir := t.TempDir()
+	projectDir := filepath.Join(dir, "evals", "chat")
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatalf("mkdir eval scenarios: %v", err)
+	}
+	nested := filepath.Join(dir, "src", "feature")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatalf("mkdir nested project dir: %v", err)
+	}
+	t.Chdir(nested)
+	if err := os.WriteFile(filepath.Join(projectDir, "memory.eval.yaml"), []byte(`
+tags:
+  - smoke
+turns:
+  - user: say READY
+    want_contains: [READY]
+`), 0o644); err != nil {
+		t.Fatalf("write scenario: %v", err)
+	}
+
+	origInit := initDependenciesFn
+	t.Cleanup(func() { initDependenciesFn = origInit })
+	called := false
+	initDependenciesFn = func() (*config.Config, *model.Manager, *storage.Store, error) {
+		called = true
+		return nil, nil, nil, errors.New("dependency initialization should not run")
+	}
+
+	var runErr error
+	out := captureStdout(t, func() {
+		runErr = runDoctorChatCommand([]string{"-project", "-list", "-tag", "smoke", "chat"})
+	})
+	if runErr != nil {
+		t.Fatalf("runDoctorChatCommand: %v", runErr)
+	}
+	if called {
+		t.Fatal("project list mode initialized dependencies")
+	}
+	for _, want := range []string{"Chat check scenarios: 1", "chat/memory", "tags=smoke"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("output missing %q: %s", want, out)
+		}
+	}
+}
+
 func TestRunDoctorChatCommandProjectListFiltersByID(t *testing.T) {
 	dir := t.TempDir()
 	projectDir := filepath.Join(dir, ".buckley", "chatchecks")
@@ -487,6 +533,27 @@ func TestResolveDoctorChatScenarioPathProject(t *testing.T) {
 	want := filepath.Join(dir, ".buckley", "chatchecks")
 	if got != want {
 		t.Fatalf("path=%q want %q", got, want)
+	}
+}
+
+func TestResolveDoctorChatScenarioPathProjectPrefersBuckleyChatchecks(t *testing.T) {
+	dir := t.TempDir()
+	buckleyDir := filepath.Join(dir, ".buckley", "chatchecks")
+	evalsDir := filepath.Join(dir, "evals")
+	if err := os.MkdirAll(buckleyDir, 0o755); err != nil {
+		t.Fatalf("mkdir chatchecks: %v", err)
+	}
+	if err := os.MkdirAll(evalsDir, 0o755); err != nil {
+		t.Fatalf("mkdir evals: %v", err)
+	}
+	t.Chdir(dir)
+
+	got, err := resolveDoctorChatScenarioPath("", true)
+	if err != nil {
+		t.Fatalf("resolveDoctorChatScenarioPath: %v", err)
+	}
+	if got != buckleyDir {
+		t.Fatalf("path=%q want %q", got, buckleyDir)
 	}
 }
 

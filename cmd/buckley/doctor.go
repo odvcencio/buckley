@@ -17,6 +17,7 @@ import (
 
 const envBuckleyChatCheckModel = "BUCKLEY_CHAT_CHECK_MODEL"
 const projectChatCheckScenarioDir = ".buckley/chatchecks"
+const projectEvalScenarioDir = "evals"
 const defaultChatCheckArtifactRoot = ".buckley/chatchecks/runs"
 
 func runDoctorCommand(args []string) error {
@@ -192,16 +193,18 @@ func findProjectChatCheckScenarioDir(start string) (string, error) {
 	}
 
 	for {
-		candidate := filepath.Join(dir, projectChatCheckScenarioDir)
-		info, err := os.Stat(candidate)
-		if err == nil {
-			if !info.IsDir() {
-				return "", fmt.Errorf("project chat check scenario path is not a directory: %s", candidate)
+		for _, rel := range []string{projectChatCheckScenarioDir, projectEvalScenarioDir} {
+			candidate := filepath.Join(dir, rel)
+			info, err := os.Stat(candidate)
+			if err == nil {
+				if !info.IsDir() {
+					return "", fmt.Errorf("project chat check scenario path is not a directory: %s", candidate)
+				}
+				return candidate, nil
 			}
-			return candidate, nil
-		}
-		if !os.IsNotExist(err) {
-			return "", fmt.Errorf("stat project chat check scenarios: %w", err)
+			if !os.IsNotExist(err) {
+				return "", fmt.Errorf("stat project chat check scenarios: %w", err)
+			}
 		}
 		parent := filepath.Dir(dir)
 		if parent == dir {
@@ -209,7 +212,7 @@ func findProjectChatCheckScenarioDir(start string) (string, error) {
 		}
 		dir = parent
 	}
-	return "", fmt.Errorf("project chat check scenarios not found: %s", projectChatCheckScenarioDir)
+	return "", fmt.Errorf("project chat check scenarios not found: %s or %s", projectChatCheckScenarioDir, projectEvalScenarioDir)
 }
 
 func resolveChatCheckArtifactRoot(configured string, useProject bool, scenarioPath string, explicit bool) string {

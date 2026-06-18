@@ -329,6 +329,48 @@ func TestLoadScenarioFile(t *testing.T) {
 	}
 }
 
+func TestLoadScenarioFileYAML(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "memory.eval.yaml")
+	data := `
+description: Checks YAML scenario parsing.
+tags:
+  - smoke
+model: file-model
+system_prompt: Be terse.
+timeout: 1500ms
+max_tokens: 64
+session_id: yaml-session
+turns:
+  - user: say ALPHA
+    want_contains:
+      - ALPHA
+    want_not_contains:
+      - BETA
+    want_regex:
+      - "^ALPHA$"
+    min_chars: 5
+    max_chars: 12
+    max_tool_calls: 0
+`
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		t.Fatalf("write scenario: %v", err)
+	}
+
+	scenario, err := LoadScenarioFile(path)
+	if err != nil {
+		t.Fatalf("LoadScenarioFile YAML: %v", err)
+	}
+	if scenario.Description != "Checks YAML scenario parsing." || scenario.Model != "file-model" {
+		t.Fatalf("unexpected scenario identity: %+v", scenario)
+	}
+	if scenario.Timeout != 1500*time.Millisecond || scenario.MaxTokens != 64 || scenario.SessionID != "yaml-session" {
+		t.Fatalf("unexpected scenario config: %+v", scenario)
+	}
+	if len(scenario.Turns) != 1 || scenario.Turns[0].User != "say ALPHA" || scenario.Turns[0].MaxToolCalls == nil || *scenario.Turns[0].MaxToolCalls != 0 {
+		t.Fatalf("unexpected YAML turns: %+v", scenario.Turns)
+	}
+}
+
 func TestLoadScenarioFileRejectsInvalidShape(t *testing.T) {
 	tests := []struct {
 		name string
@@ -385,6 +427,17 @@ func TestLoadScenarioFileRejectsInvalidShape(t *testing.T) {
 	}
 }
 
+func TestLoadScenarioFileYAMLRejectsUnknownField(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "bad.yaml")
+	if err := os.WriteFile(path, []byte("turns:\n  - user: hello\nextra: true\n"), 0o644); err != nil {
+		t.Fatalf("write scenario: %v", err)
+	}
+	_, err := LoadScenarioFile(path)
+	if err == nil || !strings.Contains(err.Error(), "field extra not found") {
+		t.Fatalf("err=%v want strict YAML field error", err)
+	}
+}
+
 func TestLoadScenariosDirectory(t *testing.T) {
 	dir := t.TempDir()
 	writeScenario := func(name string, body string) {
@@ -400,16 +453,18 @@ func TestLoadScenariosDirectory(t *testing.T) {
 	writeScenario("b.json", `{"name":"second","turns":[{"user":"say B"}]}`)
 	writeScenario("a.json", `{"name":"first","turns":[{"user":"say A"}]}`)
 	writeScenario("tools/no-tools.json", `{"turns":[{"user":"say C"}]}`)
+	writeScenario("memory.eval.yaml", `turns: [{user: "say D"}]`)
+	writeScenario("nested/recall.yml", `turns: [{user: "say E"}]`)
 	writeScenario("notes.txt", `ignored`)
 
 	scenarios, err := LoadScenarios(dir)
 	if err != nil {
 		t.Fatalf("LoadScenarios: %v", err)
 	}
-	if len(scenarios) != 3 {
-		t.Fatalf("scenarios=%d want 3", len(scenarios))
+	if len(scenarios) != 5 {
+		t.Fatalf("scenarios=%d want 5", len(scenarios))
 	}
-	wantNames := []string{"first", "second", "tools/no-tools"}
+	wantNames := []string{"first", "second", "memory", "nested/recall", "tools/no-tools"}
 	for i, want := range wantNames {
 		if scenarios[i].Name != want {
 			t.Fatalf("scenario[%d].Name=%q want %q; all=%+v", i, scenarios[i].Name, want, scenarios)
@@ -417,9 +472,30 @@ func TestLoadScenariosDirectory(t *testing.T) {
 	}
 }
 
+func TestLoadScenariosDirectorySkipsRunsArtifacts(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "runs", "20260101T000000Z", "results"), 0o755); err != nil {
+		t.Fatalf("mkdir runs: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "smoke.json"), []byte(`{"turns":[{"user":"say READY"}]}`), 0o644); err != nil {
+		t.Fatalf("write scenario: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "runs", "20260101T000000Z", "report.json"), []byte(`{"not":"a scenario"}`), 0o644); err != nil {
+		t.Fatalf("write artifact report: %v", err)
+	}
+
+	scenarios, err := LoadScenarios(dir)
+	if err != nil {
+		t.Fatalf("LoadScenarios: %v", err)
+	}
+	if len(scenarios) != 1 || scenarios[0].Name != "smoke" {
+		t.Fatalf("unexpected scenarios: %+v", scenarios)
+	}
+}
+
 func TestLoadScenariosFileUsesPathIdentity(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "smoke.json")
+	path := filepath.Join(dir, "smoke.eval.yaml")
 	if err := os.WriteFile(path, []byte(`{"turns":[{"user":"say READY"}]}`), 0o644); err != nil {
 		t.Fatalf("write scenario: %v", err)
 	}
@@ -435,8 +511,8 @@ func TestLoadScenariosFileUsesPathIdentity(t *testing.T) {
 
 func TestLoadScenariosDirectoryRejectsEmpty(t *testing.T) {
 	_, err := LoadScenarios(t.TempDir())
-	if err == nil || !strings.Contains(err.Error(), "contains no JSON scenarios") {
-		t.Fatalf("err=%v want no JSON scenarios", err)
+	if err == nil || !strings.Contains(err.Error(), "contains no JSON or YAML scenarios") {
+		t.Fatalf("err=%v want no JSON or YAML scenarios", err)
 	}
 }
 
@@ -492,6 +568,11 @@ func TestFilterScenariosByID(t *testing.T) {
 	got = FilterScenarios(scenarios, ScenarioSelector{IDs: []string{"TOOLS/NO-TOOLS.json"}})
 	if len(got) != 1 || got[0].Name != "tools/no-tools" {
 		t.Fatalf("exact id filter result: %+v", got)
+	}
+
+	got = FilterScenarios(scenarios, ScenarioSelector{IDs: []string{"reasoning/deep.eval.yaml"}})
+	if len(got) != 1 || got[0].Name != "reasoning/deep" {
+		t.Fatalf("eval yaml id filter result: %+v", got)
 	}
 
 	got = FilterScenarios(scenarios, ScenarioSelector{IDs: []string{"tools"}, Tags: []string{"smoke"}})
