@@ -35,6 +35,9 @@ sandbox:
 subagents:
   - name: verifier
     tool_tier: none
+    tools:
+      allow: [read_file]
+      deny: [run_shell]
 terminals:
   - name: tests
     command: [go, test, ./...]
@@ -70,6 +73,9 @@ sandbox:
 skills: [review, review]
 subagents:
   - name: worker
+    tools:
+      tier: root
+      allow: [read_file, read_file]
   - name: worker
 terminals:
   - name: shell

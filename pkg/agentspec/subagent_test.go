@@ -31,6 +31,7 @@ func TestRuntimeProfileSubagentProfile(t *testing.T) {
 				Persona:      "strict-reviewer",
 				Model:        "review-model",
 				ToolTier:     "read_only",
+				Tools:        ToolSpec{Allow: []string{"search_text"}, Deny: []string{"run_shell"}},
 				Skills:       []string{"review"},
 				Instructions: "Look for regressions.",
 				Policies: PolicySpec{
@@ -58,6 +59,12 @@ func TestRuntimeProfileSubagentProfile(t *testing.T) {
 	}
 	if sub.Spec.Tools.Tier != "read_only" {
 		t.Fatalf("tool tier=%q", sub.Spec.Tools.Tier)
+	}
+	if !contains(sub.Spec.Tools.Allow, "read_file") || !contains(sub.Spec.Tools.Allow, "search_text") {
+		t.Fatalf("tool allow list=%v", sub.Spec.Tools.Allow)
+	}
+	if !contains(sub.Spec.Tools.Deny, "run_shell") {
+		t.Fatalf("tool deny list=%v", sub.Spec.Tools.Deny)
 	}
 	if !contains(sub.Spec.Skills, "base") || !contains(sub.Spec.Skills, "review") {
 		t.Fatalf("skills=%v", sub.Spec.Skills)

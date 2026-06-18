@@ -198,6 +198,8 @@ func TestRunAgentCommandSubagentInitCreatesFilesystemSubagent(t *testing.T) {
 			"--persona", "researcher",
 			"--model", "xiaomi/mimo-v2.5-pro",
 			"--tool-tier", "read_only",
+			"--allow-tool", "read_file,search_text",
+			"--deny-tool", "run_shell",
 			"--skill", "code-review,planning",
 			"--approval-mode", "safe",
 			"--max-tool-calls", "5",
@@ -239,6 +241,12 @@ func TestRunAgentCommandSubagentInitCreatesFilesystemSubagent(t *testing.T) {
 		`persona: "researcher"`,
 		`model: "xiaomi/mimo-v2.5-pro"`,
 		`tool_tier: "read_only"`,
+		`tools:`,
+		`  allow:`,
+		`    - "read_file"`,
+		`    - "search_text"`,
+		`  deny:`,
+		`    - "run_shell"`,
 		`  - "code-review"`,
 		`  - "planning"`,
 		`  approval_mode: "safe"`,
@@ -299,7 +307,7 @@ func TestRunAgentCommandSubagentInitCreatesFilesystemSubagent(t *testing.T) {
 			t.Fatalf("subagents output missing %q:\n%s", want, listOut)
 		}
 	}
-	for _, want := range []string{"model=xiaomi/mimo-v2.5-pro", "tool_tier=read_only", "persona=researcher", "skills=code-review,planning", "approval=safe", "max_tool_calls=5"} {
+	for _, want := range []string{"model=xiaomi/mimo-v2.5-pro", "tool_tier=read_only", "tools=read_file, search_text", "persona=researcher", "skills=code-review,planning", "approval=safe", "max_tool_calls=5"} {
 		if !strings.Contains(listOut, want) {
 			t.Fatalf("subagents output missing configured field %q:\n%s", want, listOut)
 		}
@@ -309,7 +317,7 @@ func TestRunAgentCommandSubagentInitCreatesFilesystemSubagent(t *testing.T) {
 			t.Fatalf("runAgentCommand subagent dry-run: %v", err)
 		}
 	})
-	for _, want := range []string{"Agent run preview", "Agent: new-project/researcher", "Subagent: researcher", "Model: xiaomi/mimo-v2.5-pro", "Tool tier: read_only", "Skills: code-review, planning", "Approval mode: safe", "Instructions: yes", "Task: inspect this"} {
+	for _, want := range []string{"Agent run preview", "Agent: new-project/researcher", "Subagent: researcher", "Model: xiaomi/mimo-v2.5-pro", "Tool tier: read_only", "Tool filter: read_file, search_text", "Denied tools: run_shell", "Skills: code-review, planning", "Approval mode: safe", "Instructions: yes", "Task: inspect this"} {
 		if !strings.Contains(previewOut, want) {
 			t.Fatalf("subagent dry-run output missing %q:\n%s", want, previewOut)
 		}

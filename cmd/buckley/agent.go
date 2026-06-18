@@ -259,6 +259,8 @@ func runAgentSubagentInit(args []string) error {
 	persona := fs.String("persona", "", "persona to apply when this subagent runs")
 	modelID := fs.String("model", "", "model to use for this subagent")
 	toolTier := fs.String("tool-tier", "", "tool tier for this subagent: none, read_only, standard, or full")
+	allowTools := fs.String("allow-tool", "", "comma-separated tool names this subagent may use")
+	denyTools := fs.String("deny-tool", "", "comma-separated tool names this subagent may not use")
 	skills := fs.String("skill", "", "comma-separated additional skill names for this subagent")
 	approvalMode := fs.String("approval-mode", "", "approval mode for this subagent: ask, safe, auto, or yolo")
 	maxToolCalls := fs.Int("max-tool-calls", 0, "maximum tool calls allowed for this subagent")
@@ -270,7 +272,7 @@ func runAgentSubagentInit(args []string) error {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return fmt.Errorf("usage: buckley agent subagent init [--path <dir>] [--description <text>] [--persona <id>] [--model <id>] [--tool-tier <tier>] [--skill a,b] [--approval-mode <mode>] [--max-tool-calls n] [--force] [--dry-run] [--json|--format json] <subagent>")
+		return fmt.Errorf("usage: buckley agent subagent init [--path <dir>] [--description <text>] [--persona <id>] [--model <id>] [--tool-tier <tier>] [--allow-tool a,b] [--deny-tool a,b] [--skill a,b] [--approval-mode <mode>] [--max-tool-calls n] [--force] [--dry-run] [--json|--format json] <subagent>")
 	}
 	if err := normalizeJSONFormatFlag(*format, jsonOutput); err != nil {
 		return err
@@ -291,6 +293,8 @@ func runAgentSubagentInit(args []string) error {
 		Persona:      *persona,
 		Model:        *modelID,
 		ToolTier:     *toolTier,
+		AllowTools:   splitCommaList(*allowTools),
+		DenyTools:    splitCommaList(*denyTools),
 		Skills:       splitCommaList(*skills),
 		ApprovalMode: *approvalMode,
 		MaxToolCalls: *maxToolCalls,
@@ -617,6 +621,8 @@ type agentSubagentInitOptions struct {
 	Persona      string
 	Model        string
 	ToolTier     string
+	AllowTools   []string
+	DenyTools    []string
 	Skills       []string
 	ApprovalMode string
 	MaxToolCalls int
@@ -701,6 +707,8 @@ func filesystemSubagentConfigRequested(opts agentSubagentInitOptions) bool {
 	return strings.TrimSpace(opts.Persona) != "" ||
 		strings.TrimSpace(opts.Model) != "" ||
 		strings.TrimSpace(opts.ToolTier) != "" ||
+		len(cleanToolNames(opts.AllowTools)) > 0 ||
+		len(cleanToolNames(opts.DenyTools)) > 0 ||
 		len(cleanToolNames(opts.Skills)) > 0 ||
 		strings.TrimSpace(opts.ApprovalMode) != "" ||
 		opts.MaxToolCalls > 0
@@ -739,6 +747,25 @@ func renderSubagentConfigYAML(opts agentSubagentInitOptions) string {
 	}
 	if tier := strings.TrimSpace(opts.ToolTier); tier != "" {
 		fmt.Fprintf(&b, "tool_tier: %s\n", quoteYAMLString(tier))
+	}
+	allowTools := cleanToolNames(opts.AllowTools)
+	denyTools := cleanToolNames(opts.DenyTools)
+	sort.Strings(allowTools)
+	sort.Strings(denyTools)
+	if len(allowTools) > 0 || len(denyTools) > 0 {
+		b.WriteString("tools:\n")
+		if len(allowTools) > 0 {
+			b.WriteString("  allow:\n")
+			for _, toolName := range allowTools {
+				fmt.Fprintf(&b, "    - %s\n", quoteYAMLString(toolName))
+			}
+		}
+		if len(denyTools) > 0 {
+			b.WriteString("  deny:\n")
+			for _, toolName := range denyTools {
+				fmt.Fprintf(&b, "    - %s\n", quoteYAMLString(toolName))
+			}
+		}
 	}
 	skills := cleanToolNames(opts.Skills)
 	sort.Strings(skills)

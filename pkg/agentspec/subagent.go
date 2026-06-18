@@ -58,6 +58,18 @@ func (p *RuntimeProfile) SubagentProfile(name string) (*RuntimeProfile, error) {
 	if strings.TrimSpace(sub.ToolTier) != "" {
 		spec.Tools.Tier = strings.TrimSpace(sub.ToolTier)
 	}
+	if strings.TrimSpace(sub.Tools.Tier) != "" {
+		spec.Tools.Tier = strings.TrimSpace(sub.Tools.Tier)
+	}
+	if len(sub.Tools.Allow) > 0 {
+		spec.Tools.Allow = appendUnique(spec.Tools.Allow, sub.Tools.Allow...)
+	}
+	if len(sub.Tools.Deny) > 0 {
+		spec.Tools.Deny = appendUnique(spec.Tools.Deny, sub.Tools.Deny...)
+	}
+	if len(sub.Tools.MCP) > 0 {
+		spec.Tools.MCP = appendUnique(spec.Tools.MCP, sub.Tools.MCP...)
+	}
 	if len(sub.Skills) > 0 {
 		spec.Skills = appendUnique(spec.Skills, sub.Skills...)
 	}
@@ -93,6 +105,9 @@ func cloneSpec(spec *Spec) *Spec {
 	out.Sandbox.EnvPassthrough = append([]string(nil), spec.Sandbox.EnvPassthrough...)
 	out.Subagents = append([]SubagentSpec(nil), spec.Subagents...)
 	for i := range out.Subagents {
+		out.Subagents[i].Tools.Allow = append([]string(nil), spec.Subagents[i].Tools.Allow...)
+		out.Subagents[i].Tools.Deny = append([]string(nil), spec.Subagents[i].Tools.Deny...)
+		out.Subagents[i].Tools.MCP = append([]string(nil), spec.Subagents[i].Tools.MCP...)
 		out.Subagents[i].Skills = append([]string(nil), spec.Subagents[i].Skills...)
 		out.Subagents[i].Policies.Domains = append([]string(nil), spec.Subagents[i].Policies.Domains...)
 		out.Subagents[i].Policies.RulePacks = append([]RulePackRef(nil), spec.Subagents[i].Policies.RulePacks...)

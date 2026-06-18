@@ -105,6 +105,12 @@ func TestLoadFilesystemRuntimeProfile(t *testing.T) {
 persona: implementer
 model: xiaomi/mimo-v2.5-pro
 tool_tier: standard
+tools:
+  allow:
+    - read_file
+    - search_text
+  deny:
+    - run_shell
 skills:
   - code-review
 policies:
@@ -142,6 +148,9 @@ policies:
 	}
 	if sub.Spec.Persona != "implementer" || sub.Spec.Models.Execution != "xiaomi/mimo-v2.5-pro" || sub.Spec.Tools.Tier != "standard" {
 		t.Fatalf("subagent runtime fields not applied: %+v", sub.Spec)
+	}
+	if strings.Join(sub.Spec.Tools.Allow, ",") != "read_file,search_text" || strings.Join(sub.Spec.Tools.Deny, ",") != "run_shell" {
+		t.Fatalf("subagent tool filters not applied: %+v", sub.Spec.Tools)
 	}
 	if sub.Spec.Policies.ApprovalMode != "safe" || sub.Spec.Policies.MaxToolCalls != 7 {
 		t.Fatalf("subagent policies not applied: %+v", sub.Spec.Policies)

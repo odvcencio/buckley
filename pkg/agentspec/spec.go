@@ -99,6 +99,7 @@ type SubagentSpec struct {
 	Persona      string     `yaml:"persona,omitempty" json:"persona,omitempty"`
 	Model        string     `yaml:"model,omitempty" json:"model,omitempty"`
 	ToolTier     string     `yaml:"tool_tier,omitempty" json:"tool_tier,omitempty"`
+	Tools        ToolSpec   `yaml:"tools,omitempty" json:"tools,omitempty"`
 	Skills       []string   `yaml:"skills,omitempty" json:"skills,omitempty"`
 	Instructions string     `yaml:"instructions,omitempty" json:"instructions,omitempty"`
 	Policies     PolicySpec `yaml:"policies,omitempty" json:"policies,omitempty"`
@@ -176,6 +177,10 @@ func (s *Spec) Validate() []Diagnostic {
 		}
 		validateIdentifier(&d, path+".persona", sub.Persona)
 		validateToolTier(&d, path+".tool_tier", sub.ToolTier)
+		validateStringList(&d, path+".tools.allow", sub.Tools.Allow)
+		validateStringList(&d, path+".tools.deny", sub.Tools.Deny)
+		validateStringList(&d, path+".tools.mcp", sub.Tools.MCP)
+		validateToolTier(&d, path+".tools.tier", sub.Tools.Tier)
 		validateUniqueStrings(&d, path+".skills", sub.Skills)
 		validatePolicy(&d, path+".policies", sub.Policies)
 	}
@@ -477,8 +482,18 @@ func subagentSummary(sub SubagentSpec) string {
 	if sub.Model != "" {
 		parts = append(parts, "model="+sub.Model)
 	}
-	if sub.ToolTier != "" {
-		parts = append(parts, "tool_tier="+sub.ToolTier)
+	toolTier := sub.ToolTier
+	if sub.Tools.Tier != "" {
+		toolTier = sub.Tools.Tier
+	}
+	if toolTier != "" {
+		parts = append(parts, "tool_tier="+toolTier)
+	}
+	if len(sub.Tools.Allow) > 0 {
+		parts = append(parts, "tools="+strings.Join(sub.Tools.Allow, ","))
+	}
+	if len(sub.Tools.Deny) > 0 {
+		parts = append(parts, "deny="+strings.Join(sub.Tools.Deny, ","))
 	}
 	if len(sub.Skills) > 0 {
 		parts = append(parts, "skills="+strings.Join(sub.Skills, ","))

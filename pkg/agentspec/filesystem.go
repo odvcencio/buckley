@@ -215,6 +215,7 @@ func filesystemSubagents(agentRoot string, d *diagnostics) ([]SubagentSpec, erro
 			Persona:      config.Persona,
 			Model:        config.Model,
 			ToolTier:     config.ToolTier,
+			Tools:        config.Tools,
 			Skills:       mergedSkills,
 			Instructions: appendPrompt(config.Instructions, instructions),
 			Policies:     config.Policies,
@@ -230,6 +231,7 @@ type filesystemSubagentConfig struct {
 	Persona      string     `yaml:"persona"`
 	Model        string     `yaml:"model"`
 	ToolTier     string     `yaml:"tool_tier"`
+	Tools        ToolSpec   `yaml:"tools"`
 	Skills       []string   `yaml:"skills"`
 	Instructions string     `yaml:"instructions"`
 	Policies     PolicySpec `yaml:"policies"`
@@ -251,6 +253,10 @@ func loadFilesystemSubagentConfig(root string) (filesystemSubagentConfig, error)
 	config.Persona = strings.TrimSpace(config.Persona)
 	config.Model = strings.TrimSpace(config.Model)
 	config.ToolTier = strings.TrimSpace(config.ToolTier)
+	config.Tools.Tier = strings.TrimSpace(config.Tools.Tier)
+	config.Tools.Allow = appendUnique(nil, config.Tools.Allow...)
+	config.Tools.Deny = appendUnique(nil, config.Tools.Deny...)
+	config.Tools.MCP = appendUnique(nil, config.Tools.MCP...)
 	config.Instructions = strings.TrimSpace(config.Instructions)
 	config.Skills = appendUnique(nil, config.Skills...)
 	return config, nil
