@@ -390,44 +390,61 @@ func buildACPSystemPrompt(projectContext *projectcontext.ProjectContext, workDir
 	})
 }
 
+type acpUserSkillCommand struct {
+	list bool
+	name string
+}
+
 func handleACPUserSkillCommand(prompt string, state *acpSessionState) (bool, string) {
-	trimmed := strings.TrimSpace(prompt)
-	if trimmed == "" {
-		return false, ""
-	}
-	parts := strings.Fields(trimmed)
-	if len(parts) == 0 {
-		return false, ""
-	}
-	cmd := strings.ToLower(parts[0])
-	if cmd != "/skill" && cmd != "/skills" {
+	cmd, ok := parseACPUserSkillCommand(prompt)
+	if !ok {
 		return false, ""
 	}
 	if state == nil || state.skills == nil {
 		return true, "Skill system unavailable in this session."
 	}
-	if cmd == "/skills" || len(parts) == 1 || strings.EqualFold(parts[1], "list") {
-		names := make([]string, 0)
-		for _, s := range state.skills.List() {
-			names = append(names, s.GetName())
-		}
-		sort.Strings(names)
-		if len(names) == 0 {
-			return true, "No skills available."
-		}
-		var b strings.Builder
-		b.WriteString("Available skills:\n")
-		for _, name := range names {
-			b.WriteString("- " + name + "\n")
-		}
-		return true, strings.TrimSpace(b.String())
+	if cmd.list {
+		return true, formatACPAvailableSkills(state.skills)
 	}
-
-	name := strings.TrimSpace(strings.Join(parts[1:], " "))
-	if name == "" {
+	if cmd.name == "" {
 		return true, "Usage: /skill <name>."
 	}
+	return true, activateACPUserSkill(cmd.name, state)
+}
 
+func parseACPUserSkillCommand(prompt string) (acpUserSkillCommand, bool) {
+	parts := strings.Fields(strings.TrimSpace(prompt))
+	if len(parts) == 0 {
+		return acpUserSkillCommand{}, false
+	}
+	cmd := strings.ToLower(parts[0])
+	if cmd != "/skill" && cmd != "/skills" {
+		return acpUserSkillCommand{}, false
+	}
+	if cmd == "/skills" || len(parts) == 1 || strings.EqualFold(parts[1], "list") {
+		return acpUserSkillCommand{list: true}, true
+	}
+	return acpUserSkillCommand{name: strings.TrimSpace(strings.Join(parts[1:], " "))}, true
+}
+
+func formatACPAvailableSkills(registry *skill.Registry) string {
+	names := make([]string, 0)
+	for _, s := range registry.List() {
+		names = append(names, s.GetName())
+	}
+	sort.Strings(names)
+	if len(names) == 0 {
+		return "No skills available."
+	}
+	var b strings.Builder
+	b.WriteString("Available skills:\n")
+	for _, name := range names {
+		b.WriteString("- " + name + "\n")
+	}
+	return strings.TrimSpace(b.String())
+}
+
+func activateACPUserSkill(name string, state *acpSessionState) string {
 	tool := &builtin.SkillActivationTool{
 		Registry:     state.skills,
 		Conversation: state.skillState,
@@ -438,27 +455,30 @@ func handleACPUserSkillCommand(prompt string, state *acpSessionState) (bool, str
 		"scope":  "user request",
 	})
 	if err != nil {
-		return true, fmt.Sprintf("Error activating skill %q: %v", name, err)
+		return fmt.Sprintf("Error activating skill %q: %v", name, err)
 	}
 	if result == nil || !result.Success {
 		if result != nil && result.Error != "" {
-			return true, fmt.Sprintf("Error activating skill %q: %s", name, result.Error)
+			return fmt.Sprintf("Error activating skill %q: %s", name, result.Error)
 		}
-		return true, fmt.Sprintf("Error activating skill %q.", name)
+		return fmt.Sprintf("Error activating skill %q.", name)
 	}
+	return formatACPSkillActivationResult(name, result.Data)
+}
 
-	message, _ := result.Data["message"].(string)
-	content, _ := result.Data["content"].(string)
+func formatACPSkillActivationResult(name string, data map[string]any) string {
+	message, _ := data["message"].(string)
+	content, _ := data["content"].(string)
 	if content != "" && message != "" {
-		return true, message + "\n\n" + content
+		return message + "\n\n" + content
 	}
 	if content != "" {
-		return true, content
+		return content
 	}
 	if message != "" {
-		return true, message
+		return message
 	}
-	return true, fmt.Sprintf("Skill %q activated.", name)
+	return fmt.Sprintf("Skill %q activated.", name)
 }
 
 func buildACPModelModes(cfg *config.Config, mgr *model.Manager) *acp.SessionModeState {

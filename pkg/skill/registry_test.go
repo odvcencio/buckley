@@ -21,6 +21,36 @@ func TestNewRegistry(t *testing.T) {
 	}
 }
 
+func TestRegistry_Register(t *testing.T) {
+	registry := NewRegistry()
+
+	if err := registry.Register(nil); err == nil {
+		t.Fatalf("expected nil skill error")
+	}
+	if err := registry.Register(&Skill{Name: "missing-description"}); err == nil {
+		t.Fatalf("expected validation error")
+	}
+
+	skill := &Skill{Name: "test-skill", Description: "Test skill"}
+	if err := registry.Register(skill); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+	if skill.LoadedAt.IsZero() {
+		t.Fatalf("LoadedAt should be set")
+	}
+	if got := registry.GetSkill("test-skill"); got != skill {
+		t.Fatalf("GetSkill() = %v, want registered skill", got)
+	}
+
+	replacement := &Skill{Name: "test-skill", Description: "Replacement"}
+	if err := registry.Register(replacement); err != nil {
+		t.Fatalf("Register() replacement error = %v", err)
+	}
+	if got := registry.GetSkill("test-skill"); got != replacement {
+		t.Fatalf("GetSkill() = %v, want replacement", got)
+	}
+}
+
 func TestRegistry_Get(t *testing.T) {
 	registry := NewRegistry()
 

@@ -23,6 +23,24 @@ func NewRegistry() *Registry {
 	}
 }
 
+// Register adds or replaces a skill in the registry.
+func (r *Registry) Register(s *Skill) error {
+	if s == nil {
+		return fmt.Errorf("skill is required")
+	}
+	if err := s.Validate(); err != nil {
+		return err
+	}
+	if s.LoadedAt.IsZero() {
+		s.LoadedAt = time.Now()
+	}
+
+	r.mu.Lock()
+	r.skills[s.Name] = s
+	r.mu.Unlock()
+	return nil
+}
+
 // LoadAll loads skills from all standard locations in precedence order
 func (r *Registry) LoadAll() error {
 	r.mu.Lock()

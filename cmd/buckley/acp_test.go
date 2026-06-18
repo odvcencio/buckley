@@ -1,10 +1,12 @@
 package main
 
 import (
+	"strings"
 	"testing"
 
 	"m31labs.dev/buckley/pkg/conversation"
 	"m31labs.dev/buckley/pkg/model"
+	"m31labs.dev/buckley/pkg/skill"
 )
 
 func TestShouldNudgeForTools(t *testing.T) {
@@ -145,5 +147,121 @@ func TestNormalizeACPToolCallIDs(t *testing.T) {
 	}
 	if calls[2].ID != "tool-3" {
 		t.Fatalf("third ID = %q, want tool-3", calls[2].ID)
+	}
+}
+
+func TestParseACPUserSkillCommand(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name        string
+		prompt      string
+		wantHandled bool
+		wantList    bool
+		wantName    string
+	}{
+		{name: "plain prompt", prompt: "please inspect this", wantHandled: false},
+		{name: "empty", prompt: "   ", wantHandled: false},
+		{name: "skill list implicit", prompt: "/skill", wantHandled: true, wantList: true},
+		{name: "skills list", prompt: "/skills", wantHandled: true, wantList: true},
+		{name: "skill list explicit", prompt: "/skill list", wantHandled: true, wantList: true},
+		{name: "skill activate", prompt: "/skill code-review", wantHandled: true, wantName: "code-review"},
+		{name: "skill activate spaced name", prompt: "/skill release notes", wantHandled: true, wantName: "release notes"},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			got, handled := parseACPUserSkillCommand(tc.prompt)
+			if handled != tc.wantHandled {
+				t.Fatalf("handled=%v want %v", handled, tc.wantHandled)
+			}
+			if !handled {
+				return
+			}
+			if got.list != tc.wantList {
+				t.Fatalf("list=%v want %v", got.list, tc.wantList)
+			}
+			if got.name != tc.wantName {
+				t.Fatalf("name=%q want %q", got.name, tc.wantName)
+			}
+		})
+	}
+}
+
+func TestHandleACPUserSkillCommandUnavailable(t *testing.T) {
+	t.Parallel()
+
+	handled, text := handleACPUserSkillCommand("/skill code-review", nil)
+	if !handled {
+		t.Fatalf("expected skill command to be handled")
+	}
+	if text != "Skill system unavailable in this session." {
+		t.Fatalf("text=%q", text)
+	}
+}
+
+func TestHandleACPUserSkillCommandListsSkills(t *testing.T) {
+	t.Parallel()
+
+	registry := skill.NewRegistry()
+	mustRegisterSkill(t, registry, &skill.Skill{Name: "beta", Description: "Beta"})
+	mustRegisterSkill(t, registry, &skill.Skill{Name: "alpha", Description: "Alpha"})
+
+	handled, text := handleACPUserSkillCommand("/skills", &acpSessionState{skills: registry})
+	if !handled {
+		t.Fatalf("expected skills command to be handled")
+	}
+	want := "Available skills:\n- alpha\n- beta"
+	if text != want {
+		t.Fatalf("text=%q want %q", text, want)
+	}
+}
+
+func TestHandleACPUserSkillCommandActivatesSkill(t *testing.T) {
+	t.Parallel()
+
+	registry := skill.NewRegistry()
+	mustRegisterSkill(t, registry, &skill.Skill{
+		Name:         "code-review",
+		Description:  "Review code",
+		Content:      "# Review\nInspect the diff.",
+		AllowedTools: []string{"read_file"},
+	})
+
+	var injected []string
+	runtime := skill.NewRuntimeState(func(content string) {
+		injected = append(injected, content)
+	})
+	state := &acpSessionState{skills: registry, skillState: runtime}
+
+	handled, text := handleACPUserSkillCommand("/skill code-review", state)
+	if !handled {
+		t.Fatalf("expected skill command to be handled")
+	}
+	if !strings.Contains(text, "Skill 'code-review' activated") {
+		t.Fatalf("activation response missing message: %q", text)
+	}
+	if !strings.Contains(text, "# Skill Activated: code-review") {
+		t.Fatalf("activation response missing content: %q", text)
+	}
+	if !registry.IsActive("code-review") {
+		t.Fatalf("expected code-review to be active")
+	}
+	if len(injected) != 1 || !strings.Contains(injected[0], "# Skill Activated: code-review") {
+		t.Fatalf("unexpected injected system messages: %#v", injected)
+	}
+	filter := runtime.ToolFilter()
+	if len(filter) != 1 || filter[0] != "read_file" {
+		t.Fatalf("tool filter=%v want [read_file]", filter)
+	}
+}
+
+func mustRegisterSkill(t *testing.T, registry *skill.Registry, s *skill.Skill) {
+	t.Helper()
+	if err := registry.Register(s); err != nil {
+		t.Fatalf("Register(%q): %v", s.Name, err)
 	}
 }
