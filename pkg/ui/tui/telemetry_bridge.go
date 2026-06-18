@@ -383,40 +383,71 @@ func (b *TelemetryUIBridge) CurrentTask() string {
 }
 
 func (b *TelemetryUIBridge) handleExperimentStarted(event telemetry.Event) {
-	expID := getString(event.Data, "experiment_id")
-	expName := getString(event.Data, "name")
+	b.applyExperimentIdentity(event.Data)
+	b.experimentStatus = experimentStatusFromData(event.Data, "running")
+	b.experimentVariants = experimentVariantsFromData(event.Data["variants"])
+	b.updateSidebar()
+}
+
+func (b *TelemetryUIBridge) applyExperimentIdentity(data map[string]any) {
+	expID := getString(data, "experiment_id")
+	expName := getString(data, "name")
 	if expID != "" {
 		b.experimentID = expID
 	}
 	if expName != "" {
 		b.experiment = expName
 	}
-	status := getString(event.Data, "status")
-	if status == "" {
-		status = "running"
-	}
-	b.experimentStatus = status
-	b.experimentVariants = make(map[string]widgets.ExperimentVariant)
+}
 
-	if raw, ok := event.Data["variants"]; ok {
-		if list, ok := raw.([]any); ok {
-			for _, entry := range list {
-				if item, ok := entry.(map[string]any); ok {
-					variantID := getString(item, "id")
-					if variantID == "" {
-						continue
-					}
-					b.experimentVariants[variantID] = widgets.ExperimentVariant{
-						ID:      variantID,
-						Name:    getString(item, "name"),
-						ModelID: getString(item, "model"),
-						Status:  "pending",
-					}
-				}
-			}
+func experimentStatusFromData(data map[string]any, fallback string) string {
+	status := getString(data, "status")
+	if status == "" {
+		return fallback
+	}
+	return status
+}
+
+func experimentVariantsFromData(raw any) map[string]widgets.ExperimentVariant {
+	variants := make(map[string]widgets.ExperimentVariant)
+	for _, item := range experimentVariantMaps(raw) {
+		variant, ok := experimentVariantFromMap(item)
+		if ok {
+			variants[variant.ID] = variant
 		}
 	}
-	b.updateSidebar()
+	return variants
+}
+
+func experimentVariantMaps(raw any) []map[string]any {
+	switch list := raw.(type) {
+	case []map[string]any:
+		return append([]map[string]any(nil), list...)
+	case []any:
+		items := make([]map[string]any, 0, len(list))
+		for _, entry := range list {
+			item, ok := entry.(map[string]any)
+			if ok {
+				items = append(items, item)
+			}
+		}
+		return items
+	default:
+		return nil
+	}
+}
+
+func experimentVariantFromMap(item map[string]any) (widgets.ExperimentVariant, bool) {
+	variantID := getString(item, "id")
+	if variantID == "" {
+		return widgets.ExperimentVariant{}, false
+	}
+	return widgets.ExperimentVariant{
+		ID:      variantID,
+		Name:    getString(item, "name"),
+		ModelID: getString(item, "model"),
+		Status:  "pending",
+	}, true
 }
 
 func (b *TelemetryUIBridge) handleExperimentCompleted(event telemetry.Event) {
@@ -424,16 +455,15 @@ func (b *TelemetryUIBridge) handleExperimentCompleted(event telemetry.Event) {
 	if expID != "" && b.experimentID != "" && expID != b.experimentID {
 		return
 	}
-	status := getString(event.Data, "status")
-	if status == "" {
-		if event.Type == telemetry.EventExperimentFailed {
-			status = "failed"
-		} else {
-			status = "completed"
-		}
-	}
-	b.experimentStatus = status
+	b.experimentStatus = experimentStatusFromData(event.Data, experimentCompletionStatus(event.Type))
 	b.updateSidebar()
+}
+
+func experimentCompletionStatus(eventType telemetry.EventType) string {
+	if eventType == telemetry.EventExperimentFailed {
+		return "failed"
+	}
+	return "completed"
 }
 
 func (b *TelemetryUIBridge) handleExperimentVariant(event telemetry.Event, status string) {

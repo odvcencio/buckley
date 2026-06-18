@@ -201,6 +201,79 @@ func TestTelemetryUIBridge_HandleRLMIteration(t *testing.T) {
 	}
 }
 
+func TestTelemetryUIBridge_HandleExperimentStartedParsesVariants(t *testing.T) {
+	hub := telemetry.NewHub()
+	defer hub.Close()
+
+	bridge := NewTelemetryUIBridge(hub, nil)
+	bridge.experimentVariants["stale"] = widgets.ExperimentVariant{ID: "stale"}
+
+	bridge.handleEvent(telemetry.Event{
+		Type: telemetry.EventExperimentStarted,
+		Data: map[string]any{
+			"experiment_id": "exp-1",
+			"name":          "Model bakeoff",
+			"variants": []any{
+				map[string]any{"id": "glm", "name": "GLM", "model": "z-ai/glm-5.2"},
+				map[string]any{"id": "qwen", "name": "Qwen", "model": "qwen/qwen-max"},
+				map[string]any{"name": "missing id"},
+			},
+		},
+	})
+
+	if bridge.experimentID != "exp-1" {
+		t.Fatalf("experimentID = %q, want exp-1", bridge.experimentID)
+	}
+	if bridge.experiment != "Model bakeoff" {
+		t.Fatalf("experiment = %q, want Model bakeoff", bridge.experiment)
+	}
+	if bridge.experimentStatus != "running" {
+		t.Fatalf("experimentStatus = %q, want running", bridge.experimentStatus)
+	}
+	if len(bridge.experimentVariants) != 2 {
+		t.Fatalf("experimentVariants = %d, want 2", len(bridge.experimentVariants))
+	}
+	variant := bridge.experimentVariants["glm"]
+	if variant.Name != "GLM" || variant.ModelID != "z-ai/glm-5.2" || variant.Status != "pending" {
+		t.Fatalf("unexpected glm variant: %+v", variant)
+	}
+	if _, ok := bridge.experimentVariants["stale"]; ok {
+		t.Fatal("starting a new experiment should clear stale variants")
+	}
+}
+
+func TestTelemetryUIBridge_HandleExperimentCompletedDefaultsStatus(t *testing.T) {
+	hub := telemetry.NewHub()
+	defer hub.Close()
+
+	bridge := NewTelemetryUIBridge(hub, nil)
+	bridge.experimentID = "exp-1"
+
+	bridge.handleEvent(telemetry.Event{
+		Type: telemetry.EventExperimentCompleted,
+		Data: map[string]any{"experiment_id": "other"},
+	})
+	if bridge.experimentStatus != "" {
+		t.Fatalf("status should ignore mismatched experiment, got %q", bridge.experimentStatus)
+	}
+
+	bridge.handleEvent(telemetry.Event{
+		Type: telemetry.EventExperimentCompleted,
+		Data: map[string]any{"experiment_id": "exp-1"},
+	})
+	if bridge.experimentStatus != "completed" {
+		t.Fatalf("completed status = %q", bridge.experimentStatus)
+	}
+
+	bridge.handleEvent(telemetry.Event{
+		Type: telemetry.EventExperimentFailed,
+		Data: map[string]any{"experiment_id": "exp-1"},
+	})
+	if bridge.experimentStatus != "failed" {
+		t.Fatalf("failed status = %q", bridge.experimentStatus)
+	}
+}
+
 func TestTelemetryUIBridge_HandleToolEvents(t *testing.T) {
 	hub := telemetry.NewHub()
 	defer hub.Close()
