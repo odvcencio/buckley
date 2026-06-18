@@ -810,6 +810,67 @@ turns:
 	}
 }
 
+func TestRunEvalCommandRunsShowDefaultsToProjectEvals(t *testing.T) {
+	dir := t.TempDir()
+	evalsDir := filepath.Join(dir, "evals")
+	if err := os.MkdirAll(evalsDir, 0o755); err != nil {
+		t.Fatalf("mkdir evals dir: %v", err)
+	}
+	nested := filepath.Join(dir, "src", "feature")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatalf("mkdir nested project dir: %v", err)
+	}
+	runDir, err := writeChatCheckArtifacts(filepath.Join(evalsDir, "runs"), &chatcheck.Result{
+		Name:           "chat/smoke",
+		Passed:         true,
+		DurationMillis: 12,
+		Turns: []chatcheck.TurnResult{{
+			Index:  1,
+			User:   "say READY",
+			Text:   "READY",
+			Passed: true,
+		}},
+	}, time.Date(2026, 6, 18, 2, 3, 4, 0, time.UTC), doctorChatArtifactContext{
+		WorkDir:       dir,
+		ScenarioPath:  evalsDir,
+		Project:       true,
+		ArtifactRoot:  filepath.Join(evalsDir, "runs"),
+		ScenarioCount: 1,
+	})
+	if err != nil {
+		t.Fatalf("write eval run artifacts: %v", err)
+	}
+	t.Chdir(nested)
+
+	out := captureStdout(t, func() {
+		if err := runEvalCommand([]string{"runs", "show"}); err != nil {
+			t.Fatalf("runEvalCommand runs show: %v", err)
+		}
+	})
+	for _, want := range []string{
+		"Chat check run: " + filepath.Base(runDir) + " (pass)",
+		"Project: true",
+		"chat/smoke: pass",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("output missing %q:\n%s", want, out)
+		}
+	}
+
+	jsonOut := captureStdout(t, func() {
+		if err := runEvalCommand([]string{"artifacts", "show", "--json", filepath.Base(runDir)}); err != nil {
+			t.Fatalf("runEvalCommand artifacts show json: %v", err)
+		}
+	})
+	var detail doctorChatRunDetail
+	if err := json.Unmarshal([]byte(jsonOut), &detail); err != nil {
+		t.Fatalf("unmarshal eval run detail: %v\n%s", err, jsonOut)
+	}
+	if detail.Run.ID != filepath.Base(runDir) || !detail.Run.Passed || !detail.Run.Project {
+		t.Fatalf("unexpected eval run detail: %+v", detail.Run)
+	}
+}
+
 func TestRunDoctorChatCommandProjectListFiltersByID(t *testing.T) {
 	dir := t.TempDir()
 	projectDir := filepath.Join(dir, ".buckley", "chatchecks")

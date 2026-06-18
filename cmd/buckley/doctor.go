@@ -57,7 +57,11 @@ func runEvalCommand(args []string) error {
 	case "run":
 		return runDoctorChatCommand(evalDoctorChatArgs(args[1:]))
 	case "runs", "artifacts":
-		return runDoctorChatRunsCommand(evalDoctorChatRunsArgs(args[1:]))
+		rest := args[1:]
+		if len(rest) > 0 && strings.TrimSpace(rest[0]) == "show" {
+			return runDoctorChatRunShowCommand(evalDoctorChatRunsArgs(rest[1:]))
+		}
+		return runDoctorChatRunsCommand(evalDoctorChatRunsArgs(rest))
 	case "show":
 		return runDoctorChatRunShowCommand(evalDoctorChatRunsArgs(args[1:]))
 	default:
