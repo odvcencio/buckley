@@ -444,6 +444,111 @@ func TestRunDoctorChatCommandProjectList(t *testing.T) {
 	}
 }
 
+func TestRunDoctorChatInitCreatesProjectScenario(t *testing.T) {
+	dir := t.TempDir()
+
+	out := captureStdout(t, func() {
+		if err := runDoctorCommand([]string{
+			"chat", "init",
+			"--path", dir,
+			"--description", "Project chat smoke.",
+			"--tag", "smoke,regression",
+			"smoke",
+		}); err != nil {
+			t.Fatalf("runDoctorCommand chat init: %v", err)
+		}
+	})
+	for _, want := range []string{"Created chat check scenario smoke", ".buckley/chatchecks/", ".buckley/chatchecks/smoke.yaml", "Next: buckley doctor chat -project -list"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("doctor chat init output missing %q:\n%s", want, out)
+		}
+	}
+	scenarioPath := filepath.Join(dir, ".buckley", "chatchecks", "smoke.yaml")
+	data, err := os.ReadFile(scenarioPath)
+	if err != nil {
+		t.Fatalf("read generated scenario: %v", err)
+	}
+	for _, want := range []string{`description: "Project chat smoke."`, `name: "smoke"`, `model: "xiaomi/mimo-v2.5-pro"`, `BUCKLEY_CHAT_CHECK_ONE`, `BUCKLEY_CHAT_CHECK_TWO`} {
+		if !strings.Contains(string(data), want) {
+			t.Fatalf("generated scenario missing %q:\n%s", want, string(data))
+		}
+	}
+
+	nested := filepath.Join(dir, "src", "feature")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatalf("mkdir nested project dir: %v", err)
+	}
+	t.Chdir(nested)
+
+	origInit := initDependenciesFn
+	t.Cleanup(func() { initDependenciesFn = origInit })
+	called := false
+	initDependenciesFn = func() (*config.Config, *model.Manager, *storage.Store, error) {
+		called = true
+		return nil, nil, nil, errors.New("dependency initialization should not run")
+	}
+
+	listOut := captureStdout(t, func() {
+		if err := runDoctorCommand([]string{"chat", "-project", "-list", "-tag", "regression"}); err != nil {
+			t.Fatalf("runDoctorCommand chat project list: %v", err)
+		}
+	})
+	if called {
+		t.Fatal("project list mode initialized dependencies")
+	}
+	for _, want := range []string{"Chat check scenarios: 1", "smoke", "tags=regression,smoke", "contains=3"} {
+		if !strings.Contains(listOut, want) {
+			t.Fatalf("project list output missing %q:\n%s", want, listOut)
+		}
+	}
+
+	custom := "custom scenario\n"
+	if err := os.WriteFile(scenarioPath, []byte(custom), 0o644); err != nil {
+		t.Fatalf("write custom scenario: %v", err)
+	}
+	if err := runDoctorCommand([]string{"chat", "init", "--path", dir, "--description", "Replacement smoke.", "smoke"}); err != nil {
+		t.Fatalf("rerun doctor chat init: %v", err)
+	}
+	data, err = os.ReadFile(scenarioPath)
+	if err != nil {
+		t.Fatalf("read preserved scenario: %v", err)
+	}
+	if string(data) != custom {
+		t.Fatalf("doctor chat init should preserve existing scenario, got:\n%s", string(data))
+	}
+	if err := runDoctorCommand([]string{"chat", "init", "--path", dir, "--force", "--description", "Replacement smoke.", "smoke"}); err != nil {
+		t.Fatalf("force doctor chat init: %v", err)
+	}
+	data, err = os.ReadFile(scenarioPath)
+	if err != nil {
+		t.Fatalf("read overwritten scenario: %v", err)
+	}
+	if string(data) == custom || !strings.Contains(string(data), "Replacement smoke.") {
+		t.Fatalf("doctor chat init --force should overwrite scenario, got:\n%s", string(data))
+	}
+
+	dryDir := filepath.Join(dir, "dry")
+	jsonOut := captureStdout(t, func() {
+		if err := runDoctorCommand([]string{"chat", "init", "--dry-run", "--json", "--path", dryDir, "chat/memory"}); err != nil {
+			t.Fatalf("runDoctorCommand chat init dry-run: %v", err)
+		}
+	})
+	var result doctorChatInitResult
+	if err := json.Unmarshal([]byte(jsonOut), &result); err != nil {
+		t.Fatalf("unmarshal doctor chat init json: %v\n%s", err, jsonOut)
+	}
+	if !result.DryRun || result.Name != "chat/memory" || !strings.HasSuffix(result.Path, filepath.Join(".buckley", "chatchecks", "chat", "memory.yaml")) {
+		t.Fatalf("unexpected doctor chat init dry-run result: %+v", result)
+	}
+	if _, err := os.Stat(filepath.Join(dryDir, ".buckley")); !os.IsNotExist(err) {
+		t.Fatalf("dry-run should not create .buckley dir, stat err=%v", err)
+	}
+
+	if err := runDoctorCommand([]string{"chat", "init", "../escape"}); err == nil {
+		t.Fatalf("expected invalid scenario name error")
+	}
+}
+
 func TestRunDoctorChatCommandProjectListUsesEvalFallback(t *testing.T) {
 	dir := t.TempDir()
 	projectDir := filepath.Join(dir, "evals", "chat")

@@ -675,7 +675,7 @@ func printHelp() {
 	fmt.Println("  skills [init|list|show]          Create, list, or inspect workflow skills")
 	fmt.Println("  config [check|show|path]         Manage configuration")
 	fmt.Println("  trust [status|allow|deny|reset]  Inspect or change project trust")
-	fmt.Println("  doctor [chat]                    Quick system health and chat checks")
+	fmt.Println("  doctor chat [init|-project]      Create or run chat health checks")
 	fmt.Println("  completion [bash|zsh|fish]       Generate shell completions")
 	fmt.Println("  worktree create [--container]    Create git worktree")
 	fmt.Println("  rules list                       List loaded rule domains (embedded vs user override)")
@@ -1005,6 +1005,10 @@ func printBashCompletion() {
             COMPREPLY=( $(compgen -W "check chat" -- "${cur}") )
             return 0
             ;;
+        chat)
+            COMPREPLY=( $(compgen -W "init" -- "${cur}") )
+            return 0
+            ;;
         experiment)
             COMPREPLY=( $(compgen -W "run" -- "${cur}") )
             return 0
@@ -1109,6 +1113,9 @@ _buckley() {
                 doctor)
                     _values 'doctor command' check chat
                     ;;
+                chat)
+                    _values 'doctor chat command' init
+                    ;;
                 completion)
                     _values 'shell' bash zsh fish
                     ;;
@@ -1190,6 +1197,7 @@ complete -c buckley -n '__fish_seen_subcommand_from skills skill' -a show -d 'In
 # Doctor subcommands
 complete -c buckley -n '__fish_seen_subcommand_from doctor' -a check -d 'Validate configuration'
 complete -c buckley -n '__fish_seen_subcommand_from doctor' -a chat -d 'Run multi-turn chat health check'
+complete -c buckley -n '__fish_seen_subcommand_from doctor; and __fish_seen_subcommand_from chat' -a init -d 'Create a project chat check scenario'
 
 # Experiment subcommands
 complete -c buckley -n '__fish_seen_subcommand_from experiment' -a run -d 'Run an experiment'

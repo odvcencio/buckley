@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -30,10 +31,75 @@ func runDoctorCommand(args []string) error {
 	case "", "check", "config":
 		return runConfigCommand([]string{"check"})
 	case "chat":
+		if len(args) > 1 && strings.TrimSpace(args[1]) == "init" {
+			return runDoctorChatInitCommand(args[2:])
+		}
 		return runDoctorChatCommand(args[1:])
 	default:
 		return fmt.Errorf("unknown doctor command: %s (use check or chat)", subCmd)
 	}
+}
+
+type doctorChatInitResult struct {
+	Name        string   `json:"name"`
+	Root        string   `json:"root"`
+	Path        string   `json:"path"`
+	Created     []string `json:"created,omitempty"`
+	Existing    []string `json:"existing,omitempty"`
+	Overwritten []string `json:"overwritten,omitempty"`
+	DryRun      bool     `json:"dry_run,omitempty"`
+}
+
+type doctorChatInitOptions struct {
+	Root        string
+	Name        string
+	Description string
+	Model       string
+	Tags        []string
+	Force       bool
+	DryRun      bool
+}
+
+func runDoctorChatInitCommand(args []string) error {
+	fs := flag.NewFlagSet("doctor chat init", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	pathFlag := fs.String("path", ".", "project root where .buckley/chatchecks should be created")
+	description := fs.String("description", "", "scenario description")
+	modelID := fs.String("model", chatcheck.DefaultModel, "model to use when running this scenario")
+	var tags stringListFlag
+	fs.Var(&tags, "tag", "scenario tag (repeatable, comma-separated)")
+	force := fs.Bool("force", false, "overwrite scenario file if it already exists")
+	dryRun := fs.Bool("dry-run", false, "show what would be created without writing files")
+	jsonOutput := fs.Bool("json", false, "print machine-readable JSON")
+	format := fs.String("format", "text", "output format: text or json")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return fmt.Errorf("usage: buckley doctor chat init [--path <dir>] [--description <text>] [--model <id>] [--tag <tag>] [--force] [--dry-run] [--json|--format json] <scenario>")
+	}
+	if err := normalizeJSONFormatFlag(*format, jsonOutput); err != nil {
+		return err
+	}
+	result, err := initProjectChatCheck(doctorChatInitOptions{
+		Root:        *pathFlag,
+		Name:        fs.Arg(0),
+		Description: *description,
+		Model:       *modelID,
+		Tags:        tags.Values(),
+		Force:       *force,
+		DryRun:      *dryRun,
+	})
+	if err != nil {
+		return err
+	}
+	if *jsonOutput {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(result)
+	}
+	printDoctorChatInitResult(os.Stdout, result)
+	return nil
 }
 
 func runDoctorChatCommand(args []string) error {
@@ -213,6 +279,207 @@ func findProjectChatCheckScenarioDir(start string) (string, error) {
 		dir = parent
 	}
 	return "", fmt.Errorf("project chat check scenarios not found: %s or %s", projectChatCheckScenarioDir, projectEvalScenarioDir)
+}
+
+func initProjectChatCheck(opts doctorChatInitOptions) (doctorChatInitResult, error) {
+	name, err := cleanDoctorChatScenarioName(opts.Name)
+	if err != nil {
+		return doctorChatInitResult{}, err
+	}
+	root := strings.TrimSpace(opts.Root)
+	if root == "" {
+		root = "."
+	}
+	absRoot, err := filepath.Abs(root)
+	if err != nil {
+		return doctorChatInitResult{}, fmt.Errorf("resolve chat check init path: %w", err)
+	}
+	if info, err := os.Stat(absRoot); err == nil {
+		if !info.IsDir() {
+			return doctorChatInitResult{}, fmt.Errorf("chat check init path is not a directory: %s", absRoot)
+		}
+	} else if !os.IsNotExist(err) {
+		return doctorChatInitResult{}, fmt.Errorf("stat chat check init path: %w", err)
+	}
+
+	scenarioDir := filepath.Join(absRoot, projectChatCheckScenarioDir)
+	scenarioFile := filepath.Join(scenarioDir, filepath.FromSlash(name)+".yaml")
+	result := doctorChatInitResult{
+		Name:   name,
+		Root:   absRoot,
+		Path:   scenarioFile,
+		DryRun: opts.DryRun,
+	}
+	if _, _, _, err := ensureChatCheckInitPath(absRoot, "", true, false, opts.DryRun); err != nil {
+		return doctorChatInitResult{}, err
+	}
+	for _, dir := range []string{filepath.Join(absRoot, ".buckley"), scenarioDir, filepath.Dir(scenarioFile)} {
+		created, existing, _, err := ensureChatCheckInitPath(dir, "", true, false, opts.DryRun)
+		if err != nil {
+			return doctorChatInitResult{}, err
+		}
+		rel := agentInitRelativePath(absRoot, dir, true)
+		if created {
+			result.Created = append(result.Created, rel)
+		} else if existing {
+			result.Existing = append(result.Existing, rel)
+		}
+	}
+
+	content := renderChatCheckScenarioYAML(opts, name)
+	created, existing, overwritten, err := ensureChatCheckInitPath(scenarioFile, content, false, opts.Force, opts.DryRun)
+	if err != nil {
+		return doctorChatInitResult{}, err
+	}
+	rel := agentInitRelativePath(absRoot, scenarioFile, false)
+	switch {
+	case overwritten:
+		result.Overwritten = append(result.Overwritten, rel)
+	case created:
+		result.Created = append(result.Created, rel)
+	case existing:
+		result.Existing = append(result.Existing, rel)
+	}
+	return result, nil
+}
+
+func ensureChatCheckInitPath(path, content string, dir, force, dryRun bool) (created bool, existing bool, overwritten bool, err error) {
+	info, statErr := os.Stat(path)
+	if statErr == nil {
+		if dir {
+			if !info.IsDir() {
+				return false, false, false, fmt.Errorf("chat check init path exists and is not a directory: %s", path)
+			}
+			return false, true, false, nil
+		}
+		if info.IsDir() {
+			return false, false, false, fmt.Errorf("chat check init path exists and is a directory: %s", path)
+		}
+		if !force {
+			return false, true, false, nil
+		}
+		if dryRun {
+			return false, false, true, nil
+		}
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			return false, false, false, fmt.Errorf("write chat check scenario: %w", err)
+		}
+		return false, false, true, nil
+	}
+	if !os.IsNotExist(statErr) {
+		return false, false, false, fmt.Errorf("stat chat check init path: %w", statErr)
+	}
+	if dryRun {
+		return true, false, false, nil
+	}
+	if dir {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			return false, false, false, fmt.Errorf("create chat check directory: %w", err)
+		}
+		return true, false, false, nil
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return false, false, false, fmt.Errorf("create chat check parent directory: %w", err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		return false, false, false, fmt.Errorf("write chat check scenario: %w", err)
+	}
+	return true, false, false, nil
+}
+
+func cleanDoctorChatScenarioName(value string) (string, error) {
+	value = filepath.ToSlash(strings.TrimSpace(value))
+	switch strings.ToLower(filepath.Ext(value)) {
+	case ".yaml", ".yml", ".json":
+		value = strings.TrimSuffix(value, filepath.Ext(value))
+	}
+	return cleanAgentSkillName(value)
+}
+
+func renderChatCheckScenarioYAML(opts doctorChatInitOptions, name string) string {
+	modelID := strings.TrimSpace(opts.Model)
+	if modelID == "" {
+		modelID = chatcheck.DefaultModel
+	}
+	description := strings.TrimSpace(opts.Description)
+	if description == "" {
+		description = "Checks Buckley multi-turn chat continuity."
+	}
+	tags := normalizeChatCheckInitTags(opts.Tags)
+	scenario := chatcheck.DefaultScenario(modelID)
+	scenario.Name = name
+	scenario.Description = description
+	scenario.Tags = tags
+	scenario.SessionID = "buckley-chat-check-" + strings.ReplaceAll(filepath.Base(filepath.ToSlash(name)), "_", "-")
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "description: %s\n", quoteYAMLString(scenario.Description))
+	fmt.Fprintf(&b, "name: %s\n", quoteYAMLString(scenario.Name))
+	b.WriteString("tags:\n")
+	for _, tag := range scenario.Tags {
+		fmt.Fprintf(&b, "  - %s\n", quoteYAMLString(tag))
+	}
+	fmt.Fprintf(&b, "model: %s\n", quoteYAMLString(scenario.Model))
+	b.WriteString("timeout: \"45s\"\n")
+	fmt.Fprintf(&b, "max_tokens: %d\n", scenario.MaxTokens)
+	fmt.Fprintf(&b, "session_id: %s\n", quoteYAMLString(scenario.SessionID))
+	fmt.Fprintf(&b, "system_prompt: %s\n", quoteYAMLString(scenario.SystemPrompt))
+	b.WriteString("turns:\n")
+	for _, turn := range scenario.Turns {
+		fmt.Fprintf(&b, "  - user: %s\n", quoteYAMLString(turn.User))
+		if len(turn.WantContains) > 0 {
+			b.WriteString("    want_contains:\n")
+			for _, want := range turn.WantContains {
+				fmt.Fprintf(&b, "      - %s\n", quoteYAMLString(want))
+			}
+		}
+		if turn.MinChars > 0 {
+			fmt.Fprintf(&b, "    min_chars: %d\n", turn.MinChars)
+		}
+	}
+	return b.String()
+}
+
+func normalizeChatCheckInitTags(values []string) []string {
+	if len(values) == 0 {
+		return []string{"chat", "smoke"}
+	}
+	return normalizeChatCheckTags(values)
+}
+
+func normalizeChatCheckTags(values []string) []string {
+	seen := map[string]struct{}{}
+	out := []string{}
+	for _, value := range values {
+		for _, part := range strings.Split(value, ",") {
+			tag := strings.ToLower(strings.TrimSpace(part))
+			if tag == "" {
+				continue
+			}
+			if _, ok := seen[tag]; ok {
+				continue
+			}
+			seen[tag] = struct{}{}
+			out = append(out, tag)
+		}
+	}
+	sort.Strings(out)
+	if len(out) == 0 {
+		return []string{"chat", "smoke"}
+	}
+	return out
+}
+
+func printDoctorChatInitResult(w io.Writer, result doctorChatInitResult) {
+	action := "Created"
+	if result.DryRun {
+		action = "Would create"
+	}
+	fmt.Fprintf(w, "%s chat check scenario %s at %s\n", action, result.Name, result.Path)
+	printPathList(w, "Created", "Would create", result.Created, result.DryRun)
+	printPathList(w, "Overwritten", "Would overwrite", result.Overwritten, result.DryRun)
+	printPathList(w, "Existing", "Existing", result.Existing, false)
+	fmt.Fprintln(w, "Next: buckley doctor chat -project -list")
 }
 
 func resolveChatCheckArtifactRoot(configured string, useProject bool, scenarioPath string, explicit bool) string {
