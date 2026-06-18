@@ -193,97 +193,109 @@ func (p *PaletteWidget) Render(ctx runtime.RenderContext) {
 		return
 	}
 
-	// Draw background
 	ctx.Buffer.Fill(b, ' ', p.bgStyle)
-
-	// Draw border
 	p.drawBorder(ctx.Buffer, b)
+	p.renderTitle(ctx.Buffer, b)
 
-	// Draw title
-	titleX := b.X + (b.Width-len(p.title))/2
-	ctx.Buffer.SetString(titleX, b.Y, " "+p.title+" ", p.titleStyle)
+	y := p.renderQuery(ctx.Buffer, b, b.Y+1)
+	y = p.renderSeparator(ctx.Buffer, b, y)
+	p.renderItems(ctx.Buffer, b, y)
+	p.renderResultCount(ctx.Buffer, b)
+}
 
-	y := b.Y + 1
+func (p *PaletteWidget) renderTitle(buf *runtime.Buffer, b runtime.Rect) {
+	title := " " + p.title + " "
+	titleX := b.X + (b.Width-runeLen(title))/2
+	buf.SetString(titleX, b.Y, title, p.titleStyle)
+}
 
-	// Draw query input
-	query := p.placeholder + p.query
-	if len(query) > b.Width-4 {
-		query = query[:b.Width-4]
-	}
-	ctx.Buffer.SetString(b.X+2, y, query, p.queryStyle)
+func (p *PaletteWidget) renderQuery(buf *runtime.Buffer, b runtime.Rect, y int) int {
+	query := truncateString(p.placeholder+p.query, b.Width-4)
+	buf.SetString(b.X+2, y, query, p.queryStyle)
 
-	// Draw cursor
-	cursorX := b.X + 2 + len(query)
+	cursorX := b.X + 2 + runeLen(query)
 	if cursorX < b.X+b.Width-2 && p.focused {
-		ctx.Buffer.Set(cursorX, y, '█', p.queryStyle)
+		buf.Set(cursorX, y, '█', p.queryStyle)
 	}
-	y++
+	return y + 1
+}
 
-	// Draw separator
+func (p *PaletteWidget) renderSeparator(buf *runtime.Buffer, b runtime.Rect, y int) int {
 	for x := b.X + 1; x < b.X+b.Width-1; x++ {
-		ctx.Buffer.Set(x, y, '─', p.borderStyle)
+		buf.Set(x, y, '─', p.borderStyle)
 	}
-	y++
+	return y + 1
+}
 
-	// Draw items
-	maxItems := b.Height - 4
-	if maxItems > len(p.filtered) {
-		maxItems = len(p.filtered)
-	}
-
+func (p *PaletteWidget) renderItems(buf *runtime.Buffer, b runtime.Rect, y int) {
+	maxY := b.Y + b.Height - 1
 	lastCategory := ""
-	for i := 0; i < maxItems && y < b.Y+b.Height-1; i++ {
-		item := p.filtered[i]
 
-		// Draw category header if changed
+	for i, item := range p.filtered {
+		if y >= maxY {
+			break
+		}
 		if item.Category != "" && item.Category != lastCategory {
 			lastCategory = item.Category
-			ctx.Buffer.SetString(b.X+2, y, item.Category, p.categoryStyle)
+			p.renderCategory(buf, b, y, item.Category)
 			y++
-			if y >= b.Y+b.Height-1 {
+			if y >= maxY {
 				break
 			}
 		}
 
-		// Draw item
-		style := p.itemStyle
-		if i == p.selected {
-			style = p.selectedStyle
-			// Fill entire line for selected
-			for x := b.X + 1; x < b.X+b.Width-1; x++ {
-				ctx.Buffer.Set(x, y, ' ', style)
-			}
-		}
-
-		// Label (left-aligned)
-		label := item.Label
-		maxLabel := b.Width - 6
-		if item.Shortcut != "" {
-			maxLabel -= len(item.Shortcut) + 2
-		}
-		if len(label) > maxLabel {
-			label = label[:maxLabel-3] + "..."
-		}
-		ctx.Buffer.SetString(b.X+3, y, label, style)
-
-		// Shortcut (right-aligned)
-		if item.Shortcut != "" {
-			shortcutX := b.X + b.Width - 2 - len(item.Shortcut)
-			shortcutStyle := p.shortcutStyle
-			if i == p.selected {
-				shortcutStyle = style
-			}
-			ctx.Buffer.SetString(shortcutX, y, item.Shortcut, shortcutStyle)
-		}
-
+		p.renderItem(buf, b, y, item, i == p.selected)
 		y++
 	}
+}
 
-	// Draw item count if more items than visible
-	if len(p.filtered) > maxItems {
-		countStr := intToStr(len(p.filtered)) + " results"
-		ctx.Buffer.SetString(b.X+b.Width-2-len(countStr), b.Y+b.Height-1, countStr, p.borderStyle)
+func (p *PaletteWidget) renderCategory(buf *runtime.Buffer, b runtime.Rect, y int, category string) {
+	buf.SetString(b.X+2, y, truncateString(category, b.Width-4), p.categoryStyle)
+}
+
+func (p *PaletteWidget) renderItem(buf *runtime.Buffer, b runtime.Rect, y int, item PaletteItem, selected bool) {
+	style := p.itemStyle
+	if selected {
+		style = p.selectedStyle
+		p.fillItemRow(buf, b, y, style)
 	}
+
+	label := truncateString(item.Label, p.maxLabelWidth(b, item))
+	buf.SetString(b.X+3, y, label, style)
+
+	if item.Shortcut == "" {
+		return
+	}
+	shortcut := truncateString(item.Shortcut, b.Width-6)
+	shortcutX := b.X + b.Width - 2 - runeLen(shortcut)
+	shortcutStyle := p.shortcutStyle
+	if selected {
+		shortcutStyle = style
+	}
+	buf.SetString(shortcutX, y, shortcut, shortcutStyle)
+}
+
+func (p *PaletteWidget) fillItemRow(buf *runtime.Buffer, b runtime.Rect, y int, style backend.Style) {
+	for x := b.X + 1; x < b.X+b.Width-1; x++ {
+		buf.Set(x, y, ' ', style)
+	}
+}
+
+func (p *PaletteWidget) maxLabelWidth(b runtime.Rect, item PaletteItem) int {
+	maxLabel := b.Width - 6
+	if item.Shortcut != "" {
+		maxLabel -= runeLen(item.Shortcut) + 2
+	}
+	return max(0, maxLabel)
+}
+
+func (p *PaletteWidget) renderResultCount(buf *runtime.Buffer, b runtime.Rect) {
+	if len(p.filtered) <= max(0, b.Height-4) {
+		return
+	}
+	countStr := intToStr(len(p.filtered)) + " results"
+	countStr = truncateString(countStr, b.Width-4)
+	buf.SetString(b.X+b.Width-2-runeLen(countStr), b.Y+b.Height-1, countStr, p.borderStyle)
 }
 
 // drawBorder draws the palette border.
@@ -343,8 +355,8 @@ func (p *PaletteWidget) HandleMessage(msg runtime.Message) runtime.HandleResult 
 		return runtime.Handled()
 
 	case terminal.KeyBackspace:
-		if len(p.query) > 0 {
-			p.query = p.query[:len(p.query)-1]
+		if p.query != "" {
+			p.query = dropLastRune(p.query)
 			p.updateFiltered()
 			return runtime.Handled()
 		}
@@ -358,4 +370,12 @@ func (p *PaletteWidget) HandleMessage(msg runtime.Message) runtime.HandleResult 
 	}
 
 	return runtime.Unhandled()
+}
+
+func dropLastRune(s string) string {
+	runes := []rune(s)
+	if len(runes) == 0 {
+		return ""
+	}
+	return string(runes[:len(runes)-1])
 }

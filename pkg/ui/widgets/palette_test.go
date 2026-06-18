@@ -204,6 +204,21 @@ func TestPaletteWidget_HandleBackspace(t *testing.T) {
 	}
 }
 
+func TestPaletteWidget_HandleBackspace_RemovesWholeRune(t *testing.T) {
+	p := NewPaletteWidget("Test")
+
+	p.HandleMessage(runtime.KeyMsg{Key: terminal.KeyRune, Rune: '模'})
+	p.HandleMessage(runtime.KeyMsg{Key: terminal.KeyRune, Rune: '型'})
+
+	result := p.HandleMessage(runtime.KeyMsg{Key: terminal.KeyBackspace})
+	if !result.Handled {
+		t.Fatal("Backspace should be handled")
+	}
+	if p.query != "模" {
+		t.Fatalf("query after unicode backspace = %q, want %q", p.query, "模")
+	}
+}
+
 func TestPaletteWidget_Measure(t *testing.T) {
 	p := NewPaletteWidget("Test")
 	p.SetItems([]PaletteItem{
@@ -258,6 +273,29 @@ func TestPaletteWidget_Render(t *testing.T) {
 	cell := buf.Get(bounds.X, bounds.Y)
 	if cell.Rune != '╭' {
 		t.Errorf("expected top-left corner, got '%c'", cell.Rune)
+	}
+}
+
+func TestPaletteWidget_Render_QueryCursorUsesRuneColumns(t *testing.T) {
+	p := NewPaletteWidget("Commands")
+	p.SetPlaceholder("/")
+	p.Focus()
+	p.HandleMessage(runtime.KeyMsg{Key: terminal.KeyRune, Rune: '模'})
+	p.HandleMessage(runtime.KeyMsg{Key: terminal.KeyRune, Rune: '型'})
+	p.Layout(runtime.Rect{X: 0, Y: 0, Width: 40, Height: 10})
+
+	buf := runtime.NewBuffer(40, 10)
+	p.Render(runtime.RenderContext{Buffer: buf})
+
+	bounds := p.Bounds()
+	y := bounds.Y + 1
+	for x, want := range []rune("/模型") {
+		if got := buf.Get(bounds.X+2+x, y).Rune; got != want {
+			t.Fatalf("query cell %d = %q, want %q", x, got, want)
+		}
+	}
+	if got := buf.Get(bounds.X+2+len([]rune("/模型")), y).Rune; got != '█' {
+		t.Fatalf("cursor = %q, want block", got)
 	}
 }
 

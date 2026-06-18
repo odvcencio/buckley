@@ -42,6 +42,9 @@ func TestTruncateString(t *testing.T) {
 		{input: "Hello World", maxWidth: 8, want: "Hello..."},
 		{input: "Hi", maxWidth: 2, want: "Hi"},
 		{input: "Hello", maxWidth: 3, want: "Hel"},
+		{input: "模型abcdef", maxWidth: 5, want: "模型..."},
+		{input: "模型", maxWidth: 1, want: "模"},
+		{input: "Hello", maxWidth: 0, want: ""},
 	}
 
 	for _, tt := range tests {

@@ -96,13 +96,17 @@ func fillRect(buf *runtime.Buffer, bounds runtime.Rect, ch rune, style backend.S
 // truncateString truncates a string to fit within maxWidth.
 // Adds "..." if truncated.
 func truncateString(s string, maxWidth int) string {
-	if len(s) <= maxWidth {
+	if maxWidth <= 0 {
+		return ""
+	}
+	runes := []rune(s)
+	if len(runes) <= maxWidth {
 		return s
 	}
 	if maxWidth <= 3 {
-		return s[:maxWidth]
+		return string(runes[:maxWidth])
 	}
-	return s[:maxWidth-3] + "..."
+	return string(runes[:maxWidth-3]) + "..."
 }
 
 // padRight pads a string with spaces to reach the given width.
@@ -130,6 +134,10 @@ func centerString(s string, width int) string {
 	}
 	copy(result[padding:], s)
 	return string(result)
+}
+
+func runeLen(s string) int {
+	return len([]rune(s))
 }
 
 func max(a, b int) int {

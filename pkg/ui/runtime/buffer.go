@@ -98,9 +98,10 @@ func (b *Buffer) SetString(x, y int, s string, style backend.Style) {
 	if y < 0 || y >= b.height {
 		return
 	}
-	for i, r := range s {
-		px := x + i
+	px := x
+	for _, r := range s {
 		if px < 0 {
+			px++
 			continue
 		}
 		if px >= b.width {
@@ -112,6 +113,7 @@ func (b *Buffer) SetString(x, y int, s string, style backend.Style) {
 			b.cells[idx] = Cell{Rune: r, Style: style}
 			b.markCellDirty(px, y, idx)
 		}
+		px++
 	}
 }
 
@@ -216,15 +218,17 @@ func (s *SubBuffer) SetString(x, y int, str string, style backend.Style) {
 	if y < 0 || y >= s.bounds.Height {
 		return
 	}
-	for i, r := range str {
-		px := x + i
+	px := x
+	for _, r := range str {
 		if px < 0 {
+			px++
 			continue
 		}
 		if px >= s.bounds.Width {
 			break
 		}
 		s.parent.Set(s.bounds.X+px, s.bounds.Y+y, r, style)
+		px++
 	}
 }
 

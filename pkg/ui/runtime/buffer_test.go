@@ -58,6 +58,19 @@ func TestBuffer_SetString(t *testing.T) {
 	}
 }
 
+func TestBuffer_SetStringUsesRuneColumns(t *testing.T) {
+	b := NewBuffer(20, 5)
+	style := backend.DefaultStyle()
+
+	b.SetString(2, 1, "A模型B", style)
+
+	for i, want := range []rune("A模型B") {
+		if got := b.Get(2+i, 1).Rune; got != want {
+			t.Fatalf("Get(%d, 1) = %q, want %q", 2+i, got, want)
+		}
+	}
+}
+
 func TestBuffer_SetStringClips(t *testing.T) {
 	b := NewBuffer(10, 5)
 	style := backend.DefaultStyle()
@@ -179,6 +192,19 @@ func TestSubBuffer(t *testing.T) {
 	}
 	if b.Get(6, 2).Rune != 'H' {
 		t.Error("SubBuffer SetString didn't work")
+	}
+}
+
+func TestSubBuffer_SetStringUsesRuneColumns(t *testing.T) {
+	b := NewBuffer(20, 10)
+	sub := b.Sub(Rect{5, 2, 10, 5})
+
+	sub.SetString(1, 0, "A模型B", backend.DefaultStyle())
+
+	for i, want := range []rune("A模型B") {
+		if got := b.Get(6+i, 2).Rune; got != want {
+			t.Fatalf("Get(%d, 2) = %q, want %q", 6+i, got, want)
+		}
 	}
 }
 
