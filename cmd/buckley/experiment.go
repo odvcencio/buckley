@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"strconv"
 	"strings"
@@ -32,6 +33,12 @@ func (s *stringSliceFlag) Set(value string) error {
 		*s = append(*s, value)
 	}
 	return nil
+}
+
+type experimentDiffOptions struct {
+	identifier   string
+	showOutput   bool
+	maxOutputLen int
 }
 
 func runExperimentCommand(args []string) error {
@@ -287,16 +294,10 @@ func runExperimentShow(args []string) error {
 }
 
 func runExperimentDiff(args []string) error {
-	fs := flag.NewFlagSet("experiment diff", flag.ContinueOnError)
-	showOutput := fs.Bool("output", false, "Show full output comparison (can be long)")
-	maxOutputLen := fs.Int("max-output", 500, "Maximum output length per variant")
-	if err := fs.Parse(args); err != nil {
+	opts, err := parseExperimentDiffOptions(args)
+	if err != nil {
 		return err
 	}
-	if fs.NArg() < 1 {
-		return fmt.Errorf("usage: buckley experiment diff <id|name> [--output] [--max-output N]")
-	}
-	identifier := strings.TrimSpace(fs.Arg(0))
 
 	store, err := initExperimentStore()
 	if err != nil {
@@ -307,18 +308,12 @@ func runExperimentDiff(args []string) error {
 		return fmt.Errorf("experiment store unavailable")
 	}
 
-	exp, err := expStore.GetExperiment(identifier)
+	exp, err := loadExperimentByIdentifier(expStore, opts.identifier)
 	if err != nil {
 		return err
 	}
 	if exp == nil {
-		exp, err = expStore.FindExperimentByName(identifier)
-		if err != nil {
-			return err
-		}
-	}
-	if exp == nil {
-		return fmt.Errorf("experiment not found: %s", identifier)
+		return fmt.Errorf("experiment not found: %s", opts.identifier)
 	}
 
 	runs, err := expStore.ListRuns(exp.ID)
@@ -330,25 +325,90 @@ func runExperimentDiff(args []string) error {
 		return nil
 	}
 
-	// Build variant lookup
+	return writeExperimentDiff(os.Stdout, exp, runs, opts)
+}
+
+func parseExperimentDiffOptions(args []string) (experimentDiffOptions, error) {
+	fs := flag.NewFlagSet("experiment diff", flag.ContinueOnError)
+	showOutput := fs.Bool("output", false, "Show full output comparison (can be long)")
+	maxOutputLen := fs.Int("max-output", 500, "Maximum output length per variant")
+	identifier, flagArgs := splitExperimentDiffArgs(args)
+	if err := fs.Parse(flagArgs); err != nil {
+		return experimentDiffOptions{}, err
+	}
+	if identifier == "" && fs.NArg() > 0 {
+		identifier = fs.Arg(0)
+	}
+	if strings.TrimSpace(identifier) == "" {
+		return experimentDiffOptions{}, fmt.Errorf("usage: buckley experiment diff <id|name> [--output] [--max-output N]")
+	}
+	return experimentDiffOptions{
+		identifier:   strings.TrimSpace(identifier),
+		showOutput:   *showOutput,
+		maxOutputLen: *maxOutputLen,
+	}, nil
+}
+
+func splitExperimentDiffArgs(args []string) (string, []string) {
+	var identifier string
+	flagArgs := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		arg := strings.TrimSpace(args[i])
+		if arg == "" {
+			continue
+		}
+		if !strings.HasPrefix(arg, "-") {
+			if identifier == "" {
+				identifier = arg
+			}
+			continue
+		}
+		flagArgs = append(flagArgs, arg)
+		if experimentDiffFlagNeedsValue(arg) && i+1 < len(args) {
+			i++
+			flagArgs = append(flagArgs, args[i])
+		}
+	}
+	return identifier, flagArgs
+}
+
+func experimentDiffFlagNeedsValue(arg string) bool {
+	arg = strings.TrimSpace(arg)
+	if strings.Contains(arg, "=") {
+		return false
+	}
+	switch strings.TrimLeft(arg, "-") {
+	case "max-output":
+		return true
+	default:
+		return false
+	}
+}
+
+func loadExperimentByIdentifier(expStore *experiment.Store, identifier string) (*experiment.Experiment, error) {
+	exp, err := expStore.GetExperiment(identifier)
+	if err != nil {
+		return nil, err
+	}
+	if exp != nil {
+		return exp, nil
+	}
+	return expStore.FindExperimentByName(identifier)
+}
+
+func writeExperimentDiff(out io.Writer, exp *experiment.Experiment, runs []experiment.Run, opts experimentDiffOptions) error {
 	variantByID := make(map[string]experiment.Variant, len(exp.Variants))
 	for _, v := range exp.Variants {
 		variantByID[v.ID] = v
 	}
 
-	// Print header
-	fmt.Printf("# Experiment Diff: %s\n\n", exp.Name)
-	fmt.Printf("Comparing %d variants:\n\n", len(runs))
+	fmt.Fprintf(out, "# Experiment Diff: %s\n\n", exp.Name)
+	fmt.Fprintf(out, "Comparing %d variants:\n\n", len(runs))
 
-	// Summary table
-	writer := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+	writer := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
 	fmt.Fprintln(writer, "VARIANT\tSTATUS\tFILES\tTOKENS\tCOST\tDURATION")
 	for _, run := range runs {
-		variant := variantByID[run.VariantID]
-		name := variant.ModelID
-		if name == "" {
-			name = variant.Name
-		}
+		name := experimentVariantName(variantByID[run.VariantID])
 		status := string(run.Status)
 		files := fmt.Sprintf("%d", len(run.Files))
 		tokens := fmt.Sprintf("%d", run.Metrics.PromptTokens+run.Metrics.CompletionTokens)
@@ -359,59 +419,70 @@ func runExperimentDiff(args []string) error {
 		duration := fmt.Sprintf("%dms", run.Metrics.DurationMs)
 		fmt.Fprintf(writer, "%s\t%s\t%s\t%s\t%s\t%s\n", name, status, files, tokens, cost, duration)
 	}
-	writer.Flush()
-	fmt.Println()
+	if err := writer.Flush(); err != nil {
+		return err
+	}
+	fmt.Fprintln(out)
 
-	// Files comparison
-	fmt.Println("## Files Modified by Each Variant")
-	fmt.Println()
+	fmt.Fprintln(out, "## Files Modified by Each Variant")
+	fmt.Fprintln(out)
 	for _, run := range runs {
-		variant := variantByID[run.VariantID]
-		name := variant.ModelID
-		if name == "" {
-			name = variant.Name
-		}
-		fmt.Printf("### %s\n", name)
+		name := experimentVariantName(variantByID[run.VariantID])
+		fmt.Fprintf(out, "### %s\n", name)
 		if len(run.Files) == 0 {
-			fmt.Println("  (no files modified)")
+			fmt.Fprintln(out, "  (no files modified)")
 		} else {
 			for _, f := range run.Files {
-				fmt.Printf("  - %s\n", f)
+				fmt.Fprintf(out, "  - %s\n", f)
 			}
 		}
-		fmt.Println()
+		fmt.Fprintln(out)
 	}
 
-	// Output comparison (if requested or short enough)
-	if *showOutput || *maxOutputLen > 0 {
-		fmt.Println("## Output Comparison")
-		fmt.Println()
-		for _, run := range runs {
-			variant := variantByID[run.VariantID]
-			name := variant.ModelID
-			if name == "" {
-				name = variant.Name
-			}
-			fmt.Printf("### %s\n", name)
-			if run.Error != nil && *run.Error != "" {
-				fmt.Printf("**Error:** %s\n", *run.Error)
-			}
-			output := strings.TrimSpace(run.Output)
-			if output == "" {
-				fmt.Println("(no output)")
-			} else if *showOutput {
-				fmt.Printf("```\n%s\n```\n", output)
-			} else if len(output) > *maxOutputLen {
-				fmt.Printf("```\n%s...\n```\n", output[:*maxOutputLen])
-				fmt.Printf("_(truncated, use --output to see full)_\n")
-			} else {
-				fmt.Printf("```\n%s\n```\n", output)
-			}
-			fmt.Println()
-		}
+	if opts.showOutput || opts.maxOutputLen > 0 {
+		writeExperimentOutputComparison(out, variantByID, runs, opts)
 	}
 
 	return nil
+}
+
+func experimentVariantName(variant experiment.Variant) string {
+	if strings.TrimSpace(variant.ModelID) != "" {
+		return variant.ModelID
+	}
+	return variant.Name
+}
+
+func writeExperimentOutputComparison(out io.Writer, variantByID map[string]experiment.Variant, runs []experiment.Run, opts experimentDiffOptions) {
+	fmt.Fprintln(out, "## Output Comparison")
+	fmt.Fprintln(out)
+	for _, run := range runs {
+		name := experimentVariantName(variantByID[run.VariantID])
+		fmt.Fprintf(out, "### %s\n", name)
+		if run.Error != nil && *run.Error != "" {
+			fmt.Fprintf(out, "**Error:** %s\n", *run.Error)
+		}
+		writeExperimentRunOutput(out, run.Output, opts)
+		fmt.Fprintln(out)
+	}
+}
+
+func writeExperimentRunOutput(out io.Writer, output string, opts experimentDiffOptions) {
+	output = strings.TrimSpace(output)
+	if output == "" {
+		fmt.Fprintln(out, "(no output)")
+		return
+	}
+	if opts.showOutput {
+		fmt.Fprintf(out, "```\n%s\n```\n", output)
+		return
+	}
+	if opts.maxOutputLen > 0 && len(output) > opts.maxOutputLen {
+		fmt.Fprintf(out, "```\n%s...\n```\n", output[:opts.maxOutputLen])
+		fmt.Fprintln(out, "_(truncated, use --output to see full)_")
+		return
+	}
+	fmt.Fprintf(out, "```\n%s\n```\n", output)
 }
 
 func runExperimentReplay(args []string) error {
