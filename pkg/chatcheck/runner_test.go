@@ -143,6 +143,100 @@ func TestRunnerRunMissingExpectedText(t *testing.T) {
 	}
 }
 
+func TestRunnerRunAdditionalAssertions(t *testing.T) {
+	zero := 0
+	client := &fakeClient{responses: []model.ChatResponse{response("test-model", "OK 42")}}
+	runner := Runner{Client: client}
+
+	result, err := runner.Run(context.Background(), Scenario{
+		Model: "test-model",
+		Turns: []Turn{{
+			User:            "hello",
+			WantContains:    []string{"OK"},
+			WantNotContains: []string{"ERROR"},
+			WantRegex:       []string{`^OK \d+$`},
+			MinChars:        4,
+			MaxChars:        8,
+			MaxToolCalls:    &zero,
+		}},
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if result == nil || !result.Passed || len(result.Turns) != 1 {
+		t.Fatalf("unexpected result: %+v", result)
+	}
+	checks := make(map[string]bool)
+	for _, check := range result.Turns[0].Checks {
+		checks[check.Name] = check.Passed
+	}
+	for _, want := range []string{"non_empty_text", "min_chars", "max_chars", "contains", "not_contains", "regex", "max_tool_calls"} {
+		if !checks[want] {
+			t.Fatalf("missing passed check %q in %+v", want, result.Turns[0].Checks)
+		}
+	}
+}
+
+func TestRunnerRunAdditionalAssertionFailures(t *testing.T) {
+	zero := 0
+	tests := []struct {
+		name string
+		text string
+		turn Turn
+		want string
+		resp func(text string) model.ChatResponse
+	}{
+		{
+			name: "not contains",
+			text: "contains SECRET",
+			turn: Turn{User: "hello", WantNotContains: []string{"SECRET"}},
+			want: "forbidden",
+		},
+		{
+			name: "regex",
+			text: "wrong",
+			turn: Turn{User: "hello", WantRegex: []string{`^OK \d+$`}},
+			want: "did not match regex",
+		},
+		{
+			name: "max chars",
+			text: "too long",
+			turn: Turn{User: "hello", MaxChars: 3},
+			want: "too long",
+		},
+		{
+			name: "max tool calls",
+			text: "OK",
+			turn: Turn{User: "hello", MaxToolCalls: &zero},
+			want: "too many tool calls",
+			resp: func(text string) model.ChatResponse {
+				resp := response("test-model", text)
+				resp.Choices[0].Message.ToolCalls = []model.ToolCall{{ID: "call-1"}}
+				return resp
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			makeResp := tt.resp
+			if makeResp == nil {
+				makeResp = func(text string) model.ChatResponse { return response("test-model", text) }
+			}
+			runner := Runner{Client: &fakeClient{responses: []model.ChatResponse{makeResp(tt.text)}}}
+			result, err := runner.Run(context.Background(), Scenario{
+				Model: "test-model",
+				Turns: []Turn{tt.turn},
+			})
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("err=%v want %q", err, tt.want)
+			}
+			if result == nil || result.Passed || len(result.Turns) != 1 || result.Turns[0].Passed {
+				t.Fatalf("unexpected failed result: %+v", result)
+			}
+		})
+	}
+}
+
 func TestRunnerRunReasoningFallback(t *testing.T) {
 	client := &fakeClient{responses: []model.ChatResponse{{
 		Model: "test-model",
@@ -198,7 +292,11 @@ func TestLoadScenarioFile(t *testing.T) {
     {
       "user": "say ALPHA",
       "want_contains": ["ALPHA"],
-      "min_chars": 5
+      "want_not_contains": ["BETA"],
+      "want_regex": ["^ALPHA$"],
+      "min_chars": 5,
+      "max_chars": 12,
+      "max_tool_calls": 0
     }
   ]
 }`
@@ -224,6 +322,10 @@ func TestLoadScenarioFile(t *testing.T) {
 	}
 	if len(scenario.Turns) != 1 || scenario.Turns[0].User != "say ALPHA" || scenario.Turns[0].WantContains[0] != "ALPHA" {
 		t.Fatalf("unexpected turns: %+v", scenario.Turns)
+	}
+	turn := scenario.Turns[0]
+	if turn.WantNotContains[0] != "BETA" || turn.WantRegex[0] != "^ALPHA$" || turn.MaxChars != 12 || turn.MaxToolCalls == nil || *turn.MaxToolCalls != 0 {
+		t.Fatalf("unexpected extended assertions: %+v", turn)
 	}
 }
 
@@ -252,6 +354,21 @@ func TestLoadScenarioFileRejectsInvalidShape(t *testing.T) {
 			name: "blank prompt",
 			body: `{"turns":[{"user":"  "}]}`,
 			want: "user prompt is required",
+		},
+		{
+			name: "negative max chars",
+			body: `{"turns":[{"user":"hello","max_chars":-1}]}`,
+			want: "max_chars cannot be negative",
+		},
+		{
+			name: "negative max tool calls",
+			body: `{"turns":[{"user":"hello","max_tool_calls":-1}]}`,
+			want: "max_tool_calls cannot be negative",
+		},
+		{
+			name: "invalid regex",
+			body: `{"turns":[{"user":"hello","want_regex":["["]}]}`,
+			want: "invalid want_regex",
 		},
 	}
 	for _, tt := range tests {

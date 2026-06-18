@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -33,9 +34,13 @@ type Scenario struct {
 }
 
 type Turn struct {
-	User         string   `json:"user"`
-	WantContains []string `json:"want_contains,omitempty"`
-	MinChars     int      `json:"min_chars,omitempty"`
+	User            string   `json:"user"`
+	WantContains    []string `json:"want_contains,omitempty"`
+	WantNotContains []string `json:"want_not_contains,omitempty"`
+	WantRegex       []string `json:"want_regex,omitempty"`
+	MinChars        int      `json:"min_chars,omitempty"`
+	MaxChars        int      `json:"max_chars,omitempty"`
+	MaxToolCalls    *int     `json:"max_tool_calls,omitempty"`
 }
 
 type Result struct {
@@ -172,11 +177,8 @@ func LoadScenarioFile(path string) (Scenario, error) {
 		return Scenario{}, fmt.Errorf("chat check scenario max_tokens cannot be negative")
 	}
 	for i, turn := range file.Turns {
-		if strings.TrimSpace(turn.User) == "" {
-			return Scenario{}, fmt.Errorf("chat check scenario turn %d user prompt is required", i+1)
-		}
-		if turn.MinChars < 0 {
-			return Scenario{}, fmt.Errorf("chat check scenario turn %d min_chars cannot be negative", i+1)
+		if err := validateTurn(turn, i+1); err != nil {
+			return Scenario{}, err
 		}
 	}
 	timeout, err := parseScenarioTimeout(file.Timeout, file.TimeoutMillis)
@@ -241,6 +243,31 @@ func LoadScenarios(path string) ([]Scenario, error) {
 		scenarios = append(scenarios, scenario)
 	}
 	return scenarios, nil
+}
+
+func validateTurn(turn Turn, index int) error {
+	if strings.TrimSpace(turn.User) == "" {
+		return fmt.Errorf("chat check scenario turn %d user prompt is required", index)
+	}
+	if turn.MinChars < 0 {
+		return fmt.Errorf("chat check scenario turn %d min_chars cannot be negative", index)
+	}
+	if turn.MaxChars < 0 {
+		return fmt.Errorf("chat check scenario turn %d max_chars cannot be negative", index)
+	}
+	if turn.MaxToolCalls != nil && *turn.MaxToolCalls < 0 {
+		return fmt.Errorf("chat check scenario turn %d max_tool_calls cannot be negative", index)
+	}
+	for _, pattern := range turn.WantRegex {
+		pattern = strings.TrimSpace(pattern)
+		if pattern == "" {
+			continue
+		}
+		if _, err := regexp.Compile(pattern); err != nil {
+			return fmt.Errorf("chat check scenario turn %d invalid want_regex %q: %w", index, pattern, err)
+		}
+	}
+	return nil
 }
 
 func FilterScenarios(scenarios []Scenario, selector ScenarioSelector) []Scenario {
@@ -375,6 +402,22 @@ func (r Runner) Run(ctx context.Context, scenario Scenario) (*Result, error) {
 				Message: fmt.Sprintf("got %d chars, want at least %d", len(text), turn.MinChars),
 			})
 		}
+		if turn.MaxChars > 0 && len(text) > turn.MaxChars {
+			err := fmt.Errorf("turn %d response too long: got %d chars, want at most %d", i+1, len(text), turn.MaxChars)
+			turnResult.Checks = append(turnResult.Checks, CheckResult{
+				Name:    "max_chars",
+				Passed:  false,
+				Message: fmt.Sprintf("got %d chars, want at most %d", len(text), turn.MaxChars),
+			})
+			return failTurn(result, turnResult, err)
+		}
+		if turn.MaxChars > 0 {
+			turnResult.Checks = append(turnResult.Checks, CheckResult{
+				Name:    "max_chars",
+				Passed:  true,
+				Message: fmt.Sprintf("got %d chars, want at most %d", len(text), turn.MaxChars),
+			})
+		}
 		for _, want := range turn.WantContains {
 			want = strings.TrimSpace(want)
 			if want == "" {
@@ -393,6 +436,72 @@ func (r Runner) Run(ctx context.Context, scenario Scenario) (*Result, error) {
 				Name:    "contains",
 				Passed:  true,
 				Message: fmt.Sprintf("found %q", want),
+			})
+		}
+		for _, forbidden := range turn.WantNotContains {
+			forbidden = strings.TrimSpace(forbidden)
+			if forbidden == "" {
+				continue
+			}
+			if strings.Contains(text, forbidden) {
+				err := fmt.Errorf("turn %d response included forbidden text %q", i+1, forbidden)
+				turnResult.Checks = append(turnResult.Checks, CheckResult{
+					Name:    "not_contains",
+					Passed:  false,
+					Message: fmt.Sprintf("found forbidden text %q", forbidden),
+				})
+				return failTurn(result, turnResult, err)
+			}
+			turnResult.Checks = append(turnResult.Checks, CheckResult{
+				Name:    "not_contains",
+				Passed:  true,
+				Message: fmt.Sprintf("did not find %q", forbidden),
+			})
+		}
+		for _, pattern := range turn.WantRegex {
+			pattern = strings.TrimSpace(pattern)
+			if pattern == "" {
+				continue
+			}
+			re, err := regexp.Compile(pattern)
+			if err != nil {
+				err := fmt.Errorf("turn %d invalid response regex %q: %w", i+1, pattern, err)
+				turnResult.Checks = append(turnResult.Checks, CheckResult{
+					Name:    "regex",
+					Passed:  false,
+					Message: err.Error(),
+				})
+				return failTurn(result, turnResult, err)
+			}
+			if !re.MatchString(text) {
+				err := fmt.Errorf("turn %d response did not match regex %q", i+1, pattern)
+				turnResult.Checks = append(turnResult.Checks, CheckResult{
+					Name:    "regex",
+					Passed:  false,
+					Message: fmt.Sprintf("did not match %q", pattern),
+				})
+				return failTurn(result, turnResult, err)
+			}
+			turnResult.Checks = append(turnResult.Checks, CheckResult{
+				Name:    "regex",
+				Passed:  true,
+				Message: fmt.Sprintf("matched %q", pattern),
+			})
+		}
+		if turn.MaxToolCalls != nil && len(msg.ToolCalls) > *turn.MaxToolCalls {
+			err := fmt.Errorf("turn %d used too many tool calls: got %d, want at most %d", i+1, len(msg.ToolCalls), *turn.MaxToolCalls)
+			turnResult.Checks = append(turnResult.Checks, CheckResult{
+				Name:    "max_tool_calls",
+				Passed:  false,
+				Message: fmt.Sprintf("got %d tool calls, want at most %d", len(msg.ToolCalls), *turn.MaxToolCalls),
+			})
+			return failTurn(result, turnResult, err)
+		}
+		if turn.MaxToolCalls != nil {
+			turnResult.Checks = append(turnResult.Checks, CheckResult{
+				Name:    "max_tool_calls",
+				Passed:  true,
+				Message: fmt.Sprintf("got %d tool calls, want at most %d", len(msg.ToolCalls), *turn.MaxToolCalls),
 			})
 		}
 

@@ -169,7 +169,11 @@ type doctorChatScenarioSummary struct {
 	MaxTokens       int      `json:"max_tokens"`
 	SystemPrompt    bool     `json:"system_prompt"`
 	ExpectedMatches int      `json:"expected_matches"`
+	ForbiddenChecks int      `json:"forbidden_checks"`
+	RegexChecks     int      `json:"regex_checks"`
 	MinCharChecks   int      `json:"min_char_checks"`
+	MaxCharChecks   int      `json:"max_char_checks"`
+	MaxToolChecks   int      `json:"max_tool_call_checks"`
 }
 
 func buildDoctorChatScenarioInventory(scenarios []chatcheck.Scenario) doctorChatScenarioInventory {
@@ -191,8 +195,16 @@ func buildDoctorChatScenarioInventory(scenarios []chatcheck.Scenario) doctorChat
 		}
 		for _, turn := range scenario.Turns {
 			summary.ExpectedMatches += countNonEmptyStrings(turn.WantContains)
+			summary.ForbiddenChecks += countNonEmptyStrings(turn.WantNotContains)
+			summary.RegexChecks += countNonEmptyStrings(turn.WantRegex)
 			if turn.MinChars > 0 {
 				summary.MinCharChecks++
+			}
+			if turn.MaxChars > 0 {
+				summary.MaxCharChecks++
+			}
+			if turn.MaxToolCalls != nil {
+				summary.MaxToolChecks++
 			}
 		}
 		inventory.Scenarios = append(inventory.Scenarios, summary)
@@ -290,8 +302,20 @@ func printDoctorChatScenarioInventory(w io.Writer, inventory doctorChatScenarioI
 		if scenario.ExpectedMatches > 0 {
 			fmt.Fprintf(w, ", contains=%d", scenario.ExpectedMatches)
 		}
+		if scenario.ForbiddenChecks > 0 {
+			fmt.Fprintf(w, ", not_contains=%d", scenario.ForbiddenChecks)
+		}
+		if scenario.RegexChecks > 0 {
+			fmt.Fprintf(w, ", regex=%d", scenario.RegexChecks)
+		}
 		if scenario.MinCharChecks > 0 {
 			fmt.Fprintf(w, ", min_chars=%d", scenario.MinCharChecks)
+		}
+		if scenario.MaxCharChecks > 0 {
+			fmt.Fprintf(w, ", max_chars=%d", scenario.MaxCharChecks)
+		}
+		if scenario.MaxToolChecks > 0 {
+			fmt.Fprintf(w, ", max_tool_calls=%d", scenario.MaxToolChecks)
 		}
 		if scenario.SystemPrompt {
 			fmt.Fprint(w, ", system_prompt=true")

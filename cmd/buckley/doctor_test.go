@@ -135,7 +135,7 @@ func TestResolveDoctorChatScenariosDirectory(t *testing.T) {
 
 func TestRunDoctorChatCommandListDoesNotInitDependencies(t *testing.T) {
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "chat.json"), []byte(`{"name":"offline","description":"offline smoke","tags":["smoke","chat"],"turns":[{"user":"say READY","want_contains":["READY"]}]}`), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "chat.json"), []byte(`{"name":"offline","description":"offline smoke","tags":["smoke","chat"],"turns":[{"user":"say READY","want_contains":["READY"],"want_not_contains":["FAIL"],"want_regex":["READY"],"max_chars":32,"max_tool_calls":0}]}`), 0o644); err != nil {
 		t.Fatalf("write scenario: %v", err)
 	}
 
@@ -157,7 +157,7 @@ func TestRunDoctorChatCommandListDoesNotInitDependencies(t *testing.T) {
 	if called {
 		t.Fatal("list mode initialized dependencies")
 	}
-	for _, want := range []string{"Chat check scenarios: 1", "offline", "tags=chat,smoke", "contains=1", `description="offline smoke"`} {
+	for _, want := range []string{"Chat check scenarios: 1", "offline", "tags=chat,smoke", "contains=1", "not_contains=1", "regex=1", "max_chars=1", "max_tool_calls=1", `description="offline smoke"`} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("output missing %q: %s", want, out)
 		}
@@ -186,9 +186,13 @@ func TestPrintDoctorChatScenarioInventoryJSON(t *testing.T) {
 			Timeout:     2 * time.Second,
 			MaxTokens:   64,
 			Turns: []chatcheck.Turn{{
-				User:         "say TOKEN",
-				WantContains: []string{"TOKEN"},
-				MinChars:     5,
+				User:            "say TOKEN",
+				WantContains:    []string{"TOKEN"},
+				WantNotContains: []string{"ERROR"},
+				WantRegex:       []string{`TOKEN$`},
+				MinChars:        5,
+				MaxChars:        64,
+				MaxToolCalls:    intPtr(0),
 			}},
 		}),
 	})
@@ -202,6 +206,9 @@ func TestPrintDoctorChatScenarioInventoryJSON(t *testing.T) {
 	}
 	if got.ScenarioCount != 1 || got.Scenarios[0].ExpectedMatches != 1 || got.Scenarios[0].MinCharChecks != 1 {
 		t.Fatalf("unexpected inventory: %+v", got)
+	}
+	if got.Scenarios[0].ForbiddenChecks != 1 || got.Scenarios[0].RegexChecks != 1 || got.Scenarios[0].MaxCharChecks != 1 || got.Scenarios[0].MaxToolChecks != 1 {
+		t.Fatalf("inventory missing extended assertion counts: %+v", got)
 	}
 	if got.Scenarios[0].Description != "custom smoke" || strings.Join(got.Scenarios[0].Tags, ",") != "chat,smoke" {
 		t.Fatalf("inventory missing metadata: %+v", got)
@@ -260,4 +267,8 @@ func TestPrintChatCheckResult(t *testing.T) {
 			t.Fatalf("output missing %q: %s", want, got)
 		}
 	}
+}
+
+func intPtr(value int) *int {
+	return &value
 }
