@@ -47,79 +47,82 @@ func Render(buf *Buffer, screen *compositor.Screen, x, y, width, height int, cfg
 		return
 	}
 
-	// Get visible lines
 	lines := buf.GetVisibleLines()
-
-	// Render each line
+	contentWidth := max(0, width-1)
 	for _, vl := range lines {
 		if vl.RowIndex >= height {
 			break
 		}
-
-		rowY := y + vl.RowIndex
-
-		// Build style from line's stored style, falling back to source-based style
-		var style compositor.Style
-		if vl.Style.FG != 0 || vl.Style.BG != 0 || vl.Style.Bold || vl.Style.Italic || vl.Style.Dim {
-			// Use the line's explicit style
-			style = compositor.DefaultStyle()
-			if vl.Style.FG != 0 {
-				style = style.WithFG(compositor.Hex(vl.Style.FG))
-			}
-			if vl.Style.BG != 0 {
-				style = style.WithBG(compositor.Hex(vl.Style.BG))
-			}
-			style = style.WithBold(vl.Style.Bold).WithItalic(vl.Style.Italic).WithDim(vl.Style.Dim)
-		} else {
-			// Fall back to source-based style
-			style = getStyleForSource(vl.Source, cfg)
-		}
-
-		// Apply selection
-		if vl.Selected {
-			style = cfg.SelectionStyle
-		}
-
-		// Render content starting at left margin
-		col := x
-
-		// Render content
-		for i, r := range vl.Content {
-			if col >= x+width-1 { // -1 for scrollbar
-				break
-			}
-
-			charStyle := style
-
-			// Apply search highlight
-			for _, highlightCol := range vl.SearchHighlights {
-				// SearchHighlights already marks the start positions;
-				// highlight extends based on the highlight positions stored in vl
-				if i == highlightCol {
-					charStyle = cfg.SearchStyle
-				}
-			}
-
-			screen.Set(col, rowY, r, charStyle)
-			col++
-		}
-
-		// Fill rest of line
-		for col < x+width-1 {
-			screen.Set(col, rowY, ' ', style)
-			col++
-		}
+		renderVisibleLine(screen, vl, x, y+vl.RowIndex, contentWidth, cfg)
 	}
 
-	// Fill empty rows
-	for row := len(lines); row < height; row++ {
-		for col := x; col < x+width-1; col++ {
-			screen.Set(col, y+row, ' ', compositor.DefaultStyle())
-		}
-	}
-
-	// Render scrollbar
+	fillEmptyRows(screen, x, y+len(lines), contentWidth, height-len(lines))
 	renderScrollbar(buf, screen, x+width-1, y, height, cfg)
+}
+
+func renderVisibleLine(screen *compositor.Screen, line VisibleLine, x, y, width int, cfg RenderConfig) {
+	style := visibleLineStyle(line, cfg)
+	highlights := searchHighlightSet(line.SearchHighlights)
+
+	col := 0
+	for i, r := range line.Content {
+		if col >= width {
+			break
+		}
+		charStyle := style
+		if highlights[i] {
+			charStyle = cfg.SearchStyle
+		}
+		screen.Set(x+col, y, r, charStyle)
+		col++
+	}
+
+	fillRow(screen, x+col, y, width-col, style)
+}
+
+func visibleLineStyle(line VisibleLine, cfg RenderConfig) compositor.Style {
+	if line.Selected {
+		return cfg.SelectionStyle
+	}
+	if hasExplicitLineStyle(line.Style) {
+		return explicitLineStyle(line.Style)
+	}
+	return getStyleForSource(line.Source, cfg)
+}
+
+func hasExplicitLineStyle(style LineStyle) bool {
+	return style.FG != 0 || style.BG != 0 || style.Bold || style.Italic || style.Dim
+}
+
+func explicitLineStyle(style LineStyle) compositor.Style {
+	result := compositor.DefaultStyle()
+	if style.FG != 0 {
+		result = result.WithFG(compositor.Hex(style.FG))
+	}
+	if style.BG != 0 {
+		result = result.WithBG(compositor.Hex(style.BG))
+	}
+	return result.WithBold(style.Bold).WithItalic(style.Italic).WithDim(style.Dim)
+}
+
+func searchHighlightSet(highlights []int) map[int]bool {
+	set := make(map[int]bool, len(highlights))
+	for _, highlight := range highlights {
+		set[highlight] = true
+	}
+	return set
+}
+
+func fillEmptyRows(screen *compositor.Screen, x, y, width, rows int) {
+	for row := 0; row < rows; row++ {
+		fillRow(screen, x, y+row, width, compositor.DefaultStyle())
+	}
+}
+
+func fillRow(screen *compositor.Screen, x, y, width int, style compositor.Style) {
+	for col := 0; col < width; col++ {
+		screen.Set(x+col, y, ' ', style)
+	}
 }
 
 // renderScrollbar draws the scrollbar.

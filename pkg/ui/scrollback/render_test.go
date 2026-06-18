@@ -85,6 +85,9 @@ func TestRender_WithSelection(t *testing.T) {
 	if cell.Rune != 'H' {
 		t.Errorf("expected 'H', got '%c'", cell.Rune)
 	}
+	if !cell.Style.Equal(cfg.SelectionStyle) {
+		t.Fatal("expected selected cell to use selection style")
+	}
 }
 
 func TestRender_WithSearchHighlight(t *testing.T) {
@@ -102,6 +105,9 @@ func TestRender_WithSearchHighlight(t *testing.T) {
 	cell := screen.Get(0, 0)
 	if cell.Rune != 'H' {
 		t.Errorf("expected 'H', got '%c'", cell.Rune)
+	}
+	if !cell.Style.Equal(cfg.SearchStyle) {
+		t.Fatal("expected search match to use search style")
 	}
 }
 
@@ -122,6 +128,9 @@ func TestRender_WithExplicitStyle(t *testing.T) {
 	cell := screen.Get(0, 0)
 	if cell.Rune != 'S' {
 		t.Errorf("expected 'S', got '%c'", cell.Rune)
+	}
+	if cell.Style.FG != compositor.Hex(style.FG) || !cell.Style.Bold {
+		t.Fatalf("expected explicit line style, got %+v", cell.Style)
 	}
 }
 
