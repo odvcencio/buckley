@@ -323,6 +323,47 @@ tools:
 	}
 }
 
+func TestRunAgentCommandListShowsFilesystemDiagnostics(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "agent", "tools"), 0o755); err != nil {
+		t.Fatalf("mkdir filesystem agent tools: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "agent", "instructions.md"), []byte("Use care.\n"), 0o644); err != nil {
+		t.Fatalf("write filesystem instructions: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "agent", "tools", "inspect.ts"), []byte("export default {}\n"), 0o644); err != nil {
+		t.Fatalf("write unsupported tool slot: %v", err)
+	}
+
+	oldWd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chdir(oldWd)
+	})
+	if err := os.Chdir(dir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+
+	textOut := captureStdout(t, func() {
+		if err := runAgentCommand([]string{"list"}); err != nil {
+			t.Fatalf("runAgentCommand list: %v", err)
+		}
+	})
+	for _, want := range []string{
+		"Agent specs: 1",
+		"(valid)",
+		"kind=filesystem",
+		"warning tools: authored code slot discovered",
+		"does not execute this slot yet",
+	} {
+		if !strings.Contains(textOut, want) {
+			t.Fatalf("agent list output missing %q:\n%s", want, textOut)
+		}
+	}
+}
+
 func TestRunSkillsCommandListsAndShowsAgentSkills(t *testing.T) {
 	dir := t.TempDir()
 	skillDir := filepath.Join(dir, "agent", "skills", "triage")

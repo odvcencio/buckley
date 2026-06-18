@@ -171,6 +171,26 @@ func printAgentListText(w io.Writer, snapshot agentListSnapshot) {
 			fmt.Fprintf(w, ", error=%s", spec.Error)
 		}
 		fmt.Fprintln(w)
+		printAgentListDiagnostics(w, spec.Diagnostics)
+	}
+}
+
+func printAgentListDiagnostics(w io.Writer, diagnostics []agentspec.Diagnostic) {
+	for _, diagnostic := range diagnostics {
+		severity := strings.TrimSpace(diagnostic.Severity)
+		if severity == "" {
+			severity = "diagnostic"
+		}
+		path := strings.TrimSpace(diagnostic.Path)
+		message := strings.TrimSpace(diagnostic.Message)
+		switch {
+		case path != "" && message != "":
+			fmt.Fprintf(w, "    %s %s: %s\n", severity, path, message)
+		case message != "":
+			fmt.Fprintf(w, "    %s: %s\n", severity, message)
+		case path != "":
+			fmt.Fprintf(w, "    %s %s\n", severity, path)
+		}
 	}
 }
 
