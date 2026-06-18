@@ -126,6 +126,7 @@ func runDoctorChatCommand(args []string) error {
 	outPath := fs.String("out", "", "write machine-readable JSON report to a file")
 	junitPath := fs.String("junit", "", "write JUnit XML report to a file")
 	writeArtifacts := fs.Bool("artifacts", false, "write run artifacts under .buckley/chatchecks/runs")
+	writeFailureArtifacts := fs.Bool("artifacts-on-failure", true, "write run artifacts automatically when a chat check fails")
 	artifactsDir := fs.String("artifacts-dir", defaultChatCheckArtifactRoot, "directory for chat check run artifacts")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -191,7 +192,7 @@ func runDoctorChatCommand(args []string) error {
 		}
 	}
 	artifactRunDir := ""
-	if *writeArtifacts {
+	if shouldWriteChatCheckArtifacts(report, *writeArtifacts, *writeFailureArtifacts) {
 		var err error
 		artifactRoot := resolveChatCheckArtifactRoot(*artifactsDir, *projectScenarios, resolvedScenarioPath, flagWasSet(fs, "artifacts-dir"))
 		cwd, err := os.Getwd()
@@ -761,6 +762,27 @@ func runDoctorChatCheck(ctx context.Context, runner chatcheck.Runner, scenarios 
 		return runner.Run(ctx, scenarios[0])
 	}
 	return runner.RunSuite(ctx, "chat-check-suite", scenarios)
+}
+
+func shouldWriteChatCheckArtifacts(report any, explicit bool, onFailure bool) bool {
+	if report == nil {
+		return false
+	}
+	if explicit {
+		return true
+	}
+	return onFailure && chatCheckReportFailed(report)
+}
+
+func chatCheckReportFailed(report any) bool {
+	switch result := report.(type) {
+	case *chatcheck.Result:
+		return result != nil && !result.Passed
+	case *chatcheck.SuiteResult:
+		return result != nil && !result.Passed
+	default:
+		return false
+	}
 }
 
 func printChatCheckStart(w io.Writer, scenarios []chatcheck.Scenario) {

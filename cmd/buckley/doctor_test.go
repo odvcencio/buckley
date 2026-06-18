@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"encoding/xml"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -721,6 +723,130 @@ func TestResolveChatCheckArtifactRoot(t *testing.T) {
 	}
 	if got := resolveChatCheckArtifactRoot(defaultChatCheckArtifactRoot, false, projectScenarios, false); got != defaultChatCheckArtifactRoot {
 		t.Fatalf("non-project artifact root=%q", got)
+	}
+}
+
+func TestShouldWriteChatCheckArtifacts(t *testing.T) {
+	passed := &chatcheck.Result{Passed: true}
+	failed := &chatcheck.Result{Passed: false}
+	failedSuite := &chatcheck.SuiteResult{Passed: false}
+
+	if !shouldWriteChatCheckArtifacts(passed, true, false) {
+		t.Fatal("explicit artifacts should write passed reports")
+	}
+	if shouldWriteChatCheckArtifacts(passed, false, true) {
+		t.Fatal("successful reports should not write automatic failure artifacts")
+	}
+	if !shouldWriteChatCheckArtifacts(failed, false, true) {
+		t.Fatal("failed reports should write automatic failure artifacts")
+	}
+	if !shouldWriteChatCheckArtifacts(failedSuite, false, true) {
+		t.Fatal("failed suite reports should write automatic failure artifacts")
+	}
+	if shouldWriteChatCheckArtifacts(failed, false, false) {
+		t.Fatal("disabled failure artifacts should not write")
+	}
+	if shouldWriteChatCheckArtifacts(nil, true, true) {
+		t.Fatal("nil reports should not write artifacts")
+	}
+}
+
+func TestRunDoctorChatCommandWritesFailureArtifactsByDefault(t *testing.T) {
+	dir := t.TempDir()
+	scenarioPath := filepath.Join(dir, "failing-chat.yaml")
+	if err := os.WriteFile(scenarioPath, []byte(`
+name: failing-chat
+model: litellm/test-model
+turns:
+  - user: say EXPECTED
+    want_contains: [EXPECTED]
+`), 0o644); err != nil {
+		t.Fatalf("write scenario: %v", err)
+	}
+
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if r.URL.Path != "/chat/completions" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(model.ChatResponse{
+			ID:    "chatcmpl-test",
+			Model: "test-model",
+			Choices: []model.Choice{{
+				Index:        0,
+				Message:      model.Message{Role: "assistant", Content: "WRONG ANSWER"},
+				FinishReason: "stop",
+			}},
+			Usage: model.Usage{PromptTokens: 3, CompletionTokens: 2, TotalTokens: 5},
+		}); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	cfg := config.DefaultConfig()
+	cfg.Models.DefaultProvider = "litellm"
+	cfg.Models.Execution = "litellm/test-model"
+	cfg.Models.FallbackChains = map[string][]string{}
+	cfg.Providers.OpenRouter.Enabled = false
+	cfg.Providers.LiteLLM.Enabled = true
+	cfg.Providers.LiteLLM.BaseURL = server.URL
+	cfg.Providers.LiteLLM.Models = []string{"test-model"}
+	mgr, err := model.NewManager(cfg)
+	if err != nil {
+		t.Fatalf("new model manager: %v", err)
+	}
+	store, err := storage.New(filepath.Join(dir, "buckley.db"))
+	if err != nil {
+		t.Fatalf("new storage: %v", err)
+	}
+
+	origInit := initDependenciesFn
+	t.Cleanup(func() { initDependenciesFn = origInit })
+	initDependenciesFn = func() (*config.Config, *model.Manager, *storage.Store, error) {
+		return cfg, mgr, store, nil
+	}
+
+	artifactsDir := filepath.Join(dir, "runs")
+	var runErr error
+	out := captureStdout(t, func() {
+		runErr = runDoctorChatCommand([]string{"-scenario", scenarioPath, "-artifacts-dir", artifactsDir})
+	})
+	if runErr == nil || exitCodeForError(runErr) != 1 {
+		t.Fatalf("runErr=%v want exit code 1", runErr)
+	}
+	if requests != 1 {
+		t.Fatalf("requests=%d want 1", requests)
+	}
+	if !strings.Contains(out, "Artifacts: "+artifactsDir) {
+		t.Fatalf("output missing artifact path:\n%s", out)
+	}
+
+	entries, err := os.ReadDir(artifactsDir)
+	if err != nil {
+		t.Fatalf("read artifacts dir: %v", err)
+	}
+	if len(entries) != 1 || !entries[0].IsDir() {
+		t.Fatalf("unexpected artifact dirs: %+v", entries)
+	}
+	runDir := filepath.Join(artifactsDir, entries[0].Name())
+	for _, rel := range []string{"report.json", "summary.json", filepath.Join("results", "failing-chat.json"), filepath.Join("transcripts", "failing-chat.md")} {
+		if _, err := os.Stat(filepath.Join(runDir, rel)); err != nil {
+			t.Fatalf("missing artifact %s: %v", rel, err)
+		}
+	}
+	transcriptData, err := os.ReadFile(filepath.Join(runDir, "transcripts", "failing-chat.md"))
+	if err != nil {
+		t.Fatalf("read transcript: %v", err)
+	}
+	transcript := string(transcriptData)
+	for _, want := range []string{"# Chat Check Transcript: failing-chat", "say EXPECTED", "WRONG ANSWER", `missing "EXPECTED"`} {
+		if !strings.Contains(transcript, want) {
+			t.Fatalf("transcript missing %q:\n%s", want, transcript)
+		}
 	}
 }
 
