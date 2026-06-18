@@ -66,6 +66,22 @@ type inputLine struct {
 	end   int
 }
 
+type inputKeyHandler func(*InputArea, runtime.KeyMsg) runtime.HandleResult
+
+var inputKeyHandlers = map[terminal.Key]inputKeyHandler{
+	terminal.KeyEnter:     (*InputArea).handleSubmitKey,
+	terminal.KeyBackspace: (*InputArea).handleBackspaceKey,
+	terminal.KeyDelete:    (*InputArea).handleDeleteKey,
+	terminal.KeyLeft:      (*InputArea).handleLeftKey,
+	terminal.KeyRight:     (*InputArea).handleRightKey,
+	terminal.KeyUp:        (*InputArea).handleUpKey,
+	terminal.KeyDown:      (*InputArea).handleDownKey,
+	terminal.KeyHome:      (*InputArea).handleHomeKey,
+	terminal.KeyEnd:       (*InputArea).handleEndKey,
+	terminal.KeyEscape:    (*InputArea).handleEscapeKey,
+	terminal.KeyCtrlC:     (*InputArea).handleClearKey,
+}
+
 // NewInputArea creates a new input area widget.
 func NewInputArea() *InputArea {
 	return &InputArea{
@@ -533,92 +549,109 @@ func (i *InputArea) HandleMessage(msg runtime.Message) runtime.HandleResult {
 		return runtime.Unhandled()
 	}
 
-	switch key.Key {
-	case terminal.KeyEnter:
-		text := strings.TrimSpace(i.text.String())
-		if text == "" {
-			return runtime.Handled()
-		}
-		mode := i.mode
-		if i.onSubmit != nil {
-			i.onSubmit(text, mode)
-		}
-		return runtime.WithCommand(runtime.Submit{Text: text})
-
-	case terminal.KeyBackspace:
-		if i.cursorPos > 0 {
-			text := i.text.String()
-			prev := previousRuneOffset(text, i.cursorPos)
-			i.text.Reset()
-			i.text.WriteString(text[:prev])
-			i.text.WriteString(text[i.cursorPos:])
-			i.cursorPos = prev
-			i.checkModeChange()
-			i.notifyChange()
-		}
-		return runtime.Handled()
-
-	case terminal.KeyDelete:
-		text := i.text.String()
-		if i.cursorPos < len(text) {
-			next := nextRuneOffset(text, i.cursorPos)
-			i.text.Reset()
-			i.text.WriteString(text[:i.cursorPos])
-			i.text.WriteString(text[next:])
-			i.notifyChange()
-		}
-		return runtime.Handled()
-
-	case terminal.KeyLeft:
-		if i.cursorPos > 0 {
-			i.cursorPos = previousRuneOffset(i.text.String(), i.cursorPos)
-		}
-		return runtime.Handled()
-
-	case terminal.KeyRight:
-		if i.cursorPos < i.text.Len() {
-			i.cursorPos = nextRuneOffset(i.text.String(), i.cursorPos)
-		}
-		return runtime.Handled()
-
-	case terminal.KeyUp:
-		if i.moveCursorVertical(-1) {
-			return runtime.Handled()
-		}
-		return runtime.Unhandled()
-
-	case terminal.KeyDown:
-		if i.moveCursorVertical(1) {
-			return runtime.Handled()
-		}
-		return runtime.Unhandled()
-
-	case terminal.KeyHome:
-		i.cursorPos = 0
-		return runtime.Handled()
-
-	case terminal.KeyEnd:
-		i.cursorPos = i.text.Len()
-		return runtime.Handled()
-
-	case terminal.KeyEscape:
-		i.mode = ModeNormal
-		if i.onModeChange != nil {
-			i.onModeChange(i.mode)
-		}
-		return runtime.WithCommand(runtime.Cancel{})
-
-	case terminal.KeyRune:
+	if key.Key == terminal.KeyRune {
 		return i.handleRune(key.Rune)
-
-	case terminal.KeyCtrlC:
-		if i.HasText() {
-			i.Clear()
-			return runtime.Handled()
-		}
-		return runtime.Unhandled()
 	}
 
+	if handler, ok := inputKeyHandlers[key.Key]; ok {
+		return handler(i, key)
+	}
+	return runtime.Unhandled()
+}
+
+func (i *InputArea) handleSubmitKey(_ runtime.KeyMsg) runtime.HandleResult {
+	text := strings.TrimSpace(i.text.String())
+	if text == "" {
+		return runtime.Handled()
+	}
+	mode := i.mode
+	if i.onSubmit != nil {
+		i.onSubmit(text, mode)
+	}
+	return runtime.WithCommand(runtime.Submit{Text: text})
+}
+
+func (i *InputArea) handleBackspaceKey(_ runtime.KeyMsg) runtime.HandleResult {
+	if i.cursorPos <= 0 {
+		return runtime.Handled()
+	}
+
+	text := i.text.String()
+	prev := previousRuneOffset(text, i.cursorPos)
+	i.text.Reset()
+	i.text.WriteString(text[:prev])
+	i.text.WriteString(text[i.cursorPos:])
+	i.cursorPos = prev
+	i.checkModeChange()
+	i.notifyChange()
+	return runtime.Handled()
+}
+
+func (i *InputArea) handleDeleteKey(_ runtime.KeyMsg) runtime.HandleResult {
+	text := i.text.String()
+	if i.cursorPos >= len(text) {
+		return runtime.Handled()
+	}
+
+	next := nextRuneOffset(text, i.cursorPos)
+	i.text.Reset()
+	i.text.WriteString(text[:i.cursorPos])
+	i.text.WriteString(text[next:])
+	i.notifyChange()
+	return runtime.Handled()
+}
+
+func (i *InputArea) handleLeftKey(_ runtime.KeyMsg) runtime.HandleResult {
+	if i.cursorPos > 0 {
+		i.cursorPos = previousRuneOffset(i.text.String(), i.cursorPos)
+	}
+	return runtime.Handled()
+}
+
+func (i *InputArea) handleRightKey(_ runtime.KeyMsg) runtime.HandleResult {
+	if i.cursorPos < i.text.Len() {
+		i.cursorPos = nextRuneOffset(i.text.String(), i.cursorPos)
+	}
+	return runtime.Handled()
+}
+
+func (i *InputArea) handleUpKey(_ runtime.KeyMsg) runtime.HandleResult {
+	if i.moveCursorVertical(-1) {
+		return runtime.Handled()
+	}
+	return runtime.Unhandled()
+}
+
+func (i *InputArea) handleDownKey(_ runtime.KeyMsg) runtime.HandleResult {
+	if i.moveCursorVertical(1) {
+		return runtime.Handled()
+	}
+	return runtime.Unhandled()
+}
+
+func (i *InputArea) handleHomeKey(_ runtime.KeyMsg) runtime.HandleResult {
+	i.cursorPos = 0
+	return runtime.Handled()
+}
+
+func (i *InputArea) handleEndKey(_ runtime.KeyMsg) runtime.HandleResult {
+	i.cursorPos = i.text.Len()
+	return runtime.Handled()
+}
+
+func (i *InputArea) handleEscapeKey(_ runtime.KeyMsg) runtime.HandleResult {
+	i.mode = ModeNormal
+	if i.onModeChange != nil {
+		i.onModeChange(i.mode)
+	}
+	return runtime.WithCommand(runtime.Cancel{})
+}
+
+func (i *InputArea) handleClearKey(_ runtime.KeyMsg) runtime.HandleResult {
+	if i.HasText() {
+		i.Clear()
+		return runtime.Handled()
+	}
 	return runtime.Unhandled()
 }
 
