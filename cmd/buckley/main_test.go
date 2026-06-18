@@ -137,6 +137,20 @@ func TestParseStartupOptionsLeavesSubcommandModelFlag(t *testing.T) {
 	if got := opts.args; len(got) != 5 || got[0] != "commit" || got[1] != "--model" || got[2] != "openai/gpt-5.4-mini" || got[3] != "--agent" || got[4] != "agent.yaml" {
 		t.Fatalf("args=%v want commit --model openai/gpt-5.4-mini --agent agent.yaml", got)
 	}
+
+	opts, err = parseStartupOptions([]string{"commit", "--model=openai/gpt-5.4-mini", "--agent=agent.yaml"})
+	if err != nil {
+		t.Fatalf("parseStartupOptions error: %v", err)
+	}
+	if opts.modelOverride != "" {
+		t.Fatalf("modelOverride=%q want empty", opts.modelOverride)
+	}
+	if opts.agentPath != "" {
+		t.Fatalf("agentPath=%q want empty", opts.agentPath)
+	}
+	if got := opts.args; len(got) != 3 || got[0] != "commit" || got[1] != "--model=openai/gpt-5.4-mini" || got[2] != "--agent=agent.yaml" {
+		t.Fatalf("args=%v want commit --model=openai/gpt-5.4-mini --agent=agent.yaml", got)
+	}
 }
 
 func TestParseStartupOptionsAgentEnvDefault(t *testing.T) {

@@ -122,6 +122,23 @@ type startupOptions struct {
 	plainMode        bool
 }
 
+type startupPendingFlag int
+
+const (
+	startupPendingNone startupPendingFlag = iota
+	startupPendingPrompt
+	startupPendingEncoding
+	startupPendingConfig
+	startupPendingModel
+	startupPendingAgent
+)
+
+type startupFlagState struct {
+	pending       startupPendingFlag
+	modelFlagSeen bool
+	agentFlagSeen bool
+}
+
 func main() {
 	opts, err := parseStartupOptions(os.Args[1:])
 	if err != nil {
@@ -1256,120 +1273,139 @@ func runCommand(handler func([]string) error, args []string) int {
 }
 
 func parseStartupOptions(raw []string) (*startupOptions, error) {
-	opts := &startupOptions{}
+	opts := startupOptionsFromEnv()
+	state := startupFlagState{}
+	filtered := make([]string, 0, len(raw))
+
+	for _, arg := range raw {
+		if state.consumePending(opts, arg) {
+			continue
+		}
+
+		if state.consumeStartupFlag(opts, arg, len(filtered) == 0) {
+			continue
+		}
+		filtered = append(filtered, arg)
+	}
+
+	if err := state.validate(opts); err != nil {
+		return nil, err
+	}
+
+	opts.args = filtered
+	return opts, nil
+}
+
+func startupOptionsFromEnv() *startupOptions {
+	opts := &startupOptions{
+		agentPath: strings.TrimSpace(os.Getenv("BUCKLEY_AGENT")),
+	}
 	if val, ok := parseBoolEnv("BUCKLEY_QUIET"); ok {
 		opts.quiet = val
 	}
 	if val, ok := parseBoolEnv("NO_COLOR"); ok {
 		opts.noColor = val
 	}
+	return opts
+}
 
-	filtered := make([]string, 0, len(raw))
-	var nextPrompt bool
-	var nextEncoding bool
-	var nextConfig bool
-	var nextModel bool
-	var nextAgent bool
-	var modelFlagSeen bool
-	var agentFlagSeen bool
+func (s *startupFlagState) consumePending(opts *startupOptions, arg string) bool {
+	switch s.pending {
+	case startupPendingPrompt:
+		opts.prompt = arg
+	case startupPendingEncoding:
+		opts.encodingOverride = strings.ToLower(arg)
+	case startupPendingConfig:
+		opts.configPath = arg
+	case startupPendingModel:
+		opts.modelOverride = strings.TrimSpace(arg)
+	case startupPendingAgent:
+		opts.agentPath = strings.TrimSpace(arg)
+	default:
+		return false
+	}
+	s.pending = startupPendingNone
+	return true
+}
 
-	opts.agentPath = strings.TrimSpace(os.Getenv("BUCKLEY_AGENT"))
+func (s *startupFlagState) consumeStartupFlag(opts *startupOptions, arg string, beforeCommand bool) bool {
+	switch arg {
+	case "--plain", "--no-tui":
+		opts.plainModeSet = true
+		opts.plainMode = true
+	case "--tui":
+		opts.plainModeSet = true
+		opts.plainMode = false
+	case "-p":
+		s.pending = startupPendingPrompt
+	case "--encoding":
+		s.pending = startupPendingEncoding
+	case "--encoding=toon":
+		opts.encodingOverride = "toon"
+	case "--encoding=json", "--json":
+		opts.encodingOverride = "json"
+	case "--quiet", "-q":
+		opts.quiet = true
+	case "--no-color":
+		opts.noColor = true
+	case "--config", "-c":
+		s.pending = startupPendingConfig
+	case "--model", "-m":
+		if !beforeCommand {
+			return false
+		}
+		s.pending = startupPendingModel
+		s.modelFlagSeen = true
+	case "--agent":
+		if !beforeCommand {
+			return false
+		}
+		s.pending = startupPendingAgent
+		s.agentFlagSeen = true
+	default:
+		return s.consumeStartupValueFlag(opts, arg, beforeCommand)
+	}
+	return true
+}
 
-	for _, arg := range raw {
-		if nextPrompt {
-			opts.prompt = arg
-			nextPrompt = false
-			continue
-		}
-		if nextEncoding {
-			opts.encodingOverride = strings.ToLower(arg)
-			nextEncoding = false
-			continue
-		}
-		if nextConfig {
-			opts.configPath = arg
-			nextConfig = false
-			continue
-		}
-		if nextModel {
-			opts.modelOverride = strings.TrimSpace(arg)
-			nextModel = false
-			continue
-		}
-		if nextAgent {
-			opts.agentPath = strings.TrimSpace(arg)
-			nextAgent = false
-			continue
-		}
+func (s *startupFlagState) consumeStartupValueFlag(opts *startupOptions, arg string, beforeCommand bool) bool {
+	if strings.HasPrefix(arg, "--config=") {
+		opts.configPath = strings.TrimPrefix(arg, "--config=")
+		return true
+	}
+	if strings.HasPrefix(arg, "--model=") && beforeCommand {
+		opts.modelOverride = strings.TrimSpace(strings.TrimPrefix(arg, "--model="))
+		s.modelFlagSeen = true
+		return true
+	}
+	if strings.HasPrefix(arg, "--agent=") && beforeCommand {
+		opts.agentPath = strings.TrimSpace(strings.TrimPrefix(arg, "--agent="))
+		s.agentFlagSeen = true
+		return true
+	}
+	return false
+}
 
-		switch arg {
-		case "--plain", "--no-tui":
-			opts.plainModeSet = true
-			opts.plainMode = true
-		case "--tui":
-			opts.plainModeSet = true
-			opts.plainMode = false
-		case "-p":
-			nextPrompt = true
-		case "--encoding":
-			nextEncoding = true
-		case "--encoding=toon":
-			opts.encodingOverride = "toon"
-		case "--encoding=json", "--json":
-			opts.encodingOverride = "json"
-		case "--quiet", "-q":
-			opts.quiet = true
-		case "--no-color":
-			opts.noColor = true
-		case "--config", "-c":
-			nextConfig = true
-		case "--model", "-m":
-			if len(filtered) == 0 {
-				nextModel = true
-				modelFlagSeen = true
-			} else {
-				filtered = append(filtered, arg)
-			}
-		case "--agent":
-			if len(filtered) == 0 {
-				nextAgent = true
-				agentFlagSeen = true
-			} else {
-				filtered = append(filtered, arg)
-			}
-		default:
-			if strings.HasPrefix(arg, "--config=") {
-				opts.configPath = strings.TrimPrefix(arg, "--config=")
-			} else if strings.HasPrefix(arg, "--model=") && len(filtered) == 0 {
-				opts.modelOverride = strings.TrimSpace(strings.TrimPrefix(arg, "--model="))
-				modelFlagSeen = true
-			} else if strings.HasPrefix(arg, "--agent=") && len(filtered) == 0 {
-				opts.agentPath = strings.TrimSpace(strings.TrimPrefix(arg, "--agent="))
-				agentFlagSeen = true
-			} else {
-				filtered = append(filtered, arg)
-			}
-		}
+func (s startupFlagState) validate(opts *startupOptions) error {
+	switch s.pending {
+	case startupPendingPrompt:
+		return fmt.Errorf("-p requires a prompt argument")
+	case startupPendingEncoding:
+		return fmt.Errorf("--encoding requires a value")
+	case startupPendingConfig:
+		return fmt.Errorf("--config requires a path argument")
+	case startupPendingModel:
+		return fmt.Errorf("--model requires a value")
+	case startupPendingAgent:
+		return fmt.Errorf("--agent requires a path")
 	}
-
-	if nextPrompt {
-		return nil, fmt.Errorf("-p requires a prompt argument")
+	if s.modelFlagSeen && strings.TrimSpace(opts.modelOverride) == "" {
+		return fmt.Errorf("--model requires a value")
 	}
-	if nextEncoding {
-		return nil, fmt.Errorf("--encoding requires a value")
+	if s.agentFlagSeen && strings.TrimSpace(opts.agentPath) == "" {
+		return fmt.Errorf("--agent requires a path")
 	}
-	if nextConfig {
-		return nil, fmt.Errorf("--config requires a path argument")
-	}
-	if nextModel || modelFlagSeen && strings.TrimSpace(opts.modelOverride) == "" {
-		return nil, fmt.Errorf("--model requires a value")
-	}
-	if nextAgent || agentFlagSeen && strings.TrimSpace(opts.agentPath) == "" {
-		return nil, fmt.Errorf("--agent requires a path")
-	}
-
-	opts.args = filtered
-	return opts, nil
+	return nil
 }
 
 func (o *startupOptions) consumeResumeCommand() error {
