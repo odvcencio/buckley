@@ -49,6 +49,30 @@ type commitRunner interface {
 	Run(ctx context.Context) (*commitRunResult, error)
 }
 
+type commitCommandOptions struct {
+	dryRun        bool
+	yes           bool
+	push          bool
+	verbose       bool
+	trace         bool
+	showCost      bool
+	compactOutput bool
+	useGraft      bool
+	model         string
+	backend       string
+	timeout       time.Duration
+	paths         []string
+	exclusive     bool
+	filesToStage  []string
+}
+
+type commitCommandRuntime struct {
+	backend string
+	modelID string
+	ledger  *transparency.CostLedger
+	runner  commitRunner
+}
+
 // frameworkCommitRunner adapts oneshot.Framework to the commitRunner interface.
 type frameworkCommitRunner struct {
 	framework *oneshot.Framework
@@ -78,8 +102,7 @@ func (r *frameworkCommitRunner) Run(ctx context.Context) (*commitRunResult, erro
 	return result, nil
 }
 
-// runCommitCommand generates a structured commit via tool-use.
-func runCommitCommand(args []string) error {
+func parseCommitCommandOptions(args []string) (commitCommandOptions, error) {
 	fs := flag.NewFlagSet("commit", flag.ContinueOnError)
 	dryRun := fs.Bool("dry-run", false, "print the generated commit message without committing")
 	yes := fs.Bool("yes", false, "skip confirmation prompts and run git commit")
@@ -98,210 +121,247 @@ func runCommitCommand(args []string) error {
 	exclusive := fs.Bool("exclusive", false, "with --paths: error if any staged file falls outside the given paths")
 
 	if err := fs.Parse(args); err != nil {
-		return err
+		return commitCommandOptions{}, err
 	}
 	backend, err := resolveOneshotBackend("commit", *backendFlag)
 	if err != nil {
+		return commitCommandOptions{}, err
+	}
+
+	opts := commitCommandOptions{
+		dryRun:        *dryRun,
+		yes:           *yes,
+		push:          *pushFlag,
+		verbose:       *verbose,
+		trace:         *trace,
+		showCost:      *showCost,
+		compactOutput: *minimalOutput || *minAlias || oneshotMinimalOutputEnabled(),
+		useGraft:      *graftMode || os.Getenv("BUCKLEY_USE_GRAFT") == "1",
+		model:         *modelFlag,
+		backend:       backend,
+		timeout:       *timeout,
+		paths:         append([]string(nil), pathsFlag...),
+		exclusive:     *exclusive,
+		filesToStage:  fs.Args(),
+	}
+	return opts, nil
+}
+
+// runCommitCommand generates a structured commit via tool-use.
+func runCommitCommand(args []string) error {
+	opts, err := parseCommitCommandOptions(args)
+	if err != nil {
 		return err
 	}
-	compactOutput := *minimalOutput || *minAlias || oneshotMinimalOutputEnabled()
-	useGraft := *graftMode || os.Getenv("BUCKLEY_USE_GRAFT") == "1"
-	filesToStage := fs.Args() // remaining positional args are files to stage
 
-	// --paths + --graft is not supported: graft commit doesn't accept pathspecs.
-	if len(pathsFlag) > 0 && useGraft {
+	if err := prepareCommitIndex(opts); err != nil {
+		return err
+	}
+
+	runtime, cleanup, err := newCommitCommandRuntime(opts)
+	defer cleanup()
+	if err != nil {
+		return err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), opts.timeout)
+	defer cancel()
+
+	if !quietMode {
+		termOut.Dim("Using %s", describeOneshotBackend(runtime.backend, runtime.modelID))
+	}
+
+	result, err := runCommitGeneration(ctx, runtime.runner)
+	if err != nil {
+		printStagedIndexOnError()
+		return err
+	}
+
+	message, err := renderCommitGenerationResult(opts, result, runtime.ledger)
+	if err != nil {
+		printStagedIndexOnError()
+		return err
+	}
+
+	if opts.dryRun {
+		return nil
+	}
+
+	message, err = confirmCommitMessage(opts, message, runtime.runner, ctx, runtime.ledger)
+	if err != nil {
+		return err
+	}
+
+	if err := createCommit(message, opts.compactOutput, opts.useGraft, opts.paths); err != nil {
+		printStagedIndexOnError()
+		return err
+	}
+
+	if opts.push {
+		if err := pushChanges(opts.compactOutput, opts.useGraft); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func prepareCommitIndex(opts commitCommandOptions) error {
+	if len(opts.paths) > 0 && opts.useGraft {
 		return fmt.Errorf("--paths is not supported with --graft (graft commit cannot scope by pathspec)")
 	}
 
-	// Stage files if provided
-	if len(filesToStage) > 0 {
-		if err := stageFiles(filesToStage, useGraft, compactOutput); err != nil {
+	if len(opts.filesToStage) > 0 {
+		if err := stageFiles(opts.filesToStage, opts.useGraft, opts.compactOutput); err != nil {
 			return fmt.Errorf("staging failed: %w", err)
 		}
 	}
 
-	// Pre-flight: require non-empty staged content before spending LLM tokens.
-	// Without staged content, the unified oneshot framework drops the empty
-	// git_diff:staged source silently and the prompt collapses to AGENTS.md
-	// only — the model then faithfully summarizes project guidelines as the
-	// "change" and the downstream `git commit -F` fails with exit 1 anyway.
-	// Fail fast here with a clear, actionable error instead.
 	if hasStaged, checkErr := hasStagedChanges(); checkErr != nil {
 		return fmt.Errorf("check staged changes: %w", checkErr)
 	} else if !hasStaged {
 		return fmt.Errorf("no staged changes — stage files with `git add <files>` first, or pass them as positional arguments (e.g. `buckley commit --yes -- file.go`)")
 	}
 
-	// --paths validation: check that at least one staged file matches.
-	if len(pathsFlag) > 0 {
-		matched, err := stagedFilesMatchingPaths(pathsFlag)
-		if err != nil {
-			return fmt.Errorf("check staged paths: %w", err)
-		}
-		if len(matched) == 0 {
-			return fmt.Errorf("--paths matched no staged files (paths: %s)", strings.Join(pathsFlag, ", "))
-		}
-
-		// --exclusive: ensure no staged file falls outside the given paths.
-		if *exclusive {
-			outsiders, err := stagedFilesOutsidePaths(pathsFlag)
-			if err != nil {
-				return fmt.Errorf("check exclusive paths: %w", err)
-			}
-			if len(outsiders) > 0 {
-				return fmt.Errorf("--exclusive: staged file(s) outside given paths (commit nothing):\n  %s",
-					strings.Join(outsiders, "\n  "))
-			}
-		}
+	if len(opts.paths) == 0 {
+		return nil
 	}
 
-	// Initialize dependencies
-	cfg, mgr, store, err := initOneshotDependencies(backend)
-	if store != nil {
-		defer store.Close()
+	matched, err := stagedFilesMatchingPaths(opts.paths)
+	if err != nil {
+		return fmt.Errorf("check staged paths: %w", err)
+	}
+	if len(matched) == 0 {
+		return fmt.Errorf("--paths matched no staged files (paths: %s)", strings.Join(opts.paths, ", "))
+	}
+
+	if !opts.exclusive {
+		return nil
+	}
+	outsiders, err := stagedFilesOutsidePaths(opts.paths)
+	if err != nil {
+		return fmt.Errorf("check exclusive paths: %w", err)
+	}
+	if len(outsiders) > 0 {
+		return fmt.Errorf("--exclusive: staged file(s) outside given paths (commit nothing):\n  %s",
+			strings.Join(outsiders, "\n  "))
+	}
+	return nil
+}
+
+func newCommitCommandRuntime(opts commitCommandOptions) (*commitCommandRuntime, func(), error) {
+	cfg, mgr, store, err := initOneshotDependencies(opts.backend)
+	cleanup := func() {
+		if store != nil {
+			store.Close()
+		}
 	}
 	if err != nil {
-		return fmt.Errorf("init dependencies: %w", err)
+		cleanup()
+		return nil, func() {}, fmt.Errorf("init dependencies: %w", err)
 	}
 
-	// Determine model
-	modelID := resolveCommitModelID(*modelFlag, cfg, backend)
-	if backend == oneshotBackendAPI && modelID == "" {
-		return fmt.Errorf("no model configured (set BUCKLEY_MODEL_COMMIT or configure models.utility.commit)")
+	modelID := resolveCommitModelID(opts.model, cfg, opts.backend)
+	if opts.backend == oneshotBackendAPI && modelID == "" {
+		cleanup()
+		return nil, func() {}, fmt.Errorf("no model configured (set BUCKLEY_MODEL_COMMIT or configure models.utility.commit)")
 	}
 
-	// Get model pricing for cost calculation
 	pricing := transparency.ModelPricing{
-		InputPerMillion:  3.0, // Default pricing, will be overridden if we can fetch
+		InputPerMillion:  3.0,
 		OutputPerMillion: 15.0,
 	}
-	if backend == oneshotBackendAPI && mgr != nil {
+	if opts.backend == oneshotBackendAPI && mgr != nil {
 		if info, err := mgr.GetModelInfo(modelID); err == nil {
 			pricing.InputPerMillion = info.Pricing.Prompt
 			pricing.OutputPerMillion = info.Pricing.Completion
 		}
 	}
 
-	// Create cost ledger for tracking
 	ledger := transparency.NewCostLedger()
-
-	// Create invoker
-	invoker, err := newOneshotToolInvoker(backend, modelID, cfg, mgr, pricing, ledger)
+	invoker, err := newOneshotToolInvoker(opts.backend, modelID, cfg, mgr, pricing, ledger)
 	if err != nil {
-		return err
+		cleanup()
+		return nil, func() {}, err
 	}
 
-	// Build the definition: scoped when --paths given, full otherwise.
-	var def oneshot.Definition = commands.CommitDefinition{}
-	if len(pathsFlag) > 0 {
-		def = scopedCommitDefinition{paths: pathsFlag}
-	}
-
-	// Create unified framework runner
 	framework := oneshot.NewFramework(invoker, nil)
-	var runner commitRunner = &frameworkCommitRunner{framework: framework, def: def}
-
-	// Run with timeout
-	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
-	defer cancel()
-
-	// Show what we're doing
-	if !quietMode {
-		termOut.Dim("Using %s", describeOneshotBackend(backend, modelID))
+	runtime := &commitCommandRuntime{
+		backend: opts.backend,
+		modelID: modelID,
+		ledger:  ledger,
+		runner:  &frameworkCommitRunner{framework: framework, def: commitDefinition(opts.paths)},
 	}
+	return runtime, cleanup, nil
+}
 
-	// Execute the commit generation with spinner
+func commitDefinition(paths []string) oneshot.Definition {
+	if len(paths) > 0 {
+		return scopedCommitDefinition{paths: paths}
+	}
+	return commands.CommitDefinition{}
+}
+
+func runCommitGeneration(ctx context.Context, runner commitRunner) (*commitRunResult, error) {
 	spinner := terminal.NewSpinner("Generating commit message...")
 	spinner.Start()
 
 	result, err := runner.Run(ctx)
-
 	if err != nil {
 		spinner.StopWithError(err.Error())
-	} else if result.Error != nil {
+		return nil, fmt.Errorf("commit generation failed: %w", err)
+	}
+	if result.Error != nil {
 		spinner.StopWithError(result.Error.Error())
 	} else {
 		spinner.StopWithSuccess("Generated commit message")
 	}
-	if err != nil {
-		printStagedIndexOnError()
-		return fmt.Errorf("commit generation failed: %w", err)
-	}
+	return result, nil
+}
 
-	// Show context audit (what was sent)
-	if (*verbose || *trace) && result.ContextAudit != nil {
+func renderCommitGenerationResult(opts commitCommandOptions, result *commitRunResult, ledger *transparency.CostLedger) (string, error) {
+	if (opts.verbose || opts.trace) && result.ContextAudit != nil {
 		printContextAudit(result.ContextAudit)
 	}
-
-	// Show reasoning (for thinking models)
-	if (*verbose || *trace) && result.Trace != nil && result.Trace.Reasoning != "" {
+	if (opts.verbose || opts.trace) && result.Trace != nil && result.Trace.Reasoning != "" {
 		printReasoning(result.Trace.Reasoning)
 	}
-
-	// Check for errors
 	if result.Error != nil {
 		printError(result.Error, result.Trace)
-		printStagedIndexOnError()
-		return result.Error
+		return "", result.Error
 	}
-
-	// Show the commit message
 	if result.Commit == nil {
-		printStagedIndexOnError()
-		return fmt.Errorf("no commit generated")
+		return "", fmt.Errorf("no commit generated")
 	}
 
 	message := result.Commit.Format()
 	printCommitMessage(message)
-
-	// Show cost
-	if *showCost && result.Trace != nil {
+	if opts.showCost && result.Trace != nil {
 		printCost(result.Trace, ledger)
 	}
+	return message, nil
+}
 
-	// Dry run - just print and exit
-	if *dryRun {
-		return nil
+func confirmCommitMessage(opts commitCommandOptions, message string, runner commitRunner, ctx context.Context, ledger *transparency.CostLedger) (string, error) {
+	if opts.yes {
+		return message, nil
+	}
+	if !stdinIsTerminalFn() {
+		return "", fmt.Errorf("refusing to commit without confirmation in non-interactive mode (use --dry-run or --yes)")
 	}
 
-	// Auto-confirm or prompt
-	if !*yes {
-		if !stdinIsTerminalFn() {
-			return fmt.Errorf("refusing to commit without confirmation in non-interactive mode (use --dry-run or --yes)")
-		}
-
-		// Interactive prompt loop with regenerate/edit options
-		for {
-			action, newMessage := handleCommitPrompt(message, runner, ctx, *showCost, ledger)
-			switch action {
-			case "commit":
-				message = newMessage
-				goto doCommit
-			case "abort":
-				return fmt.Errorf("aborted")
-			case "regenerate":
-				message = newMessage
-				printCommitMessage(message)
-				continue
-			}
+	for {
+		action, newMessage := handleCommitPrompt(message, runner, ctx, opts.showCost, ledger)
+		switch action {
+		case "commit":
+			return newMessage, nil
+		case "abort":
+			return "", fmt.Errorf("aborted")
+		case "regenerate":
+			message = newMessage
+			printCommitMessage(message)
 		}
 	}
-doCommit:
-
-	// Create the commit (scoped to paths when --paths was given).
-	if err := createCommit(message, compactOutput, useGraft, pathsFlag); err != nil {
-		printStagedIndexOnError()
-		return err
-	}
-
-	// Push if requested
-	if *pushFlag {
-		if err := pushChanges(compactOutput, useGraft); err != nil {
-			return err
-		}
-	}
-
-	return nil
 }
 
 // handleCommitPrompt shows an interactive prompt with options to commit, regenerate, edit, or abort.
