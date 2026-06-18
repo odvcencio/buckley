@@ -269,6 +269,37 @@ func TestNetworkHelpers(t *testing.T) {
 	}
 }
 
+func TestACPEventStoreConfigHelpers(t *testing.T) {
+	if got := acpEventStoreName(config.ACPConfig{}); got != "sqlite" {
+		t.Fatalf("acpEventStoreName empty=%q want sqlite", got)
+	}
+	if got := acpEventStoreName(config.ACPConfig{EventStore: " NATS "}); got != "nats" {
+		t.Fatalf("acpEventStoreName nats=%q want nats", got)
+	}
+
+	cfg := config.NATSConfig{
+		URL:            "nats://127.0.0.1:4222",
+		Username:       "user",
+		Password:       "pass",
+		Token:          "token",
+		TLS:            true,
+		StreamPrefix:   "stream",
+		SnapshotBucket: "snapshots",
+		ConnectTimeout: 2 * time.Second,
+		RequestTimeout: 3 * time.Second,
+	}
+	opts := acpNATSOptions(cfg)
+	if opts.URL != cfg.URL || opts.Username != cfg.Username || opts.Password != cfg.Password || opts.Token != cfg.Token {
+		t.Fatalf("nats auth/options not copied: %+v", opts)
+	}
+	if !opts.TLS || opts.StreamPrefix != cfg.StreamPrefix || opts.SnapshotBucket != cfg.SnapshotBucket {
+		t.Fatalf("nats stream options not copied: %+v", opts)
+	}
+	if opts.ConnectTimeout != cfg.ConnectTimeout || opts.RequestTimeout != cfg.RequestTimeout {
+		t.Fatalf("nats timeouts not copied: %+v", opts)
+	}
+}
+
 func TestChooseSecret(t *testing.T) {
 	if got := chooseSecret("flag", "cfg"); got != "flag" {
 		t.Fatalf("chooseSecret(flag,cfg)=%q want flag", got)

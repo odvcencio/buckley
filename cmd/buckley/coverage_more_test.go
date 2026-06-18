@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -61,6 +62,27 @@ func TestStartACPServerGuardsAndErrors(t *testing.T) {
 	_, err = startACPServer(cfg, nil, nil)
 	if err == nil || !strings.Contains(err.Error(), "requires mTLS") {
 		t.Fatalf("expected tls/loopback guard error, got %v", err)
+	}
+}
+
+func TestOpenACPEventStoreSQLite(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv(envBuckleyACPEventsDBPath, "")
+	t.Setenv(envBuckleyDataDir, "")
+
+	handle, err := openACPEventStore(config.ACPConfig{EventStore: "sqlite"})
+	if err != nil {
+		t.Fatalf("openACPEventStore: %v", err)
+	}
+	if handle.store == nil {
+		t.Fatalf("expected event store")
+	}
+	t.Cleanup(handle.Close)
+
+	dbPath := filepath.Join(home, ".buckley", "buckley-acp-events.db")
+	if _, err := os.Stat(dbPath); err != nil {
+		t.Fatalf("expected sqlite event store at %s: %v", dbPath, err)
 	}
 }
 

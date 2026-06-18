@@ -1752,6 +1752,17 @@ func humanReadableURL(bind string) string {
 	return fmt.Sprintf("http://%s:%s", host, port)
 }
 
+type acpEventStoreHandle struct {
+	store coordevents.EventStore
+	close func()
+}
+
+func (h acpEventStoreHandle) Close() {
+	if h.close != nil {
+		h.close()
+	}
+}
+
 // startACPServer launches the ACP gRPC server when configured.
 func startACPServer(cfg *config.Config, mgr *model.Manager, store *storage.Store) (func(), error) {
 	acpCfg := cfg.ACP
@@ -1759,92 +1770,124 @@ func startACPServer(cfg *config.Config, mgr *model.Manager, store *storage.Store
 		return nil, nil
 	}
 
-	useTLS := hasACPTLS(acpCfg)
-	allowInsecure := acpCfg.AllowInsecureLocal && isLoopbackAddress(acpCfg.Listen)
-	if !useTLS && !allowInsecure {
-		return nil, fmt.Errorf("acp listener %s requires mTLS or allow_insecure_local=true on loopback", acpCfg.Listen)
-	}
-
-	var tlsCfg *tls.Config
-	if useTLS {
-		cert, err := tls.LoadX509KeyPair(acpCfg.TLSCertFile, acpCfg.TLSKeyFile)
-		if err != nil {
-			return nil, fmt.Errorf("load ACP TLS certs: %w", err)
-		}
-
-		clientCAPEM, err := os.ReadFile(acpCfg.TLSClientCAFile)
-		if err != nil {
-			return nil, fmt.Errorf("load ACP client CA: %w", err)
-		}
-
-		clientCAPool := x509.NewCertPool()
-		if ok := clientCAPool.AppendCertsFromPEM(clientCAPEM); !ok {
-			return nil, fmt.Errorf("invalid ACP client CA bundle")
-		}
-
-		tlsCfg = &tls.Config{
-			Certificates: []tls.Certificate{cert},
-			ClientAuth:   tls.RequireAndVerifyClientCert,
-			ClientCAs:    clientCAPool,
-			MinVersion:   tls.VersionTLS12,
-		}
-	} else {
-		fmt.Fprintf(os.Stderr, "Warning: starting ACP without TLS (allow_insecure_local=true for %s)\n", acpCfg.Listen)
-	}
-
-	var eventStore coordevents.EventStore
-	var closer func()
-
-	if strings.ToLower(acpCfg.EventStore) == "nats" {
-		opts := coordevents.NATSOptions{
-			URL:            acpCfg.NATS.URL,
-			Username:       acpCfg.NATS.Username,
-			Password:       acpCfg.NATS.Password,
-			Token:          acpCfg.NATS.Token,
-			TLS:            acpCfg.NATS.TLS,
-			StreamPrefix:   acpCfg.NATS.StreamPrefix,
-			SnapshotBucket: acpCfg.NATS.SnapshotBucket,
-			ConnectTimeout: acpCfg.NATS.ConnectTimeout,
-			RequestTimeout: acpCfg.NATS.RequestTimeout,
-		}
-		store, err := coordevents.NewNATSEventStore(opts)
-		if err != nil {
-			return nil, fmt.Errorf("init NATS event store: %w", err)
-		}
-		eventStore = store
-		closer = store.Close
-	} else {
-		dbPath, err := resolveACPEventsDBPath()
-		if err != nil {
-			return nil, err
-		}
-		if err := os.MkdirAll(filepath.Dir(dbPath), 0o700); err != nil {
-			return nil, fmt.Errorf("init SQLite event store: ensure directory: %w", err)
-		}
-		store, err := coordevents.NewSQLiteEventStore(dbPath)
-		if err != nil {
-			return nil, fmt.Errorf("init SQLite event store: %w", err)
-		}
-		eventStore = store
-		closer = func() { _ = store.Close() }
-	}
-
-	coord, err := coordination.NewCoordinator(coordination.DefaultConfig(), eventStore)
+	tlsCfg, err := configureACPTransport(acpCfg)
 	if err != nil {
-		if closer != nil {
-			closer()
-		}
+		return nil, err
+	}
+
+	eventStore, err := openACPEventStore(acpCfg)
+	if err != nil {
+		return nil, err
+	}
+
+	coord, err := coordination.NewCoordinator(coordination.DefaultConfig(), eventStore.store)
+	if err != nil {
+		eventStore.Close()
 		return nil, fmt.Errorf("init ACP coordinator: %w", err)
 	}
 
 	srv, err := acpserver.NewServer(coord, mgr, cfg, store)
 	if err != nil {
-		if closer != nil {
-			closer()
-		}
+		eventStore.Close()
 		return nil, fmt.Errorf("init ACP gRPC server: %w", err)
 	}
 
+	lis, err := net.Listen("tcp", acpCfg.Listen)
+	if err != nil {
+		eventStore.Close()
+		return nil, fmt.Errorf("listen on %s: %w", acpCfg.Listen, err)
+	}
+
+	grpcServer := newACPGRPCServer(srv, tlsCfg)
+	stop, err := serveACPGRPCServer(grpcServer, lis, eventStore.Close)
+	if err != nil {
+		return nil, err
+	}
+
+	fmt.Printf("🚀 ACP gRPC server listening on %s (event store: %s)\n", acpCfg.Listen, acpEventStoreName(acpCfg))
+	return stop, nil
+}
+
+func configureACPTransport(acpCfg config.ACPConfig) (*tls.Config, error) {
+	useTLS := hasACPTLS(acpCfg)
+	allowInsecure := acpCfg.AllowInsecureLocal && isLoopbackAddress(acpCfg.Listen)
+	if !useTLS && !allowInsecure {
+		return nil, fmt.Errorf("acp listener %s requires mTLS or allow_insecure_local=true on loopback", acpCfg.Listen)
+	}
+	if !useTLS {
+		fmt.Fprintf(os.Stderr, "Warning: starting ACP without TLS (allow_insecure_local=true for %s)\n", acpCfg.Listen)
+		return nil, nil
+	}
+	return loadACPTLSConfig(acpCfg)
+}
+
+func loadACPTLSConfig(acpCfg config.ACPConfig) (*tls.Config, error) {
+	cert, err := tls.LoadX509KeyPair(acpCfg.TLSCertFile, acpCfg.TLSKeyFile)
+	if err != nil {
+		return nil, fmt.Errorf("load ACP TLS certs: %w", err)
+	}
+
+	clientCAPEM, err := os.ReadFile(acpCfg.TLSClientCAFile)
+	if err != nil {
+		return nil, fmt.Errorf("load ACP client CA: %w", err)
+	}
+
+	clientCAPool := x509.NewCertPool()
+	if ok := clientCAPool.AppendCertsFromPEM(clientCAPEM); !ok {
+		return nil, fmt.Errorf("invalid ACP client CA bundle")
+	}
+
+	return &tls.Config{
+		Certificates: []tls.Certificate{cert},
+		ClientAuth:   tls.RequireAndVerifyClientCert,
+		ClientCAs:    clientCAPool,
+		MinVersion:   tls.VersionTLS12,
+	}, nil
+}
+
+func openACPEventStore(acpCfg config.ACPConfig) (acpEventStoreHandle, error) {
+	if acpEventStoreName(acpCfg) == "nats" {
+		store, err := coordevents.NewNATSEventStore(acpNATSOptions(acpCfg.NATS))
+		if err != nil {
+			return acpEventStoreHandle{}, fmt.Errorf("init NATS event store: %w", err)
+		}
+		return acpEventStoreHandle{store: store, close: store.Close}, nil
+	}
+
+	dbPath, err := resolveACPEventsDBPath()
+	if err != nil {
+		return acpEventStoreHandle{}, err
+	}
+	store, err := coordevents.NewSQLiteEventStore(dbPath)
+	if err != nil {
+		return acpEventStoreHandle{}, fmt.Errorf("init SQLite event store: %w", err)
+	}
+	return acpEventStoreHandle{store: store, close: func() { _ = store.Close() }}, nil
+}
+
+func acpNATSOptions(cfg config.NATSConfig) coordevents.NATSOptions {
+	return coordevents.NATSOptions{
+		URL:            cfg.URL,
+		Username:       cfg.Username,
+		Password:       cfg.Password,
+		Token:          cfg.Token,
+		TLS:            cfg.TLS,
+		StreamPrefix:   cfg.StreamPrefix,
+		SnapshotBucket: cfg.SnapshotBucket,
+		ConnectTimeout: cfg.ConnectTimeout,
+		RequestTimeout: cfg.RequestTimeout,
+	}
+}
+
+func acpEventStoreName(acpCfg config.ACPConfig) string {
+	name := strings.TrimSpace(strings.ToLower(acpCfg.EventStore))
+	if name == "" {
+		return "sqlite"
+	}
+	return name
+}
+
+func newACPGRPCServer(srv *acpserver.Server, tlsCfg *tls.Config) *grpc.Server {
 	grpcOpts := []grpc.ServerOption{}
 	if tlsCfg != nil {
 		grpcOpts = append(grpcOpts, grpc.Creds(credentials.NewTLS(tlsCfg)))
@@ -1855,15 +1898,10 @@ func startACPServer(cfg *config.Config, mgr *model.Manager, store *storage.Store
 	)
 	grpcServer := grpc.NewServer(grpcOpts...)
 	acppb.RegisterAgentCommunicationServer(grpcServer, srv)
+	return grpcServer
+}
 
-	lis, err := net.Listen("tcp", acpCfg.Listen)
-	if err != nil {
-		if closer != nil {
-			closer()
-		}
-		return nil, fmt.Errorf("listen on %s: %w", acpCfg.Listen, err)
-	}
-
+func serveACPGRPCServer(grpcServer *grpc.Server, lis net.Listener, closeEventStore func()) (func(), error) {
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- grpcServer.Serve(lis)
@@ -1871,8 +1909,8 @@ func startACPServer(cfg *config.Config, mgr *model.Manager, store *storage.Store
 
 	stop := func() {
 		grpcServer.GracefulStop()
-		if closer != nil {
-			closer()
+		if closeEventStore != nil {
+			closeEventStore()
 		}
 	}
 
@@ -1886,6 +1924,5 @@ func startACPServer(cfg *config.Config, mgr *model.Manager, store *storage.Store
 	case <-time.After(150 * time.Millisecond):
 	}
 
-	fmt.Printf("🚀 ACP gRPC server listening on %s (event store: %s)\n", acpCfg.Listen, strings.ToLower(acpCfg.EventStore))
 	return stop, nil
 }
