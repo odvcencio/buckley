@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -45,6 +47,20 @@ type Result struct {
 	DurationMillis int64        `json:"duration_ms"`
 	Usage          model.Usage  `json:"usage"`
 	Turns          []TurnResult `json:"turns"`
+}
+
+type SuiteResult struct {
+	Name            string      `json:"name"`
+	Passed          bool        `json:"passed"`
+	Error           string      `json:"error,omitempty"`
+	StartedAt       time.Time   `json:"started_at"`
+	CompletedAt     time.Time   `json:"completed_at"`
+	DurationMillis  int64       `json:"duration_ms"`
+	Usage           model.Usage `json:"usage"`
+	ScenarioCount   int         `json:"scenario_count"`
+	PassedScenarios int         `json:"passed_scenarios"`
+	FailedScenarios int         `json:"failed_scenarios"`
+	Results         []Result    `json:"results"`
 }
 
 type TurnResult struct {
@@ -168,6 +184,50 @@ func LoadScenarioFile(path string) (Scenario, error) {
 		MaxTokens:    file.MaxTokens,
 		SessionID:    file.SessionID,
 	}, nil
+}
+
+func LoadScenarios(path string) ([]Scenario, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return nil, fmt.Errorf("chat check scenario path is required")
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, fmt.Errorf("stat chat check scenario path: %w", err)
+	}
+	if !info.IsDir() {
+		scenario, err := LoadScenarioFile(path)
+		if err != nil {
+			return nil, err
+		}
+		return []Scenario{scenario}, nil
+	}
+
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		return nil, fmt.Errorf("read chat check scenario directory: %w", err)
+	}
+	files := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() || strings.ToLower(filepath.Ext(entry.Name())) != ".json" {
+			continue
+		}
+		files = append(files, filepath.Join(path, entry.Name()))
+	}
+	sort.Strings(files)
+	if len(files) == 0 {
+		return nil, fmt.Errorf("chat check scenario directory contains no JSON scenarios: %s", path)
+	}
+
+	scenarios := make([]Scenario, 0, len(files))
+	for _, file := range files {
+		scenario, err := LoadScenarioFile(file)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", file, err)
+		}
+		scenarios = append(scenarios, scenario)
+	}
+	return scenarios, nil
 }
 
 func (r Runner) Run(ctx context.Context, scenario Scenario) (*Result, error) {
@@ -317,6 +377,54 @@ func (r Runner) Run(ctx context.Context, scenario Scenario) (*Result, error) {
 	return result, nil
 }
 
+func (r Runner) RunSuite(ctx context.Context, name string, scenarios []Scenario) (*SuiteResult, error) {
+	if r.Client == nil {
+		return nil, fmt.Errorf("chat check client is required")
+	}
+	if len(scenarios) == 0 {
+		return nil, fmt.Errorf("chat check suite requires at least one scenario")
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		name = "chat-check-suite"
+	}
+	started := time.Now()
+	suite := &SuiteResult{
+		Name:          name,
+		StartedAt:     started,
+		ScenarioCount: len(scenarios),
+		Results:       make([]Result, 0, len(scenarios)),
+	}
+	defer finalizeSuiteResult(suite, started)
+
+	failures := make([]string, 0)
+	for _, scenario := range scenarios {
+		normalized := NormalizeScenario(scenario)
+		result, err := r.Run(ctx, normalized)
+		if result == nil {
+			result = &Result{
+				Name:      normalized.Name,
+				Model:     normalized.Model,
+				SessionID: normalized.SessionID,
+				Error:     errString(err),
+				StartedAt: time.Now(),
+			}
+			finalizeResult(result, result.StartedAt)
+		}
+		suite.Results = append(suite.Results, *result)
+		suite.Usage.PromptTokens += result.Usage.PromptTokens
+		suite.Usage.CompletionTokens += result.Usage.CompletionTokens
+		suite.Usage.TotalTokens += result.Usage.TotalTokens
+		if err != nil || !result.Passed {
+			failures = append(failures, normalized.Name)
+		}
+	}
+	if len(failures) > 0 {
+		return suite, fmt.Errorf("chat check suite failed: %d of %d scenarios failed: %s", len(failures), len(scenarios), strings.Join(failures, ", "))
+	}
+	return suite, nil
+}
+
 func failTurn(result *Result, turn TurnResult, err error) (*Result, error) {
 	if err == nil {
 		err = fmt.Errorf("chat check failed")
@@ -328,6 +436,28 @@ func failTurn(result *Result, turn TurnResult, err error) (*Result, error) {
 		result.Turns = append(result.Turns, turn)
 	}
 	return result, err
+}
+
+func finalizeSuiteResult(result *SuiteResult, started time.Time) {
+	if result == nil {
+		return
+	}
+	completed := time.Now()
+	result.CompletedAt = completed
+	result.DurationMillis = completed.Sub(started).Milliseconds()
+	result.PassedScenarios = 0
+	result.FailedScenarios = 0
+	for _, scenario := range result.Results {
+		if scenario.Passed {
+			result.PassedScenarios++
+		} else {
+			result.FailedScenarios++
+		}
+	}
+	result.Passed = result.ScenarioCount > 0 && result.FailedScenarios == 0 && len(result.Results) == result.ScenarioCount
+	if !result.Passed && result.Error == "" {
+		result.Error = fmt.Sprintf("%d of %d scenarios failed", result.FailedScenarios, result.ScenarioCount)
+	}
 }
 
 func finalizeResult(result *Result, started time.Time) {
@@ -348,6 +478,13 @@ func finalizeResult(result *Result, started time.Time) {
 		}
 	}
 	result.Passed = true
+}
+
+func errString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }
 
 func NormalizeScenario(scenario Scenario) Scenario {

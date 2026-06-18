@@ -101,6 +101,69 @@ func TestResolveDoctorChatScenarioFile(t *testing.T) {
 	}
 }
 
+func TestResolveDoctorChatScenariosDirectory(t *testing.T) {
+	dir := t.TempDir()
+	for name, data := range map[string]string{
+		"b.json": `{"name":"second","model":"file-model","turns":[{"user":"say B"}]}`,
+		"a.json": `{"name":"first","turns":[{"user":"say A"}]}`,
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(data), 0o644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+
+	got, err := resolveDoctorChatScenarios("override-model", 3*time.Second, dir, true, true)
+	if err != nil {
+		t.Fatalf("resolveDoctorChatScenarios: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("scenarios=%d want 2", len(got))
+	}
+	if got[0].Name != "first" || got[1].Name != "second" {
+		t.Fatalf("unexpected scenario order: %+v", got)
+	}
+	for _, scenario := range got {
+		if scenario.Model != "override-model" || scenario.Timeout != 3*time.Second {
+			t.Fatalf("explicit flags should apply to every scenario: %+v", scenario)
+		}
+	}
+}
+
+func TestPrintChatCheckSuiteResult(t *testing.T) {
+	var out bytes.Buffer
+	printChatCheckSuiteResult(&out, &chatcheck.SuiteResult{
+		PassedScenarios: 1,
+		FailedScenarios: 1,
+		Results: []chatcheck.Result{
+			{
+				Name:           "one",
+				Model:          "test-model",
+				Passed:         true,
+				DurationMillis: 12,
+				Turns: []chatcheck.TurnResult{{
+					Index:         1,
+					Model:         "test-model",
+					LatencyMillis: 12,
+					CharLength:    8,
+					Passed:        true,
+				}},
+			},
+			{
+				Name:           "two",
+				Model:          "test-model",
+				Error:          "missing token",
+				DurationMillis: 5,
+			},
+		},
+	})
+	got := out.String()
+	for _, want := range []string{`scenario "one"`, `scenario "two"`, "missing token", "suite: 1 passed, 1 failed"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("output missing %q: %s", want, got)
+		}
+	}
+}
+
 func TestPrintChatCheckResult(t *testing.T) {
 	var out bytes.Buffer
 	printChatCheckResult(&out, &chatcheck.Result{

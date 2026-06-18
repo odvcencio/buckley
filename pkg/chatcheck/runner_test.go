@@ -263,6 +263,64 @@ func TestLoadScenarioFileRejectsInvalidShape(t *testing.T) {
 	}
 }
 
+func TestLoadScenariosDirectory(t *testing.T) {
+	dir := t.TempDir()
+	writeScenario := func(name string, body string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+	writeScenario("b.json", `{"name":"second","turns":[{"user":"say B"}]}`)
+	writeScenario("a.json", `{"name":"first","turns":[{"user":"say A"}]}`)
+	writeScenario("notes.txt", `ignored`)
+
+	scenarios, err := LoadScenarios(dir)
+	if err != nil {
+		t.Fatalf("LoadScenarios: %v", err)
+	}
+	if len(scenarios) != 2 {
+		t.Fatalf("scenarios=%d want 2", len(scenarios))
+	}
+	if scenarios[0].Name != "first" || scenarios[1].Name != "second" {
+		t.Fatalf("scenarios not sorted by filename: %+v", scenarios)
+	}
+}
+
+func TestLoadScenariosDirectoryRejectsEmpty(t *testing.T) {
+	_, err := LoadScenarios(t.TempDir())
+	if err == nil || !strings.Contains(err.Error(), "contains no JSON scenarios") {
+		t.Fatalf("err=%v want no JSON scenarios", err)
+	}
+}
+
+func TestRunnerRunSuiteAggregatesFailures(t *testing.T) {
+	client := &fakeClient{responses: []model.ChatResponse{
+		response("test-model", "ONE"),
+		response("test-model", "wrong"),
+		response("test-model", "THREE"),
+	}}
+	runner := Runner{Client: client}
+
+	suite, err := runner.RunSuite(context.Background(), "suite", []Scenario{
+		{Name: "one", Model: "test-model", Turns: []Turn{{User: "say one", WantContains: []string{"ONE"}}}},
+		{Name: "two", Model: "test-model", Turns: []Turn{{User: "say two", WantContains: []string{"TWO"}}}},
+		{Name: "three", Model: "test-model", Turns: []Turn{{User: "say three", WantContains: []string{"THREE"}}}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "two") {
+		t.Fatalf("err=%v want suite failure naming failed scenario", err)
+	}
+	if suite == nil || suite.Passed || suite.PassedScenarios != 2 || suite.FailedScenarios != 1 {
+		t.Fatalf("unexpected suite result: %+v", suite)
+	}
+	if len(suite.Results) != 3 {
+		t.Fatalf("results=%d want 3", len(suite.Results))
+	}
+	if suite.Usage.TotalTokens != 30 {
+		t.Fatalf("total tokens=%d want 30", suite.Usage.TotalTokens)
+	}
+}
+
 func response(modelID, text string) model.ChatResponse {
 	return model.ChatResponse{
 		Model: modelID,

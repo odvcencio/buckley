@@ -41,7 +41,7 @@ func runDoctorChatCommand(args []string) error {
 	fs := flag.NewFlagSet("doctor chat", flag.ContinueOnError)
 	modelID := fs.String("model", defaultModel, "model to use for the multi-turn chat check")
 	timeout := fs.Duration("timeout", 45*time.Second, "per-turn timeout")
-	scenarioPath := fs.String("scenario", "", "JSON scenario file for the chat check")
+	scenarioPath := fs.String("scenario", "", "JSON scenario file or directory for the chat check")
 	jsonOutput := fs.Bool("json", false, "print machine-readable JSON report")
 	outPath := fs.String("out", "", "write machine-readable JSON report to a file")
 	if err := fs.Parse(args); err != nil {
@@ -57,56 +57,74 @@ func runDoctorChatCommand(args []string) error {
 	}
 	defer store.Close()
 
-	scenario, err := resolveDoctorChatScenario(*modelID, *timeout, *scenarioPath, flagWasSet(fs, "model"), flagWasSet(fs, "timeout"))
+	scenarios, err := resolveDoctorChatScenarios(*modelID, *timeout, *scenarioPath, flagWasSet(fs, "model"), flagWasSet(fs, "timeout"))
 	if err != nil {
 		return err
 	}
 
 	if *jsonOutput {
-		fmt.Fprintf(os.Stderr, "Running chat health check with %s (%d turns)\n", scenario.Model, len(scenario.Turns))
+		printChatCheckStart(os.Stderr, scenarios)
 	} else {
-		fmt.Printf("Running chat health check with %s (%d turns)\n", scenario.Model, len(scenario.Turns))
+		printChatCheckStart(os.Stdout, scenarios)
 	}
-	result, runErr := (chatcheck.Runner{Client: mgr}).Run(context.Background(), scenario)
+	report, runErr := runDoctorChatCheck(context.Background(), chatcheck.Runner{Client: mgr}, scenarios)
 	if *outPath != "" {
-		if err := writeChatCheckReport(*outPath, result); err != nil {
+		if err := writeChatCheckReport(*outPath, report); err != nil {
 			return err
 		}
 	}
 	if *jsonOutput {
-		if err := printChatCheckJSON(os.Stdout, result); err != nil {
+		if err := printChatCheckJSON(os.Stdout, report); err != nil {
 			return err
 		}
 	} else {
-		printChatCheckResult(os.Stdout, result)
+		printChatCheckReport(os.Stdout, report)
 	}
 	if runErr != nil {
 		return withExitCode(runErr, 1)
 	}
 	if !*jsonOutput {
-		fmt.Println("Chat health check passed")
+		if len(scenarios) == 1 {
+			fmt.Println("Chat health check passed")
+		} else {
+			fmt.Println("Chat health check suite passed")
+		}
 	}
 	return nil
 }
 
 func resolveDoctorChatScenario(modelID string, timeout time.Duration, scenarioPath string, modelSet bool, timeoutSet bool) (chatcheck.Scenario, error) {
-	scenario := chatcheck.DefaultScenario(modelID)
-	scenario.Timeout = timeout
-	if strings.TrimSpace(scenarioPath) == "" {
-		return chatcheck.NormalizeScenario(scenario), nil
-	}
-
-	loaded, err := chatcheck.LoadScenarioFile(scenarioPath)
+	scenarios, err := resolveDoctorChatScenarios(modelID, timeout, scenarioPath, modelSet, timeoutSet)
 	if err != nil {
 		return chatcheck.Scenario{}, err
 	}
-	if modelSet || strings.TrimSpace(loaded.Model) == "" {
-		loaded.Model = modelID
+	if len(scenarios) != 1 {
+		return chatcheck.Scenario{}, fmt.Errorf("expected one chat check scenario, got %d", len(scenarios))
 	}
-	if timeoutSet || loaded.Timeout <= 0 {
-		loaded.Timeout = timeout
+	return scenarios[0], nil
+}
+
+func resolveDoctorChatScenarios(modelID string, timeout time.Duration, scenarioPath string, modelSet bool, timeoutSet bool) ([]chatcheck.Scenario, error) {
+	scenario := chatcheck.DefaultScenario(modelID)
+	scenario.Timeout = timeout
+	if strings.TrimSpace(scenarioPath) == "" {
+		return []chatcheck.Scenario{chatcheck.NormalizeScenario(scenario)}, nil
 	}
-	return chatcheck.NormalizeScenario(loaded), nil
+
+	loaded, err := chatcheck.LoadScenarios(scenarioPath)
+	if err != nil {
+		return nil, err
+	}
+	for i := range loaded {
+		if modelSet || strings.TrimSpace(loaded[i].Model) == "" {
+			loaded[i].Model = modelID
+		}
+		if timeoutSet || loaded[i].Timeout <= 0 {
+			loaded[i].Timeout = timeout
+		}
+		loaded[i] = chatcheck.NormalizeScenario(loaded[i])
+	}
+	return loaded, nil
 }
 
 func flagWasSet(fs *flag.FlagSet, name string) bool {
@@ -120,6 +138,31 @@ func flagWasSet(fs *flag.FlagSet, name string) bool {
 		}
 	})
 	return wasSet
+}
+
+func runDoctorChatCheck(ctx context.Context, runner chatcheck.Runner, scenarios []chatcheck.Scenario) (any, error) {
+	if len(scenarios) == 1 {
+		return runner.Run(ctx, scenarios[0])
+	}
+	return runner.RunSuite(ctx, "chat-check-suite", scenarios)
+}
+
+func printChatCheckStart(w io.Writer, scenarios []chatcheck.Scenario) {
+	if len(scenarios) == 1 {
+		scenario := scenarios[0]
+		fmt.Fprintf(w, "Running chat health check with %s (%d turns)\n", scenario.Model, len(scenario.Turns))
+		return
+	}
+	fmt.Fprintf(w, "Running chat health check suite with %d scenarios\n", len(scenarios))
+}
+
+func printChatCheckReport(w io.Writer, report any) {
+	switch result := report.(type) {
+	case *chatcheck.Result:
+		printChatCheckResult(w, result)
+	case *chatcheck.SuiteResult:
+		printChatCheckSuiteResult(w, result)
+	}
 }
 
 func printChatCheckResult(w io.Writer, result *chatcheck.Result) {
@@ -151,18 +194,41 @@ func printChatCheckResult(w io.Writer, result *chatcheck.Result) {
 	}
 }
 
-func printChatCheckJSON(w io.Writer, result *chatcheck.Result) error {
+func printChatCheckSuiteResult(w io.Writer, result *chatcheck.SuiteResult) {
 	if result == nil {
+		return
+	}
+	for i := range result.Results {
+		scenario := &result.Results[i]
+		status := "ok"
+		if !scenario.Passed {
+			status = "fail"
+		}
+		fmt.Fprintf(w, "  [%s] scenario %q: %d turns, %d ms", status, scenario.Name, len(scenario.Turns), scenario.DurationMillis)
+		if scenario.Model != "" {
+			fmt.Fprintf(w, ", model=%s", scenario.Model)
+		}
+		if scenario.Error != "" {
+			fmt.Fprintf(w, ", error=%s", scenario.Error)
+		}
+		fmt.Fprintln(w)
+		printChatCheckResult(w, scenario)
+	}
+	fmt.Fprintf(w, "  suite: %d passed, %d failed\n", result.PassedScenarios, result.FailedScenarios)
+}
+
+func printChatCheckJSON(w io.Writer, report any) error {
+	if report == nil {
 		return nil
 	}
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
-	return enc.Encode(result)
+	return enc.Encode(report)
 }
 
-func writeChatCheckReport(path string, result *chatcheck.Result) error {
+func writeChatCheckReport(path string, report any) error {
 	path = strings.TrimSpace(path)
-	if path == "" || result == nil {
+	if path == "" || report == nil {
 		return nil
 	}
 	if dir := filepath.Dir(path); dir != "." && dir != "" {
@@ -170,7 +236,7 @@ func writeChatCheckReport(path string, result *chatcheck.Result) error {
 			return fmt.Errorf("create chat check report directory: %w", err)
 		}
 	}
-	data, err := json.MarshalIndent(result, "", "  ")
+	data, err := json.MarshalIndent(report, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal chat check report: %w", err)
 	}
