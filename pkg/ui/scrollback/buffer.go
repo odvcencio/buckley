@@ -669,55 +669,78 @@ func (b *Buffer) PositionForView(row, col int) (line, column int, ok bool) {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 
-	if row < 0 || row >= b.height || col < 0 {
+	absoluteRow, ok := b.absoluteViewRow(row, col)
+	if !ok {
 		return 0, 0, false
 	}
 
+	wrapped, ok := findWrappedRow(b.lines, absoluteRow)
+	if !ok {
+		return 0, 0, false
+	}
+
+	position := wrapped.contentOffset + wrapped.contentColumn(col)
+	return wrapped.lineIndex, runeOffsetToByte(wrapped.content, max(0, position)), true
+}
+
+func (b *Buffer) absoluteViewRow(row, col int) (int, bool) {
+	if row < 0 || row >= b.height || col < 0 {
+		return 0, false
+	}
 	absoluteRow := b.scrollTop + row
 	if absoluteRow < 0 || absoluteRow >= b.totalRows {
-		return 0, 0, false
+		return 0, false
 	}
+	return absoluteRow, true
+}
 
+type wrappedRowPosition struct {
+	lineIndex     int
+	content       string
+	wrapped       WrappedLine
+	contentOffset int
+	prefixLen     int
+}
+
+func findWrappedRow(lines []Line, absoluteRow int) (wrappedRowPosition, bool) {
 	rowIndex := 0
-	for lineIdx, line := range b.lines {
+	for lineIdx, line := range lines {
 		prefixLen := len([]rune(spansText(line.Prefix)))
 		contentOffset := 0
 
 		for _, wrapped := range line.Wrapped {
+			segmentLen := wrappedContentLen(wrapped, prefixLen)
 			if rowIndex == absoluteRow {
-				wrappedLen := len([]rune(wrapped.Text))
-				segmentLen := wrappedLen - prefixLen
-				if segmentLen < 0 {
-					segmentLen = 0
-				}
-				contentCol := col
-				if contentCol < prefixLen {
-					contentCol = 0
-				} else {
-					contentCol -= prefixLen
-				}
-				if contentCol > segmentLen {
-					contentCol = segmentLen
-				}
-
-				position := contentOffset + contentCol
-				if position < 0 {
-					position = 0
-				}
-				return lineIdx, runeOffsetToByte(line.Content, position), true
+				return wrappedRowPosition{
+					lineIndex:     lineIdx,
+					content:       line.Content,
+					wrapped:       wrapped,
+					contentOffset: contentOffset,
+					prefixLen:     prefixLen,
+				}, true
 			}
 
-			wrappedLen := len([]rune(wrapped.Text))
-			segmentLen := wrappedLen - prefixLen
-			if segmentLen < 0 {
-				segmentLen = 0
-			}
 			contentOffset += segmentLen
 			rowIndex++
 		}
 	}
 
-	return 0, 0, false
+	return wrappedRowPosition{}, false
+}
+
+func (p wrappedRowPosition) contentColumn(col int) int {
+	segmentLen := wrappedContentLen(p.wrapped, p.prefixLen)
+	contentCol := col
+	if contentCol < p.prefixLen {
+		contentCol = 0
+	} else {
+		contentCol -= p.prefixLen
+	}
+	return min(contentCol, segmentLen)
+}
+
+func wrappedContentLen(wrapped WrappedLine, prefixLen int) int {
+	return max(0, len([]rune(wrapped.Text))-prefixLen)
 }
 
 // IsFollowing returns true if auto-scrolling.

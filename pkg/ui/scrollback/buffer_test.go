@@ -319,6 +319,60 @@ func TestPositionForView(t *testing.T) {
 	}
 }
 
+func TestPositionForView_InvalidCoordinates(t *testing.T) {
+	buf := NewBuffer(20, 5)
+	buf.AppendLine("hello", LineStyle{}, "user")
+
+	tests := []struct {
+		name string
+		row  int
+		col  int
+	}{
+		{name: "negative row", row: -1, col: 0},
+		{name: "negative column", row: 0, col: -1},
+		{name: "row outside viewport", row: 5, col: 0},
+		{name: "row beyond content", row: 1, col: 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, _, ok := buf.PositionForView(tt.row, tt.col); ok {
+				t.Fatalf("PositionForView(%d, %d) ok = true, want false", tt.row, tt.col)
+			}
+		})
+	}
+}
+
+func TestPositionForView_WrappedRows(t *testing.T) {
+	buf := NewBuffer(7, 5)
+	buf.AppendLine("abcdefghij", LineStyle{}, "user")
+
+	line, col, ok := buf.PositionForView(1, 2)
+	if !ok {
+		t.Fatal("expected wrapped row position")
+	}
+	if line != 0 || col != 7 {
+		t.Fatalf("expected line 0 col 7, got line %d col %d", line, col)
+	}
+}
+
+func TestPositionForView_PrefixWrappedRows(t *testing.T) {
+	buf := NewBuffer(8, 5)
+	buf.AppendMessage([]Line{{
+		Content: "abcdefghij",
+		Spans:   []Span{{Text: "abcdefghij"}},
+		Prefix:  []Span{{Text: "▶ "}},
+	}})
+
+	line, col, ok := buf.PositionForView(1, 3)
+	if !ok {
+		t.Fatal("expected prefixed wrapped row position")
+	}
+	if line != 0 || col != 5 {
+		t.Fatalf("expected line 0 col 5, got line %d col %d", line, col)
+	}
+}
+
 func TestWrapLine(t *testing.T) {
 	tests := []struct {
 		text     string
