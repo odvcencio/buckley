@@ -389,23 +389,47 @@ func TestLoadScenariosDirectory(t *testing.T) {
 	dir := t.TempDir()
 	writeScenario := func(name string, body string) {
 		t.Helper()
-		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+		path := filepath.Join(dir, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", name, err)
+		}
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 			t.Fatalf("write %s: %v", name, err)
 		}
 	}
 	writeScenario("b.json", `{"name":"second","turns":[{"user":"say B"}]}`)
 	writeScenario("a.json", `{"name":"first","turns":[{"user":"say A"}]}`)
+	writeScenario("tools/no-tools.json", `{"turns":[{"user":"say C"}]}`)
 	writeScenario("notes.txt", `ignored`)
 
 	scenarios, err := LoadScenarios(dir)
 	if err != nil {
 		t.Fatalf("LoadScenarios: %v", err)
 	}
-	if len(scenarios) != 2 {
-		t.Fatalf("scenarios=%d want 2", len(scenarios))
+	if len(scenarios) != 3 {
+		t.Fatalf("scenarios=%d want 3", len(scenarios))
 	}
-	if scenarios[0].Name != "first" || scenarios[1].Name != "second" {
-		t.Fatalf("scenarios not sorted by filename: %+v", scenarios)
+	wantNames := []string{"first", "second", "tools/no-tools"}
+	for i, want := range wantNames {
+		if scenarios[i].Name != want {
+			t.Fatalf("scenario[%d].Name=%q want %q; all=%+v", i, scenarios[i].Name, want, scenarios)
+		}
+	}
+}
+
+func TestLoadScenariosFileUsesPathIdentity(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "smoke.json")
+	if err := os.WriteFile(path, []byte(`{"turns":[{"user":"say READY"}]}`), 0o644); err != nil {
+		t.Fatalf("write scenario: %v", err)
+	}
+
+	scenarios, err := LoadScenarios(path)
+	if err != nil {
+		t.Fatalf("LoadScenarios: %v", err)
+	}
+	if len(scenarios) != 1 || scenarios[0].Name != "smoke" {
+		t.Fatalf("scenario identity = %+v, want smoke", scenarios)
 	}
 }
 

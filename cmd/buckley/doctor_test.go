@@ -235,11 +235,15 @@ func TestRunDoctorChatCommandListDoesNotInitDependencies(t *testing.T) {
 
 func TestRunDoctorChatCommandProjectList(t *testing.T) {
 	dir := t.TempDir()
-	t.Chdir(dir)
 	projectDir := filepath.Join(dir, ".buckley", "chatchecks")
 	if err := os.MkdirAll(projectDir, 0o755); err != nil {
 		t.Fatalf("mkdir project scenarios: %v", err)
 	}
+	nested := filepath.Join(dir, "src", "feature")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatalf("mkdir nested project dir: %v", err)
+	}
+	t.Chdir(nested)
 	if err := os.WriteFile(filepath.Join(projectDir, "smoke.json"), []byte(`{"name":"project-smoke","tags":["smoke"],"turns":[{"user":"say READY","want_contains":["READY"]}]}`), 0o644); err != nil {
 		t.Fatalf("write scenario: %v", err)
 	}
@@ -286,8 +290,30 @@ func TestResolveDoctorChatScenarioPathProject(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolveDoctorChatScenarioPath: %v", err)
 	}
-	if got != projectChatCheckScenarioDir {
-		t.Fatalf("path=%q want %q", got, projectChatCheckScenarioDir)
+	want := filepath.Join(dir, ".buckley", "chatchecks")
+	if got != want {
+		t.Fatalf("path=%q want %q", got, want)
+	}
+}
+
+func TestResolveDoctorChatScenarioPathProjectFindsAncestor(t *testing.T) {
+	root := t.TempDir()
+	projectDir := filepath.Join(root, ".buckley", "chatchecks")
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatalf("mkdir project scenarios: %v", err)
+	}
+	nested := filepath.Join(root, "pkg", "feature")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatalf("mkdir nested dir: %v", err)
+	}
+	t.Chdir(nested)
+
+	got, err := resolveDoctorChatScenarioPath("", true)
+	if err != nil {
+		t.Fatalf("resolveDoctorChatScenarioPath: %v", err)
+	}
+	if got != projectDir {
+		t.Fatalf("path=%q want %q", got, projectDir)
 	}
 }
 

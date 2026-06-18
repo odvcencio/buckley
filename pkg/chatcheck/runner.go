@@ -215,19 +215,24 @@ func LoadScenarios(path string) ([]Scenario, error) {
 		if err != nil {
 			return nil, err
 		}
+		if strings.TrimSpace(scenario.Name) == "" {
+			scenario.Name = scenarioNameFromPath(filepath.Dir(path), path)
+		}
 		return []Scenario{scenario}, nil
 	}
 
-	entries, err := os.ReadDir(path)
-	if err != nil {
-		return nil, fmt.Errorf("read chat check scenario directory: %w", err)
-	}
-	files := make([]string, 0, len(entries))
-	for _, entry := range entries {
-		if entry.IsDir() || strings.ToLower(filepath.Ext(entry.Name())) != ".json" {
-			continue
+	files := []string{}
+	if err := filepath.WalkDir(path, func(file string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
 		}
-		files = append(files, filepath.Join(path, entry.Name()))
+		if entry.IsDir() || strings.ToLower(filepath.Ext(entry.Name())) != ".json" {
+			return nil
+		}
+		files = append(files, file)
+		return nil
+	}); err != nil {
+		return nil, fmt.Errorf("read chat check scenario directory: %w", err)
 	}
 	sort.Strings(files)
 	if len(files) == 0 {
@@ -240,9 +245,33 @@ func LoadScenarios(path string) ([]Scenario, error) {
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", file, err)
 		}
+		if strings.TrimSpace(scenario.Name) == "" {
+			scenario.Name = scenarioNameFromPath(path, file)
+		}
 		scenarios = append(scenarios, scenario)
 	}
 	return scenarios, nil
+}
+
+func scenarioNameFromPath(root, path string) string {
+	root = strings.TrimSpace(root)
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return "chat-check"
+	}
+	rel := filepath.Base(path)
+	if root != "" {
+		if candidate, err := filepath.Rel(root, path); err == nil && !strings.HasPrefix(candidate, "..") {
+			rel = candidate
+		}
+	}
+	rel = filepath.ToSlash(rel)
+	rel = strings.TrimSuffix(rel, filepath.Ext(rel))
+	rel = strings.Trim(rel, "/")
+	if rel == "" || rel == "." {
+		return "chat-check"
+	}
+	return rel
 }
 
 func validateTurn(turn Turn, index int) error {

@@ -143,17 +143,45 @@ func resolveDoctorChatScenarioPath(scenarioPath string, useProject bool) (string
 	if scenarioPath != "" {
 		return "", fmt.Errorf("doctor chat -project cannot be combined with -scenario")
 	}
-	info, err := os.Stat(projectChatCheckScenarioDir)
+	return findProjectChatCheckScenarioDir(".")
+}
+
+func findProjectChatCheckScenarioDir(start string) (string, error) {
+	start = strings.TrimSpace(start)
+	if start == "" {
+		start = "."
+	}
+	dir, err := filepath.Abs(start)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return "", fmt.Errorf("project chat check scenarios not found: %s", projectChatCheckScenarioDir)
-		}
-		return "", fmt.Errorf("stat project chat check scenarios: %w", err)
+		return "", fmt.Errorf("resolve project chat check start: %w", err)
+	}
+	info, err := os.Stat(dir)
+	if err != nil {
+		return "", fmt.Errorf("stat project chat check start: %w", err)
 	}
 	if !info.IsDir() {
-		return "", fmt.Errorf("project chat check scenario path is not a directory: %s", projectChatCheckScenarioDir)
+		dir = filepath.Dir(dir)
 	}
-	return projectChatCheckScenarioDir, nil
+
+	for {
+		candidate := filepath.Join(dir, projectChatCheckScenarioDir)
+		info, err := os.Stat(candidate)
+		if err == nil {
+			if !info.IsDir() {
+				return "", fmt.Errorf("project chat check scenario path is not a directory: %s", candidate)
+			}
+			return candidate, nil
+		}
+		if !os.IsNotExist(err) {
+			return "", fmt.Errorf("stat project chat check scenarios: %w", err)
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+	return "", fmt.Errorf("project chat check scenarios not found: %s", projectChatCheckScenarioDir)
 }
 
 type junitTestSuite struct {
