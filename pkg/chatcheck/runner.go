@@ -21,7 +21,9 @@ const (
 )
 
 type Scenario struct {
+	Description  string        `json:"description,omitempty"`
 	Name         string        `json:"name,omitempty"`
+	Tags         []string      `json:"tags,omitempty"`
 	Model        string        `json:"model,omitempty"`
 	SystemPrompt string        `json:"system_prompt,omitempty"`
 	Turns        []Turn        `json:"turns,omitempty"`
@@ -90,15 +92,22 @@ type Runner struct {
 	Client model.CompletionClient
 }
 
+type ScenarioSelector struct {
+	NameContains []string
+	Tags         []string
+}
+
 type scenarioFile struct {
-	Name          string `json:"name"`
-	Model         string `json:"model"`
-	SystemPrompt  string `json:"system_prompt"`
-	Turns         []Turn `json:"turns"`
-	Timeout       string `json:"timeout"`
-	TimeoutMillis int64  `json:"timeout_ms"`
-	MaxTokens     int    `json:"max_tokens"`
-	SessionID     string `json:"session_id"`
+	Description   string   `json:"description"`
+	Name          string   `json:"name"`
+	Tags          []string `json:"tags"`
+	Model         string   `json:"model"`
+	SystemPrompt  string   `json:"system_prompt"`
+	Turns         []Turn   `json:"turns"`
+	Timeout       string   `json:"timeout"`
+	TimeoutMillis int64    `json:"timeout_ms"`
+	MaxTokens     int      `json:"max_tokens"`
+	SessionID     string   `json:"session_id"`
 }
 
 func DefaultScenario(modelID string) Scenario {
@@ -107,11 +116,13 @@ func DefaultScenario(modelID string) Scenario {
 		modelID = DefaultModel
 	}
 	return Scenario{
-		Name:      "multi-turn-chat",
-		Model:     modelID,
-		Timeout:   defaultTimeout,
-		MaxTokens: 256,
-		SessionID: "buckley-chat-check",
+		Description: "Built-in Buckley multi-turn chat continuity check.",
+		Name:        "multi-turn-chat",
+		Tags:        []string{"chat", "smoke"},
+		Model:       modelID,
+		Timeout:     defaultTimeout,
+		MaxTokens:   256,
+		SessionID:   "buckley-chat-check",
 		SystemPrompt: strings.Join([]string{
 			"You are participating in a Buckley chat health check.",
 			"Answer plainly and include requested sentinel tokens exactly.",
@@ -176,7 +187,9 @@ func LoadScenarioFile(path string) (Scenario, error) {
 		return Scenario{}, fmt.Errorf("chat check scenario must define at least one turn")
 	}
 	return Scenario{
+		Description:  file.Description,
 		Name:         file.Name,
+		Tags:         file.Tags,
 		Model:        file.Model,
 		SystemPrompt: file.SystemPrompt,
 		Turns:        file.Turns,
@@ -228,6 +241,25 @@ func LoadScenarios(path string) ([]Scenario, error) {
 		scenarios = append(scenarios, scenario)
 	}
 	return scenarios, nil
+}
+
+func FilterScenarios(scenarios []Scenario, selector ScenarioSelector) []Scenario {
+	selector = normalizeScenarioSelector(selector)
+	if len(selector.NameContains) == 0 && len(selector.Tags) == 0 {
+		return append([]Scenario(nil), scenarios...)
+	}
+
+	filtered := make([]Scenario, 0, len(scenarios))
+	for _, scenario := range scenarios {
+		if len(selector.NameContains) > 0 && !scenarioNameMatches(scenario, selector.NameContains) {
+			continue
+		}
+		if len(selector.Tags) > 0 && !scenarioTagsMatch(scenario, selector.Tags) {
+			continue
+		}
+		filtered = append(filtered, scenario)
+	}
+	return filtered
 }
 
 func (r Runner) Run(ctx context.Context, scenario Scenario) (*Result, error) {
@@ -488,10 +520,12 @@ func errString(err error) string {
 }
 
 func NormalizeScenario(scenario Scenario) Scenario {
+	scenario.Description = strings.TrimSpace(scenario.Description)
 	scenario.Name = strings.TrimSpace(scenario.Name)
 	if scenario.Name == "" {
 		scenario.Name = "chat-check"
 	}
+	scenario.Tags = normalizeTags(scenario.Tags)
 	scenario.Model = strings.TrimSpace(scenario.Model)
 	if scenario.Model == "" {
 		scenario.Model = DefaultModel
@@ -512,6 +546,85 @@ func NormalizeScenario(scenario Scenario) Scenario {
 		scenario.Turns = defaults.Turns
 	}
 	return scenario
+}
+
+func normalizeTags(tags []string) []string {
+	if len(tags) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(tags))
+	normalized := make([]string, 0, len(tags))
+	for _, tag := range tags {
+		tag = strings.ToLower(strings.TrimSpace(tag))
+		if tag == "" {
+			continue
+		}
+		if _, ok := seen[tag]; ok {
+			continue
+		}
+		seen[tag] = struct{}{}
+		normalized = append(normalized, tag)
+	}
+	sort.Strings(normalized)
+	return normalized
+}
+
+func normalizeScenarioSelector(selector ScenarioSelector) ScenarioSelector {
+	selector.Tags = normalizeTags(selector.Tags)
+	selector.NameContains = normalizeSelectorTerms(selector.NameContains)
+	return selector
+}
+
+func normalizeSelectorTerms(terms []string) []string {
+	if len(terms) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(terms))
+	normalized := make([]string, 0, len(terms))
+	for _, term := range terms {
+		term = strings.ToLower(strings.TrimSpace(term))
+		if term == "" {
+			continue
+		}
+		if _, ok := seen[term]; ok {
+			continue
+		}
+		seen[term] = struct{}{}
+		normalized = append(normalized, term)
+	}
+	sort.Strings(normalized)
+	return normalized
+}
+
+func scenarioNameMatches(scenario Scenario, terms []string) bool {
+	name := strings.ToLower(strings.TrimSpace(scenario.Name))
+	description := strings.ToLower(strings.TrimSpace(scenario.Description))
+	for _, term := range terms {
+		if strings.Contains(name, term) || strings.Contains(description, term) {
+			return true
+		}
+	}
+	return false
+}
+
+func scenarioTagsMatch(scenario Scenario, tags []string) bool {
+	if len(tags) == 0 {
+		return true
+	}
+	scenarioTags := normalizeTags(scenario.Tags)
+	if len(scenarioTags) == 0 {
+		return false
+	}
+	tagSet := make(map[string]struct{}, len(scenarioTags))
+	for _, tag := range scenarioTags {
+		tagSet[tag] = struct{}{}
+	}
+	for _, tag := range tags {
+		if _, ok := tagSet[tag]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 func parseScenarioTimeout(timeoutText string, timeoutMillis int64) (time.Duration, error) {

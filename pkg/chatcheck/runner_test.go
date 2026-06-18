@@ -186,7 +186,9 @@ func TestRunnerRunProviderErrorCapturesFailedTurn(t *testing.T) {
 func TestLoadScenarioFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "scenario.json")
 	data := `{
+  "description": "Checks the chat path.",
   "name": "repo-smoke",
+  "tags": ["smoke", "OpenRouter"],
   "model": "file-model",
   "system_prompt": "Be terse.",
   "timeout": "2s",
@@ -208,8 +210,11 @@ func TestLoadScenarioFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadScenarioFile: %v", err)
 	}
-	if scenario.Name != "repo-smoke" || scenario.Model != "file-model" {
+	if scenario.Description != "Checks the chat path." || scenario.Name != "repo-smoke" || scenario.Model != "file-model" {
 		t.Fatalf("unexpected scenario identity: %+v", scenario)
+	}
+	if len(scenario.Tags) != 2 || scenario.Tags[0] != "smoke" || scenario.Tags[1] != "OpenRouter" {
+		t.Fatalf("unexpected tags: %+v", scenario.Tags)
 	}
 	if scenario.Timeout != 2*time.Second {
 		t.Fatalf("timeout=%s want 2s", scenario.Timeout)
@@ -291,6 +296,42 @@ func TestLoadScenariosDirectoryRejectsEmpty(t *testing.T) {
 	_, err := LoadScenarios(t.TempDir())
 	if err == nil || !strings.Contains(err.Error(), "contains no JSON scenarios") {
 		t.Fatalf("err=%v want no JSON scenarios", err)
+	}
+}
+
+func TestNormalizeScenarioTags(t *testing.T) {
+	scenario := NormalizeScenario(Scenario{
+		Name: "tagged",
+		Tags: []string{" Smoke ", "chat", "smoke", "", "CHAT"},
+		Turns: []Turn{{
+			User: "hello",
+		}},
+	})
+	if got, want := strings.Join(scenario.Tags, ","), "chat,smoke"; got != want {
+		t.Fatalf("tags=%q want %q", got, want)
+	}
+}
+
+func TestFilterScenariosByTagAndName(t *testing.T) {
+	scenarios := []Scenario{
+		NormalizeScenario(Scenario{Name: "smoke chat", Description: "fast provider check", Tags: []string{"smoke", "chat"}, Turns: []Turn{{User: "hello"}}}),
+		NormalizeScenario(Scenario{Name: "regression tools", Description: "tool loop", Tags: []string{"regression", "tools"}, Turns: []Turn{{User: "hello"}}}),
+		NormalizeScenario(Scenario{Name: "reasoning", Description: "premium model", Tags: []string{"reasoning"}, Turns: []Turn{{User: "hello"}}}),
+	}
+
+	got := FilterScenarios(scenarios, ScenarioSelector{Tags: []string{"SMOKE"}})
+	if len(got) != 1 || got[0].Name != "smoke chat" {
+		t.Fatalf("tag filter result: %+v", got)
+	}
+
+	got = FilterScenarios(scenarios, ScenarioSelector{NameContains: []string{"tool"}})
+	if len(got) != 1 || got[0].Name != "regression tools" {
+		t.Fatalf("name filter result: %+v", got)
+	}
+
+	got = FilterScenarios(scenarios, ScenarioSelector{Tags: []string{"chat"}, NameContains: []string{"provider"}})
+	if len(got) != 1 || got[0].Name != "smoke chat" {
+		t.Fatalf("combined filter result: %+v", got)
 	}
 }
 

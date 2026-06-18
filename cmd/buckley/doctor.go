@@ -42,6 +42,10 @@ func runDoctorChatCommand(args []string) error {
 	modelID := fs.String("model", defaultModel, "model to use for the multi-turn chat check")
 	timeout := fs.Duration("timeout", 45*time.Second, "per-turn timeout")
 	scenarioPath := fs.String("scenario", "", "JSON scenario file or directory for the chat check")
+	var tagFilters stringListFlag
+	var nameFilters stringListFlag
+	fs.Var(&tagFilters, "tag", "only run/list scenarios with this tag (repeatable, comma-separated)")
+	fs.Var(&nameFilters, "name", "only run/list scenarios whose name or description contains this text (repeatable, comma-separated)")
 	listScenarios := fs.Bool("list", false, "list resolved chat check scenarios and exit without running them")
 	jsonOutput := fs.Bool("json", false, "print machine-readable JSON report")
 	outPath := fs.String("out", "", "write machine-readable JSON report to a file")
@@ -55,6 +59,14 @@ func runDoctorChatCommand(args []string) error {
 	scenarios, err := resolveDoctorChatScenarios(*modelID, *timeout, *scenarioPath, flagWasSet(fs, "model"), flagWasSet(fs, "timeout"))
 	if err != nil {
 		return err
+	}
+	selector := chatcheck.ScenarioSelector{
+		NameContains: nameFilters.Values(),
+		Tags:         tagFilters.Values(),
+	}
+	scenarios = chatcheck.FilterScenarios(scenarios, selector)
+	if len(scenarios) == 0 {
+		return fmt.Errorf("no chat check scenarios matched filters: %s", formatScenarioSelector(selector))
 	}
 	if *listScenarios {
 		inventory := buildDoctorChatScenarioInventory(scenarios)
@@ -147,15 +159,17 @@ type doctorChatScenarioInventory struct {
 }
 
 type doctorChatScenarioSummary struct {
-	Name            string `json:"name"`
-	Model           string `json:"model"`
-	SessionID       string `json:"session_id"`
-	Turns           int    `json:"turns"`
-	TimeoutMillis   int64  `json:"timeout_ms"`
-	MaxTokens       int    `json:"max_tokens"`
-	SystemPrompt    bool   `json:"system_prompt"`
-	ExpectedMatches int    `json:"expected_matches"`
-	MinCharChecks   int    `json:"min_char_checks"`
+	Description     string   `json:"description,omitempty"`
+	Name            string   `json:"name"`
+	Tags            []string `json:"tags,omitempty"`
+	Model           string   `json:"model"`
+	SessionID       string   `json:"session_id"`
+	Turns           int      `json:"turns"`
+	TimeoutMillis   int64    `json:"timeout_ms"`
+	MaxTokens       int      `json:"max_tokens"`
+	SystemPrompt    bool     `json:"system_prompt"`
+	ExpectedMatches int      `json:"expected_matches"`
+	MinCharChecks   int      `json:"min_char_checks"`
 }
 
 func buildDoctorChatScenarioInventory(scenarios []chatcheck.Scenario) doctorChatScenarioInventory {
@@ -165,7 +179,9 @@ func buildDoctorChatScenarioInventory(scenarios []chatcheck.Scenario) doctorChat
 	}
 	for _, scenario := range scenarios {
 		summary := doctorChatScenarioSummary{
+			Description:   scenario.Description,
 			Name:          scenario.Name,
+			Tags:          append([]string(nil), scenario.Tags...),
 			Model:         scenario.Model,
 			SessionID:     scenario.SessionID,
 			Turns:         len(scenario.Turns),
@@ -184,6 +200,33 @@ func buildDoctorChatScenarioInventory(scenarios []chatcheck.Scenario) doctorChat
 	return inventory
 }
 
+type stringListFlag []string
+
+func (f *stringListFlag) String() string {
+	if f == nil {
+		return ""
+	}
+	return strings.Join(*f, ",")
+}
+
+func (f *stringListFlag) Set(value string) error {
+	for _, part := range strings.Split(value, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		*f = append(*f, part)
+	}
+	return nil
+}
+
+func (f *stringListFlag) Values() []string {
+	if f == nil {
+		return nil
+	}
+	return append([]string(nil), *f...)
+}
+
 func countNonEmptyStrings(values []string) int {
 	count := 0
 	for _, value := range values {
@@ -192,6 +235,20 @@ func countNonEmptyStrings(values []string) int {
 		}
 	}
 	return count
+}
+
+func formatScenarioSelector(selector chatcheck.ScenarioSelector) string {
+	parts := make([]string, 0, 2)
+	if len(selector.Tags) > 0 {
+		parts = append(parts, "tag="+strings.Join(selector.Tags, ","))
+	}
+	if len(selector.NameContains) > 0 {
+		parts = append(parts, "name="+strings.Join(selector.NameContains, ","))
+	}
+	if len(parts) == 0 {
+		return "none"
+	}
+	return strings.Join(parts, " ")
 }
 
 func flagWasSet(fs *flag.FlagSet, name string) bool {
@@ -227,6 +284,9 @@ func printDoctorChatScenarioInventory(w io.Writer, inventory doctorChatScenarioI
 	fmt.Fprintf(w, "Chat check scenarios: %d\n", inventory.ScenarioCount)
 	for _, scenario := range inventory.Scenarios {
 		fmt.Fprintf(w, "  - %s: %d turns, model=%s, timeout=%dms, max_tokens=%d", scenario.Name, scenario.Turns, scenario.Model, scenario.TimeoutMillis, scenario.MaxTokens)
+		if len(scenario.Tags) > 0 {
+			fmt.Fprintf(w, ", tags=%s", strings.Join(scenario.Tags, ","))
+		}
 		if scenario.ExpectedMatches > 0 {
 			fmt.Fprintf(w, ", contains=%d", scenario.ExpectedMatches)
 		}
@@ -238,6 +298,9 @@ func printDoctorChatScenarioInventory(w io.Writer, inventory doctorChatScenarioI
 		}
 		if scenario.SessionID != "" {
 			fmt.Fprintf(w, ", session_id=%s", scenario.SessionID)
+		}
+		if scenario.Description != "" {
+			fmt.Fprintf(w, ", description=%q", scenario.Description)
 		}
 		fmt.Fprintln(w)
 	}

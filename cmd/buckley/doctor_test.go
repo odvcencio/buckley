@@ -135,7 +135,7 @@ func TestResolveDoctorChatScenariosDirectory(t *testing.T) {
 
 func TestRunDoctorChatCommandListDoesNotInitDependencies(t *testing.T) {
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "chat.json"), []byte(`{"name":"offline","turns":[{"user":"say READY","want_contains":["READY"]}]}`), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "chat.json"), []byte(`{"name":"offline","description":"offline smoke","tags":["smoke","chat"],"turns":[{"user":"say READY","want_contains":["READY"]}]}`), 0o644); err != nil {
 		t.Fatalf("write scenario: %v", err)
 	}
 
@@ -149,7 +149,7 @@ func TestRunDoctorChatCommandListDoesNotInitDependencies(t *testing.T) {
 
 	var runErr error
 	out := captureStdout(t, func() {
-		runErr = runDoctorChatCommand([]string{"-scenario", dir, "-list"})
+		runErr = runDoctorChatCommand([]string{"-scenario", dir, "-list", "-tag", "SMOKE", "-name", "offline"})
 	})
 	if runErr != nil {
 		t.Fatalf("runDoctorChatCommand: %v", runErr)
@@ -157,20 +157,34 @@ func TestRunDoctorChatCommandListDoesNotInitDependencies(t *testing.T) {
 	if called {
 		t.Fatal("list mode initialized dependencies")
 	}
-	for _, want := range []string{"Chat check scenarios: 1", "offline", "contains=1"} {
+	for _, want := range []string{"Chat check scenarios: 1", "offline", "tags=chat,smoke", "contains=1", `description="offline smoke"`} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("output missing %q: %s", want, out)
 		}
 	}
 }
 
+func TestRunDoctorChatCommandListRejectsEmptyFilter(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "chat.json"), []byte(`{"name":"offline","tags":["smoke"],"turns":[{"user":"say READY"}]}`), 0o644); err != nil {
+		t.Fatalf("write scenario: %v", err)
+	}
+
+	err := runDoctorChatCommand([]string{"-scenario", dir, "-list", "-tag", "regression"})
+	if err == nil || !strings.Contains(err.Error(), "no chat check scenarios matched filters") {
+		t.Fatalf("err=%v want empty filter error", err)
+	}
+}
+
 func TestPrintDoctorChatScenarioInventoryJSON(t *testing.T) {
 	inventory := buildDoctorChatScenarioInventory([]chatcheck.Scenario{
 		chatcheck.NormalizeScenario(chatcheck.Scenario{
-			Name:      "custom",
-			Model:     "test-model",
-			Timeout:   2 * time.Second,
-			MaxTokens: 64,
+			Description: "custom smoke",
+			Name:        "custom",
+			Tags:        []string{"smoke", "chat"},
+			Model:       "test-model",
+			Timeout:     2 * time.Second,
+			MaxTokens:   64,
 			Turns: []chatcheck.Turn{{
 				User:         "say TOKEN",
 				WantContains: []string{"TOKEN"},
@@ -188,6 +202,9 @@ func TestPrintDoctorChatScenarioInventoryJSON(t *testing.T) {
 	}
 	if got.ScenarioCount != 1 || got.Scenarios[0].ExpectedMatches != 1 || got.Scenarios[0].MinCharChecks != 1 {
 		t.Fatalf("unexpected inventory: %+v", got)
+	}
+	if got.Scenarios[0].Description != "custom smoke" || strings.Join(got.Scenarios[0].Tags, ",") != "chat,smoke" {
+		t.Fatalf("inventory missing metadata: %+v", got)
 	}
 }
 
