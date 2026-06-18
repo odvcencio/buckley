@@ -96,6 +96,28 @@ func TestRenderConversationMarkdown_TruncatesLargeToolOutput(t *testing.T) {
 	}
 }
 
+func TestRenderConversationMarkdown_IncludesAssistantTextAndToolCalls(t *testing.T) {
+	conv := conversation.New("session-1")
+	conv.Messages = append(conv.Messages, conversation.Message{
+		Role:    "assistant",
+		Content: "I'll inspect both files.",
+		ToolCalls: []model.ToolCall{
+			{ID: "call-1", Function: model.FunctionCall{Name: "read_file"}},
+			{ID: "call-2"},
+		},
+	})
+
+	got := renderConversationMarkdown("session-1", "/work/project", conv.Messages, time.Unix(0, 0).UTC())
+	for _, want := range []string{
+		"I'll inspect both files.",
+		"Tool calls: read_file, call-2",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("markdown missing %q:\n%s", want, got)
+		}
+	}
+}
+
 func TestResolveConversationExportPath_Default(t *testing.T) {
 	workDir := t.TempDir()
 	got, err := resolveConversationExportPath(workDir, "", "buckley/session 1", time.Date(2026, 6, 17, 1, 2, 3, 0, time.UTC))

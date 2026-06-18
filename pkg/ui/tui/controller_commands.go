@@ -9,7 +9,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode"
 
 	"m31labs.dev/buckley/pkg/conversation"
 	"m31labs.dev/buckley/pkg/model"
@@ -413,62 +412,6 @@ func historySummary(messages []conversation.Message, limit int) string {
 	return strings.TrimSpace(b.String())
 }
 
-func renderConversationMarkdown(sessionID, workDir string, messages []conversation.Message, exportedAt time.Time) string {
-	var b strings.Builder
-	b.WriteString("# Buckley Conversation Export\n\n")
-	b.WriteString("- Session: `" + sessionID + "`\n")
-	b.WriteString("- Project: `" + workDir + "`\n")
-	b.WriteString("- Exported: `" + exportedAt.Format(time.RFC3339) + "`\n")
-	b.WriteString(fmt.Sprintf("- Messages: `%d`\n\n", len(messages)))
-	b.WriteString("## Messages\n\n")
-
-	for i, msg := range messages {
-		title := formatRole(msg.Role)
-		if msg.IsSummary {
-			title += " Summary"
-		}
-		if msg.Name != "" {
-			title += " " + msg.Name
-		}
-		b.WriteString(fmt.Sprintf("### %d. %s\n\n", i+1, title))
-		if !msg.Timestamp.IsZero() {
-			b.WriteString("_" + msg.Timestamp.Format(time.RFC3339) + "_\n\n")
-		}
-		content := conversation.GetContentAsString(msg.Content)
-		if content == "" && len(msg.ToolCalls) > 0 {
-			var calls []string
-			for _, call := range msg.ToolCalls {
-				calls = append(calls, call.Function.Name)
-			}
-			content = "Tool calls: " + strings.Join(calls, ", ")
-		}
-		if msg.Reasoning != "" && content == "" {
-			content = msg.Reasoning
-		}
-		content = truncateModelToolOutput(content, 16*1024)
-		if strings.TrimSpace(content) == "" {
-			content = "(empty)"
-		}
-		b.WriteString(content)
-		b.WriteString("\n\n")
-	}
-	return b.String()
-}
-
-func resolveConversationExportPath(workDir, target, sessionID string, now time.Time) (string, error) {
-	if strings.TrimSpace(workDir) == "" {
-		return "", fmt.Errorf("workdir required")
-	}
-	if strings.TrimSpace(target) == "" {
-		name := fmt.Sprintf("%s-%s.md", safePathName(sessionID), now.Format("20060102-150405"))
-		return filepath.Join(workDir, ".buckley", "exports", name), nil
-	}
-	if !filepath.IsAbs(target) {
-		target = filepath.Join(workDir, target)
-	}
-	return filepath.Clean(target), nil
-}
-
 func cloneConversation(conv *conversation.Conversation) *conversation.Conversation {
 	if conv == nil {
 		return conversation.New("")
@@ -582,32 +525,6 @@ func truncatePreview(s string, maxBytes int) string {
 		return s
 	}
 	return strings.TrimSpace(takePrefixBytes(s, maxBytes-3)) + "..."
-}
-
-func safePathName(s string) string {
-	s = strings.TrimSpace(s)
-	if s == "" {
-		return "session"
-	}
-	var b strings.Builder
-	lastUnderscore := false
-	for _, r := range s {
-		ok := unicode.IsLetter(r) || unicode.IsDigit(r) || r == '-' || r == '_' || r == '.'
-		if ok {
-			b.WriteRune(r)
-			lastUnderscore = false
-			continue
-		}
-		if !lastUnderscore {
-			b.WriteByte('_')
-			lastUnderscore = true
-		}
-	}
-	out := strings.Trim(b.String(), "_.-")
-	if out == "" {
-		return "session"
-	}
-	return out
 }
 
 func emptyAs(s, fallback string) string {
