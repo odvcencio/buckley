@@ -90,42 +90,58 @@ func (b *Backend) PollEvent() terminal.Event {
 			return nil
 		}
 
-		// Handle bracketed paste state machine
-		switch e := ev.(type) {
-		case *tcell.EventPaste:
-			if e.Start() {
-				// Begin paste mode, buffer subsequent key events
-				b.inPaste = true
-				b.pasteBuffer.Reset()
-				continue
+		if pasteEvent, consumed := b.handlePasteEvent(ev); consumed {
+			if pasteEvent != nil {
+				return pasteEvent
 			}
-			if e.End() {
-				// End paste mode, emit PasteEvent with accumulated content
-				b.inPaste = false
-				text := b.pasteBuffer.String()
-				b.pasteBuffer.Reset()
-				if text != "" {
-					return terminal.PasteEvent{Text: text}
-				}
-				continue
-			}
-
-		case *tcell.EventKey:
-			if b.inPaste {
-				// Accumulate runes during paste
-				if e.Key() == tcell.KeyRune {
-					b.pasteBuffer.WriteRune(e.Rune())
-				} else if e.Key() == tcell.KeyEnter {
-					b.pasteBuffer.WriteRune('\n')
-				} else if e.Key() == tcell.KeyTab {
-					b.pasteBuffer.WriteRune('\t')
-				}
-				continue
-			}
+			continue
 		}
-
-		// Normal event handling
 		return convertEvent(ev)
+	}
+}
+
+func (b *Backend) handlePasteEvent(ev tcell.Event) (terminal.Event, bool) {
+	switch e := ev.(type) {
+	case *tcell.EventPaste:
+		if e.Start() {
+			b.beginPaste()
+			return nil, true
+		}
+		if e.End() {
+			return b.endPaste(), true
+		}
+	case *tcell.EventKey:
+		if b.inPaste {
+			b.appendPasteKey(e)
+			return nil, true
+		}
+	}
+	return nil, false
+}
+
+func (b *Backend) beginPaste() {
+	b.inPaste = true
+	b.pasteBuffer.Reset()
+}
+
+func (b *Backend) endPaste() terminal.Event {
+	b.inPaste = false
+	text := b.pasteBuffer.String()
+	b.pasteBuffer.Reset()
+	if text == "" {
+		return nil
+	}
+	return terminal.PasteEvent{Text: text}
+}
+
+func (b *Backend) appendPasteKey(e *tcell.EventKey) {
+	switch e.Key() {
+	case tcell.KeyRune:
+		b.pasteBuffer.WriteRune(e.Rune())
+	case tcell.KeyEnter:
+		b.pasteBuffer.WriteRune('\n')
+	case tcell.KeyTab:
+		b.pasteBuffer.WriteRune('\t')
 	}
 }
 
