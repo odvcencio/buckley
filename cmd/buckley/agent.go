@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -134,12 +135,14 @@ func runAgentCheck(args []string) error {
 }
 
 type agentRunOptions struct {
-	agentPath string
-	subagent  string
-	task      string
-	model     string
-	toolTier  string
-	dryRun    bool
+	agentPath  string
+	project    bool
+	specSelect string
+	subagent   string
+	task       string
+	model      string
+	toolTier   string
+	dryRun     bool
 }
 
 func runAgentRun(args []string) error {
@@ -148,7 +151,7 @@ func runAgentRun(args []string) error {
 		return err
 	}
 
-	profile, err := agentspec.LoadRuntimeProfile(opts.agentPath)
+	profile, err := loadAgentRunProfile(opts)
 	if err != nil {
 		return err
 	}
@@ -200,6 +203,8 @@ func runAgentRun(args []string) error {
 func parseAgentRunArgs(args []string) (agentRunOptions, error) {
 	fs := flag.NewFlagSet("agent run", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
+	projectSpec := fs.Bool("project", false, "use a discovered project agent spec from .buckley/agent.yaml or .buckley/agents")
+	specSelect := fs.String("spec", "", "project agent spec name or path to use with --project")
 	subagent := fs.String("subagent", "", "subagent name from the agent spec")
 	modelID := fs.String("model", "", "override model for this subagent task")
 	toolTier := fs.String("tool-tier", "", "override tool tier: none, read_only, standard, or full")
@@ -211,10 +216,12 @@ func parseAgentRunArgs(args []string) (agentRunOptions, error) {
 
 	rest := fs.Args()
 	opts := agentRunOptions{
-		subagent: strings.TrimSpace(*subagent),
-		model:    strings.TrimSpace(*modelID),
-		toolTier: strings.TrimSpace(*toolTier),
-		dryRun:   *dryRun,
+		project:    *projectSpec || strings.TrimSpace(*specSelect) != "",
+		specSelect: strings.TrimSpace(*specSelect),
+		subagent:   strings.TrimSpace(*subagent),
+		model:      strings.TrimSpace(*modelID),
+		toolTier:   strings.TrimSpace(*toolTier),
+		dryRun:     *dryRun,
 	}
 	if *noTools {
 		if opts.toolTier != "" && opts.toolTier != "none" {
@@ -225,7 +232,20 @@ func parseAgentRunArgs(args []string) (agentRunOptions, error) {
 	if opts.toolTier != "" && !validAgentRunToolTier(opts.toolTier) {
 		return agentRunOptions{}, fmt.Errorf("tool tier must be none, read_only, standard, or full")
 	}
-	if opts.subagent != "" {
+	if opts.project {
+		if opts.subagent != "" {
+			if len(rest) < 1 {
+				return agentRunOptions{}, fmt.Errorf("usage: buckley agent run --project --subagent <name> <task...>")
+			}
+			opts.task = strings.TrimSpace(strings.Join(rest, " "))
+		} else {
+			if len(rest) < 2 {
+				return agentRunOptions{}, fmt.Errorf("usage: buckley agent run --project <subagent> <task...>")
+			}
+			opts.subagent = strings.TrimSpace(rest[0])
+			opts.task = strings.TrimSpace(strings.Join(rest[1:], " "))
+		}
+	} else if opts.subagent != "" {
 		if len(rest) < 2 {
 			return agentRunOptions{}, fmt.Errorf("usage: buckley agent run --subagent <name> <agent.yaml> <task...>")
 		}
@@ -240,7 +260,9 @@ func parseAgentRunArgs(args []string) (agentRunOptions, error) {
 		opts.task = strings.TrimSpace(strings.Join(rest[2:], " "))
 	}
 	if opts.agentPath == "" {
-		return agentRunOptions{}, fmt.Errorf("agent spec path is required")
+		if !opts.project {
+			return agentRunOptions{}, fmt.Errorf("agent spec path is required")
+		}
 	}
 	if opts.subagent == "" {
 		return agentRunOptions{}, fmt.Errorf("subagent name is required")
@@ -249,6 +271,91 @@ func parseAgentRunArgs(args []string) (agentRunOptions, error) {
 		return agentRunOptions{}, fmt.Errorf("subagent task is required")
 	}
 	return opts, nil
+}
+
+func loadAgentRunProfile(opts agentRunOptions) (*agentspec.RuntimeProfile, error) {
+	if !opts.project {
+		return agentspec.LoadRuntimeProfile(opts.agentPath)
+	}
+	path, err := resolveProjectAgentSpecPath(opts.specSelect)
+	if err != nil {
+		return nil, err
+	}
+	return agentspec.LoadRuntimeProfile(path)
+}
+
+func resolveProjectAgentSpecPath(selector string) (string, error) {
+	selector = strings.TrimSpace(selector)
+	discovery, err := agentspec.DiscoverProjectSpecs(".")
+	if err != nil {
+		return "", err
+	}
+	if len(discovery.Specs) == 0 {
+		return "", fmt.Errorf("project agent specs not found; create .buckley/agent.yaml or run `buckley agent list`")
+	}
+	if selector == "" {
+		for _, spec := range discovery.Specs {
+			base := strings.ToLower(filepath.Base(spec.Path))
+			parent := strings.ToLower(filepath.Base(filepath.Dir(spec.Path)))
+			if (base == "agent.yaml" || base == "agent.yml") && parent == ".buckley" {
+				return spec.Path, nil
+			}
+		}
+		if len(discovery.Specs) == 1 {
+			return discovery.Specs[0].Path, nil
+		}
+		return "", fmt.Errorf("multiple project agent specs found; pass --spec <name|path> or run `buckley agent list`")
+	}
+
+	matches := []agentspec.DiscoveredSpec{}
+	for _, spec := range discovery.Specs {
+		if projectAgentSpecMatches(spec, selector) {
+			matches = append(matches, spec)
+		}
+	}
+	switch len(matches) {
+	case 0:
+		return "", fmt.Errorf("project agent spec %q not found; run `buckley agent list`", selector)
+	case 1:
+		return matches[0].Path, nil
+	default:
+		return "", fmt.Errorf("project agent spec %q is ambiguous; pass a more specific --spec value", selector)
+	}
+}
+
+func projectAgentSpecMatches(spec agentspec.DiscoveredSpec, selector string) bool {
+	selector = strings.TrimSpace(selector)
+	if selector == "" {
+		return false
+	}
+	path := strings.TrimSpace(spec.Path)
+	if path == selector || filepath.ToSlash(path) == filepath.ToSlash(selector) {
+		return true
+	}
+	if strings.TrimSpace(spec.Name) == selector {
+		return true
+	}
+	stem := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+	if stem == selector {
+		return true
+	}
+	for _, rel := range projectAgentSpecRelativePaths(path) {
+		if rel == selector || strings.TrimSuffix(rel, filepath.Ext(rel)) == selector {
+			return true
+		}
+	}
+	return false
+}
+
+func projectAgentSpecRelativePaths(path string) []string {
+	path = filepath.ToSlash(strings.TrimSpace(path))
+	marker := "/.buckley/"
+	idx := strings.LastIndex(path, marker)
+	if idx < 0 {
+		return []string{filepath.Base(path)}
+	}
+	rel := path[idx+len(marker):]
+	return []string{rel, strings.TrimPrefix(rel, "agents/")}
 }
 
 func renderAgentRunPreview(opts agentRunOptions, profile *agentspec.RuntimeProfile) string {

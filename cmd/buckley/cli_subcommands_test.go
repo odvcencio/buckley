@@ -213,6 +213,30 @@ func TestParseAgentRunArgs(t *testing.T) {
 		t.Fatalf("toolTier=%q want read_only", opts.toolTier)
 	}
 
+	opts, err = parseAgentRunArgs([]string{"--project", "reviewer", "inspect", "this"})
+	if err != nil {
+		t.Fatalf("parseAgentRunArgs project form: %v", err)
+	}
+	if !opts.project || opts.agentPath != "" || opts.subagent != "reviewer" || opts.task != "inspect this" {
+		t.Fatalf("unexpected project opts: %+v", opts)
+	}
+
+	opts, err = parseAgentRunArgs([]string{"--project", "--subagent", "coder", "fix", "bug"})
+	if err != nil {
+		t.Fatalf("parseAgentRunArgs project subagent form: %v", err)
+	}
+	if !opts.project || opts.subagent != "coder" || opts.task != "fix bug" {
+		t.Fatalf("unexpected project subagent opts: %+v", opts)
+	}
+
+	opts, err = parseAgentRunArgs([]string{"--spec", "daily", "reviewer", "inspect"})
+	if err != nil {
+		t.Fatalf("parseAgentRunArgs spec form: %v", err)
+	}
+	if !opts.project || opts.specSelect != "daily" || opts.subagent != "reviewer" || opts.task != "inspect" {
+		t.Fatalf("unexpected spec opts: %+v", opts)
+	}
+
 	if _, err := parseAgentRunArgs([]string{"--tool-tier", "root", "agent.yaml", "reviewer", "inspect"}); err == nil {
 		t.Fatalf("expected invalid tool-tier error")
 	}
@@ -222,6 +246,9 @@ func TestParseAgentRunArgs(t *testing.T) {
 
 	if _, err := parseAgentRunArgs([]string{"agent.yaml", "reviewer"}); err == nil {
 		t.Fatalf("expected usage error for missing task")
+	}
+	if _, err := parseAgentRunArgs([]string{"--project", "reviewer"}); err == nil {
+		t.Fatalf("expected project usage error for missing task")
 	}
 }
 
@@ -286,6 +313,78 @@ subagents:
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("dry-run output missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestRunAgentRunProjectDryRunPreview(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".buckley", "agents"), 0o755); err != nil {
+		t.Fatalf("mkdir project specs: %v", err)
+	}
+	defaultPath := filepath.Join(dir, ".buckley", "agent.yaml")
+	if err := os.WriteFile(defaultPath, []byte(`
+version: buckley.agent/v1
+name: daily
+subagents:
+  - name: reviewer
+    model: xiaomi/mimo-v2.5-pro
+    tool_tier: read_only
+    instructions: Review carefully.
+`), 0o644); err != nil {
+		t.Fatalf("write default spec: %v", err)
+	}
+	namedPath := filepath.Join(dir, ".buckley", "agents", "implementation.yaml")
+	if err := os.WriteFile(namedPath, []byte(`
+version: buckley.agent/v1
+name: implementation
+subagents:
+  - name: coder
+    tool_tier: standard
+`), 0o644); err != nil {
+		t.Fatalf("write named spec: %v", err)
+	}
+	oldWd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chdir(oldWd)
+	})
+	if err := os.Chdir(filepath.Join(dir, ".buckley")); err != nil {
+		t.Fatalf("chdir nested: %v", err)
+	}
+
+	out := captureStdout(t, func() {
+		if err := runAgentRun([]string{"--project", "--dry-run", "reviewer", "inspect", "this"}); err != nil {
+			t.Fatalf("runAgentRun project dry-run: %v", err)
+		}
+	})
+	for _, want := range []string{
+		"Agent run preview",
+		"Source: " + defaultPath,
+		"Agent: daily/reviewer",
+		"Subagent: reviewer",
+		"Task: inspect this",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("project dry-run output missing %q:\n%s", want, out)
+		}
+	}
+
+	out = captureStdout(t, func() {
+		if err := runAgentRun([]string{"--spec", "agents/implementation.yaml", "--dry-run", "coder", "build", "it"}); err != nil {
+			t.Fatalf("runAgentRun named project dry-run: %v", err)
+		}
+	})
+	for _, want := range []string{
+		"Source: " + namedPath,
+		"Agent: implementation/coder",
+		"Subagent: coder",
+		"Task: build it",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("named project dry-run output missing %q:\n%s", want, out)
 		}
 	}
 }
