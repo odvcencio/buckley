@@ -389,6 +389,54 @@ subagents:
 	}
 }
 
+func TestRunAgentRunFilesystemProjectDryRunPreview(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "package.json"), []byte(`{"name":"daily-agent"}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write package.json: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "agent", "subagents", "researcher"), 0o755); err != nil {
+		t.Fatalf("mkdir filesystem agent: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "agent", "instructions.md"), []byte("Use the project agent.\n"), 0o644); err != nil {
+		t.Fatalf("write instructions: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "agent", "subagents", "researcher", "instructions.md"), []byte("Research carefully.\n"), 0o644); err != nil {
+		t.Fatalf("write subagent instructions: %v", err)
+	}
+	nested := filepath.Join(dir, "src")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatalf("mkdir nested: %v", err)
+	}
+	oldWd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chdir(oldWd)
+	})
+	if err := os.Chdir(nested); err != nil {
+		t.Fatalf("chdir nested: %v", err)
+	}
+
+	out := captureStdout(t, func() {
+		if err := runAgentRun([]string{"--project", "--dry-run", "researcher", "investigate", "this"}); err != nil {
+			t.Fatalf("runAgentRun filesystem project dry-run: %v", err)
+		}
+	})
+	for _, want := range []string{
+		"Agent run preview",
+		"Source: " + filepath.Join(dir, "agent"),
+		"Agent: daily-agent/researcher",
+		"Subagent: researcher",
+		"Instructions: yes",
+		"Task: investigate this",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("filesystem project dry-run output missing %q:\n%s", want, out)
+		}
+	}
+}
+
 func TestFormatSubagentTask(t *testing.T) {
 	got := formatSubagentTask("reviewer", "inspect this")
 	for _, want := range []string{`Subagent "reviewer" task:`, "inspect this", "Complete the task directly", "remaining risks", "do not claim unperformed actions"} {

@@ -102,6 +102,9 @@ func printAgentListText(w io.Writer, snapshot agentListSnapshot) {
 			name = "(unnamed)"
 		}
 		fmt.Fprintf(w, "  - %s (%s): %s", name, status, spec.Path)
+		if kind := strings.TrimSpace(spec.Kind); kind != "" && kind != agentspec.DiscoveredKindBuckley {
+			fmt.Fprintf(w, ", kind=%s", kind)
+		}
 		if len(spec.Subagents) > 0 {
 			fmt.Fprintf(w, ", subagents=%s", strings.Join(spec.Subagents, ","))
 		}
@@ -117,7 +120,7 @@ func printAgentListText(w io.Writer, snapshot agentListSnapshot) {
 
 func runAgentCheck(args []string) error {
 	if len(args) != 1 {
-		return fmt.Errorf("usage: buckley agent check <agent.yaml>")
+		return fmt.Errorf("usage: buckley agent check <agent.yaml|agent-dir>")
 	}
 	spec, diagnostics, err := loadAgentSpec(args[0])
 	if err != nil {
@@ -291,7 +294,7 @@ func resolveProjectAgentSpecPath(selector string) (string, error) {
 		return "", err
 	}
 	if len(discovery.Specs) == 0 {
-		return "", fmt.Errorf("project agent specs not found; create .buckley/agent.yaml or run `buckley agent list`")
+		return "", fmt.Errorf("project agent specs not found; create .buckley/agent.yaml or agent/instructions.md, then run `buckley agent list`")
 	}
 	if selector == "" {
 		for _, spec := range discovery.Specs {
@@ -333,6 +336,9 @@ func projectAgentSpecMatches(spec agentspec.DiscoveredSpec, selector string) boo
 		return true
 	}
 	if strings.TrimSpace(spec.Name) == selector {
+		return true
+	}
+	if strings.TrimSpace(spec.Kind) == selector {
 		return true
 	}
 	stem := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
@@ -463,7 +469,7 @@ func runAgentShow(args []string) error {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return fmt.Errorf("usage: buckley agent show [--format text|json] <agent.yaml>")
+		return fmt.Errorf("usage: buckley agent show [--format text|json] <agent.yaml|agent-dir>")
 	}
 	spec, diagnostics, err := loadAgentSpec(fs.Arg(0))
 	if err != nil {
@@ -485,6 +491,15 @@ func runAgentShow(args []string) error {
 }
 
 func loadAgentSpec(path string) (*agentspec.Spec, []agentspec.Diagnostic, error) {
+	if info, err := os.Stat(path); err == nil && info.IsDir() {
+		spec, extraDiagnostics, err := agentspec.LoadFilesystemSpec(path)
+		if err != nil {
+			return nil, nil, err
+		}
+		diagnostics := append([]agentspec.Diagnostic{}, spec.Validate()...)
+		diagnostics = append(diagnostics, extraDiagnostics...)
+		return spec, diagnostics, nil
+	}
 	spec, err := agentspec.LoadFile(path)
 	if err != nil {
 		return nil, nil, err

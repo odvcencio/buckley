@@ -98,6 +98,7 @@ type infoAgentSpecs struct {
 
 type infoAgentSpecEntry struct {
 	Path        string                 `json:"path"`
+	Kind        string                 `json:"kind,omitempty"`
 	Name        string                 `json:"name,omitempty"`
 	Summary     string                 `json:"summary,omitempty"`
 	Subagents   []string               `json:"subagents,omitempty"`
@@ -419,6 +420,7 @@ func inspectProjectAgentSpecs(cwd string) (infoAgentSpecs, []string) {
 	for _, spec := range discovery.Specs {
 		entry := infoAgentSpecEntry{
 			Path:        spec.Path,
+			Kind:        spec.Kind,
 			Name:        spec.Name,
 			Summary:     spec.Summary,
 			Subagents:   append([]string(nil), spec.Subagents...),

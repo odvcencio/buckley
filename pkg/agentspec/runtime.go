@@ -28,6 +28,9 @@ func LoadRuntimeProfile(path string) (*RuntimeProfile, error) {
 	if path == "" {
 		return nil, fmt.Errorf("agent spec path is required")
 	}
+	if info, err := os.Stat(path); err == nil && info.IsDir() {
+		return LoadFilesystemRuntimeProfile(path)
+	}
 	spec, err := LoadFile(path)
 	if err != nil {
 		return nil, err
