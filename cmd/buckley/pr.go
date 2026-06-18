@@ -21,8 +21,33 @@ const (
 	ghAPITimeout    = 120 * time.Second
 )
 
-// runPRCommand generates a structured PR via tool-use.
-func runPRCommand(args []string) error {
+type prCommandOptions struct {
+	dryRun   bool
+	yes      bool
+	push     bool
+	verbose  bool
+	showCost bool
+	base     string
+	model    string
+	backend  string
+	timeout  time.Duration
+}
+
+type prCommandRuntime struct {
+	backend   string
+	modelID   string
+	ledger    *transparency.CostLedger
+	framework *oneshot.Framework
+}
+
+type prRunResult struct {
+	PR           *commands.PRResult
+	Trace        *transparency.Trace
+	ContextAudit *transparency.ContextAudit
+	Error        error
+}
+
+func parsePRCommandOptions(args []string) (prCommandOptions, error) {
 	fs := flag.NewFlagSet("pr", flag.ContinueOnError)
 	dryRun := fs.Bool("dry-run", false, "print the generated PR without creating it")
 	yes := fs.Bool("yes", false, "skip confirmation prompts and create the PR")
@@ -35,164 +60,193 @@ func runPRCommand(args []string) error {
 	timeout := fs.Duration("timeout", 2*time.Minute, "timeout for model request")
 
 	if err := fs.Parse(args); err != nil {
-		return err
+		return prCommandOptions{}, err
 	}
 	backend, err := resolveOneshotBackend("pr", *backendFlag)
 	if err != nil {
+		return prCommandOptions{}, err
+	}
+	return prCommandOptions{
+		dryRun:   *dryRun,
+		yes:      *yes,
+		push:     *pushFlag,
+		verbose:  *verbose,
+		showCost: *showCost,
+		base:     *baseFlag,
+		model:    *modelFlag,
+		backend:  backend,
+		timeout:  *timeout,
+	}, nil
+}
+
+// runPRCommand generates a structured PR via tool-use.
+func runPRCommand(args []string) error {
+	opts, err := parsePRCommandOptions(args)
+	if err != nil {
 		return err
 	}
 
-	// Initialize dependencies
-	cfg, mgr, store, err := initOneshotDependencies(backend)
-	if store != nil {
-		defer store.Close()
+	runtime, cleanup, err := newPRCommandRuntime(opts)
+	defer cleanup()
+	if err != nil {
+		return err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), opts.timeout)
+	defer cancel()
+
+	if !quietMode {
+		termOut.Dim("Using %s", describeOneshotBackend(runtime.backend, runtime.modelID))
+	}
+
+	result, err := runPRGeneration(ctx, runtime.framework, opts.base)
+	if err != nil {
+		return err
+	}
+
+	pr, baseBranch, err := renderPRGenerationResult(opts, result, runtime.ledger)
+	if err != nil {
+		return err
+	}
+	if opts.dryRun {
+		return nil
+	}
+
+	if err := confirmPRCreation(opts); err != nil {
+		return err
+	}
+
+	if opts.push {
+		if err := pushCurrentBranch(); err != nil {
+			return err
+		}
+	}
+
+	if err := createPR(pr, baseBranch); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func newPRCommandRuntime(opts prCommandOptions) (*prCommandRuntime, func(), error) {
+	cfg, mgr, store, err := initOneshotDependencies(opts.backend)
+	cleanup := func() {
+		if store != nil {
+			store.Close()
+		}
 	}
 	if err != nil {
-		return fmt.Errorf("init dependencies: %w", err)
+		cleanup()
+		return nil, func() {}, fmt.Errorf("init dependencies: %w", err)
 	}
 
-	// Determine model
-	modelID := resolvePRModelID(*modelFlag, cfg, backend)
-	if backend == oneshotBackendAPI && modelID == "" {
-		return fmt.Errorf("no model configured (set BUCKLEY_MODEL_PR or configure models.utility.pr)")
+	modelID := resolvePRModelID(opts.model, cfg, opts.backend)
+	if opts.backend == oneshotBackendAPI && modelID == "" {
+		cleanup()
+		return nil, func() {}, fmt.Errorf("no model configured (set BUCKLEY_MODEL_PR or configure models.utility.pr)")
 	}
 
-	// Get model pricing for cost calculation
 	pricing := transparency.ModelPricing{
 		InputPerMillion:  3.0,
 		OutputPerMillion: 15.0,
 	}
-	if backend == oneshotBackendAPI && mgr != nil {
+	if opts.backend == oneshotBackendAPI && mgr != nil {
 		if info, err := mgr.GetModelInfo(modelID); err == nil {
 			pricing.InputPerMillion = info.Pricing.Prompt
 			pricing.OutputPerMillion = info.Pricing.Completion
 		}
 	}
 
-	// Create cost ledger
 	ledger := transparency.NewCostLedger()
-
-	// Create invoker
-	invoker, err := newOneshotToolInvoker(backend, modelID, cfg, mgr, pricing, ledger)
+	invoker, err := newOneshotToolInvoker(opts.backend, modelID, cfg, mgr, pricing, ledger)
 	if err != nil {
-		return err
+		cleanup()
+		return nil, func() {}, err
 	}
 
-	// Create unified framework runner
-	framework := oneshot.NewFramework(invoker, nil)
-	def := commands.PRDefinition{BaseBranch: *baseFlag}
+	return &prCommandRuntime{
+		backend:   opts.backend,
+		modelID:   modelID,
+		ledger:    ledger,
+		framework: oneshot.NewFramework(invoker, nil),
+	}, cleanup, nil
+}
 
-	// Run with timeout
-	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
-	defer cancel()
-
-	// Show what we're doing
-	if !quietMode {
-		termOut.Dim("Using %s", describeOneshotBackend(backend, modelID))
-	}
-
-	// Execute the PR generation with spinner
+func runPRGeneration(ctx context.Context, framework *oneshot.Framework, baseBranch string) (*prRunResult, error) {
 	spinner := terminal.NewSpinner("Generating PR...")
 	spinner.Start()
 
-	fwResult, err := framework.Run(ctx, def, oneshot.RunOpts{})
-
-	// Adapt to local result shape
-	type prRunResult struct {
-		PR           *commands.PRResult
-		Trace        *transparency.Trace
-		ContextAudit *transparency.ContextAudit
-		Error        error
-	}
-	result := &prRunResult{}
-	if fwResult != nil {
-		result.Trace = fwResult.Trace
-		result.ContextAudit = fwResult.ContextAudit
-		if fwResult.Value != nil {
-			if pr, ok := fwResult.Value.(*commands.PRResult); ok {
-				result.PR = pr
-			} else {
-				result.Error = fmt.Errorf("unexpected result type: %T", fwResult.Value)
-			}
-		}
-	}
+	fwResult, err := framework.Run(ctx, commands.PRDefinition{BaseBranch: baseBranch}, oneshot.RunOpts{})
+	result := prRunResultFromFramework(fwResult)
 	if err != nil {
 		result.Error = err
-	}
-
-	if err != nil {
 		spinner.StopWithError(err.Error())
-	} else if result.Error != nil {
+		return nil, fmt.Errorf("PR generation failed: %w", err)
+	}
+	if result.Error != nil {
 		spinner.StopWithError(result.Error.Error())
 	} else {
 		spinner.StopWithSuccess("Generated PR")
 	}
+	return result, nil
+}
 
-	if err != nil {
-		return fmt.Errorf("PR generation failed: %w", err)
+func prRunResultFromFramework(fwResult *oneshot.RunResult) *prRunResult {
+	result := &prRunResult{}
+	if fwResult == nil {
+		return result
 	}
+	result.Trace = fwResult.Trace
+	result.ContextAudit = fwResult.ContextAudit
+	if fwResult.Value == nil {
+		return result
+	}
+	pr, ok := fwResult.Value.(*commands.PRResult)
+	if !ok {
+		result.Error = fmt.Errorf("unexpected result type: %T", fwResult.Value)
+		return result
+	}
+	result.PR = pr
+	return result
+}
 
-	// Show context audit
-	if *verbose && result.ContextAudit != nil {
+func renderPRGenerationResult(opts prCommandOptions, result *prRunResult, ledger *transparency.CostLedger) (*commands.PRResult, string, error) {
+	if opts.verbose && result.ContextAudit != nil {
 		printContextAudit(result.ContextAudit)
 	}
-
-	// Show reasoning
-	if *verbose && result.Trace != nil && result.Trace.Reasoning != "" {
+	if opts.verbose && result.Trace != nil && result.Trace.Reasoning != "" {
 		printReasoning(result.Trace.Reasoning)
 	}
-
-	// Check for errors
 	if result.Error != nil {
 		printError(result.Error, result.Trace)
-		return result.Error
+		return nil, "", result.Error
 	}
-
-	// Show the PR
 	if result.PR == nil {
-		return fmt.Errorf("no PR generated")
+		return nil, "", fmt.Errorf("no PR generated")
 	}
 
-	// Detect branch metadata for display and PR creation
-	branch, baseBranch := detectPRBranches(*baseFlag)
-
+	branch, baseBranch := detectPRBranches(opts.base)
 	printPR(result.PR, branch, baseBranch)
-
-	// Show cost
-	if *showCost && result.Trace != nil {
+	if opts.showCost && result.Trace != nil {
 		printCost(result.Trace, ledger)
 	}
+	return result.PR, baseBranch, nil
+}
 
-	// Dry run - just print and exit
-	if *dryRun {
+func confirmPRCreation(opts prCommandOptions) error {
+	if opts.yes {
 		return nil
 	}
-
-	// Auto-confirm or prompt
-	if !*yes {
-		if !stdinIsTerminalFn() {
-			return fmt.Errorf("refusing to create PR without confirmation in non-interactive mode (use --dry-run or --yes)")
-		}
-		fmt.Print("\nCreate this PR? [y/N] ")
-		var response string
-		fmt.Scanln(&response)
-		if strings.ToLower(response) != "y" && strings.ToLower(response) != "yes" {
-			return fmt.Errorf("aborted")
-		}
+	if !stdinIsTerminalFn() {
+		return fmt.Errorf("refusing to create PR without confirmation in non-interactive mode (use --dry-run or --yes)")
 	}
-
-	// Push if requested
-	if *pushFlag {
-		if err := pushCurrentBranch(); err != nil {
-			return err
-		}
+	fmt.Print("\nCreate this PR? [y/N] ")
+	var response string
+	fmt.Scanln(&response)
+	if strings.ToLower(response) != "y" && strings.ToLower(response) != "yes" {
+		return fmt.Errorf("aborted")
 	}
-
-	// Create the PR
-	if err := createPR(result.PR, baseBranch); err != nil {
-		return err
-	}
-
 	return nil
 }
 
