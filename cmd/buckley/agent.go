@@ -119,10 +119,18 @@ func printAgentListText(w io.Writer, snapshot agentListSnapshot) {
 }
 
 func runAgentCheck(args []string) error {
-	if len(args) != 1 {
-		return fmt.Errorf("usage: buckley agent check <agent.yaml|agent-dir>")
+	fs := flag.NewFlagSet("agent check", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	projectSpec := fs.Bool("project", false, "check the default discovered project agent spec")
+	specSelect := fs.String("spec", "", "project agent spec name, kind, or path to check")
+	if err := fs.Parse(args); err != nil {
+		return err
 	}
-	spec, diagnostics, err := loadAgentSpec(args[0])
+	path, err := resolveAgentCommandSpecPath("check", *projectSpec, *specSelect, fs.Args())
+	if err != nil {
+		return err
+	}
+	spec, diagnostics, err := loadAgentSpec(path)
 	if err != nil {
 		return err
 	}
@@ -130,7 +138,7 @@ func runAgentCheck(args []string) error {
 		fmt.Print(agentspec.RenderText(spec, diagnostics))
 		return fmt.Errorf("agent spec has validation errors")
 	}
-	fmt.Printf("OK: %s is a valid Buckley agent spec\n", args[0])
+	fmt.Printf("OK: %s is a valid Buckley agent spec\n", path)
 	if len(diagnostics) > 0 {
 		fmt.Print(agentspec.RenderText(spec, diagnostics))
 	}
@@ -464,30 +472,61 @@ func formatSubagentTask(subagent, task string) string {
 func runAgentShow(args []string) error {
 	fs := flag.NewFlagSet("agent show", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
+	jsonOutput := fs.Bool("json", false, "print machine-readable JSON")
 	format := fs.String("format", "text", "output format: text or json")
+	projectSpec := fs.Bool("project", false, "show the default discovered project agent spec")
+	specSelect := fs.String("spec", "", "project agent spec name, kind, or path to show")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if fs.NArg() != 1 {
-		return fmt.Errorf("usage: buckley agent show [--format text|json] <agent.yaml|agent-dir>")
-	}
-	spec, diagnostics, err := loadAgentSpec(fs.Arg(0))
+	path, err := resolveAgentCommandSpecPath("show", *projectSpec, *specSelect, fs.Args())
 	if err != nil {
 		return err
 	}
-	switch strings.ToLower(strings.TrimSpace(*format)) {
+	spec, diagnostics, err := loadAgentSpec(path)
+	if err != nil {
+		return err
+	}
+	formatValue := strings.ToLower(strings.TrimSpace(*format))
+	switch formatValue {
 	case "", "text":
-		fmt.Print(agentspec.RenderText(spec, diagnostics))
 	case "json":
+		*jsonOutput = true
+	default:
+		return fmt.Errorf("unknown format %q (use text or json)", *format)
+	}
+	if *jsonOutput {
 		data, err := agentspec.JSON(spec, diagnostics)
 		if err != nil {
 			return fmt.Errorf("encoding agent spec: %w", err)
 		}
 		fmt.Println(string(data))
-	default:
-		return fmt.Errorf("unknown format %q (use text or json)", *format)
+		return nil
 	}
+	fmt.Print(agentspec.RenderText(spec, diagnostics))
 	return nil
+}
+
+func resolveAgentCommandSpecPath(command string, project bool, selector string, args []string) (string, error) {
+	selector = strings.TrimSpace(selector)
+	if selector != "" {
+		project = true
+	}
+	usage := fmt.Sprintf("usage: buckley agent %s [--project|--spec <name|kind|path>] <agent.yaml|agent-dir>", command)
+	if project {
+		if len(args) != 0 {
+			return "", fmt.Errorf("%s", usage)
+		}
+		return resolveProjectAgentSpecPath(selector)
+	}
+	if len(args) != 1 {
+		return "", fmt.Errorf("%s", usage)
+	}
+	path := strings.TrimSpace(args[0])
+	if path == "" {
+		return "", fmt.Errorf("%s", usage)
+	}
+	return path, nil
 }
 
 func loadAgentSpec(path string) (*agentspec.Spec, []agentspec.Diagnostic, error) {

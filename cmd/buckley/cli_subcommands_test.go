@@ -91,6 +91,87 @@ policies:
 	}
 }
 
+func TestRunAgentCommandProjectCheckAndShow(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".buckley"), 0o755); err != nil {
+		t.Fatalf("mkdir project config: %v", err)
+	}
+	defaultPath := filepath.Join(dir, ".buckley", "agent.yaml")
+	if err := os.WriteFile(defaultPath, []byte(`
+version: buckley.agent/v1
+name: daily
+summary: Default daily driver
+subagents:
+  - name: reviewer
+    tool_tier: read_only
+`), 0o644); err != nil {
+		t.Fatalf("write default agent spec: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "package.json"), []byte(`{"name":"daily-agent"}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write package.json: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "agent", "subagents", "researcher"), 0o755); err != nil {
+		t.Fatalf("mkdir filesystem agent: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "agent", "instructions.md"), []byte("Use the project agent.\n"), 0o644); err != nil {
+		t.Fatalf("write filesystem instructions: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "agent", "subagents", "researcher", "instructions.md"), []byte("Research carefully.\n"), 0o644); err != nil {
+		t.Fatalf("write filesystem subagent instructions: %v", err)
+	}
+	nested := filepath.Join(dir, "src")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatalf("mkdir nested: %v", err)
+	}
+	oldWd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(oldWd) })
+	if err := os.Chdir(nested); err != nil {
+		t.Fatalf("chdir nested: %v", err)
+	}
+
+	checkOut := captureStdout(t, func() {
+		if err := runAgentCommand([]string{"check", "--project"}); err != nil {
+			t.Fatalf("runAgentCommand project check: %v", err)
+		}
+	})
+	if !strings.Contains(checkOut, "OK: "+defaultPath+" is a valid Buckley agent spec") {
+		t.Fatalf("unexpected project check output:\n%s", checkOut)
+	}
+
+	showOut := captureStdout(t, func() {
+		if err := runAgentCommand([]string{"show", "--project"}); err != nil {
+			t.Fatalf("runAgentCommand project show: %v", err)
+		}
+	})
+	for _, want := range []string{"Agent: daily", "Summary: Default daily driver", "Subagents:", "  - reviewer (tool_tier=read_only)"} {
+		if !strings.Contains(showOut, want) {
+			t.Fatalf("project show output missing %q:\n%s", want, showOut)
+		}
+	}
+
+	jsonOut := captureStdout(t, func() {
+		if err := runAgentCommand([]string{"show", "--json", "--spec", "filesystem"}); err != nil {
+			t.Fatalf("runAgentCommand filesystem show json: %v", err)
+		}
+	})
+	var payload struct {
+		Spec struct {
+			Name     string            `json:"name"`
+			Metadata map[string]string `json:"metadata"`
+		} `json:"spec"`
+		Valid bool `json:"valid"`
+	}
+	if err := json.Unmarshal([]byte(jsonOut), &payload); err != nil {
+		t.Fatalf("unmarshal filesystem show json: %v\n%s", err, jsonOut)
+	}
+	if !payload.Valid || payload.Spec.Name != "daily-agent" || payload.Spec.Metadata["layout"] != agentspec.DiscoveredKindFilesystem {
+		t.Fatalf("unexpected filesystem show json: %+v", payload)
+	}
+}
+
 func TestRunAgentCommandList(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(dir, ".buckley", "agents"), 0o755); err != nil {
