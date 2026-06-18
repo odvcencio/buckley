@@ -665,6 +665,7 @@ func printHelp() {
 	fmt.Println("  agent list                       List discovered project agent profiles")
 	fmt.Println("  agent check [--project|path]     Validate a Buckley agent profile")
 	fmt.Println("  agent show [--project|path]      Show a project agent profile summary")
+	fmt.Println("  agent subagents [--project|path] List runnable subagents and invocation examples")
 	fmt.Println("  agent run [--project|--dry-run|--no-tools] Invoke or preview a named subagent")
 	fmt.Println("  agent-server                     HTTP proxy for ACP editor workflows (inline propose/apply)")
 	fmt.Println("  lsp [--coordinator addr]         Start LSP server on stdio (editor integration)")
@@ -990,7 +991,7 @@ func printBashCompletion() {
             return 0
             ;;
         agent)
-            COMPREPLY=( $(compgen -W "init list check show run invoke" -- "${cur}") )
+            COMPREPLY=( $(compgen -W "init list check show subagents run invoke" -- "${cur}") )
             return 0
             ;;
         skills|skill)
@@ -1103,7 +1104,7 @@ _buckley() {
                     _values 'batch command' prune-workspaces
                     ;;
                 agent)
-                    _values 'agent command' init list check show run invoke
+                    _values 'agent command' init list check show subagents run invoke
                     ;;
                 skills|skill)
                     _values 'skills command' init list show
@@ -1193,6 +1194,7 @@ complete -c buckley -n '__fish_seen_subcommand_from agent' -a check -d 'Validate
 complete -c buckley -n '__fish_seen_subcommand_from agent' -a init -d 'Create a filesystem-first agent layout'
 complete -c buckley -n '__fish_seen_subcommand_from agent' -a list -d 'List discovered project agent specs'
 complete -c buckley -n '__fish_seen_subcommand_from agent' -a show -d 'Inspect agent spec'
+complete -c buckley -n '__fish_seen_subcommand_from agent' -a subagents -d 'List runnable subagents'
 complete -c buckley -n '__fish_seen_subcommand_from agent' -a run -d 'Invoke a named subagent'
 complete -c buckley -n '__fish_seen_subcommand_from agent' -a invoke -d 'Invoke a named subagent'
 

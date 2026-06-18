@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,6 +10,8 @@ import (
 
 	"m31labs.dev/buckley/pkg/agentspec"
 	"m31labs.dev/buckley/pkg/config"
+	"m31labs.dev/buckley/pkg/model"
+	"m31labs.dev/buckley/pkg/storage"
 	"m31labs.dev/buckley/pkg/tool"
 	"m31labs.dev/buckley/pkg/tool/builtin"
 )
@@ -261,6 +264,98 @@ subagents:
 	}
 	if !payload.Valid || payload.Spec.Name != "daily-agent" || payload.Spec.Metadata["layout"] != agentspec.DiscoveredKindFilesystem {
 		t.Fatalf("unexpected filesystem show json: %+v", payload)
+	}
+}
+
+func TestRunAgentCommandSubagentsDefaultsToProject(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".buckley"), 0o755); err != nil {
+		t.Fatalf("mkdir project config: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".buckley", "agent.yaml"), []byte(`
+version: buckley.agent/v1
+name: daily
+models:
+  execution: root-model
+tools:
+  tier: full
+  allow: [read_file, search_text]
+skills: [triage]
+policies:
+  approval_mode: ask
+subagents:
+  - name: reviewer
+    model: review-model
+    tool_tier: read_only
+    skills: [review]
+    instructions: Review changes before merge.
+    policies:
+      max_tool_calls: 4
+  - name: builder
+    tool_tier: standard
+`), 0o644); err != nil {
+		t.Fatalf("write agent spec: %v", err)
+	}
+	nested := filepath.Join(dir, "src", "pkg")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatalf("mkdir nested: %v", err)
+	}
+	oldWd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(oldWd) })
+	if err := os.Chdir(nested); err != nil {
+		t.Fatalf("chdir nested: %v", err)
+	}
+
+	origInit := initDependenciesFn
+	t.Cleanup(func() { initDependenciesFn = origInit })
+	called := false
+	initDependenciesFn = func() (*config.Config, *model.Manager, *storage.Store, error) {
+		called = true
+		return nil, nil, nil, errors.New("dependency initialization should not run")
+	}
+
+	textOut := captureStdout(t, func() {
+		if err := runAgentCommand([]string{"subagents"}); err != nil {
+			t.Fatalf("runAgentCommand subagents: %v", err)
+		}
+	})
+	if called {
+		t.Fatal("agent subagents initialized dependencies")
+	}
+	for _, want := range []string{
+		"Agent subagents: 2 (daily)",
+		"builder: model=root-model",
+		"tool_tier=standard",
+		"reviewer: model=review-model",
+		"tool_tier=read_only",
+		"tools=read_file, search_text",
+		"skills=review,triage",
+		"approval=ask",
+		"max_tool_calls=4",
+		"invoke: buckley agent run --project reviewer <task>",
+	} {
+		if !strings.Contains(textOut, want) {
+			t.Fatalf("agent subagents output missing %q:\n%s", want, textOut)
+		}
+	}
+
+	jsonOut := captureStdout(t, func() {
+		if err := runAgentCommand([]string{"subagents", "--json"}); err != nil {
+			t.Fatalf("runAgentCommand subagents json: %v", err)
+		}
+	})
+	var snapshot agentSubagentsSnapshot
+	if err := json.Unmarshal([]byte(jsonOut), &snapshot); err != nil {
+		t.Fatalf("unmarshal subagents json: %v\n%s", err, jsonOut)
+	}
+	if snapshot.Agent != "daily" || snapshot.Count != 2 || len(snapshot.Subagents) != 2 {
+		t.Fatalf("unexpected subagent snapshot: %+v", snapshot)
+	}
+	if snapshot.Subagents[1].Name != "reviewer" || snapshot.Subagents[1].Model != "review-model" || snapshot.Subagents[1].MaxToolCalls != 4 || !snapshot.Subagents[1].Instructions {
+		t.Fatalf("unexpected reviewer summary: %+v", snapshot.Subagents[1])
 	}
 }
 

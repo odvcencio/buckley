@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	"m31labs.dev/buckley/pkg/agentspec"
@@ -29,10 +30,12 @@ func runAgentCommand(args []string) error {
 		return runAgentCheck(args[1:])
 	case "show":
 		return runAgentShow(args[1:])
+	case "subagents":
+		return runAgentSubagents(args[1:])
 	case "run", "invoke":
 		return runAgentRun(args[1:])
 	default:
-		return fmt.Errorf("unknown agent subcommand: %s (use init, list, check, show, or run)", args[0])
+		return fmt.Errorf("unknown agent subcommand: %s (use init, list, check, show, subagents, or run)", args[0])
 	}
 }
 
@@ -97,6 +100,26 @@ type agentListSnapshot struct {
 	Specs []agentspec.DiscoveredSpec `json:"specs,omitempty"`
 }
 
+type agentSubagentsSnapshot struct {
+	Source    string                 `json:"source,omitempty"`
+	Agent     string                 `json:"agent,omitempty"`
+	Count     int                    `json:"count"`
+	Subagents []agentSubagentSummary `json:"subagents,omitempty"`
+}
+
+type agentSubagentSummary struct {
+	Name         string   `json:"name"`
+	Model        string   `json:"model"`
+	ToolTier     string   `json:"tool_tier"`
+	ToolFilter   string   `json:"tool_filter"`
+	Persona      string   `json:"persona,omitempty"`
+	Skills       []string `json:"skills,omitempty"`
+	ApprovalMode string   `json:"approval_mode,omitempty"`
+	MaxToolCalls int      `json:"max_tool_calls,omitempty"`
+	Instructions bool     `json:"instructions"`
+	Invoke       string   `json:"invoke"`
+}
+
 func runAgentList(args []string) error {
 	fs := flag.NewFlagSet("agent list", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
@@ -126,6 +149,40 @@ func runAgentList(args []string) error {
 		return enc.Encode(snapshot)
 	}
 	printAgentListText(os.Stdout, snapshot)
+	return nil
+}
+
+func runAgentSubagents(args []string) error {
+	fs := flag.NewFlagSet("agent subagents", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	jsonOutput := fs.Bool("json", false, "print machine-readable JSON")
+	format := fs.String("format", "text", "output format: text or json")
+	projectSpec := fs.Bool("project", false, "use the default discovered project agent spec")
+	specSelect := fs.String("spec", "", "project agent spec name, kind, or path to inspect")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if err := normalizeJSONFormatFlag(*format, jsonOutput); err != nil {
+		return err
+	}
+	path, project, err := resolveAgentSubagentsSpecPath(*projectSpec, *specSelect, fs.Args())
+	if err != nil {
+		return err
+	}
+	profile, err := agentspec.LoadRuntimeProfile(path)
+	if err != nil {
+		return err
+	}
+	snapshot, err := buildAgentSubagentsSnapshot(profile, project, strings.TrimSpace(*specSelect), path)
+	if err != nil {
+		return err
+	}
+	if *jsonOutput {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(snapshot)
+	}
+	printAgentSubagentsText(os.Stdout, snapshot)
 	return nil
 }
 
@@ -191,6 +248,123 @@ func printAgentListDiagnostics(w io.Writer, diagnostics []agentspec.Diagnostic) 
 		case path != "":
 			fmt.Fprintf(w, "    %s %s\n", severity, path)
 		}
+	}
+}
+
+func resolveAgentSubagentsSpecPath(project bool, selector string, args []string) (string, bool, error) {
+	selector = strings.TrimSpace(selector)
+	if selector != "" {
+		project = true
+	}
+	if len(args) > 1 {
+		return "", false, fmt.Errorf("usage: buckley agent subagents [--project|--spec <name|kind|path>] [agent.yaml|agent-dir]")
+	}
+	if len(args) == 1 {
+		if project {
+			return "", false, fmt.Errorf("usage: buckley agent subagents [--project|--spec <name|kind|path>] [agent.yaml|agent-dir]")
+		}
+		path := strings.TrimSpace(args[0])
+		if path == "" {
+			return "", false, fmt.Errorf("agent spec path is required")
+		}
+		return path, false, nil
+	}
+	path, err := resolveProjectAgentSpecPath(selector)
+	if err != nil {
+		return "", false, err
+	}
+	return path, true, nil
+}
+
+func buildAgentSubagentsSnapshot(profile *agentspec.RuntimeProfile, project bool, selector string, path string) (agentSubagentsSnapshot, error) {
+	if profile == nil || profile.Spec == nil {
+		return agentSubagentsSnapshot{}, fmt.Errorf("agent profile is required")
+	}
+	names := agentspec.SubagentNames(profile.Spec)
+	snapshot := agentSubagentsSnapshot{
+		Source: strings.TrimSpace(profile.SourcePath),
+		Agent:  strings.TrimSpace(profile.Spec.Name),
+		Count:  len(names),
+	}
+	for _, name := range names {
+		subProfile, err := profile.SubagentProfile(name)
+		if err != nil {
+			return agentSubagentsSnapshot{}, err
+		}
+		summary := agentSubagentSummary{
+			Name:         name,
+			Model:        previewAgentRunModel(agentRunOptions{}, subProfile),
+			ToolTier:     previewAgentRunToolTier(subProfile),
+			ToolFilter:   previewAgentRunToolFilter(subProfile),
+			Skills:       append([]string(nil), subProfile.Spec.Skills...),
+			ApprovalMode: strings.TrimSpace(subProfile.Spec.Policies.ApprovalMode),
+			MaxToolCalls: subProfile.Spec.Policies.MaxToolCalls,
+			Instructions: len(subProfile.InstructionFiles) > 0 || strings.TrimSpace(subProfile.Spec.Instructions.Prompt) != "",
+			Invoke:       agentSubagentInvokeExample(project, selector, path, name),
+		}
+		if strings.TrimSpace(subProfile.Spec.Persona) != strings.TrimSpace(profile.Spec.Persona) {
+			summary.Persona = strings.TrimSpace(subProfile.Spec.Persona)
+		}
+		sort.Strings(summary.Skills)
+		snapshot.Subagents = append(snapshot.Subagents, summary)
+	}
+	return snapshot, nil
+}
+
+func agentSubagentInvokeExample(project bool, selector string, path string, name string) string {
+	name = strings.TrimSpace(name)
+	if project {
+		parts := []string{"buckley", "agent", "run", "--project"}
+		if selector = strings.TrimSpace(selector); selector != "" {
+			parts = append(parts, "--spec", shellQuote(selector))
+		}
+		parts = append(parts, shellQuote(name), shellQuote("<task>"))
+		return strings.Join(parts, " ")
+	}
+	return strings.Join([]string{"buckley", "agent", "run", shellQuote(path), shellQuote(name), shellQuote("<task>")}, " ")
+}
+
+func shellQuote(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return `""`
+	}
+	if strings.ContainsAny(value, " \t\n\"'\\$`") {
+		return strconv.Quote(value)
+	}
+	return value
+}
+
+func printAgentSubagentsText(w io.Writer, snapshot agentSubagentsSnapshot) {
+	fmt.Fprintf(w, "Agent subagents: %d", snapshot.Count)
+	if snapshot.Agent != "" {
+		fmt.Fprintf(w, " (%s)", snapshot.Agent)
+	}
+	if snapshot.Source != "" {
+		fmt.Fprintf(w, " %s", snapshot.Source)
+	}
+	fmt.Fprintln(w)
+	for _, sub := range snapshot.Subagents {
+		fmt.Fprintf(w, "  - %s: model=%s, tool_tier=%s, tools=%s", sub.Name, sub.Model, sub.ToolTier, sub.ToolFilter)
+		if sub.Persona != "" {
+			fmt.Fprintf(w, ", persona=%s", sub.Persona)
+		}
+		if len(sub.Skills) > 0 {
+			fmt.Fprintf(w, ", skills=%s", strings.Join(sub.Skills, ","))
+		}
+		if sub.ApprovalMode != "" {
+			fmt.Fprintf(w, ", approval=%s", sub.ApprovalMode)
+		}
+		if sub.MaxToolCalls > 0 {
+			fmt.Fprintf(w, ", max_tool_calls=%d", sub.MaxToolCalls)
+		}
+		if sub.Instructions {
+			fmt.Fprint(w, ", instructions=true")
+		}
+		if sub.Invoke != "" {
+			fmt.Fprintf(w, "\n    invoke: %s", sub.Invoke)
+		}
+		fmt.Fprintln(w)
 	}
 }
 
