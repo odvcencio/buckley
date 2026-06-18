@@ -16,6 +16,7 @@ import (
 )
 
 const envBuckleyChatCheckModel = "BUCKLEY_CHAT_CHECK_MODEL"
+const projectChatCheckScenarioDir = ".buckley/chatchecks"
 
 func runDoctorCommand(args []string) error {
 	subCmd := "check"
@@ -43,6 +44,7 @@ func runDoctorChatCommand(args []string) error {
 	modelID := fs.String("model", defaultModel, "model to use for the multi-turn chat check")
 	timeout := fs.Duration("timeout", 45*time.Second, "per-turn timeout")
 	scenarioPath := fs.String("scenario", "", "JSON scenario file or directory for the chat check")
+	projectScenarios := fs.Bool("project", false, "use project chat check scenarios from .buckley/chatchecks")
 	var tagFilters stringListFlag
 	var nameFilters stringListFlag
 	fs.Var(&tagFilters, "tag", "only run/list scenarios with this tag (repeatable, comma-separated)")
@@ -60,8 +62,12 @@ func runDoctorChatCommand(args []string) error {
 	if *listScenarios && strings.TrimSpace(*junitPath) != "" {
 		return fmt.Errorf("doctor chat -junit cannot be used with -list")
 	}
+	resolvedScenarioPath, err := resolveDoctorChatScenarioPath(*scenarioPath, *projectScenarios)
+	if err != nil {
+		return err
+	}
 
-	scenarios, err := resolveDoctorChatScenarios(*modelID, *timeout, *scenarioPath, flagWasSet(fs, "model"), flagWasSet(fs, "timeout"))
+	scenarios, err := resolveDoctorChatScenarios(*modelID, *timeout, resolvedScenarioPath, flagWasSet(fs, "model"), flagWasSet(fs, "timeout"))
 	if err != nil {
 		return err
 	}
@@ -127,6 +133,27 @@ func runDoctorChatCommand(args []string) error {
 		}
 	}
 	return nil
+}
+
+func resolveDoctorChatScenarioPath(scenarioPath string, useProject bool) (string, error) {
+	scenarioPath = strings.TrimSpace(scenarioPath)
+	if !useProject {
+		return scenarioPath, nil
+	}
+	if scenarioPath != "" {
+		return "", fmt.Errorf("doctor chat -project cannot be combined with -scenario")
+	}
+	info, err := os.Stat(projectChatCheckScenarioDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", fmt.Errorf("project chat check scenarios not found: %s", projectChatCheckScenarioDir)
+		}
+		return "", fmt.Errorf("stat project chat check scenarios: %w", err)
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("project chat check scenario path is not a directory: %s", projectChatCheckScenarioDir)
+	}
+	return projectChatCheckScenarioDir, nil
 }
 
 type junitTestSuite struct {

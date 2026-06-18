@@ -233,6 +233,64 @@ func TestRunDoctorChatCommandListDoesNotInitDependencies(t *testing.T) {
 	}
 }
 
+func TestRunDoctorChatCommandProjectList(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	projectDir := filepath.Join(dir, ".buckley", "chatchecks")
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatalf("mkdir project scenarios: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(projectDir, "smoke.json"), []byte(`{"name":"project-smoke","tags":["smoke"],"turns":[{"user":"say READY","want_contains":["READY"]}]}`), 0o644); err != nil {
+		t.Fatalf("write scenario: %v", err)
+	}
+
+	origInit := initDependenciesFn
+	t.Cleanup(func() { initDependenciesFn = origInit })
+	called := false
+	initDependenciesFn = func() (*config.Config, *model.Manager, *storage.Store, error) {
+		called = true
+		return nil, nil, nil, errors.New("dependency initialization should not run")
+	}
+
+	var runErr error
+	out := captureStdout(t, func() {
+		runErr = runDoctorChatCommand([]string{"-project", "-list", "-tag", "smoke"})
+	})
+	if runErr != nil {
+		t.Fatalf("runDoctorChatCommand: %v", runErr)
+	}
+	if called {
+		t.Fatal("project list mode initialized dependencies")
+	}
+	for _, want := range []string{"Chat check scenarios: 1", "project-smoke", "tags=smoke"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("output missing %q: %s", want, out)
+		}
+	}
+}
+
+func TestResolveDoctorChatScenarioPathProject(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	if _, err := resolveDoctorChatScenarioPath("custom.json", true); err == nil || !strings.Contains(err.Error(), "cannot be combined") {
+		t.Fatalf("err=%v want conflict", err)
+	}
+	if _, err := resolveDoctorChatScenarioPath("", true); err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("err=%v want missing project scenarios", err)
+	}
+
+	if err := os.MkdirAll(filepath.Join(dir, ".buckley", "chatchecks"), 0o755); err != nil {
+		t.Fatalf("mkdir project scenarios: %v", err)
+	}
+	got, err := resolveDoctorChatScenarioPath("", true)
+	if err != nil {
+		t.Fatalf("resolveDoctorChatScenarioPath: %v", err)
+	}
+	if got != projectChatCheckScenarioDir {
+		t.Fatalf("path=%q want %q", got, projectChatCheckScenarioDir)
+	}
+}
+
 func TestRunDoctorChatCommandListRejectsEmptyFilter(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "chat.json"), []byte(`{"name":"offline","tags":["smoke"],"turns":[{"user":"say READY"}]}`), 0o644); err != nil {
