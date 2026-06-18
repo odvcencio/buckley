@@ -529,68 +529,7 @@ func (c *Controller) collectModelPickerItemsLocked(curated map[string]struct{}) 
 	execID := strings.TrimSpace(c.cfg.Models.Execution)
 	planID := strings.TrimSpace(c.cfg.Models.Planning)
 	reviewID := strings.TrimSpace(c.cfg.Models.Review)
-
-	catalogIndex := make(map[string]model.ModelInfo, len(catalog.Data))
-	grouped := make(map[string][]model.ModelInfo)
-	for _, info := range catalog.Data {
-		catalogIndex[info.ID] = info
-		group := modelGroupKey(info.ID, c.modelMgr)
-		grouped[group] = append(grouped[group], info)
-	}
-
-	groups := make([]string, 0, len(grouped))
-	for group := range grouped {
-		groups = append(groups, group)
-	}
-	sort.Strings(groups)
-
-	items := make([]widgets.PaletteItem, 0, len(catalog.Data))
-	pinnedIDs := preferredModelIDs(execID, planID, reviewID, catalogIndex)
-	pinnedSet := make(map[string]struct{}, len(pinnedIDs))
-	if len(pinnedIDs) > 0 {
-		for _, modelID := range pinnedIDs {
-			info, ok := catalogIndex[modelID]
-			if !ok {
-				continue
-			}
-			pinnedSet[modelID] = struct{}{}
-			tags := modelRoleTags(modelID, execID, planID, reviewID)
-			tags = appendModelTag(tags, curated, modelID)
-			items = append(items, widgets.PaletteItem{
-				ID:          modelID,
-				Category:    "Pinned",
-				Label:       "  " + modelID,
-				Description: info.ID,
-				Shortcut:    strings.Join(tags, ","),
-				Data:        modelID,
-			})
-		}
-	}
-	for _, group := range groups {
-		models := grouped[group]
-		sort.Slice(models, func(i, j int) bool {
-			return models[i].ID < models[j].ID
-		})
-
-		for _, info := range models {
-			if _, ok := pinnedSet[info.ID]; ok {
-				continue
-			}
-			label := modelLabel(info.ID, group)
-			tags := modelRoleTags(info.ID, execID, planID, reviewID)
-			tags = appendModelTag(tags, curated, info.ID)
-			items = append(items, widgets.PaletteItem{
-				ID:          info.ID,
-				Category:    group,
-				Label:       "  " + label,
-				Description: info.ID,
-				Shortcut:    strings.Join(tags, ","),
-				Data:        info.ID,
-			})
-		}
-	}
-
-	return items, catalogIndex
+	return buildModelPickerItems(catalog.Data, c.modelMgr, execID, planID, reviewID, curated)
 }
 
 func (c *Controller) handleModelCurate(args []string) {

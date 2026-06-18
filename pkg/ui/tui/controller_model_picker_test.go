@@ -66,3 +66,80 @@ func TestPreferredModelIDs(t *testing.T) {
 		}
 	}
 }
+
+func TestBuildModelPickerItems_PinsConfiguredAndHotModels(t *testing.T) {
+	catalog := []model.ModelInfo{
+		{ID: "z-ai/glm-5.2"},
+		{ID: "openai/gpt-4o"},
+		{ID: "anthropic/claude-3.5"},
+		{ID: "qwen/qwen3.7-max"},
+		{ID: "moonshotai/kimi-k2.7-code"},
+	}
+
+	items, index := buildModelPickerItems(
+		catalog,
+		nil,
+		"openai/gpt-4o",
+		"z-ai/glm-5.2",
+		"moonshotai/kimi-k2.7-code",
+		map[string]struct{}{"qwen/qwen3.7-max": {}},
+	)
+
+	if len(index) != len(catalog) {
+		t.Fatalf("index size = %d, want %d", len(index), len(catalog))
+	}
+	wantIDs := []string{
+		"openai/gpt-4o",
+		"z-ai/glm-5.2",
+		"moonshotai/kimi-k2.7-code",
+		"qwen/qwen3.7-max",
+		"anthropic/claude-3.5",
+	}
+	if len(items) != len(wantIDs) {
+		t.Fatalf("items = %d, want %d: %+v", len(items), len(wantIDs), items)
+	}
+	for i, want := range wantIDs {
+		if items[i].ID != want {
+			t.Fatalf("item %d ID = %q, want %q; items=%+v", i, items[i].ID, want, items)
+		}
+	}
+	for i := 0; i < 4; i++ {
+		if items[i].Category != "Pinned" {
+			t.Fatalf("item %d category = %q, want Pinned", i, items[i].Category)
+		}
+	}
+	if items[3].Shortcut != "curated" {
+		t.Fatalf("qwen shortcut = %q, want curated", items[3].Shortcut)
+	}
+	if items[4].Label != "  claude-3.5" {
+		t.Fatalf("anthropic label = %q, want trimmed provider label", items[4].Label)
+	}
+}
+
+func TestBuildModelPickerItems_SortsGroupsAndModels(t *testing.T) {
+	catalog := []model.ModelInfo{
+		{ID: "zeta/model-b"},
+		{ID: "alpha/model-c"},
+		{ID: "alpha/model-a"},
+	}
+
+	items, _ := buildModelPickerItems(catalog, nil, "", "", "", nil)
+	want := []struct {
+		category string
+		id       string
+		label    string
+	}{
+		{category: "alpha", id: "alpha/model-a", label: "  model-a"},
+		{category: "alpha", id: "alpha/model-c", label: "  model-c"},
+		{category: "zeta", id: "zeta/model-b", label: "  model-b"},
+	}
+
+	if len(items) != len(want) {
+		t.Fatalf("items = %d, want %d", len(items), len(want))
+	}
+	for i := range want {
+		if items[i].Category != want[i].category || items[i].ID != want[i].id || items[i].Label != want[i].label {
+			t.Fatalf("item %d = %+v, want %+v", i, items[i], want[i])
+		}
+	}
+}
