@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"encoding/xml"
 	"flag"
 	"fmt"
 	"io"
@@ -49,11 +50,15 @@ func runDoctorChatCommand(args []string) error {
 	listScenarios := fs.Bool("list", false, "list resolved chat check scenarios and exit without running them")
 	jsonOutput := fs.Bool("json", false, "print machine-readable JSON report")
 	outPath := fs.String("out", "", "write machine-readable JSON report to a file")
+	junitPath := fs.String("junit", "", "write JUnit XML report to a file")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() > 0 {
 		return fmt.Errorf("unexpected doctor chat argument: %s", fs.Arg(0))
+	}
+	if *listScenarios && strings.TrimSpace(*junitPath) != "" {
+		return fmt.Errorf("doctor chat -junit cannot be used with -list")
 	}
 
 	scenarios, err := resolveDoctorChatScenarios(*modelID, *timeout, *scenarioPath, flagWasSet(fs, "model"), flagWasSet(fs, "timeout"))
@@ -99,6 +104,11 @@ func runDoctorChatCommand(args []string) error {
 			return err
 		}
 	}
+	if *junitPath != "" {
+		if err := writeChatCheckJUnitReport(*junitPath, report); err != nil {
+			return err
+		}
+	}
 	if *jsonOutput {
 		if err := printChatCheckJSON(os.Stdout, report); err != nil {
 			return err
@@ -117,6 +127,29 @@ func runDoctorChatCommand(args []string) error {
 		}
 	}
 	return nil
+}
+
+type junitTestSuite struct {
+	XMLName   xml.Name        `xml:"testsuite"`
+	Name      string          `xml:"name,attr"`
+	Tests     int             `xml:"tests,attr"`
+	Failures  int             `xml:"failures,attr"`
+	Errors    int             `xml:"errors,attr"`
+	Time      string          `xml:"time,attr"`
+	TestCases []junitTestCase `xml:"testcase"`
+}
+
+type junitTestCase struct {
+	ClassName string        `xml:"classname,attr"`
+	Name      string        `xml:"name,attr"`
+	Time      string        `xml:"time,attr"`
+	Failure   *junitFailure `xml:"failure,omitempty"`
+	SystemOut string        `xml:"system-out,omitempty"`
+}
+
+type junitFailure struct {
+	Message string `xml:"message,attr"`
+	Text    string `xml:",chardata"`
 }
 
 func resolveDoctorChatScenario(modelID string, timeout time.Duration, scenarioPath string, modelSet bool, timeoutSet bool) (chatcheck.Scenario, error) {
@@ -405,10 +438,8 @@ func writeChatCheckReport(path string, report any) error {
 	if path == "" || report == nil {
 		return nil
 	}
-	if dir := filepath.Dir(path); dir != "." && dir != "" {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			return fmt.Errorf("create chat check report directory: %w", err)
-		}
+	if err := ensureParentDir(path, "chat check report"); err != nil {
+		return err
 	}
 	data, err := json.MarshalIndent(report, "", "  ")
 	if err != nil {
@@ -417,6 +448,130 @@ func writeChatCheckReport(path string, report any) error {
 	data = append(data, '\n')
 	if err := os.WriteFile(path, data, 0o644); err != nil {
 		return fmt.Errorf("write chat check report: %w", err)
+	}
+	return nil
+}
+
+func writeChatCheckJUnitReport(path string, report any) error {
+	path = strings.TrimSpace(path)
+	if path == "" || report == nil {
+		return nil
+	}
+	if err := ensureParentDir(path, "chat check JUnit report"); err != nil {
+		return err
+	}
+	suite, err := chatCheckJUnitSuite(report)
+	if err != nil {
+		return err
+	}
+	data, err := xml.MarshalIndent(suite, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal chat check JUnit report: %w", err)
+	}
+	data = append([]byte(xml.Header), data...)
+	data = append(data, '\n')
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		return fmt.Errorf("write chat check JUnit report: %w", err)
+	}
+	return nil
+}
+
+func chatCheckJUnitSuite(report any) (junitTestSuite, error) {
+	switch result := report.(type) {
+	case *chatcheck.Result:
+		if result == nil {
+			return junitTestSuite{}, fmt.Errorf("chat check result is nil")
+		}
+		return junitSuiteFromResults("buckley.doctor.chat", []chatcheck.Result{*result}), nil
+	case *chatcheck.SuiteResult:
+		if result == nil {
+			return junitTestSuite{}, fmt.Errorf("chat check suite result is nil")
+		}
+		return junitSuiteFromResults(result.Name, result.Results), nil
+	default:
+		return junitTestSuite{}, fmt.Errorf("unsupported chat check report type %T", report)
+	}
+}
+
+func junitSuiteFromResults(name string, results []chatcheck.Result) junitTestSuite {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		name = "buckley.doctor.chat"
+	}
+	suite := junitTestSuite{
+		Name:      name,
+		Tests:     len(results),
+		TestCases: make([]junitTestCase, 0, len(results)),
+	}
+	var totalMillis int64
+	for _, result := range results {
+		totalMillis += result.DurationMillis
+		testCase := junitTestCase{
+			ClassName: "buckley.doctor.chat",
+			Name:      result.Name,
+			Time:      secondsString(result.DurationMillis),
+			SystemOut: chatCheckJUnitSystemOut(result),
+		}
+		if !result.Passed {
+			suite.Failures++
+			message := strings.TrimSpace(result.Error)
+			if message == "" {
+				message = "chat check failed"
+			}
+			testCase.Failure = &junitFailure{
+				Message: message,
+				Text:    chatCheckJUnitFailureText(result),
+			}
+		}
+		suite.TestCases = append(suite.TestCases, testCase)
+	}
+	suite.Time = secondsString(totalMillis)
+	return suite
+}
+
+func chatCheckJUnitSystemOut(result chatcheck.Result) string {
+	lines := make([]string, 0, len(result.Turns)+1)
+	lines = append(lines, fmt.Sprintf("model=%s session_id=%s passed=%v", result.Model, result.SessionID, result.Passed))
+	for _, turn := range result.Turns {
+		status := "passed"
+		if !turn.Passed || strings.TrimSpace(turn.Err) != "" {
+			status = "failed"
+		}
+		lines = append(lines, fmt.Sprintf("turn=%d status=%s chars=%d latency_ms=%d finish=%s tool_calls=%d reasoning=%v", turn.Index, status, turn.CharLength, turn.LatencyMillis, turn.Finish, turn.ToolCalls, turn.Reasoning))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func chatCheckJUnitFailureText(result chatcheck.Result) string {
+	lines := make([]string, 0, len(result.Turns)+1)
+	if strings.TrimSpace(result.Error) != "" {
+		lines = append(lines, result.Error)
+	}
+	for _, turn := range result.Turns {
+		if strings.TrimSpace(turn.Err) != "" {
+			lines = append(lines, fmt.Sprintf("turn %d: %s", turn.Index, turn.Err))
+		}
+		for _, check := range turn.Checks {
+			if !check.Passed {
+				lines = append(lines, fmt.Sprintf("turn %d %s: %s", turn.Index, check.Name, check.Message))
+			}
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+func secondsString(millis int64) string {
+	if millis < 0 {
+		millis = 0
+	}
+	return fmt.Sprintf("%.3f", float64(millis)/1000)
+}
+
+func ensureParentDir(path string, label string) error {
+	if dir := filepath.Dir(path); dir != "." && dir != "" {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return fmt.Errorf("create %s directory: %w", label, err)
+		}
 	}
 	return nil
 }

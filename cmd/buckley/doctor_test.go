@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"encoding/xml"
 	"errors"
 	"os"
 	"path/filepath"
@@ -71,6 +72,74 @@ func TestWriteChatCheckReport(t *testing.T) {
 	}
 	if got.Name != "multi-turn-chat" || !got.Passed {
 		t.Fatalf("unexpected report: %+v", got)
+	}
+}
+
+func TestWriteChatCheckJUnitReportSingleFailure(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "reports", "chat.xml")
+	result := &chatcheck.Result{
+		Name:           "single-chat",
+		Model:          "test-model",
+		SessionID:      "session-1",
+		Passed:         false,
+		Error:          "missing token",
+		DurationMillis: 1234,
+		Turns: []chatcheck.TurnResult{{
+			Index:         1,
+			Err:           "turn failed",
+			LatencyMillis: 42,
+			CharLength:    12,
+			Checks: []chatcheck.CheckResult{{
+				Name:    "contains",
+				Passed:  false,
+				Message: "missing TOKEN",
+			}},
+		}},
+	}
+	if err := writeChatCheckJUnitReport(path, result); err != nil {
+		t.Fatalf("writeChatCheckJUnitReport: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read report: %v", err)
+	}
+	var got junitTestSuite
+	if err := xml.Unmarshal(data, &got); err != nil {
+		t.Fatalf("junit report did not parse: %v\n%s", err, string(data))
+	}
+	if got.Name != "buckley.doctor.chat" || got.Tests != 1 || got.Failures != 1 {
+		t.Fatalf("unexpected suite: %+v", got)
+	}
+	if len(got.TestCases) != 1 || got.TestCases[0].Name != "single-chat" || got.TestCases[0].Failure == nil {
+		t.Fatalf("unexpected testcase: %+v", got.TestCases)
+	}
+	if !strings.Contains(got.TestCases[0].Failure.Text, "missing TOKEN") {
+		t.Fatalf("failure text missing check context: %+v", got.TestCases[0].Failure)
+	}
+}
+
+func TestWriteChatCheckJUnitReportSuite(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "chat.xml")
+	result := &chatcheck.SuiteResult{
+		Name: "chat-suite",
+		Results: []chatcheck.Result{
+			{Name: "one", Passed: true, DurationMillis: 100},
+			{Name: "two", Passed: false, Error: "failed", DurationMillis: 250},
+		},
+	}
+	if err := writeChatCheckJUnitReport(path, result); err != nil {
+		t.Fatalf("writeChatCheckJUnitReport: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read report: %v", err)
+	}
+	var got junitTestSuite
+	if err := xml.Unmarshal(data, &got); err != nil {
+		t.Fatalf("junit report did not parse: %v\n%s", err, string(data))
+	}
+	if got.Name != "chat-suite" || got.Tests != 2 || got.Failures != 1 || got.Time != "0.350" {
+		t.Fatalf("unexpected suite: %+v", got)
 	}
 }
 
@@ -173,6 +242,13 @@ func TestRunDoctorChatCommandListRejectsEmptyFilter(t *testing.T) {
 	err := runDoctorChatCommand([]string{"-scenario", dir, "-list", "-tag", "regression"})
 	if err == nil || !strings.Contains(err.Error(), "no chat check scenarios matched filters") {
 		t.Fatalf("err=%v want empty filter error", err)
+	}
+}
+
+func TestRunDoctorChatCommandListRejectsJUnit(t *testing.T) {
+	err := runDoctorChatCommand([]string{"-list", "-junit", filepath.Join(t.TempDir(), "chat.xml")})
+	if err == nil || !strings.Contains(err.Error(), "cannot be used with -list") {
+		t.Fatalf("err=%v want list junit conflict", err)
 	}
 }
 
