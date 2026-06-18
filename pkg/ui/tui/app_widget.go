@@ -848,7 +848,22 @@ func (a *WidgetApp) update(msg Message) bool {
 
 // handleMouseMsg processes mouse input.
 func (a *WidgetApp) handleMouseMsg(m MouseMsg) bool {
-	// Handle scroll wheel on the chat view
+	if a.handleMouseWheel(m) {
+		return true
+	}
+	if a.handleSelectionRelease(m) {
+		return true
+	}
+	if a.handleRightMousePress(m) {
+		return true
+	}
+	if a.handleLeftMousePress(m) {
+		return true
+	}
+	return a.dispatchMouseToScreen(m)
+}
+
+func (a *WidgetApp) handleMouseWheel(m MouseMsg) bool {
 	switch m.Button {
 	case MouseWheelUp:
 		a.chatView.ScrollUp(3)
@@ -857,65 +872,95 @@ func (a *WidgetApp) handleMouseMsg(m MouseMsg) bool {
 		a.chatView.ScrollDown(3)
 		return true
 	}
+	return false
+}
 
-	if m.Action == MouseRelease && a.selectionActive {
-		line, col, ok := a.chatView.PositionForPoint(m.X, m.Y)
-		if ok {
-			a.chatView.UpdateSelection(line, col)
-			a.selectionLastLine = line
-			a.selectionLastCol = col
-			a.selectionLastValid = true
-		} else if a.selectionLastValid {
-			a.chatView.UpdateSelection(a.selectionLastLine, a.selectionLastCol)
-		}
-
-		a.chatView.EndSelection()
-		a.selectionActive = false
-		a.selectionLastValid = false
-		if a.chatView.HasSelection() {
-			text := a.chatView.SelectionText()
-			if text == "" {
-				a.chatView.ClearSelection()
-			} else if err := copyToClipboard(text); err != nil {
-				a.setStatusOverride("Copy failed: "+err.Error(), 3*time.Second)
-			} else {
-				a.setStatusOverride("Selection copied", 2*time.Second)
-			}
-		}
-		a.dirty = true
-		return true
+func (a *WidgetApp) handleSelectionRelease(m MouseMsg) bool {
+	if m.Action != MouseRelease || !a.selectionActive {
+		return false
 	}
 
-	if m.Action == MousePress && m.Button == MouseRight {
-		if _, _, ok := a.chatView.PositionForPoint(m.X, m.Y); ok {
-			a.chatView.ClearSelection()
-			a.selectionActive = false
-			a.selectionLastValid = false
-			a.setStatusOverride("Selection cleared", 2*time.Second)
-			a.dirty = true
-			return true
-		}
+	line, col, ok := a.chatView.PositionForPoint(m.X, m.Y)
+	if ok {
+		a.chatView.UpdateSelection(line, col)
+		a.rememberSelectionPoint(line, col)
+	} else if a.selectionLastValid {
+		a.chatView.UpdateSelection(a.selectionLastLine, a.selectionLastCol)
 	}
 
-	if m.Action == MousePress && m.Button == MouseLeft {
-		line, col, ok := a.chatView.PositionForPoint(m.X, m.Y)
-		if ok {
-			if !a.selectionActive {
-				a.chatView.ClearSelection()
-				a.chatView.StartSelection(line, col)
-				a.selectionActive = true
-			} else {
-				a.chatView.UpdateSelection(line, col)
-			}
-			a.selectionLastLine = line
-			a.selectionLastCol = col
-			a.selectionLastValid = true
-			a.dirty = true
-			return true
-		}
+	a.chatView.EndSelection()
+	a.selectionActive = false
+	a.selectionLastValid = false
+	a.copyFinishedSelection()
+	a.dirty = true
+	return true
+}
+
+func (a *WidgetApp) copyFinishedSelection() {
+	if !a.chatView.HasSelection() {
+		return
 	}
 
-	// Convert to runtime.MouseMsg and dispatch through screen
+	text := a.chatView.SelectionText()
+	if text == "" {
+		a.chatView.ClearSelection()
+		return
+	}
+
+	if err := copyToClipboard(text); err != nil {
+		a.setStatusOverride("Copy failed: "+err.Error(), 3*time.Second)
+		return
+	}
+
+	a.setStatusOverride("Selection copied", 2*time.Second)
+}
+
+func (a *WidgetApp) handleRightMousePress(m MouseMsg) bool {
+	if m.Action != MousePress || m.Button != MouseRight {
+		return false
+	}
+
+	if _, _, ok := a.chatView.PositionForPoint(m.X, m.Y); !ok {
+		return false
+	}
+
+	a.chatView.ClearSelection()
+	a.selectionActive = false
+	a.selectionLastValid = false
+	a.setStatusOverride("Selection cleared", 2*time.Second)
+	a.dirty = true
+	return true
+}
+
+func (a *WidgetApp) handleLeftMousePress(m MouseMsg) bool {
+	if m.Action != MousePress || m.Button != MouseLeft {
+		return false
+	}
+
+	line, col, ok := a.chatView.PositionForPoint(m.X, m.Y)
+	if !ok {
+		return false
+	}
+
+	if !a.selectionActive {
+		a.chatView.ClearSelection()
+		a.chatView.StartSelection(line, col)
+		a.selectionActive = true
+	} else {
+		a.chatView.UpdateSelection(line, col)
+	}
+	a.rememberSelectionPoint(line, col)
+	a.dirty = true
+	return true
+}
+
+func (a *WidgetApp) rememberSelectionPoint(line, col int) {
+	a.selectionLastLine = line
+	a.selectionLastCol = col
+	a.selectionLastValid = true
+}
+
+func (a *WidgetApp) dispatchMouseToScreen(m MouseMsg) bool {
 	runtimeMsg := runtime.MouseMsg{
 		X:      m.X,
 		Y:      m.Y,
