@@ -23,6 +23,133 @@ const defaultChatCheckArtifactRoot = ".buckley/chatchecks/runs"
 
 type doctorChatProjectResolver func(string) (string, error)
 
+type doctorChatDisplay struct {
+	Command                string
+	ScenarioHeading        string
+	RunsHeading            string
+	RunHeading             string
+	ModelHelp              string
+	ScenarioPathHelp       string
+	ProjectHelp            string
+	ListHelp               string
+	JSONReportHelp         string
+	OutReportHelp          string
+	JUnitHelp              string
+	ArtifactsHelp          string
+	ArtifactsDirHelp       string
+	ArtifactsDirDefault    string
+	ArtifactsOnFailureHelp string
+	StartSingle            string
+	StartSuite             string
+	PassedSingle           string
+	PassedSuite            string
+}
+
+var doctorChatDisplayLabels = doctorChatDisplay{
+	Command:                "doctor chat",
+	ScenarioHeading:        "Chat check scenarios",
+	RunsHeading:            "Chat check runs",
+	RunHeading:             "Chat check run",
+	ModelHelp:              "model to use for the multi-turn chat check",
+	ScenarioPathHelp:       "JSON scenario file or directory for the chat check",
+	ProjectHelp:            "use project chat check scenarios from .buckley/chatchecks",
+	ListHelp:               "list resolved chat check scenarios and exit without running them",
+	JSONReportHelp:         "print machine-readable JSON report",
+	OutReportHelp:          "write machine-readable JSON report to a file",
+	JUnitHelp:              "write JUnit XML report to a file",
+	ArtifactsHelp:          "write run artifacts under .buckley/chatchecks/runs",
+	ArtifactsDirHelp:       "directory for chat check run artifacts",
+	ArtifactsDirDefault:    defaultChatCheckArtifactRoot,
+	ArtifactsOnFailureHelp: "write run artifacts automatically when a chat check fails",
+	StartSingle:            "Running chat health check with %s (%d turns)\n",
+	StartSuite:             "Running chat health check suite with %d scenarios\n",
+	PassedSingle:           "Chat health check passed",
+	PassedSuite:            "Chat health check suite passed",
+}
+
+var evalDisplayLabels = doctorChatDisplay{
+	Command:                "eval",
+	ScenarioHeading:        "Eval scenarios",
+	RunsHeading:            "Eval runs",
+	RunHeading:             "Eval run",
+	ModelHelp:              "model to use for the eval",
+	ScenarioPathHelp:       "JSON/YAML eval scenario file or directory",
+	ProjectHelp:            "use project eval scenarios from evals/",
+	ListHelp:               "list resolved eval scenarios and exit without running them",
+	JSONReportHelp:         "print machine-readable JSON eval report",
+	OutReportHelp:          "write machine-readable JSON eval report to a file",
+	JUnitHelp:              "write JUnit XML eval report to a file",
+	ArtifactsHelp:          "write eval run artifacts",
+	ArtifactsDirHelp:       "directory for eval run artifacts",
+	ArtifactsDirDefault:    filepath.ToSlash(filepath.Join(projectEvalScenarioDir, "runs")),
+	ArtifactsOnFailureHelp: "write eval artifacts automatically when a run fails",
+	StartSingle:            "Running eval with %s (%d turns)\n",
+	StartSuite:             "Running eval suite with %d scenarios\n",
+	PassedSingle:           "Eval passed",
+	PassedSuite:            "Eval suite passed",
+}
+
+func normalizeDoctorChatDisplay(display doctorChatDisplay) doctorChatDisplay {
+	if display.Command == "" {
+		display.Command = doctorChatDisplayLabels.Command
+	}
+	if display.ScenarioHeading == "" {
+		display.ScenarioHeading = doctorChatDisplayLabels.ScenarioHeading
+	}
+	if display.RunsHeading == "" {
+		display.RunsHeading = doctorChatDisplayLabels.RunsHeading
+	}
+	if display.RunHeading == "" {
+		display.RunHeading = doctorChatDisplayLabels.RunHeading
+	}
+	if display.ModelHelp == "" {
+		display.ModelHelp = doctorChatDisplayLabels.ModelHelp
+	}
+	if display.ScenarioPathHelp == "" {
+		display.ScenarioPathHelp = doctorChatDisplayLabels.ScenarioPathHelp
+	}
+	if display.ProjectHelp == "" {
+		display.ProjectHelp = doctorChatDisplayLabels.ProjectHelp
+	}
+	if display.ListHelp == "" {
+		display.ListHelp = doctorChatDisplayLabels.ListHelp
+	}
+	if display.JSONReportHelp == "" {
+		display.JSONReportHelp = doctorChatDisplayLabels.JSONReportHelp
+	}
+	if display.OutReportHelp == "" {
+		display.OutReportHelp = doctorChatDisplayLabels.OutReportHelp
+	}
+	if display.JUnitHelp == "" {
+		display.JUnitHelp = doctorChatDisplayLabels.JUnitHelp
+	}
+	if display.ArtifactsHelp == "" {
+		display.ArtifactsHelp = doctorChatDisplayLabels.ArtifactsHelp
+	}
+	if display.ArtifactsDirHelp == "" {
+		display.ArtifactsDirHelp = doctorChatDisplayLabels.ArtifactsDirHelp
+	}
+	if display.ArtifactsDirDefault == "" {
+		display.ArtifactsDirDefault = doctorChatDisplayLabels.ArtifactsDirDefault
+	}
+	if display.ArtifactsOnFailureHelp == "" {
+		display.ArtifactsOnFailureHelp = doctorChatDisplayLabels.ArtifactsOnFailureHelp
+	}
+	if display.StartSingle == "" {
+		display.StartSingle = doctorChatDisplayLabels.StartSingle
+	}
+	if display.StartSuite == "" {
+		display.StartSuite = doctorChatDisplayLabels.StartSuite
+	}
+	if display.PassedSingle == "" {
+		display.PassedSingle = doctorChatDisplayLabels.PassedSingle
+	}
+	if display.PassedSuite == "" {
+		display.PassedSuite = doctorChatDisplayLabels.PassedSuite
+	}
+	return display
+}
+
 func runDoctorCommand(args []string) error {
 	subCmd := "check"
 	if len(args) > 0 {
@@ -55,19 +182,19 @@ func runEvalCommand(args []string) error {
 	case "init":
 		return runEvalInitCommand(args[1:])
 	case "list":
-		return runDoctorChatCommandWithResolver(evalDoctorChatArgs(append([]string{"-list"}, args[1:]...)), findProjectEvalScenarioDir)
+		return runDoctorChatCommandWithOptions(evalDoctorChatArgs(append([]string{"-list"}, args[1:]...)), findProjectEvalScenarioDir, evalDisplayLabels)
 	case "run":
-		return runDoctorChatCommandWithResolver(evalDoctorChatArgs(args[1:]), findProjectEvalScenarioDir)
+		return runDoctorChatCommandWithOptions(evalDoctorChatArgs(args[1:]), findProjectEvalScenarioDir, evalDisplayLabels)
 	case "runs", "artifacts":
 		rest := args[1:]
 		if len(rest) > 0 && strings.TrimSpace(rest[0]) == "show" {
-			return runDoctorChatRunShowCommandWithResolver(evalDoctorChatRunsArgs(rest[1:]), findProjectEvalScenarioDir)
+			return runDoctorChatRunShowCommandWithOptions(evalDoctorChatRunsArgs(rest[1:]), findProjectEvalScenarioDir, evalDisplayLabels)
 		}
-		return runDoctorChatRunsCommandWithResolver(evalDoctorChatRunsArgs(rest), findProjectEvalScenarioDir)
+		return runDoctorChatRunsCommandWithOptions(evalDoctorChatRunsArgs(rest), findProjectEvalScenarioDir, evalDisplayLabels)
 	case "show":
-		return runDoctorChatRunShowCommandWithResolver(evalDoctorChatRunsArgs(args[1:]), findProjectEvalScenarioDir)
+		return runDoctorChatRunShowCommandWithOptions(evalDoctorChatRunsArgs(args[1:]), findProjectEvalScenarioDir, evalDisplayLabels)
 	default:
-		return runDoctorChatCommandWithResolver(evalDoctorChatArgs(args), findProjectEvalScenarioDir)
+		return runDoctorChatCommandWithOptions(evalDoctorChatArgs(args), findProjectEvalScenarioDir, evalDisplayLabels)
 	}
 }
 
@@ -260,18 +387,23 @@ func runEvalInitCommand(args []string) error {
 }
 
 func runDoctorChatRunsCommand(args []string) error {
-	return runDoctorChatRunsCommandWithResolver(args, findProjectChatCheckScenarioDir)
+	return runDoctorChatRunsCommandWithOptions(args, findProjectChatCheckScenarioDir, doctorChatDisplayLabels)
 }
 
 func runDoctorChatRunsCommandWithResolver(args []string, resolver doctorChatProjectResolver) error {
-	if len(args) > 0 && strings.TrimSpace(args[0]) == "show" {
-		return runDoctorChatRunShowCommandWithResolver(args[1:], resolver)
-	}
+	return runDoctorChatRunsCommandWithOptions(args, resolver, doctorChatDisplayLabels)
+}
 
-	fs := flag.NewFlagSet("doctor chat runs", flag.ContinueOnError)
+func runDoctorChatRunsCommandWithOptions(args []string, resolver doctorChatProjectResolver, display doctorChatDisplay) error {
+	if len(args) > 0 && strings.TrimSpace(args[0]) == "show" {
+		return runDoctorChatRunShowCommandWithOptions(args[1:], resolver, display)
+	}
+	display = normalizeDoctorChatDisplay(display)
+
+	fs := flag.NewFlagSet(display.Command+" runs", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
-	pathFlag := fs.String("path", "", "chat check artifact root to inspect")
-	projectRuns := fs.Bool("project", false, "inspect project chat check runs from .buckley/chatchecks/runs")
+	pathFlag := fs.String("path", "", "run artifact root to inspect")
+	projectRuns := fs.Bool("project", false, "inspect project run artifacts")
 	limit := fs.Int("limit", 10, "maximum runs to list (0 for all)")
 	jsonOutput := fs.Bool("json", false, "print machine-readable JSON")
 	format := fs.String("format", "text", "output format: text or json")
@@ -279,13 +411,13 @@ func runDoctorChatRunsCommandWithResolver(args []string, resolver doctorChatProj
 		return err
 	}
 	if fs.NArg() != 0 {
-		return fmt.Errorf("usage: buckley doctor chat runs [--project|--path <dir>] [--limit n] [--json|--format json]")
+		return fmt.Errorf("usage: buckley %s runs [--project|--path <dir>] [--limit n] [--json|--format json]", display.Command)
 	}
 	if strings.TrimSpace(*pathFlag) != "" && *projectRuns {
-		return fmt.Errorf("doctor chat runs --path cannot be combined with --project")
+		return fmt.Errorf("%s runs --path cannot be combined with --project", display.Command)
 	}
 	if *limit < 0 {
-		return fmt.Errorf("doctor chat runs --limit cannot be negative")
+		return fmt.Errorf("%s runs --limit cannot be negative", display.Command)
 	}
 	if err := normalizeJSONFormatFlag(*format, jsonOutput); err != nil {
 		return err
@@ -303,19 +435,24 @@ func runDoctorChatRunsCommandWithResolver(args []string, resolver doctorChatProj
 		enc.SetIndent("", "  ")
 		return enc.Encode(inventory)
 	}
-	printDoctorChatRunsInventory(os.Stdout, inventory)
+	printDoctorChatRunsInventoryWithHeading(os.Stdout, inventory, display.RunsHeading)
 	return nil
 }
 
 func runDoctorChatRunShowCommand(args []string) error {
-	return runDoctorChatRunShowCommandWithResolver(args, findProjectChatCheckScenarioDir)
+	return runDoctorChatRunShowCommandWithOptions(args, findProjectChatCheckScenarioDir, doctorChatDisplayLabels)
 }
 
 func runDoctorChatRunShowCommandWithResolver(args []string, resolver doctorChatProjectResolver) error {
-	fs := flag.NewFlagSet("doctor chat runs show", flag.ContinueOnError)
+	return runDoctorChatRunShowCommandWithOptions(args, resolver, doctorChatDisplayLabels)
+}
+
+func runDoctorChatRunShowCommandWithOptions(args []string, resolver doctorChatProjectResolver, display doctorChatDisplay) error {
+	display = normalizeDoctorChatDisplay(display)
+	fs := flag.NewFlagSet(display.Command+" runs show", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
-	pathFlag := fs.String("path", "", "chat check artifact root to inspect")
-	projectRuns := fs.Bool("project", false, "inspect project chat check runs from .buckley/chatchecks/runs")
+	pathFlag := fs.String("path", "", "run artifact root to inspect")
+	projectRuns := fs.Bool("project", false, "inspect project run artifacts")
 	includeTranscript := fs.Bool("transcript", false, "include transcript content in the output")
 	jsonOutput := fs.Bool("json", false, "print machine-readable JSON")
 	format := fs.String("format", "text", "output format: text or json")
@@ -323,10 +460,10 @@ func runDoctorChatRunShowCommandWithResolver(args []string, resolver doctorChatP
 		return err
 	}
 	if fs.NArg() > 1 {
-		return fmt.Errorf("usage: buckley doctor chat runs show [--project|--path <dir>] [--transcript] [--json|--format json] [run-id|latest]")
+		return fmt.Errorf("usage: buckley %s runs show [--project|--path <dir>] [--transcript] [--json|--format json] [run-id|latest]", display.Command)
 	}
 	if strings.TrimSpace(*pathFlag) != "" && *projectRuns {
-		return fmt.Errorf("doctor chat runs show --path cannot be combined with --project")
+		return fmt.Errorf("%s runs show --path cannot be combined with --project", display.Command)
 	}
 	if err := normalizeJSONFormatFlag(*format, jsonOutput); err != nil {
 		return err
@@ -348,40 +485,45 @@ func runDoctorChatRunShowCommandWithResolver(args []string, resolver doctorChatP
 		enc.SetIndent("", "  ")
 		return enc.Encode(detail)
 	}
-	printDoctorChatRunDetail(os.Stdout, detail, *includeTranscript)
+	printDoctorChatRunDetailWithHeading(os.Stdout, detail, *includeTranscript, display.RunHeading)
 	return nil
 }
 
 func runDoctorChatCommand(args []string) error {
-	return runDoctorChatCommandWithResolver(args, findProjectChatCheckScenarioDir)
+	return runDoctorChatCommandWithOptions(args, findProjectChatCheckScenarioDir, doctorChatDisplayLabels)
 }
 
 func runDoctorChatCommandWithResolver(args []string, resolver doctorChatProjectResolver) error {
+	return runDoctorChatCommandWithOptions(args, resolver, doctorChatDisplayLabels)
+}
+
+func runDoctorChatCommandWithOptions(args []string, resolver doctorChatProjectResolver, display doctorChatDisplay) error {
+	display = normalizeDoctorChatDisplay(display)
 	defaultModel := strings.TrimSpace(os.Getenv(envBuckleyChatCheckModel))
 	if defaultModel == "" {
 		defaultModel = chatcheck.DefaultModel
 	}
 
-	fs := flag.NewFlagSet("doctor chat", flag.ContinueOnError)
+	fs := flag.NewFlagSet(display.Command, flag.ContinueOnError)
 	fs.Usage = func() {
-		fmt.Fprintf(fs.Output(), "Usage of doctor chat [scenario-id ...]:\n")
+		fmt.Fprintf(fs.Output(), "Usage of %s [scenario-id ...]:\n", display.Command)
 		fs.PrintDefaults()
 	}
-	modelID := fs.String("model", defaultModel, "model to use for the multi-turn chat check")
+	modelID := fs.String("model", defaultModel, display.ModelHelp)
 	timeout := fs.Duration("timeout", 45*time.Second, "per-turn timeout")
-	scenarioPath := fs.String("scenario", "", "JSON scenario file or directory for the chat check")
-	projectScenarios := fs.Bool("project", false, "use project chat check scenarios from .buckley/chatchecks")
+	scenarioPath := fs.String("scenario", "", display.ScenarioPathHelp)
+	projectScenarios := fs.Bool("project", false, display.ProjectHelp)
 	var tagFilters stringListFlag
 	var nameFilters stringListFlag
 	fs.Var(&tagFilters, "tag", "only run/list scenarios with this tag (repeatable, comma-separated)")
 	fs.Var(&nameFilters, "name", "only run/list scenarios whose name or description contains this text (repeatable, comma-separated)")
-	listScenarios := fs.Bool("list", false, "list resolved chat check scenarios and exit without running them")
-	jsonOutput := fs.Bool("json", false, "print machine-readable JSON report")
-	outPath := fs.String("out", "", "write machine-readable JSON report to a file")
-	junitPath := fs.String("junit", "", "write JUnit XML report to a file")
-	writeArtifacts := fs.Bool("artifacts", false, "write run artifacts under .buckley/chatchecks/runs")
-	writeFailureArtifacts := fs.Bool("artifacts-on-failure", true, "write run artifacts automatically when a chat check fails")
-	artifactsDir := fs.String("artifacts-dir", defaultChatCheckArtifactRoot, "directory for chat check run artifacts")
+	listScenarios := fs.Bool("list", false, display.ListHelp)
+	jsonOutput := fs.Bool("json", false, display.JSONReportHelp)
+	outPath := fs.String("out", "", display.OutReportHelp)
+	junitPath := fs.String("junit", "", display.JUnitHelp)
+	writeArtifacts := fs.Bool("artifacts", false, display.ArtifactsHelp)
+	writeFailureArtifacts := fs.Bool("artifacts-on-failure", true, display.ArtifactsOnFailureHelp)
+	artifactsDir := fs.String("artifacts-dir", display.ArtifactsDirDefault, display.ArtifactsDirHelp)
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -419,7 +561,7 @@ func runDoctorChatCommandWithResolver(args []string, resolver doctorChatProjectR
 		if *jsonOutput {
 			return printChatCheckJSON(os.Stdout, inventory)
 		}
-		printDoctorChatScenarioInventory(os.Stdout, inventory)
+		printDoctorChatScenarioInventoryWithHeading(os.Stdout, inventory, display.ScenarioHeading)
 		return nil
 	}
 
@@ -430,9 +572,9 @@ func runDoctorChatCommandWithResolver(args []string, resolver doctorChatProjectR
 	defer store.Close()
 
 	if *jsonOutput {
-		printChatCheckStart(os.Stderr, scenarios)
+		printChatCheckStart(os.Stderr, scenarios, display)
 	} else {
-		printChatCheckStart(os.Stdout, scenarios)
+		printChatCheckStart(os.Stdout, scenarios, display)
 	}
 	report, runErr := runDoctorChatCheck(context.Background(), chatcheck.Runner{Client: mgr}, scenarios)
 	if *outPath != "" {
@@ -477,9 +619,9 @@ func runDoctorChatCommandWithResolver(args []string, resolver doctorChatProjectR
 	}
 	if !*jsonOutput {
 		if len(scenarios) == 1 {
-			fmt.Println("Chat health check passed")
+			fmt.Println(display.PassedSingle)
 		} else {
-			fmt.Println("Chat health check suite passed")
+			fmt.Println(display.PassedSuite)
 		}
 	}
 	return nil
@@ -1060,7 +1202,15 @@ func resolveDoctorChatRunID(root, id string) (string, error) {
 }
 
 func printDoctorChatRunsInventory(w io.Writer, inventory doctorChatRunsInventory) {
-	fmt.Fprintf(w, "Chat check runs: %d (%s)\n", inventory.Count, inventory.Root)
+	printDoctorChatRunsInventoryWithHeading(w, inventory, doctorChatDisplayLabels.RunsHeading)
+}
+
+func printDoctorChatRunsInventoryWithHeading(w io.Writer, inventory doctorChatRunsInventory, heading string) {
+	heading = strings.TrimSpace(heading)
+	if heading == "" {
+		heading = doctorChatDisplayLabels.RunsHeading
+	}
+	fmt.Fprintf(w, "%s: %d (%s)\n", heading, inventory.Count, inventory.Root)
 	for _, run := range inventory.Runs {
 		status := "pass"
 		if strings.TrimSpace(run.Error) != "" {
@@ -1089,6 +1239,14 @@ func printDoctorChatRunsInventory(w io.Writer, inventory doctorChatRunsInventory
 }
 
 func printDoctorChatRunDetail(w io.Writer, detail doctorChatRunDetail, includeTranscript bool) {
+	printDoctorChatRunDetailWithHeading(w, detail, includeTranscript, doctorChatDisplayLabels.RunHeading)
+}
+
+func printDoctorChatRunDetailWithHeading(w io.Writer, detail doctorChatRunDetail, includeTranscript bool, heading string) {
+	heading = strings.TrimSpace(heading)
+	if heading == "" {
+		heading = doctorChatDisplayLabels.RunHeading
+	}
 	run := detail.Run
 	status := "pass"
 	if strings.TrimSpace(run.Error) != "" {
@@ -1096,7 +1254,7 @@ func printDoctorChatRunDetail(w io.Writer, detail doctorChatRunDetail, includeTr
 	} else if !run.Passed {
 		status = "fail"
 	}
-	fmt.Fprintf(w, "Chat check run: %s (%s)\n", run.ID, status)
+	fmt.Fprintf(w, "%s: %s (%s)\n", heading, run.ID, status)
 	fmt.Fprintf(w, "Path: %s\n", run.Path)
 	if run.GeneratedAt != "" {
 		fmt.Fprintf(w, "Generated: %s\n", run.GeneratedAt)
@@ -1362,17 +1520,26 @@ func chatCheckReportFailed(report any) bool {
 	}
 }
 
-func printChatCheckStart(w io.Writer, scenarios []chatcheck.Scenario) {
+func printChatCheckStart(w io.Writer, scenarios []chatcheck.Scenario, display doctorChatDisplay) {
+	display = normalizeDoctorChatDisplay(display)
 	if len(scenarios) == 1 {
 		scenario := scenarios[0]
-		fmt.Fprintf(w, "Running chat health check with %s (%d turns)\n", scenario.Model, len(scenario.Turns))
+		fmt.Fprintf(w, display.StartSingle, scenario.Model, len(scenario.Turns))
 		return
 	}
-	fmt.Fprintf(w, "Running chat health check suite with %d scenarios\n", len(scenarios))
+	fmt.Fprintf(w, display.StartSuite, len(scenarios))
 }
 
 func printDoctorChatScenarioInventory(w io.Writer, inventory doctorChatScenarioInventory) {
-	fmt.Fprintf(w, "Chat check scenarios: %d\n", inventory.ScenarioCount)
+	printDoctorChatScenarioInventoryWithHeading(w, inventory, doctorChatDisplayLabels.ScenarioHeading)
+}
+
+func printDoctorChatScenarioInventoryWithHeading(w io.Writer, inventory doctorChatScenarioInventory, heading string) {
+	heading = strings.TrimSpace(heading)
+	if heading == "" {
+		heading = doctorChatDisplayLabels.ScenarioHeading
+	}
+	fmt.Fprintf(w, "%s: %d\n", heading, inventory.ScenarioCount)
 	for _, scenario := range inventory.Scenarios {
 		fmt.Fprintf(w, "  - %s: %d turns, model=%s, timeout=%dms, max_tokens=%d", scenario.Name, scenario.Turns, scenario.Model, scenario.TimeoutMillis, scenario.MaxTokens)
 		if len(scenario.Tags) > 0 {

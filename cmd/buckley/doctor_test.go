@@ -759,7 +759,7 @@ func TestRunEvalInitCreatesProjectEvalScenario(t *testing.T) {
 	if called {
 		t.Fatal("eval list initialized dependencies")
 	}
-	for _, want := range []string{"Chat check scenarios: 1", "chat/memory", "tags=regression,smoke"} {
+	for _, want := range []string{"Eval scenarios: 1", "chat/memory", "tags=regression,smoke"} {
 		if !strings.Contains(listOut, want) {
 			t.Fatalf("eval list output missing %q:\n%s", want, listOut)
 		}
@@ -875,7 +875,7 @@ turns:
 	if called {
 		t.Fatal("eval list initialized dependencies")
 	}
-	for _, want := range []string{"Chat check scenarios: 1", "chat/memory", "tags=smoke"} {
+	for _, want := range []string{"Eval scenarios: 1", "chat/memory", "tags=smoke"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("output missing %q: %s", want, out)
 		}
@@ -896,6 +896,26 @@ turns:
 	}
 	if inventory.ScenarioCount != 1 || inventory.Scenarios[0].Name != "chat/memory" {
 		t.Fatalf("unexpected eval inventory: %+v", inventory)
+	}
+}
+
+func TestRunEvalCommandHelpUsesEvalLabels(t *testing.T) {
+	var runErr error
+	out := captureStderr(t, func() {
+		runErr = runEvalCommand([]string{"--help"})
+	})
+	if runErr == nil {
+		t.Fatal("expected help to return an error")
+	}
+	for _, want := range []string{"Usage of eval", "JSON/YAML eval scenario file or directory", "use project eval scenarios from evals/", "write machine-readable JSON eval report", "model to use for the eval", `(default "evals/runs")`} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("eval help output missing %q:\n%s", want, out)
+		}
+	}
+	for _, unwanted := range []string{"Usage of doctor chat", "use project chat check scenarios from .buckley/chatchecks"} {
+		if strings.Contains(out, unwanted) {
+			t.Fatalf("eval help output should not contain %q:\n%s", unwanted, out)
+		}
 	}
 }
 
@@ -937,7 +957,7 @@ func TestRunEvalCommandRunsShowDefaultsToProjectEvals(t *testing.T) {
 		}
 	})
 	for _, want := range []string{
-		"Chat check run: " + filepath.Base(runDir) + " (pass)",
+		"Eval run: " + filepath.Base(runDir) + " (pass)",
 		"Project: true",
 		"chat/smoke: pass",
 	} {
