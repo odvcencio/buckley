@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -128,6 +129,7 @@ type Server struct {
 	projectRoot      string
 	workflow         *orchestrator.WorkflowManager
 	viewAssembler    *viewmodel.Assembler
+	viewPatchWG      sync.WaitGroup
 	runtimeTracker   *viewmodel.RuntimeStateTracker
 	headlessRegistry HeadlessRegistry
 	grpcService      *GRPCService
@@ -2107,8 +2109,19 @@ func (s *Server) onStorageEvent(event storage.Event) {
 	s.hub.Broadcast(ipcEvent)
 
 	if event.SessionID != "" && s.viewAssembler != nil {
-		go s.broadcastViewPatch(event.SessionID)
+		s.viewPatchWG.Add(1)
+		go func(sessionID string) {
+			defer s.viewPatchWG.Done()
+			s.broadcastViewPatch(sessionID)
+		}(event.SessionID)
 	}
+}
+
+func (s *Server) waitForViewPatches() {
+	if s == nil {
+		return
+	}
+	s.viewPatchWG.Wait()
 }
 
 func (s *Server) broadcastTelemetry(event telemetry.Event) {

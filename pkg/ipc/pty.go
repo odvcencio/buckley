@@ -28,64 +28,18 @@ type ptyMessage struct {
 	Cols int    `json:"cols,omitempty"`
 }
 
+type ptyRequest struct {
+	sessionID     string
+	providedToken string
+	release       func()
+}
+
 func (s *Server) handlePTY(w http.ResponseWriter, r *http.Request) {
-	principal, ok := s.authorize(r)
+	req, ok := s.preparePTYRequest(w, r)
 	if !ok {
-		httpError(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	if scopeRank[strings.ToLower(principal.Scope)] < scopeRank[strings.ToLower(storage.TokenScopeMember)] {
-		httpError(w, "forbidden", http.StatusForbidden)
-		return
-	}
-	if !s.isWebSocketOriginAllowed(r) {
-		httpError(w, "forbidden", http.StatusForbidden)
-		return
-	}
-	if s.ptyConnLimiter != nil && !s.ptyConnLimiter.Acquire() {
-		httpError(w, "too many connections", http.StatusTooManyRequests)
-		return
-	}
-	defer func() {
-		if s.ptyConnLimiter != nil {
-			s.ptyConnLimiter.Release()
-		}
-	}()
-
-	sessionID := strings.TrimSpace(r.URL.Query().Get("sessionId"))
-	if sessionID == "" {
-		httpError(w, "session id required", http.StatusBadRequest)
-		return
-	}
-
-	if s.store == nil {
-		httpError(w, "storage unavailable", http.StatusServiceUnavailable)
-		return
-	}
-
-	session, err := s.store.GetSession(sessionID)
-	if err != nil {
-		httpError(w, "failed to load session", http.StatusInternalServerError)
-		return
-	}
-	if session == nil || !principalCanAccessSession(principal, session) {
-		httpError(w, "session not found", http.StatusNotFound)
-		return
-	}
-
-	if !s.commandLimiter.Allow("pty:" + sessionID) {
-		httpError(w, "rate limit exceeded", http.StatusTooManyRequests)
-		return
-	}
-
-	providedToken := strings.TrimSpace(r.Header.Get("X-Buckley-Session-Token"))
-	if providedToken == "" && isLoopbackBindAddress(s.cfg.BindAddress) {
-		providedToken = strings.TrimSpace(r.URL.Query().Get("session_token"))
-	}
-	if providedToken != "" && !s.validateSessionTokenValue(sessionID, providedToken) {
-		httpError(w, "invalid session token", http.StatusUnauthorized)
-		return
-	}
+	defer req.release()
 
 	// InsecureSkipVerify disables the library's built-in Origin check.
 	// Origin validation is already performed above via isWebSocketOriginAllowed,
@@ -94,7 +48,7 @@ func (s *Server) handlePTY(w http.ResponseWriter, r *http.Request) {
 		InsecureSkipVerify: true,
 	})
 	if err != nil {
-		s.logger.Printf("pty websocket accept failed: %v", err)
+		s.logPTY("pty websocket accept failed: %v", err)
 		return
 	}
 	conn.SetReadLimit(maxWSReadBytesPTY)
@@ -103,39 +57,150 @@ func (s *Server) handlePTY(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	startWSPing(ctx, conn)
 
-	if providedToken == "" {
-		token, err := s.readPTYAuthToken(ctx, conn)
-		if err != nil {
-			if wErr := conn.Write(ctx, websocket.MessageText, marshalPTYError(err)); wErr != nil {
-				s.logger.Printf("[debug] pty: websocket write error (auth): %v", wErr)
-			}
-			conn.Close(websocket.StatusPolicyViolation, err.Error())
-			return
-		}
-		if !s.validateSessionTokenValue(sessionID, token) {
-			err := errors.New("invalid session token")
-			if wErr := conn.Write(ctx, websocket.MessageText, marshalPTYError(err)); wErr != nil {
-				s.logger.Printf("[debug] pty: websocket write error (token): %v", wErr)
-			}
-			conn.Close(websocket.StatusPolicyViolation, err.Error())
-			return
-		}
+	if !s.authenticatePTYConnection(ctx, conn, req.sessionID, req.providedToken) {
+		return
 	}
 
 	cmd := buildPTYCommand(r)
 	ptmx, err := startPTY(cmd, r)
 	if err != nil {
-		if wErr := conn.Write(ctx, websocket.MessageText, marshalPTYError(err)); wErr != nil {
-			s.logger.Printf("[debug] pty: websocket write error (start): %v", wErr)
-		}
-		conn.Close(websocket.StatusInternalError, err.Error())
+		s.writePTYErrorAndClose(ctx, conn, err, websocket.StatusInternalError, "start")
 		return
 	}
 	defer func() {
 		_ = ptmx.Close()
 	}()
 
-	// Copy PTY output to websocket
+	outputDone := s.forwardPTYOutput(ctx, conn, ptmx)
+	s.handlePTYInput(ctx, conn, ptmx)
+
+	cancel()
+	_ = ptmx.Close() // Unblock Read in output goroutine.
+	<-outputDone
+	_ = cmd.Wait() // Reap child process to prevent zombies.
+	if cErr := conn.Close(websocket.StatusNormalClosure, "pty closed"); cErr != nil {
+		s.logPTY("[debug] pty: websocket close error: %v", cErr)
+	}
+}
+
+func (s *Server) preparePTYRequest(w http.ResponseWriter, r *http.Request) (*ptyRequest, bool) {
+	principal, ok := s.authorizePTYAccess(w, r)
+	if !ok {
+		return nil, false
+	}
+	release, ok := s.acquirePTYConnection(w)
+	if !ok {
+		return nil, false
+	}
+
+	sessionID, ok := s.validatePTYSession(w, r, principal)
+	if !ok {
+		release()
+		return nil, false
+	}
+
+	providedToken, ok := s.resolvePTYProvidedToken(w, r, sessionID)
+	if !ok {
+		release()
+		return nil, false
+	}
+
+	return &ptyRequest{
+		sessionID:     sessionID,
+		providedToken: providedToken,
+		release:       release,
+	}, true
+}
+
+func (s *Server) authorizePTYAccess(w http.ResponseWriter, r *http.Request) (*requestPrincipal, bool) {
+	principal, ok := s.authorize(r)
+	if !ok {
+		httpError(w, "unauthorized", http.StatusUnauthorized)
+		return nil, false
+	}
+	if scopeRank[strings.ToLower(principal.Scope)] < scopeRank[strings.ToLower(storage.TokenScopeMember)] {
+		httpError(w, "forbidden", http.StatusForbidden)
+		return nil, false
+	}
+	if !s.isWebSocketOriginAllowed(r) {
+		httpError(w, "forbidden", http.StatusForbidden)
+		return nil, false
+	}
+	return principal, true
+}
+
+func (s *Server) acquirePTYConnection(w http.ResponseWriter) (func(), bool) {
+	if s.ptyConnLimiter != nil && !s.ptyConnLimiter.Acquire() {
+		httpError(w, "too many connections", http.StatusTooManyRequests)
+		return nil, false
+	}
+	release := func() {
+		if s.ptyConnLimiter != nil {
+			s.ptyConnLimiter.Release()
+		}
+	}
+	return release, true
+}
+
+func (s *Server) validatePTYSession(w http.ResponseWriter, r *http.Request, principal *requestPrincipal) (string, bool) {
+	sessionID := strings.TrimSpace(r.URL.Query().Get("sessionId"))
+	if sessionID == "" {
+		httpError(w, "session id required", http.StatusBadRequest)
+		return "", false
+	}
+
+	if s.store == nil {
+		httpError(w, "storage unavailable", http.StatusServiceUnavailable)
+		return "", false
+	}
+
+	session, err := s.store.GetSession(sessionID)
+	if err != nil {
+		httpError(w, "failed to load session", http.StatusInternalServerError)
+		return "", false
+	}
+	if session == nil || !principalCanAccessSession(principal, session) {
+		httpError(w, "session not found", http.StatusNotFound)
+		return "", false
+	}
+
+	if !s.commandLimiter.Allow("pty:" + sessionID) {
+		httpError(w, "rate limit exceeded", http.StatusTooManyRequests)
+		return "", false
+	}
+	return sessionID, true
+}
+
+func (s *Server) resolvePTYProvidedToken(w http.ResponseWriter, r *http.Request, sessionID string) (string, bool) {
+	providedToken := strings.TrimSpace(r.Header.Get("X-Buckley-Session-Token"))
+	if providedToken == "" && isLoopbackBindAddress(s.cfg.BindAddress) {
+		providedToken = strings.TrimSpace(r.URL.Query().Get("session_token"))
+	}
+	if providedToken != "" && !s.validateSessionTokenValue(sessionID, providedToken) {
+		httpError(w, "invalid session token", http.StatusUnauthorized)
+		return "", false
+	}
+	return providedToken, true
+}
+
+func (s *Server) authenticatePTYConnection(ctx context.Context, conn *websocket.Conn, sessionID, providedToken string) bool {
+	if providedToken != "" {
+		return true
+	}
+	token, err := s.readPTYAuthToken(ctx, conn)
+	if err != nil {
+		s.writePTYErrorAndClose(ctx, conn, err, websocket.StatusPolicyViolation, "auth")
+		return false
+	}
+	if !s.validateSessionTokenValue(sessionID, token) {
+		err := errors.New("invalid session token")
+		s.writePTYErrorAndClose(ctx, conn, err, websocket.StatusPolicyViolation, "token")
+		return false
+	}
+	return true
+}
+
+func (s *Server) forwardPTYOutput(ctx context.Context, conn *websocket.Conn, ptmx *os.File) <-chan struct{} {
 	outputDone := make(chan struct{})
 	go func() {
 		defer close(outputDone)
@@ -148,13 +213,7 @@ func (s *Server) handlePTY(w http.ResponseWriter, r *http.Request) {
 					Type: "data",
 					Data: base64.StdEncoding.EncodeToString(chunk),
 				}
-				if payload, mErr := json.Marshal(packet); mErr == nil {
-					writeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-					if wErr := conn.Write(writeCtx, websocket.MessageText, payload); wErr != nil {
-						s.logger.Printf("[debug] pty: websocket write error (data): %v", wErr)
-					}
-					cancel()
-				}
+				s.writePTYPacket(ctx, conn, packet, "data")
 			}
 			if err != nil {
 				exitStatus := exitCode(err)
@@ -162,22 +221,19 @@ func (s *Server) handlePTY(w http.ResponseWriter, r *http.Request) {
 					Type: "exit",
 					Data: strconv.Itoa(exitStatus),
 				}
-				if payload, mErr := json.Marshal(packet); mErr == nil {
-					if wErr := conn.Write(ctx, websocket.MessageText, payload); wErr != nil {
-						s.logger.Printf("[debug] pty: websocket write error (exit): %v", wErr)
-					}
-				}
+				s.writePTYPacket(ctx, conn, packet, "exit")
 				return
 			}
 		}
 	}()
+	return outputDone
+}
 
-	// Read inbound websocket messages
-receiveLoop:
+func (s *Server) handlePTYInput(ctx context.Context, conn *websocket.Conn, ptmx *os.File) {
 	for {
 		messageType, data, err := conn.Read(ctx)
 		if err != nil {
-			break
+			return
 		}
 		if messageType != websocket.MessageText {
 			continue
@@ -188,44 +244,78 @@ receiveLoop:
 			continue
 		}
 
-		switch msg.Type {
-		case "input":
-			if msg.Data == "" {
-				continue
-			}
-			bytes, err := base64.StdEncoding.DecodeString(msg.Data)
-			if err != nil {
-				continue
-			}
-			if _, wErr := ptmx.Write(bytes); wErr != nil {
-				s.logger.Printf("[debug] pty: write to pty failed: %v", wErr)
-			}
-		case "resize":
-			if msg.Rows <= 0 || msg.Cols <= 0 {
-				continue
-			}
-			rows, okRows := intToUint16(msg.Rows)
-			cols, okCols := intToUint16(msg.Cols)
-			if !okRows || !okCols {
-				continue
-			}
-			_ = pty.Setsize(ptmx, &pty.Winsize{
-				Rows: rows,
-				Cols: cols,
-			})
-		case "close":
-			break receiveLoop
-		default:
-			// ignore unknown message types
+		if closePTY := s.handlePTYMessage(ptmx, msg); closePTY {
+			return
 		}
 	}
+}
 
-	cancel()
-	_ = ptmx.Close() // Unblock Read in output goroutine
-	<-outputDone
-	_ = cmd.Wait() // Reap child process to prevent zombies
-	if cErr := conn.Close(websocket.StatusNormalClosure, "pty closed"); cErr != nil {
-		s.logger.Printf("[debug] pty: websocket close error: %v", cErr)
+func (s *Server) handlePTYMessage(ptmx *os.File, msg ptyMessage) bool {
+	switch msg.Type {
+	case "input":
+		bytes, ok := decodePTYInput(msg.Data)
+		if !ok {
+			return false
+		}
+		if _, wErr := ptmx.Write(bytes); wErr != nil {
+			s.logPTY("[debug] pty: write to pty failed: %v", wErr)
+		}
+	case "resize":
+		size, ok := ptyWinsize(msg)
+		if !ok {
+			return false
+		}
+		_ = pty.Setsize(ptmx, size)
+	case "close":
+		return true
+	default:
+		// ignore unknown message types
+	}
+	return false
+}
+
+func decodePTYInput(data string) ([]byte, bool) {
+	if data == "" {
+		return nil, false
+	}
+	bytes, err := base64.StdEncoding.DecodeString(data)
+	if err != nil {
+		return nil, false
+	}
+	return bytes, true
+}
+
+func ptyWinsize(msg ptyMessage) (*pty.Winsize, bool) {
+	rows, okRows := intToUint16(msg.Rows)
+	cols, okCols := intToUint16(msg.Cols)
+	if !okRows || !okCols {
+		return nil, false
+	}
+	return &pty.Winsize{Rows: rows, Cols: cols}, true
+}
+
+func (s *Server) writePTYErrorAndClose(ctx context.Context, conn *websocket.Conn, err error, status websocket.StatusCode, label string) {
+	if wErr := conn.Write(ctx, websocket.MessageText, marshalPTYError(err)); wErr != nil {
+		s.logPTY("[debug] pty: websocket write error (%s): %v", label, wErr)
+	}
+	conn.Close(status, err.Error())
+}
+
+func (s *Server) writePTYPacket(ctx context.Context, conn *websocket.Conn, packet ptyMessage, label string) {
+	payload, err := json.Marshal(packet)
+	if err != nil {
+		return
+	}
+	writeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	if wErr := conn.Write(writeCtx, websocket.MessageText, payload); wErr != nil {
+		s.logPTY("[debug] pty: websocket write error (%s): %v", label, wErr)
+	}
+}
+
+func (s *Server) logPTY(format string, args ...any) {
+	if s != nil && s.logger != nil {
+		s.logger.Printf(format, args...)
 	}
 }
 

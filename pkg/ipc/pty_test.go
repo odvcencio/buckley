@@ -1,6 +1,7 @@
 package ipc
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -36,6 +37,41 @@ func TestIntToUint16(t *testing.T) {
 				t.Errorf("intToUint16(%d) = %d, want %d", tt.value, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestDecodePTYInput(t *testing.T) {
+	encoded := base64.StdEncoding.EncodeToString([]byte("hello"))
+	got, ok := decodePTYInput(encoded)
+	if !ok {
+		t.Fatalf("expected valid input")
+	}
+	if string(got) != "hello" {
+		t.Fatalf("decodePTYInput = %q, want hello", string(got))
+	}
+
+	if _, ok := decodePTYInput(""); ok {
+		t.Fatalf("empty input should be invalid")
+	}
+	if _, ok := decodePTYInput("not-base64"); ok {
+		t.Fatalf("invalid base64 should be invalid")
+	}
+}
+
+func TestPTYWinsize(t *testing.T) {
+	size, ok := ptyWinsize(ptyMessage{Rows: 24, Cols: 80})
+	if !ok {
+		t.Fatalf("expected valid winsize")
+	}
+	if size.Rows != 24 || size.Cols != 80 {
+		t.Fatalf("winsize=%dx%d want 24x80", size.Rows, size.Cols)
+	}
+
+	if _, ok := ptyWinsize(ptyMessage{Rows: 0, Cols: 80}); ok {
+		t.Fatalf("zero rows should be invalid")
+	}
+	if _, ok := ptyWinsize(ptyMessage{Rows: 24, Cols: 65536}); ok {
+		t.Fatalf("overflow cols should be invalid")
 	}
 }
 

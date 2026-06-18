@@ -42,6 +42,7 @@ func testServer(t *testing.T) (*Server, *storage.Store) {
 		nil,
 		nil,
 	)
+	t.Cleanup(server.waitForViewPatches)
 	return server, store
 }
 
