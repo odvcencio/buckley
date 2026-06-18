@@ -54,7 +54,7 @@ func LoadFilesystemSpec(agentRoot string) (*Spec, []Diagnostic, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	skills, err := filesystemMarkdownSlugs(filepath.Join(absRoot, "skills"))
+	skills, err := filesystemSkillSlugs(filepath.Join(absRoot, "skills"))
 	if err != nil {
 		return nil, nil, err
 	}
@@ -197,7 +197,7 @@ func filesystemSubagents(agentRoot string, d *diagnostics) ([]SubagentSpec, erro
 		if err != nil {
 			return nil, err
 		}
-		skills, err := filesystemMarkdownSlugs(filepath.Join(root, "skills"))
+		skills, err := filesystemSkillSlugs(filepath.Join(root, "skills"))
 		if err != nil {
 			return nil, err
 		}
@@ -234,22 +234,59 @@ func readFilesystemInstructionBundle(root string, paths []string) (string, error
 	return strings.TrimSpace(strings.Join(parts, "\n\n")), nil
 }
 
-func filesystemMarkdownSlugs(root string) ([]string, error) {
-	files, err := filesystemMarkdownFiles(root)
+func filesystemSkillSlugs(root string) ([]string, error) {
+	info, err := os.Stat(root)
 	if err != nil {
-		return nil, err
-	}
-	slugs := make([]string, 0, len(files))
-	for _, path := range files {
-		rel, err := filepath.Rel(root, path)
-		if err != nil {
-			return nil, fmt.Errorf("resolve filesystem markdown slug: %w", err)
+		if os.IsNotExist(err) {
+			return nil, nil
 		}
-		rel = filepath.ToSlash(rel)
-		slugs = append(slugs, strings.TrimSuffix(rel, filepath.Ext(rel)))
+		return nil, fmt.Errorf("stat filesystem skills path: %w", err)
+	}
+	if !info.IsDir() {
+		return nil, fmt.Errorf("filesystem skills path is not a directory: %s", root)
+	}
+
+	slugs := []string{}
+	if err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() {
+			if path == root {
+				return nil
+			}
+			if hasSkillPackage(path) {
+				rel, err := filepath.Rel(root, path)
+				if err != nil {
+					return fmt.Errorf("resolve filesystem skill slug: %w", err)
+				}
+				slugs = append(slugs, filepath.ToSlash(rel))
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if strings.EqualFold(entry.Name(), "SKILL.md") {
+			return nil
+		}
+		if strings.EqualFold(filepath.Ext(entry.Name()), ".md") {
+			rel, err := filepath.Rel(root, path)
+			if err != nil {
+				return fmt.Errorf("resolve filesystem skill slug: %w", err)
+			}
+			rel = filepath.ToSlash(rel)
+			slugs = append(slugs, strings.TrimSuffix(rel, filepath.Ext(rel)))
+		}
+		return nil
+	}); err != nil {
+		return nil, fmt.Errorf("read filesystem skills path: %w", err)
 	}
 	sort.Strings(slugs)
 	return slugs, nil
+}
+
+func hasSkillPackage(dir string) bool {
+	info, err := os.Stat(filepath.Join(dir, "SKILL.md"))
+	return err == nil && !info.IsDir()
 }
 
 func filesystemMarkdownFiles(root string) ([]string, error) {

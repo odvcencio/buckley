@@ -56,7 +56,12 @@ func TestLoadFilesystemRuntimeProfile(t *testing.T) {
 	writeFilesystemFile(t, filepath.Join(root, "package.json"), `{"name":"daily-agent"}`)
 	writeFilesystemFile(t, filepath.Join(root, "agent", "instructions.md"), "Use the root prompt.")
 	writeFilesystemFile(t, filepath.Join(root, "agent", "instructions", "extra.md"), "Use the extra prompt.")
+	writeFilesystemFile(t, filepath.Join(root, "agent", "skills", "forecast.md"), "Use weather forecasts carefully.")
+	writeFilesystemFile(t, filepath.Join(root, "agent", "skills", "research", "SKILL.md"), "Research before answering.")
+	writeFilesystemFile(t, filepath.Join(root, "agent", "skills", "research", "references", "checklist.md"), "This is package support material.")
 	writeFilesystemFile(t, filepath.Join(root, "agent", "subagents", "coder", "instructions.md"), "Write focused patches.")
+	writeFilesystemFile(t, filepath.Join(root, "agent", "subagents", "coder", "skills", "patching", "SKILL.md"), "Patch in small steps.")
+	writeFilesystemFile(t, filepath.Join(root, "agent", "subagents", "coder", "skills", "patching", "references", "checklist.md"), "This is package support material.")
 
 	profile, err := LoadRuntimeProfile(filepath.Join(root, "agent"))
 	if err != nil {
@@ -71,6 +76,9 @@ func TestLoadFilesystemRuntimeProfile(t *testing.T) {
 	if len(profile.InstructionFiles) != 2 {
 		t.Fatalf("instruction files=%+v want 2", profile.InstructionFiles)
 	}
+	if strings.Join(profile.Spec.Skills, ",") != "forecast,research" {
+		t.Fatalf("skills=%v want forecast,research", profile.Spec.Skills)
+	}
 	sub, err := profile.SubagentProfile("coder")
 	if err != nil {
 		t.Fatalf("SubagentProfile coder: %v", err)
@@ -80,6 +88,9 @@ func TestLoadFilesystemRuntimeProfile(t *testing.T) {
 	}
 	if !strings.Contains(sub.Spec.Instructions.Prompt, "Write focused patches.") {
 		t.Fatalf("subagent instructions missing:\n%s", sub.Spec.Instructions.Prompt)
+	}
+	if strings.Join(sub.Spec.Skills, ",") != "forecast,research,patching" {
+		t.Fatalf("subagent skills=%v want forecast,research,patching", sub.Spec.Skills)
 	}
 }
 
