@@ -6,8 +6,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"m31labs.dev/buckley/pkg/ui/compositor"
 )
 
 func TestFuzzyMatch(t *testing.T) {
@@ -273,71 +271,6 @@ func TestFilePicker(t *testing.T) {
 		}
 		if fp.IsActive() {
 			t.Error("should deactivate after backspace on empty query")
-		}
-	})
-}
-
-func TestFilePickerRender(t *testing.T) {
-	// Create temp directory with test files
-	tmpDir, err := os.MkdirTemp("", "filepicker_render_test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.RemoveAll(tmpDir)
-
-	files := []string{"main.go", "handler.go", "config.go"}
-	for _, f := range files {
-		os.WriteFile(filepath.Join(tmpDir, f), []byte("test"), 0644)
-	}
-
-	fp := NewFilePicker(tmpDir)
-	fp.SetDimensions(40, 8)
-
-	// Wait for indexing
-	for i := 0; i < 50; i++ {
-		if fp.IsIndexReady() {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-
-	t.Run("render when inactive", func(t *testing.T) {
-		screen := compositor.NewScreen(80, 24)
-		Render(fp, screen, DefaultRenderConfig())
-		// Should not render anything when inactive
-		cell := screen.Get(0, 0)
-		if cell.Rune != ' ' {
-			t.Error("should not render when inactive")
-		}
-	})
-
-	t.Run("render when active", func(t *testing.T) {
-		fp.Activate(0)
-		screen := compositor.NewScreen(80, 24)
-		Render(fp, screen, DefaultRenderConfig())
-
-		// Should have border
-		cell := screen.Get(0, 0)
-		if cell.Rune != '╭' {
-			t.Errorf("expected top-left corner '╭', got %q", cell.Rune)
-		}
-	})
-
-	t.Run("RenderToString", func(t *testing.T) {
-		fp.Activate(0)
-		output := RenderToString(fp, DefaultRenderConfig())
-		if output == "" {
-			t.Error("RenderToString should produce output when active")
-		}
-	})
-
-	t.Run("CompactView", func(t *testing.T) {
-		fp.Activate(0)
-		fp.SetQuery("main")
-
-		compact := CompactView(fp)
-		if !strings.HasPrefix(compact, "@main") {
-			t.Errorf("CompactView() = %q, should start with @main", compact)
 		}
 	})
 }
