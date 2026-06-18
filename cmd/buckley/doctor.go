@@ -42,6 +42,7 @@ func runDoctorChatCommand(args []string) error {
 	modelID := fs.String("model", defaultModel, "model to use for the multi-turn chat check")
 	timeout := fs.Duration("timeout", 45*time.Second, "per-turn timeout")
 	scenarioPath := fs.String("scenario", "", "JSON scenario file or directory for the chat check")
+	listScenarios := fs.Bool("list", false, "list resolved chat check scenarios and exit without running them")
 	jsonOutput := fs.Bool("json", false, "print machine-readable JSON report")
 	outPath := fs.String("out", "", "write machine-readable JSON report to a file")
 	if err := fs.Parse(args); err != nil {
@@ -51,16 +52,29 @@ func runDoctorChatCommand(args []string) error {
 		return fmt.Errorf("unexpected doctor chat argument: %s", fs.Arg(0))
 	}
 
+	scenarios, err := resolveDoctorChatScenarios(*modelID, *timeout, *scenarioPath, flagWasSet(fs, "model"), flagWasSet(fs, "timeout"))
+	if err != nil {
+		return err
+	}
+	if *listScenarios {
+		inventory := buildDoctorChatScenarioInventory(scenarios)
+		if *outPath != "" {
+			if err := writeChatCheckReport(*outPath, inventory); err != nil {
+				return err
+			}
+		}
+		if *jsonOutput {
+			return printChatCheckJSON(os.Stdout, inventory)
+		}
+		printDoctorChatScenarioInventory(os.Stdout, inventory)
+		return nil
+	}
+
 	_, mgr, store, err := initDependenciesFn()
 	if err != nil {
 		return err
 	}
 	defer store.Close()
-
-	scenarios, err := resolveDoctorChatScenarios(*modelID, *timeout, *scenarioPath, flagWasSet(fs, "model"), flagWasSet(fs, "timeout"))
-	if err != nil {
-		return err
-	}
 
 	if *jsonOutput {
 		printChatCheckStart(os.Stderr, scenarios)
@@ -127,6 +141,59 @@ func resolveDoctorChatScenarios(modelID string, timeout time.Duration, scenarioP
 	return loaded, nil
 }
 
+type doctorChatScenarioInventory struct {
+	ScenarioCount int                         `json:"scenario_count"`
+	Scenarios     []doctorChatScenarioSummary `json:"scenarios"`
+}
+
+type doctorChatScenarioSummary struct {
+	Name            string `json:"name"`
+	Model           string `json:"model"`
+	SessionID       string `json:"session_id"`
+	Turns           int    `json:"turns"`
+	TimeoutMillis   int64  `json:"timeout_ms"`
+	MaxTokens       int    `json:"max_tokens"`
+	SystemPrompt    bool   `json:"system_prompt"`
+	ExpectedMatches int    `json:"expected_matches"`
+	MinCharChecks   int    `json:"min_char_checks"`
+}
+
+func buildDoctorChatScenarioInventory(scenarios []chatcheck.Scenario) doctorChatScenarioInventory {
+	inventory := doctorChatScenarioInventory{
+		ScenarioCount: len(scenarios),
+		Scenarios:     make([]doctorChatScenarioSummary, 0, len(scenarios)),
+	}
+	for _, scenario := range scenarios {
+		summary := doctorChatScenarioSummary{
+			Name:          scenario.Name,
+			Model:         scenario.Model,
+			SessionID:     scenario.SessionID,
+			Turns:         len(scenario.Turns),
+			TimeoutMillis: scenario.Timeout.Milliseconds(),
+			MaxTokens:     scenario.MaxTokens,
+			SystemPrompt:  strings.TrimSpace(scenario.SystemPrompt) != "",
+		}
+		for _, turn := range scenario.Turns {
+			summary.ExpectedMatches += countNonEmptyStrings(turn.WantContains)
+			if turn.MinChars > 0 {
+				summary.MinCharChecks++
+			}
+		}
+		inventory.Scenarios = append(inventory.Scenarios, summary)
+	}
+	return inventory
+}
+
+func countNonEmptyStrings(values []string) int {
+	count := 0
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			count++
+		}
+	}
+	return count
+}
+
 func flagWasSet(fs *flag.FlagSet, name string) bool {
 	if fs == nil {
 		return false
@@ -154,6 +221,26 @@ func printChatCheckStart(w io.Writer, scenarios []chatcheck.Scenario) {
 		return
 	}
 	fmt.Fprintf(w, "Running chat health check suite with %d scenarios\n", len(scenarios))
+}
+
+func printDoctorChatScenarioInventory(w io.Writer, inventory doctorChatScenarioInventory) {
+	fmt.Fprintf(w, "Chat check scenarios: %d\n", inventory.ScenarioCount)
+	for _, scenario := range inventory.Scenarios {
+		fmt.Fprintf(w, "  - %s: %d turns, model=%s, timeout=%dms, max_tokens=%d", scenario.Name, scenario.Turns, scenario.Model, scenario.TimeoutMillis, scenario.MaxTokens)
+		if scenario.ExpectedMatches > 0 {
+			fmt.Fprintf(w, ", contains=%d", scenario.ExpectedMatches)
+		}
+		if scenario.MinCharChecks > 0 {
+			fmt.Fprintf(w, ", min_chars=%d", scenario.MinCharChecks)
+		}
+		if scenario.SystemPrompt {
+			fmt.Fprint(w, ", system_prompt=true")
+		}
+		if scenario.SessionID != "" {
+			fmt.Fprintf(w, ", session_id=%s", scenario.SessionID)
+		}
+		fmt.Fprintln(w)
+	}
 }
 
 func printChatCheckReport(w io.Writer, report any) {

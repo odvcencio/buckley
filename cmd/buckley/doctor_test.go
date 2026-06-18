@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,6 +11,9 @@ import (
 	"time"
 
 	"m31labs.dev/buckley/pkg/chatcheck"
+	"m31labs.dev/buckley/pkg/config"
+	"m31labs.dev/buckley/pkg/model"
+	"m31labs.dev/buckley/pkg/storage"
 )
 
 func TestRunDoctorCommandUnknown(t *testing.T) {
@@ -126,6 +130,64 @@ func TestResolveDoctorChatScenariosDirectory(t *testing.T) {
 		if scenario.Model != "override-model" || scenario.Timeout != 3*time.Second {
 			t.Fatalf("explicit flags should apply to every scenario: %+v", scenario)
 		}
+	}
+}
+
+func TestRunDoctorChatCommandListDoesNotInitDependencies(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "chat.json"), []byte(`{"name":"offline","turns":[{"user":"say READY","want_contains":["READY"]}]}`), 0o644); err != nil {
+		t.Fatalf("write scenario: %v", err)
+	}
+
+	origInit := initDependenciesFn
+	t.Cleanup(func() { initDependenciesFn = origInit })
+	called := false
+	initDependenciesFn = func() (*config.Config, *model.Manager, *storage.Store, error) {
+		called = true
+		return nil, nil, nil, errors.New("dependency initialization should not run")
+	}
+
+	var runErr error
+	out := captureStdout(t, func() {
+		runErr = runDoctorChatCommand([]string{"-scenario", dir, "-list"})
+	})
+	if runErr != nil {
+		t.Fatalf("runDoctorChatCommand: %v", runErr)
+	}
+	if called {
+		t.Fatal("list mode initialized dependencies")
+	}
+	for _, want := range []string{"Chat check scenarios: 1", "offline", "contains=1"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("output missing %q: %s", want, out)
+		}
+	}
+}
+
+func TestPrintDoctorChatScenarioInventoryJSON(t *testing.T) {
+	inventory := buildDoctorChatScenarioInventory([]chatcheck.Scenario{
+		chatcheck.NormalizeScenario(chatcheck.Scenario{
+			Name:      "custom",
+			Model:     "test-model",
+			Timeout:   2 * time.Second,
+			MaxTokens: 64,
+			Turns: []chatcheck.Turn{{
+				User:         "say TOKEN",
+				WantContains: []string{"TOKEN"},
+				MinChars:     5,
+			}},
+		}),
+	})
+	var out bytes.Buffer
+	if err := printChatCheckJSON(&out, inventory); err != nil {
+		t.Fatalf("printChatCheckJSON: %v", err)
+	}
+	var got doctorChatScenarioInventory
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("json output did not parse: %v\n%s", err, out.String())
+	}
+	if got.ScenarioCount != 1 || got.Scenarios[0].ExpectedMatches != 1 || got.Scenarios[0].MinCharChecks != 1 {
+		t.Fatalf("unexpected inventory: %+v", got)
 	}
 }
 
