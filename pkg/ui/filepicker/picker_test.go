@@ -64,6 +64,14 @@ func TestFuzzyMatchScoring(t *testing.T) {
 	if scoreWordStart <= scoreMid {
 		t.Errorf("word start match should score higher: %d <= %d", scoreWordStart, scoreMid)
 	}
+
+	// CamelCase boundary should score higher
+	scoreCamel, _ := fuzzyMatch("apiHandler.go", "h")
+	scoreFlat, _ := fuzzyMatch("apihandler.go", "h")
+
+	if scoreCamel <= scoreFlat {
+		t.Errorf("camel boundary match should score higher: %d <= %d", scoreCamel, scoreFlat)
+	}
 }
 
 func TestFuzzyMatchHighlights(t *testing.T) {
@@ -114,6 +122,15 @@ func TestMultiPatternMatch(t *testing.T) {
 					tt.path, tt.patterns, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestMultiPatternMatch_DeduplicatesHighlights(t *testing.T) {
+	_, highlights := MultiPatternMatch("pkg/api/handler.go", []string{"api", "api"})
+	expected := []int{4, 5, 6}
+
+	if !slices.Equal(highlights, expected) {
+		t.Fatalf("highlights = %v, want %v", highlights, expected)
 	}
 }
 

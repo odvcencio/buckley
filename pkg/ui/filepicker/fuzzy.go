@@ -3,6 +3,7 @@ package filepicker
 
 import (
 	"path/filepath"
+	"slices"
 	"strings"
 	"unicode"
 )
@@ -14,85 +15,119 @@ func fuzzyMatch(path, query string) (int, []int) {
 		return 1, nil // Empty query matches everything
 	}
 
-	pathLower := strings.ToLower(path)
-	queryLower := strings.ToLower(query)
+	ctx := newFuzzyContext(path, query)
+	state := newFuzzyMatchState(query)
 
-	// Extract filename for bonus scoring
-	filename := strings.ToLower(filepath.Base(path))
-
-	score := 0
-	highlights := make([]int, 0, len(query))
-
-	pathRunes := []rune(pathLower)
-	queryRunes := []rune(queryLower)
-	originalRunes := []rune(path)
-	filenameStart := len(pathRunes) - len([]rune(filename))
-
-	qi := 0         // Query index
-	lastMatch := -1 // Last matched position
-	consecutive := 0
-
-	for pi := 0; pi < len(pathRunes) && qi < len(queryRunes); pi++ {
-		if pathRunes[pi] == queryRunes[qi] {
-			highlights = append(highlights, pi)
-
-			// Scoring bonuses
-			baseScore := 10
-
-			// Consecutive match bonus
-			if lastMatch == pi-1 {
-				consecutive++
-				baseScore += consecutive * 5
-			} else {
-				consecutive = 0
-			}
-
-			// Start of word bonus (after / or _ or - or .)
-			if pi == 0 || pathRunes[pi-1] == '/' || pathRunes[pi-1] == '_' ||
-				pathRunes[pi-1] == '-' || pathRunes[pi-1] == '.' {
-				baseScore += 20
-			}
-
-			// CamelCase bonus
-			if pi > 0 && pi < len(originalRunes) &&
-				unicode.IsLower(rune(originalRunes[pi-1])) && unicode.IsUpper(originalRunes[pi]) {
-				baseScore += 15
-			}
-
-			// Filename match bonus (matches in filename worth more)
-			if pi >= filenameStart {
-				baseScore += 25
-			}
-
-			// Exact prefix match bonus
-			if pi == qi {
-				baseScore += 30
-			}
-
-			score += baseScore
-			lastMatch = pi
-			qi++
+	for pathIdx := range ctx.pathRunes {
+		if state.matchedAll(ctx) {
+			break
+		}
+		if ctx.pathRunes[pathIdx] == ctx.queryRunes[state.queryIndex] {
+			state.recordMatch(ctx, pathIdx)
 		}
 	}
 
-	// All query chars must match
-	if qi < len(queryRunes) {
+	if !state.matchedAll(ctx) {
 		return 0, nil
 	}
 
-	// Bonus for shorter paths (prefer less nested)
-	depthPenalty := strings.Count(path, "/") * 2
-	score -= depthPenalty
+	return state.finalScore(ctx), state.highlights
+}
 
-	// Bonus for shorter overall length
-	score -= len(pathRunes) / 5
+type fuzzyContext struct {
+	path          string
+	queryLower    string
+	filename      string
+	pathRunes     []rune
+	queryRunes    []rune
+	originalRunes []rune
+	filenameStart int
+}
 
-	// Bonus for exact filename match
-	if strings.HasPrefix(filename, queryLower) {
+func newFuzzyContext(path, query string) fuzzyContext {
+	pathLower := strings.ToLower(path)
+	queryLower := strings.ToLower(query)
+	filename := strings.ToLower(filepath.Base(path))
+	pathRunes := []rune(pathLower)
+
+	return fuzzyContext{
+		path:          path,
+		queryLower:    queryLower,
+		filename:      filename,
+		pathRunes:     pathRunes,
+		queryRunes:    []rune(queryLower),
+		originalRunes: []rune(path),
+		filenameStart: len(pathRunes) - len([]rune(filename)),
+	}
+}
+
+type fuzzyMatchState struct {
+	queryIndex  int
+	lastMatch   int
+	consecutive int
+	score       int
+	highlights  []int
+}
+
+func newFuzzyMatchState(query string) fuzzyMatchState {
+	return fuzzyMatchState{
+		lastMatch:  -1,
+		highlights: make([]int, 0, len([]rune(query))),
+	}
+}
+
+func (s *fuzzyMatchState) matchedAll(ctx fuzzyContext) bool {
+	return s.queryIndex >= len(ctx.queryRunes)
+}
+
+func (s *fuzzyMatchState) recordMatch(ctx fuzzyContext, pathIdx int) {
+	s.highlights = append(s.highlights, pathIdx)
+	s.score += s.matchScore(ctx, pathIdx)
+	s.lastMatch = pathIdx
+	s.queryIndex++
+}
+
+func (s *fuzzyMatchState) matchScore(ctx fuzzyContext, pathIdx int) int {
+	score := 10
+	if s.lastMatch == pathIdx-1 {
+		s.consecutive++
+		score += s.consecutive * 5
+	} else {
+		s.consecutive = 0
+	}
+	if isWordStart(ctx.pathRunes, pathIdx) {
+		score += 20
+	}
+	if isCamelBoundary(ctx.originalRunes, pathIdx) {
+		score += 15
+	}
+	if pathIdx >= ctx.filenameStart {
+		score += 25
+	}
+	if pathIdx == s.queryIndex {
+		score += 30
+	}
+	return score
+}
+
+func (s fuzzyMatchState) finalScore(ctx fuzzyContext) int {
+	score := s.score
+	score -= strings.Count(ctx.path, "/") * 2
+	score -= len(ctx.pathRunes) / 5
+	if strings.HasPrefix(ctx.filename, ctx.queryLower) {
 		score += 50
 	}
+	return score
+}
 
-	return score, highlights
+func isWordStart(pathRunes []rune, idx int) bool {
+	return idx == 0 || pathRunes[idx-1] == '/' || pathRunes[idx-1] == '_' ||
+		pathRunes[idx-1] == '-' || pathRunes[idx-1] == '.'
+}
+
+func isCamelBoundary(originalRunes []rune, idx int) bool {
+	return idx > 0 && idx < len(originalRunes) &&
+		unicode.IsLower(originalRunes[idx-1]) && unicode.IsUpper(originalRunes[idx])
 }
 
 // MultiPatternMatch supports space-separated patterns (AND logic).
@@ -117,24 +152,19 @@ func MultiPatternMatch(path string, patterns []string) (int, []int) {
 		allHighlights = append(allHighlights, highlights...)
 	}
 
-	// Remove duplicates and sort
-	seen := make(map[int]bool)
-	unique := make([]int, 0, len(allHighlights))
-	for _, h := range allHighlights {
-		if !seen[h] {
-			seen[h] = true
-			unique = append(unique, h)
-		}
-	}
+	return totalScore, uniqueSortedHighlights(allHighlights)
+}
 
-	// Sort highlights
-	for i := 0; i < len(unique)-1; i++ {
-		for j := i + 1; j < len(unique); j++ {
-			if unique[j] < unique[i] {
-				unique[i], unique[j] = unique[j], unique[i]
-			}
+func uniqueSortedHighlights(highlights []int) []int {
+	seen := make(map[int]bool, len(highlights))
+	unique := make([]int, 0, len(highlights))
+	for _, highlight := range highlights {
+		if seen[highlight] {
+			continue
 		}
+		seen[highlight] = true
+		unique = append(unique, highlight)
 	}
-
-	return totalScore, unique
+	slices.Sort(unique)
+	return unique
 }
