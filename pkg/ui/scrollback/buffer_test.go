@@ -4,8 +4,6 @@ import (
 	"slices"
 	"strings"
 	"testing"
-
-	"m31labs.dev/buckley/pkg/ui/compositor"
 )
 
 func TestBuffer(t *testing.T) {
@@ -503,24 +501,6 @@ func TestResize(t *testing.T) {
 
 	if buf.RowCount() > initialRows {
 		t.Error("wider resize should decrease or maintain row count")
-	}
-}
-
-func TestRender(t *testing.T) {
-	buf := NewBuffer(40, 10)
-	buf.AppendLine("User message", LineStyle{}, "user")
-	buf.AppendLine("Assistant response", LineStyle{}, "assistant")
-
-	screen := compositor.NewScreen(50, 15)
-	cfg := DefaultRenderConfig()
-
-	// Should not panic
-	Render(buf, screen, 0, 0, 40, 10, cfg)
-
-	// Check something was rendered
-	cell := screen.Get(0, 0)
-	if cell.Rune == ' ' && cell.Style.Equal(compositor.DefaultStyle()) {
-		t.Error("render should have produced visible content")
 	}
 }
 

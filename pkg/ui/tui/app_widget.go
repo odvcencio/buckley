@@ -3,7 +3,6 @@ package tui
 
 import (
 	"fmt"
-	"math"
 	"os"
 	"os/exec"
 	"strings"
@@ -668,52 +667,6 @@ func (a *WidgetApp) pollEvents() {
 	}
 }
 
-func (a *WidgetApp) updateAnimations(now time.Time) bool {
-	dirty := false
-
-	if a.statusOverride != "" && !now.Before(a.statusOverrideUntil) {
-		a.statusOverride = ""
-		a.statusOverrideUntil = time.Time{}
-		a.statusBar.SetStatus(a.currentStatusText(now))
-		dirty = true
-	}
-	if !a.ctrlCArmedUntil.IsZero() && !now.Before(a.ctrlCArmedUntil) {
-		a.ctrlCArmedUntil = time.Time{}
-	}
-
-	if a.processActive && (a.processLastTick.IsZero() || now.Sub(a.processLastTick) >= processStatusTick) {
-		a.statusBar.SetStatus(a.formatProcessStatus(now))
-		a.processFrame = (a.processFrame + 1) % len(processSpinnerFrames)
-		a.processLastTick = now
-		dirty = true
-	}
-
-	if a.inputArea.IsFocused() {
-		if a.cursorPulsePeriod <= 0 {
-			a.cursorPulsePeriod = 2600 * time.Millisecond
-		}
-		if a.cursorPulseInterval <= 0 {
-			a.cursorPulseInterval = 50 * time.Millisecond
-		}
-		if a.cursorPulseStart.IsZero() {
-			a.cursorPulseStart = now
-		}
-
-		if now.Sub(a.cursorPulseLast) >= a.cursorPulseInterval {
-			phase := a.cursorPhase(now)
-			style := a.cursorStyleForPhase(phase)
-			if style != a.cursorStyle {
-				a.cursorStyle = style
-				a.inputArea.SetCursorStyle(style)
-				dirty = true
-			}
-			a.cursorPulseLast = now
-		}
-	}
-
-	return dirty
-}
-
 // handleMouseMsg processes mouse input.
 func (a *WidgetApp) handleMouseMsg(m MouseMsg) bool {
 	if a.handleMouseWheel(m) {
@@ -1110,78 +1063,6 @@ func (a *WidgetApp) render() {
 	}
 
 	a.lastRender = time.Now()
-}
-
-func (a *WidgetApp) initSoftCursor() {
-	accent := themeToBackendStyle(a.theme.Accent).FG()
-	accentDim := themeToBackendStyle(a.theme.AccentDim).FG()
-	surface := themeToBackendStyle(a.theme.SurfaceRaised).BG()
-	textInverse := themeToBackendStyle(a.theme.TextInverse).FG()
-
-	a.cursorBGHigh = accent
-	a.cursorBGLow = blendColor(surface, accentDim, 0.35)
-	a.cursorFG = textInverse
-	a.cursorStyle = a.cursorStyleForPhase(0.2)
-	a.inputArea.SetCursorStyle(a.cursorStyle)
-}
-
-func (a *WidgetApp) cursorPhase(now time.Time) float64 {
-	if a.cursorPulsePeriod <= 0 {
-		return 1
-	}
-	elapsed := now.Sub(a.cursorPulseStart)
-	phase := float64(elapsed%a.cursorPulsePeriod) / float64(a.cursorPulsePeriod)
-	return 0.5 - 0.5*math.Cos(2*math.Pi*phase)
-}
-
-func (a *WidgetApp) cursorStyleForPhase(phase float64) backend.Style {
-	bg := blendColor(a.cursorBGLow, a.cursorBGHigh, phase)
-	style := backend.DefaultStyle().Foreground(a.cursorFG).Background(bg)
-	if phase < 0.35 {
-		style = style.Dim(true)
-	} else if phase > 0.75 {
-		style = style.Bold(true)
-	}
-	return style
-}
-
-func (a *WidgetApp) setStatusOverride(text string, duration time.Duration) {
-	if duration <= 0 {
-		duration = 3 * time.Second
-	}
-	a.statusOverride = text
-	a.statusOverrideUntil = time.Now().Add(duration)
-	a.statusBar.SetStatus(text)
-}
-
-func (a *WidgetApp) currentStatusText(now time.Time) string {
-	if a.processActive {
-		return a.formatProcessStatus(now)
-	}
-	return a.statusText
-}
-
-func (a *WidgetApp) formatProcessStatus(now time.Time) string {
-	text := strings.TrimSpace(a.processText)
-	if text == "" {
-		text = "Working"
-	}
-	if a.processStarted.IsZero() {
-		a.processStarted = now
-	}
-	frame := processSpinnerFrames[a.processFrame%len(processSpinnerFrames)]
-	return fmt.Sprintf("%s %s (%s)", frame, text, formatProcessElapsed(now.Sub(a.processStarted)))
-}
-
-func formatProcessElapsed(elapsed time.Duration) string {
-	if elapsed < 0 {
-		elapsed = 0
-	}
-	seconds := int(elapsed.Round(time.Second) / time.Second)
-	if seconds < 60 {
-		return fmt.Sprintf("%ds", seconds)
-	}
-	return fmt.Sprintf("%dm%02ds", seconds/60, seconds%60)
 }
 
 // Public API methods
