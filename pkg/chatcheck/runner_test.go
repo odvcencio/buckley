@@ -476,6 +476,30 @@ func TestFilterScenariosByTagAndName(t *testing.T) {
 	}
 }
 
+func TestFilterScenariosByID(t *testing.T) {
+	scenarios := []Scenario{
+		NormalizeScenario(Scenario{Name: "smoke", Tags: []string{"smoke"}, Turns: []Turn{{User: "hello"}}}),
+		NormalizeScenario(Scenario{Name: "tools/no-tools", Tags: []string{"smoke"}, Turns: []Turn{{User: "hello"}}}),
+		NormalizeScenario(Scenario{Name: "tools/shell", Tags: []string{"regression"}, Turns: []Turn{{User: "hello"}}}),
+		NormalizeScenario(Scenario{Name: "reasoning/deep", Tags: []string{"reasoning"}, Turns: []Turn{{User: "hello"}}}),
+	}
+
+	got := FilterScenarios(scenarios, ScenarioSelector{IDs: []string{"tools"}})
+	if len(got) != 2 || got[0].Name != "tools/no-tools" || got[1].Name != "tools/shell" {
+		t.Fatalf("directory id filter result: %+v", got)
+	}
+
+	got = FilterScenarios(scenarios, ScenarioSelector{IDs: []string{"TOOLS/NO-TOOLS.json"}})
+	if len(got) != 1 || got[0].Name != "tools/no-tools" {
+		t.Fatalf("exact id filter result: %+v", got)
+	}
+
+	got = FilterScenarios(scenarios, ScenarioSelector{IDs: []string{"tools"}, Tags: []string{"smoke"}})
+	if len(got) != 1 || got[0].Name != "tools/no-tools" {
+		t.Fatalf("combined id and tag filter result: %+v", got)
+	}
+}
+
 func TestRunnerRunSuiteAggregatesFailures(t *testing.T) {
 	client := &fakeClient{responses: []model.ChatResponse{
 		response("test-model", "ONE"),

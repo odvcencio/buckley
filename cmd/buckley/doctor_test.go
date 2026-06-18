@@ -273,6 +273,57 @@ func TestRunDoctorChatCommandProjectList(t *testing.T) {
 	}
 }
 
+func TestRunDoctorChatCommandProjectListFiltersByID(t *testing.T) {
+	dir := t.TempDir()
+	projectDir := filepath.Join(dir, ".buckley", "chatchecks")
+	if err := os.MkdirAll(filepath.Join(projectDir, "tools"), 0o755); err != nil {
+		t.Fatalf("mkdir project scenarios: %v", err)
+	}
+	nested := filepath.Join(dir, "src", "feature")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatalf("mkdir nested project dir: %v", err)
+	}
+	t.Chdir(nested)
+	for name, body := range map[string]string{
+		"smoke.json":          `{"tags":["smoke"],"turns":[{"user":"say READY"}]}`,
+		"tools/no-tools.json": `{"tags":["smoke"],"turns":[{"user":"say READY","max_tool_calls":0}]}`,
+		"tools/shell.json":    `{"tags":["regression"],"turns":[{"user":"say READY"}]}`,
+	} {
+		if err := os.WriteFile(filepath.Join(projectDir, name), []byte(body), 0o644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+
+	origInit := initDependenciesFn
+	t.Cleanup(func() { initDependenciesFn = origInit })
+	called := false
+	initDependenciesFn = func() (*config.Config, *model.Manager, *storage.Store, error) {
+		called = true
+		return nil, nil, nil, errors.New("dependency initialization should not run")
+	}
+
+	var runErr error
+	out := captureStdout(t, func() {
+		runErr = runDoctorChatCommand([]string{"-project", "-list", "-tag", "smoke", "tools"})
+	})
+	if runErr != nil {
+		t.Fatalf("runDoctorChatCommand: %v", runErr)
+	}
+	if called {
+		t.Fatal("project list mode initialized dependencies")
+	}
+	for _, want := range []string{"Chat check scenarios: 1", "tools/no-tools", "tags=smoke", "max_tool_calls=1"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("output missing %q: %s", want, out)
+		}
+	}
+	for _, notWant := range []string{"smoke:", "tools/shell"} {
+		if strings.Contains(out, notWant) {
+			t.Fatalf("output should not contain %q: %s", notWant, out)
+		}
+	}
+}
+
 func TestResolveDoctorChatScenarioPathProject(t *testing.T) {
 	dir := t.TempDir()
 	t.Chdir(dir)

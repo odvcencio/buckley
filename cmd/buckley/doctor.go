@@ -41,6 +41,10 @@ func runDoctorChatCommand(args []string) error {
 	}
 
 	fs := flag.NewFlagSet("doctor chat", flag.ContinueOnError)
+	fs.Usage = func() {
+		fmt.Fprintf(fs.Output(), "Usage of doctor chat [scenario-id ...]:\n")
+		fs.PrintDefaults()
+	}
 	modelID := fs.String("model", defaultModel, "model to use for the multi-turn chat check")
 	timeout := fs.Duration("timeout", 45*time.Second, "per-turn timeout")
 	scenarioPath := fs.String("scenario", "", "JSON scenario file or directory for the chat check")
@@ -56,9 +60,6 @@ func runDoctorChatCommand(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if fs.NArg() > 0 {
-		return fmt.Errorf("unexpected doctor chat argument: %s", fs.Arg(0))
-	}
 	if *listScenarios && strings.TrimSpace(*junitPath) != "" {
 		return fmt.Errorf("doctor chat -junit cannot be used with -list")
 	}
@@ -72,6 +73,7 @@ func runDoctorChatCommand(args []string) error {
 		return err
 	}
 	selector := chatcheck.ScenarioSelector{
+		IDs:          fs.Args(),
 		NameContains: nameFilters.Values(),
 		Tags:         tagFilters.Values(),
 	}
@@ -338,7 +340,10 @@ func countNonEmptyStrings(values []string) int {
 }
 
 func formatScenarioSelector(selector chatcheck.ScenarioSelector) string {
-	parts := make([]string, 0, 2)
+	parts := make([]string, 0, 3)
+	if len(selector.IDs) > 0 {
+		parts = append(parts, "id="+strings.Join(selector.IDs, ","))
+	}
 	if len(selector.Tags) > 0 {
 		parts = append(parts, "tag="+strings.Join(selector.Tags, ","))
 	}

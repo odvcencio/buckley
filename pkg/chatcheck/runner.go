@@ -98,6 +98,7 @@ type Runner struct {
 }
 
 type ScenarioSelector struct {
+	IDs          []string
 	NameContains []string
 	Tags         []string
 }
@@ -301,12 +302,15 @@ func validateTurn(turn Turn, index int) error {
 
 func FilterScenarios(scenarios []Scenario, selector ScenarioSelector) []Scenario {
 	selector = normalizeScenarioSelector(selector)
-	if len(selector.NameContains) == 0 && len(selector.Tags) == 0 {
+	if len(selector.IDs) == 0 && len(selector.NameContains) == 0 && len(selector.Tags) == 0 {
 		return append([]Scenario(nil), scenarios...)
 	}
 
 	filtered := make([]Scenario, 0, len(scenarios))
 	for _, scenario := range scenarios {
+		if len(selector.IDs) > 0 && !scenarioIDMatches(scenario, selector.IDs) {
+			continue
+		}
 		if len(selector.NameContains) > 0 && !scenarioNameMatches(scenario, selector.NameContains) {
 			continue
 		}
@@ -708,9 +712,33 @@ func normalizeTags(tags []string) []string {
 }
 
 func normalizeScenarioSelector(selector ScenarioSelector) ScenarioSelector {
+	selector.IDs = normalizeSelectorIDs(selector.IDs)
 	selector.Tags = normalizeTags(selector.Tags)
 	selector.NameContains = normalizeSelectorTerms(selector.NameContains)
 	return selector
+}
+
+func normalizeSelectorIDs(ids []string) []string {
+	if len(ids) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(ids))
+	normalized := make([]string, 0, len(ids))
+	for _, id := range ids {
+		id = filepath.ToSlash(strings.ToLower(strings.TrimSpace(id)))
+		id = strings.Trim(id, "/")
+		id = strings.TrimSuffix(id, ".json")
+		if id == "" || id == "." {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		normalized = append(normalized, id)
+	}
+	sort.Strings(normalized)
+	return normalized
 }
 
 func normalizeSelectorTerms(terms []string) []string {
@@ -732,6 +760,17 @@ func normalizeSelectorTerms(terms []string) []string {
 	}
 	sort.Strings(normalized)
 	return normalized
+}
+
+func scenarioIDMatches(scenario Scenario, ids []string) bool {
+	name := filepath.ToSlash(strings.ToLower(strings.TrimSpace(scenario.Name)))
+	name = strings.Trim(name, "/")
+	for _, id := range ids {
+		if name == id || strings.HasPrefix(name, id+"/") {
+			return true
+		}
+	}
+	return false
 }
 
 func scenarioNameMatches(scenario Scenario, terms []string) bool {
