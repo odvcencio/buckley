@@ -1,6 +1,8 @@
 package tools
 
 import (
+	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -143,5 +145,63 @@ func TestToolCallUnmarshal(t *testing.T) {
 	}
 	if result.Value != 42 {
 		t.Errorf("expected value 42, got %d", result.Value)
+	}
+}
+
+// TestToolCallUnmarshal_RepairsGLMNumericLiteralQuirk reproduces the live
+// `buckley pr`/`buckley commit` bug under z-ai/glm-5.2: a tool call whose
+// Arguments JSON has a stray space injected right after a leading '-' in a
+// numeric literal (GLM's tool-call JSON quirk observed via
+// OpenRouter/vLLM). Unrepaired, this fails encoding/json with exactly
+// "invalid character ' ' in numeric literal" -- the literal error text from
+// the bug report -- surfacing to callers as "unmarshal tool call: invalid
+// character ' ' in numeric literal". Unmarshal must recover via
+// jsonrepair.TryUnmarshal instead of propagating that failure.
+func TestToolCallUnmarshal_RepairsGLMNumericLiteralQuirk(t *testing.T) {
+	broken := ToolCall{
+		ID:        "call_glm",
+		Name:      "generate_pull_request",
+		Arguments: []byte(`{"title": "fix bug", "confidence": - 5}`),
+	}
+
+	// Sanity check: confirm the unrepaired payload reproduces the exact
+	// live error text from the bug report.
+	var probe map[string]any
+	if err := json.Unmarshal(broken.Arguments, &probe); err == nil {
+		t.Fatalf("sanity check failed: expected the unrepaired payload to fail unmarshal")
+	} else if !strings.Contains(err.Error(), "invalid character ' ' in numeric literal") {
+		t.Fatalf("sanity check failed: expected exact reported error text, got: %v", err)
+	}
+
+	var result struct {
+		Title      string  `json:"title"`
+		Confidence float64 `json:"confidence"`
+	}
+	if err := broken.Unmarshal(&result); err != nil {
+		t.Fatalf("unmarshal tool call: %v", err)
+	}
+	if result.Title != "fix bug" {
+		t.Errorf("Title = %q, want %q", result.Title, "fix bug")
+	}
+	if result.Confidence != -5 {
+		t.Errorf("Confidence = %v, want -5", result.Confidence)
+	}
+}
+
+// TestToolCallUnmarshal_TrulyInvalidStillErrors proves the repair
+// defense-in-depth doesn't mask genuinely malformed argument JSON -- it must
+// still return an error, not silently succeed with zero values.
+func TestToolCallUnmarshal_TrulyInvalidStillErrors(t *testing.T) {
+	tc := ToolCall{
+		ID:        "call_bad",
+		Name:      "test_tool",
+		Arguments: []byte(`{not json at all`),
+	}
+
+	var result struct {
+		Name string `json:"name"`
+	}
+	if err := tc.Unmarshal(&result); err == nil {
+		t.Fatalf("expected an error for genuinely malformed JSON, got nil")
 	}
 }

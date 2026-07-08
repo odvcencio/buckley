@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"m31labs.dev/buckley/pkg/coordination/security"
+	"m31labs.dev/buckley/pkg/jsonrepair"
 	"m31labs.dev/buckley/pkg/model"
 	"m31labs.dev/buckley/pkg/rules"
 	"m31labs.dev/buckley/pkg/tool"
@@ -201,6 +202,12 @@ func (a *SubAgent) Execute(ctx context.Context, task string) (*SubAgentResult, e
 		ModelUsed: a.model,
 	}
 
+	// fallbackRetried ensures we give a reasoning model at most one
+	// corrective nudge when it emits a tool call as text we can't parse
+	// (see model.ParseTextToolCalls), instead of either silently surfacing
+	// the raw payload as the final summary or looping forever.
+	fallbackRetried := false
+
 	for i := 0; i < a.maxIterations; i++ {
 		req := model.ChatRequest{
 			Model:    a.model,
@@ -230,8 +237,32 @@ func (a *SubAgent) Execute(ctx context.Context, task string) (*SubAgentResult, e
 
 		choice := resp.Choices[0]
 
-		if len(choice.Message.ToolCalls) > 0 {
-			toolResults, err := a.executeTools(ctx, choice.Message.ToolCalls, allowedRegistry, allowedSet, result)
+		// Check for tool calls, falling back to parsing a textual tool-call
+		// payload (GLM/Qwen `<tool_call>{...}</tool_call>` or ```json
+		// fenced) when the model didn't populate the structured tool_calls
+		// field. Without this fallback, that raw text becomes
+		// result.Summary below -- the exact bug behind `buckley review`
+		// leaking a raw tool-call payload as its verdict.
+		toolCalls, unparsable, reason := resolveSubAgentToolCalls(choice.Message)
+		if unparsable {
+			// Looks like a tool call but we couldn't parse it. Never let
+			// this raw text leak out as the sub-agent's final answer.
+			if fallbackRetried {
+				result.Duration = time.Since(start)
+				return result, fmt.Errorf("sub-agent %s: model emitted a tool call as text that could not be parsed: %s", a.id, reason)
+			}
+			fallbackRetried = true
+			messages = append(messages, model.Message{Role: "assistant", Content: choice.Message.Content})
+			messages = append(messages, model.Message{
+				Role: "user",
+				Content: fmt.Sprintf("Your previous reply looked like a tool call but could not be parsed (%s). "+
+					"Call the tool using the tool-calling interface, or reply with plain text only if no tool is needed.", reason),
+			})
+			continue
+		}
+
+		if len(toolCalls) > 0 {
+			toolResults, err := a.executeTools(ctx, toolCalls, allowedRegistry, allowedSet, result)
 			if err != nil {
 				result.Duration = time.Since(start)
 				return result, err
@@ -240,7 +271,7 @@ func (a *SubAgent) Execute(ctx context.Context, task string) (*SubAgentResult, e
 			messages = append(messages, model.Message{
 				Role:      "assistant",
 				Content:   choice.Message.Content,
-				ToolCalls: choice.Message.ToolCalls,
+				ToolCalls: toolCalls,
 			})
 			for _, tr := range toolResults {
 				messages = append(messages, model.Message{
@@ -283,6 +314,37 @@ func (a *SubAgent) Execute(ctx context.Context, task string) (*SubAgentResult, e
 
 	result.Duration = time.Since(start)
 	return result, nil
+}
+
+// resolveSubAgentToolCalls extracts tool calls from msg, falling back to
+// model.ParseTextToolCalls when the model didn't populate the structured
+// tool_calls field. This handles reasoning models (GLM-5.x, Qwen agentic
+// checkpoints, etc.) routed through OpenRouter/vLLM that emit a tool call as
+// text inside the message content -- a Hermes/GLM-style
+// `<tool_call>{...}</tool_call>` block (sometimes with GLM's native
+// `name\n<arg_key>..</arg_key>` body instead of JSON) or a ```json fenced
+// `{"name":...,"arguments":...}` object -- instead of the structured
+// tool_calls field.
+//
+// unparsable is true when a tool-call-shaped payload was found in the text
+// but could not be cleanly parsed -- callers must not treat msg.Content as
+// a final answer (result.Summary) in that case, only retry or error.
+func resolveSubAgentToolCalls(msg model.Message) (calls []model.ToolCall, unparsable bool, reason string) {
+	if len(msg.ToolCalls) > 0 {
+		return msg.ToolCalls, false, ""
+	}
+	textContent, err := model.ExtractTextContent(msg.Content)
+	if err != nil {
+		return nil, false, ""
+	}
+	parsed := model.ParseTextToolCalls(textContent)
+	if !parsed.Detected {
+		return nil, false, ""
+	}
+	if len(parsed.Calls) > 0 {
+		return parsed.Calls, false, ""
+	}
+	return nil, true, parsed.Reason
 }
 
 func (a *SubAgent) allowedRegistry(ctx context.Context) (*tool.Registry, map[string]struct{}) {
@@ -363,7 +425,15 @@ func (a *SubAgent) executeTools(ctx context.Context, calls []model.ToolCall, reg
 		}
 
 		var args map[string]any
-		if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil {
+		// jsonrepair.TryUnmarshal guards against reasoning models (GLM-5.x
+		// in particular) that populate the *structured* tool_calls field
+		// with argument JSON containing common quirks -- most notably stray
+		// whitespace inside numeric literals -- which would otherwise fail
+		// here with e.g. "invalid character ' ' in numeric literal".
+		// model.ParseTextToolCalls already repairs this for the text
+		// fallback path above; this covers the same quirk arriving via a
+		// structured tool call that never went through that parser.
+		if err := jsonrepair.TryUnmarshal([]byte(call.Function.Arguments), &args); err != nil {
 			toolResults = append(toolResults, SubAgentToolCall{
 				ID:        call.ID,
 				Name:      name,

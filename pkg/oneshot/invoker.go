@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"m31labs.dev/buckley/pkg/jsonrepair"
 	"m31labs.dev/buckley/pkg/model"
 	"m31labs.dev/buckley/pkg/tools"
 	"m31labs.dev/buckley/pkg/transparency"
@@ -91,6 +92,20 @@ func normalizeInvokerReasoningEffort(effort string) string {
 
 // Invoke executes a one-shot command with the given tool.
 func (inv *DefaultInvoker) Invoke(ctx context.Context, systemPrompt, userPrompt string, tool tools.Definition, audit *transparency.ContextAudit) (*Result, *transparency.Trace, error) {
+	return inv.invoke(ctx, systemPrompt, userPrompt, tool, audit, false)
+}
+
+// invoke is the implementation behind Invoke. isRetry guards against
+// unbounded recursion: when a model emits a tool call as text that we can't
+// parse (see resolveTextToolCalls), invoke gives it exactly one corrective
+// retry before returning a clear error, instead of either looping forever or
+// silently surfacing the raw tool-call text as a "text response" -- the
+// latter is the exact bug behind `buckley pr`/`buckley commit` failing with
+// `unmarshal tool call: invalid character ' ' in numeric literal` under
+// z-ai/glm-5.2 (the model's tool call never reaches the structured
+// tool_calls field at all, so it fell through to being treated as a plain
+// text response with no tool call).
+func (inv *DefaultInvoker) invoke(ctx context.Context, systemPrompt, userPrompt string, tool tools.Definition, audit *transparency.ContextAudit, isRetry bool) (*Result, *transparency.Trace, error) {
 	// Generate trace ID
 	traceID := fmt.Sprintf("inv-%d", time.Now().UnixNano())
 
@@ -149,9 +164,24 @@ func (inv *DefaultInvoker) Invoke(ctx context.Context, systemPrompt, userPrompt 
 			tokens.Reasoning = estimateTokens(choice.Message.Reasoning)
 		}
 
-		// Check for tool calls
-		if len(choice.Message.ToolCalls) > 0 {
-			tc := choice.Message.ToolCalls[0]
+		// Check for tool calls, falling back to parsing a textual tool-call
+		// payload (GLM/Qwen `<tool_call>{...}</tool_call>` or ```json
+		// fenced) when the model didn't populate the structured tool_calls
+		// field.
+		calls, unparsable, reason := resolveTextToolCalls(choice.Message)
+		if unparsable {
+			if isRetry {
+				builder.WithError(fmt.Errorf("model emitted an unparsable tool call: %s", reason))
+				trace := builder.Build()
+				return nil, trace, fmt.Errorf("model emitted a tool call as text that could not be parsed: %s", reason)
+			}
+			nudged := userPrompt + "\n\nIMPORTANT: your previous reply looked like a tool call but could not be parsed (" +
+				reason + "). Call the " + tool.Name + " tool using the tool-calling interface; do not write the call out as text."
+			return inv.invoke(ctx, systemPrompt, nudged, tool, audit, true)
+		}
+
+		if len(calls) > 0 {
+			tc := calls[0]
 			toolCall := &tools.ToolCall{
 				ID:        tc.ID,
 				Name:      tc.Function.Name,
@@ -189,11 +219,19 @@ func (inv *DefaultInvoker) Invoke(ctx context.Context, systemPrompt, userPrompt 
 // The callback is called for each chunk of reasoning/content as it streams.
 // This allows showing thinking progress for models like kimi-k2-thinking.
 func (inv *DefaultInvoker) InvokeStream(ctx context.Context, systemPrompt, userPrompt string, tool tools.Definition, audit *transparency.ContextAudit, callback StreamCallback) (*Result, *transparency.Trace, error) {
+	return inv.invokeStream(ctx, systemPrompt, userPrompt, tool, audit, callback, false)
+}
+
+// invokeStream is the implementation behind InvokeStream. isRetry mirrors
+// invoke's single corrective-retry guard (see invoke) for a tool call the
+// model emitted as unparsable text instead of populating the streamed
+// message's structured tool_calls field.
+func (inv *DefaultInvoker) invokeStream(ctx context.Context, systemPrompt, userPrompt string, tool tools.Definition, audit *transparency.ContextAudit, callback StreamCallback, isRetry bool) (*Result, *transparency.Trace, error) {
 	// Check if client supports streaming
 	streamClient, ok := inv.client.(StreamingModelClient)
 	if !ok {
 		// Fall back to non-streaming
-		return inv.Invoke(ctx, systemPrompt, userPrompt, tool, audit)
+		return inv.invoke(ctx, systemPrompt, userPrompt, tool, audit, isRetry)
 	}
 
 	// Generate trace ID
@@ -266,8 +304,21 @@ func (inv *DefaultInvoker) InvokeStream(ctx context.Context, systemPrompt, userP
 	}
 done:
 
-	// Get final message with parsed tool calls
-	msg := acc.FinalizeWithTokenParsing()
+	// Get the final message. Hermes/GLM-style <tool_call> tags must be
+	// checked against the RAW accumulated content before
+	// FinalizeWithTokenParsing runs: FinalizeWithTokenParsing's
+	// Kimi-K2-oriented FilterToolCallTokens applies a broad "strip token
+	// fragments containing 'call'" regex that incidentally mangles
+	// <tool_call>...</tool_call> wrappers (e.g. turning
+	// "<tool_call>...</tool_call>" into "<...</"), destroying the exact tag
+	// structure model.ParseTextToolCalls needs to recognize. Only fall
+	// through to FinalizeWithTokenParsing's Kimi K2 `<|tool_call...|>`
+	// token-format handling when the raw content doesn't look like a
+	// Hermes/GLM-style payload, so Kimi K2 behavior is unchanged.
+	msg := acc.Message()
+	if len(msg.ToolCalls) == 0 && !model.ParseTextToolCalls(model.ExtractTextContentOrEmpty(msg.Content)).Detected {
+		msg = acc.FinalizeWithTokenParsing()
+	}
 
 	// Get usage from accumulator
 	usage := acc.Usage()
@@ -287,10 +338,24 @@ done:
 
 	cost := inv.pricing.Calculate(tokens)
 
-	// Build result
+	// Build result, falling back to parsing a textual tool-call payload
+	// (GLM/Qwen `<tool_call>{...}</tool_call>` or ```json fenced) when the
+	// streamed message didn't populate the structured tool_calls field.
 	result := &Result{}
-	if len(msg.ToolCalls) > 0 {
-		tc := msg.ToolCalls[0]
+	calls, unparsable, reason := resolveTextToolCalls(msg)
+	if unparsable {
+		if isRetry {
+			builder.WithError(fmt.Errorf("model emitted an unparsable tool call: %s", reason))
+			trace := builder.Build()
+			return nil, trace, fmt.Errorf("model emitted a tool call as text that could not be parsed: %s", reason)
+		}
+		nudged := userPrompt + "\n\nIMPORTANT: your previous reply looked like a tool call but could not be parsed (" +
+			reason + "). Call the " + tool.Name + " tool using the tool-calling interface; do not write the call out as text."
+		return inv.invokeStream(ctx, systemPrompt, nudged, tool, audit, callback, true)
+	}
+
+	if len(calls) > 0 {
+		tc := calls[0]
 		toolCall := &tools.ToolCall{
 			ID:        tc.ID,
 			Name:      tc.Function.Name,
@@ -481,6 +546,11 @@ func (inv *DefaultInvoker) InvokeWithTools(ctx context.Context, systemPrompt, us
 	var totalTokens transparency.TokenUsage
 	var allToolCalls []tools.ToolCall
 
+	// fallbackRetried mirrors invoke()'s isRetry guard: give the model one
+	// corrective nudge when it emits a tool call as unparsable text, instead
+	// of looping forever or letting the raw text become the final response.
+	fallbackRetried := false
+
 	// Tool loop
 	for iteration := 0; iteration < maxIterations; iteration++ {
 		req := model.ChatRequest{
@@ -516,8 +586,32 @@ func (inv *DefaultInvoker) InvokeWithTools(ctx context.Context, systemPrompt, us
 			totalTokens.Reasoning += estimateTokens(choice.Message.Reasoning)
 		}
 
+		// Check for tool calls, falling back to parsing a textual tool-call
+		// payload (GLM/Qwen `<tool_call>{...}</tool_call>` or ```json
+		// fenced) when the model didn't populate the structured tool_calls
+		// field.
+		calls, unparsable, reason := resolveTextToolCalls(choice.Message)
+		if unparsable {
+			// Looks like a tool call but we couldn't parse it. Never let
+			// this raw text leak out as the final response.
+			if fallbackRetried {
+				builder.WithToolCalls(allToolCalls)
+				builder.WithError(fmt.Errorf("model emitted an unparsable tool call: %s", reason))
+				trace := builder.Build()
+				return "", trace, fmt.Errorf("model emitted a tool call as text that could not be parsed: %s", reason)
+			}
+			fallbackRetried = true
+			messages = append(messages, choice.Message)
+			messages = append(messages, model.Message{
+				Role: "user",
+				Content: fmt.Sprintf("Your previous reply looked like a tool call but could not be parsed (%s). "+
+					"Use the tool-calling interface to call a tool, or reply with plain text only if no tool is needed.", reason),
+			})
+			continue
+		}
+
 		// If no tool calls, we have the final response
-		if len(choice.Message.ToolCalls) == 0 {
+		if len(calls) == 0 {
 			content := ""
 			if c, ok := choice.Message.Content.(string); ok {
 				content = c
@@ -542,11 +636,19 @@ func (inv *DefaultInvoker) InvokeWithTools(ctx context.Context, systemPrompt, us
 			return content, trace, nil
 		}
 
-		// Process tool calls
-		// Add assistant message with tool calls
-		messages = append(messages, choice.Message)
+		// Process tool calls (structured or recovered via
+		// resolveTextToolCalls). Add assistant message with tool calls.
+		assistantRole := choice.Message.Role
+		if assistantRole == "" {
+			assistantRole = "assistant"
+		}
+		messages = append(messages, model.Message{
+			Role:      assistantRole,
+			Content:   choice.Message.Content,
+			ToolCalls: calls,
+		})
 
-		for _, tc := range choice.Message.ToolCalls {
+		for _, tc := range calls {
 			toolCall := tools.ToolCall{
 				ID:        tc.ID,
 				Name:      tc.Function.Name,
@@ -577,4 +679,64 @@ func (inv *DefaultInvoker) InvokeWithTools(ctx context.Context, systemPrompt, us
 	trace := builder.Complete(totalTokens, cost)
 
 	return "", trace, fmt.Errorf("max tool iterations (%d) reached without final response", maxIterations)
+}
+
+// ---------------------------------------------------------------------------
+// Fallback text tool-call parsing.
+//
+// Reasoning models (GLM-5.x, Qwen agentic checkpoints, etc.) routed through
+// OpenRouter/vLLM don't always populate the OpenAI-standard structured
+// `tool_calls` field. Instead they emit the call as text inside the message
+// content, typically as a Hermes/GLM-style `<tool_call>{...}</tool_call>`
+// block (sometimes with GLM's native `name\n<arg_key>..</arg_key>` body
+// instead of JSON) or a ```json fenced `{"name":...,"arguments":...}`
+// object. Left unhandled, that raw text gets treated as the model's final
+// answer -- this is the exact bug behind `buckley pr`/`buckley commit`
+// either producing "no tool call" errors or (once a near-miss structured
+// call slips through) `unmarshal tool call: invalid character ' ' in
+// numeric literal` from GLM-5.2's numeric-literal-spacing quirk.
+// resolveTextToolCalls recognizes these encodings via model.ParseTextToolCalls
+// and is the entry point used by invoke/invokeStream/InvokeWithTools.
+// ---------------------------------------------------------------------------
+
+// resolveTextToolCalls extracts tool calls from msg, falling back to
+// model.ParseTextToolCalls when the model didn't populate the structured
+// tool_calls field. unparsable is true when a tool-call-shaped payload was
+// found in the text but could not be cleanly parsed -- callers must not
+// treat msg.Content as a final answer in that case.
+//
+// Structured tool calls (the common case) still have their
+// Function.Arguments passed through jsonrepair.FixArguments as
+// defense-in-depth: model.ParseTextToolCalls already repairs the same
+// GLM/Qwen JSON quirks (most notably stray whitespace inside numeric
+// literals) for the text-fallback path, but a structured call the API
+// returns directly never goes through that parser.
+func resolveTextToolCalls(msg model.Message) (calls []model.ToolCall, unparsable bool, reason string) {
+	if len(msg.ToolCalls) > 0 {
+		return repairStructuredToolCallArguments(msg.ToolCalls), false, ""
+	}
+	textContent, err := model.ExtractTextContent(msg.Content)
+	if err != nil {
+		return nil, false, ""
+	}
+	parsed := model.ParseTextToolCalls(textContent)
+	if !parsed.Detected {
+		return nil, false, ""
+	}
+	if len(parsed.Calls) > 0 {
+		return parsed.Calls, false, ""
+	}
+	return nil, true, parsed.Reason
+}
+
+// repairStructuredToolCallArguments returns a copy of calls with each
+// Function.Arguments repaired via jsonrepair.FixArguments when it isn't
+// already valid JSON.
+func repairStructuredToolCallArguments(calls []model.ToolCall) []model.ToolCall {
+	out := make([]model.ToolCall, len(calls))
+	for i, c := range calls {
+		out[i] = c
+		out[i].Function.Arguments = jsonrepair.FixArguments(c.Function.Arguments)
+	}
+	return out
 }
