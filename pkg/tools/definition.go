@@ -1,6 +1,10 @@
 package tools
 
-import "encoding/json"
+import (
+	"encoding/json"
+
+	"m31labs.dev/buckley/pkg/jsonrepair"
+)
 
 // Definition describes a tool that a model can call.
 // This is the contract between Buckley and the model.
@@ -50,9 +54,16 @@ type ToolCall struct {
 	Arguments json.RawMessage `json:"arguments"`
 }
 
-// Unmarshal decodes the tool call arguments into the given type.
+// Unmarshal decodes the tool call arguments into the given type. As
+// defense-in-depth against reasoning models (GLM-5.x in particular) that
+// emit tool-call argument JSON with common quirks -- most notably stray
+// whitespace inside numeric literals, e.g. "0. 92" instead of "0.92", which
+// otherwise fails with "invalid character ' ' in numeric literal" -- a
+// failed unmarshal is retried once against jsonrepair.Repair(tc.Arguments)
+// before giving up. The original (unrepaired) error is returned on failure
+// so the diagnostic stays accurate.
 func (tc ToolCall) Unmarshal(v any) error {
-	return json.Unmarshal(tc.Arguments, v)
+	return jsonrepair.TryUnmarshal(tc.Arguments, v)
 }
 
 // ToolResult represents the result of executing a tool.
