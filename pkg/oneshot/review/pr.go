@@ -85,9 +85,9 @@ func (r *Runner) ReviewPR(ctx context.Context, prRef string) (*RunResult, error)
 func (r *Runner) reviewPRWithRLM(ctx context.Context, prCtx *PRContext, systemPrompt, userPrompt string, audit *transparency.ContextAudit) (*RunResult, error) {
 	result := &RunResult{ContextAudit: audit, PRInfo: prCtx.PR}
 
-	// Allow read, glob, grep, bash for verification
-	// PR reviews focus on understanding business impact using standard tools
-	allowedTools := []string{"read", "glob", "grep", "bash"}
+	// Real registry tool names (see pkg/tool.registerBuiltins). PR review is
+	// read-only verification — no write tools.
+	allowedTools := []string{"read_file", "find_files", "search_text", "run_shell", "git_diff"}
 
 	rlmResult, err := r.rlmRunner.Run(ctx, systemPrompt, userPrompt, allowedTools)
 	if err != nil {

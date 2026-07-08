@@ -158,6 +158,9 @@ func newReviewCommandRuntime(cfg *config.Config, mgr *model.Manager) (*reviewCom
 	registry := tool.NewRegistry()
 	if cwd, err := os.Getwd(); err == nil {
 		registry.ConfigureContainers(cfg, cwd)
+		// Confine file-writing tools (write_file/apply_patch, used by the fix flow)
+		// to the repo root — a review/fix must not write outside the working tree.
+		registry.SetWorkDir(cwd)
 	}
 
 	rlmRunner := oneshot.NewRLMRunner(oneshot.RLMRunnerConfig{

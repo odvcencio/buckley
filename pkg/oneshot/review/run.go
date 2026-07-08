@@ -111,9 +111,14 @@ func (r *Runner) ReviewBranch(ctx context.Context, opts BranchContextOptions) (*
 func (r *Runner) reviewWithRLM(ctx context.Context, systemPrompt, userPrompt string, audit *transparency.ContextAudit) (*RunResult, error) {
 	result := &RunResult{ContextAudit: audit}
 
-	// Run with full tool access
-	// Allow read, glob, grep, bash for verification
-	allowedTools := []string{"read", "glob", "grep", "bash", "write"}
+	// Run with read-mostly verification tools. These MUST be real registry names
+	// (see pkg/tool.registerBuiltins) — a mismatch offers the model an empty tool
+	// set (ToolChoice:none) while the prompt says "verify with tools", so it
+	// hallucinates or leaks raw tool-call text. No write tools on a plain review:
+	// it produces a report, not edits (the FixFinding flow gets write). run_shell/
+	// run_tests execute build/tests for verification — review untrusted sources in
+	// container mode (worktrees.use_containers).
+	allowedTools := []string{"read_file", "find_files", "search_text", "run_shell", "run_tests", "git_diff"}
 
 	rlmResult, err := r.rlmRunner.Run(ctx, systemPrompt, userPrompt, allowedTools)
 	if err != nil {
@@ -297,8 +302,9 @@ func (r *Runner) FixFinding(ctx context.Context, finding *Finding, prompt string
 	// Build system prompt for fixing
 	systemPrompt := buildFixSystemPrompt()
 
-	// Run with full tool access for fixing
-	allowedTools := []string{"read", "glob", "grep", "bash", "write"}
+	// Run with the fix tool set (real registry names, includes write_file/apply_patch;
+	// file writes are confined to the repo via registry.SetWorkDir in cmd/buckley/review.go).
+	allowedTools := []string{"read_file", "find_files", "search_text", "run_shell", "run_tests", "git_diff", "write_file", "apply_patch"}
 
 	rlmResult, err := r.rlmRunner.Run(ctx, systemPrompt, prompt, allowedTools)
 	if err != nil {
@@ -311,7 +317,7 @@ func (r *Runner) FixFinding(ctx context.Context, finding *Finding, prompt string
 
 	// Extract changed files from tool calls
 	for _, tc := range rlmResult.ToolCalls {
-		if tc.Name == "write" {
+		if tc.Name == "write_file" || tc.Name == "apply_patch" {
 			// Parse the file path from arguments
 			// This is a simplification - actual parsing would depend on argument format
 			result.FilesChanged = append(result.FilesChanged, tc.Arguments)

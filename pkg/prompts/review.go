@@ -32,15 +32,16 @@ This is a remote PR - CI has already run. Your job is to:
 4. Grade the PR and recommend action
 
 TOOLS AVAILABLE:
-- read: See full file context beyond the diff
-- glob: Find related files
-- grep: Search for patterns, usages, definitions
-- bash: Run verification commands
+- read_file: See full file context beyond the diff
+- find_files: Find related files
+- search_text: Search for patterns, usages, definitions
+- run_shell: Run verification commands
+- git_diff: Inspect the diff under review
 
 WORKFLOW:
 1. Review PR metadata (title, description, CI status)
 2. Analyze the diff for scope and risk
-3. Use read/grep to verify concerns before reporting
+3. Use read_file/search_text to verify concerns before reporting
 4. Assign severity to each finding
 5. Calculate grade and recommendation
 
@@ -120,17 +121,18 @@ GROUND RULES:
 - Be SPECIFIC: exact file:line, exact code, exact fix
 
 TOOLS AVAILABLE:
-- read: Read file contents
-- glob: Find files by pattern
-- grep: Search code
-- bash: Run commands (go build, go test, etc.)
-- write: Suggest fixes (optional)
+- read_file: Read file contents
+- find_files: Find files by pattern
+- search_text: Search code
+- run_shell: Run commands (go build, go test, etc.)
+- run_tests: Run the test suite
+- write_file: Suggest fixes (optional)
 
 WORKFLOW:
-1. Run 'go build ./...' via bash - build failures are critical
-2. Run 'go test ./...' via bash - test failures are critical
+1. Run 'go build ./...' via run_shell - build failures are critical
+2. Run 'go test ./...' via run_shell - test failures are critical
 3. Review the diff for issues
-4. Use read/grep to verify any concern before reporting
+4. Use read_file/search_text to verify any concern before reporting
 5. Assign severity and grade
 
 OUTPUT FORMAT (follow exactly):
