@@ -3,6 +3,7 @@ package pr
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"m31labs.dev/buckley/pkg/oneshot"
 	"m31labs.dev/buckley/pkg/transparency"
@@ -52,6 +53,13 @@ type RunResult struct {
 	Error error
 }
 
+// maxParseAttempts bounds how many times Run re-invokes the model when the
+// response is missing a tool call or its arguments cannot be decoded/validated.
+// Tool-call JSON from non-Anthropic models is intermittently malformed, so a
+// bounded re-invoke (each with a corrective hint) makes generation reliable
+// without masking a persistently broken response.
+const maxParseAttempts = 3
+
 // Run executes the full PR generation flow.
 func (r *Runner) Run(ctx context.Context, opts ContextOptions) (*RunResult, error) {
 	result := &RunResult{}
@@ -64,48 +72,58 @@ func (r *Runner) Run(ctx context.Context, opts ContextOptions) (*RunResult, erro
 	result.Context = prCtx
 	result.ContextAudit = audit
 
-	// 2. Build prompt (rich context, no format demands)
-	userPrompt := BuildPrompt(prCtx)
+	// 2. Build prompts (rich context, no format demands)
 	systemPrompt := SystemPrompt()
+	baseUserPrompt := BuildPrompt(prCtx)
 
-	// 3. Invoke model with tool (streaming if callback provided)
-	var invokeResult *oneshot.Result
-	var trace *transparency.Trace
-	if r.streamCallback != nil {
-		invokeResult, trace, err = r.invoker.InvokeStream(ctx, systemPrompt, userPrompt, GeneratePRTool, audit, r.streamCallback)
-	} else {
-		invokeResult, trace, err = r.invoker.InvokeWithRetry(ctx, systemPrompt, userPrompt, GeneratePRTool, audit)
-	}
-	result.Trace = trace
-
-	if err != nil {
-		result.Error = err
-		return result, nil // Return result with error for transparency
-	}
-
-	// 4. Check if we got a tool call
-	if !invokeResult.HasToolCall() {
-		result.Error = &transparency.NoToolCallError{
-			Expected: "generate_pull_request",
-			Got:      "text response",
+	// 3. Invoke with a bounded parse-retry loop. InvokeWithRetry handles
+	// transport/API errors; this loop additionally re-invokes when the model
+	// returns text instead of a tool call, or emits tool-call arguments that
+	// cannot be decoded or fail validation.
+	var lastErr error
+	for attempt := 0; attempt < maxParseAttempts; attempt++ {
+		userPrompt := baseUserPrompt
+		if attempt > 0 && lastErr != nil {
+			userPrompt = baseUserPrompt + "\n\nThe previous attempt could not be used: " +
+				strings.TrimSpace(lastErr.Error()) + ". Call the " + GeneratePRTool.Name +
+				" tool again with valid JSON — arrays must be JSON arrays of strings, " +
+				"booleans must be true/false, and numbers must contain no spaces or separators."
 		}
+
+		var invokeResult *oneshot.Result
+		var trace *transparency.Trace
+		if r.streamCallback != nil {
+			invokeResult, trace, err = r.invoker.InvokeStream(ctx, systemPrompt, userPrompt, GeneratePRTool, audit, r.streamCallback)
+		} else {
+			invokeResult, trace, err = r.invoker.InvokeWithRetry(ctx, systemPrompt, userPrompt, GeneratePRTool, audit)
+		}
+		result.Trace = trace
+		if err != nil {
+			result.Error = err
+			return result, nil // transport error: surface immediately for transparency
+		}
+
+		if !invokeResult.HasToolCall() {
+			lastErr = fmt.Errorf("model returned text instead of calling %s", GeneratePRTool.Name)
+			continue
+		}
+
+		pr, decodeErr := decodePRResult(invokeResult.ToolCall.Arguments)
+		if decodeErr != nil {
+			lastErr = fmt.Errorf("decode tool call: %w", decodeErr)
+			continue
+		}
+
+		if err := pr.Validate(); err != nil {
+			lastErr = fmt.Errorf("invalid PR: %w", err)
+			continue
+		}
+
+		result.PR = &pr
 		return result, nil
 	}
 
-	// 5. Unmarshal the structured result - NO PARSING!
-	var pr PRResult
-	if err := invokeResult.ToolCall.Unmarshal(&pr); err != nil {
-		result.Error = fmt.Errorf("unmarshal tool call: %w", err)
-		return result, nil
-	}
-
-	// 6. Validate the result
-	if err := pr.Validate(); err != nil {
-		result.Error = fmt.Errorf("invalid PR: %w", err)
-		return result, nil
-	}
-
-	result.PR = &pr
+	result.Error = fmt.Errorf("unmarshal tool call: %w", lastErr)
 	return result, nil
 }
 
