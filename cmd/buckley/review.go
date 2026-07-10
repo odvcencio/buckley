@@ -7,6 +7,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"m31labs.dev/buckley/pkg/config"
@@ -20,6 +21,8 @@ import (
 
 type reviewCommandOptions struct {
 	projectMode     bool
+	deep            bool
+	deepWorkers     int
 	scope           string
 	baseBranch      string
 	includeUnstaged bool
@@ -50,6 +53,8 @@ type reviewCommandResult struct {
 func parseReviewCommandOptions(args []string) (reviewCommandOptions, error) {
 	fs := flag.NewFlagSet("review", flag.ContinueOnError)
 	projectMode := fs.Bool("project", false, "review the entire project instead of branch diff")
+	deep := fs.Bool("deep", false, "with -project: split the repo into Go packages + source groups, review each unit (with file contents) in parallel, then synthesize one graded report")
+	deepWorkers := fs.Int("deep-workers", 4, "concurrent unit reviews in -deep mode")
 	scope := fs.String("scope", commands.ReviewScopeWorktree, "review scope: worktree, branch, or changes")
 	baseBranch := fs.String("base", "", "base branch to compare against (default: auto-detect main/master)")
 	includeUnstaged := fs.Bool("unstaged", true, "include unstaged changes in review")
@@ -67,6 +72,8 @@ func parseReviewCommandOptions(args []string) (reviewCommandOptions, error) {
 
 	opts := reviewCommandOptions{
 		projectMode:     *projectMode,
+		deep:            *deep,
+		deepWorkers:     *deepWorkers,
 		scope:           *scope,
 		baseBranch:      *baseBranch,
 		includeUnstaged: *includeUnstaged,
@@ -106,14 +113,23 @@ func runReviewCommand(args []string) error {
 		return fmt.Errorf("no model configured (set BUCKLEY_MODEL_REVIEW or configure models.review)")
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), opts.timeout)
-	defer cancel()
-
 	if !quietMode {
 		termOut.Dim("Using model: %s", runtime.modelID)
 	}
 
-	result, err := runReview(ctx, opts, runtime.framework)
+	// Deep mode manages per-unit timeouts itself (opts.timeout applies to
+	// each model request, matching the flag's documented meaning); the
+	// classic paths keep the single shared deadline.
+	ctx := context.Background()
+	var result *reviewCommandResult
+	if opts.projectMode && opts.deep {
+		result, err = runDeepProjectReview(ctx, opts, runtime)
+	} else {
+		reqCtx, cancel := context.WithTimeout(ctx, opts.timeout)
+		defer cancel()
+		ctx = reqCtx
+		result, err = runReview(reqCtx, opts, runtime.framework)
+	}
 	if err != nil {
 		return err
 	}
@@ -222,6 +238,131 @@ func runProjectReview(ctx context.Context, framework *oneshot.Framework) (*revie
 
 	spinner.StopWithSuccess("Project review complete")
 	return reviewResultFromRLM(fwResult, audit), nil
+}
+
+// runDeepProjectReview fans the repository out unit-by-unit (Go packages +
+// non-Go source groups, file contents in-prompt) over a bounded worker
+// pool, then reduces the per-unit reports through a synthesis call. Unit
+// failures are recorded as coverage gaps, never fatal.
+func runDeepProjectReview(ctx context.Context, opts reviewCommandOptions, runtime *reviewCommandRuntime) (*reviewCommandResult, error) {
+	projectCtx, audit, err := commands.AssembleProjectContext(commands.DefaultProjectContextOptions())
+	if err != nil {
+		return nil, fmt.Errorf("assemble context: %w", err)
+	}
+
+	units, err := commands.EnumerateDeepUnits(projectCtx.RepoRoot)
+	if err != nil {
+		return nil, fmt.Errorf("enumerate units: %w", err)
+	}
+
+	deepOpts := commands.DefaultDeepReviewOptions()
+	header := commands.BuildDeepProjectHeader(projectCtx)
+
+	// Assemble every unit context up front: disk reads are cheap, and the
+	// shared ContextAudit stays single-threaded.
+	prompts := make([]string, len(units))
+	for i, unit := range units {
+		uc := commands.AssembleDeepUnitContext(projectCtx.RepoRoot, unit, deepOpts, audit)
+		prompts[i] = commands.BuildDeepUnitPrompt(header, uc)
+	}
+
+	workers := opts.deepWorkers
+	if workers < 1 {
+		workers = 1
+	}
+	if !quietMode {
+		termOut.Dim("Deep review: %d units · %d workers · per-request timeout %s", len(units), workers, opts.timeout)
+	}
+
+	reports := make([]commands.DeepUnitReport, len(units))
+	var wg sync.WaitGroup
+	var progressMu sync.Mutex
+	done := 0
+	sem := make(chan struct{}, workers)
+	for i := range units {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			unitCtx, cancel := context.WithTimeout(ctx, opts.timeout)
+			defer cancel()
+
+			framework := newReviewCallFramework(runtime)
+			fwResult, runErr := framework.RunRLM(unitCtx, commands.ReviewUnitDef{}, oneshot.RLMRunOpts{
+				UserPrompt: prompts[i],
+			})
+			report := commands.DeepUnitReport{Unit: units[i], Err: runErr}
+			if runErr == nil {
+				if rlmResult, ok := fwResult.Value.(*commands.ReviewRLMResult); ok {
+					report.Review = rlmResult.Review
+				}
+			}
+			reports[i] = report
+
+			progressMu.Lock()
+			done++
+			if !quietMode {
+				status := "done"
+				if runErr != nil {
+					status = "FAILED: " + runErr.Error()
+				}
+				termOut.Dim("[%d/%d] %s — %s", done, len(units), units[i].Name, status)
+			}
+			progressMu.Unlock()
+		}(i)
+	}
+	wg.Wait()
+
+	synthesisPrompt := commands.BuildDeepSynthesisPrompt(reports, 60_000)
+	synthCtx, cancel := context.WithTimeout(ctx, opts.timeout)
+	defer cancel()
+	framework := newReviewCallFramework(runtime)
+	fwResult, runErr := framework.RunRLM(synthCtx, commands.ReviewDeepSynthesisDef{}, oneshot.RLMRunOpts{
+		UserPrompt: synthesisPrompt,
+		Audit:      audit,
+	})
+	if runErr != nil {
+		return nil, fmt.Errorf("synthesis failed (unit reviews completed: %d/%d): %w", countDeepSuccesses(reports), len(reports), runErr)
+	}
+
+	result := &reviewCommandResult{contextAudit: audit}
+	synthesis := ""
+	if rlmResult, ok := fwResult.Value.(*commands.ReviewRLMResult); ok {
+		synthesis = rlmResult.Review
+		result.parsed = rlmResult.Parsed
+	}
+	result.reviewText = commands.BuildDeepReport(synthesis, reports)
+	result.trace = fwResult.Trace
+	if !quietMode {
+		termOut.Success("Deep review complete: %d/%d units + synthesis", countDeepSuccesses(reports), len(reports))
+	}
+	return result, nil
+}
+
+// newReviewCallFramework mirrors fixFinding's per-call framework
+// construction: fresh runner, shared manager/registry/ledger — the ledger
+// is mutex-guarded, so concurrent unit calls aggregate cost safely.
+func newReviewCallFramework(runtime *reviewCommandRuntime) *oneshot.Framework {
+	rlmRunner := oneshot.NewRLMRunner(oneshot.RLMRunnerConfig{
+		Models:          runtime.mgr,
+		Registry:        runtime.registry,
+		Ledger:          runtime.ledger,
+		ModelID:         runtime.modelID,
+		ReasoningEffort: runtime.reasoningEffort,
+	})
+	return oneshot.NewFramework(nil, nil).WithRLMRunner(rlmRunner)
+}
+
+func countDeepSuccesses(reports []commands.DeepUnitReport) int {
+	n := 0
+	for _, r := range reports {
+		if r.Err == nil {
+			n++
+		}
+	}
+	return n
 }
 
 func runBranchReview(ctx context.Context, opts reviewCommandOptions, framework *oneshot.Framework) (*reviewCommandResult, error) {

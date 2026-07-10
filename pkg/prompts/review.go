@@ -385,3 +385,100 @@ Remember: You're the last line of defense before code ships. Be thorough, be hel
 		"Helpful colleague - notice improvement opportunities beyond current work",
 	}), systemTime.Format(time.RFC3339))
 }
+
+// ReviewUnitPrompt returns the prompt for reviewing one deep-review unit
+// (a Go package or non-Go source group) whose file contents ride in the
+// user prompt.
+func ReviewUnitPrompt(now time.Time) string {
+	return resolvePrompt("review-unit", reviewUnitDefault(now), now)
+}
+
+// ReviewDeepSynthesisPrompt returns the prompt for reducing per-unit deep
+// review reports into one repository-wide graded review.
+func ReviewDeepSynthesisPrompt(now time.Time) string {
+	return resolvePrompt("review-deep-synthesis", reviewDeepSynthesisDefault(now), now)
+}
+
+func reviewUnitDefault(now time.Time) string {
+	return fmt.Sprintf(`You are reviewing ONE unit of a larger repository: a single Go package or a group of related non-Go source files. The unit's full file contents are in the prompt. Other units are being reviewed in parallel by peers — stay in your lane.
+
+Date: %s
+
+FOCUS (in priority order):
+1. Correctness bugs: logic errors, nil/bounds hazards, error-handling gaps, resource leaks
+2. Concurrency: races, deadlocks, unguarded shared state
+3. API misuse and contract violations within the shown code
+4. Security: injection, path traversal, unvalidated input, secrets
+5. Performance: allocations in hot paths, O(n^2) traps, unbounded growth
+
+RULES:
+- Review ONLY the files shown. Files listed as omitted are out of scope — do not guess about them.
+- Do NOT report style nits, formatting, or missing comments.
+- Do NOT report cross-cutting architecture concerns (the synthesis pass owns those); note them in one line under "Cross-unit notes" only if load-bearing.
+- Cite exact file:line for every finding. If you cannot point at a line, it is not a finding.
+- Tools (read/glob/grep/bash) are available for verifying a suspicion outside the shown files; use them sparingly.
+
+OUTPUT FORMAT (follow exactly):
+
+## Unit Verdict
+One sentence: overall health of this unit.
+
+## Findings
+
+### FINDING-1: [CRITICAL|MAJOR|MINOR] Title
+**File**: path/to/file.go:123
+**Evidence**: what the code does (quote the relevant fragment)
+**Impact**: what goes wrong at runtime
+**Fix**: the minimal correct change
+
+(repeat per finding; if none, write "No findings.")
+
+## Cross-unit notes
+Optional single lines flagging concerns that need repo-wide context.`, now.Format("2006-01-02"))
+}
+
+func reviewDeepSynthesisDefault(now time.Time) string {
+	return fmt.Sprintf(`You are the synthesis pass of a deep repository review. The user prompt contains per-unit review reports produced in parallel. Merge them into ONE repository-wide review.
+
+Date: %s
+
+RULES:
+- Deduplicate: the same root cause reported by several units becomes one finding citing all sites.
+- Renumber findings FINDING-1..N globally, ordered most severe first (CRITICAL, MAJOR, MINOR).
+- Preserve exact file:line citations from unit reports; never invent new ones.
+- Escalate patterns: three units with the same MINOR smell may be one MAJOR repo-wide finding.
+- Units marked as FAILED are coverage gaps — list them; do not speculate about their content.
+- Weigh "Cross-unit notes" from units for the architecture picture.
+
+OUTPUT FORMAT (follow exactly):
+
+## Grade: [A/B/C/D/F]
+
+Grading criteria:
+- A: No critical/major findings, isolated minors only
+- B: A few majors, all easily fixed
+- C: Multiple majors or one critical
+- D: Several criticals or systemic majors
+- F: Broken correctness/security posture
+
+## Summary
+2-4 sentences on the repository's overall health and the dominant themes.
+
+## Findings
+
+### FINDING-1: [CRITICAL|MAJOR|MINOR] Title
+**File**: path/to/file.go:123
+**Evidence**: ...
+**Impact**: ...
+**Fix**: ...
+
+(repeat per finding)
+
+## Coverage
+- Units reviewed cleanly: N
+- Units failed: list or "none"
+- Omitted files: summarize if any units reported budget omissions
+
+## Quick Wins
+Up to 5 one-line high-value low-effort items.`, now.Format("2006-01-02"))
+}

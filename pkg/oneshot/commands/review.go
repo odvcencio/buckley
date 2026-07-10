@@ -129,3 +129,48 @@ type FixResult struct {
 	// FilesChanged lists files that were modified.
 	FilesChanged []string
 }
+
+// ReviewUnitDef implements oneshot.RLMDefinition for one deep-review unit:
+// a Go package or non-Go source group whose file contents ride in the user
+// prompt (single-shot backends get real code, not a tree summary). Tools
+// stay available for verifying suspicions beyond the shown files.
+type ReviewUnitDef struct{}
+
+func (ReviewUnitDef) Name() string { return "review-unit" }
+
+func (ReviewUnitDef) SystemPrompt() string {
+	return prompts.ReviewUnitPrompt(time.Now())
+}
+
+func (ReviewUnitDef) AllowedTools() []string {
+	return []string{"read", "glob", "grep", "bash"}
+}
+
+func (ReviewUnitDef) ParseResult(response string) (any, error) {
+	return &ReviewRLMResult{
+		Review: response,
+		Parsed: ParseReview(response),
+	}, nil
+}
+
+// ReviewDeepSynthesisDef implements oneshot.RLMDefinition for the reduce
+// pass of a deep review: merging per-unit reports into one graded,
+// ParseReview-compatible repository review.
+type ReviewDeepSynthesisDef struct{}
+
+func (ReviewDeepSynthesisDef) Name() string { return "review-deep-synthesis" }
+
+func (ReviewDeepSynthesisDef) SystemPrompt() string {
+	return prompts.ReviewDeepSynthesisPrompt(time.Now())
+}
+
+func (ReviewDeepSynthesisDef) AllowedTools() []string {
+	return []string{"read", "grep"}
+}
+
+func (ReviewDeepSynthesisDef) ParseResult(response string) (any, error) {
+	return &ReviewRLMResult{
+		Review: response,
+		Parsed: ParseReview(response),
+	}, nil
+}

@@ -98,3 +98,19 @@ func TestNormalizeReviewCommandScope(t *testing.T) {
 		}
 	}
 }
+
+func TestParseReviewCommandOptionsDeep(t *testing.T) {
+	opts, err := parseReviewCommandOptions([]string{"-project", "-deep", "-deep-workers", "8", "-no-interactive"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !opts.projectMode || !opts.deep {
+		t.Fatalf("projectMode/deep = %v/%v, want true/true", opts.projectMode, opts.deep)
+	}
+	if opts.deepWorkers != 8 {
+		t.Fatalf("deepWorkers = %d, want 8", opts.deepWorkers)
+	}
+	if opts.interactive {
+		t.Fatal("no-interactive should disable the menu")
+	}
+}
