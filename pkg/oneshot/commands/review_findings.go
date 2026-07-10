@@ -224,10 +224,10 @@ func ValidateParsedReview(parsed *ParsedReview, opts ReviewValidationOptions) er
 	}
 	if len(opts.RequiredFeedbackIDs) > 0 {
 		if parsed.FeedbackDisposition != FeedbackDispositioned {
-			return fmt.Errorf("Coverage must mark supplied review feedback as %s", FeedbackDispositioned)
+			return fmt.Errorf("coverage must mark supplied review feedback as %s", FeedbackDispositioned)
 		}
 	} else if parsed.FeedbackDisposition != FeedbackNoneSupplied {
-		return fmt.Errorf("Coverage must mark feedback as %s when no feedback IDs were supplied", FeedbackNoneSupplied)
+		return fmt.Errorf("coverage must mark feedback as %s when no feedback IDs were supplied", FeedbackNoneSupplied)
 	}
 	if err := validateFeedbackLedger(parsed.FeedbackEntries, opts.RequiredFeedbackIDs); err != nil {
 		return err
@@ -523,7 +523,7 @@ func validateCoverageLedger(entries []CoverageEntry, changedFiles []string) erro
 		problems = append(problems, "missing evidence for "+strings.Join(missingEvidence, ", "))
 	}
 	if len(problems) > 0 {
-		return fmt.Errorf("Coverage ledger does not exactly match changed files: %s", strings.Join(problems, "; "))
+		return fmt.Errorf("coverage ledger does not exactly match changed files: %s", strings.Join(problems, "; "))
 	}
 	return nil
 }
