@@ -138,7 +138,7 @@ func TestPrioritizePerFileCap(t *testing.T) {
 	small := sourceFileDiff("pkg/small/late.go", "late file survives")
 	raw := big + small
 
-	const tailLine = "GeneratedHelper000600" // exists in input, beyond the per-file cap
+	const tailLine = "GeneratedHelper002000" // exists in input, beyond the per-file cap
 	if !strings.Contains(raw, tailLine) {
 		t.Fatalf("fixture too small: %s not present in input", tailLine)
 	}
@@ -245,6 +245,24 @@ func TestPrioritizeSmallCleanDiffUnchanged(t *testing.T) {
 	}
 	if res.Truncated || res.LowSignal != 0 {
 		t.Errorf("Truncated=%v LowSignal=%d, want false/0", res.Truncated, res.LowSignal)
+	}
+}
+
+func TestReviewDiffBudgetPreservesMediumPRWithoutTruncation(t *testing.T) {
+	var raw strings.Builder
+	for i := 0; i < 8; i++ {
+		raw.WriteString(largeSourceDiff(fmt.Sprintf("pkg/review/file_%d.go", i), 50_000))
+	}
+
+	res := Prioritize(raw.String(), ReviewDiffBudget)
+	if res.Truncated {
+		t.Fatal("review budget truncated a medium-sized multi-file PR")
+	}
+	for i := 0; i < 8; i++ {
+		path := fmt.Sprintf("pkg/review/file_%d.go", i)
+		if !strings.Contains(res.Context, path) {
+			t.Fatalf("review context omitted %q", path)
+		}
 	}
 }
 

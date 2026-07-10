@@ -59,13 +59,15 @@ Keep summaries under 200 words - the coordinator only sees this summary, not you
 
 // SubAgent executes delegated tasks with tool access.
 type SubAgent struct {
-	id            string
-	model         string
-	systemPrompt  string
-	reasoning     string
-	maxIterations int
-	allowedTools  map[string]struct{}
-	toolTier      string
+	id             string
+	model          string
+	systemPrompt   string
+	reasoning      string
+	maxIterations  int
+	allowedTools   map[string]struct{}
+	readOnly       bool
+	reviewSnapshot *model.ReviewSnapshot
+	toolTier       string
 
 	client     *model.Manager
 	registry   *tool.Registry
@@ -77,13 +79,14 @@ type SubAgent struct {
 
 // SubAgentConfig configures a sub-agent execution.
 type SubAgentConfig struct {
-	ID            string
-	Model         string
-	Reasoning     string
-	SystemPrompt  string
-	MaxIterations int
-	AllowedTools  []string
-	ToolTier      string // role_permissions tier for runtime validation
+	ID             string
+	Model          string
+	Reasoning      string
+	SystemPrompt   string
+	MaxIterations  int
+	AllowedTools   []string
+	ReviewSnapshot *model.ReviewSnapshot
+	ToolTier       string // role_permissions tier for runtime validation
 }
 
 // SubAgentInstanceConfig preserves the merged oneshot runner API.
@@ -101,14 +104,17 @@ type SubAgentDeps struct {
 
 // SubAgentResult captures the outcome of a sub-agent task.
 type SubAgentResult struct {
-	AgentID    string
-	ModelUsed  string
-	Summary    string
-	RawKey     string
-	Raw        []byte
-	TokensUsed int
-	Duration   time.Duration
-	ToolCalls  []SubAgentToolCall
+	AgentID           string
+	ModelUsed         string
+	Summary           string
+	RawKey            string
+	Raw               []byte
+	TokensUsed        int
+	InputTokens       int
+	OutputTokens      int
+	Duration          time.Duration
+	ToolCalls         []SubAgentToolCall
+	ExecutionEvidence []model.CommandExecutionEvidence
 }
 
 // SubAgentToolCall records a tool invocation.
@@ -117,6 +123,7 @@ type SubAgentToolCall struct {
 	Name      string
 	Arguments string
 	Result    string
+	Data      map[string]any
 	Success   bool
 	Duration  time.Duration
 }
@@ -156,19 +163,21 @@ func NewSubAgent(cfg SubAgentConfig, deps SubAgentDeps) (*SubAgent, error) {
 	}
 
 	return &SubAgent{
-		id:            cfg.ID,
-		model:         cfg.Model,
-		systemPrompt:  prompt,
-		reasoning:     normalizeSubAgentReasoning(cfg.Reasoning),
-		maxIterations: maxIterations,
-		allowedTools:  allowedTools,
-		toolTier:      cfg.ToolTier,
-		client:        deps.Models,
-		registry:      deps.Registry,
-		scratchpad:    deps.Scratchpad,
-		conflicts:     deps.Conflicts,
-		approver:      deps.Approver,
-		engine:        deps.Engine,
+		id:             cfg.ID,
+		model:          cfg.Model,
+		systemPrompt:   prompt,
+		reasoning:      normalizeSubAgentReasoning(cfg.Reasoning),
+		maxIterations:  maxIterations,
+		allowedTools:   allowedTools,
+		readOnly:       isReadOnlyToolSet(cfg.AllowedTools) || cfg.ReviewSnapshot != nil,
+		reviewSnapshot: cfg.ReviewSnapshot,
+		toolTier:       cfg.ToolTier,
+		client:         deps.Models,
+		registry:       deps.Registry,
+		scratchpad:     deps.Scratchpad,
+		conflicts:      deps.Conflicts,
+		approver:       deps.Approver,
+		engine:         deps.Engine,
 	}, nil
 }
 
@@ -189,7 +198,7 @@ func (a *SubAgent) Execute(ctx context.Context, task string) (*SubAgentResult, e
 	}
 
 	allowedRegistry, allowedSet := a.allowedRegistry(ctx)
-	toolDefs := buildToolDefinitions(allowedRegistry)
+	toolDefs := buildToolDefinitions(allowedRegistry, allowedSet)
 
 	messages := []model.Message{
 		{Role: "system", Content: a.systemPrompt},
@@ -213,6 +222,7 @@ func (a *SubAgent) Execute(ctx context.Context, task string) (*SubAgentResult, e
 				return "auto"
 			}(),
 		}
+		applyExecutionPolicy(&req, a.readOnly, a.reviewSnapshot)
 		if a.reasoning != "" {
 			req.Reasoning = &model.ReasoningConfig{Effort: a.reasoning}
 		}
@@ -221,7 +231,14 @@ func (a *SubAgent) Execute(ctx context.Context, task string) (*SubAgentResult, e
 			result.Duration = time.Since(start)
 			return result, err
 		}
-		result.TokensUsed += resp.Usage.TotalTokens
+		result.InputTokens += resp.Usage.PromptTokens
+		result.OutputTokens += resp.Usage.CompletionTokens
+		result.ExecutionEvidence = append(result.ExecutionEvidence, resp.ExecutionEvidence...)
+		turnTokens := resp.Usage.TotalTokens
+		if turnTokens == 0 {
+			turnTokens = resp.Usage.PromptTokens + resp.Usage.CompletionTokens
+		}
+		result.TokensUsed += turnTokens
 
 		if len(resp.Choices) == 0 {
 			result.Duration = time.Since(start)
@@ -285,6 +302,37 @@ func (a *SubAgent) Execute(ctx context.Context, task string) (*SubAgentResult, e
 	return result, nil
 }
 
+func isReadOnlyToolSet(names []string) bool {
+	if len(names) == 0 {
+		return false
+	}
+	for _, name := range names {
+		switch strings.TrimSpace(name) {
+		case "read_file", "find_files", "search_text":
+			// These built-ins do not execute arbitrary code or modify files.
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func applyExecutionPolicy(req *model.ChatRequest, readOnly bool, snapshot *model.ReviewSnapshot) {
+	if req == nil || (!readOnly && snapshot == nil) {
+		return
+	}
+	if readOnly || snapshot != nil {
+		if req.Metadata == nil {
+			req.Metadata = make(map[string]string, 2)
+		}
+		req.Metadata[model.RequestMetadataReadOnly] = "true"
+	}
+	if snapshot != nil {
+		req.ReviewSnapshot = snapshot
+		req.Metadata[model.RequestMetadataReviewSnapshot] = snapshot.ID()
+	}
+}
+
 func (a *SubAgent) allowedRegistry(ctx context.Context) (*tool.Registry, map[string]struct{}) {
 	allowed := map[string]struct{}{}
 	if a.registry == nil {
@@ -321,16 +369,15 @@ func (a *SubAgent) allowedRegistry(ctx context.Context) (*tool.Registry, map[str
 	return a.registry, allowed
 }
 
-func buildToolDefinitions(registry *tool.Registry) []map[string]any {
+func buildToolDefinitions(registry *tool.Registry, allowed map[string]struct{}) []map[string]any {
 	if registry == nil {
 		return nil
 	}
-	tools := registry.List()
-	defs := make([]map[string]any, 0, len(tools))
-	for _, t := range tools {
-		defs = append(defs, tool.ToOpenAIFunction(t))
+	names := make([]string, 0, len(allowed))
+	for name := range allowed {
+		names = append(names, name)
 	}
-	return defs
+	return registry.ToOpenAIFunctionsFiltered(names)
 }
 
 func (a *SubAgent) executeTools(ctx context.Context, calls []model.ToolCall, registry *tool.Registry, allowed map[string]struct{}, result *SubAgentResult) ([]SubAgentToolCall, error) {
@@ -383,7 +430,7 @@ func (a *SubAgent) executeTools(ctx context.Context, calls []model.ToolCall, reg
 
 		release := a.acquireLock(name, args)
 		start := time.Now()
-		res, err := registry.Execute(name, args)
+		res, err := registry.ExecuteWithContext(ctx, name, args)
 		if release != nil {
 			release()
 		}
@@ -400,6 +447,9 @@ func (a *SubAgent) executeTools(ctx context.Context, calls []model.ToolCall, reg
 			toolCall.Success = false
 		} else {
 			toolCall.Success = res != nil && res.Success
+			if res != nil {
+				toolCall.Data = cloneToolResultData(res.Data)
+			}
 			toolCall.Result = formatToolResult(res)
 		}
 		toolResults = append(toolResults, toolCall)
@@ -513,12 +563,31 @@ func formatToolResult(res *builtin.Result) string {
 	if res == nil {
 		return ""
 	}
+	payload := res
+	if res.ShouldAbridge && len(res.DisplayData) > 0 {
+		payload = &builtin.Result{
+			Success: res.Success,
+			Data:    cloneToolResultData(res.DisplayData),
+			Error:   res.Error,
+		}
+	}
 	// Use tool.ToJSON which applies TOON encoding for compact token-efficient results
-	result, err := tool.ToJSON(res)
+	result, err := tool.ToJSON(payload)
 	if err != nil {
 		return fmt.Sprintf("{\"success\":%t}", res.Success)
 	}
 	return result
+}
+
+func cloneToolResultData(source map[string]any) map[string]any {
+	if len(source) == 0 {
+		return nil
+	}
+	cloned := make(map[string]any, len(source))
+	for key, value := range source {
+		cloned[key] = value
+	}
+	return cloned
 }
 
 func summarizeToolCalls(calls []SubAgentToolCall) string {
@@ -539,11 +608,14 @@ func marshalSubAgentRaw(result *SubAgentResult) []byte {
 		return nil
 	}
 	payload := map[string]any{
-		"summary":     result.Summary,
-		"tool_calls":  result.ToolCalls,
-		"tokens_used": result.TokensUsed,
-		"model":       result.ModelUsed,
-		"agent_id":    result.AgentID,
+		"summary":            result.Summary,
+		"tool_calls":         result.ToolCalls,
+		"execution_evidence": result.ExecutionEvidence,
+		"tokens_used":        result.TokensUsed,
+		"input_tokens":       result.InputTokens,
+		"output_tokens":      result.OutputTokens,
+		"model":              result.ModelUsed,
+		"agent_id":           result.AgentID,
 	}
 	encoded, err := json.Marshal(payload)
 	if err != nil {

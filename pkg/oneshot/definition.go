@@ -60,7 +60,7 @@ type Definition interface {
 }
 
 // RLMDefinition describes a oneshot command that requires full RLM sub-agent
-// execution with multi-turn tool access (read, write, bash, grep, glob).
+// execution with multi-turn tool access.
 //
 // Commands implementing this interface are dispatched through RunRLM instead
 // of the single-tool invoke+retry loop used by Definition.
@@ -75,9 +75,48 @@ type RLMDefinition interface {
 	// SystemPrompt returns the system prompt for the RLM agent.
 	SystemPrompt() string
 
-	// AllowedTools returns tool names the agent may use (e.g., "read", "bash").
+	// AllowedTools returns exact registry tool names the agent may use
+	// (e.g., "read_file", "run_shell").
 	AllowedTools() []string
 
 	// ParseResult processes the free-form agent response into typed output.
 	ParseResult(response string) (any, error)
+}
+
+// RLMResultValidator optionally adds semantic validation to an RLM command.
+// RunRLM retries responses that fail this validation, using the validation
+// error as corrective guidance for the next attempt.
+type RLMResultValidator interface {
+	ValidateResult(result any) error
+}
+
+// RLMExecutionValidator optionally validates that claims in the parsed result
+// are backed by evidence from the just-completed agent execution. Review
+// definitions use this to prevent an API model from claiming passing local
+// verification without successful snapshot-bound verification tool calls.
+type RLMExecutionValidator interface {
+	ValidateRLMExecution(result any, execution *RLMResult) error
+}
+
+// RLMApprovalCritic optionally requires an independent adversarial pass after
+// the primary RLM result has been parsed and validated. Review definitions use
+// this to make an approval provisional until a fresh sub-agent has searched the
+// same evidence for missed blockers and returned its own validated review.
+//
+// The framework only invokes the critic when RequiresApprovalCritic returns
+// true. The critic result is parsed and validated through the original
+// RLMDefinition and becomes the final result.
+type RLMApprovalCritic interface {
+	// RequiresApprovalCritic reports whether the validated primary result needs
+	// an independent second pass.
+	RequiresApprovalCritic(result any) bool
+
+	// ApprovalCriticSystemPrompt returns the role prompt for the independent
+	// critic. It should demand the same output contract as the primary pass.
+	ApprovalCriticSystemPrompt() string
+
+	// BuildApprovalCriticPrompt combines the original evidence and the validated
+	// primary result into the critic task. Both are supplied explicitly so the
+	// critic can independently verify the evidence and challenge the prior work.
+	BuildApprovalCriticPrompt(originalPrompt string, primaryResult any) (string, error)
 }

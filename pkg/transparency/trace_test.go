@@ -2,6 +2,7 @@ package transparency
 
 import (
 	"encoding/json"
+	"math"
 	"testing"
 	"time"
 
@@ -144,6 +145,61 @@ func TestTraceBuilderWithError(t *testing.T) {
 	}
 	if trace.Duration <= 0 {
 		t.Error("expected positive duration even on error")
+	}
+}
+
+func TestAggregateTraceAttemptsPreservesAttributionAndTotals(t *testing.T) {
+	first := &Trace{
+		ID:        "primary-1",
+		Timestamp: time.Unix(100, 0),
+		Model:     "model",
+		Provider:  "provider",
+		Duration:  2 * time.Second,
+		Tokens:    TokenUsage{Input: 100, Output: 20, CachedInput: 10},
+		Cost:      0.10,
+		Content:   "invalid primary",
+	}
+	last := &Trace{
+		ID:        "critic-1",
+		Timestamp: time.Unix(200, 0),
+		Model:     "model",
+		Provider:  "provider",
+		Duration:  3 * time.Second,
+		Tokens:    TokenUsage{Input: 70, Output: 30, Reasoning: 5},
+		Cost:      0.20,
+		Content:   "final critic",
+	}
+
+	aggregate := AggregateTraceAttempts([]TraceAttempt{
+		{Phase: "primary", Attempt: 1, Trace: first},
+		{Phase: "approval critic", Attempt: 1, Trace: last},
+	})
+	if aggregate == nil {
+		t.Fatal("AggregateTraceAttempts() = nil")
+	}
+	if aggregate.ID != "aggregate:primary-1" {
+		t.Fatalf("aggregate.ID = %q", aggregate.ID)
+	}
+	if aggregate.Timestamp != first.Timestamp || aggregate.Duration != 5*time.Second {
+		t.Fatalf("aggregate timing = %v/%v", aggregate.Timestamp, aggregate.Duration)
+	}
+	if aggregate.Tokens != (TokenUsage{Input: 170, Output: 50, Reasoning: 5, CachedInput: 10}) {
+		t.Fatalf("aggregate.Tokens = %#v", aggregate.Tokens)
+	}
+	if math.Abs(aggregate.Cost-0.30) > 1e-12 {
+		t.Fatalf("aggregate.Cost = %v", aggregate.Cost)
+	}
+	if aggregate.Content != "final critic" {
+		t.Fatalf("aggregate.Content = %q", aggregate.Content)
+	}
+	if len(aggregate.Attempts) != 2 || aggregate.Attempts[0].Phase != "primary" || aggregate.Attempts[1].Phase != "approval critic" {
+		t.Fatalf("aggregate.Attempts = %#v", aggregate.Attempts)
+	}
+	if aggregate.Attempts[0].Trace == first || aggregate.Attempts[1].Trace == last {
+		t.Fatal("aggregate retained mutable caller trace pointers")
+	}
+	if len(aggregate.Attempts[0].Trace.Attempts) != 0 {
+		t.Fatal("nested aggregate attempts were not removed")
 	}
 }
 

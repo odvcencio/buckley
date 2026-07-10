@@ -99,7 +99,10 @@ func (t *SearchTextTool) Execute(params map[string]any) (*Result, error) {
 	defer cancel()
 
 	if useRG {
-		args := []string{"--line-number", "--column", "--no-heading", "--color", "never"}
+		args := []string{
+			"--no-config", "--no-follow", "--with-filename", "--line-number", "--column", "--no-heading", "--color", "never",
+			"--field-match-separator=\x1e", "--field-context-separator=\x1f", "--no-context-separator",
+		}
 		if !caseSensitive {
 			args = append(args, "-i")
 		}
@@ -112,7 +115,7 @@ func (t *SearchTextTool) Execute(params map[string]any) (*Result, error) {
 		for _, g := range globs {
 			args = append(args, "--glob", g)
 		}
-		args = append(args, query, effectiveSearchPath)
+		args = append(args, "--", query, effectiveSearchPath)
 		cmd = exec.CommandContext(ctx, "rg", args...)
 		toolName = "rg"
 	} else {
@@ -120,7 +123,7 @@ func (t *SearchTextTool) Execute(params map[string]any) (*Result, error) {
 		if !caseSensitive {
 			args = append(args, "-i")
 		}
-		args = append(args, query, effectiveSearchPath)
+		args = append(args, "--", query, effectiveSearchPath)
 		cmd = exec.CommandContext(ctx, "grep", args...)
 		toolName = "grep"
 	}
@@ -173,6 +176,7 @@ func (t *SearchTextTool) Execute(params map[string]any) (*Result, error) {
 
 	matchLines := strings.Split(strings.TrimRight(output, "\n"), "\n")
 	matches := make([]map[string]any, 0, len(matchLines))
+	matchCount := 0
 
 	for _, line := range matchLines {
 		if strings.TrimSpace(line) == "" {
@@ -181,6 +185,9 @@ func (t *SearchTextTool) Execute(params map[string]any) (*Result, error) {
 		match := parseSearchLine(line)
 		if match != nil {
 			matches = append(matches, match)
+			if match["kind"] == "match" {
+				matchCount++
+			}
 		}
 	}
 
@@ -191,7 +198,7 @@ func (t *SearchTextTool) Execute(params map[string]any) (*Result, error) {
 		Success: true,
 		Data: map[string]any{
 			"matches": matches,
-			"count":   len(matches),
+			"count":   matchCount,
 			"tool":    toolName,
 		},
 		ShouldAbridge: shouldAbridge,
@@ -202,9 +209,9 @@ func (t *SearchTextTool) Execute(params map[string]any) (*Result, error) {
 		displayMatches := matches[:maxDisplayMatches]
 		result.DisplayData = map[string]any{
 			"matches": displayMatches,
-			"count":   len(matches),
+			"count":   matchCount,
 			"tool":    toolName,
-			"summary": fmt.Sprintf("Found %d matches (showing first %d)", len(matches), maxDisplayMatches),
+			"summary": fmt.Sprintf("Found %d matches (showing first %d records including context)", matchCount, maxDisplayMatches),
 		}
 	}
 
@@ -212,6 +219,36 @@ func (t *SearchTextTool) Execute(params map[string]any) (*Result, error) {
 }
 
 func parseSearchLine(line string) map[string]any {
+	if strings.Contains(line, "\x1f") {
+		parts := strings.SplitN(line, "\x1f", 3)
+		if len(parts) != 3 {
+			return nil
+		}
+		return map[string]any{
+			"path":    strings.TrimSpace(parts[0]),
+			"line":    parseInt(parts[1], 0),
+			"column":  0,
+			"match":   "",
+			"context": parts[2],
+			"kind":    "context",
+		}
+	}
+	if strings.Contains(line, "\x1e") {
+		parts := strings.SplitN(line, "\x1e", 4)
+		if len(parts) != 4 {
+			return nil
+		}
+		return map[string]any{
+			"path":    strings.TrimSpace(parts[0]),
+			"line":    parseInt(parts[1], 0),
+			"column":  parseInt(parts[2], 0),
+			"match":   parts[3],
+			"context": "",
+			"kind":    "match",
+		}
+	}
+	// grep fallback output remains colon-delimited. Ripgrep always uses the
+	// unambiguous record separators above, including for colon-bearing paths.
 	parts := strings.SplitN(line, ":", 4)
 	if len(parts) < 2 {
 		return nil
@@ -238,6 +275,7 @@ func parseSearchLine(line string) map[string]any {
 		"column":  column,
 		"match":   content,
 		"context": "",
+		"kind":    "match",
 	}
 }
 

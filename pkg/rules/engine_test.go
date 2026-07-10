@@ -706,7 +706,16 @@ func TestEngine_EvalStrategy_Oneshot_AllScenarios(t *testing.T) {
 				"command":     "review",
 				"token_count": 10000,
 			},
-			wantMaxRetries: 1,
+			wantMaxRetries: 2,
+			wantContextBud: 32000,
+		},
+		{
+			name: "PR review command",
+			facts: map[string]any{
+				"command":     "review-pr",
+				"token_count": 10000,
+			},
+			wantMaxRetries: 2,
 			wantContextBud: 32000,
 		},
 		{

@@ -51,6 +51,19 @@ type Trace struct {
 
 	// Error if the invocation failed
 	Error string `json:"error,omitempty"`
+
+	// Attempts preserves every invocation that contributed to an aggregate
+	// operation such as a validation-retried review and its approval critic.
+	// Individual invocation traces leave this empty.
+	Attempts []TraceAttempt `json:"attempts,omitempty"`
+}
+
+// TraceAttempt attributes one preserved model invocation to a logical phase
+// and the one-based attempt number within that phase.
+type TraceAttempt struct {
+	Phase   string `json:"phase"`
+	Attempt int    `json:"attempt"`
+	Trace   *Trace `json:"trace"`
 }
 
 // RequestTrace captures request details for debugging.
@@ -192,4 +205,46 @@ func (tb *TraceBuilder) WithError(err error) *TraceBuilder {
 func (tb *TraceBuilder) Build() *Trace {
 	tb.trace.Duration = time.Since(tb.start)
 	return &tb.trace
+}
+
+// AggregateTraceAttempts returns a run-level trace whose token, cost, and
+// duration totals include every supplied invocation while retaining exact
+// per-phase traces for auditability. The latest invocation remains the source
+// of top-level response/reasoning fields because it produced the final result.
+func AggregateTraceAttempts(attempts []TraceAttempt) *Trace {
+	valid := make([]TraceAttempt, 0, len(attempts))
+	for _, attempt := range attempts {
+		if attempt.Trace == nil {
+			continue
+		}
+		child := *attempt.Trace
+		child.Attempts = nil
+		valid = append(valid, TraceAttempt{
+			Phase:   attempt.Phase,
+			Attempt: attempt.Attempt,
+			Trace:   &child,
+		})
+	}
+	if len(valid) == 0 {
+		return nil
+	}
+
+	latest := valid[len(valid)-1].Trace
+	aggregate := *latest
+	aggregate.ID = "aggregate:" + valid[0].Trace.ID
+	aggregate.Timestamp = valid[0].Trace.Timestamp
+	aggregate.Duration = 0
+	aggregate.Tokens = TokenUsage{}
+	aggregate.Cost = 0
+	aggregate.Attempts = valid
+	for _, attempt := range valid {
+		trace := attempt.Trace
+		aggregate.Duration += trace.Duration
+		aggregate.Tokens.Input += trace.Tokens.Input
+		aggregate.Tokens.Output += trace.Tokens.Output
+		aggregate.Tokens.Reasoning += trace.Tokens.Reasoning
+		aggregate.Tokens.CachedInput += trace.Tokens.CachedInput
+		aggregate.Cost += trace.Cost
+	}
+	return &aggregate
 }

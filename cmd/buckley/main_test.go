@@ -258,6 +258,17 @@ func TestApplyCommandModelOverrideRestoresPreviousValue(t *testing.T) {
 	}
 }
 
+func TestApplyCommandModelOverridePreservesReasoningSuffix(t *testing.T) {
+	previous := modelOverrideFlag
+	defer func() { modelOverrideFlag = previous }()
+
+	restore := applyCommandModelOverride("codex/gpt-5.6-terra-high")
+	if modelOverrideFlag != "codex/gpt-5.6-terra-high" {
+		t.Fatalf("modelOverrideFlag=%q want suffix preserved until config load", modelOverrideFlag)
+	}
+	restore()
+}
+
 func TestNetworkHelpers(t *testing.T) {
 	if !hasACPTLS(config.ACPConfig{TLSCertFile: "a", TLSKeyFile: "b", TLSClientCAFile: "c"}) {
 		t.Fatalf("expected hasACPTLS true")

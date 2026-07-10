@@ -5,12 +5,13 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"m31labs.dev/buckley/pkg/diffsignal"
 )
 
 func TestDefaultBranchContextOptions(t *testing.T) {
 	opts := DefaultBranchContextOptions()
 
-	assert.Equal(t, 200_000, opts.MaxDiffBytes)
+	assert.Equal(t, diffsignal.ReviewDiffBudget, opts.MaxDiffBytes)
 	assert.True(t, opts.IncludeUnstaged)
 	assert.True(t, opts.IncludeAgents)
 	assert.Empty(t, opts.BaseBranch) // Auto-detect
@@ -259,6 +260,10 @@ func TestNewRunner(t *testing.T) {
 
 	runner := NewRunner(cfg)
 	require.NotNil(t, runner)
+}
+
+func TestLegacyPRReviewAllowedTools_AreExactAndReadOnly(t *testing.T) {
+	assert.Equal(t, []string{"read_file", "find_files", "search_text"}, legacyPRReviewAllowedTools())
 }
 
 func TestGetDiffStats(t *testing.T) {

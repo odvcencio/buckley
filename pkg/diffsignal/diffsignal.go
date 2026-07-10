@@ -31,7 +31,7 @@ const (
 
 	// MaxFileDiffBytes caps the diff content included for a single
 	// high-signal file so one large file cannot starve the files after it.
-	MaxFileDiffBytes = 16_000
+	MaxFileDiffBytes = 64_000
 
 	// MaxParseBytes is the hard ceiling on raw diff input fed to the parser.
 	MaxParseBytes = 8_000_000
@@ -41,8 +41,10 @@ const (
 	CommitDiffBudget = 80_000
 
 	// ReviewDiffBudget is the output budget for code-review paths.
-	// Shared by the CLI oneshot path and the TUI /review command.
-	ReviewDiffBudget = 200_000
+	// Reviews must retain complete medium-sized PRs so the approval gate does
+	// not depend on Git history that is intentionally absent from an isolated
+	// snapshot workspace.
+	ReviewDiffBudget = 1_000_000
 )
 
 // summaryHeader introduces the low-signal section of the assembled context.
