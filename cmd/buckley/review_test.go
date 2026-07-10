@@ -5,6 +5,8 @@ import (
 	"time"
 
 	"m31labs.dev/buckley/pkg/config"
+	"m31labs.dev/buckley/pkg/model"
+	"m31labs.dev/buckley/pkg/oneshot"
 	"m31labs.dev/buckley/pkg/oneshot/commands"
 )
 
@@ -79,6 +81,21 @@ func TestResolveReviewModelPrecedence(t *testing.T) {
 	}
 }
 
+func TestResolveReviewModelAppliesCommandReasoningSuffix(t *testing.T) {
+	previous := modelOverrideFlag
+	modelOverrideFlag = "codex/gpt-5.6-terra-high"
+	t.Cleanup(func() { modelOverrideFlag = previous })
+
+	cfg := config.DefaultConfig()
+	cfg.Models.Reasoning = ""
+	if got := resolveReviewModel(cfg); got != "codex/gpt-5.6-terra" {
+		t.Fatalf("resolveReviewModel() = %q, want codex/gpt-5.6-terra", got)
+	}
+	if cfg.Models.Reasoning != "high" {
+		t.Fatalf("reasoning = %q, want high", cfg.Models.Reasoning)
+	}
+}
+
 func TestNormalizeReviewCommandScope(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -96,5 +113,41 @@ func TestNormalizeReviewCommandScope(t *testing.T) {
 		if got := normalizeReviewCommandScope(tt.scope); got != tt.want {
 			t.Fatalf("%s: normalizeReviewCommandScope(%q) = %q, want %q", tt.name, tt.scope, got, tt.want)
 		}
+	}
+}
+
+func TestBranchReviewSnapshotPolicyMatchesReviewScope(t *testing.T) {
+	tests := []struct {
+		name            string
+		scope           string
+		includeUnstaged bool
+		want            model.ReviewSnapshotMode
+	}{
+		{name: "branch ignores local state", scope: commands.ReviewScopeBranch, includeUnstaged: true, want: model.ReviewSnapshotHead},
+		{name: "worktree staged only", scope: commands.ReviewScopeWorktree, includeUnstaged: false, want: model.ReviewSnapshotIndex},
+		{name: "worktree tracked state", scope: commands.ReviewScopeWorktree, includeUnstaged: true, want: model.ReviewSnapshotTrackedWorktree},
+		{name: "local changes staged only", scope: commands.ReviewScopeChanges, includeUnstaged: false, want: model.ReviewSnapshotIndex},
+		{name: "local changes include unstaged", scope: commands.ReviewScopeChanges, includeUnstaged: true, want: model.ReviewSnapshotTrackedWorktree},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := branchReviewSnapshotPolicy(tt.scope, tt.includeUnstaged).Mode; got != tt.want {
+				t.Fatalf("snapshot mode = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestReviewResultFromRLMExposesPrimaryAndCriticAttempts(t *testing.T) {
+	got := reviewResultFromRLM(&oneshot.RunResult{
+		Attempts:        3,
+		PrimaryAttempts: 1,
+		CriticAttempts:  2,
+	}, nil)
+
+	if got.attempts != 3 || got.primary != 1 || got.criticAttempts != 2 {
+		t.Fatalf("attempt counts = total:%d primary:%d critic:%d, want 3/1/2",
+			got.attempts, got.primary, got.criticAttempts)
 	}
 }

@@ -41,6 +41,49 @@ func TestParseReviewPRCommandOptions(t *testing.T) {
 	}
 }
 
+func TestParseReviewPRCommandOptionsAcceptsFlagsAfterReference(t *testing.T) {
+	opts, err := parseReviewPRCommandOptions([]string{
+		"208",
+		"-model", "codex/gpt-5.6-terra-high",
+		"-timeout=40m",
+		"-output", "/tmp/pr208.md",
+		"-cost=false",
+		"-verbose",
+	})
+	if err != nil {
+		t.Fatalf("parseReviewPRCommandOptions() error = %v", err)
+	}
+	if opts.prRef != "208" {
+		t.Fatalf("prRef = %q, want 208", opts.prRef)
+	}
+	if opts.model != "codex/gpt-5.6-terra-high" {
+		t.Fatalf("model = %q, want Terra High override", opts.model)
+	}
+	if opts.timeout != 40*time.Minute {
+		t.Fatalf("timeout = %s, want 40m", opts.timeout)
+	}
+	if opts.outputFile != "/tmp/pr208.md" {
+		t.Fatalf("outputFile = %q, want /tmp/pr208.md", opts.outputFile)
+	}
+	if opts.showCost {
+		t.Fatal("showCost = true, want false")
+	}
+	if !opts.verbose {
+		t.Fatal("verbose = false, want true")
+	}
+}
+
+func TestParseReviewPRCommandOptionsRejectsIgnoredTrailingArguments(t *testing.T) {
+	for _, args := range [][]string{
+		{"208", "unexpected"},
+		{"208", "-unknown"},
+	} {
+		if _, err := parseReviewPRCommandOptions(args); err == nil {
+			t.Fatalf("parseReviewPRCommandOptions(%v) unexpectedly succeeded", args)
+		}
+	}
+}
+
 func TestParseReviewPRCommandOptionsRequiresReference(t *testing.T) {
 	_, err := parseReviewPRCommandOptions(nil)
 	if err == nil {

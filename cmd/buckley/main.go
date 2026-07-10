@@ -651,6 +651,9 @@ func printHelp() {
 	fmt.Println("                                   Execute single task (CI/batch friendly)")
 	fmt.Println("  commit [--dry-run]               Generate structured commit via tool-use (transparent)")
 	fmt.Println("  pr [--dry-run]                   Generate structured PR via tool-use (transparent)")
+	fmt.Println("  review [--scope worktree|branch|changes]")
+	fmt.Println("                                   Review local changes with repository context")
+	fmt.Println("  review-pr <number|url>           Review a GitHub PR with CI and review-thread context")
 	fmt.Println("  experiment run <name> -m <model> -p <prompt>")
 	fmt.Println("                                   Run a parallel model comparison experiment")
 	fmt.Println("  experiment list [--status <s>]   List recent experiments")
@@ -981,7 +984,7 @@ func printBashCompletion() {
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
 
-    commands="plan execute execute-task commit pr experiment eval serve remote batch git-webhook agent skills skill agent-server lsp acp info config doctor completion worktree rules migrate db resume help version"
+    commands="plan execute execute-task commit pr review review-pr experiment eval serve remote batch git-webhook agent skills skill agent-server lsp acp info config doctor completion worktree rules migrate db resume help version"
 
     case "${prev}" in
         buckley)
@@ -1059,6 +1062,8 @@ _buckley() {
         'execute-task:Execute single task'
         'commit:Create action-style commit'
         'pr:Create pull request'
+        'review:Review local changes with repository context'
+        'review-pr:Review a GitHub pull request'
         'experiment:Run model comparison experiments'
         'eval:Run project chat eval scenarios'
         'serve:Start local server'
@@ -1160,6 +1165,8 @@ complete -c buckley -n __fish_use_subcommand -a execute -d 'Execute a plan'
 complete -c buckley -n __fish_use_subcommand -a execute-task -d 'Execute single task'
 complete -c buckley -n __fish_use_subcommand -a commit -d 'Create action-style commit'
 complete -c buckley -n __fish_use_subcommand -a pr -d 'Create pull request'
+complete -c buckley -n __fish_use_subcommand -a review -d 'Review local changes with repository context'
+complete -c buckley -n __fish_use_subcommand -a review-pr -d 'Review a GitHub pull request'
 complete -c buckley -n __fish_use_subcommand -a experiment -d 'Run model comparison experiments'
 complete -c buckley -n __fish_use_subcommand -a eval -d 'Run project chat eval scenarios'
 complete -c buckley -n __fish_use_subcommand -a serve -d 'Start local server'
@@ -1684,9 +1691,8 @@ func applyCommandModelOverride(modelID string) func() {
 	modelID = strings.TrimSpace(modelID)
 	previous := modelOverrideFlag
 	if modelID != "" {
-		if normalized, _ := config.SplitReasoningSuffix(modelID); normalized != "" {
-			modelID = normalized
-		}
+		// Preserve the reasoning suffix until the command has loaded config;
+		// resolveReviewModel applies it before runtime reasoning resolution.
 		modelOverrideFlag = modelID
 	}
 	return func() {

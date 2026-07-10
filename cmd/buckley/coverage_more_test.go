@@ -109,15 +109,24 @@ func TestCompletionsProduceOutput(t *testing.T) {
 	if !strings.Contains(bash, "complete -F") {
 		t.Fatalf("expected bash completion output, got %q", bash)
 	}
+	if !strings.Contains(bash, " review review-pr ") {
+		t.Fatalf("bash completion is missing review commands: %q", bash)
+	}
 
 	zsh := captureStdout(t, func() { printZshCompletion() })
 	if !strings.Contains(zsh, "#compdef buckley") {
 		t.Fatalf("expected zsh completion output, got %q", zsh)
 	}
+	if !strings.Contains(zsh, "'review:Review local changes") || !strings.Contains(zsh, "'review-pr:Review a GitHub") {
+		t.Fatalf("zsh completion is missing review commands: %q", zsh)
+	}
 
 	fish := captureStdout(t, func() { printFishCompletion() })
 	if !strings.Contains(fish, "complete -c buckley") {
 		t.Fatalf("expected fish completion output, got %q", fish)
+	}
+	if !strings.Contains(fish, "-a review ") || !strings.Contains(fish, "-a review-pr ") {
+		t.Fatalf("fish completion is missing review commands: %q", fish)
 	}
 }
 

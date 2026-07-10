@@ -151,6 +151,98 @@ func TestSearchTextTool(t *testing.T) {
 	})
 }
 
+func TestSearchTextToolConfinesRipgrepOptionsAndSymlinks(t *testing.T) {
+	if !toolExists("rg") {
+		t.Skip("ripgrep is required for option-confinement coverage")
+	}
+	root := t.TempDir()
+	external := t.TempDir()
+	if err := os.WriteFile(filepath.Join(external, "secret.txt"), []byte("snapshot-boundary-needle\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(external, filepath.Join(root, "escape")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	configPath := filepath.Join(t.TempDir(), "ripgrep.conf")
+	if err := os.WriteFile(configPath, []byte("--follow\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("RIPGREP_CONFIG_PATH", configPath)
+
+	tool := &SearchTextTool{}
+	tool.SetWorkDir(root)
+	for _, query := range []string{"snapshot-boundary-needle", "--follow"} {
+		result, err := tool.Execute(map[string]any{"query": query, "path": "."})
+		if err != nil {
+			t.Fatalf("search %q: %v", query, err)
+		}
+		if !result.Success {
+			t.Fatalf("search %q failed: %s", query, result.Error)
+		}
+		if count, _ := result.Data["count"].(int); count != 0 {
+			t.Fatalf("search %q escaped the snapshot or treated the query as an option: %#v", query, result.Data)
+		}
+	}
+}
+
+func TestSearchTextToolPreservesRipgrepContextEvidence(t *testing.T) {
+	if !toolExists("rg") {
+		t.Skip("ripgrep is required for context-evidence coverage")
+	}
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "evidence.txt"), []byte("before evidence\ntarget evidence\nafter evidence\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tool := &SearchTextTool{}
+	tool.SetWorkDir(root)
+	result, err := tool.Execute(map[string]any{
+		"query":          "target evidence",
+		"path":           ".",
+		"context_before": 1,
+		"context_after":  1,
+	})
+	if err != nil || !result.Success {
+		t.Fatalf("context search = %#v, err=%v", result, err)
+	}
+	matches, _ := result.Data["matches"].([]map[string]any)
+	if count, _ := result.Data["count"].(int); count != 1 {
+		t.Fatalf("context records changed the match count: %#v", result.Data)
+	}
+	if len(matches) != 3 {
+		t.Fatalf("context search returned %d records, want before/match/after: %#v", len(matches), matches)
+	}
+	if matches[0]["kind"] != "context" || matches[0]["context"] != "before evidence" ||
+		matches[1]["kind"] != "match" || matches[1]["match"] != "target evidence" ||
+		matches[2]["kind"] != "context" || matches[2]["context"] != "after evidence" {
+		t.Fatalf("context evidence was not preserved: %#v", matches)
+	}
+}
+
+func TestSearchTextToolPreservesColonBearingRipgrepPaths(t *testing.T) {
+	if !toolExists("rg") {
+		t.Skip("ripgrep is required for field-framing coverage")
+	}
+	root := t.TempDir()
+	name := "a:b.txt"
+	if err := os.WriteFile(filepath.Join(root, name), []byte("needle with colon path\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tool := &SearchTextTool{}
+	tool.SetWorkDir(root)
+	result, err := tool.Execute(map[string]any{"query": "needle", "path": "."})
+	if err != nil || !result.Success {
+		t.Fatalf("colon-path search = %#v, err=%v", result, err)
+	}
+	matches, _ := result.Data["matches"].([]map[string]any)
+	if len(matches) != 1 {
+		t.Fatalf("ripgrep match framing returned %d records: %#v", len(matches), matches)
+	}
+	gotPath, _ := matches[0]["path"].(string)
+	if filepath.Base(gotPath) != name || matches[0]["line"] != 1 || matches[0]["match"] != "needle with colon path" {
+		t.Fatalf("ripgrep match framing mangled colon-bearing path: %#v", matches)
+	}
+}
+
 func TestSearchReplaceTool_Extended(t *testing.T) {
 	tool := &SearchReplaceTool{}
 

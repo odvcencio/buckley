@@ -261,6 +261,10 @@ func TestNewRunner(t *testing.T) {
 	require.NotNil(t, runner)
 }
 
+func TestLegacyPRReviewAllowedTools_AreExactAndReadOnly(t *testing.T) {
+	assert.Equal(t, []string{"read_file", "find_files", "search_text"}, legacyPRReviewAllowedTools())
+}
+
 func TestGetDiffStats(t *testing.T) {
 	// This test verifies the parsing logic, not the git command
 	// We can't easily test the git command without a real repo

@@ -7,6 +7,14 @@ import (
 	"time"
 )
 
+// RequestMetadataReadOnly marks a model turn whose execution environment must
+// not be able to modify the current checkout. Providers with native agent tools
+// use this to enforce their own read-only sandbox.
+const (
+	RequestMetadataReadOnly       = "buckley.read_only"
+	RequestMetadataReviewSnapshot = "buckley.review_snapshot"
+)
+
 // Message represents a chat message
 type Message struct {
 	Role             string            `json:"role"`                        // user, assistant, system, tool
@@ -142,15 +150,33 @@ type ChatRequest struct {
 	PromptCacheKey       string            `json:"prompt_cache_key,omitempty"`       // OpenAI prompt caching key
 	PromptCacheRetention string            `json:"prompt_cache_retention,omitempty"` // OpenAI prompt cache retention
 	PromptCache          *PromptCache      `json:"-"`
+	// ReviewSnapshot pins native verification to the immutable Git state
+	// captured once for an entire review run. Native providers materialize it;
+	// API-backed review tools are bound to the same descriptor by the RLM runner.
+	ReviewSnapshot *ReviewSnapshot `json:"-"`
 }
 
 // ChatResponse represents a non-streaming chat completion response.
 type ChatResponse struct {
-	ID      string       `json:"id"`
-	Model   string       `json:"model"`
-	Choices []Choice     `json:"choices"`
-	Usage   Usage        `json:"usage"`
-	Error   *ErrorDetail `json:"error,omitempty"`
+	ID                string                     `json:"id"`
+	Model             string                     `json:"model"`
+	Choices           []Choice                   `json:"choices"`
+	Usage             Usage                      `json:"usage"`
+	Error             *ErrorDetail               `json:"error,omitempty"`
+	ExecutionEvidence []CommandExecutionEvidence `json:"execution_evidence,omitempty"`
+}
+
+// CommandExecutionEvidence records a native provider command event. ExitCode
+// is a pointer so a missing exit status can never be mistaken for success.
+// Consumers must also require Status == "completed" before trusting it.
+type CommandExecutionEvidence struct {
+	ID               string `json:"id,omitempty"`
+	Command          string `json:"command"`
+	AggregatedOutput string `json:"aggregated_output,omitempty"`
+	ExitCode         *int   `json:"exit_code,omitempty"`
+	Status           string `json:"status"`
+	WorkingDirectory string `json:"working_directory,omitempty"`
+	RepositoryRoot   string `json:"repository_root,omitempty"`
 }
 
 // Choice represents a completion choice

@@ -13,6 +13,7 @@ import (
 	"m31labs.dev/buckley/pkg/model"
 	"m31labs.dev/buckley/pkg/oneshot"
 	"m31labs.dev/buckley/pkg/oneshot/commands"
+	"m31labs.dev/buckley/pkg/rules"
 	"m31labs.dev/buckley/pkg/terminal"
 	"m31labs.dev/buckley/pkg/tool"
 	"m31labs.dev/buckley/pkg/transparency"
@@ -41,10 +42,13 @@ type reviewCommandRuntime struct {
 }
 
 type reviewCommandResult struct {
-	reviewText   string
-	parsed       *commands.ParsedReview
-	trace        *transparency.Trace
-	contextAudit *transparency.ContextAudit
+	reviewText     string
+	parsed         *commands.ParsedReview
+	trace          *transparency.Trace
+	contextAudit   *transparency.ContextAudit
+	attempts       int
+	primary        int
+	criticAttempts int
 }
 
 func parseReviewCommandOptions(args []string) (reviewCommandOptions, error) {
@@ -111,6 +115,9 @@ func runReviewCommand(args []string) error {
 
 	if !quietMode {
 		termOut.Dim("Using model: %s", runtime.modelID)
+		if runtime.reasoningEffort != "" {
+			termOut.Dim("Reasoning effort: %s", runtime.reasoningEffort)
+		}
 	}
 
 	result, err := runReview(ctx, opts, runtime.framework)
@@ -124,6 +131,9 @@ func runReviewCommand(args []string) error {
 
 	if result.reviewText == "" {
 		return fmt.Errorf("no review generated")
+	}
+	if !quietMode {
+		printReviewAttemptCounts(result)
 	}
 
 	if err := writeReviewOutput(opts.outputFile, result.reviewText); err != nil {
@@ -153,6 +163,10 @@ func newReviewCommandRuntime(cfg *config.Config, mgr *model.Manager) (*reviewCom
 		return nil, fmt.Errorf("no review model configured")
 	}
 	reasoningEffort := model.ResolveReasoningEffort(cfg, mgr, nil, modelID, "review")
+	arbEngine, err := rules.NewDefaultEngine()
+	if err != nil {
+		return nil, fmt.Errorf("initialize rules engine: %w", err)
+	}
 
 	ledger := transparency.NewCostLedger()
 	registry := tool.NewRegistry()
@@ -172,7 +186,7 @@ func newReviewCommandRuntime(cfg *config.Config, mgr *model.Manager) (*reviewCom
 		mgr:             mgr,
 		registry:        registry,
 		ledger:          ledger,
-		framework:       oneshot.NewFramework(nil, nil).WithRLMRunner(rlmRunner),
+		framework:       oneshot.NewFramework(nil, arbEngine).WithRLMRunner(rlmRunner),
 		modelID:         modelID,
 		reasoningEffort: reasoningEffort,
 	}, nil
@@ -180,6 +194,9 @@ func newReviewCommandRuntime(cfg *config.Config, mgr *model.Manager) (*reviewCom
 
 func resolveReviewModel(cfg *config.Config) string {
 	modelID := strings.TrimSpace(modelOverrideFlag)
+	if modelID != "" {
+		modelID = normalizeModelIDWithReasoning(cfg, modelID)
+	}
 	if modelID == "" {
 		modelID = normalizeModelIDWithReasoning(cfg, os.Getenv("BUCKLEY_MODEL_REVIEW"))
 	}
@@ -202,6 +219,12 @@ func runReview(ctx context.Context, opts reviewCommandOptions, framework *onesho
 func runProjectReview(ctx context.Context, framework *oneshot.Framework) (*reviewCommandResult, error) {
 	spinner := terminal.NewSpinner("Analyzing project...")
 	spinner.Start()
+	policy := model.ReviewSnapshotPolicy{Mode: model.ReviewSnapshotTrackedWorktree}
+	snapshot, err := model.CaptureReviewSnapshot(ctx, "", policy)
+	if err != nil {
+		spinner.StopWithError(err.Error())
+		return nil, fmt.Errorf("capture project review snapshot: %w", err)
+	}
 
 	opts := commands.DefaultProjectContextOptions()
 	projectCtx, audit, err := commands.AssembleProjectContext(opts)
@@ -209,11 +232,22 @@ func runProjectReview(ctx context.Context, framework *oneshot.Framework) (*revie
 		spinner.StopWithError(err.Error())
 		return nil, fmt.Errorf("assemble context: %w", err)
 	}
+	if snapshot == nil || snapshot.Commit() != projectCtx.HeadCommit {
+		err := fmt.Errorf("project review context does not match the captured immutable HEAD")
+		spinner.StopWithError(err.Error())
+		return nil, err
+	}
+	if err := verifyReviewSnapshotStable(ctx, snapshot, policy); err != nil {
+		spinner.StopWithError(err.Error())
+		return nil, err
+	}
 
 	userPrompt := commands.BuildProjectPrompt(projectCtx)
 	fwResult, runErr := framework.RunRLM(ctx, commands.ReviewProjectDef{}, oneshot.RLMRunOpts{
-		UserPrompt: userPrompt,
-		Audit:      audit,
+		UserPrompt:     userPrompt,
+		Audit:          audit,
+		SnapshotPolicy: policy,
+		ReviewSnapshot: snapshot,
 	})
 	if runErr != nil {
 		spinner.StopWithError(runErr.Error())
@@ -228,6 +262,12 @@ func runBranchReview(ctx context.Context, opts reviewCommandOptions, framework *
 	reviewScope := normalizeReviewCommandScope(opts.scope)
 	spinner := terminal.NewSpinner(fmt.Sprintf("Analyzing %s changes...", reviewScope))
 	spinner.Start()
+	policy := branchReviewSnapshotPolicy(reviewScope, opts.includeUnstaged)
+	snapshot, err := model.CaptureReviewSnapshot(ctx, "", policy)
+	if err != nil {
+		spinner.StopWithError(err.Error())
+		return nil, fmt.Errorf("capture %s review snapshot: %w", reviewScope, err)
+	}
 
 	contextOpts := commands.DefaultBranchContextOptions()
 	contextOpts.BaseBranch = opts.baseBranch
@@ -239,11 +279,30 @@ func runBranchReview(ctx context.Context, opts reviewCommandOptions, framework *
 		spinner.StopWithError(err.Error())
 		return nil, fmt.Errorf("assemble context: %w", err)
 	}
+	if snapshot == nil || snapshot.Commit() != branchCtx.HeadCommit {
+		err := fmt.Errorf("branch review context does not match the captured immutable HEAD")
+		spinner.StopWithError(err.Error())
+		return nil, err
+	}
+	if err := verifyReviewSnapshotStable(ctx, snapshot, policy); err != nil {
+		spinner.StopWithError(err.Error())
+		return nil, err
+	}
+	if err := commands.RevalidateBranchContext(branchCtx); err != nil {
+		spinner.StopWithError(err.Error())
+		return nil, fmt.Errorf("revalidate branch review context: %w", err)
+	}
 
 	userPrompt := commands.BuildBranchPrompt(branchCtx)
-	fwResult, runErr := framework.RunRLM(ctx, commands.ReviewBranchDef{}, oneshot.RLMRunOpts{
-		UserPrompt: userPrompt,
-		Audit:      audit,
+	reviewDef := commands.ReviewBranchDef{
+		ChangedFiles:      reviewChangedFilePaths(branchCtx.Files),
+		ContextIncomplete: branchCtx.DiffTruncated || branchCtx.UnstagedTruncated || branchCtx.ContextIncomplete,
+	}
+	fwResult, runErr := framework.RunRLM(ctx, reviewDef, oneshot.RLMRunOpts{
+		UserPrompt:     userPrompt,
+		Audit:          audit,
+		SnapshotPolicy: policy,
+		ReviewSnapshot: snapshot,
 	})
 	if runErr != nil {
 		spinner.StopWithError(runErr.Error())
@@ -252,6 +311,37 @@ func runBranchReview(ctx context.Context, opts reviewCommandOptions, framework *
 
 	spinner.StopWithSuccess(fmt.Sprintf("%s review complete", titleReviewScope(reviewScope)))
 	return reviewResultFromRLM(fwResult, audit), nil
+}
+
+func branchReviewSnapshotPolicy(scope string, includeUnstaged bool) model.ReviewSnapshotPolicy {
+	if scope == commands.ReviewScopeBranch {
+		return model.ReviewSnapshotPolicy{Mode: model.ReviewSnapshotHead}
+	}
+	if includeUnstaged {
+		return model.ReviewSnapshotPolicy{Mode: model.ReviewSnapshotTrackedWorktree}
+	}
+	return model.ReviewSnapshotPolicy{Mode: model.ReviewSnapshotIndex}
+}
+
+func verifyReviewSnapshotStable(ctx context.Context, captured *model.ReviewSnapshot, policy model.ReviewSnapshotPolicy) error {
+	current, err := model.CaptureReviewSnapshot(ctx, "", policy)
+	if err != nil {
+		return fmt.Errorf("revalidate review snapshot: %w", err)
+	}
+	if captured == nil || current == nil || captured.ID() != current.ID() {
+		return fmt.Errorf("review Git state changed while context was assembled; retry against one stable snapshot")
+	}
+	return nil
+}
+
+func reviewChangedFilePaths(files []commands.FileChange) []string {
+	paths := make([]string, 0, len(files))
+	for _, file := range files {
+		if path := strings.TrimSpace(file.Path); path != "" {
+			paths = append(paths, path)
+		}
+	}
+	return paths
 }
 
 func reviewResultFromRLM(fwResult *oneshot.RunResult, audit *transparency.ContextAudit) *reviewCommandResult {
@@ -264,7 +354,22 @@ func reviewResultFromRLM(fwResult *oneshot.RunResult, audit *transparency.Contex
 		result.parsed = rlmResult.Parsed
 	}
 	result.trace = fwResult.Trace
+	result.attempts = fwResult.Attempts
+	result.primary = fwResult.PrimaryAttempts
+	result.criticAttempts = fwResult.CriticAttempts
 	return result
+}
+
+func printReviewAttemptCounts(result *reviewCommandResult) {
+	if result == nil || result.attempts == 0 {
+		return
+	}
+	termOut.Dim(
+		"Review attempts: %d primary · %d approval critic · %d total",
+		result.primary,
+		result.criticAttempts,
+		result.attempts,
+	)
 }
 
 func writeReviewOutput(outputFile, reviewText string) error {
@@ -326,7 +431,8 @@ func printReview(review string) {
 func printReviewCost(trace *transparency.Trace, ledger *transparency.CostLedger) {
 	termOut.Newline()
 
-	tokens := trace.Tokens
+	summary := ledger.Summary()
+	tokens := summary.SessionTokens
 	var tokensLine string
 	if tokens.Reasoning > 0 {
 		tokensLine = fmt.Sprintf("Tokens: %d in · %d out · %d reasoning = %d total",
@@ -336,7 +442,6 @@ func printReviewCost(trace *transparency.Trace, ledger *transparency.CostLedger)
 			tokens.Input, tokens.Output, tokens.Total())
 	}
 
-	summary := ledger.Summary()
 	costLine := fmt.Sprintf("Cost: $%.4f · Session: $%.4f", trace.Cost, summary.SessionCost)
 
 	termOut.Dim("%s", tokensLine)

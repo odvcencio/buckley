@@ -42,6 +42,7 @@ OpenAI, Anthropic, Google, and Ollama are also supported. OpenRouter is the defa
 buckley plan "add auth" "support email/password login"
 buckley execute <plan-id>
 buckley review
+buckley review-pr 123
 ```
 
 The planner, builder, review, and runtime layers share the same governance stack, persistence, and tool registry.
@@ -60,12 +61,13 @@ The planner, builder, review, and runtime layers share the same governance stack
 buckley commit
 buckley pr
 buckley review
+buckley review-pr 123
 buckley hunt
 buckley dream
 buckley experiment run "compare-routing" -m z-ai/glm-5.2 -m moonshotai/kimi-k2.7-code -p "Implement feature X"
 ```
 
-`buckley commit` and `buckley pr` use transparent tool-first workflows rather than opaque text-only prompting.
+`buckley review` examines one immutable snapshot of the selected local scope. Native Codex verification receives a self-contained copy of only the captured commit plus patch; its JSONL command events must prove successful, classifiable build and test runs that cover the changed source paths. API-model inspection tools are rooted to an independently materialized copy of that snapshot and can run only deterministic build/test/check plans in an OS-enforced, read-only-source sandbox. `buckley review-pr` adds the remote PR diff, CI state, submitted reviews, and unresolved inline feedback; run it from a checkout whose `HEAD` is the PR head so verification is pinned to the same revision. API approvals require actual successful verification tool calls—not prose claiming PASS—and build/test evidence must use one applicable toolchain and cover every changed source package. Branch and PR approvals require passing verification, complete evidence, an explicit disposition for every supplied feedback ID, and an independent approval-critic pass. `buckley review -project` is an advisory architecture assessment and cannot issue an approval verdict. `buckley commit` and `buckley pr` use transparent tool-first workflows rather than opaque text-only prompting.
 
 ## Configuration
 

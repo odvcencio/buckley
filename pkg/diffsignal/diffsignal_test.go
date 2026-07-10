@@ -138,7 +138,7 @@ func TestPrioritizePerFileCap(t *testing.T) {
 	small := sourceFileDiff("pkg/small/late.go", "late file survives")
 	raw := big + small
 
-	const tailLine = "GeneratedHelper000600" // exists in input, beyond the per-file cap
+	const tailLine = "GeneratedHelper002000" // exists in input, beyond the per-file cap
 	if !strings.Contains(raw, tailLine) {
 		t.Fatalf("fixture too small: %s not present in input", tailLine)
 	}

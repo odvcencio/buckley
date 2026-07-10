@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"m31labs.dev/buckley/pkg/diffsignal"
+	"m31labs.dev/buckley/pkg/oneshot"
 	"m31labs.dev/buckley/pkg/prompts"
 	"m31labs.dev/buckley/pkg/transparency"
 )
@@ -85,11 +86,7 @@ func (r *Runner) ReviewPR(ctx context.Context, prRef string) (*RunResult, error)
 func (r *Runner) reviewPRWithRLM(ctx context.Context, prCtx *PRContext, systemPrompt, userPrompt string, audit *transparency.ContextAudit) (*RunResult, error) {
 	result := &RunResult{ContextAudit: audit, PRInfo: prCtx.PR}
 
-	// Allow read, glob, grep, bash for verification
-	// PR reviews focus on understanding business impact using standard tools
-	allowedTools := []string{"read", "glob", "grep", "bash"}
-
-	rlmResult, err := r.rlmRunner.Run(ctx, systemPrompt, userPrompt, allowedTools)
+	rlmResult, err := r.rlmRunner.Run(ctx, systemPrompt, userPrompt, legacyPRReviewAllowedTools(), oneshot.RLMExecutionOpts{})
 	if err != nil {
 		result.Error = err
 		return result, nil
@@ -98,6 +95,10 @@ func (r *Runner) reviewPRWithRLM(ctx context.Context, prCtx *PRContext, systemPr
 	result.Review = rlmResult.Response
 	result.Trace = rlmResult.Trace
 	return result, nil
+}
+
+func legacyPRReviewAllowedTools() []string {
+	return []string{"read_file", "find_files", "search_text"}
 }
 
 // reviewPRWithLegacyTools runs a PR review with PR-specific tools (legacy fallback).

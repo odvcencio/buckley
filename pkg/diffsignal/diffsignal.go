@@ -31,7 +31,7 @@ const (
 
 	// MaxFileDiffBytes caps the diff content included for a single
 	// high-signal file so one large file cannot starve the files after it.
-	MaxFileDiffBytes = 16_000
+	MaxFileDiffBytes = 64_000
 
 	// MaxParseBytes is the hard ceiling on raw diff input fed to the parser.
 	MaxParseBytes = 8_000_000

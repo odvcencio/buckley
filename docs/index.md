@@ -67,9 +67,12 @@ buckley
 buckley commit    # AI-generated commit message from staged changes
 buckley pr        # AI-generated PR description
 buckley review    # Code review current changes
+buckley review-pr 123 # Review a GitHub PR, CI, and unresolved feedback
 buckley hunt      # Scan codebase for improvements
 buckley dream     # Architectural analysis
 ```
+
+PR reviews fail closed unless the local checkout is at the captured PR head. Primary, retry, and approval-critic passes reuse the same immutable verification snapshot. Codex receives a self-contained captured-commit workspace, and approval requires trusted JSONL command events proving classifiable build and test runs over the changed source paths. API-backed tools are confined to an independently materialized copy and can execute only deterministic build/test/check plans with source read-only, private temporary output, a scrubbed environment, and network disabled; API approval requires successful same-toolchain build and test calls covering every changed source package. Project-wide review is explicitly advisory and cannot issue an approval verdict.
 
 ## Configuration
 

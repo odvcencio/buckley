@@ -28,10 +28,19 @@ strategy oneshot_policy returns OneshotConfig {
         command == "review"
     } then ReviewConfig {
         action: "configure",
-        max_retries: 1,
+		max_retries: 2,
         context_budget: 32000,
         use_rlm: true,
     }
+
+	when {
+		command == "review-pr"
+	} then PRReviewConfig {
+		action: "configure",
+		max_retries: 2,
+		context_budget: 32000,
+		use_rlm: true,
+	}
 
     else DefaultConfig {
         action: "configure",

@@ -111,11 +111,11 @@ func (r *Runner) ReviewBranch(ctx context.Context, opts BranchContextOptions) (*
 func (r *Runner) reviewWithRLM(ctx context.Context, systemPrompt, userPrompt string, audit *transparency.ContextAudit) (*RunResult, error) {
 	result := &RunResult{ContextAudit: audit}
 
-	// Run with full tool access
-	// Allow read, glob, grep, bash for verification
-	allowedTools := []string{"read", "glob", "grep", "bash", "write"}
+	// Reviews inspect the checkout but never mutate it. Native agent providers
+	// receive the same policy and enforce their own read-only execution sandbox.
+	allowedTools := []string{"read_file", "find_files", "search_text"}
 
-	rlmResult, err := r.rlmRunner.Run(ctx, systemPrompt, userPrompt, allowedTools)
+	rlmResult, err := r.rlmRunner.Run(ctx, systemPrompt, userPrompt, allowedTools, oneshot.RLMExecutionOpts{})
 	if err != nil {
 		result.Error = err
 		return result, nil
@@ -300,7 +300,7 @@ func (r *Runner) FixFinding(ctx context.Context, finding *Finding, prompt string
 	// Run with full tool access for fixing
 	allowedTools := []string{"read", "glob", "grep", "bash", "write"}
 
-	rlmResult, err := r.rlmRunner.Run(ctx, systemPrompt, prompt, allowedTools)
+	rlmResult, err := r.rlmRunner.Run(ctx, systemPrompt, prompt, allowedTools, oneshot.RLMExecutionOpts{})
 	if err != nil {
 		result.Error = err
 		return result, nil
