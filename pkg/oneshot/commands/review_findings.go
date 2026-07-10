@@ -596,7 +596,7 @@ func validateFeedbackLedger(entries []FeedbackEntry, requiredIDs []string) error
 		problems = append(problems, "missing evidence for "+strings.Join(missingEvidence, ", "))
 	}
 	if len(problems) > 0 {
-		return fmt.Errorf("Feedback ledger does not exactly match supplied feedback IDs: %s", strings.Join(problems, "; "))
+		return fmt.Errorf("feedback ledger does not exactly match supplied feedback IDs: %s", strings.Join(problems, "; "))
 	}
 	return nil
 }
