@@ -823,7 +823,7 @@ func resolveReviewCommit(root, ref string) (string, error) {
 	}
 	commit = strings.TrimSpace(commit)
 	if commit == "" {
-		return "", fmt.Errorf("Git revision %q resolved to an empty commit", ref)
+		return "", fmt.Errorf("git revision %q resolved to an empty commit", ref)
 	}
 	return commit, nil
 }
@@ -1192,7 +1192,7 @@ func reviewReadFileLimited(path string, maxBytes int) (string, bool, error) {
 	if err != nil {
 		return "", false, err
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	if maxBytes < 0 {
 		maxBytes = 0
 	}

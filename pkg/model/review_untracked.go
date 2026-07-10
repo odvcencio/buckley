@@ -81,12 +81,12 @@ func CaptureReviewUntrackedFiles(ctx context.Context, root string, allowlistedPa
 	if err != nil {
 		return nil, fmt.Errorf("open untracked review root: %w", err)
 	}
-	defer sourceRoot.Close()
+	defer func() { _ = sourceRoot.Close() }()
 	capturedRoot, err := os.MkdirTemp("", "buckley-review-untracked-*")
 	if err != nil {
 		return nil, fmt.Errorf("create untracked review capture: %w", err)
 	}
-	defer os.RemoveAll(capturedRoot)
+	defer func() { _ = os.RemoveAll(capturedRoot) }()
 
 	files := make([]ReviewUntrackedFile, 0, len(paths))
 	patchBytes := 0
@@ -169,7 +169,7 @@ func readStableReviewUntrackedFile(root *os.Root, path string, expected os.FileI
 	if err != nil {
 		return nil, err
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 
 	opened, err := file.Stat()
 	if err != nil {

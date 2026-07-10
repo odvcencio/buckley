@@ -48,13 +48,13 @@ func TestValidateReviewEvidenceCoverageRequiresSameToolchainAndChangedPaths(t *t
 		}
 	})
 
-	t.Run("docs-only change still requires repository coverage", func(t *testing.T) {
+	t.Run("unrecognized configuration still requires repository coverage", func(t *testing.T) {
 		evidence := []reviewCommandEvidenceDetails{
 			{Kind: reviewEvidenceBuild, Language: "go", Targets: target("pkg/a", false)},
 			{Kind: reviewEvidenceTest, Language: "go", Targets: target("pkg/a", false)},
 		}
-		if err := validateReviewEvidenceCoverage([]string{"README.md"}, evidence); err == nil {
-			t.Fatal("scoped unrelated evidence approved a docs-only change")
+		if err := validateReviewEvidenceCoverage([]string{"release.yaml"}, evidence); err == nil {
+			t.Fatal("scoped unrelated evidence approved an unrecognized configuration change")
 		}
 	})
 
@@ -67,4 +67,25 @@ func TestValidateReviewEvidenceCoverageRequiresSameToolchainAndChangedPaths(t *t
 			t.Fatal("plain Cargo default-member evidence covered an arbitrary changed crate")
 		}
 	})
+}
+
+func TestReviewChangedFilesDocumentationOnly(t *testing.T) {
+	for name, tc := range map[string]struct {
+		paths []string
+		want  bool
+	}{
+		"markdown":              {paths: []string{"README.md", "docs/release.mdx"}, want: true},
+		"other doc formats":     {paths: []string{"guide.rst", "docs/design.adoc"}, want: true},
+		"extensionless license": {paths: []string{"LICENSE"}, want: true},
+		"empty":                 {paths: nil, want: false},
+		"mixed source":          {paths: []string{"README.md", "main.go"}, want: false},
+		"mixed configuration":   {paths: []string{"README.md", "release.yaml"}, want: false},
+		"unsafe path":           {paths: []string{"../README.md"}, want: false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := reviewChangedFilesDocumentationOnly(tc.paths); got != tc.want {
+				t.Fatalf("reviewChangedFilesDocumentationOnly(%v) = %v, want %v", tc.paths, got, tc.want)
+			}
+		})
+	}
 }

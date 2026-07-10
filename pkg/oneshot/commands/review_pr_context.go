@@ -390,8 +390,16 @@ func normalizePRCommandResult(name string, args []string, output []byte, err err
 		// state-bearing payload so review-pr can report a blocked review instead
 		// of aborting before analysis.
 		var status interface{ ExitCode() int }
-		if isJSONPRChecksCommand(name, args) && errors.As(err, &status) && status.ExitCode() == 8 && json.Valid(output) {
-			return output, nil
+		if isJSONPRChecksCommand(name, args) && errors.As(err, &status) {
+			switch {
+			case status.ExitCode() == 8 && json.Valid(output):
+				return output, nil
+			case status.ExitCode() == 1 && isNoPRChecksReported(output):
+				// `gh pr checks --json` emits prose rather than [] when a branch
+				// has no check runs. Preserve that stable empty state as JSON so
+				// initial capture and revalidation compare empty against empty.
+				return []byte("[]"), nil
+			}
 		}
 		detail := strings.TrimSpace(string(output))
 		if detail == "" {
@@ -400,6 +408,19 @@ func normalizePRCommandResult(name string, args []string, output []byte, err err
 		return nil, fmt.Errorf("%s: %w", detail, err)
 	}
 	return output, nil
+}
+
+func isNoPRChecksReported(output []byte) bool {
+	const (
+		prefix = "no checks reported on the '"
+		suffix = "' branch"
+	)
+	detail := strings.TrimSpace(string(output))
+	if !strings.HasPrefix(detail, prefix) || !strings.HasSuffix(detail, suffix) {
+		return false
+	}
+	branch := strings.TrimSuffix(strings.TrimPrefix(detail, prefix), suffix)
+	return branch != "" && !strings.ContainsAny(branch, "\r\n")
 }
 
 func isJSONPRChecksCommand(name string, args []string) bool {

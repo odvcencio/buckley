@@ -143,3 +143,32 @@ func reviewChangedFileLanguage(path string) string {
 		return ""
 	}
 }
+
+func reviewChangedFilesDocumentationOnly(paths []string) bool {
+	if len(paths) == 0 {
+		return false
+	}
+	for _, raw := range paths {
+		path := normalizeReviewEvidencePath(raw)
+		if path == "" || !reviewDocumentationPath(path) {
+			return false
+		}
+	}
+	return true
+}
+
+func reviewDocumentationPath(path string) bool {
+	extension := strings.ToLower(filepath.Ext(path))
+	switch extension {
+	case ".md", ".markdown", ".mdx", ".rst", ".adoc", ".asciidoc":
+		return true
+	}
+
+	base := strings.ToLower(filepath.Base(path))
+	switch base {
+	case "authors", "changelog", "code_of_conduct", "contributing", "contributors", "license", "notice", "readme", "security", "support":
+		return true
+	default:
+		return false
+	}
+}

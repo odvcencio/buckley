@@ -52,6 +52,9 @@ func TestReviewPromptsMakeApprovalVerificationPolicyExplicit(t *testing.T) {
 		"APPROVE requires both Build and Tests to be PASS",
 		"focused local verification actually completed",
 		"Any FAIL, PENDING, NOT_RUN, UNAVAILABLE, or UNKNOWN state blocks approval",
+		"Documentation-only exception",
+		"exact changed claims, links, or diff hunks",
+		"Mixed, source, and configuration changes do not qualify",
 	} {
 		if !strings.Contains(branch, want) {
 			t.Errorf("branch prompt missing %q", want)
@@ -64,6 +67,9 @@ func TestReviewPromptsMakeApprovalVerificationPolicyExplicit(t *testing.T) {
 		"passing (N/N)",
 		"Failing, pending, unknown, or absent checks block approval",
 		"repeat the exact Feedback ledger entry once for EVERY supplied ID",
+		"Documentation-only exception",
+		"exact changed claims, links, or diff hunks",
+		"Mixed, source, and configuration changes do not qualify",
 	} {
 		if !strings.Contains(pr, want) {
 			t.Errorf("PR prompt missing %q", want)

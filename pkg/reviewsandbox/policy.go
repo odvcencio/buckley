@@ -122,9 +122,7 @@ func InheritedCommandEnvironment(runtimeDir string) []string {
 			result = append(result, entry)
 		}
 	}
-	for _, entry := range sortedEnvironment(overrides) {
-		result = append(result, entry)
-	}
+	result = append(result, sortedEnvironment(overrides)...)
 	return result
 }
 

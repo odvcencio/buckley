@@ -457,6 +457,93 @@ func TestApprovedAPIReviewRequiresSuccessfulVerificationToolEvidence(t *testing.
 	assert.NoError(t, validateReviewExecutionEvidence(result, execution, changedFiles))
 }
 
+func TestApprovedPRDocumentationReviewUsesExactDiffLedgerInsteadOfUnrelatedCommands(t *testing.T) {
+	changedFiles := []string{"README.md", "docs/release-notes.mdx"}
+	result := &ReviewRLMResult{Parsed: &ParsedReview{
+		Approved: true,
+		CoverageEntries: []CoverageEntry{
+			{Path: "README.md", Evidence: "checked the installation claim against the changed command example"},
+			{Path: "docs/release-notes.mdx", Evidence: "checked the release link and version claim in the diff"},
+		},
+	}}
+	def := ReviewPRDef{ChangedFiles: changedFiles}
+
+	assert.NoError(t, def.ValidateRLMExecution(result, nil))
+
+	result.Parsed.CoverageEntries = result.Parsed.CoverageEntries[:1]
+	assert.ErrorContains(t, def.ValidateRLMExecution(result, nil), "documentation-only approval requires exact changed-file diff evidence")
+}
+
+func TestReviewPRRuntimeAcceptsExactChangelogDocumentationLedger(t *testing.T) {
+	def := ReviewPRDef{
+		ChangedFiles: []string{"CHANGELOG.md"},
+		CIStatus:     "passing (1/1)",
+	}
+	result, err := def.ParseResult(`## Grade: A
+
+## Summary
+The release notes accurately describe the shipped behavior.
+
+## CI Status
+- Build: PASS — named remote build check passed.
+- Tests: PASS — named remote test check passed.
+
+## Coverage
+- **File**: ` + "`CHANGELOG.md`" + ` — checked every changed release claim and link against the diff.
+- **Feedback disposition**: ` + "`NONE_SUPPLIED`" + ` — no prior feedback was supplied.
+- **Verification**: documentation diff and named remote CI checks.
+
+## Invariant Audit
+- Checked release version, links, and claim consistency; no source invariant changed.
+
+## Falsification
+- **Strongest plausible failure**: a release claim could name the wrong shipped version.
+- **Evidence**: the changed heading and linked release version agree.
+- **Conclusion**: DISPROVED
+
+## Findings
+None.
+
+## Verdict
+- **Approved**: YES
+- **Blockers**: None
+- **Suggestions**: None
+`)
+	if err != nil {
+		t.Fatalf("ParseResult: %v", err)
+	}
+	if err := def.ValidateResult(result); err != nil {
+		t.Fatalf("ValidateResult: %v", err)
+	}
+	if err := def.ValidateRLMExecution(result, nil); err != nil {
+		t.Fatalf("ValidateRLMExecution: %v", err)
+	}
+}
+
+func TestApprovedPRDocumentationExceptionRejectsMixedOrNonDocumentationChanges(t *testing.T) {
+	result := &ReviewRLMResult{Parsed: &ParsedReview{
+		Approved: true,
+		CoverageEntries: []CoverageEntry{
+			{Path: "README.md", Evidence: "reviewed the changed documentation claim"},
+			{Path: "config/release.yaml", Evidence: "reviewed the changed release configuration"},
+		},
+	}}
+	execution := &oneshot.RLMResult{ProviderID: "codex"}
+
+	mixed := ReviewPRDef{ChangedFiles: []string{"README.md", "config/release.yaml"}}
+	assert.ErrorContains(t, mixed.ValidateRLMExecution(result, execution), "requires repo-root build and test evidence")
+
+	result.Parsed.CoverageEntries = result.Parsed.CoverageEntries[:1]
+	branch := ReviewBranchDef{ChangedFiles: []string{"README.md"}}
+	assert.NoError(t, branch.ValidateRLMExecution(result, nil))
+
+	result.Parsed.CoverageEntries = nil
+	assert.ErrorContains(t, branch.ValidateRLMExecution(result, nil), "documentation-only approval requires exact changed-file diff evidence")
+
+	sourceBranch := ReviewBranchDef{ChangedFiles: []string{"README.md", "main.go"}}
+	assert.ErrorContains(t, sourceBranch.ValidateRLMExecution(result, execution), "does not cover changed source paths")
+}
+
 func TestReviewBranchDef_Interface(t *testing.T) {
 	def := ReviewBranchDef{}
 
@@ -923,8 +1010,8 @@ func TestReviewApprovalRequiresNormalizedPassingBuildAndTests(t *testing.T) {
 		newStatus   string
 		wantMessage string
 	}{
-		{name: "arbitrary build prose", oldStatus: "- Build: PASS", newStatus: "- Build: compiled successfully", wantMessage: "Build status must start"},
-		{name: "arbitrary test prose", oldStatus: "- Tests: PASS", newStatus: "- Tests: 42 passed, 0 failed", wantMessage: "Tests status must start"},
+		{name: "arbitrary build prose", oldStatus: "- Build: PASS", newStatus: "- Build: compiled successfully", wantMessage: "build status must start"},
+		{name: "arbitrary test prose", oldStatus: "- Tests: PASS", newStatus: "- Tests: 42 passed, 0 failed", wantMessage: "tests status must start"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			review := strings.Replace(base, tc.oldStatus, tc.newStatus, 1)

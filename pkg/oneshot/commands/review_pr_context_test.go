@@ -43,6 +43,28 @@ func TestNormalizePRCommandResult_PreservesPendingChecksJSON(t *testing.T) {
 	}
 }
 
+func TestNormalizePRCommandResult_PreservesCanonicalNoChecksAsEmptyJSON(t *testing.T) {
+	args := []string{"pr", "checks", "216", "--json", "name,state", "--repo", "m31labs/gotreesitter"}
+	output := []byte("no checks reported on the 'release/v0.23.0' branch\n")
+	got, err := normalizePRCommandResult("gh", args, output, reviewCommandExitError{code: 1})
+	if err != nil {
+		t.Fatalf("normalizePRCommandResult: %v", err)
+	}
+	if string(got) != "[]" {
+		t.Fatalf("output = %q, want []", got)
+	}
+
+	checks, err := getPRChecks(func(name string, args ...string) ([]byte, error) {
+		return normalizePRCommandResult(name, args, output, reviewCommandExitError{code: 1})
+	}, prReference{Number: 216, Repository: "m31labs/gotreesitter"})
+	if err != nil {
+		t.Fatalf("getPRChecks: %v", err)
+	}
+	if len(checks) != 0 {
+		t.Fatalf("checks = %#v, want stable empty state", checks)
+	}
+}
+
 func TestNormalizePRCommandResult_RejectsOtherFailures(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -51,6 +73,8 @@ func TestNormalizePRCommandResult_RejectsOtherFailures(t *testing.T) {
 		code   int
 	}{
 		{name: "gh", args: []string{"pr", "checks", "208", "--json", "name,state"}, output: []byte(`[{"state":"PENDING"}]`), code: 1},
+		{name: "gh", args: []string{"pr", "checks", "208", "--json", "name,state"}, output: []byte("no checks reported on the 'topic' branch; authentication failed"), code: 1},
+		{name: "gh", args: []string{"pr", "checks", "208", "--json", "name,state"}, output: []byte("no checks reported on the '' branch"), code: 1},
 		{name: "gh", args: []string{"pr", "checks", "208", "--json", "name,state"}, output: []byte("not json"), code: 8},
 		{name: "gh", args: []string{"pr", "view", "208", "--json", "state"}, output: []byte(`{"state":"OPEN"}`), code: 8},
 		{name: "git", args: []string{"status", "--porcelain"}, output: []byte(`[]`), code: 8},
@@ -442,6 +466,28 @@ func TestRevalidatePRContext_PendingChecksExitEightRemainsReviewable(t *testing.
 	}
 	if changed != "" {
 		t.Fatalf("pending CI changed evidence = %q, want stable", changed)
+	}
+}
+
+func TestRevalidatePRContext_StableNoChecksExitOneRemainsReviewable(t *testing.T) {
+	ctx := stablePRRevalidationContext()
+	ctx.PR.CIStatus = "no checks"
+	ctx.Checks = nil
+	base := stablePRRevalidationRunner(prRevalidationOutputs{checks: `[]`})
+	run := func(name string, args ...string) ([]byte, error) {
+		output, err := base(name, args...)
+		if err == nil && name == "gh" && hasPRArgPrefix(args, "pr", "checks", "208", "--json", "name,state") {
+			return normalizePRCommandResult(name, args, []byte("no checks reported on the 'release/v0.23.0' branch\n"), reviewCommandExitError{code: 1})
+		}
+		return output, err
+	}
+
+	changed, err := revalidatePRContext(ctx, run)
+	if err != nil {
+		t.Fatalf("revalidatePRContext: %v", err)
+	}
+	if changed != "" {
+		t.Fatalf("no-check CI changed evidence = %q, want stable", changed)
 	}
 }
 

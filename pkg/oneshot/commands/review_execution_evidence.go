@@ -629,15 +629,6 @@ func hasExactArg(args []string, targets ...string) bool {
 	return false
 }
 
-func hasArgPrefix(args []string, prefix string) bool {
-	for _, arg := range args {
-		if arg == prefix || strings.HasPrefix(arg, prefix+"=") {
-			return true
-		}
-	}
-	return false
-}
-
 func reviewOutputShowsNoTests(runner, output string) bool {
 	lower := strings.ToLower(output)
 	if runner == "go" && strings.Contains(lower, "[no test files]") {

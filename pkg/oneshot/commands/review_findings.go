@@ -203,17 +203,17 @@ func ValidateParsedReview(parsed *ParsedReview, opts ReviewValidationOptions) er
 		return fmt.Errorf("review is missing required evidence: %s", strings.Join(missing, ", "))
 	}
 	if parsed.BuildVerification == "" {
-		return fmt.Errorf("Build status must start with one exact verification state: %s", verificationStateList())
+		return fmt.Errorf("build status must start with one exact verification state: %s", verificationStateList())
 	}
 	if parsed.TestVerification == "" {
-		return fmt.Errorf("Tests status must start with one exact verification state: %s", verificationStateList())
+		return fmt.Errorf("tests status must start with one exact verification state: %s", verificationStateList())
 	}
 	verdictApproved, err := parseVerdictApproval(parsed.Verdict)
 	if err != nil {
 		return fmt.Errorf("invalid Verdict decision: %w", err)
 	}
 	if verdictApproved != parsed.Approved {
-		return fmt.Errorf("Verdict decision is inconsistent with the parsed approval state")
+		return fmt.Errorf("verdict decision is inconsistent with the parsed approval state")
 	}
 
 	if err := validateCoverageLedger(parsed.CoverageEntries, opts.ChangedFiles); err != nil {

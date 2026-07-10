@@ -154,6 +154,16 @@ func validateReviewExecutionEvidence(result any, execution *oneshot.RLMResult, c
 	if !ok || review.Parsed == nil || !review.Parsed.Approved {
 		return nil
 	}
+	if reviewChangedFilesDocumentationOnly(changedFiles) {
+		// ValidateResult separately enforces normalized status, completeness, and
+		// (for PRs) authoritative remote CI. The execution gate revalidates the
+		// exact per-file ledger here so documentation-only approvals are grounded
+		// in diff claims without manufacturing unrelated source commands.
+		if err := validateCoverageLedger(review.Parsed.CoverageEntries, changedFiles); err != nil {
+			return fmt.Errorf("documentation-only approval requires exact changed-file diff evidence: %w", err)
+		}
+		return nil
+	}
 	if execution == nil {
 		return fmt.Errorf("approved review is missing execution evidence")
 	}
