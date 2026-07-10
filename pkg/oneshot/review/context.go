@@ -66,7 +66,7 @@ type BranchContextOptions struct {
 // DefaultBranchContextOptions returns sensible defaults.
 func DefaultBranchContextOptions() BranchContextOptions {
 	return BranchContextOptions{
-		MaxDiffBytes:    200_000,
+		MaxDiffBytes:    diffsignal.ReviewDiffBudget,
 		IncludeUnstaged: true,
 		IncludeAgents:   true,
 		BaseBranch:      "", // Auto-detect

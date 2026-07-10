@@ -25,6 +25,7 @@ func TestClassifyReviewCommandEvidence(t *testing.T) {
 		{name: "shell wrapped go build", command: `/bin/bash -lc 'go build ./pkg/model'`, want: reviewEvidenceBuild},
 		{name: "go compile-only test", command: `/bin/bash -lc "go test -run '^$' ./pkg/model"`, want: reviewEvidenceBuild},
 		{name: "go package tests", command: "go test ./pkg/model ./pkg/rlm", output: "ok  model\nok  rlm", want: reviewEvidenceTest},
+		{name: "go recursive tests with testless utility package", command: "go test ./...", output: "?   example.test/cmd/tool [no test files]\nok  example.test/pkg/core 0.123s", want: reviewEvidenceTest},
 		{name: "cargo check", command: "cargo check --workspace", want: reviewEvidenceBuild},
 		{name: "cargo tests", command: "cargo test --workspace", output: "running 2 tests\ntest result: ok", want: reviewEvidenceTest},
 		{name: "pytest", command: "python3 -m pytest .", output: "12 passed", want: reviewEvidenceTest},

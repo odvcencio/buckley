@@ -869,15 +869,57 @@ func estimateCodexUsage(messages []Message, output string) Usage {
 
 func formatCodexCLIError(err error, result CodexCLICommandResult) error {
 	stderr := strings.TrimSpace(string(result.Stderr))
-	stdout := strings.TrimSpace(string(result.Stdout))
+	stdout := codexCLIStdoutFailureDiagnostic(result.Stdout)
 	switch {
-	case stderr != "":
-		return fmt.Errorf("codex CLI failed: %w: %s", err, stderr)
+	case stdout != "" && stderr != "":
+		return fmt.Errorf("codex CLI failed: %w: %s\ncodex CLI stderr: %s", err, stdout, stderr)
 	case stdout != "":
 		return fmt.Errorf("codex CLI failed: %w: %s", err, stdout)
+	case stderr != "":
+		return fmt.Errorf("codex CLI failed: %w: %s", err, stderr)
 	default:
 		return fmt.Errorf("codex CLI failed: %w", err)
 	}
+}
+
+func codexCLIStdoutFailureDiagnostic(stdout []byte) string {
+	type errorDetail struct {
+		Message string `json:"message"`
+	}
+	type event struct {
+		Type    string          `json:"type"`
+		Message string          `json:"message"`
+		Error   json.RawMessage `json:"error"`
+	}
+
+	var diagnostic string
+	scanner := bufio.NewScanner(bytes.NewReader(stdout))
+	scanner.Buffer(make([]byte, 64<<10), 1<<20)
+	for scanner.Scan() {
+		var current event
+		if json.Unmarshal(scanner.Bytes(), &current) != nil || (current.Type != "error" && current.Type != "turn.failed") {
+			continue
+		}
+		message := strings.TrimSpace(current.Message)
+		if len(current.Error) > 0 {
+			var detail errorDetail
+			if json.Unmarshal(current.Error, &detail) == nil && strings.TrimSpace(detail.Message) != "" {
+				message = strings.TrimSpace(detail.Message)
+			} else {
+				var plain string
+				if json.Unmarshal(current.Error, &plain) == nil && strings.TrimSpace(plain) != "" {
+					message = strings.TrimSpace(plain)
+				}
+			}
+		}
+		if message != "" {
+			diagnostic = message
+		}
+	}
+	if diagnostic != "" {
+		return diagnostic
+	}
+	return strings.TrimSpace(string(stdout))
 }
 
 func runCodexCLICommand(ctx context.Context, cmd CodexCLICommand) (CodexCLICommandResult, error) {

@@ -640,8 +640,24 @@ func hasArgPrefix(args []string, prefix string) bool {
 
 func reviewOutputShowsNoTests(runner, output string) bool {
 	lower := strings.ToLower(output)
+	if runner == "go" && strings.Contains(lower, "[no test files]") {
+		// Recursive Go runs commonly contain a mix of utility packages without
+		// tests and packages whose tests completed successfully. Reject a truly
+		// testless target, but do not discard the entire repo-wide evidence event
+		// merely because one package printed the standard '?' marker.
+		hasPassingPackage := false
+		for _, line := range strings.Split(lower, "\n") {
+			fields := strings.Fields(line)
+			if len(fields) > 0 && fields[0] == "ok" {
+				hasPassingPackage = true
+				break
+			}
+		}
+		if !hasPassingPackage {
+			return true
+		}
+	}
 	for _, marker := range []string{
-		"[no test files]",
 		"no tests to run",
 		"no tests ran",
 		"no tests found",

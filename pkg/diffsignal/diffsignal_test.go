@@ -248,6 +248,24 @@ func TestPrioritizeSmallCleanDiffUnchanged(t *testing.T) {
 	}
 }
 
+func TestReviewDiffBudgetPreservesMediumPRWithoutTruncation(t *testing.T) {
+	var raw strings.Builder
+	for i := 0; i < 8; i++ {
+		raw.WriteString(largeSourceDiff(fmt.Sprintf("pkg/review/file_%d.go", i), 50_000))
+	}
+
+	res := Prioritize(raw.String(), ReviewDiffBudget)
+	if res.Truncated {
+		t.Fatal("review budget truncated a medium-sized multi-file PR")
+	}
+	for i := 0; i < 8; i++ {
+		path := fmt.Sprintf("pkg/review/file_%d.go", i)
+		if !strings.Contains(res.Context, path) {
+			t.Fatalf("review context omitted %q", path)
+		}
+	}
+}
+
 // Non-diff or unparseable input falls back to the legacy truncation behavior.
 func TestPrioritizeFallbackNonDiffInput(t *testing.T) {
 	t.Run("empty", func(t *testing.T) {

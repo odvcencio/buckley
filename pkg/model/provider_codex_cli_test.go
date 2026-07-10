@@ -2,6 +2,7 @@ package model
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,6 +12,39 @@ import (
 
 	"m31labs.dev/buckley/pkg/config"
 )
+
+func TestFormatCodexCLIErrorPrefersStructuredStdoutDiagnostic(t *testing.T) {
+	cause := errors.New("exit status 1")
+	result := CodexCLICommandResult{
+		Stdout: []byte(strings.Join([]string{
+			`{"type":"thread.started","thread_id":"thread-1"}`,
+			`{"type":"error","message":"reconnecting"}`,
+			`{"type":"turn.failed","error":{"message":"model capacity unavailable; retry later"}}`,
+		}, "\n")),
+		Stderr: []byte("WARN model metadata cache was unavailable"),
+	}
+
+	err := formatCodexCLIError(cause, result)
+	if !errors.Is(err, cause) {
+		t.Fatalf("formatted error does not wrap command failure: %v", err)
+	}
+	got := err.Error()
+	for _, want := range []string{"model capacity unavailable; retry later", "codex CLI stderr: WARN model metadata cache was unavailable"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("formatted error omitted %q: %s", want, got)
+		}
+	}
+	if strings.Contains(got, "thread.started") || strings.Index(got, "model capacity unavailable") > strings.Index(got, "metadata cache") {
+		t.Fatalf("formatted error did not prioritize the structured stdout failure: %s", got)
+	}
+}
+
+func TestCodexCLIStdoutFailureDiagnosticSupportsStringError(t *testing.T) {
+	stdout := []byte(`{"type":"turn.failed","error":"request rejected"}`)
+	if got := codexCLIStdoutFailureDiagnostic(stdout); got != "request rejected" {
+		t.Fatalf("diagnostic = %q, want request rejected", got)
+	}
+}
 
 func TestCodexCLIProviderChatCompletionUsesExecLastMessage(t *testing.T) {
 	provider := NewCodexCLIProvider(
