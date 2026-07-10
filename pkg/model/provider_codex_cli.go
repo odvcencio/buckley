@@ -597,7 +597,7 @@ func verifyCodexReviewWorkspace(ctx context.Context, workDir string, descriptor 
 	if err != nil {
 		return fmt.Errorf("read materialized tracked patch: %w", err)
 	}
-	if !bytes.Equal(patch, descriptor.Patch()) {
+	if !bytes.Equal(canonicalReviewSnapshotPatch(patch), canonicalReviewSnapshotPatch(descriptor.Patch())) {
 		return fmt.Errorf("tracked source differs from immutable snapshot %s", descriptor.ID())
 	}
 	return nil

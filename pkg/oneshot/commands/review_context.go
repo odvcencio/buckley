@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -13,6 +14,7 @@ import (
 	"strings"
 
 	"m31labs.dev/buckley/pkg/diffsignal"
+	"m31labs.dev/buckley/pkg/model"
 	"m31labs.dev/buckley/pkg/transparency"
 )
 
@@ -31,6 +33,7 @@ type BranchContext struct {
 	BaseCommit        string
 	Scope             string
 	IncludesUnstaged  bool
+	IncludesUntracked bool
 	Files             []FileChange
 	Stats             DiffStats
 	Diff              string
@@ -79,9 +82,17 @@ func (ds DiffStats) TotalChanges() int {
 type BranchContextOptions struct {
 	MaxDiffBytes    int
 	IncludeUnstaged bool
-	IncludeAgents   bool
-	BaseBranch      string
-	Scope           string
+	// UntrackedPaths explicitly allowlists repository-relative untracked text
+	// paths for model input. Callers must obtain clear user authorization.
+	UntrackedPaths []string
+	IncludeAgents  bool
+	BaseBranch     string
+	Scope          string
+	// CapturedUntracked is immutable worktree evidence supplied by the review
+	// snapshot. When UntrackedPaths is non-empty, nil asks direct callers to
+	// capture it; non-nil (even empty) prevents a second live read from
+	// diverging from verification.
+	CapturedUntracked []model.ReviewUntrackedFile
 }
 
 // DefaultBranchContextOptions returns sensible defaults.
@@ -132,6 +143,9 @@ func AssembleBranchContext(opts BranchContextOptions) (*BranchContext, *transpar
 
 	ctx.Scope = normalizeReviewScope(opts.Scope)
 	ctx.IncludesUnstaged = opts.IncludeUnstaged
+	if len(opts.UntrackedPaths) > 0 && (!opts.IncludeUnstaged || ctx.Scope != ReviewScopeWorktree) {
+		return nil, nil, fmt.Errorf("untracked review input requires worktree scope with unstaged changes enabled")
+	}
 	audit.Add("review scope", reviewEstimateTokens(ctx.Scope))
 
 	ctx.BaseBranch = opts.BaseBranch
@@ -211,23 +225,44 @@ func AssembleBranchContext(opts BranchContextOptions) (*BranchContext, *transpar
 		}
 
 		if ctx.Scope == ReviewScopeWorktree {
-			// Worktree review always includes staged changes. IncludeUnstaged
-			// controls only the unstaged half of the local evidence.
+			// Worktree review always includes staged changes. Untracked text is
+			// included only after a separate, explicit caller opt-in.
+			var untracked []model.ReviewUntrackedFile
+			if len(opts.UntrackedPaths) > 0 {
+				if opts.CapturedUntracked != nil {
+					untracked = opts.CapturedUntracked
+					if err := validateCapturedReviewUntracked(opts.UntrackedPaths, untracked); err != nil {
+						return nil, nil, err
+					}
+				} else {
+					untracked, err = model.CaptureReviewUntrackedFiles(context.Background(), ctx.RepoRoot, opts.UntrackedPaths)
+					if err != nil {
+						return nil, nil, fmt.Errorf("capture reviewable untracked files: %w", err)
+					}
+				}
+				ctx.IncludesUntracked = true
+			}
 			localStatus, err := localNameStatus(ctx.RepoRoot, opts.IncludeUnstaged)
 			if err != nil {
 				return nil, nil, fmt.Errorf("failed to get worktree changed files: %w", err)
 			}
+			localStatus = appendReviewUntrackedNameStatus(localStatus, untracked)
 			if strings.TrimSpace(localStatus) != "" {
 				ctx.Files = mergeFileChanges(ctx.Files, parseNameStatus(localStatus))
 			}
 			localStats := getLocalDiffStats(ctx.RepoRoot, opts.IncludeUnstaged)
+			for _, file := range untracked {
+				localStats.Files++
+				localStats.Insertions += file.Insertions
+			}
 			ctx.Stats.Files = len(ctx.Files)
 			ctx.Stats.Insertions += localStats.Insertions
 			ctx.Stats.Deletions += localStats.Deletions
-			localChanges, localRawTrunc, err := localDiff(ctx.RepoRoot, opts.MaxDiffBytes, opts.IncludeUnstaged)
+			localChanges, localRawTrunc, err := localDiff(ctx.RepoRoot, 0, opts.IncludeUnstaged)
 			if err != nil {
 				return nil, nil, fmt.Errorf("failed to get worktree diff: %w", err)
 			}
+			localChanges = appendReviewUntrackedDiff(localChanges, untracked)
 			if strings.TrimSpace(localChanges) != "" {
 				// Reserve space for the truncation marker so appending it never
 				// pushes ctx.Unstaged past MaxDiffBytes (marker is 16 bytes).
@@ -381,7 +416,12 @@ func BuildBranchPrompt(ctx *BranchContext) string {
 		sb.WriteString("- **Context Completeness**: INCOMPLETE — project guidance was unavailable or truncated; do not approve\n")
 	}
 	sb.WriteString("- **Verification Identity**: use only the captured commit content and supplied diff; never resolve live branch refs\n")
-	sb.WriteString("- **Excluded Local State**: untracked files and Git index-hidden assume-unchanged/skip-worktree edits\n")
+	if ctx.IncludesUntracked {
+		sb.WriteString("- **Included Local State**: explicitly opted-in filtered untracked text files (contents may still contain secrets)\n")
+		sb.WriteString("- **Excluded Local State**: ignored, known secret-like, binary, symlink/non-regular untracked files; untracked AGENTS.md; and Git index-hidden assume-unchanged/skip-worktree edits\n")
+	} else {
+		sb.WriteString("- **Excluded Local State**: untracked files and Git index-hidden assume-unchanged/skip-worktree edits\n")
+	}
 	sb.WriteString("\n")
 
 	if ctx.RecentLog != "" {
@@ -492,17 +532,17 @@ func BuildProjectPrompt(ctx *ProjectContext) string {
 
 // detectBaseBranch tries to find main or master branch.
 func detectBaseBranch(root string) string {
-	if _, err := resolveReviewCommit(root, "main"); err == nil {
-		return "main"
-	}
-	if _, err := resolveReviewCommit(root, "master"); err == nil {
-		return "master"
-	}
 	if _, err := resolveReviewCommit(root, "origin/main"); err == nil {
 		return "origin/main"
 	}
 	if _, err := resolveReviewCommit(root, "origin/master"); err == nil {
 		return "origin/master"
+	}
+	if _, err := resolveReviewCommit(root, "main"); err == nil {
+		return "main"
+	}
+	if _, err := resolveReviewCommit(root, "master"); err == nil {
+		return "master"
 	}
 	return "main"
 }
@@ -629,6 +669,64 @@ func localNameStatus(root string, includeUnstaged bool) (string, error) {
 	}
 	args = append(args, "--")
 	return reviewGitOutputAt(root, args...)
+}
+
+func appendReviewUntrackedNameStatus(status string, files []model.ReviewUntrackedFile) string {
+	if len(files) == 0 {
+		return status
+	}
+	var result strings.Builder
+	result.WriteString(strings.TrimSpace(status))
+	for _, file := range files {
+		if result.Len() > 0 {
+			result.WriteByte('\n')
+		}
+		result.WriteString("A\t")
+		result.WriteString(file.Path)
+	}
+	return result.String()
+}
+
+func validateCapturedReviewUntracked(allowlistedPaths []string, files []model.ReviewUntrackedFile) error {
+	allowed := make(map[string]struct{}, len(allowlistedPaths))
+	for _, raw := range allowlistedPaths {
+		path := filepath.ToSlash(filepath.Clean(filepath.FromSlash(strings.TrimSpace(raw))))
+		if path == "." || filepath.IsAbs(path) || path == ".." || strings.HasPrefix(path, "../") {
+			return fmt.Errorf("unsafe captured untracked allowlist path %q", raw)
+		}
+		allowed[path] = struct{}{}
+	}
+	for _, file := range files {
+		if _, ok := allowed[file.Path]; !ok {
+			return fmt.Errorf("captured untracked review evidence %q was not explicitly allowlisted", file.Path)
+		}
+		delete(allowed, file.Path)
+	}
+	if len(allowed) > 0 {
+		missing := make([]string, 0, len(allowed))
+		for path := range allowed {
+			missing = append(missing, path)
+		}
+		sort.Strings(missing)
+		return fmt.Errorf("captured untracked review evidence is missing allowlisted paths: %s", strings.Join(missing, ", "))
+	}
+	return nil
+}
+
+func appendReviewUntrackedDiff(diff string, files []model.ReviewUntrackedFile) string {
+	if len(files) == 0 {
+		return diff
+	}
+	var result strings.Builder
+	result.Grow(len(diff))
+	result.WriteString(strings.TrimSpace(diff))
+	for _, file := range files {
+		if result.Len() > 0 {
+			result.WriteByte('\n')
+		}
+		result.Write(file.Patch)
+	}
+	return result.String()
 }
 
 func localDiff(root string, maxBytes int, includeUnstaged bool) (string, bool, error) {

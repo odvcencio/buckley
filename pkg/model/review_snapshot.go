@@ -8,7 +8,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
+
+	"m31labs.dev/buckley/pkg/diffsignal"
 )
 
 // ReviewSnapshotMode selects the exact Git state exposed to native review
@@ -27,6 +30,10 @@ const (
 	// changes visible to Git. Untracked files and paths hidden with Git index
 	// assume-unchanged/skip-worktree flags are intentionally excluded.
 	ReviewSnapshotTrackedWorktree ReviewSnapshotMode = "tracked-worktree"
+	// ReviewSnapshotWorktree adds explicitly allowlisted, reviewable untracked
+	// text files to the tracked worktree snapshot. Sensitive-looking paths,
+	// binary files, symlinks, and untracked agent instructions remain excluded.
+	ReviewSnapshotWorktree ReviewSnapshotMode = "worktree"
 )
 
 const MaxReviewSnapshotPatchBytes = 64 << 20
@@ -37,6 +44,9 @@ const MaxReviewSnapshotPatchBytes = 64 << 20
 type ReviewSnapshotPolicy struct {
 	Mode           ReviewSnapshotMode
 	ExpectedCommit string
+	// UntrackedPaths is the explicit repository-relative allowlist required by
+	// ReviewSnapshotWorktree. It is ignored by modes that exclude untracked data.
+	UntrackedPaths []string
 }
 
 // ReviewSnapshot is an immutable, content-addressed verification descriptor.
@@ -48,6 +58,7 @@ type ReviewSnapshot struct {
 	relativeWorkDir string
 	commit          string
 	patch           []byte
+	untracked       []ReviewUntrackedFile
 	id              string
 }
 
@@ -137,6 +148,7 @@ func CaptureReviewSnapshot(ctx context.Context, workDir string, policy ReviewSna
 	}
 
 	var patch []byte
+	var capturedUntracked []ReviewUntrackedFile
 	switch policy.Mode {
 	case ReviewSnapshotHead:
 		// The commit itself is the complete snapshot.
@@ -146,6 +158,19 @@ func CaptureReviewSnapshot(ctx context.Context, workDir string, policy ReviewSna
 	case ReviewSnapshotTrackedWorktree:
 		patch, err = reviewSnapshotGitBytes(ctx, root,
 			"diff", "--binary", "--full-index", "--no-ext-diff", "--no-textconv", head, "--")
+	case ReviewSnapshotWorktree:
+		if len(policy.UntrackedPaths) == 0 {
+			return nil, fmt.Errorf("worktree review snapshot requires explicitly allowlisted untracked paths")
+		}
+		patch, err = reviewSnapshotGitBytes(ctx, root,
+			"diff", "--binary", "--full-index", "--no-ext-diff", "--no-textconv", head, "--")
+		if err == nil {
+			capturedUntracked, err = CaptureReviewUntrackedFiles(ctx, root, policy.UntrackedPaths)
+			for _, file := range capturedUntracked {
+				patch = append(patch, file.Patch...)
+			}
+			patch = canonicalReviewSnapshotPatch(patch)
+		}
 	}
 	if err != nil {
 		return nil, fmt.Errorf("capture %s review snapshot: %w", policy.Mode, err)
@@ -159,16 +184,42 @@ func CaptureReviewSnapshot(ctx context.Context, workDir string, policy ReviewSna
 	if err != nil || strings.TrimSpace(currentHead) != head {
 		return nil, fmt.Errorf("review HEAD changed while snapshot was captured")
 	}
-	return NewReviewSnapshot(policy.Mode, root, workDir, head, patch)
+	snapshot, err := NewReviewSnapshot(policy.Mode, root, workDir, head, patch)
+	if err != nil {
+		return nil, err
+	}
+	if policy.Mode == ReviewSnapshotWorktree {
+		snapshot.untracked = cloneReviewUntrackedFiles(capturedUntracked)
+	}
+	return snapshot, nil
 }
 
 func validReviewSnapshotMode(mode ReviewSnapshotMode) bool {
 	switch mode {
-	case ReviewSnapshotNone, ReviewSnapshotHead, ReviewSnapshotIndex, ReviewSnapshotTrackedWorktree:
+	case ReviewSnapshotNone, ReviewSnapshotHead, ReviewSnapshotIndex, ReviewSnapshotTrackedWorktree, ReviewSnapshotWorktree:
 		return true
 	default:
 		return false
 	}
+}
+
+// canonicalReviewSnapshotPatch makes independent tracked and untracked Git
+// diff calls compare identically to the single path-sorted diff emitted after
+// materialization. Each file segment remains byte-for-byte unchanged.
+func canonicalReviewSnapshotPatch(patch []byte) []byte {
+	files := diffsignal.Split(string(patch))
+	if len(files) < 2 {
+		return append([]byte(nil), patch...)
+	}
+	sort.SliceStable(files, func(i, j int) bool {
+		return files[i].Segment < files[j].Segment
+	})
+	var result strings.Builder
+	result.Grow(len(patch))
+	for _, file := range files {
+		result.WriteString(file.Segment)
+	}
+	return []byte(result.String())
 }
 
 func reviewSnapshotGitOutput(ctx context.Context, dir string, args ...string) (string, error) {
@@ -231,6 +282,16 @@ func (s *ReviewSnapshot) Patch() []byte {
 		return nil
 	}
 	return append([]byte(nil), s.patch...)
+}
+
+// UntrackedFiles returns the exact filtered untracked evidence frozen into a
+// worktree snapshot. A non-nil empty slice distinguishes a captured worktree
+// with no reviewable untracked files from snapshot modes that exclude them.
+func (s *ReviewSnapshot) UntrackedFiles() []ReviewUntrackedFile {
+	if s == nil || s.mode != ReviewSnapshotWorktree {
+		return nil
+	}
+	return cloneReviewUntrackedFiles(s.untracked)
 }
 
 func (s *ReviewSnapshot) ID() string {

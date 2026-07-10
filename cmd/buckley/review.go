@@ -24,6 +24,7 @@ type reviewCommandOptions struct {
 	scope           string
 	baseBranch      string
 	includeUnstaged bool
+	untrackedPaths  []string
 	verbose         bool
 	showCost        bool
 	model           string
@@ -57,6 +58,8 @@ func parseReviewCommandOptions(args []string) (reviewCommandOptions, error) {
 	scope := fs.String("scope", commands.ReviewScopeWorktree, "review scope: worktree, branch, or changes")
 	baseBranch := fs.String("base", "", "base branch to compare against (default: auto-detect main/master)")
 	includeUnstaged := fs.Bool("unstaged", true, "include unstaged changes in review")
+	var untrackedPaths stringSliceFlag
+	fs.Var(&untrackedPaths, "include-untracked", "include one untracked repository-relative text path in model input (repeatable; review for secrets)")
 	verbose := fs.Bool("verbose", false, "show full context and reasoning")
 	showCost := fs.Bool("cost", true, "show token/cost breakdown")
 	modelFlag := fs.String("model", "", "model to use (default: BUCKLEY_MODEL_REVIEW, models.review, or execution model)")
@@ -74,6 +77,7 @@ func parseReviewCommandOptions(args []string) (reviewCommandOptions, error) {
 		scope:           *scope,
 		baseBranch:      *baseBranch,
 		includeUnstaged: *includeUnstaged,
+		untrackedPaths:  append([]string(nil), untrackedPaths...),
 		verbose:         *verbose,
 		showCost:        *showCost,
 		model:           *modelFlag,
@@ -83,6 +87,9 @@ func parseReviewCommandOptions(args []string) (reviewCommandOptions, error) {
 	}
 	if *noInteractive {
 		opts.interactive = false
+	}
+	if len(opts.untrackedPaths) > 0 && (opts.projectMode || normalizeReviewCommandScope(opts.scope) != commands.ReviewScopeWorktree || !opts.includeUnstaged) {
+		return reviewCommandOptions{}, fmt.Errorf("--include-untracked requires --scope worktree, --unstaged=true, and non-project review")
 	}
 	return opts, nil
 }
@@ -262,7 +269,7 @@ func runBranchReview(ctx context.Context, opts reviewCommandOptions, framework *
 	reviewScope := normalizeReviewCommandScope(opts.scope)
 	spinner := terminal.NewSpinner(fmt.Sprintf("Analyzing %s changes...", reviewScope))
 	spinner.Start()
-	policy := branchReviewSnapshotPolicy(reviewScope, opts.includeUnstaged)
+	policy := branchReviewSnapshotPolicy(reviewScope, opts.includeUnstaged, opts.untrackedPaths)
 	snapshot, err := model.CaptureReviewSnapshot(ctx, "", policy)
 	if err != nil {
 		spinner.StopWithError(err.Error())
@@ -272,7 +279,11 @@ func runBranchReview(ctx context.Context, opts reviewCommandOptions, framework *
 	contextOpts := commands.DefaultBranchContextOptions()
 	contextOpts.BaseBranch = opts.baseBranch
 	contextOpts.IncludeUnstaged = opts.includeUnstaged
+	contextOpts.UntrackedPaths = append([]string(nil), opts.untrackedPaths...)
 	contextOpts.Scope = reviewScope
+	if snapshot != nil && policy.Mode == model.ReviewSnapshotWorktree {
+		contextOpts.CapturedUntracked = snapshot.UntrackedFiles()
+	}
 
 	branchCtx, audit, err := commands.AssembleBranchContext(contextOpts)
 	if err != nil {
@@ -313,11 +324,14 @@ func runBranchReview(ctx context.Context, opts reviewCommandOptions, framework *
 	return reviewResultFromRLM(fwResult, audit), nil
 }
 
-func branchReviewSnapshotPolicy(scope string, includeUnstaged bool) model.ReviewSnapshotPolicy {
+func branchReviewSnapshotPolicy(scope string, includeUnstaged bool, untrackedPaths []string) model.ReviewSnapshotPolicy {
 	if scope == commands.ReviewScopeBranch {
 		return model.ReviewSnapshotPolicy{Mode: model.ReviewSnapshotHead}
 	}
 	if includeUnstaged {
+		if scope == commands.ReviewScopeWorktree && len(untrackedPaths) > 0 {
+			return model.ReviewSnapshotPolicy{Mode: model.ReviewSnapshotWorktree, UntrackedPaths: append([]string(nil), untrackedPaths...)}
+		}
 		return model.ReviewSnapshotPolicy{Mode: model.ReviewSnapshotTrackedWorktree}
 	}
 	return model.ReviewSnapshotPolicy{Mode: model.ReviewSnapshotIndex}

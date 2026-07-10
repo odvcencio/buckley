@@ -39,6 +39,9 @@ func TestParseReviewCommandOptions(t *testing.T) {
 	if opts.includeUnstaged {
 		t.Fatal("includeUnstaged = true, want false")
 	}
+	if len(opts.untrackedPaths) != 0 {
+		t.Fatalf("untrackedPaths = %v, want none by default", opts.untrackedPaths)
+	}
 	if !opts.verbose {
 		t.Fatal("verbose = false, want true")
 	}
@@ -121,21 +124,48 @@ func TestBranchReviewSnapshotPolicyMatchesReviewScope(t *testing.T) {
 		name            string
 		scope           string
 		includeUnstaged bool
+		untrackedPaths  []string
 		want            model.ReviewSnapshotMode
 	}{
 		{name: "branch ignores local state", scope: commands.ReviewScopeBranch, includeUnstaged: true, want: model.ReviewSnapshotHead},
 		{name: "worktree staged only", scope: commands.ReviewScopeWorktree, includeUnstaged: false, want: model.ReviewSnapshotIndex},
-		{name: "worktree tracked state", scope: commands.ReviewScopeWorktree, includeUnstaged: true, want: model.ReviewSnapshotTrackedWorktree},
+		{name: "worktree excludes untracked state by default", scope: commands.ReviewScopeWorktree, includeUnstaged: true, want: model.ReviewSnapshotTrackedWorktree},
+		{name: "worktree explicitly includes reviewable untracked state", scope: commands.ReviewScopeWorktree, includeUnstaged: true, untrackedPaths: []string{"new.go"}, want: model.ReviewSnapshotWorktree},
 		{name: "local changes staged only", scope: commands.ReviewScopeChanges, includeUnstaged: false, want: model.ReviewSnapshotIndex},
 		{name: "local changes include unstaged", scope: commands.ReviewScopeChanges, includeUnstaged: true, want: model.ReviewSnapshotTrackedWorktree},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := branchReviewSnapshotPolicy(tt.scope, tt.includeUnstaged).Mode; got != tt.want {
+			policy := branchReviewSnapshotPolicy(tt.scope, tt.includeUnstaged, tt.untrackedPaths)
+			if got := policy.Mode; got != tt.want {
 				t.Fatalf("snapshot mode = %q, want %q", got, tt.want)
 			}
+			if tt.want == model.ReviewSnapshotWorktree && len(policy.UntrackedPaths) != 1 {
+				t.Fatalf("snapshot untracked allowlist = %v, want one path", policy.UntrackedPaths)
+			}
 		})
+	}
+}
+
+func TestParseReviewCommandOptionsRequiresExplicitSafeUntrackedMode(t *testing.T) {
+	opts, err := parseReviewCommandOptions([]string{"--scope", "worktree", "--include-untracked", "helper.go", "--include-untracked", "pkg/new.go", "--no-interactive"})
+	if err != nil {
+		t.Fatalf("parseReviewCommandOptions() error = %v", err)
+	}
+	if len(opts.untrackedPaths) != 2 || opts.untrackedPaths[0] != "helper.go" || opts.untrackedPaths[1] != "pkg/new.go" {
+		t.Fatalf("untrackedPaths = %v, want explicit path allowlist", opts.untrackedPaths)
+	}
+
+	for _, args := range [][]string{
+		{"--scope", "branch", "--include-untracked", "helper.go"},
+		{"--scope", "changes", "--include-untracked", "helper.go"},
+		{"--scope", "worktree", "--unstaged=false", "--include-untracked", "helper.go"},
+		{"--project", "--include-untracked", "helper.go"},
+	} {
+		if _, err := parseReviewCommandOptions(args); err == nil {
+			t.Fatalf("parseReviewCommandOptions(%v) succeeded, want unsafe-mode error", args)
+		}
 	}
 }
 

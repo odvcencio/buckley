@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -8,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"m31labs.dev/buckley/pkg/diffsignal"
 	"m31labs.dev/buckley/pkg/model"
 	"m31labs.dev/buckley/pkg/oneshot"
 	"m31labs.dev/buckley/pkg/rlm"
@@ -16,7 +18,7 @@ import (
 func TestDefaultBranchContextOptions(t *testing.T) {
 	opts := DefaultBranchContextOptions()
 
-	assert.Equal(t, 200_000, opts.MaxDiffBytes)
+	assert.Equal(t, diffsignal.ReviewDiffBudget, opts.MaxDiffBytes)
 	assert.True(t, opts.IncludeUnstaged)
 	assert.True(t, opts.IncludeAgents)
 	assert.Empty(t, opts.BaseBranch)
@@ -1203,6 +1205,146 @@ func TestWorktreeScopeIncludesStagedChanges(t *testing.T) {
 	prompt := BuildBranchPrompt(ctx)
 	if !strings.Contains(prompt, "Worktree Changes (staged only; unstaged excluded)") {
 		t.Fatalf("worktree prompt did not disclose staged-only evidence:\n%s", prompt)
+	}
+}
+
+func TestWorktreeScopeIncludesReviewableUntrackedSource(t *testing.T) {
+	dir := t.TempDir()
+	gitInCmd(t, dir, "init", "-q")
+	for path, content := range map[string]string{
+		"go.mod":     "module example.test/worktree-context\n\ngo 1.24\n",
+		"compile.go": "package snapshot\n\nfunc Value() int { return untrackedValue() }\n",
+		".gitignore": "ignored.go\n",
+	} {
+		if err := os.WriteFile(filepath.Join(dir, path), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	gitInCmd(t, dir, "add", ".")
+	gitInCmd(t, dir, "commit", "-m", "initial")
+
+	untrackedSource := "package snapshot\n\nfunc untrackedValue() int { return 42 }\n"
+	for path, content := range map[string][]byte{
+		"helper.go":             []byte(untrackedSource),
+		"ignored.go":            []byte("package snapshot\nfunc untrackedValue() int { return 0 }\n"),
+		".env":                  []byte("TOKEN=must-not-leak\n"),
+		".env.production.local": []byte("TOKEN=production-must-not-leak\n"),
+		"asset.bin":             {0xff, 0x00, 0x01},
+		"AGENTS.md":             []byte("untracked instructions must not leak\n"),
+		"credentials.json":      []byte(`{"token":"must-not-leak"}`),
+		"credentials.txt":       []byte("plaintext-credentials-must-not-leak\n"),
+		".git-credentials":      []byte("https://user:secret@example.test\n"),
+		"control.go":            []byte("package snapshot\n// \x1b[31mterminal control\n"),
+		"invalid.go":            {0xff, 0xfe, 'g', 'o'},
+	} {
+		if err := os.WriteFile(filepath.Join(dir, path), content, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	snapshot, err := model.CaptureReviewSnapshot(context.Background(), dir, model.ReviewSnapshotPolicy{
+		Mode:           model.ReviewSnapshotWorktree,
+		UntrackedPaths: []string{"helper.go"},
+	})
+	if err != nil {
+		t.Fatalf("CaptureReviewSnapshot: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "helper.go"), []byte("package snapshot\n\nfunc untrackedValue() int { return 99 }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+
+	ctx, _, err := AssembleBranchContext(BranchContextOptions{
+		MaxDiffBytes:      20_000,
+		IncludeUnstaged:   true,
+		UntrackedPaths:    []string{"helper.go"},
+		BaseBranch:        "HEAD",
+		Scope:             ReviewScopeWorktree,
+		CapturedUntracked: snapshot.UntrackedFiles(),
+	})
+	if err != nil {
+		t.Fatalf("AssembleBranchContext: %v", err)
+	}
+	if !ctx.IncludesUntracked {
+		t.Fatal("worktree context did not disclose reviewable untracked state")
+	}
+	if len(ctx.Files) != 1 || ctx.Files[0] != (FileChange{Status: "A", Path: "helper.go"}) {
+		t.Fatalf("worktree file inventory = %#v, want only untracked helper.go", ctx.Files)
+	}
+	if !strings.Contains(ctx.Unstaged, "helper.go") || !strings.Contains(ctx.Unstaged, "untrackedValue") {
+		t.Fatalf("worktree diff omitted untracked source:\n%s", ctx.Unstaged)
+	}
+	if !strings.Contains(ctx.Unstaged, "return 42") || strings.Contains(ctx.Unstaged, "return 99") {
+		t.Fatalf("worktree context diverged from the immutable untracked snapshot:\n%s", ctx.Unstaged)
+	}
+	if ctx.Stats.Files != 1 || ctx.Stats.Insertions != 3 || ctx.Stats.Deletions != 0 {
+		t.Fatalf("worktree stats omitted untracked source: %#v", ctx.Stats)
+	}
+	prompt := BuildBranchPrompt(ctx)
+	if !strings.Contains(prompt, "Included Local State**: explicitly opted-in filtered untracked text files") {
+		t.Fatalf("worktree prompt did not disclose untracked source inclusion:\n%s", prompt)
+	}
+	for _, forbidden := range []string{"ignored.go", "TOKEN=must-not-leak", "production-must-not-leak", "plaintext-credentials-must-not-leak", "user:secret", "terminal control", "invalid.go", "asset.bin", "untracked instructions must not leak", "credentials.json"} {
+		if strings.Contains(prompt, forbidden) {
+			t.Fatalf("worktree context exposed excluded untracked content %q:\n%s", forbidden, prompt)
+		}
+	}
+}
+
+func TestWorktreeScopeExcludesUntrackedTextByDefault(t *testing.T) {
+	dir := t.TempDir()
+	gitInCmd(t, dir, "init", "-q")
+	if err := os.WriteFile(filepath.Join(dir, "tracked.go"), []byte("package snapshot\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitInCmd(t, dir, "add", "tracked.go")
+	gitInCmd(t, dir, "commit", "-m", "initial")
+	if err := os.MkdirAll(filepath.Join(dir, "config"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const secret = "database_password: ordinary-name-secret\n"
+	if err := os.WriteFile(filepath.Join(dir, "config", "local.yaml"), []byte(secret), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+
+	ctx, _, err := AssembleBranchContext(BranchContextOptions{
+		MaxDiffBytes:    20_000,
+		IncludeUnstaged: true,
+		BaseBranch:      "HEAD",
+		Scope:           ReviewScopeWorktree,
+	})
+	if err != nil {
+		t.Fatalf("AssembleBranchContext: %v", err)
+	}
+	if ctx.IncludesUntracked {
+		t.Fatal("worktree context included untracked input without explicit opt-in")
+	}
+	prompt := BuildBranchPrompt(ctx)
+	if strings.Contains(prompt, "local.yaml") || strings.Contains(prompt, "ordinary-name-secret") {
+		t.Fatalf("default worktree context exposed untracked secret:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "Excluded Local State**: untracked files") {
+		t.Fatalf("default worktree prompt did not disclose untracked exclusion:\n%s", prompt)
+	}
+}
+
+func TestDetectBaseBranchPrefersRemoteTrackingBranch(t *testing.T) {
+	dir := t.TempDir()
+	gitInCmd(t, dir, "init", "-q", "-b", "main")
+	if err := os.WriteFile(filepath.Join(dir, "base.txt"), []byte("base\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitInCmd(t, dir, "add", "base.txt")
+	gitInCmd(t, dir, "commit", "-m", "base")
+	gitInCmd(t, dir, "update-ref", "refs/remotes/origin/main", "HEAD")
+	if err := os.WriteFile(filepath.Join(dir, "local.txt"), []byte("stale local branch moved\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitInCmd(t, dir, "add", "local.txt")
+	gitInCmd(t, dir, "commit", "-m", "move local main")
+
+	if got := detectBaseBranch(dir); got != "origin/main" {
+		t.Fatalf("detectBaseBranch() = %q, want origin/main", got)
 	}
 }
 
