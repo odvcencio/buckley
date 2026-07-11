@@ -7,12 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [1.7.0] - 2026-07-10
+## [2.0.0] - 2026-07-10
+
+### Breaking
+- Removed the legacy import-path mirrors under `pkg/buckley/ui/{filepicker,scrollback,shellmode,viewmodel,widgets}`. Consumers of retained UI surfaces must migrate to the canonical `pkg/ui/...` packages.
+- Removed `pkg/ui/shellmode` and pruned obsolete exported helpers from the remaining `pkg/ui` packages as the terminal implementation was consolidated. External UI integrations must migrate to the current `pkg/ui/terminal`, `pkg/ui/tui`, and retained component APIs, or remain on v1.6.1 while migrating.
 
 ### Added
 - Filesystem-discovered agent profiles, skills, named subagents, scoped tool tiers, and invocation previews.
 - Project chat-check suites, artifacts, JUnit reports, health checks, and eval scenario inspection.
 - JSON previews for governed agent runs and richer project/agent diagnostics.
+- New top-level `doctor`, `info`, and `skills` inspection surfaces, plus expanded `agent init`, `agent list`, `agent info`, `agent subagent`, and `agent run` workflows.
 
 ### Changed
 - Split the one-shot commit, PR, and review flows into focused command surfaces with governed Codex and API backends.
@@ -149,8 +154,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Telemetry is local-only by default.
 - Plugin discovery limited to local paths only.
 
-[Unreleased]: https://github.com/odvcencio/buckley/compare/v1.7.0...HEAD
-[1.7.0]: https://github.com/odvcencio/buckley/compare/v1.6.1...v1.7.0
+[Unreleased]: https://github.com/odvcencio/buckley/compare/v2.0.0...HEAD
+[2.0.0]: https://github.com/odvcencio/buckley/compare/v1.6.1...v2.0.0
 [1.6.1]: https://github.com/odvcencio/buckley/compare/v1.6.0...v1.6.1
 [1.6.0]: https://github.com/odvcencio/buckley/compare/v1.5.0...v1.6.0
 [1.5.0]: https://github.com/odvcencio/buckley/compare/v1.4.1...v1.5.0
