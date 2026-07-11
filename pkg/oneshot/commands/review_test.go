@@ -478,6 +478,7 @@ func TestReviewPRRuntimeAcceptsExactChangelogDocumentationLedger(t *testing.T) {
 	def := ReviewPRDef{
 		ChangedFiles: []string{"CHANGELOG.md"},
 		CIStatus:     "passing (1/1)",
+		CIProvenance: prCISourceBase,
 	}
 	result, err := def.ParseResult(`## Grade: A
 
@@ -608,7 +609,7 @@ func TestApprovalReviewsRequireIndependentCritic(t *testing.T) {
 	assert.Contains(t, branchCriticPrompt, approval)
 	assert.Contains(t, branchCriticPrompt, "complete machine-validated review becomes the final result")
 
-	pr := ReviewPRDef{ChangedFiles: []string{"ratchet.go"}, CIStatus: "passing (1/1)"}
+	pr := ReviewPRDef{ChangedFiles: []string{"ratchet.go"}, CIStatus: "passing (1/1)", CIProvenance: prCISourceHead}
 	prResult, err := pr.ParseResult(approval)
 	assert.NoError(t, err)
 	assert.NoError(t, pr.ValidateResult(prResult))
@@ -799,6 +800,7 @@ func TestReviewPRDefValidateResultAcceptsCompleteApproval(t *testing.T) {
 	def := ReviewPRDef{
 		ChangedFiles:                []string{"ratchet.go", "skips.go"},
 		CIStatus:                    "passing (22/22)",
+		CIProvenance:                prCISourceHead,
 		RequiresFeedbackDisposition: true,
 		RequiredFeedbackIDs:         []string{"thread:PRRT_1"},
 	}
@@ -838,7 +840,7 @@ None.
 }
 
 func TestReviewCoverageLedgerUsesNormalizedExactPaths(t *testing.T) {
-	def := ReviewPRDef{ChangedFiles: []string{"pkg/ratchet.go"}, CIStatus: "passing (1/1)"}
+	def := ReviewPRDef{ChangedFiles: []string{"pkg/ratchet.go"}, CIStatus: "passing (1/1)", CIProvenance: prCISourceHead}
 
 	valid := completeReviewWithCoverage("- **File**: `./pkg\\ratchet.go` — reviewed the exact changed file and its paired bound.\n" +
 		"- **Feedback disposition**: `NONE_SUPPLIED` — no prior feedback was supplied.\n" +
@@ -1027,10 +1029,25 @@ func TestReviewPRApprovalRequiresAuthoritativePassingRemoteCI(t *testing.T) {
 		"- **Feedback disposition**: `NONE_SUPPLIED` — no prior feedback was supplied.\n" +
 		"- **Verification**: named remote checks passed.")
 
-	valid := ReviewPRDef{ChangedFiles: []string{"ratchet.go"}, CIStatus: "passing (3/3)"}
+	valid := ReviewPRDef{ChangedFiles: []string{"ratchet.go"}, CIStatus: "passing (3/3)", CIProvenance: prCISourceHead}
 	result, err := valid.ParseResult(base)
 	assert.NoError(t, err)
 	assert.NoError(t, valid.ValidateResult(result))
+
+	documentationBase := ReviewPRDef{ChangedFiles: []string{"README.md"}, CIStatus: "passing (3/3)", CIProvenance: prCISourceBase}
+	result, err = documentationBase.ParseResult(strings.ReplaceAll(base, "ratchet.go", "README.md"))
+	assert.NoError(t, err)
+	assert.NoError(t, documentationBase.ValidateResult(result))
+
+	sourceBase := ReviewPRDef{ChangedFiles: []string{"ratchet.go"}, CIStatus: "passing (3/3)", CIProvenance: prCISourceBase}
+	result, err = sourceBase.ParseResult(base)
+	assert.NoError(t, err)
+	assert.ErrorContains(t, sourceBase.ValidateResult(result), "documentation-only approval")
+
+	missingProvenance := ReviewPRDef{ChangedFiles: []string{"ratchet.go"}, CIStatus: "passing (3/3)"}
+	result, err = missingProvenance.ParseResult(base)
+	assert.NoError(t, err)
+	assert.ErrorContains(t, missingProvenance.ValidateResult(result), "explicit remote CI provenance")
 
 	for _, ciStatus := range []string{
 		"",
@@ -1061,6 +1078,7 @@ func TestReviewFeedbackLedgerRequiresExactPerIDDisposition(t *testing.T) {
 	def := ReviewPRDef{
 		ChangedFiles:                []string{"ratchet.go"},
 		CIStatus:                    "passing (2/2)",
+		CIProvenance:                prCISourceHead,
 		RequiresFeedbackDisposition: true,
 		RequiredFeedbackIDs:         []string{"thread:PRRT_1", "review:123"},
 	}
@@ -1103,6 +1121,7 @@ func TestReviewFeedbackLedgerUnresolvedBlocksOnlyApproval(t *testing.T) {
 	def := ReviewPRDef{
 		ChangedFiles:                []string{"ratchet.go"},
 		CIStatus:                    "passing (1/1)",
+		CIProvenance:                prCISourceHead,
 		RequiresFeedbackDisposition: true,
 		RequiredFeedbackIDs:         []string{"thread:PRRT_1"},
 	}
