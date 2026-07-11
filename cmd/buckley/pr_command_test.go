@@ -155,6 +155,7 @@ func TestResolvePRBaseRangeFetchesStackedBaseAndExcludesPriorHistory(t *testing.
 	}
 	runGit(t, feature, "add", "focused.go")
 	runGit(t, feature, "commit", "-m", "fix trailing extra ownership")
+	featureHead := runGitOutputForPushTest(t, feature, "rev-parse", "HEAD")
 
 	// Advance the remote base after the feature clone. Resolution must fetch
 	// this new commit while retaining the original stack point as merge-base.
@@ -177,9 +178,20 @@ func TestResolvePRBaseRangeFetchesStackedBaseAndExcludesPriorHistory(t *testing.
 	if resolved.MergeBase != stackBase {
 		t.Fatalf("merge base = %s, want stack point %s", resolved.MergeBase, stackBase)
 	}
-	if resolved.Range != stackBase+"..HEAD" {
-		t.Fatalf("range = %q, want %q", resolved.Range, stackBase+"..HEAD")
+	if resolved.HeadCommit != featureHead {
+		t.Fatalf("head commit = %s, want resolved feature head %s", resolved.HeadCommit, featureHead)
 	}
+	if resolved.Range != stackBase+".."+featureHead {
+		t.Fatalf("range = %q, want %q", resolved.Range, stackBase+".."+featureHead)
+	}
+
+	// Move symbolic HEAD after resolution. All three context gathers must stay
+	// pinned to featureHead rather than observing this later commit.
+	if err := os.WriteFile(filepath.Join(feature, "later.go"), []byte("package later\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, feature, "add", "later.go")
+	runGit(t, feature, "commit", "-m", "later unrelated local commit")
 
 	def := commands.PRDefinition{
 		BaseBranch:  resolved.Branch,
@@ -196,5 +208,8 @@ func TestResolvePRBaseRangeFetchesStackedBaseAndExcludesPriorHistory(t *testing.
 	}
 	if strings.Contains(prompt, "land prior roadmap") || strings.Contains(prompt, "Closes #219") || strings.Contains(prompt, "advance stacked base") {
 		t.Fatalf("prompt leaked base history:\n%s", prompt)
+	}
+	if strings.Contains(prompt, "later unrelated local commit") || strings.Contains(prompt, "later.go") {
+		t.Fatalf("prompt moved with symbolic HEAD after range resolution:\n%s", prompt)
 	}
 }

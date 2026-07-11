@@ -18,7 +18,7 @@ type PRDefinition struct {
 	// to the model for provenance but is not itself used as the diff boundary.
 	BaseCommit string
 
-	// CommitRange is the immutable merge-base..HEAD range resolved by the CLI.
+	// CommitRange is the immutable merge-base..head-SHA range resolved by the CLI.
 	// When set, all Git context sources use it instead of a mutable branch ref.
 	CommitRange string
 }

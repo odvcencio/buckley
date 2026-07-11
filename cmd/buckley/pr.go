@@ -48,10 +48,11 @@ type prRunResult struct {
 }
 
 type prBaseRange struct {
-	Branch    string
-	Commit    string
-	MergeBase string
-	Range     string
+	Branch     string
+	Commit     string
+	MergeBase  string
+	HeadCommit string
+	Range      string
 }
 
 func parsePRCommandOptions(args []string) (prCommandOptions, error) {
@@ -218,8 +219,8 @@ func runPRGeneration(ctx context.Context, framework *oneshot.Framework, baseBran
 }
 
 // resolvePRBaseRange fetches the selected base branch, resolves it to an
-// immutable commit, then computes the exact merge-base..HEAD range. PR context
-// must never be assembled from a stale local branch or a moving remote ref.
+// immutable commit, then pins HEAD and computes the exact merge-base..head range.
+// PR context must never be assembled from stale or moving refs.
 func resolvePRBaseRange(ctx context.Context, baseFlag string) (prBaseRange, error) {
 	_, baseBranch := detectPRBranches(baseFlag)
 	remote := os.Getenv("BUCKLEY_REMOTE_NAME")
@@ -256,16 +257,21 @@ func resolvePRBaseRange(ctx context.Context, baseFlag string) (prBaseRange, erro
 	if err != nil {
 		return prBaseRange{}, fmt.Errorf("resolve base %q: %w", resolvedRef, err)
 	}
-	mergeBase, err := prGitOutput(ctx, "merge-base", baseCommit, "HEAD")
+	headCommit, err := prGitOutput(ctx, "rev-parse", "--verify", "HEAD^{commit}")
 	if err != nil {
-		return prBaseRange{}, fmt.Errorf("merge-base %s and HEAD: %w", baseCommit, err)
+		return prBaseRange{}, fmt.Errorf("resolve HEAD: %w", err)
+	}
+	mergeBase, err := prGitOutput(ctx, "merge-base", baseCommit, headCommit)
+	if err != nil {
+		return prBaseRange{}, fmt.Errorf("merge-base %s and %s: %w", baseCommit, headCommit, err)
 	}
 
 	return prBaseRange{
-		Branch:    baseBranch,
-		Commit:    baseCommit,
-		MergeBase: mergeBase,
-		Range:     mergeBase + "..HEAD",
+		Branch:     baseBranch,
+		Commit:     baseCommit,
+		MergeBase:  mergeBase,
+		HeadCommit: headCommit,
+		Range:      mergeBase + ".." + headCommit,
 	}, nil
 }
 
