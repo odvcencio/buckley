@@ -112,8 +112,27 @@ type ReviewPRDef struct {
 
 func (ReviewPRDef) Name() string { return "review-pr" }
 
-func (ReviewPRDef) SystemPrompt() string {
-	return prompts.ReviewPRPrompt(time.Now())
+func (d ReviewPRDef) SystemPrompt() string {
+	return prompts.ReviewPRPrompt(time.Now()) + reviewFeedbackOutputContract(d.RequiredFeedbackIDs)
+}
+
+func reviewFeedbackOutputContract(requiredIDs []string) string {
+	var sb strings.Builder
+	sb.WriteString("\n\nEXACT FEEDBACK OUTPUT CONTRACT FOR THIS REVIEW:\n")
+	if len(requiredIDs) == 0 {
+		sb.WriteString("- Coverage must contain this literal line and no Feedback entries:\n")
+		sb.WriteString("  - **Feedback disposition**: `NONE_SUPPLIED` — <evidence>\n")
+		return sb.String()
+	}
+	sb.WriteString("- Coverage must contain this literal line; do not use NONE_SUPPLIED:\n")
+	sb.WriteString("  - **Feedback disposition**: `DISPOSITIONED` — <evidence>\n")
+	sb.WriteString("- Coverage must contain exactly these per-ID line shapes:\n")
+	for _, id := range requiredIDs {
+		sb.WriteString("  - **Feedback**: `")
+		sb.WriteString(id)
+		sb.WriteString("` — `ADDRESSED|DISPUTED|UNRESOLVED` — <concrete evidence>\n")
+	}
+	return sb.String()
 }
 
 func (ReviewPRDef) AllowedTools() []string {
