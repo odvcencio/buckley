@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -204,8 +205,8 @@ func (d PRDefinition) BuildPrompt(ctx *oneshot.Context) string {
 }
 
 func (PRDefinition) Validate(result json.RawMessage) error {
-	var pr PRResult
-	if err := json.Unmarshal(result, &pr); err != nil {
+	pr, err := decodePRResult(result)
+	if err != nil {
 		return fmt.Errorf("unmarshal: %w", err)
 	}
 	if strings.TrimSpace(pr.Title) == "" {
@@ -227,9 +228,129 @@ func (PRDefinition) Validate(result json.RawMessage) error {
 }
 
 func (PRDefinition) Unmarshal(result json.RawMessage) (any, error) {
-	var pr PRResult
-	if err := json.Unmarshal(result, &pr); err != nil {
+	pr, err := decodePRResult(result)
+	if err != nil {
 		return nil, fmt.Errorf("unmarshal: %w", err)
 	}
-	return &pr, nil
+	return pr, nil
+}
+
+// decodePRResult tolerates the one provider deviation observed in production:
+// changes may arrive as a single string despite the tool schema requiring an
+// array. Every other field retains its declared JSON type.
+func decodePRResult(result json.RawMessage) (*PRResult, error) {
+	var wire struct {
+		Title         string          `json:"title"`
+		Summary       string          `json:"summary"`
+		Changes       json.RawMessage `json:"changes"`
+		Testing       []string        `json:"testing"`
+		Breaking      bool            `json:"breaking,omitempty"`
+		Issues        []string        `json:"issues,omitempty"`
+		ReviewersHint string          `json:"reviewers_hint,omitempty"`
+	}
+	if err := json.Unmarshal(result, &wire); err != nil {
+		return nil, err
+	}
+
+	changes, err := decodePRChanges(wire.Changes)
+	if err != nil {
+		return nil, fmt.Errorf("changes: %w", err)
+	}
+	return &PRResult{
+		Title:         wire.Title,
+		Summary:       wire.Summary,
+		Changes:       changes,
+		Testing:       wire.Testing,
+		Breaking:      wire.Breaking,
+		Issues:        wire.Issues,
+		ReviewersHint: wire.ReviewersHint,
+	}, nil
+}
+
+func decodePRChanges(raw json.RawMessage) ([]string, error) {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
+		return nil, nil
+	}
+	if raw[0] == '[' {
+		var changes []string
+		if err := json.Unmarshal(raw, &changes); err != nil {
+			return nil, err
+		}
+		return changes, nil
+	}
+	if raw[0] != '"' {
+		return nil, fmt.Errorf("must be a string or array of strings")
+	}
+	var changes string
+	if err := json.Unmarshal(raw, &changes); err != nil {
+		return nil, err
+	}
+	return normalizePRChanges(changes), nil
+}
+
+func normalizePRChanges(changes string) []string {
+	changes = strings.TrimSpace(strings.ReplaceAll(changes, "\r\n", "\n"))
+	if changes == "" {
+		return nil
+	}
+
+	var lines []string
+	hasBullets := false
+	for _, line := range strings.Split(changes, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if _, ok := trimPRChangeBullet(line); ok {
+			hasBullets = true
+		}
+		lines = append(lines, line)
+	}
+	if len(lines) == 1 {
+		if item, ok := trimPRChangeBullet(lines[0]); ok && item != "" {
+			return []string{item}
+		}
+		return []string{changes}
+	}
+	if !hasBullets {
+		return lines
+	}
+
+	items := make([]string, 0, len(lines))
+	for _, line := range lines {
+		if item, ok := trimPRChangeBullet(line); ok {
+			if item != "" {
+				items = append(items, item)
+			}
+			continue
+		}
+		if len(items) == 0 {
+			items = append(items, line)
+		} else {
+			items[len(items)-1] += " " + line
+		}
+	}
+	return items
+}
+
+func trimPRChangeBullet(line string) (string, bool) {
+	for _, prefix := range []string{"- ", "* ", "• "} {
+		if strings.HasPrefix(line, prefix) {
+			return strings.TrimSpace(strings.TrimPrefix(line, prefix)), true
+		}
+	}
+	for i, r := range line {
+		if r >= '0' && r <= '9' {
+			continue
+		}
+		if i > 0 && (r == '.' || r == ')') {
+			rest := line[i+1:]
+			if strings.HasPrefix(rest, " ") {
+				return strings.TrimSpace(rest), true
+			}
+		}
+		break
+	}
+	return line, false
 }
