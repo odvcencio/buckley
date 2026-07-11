@@ -175,6 +175,7 @@ func runPRReview(ctx context.Context, prRef string, framework *oneshot.Framework
 		ChangedFiles:                prCtx.Files,
 		ContextIncomplete:           prCtx.HasIncompleteContext(),
 		CIStatus:                    prCtx.PR.CIStatus,
+		CIProvenance:                prCtx.CIProvenance,
 		RequiresFeedbackDisposition: prCtx.HasReviewFeedback(),
 		RequiredFeedbackIDs:         prCtx.RequiredFeedbackIDs(),
 	}

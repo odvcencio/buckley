@@ -86,6 +86,224 @@ func TestNormalizePRCommandResult_RejectsOtherFailures(t *testing.T) {
 	}
 }
 
+func TestSelectPRCIEvidence_DocumentationOnlyInheritsImmutableBaseChecks(t *testing.T) {
+	pr := &PRInfo{
+		Host:       "github.example",
+		Repository: "m31labs/buckley",
+		BaseSHA:    "base-sha",
+		HeadSHA:    "head-sha",
+	}
+	tests := []struct {
+		name           string
+		checkResponse  string
+		statusResponse string
+		want           string
+	}{
+		{
+			name: "passing across every page",
+			checkResponse: `[{"total_count":2,"check_runs":[{"id":1,"name":"unit","status":"completed","conclusion":"success"}]},` +
+				`{"total_count":2,"check_runs":[{"id":2,"name":"optional","status":"completed","conclusion":"neutral"}]}]`,
+			statusResponse: `[{"state":"pending","total_count":0,"statuses":[]}]`,
+			want:           "passing (2/2)",
+		},
+		{
+			name:           "failing check run",
+			checkResponse:  `[{"total_count":1,"check_runs":[{"id":1,"name":"unit","status":"completed","conclusion":"failure"}]}]`,
+			statusResponse: `[{"state":"pending","total_count":0,"statuses":[]}]`,
+			want:           "failing (1/1)",
+		},
+		{
+			name:           "pending check run",
+			checkResponse:  `[{"total_count":1,"check_runs":[{"id":1,"name":"unit","status":"in_progress","conclusion":""}]}]`,
+			statusResponse: `[{"state":"pending","total_count":0,"statuses":[]}]`,
+			want:           "pending (1/1)",
+		},
+		{
+			name:           "legacy status-only failure",
+			checkResponse:  `[{"total_count":0,"check_runs":[]}]`,
+			statusResponse: `[{"state":"failure","total_count":1,"statuses":[{"id":3,"context":"legacy/ci","state":"failure"}]}]`,
+			want:           "failing (1/1)",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			calls := 0
+			run := func(name string, args ...string) ([]byte, error) {
+				calls++
+				if name != "gh" || !hasPRArgPair(args, "--hostname", "github.example") {
+					return nil, fmt.Errorf("unexpected command: %s %s", name, strings.Join(args, " "))
+				}
+				switch {
+				case hasPRArg(args, "repos/m31labs/buckley/commits/base-sha/check-suites?per_page=1"):
+					return []byte(`{"total_count":2}`), nil
+				case hasPRArg(args, "repos/m31labs/buckley/commits/base-sha/check-runs?filter=latest&per_page=100"):
+					return []byte(tt.checkResponse), nil
+				case hasPRArg(args, "repos/m31labs/buckley/commits/base-sha/status?per_page=100"):
+					return []byte(tt.statusResponse), nil
+				default:
+					return nil, fmt.Errorf("unexpected endpoint: %s", strings.Join(args, " "))
+				}
+			}
+
+			selection, err := selectPRCIEvidence(run, pr, []string{"CHANGELOG.md", "docs/release.md"}, true, nil)
+			if err != nil {
+				t.Fatalf("selectPRCIEvidence: %v", err)
+			}
+			if calls != 3 {
+				t.Fatalf("base CI evidence calls = %d, want suite preflight, check-runs, and commit status", calls)
+			}
+			if selection.Source != prCISourceBase || selection.Revision != "base-sha" {
+				t.Fatalf("selection provenance = %#v", selection)
+			}
+			if got := summarizePRChecks(selection.Checks); got != tt.want {
+				t.Fatalf("summarizePRChecks = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSelectPRCIEvidence_RejectsGitHubCheckSuiteVisibilityCeiling(t *testing.T) {
+	pr := &PRInfo{Host: "github.com", Repository: "m31labs/buckley", BaseSHA: "base-sha", HeadSHA: "head-sha"}
+	calls := 0
+	run := func(name string, args ...string) ([]byte, error) {
+		calls++
+		if name != "gh" || !hasPRArg(args, "repos/m31labs/buckley/commits/base-sha/check-suites?per_page=1") ||
+			!hasPRArgPair(args, "--hostname", "github.com") {
+			return nil, fmt.Errorf("unexpected command: %s %s", name, strings.Join(args, " "))
+		}
+		return []byte(`{"total_count":1001}`), nil
+	}
+	_, err := selectPRCIEvidence(run, pr, []string{"README.md"}, true, nil)
+	if err == nil || !strings.Contains(err.Error(), "1000 most recent check suites") {
+		t.Fatalf("selectPRCIEvidence error = %v, want visibility ceiling", err)
+	}
+	if calls != 1 {
+		t.Fatalf("CI calls after suite ceiling = %d, want fail before check-run fetch", calls)
+	}
+}
+
+func TestGetCommitStatuses_UsesLatestCombinedContextState(t *testing.T) {
+	run := func(name string, args ...string) ([]byte, error) {
+		if name != "gh" || !hasPRArgPrefix(args, "api", "--paginate", "--slurp") ||
+			!hasPRArg(args, "repos/m31labs/buckley/commits/base-sha/status?per_page=100") ||
+			!hasPRArgPair(args, "--hostname", "github.com") {
+			return nil, fmt.Errorf("unexpected command: %s %s", name, strings.Join(args, " "))
+		}
+		// Preserve raw cardinality while choosing the successful rerun as the
+		// authoritative latest state for this context.
+		return []byte(`[{"state":"success","total_count":2,"statuses":[` +
+			`{"id":8,"context":"legacy/ci","state":"failure","created_at":"2026-07-10T10:00:00Z"},` +
+			`{"id":9,"context":"legacy/ci","state":"success","created_at":"2026-07-10T11:00:00Z"}]}]`), nil
+	}
+	checks, err := getCommitStatuses(run, "github.com", "m31labs/buckley", "base-sha")
+	if err != nil {
+		t.Fatalf("getCommitStatuses: %v", err)
+	}
+	if got := summarizePRChecks(checks); got != "passing (1/1)" {
+		t.Fatalf("successful latest rerun summarized as %q", got)
+	}
+	if len(checks) != 1 {
+		t.Fatalf("latest contexts = %#v, want one collapsed rerun", checks)
+	}
+}
+
+func TestSelectPRCIEvidence_HeadChecksAndMixedDiffNeverUseBase(t *testing.T) {
+	pr := &PRInfo{
+		Host:       "github.example",
+		Repository: "m31labs/buckley",
+		BaseSHA:    "base-sha",
+		HeadSHA:    "head-sha",
+	}
+	run := func(name string, args ...string) ([]byte, error) {
+		return nil, fmt.Errorf("base check-runs must not be fetched: %s %s", name, strings.Join(args, " "))
+	}
+
+	t.Run("head checks take precedence", func(t *testing.T) {
+		head := []PRCheck{{Name: "docs", Status: "SUCCESS"}}
+		selection, err := selectPRCIEvidence(run, pr, []string{"README.md"}, true, head)
+		if err != nil {
+			t.Fatalf("selectPRCIEvidence: %v", err)
+		}
+		if selection.Source != prCISourceHead || selection.Revision != "head-sha" || len(selection.Checks) != 1 {
+			t.Fatalf("selection = %#v, want head checks", selection)
+		}
+	})
+
+	t.Run("mixed diff rejects fallback", func(t *testing.T) {
+		selection, err := selectPRCIEvidence(run, pr, []string{"README.md", "main.go"}, true, nil)
+		if err != nil {
+			t.Fatalf("selectPRCIEvidence: %v", err)
+		}
+		if selection.Source != prCISourceHead || selection.Revision != "head-sha" || len(selection.Checks) != 0 {
+			t.Fatalf("selection = %#v, want empty head evidence", selection)
+		}
+	})
+
+	t.Run("incomplete file pagination rejects fallback", func(t *testing.T) {
+		selection, err := selectPRCIEvidence(run, pr, []string{"README.md"}, false, nil)
+		if err != nil {
+			t.Fatalf("selectPRCIEvidence: %v", err)
+		}
+		if selection.Source != prCISourceHead {
+			t.Fatalf("selection = %#v, want empty head evidence", selection)
+		}
+	})
+}
+
+func TestGetCommitCheckRuns_RejectsPaginationCardinalityDrift(t *testing.T) {
+	tests := []struct {
+		name     string
+		response string
+		want     string
+	}{
+		{
+			name:     "missing page",
+			response: `[{"total_count":2,"check_runs":[{"id":1,"name":"unit","status":"completed","conclusion":"success"}]}]`,
+			want:     "cardinality mismatch",
+		},
+		{
+			name: "total changes between pages",
+			response: `[{"total_count":2,"check_runs":[{"id":1,"name":"unit"}]},` +
+				`{"total_count":3,"check_runs":[{"id":2,"name":"lint"}]}]`,
+			want: "total_count changed across pages",
+		},
+		{
+			name: "duplicate page",
+			response: `[{"total_count":2,"check_runs":[{"id":1,"name":"unit"}]},` +
+				`{"total_count":2,"check_runs":[{"id":1,"name":"unit"}]}]`,
+			want: "duplicate check-run id 1",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			run := func(string, ...string) ([]byte, error) { return []byte(tt.response), nil }
+			_, err := getCommitCheckRuns(run, "github.com", "m31labs/buckley", "base-sha")
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("getCommitCheckRuns error = %v, want %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestBuildPRPrompt_SurfacesImmutableBaseCIProvenance(t *testing.T) {
+	prompt := BuildPRPrompt(&PRContext{
+		PR: &PRInfo{
+			Number:       219,
+			Title:        "Release notes",
+			CIStatus:     "passing (2/2)",
+			BaseSHA:      "base-sha",
+			HeadSHA:      "head-sha",
+			ChangedFiles: 1,
+		},
+		CIProvenance: prCISourceBase,
+		CIRevision:   "base-sha",
+	})
+	if !strings.Contains(prompt, "**CI Evidence**: immutable base @ base-sha") {
+		t.Fatalf("prompt omitted inherited CI provenance:\n%s", prompt)
+	}
+}
+
 func TestAssemblePRContext_BuildPromptIncludesReviewEvidence(t *testing.T) {
 	diff := oversizedReviewDiff()
 	run := func(name string, args ...string) ([]byte, error) {
@@ -108,11 +326,11 @@ func TestAssemblePRContext_BuildPromptIncludesReviewEvidence(t *testing.T) {
   "deletions": 11,
   "changedFiles": 4
 }`), nil
-		case name == "gh" && matchesPRArgs(args, "pr", "checks", "208", "--json", "state"):
+		case name == "gh" && hasPRArgPrefix(args, "pr", "checks", "208", "--json", "state"):
 			return []byte(`[{"state":"SUCCESS"}]`), nil
-		case name == "gh" && matchesPRArgs(args, "pr", "diff", "208"):
+		case name == "gh" && hasPRArgPrefix(args, "pr", "diff", "208"):
 			return []byte(diff), nil
-		case name == "gh" && matchesPRArgs(args, "pr", "checks", "208", "--json", "name,state"):
+		case name == "gh" && hasPRArgPrefix(args, "pr", "checks", "208", "--json", "name,state"):
 			return []byte(`[{"name":"unit","state":"SUCCESS"}]`), nil
 		case name == "gh" && hasPRArgPrefix(args, "api", "--paginate", "--slurp") && hasPRArg(args, "repos/m31labs/buckley/issues/208/comments?per_page=100"):
 			return []byte(`[[{"id":"IC_top_1","user":{"login":"maintainer"},"body":"Please keep the max ratchet at zero."}]]`), nil
@@ -242,11 +460,11 @@ func TestAssemblePRContext_FallbackAndFetchFailuresAreVisible(t *testing.T) {
 		switch {
 		case name == "gh" && hasPRArgPrefix(args, "pr", "view", "208", "--json") && strings.Contains(args[len(args)-1], "headRefOid"):
 			return []byte(`{"number":208,"title":"Fallback coverage","author":{"login":"author"},"state":"OPEN","url":"https://github.com/m31labs/buckley/pull/208","baseRefName":"main","baseRefOid":"base-sha","headRefName":"topic","headRefOid":"head-sha","reviewDecision":"","additions":1,"deletions":0,"changedFiles":1}`), nil
-		case name == "gh" && matchesPRArgs(args, "pr", "checks", "208", "--json", "state"):
+		case name == "gh" && hasPRArgPrefix(args, "pr", "checks", "208", "--json", "state"):
 			return []byte(`[]`), nil
-		case name == "gh" && matchesPRArgs(args, "pr", "diff", "208"):
+		case name == "gh" && hasPRArgPrefix(args, "pr", "diff", "208"):
 			return []byte("diff --git a/a.go b/a.go\n--- a/a.go\n+++ b/a.go\n@@ -1 +1 @@\n-old\n+new\n"), nil
-		case name == "gh" && matchesPRArgs(args, "pr", "checks", "208", "--json", "name,state"):
+		case name == "gh" && hasPRArgPrefix(args, "pr", "checks", "208", "--json", "name,state"):
 			return nil, errors.New("checks API unavailable")
 		case name == "gh" && hasPRArgPrefix(args, "api", "--paginate", "--slurp") && hasPRArg(args, "repos/m31labs/buckley/issues/208/comments?per_page=100"):
 			return nil, errors.New("comments API unavailable")
@@ -357,11 +575,11 @@ func TestAssemblePRContext_MarksConcurrentHeadPushIncomplete(t *testing.T) {
 				head = "pushed-head"
 			}
 			return []byte(fmt.Sprintf(`{"number":208,"title":"Concurrent push","author":{"login":"author"},"state":"OPEN","url":"https://github.com/m31labs/buckley/pull/208","baseRefName":"main","baseRefOid":"base-sha","headRefName":"topic","headRefOid":%q,"changedFiles":1}`, head)), nil
-		case name == "gh" && matchesPRArgs(args, "pr", "checks", "208", "--json", "state"):
+		case name == "gh" && hasPRArgPrefix(args, "pr", "checks", "208", "--json", "state"):
 			return []byte(`[]`), nil
-		case name == "gh" && matchesPRArgs(args, "pr", "diff", "208"):
+		case name == "gh" && hasPRArgPrefix(args, "pr", "diff", "208"):
 			return []byte("diff --git a/a.go b/a.go\n--- a/a.go\n+++ b/a.go\n@@ -1 +1 @@\n-old\n+new\n"), nil
-		case name == "gh" && matchesPRArgs(args, "pr", "checks", "208", "--json", "name,state"):
+		case name == "gh" && hasPRArgPrefix(args, "pr", "checks", "208", "--json", "name,state"):
 			return []byte(`[]`), nil
 		case name == "gh" && hasPRArgPrefix(args, "api", "--paginate", "--slurp") && hasPRArg(args, "repos/m31labs/buckley/issues/208/comments?per_page=100"):
 			return []byte(`[]`), nil
@@ -442,6 +660,94 @@ func TestRevalidatePRContext_HeadStableCIFailureInvalidatesEvidence(t *testing.T
 	}
 	if strings.Contains(changed, "head revision") {
 		t.Fatalf("fixture head should remain stable, got %q", changed)
+	}
+}
+
+func TestRevalidatePRContext_InheritedBaseCIYieldsToNewHeadChecks(t *testing.T) {
+	ctx := stablePRRevalidationContext()
+	ctx.CIProvenance = prCISourceBase
+	ctx.CIRevision = "base-sha"
+
+	changed, err := revalidatePRContext(ctx, stablePRRevalidationRunner(prRevalidationOutputs{}))
+	if err != nil {
+		t.Fatalf("revalidatePRContext: %v", err)
+	}
+	for _, expected := range []string{
+		`CI provenance "immutable base" -> "pull request head"`,
+		`CI revision "base-sha" -> "head-sha"`,
+	} {
+		if !strings.Contains(changed, expected) {
+			t.Errorf("changed evidence %q missing %q", changed, expected)
+		}
+	}
+}
+
+func TestRevalidatePRContext_StableInheritedBaseCIRemainsSnapshotBound(t *testing.T) {
+	ctx := stablePRRevalidationContext()
+	ctx.Checks = []PRCheck{{Name: "unit", Status: "completed", Conclusion: "success"}}
+	ctx.CIProvenance = prCISourceBase
+	ctx.CIRevision = "base-sha"
+	base := stablePRRevalidationRunner(prRevalidationOutputs{checks: `[]`})
+	baseCheckCalls := 0
+	run := func(name string, args ...string) ([]byte, error) {
+		if name == "gh" && hasPRArg(args, "repos/m31labs/buckley/commits/base-sha/check-suites?per_page=1") {
+			if !hasPRArgPair(args, "--hostname", "github.com") {
+				return nil, fmt.Errorf("base check suites omitted explicit host: %s", strings.Join(args, " "))
+			}
+			return []byte(`{"total_count":1}`), nil
+		}
+		if name == "gh" && hasPRArgPrefix(args, "api", "--paginate", "--slurp") &&
+			hasPRArg(args, "repos/m31labs/buckley/commits/base-sha/check-runs?filter=latest&per_page=100") {
+			baseCheckCalls++
+			if !hasPRArgPair(args, "--hostname", "github.com") {
+				return nil, fmt.Errorf("base check-runs omitted explicit host: %s", strings.Join(args, " "))
+			}
+			return []byte(`[{"total_count":1,"check_runs":[{"id":1,"name":"unit","status":"completed","conclusion":"success"}]}]`), nil
+		}
+		if name == "gh" && hasPRArgPrefix(args, "api", "--paginate", "--slurp") &&
+			hasPRArg(args, "repos/m31labs/buckley/commits/base-sha/status?per_page=100") {
+			if !hasPRArgPair(args, "--hostname", "github.com") {
+				return nil, fmt.Errorf("base commit status omitted explicit host: %s", strings.Join(args, " "))
+			}
+			return []byte(`[{"state":"pending","total_count":0,"statuses":[]}]`), nil
+		}
+		return base(name, args...)
+	}
+
+	changed, err := revalidatePRContext(ctx, run)
+	if err != nil {
+		t.Fatalf("revalidatePRContext: %v", err)
+	}
+	if changed != "" {
+		t.Fatalf("stable inherited base CI changed evidence = %q", changed)
+	}
+	if baseCheckCalls != 1 {
+		t.Fatalf("base check-runs revalidation calls = %d, want 1", baseCheckCalls)
+	}
+}
+
+func TestRevalidatePRContext_InheritedBaseCIFailsClosedOnMetadataDrift(t *testing.T) {
+	ctx := stablePRRevalidationContext()
+	ctx.CIProvenance = prCISourceBase
+	ctx.CIRevision = "base-sha"
+	calls := 0
+	run := func(name string, args ...string) ([]byte, error) {
+		calls++
+		if name != "gh" || !hasPRArgPrefix(args, "pr", "view", "208", "--json") {
+			return nil, fmt.Errorf("unexpected command after metadata drift: %s %s", name, strings.Join(args, " "))
+		}
+		return []byte(`{"number":208,"url":"https://github.com/m31labs/buckley/pull/208","baseRefName":"main","baseRefOid":"moved-base","headRefName":"topic","headRefOid":"head-sha","reviewDecision":"REVIEW_REQUIRED"}`), nil
+	}
+
+	changed, err := revalidatePRContext(ctx, run)
+	if err != nil {
+		t.Fatalf("revalidatePRContext: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("commands after base metadata drift = %d, want metadata-only revalidation", calls)
+	}
+	if !strings.Contains(changed, `base revision "base-sha" -> "moved-base"`) {
+		t.Fatalf("changed evidence = %q", changed)
 	}
 }
 
@@ -635,8 +941,10 @@ func stablePRRevalidationContext() *PRContext {
 			ReviewDecision: "REVIEW_REQUIRED",
 			CIStatus:       "passing (1/1)",
 		},
-		Checks:   []PRCheck{{Name: "unit", Status: "SUCCESS"}},
-		Comments: []PRComment{{ID: "IC_top_1", Author: "maintainer", Body: "Keep the ratchet."}},
+		Checks:       []PRCheck{{Name: "unit", Status: "SUCCESS"}},
+		CIProvenance: prCISourceHead,
+		CIRevision:   "head-sha",
+		Comments:     []PRComment{{ID: "IC_top_1", Author: "maintainer", Body: "Keep the ratchet."}},
 		Reviews: []PRReview{{
 			ID:          "PRR_review_1",
 			Author:      "reviewer",
@@ -795,17 +1103,18 @@ func TestParsePRRef_NumericKeepsCurrentRepository(t *testing.T) {
 
 func TestAssemblePRContext_ChangedFileCardinalityMismatchIsIncomplete(t *testing.T) {
 	run := func(name string, args ...string) ([]byte, error) {
-		if name == "gh" && len(args) > 0 && args[0] == "pr" && hasPRArg(args, "--repo") {
-			t.Errorf("numeric PR reference must keep current-repository behavior: %s", strings.Join(args, " "))
+		if name == "gh" && hasPRArgPrefix(args, "pr") && len(args) > 1 && args[1] != "view" &&
+			!hasPRArgPair(args, "--repo", "github.com/m31labs/buckley") {
+			t.Errorf("post-metadata PR operation was not pinned to resolved repository: %s", strings.Join(args, " "))
 		}
 		switch {
 		case name == "gh" && hasPRArgPrefix(args, "pr", "view", "208", "--json") && strings.Contains(args[len(args)-1], "headRefOid"):
 			return []byte(`{"number":208,"title":"Cardinality","author":{"login":"author"},"state":"OPEN","url":"https://github.com/m31labs/buckley/pull/208","baseRefName":"main","baseRefOid":"base","headRefName":"topic","headRefOid":"head","changedFiles":3}`), nil
-		case name == "gh" && matchesPRArgs(args, "pr", "checks", "208", "--json", "state"):
+		case name == "gh" && hasPRArgPrefix(args, "pr", "checks", "208", "--json", "state"):
 			return []byte(`[]`), nil
-		case name == "gh" && matchesPRArgs(args, "pr", "diff", "208"):
+		case name == "gh" && hasPRArgPrefix(args, "pr", "diff", "208"):
 			return []byte("diff --git a/a.go b/a.go\n"), nil
-		case name == "gh" && matchesPRArgs(args, "pr", "checks", "208", "--json", "name,state"):
+		case name == "gh" && hasPRArgPrefix(args, "pr", "checks", "208", "--json", "name,state"):
 			return []byte(`[]`), nil
 		case name == "gh" && hasPRArgPrefix(args, "api", "--paginate", "--slurp") && hasPRArg(args, "repos/m31labs/buckley/issues/208/comments?per_page=100"):
 			return []byte(`[]`), nil

@@ -105,6 +105,7 @@ type ReviewPRDef struct {
 	ChangedFiles                []string
 	ContextIncomplete           bool
 	CIStatus                    string
+	CIProvenance                string
 	RequiresFeedbackDisposition bool
 	RequiredFeedbackIDs         []string
 }
@@ -139,6 +140,7 @@ func (d ReviewPRDef) ValidateResult(result any) error {
 		ChangedFiles:                d.ChangedFiles,
 		ContextIncomplete:           d.ContextIncomplete,
 		CIStatus:                    d.CIStatus,
+		CIProvenance:                d.CIProvenance,
 		RequiresFeedbackDisposition: d.RequiresFeedbackDisposition,
 		RequiredFeedbackIDs:         d.RequiredFeedbackIDs,
 		RequirePassingRemoteCI:      true,

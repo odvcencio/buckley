@@ -160,6 +160,7 @@ type ReviewValidationOptions struct {
 	ChangedFiles                []string
 	ContextIncomplete           bool
 	CIStatus                    string
+	CIProvenance                string
 	RequiresFeedbackDisposition bool
 	RequiredFeedbackIDs         []string
 	RequirePassingRemoteCI      bool
@@ -250,6 +251,15 @@ func ValidateParsedReview(parsed *ParsedReview, opts ReviewValidationOptions) er
 			ciState := parseRemoteCIState(opts.CIStatus)
 			if ciState != VerificationPass {
 				return fmt.Errorf("an approval requires authoritative remote CI PASS, got %s from %q", ciState, opts.CIStatus)
+			}
+			switch opts.CIProvenance {
+			case prCISourceHead:
+			case prCISourceBase:
+				if !reviewChangedFilesDocumentationOnly(opts.ChangedFiles) {
+					return fmt.Errorf("immutable-base CI can authorize only a documentation-only approval")
+				}
+			default:
+				return fmt.Errorf("an approval requires explicit remote CI provenance, got %q", opts.CIProvenance)
 			}
 		}
 		for _, feedback := range parsed.FeedbackEntries {

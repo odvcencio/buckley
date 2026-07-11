@@ -33,6 +33,14 @@ func trustedExecutableDirectories() []string {
 		candidates = appendGlobDirectories(candidates, filepath.Join(codexHome, "bin", "wsl", "*"))
 		candidates = appendGlobDirectories(candidates, filepath.Join(codexHome, "bin", "*"))
 	}
+	return canonicalTrustedExecutableDirectories(candidates)
+}
+
+// canonicalTrustedExecutableDirectories preserves the explicit candidate
+// priority while removing missing directories and canonical duplicates. The
+// order is security-relevant: both trustedLookPath and the review sandbox PATH
+// must prefer the configured toolchain roots over generic system directories.
+func canonicalTrustedExecutableDirectories(candidates []string) []string {
 	seen := make(map[string]struct{}, len(candidates))
 	result := make([]string, 0, len(candidates))
 	for _, candidate := range candidates {
@@ -51,7 +59,6 @@ func trustedExecutableDirectories() []string {
 		seen[canonical] = struct{}{}
 		result = append(result, canonical)
 	}
-	sort.Strings(result)
 	return result
 }
 
