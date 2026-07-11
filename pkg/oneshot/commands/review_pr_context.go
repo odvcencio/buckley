@@ -153,6 +153,10 @@ func assemblePRContext(prRef string, deps prContextDependencies) (*PRContext, *t
 		return nil, nil, fmt.Errorf("failed to get PR info: %w", err)
 	}
 	prCtx.PR = pr
+	target.Number = pr.Number
+	target.Host = firstPRString(target.Host, pr.Host)
+	target.Repository = firstPRString(target.Repository, pr.Repository)
+	prCtx.target = target
 	metadata := pr.Title + pr.Body + pr.Host + pr.Repository + pr.HeadSHA + pr.BaseSHA + pr.ReviewDecision
 	audit.Add("PR metadata", reviewEstimateTokens(metadata))
 	prCtx.addStatus("PR metadata", "complete", "immutable repository and base/head revisions captured", false)
@@ -172,13 +176,7 @@ func assemblePRContext(prRef string, deps prContextDependencies) (*PRContext, *t
 
 	headChecks, headChecksErr := getPRChecks(deps.run, target)
 
-	feedbackTarget := target
-	if pr != nil {
-		feedbackTarget.Number = pr.Number
-		feedbackTarget.Host = firstPRString(feedbackTarget.Host, pr.Host)
-		feedbackTarget.Repository = firstPRString(feedbackTarget.Repository, pr.Repository)
-	}
-	comments, err := getPRComments(deps.run, feedbackTarget)
+	comments, err := getPRComments(deps.run, target)
 	if err == nil {
 		prCtx.Comments = comments
 		audit.Add("top-level comments", reviewEstimateTokens(prCommentBodies(comments)))
@@ -187,7 +185,7 @@ func assemblePRContext(prRef string, deps prContextDependencies) (*PRContext, *t
 		recordPRContextFailure(prCtx, audit, "Top-level comments", err)
 	}
 
-	reviews, err := getPRReviews(deps.run, feedbackTarget)
+	reviews, err := getPRReviews(deps.run, target)
 	if err == nil {
 		prCtx.Reviews = reviews
 		audit.Add("submitted reviews", reviewEstimateTokens(prReviewBodies(reviews)))

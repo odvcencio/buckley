@@ -299,11 +299,11 @@ func TestAssemblePRContext_BuildPromptIncludesReviewEvidence(t *testing.T) {
   "deletions": 11,
   "changedFiles": 4
 }`), nil
-		case name == "gh" && matchesPRArgs(args, "pr", "checks", "208", "--json", "state"):
+		case name == "gh" && hasPRArgPrefix(args, "pr", "checks", "208", "--json", "state"):
 			return []byte(`[{"state":"SUCCESS"}]`), nil
-		case name == "gh" && matchesPRArgs(args, "pr", "diff", "208"):
+		case name == "gh" && hasPRArgPrefix(args, "pr", "diff", "208"):
 			return []byte(diff), nil
-		case name == "gh" && matchesPRArgs(args, "pr", "checks", "208", "--json", "name,state"):
+		case name == "gh" && hasPRArgPrefix(args, "pr", "checks", "208", "--json", "name,state"):
 			return []byte(`[{"name":"unit","state":"SUCCESS"}]`), nil
 		case name == "gh" && hasPRArgPrefix(args, "api", "--paginate", "--slurp") && hasPRArg(args, "repos/m31labs/buckley/issues/208/comments?per_page=100"):
 			return []byte(`[[{"id":"IC_top_1","user":{"login":"maintainer"},"body":"Please keep the max ratchet at zero."}]]`), nil
@@ -433,11 +433,11 @@ func TestAssemblePRContext_FallbackAndFetchFailuresAreVisible(t *testing.T) {
 		switch {
 		case name == "gh" && hasPRArgPrefix(args, "pr", "view", "208", "--json") && strings.Contains(args[len(args)-1], "headRefOid"):
 			return []byte(`{"number":208,"title":"Fallback coverage","author":{"login":"author"},"state":"OPEN","url":"https://github.com/m31labs/buckley/pull/208","baseRefName":"main","baseRefOid":"base-sha","headRefName":"topic","headRefOid":"head-sha","reviewDecision":"","additions":1,"deletions":0,"changedFiles":1}`), nil
-		case name == "gh" && matchesPRArgs(args, "pr", "checks", "208", "--json", "state"):
+		case name == "gh" && hasPRArgPrefix(args, "pr", "checks", "208", "--json", "state"):
 			return []byte(`[]`), nil
-		case name == "gh" && matchesPRArgs(args, "pr", "diff", "208"):
+		case name == "gh" && hasPRArgPrefix(args, "pr", "diff", "208"):
 			return []byte("diff --git a/a.go b/a.go\n--- a/a.go\n+++ b/a.go\n@@ -1 +1 @@\n-old\n+new\n"), nil
-		case name == "gh" && matchesPRArgs(args, "pr", "checks", "208", "--json", "name,state"):
+		case name == "gh" && hasPRArgPrefix(args, "pr", "checks", "208", "--json", "name,state"):
 			return nil, errors.New("checks API unavailable")
 		case name == "gh" && hasPRArgPrefix(args, "api", "--paginate", "--slurp") && hasPRArg(args, "repos/m31labs/buckley/issues/208/comments?per_page=100"):
 			return nil, errors.New("comments API unavailable")
@@ -548,11 +548,11 @@ func TestAssemblePRContext_MarksConcurrentHeadPushIncomplete(t *testing.T) {
 				head = "pushed-head"
 			}
 			return []byte(fmt.Sprintf(`{"number":208,"title":"Concurrent push","author":{"login":"author"},"state":"OPEN","url":"https://github.com/m31labs/buckley/pull/208","baseRefName":"main","baseRefOid":"base-sha","headRefName":"topic","headRefOid":%q,"changedFiles":1}`, head)), nil
-		case name == "gh" && matchesPRArgs(args, "pr", "checks", "208", "--json", "state"):
+		case name == "gh" && hasPRArgPrefix(args, "pr", "checks", "208", "--json", "state"):
 			return []byte(`[]`), nil
-		case name == "gh" && matchesPRArgs(args, "pr", "diff", "208"):
+		case name == "gh" && hasPRArgPrefix(args, "pr", "diff", "208"):
 			return []byte("diff --git a/a.go b/a.go\n--- a/a.go\n+++ b/a.go\n@@ -1 +1 @@\n-old\n+new\n"), nil
-		case name == "gh" && matchesPRArgs(args, "pr", "checks", "208", "--json", "name,state"):
+		case name == "gh" && hasPRArgPrefix(args, "pr", "checks", "208", "--json", "name,state"):
 			return []byte(`[]`), nil
 		case name == "gh" && hasPRArgPrefix(args, "api", "--paginate", "--slurp") && hasPRArg(args, "repos/m31labs/buckley/issues/208/comments?per_page=100"):
 			return []byte(`[]`), nil
@@ -1070,17 +1070,18 @@ func TestParsePRRef_NumericKeepsCurrentRepository(t *testing.T) {
 
 func TestAssemblePRContext_ChangedFileCardinalityMismatchIsIncomplete(t *testing.T) {
 	run := func(name string, args ...string) ([]byte, error) {
-		if name == "gh" && len(args) > 0 && args[0] == "pr" && hasPRArg(args, "--repo") {
-			t.Errorf("numeric PR reference must keep current-repository behavior: %s", strings.Join(args, " "))
+		if name == "gh" && hasPRArgPrefix(args, "pr") && len(args) > 1 && args[1] != "view" &&
+			!hasPRArgPair(args, "--repo", "github.com/m31labs/buckley") {
+			t.Errorf("post-metadata PR operation was not pinned to resolved repository: %s", strings.Join(args, " "))
 		}
 		switch {
 		case name == "gh" && hasPRArgPrefix(args, "pr", "view", "208", "--json") && strings.Contains(args[len(args)-1], "headRefOid"):
 			return []byte(`{"number":208,"title":"Cardinality","author":{"login":"author"},"state":"OPEN","url":"https://github.com/m31labs/buckley/pull/208","baseRefName":"main","baseRefOid":"base","headRefName":"topic","headRefOid":"head","changedFiles":3}`), nil
-		case name == "gh" && matchesPRArgs(args, "pr", "checks", "208", "--json", "state"):
+		case name == "gh" && hasPRArgPrefix(args, "pr", "checks", "208", "--json", "state"):
 			return []byte(`[]`), nil
-		case name == "gh" && matchesPRArgs(args, "pr", "diff", "208"):
+		case name == "gh" && hasPRArgPrefix(args, "pr", "diff", "208"):
 			return []byte("diff --git a/a.go b/a.go\n"), nil
-		case name == "gh" && matchesPRArgs(args, "pr", "checks", "208", "--json", "name,state"):
+		case name == "gh" && hasPRArgPrefix(args, "pr", "checks", "208", "--json", "name,state"):
 			return []byte(`[]`), nil
 		case name == "gh" && hasPRArgPrefix(args, "api", "--paginate", "--slurp") && hasPRArg(args, "repos/m31labs/buckley/issues/208/comments?per_page=100"):
 			return []byte(`[]`), nil
