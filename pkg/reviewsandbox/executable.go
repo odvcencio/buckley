@@ -2,6 +2,7 @@ package reviewsandbox
 
 import (
 	"fmt"
+	goversion "go/version"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -14,15 +15,22 @@ import (
 // fixed system/toolchain allowlist (or an explicitly configured absolute Codex
 // executable).
 func trustedExecutableDirectories() []string {
-	candidates := []string{
+	candidates := make([]string, 0, 16)
+	home, _ := os.UserHomeDir()
+	if strings.TrimSpace(home) != "" {
+		// golang.org/dl installs complete toolchains below ~/sdk. Prefer the
+		// newest installed SDK over an older system Go so immutable reviews can
+		// verify modules that have already raised their go directive.
+		candidates = appendGlobDirectoriesDescending(candidates, filepath.Join(home, "sdk", "go*", "bin"))
+	}
+	candidates = append(candidates,
 		"/usr/local/go/bin",
 		"/usr/local/bin",
 		"/usr/bin",
 		"/bin",
 		"/opt/homebrew/bin",
 		"/opt/local/bin",
-	}
-	home, _ := os.UserHomeDir()
+	)
 	if strings.TrimSpace(home) != "" {
 		candidates = append(candidates, filepath.Join(home, ".cargo", "bin"))
 		candidates = appendGlobDirectories(candidates, filepath.Join(home, ".rustup", "toolchains", "*", "bin"))
@@ -68,6 +76,22 @@ func appendGlobDirectories(candidates []string, pattern string) []string {
 		return candidates
 	}
 	sort.Strings(matches)
+	return append(candidates, matches...)
+}
+
+func appendGlobDirectoriesDescending(candidates []string, pattern string) []string {
+	matches, err := filepath.Glob(pattern)
+	if err != nil {
+		return candidates
+	}
+	sort.SliceStable(matches, func(i, j int) bool {
+		iVersion := filepath.Base(filepath.Dir(matches[i]))
+		jVersion := filepath.Base(filepath.Dir(matches[j]))
+		if comparison := goversion.Compare(iVersion, jVersion); comparison != 0 {
+			return comparison > 0
+		}
+		return matches[i] > matches[j]
+	})
 	return append(candidates, matches...)
 }
 

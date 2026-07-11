@@ -71,10 +71,17 @@ func TestTrustedExecutableDirectoriesPreserveToolchainPriority(t *testing.T) {
 
 func TestSandboxPathPrefersLocalGoToolchainOverSystemGo(t *testing.T) {
 	localGo := filepath.Clean("/usr/local/go/bin/go")
-	systemGo := filepath.Clean("/usr/bin/go")
-	for _, executable := range []string{localGo, systemGo} {
-		if _, err := os.Stat(executable); err != nil {
-			t.Skipf("toolchain priority regression requires %s: %v", executable, err)
+	if _, err := os.Stat(localGo); err != nil {
+		t.Skipf("toolchain priority regression requires %s: %v", localGo, err)
+	}
+	want := localGo
+	home, _ := os.UserHomeDir()
+	sdkBins := appendGlobDirectoriesDescending(nil, filepath.Join(home, "sdk", "go*", "bin"))
+	for _, sdkBin := range sdkBins {
+		candidate := filepath.Join(sdkBin, "go")
+		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+			want = filepath.Clean(candidate)
+			break
 		}
 	}
 
@@ -82,15 +89,49 @@ func TestSandboxPathPrefersLocalGoToolchainOverSystemGo(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resolved != localGo {
-		t.Fatalf("trusted Go executable = %q, want preferred toolchain %q", resolved, localGo)
+	if resolved != want {
+		t.Fatalf("trusted Go executable = %q, want preferred toolchain %q", resolved, want)
 	}
 
 	pathDirectories := filepath.SplitList(ToolEnvironment(t.TempDir())["PATH"])
+	preferredIndex := indexOf(pathDirectories, filepath.Dir(want))
 	localIndex := indexOf(pathDirectories, filepath.Dir(localGo))
-	systemIndex := indexOf(pathDirectories, filepath.Dir(systemGo))
-	if localIndex < 0 || systemIndex < 0 || localIndex >= systemIndex {
-		t.Fatalf("sandbox PATH toolchain priority = %#v, want %q before %q", pathDirectories, filepath.Dir(localGo), filepath.Dir(systemGo))
+	if preferredIndex < 0 || localIndex < 0 || preferredIndex > localIndex {
+		t.Fatalf("sandbox PATH toolchain priority = %#v, want %q no later than %q", pathDirectories, filepath.Dir(want), filepath.Dir(localGo))
+	}
+}
+
+func TestGoSDKDirectoriesUseSemanticVersionOrder(t *testing.T) {
+	root := t.TempDir()
+	for _, version := range []string{"go1.9.7", "go1.26.0", "go1.25.10"} {
+		if err := os.MkdirAll(filepath.Join(root, version, "bin"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got := appendGlobDirectoriesDescending(nil, filepath.Join(root, "go*", "bin"))
+	want := []string{
+		filepath.Join(root, "go1.26.0", "bin"),
+		filepath.Join(root, "go1.25.10", "bin"),
+		filepath.Join(root, "go1.9.7", "bin"),
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("Go SDK order = %#v, want %#v", got, want)
+	}
+}
+
+func TestReviewReadRootsIncludeSelectedGoSDK(t *testing.T) {
+	resolved, err := trustedLookPath("go")
+	if err != nil {
+		t.Skipf("trusted Go toolchain is not installed: %v", err)
+	}
+	home, _ := os.UserHomeDir()
+	sdkRoot := filepath.Join(home, "sdk")
+	goRoot := filepath.Dir(filepath.Dir(resolved))
+	if relative, err := filepath.Rel(sdkRoot, goRoot); err != nil || relative == "." || strings.HasPrefix(relative, "..") {
+		t.Skipf("selected Go toolchain %q is not a user SDK", resolved)
+	}
+	if indexOf(reviewReadRoots("true"), goRoot) < 0 {
+		t.Fatalf("review read roots omit selected Go SDK root %q", goRoot)
 	}
 }
 

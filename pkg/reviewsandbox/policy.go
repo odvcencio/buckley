@@ -136,6 +136,9 @@ func reviewReadRoots(command string) []string {
 	for _, executable := range []string{"go", "cargo", "rustc", "python3", "node", "npm"} {
 		if resolved, err := trustedLookPath(executable); err == nil {
 			candidates = appendExecutableReadRoots(candidates, resolved)
+			if executable == "go" {
+				candidates = appendGoSDKReadRoot(candidates, resolved)
+			}
 		}
 	}
 
@@ -144,6 +147,20 @@ func reviewReadRoots(command string) []string {
 		candidates = append(candidates, filepath.Join(home, filepath.FromSlash(rel)))
 	}
 	return canonicalExistingDirectories(candidates)
+}
+
+func appendGoSDKReadRoot(candidates []string, executable string) []string {
+	home, _ := os.UserHomeDir()
+	if strings.TrimSpace(home) == "" {
+		return candidates
+	}
+	sdkRoot := filepath.Join(home, "sdk")
+	goRoot := filepath.Dir(filepath.Dir(filepath.Clean(executable)))
+	relative, err := filepath.Rel(sdkRoot, goRoot)
+	if err != nil || relative == "." || strings.HasPrefix(relative, ".."+string(os.PathSeparator)) || relative == ".." {
+		return candidates
+	}
+	return append(candidates, goRoot)
 }
 
 func appendExecutableReadRoots(candidates []string, executable string) []string {
