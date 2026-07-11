@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.7.0] - 2026-07-10
+
+### Added
+- Filesystem-discovered agent profiles, skills, named subagents, scoped tool tiers, and invocation previews.
+- Project chat-check suites, artifacts, JUnit reports, health checks, and eval scenario inspection.
+- JSON previews for governed agent runs and richer project/agent diagnostics.
+
+### Changed
+- Split the one-shot commit, PR, and review flows into focused command surfaces with governed Codex and API backends.
+- Refactored the TUI, ACP, experiment, and task-workspace paths into smaller components while preserving behavior.
+- Made terminal input, search, file-picker, status-bar, and chat wrapping rune-aware.
+
+### Fixed
+- `review-pr` now binds every PR operation to the resolved repository and immutable head/base revisions, includes legacy commit statuses, collapses reruns to the latest context state, and validates CI provenance before approval.
+- Documentation-only PRs with no head checks can inherit successful CI from their immutable base revision; source or mixed changes still fail closed.
+- Immutable-base CI collection now fails closed when GitHub's 1,000-check-suite visibility ceiling could make evidence incomplete.
+- Review sandboxes preserve configured toolchain priority, allowing module-compatible Go installations to win over older system binaries.
+- Review prompts and evidence distinguish changed-source findings from sandbox/environment limitations instead of returning false-clean approvals.
+
 ## [1.6.1] - 2026-06-17
 
 ### Fixed
@@ -130,7 +149,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Telemetry is local-only by default.
 - Plugin discovery limited to local paths only.
 
-[Unreleased]: https://github.com/odvcencio/buckley/compare/v1.6.1...HEAD
+[Unreleased]: https://github.com/odvcencio/buckley/compare/v1.7.0...HEAD
+[1.7.0]: https://github.com/odvcencio/buckley/compare/v1.6.1...v1.7.0
 [1.6.1]: https://github.com/odvcencio/buckley/compare/v1.6.0...v1.6.1
 [1.6.0]: https://github.com/odvcencio/buckley/compare/v1.5.0...v1.6.0
 [1.5.0]: https://github.com/odvcencio/buckley/compare/v1.4.1...v1.5.0
