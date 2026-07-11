@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -13,6 +14,14 @@ import (
 type PRDefinition struct {
 	// BaseBranch overrides automatic base branch detection.
 	BaseBranch string
+
+	// BaseCommit is the fetched, immutable commit for BaseBranch. It is shown
+	// to the model for provenance but is not itself used as the diff boundary.
+	BaseCommit string
+
+	// CommitRange is the immutable merge-base..head-SHA range resolved by the CLI.
+	// When set, all Git context sources use it instead of a mutable branch ref.
+	CommitRange string
 }
 
 // PRResult is the structured output from the generate_pull_request tool.
@@ -117,10 +126,13 @@ func (d PRDefinition) ContextSources() []oneshot.ContextSource {
 	if base == "" {
 		base = "main"
 	}
+	params := func() map[string]string {
+		return map[string]string{"base": base, "range": d.CommitRange}
+	}
 	return []oneshot.ContextSource{
-		{Type: "git_diff", Params: map[string]string{"base": base}},
-		{Type: "git_log", Params: map[string]string{"base": base}},
-		{Type: "git_files", Params: map[string]string{"base": base}},
+		{Type: "git_diff", Params: params()},
+		{Type: "git_log", Params: params()},
+		{Type: "git_files", Params: params()},
 		{Type: "agents_md"},
 	}
 }
@@ -141,24 +153,41 @@ Guidelines for good PRs:
 Focus on helping reviewers understand and validate the changes efficiently.`
 }
 
-func (PRDefinition) BuildPrompt(ctx *oneshot.Context) string {
+func (d PRDefinition) BuildPrompt(ctx *oneshot.Context) string {
 	var b strings.Builder
+	base := d.BaseBranch
+	if base == "" {
+		base = "main"
+	}
 
 	b.WriteString("Generate a pull request for the following changes.\n\n")
+	b.WriteString("Base: ")
+	b.WriteString(base)
+	if d.BaseCommit != "" {
+		b.WriteString(" @ ")
+		b.WriteString(d.BaseCommit)
+	}
+	b.WriteString("\n")
+	if d.CommitRange != "" {
+		b.WriteString("Exact change range: ")
+		b.WriteString(d.CommitRange)
+		b.WriteString("\n")
+	}
+	b.WriteString("\n")
 
-	if log, ok := ctx.Sources["git_log:main"]; ok && log != "" {
+	if log, ok := ctx.Sources["git_log:"+base]; ok && log != "" {
 		b.WriteString("## Commits\n\n```\n")
 		b.WriteString(log)
 		b.WriteString("\n```\n\n")
 	}
 
-	if files, ok := ctx.Sources["git_files:main"]; ok && files != "" {
+	if files, ok := ctx.Sources["git_files:"+base]; ok && files != "" {
 		b.WriteString("## Changed Files\n\n")
 		b.WriteString(files)
 		b.WriteString("\n\n")
 	}
 
-	if diff, ok := ctx.Sources["git_diff:main"]; ok && diff != "" {
+	if diff, ok := ctx.Sources["git_diff:"+base]; ok && diff != "" {
 		b.WriteString("## Full Diff\n\n```diff\n")
 		b.WriteString(diff)
 		b.WriteString("\n```\n\n")
@@ -176,8 +205,8 @@ func (PRDefinition) BuildPrompt(ctx *oneshot.Context) string {
 }
 
 func (PRDefinition) Validate(result json.RawMessage) error {
-	var pr PRResult
-	if err := json.Unmarshal(result, &pr); err != nil {
+	pr, err := decodePRResult(result)
+	if err != nil {
 		return fmt.Errorf("unmarshal: %w", err)
 	}
 	if strings.TrimSpace(pr.Title) == "" {
@@ -199,9 +228,129 @@ func (PRDefinition) Validate(result json.RawMessage) error {
 }
 
 func (PRDefinition) Unmarshal(result json.RawMessage) (any, error) {
-	var pr PRResult
-	if err := json.Unmarshal(result, &pr); err != nil {
+	pr, err := decodePRResult(result)
+	if err != nil {
 		return nil, fmt.Errorf("unmarshal: %w", err)
 	}
-	return &pr, nil
+	return pr, nil
+}
+
+// decodePRResult tolerates the one provider deviation observed in production:
+// changes may arrive as a single string despite the tool schema requiring an
+// array. Every other field retains its declared JSON type.
+func decodePRResult(result json.RawMessage) (*PRResult, error) {
+	var wire struct {
+		Title         string          `json:"title"`
+		Summary       string          `json:"summary"`
+		Changes       json.RawMessage `json:"changes"`
+		Testing       []string        `json:"testing"`
+		Breaking      bool            `json:"breaking,omitempty"`
+		Issues        []string        `json:"issues,omitempty"`
+		ReviewersHint string          `json:"reviewers_hint,omitempty"`
+	}
+	if err := json.Unmarshal(result, &wire); err != nil {
+		return nil, err
+	}
+
+	changes, err := decodePRChanges(wire.Changes)
+	if err != nil {
+		return nil, fmt.Errorf("changes: %w", err)
+	}
+	return &PRResult{
+		Title:         wire.Title,
+		Summary:       wire.Summary,
+		Changes:       changes,
+		Testing:       wire.Testing,
+		Breaking:      wire.Breaking,
+		Issues:        wire.Issues,
+		ReviewersHint: wire.ReviewersHint,
+	}, nil
+}
+
+func decodePRChanges(raw json.RawMessage) ([]string, error) {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
+		return nil, nil
+	}
+	if raw[0] == '[' {
+		var changes []string
+		if err := json.Unmarshal(raw, &changes); err != nil {
+			return nil, err
+		}
+		return changes, nil
+	}
+	if raw[0] != '"' {
+		return nil, fmt.Errorf("must be a string or array of strings")
+	}
+	var changes string
+	if err := json.Unmarshal(raw, &changes); err != nil {
+		return nil, err
+	}
+	return normalizePRChanges(changes), nil
+}
+
+func normalizePRChanges(changes string) []string {
+	changes = strings.TrimSpace(strings.ReplaceAll(changes, "\r\n", "\n"))
+	if changes == "" {
+		return nil
+	}
+
+	var lines []string
+	hasBullets := false
+	for _, line := range strings.Split(changes, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if _, ok := trimPRChangeBullet(line); ok {
+			hasBullets = true
+		}
+		lines = append(lines, line)
+	}
+	if len(lines) == 1 {
+		if item, ok := trimPRChangeBullet(lines[0]); ok && item != "" {
+			return []string{item}
+		}
+		return []string{changes}
+	}
+	if !hasBullets {
+		return lines
+	}
+
+	items := make([]string, 0, len(lines))
+	for _, line := range lines {
+		if item, ok := trimPRChangeBullet(line); ok {
+			if item != "" {
+				items = append(items, item)
+			}
+			continue
+		}
+		if len(items) == 0 {
+			items = append(items, line)
+		} else {
+			items[len(items)-1] += " " + line
+		}
+	}
+	return items
+}
+
+func trimPRChangeBullet(line string) (string, bool) {
+	for _, prefix := range []string{"- ", "* ", "• "} {
+		if strings.HasPrefix(line, prefix) {
+			return strings.TrimSpace(strings.TrimPrefix(line, prefix)), true
+		}
+	}
+	for i, r := range line {
+		if r >= '0' && r <= '9' {
+			continue
+		}
+		if i > 0 && (r == '.' || r == ')') {
+			rest := line[i+1:]
+			if strings.HasPrefix(rest, " ") {
+				return strings.TrimSpace(rest), true
+			}
+		}
+		break
+	}
+	return line, false
 }

@@ -120,6 +120,8 @@ func gatherGitDiff(params map[string]string, opts ContextOpts) (string, error) {
 
 	if params["staged"] == "true" {
 		args = append(args, "--cached")
+	} else if revisionRange := params["range"]; revisionRange != "" {
+		args = append(args, revisionRange)
 	} else if base := params["base"]; base != "" {
 		args = append(args, base+"...HEAD")
 	}
@@ -140,8 +142,14 @@ func gatherGitDiff(params map[string]string, opts ContextOpts) (string, error) {
 
 	output, rawTruncated, err := contextGitOutputLimited(diffsignal.MaxParseBytes, args...)
 	if err != nil {
-		// Retry without ...HEAD for base diff
-		if base := params["base"]; base != "" {
+		// A caller-supplied exact range must fail closed rather than silently
+		// widening to a mutable branch. Legacy base-only sources retain their
+		// historical fallback.
+		if params["range"] == "" {
+			base := params["base"]
+			if base == "" {
+				return "", err
+			}
 			args = []string{"diff", base}
 			if len(pathsArgs) > 0 {
 				args = append(args, "--")
@@ -173,7 +181,9 @@ func gatherGitDiff(params map[string]string, opts ContextOpts) (string, error) {
 func gatherGitLog(params map[string]string) (string, error) {
 	args := []string{"log", "--oneline"}
 
-	if base := params["base"]; base != "" {
+	if revisionRange := params["range"]; revisionRange != "" {
+		args = append(args, revisionRange)
+	} else if base := params["base"]; base != "" {
 		args = append(args, base+"..HEAD")
 	} else {
 		args = append(args, "-20")
@@ -192,6 +202,8 @@ func gatherGitFiles(params map[string]string) (string, error) {
 
 	if params["staged"] == "true" {
 		args = append(args, "--cached")
+	} else if revisionRange := params["range"]; revisionRange != "" {
+		args = append(args, revisionRange)
 	} else if base := params["base"]; base != "" {
 		args = append(args, base+"...HEAD")
 	}
@@ -212,8 +224,12 @@ func gatherGitFiles(params map[string]string) (string, error) {
 
 	output, err := contextGitOutput(args...)
 	if err != nil {
-		// Retry without ...HEAD for base
-		if base := params["base"]; base != "" {
+		// Exact ranges fail closed; only legacy base-only sources may fall back.
+		if params["range"] == "" {
+			base := params["base"]
+			if base == "" {
+				return "", err
+			}
 			args = []string{"diff", "--name-status", base}
 			if len(pathsArgs) > 0 {
 				args = append(args, "--")

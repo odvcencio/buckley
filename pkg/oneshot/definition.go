@@ -14,9 +14,11 @@ type ContextSource struct {
 
 	// Params holds source-specific parameters.
 	//
-	//   git_diff:  "staged" => "true" for --cached; "base" => branch name for base...HEAD
-	//   git_log:   "base" => branch name for base..HEAD
-	//   git_files: "staged" => "true" for --cached --name-status; "base" => branch name
+	//   git_diff:  "staged" => "true" for --cached; "base" => display branch;
+	//              "range" => an exact revision range (preferred over base)
+	//   git_log:   "base" => display branch; "range" => an exact revision range
+	//   git_files: "staged" => "true" for --cached --name-status;
+	//              "base" => display branch; "range" => an exact revision range
 	//   agents_md: (no params)
 	//   env:       "name" => environment variable name
 	//   command:   "cmd" => shell command string
