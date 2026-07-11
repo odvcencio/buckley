@@ -1055,9 +1055,10 @@ func getCommitStatuses(run prCommandRunner, host, repository, revision string) (
 	}
 
 	type commitStatus struct {
-		ID      int64  `json:"id"`
-		Context string `json:"context"`
-		State   string `json:"state"`
+		ID        int64  `json:"id"`
+		Context   string `json:"context"`
+		State     string `json:"state"`
+		CreatedAt string `json:"created_at"`
 	}
 	type combinedStatusPage struct {
 		TotalCount int            `json:"total_count"`
@@ -1086,24 +1087,41 @@ func getCommitStatuses(run prCommandRunner, host, repository, revision string) (
 	}
 
 	total := pages[0].TotalCount
-	checks := make([]PRCheck, 0, total)
+	latestByContext := make(map[string]commitStatus, total)
 	seenIDs := make(map[int64]struct{}, total)
+	statusRecords := 0
 	for pageIndex, page := range pages {
 		if page.TotalCount != total {
 			return nil, fmt.Errorf("base commit-status total_count changed across pages: page 1 reported %d, page %d reported %d", total, pageIndex+1, page.TotalCount)
 		}
 		for _, status := range page.Statuses {
+			statusRecords++
 			if status.ID != 0 {
 				if _, exists := seenIDs[status.ID]; exists {
 					return nil, fmt.Errorf("base commit-status pagination returned duplicate status id %d", status.ID)
 				}
 				seenIDs[status.ID] = struct{}{}
 			}
-			checks = append(checks, PRCheck{Name: "status: " + status.Context, Status: status.State})
+			current, exists := latestByContext[status.Context]
+			if !exists || status.CreatedAt > current.CreatedAt ||
+				(status.CreatedAt == current.CreatedAt && status.ID > current.ID) {
+				latestByContext[status.Context] = status
+			}
 		}
 	}
-	if len(checks) != total {
-		return nil, fmt.Errorf("base commit-status cardinality mismatch: API reported %d but pagination returned %d", total, len(checks))
+	if statusRecords != total {
+		return nil, fmt.Errorf("base commit-status cardinality mismatch: API reported %d but pagination returned %d", total, statusRecords)
+	}
+
+	contexts := make([]string, 0, len(latestByContext))
+	for context := range latestByContext {
+		contexts = append(contexts, context)
+	}
+	sort.Strings(contexts)
+	checks := make([]PRCheck, 0, len(contexts))
+	for _, context := range contexts {
+		status := latestByContext[context]
+		checks = append(checks, PRCheck{Name: "status: " + context, Status: status.State})
 	}
 	return checks, nil
 }

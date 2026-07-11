@@ -168,9 +168,11 @@ func TestGetCommitStatuses_UsesLatestCombinedContextState(t *testing.T) {
 			!hasPRArgPair(args, "--hostname", "github.com") {
 			return nil, fmt.Errorf("unexpected command: %s %s", name, strings.Join(args, " "))
 		}
-		// GitHub's combined-status endpoint exposes the latest status for each
-		// context, so this successful rerun is authoritative over older failures.
-		return []byte(`[{"state":"success","total_count":1,"statuses":[{"id":9,"context":"legacy/ci","state":"success"}]}]`), nil
+		// Preserve raw cardinality while choosing the successful rerun as the
+		// authoritative latest state for this context.
+		return []byte(`[{"state":"success","total_count":2,"statuses":[` +
+			`{"id":8,"context":"legacy/ci","state":"failure","created_at":"2026-07-10T10:00:00Z"},` +
+			`{"id":9,"context":"legacy/ci","state":"success","created_at":"2026-07-10T11:00:00Z"}]}]`), nil
 	}
 	checks, err := getCommitStatuses(run, "github.com", "m31labs/buckley", "base-sha")
 	if err != nil {
@@ -178,6 +180,9 @@ func TestGetCommitStatuses_UsesLatestCombinedContextState(t *testing.T) {
 	}
 	if got := summarizePRChecks(checks); got != "passing (1/1)" {
 		t.Fatalf("successful latest rerun summarized as %q", got)
+	}
+	if len(checks) != 1 {
+		t.Fatalf("latest contexts = %#v, want one collapsed rerun", checks)
 	}
 }
 
