@@ -131,10 +131,12 @@ func TestSelectPRCIEvidence_DocumentationOnlyInheritsImmutableBaseChecks(t *test
 			calls := 0
 			run := func(name string, args ...string) ([]byte, error) {
 				calls++
-				if name != "gh" || !hasPRArgPrefix(args, "api", "--paginate", "--slurp") || !hasPRArgPair(args, "--hostname", "github.example") {
+				if name != "gh" || !hasPRArgPair(args, "--hostname", "github.example") {
 					return nil, fmt.Errorf("unexpected command: %s %s", name, strings.Join(args, " "))
 				}
 				switch {
+				case hasPRArg(args, "repos/m31labs/buckley/commits/base-sha/check-suites?per_page=1"):
+					return []byte(`{"total_count":2}`), nil
 				case hasPRArg(args, "repos/m31labs/buckley/commits/base-sha/check-runs?filter=latest&per_page=100"):
 					return []byte(tt.checkResponse), nil
 				case hasPRArg(args, "repos/m31labs/buckley/commits/base-sha/status?per_page=100"):
@@ -148,8 +150,8 @@ func TestSelectPRCIEvidence_DocumentationOnlyInheritsImmutableBaseChecks(t *test
 			if err != nil {
 				t.Fatalf("selectPRCIEvidence: %v", err)
 			}
-			if calls != 2 {
-				t.Fatalf("base CI evidence calls = %d, want check-runs plus commit status", calls)
+			if calls != 3 {
+				t.Fatalf("base CI evidence calls = %d, want suite preflight, check-runs, and commit status", calls)
 			}
 			if selection.Source != prCISourceBase || selection.Revision != "base-sha" {
 				t.Fatalf("selection provenance = %#v", selection)
@@ -158,6 +160,26 @@ func TestSelectPRCIEvidence_DocumentationOnlyInheritsImmutableBaseChecks(t *test
 				t.Fatalf("summarizePRChecks = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestSelectPRCIEvidence_RejectsGitHubCheckSuiteVisibilityCeiling(t *testing.T) {
+	pr := &PRInfo{Host: "github.com", Repository: "m31labs/buckley", BaseSHA: "base-sha", HeadSHA: "head-sha"}
+	calls := 0
+	run := func(name string, args ...string) ([]byte, error) {
+		calls++
+		if name != "gh" || !hasPRArg(args, "repos/m31labs/buckley/commits/base-sha/check-suites?per_page=1") ||
+			!hasPRArgPair(args, "--hostname", "github.com") {
+			return nil, fmt.Errorf("unexpected command: %s %s", name, strings.Join(args, " "))
+		}
+		return []byte(`{"total_count":1001}`), nil
+	}
+	_, err := selectPRCIEvidence(run, pr, []string{"README.md"}, true, nil)
+	if err == nil || !strings.Contains(err.Error(), "1000 most recent check suites") {
+		t.Fatalf("selectPRCIEvidence error = %v, want visibility ceiling", err)
+	}
+	if calls != 1 {
+		t.Fatalf("CI calls after suite ceiling = %d, want fail before check-run fetch", calls)
 	}
 }
 
@@ -668,6 +690,12 @@ func TestRevalidatePRContext_StableInheritedBaseCIRemainsSnapshotBound(t *testin
 	base := stablePRRevalidationRunner(prRevalidationOutputs{checks: `[]`})
 	baseCheckCalls := 0
 	run := func(name string, args ...string) ([]byte, error) {
+		if name == "gh" && hasPRArg(args, "repos/m31labs/buckley/commits/base-sha/check-suites?per_page=1") {
+			if !hasPRArgPair(args, "--hostname", "github.com") {
+				return nil, fmt.Errorf("base check suites omitted explicit host: %s", strings.Join(args, " "))
+			}
+			return []byte(`{"total_count":1}`), nil
+		}
 		if name == "gh" && hasPRArgPrefix(args, "api", "--paginate", "--slurp") &&
 			hasPRArg(args, "repos/m31labs/buckley/commits/base-sha/check-runs?filter=latest&per_page=100") {
 			baseCheckCalls++

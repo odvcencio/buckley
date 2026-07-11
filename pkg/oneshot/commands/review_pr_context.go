@@ -960,6 +960,13 @@ func describePRCISelection(selection prCISelection) (string, string) {
 }
 
 func getCommitCIEvidence(run prCommandRunner, host, repository, revision string) ([]PRCheck, error) {
+	suiteCount, err := getCommitCheckSuiteCount(run, host, repository, revision)
+	if err != nil {
+		return nil, fmt.Errorf("check suites: %w", err)
+	}
+	if suiteCount > 1000 {
+		return nil, fmt.Errorf("check suites: base check-runs may be incomplete because GitHub limits the endpoint to the 1000 most recent check suites (found %d)", suiteCount)
+	}
 	checkRuns, err := getCommitCheckRuns(run, host, repository, revision)
 	if err != nil {
 		return nil, fmt.Errorf("check runs: %w", err)
@@ -969,6 +976,34 @@ func getCommitCIEvidence(run prCommandRunner, host, repository, revision string)
 		return nil, fmt.Errorf("commit statuses: %w", err)
 	}
 	return append(checkRuns, statuses...), nil
+}
+
+func getCommitCheckSuiteCount(run prCommandRunner, host, repository, revision string) (int, error) {
+	if strings.TrimSpace(host) == "" {
+		return 0, fmt.Errorf("explicit GitHub host is required for base check suites")
+	}
+	owner, repo, err := splitPRRepository(repository)
+	if err != nil {
+		return 0, fmt.Errorf("resolve repository for base check suites: %w", err)
+	}
+	revision = strings.TrimSpace(revision)
+	if revision == "" {
+		return 0, fmt.Errorf("immutable base revision is required for base check suites")
+	}
+
+	endpoint := fmt.Sprintf("repos/%s/%s/commits/%s/check-suites?per_page=1", owner, repo, url.PathEscape(revision))
+	args := withPRAPIHostname([]string{"api", endpoint}, host)
+	output, err := run("gh", args...)
+	if err != nil {
+		return 0, err
+	}
+	var response struct {
+		TotalCount int `json:"total_count"`
+	}
+	if err := json.Unmarshal(output, &response); err != nil {
+		return 0, err
+	}
+	return response.TotalCount, nil
 }
 
 func getCommitCheckRuns(run prCommandRunner, host, repository, revision string) ([]PRCheck, error) {

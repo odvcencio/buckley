@@ -54,6 +54,46 @@ func TestTrustedExecutableResolutionIgnoresHostilePath(t *testing.T) {
 	}
 }
 
+func TestTrustedExecutableDirectoriesPreserveToolchainPriority(t *testing.T) {
+	preferred := t.TempDir()
+	fallback := t.TempDir()
+	alias := filepath.Join(t.TempDir(), "preferred")
+	if err := os.Symlink(preferred, alias); err != nil {
+		t.Fatal(err)
+	}
+
+	directories := canonicalTrustedExecutableDirectories([]string{preferred, fallback, alias})
+	want := []string{filepath.Clean(preferred), filepath.Clean(fallback)}
+	if !reflect.DeepEqual(directories, want) {
+		t.Fatalf("trusted executable directories = %#v, want priority-preserving %#v", directories, want)
+	}
+}
+
+func TestSandboxPathPrefersLocalGoToolchainOverSystemGo(t *testing.T) {
+	localGo := filepath.Clean("/usr/local/go/bin/go")
+	systemGo := filepath.Clean("/usr/bin/go")
+	for _, executable := range []string{localGo, systemGo} {
+		if _, err := os.Stat(executable); err != nil {
+			t.Skipf("toolchain priority regression requires %s: %v", executable, err)
+		}
+	}
+
+	resolved, err := trustedLookPath("go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved != localGo {
+		t.Fatalf("trusted Go executable = %q, want preferred toolchain %q", resolved, localGo)
+	}
+
+	pathDirectories := filepath.SplitList(ToolEnvironment(t.TempDir())["PATH"])
+	localIndex := indexOf(pathDirectories, filepath.Dir(localGo))
+	systemIndex := indexOf(pathDirectories, filepath.Dir(systemGo))
+	if localIndex < 0 || systemIndex < 0 || localIndex >= systemIndex {
+		t.Fatalf("sandbox PATH toolchain priority = %#v, want %q before %q", pathDirectories, filepath.Dir(localGo), filepath.Dir(systemGo))
+	}
+}
+
 func TestExecutorReportsPassWithExactArgvAndNormalizedScope(t *testing.T) {
 	root := t.TempDir()
 	pkg := filepath.Join(root, "pkg")
