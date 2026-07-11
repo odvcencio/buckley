@@ -134,6 +134,7 @@ func (f *Framework) Run(ctx context.Context, def Definition, opts RunOpts) (*Run
 	tool := def.Tool()
 	userPrompt := baseUserPrompt
 	var lastTrace *transparency.Trace
+	var lastErr error
 
 	for attempt := 0; attempt < maxRetries; attempt++ {
 		result, trace, invokeErr := f.invoker.Invoke(ctx, systemPrompt, userPrompt, tool, audit)
@@ -145,12 +146,14 @@ func (f *Framework) Run(ctx context.Context, def Definition, opts RunOpts) (*Run
 
 		// Check if model called the tool
 		if result == nil || result.ToolCall == nil {
+			lastErr = fmt.Errorf("model did not call required tool %q", tool.Name)
 			userPrompt = baseUserPrompt + "\n\nIMPORTANT: You MUST call the " + tool.Name + " tool. Do not reply with plain text."
 			continue
 		}
 
 		// 5. Validate
 		if err := def.Validate(result.ToolCall.Arguments); err != nil {
+			lastErr = fmt.Errorf("invalid %s tool arguments: %w", tool.Name, err)
 			userPrompt = baseUserPrompt + "\n\nThe previous response failed validation: " + strings.TrimSpace(err.Error()) + ". Fix and call " + tool.Name + " again."
 			continue
 		}
@@ -158,6 +161,7 @@ func (f *Framework) Run(ctx context.Context, def Definition, opts RunOpts) (*Run
 		// Unmarshal
 		value, err := def.Unmarshal(result.ToolCall.Arguments)
 		if err != nil {
+			lastErr = fmt.Errorf("decode %s tool arguments: %w", tool.Name, err)
 			userPrompt = baseUserPrompt + "\n\nThe tool call arguments must be valid JSON matching the schema for " + tool.Name + "."
 			continue
 		}
@@ -173,7 +177,7 @@ func (f *Framework) Run(ctx context.Context, def Definition, opts RunOpts) (*Run
 	return &RunResult{
 		Trace:        lastTrace,
 		ContextAudit: audit,
-	}, fmt.Errorf("failed after %d attempts for command %q", maxRetries, def.Name())
+	}, fmt.Errorf("failed after %d attempts for command %q: %w", maxRetries, def.Name(), lastErr)
 }
 
 // RLMRunOpts configures an RLM framework execution.

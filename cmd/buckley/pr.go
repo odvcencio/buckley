@@ -47,6 +47,13 @@ type prRunResult struct {
 	Error        error
 }
 
+type prBaseRange struct {
+	Branch    string
+	Commit    string
+	MergeBase string
+	Range     string
+}
+
 func parsePRCommandOptions(args []string) (prCommandOptions, error) {
 	fs := flag.NewFlagSet("pr", flag.ContinueOnError)
 	dryRun := fs.Bool("dry-run", false, "print the generated PR without creating it")
@@ -101,6 +108,14 @@ func runPRCommand(args []string) error {
 
 	result, err := runPRGeneration(ctx, runtime.framework, opts.base)
 	if err != nil {
+		if opts.verbose && result != nil {
+			if result.ContextAudit != nil {
+				printContextAudit(result.ContextAudit)
+			}
+			if result.Trace != nil && result.Trace.Reasoning != "" {
+				printReasoning(result.Trace.Reasoning)
+			}
+		}
 		return err
 	}
 
@@ -177,12 +192,22 @@ func runPRGeneration(ctx context.Context, framework *oneshot.Framework, baseBran
 	spinner := terminal.NewSpinner("Generating PR...")
 	spinner.Start()
 
-	fwResult, err := framework.Run(ctx, commands.PRDefinition{BaseBranch: baseBranch}, oneshot.RunOpts{})
+	base, err := resolvePRBaseRange(ctx, baseBranch)
+	if err != nil {
+		spinner.StopWithError(err.Error())
+		return nil, fmt.Errorf("resolve PR base: %w", err)
+	}
+
+	fwResult, err := framework.Run(ctx, commands.PRDefinition{
+		BaseBranch:  base.Branch,
+		BaseCommit:  base.Commit,
+		CommitRange: base.Range,
+	}, oneshot.RunOpts{})
 	result := prRunResultFromFramework(fwResult)
 	if err != nil {
 		result.Error = err
 		spinner.StopWithError(err.Error())
-		return nil, fmt.Errorf("PR generation failed: %w", err)
+		return result, fmt.Errorf("PR generation failed: %w", err)
 	}
 	if result.Error != nil {
 		spinner.StopWithError(result.Error.Error())
@@ -190,6 +215,70 @@ func runPRGeneration(ctx context.Context, framework *oneshot.Framework, baseBran
 		spinner.StopWithSuccess("Generated PR")
 	}
 	return result, nil
+}
+
+// resolvePRBaseRange fetches the selected base branch, resolves it to an
+// immutable commit, then computes the exact merge-base..HEAD range. PR context
+// must never be assembled from a stale local branch or a moving remote ref.
+func resolvePRBaseRange(ctx context.Context, baseFlag string) (prBaseRange, error) {
+	_, baseBranch := detectPRBranches(baseFlag)
+	remote := os.Getenv("BUCKLEY_REMOTE_NAME")
+	if remote == "" {
+		remote = "origin"
+	}
+	baseBranch = strings.TrimSpace(baseBranch)
+	baseBranch = strings.TrimPrefix(baseBranch, "refs/heads/")
+	baseBranch = strings.TrimPrefix(baseBranch, "refs/remotes/"+remote+"/")
+	baseBranch = strings.TrimPrefix(baseBranch, remote+"/")
+	if baseBranch == "" {
+		return prBaseRange{}, fmt.Errorf("base branch is empty")
+	}
+	if err := exec.CommandContext(ctx, "git", "check-ref-format", "--branch", baseBranch).Run(); err != nil {
+		return prBaseRange{}, fmt.Errorf("invalid base branch %q", baseBranch)
+	}
+
+	resolvedRef := baseBranch
+	if err := exec.CommandContext(ctx, "git", "remote", "get-url", remote).Run(); err == nil {
+		remoteRef := "refs/remotes/" + remote + "/" + baseBranch
+		refspec := "+refs/heads/" + baseBranch + ":" + remoteRef
+		cmd := exec.CommandContext(ctx, "git", "fetch", "--quiet", "--no-tags", remote, refspec)
+		if output, err := cmd.CombinedOutput(); err != nil {
+			detail := strings.TrimSpace(string(output))
+			if detail != "" {
+				return prBaseRange{}, fmt.Errorf("fetch %s/%s: %s", remote, baseBranch, detail)
+			}
+			return prBaseRange{}, fmt.Errorf("fetch %s/%s: %w", remote, baseBranch, err)
+		}
+		resolvedRef = remoteRef
+	}
+
+	baseCommit, err := prGitOutput(ctx, "rev-parse", "--verify", resolvedRef+"^{commit}")
+	if err != nil {
+		return prBaseRange{}, fmt.Errorf("resolve base %q: %w", resolvedRef, err)
+	}
+	mergeBase, err := prGitOutput(ctx, "merge-base", baseCommit, "HEAD")
+	if err != nil {
+		return prBaseRange{}, fmt.Errorf("merge-base %s and HEAD: %w", baseCommit, err)
+	}
+
+	return prBaseRange{
+		Branch:    baseBranch,
+		Commit:    baseCommit,
+		MergeBase: mergeBase,
+		Range:     mergeBase + "..HEAD",
+	}, nil
+}
+
+func prGitOutput(ctx context.Context, args ...string) (string, error) {
+	output, err := exec.CommandContext(ctx, "git", args...).CombinedOutput()
+	if err != nil {
+		detail := strings.TrimSpace(string(output))
+		if detail != "" {
+			return "", fmt.Errorf("%s", detail)
+		}
+		return "", err
+	}
+	return strings.TrimSpace(string(output)), nil
 }
 
 func prRunResultFromFramework(fwResult *oneshot.RunResult) *prRunResult {

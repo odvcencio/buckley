@@ -1,6 +1,9 @@
 package main
 
 import (
+	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -122,5 +125,76 @@ func TestPRRunResultFromFrameworkRejectsUnexpectedValue(t *testing.T) {
 	}
 	if !strings.Contains(result.Error.Error(), "unexpected result type") {
 		t.Fatalf("error = %q, want unexpected result type", result.Error)
+	}
+}
+
+func TestResolvePRBaseRangeFetchesStackedBaseAndExcludesPriorHistory(t *testing.T) {
+	remote := t.TempDir()
+	runGit(t, remote, "init", "--bare", ".")
+
+	seed := initTempGitRepo(t)
+	runGit(t, seed, "branch", "-M", "main")
+	runGit(t, seed, "remote", "add", "origin", remote)
+	runGit(t, seed, "push", "-u", "origin", "main")
+	runGit(t, seed, "switch", "-c", "codex/poppler-versioned-external-relex")
+	if err := os.WriteFile(filepath.Join(seed, "prior.txt"), []byte("prior\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, seed, "add", "prior.txt")
+	runGit(t, seed, "commit", "-m", "land prior roadmap", "-m", "Closes #219")
+	runGit(t, seed, "push", "-u", "origin", "codex/poppler-versioned-external-relex")
+	stackBase := runGitOutputForPushTest(t, seed, "rev-parse", "HEAD")
+
+	feature := filepath.Join(t.TempDir(), "feature")
+	runGit(t, filepath.Dir(feature), "clone", "-b", "codex/poppler-versioned-external-relex", remote, feature)
+	runGit(t, feature, "config", "user.email", "test@example.com")
+	runGit(t, feature, "config", "user.name", "Test User")
+	runGit(t, feature, "switch", "-c", "codex/javascript-trailing-extra-parity")
+	if err := os.WriteFile(filepath.Join(feature, "focused.go"), []byte("package focused\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, feature, "add", "focused.go")
+	runGit(t, feature, "commit", "-m", "fix trailing extra ownership")
+
+	// Advance the remote base after the feature clone. Resolution must fetch
+	// this new commit while retaining the original stack point as merge-base.
+	if err := os.WriteFile(filepath.Join(seed, "advanced.txt"), []byte("advanced\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, seed, "add", "advanced.txt")
+	runGit(t, seed, "commit", "-m", "advance stacked base")
+	runGit(t, seed, "push", "origin", "codex/poppler-versioned-external-relex")
+	wantBase := runGitOutputForPushTest(t, seed, "rev-parse", "HEAD")
+
+	t.Chdir(feature)
+	resolved, err := resolvePRBaseRange(context.Background(), "codex/poppler-versioned-external-relex")
+	if err != nil {
+		t.Fatalf("resolvePRBaseRange: %v", err)
+	}
+	if resolved.Commit != wantBase {
+		t.Fatalf("base commit = %s, want freshly fetched %s", resolved.Commit, wantBase)
+	}
+	if resolved.MergeBase != stackBase {
+		t.Fatalf("merge base = %s, want stack point %s", resolved.MergeBase, stackBase)
+	}
+	if resolved.Range != stackBase+"..HEAD" {
+		t.Fatalf("range = %q, want %q", resolved.Range, stackBase+"..HEAD")
+	}
+
+	def := commands.PRDefinition{
+		BaseBranch:  resolved.Branch,
+		BaseCommit:  resolved.Commit,
+		CommitRange: resolved.Range,
+	}
+	ctx, err := oneshot.BuildContext(def.ContextSources(), oneshot.ContextOpts{})
+	if err != nil {
+		t.Fatalf("BuildContext: %v", err)
+	}
+	prompt := def.BuildPrompt(ctx)
+	if !strings.Contains(prompt, "fix trailing extra ownership") || !strings.Contains(prompt, "focused.go") {
+		t.Fatalf("prompt missing focused stack change:\n%s", prompt)
+	}
+	if strings.Contains(prompt, "land prior roadmap") || strings.Contains(prompt, "Closes #219") || strings.Contains(prompt, "advance stacked base") {
+		t.Fatalf("prompt leaked base history:\n%s", prompt)
 	}
 }
