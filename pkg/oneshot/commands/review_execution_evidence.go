@@ -18,6 +18,7 @@ const (
 type reviewCoverageTarget struct {
 	Path      string
 	Recursive bool
+	ExactFile bool
 }
 
 type reviewCommandEvidenceDetails struct {
@@ -79,7 +80,7 @@ func reviewEvidenceLanguage(runner string) string {
 		return "go"
 	case "cargo":
 		return "rust"
-	case "pytest":
+	case "pytest", "python-check", "python-compileall", "python-pycompile":
 		return "python"
 	case "npm", "yarn", "pnpm", "yarn.cmd", "pnpm.cmd":
 		return "node"
@@ -95,6 +96,18 @@ func reviewCommandCoverage(argv []string, runner string) []reviewCoverageTarget 
 	if !ok || len(argv) == 0 {
 		return nil
 	}
+	if runner == "python-pycompile" {
+		return pythonCompileCoverage(argv, "py_compile")
+	}
+	if runner == "python-compileall" {
+		return pythonCompileCoverage(argv, "compileall")
+	}
+	if runner == "python-check" {
+		if len(argv) != 3 || argv[2] != "--check" || !safePythonSourceTarget(argv[1]) {
+			return nil
+		}
+		return []reviewCoverageTarget{{Path: normalizeReviewEvidencePath(argv[1]), ExactFile: true}}
+	}
 	if runner == "cargo" {
 		return []reviewCoverageTarget{{
 			Path:      ".",
@@ -104,10 +117,11 @@ func reviewCommandCoverage(argv []string, runner string) []reviewCoverageTarget 
 	if runner != "go" {
 		return []reviewCoverageTarget{{Path: ".", Recursive: true}}
 	}
-	if len(argv) < 2 {
+	invocation, ok := parseGoReviewInvocation(argv)
+	if !ok {
 		return nil
 	}
-	targets := goReviewPackageTargets(argv[2:])
+	targets := goReviewPackageTargets(invocation.Args)
 	if len(targets) == 0 {
 		targets = []string{"."}
 	}
@@ -119,7 +133,38 @@ func reviewCommandCoverage(argv []string, runner string) []reviewCoverageTarget 
 		if clean == "..." || clean == "" {
 			clean = "."
 		}
+		if invocation.Directory != "." {
+			if clean == "." {
+				clean = invocation.Directory
+			} else {
+				clean = filepath.ToSlash(filepath.Join(invocation.Directory, clean))
+			}
+		}
 		coverage = append(coverage, reviewCoverageTarget{Path: clean, Recursive: recursive})
+	}
+	return coverage
+}
+
+func pythonCompileCoverage(argv []string, module string) []reviewCoverageTarget {
+	if len(argv) < 4 || argv[1] != "-m" || argv[2] != module {
+		return nil
+	}
+	var coverage []reviewCoverageTarget
+	for _, arg := range argv[3:] {
+		if arg == "-q" {
+			continue
+		}
+		if arg == "." && module == "compileall" {
+			coverage = append(coverage, reviewCoverageTarget{Path: ".", Recursive: true})
+			continue
+		}
+		if !safePythonSourceTarget(arg) {
+			return nil
+		}
+		coverage = append(coverage, reviewCoverageTarget{
+			Path:      normalizeReviewEvidencePath(arg),
+			ExactFile: true,
+		})
 	}
 	return coverage
 }
@@ -296,17 +341,18 @@ func classifyReviewArgv(argv []string) (kind, runner string) {
 	runner = strings.ToLower(filepath.Base(argv[0]))
 	switch runner {
 	case "go", "go.exe":
-		if len(argv) < 2 {
+		invocation, ok := parseGoReviewInvocation(argv)
+		if !ok {
 			return "", ""
 		}
-		switch argv[1] {
+		switch invocation.Subcommand {
 		case "build":
-			if validateGoBuildArgs(argv[2:]) {
+			if validateGoBuildArgs(invocation.Args) {
 				return reviewEvidenceBuild, "go"
 			}
 			return "", ""
 		case "test":
-			buildOnly, safe := validateGoTestArgs(argv[2:])
+			buildOnly, safe := validateGoTestArgs(invocation.Args)
 			if !safe {
 				return "", ""
 			}
@@ -334,6 +380,15 @@ func classifyReviewArgv(argv []string) (kind, runner string) {
 			}
 			return reviewEvidenceTest, "pytest"
 		}
+		if validPythonCompileArgs(argv, "py_compile") {
+			return reviewEvidenceBuild, "python-pycompile"
+		}
+		if validPythonCompileArgs(argv, "compileall") {
+			return reviewEvidenceBuild, "python-compileall"
+		}
+		if len(argv) == 3 && safePythonSourceTarget(argv[1]) && argv[2] == "--check" {
+			return reviewEvidenceTest, "python-check"
+		}
 	case "npm", "npm.cmd":
 		return classifyPackageScript(argv[1:], "npm")
 	case "yarn", "yarn.cmd", "pnpm", "pnpm.cmd":
@@ -342,6 +397,59 @@ func classifyReviewArgv(argv []string) (kind, runner string) {
 		return classifyMakeTarget(argv[1:])
 	}
 	return "", ""
+}
+
+type goReviewInvocation struct {
+	Directory  string
+	Subcommand string
+	Args       []string
+}
+
+func parseGoReviewInvocation(argv []string) (goReviewInvocation, bool) {
+	if len(argv) < 2 {
+		return goReviewInvocation{}, false
+	}
+	directory := "."
+	index := 1
+	if argv[index] == "-C" {
+		index++
+		if index >= len(argv) {
+			return goReviewInvocation{}, false
+		}
+		directory = normalizeReviewEvidencePath(argv[index])
+		index++
+	} else if strings.HasPrefix(argv[index], "-C=") {
+		directory = normalizeReviewEvidencePath(strings.TrimPrefix(argv[index], "-C="))
+		index++
+	}
+	if directory == "" || index >= len(argv) || strings.HasPrefix(argv[index], "-") {
+		return goReviewInvocation{}, false
+	}
+	return goReviewInvocation{
+		Directory:  directory,
+		Subcommand: argv[index],
+		Args:       argv[index+1:],
+	}, true
+}
+
+func validPythonCompileArgs(argv []string, module string) bool {
+	return len(pythonCompileCoverage(argv, module)) > 0
+}
+
+func safePythonSourceTarget(target string) bool {
+	if strings.Contains(target, "\\") {
+		return false
+	}
+	target = normalizeReviewEvidencePath(target)
+	if target == "" || target == "." {
+		return false
+	}
+	switch strings.ToLower(filepath.Ext(target)) {
+	case ".py", ".pyi":
+		return true
+	default:
+		return false
+	}
 }
 
 func stripReviewEnvironment(argv []string) ([]string, bool) {
@@ -676,12 +784,20 @@ func reviewOutputShowsNoTests(runner, output string) bool {
 
 func goReviewUsesFocusedFilter(argv []string) bool {
 	argv, ok := stripReviewEnvironment(argv)
-	if !ok || len(argv) < 3 || filepath.Base(argv[0]) != "go" || argv[1] != "test" {
+	runner := ""
+	if len(argv) > 0 {
+		runner = strings.ToLower(filepath.Base(argv[0]))
+	}
+	if !ok || len(argv) < 3 || runner != "go" && runner != "go.exe" {
 		return false
 	}
-	for index, arg := range argv[2:] {
-		if arg == "-run" && index+3 < len(argv) {
-			return argv[index+3] != "^$"
+	invocation, ok := parseGoReviewInvocation(argv)
+	if !ok || invocation.Subcommand != "test" {
+		return false
+	}
+	for index, arg := range invocation.Args {
+		if arg == "-run" && index+1 < len(invocation.Args) {
+			return invocation.Args[index+1] != "^$"
 		}
 		if strings.HasPrefix(arg, "-run=") {
 			return strings.TrimPrefix(arg, "-run=") != "^$"

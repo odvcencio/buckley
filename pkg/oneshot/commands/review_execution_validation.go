@@ -62,7 +62,19 @@ func validateReviewEvidenceCoverage(changedFiles []string, evidence []reviewComm
 			}
 		}
 		if !languageSatisfied {
-			missing = append(missing, language+":"+strings.Join(files, "+"))
+			var gaps []string
+			for _, kind := range []string{reviewEvidenceBuild, reviewEvidenceTest} {
+				var paths []string
+				for _, file := range files {
+					if !reviewEvidenceCoversFile(evidence, language, kind, file) {
+						paths = append(paths, file)
+					}
+				}
+				if len(paths) > 0 {
+					gaps = append(gaps, kind+":"+strings.Join(paths, "+"))
+				}
+			}
+			missing = append(missing, language+"("+strings.Join(gaps, ";")+")")
 		}
 	}
 	if len(missing) > 0 {
@@ -89,6 +101,12 @@ func reviewEvidenceCoversFile(evidence []reviewCommandEvidenceDetails, language,
 		for _, target := range item.Targets {
 			targetPath := normalizeReviewEvidencePath(target.Path)
 			if targetPath == "" {
+				continue
+			}
+			if target.ExactFile {
+				if file == targetPath {
+					return true
+				}
 				continue
 			}
 			if target.Recursive {
