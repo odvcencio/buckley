@@ -94,25 +94,35 @@ func TestSelectPRCIEvidence_DocumentationOnlyInheritsImmutableBaseChecks(t *test
 		HeadSHA:    "head-sha",
 	}
 	tests := []struct {
-		name     string
-		response string
-		want     string
+		name           string
+		checkResponse  string
+		statusResponse string
+		want           string
 	}{
 		{
 			name: "passing across every page",
-			response: `[{"total_count":2,"check_runs":[{"id":1,"name":"unit","status":"completed","conclusion":"success"}]},` +
+			checkResponse: `[{"total_count":2,"check_runs":[{"id":1,"name":"unit","status":"completed","conclusion":"success"}]},` +
 				`{"total_count":2,"check_runs":[{"id":2,"name":"optional","status":"completed","conclusion":"neutral"}]}]`,
-			want: "passing (2/2)",
+			statusResponse: `[{"state":"pending","total_count":0,"statuses":[]}]`,
+			want:           "passing (2/2)",
 		},
 		{
-			name:     "failing",
-			response: `[{"total_count":1,"check_runs":[{"id":1,"name":"unit","status":"completed","conclusion":"failure"}]}]`,
-			want:     "failing (1/1)",
+			name:           "failing check run",
+			checkResponse:  `[{"total_count":1,"check_runs":[{"id":1,"name":"unit","status":"completed","conclusion":"failure"}]}]`,
+			statusResponse: `[{"state":"pending","total_count":0,"statuses":[]}]`,
+			want:           "failing (1/1)",
 		},
 		{
-			name:     "pending",
-			response: `[{"total_count":1,"check_runs":[{"id":1,"name":"unit","status":"in_progress","conclusion":""}]}]`,
-			want:     "pending (1/1)",
+			name:           "pending check run",
+			checkResponse:  `[{"total_count":1,"check_runs":[{"id":1,"name":"unit","status":"in_progress","conclusion":""}]}]`,
+			statusResponse: `[{"state":"pending","total_count":0,"statuses":[]}]`,
+			want:           "pending (1/1)",
+		},
+		{
+			name:           "legacy status-only failure",
+			checkResponse:  `[{"total_count":0,"check_runs":[]}]`,
+			statusResponse: `[{"state":"failure","total_count":1,"statuses":[{"id":3,"context":"legacy/ci","state":"failure"}]}]`,
+			want:           "failing (1/1)",
 		},
 	}
 
@@ -121,20 +131,25 @@ func TestSelectPRCIEvidence_DocumentationOnlyInheritsImmutableBaseChecks(t *test
 			calls := 0
 			run := func(name string, args ...string) ([]byte, error) {
 				calls++
-				if name != "gh" || !hasPRArgPrefix(args, "api", "--paginate", "--slurp") ||
-					!hasPRArg(args, "repos/m31labs/buckley/commits/base-sha/check-runs?filter=latest&per_page=100") ||
-					!hasPRArgPair(args, "--hostname", "github.example") {
+				if name != "gh" || !hasPRArgPrefix(args, "api", "--paginate", "--slurp") || !hasPRArgPair(args, "--hostname", "github.example") {
 					return nil, fmt.Errorf("unexpected command: %s %s", name, strings.Join(args, " "))
 				}
-				return []byte(tt.response), nil
+				switch {
+				case hasPRArg(args, "repos/m31labs/buckley/commits/base-sha/check-runs?filter=latest&per_page=100"):
+					return []byte(tt.checkResponse), nil
+				case hasPRArg(args, "repos/m31labs/buckley/commits/base-sha/status?per_page=100"):
+					return []byte(tt.statusResponse), nil
+				default:
+					return nil, fmt.Errorf("unexpected endpoint: %s", strings.Join(args, " "))
+				}
 			}
 
 			selection, err := selectPRCIEvidence(run, pr, []string{"CHANGELOG.md", "docs/release.md"}, true, nil)
 			if err != nil {
 				t.Fatalf("selectPRCIEvidence: %v", err)
 			}
-			if calls != 1 {
-				t.Fatalf("base check-runs calls = %d, want 1", calls)
+			if calls != 2 {
+				t.Fatalf("base CI evidence calls = %d, want check-runs plus commit status", calls)
 			}
 			if selection.Source != prCISourceBase || selection.Revision != "base-sha" {
 				t.Fatalf("selection provenance = %#v", selection)
@@ -143,6 +158,26 @@ func TestSelectPRCIEvidence_DocumentationOnlyInheritsImmutableBaseChecks(t *test
 				t.Fatalf("summarizePRChecks = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestGetCommitStatuses_UsesLatestCombinedContextState(t *testing.T) {
+	run := func(name string, args ...string) ([]byte, error) {
+		if name != "gh" || !hasPRArgPrefix(args, "api", "--paginate", "--slurp") ||
+			!hasPRArg(args, "repos/m31labs/buckley/commits/base-sha/status?per_page=100") ||
+			!hasPRArgPair(args, "--hostname", "github.com") {
+			return nil, fmt.Errorf("unexpected command: %s %s", name, strings.Join(args, " "))
+		}
+		// GitHub's combined-status endpoint exposes the latest status for each
+		// context, so this successful rerun is authoritative over older failures.
+		return []byte(`[{"state":"success","total_count":1,"statuses":[{"id":9,"context":"legacy/ci","state":"success"}]}]`), nil
+	}
+	checks, err := getCommitStatuses(run, "github.com", "m31labs/buckley", "base-sha")
+	if err != nil {
+		t.Fatalf("getCommitStatuses: %v", err)
+	}
+	if got := summarizePRChecks(checks); got != "passing (1/1)" {
+		t.Fatalf("successful latest rerun summarized as %q", got)
 	}
 }
 
@@ -635,6 +670,13 @@ func TestRevalidatePRContext_StableInheritedBaseCIRemainsSnapshotBound(t *testin
 				return nil, fmt.Errorf("base check-runs omitted explicit host: %s", strings.Join(args, " "))
 			}
 			return []byte(`[{"total_count":1,"check_runs":[{"id":1,"name":"unit","status":"completed","conclusion":"success"}]}]`), nil
+		}
+		if name == "gh" && hasPRArgPrefix(args, "api", "--paginate", "--slurp") &&
+			hasPRArg(args, "repos/m31labs/buckley/commits/base-sha/status?per_page=100") {
+			if !hasPRArgPair(args, "--hostname", "github.com") {
+				return nil, fmt.Errorf("base commit status omitted explicit host: %s", strings.Join(args, " "))
+			}
+			return []byte(`[{"state":"pending","total_count":0,"statuses":[]}]`), nil
 		}
 		return base(name, args...)
 	}

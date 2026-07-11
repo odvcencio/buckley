@@ -925,7 +925,7 @@ func selectPRCIEvidence(run prCommandRunner, pr *PRInfo, files []string, filesAu
 		return selection, nil
 	}
 
-	baseChecks, err := getCommitCheckRuns(run, pr.Host, pr.Repository, pr.BaseSHA)
+	baseChecks, err := getCommitCIEvidence(run, pr.Host, pr.Repository, pr.BaseSHA)
 	if err != nil {
 		return prCISelection{}, err
 	}
@@ -945,7 +945,7 @@ func refetchPRCIEvidence(run prCommandRunner, target prReference, metadata prMet
 		return headChecks, prCISourceHead, metadata.HeadSHA, nil
 	}
 
-	baseChecks, err := getCommitCheckRuns(run, metadata.Host, metadata.Repository, metadata.BaseSHA)
+	baseChecks, err := getCommitCIEvidence(run, metadata.Host, metadata.Repository, metadata.BaseSHA)
 	if err != nil {
 		return nil, "", "", err
 	}
@@ -959,6 +959,18 @@ func describePRCISelection(selection prCISelection) (string, string) {
 			len(selection.Checks), displayPRRevision(selection.Revision))
 	}
 	return "CI checks", fmt.Sprintf("%d checks from pull request head %s", len(selection.Checks), displayPRRevision(selection.Revision))
+}
+
+func getCommitCIEvidence(run prCommandRunner, host, repository, revision string) ([]PRCheck, error) {
+	checkRuns, err := getCommitCheckRuns(run, host, repository, revision)
+	if err != nil {
+		return nil, fmt.Errorf("check runs: %w", err)
+	}
+	statuses, err := getCommitStatuses(run, host, repository, revision)
+	if err != nil {
+		return nil, fmt.Errorf("commit statuses: %w", err)
+	}
+	return append(checkRuns, statuses...), nil
 }
 
 func getCommitCheckRuns(run prCommandRunner, host, repository, revision string) ([]PRCheck, error) {
@@ -1027,6 +1039,73 @@ func getCommitCheckRuns(run prCommandRunner, host, repository, revision string) 
 	}
 	if len(checks) != total {
 		return nil, fmt.Errorf("base check-runs cardinality mismatch: API reported %d but pagination returned %d", total, len(checks))
+	}
+	return checks, nil
+}
+
+func getCommitStatuses(run prCommandRunner, host, repository, revision string) ([]PRCheck, error) {
+	if strings.TrimSpace(host) == "" {
+		return nil, fmt.Errorf("explicit GitHub host is required for base commit statuses")
+	}
+	owner, repo, err := splitPRRepository(repository)
+	if err != nil {
+		return nil, fmt.Errorf("resolve repository for base commit statuses: %w", err)
+	}
+	revision = strings.TrimSpace(revision)
+	if revision == "" {
+		return nil, fmt.Errorf("immutable base revision is required for base commit statuses")
+	}
+
+	type commitStatus struct {
+		ID      int64  `json:"id"`
+		Context string `json:"context"`
+		State   string `json:"state"`
+	}
+	type combinedStatusPage struct {
+		TotalCount int            `json:"total_count"`
+		Statuses   []commitStatus `json:"statuses"`
+	}
+
+	// The combined-status endpoint returns only the latest status for each
+	// context, so an obsolete failed attempt cannot override a successful rerun.
+	endpoint := fmt.Sprintf("repos/%s/%s/commits/%s/status?per_page=100", owner, repo, url.PathEscape(revision))
+	args := withPRAPIHostname([]string{"api", "--paginate", "--slurp", endpoint}, host)
+	output, err := run("gh", args...)
+	if err != nil {
+		return nil, err
+	}
+
+	var pages []combinedStatusPage
+	if err := json.Unmarshal(output, &pages); err != nil {
+		var page combinedStatusPage
+		if flatErr := json.Unmarshal(output, &page); flatErr != nil {
+			return nil, err
+		}
+		pages = []combinedStatusPage{page}
+	}
+	if len(pages) == 0 {
+		return nil, fmt.Errorf("base commit-status response contained no pages")
+	}
+
+	total := pages[0].TotalCount
+	checks := make([]PRCheck, 0, total)
+	seenIDs := make(map[int64]struct{}, total)
+	for pageIndex, page := range pages {
+		if page.TotalCount != total {
+			return nil, fmt.Errorf("base commit-status total_count changed across pages: page 1 reported %d, page %d reported %d", total, pageIndex+1, page.TotalCount)
+		}
+		for _, status := range page.Statuses {
+			if status.ID != 0 {
+				if _, exists := seenIDs[status.ID]; exists {
+					return nil, fmt.Errorf("base commit-status pagination returned duplicate status id %d", status.ID)
+				}
+				seenIDs[status.ID] = struct{}{}
+			}
+			checks = append(checks, PRCheck{Name: "status: " + status.Context, Status: status.State})
+		}
+	}
+	if len(checks) != total {
+		return nil, fmt.Errorf("base commit-status cardinality mismatch: API reported %d but pagination returned %d", total, len(checks))
 	}
 	return checks, nil
 }
