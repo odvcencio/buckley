@@ -49,12 +49,19 @@ type PRContext struct {
 	InlineComments          []PRComment
 	ResolvedThreadsFiltered int
 	Checks                  []PRCheck
+	CIProvenance            string
+	CIRevision              string
 	Files                   []string
 	AgentsMD                string
 	CheckoutSHA             string
 	ContextStatus           []PRContextStatus
 	target                  prReference
 }
+
+const (
+	prCISourceHead = "pull request head"
+	prCISourceBase = "immutable base"
+)
 
 // PRComment represents a PR comment.
 type PRComment struct {
@@ -163,16 +170,7 @@ func assemblePRContext(prRef string, deps prContextDependencies) (*PRContext, *t
 		prCtx.addStatus("PR diff", "complete", fmt.Sprintf("%d bytes", diff.OriginalBytes), false)
 	}
 
-	checks, err := getPRChecks(deps.run, target)
-	if err == nil {
-		prCtx.Checks = checks
-		prCtx.PR.CIStatus = summarizePRChecks(checks)
-		audit.Add("CI checks", len(checks)*10)
-		prCtx.addStatus("CI checks", "complete", fmt.Sprintf("%d checks", len(checks)), false)
-	} else {
-		prCtx.PR.CIStatus = "unknown"
-		recordPRContextFailure(prCtx, audit, "CI checks", err)
-	}
+	headChecks, headChecksErr := getPRChecks(deps.run, target)
 
 	feedbackTarget := target
 	if pr != nil {
@@ -224,8 +222,9 @@ func assemblePRContext(prRef string, deps prContextDependencies) (*PRContext, *t
 		recordPRContextFailure(prCtx, audit, "Inline review threads", err)
 	}
 
-	files, err := getPRFiles(deps.run, pr)
-	if err == nil {
+	files, filesErr := getPRFiles(deps.run, pr)
+	filesAuthoritative := filesErr == nil && len(files) == pr.ChangedFiles
+	if filesErr == nil {
 		prCtx.Files = files
 		if len(files) != pr.ChangedFiles {
 			audit.Add("changed files (cardinality mismatch)", len(files)*5)
@@ -236,7 +235,26 @@ func assemblePRContext(prRef string, deps prContextDependencies) (*PRContext, *t
 			prCtx.addStatus("Changed files", "complete", fmt.Sprintf("%d files", len(files)), false)
 		}
 	} else {
-		recordPRContextFailure(prCtx, audit, "Changed files", err)
+		recordPRContextFailure(prCtx, audit, "Changed files", filesErr)
+	}
+
+	if headChecksErr != nil {
+		prCtx.PR.CIStatus = "unknown"
+		recordPRContextFailure(prCtx, audit, "CI checks", headChecksErr)
+	} else {
+		selection, selectionErr := selectPRCIEvidence(deps.run, pr, files, filesAuthoritative, headChecks)
+		if selectionErr != nil {
+			prCtx.PR.CIStatus = "unknown"
+			recordPRContextFailure(prCtx, audit, "CI checks (immutable base)", selectionErr)
+		} else {
+			prCtx.Checks = selection.Checks
+			prCtx.CIProvenance = selection.Source
+			prCtx.CIRevision = selection.Revision
+			prCtx.PR.CIStatus = summarizePRChecks(selection.Checks)
+			name, detail := describePRCISelection(selection)
+			audit.Add(name, len(selection.Checks)*10)
+			prCtx.addStatus("CI checks", "complete", detail, false)
+		}
 	}
 
 	assemblePRAgentsContext(prCtx, audit, deps)
@@ -261,6 +279,9 @@ func BuildPRPrompt(ctx *PRContext) string {
 	sb.WriteString(fmt.Sprintf("- **Base**: %s @ %s\n", ctx.PR.BaseBranch, displayPRRevision(ctx.PR.BaseSHA)))
 	sb.WriteString(fmt.Sprintf("- **Changes**: +%d/-%d in %d files\n", ctx.PR.Additions, ctx.PR.Deletions, ctx.PR.ChangedFiles))
 	sb.WriteString(fmt.Sprintf("- **CI Status**: %s\n", ctx.PR.CIStatus))
+	if ctx.CIProvenance != "" {
+		sb.WriteString(fmt.Sprintf("- **CI Evidence**: %s @ %s\n", ctx.CIProvenance, displayPRRevision(ctx.CIRevision)))
+	}
 	sb.WriteString(fmt.Sprintf("- **Review Decision**: %s\n", displayPRValue(ctx.PR.ReviewDecision)))
 	if ctx.CheckoutSHA != "" {
 		sb.WriteString(fmt.Sprintf("- **Local Verification Checkout**: %s\n", ctx.CheckoutSHA))
@@ -545,6 +566,8 @@ type prMetadataSnapshot struct {
 type prEvidenceSnapshot struct {
 	Metadata                prMetadataSnapshot
 	CIStatus                string
+	CIProvenance            string
+	CIRevision              string
 	ChecksFingerprint       string
 	CommentIDsFingerprint   string
 	CommentsFingerprint     string
@@ -611,7 +634,7 @@ func revalidatePRContext(ctx *PRContext, run prCommandRunner) (string, error) {
 		return changed, nil
 	}
 
-	current, err := fetchPRReviewEvidence(run, target, currentMetadata)
+	current, err := fetchPRReviewEvidence(run, target, currentMetadata, captured.CIProvenance)
 	if err != nil {
 		return "", fmt.Errorf("re-fetch PR review evidence: %w", err)
 	}
@@ -694,11 +717,11 @@ func snapshotPRContextEvidence(ctx *PRContext) prEvidenceSnapshot {
 			ReviewDecision: ctx.PR.ReviewDecision,
 		}
 	}
-	return newPREvidenceSnapshot(metadata, ctx.Checks, ctx.Comments, ctx.Reviews, ctx.InlineComments, ctx.ResolvedThreadsFiltered)
+	return newPREvidenceSnapshot(metadata, ctx.Checks, ctx.CIProvenance, ctx.CIRevision, ctx.Comments, ctx.Reviews, ctx.InlineComments, ctx.ResolvedThreadsFiltered)
 }
 
-func fetchPRReviewEvidence(run prCommandRunner, target prReference, metadata prMetadataSnapshot) (prEvidenceSnapshot, error) {
-	checks, err := getPRChecks(run, target)
+func fetchPRReviewEvidence(run prCommandRunner, target prReference, metadata prMetadataSnapshot, capturedCISource string) (prEvidenceSnapshot, error) {
+	checks, ciSource, ciRevision, err := refetchPRCIEvidence(run, target, metadata, capturedCISource)
 	if err != nil {
 		return prEvidenceSnapshot{}, fmt.Errorf("CI checks: %w", err)
 	}
@@ -736,12 +759,14 @@ func fetchPRReviewEvidence(run prCommandRunner, target prReference, metadata prM
 	if changed := describePRMetadataChanges(metadata, metadataAfter); changed != "" {
 		return prEvidenceSnapshot{}, fmt.Errorf("PR metadata changed during evidence re-fetch: %s", changed)
 	}
-	return newPREvidenceSnapshot(metadataAfter, checks, comments, reviews, inline.Comments, inline.ResolvedThreadsFiltered), nil
+	return newPREvidenceSnapshot(metadataAfter, checks, ciSource, ciRevision, comments, reviews, inline.Comments, inline.ResolvedThreadsFiltered), nil
 }
 
 func newPREvidenceSnapshot(
 	metadata prMetadataSnapshot,
 	checks []PRCheck,
+	ciProvenance string,
+	ciRevision string,
 	comments []PRComment,
 	reviews []PRReview,
 	inlineComments []PRComment,
@@ -755,6 +780,8 @@ func newPREvidenceSnapshot(
 	return prEvidenceSnapshot{
 		Metadata:                metadata,
 		CIStatus:                summarizePRChecks(checks),
+		CIProvenance:            ciProvenance,
+		CIRevision:              ciRevision,
 		ChecksFingerprint:       fingerprintPRChecks(checks),
 		CommentIDsFingerprint:   fingerprintPRStrings(feedback.Comments),
 		CommentsFingerprint:     fingerprintPRComments(comments),
@@ -773,6 +800,12 @@ func describePREvidenceChanges(captured, current prEvidenceSnapshot) string {
 	}
 	if captured.CIStatus != current.CIStatus {
 		changes = append(changes, fmt.Sprintf("CI status %q -> %q", captured.CIStatus, current.CIStatus))
+	}
+	if captured.CIProvenance != current.CIProvenance {
+		changes = append(changes, fmt.Sprintf("CI provenance %q -> %q", captured.CIProvenance, current.CIProvenance))
+	}
+	if captured.CIRevision != current.CIRevision {
+		changes = append(changes, fmt.Sprintf("CI revision %q -> %q", captured.CIRevision, current.CIRevision))
 	}
 	if captured.ChecksFingerprint != current.ChecksFingerprint {
 		changes = append(changes, "CI check outcomes changed")
@@ -874,6 +907,128 @@ func summarizePRChecks(checks []PRCheck) string {
 		return fmt.Sprintf("passing (%d/%d)", nonBlocking, len(checks))
 	}
 	return "no checks"
+}
+
+type prCISelection struct {
+	Checks   []PRCheck
+	Source   string
+	Revision string
+}
+
+func selectPRCIEvidence(run prCommandRunner, pr *PRInfo, files []string, filesAuthoritative bool, headChecks []PRCheck) (prCISelection, error) {
+	selection := prCISelection{
+		Checks:   headChecks,
+		Source:   prCISourceHead,
+		Revision: pr.HeadSHA,
+	}
+	if len(headChecks) > 0 || !filesAuthoritative || !reviewChangedFilesDocumentationOnly(files) {
+		return selection, nil
+	}
+
+	baseChecks, err := getCommitCheckRuns(run, pr.Host, pr.Repository, pr.BaseSHA)
+	if err != nil {
+		return prCISelection{}, err
+	}
+	return prCISelection{
+		Checks:   baseChecks,
+		Source:   prCISourceBase,
+		Revision: pr.BaseSHA,
+	}, nil
+}
+
+func refetchPRCIEvidence(run prCommandRunner, target prReference, metadata prMetadataSnapshot, capturedCISource string) ([]PRCheck, string, string, error) {
+	headChecks, err := getPRChecks(run, target)
+	if err != nil {
+		return nil, "", "", err
+	}
+	if len(headChecks) > 0 || capturedCISource != prCISourceBase {
+		return headChecks, prCISourceHead, metadata.HeadSHA, nil
+	}
+
+	baseChecks, err := getCommitCheckRuns(run, metadata.Host, metadata.Repository, metadata.BaseSHA)
+	if err != nil {
+		return nil, "", "", err
+	}
+	return baseChecks, prCISourceBase, metadata.BaseSHA, nil
+}
+
+func describePRCISelection(selection prCISelection) (string, string) {
+	if selection.Source == prCISourceBase {
+		return "CI checks (immutable base)", fmt.Sprintf(
+			"%d check runs inherited from immutable base %s for a documentation-only diff after the PR head reported zero checks",
+			len(selection.Checks), displayPRRevision(selection.Revision))
+	}
+	return "CI checks", fmt.Sprintf("%d checks from pull request head %s", len(selection.Checks), displayPRRevision(selection.Revision))
+}
+
+func getCommitCheckRuns(run prCommandRunner, host, repository, revision string) ([]PRCheck, error) {
+	if strings.TrimSpace(host) == "" {
+		return nil, fmt.Errorf("explicit GitHub host is required for base check-runs")
+	}
+	owner, repo, err := splitPRRepository(repository)
+	if err != nil {
+		return nil, fmt.Errorf("resolve repository for base check-runs: %w", err)
+	}
+	revision = strings.TrimSpace(revision)
+	if revision == "" {
+		return nil, fmt.Errorf("immutable base revision is required for base check-runs")
+	}
+
+	type checkRun struct {
+		ID         int64  `json:"id"`
+		Name       string `json:"name"`
+		Status     string `json:"status"`
+		Conclusion string `json:"conclusion"`
+	}
+	type checkRunsPage struct {
+		TotalCount int        `json:"total_count"`
+		CheckRuns  []checkRun `json:"check_runs"`
+	}
+
+	// Ask GitHub for the latest check run per check name explicitly. That keeps
+	// an obsolete failed attempt from poisoning a successful rerun on the same
+	// immutable commit while preserving distinct current checks across apps and
+	// workflows.
+	endpoint := fmt.Sprintf("repos/%s/%s/commits/%s/check-runs?filter=latest&per_page=100", owner, repo, url.PathEscape(revision))
+	args := withPRAPIHostname([]string{"api", "--paginate", "--slurp", endpoint}, host)
+	output, err := run("gh", args...)
+	if err != nil {
+		return nil, err
+	}
+
+	var pages []checkRunsPage
+	if err := json.Unmarshal(output, &pages); err != nil {
+		var page checkRunsPage
+		if flatErr := json.Unmarshal(output, &page); flatErr != nil {
+			return nil, err
+		}
+		pages = []checkRunsPage{page}
+	}
+	if len(pages) == 0 {
+		return nil, fmt.Errorf("base check-runs response contained no pages")
+	}
+
+	total := pages[0].TotalCount
+	checks := make([]PRCheck, 0, total)
+	seenIDs := make(map[int64]struct{}, total)
+	for pageIndex, page := range pages {
+		if page.TotalCount != total {
+			return nil, fmt.Errorf("base check-runs total_count changed across pages: page 1 reported %d, page %d reported %d", total, pageIndex+1, page.TotalCount)
+		}
+		for _, check := range page.CheckRuns {
+			if check.ID != 0 {
+				if _, exists := seenIDs[check.ID]; exists {
+					return nil, fmt.Errorf("base check-runs pagination returned duplicate check-run id %d", check.ID)
+				}
+				seenIDs[check.ID] = struct{}{}
+			}
+			checks = append(checks, PRCheck{Name: check.Name, Status: check.Status, Conclusion: check.Conclusion})
+		}
+	}
+	if len(checks) != total {
+		return nil, fmt.Errorf("base check-runs cardinality mismatch: API reported %d but pagination returned %d", total, len(checks))
+	}
+	return checks, nil
 }
 
 func getPRDiff(run prCommandRunner, target prReference) (prDiff, error) {
