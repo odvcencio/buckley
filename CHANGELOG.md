@@ -26,6 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - `review-pr` now binds every PR operation to the resolved repository and immutable head/base revisions, includes legacy commit statuses, collapses reruns to the latest context state, and validates CI provenance before approval.
+- PR generation now fetches the selected base and pins both ends of the merge-base range for diff, log, and changed-file context; exhausted retries retain their concrete validation/decode reason, and the decoder accepts the common single-string `changes` shape without weakening other fields.
 - Documentation-only PRs with no head checks can inherit successful CI from their immutable base revision; source or mixed changes still fail closed.
 - Immutable-base CI collection now fails closed when GitHub's 1,000-check-suite visibility ceiling could make evidence incomplete.
 - Review sandboxes preserve configured toolchain priority, allowing module-compatible Go installations to win over older system binaries.
