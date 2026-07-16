@@ -63,7 +63,7 @@ func (pr PRResult) FormatBody() string {
 	b.WriteString("## Changes\n\n")
 	for _, change := range pr.Changes {
 		b.WriteString("- ")
-		b.WriteString(commitmsg.NeutralizeCloseDirectives(change))
+		b.WriteString(commitmsg.NeutralizeCloseDirectives(trimBulletMarker(change)))
 		b.WriteString("\n")
 	}
 	b.WriteString("\n")
@@ -72,7 +72,7 @@ func (pr PRResult) FormatBody() string {
 		b.WriteString("## Testing\n\n")
 		for _, test := range pr.Testing {
 			b.WriteString("- ")
-			b.WriteString(commitmsg.NeutralizeCloseDirectives(test))
+			b.WriteString(commitmsg.NeutralizeCloseDirectives(trimBulletMarker(test)))
 			b.WriteString("\n")
 		}
 		b.WriteString("\n")
@@ -177,6 +177,19 @@ func isCommitAction(action string) bool {
 		}
 	}
 	return false
+}
+
+// trimBulletMarker strips a leading markdown list marker from a model-supplied
+// bullet. Renderers prepend their own "- ", and models intermittently include
+// one in the string too, producing "- - item" (observed live).
+func trimBulletMarker(s string) string {
+	t := strings.TrimSpace(s)
+	for _, marker := range []string{"- ", "* ", "• "} {
+		if strings.HasPrefix(t, marker) {
+			return strings.TrimSpace(strings.TrimPrefix(t, marker))
+		}
+	}
+	return t
 }
 
 func (PRDefinition) SystemPrompt() string {

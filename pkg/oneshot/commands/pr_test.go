@@ -50,6 +50,27 @@ func TestPRFormatBodyNeverEmitsCloseDirectives(t *testing.T) {
 	}
 }
 
+func TestPRFormatBodyTrimsModelSuppliedBulletMarkers(t *testing.T) {
+	pr := PRResult{
+		Action:  "fix",
+		Title:   "double bullets",
+		Summary: "s",
+		Changes: []string{"- Already-bulleted change", "* Star-bulleted change", "Plain change"},
+		Testing: []string{"- go test ./..."},
+	}
+	body := pr.FormatBody()
+	for _, banned := range []string{"- - ", "- * "} {
+		if strings.Contains(body, banned) {
+			t.Fatalf("body contains doubled list marker %q:\n%s", banned, body)
+		}
+	}
+	for _, want := range []string{"- Already-bulleted change", "- Star-bulleted change", "- Plain change", "- go test ./..."} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("body missing normalized bullet %q:\n%s", want, body)
+		}
+	}
+}
+
 func TestPRFormatBodyOmitsEmptyTesting(t *testing.T) {
 	pr := PRResult{Action: "document", Title: "readme", Summary: "Docs only.", Changes: []string{"Update README"}}
 	body := pr.FormatBody()
