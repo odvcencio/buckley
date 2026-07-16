@@ -169,6 +169,16 @@ func (d PRDefinition) baseOrDefault() string {
 	return "main"
 }
 
+// isCommitAction reports whether action is one of the allowed commit verbs.
+func isCommitAction(action string) bool {
+	for _, a := range commitActions {
+		if a == action {
+			return true
+		}
+	}
+	return false
+}
+
 func (PRDefinition) SystemPrompt() string {
 	return `You are a pull request generator. Analyze the branch's commits and diff and generate a clear, informative PR.
 
@@ -233,6 +243,12 @@ func (PRDefinition) Validate(result json.RawMessage) error {
 	}
 	if strings.TrimSpace(pr.Action) == "" {
 		return fmt.Errorf("action is required")
+	}
+	// Providers do not all hard-enforce schema enums (observed: a model
+	// returning "feat"), so membership is validated here and the retry loop
+	// corrects the model.
+	if !isCommitAction(pr.Action) {
+		return fmt.Errorf("action %q is not an allowed verb (use one of: %s)", pr.Action, strings.Join(commitActions, ", "))
 	}
 	if strings.TrimSpace(pr.Title) == "" {
 		return fmt.Errorf("title is required")

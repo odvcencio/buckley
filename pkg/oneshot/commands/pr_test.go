@@ -15,7 +15,7 @@ func TestPRResultHeaderComposesCommitGrammar(t *testing.T) {
 		want string
 	}{
 		{"action+scope", PRResult{Action: "fix", Scope: "scene3d", Title: "restore pool shell"}, "fix(scene3d): restore pool shell"},
-		{"action only", PRResult{Action: "docs", Title: "refresh README"}, "docs: refresh README"},
+		{"action only", PRResult{Action: "document", Title: "refresh README"}, "document: refresh README"},
 		{"no action falls back to raw title", PRResult{Title: "legacy freeform title"}, "legacy freeform title"},
 	}
 	for _, tc := range cases {
@@ -51,7 +51,7 @@ func TestPRFormatBodyNeverEmitsCloseDirectives(t *testing.T) {
 }
 
 func TestPRFormatBodyOmitsEmptyTesting(t *testing.T) {
-	pr := PRResult{Action: "docs", Title: "readme", Summary: "Docs only.", Changes: []string{"Update README"}}
+	pr := PRResult{Action: "document", Title: "readme", Summary: "Docs only.", Changes: []string{"Update README"}}
 	body := pr.FormatBody()
 	if strings.Contains(body, "## Testing") {
 		t.Fatalf("body must omit empty Testing section:\n%s", body)
@@ -96,7 +96,7 @@ func TestPRValidateRequiresActionButNotTesting(t *testing.T) {
 		return PRDefinition{}.Validate(raw)
 	}
 
-	ok := PRResult{Action: "docs", Title: "readme", Summary: "s", Changes: []string{"c"}}
+	ok := PRResult{Action: "document", Title: "readme", Summary: "s", Changes: []string{"c"}}
 	if err := valid(ok); err != nil {
 		t.Fatalf("testing must be optional, got error: %v", err)
 	}
@@ -104,5 +104,13 @@ func TestPRValidateRequiresActionButNotTesting(t *testing.T) {
 	noAction := PRResult{Title: "readme", Summary: "s", Changes: []string{"c"}}
 	if err := valid(noAction); err == nil {
 		t.Fatal("missing action must fail validation")
+	}
+
+	// Providers don't reliably enforce schema enums (observed: "feat" from a
+	// live model). Validation must reject non-vocabulary verbs so the retry
+	// loop corrects them.
+	badVerb := PRResult{Action: "feat", Title: "readme", Summary: "s", Changes: []string{"c"}}
+	if err := valid(badVerb); err == nil {
+		t.Fatal("non-vocabulary action verb must fail validation")
 	}
 }

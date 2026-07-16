@@ -99,7 +99,7 @@ func runPRCommand(args []string) error {
 		termOut.Dim("Using %s", describeOneshotBackend(runtime.backend, runtime.modelID))
 	}
 
-	result, err := runPRGeneration(ctx, runtime.framework, opts.base)
+	result, err := runPRGeneration(ctx, runtime.framework, resolveEvidenceBase(opts.base))
 	if err != nil {
 		return err
 	}
@@ -250,6 +250,43 @@ func confirmPRCreation(opts prCommandOptions) error {
 	return nil
 }
 
+// resolveEvidenceBase picks the ref the PR EVIDENCE (diff/log/files) is
+// gathered against. A local base branch can silently sit many commits behind
+// its remote (held back by an old checkout or a worktree), which poisons the
+// generated PR into describing history that is already merged. The remote
+// tracking ref is the truth the PR will actually merge against, so prefer
+// origin/<base> whenever it exists; gh still receives the short base name.
+func resolveEvidenceBase(baseFlag string) string {
+	short, _ := prShortBase(baseFlag)
+	ctx, cancel := context.WithTimeout(context.Background(), gitLocalTimeout)
+	defer cancel()
+
+	remote := os.Getenv("BUCKLEY_REMOTE_NAME")
+	if remote == "" {
+		remote = "origin"
+	}
+	tracking := remote + "/" + short
+	if err := exec.CommandContext(ctx, "git", "rev-parse", "--verify", tracking).Run(); err == nil {
+		return tracking
+	}
+	return short
+}
+
+// prShortBase resolves the short base branch name (flag or auto-detected).
+func prShortBase(baseFlag string) (string, bool) {
+	if baseFlag != "" {
+		return baseFlag, true
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), gitLocalTimeout)
+	defer cancel()
+	for _, candidate := range []string{"main", "master", "develop"} {
+		if err := exec.CommandContext(ctx, "git", "rev-parse", "--verify", candidate).Run(); err == nil {
+			return candidate, false
+		}
+	}
+	return "main", false
+}
+
 // detectPRBranches returns the current branch and base branch for PR display.
 func detectPRBranches(baseFlag string) (branch, baseBranch string) {
 	ctx, cancel := context.WithTimeout(context.Background(), gitLocalTimeout)
@@ -258,20 +295,7 @@ func detectPRBranches(baseFlag string) (branch, baseBranch string) {
 	if out, err := exec.CommandContext(ctx, "git", "rev-parse", "--abbrev-ref", "HEAD").Output(); err == nil {
 		branch = strings.TrimSpace(string(out))
 	}
-	if baseFlag != "" {
-		baseBranch = baseFlag
-	} else {
-		// Auto-detect main/master
-		for _, candidate := range []string{"main", "master", "develop"} {
-			if err := exec.CommandContext(ctx, "git", "rev-parse", "--verify", candidate).Run(); err == nil {
-				baseBranch = candidate
-				break
-			}
-		}
-		if baseBranch == "" {
-			baseBranch = "main"
-		}
-	}
+	baseBranch, _ = prShortBase(baseFlag)
 	return
 }
 
