@@ -47,7 +47,7 @@ func (cr CommitResult) Header() string {
 func (cr CommitResult) Format() string {
 	msg := cr.Header() + "\n\n"
 	for _, bullet := range cr.Body {
-		msg += "- " + commitmsg.NeutralizeCloseDirectives(bullet) + "\n"
+		msg += "- " + commitmsg.NeutralizeCloseDirectives(trimBulletMarker(bullet)) + "\n"
 	}
 	if cr.Breaking {
 		msg += "\nBREAKING CHANGE: " + cr.Subject + "\n"

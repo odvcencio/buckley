@@ -134,6 +134,7 @@ func (f *Framework) Run(ctx context.Context, def Definition, opts RunOpts) (*Run
 	tool := def.Tool()
 	userPrompt := baseUserPrompt
 	var lastTrace *transparency.Trace
+	var lastErr error
 
 	for attempt := 0; attempt < maxRetries; attempt++ {
 		result, trace, invokeErr := f.invoker.Invoke(ctx, systemPrompt, userPrompt, tool, audit)
@@ -145,12 +146,14 @@ func (f *Framework) Run(ctx context.Context, def Definition, opts RunOpts) (*Run
 
 		// Check if model called the tool
 		if result == nil || result.ToolCall == nil {
+			lastErr = fmt.Errorf("model did not call the %s tool", tool.Name)
 			userPrompt = baseUserPrompt + "\n\nIMPORTANT: You MUST call the " + tool.Name + " tool. Do not reply with plain text."
 			continue
 		}
 
 		// 5. Validate
 		if err := def.Validate(result.ToolCall.Arguments); err != nil {
+			lastErr = fmt.Errorf("validation: %w", err)
 			userPrompt = baseUserPrompt + "\n\nThe previous response failed validation: " + strings.TrimSpace(err.Error()) + ". Fix and call " + tool.Name + " again."
 			continue
 		}
@@ -158,6 +161,7 @@ func (f *Framework) Run(ctx context.Context, def Definition, opts RunOpts) (*Run
 		// Unmarshal
 		value, err := def.Unmarshal(result.ToolCall.Arguments)
 		if err != nil {
+			lastErr = fmt.Errorf("unmarshal: %w", err)
 			userPrompt = baseUserPrompt + "\n\nThe tool call arguments must be valid JSON matching the schema for " + tool.Name + "."
 			continue
 		}
@@ -169,7 +173,16 @@ func (f *Framework) Run(ctx context.Context, def Definition, opts RunOpts) (*Run
 		}, nil
 	}
 
-	// All retries exhausted
+	// All retries exhausted. Surface the last failure reason: without it,
+	// every exhausted run reads identically and the operator is left to
+	// guess whether the model skipped the tool call, tripped validation,
+	// or emitted malformed JSON.
+	if lastErr != nil {
+		return &RunResult{
+			Trace:        lastTrace,
+			ContextAudit: audit,
+		}, fmt.Errorf("failed after %d attempts for command %q: last attempt: %w", maxRetries, def.Name(), lastErr)
+	}
 	return &RunResult{
 		Trace:        lastTrace,
 		ContextAudit: audit,
