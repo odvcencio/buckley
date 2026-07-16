@@ -281,7 +281,7 @@ func printPR(pr *commands.PRResult, branch, baseBranch string) {
 
 	// Build content for the box
 	var content strings.Builder
-	content.WriteString(pr.Title)
+	content.WriteString(pr.Header())
 	content.WriteString("\n\n")
 	content.WriteString(pr.Summary)
 	content.WriteString("\n\nChanges:")
@@ -296,7 +296,7 @@ func printPR(pr *commands.PRResult, branch, baseBranch string) {
 	termOut.Box("", content.String())
 
 	// Also print the full body for piping
-	fmt.Println("Title:", pr.Title)
+	fmt.Println("Title:", pr.Header())
 	fmt.Println()
 	fmt.Println(pr.FormatBody())
 }
@@ -355,7 +355,7 @@ func createPR(pr *commands.PRResult, baseBranch string) error {
 	body := pr.FormatBody()
 
 	cmd := exec.CommandContext(ctx, "gh", "pr", "create",
-		"--title", pr.Title,
+		"--title", pr.Header(),
 		"--body", body,
 		"--base", baseBranch,
 	)
