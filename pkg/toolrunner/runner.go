@@ -13,6 +13,13 @@ const (
 	defaultMaxIterations  = 25
 	defaultMaxToolsPhase1 = 15
 	defaultMaxParallel    = 5
+
+	// MaxIterationsFinishReason is set on Result.FinishReason when the loop hits
+	// its iteration cap without a final answer, so callers can render their own
+	// checkpoint UX instead of treating the fallback text as a normal reply.
+	MaxIterationsFinishReason = "max_iterations"
+
+	maxIterationsReachedMessage = "Maximum iterations reached. Please try a simpler request."
 )
 
 // Runner executes a tool loop with optional tool selection.

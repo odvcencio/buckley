@@ -33,6 +33,9 @@ type Request struct {
 	AllowedTools    []string
 	MaxIterations   int
 	Model           string
+	// Reasoning, when set, is forwarded to the provider on every turn so
+	// reasoning-capable models (e.g. Kimi K3, GLM) run at the requested effort.
+	Reasoning *model.ReasoningConfig
 }
 
 // Result contains the output from tool runner execution.
@@ -75,6 +78,16 @@ type StreamHandler interface {
 	OnToolEnd(name string, result string, err error)
 	OnError(err error)
 	OnComplete(result *Result)
+}
+
+// TurnObserver is an optional interface a StreamHandler may also implement to
+// observe each conversation message the loop produces — assistant messages
+// (with any preamble content, reasoning, and tool calls), tool-result messages,
+// and the final assistant answer — in order. Callers use it to persist a full,
+// correctly-shaped turn into their own conversation store, since the runner
+// keeps its wire history internally and only surfaces a summarized Result.
+type TurnObserver interface {
+	OnTurnMessage(msg model.Message)
 }
 
 // CacheStats tracks cache performance metrics.
