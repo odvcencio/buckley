@@ -1268,6 +1268,22 @@ func TestResolveOneShotToolFilterRespectsAgentTierAndDeny(t *testing.T) {
 	}
 }
 
+// TestResolveOneShotToolFilterUnrestrictedReturnsNil locks the contract that a
+// plain `buckley -p` (no agent profile, no --allow-tools) is UNRESTRICTED: the
+// filter must be nil ("offer all tools"), never an empty slice. The caller must
+// then avoid SetToolFilter(nil), which would record an empty allow-list (allow
+// nothing) — the bug that made -p send zero tools so models narrated or
+// hallucinated tool calls instead of acting.
+func TestResolveOneShotToolFilterUnrestrictedReturnsNil(t *testing.T) {
+	registry := tool.NewEmptyRegistry()
+	registry.Register(metadataTool{name: "read_file", metadata: tool.ToolMetadata{Impact: tool.ImpactReadOnly, Category: tool.CategoryFilesystem}})
+	registry.Register(metadataTool{name: "run_shell", metadata: tool.ToolMetadata{Impact: tool.ImpactDestructive, Category: tool.CategoryShell}})
+
+	if got := resolveOneShotToolFilter(nil, registry, nil); got != nil {
+		t.Fatalf("plain one-shot filter = %v, want nil (unrestricted)", got)
+	}
+}
+
 type metadataTool struct {
 	name     string
 	metadata tool.ToolMetadata
