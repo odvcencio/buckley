@@ -144,12 +144,24 @@ func (c *Conversation) AddToolCallMessage(toolCalls []model.ToolCall) {
 }
 
 // AddToolCallMessageWithReasoning adds an assistant tool-call message with reasoning state.
+// Prefer AddToolCallMessageWithContent when the model emitted explanatory text
+// alongside the tool call, so that preamble is not lost.
 func (c *Conversation) AddToolCallMessageWithReasoning(toolCalls []model.ToolCall, reasoning string, reasoningDetails []model.ReasoningDetail) {
+	c.AddToolCallMessageWithContent("", toolCalls, reasoning, reasoningDetails)
+}
+
+// AddToolCallMessageWithContent adds an assistant tool-call message, preserving
+// any explanatory content the model produced in the same turn. Assistant
+// messages carrying both content and tool_calls are valid on the wire (OpenAI /
+// OpenRouter / Anthropic) and models such as Kimi and GLM routinely emit a
+// short preamble before a tool call. Dropping that content made the agent look
+// like it was acting silently and lost context for later turns.
+func (c *Conversation) AddToolCallMessageWithContent(content string, toolCalls []model.ToolCall, reasoning string, reasoningDetails []model.ReasoningDetail) {
 	msg := Message{
 		Role:             "assistant",
-		Content:          "", // Tool calls don't have content
+		Content:          content,
 		Timestamp:        time.Now(),
-		Tokens:           estimateToolCallTokens(toolCalls) + estimateTokens(reasoning),
+		Tokens:           estimateTokens(content) + estimateToolCallTokens(toolCalls) + estimateTokens(reasoning),
 		ToolCalls:        toolCalls,
 		IsSummary:        false,
 		Reasoning:        reasoning,

@@ -20,7 +20,7 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.Models.Review != "z-ai/glm-5.2" {
 		t.Fatalf("expected default review model to be z-ai/glm-5.2, got %s", cfg.Models.Review)
 	}
-	wantCurated := []string{"z-ai/glm-5.2", "moonshotai/kimi-k2.7-code", "qwen/qwen3.7-max"}
+	wantCurated := []string{"z-ai/glm-5.2", "moonshotai/kimi-k3", "moonshotai/kimi-k2.7-code", "qwen/qwen3.7-max"}
 	if len(cfg.Models.Curated) != len(wantCurated) {
 		t.Fatalf("expected curated defaults %v, got %v", wantCurated, cfg.Models.Curated)
 	}
@@ -41,6 +41,12 @@ func TestDefaultConfig(t *testing.T) {
 	}
 	if cfg.Models.Utility.Commit != "qwen/qwen3.6-flash" {
 		t.Fatalf("expected default commit model to be qwen/qwen3.6-flash, got %s", cfg.Models.Utility.Commit)
+	}
+	if got := cfg.Providers.ModelRouting["moonshotai/"]; got != "openrouter" {
+		t.Fatalf("expected moonshotai/ to route to openrouter, got %q", got)
+	}
+	if chain := cfg.Models.FallbackChains["moonshotai/kimi-k3"]; len(chain) == 0 {
+		t.Fatalf("expected a fallback chain for moonshotai/kimi-k3, got none")
 	}
 	if cfg.Personality.QuirkProbability <= 0 || cfg.Personality.QuirkProbability >= 1 {
 		t.Fatalf("unexpected quirk probability: %f", cfg.Personality.QuirkProbability)

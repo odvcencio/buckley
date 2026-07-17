@@ -136,6 +136,43 @@ func TestAddToolCallMessage(t *testing.T) {
 	}
 }
 
+func TestAddToolCallMessageWithContentPreservesPreamble(t *testing.T) {
+	conv := New("test")
+	toolCalls := []model.ToolCall{
+		{
+			ID:   "call_123",
+			Type: "function",
+			Function: model.FunctionCall{
+				Name:      "read_file",
+				Arguments: `{"path":"/test/file.txt"}`,
+			},
+		},
+	}
+
+	// Models like Kimi and GLM often emit an explanatory preamble ("Let me
+	// check X.") in the same turn as a tool call. That content must not be
+	// dropped from the transcript or the wire history.
+	conv.AddUserMessage("Review this file")
+	conv.AddToolCallMessageWithContent("Let me read the file first.", toolCalls, "", nil)
+
+	msg := conv.Messages[len(conv.Messages)-1]
+	if got := GetContentAsString(msg.Content); got != "Let me read the file first." {
+		t.Fatalf("expected preamble content preserved, got %q", got)
+	}
+	if len(msg.ToolCalls) != 1 {
+		t.Fatalf("expected tool call preserved alongside content, got %d", len(msg.ToolCalls))
+	}
+
+	modelMsgs := conv.ToModelMessages()
+	assistant := modelMsgs[len(modelMsgs)-1]
+	if assistant.Content != "Let me read the file first." {
+		t.Fatalf("expected assistant wire content preserved, got %v", assistant.Content)
+	}
+	if len(assistant.ToolCalls) != 1 {
+		t.Fatalf("expected assistant wire tool_calls preserved, got %d", len(assistant.ToolCalls))
+	}
+}
+
 func TestAddToolCallMessageWithReasoningPreservesMultiTurnState(t *testing.T) {
 	conv := New("test")
 	toolCalls := []model.ToolCall{

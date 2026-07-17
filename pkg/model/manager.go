@@ -627,11 +627,19 @@ func (m *Manager) SupportsReasoning(modelID string) bool {
 	return false
 }
 
-// SupportsTools checks if a model supports function/tool calling
+// SupportsTools checks if a model supports function/tool calling.
+//
+// When the model can't be resolved in the fetched catalog (e.g. a freshly
+// released model like moonshotai/kimi-k3 that OpenRouter hasn't listed yet, or
+// a transient catalog-fetch failure) we default to ENABLED rather than
+// silently stripping tools. Silent tool-stripping is a severe failure mode: the
+// agent "chats" without ever acting. Callers retry with tools off if the
+// provider genuinely rejects tool calls (see the tool-unsupported fallbacks in
+// the interactive and headless loops), so optimistic-enable is safe.
 func (m *Manager) SupportsTools(modelID string) bool {
 	info, err := m.GetModelInfo(modelID)
 	if err != nil {
-		return false
+		return true
 	}
 
 	// Check supported_parameters for "tools" or "functions"

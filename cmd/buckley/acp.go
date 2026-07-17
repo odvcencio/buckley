@@ -658,7 +658,7 @@ func runACPLoop(
 
 		lastPhase = sendACPPhaseUpdate(stream, lastPhase, fmt.Sprintf("Executing %d tool call(s)…", len(msg.ToolCalls)))
 		normalizeACPToolCallIDs(msg.ToolCalls)
-		conv.AddToolCallMessageWithReasoning(msg.ToolCalls, msg.Reasoning, msg.ReasoningDetails)
+		conv.AddToolCallMessageWithContent(model.ExtractTextContentOrEmpty(msg.Content), msg.ToolCalls, msg.Reasoning, msg.ReasoningDetails)
 		lastPhase = executeACPToolCalls(conv, registry, stream, msg.ToolCalls, toolTurn.AllowedTools, lastPhase)
 	}
 }

@@ -179,7 +179,11 @@ func normalizeToolLoopCalls(registry *tool.Registry, calls []model.ToolCall, all
 
 func (c *Controller) recordToolLoopCalls(sess *SessionState, calls []model.ToolCall, msg model.Message) {
 	c.app.SetStatus(fmt.Sprintf("Model requested %d tool call(s)", len(calls)))
-	sess.Conversation.AddToolCallMessageWithReasoning(calls, msg.Reasoning, msg.ReasoningDetails)
+	preamble := model.ExtractTextContentOrEmpty(msg.Content)
+	sess.Conversation.AddToolCallMessageWithContent(preamble, calls, msg.Reasoning, msg.ReasoningDetails)
+	if strings.TrimSpace(preamble) != "" {
+		c.app.AddMessage(preamble, "assistant")
+	}
 	c.saveLatestConversationMessage(sess)
 }
 
