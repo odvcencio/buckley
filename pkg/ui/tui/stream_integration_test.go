@@ -103,6 +103,21 @@ func (echoTool) Metadata() tool.ToolMetadata {
 	return tool.ToolMetadata{Impact: tool.ImpactReadOnly, Category: tool.CategoryFilesystem}
 }
 
+// failTool always returns a failure, to exercise tool-error recovery.
+type failTool struct{}
+
+func (failTool) Name() string       { return "boom" }
+func (failTool) Description() string { return "always fails" }
+func (failTool) Parameters() builtin.ParameterSchema {
+	return builtin.ParameterSchema{Type: "object"}
+}
+func (failTool) Execute(map[string]any) (*builtin.Result, error) {
+	return &builtin.Result{Success: false, Error: "boom exploded"}, nil
+}
+func (failTool) Metadata() tool.ToolMetadata {
+	return tool.ToolMetadata{Impact: tool.ImpactReadOnly, Category: tool.CategoryFilesystem}
+}
+
 // TestInteractiveToolLoopStreamsAndPersists drives a full interactive turn
 // (preamble + tool call, then final answer) through the converged streaming loop
 // and asserts BOTH the persisted conversation shape and the render calls — the
@@ -375,6 +390,42 @@ func TestInteractiveToolLoopHandlesMultipleToolCalls(t *testing.T) {
 	}
 	if toolMsgs != 2 {
 		t.Fatalf("expected 2 tool result messages, got %d", toolMsgs)
+	}
+}
+
+// TestInteractiveToolLoopRecoversFromToolError verifies a failing tool doesn't
+// abort the turn: the error is fed back as the tool result and the model still
+// produces a final answer.
+func TestInteractiveToolLoopRecoversFromToolError(t *testing.T) {
+	provider := &fakeStreamProvider{
+		id:      "fake",
+		catalog: fakeToolModelCatalog(),
+		responses: []model.Message{
+			{Role: "assistant", ToolCalls: []model.ToolCall{{ID: "c1", Type: "function", Function: model.FunctionCall{Name: "boom", Arguments: "{}"}}}},
+			{Role: "assistant", Content: "Recovered; the tool failed but here's my answer."},
+		},
+	}
+	c, sess := newLoopController(t, provider)
+	// Swap in a registry whose only tool fails.
+	sess.ToolRegistry = tool.NewEmptyRegistry()
+	sess.ToolRegistry.Register(failTool{})
+	sess.Conversation.AddUserMessage("try the tool")
+
+	text, _, _, err := c.runToolLoop(context.Background(), sess, "fake/model-x")
+	if err != nil {
+		t.Fatalf("runToolLoop error (should recover, not fail): %v", err)
+	}
+	if text != "Recovered; the tool failed but here's my answer." {
+		t.Fatalf("final text = %q", text)
+	}
+	var sawErrorResult bool
+	for _, m := range sess.Conversation.Messages {
+		if m.Role == "tool" && strings.Contains(conversation.GetContentAsString(m.Content), "boom exploded") {
+			sawErrorResult = true
+		}
+	}
+	if !sawErrorResult {
+		t.Fatalf("tool error was not fed back to the model as a tool result")
 	}
 }
 
