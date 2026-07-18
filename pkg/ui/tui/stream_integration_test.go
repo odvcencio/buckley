@@ -304,6 +304,80 @@ func TestInteractiveToolLoopCheckpointsOnMaxIterations(t *testing.T) {
 	}
 }
 
+// TestInteractiveToolLoopParsesInlineToolTokens verifies the streaming TUI loop
+// recovers a tool call a model embedded as inline tokens in content (the class of
+// bug that otherwise makes a model "answer" with markup instead of acting).
+func TestInteractiveToolLoopParsesInlineToolTokens(t *testing.T) {
+	provider := &fakeStreamProvider{
+		id:      "fake",
+		catalog: fakeToolModelCatalog(),
+		responses: []model.Message{
+			{Role: "assistant", Content: "Checking.\n<|tool_calls_section_begin|><|tool_call_begin|>functions.echo:0<|tool_call_argument_begin|>{}<|tool_call_end|><|tool_calls_section_end|>"},
+			{Role: "assistant", Content: "Inline handled."},
+		},
+	}
+	c, sess := newLoopController(t, provider)
+	sess.Conversation.AddUserMessage("do it")
+
+	text, _, _, err := c.runToolLoop(context.Background(), sess, "fake/model-x")
+	if err != nil {
+		t.Fatalf("runToolLoop error: %v", err)
+	}
+	if text != "Inline handled." {
+		t.Fatalf("final text = %q", text)
+	}
+	var toolMsgs, assistantWithCall int
+	for _, m := range sess.Conversation.Messages {
+		if m.Role == "tool" && m.Name == "echo" {
+			toolMsgs++
+		}
+		if m.Role == "assistant" && len(m.ToolCalls) == 1 && m.ToolCalls[0].Function.Name == "echo" {
+			assistantWithCall++
+			if s := conversation.GetContentAsString(m.Content); strings.Contains(s, "tool_call") {
+				t.Fatalf("inline markup left in persisted content: %q", s)
+			}
+		}
+	}
+	if toolMsgs != 1 || assistantWithCall != 1 {
+		t.Fatalf("inline tool token not parsed+executed: toolMsgs=%d assistantWithCall=%d", toolMsgs, assistantWithCall)
+	}
+}
+
+// TestInteractiveToolLoopHandlesMultipleToolCalls verifies a single assistant
+// turn that requests several tools executes all of them before continuing.
+func TestInteractiveToolLoopHandlesMultipleToolCalls(t *testing.T) {
+	provider := &fakeStreamProvider{
+		id:      "fake",
+		catalog: fakeToolModelCatalog(),
+		responses: []model.Message{
+			{Role: "assistant", ToolCalls: []model.ToolCall{
+				{ID: "c1", Type: "function", Function: model.FunctionCall{Name: "echo", Arguments: "{}"}},
+				{ID: "c2", Type: "function", Function: model.FunctionCall{Name: "echo", Arguments: "{}"}},
+			}},
+			{Role: "assistant", Content: "Both ran."},
+		},
+	}
+	c, sess := newLoopController(t, provider)
+	sess.Conversation.AddUserMessage("run two")
+
+	text, _, _, err := c.runToolLoop(context.Background(), sess, "fake/model-x")
+	if err != nil {
+		t.Fatalf("runToolLoop error: %v", err)
+	}
+	if text != "Both ran." {
+		t.Fatalf("final text = %q", text)
+	}
+	toolMsgs := 0
+	for _, m := range sess.Conversation.Messages {
+		if m.Role == "tool" {
+			toolMsgs++
+		}
+	}
+	if toolMsgs != 2 {
+		t.Fatalf("expected 2 tool result messages, got %d", toolMsgs)
+	}
+}
+
 func roles(msgs []conversation.Message) []string {
 	out := make([]string, len(msgs))
 	for i, m := range msgs {
