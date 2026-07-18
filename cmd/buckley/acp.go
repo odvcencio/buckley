@@ -653,26 +653,32 @@ func runACPLoop(
 			return "", model.NoResponseChoicesError(req, resp)
 		}
 
-		msg := resp.Choices[0].Message
+		// Reconcile inline tool-call tokens some models embed in the content
+		// field instead of a structured tool_calls array (the streaming loops do
+		// this via the stream accumulator). Without it the markup leaks as a
+		// "final answer" and the tool never runs.
+		choice := resp.Choices[0]
+		choice.Message = reconcileInlineToolCalls(choice.Message)
+		msg := choice.Message
 		if len(msg.ToolCalls) == 0 {
 			text, err := model.ExtractTextContent(msg.Content)
 			if err != nil {
-				recordACPTurn(tracer, rec, &resp.Choices[0], "error", err)
+				recordACPTurn(tracer, rec, &choice, "error", err)
 				return "", err
 			}
 			if shouldNudgeACPToolUse(useTools, toolTurn.Enabled, nudgeCount, text) {
 				nudgeCount++
-				recordACPTurn(tracer, rec, &resp.Choices[0], "nudge", nil)
+				recordACPTurn(tracer, rec, &choice, "nudge", nil)
 				conv.AddUserMessage("Use tools to take action now. Pick a tool and call it; do not answer with prose alone.")
 				continue
 			}
-			recordACPTurn(tracer, rec, &resp.Choices[0], "finalize", nil)
+			recordACPTurn(tracer, rec, &choice, "finalize", nil)
 			sendACPPhaseUpdate(stream, lastPhase, "Finalizing response…")
 			conv.AddAssistantMessageWithReasoningDetails(text, msg.Reasoning, msg.ReasoningDetails)
 			return text, nil
 		}
 
-		recordACPTurn(tracer, rec, &resp.Choices[0], "tool_calls", nil)
+		recordACPTurn(tracer, rec, &choice, "tool_calls", nil)
 		lastPhase = sendACPPhaseUpdate(stream, lastPhase, fmt.Sprintf("Executing %d tool call(s)…", len(msg.ToolCalls)))
 		normalizeACPToolCallIDs(msg.ToolCalls)
 		conv.AddToolCallMessageWithContent(model.ExtractTextContentOrEmpty(msg.Content), msg.ToolCalls, msg.Reasoning, msg.ReasoningDetails)
@@ -776,6 +782,25 @@ func acpStructuredToolCalls(calls []model.ToolCall) []turntrace.ToolCallPreview 
 		out = append(out, turntrace.ToolCallPreview{Name: c.Function.Name, ID: c.ID, Args: c.Function.Arguments})
 	}
 	return out
+}
+
+// reconcileInlineToolCalls promotes tool calls that a model embedded as inline
+// tokens in the content field (e.g. Kimi's <|tool_call_begin|> markup) into a
+// structured tool_calls array, mirroring the streaming loops. When the response
+// already has structured tool calls, or the content carries no recognized
+// markup, the message is returned unchanged — so any still-unrecognized markup
+// stays visible in the turn trace's inline_markup_detected flag.
+func reconcileInlineToolCalls(msg model.Message) model.Message {
+	if len(msg.ToolCalls) > 0 {
+		return msg
+	}
+	calls, cleaned := model.ParseToolCallsFromContent(model.ExtractTextContentOrEmpty(msg.Content))
+	if len(calls) == 0 {
+		return msg
+	}
+	msg.ToolCalls = calls
+	msg.Content = model.FilterToolCallTokens(cleaned)
+	return msg
 }
 
 const acpMaxToolNudges = 2

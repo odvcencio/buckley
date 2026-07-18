@@ -9,6 +9,32 @@ import (
 	"m31labs.dev/buckley/pkg/skill"
 )
 
+func TestReconcileInlineToolCalls(t *testing.T) {
+	t.Parallel()
+
+	// Structured tool calls pass through untouched.
+	structured := model.Message{ToolCalls: []model.ToolCall{{ID: "c1", Function: model.FunctionCall{Name: "read_file"}}}, Content: "keep"}
+	if got := reconcileInlineToolCalls(structured); len(got.ToolCalls) != 1 || got.Content != "keep" {
+		t.Fatalf("structured message altered: %+v", got)
+	}
+
+	// Kimi-style inline markup is promoted to a real tool call and stripped from content.
+	inline := model.Message{Content: "I'll help you with that.\n<|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{\"city\":\"Beijing\"}<|tool_call_end|><|tool_calls_section_end|>"}
+	got := reconcileInlineToolCalls(inline)
+	if len(got.ToolCalls) != 1 || got.ToolCalls[0].Function.Name != "get_weather" {
+		t.Fatalf("inline markup not recovered as a tool call: %+v", got.ToolCalls)
+	}
+	if s, _ := got.Content.(string); strings.Contains(s, "tool_call") {
+		t.Fatalf("tool-call markup left in content: %q", s)
+	}
+
+	// Plain content with no markup is unchanged (still treated as a final answer).
+	plain := model.Message{Content: "The answer is 42."}
+	if got := reconcileInlineToolCalls(plain); len(got.ToolCalls) != 0 || got.Content != "The answer is 42." {
+		t.Fatalf("plain content altered: %+v", got)
+	}
+}
+
 func TestShouldNudgeForTools(t *testing.T) {
 	t.Parallel()
 
