@@ -32,6 +32,18 @@ func NewManager(cfg *config.Config) (*Manager, error) {
 	if err != nil {
 		return nil, err
 	}
+	return NewManagerWithProviders(cfg, providers)
+}
+
+// NewManagerWithProviders builds a Manager backed by the supplied providers
+// instead of constructing them from config. This is the injection seam that lets
+// callers (including headless tests and embedders) drive the model layer with a
+// custom or fake Provider — e.g. to exercise the chat/tool loop end-to-end
+// without a live network or a terminal.
+func NewManagerWithProviders(cfg *config.Config, providers map[string]Provider) (*Manager, error) {
+	if cfg == nil {
+		return nil, fmt.Errorf("config required")
+	}
 
 	order := make([]string, 0, len(providers))
 	for id := range providers {
