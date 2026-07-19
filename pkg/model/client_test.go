@@ -960,8 +960,8 @@ func TestClient_ChatCompletion_Retry(t *testing.T) {
 func TestDefaultRetryConfig(t *testing.T) {
 	config := DefaultRetryConfig()
 
-	if config.MaxRetries != 3 {
-		t.Errorf("MaxRetries = %d, want 3", config.MaxRetries)
+	if config.MaxRetries != 6 {
+		t.Errorf("MaxRetries = %d, want 6", config.MaxRetries)
 	}
 	if config.InitialInterval != 100*time.Millisecond {
 		t.Errorf("InitialInterval = %v, want 100ms", config.InitialInterval)
