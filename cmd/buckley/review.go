@@ -115,7 +115,13 @@ func runReviewCommand(args []string) error {
 		return fmt.Errorf("init dependencies: %w", err)
 	}
 
-	runtime, err := newReviewCommandRuntime(cfg, mgr)
+	// Parallel project reviews use scoped file bundles, so cap each bundle's
+	// tool loop lower to bound cost; single/branch reviews keep the full budget.
+	maxIter := reviewSingleMaxIterations
+	if opts.projectMode {
+		maxIter = reviewBundleMaxIterations
+	}
+	runtime, err := newReviewCommandRuntime(cfg, mgr, maxIter)
 	if err != nil {
 		return fmt.Errorf("no model configured (set BUCKLEY_MODEL_REVIEW or configure models.review)")
 	}
@@ -167,7 +173,7 @@ func runReviewCommand(args []string) error {
 	return nil
 }
 
-func newReviewCommandRuntime(cfg *config.Config, mgr *model.Manager) (*reviewCommandRuntime, error) {
+func newReviewCommandRuntime(cfg *config.Config, mgr *model.Manager, maxIterations int) (*reviewCommandRuntime, error) {
 	modelID := resolveReviewModel(cfg)
 	if modelID == "" {
 		return nil, fmt.Errorf("no review model configured")
@@ -190,6 +196,7 @@ func newReviewCommandRuntime(cfg *config.Config, mgr *model.Manager) (*reviewCom
 		Ledger:          ledger,
 		ModelID:         modelID,
 		ReasoningEffort: reasoningEffort,
+		MaxIterations:   maxIterations,
 	})
 
 	return &reviewCommandRuntime{

@@ -23,6 +23,14 @@ import (
 // full run).
 const synthesisTimeout = 8 * time.Minute
 
+// Per-run tool-loop caps. Bundle reviewers are scoped to a file slice, so a
+// lower cap bounds cost without much coverage loss; the single/branch path keeps
+// the full budget.
+const (
+	reviewBundleMaxIterations = 18
+	reviewSingleMaxIterations = 25
+)
+
 // parallelReviewLineThreshold is the changed-line count above which a branch
 // review fans out into parallel bundle reviewers instead of one agent. Project
 // reviews always fan out (they are inherently large).
@@ -267,17 +275,39 @@ func fallbackBundleReport(reviews []string, partsDir string) string {
 	return b.String()
 }
 
-// buildBundleProjectPrompt scopes a bundle reviewer to a subset of files.
+// buildBundleProjectPrompt scopes a bundle reviewer to a subset of files. It is
+// deliberately LEAN: the full project context (whole tree + README) is NOT
+// re-sent to every bundle — the agent reads the actual files via tools, so
+// repeating heavy context 6× only burns fresh tokens for little value.
 func buildBundleProjectPrompt(projectCtx *commands.ProjectContext, files []string) string {
 	var b strings.Builder
-	b.WriteString(commands.BuildProjectPrompt(projectCtx))
-	b.WriteString("\n\n---\nSCOPE FOR THIS PASS: review ONLY the files listed below (one slice of a larger project being reviewed in parallel). ")
-	b.WriteString("Use read_file/find_files/search_text to read them. Do NOT review files outside this list. ")
-	b.WriteString("Deliver concrete issues with file:line evidence, risks, and prioritized action items for just these files.\n\nFILES:\n")
+	fmt.Fprintf(&b, "You are reviewing ONE slice of the project at %s (branch %s, commit %s), in parallel with other reviewers covering other slices.\n",
+		projectCtx.RepoRoot, projectCtx.Branch, shortCommit(projectCtx.HeadCommit))
+	if mod := firstLines(projectCtx.GoMod, 3); mod != "" {
+		fmt.Fprintf(&b, "\ngo.mod (head):\n%s\n", mod)
+	}
+	b.WriteString("\nReview ONLY the files listed below. Use read_file/find_files/search_text to read them; do NOT review files outside this list. ")
+	b.WriteString("Deliver concrete issues with file:line evidence, correctness/performance/maintainability risks, and prioritized action items (High/Medium/Low + effort). Find real problems; do not summarize what the code does.\n\nFILES:\n")
 	for _, f := range files {
 		b.WriteString("- ")
 		b.WriteString(f)
 		b.WriteString("\n")
 	}
 	return b.String()
+}
+
+func shortCommit(c string) string {
+	c = strings.TrimSpace(c)
+	if len(c) > 10 {
+		return c[:10]
+	}
+	return c
+}
+
+func firstLines(s string, n int) string {
+	lines := strings.Split(strings.TrimSpace(s), "\n")
+	if len(lines) > n {
+		lines = lines[:n]
+	}
+	return strings.Join(lines, "\n")
 }
