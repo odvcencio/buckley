@@ -237,7 +237,27 @@ func (m *Manager) ChatCompletion(ctx context.Context, req ChatRequest) (*ChatRes
 	if len(resp.Choices) == 0 {
 		return nil, NoResponseChoicesError(req, resp)
 	}
+	warnModelSubstitution(selectedModel, resp.Model)
 	return resp, nil
+}
+
+var warnedModelSubstitutions sync.Map
+
+// warnModelSubstitution loudly surfaces the case where a provider served a
+// DIFFERENT model than requested — e.g. OpenRouter's allow_fallbacks silently
+// routing a rate-limited (429) model to another one. Without this the swap is
+// invisible and tokens are spent on a model the user never selected. Warns once
+// per distinct requested→served pair to avoid spamming a long run.
+func warnModelSubstitution(requested, served string) {
+	requested = strings.TrimSpace(requested)
+	served = strings.TrimSpace(served)
+	if requested == "" || served == "" || strings.EqualFold(requested, served) {
+		return
+	}
+	if _, loaded := warnedModelSubstitutions.LoadOrStore(requested+" -> "+served, struct{}{}); loaded {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "⚠ model substitution: requested %q but the provider served %q — likely a rate-limit (429) fallback. Tokens are being spent on a model you did not select.\n", requested, served)
 }
 
 // ChatCompletionStream performs a streaming chat completion

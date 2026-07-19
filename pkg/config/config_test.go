@@ -45,8 +45,11 @@ func TestDefaultConfig(t *testing.T) {
 	if got := cfg.Providers.ModelRouting["moonshotai/"]; got != "openrouter" {
 		t.Fatalf("expected moonshotai/ to route to openrouter, got %q", got)
 	}
-	if chain := cfg.Models.FallbackChains["moonshotai/kimi-k3"]; len(chain) == 0 {
-		t.Fatalf("expected a fallback chain for moonshotai/kimi-k3, got none")
+	// kimi-k3 must NOT have a fallback chain: a chain becomes an OpenRouter
+	// `models` list that silently serves a different model (e.g. kimi-k2.7-code)
+	// on a 429, wasting tokens on a model the user did not choose.
+	if chain := cfg.Models.FallbackChains["moonshotai/kimi-k3"]; len(chain) != 0 {
+		t.Fatalf("expected NO fallback chain for moonshotai/kimi-k3, got %v", chain)
 	}
 	if cfg.Personality.QuirkProbability <= 0 || cfg.Personality.QuirkProbability >= 1 {
 		t.Fatalf("unexpected quirk probability: %f", cfg.Personality.QuirkProbability)

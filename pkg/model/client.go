@@ -19,7 +19,11 @@ import (
 const (
 	defaultBaseURL = "https://openrouter.ai/api/v1"
 	defaultTimeout = 5 * time.Minute
-	maxRetries     = 3
+	// maxRetries is intentionally patient (not 3) so a rate-limited (429)
+	// reasoning model recovers on its OWN retries rather than being swapped for
+	// a different model. Each retry honors Retry-After, capped at maxRetryDelay,
+	// so total wait stays bounded.
+	maxRetries     = 6
 	baseRetryDelay = 1 * time.Second
 	maxRetryDelay  = 30 * time.Second
 
@@ -40,7 +44,7 @@ type RetryConfig struct {
 // DefaultRetryConfig returns the default retry configuration.
 func DefaultRetryConfig() RetryConfig {
 	return RetryConfig{
-		MaxRetries:      3,
+		MaxRetries:      6,
 		InitialInterval: 100 * time.Millisecond,
 		MaxInterval:     5 * time.Second,
 		Multiplier:      2.0,

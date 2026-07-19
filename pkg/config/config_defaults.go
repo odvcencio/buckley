@@ -123,11 +123,13 @@ func DefaultConfig() *Config {
 					defaultOpenRouterChatModel,
 					defaultOpenRouterUtilityModel,
 				},
-				defaultOpenRouterKimiK3: {
-					defaultOpenRouterKimiCode,
-					defaultOpenRouterQwenMax,
-					defaultOpenRouterUtilityModel,
-				},
+				// NOTE: moonshotai/kimi-k3 intentionally has NO fallback chain.
+				// A fallback chain is sent to OpenRouter as a `models` list with
+				// allow_fallbacks=true, which causes OpenRouter to SILENTLY serve
+				// a different model (e.g. kimi-k2.7-code) when K3 is rate-limited
+				// (429). For a reasoning-tier model you explicitly select, that
+				// silent substitution wastes tokens on the wrong model. With no
+				// chain, a 429 returns to buckley and is retried on K3 itself.
 				defaultOpenRouterQwenMax: {
 					defaultOpenRouterChatModel,
 					defaultOpenRouterKimiCode,
