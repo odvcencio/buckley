@@ -278,6 +278,34 @@ func (a *SubAgent) Execute(ctx context.Context, task string) (*SubAgentResult, e
 		break
 	}
 
+	// If the loop exhausted its iteration budget while the model was still
+	// calling tools, it never produced a final answer. Force ONE more turn with
+	// tools disabled so the model writes its conclusion from what it already
+	// gathered — otherwise the "summary" degrades to a useless tool-call trace
+	// (e.g. a review that just lists read_file/search_text calls).
+	if result.Summary == "" && len(result.ToolCalls) > 0 {
+		messages = append(messages, model.Message{
+			Role:    "user",
+			Content: "You have reached the tool-call limit — do NOT call any more tools. Using only what you have already gathered, write your complete final answer now.",
+		})
+		finalReq := model.ChatRequest{
+			Model:      a.model,
+			Messages:   messages,
+			ToolChoice: "none",
+		}
+		applyExecutionPolicy(&finalReq, a.readOnly, a.reviewSnapshot)
+		if a.reasoning != "" {
+			finalReq.Reasoning = &model.ReasoningConfig{Effort: a.reasoning}
+		}
+		if resp, err := a.client.ChatCompletion(ctx, finalReq); err == nil && len(resp.Choices) > 0 {
+			result.InputTokens += resp.Usage.PromptTokens
+			result.OutputTokens += resp.Usage.CompletionTokens
+			if content, cerr := model.ExtractTextContent(resp.Choices[0].Message.Content); cerr == nil {
+				result.Summary = strings.TrimSpace(content)
+			}
+		}
+	}
+
 	if result.Summary == "" {
 		result.Summary = summarizeToolCalls(result.ToolCalls)
 	}

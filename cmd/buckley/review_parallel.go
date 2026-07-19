@@ -287,6 +287,7 @@ func buildBundleProjectPrompt(projectCtx *commands.ProjectContext, files []strin
 		fmt.Fprintf(&b, "\ngo.mod (head):\n%s\n", mod)
 	}
 	b.WriteString("\nReview ONLY the files listed below. Use read_file/find_files/search_text to read them; do NOT review files outside this list. ")
+	b.WriteString("You have a LIMITED tool budget: read the most important files first (entry points, largest/most-complex files, anything suspicious), then STOP exploring and WRITE your review — do not try to open every file. ")
 	b.WriteString("Deliver concrete issues with file:line evidence, correctness/performance/maintainability risks, and prioritized action items (High/Medium/Low + effort). Find real problems; do not summarize what the code does.\n\nFILES:\n")
 	for _, f := range files {
 		b.WriteString("- ")
