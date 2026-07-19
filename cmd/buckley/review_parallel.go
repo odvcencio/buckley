@@ -19,9 +19,11 @@ import (
 )
 
 // synthesisTimeout is a dedicated deadline for the reduce step so a long,
-// expensive bundle phase can never starve it (the failure mode that wasted a
-// full run).
-const synthesisTimeout = 8 * time.Minute
+// expensive bundle phase can never starve it. It is generous because the
+// synthesizer reasons over the concatenated bundle reviews (tens of KB) at the
+// review reasoning effort; if it still overruns, the bundle reviews are returned
+// verbatim rather than lost.
+const synthesisTimeout = 15 * time.Minute
 
 // Per-run tool-loop caps. Bundle reviewers are scoped to a file slice, so a
 // lower cap bounds cost without much coverage loss; the single/branch path keeps
