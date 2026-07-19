@@ -152,6 +152,12 @@ func runReviewCommand(args []string) error {
 		printReviewAttemptCounts(result)
 	}
 
+	// Deterministically ground the review's file:line claims against the repo so
+	// hallucinated locations are flagged regardless of which model was used.
+	if groundLine := groundReviewFindings(result); groundLine != "" && !quietMode {
+		termOut.Dim("%s", groundLine)
+	}
+
 	if err := writeReviewOutput(opts.outputFile, result.reviewText); err != nil {
 		return err
 	}
