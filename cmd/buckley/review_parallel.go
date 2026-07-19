@@ -3,16 +3,25 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"m31labs.dev/buckley/pkg/model"
 	"m31labs.dev/buckley/pkg/oneshot"
 	"m31labs.dev/buckley/pkg/oneshot/commands"
+	"m31labs.dev/buckley/pkg/paths"
 	"m31labs.dev/buckley/pkg/transparency"
 )
+
+// synthesisTimeout is a dedicated deadline for the reduce step so a long,
+// expensive bundle phase can never starve it (the failure mode that wasted a
+// full run).
+const synthesisTimeout = 8 * time.Minute
 
 // parallelReviewLineThreshold is the changed-line count above which a branch
 // review fans out into parallel bundle reviewers instead of one agent. Project
@@ -198,11 +207,64 @@ func runParallelProjectReview(ctx context.Context, framework *oneshot.Framework,
 	}
 	reviews := runReviewBundlesParallel(ctx, framework, commands.ReviewProjectDef{}, snapshot, policy, prompts, concurrency)
 
-	fwResult, err := synthesizeBundleReviews(ctx, framework, reviews, audit)
+	// Persist the (expensive) bundle reviews to disk immediately, BEFORE the
+	// synthesis step, so a synthesis failure/timeout can never discard them.
+	partsDir := persistBundleReviews(reviews)
+
+	// Give synthesis its own fresh deadline, detached from the bundle-phase
+	// deadline, so a long map phase can't starve the reduce.
+	synthCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), synthesisTimeout)
+	defer cancel()
+
+	fwResult, err := synthesizeBundleReviews(synthCtx, framework, reviews, audit)
 	if err != nil {
-		return nil, err
+		// Synthesis failed, but the bundle reviews succeeded — deliver them
+		// concatenated rather than waste the work.
+		fmt.Fprintf(os.Stderr, "⚠ synthesis step failed (%v); returning the %d bundle reviews unsynthesized%s\n",
+			err, len(reviews), partsDirNote(partsDir))
+		return &reviewCommandResult{
+			reviewText:   fallbackBundleReport(reviews, partsDir),
+			contextAudit: audit,
+		}, nil
 	}
 	return reviewResultFromRLM(fwResult, audit), nil
+}
+
+// persistBundleReviews writes each bundle review to <logs>/review-bundles/ so
+// the expensive map-phase output survives a later failure. Best-effort; returns
+// the directory (empty on failure).
+func persistBundleReviews(reviews []string) string {
+	dir := filepath.Join(paths.BuckleyLogsBaseDir(), "review-bundles")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return ""
+	}
+	for i, r := range reviews {
+		_ = os.WriteFile(filepath.Join(dir, fmt.Sprintf("bundle-%02d.md", i+1)), []byte(r), 0o644)
+	}
+	return dir
+}
+
+func partsDirNote(dir string) string {
+	if dir == "" {
+		return ""
+	}
+	return " (also saved to " + dir + ")"
+}
+
+// fallbackBundleReport concatenates the raw bundle reviews when synthesis fails.
+func fallbackBundleReport(reviews []string, partsDir string) string {
+	var b strings.Builder
+	b.WriteString("# Project Review (unsynthesized bundle reviews)\n\n")
+	b.WriteString("_Synthesis did not complete; the individual bundle reviews are included verbatim below")
+	b.WriteString(partsDirNote(partsDir))
+	b.WriteString("._\n")
+	for i, r := range reviews {
+		if strings.TrimSpace(r) == "" {
+			continue
+		}
+		fmt.Fprintf(&b, "\n\n---\n## Bundle %d\n\n%s\n", i+1, r)
+	}
+	return b.String()
 }
 
 // buildBundleProjectPrompt scopes a bundle reviewer to a subset of files.
