@@ -32,6 +32,18 @@ func NewManager(cfg *config.Config) (*Manager, error) {
 	if err != nil {
 		return nil, err
 	}
+	return NewManagerWithProviders(cfg, providers)
+}
+
+// NewManagerWithProviders builds a Manager backed by the supplied providers
+// instead of constructing them from config. This is the injection seam that lets
+// callers (including headless tests and embedders) drive the model layer with a
+// custom or fake Provider — e.g. to exercise the chat/tool loop end-to-end
+// without a live network or a terminal.
+func NewManagerWithProviders(cfg *config.Config, providers map[string]Provider) (*Manager, error) {
+	if cfg == nil {
+		return nil, fmt.Errorf("config required")
+	}
 
 	order := make([]string, 0, len(providers))
 	for id := range providers {
@@ -225,7 +237,27 @@ func (m *Manager) ChatCompletion(ctx context.Context, req ChatRequest) (*ChatRes
 	if len(resp.Choices) == 0 {
 		return nil, NoResponseChoicesError(req, resp)
 	}
+	warnModelSubstitution(selectedModel, resp.Model)
 	return resp, nil
+}
+
+var warnedModelSubstitutions sync.Map
+
+// warnModelSubstitution loudly surfaces the case where a provider served a
+// DIFFERENT model than requested — e.g. OpenRouter's allow_fallbacks silently
+// routing a rate-limited (429) model to another one. Without this the swap is
+// invisible and tokens are spent on a model the user never selected. Warns once
+// per distinct requested→served pair to avoid spamming a long run.
+func warnModelSubstitution(requested, served string) {
+	requested = strings.TrimSpace(requested)
+	served = strings.TrimSpace(served)
+	if requested == "" || served == "" || strings.EqualFold(requested, served) {
+		return
+	}
+	if _, loaded := warnedModelSubstitutions.LoadOrStore(requested+" -> "+served, struct{}{}); loaded {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "⚠ model substitution: requested %q but the provider served %q — likely a rate-limit (429) fallback. Tokens are being spent on a model you did not select.\n", requested, served)
 }
 
 // ChatCompletionStream performs a streaming chat completion
@@ -627,11 +659,19 @@ func (m *Manager) SupportsReasoning(modelID string) bool {
 	return false
 }
 
-// SupportsTools checks if a model supports function/tool calling
+// SupportsTools checks if a model supports function/tool calling.
+//
+// When the model can't be resolved in the fetched catalog (e.g. a freshly
+// released model like moonshotai/kimi-k3 that OpenRouter hasn't listed yet, or
+// a transient catalog-fetch failure) we default to ENABLED rather than
+// silently stripping tools. Silent tool-stripping is a severe failure mode: the
+// agent "chats" without ever acting. Callers retry with tools off if the
+// provider genuinely rejects tool calls (see the tool-unsupported fallbacks in
+// the interactive and headless loops), so optimistic-enable is safe.
 func (m *Manager) SupportsTools(modelID string) bool {
 	info, err := m.GetModelInfo(modelID)
 	if err != nil {
-		return false
+		return true
 	}
 
 	// Check supported_parameters for "tools" or "functions"

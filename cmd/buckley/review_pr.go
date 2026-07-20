@@ -117,7 +117,7 @@ func runReviewPRCommand(args []string) error {
 		return fmt.Errorf("init dependencies: %w", err)
 	}
 
-	runtime, err := newReviewCommandRuntime(cfg, mgr)
+	runtime, err := newReviewCommandRuntime(cfg, mgr, reviewSingleMaxIterations)
 	if err != nil {
 		return fmt.Errorf("no model configured (set BUCKLEY_MODEL_REVIEW or configure models.review)")
 	}

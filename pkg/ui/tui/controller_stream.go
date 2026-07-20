@@ -65,12 +65,10 @@ func (c *Controller) handleStreamError(ctx context.Context, err error) bool {
 	return true
 }
 
-func (c *Controller) renderStreamResponse(fullResponse, finishReason string) {
-	if fullResponse != "" {
-		c.app.AddMessage(fullResponse, "assistant")
-	} else {
-		c.app.AddMessage("(empty response from model)", "system")
-	}
+// renderStreamResponse now only surfaces provider notices. The assistant text,
+// checkpoint, and empty-response handling are rendered live by runToolLoop and
+// its streaming handler, so re-emitting the text here would duplicate it.
+func (c *Controller) renderStreamResponse(_, finishReason string) {
 	if notice := modelFinishReasonNotice(finishReason); notice != "" {
 		c.app.AddMessage(notice, "system")
 	}

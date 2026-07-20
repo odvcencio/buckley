@@ -104,6 +104,7 @@ func DefaultConfig() *Config {
 			Review:    defaultOpenRouterModel,
 			Curated: []string{
 				defaultOpenRouterChatModel,
+				defaultOpenRouterKimiK3,
 				defaultOpenRouterKimiCode,
 				defaultOpenRouterQwenMax,
 			},
@@ -122,6 +123,13 @@ func DefaultConfig() *Config {
 					defaultOpenRouterChatModel,
 					defaultOpenRouterUtilityModel,
 				},
+				// NOTE: moonshotai/kimi-k3 intentionally has NO fallback chain.
+				// A fallback chain is sent to OpenRouter as a `models` list with
+				// allow_fallbacks=true, which causes OpenRouter to SILENTLY serve
+				// a different model (e.g. kimi-k2.7-code) when K3 is rate-limited
+				// (429). For a reasoning-tier model you explicitly select, that
+				// silent substitution wastes tokens on the wrong model. With no
+				// chain, a 429 returns to buckley and is retried on K3 itself.
 				defaultOpenRouterQwenMax: {
 					defaultOpenRouterChatModel,
 					defaultOpenRouterKimiCode,
@@ -167,19 +175,21 @@ func DefaultConfig() *Config {
 				Models:  []string{defaultCodexModel},
 			},
 			ModelRouting: map[string]string{
-				"openai/":    "openai",
-				"anthropic/": "anthropic",
-				"google/":    "google",
-				"qwen/":      "openrouter",
-				"ollama/":    "ollama",
-				"litellm/":   "litellm",
-				"codex/":     "codex",
-				"gpt-":       "openai",
-				"claude-":    "anthropic",
-				"gemini-":    "google",
-				"o1-":        "openai",
-				"o3-":        "openai",
-				"chatgpt-":   "openai",
+				"openai/":     "openai",
+				"anthropic/":  "anthropic",
+				"google/":     "google",
+				"qwen/":       "openrouter",
+				"moonshotai/": "openrouter",
+				"z-ai/":       "openrouter",
+				"ollama/":     "ollama",
+				"litellm/":    "litellm",
+				"codex/":      "codex",
+				"gpt-":        "openai",
+				"claude-":     "anthropic",
+				"gemini-":     "google",
+				"o1-":         "openai",
+				"o3-":         "openai",
+				"chatgpt-":    "openai",
 			},
 		},
 		PromptCache: PromptCacheConfig{

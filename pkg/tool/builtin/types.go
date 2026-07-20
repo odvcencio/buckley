@@ -1,10 +1,33 @@
 package builtin
 
+import "encoding/json"
+
 // ParameterSchema defines the parameters a tool accepts
 type ParameterSchema struct {
 	Type       string                    `json:"type"`
 	Properties map[string]PropertySchema `json:"properties"`
 	Required   []string                  `json:"required"`
+}
+
+// MarshalJSON guarantees that `type`, `properties`, and `required` are always
+// emitted as valid JSON (object/object/array), never null. Strict providers —
+// notably Moonshot (Kimi K2/K3) — reject a tool whose `required` is null with a
+// 400 ("required must be an array"), which otherwise silently forces a fallback
+// to a different model. A nil map/slice in Go marshals to null, so a tool that
+// simply doesn't set Required would break every request to those providers.
+func (p ParameterSchema) MarshalJSON() ([]byte, error) {
+	type alias ParameterSchema // distinct type: no inherited MarshalJSON, so no recursion
+	out := alias(p)
+	if out.Type == "" {
+		out.Type = "object"
+	}
+	if out.Properties == nil {
+		out.Properties = map[string]PropertySchema{}
+	}
+	if out.Required == nil {
+		out.Required = []string{}
+	}
+	return json.Marshal(out)
 }
 
 // PropertySchema defines a single parameter

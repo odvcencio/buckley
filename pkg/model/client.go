@@ -19,7 +19,11 @@ import (
 const (
 	defaultBaseURL = "https://openrouter.ai/api/v1"
 	defaultTimeout = 5 * time.Minute
-	maxRetries     = 3
+	// maxRetries is intentionally patient (not 3) so a rate-limited (429)
+	// reasoning model recovers on its OWN retries rather than being swapped for
+	// a different model. Each retry honors Retry-After, capped at maxRetryDelay,
+	// so total wait stays bounded.
+	maxRetries     = 6
 	baseRetryDelay = 1 * time.Second
 	maxRetryDelay  = 30 * time.Second
 
@@ -40,7 +44,7 @@ type RetryConfig struct {
 // DefaultRetryConfig returns the default retry configuration.
 func DefaultRetryConfig() RetryConfig {
 	return RetryConfig{
-		MaxRetries:      3,
+		MaxRetries:      6,
 		InitialInterval: 100 * time.Millisecond,
 		MaxInterval:     5 * time.Second,
 		Multiplier:      2.0,
@@ -542,11 +546,26 @@ func (c *Client) executeStreamRequest(ctx context.Context, req ChatRequest, chun
 	return fmt.Errorf("max retries exceeded: %w", lastErr)
 }
 
+const (
+	// maxSSELineBytes bounds a single SSE data: frame. Streaming tool-call
+	// argument bursts (e.g. a large code edit from Kimi/GLM) can push one frame
+	// well past the old 1MB ceiling, and bufio.Scanner aborts the entire turn
+	// with ErrTooLong when a line exceeds the buffer. 10MB matches the sandbox
+	// output ceiling and comfortably covers real tool-call payloads.
+	maxSSELineBytes = 10 * 1024 * 1024
+
+	// maxConsecutiveSSEParseErrors caps how many malformed frames in a row we
+	// tolerate before treating the stream as genuinely broken. A single bad
+	// frame (partial JSON, a stray keep-alive) should never kill the turn.
+	maxConsecutiveSSEParseErrors = 16
+)
+
 // parseSSEStream parses Server-Sent Events stream
 func (c *Client) parseSSEStream(ctx context.Context, r io.Reader, chunkChan chan<- StreamChunk) error {
 	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024) // 1MB max line
+	scanner.Buffer(make([]byte, 0, 64*1024), maxSSELineBytes)
 
+	consecutiveParseErrors := 0
 	for scanner.Scan() {
 		select {
 		case <-ctx.Done():
@@ -573,11 +592,19 @@ func (c *Client) parseSSEStream(ctx context.Context, r io.Reader, chunkChan chan
 			return nil
 		}
 
-		// Parse JSON chunk
+		// Parse JSON chunk. A single malformed frame must not abort the whole
+		// stream — skip it and keep reading, matching the OpenAI and LiteLLM
+		// stream parsers. Only bail if we see a sustained run of garbage, which
+		// signals a real protocol break rather than a transient bad frame.
 		var chunk StreamChunk
 		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
-			return fmt.Errorf("decoding chunk: %w", err)
+			consecutiveParseErrors++
+			if consecutiveParseErrors > maxConsecutiveSSEParseErrors {
+				return fmt.Errorf("decoding chunk: %w", err)
+			}
+			continue
 		}
+		consecutiveParseErrors = 0
 
 		select {
 		case chunkChan <- chunk:

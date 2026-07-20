@@ -559,3 +559,45 @@ func TestGetModelInfoAcceptsUnqualifiedRoutedModelID(t *testing.T) {
 		t.Fatal("expected SupportsTools() to resolve unqualified model IDs")
 	}
 }
+
+func TestSupportsToolsDefaultsEnabledForUncataloguedModel(t *testing.T) {
+	cfg := &config.Config{
+		Models: config.ModelConfig{
+			DefaultProvider: "openrouter",
+			FallbackChains:  map[string][]string{},
+		},
+		Providers: config.ProviderConfig{
+			ModelRouting: map[string]string{"moonshotai/": "openrouter"},
+		},
+	}
+	prov := &stubProvider{
+		id: "openrouter",
+		catalog: ModelCatalog{
+			Data: []ModelInfo{
+				{ID: "z-ai/glm-5.2", SupportedParameters: []string{"tools"}},
+			},
+		},
+	}
+	mgr := &Manager{
+		config:         cfg,
+		providers:      map[string]Provider{"openrouter": prov},
+		providerOrder:  []string{"openrouter"},
+		catalog:        make(map[string]ModelInfo),
+		providerModels: make(map[string][]string),
+		modelProviders: make(map[string]string),
+	}
+	if err := mgr.Initialize(); err != nil {
+		t.Fatalf("Initialize() error = %v", err)
+	}
+
+	// A freshly released model (e.g. moonshotai/kimi-k3) may not be in the
+	// fetched catalog yet. Silently disabling tools makes the agent "chat"
+	// without ever acting. Default to enabled and let the provider (and the
+	// caller's retry-without-tools fallback) correct genuine non-support.
+	if _, err := mgr.GetModelInfo("moonshotai/kimi-k3"); err == nil {
+		t.Fatal("precondition: expected kimi-k3 to be absent from the catalog")
+	}
+	if !mgr.SupportsTools("moonshotai/kimi-k3") {
+		t.Fatal("expected SupportsTools() to default to enabled for an uncatalogued model")
+	}
+}

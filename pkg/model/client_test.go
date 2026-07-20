@@ -364,6 +364,58 @@ func TestClient_ChatCompletion(t *testing.T) {
 	}
 }
 
+// TestParseSSEStreamSkipsMalformedChunk verifies a single unparseable frame
+// does not abort the whole stream — the surrounding valid frames must survive.
+func TestParseSSEStreamSkipsMalformedChunk(t *testing.T) {
+	client := NewClient("test-key", "")
+	stream := strings.Join([]string{
+		`data: {"id":"c1","choices":[{"delta":{"content":"Hello"}}]}`,
+		`data: {oops not valid json`,
+		`data: {"id":"c2","choices":[{"delta":{"content":" world"}}]}`,
+		`data: [DONE]`,
+		"",
+	}, "\n")
+
+	chunkChan := make(chan StreamChunk, 8)
+	err := client.parseSSEStream(context.Background(), strings.NewReader(stream), chunkChan)
+	close(chunkChan)
+	if err != nil {
+		t.Fatalf("parseSSEStream returned error on a single bad frame: %v", err)
+	}
+	var ids []string
+	for ch := range chunkChan {
+		ids = append(ids, ch.ID)
+	}
+	if len(ids) != 2 || ids[0] != "c1" || ids[1] != "c2" {
+		t.Fatalf("expected valid chunks c1,c2 to survive a bad frame, got %v", ids)
+	}
+}
+
+// TestParseSSEStreamHandlesLargeFrame verifies a single frame larger than the
+// old 1MB cap is parsed instead of aborting the turn with bufio.ErrTooLong.
+func TestParseSSEStreamHandlesLargeFrame(t *testing.T) {
+	client := NewClient("test-key", "")
+	bigContent := strings.Repeat("x", 2*1024*1024) // 2MB, exceeds the old 1MB line cap
+	frame := `data: {"id":"big","choices":[{"delta":{"content":"` + bigContent + `"}}]}`
+	stream := frame + "\n" + "data: [DONE]\n"
+
+	chunkChan := make(chan StreamChunk, 4)
+	err := client.parseSSEStream(context.Background(), strings.NewReader(stream), chunkChan)
+	close(chunkChan)
+	if err != nil {
+		t.Fatalf("parseSSEStream failed on a 2MB frame (old 1MB cap regression): %v", err)
+	}
+	got := 0
+	for ch := range chunkChan {
+		if ch.ID == "big" {
+			got++
+		}
+	}
+	if got != 1 {
+		t.Fatalf("expected the large frame to be parsed once, got %d matching chunks", got)
+	}
+}
+
 // TestClient_ChatCompletionStream tests streaming chat completion
 func TestClient_ChatCompletionStream(t *testing.T) {
 	tests := []struct {
@@ -908,8 +960,8 @@ func TestClient_ChatCompletion_Retry(t *testing.T) {
 func TestDefaultRetryConfig(t *testing.T) {
 	config := DefaultRetryConfig()
 
-	if config.MaxRetries != 3 {
-		t.Errorf("MaxRetries = %d, want 3", config.MaxRetries)
+	if config.MaxRetries != 6 {
+		t.Errorf("MaxRetries = %d, want 6", config.MaxRetries)
 	}
 	if config.InitialInterval != 100*time.Millisecond {
 		t.Errorf("InitialInterval = %v, want 100ms", config.InitialInterval)

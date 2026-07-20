@@ -482,6 +482,110 @@ func (h *recordingStreamHandler) OnToolEnd(name string, _ string, err error) {
 func (h *recordingStreamHandler) OnError(err error)    { h.errors = append(h.errors, err) }
 func (h *recordingStreamHandler) OnComplete(_ *Result) { h.completed = true }
 
+// recordingTurnHandler also implements TurnObserver, capturing the full turn.
+type recordingTurnHandler struct {
+	recordingStreamHandler
+	turns []model.Message
+}
+
+func (h *recordingTurnHandler) OnTurnMessage(msg model.Message) {
+	h.turns = append(h.turns, msg)
+}
+
+func TestRunner_TurnObserverAndReasoningThreading(t *testing.T) {
+	mock := &MockModelClient{
+		Responses: []model.ChatResponse{
+			{
+				// Iteration 1: preamble content + reasoning + a tool call, all
+				// in the same turn.
+				Choices: []model.Choice{{
+					Message: model.Message{
+						Content:   "Let me check that file.",
+						Reasoning: "The user wants to know if the file exists.",
+						ToolCalls: []model.ToolCall{{
+							ID: "call_1",
+							Function: model.FunctionCall{
+								Name:      "file_exists",
+								Arguments: `{"path": "/tmp/test.txt"}`,
+							},
+						}},
+					},
+				}},
+			},
+			{
+				// Iteration 2: final answer.
+				Choices: []model.Choice{{
+					Message: model.Message{Content: "The file does not exist."},
+				}},
+			},
+		},
+	}
+
+	registry := emptyRegistry()
+	registry.Register(&builtin.FileExistsTool{})
+
+	runner, err := New(Config{
+		Models:               mock,
+		Registry:             registry,
+		DefaultMaxIterations: 10,
+		EnableReasoning:      true,
+	})
+	if err != nil {
+		t.Fatalf("failed to create runner: %v", err)
+	}
+
+	handler := &recordingTurnHandler{}
+	runner.SetStreamHandler(handler)
+
+	_, err = runner.Run(context.Background(), Request{
+		Messages:  []model.Message{{Role: "user", Content: "Does /tmp/test.txt exist?"}},
+		Reasoning: &model.ReasoningConfig{Effort: "high"},
+	})
+	if err != nil {
+		t.Fatalf("execution failed: %v", err)
+	}
+
+	// Reasoning effort must be threaded onto every provider request.
+	if len(mock.Requests) == 0 {
+		t.Fatal("expected at least one provider request")
+	}
+	for i, req := range mock.Requests {
+		if req.Reasoning == nil || req.Reasoning.Effort != "high" {
+			t.Fatalf("request %d missing threaded reasoning effort: %+v", i, req.Reasoning)
+		}
+	}
+
+	// The TurnObserver must see: assistant(preamble+reasoning+tool_calls),
+	// tool result, final assistant answer — in order.
+	if len(handler.turns) != 3 {
+		t.Fatalf("expected 3 turn messages, got %d: %+v", len(handler.turns), handler.turns)
+	}
+
+	assistant := handler.turns[0]
+	if assistant.Role != "assistant" {
+		t.Fatalf("turn[0] role = %q, want assistant", assistant.Role)
+	}
+	if got := model.ExtractTextContentOrEmpty(assistant.Content); got != "Let me check that file." {
+		t.Fatalf("preamble content dropped from turn message: %q", got)
+	}
+	if assistant.Reasoning == "" {
+		t.Fatalf("reasoning dropped from assistant turn message")
+	}
+	if len(assistant.ToolCalls) != 1 {
+		t.Fatalf("tool call dropped from assistant turn message: %+v", assistant.ToolCalls)
+	}
+
+	toolMsg := handler.turns[1]
+	if toolMsg.Role != "tool" || toolMsg.Name != "file_exists" {
+		t.Fatalf("turn[1] = %+v, want tool result for file_exists", toolMsg)
+	}
+
+	final := handler.turns[2]
+	if final.Role != "assistant" || model.ExtractTextContentOrEmpty(final.Content) != "The file does not exist." {
+		t.Fatalf("turn[2] = %+v, want final assistant answer", final)
+	}
+}
+
 func TestRunner_StreamHandler_ToolCallsAndContent(t *testing.T) {
 	mock := &MockModelClient{
 		Responses: []model.ChatResponse{

@@ -17,11 +17,12 @@ import (
 // This provides access to all built-in tools (read, write, bash, glob, grep, etc.)
 // instead of limited custom tool definitions.
 type RLMRunner struct {
-	models    *model.Manager
-	registry  *tool.Registry
-	ledger    *transparency.CostLedger
-	modelID   string
-	reasoning string
+	models        *model.Manager
+	registry      *tool.Registry
+	ledger        *transparency.CostLedger
+	modelID       string
+	reasoning     string
+	maxIterations int
 }
 
 // RLMRunnerConfig configures the RLM runner.
@@ -31,16 +32,24 @@ type RLMRunnerConfig struct {
 	Ledger          *transparency.CostLedger
 	ModelID         string
 	ReasoningEffort string
+	// MaxIterations caps the sub-agent tool loop per run (0 = default 25).
+	// Lower values bound cost for scoped tasks like parallel review bundles.
+	MaxIterations int
 }
 
 // NewRLMRunner creates an RLM-based runner.
 func NewRLMRunner(cfg RLMRunnerConfig) *RLMRunner {
+	maxIter := cfg.MaxIterations
+	if maxIter <= 0 {
+		maxIter = 25
+	}
 	return &RLMRunner{
-		models:    cfg.Models,
-		registry:  cfg.Registry,
-		ledger:    cfg.Ledger,
-		modelID:   cfg.ModelID,
-		reasoning: normalizeRLMReasoningEffort(cfg.ReasoningEffort),
+		models:        cfg.Models,
+		registry:      cfg.Registry,
+		ledger:        cfg.Ledger,
+		modelID:       cfg.ModelID,
+		reasoning:     normalizeRLMReasoningEffort(cfg.ReasoningEffort),
+		maxIterations: maxIter,
 	}
 }
 
@@ -128,7 +137,7 @@ func (r *RLMRunner) Run(ctx context.Context, systemPrompt, task string, allowedT
 		Model:          modelToUse,
 		Reasoning:      r.reasoning,
 		SystemPrompt:   systemPrompt,
-		MaxIterations:  25, // Allow more iterations for complex tasks
+		MaxIterations:  r.maxIterations,
 		AllowedTools:   allowedTools,
 		ReviewSnapshot: opts.ReviewSnapshot,
 	}

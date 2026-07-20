@@ -41,10 +41,11 @@ func (r *Runner) executeWithTools(ctx context.Context, req Request, tools []tool
 		}
 
 		apiReq := model.ChatRequest{
-			Model:    r.requestModel(req),
-			Messages: messages,
-			Tools:    toolDefs,
-			Stream:   true,
+			Model:     r.requestModel(req),
+			Messages:  messages,
+			Tools:     toolDefs,
+			Stream:    true,
+			Reasoning: req.Reasoning,
 		}
 		if len(toolDefs) > 0 {
 			apiReq.ToolChoice = "auto"
@@ -168,6 +169,12 @@ func (r *Runner) executeWithTools(ctx context.Context, req Request, tools []tool
 				if result.Reasoning != "" {
 					// Model provided reasoning but no response - this is valid
 					result.Content = ""
+					r.notifyTurnMessage(model.Message{
+						Role:             "assistant",
+						Content:          "",
+						Reasoning:        msg.Reasoning,
+						ReasoningDetails: msg.ReasoningDetails,
+					})
 					if r.streamHandler != nil {
 						r.streamHandler.OnComplete(result)
 					}
@@ -179,6 +186,12 @@ func (r *Runner) executeWithTools(ctx context.Context, req Request, tools []tool
 			}
 
 			result.Content = content
+			r.notifyTurnMessage(model.Message{
+				Role:             "assistant",
+				Content:          content,
+				Reasoning:        msg.Reasoning,
+				ReasoningDetails: msg.ReasoningDetails,
+			})
 			if r.streamHandler != nil {
 				r.streamHandler.OnComplete(result)
 			}
@@ -195,11 +208,18 @@ func (r *Runner) executeWithTools(ctx context.Context, req Request, tools []tool
 			}
 		}
 
-		messages = append(messages, model.Message{
-			Role:      "assistant",
-			Content:   msg.Content,
-			ToolCalls: toolCalls,
-		})
+		// Preserve any preamble content and reasoning the model emitted in the
+		// same turn as the tool call — both are valid on the wire and dropping
+		// them loses user-visible context and cross-turn reasoning continuity.
+		assistantMsg := model.Message{
+			Role:             "assistant",
+			Content:          msg.Content,
+			ToolCalls:        toolCalls,
+			Reasoning:        msg.Reasoning,
+			ReasoningDetails: msg.ReasoningDetails,
+		}
+		messages = append(messages, assistantMsg)
+		r.notifyTurnMessage(assistantMsg)
 
 		toolResults, err := r.executeToolCalls(ctx, toolCalls, tools, result)
 		if err != nil {
@@ -208,19 +228,34 @@ func (r *Runner) executeWithTools(ctx context.Context, req Request, tools []tool
 		}
 		for _, tr := range toolResults {
 			content := deduper.messageFor(tr)
-			messages = append(messages, model.Message{
+			toolMsg := model.Message{
 				Role:       "tool",
 				ToolCallID: tr.ID,
 				Name:       tr.Name,
 				Content:    content,
-			})
+			}
+			messages = append(messages, toolMsg)
+			r.notifyTurnMessage(toolMsg)
 		}
 		// Release the pooled slice after processing
 		releaseToolCallRecordSlice(toolResults)
 	}
 
-	result.Content = "Maximum iterations reached. Please try a simpler request."
+	result.Content = maxIterationsReachedMessage
+	result.FinishReason = MaxIterationsFinishReason
 	return result, nil
+}
+
+// notifyTurnMessage forwards a produced conversation message to the stream
+// handler when it also implements TurnObserver, so callers can persist a full,
+// correctly-shaped turn. It is a no-op otherwise.
+func (r *Runner) notifyTurnMessage(msg model.Message) {
+	if r == nil || r.streamHandler == nil {
+		return
+	}
+	if obs, ok := r.streamHandler.(TurnObserver); ok {
+		obs.OnTurnMessage(msg)
+	}
 }
 
 func (r *Runner) executeToolCalls(ctx context.Context, calls []model.ToolCall, tools []tool.Tool, result *Result) ([]ToolCallRecord, error) {

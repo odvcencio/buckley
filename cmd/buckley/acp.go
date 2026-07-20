@@ -18,12 +18,14 @@ import (
 	projectcontext "m31labs.dev/buckley/pkg/context"
 	"m31labs.dev/buckley/pkg/conversation"
 	"m31labs.dev/buckley/pkg/model"
+	"m31labs.dev/buckley/pkg/paths"
 	"m31labs.dev/buckley/pkg/prompts"
 	"m31labs.dev/buckley/pkg/rules"
 	"m31labs.dev/buckley/pkg/skill"
 	"m31labs.dev/buckley/pkg/storage"
 	"m31labs.dev/buckley/pkg/tool"
 	"m31labs.dev/buckley/pkg/tool/builtin"
+	"m31labs.dev/buckley/pkg/turntrace"
 )
 
 const defaultACPSystemPrompt = `You are Buckley, an AI development assistant with access to tools.
@@ -617,7 +619,13 @@ func runACPLoop(
 	useTools := acpModelCanUseTools(registry, mgr, modelID)
 	nudgeCount := 0
 	lastPhase := ""
+
+	tracer := openTurnTracer()
+	defer tracer.Close()
+
+	iteration := -1
 	for {
+		iteration++
 		if ctx.Err() != nil {
 			return "", ctx.Err()
 		}
@@ -628,39 +636,171 @@ func runACPLoop(
 		useTools = toolTurn.UseTools
 		req := buildACPChatRequest(cfg, mgr, engine, conv, modelID, toolTurn)
 
+		rec := newACPTurnRecord(tracer, iteration, mgr, modelID, req, toolTurn)
+
 		resp, err := mgr.ChatCompletion(ctx, req)
 		if err != nil {
 			if useTools && isToolUnsupportedError(err) {
+				recordACPTurn(tracer, rec, nil, "retry_without_tools", err)
 				useTools = false
 				continue
 			}
+			recordACPTurn(tracer, rec, nil, "error", err)
 			return "", err
 		}
 		if len(resp.Choices) == 0 {
+			recordACPTurn(tracer, rec, nil, "error", model.NoResponseChoicesError(req, resp))
 			return "", model.NoResponseChoicesError(req, resp)
 		}
 
-		msg := resp.Choices[0].Message
+		// Reconcile inline tool-call tokens some models embed in the content
+		// field instead of a structured tool_calls array (the streaming loops do
+		// this via the stream accumulator). Without it the markup leaks as a
+		// "final answer" and the tool never runs.
+		choice := resp.Choices[0]
+		choice.Message = reconcileInlineToolCalls(choice.Message)
+		msg := choice.Message
 		if len(msg.ToolCalls) == 0 {
 			text, err := model.ExtractTextContent(msg.Content)
 			if err != nil {
+				recordACPTurn(tracer, rec, &choice, "error", err)
 				return "", err
 			}
 			if shouldNudgeACPToolUse(useTools, toolTurn.Enabled, nudgeCount, text) {
 				nudgeCount++
+				recordACPTurn(tracer, rec, &choice, "nudge", nil)
 				conv.AddUserMessage("Use tools to take action now. Pick a tool and call it; do not answer with prose alone.")
 				continue
 			}
+			recordACPTurn(tracer, rec, &choice, "finalize", nil)
 			sendACPPhaseUpdate(stream, lastPhase, "Finalizing response…")
 			conv.AddAssistantMessageWithReasoningDetails(text, msg.Reasoning, msg.ReasoningDetails)
 			return text, nil
 		}
 
+		recordACPTurn(tracer, rec, &choice, "tool_calls", nil)
 		lastPhase = sendACPPhaseUpdate(stream, lastPhase, fmt.Sprintf("Executing %d tool call(s)…", len(msg.ToolCalls)))
 		normalizeACPToolCallIDs(msg.ToolCalls)
-		conv.AddToolCallMessageWithReasoning(msg.ToolCalls, msg.Reasoning, msg.ReasoningDetails)
+		conv.AddToolCallMessageWithContent(model.ExtractTextContentOrEmpty(msg.Content), msg.ToolCalls, msg.Reasoning, msg.ReasoningDetails)
 		lastPhase = executeACPToolCalls(conv, registry, stream, msg.ToolCalls, toolTurn.AllowedTools, lastPhase)
 	}
+}
+
+// openTurnTracer opens a per-turn JSONL tracer when BUCKLEY_TRACE is set: a file
+// path writes there; "1"/"true"/"on" writes to <logs-dir>/trace.jsonl. This is
+// what lets the -p and acp chat loops be diagnosed headlessly.
+func openTurnTracer() *turntrace.Tracer {
+	v := strings.TrimSpace(os.Getenv("BUCKLEY_TRACE"))
+	switch strings.ToLower(v) {
+	case "", "0", "false", "off":
+		return nil
+	}
+	path := v
+	if lv := strings.ToLower(v); lv == "1" || lv == "true" || lv == "on" {
+		path = filepath.Join(paths.BuckleyLogsBaseDir(), "trace.jsonl")
+	}
+	tr, err := turntrace.Open(path)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: turn trace disabled: %v\n", err)
+		return nil
+	}
+	return tr
+}
+
+// newACPTurnRecord captures the request side of a turn, including the tool-gating
+// decision (SupportsTools + the model's supported_parameters) — the usual "why
+// were no tools sent" answer.
+func newACPTurnRecord(tracer *turntrace.Tracer, iteration int, mgr *model.Manager, modelID string, req model.ChatRequest, turn acpToolTurn) turntrace.TurnRecord {
+	if tracer == nil {
+		return turntrace.TurnRecord{}
+	}
+	rec := turntrace.TurnRecord{
+		Iteration:    iteration,
+		Model:        modelID,
+		NumMessages:  len(req.Messages),
+		Roles:        acpMessageRoles(req.Messages),
+		UseTools:     turn.UseTools,
+		ToolsOffered: len(req.Tools),
+		ToolNames:    acpToolNames(req.Tools),
+		ToolChoice:   req.ToolChoice,
+	}
+	if req.Reasoning != nil {
+		rec.ReasoningEffort = req.Reasoning.Effort
+	}
+	if mgr != nil {
+		rec.SupportsTools = mgr.SupportsTools(modelID)
+		if info, err := mgr.GetModelInfo(modelID); err == nil && info != nil {
+			rec.SupportedParameters = info.SupportedParameters
+		}
+	}
+	return rec
+}
+
+// recordACPTurn fills in the response side and emits the record.
+func recordACPTurn(tracer *turntrace.Tracer, rec turntrace.TurnRecord, choice *model.Choice, branch string, err error) {
+	if tracer == nil {
+		return
+	}
+	rec.Branch = branch
+	if err != nil {
+		rec.Error = err.Error()
+	}
+	if choice != nil {
+		rec.FinishReason = choice.FinishReason
+		content := model.ExtractTextContentOrEmpty(choice.Message.Content)
+		rec.ContentPreview = content
+		rec.ReasoningChars = len(choice.Message.Reasoning)
+		rec.StructuredToolCalls = acpStructuredToolCalls(choice.Message.ToolCalls)
+		rec.InlineMarkupDetected = turntrace.InlineToolMarkupDetected(content)
+	}
+	tracer.Record(rec)
+}
+
+func acpMessageRoles(msgs []model.Message) []string {
+	roles := make([]string, 0, len(msgs))
+	for _, m := range msgs {
+		roles = append(roles, m.Role)
+	}
+	return roles
+}
+
+func acpToolNames(tools []map[string]any) []string {
+	names := make([]string, 0, len(tools))
+	for _, t := range tools {
+		if fn, ok := t["function"].(map[string]any); ok {
+			if n, ok := fn["name"].(string); ok {
+				names = append(names, n)
+			}
+		}
+	}
+	return names
+}
+
+func acpStructuredToolCalls(calls []model.ToolCall) []turntrace.ToolCallPreview {
+	out := make([]turntrace.ToolCallPreview, 0, len(calls))
+	for _, c := range calls {
+		out = append(out, turntrace.ToolCallPreview{Name: c.Function.Name, ID: c.ID, Args: c.Function.Arguments})
+	}
+	return out
+}
+
+// reconcileInlineToolCalls promotes tool calls that a model embedded as inline
+// tokens in the content field (e.g. Kimi's <|tool_call_begin|> markup) into a
+// structured tool_calls array, mirroring the streaming loops. When the response
+// already has structured tool calls, or the content carries no recognized
+// markup, the message is returned unchanged — so any still-unrecognized markup
+// stays visible in the turn trace's inline_markup_detected flag.
+func reconcileInlineToolCalls(msg model.Message) model.Message {
+	if len(msg.ToolCalls) > 0 {
+		return msg
+	}
+	calls, cleaned := model.ParseToolCallsFromContent(model.ExtractTextContentOrEmpty(msg.Content))
+	if len(calls) == 0 {
+		return msg
+	}
+	msg.ToolCalls = calls
+	msg.Content = model.FilterToolCallTokens(cleaned)
+	return msg
 }
 
 const acpMaxToolNudges = 2

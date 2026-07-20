@@ -585,8 +585,9 @@ func (r *Runner) callModel(ctx context.Context, req model.ChatRequest) (*model.C
 
 func (r *Runner) handleToolCalls(ctx context.Context, msg model.Message) error {
 	toolCalls := msg.ToolCalls
-	// Add the tool call message to conversation
-	r.conv.AddToolCallMessageWithReasoning(toolCalls, msg.Reasoning, msg.ReasoningDetails)
+	// Add the tool call message to conversation, preserving any preamble content
+	// the model emitted alongside the tool call (e.g. "Let me check X.").
+	r.conv.AddToolCallMessageWithContent(model.ExtractTextContentOrEmpty(msg.Content), toolCalls, msg.Reasoning, msg.ReasoningDetails)
 	r.persistLatestConversationMessage()
 
 	for _, tc := range toolCalls {

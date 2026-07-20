@@ -372,7 +372,15 @@ func executeOneShot(prompt string, cfg *config.Config, mgr *model.Manager, store
 	createTool := &builtin.CreateSkillTool{Registry: skills}
 	createTool.SetWorkDir(cwd)
 	registry.Register(createTool)
-	skillState.SetToolFilter(resolveOneShotToolFilter(agentProfile, registry, allowedTools))
+	// resolveOneShotToolFilter returns nil to mean "no restriction — offer all
+	// tools" and a (possibly empty) slice to mean "restrict to exactly these".
+	// SetToolFilter(nil) would wrongly record an *empty allow-list* (allow
+	// nothing) because it sets toolFilterSet=true, which zeroes tools for a plain
+	// `buckley -p` and makes the model narrate/hallucinate instead of acting.
+	// Only apply a filter when one is actually specified.
+	if filter := resolveOneShotToolFilter(agentProfile, registry, allowedTools); filter != nil {
+		skillState.SetToolFilter(filter)
+	}
 
 	conv.AddSystemMessage(buildACPSystemPrompt(projectContext, cwd, skills, engine, agentPromptSection(agentProfile)))
 	conv.AddUserMessage(prompt)
@@ -737,6 +745,8 @@ func printHelp() {
 	fmt.Println("  BUCKLEY_DB_PATH                  Override primary SQLite DB path")
 	fmt.Println("  BUCKLEY_DATA_DIR                 Directory containing Buckley DB files (db, remote-auth, checkpoints, etc)")
 	fmt.Println("  BUCKLEY_LOG_DIR                  Override telemetry log directory")
+	fmt.Println("  BUCKLEY_TRACE                    Write a per-turn chat-loop trace as JSONL (1/true, or a file path) for headless diagnosis")
+	fmt.Println("  BUCKLEY_NETWORK_LOGS_ENABLED     Log raw model request/response bodies to network.jsonl (may capture prompts/code)")
 	fmt.Println("  BUCKLEY_QUIET                    Suppress non-essential output")
 	fmt.Println("  NO_COLOR                         Disable colored output")
 	fmt.Println()

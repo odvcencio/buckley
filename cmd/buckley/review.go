@@ -31,6 +31,7 @@ type reviewCommandOptions struct {
 	timeout         time.Duration
 	outputFile      string
 	interactive     bool
+	concurrency     int
 }
 
 type reviewCommandRuntime struct {
@@ -67,6 +68,7 @@ func parseReviewCommandOptions(args []string) (reviewCommandOptions, error) {
 	outputFile := fs.String("output", "", "write review to file instead of stdout")
 	interactive := fs.Bool("interactive", true, "show interactive menu to fix findings")
 	noInteractive := fs.Bool("no-interactive", false, "disable interactive mode")
+	concurrency := fs.Int("concurrency", 2, "parallel bundle reviewers for project / large (>1200 line) reviews")
 
 	if err := fs.Parse(args); err != nil {
 		return reviewCommandOptions{}, err
@@ -84,6 +86,7 @@ func parseReviewCommandOptions(args []string) (reviewCommandOptions, error) {
 		timeout:         *timeout,
 		outputFile:      *outputFile,
 		interactive:     *interactive,
+		concurrency:     *concurrency,
 	}
 	if *noInteractive {
 		opts.interactive = false
@@ -112,7 +115,13 @@ func runReviewCommand(args []string) error {
 		return fmt.Errorf("init dependencies: %w", err)
 	}
 
-	runtime, err := newReviewCommandRuntime(cfg, mgr)
+	// Parallel project reviews use scoped file bundles, so cap each bundle's
+	// tool loop lower to bound cost; single/branch reviews keep the full budget.
+	maxIter := reviewSingleMaxIterations
+	if opts.projectMode {
+		maxIter = reviewBundleMaxIterations
+	}
+	runtime, err := newReviewCommandRuntime(cfg, mgr, maxIter)
 	if err != nil {
 		return fmt.Errorf("no model configured (set BUCKLEY_MODEL_REVIEW or configure models.review)")
 	}
@@ -143,6 +152,12 @@ func runReviewCommand(args []string) error {
 		printReviewAttemptCounts(result)
 	}
 
+	// Deterministically ground the review's file:line claims against the repo so
+	// hallucinated locations are flagged regardless of which model was used.
+	if groundLine := groundReviewFindings(result); groundLine != "" && !quietMode {
+		termOut.Dim("%s", groundLine)
+	}
+
 	if err := writeReviewOutput(opts.outputFile, result.reviewText); err != nil {
 		return err
 	}
@@ -164,7 +179,7 @@ func runReviewCommand(args []string) error {
 	return nil
 }
 
-func newReviewCommandRuntime(cfg *config.Config, mgr *model.Manager) (*reviewCommandRuntime, error) {
+func newReviewCommandRuntime(cfg *config.Config, mgr *model.Manager, maxIterations int) (*reviewCommandRuntime, error) {
 	modelID := resolveReviewModel(cfg)
 	if modelID == "" {
 		return nil, fmt.Errorf("no review model configured")
@@ -187,6 +202,7 @@ func newReviewCommandRuntime(cfg *config.Config, mgr *model.Manager) (*reviewCom
 		Ledger:          ledger,
 		ModelID:         modelID,
 		ReasoningEffort: reasoningEffort,
+		MaxIterations:   maxIterations,
 	})
 
 	return &reviewCommandRuntime{
@@ -218,12 +234,12 @@ func resolveReviewModel(cfg *config.Config) string {
 
 func runReview(ctx context.Context, opts reviewCommandOptions, framework *oneshot.Framework) (*reviewCommandResult, error) {
 	if opts.projectMode {
-		return runProjectReview(ctx, framework)
+		return runProjectReview(ctx, opts, framework)
 	}
 	return runBranchReview(ctx, opts, framework)
 }
 
-func runProjectReview(ctx context.Context, framework *oneshot.Framework) (*reviewCommandResult, error) {
+func runProjectReview(ctx context.Context, opts reviewCommandOptions, framework *oneshot.Framework) (*reviewCommandResult, error) {
 	spinner := terminal.NewSpinner("Analyzing project...")
 	spinner.Start()
 	policy := model.ReviewSnapshotPolicy{Mode: model.ReviewSnapshotTrackedWorktree}
@@ -233,8 +249,8 @@ func runProjectReview(ctx context.Context, framework *oneshot.Framework) (*revie
 		return nil, fmt.Errorf("capture project review snapshot: %w", err)
 	}
 
-	opts := commands.DefaultProjectContextOptions()
-	projectCtx, audit, err := commands.AssembleProjectContext(opts)
+	ctxOpts := commands.DefaultProjectContextOptions()
+	projectCtx, audit, err := commands.AssembleProjectContext(ctxOpts)
 	if err != nil {
 		spinner.StopWithError(err.Error())
 		return nil, fmt.Errorf("assemble context: %w", err)
@@ -249,20 +265,17 @@ func runProjectReview(ctx context.Context, framework *oneshot.Framework) (*revie
 		return nil, err
 	}
 
-	userPrompt := commands.BuildProjectPrompt(projectCtx)
-	fwResult, runErr := framework.RunRLM(ctx, commands.ReviewProjectDef{}, oneshot.RLMRunOpts{
-		UserPrompt:     userPrompt,
-		Audit:          audit,
-		SnapshotPolicy: policy,
-		ReviewSnapshot: snapshot,
-	})
+	// Project reviews always fan out: partition the tree into file bundles,
+	// review them in parallel, then synthesize. This gives fuller coverage than
+	// one agent skimming a large repo (and matches the map-reduce shape).
+	result, runErr := runParallelProjectReview(ctx, framework, snapshot, policy, projectCtx, audit, opts.concurrency)
 	if runErr != nil {
 		spinner.StopWithError(runErr.Error())
 		return nil, fmt.Errorf("review failed: %w", runErr)
 	}
 
 	spinner.StopWithSuccess("Project review complete")
-	return reviewResultFromRLM(fwResult, audit), nil
+	return result, nil
 }
 
 func runBranchReview(ctx context.Context, opts reviewCommandOptions, framework *oneshot.Framework) (*reviewCommandResult, error) {

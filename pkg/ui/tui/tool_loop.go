@@ -2,44 +2,267 @@ package tui
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"strings"
 
 	"m31labs.dev/buckley/pkg/model"
 	"m31labs.dev/buckley/pkg/tool"
 	"m31labs.dev/buckley/pkg/tool/builtin"
+	"m31labs.dev/buckley/pkg/toolrunner"
 )
 
+// toolLoopMaxToolsPhase1 is set high so the tool runner's optional LLM
+// tool-selection pre-pass never fires for interactive turns: the tool set has
+// already been reduced by Arbiter governance + active skills, and that decision
+// must stay authoritative.
+const toolLoopMaxToolsPhase1 = 4096
+
 type toolLoopState struct {
-	useTools   bool
-	totalUsage model.Usage
+	useTools bool
 }
 
-type toolLoopIterationResult struct {
-	done         bool
-	message      model.Message
-	finishReason string
-}
-
+// runToolLoop drives one interactive assistant turn through the shared streaming
+// tool loop in pkg/toolrunner. Converging the TUI onto that loop (rather than a
+// separate non-streaming re-implementation) is what makes chat behave the same
+// as the agent/one-shot surfaces: live token streaming, inline tool-call token
+// parsing (Kimi/GLM), preserved preamble content, reasoning continuity, and the
+// hardened SSE path all come for free. The handler renders live and persists the
+// full turn; a TUI tool executor keeps governance, tool-name repair, per-tool
+// display, and model-facing truncation.
 func (c *Controller) runToolLoop(ctx context.Context, sess *SessionState, modelID string) (string, *model.Usage, string, error) {
 	if err := c.validateToolLoopInputs(sess); err != nil {
 		return "", nil, "", err
 	}
 
-	maxIterations := interactiveMaxToolIterations
 	state := c.newToolLoopState(sess, modelID)
-	for iter := 0; iter < maxIterations; iter++ {
-		result, err := c.runToolLoopIteration(ctx, sess, modelID, iter, maxIterations, &state)
-		if err != nil {
-			return "", nil, "", err
-		}
-		if result.done {
-			return c.finishToolLoopResponse(sess, result.message, state.totalUsage, result.finishReason)
+	allowedTools := toolLoopAllowedTools(sess)
+
+	var governedNames []string
+	if state.useTools && sess.ToolRegistry != nil {
+		governedNames = tool.GovernedToolNames(sess.ToolRegistry, c.evaluator, "interactive", "coding", allowedTools, 0)
+		if len(governedNames) == 0 {
+			// A governance decision of "no tools" must not be sent as an empty
+			// allow-list, which the runner reads as "all tools".
+			state.useTools = false
 		}
 	}
 
-	return c.checkpointToolLoop(sess, state.totalUsage, maxIterations)
+	var reasoning *model.ReasoningConfig
+	if effort := model.ResolveReasoningEffort(c.cfg, c.modelMgr, c.rulesEngine, modelID, "execution"); effort != "" {
+		reasoning = &model.ReasoningConfig{Effort: effort}
+	}
+
+	handler := newTUIStreamHandler(c, sess)
+
+	result, err := c.runToolRunner(ctx, sess, modelID, governedNames, reasoning, state.useTools, handler)
+	if err != nil && state.useTools {
+		// Reactive fallback: some models/providers reject tools outright. Retry
+		// once with tools off, mirroring the pre-convergence behavior.
+		if retryErr := c.handleToolLoopModelError(err, &state); retryErr == nil {
+			handler.reset()
+			result, err = c.runToolRunner(ctx, sess, modelID, nil, reasoning, false, handler)
+		}
+	}
+	handler.finish()
+	if err != nil {
+		return "", nil, "", err
+	}
+	if result == nil {
+		result = &toolrunner.Result{}
+	}
+
+	usage := result.Usage
+	if result.FinishReason == toolrunner.MaxIterationsFinishReason {
+		return c.checkpointToolLoop(sess, usage, interactiveMaxToolIterations)
+	}
+
+	text := result.Content
+	if strings.TrimSpace(text) == "" {
+		// Some reasoning models return their answer in the reasoning channel
+		// with empty content; surface it rather than showing nothing.
+		if strings.TrimSpace(result.Reasoning) != "" && !handler.streamedAny {
+			text = result.Reasoning
+			c.app.AddMessage(text, "assistant")
+		} else if !handler.streamedAny {
+			c.app.AddMessage("(empty response from model)", "system")
+		}
+	}
+
+	c.setAwaitingToolLoopDecision(sess, false)
+	return text, &usage, result.FinishReason, nil
+}
+
+// runToolRunner builds and runs a tool runner for a single interactive turn.
+func (c *Controller) runToolRunner(ctx context.Context, sess *SessionState, modelID string, governedNames []string, reasoning *model.ReasoningConfig, useTools bool, handler *tuiStreamHandler) (*toolrunner.Result, error) {
+	registry := sess.ToolRegistry
+	if !useTools {
+		// Run with no tools by handing the runner an empty registry, so it emits
+		// zero tool definitions. (An empty AllowedTools list means "all tools".)
+		registry = tool.NewRegistry(tool.WithBuiltinFilter(func(tool.Tool) bool { return false }))
+		governedNames = nil
+	}
+
+	runner, err := toolrunner.New(toolrunner.Config{
+		Models:               c.modelMgr,
+		Registry:             registry,
+		ToolExecutor:         c.newTUIToolExecutor(sess, governedNames),
+		EnableReasoning:      true,
+		DefaultMaxIterations: interactiveMaxToolIterations,
+		MaxToolsPhase1:       toolLoopMaxToolsPhase1,
+	})
+	if err != nil {
+		return nil, err
+	}
+	runner.SetStreamHandler(handler)
+
+	return runner.Run(ctx, toolrunner.Request{
+		Messages:      c.buildMessagesForSession(sess),
+		AllowedTools:  governedNames,
+		MaxIterations: interactiveMaxToolIterations,
+		Model:         modelID,
+		Reasoning:     reasoning,
+	})
+}
+
+// newTUIToolExecutor returns a tool executor that keeps the interactive surface's
+// tool-name repair, skill/governance allow-check, per-tool display messages, and
+// model-facing output truncation while executing through the shared runner.
+func (c *Controller) newTUIToolExecutor(sess *SessionState, allowed []string) toolrunner.ToolExecutor {
+	return func(ctx context.Context, call model.ToolCall, args map[string]any, _ map[string]tool.Tool) (toolrunner.ToolExecutionResult, error) {
+		if sess.ToolRegistry == nil {
+			msg := "Error: tool registry unavailable"
+			return toolrunner.ToolExecutionResult{Result: msg, Error: msg}, nil
+		}
+
+		name := call.Function.Name
+		if repaired, ok := resolveToolCallName(sess.ToolRegistry, name, allowed); ok {
+			name = repaired
+		}
+		if !tool.IsToolAllowed(name, allowed) {
+			msg := fmt.Sprintf("Error: tool %s not allowed by active skills", name)
+			return toolrunner.ToolExecutionResult{Result: msg, Error: msg}, nil
+		}
+		if args == nil {
+			args = make(map[string]any)
+		}
+
+		result, execErr := sess.ToolRegistry.ExecuteWithContext(ctx, name, args)
+		if display := toolDisplayMessage(name, result, execErr); display != "" {
+			c.app.AddMessage(display, "system")
+		}
+
+		errStr := ""
+		switch {
+		case execErr != nil:
+			errStr = execErr.Error()
+		case result != nil && !result.Success:
+			errStr = result.Error
+		}
+		return toolrunner.ToolExecutionResult{
+			Result:  formatToolResultForModel(result, execErr),
+			Error:   errStr,
+			Success: execErr == nil && result != nil && result.Success,
+		}, nil
+	}
+}
+
+// tuiStreamHandler renders a streaming interactive turn and persists it. It
+// implements toolrunner.StreamHandler and toolrunner.TurnObserver.
+type tuiStreamHandler struct {
+	c           *Controller
+	sess        *SessionState
+	bubbleOpen  bool
+	streamedAny bool
+	sawEvent    bool
+}
+
+func newTUIStreamHandler(c *Controller, sess *SessionState) *tuiStreamHandler {
+	return &tuiStreamHandler{c: c, sess: sess}
+}
+
+func (h *tuiStreamHandler) firstEvent() {
+	if !h.sawEvent {
+		h.sawEvent = true
+		h.c.app.RemoveThinkingIndicator()
+	}
+}
+
+// openBubble seeds an empty assistant message so streamed deltas append into it
+// (StreamChunk deltas append to the last message via the coalescer).
+func (h *tuiStreamHandler) openBubble() {
+	if !h.bubbleOpen {
+		h.c.app.AddMessage("", "assistant")
+		h.bubbleOpen = true
+	}
+}
+
+func (h *tuiStreamHandler) closeBubble() {
+	if h.bubbleOpen {
+		h.c.app.StreamEnd(h.sess.ID, "")
+		h.bubbleOpen = false
+	}
+}
+
+func (h *tuiStreamHandler) OnText(text string) {
+	if text == "" {
+		return
+	}
+	h.firstEvent()
+	h.openBubble()
+	h.streamedAny = true
+	h.c.app.StreamChunk(h.sess.ID, text)
+}
+
+func (h *tuiStreamHandler) OnReasoning(string) { h.firstEvent() }
+
+func (h *tuiStreamHandler) OnReasoningEnd() {}
+
+func (h *tuiStreamHandler) OnToolStart(name string, _ string) {
+	h.firstEvent()
+	// Finalize any preamble bubble before tool-activity messages appear.
+	h.closeBubble()
+	h.c.app.StartProcessStatus(fmt.Sprintf("Running %s", compactStatusText(name, 36)))
+}
+
+func (h *tuiStreamHandler) OnToolEnd(string, string, error) {
+	h.c.app.StopProcessStatus()
+}
+
+func (h *tuiStreamHandler) OnError(error) {}
+
+func (h *tuiStreamHandler) OnComplete(*toolrunner.Result) {
+	h.closeBubble()
+}
+
+// OnTurnMessage persists each produced message into the session conversation,
+// incrementally, so the transcript survives a crash mid-turn and feeds correct
+// wire history back to the model on the next turn.
+func (h *tuiStreamHandler) OnTurnMessage(msg model.Message) {
+	if h.sess == nil || h.sess.Conversation == nil {
+		return
+	}
+	switch {
+	case msg.Role == "assistant" && len(msg.ToolCalls) > 0:
+		h.sess.Conversation.AddToolCallMessageWithContent(model.ExtractTextContentOrEmpty(msg.Content), msg.ToolCalls, msg.Reasoning, msg.ReasoningDetails)
+	case msg.Role == "tool":
+		h.sess.Conversation.AddToolResponseMessage(msg.ToolCallID, msg.Name, model.ExtractTextContentOrEmpty(msg.Content))
+	case msg.Role == "assistant":
+		h.sess.Conversation.AddAssistantMessageWithReasoningDetails(model.ExtractTextContentOrEmpty(msg.Content), msg.Reasoning, msg.ReasoningDetails)
+	default:
+		return
+	}
+	h.c.saveLatestConversationMessage(h.sess)
+}
+
+// reset drops any partial bubble before a retry-without-tools re-run.
+func (h *tuiStreamHandler) reset() {
+	h.closeBubble()
+	h.streamedAny = false
+}
+
+// finish flushes any open bubble once the turn is complete.
+func (h *tuiStreamHandler) finish() {
+	h.closeBubble()
 }
 
 func (c *Controller) validateToolLoopInputs(sess *SessionState) error {
@@ -60,28 +283,6 @@ func (c *Controller) newToolLoopState(sess *SessionState, modelID string) toolLo
 	}
 }
 
-func (c *Controller) runToolLoopIteration(ctx context.Context, sess *SessionState, modelID string, iteration, maxIterations int, state *toolLoopState) (toolLoopIterationResult, error) {
-	if ctx.Err() != nil {
-		return toolLoopIterationResult{}, ctx.Err()
-	}
-
-	allowedTools := toolLoopAllowedTools(sess)
-	req, nextUseTools := c.buildToolLoopRequest(sess, modelID, state.useTools, allowedTools)
-	state.useTools = nextUseTools
-
-	resp, err := c.callToolLoopModel(ctx, req, modelID, iteration, maxIterations)
-	if err != nil {
-		return toolLoopIterationResult{}, c.handleToolLoopModelError(err, state)
-	}
-	state.totalUsage = addUsage(state.totalUsage, resp.Usage)
-
-	choice, err := firstToolLoopChoice(req, resp)
-	if err != nil {
-		return toolLoopIterationResult{}, err
-	}
-	return c.handleToolLoopChoice(sess, choice.Message, allowedTools, choice.FinishReason), nil
-}
-
 func (c *Controller) handleToolLoopModelError(err error, state *toolLoopState) error {
 	if state != nil && state.useTools && isToolUnsupportedError(err) {
 		c.app.SetStatus("Retrying without tools")
@@ -91,21 +292,6 @@ func (c *Controller) handleToolLoopModelError(err error, state *toolLoopState) e
 	return err
 }
 
-func (c *Controller) handleToolLoopChoice(sess *SessionState, msg model.Message, allowedTools []string, finishReason string) toolLoopIterationResult {
-	if len(msg.ToolCalls) == 0 {
-		return toolLoopIterationResult{
-			done:         true,
-			message:      msg,
-			finishReason: finishReason,
-		}
-	}
-
-	toolCalls := normalizeToolLoopCalls(sess.ToolRegistry, msg.ToolCalls, allowedTools)
-	c.recordToolLoopCalls(sess, toolCalls, msg)
-	c.executeToolLoopCalls(sess, toolCalls, allowedTools)
-	return toolLoopIterationResult{}
-}
-
 func toolLoopAllowedTools(sess *SessionState) []string {
 	if sess == nil || sess.SkillState == nil {
 		return nil
@@ -113,122 +299,11 @@ func toolLoopAllowedTools(sess *SessionState) []string {
 	return sess.SkillState.ToolFilter()
 }
 
-func (c *Controller) buildToolLoopRequest(sess *SessionState, modelID string, useTools bool, allowedTools []string) (model.ChatRequest, bool) {
-	req := model.ChatRequest{
-		Model:     modelID,
-		Messages:  c.buildMessagesForSession(sess),
-		SessionID: sess.ID,
-	}
-
-	if useTools && sess.ToolRegistry != nil {
-		tools := sess.ToolRegistry.ToOpenAIFunctionsGoverned(c.evaluator, "interactive", "coding", allowedTools, 0)
-		if len(tools) > 0 {
-			req.Tools = tools
-			req.ToolChoice = "auto"
-		} else {
-			useTools = false
-		}
-	}
-
-	if effort := model.ResolveReasoningEffort(c.cfg, c.modelMgr, c.rulesEngine, modelID, "execution"); effort != "" {
-		req.Reasoning = &model.ReasoningConfig{Effort: effort}
-	}
-	return req, useTools
-}
-
-func (c *Controller) callToolLoopModel(ctx context.Context, req model.ChatRequest, modelID string, iteration, maxIterations int) (*model.ChatResponse, error) {
-	c.app.StartProcessStatus(modelProcessStatus(modelID, iteration, maxIterations, len(req.Tools), req.Reasoning))
-	resp, err := c.modelMgr.ChatCompletion(ctx, req)
-	c.app.StopProcessStatus()
-	return resp, err
-}
-
-func firstToolLoopChoice(req model.ChatRequest, resp *model.ChatResponse) (model.Choice, error) {
-	if resp == nil || len(resp.Choices) == 0 {
-		return model.Choice{}, model.NoResponseChoicesError(req, resp)
-	}
-	return resp.Choices[0], nil
-}
-
-func (c *Controller) finishToolLoopResponse(sess *SessionState, msg model.Message, totalUsage model.Usage, finishReason string) (string, *model.Usage, string, error) {
-	c.app.SetStatus("Finalizing response")
-	text, err := model.ExtractTextContent(msg.Content)
-	if err != nil {
-		return "", nil, "", err
-	}
-	if text == "" && strings.TrimSpace(msg.Reasoning) != "" {
-		text = msg.Reasoning
-	}
-	sess.Conversation.AddAssistantMessageWithReasoningDetails(text, msg.Reasoning, msg.ReasoningDetails)
-	c.saveLatestConversationMessage(sess)
-	c.setAwaitingToolLoopDecision(sess, false)
-	return text, &totalUsage, finishReason, nil
-}
-
-func normalizeToolLoopCalls(registry *tool.Registry, calls []model.ToolCall, allowedTools []string) []model.ToolCall {
-	for i := range calls {
-		if calls[i].ID == "" {
-			calls[i].ID = fmt.Sprintf("tool-%d", i+1)
-		}
-		if repairedName, ok := resolveToolCallName(registry, calls[i].Function.Name, allowedTools); ok {
-			calls[i].Function.Name = repairedName
-		}
-	}
-	return calls
-}
-
-func (c *Controller) recordToolLoopCalls(sess *SessionState, calls []model.ToolCall, msg model.Message) {
-	c.app.SetStatus(fmt.Sprintf("Model requested %d tool call(s)", len(calls)))
-	sess.Conversation.AddToolCallMessageWithReasoning(calls, msg.Reasoning, msg.ReasoningDetails)
-	c.saveLatestConversationMessage(sess)
-}
-
-func (c *Controller) executeToolLoopCalls(sess *SessionState, calls []model.ToolCall, allowedTools []string) {
-	for i, tc := range calls {
-		c.executeToolLoopCall(sess, tc, i+1, len(calls), allowedTools)
-	}
-}
-
-func (c *Controller) executeToolLoopCall(sess *SessionState, tc model.ToolCall, index, total int, allowedTools []string) {
-	params, err := parseToolParams(tc.Function.Arguments)
-	if err != nil {
-		c.addToolLoopResponse(sess, tc, fmt.Sprintf("Error: invalid tool arguments: %v", err))
-		return
-	}
-	if sess.ToolRegistry == nil {
-		c.addToolLoopResponse(sess, tc, "Error: tool registry unavailable")
-		return
-	}
-	if !tool.IsToolAllowed(tc.Function.Name, allowedTools) {
-		c.addToolLoopResponse(sess, tc, fmt.Sprintf("Error: tool %s not allowed by active skills", tc.Function.Name))
-		return
-	}
-	if params == nil {
-		params = make(map[string]any)
-	}
-	if tc.ID != "" {
-		params[tool.ToolCallIDParam] = tc.ID
-	}
-
-	c.app.StartProcessStatus(fmt.Sprintf("Running %s (%d/%d)", compactStatusText(tc.Function.Name, 36), index, total))
-	result, execErr := sess.ToolRegistry.Execute(tc.Function.Name, params)
-	c.app.StopProcessStatus()
-	c.addToolLoopResponse(sess, tc, formatToolResultForModel(result, execErr))
-
-	if display := toolDisplayMessage(tc.Function.Name, result, execErr); display != "" {
-		c.app.AddMessage(display, "system")
-	}
-}
-
-func (c *Controller) addToolLoopResponse(sess *SessionState, tc model.ToolCall, text string) {
-	sess.Conversation.AddToolResponseMessage(tc.ID, tc.Function.Name, text)
-	c.saveLatestConversationMessage(sess)
-}
-
 func (c *Controller) checkpointToolLoop(sess *SessionState, totalUsage model.Usage, maxIterations int) (string, *model.Usage, string, error) {
 	checkpoint := maxToolIterationsCheckpoint(maxIterations)
 	sess.Conversation.AddAssistantMessage(checkpoint)
 	c.saveLatestConversationMessage(sess)
+	c.app.AddMessage(checkpoint, "assistant")
 	c.setAwaitingToolLoopDecision(sess, true)
 	return checkpoint, &totalUsage, toolLoopCheckpointFinishReason, nil
 }
@@ -379,20 +454,6 @@ func compactStatusText(text string, maxLen int) string {
 	return text[:maxLen-3] + "..."
 }
 
-func parseToolParams(raw string) (map[string]any, error) {
-	if strings.TrimSpace(raw) == "" {
-		return map[string]any{}, nil
-	}
-	var params map[string]any
-	if err := json.Unmarshal([]byte(raw), &params); err != nil {
-		return nil, err
-	}
-	if params == nil {
-		params = make(map[string]any)
-	}
-	return params, nil
-}
-
 func formatToolResultForModel(result *builtin.Result, execErr error) string {
 	if execErr != nil {
 		return fmt.Sprintf("Error: %v", execErr)
@@ -471,13 +532,6 @@ func toolDisplayMessage(name string, result *builtin.Result, execErr error) stri
 		return summary
 	}
 	return ""
-}
-
-func addUsage(total model.Usage, next model.Usage) model.Usage {
-	total.PromptTokens += next.PromptTokens
-	total.CompletionTokens += next.CompletionTokens
-	total.TotalTokens += next.TotalTokens
-	return total
 }
 
 func isToolUnsupportedError(err error) bool {
