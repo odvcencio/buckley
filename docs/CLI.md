@@ -176,7 +176,7 @@ writing standard.
 
 Follow these rules for generated and hand-written prose:
 - Use active voice. Use the imperative mood for instructions.
-- Keep each sentence at or below 25 words.
+- Keep procedural sentences at or below 20 words. Keep descriptive sentences at or below 25 words.
 - Give each word one meaning. Use it the same way every time.
 - Do not write noun clusters of more than three nouns.
 - Define an abbreviation at first use.
