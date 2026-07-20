@@ -168,6 +168,26 @@ buckley pr --dry-run          # Preview PR title and body
 buckley pr --base develop     # Target specific base branch
 ```
 
+### Prose style (ASD-STE100)
+
+Buckley writes commit messages, PR titles, and PR bodies in ASD-STE100
+(Simplified Technical English). ASD-STE100 is a controlled-language
+writing standard.
+
+Follow these rules for generated and hand-written prose:
+- Use active voice. Use the imperative mood for instructions.
+- Keep procedural sentences at or below 20 words. Keep descriptive sentences at or below 25 words.
+- Give each word one meaning. Use it the same way every time.
+- Do not write noun clusters of more than three nouns.
+- Define an abbreviation at first use.
+
+`buckley review` checks this rule too. It flags ASD-STE100 violations in
+commit messages, PR descriptions, and added doc or comment text. Each
+flag includes a suggested rewrite.
+
+These rules govern prose only. The commit header format, the
+72-character limit, and the JSON output contract for PRs stay unchanged.
+
 ### serve
 
 Start the local HTTP/WebSocket IPC server (and optional embedded Mission Control UI).

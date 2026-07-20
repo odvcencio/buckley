@@ -9,6 +9,7 @@ import (
 
 	"m31labs.dev/buckley/pkg/config"
 	"m31labs.dev/buckley/pkg/model"
+	"m31labs.dev/buckley/pkg/prompts"
 )
 
 type PRCreator struct {
@@ -42,7 +43,9 @@ Generate a comprehensive PR description with:
 - Testing performed
 - Checklist items
 
-Format in markdown. Be specific and detailed.`
+Format in markdown. Be specific and detailed.
+
+` + prompts.STE100ProseBlock()
 
 func (pc *PRCreator) GeneratePR(plan *Plan) (*PRInfo, error) {
 	if plan == nil {
