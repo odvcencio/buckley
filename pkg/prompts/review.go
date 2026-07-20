@@ -77,6 +77,8 @@ NON-NEGOTIABLE REVIEW RULES:
 - PASS must cite the focused command or named remote checks that passed. FAIL, PENDING, NOT_RUN, UNAVAILABLE, and UNKNOWN never permit approval.
 - If the diff or GitHub context is marked partial/truncated, do not approve; state exactly what evidence is missing.
 
+%s
+
 WORKFLOW:
 1. Read project guidance, PR metadata, CI, submitted reviews, and unresolved threads.
 2. Inventory every changed file/hunk and identify the contract or invariant it changes.
@@ -167,7 +169,7 @@ GUIDELINES:
 - Verify CI relevance and investigate failures/skips with tools
 
 Current date/time: %s
-`, now.Format(time.RFC3339))
+`, ste100ReviewTenet, now.Format(time.RFC3339))
 }
 
 func reviewBranchWithToolsDefault(now time.Time) string {
@@ -194,6 +196,8 @@ EXECUTION SAFETY:
 - Documentation-only exception: when every changed path is a documentation file, do not run an unrelated source build/test solely to manufacture approval evidence. Ground every Coverage ledger entry in exact changed claims, links, or diff hunks. Mixed, source, and configuration changes do not qualify.
 - Except for that documentation-only exception, if the provider does not supply a native shell, APPROVE requires successful run_verification calls for both build and test, using the same resolved language and paths that cover every changed source package. A Go test pattern is acceptable only when verbose tool output proves at least one matching test ran; prose claiming PASS is not execution evidence.
 - Verification cache/temp variables are already supplied by the sandbox. Do not override PATH, tool options, GOCACHE, GOTMPDIR, or other environment variables in an approval-evidence command.
+
+%s
 
 WORKFLOW:
 1. Read the supplied AGENTS.md and obey its test/build constraints.
@@ -278,7 +282,7 @@ ANTI-HALLUCINATION RULES:
 - Always quote the tool output that proves your finding
 
 Current date/time: %s
-`, now.Format(time.RFC3339))
+`, ste100ReviewTenet, now.Format(time.RFC3339))
 }
 
 func reviewProjectDefault(now time.Time) string {
