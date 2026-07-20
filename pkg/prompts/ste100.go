@@ -8,7 +8,8 @@ package prompts
 // hypha://m31labs/hyphae decisions/0011-ste100-prose-standard.md
 const ste100ProseBlock = `ASD-STE100 profile:
 - Use active voice. Use the imperative mood for instructions.
-- Write one topic per sentence. Keep each sentence at or below 25 words.
+- Write one topic per sentence. Keep procedural sentences at or below 20
+  words. Keep descriptive sentences at or below 25 words.
 - Give each word one meaning; use it the same way throughout.
 - Do not write noun clusters of more than three nouns. Keep articles.
 - Do not use idioms, slang, or Latin abbreviations. Write "for example",
@@ -17,6 +18,14 @@ const ste100ProseBlock = `ASD-STE100 profile:
 - Use concrete verbs. Avoid vague verbs such as "handle", "leverage",
   "deal with".
 - This rule governs prose only; the structural rules above still apply.`
+
+// STE100ProseBlock returns the ASD-STE100 prose rule set for injection
+// into prompts outside this package (for example, orchestrator system
+// prompts that generate commit/PR prose but do not use the pkg/prompts
+// templates directly).
+func STE100ProseBlock() string {
+	return ste100ProseBlock
+}
 
 // ste100ReviewTenet is the ASD-STE100 prose tenet injected into review
 // prompts. It directs the reviewer to flag prose that violates the
@@ -33,5 +42,7 @@ const ste100ReviewTenet = `ASD-STE100 profile:
   in active, plain prose.
 - Report violations as a MINOR finding unless the violation obscures a
   Critical or Major finding.
+- Group multiple prose violations into a single MINOR finding. Do not
+  emit one finding per sentence; keep correctness findings prominent.
 - Do not flag code identifiers, quoted tool output, verbatim logs, or
   third-party text.`

@@ -75,6 +75,12 @@ func TestSTE100ReviewTenetContent(t *testing.T) {
 // override is configured (the common, un-overridden path).
 func TestSTE100MarkerSurvivesResolvePromptWithNoOverride(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
+	// Force-clear any override env vars a polluted runner environment might
+	// have set, so this test always exercises the un-overridden default path.
+	t.Setenv("BUCKLEY_PROMPT_COMMIT", "")
+	t.Setenv("BUCKLEY_PROMPT_COMMIT_FILE", "")
+	t.Setenv("BUCKLEY_PROMPT_PR", "")
+	t.Setenv("BUCKLEY_PROMPT_PR_FILE", "")
 	now := time.Unix(0, 0)
 
 	if !strings.Contains(CommitPrompt(now), "ASD-STE100 profile:") {
