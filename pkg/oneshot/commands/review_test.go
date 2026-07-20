@@ -57,6 +57,29 @@ func TestReviewDefinitionsExposeOnlySnapshotReviewTools(t *testing.T) {
 	assert.Contains(t, (FixFindingDef{}).AllowedTools(), "write_file")
 }
 
+func TestReviewPRSystemPromptInstantiatesExactFeedbackContract(t *testing.T) {
+	withFeedback := (ReviewPRDef{RequiredFeedbackIDs: []string{
+		"submitted-review:PRR_1",
+		"inline-thread:PRRT_2/comment:PRRC_3",
+	}}).SystemPrompt()
+	for _, want := range []string{
+		"EXACT FEEDBACK OUTPUT CONTRACT FOR THIS REVIEW",
+		"- **Feedback disposition**: `DISPOSITIONED`",
+		"- **Feedback**: `submitted-review:PRR_1` — `ADDRESSED|DISPUTED|UNRESOLVED`",
+		"- **Feedback**: `inline-thread:PRRT_2/comment:PRRC_3` — `ADDRESSED|DISPUTED|UNRESOLVED`",
+		"do not use NONE_SUPPLIED",
+	} {
+		if !strings.Contains(withFeedback, want) {
+			t.Errorf("feedback-aware prompt missing %q", want)
+		}
+	}
+
+	withoutFeedback := (ReviewPRDef{}).SystemPrompt()
+	if !strings.Contains(withoutFeedback, "- **Feedback disposition**: `NONE_SUPPLIED`") {
+		t.Fatal("no-feedback prompt did not instantiate NONE_SUPPLIED disposition")
+	}
+}
+
 func TestDiffStats_TotalChanges(t *testing.T) {
 	tests := []struct {
 		name     string

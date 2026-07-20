@@ -37,6 +37,10 @@ func TestReviewPromptsRequireEvidenceCoverageAndExactTools(t *testing.T) {
 				"already supplied by the sandbox",
 				"same applicable toolchain",
 				"cover every changed source path",
+				"go -C relative/module",
+				"python3 -m py_compile path/to/changed.py",
+				"python3 path/to/changed-checker.py --check",
+				"For each changed language",
 			} {
 				if !strings.Contains(strings.ToLower(prompt), strings.ToLower(want)) {
 					t.Errorf("prompt missing %q", want)

@@ -1,6 +1,11 @@
 package commands
 
-import "testing"
+import (
+	"strings"
+	"testing"
+
+	"m31labs.dev/buckley/pkg/model"
+)
 
 func TestValidateReviewEvidenceCoverageRequiresSameToolchainAndChangedPaths(t *testing.T) {
 	changed := []string{"pkg/a/a.go", "pkg/b/b.go"}
@@ -67,6 +72,77 @@ func TestValidateReviewEvidenceCoverageRequiresSameToolchainAndChangedPaths(t *t
 			t.Fatal("plain Cargo default-member evidence covered an arbitrary changed crate")
 		}
 	})
+}
+
+func TestValidateReviewEvidenceCoverageMixedGoPythonPullRequest(t *testing.T) {
+	changed := []string{
+		"cgo_harness/parity_gate_ratchet_test.go",
+		"cgo_harness/parity_javascript_regression_test.go",
+		"grammars/external_lex_states_election_test.go",
+		"grammars/javascript_external_lex_states.go",
+		"grammars/javascript_external_lex_states_default_test.go",
+		"grammars/javascript_external_lex_states_regression_test.go",
+		"grammars/javascript_scanner.go",
+		"parser_recover_c.go",
+		"parser_result_test/parser_result_javascript_block_assignment_regression_test.go",
+		"cgo_harness/tier_scan/gen_external_lex_elections.py",
+	}
+	commands := []struct {
+		command string
+		output  string
+	}{
+		{command: `go test -run '^$' . ./grammars ./parser_result_test`},
+		{command: "go test . ./grammars ./parser_result_test", output: "ok  root\nok  grammars\nok  parser_result_test"},
+		{command: `go -C cgo_harness test -run '^$' .`},
+		{command: "go -C cgo_harness test .", output: "ok  cgo_harness"},
+		{command: "python3 -m py_compile cgo_harness/tier_scan/gen_external_lex_elections.py"},
+		{command: "python3 cgo_harness/tier_scan/gen_external_lex_elections.py --check", output: "external lex election ledger is current"},
+	}
+
+	evidence := classifyCompletedReviewCommands(t, commands)
+	if err := validateReviewEvidenceCoverage(changed, evidence); err != nil {
+		t.Fatalf("valid mixed Go/Python evidence rejected: %v", err)
+	}
+
+	withoutPythonBuild := append([]reviewCommandEvidenceDetails(nil), evidence[:4]...)
+	withoutPythonBuild = append(withoutPythonBuild, evidence[5])
+	err := validateReviewEvidenceCoverage(changed, withoutPythonBuild)
+	if err == nil || !strings.Contains(err.Error(), "python(build:cgo_harness/tier_scan/gen_external_lex_elections.py)") {
+		t.Fatalf("missing Python build evidence error = %v", err)
+	}
+
+	wrongCheck := classifyCompletedReviewCommands(t, []struct {
+		command string
+		output  string
+	}{{command: "python3 scripts/other.py --check", output: "current"}})
+	err = validateReviewEvidenceCoverage(changed, append(evidence[:5:5], wrongCheck...))
+	if err == nil || !strings.Contains(err.Error(), "python(test:cgo_harness/tier_scan/gen_external_lex_elections.py)") {
+		t.Fatalf("unrelated exact-file check error = %v", err)
+	}
+}
+
+func classifyCompletedReviewCommands(t *testing.T, commands []struct {
+	command string
+	output  string
+}) []reviewCommandEvidenceDetails {
+	t.Helper()
+	zero := 0
+	evidence := make([]reviewCommandEvidenceDetails, 0, len(commands))
+	for _, command := range commands {
+		details, ok := classifyReviewCommandEvidenceDetails(model.CommandExecutionEvidence{
+			Command:          command.command,
+			AggregatedOutput: command.output,
+			ExitCode:         &zero,
+			Status:           "completed",
+			WorkingDirectory: "/snapshot",
+			RepositoryRoot:   "/snapshot",
+		})
+		if !ok {
+			t.Fatalf("command did not classify: %s", command.command)
+		}
+		evidence = append(evidence, details)
+	}
+	return evidence
 }
 
 func TestReviewChangedFilesDocumentationOnly(t *testing.T) {
