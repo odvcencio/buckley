@@ -148,7 +148,7 @@ export function useBuckleyState() {
       return
     }
 
-    if (event.type.startsWith('telemetry.')) {
+    if (event.type.startsWith('telemetry.') || event.type.startsWith('command.')) {
       dispatch({
         type: 'ACTIVITY_ADD',
         event: {
@@ -188,4 +188,3 @@ export function useBuckleyState() {
     clearSessionState: () => dispatch({ type: 'CLEAR_SESSION_STATE' }),
   }
 }
-

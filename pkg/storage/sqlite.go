@@ -178,6 +178,24 @@ var migrations = []Migration{
 	{11, "memories_project_path", ensureMemoriesSchema},
 	{12, "message_tool_turns", ensureMessagesSchema},
 	{13, "provider_threads", ensureProviderThreadsSchema},
+	{14, "session_model", ensureSessionSchema},
+	{15, "ipc_events", ensureIPCEventsSchema},
+}
+
+func ensureIPCEventsSchema(db *sql.DB) error {
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS ipc_events (
+		event_id TEXT PRIMARY KEY,
+		session_id TEXT,
+		event_type TEXT NOT NULL,
+		payload_json TEXT,
+		created_at TIMESTAMP NOT NULL
+	)`); err != nil {
+		return fmt.Errorf("create ipc_events: %w", err)
+	}
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_ipc_events_session_id ON ipc_events(session_id, event_id)`); err != nil {
+		return fmt.Errorf("index ipc_events: %w", err)
+	}
+	return nil
 }
 
 func ensureProviderThreadsSchema(db *sql.DB) error {
@@ -394,6 +412,12 @@ func ensureSessionSchema(db *sql.DB) error {
 	if !cols["git_branch"] {
 		if _, err := db.Exec(`ALTER TABLE sessions ADD COLUMN git_branch TEXT`); err != nil {
 			return fmt.Errorf("add session git_branch: %w", err)
+		}
+	}
+
+	if !cols["model"] {
+		if _, err := db.Exec(`ALTER TABLE sessions ADD COLUMN model TEXT`); err != nil {
+			return fmt.Errorf("add session model: %w", err)
 		}
 	}
 

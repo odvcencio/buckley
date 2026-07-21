@@ -4,19 +4,23 @@ import (
 	"context"
 	"encoding/json"
 	"log"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/oklog/ulid/v2"
 	"nhooyr.io/websocket"
 )
 
 // Event represents a message sent to WebSocket clients.
 type Event struct {
+	EventID   string    `json:"eventId"`
 	Type      string    `json:"type"`
 	SessionID string    `json:"sessionId,omitempty"`
 	Payload   any       `json:"payload,omitempty"`
 	Timestamp time.Time `json:"timestamp"`
+	Transient bool      `json:"-"`
 }
 
 // EventForwarder receives events from the hub.
@@ -29,6 +33,17 @@ type Hub struct {
 	mu         sync.RWMutex
 	clients    map[*client]struct{}
 	forwarders []EventForwarder
+	recorder   func(Event) error
+}
+
+// SetRecorder installs durable event recording before fan-out.
+func (h *Hub) SetRecorder(recorder func(Event) error) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	h.recorder = recorder
+	h.mu.Unlock()
 }
 
 // NewHub creates a Hub.
@@ -48,6 +63,21 @@ func (h *Hub) AddForwarder(f EventForwarder) {
 
 // Broadcast sends an event to all clients, dropping slow consumers.
 func (h *Hub) Broadcast(event Event) {
+	if event.Timestamp.IsZero() {
+		event.Timestamp = time.Now()
+	}
+	if strings.TrimSpace(event.EventID) == "" {
+		event.EventID = strings.ToLower(ulid.Make().String())
+	}
+	h.mu.RLock()
+	recorder := h.recorder
+	h.mu.RUnlock()
+	if recorder != nil && !event.Transient {
+		if err := recorder(event); err != nil {
+			log.Printf("ipc: recording event %s: %v", event.Type, err)
+		}
+	}
+
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 

@@ -2,11 +2,11 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 
 import type { AuthPrincipal } from '../auth/types'
 import { hasScope } from '../auth/scopes'
-import { issueSessionToken } from '../lib/api'
-import { client } from '../lib/grpc'
+import { issueSessionToken, listModels, type ModelOption } from '../lib/api'
 import { useGrpcStream, eventToWSEvent } from '../hooks/useGrpcStream'
 import { useBuckleyState } from '../hooks/useBuckleyState'
-import { toDisplaySession, toPendingApproval } from '../ipc/normalize'
+import { useSessionActions } from '../hooks/useSessionActions'
+import { toDisplaySession } from '../ipc/normalize'
 import type { DisplayMessage, ToolCall } from '../types'
 
 import { OperatorConsole } from './OperatorConsole'
@@ -49,6 +49,8 @@ export function MissionControlApp({
   const [searchOpen, setSearchOpen] = useState(false)
   const [terminalToken, setTerminalToken] = useState<string | undefined>(undefined)
   const [terminalTokenSessionId, setTerminalTokenSessionId] = useState<string | null>(null)
+  const [commandStatus, setCommandStatus] = useState<string | undefined>(undefined)
+	const [models, setModels] = useState<ModelOption[]>([])
   const terminalSessionToken =
     canWrite && currentSessionId && terminalTokenSessionId === currentSessionId ? terminalToken : undefined
 
@@ -64,24 +66,42 @@ export function MissionControlApp({
     onEvent: onGrpcEvent,
   })
 
-  const refreshApprovals = useCallback(async () => {
-    try {
-      const resp = await client.listPendingApprovals({ sessionId: currentSessionId ?? '' })
-      const raw = Array.isArray(resp.approvals) ? resp.approvals : []
-      const list = raw.flatMap((item) => {
-        const parsed = toPendingApproval(item)
-        return parsed ? [parsed] : []
-      })
-      setApprovals(list)
-    } catch (err) {
-      console.error('Failed to refresh pending approvals:', err)
-      setApprovals([])
-    }
-  }, [currentSessionId, setApprovals])
+	const isStreaming = currentView?.isStreaming ?? false
+	const {
+		refreshApprovals,
+		sendMessage,
+		queueMessage,
+		interrupt,
+		runCommand,
+		pause,
+		resume,
+		approve,
+		reject,
+	} = useSessionActions({
+		canWrite,
+		sessionId: currentSessionId,
+		sessionToken: terminalSessionToken,
+		isStreaming,
+		setCommandStatus,
+		setApprovals,
+	})
 
   useEffect(() => {
     refreshApprovals()
   }, [refreshApprovals])
+
+	useEffect(() => {
+		const controller = new AbortController()
+		listModels(true, controller.signal)
+			.then((result) => {
+				setModels(result.models)
+				if (result.warning) setCommandStatus(`catalog · cached · ${result.warning}`)
+			})
+			.catch((err) => {
+				if (!controller.signal.aborted) console.error('Failed to load model catalog:', err)
+			})
+		return () => controller.abort()
+	}, [])
 
   useEffect(() => {
     if (currentSessionId || sessions.length === 0) return
@@ -133,95 +153,6 @@ export function MissionControlApp({
     return () => window.removeEventListener('keydown', handler)
   }, [])
 
-  const handleSendMessage = useCallback(
-    async (content: string) => {
-      if (!canWrite) return
-      if (!currentSessionId) return
-      if (!terminalSessionToken) return
-      try {
-        await client.sendCommand({ sessionId: currentSessionId, type: 'input', content, sessionToken: terminalSessionToken })
-      } catch (err) {
-        console.error('Failed to send message:', err)
-      }
-    },
-    [canWrite, currentSessionId, terminalSessionToken]
-  )
-
-  const handleCommand = useCallback(
-    async (command: string) => {
-      if (!canWrite) return
-      if (!currentSessionId) return
-      if (!terminalSessionToken) return
-      try {
-        await client.sendCommand({ sessionId: currentSessionId, type: 'slash', content: command, sessionToken: terminalSessionToken })
-      } catch (err) {
-        console.error('Failed to send command:', err)
-      }
-    },
-    [canWrite, currentSessionId, terminalSessionToken]
-  )
-
-  const handleRunCommand = useCallback(
-    (command: string) => {
-      void handleCommand(command)
-    },
-    [handleCommand]
-  )
-
-  const handlePause = useCallback(async () => {
-    if (!canWrite) return
-    if (!currentSessionId) return
-    if (!terminalSessionToken) return
-    try {
-      await client.workflowAction(
-        { sessionId: currentSessionId, action: 'pause', note: 'Paused via web UI' },
-        { sessionToken: terminalSessionToken }
-      )
-    } catch (err) {
-      console.error('Failed to pause workflow:', err)
-    }
-  }, [canWrite, currentSessionId, terminalSessionToken])
-
-  const handleResume = useCallback(async () => {
-    if (!canWrite) return
-    if (!currentSessionId) return
-    if (!terminalSessionToken) return
-    try {
-      await client.workflowAction(
-        { sessionId: currentSessionId, action: 'resume', note: 'Resumed via web UI' },
-        { sessionToken: terminalSessionToken }
-      )
-    } catch (err) {
-      console.error('Failed to resume workflow:', err)
-    }
-  }, [canWrite, currentSessionId, terminalSessionToken])
-
-  const handleApprove = useCallback(
-    async (approvalId: string) => {
-      if (!canWrite) return
-      try {
-        await client.approveToolCall({ approvalId, note: 'Approved via web UI' })
-        await refreshApprovals()
-      } catch (err) {
-        console.error('Failed to approve tool call:', err)
-      }
-    },
-    [canWrite, refreshApprovals]
-  )
-
-  const handleReject = useCallback(
-    async (approvalId: string) => {
-      if (!canWrite) return
-      try {
-        await client.rejectToolCall({ approvalId, reason: 'Rejected via web UI' })
-        await refreshApprovals()
-      } catch (err) {
-        console.error('Failed to reject tool call:', err)
-      }
-    },
-    [canWrite, refreshApprovals]
-  )
-
   const handleSelectSession = useCallback(
     (sessionId: string) => {
       setCurrentSessionId(sessionId)
@@ -255,6 +186,7 @@ export function MissionControlApp({
               ? 'tool'
               : 'system',
       content: msg.content,
+		reasoning: msg.reasoning,
       timestamp: msg.timestamp,
     }))
   }, [currentView])
@@ -274,7 +206,7 @@ export function MissionControlApp({
       })
     }
     return map
-  }, [currentView?.activeToolCalls])
+  }, [currentView])
 
   const handleSelectMessage = useCallback((messageId: string) => {
     const target = document.getElementById(`message-${messageId}`)
@@ -314,17 +246,22 @@ export function MissionControlApp({
         />
 
         <main className="flex-1 flex flex-col overflow-hidden">
-          <ConversationView messages={messages} toolCalls={toolCalls} isStreaming={currentView?.isStreaming ?? false} />
+          <ConversationView messages={messages} toolCalls={toolCalls} isStreaming={isStreaming} />
           <MessageInput
-            onSend={(msg) => void handleSendMessage(msg)}
-            onCommand={(cmd) => void handleCommand(cmd)}
-            onPause={() => void handlePause()}
-            onResume={() => void handleResume()}
+            onSend={(msg) => void sendMessage(msg)}
+            onQueue={(msg) => void queueMessage(msg)}
+            onCommand={(cmd) => void runCommand(cmd)}
+            onInterrupt={() => void interrupt()}
+            onPause={() => void pause()}
+            onResume={() => void resume()}
             onOpenCommandPalette={() => setCommandPaletteOpen(true)}
             disabled={!currentSessionId || !canWrite || !terminalSessionToken}
             isPaused={isPaused}
-            isStreaming={currentView?.isStreaming ?? false}
+            isStreaming={isStreaming}
             placeholder={placeholder}
+            commandStatus={commandStatus}
+			models={models}
+			currentModel={displaySession?.model}
           />
         </main>
 
@@ -335,10 +272,10 @@ export function MissionControlApp({
           activity={activity}
           terminalSessionToken={terminalSessionToken}
           terminalCanConnect={canWrite}
-          onPause={canWrite ? () => void handlePause() : undefined}
-          onResume={canWrite ? () => void handleResume() : undefined}
-          onApprove={canWrite ? (id) => void handleApprove(id) : undefined}
-          onReject={canWrite ? (id) => void handleReject(id) : undefined}
+          onPause={canWrite ? () => void pause() : undefined}
+          onResume={canWrite ? () => void resume() : undefined}
+          onApprove={canWrite ? (id) => void approve(id) : undefined}
+          onReject={canWrite ? (id) => void reject(id) : undefined}
           onRefreshApprovals={() => void refreshApprovals()}
         />
       </div>
@@ -361,10 +298,10 @@ export function MissionControlApp({
           activity={activity}
           terminalSessionToken={terminalSessionToken}
           terminalCanConnect={canWrite}
-          onPause={canWrite ? () => void handlePause() : undefined}
-          onResume={canWrite ? () => void handleResume() : undefined}
-          onApprove={canWrite ? (id) => void handleApprove(id) : undefined}
-          onReject={canWrite ? (id) => void handleReject(id) : undefined}
+          onPause={canWrite ? () => void pause() : undefined}
+          onResume={canWrite ? () => void resume() : undefined}
+          onApprove={canWrite ? (id) => void approve(id) : undefined}
+          onReject={canWrite ? (id) => void reject(id) : undefined}
           onRefreshApprovals={() => void refreshApprovals()}
         />
       </div>
@@ -374,24 +311,28 @@ export function MissionControlApp({
           <ApprovalBanner
             key={approval.id}
             approval={approval}
-            onApprove={(id) => void handleApprove(id)}
-            onReject={(id) => void handleReject(id)}
+            onApprove={(id) => void approve(id)}
+            onReject={(id) => void reject(id)}
           />
         ))}
       </div>
 
-      <CommandPalette
-        isOpen={commandPaletteOpen}
-        onClose={() => setCommandPaletteOpen(false)}
-        onRunCommand={handleRunCommand}
-      />
+      {commandPaletteOpen && (
+        <CommandPalette
+          isOpen
+          onClose={() => setCommandPaletteOpen(false)}
+          onRunCommand={(command) => void runCommand(command)}
+        />
+      )}
 
-      <ConversationSearch
-        isOpen={searchOpen}
-        messages={messages}
-        onClose={() => setSearchOpen(false)}
-        onSelectMessage={handleSelectMessage}
-      />
+      {searchOpen && (
+        <ConversationSearch
+          isOpen
+          messages={messages}
+          onClose={() => setSearchOpen(false)}
+          onSelectMessage={handleSelectMessage}
+        />
+      )}
 
       <OperatorConsole isOpen={operatorOpen} onClose={() => setOperatorOpen(false)} />
     </div>

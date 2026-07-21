@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"m31labs.dev/buckley/pkg/conversation"
+	"m31labs.dev/buckley/pkg/ipc/command"
 	"m31labs.dev/buckley/pkg/model"
 	"m31labs.dev/buckley/pkg/storage"
 	"m31labs.dev/buckley/pkg/tool"
@@ -98,6 +99,89 @@ func TestRunnerStateTransitions(t *testing.T) {
 				t.Errorf("expected state %v, got %v", tc.expected, got)
 			}
 		})
+	}
+}
+
+func TestRunnerCommandLifecycle(t *testing.T) {
+	emitter := &mockEmitter{}
+	runner := &Runner{
+		sessionID:           "test-session",
+		state:               StateIdle,
+		emitter:             emitter,
+		interruptedCommands: make(map[string]struct{}),
+	}
+	cmd := command.SessionCommand{ID: "cmd-1", SessionID: "test-session", Type: "pause"}
+	if err := runner.runSessionCommand(cmd); err != nil {
+		t.Fatalf("runSessionCommand: %v", err)
+	}
+	if len(emitter.events) < 2 {
+		t.Fatalf("events=%d want at least 2", len(emitter.events))
+	}
+	if emitter.events[0].Type != EventCommandStarted {
+		t.Fatalf("first event=%q want %q", emitter.events[0].Type, EventCommandStarted)
+	}
+	last := emitter.events[len(emitter.events)-1]
+	if last.Type != EventCommandCompleted {
+		t.Fatalf("last event=%q want %q", last.Type, EventCommandCompleted)
+	}
+	if last.Data["commandId"] != "cmd-1" {
+		t.Fatalf("commandId=%v want cmd-1", last.Data["commandId"])
+	}
+}
+
+func TestRunnerSteerCancelsAndQueues(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	emitter := &mockEmitter{}
+	runner := &Runner{
+		sessionID:           "test-session",
+		state:               StateProcessing,
+		emitter:             emitter,
+		cancelFunc:          cancel,
+		activeCommandID:     "active-command",
+		interruptedCommands: make(map[string]struct{}),
+		commandQueue:        make(chan command.SessionCommand, 1),
+	}
+
+	if err := runner.HandleSessionCommand(command.SessionCommand{ID: "steer-command", Type: "steer", Content: "change course"}); err != nil {
+		t.Fatalf("HandleSessionCommand: %v", err)
+	}
+	select {
+	case <-ctx.Done():
+	default:
+		t.Fatal("steer did not cancel the active command")
+	}
+	queued := <-runner.commandQueue
+	if queued.Type != "steer" || queued.ID != "steer-command" {
+		t.Fatalf("queued=%+v want steer with stable ID", queued)
+	}
+	if _, ok := runner.interruptedCommands["active-command"]; !ok {
+		t.Fatal("active command was not marked interrupted")
+	}
+}
+
+func TestRunnerQueueDoesNotCancel(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runner := &Runner{
+		sessionID:           "test-session",
+		state:               StateProcessing,
+		cancelFunc:          cancel,
+		activeCommandID:     "active-command",
+		interruptedCommands: make(map[string]struct{}),
+		commandQueue:        make(chan command.SessionCommand, 1),
+	}
+
+	if err := runner.HandleSessionCommand(command.SessionCommand{ID: "queued-command", Type: "queue", Content: "after this"}); err != nil {
+		t.Fatalf("HandleSessionCommand: %v", err)
+	}
+	select {
+	case <-ctx.Done():
+		t.Fatal("queue cancelled the active command")
+	default:
+	}
+	queued := <-runner.commandQueue
+	if queued.Type != "queue" || queued.ID != "queued-command" {
+		t.Fatalf("queued=%+v want queue with stable ID", queued)
 	}
 }
 

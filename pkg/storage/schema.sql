@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     project_path TEXT,
     git_repo TEXT,
     git_branch TEXT,
+    model TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     last_active TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     message_count INT DEFAULT 0,
@@ -132,6 +133,17 @@ CREATE TABLE IF NOT EXISTS api_calls (
 
 CREATE INDEX IF NOT EXISTS idx_api_calls_session ON api_calls(session_id);
 CREATE INDEX IF NOT EXISTS idx_api_calls_timestamp ON api_calls(timestamp);
+
+-- Durable IPC event log: reconnecting clients can resume progress streams.
+CREATE TABLE IF NOT EXISTS ipc_events (
+    event_id TEXT PRIMARY KEY,
+    session_id TEXT,
+    event_type TEXT NOT NULL,
+    payload_json TEXT,
+    created_at TIMESTAMP NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_ipc_events_session_id ON ipc_events(session_id, event_id);
 
 -- Feature sessions table: links sessions to feature development plans and worktrees (Phase 4)
 CREATE TABLE IF NOT EXISTS feature_sessions (

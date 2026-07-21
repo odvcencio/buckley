@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
+	"github.com/oklog/ulid/v2"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/types/known/emptypb"
 	"google.golang.org/protobuf/types/known/structpb"
@@ -219,13 +220,17 @@ func (s *GRPCService) runEventForwarder() {
 }
 
 func convertToProtoEvent(event Event) *ipcpb.Event {
+	eventID := strings.TrimSpace(event.EventID)
+	if eventID == "" {
+		eventID = strings.ToLower(ulid.Make().String())
+	}
 	payload := payloadToStruct(event.Payload)
 	return &ipcpb.Event{
 		Type:      event.Type,
 		SessionId: event.SessionID,
 		Payload:   payload,
 		Timestamp: timestamppb.New(event.Timestamp),
-		EventId:   fmt.Sprintf("%d", event.Timestamp.UnixNano()),
+		EventId:   eventID,
 	}
 }
 
@@ -654,6 +659,11 @@ func (s *GRPCService) Subscribe(
 		return err
 	}
 
+	replayedThrough, err := s.replaySessionEvents(req.Msg, stream)
+	if err != nil {
+		return err
+	}
+
 	// Opportunistically send an initial snapshot to help UI clients render immediately.
 	if sessID == "" && s.server != nil && s.server.store != nil {
 		if sessions, err := s.server.store.ListSessions(50); err == nil {
@@ -696,6 +706,9 @@ func (s *GRPCService) Subscribe(
 		case <-subCtx.Done():
 			return subCtx.Err()
 		case event := <-sub.events:
+			if replayedThrough != "" && event.EventId <= replayedThrough {
+				continue
+			}
 			if err := stream.Send(event); err != nil {
 				return err
 			}
@@ -722,6 +735,34 @@ func (s *GRPCService) Subscribe(
 			}
 		}
 	}
+}
+
+func (s *GRPCService) replaySessionEvents(filter *ipcpb.SubscribeRequest, stream *connect.ServerStream[ipcpb.Event]) (string, error) {
+	if filter == nil || strings.TrimSpace(filter.SessionId) == "" || strings.TrimSpace(filter.LastEventId) == "" || s.server == nil || s.server.store == nil {
+		return "", nil
+	}
+	events, err := s.server.store.ListIPCEventsAfter(filter.SessionId, filter.LastEventId, 5000)
+	if err != nil {
+		return "", connect.NewError(connect.CodeInternal, err)
+	}
+	replayedThrough := ""
+	for _, stored := range events {
+		event := Event{
+			EventID:   stored.ID,
+			Type:      stored.Type,
+			SessionID: stored.SessionID,
+			Payload:   stored.Payload,
+			Timestamp: stored.CreatedAt,
+		}
+		if !matchesEventFilter(event, filter) {
+			continue
+		}
+		if err := stream.Send(convertToProtoEvent(event)); err != nil {
+			return replayedThrough, err
+		}
+		replayedThrough = stored.ID
+	}
+	return replayedThrough, nil
 }
 
 // =============================================================================
@@ -782,7 +823,7 @@ func (s *GRPCService) SendCommand(
 	if cmdType == "" {
 		cmdType = "input"
 	}
-	if (cmdType == "input" || cmdType == "slash") && strings.TrimSpace(msg.Content) == "" {
+	if command.RequiresContent(cmdType) && strings.TrimSpace(msg.Content) == "" {
 		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("content required"))
 	}
 
@@ -791,13 +832,15 @@ func (s *GRPCService) SendCommand(
 		Type:      cmdType,
 		Content:   msg.Content,
 	}
+	cmd.EnsureID()
 
 	// Try headless registry first
 	if s.server.headlessRegistry != nil {
 		if err := s.server.headlessRegistry.DispatchCommand(cmd); err == nil {
 			return connect.NewResponse(&ipcpb.CommandResponse{
-				Status:  "accepted",
-				Message: "Command dispatched to headless session",
+				Status:    "accepted",
+				Message:   "Command dispatched to headless session",
+				CommandId: cmd.ID,
 			}), nil
 		}
 	}
@@ -806,19 +849,22 @@ func (s *GRPCService) SendCommand(
 	if s.server.commandGW != nil {
 		if err := s.server.commandGW.Dispatch(cmd); err != nil {
 			return connect.NewResponse(&ipcpb.CommandResponse{
-				Status:  "rejected",
-				Message: err.Error(),
+				Status:    "rejected",
+				Message:   err.Error(),
+				CommandId: cmd.ID,
 			}), nil
 		}
 		return connect.NewResponse(&ipcpb.CommandResponse{
-			Status:  "accepted",
-			Message: "Command dispatched",
+			Status:    "accepted",
+			Message:   "Command dispatched",
+			CommandId: cmd.ID,
 		}), nil
 	}
 
 	return connect.NewResponse(&ipcpb.CommandResponse{
-		Status:  "rejected",
-		Message: "No command handler available",
+		Status:    "rejected",
+		Message:   "No command handler available",
+		CommandId: cmd.ID,
 	}), nil
 }
 

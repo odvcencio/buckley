@@ -191,6 +191,7 @@ func (r *Registry) CreateSession(req CreateSessionRequest) (*SessionInfo, error)
 		ProjectPath: projectPath,
 		GitRepo:     gitRepo,
 		GitBranch:   gitBranch,
+		Model:       modelID,
 		CreatedAt:   time.Now(),
 		LastActive:  time.Now(),
 		Status:      storage.SessionStatusActive,
@@ -293,8 +294,8 @@ func (r *Registry) EnsureSession(sessionID string) (*Runner, error) {
 	}
 
 	idleTimeout := r.maxIdleTime
-	modelID := ""
-	if r.config != nil {
+	modelID := strings.TrimSpace(sess.Model)
+	if modelID == "" && r.config != nil {
 		modelID = r.config.Models.Execution
 		if modelID == "" {
 			modelID = r.config.Models.Planning
@@ -420,7 +421,7 @@ func (r *Registry) GetSessionInfo(sessionID string) (*SessionInfo, bool) {
 		ID:           sessionID,
 		Project:      runnerProjectPath(runner),
 		Branch:       strings.TrimSpace(runner.session.GitBranch),
-		Model:        strings.TrimSpace(runner.modelOverride),
+		Model:        runner.Model(),
 		State:        runner.State(),
 		CreatedAt:    runner.session.CreatedAt,
 		LastActive:   runner.LastActive(),
@@ -439,7 +440,7 @@ func (r *Registry) ListSessions() []SessionInfo {
 			ID:           id,
 			Project:      runnerProjectPath(runner),
 			Branch:       strings.TrimSpace(runner.session.GitBranch),
-			Model:        strings.TrimSpace(runner.modelOverride),
+			Model:        runner.Model(),
 			State:        runner.State(),
 			CreatedAt:    runner.session.CreatedAt,
 			LastActive:   runner.LastActive(),

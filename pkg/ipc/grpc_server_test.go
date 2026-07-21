@@ -76,6 +76,9 @@ func TestGRPCSendCommandScopeEnforced(t *testing.T) {
 	if resp.Msg.Status != "accepted" {
 		t.Fatalf("SendCommand status=%q want accepted", resp.Msg.Status)
 	}
+	if resp.Msg.CommandId == "" {
+		t.Fatal("SendCommand returned an empty command ID")
+	}
 }
 
 func TestGRPCSendCommandRequiresSessionToken(t *testing.T) {
