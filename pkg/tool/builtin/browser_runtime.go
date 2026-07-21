@@ -50,8 +50,8 @@ func (t *BrowserStartTool) Parameters() ParameterSchema {
 				Type:        "object",
 				Description: "Viewport config (width, height, device_scale_factor)",
 				Properties: map[string]PropertySchema{
-					"width":              {Type: "integer", Description: "Viewport width in pixels"},
-					"height":             {Type: "integer", Description: "Viewport height in pixels"},
+					"width":               {Type: "integer", Description: "Viewport width in pixels"},
+					"height":              {Type: "integer", Description: "Viewport height in pixels"},
 					"device_scale_factor": {Type: "number", Description: "Device pixel ratio"},
 				},
 			},
