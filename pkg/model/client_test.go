@@ -512,6 +512,22 @@ func TestClient_ChatCompletion_ContextCancellation(t *testing.T) {
 	}
 }
 
+func TestClient_ParseSSEStreamReturnsInBandProviderError(t *testing.T) {
+	client := NewClient("test-key", "http://example.invalid")
+	stream := "data: {\"error\":{\"code\":400,\"message\":\"invalid tool schema\",\"type\":\"invalid_request\"},\"choices\":[]}\n\n"
+	err := client.parseSSEStream(context.Background(), strings.NewReader(stream), make(chan StreamChunk, 1))
+	if err == nil {
+		t.Fatal("expected streaming provider error")
+	}
+	apiErr, ok := err.(*APIError)
+	if !ok {
+		t.Fatalf("error type = %T, want *APIError", err)
+	}
+	if apiErr.StatusCode != 400 || apiErr.Message != "invalid tool schema" || apiErr.Type != "invalid_request" {
+		t.Fatalf("unexpected API error: %+v", apiErr)
+	}
+}
+
 // TestExtractTextContent tests text content extraction
 func TestExtractTextContent(t *testing.T) {
 	tests := []struct {

@@ -20,6 +20,11 @@ func (p *OpenRouterProvider) FetchCatalog() (*ModelCatalog, error) {
 	return p.client.FetchCatalog()
 }
 
+// RefreshCatalog bypasses the OpenRouter client's in-memory catalog cache.
+func (p *OpenRouterProvider) RefreshCatalog() (*ModelCatalog, error) {
+	return p.client.RefreshCatalog()
+}
+
 // GetModelInfo fetches info for the supplied model.
 func (p *OpenRouterProvider) GetModelInfo(modelID string) (*ModelInfo, error) {
 	return p.client.GetModelInfo(modelID)

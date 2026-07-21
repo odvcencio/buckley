@@ -46,6 +46,11 @@ const (
 	EventRLMIteration               EventType = "rlm.iteration"
 	EventCircuitFailure             EventType = "circuit.failure"
 	EventCircuitStateChange         EventType = "circuit.state_change"
+	EventSubagentSpawned            EventType = "subagent.spawned"
+	EventSubagentState              EventType = "subagent.state"
+	EventSubagentCompleted          EventType = "subagent.completed"
+	EventSubagentFailed             EventType = "subagent.failed"
+	EventSubagentCancelled          EventType = "subagent.cancelled"
 
 	// RLM transparency events.
 	EventRLMEscalation    EventType = "rlm.escalation"
@@ -83,7 +88,7 @@ const (
 	// Machine review events.
 	EventMachineReview    EventType = "machine.review"
 	EventMachineIteration EventType = "machine.iteration"
-	EventDebug                      EventType = "debug"
+	EventDebug            EventType = "debug"
 )
 
 // Event describes workflow telemetry that UIs and IPC clients can consume.

@@ -177,6 +177,22 @@ var migrations = []Migration{
 	{10, "messages_search", ensureMessagesSearchSchema},
 	{11, "memories_project_path", ensureMemoriesSchema},
 	{12, "message_tool_turns", ensureMessagesSchema},
+	{13, "provider_threads", ensureProviderThreadsSchema},
+}
+
+func ensureProviderThreadsSchema(db *sql.DB) error {
+	_, err := db.Exec(`CREATE TABLE IF NOT EXISTS provider_threads (
+		session_id TEXT NOT NULL,
+		provider_id TEXT NOT NULL,
+		thread_id TEXT NOT NULL,
+		updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+		PRIMARY KEY (session_id, provider_id),
+		FOREIGN KEY (session_id) REFERENCES sessions(session_id) ON DELETE CASCADE
+	)`)
+	if err != nil {
+		return fmt.Errorf("create provider_threads: %w", err)
+	}
+	return nil
 }
 
 // runMigrations runs the schema migrations with version tracking

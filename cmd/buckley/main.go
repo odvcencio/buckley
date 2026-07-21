@@ -249,6 +249,7 @@ func main() {
 		os.Exit(1)
 	}
 	defer store.Close()
+	modelManager.SetProviderThreadStore(store)
 
 	// Load project context (AGENTS.md)
 	loader := projectcontext.NewLoader(cwd)
@@ -295,13 +296,14 @@ func main() {
 
 	// Create and run TUI
 	ctrl, err := tui.NewController(tui.ControllerConfig{
-		Config:       cfg,
-		ModelManager: modelManager,
-		Store:        store,
-		ProjectCtx:   projectContext,
-		Telemetry:    telemetryHub,
-		SessionID:    resumeSessionID,
-		AgentProfile: agentPromptSection(agentProfile),
+		Config:        cfg,
+		ModelManager:  modelManager,
+		Store:         store,
+		ProjectCtx:    projectContext,
+		Telemetry:     telemetryHub,
+		SessionID:     resumeSessionID,
+		AgentProfile:  agentPromptSection(agentProfile),
+		ModelOverride: modelOverrideFlag,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error creating TUI: %v\n", err)
@@ -372,7 +374,9 @@ func executeOneShot(prompt string, cfg *config.Config, mgr *model.Manager, store
 	createTool := &builtin.CreateSkillTool{Registry: skills}
 	createTool.SetWorkDir(cwd)
 	registry.Register(createTool)
-	skillState.SetToolFilter(resolveOneShotToolFilter(agentProfile, registry, allowedTools))
+	if toolFilter := resolveOneShotToolFilter(agentProfile, registry, allowedTools); toolFilter != nil {
+		skillState.SetToolFilter(toolFilter)
+	}
 
 	conv.AddSystemMessage(buildACPSystemPrompt(projectContext, cwd, skills, engine, agentPromptSection(agentProfile)))
 	conv.AddUserMessage(prompt)
@@ -628,6 +632,7 @@ func initDependencies() (*config.Config, *model.Manager, *storage.Store, error) 
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("failed to initialize storage: %w", err)
 	}
+	modelManager.SetProviderThreadStore(store)
 
 	return cfg, modelManager, store, nil
 }

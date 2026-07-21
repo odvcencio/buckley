@@ -204,6 +204,16 @@ CREATE TABLE IF NOT EXISTS session_skills (
 CREATE INDEX IF NOT EXISTS idx_session_skills_session ON session_skills(session_id);
 CREATE INDEX IF NOT EXISTS idx_session_skills_active ON session_skills(session_id, is_active);
 
+-- Native provider conversation IDs for durable chat resumption.
+CREATE TABLE IF NOT EXISTS provider_threads (
+    session_id TEXT NOT NULL,
+    provider_id TEXT NOT NULL,
+    thread_id TEXT NOT NULL,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (session_id, provider_id),
+    FOREIGN KEY (session_id) REFERENCES sessions(session_id) ON DELETE CASCADE
+);
+
 -- Executions table: tracks orchestrator execution metadata
 CREATE TABLE IF NOT EXISTS executions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

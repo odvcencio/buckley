@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -192,6 +193,7 @@ type StreamChunk struct {
 	Model   string         `json:"model"`
 	Choices []StreamChoice `json:"choices"`
 	Usage   *Usage         `json:"usage,omitempty"` // Only present in final chunk
+	Error   *ErrorDetail   `json:"error,omitempty"` // OpenRouter may report mid-stream failures in-band
 }
 
 // StreamChoice represents a streaming choice
@@ -378,6 +380,30 @@ type ErrorDetail struct {
 	Message string `json:"message"`
 	Type    string `json:"type"`
 	Code    string `json:"code"`
+}
+
+// UnmarshalJSON accepts the string and numeric error codes used by
+// OpenRouter's regular and streaming error envelopes.
+func (e *ErrorDetail) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		Message string          `json:"message"`
+		Type    string          `json:"type"`
+		Code    json.RawMessage `json:"code"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	e.Message = raw.Message
+	e.Type = raw.Type
+	e.Code = ""
+	if len(raw.Code) == 0 || string(raw.Code) == "null" {
+		return nil
+	}
+	if err := json.Unmarshal(raw.Code, &e.Code); err == nil {
+		return nil
+	}
+	e.Code = strings.TrimSpace(string(raw.Code))
+	return nil
 }
 
 // APIError represents a structured API error with retry information

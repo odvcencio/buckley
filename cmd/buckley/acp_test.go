@@ -66,6 +66,9 @@ func TestShouldNudgeACPToolUseHonorsLimitAndToolAvailability(t *testing.T) {
 	if !shouldNudgeACPToolUse(true, true, 0, "I'll search the repo first.") {
 		t.Fatal("expected nudge when tools are available and model describes tool-like intent")
 	}
+	if !shouldNudgeACPToolUse(true, true, 0, "") {
+		t.Fatal("expected nudge when a tool-enabled model returns an empty turn")
+	}
 	if shouldNudgeACPToolUse(false, true, 0, "I'll search the repo first.") {
 		t.Fatal("did not expect nudge when tool use is disabled")
 	}
@@ -109,6 +112,9 @@ func TestBuildACPChatRequestAttachesTools(t *testing.T) {
 	}
 	if req.ToolChoice != "auto" {
 		t.Fatalf("ToolChoice = %q, want auto", req.ToolChoice)
+	}
+	if req.ParallelToolCalls != nil {
+		t.Fatalf("ParallelToolCalls = %v, want omitted without catalog support", req.ParallelToolCalls)
 	}
 }
 

@@ -253,11 +253,8 @@ func TestStreamAccumulator_Usage(t *testing.T) {
 		t.Error("Usage() should be nil before final chunk")
 	}
 
-	// Final chunk with usage
+	// OpenRouter may send usage in a terminal chunk with no choices.
 	acc.Add(StreamChunk{
-		Choices: []StreamChoice{{
-			Delta: MessageDelta{Content: "!"},
-		}},
 		Usage: &Usage{
 			PromptTokens:     10,
 			CompletionTokens: 5,

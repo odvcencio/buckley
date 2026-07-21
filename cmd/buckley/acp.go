@@ -616,6 +616,8 @@ func runACPLoop(
 	evaluator := newACPEvaluator(engine)
 	useTools := acpModelCanUseTools(registry, mgr, modelID)
 	nudgeCount := 0
+	finalizeNudgeCount := 0
+	toolsExecuted := false
 	lastPhase := ""
 	for {
 		if ctx.Err() != nil {
@@ -646,10 +648,21 @@ func runACPLoop(
 			if err != nil {
 				return "", err
 			}
+			if strings.TrimSpace(text) == "" && toolsExecuted {
+				if finalizeNudgeCount == 0 {
+					finalizeNudgeCount++
+					conv.AddUserMessage("Return the final answer now using the completed tool results. Do not leave the response empty.")
+					continue
+				}
+				return "", fmt.Errorf("model returned an empty final response after tool execution")
+			}
 			if shouldNudgeACPToolUse(useTools, toolTurn.Enabled, nudgeCount, text) {
 				nudgeCount++
 				conv.AddUserMessage("Use tools to take action now. Pick a tool and call it; do not answer with prose alone.")
 				continue
+			}
+			if strings.TrimSpace(text) == "" {
+				return "", fmt.Errorf("model returned an empty response")
 			}
 			sendACPPhaseUpdate(stream, lastPhase, "Finalizing response…")
 			conv.AddAssistantMessageWithReasoningDetails(text, msg.Reasoning, msg.ReasoningDetails)
@@ -660,6 +673,7 @@ func runACPLoop(
 		normalizeACPToolCallIDs(msg.ToolCalls)
 		conv.AddToolCallMessageWithReasoning(msg.ToolCalls, msg.Reasoning, msg.ReasoningDetails)
 		lastPhase = executeACPToolCalls(conv, registry, stream, msg.ToolCalls, toolTurn.AllowedTools, lastPhase)
+		toolsExecuted = true
 	}
 }
 
@@ -725,6 +739,10 @@ func buildACPChatRequest(cfg *config.Config, mgr *model.Manager, engine *rules.E
 	if turn.UseTools {
 		req.Tools = turn.Tools
 		req.ToolChoice = "auto"
+		if mgr != nil && mgr.SupportsParameter(modelID, "parallel_tool_calls") {
+			sequential := false
+			req.ParallelToolCalls = &sequential
+		}
 	}
 	if effort := model.ResolveReasoningEffort(cfg, acpReasoningChecker(mgr), engine, modelID, "execution"); effort != "" {
 		req.Reasoning = &model.ReasoningConfig{Effort: effort}
@@ -733,7 +751,8 @@ func buildACPChatRequest(cfg *config.Config, mgr *model.Manager, engine *rules.E
 }
 
 func shouldNudgeACPToolUse(useTools, toolsEnabled bool, nudgeCount int, text string) bool {
-	return useTools && toolsEnabled && nudgeCount < acpMaxToolNudges && shouldNudgeForTools(text)
+	return useTools && toolsEnabled && nudgeCount < acpMaxToolNudges &&
+		(strings.TrimSpace(text) == "" || shouldNudgeForTools(text))
 }
 
 func normalizeACPToolCallIDs(calls []model.ToolCall) {
