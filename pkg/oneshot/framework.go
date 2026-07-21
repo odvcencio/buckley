@@ -35,6 +35,7 @@ type RLMExecutor interface {
 // invocation in one RunRLM call.
 type RLMExecutionOpts struct {
 	ReviewSnapshot *model.ReviewSnapshot
+	MaxIterations  int
 }
 
 // ToolInvoker runs a single tool-shaped one-shot model invocation.
@@ -259,6 +260,9 @@ func (f *Framework) RunRLM(ctx context.Context, def RLMDefinition, opts RLMRunOp
 		}
 	}
 	executionOpts := RLMExecutionOpts{ReviewSnapshot: snapshot}
+	if budget, ok := def.(RLMExecutionBudget); ok {
+		executionOpts.MaxIterations = budget.MaxRLMIterations()
+	}
 
 	primary := f.runValidatedRLMPhase(ctx, def, def.SystemPrompt(), basePrompt, maxRetries, "primary", executionOpts)
 	result.Attempts = primary.attempts

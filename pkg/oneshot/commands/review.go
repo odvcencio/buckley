@@ -78,6 +78,8 @@ func (ReviewProjectDef) AllowedTools() []string {
 	return []string{"read_file", "find_files", "search_text"}
 }
 
+func (ReviewProjectDef) MaxRLMIterations() int { return 8 }
+
 func (ReviewProjectDef) ParseResult(response string) (any, error) {
 	return &ReviewRLMResult{
 		Review: response,

@@ -27,8 +27,9 @@ func TestDefaultBranchContextOptions(t *testing.T) {
 func TestDefaultProjectContextOptions(t *testing.T) {
 	opts := DefaultProjectContextOptions()
 
-	assert.Equal(t, 3, opts.MaxTreeDepth)
+	assert.Equal(t, 2, opts.MaxTreeDepth)
 	assert.True(t, opts.IncludeAgents)
+	assert.True(t, opts.IncludeCanopy)
 }
 
 func TestReviewDefinitionsExposeOnlySnapshotReviewTools(t *testing.T) {
@@ -43,6 +44,7 @@ func TestReviewDefinitionsExposeOnlySnapshotReviewTools(t *testing.T) {
 	projectTools := (ReviewProjectDef{}).AllowedTools()
 	assert.Equal(t, []string{"read_file", "find_files", "search_text"}, projectTools)
 	assert.NotContains(t, projectTools, "run_verification")
+	assert.Equal(t, 8, (ReviewProjectDef{}).MaxRLMIterations())
 
 	for _, definition := range definitions {
 		t.Run(definition.name, func(t *testing.T) {

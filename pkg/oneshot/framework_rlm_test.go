@@ -12,13 +12,14 @@ import (
 )
 
 type scriptedRLMExecutor struct {
-	responses []string
-	systems   []string
-	prompts   []string
-	tools     [][]string
-	snapshots []*model.ReviewSnapshot
-	traces    []*transparency.Trace
-	providers []string
+	responses  []string
+	systems    []string
+	prompts    []string
+	tools      [][]string
+	snapshots  []*model.ReviewSnapshot
+	traces     []*transparency.Trace
+	providers  []string
+	iterations []int
 }
 
 func (s *scriptedRLMExecutor) Run(_ context.Context, system string, task string, allowedTools []string, opts RLMExecutionOpts) (*RLMResult, error) {
@@ -26,6 +27,7 @@ func (s *scriptedRLMExecutor) Run(_ context.Context, system string, task string,
 	s.prompts = append(s.prompts, task)
 	s.tools = append(s.tools, append([]string(nil), allowedTools...))
 	s.snapshots = append(s.snapshots, opts.ReviewSnapshot)
+	s.iterations = append(s.iterations, opts.MaxIterations)
 	if len(s.responses) == 0 {
 		return nil, fmt.Errorf("no scripted response")
 	}
@@ -47,6 +49,10 @@ func (s *scriptedRLMExecutor) Run(_ context.Context, system string, task string,
 type validatingRLMDefinition struct{}
 
 type executionValidatingRLMDefinition struct{ validatingRLMDefinition }
+
+type budgetedRLMDefinition struct{ validatingRLMDefinition }
+
+func (budgetedRLMDefinition) MaxRLMIterations() int { return 8 }
 
 func (executionValidatingRLMDefinition) ValidateRLMExecution(_ any, execution *RLMResult) error {
 	if execution == nil || execution.ProviderID != "verified" {
@@ -123,6 +129,17 @@ func TestRunRLMRetriesValidationFailureWithGuidance(t *testing.T) {
 	}
 	if got := strings.Join(runner.tools[0], ","); got != "read_file,run_shell" {
 		t.Fatalf("allowed tools = %q, want exact registry names", got)
+	}
+}
+
+func TestRunRLMAppliesDefinitionIterationBudget(t *testing.T) {
+	runner := &scriptedRLMExecutor{responses: []string{"valid"}}
+	framework := NewFramework(nil, nil).WithRLMRunner(runner)
+	if _, err := framework.RunRLM(context.Background(), budgetedRLMDefinition{}, RLMRunOpts{}); err != nil {
+		t.Fatalf("RunRLM() error = %v", err)
+	}
+	if len(runner.iterations) != 1 || runner.iterations[0] != 8 {
+		t.Fatalf("iteration budgets = %v, want [8]", runner.iterations)
 	}
 }
 
