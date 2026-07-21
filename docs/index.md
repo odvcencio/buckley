@@ -40,7 +40,7 @@ features:
 ## Quick Start
 
 ```bash
-go install github.com/odvcencio/buckley/cmd/buckley@latest
+go install m31labs.dev/buckley/cmd/buckley@latest
 export OPENROUTER_API_KEY="your-key"
 buckley
 ```

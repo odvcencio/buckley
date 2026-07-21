@@ -1,5 +1,9 @@
 # Buckley
 
+[![Go Reference](https://pkg.go.dev/badge/m31labs.dev/buckley.svg)](https://pkg.go.dev/m31labs.dev/buckley)
+[![CI](https://github.com/odvcencio/buckley/actions/workflows/ci.yml/badge.svg)](https://github.com/odvcencio/buckley/actions/workflows/ci.yml)
+[![Release](https://github.com/odvcencio/buckley/actions/workflows/release.yml/badge.svg)](https://github.com/odvcencio/buckley/actions/workflows/release.yml)
+
 Buckley is a tool-first AI agent harness for serious repository work.
 
 It combines resumable sessions, Arbiter-governed model and tool selection, Claude-style repository instructions, and multiple operator surfaces: terminal, browser, one-shot, ACP, and LSP.
@@ -19,7 +23,7 @@ Agents working with Buckley should use the [using-buckley](https://github.com/od
 ## Quick Start
 
 ```bash
-go install github.com/odvcencio/buckley/cmd/buckley@latest
+go install m31labs.dev/buckley/cmd/buckley@latest
 export OPENROUTER_API_KEY="your-key"
 buckley
 ```
