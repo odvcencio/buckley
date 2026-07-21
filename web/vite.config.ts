@@ -30,6 +30,10 @@ export default defineConfig({
   build: {
     outDir: '../pkg/ipc/ui',
     emptyOutDir: true,
+    minify: 'terser',
+    terserOptions: {
+      maxWorkers: 1,
+    },
     rollupOptions: {
       output: {
         // Stable names keep embedded asset verification reproducible across builders.
