@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-07-10
+
+### Breaking
+- Removed the legacy import-path mirrors under `pkg/buckley/ui/{filepicker,scrollback,shellmode,viewmodel,widgets}`. Consumers of retained UI surfaces must migrate to the canonical `pkg/ui/...` packages.
+- Removed `pkg/ui/shellmode` and pruned obsolete exported helpers from the remaining `pkg/ui` packages as the terminal implementation was consolidated. External UI integrations must migrate to the current `pkg/ui/terminal`, `pkg/ui/tui`, and retained component APIs, or remain on v1.6.1 while migrating.
+
+### Added
+- Filesystem-discovered agent profiles, skills, named subagents, scoped tool tiers, and invocation previews.
+- Project chat-check suites, artifacts, JUnit reports, health checks, and eval scenario inspection.
+- JSON previews for governed agent runs and richer project/agent diagnostics.
+- New top-level `doctor`, `info`, and `skills` inspection surfaces, plus expanded `agent init`, `agent list`, `agent info`, `agent subagent`, and `agent run` workflows.
+
+### Changed
+- Split the one-shot commit, PR, and review flows into focused command surfaces with governed Codex and API backends.
+- Refactored the TUI, ACP, experiment, and task-workspace paths into smaller components while preserving behavior.
+- Made terminal input, search, file-picker, status-bar, and chat wrapping rune-aware.
+
+### Fixed
+- `review-pr` now binds every PR operation to the resolved repository and immutable head/base revisions, includes legacy commit statuses, collapses reruns to the latest context state, and validates CI provenance before approval.
+- PR generation now fetches the selected base and pins both ends of the merge-base range for diff, log, and changed-file context; exhausted retries retain their concrete validation/decode reason, and the decoder accepts the common single-string `changes` shape without weakening other fields.
+- Documentation-only PRs with no head checks can inherit successful CI from their immutable base revision; source or mixed changes still fail closed.
+- Immutable-base CI collection now fails closed when GitHub's 1,000-check-suite visibility ceiling could make evidence incomplete.
+- Review sandboxes preserve configured toolchain priority, allowing module-compatible Go installations to win over older system binaries.
+- Review prompts and evidence distinguish changed-source findings from sandbox/environment limitations instead of returning false-clean approvals.
+
 ## [1.6.1] - 2026-06-17
 
 ### Fixed
@@ -130,7 +155,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Telemetry is local-only by default.
 - Plugin discovery limited to local paths only.
 
-[Unreleased]: https://github.com/odvcencio/buckley/compare/v1.6.1...HEAD
+[Unreleased]: https://github.com/odvcencio/buckley/compare/v2.0.0...HEAD
+[2.0.0]: https://github.com/odvcencio/buckley/compare/v1.6.1...v2.0.0
 [1.6.1]: https://github.com/odvcencio/buckley/compare/v1.6.0...v1.6.1
 [1.6.0]: https://github.com/odvcencio/buckley/compare/v1.5.0...v1.6.0
 [1.5.0]: https://github.com/odvcencio/buckley/compare/v1.4.1...v1.5.0
