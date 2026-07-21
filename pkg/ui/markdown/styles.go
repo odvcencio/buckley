@@ -3,8 +3,8 @@
 package markdown
 
 import (
-	"m31labs.dev/buckley/pkg/ui/compositor"
-	"m31labs.dev/buckley/pkg/ui/theme"
+	"m31labs.dev/fluffyui/compositor"
+	"m31labs.dev/fluffyui/theme"
 )
 
 // StyledSpan represents a span of text with consistent styling.

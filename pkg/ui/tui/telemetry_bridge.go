@@ -149,6 +149,10 @@ func (b *TelemetryUIBridge) handleEvent(event telemetry.Event) {
 		b.handleToolStarted(event)
 	case telemetry.EventToolCompleted, telemetry.EventToolFailed:
 		b.handleToolFinished(event)
+	case telemetry.EventSubagentSpawned, telemetry.EventSubagentState:
+		b.handleSubagentActive(event)
+	case telemetry.EventSubagentCompleted, telemetry.EventSubagentFailed, telemetry.EventSubagentCancelled:
+		b.removeRunningTool(event.TaskID)
 
 	// Experiment events
 	case telemetry.EventExperimentStarted:
@@ -164,6 +168,28 @@ func (b *TelemetryUIBridge) handleEvent(event telemetry.Event) {
 	case telemetry.EventRLMIteration:
 		b.handleRLMIteration(event)
 	}
+}
+
+func (b *TelemetryUIBridge) handleSubagentActive(event telemetry.Event) {
+	agentID := strings.TrimSpace(event.TaskID)
+	if agentID == "" {
+		agentID = getString(event.Data, "agent_id")
+	}
+	if agentID == "" {
+		return
+	}
+	label := getString(event.Data, "agent")
+	if label == "" {
+		label = getString(event.Data, "provider")
+	}
+	if label == "" {
+		label = "subagent"
+	}
+	state := getString(event.Data, "state")
+	if state == "" {
+		state = "running"
+	}
+	b.addRunningTool(agentID, "agent:"+label, truncate(state, 30))
 }
 
 func (b *TelemetryUIBridge) handleTaskStarted(event telemetry.Event) {

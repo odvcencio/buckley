@@ -17,6 +17,9 @@ func (c *Controller) streamResponse(ctx context.Context, prompt string, sess *Se
 	fullResponse, usage, finishReason, err := c.runToolLoop(ctx, sess, modelID)
 	c.app.RemoveThinkingIndicator()
 	if c.handleStreamError(ctx, err) {
+		if ctx.Err() == context.Canceled && c.processMessageQueue(sess) {
+			return
+		}
 		return
 	}
 
@@ -38,14 +41,13 @@ func (c *Controller) finishStreamLifecycle(sess *SessionState) {
 
 func (c *Controller) prepareStreamRequest(prompt string, sess *SessionState) string {
 	c.app.SetStatus("Preparing request")
-	c.app.ShowThinkingIndicator()
 	sess.Conversation.AddUserMessage(prompt)
 	c.saveLatestConversationMessage(sess)
 	return c.resolveExecutionModel()
 }
 
 func (c *Controller) resolveExecutionModel() string {
-	modelID := model.ResolvePhaseModel(c.cfg, c.modelMgr, c.rulesEngine, "execution", "")
+	modelID := model.ResolvePhaseModel(c.cfg, c.modelMgr, c.rulesEngine, "execution", c.modelOverride)
 	if modelID == "" {
 		return "openai/gpt-4o"
 	}

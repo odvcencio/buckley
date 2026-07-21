@@ -6,8 +6,8 @@ import (
 
 	"github.com/yuin/goldmark/ast"
 	extast "github.com/yuin/goldmark/extension/ast"
-	"m31labs.dev/buckley/pkg/ui/compositor"
-	"m31labs.dev/buckley/pkg/ui/theme"
+	"m31labs.dev/fluffyui/compositor"
+	"m31labs.dev/fluffyui/theme"
 )
 
 // Renderer turns markdown into styled lines for the TUI.

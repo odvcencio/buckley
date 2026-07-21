@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"m31labs.dev/buckley/pkg/ui/backend/sim"
-	"m31labs.dev/buckley/pkg/ui/terminal"
+	"m31labs.dev/fluffyui/backend/sim"
+	"m31labs.dev/fluffyui/terminal"
 )
 
 func newKeyTestWidgetApp(t *testing.T, cfg WidgetAppConfig) *WidgetApp {

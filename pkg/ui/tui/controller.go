@@ -27,7 +27,6 @@ import (
 	"m31labs.dev/buckley/pkg/tool"
 	"m31labs.dev/buckley/pkg/tool/builtin"
 	"m31labs.dev/buckley/pkg/types"
-	"m31labs.dev/buckley/pkg/ui/theme"
 	"m31labs.dev/buckley/pkg/ui/widgets"
 )
 
@@ -54,8 +53,9 @@ type Controller struct {
 	telemetryBridge *TelemetryUIBridge
 
 	// State
-	workDir      string
-	agentProfile string
+	workDir       string
+	agentProfile  string
+	modelOverride string
 
 	// Multi-session support - each session runs independently
 	sessions       []*SessionState // Active sessions for this project
@@ -68,6 +68,7 @@ type QueuedMessage struct {
 	Timestamp    time.Time
 	Acknowledged bool
 	DisableTools bool
+	Steering     bool
 }
 
 // SessionState holds the state for a single session.
@@ -82,24 +83,19 @@ type SessionState struct {
 	Cancel        context.CancelFunc
 	MessageQueue  []QueuedMessage // Messages queued while streaming
 
-	DisableToolsNextTurn     bool
-	AwaitingToolLoopDecision bool
+	DisableToolsNextTurn bool
 }
-
-const (
-	interactiveMaxToolIterations   = 50
-	toolLoopCheckpointFinishReason = "tool_round_checkpoint"
-)
 
 // ControllerConfig configures the controller.
 type ControllerConfig struct {
-	Config       *config.Config
-	ModelManager *model.Manager
-	Store        *storage.Store
-	ProjectCtx   *projectcontext.ProjectContext
-	Telemetry    *telemetry.Hub
-	SessionID    string // Resume session, empty for new
-	AgentProfile string
+	Config        *config.Config
+	ModelManager  *model.Manager
+	Store         *storage.Store
+	ProjectCtx    *projectcontext.ProjectContext
+	Telemetry     *telemetry.Hub
+	SessionID     string // Resume session, empty for new
+	AgentProfile  string
+	ModelOverride string // CLI --model override, takes precedence over routing rules
 }
 
 func newSessionState(cfg *config.Config, store *storage.Store, workDir string, hub *telemetry.Hub, sessionID string, loadMessages bool) (*SessionState, error) {
@@ -109,19 +105,8 @@ func newSessionState(cfg *config.Config, store *storage.Store, workDir string, h
 	}
 
 	if loadMessages && store != nil {
-		if msgs, err := store.GetMessages(sessionID, 1000, 0); err == nil {
-			for _, msg := range msgs {
-				content := msg.Content
-				if msg.ContentJSON != "" {
-					content = msg.ContentJSON
-				}
-				switch msg.Role {
-				case "user":
-					sess.Conversation.AddUserMessage(content)
-				case "assistant":
-					sess.Conversation.AddAssistantMessage(content)
-				}
-			}
+		if err := sess.Conversation.LoadFromStorage(store); err != nil {
+			return nil, fmt.Errorf("load session %s messages: %w", sessionID, err)
 		}
 	}
 
@@ -151,6 +136,9 @@ func newSessionState(cfg *config.Config, store *storage.Store, workDir string, h
 
 // NewController creates a new TUI controller.
 func NewController(cfg ControllerConfig) (*Controller, error) {
+	if cfg.ModelManager != nil && cfg.Telemetry != nil {
+		cfg.ModelManager.EnableTelemetry(cfg.Telemetry)
+	}
 	workDir, err := os.Getwd()
 	if err != nil {
 		return nil, fmt.Errorf("get working directory: %w", err)
@@ -182,7 +170,7 @@ func NewController(cfg ControllerConfig) (*Controller, error) {
 
 	// Create TUI app
 	app, err := NewWidgetApp(WidgetAppConfig{
-		Theme:       theme.DefaultTheme(),
+		Theme:       defaultBuckleyTheme(),
 		ModelName:   cfg.Config.Models.Execution,
 		WorkDir:     workDir,
 		ProjectRoot: projectRoot,
@@ -205,6 +193,7 @@ func NewController(cfg ControllerConfig) (*Controller, error) {
 		resolver:       resolver,
 		workDir:        workDir,
 		agentProfile:   strings.TrimSpace(cfg.AgentProfile),
+		modelOverride:  strings.TrimSpace(cfg.ModelOverride),
 		sessions:       projectSessions,
 		currentSession: currentIdx,
 	}
@@ -322,13 +311,7 @@ func (c *Controller) Run() error {
 	sess := c.sessions[c.currentSession]
 	if len(sess.Conversation.Messages) > 0 {
 		c.app.AddMessage(fmt.Sprintf("Resuming session: %s (%d messages)", sess.ID, len(sess.Conversation.Messages)), "system")
-		for _, msg := range sess.Conversation.Messages {
-			content := ""
-			if s, ok := msg.Content.(string); ok {
-				content = s
-			}
-			c.app.AddMessage(content, msg.Role)
-		}
+		renderConversationHistory(c.app, sess.Conversation.Messages)
 	}
 
 	// Run the app
@@ -347,42 +330,50 @@ func (c *Controller) handleSubmit(text string) {
 		return
 	}
 
+	c.submitPrompt(text, true)
+}
+
+func (c *Controller) submitPrompt(text string, steering bool) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 
 	// Get current session
 	sess := c.sessions[c.currentSession]
 	disableTools := shouldDisableToolsForPrompt(text)
 
 	if sess.Compacting {
+		c.mu.Unlock()
 		c.app.AddMessage("Context compaction is running. Wait for it to finish before sending another message.", "system")
 		return
 	}
 
-	// If session is streaming, queue the message instead of starting new stream
+	// Steering cancels the active model request and becomes the next visible
+	// turn. Explicit queueing preserves the current run and FIFO order.
 	if sess.Streaming {
 		sess.MessageQueue = append(sess.MessageQueue, QueuedMessage{
 			Content:      text,
 			Timestamp:    time.Now(),
 			DisableTools: disableTools,
+			Steering:     steering,
 		})
-		// Show queued message with indicator
-		c.app.AddMessage(text+" (queued)", "user")
-		c.updateQueueIndicator(sess)
+		cancel := sess.Cancel
+		queued := len(sess.MessageQueue)
+		c.mu.Unlock()
+		label := " (queued)"
+		status := fmt.Sprintf("Streaming... [%d queued]", queued)
+		if steering {
+			label = " (steering)"
+			status = fmt.Sprintf("Steering active run... [%d pending]", queued)
+		}
+		c.app.AddMessage(text+label, "user")
+		c.app.SetStatus(status)
+		if steering && cancel != nil {
+			cancel()
+		}
 		return
 	}
 
 	// Add user message to display
 	c.app.AddMessage(text, "user")
-	if sess.AwaitingToolLoopDecision && isStopToolLoopDecision(text) {
-		sess.AwaitingToolLoopDecision = false
-		sess.Conversation.AddUserMessage(text)
-		c.saveLatestConversationMessage(sess)
-		c.app.AddMessage("Stopped at the tool-loop checkpoint. Type a new request when ready.", "system")
-		c.app.SetStatus("Ready")
-		return
-	}
-	sess.AwaitingToolLoopDecision = false
 	if disableTools {
 		sess.DisableToolsNextTurn = true
 	}
@@ -392,6 +383,7 @@ func (c *Controller) handleSubmit(text string) {
 	sess.Cancel = cancel
 	sess.Streaming = true
 	c.emitStreaming(sess.ID, true)
+	c.mu.Unlock()
 
 	// Start streaming response for this session
 	go c.streamResponse(ctx, text, sess)
@@ -432,9 +424,7 @@ func (c *Controller) handleCommand(text string) {
 			modelID := strings.TrimSpace(strings.Join(parts[1:], " "))
 			c.setExecutionModel(modelID)
 		} else {
-			c.mu.Lock()
-			c.showModelPickerLocked()
-			c.mu.Unlock()
+			c.showLiveModelPicker()
 		}
 
 	case "/tokens", "/context", "/usage", "/status":
@@ -452,6 +442,22 @@ func (c *Controller) handleCommand(text string) {
 	case "/cancel", "/stop":
 		c.cancelCurrentStream()
 
+	case "/queue":
+		prompt := strings.TrimSpace(strings.TrimPrefix(text, parts[0]))
+		if prompt == "" {
+			c.app.AddMessage("Usage: /queue <message>", "system")
+			return
+		}
+		c.submitPrompt(prompt, false)
+
+	case "/steer":
+		prompt := strings.TrimSpace(strings.TrimPrefix(text, parts[0]))
+		if prompt == "" {
+			c.app.AddMessage("Usage: /steer <message>", "system")
+			return
+		}
+		c.submitPrompt(prompt, true)
+
 	case "/plans":
 		c.showPlans()
 
@@ -467,6 +473,8 @@ func (c *Controller) handleCommand(text string) {
   /history             - Show recent conversation turns
   /export [file]       - Export the current conversation to Markdown
   /cancel, /stop       - Cancel the current response and clear queued input
+  /steer <message>     - Interrupt and redirect the active response
+  /queue <message>     - Run a follow-up after the active response
   /sessions, /tabs     - List active sessions
   /next, /n            - Switch to next session
   /prev, /p            - Switch to previous session
@@ -512,6 +520,24 @@ func (c *Controller) showModelPickerLocked() {
 		}
 		c.setExecutionModel(modelID)
 	})
+}
+
+func (c *Controller) showLiveModelPicker() {
+	if c.modelMgr == nil {
+		c.app.AddMessage("Model catalog unavailable in this session.", "system")
+		return
+	}
+	c.app.StartProcessStatus("Refreshing OpenRouter model catalog")
+	go func() {
+		err := c.modelMgr.RefreshProviderCatalog("openrouter")
+		c.app.StopProcessStatus()
+		if err != nil {
+			c.app.AddMessage("OpenRouter catalog refresh failed; showing the last available catalog: "+err.Error(), "system")
+		}
+		c.mu.Lock()
+		c.showModelPickerLocked()
+		c.mu.Unlock()
+	}()
 }
 
 func (c *Controller) collectModelPickerItemsLocked(curated map[string]struct{}) ([]widgets.PaletteItem, map[string]model.ModelInfo) {
@@ -778,8 +804,13 @@ func (c *Controller) setExecutionModelLocked(modelID string) {
 	}
 
 	c.cfg.Models.Execution = modelID
+	c.modelOverride = modelID
 	c.app.SetModelName(modelID)
-	c.app.AddMessage("Execution model set to "+modelID, "system")
+	notice := "Execution model set to " + modelID
+	if len(c.sessions) > 0 && c.sessions[c.currentSession].Streaming {
+		notice += " (applies to the next model turn; the active request continues)"
+	}
+	c.app.AddMessage(notice, "system")
 }
 
 func catalogHasModel(mgr *model.Manager, modelID string) bool {
@@ -837,7 +868,7 @@ func modelRoleTags(modelID, execID, planID, reviewID string) []string {
 }
 
 func preferredModelIDs(execID, planID, reviewID string, catalog map[string]model.ModelInfo) []string {
-	ids := make([]string, 0, 4)
+	ids := make([]string, 0, 5)
 	seen := make(map[string]struct{})
 	add := func(id string) {
 		id = strings.TrimSpace(id)
@@ -859,6 +890,7 @@ func preferredModelIDs(execID, planID, reviewID string, catalog map[string]model
 	add(execID)
 	add(planID)
 	add(reviewID)
+	add("moonshotai/kimi-k3")
 	add("z-ai/glm-5.2")
 	add("moonshotai/kimi-k2.7-code")
 	add("qwen/qwen3.7-max")
@@ -1014,7 +1046,7 @@ func (c *Controller) buildSystemPrompt(sess *SessionState) string {
 		RootDir:           c.workDir,
 		SkillsDescription: skillDescriptions,
 		TaskType:          "coding",
-		ModelTier:         model.InferModelTier(model.ResolvePhaseModel(c.cfg, c.modelMgr, c.rulesEngine, "execution", "")),
+		ModelTier:         model.InferModelTier(model.ResolvePhaseModel(c.cfg, c.modelMgr, c.rulesEngine, "execution", c.modelOverride)),
 		GTSAvailable:      commandAvailable("gts"),
 	})
 }
@@ -1168,13 +1200,7 @@ func (c *Controller) switchToSessionLocked(idx int) {
 	c.app.AddMessage(statusMsg, "system")
 
 	// Replay conversation to display
-	for _, msg := range sess.Conversation.Messages {
-		content := ""
-		if s, ok := msg.Content.(string); ok {
-			content = s
-		}
-		c.app.AddMessage(content, msg.Role)
-	}
+	renderConversationHistory(c.app, sess.Conversation.Messages)
 
 	if sess.Streaming {
 		c.app.SetStatus("Streaming...")
@@ -1195,6 +1221,9 @@ func (c *Controller) Stop() {
 	for _, sess := range c.sessions {
 		if sess.Cancel != nil {
 			sess.Cancel()
+		}
+		if sess.ToolRegistry != nil {
+			_ = sess.ToolRegistry.Close()
 		}
 	}
 	c.mu.Unlock()
@@ -1447,11 +1476,12 @@ func (c *Controller) processMessageQueue(sess *SessionState) bool {
 	// Mark as acknowledged
 	queued.Acknowledged = true
 	sess.DisableToolsNextTurn = queued.DisableTools
-	sess.AwaitingToolLoopDecision = false
-
 	// Show acknowledgment in UI
 	remaining := len(sess.MessageQueue)
 	ackMsg := fmt.Sprintf("Processing queued message from %s", queued.Timestamp.Format("15:04:05"))
+	if queued.Steering {
+		ackMsg = fmt.Sprintf("Applying steering from %s", queued.Timestamp.Format("15:04:05"))
+	}
 	if remaining > 0 {
 		ackMsg += fmt.Sprintf(" (%d more queued)", remaining)
 	}

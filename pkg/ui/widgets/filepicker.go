@@ -5,10 +5,10 @@ import (
 	"strconv"
 	"strings"
 
-	"m31labs.dev/buckley/pkg/ui/backend"
 	"m31labs.dev/buckley/pkg/ui/filepicker"
-	"m31labs.dev/buckley/pkg/ui/runtime"
-	"m31labs.dev/buckley/pkg/ui/terminal"
+	"m31labs.dev/fluffyui/backend"
+	"m31labs.dev/fluffyui/runtime"
+	"m31labs.dev/fluffyui/terminal"
 )
 
 // FilePickerWidget wraps FilePicker as a widget for overlay display.
@@ -106,7 +106,7 @@ func (f *FilePickerWidget) Render(ctx runtime.RenderContext) {
 func (f *FilePickerWidget) renderTitle(buf *runtime.Buffer, b runtime.Rect) {
 	title := " File Search "
 	title = truncateString(title, b.Width-2)
-	titleX := b.X + (b.Width-runeLen(title))/2
+	titleX := b.X + (b.Width-displayWidth(title))/2
 	buf.SetString(titleX, b.Y, title, f.borderStyle.Bold(true))
 }
 
@@ -115,7 +115,7 @@ func (f *FilePickerWidget) renderQuery(buf *runtime.Buffer, b runtime.Rect) {
 	queryLine := truncateString("@ "+query, b.Width-4)
 	buf.SetString(b.X+2, b.Y+1, queryLine, f.queryStyle)
 
-	cursorX := b.X + 2 + runeLen(queryLine)
+	cursorX := b.X + 2 + displayWidth(queryLine)
 	if cursorX < b.X+b.Width-2 && f.focused {
 		buf.Set(cursorX, b.Y+1, '█', f.queryStyle)
 	}
@@ -157,7 +157,7 @@ func (f *FilePickerWidget) renderStatus(buf *runtime.Buffer, b runtime.Rect) {
 	} else {
 		status = "indexing..."
 	}
-	buf.SetString(b.X+b.Width-2-runeLen(status), b.Y+b.Height-1, status, f.borderStyle)
+	buf.SetString(b.X+b.Width-2-displayWidth(status), b.Y+b.Height-1, status, f.borderStyle)
 }
 
 // renderMatch draws a path with character highlights.

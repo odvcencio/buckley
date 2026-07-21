@@ -2,8 +2,11 @@
 package widgets
 
 import (
-	"m31labs.dev/buckley/pkg/ui/backend"
-	"m31labs.dev/buckley/pkg/ui/runtime"
+	"strings"
+
+	"github.com/mattn/go-runewidth"
+	"m31labs.dev/fluffyui/backend"
+	"m31labs.dev/fluffyui/runtime"
 )
 
 // Base provides common functionality for widgets.
@@ -99,45 +102,71 @@ func truncateString(s string, maxWidth int) string {
 	if maxWidth <= 0 {
 		return ""
 	}
-	runes := []rune(s)
-	if len(runes) <= maxWidth {
+	if runewidth.StringWidth(s) <= maxWidth {
 		return s
 	}
 	if maxWidth <= 3 {
-		return string(runes[:maxWidth])
+		return runewidth.Truncate(s, maxWidth, "")
 	}
-	return string(runes[:maxWidth-3]) + "..."
+	return runewidth.Truncate(s, maxWidth-3, "") + "..."
+}
+
+func clipString(s string, maxWidth int) string {
+	if maxWidth <= 0 {
+		return ""
+	}
+	return runewidth.Truncate(s, maxWidth, "")
 }
 
 // padRight pads a string with spaces to reach the given width.
 func padRight(s string, width int) string {
-	if len(s) >= width {
+	current := runewidth.StringWidth(s)
+	if current >= width {
 		return s
 	}
-	result := make([]byte, width)
-	copy(result, s)
-	for i := len(s); i < width; i++ {
-		result[i] = ' '
-	}
-	return string(result)
+	return s + strings.Repeat(" ", width-current)
 }
 
 // centerString centers a string within the given width.
 func centerString(s string, width int) string {
-	if len(s) >= width {
+	current := runewidth.StringWidth(s)
+	if current >= width {
 		return s
 	}
-	padding := (width - len(s)) / 2
-	result := make([]byte, width)
-	for i := range result {
-		result[i] = ' '
-	}
-	copy(result[padding:], s)
-	return string(result)
+	left := (width - current) / 2
+	return strings.Repeat(" ", left) + s + strings.Repeat(" ", width-current-left)
 }
 
 func runeLen(s string) int {
 	return len([]rune(s))
+}
+
+func displayWidth(s string) int {
+	return runewidth.StringWidth(s)
+}
+
+func suffixDisplayWidth(s string, maxWidth int) string {
+	if maxWidth <= 0 {
+		return ""
+	}
+	if displayWidth(s) <= maxWidth {
+		return s
+	}
+	runes := []rune(s)
+	width := 0
+	start := len(runes)
+	for start > 0 {
+		runeWidth := runewidth.RuneWidth(runes[start-1])
+		if runeWidth < 1 {
+			runeWidth = 1
+		}
+		if width+runeWidth > maxWidth {
+			break
+		}
+		width += runeWidth
+		start--
+	}
+	return string(runes[start:])
 }
 
 func max(a, b int) int {

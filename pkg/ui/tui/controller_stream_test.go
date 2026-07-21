@@ -37,3 +37,10 @@ func TestStreamUsageStats_EmptyFallback(t *testing.T) {
 		t.Fatalf("tokens = %d, want 0", stats.tokens)
 	}
 }
+
+func TestStoredToolResultProgressSummaryIncludesPersistedError(t *testing.T) {
+	got := storedToolResultProgressSummary("run_shell", `{"success":false,"error":"command exited with code 1: compile failed"}`)
+	if got != "✗ run_shell — command exited with code 1: compile failed" {
+		t.Fatalf("unexpected progress summary: %q", got)
+	}
+}

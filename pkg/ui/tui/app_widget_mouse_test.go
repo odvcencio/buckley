@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	uiruntime "m31labs.dev/buckley/pkg/ui/runtime"
+	uiruntime "m31labs.dev/fluffyui/runtime"
 )
 
 func layoutChatForMouseTest(app *WidgetApp) {

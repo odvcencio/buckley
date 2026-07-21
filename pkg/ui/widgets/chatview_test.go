@@ -5,11 +5,11 @@ import (
 	"strings"
 	"testing"
 
-	"m31labs.dev/buckley/pkg/ui/backend"
-	"m31labs.dev/buckley/pkg/ui/markdown"
-	"m31labs.dev/buckley/pkg/ui/runtime"
-	"m31labs.dev/buckley/pkg/ui/terminal"
-	"m31labs.dev/buckley/pkg/ui/theme"
+	"m31labs.dev/fluffyui/backend"
+	"m31labs.dev/fluffyui/markdown"
+	"m31labs.dev/fluffyui/runtime"
+	"m31labs.dev/fluffyui/terminal"
+	"m31labs.dev/fluffyui/theme"
 )
 
 func TestNewChatView(t *testing.T) {

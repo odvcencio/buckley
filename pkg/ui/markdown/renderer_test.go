@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"m31labs.dev/buckley/pkg/ui/theme"
+	"m31labs.dev/fluffyui/theme"
 )
 
 func TestRenderer_RenderParagraph(t *testing.T) {

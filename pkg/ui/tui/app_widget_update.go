@@ -4,7 +4,7 @@ import (
 	"strings"
 	"time"
 
-	"m31labs.dev/buckley/pkg/ui/runtime"
+	"m31labs.dev/fluffyui/runtime"
 )
 
 // update processes a message and returns true if a render is needed.
@@ -37,6 +37,9 @@ func (a *WidgetApp) update(msg Message) bool {
 		return true
 	case ThinkingMsg:
 		return a.handleThinkingMsg(m)
+	case ModelPickerMsg:
+		a.showModelPicker(m.Items, m.OnSelect)
+		return true
 	case RefreshMsg:
 		return true
 	case QuitMsg:

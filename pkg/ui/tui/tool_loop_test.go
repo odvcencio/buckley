@@ -5,34 +5,25 @@ import (
 	"strings"
 	"testing"
 
-	"m31labs.dev/buckley/pkg/ui/backend/sim"
+	"m31labs.dev/buckley/pkg/conversation"
+	"m31labs.dev/buckley/pkg/model"
+	"m31labs.dev/buckley/pkg/tool"
+	"m31labs.dev/buckley/pkg/tool/builtin"
+	"m31labs.dev/fluffyui/backend/sim"
 )
 
 func TestModelProcessStatus(t *testing.T) {
-	got := modelProcessStatus("z-ai/glm-5.2", 0, 50, 12, nil)
-	if got != "Thinking with z-ai/glm-5.2 - round 1/50, 12 tools" {
+	got := modelProcessStatus("z-ai/glm-5.2", 0, 12, nil)
+	if got != "Thinking with z-ai/glm-5.2 - round 1, 12 tools, type to steer" {
 		t.Fatalf("modelProcessStatus() = %q", got)
 	}
 
-	got = modelProcessStatus("very/long-model-name-that-will-not-fit-in-the-status-bar", 1, 50, 0, nil)
+	got = modelProcessStatus("very/long-model-name-that-will-not-fit-in-the-status-bar", 1, 0, nil)
 	if !strings.HasPrefix(got, "Thinking after tools with very/long-model-name") {
 		t.Fatalf("unexpected model process status: %q", got)
 	}
-	if !strings.Contains(got, "round 2/50") {
+	if !strings.Contains(got, "round 2") {
 		t.Fatalf("expected round indicator in status: %q", got)
-	}
-}
-
-func TestMaxToolIterationsCheckpoint(t *testing.T) {
-	got := maxToolIterationsCheckpoint(50)
-	if !strings.Contains(got, "50 model/tool rounds") {
-		t.Fatalf("expected model/tool round count, got %q", got)
-	}
-	if !strings.Contains(got, "continue without tools") {
-		t.Fatalf("expected no-tools continuation option, got %q", got)
-	}
-	if strings.Contains(got, "Error:") || strings.Contains(got, "max tool calling iterations") {
-		t.Fatalf("checkpoint should not read like an internal error, got %q", got)
 	}
 }
 
@@ -52,15 +43,6 @@ func TestModelFinishReasonNotice(t *testing.T) {
 	got = modelFinishReasonNotice("content_filter")
 	if !strings.Contains(got, "content_filter") {
 		t.Fatalf("content_filter notice should include reason, got %q", got)
-	}
-}
-
-func TestToolLoopCheckpointFinishReason(t *testing.T) {
-	if got := modelFinishReasonNotice(toolLoopCheckpointFinishReason); got != "" {
-		t.Fatalf("checkpoint should not add a provider notice, got %q", got)
-	}
-	if got := readyStatusForFinishReason(toolLoopCheckpointFinishReason); got != "Ready - needs direction" {
-		t.Fatalf("checkpoint ready status = %q", got)
 	}
 }
 
@@ -122,5 +104,45 @@ func TestHandleToolLoopModelError_RetriesWithoutTools(t *testing.T) {
 
 	if err := ctrl.handleToolLoopModelError(fmt.Errorf("provider unavailable"), state); err == nil {
 		t.Fatal("non-tool errors should be returned")
+	}
+}
+
+func TestBuildToolLoopRequestOmitsUnadvertisedParallelToolControl(t *testing.T) {
+	ctrl := &Controller{}
+	conv := conversation.New("session-1")
+	conv.AddUserMessage("hello")
+	sess := &SessionState{
+		ID:           "session-1",
+		Conversation: conv,
+		ToolRegistry: tool.NewRegistry(tool.WithBuiltinFilter(func(current tool.Tool) bool {
+			return current.Name() == "file_exists"
+		})),
+	}
+
+	req, useTools := ctrl.buildToolLoopRequest(sess, "qwen/qwen3.6-flash", true, nil)
+	if !useTools || len(req.Tools) != 1 {
+		t.Fatalf("expected one enabled tool, got useTools=%t tools=%d", useTools, len(req.Tools))
+	}
+	if req.ParallelToolCalls != nil {
+		t.Fatalf("parallel_tool_calls = %v, want omitted without catalog support", req.ParallelToolCalls)
+	}
+}
+
+func TestToolProgressSummariesIncludeIntentAndFailureReason(t *testing.T) {
+	call := model.ToolCall{Function: model.FunctionCall{
+		Name:      "run_shell",
+		Arguments: `{"command":"go test ./pkg/model/..."}`,
+	}}
+	if got := toolCallProgressSummary(call); !strings.Contains(got, "- command: go test ./pkg/model/...") {
+		t.Fatalf("tool call summary omitted intent: %q", got)
+	}
+	result := &builtin.Result{
+		Success: false,
+		Error:   "command exited with code 1",
+		Data:    map[string]any{"stderr": "compile error: missing symbol"},
+	}
+	got := toolResultProgressSummary("run_shell", result, nil)
+	if !strings.Contains(got, "compile error: missing symbol") || !strings.Contains(got, "command exited with code 1") {
+		t.Fatalf("tool result summary omitted failure reason: %q", got)
 	}
 }
