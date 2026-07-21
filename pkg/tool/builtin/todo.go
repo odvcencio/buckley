@@ -122,8 +122,9 @@ func (t *TodoTool) Parameters() ParameterSchema {
 				Description: "Task description for 'brainstorm' action",
 			},
 			"context": {
-				Type:        "object",
-				Description: "Additional context for 'brainstorm' action (files, constraints, etc.)",
+				Type:                 "object",
+				Description:          "Additional context for 'brainstorm' action (files, constraints, etc.)",
+				AdditionalProperties: true,
 			},
 			// Refine parameters
 			"approach_index": {
@@ -133,6 +134,17 @@ func (t *TodoTool) Parameters() ParameterSchema {
 			"approaches": {
 				Type:        "array",
 				Description: "Approaches from brainstorm result for 'refine' action",
+				Items: &PropertySchema{
+					Type:        "object",
+					Description: "A possible approach to tackle the task",
+					Properties: map[string]PropertySchema{
+						"name":        {Type: "string", Description: "Name of the approach"},
+						"description": {Type: "string", Description: "Description of the approach"},
+						"steps":       {Type: "integer", Description: "Number of steps"},
+						"risk":        {Type: "string", Description: "Risk level: low, medium, high"},
+						"tradeoffs":   {Type: "array", Description: "Tradeoffs of this approach", Items: &PropertySchema{Type: "string"}},
+					},
+				},
 			},
 			"adjustments": {
 				Type:        "string",
@@ -142,6 +154,17 @@ func (t *TodoTool) Parameters() ParameterSchema {
 			"todos": {
 				Type:        "array",
 				Description: "Array of TODO items for 'create' or 'commit' action. Each item should have content, activeForm, and status fields",
+				Items: &PropertySchema{
+					Type:        "object",
+					Description: "A single TODO item",
+					Properties: map[string]PropertySchema{
+						"content":    {Type: "string", Description: "Task description"},
+						"activeForm": {Type: "string", Description: "Present-tense description of the task"},
+						"status":     {Type: "string", Description: "Task status: pending, in_progress, completed, failed"},
+						"metadata":   {Type: "string", Description: "Optional metadata string"},
+					},
+					Required: []string{"content", "activeForm", "status"},
+				},
 			},
 			// Update parameters
 			"todo_id": {

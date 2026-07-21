@@ -2,18 +2,22 @@ package builtin
 
 // ParameterSchema defines the parameters a tool accepts
 type ParameterSchema struct {
-	Type       string                    `json:"type"`
-	Properties map[string]PropertySchema `json:"properties"`
-	Required   []string                  `json:"required"`
+	Type                 string                    `json:"type"`
+	Properties           map[string]PropertySchema `json:"properties,omitempty"`
+	Required             []string                  `json:"required,omitempty"`
+	AdditionalProperties any                       `json:"additionalProperties,omitempty"`
 }
 
 // PropertySchema defines a single parameter
 type PropertySchema struct {
-	Type        string          `json:"type"`
-	Description string          `json:"description"`
-	Default     any             `json:"default,omitempty"`
-	Items       *PropertySchema `json:"items,omitempty"` // For array types
-	Enum        []string        `json:"enum,omitempty"`  // For string types with fixed options
+	Type                 string                    `json:"type"`
+	Description          string                    `json:"description"`
+	Default              any                       `json:"default,omitempty"`
+	Items                *PropertySchema           `json:"items,omitempty"`       // For array types
+	Enum                 []string                  `json:"enum,omitempty"`        // For string types with fixed options
+	Properties           map[string]PropertySchema `json:"properties,omitempty"`  // For nested object types
+	Required             []string                  `json:"required,omitempty"`
+	AdditionalProperties any                       `json:"additionalProperties,omitempty"`
 }
 
 // Result represents the result of a tool execution

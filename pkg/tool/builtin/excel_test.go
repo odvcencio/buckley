@@ -17,6 +17,8 @@ func TestExcelToolMetadata(t *testing.T) {
 	}
 	if params := tool.Parameters(); params.Type != "object" {
 		t.Errorf("Parameters().Type = %q, want %q", params.Type, "object")
+	} else if data := params.Properties["data"]; data.Items == nil || data.Items.Items == nil || data.Items.Items.Type == "" {
+		t.Fatal("data item schema must declare a concrete cell value type")
 	}
 }
 

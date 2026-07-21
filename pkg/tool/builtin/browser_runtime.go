@@ -49,6 +49,11 @@ func (t *BrowserStartTool) Parameters() ParameterSchema {
 			"viewport": {
 				Type:        "object",
 				Description: "Viewport config (width, height, device_scale_factor)",
+				Properties: map[string]PropertySchema{
+					"width":              {Type: "integer", Description: "Viewport width in pixels"},
+					"height":             {Type: "integer", Description: "Viewport height in pixels"},
+					"device_scale_factor": {Type: "number", Description: "Device pixel ratio"},
+				},
 			},
 			"frame_rate": {
 				Type:        "integer",
@@ -70,6 +75,7 @@ func (t *BrowserStartTool) Parameters() ParameterSchema {
 			"network_allowlist": {
 				Type:        "array",
 				Description: "Optional network allowlist for browserd",
+				Items:       &PropertySchema{Type: "string"},
 			},
 		},
 	}
@@ -446,8 +452,9 @@ func (t *BrowserActTool) Parameters() ParameterSchema {
 				Description: "Browser session identifier",
 			},
 			"action": {
-				Type:        "object",
-				Description: "Action payload (type, target, text, key, scroll, modifiers, expected_state_version)",
+				Type:                 "object",
+				Description:          "Action payload (type, target, text, key, scroll, modifiers, expected_state_version)",
+				AdditionalProperties: true,
 			},
 		},
 		Required: []string{"session_id", "action"},
