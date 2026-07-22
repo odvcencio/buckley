@@ -32,13 +32,14 @@ type skillsCommandList struct {
 }
 
 type skillsCommandEntry struct {
-	Name         string   `json:"name"`
-	Description  string   `json:"description"`
-	Source       string   `json:"source"`
-	Path         string   `json:"path,omitempty"`
-	Phase        string   `json:"phase,omitempty"`
-	AllowedTools []string `json:"allowed_tools,omitempty"`
-	Content      string   `json:"content,omitempty"`
+	Name             string   `json:"name"`
+	Description      string   `json:"description"`
+	Source           string   `json:"source"`
+	Path             string   `json:"path,omitempty"`
+	Phase            string   `json:"phase,omitempty"`
+	AllowedTools     []string `json:"allowed_tools,omitempty"`
+	PreapprovedTools []string `json:"preapproved_tools,omitempty"`
+	Content          string   `json:"content,omitempty"`
 }
 
 func runSkillsCommand(args []string) error {
@@ -481,6 +482,9 @@ func printSkillShow(w io.Writer, entry skillsCommandEntry) {
 	if len(entry.AllowedTools) > 0 {
 		fmt.Fprintf(w, "Allowed tools: %s\n", strings.Join(entry.AllowedTools, ", "))
 	}
+	if len(entry.PreapprovedTools) > 0 {
+		fmt.Fprintf(w, "Pre-approved tools: %s\n", strings.Join(entry.PreapprovedTools, ", "))
+	}
 	if entry.Content != "" {
 		fmt.Fprintln(w, "\nContent:")
 		fmt.Fprintln(w, strings.TrimSpace(entry.Content))
@@ -493,14 +497,17 @@ func skillCommandEntry(s *skill.Skill) skillsCommandEntry {
 	}
 	allowedTools := cleanToolNames(s.AllowedTools)
 	sort.Strings(allowedTools)
+	preapprovedTools := cleanToolNames(s.PreapprovedTools)
+	sort.Strings(preapprovedTools)
 	return skillsCommandEntry{
-		Name:         s.Name,
-		Description:  s.Description,
-		Source:       s.Source,
-		Path:         s.FilePath,
-		Phase:        s.Phase,
-		AllowedTools: allowedTools,
-		Content:      s.Content,
+		Name:             s.Name,
+		Description:      s.Description,
+		Source:           s.Source,
+		Path:             s.FilePath,
+		Phase:            s.Phase,
+		AllowedTools:     allowedTools,
+		PreapprovedTools: preapprovedTools,
+		Content:          s.Content,
 	}
 }
 

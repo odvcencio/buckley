@@ -3,6 +3,8 @@ package skill
 import (
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 )
@@ -115,6 +117,38 @@ Content`,
 				t.Errorf("Content = %v, want %v", got.Content, tt.want.Content)
 			}
 		})
+	}
+}
+
+func TestParseSkillFile_AgentSkillsFrontmatter(t *testing.T) {
+	loader := NewLoader()
+	skill, err := loader.parseSkillFile(`---
+name: portable-review
+description: Review portable agent changes.
+license: MIT
+compatibility: Requires git
+metadata:
+  author: m31
+  version: "2"
+allowed-tools: read_file search_text run_tests
+---
+
+Review the change.`)
+	if err != nil {
+		t.Fatalf("parseSkillFile: %v", err)
+	}
+	if skill.License != "MIT" || skill.Compatibility != "Requires git" {
+		t.Fatalf("standard metadata not ingested: %+v", skill)
+	}
+	if skill.Metadata["author"] != "m31" || skill.Metadata["version"] != "2" {
+		t.Fatalf("metadata=%v", skill.Metadata)
+	}
+	wantTools := []string{"read_file", "search_text", "run_tests"}
+	if !slices.Equal(skill.PreapprovedTools, wantTools) {
+		t.Fatalf("PreapprovedTools=%v want %v", skill.PreapprovedTools, wantTools)
+	}
+	if len(skill.AllowedTools) != 0 {
+		t.Fatalf("standard pre-approvals became a restrictive allowlist: %v", skill.AllowedTools)
 	}
 }
 
@@ -286,6 +320,82 @@ This should not be registered as a separate skill.
 	}
 	if _, ok := skills["research/references/checklist"]; ok {
 		t.Fatalf("packaged skill support file registered as skill: %+v", skills["research/references/checklist"])
+	}
+}
+
+func TestLoadProjectAgent_InteroperableRootsAndPrecedence(t *testing.T) {
+	root := t.TempDir()
+	writeSkillTestFile(t, filepath.Join(root, ".agents", "skills", "review", "SKILL.md"), `---
+name: review
+description: Shared agent review.
+---
+Shared instructions.`)
+	writeSkillTestFile(t, filepath.Join(root, ".codex", "skills", "review", "SKILL.md"), `---
+name: review
+description: Codex-specific review.
+---
+Codex instructions.`)
+	nested := filepath.Join(root, "src")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatalf("mkdir nested: %v", err)
+	}
+	t.Chdir(nested)
+
+	skills := make(map[string]*Skill)
+	if err := NewLoader().LoadProjectAgent(skills); err != nil {
+		t.Fatalf("LoadProjectAgent: %v", err)
+	}
+	got := skills["review"]
+	if got == nil || got.Description != "Codex-specific review." {
+		t.Fatalf("review=%+v", got)
+	}
+	if got.Source != "agent" || got.FilePath != filepath.Join(root, ".codex", "skills", "review", "SKILL.md") {
+		t.Fatalf("unexpected provenance: %+v", got)
+	}
+}
+
+func TestLoadProjectAgent_DoesNotCrossRepositoryBoundary(t *testing.T) {
+	parent := t.TempDir()
+	writeSkillTestFile(t, filepath.Join(parent, ".codex", "skills", "global", "SKILL.md"), `---
+name: global
+description: Must not leak into a nested repository.
+---
+Global instructions.`)
+	repo := filepath.Join(parent, "repo")
+	if err := os.MkdirAll(filepath.Join(repo, ".git"), 0o755); err != nil {
+		t.Fatalf("mkdir repo marker: %v", err)
+	}
+	nested := filepath.Join(repo, "src")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatalf("mkdir nested: %v", err)
+	}
+	t.Chdir(nested)
+
+	skills := make(map[string]*Skill)
+	if err := NewLoader().LoadProjectAgent(skills); err != nil {
+		t.Fatalf("LoadProjectAgent: %v", err)
+	}
+	if skills["global"] != nil {
+		t.Fatalf("skill outside repository boundary was loaded: %+v", skills["global"])
+	}
+}
+
+func TestLoadFromDirectory_ReportsMalformedSkillsAndKeepsValidSkills(t *testing.T) {
+	dir := t.TempDir()
+	writeSkillTestFile(t, filepath.Join(dir, "good", "SKILL.md"), `---
+name: good
+description: Valid skill.
+---
+Do good work.`)
+	writeSkillTestFile(t, filepath.Join(dir, "bad", "SKILL.md"), `not frontmatter`)
+
+	skills := make(map[string]*Skill)
+	err := NewLoader().loadFromDirectory(dir, "project", skills)
+	if err == nil || !strings.Contains(err.Error(), filepath.Join("bad", "SKILL.md")) {
+		t.Fatalf("error=%v", err)
+	}
+	if skills["good"] == nil {
+		t.Fatalf("valid skill was dropped: %+v", skills)
 	}
 }
 
