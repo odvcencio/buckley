@@ -228,7 +228,10 @@ func loadOrCreateControllerSessions(cfg ControllerConfig, workDir string) ([]*Se
 
 func loadActiveProjectSessions(cfg ControllerConfig, workDir string) ([]*SessionState, error) {
 	var projectSessions []*SessionState
-	allSessions, _ := cfg.Store.ListSessions(100)
+	allSessions, err := cfg.Store.ListSessionsByRepo(workDir)
+	if err != nil {
+		return nil, fmt.Errorf("list project sessions: %w", err)
+	}
 	for _, s := range allSessions {
 		if s.ProjectPath != workDir || s.Status != storage.SessionStatusActive {
 			continue
