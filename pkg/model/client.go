@@ -456,7 +456,6 @@ func (c *Client) ChatCompletion(ctx context.Context, req ChatRequest) (*ChatResp
 			return nil
 		}
 
-		return retryExhaustedError(c.retryLimit(lastErr), lastErr)
 	})
 
 	if err != nil {
@@ -586,7 +585,6 @@ func (c *Client) executeStreamRequest(ctx context.Context, req ChatRequest, chun
 		return nil
 	}
 
-	return retryExhaustedError(c.retryLimit(lastErr), lastErr)
 }
 
 // parseSSEStream parses Server-Sent Events stream
