@@ -1141,7 +1141,7 @@ func (c *Controller) listSessions() {
 		c.app.AddMessage("Session storage unavailable", "system")
 		return
 	}
-	sessions, err := c.store.ListSessions(100)
+	sessions, err := c.store.ListSessionsByRepo(c.workDir)
 	if err != nil {
 		c.app.AddMessage("Could not list sessions: "+err.Error(), "system")
 		return
@@ -1150,7 +1150,7 @@ func (c *Controller) listSessions() {
 	var sb strings.Builder
 	sb.WriteString("Saved sessions:\n")
 	visible := 0
-	for i, sess := range sessions {
+	for _, sess := range sessions {
 		if sess.ProjectPath != c.workDir {
 			continue
 		}
@@ -1159,7 +1159,7 @@ func (c *Controller) listSessions() {
 		if current := c.currentSessionState(); current != nil && current.ID == sess.ID {
 			marker = "→ "
 		}
-		sb.WriteString(fmt.Sprintf("%s[%d] %s · %s · %d messages\n", marker, i+1, sess.ID, sess.Status, sess.MessageCount))
+		sb.WriteString(fmt.Sprintf("%s[%d] %s · %s · %d messages\n", marker, visible, sess.ID, sess.Status, sess.MessageCount))
 	}
 	if visible == 0 {
 		sb.WriteString("No saved sessions for this project.\n")
@@ -1174,7 +1174,7 @@ func (c *Controller) resumeSession(reference string) {
 		c.app.AddMessage("Session storage unavailable", "system")
 		return
 	}
-	all, err := c.store.ListSessions(100)
+	all, err := c.store.ListSessionsByRepo(c.workDir)
 	if err != nil {
 		c.app.AddMessage("Could not list sessions: "+err.Error(), "system")
 		return
