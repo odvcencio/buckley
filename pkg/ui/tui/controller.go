@@ -245,6 +245,11 @@ func resolveControllerSession(cfg ControllerConfig, workDir string, projectSessi
 	sessionID := cfg.SessionID
 	if sessionID == "" {
 		if len(projectSessions) > 0 {
+			for i, sess := range projectSessions {
+				if sess.Conversation != nil && len(sess.Conversation.Messages) > 0 {
+					return projectSessions, i, nil
+				}
+			}
 			return projectSessions, 0, nil
 		}
 		sess, err := createControllerSession(cfg, workDir, generatedControllerSessionID(workDir))
