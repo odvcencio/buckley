@@ -161,6 +161,10 @@ func runReviewPRCommand(args []string) error {
 }
 
 func runPRReview(ctx context.Context, prRef string, framework *oneshot.Framework) (*reviewCommandResult, *commands.PRInfo, error) {
+	return runPRReviewWithIterationLimit(ctx, prRef, framework, 0)
+}
+
+func runPRReviewWithIterationLimit(ctx context.Context, prRef string, framework *oneshot.Framework, maxIterations int) (*reviewCommandResult, *commands.PRInfo, error) {
 	spinner := terminal.NewSpinner("Fetching PR details...")
 	spinner.Start()
 
@@ -178,6 +182,7 @@ func runPRReview(ctx context.Context, prRef string, framework *oneshot.Framework
 		CIProvenance:                prCtx.CIProvenance,
 		RequiresFeedbackDisposition: prCtx.HasReviewFeedback(),
 		RequiredFeedbackIDs:         prCtx.RequiredFeedbackIDs(),
+		MaxIterations:               maxIterations,
 	}
 	fwResult, runErr := framework.RunRLM(ctx, reviewDef, oneshot.RLMRunOpts{
 		UserPrompt: userPrompt,

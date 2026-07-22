@@ -110,9 +110,12 @@ type ReviewPRDef struct {
 	CIProvenance                string
 	RequiresFeedbackDisposition bool
 	RequiredFeedbackIDs         []string
+	MaxIterations               int
 }
 
 func (ReviewPRDef) Name() string { return "review-pr" }
+
+func (d ReviewPRDef) MaxRLMIterations() int { return d.MaxIterations }
 
 func (ReviewPRDef) SystemPrompt() string {
 	return prompts.ReviewPRPrompt(time.Now())

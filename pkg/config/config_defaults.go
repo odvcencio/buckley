@@ -98,6 +98,12 @@ func defaultNATSURL() string {
 // DefaultConfig returns sensible defaults
 func DefaultConfig() *Config {
 	return &Config{
+		Buckbot: BuckbotConfig{
+			Model:               "moonshotai/kimi-k3",
+			PerReviewBudgetUSD:  0.25,
+			MonthlyBudgetUSD:    25.00,
+			MaxReviewIterations: 6,
+		},
 		Models: ModelConfig{
 			Planning:  defaultOpenRouterModel,
 			Execution: defaultOpenRouterModel,
