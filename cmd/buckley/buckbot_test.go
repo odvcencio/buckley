@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -91,6 +93,57 @@ func TestBuckbotService_BoundsReviewRetries(t *testing.T) {
 	service.handle(gitwatcher.PullRequestEvent{Repository: "owner/repo", Number: 24, HeadSHA: "bounded"})
 	if reviewed.Load() != buckbotMaxReviewAttempts {
 		t.Fatalf("reviewed=%d want bounded attempts=%d", reviewed.Load(), buckbotMaxReviewAttempts)
+	}
+}
+
+func TestBuckbotService_PersistsIncompletePaidReviewWithoutPosting(t *testing.T) {
+	var posted, salvaged atomic.Int32
+	service := newBuckbotService(config.BuckbotConfig{PerReviewBudgetUSD: 0.25, MonthlyBudgetUSD: 25}, func(context.Context, gitwatcher.PullRequestEvent) (string, float64, error) {
+		return "> [!WARNING]\nIncomplete review\n\ncompleted evidence", 0.10, context.DeadlineExceeded
+	}, func(context.Context, gitwatcher.PullRequestEvent, string) error {
+		posted.Add(1)
+		return nil
+	})
+	service.salvage = func(event gitwatcher.PullRequestEvent, review string, cause error) (string, error) {
+		salvaged.Add(1)
+		if event.HeadSHA != "partial" || !strings.Contains(review, "completed evidence") || !errors.Is(cause, context.DeadlineExceeded) {
+			t.Fatalf("unexpected salvage: event=%+v review=%q cause=%v", event, review, cause)
+		}
+		return ".buckley/buckbot/salvage/review.md", nil
+	}
+
+	service.handle(gitwatcher.PullRequestEvent{Repository: "owner/repo", Number: 27, HeadSHA: "partial"})
+	if posted.Load() != 0 || salvaged.Load() != 1 {
+		t.Fatalf("posted=%d salvaged=%d want 0/1", posted.Load(), salvaged.Load())
+	}
+}
+
+func TestSaveBuckbotSalvageWritesSecureArtifact(t *testing.T) {
+	t.Chdir(t.TempDir())
+	path, err := saveBuckbotSalvage(
+		gitwatcher.PullRequestEvent{Repository: "owner/repo", Number: 28, HeadSHA: "1234567890abcdef"},
+		"completed evidence",
+		context.DeadlineExceeded,
+	)
+	if err != nil {
+		t.Fatalf("saveBuckbotSalvage() error = %v", err)
+	}
+	if !strings.HasPrefix(path, filepath.Join(".buckley", "buckbot", "salvage")) || !strings.Contains(path, "owner-repo-pr-28-1234567890ab") {
+		t.Fatalf("salvage path = %q", path)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read salvage: %v", err)
+	}
+	if !strings.Contains(string(data), "Incomplete review") || !strings.Contains(string(data), "completed evidence") || !strings.Contains(string(data), "deadline exceeded") {
+		t.Fatalf("salvage content = %q", data)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("salvage permissions = %o, want 600", got)
 	}
 }
 

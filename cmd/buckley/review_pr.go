@@ -133,13 +133,22 @@ func runReviewPRCommand(args []string) error {
 		termOut.Dim("Reviewing PR: %s", opts.prRef)
 	}
 
-	result, prInfo, err := runPRReview(ctx, opts.prRef, runtime.framework)
-	if err != nil {
-		return err
-	}
+	result, prInfo, reviewErr := runPRReview(ctx, opts.prRef, runtime.framework)
 
-	if opts.verbose && result.contextAudit != nil {
+	if opts.verbose && result != nil && result.contextAudit != nil {
 		printReviewContextAudit(result.contextAudit)
+	}
+	if reviewErr != nil {
+		if result == nil || !result.incomplete || strings.TrimSpace(result.reviewText) == "" {
+			return reviewErr
+		}
+		if err := writePRReviewOutput(opts.outputFile, result.reviewText, prInfo); err != nil {
+			return fmt.Errorf("%w; also failed to write salvaged review: %v", reviewErr, err)
+		}
+		if opts.showCost && result.trace != nil {
+			printReviewCost(result.trace, runtime.ledger)
+		}
+		return fmt.Errorf("%w; incomplete review salvaged%s", reviewErr, reviewSalvageDestination(opts.outputFile))
 	}
 
 	if result.reviewText == "" {
@@ -196,6 +205,10 @@ func runPRReviewWithIterationLimit(ctx context.Context, prRef string, framework 
 
 	if runErr != nil {
 		spinner.StopWithError(runErr.Error())
+		partial := reviewResultFromRLM(fwResult, audit)
+		if strings.TrimSpace(partial.reviewText) != "" {
+			return partial, prCtx.PR, fmt.Errorf("review failed: %w", runErr)
+		}
 		return nil, prCtx.PR, fmt.Errorf("review failed: %w", runErr)
 	}
 	if err := commands.RevalidatePRContext(prCtx); err != nil {

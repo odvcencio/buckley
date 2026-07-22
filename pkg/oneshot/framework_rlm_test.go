@@ -2,6 +2,7 @@ package oneshot
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -10,6 +11,15 @@ import (
 	"m31labs.dev/buckley/pkg/model"
 	"m31labs.dev/buckley/pkg/transparency"
 )
+
+type partialRLMExecutor struct {
+	result *RLMResult
+	err    error
+}
+
+func (p partialRLMExecutor) Run(context.Context, string, string, []string, RLMExecutionOpts) (*RLMResult, error) {
+	return p.result, p.err
+}
 
 type scriptedRLMExecutor struct {
 	responses  []string
@@ -129,6 +139,28 @@ func TestRunRLMRetriesValidationFailureWithGuidance(t *testing.T) {
 	}
 	if got := strings.Join(runner.tools[0], ","); got != "read_file,run_shell" {
 		t.Fatalf("allowed tools = %q, want exact registry names", got)
+	}
+}
+
+func TestRunRLMPreservesPartialValueOnExecutionDeadline(t *testing.T) {
+	trace := newTestRLMTrace("partial", 100, 10, 0.01)
+	framework := NewFramework(nil, nil).WithRLMRunner(partialRLMExecutor{
+		result: &RLMResult{Response: "incomplete evidence", Trace: trace},
+		err:    context.DeadlineExceeded,
+	})
+
+	result, err := framework.RunRLM(context.Background(), validatingRLMDefinition{}, RLMRunOpts{MaxRetries: 1})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("RunRLM() error = %v, want deadline", err)
+	}
+	if result == nil || !result.Incomplete || result.Value != "incomplete evidence" {
+		t.Fatalf("partial result = %#v, want incomplete parsed value", result)
+	}
+	if !strings.Contains(result.IncompleteReason, "deadline") {
+		t.Fatalf("incomplete reason = %q, want deadline", result.IncompleteReason)
+	}
+	if result.Trace == nil || result.Trace.Tokens.Input != 100 {
+		t.Fatalf("partial trace = %#v, want retained accounting", result.Trace)
 	}
 }
 
@@ -397,11 +429,14 @@ func TestRunRLMReturnsValidationErrorAfterRetryBudget(t *testing.T) {
 	runner := &scriptedRLMExecutor{responses: []string{"bad", "still bad"}}
 	framework := NewFramework(nil, nil).WithRLMRunner(runner)
 
-	_, err := framework.RunRLM(context.Background(), validatingRLMDefinition{}, RLMRunOpts{
+	result, err := framework.RunRLM(context.Background(), validatingRLMDefinition{}, RLMRunOpts{
 		UserPrompt: "review this change",
 		MaxRetries: 2,
 	})
 	if err == nil || !strings.Contains(err.Error(), "after 2 attempts") {
 		t.Fatalf("RunRLM() error = %v, want exhausted validation error", err)
+	}
+	if result == nil || !result.Incomplete || result.Value != "still bad" {
+		t.Fatalf("RunRLM() result = %#v, want last rejected value preserved as incomplete", result)
 	}
 }

@@ -2,6 +2,7 @@ package oneshot
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -9,7 +10,33 @@ import (
 	"testing"
 
 	"m31labs.dev/buckley/pkg/model"
+	"m31labs.dev/buckley/pkg/rlm"
 )
+
+func TestFormatIncompleteRLMResponseRetainsCompletedEvidence(t *testing.T) {
+	result := &rlm.SubAgentResult{
+		Summary:      "Inspected the sharding contract.",
+		InputTokens:  120,
+		OutputTokens: 30,
+		TokensUsed:   150,
+		ToolCalls: []rlm.SubAgentToolCall{{
+			Name:      "search_text",
+			Arguments: `{"query":"race_root"}`,
+			Result:    "found aggregate gate",
+			Success:   true,
+		}},
+	}
+
+	got := formatIncompleteRLMResponse(result, errors.Join(context.DeadlineExceeded, errors.New("provider still working")))
+	for _, want := range []string{"Incomplete agent result", "not a completed or validated result", "Inspected the sharding contract", "search_text", "found aggregate gate", "120 input", "1"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("salvage output missing %q:\n%s", want, got)
+		}
+	}
+	if !strings.HasSuffix(got, "\n") {
+		t.Fatal("salvage output must end with newline")
+	}
+}
 
 func TestReviewSnapshotRegistryReadsOnlyMaterializedState(t *testing.T) {
 	repo := t.TempDir()

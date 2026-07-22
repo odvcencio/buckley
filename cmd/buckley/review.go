@@ -50,6 +50,8 @@ type reviewCommandResult struct {
 	attempts       int
 	primary        int
 	criticAttempts int
+	incomplete     bool
+	incompleteWhy  string
 }
 
 func parseReviewCommandOptions(args []string) (reviewCommandOptions, error) {
@@ -127,13 +129,22 @@ func runReviewCommand(args []string) error {
 		}
 	}
 
-	result, err := runReview(ctx, opts, runtime.framework)
-	if err != nil {
-		return err
-	}
+	result, reviewErr := runReview(ctx, opts, runtime.framework)
 
-	if opts.verbose && result.contextAudit != nil {
+	if opts.verbose && result != nil && result.contextAudit != nil {
 		printReviewContextAudit(result.contextAudit)
+	}
+	if reviewErr != nil {
+		if result == nil || !result.incomplete || strings.TrimSpace(result.reviewText) == "" {
+			return reviewErr
+		}
+		if err := writeReviewOutput(opts.outputFile, result.reviewText); err != nil {
+			return fmt.Errorf("%w; also failed to write salvaged review: %v", reviewErr, err)
+		}
+		if opts.showCost && result.trace != nil {
+			printReviewCost(result.trace, runtime.ledger)
+		}
+		return fmt.Errorf("%w; incomplete review salvaged%s", reviewErr, reviewSalvageDestination(opts.outputFile))
 	}
 
 	if result.reviewText == "" {
@@ -258,6 +269,10 @@ func runProjectReview(ctx context.Context, framework *oneshot.Framework) (*revie
 	})
 	if runErr != nil {
 		spinner.StopWithError(runErr.Error())
+		partial := reviewResultFromRLM(fwResult, audit)
+		if strings.TrimSpace(partial.reviewText) != "" {
+			return partial, fmt.Errorf("review failed: %w", runErr)
+		}
 		return nil, fmt.Errorf("review failed: %w", runErr)
 	}
 
@@ -317,6 +332,10 @@ func runBranchReview(ctx context.Context, opts reviewCommandOptions, framework *
 	})
 	if runErr != nil {
 		spinner.StopWithError(runErr.Error())
+		partial := reviewResultFromRLM(fwResult, audit)
+		if strings.TrimSpace(partial.reviewText) != "" {
+			return partial, fmt.Errorf("review failed: %w", runErr)
+		}
 		return nil, fmt.Errorf("review failed: %w", runErr)
 	}
 
@@ -371,7 +390,35 @@ func reviewResultFromRLM(fwResult *oneshot.RunResult, audit *transparency.Contex
 	result.attempts = fwResult.Attempts
 	result.primary = fwResult.PrimaryAttempts
 	result.criticAttempts = fwResult.CriticAttempts
+	result.incomplete = fwResult.Incomplete
+	result.incompleteWhy = fwResult.IncompleteReason
+	if result.incomplete {
+		result.reviewText = markIncompleteReview(result.reviewText, result.incompleteWhy)
+		result.parsed = nil
+	}
 	return result
+}
+
+func markIncompleteReview(review, reason string) string {
+	review = strings.TrimSpace(review)
+	if strings.Contains(review, "**Incomplete review") {
+		return review + "\n"
+	}
+	if strings.TrimSpace(reason) == "" {
+		reason = "the review run ended before validation completed"
+	}
+	return fmt.Sprintf(
+		"> [!WARNING]\n> **Incomplete review — salvaged from completed work.**\n> This artifact is not a merge verdict and must not be used as an approval.\n> Cause: %s\n\n%s\n",
+		reason,
+		review,
+	)
+}
+
+func reviewSalvageDestination(outputFile string) string {
+	if strings.TrimSpace(outputFile) == "" {
+		return " to standard output"
+	}
+	return " to " + outputFile
 }
 
 func printReviewAttemptCounts(result *reviewCommandResult) {

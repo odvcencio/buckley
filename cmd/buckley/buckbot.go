@@ -8,7 +8,9 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -25,6 +27,7 @@ var buckbotListenFn = http.ListenAndServe
 
 type buckbotReviewer func(context.Context, gitwatcher.PullRequestEvent) (string, float64, error)
 type buckbotPoster func(context.Context, gitwatcher.PullRequestEvent, string) error
+type buckbotSalvager func(gitwatcher.PullRequestEvent, string, error) (string, error)
 
 const (
 	buckbotReviewAttemptTimeout = 5 * time.Minute
@@ -50,16 +53,18 @@ type buckbotService struct {
 	spentUSD float64
 	reserved float64
 	sleep    func(context.Context, time.Duration) error
+	salvage  buckbotSalvager
 }
 
 func newBuckbotService(cfg config.BuckbotConfig, review buckbotReviewer, post buckbotPoster) *buckbotService {
 	return &buckbotService{
-		cfg:    cfg,
-		review: review,
-		post:   post,
-		seen:   make(map[string]struct{}),
-		active: make(map[string]buckbotActiveReview),
-		sleep:  waitForBuckbotRetry,
+		cfg:     cfg,
+		review:  review,
+		post:    post,
+		seen:    make(map[string]struct{}),
+		active:  make(map[string]buckbotActiveReview),
+		sleep:   waitForBuckbotRetry,
+		salvage: saveBuckbotSalvage,
 	}
 }
 
@@ -104,6 +109,14 @@ func (s *buckbotService) handle(event gitwatcher.PullRequestEvent) {
 		s.settleReviewBudget(cost)
 
 		if err != nil {
+			if strings.TrimSpace(review) != "" {
+				path, salvageErr := s.salvage(event, review, err)
+				if salvageErr != nil {
+					slog.Error("Buckbot could not persist incomplete review", "repository", event.Repository, "pr", event.Number, "head", event.HeadSHA, "error", salvageErr)
+				} else {
+					slog.Warn("Buckbot persisted incomplete review", "repository", event.Repository, "pr", event.Number, "head", event.HeadSHA, "path", path)
+				}
+			}
 			if cost == 0 && isRetryableBuckbotError(err) && attempt+1 < buckbotMaxReviewAttempts {
 				delay := buckbotRetryDelay(attempt, err)
 				slog.Warn("Buckbot review retry scheduled", "repository", event.Repository, "pr", event.Number, "head", event.HeadSHA, "delay", delay, "error", err)
@@ -285,16 +298,63 @@ func newBuckbotReviewer(botCfg config.BuckbotConfig, costStore *storage.Store) b
 		result, _, reviewErr := runPRReviewWithIterationLimit(ctx, ref, runtime.framework, botCfg.MaxReviewIterations)
 		entries := runtime.ledger.Entries()
 		cost := runtime.ledger.SessionTotal()
+		partialReview := ""
+		if result != nil {
+			partialReview = result.reviewText
+		}
 		if len(entries) > 0 {
 			if err := saveBuckbotSpend(costStore, event, botCfg.Model, entries); err != nil {
-				return "", cost, err
+				return partialReview, cost, err
 			}
 		}
 		if reviewErr != nil {
-			return "", cost, reviewErr
+			return partialReview, cost, reviewErr
 		}
-		return result.reviewText, cost, nil
+		return partialReview, cost, nil
 	}
+}
+
+func saveBuckbotSalvage(event gitwatcher.PullRequestEvent, review string, cause error) (string, error) {
+	dir := filepath.Join(".buckley", "buckbot", "salvage")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", fmt.Errorf("create Buckbot salvage directory: %w", err)
+	}
+	sha := strings.TrimSpace(event.HeadSHA)
+	if len(sha) > 12 {
+		sha = sha[:12]
+	}
+	name := strings.NewReplacer("/", "-", "\\", "-", ":", "-").Replace(event.Repository)
+	filename := fmt.Sprintf("%s-pr-%d-%s-%s.md", name, event.Number, sha, time.Now().UTC().Format("20060102T150405.000000000Z"))
+	path := filepath.Join(dir, filename)
+	body := strings.TrimSpace(review)
+	if cause != nil && !strings.Contains(body, "Incomplete review") {
+		body = fmt.Sprintf("> [!WARNING]\n> **Incomplete review — salvaged from completed work.**\n> Cause: %s\n\n%s", cause, body)
+	}
+	tmp, err := os.CreateTemp(dir, ".salvage-*.tmp")
+	if err != nil {
+		return "", fmt.Errorf("create Buckbot salvage temp file: %w", err)
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
+		return "", fmt.Errorf("secure Buckbot salvage temp file: %w", err)
+	}
+	if _, err := tmp.WriteString(body + "\n"); err != nil {
+		_ = tmp.Close()
+		return "", fmt.Errorf("write Buckbot salvage: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return "", fmt.Errorf("sync Buckbot salvage: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return "", fmt.Errorf("close Buckbot salvage: %w", err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return "", fmt.Errorf("publish Buckbot salvage: %w", err)
+	}
+	return path, nil
 }
 
 func saveBuckbotSpend(store *storage.Store, event gitwatcher.PullRequestEvent, modelID string, entries []transparency.CostEntry) error {
