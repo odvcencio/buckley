@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	stdruntime "runtime"
 	"strings"
 	"sync"
 	"time"
@@ -1351,23 +1352,54 @@ func (a *WidgetApp) WelcomeScreen() {
 }
 
 func copyToClipboard(text string) error {
-	cmds := [][]string{
-		{"pbcopy"},                           // macOS
-		{"xclip", "-selection", "clipboard"}, // Linux X11
-		{"xsel", "--clipboard", "--input"},   // Linux X11 alt
-		{"wl-copy"},                          // Linux Wayland
-		{"clip.exe"},                         // WSL/Windows
-	}
-
+	cmds := clipboardCommands()
+	var failures []string
 	for _, args := range cmds {
+		if !clipboardCommandAvailable(args[0]) {
+			continue
+		}
 		cmd := exec.Command(args[0], args[1:]...)
 		cmd.Stdin = strings.NewReader(text)
 		if err := cmd.Run(); err == nil {
 			return nil
+		} else {
+			failures = append(failures, fmt.Sprintf("%s: %v", args[0], err))
 		}
 	}
+	if len(failures) > 0 {
+		return fmt.Errorf("clipboard command failed: %s", strings.Join(failures, "; "))
+	}
+	return fmt.Errorf("clipboard unavailable (install wl-clipboard, xclip, or xsel)")
+}
 
-	return fmt.Errorf("no clipboard command available")
+func clipboardCommands() [][]string {
+	return clipboardCommandsFor(stdruntime.GOOS)
+}
+
+func clipboardCommandsFor(goos string) [][]string {
+	switch goos {
+	case "darwin":
+		return [][]string{{"pbcopy"}}
+	case "windows":
+		return [][]string{{"clip.exe"}}
+	default:
+		return [][]string{
+			{"wl-copy"},
+			{"xclip", "-selection", "clipboard"},
+			{"xsel", "--clipboard", "--input"},
+			{"clip.exe"},
+			{"/mnt/c/Windows/System32/clip.exe"},
+		}
+	}
+}
+
+func clipboardCommandAvailable(name string) bool {
+	if strings.ContainsRune(name, os.PathSeparator) {
+		info, err := os.Stat(name)
+		return err == nil && !info.IsDir()
+	}
+	_, err := exec.LookPath(name)
+	return err == nil
 }
 
 func max(a, b int) int {

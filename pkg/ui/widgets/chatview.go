@@ -193,7 +193,7 @@ func (c *ChatView) renderPlainLines(content, source string) []scrollback.Line {
 }
 
 func (c *ChatView) renderMarkdownLines(content, source string) []scrollback.Line {
-	mdLines := c.mdRenderer.RenderWidth(source, content, c.markdownRenderWidth())
+	mdLines := c.mdRenderer.RenderWidth(source, markdownPPForTerminal(content), c.markdownRenderWidth())
 	lines := make([]scrollback.Line, 0, len(mdLines))
 	for _, line := range mdLines {
 		spans := convertMarkdownSpans(line.Spans)

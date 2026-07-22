@@ -78,6 +78,39 @@ func TestChatView_WideTableStaysInsideTranscriptAndPreservesCells(t *testing.T) 
 	}
 }
 
+func TestChatView_RendersMarkdownPlusPlusExtensions(t *testing.T) {
+	cv := NewChatView()
+	cv.SetMarkdownRenderer(markdown.NewRenderer(theme.DefaultTheme()), backend.DefaultStyle())
+	cv.Layout(runtime.Rect{X: 0, Y: 0, Width: 100, Height: 80})
+
+	cv.AddMessage(`---
+title: Hidden metadata
+---
+
+# Result :rocket:
+
+> [!NOTE] Parser-backed
+> Markdown++ content is visible.
+
+Term
+: Definition`, "assistant")
+
+	var rendered strings.Builder
+	for _, line := range cv.buffer.GetVisibleLines() {
+		rendered.WriteString(line.Content)
+		rendered.WriteByte('\n')
+	}
+	text := rendered.String()
+	for _, want := range []string{"Result 🚀", "NOTE — Parser-backed", "Markdown++ content is visible", "Term", "Definition"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("Markdown++ output missing %q:\n%s", want, text)
+		}
+	}
+	if strings.Contains(text, "Hidden metadata") {
+		t.Fatalf("Markdown++ frontmatter leaked into chat output:\n%s", text)
+	}
+}
+
 func TestChatView_AddMessage_User(t *testing.T) {
 	cv := NewChatView()
 	cv.Layout(runtime.Rect{X: 0, Y: 0, Width: 80, Height: 24})
