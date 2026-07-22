@@ -453,8 +453,6 @@ k8s.io/utils v0.0.0-20230726121419-3b25d923346b h1:sgn3ZU783SCgtaSJjpcVVlRqd6GSn
 k8s.io/utils v0.0.0-20230726121419-3b25d923346b/go.mod h1:OLgZIPagt7ERELqWJFomSt595RzquPNLL48iOWgYOg0=
 m31labs.dev/arbiter v1.7.0 h1:98Ekg408Bn9WAPSbLYqau0lKxesc9FlMt57hS1ek/ZM=
 m31labs.dev/arbiter v1.7.0/go.mod h1:VUoRZSRQUYpwsIaOcklySodfQQWVLJCrJ7XmPAVIyY0=
-m31labs.dev/fluffyui v0.6.0 h1:j04hk3KuW5wB/NHFa1m6KSkY7fZW1ralCk/g3TPTKk8=
-m31labs.dev/fluffyui v0.6.0/go.mod h1:fzkOO5zk2IbybNNvWZqHWPkvCNJqwx1LwgeUhsd9S08=
 m31labs.dev/fluffyui v0.6.1 h1:ZsOKIDevzsIKQM+aHkVk4QURZUwN0mULfgmMW+AOSug=
 m31labs.dev/fluffyui v0.6.1/go.mod h1:Jq68rJPVWnCaJYzswshF3+JLIlQNTwnefxblHEZcDSM=
 modernc.org/cc/v4 v4.21.4 h1:3Be/Rdo1fpr8GrQ7IVw9OHtplU4gWbb+wNgeoBMmGLQ=
