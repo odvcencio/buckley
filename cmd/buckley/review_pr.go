@@ -169,6 +169,7 @@ func runPRReview(ctx context.Context, prRef string, framework *oneshot.Framework
 		spinner.StopWithError(err.Error())
 		return nil, nil, fmt.Errorf("assemble PR context: %w", err)
 	}
+	spinner.SetMessage("Reviewing immutable PR head...")
 
 	userPrompt := commands.BuildPRPrompt(prCtx)
 	reviewDef := commands.ReviewPRDef{
@@ -192,6 +193,7 @@ func runPRReview(ctx context.Context, prRef string, framework *oneshot.Framework
 		spinner.StopWithError(runErr.Error())
 		return nil, prCtx.PR, fmt.Errorf("review failed: %w", runErr)
 	}
+	spinner.SetMessage("Revalidating PR head...")
 	if err := commands.RevalidatePRContext(prCtx); err != nil {
 		spinner.StopWithError(err.Error())
 		return nil, prCtx.PR, fmt.Errorf("review target changed: %w", err)
