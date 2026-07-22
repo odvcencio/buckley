@@ -2,11 +2,14 @@ package main
 
 import (
 	"context"
+	"path/filepath"
 	"sync/atomic"
 	"testing"
 
 	"m31labs.dev/buckley/pkg/config"
 	"m31labs.dev/buckley/pkg/gitwatcher"
+	"m31labs.dev/buckley/pkg/storage"
+	"m31labs.dev/buckley/pkg/transparency"
 )
 
 func TestBuckbotService_DeduplicatesRevisionAndPostsWithinBudget(t *testing.T) {
@@ -23,6 +26,26 @@ func TestBuckbotService_DeduplicatesRevisionAndPostsWithinBudget(t *testing.T) {
 	service.handle(event)
 	if reviewed.Load() != 1 || posted.Load() != 1 {
 		t.Fatalf("reviewed=%d posted=%d want one of each", reviewed.Load(), posted.Load())
+	}
+}
+
+func TestSaveBuckbotSpend_PersistsMonthlyCost(t *testing.T) {
+	store, err := storage.New(filepath.Join(t.TempDir(), "buckbot.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	event := gitwatcher.PullRequestEvent{Repository: "owner/repo", Number: 7, HeadSHA: "abc"}
+	entries := []transparency.CostEntry{{Model: "moonshotai/kimi-k3", Tokens: transparency.TokenUsage{Input: 100, Output: 10}, Cost: 0.12}}
+	if err := saveBuckbotSpend(store, event, "moonshotai/kimi-k3", entries); err != nil {
+		t.Fatalf("save spend: %v", err)
+	}
+	spend, err := store.GetMonthlyCostForPrincipal("buckbot")
+	if err != nil {
+		t.Fatalf("monthly spend: %v", err)
+	}
+	if spend != 0.12 {
+		t.Fatalf("spend=%v want 0.12", spend)
 	}
 }
 
