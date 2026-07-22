@@ -324,6 +324,21 @@ func TestChatView_PageUp(t *testing.T) {
 	}
 }
 
+func TestChatViewportCapsAndCentersWideProse(t *testing.T) {
+	wide := chatViewport(runtime.Rect{X: 0, Y: 1, Width: 160, Height: 40})
+	if wide.Width != maxChatTextWidth+2 {
+		t.Fatalf("wide viewport width = %d, want %d", wide.Width, maxChatTextWidth+2)
+	}
+	if wide.X != 24 {
+		t.Fatalf("wide viewport x = %d, want 24", wide.X)
+	}
+
+	narrow := chatViewport(runtime.Rect{X: 3, Y: 1, Width: 80, Height: 20})
+	if narrow.X != 3 || narrow.Width != 80 {
+		t.Fatalf("narrow viewport = %+v, want x=3 width=80", narrow)
+	}
+}
+
 func TestChatView_PageDown(t *testing.T) {
 	cv := NewChatView()
 	cv.Layout(runtime.Rect{X: 0, Y: 0, Width: 80, Height: 5})

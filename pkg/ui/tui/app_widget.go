@@ -123,7 +123,8 @@ type WidgetApp struct {
 	projectRoot string
 
 	// Render synchronization
-	renderMu sync.Mutex
+	renderMu        sync.Mutex
+	forceFullRedraw bool
 }
 
 // WidgetAppConfig configures the widget-based TUI application.
@@ -297,6 +298,7 @@ func NewWidgetApp(cfg WidgetAppConfig) (*WidgetApp, error) {
 		cursorPulsePeriod:   2600 * time.Millisecond,
 		cursorPulseInterval: 50 * time.Millisecond,
 		inputMeasuredHeight: inputArea.Measure(runtime.Constraints{MaxWidth: w, MaxHeight: h}).Height,
+		forceFullRedraw:     true,
 	}
 
 	// Create coalescer for smooth streaming
@@ -305,6 +307,7 @@ func NewWidgetApp(cfg WidgetAppConfig) (*WidgetApp, error) {
 	app.applyScrollStatus(chatView.ScrollPosition())
 
 	chatView.OnScrollChange(func(top, total, viewHeight int) {
+		app.forceFullRedraw = true
 		if app.applyScrollStatus(top, total, viewHeight) {
 			app.dirty = true
 		}
@@ -1049,16 +1052,20 @@ func (a *WidgetApp) render() {
 
 	// Track cells updated
 	var cellsUpdated int64
+	forceFullRedraw := a.forceFullRedraw
+	if forceFullRedraw {
+		a.backend.Clear()
+	}
 
 	// Use partial redraw if only some cells changed
-	if buf.IsDirty() {
+	if forceFullRedraw || buf.IsDirty() {
 		dirtyCount := buf.DirtyCount()
 		w, h := buf.Size()
 		totalCells := w * h
 
 		// If more than half the cells are dirty, do a full redraw
 		// (more efficient than many individual SetContent calls)
-		if dirtyCount > totalCells/2 {
+		if forceFullRedraw || dirtyCount > totalCells/2 {
 			for y := 0; y < h; y++ {
 				for x := 0; x < w; x++ {
 					cell := buf.Get(x, y)
@@ -1078,8 +1085,14 @@ func (a *WidgetApp) render() {
 		buf.ClearDirty()
 	}
 
-	// Show the screen
-	a.backend.Show()
+	// A forced redraw clears and repopulates every backend cell before Sync
+	// invalidates the terminal's retained front buffer.
+	if forceFullRedraw {
+		a.backend.Sync()
+	} else {
+		a.backend.Show()
+	}
+	a.forceFullRedraw = false
 
 	// Update metrics
 	elapsed := time.Since(start)
@@ -1106,6 +1119,13 @@ func (a *WidgetApp) Refresh() {
 // AddMessage adds a message. Thread-safe via message passing.
 func (a *WidgetApp) AddMessage(content, source string) {
 	a.Post(AddMessageMsg{Content: content, Source: source})
+}
+
+// addMessageImmediately hydrates transcript content before the next frame.
+// Callers must already be on the UI goroutine or before Run starts.
+func (a *WidgetApp) addMessageImmediately(content, source string) {
+	a.chatView.AddMessage(content, source)
+	a.updateScrollStatus()
 }
 
 // RemoveThinkingIndicator removes the thinking indicator.
@@ -1281,6 +1301,7 @@ func (a *WidgetApp) SetRLMStatus(status *widgets.RLMStatus, scratchpad []widgets
 func (a *WidgetApp) ClearScrollback() {
 	a.chatView.Clear()
 	a.unreadCount = 0
+	a.forceFullRedraw = true
 	a.updateScrollStatus()
 }
 

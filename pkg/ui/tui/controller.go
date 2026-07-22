@@ -313,14 +313,14 @@ func (c *Controller) Run() error {
 
 	// Add system context if available
 	if c.projectCtx != nil && c.projectCtx.Loaded {
-		c.app.AddMessage("Project context loaded from AGENTS.md", "system")
+		c.app.addMessageImmediately("Project context loaded from AGENTS.md", "system")
 	}
 
 	// Load existing conversation history for current session
 	sess := c.sessions[c.currentSession]
 	if len(sess.Conversation.Messages) > 0 {
-		c.app.AddMessage(fmt.Sprintf("Resuming session: %s (%d messages)", sess.ID, len(sess.Conversation.Messages)), "system")
-		renderConversationHistory(c.app, sess.Conversation.Messages)
+		c.app.addMessageImmediately(fmt.Sprintf("Resuming session: %s (%d messages)", sess.ID, len(sess.Conversation.Messages)), "system")
+		renderConversationHistoryImmediately(c.app, sess.Conversation.Messages)
 	}
 
 	// Run the app
@@ -1273,10 +1273,10 @@ func (c *Controller) switchToSessionLocked(idx int) {
 	if sess.Streaming {
 		statusMsg += " (response in progress)"
 	}
-	c.app.AddMessage(statusMsg, "system")
+	c.app.addMessageImmediately(statusMsg, "system")
 
 	// Replay conversation to display
-	renderConversationHistory(c.app, sess.Conversation.Messages)
+	renderConversationHistoryImmediately(c.app, sess.Conversation.Messages)
 
 	if sess.Streaming {
 		c.app.SetStatus("Streaming...")

@@ -66,6 +66,7 @@ func (a *WidgetApp) handleResizeMsg(m ResizeMsg) bool {
 	}).Height
 	a.screen.Resize(m.Width, m.Height)
 	a.updateSidebarVisibility()
+	a.forceFullRedraw = true
 	return true
 }
 

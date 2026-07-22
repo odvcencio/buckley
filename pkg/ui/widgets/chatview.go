@@ -11,6 +11,8 @@ import (
 	"m31labs.dev/fluffyui/terminal"
 )
 
+const maxChatTextWidth = 110
+
 // ChatView displays the conversation history with scrolling.
 type ChatView struct {
 	Base
@@ -294,7 +296,7 @@ func (c *ChatView) ScrollPosition() (top, total, viewHeight int) {
 
 // PositionForPoint maps screen coordinates to a buffer position.
 func (c *ChatView) PositionForPoint(x, y int) (line, col int, ok bool) {
-	bounds := c.bounds
+	bounds := chatViewport(c.bounds)
 	if x < bounds.X || y < bounds.Y || y >= bounds.Y+bounds.Height {
 		return 0, 0, false
 	}
@@ -378,7 +380,8 @@ func (c *ChatView) Measure(constraints runtime.Constraints) runtime.Size {
 // Layout updates the scrollback buffer size.
 func (c *ChatView) Layout(bounds runtime.Rect) {
 	c.bounds = bounds
-	c.buffer.Resize(bounds.Width, bounds.Height)
+	viewport := chatViewport(bounds)
+	c.buffer.Resize(viewport.Width, viewport.Height)
 }
 
 // Render draws the chat view.
@@ -388,8 +391,9 @@ func (c *ChatView) Render(ctx runtime.RenderContext) {
 		return
 	}
 
-	c.renderVisibleLines(ctx, c.buffer.GetVisibleLines(), bounds)
-	c.renderScrollbar(ctx)
+	viewport := chatViewport(bounds)
+	c.renderVisibleLines(ctx, c.buffer.GetVisibleLines(), viewport)
+	c.renderScrollbar(ctx, viewport)
 }
 
 func (c *ChatView) renderVisibleLines(ctx runtime.RenderContext, lines []scrollback.VisibleLine, bounds runtime.Rect) {
@@ -500,8 +504,7 @@ func fillChatRow(buf *runtime.Buffer, x, y, maxX int, style backend.Style) {
 }
 
 // renderScrollbar draws the scrollbar on the right edge.
-func (c *ChatView) renderScrollbar(ctx runtime.RenderContext) {
-	bounds := c.bounds
+func (c *ChatView) renderScrollbar(ctx runtime.RenderContext, bounds runtime.Rect) {
 	top, total, viewH := c.buffer.ScrollPosition()
 
 	if total <= viewH {
@@ -525,6 +528,17 @@ func (c *ChatView) renderScrollbar(ctx runtime.RenderContext) {
 			style = c.scrollbarStyle
 		}
 		ctx.Buffer.Set(scrollX, bounds.Y+y, r, style)
+	}
+}
+
+func chatViewport(bounds runtime.Rect) runtime.Rect {
+	maxWidth := maxChatTextWidth + 2 // wrapping inset plus scrollbar
+	width := min(bounds.Width, maxWidth)
+	return runtime.Rect{
+		X:      bounds.X + max(0, (bounds.Width-width)/2),
+		Y:      bounds.Y,
+		Width:  width,
+		Height: bounds.Height,
 	}
 }
 
