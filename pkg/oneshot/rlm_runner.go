@@ -279,8 +279,8 @@ func formatIncompleteRLMResponse(result *rlm.SubAgentResult, cause error) string
 	}
 
 	b.WriteString("\n## Accounting\n\n")
-	b.WriteString(fmt.Sprintf("- Completed model tokens: %d input, %d output, %d total\n", result.InputTokens, result.OutputTokens, result.TokensUsed))
-	b.WriteString(fmt.Sprintf("- Completed tool calls retained: %d\n", len(result.ToolCalls)))
+	fmt.Fprintf(&b, "- Completed model tokens: %d input, %d output, %d total\n", result.InputTokens, result.OutputTokens, result.TokensUsed)
+	fmt.Fprintf(&b, "- Completed tool calls retained: %d\n", len(result.ToolCalls))
 	return strings.TrimSpace(b.String()) + "\n"
 }
 

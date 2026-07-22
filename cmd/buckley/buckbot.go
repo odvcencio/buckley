@@ -209,7 +209,7 @@ func isRetryableBuckbotError(err error) bool {
 		return apiErr.Retryable
 	}
 	var networkErr net.Error
-	return errors.As(err, &networkErr) && (networkErr.Timeout() || networkErr.Temporary())
+	return errors.As(err, &networkErr)
 }
 
 func buckbotRetryDelay(attempt int, err error) time.Duration {
@@ -268,7 +268,7 @@ func runBuckbotCommand(args []string) error {
 	if err != nil {
 		return fmt.Errorf("open Buckbot cost store: %w", err)
 	}
-	defer costStore.Close()
+	defer func() { _ = costStore.Close() }()
 	monthlySpend, err := costStore.GetMonthlyCostForPrincipal("buckbot")
 	if err != nil {
 		return fmt.Errorf("load Buckbot monthly spend: %w", err)
@@ -283,7 +283,7 @@ func newBuckbotReviewer(botCfg config.BuckbotConfig, costStore *storage.Store) b
 	return func(ctx context.Context, event gitwatcher.PullRequestEvent) (string, float64, error) {
 		cfg, mgr, store, err := initDependenciesFn()
 		if store != nil {
-			defer store.Close()
+			defer func() { _ = store.Close() }()
 		}
 		if err != nil {
 			return "", 0, fmt.Errorf("init dependencies: %w", err)
@@ -335,7 +335,7 @@ func saveBuckbotSalvage(event gitwatcher.PullRequestEvent, review string, cause 
 		return "", fmt.Errorf("create Buckbot salvage temp file: %w", err)
 	}
 	tmpPath := tmp.Name()
-	defer os.Remove(tmpPath)
+	defer func() { _ = os.Remove(tmpPath) }()
 	if err := tmp.Chmod(0o600); err != nil {
 		_ = tmp.Close()
 		return "", fmt.Errorf("secure Buckbot salvage temp file: %w", err)
@@ -359,7 +359,7 @@ func saveBuckbotSalvage(event gitwatcher.PullRequestEvent, review string, cause 
 
 func saveBuckbotSpend(store *storage.Store, event gitwatcher.PullRequestEvent, modelID string, entries []transparency.CostEntry) error {
 	if store == nil {
-		return fmt.Errorf("Buckbot cost store required")
+		return fmt.Errorf("buckbot cost store required")
 	}
 	now := time.Now().UTC()
 	sessionID := fmt.Sprintf("buckbot-%d", now.UnixNano())

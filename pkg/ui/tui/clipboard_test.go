@@ -10,9 +10,10 @@ import (
 func TestClipboardCommands_IncludeNativePlatformBridge(t *testing.T) {
 	commands := clipboardCommands()
 	want := "wl-copy"
-	if runtime.GOOS == "darwin" {
+	switch runtime.GOOS {
+	case "darwin":
 		want = "pbcopy"
-	} else if runtime.GOOS == "windows" {
+	case "windows":
 		want = "clip.exe"
 	}
 	for _, command := range commands {

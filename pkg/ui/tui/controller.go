@@ -1162,7 +1162,7 @@ func (c *Controller) listSessions() {
 		if current := c.currentSessionState(); current != nil && current.ID == sess.ID {
 			marker = "→ "
 		}
-		sb.WriteString(fmt.Sprintf("%s[%d] %s · %s · %d messages\n", marker, visible, sess.ID, sess.Status, sess.MessageCount))
+		fmt.Fprintf(&sb, "%s[%d] %s · %s · %d messages\n", marker, visible, sess.ID, sess.Status, sess.MessageCount)
 	}
 	if visible == 0 {
 		sb.WriteString("No saved sessions for this project.\n")
