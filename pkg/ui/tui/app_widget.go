@@ -38,6 +38,13 @@ const (
 
 var processSpinnerFrames = [...]string{"-", "\\", "|", "/"}
 
+// expandFromZero avoids treating a fill widget's unconstrained measurement as
+// its flex basis. Nested flex layouts otherwise measure the chat view at the
+// maximum integer size and collapse it when distributing the real viewport.
+func expandFromZero(widget runtime.Widget) runtime.FlexChild {
+	return runtime.FlexChild{Widget: widget, Grow: 1, Shrink: 1, Basis: 0}
+}
+
 // WidgetApp is the main TUI application using the widget tree architecture.
 type WidgetApp struct {
 	screen  *runtime.Screen
@@ -232,12 +239,12 @@ func NewWidgetApp(cfg WidgetAppConfig) (*WidgetApp, error) {
 	var mainArea *runtime.Flex
 	if sidebarVisible {
 		mainArea = runtime.HBox(
-			runtime.Flexible(chatView, 3), // 75% for chat
-			runtime.Sized(sidebar, 24),    // Fixed 24 cols for sidebar
+			expandFromZero(chatView),   // Fill space left by the sidebar
+			runtime.Sized(sidebar, 24), // Fixed 24 cols for sidebar
 		)
 	} else {
 		mainArea = runtime.HBox(
-			runtime.Expanded(chatView), // Full width when sidebar hidden
+			expandFromZero(chatView), // Full width when sidebar hidden
 		)
 	}
 
@@ -248,7 +255,7 @@ func NewWidgetApp(cfg WidgetAppConfig) (*WidgetApp, error) {
 	// StatusBar (fixed 1 row)
 	root := runtime.VBox(
 		runtime.Fixed(header),
-		runtime.Expanded(mainArea),
+		expandFromZero(mainArea),
 		runtime.Fixed(inputArea),
 		runtime.Fixed(statusBar),
 	)
@@ -1199,19 +1206,19 @@ func (a *WidgetApp) rebuildLayout() {
 	// Rebuild main area with or without sidebar
 	if a.sidebarVisible {
 		a.mainArea = runtime.HBox(
-			runtime.Flexible(a.chatView, 3),
+			expandFromZero(a.chatView),
 			runtime.Sized(a.sidebar, 24),
 		)
 	} else {
 		a.mainArea = runtime.HBox(
-			runtime.Expanded(a.chatView),
+			expandFromZero(a.chatView),
 		)
 	}
 
 	// Rebuild root with new main area
 	a.root = runtime.VBox(
 		runtime.Fixed(a.header),
-		runtime.Expanded(a.mainArea),
+		expandFromZero(a.mainArea),
 		runtime.Fixed(a.inputArea),
 		runtime.Fixed(a.statusBar),
 	)
