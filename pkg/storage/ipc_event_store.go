@@ -57,7 +57,7 @@ func (s *Store) ListIPCEventsAfter(sessionID, afterID string, limit int) ([]IPCE
 	if err != nil {
 		return nil, fmt.Errorf("list ipc events: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	events := make([]IPCEvent, 0)
 	for rows.Next() {
