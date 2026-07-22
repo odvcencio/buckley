@@ -113,6 +113,15 @@ func (c *ChatView) AppendText(text string) {
 	c.buffer.ReplaceLastMessage(lines)
 }
 
+// ReplaceText replaces the content of the last message while preserving its source.
+func (c *ChatView) ReplaceText(content string) {
+	if c.lastSource == "" {
+		return
+	}
+	c.lastContent = content
+	c.buffer.ReplaceLastMessage(c.buildMessageLines(content, c.lastSource))
+}
+
 func (c *ChatView) buildMessageLines(content, source string) []scrollback.Line {
 	lines := c.messageBodyLines(content, source)
 	lines = prependConversationSeparator(lines, source)

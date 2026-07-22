@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"m31labs.dev/buckley/pkg/conversation"
+	"m31labs.dev/buckley/pkg/model"
 )
 
 func renderConversationHistory(app *WidgetApp, messages []conversation.Message) {
@@ -44,7 +45,7 @@ func renderConversationHistoryWith(addMessage func(content, source string), mess
 				startProgress()
 				if reasoning := strings.TrimSpace(msg.Reasoning); reasoning != "" {
 					progress.WriteString("\n\nThinking\n\n")
-					progress.WriteString(reasoning)
+					progress.WriteString(model.NormalizeReasoningText(reasoning))
 				}
 				for _, call := range msg.ToolCalls {
 					progress.WriteString("\n\n→ ")

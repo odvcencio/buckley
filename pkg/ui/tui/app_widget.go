@@ -1130,6 +1130,11 @@ func (a *WidgetApp) AppendToLastMessage(text string) {
 	a.Post(AppendMsg{Text: text})
 }
 
+// ReplaceLastMessage replaces the current message content.
+func (a *WidgetApp) ReplaceLastMessage(content string) {
+	a.Post(ReplaceLastMessageMsg{Content: content})
+}
+
 // StreamChunk sends a streaming chunk through the coalescer.
 func (a *WidgetApp) StreamChunk(sessionID, text string) {
 	a.Post(StreamChunk{SessionID: sessionID, Text: text})

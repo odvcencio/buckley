@@ -162,6 +162,21 @@ func TestChatView_AddMessage_Thinking(t *testing.T) {
 	}
 }
 
+func TestChatView_ReplaceTextRebuildsStreamingMessage(t *testing.T) {
+	cv := NewChatView()
+	cv.SetMarkdownRenderer(markdown.NewRenderer(theme.DefaultTheme()), backend.DefaultStyle())
+	cv.Layout(runtime.Rect{X: 0, Y: 0, Width: 80, Height: 24})
+	cv.AddMessage("Thinking\n\nI\n am\n split", "thinking")
+
+	cv.ReplaceText("Thinking\n\nI am joined")
+
+	rows := chatViewRows(cv, "thinking")
+	joined := strings.Join(rows, "\n")
+	if strings.Contains(joined, "I\n") || !strings.Contains(joined, "I am joined") {
+		t.Fatalf("replaced thinking rows = %q", rows)
+	}
+}
+
 func TestChatView_AddMessage_System(t *testing.T) {
 	cv := NewChatView()
 	cv.Layout(runtime.Rect{X: 0, Y: 0, Width: 80, Height: 24})

@@ -21,6 +21,7 @@ type toolLoopState struct {
 type toolLoopProgress struct {
 	started       bool
 	reasoningOpen bool
+	reasoning     strings.Builder
 }
 
 type toolLoopIterationResult struct {
@@ -164,6 +165,7 @@ func (c *Controller) callToolLoopModel(ctx context.Context, req model.ChatReques
 	defer model.ReleaseStreamAccumulator(accumulator)
 	if state != nil {
 		state.progress.reasoningOpen = false
+		state.progress.reasoning.Reset()
 	}
 
 	var responseID string
@@ -237,15 +239,17 @@ func (c *Controller) appendReasoningProgress(state *toolLoopState, delta model.M
 	if text == "" {
 		return
 	}
+	state.progress.reasoning.WriteString(text)
+	display := "Thinking\n\n" + model.NormalizeReasoningText(state.progress.reasoning.String())
 	if !state.progress.started {
 		state.progress.started = true
 	}
 	if !state.progress.reasoningOpen {
-		c.app.AddMessage("Thinking\n\n"+text, "thinking")
+		c.app.AddMessage(display, "thinking")
 		state.progress.reasoningOpen = true
 		return
 	}
-	c.app.AppendToLastMessage(text)
+	c.app.ReplaceLastMessage(display)
 }
 
 func visibleReasoningDetails(details []model.ReasoningDetail) string {

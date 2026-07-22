@@ -4,6 +4,8 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"unicode"
+	"unicode/utf8"
 )
 
 // streamAccumulatorPool provides memory-efficient recycling of StreamAccumulator
@@ -128,7 +130,7 @@ func (a *StreamAccumulator) Message() Message {
 	return Message{
 		Role:             a.role,
 		Content:          a.content.String(),
-		Reasoning:        a.reasoning.String(),
+		Reasoning:        NormalizeReasoningText(a.reasoning.String()),
 		ReasoningDetails: a.reasoningDetails,
 		ToolCalls:        a.toolCalls,
 	}
@@ -141,7 +143,132 @@ func (a *StreamAccumulator) Content() string {
 
 // Reasoning returns the accumulated reasoning/thinking content.
 func (a *StreamAccumulator) Reasoning() string {
-	return a.reasoning.String()
+	return NormalizeReasoningText(a.reasoning.String())
+}
+
+// NormalizeReasoningText removes provider chunk separators that occasionally
+// arrive as a newline before nearly every reasoning token. Deliberately
+// formatted prose is left untouched.
+func NormalizeReasoningText(text string) string {
+	if !reasoningIsSplitPerToken(text) {
+		return text
+	}
+	return joinReasoningFragments(text)
+}
+
+func joinReasoningFragments(text string) string {
+	var joined strings.Builder
+	start := 0
+	newlines := 0
+	for start < len(text) {
+		end := strings.IndexByte(text[start:], '\n')
+		if end < 0 {
+			writeReasoningFragment(&joined, text[start:], newlines)
+			break
+		}
+		end += start
+		writeReasoningFragment(&joined, text[start:end], newlines)
+		start = end
+		newlines = 0
+		for start < len(text) && text[start] == '\n' {
+			newlines++
+			start++
+		}
+	}
+	return joined.String()
+}
+
+func writeReasoningFragment(joined *strings.Builder, fragment string, newlines int) {
+	if strings.Trim(fragment, " \t") == "" {
+		if joined.Len() > 0 && !endsWithSpace(joined.String()) {
+			joined.WriteByte(' ')
+		}
+		return
+	}
+	if joined.Len() > 0 {
+		if breaks := reasoningStructuralBreak(joined.String(), fragment, newlines); breaks > 0 {
+			joined.WriteString(strings.Repeat("\n", breaks))
+		} else if !startsWithSpace(fragment) && reasoningFragmentNeedsSpace(joined.String(), fragment) {
+			joined.WriteByte(' ')
+		}
+	}
+	joined.WriteString(fragment)
+}
+
+func reasoningStructuralBreak(joined, next string, newlines int) int {
+	trimmed := strings.TrimLeft(next, " \t")
+	if newlines < 3 && strings.HasPrefix(trimmed, "- ") {
+		return 1
+	}
+	if startsWithSpace(next) {
+		return 0
+	}
+	previous, _ := utf8.DecodeLastRuneInString(strings.TrimRight(joined, " \t"))
+	first, _ := utf8.DecodeRuneInString(trimmed)
+	if newlines < 3 && previous == ':' && unicode.IsDigit(first) {
+		return 2
+	}
+	if newlines != 2 {
+		return 0
+	}
+	if strings.HasPrefix(trimmed, "**") {
+		return 2
+	}
+	if previous == '.' && (unicode.IsUpper(first) || unicode.IsDigit(first) && utf8.RuneCountInString(trimmed) == 1) {
+		return 2
+	}
+	return 0
+}
+
+func startsWithSpace(text string) bool {
+	first, _ := utf8.DecodeRuneInString(text)
+	return unicode.IsSpace(first)
+}
+
+func endsWithSpace(text string) bool {
+	last, _ := utf8.DecodeLastRuneInString(text)
+	return unicode.IsSpace(last)
+}
+
+func reasoningFragmentNeedsSpace(joined, next string) bool {
+	previous, _ := utf8.DecodeLastRuneInString(joined)
+	first, _ := utf8.DecodeRuneInString(next)
+	if !unicode.IsLetter(first) && !unicode.IsDigit(first) {
+		return false
+	}
+	if previous == '.' && unicode.IsDigit(first) {
+		return false
+	}
+	return strings.ContainsRune(".,:;!?)]}", previous)
+}
+
+func reasoningIsSplitPerToken(text string) bool {
+	if strings.Count(text, "\n") < 8 {
+		return false
+	}
+
+	lines := strings.Split(text, "\n")
+	nonEmpty := 0
+	short := 0
+	indented := 0
+	for i, line := range lines {
+		if line == "" {
+			continue
+		}
+		nonEmpty++
+		if utf8.RuneCountInString(line) <= 16 {
+			short++
+		}
+		if i > 0 && (strings.HasPrefix(line, " ") || strings.HasPrefix(line, "\t")) {
+			indented++
+		}
+	}
+	if nonEmpty < 8 || short*100 < nonEmpty*80 {
+		return false
+	}
+
+	empty := len(lines) - nonEmpty
+	return indented*100 >= nonEmpty*40 || empty*100 >= len(lines)*35
 }
 
 // ReasoningDetails returns accumulated OpenRouter reasoning detail blocks.
@@ -323,7 +450,7 @@ func (a *StreamAccumulator) FinalizeWithTokenParsing() Message {
 	return Message{
 		Role:             a.role,
 		Content:          content,
-		Reasoning:        a.reasoning.String(),
+		Reasoning:        NormalizeReasoningText(a.reasoning.String()),
 		ReasoningDetails: a.reasoningDetails,
 		ToolCalls:        toolCalls,
 	}

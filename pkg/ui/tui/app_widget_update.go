@@ -25,6 +25,8 @@ func (a *WidgetApp) update(msg Message) bool {
 		return a.handleAddMessageMsg(m)
 	case AppendMsg:
 		return a.handleAppendMsg(m)
+	case ReplaceLastMessageMsg:
+		return a.handleReplaceLastMessageMsg(m)
 	case StatusMsg:
 		return a.handleStatusMsg(m, time.Now())
 	case ProcessStatusMsg:
@@ -93,6 +95,12 @@ func (a *WidgetApp) handleAddMessageMsg(m AddMessageMsg) bool {
 
 func (a *WidgetApp) handleAppendMsg(m AppendMsg) bool {
 	a.chatView.AppendText(m.Text)
+	a.updateScrollStatus()
+	return true
+}
+
+func (a *WidgetApp) handleReplaceLastMessageMsg(m ReplaceLastMessageMsg) bool {
+	a.chatView.ReplaceText(m.Content)
 	a.updateScrollStatus()
 	return true
 }
