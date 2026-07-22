@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	sqlite "modernc.org/sqlite"
 	sqlite3 "modernc.org/sqlite/lib"
@@ -180,6 +181,43 @@ var migrations = []Migration{
 	{13, "provider_threads", ensureProviderThreadsSchema},
 	{14, "session_model", ensureSessionSchema},
 	{15, "ipc_events", ensureIPCEventsSchema},
+	{16, "normalize_legacy_timestamps", normalizeLegacyTimestamps},
+}
+
+func sqliteTimestamp(value time.Time) string {
+	return value.UTC().Format(time.RFC3339Nano)
+}
+
+func normalizeLegacyTimestamps(db *sql.DB) error {
+	for _, target := range []struct{ table, column string }{
+		{"sessions", "created_at"}, {"sessions", "last_active"},
+		{"messages", "timestamp"}, {"api_calls", "timestamp"}, {"ipc_events", "created_at"},
+	} {
+		rows, err := db.Query("SELECT rowid, " + target.column + " FROM " + target.table)
+		if err != nil {
+			return fmt.Errorf("read legacy %s.%s: %w", target.table, target.column, err)
+		}
+		for rows.Next() {
+			var id int64
+			var raw string
+			if err := rows.Scan(&id, &raw); err != nil {
+				_ = rows.Close()
+				return fmt.Errorf("scan legacy %s.%s: %w", target.table, target.column, err)
+			}
+			if parsed := parseSQLiteTimestamp(raw); !parsed.IsZero() && raw != sqliteTimestamp(parsed) {
+				if _, err := db.Exec("UPDATE "+target.table+" SET "+target.column+" = ? WHERE rowid = ?", sqliteTimestamp(parsed), id); err != nil {
+					_ = rows.Close()
+					return fmt.Errorf("normalize %s.%s: %w", target.table, target.column, err)
+				}
+			}
+		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		_ = rows.Close()
+	}
+	return nil
 }
 
 func ensureIPCEventsSchema(db *sql.DB) error {

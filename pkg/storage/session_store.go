@@ -71,8 +71,8 @@ func (s *Store) CreateSession(session *Session) error {
 			session.GitRepo,
 			session.GitBranch,
 			session.Model,
-			session.CreatedAt,
-			session.LastActive,
+			sqliteTimestamp(session.CreatedAt),
+			sqliteTimestamp(session.LastActive),
 			status,
 			completedAt,
 		)
@@ -282,7 +282,7 @@ func (s *Store) ListSessionsByRepo(repoPath string) ([]Session, error) {
 func (s *Store) UpdateSessionActivity(sessionID string) error {
 	now := time.Now()
 	query := `UPDATE sessions SET last_active = ? WHERE session_id = ?`
-	_, err := s.db.Exec(query, now, sessionID)
+	_, err := s.db.Exec(query, sqliteTimestamp(now), sessionID)
 	if err != nil {
 		return err
 	}
@@ -322,7 +322,7 @@ func (s *Store) UpdateSessionModel(sessionID, modelID string) error {
 	if modelID == "" {
 		return fmt.Errorf("model required")
 	}
-	res, err := s.db.Exec(`UPDATE sessions SET model = ?, last_active = ? WHERE session_id = ?`, modelID, time.Now(), sessionID)
+	res, err := s.db.Exec(`UPDATE sessions SET model = ?, last_active = ? WHERE session_id = ?`, modelID, sqliteTimestamp(time.Now()), sessionID)
 	if err != nil {
 		return err
 	}
