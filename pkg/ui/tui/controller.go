@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -412,6 +413,13 @@ func (c *Controller) handleCommand(text string) {
 
 	case "/sessions", "/tabs":
 		c.listSessions()
+
+	case "/resume":
+		if len(parts) < 2 {
+			c.app.AddMessage("Usage: /resume <session number or id>. Run /sessions to list saved sessions.", "system")
+			return
+		}
+		c.resumeSession(strings.Join(parts[1:], " "))
 
 	case "/next", "/n":
 		c.nextSession()
@@ -1126,33 +1134,93 @@ func buildRegistry(cfg *config.Config, store *storage.Store, workDir string, hub
 	return registry
 }
 
-// listSessions shows all active sessions for this project.
+// listSessions shows persisted sessions for this project, including completed
+// sessions that can be resumed.
 func (c *Controller) listSessions() {
-	c.mu.Lock()
-	sessions := c.sessions
-	current := c.currentSession
-	c.mu.Unlock()
-
-	if len(sessions) == 0 {
-		c.app.AddMessage("No active sessions", "system")
+	if c.store == nil {
+		c.app.AddMessage("Session storage unavailable", "system")
+		return
+	}
+	sessions, err := c.store.ListSessions(100)
+	if err != nil {
+		c.app.AddMessage("Could not list sessions: "+err.Error(), "system")
 		return
 	}
 
 	var sb strings.Builder
-	sb.WriteString("Active sessions:\n")
+	sb.WriteString("Saved sessions:\n")
+	visible := 0
 	for i, sess := range sessions {
+		if sess.ProjectPath != c.workDir {
+			continue
+		}
+		visible++
 		marker := "  "
-		if i == current {
+		if current := c.currentSessionState(); current != nil && current.ID == sess.ID {
 			marker = "→ "
 		}
-		status := ""
-		if sess.Streaming {
-			status = " (streaming...)"
-		}
-		sb.WriteString(fmt.Sprintf("%s[%d] %s%s\n", marker, i+1, sess.ID, status))
+		sb.WriteString(fmt.Sprintf("%s[%d] %s · %s · %d messages\n", marker, i+1, sess.ID, sess.Status, sess.MessageCount))
 	}
-	sb.WriteString("\nUse /next or /prev to switch (Alt+Right/Left)")
+	if visible == 0 {
+		sb.WriteString("No saved sessions for this project.\n")
+	} else {
+		sb.WriteString("\nUse /resume <number or id> to open a session.")
+	}
 	c.app.AddMessage(sb.String(), "system")
+}
+
+func (c *Controller) resumeSession(reference string) {
+	if c.store == nil {
+		c.app.AddMessage("Session storage unavailable", "system")
+		return
+	}
+	all, err := c.store.ListSessions(100)
+	if err != nil {
+		c.app.AddMessage("Could not list sessions: "+err.Error(), "system")
+		return
+	}
+	project := make([]storage.Session, 0)
+	for _, sess := range all {
+		if sess.ProjectPath == c.workDir {
+			project = append(project, sess)
+		}
+	}
+	var target *storage.Session
+	if n, err := strconv.Atoi(strings.TrimSpace(reference)); err == nil && n > 0 && n <= len(project) {
+		target = &project[n-1]
+	} else {
+		for i := range project {
+			if project[i].ID == strings.TrimSpace(reference) {
+				target = &project[i]
+				break
+			}
+		}
+	}
+	if target == nil {
+		c.app.AddMessage("Session not found. Run /sessions and use its number or full id.", "system")
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for i, sess := range c.sessions {
+		if sess.ID == target.ID {
+			c.currentSession = i
+			c.switchToSessionLocked(i)
+			return
+		}
+	}
+	if err := c.store.SetSessionStatus(target.ID, storage.SessionStatusActive); err != nil {
+		c.app.AddMessage("Could not resume session: "+err.Error(), "system")
+		return
+	}
+	sess, err := newSessionState(c.cfg, c.store, c.workDir, c.telemetry, target.ID, true)
+	if err != nil {
+		c.app.AddMessage("Could not load session: "+err.Error(), "system")
+		return
+	}
+	c.sessions = append([]*SessionState{sess}, c.sessions...)
+	c.currentSession = 0
+	c.switchToSessionLocked(0)
 }
 
 // nextSession switches to the next session.
