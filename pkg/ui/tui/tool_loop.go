@@ -148,6 +148,10 @@ func (c *Controller) buildToolLoopRequest(sess *SessionState, modelID string, us
 			req.Reasoning.Enabled = &enabled
 		}
 	}
+	if c.modelMgr != nil && c.modelMgr.SupportsParameter(modelID, "include_reasoning") {
+		include := true
+		req.IncludeReasoning = &include
+	}
 	return req, useTools
 }
 

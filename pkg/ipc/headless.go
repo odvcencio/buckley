@@ -318,20 +318,27 @@ func (s *Server) handleHeadlessCommand(w http.ResponseWriter, r *http.Request) {
 	if payload.Type == "" {
 		payload.Type = "input"
 	}
+	if command.RequiresContent(payload.Type) && strings.TrimSpace(payload.Content) == "" {
+		respondError(w, http.StatusBadRequest, fmt.Errorf("content required"))
+		return
+	}
 
 	cmd := command.SessionCommand{
 		SessionID: sessionID,
 		Type:      payload.Type,
 		Content:   payload.Content,
 	}
+	cmd.EnsureID()
 
 	if err := s.headlessRegistry.DispatchCommand(cmd); err != nil {
 		respondError(w, http.StatusInternalServerError, err)
 		return
 	}
 
-	w.WriteHeader(http.StatusAccepted)
-	respondJSON(w, map[string]string{"status": "accepted"})
+	respondJSONStatus(w, http.StatusAccepted, map[string]string{
+		"status":    "accepted",
+		"commandId": cmd.ID,
+	})
 }
 
 func (s *Server) handleAdoptHeadlessSession(w http.ResponseWriter, r *http.Request) {

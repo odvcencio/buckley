@@ -32,6 +32,7 @@ export function toSession(raw: unknown): Session | null {
     projectPath: emptyToUndefined(s.projectPath),
     gitRepo: emptyToUndefined(s.gitRepo),
     gitBranch: emptyToUndefined(s.gitBranch),
+	model: emptyToUndefined(s.model),
     status,
     createdAt: timestampToISO(s.createdAt),
     lastActive: timestampToISO(s.lastActive),
