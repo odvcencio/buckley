@@ -483,7 +483,7 @@ func printSkillShow(w io.Writer, entry skillsCommandEntry) {
 		fmt.Fprintf(w, "Allowed tools: %s\n", strings.Join(entry.AllowedTools, ", "))
 	}
 	if len(entry.PreapprovedTools) > 0 {
-		fmt.Fprintf(w, "Pre-approved tools: %s\n", strings.Join(entry.PreapprovedTools, ", "))
+		_, _ = fmt.Fprintf(w, "Pre-approved tools: %s\n", strings.Join(entry.PreapprovedTools, ", "))
 	}
 	if entry.Content != "" {
 		fmt.Fprintln(w, "\nContent:")
