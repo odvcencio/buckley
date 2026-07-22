@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/mattn/go-runewidth"
 	"m31labs.dev/fluffyui/backend"
 	"m31labs.dev/fluffyui/markdown"
 	"m31labs.dev/fluffyui/runtime"
@@ -52,6 +53,28 @@ func TestChatView_FluffyMarkdownRenderingMatrix(t *testing.T) {
 		if !strings.Contains(text, want) {
 			t.Fatalf("FluffyUI markdown output missing %q:\n%s", want, text)
 		}
+	}
+}
+
+func TestChatView_WideTableStaysInsideTranscriptAndPreservesCells(t *testing.T) {
+	cv := NewChatView()
+	cv.SetMarkdownRenderer(markdown.NewRenderer(theme.DefaultTheme()), backend.DefaultStyle())
+	cv.Layout(runtime.Rect{X: 0, Y: 0, Width: 155, Height: 40})
+
+	source := `| Item | Previous state | Current state |
+| --- | --- | --- |
+| Incremental parsing | A deliberately long description of the previous behavior | A deliberately long description that must wrap without losing the final fallback marker |`
+	lines := cv.renderMarkdownLines(source, "assistant")
+	var rendered strings.Builder
+	for _, line := range lines {
+		if width := runewidth.StringWidth(line.Content); width > maxChatTextWidth {
+			t.Fatalf("table line width = %d, want <= %d: %q", width, maxChatTextWidth, line.Content)
+		}
+		rendered.WriteString(line.Content)
+		rendered.WriteByte('\n')
+	}
+	if !strings.Contains(rendered.String(), "fallback marker") {
+		t.Fatalf("wrapped table lost cell content:\n%s", rendered.String())
 	}
 }
 

@@ -453,8 +453,8 @@ k8s.io/utils v0.0.0-20230726121419-3b25d923346b h1:sgn3ZU783SCgtaSJjpcVVlRqd6GSn
 k8s.io/utils v0.0.0-20230726121419-3b25d923346b/go.mod h1:OLgZIPagt7ERELqWJFomSt595RzquPNLL48iOWgYOg0=
 m31labs.dev/arbiter v1.7.0 h1:98Ekg408Bn9WAPSbLYqau0lKxesc9FlMt57hS1ek/ZM=
 m31labs.dev/arbiter v1.7.0/go.mod h1:VUoRZSRQUYpwsIaOcklySodfQQWVLJCrJ7XmPAVIyY0=
-m31labs.dev/fluffyui v0.6.1 h1:ZsOKIDevzsIKQM+aHkVk4QURZUwN0mULfgmMW+AOSug=
-m31labs.dev/fluffyui v0.6.1/go.mod h1:Jq68rJPVWnCaJYzswshF3+JLIlQNTwnefxblHEZcDSM=
+m31labs.dev/fluffyui v0.6.3 h1:4m6F3cuO94Rbkelh4auIGrTB/VTyHIXV8R0YNz6DVJI=
+m31labs.dev/fluffyui v0.6.3/go.mod h1:yqe3GzQbOHCrZzr13MucTEub8LBzEP/88qz4yKJlm4g=
 modernc.org/cc/v4 v4.21.4 h1:3Be/Rdo1fpr8GrQ7IVw9OHtplU4gWbb+wNgeoBMmGLQ=
 modernc.org/cc/v4 v4.21.4/go.mod h1:HM7VJTZbUCR3rV8EYBi9wxnJ0ZBRiGE5OeGXNA0IsLQ=
 modernc.org/ccgo/v4 v4.19.2 h1:lwQZgvboKD0jBwdaeVCTouxhxAyN6iawF3STraAal8Y=
