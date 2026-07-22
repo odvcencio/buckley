@@ -173,6 +173,7 @@ func runPRReviewWithIterationLimit(ctx context.Context, prRef string, framework 
 		spinner.StopWithError(err.Error())
 		return nil, nil, fmt.Errorf("assemble PR context: %w", err)
 	}
+	spinner.SetMessage("Running model review...")
 
 	userPrompt := commands.BuildPRPrompt(prCtx)
 	reviewDef := commands.ReviewPRDef{

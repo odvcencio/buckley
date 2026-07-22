@@ -3,6 +3,7 @@ package model
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -333,6 +334,13 @@ func TestClient_ChatCompletion(t *testing.T) {
 			defer server.Close()
 
 			client := NewClient("test-key", server.URL)
+			client.SetRetryConfig(RetryConfig{
+				MaxRetries:          3,
+				MaxRateLimitRetries: 3,
+				InitialInterval:     time.Millisecond,
+				MaxInterval:         2 * time.Millisecond,
+				Multiplier:          2,
+			})
 			req := ChatRequest{
 				Model: "test/model",
 				Messages: []Message{
@@ -430,6 +438,13 @@ func TestClient_ChatCompletionStream(t *testing.T) {
 			defer server.Close()
 
 			client := NewClient("test-key", server.URL)
+			client.SetRetryConfig(RetryConfig{
+				MaxRetries:          3,
+				MaxRateLimitRetries: 3,
+				InitialInterval:     time.Millisecond,
+				MaxInterval:         2 * time.Millisecond,
+				Multiplier:          2,
+			})
 			req := ChatRequest{
 				Model:    "test/model",
 				Messages: []Message{{Role: "user", Content: "Hello"}},
@@ -480,6 +495,47 @@ func TestClient_ChatCompletionStream(t *testing.T) {
 				t.Errorf("received %d chunks, want %d", receivedChunks, tt.expectChunks)
 			}
 		})
+	}
+}
+
+func TestClient_ChatCompletionStream_UsesExtendedRateLimitRetryBudget(t *testing.T) {
+	attempts := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		if attempts < 3 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"error":{"message":"rate limited","code":429}}`))
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"id\":\"test\",\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\ndata: [DONE]\n\n"))
+	}))
+	defer server.Close()
+
+	client := NewClient("test-key", server.URL)
+	client.SetRetryConfig(RetryConfig{
+		MaxRetries:          1,
+		MaxRateLimitRetries: 2,
+		InitialInterval:     time.Millisecond,
+		MaxInterval:         2 * time.Millisecond,
+		Multiplier:          2,
+	})
+	chunks, errs := client.ChatCompletionStream(context.Background(), ChatRequest{
+		Model: "test/model", Messages: []Message{{Role: "user", Content: "test"}},
+	})
+	var received int
+	for range chunks {
+		received++
+	}
+	var streamErr error
+	for err := range errs {
+		streamErr = err
+	}
+	if streamErr != nil {
+		t.Fatalf("stream failed after retry: %v", streamErr)
+	}
+	if attempts != 3 || received != 1 {
+		t.Fatalf("attempts=%d chunks=%d want 3 and 1", attempts, received)
 	}
 }
 
@@ -687,21 +743,21 @@ func TestClient_calculateRetryDelay(t *testing.T) {
 			attempt:     1,
 			lastErr:     nil,
 			expectedMin: 1 * time.Second,
-			expectedMax: 1 * time.Second,
+			expectedMax: 1200 * time.Millisecond,
 		},
 		{
 			name:        "second_retry",
 			attempt:     2,
 			lastErr:     nil,
 			expectedMin: 2 * time.Second,
-			expectedMax: 2 * time.Second,
+			expectedMax: 2400 * time.Millisecond,
 		},
 		{
 			name:        "third_retry",
 			attempt:     3,
 			lastErr:     nil,
 			expectedMin: 4 * time.Second,
-			expectedMax: 4 * time.Second,
+			expectedMax: 4800 * time.Millisecond,
 		},
 		{
 			name:        "large_attempt_capped",
@@ -721,14 +777,14 @@ func TestClient_calculateRetryDelay(t *testing.T) {
 			expectedMax: 5 * time.Second,
 		},
 		{
-			name:    "retry_after_exceeds_max",
+			name:    "retry_after_honored_beyond_max_backoff",
 			attempt: 1,
 			lastErr: &APIError{
 				StatusCode: 429,
 				RetryAfter: 60 * time.Second,
 			},
-			expectedMin: 30 * time.Second,
-			expectedMax: 30 * time.Second,
+			expectedMin: 60 * time.Second,
+			expectedMax: 60 * time.Second,
 		},
 	}
 
@@ -740,6 +796,31 @@ func TestClient_calculateRetryDelay(t *testing.T) {
 					delay, tt.expectedMin, tt.expectedMax)
 			}
 		})
+	}
+}
+
+func TestClient_RetryWaitDeadlinePreservesAPIError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Retry-After", "60")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"error":{"message":"capacity limited","type":"rate_limit"}}`))
+	}))
+	defer server.Close()
+
+	client := NewClient("test-key", server.URL)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	_, err := client.ChatCompletion(ctx, ChatRequest{Model: "test", Messages: []Message{{Role: "user", Content: "hello"}}})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("error=%v want context deadline", err)
+	}
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("error=%v must preserve APIError", err)
+	}
+	if apiErr.StatusCode != http.StatusTooManyRequests || apiErr.RetryAfter != time.Minute {
+		t.Fatalf("API error=%+v want 429 with Retry-After 1m", apiErr)
 	}
 }
 
@@ -920,6 +1001,81 @@ func TestClient_ChatCompletion_Retry(t *testing.T) {
 	}
 }
 
+func TestClient_ChatCompletion_UsesExtendedRateLimitRetryBudget(t *testing.T) {
+	attempts := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		if attempts < 5 {
+			w.Header().Set("Retry-After", "0")
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"error":{"message":"Provider returned error","code":429,"metadata":{"provider_name":"Moonshot AI","raw":"{\"error\":{\"message\":\"capacity limited\"}}"}}}`))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{
+			"id":"test","model":"test/model",
+			"choices":[{"message":{"role":"assistant","content":"success"},"finish_reason":"stop"}],
+			"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}
+		}`))
+	}))
+	defer server.Close()
+
+	client := NewClient("test-key", server.URL)
+	client.SetRetryConfig(RetryConfig{
+		MaxRetries:          1,
+		MaxRateLimitRetries: 4,
+		InitialInterval:     time.Millisecond,
+		MaxInterval:         2 * time.Millisecond,
+		Multiplier:          2,
+	})
+	resp, err := client.ChatCompletion(context.Background(), ChatRequest{
+		Model: "test/model", Messages: []Message{{Role: "user", Content: "test"}},
+	})
+	if err != nil {
+		t.Fatalf("expected success after extended 429 retries, got %v", err)
+	}
+	if resp.ID != "test" || attempts != 5 {
+		t.Fatalf("response=%q attempts=%d want test and 5", resp.ID, attempts)
+	}
+}
+
+func TestClient_ChatCompletion_ExhaustedRateLimitPreservesProviderDetails(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", "1")
+		w.Header().Set("X-Request-ID", "req-123")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"error":{"message":"Provider returned error","type":"provider_error","code":429,"metadata":{"provider_name":"Moonshot AI","raw":"{\"error\":{\"message\":\"capacity limited\"}}"}}}`))
+	}))
+	defer server.Close()
+
+	client := NewClient("test-key", server.URL)
+	client.SetRetryConfig(RetryConfig{
+		MaxRetries:          0,
+		MaxRateLimitRetries: 0,
+		InitialInterval:     time.Millisecond,
+		MaxInterval:         time.Millisecond,
+		Multiplier:          2,
+	})
+	_, err := client.ChatCompletion(context.Background(), ChatRequest{
+		Model: "test/model", Messages: []Message{{Role: "user", Content: "test"}},
+	})
+	if err == nil {
+		t.Fatal("expected rate-limit error")
+	}
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("errors.As(APIError) failed for %T: %v", err, err)
+	}
+	if apiErr.Provider != "Moonshot AI" || apiErr.Details != "capacity limited" || apiErr.RequestID != "req-123" || apiErr.RetryAfter != time.Second {
+		t.Fatalf("APIError metadata = %+v", apiErr)
+	}
+	for _, want := range []string{"after 1 attempts", "Moonshot AI", "capacity limited", "req-123", "retry after: 1s"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error %q missing %q", err, want)
+		}
+	}
+}
+
 // TestDefaultRetryConfig tests the default retry configuration
 func TestDefaultRetryConfig(t *testing.T) {
 	config := DefaultRetryConfig()
@@ -927,11 +1083,14 @@ func TestDefaultRetryConfig(t *testing.T) {
 	if config.MaxRetries != 3 {
 		t.Errorf("MaxRetries = %d, want 3", config.MaxRetries)
 	}
-	if config.InitialInterval != 100*time.Millisecond {
-		t.Errorf("InitialInterval = %v, want 100ms", config.InitialInterval)
+	if config.MaxRateLimitRetries != 12 {
+		t.Errorf("MaxRateLimitRetries = %d, want 12", config.MaxRateLimitRetries)
 	}
-	if config.MaxInterval != 5*time.Second {
-		t.Errorf("MaxInterval = %v, want 5s", config.MaxInterval)
+	if config.InitialInterval != time.Second {
+		t.Errorf("InitialInterval = %v, want 1s", config.InitialInterval)
+	}
+	if config.MaxInterval != 30*time.Second {
+		t.Errorf("MaxInterval = %v, want 30s", config.MaxInterval)
 	}
 	if config.Multiplier != 2.0 {
 		t.Errorf("Multiplier = %f, want 2.0", config.Multiplier)

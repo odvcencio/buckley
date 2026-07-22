@@ -2,8 +2,11 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
+	"log/slog"
+	"net"
 	"net/http"
 	"os/exec"
 	"strings"
@@ -12,6 +15,7 @@ import (
 
 	"m31labs.dev/buckley/pkg/config"
 	"m31labs.dev/buckley/pkg/gitwatcher"
+	"m31labs.dev/buckley/pkg/model"
 	"m31labs.dev/buckley/pkg/storage"
 	"m31labs.dev/buckley/pkg/transparency"
 )
@@ -22,43 +26,200 @@ var buckbotListenFn = http.ListenAndServe
 type buckbotReviewer func(context.Context, gitwatcher.PullRequestEvent) (string, float64, error)
 type buckbotPoster func(context.Context, gitwatcher.PullRequestEvent, string) error
 
+const (
+	buckbotReviewAttemptTimeout = 5 * time.Minute
+	buckbotPostAttemptTimeout   = time.Minute
+	buckbotInitialRetryDelay    = 15 * time.Second
+	buckbotMaxRetryDelay        = 5 * time.Minute
+	buckbotMaxReviewAttempts    = 6
+	buckbotMaxPostAttempts      = 8
+)
+
+type buckbotActiveReview struct {
+	revision string
+	cancel   context.CancelFunc
+}
+
 type buckbotService struct {
 	cfg      config.BuckbotConfig
 	review   buckbotReviewer
 	post     buckbotPoster
 	mu       sync.Mutex
 	seen     map[string]struct{}
+	active   map[string]buckbotActiveReview
 	spentUSD float64
+	reserved float64
+	sleep    func(context.Context, time.Duration) error
 }
 
 func newBuckbotService(cfg config.BuckbotConfig, review buckbotReviewer, post buckbotPoster) *buckbotService {
-	return &buckbotService{cfg: cfg, review: review, post: post, seen: make(map[string]struct{})}
+	return &buckbotService{
+		cfg:    cfg,
+		review: review,
+		post:   post,
+		seen:   make(map[string]struct{}),
+		active: make(map[string]buckbotActiveReview),
+		sleep:  waitForBuckbotRetry,
+	}
 }
 
 func (s *buckbotService) handle(event gitwatcher.PullRequestEvent) {
 	key := fmt.Sprintf("%s#%d@%s", event.Repository, event.Number, event.HeadSHA)
+	pullRequestKey := fmt.Sprintf("%s#%d", event.Repository, event.Number)
+	ctx, cancel := context.WithCancel(context.Background())
 	s.mu.Lock()
-	if _, exists := s.seen[key]; exists || s.spentUSD+s.cfg.PerReviewBudgetUSD > s.cfg.MonthlyBudgetUSD {
+	_, completed := s.seen[key]
+	if completed {
 		s.mu.Unlock()
+		cancel()
 		return
 	}
-	s.seen[key] = struct{}{}
+	if current, running := s.active[pullRequestKey]; running {
+		if current.revision == key {
+			s.mu.Unlock()
+			cancel()
+			return
+		}
+		current.cancel()
+	}
+	s.active[pullRequestKey] = buckbotActiveReview{revision: key, cancel: cancel}
 	s.mu.Unlock()
+	defer func() {
+		cancel()
+		s.mu.Lock()
+		if current, ok := s.active[pullRequestKey]; ok && current.revision == key {
+			delete(s.active, pullRequestKey)
+		}
+		s.mu.Unlock()
+	}()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	defer cancel()
-	review, cost, err := s.review(ctx, event)
-	if err != nil || strings.TrimSpace(review) == "" || cost > s.cfg.PerReviewBudgetUSD {
-		return
+	for attempt := 0; attempt < buckbotMaxReviewAttempts; attempt++ {
+		if !s.reserveReviewBudget() {
+			slog.Warn("Buckbot monthly budget cannot reserve another review", "repository", event.Repository, "pr", event.Number)
+			return
+		}
+		attemptCtx, attemptCancel := context.WithTimeout(ctx, buckbotReviewAttemptTimeout)
+		review, cost, err := s.review(attemptCtx, event)
+		attemptCancel()
+		s.settleReviewBudget(cost)
+
+		if err != nil {
+			if cost == 0 && isRetryableBuckbotError(err) && attempt+1 < buckbotMaxReviewAttempts {
+				delay := buckbotRetryDelay(attempt, err)
+				slog.Warn("Buckbot review retry scheduled", "repository", event.Repository, "pr", event.Number, "head", event.HeadSHA, "delay", delay, "error", err)
+				if s.sleep(ctx, delay) == nil {
+					continue
+				}
+				return
+			}
+			slog.Warn("Buckbot review failed", "repository", event.Repository, "pr", event.Number, "head", event.HeadSHA, "cost_usd", cost, "error", err)
+			return
+		}
+		if strings.TrimSpace(review) == "" {
+			slog.Warn("Buckbot review was empty", "repository", event.Repository, "pr", event.Number, "head", event.HeadSHA)
+			return
+		}
+		if cost > s.cfg.PerReviewBudgetUSD {
+			slog.Warn("Buckbot review exceeded per-review budget", "repository", event.Repository, "pr", event.Number, "cost_usd", cost, "budget_usd", s.cfg.PerReviewBudgetUSD)
+			return
+		}
+		if !s.isCurrentRevision(pullRequestKey, key) {
+			slog.Info("Buckbot discarded stale review", "repository", event.Repository, "pr", event.Number, "head", event.HeadSHA)
+			return
+		}
+
+		for postAttempt := 0; postAttempt < buckbotMaxPostAttempts; postAttempt++ {
+			if !s.isCurrentRevision(pullRequestKey, key) {
+				return
+			}
+			postCtx, postCancel := context.WithTimeout(ctx, buckbotPostAttemptTimeout)
+			err := s.post(postCtx, event, review)
+			postCancel()
+			if err == nil {
+				s.mu.Lock()
+				if current, ok := s.active[pullRequestKey]; ok && current.revision == key {
+					s.seen[key] = struct{}{}
+				}
+				s.mu.Unlock()
+				return
+			}
+			if postAttempt+1 == buckbotMaxPostAttempts {
+				slog.Warn("Buckbot post retries exhausted", "repository", event.Repository, "pr", event.Number, "head", event.HeadSHA, "attempts", buckbotMaxPostAttempts, "error", err)
+				return
+			}
+			delay := buckbotRetryDelay(postAttempt, err)
+			slog.Warn("Buckbot post retry scheduled", "repository", event.Repository, "pr", event.Number, "head", event.HeadSHA, "delay", delay, "error", err)
+			if s.sleep(ctx, delay) != nil {
+				return
+			}
+		}
 	}
+	slog.Warn("Buckbot review retries exhausted", "repository", event.Repository, "pr", event.Number, "head", event.HeadSHA, "attempts", buckbotMaxReviewAttempts)
+}
+
+func (s *buckbotService) isCurrentRevision(pullRequestKey, revision string) bool {
 	s.mu.Lock()
-	if s.spentUSD+cost > s.cfg.MonthlyBudgetUSD {
-		s.mu.Unlock()
-		return
+	defer s.mu.Unlock()
+	current, ok := s.active[pullRequestKey]
+	return ok && current.revision == revision
+}
+
+func (s *buckbotService) reserveReviewBudget() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	reservation := s.cfg.PerReviewBudgetUSD
+	if s.spentUSD+s.reserved+reservation > s.cfg.MonthlyBudgetUSD {
+		return false
 	}
-	s.spentUSD += cost
-	s.mu.Unlock()
-	_ = s.post(ctx, event, review)
+	s.reserved += reservation
+	return true
+}
+
+func (s *buckbotService) settleReviewBudget(cost float64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.reserved -= s.cfg.PerReviewBudgetUSD
+	if s.reserved < 0 {
+		s.reserved = 0
+	}
+	if cost > 0 {
+		s.spentUSD += cost
+	}
+}
+
+func isRetryableBuckbotError(err error) bool {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var apiErr *model.APIError
+	if errors.As(err, &apiErr) {
+		return apiErr.Retryable
+	}
+	var networkErr net.Error
+	return errors.As(err, &networkErr) && (networkErr.Timeout() || networkErr.Temporary())
+}
+
+func buckbotRetryDelay(attempt int, err error) time.Duration {
+	delay := buckbotInitialRetryDelay
+	for i := 0; i < attempt && delay < buckbotMaxRetryDelay; i++ {
+		delay = min(delay*2, buckbotMaxRetryDelay)
+	}
+	var apiErr *model.APIError
+	if errors.As(err, &apiErr) && apiErr.RetryAfter > delay {
+		return apiErr.RetryAfter
+	}
+	return delay
+}
+
+func waitForBuckbotRetry(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 func runBuckbotCommand(args []string) error {
@@ -121,14 +282,18 @@ func newBuckbotReviewer(botCfg config.BuckbotConfig, costStore *storage.Store) b
 			return "", 0, err
 		}
 		ref := fmt.Sprintf("https://github.com/%s/pull/%d", event.Repository, event.Number)
-		result, _, err := runPRReviewWithIterationLimit(ctx, ref, runtime.framework, botCfg.MaxReviewIterations)
-		if err != nil {
-			return "", 0, err
+		result, _, reviewErr := runPRReviewWithIterationLimit(ctx, ref, runtime.framework, botCfg.MaxReviewIterations)
+		entries := runtime.ledger.Entries()
+		cost := runtime.ledger.SessionTotal()
+		if len(entries) > 0 {
+			if err := saveBuckbotSpend(costStore, event, botCfg.Model, entries); err != nil {
+				return "", cost, err
+			}
 		}
-		if err := saveBuckbotSpend(costStore, event, botCfg.Model, runtime.ledger.Entries()); err != nil {
-			return "", 0, err
+		if reviewErr != nil {
+			return "", cost, reviewErr
 		}
-		return result.reviewText, runtime.ledger.SessionTotal(), nil
+		return result.reviewText, cost, nil
 	}
 }
 

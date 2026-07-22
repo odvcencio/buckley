@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math/rand"
@@ -20,9 +21,6 @@ import (
 const (
 	defaultBaseURL = "https://openrouter.ai/api/v1"
 	defaultTimeout = 5 * time.Minute
-	maxRetries     = 3
-	baseRetryDelay = 1 * time.Second
-	maxRetryDelay  = 30 * time.Second
 
 	// Rate limiting: OpenRouter allows ~200 requests/minute for most tiers
 	// We use a conservative 60 requests/minute (1/second) to stay well under limits
@@ -32,19 +30,21 @@ const (
 
 // RetryConfig configures the retry mechanism for idempotent HTTP requests.
 type RetryConfig struct {
-	MaxRetries      int
-	InitialInterval time.Duration
-	MaxInterval     time.Duration
-	Multiplier      float64
+	MaxRetries          int
+	MaxRateLimitRetries int
+	InitialInterval     time.Duration
+	MaxInterval         time.Duration
+	Multiplier          float64
 }
 
 // DefaultRetryConfig returns the default retry configuration.
 func DefaultRetryConfig() RetryConfig {
 	return RetryConfig{
-		MaxRetries:      3,
-		InitialInterval: 100 * time.Millisecond,
-		MaxInterval:     5 * time.Second,
-		Multiplier:      2.0,
+		MaxRetries:          3,
+		MaxRateLimitRetries: 12,
+		InitialInterval:     1 * time.Second,
+		MaxInterval:         30 * time.Second,
+		Multiplier:          2.0,
 	}
 }
 
@@ -170,11 +170,29 @@ func isRetryableError(err error) bool {
 	if err == nil {
 		return false
 	}
-	if apiErr, ok := err.(*APIError); ok {
+	var apiErr *APIError
+	if errors.As(err, &apiErr) {
 		return apiErr.Retryable
 	}
 	// Network errors are generally retryable
 	return true
+}
+
+func (c *Client) retryLimit(err error) int {
+	limit := max(c.retryConfig.MaxRetries, 0)
+	var apiErr *APIError
+	if errors.As(err, &apiErr) && apiErr.IsRateLimitError() && c.retryConfig.MaxRateLimitRetries > limit {
+		limit = c.retryConfig.MaxRateLimitRetries
+	}
+	return limit
+}
+
+func (c *Client) canRetryModelRequest(attempt int, err error) bool {
+	return isRetryableError(err) && attempt < c.retryLimit(err)
+}
+
+func retryExhaustedError(attempt int, err error) error {
+	return fmt.Errorf("model request retries exhausted after %d attempts: %w", attempt+1, err)
 }
 
 // isIdempotentMethod checks if an HTTP method is idempotent and safe to retry.
@@ -359,13 +377,13 @@ func (c *Client) ChatCompletion(ctx context.Context, req ChatRequest) (*ChatResp
 	// Wrap the actual API call with circuit breaker
 	err := c.circuitBreaker.Call(func() error {
 		var lastErr error
-		for attempt := 0; attempt <= maxRetries; attempt++ {
+		for attempt := 0; ; attempt++ {
 			if attempt > 0 {
 				// Log retry attempt
 				delay := c.calculateRetryDelay(attempt, lastErr)
 				select {
 				case <-ctx.Done():
-					return ctx.Err()
+					return errors.Join(ctx.Err(), lastErr)
 				case <-time.After(delay):
 				}
 			}
@@ -386,23 +404,28 @@ func (c *Client) ChatCompletion(ctx context.Context, req ChatRequest) (*ChatResp
 			// Wait for rate limiter
 			if c.rateLimiter != nil {
 				if err := c.rateLimiter.Wait(ctx); err != nil {
-					lastErr = fmt.Errorf("rate limit wait: %w", err)
-					continue
+					return fmt.Errorf("rate limit wait: %w", err)
 				}
 			}
 
 			resp, err := c.httpClient.Do(httpReq)
 			if err != nil {
 				lastErr = err
-				continue
+				if c.canRetryModelRequest(attempt, lastErr) {
+					continue
+				}
+				return retryExhaustedError(attempt, lastErr)
 			}
 			if resp.StatusCode != http.StatusOK {
 				apiErr := c.parseError(resp)
 				resp.Body.Close()
 				lastErr = apiErr
 
-				if ae, ok := apiErr.(*APIError); ok && ae.Retryable {
+				if c.canRetryModelRequest(attempt, apiErr) {
 					continue
+				}
+				if isRetryableError(apiErr) {
+					return retryExhaustedError(attempt, apiErr)
 				}
 				return apiErr
 			}
@@ -433,7 +456,7 @@ func (c *Client) ChatCompletion(ctx context.Context, req ChatRequest) (*ChatResp
 			return nil
 		}
 
-		return fmt.Errorf("max retries exceeded: %w", lastErr)
+		return retryExhaustedError(c.retryLimit(lastErr), lastErr)
 	})
 
 	if err != nil {
@@ -445,22 +468,28 @@ func (c *Client) ChatCompletion(ctx context.Context, req ChatRequest) (*ChatResp
 // calculateRetryDelay calculates the delay before the next retry using exponential backoff
 func (c *Client) calculateRetryDelay(attempt int, lastErr error) time.Duration {
 	// Check if error has Retry-After header
-	if apiErr, ok := lastErr.(*APIError); ok && apiErr.RetryAfter > 0 {
-		return min(apiErr.RetryAfter, maxRetryDelay)
+	var apiErr *APIError
+	if errors.As(lastErr, &apiErr) && apiErr.RetryAfter > 0 {
+		// Retry-After is the provider's earliest acceptable retry time, not a
+		// backoff suggestion. The caller's context remains the upper bound.
+		return apiErr.RetryAfter
 	}
 
 	if attempt <= 0 {
-		return baseRetryDelay
+		return c.retryConfig.InitialInterval
 	}
 
-	// Exponential backoff: 1s, 2s, 4s, 8s, ... up to maxRetryDelay
-	multiplier := 1
+	// Exponential backoff with positive jitter avoids retrying before the
+	// calculated delay while spreading concurrent clients across the window.
+	delay := float64(c.retryConfig.InitialInterval)
 	for i := 0; i < attempt-1; i++ {
-		multiplier *= 2
+		delay *= c.retryConfig.Multiplier
 	}
-	delay := min(baseRetryDelay*time.Duration(multiplier), maxRetryDelay)
-
-	return delay
+	delay = min(delay, float64(c.retryConfig.MaxInterval))
+	if delay < float64(c.retryConfig.MaxInterval) {
+		delay += rand.Float64() * delay * 0.2
+	}
+	return min(time.Duration(delay), c.retryConfig.MaxInterval)
 }
 
 // ChatCompletionStream performs a streaming chat completion with automatic retries
@@ -496,12 +525,12 @@ func (c *Client) executeStreamRequest(ctx context.Context, req ChatRequest, chun
 
 	// Retry loop for establishing connection
 	var lastErr error
-	for attempt := 0; attempt <= maxRetries; attempt++ {
+	for attempt := 0; ; attempt++ {
 		if attempt > 0 {
 			delay := c.calculateRetryDelay(attempt, lastErr)
 			select {
 			case <-ctx.Done():
-				return ctx.Err()
+				return errors.Join(ctx.Err(), lastErr)
 			case <-time.After(delay):
 			}
 		}
@@ -518,15 +547,17 @@ func (c *Client) executeStreamRequest(ctx context.Context, req ChatRequest, chun
 		// Wait for rate limiter
 		if c.rateLimiter != nil {
 			if err := c.rateLimiter.Wait(ctx); err != nil {
-				lastErr = fmt.Errorf("rate limit wait: %w", err)
-				continue
+				return fmt.Errorf("rate limit wait: %w", err)
 			}
 		}
 
 		resp, err := c.httpClient.Do(httpReq)
 		if err != nil {
 			lastErr = err
-			continue
+			if c.canRetryModelRequest(attempt, lastErr) {
+				continue
+			}
+			return retryExhaustedError(attempt, lastErr)
 		}
 
 		if resp.StatusCode != http.StatusOK {
@@ -535,8 +566,11 @@ func (c *Client) executeStreamRequest(ctx context.Context, req ChatRequest, chun
 			lastErr = apiErr
 
 			// Only retry if error is retryable
-			if ae, ok := apiErr.(*APIError); ok && ae.Retryable {
+			if c.canRetryModelRequest(attempt, apiErr) {
 				continue
+			}
+			if isRetryableError(apiErr) {
+				return retryExhaustedError(attempt, apiErr)
 			}
 			return apiErr
 		}
@@ -552,8 +586,7 @@ func (c *Client) executeStreamRequest(ctx context.Context, req ChatRequest, chun
 		return nil
 	}
 
-	// Max retries exceeded
-	return fmt.Errorf("max retries exceeded: %w", lastErr)
+	return retryExhaustedError(c.retryLimit(lastErr), lastErr)
 }
 
 // parseSSEStream parses Server-Sent Events stream
@@ -601,11 +634,14 @@ func (c *Client) parseSSEStream(ctx context.Context, r io.Reader, chunkChan chan
 			if message == "" {
 				message = "provider returned a streaming error"
 			}
+			provider, details := providerErrorMetadata(chunk.Error.Metadata)
 			return &APIError{
 				StatusCode: statusCode,
 				Message:    message,
 				Type:       chunk.Error.Type,
 				Code:       chunk.Error.Code,
+				Provider:   provider,
+				Details:    details,
 				Retryable:  statusCode == http.StatusTooManyRequests || statusCode >= 500,
 			}
 		}
@@ -634,6 +670,11 @@ func (c *Client) setHeaders(req *http.Request) {
 
 // parseError parses an error response and wraps it with additional context
 func (c *Client) parseError(resp *http.Response) error {
+	provider := strings.TrimSpace(resp.Header.Get("X-Provider-Name"))
+	requestID := firstNonEmptyHeader(resp.Header, "X-Request-ID", "X-Generation-ID")
+	retryAfter := parseRetryAfter(resp.Header.Get("Retry-After"))
+	retryable := resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500
+
 	// Read the body for debugging
 	const maxErrorResponseSize = 50 * 1024 * 1024 // 50MB
 	body, readErr := io.ReadAll(io.LimitReader(resp.Body, maxErrorResponseSize))
@@ -641,7 +682,10 @@ func (c *Client) parseError(resp *http.Response) error {
 		return &APIError{
 			StatusCode: resp.StatusCode,
 			Message:    resp.Status,
-			Retryable:  resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500,
+			Provider:   provider,
+			RequestID:  requestID,
+			Retryable:  retryable,
+			RetryAfter: retryAfter,
 		}
 	}
 
@@ -659,7 +703,10 @@ func (c *Client) parseError(resp *http.Response) error {
 		return &APIError{
 			StatusCode: resp.StatusCode,
 			Message:    message,
-			Retryable:  resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500,
+			Provider:   provider,
+			RequestID:  requestID,
+			Retryable:  retryable,
+			RetryAfter: retryAfter,
 		}
 	}
 
@@ -668,15 +715,85 @@ func (c *Client) parseError(resp *http.Response) error {
 	if message == "" {
 		message = resp.Status
 	}
+	metadataProvider, details := providerErrorMetadata(errResp.Error.Metadata)
+	if provider == "" {
+		provider = metadataProvider
+	}
 
 	return &APIError{
 		StatusCode: resp.StatusCode,
 		Message:    message,
 		Type:       errResp.Error.Type,
 		Code:       errResp.Error.Code,
-		Retryable:  resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500,
-		RetryAfter: parseRetryAfter(resp.Header.Get("Retry-After")),
+		Provider:   provider,
+		Details:    details,
+		RequestID:  requestID,
+		Retryable:  retryable,
+		RetryAfter: retryAfter,
 	}
+}
+
+func firstNonEmptyHeader(header http.Header, names ...string) string {
+	for _, name := range names {
+		if value := strings.TrimSpace(header.Get(name)); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func providerErrorMetadata(data json.RawMessage) (string, string) {
+	if len(data) == 0 || bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
+		return "", ""
+	}
+	var metadata struct {
+		ProviderName string          `json:"provider_name"`
+		Raw          json.RawMessage `json:"raw"`
+	}
+	if err := json.Unmarshal(data, &metadata); err != nil {
+		return "", boundedErrorDetail(string(data))
+	}
+	return strings.TrimSpace(metadata.ProviderName), providerRawErrorDetail(metadata.Raw)
+}
+
+func providerRawErrorDetail(raw json.RawMessage) string {
+	if len(raw) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return ""
+	}
+	var text string
+	if err := json.Unmarshal(raw, &text); err == nil {
+		trimmed := strings.TrimSpace(text)
+		if json.Valid([]byte(trimmed)) {
+			return providerRawErrorDetail(json.RawMessage(trimmed))
+		}
+		return boundedErrorDetail(trimmed)
+	}
+	var envelope struct {
+		Error   ErrorDetail `json:"error"`
+		Message string      `json:"message"`
+	}
+	if err := json.Unmarshal(raw, &envelope); err == nil {
+		if message := strings.TrimSpace(envelope.Error.Message); message != "" {
+			return boundedErrorDetail(message)
+		}
+		if message := strings.TrimSpace(envelope.Message); message != "" {
+			return boundedErrorDetail(message)
+		}
+	}
+	var compact bytes.Buffer
+	if err := json.Compact(&compact, raw); err == nil {
+		return boundedErrorDetail(compact.String())
+	}
+	return boundedErrorDetail(string(raw))
+}
+
+func boundedErrorDetail(detail string) string {
+	const maxDetailBytes = 1000
+	detail = strings.Join(strings.Fields(detail), " ")
+	if len(detail) <= maxDetailBytes {
+		return detail
+	}
+	return detail[:maxDetailBytes] + "..."
 }
 
 // parseRetryAfter parses the Retry-After header

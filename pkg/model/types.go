@@ -377,24 +377,27 @@ type ErrorResponse struct {
 
 // ErrorDetail contains error information
 type ErrorDetail struct {
-	Message string `json:"message"`
-	Type    string `json:"type"`
-	Code    string `json:"code"`
+	Message  string          `json:"message"`
+	Type     string          `json:"type"`
+	Code     string          `json:"code"`
+	Metadata json.RawMessage `json:"metadata,omitempty"`
 }
 
 // UnmarshalJSON accepts the string and numeric error codes used by
 // OpenRouter's regular and streaming error envelopes.
 func (e *ErrorDetail) UnmarshalJSON(data []byte) error {
 	var raw struct {
-		Message string          `json:"message"`
-		Type    string          `json:"type"`
-		Code    json.RawMessage `json:"code"`
+		Message  string          `json:"message"`
+		Type     string          `json:"type"`
+		Code     json.RawMessage `json:"code"`
+		Metadata json.RawMessage `json:"metadata"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return err
 	}
 	e.Message = raw.Message
 	e.Type = raw.Type
+	e.Metadata = append(e.Metadata[:0], raw.Metadata...)
 	e.Code = ""
 	if len(raw.Code) == 0 || string(raw.Code) == "null" {
 		return nil
@@ -412,16 +415,38 @@ type APIError struct {
 	Message    string
 	Type       string
 	Code       string
+	Provider   string
+	Details    string
+	RequestID  string
 	Retryable  bool
 	RetryAfter time.Duration
 }
 
 // Error implements the error interface
 func (e *APIError) Error() string {
+	message := fmt.Sprintf("HTTP %d: %s", e.StatusCode, e.Message)
 	if e.Type != "" && e.Code != "" {
-		return fmt.Sprintf("HTTP %d: %s (type: %s, code: %s)", e.StatusCode, e.Message, e.Type, e.Code)
+		message += fmt.Sprintf(" (type: %s, code: %s)", e.Type, e.Code)
 	}
-	return fmt.Sprintf("HTTP %d: %s", e.StatusCode, e.Message)
+
+	qualifiers := make([]string, 0, 3)
+	if e.Provider != "" {
+		qualifiers = append(qualifiers, "provider: "+e.Provider)
+	}
+	if e.RequestID != "" {
+		qualifiers = append(qualifiers, "request: "+e.RequestID)
+	}
+	if e.RetryAfter > 0 {
+		qualifiers = append(qualifiers, "retry after: "+e.RetryAfter.String())
+	}
+
+	if len(qualifiers) > 0 {
+		message += " (" + strings.Join(qualifiers, "; ") + ")"
+	}
+	if e.Details != "" && e.Details != e.Message {
+		message += ": " + e.Details
+	}
+	return message
 }
 
 // IsRateLimitError returns true if this is a rate limit error
