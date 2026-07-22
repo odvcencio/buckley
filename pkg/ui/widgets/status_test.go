@@ -3,8 +3,8 @@ package widgets
 import (
 	"testing"
 
-	"m31labs.dev/buckley/pkg/ui/backend"
-	"m31labs.dev/buckley/pkg/ui/runtime"
+	"m31labs.dev/fluffyui/backend"
+	"m31labs.dev/fluffyui/runtime"
 )
 
 func TestNewStatusBar(t *testing.T) {
@@ -262,8 +262,8 @@ func TestStatusBar_Render_UnicodeStatusUsesRuneColumns(t *testing.T) {
 
 	sb.Render(ctx)
 
-	if got := readBufferRunes(buf, 0, 0, 3); got != " 模型" {
-		t.Fatalf("left status segment = %q, want %q", got, " 模型")
+	if got := readBufferRunes(buf, 0, 0, 5); got != " 模 型 " {
+		t.Fatalf("left status segment = %q, want %q", got, " 模 型 ")
 	}
 	start := 24/2 - runeLen("END")/2
 	if got := readBufferRunes(buf, start, 0, 3); got != "END" {

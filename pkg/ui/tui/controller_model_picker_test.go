@@ -51,15 +51,16 @@ func TestModelRoleTags(t *testing.T) {
 func TestPreferredModelIDs(t *testing.T) {
 	catalog := map[string]model.ModelInfo{
 		"moonshotai/kimi-k2.7-code": {},
+		"moonshotai/kimi-k3":        {},
 		"openai/gpt-4o":             {},
 		"qwen/qwen3.7-max":          {},
 		"z-ai/glm-5.2":              {},
 	}
 	ids := preferredModelIDs("openai/gpt-4o", "", "", catalog)
-	if len(ids) != 4 {
-		t.Fatalf("expected 4 preferred models, got %d", len(ids))
+	if len(ids) != 5 {
+		t.Fatalf("expected 5 preferred models, got %d", len(ids))
 	}
-	want := []string{"openai/gpt-4o", "z-ai/glm-5.2", "moonshotai/kimi-k2.7-code", "qwen/qwen3.7-max"}
+	want := []string{"openai/gpt-4o", "moonshotai/kimi-k3", "z-ai/glm-5.2", "moonshotai/kimi-k2.7-code", "qwen/qwen3.7-max"}
 	for i := range want {
 		if ids[i] != want[i] {
 			t.Fatalf("unexpected preferred model order: %v", ids)
@@ -69,6 +70,7 @@ func TestPreferredModelIDs(t *testing.T) {
 
 func TestBuildModelPickerItems_PinsConfiguredAndHotModels(t *testing.T) {
 	catalog := []model.ModelInfo{
+		{ID: "moonshotai/kimi-k3"},
 		{ID: "z-ai/glm-5.2"},
 		{ID: "openai/gpt-4o"},
 		{ID: "anthropic/claude-3.5"},
@@ -92,6 +94,7 @@ func TestBuildModelPickerItems_PinsConfiguredAndHotModels(t *testing.T) {
 		"openai/gpt-4o",
 		"z-ai/glm-5.2",
 		"moonshotai/kimi-k2.7-code",
+		"moonshotai/kimi-k3",
 		"qwen/qwen3.7-max",
 		"anthropic/claude-3.5",
 	}
@@ -103,16 +106,16 @@ func TestBuildModelPickerItems_PinsConfiguredAndHotModels(t *testing.T) {
 			t.Fatalf("item %d ID = %q, want %q; items=%+v", i, items[i].ID, want, items)
 		}
 	}
-	for i := 0; i < 4; i++ {
+	for i := 0; i < 5; i++ {
 		if items[i].Category != "Pinned" {
 			t.Fatalf("item %d category = %q, want Pinned", i, items[i].Category)
 		}
 	}
-	if items[3].Shortcut != "curated" {
-		t.Fatalf("qwen shortcut = %q, want curated", items[3].Shortcut)
+	if items[4].Shortcut != "curated" {
+		t.Fatalf("qwen shortcut = %q, want curated", items[4].Shortcut)
 	}
-	if items[4].Label != "  claude-3.5" {
-		t.Fatalf("anthropic label = %q, want trimmed provider label", items[4].Label)
+	if items[5].Label != "  claude-3.5" {
+		t.Fatalf("anthropic label = %q, want trimmed provider label", items[5].Label)
 	}
 }
 

@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"m31labs.dev/buckley/pkg/ui/backend"
+	"m31labs.dev/fluffyui/backend"
 )
 
 func (a *WidgetApp) updateAnimations(now time.Time) bool {

@@ -19,6 +19,7 @@ func TestSessionStoreLifecycle(t *testing.T) {
 		ProjectPath: "/project",
 		GitRepo:     "repo",
 		GitBranch:   "main",
+		Model:       "moonshotai/kimi-k3",
 		CreatedAt:   time.Now(),
 		LastActive:  time.Now(),
 		Status:      SessionStatusActive,
@@ -34,6 +35,9 @@ func TestSessionStoreLifecycle(t *testing.T) {
 	if fetched == nil || fetched.ID != "sess-123" {
 		t.Fatalf("expected session to exist, got %+v", fetched)
 	}
+	if fetched.Model != "moonshotai/kimi-k3" {
+		t.Fatalf("model=%q want moonshotai/kimi-k3", fetched.Model)
+	}
 
 	// EnsureSession should be a no-op if session already exists.
 	if err := store.EnsureSession("sess-123"); err != nil {
@@ -47,6 +51,13 @@ func TestSessionStoreLifecycle(t *testing.T) {
 	}
 	if len(list) != 1 || list[0].ID != "sess-123" {
 		t.Fatalf("expected session in list, got %+v", list)
+	}
+	if err := store.UpdateSessionModel("sess-123", "openai/gpt-5.4"); err != nil {
+		t.Fatalf("update session model: %v", err)
+	}
+	fetched, _ = store.GetSession("sess-123")
+	if fetched == nil || fetched.Model != "openai/gpt-5.4" {
+		t.Fatalf("updated model not persisted: %+v", fetched)
 	}
 
 	// Update stats and verify SetSessionStatus toggles completion.

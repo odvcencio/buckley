@@ -3,8 +3,8 @@ package widgets
 import (
 	"testing"
 
-	"m31labs.dev/buckley/pkg/ui/runtime"
-	"m31labs.dev/buckley/pkg/ui/terminal"
+	"m31labs.dev/fluffyui/runtime"
+	"m31labs.dev/fluffyui/terminal"
 )
 
 func TestSidebar_New(t *testing.T) {
@@ -311,15 +311,15 @@ func TestTaskStatus_Values(t *testing.T) {
 
 func TestTruncateSidebarText_Unicode(t *testing.T) {
 	got := truncateSidebarText("模型文件路径", 5)
-	if got != "模型..." {
-		t.Fatalf("truncateSidebarText() = %q, want %q", got, "模型...")
+	if got != "模..." {
+		t.Fatalf("truncateSidebarText() = %q, want %q", got, "模...")
 	}
 }
 
 func TestTruncateRecentFileName_Unicode(t *testing.T) {
 	got := truncateRecentFileName("pkg/界面/模型文件路径.go", 8)
-	if got != "模型文件路..." {
-		t.Fatalf("truncateRecentFileName() = %q, want %q", got, "模型文件路...")
+	if got != "模型..." {
+		t.Fatalf("truncateRecentFileName() = %q, want %q", got, "模型...")
 	}
 }
 

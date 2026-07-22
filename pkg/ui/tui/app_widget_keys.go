@@ -3,8 +3,8 @@ package tui
 import (
 	"time"
 
-	"m31labs.dev/buckley/pkg/ui/runtime"
-	"m31labs.dev/buckley/pkg/ui/terminal"
+	"m31labs.dev/fluffyui/runtime"
+	"m31labs.dev/fluffyui/terminal"
 )
 
 type keyDispatchResult struct {

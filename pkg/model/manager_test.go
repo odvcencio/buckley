@@ -17,6 +17,16 @@ type stubProvider struct {
 	nilResponse bool
 }
 
+type refreshingStubProvider struct {
+	*stubProvider
+	refreshed ModelCatalog
+}
+
+func (s *refreshingStubProvider) RefreshCatalog() (*ModelCatalog, error) {
+	s.catalog = s.refreshed
+	return &s.refreshed, nil
+}
+
 func (s *stubProvider) ID() string { return s.id }
 
 func (s *stubProvider) FetchCatalog() (*ModelCatalog, error) {
@@ -96,6 +106,37 @@ func TestInitializeFallsBackWhenModelsMissing(t *testing.T) {
 	want := "p1/model-a"
 	if cfg.Models.Planning != want || cfg.Models.Execution != want || cfg.Models.Review != want {
 		t.Fatalf("fallback models not applied: got planning=%q execution=%q review=%q", cfg.Models.Planning, cfg.Models.Execution, cfg.Models.Review)
+	}
+}
+
+func TestRefreshProviderCatalogReplacesOnlyProviderEntries(t *testing.T) {
+	provider := &refreshingStubProvider{
+		stubProvider: &stubProvider{id: "openrouter"},
+		refreshed: ModelCatalog{Data: []ModelInfo{
+			{ID: "moonshotai/kimi-k3"},
+			{ID: "openai/gpt-5"},
+		}},
+	}
+	mgr := &Manager{
+		config:         &config.Config{},
+		providers:      map[string]Provider{"openrouter": provider},
+		catalog:        map[string]ModelInfo{"old/model": {ID: "old/model"}, "local/model": {ID: "local/model"}},
+		providerModels: map[string][]string{"openrouter": {"old/model"}, "ollama": {"local/model"}},
+		modelProviders: map[string]string{"old/model": "openrouter", "local/model": "ollama"},
+	}
+
+	if err := mgr.RefreshProviderCatalog("openrouter"); err != nil {
+		t.Fatalf("RefreshProviderCatalog() error = %v", err)
+	}
+	catalog := mgr.GetCatalog()
+	want := []string{"local/model", "moonshotai/kimi-k3", "openai/gpt-5"}
+	if len(catalog.Data) != len(want) {
+		t.Fatalf("catalog size = %d, want %d", len(catalog.Data), len(want))
+	}
+	for index, id := range want {
+		if catalog.Data[index].ID != id {
+			t.Fatalf("catalog[%d] = %q, want %q", index, catalog.Data[index].ID, id)
+		}
 	}
 }
 
@@ -499,6 +540,9 @@ func TestSupportsHelpersAndCostCalculation(t *testing.T) {
 	}
 	if !mgr.SupportsTools(info.ID) {
 		t.Fatalf("expected tools support from supported parameters")
+	}
+	if mgr.SupportsParameter(info.ID, "parallel_tool_calls") {
+		t.Fatal("parallel_tool_calls should not be inferred from tool support")
 	}
 	if !mgr.SupportsReasoning(info.ID) {
 		t.Fatalf("expected reasoning support from supported parameters")

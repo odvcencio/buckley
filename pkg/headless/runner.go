@@ -46,14 +46,19 @@ const (
 
 // Event types emitted by the runner.
 const (
-	EventMessageCreated   = "message.created"
-	EventMessageUpdated   = "message.updated"
-	EventToolCallStarted  = "tool.started"
-	EventToolCallComplete = "tool.completed"
-	EventApprovalRequired = "approval.required"
-	EventStateChanged     = "state.changed"
-	EventError            = "error"
-	EventWarning          = "warning"
+	EventMessageCreated     = "message.created"
+	EventMessageUpdated     = "message.updated"
+	EventToolCallStarted    = "tool.started"
+	EventToolCallComplete   = "tool.completed"
+	EventApprovalRequired   = "approval.required"
+	EventStateChanged       = "state.changed"
+	EventCommandQueued      = "command.queued"
+	EventCommandStarted     = "command.started"
+	EventCommandCompleted   = "command.completed"
+	EventCommandFailed      = "command.failed"
+	EventCommandInterrupted = "command.interrupted"
+	EventError              = "error"
+	EventWarning            = "warning"
 )
 
 // defaultHeadlessSystemPrompt provides core agent instructions for headless sessions.
@@ -125,10 +130,12 @@ type Runner struct {
 	maxToolExecTime       time.Duration
 	maxRuntime            time.Duration
 
-	state       RunnerState
-	lastActive  time.Time
-	idleTimeout time.Duration
-	cancelFunc  context.CancelFunc
+	state               RunnerState
+	lastActive          time.Time
+	idleTimeout         time.Duration
+	cancelFunc          context.CancelFunc
+	activeCommandID     string
+	interruptedCommands map[string]struct{}
 
 	// Pending approval state
 	pendingApproval *PendingApproval
@@ -284,6 +291,7 @@ func NewRunner(cfg RunnerConfig) (*Runner, error) {
 		commandQueue:          make(chan command.SessionCommand, 64),
 		commandStop:           make(chan struct{}),
 		commandStopped:        make(chan struct{}),
+		interruptedCommands:   make(map[string]struct{}),
 	}
 
 	go r.commandLoop()
@@ -311,6 +319,16 @@ func (r *Runner) LastActive() time.Time {
 	return r.lastActive
 }
 
+// Model returns the model selected for subsequent turns.
+func (r *Runner) Model() string {
+	if r == nil {
+		return ""
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return strings.TrimSpace(r.modelOverride)
+}
+
 // PendingApproval returns any pending approval, or nil.
 func (r *Runner) GetPendingApproval() *PendingApproval {
 	r.mu.RLock()
@@ -320,6 +338,7 @@ func (r *Runner) GetPendingApproval() *PendingApproval {
 
 // HandleSessionCommand implements the command.Handler interface.
 func (r *Runner) HandleSessionCommand(cmd command.SessionCommand) error {
+	cmd.EnsureID()
 	r.mu.Lock()
 	r.lastActive = time.Now()
 	stopped := r.state == StateStopped
@@ -328,13 +347,20 @@ func (r *Runner) HandleSessionCommand(cmd command.SessionCommand) error {
 	if stopped {
 		return fmt.Errorf("session stopped")
 	}
+	if cmd.Type == "interrupt" {
+		return r.interruptCommand(cmd)
+	}
+	if cmd.Type == "steer" {
+		r.interruptActiveCommand()
+	}
 
 	if r.commandQueue == nil {
-		return r.handleSessionCommand(cmd)
+		return r.runSessionCommand(cmd)
 	}
 
 	select {
 	case r.commandQueue <- cmd:
+		r.emitCommandEvent(EventCommandQueued, cmd, nil)
 		return nil
 	default:
 		return fmt.Errorf("command queue full")
@@ -351,17 +377,94 @@ func (r *Runner) commandLoop() {
 			if !ok {
 				return
 			}
-			if err := r.handleSessionCommand(cmd); err != nil {
+			if err := r.runSessionCommand(cmd); err != nil {
 				_ = r.persistSystemMessage(r.formatCommandError(err))
 			}
 		}
 	}
 }
 
+func (r *Runner) runSessionCommand(cmd command.SessionCommand) error {
+	r.mu.Lock()
+	r.activeCommandID = cmd.ID
+	r.mu.Unlock()
+	r.emitCommandEvent(EventCommandStarted, cmd, nil)
+
+	err := r.handleSessionCommand(cmd)
+
+	r.mu.Lock()
+	_, interrupted := r.interruptedCommands[cmd.ID]
+	delete(r.interruptedCommands, cmd.ID)
+	if r.activeCommandID == cmd.ID {
+		r.activeCommandID = ""
+	}
+	r.mu.Unlock()
+
+	if interrupted {
+		r.emitCommandEvent(EventCommandInterrupted, cmd, nil)
+		return nil
+	}
+	if err != nil {
+		r.emitCommandEvent(EventCommandFailed, cmd, err)
+		return err
+	}
+	r.emitCommandEvent(EventCommandCompleted, cmd, nil)
+	return nil
+}
+
+func (r *Runner) interruptCommand(cmd command.SessionCommand) error {
+	r.emitCommandEvent(EventCommandStarted, cmd, nil)
+	target := r.interruptActiveCommand()
+	r.emitCommandEvent(EventCommandCompleted, cmd, nil, map[string]any{
+		"interruptedCommandId": target,
+	})
+	return nil
+}
+
+func (r *Runner) interruptActiveCommand() string {
+	r.mu.Lock()
+	target := r.activeCommandID
+	cancel := r.cancelFunc
+	if target != "" {
+		if r.interruptedCommands == nil {
+			r.interruptedCommands = make(map[string]struct{})
+		}
+		r.interruptedCommands[target] = struct{}{}
+	}
+	r.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	return target
+}
+
+func (r *Runner) emitCommandEvent(eventType string, cmd command.SessionCommand, err error, extras ...map[string]any) {
+	data := map[string]any{
+		"commandId": cmd.ID,
+		"type":      cmd.Type,
+	}
+	if err != nil {
+		data["error"] = err.Error()
+	}
+	for _, extra := range extras {
+		for key, value := range extra {
+			data[key] = value
+		}
+	}
+	r.emit(RunnerEvent{
+		Type:      eventType,
+		SessionID: r.sessionID,
+		Timestamp: time.Now(),
+		Data:      data,
+	})
+}
+
 func (r *Runner) handleSessionCommand(cmd command.SessionCommand) error {
 	switch cmd.Type {
-	case "input":
+	case "input", "steer", "queue":
 		return r.processUserInput(cmd.Content)
+	case "model":
+		return r.setModel(cmd.Content)
 	case "slash":
 		return r.processSlashCommand(cmd.Content)
 	case "approval":
@@ -373,6 +476,33 @@ func (r *Runner) handleSessionCommand(cmd command.SessionCommand) error {
 	default:
 		return fmt.Errorf("unknown command type: %s", cmd.Type)
 	}
+}
+
+func (r *Runner) setModel(modelID string) error {
+	modelID = strings.TrimSpace(modelID)
+	if modelID == "" {
+		return fmt.Errorf("model required")
+	}
+	if r.modelManager == nil {
+		return fmt.Errorf("model manager unavailable")
+	}
+	if _, err := r.modelManager.GetModelInfo(modelID); err != nil {
+		return fmt.Errorf("select model %s: %w", modelID, err)
+	}
+	if err := r.store.UpdateSessionModel(r.sessionID, modelID); err != nil {
+		return fmt.Errorf("persist model: %w", err)
+	}
+	r.mu.Lock()
+	r.modelOverride = modelID
+	r.session.Model = modelID
+	r.mu.Unlock()
+	r.emit(RunnerEvent{
+		Type:      EventStateChanged,
+		SessionID: r.sessionID,
+		Timestamp: time.Now(),
+		Data:      map[string]any{"model": modelID},
+	})
+	return nil
 }
 
 // Stop gracefully stops the runner.
@@ -455,10 +585,14 @@ func (r *Runner) runConversationLoop() error {
 	r.mu.Lock()
 	r.cancelFunc = cancel
 	r.mu.Unlock()
-	defer cancel()
+	defer func() {
+		cancel()
+		r.mu.Lock()
+		r.cancelFunc = nil
+		r.mu.Unlock()
+	}()
 
-	maxIterations := 50 // Prevent runaway loops
-	for i := 0; i < maxIterations; i++ {
+	for {
 		if r.State() == StateStopped || r.State() == StatePaused {
 			break
 		}
@@ -469,6 +603,9 @@ func (r *Runner) runConversationLoop() error {
 		// Call model
 		response, err := r.callModel(ctx, req)
 		if err != nil {
+			if errors.Is(err, context.Canceled) {
+				return err
+			}
 			r.emitError("model call failed", err)
 			return err
 		}
@@ -536,6 +673,10 @@ func (r *Runner) buildChatRequest() model.ChatRequest {
 	}
 	if effort := model.ResolveReasoningEffort(r.config, r.modelManager, r.rulesEngine, modelID, "execution"); effort != "" {
 		req.Reasoning = &model.ReasoningConfig{Effort: effort}
+	}
+	if r.modelManager != nil && r.modelManager.SupportsParameter(modelID, "include_reasoning") {
+		include := true
+		req.IncludeReasoning = &include
 	}
 	return req
 }
@@ -1075,6 +1216,11 @@ func (r *Runner) processSlashCommand(content string) error {
 		return r.runResumePlanCommand(args)
 	case "workflow":
 		return r.runWorkflowCommand(args)
+	case "model":
+		if len(args) != 1 {
+			return fmt.Errorf("usage: /model <model-id>")
+		}
+		return r.setModel(args[0])
 	default:
 		return fmt.Errorf("unknown command: %s", cmd)
 	}

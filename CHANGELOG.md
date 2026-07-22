@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Live OpenRouter catalog refresh and fuzzy model selection during an active chat.
+- Steering, queued input, interrupt handling, durable provider threads, and asynchronous subagent progress.
+- Canopy-first branch and project review context with compact prompts and repository-health reporting.
+- FluffyUI terminal rendering and an accepted staged path for a GoSX browser/desktop client.
+
+### Changed
+- Interactive tool execution continues until completion while remaining sequential and visible as a persistent event stream.
+- Provider-supplied reasoning and tool results render as durable progress entries instead of transient status messages.
+- Project reviews use bounded structural sampling to reduce elapsed time and token spend.
+
+### Fixed
+- OpenRouter requests now gate optional fields by each model's advertised parameters.
+- Tool JSON schemas declare concrete nested item types accepted by Moonshot/Kimi providers.
+- Unrestricted one-shot sessions no longer collapse into an empty tool allowlist.
+- Task workspace discovery prefers the requested repository instead of an unrelated ancestor checkout.
+
+### Release
+- Tag pushes and manual releases share strict semantic-tag, vanity-path, preflight, and post-install verification.
+
 ## [1.6.1] - 2026-06-17
 
 ### Fixed

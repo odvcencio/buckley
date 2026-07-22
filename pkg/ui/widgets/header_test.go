@@ -3,8 +3,8 @@ package widgets
 import (
 	"testing"
 
-	"m31labs.dev/buckley/pkg/ui/backend"
-	"m31labs.dev/buckley/pkg/ui/runtime"
+	"m31labs.dev/fluffyui/backend"
+	"m31labs.dev/fluffyui/runtime"
 )
 
 func TestNewHeader(t *testing.T) {

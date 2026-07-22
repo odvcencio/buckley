@@ -6,9 +6,9 @@ import (
 	"strconv"
 	"strings"
 
-	"m31labs.dev/buckley/pkg/ui/backend"
-	"m31labs.dev/buckley/pkg/ui/runtime"
-	"m31labs.dev/buckley/pkg/ui/terminal"
+	"m31labs.dev/fluffyui/backend"
+	"m31labs.dev/fluffyui/runtime"
+	"m31labs.dev/fluffyui/terminal"
 )
 
 // TaskStatus represents the status of a task in the plan.
@@ -413,7 +413,7 @@ func (s *Sidebar) renderCurrentTask(buf *runtime.Buffer, x, y, width int) int {
 // renderProgressBar draws a progress bar.
 func (s *Sidebar) renderProgressBar(buf *runtime.Buffer, x, y, width, percent int) int {
 	percentStr := strconv.Itoa(percent) + "%"
-	percentWidth := runeLen(percentStr)
+	percentWidth := displayWidth(percentStr)
 	barWidth := width - percentWidth - 1
 	if barWidth < 1 {
 		barWidth = width
@@ -782,19 +782,12 @@ func truncateSidebarLine(value string, max int) string {
 	if value == "" || max <= 0 {
 		return ""
 	}
-	runes := []rune(value)
-	if len(runes) <= max {
-		return value
-	}
-	if max <= 3 {
-		return string(runes[:max])
-	}
-	return string(runes[:max-3]) + "..."
+	return truncateString(value, max)
 }
 
 func truncateRecentFileName(path string, max int) string {
 	name := path
-	if runeLen(name) > max {
+	if displayWidth(name) > max {
 		name = filepath.Base(path)
 	}
 	return truncateSidebarText(name, max)

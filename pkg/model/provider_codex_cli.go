@@ -10,10 +10,12 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"m31labs.dev/buckley/pkg/config"
 	"m31labs.dev/buckley/pkg/reviewsandbox"
+	"m31labs.dev/buckley/pkg/telemetry"
 )
 
 const (
@@ -29,6 +31,8 @@ type CodexCLICommand struct {
 	Stdin string
 	Dir   string
 	Env   []string
+	// OnStdoutLine receives complete JSONL records while Codex is running.
+	OnStdoutLine func([]byte)
 }
 
 // CodexCLICommandResult captures Codex CLI output.
@@ -45,6 +49,7 @@ type codexReviewWorkspaceVerifier func(ctx context.Context, workDir string, snap
 
 // CodexCLIProvider adapts `codex exec` to Buckley's chat provider interface.
 type CodexCLIProvider struct {
+	mu              sync.RWMutex
 	command         string
 	models          []ModelInfo
 	sandbox         config.SandboxConfig
@@ -52,6 +57,9 @@ type CodexCLIProvider struct {
 	runner          CodexCLICommandRunner
 	reviewWorkspace codexReviewWorkspacePreparer
 	reviewVerifier  codexReviewWorkspaceVerifier
+	sessionThreads  map[string]string
+	threadStore     ProviderThreadStore
+	telemetry       *telemetry.Hub
 }
 
 // NewCodexCLIProvider builds a Codex CLI-backed chat provider.
@@ -68,7 +76,28 @@ func NewCodexCLIProvider(cfg config.CodexConfig, sandboxCfg config.SandboxConfig
 		runner:          runCodexCLICommand,
 		reviewWorkspace: prepareCodexReviewWorkspace,
 		reviewVerifier:  verifyCodexReviewWorkspace,
+		sessionThreads:  make(map[string]string),
 	}
+}
+
+// SetTelemetry enables live Codex native-agent lifecycle telemetry.
+func (p *CodexCLIProvider) SetTelemetry(hub *telemetry.Hub) {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	p.telemetry = hub
+	p.mu.Unlock()
+}
+
+// SetProviderThreadStore enables durable Buckley-session to Codex-thread mapping.
+func (p *CodexCLIProvider) SetProviderThreadStore(store ProviderThreadStore) {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	p.threadStore = store
+	p.mu.Unlock()
 }
 
 // ID returns provider identifier.
@@ -159,14 +188,29 @@ func (p *CodexCLIProvider) ChatCompletion(ctx context.Context, req ChatRequest) 
 	}
 	defer cleanupWorkspace()
 
-	args := p.buildExecArgsWithPolicy(req.Model, outFile, execDir, req.Reasoning, sandboxOverride, reviewPolicyArgs)
-	if req.ReviewSnapshot != nil && len(args) > 0 {
-		// Keep ambient user rules, plugins, and MCP configuration from adding
-		// evidence outside the captured review workspace. Authentication remains
-		// available under --ignore-user-config.
-		args = append(append(args[:len(args)-1:len(args)-1], "--strict-config", "--ignore-user-config", "--ignore-rules"), args[len(args)-1])
+	durableChat := strings.TrimSpace(req.SessionID) != "" && req.ReviewSnapshot == nil
+	threadID := ""
+	if durableChat {
+		threadID = p.threadForSession(req.SessionID)
 	}
+	buildArgs := func(resumeThread string) []string {
+		args := p.buildExecArgsWithPolicy(req.Model, outFile, execDir, req.Reasoning, sandboxOverride, reviewPolicyArgs)
+		if durableChat {
+			args = removeCodexArg(args, "--ephemeral")
+		}
+		if req.ReviewSnapshot != nil && len(args) > 0 {
+			// Keep ambient user rules, plugins, and MCP configuration from adding
+			// evidence outside the captured review workspace. Authentication remains
+			// available under --ignore-user-config.
+			args = append(append(args[:len(args)-1:len(args)-1], "--strict-config", "--ignore-user-config", "--ignore-rules"), args[len(args)-1])
+		}
+		return codexResumeArgs(args, resumeThread)
+	}
+	args := buildArgs(threadID)
 	chatPrompt := buildCodexChatPrompt(req.Messages)
+	if threadID != "" {
+		chatPrompt = buildCodexResumePrompt(req.Messages)
+	}
 	if req.ReviewSnapshot != nil {
 		chatPrompt = rewriteCodexReviewPromptRoot(
 			chatPrompt,
@@ -175,15 +219,30 @@ func (p *CodexCLIProvider) ChatCompletion(ctx context.Context, req ChatRequest) 
 			reviewWorkingDirectory,
 		)
 	}
-	result, err := p.runner(ctx, CodexCLICommand{
-		Name:  p.command,
-		Args:  args,
-		Stdin: chatPrompt,
-		Dir:   execDir,
-		Env:   commandEnv,
-	})
+	run := func(commandArgs []string, prompt string) (CodexCLICommandResult, error) {
+		return p.runner(ctx, CodexCLICommand{
+			Name:         p.command,
+			Args:         commandArgs,
+			Stdin:        prompt,
+			Dir:          execDir,
+			Env:          commandEnv,
+			OnStdoutLine: func(line []byte) { p.consumeCodexEvent(req.SessionID, line) },
+		})
+	}
+	result, err := run(args, chatPrompt)
+	if err != nil && threadID != "" && codexResumeUnavailable(result) {
+		p.clearSessionThread(req.SessionID, threadID)
+		_ = os.WriteFile(outFile, nil, 0o600)
+		threadID = ""
+		chatPrompt = buildCodexChatPrompt(req.Messages)
+		result, err = run(buildArgs(""), chatPrompt)
+	}
 	if err != nil {
 		return nil, formatCodexCLIError(err, result)
+	}
+	if startedThread := parseCodexThreadID(result.Stdout); durableChat && startedThread != "" {
+		threadID = startedThread
+		p.setSessionThread(req.SessionID, startedThread)
 	}
 	if req.ReviewSnapshot != nil {
 		if p.reviewVerifier == nil {
@@ -201,14 +260,17 @@ func (p *CodexCLIProvider) ChatCompletion(ctx context.Context, req ChatRequest) 
 		return nil, fmt.Errorf("codex CLI returned an empty response")
 	}
 
-	usage := estimateCodexUsage(req.Messages, content)
+	usage, exactUsage := parseCodexUsage(result.Stdout)
+	if !exactUsage {
+		usage = estimateCodexUsage(req.Messages, content)
+	}
 	executionEvidence := parseCodexCommandExecutionEvidence(result.Stdout)
 	for index := range executionEvidence {
 		executionEvidence[index].WorkingDirectory = filepath.Clean(execDir)
 		executionEvidence[index].RepositoryRoot = filepath.Clean(reviewRepositoryRoot)
 	}
 	return &ChatResponse{
-		ID:                fmt.Sprintf("codex-%d", time.Now().UnixNano()),
+		ID:                defaultIfBlank(threadID, fmt.Sprintf("codex-%d", time.Now().UnixNano())),
 		Model:             codexModelID(req.Model),
 		ExecutionEvidence: executionEvidence,
 		Choices: []Choice{
@@ -291,6 +353,86 @@ func (p *CodexCLIProvider) buildExecArgsWithPolicy(modelID, outputPath, workDir 
 	}
 	args = append(args, "-")
 	return args
+}
+
+func codexResumeArgs(args []string, threadID string) []string {
+	threadID = strings.TrimSpace(threadID)
+	if threadID == "" || len(args) == 0 {
+		return args
+	}
+	last := len(args) - 1
+	if args[last] != "-" {
+		return append(args, "resume", threadID, "-")
+	}
+	resumed := append([]string(nil), args[:last]...)
+	return append(resumed, "resume", threadID, "-")
+}
+
+func removeCodexArg(args []string, target string) []string {
+	out := make([]string, 0, len(args))
+	for _, arg := range args {
+		if arg != target {
+			out = append(out, arg)
+		}
+	}
+	return out
+}
+
+func (p *CodexCLIProvider) threadForSession(sessionID string) string {
+	if p == nil {
+		return ""
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	p.mu.RLock()
+	threadID := p.sessionThreads[sessionID]
+	store := p.threadStore
+	p.mu.RUnlock()
+	if threadID != "" || sessionID == "" || store == nil {
+		return threadID
+	}
+	stored, err := store.LoadProviderThread(sessionID, codexProviderID)
+	if err != nil || strings.TrimSpace(stored) == "" {
+		return ""
+	}
+	p.mu.Lock()
+	p.sessionThreads[sessionID] = strings.TrimSpace(stored)
+	threadID = p.sessionThreads[sessionID]
+	p.mu.Unlock()
+	return threadID
+}
+
+func (p *CodexCLIProvider) setSessionThread(sessionID, threadID string) {
+	if p == nil {
+		return
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	threadID = strings.TrimSpace(threadID)
+	if sessionID == "" || threadID == "" {
+		return
+	}
+	p.mu.Lock()
+	p.sessionThreads[sessionID] = threadID
+	store := p.threadStore
+	p.mu.Unlock()
+	if store != nil {
+		_ = store.SaveProviderThread(sessionID, codexProviderID, threadID)
+	}
+}
+
+func (p *CodexCLIProvider) clearSessionThread(sessionID, threadID string) {
+	if p == nil {
+		return
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	p.mu.Lock()
+	if p.sessionThreads[sessionID] == strings.TrimSpace(threadID) {
+		delete(p.sessionThreads, sessionID)
+	}
+	store := p.threadStore
+	p.mu.Unlock()
+	if store != nil {
+		_ = store.DeleteProviderThread(sessionID, codexProviderID)
+	}
 }
 
 func requestRequiresReadOnly(req ChatRequest) bool {
@@ -695,6 +837,69 @@ func parseCodexCommandExecutionEvidence(stdout []byte) []CommandExecutionEvidenc
 	return evidence
 }
 
+func parseCodexThreadID(stdout []byte) string {
+	var event struct {
+		Type     string `json:"type"`
+		ThreadID string `json:"thread_id"`
+	}
+	scanner := bufio.NewScanner(bytes.NewReader(stdout))
+	scanner.Buffer(make([]byte, 64*1024), 16*1024*1024)
+	for scanner.Scan() {
+		if json.Unmarshal(scanner.Bytes(), &event) == nil && event.Type == "thread.started" {
+			if threadID := strings.TrimSpace(event.ThreadID); threadID != "" {
+				return threadID
+			}
+		}
+	}
+	return ""
+}
+
+func parseCodexUsage(stdout []byte) (Usage, bool) {
+	var exact Usage
+	found := false
+	type usagePayload struct {
+		InputTokens           int `json:"input_tokens"`
+		CachedInputTokens     int `json:"cached_input_tokens"`
+		OutputTokens          int `json:"output_tokens"`
+		ReasoningOutputTokens int `json:"reasoning_output_tokens"`
+	}
+	var event struct {
+		Type  string       `json:"type"`
+		Usage usagePayload `json:"usage"`
+	}
+	scanner := bufio.NewScanner(bytes.NewReader(stdout))
+	scanner.Buffer(make([]byte, 64*1024), 16*1024*1024)
+	for scanner.Scan() {
+		if json.Unmarshal(scanner.Bytes(), &event) != nil || event.Type != "turn.completed" {
+			continue
+		}
+		exact = Usage{
+			PromptTokens:     event.Usage.InputTokens,
+			CompletionTokens: event.Usage.OutputTokens,
+			TotalTokens:      event.Usage.InputTokens + event.Usage.OutputTokens,
+		}
+		found = true
+	}
+	return exact, found
+}
+
+func codexResumeUnavailable(result CodexCLICommandResult) bool {
+	text := strings.ToLower(string(result.Stdout) + "\n" + string(result.Stderr))
+	for _, marker := range []string{
+		"thread not found",
+		"session not found",
+		"no rollout found",
+		"rollout file",
+		"failed to resume",
+		"could not find session",
+	} {
+		if strings.Contains(text, marker) {
+			return true
+		}
+	}
+	return false
+}
+
 func boundedCodexCommandOutput(output string) string {
 	const maxBytes = 64 * 1024
 	if len(output) <= maxBytes {
@@ -740,6 +945,23 @@ func buildCodexChatPrompt(messages []Message) string {
 		b.WriteString("\n")
 	}
 	return strings.TrimSpace(b.String()) + "\n"
+}
+
+func buildCodexResumePrompt(messages []Message) string {
+	start := 0
+	for index := len(messages) - 1; index >= 0; index-- {
+		if strings.EqualFold(strings.TrimSpace(messages[index].Role), "assistant") {
+			start = index + 1
+			break
+		}
+	}
+	if start >= len(messages) {
+		start = len(messages) - 1
+	}
+	if start < 0 {
+		start = 0
+	}
+	return buildCodexChatPrompt(messages[start:])
 }
 
 func codexModelCatalog(models []string) []ModelInfo {
@@ -922,6 +1144,157 @@ func codexCLIStdoutFailureDiagnostic(stdout []byte) string {
 	return strings.TrimSpace(string(stdout))
 }
 
+type codexCollabAgentState struct {
+	Status  string `json:"status"`
+	Message string `json:"message"`
+}
+
+type codexCLIEvent struct {
+	Type     string `json:"type"`
+	ThreadID string `json:"thread_id"`
+	Item     struct {
+		ID                string                           `json:"id"`
+		Type              string                           `json:"type"`
+		Tool              string                           `json:"tool"`
+		SenderThreadID    string                           `json:"sender_thread_id"`
+		ReceiverThreadIDs []string                         `json:"receiver_thread_ids"`
+		AgentsStates      map[string]codexCollabAgentState `json:"agents_states"`
+		Status            string                           `json:"status"`
+	} `json:"item"`
+}
+
+func (p *CodexCLIProvider) consumeCodexEvent(sessionID string, line []byte) {
+	if p == nil || len(bytes.TrimSpace(line)) == 0 {
+		return
+	}
+	var event codexCLIEvent
+	if json.Unmarshal(line, &event) != nil {
+		return
+	}
+	if event.Type == "thread.started" && strings.TrimSpace(sessionID) != "" {
+		p.setSessionThread(sessionID, event.ThreadID)
+	}
+	if !strings.HasPrefix(event.Type, "item.") || event.Item.Type != "collab_tool_call" {
+		return
+	}
+	p.publishCodexCollabEvent(sessionID, event.Item)
+}
+
+func (p *CodexCLIProvider) publishCodexCollabEvent(sessionID string, item struct {
+	ID                string                           `json:"id"`
+	Type              string                           `json:"type"`
+	Tool              string                           `json:"tool"`
+	SenderThreadID    string                           `json:"sender_thread_id"`
+	ReceiverThreadIDs []string                         `json:"receiver_thread_ids"`
+	AgentsStates      map[string]codexCollabAgentState `json:"agents_states"`
+	Status            string                           `json:"status"`
+}) {
+	p.mu.RLock()
+	hub := p.telemetry
+	p.mu.RUnlock()
+	if hub == nil {
+		return
+	}
+	agentIDs := append([]string(nil), item.ReceiverThreadIDs...)
+	if len(agentIDs) == 0 {
+		for agentID := range item.AgentsStates {
+			agentIDs = append(agentIDs, agentID)
+		}
+	}
+	for _, agentID := range agentIDs {
+		agentID = strings.TrimSpace(agentID)
+		if agentID == "" {
+			continue
+		}
+		state := item.AgentsStates[agentID]
+		if state.Status == "" {
+			state.Status = defaultCodexCollabState(item.Tool, item.Status)
+		}
+		eventType := codexCollabTelemetryType(item.Tool, state.Status)
+		data := map[string]any{
+			"agent_id":        agentID,
+			"parent_agent_id": strings.TrimSpace(item.SenderThreadID),
+			"provider":        "codex",
+			"operation":       strings.TrimSpace(item.Tool),
+			"state":           strings.TrimSpace(state.Status),
+			"operation_id":    strings.TrimSpace(item.ID),
+		}
+		if message := boundedCodexTelemetryText(state.Message); message != "" {
+			data["message"] = message
+		}
+		hub.Publish(telemetry.Event{
+			Type:      eventType,
+			SessionID: strings.TrimSpace(sessionID),
+			TaskID:    agentID,
+			Data:      data,
+		})
+	}
+}
+
+func defaultCodexCollabState(tool, status string) string {
+	if tool == "close_agent" && status == "completed" {
+		return "shutdown"
+	}
+	if status == "failed" {
+		return "errored"
+	}
+	return "running"
+}
+
+func codexCollabTelemetryType(tool, status string) telemetry.EventType {
+	switch strings.TrimSpace(status) {
+	case "completed":
+		return telemetry.EventSubagentCompleted
+	case "errored", "not_found":
+		return telemetry.EventSubagentFailed
+	case "interrupted", "shutdown":
+		return telemetry.EventSubagentCancelled
+	default:
+		if strings.TrimSpace(tool) == "spawn_agent" {
+			return telemetry.EventSubagentSpawned
+		}
+		return telemetry.EventSubagentState
+	}
+}
+
+func boundedCodexTelemetryText(text string) string {
+	text = strings.TrimSpace(text)
+	if len(text) <= 1024 {
+		return text
+	}
+	return text[:1021] + "..."
+}
+
+type codexLineWriter struct {
+	all     bytes.Buffer
+	pending []byte
+	onLine  func([]byte)
+}
+
+func (w *codexLineWriter) Write(data []byte) (int, error) {
+	w.all.Write(data)
+	w.pending = append(w.pending, data...)
+	for {
+		index := bytes.IndexByte(w.pending, '\n')
+		if index < 0 {
+			break
+		}
+		line := append([]byte(nil), w.pending[:index]...)
+		w.pending = w.pending[index+1:]
+		if w.onLine != nil {
+			w.onLine(line)
+		}
+	}
+	return len(data), nil
+}
+
+func (w *codexLineWriter) Flush() {
+	if len(w.pending) > 0 && w.onLine != nil {
+		w.onLine(append([]byte(nil), w.pending...))
+	}
+	w.pending = nil
+}
+
 func runCodexCLICommand(ctx context.Context, cmd CodexCLICommand) (CodexCLICommandResult, error) {
 	execCmd := exec.CommandContext(ctx, cmd.Name, cmd.Args...)
 	if strings.TrimSpace(cmd.Dir) != "" {
@@ -934,14 +1307,15 @@ func runCodexCLICommand(ctx context.Context, cmd CodexCLICommand) (CodexCLIComma
 		execCmd.Env = append([]string(nil), cmd.Env...)
 	}
 
-	var stdout bytes.Buffer
+	stdout := &codexLineWriter{onLine: cmd.OnStdoutLine}
 	var stderr bytes.Buffer
-	execCmd.Stdout = &stdout
+	execCmd.Stdout = stdout
 	execCmd.Stderr = &stderr
 
 	err := execCmd.Run()
+	stdout.Flush()
 	return CodexCLICommandResult{
-		Stdout: stdout.Bytes(),
+		Stdout: stdout.all.Bytes(),
 		Stderr: stderr.Bytes(),
 	}, err
 }

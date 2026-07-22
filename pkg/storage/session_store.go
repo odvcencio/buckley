@@ -21,6 +21,7 @@ type Session struct {
 	ProjectPath  string     `json:"projectPath,omitempty"`
 	GitRepo      string     `json:"gitRepo,omitempty"`
 	GitBranch    string     `json:"gitBranch,omitempty"`
+	Model        string     `json:"model,omitempty"`
 	CreatedAt    time.Time  `json:"createdAt"`
 	LastActive   time.Time  `json:"lastActive"`
 	MessageCount int        `json:"messageCount"`
@@ -42,8 +43,8 @@ func (s *Store) CreateSession(session *Session) error {
 	}
 
 	query := `
-		INSERT INTO sessions (session_id, principal, project_path, git_repo, git_branch, created_at, last_active, status, completed_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO sessions (session_id, principal, project_path, git_repo, git_branch, model, created_at, last_active, status, completed_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`
 
 	principal := strings.TrimSpace(session.Principal)
@@ -69,6 +70,7 @@ func (s *Store) CreateSession(session *Session) error {
 			session.ProjectPath,
 			session.GitRepo,
 			session.GitBranch,
+			session.Model,
 			session.CreatedAt,
 			session.LastActive,
 			status,
@@ -100,7 +102,7 @@ func (s *Store) CreateSession(session *Session) error {
 // GetSession retrieves a session by ID.
 func (s *Store) GetSession(sessionID string) (*Session, error) {
 	query := `
-		SELECT session_id, principal, project_path, git_repo, git_branch, created_at, last_active,
+		SELECT session_id, principal, project_path, git_repo, git_branch, model, created_at, last_active,
 		       message_count, total_tokens, total_cost, status, completed_at,
 		       pause_reason, pause_question, paused_at
 		FROM sessions WHERE session_id = ?
@@ -116,6 +118,7 @@ func (s *Store) GetSession(sessionID string) (*Session, error) {
 		&session.ProjectPath,
 		&session.GitRepo,
 		&session.GitBranch,
+		&session.Model,
 		&session.CreatedAt,
 		&session.LastActive,
 		&session.MessageCount,
@@ -177,7 +180,7 @@ func (s *Store) EnsureSession(sessionID string) error {
 // ListSessions returns all sessions ordered by last active time.
 func (s *Store) ListSessions(limit int) ([]Session, error) {
 	query := `
-		SELECT session_id, principal, project_path, git_repo, git_branch, created_at, last_active,
+		SELECT session_id, principal, project_path, git_repo, git_branch, model, created_at, last_active,
 		       message_count, total_tokens, total_cost, status, completed_at
 		FROM sessions
 		ORDER BY last_active DESC
@@ -200,6 +203,7 @@ func (s *Store) ListSessions(limit int) ([]Session, error) {
 			&session.ProjectPath,
 			&session.GitRepo,
 			&session.GitBranch,
+			&session.Model,
 			&session.CreatedAt,
 			&session.LastActive,
 			&session.MessageCount,
@@ -229,7 +233,7 @@ func (s *Store) ListSessionsByRepo(repoPath string) ([]Session, error) {
 		return []Session{}, nil
 	}
 	query := `
-		SELECT session_id, principal, project_path, git_repo, git_branch, created_at, last_active,
+		SELECT session_id, principal, project_path, git_repo, git_branch, model, created_at, last_active,
 		       message_count, total_tokens, total_cost, status, completed_at
 		FROM sessions
 		WHERE git_repo = ? OR project_path = ?
@@ -252,6 +256,7 @@ func (s *Store) ListSessionsByRepo(repoPath string) ([]Session, error) {
 			&session.ProjectPath,
 			&session.GitRepo,
 			&session.GitBranch,
+			&session.Model,
 			&session.CreatedAt,
 			&session.LastActive,
 			&session.MessageCount,
@@ -304,6 +309,31 @@ func (s *Store) UpdateSessionProjectPath(sessionID, projectPath string) error {
 	s.notify(newEvent(EventSessionUpdated, sessionID, sessionID, map[string]any{
 		"projectPath": projectPath,
 	}))
+	return nil
+}
+
+// UpdateSessionModel persists the model selected for subsequent turns.
+func (s *Store) UpdateSessionModel(sessionID, modelID string) error {
+	sessionID = strings.TrimSpace(sessionID)
+	modelID = strings.TrimSpace(modelID)
+	if sessionID == "" {
+		return fmt.Errorf("session id required")
+	}
+	if modelID == "" {
+		return fmt.Errorf("model required")
+	}
+	res, err := s.db.Exec(`UPDATE sessions SET model = ?, last_active = ? WHERE session_id = ?`, modelID, time.Now(), sessionID)
+	if err != nil {
+		return err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return fmt.Errorf("session %s not found", sessionID)
+	}
+	s.notify(newEvent(EventSessionUpdated, sessionID, sessionID, map[string]any{"model": modelID}))
 	return nil
 }
 

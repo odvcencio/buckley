@@ -4,9 +4,9 @@ import (
 	"strconv"
 	"strings"
 
-	"m31labs.dev/buckley/pkg/ui/backend"
-	"m31labs.dev/buckley/pkg/ui/runtime"
-	"m31labs.dev/buckley/pkg/ui/terminal"
+	"m31labs.dev/fluffyui/backend"
+	"m31labs.dev/fluffyui/runtime"
+	"m31labs.dev/fluffyui/terminal"
 )
 
 // PaletteItem represents a single item in the palette.
@@ -206,7 +206,7 @@ func (p *PaletteWidget) Render(ctx runtime.RenderContext) {
 
 func (p *PaletteWidget) renderTitle(buf *runtime.Buffer, b runtime.Rect) {
 	title := " " + p.title + " "
-	titleX := b.X + (b.Width-runeLen(title))/2
+	titleX := b.X + (b.Width-displayWidth(title))/2
 	buf.SetString(titleX, b.Y, title, p.titleStyle)
 }
 
@@ -214,7 +214,7 @@ func (p *PaletteWidget) renderQuery(buf *runtime.Buffer, b runtime.Rect, y int) 
 	query := truncateString(p.placeholder+p.query, b.Width-4)
 	buf.SetString(b.X+2, y, query, p.queryStyle)
 
-	cursorX := b.X + 2 + runeLen(query)
+	cursorX := b.X + 2 + displayWidth(query)
 	if cursorX < b.X+b.Width-2 && p.focused {
 		buf.Set(cursorX, y, '█', p.queryStyle)
 	}
@@ -268,7 +268,7 @@ func (p *PaletteWidget) renderItem(buf *runtime.Buffer, b runtime.Rect, y int, i
 		return
 	}
 	shortcut := truncateString(item.Shortcut, b.Width-6)
-	shortcutX := b.X + b.Width - 2 - runeLen(shortcut)
+	shortcutX := b.X + b.Width - 2 - displayWidth(shortcut)
 	shortcutStyle := p.shortcutStyle
 	if selected {
 		shortcutStyle = style
@@ -285,7 +285,7 @@ func (p *PaletteWidget) fillItemRow(buf *runtime.Buffer, b runtime.Rect, y int, 
 func (p *PaletteWidget) maxLabelWidth(b runtime.Rect, item PaletteItem) int {
 	maxLabel := b.Width - 6
 	if item.Shortcut != "" {
-		maxLabel -= runeLen(item.Shortcut) + 2
+		maxLabel -= displayWidth(item.Shortcut) + 2
 	}
 	return max(0, maxLabel)
 }
@@ -296,7 +296,7 @@ func (p *PaletteWidget) renderResultCount(buf *runtime.Buffer, b runtime.Rect) {
 	}
 	countStr := strconv.Itoa(len(p.filtered)) + " results"
 	countStr = truncateString(countStr, b.Width-4)
-	buf.SetString(b.X+b.Width-2-runeLen(countStr), b.Y+b.Height-1, countStr, p.borderStyle)
+	buf.SetString(b.X+b.Width-2-displayWidth(countStr), b.Y+b.Height-1, countStr, p.borderStyle)
 }
 
 // drawBorder draws the palette border.

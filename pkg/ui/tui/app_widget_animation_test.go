@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"m31labs.dev/buckley/pkg/ui/backend/sim"
+	"m31labs.dev/fluffyui/backend/sim"
 )
 
 func TestWidgetAppUpdateAnimations_ExpiresStatusOverrideAndCtrlC(t *testing.T) {

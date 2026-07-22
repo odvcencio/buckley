@@ -123,12 +123,16 @@ func (r *RLMRunner) Run(ctx context.Context, systemPrompt, task string, allowedT
 	defer cleanupSnapshot()
 
 	// Create sub-agent configuration
+	maxIterations := opts.MaxIterations
+	if maxIterations <= 0 {
+		maxIterations = 25
+	}
 	agentCfg := rlm.SubAgentInstanceConfig{
 		ID:             fmt.Sprintf("oneshot-%d", time.Now().UnixNano()),
 		Model:          modelToUse,
 		Reasoning:      r.reasoning,
 		SystemPrompt:   systemPrompt,
-		MaxIterations:  25, // Allow more iterations for complex tasks
+		MaxIterations:  maxIterations,
 		AllowedTools:   allowedTools,
 		ReviewSnapshot: opts.ReviewSnapshot,
 	}

@@ -85,3 +85,23 @@ func TestBranchReviewPromptDoesNotMandateBroadGoSweep(t *testing.T) {
 		}
 	}
 }
+
+func TestBranchReviewPromptStaysCompact(t *testing.T) {
+	prompt := reviewBranchWithToolsDefault(time.Unix(0, 0))
+	const maxBytes = 6_000
+	if len(prompt) > maxBytes {
+		t.Fatalf("branch review system prompt grew to %d bytes; budget is %d", len(prompt), maxBytes)
+	}
+}
+
+func TestProjectReviewPromptStaysCompactAndBounded(t *testing.T) {
+	prompt := reviewProjectDefault(time.Unix(0, 0))
+	if len(prompt) > 2_500 {
+		t.Fatalf("project review system prompt grew to %d bytes", len(prompt))
+	}
+	for _, want := range []string{"Canopy", "at most eight", "three highest-risk", "## Project Health"} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("project review prompt missing %q", want)
+		}
+	}
+}

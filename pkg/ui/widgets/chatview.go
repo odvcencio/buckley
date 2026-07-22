@@ -3,12 +3,12 @@ package widgets
 import (
 	"strings"
 
-	"m31labs.dev/buckley/pkg/ui/backend"
-	"m31labs.dev/buckley/pkg/ui/compositor"
-	"m31labs.dev/buckley/pkg/ui/markdown"
-	"m31labs.dev/buckley/pkg/ui/runtime"
 	"m31labs.dev/buckley/pkg/ui/scrollback"
-	"m31labs.dev/buckley/pkg/ui/terminal"
+	"m31labs.dev/fluffyui/backend"
+	"m31labs.dev/fluffyui/compositor"
+	"m31labs.dev/fluffyui/markdown"
+	"m31labs.dev/fluffyui/runtime"
+	"m31labs.dev/fluffyui/terminal"
 )
 
 // ChatView displays the conversation history with scrolling.
@@ -85,20 +85,18 @@ func (c *ChatView) OnScrollChange(fn func(top, total, viewHeight int)) {
 
 // AddMessage adds a message to the chat.
 func (c *ChatView) AddMessage(content, source string) {
-	switch source {
-	case "thinking":
+	if source == "thinking" && strings.TrimSpace(content) == "" {
 		c.buffer.AppendAuxLine("  ◦ thinking...", scrollback.LineStyle{
 			FG:     extractFG(c.thinkingStyle),
 			Italic: true,
 			Dim:    true,
 		}, "thinking")
 		return
-	default:
-		lines := c.buildMessageLines(content, source)
-		c.buffer.AppendMessage(lines)
-		c.lastSource = source
-		c.lastContent = content
 	}
+	lines := c.buildMessageLines(content, source)
+	c.buffer.AppendMessage(lines)
+	c.lastSource = source
+	c.lastContent = content
 }
 
 // AppendText appends text to the last message (for streaming).

@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/time/rate"
@@ -71,6 +72,7 @@ type Client struct {
 	transport      *LoggingTransport
 	catalog        *ModelCatalog
 	catalogAge     time.Time
+	catalogMu      sync.Mutex
 	rateLimiter    *rate.Limiter
 	circuitBreaker *CircuitBreaker
 	retryConfig    RetryConfig
@@ -285,8 +287,20 @@ func (c *Client) DoWithRetry(req *http.Request) (*http.Response, error) {
 
 // FetchCatalog fetches the model catalog from OpenRouter
 func (c *Client) FetchCatalog() (*ModelCatalog, error) {
+	return c.fetchCatalog(false)
+}
+
+// RefreshCatalog bypasses the in-memory catalog cache.
+func (c *Client) RefreshCatalog() (*ModelCatalog, error) {
+	return c.fetchCatalog(true)
+}
+
+func (c *Client) fetchCatalog(force bool) (*ModelCatalog, error) {
+	c.catalogMu.Lock()
+	defer c.catalogMu.Unlock()
+
 	// Return cached catalog if less than 24h old
-	if c.catalog != nil && time.Since(c.catalogAge) < 24*time.Hour {
+	if !force && c.catalog != nil && time.Since(c.catalogAge) < 24*time.Hour {
 		return c.catalog, nil
 	}
 
@@ -577,6 +591,23 @@ func (c *Client) parseSSEStream(ctx context.Context, r io.Reader, chunkChan chan
 		var chunk StreamChunk
 		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
 			return fmt.Errorf("decoding chunk: %w", err)
+		}
+		if chunk.Error != nil {
+			statusCode, _ := strconv.Atoi(strings.TrimSpace(chunk.Error.Code))
+			if statusCode == 0 {
+				statusCode = http.StatusOK
+			}
+			message := strings.TrimSpace(chunk.Error.Message)
+			if message == "" {
+				message = "provider returned a streaming error"
+			}
+			return &APIError{
+				StatusCode: statusCode,
+				Message:    message,
+				Type:       chunk.Error.Type,
+				Code:       chunk.Error.Code,
+				Retryable:  statusCode == http.StatusTooManyRequests || statusCode >= 500,
+			}
 		}
 
 		select {

@@ -9,14 +9,14 @@ import (
 	"sync"
 	"time"
 
-	"m31labs.dev/buckley/pkg/ui/backend"
-	"m31labs.dev/buckley/pkg/ui/backend/tcell"
 	"m31labs.dev/buckley/pkg/ui/filepicker"
-	"m31labs.dev/buckley/pkg/ui/markdown"
-	"m31labs.dev/buckley/pkg/ui/runtime"
-	"m31labs.dev/buckley/pkg/ui/terminal"
-	"m31labs.dev/buckley/pkg/ui/theme"
 	"m31labs.dev/buckley/pkg/ui/widgets"
+	"m31labs.dev/fluffyui/backend"
+	"m31labs.dev/fluffyui/backend/tcell"
+	"m31labs.dev/fluffyui/markdown"
+	"m31labs.dev/fluffyui/runtime"
+	"m31labs.dev/fluffyui/terminal"
+	"m31labs.dev/fluffyui/theme"
 )
 
 // RenderMetrics tracks rendering performance statistics.
@@ -165,7 +165,7 @@ func NewWidgetApp(cfg WidgetAppConfig) (*WidgetApp, error) {
 	// Get theme
 	th := cfg.Theme
 	if th == nil {
-		th = theme.DefaultTheme()
+		th = defaultBuckleyTheme()
 	}
 
 	// Create widgets
@@ -254,7 +254,7 @@ func NewWidgetApp(cfg WidgetAppConfig) (*WidgetApp, error) {
 	)
 
 	// Create screen
-	screen := runtime.NewScreen(w, h, th)
+	screen := runtime.NewScreen(w, h)
 
 	// Add root layer (focus scope is created internally)
 	screen.PushLayer(root, false)
@@ -441,6 +441,8 @@ func (a *WidgetApp) showCommandPalette() {
 		{ID: "export", Category: "Session", Label: "Export Conversation", Shortcut: "/export"},
 		{ID: "compact", Category: "Session", Label: "Compact Context", Shortcut: "/compact"},
 		{ID: "cancel", Category: "Session", Label: "Cancel Response", Shortcut: "/cancel"},
+		{ID: "steer", Category: "Session", Label: "Steer Active Response", Shortcut: "/steer"},
+		{ID: "queue", Category: "Session", Label: "Queue Follow-up", Shortcut: "/queue"},
 
 		// Navigation commands
 		{ID: "toggle-sidebar", Category: "View", Label: "Toggle Sidebar", Shortcut: "Ctrl+B"},
@@ -497,6 +499,8 @@ func (a *WidgetApp) showSlashCommandPalette() {
 		{ID: "/history", Label: "/history", Description: "Show recent turns"},
 		{ID: "/export", Label: "/export", Description: "Export conversation to Markdown"},
 		{ID: "/cancel", Label: "/cancel", Description: "Cancel current response"},
+		{ID: "/steer ", Label: "/steer", Description: "Interrupt and redirect the active response"},
+		{ID: "/queue ", Label: "/queue", Description: "Queue a follow-up without interrupting"},
 		{ID: "/sessions", Label: "/sessions", Description: "List active sessions"},
 		{ID: "/next", Label: "/next", Description: "Switch to next session"},
 		{ID: "/prev", Label: "/prev", Description: "Switch to previous session"},
@@ -510,6 +514,10 @@ func (a *WidgetApp) showSlashCommandPalette() {
 	palette.SetItems(items)
 
 	palette.SetOnSelect(func(item widgets.PaletteItem) {
+		if strings.HasSuffix(item.ID, " ") {
+			a.prefillInput(item.ID)
+			return
+		}
 		// Execute the slash command
 		if a.onSubmit != nil {
 			a.onSubmit(item.ID)
@@ -534,6 +542,10 @@ func (a *WidgetApp) showSlashCommandPalette() {
 
 // ShowModelPicker displays a model picker overlay.
 func (a *WidgetApp) ShowModelPicker(items []widgets.PaletteItem, onSelect func(item widgets.PaletteItem)) {
+	a.Post(ModelPickerMsg{Items: items, OnSelect: onSelect})
+}
+
+func (a *WidgetApp) showModelPicker(items []widgets.PaletteItem, onSelect func(item widgets.PaletteItem)) {
 	palette := widgets.NewPaletteWidget("Models")
 	palette.SetPlaceholder("search models...")
 	palette.SetMaxVisible(16)
@@ -904,7 +916,7 @@ func (a *WidgetApp) handleCommand(cmd runtime.Command) {
 		if a.onFileSelect != nil {
 			a.onFileSelect(c.Path)
 		}
-	case runtime.ApprovalResponse:
+	case widgets.ApprovalResponse:
 		// Notify callback with approval decision
 		if a.onApproval != nil {
 			a.onApproval(c.RequestID, c.Approved, c.AlwaysAllow)
@@ -949,6 +961,10 @@ func (a *WidgetApp) handlePaletteCommand(id string) {
 		if a.onSubmit != nil {
 			a.onSubmit("/cancel")
 		}
+	case "steer":
+		a.prefillInput("/steer ")
+	case "queue":
+		a.prefillInput("/queue ")
 
 	// View commands
 	case "toggle-sidebar":
@@ -995,6 +1011,13 @@ func (a *WidgetApp) handlePaletteCommand(id string) {
 	case "quit":
 		a.Quit()
 	}
+}
+
+func (a *WidgetApp) prefillInput(text string) {
+	a.inputArea.SetText(text)
+	a.inputArea.Focus()
+	a.refreshInputLayout()
+	a.dirty = true
 }
 
 // Quit stops the application.

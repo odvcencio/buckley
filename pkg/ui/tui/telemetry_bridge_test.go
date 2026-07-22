@@ -855,6 +855,27 @@ func TestTelemetryUIBridge_ForwardLoopProcessesEvents(t *testing.T) {
 	bridge.Stop()
 }
 
+func TestTelemetryUIBridge_TracksSubagentLifecycle(t *testing.T) {
+	hub := telemetry.NewHub()
+	defer hub.Close()
+	bridge := NewTelemetryUIBridge(hub, nil)
+
+	bridge.handleEvent(telemetry.Event{
+		Type:   telemetry.EventSubagentSpawned,
+		TaskID: "child-1",
+		Data:   map[string]any{"provider": "codex", "state": "running"},
+	})
+	running, ok := bridge.runningTools["child-1"]
+	if !ok || running.Name != "agent:codex" || running.Command != "running" {
+		t.Fatalf("unexpected running subagent: %+v", bridge.runningTools)
+	}
+
+	bridge.handleEvent(telemetry.Event{Type: telemetry.EventSubagentCompleted, TaskID: "child-1"})
+	if _, ok := bridge.runningTools["child-1"]; ok {
+		t.Fatalf("completed subagent still active: %+v", bridge.runningTools)
+	}
+}
+
 func TestTelemetryUIBridge_ForwardLoopHandlesChannelClose(t *testing.T) {
 	hub := telemetry.NewHub()
 

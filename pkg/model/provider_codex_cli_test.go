@@ -9,8 +9,10 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"m31labs.dev/buckley/pkg/config"
+	"m31labs.dev/buckley/pkg/telemetry"
 )
 
 func TestFormatCodexCLIErrorPrefersStructuredStdoutDiagnostic(t *testing.T) {
@@ -120,6 +122,115 @@ func TestCodexCLIProviderChatCompletionUsesExecLastMessage(t *testing.T) {
 	}
 	if resp.ExecutionEvidence[0].ExitCode == nil || *resp.ExecutionEvidence[0].ExitCode != 0 || resp.ExecutionEvidence[0].Status != "completed" {
 		t.Fatalf("incomplete command execution evidence: %+v", resp.ExecutionEvidence[0])
+	}
+}
+
+func TestCodexCLIProviderDurableChatResumesExactThread(t *testing.T) {
+	provider := NewCodexCLIProvider(config.CodexConfig{Command: "codex"}, config.SandboxConfig{Mode: "workspace"}, config.ApprovalConfig{Mode: "safe"})
+	calls := 0
+	provider.runner = func(_ context.Context, command CodexCLICommand) (CodexCLICommandResult, error) {
+		calls++
+		if containsArgs(command.Args, "--ephemeral") {
+			t.Fatalf("durable chat used --ephemeral: %v", command.Args)
+		}
+		output := "first answer"
+		if calls == 1 {
+			if containsArgs(command.Args, "resume") {
+				t.Fatalf("initial turn unexpectedly resumed: %v", command.Args)
+			}
+		} else {
+			output = "second answer"
+			if !containsSubsequence(command.Args, []string{"resume", "thread-1", "-"}) {
+				t.Fatalf("second turn did not resume exact thread: %v", command.Args)
+			}
+			if strings.Contains(command.Stdin, "hello") || strings.Contains(command.Stdin, "first answer") || !strings.Contains(command.Stdin, "follow up") {
+				t.Fatalf("resume prompt replayed old transcript: %q", command.Stdin)
+			}
+		}
+		if err := os.WriteFile(argAfter(command.Args, "--output-last-message"), []byte(output), 0o600); err != nil {
+			return CodexCLICommandResult{}, err
+		}
+		return CodexCLICommandResult{Stdout: []byte(strings.Join([]string{
+			`{"type":"thread.started","thread_id":"thread-1"}`,
+			`{"type":"turn.completed","usage":{"input_tokens":21,"cached_input_tokens":5,"output_tokens":8,"reasoning_output_tokens":3}}`,
+		}, "\n"))}, nil
+	}
+
+	first, err := provider.ChatCompletion(context.Background(), ChatRequest{
+		Model:     "codex/default",
+		SessionID: "buckley-session",
+		Messages:  []Message{{Role: "system", Content: "system"}, {Role: "user", Content: "hello"}},
+	})
+	if err != nil {
+		t.Fatalf("first ChatCompletion: %v", err)
+	}
+	if first.ID != "thread-1" || first.Usage.PromptTokens != 21 || first.Usage.CompletionTokens != 8 || first.Usage.TotalTokens != 29 {
+		t.Fatalf("unexpected first response metadata: %+v", first)
+	}
+	_, err = provider.ChatCompletion(context.Background(), ChatRequest{
+		Model:     "codex/default",
+		SessionID: "buckley-session",
+		Messages: []Message{
+			{Role: "system", Content: "system"},
+			{Role: "user", Content: "hello"},
+			{Role: "assistant", Content: "first answer"},
+			{Role: "user", Content: "follow up"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("second ChatCompletion: %v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("runner calls = %d, want 2", calls)
+	}
+}
+
+func TestCodexCLIProviderResumesPersistedThreadAfterRestart(t *testing.T) {
+	store := &fakeProviderThreadStore{threads: map[string]string{"buckley-session\x00codex": "thread-persisted"}}
+	provider := NewCodexCLIProvider(config.CodexConfig{Command: "codex"}, config.SandboxConfig{Mode: "workspace"}, config.ApprovalConfig{Mode: "safe"})
+	provider.SetProviderThreadStore(store)
+	provider.runner = func(_ context.Context, command CodexCLICommand) (CodexCLICommandResult, error) {
+		if !containsSubsequence(command.Args, []string{"resume", "thread-persisted", "-"}) {
+			t.Fatalf("persisted thread was not resumed: %v", command.Args)
+		}
+		if err := os.WriteFile(argAfter(command.Args, "--output-last-message"), []byte("resumed answer"), 0o600); err != nil {
+			return CodexCLICommandResult{}, err
+		}
+		return CodexCLICommandResult{Stdout: []byte(`{"type":"turn.completed","usage":{"input_tokens":3,"output_tokens":2}}`)}, nil
+	}
+
+	response, err := provider.ChatCompletion(context.Background(), ChatRequest{
+		Model:     "codex/default",
+		SessionID: "buckley-session",
+		Messages:  []Message{{Role: "user", Content: "continue"}},
+	})
+	if err != nil {
+		t.Fatalf("ChatCompletion: %v", err)
+	}
+	if response.ID != "thread-persisted" || store.loads != 1 {
+		t.Fatalf("response ID = %q, loads = %d", response.ID, store.loads)
+	}
+}
+
+func TestCodexCLIProviderPublishesNativeSubagentTelemetry(t *testing.T) {
+	hub := telemetry.NewHub()
+	defer hub.Close()
+	events, unsubscribe := hub.Subscribe()
+	defer unsubscribe()
+	provider := NewCodexCLIProvider(config.CodexConfig{}, config.SandboxConfig{}, config.ApprovalConfig{})
+	provider.SetTelemetry(hub)
+
+	provider.consumeCodexEvent("buckley-session", []byte(`{"type":"item.updated","item":{"id":"collab-1","type":"collab_tool_call","tool":"spawn_agent","sender_thread_id":"parent-thread","receiver_thread_ids":["child-thread"],"agents_states":{"child-thread":{"status":"running"}},"status":"completed"}}`))
+	select {
+	case event := <-events:
+		if event.Type != telemetry.EventSubagentSpawned || event.SessionID != "buckley-session" || event.TaskID != "child-thread" {
+			t.Fatalf("unexpected event: %+v", event)
+		}
+		if event.Data["provider"] != "codex" || event.Data["parent_agent_id"] != "parent-thread" {
+			t.Fatalf("unexpected event data: %+v", event.Data)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for native subagent telemetry")
 	}
 }
 
@@ -681,4 +792,27 @@ func containsSubsequence(values, want []string) bool {
 		}
 	}
 	return false
+}
+
+type fakeProviderThreadStore struct {
+	threads map[string]string
+	loads   int
+}
+
+func (s *fakeProviderThreadStore) LoadProviderThread(sessionID, providerID string) (string, error) {
+	s.loads++
+	return s.threads[sessionID+"\x00"+providerID], nil
+}
+
+func (s *fakeProviderThreadStore) SaveProviderThread(sessionID, providerID, threadID string) error {
+	if s.threads == nil {
+		s.threads = make(map[string]string)
+	}
+	s.threads[sessionID+"\x00"+providerID] = threadID
+	return nil
+}
+
+func (s *fakeProviderThreadStore) DeleteProviderThread(sessionID, providerID string) error {
+	delete(s.threads, sessionID+"\x00"+providerID)
+	return nil
 }

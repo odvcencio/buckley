@@ -1,8 +1,17 @@
 package builtin
 
 import (
+	"context"
 	"testing"
+
+	"m31labs.dev/buckley/pkg/subagent"
 )
+
+type builtinSubagentRunnerFunc func(context.Context, subagent.Request, func(int)) (string, error)
+
+func (f builtinSubagentRunnerFunc) Run(ctx context.Context, request subagent.Request, started func(int)) (string, error) {
+	return f(ctx, request, started)
+}
 
 func TestSplitOneShotOutput(t *testing.T) {
 	tests := []struct {
@@ -374,6 +383,36 @@ func TestSubagentTool(t *testing.T) {
 		}
 		if result.Success {
 			t.Error("expected failure for missing task")
+		}
+	})
+
+	t.Run("spawn and wait for named agent", func(t *testing.T) {
+		manager := subagent.NewManager(builtinSubagentRunnerFunc(func(_ context.Context, request subagent.Request, started func(int)) (string, error) {
+			if request.Agent != "reviewer" || request.Spec != "daily" || request.Task != "inspect this" {
+				t.Fatalf("unexpected request: %+v", request)
+			}
+			started(99)
+			return "review complete", nil
+		}), 1)
+		t.Cleanup(func() { _ = manager.Close() })
+		managedTool := &SubagentTool{manager: manager}
+		spawned, err := managedTool.Execute(map[string]any{
+			"action":       "spawn",
+			"agent":        "reviewer",
+			"spec":         "daily",
+			"initial_task": "inspect this",
+		})
+		if err != nil || !spawned.Success {
+			t.Fatalf("spawn result=%+v err=%v", spawned, err)
+		}
+		run := spawned.Data["run"].(subagent.Snapshot)
+		finished, err := managedTool.Execute(map[string]any{"action": "wait", "id": run.ID, "timeout_seconds": 5})
+		if err != nil || !finished.Success {
+			t.Fatalf("wait result=%+v err=%v", finished, err)
+		}
+		got := finished.Data["run"].(subagent.Snapshot)
+		if got.State != subagent.StateCompleted || got.Output != "review complete" || got.PID != 99 {
+			t.Fatalf("unexpected completed run: %+v", got)
 		}
 	})
 }

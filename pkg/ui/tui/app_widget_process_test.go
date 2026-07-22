@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"m31labs.dev/buckley/pkg/ui/backend/sim"
 	"m31labs.dev/buckley/pkg/ui/widgets"
+	"m31labs.dev/fluffyui/backend/sim"
 )
 
 func TestFormatProcessElapsed(t *testing.T) {
@@ -151,5 +151,22 @@ func TestWidgetAppSidebarDoesNotAutoShowForTransientTools(t *testing.T) {
 	app.SetRunningTools(nil)
 	if !app.IsSidebarVisible() {
 		t.Fatal("sidebar should not auto-hide when transient telemetry clears")
+	}
+}
+
+func TestWidgetAppSteerAndQueueCommandsPrefillInput(t *testing.T) {
+	be := sim.New(80, 24)
+	app, err := NewWidgetApp(WidgetAppConfig{Backend: be})
+	if err != nil {
+		t.Fatalf("NewWidgetApp: %v", err)
+	}
+
+	app.handlePaletteCommand("steer")
+	if got := app.inputArea.Text(); got != "/steer " {
+		t.Fatalf("steer input = %q", got)
+	}
+	app.handlePaletteCommand("queue")
+	if got := app.inputArea.Text(); got != "/queue " {
+		t.Fatalf("queue input = %q", got)
 	}
 }

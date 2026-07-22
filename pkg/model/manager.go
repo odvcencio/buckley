@@ -11,12 +11,14 @@ import (
 	"time"
 
 	"m31labs.dev/buckley/pkg/config"
+	"m31labs.dev/buckley/pkg/telemetry"
 )
 
 const catalogFetchTimeout = 30 * time.Second
 
 // Manager manages provider routing and model metadata.
 type Manager struct {
+	catalogMu      sync.RWMutex
 	config         *config.Config
 	providers      map[string]Provider
 	providerOrder  []string
@@ -24,6 +26,38 @@ type Manager struct {
 	providerModels map[string][]string
 	modelProviders map[string]string
 	routingHooks   *RoutingHooks
+}
+
+// ProviderThreadStore persists native provider conversation identifiers so a
+// Buckley session can resume the same provider thread after a process restart.
+type ProviderThreadStore interface {
+	LoadProviderThread(sessionID, providerID string) (string, error)
+	SaveProviderThread(sessionID, providerID, threadID string) error
+	DeleteProviderThread(sessionID, providerID string) error
+}
+
+// EnableTelemetry wires live native-provider events into Buckley's telemetry hub.
+func (m *Manager) EnableTelemetry(hub *telemetry.Hub) {
+	if m == nil {
+		return
+	}
+	for _, provider := range m.providers {
+		if setter, ok := provider.(interface{ SetTelemetry(*telemetry.Hub) }); ok {
+			setter.SetTelemetry(hub)
+		}
+	}
+}
+
+// SetProviderThreadStore wires durable native-provider conversation state.
+func (m *Manager) SetProviderThreadStore(store ProviderThreadStore) {
+	if m == nil {
+		return
+	}
+	for _, provider := range m.providers {
+		if setter, ok := provider.(interface{ SetProviderThreadStore(ProviderThreadStore) }); ok {
+			setter.SetProviderThreadStore(store)
+		}
+	}
 }
 
 // NewManager creates a new model manager
@@ -88,14 +122,82 @@ func (m *Manager) Initialize() error {
 		}
 	}
 
+	m.catalogMu.Lock()
 	m.catalog = aggregated
 	m.providerModels = providerModels
 	m.modelProviders = modelProviders
+	m.catalogMu.Unlock()
 
 	if err := m.ensureConfiguredModels(); err != nil {
 		return fmt.Errorf("ensuring configured models: %w", err)
 	}
 	return nil
+}
+
+// RefreshProviderCatalog fetches a provider's current catalog and atomically
+// replaces only that provider's entries in the merged catalog.
+func (m *Manager) RefreshProviderCatalog(providerID string) error {
+	if m == nil {
+		return fmt.Errorf("model manager unavailable")
+	}
+	providerID = strings.TrimSpace(providerID)
+	provider, ok := m.providers[providerID]
+	if !ok {
+		return fmt.Errorf("provider not configured: %s", providerID)
+	}
+
+	var (
+		catalog *ModelCatalog
+		err     error
+	)
+	if refresher, ok := provider.(interface{ RefreshCatalog() (*ModelCatalog, error) }); ok {
+		catalog, err = refreshCatalogWithTimeout(refresher, catalogFetchTimeout)
+	} else {
+		catalog, err = fetchCatalogWithTimeout(provider, catalogFetchTimeout)
+	}
+	if err != nil {
+		return fmt.Errorf("refresh %s catalog: %w", providerID, err)
+	}
+	if catalog == nil {
+		return fmt.Errorf("refresh %s catalog: empty response", providerID)
+	}
+
+	m.catalogMu.Lock()
+	defer m.catalogMu.Unlock()
+	for _, modelID := range m.providerModels[providerID] {
+		delete(m.catalog, modelID)
+		delete(m.modelProviders, modelID)
+	}
+	modelIDs := make([]string, 0, len(catalog.Data))
+	for _, info := range catalog.Data {
+		m.catalog[info.ID] = info
+		m.modelProviders[info.ID] = providerID
+		modelIDs = append(modelIDs, info.ID)
+	}
+	sort.Strings(modelIDs)
+	m.providerModels[providerID] = modelIDs
+	return nil
+}
+
+func refreshCatalogWithTimeout(refresher interface{ RefreshCatalog() (*ModelCatalog, error) }, timeout time.Duration) (*ModelCatalog, error) {
+	if timeout <= 0 {
+		return refresher.RefreshCatalog()
+	}
+	type result struct {
+		catalog *ModelCatalog
+		err     error
+	}
+	resultCh := make(chan result, 1)
+	go func() {
+		catalog, err := refresher.RefreshCatalog()
+		resultCh <- result{catalog: catalog, err: err}
+	}()
+	select {
+	case result := <-resultCh:
+		return result.catalog, result.err
+	case <-time.After(timeout):
+		return nil, fmt.Errorf("refresh timed out after %s", timeout)
+	}
 }
 
 func fetchCatalogWithTimeout(provider Provider, timeout time.Duration) (*ModelCatalog, error) {
@@ -128,9 +230,12 @@ func fetchCatalogWithTimeout(provider Provider, timeout time.Duration) (*ModelCa
 // GetModelInfo returns information about a model
 func (m *Manager) GetModelInfo(modelID string) (*ModelInfo, error) {
 	for _, candidate := range m.modelInfoCandidates(modelID) {
+		m.catalogMu.RLock()
 		if info, ok := m.catalog[candidate]; ok {
+			m.catalogMu.RUnlock()
 			return &info, nil
 		}
+		m.catalogMu.RUnlock()
 	}
 
 	provider := m.providerForModel(modelID)
@@ -150,6 +255,8 @@ func (m *Manager) GetModelInfo(modelID string) (*ModelInfo, error) {
 
 // GetCatalog returns the merged model catalog
 func (m *Manager) GetCatalog() *ModelCatalog {
+	m.catalogMu.RLock()
+	defer m.catalogMu.RUnlock()
 	var models []ModelInfo
 	for _, info := range m.catalog {
 		models = append(models, info)
@@ -169,7 +276,10 @@ func (m *Manager) ProviderIDForModel(modelID string) string {
 	if modelID == "" {
 		return ""
 	}
-	if providerID, ok := m.modelProviders[modelID]; ok {
+	m.catalogMu.RLock()
+	providerID, ok := m.modelProviders[modelID]
+	m.catalogMu.RUnlock()
+	if ok {
 		return providerID
 	}
 	if provider := m.providerForModel(modelID); provider != nil {
@@ -541,6 +651,8 @@ func (m *Manager) selectFallbackModel() (string, bool) {
 		}
 	}
 
+	m.catalogMu.RLock()
+	defer m.catalogMu.RUnlock()
 	for _, models := range m.providerModels {
 		if len(models) > 0 {
 			return models[0], true
@@ -555,6 +667,8 @@ func (m *Manager) selectFallbackModel() (string, bool) {
 }
 
 func (m *Manager) firstModelForProvider(providerID string) (string, bool) {
+	m.catalogMu.RLock()
+	defer m.catalogMu.RUnlock()
 	models := m.providerModels[providerID]
 	if len(models) == 0 {
 		return "", false
@@ -564,9 +678,12 @@ func (m *Manager) firstModelForProvider(providerID string) (string, bool) {
 
 func (m *Manager) modelAvailable(modelID string) bool {
 	for _, candidate := range m.modelInfoCandidates(modelID) {
+		m.catalogMu.RLock()
 		if _, ok := m.catalog[candidate]; ok {
+			m.catalogMu.RUnlock()
 			return true
 		}
+		m.catalogMu.RUnlock()
 	}
 	return false
 }
@@ -629,14 +746,21 @@ func (m *Manager) SupportsReasoning(modelID string) bool {
 
 // SupportsTools checks if a model supports function/tool calling
 func (m *Manager) SupportsTools(modelID string) bool {
+	return m.SupportsParameter(modelID, "tools") || m.SupportsParameter(modelID, "functions")
+}
+
+// SupportsParameter reports whether the provider catalog advertises a request
+// field for this model. Provider-specific optional fields must be gated by this
+// method so a model that supports tools is not assumed to support every tool
+// control field.
+func (m *Manager) SupportsParameter(modelID, parameter string) bool {
 	info, err := m.GetModelInfo(modelID)
 	if err != nil {
 		return false
 	}
-
-	// Check supported_parameters for "tools" or "functions"
-	for _, param := range info.SupportedParameters {
-		if param == "tools" || param == "functions" {
+	parameter = strings.TrimSpace(parameter)
+	for _, candidate := range info.SupportedParameters {
+		if candidate == parameter {
 			return true
 		}
 	}
@@ -696,6 +820,8 @@ func (m *Manager) modelInfoCandidates(modelID string) []string {
 		add(providerID + "/" + modelID)
 	}
 
+	m.catalogMu.RLock()
+	defer m.catalogMu.RUnlock()
 	for knownModelID := range m.catalog {
 		if strings.HasSuffix(knownModelID, "/"+modelID) {
 			add(knownModelID)

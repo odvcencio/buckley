@@ -5,11 +5,11 @@ import (
 	"strings"
 	"testing"
 
-	"m31labs.dev/buckley/pkg/ui/backend"
-	"m31labs.dev/buckley/pkg/ui/markdown"
-	"m31labs.dev/buckley/pkg/ui/runtime"
-	"m31labs.dev/buckley/pkg/ui/terminal"
-	"m31labs.dev/buckley/pkg/ui/theme"
+	"m31labs.dev/fluffyui/backend"
+	"m31labs.dev/fluffyui/markdown"
+	"m31labs.dev/fluffyui/runtime"
+	"m31labs.dev/fluffyui/terminal"
+	"m31labs.dev/fluffyui/theme"
 )
 
 func TestNewChatView(t *testing.T) {
@@ -20,6 +20,38 @@ func TestNewChatView(t *testing.T) {
 	}
 	if cv.buffer == nil {
 		t.Error("expected non-nil buffer")
+	}
+}
+
+func TestChatView_FluffyMarkdownRenderingMatrix(t *testing.T) {
+	cv := NewChatView()
+	cv.SetMarkdownRenderer(markdown.NewRenderer(theme.DefaultTheme()), backend.DefaultStyle())
+	cv.Layout(runtime.Rect{X: 0, Y: 0, Width: 80, Height: 80})
+	cv.AddMessage(`# Render
+
+**bold** and ~~retired~~ with [a link](https://example.com).
+
+- [x] complete
+
+> quoted context
+
+| Name | State |
+|:-----|------:|
+| Buckley | ready |
+
+`+"```go\nfmt.Println(\"hello\")\n```"+`
+`, "assistant")
+
+	var rendered strings.Builder
+	for _, line := range cv.buffer.GetVisibleLines() {
+		rendered.WriteString(line.Content)
+		rendered.WriteByte('\n')
+	}
+	text := rendered.String()
+	for _, want := range []string{"Render", "bold", "retired", "complete", "quoted context", "Name", "State", "Buckley", "ready", "fmt.Println", "╭"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("FluffyUI markdown output missing %q:\n%s", want, text)
+		}
 	}
 }
 

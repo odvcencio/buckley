@@ -154,10 +154,10 @@ func (r *Registry) applyDefaultKinds() {
 		"browser_close":           "execute",
 
 		// Delegation
-		"codex":    "execute",
-		"claude":   "execute",
-		"buckley":  "execute",
-		"subagent": "execute",
+		"invoke_codex":   "execute",
+		"invoke_claude":  "execute",
+		"invoke_buckley": "execute",
+		"spawn_subagent": "execute",
 
 		// Misc
 		"create_skill":    "edit",
@@ -176,9 +176,20 @@ func (r *Registry) applyDefaultKinds() {
 // EnableTelemetry wires telemetry events for selected built-in tools.
 func (r *Registry) EnableTelemetry(hub *telemetry.Hub, sessionID string) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	r.telemetryHub = hub
 	r.telemetrySession = sessionID
+	tools := make([]Tool, 0, len(r.tools))
+	for _, current := range r.tools {
+		tools = append(tools, current)
+	}
+	r.mu.Unlock()
+	for _, current := range tools {
+		if setter, ok := current.(interface {
+			SetTelemetry(*telemetry.Hub, string)
+		}); ok {
+			setter.SetTelemetry(hub, sessionID)
+		}
+	}
 }
 
 // EnableMissionControl configures mission-control-backed approvals for mutating tools.

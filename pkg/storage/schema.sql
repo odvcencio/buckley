@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     project_path TEXT,
     git_repo TEXT,
     git_branch TEXT,
+    model TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     last_active TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     message_count INT DEFAULT 0,
@@ -133,6 +134,17 @@ CREATE TABLE IF NOT EXISTS api_calls (
 CREATE INDEX IF NOT EXISTS idx_api_calls_session ON api_calls(session_id);
 CREATE INDEX IF NOT EXISTS idx_api_calls_timestamp ON api_calls(timestamp);
 
+-- Durable IPC event log: reconnecting clients can resume progress streams.
+CREATE TABLE IF NOT EXISTS ipc_events (
+    event_id TEXT PRIMARY KEY,
+    session_id TEXT,
+    event_type TEXT NOT NULL,
+    payload_json TEXT,
+    created_at TIMESTAMP NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_ipc_events_session_id ON ipc_events(session_id, event_id);
+
 -- Feature sessions table: links sessions to feature development plans and worktrees (Phase 4)
 CREATE TABLE IF NOT EXISTS feature_sessions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -203,6 +215,16 @@ CREATE TABLE IF NOT EXISTS session_skills (
 
 CREATE INDEX IF NOT EXISTS idx_session_skills_session ON session_skills(session_id);
 CREATE INDEX IF NOT EXISTS idx_session_skills_active ON session_skills(session_id, is_active);
+
+-- Native provider conversation IDs for durable chat resumption.
+CREATE TABLE IF NOT EXISTS provider_threads (
+    session_id TEXT NOT NULL,
+    provider_id TEXT NOT NULL,
+    thread_id TEXT NOT NULL,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (session_id, provider_id),
+    FOREIGN KEY (session_id) REFERENCES sessions(session_id) ON DELETE CASCADE
+);
 
 -- Executions table: tracks orchestrator execution metadata
 CREATE TABLE IF NOT EXISTS executions (

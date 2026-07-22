@@ -4,10 +4,10 @@ import (
 	"slices"
 	"testing"
 
-	"m31labs.dev/buckley/pkg/ui/backend"
 	"m31labs.dev/buckley/pkg/ui/filepicker"
-	"m31labs.dev/buckley/pkg/ui/runtime"
-	"m31labs.dev/buckley/pkg/ui/terminal"
+	"m31labs.dev/fluffyui/backend"
+	"m31labs.dev/fluffyui/runtime"
+	"m31labs.dev/fluffyui/terminal"
 )
 
 func TestFilePickerWidget_Measure(t *testing.T) {
@@ -191,8 +191,10 @@ func TestFilePickerWidget_Render_QueryCursorUsesRuneColumns(t *testing.T) {
 	assertCellRune(t, buf, x, y, '@')
 	assertCellRune(t, buf, x+1, y, ' ')
 	assertCellRune(t, buf, x+2, y, '模')
-	assertCellRune(t, buf, x+3, y, '型')
-	assertCellRune(t, buf, x+4, y, '█')
+	assertCellRune(t, buf, x+3, y, ' ')
+	assertCellRune(t, buf, x+4, y, '型')
+	assertCellRune(t, buf, x+5, y, ' ')
+	assertCellRune(t, buf, x+6, y, '█')
 }
 
 func TestFilePickerWidget_RenderMatch_UsesRuneColumns(t *testing.T) {
@@ -263,7 +265,7 @@ func TestTruncateFilePickerPath(t *testing.T) {
 			path:          "pkg/模型超长文件名.go",
 			highlights:    []int{4, 8, 10},
 			maxWidth:      8,
-			expectedPath:  "模型超长文...",
+			expectedPath:  "模型...",
 			expectedMarks: []int{0, 4},
 		},
 	}

@@ -83,6 +83,12 @@ type RLMDefinition interface {
 	ParseResult(response string) (any, error)
 }
 
+// RLMExecutionBudget optionally caps model/tool iterations for commands where
+// bounded sampling is part of the product contract.
+type RLMExecutionBudget interface {
+	MaxRLMIterations() int
+}
+
 // RLMResultValidator optionally adds semantic validation to an RLM command.
 // RunRLM retries responses that fail this validation, using the validation
 // error as corrective guidance for the next attempt.

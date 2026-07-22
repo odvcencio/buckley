@@ -1,14 +1,64 @@
 package tui
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
 
 	"m31labs.dev/buckley/pkg/conversation"
 	"m31labs.dev/buckley/pkg/model"
-	"m31labs.dev/buckley/pkg/ui/backend/sim"
+	"m31labs.dev/fluffyui/backend/sim"
 )
+
+func TestSubmitPrompt_SteersActiveStream(t *testing.T) {
+	app, err := NewWidgetApp(WidgetAppConfig{Backend: sim.New(80, 24)})
+	if err != nil {
+		t.Fatalf("NewWidgetApp: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	sess := &SessionState{
+		ID:           "session-1",
+		Conversation: conversation.New("session-1"),
+		Streaming:    true,
+		Cancel:       cancel,
+	}
+	ctrl := &Controller{app: app, sessions: []*SessionState{sess}}
+
+	ctrl.submitPrompt("focus on the parser", true)
+
+	if ctx.Err() != context.Canceled {
+		t.Fatal("steering did not cancel the active model request")
+	}
+	if len(sess.MessageQueue) != 1 || !sess.MessageQueue[0].Steering {
+		t.Fatalf("steering queue = %#v", sess.MessageQueue)
+	}
+}
+
+func TestSubmitPrompt_ExplicitQueueDoesNotInterrupt(t *testing.T) {
+	app, err := NewWidgetApp(WidgetAppConfig{Backend: sim.New(80, 24)})
+	if err != nil {
+		t.Fatalf("NewWidgetApp: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	sess := &SessionState{
+		ID:           "session-1",
+		Conversation: conversation.New("session-1"),
+		Streaming:    true,
+		Cancel:       cancel,
+	}
+	ctrl := &Controller{app: app, sessions: []*SessionState{sess}}
+
+	ctrl.submitPrompt("then check tests", false)
+
+	if ctx.Err() != nil {
+		t.Fatal("explicit queue interrupted the active model request")
+	}
+	if len(sess.MessageQueue) != 1 || sess.MessageQueue[0].Steering {
+		t.Fatalf("follow-up queue = %#v", sess.MessageQueue)
+	}
+}
 
 func TestHandleSubmit_SlashCommandDoesNotDeadlock(t *testing.T) {
 	app, err := NewWidgetApp(WidgetAppConfig{Backend: sim.New(80, 24)})

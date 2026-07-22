@@ -4,9 +4,9 @@ import (
 	"strconv"
 	"strings"
 
-	"m31labs.dev/buckley/pkg/ui/backend"
-	"m31labs.dev/buckley/pkg/ui/runtime"
-	"m31labs.dev/buckley/pkg/ui/terminal"
+	"m31labs.dev/fluffyui/backend"
+	"m31labs.dev/fluffyui/runtime"
+	"m31labs.dev/fluffyui/terminal"
 )
 
 // DiffLine represents a single line in a diff preview.
@@ -36,6 +36,15 @@ type ApprovalRequest struct {
 	AddedLines   int        // Lines added (for diff summary)
 	RemovedLines int        // Lines removed (for diff summary)
 }
+
+// ApprovalResponse is emitted by ApprovalWidget for application handling.
+type ApprovalResponse struct {
+	RequestID   string
+	Approved    bool
+	AlwaysAllow bool
+}
+
+func (ApprovalResponse) Command() {}
 
 // ApprovalWidget displays a modal dialog for tool approval.
 type ApprovalWidget struct {
@@ -149,7 +158,7 @@ func (a *ApprovalWidget) Render(ctx runtime.RenderContext) {
 
 	// Draw warning title
 	title := " Approval Required "
-	titleX := b.X + (b.Width-runeLen(title))/2
+	titleX := b.X + (b.Width-displayWidth(title))/2
 	ctx.Buffer.SetString(titleX, b.Y, title, a.titleStyle)
 
 	y := b.Y + 2
@@ -157,12 +166,12 @@ func (a *ApprovalWidget) Render(ctx runtime.RenderContext) {
 	// Draw tool and operation info
 	toolLabel := "Tool: "
 	ctx.Buffer.SetString(b.X+2, y, toolLabel, a.labelStyle)
-	ctx.Buffer.SetString(b.X+2+runeLen(toolLabel), y, a.request.Tool, a.textStyle)
+	ctx.Buffer.SetString(b.X+2+displayWidth(toolLabel), y, a.request.Tool, a.textStyle)
 	y++
 
 	opLabel := "Operation: "
 	ctx.Buffer.SetString(b.X+2, y, opLabel, a.labelStyle)
-	ctx.Buffer.SetString(b.X+2+runeLen(opLabel), y, a.request.Operation, a.textStyle)
+	ctx.Buffer.SetString(b.X+2+displayWidth(opLabel), y, a.request.Operation, a.textStyle)
 	y++
 
 	// Draw description if present
@@ -187,8 +196,8 @@ func (a *ApprovalWidget) Render(ctx runtime.RenderContext) {
 		y++
 		fileLabel := "File: "
 		ctx.Buffer.SetString(b.X+2, y, fileLabel, a.labelStyle)
-		filePath := truncateString(a.request.FilePath, b.Width-4-runeLen(fileLabel))
-		ctx.Buffer.SetString(b.X+2+runeLen(fileLabel), y, filePath, a.textStyle)
+		filePath := truncateString(a.request.FilePath, b.Width-4-displayWidth(fileLabel))
+		ctx.Buffer.SetString(b.X+2+displayWidth(fileLabel), y, filePath, a.textStyle)
 		y++
 		y++
 		ctx.Buffer.SetString(b.X+2, y, "Changes:", a.labelStyle)
@@ -296,6 +305,7 @@ func (a *ApprovalWidget) drawDiffLine(buf *runtime.Buffer, x, y, width int, line
 	content := truncateRunes(prefix+line.Content, width-3)
 
 	buf.Set(x, y, '│', a.borderStyle)
+	buf.Fill(runtime.Rect{X: x + 1, Y: y, Width: width - 2, Height: 1}, ' ', style)
 	buf.SetString(x+1, y, content, style)
 	buf.Set(x+width-1, y, '│', a.borderStyle)
 }
@@ -323,11 +333,7 @@ func truncateRunes(value string, maxWidth int) string {
 	if maxWidth <= 0 {
 		return ""
 	}
-	runes := []rune(value)
-	if len(runes) <= maxWidth {
-		return value
-	}
-	return string(runes[:maxWidth])
+	return clipString(value, maxWidth)
 }
 
 // drawButtons renders the action buttons at the bottom.
@@ -335,7 +341,7 @@ func (a *ApprovalWidget) drawButtons(buf *runtime.Buffer, b runtime.Rect) {
 	y := b.Y + b.Height - 2
 
 	buttons := "[A]llow    [D]eny    A[l]ways allow"
-	x := b.X + (b.Width-runeLen(buttons))/2
+	x := b.X + (b.Width-displayWidth(buttons))/2
 
 	// Draw with highlights on key letters
 	col := 0
@@ -360,7 +366,7 @@ func (a *ApprovalWidget) HandleMessage(msg runtime.Message) runtime.HandleResult
 	case terminal.KeyEscape:
 		// Escape = Deny
 		return runtime.WithCommands(
-			runtime.ApprovalResponse{
+			ApprovalResponse{
 				RequestID:   a.request.ID,
 				Approved:    false,
 				AlwaysAllow: false,
@@ -390,7 +396,7 @@ func (a *ApprovalWidget) HandleMessage(msg runtime.Message) runtime.HandleResult
 		switch key.Rune {
 		case 'a', 'A', 'y', 'Y': // Allow / Yes
 			return runtime.WithCommands(
-				runtime.ApprovalResponse{
+				ApprovalResponse{
 					RequestID:   a.request.ID,
 					Approved:    true,
 					AlwaysAllow: false,
@@ -400,7 +406,7 @@ func (a *ApprovalWidget) HandleMessage(msg runtime.Message) runtime.HandleResult
 
 		case 'd', 'D', 'n', 'N': // Deny / No
 			return runtime.WithCommands(
-				runtime.ApprovalResponse{
+				ApprovalResponse{
 					RequestID:   a.request.ID,
 					Approved:    false,
 					AlwaysAllow: false,
@@ -410,7 +416,7 @@ func (a *ApprovalWidget) HandleMessage(msg runtime.Message) runtime.HandleResult
 
 		case 'l', 'L': // Always allow
 			return runtime.WithCommands(
-				runtime.ApprovalResponse{
+				ApprovalResponse{
 					RequestID:   a.request.ID,
 					Approved:    true,
 					AlwaysAllow: true,

@@ -55,19 +55,18 @@ export function CommandPalette({ isOpen, onClose, onRunCommand }: Props) {
 
   useEffect(() => {
     if (!isOpen) return
-    setQuery('')
-    setActiveIndex(0)
     const handle = window.setTimeout(() => {
       inputRef.current?.focus()
     }, 0)
     return () => window.clearTimeout(handle)
   }, [isOpen])
 
-  useEffect(() => {
-    setActiveIndex(0)
-  }, [normalized])
-
   if (!isOpen) return null
+
+  const handleQueryChange = (value: string) => {
+    setQuery(value)
+    setActiveIndex(0)
+  }
 
   const runCommand = (command: string) => {
     const trimmed = command.trim()
@@ -136,7 +135,7 @@ export function CommandPalette({ isOpen, onClose, onRunCommand }: Props) {
               <input
                 ref={inputRef}
                 value={query}
-                onChange={(event) => setQuery(event.target.value)}
+                onChange={(event) => handleQueryChange(event.target.value)}
                 onKeyDown={handleKeyDown}
                 placeholder="Type a command or filter list..."
                 className="w-full rounded-xl bg-[var(--color-depth)] border border-[var(--color-border-subtle)] pl-10 pr-4 py-2.5 text-sm text-[var(--color-text)] focus:outline-none focus:ring-2 focus:ring-[var(--color-accent)]/30"

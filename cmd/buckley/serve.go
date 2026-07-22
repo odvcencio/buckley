@@ -259,6 +259,9 @@ func runServeCommand(args []string) error {
 	commandGateway := command.NewGateway()
 	planStore := orchestrator.NewFilePlanStore(appCfg.Artifacts.PlanningDir)
 	models := initServeModels(appCfg)
+	if models != nil {
+		models.SetProviderThreadStore(store)
+	}
 
 	if stopACP, err := maybeStartServeACP(appCfg, models, store, opts.bind); err != nil {
 		return err

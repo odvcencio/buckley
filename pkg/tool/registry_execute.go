@@ -162,9 +162,23 @@ func (r *Registry) Close() error {
 	r.mu.Lock()
 	sb := r.sandbox
 	r.sandbox = nil
-	r.mu.Unlock()
-	if sb != nil {
-		return sb.Close()
+	tools := make([]Tool, 0, len(r.tools))
+	for _, current := range r.tools {
+		tools = append(tools, current)
 	}
-	return nil
+	r.mu.Unlock()
+	var firstErr error
+	for _, current := range tools {
+		if closer, ok := current.(interface{ Close() error }); ok {
+			if err := closer.Close(); err != nil && firstErr == nil {
+				firstErr = err
+			}
+		}
+	}
+	if sb != nil {
+		if err := sb.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
 }

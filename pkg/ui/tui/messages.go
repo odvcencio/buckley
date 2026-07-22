@@ -1,7 +1,11 @@
 // Package tui provides the terminal user interface.
 package tui
 
-import "time"
+import (
+	"time"
+
+	"m31labs.dev/buckley/pkg/ui/widgets"
+)
 
 // Message is the interface for all events flowing through the UI.
 // All UI state mutations happen through message processing.
@@ -156,6 +160,14 @@ type ThinkingMsg struct {
 }
 
 func (ThinkingMsg) isMessage() {}
+
+// ModelPickerMsg opens a searchable model catalog overlay on the UI loop.
+type ModelPickerMsg struct {
+	Items    []widgets.PaletteItem
+	OnSelect func(item widgets.PaletteItem)
+}
+
+func (ModelPickerMsg) isMessage() {}
 
 // --- Overlay/Mode Events ---
 

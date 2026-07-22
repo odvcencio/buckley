@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 
 	"m31labs.dev/buckley/pkg/model"
@@ -14,6 +15,12 @@ import (
 type toolLoopState struct {
 	useTools   bool
 	totalUsage model.Usage
+	progress   toolLoopProgress
+}
+
+type toolLoopProgress struct {
+	started       bool
+	reasoningOpen bool
 }
 
 type toolLoopIterationResult struct {
@@ -27,10 +34,9 @@ func (c *Controller) runToolLoop(ctx context.Context, sess *SessionState, modelI
 		return "", nil, "", err
 	}
 
-	maxIterations := interactiveMaxToolIterations
 	state := c.newToolLoopState(sess, modelID)
-	for iter := 0; iter < maxIterations; iter++ {
-		result, err := c.runToolLoopIteration(ctx, sess, modelID, iter, maxIterations, &state)
+	for iter := 0; ; iter++ {
+		result, err := c.runToolLoopIteration(ctx, sess, modelID, iter, &state)
 		if err != nil {
 			return "", nil, "", err
 		}
@@ -38,8 +44,6 @@ func (c *Controller) runToolLoop(ctx context.Context, sess *SessionState, modelI
 			return c.finishToolLoopResponse(sess, result.message, state.totalUsage, result.finishReason)
 		}
 	}
-
-	return c.checkpointToolLoop(sess, state.totalUsage, maxIterations)
 }
 
 func (c *Controller) validateToolLoopInputs(sess *SessionState) error {
@@ -60,7 +64,7 @@ func (c *Controller) newToolLoopState(sess *SessionState, modelID string) toolLo
 	}
 }
 
-func (c *Controller) runToolLoopIteration(ctx context.Context, sess *SessionState, modelID string, iteration, maxIterations int, state *toolLoopState) (toolLoopIterationResult, error) {
+func (c *Controller) runToolLoopIteration(ctx context.Context, sess *SessionState, modelID string, iteration int, state *toolLoopState) (toolLoopIterationResult, error) {
 	if ctx.Err() != nil {
 		return toolLoopIterationResult{}, ctx.Err()
 	}
@@ -69,7 +73,7 @@ func (c *Controller) runToolLoopIteration(ctx context.Context, sess *SessionStat
 	req, nextUseTools := c.buildToolLoopRequest(sess, modelID, state.useTools, allowedTools)
 	state.useTools = nextUseTools
 
-	resp, err := c.callToolLoopModel(ctx, req, modelID, iteration, maxIterations)
+	resp, err := c.callToolLoopModel(ctx, req, modelID, iteration, state)
 	if err != nil {
 		return toolLoopIterationResult{}, c.handleToolLoopModelError(err, state)
 	}
@@ -79,7 +83,7 @@ func (c *Controller) runToolLoopIteration(ctx context.Context, sess *SessionStat
 	if err != nil {
 		return toolLoopIterationResult{}, err
 	}
-	return c.handleToolLoopChoice(sess, choice.Message, allowedTools, choice.FinishReason), nil
+	return c.handleToolLoopChoice(sess, choice.Message, allowedTools, choice.FinishReason, state), nil
 }
 
 func (c *Controller) handleToolLoopModelError(err error, state *toolLoopState) error {
@@ -91,7 +95,7 @@ func (c *Controller) handleToolLoopModelError(err error, state *toolLoopState) e
 	return err
 }
 
-func (c *Controller) handleToolLoopChoice(sess *SessionState, msg model.Message, allowedTools []string, finishReason string) toolLoopIterationResult {
+func (c *Controller) handleToolLoopChoice(sess *SessionState, msg model.Message, allowedTools []string, finishReason string, state *toolLoopState) toolLoopIterationResult {
 	if len(msg.ToolCalls) == 0 {
 		return toolLoopIterationResult{
 			done:         true,
@@ -102,7 +106,7 @@ func (c *Controller) handleToolLoopChoice(sess *SessionState, msg model.Message,
 
 	toolCalls := normalizeToolLoopCalls(sess.ToolRegistry, msg.ToolCalls, allowedTools)
 	c.recordToolLoopCalls(sess, toolCalls, msg)
-	c.executeToolLoopCalls(sess, toolCalls, allowedTools)
+	c.executeToolLoopCalls(sess, toolCalls, allowedTools, state)
 	return toolLoopIterationResult{}
 }
 
@@ -125,22 +129,135 @@ func (c *Controller) buildToolLoopRequest(sess *SessionState, modelID string, us
 		if len(tools) > 0 {
 			req.Tools = tools
 			req.ToolChoice = "auto"
+			if c.modelMgr != nil && c.modelMgr.SupportsParameter(modelID, "parallel_tool_calls") {
+				sequential := false
+				req.ParallelToolCalls = &sequential
+			}
 		} else {
 			useTools = false
 		}
 	}
 
-	if effort := model.ResolveReasoningEffort(c.cfg, c.modelMgr, c.rulesEngine, modelID, "execution"); effort != "" {
-		req.Reasoning = &model.ReasoningConfig{Effort: effort}
+	if c.modelMgr != nil && c.modelMgr.SupportsReasoning(modelID) {
+		exclude := false
+		req.Reasoning = &model.ReasoningConfig{Exclude: &exclude}
+		if effort := model.ResolveReasoningEffort(c.cfg, c.modelMgr, c.rulesEngine, modelID, "execution"); effort != "" {
+			req.Reasoning.Effort = effort
+		} else {
+			enabled := true
+			req.Reasoning.Enabled = &enabled
+		}
+	}
+	if c.modelMgr != nil && c.modelMgr.SupportsParameter(modelID, "include_reasoning") {
+		include := true
+		req.IncludeReasoning = &include
 	}
 	return req, useTools
 }
 
-func (c *Controller) callToolLoopModel(ctx context.Context, req model.ChatRequest, modelID string, iteration, maxIterations int) (*model.ChatResponse, error) {
-	c.app.StartProcessStatus(modelProcessStatus(modelID, iteration, maxIterations, len(req.Tools), req.Reasoning))
-	resp, err := c.modelMgr.ChatCompletion(ctx, req)
-	c.app.StopProcessStatus()
-	return resp, err
+func (c *Controller) callToolLoopModel(ctx context.Context, req model.ChatRequest, modelID string, iteration int, state *toolLoopState) (*model.ChatResponse, error) {
+	c.app.StartProcessStatus(modelProcessStatus(modelID, iteration, len(req.Tools), req.Reasoning))
+	defer c.app.StopProcessStatus()
+
+	chunks, errs := c.modelMgr.ChatCompletionStream(ctx, req)
+	accumulator := model.AcquireStreamAccumulator()
+	defer model.ReleaseStreamAccumulator(accumulator)
+	if state != nil {
+		state.progress.reasoningOpen = false
+	}
+
+	var responseID string
+	var responseModel string
+	var finishReason string
+	receivedChoice := false
+	for chunks != nil || errs != nil {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case chunk, ok := <-chunks:
+			if !ok {
+				chunks = nil
+				continue
+			}
+			if chunk.ID != "" {
+				responseID = chunk.ID
+			}
+			if chunk.Model != "" {
+				responseModel = chunk.Model
+			}
+			accumulator.Add(chunk)
+			for _, choice := range chunk.Choices {
+				receivedChoice = true
+				c.appendReasoningProgress(state, choice.Delta)
+				if choice.FinishReason != nil {
+					finishReason = *choice.FinishReason
+				}
+			}
+		case err, ok := <-errs:
+			if !ok {
+				errs = nil
+				continue
+			}
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+
+	message := accumulator.FinalizeWithTokenParsing()
+	if !receivedChoice {
+		return nil, model.NoResponseChoicesError(req, &model.ChatResponse{ID: responseID, Model: responseModel})
+	}
+	if message.Role == "" {
+		message.Role = "assistant"
+	}
+	usage := model.Usage{}
+	if streamedUsage := accumulator.Usage(); streamedUsage != nil {
+		usage = *streamedUsage
+	}
+	return &model.ChatResponse{
+		ID:    responseID,
+		Model: responseModel,
+		Choices: []model.Choice{{
+			Message:      message,
+			FinishReason: finishReason,
+		}},
+		Usage: usage,
+	}, nil
+}
+
+func (c *Controller) appendReasoningProgress(state *toolLoopState, delta model.MessageDelta) {
+	if c == nil || c.app == nil || state == nil {
+		return
+	}
+	text := delta.Reasoning
+	if strings.TrimSpace(text) == "" {
+		text = visibleReasoningDetails(delta.ReasoningDetails)
+	}
+	if text == "" {
+		return
+	}
+	if !state.progress.started {
+		state.progress.started = true
+	}
+	if !state.progress.reasoningOpen {
+		c.app.AddMessage("Thinking\n\n"+text, "thinking")
+		state.progress.reasoningOpen = true
+		return
+	}
+	c.app.AppendToLastMessage(text)
+}
+
+func visibleReasoningDetails(details []model.ReasoningDetail) string {
+	var b strings.Builder
+	for _, detail := range details {
+		if detail.Text != "" {
+			b.WriteString(detail.Text)
+		} else if detail.Summary != "" {
+			b.WriteString(detail.Summary)
+		}
+	}
+	return b.String()
 }
 
 func firstToolLoopChoice(req model.ChatRequest, resp *model.ChatResponse) (model.Choice, error) {
@@ -161,7 +278,6 @@ func (c *Controller) finishToolLoopResponse(sess *SessionState, msg model.Messag
 	}
 	sess.Conversation.AddAssistantMessageWithReasoningDetails(text, msg.Reasoning, msg.ReasoningDetails)
 	c.saveLatestConversationMessage(sess)
-	c.setAwaitingToolLoopDecision(sess, false)
 	return text, &totalUsage, finishReason, nil
 }
 
@@ -183,24 +299,30 @@ func (c *Controller) recordToolLoopCalls(sess *SessionState, calls []model.ToolC
 	c.saveLatestConversationMessage(sess)
 }
 
-func (c *Controller) executeToolLoopCalls(sess *SessionState, calls []model.ToolCall, allowedTools []string) {
+func (c *Controller) executeToolLoopCalls(sess *SessionState, calls []model.ToolCall, allowedTools []string, state *toolLoopState) {
 	for i, tc := range calls {
-		c.executeToolLoopCall(sess, tc, i+1, len(calls), allowedTools)
+		c.executeToolLoopCall(sess, tc, i+1, len(calls), allowedTools, state)
 	}
 }
 
-func (c *Controller) executeToolLoopCall(sess *SessionState, tc model.ToolCall, index, total int, allowedTools []string) {
+func (c *Controller) executeToolLoopCall(sess *SessionState, tc model.ToolCall, index, total int, allowedTools []string, state *toolLoopState) {
+	c.appendToolCallProgress(state, tc)
 	params, err := parseToolParams(tc.Function.Arguments)
 	if err != nil {
-		c.addToolLoopResponse(sess, tc, fmt.Sprintf("Error: invalid tool arguments: %v", err))
+		message := fmt.Sprintf("Error: invalid tool arguments: %v", err)
+		c.appendToolResultProgress(state, tc.Function.Name, nil, fmt.Errorf("invalid arguments: %w", err))
+		c.addToolLoopResponse(sess, tc, message)
 		return
 	}
 	if sess.ToolRegistry == nil {
+		c.appendToolResultProgress(state, tc.Function.Name, nil, fmt.Errorf("tool registry unavailable"))
 		c.addToolLoopResponse(sess, tc, "Error: tool registry unavailable")
 		return
 	}
 	if !tool.IsToolAllowed(tc.Function.Name, allowedTools) {
-		c.addToolLoopResponse(sess, tc, fmt.Sprintf("Error: tool %s not allowed by active skills", tc.Function.Name))
+		err := fmt.Errorf("tool %s not allowed by active skills", tc.Function.Name)
+		c.appendToolResultProgress(state, tc.Function.Name, nil, err)
+		c.addToolLoopResponse(sess, tc, "Error: "+err.Error())
 		return
 	}
 	if params == nil {
@@ -213,11 +335,8 @@ func (c *Controller) executeToolLoopCall(sess *SessionState, tc model.ToolCall, 
 	c.app.StartProcessStatus(fmt.Sprintf("Running %s (%d/%d)", compactStatusText(tc.Function.Name, 36), index, total))
 	result, execErr := sess.ToolRegistry.Execute(tc.Function.Name, params)
 	c.app.StopProcessStatus()
+	c.appendToolResultProgress(state, tc.Function.Name, result, execErr)
 	c.addToolLoopResponse(sess, tc, formatToolResultForModel(result, execErr))
-
-	if display := toolDisplayMessage(tc.Function.Name, result, execErr); display != "" {
-		c.app.AddMessage(display, "system")
-	}
 }
 
 func (c *Controller) addToolLoopResponse(sess *SessionState, tc model.ToolCall, text string) {
@@ -225,43 +344,150 @@ func (c *Controller) addToolLoopResponse(sess *SessionState, tc model.ToolCall, 
 	c.saveLatestConversationMessage(sess)
 }
 
-func (c *Controller) checkpointToolLoop(sess *SessionState, totalUsage model.Usage, maxIterations int) (string, *model.Usage, string, error) {
-	checkpoint := maxToolIterationsCheckpoint(maxIterations)
-	sess.Conversation.AddAssistantMessage(checkpoint)
-	c.saveLatestConversationMessage(sess)
-	c.setAwaitingToolLoopDecision(sess, true)
-	return checkpoint, &totalUsage, toolLoopCheckpointFinishReason, nil
+func (c *Controller) appendToolCallProgress(state *toolLoopState, tc model.ToolCall) {
+	if c == nil || c.app == nil || state == nil {
+		return
+	}
+	if !state.progress.started {
+		state.progress.started = true
+	}
+	state.progress.reasoningOpen = false
+	c.app.AddMessage(toolCallProgressBlock(tc), "tool")
 }
 
-func modelProcessStatus(modelID string, iteration, maxIterations, toolCount int, reasoning *model.ReasoningConfig) string {
+func (c *Controller) appendToolResultProgress(state *toolLoopState, name string, result *builtin.Result, execErr error) {
+	if c == nil || c.app == nil || state == nil {
+		return
+	}
+	if !state.progress.started {
+		state.progress.started = true
+	}
+	c.app.AppendToLastMessage("\n\n" + toolResultProgressSummary(name, result, execErr))
+}
+
+func toolCallProgressBlock(tc model.ToolCall) string {
+	name := strings.TrimSpace(tc.Function.Name)
+	if name == "" {
+		name = "tool"
+	}
+	detail := compactToolArguments(tc.Function.Arguments, 600)
+	if detail == "" || detail == "{}" {
+		return "→ " + name
+	}
+	return "→ " + name + "\n\n" + detail
+}
+
+func toolCallProgressSummary(tc model.ToolCall) string {
+	name := strings.TrimSpace(tc.Function.Name)
+	if name == "" {
+		name = "tool"
+	}
+	arguments := compactToolArguments(tc.Function.Arguments, 180)
+	if arguments == "" || arguments == "{}" {
+		return name
+	}
+	return name + " — " + arguments
+}
+
+func compactToolArguments(raw string, maxLen int) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	var params map[string]any
+	if json.Unmarshal([]byte(raw), &params) == nil && len(params) > 0 {
+		keys := make([]string, 0, len(params))
+		for key := range params {
+			if key != tool.ToolCallIDParam {
+				keys = append(keys, key)
+			}
+		}
+		sort.Strings(keys)
+		parts := make([]string, 0, len(keys))
+		for _, key := range keys {
+			parts = append(parts, "- "+key+": "+compactToolArgumentValue(params[key]))
+		}
+		raw = strings.Join(parts, "\n")
+	}
+	return compactMultilineText(raw, maxLen)
+}
+
+func compactToolArgumentValue(value any) string {
+	if text, ok := value.(string); ok {
+		text = strings.TrimSpace(text)
+		text = strings.ReplaceAll(text, "\r\n", " ↵ ")
+		text = strings.ReplaceAll(text, "\n", " ↵ ")
+		return strings.Join(strings.Fields(text), " ")
+	}
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return "<unavailable>"
+	}
+	return string(encoded)
+}
+
+func compactMultilineText(text string, maxLen int) string {
+	text = strings.TrimSpace(text)
+	if maxLen <= 0 || len(text) <= maxLen {
+		return text
+	}
+	if maxLen <= 3 {
+		return text[:maxLen]
+	}
+	return strings.TrimSpace(text[:maxLen-3]) + "..."
+}
+
+func toolResultProgressSummary(name string, result *builtin.Result, execErr error) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		name = "tool"
+	}
+	if execErr != nil {
+		return "✗ " + name + " — " + compactStatusText(execErr.Error(), 200)
+	}
+	if result == nil {
+		return "✗ " + name + " — no result returned"
+	}
+	if !result.Success {
+		detail := strings.TrimSpace(result.Error)
+		if stderr, ok := result.Data["stderr"].(string); ok && strings.TrimSpace(stderr) != "" {
+			detail = strings.TrimSpace(detail + ": " + strings.TrimSpace(stderr))
+		}
+		if detail == "" {
+			detail = "failed"
+		}
+		return "✗ " + name + " — " + compactStatusText(detail, 200)
+	}
+	if display := strings.TrimSpace(toolDisplayMessage(name, result, nil)); display != "" {
+		return "✓ " + name + " — " + compactStatusText(display, 200)
+	}
+	return "✓ " + name + " — completed"
+}
+
+func modelProcessStatus(modelID string, iteration, toolCount int, reasoning *model.ReasoningConfig) string {
 	phase := "Thinking with " + compactStatusText(modelID, 44)
 	if iteration > 0 {
 		phase = "Thinking after tools with " + compactStatusText(modelID, 34)
 	}
 	var details []string
-	if maxIterations > 0 {
-		details = append(details, fmt.Sprintf("round %d/%d", iteration+1, maxIterations))
-	}
+	details = append(details, fmt.Sprintf("round %d", iteration+1))
 	if toolCount > 0 {
 		details = append(details, fmt.Sprintf("%d tools", toolCount))
 	}
 	if reasoning != nil && strings.TrimSpace(reasoning.Effort) != "" {
 		details = append(details, "reasoning "+strings.TrimSpace(reasoning.Effort))
 	}
+	details = append(details, "type to steer")
 	if len(details) > 0 {
 		phase += " - " + strings.Join(details, ", ")
 	}
 	return phase
 }
 
-func maxToolIterationsCheckpoint(maxIterations int) string {
-	return fmt.Sprintf("I reached Buckley's interactive checkpoint after %d model/tool rounds without a final answer.\n\nReply with one of:\n- continue: keep going with tools\n- continue without tools: synthesize from the current context only\n- stop: leave this session here", maxIterations)
-}
-
 func modelFinishReasonNotice(reason string) string {
 	trimmed := strings.TrimSpace(reason)
 	switch strings.ToLower(trimmed) {
-	case "", "stop", "tool_calls", toolLoopCheckpointFinishReason:
+	case "", "stop", "tool_calls":
 		return ""
 	case "length", "max_tokens", "max_output_tokens", "token_limit":
 		return "Response stopped because the provider reported finish_reason=" + trimmed + ", which usually means the output token limit was reached. Ask Buckley to continue, reduce context, or raise the chat max_tokens setting."
@@ -273,9 +499,6 @@ func modelFinishReasonNotice(reason string) string {
 }
 
 func readyStatusForFinishReason(reason string) string {
-	if strings.EqualFold(strings.TrimSpace(reason), toolLoopCheckpointFinishReason) {
-		return "Ready - needs direction"
-	}
 	if isTokenLimitFinishReason(reason) {
 		return "Ready - output token limit reached"
 	}
@@ -331,11 +554,6 @@ func containsToolFreeDirective(prompt string) bool {
 	return false
 }
 
-func isStopToolLoopDecision(prompt string) bool {
-	lower := strings.ToLower(strings.TrimSpace(prompt))
-	return lower == "stop" || lower == "no" || lower == "leave it" || lower == "leave it here"
-}
-
 func (c *Controller) consumeDisableToolsNextTurn(sess *SessionState) bool {
 	if c == nil || sess == nil {
 		return false
@@ -345,15 +563,6 @@ func (c *Controller) consumeDisableToolsNextTurn(sess *SessionState) bool {
 	disable := sess.DisableToolsNextTurn
 	sess.DisableToolsNextTurn = false
 	return disable
-}
-
-func (c *Controller) setAwaitingToolLoopDecision(sess *SessionState, awaiting bool) {
-	if c == nil || sess == nil {
-		return
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	sess.AwaitingToolLoopDecision = awaiting
 }
 
 func isTokenLimitFinishReason(reason string) bool {

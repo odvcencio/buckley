@@ -1,11 +1,13 @@
 import { useState, useRef, useEffect } from 'react'
-import { Send, Command, Pause, Play, Loader2, FileCode } from 'lucide-react'
+import { Send, Command, Pause, Play, Square, ListPlus, FileCode } from 'lucide-react'
 
-import { listProjectFiles } from '../lib/api'
+import { listProjectFiles, type ModelOption } from '../lib/api'
 
 interface Props {
   onSend: (message: string) => void
+  onQueue?: (message: string) => void
   onCommand?: (command: string) => void
+  onInterrupt?: () => void
   onPause?: () => void
   onResume?: () => void
   onOpenCommandPalette?: () => void
@@ -13,6 +15,9 @@ interface Props {
   isPaused?: boolean
   isStreaming?: boolean
   placeholder?: string
+  commandStatus?: string
+  models?: ModelOption[]
+  currentModel?: string
 }
 
 type FileTrigger = {
@@ -31,9 +36,191 @@ function findFileTrigger(value: string, cursor: number): FileTrigger | null {
   return { start: atIndex, query }
 }
 
+function ModelPicker({ open, models, results, activeIndex, currentModel, onSelect, onActiveIndex }: {
+  open: boolean
+  models: ModelOption[]
+  results: ModelOption[]
+  activeIndex: number
+  currentModel?: string
+  onSelect: (modelID: string) => void
+  onActiveIndex: (index: number) => void
+}) {
+  if (!open) return null
+  return (
+    <div className="absolute left-0 right-0 bottom-full mb-2 z-30">
+      <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-abyss)]/95 shadow-xl overflow-hidden">
+        <div className="px-4 py-3 border-b border-[var(--color-border)] flex items-center justify-between">
+          <div className="text-xs font-semibold text-[var(--color-text)]">OpenRouter models</div>
+          <div className="text-[10px] text-[var(--color-text-muted)] font-mono">{models.length.toLocaleString()} available</div>
+        </div>
+        <div className="max-h-72 overflow-y-auto scrollbar-thin">
+          {results.length === 0 ? (
+            <div className="px-4 py-3 text-sm text-[var(--color-text-muted)]">No model matches.</div>
+          ) : results.map((item, index) => (
+            <button
+              key={item.id}
+              type="button"
+              onClick={() => onSelect(item.id)}
+              onMouseEnter={() => onActiveIndex(index)}
+              className={`w-full text-left px-4 py-2.5 border-b border-[var(--color-border-subtle)] last:border-0 ${index === activeIndex ? 'bg-[var(--color-surface)]' : ''}`}
+            >
+              <div className="flex items-center gap-2">
+                <span className="text-sm font-mono text-[var(--color-text)]">{item.id}</span>
+                {item.id === currentModel ? <span className="text-[10px] text-[var(--color-accent)]">current</span> : null}
+              </div>
+              <div className="mt-0.5 text-xs text-[var(--color-text-muted)] truncate">
+                {item.name}{item.contextLength ? ` · ${item.contextLength.toLocaleString()} context` : ''}
+              </div>
+            </button>
+          ))}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function FilePicker({ open, query, loading, error, results, activeIndex, onSelect, onActiveIndex }: {
+  open: boolean
+  query: string
+  loading: boolean
+  error: string | null
+  results: string[]
+  activeIndex: number
+  onSelect: (path: string) => void
+  onActiveIndex: (index: number) => void
+}) {
+  if (!open) return null
+  let body: React.ReactNode
+  if (loading) body = <div className="px-4 py-3 text-sm text-[var(--color-text-muted)]">Loading files...</div>
+  else if (error) body = <div className="px-4 py-3 text-sm text-[var(--color-error)]">{error}</div>
+  else if (results.length === 0) body = <div className="px-4 py-3 text-sm text-[var(--color-text-muted)]">No matches.</div>
+  else body = results.map((path, index) => (
+    <button
+      key={path}
+      type="button"
+      onClick={() => onSelect(path)}
+      onMouseEnter={() => onActiveIndex(index)}
+      className={`w-full text-left px-4 py-2.5 text-sm font-mono transition-colors ${index === activeIndex ? 'bg-[var(--color-surface)] text-[var(--color-text)]' : 'text-[var(--color-text-secondary)] hover:bg-[var(--color-surface)]'}`}
+    >
+      {path}
+    </button>
+  ))
+  return (
+    <div className="absolute left-0 right-0 bottom-full mb-2 z-30">
+      <div className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-abyss)]/95 backdrop-blur-xl shadow-xl shadow-black/40 overflow-hidden">
+        <div className="px-4 py-3 border-b border-[var(--color-border)] flex items-center justify-between">
+          <div className="text-xs font-semibold text-[var(--color-text)]">File Picker</div>
+          <div className="text-[10px] text-[var(--color-text-muted)] font-mono">@{query || '...'}</div>
+        </div>
+        <div className="max-h-56 overflow-y-auto scrollbar-thin">{body}</div>
+      </div>
+    </div>
+  )
+}
+
+function ComposerActions({ valueLength, canQueue, isPaused, isStreaming, onCommands, onFiles, onQueue, onInterrupt, onPause, onResume }: {
+  valueLength: number
+  canQueue: boolean
+  isPaused: boolean
+  isStreaming: boolean
+  onCommands: () => void
+  onFiles: () => void
+  onQueue: () => void
+  onInterrupt?: () => void
+  onPause?: () => void
+  onResume?: () => void
+}) {
+  return (
+    <div className="flex items-center gap-2 mt-3 px-1">
+      <button onClick={onCommands} className="group flex items-center gap-1.5 px-3 py-1.5 text-xs text-[var(--color-text-muted)] rounded-lg hover:text-[var(--color-text-secondary)] hover:bg-[var(--color-surface)]/50 transition-all duration-200">
+        <Command className="w-3 h-3 transition-transform group-hover:scale-110" />
+        <span>Commands</span>
+        <kbd className="hidden sm:inline-block ml-1 px-1.5 py-0.5 text-[10px] font-mono bg-[var(--color-surface)] rounded border border-[var(--color-border-subtle)]">Ctrl+P</kbd>
+      </button>
+      <button onClick={onFiles} className="group flex items-center gap-1.5 px-3 py-1.5 text-xs text-[var(--color-text-muted)] rounded-lg hover:text-[var(--color-text-secondary)] hover:bg-[var(--color-surface)]/50 transition-all duration-200">
+        <FileCode className="w-3 h-3 transition-transform group-hover:scale-110" />
+        <span>Files</span>
+        <kbd className="hidden sm:inline-block ml-1 px-1.5 py-0.5 text-[10px] font-mono bg-[var(--color-surface)] rounded border border-[var(--color-border-subtle)]">@</kbd>
+      </button>
+      <div className="flex-1" />
+      {isStreaming && canQueue ? (
+        <button onClick={onQueue} className="group flex items-center gap-1.5 px-3 py-1.5 text-xs text-[var(--color-text-muted)] rounded-lg hover:text-[var(--color-text-secondary)] hover:bg-[var(--color-surface)]/50 transition-all duration-200">
+          <ListPlus className="w-3 h-3 transition-transform group-hover:scale-110" /><span>Queue</span>
+        </button>
+      ) : null}
+      {isPaused ? (
+        <button onClick={onResume} className="group flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-[var(--color-success)] bg-[var(--color-success-subtle)] rounded-lg border border-[var(--color-success)]/20 hover:border-[var(--color-success)]/40 transition-all duration-200">
+          <Play className="w-3 h-3" /><span>Resume</span>
+        </button>
+      ) : isStreaming ? (
+        <>
+          <button onClick={onInterrupt} className="group flex items-center gap-1.5 px-3 py-1.5 text-xs text-[var(--color-text-muted)] rounded-lg hover:text-[var(--color-error)] hover:bg-[var(--color-error-subtle)] transition-all duration-200"><Square className="w-3 h-3" /><span>Stop</span></button>
+          <button onClick={onPause} className="group flex items-center gap-1.5 px-3 py-1.5 text-xs text-[var(--color-text-muted)] rounded-lg hover:text-[var(--color-warning)] hover:bg-[var(--color-warning-subtle)] transition-all duration-200"><Pause className="w-3 h-3" /><span>Pause</span></button>
+        </>
+      ) : null}
+      {valueLength > 0 ? <span className="text-[10px] text-[var(--color-text-subtle)] tabular-nums">{valueLength.toLocaleString()}</span> : null}
+    </div>
+  )
+}
+
+function handleComposerKeyDown(e: React.KeyboardEvent, options: {
+  modelPickerOpen: boolean
+  modelResults: ModelOption[]
+  modelActiveIndex: number
+  setModelActiveIndex: React.Dispatch<React.SetStateAction<number>>
+  selectModel: (modelID: string) => void
+  filePickerOpen: boolean
+  fileResults: string[]
+  fileActiveIndex: number
+  setFileActiveIndex: React.Dispatch<React.SetStateAction<number>>
+  disableFilePicker: () => void
+  insertFile: (path: string) => void
+  submit: () => void
+}) {
+  if (options.modelPickerOpen) {
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault()
+      const delta = e.key === 'ArrowDown' ? 1 : -1
+      options.setModelActiveIndex((index) => Math.max(0, Math.min(options.modelResults.length - 1, index + delta)))
+      return
+    }
+    if ((e.key === 'Tab' || (e.key === 'Enter' && !e.shiftKey)) && options.modelResults.length > 0) {
+      e.preventDefault()
+      const selected = options.modelResults[options.modelActiveIndex]
+      if (selected) options.selectModel(selected.id)
+      return
+    }
+  }
+  if (options.filePickerOpen) {
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault()
+      const delta = e.key === 'ArrowDown' ? 1 : -1
+      options.setFileActiveIndex((index) => Math.max(0, Math.min(options.fileResults.length - 1, index + delta)))
+      return
+    }
+    if (e.key === 'Escape') {
+      e.preventDefault()
+      options.disableFilePicker()
+      return
+    }
+    if (e.key === 'Enter' && !e.shiftKey && options.fileResults.length > 0) {
+      e.preventDefault()
+      const selected = options.fileResults[options.fileActiveIndex]
+      if (selected) options.insertFile(selected)
+      return
+    }
+  }
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault()
+    options.submit()
+  }
+}
+
 export function MessageInput({
   onSend,
+  onQueue,
   onCommand,
+  onInterrupt,
   onPause,
   onResume,
   onOpenCommandPalette,
@@ -41,6 +228,9 @@ export function MessageInput({
   isPaused = false,
   isStreaming = false,
   placeholder = 'Send a message...',
+  commandStatus,
+  models = [],
+  currentModel,
 }: Props) {
   const [value, setValue] = useState('')
   const [isFocused, setIsFocused] = useState(false)
@@ -64,6 +254,13 @@ export function MessageInput({
   const fileTrigger = findFileTrigger(value, cursorPos)
   const filePickerOpen = !disabled && filePickerEnabled && !!fileTrigger
   const fileQuery = fileTrigger?.query ?? ''
+	const modelMatch = value.slice(0, cursorPos).match(/^\/model(?:\s+([^\s]*))?$/i)
+	const modelQuery = (modelMatch?.[1] ?? '').toLowerCase()
+	const modelResults = modelMatch
+		? models.filter((item) => `${item.id} ${item.name}`.toLowerCase().includes(modelQuery)).slice(0, 10)
+		: []
+	const modelPickerOpen = !disabled && !!modelMatch
+	const [modelActiveIndex, setModelActiveIndex] = useState(0)
 
   useEffect(() => {
     if (fileTrigger) return
@@ -146,6 +343,19 @@ export function MessageInput({
     })
   }
 
+	const selectModel = (modelID: string) => {
+		const next = `/model ${modelID}`
+		setValue(next)
+		setModelActiveIndex(0)
+		window.requestAnimationFrame(() => {
+			const el = textareaRef.current
+			if (!el) return
+			el.focus()
+			el.setSelectionRange(next.length, next.length)
+			setCursorPos(next.length)
+		})
+	}
+
   const handleSubmit = () => {
     const trimmed = value.trim()
     if (!trimmed || disabled) return
@@ -159,40 +369,28 @@ export function MessageInput({
     setCursorPos(0)
   }
 
-  const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (filePickerOpen) {
-      if (e.key === 'ArrowDown') {
-        e.preventDefault()
-        if (fileResults.length === 0) return
-        setFileActiveIndex((idx) => Math.min(fileResults.length - 1, idx + 1))
-        return
-      }
-      if (e.key === 'ArrowUp') {
-        e.preventDefault()
-        if (fileResults.length === 0) return
-        setFileActiveIndex((idx) => Math.max(0, idx - 1))
-        return
-      }
-      if (e.key === 'Escape') {
-        e.preventDefault()
-        setFilePickerEnabled(false)
-        return
-      }
-      if (e.key === 'Enter' && !e.shiftKey && fileResults.length > 0) {
-        e.preventDefault()
-        const selected = fileResults[fileActiveIndex]
-        if (selected) {
-          insertFile(selected)
-        }
-        return
-      }
-    }
-
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault()
-      handleSubmit()
-    }
+  const handleQueue = () => {
+    const trimmed = value.trim()
+    if (!trimmed || disabled || !onQueue) return
+    onQueue(trimmed)
+    setValue('')
+    setCursorPos(0)
   }
+
+  const handleKeyDown = (e: React.KeyboardEvent) => handleComposerKeyDown(e, {
+    modelPickerOpen,
+    modelResults,
+    modelActiveIndex,
+    setModelActiveIndex,
+    selectModel,
+    filePickerOpen,
+    fileResults,
+    fileActiveIndex,
+    setFileActiveIndex,
+    disableFilePicker: () => setFilePickerEnabled(false),
+    insertFile,
+    submit: handleSubmit,
+  })
 
   const canSubmit = value.trim().length > 0 && !disabled
 
@@ -220,42 +418,8 @@ export function MessageInput({
           />
 
           <div className="relative bg-[var(--color-surface)] rounded-2xl">
-            {filePickerOpen && (
-              <div className="absolute left-0 right-0 bottom-full mb-2 z-30">
-                <div className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-abyss)]/95 backdrop-blur-xl shadow-xl shadow-black/40 overflow-hidden">
-                  <div className="px-4 py-3 border-b border-[var(--color-border)] flex items-center justify-between">
-                    <div className="text-xs font-semibold text-[var(--color-text)]">File Picker</div>
-                    <div className="text-[10px] text-[var(--color-text-muted)] font-mono">
-                      @{fileQuery || '...'}
-                    </div>
-                  </div>
-                  <div className="max-h-56 overflow-y-auto scrollbar-thin">
-                    {fileLoading ? (
-                      <div className="px-4 py-3 text-sm text-[var(--color-text-muted)]">Loading files...</div>
-                    ) : fileError ? (
-                      <div className="px-4 py-3 text-sm text-[var(--color-error)]">{fileError}</div>
-                    ) : fileResults.length === 0 ? (
-                      <div className="px-4 py-3 text-sm text-[var(--color-text-muted)]">No matches.</div>
-                    ) : (
-                      fileResults.map((path, index) => (
-                        <button
-                          key={path}
-                          onClick={() => insertFile(path)}
-                          onMouseEnter={() => setFileActiveIndex(index)}
-                          className={`w-full text-left px-4 py-2.5 text-sm font-mono transition-colors ${
-                            index === fileActiveIndex
-                              ? 'bg-[var(--color-surface)] text-[var(--color-text)]'
-                              : 'text-[var(--color-text-secondary)] hover:bg-[var(--color-surface)]'
-                          }`}
-                        >
-                          {path}
-                        </button>
-                      ))
-                    )}
-                  </div>
-                </div>
-              </div>
-            )}
+            <ModelPicker open={modelPickerOpen} models={models} results={modelResults} activeIndex={modelActiveIndex} currentModel={currentModel} onSelect={selectModel} onActiveIndex={setModelActiveIndex} />
+            <FilePicker open={filePickerOpen} query={fileQuery} loading={fileLoading} error={fileError} results={fileResults} activeIndex={fileActiveIndex} onSelect={insertFile} onActiveIndex={setFileActiveIndex} />
             <textarea
               ref={textareaRef}
               value={value}
@@ -285,6 +449,7 @@ export function MessageInput({
             <button
               onClick={handleSubmit}
               disabled={!canSubmit}
+              aria-label={isStreaming ? 'Steer current turn' : 'Send message'}
               className={`
                 absolute right-3 bottom-3
                 p-2.5 rounded-xl
@@ -295,97 +460,28 @@ export function MessageInput({
                 }
               `}
             >
-              {isStreaming ? (
-                <Loader2 className="w-4 h-4 animate-spin" />
-              ) : (
-                <Send className="w-4 h-4" />
-              )}
+              <Send className="w-4 h-4" />
             </button>
           </div>
         </div>
 
-        {/* Quick actions row with subtle styling */}
-        <div className="flex items-center gap-2 mt-3 px-1">
-          <button
-            onClick={() => {
-              if (onOpenCommandPalette) {
-                onOpenCommandPalette()
-              } else {
-                insertTextAtCursor('/')
-              }
-            }}
-            className="
-              group flex items-center gap-1.5 px-3 py-1.5
-              text-xs text-[var(--color-text-muted)]
-              rounded-lg
-              hover:text-[var(--color-text-secondary)] hover:bg-[var(--color-surface)]/50
-              transition-all duration-200
-            "
-          >
-            <Command className="w-3 h-3 transition-transform group-hover:scale-110" />
-            <span>Commands</span>
-            <kbd className="hidden sm:inline-block ml-1 px-1.5 py-0.5 text-[10px] font-mono bg-[var(--color-surface)] rounded border border-[var(--color-border-subtle)]">
-              Ctrl+P
-            </kbd>
-          </button>
-
-          <button
-            onClick={() => insertTextAtCursor('@')}
-            className="
-              group flex items-center gap-1.5 px-3 py-1.5
-              text-xs text-[var(--color-text-muted)]
-              rounded-lg
-              hover:text-[var(--color-text-secondary)] hover:bg-[var(--color-surface)]/50
-              transition-all duration-200
-            "
-          >
-            <FileCode className="w-3 h-3 transition-transform group-hover:scale-110" />
-            <span>Files</span>
-            <kbd className="hidden sm:inline-block ml-1 px-1.5 py-0.5 text-[10px] font-mono bg-[var(--color-surface)] rounded border border-[var(--color-border-subtle)]">
-              @
-            </kbd>
-          </button>
-
-          <div className="flex-1" />
-
-          {isPaused ? (
-            <button
-              onClick={onResume}
-              className="
-                group flex items-center gap-1.5 px-3 py-1.5
-                text-xs font-medium
-                text-[var(--color-success)] bg-[var(--color-success-subtle)]
-                rounded-lg border border-[var(--color-success)]/20
-                hover:border-[var(--color-success)]/40 hover:shadow-sm hover:shadow-[var(--color-success)]/10
-                transition-all duration-200
-              "
-            >
-              <Play className="w-3 h-3 transition-transform group-hover:scale-110" />
-              <span>Resume</span>
-            </button>
-          ) : isStreaming ? (
-            <button
-              onClick={onPause}
-              className="
-                group flex items-center gap-1.5 px-3 py-1.5
-                text-xs text-[var(--color-text-muted)]
-                rounded-lg
-                hover:text-[var(--color-warning)] hover:bg-[var(--color-warning-subtle)]
-                transition-all duration-200
-              "
-            >
-              <Pause className="w-3 h-3 transition-transform group-hover:scale-110" />
-              <span>Pause</span>
-            </button>
-          ) : null}
-
-          {/* Character count indicator */}
-          {value.length > 0 && (
-            <span className="text-[10px] text-[var(--color-text-subtle)] tabular-nums">
-              {value.length.toLocaleString()}
-            </span>
-          )}
-        </div>
+        <ComposerActions
+          valueLength={value.length}
+          canQueue={canSubmit && !!onQueue}
+          isPaused={isPaused}
+          isStreaming={isStreaming}
+          onCommands={() => onOpenCommandPalette ? onOpenCommandPalette() : insertTextAtCursor('/')}
+          onFiles={() => insertTextAtCursor('@')}
+          onQueue={handleQueue}
+          onInterrupt={onInterrupt}
+          onPause={onPause}
+          onResume={onResume}
+        />
+        {commandStatus ? (
+          <div className="mt-2 px-1 text-[10px] font-mono text-[var(--color-text-muted)]" aria-live="polite">
+            {commandStatus}
+          </div>
+        ) : null}
       </div>
     </div>
   )

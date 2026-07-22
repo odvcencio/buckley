@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"strconv"
 
-	"m31labs.dev/buckley/pkg/ui/backend"
-	"m31labs.dev/buckley/pkg/ui/runtime"
+	"m31labs.dev/fluffyui/backend"
+	"m31labs.dev/fluffyui/runtime"
 )
 
 // StatusBar is the Buckley status bar widget.
@@ -89,7 +89,7 @@ func (s *StatusBar) renderRightSegment(buf *runtime.Buffer, bounds runtime.Rect,
 		return statusSegment{}
 	}
 
-	segment := newStatusSegment(bounds.X+bounds.Width-runeLen(text), text)
+	segment := newStatusSegment(bounds.X+bounds.Width-displayWidth(text), text)
 	if segment.x <= left.end() {
 		return statusSegment{}
 	}
@@ -104,7 +104,7 @@ func (s *StatusBar) renderScrollSegment(buf *runtime.Buffer, bounds runtime.Rect
 	}
 
 	text := truncateString(s.scrollPos, bounds.Width)
-	segment := newStatusSegment(bounds.X+bounds.Width/2-runeLen(text)/2, text)
+	segment := newStatusSegment(bounds.X+bounds.Width/2-displayWidth(text)/2, text)
 	rightEdge := bounds.X + bounds.Width
 	if right.text != "" {
 		rightEdge = right.x
@@ -135,7 +135,7 @@ type statusSegment struct {
 }
 
 func newStatusSegment(x int, text string) statusSegment {
-	return statusSegment{x: x, text: text, width: runeLen(text)}
+	return statusSegment{x: x, text: text, width: displayWidth(text)}
 }
 
 func (s statusSegment) end() int {

@@ -1,5 +1,6 @@
 // Package theme provides a unified visual design system for Buckley's TUI.
-// Inspired by Dark Elegance: rich blacks, subtle depth, glowing accents.
+// The default palette is intentionally restrained: graphite surfaces, cool
+// blue focus, and neutral message text keep long agent sessions readable.
 package theme
 
 import (
@@ -57,56 +58,52 @@ type Theme struct {
 	Spinner compositor.Style
 }
 
-// DefaultTheme returns the Dark Elegance theme.
+// DefaultTheme returns Buckley's graphite theme.
 func DefaultTheme() *Theme {
 	return &Theme{
-		// Core palette - deep blacks with subtle blue undertone
-		Background:    compositor.DefaultStyle().WithBG(compositor.RGB(12, 12, 16)),
-		Surface:       compositor.DefaultStyle().WithBG(compositor.RGB(22, 22, 28)),
-		SurfaceRaised: compositor.DefaultStyle().WithBG(compositor.RGB(32, 32, 40)),
-		SurfaceDim:    compositor.DefaultStyle().WithBG(compositor.RGB(8, 8, 10)),
+		Background:    compositor.DefaultStyle().WithBG(compositor.RGB(10, 12, 15)),
+		Surface:       compositor.DefaultStyle().WithBG(compositor.RGB(16, 19, 24)),
+		SurfaceRaised: compositor.DefaultStyle().WithBG(compositor.RGB(23, 27, 34)),
+		SurfaceDim:    compositor.DefaultStyle().WithBG(compositor.RGB(7, 9, 12)),
 
-		// Text hierarchy - warm whites
-		TextPrimary:   compositor.DefaultStyle().WithFG(compositor.RGB(240, 238, 232)),
-		TextSecondary: compositor.DefaultStyle().WithFG(compositor.RGB(160, 158, 150)),
-		TextMuted:     compositor.DefaultStyle().WithFG(compositor.RGB(100, 98, 92)),
-		TextInverse:   compositor.DefaultStyle().WithFG(compositor.RGB(12, 12, 16)),
+		TextPrimary:   compositor.DefaultStyle().WithFG(compositor.RGB(220, 226, 234)),
+		TextSecondary: compositor.DefaultStyle().WithFG(compositor.RGB(151, 161, 175)),
+		TextMuted:     compositor.DefaultStyle().WithFG(compositor.RGB(94, 104, 118)),
+		TextInverse:   compositor.DefaultStyle().WithFG(compositor.RGB(10, 12, 15)),
 
-		// Accent - warm amber/gold (memorable, warm, inviting)
-		Accent:     compositor.DefaultStyle().WithFG(compositor.RGB(255, 183, 77)),
-		AccentDim:  compositor.DefaultStyle().WithFG(compositor.RGB(180, 130, 60)),
-		AccentGlow: compositor.DefaultStyle().WithFG(compositor.RGB(255, 200, 100)).WithBold(true),
+		Accent:     compositor.DefaultStyle().WithFG(compositor.RGB(122, 162, 247)),
+		AccentDim:  compositor.DefaultStyle().WithFG(compositor.RGB(82, 112, 173)),
+		AccentGlow: compositor.DefaultStyle().WithFG(compositor.RGB(160, 190, 255)).WithBold(true),
 
 		// Semantic colors
-		Success: compositor.DefaultStyle().WithFG(compositor.RGB(134, 239, 172)),
-		Warning: compositor.DefaultStyle().WithFG(compositor.RGB(253, 224, 71)),
-		Error:   compositor.DefaultStyle().WithFG(compositor.RGB(248, 113, 113)),
-		Info:    compositor.DefaultStyle().WithFG(compositor.RGB(147, 197, 253)),
+		Success: compositor.DefaultStyle().WithFG(compositor.RGB(158, 206, 106)),
+		Warning: compositor.DefaultStyle().WithFG(compositor.RGB(224, 175, 104)),
+		Error:   compositor.DefaultStyle().WithFG(compositor.RGB(247, 118, 142)),
+		Info:    compositor.DefaultStyle().WithFG(compositor.RGB(125, 207, 255)),
 
-		// Message sources - each has distinct character
-		User:      compositor.DefaultStyle().WithFG(compositor.RGB(134, 239, 172)), // Fresh green
-		Assistant: compositor.DefaultStyle().WithFG(compositor.RGB(255, 183, 77)),  // Warm amber
-		System:    compositor.DefaultStyle().WithFG(compositor.RGB(160, 158, 150)).WithItalic(true),
-		Tool:      compositor.DefaultStyle().WithFG(compositor.RGB(192, 132, 252)), // Purple
-		Thinking:  compositor.DefaultStyle().WithFG(compositor.RGB(100, 98, 92)).WithItalic(true),
+		User:      compositor.DefaultStyle().WithFG(compositor.RGB(125, 207, 255)),
+		Assistant: compositor.DefaultStyle().WithFG(compositor.RGB(220, 226, 234)),
+		System:    compositor.DefaultStyle().WithFG(compositor.RGB(151, 161, 175)).WithItalic(true),
+		Tool:      compositor.DefaultStyle().WithFG(compositor.RGB(187, 154, 247)),
+		Thinking:  compositor.DefaultStyle().WithFG(compositor.RGB(94, 104, 118)).WithItalic(true),
 
 		// UI elements
-		Border:      compositor.DefaultStyle().WithFG(compositor.RGB(50, 50, 60)),
-		BorderFocus: compositor.DefaultStyle().WithFG(compositor.RGB(255, 183, 77)),
-		Selection:   compositor.DefaultStyle().WithBG(compositor.RGB(60, 60, 80)),
-		SearchMatch: compositor.DefaultStyle().WithBG(compositor.RGB(120, 90, 20)).WithFG(compositor.RGB(255, 255, 255)),
-		Scrollbar:   compositor.DefaultStyle().WithFG(compositor.RGB(50, 50, 60)),
-		ScrollThumb: compositor.DefaultStyle().WithFG(compositor.RGB(100, 100, 110)),
+		Border:      compositor.DefaultStyle().WithFG(compositor.RGB(43, 49, 59)),
+		BorderFocus: compositor.DefaultStyle().WithFG(compositor.RGB(122, 162, 247)),
+		Selection:   compositor.DefaultStyle().WithBG(compositor.RGB(40, 52, 76)),
+		SearchMatch: compositor.DefaultStyle().WithBG(compositor.RGB(89, 67, 28)).WithFG(compositor.RGB(238, 242, 247)),
+		Scrollbar:   compositor.DefaultStyle().WithFG(compositor.RGB(43, 49, 59)),
+		ScrollThumb: compositor.DefaultStyle().WithFG(compositor.RGB(94, 104, 118)),
 
 		// Mode indicators
-		ModeNormal: compositor.DefaultStyle().WithFG(compositor.RGB(160, 158, 150)),
-		ModeShell:  compositor.DefaultStyle().WithFG(compositor.RGB(134, 239, 172)).WithBold(true),
-		ModeEnv:    compositor.DefaultStyle().WithFG(compositor.RGB(147, 197, 253)).WithBold(true),
-		ModeSearch: compositor.DefaultStyle().WithFG(compositor.RGB(253, 224, 71)).WithBold(true),
+		ModeNormal: compositor.DefaultStyle().WithFG(compositor.RGB(151, 161, 175)),
+		ModeShell:  compositor.DefaultStyle().WithFG(compositor.RGB(158, 206, 106)).WithBold(true),
+		ModeEnv:    compositor.DefaultStyle().WithFG(compositor.RGB(125, 207, 255)).WithBold(true),
+		ModeSearch: compositor.DefaultStyle().WithFG(compositor.RGB(224, 175, 104)).WithBold(true),
 
 		// Special
-		Logo:    compositor.DefaultStyle().WithFG(compositor.RGB(255, 183, 77)).WithBold(true),
-		Spinner: compositor.DefaultStyle().WithFG(compositor.RGB(255, 183, 77)),
+		Logo:    compositor.DefaultStyle().WithFG(compositor.RGB(122, 162, 247)).WithBold(true),
+		Spinner: compositor.DefaultStyle().WithFG(compositor.RGB(122, 162, 247)),
 	}
 }
 

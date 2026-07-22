@@ -49,6 +49,10 @@ func NewStreamAccumulator() *StreamAccumulator {
 
 // Add processes a streaming chunk and accumulates its contents.
 func (a *StreamAccumulator) Add(chunk StreamChunk) {
+	// OpenRouter can send usage in a terminal chunk with no choices.
+	if chunk.Usage != nil {
+		a.usage = chunk.Usage
+	}
 	if len(chunk.Choices) == 0 {
 		return
 	}
@@ -79,10 +83,6 @@ func (a *StreamAccumulator) Add(chunk StreamChunk) {
 		a.accumulateToolCall(tc)
 	}
 
-	// Capture usage from final chunk
-	if chunk.Usage != nil {
-		a.usage = chunk.Usage
-	}
 }
 
 // accumulateToolCall accumulates a tool call delta into the appropriate slot.

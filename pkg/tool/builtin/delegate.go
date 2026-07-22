@@ -6,10 +6,13 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
+
+	"m31labs.dev/buckley/pkg/subagent"
+	"m31labs.dev/buckley/pkg/telemetry"
 )
 
 // delegationCheck performs guardrail checks before delegation
@@ -470,36 +473,57 @@ func (t *BuckleyTool) ExecuteWithContext(ctx context.Context, params map[string]
 	}, nil
 }
 
-// SubagentTool spawns an interactive Buckley subagent for multi-turn collaboration
-type SubagentTool struct{}
+// SubagentTool manages asynchronous Buckley child-agent runs.
+type SubagentTool struct {
+	mu       sync.Mutex
+	manager  *subagent.Manager
+	workDir  string
+	hub      *telemetry.Hub
+	session  string
+	command  string
+	maxChild int
+}
 
 func (t *SubagentTool) Name() string {
 	return "spawn_subagent"
 }
 
 func (t *SubagentTool) Description() string {
-	return "**INTERACTIVE SUBAGENT COLLABORATION** for complex tasks requiring back-and-forth refinement. Trigger phrases: 'implement and review', 'build with feedback', 'develop iteratively', 'create and refine', 'work on this with checkpoints'. Use when you need to supervise a subagent's work through multiple rounds - give initial task, review progress, provide corrections, verify results. You act as the orchestrator, the subagent executes. Essential for quality-critical implementations."
+	return "Spawn and manage bounded Buckley subagents. Use named project agent profiles when available, then list, inspect, wait for, or cancel child runs by ID."
 }
 
 func (t *SubagentTool) Parameters() ParameterSchema {
 	return ParameterSchema{
 		Type: "object",
 		Properties: map[string]PropertySchema{
+			"action": {
+				Type:        "string",
+				Description: "Management action: spawn, list, status, wait, or cancel (default spawn)",
+				Enum:        []string{"spawn", "list", "status", "wait", "cancel"},
+				Default:     "spawn",
+			},
+			"agent": {
+				Type:        "string",
+				Description: "Named subagent from the discovered project agent profile. Omit for a generic Buckley child.",
+			},
+			"spec": {
+				Type:        "string",
+				Description: "Optional project agent spec selector used with a named subagent.",
+			},
 			"initial_task": {
 				Type:        "string",
-				Description: "The initial task description to give the subagent. This starts the conversation.",
+				Description: "Task for action=spawn.",
 			},
-			"follow_ups": {
-				Type:        "array",
-				Description: "Optional array of follow-up prompts to send to the subagent after each response. Use this to guide, review, or refine the subagent's work iteratively. Each will be sent as a separate message in sequence.",
+			"id": {
+				Type:        "string",
+				Description: "Child run ID for status, wait, or cancel.",
 			},
 			"timeout_seconds": {
 				Type:        "integer",
-				Description: "Total timeout in seconds for the entire interactive session (default 300)",
+				Description: "Maximum child runtime for spawn, or maximum wait duration for wait (default 300)",
 				Default:     300,
 			},
 		},
-		Required: []string{"initial_task"},
 	}
 }
 
@@ -508,164 +532,192 @@ func (t *SubagentTool) Execute(params map[string]any) (*Result, error) {
 }
 
 func (t *SubagentTool) ExecuteWithContext(ctx context.Context, params map[string]any) (*Result, error) {
-	guard := GetDelegationGuard()
-
-	// Check delegation guardrails - subagents count as Buckley delegations
-	if err := delegationCheck("spawn_subagent"); err != nil {
-		return &Result{Success: false, Error: err.Error()}, nil
-	}
-
-	// Block deep self-delegation
-	if guard.GetCurrentDepth() >= 2 {
-		return &Result{
-			Success: false,
-			Error: fmt.Sprintf("Subagent spawn blocked at delegation depth %d. "+
-				"Deep recursive subagent spawning is not allowed. "+
-				"Consider handling this task directly.", guard.GetCurrentDepth()),
-		}, nil
-	}
-
-	initialTask, ok := params["initial_task"].(string)
-	if !ok || strings.TrimSpace(initialTask) == "" {
-		return &Result{Success: false, Error: "initial_task parameter must be a non-empty string"}, nil
-	}
-
-	// Extract follow-ups if provided
-	var followUps []string
-	if fups, ok := params["follow_ups"].([]any); ok {
-		for _, fup := range fups {
-			if fupStr, ok := fup.(string); ok {
-				followUps = append(followUps, fupStr)
-			}
-		}
-	}
-
-	timeout := parseInt(params["timeout_seconds"], 300)
-	if timeout <= 0 || timeout > 600 {
-		timeout = 300
-	}
-
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	ctx, cancel := context.WithTimeout(ctx, time.Duration(timeout)*time.Second)
-
-	// Find buckley executable
-	buckleyPath := os.Args[0]
-	if _, err := os.Stat(buckleyPath); err != nil {
-		buckleyPath, err = exec.LookPath("buckley")
-		if err != nil {
-			cancel()
-			return &Result{
-				Success: false,
-				Error:   "buckley executable not found. Ensure buckley is built or in PATH.",
-			}, nil
+	action := strings.ToLower(strings.TrimSpace(delegateStringParam(params, "action")))
+	if action == "" {
+		action = "spawn"
+	}
+	manager := t.getManager()
+	switch action {
+	case "spawn":
+		return t.spawn(manager, params)
+	case "list":
+		runs := manager.List()
+		return &Result{Success: true, Data: map[string]any{"runs": runs, "count": len(runs)}}, nil
+	case "status":
+		return subagentStatusResult(manager, delegateStringParam(params, "id"))
+	case "wait":
+		id := delegateStringParam(params, "id")
+		seconds := parseInt(params["timeout_seconds"], 300)
+		if seconds <= 0 || seconds > 3600 {
+			seconds = 300
 		}
-	}
-
-	// Ensure log directory for background subagents
-	home, err := os.UserHomeDir()
-	if err != nil {
-		cancel()
-		return &Result{Success: false, Error: fmt.Sprintf("failed to determine home directory: %v", err)}, nil
-	}
-	logDir := filepath.Join(home, ".buckley", "subagents")
-	if err := os.MkdirAll(logDir, 0o755); err != nil {
-		cancel()
-		return &Result{Success: false, Error: fmt.Sprintf("failed to create subagent log directory: %v", err)}, nil
-	}
-	logPath := filepath.Join(logDir, fmt.Sprintf("subagent-%d.log", time.Now().UnixNano()))
-	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
-	if err != nil {
-		cancel()
-		return &Result{Success: false, Error: fmt.Sprintf("failed to create subagent log file: %v", err)}, nil
-	}
-
-	fmt.Fprintf(logFile, "=== Buckley Subagent Log ===\nStarted: %s\nInitial Task:\n%s\n", time.Now().Format(time.RFC3339), initialTask)
-	if len(followUps) > 0 {
-		fmt.Fprintln(logFile, "\nFollow-ups:")
-		for i, f := range followUps {
-			fmt.Fprintf(logFile, "  %d. %s\n", i+1, f)
-		}
-	}
-	fmt.Fprintln(logFile, "\n--- Subagent Output ---")
-
-	// Start buckley in plain mode without -p so it stays interactive
-	// We'll pipe stdin and capture stdout to the log file
-	command := exec.CommandContext(ctx, buckleyPath)
-	// Configure with incremented delegation depth and plain mode
-	command.Env = append(guard.PrepareChildEnv(), "BUCKLEY_PLAIN_MODE=1")
-
-	stdin, err := command.StdinPipe()
-	if err != nil {
-		logFile.Close()
-		cancel()
-		return &Result{Success: false, Error: fmt.Sprintf("failed to create stdin pipe: %v", err)}, nil
-	}
-
-	command.Stdout = logFile
-	command.Stderr = logFile
-
-	// Start the subagent process
-	if err := command.Start(); err != nil {
-		stdin.Close()
-		logFile.Close()
-		cancel()
-		return &Result{Success: false, Error: fmt.Sprintf("failed to start buckley subagent: %v", err)}, nil
-	}
-
-	// Send initial task
-	if _, err := fmt.Fprintf(stdin, "%s\n", initialTask); err != nil {
-		fmt.Fprintf(logFile, "\n[orchestrator] failed to send initial task: %v\n", err)
-	}
-
-	// For interactive mode, we need to wait for responses and send follow-ups
-	// This is tricky with pure stdin/stdout - we need to detect when output is complete
-	// For now, implement a simpler version: send all prompts, then read all output
-
-	// Send follow-ups
-	for _, followUp := range followUps {
-		time.Sleep(100 * time.Millisecond) // Small delay between messages
-		if _, err := fmt.Fprintf(stdin, "%s\n", followUp); err != nil {
-			fmt.Fprintf(logFile, "\n[orchestrator] failed to send follow-up: %v\n", err)
-			break
-		}
-	}
-
-	// Close stdin to signal we're done sending
-	_ = stdin.Close()
-
-	// Wait for subagent asynchronously
-	go func() {
-		defer logFile.Close()
+		waitCtx, cancel := context.WithTimeout(ctx, time.Duration(seconds)*time.Second)
 		defer cancel()
-		err := command.Wait()
-		status := "completed"
+		snapshot, err := manager.Wait(waitCtx, id)
 		if err != nil {
-			if ctx.Err() == context.DeadlineExceeded {
-				status = fmt.Sprintf("timed out after %ds", timeout)
-			} else if exitErr, ok := err.(*exec.ExitError); ok {
-				status = fmt.Sprintf("exited with code %d", exitErr.ExitCode())
-			} else {
-				status = fmt.Sprintf("failed: %v", err)
-			}
+			return &Result{Success: false, Error: err.Error()}, nil
 		}
-		fmt.Fprintf(logFile, "\n--- Subagent %s at %s ---\n", status, time.Now().Format(time.RFC3339))
-	}()
+		return subagentSnapshotResult(snapshot), nil
+	case "cancel":
+		snapshot, err := manager.Cancel(delegateStringParam(params, "id"))
+		if err != nil {
+			return &Result{Success: false, Error: err.Error()}, nil
+		}
+		return &Result{Success: true, Data: map[string]any{"run": snapshot}, DisplayData: map[string]any{"summary": "Subagent cancellation requested"}, ShouldAbridge: true}, nil
+	default:
+		return &Result{Success: false, Error: fmt.Sprintf("unknown subagent action: %s", action)}, nil
+	}
+}
 
+func (t *SubagentTool) SetWorkDir(workDir string) {
+	t.mu.Lock()
+	t.workDir = strings.TrimSpace(workDir)
+	t.mu.Unlock()
+}
+
+func (t *SubagentTool) SetTelemetry(hub *telemetry.Hub, sessionID string) {
+	t.mu.Lock()
+	t.hub = hub
+	t.session = strings.TrimSpace(sessionID)
+	manager := t.manager
+	t.mu.Unlock()
+	if manager != nil {
+		manager.SetTelemetry(hub, sessionID)
+	}
+}
+
+func (t *SubagentTool) Close() error {
+	t.mu.Lock()
+	manager := t.manager
+	t.mu.Unlock()
+	if manager == nil {
+		return nil
+	}
+	return manager.Close()
+}
+
+func (t *SubagentTool) getManager() *subagent.Manager {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.manager == nil {
+		maxChild := t.maxChild
+		if maxChild <= 0 {
+			maxChild = subagent.DefaultMaxConcurrent
+		}
+		t.manager = subagent.NewManager(&buckleySubagentRunner{command: t.command, workDir: t.workDir}, maxChild)
+		t.manager.SetTelemetry(t.hub, t.session)
+	}
+	return t.manager
+}
+
+func (t *SubagentTool) spawn(manager *subagent.Manager, params map[string]any) (*Result, error) {
+	task := delegateStringParam(params, "initial_task")
+	if task == "" {
+		return &Result{Success: false, Error: "initial_task parameter must be a non-empty string"}, nil
+	}
+	if err := delegationCheck("spawn_subagent"); err != nil {
+		return &Result{Success: false, Error: err.Error()}, nil
+	}
+	guard := GetDelegationGuard()
+	if guard.GetCurrentDepth() >= 2 {
+		return &Result{Success: false, Error: fmt.Sprintf("subagent spawn blocked at delegation depth %d", guard.GetCurrentDepth())}, nil
+	}
+	timeout := parseInt(params["timeout_seconds"], 300)
+	if timeout <= 0 || timeout > 3600 {
+		timeout = 300
+	}
+	snapshot, err := manager.Spawn(delegateStringParam(params, "agent"), delegateStringParam(params, "spec"), task, timeout)
+	if err != nil {
+		return &Result{Success: false, Error: err.Error()}, nil
+	}
 	return &Result{
 		Success: true,
-		Data: map[string]any{
-			"initial_task":    initialTask,
-			"follow_ups":      followUps,
-			"log_path":        logPath,
-			"pid":             command.Process.Pid,
-			"timeout_seconds": timeout,
-		},
+		Data:    map[string]any{"run": snapshot},
 		DisplayData: map[string]any{
-			"summary": fmt.Sprintf("Subagent running in background (PID %d)", command.Process.Pid),
-			"log":     logPath,
+			"summary": fmt.Sprintf("Subagent %s started", snapshot.ID),
 		},
 		ShouldAbridge: true,
 	}, nil
+}
+
+func subagentStatusResult(manager *subagent.Manager, id string) (*Result, error) {
+	snapshot, ok := manager.Status(id)
+	if !ok {
+		return &Result{Success: false, Error: fmt.Sprintf("subagent not found: %s", strings.TrimSpace(id))}, nil
+	}
+	return subagentSnapshotResult(snapshot), nil
+}
+
+func subagentSnapshotResult(snapshot subagent.Snapshot) *Result {
+	return &Result{
+		Success: snapshot.State != subagent.StateFailed,
+		Data:    map[string]any{"run": snapshot},
+		Error:   snapshot.Error,
+		DisplayData: map[string]any{
+			"summary": fmt.Sprintf("Subagent %s is %s", snapshot.ID, snapshot.State),
+		},
+		ShouldAbridge: true,
+	}
+}
+
+func delegateStringParam(params map[string]any, key string) string {
+	value, _ := params[key].(string)
+	return strings.TrimSpace(value)
+}
+
+type buckleySubagentRunner struct {
+	command string
+	workDir string
+}
+
+func (r *buckleySubagentRunner) Run(ctx context.Context, request subagent.Request, started func(pid int)) (string, error) {
+	command := strings.TrimSpace(r.command)
+	if command == "" {
+		command = os.Args[0]
+		if _, err := os.Stat(command); err != nil {
+			resolved, lookupErr := exec.LookPath("buckley")
+			if lookupErr != nil {
+				return "", fmt.Errorf("buckley executable not found")
+			}
+			command = resolved
+		}
+	}
+	var args []string
+	if request.Agent == "" {
+		args = []string{"-p", request.Task}
+	} else {
+		args = []string{"agent", "run", "--project"}
+		if request.Spec != "" {
+			args = append(args, "--spec", request.Spec)
+		}
+		args = append(args, request.Agent, request.Task)
+	}
+	cmd := exec.CommandContext(ctx, command, args...)
+	cmd.Dir = r.workDir
+	cmd.Env = GetDelegationGuard().PrepareChildEnv()
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Start(); err != nil {
+		return "", fmt.Errorf("start buckley subagent: %w", err)
+	}
+	if started != nil {
+		started(cmd.Process.Pid)
+	}
+	err := cmd.Wait()
+	output := strings.TrimSpace(stdout.String())
+	if diagnostic := strings.TrimSpace(stderr.String()); diagnostic != "" {
+		if output != "" {
+			output += "\n"
+		}
+		output += diagnostic
+	}
+	if err != nil {
+		return output, fmt.Errorf("buckley subagent: %w", err)
+	}
+	return output, nil
 }

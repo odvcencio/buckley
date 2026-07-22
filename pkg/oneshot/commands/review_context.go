@@ -43,6 +43,8 @@ type BranchContext struct {
 	ContextIncomplete bool
 	RecentLog         string
 	AgentsMD          string
+	CanopyReview      string
+	CanopyStatus      string
 }
 
 // ProjectContext contains context for project review.
@@ -56,6 +58,8 @@ type ProjectContext struct {
 	ReadmeMD          string
 	AgentsMD          string
 	RecentLog         string
+	CanopySummary     string
+	CanopyStatus      string
 	ContextIncomplete bool
 }
 
@@ -86,6 +90,7 @@ type BranchContextOptions struct {
 	// paths for model input. Callers must obtain clear user authorization.
 	UntrackedPaths []string
 	IncludeAgents  bool
+	IncludeCanopy  bool
 	BaseBranch     string
 	Scope          string
 	// CapturedUntracked is immutable worktree evidence supplied by the review
@@ -101,6 +106,7 @@ func DefaultBranchContextOptions() BranchContextOptions {
 		MaxDiffBytes:    diffsignal.ReviewDiffBudget,
 		IncludeUnstaged: true,
 		IncludeAgents:   true,
+		IncludeCanopy:   true,
 		BaseBranch:      "",
 		Scope:           ReviewScopeWorktree,
 	}
@@ -110,13 +116,15 @@ func DefaultBranchContextOptions() BranchContextOptions {
 type ProjectContextOptions struct {
 	MaxTreeDepth  int
 	IncludeAgents bool
+	IncludeCanopy bool
 }
 
 // DefaultProjectContextOptions returns sensible defaults.
 func DefaultProjectContextOptions() ProjectContextOptions {
 	return ProjectContextOptions{
-		MaxTreeDepth:  3,
+		MaxTreeDepth:  2,
 		IncludeAgents: true,
+		IncludeCanopy: true,
 	}
 }
 
@@ -284,9 +292,16 @@ func AssembleBranchContext(opts BranchContextOptions) (*BranchContext, *transpar
 		}
 	}
 
-	logArgs := []string{"log", "--oneline", "-20", ctx.HeadCommit}
+	if opts.IncludeCanopy {
+		ctx.CanopyReview, ctx.CanopyStatus = collectCanopyReview(ctx.RepoRoot, ctx.BaseCommit)
+		if ctx.CanopyReview != "" {
+			audit.Add("canopy structural review", reviewEstimateTokens(ctx.CanopyReview))
+		}
+	}
+
+	logArgs := []string{"log", "--oneline", "--max-count=10", ctx.HeadCommit}
 	if ctx.Scope != ReviewScopeChanges {
-		logArgs = []string{"log", "--oneline", "-20", ctx.BaseCommit + ".." + ctx.HeadCommit}
+		logArgs = []string{"log", "--oneline", "--max-count=10", ctx.BaseCommit + ".." + ctx.HeadCommit}
 	}
 	log, _ := reviewGitOutputAt(ctx.RepoRoot, logArgs...)
 	if strings.TrimSpace(log) != "" {
@@ -367,7 +382,7 @@ func AssembleProjectContext(opts ProjectContextOptions) (*ProjectContext, *trans
 		audit.Add("package.json", reviewEstimateTokens(content))
 	}
 
-	if content, truncated, readErr := readTrackedProjectFile(ctx.RepoRoot, tracked, "README.md", 20_000); readErr != nil {
+	if content, truncated, readErr := readTrackedProjectFile(ctx.RepoRoot, tracked, "README.md", 8_000); readErr != nil {
 		ctx.ContextIncomplete = true
 		audit.Add("README.md (unavailable)", 0)
 	} else if truncated {
@@ -391,7 +406,16 @@ func AssembleProjectContext(opts ProjectContextOptions) (*ProjectContext, *trans
 		ctx.ContextIncomplete = ctx.ContextIncomplete || incomplete
 	}
 
-	log, _ := reviewGitOutputAt(ctx.RepoRoot, "log", "--oneline", "-30", ctx.HeadCommit)
+	if opts.IncludeCanopy {
+		ctx.CanopySummary, ctx.CanopyStatus = collectCanopyProjectSummary(ctx.RepoRoot)
+		if ctx.CanopySummary != "" {
+			audit.Add("Canopy project summary", reviewEstimateTokens(ctx.CanopySummary))
+		} else {
+			audit.Add("Canopy project summary ("+ctx.CanopyStatus+")", 0)
+		}
+	}
+
+	log, _ := reviewGitOutputAt(ctx.RepoRoot, "log", "--oneline", "--max-count=5", ctx.HeadCommit)
 	if strings.TrimSpace(log) != "" {
 		ctx.RecentLog = log
 		audit.Add("recent commits", reviewEstimateTokens(log))
@@ -440,6 +464,16 @@ func BuildBranchPrompt(ctx *BranchContext) string {
 		sb.WriteString(fmt.Sprintf("%s\t%s\n", f.Status, f.Path))
 	}
 	sb.WriteString("```\n\n")
+
+	if ctx.CanopyReview != "" {
+		sb.WriteString("## Primary Structural Review (Canopy)\n\n")
+		sb.WriteString("Use this diff-scoped structural evidence before opening additional files. Validate findings against the supplied diff and snapshot tools.\n\n")
+		sb.WriteString("```json\n")
+		sb.WriteString(ctx.CanopyReview)
+		sb.WriteString("\n```\n\n")
+	} else if ctx.CanopyStatus != "" {
+		sb.WriteString("- **Canopy**: unavailable for this snapshot (" + ctx.CanopyStatus + ")\n\n")
+	}
 
 	sb.WriteString("## Full Diff\n\n")
 	sb.WriteString("```diff\n")
@@ -492,6 +526,17 @@ func BuildProjectPrompt(ctx *ProjectContext) string {
 		sb.WriteString("```\n")
 		sb.WriteString(ctx.Tree)
 		sb.WriteString("\n```\n\n")
+	}
+
+	if ctx.CanopySummary != "" {
+		sb.WriteString("## Primary Project Health Map (Canopy)\n\n")
+		sb.WriteString("Use this structural baseline to choose a small number of high-value inspections. Do not rescan the repository file-by-file.\n\n")
+		sb.WriteString("- **Source status**: " + ctx.CanopyStatus + "\n\n")
+		sb.WriteString("```json\n")
+		sb.WriteString(ctx.CanopySummary)
+		sb.WriteString("\n```\n\n")
+	} else if ctx.CanopyStatus != "" {
+		sb.WriteString("- **Canopy**: unavailable (" + ctx.CanopyStatus + ")\n\n")
 	}
 
 	if ctx.GoMod != "" {
