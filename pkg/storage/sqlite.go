@@ -182,6 +182,7 @@ var migrations = []Migration{
 	{14, "session_model", ensureSessionSchema},
 	{15, "ipc_events", ensureIPCEventsSchema},
 	{16, "normalize_legacy_timestamps", normalizeLegacyTimestamps},
+	{17, "normalize_session_lifecycle_timestamps", normalizeLegacyTimestamps},
 }
 
 func sqliteTimestamp(value time.Time) string {
@@ -191,9 +192,10 @@ func sqliteTimestamp(value time.Time) string {
 func normalizeLegacyTimestamps(db *sql.DB) error {
 	for _, target := range []struct{ table, column string }{
 		{"sessions", "created_at"}, {"sessions", "last_active"},
+		{"sessions", "completed_at"},
 		{"messages", "timestamp"}, {"api_calls", "timestamp"}, {"ipc_events", "created_at"},
 	} {
-		rows, err := db.Query("SELECT rowid, " + target.column + " FROM " + target.table)
+		rows, err := db.Query("SELECT rowid, " + target.column + " FROM " + target.table + " WHERE " + target.column + " IS NOT NULL")
 		if err != nil {
 			return fmt.Errorf("read legacy %s.%s: %w", target.table, target.column, err)
 		}
