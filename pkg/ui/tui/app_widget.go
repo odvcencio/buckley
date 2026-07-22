@@ -123,8 +123,7 @@ type WidgetApp struct {
 	projectRoot string
 
 	// Render synchronization
-	renderMu        sync.Mutex
-	forceFullRedraw bool
+	renderMu sync.Mutex
 }
 
 // WidgetAppConfig configures the widget-based TUI application.
@@ -298,7 +297,6 @@ func NewWidgetApp(cfg WidgetAppConfig) (*WidgetApp, error) {
 		cursorPulsePeriod:   2600 * time.Millisecond,
 		cursorPulseInterval: 50 * time.Millisecond,
 		inputMeasuredHeight: inputArea.Measure(runtime.Constraints{MaxWidth: w, MaxHeight: h}).Height,
-		forceFullRedraw:     true,
 	}
 
 	// Create coalescer for smooth streaming
@@ -307,7 +305,6 @@ func NewWidgetApp(cfg WidgetAppConfig) (*WidgetApp, error) {
 	app.applyScrollStatus(chatView.ScrollPosition())
 
 	chatView.OnScrollChange(func(top, total, viewHeight int) {
-		app.forceFullRedraw = true
 		if app.applyScrollStatus(top, total, viewHeight) {
 			app.dirty = true
 		}
@@ -1052,20 +1049,16 @@ func (a *WidgetApp) render() {
 
 	// Track cells updated
 	var cellsUpdated int64
-	forceFullRedraw := a.forceFullRedraw
-	if forceFullRedraw {
-		a.backend.Clear()
-	}
 
 	// Use partial redraw if only some cells changed
-	if forceFullRedraw || buf.IsDirty() {
+	if buf.IsDirty() {
 		dirtyCount := buf.DirtyCount()
 		w, h := buf.Size()
 		totalCells := w * h
 
 		// If more than half the cells are dirty, do a full redraw
 		// (more efficient than many individual SetContent calls)
-		if forceFullRedraw || dirtyCount > totalCells/2 {
+		if dirtyCount > totalCells/2 {
 			for y := 0; y < h; y++ {
 				for x := 0; x < w; x++ {
 					cell := buf.Get(x, y)
@@ -1085,14 +1078,8 @@ func (a *WidgetApp) render() {
 		buf.ClearDirty()
 	}
 
-	// A forced redraw clears and repopulates every backend cell before Sync
-	// invalidates the terminal's retained front buffer.
-	if forceFullRedraw {
-		a.backend.Sync()
-	} else {
-		a.backend.Show()
-	}
-	a.forceFullRedraw = false
+	// Show the screen
+	a.backend.Show()
 
 	// Update metrics
 	elapsed := time.Since(start)
@@ -1301,7 +1288,6 @@ func (a *WidgetApp) SetRLMStatus(status *widgets.RLMStatus, scratchpad []widgets
 func (a *WidgetApp) ClearScrollback() {
 	a.chatView.Clear()
 	a.unreadCount = 0
-	a.forceFullRedraw = true
 	a.updateScrollStatus()
 }
 

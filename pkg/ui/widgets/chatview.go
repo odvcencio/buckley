@@ -391,6 +391,7 @@ func (c *ChatView) Render(ctx runtime.RenderContext) {
 		return
 	}
 
+	ctx.Buffer.Fill(bounds, ' ', backend.DefaultStyle())
 	viewport := chatViewport(bounds)
 	c.renderVisibleLines(ctx, c.buffer.GetVisibleLines(), viewport)
 	c.renderScrollbar(ctx, viewport)
