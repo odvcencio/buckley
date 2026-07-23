@@ -28,9 +28,14 @@ type reviewCommandOptions struct {
 	verbose         bool
 	showCost        bool
 	model           string
+	criticModel     string
 	timeout         time.Duration
 	outputFile      string
 	interactive     bool
+	budgetUSD       float64
+	maxTurns        int
+	maxDiff         int
+	maxRetries      int
 }
 
 type reviewCommandRuntime struct {
@@ -40,6 +45,7 @@ type reviewCommandRuntime struct {
 	framework       *oneshot.Framework
 	modelID         string
 	reasoningEffort string
+	policy          automatedReviewOptions
 }
 
 type reviewCommandResult struct {
@@ -64,11 +70,16 @@ func parseReviewCommandOptions(args []string) (reviewCommandOptions, error) {
 	fs.Var(&untrackedPaths, "include-untracked", "include one untracked repository-relative text path in model input (repeatable; review for secrets)")
 	verbose := fs.Bool("verbose", false, "show full context and reasoning")
 	showCost := fs.Bool("cost", true, "show token/cost breakdown")
-	modelFlag := fs.String("model", "", "model to use (default: BUCKLEY_MODEL_REVIEW, models.review, or execution model)")
+	modelFlag := fs.String("model", "", "model to use (default: BUCKLEY_MODEL_REVIEW or buckbot.model)")
+	criticModel := fs.String("critic-model", "", "opt-in approval critic model for large or business-critical reviews")
 	timeout := fs.Duration("timeout", 5*time.Minute, "timeout for model request")
 	outputFile := fs.String("output", "", "write review to file instead of stdout")
 	interactive := fs.Bool("interactive", true, "show interactive menu to fix findings")
 	noInteractive := fs.Bool("no-interactive", false, "disable interactive mode")
+	budgetUSD := fs.Float64("budget", 0, "maximum model spend in USD (0 = Buckbot default)")
+	maxTurns := fs.Int("max-turns", 0, "hard model turn limit per review pass (0 = adaptive)")
+	maxDiff := fs.Int("max-diff-bytes", 0, "maximum prioritized diff bytes (0 = Buckbot default)")
+	maxRetries := fs.Int("max-validation-attempts", 0, "maximum schema-validation attempts (0 = Buckbot default)")
 
 	if err := fs.Parse(args); err != nil {
 		return reviewCommandOptions{}, err
@@ -83,9 +94,14 @@ func parseReviewCommandOptions(args []string) (reviewCommandOptions, error) {
 		verbose:         *verbose,
 		showCost:        *showCost,
 		model:           *modelFlag,
+		criticModel:     *criticModel,
 		timeout:         *timeout,
 		outputFile:      *outputFile,
 		interactive:     *interactive,
+		budgetUSD:       *budgetUSD,
+		maxTurns:        *maxTurns,
+		maxDiff:         *maxDiff,
+		maxRetries:      *maxRetries,
 	}
 	if *noInteractive {
 		opts.interactive = false
@@ -113,6 +129,9 @@ func runReviewCommand(args []string) error {
 	if err != nil {
 		return fmt.Errorf("init dependencies: %w", err)
 	}
+	if strings.TrimSpace(opts.criticModel) != "" {
+		cfg.Buckbot.CriticModel = strings.TrimSpace(opts.criticModel)
+	}
 
 	runtime, err := newReviewCommandRuntime(cfg, mgr)
 	if err != nil {
@@ -129,7 +148,13 @@ func runReviewCommand(args []string) error {
 		}
 	}
 
-	result, reviewErr := runReview(ctx, opts, runtime.framework)
+	policy := runtime.policy.withOverrides(automatedReviewOptions{
+		maxIterations: opts.maxTurns,
+		maxRetries:    opts.maxRetries,
+		maxDiffBytes:  opts.maxDiff,
+		maxCostUSD:    opts.budgetUSD,
+	})
+	result, reviewErr := runReviewWithPolicy(ctx, opts, runtime.framework, policy)
 
 	if opts.verbose && result != nil && result.contextAudit != nil {
 		printReviewContextAudit(result.contextAudit)
@@ -199,14 +224,34 @@ func newReviewCommandRuntime(cfg *config.Config, mgr *model.Manager) (*reviewCom
 		ModelID:         modelID,
 		ReasoningEffort: reasoningEffort,
 	})
+	framework := oneshot.NewFramework(nil, arbEngine).WithRLMRunner(rlmRunner)
+	policy := defaultAutomatedReviewOptions(cfg)
+	criticModel := ""
+	if cfg != nil {
+		criticModel = strings.TrimSpace(cfg.Buckbot.CriticModel)
+	}
+	if criticModel != "" && criticModel != modelID {
+		criticRunner := oneshot.NewRLMRunner(oneshot.RLMRunnerConfig{
+			Models:          mgr,
+			Registry:        registry,
+			Ledger:          ledger,
+			ModelID:         criticModel,
+			ReasoningEffort: model.ResolveReasoningEffort(cfg, mgr, nil, criticModel, "review"),
+		})
+		framework = framework.WithApprovalCriticRunner(criticRunner)
+		policy.criticReserveUSD = policy.maxCostUSD * 0.12
+	} else {
+		policy.criticReserveUSD = 0
+	}
 
 	return &reviewCommandRuntime{
 		mgr:             mgr,
 		registry:        registry,
 		ledger:          ledger,
-		framework:       oneshot.NewFramework(nil, arbEngine).WithRLMRunner(rlmRunner),
+		framework:       framework,
 		modelID:         modelID,
 		reasoningEffort: reasoningEffort,
+		policy:          policy,
 	}, nil
 }
 
@@ -219,6 +264,9 @@ func resolveReviewModel(cfg *config.Config) string {
 		modelID = normalizeModelIDWithReasoning(cfg, os.Getenv("BUCKLEY_MODEL_REVIEW"))
 	}
 	if modelID == "" && cfg != nil {
+		modelID = cfg.Buckbot.Model
+	}
+	if modelID == "" && cfg != nil {
 		modelID = cfg.Models.Review
 	}
 	if modelID == "" && cfg != nil {
@@ -228,13 +276,21 @@ func resolveReviewModel(cfg *config.Config) string {
 }
 
 func runReview(ctx context.Context, opts reviewCommandOptions, framework *oneshot.Framework) (*reviewCommandResult, error) {
+	return runReviewWithPolicy(ctx, opts, framework, automatedReviewOptions{})
+}
+
+func runReviewWithPolicy(ctx context.Context, opts reviewCommandOptions, framework *oneshot.Framework, policy automatedReviewOptions) (*reviewCommandResult, error) {
 	if opts.projectMode {
-		return runProjectReview(ctx, framework)
+		return runProjectReviewWithPolicy(ctx, framework, policy)
 	}
-	return runBranchReview(ctx, opts, framework)
+	return runBranchReviewWithPolicy(ctx, opts, framework, policy)
 }
 
 func runProjectReview(ctx context.Context, framework *oneshot.Framework) (*reviewCommandResult, error) {
+	return runProjectReviewWithPolicy(ctx, framework, automatedReviewOptions{})
+}
+
+func runProjectReviewWithPolicy(ctx context.Context, framework *oneshot.Framework, reviewPolicy automatedReviewOptions) (*reviewCommandResult, error) {
 	spinner := terminal.NewSpinner("Analyzing project...")
 	spinner.Start()
 	policy := model.ReviewSnapshotPolicy{Mode: model.ReviewSnapshotTrackedWorktree}
@@ -262,10 +318,14 @@ func runProjectReview(ctx context.Context, framework *oneshot.Framework) (*revie
 
 	userPrompt := commands.BuildProjectPrompt(projectCtx)
 	fwResult, runErr := framework.RunRLM(ctx, commands.ReviewProjectDef{}, oneshot.RLMRunOpts{
-		UserPrompt:     userPrompt,
-		Audit:          audit,
-		SnapshotPolicy: policy,
-		ReviewSnapshot: snapshot,
+		UserPrompt:               userPrompt,
+		Audit:                    audit,
+		MaxRetries:               reviewPolicy.maxRetries,
+		MaxIterations:            reviewPolicy.maxIterations,
+		MaxCostUSD:               reviewPolicy.maxCostUSD,
+		ApprovalCriticReserveUSD: reviewPolicy.criticReserveUSD,
+		SnapshotPolicy:           policy,
+		ReviewSnapshot:           snapshot,
 	})
 	if runErr != nil {
 		spinner.StopWithError(runErr.Error())
@@ -281,6 +341,10 @@ func runProjectReview(ctx context.Context, framework *oneshot.Framework) (*revie
 }
 
 func runBranchReview(ctx context.Context, opts reviewCommandOptions, framework *oneshot.Framework) (*reviewCommandResult, error) {
+	return runBranchReviewWithPolicy(ctx, opts, framework, automatedReviewOptions{})
+}
+
+func runBranchReviewWithPolicy(ctx context.Context, opts reviewCommandOptions, framework *oneshot.Framework, reviewPolicy automatedReviewOptions) (*reviewCommandResult, error) {
 	reviewScope := normalizeReviewCommandScope(opts.scope)
 	spinner := terminal.NewSpinner(fmt.Sprintf("Analyzing %s changes...", reviewScope))
 	spinner.Start()
@@ -296,6 +360,9 @@ func runBranchReview(ctx context.Context, opts reviewCommandOptions, framework *
 	contextOpts.IncludeUnstaged = opts.includeUnstaged
 	contextOpts.UntrackedPaths = append([]string(nil), opts.untrackedPaths...)
 	contextOpts.Scope = reviewScope
+	if reviewPolicy.maxDiffBytes > 0 {
+		contextOpts.MaxDiffBytes = reviewPolicy.maxDiffBytes
+	}
 	if snapshot != nil && policy.Mode == model.ReviewSnapshotWorktree {
 		contextOpts.CapturedUntracked = snapshot.UntrackedFiles()
 	}
@@ -323,12 +390,17 @@ func runBranchReview(ctx context.Context, opts reviewCommandOptions, framework *
 	reviewDef := commands.ReviewBranchDef{
 		ChangedFiles:      reviewChangedFilePaths(branchCtx.Files),
 		ContextIncomplete: branchCtx.DiffTruncated || branchCtx.UnstagedTruncated || branchCtx.ContextIncomplete,
+		ApprovalCritic:    reviewPolicy.approvalCritic,
 	}
 	fwResult, runErr := framework.RunRLM(ctx, reviewDef, oneshot.RLMRunOpts{
-		UserPrompt:     userPrompt,
-		Audit:          audit,
-		SnapshotPolicy: policy,
-		ReviewSnapshot: snapshot,
+		UserPrompt:               userPrompt,
+		Audit:                    audit,
+		MaxRetries:               reviewPolicy.maxRetries,
+		MaxIterations:            reviewPolicy.maxIterations,
+		MaxCostUSD:               reviewPolicy.maxCostUSD,
+		ApprovalCriticReserveUSD: reviewPolicy.criticReserveUSD,
+		SnapshotPolicy:           policy,
+		ReviewSnapshot:           snapshot,
 	})
 	if runErr != nil {
 		spinner.StopWithError(runErr.Error())

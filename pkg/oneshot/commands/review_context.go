@@ -464,6 +464,11 @@ func BuildBranchPrompt(ctx *BranchContext) string {
 		sb.WriteString(fmt.Sprintf("%s\t%s\n", f.Status, f.Path))
 	}
 	sb.WriteString("```\n\n")
+	changedPaths := make([]string, 0, len(ctx.Files))
+	for _, file := range ctx.Files {
+		changedPaths = append(changedPaths, file.Path)
+	}
+	appendReviewVerificationTargets(&sb, changedPaths)
 
 	if ctx.CanopyReview != "" {
 		sb.WriteString("## Primary Structural Review (Canopy)\n\n")

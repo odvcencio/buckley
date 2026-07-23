@@ -223,6 +223,10 @@ type RLMRunOpts struct {
 	// MaxRetries overrides the Arbiter oneshot policy when non-zero.
 	MaxRetries int
 
+	// MaxIterations overrides the definition's per-agent turn budget when
+	// non-zero.
+	MaxIterations int
+
 	// MaxCostUSD is a hard best-effort cost ceiling shared by validation
 	// retries and the approval critic. Zero leaves cost unconstrained.
 	MaxCostUSD float64
@@ -290,7 +294,9 @@ func (f *Framework) RunRLM(ctx context.Context, def RLMDefinition, opts RLMRunOp
 		}
 	}
 	executionOpts := RLMExecutionOpts{ReviewSnapshot: snapshot}
-	if budget, ok := def.(RLMExecutionBudget); ok {
+	if opts.MaxIterations > 0 {
+		executionOpts.MaxIterations = opts.MaxIterations
+	} else if budget, ok := def.(RLMExecutionBudget); ok {
 		executionOpts.MaxIterations = budget.MaxRLMIterations()
 	}
 

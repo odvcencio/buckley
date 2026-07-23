@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"m31labs.dev/buckley/pkg/config"
 	"m31labs.dev/buckley/pkg/model"
 	"m31labs.dev/buckley/pkg/oneshot"
 	"m31labs.dev/buckley/pkg/oneshot/commands"
@@ -15,29 +16,31 @@ import (
 )
 
 type reviewPRCommandOptions struct {
-	verbose    bool
-	showCost   bool
-	model      string
-	timeout    time.Duration
-	outputFile string
-	prRef      string
-	budgetUSD  float64
-	maxTurns   int
-	maxDiff    int
-	maxRetries int
+	verbose     bool
+	showCost    bool
+	model       string
+	criticModel string
+	timeout     time.Duration
+	outputFile  string
+	prRef       string
+	budgetUSD   float64
+	maxTurns    int
+	maxDiff     int
+	maxRetries  int
 }
 
 func parseReviewPRCommandOptions(args []string) (reviewPRCommandOptions, error) {
 	fs := flag.NewFlagSet("review-pr", flag.ContinueOnError)
 	verbose := fs.Bool("verbose", false, "show full context and reasoning")
 	showCost := fs.Bool("cost", true, "show token/cost breakdown")
-	modelFlag := fs.String("model", "", "model to use (default: BUCKLEY_MODEL_REVIEW, models.review, or execution model)")
+	modelFlag := fs.String("model", "", "model to use (default: BUCKLEY_MODEL_REVIEW or buckbot.model)")
+	criticModel := fs.String("critic-model", "", "opt-in approval critic model for large or business-critical reviews")
 	timeout := fs.Duration("timeout", 5*time.Minute, "timeout for model request")
 	outputFile := fs.String("output", "", "write review to file instead of stdout")
-	budgetUSD := fs.Float64("budget", 0, "maximum model spend in USD (0 = unlimited)")
-	maxTurns := fs.Int("max-turns", 0, "maximum model turns per review pass")
-	maxDiff := fs.Int("max-diff-bytes", 0, "maximum prioritized diff bytes (0 = default)")
-	maxRetries := fs.Int("max-validation-attempts", 0, "maximum schema-validation attempts")
+	budgetUSD := fs.Float64("budget", 0, "maximum model spend in USD (0 = Buckbot default)")
+	maxTurns := fs.Int("max-turns", 0, "hard model turn limit per review pass (0 = adaptive)")
+	maxDiff := fs.Int("max-diff-bytes", 0, "maximum prioritized diff bytes (0 = Buckbot default)")
+	maxRetries := fs.Int("max-validation-attempts", 0, "maximum schema-validation attempts (0 = Buckbot default)")
 
 	if err := fs.Parse(interspersedReviewPRArgs(args)); err != nil {
 		return reviewPRCommandOptions{}, err
@@ -47,16 +50,17 @@ func parseReviewPRCommandOptions(args []string) (reviewPRCommandOptions, error) 
 		return reviewPRCommandOptions{}, reviewPRUsageError()
 	}
 	return reviewPRCommandOptions{
-		verbose:    *verbose,
-		showCost:   *showCost,
-		model:      *modelFlag,
-		timeout:    *timeout,
-		outputFile: *outputFile,
-		prRef:      fs.Arg(0),
-		budgetUSD:  *budgetUSD,
-		maxTurns:   *maxTurns,
-		maxDiff:    *maxDiff,
-		maxRetries: *maxRetries,
+		verbose:     *verbose,
+		showCost:    *showCost,
+		model:       *modelFlag,
+		criticModel: *criticModel,
+		timeout:     *timeout,
+		outputFile:  *outputFile,
+		prRef:       fs.Arg(0),
+		budgetUSD:   *budgetUSD,
+		maxTurns:    *maxTurns,
+		maxDiff:     *maxDiff,
+		maxRetries:  *maxRetries,
 	}, nil
 }
 
@@ -100,7 +104,7 @@ func reviewPRFlagName(arg string) (string, bool) {
 
 func reviewPRFlagTakesValue(name string) bool {
 	switch name {
-	case "model", "timeout", "output", "budget", "max-turns", "max-diff-bytes", "max-validation-attempts":
+	case "model", "critic-model", "timeout", "output", "budget", "max-turns", "max-diff-bytes", "max-validation-attempts":
 		return true
 	default:
 		return false
@@ -128,6 +132,9 @@ func runReviewPRCommand(args []string) error {
 	if err != nil {
 		return fmt.Errorf("init dependencies: %w", err)
 	}
+	if strings.TrimSpace(opts.criticModel) != "" {
+		cfg.Buckbot.CriticModel = strings.TrimSpace(opts.criticModel)
+	}
 
 	runtime, err := newReviewCommandRuntime(cfg, mgr)
 	if err != nil {
@@ -145,12 +152,13 @@ func runReviewPRCommand(args []string) error {
 		termOut.Dim("Reviewing PR: %s", opts.prRef)
 	}
 
-	result, prInfo, reviewErr := runPRReviewWithOptions(ctx, opts.prRef, runtime.framework, automatedReviewOptions{
+	policy := runtime.policy.withOverrides(automatedReviewOptions{
 		maxIterations: opts.maxTurns,
 		maxRetries:    opts.maxRetries,
 		maxDiffBytes:  opts.maxDiff,
 		maxCostUSD:    opts.budgetUSD,
 	})
+	result, prInfo, reviewErr := runPRReviewWithOptions(ctx, opts.prRef, runtime.framework, policy)
 
 	if opts.verbose && result != nil && result.contextAudit != nil {
 		printReviewContextAudit(result.contextAudit)
@@ -200,6 +208,43 @@ type automatedReviewOptions struct {
 	maxDiffBytes     int
 	maxCostUSD       float64
 	criticReserveUSD float64
+	approvalCritic   bool
+}
+
+func defaultAutomatedReviewOptions(cfg *config.Config) automatedReviewOptions {
+	if cfg == nil {
+		return automatedReviewOptions{}
+	}
+	opts := automatedReviewOptions{
+		maxIterations: cfg.Buckbot.MaxReviewIterations,
+		maxRetries:    cfg.Buckbot.MaxValidationAttempts,
+		maxDiffBytes:  cfg.Buckbot.MaxDiffBytes,
+		maxCostUSD:    cfg.Buckbot.PerReviewBudgetUSD,
+	}
+	if strings.TrimSpace(cfg.Buckbot.CriticModel) != "" {
+		opts.criticReserveUSD = cfg.Buckbot.PerReviewBudgetUSD * 0.12
+		opts.approvalCritic = true
+	}
+	return opts
+}
+
+func (defaults automatedReviewOptions) withOverrides(overrides automatedReviewOptions) automatedReviewOptions {
+	if overrides.maxIterations > 0 {
+		defaults.maxIterations = overrides.maxIterations
+	}
+	if overrides.maxRetries > 0 {
+		defaults.maxRetries = overrides.maxRetries
+	}
+	if overrides.maxDiffBytes > 0 {
+		defaults.maxDiffBytes = overrides.maxDiffBytes
+	}
+	if overrides.maxCostUSD > 0 {
+		defaults.maxCostUSD = overrides.maxCostUSD
+		if defaults.criticReserveUSD > 0 {
+			defaults.criticReserveUSD = overrides.maxCostUSD * 0.12
+		}
+	}
+	return defaults
 }
 
 func runPRReviewWithOptions(ctx context.Context, prRef string, framework *oneshot.Framework, opts automatedReviewOptions) (*reviewCommandResult, *commands.PRInfo, error) {
@@ -226,6 +271,7 @@ func runPRReviewWithOptions(ctx context.Context, prRef string, framework *onesho
 		RequiresFeedbackDisposition: prCtx.HasReviewFeedback(),
 		RequiredFeedbackIDs:         prCtx.RequiredFeedbackIDs(),
 		MaxIterations:               opts.maxIterations,
+		ApprovalCritic:              opts.approvalCritic,
 	}
 	fwResult, runErr := framework.RunRLM(ctx, reviewDef, oneshot.RLMRunOpts{
 		UserPrompt:               userPrompt,

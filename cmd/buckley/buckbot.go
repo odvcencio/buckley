@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -18,7 +20,7 @@ import (
 	"m31labs.dev/buckley/pkg/config"
 	"m31labs.dev/buckley/pkg/gitwatcher"
 	"m31labs.dev/buckley/pkg/model"
-	"m31labs.dev/buckley/pkg/oneshot"
+	"m31labs.dev/buckley/pkg/oneshot/commands"
 	"m31labs.dev/buckley/pkg/storage"
 	"m31labs.dev/buckley/pkg/transparency"
 )
@@ -48,6 +50,7 @@ type buckbotService struct {
 	cfg      config.BuckbotConfig
 	review   buckbotReviewer
 	post     buckbotPoster
+	announce buckbotPoster
 	mu       sync.Mutex
 	seen     map[string]struct{}
 	active   map[string]buckbotActiveReview
@@ -103,6 +106,13 @@ func (s *buckbotService) handle(event gitwatcher.PullRequestEvent) {
 		if !s.reserveReviewBudget() {
 			slog.Warn("Buckbot monthly budget cannot reserve another review", "repository", event.Repository, "pr", event.Number)
 			return
+		}
+		if attempt == 0 && s.announce != nil {
+			announceCtx, announceCancel := context.WithTimeout(ctx, buckbotPostAttemptTimeout)
+			if err := s.announce(announceCtx, event, ""); err != nil {
+				slog.Warn("Buckbot could not post review-started comment", "repository", event.Repository, "pr", event.Number, "head", event.HeadSHA, "error", err)
+			}
+			announceCancel()
 		}
 		attemptCtx, attemptCancel := context.WithTimeout(ctx, buckbotReviewAttemptTimeout)
 		review, cost, err := s.review(attemptCtx, event)
@@ -275,6 +285,7 @@ func runBuckbotCommand(args []string) error {
 		return fmt.Errorf("load Buckbot monthly spend: %w", err)
 	}
 	service := newBuckbotService(cfg.Buckbot, newBuckbotReviewer(cfg.Buckbot, costStore), postBuckbotReview)
+	service.announce = postBuckbotReviewStarted(cfg.Buckbot)
 	service.spentUSD = monthlySpend
 	fmt.Printf("Buckbot listening for pull_request webhooks on %s using %s\n", addr, cfg.Buckbot.Model)
 	return buckbotListenFn(addr, gitwatcher.NewPullRequestHandler(webhookSecret, service.handle))
@@ -290,30 +301,15 @@ func newBuckbotReviewer(botCfg config.BuckbotConfig, costStore *storage.Store) b
 			return "", 0, fmt.Errorf("init dependencies: %w", err)
 		}
 		cfgCopy := *cfg
+		cfgCopy.Buckbot = botCfg
 		cfgCopy.Models.Review = botCfg.Model
 		runtime, err := newReviewCommandRuntime(&cfgCopy, mgr)
 		if err != nil {
 			return "", 0, err
 		}
 		criticModel := strings.TrimSpace(botCfg.CriticModel)
-		if criticModel != "" && criticModel != botCfg.Model {
-			criticRunner := oneshot.NewRLMRunner(oneshot.RLMRunnerConfig{
-				Models:          mgr,
-				Registry:        runtime.registry,
-				Ledger:          runtime.ledger,
-				ModelID:         criticModel,
-				ReasoningEffort: model.ResolveReasoningEffort(&cfgCopy, mgr, nil, criticModel, "review"),
-			})
-			runtime.framework = runtime.framework.WithApprovalCriticRunner(criticRunner)
-		}
 		ref := fmt.Sprintf("https://github.com/%s/pull/%d", event.Repository, event.Number)
-		result, _, reviewErr := runPRReviewWithOptions(ctx, ref, runtime.framework, automatedReviewOptions{
-			maxIterations:    botCfg.MaxReviewIterations,
-			maxRetries:       botCfg.MaxValidationAttempts,
-			maxDiffBytes:     botCfg.MaxDiffBytes,
-			maxCostUSD:       botCfg.PerReviewBudgetUSD,
-			criticReserveUSD: botCfg.PerReviewBudgetUSD * 0.12,
-		})
+		result, _, reviewErr := runPRReviewWithOptions(ctx, ref, runtime.framework, runtime.policy)
 		entries := runtime.ledger.Entries()
 		cost := runtime.ledger.SessionTotal()
 		partialReview := ""
@@ -436,9 +432,80 @@ func saveBuckbotSpend(store *storage.Store, event gitwatcher.PullRequestEvent, m
 }
 
 func postBuckbotReview(ctx context.Context, event gitwatcher.PullRequestEvent, review string) error {
-	cmd := exec.CommandContext(ctx, "gh", "pr", "review", fmt.Sprint(event.Number), "--repo", event.Repository, "--comment", "--body", review)
+	parsed := commands.ParseReview(review)
+	inlineComments := make([]map[string]any, 0, len(parsed.Findings))
+	for _, finding := range parsed.Findings {
+		if finding.Line <= 0 || strings.TrimSpace(finding.File) == "" {
+			continue
+		}
+		inlineComments = append(inlineComments, map[string]any{
+			"path": finding.File,
+			"line": finding.Line,
+			"side": "RIGHT",
+			"body": formatBuckbotInlineFinding(finding),
+		})
+	}
+	if err := postBuckbotReviewPayload(ctx, event, review, inlineComments); err != nil {
+		if len(inlineComments) == 0 {
+			return err
+		}
+		slog.Warn("Buckbot inline review was rejected; posting summary without inline comments", "repository", event.Repository, "pr", event.Number, "error", err)
+		if fallbackErr := postBuckbotReviewPayload(ctx, event, review, nil); fallbackErr != nil {
+			return fmt.Errorf("%v; summary fallback: %w", err, fallbackErr)
+		}
+	}
+	return nil
+}
+
+func postBuckbotReviewPayload(ctx context.Context, event gitwatcher.PullRequestEvent, review string, inlineComments []map[string]any) error {
+	payload, err := json.Marshal(map[string]any{
+		"body":      review,
+		"commit_id": event.HeadSHA,
+		"event":     "COMMENT",
+		"comments":  inlineComments,
+	})
+	if err != nil {
+		return fmt.Errorf("encode GitHub review: %w", err)
+	}
+	cmd := exec.CommandContext(ctx, "gh", "api", fmt.Sprintf("repos/%s/pulls/%d/reviews", event.Repository, event.Number), "--method", "POST", "--input", "-")
+	cmd.Stdin = bytes.NewReader(payload)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("post GitHub review: %w: %s", err, strings.TrimSpace(string(output)))
 	}
 	return nil
+}
+
+func postBuckbotReviewStarted(cfg config.BuckbotConfig) buckbotPoster {
+	return func(ctx context.Context, event gitwatcher.PullRequestEvent, _ string) error {
+		sha := strings.TrimSpace(event.HeadSHA)
+		if len(sha) > 12 {
+			sha = sha[:12]
+		}
+		body := fmt.Sprintf(
+			"🔎 **Buckbot is reviewing `%s`.**\n\nI’m mapping the changed surface with Canopy, tracing affected consumers and boundaries, and checking concrete risks against CI. A final summary and any line-level findings will follow.\n\n_Model: `%s` · hard cost cap: $%.2f_",
+			sha,
+			cfg.Model,
+			cfg.PerReviewBudgetUSD,
+		)
+		cmd := exec.CommandContext(ctx, "gh", "pr", "comment", fmt.Sprint(event.Number), "--repo", event.Repository, "--body", body)
+		if output, err := cmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("post GitHub review-started comment: %w: %s", err, strings.TrimSpace(string(output)))
+		}
+		return nil
+	}
+}
+
+func formatBuckbotInlineFinding(finding commands.Finding) string {
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "**%s · %s: %s**\n\n%s", finding.ID, finding.Severity, finding.Title, finding.Evidence)
+	if finding.Impact != "" {
+		fmt.Fprintf(&sb, "\n\n**Impact:** %s", finding.Impact)
+	}
+	if finding.Fix != "" {
+		fmt.Fprintf(&sb, "\n\n**Suggested fix:** %s", finding.Fix)
+	}
+	if finding.SuggestedFix != "" {
+		fmt.Fprintf(&sb, "\n\n```suggestion\n%s\n```", strings.TrimSpace(finding.SuggestedFix))
+	}
+	return sb.String()
 }

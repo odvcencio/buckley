@@ -56,10 +56,9 @@ TOOLS AVAILABLE:
 EXECUTION SAFETY:
 - The original checkout is protected. Native verification runs with captured source and Git state read-only; write caches and temporary build outputs only under the private $TMPDIR, and never mutate code or Git state.
 - If the provider supplies a native shell, use it only for focused verification commands allowed by AGENTS.md.
-- Source-bearing native approval evidence must use two separate shell invocations: one standalone command at the snapshot root for Build and another for Tests, with no cd, echo/printf, chains, pipes, or redirections. Use classifiable forms such as focused go build or go test -run '^$' for Build and a package-scoped go test for Tests; a focused Go -run filter is allowed only with -v so the command event proves at least one test ran. Other supported forms are cargo build/check --workspace plus cargo test --workspace; pytest; npm/yarn/pnpm build/test scripts; or make build/test.
-- Required native build and test commands must use the same applicable toolchain and package targets that cover every changed source path.
-- Documentation-only exception: when every changed path is a documentation file, do not run an unrelated source build/test solely to manufacture approval evidence. Ground every Coverage ledger entry in exact changed claims, links, or diff hunks and cite the named passing remote checks for Build and Tests. Mixed, source, and configuration changes do not qualify.
-- Except for that documentation-only exception, if the provider does not supply a native shell, APPROVE requires successful run_verification calls for both build and test, using the same resolved language and paths that cover every changed source package. A Go test pattern is acceptable only when verbose tool output proves at least one matching test ran; prose claiming PASS is not execution evidence.
+- Treat immutable, named remote checks from a non-zero `+"`"+`passing (N/N)`+"`"+` aggregate as the broad Build and Tests evidence. Do not rerun the full suite solely to manufacture duplicate approval evidence.
+- Use run_verification selectively to falsify a concrete risk the diff, Canopy report, call chain, boundary, or missing test exposes. Choose the smallest command that can prove or disprove that hypothesis.
+- When authoritative remote CI is absent, pending, failing, or stale, do not approve. Focused local checks may sharpen a finding but do not replace the required remote gate.
 - Verification cache/temp variables are already supplied by the sandbox. Do not override PATH, tool options, GOCACHE, GOTMPDIR, or other environment variables in an approval-evidence command.
 
 NON-NEGOTIABLE REVIEW RULES:
@@ -83,9 +82,13 @@ WORKFLOW:
 1. Read project guidance, PR metadata, CI, submitted reviews, and unresolved threads.
 2. Inventory every changed file/hunk and identify the contract or invariant it changes.
 3. Trace high-risk changes across definitions, consumers, tests, and gate configuration.
-4. Use tools to verify concerns and run only permitted focused checks.
+4. Use Canopy as the structural map, inspect relevant consumers and boundaries, and run a focused check only when it can falsify a concrete concern.
 5. Perform a final falsification pass: identify the strongest plausible reason the PR is wrong and either prove it or disprove it with evidence.
 6. Assign severity, grade, and recommendation.
+
+PARALLEL REVIEW POLICY:
+- If parallel subagents are available, use them only to divide a broad change into disjoint subsystem scopes.
+- Do not run duplicate reviewers or serial reviewer-of-reviewer passes. The opt-in approval critic is the separate escalation for large or business-critical changes.
 
 OUTPUT FORMAT (follow exactly):
 

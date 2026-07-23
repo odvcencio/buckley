@@ -177,6 +177,19 @@ func TestRunRLMAppliesDefinitionIterationBudget(t *testing.T) {
 	}
 }
 
+func TestRunRLMAppliesCallerIterationBudget(t *testing.T) {
+	runner := &scriptedRLMExecutor{responses: []string{"valid"}}
+	framework := NewFramework(nil, nil).WithRLMRunner(runner)
+	if _, err := framework.RunRLM(context.Background(), budgetedRLMDefinition{}, RLMRunOpts{
+		MaxIterations: 3,
+	}); err != nil {
+		t.Fatalf("RunRLM() error = %v", err)
+	}
+	if len(runner.iterations) != 1 || runner.iterations[0] != 3 {
+		t.Fatalf("iteration budgets = %v, want [3]", runner.iterations)
+	}
+}
+
 func TestRunRLMSharesCostBudgetAcrossRetries(t *testing.T) {
 	runner := &scriptedRLMExecutor{
 		responses: []string{"incomplete", "valid"},

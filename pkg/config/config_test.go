@@ -21,8 +21,9 @@ func TestDefaultConfig(t *testing.T) {
 		t.Fatalf("expected default review model to be z-ai/glm-5.2, got %s", cfg.Models.Review)
 	}
 	if cfg.Buckbot.Model != "qwen/qwen3.6-flash" ||
-		cfg.Buckbot.CriticModel != "moonshotai/kimi-k2.7-code" ||
-		cfg.Buckbot.MaxReviewIterations != 3 ||
+		cfg.Buckbot.CriticModel != "" ||
+		cfg.Buckbot.PerReviewBudgetUSD != 0.15 ||
+		cfg.Buckbot.MaxReviewIterations != 0 ||
 		cfg.Buckbot.MaxValidationAttempts != 2 ||
 		cfg.Buckbot.MaxDiffBytes != 80_000 {
 		t.Fatalf("unexpected Buckbot efficiency defaults: %+v", cfg.Buckbot)
@@ -46,8 +47,8 @@ func TestDefaultConfig(t *testing.T) {
 			t.Fatalf("expected GLM fallback[%d] to be %s, got %s", i, want, gotFallback[i])
 		}
 	}
-	if cfg.Models.Utility.Commit != "qwen/qwen3.6-flash" {
-		t.Fatalf("expected default commit model to be qwen/qwen3.6-flash, got %s", cfg.Models.Utility.Commit)
+	if cfg.Models.Utility.Commit != "qwen/qwen3.7-plus" {
+		t.Fatalf("expected default commit model to be qwen/qwen3.7-plus, got %s", cfg.Models.Utility.Commit)
 	}
 	if cfg.Personality.QuirkProbability <= 0 || cfg.Personality.QuirkProbability >= 1 {
 		t.Fatalf("unexpected quirk probability: %f", cfg.Personality.QuirkProbability)

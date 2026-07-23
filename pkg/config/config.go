@@ -13,6 +13,7 @@ const (
 	defaultOpenRouterModel        = defaultOpenRouterChatModel
 	defaultOpenRouterChatModel    = "z-ai/glm-5.2"
 	defaultOpenRouterUtilityModel = "qwen/qwen3.6-flash"
+	defaultOpenRouterCommitModel  = "qwen/qwen3.7-plus"
 	defaultOpenRouterKimiCode     = "moonshotai/kimi-k2.7-code"
 	defaultOpenRouterQwenMax      = "qwen/qwen3.7-max"
 	legacyOpenRouterChatModel     = "qwen/qwen3.6-max-preview"
@@ -68,7 +69,7 @@ var providerDefaultModels = map[string]providerModelDefaults{
 		Planning:          defaultOpenRouterChatModel,
 		Execution:         defaultOpenRouterChatModel,
 		Review:            defaultOpenRouterChatModel,
-		UtilityCommit:     defaultOpenRouterUtilityModel,
+		UtilityCommit:     defaultOpenRouterCommitModel,
 		UtilityPR:         defaultOpenRouterUtilityModel,
 		UtilityCompaction: defaultOpenRouterUtilityModel,
 		UtilityTodoPlan:   defaultOpenRouterUtilityModel,
@@ -196,12 +197,15 @@ type UtilityModelConfig struct {
 // DefaultUtilityModel is the default model for utility tasks.
 const DefaultUtilityModel = defaultOpenRouterUtilityModel
 
+// DefaultCommitModel is the default model for commit message generation.
+const DefaultCommitModel = defaultOpenRouterCommitModel
+
 // GetUtilityCommitModel returns the model for commit message generation
 func (c *Config) GetUtilityCommitModel() string {
 	if c.Models.Utility.Commit != "" {
 		return c.Models.Utility.Commit
 	}
-	return DefaultUtilityModel
+	return DefaultCommitModel
 }
 
 // GetUtilityPRModel returns the model for PR description generation

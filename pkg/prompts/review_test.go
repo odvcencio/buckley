@@ -35,8 +35,6 @@ func TestReviewPromptsRequireEvidenceCoverageAndExactTools(t *testing.T) {
 				"provider/executor enforcement",
 				"Strongest plausible failure",
 				"already supplied by the sandbox",
-				"same applicable toolchain",
-				"cover every changed source path",
 			} {
 				if !strings.Contains(strings.ToLower(prompt), strings.ToLower(want)) {
 					t.Errorf("prompt missing %q", want)
@@ -51,6 +49,8 @@ func TestReviewPromptsMakeApprovalVerificationPolicyExplicit(t *testing.T) {
 	for _, want := range []string{
 		"APPROVE requires both Build and Tests to be PASS",
 		"focused local verification actually completed",
+		"same applicable toolchain",
+		"cover every changed source path",
 		"Any FAIL, PENDING, NOT_RUN, UNAVAILABLE, or UNKNOWN state blocks approval",
 		"Documentation-only exception",
 		"exact changed claims, links, or diff hunks",
@@ -67,9 +67,9 @@ func TestReviewPromptsMakeApprovalVerificationPolicyExplicit(t *testing.T) {
 		"passing (N/N)",
 		"Failing, pending, unknown, or absent checks block approval",
 		"repeat the exact Feedback ledger entry once for EVERY supplied ID",
-		"Documentation-only exception",
-		"exact changed claims, links, or diff hunks",
-		"Mixed, source, and configuration changes do not qualify",
+		"Do not rerun the full suite solely",
+		"falsify a concrete risk",
+		"do not replace the required remote gate",
 	} {
 		if !strings.Contains(pr, want) {
 			t.Errorf("PR prompt missing %q", want)

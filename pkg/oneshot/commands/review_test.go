@@ -471,6 +471,17 @@ func TestApprovedAPIReviewRequiresSuccessfulVerificationToolEvidence(t *testing.
 	assert.NoError(t, validateReviewExecutionEvidence(result, execution, changedFiles))
 }
 
+func TestReviewVerificationTargetsListsChangedSourcePackages(t *testing.T) {
+	got := reviewVerificationTargets([]string{
+		"cmd/buckley/review.go",
+		"cmd/buckley/review_test.go",
+		"pkg/model/client.go",
+		"README.md",
+	})
+	want := []string{"go: cmd/buckley", "go: pkg/model"}
+	assert.Equal(t, want, got)
+}
+
 func TestApprovedPRDocumentationReviewUsesExactDiffLedgerInsteadOfUnrelatedCommands(t *testing.T) {
 	changedFiles := []string{"README.md", "docs/release-notes.mdx"}
 	result := &ReviewRLMResult{Parsed: &ParsedReview{
@@ -486,6 +497,33 @@ func TestApprovedPRDocumentationReviewUsesExactDiffLedgerInsteadOfUnrelatedComma
 
 	result.Parsed.CoverageEntries = result.Parsed.CoverageEntries[:1]
 	assert.ErrorContains(t, def.ValidateRLMExecution(result, nil), "documentation-only approval requires exact changed-file diff evidence")
+}
+
+func TestApprovedPRUsesAuthoritativeRemoteCIInsteadOfDuplicateLocalSuite(t *testing.T) {
+	result := &ReviewRLMResult{Parsed: &ParsedReview{Approved: true}}
+
+	for _, provenance := range []string{prCISourceHead, prCISourceBase} {
+		def := ReviewPRDef{
+			ChangedFiles: []string{"pkg/model/client.go"},
+			CIStatus:     "passing (4/4)",
+			CIProvenance: provenance,
+		}
+		assert.NoError(t, def.ValidateRLMExecution(result, nil))
+	}
+
+	pending := ReviewPRDef{
+		ChangedFiles: []string{"pkg/model/client.go"},
+		CIStatus:     "pending (3/4)",
+		CIProvenance: prCISourceHead,
+	}
+	assert.ErrorContains(t, pending.ValidateRLMExecution(result, nil), "missing execution evidence")
+
+	untrusted := ReviewPRDef{
+		ChangedFiles: []string{"pkg/model/client.go"},
+		CIStatus:     "passing (4/4)",
+		CIProvenance: "working tree",
+	}
+	assert.ErrorContains(t, untrusted.ValidateRLMExecution(result, nil), "missing execution evidence")
 }
 
 func TestReviewPRRuntimeAcceptsExactChangelogDocumentationLedger(t *testing.T) {
@@ -606,16 +644,17 @@ func TestReviewPRDef_Interface(t *testing.T) {
 	assert.NotContains(t, def.AllowedTools(), "write_file")
 }
 
-func TestApprovalReviewsRequireIndependentCritic(t *testing.T) {
+func TestApprovalCriticIsExplicitlyOptIn(t *testing.T) {
 	approval := completeReviewWithCoverage("- **File**: `ratchet.go` — reviewed the exact changed file and paired bound.\n" +
 		"- **Feedback disposition**: `NONE_SUPPLIED` — no prior feedback was supplied.\n" +
 		"- **Verification**: focused test passed.")
 
-	branch := ReviewBranchDef{ChangedFiles: []string{"ratchet.go"}}
+	branch := ReviewBranchDef{ChangedFiles: []string{"ratchet.go"}, ApprovalCritic: true}
 	branchResult, err := branch.ParseResult(approval)
 	assert.NoError(t, err)
 	assert.NoError(t, branch.ValidateResult(branchResult))
 	assert.True(t, branch.RequiresApprovalCritic(branchResult))
+	assert.False(t, (ReviewBranchDef{}).RequiresApprovalCritic(branchResult))
 	assert.Contains(t, branch.ApprovalCriticSystemPrompt(), "INDEPENDENT APPROVAL CRITIC ROLE")
 	branchCriticPrompt, err := branch.BuildApprovalCriticPrompt("ORIGINAL DIFF", branchResult)
 	assert.NoError(t, err)
@@ -623,11 +662,19 @@ func TestApprovalReviewsRequireIndependentCritic(t *testing.T) {
 	assert.Contains(t, branchCriticPrompt, approval)
 	assert.Contains(t, branchCriticPrompt, "complete machine-validated review becomes the final result")
 
-	pr := ReviewPRDef{ChangedFiles: []string{"ratchet.go"}, CIStatus: "passing (1/1)", CIProvenance: prCISourceHead}
+	pr := ReviewPRDef{
+		ChangedFiles:   []string{"ratchet.go"},
+		CIStatus:       "passing (1/1)",
+		CIProvenance:   prCISourceHead,
+		ApprovalCritic: true,
+	}
 	prResult, err := pr.ParseResult(approval)
 	assert.NoError(t, err)
 	assert.NoError(t, pr.ValidateResult(prResult))
 	assert.True(t, pr.RequiresApprovalCritic(prResult))
+	pr.ApprovalCritic = false
+	assert.False(t, pr.RequiresApprovalCritic(prResult))
+	pr.ApprovalCritic = true
 	assert.Contains(t, pr.ApprovalCriticSystemPrompt(), "INDEPENDENT APPROVAL CRITIC ROLE")
 
 	nonApproval := strings.Replace(approval, "## Grade: A", "## Grade: C", 1)
