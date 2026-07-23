@@ -214,6 +214,7 @@ func NewController(cfg ControllerConfig) (*Controller, error) {
 		ctrl.nextSession,
 		ctrl.prevSession,
 	)
+	app.SetInterruptCallback(ctrl.cancelCurrentStream)
 
 	return ctrl, nil
 }
@@ -504,7 +505,7 @@ func (c *Controller) handleCommand(text string) {
   /help                - Show this help
   /quit, /exit         - Exit Buckley
 
-Shortcuts: Alt+Right (next), Alt+Left (prev), Ctrl+F (search)`, "system")
+Shortcuts: Ctrl+C (interrupt active work), Alt+Right (next), Alt+Left (prev), Ctrl+F (search)`, "system")
 
 	case "/quit", "/exit":
 		c.app.Quit()
@@ -982,7 +983,7 @@ func (c *Controller) buildMessagesForSession(sess *SessionState) []model.Message
 
 	// Add conversation history from session
 	if sess != nil && sess.Conversation != nil {
-		messages = append(messages, sess.Conversation.ToModelMessages()...)
+		messages = append(messages, sess.Conversation.ToEfficientModelMessages()...)
 	}
 
 	return truncateModelToolMessages(messages, defaultTUIToolModelMaxBytes)
@@ -1106,7 +1107,10 @@ const defaultTUIToolModelMaxBytes = 24 * 1024
 // buildRegistry creates the tool registry with all available tools.
 func buildRegistry(cfg *config.Config, store *storage.Store, workDir string, hub *telemetry.Hub, sessionID string) *tool.Registry {
 	registry := tool.NewRegistry()
-	registry.SetMaxOutputBytes(defaultTUIMaxOutputBytes)
+	tool.ApplyToolMiddlewareConfig(registry, cfg)
+	if cfg == nil || cfg.ToolMiddleware.MaxResultBytes <= 0 {
+		registry.SetMaxOutputBytes(defaultTUIMaxOutputBytes)
+	}
 
 	// Configure container execution if enabled
 	if cfg != nil && workDir != "" {
@@ -1133,6 +1137,7 @@ func buildRegistry(cfg *config.Config, store *storage.Store, workDir string, hub
 	if workDir != "" {
 		registry.SetWorkDir(workDir)
 	}
+	registry.EnableDynamicDiscovery(nil)
 
 	return registry
 }

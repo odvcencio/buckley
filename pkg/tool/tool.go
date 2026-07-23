@@ -45,6 +45,31 @@ func ToJSON(r *builtin.Result) (string, error) {
 	return string(data), nil
 }
 
+// ToModelOutput encodes only fields that help the model decide its next step.
+// UI, approval callbacks, and duplicate full/display payloads stay out of the
+// context window.
+func ToModelOutput(r *builtin.Result) (string, error) {
+	if r == nil {
+		return "", nil
+	}
+	data := r.Data
+	if r.ShouldAbridge && len(r.DisplayData) > 0 {
+		data = r.DisplayData
+	}
+	payload := map[string]any{"success": r.Success}
+	if r.Error != "" {
+		payload["error"] = r.Error
+	}
+	if len(data) > 0 {
+		payload["data"] = data
+	}
+	encoded, err := resultCodec.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
+	return string(encoded), nil
+}
+
 // FromJSON parses a result from JSON
 func FromJSON(jsonStr string) (*builtin.Result, error) {
 	var result builtin.Result

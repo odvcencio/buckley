@@ -1,8 +1,10 @@
 package tui
 
 import (
+	"encoding/json"
 	"testing"
 
+	"m31labs.dev/buckley/pkg/model"
 	"m31labs.dev/buckley/pkg/tool"
 	"m31labs.dev/buckley/pkg/tool/builtin"
 )
@@ -46,5 +48,39 @@ func TestResolveToolCallNameRespectsAllowedTools(t *testing.T) {
 	}
 	if got != "Read_File" {
 		t.Fatalf("tool name=%q want original", got)
+	}
+}
+
+func TestNormalizeToolLoopCallsRepairsShellPayloadNamedRunTests(t *testing.T) {
+	registry := tool.NewEmptyRegistry()
+	registry.Register(repairNameTool{name: "run_tests"})
+	registry.Register(repairNameTool{name: "run_shell"})
+	arguments, _ := json.Marshal(map[string]any{
+		"command":         "go test ./server",
+		"timeout_seconds": 30,
+	})
+	calls := []model.ToolCall{{Function: model.FunctionCall{
+		Name:      "run_tests",
+		Arguments: string(arguments),
+	}}}
+
+	got := normalizeToolLoopCalls(registry, calls, nil)
+	if got[0].Function.Name != "run_shell" {
+		t.Fatalf("tool name = %q, want run_shell", got[0].Function.Name)
+	}
+}
+
+func TestNormalizeToolLoopCallsKeepsValidRunTestsPayload(t *testing.T) {
+	registry := tool.NewEmptyRegistry()
+	registry.Register(repairNameTool{name: "run_tests"})
+	registry.Register(repairNameTool{name: "run_shell"})
+	calls := []model.ToolCall{{Function: model.FunctionCall{
+		Name:      "run_tests",
+		Arguments: `{"path":"./server","pattern":"ISR"}`,
+	}}}
+
+	got := normalizeToolLoopCalls(registry, calls, nil)
+	if got[0].Function.Name != "run_tests" {
+		t.Fatalf("tool name = %q, want run_tests", got[0].Function.Name)
 	}
 }

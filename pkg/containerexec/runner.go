@@ -1,6 +1,7 @@
 package containerexec
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os/exec"
@@ -53,17 +54,30 @@ func (cr *ContainerRunner) Parameters() builtin.ParameterSchema {
 
 // Execute runs the tool inside the container
 func (cr *ContainerRunner) Execute(params map[string]any) (*builtin.Result, error) {
+	return cr.ExecuteWithContext(context.Background(), params)
+}
+
+// ExecuteWithContext runs the tool and stops container execution when ctx is cancelled.
+func (cr *ContainerRunner) ExecuteWithContext(ctx context.Context, params map[string]any) (*builtin.Result, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	// For tools that can run on host (read-only operations), run directly
 	if CanRunOnHost(cr.tool.Name()) {
+		if contextTool, ok := cr.tool.(interface {
+			ExecuteWithContext(context.Context, map[string]any) (*builtin.Result, error)
+		}); ok {
+			return contextTool.ExecuteWithContext(ctx, params)
+		}
 		return cr.tool.Execute(params)
 	}
 
 	// For tools that need to run in container, wrap the execution
-	return cr.executeInContainer(params)
+	return cr.executeInContainer(ctx, params)
 }
 
 // executeInContainer runs the tool inside a docker container
-func (cr *ContainerRunner) executeInContainer(params map[string]any) (*builtin.Result, error) {
+func (cr *ContainerRunner) executeInContainer(ctx context.Context, params map[string]any) (*builtin.Result, error) {
 	// Marshal params to JSON
 	paramsJSON, err := json.Marshal(params)
 	if err != nil {
@@ -72,7 +86,7 @@ func (cr *ContainerRunner) executeInContainer(params map[string]any) (*builtin.R
 
 	// Build docker compose exec command
 	// We'll create a wrapper script that the tool can execute
-	cmd := exec.Command("docker", "compose", "-f", cr.composeFile,
+	cmd := exec.CommandContext(ctx, "docker", "compose", "-f", cr.composeFile,
 		"exec", "-T", cr.service,
 		"sh", "-c", fmt.Sprintf("echo '%s' | %s", string(paramsJSON), cr.tool.Name()))
 

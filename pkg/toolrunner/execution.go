@@ -426,7 +426,7 @@ func (r *Runner) executeToolDefault(ctx context.Context, name string, args map[s
 
 	success := toolResult.Success
 	if toolResult.Data != nil {
-		if result, err := tool.ToJSON(toolResult); err == nil {
+		if result, err := tool.ToModelOutput(toolResult); err == nil {
 			return ToolExecutionResult{
 				Result:  result,
 				Success: success,

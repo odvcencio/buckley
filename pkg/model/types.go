@@ -294,9 +294,46 @@ type FunctionCallDelta struct {
 
 // Usage tracks token consumption for a single request.
 type Usage struct {
-	PromptTokens     int `json:"prompt_tokens"`
-	CompletionTokens int `json:"completion_tokens"`
-	TotalTokens      int `json:"total_tokens"`
+	PromptTokens           int                     `json:"prompt_tokens"`
+	CompletionTokens       int                     `json:"completion_tokens"`
+	TotalTokens            int                     `json:"total_tokens"`
+	PromptTokensDetails    *PromptTokensDetails    `json:"prompt_tokens_details,omitempty"`
+	CompletionTokenDetails *CompletionTokenDetails `json:"completion_tokens_details,omitempty"`
+	CacheWriteTokens       int                     `json:"cache_write_tokens,omitempty"`
+}
+
+type PromptTokensDetails struct {
+	CachedTokens int `json:"cached_tokens,omitempty"`
+}
+
+type CompletionTokenDetails struct {
+	ReasoningTokens int `json:"reasoning_tokens,omitempty"`
+}
+
+// RequestTokenEstimate describes the approximate model input footprint.
+type RequestTokenEstimate struct {
+	Messages int
+	Tools    int
+	Fixed    int
+	Total    int
+}
+
+// EstimateRequestTokens includes tool schemas and request controls, which the
+// conversation-only char/4 estimator historically missed.
+func EstimateRequestTokens(req ChatRequest) RequestTokenEstimate {
+	messages, _ := json.Marshal(req.Messages)
+	tools, _ := json.Marshal(req.Tools)
+	copyReq := req
+	copyReq.Messages = nil
+	copyReq.Tools = nil
+	fixed, _ := json.Marshal(copyReq)
+	estimate := RequestTokenEstimate{
+		Messages: len(messages) / 4,
+		Tools:    len(tools) / 4,
+		Fixed:    len(fixed) / 4,
+	}
+	estimate.Total = estimate.Messages + estimate.Tools + estimate.Fixed
+	return estimate
 }
 
 // ModelCatalog represents the list of available models

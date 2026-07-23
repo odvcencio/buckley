@@ -122,7 +122,7 @@ func (r *Registry) executeTool(ctx *ExecutionContext, tool Tool, params map[stri
 	if r.containerExecute && r.containerCompose != "" {
 		service := containerexec.GetServiceForTool(strings.TrimSpace(ctx.ToolName))
 		runner := containerexec.NewContainerRunner(r.containerCompose, service, r.containerWorkDir, tool)
-		return runner.Execute(params)
+		return runner.ExecuteWithContext(ctx.Context, params)
 	}
 	if tool == nil {
 		return nil, fmt.Errorf("tool required")

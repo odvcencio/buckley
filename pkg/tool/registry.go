@@ -34,6 +34,10 @@ type Registry struct {
 	missionAgent           string
 	missionTimeout         time.Duration
 	requireMissionApproval bool
+
+	discoveryEnabled bool
+	discoveryCore    map[string]struct{}
+	discoveryExposed map[string]struct{}
 }
 
 type registryOptions struct {

@@ -568,16 +568,7 @@ func formatToolResult(res *builtin.Result) string {
 	if res == nil {
 		return ""
 	}
-	payload := res
-	if res.ShouldAbridge && len(res.DisplayData) > 0 {
-		payload = &builtin.Result{
-			Success: res.Success,
-			Data:    cloneToolResultData(res.DisplayData),
-			Error:   res.Error,
-		}
-	}
-	// Use tool.ToJSON which applies TOON encoding for compact token-efficient results
-	result, err := tool.ToJSON(payload)
+	result, err := tool.ToModelOutput(res)
 	if err != nil {
 		return fmt.Sprintf("{\"success\":%t}", res.Success)
 	}

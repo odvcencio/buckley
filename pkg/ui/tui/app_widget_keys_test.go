@@ -54,6 +54,27 @@ func TestWidgetAppCtrlCClearsInputBeforeQuit(t *testing.T) {
 	}
 }
 
+func TestWidgetAppCtrlCInterruptsActiveProcess(t *testing.T) {
+	interrupts := 0
+	app := newKeyTestWidgetApp(t, WidgetAppConfig{})
+	app.running = true
+	app.processActive = true
+	app.SetInterruptCallback(func() { interrupts++ })
+
+	if !app.handleKeyMsg(KeyMsg{Key: int(terminal.KeyCtrlC)}) {
+		t.Fatal("Ctrl+C should request a render after interrupting")
+	}
+	if interrupts != 1 {
+		t.Fatalf("interrupt count = %d, want 1", interrupts)
+	}
+	if !app.ctrlCArmedUntil.IsZero() {
+		t.Fatal("interrupt should not arm the quit shortcut")
+	}
+	if got := app.statusBar.Status(); !strings.Contains(got, "Interrupt requested") {
+		t.Fatalf("status = %q, want interrupt feedback", got)
+	}
+}
+
 func TestWidgetAppGlobalControlShortcuts(t *testing.T) {
 	app := newKeyTestWidgetApp(t, WidgetAppConfig{})
 	app.minWidthForSidebar = 1

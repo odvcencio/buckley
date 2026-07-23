@@ -662,7 +662,7 @@ func (r *Runner) buildChatRequest() model.ChatRequest {
 	modelID := r.resolveExecutionModel()
 	req := model.ChatRequest{
 		Model:     modelID,
-		Messages:  r.conv.ToModelMessages(),
+		Messages:  r.conv.ToEfficientModelMessages(),
 		SessionID: r.sessionID,
 	}
 	if r.tools != nil && r.modelManager != nil && r.modelManager.SupportsTools(modelID) {
@@ -712,6 +712,10 @@ func (r *Runner) callModel(ctx context.Context, req model.ChatRequest) (*model.C
 		} else if resp != nil {
 			data["input_tokens"] = resp.Usage.PromptTokens
 			data["output_tokens"] = resp.Usage.CompletionTokens
+			if resp.Usage.PromptTokensDetails != nil {
+				data["cached_input_tokens"] = resp.Usage.PromptTokensDetails.CachedTokens
+			}
+			data["cache_write_tokens"] = resp.Usage.CacheWriteTokens
 		}
 		r.telemetry.Publish(telemetry.Event{
 			Type:      eventType,
@@ -845,7 +849,7 @@ func (r *Runner) handleToolCalls(ctx context.Context, msg model.Message) error {
 
 		// Execute tool with timing
 		startTime := time.Now()
-		result, err := r.tools.Execute(tc.Function.Name, args)
+		result, err := r.tools.ExecuteWithContext(ctx, tc.Function.Name, args)
 		duration := time.Since(startTime)
 
 		// Log to audit trail

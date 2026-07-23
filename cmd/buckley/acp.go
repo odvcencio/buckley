@@ -321,6 +321,7 @@ func getACPSessionState(
 	skillState := skill.NewRuntimeState(conv.AddSystemMessage)
 
 	registry := tool.NewRegistry()
+	tool.ApplyToolMiddlewareConfig(registry, cfg)
 	if err := registry.LoadDefaultPlugins(); err != nil && logf != nil {
 		logf("load plugins warning: %v", err)
 	}
@@ -337,6 +338,7 @@ func getACPSessionState(
 		createTool.SetWorkDir(workDir)
 	}
 	registry.Register(createTool)
+	registry.EnableDynamicDiscovery(nil)
 
 	// Wire todo persistence for the ACP session
 	registry.SetTodoStore(&acpTodoStoreAdapter{sessionID: session.ID})
@@ -672,7 +674,7 @@ func runACPLoop(
 		lastPhase = sendACPPhaseUpdate(stream, lastPhase, fmt.Sprintf("Executing %d tool call(s)…", len(msg.ToolCalls)))
 		normalizeACPToolCallIDs(msg.ToolCalls)
 		conv.AddToolCallMessageWithReasoning(msg.ToolCalls, msg.Reasoning, msg.ReasoningDetails)
-		lastPhase = executeACPToolCalls(conv, registry, stream, msg.ToolCalls, toolTurn.AllowedTools, lastPhase)
+		lastPhase = executeACPToolCalls(ctx, conv, registry, stream, msg.ToolCalls, toolTurn.AllowedTools, lastPhase)
 		toolsExecuted = true
 	}
 }
@@ -733,7 +735,7 @@ func buildACPToolTurn(registry *tool.Registry, skillState *skill.RuntimeState, e
 func buildACPChatRequest(cfg *config.Config, mgr *model.Manager, engine *rules.Engine, conv *conversation.Conversation, modelID string, turn acpToolTurn) model.ChatRequest {
 	req := model.ChatRequest{
 		Model:     modelID,
-		Messages:  conv.ToModelMessages(),
+		Messages:  conv.ToEfficientModelMessages(),
 		SessionID: conv.SessionID,
 	}
 	if turn.UseTools {
@@ -763,8 +765,11 @@ func normalizeACPToolCallIDs(calls []model.ToolCall) {
 	}
 }
 
-func executeACPToolCalls(conv *conversation.Conversation, registry *tool.Registry, stream acp.StreamFunc, calls []model.ToolCall, allowedTools []string, lastPhase string) string {
+func executeACPToolCalls(ctx context.Context, conv *conversation.Conversation, registry *tool.Registry, stream acp.StreamFunc, calls []model.ToolCall, allowedTools []string, lastPhase string) string {
 	for i, tc := range calls {
+		if ctx.Err() != nil {
+			return lastPhase
+		}
 		params, err := parseACPToolParams(tc.Function.Arguments)
 		if err != nil {
 			rawParams := map[string]any{"raw": tc.Function.Arguments}
@@ -790,7 +795,7 @@ func executeACPToolCalls(conv *conversation.Conversation, registry *tool.Registr
 			continue
 		}
 
-		result, execErr := executeACPToolCall(registry, tc.Function.Name, params, tc.ID)
+		result, execErr := executeACPToolCall(ctx, registry, tc.Function.Name, params, tc.ID)
 		toolText := formatACPToolResult(result, execErr)
 		displayText := formatACPToolDisplay(result, execErr)
 		conv.AddToolResponseMessage(tc.ID, tc.Function.Name, toolText)
@@ -1080,7 +1085,7 @@ func isToolUnsupportedError(err error) bool {
 	return false
 }
 
-func executeACPToolCall(registry *tool.Registry, name string, params map[string]any, callID string) (*builtin.Result, error) {
+func executeACPToolCall(ctx context.Context, registry *tool.Registry, name string, params map[string]any, callID string) (*builtin.Result, error) {
 	if registry == nil {
 		return nil, fmt.Errorf("tool registry unavailable")
 	}
@@ -1090,7 +1095,7 @@ func executeACPToolCall(registry *tool.Registry, name string, params map[string]
 	if callID != "" {
 		params[tool.ToolCallIDParam] = callID
 	}
-	return registry.Execute(name, params)
+	return registry.ExecuteWithContext(ctx, name, params)
 }
 
 func formatACPToolResult(result *builtin.Result, err error) string {

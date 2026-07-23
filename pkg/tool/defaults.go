@@ -3,10 +3,35 @@ package tool
 import (
 	"time"
 
+	"m31labs.dev/buckley/pkg/config"
 	"m31labs.dev/buckley/pkg/filewatch"
 	"m31labs.dev/buckley/pkg/mission"
 	"m31labs.dev/buckley/pkg/telemetry"
 )
+
+// ApplyToolMiddlewareConfig installs the configured timeout, retry, output,
+// progress, validation, and file-tracking middleware on a registry.
+func ApplyToolMiddlewareConfig(registry *Registry, cfg *config.Config) {
+	if registry == nil {
+		return
+	}
+	defaults := DefaultRegistryConfig()
+	if cfg != nil {
+		middleware := cfg.ToolMiddleware
+		defaults.Middleware.DefaultTimeout = middleware.DefaultTimeout
+		defaults.Middleware.PerToolTimeouts = middleware.PerToolTimeouts
+		defaults.Middleware.MaxResultBytes = middleware.MaxResultBytes
+		defaults.Middleware.RetryConfig = RetryConfig{
+			MaxAttempts:  middleware.Retry.MaxAttempts,
+			InitialDelay: middleware.Retry.InitialDelay,
+			MaxDelay:     middleware.Retry.MaxDelay,
+			Multiplier:   middleware.Retry.Multiplier,
+			Jitter:       middleware.Retry.Jitter,
+		}
+		defaults.MaxOutputBytes = middleware.MaxResultBytes
+	}
+	ApplyRegistryConfig(registry, defaults)
+}
 
 const (
 	DefaultToolTimeout      = 2 * time.Minute

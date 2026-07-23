@@ -501,7 +501,7 @@ func (r *Runtime) executeCoordinatorTools(ctx context.Context, registry *tool.Re
 		if call.ID != "" {
 			args[tool.ToolCallIDParam] = call.ID
 		}
-		res, err := registry.Execute(name, args)
+		res, err := registry.ExecuteWithContext(ctx, name, args)
 		if err != nil {
 			result.Result = fmt.Sprintf("execution error: %v", err)
 		} else {

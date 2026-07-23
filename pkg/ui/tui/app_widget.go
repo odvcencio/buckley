@@ -117,6 +117,7 @@ type WidgetApp struct {
 	onNextSession func()
 	onPrevSession func()
 	onApproval    func(requestID string, approved, alwaysAllow bool)
+	onInterrupt   func()
 
 	// Configuration
 	theme       *theme.Theme
@@ -1187,6 +1188,11 @@ func (a *WidgetApp) SetCallbacks(onSubmit func(string), onFileSelect func(string
 func (a *WidgetApp) SetSessionCallbacks(onNext, onPrev func()) {
 	a.onNextSession = onNext
 	a.onPrevSession = onPrev
+}
+
+// SetInterruptCallback sets the callback used to stop an active model or tool process.
+func (a *WidgetApp) SetInterruptCallback(onInterrupt func()) {
+	a.onInterrupt = onInterrupt
 }
 
 // SetApprovalCallback sets the callback for tool approval decisions.

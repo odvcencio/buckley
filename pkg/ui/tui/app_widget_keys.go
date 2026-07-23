@@ -55,6 +55,13 @@ func (a *WidgetApp) handleCtrlCKey(key terminal.Key) keyDispatchResult {
 	if key != terminal.KeyCtrlC {
 		return keyDispatchResult{}
 	}
+	if a.processActive && a.onInterrupt != nil {
+		a.inputArea.Clear()
+		a.ctrlCArmedUntil = time.Time{}
+		a.onInterrupt()
+		a.setStatusOverride("Interrupt requested · stopping active process…", 3*time.Second)
+		return keyDispatchResult{handled: true, dirty: true}
+	}
 
 	now := time.Now()
 	if now.Before(a.ctrlCArmedUntil) {

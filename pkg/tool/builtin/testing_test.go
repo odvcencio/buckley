@@ -40,6 +40,22 @@ func TestRunTestsToolUnsupportedFramework(t *testing.T) {
 	}
 }
 
+func TestLocalGoTestPath(t *testing.T) {
+	tests := map[string]string{
+		".":          ".",
+		"./server":   "./server",
+		"server":     "./server",
+		"server/...": "./server/...",
+	}
+	for input, want := range tests {
+		t.Run(input, func(t *testing.T) {
+			if got := localGoTestPath(input); got != want {
+				t.Fatalf("localGoTestPath(%q) = %q, want %q", input, got, want)
+			}
+		})
+	}
+}
+
 func TestDetectTestFrameworkGoMod(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.com/test\n\ngo 1.25"), 0o644); err != nil {
