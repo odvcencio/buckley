@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"m31labs.dev/buckley/pkg/bus"
+	"m31labs.dev/buckley/pkg/conversation"
 	"m31labs.dev/buckley/pkg/coordination/security"
 	"m31labs.dev/buckley/pkg/encoding/toon"
 	"m31labs.dev/buckley/pkg/graft"
@@ -284,6 +285,9 @@ func (r *Runtime) Execute(ctx context.Context, task string) (*Answer, error) {
 		{Role: "system", Content: coordinatorSystemPrompt},
 		{Role: "user", Content: r.buildCoordinatorContext(ctx, task, &answer, start, maxTokens, confidenceThreshold)},
 	}
+	coordinatorModel := r.coordinatorModelID()
+	sessionID := fmt.Sprintf("rlm-coordinator-%d", start.UnixNano())
+	contextWindow, _ := r.models.GetContextLength(coordinatorModel)
 
 	for answer.Iteration < maxIterations && !answer.Ready {
 		if err := ctx.Err(); err != nil {
@@ -296,12 +300,14 @@ func (r *Runtime) Execute(ctx context.Context, task string) (*Answer, error) {
 
 		answer.Iteration++
 
-		resp, err := r.models.ChatCompletion(ctx, model.ChatRequest{
-			Model:      r.coordinatorModelID(),
-			Messages:   messages,
+		req := model.ChatRequest{
+			Model:      coordinatorModel,
 			Tools:      toolDefs,
 			ToolChoice: toolChoice,
-		})
+			SessionID:  sessionID,
+		}
+		req.Messages = conversation.CompactModelMessagesForRequest(messages, req, contextWindow)
+		resp, err := r.models.ChatCompletion(ctx, req)
 		if err != nil {
 			return &answer, err
 		}

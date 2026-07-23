@@ -1,11 +1,12 @@
 package tool
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
-	"m31labs.dev/buckley/pkg/tool/builtin"
 	"go.uber.org/mock/gomock"
+	"m31labs.dev/buckley/pkg/tool/builtin"
 )
 
 func TestToOpenAIFunction(t *testing.T) {
@@ -60,5 +61,32 @@ func TestToJSONUsesToonByDefault(t *testing.T) {
 	}
 	if strings.HasPrefix(jsonStr, "{") {
 		t.Fatalf("expected TOON payload, got %s", jsonStr)
+	}
+}
+
+func TestToModelOutputWithLimit_ReturnsValidBoundedPayload(t *testing.T) {
+	SetResultEncoding(false)
+	t.Cleanup(func() { SetResultEncoding(true) })
+	result := &builtin.Result{
+		Success: true,
+		Data:    map[string]any{"output": strings.Repeat("large tool output ", 4000)},
+	}
+	const limit = 4096
+	encoded, err := ToModelOutputWithLimit(result, limit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(encoded) > limit {
+		t.Fatalf("model output = %d bytes, want <= %d", len(encoded), limit)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(encoded), &payload); err != nil {
+		t.Fatalf("bounded payload is invalid JSON: %v", err)
+	}
+	if payload["truncated"] != true {
+		t.Fatalf("bounded payload does not identify truncation: %#v", payload)
+	}
+	if payload["output_head"] == "" || payload["output_tail"] == "" {
+		t.Fatalf("bounded payload omitted useful boundaries: %#v", payload)
 	}
 }

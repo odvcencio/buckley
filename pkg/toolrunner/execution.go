@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"m31labs.dev/buckley/pkg/conversation"
 	"m31labs.dev/buckley/pkg/model"
 	"m31labs.dev/buckley/pkg/tool"
 )
@@ -31,6 +32,15 @@ func (r *Runner) executeWithTools(ctx context.Context, req Request, tools []tool
 	}
 
 	deduper := newToolResultDeduper()
+	modelID := r.requestModel(req)
+	sessionID := strings.TrimSpace(req.SessionID)
+	if sessionID == "" {
+		sessionID = fmt.Sprintf("toolrunner-%d", time.Now().UnixNano())
+	}
+	contextWindow := 0
+	if provider, ok := r.config.Models.(model.ContextWindowProvider); ok {
+		contextWindow, _ = provider.GetContextLength(modelID)
+	}
 
 	for iteration := 0; iteration < maxIterations; iteration++ {
 		result.Iterations = iteration + 1
@@ -41,14 +51,15 @@ func (r *Runner) executeWithTools(ctx context.Context, req Request, tools []tool
 		}
 
 		apiReq := model.ChatRequest{
-			Model:    r.requestModel(req),
-			Messages: messages,
-			Tools:    toolDefs,
-			Stream:   true,
+			Model:     modelID,
+			Tools:     toolDefs,
+			Stream:    true,
+			SessionID: sessionID,
 		}
 		if len(toolDefs) > 0 {
 			apiReq.ToolChoice = "auto"
 		}
+		apiReq.Messages = conversation.CompactModelMessagesForRequest(messages, apiReq, contextWindow)
 
 		// Use streaming
 		chunkChan, errChan := r.config.Models.ChatCompletionStream(ctx, apiReq)
@@ -143,9 +154,7 @@ func (r *Runner) executeWithTools(ctx context.Context, req Request, tools []tool
 
 		// Update usage from accumulated response
 		if usage := acc.Usage(); usage != nil {
-			result.Usage.PromptTokens += usage.PromptTokens
-			result.Usage.CompletionTokens += usage.CompletionTokens
-			result.Usage.TotalTokens += usage.TotalTokens
+			result.Usage = model.AddUsage(result.Usage, *usage)
 		}
 
 		result.FinishReason = finishReason

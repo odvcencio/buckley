@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 
+	"m31labs.dev/buckley/pkg/conversation"
 	"m31labs.dev/buckley/pkg/model"
 	"m31labs.dev/buckley/pkg/tool"
 	"m31labs.dev/buckley/pkg/tool/builtin"
@@ -81,7 +82,7 @@ func (c *Controller) runToolLoopIteration(ctx context.Context, sess *SessionStat
 	if err != nil {
 		return toolLoopIterationResult{}, c.handleToolLoopModelError(err, state)
 	}
-	state.totalUsage = addUsage(state.totalUsage, resp.Usage)
+	state.totalUsage = model.AddUsage(state.totalUsage, resp.Usage)
 
 	choice, err := firstToolLoopChoice(req, resp)
 	if err != nil {
@@ -156,6 +157,11 @@ func (c *Controller) buildToolLoopRequest(sess *SessionState, modelID string, us
 		include := true
 		req.IncludeReasoning = &include
 	}
+	contextWindow := 0
+	if c.modelMgr != nil {
+		contextWindow, _ = c.modelMgr.GetContextLength(modelID)
+	}
+	req.Messages = conversation.CompactModelMessagesForRequest(req.Messages, req, contextWindow)
 	return req, useTools
 }
 
@@ -722,26 +728,6 @@ func toolDisplayMessage(name string, result *builtin.Result, execErr error) stri
 		return summary
 	}
 	return ""
-}
-
-func addUsage(total model.Usage, next model.Usage) model.Usage {
-	total.PromptTokens += next.PromptTokens
-	total.CompletionTokens += next.CompletionTokens
-	total.TotalTokens += next.TotalTokens
-	total.CacheWriteTokens += next.CacheWriteTokens
-	if next.PromptTokensDetails != nil {
-		if total.PromptTokensDetails == nil {
-			total.PromptTokensDetails = &model.PromptTokensDetails{}
-		}
-		total.PromptTokensDetails.CachedTokens += next.PromptTokensDetails.CachedTokens
-	}
-	if next.CompletionTokenDetails != nil {
-		if total.CompletionTokenDetails == nil {
-			total.CompletionTokenDetails = &model.CompletionTokenDetails{}
-		}
-		total.CompletionTokenDetails.ReasoningTokens += next.CompletionTokenDetails.ReasoningTokens
-	}
-	return total
 }
 
 func isToolUnsupportedError(err error) bool {

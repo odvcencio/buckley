@@ -13,6 +13,7 @@ import (
 
 	"m31labs.dev/buckley/pkg/artifact"
 	"m31labs.dev/buckley/pkg/config"
+	"m31labs.dev/buckley/pkg/conversation"
 	"m31labs.dev/buckley/pkg/encoding/toon"
 	"m31labs.dev/buckley/pkg/model"
 	"m31labs.dev/buckley/pkg/paths"
@@ -353,8 +354,15 @@ func (a *BuilderAgent) generateWithTools(req model.ChatRequest, task *Task) (str
 	ctx := context.Background()
 	maxIterations := 10 // Prevent infinite loops
 	messages := req.Messages
+	if req.SessionID == "" {
+		req.SessionID = fmt.Sprintf("builder-%d", time.Now().UnixNano())
+	}
 	skillState := (*skill.RuntimeState)(nil)
 	var baseInjector func(string)
+	contextWindow := 0
+	if provider, ok := a.modelClient.(model.ContextWindowProvider); ok {
+		contextWindow, _ = provider.GetContextLength(req.Model)
+	}
 
 	if a.workflow != nil {
 		skillState = a.workflow.skillState
@@ -391,7 +399,7 @@ func (a *BuilderAgent) generateWithTools(req model.ChatRequest, task *Task) (str
 		}
 
 		// Update request with current messages
-		req.Messages = messages
+		req.Messages = conversation.CompactModelMessagesForRequest(messages, req, contextWindow)
 
 		// Call model
 		resp, err := a.modelClient.ChatCompletion(ctx, req)
