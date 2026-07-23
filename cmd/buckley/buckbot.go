@@ -18,6 +18,7 @@ import (
 	"m31labs.dev/buckley/pkg/config"
 	"m31labs.dev/buckley/pkg/gitwatcher"
 	"m31labs.dev/buckley/pkg/model"
+	"m31labs.dev/buckley/pkg/oneshot"
 	"m31labs.dev/buckley/pkg/storage"
 	"m31labs.dev/buckley/pkg/transparency"
 )
@@ -294,8 +295,25 @@ func newBuckbotReviewer(botCfg config.BuckbotConfig, costStore *storage.Store) b
 		if err != nil {
 			return "", 0, err
 		}
+		criticModel := strings.TrimSpace(botCfg.CriticModel)
+		if criticModel != "" && criticModel != botCfg.Model {
+			criticRunner := oneshot.NewRLMRunner(oneshot.RLMRunnerConfig{
+				Models:          mgr,
+				Registry:        runtime.registry,
+				Ledger:          runtime.ledger,
+				ModelID:         criticModel,
+				ReasoningEffort: model.ResolveReasoningEffort(&cfgCopy, mgr, nil, criticModel, "review"),
+			})
+			runtime.framework = runtime.framework.WithApprovalCriticRunner(criticRunner)
+		}
 		ref := fmt.Sprintf("https://github.com/%s/pull/%d", event.Repository, event.Number)
-		result, _, reviewErr := runPRReviewWithIterationLimit(ctx, ref, runtime.framework, botCfg.MaxReviewIterations)
+		result, _, reviewErr := runPRReviewWithOptions(ctx, ref, runtime.framework, automatedReviewOptions{
+			maxIterations:    botCfg.MaxReviewIterations,
+			maxRetries:       botCfg.MaxValidationAttempts,
+			maxDiffBytes:     botCfg.MaxDiffBytes,
+			maxCostUSD:       botCfg.PerReviewBudgetUSD,
+			criticReserveUSD: botCfg.PerReviewBudgetUSD * 0.12,
+		})
 		entries := runtime.ledger.Entries()
 		cost := runtime.ledger.SessionTotal()
 		partialReview := ""
@@ -310,8 +328,45 @@ func newBuckbotReviewer(botCfg config.BuckbotConfig, costStore *storage.Store) b
 		if reviewErr != nil {
 			return partialReview, cost, reviewErr
 		}
-		return partialReview, cost, nil
+		modelLabel := botCfg.Model
+		if criticModel != "" && criticModel != botCfg.Model {
+			modelLabel += " + " + criticModel + " critic"
+		}
+		return appendBuckbotCostFooter(partialReview, modelLabel, runtime.ledger.Summary(), botCfg.PerReviewBudgetUSD), cost, nil
 	}
+}
+
+func appendBuckbotCostFooter(review, modelID string, summary transparency.CostSummary, budgetUSD float64) string {
+	review = strings.TrimSpace(review)
+	if review == "" {
+		return ""
+	}
+	return fmt.Sprintf(
+		"%s\n\n---\n_Buckbot · `%s` · $%.4f / $%.2f · %s input + %s output tokens · %d model call%s_",
+		review,
+		modelID,
+		summary.SessionCost,
+		budgetUSD,
+		formatBuckbotCount(summary.SessionTokens.Input),
+		formatBuckbotCount(summary.SessionTokens.Output),
+		summary.InvocationCount,
+		func() string {
+			if summary.InvocationCount == 1 {
+				return ""
+			}
+			return "s"
+		}(),
+	)
+}
+
+func formatBuckbotCount(value int) string {
+	if value < 1_000 {
+		return fmt.Sprintf("%d", value)
+	}
+	if value < 999_950 {
+		return strings.TrimSuffix(fmt.Sprintf("%.1f", float64(value)/1_000), ".0") + "k"
+	}
+	return fmt.Sprintf("%.1fM", float64(value)/1_000_000)
 }
 
 func saveBuckbotSalvage(event gitwatcher.PullRequestEvent, review string, cause error) (string, error) {

@@ -65,6 +65,7 @@ type SubAgent struct {
 	systemPrompt   string
 	reasoning      string
 	maxIterations  int
+	maxCostUSD     float64
 	allowedTools   map[string]struct{}
 	readOnly       bool
 	reviewSnapshot *model.ReviewSnapshot
@@ -85,6 +86,7 @@ type SubAgentConfig struct {
 	Reasoning      string
 	SystemPrompt   string
 	MaxIterations  int
+	MaxCostUSD     float64
 	AllowedTools   []string
 	ReviewSnapshot *model.ReviewSnapshot
 	ToolTier       string // role_permissions tier for runtime validation
@@ -169,6 +171,7 @@ func NewSubAgent(cfg SubAgentConfig, deps SubAgentDeps) (*SubAgent, error) {
 		systemPrompt:   prompt,
 		reasoning:      normalizeSubAgentReasoning(cfg.Reasoning),
 		maxIterations:  maxIterations,
+		maxCostUSD:     cfg.MaxCostUSD,
 		allowedTools:   allowedTools,
 		readOnly:       isReadOnlyToolSet(cfg.AllowedTools) || cfg.ReviewSnapshot != nil,
 		reviewSnapshot: cfg.ReviewSnapshot,
@@ -224,11 +227,21 @@ func (a *SubAgent) Execute(ctx context.Context, task string) (*SubAgentResult, e
 				return "auto"
 			}(),
 		}
+		requestMessages := messages
+		if i == a.maxIterations-1 {
+			req.Tools = nil
+			req.ToolChoice = "none"
+			requestMessages = finalSynthesisMessages(messages)
+		}
 		applyExecutionPolicy(&req, a.readOnly, a.reviewSnapshot)
 		if a.reasoning != "" {
 			req.Reasoning = &model.ReasoningConfig{Effort: a.reasoning}
 		}
-		req.Messages = conversation.CompactModelMessagesForRequest(messages, req, contextWindow)
+		req.Messages = conversation.CompactModelMessagesForRequest(requestMessages, req, contextWindow)
+		if err := a.applyCostBudget(&req, result); err != nil {
+			finalizeSubAgentResult(result, start)
+			return result, err
+		}
 		resp, err := a.client.ChatCompletion(ctx, req)
 		if err != nil {
 			finalizeSubAgentResult(result, start)
@@ -297,6 +310,60 @@ func (a *SubAgent) Execute(ctx context.Context, task string) (*SubAgentResult, e
 	}
 
 	return result, nil
+}
+
+func finalSynthesisMessages(messages []model.Message) []model.Message {
+	final := append([]model.Message(nil), messages...)
+	return append(final, model.Message{
+		Role: "user",
+		Content: "FINAL SYNTHESIS: Tool use is complete. Return the complete final answer now. " +
+			"Do not request another tool call, omit required sections, or respond with progress commentary.",
+	})
+}
+
+const (
+	defaultBudgetedCompletionTokens = 8192
+	minimumBudgetedCompletionTokens = 256
+)
+
+func (a *SubAgent) applyCostBudget(req *model.ChatRequest, result *SubAgentResult) error {
+	if a.maxCostUSD <= 0 || req == nil {
+		return nil
+	}
+	pricing, err := a.client.GetPricing(a.model)
+	if err != nil {
+		return fmt.Errorf("resolve model pricing for cost budget: %w", err)
+	}
+	spent, err := a.client.CalculateCostFromTokens(a.model, result.InputTokens, result.OutputTokens)
+	if err != nil {
+		return fmt.Errorf("calculate consumed review budget: %w", err)
+	}
+	estimate := model.EstimateRequestTokens(*req)
+	maxOutputTokens, err := budgetedMaxOutputTokens(*pricing, estimate.Total, spent, a.maxCostUSD)
+	if err != nil {
+		return err
+	}
+	req.MaxTokens = maxOutputTokens
+	return nil
+}
+
+func budgetedMaxOutputTokens(pricing model.ModelPricing, estimatedInputTokens int, spentUSD, maxCostUSD float64) (int, error) {
+	remaining := maxCostUSD - spentUSD
+	estimatedInputCost := float64(estimatedInputTokens) * pricing.Prompt / 1_000_000
+	// Leave room for token-estimation and provider-accounting variance.
+	availableOutputUSD := (remaining - estimatedInputCost) * 0.98
+	if availableOutputUSD <= 0 {
+		return 0, fmt.Errorf("review cost budget exhausted before model call: $%.4f spent, $%.4f limit", spentUSD, maxCostUSD)
+	}
+
+	maxOutputTokens := defaultBudgetedCompletionTokens
+	if pricing.Completion > 0 {
+		maxOutputTokens = min(maxOutputTokens, int(availableOutputUSD*1_000_000/pricing.Completion))
+	}
+	if maxOutputTokens < minimumBudgetedCompletionTokens {
+		return 0, fmt.Errorf("review cost budget cannot fund a useful model response: %d output tokens affordable", maxOutputTokens)
+	}
+	return maxOutputTokens, nil
 }
 
 func finalizeSubAgentResult(result *SubAgentResult, start time.Time) {

@@ -314,3 +314,41 @@ func TestBuckbotService_DoesNotPostOverBudget(t *testing.T) {
 		t.Fatal("over-budget review must not be posted")
 	}
 }
+
+func TestAppendBuckbotCostFooter(t *testing.T) {
+	got := appendBuckbotCostFooter("## Review\nLooks good.", "moonshotai/kimi-k2.7-code", transparency.CostSummary{
+		SessionCost:     0.08321,
+		SessionTokens:   transparency.TokenUsage{Input: 12_400, Output: 2_000},
+		InvocationCount: 2,
+	}, 0.25)
+	for _, want := range []string{
+		"Looks good.",
+		"`moonshotai/kimi-k2.7-code`",
+		"$0.0832 / $0.25",
+		"12.4k input + 2k output tokens",
+		"2 model calls",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("footer = %q, want %q", got, want)
+		}
+	}
+	if got := appendBuckbotCostFooter("", "model", transparency.CostSummary{}, 0.25); got != "" {
+		t.Fatalf("empty review footer = %q, want empty", got)
+	}
+}
+
+func TestFormatBuckbotCount(t *testing.T) {
+	tests := map[int]string{
+		999:       "999",
+		1_000:     "1k",
+		12_400:    "12.4k",
+		999_999:   "1.0M",
+		1_000_000: "1.0M",
+		1_500_000: "1.5M",
+	}
+	for input, want := range tests {
+		if got := formatBuckbotCount(input); got != want {
+			t.Errorf("formatBuckbotCount(%d) = %q, want %q", input, got, want)
+		}
+	}
+}

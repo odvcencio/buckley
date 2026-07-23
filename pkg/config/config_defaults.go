@@ -99,10 +99,13 @@ func defaultNATSURL() string {
 func DefaultConfig() *Config {
 	return &Config{
 		Buckbot: BuckbotConfig{
-			Model:               "moonshotai/kimi-k3",
-			PerReviewBudgetUSD:  0.25,
-			MonthlyBudgetUSD:    25.00,
-			MaxReviewIterations: 6,
+			Model:                 "qwen/qwen3.6-flash",
+			CriticModel:           "moonshotai/kimi-k2.7-code",
+			PerReviewBudgetUSD:    0.25,
+			MonthlyBudgetUSD:      25.00,
+			MaxReviewIterations:   3,
+			MaxValidationAttempts: 2,
+			MaxDiffBytes:          80_000,
 		},
 		Models: ModelConfig{
 			Planning:  defaultOpenRouterModel,

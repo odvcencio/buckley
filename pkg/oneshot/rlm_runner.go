@@ -133,6 +133,7 @@ func (r *RLMRunner) Run(ctx context.Context, systemPrompt, task string, allowedT
 		Reasoning:      r.reasoning,
 		SystemPrompt:   systemPrompt,
 		MaxIterations:  maxIterations,
+		MaxCostUSD:     opts.MaxCostUSD,
 		AllowedTools:   allowedTools,
 		ReviewSnapshot: opts.ReviewSnapshot,
 	}

@@ -1,6 +1,7 @@
 package rlm
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -75,6 +76,38 @@ func TestNewSubAgentValidation(t *testing.T) {
 				t.Errorf("error = %q, want %q", err.Error(), tt.wantErr)
 			}
 		})
+	}
+}
+
+func TestBudgetedMaxOutputTokensReservesInputAndCapsCompletion(t *testing.T) {
+	pricing := model.ModelPricing{Prompt: 0.72, Completion: 3.50}
+	got, err := budgetedMaxOutputTokens(pricing, 40_000, 0.10, 0.15)
+	if err != nil {
+		t.Fatalf("budgetedMaxOutputTokens() error = %v", err)
+	}
+	if got != 5_935 {
+		t.Fatalf("budgetedMaxOutputTokens() = %d, want 5935", got)
+	}
+}
+
+func TestBudgetedMaxOutputTokensRejectsUnaffordableRequest(t *testing.T) {
+	pricing := model.ModelPricing{Prompt: 3, Completion: 15}
+	if _, err := budgetedMaxOutputTokens(pricing, 100_000, 0, 0.25); err == nil {
+		t.Fatal("budgetedMaxOutputTokens() error = nil, want exhausted input budget")
+	}
+}
+
+func TestFinalSynthesisMessagesPreservesHistoryAndRequiresAnswer(t *testing.T) {
+	history := []model.Message{{Role: "tool", Content: "evidence"}}
+	got := finalSynthesisMessages(history)
+	if len(got) != 2 || got[0].Content != "evidence" {
+		t.Fatalf("final synthesis messages = %#v, want preserved history", got)
+	}
+	if got[1].Role != "user" || !strings.Contains(fmt.Sprint(got[1].Content), "complete final answer now") {
+		t.Fatalf("final synthesis instruction = %#v", got[1])
+	}
+	if len(history) != 1 {
+		t.Fatalf("final synthesis mutated history: %#v", history)
 	}
 }
 

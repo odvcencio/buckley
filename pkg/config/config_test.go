@@ -20,6 +20,13 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.Models.Review != "z-ai/glm-5.2" {
 		t.Fatalf("expected default review model to be z-ai/glm-5.2, got %s", cfg.Models.Review)
 	}
+	if cfg.Buckbot.Model != "qwen/qwen3.6-flash" ||
+		cfg.Buckbot.CriticModel != "moonshotai/kimi-k2.7-code" ||
+		cfg.Buckbot.MaxReviewIterations != 3 ||
+		cfg.Buckbot.MaxValidationAttempts != 2 ||
+		cfg.Buckbot.MaxDiffBytes != 80_000 {
+		t.Fatalf("unexpected Buckbot efficiency defaults: %+v", cfg.Buckbot)
+	}
 	wantCurated := []string{"z-ai/glm-5.2", "moonshotai/kimi-k2.7-code", "qwen/qwen3.7-max"}
 	if len(cfg.Models.Curated) != len(wantCurated) {
 		t.Fatalf("expected curated defaults %v, got %v", wantCurated, cfg.Models.Curated)
