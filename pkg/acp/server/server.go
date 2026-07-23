@@ -20,6 +20,10 @@ import (
 	"google.golang.org/protobuf/types/known/emptypb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/peer"
 	acppb "m31labs.dev/buckley/pkg/acp/proto"
 	"m31labs.dev/buckley/pkg/agent"
 	"m31labs.dev/buckley/pkg/bus"
@@ -34,10 +38,6 @@ import (
 	"m31labs.dev/buckley/pkg/storage"
 	"m31labs.dev/buckley/pkg/telemetry"
 	"m31labs.dev/buckley/pkg/tool"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials"
-	"google.golang.org/grpc/metadata"
-	"google.golang.org/grpc/peer"
 )
 
 // Server implements the Zed ACP gRPC service.
