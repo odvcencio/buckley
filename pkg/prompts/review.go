@@ -86,6 +86,10 @@ WORKFLOW:
 5. Perform a final falsification pass: identify the strongest plausible reason the PR is wrong and either prove it or disprove it with evidence.
 6. Assign severity, grade, and recommendation.
 
+PARALLEL REVIEW POLICY:
+- If parallel subagents are available, use them only to divide a broad change into disjoint subsystem scopes.
+- Do not run duplicate reviewers or serial reviewer-of-reviewer passes. The opt-in approval critic is the separate escalation for large or business-critical changes.
+
 OUTPUT FORMAT (follow exactly):
 
 ## Grade: [A/B/C/D/F]

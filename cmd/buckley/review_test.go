@@ -20,6 +20,7 @@ func TestParseReviewCommandOptions(t *testing.T) {
 		"-verbose",
 		"-cost=false",
 		"-model", "test/reviewer",
+		"-critic-model", "test/critic",
 		"-timeout", "12s",
 		"-output", "review.md",
 		"-no-interactive",
@@ -55,6 +56,9 @@ func TestParseReviewCommandOptions(t *testing.T) {
 	}
 	if opts.model != "test/reviewer" {
 		t.Fatalf("model = %q, want test/reviewer", opts.model)
+	}
+	if opts.criticModel != "test/critic" {
+		t.Fatalf("criticModel = %q, want test/critic", opts.criticModel)
 	}
 	if opts.timeout != 12*time.Second {
 		t.Fatalf("timeout = %v, want 12s", opts.timeout)

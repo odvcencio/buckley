@@ -1,9 +1,11 @@
 package rlm
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"m31labs.dev/buckley/pkg/model"
 	"m31labs.dev/buckley/pkg/tool"
@@ -138,6 +140,33 @@ func TestSubAgentMaxIterationsDefault(t *testing.T) {
 	}
 	if defaultSubAgentMaxIterations != 25 {
 		t.Errorf("defaultSubAgentMaxIterations = %d, want 25", defaultSubAgentMaxIterations)
+	}
+}
+
+func TestSubAgentAdaptiveSynthesisUsesDeadline(t *testing.T) {
+	agent := &SubAgent{
+		adaptive:      true,
+		synthesisLead: time.Minute,
+	}
+	farCtx, farCancel := context.WithDeadline(context.Background(), time.Now().Add(2*time.Minute))
+	defer farCancel()
+	if agent.shouldSynthesize(farCtx, 0, 0, time.Now()) {
+		t.Fatal("adaptive agent synthesized before its deadline reserve")
+	}
+	nearCtx, nearCancel := context.WithDeadline(context.Background(), time.Now().Add(30*time.Second))
+	defer nearCancel()
+	if !agent.shouldSynthesize(nearCtx, 0, 0, time.Now().Add(-2*time.Minute)) {
+		t.Fatal("adaptive agent did not reserve time for final synthesis")
+	}
+}
+
+func TestSubAgentExplicitLimitStillForcesFinalTurn(t *testing.T) {
+	agent := &SubAgent{maxIterations: 3}
+	if agent.shouldSynthesize(context.Background(), 1, 3, time.Now()) {
+		t.Fatal("explicit limit synthesized one turn early")
+	}
+	if !agent.shouldSynthesize(context.Background(), 2, 3, time.Now()) {
+		t.Fatal("explicit limit did not force its final turn")
 	}
 }
 

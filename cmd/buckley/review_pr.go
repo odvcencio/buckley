@@ -16,16 +16,17 @@ import (
 )
 
 type reviewPRCommandOptions struct {
-	verbose    bool
-	showCost   bool
-	model      string
-	timeout    time.Duration
-	outputFile string
-	prRef      string
-	budgetUSD  float64
-	maxTurns   int
-	maxDiff    int
-	maxRetries int
+	verbose     bool
+	showCost    bool
+	model       string
+	criticModel string
+	timeout     time.Duration
+	outputFile  string
+	prRef       string
+	budgetUSD   float64
+	maxTurns    int
+	maxDiff     int
+	maxRetries  int
 }
 
 func parseReviewPRCommandOptions(args []string) (reviewPRCommandOptions, error) {
@@ -33,10 +34,11 @@ func parseReviewPRCommandOptions(args []string) (reviewPRCommandOptions, error) 
 	verbose := fs.Bool("verbose", false, "show full context and reasoning")
 	showCost := fs.Bool("cost", true, "show token/cost breakdown")
 	modelFlag := fs.String("model", "", "model to use (default: BUCKLEY_MODEL_REVIEW or buckbot.model)")
+	criticModel := fs.String("critic-model", "", "opt-in approval critic model for large or business-critical reviews")
 	timeout := fs.Duration("timeout", 5*time.Minute, "timeout for model request")
 	outputFile := fs.String("output", "", "write review to file instead of stdout")
 	budgetUSD := fs.Float64("budget", 0, "maximum model spend in USD (0 = Buckbot default)")
-	maxTurns := fs.Int("max-turns", 0, "maximum model turns per review pass (0 = Buckbot default)")
+	maxTurns := fs.Int("max-turns", 0, "hard model turn limit per review pass (0 = adaptive)")
 	maxDiff := fs.Int("max-diff-bytes", 0, "maximum prioritized diff bytes (0 = Buckbot default)")
 	maxRetries := fs.Int("max-validation-attempts", 0, "maximum schema-validation attempts (0 = Buckbot default)")
 
@@ -48,16 +50,17 @@ func parseReviewPRCommandOptions(args []string) (reviewPRCommandOptions, error) 
 		return reviewPRCommandOptions{}, reviewPRUsageError()
 	}
 	return reviewPRCommandOptions{
-		verbose:    *verbose,
-		showCost:   *showCost,
-		model:      *modelFlag,
-		timeout:    *timeout,
-		outputFile: *outputFile,
-		prRef:      fs.Arg(0),
-		budgetUSD:  *budgetUSD,
-		maxTurns:   *maxTurns,
-		maxDiff:    *maxDiff,
-		maxRetries: *maxRetries,
+		verbose:     *verbose,
+		showCost:    *showCost,
+		model:       *modelFlag,
+		criticModel: *criticModel,
+		timeout:     *timeout,
+		outputFile:  *outputFile,
+		prRef:       fs.Arg(0),
+		budgetUSD:   *budgetUSD,
+		maxTurns:    *maxTurns,
+		maxDiff:     *maxDiff,
+		maxRetries:  *maxRetries,
 	}, nil
 }
 
@@ -101,7 +104,7 @@ func reviewPRFlagName(arg string) (string, bool) {
 
 func reviewPRFlagTakesValue(name string) bool {
 	switch name {
-	case "model", "timeout", "output", "budget", "max-turns", "max-diff-bytes", "max-validation-attempts":
+	case "model", "critic-model", "timeout", "output", "budget", "max-turns", "max-diff-bytes", "max-validation-attempts":
 		return true
 	default:
 		return false
@@ -128,6 +131,9 @@ func runReviewPRCommand(args []string) error {
 	}
 	if err != nil {
 		return fmt.Errorf("init dependencies: %w", err)
+	}
+	if strings.TrimSpace(opts.criticModel) != "" {
+		cfg.Buckbot.CriticModel = strings.TrimSpace(opts.criticModel)
 	}
 
 	runtime, err := newReviewCommandRuntime(cfg, mgr)

@@ -13,6 +13,7 @@ import (
 	"m31labs.dev/buckley/pkg/config"
 	"m31labs.dev/buckley/pkg/gitwatcher"
 	"m31labs.dev/buckley/pkg/model"
+	"m31labs.dev/buckley/pkg/oneshot/commands"
 	"m31labs.dev/buckley/pkg/storage"
 	"m31labs.dev/buckley/pkg/transparency"
 )
@@ -211,7 +212,7 @@ func TestBuckbotService_DiscardsStaleRevisionWhenReviewerIgnoresCancellation(t *
 }
 
 func TestBuckbotService_ReservesMonthlyBudgetAcrossPullRequests(t *testing.T) {
-	var reviewed, posted atomic.Int32
+	var announced, reviewed, posted atomic.Int32
 	started := make(chan struct{})
 	release := make(chan struct{})
 	service := newBuckbotService(config.BuckbotConfig{PerReviewBudgetUSD: 0.20, MonthlyBudgetUSD: 0.25}, func(context.Context, gitwatcher.PullRequestEvent) (string, float64, error) {
@@ -223,6 +224,10 @@ func TestBuckbotService_ReservesMonthlyBudgetAcrossPullRequests(t *testing.T) {
 		posted.Add(1)
 		return nil
 	})
+	service.announce = func(context.Context, gitwatcher.PullRequestEvent, string) error {
+		announced.Add(1)
+		return nil
+	}
 
 	done := make(chan struct{})
 	go func() {
@@ -234,8 +239,8 @@ func TestBuckbotService_ReservesMonthlyBudgetAcrossPullRequests(t *testing.T) {
 	close(release)
 	<-done
 
-	if reviewed.Load() != 1 || posted.Load() != 1 {
-		t.Fatalf("reviewed=%d posted=%d want one budget-reserved review", reviewed.Load(), posted.Load())
+	if announced.Load() != 1 || reviewed.Load() != 1 || posted.Load() != 1 {
+		t.Fatalf("announced=%d reviewed=%d posted=%d want one budget-reserved review", announced.Load(), reviewed.Load(), posted.Load())
 	}
 }
 
@@ -334,6 +339,27 @@ func TestAppendBuckbotCostFooter(t *testing.T) {
 	}
 	if got := appendBuckbotCostFooter("", "model", transparency.CostSummary{}, 0.25); got != "" {
 		t.Fatalf("empty review footer = %q, want empty", got)
+	}
+}
+
+func TestFormatBuckbotInlineFinding(t *testing.T) {
+	got := formatBuckbotInlineFinding(commands.Finding{
+		ID:       "FINDING-001",
+		Severity: commands.SeverityMajor,
+		Title:    "Budget bypass",
+		Evidence: "A zero value skips the guard.",
+		Impact:   "A review can exceed its cap.",
+		Fix:      "Reject non-positive budgets.",
+	})
+	for _, want := range []string{
+		"FINDING-001 · MAJOR: Budget bypass",
+		"A zero value skips the guard.",
+		"**Impact:** A review can exceed its cap.",
+		"**Suggested fix:** Reject non-positive budgets.",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("inline finding = %q, want %q", got, want)
+		}
 	}
 }
 

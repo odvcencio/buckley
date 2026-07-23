@@ -28,6 +28,7 @@ type reviewCommandOptions struct {
 	verbose         bool
 	showCost        bool
 	model           string
+	criticModel     string
 	timeout         time.Duration
 	outputFile      string
 	interactive     bool
@@ -70,12 +71,13 @@ func parseReviewCommandOptions(args []string) (reviewCommandOptions, error) {
 	verbose := fs.Bool("verbose", false, "show full context and reasoning")
 	showCost := fs.Bool("cost", true, "show token/cost breakdown")
 	modelFlag := fs.String("model", "", "model to use (default: BUCKLEY_MODEL_REVIEW or buckbot.model)")
+	criticModel := fs.String("critic-model", "", "opt-in approval critic model for large or business-critical reviews")
 	timeout := fs.Duration("timeout", 5*time.Minute, "timeout for model request")
 	outputFile := fs.String("output", "", "write review to file instead of stdout")
 	interactive := fs.Bool("interactive", true, "show interactive menu to fix findings")
 	noInteractive := fs.Bool("no-interactive", false, "disable interactive mode")
 	budgetUSD := fs.Float64("budget", 0, "maximum model spend in USD (0 = Buckbot default)")
-	maxTurns := fs.Int("max-turns", 0, "maximum model turns per review pass (0 = Buckbot default)")
+	maxTurns := fs.Int("max-turns", 0, "hard model turn limit per review pass (0 = adaptive)")
 	maxDiff := fs.Int("max-diff-bytes", 0, "maximum prioritized diff bytes (0 = Buckbot default)")
 	maxRetries := fs.Int("max-validation-attempts", 0, "maximum schema-validation attempts (0 = Buckbot default)")
 
@@ -92,6 +94,7 @@ func parseReviewCommandOptions(args []string) (reviewCommandOptions, error) {
 		verbose:         *verbose,
 		showCost:        *showCost,
 		model:           *modelFlag,
+		criticModel:     *criticModel,
 		timeout:         *timeout,
 		outputFile:      *outputFile,
 		interactive:     *interactive,
@@ -125,6 +128,9 @@ func runReviewCommand(args []string) error {
 	}
 	if err != nil {
 		return fmt.Errorf("init dependencies: %w", err)
+	}
+	if strings.TrimSpace(opts.criticModel) != "" {
+		cfg.Buckbot.CriticModel = strings.TrimSpace(opts.criticModel)
 	}
 
 	runtime, err := newReviewCommandRuntime(cfg, mgr)

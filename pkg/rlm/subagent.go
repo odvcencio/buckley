@@ -17,6 +17,7 @@ import (
 
 const (
 	defaultSubAgentMaxIterations = 25
+	defaultFinalSynthesisLead    = 90 * time.Second
 
 	defaultSubAgentPrompt = `You are a Buckley sub-agent executing a specific task delegated by the coordinator.
 
@@ -66,6 +67,8 @@ type SubAgent struct {
 	reasoning      string
 	maxIterations  int
 	maxCostUSD     float64
+	adaptive       bool
+	synthesisLead  time.Duration
 	allowedTools   map[string]struct{}
 	readOnly       bool
 	reviewSnapshot *model.ReviewSnapshot
@@ -87,6 +90,8 @@ type SubAgentConfig struct {
 	SystemPrompt   string
 	MaxIterations  int
 	MaxCostUSD     float64
+	Adaptive       bool
+	SynthesisLead  time.Duration
 	AllowedTools   []string
 	ReviewSnapshot *model.ReviewSnapshot
 	ToolTier       string // role_permissions tier for runtime validation
@@ -152,8 +157,12 @@ func NewSubAgent(cfg SubAgentConfig, deps SubAgentDeps) (*SubAgent, error) {
 	}
 
 	maxIterations := cfg.MaxIterations
-	if maxIterations <= 0 {
+	if maxIterations <= 0 && !cfg.Adaptive {
 		maxIterations = defaultSubAgentMaxIterations
+	}
+	synthesisLead := cfg.SynthesisLead
+	if cfg.Adaptive && synthesisLead <= 0 {
+		synthesisLead = defaultFinalSynthesisLead
 	}
 
 	allowedTools := make(map[string]struct{})
@@ -172,6 +181,8 @@ func NewSubAgent(cfg SubAgentConfig, deps SubAgentDeps) (*SubAgent, error) {
 		reasoning:      normalizeSubAgentReasoning(cfg.Reasoning),
 		maxIterations:  maxIterations,
 		maxCostUSD:     cfg.MaxCostUSD,
+		adaptive:       cfg.Adaptive,
+		synthesisLead:  synthesisLead,
 		allowedTools:   allowedTools,
 		readOnly:       isReadOnlyToolSet(cfg.AllowedTools) || cfg.ReviewSnapshot != nil,
 		reviewSnapshot: cfg.ReviewSnapshot,
@@ -214,8 +225,14 @@ func (a *SubAgent) Execute(ctx context.Context, task string) (*SubAgentResult, e
 		ModelUsed: a.model,
 	}
 	contextWindow, _ := a.client.GetContextLength(a.model)
+	maxIterations := a.maxIterations
+	if maxIterations <= 0 {
+		if _, hasDeadline := ctx.Deadline(); !hasDeadline && a.maxCostUSD <= 0 {
+			maxIterations = defaultSubAgentMaxIterations
+		}
+	}
 
-	for i := 0; i < a.maxIterations; i++ {
+	for i := 0; maxIterations <= 0 || i < maxIterations; i++ {
 		req := model.ChatRequest{
 			Model:     a.model,
 			Tools:     toolDefs,
@@ -228,7 +245,7 @@ func (a *SubAgent) Execute(ctx context.Context, task string) (*SubAgentResult, e
 			}(),
 		}
 		requestMessages := messages
-		if i == a.maxIterations-1 {
+		if a.shouldSynthesize(ctx, i, maxIterations, start) {
 			req.Tools = nil
 			req.ToolChoice = "none"
 			requestMessages = finalSynthesisMessages(messages)
@@ -310,6 +327,24 @@ func (a *SubAgent) Execute(ctx context.Context, task string) (*SubAgentResult, e
 	}
 
 	return result, nil
+}
+
+func (a *SubAgent) shouldSynthesize(ctx context.Context, iteration, maxIterations int, startedAt time.Time) bool {
+	if maxIterations > 0 && iteration == maxIterations-1 {
+		return true
+	}
+	if !a.adaptive || a.synthesisLead <= 0 {
+		return false
+	}
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return false
+	}
+	lead := a.synthesisLead
+	if proportionalLead := deadline.Sub(startedAt) / 3; proportionalLead < lead {
+		lead = proportionalLead
+	}
+	return time.Until(deadline) <= lead
 }
 
 func finalSynthesisMessages(messages []model.Message) []model.Message {

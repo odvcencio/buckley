@@ -15,6 +15,7 @@ func TestParseReviewPRCommandOptions(t *testing.T) {
 		"-verbose",
 		"-cost=false",
 		"-model", "test/reviewer",
+		"-critic-model", "test/critic",
 		"-timeout", "30s",
 		"-output", "review.md",
 		"-budget", "0.25",
@@ -36,6 +37,9 @@ func TestParseReviewPRCommandOptions(t *testing.T) {
 	if opts.model != "test/reviewer" {
 		t.Fatalf("model = %q, want test/reviewer", opts.model)
 	}
+	if opts.criticModel != "test/critic" {
+		t.Fatalf("criticModel = %q, want test/critic", opts.criticModel)
+	}
 	if opts.timeout != 30*time.Second {
 		t.Fatalf("timeout = %s, want 30s", opts.timeout)
 	}
@@ -54,7 +58,7 @@ func TestParseReviewPRCommandOptions(t *testing.T) {
 func TestDefaultAutomatedReviewOptionsAndOverrides(t *testing.T) {
 	cfg := config.DefaultConfig()
 	defaults := defaultAutomatedReviewOptions(cfg)
-	if defaults.maxIterations != 3 || defaults.maxRetries != 2 || defaults.maxDiffBytes != 80_000 ||
+	if defaults.maxIterations != 0 || defaults.maxRetries != 2 || defaults.maxDiffBytes != 80_000 ||
 		defaults.maxCostUSD != 0.25 || defaults.criticReserveUSD != 0 || defaults.approvalCritic {
 		t.Fatalf("defaults = %#v, want Buckbot defaults", defaults)
 	}

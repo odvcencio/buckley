@@ -103,7 +103,7 @@ func DefaultConfig() *Config {
 			CriticModel:           "",
 			PerReviewBudgetUSD:    0.25,
 			MonthlyBudgetUSD:      25.00,
-			MaxReviewIterations:   3,
+			MaxReviewIterations:   0,
 			MaxValidationAttempts: 2,
 			MaxDiffBytes:          80_000,
 		},
