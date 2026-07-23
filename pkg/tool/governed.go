@@ -110,6 +110,7 @@ func GovernedToolNames(registry *Registry, evaluator types.RuleEvaluator, role, 
 // ToOpenAIFunctionsGoverned applies skill and arbiter filtering before exposing tools.
 func (r *Registry) ToOpenAIFunctionsGoverned(evaluator types.RuleEvaluator, role, taskType string, baseAllowed []string, budgetUtil float64) []map[string]any {
 	names := GovernedToolNames(r, evaluator, role, taskType, baseAllowed, budgetUtil)
+	names = r.filterDiscoveredToolNames(names)
 	return r.ToOpenAIFunctionsFiltered(names)
 }
 

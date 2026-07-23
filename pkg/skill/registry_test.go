@@ -1,6 +1,9 @@
 package skill
 
 import (
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -428,6 +431,101 @@ func TestRegistry_GetDescriptions(t *testing.T) {
 	// Should mention auto-activation for phase skills
 	if !containsHelper(desc, "planning phase") {
 		t.Error("GetDescriptions() missing phase information for skill1")
+	}
+}
+
+func TestRegistry_GetDescriptions_Deterministic(t *testing.T) {
+	registry := NewRegistry()
+	registry.skills["zeta"] = &Skill{Name: "zeta", Description: "Last"}
+	registry.skills["alpha"] = &Skill{Name: "alpha", Description: "First"}
+
+	desc := registry.GetDescriptions()
+	if strings.Index(desc, "- alpha:") > strings.Index(desc, "- zeta:") {
+		t.Fatalf("descriptions are not sorted: %s", desc)
+	}
+}
+
+func TestRegistry_GetDescriptions_CompactsAdvertisementOnly(t *testing.T) {
+	registry := NewRegistry()
+	description := "First trigger line.\n  Second trigger line. " + strings.Repeat("detail ", 100)
+	registry.skills["compact"] = &Skill{Name: "compact", Description: description}
+
+	desc := registry.GetDescriptions()
+	if strings.Contains(desc, "\n  Second") || !strings.Contains(desc, "First trigger line. Second trigger line.") {
+		t.Fatalf("description was not compacted: %q", desc)
+	}
+	if len([]rune(desc)) >= len([]rune(description)) {
+		t.Fatalf("advertisement was not bounded: prompt=%d source=%d", len([]rune(desc)), len([]rune(description)))
+	}
+	if registry.GetSkill("compact").Description != description {
+		t.Fatal("stored description was mutated")
+	}
+}
+
+func TestRegistry_LoadAll_ReplacesStaleSkillsAndRefreshesActive(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", t.TempDir())
+	t.Chdir(root)
+	path := filepath.Join(root, ".buckley", "skills", "reload", "SKILL.md")
+	writeSkillTestFile(t, path, `---
+name: reload
+description: First version.
+---
+First instructions.`)
+
+	registry := NewRegistry()
+	if err := registry.LoadAll(); err != nil {
+		t.Fatalf("initial LoadAll: %v", err)
+	}
+	if err := registry.Activate("reload", "test", "user"); err != nil {
+		t.Fatalf("Activate: %v", err)
+	}
+	writeSkillTestFile(t, path, `---
+name: reload
+description: Second version.
+---
+Second instructions.`)
+	if err := registry.LoadAll(); err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	active := registry.GetActiveSkill("reload")
+	if active == nil || active.Skill.Description != "Second version." {
+		t.Fatalf("active skill was not refreshed: %+v", active)
+	}
+
+	if err := os.RemoveAll(filepath.Dir(path)); err != nil {
+		t.Fatalf("remove skill: %v", err)
+	}
+	if err := registry.LoadAll(); err != nil {
+		t.Fatalf("reload after removal: %v", err)
+	}
+	if registry.GetSkill("reload") != nil || registry.IsActive("reload") {
+		t.Fatalf("stale skill survived reload")
+	}
+}
+
+func TestRegistry_LoadAll_ExposesPerFileDiagnostics(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", t.TempDir())
+	t.Chdir(root)
+	writeSkillTestFile(t, filepath.Join(root, ".buckley", "skills", "valid", "SKILL.md"), `---
+name: valid
+description: Valid skill.
+---
+Valid instructions.`)
+	badPath := filepath.Join(root, ".buckley", "skills", "invalid", "SKILL.md")
+	writeSkillTestFile(t, badPath, `missing frontmatter`)
+
+	registry := NewRegistry()
+	if err := registry.LoadAll(); err == nil {
+		t.Fatal("LoadAll error=nil, want partial-load error")
+	}
+	if registry.GetSkill("valid") == nil {
+		t.Fatal("valid sibling was not loaded")
+	}
+	diagnostics := registry.Diagnostics()
+	if len(diagnostics) != 1 || !strings.Contains(diagnostics[0], badPath) {
+		t.Fatalf("diagnostics=%v", diagnostics)
 	}
 }
 

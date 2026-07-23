@@ -48,6 +48,7 @@ func mergeConfigs(base, override *Config, raw map[string]any, projectScope bool)
 	mergeBatchConfig(base, override, raw)
 	mergeGitCloneConfig(base, override, raw)
 	mergeGitEventsConfig(base, override, raw)
+	mergeBuckbotConfig(base, override, raw)
 	mergeInputConfig(base, override, raw)
 	mergeWorktreeConfig(base, override, raw)
 	mergeIPCConfig(base, override, raw)
@@ -60,6 +61,30 @@ func mergeConfigs(base, override *Config, raw map[string]any, projectScope bool)
 	mergeUIConfig(base, override, raw)
 	mergeCommentingConfig(base, override, raw)
 	mergeDiagnosticsConfig(base, override, raw)
+}
+
+func mergeBuckbotConfig(base, override *Config, raw map[string]any) {
+	if boolFieldSet(raw, "buckbot", "enabled") {
+		base.Buckbot.Enabled = override.Buckbot.Enabled
+	}
+	if boolFieldSet(raw, "buckbot", "secret") {
+		base.Buckbot.Secret = override.Buckbot.Secret
+	}
+	if boolFieldSet(raw, "buckbot", "webhook_bind") {
+		base.Buckbot.WebhookBind = override.Buckbot.WebhookBind
+	}
+	if boolFieldSet(raw, "buckbot", "model") {
+		base.Buckbot.Model = override.Buckbot.Model
+	}
+	if boolFieldSet(raw, "buckbot", "per_review_budget_usd") {
+		base.Buckbot.PerReviewBudgetUSD = override.Buckbot.PerReviewBudgetUSD
+	}
+	if boolFieldSet(raw, "buckbot", "monthly_budget_usd") {
+		base.Buckbot.MonthlyBudgetUSD = override.Buckbot.MonthlyBudgetUSD
+	}
+	if boolFieldSet(raw, "buckbot", "max_review_iterations") {
+		base.Buckbot.MaxReviewIterations = override.Buckbot.MaxReviewIterations
+	}
 }
 
 func boolFieldSet(raw map[string]any, path ...string) bool {

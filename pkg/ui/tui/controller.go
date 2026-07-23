@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -213,6 +214,7 @@ func NewController(cfg ControllerConfig) (*Controller, error) {
 		ctrl.nextSession,
 		ctrl.prevSession,
 	)
+	app.SetInterruptCallback(ctrl.cancelCurrentStream)
 
 	return ctrl, nil
 }
@@ -227,7 +229,10 @@ func loadOrCreateControllerSessions(cfg ControllerConfig, workDir string) ([]*Se
 
 func loadActiveProjectSessions(cfg ControllerConfig, workDir string) ([]*SessionState, error) {
 	var projectSessions []*SessionState
-	allSessions, _ := cfg.Store.ListSessions(100)
+	allSessions, err := cfg.Store.ListSessionsByRepo(workDir)
+	if err != nil {
+		return nil, fmt.Errorf("list project sessions: %w", err)
+	}
 	for _, s := range allSessions {
 		if s.ProjectPath != workDir || s.Status != storage.SessionStatusActive {
 			continue
@@ -245,6 +250,11 @@ func resolveControllerSession(cfg ControllerConfig, workDir string, projectSessi
 	sessionID := cfg.SessionID
 	if sessionID == "" {
 		if len(projectSessions) > 0 {
+			for i, sess := range projectSessions {
+				if sess.Conversation != nil && len(sess.Conversation.Messages) > 0 {
+					return projectSessions, i, nil
+				}
+			}
 			return projectSessions, 0, nil
 		}
 		sess, err := createControllerSession(cfg, workDir, generatedControllerSessionID(workDir))
@@ -304,14 +314,14 @@ func (c *Controller) Run() error {
 
 	// Add system context if available
 	if c.projectCtx != nil && c.projectCtx.Loaded {
-		c.app.AddMessage("Project context loaded from AGENTS.md", "system")
+		c.app.addMessageImmediately("Project context loaded from AGENTS.md", "system")
 	}
 
 	// Load existing conversation history for current session
 	sess := c.sessions[c.currentSession]
 	if len(sess.Conversation.Messages) > 0 {
-		c.app.AddMessage(fmt.Sprintf("Resuming session: %s (%d messages)", sess.ID, len(sess.Conversation.Messages)), "system")
-		renderConversationHistory(c.app, sess.Conversation.Messages)
+		c.app.addMessageImmediately(fmt.Sprintf("Resuming session: %s (%d messages)", sess.ID, len(sess.Conversation.Messages)), "system")
+		renderConversationHistoryImmediately(c.app, sess.Conversation.Messages)
 	}
 
 	// Run the app
@@ -408,6 +418,13 @@ func (c *Controller) handleCommand(text string) {
 	case "/sessions", "/tabs":
 		c.listSessions()
 
+	case "/resume":
+		if len(parts) < 2 {
+			c.app.AddMessage("Usage: /resume <session number or id>. Run /sessions to list saved sessions.", "system")
+			return
+		}
+		c.resumeSession(strings.Join(parts[1:], " "))
+
 	case "/next", "/n":
 		c.nextSession()
 
@@ -488,7 +505,7 @@ func (c *Controller) handleCommand(text string) {
   /help                - Show this help
   /quit, /exit         - Exit Buckley
 
-Shortcuts: Alt+Right (next), Alt+Left (prev), Ctrl+F (search)`, "system")
+Shortcuts: Ctrl+C (interrupt active work), Alt+Right (next), Alt+Left (prev), Ctrl+F (search)`, "system")
 
 	case "/quit", "/exit":
 		c.app.Quit()
@@ -966,7 +983,7 @@ func (c *Controller) buildMessagesForSession(sess *SessionState) []model.Message
 
 	// Add conversation history from session
 	if sess != nil && sess.Conversation != nil {
-		messages = append(messages, sess.Conversation.ToModelMessages()...)
+		messages = append(messages, sess.Conversation.ToEfficientModelMessages()...)
 	}
 
 	return truncateModelToolMessages(messages, defaultTUIToolModelMaxBytes)
@@ -1090,7 +1107,10 @@ const defaultTUIToolModelMaxBytes = 24 * 1024
 // buildRegistry creates the tool registry with all available tools.
 func buildRegistry(cfg *config.Config, store *storage.Store, workDir string, hub *telemetry.Hub, sessionID string) *tool.Registry {
 	registry := tool.NewRegistry()
-	registry.SetMaxOutputBytes(defaultTUIMaxOutputBytes)
+	tool.ApplyToolMiddlewareConfig(registry, cfg)
+	if cfg == nil || cfg.ToolMiddleware.MaxResultBytes <= 0 {
+		registry.SetMaxOutputBytes(defaultTUIMaxOutputBytes)
+	}
 
 	// Configure container execution if enabled
 	if cfg != nil && workDir != "" {
@@ -1117,37 +1137,98 @@ func buildRegistry(cfg *config.Config, store *storage.Store, workDir string, hub
 	if workDir != "" {
 		registry.SetWorkDir(workDir)
 	}
+	registry.EnableDynamicDiscovery(nil)
 
 	return registry
 }
 
-// listSessions shows all active sessions for this project.
+// listSessions shows persisted sessions for this project, including completed
+// sessions that can be resumed.
 func (c *Controller) listSessions() {
-	c.mu.Lock()
-	sessions := c.sessions
-	current := c.currentSession
-	c.mu.Unlock()
-
-	if len(sessions) == 0 {
-		c.app.AddMessage("No active sessions", "system")
+	if c.store == nil {
+		c.app.AddMessage("Session storage unavailable", "system")
+		return
+	}
+	sessions, err := c.store.ListSessionsByRepo(c.workDir)
+	if err != nil {
+		c.app.AddMessage("Could not list sessions: "+err.Error(), "system")
 		return
 	}
 
 	var sb strings.Builder
-	sb.WriteString("Active sessions:\n")
-	for i, sess := range sessions {
+	sb.WriteString("Saved sessions:\n")
+	visible := 0
+	for _, sess := range sessions {
+		if sess.ProjectPath != c.workDir {
+			continue
+		}
+		visible++
 		marker := "  "
-		if i == current {
+		if current := c.currentSessionState(); current != nil && current.ID == sess.ID {
 			marker = "→ "
 		}
-		status := ""
-		if sess.Streaming {
-			status = " (streaming...)"
-		}
-		sb.WriteString(fmt.Sprintf("%s[%d] %s%s\n", marker, i+1, sess.ID, status))
+		fmt.Fprintf(&sb, "%s[%d] %s · %s · %d messages\n", marker, visible, sess.ID, sess.Status, sess.MessageCount)
 	}
-	sb.WriteString("\nUse /next or /prev to switch (Alt+Right/Left)")
+	if visible == 0 {
+		sb.WriteString("No saved sessions for this project.\n")
+	} else {
+		sb.WriteString("\nUse /resume <number or id> to open a session.")
+	}
 	c.app.AddMessage(sb.String(), "system")
+}
+
+func (c *Controller) resumeSession(reference string) {
+	if c.store == nil {
+		c.app.AddMessage("Session storage unavailable", "system")
+		return
+	}
+	all, err := c.store.ListSessionsByRepo(c.workDir)
+	if err != nil {
+		c.app.AddMessage("Could not list sessions: "+err.Error(), "system")
+		return
+	}
+	project := make([]storage.Session, 0)
+	for _, sess := range all {
+		if sess.ProjectPath == c.workDir {
+			project = append(project, sess)
+		}
+	}
+	var target *storage.Session
+	if n, err := strconv.Atoi(strings.TrimSpace(reference)); err == nil && n > 0 && n <= len(project) {
+		target = &project[n-1]
+	} else {
+		for i := range project {
+			if project[i].ID == strings.TrimSpace(reference) {
+				target = &project[i]
+				break
+			}
+		}
+	}
+	if target == nil {
+		c.app.AddMessage("Session not found. Run /sessions and use its number or full id.", "system")
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for i, sess := range c.sessions {
+		if sess.ID == target.ID {
+			c.currentSession = i
+			c.switchToSessionLocked(i)
+			return
+		}
+	}
+	if err := c.store.SetSessionStatus(target.ID, storage.SessionStatusActive); err != nil {
+		c.app.AddMessage("Could not resume session: "+err.Error(), "system")
+		return
+	}
+	sess, err := newSessionState(c.cfg, c.store, c.workDir, c.telemetry, target.ID, true)
+	if err != nil {
+		c.app.AddMessage("Could not load session: "+err.Error(), "system")
+		return
+	}
+	c.sessions = append([]*SessionState{sess}, c.sessions...)
+	c.currentSession = 0
+	c.switchToSessionLocked(0)
 }
 
 // nextSession switches to the next session.
@@ -1197,10 +1278,10 @@ func (c *Controller) switchToSessionLocked(idx int) {
 	if sess.Streaming {
 		statusMsg += " (response in progress)"
 	}
-	c.app.AddMessage(statusMsg, "system")
+	c.app.addMessageImmediately(statusMsg, "system")
 
 	// Replay conversation to display
-	renderConversationHistory(c.app, sess.Conversation.Messages)
+	renderConversationHistoryImmediately(c.app, sess.Conversation.Messages)
 
 	if sess.Streaming {
 		c.app.SetStatus("Streaming...")

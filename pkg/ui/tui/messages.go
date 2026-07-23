@@ -154,6 +154,13 @@ type AppendMsg struct {
 
 func (AppendMsg) isMessage() {}
 
+// ReplaceLastMessageMsg replaces the content of the last message.
+type ReplaceLastMessageMsg struct {
+	Content string
+}
+
+func (ReplaceLastMessageMsg) isMessage() {}
+
 // ThinkingMsg shows/hides the thinking indicator.
 type ThinkingMsg struct {
 	Show bool

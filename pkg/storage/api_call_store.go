@@ -91,3 +91,19 @@ func (s *Store) GetMonthlyCost() (float64, error) {
 	err := s.db.QueryRow(query).Scan(&cost)
 	return cost, err
 }
+
+// GetMonthlyCostForPrincipal returns this month's API spend for one principal.
+// It lets background services enforce their own budgets without consuming a
+// user's interactive-session allowance.
+func (s *Store) GetMonthlyCostForPrincipal(principal string) (float64, error) {
+	query := `
+		SELECT COALESCE(SUM(api_calls.cost), 0)
+		FROM api_calls
+		JOIN sessions ON sessions.session_id = api_calls.session_id
+		WHERE sessions.principal = ?
+		  AND strftime('%Y-%m', api_calls.timestamp) = strftime('%Y-%m', 'now')
+	`
+	var cost float64
+	err := s.db.QueryRow(query, principal).Scan(&cost)
+	return cost, err
+}

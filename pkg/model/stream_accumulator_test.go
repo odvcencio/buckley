@@ -54,6 +54,45 @@ func TestStreamAccumulator_Reasoning(t *testing.T) {
 	}
 }
 
+func TestNormalizeReasoningText_TokenSeparatedNewlines(t *testing.T) {
+	raw := "I\n now\n have\n a\n full\n picture\n of\n the\n latest\n release\n v\n0\n.\n46\n.\n0\n and\n can\n answer\n."
+	want := "I now have a full picture of the latest release v0.46.0 and can answer."
+	if got := NormalizeReasoningText(raw); got != want {
+		t.Fatalf("NormalizeReasoningText() = %q, want %q", got, want)
+	}
+}
+
+func TestNormalizeReasoningText_RepeatedChunkSeparators(t *testing.T) {
+	raw := "Latest\n\n\n release\n\n\n is\n\n\n ready\n\n\n for\n\n\n a\n\n\n full\n\n\n review\n\n\n now\n\n\n."
+	want := "Latest release is ready for a full review now."
+	if got := NormalizeReasoningText(raw); got != want {
+		t.Fatalf("NormalizeReasoningText() = %q, want %q", got, want)
+	}
+}
+
+func TestNormalizeReasoningText_ReconstructsPunctuationSpacing(t *testing.T) {
+	raw := "The\n\n\n user\n\n\n checked\n\n\n v\n\n0\n\n.\n\n46\n\n\n.\nLet\n\n\n me\n\n\n gather\n\n\n:\n1\n\n\n.\n\n Unreleased\n\n\n CHANGE\nLOG\n\n\n first\n\n\n."
+	want := "The user checked v0.46. Let me gather:\n\n1. Unreleased CHANGELOG first."
+	if got := NormalizeReasoningText(raw); got != want {
+		t.Fatalf("NormalizeReasoningText() = %q, want %q", got, want)
+	}
+}
+
+func TestNormalizeReasoningText_PreservesRecoverableMarkdownBreaks(t *testing.T) {
+	raw := "I\n now\n know\n enough\n to\n summarize\n the\n facts\n.\n\nKey\n facts\n:\n\n**Repo\n state\n:**\n- First\n item\n.\n\n2\n.\n Second\n item\n.\n- Third\n item\n with\n suggestion\n \n2\n.\n\nRank\n:\n \n1\n) final\n choice\n."
+	want := "I now know enough to summarize the facts.\n\nKey facts:\n\n**Repo state:**\n- First item.\n\n2. Second item.\n- Third item with suggestion 2.\n\nRank: \n\n1) final choice."
+	if got := NormalizeReasoningText(raw); got != want {
+		t.Fatalf("NormalizeReasoningText() = %q, want %q", got, want)
+	}
+}
+
+func TestNormalizeReasoningText_PreservesIntentionalFormatting(t *testing.T) {
+	raw := "I checked the implementation and found two issues.\n\n- The first item needs a guard.\n- The second item needs a regression test.\n\nThe existing paragraph breaks should remain."
+	if got := NormalizeReasoningText(raw); got != raw {
+		t.Fatalf("NormalizeReasoningText() changed formatted prose:\n%q", got)
+	}
+}
+
 func TestStreamAccumulator_ReasoningDetails(t *testing.T) {
 	acc := NewStreamAccumulator()
 

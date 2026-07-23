@@ -5,18 +5,30 @@ import (
 	"strings"
 
 	"m31labs.dev/buckley/pkg/conversation"
+	"m31labs.dev/buckley/pkg/model"
 )
 
 func renderConversationHistory(app *WidgetApp, messages []conversation.Message) {
 	if app == nil {
 		return
 	}
+	renderConversationHistoryWith(app.AddMessage, messages)
+}
+
+func renderConversationHistoryImmediately(app *WidgetApp, messages []conversation.Message) {
+	if app == nil {
+		return
+	}
+	renderConversationHistoryWith(app.addMessageImmediately, messages)
+}
+
+func renderConversationHistoryWith(addMessage func(content, source string), messages []conversation.Message) {
 	var progress strings.Builder
 	flushProgress := func() {
 		if progress.Len() == 0 {
 			return
 		}
-		app.AddMessage(progress.String(), "system")
+		addMessage(progress.String(), "system")
 		progress.Reset()
 	}
 	startProgress := func() {
@@ -33,7 +45,7 @@ func renderConversationHistory(app *WidgetApp, messages []conversation.Message) 
 				startProgress()
 				if reasoning := strings.TrimSpace(msg.Reasoning); reasoning != "" {
 					progress.WriteString("\n\nThinking\n\n")
-					progress.WriteString(reasoning)
+					progress.WriteString(model.NormalizeReasoningText(reasoning))
 				}
 				for _, call := range msg.ToolCalls {
 					progress.WriteString("\n\n→ ")
@@ -42,7 +54,7 @@ func renderConversationHistory(app *WidgetApp, messages []conversation.Message) 
 			}
 			if strings.TrimSpace(content) != "" && len(msg.ToolCalls) == 0 {
 				flushProgress()
-				app.AddMessage(content, "assistant")
+				addMessage(content, "assistant")
 			}
 		case "tool":
 			startProgress()
@@ -51,7 +63,7 @@ func renderConversationHistory(app *WidgetApp, messages []conversation.Message) 
 		default:
 			flushProgress()
 			if strings.TrimSpace(content) != "" {
-				app.AddMessage(content, msg.Role)
+				addMessage(content, msg.Role)
 			}
 		}
 	}

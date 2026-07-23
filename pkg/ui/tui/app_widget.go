@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	stdruntime "runtime"
 	"strings"
 	"sync"
 	"time"
@@ -37,6 +38,13 @@ const (
 )
 
 var processSpinnerFrames = [...]string{"-", "\\", "|", "/"}
+
+// expandFromZero avoids treating a fill widget's unconstrained measurement as
+// its flex basis. Nested flex layouts otherwise measure the chat view at the
+// maximum integer size and collapse it when distributing the real viewport.
+func expandFromZero(widget runtime.Widget) runtime.FlexChild {
+	return runtime.FlexChild{Widget: widget, Grow: 1, Shrink: 1, Basis: 0}
+}
 
 // WidgetApp is the main TUI application using the widget tree architecture.
 type WidgetApp struct {
@@ -109,6 +117,7 @@ type WidgetApp struct {
 	onNextSession func()
 	onPrevSession func()
 	onApproval    func(requestID string, approved, alwaysAllow bool)
+	onInterrupt   func()
 
 	// Configuration
 	theme       *theme.Theme
@@ -232,12 +241,12 @@ func NewWidgetApp(cfg WidgetAppConfig) (*WidgetApp, error) {
 	var mainArea *runtime.Flex
 	if sidebarVisible {
 		mainArea = runtime.HBox(
-			runtime.Flexible(chatView, 3), // 75% for chat
-			runtime.Sized(sidebar, 24),    // Fixed 24 cols for sidebar
+			expandFromZero(chatView),   // Fill space left by the sidebar
+			runtime.Sized(sidebar, 24), // Fixed 24 cols for sidebar
 		)
 	} else {
 		mainArea = runtime.HBox(
-			runtime.Expanded(chatView), // Full width when sidebar hidden
+			expandFromZero(chatView), // Full width when sidebar hidden
 		)
 	}
 
@@ -248,7 +257,7 @@ func NewWidgetApp(cfg WidgetAppConfig) (*WidgetApp, error) {
 	// StatusBar (fixed 1 row)
 	root := runtime.VBox(
 		runtime.Fixed(header),
-		runtime.Expanded(mainArea),
+		expandFromZero(mainArea),
 		runtime.Fixed(inputArea),
 		runtime.Fixed(statusBar),
 	)
@@ -501,7 +510,8 @@ func (a *WidgetApp) showSlashCommandPalette() {
 		{ID: "/cancel", Label: "/cancel", Description: "Cancel current response"},
 		{ID: "/steer ", Label: "/steer", Description: "Interrupt and redirect the active response"},
 		{ID: "/queue ", Label: "/queue", Description: "Queue a follow-up without interrupting"},
-		{ID: "/sessions", Label: "/sessions", Description: "List active sessions"},
+		{ID: "/sessions", Label: "/sessions", Description: "List saved sessions"},
+		{ID: "/resume ", Label: "/resume", Description: "Resume a saved session"},
 		{ID: "/next", Label: "/next", Description: "Switch to next session"},
 		{ID: "/prev", Label: "/prev", Description: "Switch to previous session"},
 		{ID: "/model", Label: "/model", Description: "Select execution model"},
@@ -1100,6 +1110,13 @@ func (a *WidgetApp) AddMessage(content, source string) {
 	a.Post(AddMessageMsg{Content: content, Source: source})
 }
 
+// addMessageImmediately hydrates transcript content before the next frame.
+// Callers must already be on the UI goroutine or before Run starts.
+func (a *WidgetApp) addMessageImmediately(content, source string) {
+	a.chatView.AddMessage(content, source)
+	a.updateScrollStatus()
+}
+
 // RemoveThinkingIndicator removes the thinking indicator.
 func (a *WidgetApp) RemoveThinkingIndicator() {
 	a.Post(ThinkingMsg{Show: false})
@@ -1113,6 +1130,11 @@ func (a *WidgetApp) ShowThinkingIndicator() {
 // AppendToLastMessage appends text. Thread-safe via message passing.
 func (a *WidgetApp) AppendToLastMessage(text string) {
 	a.Post(AppendMsg{Text: text})
+}
+
+// ReplaceLastMessage replaces the current message content.
+func (a *WidgetApp) ReplaceLastMessage(content string) {
+	a.Post(ReplaceLastMessageMsg{Content: content})
 }
 
 // StreamChunk sends a streaming chunk through the coalescer.
@@ -1168,6 +1190,11 @@ func (a *WidgetApp) SetSessionCallbacks(onNext, onPrev func()) {
 	a.onPrevSession = onPrev
 }
 
+// SetInterruptCallback sets the callback used to stop an active model or tool process.
+func (a *WidgetApp) SetInterruptCallback(onInterrupt func()) {
+	a.onInterrupt = onInterrupt
+}
+
 // SetApprovalCallback sets the callback for tool approval decisions.
 func (a *WidgetApp) SetApprovalCallback(onApproval func(requestID string, approved, alwaysAllow bool)) {
 	a.onApproval = onApproval
@@ -1198,19 +1225,19 @@ func (a *WidgetApp) rebuildLayout() {
 	// Rebuild main area with or without sidebar
 	if a.sidebarVisible {
 		a.mainArea = runtime.HBox(
-			runtime.Flexible(a.chatView, 3),
+			expandFromZero(a.chatView),
 			runtime.Sized(a.sidebar, 24),
 		)
 	} else {
 		a.mainArea = runtime.HBox(
-			runtime.Expanded(a.chatView),
+			expandFromZero(a.chatView),
 		)
 	}
 
 	// Rebuild root with new main area
 	a.root = runtime.VBox(
 		runtime.Fixed(a.header),
-		runtime.Expanded(a.mainArea),
+		expandFromZero(a.mainArea),
 		runtime.Fixed(a.inputArea),
 		runtime.Fixed(a.statusBar),
 	)
@@ -1331,23 +1358,54 @@ func (a *WidgetApp) WelcomeScreen() {
 }
 
 func copyToClipboard(text string) error {
-	cmds := [][]string{
-		{"pbcopy"},                           // macOS
-		{"xclip", "-selection", "clipboard"}, // Linux X11
-		{"xsel", "--clipboard", "--input"},   // Linux X11 alt
-		{"wl-copy"},                          // Linux Wayland
-		{"clip.exe"},                         // WSL/Windows
-	}
-
+	cmds := clipboardCommands()
+	var failures []string
 	for _, args := range cmds {
+		if !clipboardCommandAvailable(args[0]) {
+			continue
+		}
 		cmd := exec.Command(args[0], args[1:]...)
 		cmd.Stdin = strings.NewReader(text)
 		if err := cmd.Run(); err == nil {
 			return nil
+		} else {
+			failures = append(failures, fmt.Sprintf("%s: %v", args[0], err))
 		}
 	}
+	if len(failures) > 0 {
+		return fmt.Errorf("clipboard command failed: %s", strings.Join(failures, "; "))
+	}
+	return fmt.Errorf("clipboard unavailable (install wl-clipboard, xclip, or xsel)")
+}
 
-	return fmt.Errorf("no clipboard command available")
+func clipboardCommands() [][]string {
+	return clipboardCommandsFor(stdruntime.GOOS)
+}
+
+func clipboardCommandsFor(goos string) [][]string {
+	switch goos {
+	case "darwin":
+		return [][]string{{"pbcopy"}}
+	case "windows":
+		return [][]string{{"clip.exe"}}
+	default:
+		return [][]string{
+			{"wl-copy"},
+			{"xclip", "-selection", "clipboard"},
+			{"xsel", "--clipboard", "--input"},
+			{"clip.exe"},
+			{"/mnt/c/Windows/System32/clip.exe"},
+		}
+	}
+}
+
+func clipboardCommandAvailable(name string) bool {
+	if strings.ContainsRune(name, os.PathSeparator) {
+		info, err := os.Stat(name)
+		return err == nil && !info.IsDir()
+	}
+	_, err := exec.LookPath(name)
+	return err == nil
 }
 
 func max(a, b int) int {

@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/mattn/go-runewidth"
 	"m31labs.dev/fluffyui/backend"
 	"m31labs.dev/fluffyui/markdown"
 	"m31labs.dev/fluffyui/runtime"
@@ -52,6 +53,61 @@ func TestChatView_FluffyMarkdownRenderingMatrix(t *testing.T) {
 		if !strings.Contains(text, want) {
 			t.Fatalf("FluffyUI markdown output missing %q:\n%s", want, text)
 		}
+	}
+}
+
+func TestChatView_WideTableStaysInsideTranscriptAndPreservesCells(t *testing.T) {
+	cv := NewChatView()
+	cv.SetMarkdownRenderer(markdown.NewRenderer(theme.DefaultTheme()), backend.DefaultStyle())
+	cv.Layout(runtime.Rect{X: 0, Y: 0, Width: 155, Height: 40})
+
+	source := `| Item | Previous state | Current state |
+| --- | --- | --- |
+| Incremental parsing | A deliberately long description of the previous behavior | A deliberately long description that must wrap without losing the final fallback marker |`
+	lines := cv.renderMarkdownLines(source, "assistant")
+	var rendered strings.Builder
+	for _, line := range lines {
+		if width := runewidth.StringWidth(line.Content); width > maxChatTextWidth {
+			t.Fatalf("table line width = %d, want <= %d: %q", width, maxChatTextWidth, line.Content)
+		}
+		rendered.WriteString(line.Content)
+		rendered.WriteByte('\n')
+	}
+	if !strings.Contains(rendered.String(), "fallback marker") {
+		t.Fatalf("wrapped table lost cell content:\n%s", rendered.String())
+	}
+}
+
+func TestChatView_RendersMarkdownPlusPlusExtensions(t *testing.T) {
+	cv := NewChatView()
+	cv.SetMarkdownRenderer(markdown.NewRenderer(theme.DefaultTheme()), backend.DefaultStyle())
+	cv.Layout(runtime.Rect{X: 0, Y: 0, Width: 100, Height: 80})
+
+	cv.AddMessage(`---
+title: Hidden metadata
+---
+
+# Result :rocket:
+
+> [!NOTE] Parser-backed
+> Markdown++ content is visible.
+
+Term
+: Definition`, "assistant")
+
+	var rendered strings.Builder
+	for _, line := range cv.buffer.GetVisibleLines() {
+		rendered.WriteString(line.Content)
+		rendered.WriteByte('\n')
+	}
+	text := rendered.String()
+	for _, want := range []string{"Result 🚀", "NOTE — Parser-backed", "Markdown++ content is visible", "Term", "Definition"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("Markdown++ output missing %q:\n%s", want, text)
+		}
+	}
+	if strings.Contains(text, "Hidden metadata") {
+		t.Fatalf("Markdown++ frontmatter leaked into chat output:\n%s", text)
 	}
 }
 
@@ -159,6 +215,21 @@ func TestChatView_AddMessage_Thinking(t *testing.T) {
 	}
 	if !found {
 		t.Error("expected thinking indicator line")
+	}
+}
+
+func TestChatView_ReplaceTextRebuildsStreamingMessage(t *testing.T) {
+	cv := NewChatView()
+	cv.SetMarkdownRenderer(markdown.NewRenderer(theme.DefaultTheme()), backend.DefaultStyle())
+	cv.Layout(runtime.Rect{X: 0, Y: 0, Width: 80, Height: 24})
+	cv.AddMessage("Thinking\n\nI\n am\n split", "thinking")
+
+	cv.ReplaceText("Thinking\n\nI am joined")
+
+	rows := chatViewRows(cv, "thinking")
+	joined := strings.Join(rows, "\n")
+	if strings.Contains(joined, "I\n") || !strings.Contains(joined, "I am joined") {
+		t.Fatalf("replaced thinking rows = %q", rows)
 	}
 }
 
@@ -321,6 +392,21 @@ func TestChatView_PageUp(t *testing.T) {
 
 	if !notified {
 		t.Error("expected scroll change notification on PageUp")
+	}
+}
+
+func TestChatViewportCapsAndCentersWideProse(t *testing.T) {
+	wide := chatViewport(runtime.Rect{X: 0, Y: 1, Width: 160, Height: 40})
+	if wide.Width != maxChatTextWidth+2 {
+		t.Fatalf("wide viewport width = %d, want %d", wide.Width, maxChatTextWidth+2)
+	}
+	if wide.X != 24 {
+		t.Fatalf("wide viewport x = %d, want 24", wide.X)
+	}
+
+	narrow := chatViewport(runtime.Rect{X: 3, Y: 1, Width: 80, Height: 20})
+	if narrow.X != 3 || narrow.Width != 80 {
+		t.Fatalf("narrow viewport = %+v, want x=3 width=80", narrow)
 	}
 }
 

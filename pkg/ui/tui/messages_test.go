@@ -24,6 +24,7 @@ func TestMessages_ImplementInterface(t *testing.T) {
 		ModelMsg{Name: "gpt-4"},
 		AddMessageMsg{Content: "hi", Source: "user"},
 		AppendMsg{Text: " world"},
+		ReplaceLastMessageMsg{Content: "replacement"},
 		ThinkingMsg{Show: true},
 		ModeChangeMsg{Mode: "normal"},
 		OverlayMsg{Show: true, Name: "file_picker"},
@@ -60,6 +61,7 @@ func TestMessages_IsMessageMethods(t *testing.T) {
 	ModelMsg{}.isMessage()
 	AddMessageMsg{}.isMessage()
 	AppendMsg{}.isMessage()
+	ReplaceLastMessageMsg{}.isMessage()
 	ThinkingMsg{}.isMessage()
 	ModeChangeMsg{}.isMessage()
 	OverlayMsg{}.isMessage()

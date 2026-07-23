@@ -1,6 +1,6 @@
 module m31labs.dev/buckley
 
-go 1.25.1
+go 1.26
 
 require (
 	connectrpc.com/connect v1.19.1
@@ -43,7 +43,8 @@ require (
 	k8s.io/apimachinery v0.30.3
 	k8s.io/client-go v0.30.3
 	m31labs.dev/arbiter v1.7.0
-	m31labs.dev/fluffyui v0.6.1
+	m31labs.dev/fluffyui v0.6.3
+	m31labs.dev/mdpp v0.4.7
 	modernc.org/sqlite v1.34.4
 	nhooyr.io/websocket v1.8.17
 )
@@ -107,7 +108,7 @@ require (
 	github.com/nats-io/nkeys v0.4.7 // indirect
 	github.com/nats-io/nuid v1.0.1 // indirect
 	github.com/ncruces/go-strftime v0.1.9 // indirect
-	github.com/odvcencio/gotreesitter v0.10.0 // indirect
+	github.com/odvcencio/gotreesitter v0.20.0 // indirect
 	github.com/olekukonko/tablewriter v0.0.5 // indirect
 	github.com/pjbgf/sha1cd v0.3.2 // indirect
 	github.com/pkg/errors v0.9.1 // indirect

@@ -3,6 +3,7 @@ package builtin
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"runtime"
@@ -12,6 +13,49 @@ import (
 
 	"m31labs.dev/buckley/pkg/sandbox"
 )
+
+const maxShellProgressBytes = 32 * 1024
+
+type shellOutputSinkKey struct{}
+
+// ShellOutputSink receives bounded live output from a shell invocation.
+type ShellOutputSink func(stream, text string)
+
+// WithShellOutputSink attaches a live-output receiver to a shell context.
+func WithShellOutputSink(ctx context.Context, sink ShellOutputSink) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if sink == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, shellOutputSinkKey{}, sink)
+}
+
+type shellProgressWriter struct {
+	sink      ShellOutputSink
+	stream    string
+	remaining int
+}
+
+func newShellProgressWriter(ctx context.Context, stream string) *shellProgressWriter {
+	sink, _ := ctx.Value(shellOutputSinkKey{}).(ShellOutputSink)
+	return &shellProgressWriter{sink: sink, stream: stream, remaining: maxShellProgressBytes}
+}
+
+func (w *shellProgressWriter) Write(p []byte) (int, error) {
+	written := len(p)
+	if w == nil || w.sink == nil || w.remaining <= 0 || len(p) == 0 {
+		return written, nil
+	}
+	visible := p
+	if len(visible) > w.remaining {
+		visible = visible[:w.remaining]
+	}
+	w.remaining -= len(visible)
+	w.sink(w.stream, string(visible))
+	return written, nil
+}
 
 const (
 	interactiveTerminalEnv  = "BUCKLEY_INTERACTIVE_TERMINAL"
@@ -199,15 +243,22 @@ func (t *ShellCommandTool) ExecuteWithContext(ctx context.Context, params map[st
 	if strings.TrimSpace(t.workDir) != "" {
 		command.Dir = strings.TrimSpace(t.workDir)
 	}
+	configureCommandCancellation(command)
 	command.Env = mergeEnv(command.Env, t.env)
 	stdout := newLimitedBuffer(t.maxOutputBytes)
 	stderr := newLimitedBuffer(t.maxOutputBytes)
-	command.Stdout = stdout
-	command.Stderr = stderr
+	command.Stdout = io.MultiWriter(stdout, newShellProgressWriter(ctx, "stdout"))
+	command.Stderr = io.MultiWriter(stderr, newShellProgressWriter(ctx, "stderr"))
 
 	err := command.Run()
 	exitCode := 0
 	if err != nil {
+		if ctx.Err() == context.Canceled {
+			return &Result{
+				Success: false,
+				Error:   "command interrupted by user",
+			}, nil
+		}
 		if ctx.Err() == context.DeadlineExceeded {
 			return &Result{
 				Success: false,

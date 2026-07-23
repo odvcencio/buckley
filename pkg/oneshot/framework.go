@@ -99,6 +99,14 @@ type RunResult struct {
 	// CriticAttempts is the number of independent approval-critic invocations.
 	// It is zero when the primary result did not require a critic.
 	CriticAttempts int
+
+	// Incomplete reports that Value contains only salvaged work from an
+	// interrupted RLM run. Callers may persist or display it, but must not treat
+	// it as a validated result or approval.
+	Incomplete bool
+
+	// IncompleteReason records why validation could not finish.
+	IncompleteReason string
 }
 
 // Run executes a oneshot command using the unified pipeline:
@@ -270,9 +278,13 @@ func (f *Framework) RunRLM(ctx context.Context, def RLMDefinition, opts RLMRunOp
 	traceAttempts := append([]transparency.TraceAttempt(nil), primary.traces...)
 	result.Trace = transparency.AggregateTraceAttempts(traceAttempts)
 	if primary.err != nil {
+		result.Value = primary.value
+		result.Incomplete = true
+		result.IncompleteReason = primary.err.Error()
 		return result, primary.err
 	}
 
+	result.Value = primary.value
 	criticDef, hasCritic := def.(RLMApprovalCritic)
 	if !hasCritic || !criticDef.RequiresApprovalCritic(primary.value) {
 		result.Value = primary.value
@@ -281,6 +293,8 @@ func (f *Framework) RunRLM(ctx context.Context, def RLMDefinition, opts RLMRunOp
 
 	criticPrompt, err := criticDef.BuildApprovalCriticPrompt(basePrompt, primary.value)
 	if err != nil {
+		result.Incomplete = true
+		result.IncompleteReason = err.Error()
 		return result, fmt.Errorf("build approval critic prompt for %q: %w", def.Name(), err)
 	}
 	critic := f.runValidatedRLMPhase(
@@ -297,6 +311,11 @@ func (f *Framework) RunRLM(ctx context.Context, def RLMDefinition, opts RLMRunOp
 	traceAttempts = append(traceAttempts, critic.traces...)
 	result.Trace = transparency.AggregateTraceAttempts(traceAttempts)
 	if critic.err != nil {
+		if critic.value != nil {
+			result.Value = critic.value
+		}
+		result.Incomplete = true
+		result.IncompleteReason = critic.err.Error()
 		return result, critic.err
 	}
 
@@ -338,6 +357,11 @@ func (f *Framework) runValidatedRLMPhase(
 			})
 		}
 		if err != nil {
+			if rlmResult != nil && strings.TrimSpace(rlmResult.Response) != "" {
+				// Preserve parseable partial work for callers that explicitly
+				// handle incomplete results. Never validate or accept it here.
+				result.value, _ = def.ParseResult(rlmResult.Response)
+			}
 			result.err = fmt.Errorf("RLM %s execution failed for %q: %w", phase, def.Name(), err)
 			return result
 		}
@@ -365,7 +389,6 @@ func (f *Framework) runValidatedRLMPhase(
 			". Re-run the review from the supplied evidence and return a complete, internally consistent review in the required format."
 	}
 
-	result.value = nil
 	result.err = fmt.Errorf("%s review validation failed after %d attempts for %q: %w", phase, maxRetries, def.Name(), lastErr)
 	return result
 }

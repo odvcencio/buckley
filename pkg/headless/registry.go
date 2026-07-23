@@ -328,7 +328,10 @@ func (r *Registry) EnsureSession(sessionID string) (*Runner, error) {
 
 func (r *Registry) buildToolRegistry(sessionID string, project string) *tool.Registry {
 	tools := tool.NewRegistry()
-	tools.SetMaxOutputBytes(defaultHeadlessMaxOutputBytes)
+	tool.ApplyToolMiddlewareConfig(tools, r.config)
+	if r.config == nil || r.config.ToolMiddleware.MaxResultBytes <= 0 {
+		tools.SetMaxOutputBytes(defaultHeadlessMaxOutputBytes)
+	}
 	if strings.TrimSpace(project) != "" && r.config != nil {
 		tools.ConfigureContainers(r.config, project)
 	}
@@ -350,6 +353,7 @@ func (r *Registry) buildToolRegistry(sessionID string, project string) *tool.Reg
 	if strings.TrimSpace(project) != "" {
 		tools.SetWorkDir(project)
 	}
+	tools.EnableDynamicDiscovery(nil)
 	return tools
 }
 

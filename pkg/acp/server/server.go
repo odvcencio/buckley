@@ -20,6 +20,10 @@ import (
 	"google.golang.org/protobuf/types/known/emptypb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/peer"
 	acppb "m31labs.dev/buckley/pkg/acp/proto"
 	"m31labs.dev/buckley/pkg/agent"
 	"m31labs.dev/buckley/pkg/bus"
@@ -34,10 +38,6 @@ import (
 	"m31labs.dev/buckley/pkg/storage"
 	"m31labs.dev/buckley/pkg/telemetry"
 	"m31labs.dev/buckley/pkg/tool"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials"
-	"google.golang.org/grpc/metadata"
-	"google.golang.org/grpc/peer"
 )
 
 // Server implements the Zed ACP gRPC service.
@@ -568,6 +568,7 @@ func extractMessageText(msg model.Message) string {
 // buildRLMRuntime constructs an RLM runtime for ACP requests.
 func (s *Server) buildRLMRuntime(sessionID, agentID string) (*rlm.Runtime, func(), error) {
 	registry := tool.NewRegistry()
+	tool.ApplyToolMiddlewareConfig(registry, s.cfg)
 	registry.ConfigureContainers(s.cfg, s.projectRoot)
 
 	missionStore := mission.NewStore(s.store.DB())
@@ -651,6 +652,7 @@ func resolveRLMConfig(cfg *config.Config) rlm.Config {
 // buildOrchestratorContext constructs a fresh orchestrator stack for ACP requests.
 func (s *Server) buildOrchestratorContext(sessionID, agentID string) (*orchestrator.Orchestrator, func(), error) {
 	registry := tool.NewRegistry()
+	tool.ApplyToolMiddlewareConfig(registry, s.cfg)
 	registry.ConfigureContainers(s.cfg, s.projectRoot)
 
 	missionStore := mission.NewStore(s.store.DB())
@@ -841,6 +843,7 @@ func (s *Server) RequestToolExecution(req *acppb.ToolExecutionRequest, stream ac
 	}
 
 	registry := tool.NewRegistry()
+	tool.ApplyToolMiddlewareConfig(registry, s.cfg)
 	registry.ConfigureContainers(s.cfg, s.projectRoot)
 	missionStore := mission.NewStore(s.store.DB())
 	requireApproval := strings.ToLower(s.cfg.Orchestrator.TrustLevel) != "autonomous"
@@ -871,7 +874,7 @@ func (s *Server) RequestToolExecution(req *acppb.ToolExecutionRequest, stream ac
 	for k, v := range req.Parameters {
 		params[k] = v
 	}
-	res, err := registry.Execute(req.Tool, params)
+	res, err := registry.ExecuteWithContext(stream.Context(), req.Tool, params)
 	if err != nil {
 		_ = stream.Send(&acppb.ToolExecutionEvent{ExecutionId: req.Tool, Status: "failed", Output: err.Error(), Timestamp: timestamppb.Now()})
 		return statusError(codes.Internal, err.Error())

@@ -71,8 +71,8 @@ func (s *Store) CreateSession(session *Session) error {
 			session.GitRepo,
 			session.GitBranch,
 			session.Model,
-			session.CreatedAt,
-			session.LastActive,
+			sqliteTimestamp(session.CreatedAt),
+			sqliteTimestamp(session.LastActive),
 			status,
 			completedAt,
 		)
@@ -109,6 +109,7 @@ func (s *Store) GetSession(sessionID string) (*Session, error) {
 	`
 	var session Session
 	var principal sql.NullString
+	var gitRepo, gitBranch, modelID sql.NullString
 	var completed sql.NullTime
 	var pauseReason, pauseQuestion sql.NullString
 	var pausedAt sql.NullTime
@@ -116,9 +117,9 @@ func (s *Store) GetSession(sessionID string) (*Session, error) {
 		&session.ID,
 		&principal,
 		&session.ProjectPath,
-		&session.GitRepo,
-		&session.GitBranch,
-		&session.Model,
+		&gitRepo,
+		&gitBranch,
+		&modelID,
 		&session.CreatedAt,
 		&session.LastActive,
 		&session.MessageCount,
@@ -142,6 +143,9 @@ func (s *Store) GetSession(sessionID string) (*Session, error) {
 	if principal.Valid {
 		session.Principal = principal.String
 	}
+	session.GitRepo = gitRepo.String
+	session.GitBranch = gitBranch.String
+	session.Model = modelID.String
 	if pauseReason.Valid {
 		session.PauseReason = pauseReason.String
 	}
@@ -196,14 +200,15 @@ func (s *Store) ListSessions(limit int) ([]Session, error) {
 	for rows.Next() {
 		var session Session
 		var principal sql.NullString
+		var gitRepo, gitBranch, modelID sql.NullString
 		var completed sql.NullTime
 		if err := rows.Scan(
 			&session.ID,
 			&principal,
 			&session.ProjectPath,
-			&session.GitRepo,
-			&session.GitBranch,
-			&session.Model,
+			&gitRepo,
+			&gitBranch,
+			&modelID,
 			&session.CreatedAt,
 			&session.LastActive,
 			&session.MessageCount,
@@ -220,6 +225,9 @@ func (s *Store) ListSessions(limit int) ([]Session, error) {
 		if principal.Valid {
 			session.Principal = principal.String
 		}
+		session.GitRepo = gitRepo.String
+		session.GitBranch = gitBranch.String
+		session.Model = modelID.String
 		sessions = append(sessions, session)
 	}
 
@@ -249,14 +257,15 @@ func (s *Store) ListSessionsByRepo(repoPath string) ([]Session, error) {
 	for rows.Next() {
 		var session Session
 		var principal sql.NullString
+		var gitRepo, gitBranch, modelID sql.NullString
 		var completed sql.NullTime
 		if err := rows.Scan(
 			&session.ID,
 			&principal,
 			&session.ProjectPath,
-			&session.GitRepo,
-			&session.GitBranch,
-			&session.Model,
+			&gitRepo,
+			&gitBranch,
+			&modelID,
 			&session.CreatedAt,
 			&session.LastActive,
 			&session.MessageCount,
@@ -273,6 +282,9 @@ func (s *Store) ListSessionsByRepo(repoPath string) ([]Session, error) {
 		if principal.Valid {
 			session.Principal = principal.String
 		}
+		session.GitRepo = gitRepo.String
+		session.GitBranch = gitBranch.String
+		session.Model = modelID.String
 		sessions = append(sessions, session)
 	}
 	return sessions, rows.Err()
@@ -282,7 +294,7 @@ func (s *Store) ListSessionsByRepo(repoPath string) ([]Session, error) {
 func (s *Store) UpdateSessionActivity(sessionID string) error {
 	now := time.Now()
 	query := `UPDATE sessions SET last_active = ? WHERE session_id = ?`
-	_, err := s.db.Exec(query, now, sessionID)
+	_, err := s.db.Exec(query, sqliteTimestamp(now), sessionID)
 	if err != nil {
 		return err
 	}
@@ -322,7 +334,7 @@ func (s *Store) UpdateSessionModel(sessionID, modelID string) error {
 	if modelID == "" {
 		return fmt.Errorf("model required")
 	}
-	res, err := s.db.Exec(`UPDATE sessions SET model = ?, last_active = ? WHERE session_id = ?`, modelID, time.Now(), sessionID)
+	res, err := s.db.Exec(`UPDATE sessions SET model = ?, last_active = ? WHERE session_id = ?`, modelID, sqliteTimestamp(time.Now()), sessionID)
 	if err != nil {
 		return err
 	}

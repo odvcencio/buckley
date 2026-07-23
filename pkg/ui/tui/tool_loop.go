@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"sort"
@@ -16,11 +17,13 @@ type toolLoopState struct {
 	useTools   bool
 	totalUsage model.Usage
 	progress   toolLoopProgress
+	executions map[[32]byte]int
 }
 
 type toolLoopProgress struct {
 	started       bool
 	reasoningOpen bool
+	reasoning     strings.Builder
 }
 
 type toolLoopIterationResult struct {
@@ -61,6 +64,7 @@ func (c *Controller) newToolLoopState(sess *SessionState, modelID string) toolLo
 		useTools: !c.consumeDisableToolsNextTurn(sess) &&
 			sess.ToolRegistry != nil &&
 			c.modelMgr.SupportsTools(modelID),
+		executions: make(map[[32]byte]int),
 	}
 }
 
@@ -83,7 +87,7 @@ func (c *Controller) runToolLoopIteration(ctx context.Context, sess *SessionStat
 	if err != nil {
 		return toolLoopIterationResult{}, err
 	}
-	return c.handleToolLoopChoice(sess, choice.Message, allowedTools, choice.FinishReason, state), nil
+	return c.handleToolLoopChoice(ctx, sess, choice.Message, allowedTools, choice.FinishReason, state), nil
 }
 
 func (c *Controller) handleToolLoopModelError(err error, state *toolLoopState) error {
@@ -95,7 +99,7 @@ func (c *Controller) handleToolLoopModelError(err error, state *toolLoopState) e
 	return err
 }
 
-func (c *Controller) handleToolLoopChoice(sess *SessionState, msg model.Message, allowedTools []string, finishReason string, state *toolLoopState) toolLoopIterationResult {
+func (c *Controller) handleToolLoopChoice(ctx context.Context, sess *SessionState, msg model.Message, allowedTools []string, finishReason string, state *toolLoopState) toolLoopIterationResult {
 	if len(msg.ToolCalls) == 0 {
 		return toolLoopIterationResult{
 			done:         true,
@@ -106,7 +110,7 @@ func (c *Controller) handleToolLoopChoice(sess *SessionState, msg model.Message,
 
 	toolCalls := normalizeToolLoopCalls(sess.ToolRegistry, msg.ToolCalls, allowedTools)
 	c.recordToolLoopCalls(sess, toolCalls, msg)
-	c.executeToolLoopCalls(sess, toolCalls, allowedTools, state)
+	c.executeToolLoopCalls(ctx, sess, toolCalls, allowedTools, state)
 	return toolLoopIterationResult{}
 }
 
@@ -156,7 +160,11 @@ func (c *Controller) buildToolLoopRequest(sess *SessionState, modelID string, us
 }
 
 func (c *Controller) callToolLoopModel(ctx context.Context, req model.ChatRequest, modelID string, iteration int, state *toolLoopState) (*model.ChatResponse, error) {
-	c.app.StartProcessStatus(modelProcessStatus(modelID, iteration, len(req.Tools), req.Reasoning))
+	status := modelProcessStatus(modelID, iteration, len(req.Tools), req.Reasoning)
+	if estimate := model.EstimateRequestTokens(req); estimate.Total >= 1000 {
+		status += fmt.Sprintf(", ~%.1fk input", float64(estimate.Total)/1000)
+	}
+	c.app.StartProcessStatus(status)
 	defer c.app.StopProcessStatus()
 
 	chunks, errs := c.modelMgr.ChatCompletionStream(ctx, req)
@@ -164,6 +172,7 @@ func (c *Controller) callToolLoopModel(ctx context.Context, req model.ChatReques
 	defer model.ReleaseStreamAccumulator(accumulator)
 	if state != nil {
 		state.progress.reasoningOpen = false
+		state.progress.reasoning.Reset()
 	}
 
 	var responseID string
@@ -237,15 +246,17 @@ func (c *Controller) appendReasoningProgress(state *toolLoopState, delta model.M
 	if text == "" {
 		return
 	}
+	state.progress.reasoning.WriteString(text)
+	display := "Thinking\n\n" + model.NormalizeReasoningText(state.progress.reasoning.String())
 	if !state.progress.started {
 		state.progress.started = true
 	}
 	if !state.progress.reasoningOpen {
-		c.app.AddMessage("Thinking\n\n"+text, "thinking")
+		c.app.AddMessage(display, "thinking")
 		state.progress.reasoningOpen = true
 		return
 	}
-	c.app.AppendToLastMessage(text)
+	c.app.ReplaceLastMessage(display)
 }
 
 func visibleReasoningDetails(details []model.ReasoningDetail) string {
@@ -289,8 +300,35 @@ func normalizeToolLoopCalls(registry *tool.Registry, calls []model.ToolCall, all
 		if repairedName, ok := resolveToolCallName(registry, calls[i].Function.Name, allowedTools); ok {
 			calls[i].Function.Name = repairedName
 		}
+		repairToolCallByArguments(registry, &calls[i], allowedTools)
 	}
 	return calls
+}
+
+func repairToolCallByArguments(registry *tool.Registry, call *model.ToolCall, allowedTools []string) {
+	if registry == nil || call == nil || call.Function.Name != "run_tests" {
+		return
+	}
+	var params map[string]any
+	if json.Unmarshal([]byte(call.Function.Arguments), &params) != nil {
+		return
+	}
+	command, _ := params["command"].(string)
+	if strings.TrimSpace(command) == "" || hasAnyToolParam(params, "path", "pattern", "coverage", "verbose") {
+		return
+	}
+	if _, ok := registry.Get("run_shell"); ok && tool.IsToolAllowed("run_shell", allowedTools) {
+		call.Function.Name = "run_shell"
+	}
+}
+
+func hasAnyToolParam(params map[string]any, names ...string) bool {
+	for _, name := range names {
+		if _, ok := params[name]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *Controller) recordToolLoopCalls(sess *SessionState, calls []model.ToolCall, msg model.Message) {
@@ -299,13 +337,16 @@ func (c *Controller) recordToolLoopCalls(sess *SessionState, calls []model.ToolC
 	c.saveLatestConversationMessage(sess)
 }
 
-func (c *Controller) executeToolLoopCalls(sess *SessionState, calls []model.ToolCall, allowedTools []string, state *toolLoopState) {
+func (c *Controller) executeToolLoopCalls(ctx context.Context, sess *SessionState, calls []model.ToolCall, allowedTools []string, state *toolLoopState) {
 	for i, tc := range calls {
-		c.executeToolLoopCall(sess, tc, i+1, len(calls), allowedTools, state)
+		if ctx.Err() != nil {
+			return
+		}
+		c.executeToolLoopCall(ctx, sess, tc, i+1, len(calls), allowedTools, state)
 	}
 }
 
-func (c *Controller) executeToolLoopCall(sess *SessionState, tc model.ToolCall, index, total int, allowedTools []string, state *toolLoopState) {
+func (c *Controller) executeToolLoopCall(ctx context.Context, sess *SessionState, tc model.ToolCall, index, total int, allowedTools []string, state *toolLoopState) {
 	c.appendToolCallProgress(state, tc)
 	params, err := parseToolParams(tc.Function.Arguments)
 	if err != nil {
@@ -332,11 +373,37 @@ func (c *Controller) executeToolLoopCall(sess *SessionState, tc model.ToolCall, 
 		params[tool.ToolCallIDParam] = tc.ID
 	}
 
-	c.app.StartProcessStatus(fmt.Sprintf("Running %s (%d/%d)", compactStatusText(tc.Function.Name, 36), index, total))
-	result, execErr := sess.ToolRegistry.Execute(tc.Function.Name, params)
+	toolCtx := ctx
+	streamingShellOutput := tc.Function.Name == "run_shell"
+	if streamingShellOutput {
+		c.app.AppendToLastMessage("\n\n```text\n")
+		toolCtx = builtin.WithShellOutputSink(ctx, func(_ string, text string) {
+			c.app.AppendToLastMessage(text)
+		})
+	}
+	c.app.StartProcessStatus(fmt.Sprintf("Running %s (%d/%d) · Ctrl+C to interrupt", compactStatusText(tc.Function.Name, 36), index, total))
+	result, execErr := sess.ToolRegistry.ExecuteWithContext(toolCtx, tc.Function.Name, params)
 	c.app.StopProcessStatus()
+	if streamingShellOutput {
+		c.app.AppendToLastMessage("\n```")
+	}
 	c.appendToolResultProgress(state, tc.Function.Name, result, execErr)
-	c.addToolLoopResponse(sess, tc, formatToolResultForModel(result, execErr))
+	modelResult := formatToolResultForModel(result, execErr)
+	modelResult += stagnationNudge(state, tc, modelResult)
+	c.addToolLoopResponse(sess, tc, modelResult)
+}
+
+func stagnationNudge(state *toolLoopState, call model.ToolCall, result string) string {
+	if state == nil {
+		return ""
+	}
+	fingerprint := sha256.Sum256([]byte(call.Function.Name + "\x00" + call.Function.Arguments + "\x00" + result))
+	state.executions[fingerprint]++
+	count := state.executions[fingerprint]
+	if count < 3 {
+		return ""
+	}
+	return fmt.Sprintf("\n\nHarness notice: this identical action and result has repeated %d times. Reassess the approach, use discover_tools for another capability, ask the user if blocked, or conclude; do not repeat it again unless state changes.", count)
 }
 
 func (c *Controller) addToolLoopResponse(sess *SessionState, tc model.ToolCall, text string) {
@@ -609,36 +676,11 @@ func formatToolResultForModel(result *builtin.Result, execErr error) string {
 	if result == nil {
 		return "No result"
 	}
-	encoded, err := tool.ToJSON(modelFacingToolResult(result))
+	encoded, err := tool.ToModelOutput(result)
 	if err != nil {
 		return fmt.Sprintf("{\"success\":%t}", result.Success)
 	}
 	return truncateModelToolOutput(encoded, defaultTUIToolModelMaxBytes)
-}
-
-func modelFacingToolResult(result *builtin.Result) *builtin.Result {
-	if result == nil {
-		return nil
-	}
-	if !result.ShouldAbridge || len(result.DisplayData) == 0 {
-		return result
-	}
-	abridged := *result
-	abridged.Data = cloneAnyMap(result.DisplayData)
-	abridged.DisplayData = nil
-	abridged.ShouldAbridge = false
-	return &abridged
-}
-
-func cloneAnyMap(input map[string]any) map[string]any {
-	if len(input) == 0 {
-		return nil
-	}
-	output := make(map[string]any, len(input))
-	for k, v := range input {
-		output[k] = v
-	}
-	return output
 }
 
 func truncateModelToolOutput(content string, maxBytes int) string {
@@ -686,6 +728,19 @@ func addUsage(total model.Usage, next model.Usage) model.Usage {
 	total.PromptTokens += next.PromptTokens
 	total.CompletionTokens += next.CompletionTokens
 	total.TotalTokens += next.TotalTokens
+	total.CacheWriteTokens += next.CacheWriteTokens
+	if next.PromptTokensDetails != nil {
+		if total.PromptTokensDetails == nil {
+			total.PromptTokensDetails = &model.PromptTokensDetails{}
+		}
+		total.PromptTokensDetails.CachedTokens += next.PromptTokensDetails.CachedTokens
+	}
+	if next.CompletionTokenDetails != nil {
+		if total.CompletionTokenDetails == nil {
+			total.CompletionTokenDetails = &model.CompletionTokenDetails{}
+		}
+		total.CompletionTokenDetails.ReasoningTokens += next.CompletionTokenDetails.ReasoningTokens
+	}
 	return total
 }
 

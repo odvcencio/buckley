@@ -147,7 +147,7 @@ func (r *RLMRunner) Run(ctx context.Context, systemPrompt, task string, allowedT
 	}
 
 	// Execute task
-	agentResult, err := agent.Execute(ctx, task)
+	agentResult, executionErr := agent.Execute(ctx, task)
 	if opts.ReviewSnapshot != nil && snapshotWorkDir != "" {
 		verifyCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		verifyErr := model.VerifyReviewWorkspace(verifyCtx, snapshotWorkDir, opts.ReviewSnapshot)
@@ -156,15 +156,22 @@ func (r *RLMRunner) Run(ctx context.Context, systemPrompt, task string, allowedT
 			return nil, fmt.Errorf("API review changed the captured source snapshot: %w", verifyErr)
 		}
 	}
-	if err != nil {
-		return nil, fmt.Errorf("execute task: %w", err)
+	if agentResult == nil {
+		if executionErr != nil {
+			return nil, fmt.Errorf("execute task: %w", executionErr)
+		}
+		return nil, fmt.Errorf("execute task returned no result")
 	}
 
 	duration := time.Since(start)
+	response := agentResult.Summary
+	if executionErr != nil {
+		response = formatIncompleteRLMResponse(agentResult, executionErr)
+	}
 
 	// Build result
 	result := &RLMResult{
-		Response:          agentResult.Summary,
+		Response:          response,
 		ToolCalls:         agentResult.ToolCalls,
 		TokensUsed:        agentResult.TokensUsed,
 		InputTokens:       agentResult.InputTokens,
@@ -196,7 +203,7 @@ func (r *RLMRunner) Run(ctx context.Context, systemPrompt, task string, allowedT
 		})
 	}
 
-	builder.WithContent(agentResult.Summary)
+	builder.WithContent(response)
 
 	// Calculate cost (rough estimate)
 	pricing := transparency.ModelPricing{
@@ -224,7 +231,67 @@ func (r *RLMRunner) Run(ctx context.Context, systemPrompt, task string, allowedT
 		})
 	}
 
+	if executionErr != nil {
+		return result, fmt.Errorf("execute task: %w", executionErr)
+	}
 	return result, nil
+}
+
+func formatIncompleteRLMResponse(result *rlm.SubAgentResult, cause error) string {
+	var b strings.Builder
+	b.WriteString("> [!WARNING]\n")
+	b.WriteString("> **Incomplete agent result — salvaged from completed work.**\n")
+	b.WriteString("> The run ended before validation completed. This artifact is not a completed or validated result.\n\n")
+	b.WriteString("## Interruption\n\n")
+	b.WriteString(salvageText(cause.Error(), 2000))
+	b.WriteString("\n")
+
+	if summary := strings.TrimSpace(result.Summary); summary != "" {
+		b.WriteString("\n## Partial Model Output\n\n")
+		b.WriteString(salvageText(summary, 8000))
+		b.WriteString("\n")
+	}
+
+	if len(result.ToolCalls) > 0 {
+		b.WriteString("\n## Completed Evidence\n")
+		start := max(0, len(result.ToolCalls)-12)
+		for _, call := range result.ToolCalls[start:] {
+			status := "failed"
+			if call.Success {
+				status = "completed"
+			}
+			b.WriteString("\n- `")
+			b.WriteString(salvageText(call.Name, 200))
+			b.WriteString("` — ")
+			b.WriteString(status)
+			if arguments := strings.TrimSpace(call.Arguments); arguments != "" {
+				b.WriteString("\n  - Arguments: `")
+				b.WriteString(salvageText(arguments, 800))
+				b.WriteString("`")
+			}
+			if output := strings.TrimSpace(call.Result); output != "" {
+				b.WriteString("\n  - Result:\n\n    ```text\n    ")
+				output = strings.ReplaceAll(salvageText(output, 4000), "\n", "\n    ")
+				b.WriteString(output)
+				b.WriteString("\n    ```\n")
+			}
+		}
+	}
+
+	b.WriteString("\n## Accounting\n\n")
+	fmt.Fprintf(&b, "- Completed model tokens: %d input, %d output, %d total\n", result.InputTokens, result.OutputTokens, result.TokensUsed)
+	fmt.Fprintf(&b, "- Completed tool calls retained: %d\n", len(result.ToolCalls))
+	return strings.TrimSpace(b.String()) + "\n"
+}
+
+func salvageText(value string, limit int) string {
+	value = strings.TrimSpace(value)
+	value = strings.ReplaceAll(value, "```", "` ` `")
+	runes := []rune(value)
+	if limit > 0 && len(runes) > limit {
+		return string(runes[:limit]) + "…"
+	}
+	return value
 }
 
 func newReviewSnapshotRegistry(root string, allowedTools []string, codexCommand ...string) (*tool.Registry, error) {

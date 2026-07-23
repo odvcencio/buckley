@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -179,5 +180,19 @@ func TestReviewResultFromRLMExposesPrimaryAndCriticAttempts(t *testing.T) {
 	if got.attempts != 3 || got.primary != 1 || got.criticAttempts != 2 {
 		t.Fatalf("attempt counts = total:%d primary:%d critic:%d, want 3/1/2",
 			got.attempts, got.primary, got.criticAttempts)
+	}
+}
+
+func TestReviewResultFromRLMPreservesIncompleteState(t *testing.T) {
+	got := reviewResultFromRLM(&oneshot.RunResult{
+		Value:            &commands.ReviewRLMResult{Review: "partial review"},
+		Incomplete:       true,
+		IncompleteReason: "context deadline exceeded",
+	}, nil)
+	if !got.incomplete || !strings.Contains(got.reviewText, "Incomplete review") || !strings.Contains(got.reviewText, "partial review") || !strings.Contains(got.incompleteWhy, "deadline") {
+		t.Fatalf("incomplete review result = %#v", got)
+	}
+	if got.parsed != nil {
+		t.Fatal("incomplete review must not retain a parsed merge verdict")
 	}
 }

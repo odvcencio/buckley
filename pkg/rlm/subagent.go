@@ -228,7 +228,7 @@ func (a *SubAgent) Execute(ctx context.Context, task string) (*SubAgentResult, e
 		}
 		resp, err := a.client.ChatCompletion(ctx, req)
 		if err != nil {
-			result.Duration = time.Since(start)
+			finalizeSubAgentResult(result, start)
 			return result, err
 		}
 		result.InputTokens += resp.Usage.PromptTokens
@@ -241,7 +241,7 @@ func (a *SubAgent) Execute(ctx context.Context, task string) (*SubAgentResult, e
 		result.TokensUsed += turnTokens
 
 		if len(resp.Choices) == 0 {
-			result.Duration = time.Since(start)
+			finalizeSubAgentResult(result, start)
 			return result, fmt.Errorf("no response from model")
 		}
 
@@ -250,7 +250,7 @@ func (a *SubAgent) Execute(ctx context.Context, task string) (*SubAgentResult, e
 		if len(choice.Message.ToolCalls) > 0 {
 			toolResults, err := a.executeTools(ctx, choice.Message.ToolCalls, allowedRegistry, allowedSet, result)
 			if err != nil {
-				result.Duration = time.Since(start)
+				finalizeSubAgentResult(result, start)
 				return result, err
 			}
 
@@ -278,16 +278,11 @@ func (a *SubAgent) Execute(ctx context.Context, task string) (*SubAgentResult, e
 		break
 	}
 
-	if result.Summary == "" {
-		result.Summary = summarizeToolCalls(result.ToolCalls)
-	}
-
-	raw := marshalSubAgentRaw(result)
-	result.Raw = raw
+	finalizeSubAgentResult(result, start)
 	if a.scratchpad != nil {
 		key, err := a.scratchpad.Write(ctx, WriteRequest{
 			Type:      EntryTypeAnalysis,
-			Raw:       raw,
+			Raw:       result.Raw,
 			Summary:   result.Summary,
 			Metadata:  map[string]any{"model": a.model, "agent_id": a.id},
 			CreatedBy: a.id,
@@ -298,8 +293,18 @@ func (a *SubAgent) Execute(ctx context.Context, task string) (*SubAgentResult, e
 		}
 	}
 
-	result.Duration = time.Since(start)
 	return result, nil
+}
+
+func finalizeSubAgentResult(result *SubAgentResult, start time.Time) {
+	if result == nil {
+		return
+	}
+	if strings.TrimSpace(result.Summary) == "" {
+		result.Summary = summarizeToolCalls(result.ToolCalls)
+	}
+	result.Raw = marshalSubAgentRaw(result)
+	result.Duration = time.Since(start)
 }
 
 func isReadOnlyToolSet(names []string) bool {
@@ -563,16 +568,7 @@ func formatToolResult(res *builtin.Result) string {
 	if res == nil {
 		return ""
 	}
-	payload := res
-	if res.ShouldAbridge && len(res.DisplayData) > 0 {
-		payload = &builtin.Result{
-			Success: res.Success,
-			Data:    cloneToolResultData(res.DisplayData),
-			Error:   res.Error,
-		}
-	}
-	// Use tool.ToJSON which applies TOON encoding for compact token-efficient results
-	result, err := tool.ToJSON(payload)
+	result, err := tool.ToModelOutput(res)
 	if err != nil {
 		return fmt.Sprintf("{\"success\":%t}", res.Success)
 	}

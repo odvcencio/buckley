@@ -133,13 +133,22 @@ func runReviewPRCommand(args []string) error {
 		termOut.Dim("Reviewing PR: %s", opts.prRef)
 	}
 
-	result, prInfo, err := runPRReview(ctx, opts.prRef, runtime.framework)
-	if err != nil {
-		return err
-	}
+	result, prInfo, reviewErr := runPRReview(ctx, opts.prRef, runtime.framework)
 
-	if opts.verbose && result.contextAudit != nil {
+	if opts.verbose && result != nil && result.contextAudit != nil {
 		printReviewContextAudit(result.contextAudit)
+	}
+	if reviewErr != nil {
+		if result == nil || !result.incomplete || strings.TrimSpace(result.reviewText) == "" {
+			return reviewErr
+		}
+		if err := writePRReviewOutput(opts.outputFile, result.reviewText, prInfo); err != nil {
+			return fmt.Errorf("%w; also failed to write salvaged review: %v", reviewErr, err)
+		}
+		if opts.showCost && result.trace != nil {
+			printReviewCost(result.trace, runtime.ledger)
+		}
+		return fmt.Errorf("%w; incomplete review salvaged%s", reviewErr, reviewSalvageDestination(opts.outputFile))
 	}
 
 	if result.reviewText == "" {
@@ -161,6 +170,10 @@ func runReviewPRCommand(args []string) error {
 }
 
 func runPRReview(ctx context.Context, prRef string, framework *oneshot.Framework) (*reviewCommandResult, *commands.PRInfo, error) {
+	return runPRReviewWithIterationLimit(ctx, prRef, framework, 0)
+}
+
+func runPRReviewWithIterationLimit(ctx context.Context, prRef string, framework *oneshot.Framework, maxIterations int) (*reviewCommandResult, *commands.PRInfo, error) {
 	spinner := terminal.NewSpinner("Fetching PR details...")
 	spinner.Start()
 
@@ -169,6 +182,7 @@ func runPRReview(ctx context.Context, prRef string, framework *oneshot.Framework
 		spinner.StopWithError(err.Error())
 		return nil, nil, fmt.Errorf("assemble PR context: %w", err)
 	}
+	spinner.SetMessage("Running model review...")
 
 	userPrompt := commands.BuildPRPrompt(prCtx)
 	reviewDef := commands.ReviewPRDef{
@@ -178,6 +192,7 @@ func runPRReview(ctx context.Context, prRef string, framework *oneshot.Framework
 		CIProvenance:                prCtx.CIProvenance,
 		RequiresFeedbackDisposition: prCtx.HasReviewFeedback(),
 		RequiredFeedbackIDs:         prCtx.RequiredFeedbackIDs(),
+		MaxIterations:               maxIterations,
 	}
 	fwResult, runErr := framework.RunRLM(ctx, reviewDef, oneshot.RLMRunOpts{
 		UserPrompt: userPrompt,
@@ -190,6 +205,10 @@ func runPRReview(ctx context.Context, prRef string, framework *oneshot.Framework
 
 	if runErr != nil {
 		spinner.StopWithError(runErr.Error())
+		partial := reviewResultFromRLM(fwResult, audit)
+		if strings.TrimSpace(partial.reviewText) != "" {
+			return partial, prCtx.PR, fmt.Errorf("review failed: %w", runErr)
+		}
 		return nil, prCtx.PR, fmt.Errorf("review failed: %w", runErr)
 	}
 	if err := commands.RevalidatePRContext(prCtx); err != nil {

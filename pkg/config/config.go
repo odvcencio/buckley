@@ -143,6 +143,7 @@ type Config struct {
 	WebUI          WebUIConfig          `yaml:"web_ui"`
 	Commenting     CommentingConfig     `yaml:"commenting"`
 	GitEvents      GitEventsConfig      `yaml:"git_events"`
+	Buckbot        BuckbotConfig        `yaml:"buckbot"`
 	Input          InputConfig          `yaml:"input"`
 	Diagnostics    DiagnosticsConfig    `yaml:"diagnostics"`
 	Notify         NotifyConfig         `yaml:"notify"`
@@ -753,4 +754,16 @@ type GitEventsConfig struct {
 	RegressionCommand  string `yaml:"regression_command"`
 	ReleaseCommand     string `yaml:"release_command"`
 	FailureCommand     string `yaml:"failure_command"`
+}
+
+// BuckbotConfig controls automatic pull-request reviews posted through the
+// authenticated gh CLI identity on the host running the daemon.
+type BuckbotConfig struct {
+	Enabled             bool    `yaml:"enabled"`
+	Secret              string  `yaml:"secret"`
+	WebhookBind         string  `yaml:"webhook_bind"`
+	Model               string  `yaml:"model"`
+	PerReviewBudgetUSD  float64 `yaml:"per_review_budget_usd"`
+	MonthlyBudgetUSD    float64 `yaml:"monthly_budget_usd"`
+	MaxReviewIterations int     `yaml:"max_review_iterations"`
 }

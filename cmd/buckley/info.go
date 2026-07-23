@@ -122,12 +122,13 @@ type infoSkills struct {
 }
 
 type infoSkillEntry struct {
-	Name         string   `json:"name"`
-	Description  string   `json:"description"`
-	Source       string   `json:"source"`
-	Path         string   `json:"path,omitempty"`
-	Phase        string   `json:"phase,omitempty"`
-	AllowedTools []string `json:"allowed_tools,omitempty"`
+	Name             string   `json:"name"`
+	Description      string   `json:"description"`
+	Source           string   `json:"source"`
+	Path             string   `json:"path,omitempty"`
+	Phase            string   `json:"phase,omitempty"`
+	AllowedTools     []string `json:"allowed_tools,omitempty"`
+	PreapprovedTools []string `json:"preapproved_tools,omitempty"`
 }
 
 type infoTools struct {
@@ -474,10 +475,8 @@ type inspectedSkills struct {
 
 func inspectSkills() (inspectedSkills, []string) {
 	registry := skill.NewRegistry()
-	diagnostics := []string{}
-	if err := registry.LoadAll(); err != nil {
-		diagnostics = append(diagnostics, fmt.Sprintf("skills partially loaded: %v", err))
-	}
+	_ = registry.LoadAll()
+	diagnostics := registry.Diagnostics()
 	entries := []infoSkillEntry{}
 	bySource := map[string]int{}
 	for _, s := range registry.List() {
@@ -486,13 +485,16 @@ func inspectSkills() (inspectedSkills, []string) {
 		}
 		allowedTools := cleanToolNames(s.AllowedTools)
 		sort.Strings(allowedTools)
+		preapprovedTools := cleanToolNames(s.PreapprovedTools)
+		sort.Strings(preapprovedTools)
 		entries = append(entries, infoSkillEntry{
-			Name:         s.Name,
-			Description:  s.Description,
-			Source:       s.Source,
-			Path:         s.FilePath,
-			Phase:        s.Phase,
-			AllowedTools: allowedTools,
+			Name:             s.Name,
+			Description:      s.Description,
+			Source:           s.Source,
+			Path:             s.FilePath,
+			Phase:            s.Phase,
+			AllowedTools:     allowedTools,
+			PreapprovedTools: preapprovedTools,
 		})
 		bySource[s.Source]++
 	}

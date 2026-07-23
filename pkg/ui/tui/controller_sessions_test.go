@@ -113,6 +113,24 @@ func TestLoadOrCreateControllerSessions_ResumesActiveProjectSessions(t *testing.
 	}
 }
 
+func TestLoadOrCreateControllerSessions_PrefersSessionWithHistory(t *testing.T) {
+	cfg, store, workDir := newControllerSessionTestConfig(t)
+	now := time.Now()
+	createControllerTestSession(t, store, "empty-newer", workDir, storage.SessionStatusActive, now)
+	createControllerTestSession(t, store, "history", workDir, storage.SessionStatusActive, now.Add(-time.Minute))
+	if err := store.SaveMessage(&storage.Message{SessionID: "history", Role: "user", Content: "resume me", Timestamp: now.Add(-time.Minute)}); err != nil {
+		t.Fatalf("SaveMessage: %v", err)
+	}
+
+	sessions, current, err := loadOrCreateControllerSessions(cfg, workDir)
+	if err != nil {
+		t.Fatalf("loadOrCreateControllerSessions: %v", err)
+	}
+	if sessions[current].ID != "history" {
+		t.Fatalf("current session = %q, want history", sessions[current].ID)
+	}
+}
+
 func TestLoadOrCreateControllerSessions_SelectsRequestedActiveSession(t *testing.T) {
 	cfg, store, workDir := newControllerSessionTestConfig(t)
 	cfg.SessionID = "old"
