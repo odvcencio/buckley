@@ -33,6 +33,7 @@ type Request struct {
 	AllowedTools    []string
 	MaxIterations   int
 	Model           string
+	SessionID       string
 }
 
 // Result contains the output from tool runner execution.

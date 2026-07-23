@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"m31labs.dev/buckley/pkg/conversation"
 	"m31labs.dev/buckley/pkg/coordination/security"
 	"m31labs.dev/buckley/pkg/model"
 	"m31labs.dev/buckley/pkg/rules"
@@ -209,12 +210,13 @@ func (a *SubAgent) Execute(ctx context.Context, task string) (*SubAgentResult, e
 		AgentID:   a.id,
 		ModelUsed: a.model,
 	}
+	contextWindow, _ := a.client.GetContextLength(a.model)
 
 	for i := 0; i < a.maxIterations; i++ {
 		req := model.ChatRequest{
-			Model:    a.model,
-			Messages: messages,
-			Tools:    toolDefs,
+			Model:     a.model,
+			Tools:     toolDefs,
+			SessionID: "rlm-subagent-" + a.id,
 			ToolChoice: func() string {
 				if len(toolDefs) == 0 {
 					return "none"
@@ -226,6 +228,7 @@ func (a *SubAgent) Execute(ctx context.Context, task string) (*SubAgentResult, e
 		if a.reasoning != "" {
 			req.Reasoning = &model.ReasoningConfig{Effort: a.reasoning}
 		}
+		req.Messages = conversation.CompactModelMessagesForRequest(messages, req, contextWindow)
 		resp, err := a.client.ChatCompletion(ctx, req)
 		if err != nil {
 			finalizeSubAgentResult(result, start)

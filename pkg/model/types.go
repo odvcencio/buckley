@@ -310,6 +310,28 @@ type CompletionTokenDetails struct {
 	ReasoningTokens int `json:"reasoning_tokens,omitempty"`
 }
 
+// AddUsage combines provider usage without dropping cache or reasoning detail
+// fields when a harness makes several requests for one turn.
+func AddUsage(total Usage, next Usage) Usage {
+	total.PromptTokens += next.PromptTokens
+	total.CompletionTokens += next.CompletionTokens
+	total.TotalTokens += next.TotalTokens
+	total.CacheWriteTokens += next.CacheWriteTokens
+	if next.PromptTokensDetails != nil {
+		if total.PromptTokensDetails == nil {
+			total.PromptTokensDetails = &PromptTokensDetails{}
+		}
+		total.PromptTokensDetails.CachedTokens += next.PromptTokensDetails.CachedTokens
+	}
+	if next.CompletionTokenDetails != nil {
+		if total.CompletionTokenDetails == nil {
+			total.CompletionTokenDetails = &CompletionTokenDetails{}
+		}
+		total.CompletionTokenDetails.ReasoningTokens += next.CompletionTokenDetails.ReasoningTokens
+	}
+	return total
+}
+
 // RequestTokenEstimate describes the approximate model input footprint.
 type RequestTokenEstimate struct {
 	Messages int

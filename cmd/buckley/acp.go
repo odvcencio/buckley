@@ -749,6 +749,11 @@ func buildACPChatRequest(cfg *config.Config, mgr *model.Manager, engine *rules.E
 	if effort := model.ResolveReasoningEffort(cfg, acpReasoningChecker(mgr), engine, modelID, "execution"); effort != "" {
 		req.Reasoning = &model.ReasoningConfig{Effort: effort}
 	}
+	contextWindow := 0
+	if mgr != nil {
+		contextWindow, _ = mgr.GetContextLength(modelID)
+	}
+	req.Messages = conversation.CompactModelMessagesForRequest(req.Messages, req, contextWindow)
 	return req
 }
 

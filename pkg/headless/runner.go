@@ -678,6 +678,11 @@ func (r *Runner) buildChatRequest() model.ChatRequest {
 		include := true
 		req.IncludeReasoning = &include
 	}
+	contextWindow := 0
+	if r.modelManager != nil {
+		contextWindow, _ = r.modelManager.GetContextLength(modelID)
+	}
+	req.Messages = conversation.CompactModelMessagesForRequest(req.Messages, req, contextWindow)
 	return req
 }
 
