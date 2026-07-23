@@ -22,6 +22,7 @@ func TestDefaultConfig(t *testing.T) {
 	}
 	if cfg.Buckbot.Model != "qwen/qwen3.6-flash" ||
 		cfg.Buckbot.CriticModel != "" ||
+		cfg.Buckbot.PerReviewBudgetUSD != 0.15 ||
 		cfg.Buckbot.MaxReviewIterations != 0 ||
 		cfg.Buckbot.MaxValidationAttempts != 2 ||
 		cfg.Buckbot.MaxDiffBytes != 80_000 {

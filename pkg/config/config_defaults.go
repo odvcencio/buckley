@@ -101,7 +101,7 @@ func DefaultConfig() *Config {
 		Buckbot: BuckbotConfig{
 			Model:                 "qwen/qwen3.6-flash",
 			CriticModel:           "",
-			PerReviewBudgetUSD:    0.25,
+			PerReviewBudgetUSD:    0.15,
 			MonthlyBudgetUSD:      25.00,
 			MaxReviewIterations:   0,
 			MaxValidationAttempts: 2,

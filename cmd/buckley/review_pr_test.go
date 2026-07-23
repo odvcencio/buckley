@@ -59,7 +59,7 @@ func TestDefaultAutomatedReviewOptionsAndOverrides(t *testing.T) {
 	cfg := config.DefaultConfig()
 	defaults := defaultAutomatedReviewOptions(cfg)
 	if defaults.maxIterations != 0 || defaults.maxRetries != 2 || defaults.maxDiffBytes != 80_000 ||
-		defaults.maxCostUSD != 0.25 || defaults.criticReserveUSD != 0 || defaults.approvalCritic {
+		defaults.maxCostUSD != 0.15 || defaults.criticReserveUSD != 0 || defaults.approvalCritic {
 		t.Fatalf("defaults = %#v, want Buckbot defaults", defaults)
 	}
 
