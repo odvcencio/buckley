@@ -7,6 +7,40 @@ import (
 	"strings"
 )
 
+func appendReviewVerificationTargets(sb *strings.Builder, changedFiles []string) {
+	targets := reviewVerificationTargets(changedFiles)
+	if sb == nil || len(targets) == 0 {
+		return
+	}
+	sb.WriteString("## Required Local Verification Targets\n\n")
+	sb.WriteString("For an approval, call `run_verification` for both `build` and `test` on every target below. Use the exact language and repository-relative path shown; do not substitute only remote CI.\n\n")
+	for _, target := range targets {
+		sb.WriteString("- ")
+		sb.WriteString(target)
+		sb.WriteString("\n")
+	}
+	sb.WriteString("\n")
+}
+
+func reviewVerificationTargets(changedFiles []string) []string {
+	seen := make(map[string]struct{})
+	for _, file := range changedFiles {
+		file = normalizeReviewEvidencePath(file)
+		language := reviewChangedFileLanguage(file)
+		if file == "" || language == "" {
+			continue
+		}
+		target := language + ": " + filepath.ToSlash(filepath.Dir(file))
+		seen[target] = struct{}{}
+	}
+	targets := make([]string, 0, len(seen))
+	for target := range seen {
+		targets = append(targets, target)
+	}
+	sort.Strings(targets)
+	return targets
+}
+
 func validateReviewEvidenceCoverage(changedFiles []string, evidence []reviewCommandEvidenceDetails) error {
 	required := make(map[string][]string)
 	for _, file := range changedFiles {

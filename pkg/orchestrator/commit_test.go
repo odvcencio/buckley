@@ -144,9 +144,9 @@ func TestCommitGenerator_getUtilityModel(t *testing.T) {
 			expected: config.DefaultUtilityModel,
 		},
 		{
-			name:     "default config uses default utility model",
+			name:     "default config uses default commit model",
 			cfg:      config.DefaultConfig(),
-			expected: config.DefaultUtilityModel,
+			expected: config.DefaultCommitModel,
 		},
 		{
 			name: "custom commit model",

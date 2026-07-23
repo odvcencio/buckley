@@ -18,7 +18,6 @@ import (
 	"m31labs.dev/buckley/pkg/config"
 	"m31labs.dev/buckley/pkg/gitwatcher"
 	"m31labs.dev/buckley/pkg/model"
-	"m31labs.dev/buckley/pkg/oneshot"
 	"m31labs.dev/buckley/pkg/storage"
 	"m31labs.dev/buckley/pkg/transparency"
 )
@@ -290,30 +289,15 @@ func newBuckbotReviewer(botCfg config.BuckbotConfig, costStore *storage.Store) b
 			return "", 0, fmt.Errorf("init dependencies: %w", err)
 		}
 		cfgCopy := *cfg
+		cfgCopy.Buckbot = botCfg
 		cfgCopy.Models.Review = botCfg.Model
 		runtime, err := newReviewCommandRuntime(&cfgCopy, mgr)
 		if err != nil {
 			return "", 0, err
 		}
 		criticModel := strings.TrimSpace(botCfg.CriticModel)
-		if criticModel != "" && criticModel != botCfg.Model {
-			criticRunner := oneshot.NewRLMRunner(oneshot.RLMRunnerConfig{
-				Models:          mgr,
-				Registry:        runtime.registry,
-				Ledger:          runtime.ledger,
-				ModelID:         criticModel,
-				ReasoningEffort: model.ResolveReasoningEffort(&cfgCopy, mgr, nil, criticModel, "review"),
-			})
-			runtime.framework = runtime.framework.WithApprovalCriticRunner(criticRunner)
-		}
 		ref := fmt.Sprintf("https://github.com/%s/pull/%d", event.Repository, event.Number)
-		result, _, reviewErr := runPRReviewWithOptions(ctx, ref, runtime.framework, automatedReviewOptions{
-			maxIterations:    botCfg.MaxReviewIterations,
-			maxRetries:       botCfg.MaxValidationAttempts,
-			maxDiffBytes:     botCfg.MaxDiffBytes,
-			maxCostUSD:       botCfg.PerReviewBudgetUSD,
-			criticReserveUSD: botCfg.PerReviewBudgetUSD * 0.12,
-		})
+		result, _, reviewErr := runPRReviewWithOptions(ctx, ref, runtime.framework, runtime.policy)
 		entries := runtime.ledger.Entries()
 		cost := runtime.ledger.SessionTotal()
 		partialReview := ""

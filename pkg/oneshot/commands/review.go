@@ -19,6 +19,7 @@ import (
 type ReviewBranchDef struct {
 	ChangedFiles      []string
 	ContextIncomplete bool
+	ApprovalCritic    bool
 }
 
 func (ReviewBranchDef) Name() string { return "review" }
@@ -54,7 +55,7 @@ func (d ReviewBranchDef) ValidateRLMExecution(result any, execution *oneshot.RLM
 }
 
 func (d ReviewBranchDef) RequiresApprovalCritic(result any) bool {
-	return reviewResultIsApproved(result)
+	return d.ApprovalCritic && reviewResultIsApproved(result)
 }
 
 func (d ReviewBranchDef) ApprovalCriticSystemPrompt() string {
@@ -111,6 +112,7 @@ type ReviewPRDef struct {
 	RequiresFeedbackDisposition bool
 	RequiredFeedbackIDs         []string
 	MaxIterations               int
+	ApprovalCritic              bool
 }
 
 func (ReviewPRDef) Name() string { return "review-pr" }
@@ -153,6 +155,12 @@ func (d ReviewPRDef) ValidateResult(result any) error {
 }
 
 func (d ReviewPRDef) ValidateRLMExecution(result any, execution *oneshot.RLMResult) error {
+	review, ok := result.(*ReviewRLMResult)
+	if ok && review.Parsed != nil && review.Parsed.Approved &&
+		parseRemoteCIState(d.CIStatus) == VerificationPass &&
+		(d.CIProvenance == prCISourceHead || d.CIProvenance == prCISourceBase) {
+		return nil
+	}
 	return validateReviewExecutionEvidence(result, execution, d.ChangedFiles)
 }
 
@@ -244,7 +252,7 @@ func reviewEvidenceExitCode(value any) (int, bool) {
 }
 
 func (d ReviewPRDef) RequiresApprovalCritic(result any) bool {
-	return reviewResultIsApproved(result)
+	return d.ApprovalCritic && reviewResultIsApproved(result)
 }
 
 func (d ReviewPRDef) ApprovalCriticSystemPrompt() string {

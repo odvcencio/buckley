@@ -23,6 +23,10 @@ func TestParseReviewCommandOptions(t *testing.T) {
 		"-timeout", "12s",
 		"-output", "review.md",
 		"-no-interactive",
+		"-budget", "0.20",
+		"-max-turns", "4",
+		"-max-diff-bytes", "64000",
+		"-max-validation-attempts", "1",
 	})
 	if err != nil {
 		t.Fatalf("parseReviewCommandOptions() error = %v", err)
@@ -61,6 +65,10 @@ func TestParseReviewCommandOptions(t *testing.T) {
 	if opts.interactive {
 		t.Fatal("interactive = true, want false when -no-interactive is set")
 	}
+	if opts.budgetUSD != 0.20 || opts.maxTurns != 4 || opts.maxDiff != 64_000 || opts.maxRetries != 1 {
+		t.Fatalf("budget controls = $%.2f/%d/%d/%d, want $0.20/4/64000/1",
+			opts.budgetUSD, opts.maxTurns, opts.maxDiff, opts.maxRetries)
+	}
 }
 
 func TestResolveReviewModelPrecedence(t *testing.T) {
@@ -82,6 +90,22 @@ func TestResolveReviewModelPrecedence(t *testing.T) {
 	modelOverrideFlag = "override/reviewer"
 	if got := resolveReviewModel(cfg); got != "override/reviewer" {
 		t.Fatalf("resolveReviewModel() with override = %q, want override/reviewer", got)
+	}
+}
+
+func TestResolveReviewModelDefaultsToBuckbot(t *testing.T) {
+	previous := modelOverrideFlag
+	modelOverrideFlag = ""
+	t.Cleanup(func() { modelOverrideFlag = previous })
+	t.Setenv("BUCKLEY_MODEL_REVIEW", "")
+
+	cfg := config.DefaultConfig()
+	cfg.Buckbot.Model = "buckbot/reviewer"
+	cfg.Models.Review = "config/reviewer"
+	cfg.Models.Execution = "config/executor"
+
+	if got := resolveReviewModel(cfg); got != "buckbot/reviewer" {
+		t.Fatalf("resolveReviewModel() = %q, want buckbot/reviewer", got)
 	}
 }
 

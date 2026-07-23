@@ -100,7 +100,7 @@ func DefaultConfig() *Config {
 	return &Config{
 		Buckbot: BuckbotConfig{
 			Model:                 "qwen/qwen3.6-flash",
-			CriticModel:           "moonshotai/kimi-k2.7-code",
+			CriticModel:           "",
 			PerReviewBudgetUSD:    0.25,
 			MonthlyBudgetUSD:      25.00,
 			MaxReviewIterations:   3,
@@ -139,7 +139,7 @@ func DefaultConfig() *Config {
 			},
 			DefaultProvider: "openrouter",
 			Utility: UtilityModelConfig{
-				Commit:     DefaultUtilityModel,
+				Commit:     DefaultCommitModel,
 				PR:         DefaultUtilityModel,
 				Compaction: DefaultUtilityModel,
 				TodoPlan:   DefaultUtilityModel,
