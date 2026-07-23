@@ -170,6 +170,19 @@ func TestSubAgentExplicitLimitStillForcesFinalTurn(t *testing.T) {
 	}
 }
 
+func TestSynthesisBudgetRequiredReservesFinalResponse(t *testing.T) {
+	pricing := model.ModelPricing{Prompt: 0.32, Completion: 1.28}
+	if synthesisBudgetRequired(pricing, 10_000, 0, 0.15) {
+		t.Fatal("synthesis triggered while exploration and final-response reserve still fit")
+	}
+	if !synthesisBudgetRequired(pricing, 10_000, 0.06, 0.15) {
+		t.Fatal("synthesis did not trigger before exploration consumed the final-response reserve")
+	}
+	if synthesisBudgetRequired(pricing, 10_000, 0.06, 0) {
+		t.Fatal("unbudgeted execution should not trigger cost-aware synthesis")
+	}
+}
+
 func TestBuildToolDefinitionsFiltersToAllowedRegistryNames(t *testing.T) {
 	registry := tool.NewRegistry()
 	allowed := map[string]struct{}{

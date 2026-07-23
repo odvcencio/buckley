@@ -18,6 +18,9 @@ import (
 const (
 	defaultSubAgentMaxIterations = 25
 	defaultFinalSynthesisLead    = 90 * time.Second
+	finalSynthesisMinimumTokens  = 2048
+	finalSynthesisBudgetFraction = 0.50
+	budgetEstimateSafetyFactor   = 1.10
 
 	defaultSubAgentPrompt = `You are a Buckley sub-agent executing a specific task delegated by the coordinator.
 
@@ -255,6 +258,11 @@ func (a *SubAgent) Execute(ctx context.Context, task string) (*SubAgentResult, e
 			req.Reasoning = &model.ReasoningConfig{Effort: a.reasoning}
 		}
 		req.Messages = conversation.CompactModelMessagesForRequest(requestMessages, req, contextWindow)
+		if len(req.Tools) > 0 && a.shouldSynthesizeForBudget(req, result) {
+			req.Tools = nil
+			req.ToolChoice = "none"
+			req.Messages = conversation.CompactModelMessagesForRequest(finalSynthesisMessages(messages), req, contextWindow)
+		}
 		if err := a.applyCostBudget(&req, result); err != nil {
 			finalizeSubAgentResult(result, start)
 			return result, err
@@ -345,6 +353,38 @@ func (a *SubAgent) shouldSynthesize(ctx context.Context, iteration, maxIteration
 		lead = proportionalLead
 	}
 	return time.Until(deadline) <= lead
+}
+
+func (a *SubAgent) shouldSynthesizeForBudget(req model.ChatRequest, result *SubAgentResult) bool {
+	if a.maxCostUSD <= 0 || result == nil {
+		return false
+	}
+	pricing, err := a.client.GetPricing(a.model)
+	if err != nil {
+		return false
+	}
+	spent, err := a.client.CalculateCostFromTokens(a.model, result.InputTokens, result.OutputTokens)
+	if err != nil {
+		return false
+	}
+	estimate := model.EstimateRequestTokens(req)
+	return synthesisBudgetRequired(*pricing, estimate.Total, spent, a.maxCostUSD)
+}
+
+func synthesisBudgetRequired(pricing model.ModelPricing, estimatedInputTokens int, spentUSD, maxCostUSD float64) bool {
+	if maxCostUSD <= 0 {
+		return false
+	}
+	remaining := maxCostUSD - spentUSD
+	estimatedInputCost := float64(estimatedInputTokens) * pricing.Prompt / 1_000_000
+	explorationOutputCost := float64(defaultBudgetedCompletionTokens) * pricing.Completion / 1_000_000
+	synthesisOutputCost := float64(finalSynthesisMinimumTokens) * pricing.Completion / 1_000_000
+	synthesisReserve := max(
+		maxCostUSD*finalSynthesisBudgetFraction,
+		estimatedInputCost+synthesisOutputCost,
+	)
+	required := (estimatedInputCost + explorationOutputCost + synthesisReserve) * budgetEstimateSafetyFactor
+	return remaining <= required
 }
 
 func finalSynthesisMessages(messages []model.Message) []model.Message {
