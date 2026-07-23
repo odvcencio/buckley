@@ -30,6 +30,7 @@ type scriptedRLMExecutor struct {
 	traces     []*transparency.Trace
 	providers  []string
 	iterations []int
+	maxCosts   []float64
 }
 
 func (s *scriptedRLMExecutor) Run(_ context.Context, system string, task string, allowedTools []string, opts RLMExecutionOpts) (*RLMResult, error) {
@@ -38,6 +39,7 @@ func (s *scriptedRLMExecutor) Run(_ context.Context, system string, task string,
 	s.tools = append(s.tools, append([]string(nil), allowedTools...))
 	s.snapshots = append(s.snapshots, opts.ReviewSnapshot)
 	s.iterations = append(s.iterations, opts.MaxIterations)
+	s.maxCosts = append(s.maxCosts, opts.MaxCostUSD)
 	if len(s.responses) == 0 {
 		return nil, fmt.Errorf("no scripted response")
 	}
@@ -172,6 +174,82 @@ func TestRunRLMAppliesDefinitionIterationBudget(t *testing.T) {
 	}
 	if len(runner.iterations) != 1 || runner.iterations[0] != 8 {
 		t.Fatalf("iteration budgets = %v, want [8]", runner.iterations)
+	}
+}
+
+func TestRunRLMSharesCostBudgetAcrossRetries(t *testing.T) {
+	runner := &scriptedRLMExecutor{
+		responses: []string{"incomplete", "valid"},
+		traces: []*transparency.Trace{
+			newTestRLMTrace("primary-1", 100, 10, 0.12),
+			newTestRLMTrace("primary-2", 100, 10, 0.02),
+		},
+	}
+	framework := NewFramework(nil, nil).WithRLMRunner(runner)
+
+	_, err := framework.RunRLM(context.Background(), validatingRLMDefinition{}, RLMRunOpts{
+		MaxRetries:               2,
+		MaxCostUSD:               0.20,
+		ApprovalCriticReserveUSD: 0.05,
+	})
+	if err != nil {
+		t.Fatalf("RunRLM() error = %v", err)
+	}
+	assertFloatSliceNear(t, runner.maxCosts, []float64{0.15, 0.03})
+}
+
+func TestRunRLMApprovalCriticReceivesRemainingTotalBudget(t *testing.T) {
+	runner := &scriptedRLMExecutor{
+		responses: []string{"approve", "approve"},
+		traces: []*transparency.Trace{
+			newTestRLMTrace("primary", 100, 10, 0.10),
+			newTestRLMTrace("critic", 100, 10, 0.05),
+		},
+	}
+	framework := NewFramework(nil, nil).WithRLMRunner(runner)
+
+	_, err := framework.RunRLM(context.Background(), criticRLMDefinition{}, RLMRunOpts{
+		MaxRetries:               1,
+		MaxCostUSD:               0.20,
+		ApprovalCriticReserveUSD: 0.05,
+	})
+	if err != nil {
+		t.Fatalf("RunRLM() error = %v", err)
+	}
+	assertFloatSliceNear(t, runner.maxCosts, []float64{0.15, 0.10})
+}
+
+func TestRunRLMUsesDedicatedApprovalCriticRunner(t *testing.T) {
+	primary := &scriptedRLMExecutor{responses: []string{"approve"}}
+	critic := &scriptedRLMExecutor{responses: []string{"request-changes"}}
+	framework := NewFramework(nil, nil).
+		WithRLMRunner(primary).
+		WithApprovalCriticRunner(critic)
+
+	result, err := framework.RunRLM(context.Background(), criticRLMDefinition{}, RLMRunOpts{MaxRetries: 1})
+	if err != nil {
+		t.Fatalf("RunRLM() error = %v", err)
+	}
+	if result.Value != "request-changes" {
+		t.Fatalf("result.Value = %#v, want dedicated critic result", result.Value)
+	}
+	if len(primary.systems) != 1 || primary.systems[0] != "primary reviewer" {
+		t.Fatalf("primary systems = %v", primary.systems)
+	}
+	if len(critic.systems) != 1 || critic.systems[0] != "adversarial critic" {
+		t.Fatalf("critic systems = %v", critic.systems)
+	}
+}
+
+func assertFloatSliceNear(t *testing.T, got, want []float64) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("values = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] < want[i]-0.000001 || got[i] > want[i]+0.000001 {
+			t.Fatalf("values = %v, want %v", got, want)
+		}
 	}
 }
 

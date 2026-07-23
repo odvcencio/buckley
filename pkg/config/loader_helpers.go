@@ -76,6 +76,9 @@ func mergeBuckbotConfig(base, override *Config, raw map[string]any) {
 	if boolFieldSet(raw, "buckbot", "model") {
 		base.Buckbot.Model = override.Buckbot.Model
 	}
+	if boolFieldSet(raw, "buckbot", "critic_model") {
+		base.Buckbot.CriticModel = override.Buckbot.CriticModel
+	}
 	if boolFieldSet(raw, "buckbot", "per_review_budget_usd") {
 		base.Buckbot.PerReviewBudgetUSD = override.Buckbot.PerReviewBudgetUSD
 	}
@@ -84,6 +87,12 @@ func mergeBuckbotConfig(base, override *Config, raw map[string]any) {
 	}
 	if boolFieldSet(raw, "buckbot", "max_review_iterations") {
 		base.Buckbot.MaxReviewIterations = override.Buckbot.MaxReviewIterations
+	}
+	if boolFieldSet(raw, "buckbot", "max_validation_attempts") {
+		base.Buckbot.MaxValidationAttempts = override.Buckbot.MaxValidationAttempts
+	}
+	if boolFieldSet(raw, "buckbot", "max_diff_bytes") {
+		base.Buckbot.MaxDiffBytes = override.Buckbot.MaxDiffBytes
 	}
 }
 

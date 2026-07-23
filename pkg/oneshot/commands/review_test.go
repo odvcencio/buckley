@@ -24,6 +24,18 @@ func TestDefaultBranchContextOptions(t *testing.T) {
 	assert.Empty(t, opts.BaseBranch)
 }
 
+func TestParseReviewAcceptsEquivalentUnbulletedEvidenceLabels(t *testing.T) {
+	review := `## Coverage
+**Feedback disposition**: ` + "`NONE_SUPPLIED`" + ` — no prior feedback was supplied.
+
+## Falsification
+**Conclusion**: DISPROVED (the evidence rules out the failure)
+`
+	parsed := ParseReview(review)
+	assert.Equal(t, FeedbackNoneSupplied, parsed.FeedbackDisposition)
+	assert.Equal(t, FalsificationDisproved, parsed.FalsificationConclusion)
+}
+
 func TestDefaultProjectContextOptions(t *testing.T) {
 	opts := DefaultProjectContextOptions()
 

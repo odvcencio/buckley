@@ -20,9 +20,10 @@ const defaultMaxRetries = 3
 //   - Definition    -> single-tool invoke+retry (commit, PR)
 //   - RLMDefinition -> full RLM sub-agent with multi-turn tool access (review)
 type Framework struct {
-	invoker   ToolInvoker
-	rlmRunner RLMExecutor
-	engine    *rules.Engine
+	invoker              ToolInvoker
+	rlmRunner            RLMExecutor
+	approvalCriticRunner RLMExecutor
+	engine               *rules.Engine
 }
 
 // RLMExecutor runs a multi-turn agent task. Keeping the framework dependent on
@@ -36,6 +37,7 @@ type RLMExecutor interface {
 type RLMExecutionOpts struct {
 	ReviewSnapshot *model.ReviewSnapshot
 	MaxIterations  int
+	MaxCostUSD     float64
 }
 
 // ToolInvoker runs a single tool-shaped one-shot model invocation.
@@ -57,9 +59,21 @@ func NewFramework(invoker ToolInvoker, engine *rules.Engine) *Framework {
 // This enables execution of RLMDefinition-based commands (e.g., review).
 func (f *Framework) WithRLMRunner(runner RLMExecutor) *Framework {
 	return &Framework{
-		invoker:   f.invoker,
-		rlmRunner: runner,
-		engine:    f.engine,
+		invoker:              f.invoker,
+		rlmRunner:            runner,
+		approvalCriticRunner: f.approvalCriticRunner,
+		engine:               f.engine,
+	}
+}
+
+// WithApprovalCriticRunner uses a separately priced model for the independent
+// approval gate while retaining the primary reviewer for all other outcomes.
+func (f *Framework) WithApprovalCriticRunner(runner RLMExecutor) *Framework {
+	return &Framework{
+		invoker:              f.invoker,
+		rlmRunner:            f.rlmRunner,
+		approvalCriticRunner: runner,
+		engine:               f.engine,
 	}
 }
 
@@ -209,6 +223,14 @@ type RLMRunOpts struct {
 	// MaxRetries overrides the Arbiter oneshot policy when non-zero.
 	MaxRetries int
 
+	// MaxCostUSD is a hard best-effort cost ceiling shared by validation
+	// retries and the approval critic. Zero leaves cost unconstrained.
+	MaxCostUSD float64
+
+	// ApprovalCriticReserveUSD protects enough of MaxCostUSD for an
+	// independent approval critic. It is unused for non-approval results.
+	ApprovalCriticReserveUSD float64
+
 	// SnapshotPolicy captures the exact Git state that native review
 	// verification may inspect. It is captured once before the primary pass and
 	// reused unchanged for validation retries and the approval critic.
@@ -272,7 +294,15 @@ func (f *Framework) RunRLM(ctx context.Context, def RLMDefinition, opts RLMRunOp
 		executionOpts.MaxIterations = budget.MaxRLMIterations()
 	}
 
-	primary := f.runValidatedRLMPhase(ctx, def, def.SystemPrompt(), basePrompt, maxRetries, "primary", executionOpts)
+	primaryBudget := opts.MaxCostUSD
+	if primaryBudget > 0 && opts.ApprovalCriticReserveUSD > 0 {
+		primaryBudget -= opts.ApprovalCriticReserveUSD
+		if primaryBudget <= 0 {
+			return result, fmt.Errorf("approval critic reserve $%.4f leaves no primary review budget for %q", opts.ApprovalCriticReserveUSD, def.Name())
+		}
+	}
+	executionOpts.MaxCostUSD = primaryBudget
+	primary := f.runValidatedRLMPhase(ctx, f.rlmRunner, def, def.SystemPrompt(), basePrompt, maxRetries, "primary", executionOpts)
 	result.Attempts = primary.attempts
 	result.PrimaryAttempts = primary.attempts
 	traceAttempts := append([]transparency.TraceAttempt(nil), primary.traces...)
@@ -297,8 +327,21 @@ func (f *Framework) RunRLM(ctx context.Context, def RLMDefinition, opts RLMRunOp
 		result.IncompleteReason = err.Error()
 		return result, fmt.Errorf("build approval critic prompt for %q: %w", def.Name(), err)
 	}
+	if opts.MaxCostUSD > 0 {
+		executionOpts.MaxCostUSD = opts.MaxCostUSD - primary.cost
+		if executionOpts.MaxCostUSD <= 0 {
+			result.Incomplete = true
+			result.IncompleteReason = "review cost budget exhausted before approval critic"
+			return result, fmt.Errorf("%s for %q", result.IncompleteReason, def.Name())
+		}
+	}
+	criticRunner := f.approvalCriticRunner
+	if criticRunner == nil {
+		criticRunner = f.rlmRunner
+	}
 	critic := f.runValidatedRLMPhase(
 		ctx,
+		criticRunner,
 		def,
 		criticDef.ApprovalCriticSystemPrompt(),
 		criticPrompt,
@@ -330,11 +373,13 @@ type rlmPhaseResult struct {
 	value    any
 	traces   []transparency.TraceAttempt
 	attempts int
+	cost     float64
 	err      error
 }
 
 func (f *Framework) runValidatedRLMPhase(
 	ctx context.Context,
+	runner RLMExecutor,
 	def RLMDefinition,
 	systemPrompt string,
 	basePrompt string,
@@ -347,9 +392,18 @@ func (f *Framework) runValidatedRLMPhase(
 	var lastErr error
 
 	for attempt := 0; attempt < maxRetries; attempt++ {
+		attemptOpts := executionOpts
+		if executionOpts.MaxCostUSD > 0 {
+			attemptOpts.MaxCostUSD = executionOpts.MaxCostUSD - result.cost
+			if attemptOpts.MaxCostUSD <= 0 {
+				result.err = fmt.Errorf("RLM %s cost budget exhausted for %q after %d attempts", phase, def.Name(), result.attempts)
+				return result
+			}
+		}
 		result.attempts++
-		rlmResult, err := f.rlmRunner.Run(ctx, systemPrompt, userPrompt, def.AllowedTools(), executionOpts)
+		rlmResult, err := runner.Run(ctx, systemPrompt, userPrompt, def.AllowedTools(), attemptOpts)
 		if rlmResult != nil && rlmResult.Trace != nil {
+			result.cost += rlmResult.Trace.Cost
 			result.traces = append(result.traces, transparency.TraceAttempt{
 				Phase:   phase,
 				Attempt: attempt + 1,

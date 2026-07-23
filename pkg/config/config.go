@@ -759,11 +759,14 @@ type GitEventsConfig struct {
 // BuckbotConfig controls automatic pull-request reviews posted through the
 // authenticated gh CLI identity on the host running the daemon.
 type BuckbotConfig struct {
-	Enabled             bool    `yaml:"enabled"`
-	Secret              string  `yaml:"secret"`
-	WebhookBind         string  `yaml:"webhook_bind"`
-	Model               string  `yaml:"model"`
-	PerReviewBudgetUSD  float64 `yaml:"per_review_budget_usd"`
-	MonthlyBudgetUSD    float64 `yaml:"monthly_budget_usd"`
-	MaxReviewIterations int     `yaml:"max_review_iterations"`
+	Enabled               bool    `yaml:"enabled"`
+	Secret                string  `yaml:"secret"`
+	WebhookBind           string  `yaml:"webhook_bind"`
+	Model                 string  `yaml:"model"`
+	CriticModel           string  `yaml:"critic_model"`
+	PerReviewBudgetUSD    float64 `yaml:"per_review_budget_usd"`
+	MonthlyBudgetUSD      float64 `yaml:"monthly_budget_usd"`
+	MaxReviewIterations   int     `yaml:"max_review_iterations"`
+	MaxValidationAttempts int     `yaml:"max_validation_attempts"`
+	MaxDiffBytes          int     `yaml:"max_diff_bytes"`
 }

@@ -108,6 +108,18 @@ type prContextDependencies struct {
 	run prCommandRunner
 }
 
+// PRContextOptions controls automated-review context limits. Interactive
+// reviews use the larger default; callers with a strict cost envelope can
+// reduce only the diff while retaining metadata, feedback, and CI evidence.
+type PRContextOptions struct {
+	MaxDiffBytes int
+}
+
+// DefaultPRContextOptions returns the full interactive review context budget.
+func DefaultPRContextOptions() PRContextOptions {
+	return PRContextOptions{MaxDiffBytes: diffsignal.ReviewDiffBudget}
+}
+
 type prDiff struct {
 	Text          string
 	Truncated     bool
@@ -130,16 +142,28 @@ type inlineCommentsResult struct {
 
 // AssemblePRContext gathers context for PR review using gh CLI.
 func AssemblePRContext(prRef string) (*PRContext, *transparency.ContextAudit, error) {
-	return assemblePRContext(prRef, prContextDependencies{
+	return AssemblePRContextWithOptions(prRef, DefaultPRContextOptions())
+}
+
+// AssemblePRContextWithOptions gathers PR context with explicit size limits.
+func AssemblePRContextWithOptions(prRef string, opts PRContextOptions) (*PRContext, *transparency.ContextAudit, error) {
+	return assemblePRContextWithOptions(prRef, prContextDependencies{
 		run: defaultPRCommandRunner,
-	})
+	}, opts)
 }
 
 func assemblePRContext(prRef string, deps prContextDependencies) (*PRContext, *transparency.ContextAudit, error) {
+	return assemblePRContextWithOptions(prRef, deps, DefaultPRContextOptions())
+}
+
+func assemblePRContextWithOptions(prRef string, deps prContextDependencies, opts PRContextOptions) (*PRContext, *transparency.ContextAudit, error) {
 	audit := transparency.NewContextAudit()
 	prCtx := &PRContext{}
 	if deps.run == nil {
 		deps.run = defaultPRCommandRunner
+	}
+	if opts.MaxDiffBytes <= 0 {
+		opts.MaxDiffBytes = diffsignal.ReviewDiffBudget
 	}
 
 	target, err := parsePRRef(prRef)
@@ -161,7 +185,7 @@ func assemblePRContext(prRef string, deps prContextDependencies) (*PRContext, *t
 	audit.Add("PR metadata", reviewEstimateTokens(metadata))
 	prCtx.addStatus("PR metadata", "complete", "immutable repository and base/head revisions captured", false)
 
-	diff, err := getPRDiff(deps.run, target)
+	diff, err := getPRDiffWithBudget(deps.run, target, opts.MaxDiffBytes)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to get PR diff: %w", err)
 	}
@@ -1162,6 +1186,10 @@ func getCommitStatuses(run prCommandRunner, host, repository, revision string) (
 }
 
 func getPRDiff(run prCommandRunner, target prReference) (prDiff, error) {
+	return getPRDiffWithBudget(run, target, diffsignal.ReviewDiffBudget)
+}
+
+func getPRDiffWithBudget(run prCommandRunner, target prReference, maxBytes int) (prDiff, error) {
 	args := withPRTarget([]string{"pr", "diff", strconv.Itoa(target.Number)}, target)
 	output, err := run("gh", args...)
 	if err != nil {
@@ -1170,7 +1198,10 @@ func getPRDiff(run prCommandRunner, target prReference) (prDiff, error) {
 
 	// Reserve space for the truncation marker so output stays within budget.
 	const truncMarker = "\n... (truncated)"
-	budget := diffsignal.ReviewDiffBudget - len(truncMarker)
+	if maxBytes <= len(truncMarker) {
+		maxBytes = diffsignal.ReviewDiffBudget
+	}
+	budget := maxBytes - len(truncMarker)
 	res := diffsignal.Prioritize(string(output), budget)
 	diff := res.Context
 	if res.Truncated {

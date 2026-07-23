@@ -21,6 +21,10 @@ type reviewPRCommandOptions struct {
 	timeout    time.Duration
 	outputFile string
 	prRef      string
+	budgetUSD  float64
+	maxTurns   int
+	maxDiff    int
+	maxRetries int
 }
 
 func parseReviewPRCommandOptions(args []string) (reviewPRCommandOptions, error) {
@@ -30,6 +34,10 @@ func parseReviewPRCommandOptions(args []string) (reviewPRCommandOptions, error) 
 	modelFlag := fs.String("model", "", "model to use (default: BUCKLEY_MODEL_REVIEW, models.review, or execution model)")
 	timeout := fs.Duration("timeout", 5*time.Minute, "timeout for model request")
 	outputFile := fs.String("output", "", "write review to file instead of stdout")
+	budgetUSD := fs.Float64("budget", 0, "maximum model spend in USD (0 = unlimited)")
+	maxTurns := fs.Int("max-turns", 0, "maximum model turns per review pass")
+	maxDiff := fs.Int("max-diff-bytes", 0, "maximum prioritized diff bytes (0 = default)")
+	maxRetries := fs.Int("max-validation-attempts", 0, "maximum schema-validation attempts")
 
 	if err := fs.Parse(interspersedReviewPRArgs(args)); err != nil {
 		return reviewPRCommandOptions{}, err
@@ -45,6 +53,10 @@ func parseReviewPRCommandOptions(args []string) (reviewPRCommandOptions, error) 
 		timeout:    *timeout,
 		outputFile: *outputFile,
 		prRef:      fs.Arg(0),
+		budgetUSD:  *budgetUSD,
+		maxTurns:   *maxTurns,
+		maxDiff:    *maxDiff,
+		maxRetries: *maxRetries,
 	}, nil
 }
 
@@ -88,7 +100,7 @@ func reviewPRFlagName(arg string) (string, bool) {
 
 func reviewPRFlagTakesValue(name string) bool {
 	switch name {
-	case "model", "timeout", "output":
+	case "model", "timeout", "output", "budget", "max-turns", "max-diff-bytes", "max-validation-attempts":
 		return true
 	default:
 		return false
@@ -133,7 +145,12 @@ func runReviewPRCommand(args []string) error {
 		termOut.Dim("Reviewing PR: %s", opts.prRef)
 	}
 
-	result, prInfo, reviewErr := runPRReview(ctx, opts.prRef, runtime.framework)
+	result, prInfo, reviewErr := runPRReviewWithOptions(ctx, opts.prRef, runtime.framework, automatedReviewOptions{
+		maxIterations: opts.maxTurns,
+		maxRetries:    opts.maxRetries,
+		maxDiffBytes:  opts.maxDiff,
+		maxCostUSD:    opts.budgetUSD,
+	})
 
 	if opts.verbose && result != nil && result.contextAudit != nil {
 		printReviewContextAudit(result.contextAudit)
@@ -174,10 +191,26 @@ func runPRReview(ctx context.Context, prRef string, framework *oneshot.Framework
 }
 
 func runPRReviewWithIterationLimit(ctx context.Context, prRef string, framework *oneshot.Framework, maxIterations int) (*reviewCommandResult, *commands.PRInfo, error) {
+	return runPRReviewWithOptions(ctx, prRef, framework, automatedReviewOptions{maxIterations: maxIterations})
+}
+
+type automatedReviewOptions struct {
+	maxIterations    int
+	maxRetries       int
+	maxDiffBytes     int
+	maxCostUSD       float64
+	criticReserveUSD float64
+}
+
+func runPRReviewWithOptions(ctx context.Context, prRef string, framework *oneshot.Framework, opts automatedReviewOptions) (*reviewCommandResult, *commands.PRInfo, error) {
 	spinner := terminal.NewSpinner("Fetching PR details...")
 	spinner.Start()
 
-	prCtx, audit, err := commands.AssemblePRContext(prRef)
+	contextOpts := commands.DefaultPRContextOptions()
+	if opts.maxDiffBytes > 0 {
+		contextOpts.MaxDiffBytes = opts.maxDiffBytes
+	}
+	prCtx, audit, err := commands.AssemblePRContextWithOptions(prRef, contextOpts)
 	if err != nil {
 		spinner.StopWithError(err.Error())
 		return nil, nil, fmt.Errorf("assemble PR context: %w", err)
@@ -192,11 +225,14 @@ func runPRReviewWithIterationLimit(ctx context.Context, prRef string, framework 
 		CIProvenance:                prCtx.CIProvenance,
 		RequiresFeedbackDisposition: prCtx.HasReviewFeedback(),
 		RequiredFeedbackIDs:         prCtx.RequiredFeedbackIDs(),
-		MaxIterations:               maxIterations,
+		MaxIterations:               opts.maxIterations,
 	}
 	fwResult, runErr := framework.RunRLM(ctx, reviewDef, oneshot.RLMRunOpts{
-		UserPrompt: userPrompt,
-		Audit:      audit,
+		UserPrompt:               userPrompt,
+		Audit:                    audit,
+		MaxRetries:               opts.maxRetries,
+		MaxCostUSD:               opts.maxCostUSD,
+		ApprovalCriticReserveUSD: opts.criticReserveUSD,
 		SnapshotPolicy: model.ReviewSnapshotPolicy{
 			Mode:           model.ReviewSnapshotHead,
 			ExpectedCommit: prCtx.PR.HeadSHA,

@@ -351,7 +351,7 @@ func parseRemoteCIState(value string) VerificationState {
 }
 
 func parseFalsificationConclusion(section string) FalsificationConclusion {
-	re := regexp.MustCompile("(?mi)^\\s*-\\s+\\*\\*Conclusion\\*\\*:\\s*`?(PROVED|DISPROVED|UNRESOLVED)`?\\.?\\s*$")
+	re := regexp.MustCompile("(?mi)^\\s*(?:-\\s+)?\\*\\*Conclusion\\*\\*:\\s*`?(PROVED|DISPROVED|UNRESOLVED)`?(?:\\s*[.—:(-].*)?\\s*$")
 	matches := re.FindStringSubmatch(section)
 	if len(matches) < 2 {
 		return ""
@@ -367,14 +367,15 @@ func parseCoverageLedger(section string) ([]CoverageEntry, FeedbackDisposition, 
 
 	for _, rawLine := range strings.Split(section, "\n") {
 		line := strings.TrimSpace(rawLine)
-		lower := strings.ToLower(line)
-		const filePrefix = "- **file**:"
-		const feedbackPrefix = "- **feedback disposition**:"
-		const feedbackEntryPrefix = "- **feedback**:"
+		normalized := strings.TrimSpace(strings.TrimPrefix(line, "-"))
+		lower := strings.ToLower(normalized)
+		const filePrefix = "**file**:"
+		const feedbackPrefix = "**feedback disposition**:"
+		const feedbackEntryPrefix = "**feedback**:"
 
 		switch {
 		case strings.HasPrefix(lower, filePrefix):
-			rest := strings.TrimSpace(line[len(filePrefix):])
+			rest := strings.TrimSpace(normalized[len(filePrefix):])
 			if !strings.HasPrefix(rest, "`") {
 				continue
 			}
@@ -388,7 +389,7 @@ func parseCoverageLedger(section string) ([]CoverageEntry, FeedbackDisposition, 
 			entries = append(entries, CoverageEntry{Path: rawPath, Evidence: evidence})
 
 		case strings.HasPrefix(lower, feedbackPrefix):
-			rest := strings.TrimSpace(line[len(feedbackPrefix):])
+			rest := strings.TrimSpace(normalized[len(feedbackPrefix):])
 			status, details := parseFeedbackDisposition(rest)
 			if status != "" {
 				disposition = status
@@ -396,7 +397,7 @@ func parseCoverageLedger(section string) ([]CoverageEntry, FeedbackDisposition, 
 			}
 
 		case strings.HasPrefix(lower, feedbackEntryPrefix):
-			rest := strings.TrimSpace(line[len(feedbackEntryPrefix):])
+			rest := strings.TrimSpace(normalized[len(feedbackEntryPrefix):])
 			if entry, ok := parseFeedbackEntry(rest); ok {
 				feedbackEntries = append(feedbackEntries, entry)
 			}

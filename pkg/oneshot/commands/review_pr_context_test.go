@@ -1091,6 +1091,25 @@ func TestEnterprisePRURLTargetsEveryGitHubOperation(t *testing.T) {
 	}
 }
 
+func TestGetPRDiffWithBudgetBoundsAutomatedContext(t *testing.T) {
+	run := func(name string, args ...string) ([]byte, error) {
+		return []byte(strings.Repeat("+changed line\n", 100)), nil
+	}
+	diff, err := getPRDiffWithBudget(run, prReference{Number: 7}, 160)
+	if err != nil {
+		t.Fatalf("getPRDiffWithBudget() error = %v", err)
+	}
+	if !diff.Truncated {
+		t.Fatal("getPRDiffWithBudget() did not report truncation")
+	}
+	if len(diff.Text) > 160 {
+		t.Fatalf("bounded diff length = %d, want <= 160", len(diff.Text))
+	}
+	if !strings.Contains(diff.Text, "... (truncated)") {
+		t.Fatalf("bounded diff omitted truncation marker: %q", diff.Text)
+	}
+}
+
 func TestParsePRRef_NumericKeepsCurrentRepository(t *testing.T) {
 	target, err := parsePRRef("208")
 	if err != nil {

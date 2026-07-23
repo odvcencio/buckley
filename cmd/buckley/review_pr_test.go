@@ -15,6 +15,10 @@ func TestParseReviewPRCommandOptions(t *testing.T) {
 		"-model", "test/reviewer",
 		"-timeout", "30s",
 		"-output", "review.md",
+		"-budget", "0.25",
+		"-max-turns", "3",
+		"-max-diff-bytes", "80000",
+		"-max-validation-attempts", "2",
 		"https://github.com/owner/repo/pull/123",
 	})
 	if err != nil {
@@ -35,6 +39,10 @@ func TestParseReviewPRCommandOptions(t *testing.T) {
 	}
 	if opts.outputFile != "review.md" {
 		t.Fatalf("outputFile = %q, want review.md", opts.outputFile)
+	}
+	if opts.budgetUSD != 0.25 || opts.maxTurns != 3 || opts.maxDiff != 80_000 || opts.maxRetries != 2 {
+		t.Fatalf("budget controls = $%.2f/%d/%d/%d, want $0.25/3/80000/2",
+			opts.budgetUSD, opts.maxTurns, opts.maxDiff, opts.maxRetries)
 	}
 	if opts.prRef != "https://github.com/owner/repo/pull/123" {
 		t.Fatalf("prRef = %q, want PR URL", opts.prRef)
