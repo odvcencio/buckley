@@ -768,6 +768,7 @@ type BuckbotConfig struct {
 	WebhookBind           string  `yaml:"webhook_bind"`
 	Model                 string  `yaml:"model"`
 	CriticModel           string  `yaml:"critic_model"`
+	Reasoning             string  `yaml:"reasoning"`
 	PerReviewBudgetUSD    float64 `yaml:"per_review_budget_usd"`
 	MonthlyBudgetUSD      float64 `yaml:"monthly_budget_usd"`
 	MaxReviewIterations   int     `yaml:"max_review_iterations"`

@@ -22,15 +22,19 @@ func (p partialRLMExecutor) Run(context.Context, string, string, []string, RLMEx
 }
 
 type scriptedRLMExecutor struct {
-	responses  []string
-	systems    []string
-	prompts    []string
-	tools      [][]string
-	snapshots  []*model.ReviewSnapshot
-	traces     []*transparency.Trace
-	providers  []string
-	iterations []int
-	maxCosts   []float64
+	responses    []string
+	systems      []string
+	prompts      []string
+	tools        [][]string
+	snapshots    []*model.ReviewSnapshot
+	traces       []*transparency.Trace
+	providers    []string
+	iterations   []int
+	toolLimits   []int
+	exploration  []time.Duration
+	synthesis    []time.Duration
+	verification []time.Duration
+	maxCosts     []float64
 }
 
 func (s *scriptedRLMExecutor) Run(_ context.Context, system string, task string, allowedTools []string, opts RLMExecutionOpts) (*RLMResult, error) {
@@ -39,6 +43,10 @@ func (s *scriptedRLMExecutor) Run(_ context.Context, system string, task string,
 	s.tools = append(s.tools, append([]string(nil), allowedTools...))
 	s.snapshots = append(s.snapshots, opts.ReviewSnapshot)
 	s.iterations = append(s.iterations, opts.MaxIterations)
+	s.toolLimits = append(s.toolLimits, opts.MaxToolCalls)
+	s.exploration = append(s.exploration, opts.ExplorationTimeout)
+	s.synthesis = append(s.synthesis, opts.SynthesisLead)
+	s.verification = append(s.verification, opts.VerificationTimeout)
 	s.maxCosts = append(s.maxCosts, opts.MaxCostUSD)
 	if len(s.responses) == 0 {
 		return nil, fmt.Errorf("no scripted response")
@@ -187,6 +195,33 @@ func TestRunRLMAppliesCallerIterationBudget(t *testing.T) {
 	}
 	if len(runner.iterations) != 1 || runner.iterations[0] != 3 {
 		t.Fatalf("iteration budgets = %v, want [3]", runner.iterations)
+	}
+}
+
+func TestRunRLMPropagatesBoundedReviewPlan(t *testing.T) {
+	runner := &scriptedRLMExecutor{responses: []string{"valid"}}
+	framework := NewFramework(nil, nil).WithRLMRunner(runner)
+	if _, err := framework.RunRLM(context.Background(), validatingRLMDefinition{}, RLMRunOpts{
+		MaxRetries:          1,
+		MaxIterations:       8,
+		MaxToolCalls:        12,
+		ExplorationTimeout:  3 * time.Minute,
+		SynthesisLead:       75 * time.Second,
+		VerificationTimeout: 90 * time.Second,
+	}); err != nil {
+		t.Fatalf("RunRLM() error = %v", err)
+	}
+	if len(runner.toolLimits) != 1 || runner.toolLimits[0] != 12 {
+		t.Fatalf("tool limits = %v, want [12]", runner.toolLimits)
+	}
+	if len(runner.exploration) != 1 || runner.exploration[0] != 3*time.Minute {
+		t.Fatalf("exploration limits = %v, want [3m]", runner.exploration)
+	}
+	if len(runner.synthesis) != 1 || runner.synthesis[0] != 75*time.Second {
+		t.Fatalf("synthesis reserves = %v, want [75s]", runner.synthesis)
+	}
+	if len(runner.verification) != 1 || runner.verification[0] != 90*time.Second {
+		t.Fatalf("verification limits = %v, want [90s]", runner.verification)
 	}
 }
 

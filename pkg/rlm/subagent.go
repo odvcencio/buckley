@@ -3,6 +3,7 @@ package rlm
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -64,18 +65,20 @@ Keep summaries under 200 words - the coordinator only sees this summary, not you
 
 // SubAgent executes delegated tasks with tool access.
 type SubAgent struct {
-	id             string
-	model          string
-	systemPrompt   string
-	reasoning      string
-	maxIterations  int
-	maxCostUSD     float64
-	adaptive       bool
-	synthesisLead  time.Duration
-	allowedTools   map[string]struct{}
-	readOnly       bool
-	reviewSnapshot *model.ReviewSnapshot
-	toolTier       string
+	id                 string
+	model              string
+	systemPrompt       string
+	reasoning          string
+	maxIterations      int
+	maxToolCalls       int
+	maxCostUSD         float64
+	adaptive           bool
+	explorationTimeout time.Duration
+	synthesisLead      time.Duration
+	allowedTools       map[string]struct{}
+	readOnly           bool
+	reviewSnapshot     *model.ReviewSnapshot
+	toolTier           string
 
 	client     *model.Manager
 	registry   *tool.Registry
@@ -87,17 +90,19 @@ type SubAgent struct {
 
 // SubAgentConfig configures a sub-agent execution.
 type SubAgentConfig struct {
-	ID             string
-	Model          string
-	Reasoning      string
-	SystemPrompt   string
-	MaxIterations  int
-	MaxCostUSD     float64
-	Adaptive       bool
-	SynthesisLead  time.Duration
-	AllowedTools   []string
-	ReviewSnapshot *model.ReviewSnapshot
-	ToolTier       string // role_permissions tier for runtime validation
+	ID                 string
+	Model              string
+	Reasoning          string
+	SystemPrompt       string
+	MaxIterations      int
+	MaxToolCalls       int
+	MaxCostUSD         float64
+	Adaptive           bool
+	ExplorationTimeout time.Duration
+	SynthesisLead      time.Duration
+	AllowedTools       []string
+	ReviewSnapshot     *model.ReviewSnapshot
+	ToolTier           string // role_permissions tier for runtime validation
 }
 
 // SubAgentInstanceConfig preserves the merged oneshot runner API.
@@ -178,24 +183,26 @@ func NewSubAgent(cfg SubAgentConfig, deps SubAgentDeps) (*SubAgent, error) {
 	}
 
 	return &SubAgent{
-		id:             cfg.ID,
-		model:          cfg.Model,
-		systemPrompt:   prompt,
-		reasoning:      normalizeSubAgentReasoning(cfg.Reasoning),
-		maxIterations:  maxIterations,
-		maxCostUSD:     cfg.MaxCostUSD,
-		adaptive:       cfg.Adaptive,
-		synthesisLead:  synthesisLead,
-		allowedTools:   allowedTools,
-		readOnly:       isReadOnlyToolSet(cfg.AllowedTools) || cfg.ReviewSnapshot != nil,
-		reviewSnapshot: cfg.ReviewSnapshot,
-		toolTier:       cfg.ToolTier,
-		client:         deps.Models,
-		registry:       deps.Registry,
-		scratchpad:     deps.Scratchpad,
-		conflicts:      deps.Conflicts,
-		approver:       deps.Approver,
-		engine:         deps.Engine,
+		id:                 cfg.ID,
+		model:              cfg.Model,
+		systemPrompt:       prompt,
+		reasoning:          normalizeSubAgentReasoning(cfg.Reasoning),
+		maxIterations:      maxIterations,
+		maxToolCalls:       cfg.MaxToolCalls,
+		maxCostUSD:         cfg.MaxCostUSD,
+		adaptive:           cfg.Adaptive,
+		explorationTimeout: cfg.ExplorationTimeout,
+		synthesisLead:      synthesisLead,
+		allowedTools:       allowedTools,
+		readOnly:           isReadOnlyToolSet(cfg.AllowedTools) || cfg.ReviewSnapshot != nil,
+		reviewSnapshot:     cfg.ReviewSnapshot,
+		toolTier:           cfg.ToolTier,
+		client:             deps.Models,
+		registry:           deps.Registry,
+		scratchpad:         deps.Scratchpad,
+		conflicts:          deps.Conflicts,
+		approver:           deps.Approver,
+		engine:             deps.Engine,
 	}, nil
 }
 
@@ -248,7 +255,7 @@ func (a *SubAgent) Execute(ctx context.Context, task string) (*SubAgentResult, e
 			}(),
 		}
 		requestMessages := messages
-		if a.shouldSynthesize(ctx, i, maxIterations, start) {
+		if a.shouldSynthesize(ctx, i, maxIterations, start) || a.toolBudgetExhausted(result) {
 			req.Tools = nil
 			req.ToolChoice = "none"
 			requestMessages = finalSynthesisMessages(messages)
@@ -267,8 +274,23 @@ func (a *SubAgent) Execute(ctx context.Context, task string) (*SubAgentResult, e
 			finalizeSubAgentResult(result, start)
 			return result, err
 		}
-		resp, err := a.client.ChatCompletion(ctx, req)
+		requestCtx, cancelRequest := context.WithCancel(ctx)
+		exploring := len(req.Tools) > 0
+		if exploring {
+			cancelRequest()
+			requestCtx, cancelRequest = a.explorationContext(ctx, start)
+		}
+		resp, err := awaitChatCompletion(requestCtx, func() (*model.ChatResponse, error) {
+			return a.client.ChatCompletion(requestCtx, req)
+		})
+		explorationDeadlineReached := exploring &&
+			errors.Is(err, context.DeadlineExceeded) &&
+			ctx.Err() == nil
+		cancelRequest()
 		if err != nil {
+			if explorationDeadlineReached {
+				continue
+			}
 			finalizeSubAgentResult(result, start)
 			return result, err
 		}
@@ -289,7 +311,9 @@ func (a *SubAgent) Execute(ctx context.Context, task string) (*SubAgentResult, e
 		choice := resp.Choices[0]
 
 		if len(choice.Message.ToolCalls) > 0 {
-			toolResults, err := a.executeTools(ctx, choice.Message.ToolCalls, allowedRegistry, allowedSet, result)
+			toolCtx, cancelTools := a.explorationContext(ctx, start)
+			toolResults, err := a.executeTools(toolCtx, choice.Message.ToolCalls, allowedRegistry, allowedSet, result)
+			cancelTools()
 			if err != nil {
 				finalizeSubAgentResult(result, start)
 				return result, err
@@ -341,6 +365,9 @@ func (a *SubAgent) shouldSynthesize(ctx context.Context, iteration, maxIteration
 	if maxIterations > 0 && iteration == maxIterations-1 {
 		return true
 	}
+	if a.adaptive && a.explorationTimeout > 0 && time.Since(startedAt) >= a.explorationTimeout {
+		return true
+	}
 	if !a.adaptive || a.synthesisLead <= 0 {
 		return false
 	}
@@ -348,11 +375,63 @@ func (a *SubAgent) shouldSynthesize(ctx context.Context, iteration, maxIteration
 	if !ok {
 		return false
 	}
+	lead := a.effectiveSynthesisLead(deadline, startedAt)
+	return time.Until(deadline) <= lead
+}
+
+func (a *SubAgent) effectiveSynthesisLead(deadline, startedAt time.Time) time.Duration {
 	lead := a.synthesisLead
 	if proportionalLead := deadline.Sub(startedAt) / 3; proportionalLead < lead {
 		lead = proportionalLead
 	}
-	return time.Until(deadline) <= lead
+	return lead
+}
+
+func (a *SubAgent) explorationContext(ctx context.Context, startedAt time.Time) (context.Context, context.CancelFunc) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if !a.adaptive || a.synthesisLead <= 0 {
+		return context.WithCancel(ctx)
+	}
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return context.WithCancel(ctx)
+	}
+	toolDeadline := deadline.Add(-a.effectiveSynthesisLead(deadline, startedAt))
+	if a.explorationTimeout > 0 {
+		explorationDeadline := startedAt.Add(a.explorationTimeout)
+		if explorationDeadline.Before(toolDeadline) {
+			toolDeadline = explorationDeadline
+		}
+	}
+	return context.WithDeadline(ctx, toolDeadline)
+}
+
+type chatCompletionResult struct {
+	response *model.ChatResponse
+	err      error
+}
+
+func awaitChatCompletion(ctx context.Context, complete func() (*model.ChatResponse, error)) (*model.ChatResponse, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	completed := make(chan chatCompletionResult, 1)
+	go func() {
+		response, err := complete()
+		completed <- chatCompletionResult{response: response, err: err}
+	}()
+	select {
+	case result := <-completed:
+		return result.response, result.err
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+func (a *SubAgent) toolBudgetExhausted(result *SubAgentResult) bool {
+	return a.maxToolCalls > 0 && result != nil && len(result.ToolCalls) >= a.maxToolCalls
 }
 
 func (a *SubAgent) shouldSynthesizeForBudget(req model.ChatRequest, result *SubAgentResult) bool {
@@ -543,6 +622,17 @@ func (a *SubAgent) executeTools(ctx context.Context, calls []model.ToolCall, reg
 		}
 		if _, ok := allowed[name]; !ok {
 			return nil, fmt.Errorf("tool not allowed: %s", name)
+		}
+		if a.maxToolCalls > 0 && len(result.ToolCalls) >= a.maxToolCalls {
+			toolCall := SubAgentToolCall{
+				ID:        call.ID,
+				Name:      name,
+				Arguments: call.Function.Arguments,
+				Result:    fmt.Sprintf("tool call budget exhausted after %d calls; synthesize the final answer from completed evidence", a.maxToolCalls),
+				Success:   false,
+			}
+			toolResults = append(toolResults, toolCall)
+			continue
 		}
 		if a.approver != nil {
 			if err := a.approver.CheckToolAccess(ctx, name); err != nil {

@@ -113,7 +113,12 @@ func (r *RLMRunner) Run(ctx context.Context, systemPrompt, task string, allowedT
 				cleanupSnapshot()
 				return nil, fmt.Errorf("resolve API review snapshot root: %w", rootErr)
 			}
-			agentRegistry, err = newReviewSnapshotRegistry(snapshotRoot, allowedTools, r.models.ReviewSandboxCommand())
+			agentRegistry, err = newReviewSnapshotRegistryWithLimits(
+				snapshotRoot,
+				allowedTools,
+				opts.VerificationTimeout,
+				r.models.ReviewSandboxCommand(),
+			)
 			if err != nil {
 				cleanupSnapshot()
 				return nil, err
@@ -124,15 +129,18 @@ func (r *RLMRunner) Run(ctx context.Context, systemPrompt, task string, allowedT
 
 	// Create sub-agent configuration
 	agentCfg := rlm.SubAgentInstanceConfig{
-		ID:             fmt.Sprintf("oneshot-%d", time.Now().UnixNano()),
-		Model:          modelToUse,
-		Reasoning:      r.reasoning,
-		SystemPrompt:   systemPrompt,
-		MaxIterations:  opts.MaxIterations,
-		MaxCostUSD:     opts.MaxCostUSD,
-		Adaptive:       opts.MaxIterations <= 0,
-		AllowedTools:   allowedTools,
-		ReviewSnapshot: opts.ReviewSnapshot,
+		ID:                 fmt.Sprintf("oneshot-%d", time.Now().UnixNano()),
+		Model:              modelToUse,
+		Reasoning:          r.reasoning,
+		SystemPrompt:       systemPrompt,
+		MaxIterations:      opts.MaxIterations,
+		MaxToolCalls:       opts.MaxToolCalls,
+		MaxCostUSD:         opts.MaxCostUSD,
+		Adaptive:           opts.MaxIterations <= 0 || opts.SynthesisLead > 0,
+		ExplorationTimeout: opts.ExplorationTimeout,
+		SynthesisLead:      opts.SynthesisLead,
+		AllowedTools:       allowedTools,
+		ReviewSnapshot:     opts.ReviewSnapshot,
 	}
 
 	// Create sub-agent with full tool access
@@ -293,6 +301,10 @@ func salvageText(value string, limit int) string {
 }
 
 func newReviewSnapshotRegistry(root string, allowedTools []string, codexCommand ...string) (*tool.Registry, error) {
+	return newReviewSnapshotRegistryWithLimits(root, allowedTools, 0, codexCommand...)
+}
+
+func newReviewSnapshotRegistryWithLimits(root string, allowedTools []string, verificationTimeout time.Duration, codexCommand ...string) (*tool.Registry, error) {
 	allowed := make(map[string]struct{}, len(allowedTools))
 	for _, name := range allowedTools {
 		name = strings.TrimSpace(name)
@@ -316,6 +328,9 @@ func newReviewSnapshotRegistry(root string, allowedTools []string, codexCommand 
 		verification, err := builtin.NewRunVerificationTool(root, codexCommand...)
 		if err != nil {
 			return nil, fmt.Errorf("create sealed review verification tool: %w", err)
+		}
+		if verificationTimeout > 0 {
+			verification.SetTimeoutLimit(verificationTimeout)
 		}
 		registry.Register(verification)
 		registry.SetToolKind(verification.Name(), "execute")

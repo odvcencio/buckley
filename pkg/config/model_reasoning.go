@@ -20,7 +20,7 @@ func SplitReasoningSuffix(modelID string) (string, string) {
 		return "", ""
 	}
 	lower := strings.ToLower(modelID)
-	if !strings.Contains(lower, "gpt-5") {
+	if !strings.Contains(lower, "gpt-5") && !strings.HasPrefix(lower, "qwen/qwen3.7-plus-") {
 		return modelID, ""
 	}
 	for _, candidate := range reasoningSuffixes {

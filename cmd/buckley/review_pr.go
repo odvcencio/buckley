@@ -12,6 +12,7 @@ import (
 	"m31labs.dev/buckley/pkg/model"
 	"m31labs.dev/buckley/pkg/oneshot"
 	"m31labs.dev/buckley/pkg/oneshot/commands"
+	"m31labs.dev/buckley/pkg/rules"
 	"m31labs.dev/buckley/pkg/terminal"
 )
 
@@ -35,7 +36,7 @@ func parseReviewPRCommandOptions(args []string) (reviewPRCommandOptions, error) 
 	showCost := fs.Bool("cost", true, "show token/cost breakdown")
 	modelFlag := fs.String("model", "", "model to use (default: BUCKLEY_MODEL_REVIEW or buckbot.model)")
 	criticModel := fs.String("critic-model", "", "opt-in approval critic model for large or business-critical reviews")
-	timeout := fs.Duration("timeout", 5*time.Minute, "timeout for model request")
+	timeout := fs.Duration("timeout", defaultReviewTimeout, "total review timeout")
 	outputFile := fs.String("output", "", "write review to file instead of stdout")
 	budgetUSD := fs.Float64("budget", 0, "maximum model spend in USD (0 = Buckbot default)")
 	maxTurns := fs.Int("max-turns", 0, "hard model turn limit per review pass (0 = adaptive)")
@@ -203,12 +204,18 @@ func runPRReviewWithIterationLimit(ctx context.Context, prRef string, framework 
 }
 
 type automatedReviewOptions struct {
-	maxIterations    int
-	maxRetries       int
-	maxDiffBytes     int
-	maxCostUSD       float64
-	criticReserveUSD float64
-	approvalCritic   bool
+	maxIterations       int
+	maxToolCalls        int
+	maxRetries          int
+	maxDiffBytes        int
+	maxCostUSD          float64
+	criticReserveUSD    float64
+	approvalCritic      bool
+	verificationTimeout time.Duration
+	explorationTimeout  time.Duration
+	synthesisLead       time.Duration
+	sizeClass           string
+	engine              *rules.Engine
 }
 
 func defaultAutomatedReviewOptions(cfg *config.Config) automatedReviewOptions {
@@ -262,7 +269,14 @@ func runPRReviewWithOptions(ctx context.Context, prRef string, framework *onesho
 	}
 	spinner.SetMessage("Running model review...")
 
-	userPrompt := commands.BuildPRPrompt(prCtx)
+	plan := resolveReviewExecutionPlan(opts.engine, rules.ReviewPlanFacts{
+		FileCount:         len(prCtx.Files),
+		DiffBytes:         len(prCtx.Diff),
+		ContextIncomplete: prCtx.HasIncompleteContext(),
+		HasFeedback:       prCtx.HasReviewFeedback(),
+	})
+	opts = opts.withExecutionPlan(plan)
+	userPrompt := appendReviewExecutionPlan(commands.BuildPRPrompt(prCtx), opts)
 	reviewDef := commands.ReviewPRDef{
 		ChangedFiles:                prCtx.Files,
 		ContextIncomplete:           prCtx.HasIncompleteContext(),
@@ -277,8 +291,13 @@ func runPRReviewWithOptions(ctx context.Context, prRef string, framework *onesho
 		UserPrompt:               userPrompt,
 		Audit:                    audit,
 		MaxRetries:               opts.maxRetries,
+		MaxIterations:            opts.maxIterations,
+		MaxToolCalls:             opts.maxToolCalls,
 		MaxCostUSD:               opts.maxCostUSD,
 		ApprovalCriticReserveUSD: opts.criticReserveUSD,
+		ExplorationTimeout:       opts.explorationTimeout,
+		SynthesisLead:            opts.synthesisLead,
+		VerificationTimeout:      opts.verificationTimeout,
 		SnapshotPolicy: model.ReviewSnapshotPolicy{
 			Mode:           model.ReviewSnapshotHead,
 			ExpectedCommit: prCtx.PR.HeadSHA,

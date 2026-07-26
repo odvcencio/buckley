@@ -33,7 +33,7 @@ type buckbotPoster func(context.Context, gitwatcher.PullRequestEvent, string) er
 type buckbotSalvager func(gitwatcher.PullRequestEvent, string, error) (string, error)
 
 const (
-	buckbotReviewAttemptTimeout = 5 * time.Minute
+	buckbotReviewAttemptTimeout = defaultReviewTimeout
 	buckbotPostAttemptTimeout   = time.Minute
 	buckbotInitialRetryDelay    = 15 * time.Second
 	buckbotMaxRetryDelay        = 5 * time.Minute

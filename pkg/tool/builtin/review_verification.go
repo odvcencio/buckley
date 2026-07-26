@@ -20,6 +20,7 @@ type RunVerificationTool struct {
 	codexCommand   string
 	verifier       reviewsandbox.Verifier
 	maxOutputBytes int
+	timeoutLimit   time.Duration
 }
 
 // NewRunVerificationTool seals the tool to one canonical immutable snapshot.
@@ -52,6 +53,14 @@ func (t *RunVerificationTool) SetMaxOutputBytes(max int) {
 	t.maxOutputBytes = max
 }
 
+// SetTimeoutLimit caps every verification command and changes its default.
+func (t *RunVerificationTool) SetTimeoutLimit(limit time.Duration) {
+	if t == nil || limit <= 0 {
+		return
+	}
+	t.timeoutLimit = limit
+}
+
 func (t *RunVerificationTool) Name() string { return "run_verification" }
 
 func (t *RunVerificationTool) Description() string {
@@ -59,6 +68,12 @@ func (t *RunVerificationTool) Description() string {
 }
 
 func (t *RunVerificationTool) Parameters() ParameterSchema {
+	defaultTimeout := 300
+	maxTimeout := 900
+	if t != nil && t.timeoutLimit > 0 {
+		maxTimeout = max(1, int(t.timeoutLimit/time.Second))
+		defaultTimeout = maxTimeout
+	}
 	return ParameterSchema{
 		Type: "object",
 		Properties: map[string]PropertySchema{
@@ -84,8 +99,8 @@ func (t *RunVerificationTool) Parameters() ParameterSchema {
 			},
 			"timeout_seconds": {
 				Type:        "integer",
-				Description: "Timeout from 1 to 900 seconds",
-				Default:     300,
+				Description: fmt.Sprintf("Timeout from 1 to %d seconds", maxTimeout),
+				Default:     defaultTimeout,
 			},
 		},
 		Required: []string{"kind"},
@@ -109,7 +124,12 @@ func (t *RunVerificationTool) ExecuteWithContext(ctx context.Context, params map
 	}
 	path, _ := params["path"].(string)
 	pattern, _ := params["pattern"].(string)
+	maxTimeout := 900
 	timeout := 300
+	if t != nil && t.timeoutLimit > 0 {
+		maxTimeout = max(1, int(t.timeoutLimit/time.Second))
+		timeout = maxTimeout
+	}
 	if raw, ok := params["timeout_seconds"]; ok {
 		switch value := raw.(type) {
 		case int:
@@ -127,8 +147,11 @@ func (t *RunVerificationTool) ExecuteWithContext(ctx context.Context, params map
 			return unavailableVerificationResult(kind, language, "timeout_seconds must be an integer"), nil
 		}
 	}
-	if timeout < 1 || timeout > 900 {
-		return unavailableVerificationResult(kind, language, "timeout_seconds must be between 1 and 900"), nil
+	if timeout < 1 {
+		return unavailableVerificationResult(kind, language, fmt.Sprintf("timeout_seconds must be between 1 and %d", maxTimeout)), nil
+	}
+	if timeout > maxTimeout {
+		timeout = maxTimeout
 	}
 	if t == nil || strings.TrimSpace(t.snapshotRoot) == "" {
 		return unavailableVerificationResult(kind, language, "run_verification requires an immutable snapshot-bound registry"), nil

@@ -1,0 +1,49 @@
+outcome ReviewPlan {
+    action: string
+    size_class: string
+    max_iterations: number
+    max_tool_calls: number
+    verification_timeout_seconds: number
+    exploration_timeout_seconds: number
+    synthesis_reserve_seconds: number
+}
+
+strategy review_plan returns ReviewPlan {
+    when {
+        context_incomplete == true
+        or file_count > 20
+        or diff_bytes > 80000
+    } then BroadReview {
+        action: "bound_review",
+        size_class: "broad",
+        max_iterations: 14,
+        max_tool_calls: 24,
+        verification_timeout_seconds: 90,
+        exploration_timeout_seconds: 180,
+        synthesis_reserve_seconds: 90,
+    }
+
+    when {
+        file_count > 8
+        or diff_bytes > 24000
+        or has_feedback == true
+    } then StandardReview {
+        action: "bound_review",
+        size_class: "standard",
+        max_iterations: 11,
+        max_tool_calls: 18,
+        verification_timeout_seconds: 75,
+        exploration_timeout_seconds: 165,
+        synthesis_reserve_seconds: 75,
+    }
+
+    else FocusedReview {
+        action: "bound_review",
+        size_class: "focused",
+        max_iterations: 8,
+        max_tool_calls: 12,
+        verification_timeout_seconds: 60,
+        exploration_timeout_seconds: 120,
+        synthesis_reserve_seconds: 60,
+    }
+}

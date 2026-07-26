@@ -84,6 +84,7 @@ func (ds DiffStats) TotalChanges() int {
 
 // BranchContextOptions configures branch context assembly.
 type BranchContextOptions struct {
+	Context         context.Context
 	MaxDiffBytes    int
 	IncludeUnstaged bool
 	// UntrackedPaths explicitly allowlists repository-relative untracked text
@@ -114,6 +115,7 @@ func DefaultBranchContextOptions() BranchContextOptions {
 
 // ProjectContextOptions configures project context assembly.
 type ProjectContextOptions struct {
+	Context       context.Context
 	MaxTreeDepth  int
 	IncludeAgents bool
 	IncludeCanopy bool
@@ -293,7 +295,7 @@ func AssembleBranchContext(opts BranchContextOptions) (*BranchContext, *transpar
 	}
 
 	if opts.IncludeCanopy {
-		ctx.CanopyReview, ctx.CanopyStatus = collectCanopyReview(ctx.RepoRoot, ctx.BaseCommit)
+		ctx.CanopyReview, ctx.CanopyStatus = collectCanopyReview(opts.Context, ctx.RepoRoot, ctx.BaseCommit)
 		if ctx.CanopyReview != "" {
 			audit.Add("canopy structural review", reviewEstimateTokens(ctx.CanopyReview))
 		}
@@ -407,7 +409,7 @@ func AssembleProjectContext(opts ProjectContextOptions) (*ProjectContext, *trans
 	}
 
 	if opts.IncludeCanopy {
-		ctx.CanopySummary, ctx.CanopyStatus = collectCanopyProjectSummary(ctx.RepoRoot)
+		ctx.CanopySummary, ctx.CanopyStatus = collectCanopyProjectSummary(opts.Context, ctx.RepoRoot)
 		if ctx.CanopySummary != "" {
 			audit.Add("Canopy project summary", reviewEstimateTokens(ctx.CanopySummary))
 		} else {

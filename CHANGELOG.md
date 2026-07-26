@@ -17,12 +17,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Interactive tool execution continues until completion while remaining sequential and visible as a persistent event stream.
 - Provider-supplied reasoning and tool results render as durable progress entries instead of transient status messages.
 - Project reviews use bounded structural sampling to reduce elapsed time and token spend.
+- Buckbot now defaults to `qwen/qwen3.7-plus` with medium reasoning and uses Arbiter review budgets for focused, standard, and broad changes.
 
 ### Fixed
 - OpenRouter requests now gate optional fields by each model's advertised parameters.
 - Tool JSON schemas declare concrete nested item types accepted by Moonshot/Kimi providers.
 - Unrestricted one-shot sessions no longer collapse into an empty tool allowlist.
 - Task workspace discovery prefers the requested repository instead of an unrelated ancestor checkout.
+- Reviews now enforce hard model-call deadlines, stop evidence collection by change size, and reserve time for final synthesis.
+- Reviews now cap verification commands and prevent duplicate work before the command deadline.
+- Reviews now stop Canopy context collection when the review deadline expires.
 
 ### Release
 - Tag pushes and manual releases share strict semantic-tag, vanity-path, preflight, and post-install verification.

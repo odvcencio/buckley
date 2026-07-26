@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"m31labs.dev/buckley/pkg/model"
 	"m31labs.dev/buckley/pkg/rules"
@@ -35,9 +36,13 @@ type RLMExecutor interface {
 // RLMExecutionOpts is immutable execution metadata shared by every sub-agent
 // invocation in one RunRLM call.
 type RLMExecutionOpts struct {
-	ReviewSnapshot *model.ReviewSnapshot
-	MaxIterations  int
-	MaxCostUSD     float64
+	ReviewSnapshot      *model.ReviewSnapshot
+	MaxIterations       int
+	MaxToolCalls        int
+	MaxCostUSD          float64
+	ExplorationTimeout  time.Duration
+	SynthesisLead       time.Duration
+	VerificationTimeout time.Duration
 }
 
 // ToolInvoker runs a single tool-shaped one-shot model invocation.
@@ -227,6 +232,9 @@ type RLMRunOpts struct {
 	// non-zero.
 	MaxIterations int
 
+	// MaxToolCalls bounds inspection and verification calls in one review pass.
+	MaxToolCalls int
+
 	// MaxCostUSD is a hard best-effort cost ceiling shared by validation
 	// retries and the approval critic. Zero leaves cost unconstrained.
 	MaxCostUSD float64
@@ -234,6 +242,15 @@ type RLMRunOpts struct {
 	// ApprovalCriticReserveUSD protects enough of MaxCostUSD for an
 	// independent approval critic. It is unused for non-approval results.
 	ApprovalCriticReserveUSD float64
+
+	// SynthesisLead reserves command time for a complete final review.
+	SynthesisLead time.Duration
+
+	// ExplorationTimeout caps evidence collection before final synthesis.
+	ExplorationTimeout time.Duration
+
+	// VerificationTimeout caps each snapshot verification command.
+	VerificationTimeout time.Duration
 
 	// SnapshotPolicy captures the exact Git state that native review
 	// verification may inspect. It is captured once before the primary pass and
@@ -293,7 +310,13 @@ func (f *Framework) RunRLM(ctx context.Context, def RLMDefinition, opts RLMRunOp
 			)
 		}
 	}
-	executionOpts := RLMExecutionOpts{ReviewSnapshot: snapshot}
+	executionOpts := RLMExecutionOpts{
+		ReviewSnapshot:      snapshot,
+		MaxToolCalls:        opts.MaxToolCalls,
+		ExplorationTimeout:  opts.ExplorationTimeout,
+		SynthesisLead:       opts.SynthesisLead,
+		VerificationTimeout: opts.VerificationTimeout,
+	}
 	if opts.MaxIterations > 0 {
 		executionOpts.MaxIterations = opts.MaxIterations
 	} else if budget, ok := def.(RLMExecutionBudget); ok {

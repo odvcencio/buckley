@@ -2,6 +2,7 @@ package rlm
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -157,6 +158,78 @@ func TestSubAgentAdaptiveSynthesisUsesDeadline(t *testing.T) {
 	defer nearCancel()
 	if !agent.shouldSynthesize(nearCtx, 0, 0, time.Now().Add(-2*time.Minute)) {
 		t.Fatal("adaptive agent did not reserve time for final synthesis")
+	}
+}
+
+func TestSubAgentToolDeadlinePreservesSynthesisWindow(t *testing.T) {
+	agent := &SubAgent{
+		adaptive:      true,
+		synthesisLead: 90 * time.Second,
+	}
+	startedAt := time.Now()
+	parent, cancelParent := context.WithDeadline(context.Background(), startedAt.Add(6*time.Minute))
+	defer cancelParent()
+
+	toolCtx, cancelTools := agent.explorationContext(parent, startedAt)
+	defer cancelTools()
+	got, ok := toolCtx.Deadline()
+	if !ok {
+		t.Fatal("tool context has no deadline")
+	}
+	want := startedAt.Add(4*time.Minute + 30*time.Second)
+	if delta := got.Sub(want); delta < -time.Second || delta > time.Second {
+		t.Fatalf("tool deadline = %s, want about %s", got, want)
+	}
+}
+
+func TestSubAgentExplorationDeadlineUsesShorterSizeBudget(t *testing.T) {
+	agent := &SubAgent{
+		adaptive:           true,
+		explorationTimeout: 3 * time.Minute,
+		synthesisLead:      90 * time.Second,
+	}
+	startedAt := time.Now()
+	parent, cancelParent := context.WithDeadline(context.Background(), startedAt.Add(12*time.Minute))
+	defer cancelParent()
+
+	exploreCtx, cancelExplore := agent.explorationContext(parent, startedAt)
+	defer cancelExplore()
+	got, ok := exploreCtx.Deadline()
+	if !ok {
+		t.Fatal("exploration context has no deadline")
+	}
+	want := startedAt.Add(3 * time.Minute)
+	if delta := got.Sub(want); delta < -time.Second || delta > time.Second {
+		t.Fatalf("exploration deadline = %s, want about %s", got, want)
+	}
+}
+
+func TestAwaitChatCompletionReturnsWhenProviderIgnoresCancellation(t *testing.T) {
+	providerRelease := make(chan struct{})
+	defer close(providerRelease)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+
+	started := time.Now()
+	_, err := awaitChatCompletion(ctx, func() (*model.ChatResponse, error) {
+		<-providerRelease
+		return &model.ChatResponse{}, nil
+	})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("awaitChatCompletion() error = %v, want deadline exceeded", err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("awaitChatCompletion() returned after %s, want under one second", elapsed)
+	}
+}
+
+func TestSubAgentToolBudgetForcesSynthesis(t *testing.T) {
+	agent := &SubAgent{maxToolCalls: 12}
+	if agent.toolBudgetExhausted(&SubAgentResult{ToolCalls: make([]SubAgentToolCall, 11)}) {
+		t.Fatal("tool budget exhausted early")
+	}
+	if !agent.toolBudgetExhausted(&SubAgentResult{ToolCalls: make([]SubAgentToolCall, 12)}) {
+		t.Fatal("tool budget did not force synthesis")
 	}
 }
 
