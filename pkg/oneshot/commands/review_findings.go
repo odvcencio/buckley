@@ -421,9 +421,15 @@ func parseFeedbackEntry(value string) (FeedbackEntry, bool) {
 		return FeedbackEntry{}, false
 	}
 	rest = trimCoverageSeparator(rest)
-	statusToken, rest, ok := parseBacktickToken(rest)
+	statusValue := rest
+	statusToken, statusRest, ok := parseBacktickToken(statusValue)
 	if !ok {
-		return FeedbackEntry{}, false
+		fields := strings.Fields(statusValue)
+		if len(fields) == 0 {
+			return FeedbackEntry{}, false
+		}
+		statusToken = fields[0]
+		statusRest = strings.TrimPrefix(statusValue, fields[0])
 	}
 	status := FeedbackStatus(strings.ToUpper(strings.TrimSpace(statusToken)))
 	if status != FeedbackAddressed && status != FeedbackDisputed && status != FeedbackUnresolved {
@@ -432,7 +438,7 @@ func parseFeedbackEntry(value string) (FeedbackEntry, bool) {
 	return FeedbackEntry{
 		ID:       strings.TrimSpace(id),
 		Status:   status,
-		Evidence: trimCoverageSeparator(rest),
+		Evidence: trimCoverageSeparator(statusRest),
 	}, true
 }
 
