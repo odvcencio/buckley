@@ -1242,6 +1242,33 @@ func TestReviewValidationRequiresBlockerForRequestChanges(t *testing.T) {
 	assert.NoError(t, err)
 	assert.NoError(t, def.ValidateResult(result))
 
+	t.Run("pending CI requires discussion", func(t *testing.T) {
+		pendingReview := strings.ReplaceAll(review, "- Build: PASS", "- Build: PENDING")
+		pendingReview = strings.ReplaceAll(pendingReview, "- Tests: PASS", "- Tests: PENDING")
+		pendingDef := ReviewPRDef{
+			ChangedFiles: []string{"ratchet.go"},
+			CIStatus:     "pending (1/2)",
+			CIProvenance: prCISourceHead,
+		}
+		pendingResult, parseErr := pendingDef.ParseResult(pendingReview)
+		assert.NoError(t, parseErr)
+		assert.ErrorContains(
+			t,
+			pendingDef.ValidateResult(pendingResult),
+			"pending or unavailable CI alone requires NEEDS DISCUSSION",
+		)
+
+		pendingDiscussion := strings.Replace(
+			pendingReview,
+			"**Recommendation**: REQUEST CHANGES",
+			"**Recommendation**: NEEDS DISCUSSION",
+			1,
+		)
+		pendingResult, parseErr = pendingDef.ParseResult(pendingDiscussion)
+		assert.NoError(t, parseErr)
+		assert.NoError(t, pendingDef.ValidateResult(pendingResult))
+	})
+
 	t.Run("unresolved feedback permits request changes", func(t *testing.T) {
 		unresolved := strings.Replace(
 			review,

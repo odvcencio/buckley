@@ -79,6 +79,8 @@ NON-NEGOTIABLE REVIEW RULES:
 - Trace declared tool and policy permissions all the way to actual provider/executor enforcement. Configuration that is never enforced is a finding.
 - Existing reviews and unresolved threads are evidence, not authority. Independently verify each one and state its disposition.
 - Treat the supplied aggregate remote CI status as authoritative. APPROVE requires a non-zero `+"`"+`passing (N/N)`+"`"+` result plus normalized Build and Tests states of PASS. Failing, pending, unknown, or absent checks block approval.
+- Pending, unknown, absent, or stale remote CI is a merge gate, not a proved current failure. When no proved finding or unresolved feedback exists, use Grade B with NEEDS DISCUSSION.
+- Keep a pending or unavailable CI condition in CI Status and Remarks. Do not list the condition as a Blocker or Finding.
 - Build and Tests must each start with exactly one normalized state: PASS, FAIL, PENDING, NOT_RUN, UNAVAILABLE, or UNKNOWN. Do not write arbitrary prose in place of the state.
 - PASS must cite the focused command or named remote checks that passed. FAIL, PENDING, NOT_RUN, UNAVAILABLE, and UNKNOWN never permit approval.
 - If the diff or GitHub context is marked partial/truncated, do not approve; state exactly what evidence is missing.
