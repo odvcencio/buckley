@@ -521,8 +521,8 @@ func (f *Framework) runValidatedRLMPhase(
 				return result
 			}
 			cleanRepairUsed = true
-			if attempt+1 >= attemptLimit {
-				attemptLimit++
+			if requiredAttempts := attempt + 3; attemptLimit < requiredAttempts {
+				attemptLimit = requiredAttempts
 			}
 		} else {
 			result.value, lastErr = def.ParseResult(rlmResult.Response)

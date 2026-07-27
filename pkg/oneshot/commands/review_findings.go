@@ -275,9 +275,6 @@ func ValidateParsedReview(parsed *ParsedReview, opts ReviewValidationOptions) er
 				return fmt.Errorf("an approval is inconsistent with unresolved feedback %s", feedback.ID)
 			}
 		}
-		if parsed.Grade != GradeA && parsed.Grade != GradeB {
-			return fmt.Errorf("approval is inconsistent with grade %s", parsed.Grade)
-		}
 		if len(parsed.Blockers) > 0 {
 			return fmt.Errorf("approval is inconsistent with blockers: %s", strings.Join(parsed.Blockers, ", "))
 		}
@@ -285,6 +282,22 @@ func ValidateParsedReview(parsed *ParsedReview, opts ReviewValidationOptions) er
 			if finding.Severity == SeverityCritical || finding.Severity == SeverityMajor {
 				return fmt.Errorf("approval is inconsistent with blocking finding %s", finding.ID)
 			}
+		}
+		var qualityProblems []string
+		if parsed.Grade != GradeA {
+			qualityProblems = append(qualityProblems, fmt.Sprintf("grade is %s instead of A", parsed.Grade))
+		}
+		if len(parsed.Findings) > 0 {
+			qualityProblems = append(qualityProblems, "Findings is not empty")
+		}
+		if len(parsed.Suggestions) > 0 {
+			qualityProblems = append(qualityProblems, "Suggestions is not empty")
+		}
+		if len(qualityProblems) > 0 {
+			return fmt.Errorf(
+				"approval quality gate failed: %s; remove non-defect observations or return a non-approval verdict for demonstrated defects",
+				strings.Join(qualityProblems, ", "),
+			)
 		}
 	} else if parsed.Grade == GradeA {
 		return fmt.Errorf("grade A is inconsistent with a non-approval verdict")

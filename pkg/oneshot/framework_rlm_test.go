@@ -376,6 +376,31 @@ func TestRunRLMRepairsFinalToolCallFinishReasonDirectly(t *testing.T) {
 	}
 }
 
+func TestRunRLMCleanRepairRetainsOneTextCorrection(t *testing.T) {
+	runner := &scriptedRLMExecutor{
+		responses:     []string{"Executed 5 tool calls: read_file", "grade B approval", "valid"},
+		finishReasons: []string{"tool_calls", "stop", "stop"},
+	}
+	framework := NewFramework(nil, nil).WithRLMRunner(runner)
+
+	result, err := framework.RunRLM(context.Background(), validatingRLMDefinition{}, RLMRunOpts{
+		UserPrompt: "review this exact diff",
+		MaxRetries: 2,
+	})
+	if err != nil {
+		t.Fatalf("RunRLM() error = %v", err)
+	}
+	if result.Value != "valid" || result.Attempts != 3 {
+		t.Fatalf("result = %#v, want one text correction after clean repair", result)
+	}
+	if got := runner.toolLimits; len(got) != 3 || got[1] != 0 || got[2] != 0 {
+		t.Fatalf("tool budgets = %v, want both repairs to disable tools", got)
+	}
+	if !strings.Contains(runner.prompts[2], "missing coverage evidence") {
+		t.Fatalf("text correction omitted validation guidance: %q", runner.prompts[2])
+	}
+}
+
 func TestRunRLMRejectsRepeatedUnfinishedToolCallsWithoutLoop(t *testing.T) {
 	const malformed = "review progress\n\n<tool_call>"
 	runner := &scriptedRLMExecutor{responses: []string{
