@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -8,6 +10,8 @@ import (
 	"time"
 
 	"m31labs.dev/buckley/pkg/config"
+	"m31labs.dev/buckley/pkg/gitwatcher"
+	"m31labs.dev/buckley/pkg/oneshot/commands"
 )
 
 func TestParseReviewPRCommandOptions(t *testing.T) {
@@ -170,5 +174,46 @@ func TestWritePRReviewOutputWritesFile(t *testing.T) {
 	}
 	if string(got) != "review body" {
 		t.Fatalf("output = %q, want review body", got)
+	}
+}
+
+func TestPostCompletedPRReviewRetriesWithoutAnotherModelRun(t *testing.T) {
+	originalPost := postCompletedBuckbotReviewFn
+	originalWait := waitCompletedBuckbotPostRetryFn
+	t.Cleanup(func() {
+		postCompletedBuckbotReviewFn = originalPost
+		waitCompletedBuckbotPostRetryFn = originalWait
+	})
+
+	var posts, waits int
+	postCompletedBuckbotReviewFn = func(_ context.Context, event gitwatcher.PullRequestEvent, review string) error {
+		posts++
+		if event.HeadSHA != "head-sha" || review != "validated review" {
+			t.Fatalf("post input = %#v / %q", event, review)
+		}
+		if posts == 1 {
+			return errors.New("GitHub secondary rate limit (HTTP 403)")
+		}
+		return nil
+	}
+	waitCompletedBuckbotPostRetryFn = func(_ context.Context, delay time.Duration) error {
+		waits++
+		if delay != time.Second {
+			t.Fatalf("retry delay = %s, want 1s", delay)
+		}
+		return nil
+	}
+
+	err := postCompletedPRReview(context.Background(), &commands.PRInfo{
+		Host:       "github.com",
+		Repository: "owner/repo",
+		Number:     42,
+		HeadSHA:    "head-sha",
+	}, "validated review")
+	if err != nil {
+		t.Fatalf("postCompletedPRReview() error = %v", err)
+	}
+	if posts != 2 || waits != 1 {
+		t.Fatalf("posts/waits = %d/%d, want 2/1", posts, waits)
 	}
 }

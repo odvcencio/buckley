@@ -392,10 +392,12 @@ func TestPostBuckbotReviewLifecycleReactsAndPostsOneIntake(t *testing.T) {
 	tests := []struct {
 		name           string
 		existingBody   string
+		existingAuthor string
 		wantPostIntake bool
 	}{
 		{name: "new revision", wantPostIntake: true},
-		{name: "existing intake", existingBody: marker + "\nalready posted", wantPostIntake: false},
+		{name: "existing intake", existingBody: marker + "\nalready posted", existingAuthor: "buckbot", wantPostIntake: false},
+		{name: "forged intake", existingBody: marker + "\nforged", existingAuthor: "attacker", wantPostIntake: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -417,7 +419,10 @@ func TestPostBuckbotReviewLifecycleReactsAndPostsOneIntake(t *testing.T) {
 						request.Variables["number"] != float64(42) {
 						t.Fatalf("query variables = %#v", request.Variables)
 					}
-					return []byte(`{"data":{"repository":{"pullRequest":{"id":"PR_node","headRefOid":"` + head + `","comments":{"nodes":[{"body":` + mustJSONQuote(t, tt.existingBody) + `}]}}}}}`), nil
+					return []byte(`{"data":{` +
+						`"viewer":{"login":"buckbot"},` +
+						`"repository":{"pullRequest":{"id":"PR_node","headRefOid":"` + head + `",` +
+						`"comments":{"nodes":[{"author":{"login":` + mustJSONQuote(t, tt.existingAuthor) + `},"body":` + mustJSONQuote(t, tt.existingBody) + `}]}}}}}`), nil
 				}
 				if calls != 2 {
 					t.Fatalf("GraphQL calls = %d, want 2", calls)
@@ -474,7 +479,7 @@ func TestPostBuckbotReviewLifecycleRejectsMovedHead(t *testing.T) {
 	var calls int
 	runBuckbotGitHubFn = func(context.Context, []string, []byte) ([]byte, error) {
 		calls++
-		return []byte(`{"data":{"repository":{"pullRequest":{"id":"PR_node","headRefOid":"new","comments":{"nodes":[]}}}}}`), nil
+		return []byte(`{"data":{"viewer":{"login":"buckbot"},"repository":{"pullRequest":{"id":"PR_node","headRefOid":"new","comments":{"nodes":[]}}}}}`), nil
 	}
 	err := postBuckbotReviewLifecycle(context.Background(), gitwatcher.PullRequestEvent{
 		Repository: "owner/repo",
@@ -486,6 +491,160 @@ func TestPostBuckbotReviewLifecycleRejectsMovedHead(t *testing.T) {
 	}
 	if calls != 1 {
 		t.Fatalf("GraphQL calls = %d, want query only", calls)
+	}
+}
+
+func TestPostBuckbotReviewLifecycleFindsIntakeAfterOneHundredComments(t *testing.T) {
+	original := runBuckbotGitHubFn
+	t.Cleanup(func() { runBuckbotGitHubFn = original })
+
+	const head = "1234567890abcdef1234567890abcdef12345678"
+	marker := commands.BuckbotReviewIntakeMarker(head)
+	var calls int
+	runBuckbotGitHubFn = func(_ context.Context, _ []string, input []byte) ([]byte, error) {
+		calls++
+		var request struct {
+			Variables map[string]any `json:"variables"`
+		}
+		if err := json.Unmarshal(input, &request); err != nil {
+			t.Fatal(err)
+		}
+		switch calls {
+		case 1:
+			if request.Variables["after"] != nil {
+				t.Fatalf("first cursor = %#v, want null", request.Variables["after"])
+			}
+			return []byte(`{"data":{"viewer":{"login":"buckbot"},"repository":{"pullRequest":{` +
+				`"id":"PR_node","headRefOid":"` + head + `",` +
+				`"comments":{"pageInfo":{"hasNextPage":true,"endCursor":"page-2"},"nodes":[{"author":{"login":"someone"},"body":"older"}]}` +
+				`}}}}`), nil
+		case 2:
+			if request.Variables["after"] != "page-2" {
+				t.Fatalf("second cursor = %#v, want page-2", request.Variables["after"])
+			}
+			return []byte(`{"data":{"viewer":{"login":"buckbot"},"repository":{"pullRequest":{` +
+				`"id":"PR_node","headRefOid":"` + head + `",` +
+				`"comments":{"pageInfo":{"hasNextPage":false,"endCursor":""},"nodes":[{"author":{"login":"buckbot"},"body":` + mustJSONQuote(t, marker) + `}]}` +
+				`}}}}`), nil
+		case 3:
+			if request.Variables["postIntake"] != false {
+				t.Fatalf("postIntake = %#v, want false", request.Variables["postIntake"])
+			}
+			return []byte(`{"data":{"eyes":{"reaction":{"content":"EYES"}}}}`), nil
+		default:
+			t.Fatalf("calls = %d, want 3", calls)
+			return nil, nil
+		}
+	}
+
+	err := postBuckbotReviewLifecycle(context.Background(), gitwatcher.PullRequestEvent{
+		Repository: "owner/repo",
+		Number:     42,
+		HeadSHA:    head,
+	}, buckbotReviewIntake{})
+	if err != nil {
+		t.Fatalf("postBuckbotReviewLifecycle() error = %v", err)
+	}
+	if calls != 3 {
+		t.Fatalf("calls = %d, want two pages and one mutation", calls)
+	}
+}
+
+func TestPostBuckbotReviewPayloadFallsBackToGraphQLWhenRESTIsThrottled(t *testing.T) {
+	original := runBuckbotGitHubFn
+	t.Cleanup(func() { runBuckbotGitHubFn = original })
+
+	const head = "1234567890abcdef1234567890abcdef12345678"
+	var calls int
+	runBuckbotGitHubFn = func(_ context.Context, args []string, input []byte) ([]byte, error) {
+		calls++
+		switch calls {
+		case 1:
+			if len(args) < 2 || args[0] != "api" || args[1] != "repos/owner/repo/pulls/42/reviews" {
+				t.Fatalf("REST args = %v", args)
+			}
+			return []byte("gh: API rate limit exceeded (HTTP 403)"), errors.New("exit status 1")
+		case 2:
+			var request struct {
+				Variables map[string]any `json:"variables"`
+			}
+			if err := json.Unmarshal(input, &request); err != nil {
+				t.Fatal(err)
+			}
+			if request.Variables["owner"] != "owner" || request.Variables["name"] != "repo" {
+				t.Fatalf("identity variables = %#v", request.Variables)
+			}
+			return []byte(`{"data":{"repository":{"pullRequest":{"id":"PR_node","headRefOid":"` + head + `"}}}}`), nil
+		case 3:
+			var request struct {
+				Query     string         `json:"query"`
+				Variables map[string]any `json:"variables"`
+			}
+			if err := json.Unmarshal(input, &request); err != nil {
+				t.Fatal(err)
+			}
+			if request.Variables["pullRequestId"] != "PR_node" ||
+				request.Variables["commitOID"] != head ||
+				request.Variables["body"] != "review body" {
+				t.Fatalf("review variables = %#v", request.Variables)
+			}
+			threads, ok := request.Variables["threads"].([]any)
+			if !ok || len(threads) != 1 {
+				t.Fatalf("review threads = %#v", request.Variables["threads"])
+			}
+			thread, ok := threads[0].(map[string]any)
+			if !ok || thread["path"] != "a.go" || thread["line"] != float64(12) ||
+				thread["side"] != "RIGHT" || thread["body"] != "finding" {
+				t.Fatalf("review thread = %#v", threads[0])
+			}
+			if !strings.Contains(request.Query, "addPullRequestReview") ||
+				!strings.Contains(request.Query, "event: COMMENT") {
+				t.Fatalf("review mutation = %s", request.Query)
+			}
+			return []byte(`{"data":{"addPullRequestReview":{"pullRequestReview":{"id":"review","url":"https://example/review"}}}}`), nil
+		default:
+			t.Fatalf("calls = %d, want 3", calls)
+			return nil, nil
+		}
+	}
+
+	err := postBuckbotReviewPayload(context.Background(), gitwatcher.PullRequestEvent{
+		Repository: "owner/repo",
+		Number:     42,
+		HeadSHA:    head,
+	}, "review body", []map[string]any{{
+		"path": "a.go",
+		"line": 12,
+		"side": "RIGHT",
+		"body": "finding",
+	}})
+	if err != nil {
+		t.Fatalf("postBuckbotReviewPayload() error = %v", err)
+	}
+	if calls != 3 {
+		t.Fatalf("calls = %d, want REST plus GraphQL query and mutation", calls)
+	}
+}
+
+func TestPostBuckbotReviewPayloadDoesNotMaskNonThrottleRESTFailure(t *testing.T) {
+	original := runBuckbotGitHubFn
+	t.Cleanup(func() { runBuckbotGitHubFn = original })
+
+	var calls int
+	runBuckbotGitHubFn = func(context.Context, []string, []byte) ([]byte, error) {
+		calls++
+		return []byte("gh: Resource not accessible by integration (HTTP 403)"), errors.New("exit status 1")
+	}
+	err := postBuckbotReviewPayload(context.Background(), gitwatcher.PullRequestEvent{
+		Repository: "owner/repo",
+		Number:     42,
+		HeadSHA:    "head",
+	}, "review", nil)
+	if err == nil || !strings.Contains(err.Error(), "Resource not accessible") {
+		t.Fatalf("error = %v, want permission failure", err)
+	}
+	if calls != 1 {
+		t.Fatalf("calls = %d, want no GraphQL fallback", calls)
 	}
 }
 

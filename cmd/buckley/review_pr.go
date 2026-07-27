@@ -17,6 +17,14 @@ import (
 	"m31labs.dev/buckley/pkg/terminal"
 )
 
+var postCompletedBuckbotReviewFn buckbotPoster = postBuckbotReview
+var waitCompletedBuckbotPostRetryFn = waitForBuckbotRetry
+
+const (
+	maxCompletedBuckbotPostAttempts = 3
+	completedBuckbotPostRetryDelay  = time.Second
+)
+
 type reviewPRCommandOptions struct {
 	verbose     bool
 	showCost    bool
@@ -243,7 +251,21 @@ func postCompletedPRReview(ctx context.Context, prInfo *commands.PRInfo, reviewT
 		Number:     prInfo.Number,
 		HeadSHA:    prInfo.HeadSHA,
 	}
-	return postBuckbotReview(ctx, event, reviewText)
+	var lastErr error
+	for attempt := 0; attempt < maxCompletedBuckbotPostAttempts; attempt++ {
+		lastErr = postCompletedBuckbotReviewFn(ctx, event, reviewText)
+		if lastErr == nil {
+			return nil
+		}
+		if !isRetryableBuckbotPostError(lastErr) || attempt+1 == maxCompletedBuckbotPostAttempts {
+			return lastErr
+		}
+		delay := completedBuckbotPostRetryDelay * time.Duration(1<<attempt)
+		if err := waitCompletedBuckbotPostRetryFn(ctx, delay); err != nil {
+			return fmt.Errorf("post GitHub review retry: %w", err)
+		}
+	}
+	return lastErr
 }
 
 func runPRReview(ctx context.Context, prRef string, framework *oneshot.Framework) (*reviewCommandResult, *commands.PRInfo, error) {

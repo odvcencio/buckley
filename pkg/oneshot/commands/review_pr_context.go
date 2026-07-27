@@ -1251,7 +1251,125 @@ func getPRChecks(run prCommandRunner, target prReference) ([]PRCheck, error) {
 	return checks, nil
 }
 
+const prTopLevelCommentsQuery = `query($owner: String!, $name: String!, $number: Int!, $after: String) {
+  viewer { login }
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      comments(first: 100, after: $after) {
+        pageInfo { hasNextPage endCursor }
+        nodes {
+          id
+          author { login }
+          body
+        }
+      }
+    }
+  }
+}`
+
 func getPRComments(run prCommandRunner, target prReference) ([]PRComment, error) {
+	comments, graphErr := getPRCommentsGraphQL(run, target)
+	if graphErr == nil {
+		return comments, nil
+	}
+	return getPRCommentsREST(run, target)
+}
+
+func getPRCommentsGraphQL(run prCommandRunner, target prReference) ([]PRComment, error) {
+	owner, repo, err := splitPRRepository(target.Repository)
+	if err != nil {
+		return nil, fmt.Errorf("resolve repository for paginated top-level comments: %w", err)
+	}
+	type graphComment struct {
+		ID     string `json:"id"`
+		Author struct {
+			Login string `json:"login"`
+		} `json:"author"`
+		Body string `json:"body"`
+	}
+	type graphResponse struct {
+		Data struct {
+			Viewer struct {
+				Login string `json:"login"`
+			} `json:"viewer"`
+			Repository *struct {
+				PullRequest *struct {
+					Comments struct {
+						PageInfo struct {
+							HasNextPage bool   `json:"hasNextPage"`
+							EndCursor   string `json:"endCursor"`
+						} `json:"pageInfo"`
+						Nodes []graphComment `json:"nodes"`
+					} `json:"comments"`
+				} `json:"pullRequest"`
+			} `json:"repository"`
+		} `json:"data"`
+		Errors []struct {
+			Message string `json:"message"`
+		} `json:"errors"`
+	}
+
+	var comments []PRComment
+	after := ""
+	seenCursors := make(map[string]struct{})
+	for {
+		args := []string{
+			"api", "graphql",
+			"-F", "owner=" + owner,
+			"-F", "name=" + repo,
+			"-F", "number=" + strconv.Itoa(target.Number),
+			"-f", "query=" + prTopLevelCommentsQuery,
+		}
+		if after != "" {
+			args = append(args, "-F", "after="+after)
+		}
+		args = withPRAPIHostname(args, target.Host)
+		output, err := run("gh", args...)
+		if err != nil {
+			return nil, err
+		}
+
+		var response graphResponse
+		if err := json.Unmarshal(output, &response); err != nil {
+			return nil, err
+		}
+		if len(response.Errors) > 0 {
+			return nil, fmt.Errorf("%s", response.Errors[0].Message)
+		}
+		if response.Data.Viewer.Login == "" {
+			return nil, fmt.Errorf("authenticated viewer missing from GraphQL response")
+		}
+		if response.Data.Repository == nil || response.Data.Repository.PullRequest == nil {
+			return nil, fmt.Errorf("pull request not found in GraphQL response")
+		}
+
+		connection := response.Data.Repository.PullRequest.Comments
+		for _, comment := range connection.Nodes {
+			if comment.Author.Login == response.Data.Viewer.Login && isBuckbotOperationalComment(comment.Body) {
+				continue
+			}
+			comments = append(comments, PRComment{
+				ID:     stablePRFeedbackSourceID(comment.ID, "top-level-comment", comment.Author.Login, comment.Body),
+				Author: comment.Author.Login,
+				Body:   comment.Body,
+			})
+		}
+		if !connection.PageInfo.HasNextPage {
+			return comments, nil
+		}
+		cursor := connection.PageInfo.EndCursor
+		if cursor == "" {
+			return nil, fmt.Errorf("top-level comment pagination omitted the next cursor")
+		}
+		if _, duplicate := seenCursors[cursor]; duplicate {
+			return nil, fmt.Errorf("top-level comment pagination repeated cursor %q", cursor)
+		}
+		seenCursors[cursor] = struct{}{}
+		after = cursor
+	}
+}
+
+func getPRCommentsREST(run prCommandRunner, target prReference) ([]PRComment, error) {
 	owner, repo, err := splitPRRepository(target.Repository)
 	if err != nil {
 		return nil, fmt.Errorf("resolve repository for paginated top-level comments: %w", err)
@@ -1282,9 +1400,6 @@ func getPRComments(run prCommandRunner, target prReference) ([]PRComment, error)
 	var comments []PRComment
 	for _, page := range pages {
 		for _, c := range page {
-			if isBuckbotOperationalComment(c.Body) {
-				continue
-			}
 			id := prRESTID(c.ID)
 			comments = append(comments, PRComment{
 				ID:     stablePRFeedbackSourceID(id, "top-level-comment", c.User.Login, c.Body),
