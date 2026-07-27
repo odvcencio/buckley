@@ -153,6 +153,8 @@ func appendReviewExecutionPlan(prompt string, opts automatedReviewOptions) strin
 - Inspect the supplied diff and structural evidence before you call a tool.
 - Do not read a changed file when the supplied diff already shows the required lines.
 - Use tools only for omitted definitions, callers, invariants, or targeted verification.
+- Before approval, trace changed state through each cache, dispatch gate, and fast path that can bypass it.
+- Do not treat direct helper tests as proof that production dispatch reaches the changed behavior.
 - Do not repeat equivalent searches, builds, or tests.
 - If required evidence cannot fit or project guidance forbids it, finish with a non-approval verdict.
 `,

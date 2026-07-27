@@ -629,6 +629,34 @@ func printReviewAttemptCounts(result *reviewCommandResult) {
 		result.criticAttempts,
 		result.attempts,
 	)
+	for _, line := range reviewValidationRepairLines(result.trace) {
+		termOut.Dim("Review repair: %s", line)
+	}
+}
+
+func reviewValidationRepairLines(trace *transparency.Trace) []string {
+	if trace == nil {
+		return nil
+	}
+	var lines []string
+	for _, attempt := range trace.Attempts {
+		reason := strings.TrimSpace(attempt.ValidationError)
+		if reason == "" {
+			continue
+		}
+		const maxReasonRunes = 180
+		runes := []rune(reason)
+		if len(runes) > maxReasonRunes {
+			reason = string(runes[:maxReasonRunes]) + "…"
+		}
+		lines = append(lines, fmt.Sprintf(
+			"%s attempt %d: %s",
+			reviewAttemptPhase(attempt.Phase),
+			attempt.Attempt,
+			reason,
+		))
+	}
+	return lines
 }
 
 func writeReviewOutput(outputFile, reviewText string) error {

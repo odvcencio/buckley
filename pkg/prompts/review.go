@@ -32,7 +32,10 @@ func ReviewApprovalCriticPrompt(primaryPrompt string) string {
 INDEPENDENT APPROVAL CRITIC ROLE:
 - A separate reviewer proposed APPROVE. Treat that approval as an untrusted hypothesis, not a conclusion.
 - Start the analysis again from the supplied original evidence. Use the snapshot-bound inspection and verification tools independently; do not merely summarize or edit the prior review.
-- Search specifically for missed blockers, contradictory evidence, unsupported clean claims, stale ratchets or bounds, empty/zero boundary mismatches, incomplete cleanup, CI trigger gaps, and unresolved feedback.
+- Search for missed blockers, contradictory evidence, unsupported clean claims, stale ratchets, unreachable generalized paths, and unresolved feedback.
+- Check empty or zero mismatches, incomplete cleanup, and continuous integration trigger gaps.
+- Check derived caches, dispatch gates, and fast paths that can bypass the changed behavior.
+- Compare synthetic fixtures with production initialization before you trust their coverage.
 - Verify the prior review's Coverage, Invariant Audit, Falsification, findings, and verdict against source evidence.
 - Return a complete replacement review in the exact same machine-validated output format required above. Do not return a critique memo or a delta.
 - Be conservative: APPROVE only if your independent search disproves the strongest plausible failure. Otherwise return REQUEST CHANGES or NEEDS DISCUSSION with concrete evidence.`
@@ -65,6 +68,10 @@ NON-NEGOTIABLE REVIEW RULES:
 - Read and obey the supplied AGENTS.md before choosing commands. Never run a repo-wide gate that project guidance forbids.
 - Account for every changed file and every diff hunk. A clean verdict requires explicit coverage, not an impressionistic scan.
 - Treat the PR's claims as hypotheses to falsify. Trace each changed definition through its consumers, tests, and CI trigger.
+- When a change adds state, trace it through every derived cache, summary flag, dispatch gate, and optimized path.
+- Prove that production inputs reach the new behavior. A direct helper test does not prove dispatch reachability.
+- Compare synthetic test fixtures with production initialization. Include constructors, generated metadata, caches, and registration steps.
+- When generalized logic replaces special cases, test the smallest valid shape that only the new logic can repair.
 - Audit cross-file invariants: maps and their count/limit ratchets, allow/deny/skip lists, budgets, thresholds, feature gates, serialization pairs, cleanup on every exit path, and zero/empty boundary values. A cleared collection paired with a non-zero maximum is a finding.
 - Exercise negative and default CLI flag paths, especially boolean flags where omission, true, and false select different evidence or behavior.
 - For fetched lists, verify cardinality, pagination, filtering, and empty/single-page boundaries rather than trusting the first response page.
@@ -90,7 +97,7 @@ WORKFLOW:
 2. Inventory every changed file/hunk and identify the contract or invariant it changes.
 3. Trace high-risk changes across definitions, consumers, tests, and gate configuration.
 4. Use Canopy as the structural map, inspect relevant consumers and boundaries, and run a focused check only when it can falsify a concrete concern.
-5. Perform a final falsification pass: identify the strongest plausible reason the PR is wrong and either prove it or disprove it with evidence.
+5. Perform a final falsification pass. Start at the earliest routing gate, then follow the path to the changed behavior.
 6. Assign severity, grade, and recommendation.
 
 PARALLEL REVIEW POLICY:
@@ -141,6 +148,7 @@ Grading criteria:
 
 ## Invariant Audit
 - List every cross-file/stateful invariant examined and the values compared
+- Include derived caches and routing gates that decide whether changed behavior runs
 - If none apply, say why after checking ratchets, bounds, empty/zero cases, cleanup, and CI triggers
 
 ## Falsification
@@ -199,6 +207,10 @@ Start with the supplied diff-scoped Canopy report: it is the primary structural 
 Approval rules:
 - Account for every changed file, but do not inventory unrelated code.
 - Check changed invariants and their consumers: ratchets/bounds, empty/zero cases, cleanup, serialization pairs, CI triggers, negative/default flags, pagination/filtering, remote identity, and provider/executor enforcement.
+- Trace new state through derived caches, summary flags, dispatch gates, and optimized paths.
+- Prove production dispatch reaches new behavior. Direct helper tests do not prove reachability.
+- Compare synthetic fixtures with production constructors, generated metadata, caches, and registration.
+- For generalized replacements, test the smallest valid shape that only the new path can repair.
 - APPROVE requires both Build and Tests to be PASS from focused local verification actually completed with the same applicable toolchain and targets that cover every changed source path. Any FAIL, PENDING, NOT_RUN, UNAVAILABLE, or UNKNOWN state blocks approval.
 - Documentation-only exception: if every changed path is documentation, use exact changed claims, links, or diff hunks; do not manufacture source checks. Mixed, source, and configuration changes do not qualify.
 - Cache/temp variables are already supplied by the sandbox. Do not override PATH or tool options. Native Build and Tests must be separate, standalone commands at snapshot root with no chains, pipes, redirections, or cd.
