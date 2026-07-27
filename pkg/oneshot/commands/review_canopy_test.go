@@ -37,6 +37,12 @@ printf '{"base":"base-sha","changed_files":1,"files":["a.go"],"index_scope":"cha
 	if evidence.IndexScope != "changed" {
 		t.Fatalf("index scope = %q, want changed", evidence.IndexScope)
 	}
+	if evidence.IndexScopeSource != "Canopy report" {
+		t.Fatalf("index scope source = %q, want Canopy report", evidence.IndexScopeSource)
+	}
+	if evidence.BlastRadius != 2 {
+		t.Fatalf("blast radius = %d, want 2", evidence.BlastRadius)
+	}
 	if evidence.Runtime <= 0 {
 		t.Fatalf("runtime = %s, want a measured duration", evidence.Runtime)
 	}
@@ -67,6 +73,69 @@ printf '{"base":"base-sha","changed_files":1,"files":["a.go"],"index_scope":"cha
 	}
 	if string(count) != "run\n" {
 		t.Fatalf("invocations = %q, want one", count)
+	}
+}
+
+func TestCollectCanopyReviewEvidenceAcceptsLegacyRepositoryReport(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test helper uses a POSIX shell script")
+	}
+	tempDir := t.TempDir()
+	helper := filepath.Join(tempDir, "canopy")
+	script := `#!/bin/sh
+printf '{"base":"base-sha","changed_files":15,"blast_radius":1733,"complexity_delta":[{"file":"parser.go","name":"parse","cyclomatic":31,"cognitive":39,"lines":98}]}\n'
+`
+	if err := os.WriteFile(helper, []byte(script), 0o755); err != nil {
+		t.Fatalf("write helper: %v", err)
+	}
+	t.Setenv("CANOPY_BIN", helper)
+
+	evidence := collectCanopyReviewEvidence(context.Background(), tempDir, "base-sha")
+	if evidence.Status != "available" {
+		t.Fatalf("status = %q, want available", evidence.Status)
+	}
+	if evidence.IndexScope != "repository" {
+		t.Fatalf("index scope = %q, want repository", evidence.IndexScope)
+	}
+	if evidence.IndexScopeSource != "repository-root invocation" {
+		t.Fatalf("index scope source = %q, want repository-root invocation", evidence.IndexScopeSource)
+	}
+	if evidence.BlastRadius != 1733 {
+		t.Fatalf("blast radius = %d, want 1733", evidence.BlastRadius)
+	}
+	for _, want := range []string{
+		`"changed_files": 15`,
+		`"index_scope": "repository"`,
+		`"index_scope_source": "repository-root invocation"`,
+		`"blast_radius": 1733`,
+		`"name": "parse"`,
+	} {
+		if !strings.Contains(evidence.Output, want) {
+			t.Errorf("compact evidence missing %q:\n%s", want, evidence.Output)
+		}
+	}
+}
+
+func TestCollectCanopyReviewEvidenceRejectsInvalidExplicitScope(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test helper uses a POSIX shell script")
+	}
+	tempDir := t.TempDir()
+	helper := filepath.Join(tempDir, "canopy")
+	script := `#!/bin/sh
+printf '{"base":"base-sha","index_scope":"workspace"}\n'
+`
+	if err := os.WriteFile(helper, []byte(script), 0o755); err != nil {
+		t.Fatalf("write helper: %v", err)
+	}
+	t.Setenv("CANOPY_BIN", helper)
+
+	evidence := collectCanopyReviewEvidence(context.Background(), tempDir, "base-sha")
+	if evidence.Status != "index scope unavailable" {
+		t.Fatalf("status = %q, want index scope unavailable", evidence.Status)
+	}
+	if evidence.Output != "" {
+		t.Fatalf("output = %q, want empty", evidence.Output)
 	}
 }
 

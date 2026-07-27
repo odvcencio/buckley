@@ -105,6 +105,7 @@ type OneshotFacts struct {
 type ReviewPlanFacts struct {
 	FileCount         int  `arb:"file_count"`
 	DiffBytes         int  `arb:"diff_bytes"`
+	BlastRadius       int  `arb:"blast_radius"`
 	ContextIncomplete bool `arb:"context_incomplete"`
 	HasFeedback       bool `arb:"has_feedback"`
 }

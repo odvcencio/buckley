@@ -23,10 +23,12 @@ const (
 )
 
 type canopyReviewEvidence struct {
-	Output     string
-	Status     string
-	Runtime    time.Duration
-	IndexScope string
+	Output           string
+	Status           string
+	Runtime          time.Duration
+	IndexScope       string
+	IndexScopeSource string
+	BlastRadius      int
 }
 
 type canopyReviewReport struct {
@@ -57,6 +59,7 @@ type compactCanopyReview struct {
 	Base               string                    `json:"base"`
 	ChangedFiles       int                       `json:"changed_files"`
 	IndexScope         string                    `json:"index_scope"`
+	IndexScopeSource   string                    `json:"index_scope_source,omitempty"`
 	BlastRadius        int                       `json:"blast_radius"`
 	ComplexityHotspots []canopyComplexityHotspot `json:"complexity_hotspots,omitempty"`
 	Capabilities       []canopyReviewCapability  `json:"credible_capabilities,omitempty"`
@@ -103,17 +106,18 @@ func collectCanopyReviewEvidence(parent context.Context, repoRoot, baseCommit st
 		return canopyReviewEvidence{Status: "returned invalid JSON", Runtime: elapsed}
 	}
 	report.Base = strings.TrimSpace(report.Base)
-	report.IndexScope = strings.TrimSpace(report.IndexScope)
 	if report.Base != baseCommit {
 		return canopyReviewEvidence{Status: "base revision mismatch", Runtime: elapsed}
 	}
-	if report.IndexScope != "changed" && report.IndexScope != "repository" {
+	indexScope, indexScopeSource, valid := resolveCanopyIndexScope(report.IndexScope)
+	if !valid {
 		return canopyReviewEvidence{Status: "index scope unavailable", Runtime: elapsed}
 	}
 	compact := compactCanopyReview{
 		Base:               report.Base,
 		ChangedFiles:       report.ChangedFiles,
-		IndexScope:         report.IndexScope,
+		IndexScope:         indexScope,
+		IndexScopeSource:   indexScopeSource,
 		BlastRadius:        report.BlastRadius,
 		ComplexityHotspots: selectCanopyHotspots(report.ComplexityDelta),
 		Capabilities:       selectCredibleCanopyCapabilities(report.NewCapabilities),
@@ -123,10 +127,23 @@ func collectCanopyReviewEvidence(parent context.Context, repoRoot, baseCommit st
 		return canopyReviewEvidence{Status: "could not compact evidence", Runtime: elapsed}
 	}
 	return canopyReviewEvidence{
-		Output:     string(output),
-		Status:     "available",
-		Runtime:    elapsed,
-		IndexScope: report.IndexScope,
+		Output:           string(output),
+		Status:           "available",
+		Runtime:          elapsed,
+		IndexScope:       indexScope,
+		IndexScopeSource: indexScopeSource,
+		BlastRadius:      report.BlastRadius,
+	}
+}
+
+func resolveCanopyIndexScope(value string) (scope, source string, valid bool) {
+	switch scope = strings.TrimSpace(value); scope {
+	case "":
+		return "repository", "repository-root invocation", true
+	case "changed", "repository":
+		return scope, "Canopy report", true
+	default:
+		return "", "", false
 	}
 }
 

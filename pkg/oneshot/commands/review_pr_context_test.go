@@ -677,10 +677,12 @@ func TestAssemblePRCanopyContextRunsOnceForImmutableCleanHead(t *testing.T) {
 			t.Fatalf("snapshot = %s at %s", baseSHA, repoRoot)
 		}
 		return canopyReviewEvidence{
-			Output:     `{"index_scope":"changed","blast_radius":4}`,
-			Status:     "available",
-			Runtime:    4600 * time.Millisecond,
-			IndexScope: "changed",
+			Output:           `{"index_scope":"changed","blast_radius":4}`,
+			Status:           "available",
+			Runtime:          4600 * time.Millisecond,
+			IndexScope:       "changed",
+			IndexScopeSource: "Canopy report",
+			BlastRadius:      4,
 		}
 	}
 
@@ -690,11 +692,14 @@ func TestAssemblePRCanopyContextRunsOnceForImmutableCleanHead(t *testing.T) {
 	if calls != 1 {
 		t.Fatalf("Canopy calls = %d, want one", calls)
 	}
+	if ctx.CanopyBlastRadius != 4 {
+		t.Fatalf("Canopy blast radius = %d, want 4", ctx.CanopyBlastRadius)
+	}
 	for _, prompt := range []string{firstPrompt, secondPrompt} {
 		for _, want := range []string{
 			"## Primary Structural Review (Canopy)",
 			"**Measured runtime**: 4.6s",
-			"**Index scope**: changed",
+			"**Index scope**: changed (Canopy report)",
 			`"blast_radius":4`,
 		} {
 			if !strings.Contains(prompt, want) {

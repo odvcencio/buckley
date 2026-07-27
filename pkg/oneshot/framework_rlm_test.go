@@ -37,32 +37,35 @@ func (r *deadlineAfterRejectedRLMExecutor) Run(context.Context, string, string, 
 }
 
 type scriptedRLMExecutor struct {
-	responses     []string
-	systems       []string
-	prompts       []string
-	tools         [][]string
-	snapshots     []*model.ReviewSnapshot
-	traces        []*transparency.Trace
-	providers     []string
-	iterations    []int
-	toolLimits    []int
-	exploration   []time.Duration
-	synthesis     []time.Duration
-	verification  []time.Duration
-	models        []string
-	reasoning     []string
-	reasoningMax  []int
-	maxCosts      []float64
-	finishReasons []string
+	responses          []string
+	systems            []string
+	prompts            []string
+	tools              [][]string
+	snapshots          []*model.ReviewSnapshot
+	traces             []*transparency.Trace
+	providers          []string
+	iterations         []int
+	toolLimits         []int
+	verificationLimits []int
+	exploration        []time.Duration
+	synthesis          []time.Duration
+	verification       []time.Duration
+	models             []string
+	reasoning          []string
+	reasoningMax       []int
+	maxCosts           []float64
+	finishReasons      []string
+	deadlines          []time.Time
 }
 
-func (s *scriptedRLMExecutor) Run(_ context.Context, system string, task string, allowedTools []string, opts RLMExecutionOpts) (*RLMResult, error) {
+func (s *scriptedRLMExecutor) Run(ctx context.Context, system string, task string, allowedTools []string, opts RLMExecutionOpts) (*RLMResult, error) {
 	s.systems = append(s.systems, system)
 	s.prompts = append(s.prompts, task)
 	s.tools = append(s.tools, append([]string(nil), allowedTools...))
 	s.snapshots = append(s.snapshots, opts.ReviewSnapshot)
 	s.iterations = append(s.iterations, opts.MaxIterations)
 	s.toolLimits = append(s.toolLimits, opts.MaxToolCalls)
+	s.verificationLimits = append(s.verificationLimits, opts.MaxVerificationCalls)
 	s.exploration = append(s.exploration, opts.ExplorationTimeout)
 	s.synthesis = append(s.synthesis, opts.SynthesisLead)
 	s.verification = append(s.verification, opts.VerificationTimeout)
@@ -70,6 +73,8 @@ func (s *scriptedRLMExecutor) Run(_ context.Context, system string, task string,
 	s.reasoning = append(s.reasoning, opts.ReasoningEffort)
 	s.reasoningMax = append(s.reasoningMax, opts.ReasoningMaxTokens)
 	s.maxCosts = append(s.maxCosts, opts.MaxCostUSD)
+	deadline, _ := ctx.Deadline()
+	s.deadlines = append(s.deadlines, deadline)
 	if len(s.responses) == 0 {
 		return nil, fmt.Errorf("no scripted response")
 	}
@@ -199,8 +204,19 @@ func TestRunRLMRetriesValidationFailureWithGuidance(t *testing.T) {
 	if got := runner.iterations; len(got) != 2 || got[0] != 8 || got[1] != 1 {
 		t.Fatalf("iteration budgets = %v, want [8 1]", got)
 	}
+	if got := runner.reasoningMax; len(got) != 2 || got[1] != textRepairReasoningMaxTokens {
+		t.Fatalf("reasoning token budgets = %v, want repair cap %d", got, textRepairReasoningMaxTokens)
+	}
 	if got := strings.Join(runner.tools[0], ","); got != "read_file,run_shell" {
 		t.Fatalf("allowed tools = %q, want exact registry names", got)
+	}
+	for _, required := range []string{
+		"Treat Falsification, Findings, Remarks, Grade, and Verdict as one coupled outcome.",
+		"Never return findings with a DISPROVED or UNRESOLVED conclusion.",
+	} {
+		if !strings.Contains(runner.prompts[1], required) {
+			t.Fatalf("repair prompt omitted %q: %q", required, runner.prompts[1])
+		}
 	}
 }
 
@@ -604,6 +620,53 @@ func TestRunRLMApprovalCriticReceivesRemainingTotalBudget(t *testing.T) {
 		t.Fatalf("RunRLM() error = %v", err)
 	}
 	assertFloatSliceNear(t, runner.maxCosts, []float64{0.15, 0.10})
+}
+
+func TestRunRLMReservesTimeAndBoundsApprovalCritic(t *testing.T) {
+	runner := &scriptedRLMExecutor{responses: []string{"approve", "approve"}}
+	framework := NewFramework(nil, nil).WithRLMRunner(runner)
+	parentDeadline := time.Now().Add(10 * time.Minute)
+	ctx, cancel := context.WithDeadline(context.Background(), parentDeadline)
+	defer cancel()
+
+	_, err := framework.RunRLM(ctx, criticRLMDefinition{}, RLMRunOpts{
+		MaxRetries:               1,
+		MaxIterations:            6,
+		MaxToolCalls:             6,
+		MaxVerificationCalls:     1,
+		ApprovalCriticReserve:    80 * time.Second,
+		CriticMaxIterations:      2,
+		CriticMaxToolCalls:       2,
+		CriticExplorationTimeout: 20 * time.Second,
+		CriticSynthesisLead:      50 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("RunRLM() error = %v", err)
+	}
+	if len(runner.deadlines) != 2 {
+		t.Fatalf("phase deadlines = %v, want primary and critic", runner.deadlines)
+	}
+	if delta := parentDeadline.Sub(runner.deadlines[0]); delta < 79*time.Second || delta > 81*time.Second {
+		t.Fatalf("primary time reserve = %s, want about 80s", delta)
+	}
+	if delta := parentDeadline.Sub(runner.deadlines[1]); delta < -time.Second || delta > time.Second {
+		t.Fatalf("critic deadline differs from parent by %s", delta)
+	}
+	if got := runner.iterations; len(got) != 2 || got[0] != 6 || got[1] != 2 {
+		t.Fatalf("iteration budgets = %v, want [6 2]", got)
+	}
+	if got := runner.toolLimits; len(got) != 2 || got[0] != 6 || got[1] != 2 {
+		t.Fatalf("tool budgets = %v, want [6 2]", got)
+	}
+	if got := runner.verificationLimits; len(got) != 2 || got[0] != 1 || got[1] != 1 {
+		t.Fatalf("verification budgets = %v, want [1 1]", got)
+	}
+	if got := runner.exploration; len(got) != 2 || got[1] != 20*time.Second {
+		t.Fatalf("critic exploration budget = %v, want 20s", got)
+	}
+	if got := runner.synthesis; len(got) != 2 || got[1] != 50*time.Second {
+		t.Fatalf("critic synthesis reserve = %v, want 50s", got)
+	}
 }
 
 func TestRunRLMUsesDedicatedApprovalCriticRunner(t *testing.T) {

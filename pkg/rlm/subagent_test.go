@@ -384,6 +384,20 @@ func TestSubAgentToolBudgetForcesSynthesis(t *testing.T) {
 	}
 }
 
+func TestSubAgentVerificationBudgetCapsExpensiveCalls(t *testing.T) {
+	agent := &SubAgent{maxVerificationCalls: 1}
+	if agent.verificationBudgetExhausted(&SubAgentResult{
+		ToolCalls: []SubAgentToolCall{{Name: "read_file"}},
+	}) {
+		t.Fatal("source inspection exhausted the verification budget")
+	}
+	if !agent.verificationBudgetExhausted(&SubAgentResult{
+		ToolCalls: []SubAgentToolCall{{Name: "run_verification"}},
+	}) {
+		t.Fatal("verification budget did not stop a second expensive call")
+	}
+}
+
 func TestSubAgentExplicitLimitStillForcesFinalTurn(t *testing.T) {
 	agent := &SubAgent{maxIterations: 3}
 	if agent.shouldSynthesize(context.Background(), 1, 3, time.Now()) {

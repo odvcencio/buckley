@@ -72,22 +72,23 @@ Keep summaries under 200 words - the coordinator only sees this summary, not you
 
 // SubAgent executes delegated tasks with tool access.
 type SubAgent struct {
-	id                 string
-	model              string
-	systemPrompt       string
-	reasoning          string
-	reasoningMaxTokens int
-	maxOutputTokens    int
-	maxIterations      int
-	maxToolCalls       int
-	maxCostUSD         float64
-	adaptive           bool
-	explorationTimeout time.Duration
-	synthesisLead      time.Duration
-	allowedTools       map[string]struct{}
-	readOnly           bool
-	reviewSnapshot     *model.ReviewSnapshot
-	toolTier           string
+	id                   string
+	model                string
+	systemPrompt         string
+	reasoning            string
+	reasoningMaxTokens   int
+	maxOutputTokens      int
+	maxIterations        int
+	maxToolCalls         int
+	maxVerificationCalls int
+	maxCostUSD           float64
+	adaptive             bool
+	explorationTimeout   time.Duration
+	synthesisLead        time.Duration
+	allowedTools         map[string]struct{}
+	readOnly             bool
+	reviewSnapshot       *model.ReviewSnapshot
+	toolTier             string
 
 	client     *model.Manager
 	registry   *tool.Registry
@@ -99,21 +100,22 @@ type SubAgent struct {
 
 // SubAgentConfig configures a sub-agent execution.
 type SubAgentConfig struct {
-	ID                 string
-	Model              string
-	Reasoning          string
-	ReasoningMaxTokens int
-	MaxOutputTokens    int
-	SystemPrompt       string
-	MaxIterations      int
-	MaxToolCalls       int
-	MaxCostUSD         float64
-	Adaptive           bool
-	ExplorationTimeout time.Duration
-	SynthesisLead      time.Duration
-	AllowedTools       []string
-	ReviewSnapshot     *model.ReviewSnapshot
-	ToolTier           string // role_permissions tier for runtime validation
+	ID                   string
+	Model                string
+	Reasoning            string
+	ReasoningMaxTokens   int
+	MaxOutputTokens      int
+	SystemPrompt         string
+	MaxIterations        int
+	MaxToolCalls         int
+	MaxVerificationCalls int
+	MaxCostUSD           float64
+	Adaptive             bool
+	ExplorationTimeout   time.Duration
+	SynthesisLead        time.Duration
+	AllowedTools         []string
+	ReviewSnapshot       *model.ReviewSnapshot
+	ToolTier             string // role_permissions tier for runtime validation
 }
 
 // SubAgentInstanceConfig preserves the merged oneshot runner API.
@@ -195,28 +197,29 @@ func NewSubAgent(cfg SubAgentConfig, deps SubAgentDeps) (*SubAgent, error) {
 	}
 
 	return &SubAgent{
-		id:                 cfg.ID,
-		model:              cfg.Model,
-		systemPrompt:       prompt,
-		reasoning:          normalizeSubAgentReasoning(cfg.Reasoning),
-		reasoningMaxTokens: max(0, cfg.ReasoningMaxTokens),
-		maxOutputTokens:    max(0, cfg.MaxOutputTokens),
-		maxIterations:      maxIterations,
-		maxToolCalls:       cfg.MaxToolCalls,
-		maxCostUSD:         cfg.MaxCostUSD,
-		adaptive:           cfg.Adaptive,
-		explorationTimeout: cfg.ExplorationTimeout,
-		synthesisLead:      synthesisLead,
-		allowedTools:       allowedTools,
-		readOnly:           isReadOnlyToolSet(cfg.AllowedTools) || cfg.ReviewSnapshot != nil,
-		reviewSnapshot:     cfg.ReviewSnapshot,
-		toolTier:           cfg.ToolTier,
-		client:             deps.Models,
-		registry:           deps.Registry,
-		scratchpad:         deps.Scratchpad,
-		conflicts:          deps.Conflicts,
-		approver:           deps.Approver,
-		engine:             deps.Engine,
+		id:                   cfg.ID,
+		model:                cfg.Model,
+		systemPrompt:         prompt,
+		reasoning:            normalizeSubAgentReasoning(cfg.Reasoning),
+		reasoningMaxTokens:   max(0, cfg.ReasoningMaxTokens),
+		maxOutputTokens:      max(0, cfg.MaxOutputTokens),
+		maxIterations:        maxIterations,
+		maxToolCalls:         cfg.MaxToolCalls,
+		maxVerificationCalls: cfg.MaxVerificationCalls,
+		maxCostUSD:           cfg.MaxCostUSD,
+		adaptive:             cfg.Adaptive,
+		explorationTimeout:   cfg.ExplorationTimeout,
+		synthesisLead:        synthesisLead,
+		allowedTools:         allowedTools,
+		readOnly:             isReadOnlyToolSet(cfg.AllowedTools) || cfg.ReviewSnapshot != nil,
+		reviewSnapshot:       cfg.ReviewSnapshot,
+		toolTier:             cfg.ToolTier,
+		client:               deps.Models,
+		registry:             deps.Registry,
+		scratchpad:           deps.Scratchpad,
+		conflicts:            deps.Conflicts,
+		approver:             deps.Approver,
+		engine:               deps.Engine,
 	}, nil
 }
 
@@ -711,6 +714,17 @@ func (a *SubAgent) executeTools(ctx context.Context, calls []model.ToolCall, reg
 			toolResults = append(toolResults, toolCall)
 			continue
 		}
+		if name == "run_verification" && a.verificationBudgetExhausted(result) {
+			toolCall := SubAgentToolCall{
+				ID:        call.ID,
+				Name:      name,
+				Arguments: call.Function.Arguments,
+				Result:    fmt.Sprintf("verification budget exhausted after %d call; synthesize from existing CI and source evidence", a.maxVerificationCalls),
+				Success:   false,
+			}
+			toolResults = append(toolResults, toolCall)
+			continue
+		}
 		if a.approver != nil {
 			if err := a.approver.CheckToolAccess(ctx, name); err != nil {
 				return nil, err
@@ -774,6 +788,19 @@ func (a *SubAgent) executeTools(ctx context.Context, calls []model.ToolCall, reg
 	}
 
 	return toolResults, nil
+}
+
+func (a *SubAgent) verificationBudgetExhausted(result *SubAgentResult) bool {
+	if a.maxVerificationCalls <= 0 || result == nil {
+		return false
+	}
+	count := 0
+	for _, call := range result.ToolCalls {
+		if call.Name == "run_verification" {
+			count++
+		}
+	}
+	return count >= a.maxVerificationCalls
 }
 
 // checkRolePermission validates a tool call against role_permissions arbiter rules.

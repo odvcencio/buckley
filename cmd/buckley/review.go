@@ -350,14 +350,15 @@ func runProjectReviewWithPolicy(ctx context.Context, framework *oneshot.Framewor
 	}
 
 	plan := reviewExecutionPlan{
-		sizeClass:           "project",
-		reasoningEffort:     "high",
-		reasoningMaxTokens:  4096,
-		maxIterations:       8,
-		maxToolCalls:        8,
-		verificationTimeout: 90 * time.Second,
-		explorationTimeout:  3 * time.Minute,
-		synthesisLead:       75 * time.Second,
+		sizeClass:            "project",
+		reasoningEffort:      "high",
+		reasoningMaxTokens:   4096,
+		maxIterations:        8,
+		maxToolCalls:         8,
+		maxVerificationCalls: 1,
+		verificationTimeout:  90 * time.Second,
+		explorationTimeout:   3 * time.Minute,
+		synthesisLead:        75 * time.Second,
 	}
 	reviewPolicy = reviewPolicy.withExecutionPlan(plan)
 	spinner.SetMessage(fmt.Sprintf("Running %s review with %s reasoning...", reviewPolicy.sizeClass, reviewPolicy.reasoningEffort))
@@ -368,6 +369,7 @@ func runProjectReviewWithPolicy(ctx context.Context, framework *oneshot.Framewor
 		MaxRetries:               reviewPolicy.maxRetries,
 		MaxIterations:            reviewPolicy.maxIterations,
 		MaxToolCalls:             reviewPolicy.maxToolCalls,
+		MaxVerificationCalls:     reviewPolicy.maxVerificationCalls,
 		MaxCostUSD:               reviewPolicy.maxCostUSD,
 		ApprovalCriticReserveUSD: reviewPolicy.criticReserveUSD,
 		ExplorationTimeout:       reviewPolicy.explorationTimeout,
@@ -458,8 +460,14 @@ func runBranchReviewWithPolicy(ctx context.Context, opts reviewCommandOptions, f
 		MaxRetries:               reviewPolicy.maxRetries,
 		MaxIterations:            reviewPolicy.maxIterations,
 		MaxToolCalls:             reviewPolicy.maxToolCalls,
+		MaxVerificationCalls:     reviewPolicy.maxVerificationCalls,
 		MaxCostUSD:               reviewPolicy.maxCostUSD,
 		ApprovalCriticReserveUSD: reviewPolicy.criticReserveUSD,
+		ApprovalCriticReserve:    enabledReviewDuration(reviewPolicy.approvalCritic, reviewPolicy.criticReserve),
+		CriticMaxIterations:      reviewPolicy.criticMaxIterations,
+		CriticMaxToolCalls:       reviewPolicy.criticMaxToolCalls,
+		CriticExplorationTimeout: reviewPolicy.criticExploration,
+		CriticSynthesisLead:      reviewPolicy.criticSynthesisLead,
 		ExplorationTimeout:       reviewPolicy.explorationTimeout,
 		SynthesisLead:            reviewPolicy.synthesisLead,
 		VerificationTimeout:      reviewPolicy.verificationTimeout,

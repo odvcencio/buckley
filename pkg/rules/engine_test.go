@@ -773,8 +773,8 @@ func TestEngine_EvalStrategy_ReviewPlan_AllSizes(t *testing.T) {
 			wantReasoning:    1024,
 			wantIterations:   4,
 			wantToolCalls:    4,
-			wantVerification: 60,
-			wantReserve:      150,
+			wantVerification: 25,
+			wantReserve:      85,
 		},
 		{
 			name:             "feedback gets standard budget",
@@ -783,8 +783,8 @@ func TestEngine_EvalStrategy_ReviewPlan_AllSizes(t *testing.T) {
 			wantReasoning:    1536,
 			wantIterations:   5,
 			wantToolCalls:    5,
-			wantVerification: 60,
-			wantReserve:      165,
+			wantVerification: 30,
+			wantReserve:      90,
 		},
 		{
 			name:             "large change stays bounded",
@@ -793,8 +793,8 @@ func TestEngine_EvalStrategy_ReviewPlan_AllSizes(t *testing.T) {
 			wantReasoning:    2048,
 			wantIterations:   6,
 			wantToolCalls:    6,
-			wantVerification: 75,
-			wantReserve:      165,
+			wantVerification: 30,
+			wantReserve:      90,
 		},
 		{
 			name:             "incomplete context stays bounded",
@@ -803,8 +803,18 @@ func TestEngine_EvalStrategy_ReviewPlan_AllSizes(t *testing.T) {
 			wantReasoning:    2048,
 			wantIterations:   6,
 			wantToolCalls:    6,
-			wantVerification: 75,
-			wantReserve:      165,
+			wantVerification: 30,
+			wantReserve:      90,
+		},
+		{
+			name:             "high blast radius gets broad budget",
+			facts:            ReviewPlanFacts{FileCount: 3, DiffBytes: 8_000, BlastRadius: 1_127},
+			wantSize:         "broad",
+			wantReasoning:    2048,
+			wantIterations:   6,
+			wantToolCalls:    6,
+			wantVerification: 30,
+			wantReserve:      90,
 		},
 	}
 
@@ -821,8 +831,11 @@ func TestEngine_EvalStrategy_ReviewPlan_AllSizes(t *testing.T) {
 				"reasoning_max_tokens":         tt.wantReasoning,
 				"max_iterations":               tt.wantIterations,
 				"max_tool_calls":               tt.wantToolCalls,
+				"max_verification_calls":       1,
 				"verification_timeout_seconds": tt.wantVerification,
 				"synthesis_reserve_seconds":    tt.wantReserve,
+				"critic_max_iterations":        2,
+				"critic_max_tool_calls":        2,
 			} {
 				if got, ok := result.Params[key].(float64); !ok || got != want {
 					t.Errorf("%s = %v, want %.0f", key, result.Params[key], want)

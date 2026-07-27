@@ -120,12 +120,29 @@ func (ReviewPRDef) Name() string { return "review-pr" }
 
 func (d ReviewPRDef) MaxRLMIterations() int { return d.MaxIterations }
 
-func (ReviewPRDef) SystemPrompt() string {
-	return prompts.ReviewPRPrompt(time.Now())
+func (d ReviewPRDef) SystemPrompt() string {
+	prompt := prompts.ReviewPRPrompt(time.Now())
+	if d.authoritativeRemoteCIPasses() {
+		prompt += `
+
+REMOTE CI EXECUTION POLICY:
+- Authoritative remote continuous integration already passed for this immutable revision.
+- The run_verification tool is disabled. Use the named remote checks for Build and Tests evidence.`
+	}
+	return prompt
 }
 
-func (ReviewPRDef) AllowedTools() []string {
-	return reviewAllowedTools()
+func (d ReviewPRDef) AllowedTools() []string {
+	allowed := reviewAllowedTools()
+	if !d.authoritativeRemoteCIPasses() {
+		return allowed
+	}
+	return allowed[:len(allowed)-1]
+}
+
+func (d ReviewPRDef) authoritativeRemoteCIPasses() bool {
+	return parseRemoteCIState(d.CIStatus) == VerificationPass &&
+		(d.CIProvenance == prCISourceHead || d.CIProvenance == prCISourceBase)
 }
 
 func reviewAllowedTools() []string {
@@ -264,8 +281,7 @@ func reviewFenceMarker(line string) string {
 func (d ReviewPRDef) ValidateRLMExecution(result any, execution *oneshot.RLMResult) error {
 	review, ok := result.(*ReviewRLMResult)
 	if ok && review.Parsed != nil && review.Parsed.Approved &&
-		parseRemoteCIState(d.CIStatus) == VerificationPass &&
-		(d.CIProvenance == prCISourceHead || d.CIProvenance == prCISourceBase) {
+		d.authoritativeRemoteCIPasses() {
 		return nil
 	}
 	return validateReviewExecutionEvidence(result, execution, d.ChangedFiles)

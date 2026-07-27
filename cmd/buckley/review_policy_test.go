@@ -74,40 +74,47 @@ func TestResolveReviewExecutionPlanUsesGovernedSizeClasses(t *testing.T) {
 	if focused.sizeClass != "focused" || focused.reasoningEffort != "low" ||
 		focused.reasoningMaxTokens != 1024 ||
 		focused.maxIterations != 4 || focused.maxToolCalls != 4 ||
-		focused.verificationTimeout != 60*time.Second || focused.explorationTimeout != 60*time.Second ||
-		focused.synthesisLead != 150*time.Second {
+		focused.maxVerificationCalls != 1 ||
+		focused.verificationTimeout != 25*time.Second || focused.explorationTimeout != 45*time.Second ||
+		focused.synthesisLead != 85*time.Second || focused.criticReserve != 70*time.Second ||
+		focused.criticMaxIterations != 2 || focused.criticMaxToolCalls != 2 ||
+		focused.criticExploration != 15*time.Second || focused.criticSynthesisLead != 45*time.Second {
 		t.Fatalf("focused plan = %#v", focused)
 	}
 
 	broad := resolveReviewExecutionPlan(engine, rules.ReviewPlanFacts{
-		FileCount:         2,
-		DiffBytes:         8_000,
-		ContextIncomplete: true,
+		FileCount:   3,
+		DiffBytes:   8_000,
+		BlastRadius: 1_127,
 	})
 	if broad.sizeClass != "broad" || broad.reasoningEffort != "medium" ||
 		broad.reasoningMaxTokens != 2048 ||
 		broad.maxIterations != 6 || broad.maxToolCalls != 6 ||
-		broad.verificationTimeout != 75*time.Second || broad.explorationTimeout != 90*time.Second ||
-		broad.synthesisLead != 165*time.Second {
+		broad.maxVerificationCalls != 1 ||
+		broad.verificationTimeout != 30*time.Second || broad.explorationTimeout != 55*time.Second ||
+		broad.synthesisLead != 90*time.Second || broad.criticReserve != 80*time.Second ||
+		broad.criticMaxIterations != 2 || broad.criticMaxToolCalls != 2 ||
+		broad.criticExploration != 20*time.Second || broad.criticSynthesisLead != 50*time.Second {
 		t.Fatalf("broad plan = %#v", broad)
 	}
 }
 
 func TestReviewExecutionPlanPreservesExplicitTurnOverride(t *testing.T) {
 	opts := automatedReviewOptions{maxIterations: 5, adaptiveReasoning: true}.withExecutionPlan(reviewExecutionPlan{
-		sizeClass:           "standard",
-		reasoningEffort:     "medium",
-		reasoningMaxTokens:  4096,
-		maxIterations:       11,
-		maxToolCalls:        18,
-		verificationTimeout: 2 * time.Minute,
-		explorationTimeout:  4 * time.Minute,
-		synthesisLead:       90 * time.Second,
+		sizeClass:            "standard",
+		reasoningEffort:      "medium",
+		reasoningMaxTokens:   4096,
+		maxIterations:        11,
+		maxToolCalls:         18,
+		maxVerificationCalls: 1,
+		verificationTimeout:  2 * time.Minute,
+		explorationTimeout:   4 * time.Minute,
+		synthesisLead:        90 * time.Second,
 	})
 	if opts.maxIterations != 5 {
 		t.Fatalf("maxIterations = %d, want explicit override 5", opts.maxIterations)
 	}
-	if opts.maxToolCalls != 18 || opts.verificationTimeout != 2*time.Minute ||
+	if opts.maxToolCalls != 18 || opts.maxVerificationCalls != 1 || opts.verificationTimeout != 2*time.Minute ||
 		opts.explorationTimeout != 4*time.Minute || opts.synthesisLead != 90*time.Second ||
 		opts.reasoningEffort != "medium" || opts.reasoningMaxTokens != 4096 {
 		t.Fatalf("execution plan was not applied: %#v", opts)
