@@ -121,6 +121,29 @@ func TestPRReviewPromptRestrictsMinorFindingsToRealDefects(t *testing.T) {
 	if strings.Contains(prompt, "MINOR: Style, naming, documentation, minor improvements") {
 		t.Fatal("PR prompt still classifies style as a general MINOR finding")
 	}
+	for _, want := range []string{
+		"Never report ASD-STE100",
+		"permits clusters of three nouns",
+		"more test shapes only because more shapes exist",
+		"Write Findings only when Falsification concludes PROVED",
+		"Do not invent or paraphrase an identifier",
+		"REQUEST CHANGES requires at least one Blocker",
+		"current failing input, violated invariant, failing check, or reproducible current behavior",
+		"possible rename, regeneration, test drift, or private test-hook change is not a finding",
+		"malformed historical fixture",
+		"Write no words after the token",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("PR prompt missing %q", want)
+		}
+	}
+}
+
+func TestBranchReviewPromptRequiresProvedFalsificationForFindings(t *testing.T) {
+	prompt := reviewBranchWithToolsDefault(time.Unix(0, 0))
+	if !strings.Contains(prompt, "Write Findings only when Falsification concludes PROVED") {
+		t.Fatal("branch prompt does not require proved falsification for findings")
+	}
 }
 
 func TestBranchReviewPromptDoesNotMandateBroadGoSweep(t *testing.T) {
