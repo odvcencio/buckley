@@ -355,7 +355,13 @@ func runPRReviewWithOptions(ctx context.Context, prRef string, framework *onesho
 	}
 	if err := commands.RevalidatePRContext(prCtx); err != nil {
 		spinner.StopWithError(err.Error())
-		return nil, prCtx.PR, fmt.Errorf("review target changed: %w", err)
+		revalidationErr := fmt.Errorf("review target changed or could not be revalidated: %w", err)
+		partial := reviewResultFromRLM(fwResult, audit)
+		partial.incomplete = true
+		partial.incompleteWhy = revalidationErr.Error()
+		partial.reviewText = markIncompleteReview(partial.reviewText, partial.incompleteWhy)
+		partial.parsed = nil
+		return partial, prCtx.PR, revalidationErr
 	}
 
 	spinner.StopWithSuccess("PR review complete")

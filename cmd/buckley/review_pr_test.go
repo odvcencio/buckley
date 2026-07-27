@@ -84,6 +84,23 @@ func TestDefaultAutomatedReviewOptionsAndOverrides(t *testing.T) {
 	}
 }
 
+func TestMarkIncompleteReviewPreservesCompletedRevalidationWork(t *testing.T) {
+	review := markIncompleteReview(
+		"## Summary\n\nCompleted review evidence.",
+		"review target could not be revalidated: GitHub rate limited the request",
+	)
+	for _, want := range []string{
+		"Incomplete review",
+		"must not be used as an approval",
+		"GitHub rate limited the request",
+		"Completed review evidence",
+	} {
+		if !strings.Contains(review, want) {
+			t.Fatalf("salvaged review missing %q:\n%s", want, review)
+		}
+	}
+}
+
 func TestParseReviewPRCommandOptionsAcceptsFlagsAfterReference(t *testing.T) {
 	opts, err := parseReviewPRCommandOptions([]string{
 		"208",
