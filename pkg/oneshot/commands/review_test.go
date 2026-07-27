@@ -1173,6 +1173,26 @@ func TestReviewValidationRequiresBlockerForRequestChanges(t *testing.T) {
 	result, err = def.ParseResult(discussion)
 	assert.NoError(t, err)
 	assert.NoError(t, def.ValidateResult(result))
+
+	t.Run("unresolved feedback permits request changes", func(t *testing.T) {
+		unresolved := strings.Replace(
+			review,
+			"`NONE_SUPPLIED` — no prior feedback was supplied.",
+			"`DISPOSITIONED` — verified the supplied feedback.\n"+
+				"- **Feedback**: `thread:PRRT_1` — `UNRESOLVED` — the requested regression test is still absent.",
+			1,
+		)
+		unresolvedDef := ReviewPRDef{
+			ChangedFiles:                []string{"ratchet.go"},
+			CIStatus:                    "passing (1/1)",
+			CIProvenance:                prCISourceHead,
+			RequiresFeedbackDisposition: true,
+			RequiredFeedbackIDs:         []string{"thread:PRRT_1"},
+		}
+		unresolvedResult, parseErr := unresolvedDef.ParseResult(unresolved)
+		assert.NoError(t, parseErr)
+		assert.NoError(t, unresolvedDef.ValidateResult(unresolvedResult))
+	})
 }
 
 func TestReviewCoverageLedgerUsesNormalizedExactPaths(t *testing.T) {
