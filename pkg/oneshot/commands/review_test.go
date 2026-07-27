@@ -1057,13 +1057,17 @@ func TestReviewApprovalRequiresNormalizedPassingBuildAndTests(t *testing.T) {
 			review := strings.Replace(base, "- Build: PASS", "- Build: "+state, 1)
 			result, err := def.ParseResult(review)
 			assert.NoError(t, err)
-			assert.ErrorContains(t, def.ValidateResult(result), "requires Build status PASS")
+			validationErr := def.ValidateResult(result)
+			assert.ErrorContains(t, validationErr, "requires Build status PASS")
+			assert.True(t, oneshot.IsRLMExecutionEvidenceRequired(validationErr))
 		})
 		t.Run("tests "+state, func(t *testing.T) {
 			review := strings.Replace(base, "- Tests: PASS", "- Tests: "+state, 1)
 			result, err := def.ParseResult(review)
 			assert.NoError(t, err)
-			assert.ErrorContains(t, def.ValidateResult(result), "requires Tests status PASS")
+			validationErr := def.ValidateResult(result)
+			assert.ErrorContains(t, validationErr, "requires Tests status PASS")
+			assert.True(t, oneshot.IsRLMExecutionEvidenceRequired(validationErr))
 		})
 	}
 
@@ -1080,7 +1084,9 @@ func TestReviewApprovalRequiresNormalizedPassingBuildAndTests(t *testing.T) {
 			review := strings.Replace(base, tc.oldStatus, tc.newStatus, 1)
 			result, err := def.ParseResult(review)
 			assert.NoError(t, err)
-			assert.ErrorContains(t, def.ValidateResult(result), tc.wantMessage)
+			validationErr := def.ValidateResult(result)
+			assert.ErrorContains(t, validationErr, tc.wantMessage)
+			assert.False(t, oneshot.IsRLMExecutionEvidenceRequired(validationErr))
 		})
 	}
 }

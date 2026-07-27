@@ -319,9 +319,12 @@ func TestRunRLMRetriesExecutionEvidenceFailureWithGuidance(t *testing.T) {
 	framework := NewFramework(nil, nil).WithRLMRunner(runner)
 
 	result, err := framework.RunRLM(context.Background(), executionValidatingRLMDefinition{}, RLMRunOpts{
-		UserPrompt:    "review this change",
-		MaxRetries:    2,
-		MaxIterations: 8,
+		UserPrompt:         "review this change",
+		MaxRetries:         2,
+		MaxIterations:      14,
+		MaxToolCalls:       24,
+		ExplorationTimeout: 3 * time.Minute,
+		SynthesisLead:      time.Minute,
 	})
 	if err != nil {
 		t.Fatalf("RunRLM() error = %v", err)
@@ -332,8 +335,17 @@ func TestRunRLMRetriesExecutionEvidenceFailureWithGuidance(t *testing.T) {
 	if len(runner.prompts) != 2 || !strings.Contains(runner.prompts[1], "missing execution evidence") {
 		t.Fatalf("retry prompt missing execution-evidence guidance: %#v", runner.prompts)
 	}
-	if got := runner.iterations; len(got) != 2 || got[0] != 8 || got[1] != 8 {
-		t.Fatalf("iteration budgets = %v, want [8 8]", got)
+	if got := runner.iterations; len(got) != 2 || got[0] != 14 || got[1] != evidenceRepairMaxIterations {
+		t.Fatalf("iteration budgets = %v, want [14 %d]", got, evidenceRepairMaxIterations)
+	}
+	if got := runner.toolLimits; len(got) != 2 || got[0] != 24 || got[1] != evidenceRepairMaxToolCalls {
+		t.Fatalf("tool budgets = %v, want [24 %d]", got, evidenceRepairMaxToolCalls)
+	}
+	if strings.Contains(runner.prompts[1], "review this change") {
+		t.Fatalf("evidence repair repeated the original evidence: %q", runner.prompts[1])
+	}
+	if !strings.Contains(runner.prompts[1], "Gather only the missing evidence") {
+		t.Fatalf("evidence repair prompt = %q", runner.prompts[1])
 	}
 }
 

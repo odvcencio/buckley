@@ -7,6 +7,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"m31labs.dev/buckley/pkg/oneshot"
 )
 
 // Severity levels for findings.
@@ -242,10 +244,16 @@ func ValidateParsedReview(parsed *ParsedReview, opts ReviewValidationOptions) er
 			return fmt.Errorf("an approval cannot be issued from incomplete or truncated review context")
 		}
 		if parsed.BuildVerification != VerificationPass {
-			return fmt.Errorf("an approval requires Build status PASS, got %s", parsed.BuildVerification)
+			return oneshot.RequireRLMExecutionEvidence(fmt.Errorf(
+				"an approval requires Build status PASS, got %s",
+				parsed.BuildVerification,
+			))
 		}
 		if parsed.TestVerification != VerificationPass {
-			return fmt.Errorf("an approval requires Tests status PASS, got %s", parsed.TestVerification)
+			return oneshot.RequireRLMExecutionEvidence(fmt.Errorf(
+				"an approval requires Tests status PASS, got %s",
+				parsed.TestVerification,
+			))
 		}
 		if opts.RequirePassingRemoteCI {
 			ciState := parseRemoteCIState(opts.CIStatus)

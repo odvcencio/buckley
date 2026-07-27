@@ -14,6 +14,13 @@ import (
 
 const defaultMaxRetries = 3
 
+const (
+	evidenceRepairMaxIterations      = 8
+	evidenceRepairMaxToolCalls       = 8
+	evidenceRepairExplorationTimeout = 2 * time.Minute
+	evidenceRepairSynthesisLead      = 30 * time.Second
+)
+
 // Framework provides a single execution engine for all oneshot commands.
 // It replaces the duplicated Runner types in commit/, pr/, and rlm/.
 //
@@ -406,6 +413,14 @@ type rlmPhaseResult struct {
 	err      error
 }
 
+type rlmValidationRetryMode uint8
+
+const (
+	rlmValidationRetryFull rlmValidationRetryMode = iota
+	rlmValidationRetryText
+	rlmValidationRetryEvidence
+)
+
 func (f *Framework) runValidatedRLMPhase(
 	ctx context.Context,
 	runner RLMExecutor,
@@ -419,14 +434,28 @@ func (f *Framework) runValidatedRLMPhase(
 	userPrompt := basePrompt
 	var result rlmPhaseResult
 	var lastErr error
-	repairOnly := false
+	retryMode := rlmValidationRetryFull
 
 	for attempt := 0; attempt < maxRetries; attempt++ {
 		attemptOpts := executionOpts
-		if attempt > 0 && repairOnly {
-			attemptOpts.MaxIterations = 1
-			attemptOpts.MaxToolCalls = 0
-			attemptOpts.ExplorationTimeout = 0
+		if attempt > 0 {
+			switch retryMode {
+			case rlmValidationRetryText:
+				attemptOpts.MaxIterations = 1
+				attemptOpts.MaxToolCalls = 0
+				attemptOpts.ExplorationTimeout = 0
+			case rlmValidationRetryEvidence:
+				attemptOpts.MaxIterations = boundedPositiveLimit(attemptOpts.MaxIterations, evidenceRepairMaxIterations)
+				attemptOpts.MaxToolCalls = boundedPositiveLimit(attemptOpts.MaxToolCalls, evidenceRepairMaxToolCalls)
+				attemptOpts.ExplorationTimeout = boundedPositiveDuration(
+					attemptOpts.ExplorationTimeout,
+					evidenceRepairExplorationTimeout,
+				)
+				attemptOpts.SynthesisLead = boundedPositiveDuration(
+					attemptOpts.SynthesisLead,
+					evidenceRepairSynthesisLead,
+				)
+			}
 		}
 		if executionOpts.MaxCostUSD > 0 {
 			attemptOpts.MaxCostUSD = executionOpts.MaxCostUSD - result.cost
@@ -456,20 +485,29 @@ func (f *Framework) runValidatedRLMPhase(
 		}
 		if rlmResult == nil {
 			lastErr = fmt.Errorf("RLM runner returned no result")
-			repairOnly = false
+			retryMode = rlmValidationRetryFull
 		} else {
 			result.value, lastErr = def.ParseResult(rlmResult.Response)
-			repairOnly = lastErr != nil
+			if lastErr != nil {
+				retryMode = rlmValidationRetryText
+			}
 			if lastErr == nil {
 				if validator, ok := def.(RLMResultValidator); ok {
 					lastErr = validator.ValidateResult(result.value)
-					repairOnly = lastErr != nil
+					if lastErr != nil {
+						retryMode = rlmValidationRetryText
+						if IsRLMExecutionEvidenceRequired(lastErr) {
+							retryMode = rlmValidationRetryEvidence
+						}
+					}
 				}
 			}
 			if lastErr == nil {
 				if validator, ok := def.(RLMExecutionValidator); ok {
 					lastErr = validator.ValidateRLMExecution(result.value, rlmResult)
-					repairOnly = false
+					if lastErr != nil {
+						retryMode = rlmValidationRetryEvidence
+					}
 				}
 			}
 		}
@@ -482,7 +520,7 @@ func (f *Framework) runValidatedRLMPhase(
 			rlmResult,
 			phase,
 			lastErr,
-			repairOnly,
+			retryMode,
 		)
 	}
 
@@ -490,10 +528,16 @@ func (f *Framework) runValidatedRLMPhase(
 	return result
 }
 
-func buildRLMValidationRetryPrompt(basePrompt string, previous *RLMResult, phase string, validationErr error, repairOnly bool) string {
+func buildRLMValidationRetryPrompt(
+	basePrompt string,
+	previous *RLMResult,
+	phase string,
+	validationErr error,
+	retryMode rlmValidationRetryMode,
+) string {
 	rejection := "QUALITY GATE: The previous " + phase + " review was rejected: " +
 		strings.TrimSpace(validationErr.Error()) + ". "
-	if repairOnly && previous != nil && strings.TrimSpace(previous.Response) != "" {
+	if retryMode == rlmValidationRetryText && previous != nil && strings.TrimSpace(previous.Response) != "" {
 		prefix := ""
 		if phase != "primary" {
 			prefix = basePrompt + "\n\n"
@@ -503,8 +547,29 @@ func buildRLMValidationRetryPrompt(basePrompt string, previous *RLMResult, phase
 			"Return one complete review in the required format.\n\nPRIOR REVIEW:\n" +
 			previous.Response
 	}
+	if retryMode == rlmValidationRetryEvidence && previous != nil && strings.TrimSpace(previous.Response) != "" {
+		return rejection +
+			"Gather only the missing evidence with the available tools. Run each required verification before synthesis. " +
+			"Do not repeat inspection unless new evidence contradicts the prior review. " +
+			"Return one complete review in the required format.\n\nPRIOR REVIEW:\n" +
+			previous.Response
+	}
 	return basePrompt + "\n\n" + rejection +
 		"Re-run the review from the supplied evidence and return a complete, internally consistent review in the required format."
+}
+
+func boundedPositiveLimit(value, limit int) int {
+	if value <= 0 || value > limit {
+		return limit
+	}
+	return value
+}
+
+func boundedPositiveDuration(value, limit time.Duration) time.Duration {
+	if value <= 0 || value > limit {
+		return limit
+	}
+	return value
 }
 
 // resolveMaxRetries determines the retry count from opts, arbiter, or defaults.
