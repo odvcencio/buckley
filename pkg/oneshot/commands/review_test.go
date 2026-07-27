@@ -1159,6 +1159,20 @@ func TestReviewFeedbackLedgerRequiresExactPerIDDisposition(t *testing.T) {
 		{ID: "review:123", Status: FeedbackDisputed, Evidence: "source trace proves the concern does not apply."},
 	}, result.(*ReviewRLMResult).Parsed.FeedbackEntries)
 
+	bareStatus := completeReviewWithCoverage(
+		fileLine + disposition +
+			"- **Feedback**: `thread:PRRT_1` — ADDRESSED — focused test proves the requested boundary fix.\n" +
+			"- **Feedback**: `review:123` — DISPUTED — source trace proves the concern does not apply.\n" +
+			verification,
+	)
+	result, err = def.ParseResult(bareStatus)
+	assert.NoError(t, err)
+	assert.Equal(t, []FeedbackEntry{
+		{ID: "thread:PRRT_1", Status: FeedbackAddressed, Evidence: "focused test proves the requested boundary fix."},
+		{ID: "review:123", Status: FeedbackDisputed, Evidence: "source trace proves the concern does not apply."},
+	}, result.(*ReviewRLMResult).Parsed.FeedbackEntries)
+	assert.NoError(t, def.ValidateResult(result))
+
 	tests := []struct {
 		name    string
 		entries string

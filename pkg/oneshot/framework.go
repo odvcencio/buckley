@@ -552,7 +552,7 @@ func buildRLMValidationRetryPrompt(
 		strings.TrimSpace(validationErr.Error()) + ". "
 	if retryMode == rlmValidationRetryText && previous != nil && strings.TrimSpace(previous.Response) != "" {
 		prefix := ""
-		if phase != "primary" {
+		if phase != "primary" || isToolCallOnlyRLMSummary(previous.Response) {
 			prefix = basePrompt + "\n\n"
 		}
 		return prefix + rejection +
@@ -569,6 +569,11 @@ func buildRLMValidationRetryPrompt(
 	}
 	return basePrompt + "\n\n" + rejection +
 		"Re-run the review from the supplied evidence and return a complete, internally consistent review in the required format."
+}
+
+func isToolCallOnlyRLMSummary(response string) bool {
+	response = strings.TrimSpace(response)
+	return strings.HasPrefix(response, "Executed ") && strings.Contains(response, " tool calls:")
 }
 
 func boundedPositiveLimit(value, limit int) int {
