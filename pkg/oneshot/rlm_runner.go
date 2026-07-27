@@ -147,6 +147,7 @@ func (r *RLMRunner) Run(ctx context.Context, systemPrompt, task string, allowedT
 		Model:              modelToUse,
 		Reasoning:          reasoningEffort,
 		ReasoningMaxTokens: opts.ReasoningMaxTokens,
+		MaxOutputTokens:    reviewRLMOutputTokenLimit(opts.ReasoningMaxTokens),
 		SystemPrompt:       systemPrompt,
 		MaxIterations:      opts.MaxIterations,
 		MaxToolCalls:       opts.MaxToolCalls,
@@ -266,6 +267,13 @@ func (r *RLMRunner) Run(ctx context.Context, systemPrompt, task string, allowedT
 		return result, fmt.Errorf("execute task: %w", executionErr)
 	}
 	return result, nil
+}
+
+func reviewRLMOutputTokenLimit(reasoningMaxTokens int) int {
+	if reasoningMaxTokens <= 0 {
+		return 0
+	}
+	return 4096
 }
 
 func effectiveRLMMaxCostUSD(providerID string, configured float64) float64 {

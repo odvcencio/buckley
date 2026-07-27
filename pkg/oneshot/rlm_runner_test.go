@@ -31,6 +31,15 @@ func TestNativeCodexReviewRunsWithoutCatalogPricing(t *testing.T) {
 	}
 }
 
+func TestReviewRLMOutputTokenLimitRequiresGovernedReasoning(t *testing.T) {
+	if got := reviewRLMOutputTokenLimit(0); got != 0 {
+		t.Fatalf("ungoverned output limit = %d, want zero", got)
+	}
+	if got := reviewRLMOutputTokenLimit(1024); got != 4096 {
+		t.Fatalf("governed output limit = %d, want 4096", got)
+	}
+}
+
 func TestFormatIncompleteRLMResponseRetainsCompletedEvidence(t *testing.T) {
 	result := &rlm.SubAgentResult{
 		Summary:      "Inspected the sharding contract.",
