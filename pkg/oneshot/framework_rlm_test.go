@@ -123,6 +123,38 @@ type criticRLMDefinition struct{}
 
 type executionCriticRLMDefinition struct{ criticRLMDefinition }
 
+type pointerCriticResult struct {
+	approved bool
+}
+
+type typedNilCriticRLMDefinition struct{}
+
+func (typedNilCriticRLMDefinition) Name() string           { return "typed-nil-critic-test" }
+func (typedNilCriticRLMDefinition) SystemPrompt() string   { return "primary reviewer" }
+func (typedNilCriticRLMDefinition) AllowedTools() []string { return nil }
+func (typedNilCriticRLMDefinition) ParseResult(response string) (any, error) {
+	if response == "approve" {
+		return &pointerCriticResult{approved: true}, nil
+	}
+	return (*pointerCriticResult)(nil), fmt.Errorf("malformed review")
+}
+func (typedNilCriticRLMDefinition) ValidateResult(result any) error {
+	if value, ok := result.(*pointerCriticResult); !ok || value == nil || !value.approved {
+		return fmt.Errorf("malformed review")
+	}
+	return nil
+}
+func (typedNilCriticRLMDefinition) RequiresApprovalCritic(result any) bool {
+	value, ok := result.(*pointerCriticResult)
+	return ok && value != nil && value.approved
+}
+func (typedNilCriticRLMDefinition) ApprovalCriticSystemPrompt() string {
+	return "adversarial critic"
+}
+func (typedNilCriticRLMDefinition) BuildApprovalCriticPrompt(string, any) (string, error) {
+	return "check the approval", nil
+}
+
 func (executionCriticRLMDefinition) ValidateRLMExecution(result any, execution *RLMResult) error {
 	if result == "approve" && (execution == nil || execution.ProviderID != "verified") {
 		return fmt.Errorf("approval lacks current-attempt execution evidence")
@@ -924,6 +956,26 @@ func TestRunRLMApprovalCriticRetriesMalformedResultAndExposesCounts(t *testing.T
 	}
 	if got := runner.systems; len(got) != 3 || got[1] != "adversarial critic" || got[2] != "adversarial critic" {
 		t.Fatalf("systems = %#v, want fresh critic on retry", got)
+	}
+}
+
+func TestRunRLMCriticFailurePreservesPrimaryWhenCriticValueIsTypedNil(t *testing.T) {
+	runner := &scriptedRLMExecutor{responses: []string{"approve", "malformed"}}
+	framework := NewFramework(nil, nil).WithRLMRunner(runner)
+
+	result, err := framework.RunRLM(context.Background(), typedNilCriticRLMDefinition{}, RLMRunOpts{
+		UserPrompt: "diff evidence",
+		MaxRetries: 1,
+	})
+	if err == nil || !strings.Contains(err.Error(), "approval critic review validation failed") {
+		t.Fatalf("RunRLM() error = %v, want critic validation error", err)
+	}
+	primary, ok := result.Value.(*pointerCriticResult)
+	if !ok || primary == nil || !primary.approved {
+		t.Fatalf("result.Value = %#v, want preserved primary approval", result.Value)
+	}
+	if !result.Incomplete || result.CriticAttempts != 1 {
+		t.Fatalf("result state = incomplete:%v critic:%d, want true/1", result.Incomplete, result.CriticAttempts)
 	}
 }
 

@@ -3,6 +3,7 @@ package oneshot
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"strings"
 	"time"
 
@@ -446,7 +447,7 @@ func (f *Framework) RunRLM(ctx context.Context, def RLMDefinition, opts RLMRunOp
 	traceAttempts = append(traceAttempts, critic.traces...)
 	result.Trace = transparency.AggregateTraceAttempts(traceAttempts)
 	if critic.err != nil {
-		if critic.value != nil {
+		if hasRLMValue(critic.value) {
 			result.Value = critic.value
 		}
 		result.Incomplete = true
@@ -459,6 +460,19 @@ func (f *Framework) RunRLM(ctx context.Context, def RLMDefinition, opts RLMRunOp
 	// authoritative final review.
 	result.Value = critic.value
 	return result, nil
+}
+
+func hasRLMValue(value any) bool {
+	if value == nil {
+		return false
+	}
+	reflected := reflect.ValueOf(value)
+	switch reflected.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return !reflected.IsNil()
+	default:
+		return true
+	}
 }
 
 func contextWithReservedTime(ctx context.Context, reserve time.Duration) (context.Context, context.CancelFunc) {

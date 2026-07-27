@@ -237,13 +237,15 @@ func newReviewCommandRuntime(cfg *config.Config, mgr *model.Manager) (*reviewCom
 	if cfg != nil {
 		criticModel = strings.TrimSpace(cfg.Buckbot.CriticModel)
 	}
+	criticReasoning := ""
+	criticModel, criticReasoning = config.SplitReasoningSuffix(criticModel)
 	if criticModel != "" && criticModel != modelID {
 		criticRunner := oneshot.NewRLMRunner(oneshot.RLMRunnerConfig{
 			Models:          mgr,
 			Registry:        registry,
 			Ledger:          ledger,
 			ModelID:         criticModel,
-			ReasoningEffort: resolveReviewReasoningEffort(cfg, mgr, criticModel, ""),
+			ReasoningEffort: resolveReviewReasoningEffort(cfg, mgr, criticModel, criticReasoning),
 		})
 		framework = framework.WithApprovalCriticRunner(criticRunner)
 		policy.criticReserveUSD = policy.maxCostUSD * 0.12
@@ -529,7 +531,7 @@ func reviewResultFromRLM(fwResult *oneshot.RunResult, audit *transparency.Contex
 	if fwResult == nil {
 		return result
 	}
-	if rlmResult, ok := fwResult.Value.(*commands.ReviewRLMResult); ok {
+	if rlmResult, ok := fwResult.Value.(*commands.ReviewRLMResult); ok && rlmResult != nil {
 		result.reviewText = rlmResult.Review
 		result.parsed = rlmResult.Parsed
 	}

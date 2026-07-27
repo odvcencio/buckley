@@ -61,6 +61,17 @@ func TestResolveReviewReasoningEffortUsesExplicitSuffix(t *testing.T) {
 	}
 }
 
+func TestCriticModelReasoningSuffixStaysIndependent(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Models.Reasoning = "low"
+	modelID, explicit := config.SplitReasoningSuffix("qwen/qwen3.7-plus-xhigh")
+
+	got := resolveReviewReasoningEffort(cfg, reviewReasoningChecker{supported: true}, modelID, explicit)
+	if modelID != "qwen/qwen3.7-plus" || got != "xhigh" {
+		t.Fatalf("critic selection = %q/%q, want qwen/qwen3.7-plus/xhigh", modelID, got)
+	}
+}
+
 func TestResolveReviewExecutionPlanUsesGovernedSizeClasses(t *testing.T) {
 	engine, err := rules.NewEngine()
 	if err != nil {
