@@ -19,6 +19,7 @@ const (
 	evidenceRepairMaxToolCalls       = 8
 	evidenceRepairExplorationTimeout = 2 * time.Minute
 	evidenceRepairSynthesisLead      = 30 * time.Second
+	textRepairReasoningMaxTokens     = 512
 )
 
 // Framework provides a single execution engine for all oneshot commands.
@@ -517,6 +518,10 @@ func (f *Framework) runValidatedRLMPhase(
 				attemptOpts.MaxIterations = 1
 				attemptOpts.MaxToolCalls = 0
 				attemptOpts.ExplorationTimeout = 0
+				attemptOpts.ReasoningMaxTokens = boundedPositiveLimit(
+					attemptOpts.ReasoningMaxTokens,
+					textRepairReasoningMaxTokens,
+				)
 			case rlmValidationRetryEvidence:
 				attemptOpts.MaxIterations = boundedPositiveLimit(attemptOpts.MaxIterations, evidenceRepairMaxIterations)
 				attemptOpts.MaxToolCalls = boundedPositiveLimit(attemptOpts.MaxToolCalls, evidenceRepairMaxToolCalls)
@@ -683,7 +688,12 @@ func buildRLMValidationRetryPrompt(
 		strings.TrimSpace(validationErr.Error()) + ". "
 	if retryMode == rlmValidationRetryText && previous != nil && strings.TrimSpace(previous.Response) != "" {
 		return basePrompt + "\n\n" + rejection +
-			"Repair the prior review without new tool calls. Preserve its technical judgment and evidence. " +
+			"Repair the prior review without new tool calls. Preserve judgments and evidence that satisfy the gate. " +
+			"Treat Falsification, Findings, Remarks, Grade, and Verdict as one coupled outcome. " +
+			"If the conclusion is DISPROVED or UNRESOLVED, replace Findings with `None.` and remove every finding ID from Blockers and Suggestions. " +
+			"Move a non-defect observation to Remarks. " +
+			"If a current defect is demonstrated, make that defect the strongest plausible failure, use conclusion PROVED, and keep a non-approval verdict. " +
+			"Never return findings with a DISPROVED or UNRESOLVED conclusion. " +
 			"Return one complete review in the required format.\n\nPRIOR REVIEW:\n" +
 			previous.Response
 	}

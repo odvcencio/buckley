@@ -204,8 +204,19 @@ func TestRunRLMRetriesValidationFailureWithGuidance(t *testing.T) {
 	if got := runner.iterations; len(got) != 2 || got[0] != 8 || got[1] != 1 {
 		t.Fatalf("iteration budgets = %v, want [8 1]", got)
 	}
+	if got := runner.reasoningMax; len(got) != 2 || got[1] != textRepairReasoningMaxTokens {
+		t.Fatalf("reasoning token budgets = %v, want repair cap %d", got, textRepairReasoningMaxTokens)
+	}
 	if got := strings.Join(runner.tools[0], ","); got != "read_file,run_shell" {
 		t.Fatalf("allowed tools = %q, want exact registry names", got)
+	}
+	for _, required := range []string{
+		"Treat Falsification, Findings, Remarks, Grade, and Verdict as one coupled outcome.",
+		"Never return findings with a DISPROVED or UNRESOLVED conclusion.",
+	} {
+		if !strings.Contains(runner.prompts[1], required) {
+			t.Fatalf("repair prompt omitted %q: %q", required, runner.prompts[1])
+		}
 	}
 }
 
