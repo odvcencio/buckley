@@ -93,6 +93,7 @@ func TestTraceBuilder(t *testing.T) {
 	builder.WithContext(audit)
 	builder.WithReasoning("I thought about it...")
 	builder.WithContent("Here's the result")
+	builder.WithResponse(&ResponseTrace{FinishReason: "stop"})
 	builder.WithToolCalls([]tools.ToolCall{
 		{ID: "call_1", Name: "tool_a"},
 	})
@@ -116,6 +117,9 @@ func TestTraceBuilder(t *testing.T) {
 	}
 	if trace.Content != "Here's the result" {
 		t.Errorf("unexpected content: %q", trace.Content)
+	}
+	if trace.Response == nil || trace.Response.FinishReason != "stop" {
+		t.Errorf("unexpected response metadata: %#v", trace.Response)
 	}
 	if len(trace.ToolCalls) != 1 {
 		t.Errorf("expected 1 tool call, got %d", len(trace.ToolCalls))

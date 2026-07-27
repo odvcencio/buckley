@@ -78,6 +78,10 @@ NON-NEGOTIABLE REVIEW RULES:
 - Anchor each finding to the smallest changed right-side line that demonstrates the defect. GitHub must accept the line as an inline comment.
 - If supporting evidence is outside the diff, cite it in Evidence. Keep the finding anchored to the causal changed line.
 - Include a suggestion block only when it is an exact replacement for the anchored changed lines. Otherwise, omit the block.
+- APPROVE requires Grade A with no Findings and no Suggestions. Put useful non-defect observations in Remarks.
+- A finding must prove a changed behavior, contract, security, data, performance, or test defect.
+- Do not report wording, comments, naming, style, documentation, maintainability, extensibility, or future support as findings without a demonstrated failure.
+- Do not claim provider finish-reason support without an exact changed branch or test that proves the claim.
 
 %s
 
@@ -99,7 +103,7 @@ OUTPUT FORMAT (follow exactly):
 
 Grading criteria:
 - A: No issues, ready to merge, exemplary PR
-- B: Minor issues only, approve with suggestions
+- B: Real non-blocking defects remain; do not approve
 - C: Major issues present, request changes
 - D: Critical issues, significant rework needed
 - F: CI failing or security vulnerabilities

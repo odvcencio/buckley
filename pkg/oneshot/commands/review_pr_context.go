@@ -134,6 +134,7 @@ type prDiff struct {
 	Text          string
 	Truncated     bool
 	OriginalBytes int
+	Files         []string
 }
 
 type prReference struct {
@@ -150,7 +151,16 @@ type inlineCommentsResult struct {
 	FallbackReason          string
 }
 
-const buckbotOperationalCommentPrefix = "<!-- buckbot:operation:"
+type prCommentsResult struct {
+	Comments    []PRComment
+	ViewerLogin string
+}
+
+const (
+	buckbotOperationalCommentPrefix = "<!-- buckbot:operation:"
+	buckbotFinalReviewPrefix        = "<!-- buckbot:final:"
+	buckbotInlineReviewPrefix       = "<!-- buckbot:inline:"
+)
 
 // BuckbotReviewIntakeMarker identifies a review-start notice. Context assembly
 // excludes these notices from the prior-feedback ledger.
@@ -160,6 +170,41 @@ func BuckbotReviewIntakeMarker(headSHA string) string {
 
 func isBuckbotOperationalComment(body string) bool {
 	return strings.HasPrefix(strings.TrimSpace(body), buckbotOperationalCommentPrefix)
+}
+
+func isBuckbotLifecycleFeedback(body string) bool {
+	body = strings.TrimSpace(body)
+	return isBuckbotOperationalComment(body) ||
+		strings.HasPrefix(body, buckbotFinalReviewPrefix) ||
+		strings.HasPrefix(body, buckbotInlineReviewPrefix)
+}
+
+func filterOwnBuckbotLifecycleComments(comments []PRComment, viewerLogin string) []PRComment {
+	if strings.TrimSpace(viewerLogin) == "" {
+		return comments
+	}
+	filtered := make([]PRComment, 0, len(comments))
+	for _, comment := range comments {
+		if strings.EqualFold(comment.Author, viewerLogin) && isBuckbotLifecycleFeedback(comment.Body) {
+			continue
+		}
+		filtered = append(filtered, comment)
+	}
+	return filtered
+}
+
+func filterOwnBuckbotLifecycleReviews(reviews []PRReview, viewerLogin string) []PRReview {
+	if strings.TrimSpace(viewerLogin) == "" {
+		return reviews
+	}
+	filtered := make([]PRReview, 0, len(reviews))
+	for _, review := range reviews {
+		if strings.EqualFold(review.Author, viewerLogin) && isBuckbotLifecycleFeedback(review.Body) {
+			continue
+		}
+		filtered = append(filtered, review)
+	}
+	return filtered
 }
 
 // AssemblePRContext gathers context for PR review using gh CLI.
@@ -223,17 +268,20 @@ func assemblePRContextWithOptions(prRef string, deps prContextDependencies, opts
 
 	headChecks, headChecksErr := getPRChecks(deps.run, target)
 
-	comments, err := getPRComments(deps.run, target)
+	commentResult, err := getPRCommentsWithViewer(deps.run, target)
+	viewerLogin := ""
 	if err == nil {
-		prCtx.Comments = comments
-		audit.Add("top-level comments", reviewEstimateTokens(prCommentBodies(comments)))
-		prCtx.addStatus("Top-level comments", "complete", fmt.Sprintf("%d comments", len(comments)), false)
+		viewerLogin = commentResult.ViewerLogin
+		prCtx.Comments = commentResult.Comments
+		audit.Add("top-level comments", reviewEstimateTokens(prCommentBodies(commentResult.Comments)))
+		prCtx.addStatus("Top-level comments", "complete", fmt.Sprintf("%d comments", len(commentResult.Comments)), false)
 	} else {
 		recordPRContextFailure(prCtx, audit, "Top-level comments", err)
 	}
 
 	reviews, err := getPRReviews(deps.run, target)
 	if err == nil {
+		reviews = filterOwnBuckbotLifecycleReviews(reviews, viewerLogin)
 		prCtx.Reviews = reviews
 		audit.Add("submitted reviews", reviewEstimateTokens(prReviewBodies(reviews)))
 		prCtx.addStatus("Submitted reviews", "complete", fmt.Sprintf("%d reviews", len(reviews)), false)
@@ -241,7 +289,7 @@ func assemblePRContextWithOptions(prRef string, deps prContextDependencies, opts
 		recordPRContextFailure(prCtx, audit, "Submitted reviews", err)
 	}
 
-	inline, err := getPRInlineComments(deps.run, pr)
+	inline, err := getPRInlineCommentsForViewer(deps.run, pr, viewerLogin)
 	if err == nil {
 		prCtx.InlineComments = inline.Comments
 		prCtx.ResolvedThreadsFiltered = inline.ResolvedThreadsFiltered
@@ -267,21 +315,15 @@ func assemblePRContextWithOptions(prRef string, deps prContextDependencies, opts
 		recordPRContextFailure(prCtx, audit, "Inline review threads", err)
 	}
 
-	files, filesErr := getPRFiles(deps.run, pr)
-	filesAuthoritative := filesErr == nil && len(files) == pr.ChangedFiles
-	if filesErr == nil {
-		prCtx.Files = files
-		if len(files) != pr.ChangedFiles {
-			audit.Add("changed files (cardinality mismatch)", len(files)*5)
-			prCtx.addStatus("Changed files", "incomplete",
-				fmt.Sprintf("metadata reports %d files; paginated API returned %d; review coverage is not authoritative", pr.ChangedFiles, len(files)), false)
-		} else {
-			audit.Add("changed files", len(files)*5)
-			prCtx.addStatus("Changed files", "complete", fmt.Sprintf("%d files", len(files)), false)
-		}
-	} else {
-		recordPRContextFailure(prCtx, audit, "Changed files", filesErr)
+	apiFiles, filesErr := getPRFiles(deps.run, pr)
+	files, detail, err := resolvePRChangedFiles(diff.Files, pr.ChangedFiles, apiFiles, filesErr)
+	if err != nil {
+		return nil, nil, fmt.Errorf("resolve authoritative changed files: %w", err)
 	}
+	prCtx.Files = files
+	filesAuthoritative := true
+	audit.Add("changed files", len(files)*5)
+	prCtx.addStatus("Changed files", "complete", detail, false)
 
 	if headChecksErr != nil {
 		prCtx.PR.CIStatus = "unknown"
@@ -786,7 +828,7 @@ func fetchPRReviewEvidence(run prCommandRunner, target prReference, metadata prM
 	feedbackTarget.Number = metadata.Number
 	feedbackTarget.Host = firstPRString(feedbackTarget.Host, metadata.Host)
 	feedbackTarget.Repository = firstPRString(feedbackTarget.Repository, metadata.Repository)
-	comments, err := getPRComments(run, feedbackTarget)
+	commentResult, err := getPRCommentsWithViewer(run, feedbackTarget)
 	if err != nil {
 		return prEvidenceSnapshot{}, fmt.Errorf("top-level comments: %w", err)
 	}
@@ -794,11 +836,12 @@ func fetchPRReviewEvidence(run prCommandRunner, target prReference, metadata prM
 	if err != nil {
 		return prEvidenceSnapshot{}, fmt.Errorf("submitted reviews: %w", err)
 	}
-	inline, err := getPRInlineComments(run, &PRInfo{
+	reviews = filterOwnBuckbotLifecycleReviews(reviews, commentResult.ViewerLogin)
+	inline, err := getPRInlineCommentsForViewer(run, &PRInfo{
 		Number:     metadata.Number,
 		Host:       metadata.Host,
 		Repository: metadata.Repository,
-	})
+	}, commentResult.ViewerLogin)
 	if err != nil {
 		return prEvidenceSnapshot{}, fmt.Errorf("inline review threads: %w", err)
 	}
@@ -816,7 +859,7 @@ func fetchPRReviewEvidence(run prCommandRunner, target prReference, metadata prM
 	if changed := describePRMetadataChanges(metadata, metadataAfter); changed != "" {
 		return prEvidenceSnapshot{}, fmt.Errorf("PR metadata changed during evidence re-fetch: %s", changed)
 	}
-	return newPREvidenceSnapshot(metadataAfter, checks, ciSource, ciRevision, comments, reviews, inline.Comments, inline.ResolvedThreadsFiltered), nil
+	return newPREvidenceSnapshot(metadataAfter, checks, ciSource, ciRevision, commentResult.Comments, reviews, inline.Comments, inline.ResolvedThreadsFiltered), nil
 }
 
 func newPREvidenceSnapshot(
@@ -1230,6 +1273,10 @@ func getPRDiffWithBudget(run prCommandRunner, target prReference, maxBytes int) 
 	if err != nil {
 		return prDiff{}, err
 	}
+	files, err := changedFilesFromPRDiff(string(output))
+	if err != nil {
+		return prDiff{}, fmt.Errorf("parse changed-file manifest from PR diff: %w", err)
+	}
 
 	// Reserve space for the truncation marker so output stays within budget.
 	const truncMarker = "\n... (truncated)"
@@ -1246,7 +1293,107 @@ func getPRDiffWithBudget(run prCommandRunner, target prReference, maxBytes int) 
 		Text:          diff,
 		Truncated:     res.Truncated,
 		OriginalBytes: len(output),
+		Files:         files,
 	}, nil
+}
+
+func changedFilesFromPRDiff(raw string) ([]string, error) {
+	segments := diffsignal.Split(raw)
+	if len(segments) == 0 {
+		if strings.TrimSpace(raw) == "" {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("unified diff contains no file boundaries")
+	}
+
+	files := make([]string, 0, len(segments))
+	seen := make(map[string]struct{}, len(segments))
+	for _, segment := range segments {
+		file := strings.TrimSpace(segment.Path)
+		if file == "" {
+			return nil, fmt.Errorf("unified diff contains an empty changed-file path")
+		}
+		if _, duplicate := seen[file]; duplicate {
+			return nil, fmt.Errorf("unified diff contains duplicate changed-file path %q", file)
+		}
+		seen[file] = struct{}{}
+		files = append(files, file)
+	}
+	return files, nil
+}
+
+func resolvePRChangedFiles(diffFiles []string, reportedCount int, apiFiles []string, apiErr error) ([]string, string, error) {
+	if reportedCount < 0 {
+		return nil, "", fmt.Errorf("metadata reports invalid changed-file count %d", reportedCount)
+	}
+	if err := validatePRChangedFileManifest(diffFiles, reportedCount, "unified diff"); err != nil {
+		return nil, "", err
+	}
+
+	if apiErr != nil {
+		return append([]string(nil), diffFiles...),
+			fmt.Sprintf("%d files; exact diff manifest matched metadata after the files API failed: %s",
+				len(diffFiles), compactPRContextErrorText(apiErr.Error())), nil
+	}
+	if err := validatePRChangedFileManifest(apiFiles, reportedCount, "files API"); err != nil {
+		return nil, "", err
+	}
+	if err := comparePRChangedFileManifests(diffFiles, apiFiles); err != nil {
+		return nil, "", err
+	}
+	return append([]string(nil), diffFiles...),
+		fmt.Sprintf("%d files; exact diff and files API manifests match", len(diffFiles)), nil
+}
+
+func validatePRChangedFileManifest(files []string, reportedCount int, source string) error {
+	if len(files) != reportedCount {
+		return fmt.Errorf("%s manifest has %d files; metadata reports %d", source, len(files), reportedCount)
+	}
+	seen := make(map[string]struct{}, len(files))
+	for _, rawFile := range files {
+		file := strings.TrimSpace(rawFile)
+		if file == "" {
+			return fmt.Errorf("%s manifest contains an empty path", source)
+		}
+		if _, duplicate := seen[file]; duplicate {
+			return fmt.Errorf("%s manifest contains duplicate path %q", source, file)
+		}
+		seen[file] = struct{}{}
+	}
+	return nil
+}
+
+func comparePRChangedFileManifests(diffFiles, apiFiles []string) error {
+	diffSet := make(map[string]struct{}, len(diffFiles))
+	for _, file := range diffFiles {
+		diffSet[strings.TrimSpace(file)] = struct{}{}
+	}
+	var missing []string
+	var unexpected []string
+	for _, rawFile := range apiFiles {
+		file := strings.TrimSpace(rawFile)
+		if _, exists := diffSet[file]; !exists {
+			unexpected = append(unexpected, file)
+		}
+		delete(diffSet, file)
+	}
+	for file := range diffSet {
+		missing = append(missing, file)
+	}
+	sort.Strings(missing)
+	sort.Strings(unexpected)
+	if len(missing) == 0 && len(unexpected) == 0 {
+		return nil
+	}
+	return fmt.Errorf("files API manifest does not match the exact diff: missing %s; unexpected %s",
+		formatPRManifestPaths(missing), formatPRManifestPaths(unexpected))
+}
+
+func formatPRManifestPaths(files []string) string {
+	if len(files) == 0 {
+		return "none"
+	}
+	return strings.Join(files, ", ")
 }
 
 func getPRChecks(run prCommandRunner, target prReference) ([]PRCheck, error) {
@@ -1291,21 +1438,27 @@ const prTopLevelCommentsQuery = `query($owner: String!, $name: String!, $number:
 }`
 
 func getPRComments(run prCommandRunner, target prReference) ([]PRComment, error) {
-	comments, graphErr := getPRCommentsGraphQL(run, target)
+	result, err := getPRCommentsWithViewer(run, target)
+	return result.Comments, err
+}
+
+func getPRCommentsWithViewer(run prCommandRunner, target prReference) (prCommentsResult, error) {
+	result, graphErr := getPRCommentsGraphQL(run, target)
 	if graphErr == nil {
-		return comments, nil
+		result.Comments = filterOwnBuckbotLifecycleComments(result.Comments, result.ViewerLogin)
+		return result, nil
 	}
 	comments, restErr := getPRCommentsREST(run, target)
 	if restErr != nil {
-		return nil, fmt.Errorf("GraphQL top-level comments failed: %v; REST top-level comments failed: %w", graphErr, restErr)
+		return prCommentsResult{}, fmt.Errorf("GraphQL top-level comments failed: %v; REST top-level comments failed: %w", graphErr, restErr)
 	}
-	return comments, nil
+	return prCommentsResult{Comments: comments}, nil
 }
 
-func getPRCommentsGraphQL(run prCommandRunner, target prReference) ([]PRComment, error) {
+func getPRCommentsGraphQL(run prCommandRunner, target prReference) (prCommentsResult, error) {
 	owner, repo, err := splitPRRepository(target.Repository)
 	if err != nil {
-		return nil, fmt.Errorf("resolve repository for paginated top-level comments: %w", err)
+		return prCommentsResult{}, fmt.Errorf("resolve repository for paginated top-level comments: %w", err)
 	}
 	type graphComment struct {
 		ID     string `json:"id"`
@@ -1336,7 +1489,7 @@ func getPRCommentsGraphQL(run prCommandRunner, target prReference) ([]PRComment,
 		} `json:"errors"`
 	}
 
-	var comments []PRComment
+	var result prCommentsResult
 	after := ""
 	seenCursors := make(map[string]struct{})
 	for {
@@ -1353,43 +1506,45 @@ func getPRCommentsGraphQL(run prCommandRunner, target prReference) ([]PRComment,
 		args = withPRAPIHostname(args, target.Host)
 		output, err := run("gh", args...)
 		if err != nil {
-			return nil, err
+			return prCommentsResult{}, err
 		}
 
 		var response graphResponse
 		if err := json.Unmarshal(output, &response); err != nil {
-			return nil, err
+			return prCommentsResult{}, err
 		}
 		if len(response.Errors) > 0 {
-			return nil, fmt.Errorf("%s", response.Errors[0].Message)
+			return prCommentsResult{}, fmt.Errorf("%s", response.Errors[0].Message)
 		}
 		if response.Data.Viewer.Login == "" {
-			return nil, fmt.Errorf("authenticated viewer missing from GraphQL response")
+			return prCommentsResult{}, fmt.Errorf("authenticated viewer missing from GraphQL response")
 		}
 		if response.Data.Repository == nil || response.Data.Repository.PullRequest == nil {
-			return nil, fmt.Errorf("pull request not found in GraphQL response")
+			return prCommentsResult{}, fmt.Errorf("pull request not found in GraphQL response")
+		}
+		if result.ViewerLogin == "" {
+			result.ViewerLogin = response.Data.Viewer.Login
+		} else if !strings.EqualFold(result.ViewerLogin, response.Data.Viewer.Login) {
+			return prCommentsResult{}, fmt.Errorf("authenticated viewer changed during top-level comment pagination")
 		}
 
 		connection := response.Data.Repository.PullRequest.Comments
 		for _, comment := range connection.Nodes {
-			if comment.Author.Login == response.Data.Viewer.Login && isBuckbotOperationalComment(comment.Body) {
-				continue
-			}
-			comments = append(comments, PRComment{
+			result.Comments = append(result.Comments, PRComment{
 				ID:     stablePRFeedbackSourceID(comment.ID, "top-level-comment", comment.Author.Login, comment.Body),
 				Author: comment.Author.Login,
 				Body:   comment.Body,
 			})
 		}
 		if !connection.PageInfo.HasNextPage {
-			return comments, nil
+			return result, nil
 		}
 		cursor := connection.PageInfo.EndCursor
 		if cursor == "" {
-			return nil, fmt.Errorf("top-level comment pagination omitted the next cursor")
+			return prCommentsResult{}, fmt.Errorf("top-level comment pagination omitted the next cursor")
 		}
 		if _, duplicate := seenCursors[cursor]; duplicate {
-			return nil, fmt.Errorf("top-level comment pagination repeated cursor %q", cursor)
+			return prCommentsResult{}, fmt.Errorf("top-level comment pagination repeated cursor %q", cursor)
 		}
 		seenCursors[cursor] = struct{}{}
 		after = cursor
@@ -1493,6 +1648,7 @@ func prRESTID(raw json.RawMessage) string {
 }
 
 const prReviewThreadsQuery = `query($owner: String!, $name: String!, $number: Int!, $after: String) {
+  viewer { login }
   repository(owner: $owner, name: $name) {
     pullRequest(number: $number) {
       reviewThreads(first: 100, after: $after) {
@@ -1524,12 +1680,16 @@ const prReviewThreadsQuery = `query($owner: String!, $name: String!, $number: In
 }`
 
 func getPRInlineComments(run prCommandRunner, pr *PRInfo) (inlineCommentsResult, error) {
+	return getPRInlineCommentsForViewer(run, pr, "")
+}
+
+func getPRInlineCommentsForViewer(run prCommandRunner, pr *PRInfo, viewerLogin string) (inlineCommentsResult, error) {
 	owner, repo, err := splitPRRepository(pr.Repository)
 	if err != nil {
 		return inlineCommentsResult{}, err
 	}
 
-	result, graphErr := getPRInlineCommentsGraphQL(run, pr.Host, owner, repo, pr.Number)
+	result, graphErr := getPRInlineCommentsGraphQL(run, pr.Host, owner, repo, pr.Number, viewerLogin)
 	if graphErr == nil {
 		return result, nil
 	}
@@ -1538,12 +1698,13 @@ func getPRInlineComments(run prCommandRunner, pr *PRInfo) (inlineCommentsResult,
 	if restErr != nil {
 		return inlineCommentsResult{}, fmt.Errorf("GraphQL review threads failed: %v; REST inline comments failed: %w", graphErr, restErr)
 	}
+	result.Comments = filterOwnBuckbotLifecycleComments(result.Comments, viewerLogin)
 	result.Fallback = true
 	result.FallbackReason = compactPRContextErrorText(graphErr.Error())
 	return result, nil
 }
 
-func getPRInlineCommentsGraphQL(run prCommandRunner, host, owner, repo string, prNumber int) (inlineCommentsResult, error) {
+func getPRInlineCommentsGraphQL(run prCommandRunner, host, owner, repo string, prNumber int, expectedViewer string) (inlineCommentsResult, error) {
 	type graphComment struct {
 		ID     string `json:"id"`
 		Author struct {
@@ -1572,6 +1733,9 @@ func getPRInlineCommentsGraphQL(run prCommandRunner, host, owner, repo string, p
 	}
 	type graphResponse struct {
 		Data struct {
+			Viewer struct {
+				Login string `json:"login"`
+			} `json:"viewer"`
 			Repository *struct {
 				PullRequest *struct {
 					ReviewThreads struct {
@@ -1590,6 +1754,7 @@ func getPRInlineCommentsGraphQL(run prCommandRunner, host, owner, repo string, p
 	}
 
 	var result inlineCommentsResult
+	viewerLogin := ""
 	after := ""
 	for page := 0; ; page++ {
 		args := []string{
@@ -1615,6 +1780,18 @@ func getPRInlineCommentsGraphQL(run prCommandRunner, host, owner, repo string, p
 		if len(response.Errors) > 0 {
 			return inlineCommentsResult{}, fmt.Errorf("%s", response.Errors[0].Message)
 		}
+		currentViewer := response.Data.Viewer.Login
+		if currentViewer == "" {
+			currentViewer = expectedViewer
+		}
+		if viewerLogin == "" {
+			viewerLogin = currentViewer
+			if expectedViewer != "" && !strings.EqualFold(expectedViewer, viewerLogin) {
+				return inlineCommentsResult{}, fmt.Errorf("authenticated viewer changed between review context sources")
+			}
+		} else if currentViewer != "" && !strings.EqualFold(viewerLogin, currentViewer) {
+			return inlineCommentsResult{}, fmt.Errorf("authenticated viewer changed during inline comment pagination")
+		}
 		if response.Data.Repository == nil || response.Data.Repository.PullRequest == nil {
 			return inlineCommentsResult{}, fmt.Errorf("pull request not found in GraphQL response")
 		}
@@ -1630,6 +1807,9 @@ func getPRInlineCommentsGraphQL(run prCommandRunner, host, owner, repo string, p
 			}
 			var threadEvidence strings.Builder
 			for _, comment := range thread.Comments.Nodes {
+				if viewerLogin != "" && strings.EqualFold(comment.Author.Login, viewerLogin) && isBuckbotLifecycleFeedback(comment.Body) {
+					continue
+				}
 				threadEvidence.WriteString(comment.ID)
 				threadEvidence.WriteByte('\n')
 				threadEvidence.WriteString(comment.Author.Login)
@@ -1641,6 +1821,9 @@ func getPRInlineCommentsGraphQL(run prCommandRunner, host, owner, repo string, p
 				thread.Path, strconv.Itoa(thread.Line), strconv.Itoa(thread.StartLine), strconv.Itoa(thread.OriginalLine),
 				strconv.FormatBool(thread.Outdated), threadEvidence.String())
 			for _, comment := range thread.Comments.Nodes {
+				if viewerLogin != "" && strings.EqualFold(comment.Author.Login, viewerLogin) && isBuckbotLifecycleFeedback(comment.Body) {
+					continue
+				}
 				commentID := stablePRFeedbackSourceID(comment.ID, "inline-comment", threadID,
 					comment.Author.Login, comment.Body, comment.Path, strconv.Itoa(comment.Line),
 					strconv.Itoa(comment.StartLine), strconv.Itoa(comment.OriginalLine))

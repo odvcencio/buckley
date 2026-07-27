@@ -49,6 +49,12 @@ type RLMResult struct {
 	// Response is the final text response
 	Response string
 
+	// Incomplete reports that execution ended before a final model response.
+	Incomplete bool
+
+	// FinishReason records why the provider stopped the final model turn.
+	FinishReason string
+
 	// ToolCalls lists all tools that were called
 	ToolCalls []rlm.SubAgentToolCall
 
@@ -187,6 +193,8 @@ func (r *RLMRunner) Run(ctx context.Context, systemPrompt, task string, allowedT
 	// Build result
 	result := &RLMResult{
 		Response:          response,
+		Incomplete:        executionErr != nil,
+		FinishReason:      agentResult.FinishReason,
 		ToolCalls:         agentResult.ToolCalls,
 		TokensUsed:        agentResult.TokensUsed,
 		InputTokens:       agentResult.InputTokens,
@@ -219,6 +227,9 @@ func (r *RLMRunner) Run(ctx context.Context, systemPrompt, task string, allowedT
 	}
 
 	builder.WithContent(response)
+	builder.WithResponse(&transparency.ResponseTrace{
+		FinishReason: agentResult.FinishReason,
+	})
 
 	// Calculate API cost only when the provider publishes token pricing.
 	// Native Codex runs through the user's CLI subscription.
@@ -238,6 +249,7 @@ func (r *RLMRunner) Run(ctx context.Context, systemPrompt, task string, allowedT
 	}
 
 	result.Trace = builder.Complete(tokens, cost)
+	result.Trace.Duration = duration
 
 	// Record in ledger
 	if r.ledger != nil {

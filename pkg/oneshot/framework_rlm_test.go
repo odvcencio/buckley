@@ -21,23 +21,39 @@ func (p partialRLMExecutor) Run(context.Context, string, string, []string, RLMEx
 	return p.result, p.err
 }
 
+type deadlineAfterRejectedRLMExecutor struct {
+	calls int
+}
+
+func (r *deadlineAfterRejectedRLMExecutor) Run(context.Context, string, string, []string, RLMExecutionOpts) (*RLMResult, error) {
+	r.calls++
+	if r.calls == 1 {
+		return &RLMResult{Response: "prior rejected review", FinishReason: "stop"}, nil
+	}
+	return &RLMResult{
+		Response:   "> [!WARNING]\n> **Incomplete agent result.**\n\nNo completed model output.",
+		Incomplete: true,
+	}, context.DeadlineExceeded
+}
+
 type scriptedRLMExecutor struct {
-	responses    []string
-	systems      []string
-	prompts      []string
-	tools        [][]string
-	snapshots    []*model.ReviewSnapshot
-	traces       []*transparency.Trace
-	providers    []string
-	iterations   []int
-	toolLimits   []int
-	exploration  []time.Duration
-	synthesis    []time.Duration
-	verification []time.Duration
-	models       []string
-	reasoning    []string
-	reasoningMax []int
-	maxCosts     []float64
+	responses     []string
+	systems       []string
+	prompts       []string
+	tools         [][]string
+	snapshots     []*model.ReviewSnapshot
+	traces        []*transparency.Trace
+	providers     []string
+	iterations    []int
+	toolLimits    []int
+	exploration   []time.Duration
+	synthesis     []time.Duration
+	verification  []time.Duration
+	models        []string
+	reasoning     []string
+	reasoningMax  []int
+	maxCosts      []float64
+	finishReasons []string
 }
 
 func (s *scriptedRLMExecutor) Run(_ context.Context, system string, task string, allowedTools []string, opts RLMExecutionOpts) (*RLMResult, error) {
@@ -69,7 +85,12 @@ func (s *scriptedRLMExecutor) Run(_ context.Context, system string, task string,
 		provider = s.providers[0]
 		s.providers = s.providers[1:]
 	}
-	return &RLMResult{Response: response, Trace: trace, ProviderID: provider}, nil
+	var finishReason string
+	if len(s.finishReasons) > 0 {
+		finishReason = s.finishReasons[0]
+		s.finishReasons = s.finishReasons[1:]
+	}
+	return &RLMResult{Response: response, FinishReason: finishReason, Trace: trace, ProviderID: provider}, nil
 }
 
 type validatingRLMDefinition struct{}
@@ -157,14 +178,37 @@ func TestRunRLMRetriesValidationFailureWithGuidance(t *testing.T) {
 	if !strings.Contains(runner.prompts[1], "PRIOR REVIEW:\nincomplete") {
 		t.Fatalf("retry prompt missing prior review: %q", runner.prompts[1])
 	}
-	if strings.Contains(runner.prompts[1], "review this change") {
-		t.Fatalf("repair prompt repeated the original evidence: %q", runner.prompts[1])
+	if !strings.Contains(runner.prompts[1], "review this change") {
+		t.Fatalf("repair prompt omitted the original evidence: %q", runner.prompts[1])
 	}
 	if got := runner.iterations; len(got) != 2 || got[0] != 8 || got[1] != 1 {
 		t.Fatalf("iteration budgets = %v, want [8 1]", got)
 	}
 	if got := strings.Join(runner.tools[0], ","); got != "read_file,run_shell" {
 		t.Fatalf("allowed tools = %q, want exact registry names", got)
+	}
+}
+
+func TestRunRLMValidationRepairPreservesExactManifestAndEvidence(t *testing.T) {
+	runner := &scriptedRLMExecutor{responses: []string{"incomplete", "valid"}}
+	framework := NewFramework(nil, nil).WithRLMRunner(runner)
+	prompt := "EXACT MANIFEST:\n- first.go\n- second.go\n\nEVIDENCE:\nverified at head-sha"
+
+	_, err := framework.RunRLM(context.Background(), validatingRLMDefinition{}, RLMRunOpts{
+		UserPrompt: prompt,
+		MaxRetries: 2,
+	})
+	if err != nil {
+		t.Fatalf("RunRLM() error = %v", err)
+	}
+	if len(runner.prompts) != 2 {
+		t.Fatalf("attempts = %d, want 2", len(runner.prompts))
+	}
+	repair := runner.prompts[1]
+	for _, required := range []string{"EXACT MANIFEST:", "- first.go", "- second.go", "EVIDENCE:", "verified at head-sha"} {
+		if !strings.Contains(repair, required) {
+			t.Fatalf("repair prompt omitted %q: %q", required, repair)
+		}
 	}
 }
 
@@ -201,6 +245,206 @@ func TestRunRLMToolSummaryRepairRestoresOriginalEvidence(t *testing.T) {
 	}
 }
 
+func TestRunRLMRepairsSavedUnfinishedToolCallOnce(t *testing.T) {
+	const savedFailure = `I need to address the rejection: my prior review concluded DISPROVED for the main policy risk, yet the gate demands I either PROVE or DISPROVE the strongest plausible failure. Looking at the evidence more carefully, the policy change IS intentional (the detail string is transparent), but the filesAuthoritative flag is objectively misleading when the files API failed. Let me verify concrete behavior by inspecting the actual code lines and running a focused verification.
+
+<tool_call>`
+	runner := &scriptedRLMExecutor{responses: []string{
+		"incomplete",
+		savedFailure,
+		"valid",
+	}}
+	framework := NewFramework(nil, nil).WithRLMRunner(runner)
+
+	result, err := framework.RunRLM(context.Background(), validatingRLMDefinition{}, RLMRunOpts{
+		UserPrompt:    "review this exact diff and manifest",
+		MaxRetries:    2,
+		MaxIterations: 8,
+		MaxToolCalls:  12,
+	})
+	if err != nil {
+		t.Fatalf("RunRLM() error = %v", err)
+	}
+	if result.Value != "valid" || result.Attempts != 3 {
+		t.Fatalf("result = %#v, want valid result after three attempts", result)
+	}
+	if got := runner.iterations; len(got) != 3 || got[0] != 8 || got[1] != 1 || got[2] != 1 {
+		t.Fatalf("iteration budgets = %v, want [8 1 1]", got)
+	}
+	if got := runner.toolLimits; len(got) != 3 || got[0] != 12 || got[1] != 0 || got[2] != 0 {
+		t.Fatalf("tool budgets = %v, want [12 0 0]", got)
+	}
+	cleanPrompt := runner.prompts[2]
+	for _, required := range []string{
+		"review this exact diff and manifest",
+		"I need to address the rejection",
+		"Complete one clean repair",
+		"Do not emit tool-call markup",
+	} {
+		if !strings.Contains(cleanPrompt, required) {
+			t.Fatalf("clean repair prompt omitted %q: %q", required, cleanPrompt)
+		}
+	}
+	if strings.Contains(cleanPrompt, "<tool_call>") {
+		t.Fatalf("clean repair prompt retained tool-call markup: %q", cleanPrompt)
+	}
+}
+
+func TestRunRLMRepairsSavedBalancedToolCallOnce(t *testing.T) {
+	const savedFailure = `I'll conduct a fresh, rigorous review of this PR. Let me start by examining the project guidance, diff, and structural evidence.
+
+## Analysis
+
+The manifest fallback validates the exact diff before use. Let me verify one changed test:
+
+<tool_call>
+<function=run_verification>
+<parameter=command>
+go test ./pkg/oneshot/commands -run TestAssemblePRContext
+</parameter>
+</function>
+</tool_call>`
+	runner := &scriptedRLMExecutor{
+		responses: []string{
+			"incomplete",
+			savedFailure,
+			"valid",
+		},
+		finishReasons: []string{"stop", "stop", "stop"},
+	}
+	framework := NewFramework(nil, nil).WithRLMRunner(runner)
+
+	result, err := framework.RunRLM(context.Background(), validatingRLMDefinition{}, RLMRunOpts{
+		UserPrompt:    "review this exact diff and manifest",
+		MaxRetries:    2,
+		MaxIterations: 8,
+		MaxToolCalls:  12,
+	})
+	if err != nil {
+		t.Fatalf("RunRLM() error = %v", err)
+	}
+	if result.Value != "valid" || result.Attempts != 3 {
+		t.Fatalf("result = %#v, want valid result after three attempts", result)
+	}
+	if got := runner.iterations; len(got) != 3 || got[0] != 8 || got[1] != 1 || got[2] != 1 {
+		t.Fatalf("iteration budgets = %v, want [8 1 1]", got)
+	}
+	if got := runner.toolLimits; len(got) != 3 || got[0] != 12 || got[1] != 0 || got[2] != 0 {
+		t.Fatalf("tool budgets = %v, want [12 0 0]", got)
+	}
+	cleanPrompt := runner.prompts[2]
+	for _, required := range []string{
+		"review this exact diff and manifest",
+		"I'll conduct a fresh, rigorous review",
+		"provider returned a tool call as final text",
+		"Complete one clean repair",
+		"Do not emit tool-call markup",
+	} {
+		if !strings.Contains(cleanPrompt, required) {
+			t.Fatalf("clean repair prompt omitted %q: %q", required, cleanPrompt)
+		}
+	}
+	for _, removed := range []string{"<tool_call>", "run_verification", "go test ./pkg/oneshot/commands"} {
+		if strings.Contains(cleanPrompt, removed) {
+			t.Fatalf("clean repair prompt retained %q: %q", removed, cleanPrompt)
+		}
+	}
+}
+
+func TestRunRLMRepairsFinalToolCallFinishReasonDirectly(t *testing.T) {
+	runner := &scriptedRLMExecutor{
+		responses:     []string{"Executed 5 tool calls: read_file", "valid"},
+		finishReasons: []string{"tool_calls", "stop"},
+	}
+	framework := NewFramework(nil, nil).WithRLMRunner(runner)
+
+	result, err := framework.RunRLM(context.Background(), validatingRLMDefinition{}, RLMRunOpts{
+		UserPrompt: "review this exact diff",
+		MaxRetries: 2,
+	})
+	if err != nil {
+		t.Fatalf("RunRLM() error = %v", err)
+	}
+	if result.Value != "valid" || result.Attempts != 2 {
+		t.Fatalf("result = %#v, want one direct clean repair", result)
+	}
+	if got := runner.toolLimits; len(got) != 2 || got[1] != 0 {
+		t.Fatalf("tool budgets = %v, want the repair to disable tools", got)
+	}
+	if !strings.Contains(runner.prompts[1], "stopped the final response to request a tool") {
+		t.Fatalf("clean repair omitted the finish reason: %q", runner.prompts[1])
+	}
+}
+
+func TestRunRLMCleanRepairRetainsOneTextCorrection(t *testing.T) {
+	runner := &scriptedRLMExecutor{
+		responses:     []string{"Executed 5 tool calls: read_file", "grade B approval", "valid"},
+		finishReasons: []string{"tool_calls", "stop", "stop"},
+	}
+	framework := NewFramework(nil, nil).WithRLMRunner(runner)
+
+	result, err := framework.RunRLM(context.Background(), validatingRLMDefinition{}, RLMRunOpts{
+		UserPrompt: "review this exact diff",
+		MaxRetries: 2,
+	})
+	if err != nil {
+		t.Fatalf("RunRLM() error = %v", err)
+	}
+	if result.Value != "valid" || result.Attempts != 3 {
+		t.Fatalf("result = %#v, want one text correction after clean repair", result)
+	}
+	if got := runner.toolLimits; len(got) != 3 || got[1] != 0 || got[2] != 0 {
+		t.Fatalf("tool budgets = %v, want both repairs to disable tools", got)
+	}
+	if !strings.Contains(runner.prompts[2], "missing coverage evidence") {
+		t.Fatalf("text correction omitted validation guidance: %q", runner.prompts[2])
+	}
+}
+
+func TestRunRLMRejectsRepeatedUnfinishedToolCallsWithoutLoop(t *testing.T) {
+	const malformed = "review progress\n\n<tool_call>"
+	runner := &scriptedRLMExecutor{responses: []string{
+		"incomplete",
+		malformed,
+		malformed,
+		"valid",
+	}}
+	framework := NewFramework(nil, nil).WithRLMRunner(runner)
+
+	result, err := framework.RunRLM(context.Background(), validatingRLMDefinition{}, RLMRunOpts{
+		UserPrompt: "review this change",
+		MaxRetries: 2,
+	})
+	if err == nil || !strings.Contains(err.Error(), "unfinished tool-call markup") {
+		t.Fatalf("RunRLM() error = %v, want unfinished tool-call rejection", err)
+	}
+	if result == nil || result.Attempts != 3 || len(runner.prompts) != 3 {
+		t.Fatalf("result = %#v, prompts = %d, want exactly three attempts", result, len(runner.prompts))
+	}
+}
+
+func TestRunRLMRepairsTokenLimitedResponseOnce(t *testing.T) {
+	runner := &scriptedRLMExecutor{
+		responses:     []string{"incomplete", "truncated review", "valid"},
+		finishReasons: []string{"stop", "length", "stop"},
+	}
+	framework := NewFramework(nil, nil).WithRLMRunner(runner)
+
+	result, err := framework.RunRLM(context.Background(), validatingRLMDefinition{}, RLMRunOpts{
+		UserPrompt: "review this change",
+		MaxRetries: 2,
+	})
+	if err != nil {
+		t.Fatalf("RunRLM() error = %v", err)
+	}
+	if result.Value != "valid" || result.Attempts != 3 {
+		t.Fatalf("result = %#v, want one clean repair after truncation", result)
+	}
+	if !strings.Contains(runner.prompts[2], "token limit") {
+		t.Fatalf("clean repair omitted the finish reason: %q", runner.prompts[2])
+	}
+}
+
 func TestRunRLMPreservesPartialValueOnExecutionDeadline(t *testing.T) {
 	trace := newTestRLMTrace("partial", 100, 10, 0.01)
 	framework := NewFramework(nil, nil).WithRLMRunner(partialRLMExecutor{
@@ -220,6 +464,25 @@ func TestRunRLMPreservesPartialValueOnExecutionDeadline(t *testing.T) {
 	}
 	if result.Trace == nil || result.Trace.Tokens.Input != 100 {
 		t.Fatalf("partial trace = %#v, want retained accounting", result.Trace)
+	}
+}
+
+func TestRunRLMDeadlineKeepsEarlierRejectedResponse(t *testing.T) {
+	runner := &deadlineAfterRejectedRLMExecutor{}
+	framework := NewFramework(nil, nil).WithRLMRunner(runner)
+
+	result, err := framework.RunRLM(context.Background(), validatingRLMDefinition{}, RLMRunOpts{
+		UserPrompt: "review this change",
+		MaxRetries: 2,
+	})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("RunRLM() error = %v, want deadline", err)
+	}
+	if result == nil || result.Value != "prior rejected review" {
+		t.Fatalf("result = %#v, want the earlier rejected response", result)
+	}
+	if runner.calls != 2 {
+		t.Fatalf("model calls = %d, want 2", runner.calls)
 	}
 }
 
@@ -392,8 +655,8 @@ func TestRunRLMRetriesExecutionEvidenceFailureWithGuidance(t *testing.T) {
 	if got := runner.toolLimits; len(got) != 2 || got[0] != 24 || got[1] != evidenceRepairMaxToolCalls {
 		t.Fatalf("tool budgets = %v, want [24 %d]", got, evidenceRepairMaxToolCalls)
 	}
-	if strings.Contains(runner.prompts[1], "review this change") {
-		t.Fatalf("evidence repair repeated the original evidence: %q", runner.prompts[1])
+	if !strings.Contains(runner.prompts[1], "review this change") {
+		t.Fatalf("evidence repair omitted the original evidence: %q", runner.prompts[1])
 	}
 	if !strings.Contains(runner.prompts[1], "Gather only the missing evidence") {
 		t.Fatalf("evidence repair prompt = %q", runner.prompts[1])

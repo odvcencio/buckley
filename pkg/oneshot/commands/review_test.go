@@ -936,6 +936,40 @@ None.
 	assert.NoError(t, def.ValidateResult(result))
 }
 
+func TestReviewApprovalRequiresGradeAWithoutFindingsOrSuggestions(t *testing.T) {
+	coverage := "- **File**: `ratchet.go` — reviewed the changed bound and its consumer.\n" +
+		"- **Feedback disposition**: `NONE_SUPPLIED` — no prior feedback was supplied.\n" +
+		"- **Verification**: named remote checks passed."
+	def := ReviewPRDef{
+		ChangedFiles: []string{"ratchet.go"},
+		CIStatus:     "passing (1/1)",
+		CIProvenance: prCISourceHead,
+	}
+
+	gradeB := strings.Replace(completeReviewWithCoverage(coverage), "## Grade: A", "## Grade: B", 1)
+	result, err := def.ParseResult(gradeB)
+	assert.NoError(t, err)
+	assert.ErrorContains(t, def.ValidateResult(result), "grade is B instead of A")
+
+	withSuggestion := strings.Replace(
+		completeReviewWithCoverage(coverage),
+		"## Findings\nNone.",
+		`## Findings
+### FINDING-001: [MINOR] Document finish-reason mappings for future providers
+- **File**: ratchet.go:1
+- **Evidence**: The switch has no comment that claims support for other provider values.
+- **Business Impact**: Future provider maintenance could be easier.
+- **Fix**: Add unsupported provider mappings to a comment.`,
+		1,
+	)
+	withSuggestion = strings.Replace(withSuggestion, "**Suggestions**: None", "**Suggestions**: FINDING-001", 1)
+	result, err = def.ParseResult(withSuggestion)
+	assert.NoError(t, err)
+	validationErr := def.ValidateResult(result)
+	assert.ErrorContains(t, validationErr, "Findings is not empty")
+	assert.ErrorContains(t, validationErr, "Suggestions is not empty")
+}
+
 func TestReviewCoverageLedgerUsesNormalizedExactPaths(t *testing.T) {
 	def := ReviewPRDef{ChangedFiles: []string{"pkg/ratchet.go"}, CIStatus: "passing (1/1)", CIProvenance: prCISourceHead}
 

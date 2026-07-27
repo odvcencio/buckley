@@ -437,6 +437,7 @@ const (
 	rlmValidationRetryFull rlmValidationRetryMode = iota
 	rlmValidationRetryText
 	rlmValidationRetryEvidence
+	rlmValidationRetryClean
 )
 
 func (f *Framework) runValidatedRLMPhase(
@@ -453,12 +454,14 @@ func (f *Framework) runValidatedRLMPhase(
 	var result rlmPhaseResult
 	var lastErr error
 	retryMode := rlmValidationRetryFull
+	attemptLimit := maxRetries
+	cleanRepairUsed := false
 
-	for attempt := 0; attempt < maxRetries; attempt++ {
+	for attempt := 0; attempt < attemptLimit; attempt++ {
 		attemptOpts := executionOpts
 		if attempt > 0 {
 			switch retryMode {
-			case rlmValidationRetryText:
+			case rlmValidationRetryText, rlmValidationRetryClean:
 				attemptOpts.MaxIterations = 1
 				attemptOpts.MaxToolCalls = 0
 				attemptOpts.ExplorationTimeout = 0
@@ -495,8 +498,11 @@ func (f *Framework) runValidatedRLMPhase(
 		if err != nil {
 			if rlmResult != nil && strings.TrimSpace(rlmResult.Response) != "" {
 				// Preserve parseable partial work for callers that explicitly
-				// handle incomplete results. Never validate or accept it here.
-				result.value, _ = def.ParseResult(rlmResult.Response)
+				// handle incomplete results. Keep an earlier rejected response
+				// when the new attempt contains only an execution salvage.
+				if result.value == nil || !rlmResult.Incomplete {
+					result.value, _ = def.ParseResult(rlmResult.Response)
+				}
 			}
 			result.err = fmt.Errorf("RLM %s execution failed for %q: %w", phase, def.Name(), err)
 			return result
@@ -504,6 +510,20 @@ func (f *Framework) runValidatedRLMPhase(
 		if rlmResult == nil {
 			lastErr = fmt.Errorf("RLM runner returned no result")
 			retryMode = rlmValidationRetryFull
+		} else if incompleteErr := incompleteRLMOutputError(rlmResult); incompleteErr != nil {
+			// Preserve the rejected value for diagnostics, but never validate or
+			// accept an incomplete provider response.
+			result.value, _ = def.ParseResult(rlmResult.Response)
+			lastErr = incompleteErr
+			retryMode = rlmValidationRetryClean
+			if cleanRepairUsed {
+				result.err = rlmValidationFailure(phase, def.Name(), result.attempts, lastErr)
+				return result
+			}
+			cleanRepairUsed = true
+			if requiredAttempts := attempt + 3; attemptLimit < requiredAttempts {
+				attemptLimit = requiredAttempts
+			}
 		} else {
 			result.value, lastErr = def.ParseResult(rlmResult.Response)
 			if lastErr != nil {
@@ -542,8 +562,58 @@ func (f *Framework) runValidatedRLMPhase(
 		)
 	}
 
-	result.err = fmt.Errorf("%s review validation failed after %d attempts for %q: %w", phase, maxRetries, def.Name(), lastErr)
+	result.err = rlmValidationFailure(phase, def.Name(), result.attempts, lastErr)
 	return result
+}
+
+func rlmValidationFailure(phase, definition string, attempts int, err error) error {
+	return fmt.Errorf("%s review validation failed after %d attempts for %q: %w", phase, attempts, definition, err)
+}
+
+func incompleteRLMOutputError(result *RLMResult) error {
+	if result == nil {
+		return nil
+	}
+	switch strings.ToLower(strings.TrimSpace(result.FinishReason)) {
+	case "length", "max_tokens":
+		return fmt.Errorf("provider stopped the response at its token limit")
+	case "tool_call", "tool_calls":
+		return fmt.Errorf("provider stopped the final response to request a tool")
+	}
+	if hasUnclosedToolCallMarkup(result.Response) {
+		return fmt.Errorf("provider returned unfinished tool-call markup")
+	}
+	if endsWithToolCallMarkup(result.Response) {
+		return fmt.Errorf("provider returned a tool call as final text")
+	}
+	return nil
+}
+
+func hasUnclosedToolCallMarkup(response string) bool {
+	for _, delimiters := range [][2]string{
+		{"<tool_call>", "</tool_call>"},
+		{"<|tool_call_begin|>", "<|tool_call_end|>"},
+		{"<|tool_calls_section_begin|>", "<|tool_calls_section_end|>"},
+	} {
+		if strings.Count(response, delimiters[0]) > strings.Count(response, delimiters[1]) {
+			return true
+		}
+	}
+	return false
+}
+
+func endsWithToolCallMarkup(response string) bool {
+	response = strings.TrimSpace(response)
+	for _, closing := range []string{
+		"</tool_call>",
+		"<|tool_call_end|>",
+		"<|tool_calls_section_end|>",
+	} {
+		if strings.HasSuffix(response, closing) {
+			return true
+		}
+	}
+	return false
 }
 
 func buildRLMValidationRetryPrompt(
@@ -556,29 +626,58 @@ func buildRLMValidationRetryPrompt(
 	rejection := "QUALITY GATE: The previous " + phase + " review was rejected: " +
 		strings.TrimSpace(validationErr.Error()) + ". "
 	if retryMode == rlmValidationRetryText && previous != nil && strings.TrimSpace(previous.Response) != "" {
-		prefix := ""
-		if phase != "primary" || isToolCallOnlyRLMSummary(previous.Response) {
-			prefix = basePrompt + "\n\n"
-		}
-		return prefix + rejection +
+		return basePrompt + "\n\n" + rejection +
 			"Repair the prior review without new tool calls. Preserve its technical judgment and evidence. " +
 			"Return one complete review in the required format.\n\nPRIOR REVIEW:\n" +
 			previous.Response
 	}
 	if retryMode == rlmValidationRetryEvidence && previous != nil && strings.TrimSpace(previous.Response) != "" {
-		return rejection +
+		return basePrompt + "\n\n" + rejection +
 			"Gather only the missing evidence with the available tools. Run each required verification before synthesis. " +
 			"Do not repeat inspection unless new evidence contradicts the prior review. " +
 			"Return one complete review in the required format.\n\nPRIOR REVIEW:\n" +
 			previous.Response
 	}
+	if retryMode == rlmValidationRetryClean && previous != nil && strings.TrimSpace(previous.Response) != "" {
+		rejected := sanitizeCleanRepairResponse(previous.Response)
+		return basePrompt + "\n\n" + rejection +
+			"Complete one clean repair with no tool calls. Use only the supplied evidence. " +
+			"Do not emit tool-call markup, tool-call JSON, progress text, or a plan. " +
+			"Start with the required review format. Return the complete final review.\n\nREJECTED RESPONSE:\n" +
+			rejected
+	}
 	return basePrompt + "\n\n" + rejection +
 		"Re-run the review from the supplied evidence and return a complete, internally consistent review in the required format."
 }
 
-func isToolCallOnlyRLMSummary(response string) bool {
+func sanitizeCleanRepairResponse(response string) string {
+	for _, delimiters := range [][2]string{
+		{"<tool_call>", "</tool_call>"},
+		{"<|tool_call_begin|>", "<|tool_call_end|>"},
+		{"<|tool_calls_section_begin|>", "<|tool_calls_section_end|>"},
+	} {
+		response = removeDelimitedToolCallBlocks(response, delimiters[0], delimiters[1])
+	}
 	response = strings.TrimSpace(response)
-	return strings.HasPrefix(response, "Executed ") && strings.Contains(response, " tool calls:")
+	if response == "" {
+		return "[The rejected tool request was removed. Reconstruct the review from the supplied evidence.]"
+	}
+	return response
+}
+
+func removeDelimitedToolCallBlocks(response, opening, closing string) string {
+	for {
+		start := strings.Index(response, opening)
+		if start < 0 {
+			return response
+		}
+		afterOpening := response[start+len(opening):]
+		end := strings.Index(afterOpening, closing)
+		if end < 0 {
+			return response[:start]
+		}
+		response = response[:start] + afterOpening[end+len(closing):]
+	}
 }
 
 func boundedPositiveLimit(value, limit int) int {

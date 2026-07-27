@@ -532,10 +532,69 @@ func reviewResultFromRLM(fwResult *oneshot.RunResult, audit *transparency.Contex
 	result.incomplete = fwResult.Incomplete
 	result.incompleteWhy = fwResult.IncompleteReason
 	if result.incomplete {
+		result.reviewText = appendReviewAttemptDiagnostics(result.reviewText, result.trace)
 		result.reviewText = markIncompleteReview(result.reviewText, result.incompleteWhy)
 		result.parsed = nil
 	}
 	return result
+}
+
+func appendReviewAttemptDiagnostics(review string, trace *transparency.Trace) string {
+	if trace == nil || len(trace.Attempts) == 0 {
+		return review
+	}
+	var b strings.Builder
+	b.WriteString(strings.TrimSpace(review))
+	b.WriteString("\n\n## Review attempt diagnostics\n")
+	for _, attempt := range trace.Attempts {
+		if attempt.Trace == nil {
+			continue
+		}
+		attemptTrace := attempt.Trace
+		fmt.Fprintf(
+			&b,
+			"\n### %s attempt %d\n\n- Finish reason: `%s`\n- Tokens: %d input and %d output\n- Duration: %s\n",
+			reviewAttemptPhase(attempt.Phase),
+			attempt.Attempt,
+			reviewAttemptFinishReason(attemptTrace),
+			attemptTrace.Tokens.Input,
+			attemptTrace.Tokens.Output,
+			attemptTrace.Duration.Round(time.Millisecond),
+		)
+		if excerpt := reviewAttemptExcerpt(attemptTrace.Content, 4000); excerpt != "" {
+			b.WriteString("\nResponse excerpt:\n\n> ")
+			b.WriteString(strings.ReplaceAll(excerpt, "\n", "\n> "))
+			b.WriteString("\n")
+		}
+	}
+	return strings.TrimSpace(b.String())
+}
+
+func reviewAttemptPhase(phase string) string {
+	switch strings.ToLower(strings.TrimSpace(phase)) {
+	case "primary":
+		return "Primary"
+	case "approval critic":
+		return "Approval critic"
+	default:
+		return "Review"
+	}
+}
+
+func reviewAttemptFinishReason(trace *transparency.Trace) string {
+	if trace == nil || trace.Response == nil || strings.TrimSpace(trace.Response.FinishReason) == "" {
+		return "unavailable"
+	}
+	return strings.TrimSpace(trace.Response.FinishReason)
+}
+
+func reviewAttemptExcerpt(content string, limit int) string {
+	content = strings.TrimSpace(content)
+	runes := []rune(content)
+	if limit > 0 && len(runes) > limit {
+		return string(runes[:limit]) + "…"
+	}
+	return content
 }
 
 func markIncompleteReview(review, reason string) string {

@@ -73,9 +73,9 @@ func TestResolveReviewExecutionPlanUsesGovernedSizeClasses(t *testing.T) {
 	})
 	if focused.sizeClass != "focused" || focused.reasoningEffort != "low" ||
 		focused.reasoningMaxTokens != 2048 ||
-		focused.maxIterations != 6 || focused.maxToolCalls != 6 ||
-		focused.verificationTimeout != 60*time.Second || focused.explorationTimeout != 90*time.Second ||
-		focused.synthesisLead != 90*time.Second {
+		focused.maxIterations != 4 || focused.maxToolCalls != 4 ||
+		focused.verificationTimeout != 60*time.Second || focused.explorationTimeout != 60*time.Second ||
+		focused.synthesisLead != 150*time.Second {
 		t.Fatalf("focused plan = %#v", focused)
 	}
 
@@ -86,9 +86,9 @@ func TestResolveReviewExecutionPlanUsesGovernedSizeClasses(t *testing.T) {
 	})
 	if broad.sizeClass != "broad" || broad.reasoningEffort != "medium" ||
 		broad.reasoningMaxTokens != 4096 ||
-		broad.maxIterations != 8 || broad.maxToolCalls != 8 ||
-		broad.verificationTimeout != 90*time.Second || broad.explorationTimeout != 105*time.Second ||
-		broad.synthesisLead != 2*time.Minute {
+		broad.maxIterations != 6 || broad.maxToolCalls != 6 ||
+		broad.verificationTimeout != 75*time.Second || broad.explorationTimeout != 90*time.Second ||
+		broad.synthesisLead != 165*time.Second {
 		t.Fatalf("broad plan = %#v", broad)
 	}
 }
