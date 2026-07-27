@@ -151,7 +151,13 @@ func (validatingRLMDefinition) ValidateResult(result any) error {
 }
 
 func TestRunRLMRetriesValidationFailureWithGuidance(t *testing.T) {
-	runner := &scriptedRLMExecutor{responses: []string{"incomplete", "valid"}}
+	runner := &scriptedRLMExecutor{
+		responses: []string{"incomplete", "valid"},
+		traces: []*transparency.Trace{
+			newTestRLMTrace("primary-1", 100, 10, 0.01),
+			newTestRLMTrace("primary-2", 120, 12, 0.01),
+		},
+	}
 	framework := NewFramework(nil, nil).WithRLMRunner(runner)
 
 	result, err := framework.RunRLM(context.Background(), validatingRLMDefinition{}, RLMRunOpts{
@@ -168,6 +174,15 @@ func TestRunRLMRetriesValidationFailureWithGuidance(t *testing.T) {
 	if result.Attempts != 2 || result.PrimaryAttempts != 2 || result.CriticAttempts != 0 {
 		t.Fatalf("attempt counts = total:%d primary:%d critic:%d, want 2/2/0",
 			result.Attempts, result.PrimaryAttempts, result.CriticAttempts)
+	}
+	if result.Trace == nil || len(result.Trace.Attempts) != 2 {
+		t.Fatalf("trace attempts = %#v, want two", result.Trace)
+	}
+	if got := result.Trace.Attempts[0].ValidationError; got != "missing coverage evidence" {
+		t.Fatalf("first validation error = %q", got)
+	}
+	if got := result.Trace.Attempts[1].ValidationError; got != "" {
+		t.Fatalf("final validation error = %q, want empty", got)
 	}
 	if len(runner.prompts) != 2 {
 		t.Fatalf("attempts = %d, want 2", len(runner.prompts))

@@ -82,6 +82,37 @@ func TestReviewPromptsMakeApprovalVerificationPolicyExplicit(t *testing.T) {
 	}
 }
 
+func TestReviewPromptsRequireProductionReachabilityAudit(t *testing.T) {
+	for name, prompt := range map[string]string{
+		"branch": reviewBranchWithToolsDefault(time.Unix(0, 0)),
+		"PR":     reviewPRDefault(time.Unix(0, 0)),
+	} {
+		t.Run(name, func(t *testing.T) {
+			for _, want := range []string{
+				"derived cache",
+				"dispatch gate",
+				"optimized path",
+				"production",
+				"direct helper test",
+				"synthetic",
+				"generated metadata",
+				"smallest valid shape",
+			} {
+				if !strings.Contains(strings.ToLower(prompt), strings.ToLower(want)) {
+					t.Errorf("prompt missing %q", want)
+				}
+			}
+		})
+	}
+
+	critic := ReviewApprovalCriticPrompt("review")
+	for _, want := range []string{"unreachable generalized paths", "derived caches", "dispatch gates", "synthetic fixtures"} {
+		if !strings.Contains(critic, want) {
+			t.Errorf("approval critic prompt missing %q", want)
+		}
+	}
+}
+
 func TestPRReviewPromptRestrictsMinorFindingsToRealDefects(t *testing.T) {
 	prompt := reviewPRDefault(time.Unix(0, 0))
 	if !strings.Contains(prompt, "MINOR: A real non-blocking behavior, validation, test, or operational defect") {

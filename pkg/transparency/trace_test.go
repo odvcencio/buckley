@@ -175,7 +175,7 @@ func TestAggregateTraceAttemptsPreservesAttributionAndTotals(t *testing.T) {
 	}
 
 	aggregate := AggregateTraceAttempts([]TraceAttempt{
-		{Phase: "primary", Attempt: 1, Trace: first},
+		{Phase: "primary", Attempt: 1, ValidationError: "missing evidence", Trace: first},
 		{Phase: "approval critic", Attempt: 1, Trace: last},
 	})
 	if aggregate == nil {
@@ -198,6 +198,9 @@ func TestAggregateTraceAttemptsPreservesAttributionAndTotals(t *testing.T) {
 	}
 	if len(aggregate.Attempts) != 2 || aggregate.Attempts[0].Phase != "primary" || aggregate.Attempts[1].Phase != "approval critic" {
 		t.Fatalf("aggregate.Attempts = %#v", aggregate.Attempts)
+	}
+	if aggregate.Attempts[0].ValidationError != "missing evidence" {
+		t.Fatalf("validation error = %q, want missing evidence", aggregate.Attempts[0].ValidationError)
 	}
 	if aggregate.Attempts[0].Trace == first || aggregate.Attempts[1].Trace == last {
 		t.Fatal("aggregate retained mutable caller trace pointers")

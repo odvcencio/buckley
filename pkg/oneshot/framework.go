@@ -458,6 +458,7 @@ func (f *Framework) runValidatedRLMPhase(
 	cleanRepairUsed := false
 
 	for attempt := 0; attempt < attemptLimit; attempt++ {
+		traceIndex := -1
 		attemptOpts := executionOpts
 		if attempt > 0 {
 			switch retryMode {
@@ -494,6 +495,7 @@ func (f *Framework) runValidatedRLMPhase(
 				Attempt: attempt + 1,
 				Trace:   rlmResult.Trace,
 			})
+			traceIndex = len(result.traces) - 1
 		}
 		if err != nil {
 			if rlmResult != nil && strings.TrimSpace(rlmResult.Response) != "" {
@@ -551,6 +553,9 @@ func (f *Framework) runValidatedRLMPhase(
 		}
 		if lastErr == nil {
 			return result
+		}
+		if traceIndex >= 0 {
+			result.traces[traceIndex].ValidationError = strings.TrimSpace(lastErr.Error())
 		}
 
 		userPrompt = buildRLMValidationRetryPrompt(

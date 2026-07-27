@@ -246,6 +246,26 @@ func TestReviewResultFromRLMExposesPrimaryAndCriticAttempts(t *testing.T) {
 	}
 }
 
+func TestReviewValidationRepairLinesExplainBoundedRetries(t *testing.T) {
+	longReason := strings.Repeat("x", 220)
+	trace := &transparency.Trace{Attempts: []transparency.TraceAttempt{
+		{Phase: "primary", Attempt: 1, ValidationError: "missing coverage evidence"},
+		{Phase: "primary", Attempt: 2},
+		{Phase: "approval critic", Attempt: 1, ValidationError: longReason},
+	}}
+
+	got := reviewValidationRepairLines(trace)
+	if len(got) != 2 {
+		t.Fatalf("repair lines = %v, want two", got)
+	}
+	if got[0] != "Primary attempt 1: missing coverage evidence" {
+		t.Fatalf("first repair line = %q", got[0])
+	}
+	if !strings.HasPrefix(got[1], "Approval critic attempt 1: ") || !strings.HasSuffix(got[1], "…") {
+		t.Fatalf("second repair line = %q", got[1])
+	}
+}
+
 func TestReviewResultFromRLMPreservesIncompleteState(t *testing.T) {
 	got := reviewResultFromRLM(&oneshot.RunResult{
 		Value: &commands.ReviewRLMResult{Review: "partial review"},
