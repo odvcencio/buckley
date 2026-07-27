@@ -72,6 +72,7 @@ func TestResolveReviewExecutionPlanUsesGovernedSizeClasses(t *testing.T) {
 		DiffBytes: 8_000,
 	})
 	if focused.sizeClass != "focused" || focused.reasoningEffort != "low" ||
+		focused.reasoningMaxTokens != 2048 ||
 		focused.maxIterations != 6 || focused.maxToolCalls != 6 ||
 		focused.verificationTimeout != 60*time.Second || focused.explorationTimeout != 90*time.Second ||
 		focused.synthesisLead != 90*time.Second {
@@ -84,6 +85,7 @@ func TestResolveReviewExecutionPlanUsesGovernedSizeClasses(t *testing.T) {
 		ContextIncomplete: true,
 	})
 	if broad.sizeClass != "broad" || broad.reasoningEffort != "medium" ||
+		broad.reasoningMaxTokens != 4096 ||
 		broad.maxIterations != 8 || broad.maxToolCalls != 8 ||
 		broad.verificationTimeout != 90*time.Second || broad.explorationTimeout != 105*time.Second ||
 		broad.synthesisLead != 2*time.Minute {
@@ -95,6 +97,7 @@ func TestReviewExecutionPlanPreservesExplicitTurnOverride(t *testing.T) {
 	opts := automatedReviewOptions{maxIterations: 5, adaptiveReasoning: true}.withExecutionPlan(reviewExecutionPlan{
 		sizeClass:           "standard",
 		reasoningEffort:     "medium",
+		reasoningMaxTokens:  4096,
 		maxIterations:       11,
 		maxToolCalls:        18,
 		verificationTimeout: 2 * time.Minute,
@@ -106,7 +109,7 @@ func TestReviewExecutionPlanPreservesExplicitTurnOverride(t *testing.T) {
 	}
 	if opts.maxToolCalls != 18 || opts.verificationTimeout != 2*time.Minute ||
 		opts.explorationTimeout != 4*time.Minute || opts.synthesisLead != 90*time.Second ||
-		opts.reasoningEffort != "medium" {
+		opts.reasoningEffort != "medium" || opts.reasoningMaxTokens != 4096 {
 		t.Fatalf("execution plan was not applied: %#v", opts)
 	}
 }
@@ -155,6 +158,7 @@ func TestAppendReviewExecutionPlanGuidesBoundedEvidenceCollection(t *testing.T) 
 		sizeClass:           "focused",
 		modelID:             "codex/gpt-5.6-luna",
 		reasoningEffort:     "low",
+		reasoningMaxTokens:  2048,
 		maxIterations:       8,
 		maxToolCalls:        12,
 		verificationTimeout: 90 * time.Second,
@@ -165,6 +169,7 @@ func TestAppendReviewExecutionPlanGuidesBoundedEvidenceCollection(t *testing.T) 
 		"Size class: FOCUSED",
 		"Model: codex/gpt-5.6-luna",
 		"Reasoning effort: LOW",
+		"Limit each model turn to 2048 reasoning tokens",
 		"at most 8 model turns and 12 total",
 		"Limit each verification command to 90 seconds",
 		"Finish evidence collection within 180 seconds",

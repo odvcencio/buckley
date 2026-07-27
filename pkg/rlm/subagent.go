@@ -69,6 +69,7 @@ type SubAgent struct {
 	model              string
 	systemPrompt       string
 	reasoning          string
+	reasoningMaxTokens int
 	maxIterations      int
 	maxToolCalls       int
 	maxCostUSD         float64
@@ -93,6 +94,7 @@ type SubAgentConfig struct {
 	ID                 string
 	Model              string
 	Reasoning          string
+	ReasoningMaxTokens int
 	SystemPrompt       string
 	MaxIterations      int
 	MaxToolCalls       int
@@ -187,6 +189,7 @@ func NewSubAgent(cfg SubAgentConfig, deps SubAgentDeps) (*SubAgent, error) {
 		model:              cfg.Model,
 		systemPrompt:       prompt,
 		reasoning:          normalizeSubAgentReasoning(cfg.Reasoning),
+		reasoningMaxTokens: max(0, cfg.ReasoningMaxTokens),
 		maxIterations:      maxIterations,
 		maxToolCalls:       cfg.MaxToolCalls,
 		maxCostUSD:         cfg.MaxCostUSD,
@@ -262,7 +265,10 @@ func (a *SubAgent) Execute(ctx context.Context, task string) (*SubAgentResult, e
 		}
 		applyExecutionPolicy(&req, a.readOnly, a.reviewSnapshot)
 		if a.reasoning != "" {
-			req.Reasoning = &model.ReasoningConfig{Effort: a.reasoning}
+			req.Reasoning = &model.ReasoningConfig{
+				Effort:    a.reasoning,
+				MaxTokens: a.reasoningMaxTokens,
+			}
 		}
 		req.Messages = conversation.CompactModelMessagesForRequest(requestMessages, req, contextWindow)
 		if len(req.Tools) > 0 && a.shouldSynthesizeForBudget(req, result) {

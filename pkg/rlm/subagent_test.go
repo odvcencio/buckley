@@ -161,6 +161,24 @@ func TestSubAgentDefaultPrompt(t *testing.T) {
 	}
 }
 
+func TestNewSubAgentBoundsReasoningTokens(t *testing.T) {
+	agent, err := NewSubAgent(SubAgentConfig{
+		ID:                 "bounded-reasoning",
+		Model:              "test-model",
+		Reasoning:          "medium",
+		ReasoningMaxTokens: 4096,
+	}, SubAgentDeps{
+		Models:   &model.Manager{},
+		Registry: tool.NewEmptyRegistry(),
+	})
+	if err != nil {
+		t.Fatalf("NewSubAgent() error = %v", err)
+	}
+	if agent.reasoning != "medium" || agent.reasoningMaxTokens != 4096 {
+		t.Fatalf("reasoning policy = %q/%d", agent.reasoning, agent.reasoningMaxTokens)
+	}
+}
+
 func TestSubAgentMaxIterationsDefault(t *testing.T) {
 	if defaultSubAgentMaxIterations <= 0 {
 		t.Errorf("defaultSubAgentMaxIterations should be positive, got %d", defaultSubAgentMaxIterations)

@@ -36,6 +36,7 @@ type scriptedRLMExecutor struct {
 	verification []time.Duration
 	models       []string
 	reasoning    []string
+	reasoningMax []int
 	maxCosts     []float64
 }
 
@@ -51,6 +52,7 @@ func (s *scriptedRLMExecutor) Run(_ context.Context, system string, task string,
 	s.verification = append(s.verification, opts.VerificationTimeout)
 	s.models = append(s.models, opts.ModelID)
 	s.reasoning = append(s.reasoning, opts.ReasoningEffort)
+	s.reasoningMax = append(s.reasoningMax, opts.ReasoningMaxTokens)
 	s.maxCosts = append(s.maxCosts, opts.MaxCostUSD)
 	if len(s.responses) == 0 {
 		return nil, fmt.Errorf("no scripted response")
@@ -257,6 +259,7 @@ func TestRunRLMPropagatesBoundedReviewPlan(t *testing.T) {
 		VerificationTimeout: 90 * time.Second,
 		ModelID:             "codex/gpt-5.6-luna",
 		ReasoningEffort:     "low",
+		ReasoningMaxTokens:  2048,
 	}); err != nil {
 		t.Fatalf("RunRLM() error = %v", err)
 	}
@@ -274,6 +277,9 @@ func TestRunRLMPropagatesBoundedReviewPlan(t *testing.T) {
 	}
 	if len(runner.reasoning) != 1 || runner.reasoning[0] != "low" {
 		t.Fatalf("reasoning efforts = %v, want [low]", runner.reasoning)
+	}
+	if len(runner.reasoningMax) != 1 || runner.reasoningMax[0] != 2048 {
+		t.Fatalf("reasoning token limits = %v, want [2048]", runner.reasoningMax)
 	}
 	if len(runner.models) != 1 || runner.models[0] != "codex/gpt-5.6-luna" {
 		t.Fatalf("models = %v, want [codex/gpt-5.6-luna]", runner.models)

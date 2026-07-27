@@ -298,6 +298,7 @@ type automatedReviewOptions struct {
 	sizeClass           string
 	modelID             string
 	reasoningEffort     string
+	reasoningMaxTokens  int
 	adaptiveCodexModel  bool
 	adaptiveReasoning   bool
 	engine              *rules.Engine
@@ -394,6 +395,7 @@ func runPRReviewWithOptions(ctx context.Context, prRef string, framework *onesho
 		VerificationTimeout:      opts.verificationTimeout,
 		ModelID:                  opts.modelID,
 		ReasoningEffort:          opts.reasoningEffort,
+		ReasoningMaxTokens:       opts.reasoningMaxTokens,
 		SnapshotPolicy: model.ReviewSnapshotPolicy{
 			Mode:           model.ReviewSnapshotHead,
 			ExpectedCommit: prCtx.PR.HeadSHA,

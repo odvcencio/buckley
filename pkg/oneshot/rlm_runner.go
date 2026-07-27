@@ -140,6 +140,7 @@ func (r *RLMRunner) Run(ctx context.Context, systemPrompt, task string, allowedT
 		ID:                 fmt.Sprintf("oneshot-%d", time.Now().UnixNano()),
 		Model:              modelToUse,
 		Reasoning:          reasoningEffort,
+		ReasoningMaxTokens: opts.ReasoningMaxTokens,
 		SystemPrompt:       systemPrompt,
 		MaxIterations:      opts.MaxIterations,
 		MaxToolCalls:       opts.MaxToolCalls,

@@ -52,6 +52,7 @@ type RLMExecutionOpts struct {
 	VerificationTimeout time.Duration
 	ModelID             string
 	ReasoningEffort     string
+	ReasoningMaxTokens  int
 }
 
 // ToolInvoker runs a single tool-shaped one-shot model invocation.
@@ -264,6 +265,9 @@ type RLMRunOpts struct {
 	// ReasoningEffort overrides the runner default for this review plan.
 	ReasoningEffort string
 
+	// ReasoningMaxTokens bounds hidden reasoning for each model turn.
+	ReasoningMaxTokens int
+
 	// ModelID overrides the primary runner model for this review plan.
 	// A separately configured approval critic keeps its own model.
 	ModelID string
@@ -334,6 +338,7 @@ func (f *Framework) RunRLM(ctx context.Context, def RLMDefinition, opts RLMRunOp
 		VerificationTimeout: opts.VerificationTimeout,
 		ModelID:             opts.ModelID,
 		ReasoningEffort:     opts.ReasoningEffort,
+		ReasoningMaxTokens:  opts.ReasoningMaxTokens,
 	}
 	if opts.MaxIterations > 0 {
 		executionOpts.MaxIterations = opts.MaxIterations
