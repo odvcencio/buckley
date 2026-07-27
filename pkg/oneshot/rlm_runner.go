@@ -135,6 +135,7 @@ func (r *RLMRunner) Run(ctx context.Context, systemPrompt, task string, allowedT
 	if override := normalizeRLMReasoningEffort(opts.ReasoningEffort); override != "" {
 		reasoningEffort = override
 	}
+	maxCostUSD := effectiveRLMMaxCostUSD(providerID, opts.MaxCostUSD)
 	agentCfg := rlm.SubAgentInstanceConfig{
 		ID:                 fmt.Sprintf("oneshot-%d", time.Now().UnixNano()),
 		Model:              modelToUse,
@@ -142,7 +143,7 @@ func (r *RLMRunner) Run(ctx context.Context, systemPrompt, task string, allowedT
 		SystemPrompt:       systemPrompt,
 		MaxIterations:      opts.MaxIterations,
 		MaxToolCalls:       opts.MaxToolCalls,
-		MaxCostUSD:         opts.MaxCostUSD,
+		MaxCostUSD:         maxCostUSD,
 		Adaptive:           opts.MaxIterations <= 0 || opts.SynthesisLead > 0,
 		ExplorationTimeout: opts.ExplorationTimeout,
 		SynthesisLead:      opts.SynthesisLead,
@@ -218,18 +219,22 @@ func (r *RLMRunner) Run(ctx context.Context, systemPrompt, task string, allowedT
 
 	builder.WithContent(response)
 
-	// Calculate cost (rough estimate)
-	pricing := transparency.ModelPricing{
-		InputPerMillion:  3.0,
-		OutputPerMillion: 15.0,
-	}
-	if r.models != nil {
-		if info, err := r.models.GetModelInfo(modelToUse); err == nil {
-			pricing.InputPerMillion = info.Pricing.Prompt
-			pricing.OutputPerMillion = info.Pricing.Completion
+	// Calculate API cost only when the provider publishes token pricing.
+	// Native Codex runs through the user's CLI subscription.
+	cost := 0.0
+	if providerID != "codex" {
+		pricing := transparency.ModelPricing{
+			InputPerMillion:  3.0,
+			OutputPerMillion: 15.0,
 		}
+		if r.models != nil {
+			if info, err := r.models.GetModelInfo(modelToUse); err == nil {
+				pricing.InputPerMillion = info.Pricing.Prompt
+				pricing.OutputPerMillion = info.Pricing.Completion
+			}
+		}
+		cost = effectiveRLMInvocationCost(providerID, pricing, tokens)
 	}
-	cost := pricing.Calculate(tokens)
 
 	result.Trace = builder.Complete(tokens, cost)
 
@@ -248,6 +253,22 @@ func (r *RLMRunner) Run(ctx context.Context, systemPrompt, task string, allowedT
 		return result, fmt.Errorf("execute task: %w", executionErr)
 	}
 	return result, nil
+}
+
+func effectiveRLMMaxCostUSD(providerID string, configured float64) float64 {
+	if providerID == "codex" {
+		// Native Codex execution has no per-token API price that Buckley can
+		// enforce. Keep its turn, tool, and elapsed-time budgets authoritative.
+		return 0
+	}
+	return configured
+}
+
+func effectiveRLMInvocationCost(providerID string, pricing transparency.ModelPricing, tokens transparency.TokenUsage) float64 {
+	if providerID == "codex" {
+		return 0
+	}
+	return pricing.Calculate(tokens)
 }
 
 func formatIncompleteRLMResponse(result *rlm.SubAgentResult, cause error) string {

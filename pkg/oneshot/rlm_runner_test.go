@@ -11,7 +11,25 @@ import (
 
 	"m31labs.dev/buckley/pkg/model"
 	"m31labs.dev/buckley/pkg/rlm"
+	"m31labs.dev/buckley/pkg/transparency"
 )
+
+func TestNativeCodexReviewRunsWithoutCatalogPricing(t *testing.T) {
+	if got := effectiveRLMMaxCostUSD("codex", 0.15); got != 0 {
+		t.Fatalf("Codex cost budget = %v, want zero", got)
+	}
+	if got := effectiveRLMMaxCostUSD("openrouter", 0.15); got != 0.15 {
+		t.Fatalf("OpenRouter cost budget = %v, want 0.15", got)
+	}
+	pricing := transparency.ModelPricing{InputPerMillion: 1, OutputPerMillion: 2}
+	tokens := transparency.TokenUsage{Input: 1_000_000, Output: 1_000_000}
+	if got := effectiveRLMInvocationCost("codex", pricing, tokens); got != 0 {
+		t.Fatalf("Codex invocation cost = %v, want zero", got)
+	}
+	if got := effectiveRLMInvocationCost("openrouter", pricing, tokens); got != 3 {
+		t.Fatalf("OpenRouter invocation cost = %v, want 3", got)
+	}
+}
 
 func TestFormatIncompleteRLMResponseRetainsCompletedEvidence(t *testing.T) {
 	result := &rlm.SubAgentResult{
