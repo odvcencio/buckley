@@ -157,14 +157,37 @@ func TestRunRLMRetriesValidationFailureWithGuidance(t *testing.T) {
 	if !strings.Contains(runner.prompts[1], "PRIOR REVIEW:\nincomplete") {
 		t.Fatalf("retry prompt missing prior review: %q", runner.prompts[1])
 	}
-	if strings.Contains(runner.prompts[1], "review this change") {
-		t.Fatalf("repair prompt repeated the original evidence: %q", runner.prompts[1])
+	if !strings.Contains(runner.prompts[1], "review this change") {
+		t.Fatalf("repair prompt omitted the original evidence: %q", runner.prompts[1])
 	}
 	if got := runner.iterations; len(got) != 2 || got[0] != 8 || got[1] != 1 {
 		t.Fatalf("iteration budgets = %v, want [8 1]", got)
 	}
 	if got := strings.Join(runner.tools[0], ","); got != "read_file,run_shell" {
 		t.Fatalf("allowed tools = %q, want exact registry names", got)
+	}
+}
+
+func TestRunRLMValidationRepairPreservesExactManifestAndEvidence(t *testing.T) {
+	runner := &scriptedRLMExecutor{responses: []string{"incomplete", "valid"}}
+	framework := NewFramework(nil, nil).WithRLMRunner(runner)
+	prompt := "EXACT MANIFEST:\n- first.go\n- second.go\n\nEVIDENCE:\nverified at head-sha"
+
+	_, err := framework.RunRLM(context.Background(), validatingRLMDefinition{}, RLMRunOpts{
+		UserPrompt: prompt,
+		MaxRetries: 2,
+	})
+	if err != nil {
+		t.Fatalf("RunRLM() error = %v", err)
+	}
+	if len(runner.prompts) != 2 {
+		t.Fatalf("attempts = %d, want 2", len(runner.prompts))
+	}
+	repair := runner.prompts[1]
+	for _, required := range []string{"EXACT MANIFEST:", "- first.go", "- second.go", "EVIDENCE:", "verified at head-sha"} {
+		if !strings.Contains(repair, required) {
+			t.Fatalf("repair prompt omitted %q: %q", required, repair)
+		}
 	}
 }
 
@@ -392,8 +415,8 @@ func TestRunRLMRetriesExecutionEvidenceFailureWithGuidance(t *testing.T) {
 	if got := runner.toolLimits; len(got) != 2 || got[0] != 24 || got[1] != evidenceRepairMaxToolCalls {
 		t.Fatalf("tool budgets = %v, want [24 %d]", got, evidenceRepairMaxToolCalls)
 	}
-	if strings.Contains(runner.prompts[1], "review this change") {
-		t.Fatalf("evidence repair repeated the original evidence: %q", runner.prompts[1])
+	if !strings.Contains(runner.prompts[1], "review this change") {
+		t.Fatalf("evidence repair omitted the original evidence: %q", runner.prompts[1])
 	}
 	if !strings.Contains(runner.prompts[1], "Gather only the missing evidence") {
 		t.Fatalf("evidence repair prompt = %q", runner.prompts[1])

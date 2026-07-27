@@ -556,17 +556,13 @@ func buildRLMValidationRetryPrompt(
 	rejection := "QUALITY GATE: The previous " + phase + " review was rejected: " +
 		strings.TrimSpace(validationErr.Error()) + ". "
 	if retryMode == rlmValidationRetryText && previous != nil && strings.TrimSpace(previous.Response) != "" {
-		prefix := ""
-		if phase != "primary" || isToolCallOnlyRLMSummary(previous.Response) {
-			prefix = basePrompt + "\n\n"
-		}
-		return prefix + rejection +
+		return basePrompt + "\n\n" + rejection +
 			"Repair the prior review without new tool calls. Preserve its technical judgment and evidence. " +
 			"Return one complete review in the required format.\n\nPRIOR REVIEW:\n" +
 			previous.Response
 	}
 	if retryMode == rlmValidationRetryEvidence && previous != nil && strings.TrimSpace(previous.Response) != "" {
-		return rejection +
+		return basePrompt + "\n\n" + rejection +
 			"Gather only the missing evidence with the available tools. Run each required verification before synthesis. " +
 			"Do not repeat inspection unless new evidence contradicts the prior review. " +
 			"Return one complete review in the required format.\n\nPRIOR REVIEW:\n" +
@@ -574,11 +570,6 @@ func buildRLMValidationRetryPrompt(
 	}
 	return basePrompt + "\n\n" + rejection +
 		"Re-run the review from the supplied evidence and return a complete, internally consistent review in the required format."
-}
-
-func isToolCallOnlyRLMSummary(response string) bool {
-	response = strings.TrimSpace(response)
-	return strings.HasPrefix(response, "Executed ") && strings.Contains(response, " tool calls:")
 }
 
 func boundedPositiveLimit(value, limit int) int {
