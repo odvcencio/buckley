@@ -142,6 +142,25 @@ func TestExecutorReportsPassWithExactArgvAndNormalizedScope(t *testing.T) {
 	}
 }
 
+func TestVerificationPlanAcceptsLongFocusedGoPattern(t *testing.T) {
+	pattern := "^(" + strings.Repeat("TestFocused|", 120) + "TestLast)$"
+	if len(pattern) <= 256 || len(pattern) >= maximumPatternBytes {
+		t.Fatalf("test pattern length = %d, want between old and new limits", len(pattern))
+	}
+	plan, err := verificationPlan(KindTest, LanguageGo, pattern, ".")
+	if err != nil {
+		t.Fatalf("verificationPlan() error = %v", err)
+	}
+	if got := strings.Join(plan.args, " "); !strings.Contains(got, pattern) {
+		t.Fatalf("verification argv omitted pattern: %q", got)
+	}
+
+	_, err = verificationPlan(KindTest, LanguageGo, strings.Repeat("x", maximumPatternBytes+1), ".")
+	if err == nil || !strings.Contains(err.Error(), "pattern is invalid") {
+		t.Fatalf("oversized pattern error = %v", err)
+	}
+}
+
 func TestExecutorClassifiesCommandFailureAndSandboxUnavailable(t *testing.T) {
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module example.test/review\n\ngo 1.25\n"), 0o644); err != nil {

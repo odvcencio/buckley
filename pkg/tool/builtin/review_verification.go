@@ -95,7 +95,7 @@ func (t *RunVerificationTool) Parameters() ParameterSchema {
 			},
 			"pattern": {
 				Type:        "string",
-				Description: "Optional test-name pattern; accepted only for kind=test",
+				Description: "Optional test-name pattern, at most 4096 bytes; accepted only for kind=test",
 			},
 			"timeout_seconds": {
 				Type:        "integer",

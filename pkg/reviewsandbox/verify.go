@@ -42,10 +42,12 @@ const (
 )
 
 const (
-	defaultTimeout   = 5 * time.Minute
-	maximumTimeout   = 15 * time.Minute
-	defaultMaxOutput = 256 * 1024
-	maximumMaxOutput = 2 * 1024 * 1024
+	defaultTimeout              = 5 * time.Minute
+	maximumTimeout              = 15 * time.Minute
+	defaultMaxOutput            = 256 * 1024
+	maximumMaxOutput            = 2 * 1024 * 1024
+	maximumPatternBytes         = 4096
+	verificationProcessWaitTime = 2 * time.Second
 )
 
 type Request struct {
@@ -324,7 +326,7 @@ func verificationPlan(kind Kind, language Language, pattern, workDir string) (pl
 		return plan{}, fmt.Errorf("verification kind must be build, test, or check")
 	}
 	pattern = strings.TrimSpace(pattern)
-	if len(pattern) > 256 || strings.ContainsRune(pattern, 0) || strings.HasPrefix(pattern, "-") {
+	if len(pattern) > maximumPatternBytes || strings.ContainsRune(pattern, 0) || strings.HasPrefix(pattern, "-") {
 		return plan{}, fmt.Errorf("verification pattern is invalid")
 	}
 	if kind != KindTest && pattern != "" {
@@ -480,6 +482,7 @@ func runCommand(ctx context.Context, invocation commandInvocation, maxOutput int
 	cmd.Env = append([]string(nil), invocation.Env...)
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
+	cmd.WaitDelay = verificationProcessWaitTime
 	err := cmd.Run()
 	exitCode := 0
 	if err != nil {

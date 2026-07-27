@@ -491,15 +491,19 @@ func (f *Framework) runValidatedRLMPhase(
 }
 
 func buildRLMValidationRetryPrompt(basePrompt string, previous *RLMResult, phase string, validationErr error, repairOnly bool) string {
-	guidance := basePrompt + "\n\nQUALITY GATE: The previous " + phase + " review was rejected: " +
+	rejection := "QUALITY GATE: The previous " + phase + " review was rejected: " +
 		strings.TrimSpace(validationErr.Error()) + ". "
 	if repairOnly && previous != nil && strings.TrimSpace(previous.Response) != "" {
-		return guidance +
+		prefix := ""
+		if phase != "primary" {
+			prefix = basePrompt + "\n\n"
+		}
+		return prefix + rejection +
 			"Repair the prior review without new tool calls. Preserve its technical judgment and evidence. " +
 			"Return one complete review in the required format.\n\nPRIOR REVIEW:\n" +
 			previous.Response
 	}
-	return guidance +
+	return basePrompt + "\n\n" + rejection +
 		"Re-run the review from the supplied evidence and return a complete, internally consistent review in the required format."
 }
 

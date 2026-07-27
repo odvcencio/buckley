@@ -151,6 +151,9 @@ func TestRunRLMRetriesValidationFailureWithGuidance(t *testing.T) {
 	if !strings.Contains(runner.prompts[1], "PRIOR REVIEW:\nincomplete") {
 		t.Fatalf("retry prompt missing prior review: %q", runner.prompts[1])
 	}
+	if strings.Contains(runner.prompts[1], "review this change") {
+		t.Fatalf("repair prompt repeated the original evidence: %q", runner.prompts[1])
+	}
 	if got := runner.iterations; len(got) != 2 || got[0] != 8 || got[1] != 1 {
 		t.Fatalf("iteration budgets = %v, want [8 1]", got)
 	}
