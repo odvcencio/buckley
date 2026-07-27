@@ -319,11 +319,7 @@ func (a *SubAgent) Execute(ctx context.Context, task string) (*SubAgentResult, e
 				return result, err
 			}
 
-			messages = append(messages, model.Message{
-				Role:      "assistant",
-				Content:   choice.Message.Content,
-				ToolCalls: choice.Message.ToolCalls,
-			})
+			messages = append(messages, assistantToolCallMessage(choice.Message))
 			for _, tr := range toolResults {
 				messages = append(messages, model.Message{
 					Role:       "tool",
@@ -359,6 +355,16 @@ func (a *SubAgent) Execute(ctx context.Context, task string) (*SubAgentResult, e
 	}
 
 	return result, nil
+}
+
+func assistantToolCallMessage(message model.Message) model.Message {
+	return model.Message{
+		Role:             "assistant",
+		Content:          message.Content,
+		ToolCalls:        append([]model.ToolCall(nil), message.ToolCalls...),
+		Reasoning:        message.Reasoning,
+		ReasoningDetails: append([]model.ReasoningDetail(nil), message.ReasoningDetails...),
+	}
 }
 
 func (a *SubAgent) shouldSynthesize(ctx context.Context, iteration, maxIterations int, startedAt time.Time) bool {

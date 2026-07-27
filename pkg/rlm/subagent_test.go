@@ -114,6 +114,32 @@ func TestFinalSynthesisMessagesPreservesHistoryAndRequiresAnswer(t *testing.T) {
 	}
 }
 
+func TestAssistantToolCallMessagePreservesReasoningContinuity(t *testing.T) {
+	source := model.Message{
+		Content:   "inspect the selected files",
+		ToolCalls: []model.ToolCall{{ID: "call-1"}},
+		Reasoning: "the supplied diff leaves one invariant unclear",
+		ReasoningDetails: []model.ReasoningDetail{{
+			Type: "reasoning.text",
+			Text: "inspect the exact invariant before the verdict",
+		}},
+	}
+
+	got := assistantToolCallMessage(source)
+	if got.Role != "assistant" || got.Reasoning != source.Reasoning {
+		t.Fatalf("assistant tool message = %#v", got)
+	}
+	if len(got.ReasoningDetails) != 1 || got.ReasoningDetails[0].Text != source.ReasoningDetails[0].Text {
+		t.Fatalf("reasoning details = %#v", got.ReasoningDetails)
+	}
+
+	source.ToolCalls[0].ID = "changed"
+	source.ReasoningDetails[0].Text = "changed"
+	if got.ToolCalls[0].ID != "call-1" || got.ReasoningDetails[0].Text == "changed" {
+		t.Fatal("assistant tool message shares mutable slices with the provider response")
+	}
+}
+
 func TestSubAgentDefaultPrompt(t *testing.T) {
 	// Verify the default prompt is set when empty
 	if defaultSubAgentPrompt == "" {
