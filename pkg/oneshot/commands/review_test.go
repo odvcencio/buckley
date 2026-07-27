@@ -766,6 +766,42 @@ Code has issues.
 	assert.Equal(t, []string{"FINDING-002"}, parsed.Suggestions)
 }
 
+func TestExtractFileLineAcceptsMarkdownCodeLocations(t *testing.T) {
+	tests := []struct {
+		name     string
+		location string
+		wantFile string
+		wantLine int
+	}{
+		{
+			name:     "plain location",
+			location: "pkg/db/query.go:42",
+			wantFile: "pkg/db/query.go",
+			wantLine: 42,
+		},
+		{
+			name:     "code location with range",
+			location: "`cmd/buckley/review_pr_test.go:228-242`",
+			wantFile: "cmd/buckley/review_pr_test.go",
+			wantLine: 228,
+		},
+		{
+			name:     "code path with external line",
+			location: "`pkg/rlm/subagent.go`:362",
+			wantFile: "pkg/rlm/subagent.go",
+			wantLine: 362,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			file, line := extractFileLine("- **File**: " + test.location)
+			assert.Equal(t, test.wantFile, file)
+			assert.Equal(t, test.wantLine, line)
+		})
+	}
+}
+
 func TestParseVerdictApprovalRequiresOneExactNormalizedDecision(t *testing.T) {
 	tests := []struct {
 		name     string

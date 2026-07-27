@@ -724,19 +724,31 @@ func extractFindings(review string) []Finding {
 }
 
 func extractFileLine(content string) (file string, line int) {
-	re := regexp.MustCompile(`\*\*File\*\*:\s*([^\s:]+)(?::(\d+))?`)
+	re := regexp.MustCompile(`(?m)^\s*(?:-\s*)?\*\*File\*\*:\s*(.+?)\s*$`)
 	matches := re.FindStringSubmatch(content)
-	if len(matches) >= 2 {
-		file = matches[1]
-		if len(matches) >= 3 && matches[2] != "" {
-			var n int
-			for _, c := range matches[2] {
-				n = n*10 + int(c-'0')
-			}
-			line = n
+	if len(matches) < 2 {
+		return "", 0
+	}
+
+	location := strings.TrimSpace(matches[1])
+	if strings.HasPrefix(location, "`") {
+		if closing := strings.Index(location[1:], "`"); closing >= 0 {
+			closing++
+			location = location[1:closing] + strings.TrimSpace(location[closing+1:])
 		}
 	}
-	return
+
+	locationRe := regexp.MustCompile(`^(.+?):(\d+)(?:-\d+)?$`)
+	locationMatches := locationRe.FindStringSubmatch(location)
+	if len(locationMatches) < 3 {
+		return strings.TrimSpace(strings.Trim(location, "`")), 0
+	}
+
+	line, err := strconv.Atoi(locationMatches[2])
+	if err != nil {
+		return strings.TrimSpace(strings.Trim(location, "`")), 0
+	}
+	return strings.TrimSpace(strings.Trim(locationMatches[1], "`")), line
 }
 
 func extractField(content, field string) string {
