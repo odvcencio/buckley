@@ -18,14 +18,20 @@ const (
 )
 
 type reviewExecutionPlan struct {
-	sizeClass           string
-	reasoningEffort     string
-	reasoningMaxTokens  int
-	maxIterations       int
-	maxToolCalls        int
-	verificationTimeout time.Duration
-	explorationTimeout  time.Duration
-	synthesisLead       time.Duration
+	sizeClass            string
+	reasoningEffort      string
+	reasoningMaxTokens   int
+	maxIterations        int
+	maxToolCalls         int
+	maxVerificationCalls int
+	verificationTimeout  time.Duration
+	explorationTimeout   time.Duration
+	synthesisLead        time.Duration
+	criticReserve        time.Duration
+	criticMaxIterations  int
+	criticMaxToolCalls   int
+	criticExploration    time.Duration
+	criticSynthesisLead  time.Duration
 }
 
 func resolveReviewReasoningEffort(cfg *config.Config, checker model.ReasoningChecker, modelID, explicit string) string {
@@ -56,14 +62,20 @@ func resolveReviewReasoningEffort(cfg *config.Config, checker model.ReasoningChe
 
 func resolveReviewExecutionPlan(engine *rules.Engine, facts rules.ReviewPlanFacts) reviewExecutionPlan {
 	plan := reviewExecutionPlan{
-		sizeClass:           "standard",
-		reasoningEffort:     "medium",
-		reasoningMaxTokens:  1536,
-		maxIterations:       5,
-		maxToolCalls:        5,
-		verificationTimeout: 60 * time.Second,
-		explorationTimeout:  75 * time.Second,
-		synthesisLead:       165 * time.Second,
+		sizeClass:            "standard",
+		reasoningEffort:      "medium",
+		reasoningMaxTokens:   1536,
+		maxIterations:        5,
+		maxToolCalls:         5,
+		maxVerificationCalls: 1,
+		verificationTimeout:  30 * time.Second,
+		explorationTimeout:   50 * time.Second,
+		synthesisLead:        90 * time.Second,
+		criticReserve:        75 * time.Second,
+		criticMaxIterations:  2,
+		criticMaxToolCalls:   2,
+		criticExploration:    20 * time.Second,
+		criticSynthesisLead:  45 * time.Second,
 	}
 	if engine == nil {
 		return plan
@@ -81,12 +93,21 @@ func resolveReviewExecutionPlan(engine *rules.Engine, facts rules.ReviewPlanFact
 	plan.reasoningMaxTokens = reviewPlanInt(result.Params["reasoning_max_tokens"], plan.reasoningMaxTokens)
 	plan.maxIterations = reviewPlanInt(result.Params["max_iterations"], plan.maxIterations)
 	plan.maxToolCalls = reviewPlanInt(result.Params["max_tool_calls"], plan.maxToolCalls)
+	plan.maxVerificationCalls = reviewPlanInt(result.Params["max_verification_calls"], plan.maxVerificationCalls)
 	verificationSeconds := reviewPlanInt(result.Params["verification_timeout_seconds"], int(plan.verificationTimeout/time.Second))
 	explorationSeconds := reviewPlanInt(result.Params["exploration_timeout_seconds"], int(plan.explorationTimeout/time.Second))
 	reserveSeconds := reviewPlanInt(result.Params["synthesis_reserve_seconds"], int(plan.synthesisLead/time.Second))
+	criticReserveSeconds := reviewPlanInt(result.Params["approval_critic_reserve_seconds"], int(plan.criticReserve/time.Second))
+	criticExplorationSeconds := reviewPlanInt(result.Params["critic_exploration_timeout_seconds"], int(plan.criticExploration/time.Second))
+	criticSynthesisSeconds := reviewPlanInt(result.Params["critic_synthesis_reserve_seconds"], int(plan.criticSynthesisLead/time.Second))
+	plan.criticMaxIterations = reviewPlanInt(result.Params["critic_max_iterations"], plan.criticMaxIterations)
+	plan.criticMaxToolCalls = reviewPlanInt(result.Params["critic_max_tool_calls"], plan.criticMaxToolCalls)
 	plan.verificationTimeout = time.Duration(verificationSeconds) * time.Second
 	plan.explorationTimeout = time.Duration(explorationSeconds) * time.Second
 	plan.synthesisLead = time.Duration(reserveSeconds) * time.Second
+	plan.criticReserve = time.Duration(criticReserveSeconds) * time.Second
+	plan.criticExploration = time.Duration(criticExplorationSeconds) * time.Second
+	plan.criticSynthesisLead = time.Duration(criticSynthesisSeconds) * time.Second
 	return plan
 }
 
@@ -104,15 +125,28 @@ func reviewPlanInt(value any, fallback int) int {
 	return fallback
 }
 
+func enabledReviewDuration(enabled bool, value time.Duration) time.Duration {
+	if !enabled {
+		return 0
+	}
+	return value
+}
+
 func (opts automatedReviewOptions) withExecutionPlan(plan reviewExecutionPlan) automatedReviewOptions {
 	if opts.maxIterations <= 0 {
 		opts.maxIterations = plan.maxIterations
 	}
 	opts.maxToolCalls = plan.maxToolCalls
+	opts.maxVerificationCalls = plan.maxVerificationCalls
 	opts.reasoningMaxTokens = plan.reasoningMaxTokens
 	opts.verificationTimeout = plan.verificationTimeout
 	opts.explorationTimeout = plan.explorationTimeout
 	opts.synthesisLead = plan.synthesisLead
+	opts.criticReserve = plan.criticReserve
+	opts.criticMaxIterations = plan.criticMaxIterations
+	opts.criticMaxToolCalls = plan.criticMaxToolCalls
+	opts.criticExploration = plan.criticExploration
+	opts.criticSynthesisLead = plan.criticSynthesisLead
 	opts.sizeClass = plan.sizeClass
 	if opts.adaptiveCodexModel {
 		opts.modelID = codexReviewModelForSize(plan.sizeClass)
@@ -136,6 +170,7 @@ func appendReviewExecutionPlan(prompt string, opts automatedReviewOptions) strin
 - Reasoning effort: %s
 - Limit each model turn to %d reasoning tokens.
 - Use at most %d model turns and %d total inspection or verification calls.
+- Use at most %d verification calls.
 - Limit each verification command to %d seconds.
 - Finish evidence collection within %d seconds.
 - Keep the final %d seconds for a complete verdict.
@@ -174,6 +209,7 @@ func appendReviewExecutionPlan(prompt string, opts automatedReviewOptions) strin
 		opts.reasoningMaxTokens,
 		opts.maxIterations,
 		opts.maxToolCalls,
+		opts.maxVerificationCalls,
 		int(opts.verificationTimeout/time.Second),
 		int(opts.explorationTimeout/time.Second),
 		int(opts.synthesisLead/time.Second),

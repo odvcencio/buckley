@@ -60,6 +60,7 @@ type PRContext struct {
 	CanopyRuntime           time.Duration
 	CanopyIndexScope        string
 	CanopyIndexScopeSource  string
+	CanopyBlastRadius       int
 	ContextStatus           []PRContextStatus
 	target                  prReference
 	localRepoRoot           string
@@ -2253,6 +2254,7 @@ func assemblePRCanopyContext(
 	ctx.CanopyRuntime = evidence.Runtime
 	ctx.CanopyIndexScope = evidence.IndexScope
 	ctx.CanopyIndexScopeSource = evidence.IndexScopeSource
+	ctx.CanopyBlastRadius = evidence.BlastRadius
 	ctx.addStatus("Canopy structural review", "complete",
 		fmt.Sprintf("measured runtime %s; index scope %s", formatCanopyRuntime(evidence.Runtime), evidence.IndexScope), false)
 	audit.Add("Canopy structural review", reviewEstimateTokens(evidence.Output))

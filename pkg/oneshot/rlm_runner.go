@@ -143,20 +143,21 @@ func (r *RLMRunner) Run(ctx context.Context, systemPrompt, task string, allowedT
 	}
 	maxCostUSD := effectiveRLMMaxCostUSD(providerID, opts.MaxCostUSD)
 	agentCfg := rlm.SubAgentInstanceConfig{
-		ID:                 fmt.Sprintf("oneshot-%d", time.Now().UnixNano()),
-		Model:              modelToUse,
-		Reasoning:          reasoningEffort,
-		ReasoningMaxTokens: opts.ReasoningMaxTokens,
-		MaxOutputTokens:    reviewRLMOutputTokenLimit(opts.ReasoningMaxTokens),
-		SystemPrompt:       systemPrompt,
-		MaxIterations:      opts.MaxIterations,
-		MaxToolCalls:       opts.MaxToolCalls,
-		MaxCostUSD:         maxCostUSD,
-		Adaptive:           opts.MaxIterations <= 0 || opts.SynthesisLead > 0,
-		ExplorationTimeout: opts.ExplorationTimeout,
-		SynthesisLead:      opts.SynthesisLead,
-		AllowedTools:       allowedTools,
-		ReviewSnapshot:     opts.ReviewSnapshot,
+		ID:                   fmt.Sprintf("oneshot-%d", time.Now().UnixNano()),
+		Model:                modelToUse,
+		Reasoning:            reasoningEffort,
+		ReasoningMaxTokens:   opts.ReasoningMaxTokens,
+		MaxOutputTokens:      reviewRLMOutputTokenLimit(opts.ReasoningMaxTokens),
+		SystemPrompt:         systemPrompt,
+		MaxIterations:        opts.MaxIterations,
+		MaxToolCalls:         opts.MaxToolCalls,
+		MaxVerificationCalls: opts.MaxVerificationCalls,
+		MaxCostUSD:           maxCostUSD,
+		Adaptive:             opts.MaxIterations <= 0 || opts.SynthesisLead > 0,
+		ExplorationTimeout:   opts.ExplorationTimeout,
+		SynthesisLead:        opts.SynthesisLead,
+		AllowedTools:         allowedTools,
+		ReviewSnapshot:       opts.ReviewSnapshot,
 	}
 
 	// Create sub-agent with full tool access

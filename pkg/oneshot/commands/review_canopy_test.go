@@ -40,6 +40,9 @@ printf '{"base":"base-sha","changed_files":1,"files":["a.go"],"index_scope":"cha
 	if evidence.IndexScopeSource != "Canopy report" {
 		t.Fatalf("index scope source = %q, want Canopy report", evidence.IndexScopeSource)
 	}
+	if evidence.BlastRadius != 2 {
+		t.Fatalf("blast radius = %d, want 2", evidence.BlastRadius)
+	}
 	if evidence.Runtime <= 0 {
 		t.Fatalf("runtime = %s, want a measured duration", evidence.Runtime)
 	}
@@ -96,6 +99,9 @@ printf '{"base":"base-sha","changed_files":15,"blast_radius":1733,"complexity_de
 	}
 	if evidence.IndexScopeSource != "repository-root invocation" {
 		t.Fatalf("index scope source = %q, want repository-root invocation", evidence.IndexScopeSource)
+	}
+	if evidence.BlastRadius != 1733 {
+		t.Fatalf("blast radius = %d, want 1733", evidence.BlastRadius)
 	}
 	for _, want := range []string{
 		`"changed_files": 15`,

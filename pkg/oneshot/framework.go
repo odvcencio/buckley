@@ -43,16 +43,17 @@ type RLMExecutor interface {
 // RLMExecutionOpts is immutable execution metadata shared by every sub-agent
 // invocation in one RunRLM call.
 type RLMExecutionOpts struct {
-	ReviewSnapshot      *model.ReviewSnapshot
-	MaxIterations       int
-	MaxToolCalls        int
-	MaxCostUSD          float64
-	ExplorationTimeout  time.Duration
-	SynthesisLead       time.Duration
-	VerificationTimeout time.Duration
-	ModelID             string
-	ReasoningEffort     string
-	ReasoningMaxTokens  int
+	ReviewSnapshot       *model.ReviewSnapshot
+	MaxIterations        int
+	MaxToolCalls         int
+	MaxVerificationCalls int
+	MaxCostUSD           float64
+	ExplorationTimeout   time.Duration
+	SynthesisLead        time.Duration
+	VerificationTimeout  time.Duration
+	ModelID              string
+	ReasoningEffort      string
+	ReasoningMaxTokens   int
 }
 
 // ToolInvoker runs a single tool-shaped one-shot model invocation.
@@ -245,6 +246,10 @@ type RLMRunOpts struct {
 	// MaxToolCalls bounds inspection and verification calls in one review pass.
 	MaxToolCalls int
 
+	// MaxVerificationCalls bounds expensive verification calls in one review
+	// pass. Zero leaves verification bounded only by MaxToolCalls.
+	MaxVerificationCalls int
+
 	// MaxCostUSD is a hard best-effort cost ceiling shared by validation
 	// retries and the approval critic. Zero leaves cost unconstrained.
 	MaxCostUSD float64
@@ -252,6 +257,22 @@ type RLMRunOpts struct {
 	// ApprovalCriticReserveUSD protects enough of MaxCostUSD for an
 	// independent approval critic. It is unused for non-approval results.
 	ApprovalCriticReserveUSD float64
+
+	// ApprovalCriticReserve protects command time for an independent approval
+	// critic. It is unused when the review does not enable a critic.
+	ApprovalCriticReserve time.Duration
+
+	// CriticMaxIterations bounds the approval critic's model turns.
+	CriticMaxIterations int
+
+	// CriticMaxToolCalls bounds the approval critic's inspection calls.
+	CriticMaxToolCalls int
+
+	// CriticExplorationTimeout caps approval-critic evidence collection.
+	CriticExplorationTimeout time.Duration
+
+	// CriticSynthesisLead reserves approval-critic final response time.
+	CriticSynthesisLead time.Duration
 
 	// SynthesisLead reserves command time for a complete final review.
 	SynthesisLead time.Duration
@@ -331,14 +352,15 @@ func (f *Framework) RunRLM(ctx context.Context, def RLMDefinition, opts RLMRunOp
 		}
 	}
 	executionOpts := RLMExecutionOpts{
-		ReviewSnapshot:      snapshot,
-		MaxToolCalls:        opts.MaxToolCalls,
-		ExplorationTimeout:  opts.ExplorationTimeout,
-		SynthesisLead:       opts.SynthesisLead,
-		VerificationTimeout: opts.VerificationTimeout,
-		ModelID:             opts.ModelID,
-		ReasoningEffort:     opts.ReasoningEffort,
-		ReasoningMaxTokens:  opts.ReasoningMaxTokens,
+		ReviewSnapshot:       snapshot,
+		MaxToolCalls:         opts.MaxToolCalls,
+		MaxVerificationCalls: opts.MaxVerificationCalls,
+		ExplorationTimeout:   opts.ExplorationTimeout,
+		SynthesisLead:        opts.SynthesisLead,
+		VerificationTimeout:  opts.VerificationTimeout,
+		ModelID:              opts.ModelID,
+		ReasoningEffort:      opts.ReasoningEffort,
+		ReasoningMaxTokens:   opts.ReasoningMaxTokens,
 	}
 	if opts.MaxIterations > 0 {
 		executionOpts.MaxIterations = opts.MaxIterations
@@ -354,7 +376,9 @@ func (f *Framework) RunRLM(ctx context.Context, def RLMDefinition, opts RLMRunOp
 		}
 	}
 	executionOpts.MaxCostUSD = primaryBudget
-	primary := f.runValidatedRLMPhase(ctx, f.rlmRunner, def, def.SystemPrompt(), basePrompt, maxRetries, "primary", executionOpts)
+	primaryCtx, cancelPrimary := contextWithReservedTime(ctx, opts.ApprovalCriticReserve)
+	primary := f.runValidatedRLMPhase(primaryCtx, f.rlmRunner, def, def.SystemPrompt(), basePrompt, maxRetries, "primary", executionOpts)
+	cancelPrimary()
 	result.Attempts = primary.attempts
 	result.PrimaryAttempts = primary.attempts
 	traceAttempts := append([]transparency.TraceAttempt(nil), primary.traces...)
@@ -379,9 +403,22 @@ func (f *Framework) RunRLM(ctx context.Context, def RLMDefinition, opts RLMRunOp
 		result.IncompleteReason = err.Error()
 		return result, fmt.Errorf("build approval critic prompt for %q: %w", def.Name(), err)
 	}
+	criticExecutionOpts := executionOpts
+	if opts.CriticMaxIterations > 0 {
+		criticExecutionOpts.MaxIterations = opts.CriticMaxIterations
+	}
+	if opts.CriticMaxToolCalls > 0 {
+		criticExecutionOpts.MaxToolCalls = opts.CriticMaxToolCalls
+	}
+	if opts.CriticExplorationTimeout > 0 {
+		criticExecutionOpts.ExplorationTimeout = opts.CriticExplorationTimeout
+	}
+	if opts.CriticSynthesisLead > 0 {
+		criticExecutionOpts.SynthesisLead = opts.CriticSynthesisLead
+	}
 	if opts.MaxCostUSD > 0 {
-		executionOpts.MaxCostUSD = opts.MaxCostUSD - primary.cost
-		if executionOpts.MaxCostUSD <= 0 {
+		criticExecutionOpts.MaxCostUSD = opts.MaxCostUSD - primary.cost
+		if criticExecutionOpts.MaxCostUSD <= 0 {
 			result.Incomplete = true
 			result.IncompleteReason = "review cost budget exhausted before approval critic"
 			return result, fmt.Errorf("%s for %q", result.IncompleteReason, def.Name())
@@ -391,7 +428,7 @@ func (f *Framework) RunRLM(ctx context.Context, def RLMDefinition, opts RLMRunOp
 	if criticRunner == nil {
 		criticRunner = f.rlmRunner
 	} else {
-		executionOpts.ModelID = ""
+		criticExecutionOpts.ModelID = ""
 	}
 	critic := f.runValidatedRLMPhase(
 		ctx,
@@ -401,7 +438,7 @@ func (f *Framework) RunRLM(ctx context.Context, def RLMDefinition, opts RLMRunOp
 		criticPrompt,
 		maxRetries,
 		"approval critic",
-		executionOpts,
+		criticExecutionOpts,
 	)
 	result.Attempts += critic.attempts
 	result.CriticAttempts = critic.attempts
@@ -421,6 +458,20 @@ func (f *Framework) RunRLM(ctx context.Context, def RLMDefinition, opts RLMRunOp
 	// authoritative final review.
 	result.Value = critic.value
 	return result, nil
+}
+
+func contextWithReservedTime(ctx context.Context, reserve time.Duration) (context.Context, context.CancelFunc) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if reserve <= 0 {
+		return context.WithCancel(ctx)
+	}
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return context.WithCancel(ctx)
+	}
+	return context.WithDeadline(ctx, deadline.Add(-reserve))
 }
 
 type rlmPhaseResult struct {

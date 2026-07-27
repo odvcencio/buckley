@@ -682,6 +682,7 @@ func TestAssemblePRCanopyContextRunsOnceForImmutableCleanHead(t *testing.T) {
 			Runtime:          4600 * time.Millisecond,
 			IndexScope:       "changed",
 			IndexScopeSource: "Canopy report",
+			BlastRadius:      4,
 		}
 	}
 
@@ -690,6 +691,9 @@ func TestAssemblePRCanopyContextRunsOnceForImmutableCleanHead(t *testing.T) {
 	secondPrompt := BuildPRPrompt(ctx)
 	if calls != 1 {
 		t.Fatalf("Canopy calls = %d, want one", calls)
+	}
+	if ctx.CanopyBlastRadius != 4 {
+		t.Fatalf("Canopy blast radius = %d, want 4", ctx.CanopyBlastRadius)
 	}
 	for _, prompt := range []string{firstPrompt, secondPrompt} {
 		for _, want := range []string{

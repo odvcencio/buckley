@@ -285,24 +285,30 @@ func runPRReviewWithIterationLimit(ctx context.Context, prRef string, framework 
 }
 
 type automatedReviewOptions struct {
-	maxIterations       int
-	maxToolCalls        int
-	maxRetries          int
-	maxDiffBytes        int
-	maxCostUSD          float64
-	criticReserveUSD    float64
-	approvalCritic      bool
-	verificationTimeout time.Duration
-	explorationTimeout  time.Duration
-	synthesisLead       time.Duration
-	sizeClass           string
-	modelID             string
-	reasoningEffort     string
-	reasoningMaxTokens  int
-	adaptiveCodexModel  bool
-	adaptiveReasoning   bool
-	engine              *rules.Engine
-	contextReady        func(context.Context, *commands.PRInfo, automatedReviewOptions) error
+	maxIterations        int
+	maxToolCalls         int
+	maxVerificationCalls int
+	maxRetries           int
+	maxDiffBytes         int
+	maxCostUSD           float64
+	criticReserveUSD     float64
+	approvalCritic       bool
+	verificationTimeout  time.Duration
+	explorationTimeout   time.Duration
+	synthesisLead        time.Duration
+	criticReserve        time.Duration
+	criticMaxIterations  int
+	criticMaxToolCalls   int
+	criticExploration    time.Duration
+	criticSynthesisLead  time.Duration
+	sizeClass            string
+	modelID              string
+	reasoningEffort      string
+	reasoningMaxTokens   int
+	adaptiveCodexModel   bool
+	adaptiveReasoning    bool
+	engine               *rules.Engine
+	contextReady         func(context.Context, *commands.PRInfo, automatedReviewOptions) error
 }
 
 func defaultAutomatedReviewOptions(cfg *config.Config) automatedReviewOptions {
@@ -360,6 +366,7 @@ func runPRReviewWithOptions(ctx context.Context, prRef string, framework *onesho
 	plan := resolveReviewExecutionPlan(opts.engine, rules.ReviewPlanFacts{
 		FileCount:         len(prCtx.Files),
 		DiffBytes:         len(prCtx.Diff),
+		BlastRadius:       prCtx.CanopyBlastRadius,
 		ContextIncomplete: prCtx.HasIncompleteContext(),
 		HasFeedback:       prCtx.HasReviewFeedback(),
 	})
@@ -388,8 +395,14 @@ func runPRReviewWithOptions(ctx context.Context, prRef string, framework *onesho
 		MaxRetries:               opts.maxRetries,
 		MaxIterations:            opts.maxIterations,
 		MaxToolCalls:             opts.maxToolCalls,
+		MaxVerificationCalls:     opts.maxVerificationCalls,
 		MaxCostUSD:               opts.maxCostUSD,
 		ApprovalCriticReserveUSD: opts.criticReserveUSD,
+		ApprovalCriticReserve:    enabledReviewDuration(opts.approvalCritic, opts.criticReserve),
+		CriticMaxIterations:      opts.criticMaxIterations,
+		CriticMaxToolCalls:       opts.criticMaxToolCalls,
+		CriticExplorationTimeout: opts.criticExploration,
+		CriticSynthesisLead:      opts.criticSynthesisLead,
 		ExplorationTimeout:       opts.explorationTimeout,
 		SynthesisLead:            opts.synthesisLead,
 		VerificationTimeout:      opts.verificationTimeout,

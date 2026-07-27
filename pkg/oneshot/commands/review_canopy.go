@@ -28,6 +28,7 @@ type canopyReviewEvidence struct {
 	Runtime          time.Duration
 	IndexScope       string
 	IndexScopeSource string
+	BlastRadius      int
 }
 
 type canopyReviewReport struct {
@@ -131,6 +132,7 @@ func collectCanopyReviewEvidence(parent context.Context, repoRoot, baseCommit st
 		Runtime:          elapsed,
 		IndexScope:       indexScope,
 		IndexScopeSource: indexScopeSource,
+		BlastRadius:      report.BlastRadius,
 	}
 }
 

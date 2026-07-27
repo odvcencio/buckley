@@ -471,6 +471,33 @@ func TestApprovedAPIReviewRequiresSuccessfulVerificationToolEvidence(t *testing.
 	assert.NoError(t, validateReviewExecutionEvidence(result, execution, changedFiles))
 }
 
+func TestReviewPRDefSkipsDuplicateVerificationForAuthoritativeRemoteCI(t *testing.T) {
+	def := ReviewPRDef{
+		CIStatus:     "passing (8/8)",
+		CIProvenance: prCISourceHead,
+	}
+	for _, name := range def.AllowedTools() {
+		if name == "run_verification" {
+			t.Fatal("authoritative remote CI still exposed run_verification")
+		}
+	}
+	if !strings.Contains(def.SystemPrompt(), "run_verification tool is disabled") {
+		t.Fatal("system prompt did not explain the remote CI execution policy")
+	}
+
+	pending := ReviewPRDef{
+		CIStatus:     "pending (3/8)",
+		CIProvenance: prCISourceHead,
+	}
+	hasVerification := false
+	for _, name := range pending.AllowedTools() {
+		hasVerification = hasVerification || name == "run_verification"
+	}
+	if !hasVerification {
+		t.Fatal("pending CI removed focused verification")
+	}
+}
+
 func TestReviewVerificationTargetsListsChangedSourcePackages(t *testing.T) {
 	got := reviewVerificationTargets([]string{
 		"cmd/buckley/review.go",
