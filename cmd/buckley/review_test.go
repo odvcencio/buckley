@@ -149,6 +149,19 @@ func TestResolveReviewModelAppliesCommandReasoningSuffix(t *testing.T) {
 	}
 }
 
+func TestResolveReviewModelUsesCodexAdaptiveBaseline(t *testing.T) {
+	previous := modelOverrideFlag
+	modelOverrideFlag = "codex/auto"
+	t.Cleanup(func() { modelOverrideFlag = previous })
+
+	if got := resolveReviewModel(config.DefaultConfig()); got != codexReviewModelStandard {
+		t.Fatalf("resolveReviewModel() = %q, want Terra baseline", got)
+	}
+	if !isAdaptiveCodexReviewSelector(resolveReviewModelSelector(config.DefaultConfig())) {
+		t.Fatal("codex/auto did not enable adaptive model selection")
+	}
+}
+
 func TestNormalizeReviewCommandScope(t *testing.T) {
 	tests := []struct {
 		name  string

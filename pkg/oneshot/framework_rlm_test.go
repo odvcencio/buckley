@@ -34,6 +34,7 @@ type scriptedRLMExecutor struct {
 	exploration  []time.Duration
 	synthesis    []time.Duration
 	verification []time.Duration
+	models       []string
 	reasoning    []string
 	maxCosts     []float64
 }
@@ -48,6 +49,7 @@ func (s *scriptedRLMExecutor) Run(_ context.Context, system string, task string,
 	s.exploration = append(s.exploration, opts.ExplorationTimeout)
 	s.synthesis = append(s.synthesis, opts.SynthesisLead)
 	s.verification = append(s.verification, opts.VerificationTimeout)
+	s.models = append(s.models, opts.ModelID)
 	s.reasoning = append(s.reasoning, opts.ReasoningEffort)
 	s.maxCosts = append(s.maxCosts, opts.MaxCostUSD)
 	if len(s.responses) == 0 {
@@ -220,6 +222,7 @@ func TestRunRLMPropagatesBoundedReviewPlan(t *testing.T) {
 		ExplorationTimeout:  3 * time.Minute,
 		SynthesisLead:       75 * time.Second,
 		VerificationTimeout: 90 * time.Second,
+		ModelID:             "codex/gpt-5.6-luna",
 		ReasoningEffort:     "low",
 	}); err != nil {
 		t.Fatalf("RunRLM() error = %v", err)
@@ -238,6 +241,9 @@ func TestRunRLMPropagatesBoundedReviewPlan(t *testing.T) {
 	}
 	if len(runner.reasoning) != 1 || runner.reasoning[0] != "low" {
 		t.Fatalf("reasoning efforts = %v, want [low]", runner.reasoning)
+	}
+	if len(runner.models) != 1 || runner.models[0] != "codex/gpt-5.6-luna" {
+		t.Fatalf("models = %v, want [codex/gpt-5.6-luna]", runner.models)
 	}
 }
 
@@ -394,6 +400,29 @@ func TestRunRLMApprovalCriticApproves(t *testing.T) {
 	}
 	if len(runner.snapshots) != 2 || runner.snapshots[0] != snapshot || runner.snapshots[1] != snapshot {
 		t.Fatalf("primary/critic did not reuse one immutable snapshot: %#v", runner.snapshots)
+	}
+}
+
+func TestRunRLMDedicatedCriticKeepsItsConfiguredModel(t *testing.T) {
+	primary := &scriptedRLMExecutor{responses: []string{"approve"}}
+	critic := &scriptedRLMExecutor{responses: []string{"approve"}}
+	framework := NewFramework(nil, nil).
+		WithRLMRunner(primary).
+		WithApprovalCriticRunner(critic)
+
+	_, err := framework.RunRLM(context.Background(), criticRLMDefinition{}, RLMRunOpts{
+		UserPrompt: "diff evidence",
+		MaxRetries: 1,
+		ModelID:    "codex/gpt-5.6-sol",
+	})
+	if err != nil {
+		t.Fatalf("RunRLM() error = %v", err)
+	}
+	if got := primary.models; len(got) != 1 || got[0] != "codex/gpt-5.6-sol" {
+		t.Fatalf("primary models = %v, want adaptive Sol override", got)
+	}
+	if got := critic.models; len(got) != 1 || got[0] != "" {
+		t.Fatalf("critic models = %v, want configured runner model", got)
 	}
 }
 

@@ -50,6 +50,7 @@ type RLMExecutionOpts struct {
 	ExplorationTimeout  time.Duration
 	SynthesisLead       time.Duration
 	VerificationTimeout time.Duration
+	ModelID             string
 	ReasoningEffort     string
 }
 
@@ -263,6 +264,10 @@ type RLMRunOpts struct {
 	// ReasoningEffort overrides the runner default for this review plan.
 	ReasoningEffort string
 
+	// ModelID overrides the primary runner model for this review plan.
+	// A separately configured approval critic keeps its own model.
+	ModelID string
+
 	// SnapshotPolicy captures the exact Git state that native review
 	// verification may inspect. It is captured once before the primary pass and
 	// reused unchanged for validation retries and the approval critic.
@@ -327,6 +332,7 @@ func (f *Framework) RunRLM(ctx context.Context, def RLMDefinition, opts RLMRunOp
 		ExplorationTimeout:  opts.ExplorationTimeout,
 		SynthesisLead:       opts.SynthesisLead,
 		VerificationTimeout: opts.VerificationTimeout,
+		ModelID:             opts.ModelID,
 		ReasoningEffort:     opts.ReasoningEffort,
 	}
 	if opts.MaxIterations > 0 {
@@ -379,6 +385,8 @@ func (f *Framework) RunRLM(ctx context.Context, def RLMDefinition, opts RLMRunOp
 	criticRunner := f.approvalCriticRunner
 	if criticRunner == nil {
 		criticRunner = f.rlmRunner
+	} else {
+		executionOpts.ModelID = ""
 	}
 	critic := f.runValidatedRLMPhase(
 		ctx,

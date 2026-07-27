@@ -294,6 +294,12 @@ func AssembleBranchContext(opts BranchContextOptions) (*BranchContext, *transpar
 		}
 	}
 
+	enrichBranchReviewContext(opts, ctx, audit)
+
+	return ctx, audit, nil
+}
+
+func enrichBranchReviewContext(opts BranchContextOptions, ctx *BranchContext, audit *transparency.ContextAudit) {
 	if opts.IncludeCanopy {
 		ctx.CanopyReview, ctx.CanopyStatus = collectCanopyReview(opts.Context, ctx.RepoRoot, ctx.BaseCommit)
 		if ctx.CanopyReview != "" {
@@ -320,8 +326,6 @@ func AssembleBranchContext(opts BranchContextOptions) (*BranchContext, *transpar
 			audit,
 		)
 	}
-
-	return ctx, audit, nil
 }
 
 // AssembleProjectContext gathers context for project review.

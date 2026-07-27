@@ -11,7 +11,10 @@ import (
 )
 
 const (
-	defaultReviewTimeout = 4*time.Minute + 45*time.Second
+	defaultReviewTimeout     = 4*time.Minute + 45*time.Second
+	codexReviewModelFocused  = "codex/gpt-5.6-luna"
+	codexReviewModelStandard = "codex/gpt-5.6-terra"
+	codexReviewModelBroad    = "codex/gpt-5.6-sol"
 )
 
 type reviewExecutionPlan struct {
@@ -107,6 +110,9 @@ func (opts automatedReviewOptions) withExecutionPlan(plan reviewExecutionPlan) a
 	opts.explorationTimeout = plan.explorationTimeout
 	opts.synthesisLead = plan.synthesisLead
 	opts.sizeClass = plan.sizeClass
+	if opts.adaptiveCodexModel {
+		opts.modelID = codexReviewModelForSize(plan.sizeClass)
+	}
 	if opts.adaptiveReasoning {
 		opts.reasoningEffort = plan.reasoningEffort
 	}
@@ -119,6 +125,7 @@ func appendReviewExecutionPlan(prompt string, opts automatedReviewOptions) strin
 ## Bounded Review Plan
 
 - Size class: %s
+- Model: %s
 - Reasoning effort: %s
 - Use at most %d model turns and %d total inspection or verification calls.
 - Limit each verification command to %d seconds.
@@ -129,6 +136,7 @@ func appendReviewExecutionPlan(prompt string, opts automatedReviewOptions) strin
 - If required evidence cannot fit or project guidance forbids it, finish with a non-approval verdict.
 `,
 		strings.ToUpper(opts.sizeClass),
+		opts.modelID,
 		strings.ToUpper(opts.reasoningEffort),
 		opts.maxIterations,
 		opts.maxToolCalls,
@@ -136,6 +144,26 @@ func appendReviewExecutionPlan(prompt string, opts automatedReviewOptions) strin
 		int(opts.explorationTimeout/time.Second),
 		int(opts.synthesisLead/time.Second),
 	)
+}
+
+func isAdaptiveCodexReviewSelector(modelID string) bool {
+	switch strings.ToLower(strings.TrimSpace(modelID)) {
+	case "codex", "codex/auto", "codex/adaptive":
+		return true
+	default:
+		return false
+	}
+}
+
+func codexReviewModelForSize(sizeClass string) string {
+	switch strings.ToLower(strings.TrimSpace(sizeClass)) {
+	case "focused":
+		return codexReviewModelFocused
+	case "broad", "project":
+		return codexReviewModelBroad
+	default:
+		return codexReviewModelStandard
+	}
 }
 
 func resolveConfiguredReviewReasoning(cfg *config.Config) string {

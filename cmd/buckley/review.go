@@ -70,7 +70,7 @@ func parseReviewCommandOptions(args []string) (reviewCommandOptions, error) {
 	fs.Var(&untrackedPaths, "include-untracked", "include one untracked repository-relative text path in model input (repeatable; review for secrets)")
 	verbose := fs.Bool("verbose", false, "show full context and reasoning")
 	showCost := fs.Bool("cost", true, "show token/cost breakdown")
-	modelFlag := fs.String("model", "", "model to use (default: BUCKLEY_MODEL_REVIEW or buckbot.model)")
+	modelFlag := fs.String("model", "", "model to use; codex/auto scales Luna to Terra to Sol")
 	criticModel := fs.String("critic-model", "", "opt-in approval critic model for large or business-critical reviews")
 	timeout := fs.Duration("timeout", defaultReviewTimeout, "total review timeout")
 	outputFile := fs.String("output", "", "write review to file instead of stdout")
@@ -142,7 +142,7 @@ func runReviewCommand(args []string) error {
 	defer cancel()
 
 	if !quietMode {
-		termOut.Dim("Using model: %s", runtime.modelID)
+		printReviewModelSelection(runtime)
 		if runtime.policy.adaptiveReasoning {
 			termOut.Dim("Reasoning effort: adaptive (low, medium, or high)")
 		} else if runtime.reasoningEffort != "" {
@@ -228,6 +228,8 @@ func newReviewCommandRuntime(cfg *config.Config, mgr *model.Manager) (*reviewCom
 	})
 	framework := oneshot.NewFramework(nil, arbEngine).WithRLMRunner(rlmRunner)
 	policy := defaultAutomatedReviewOptions(cfg)
+	policy.modelID = modelID
+	policy.adaptiveCodexModel = isAdaptiveCodexReviewSelector(resolveReviewModelSelector(cfg))
 	policy.reasoningEffort = reasoningEffort
 	policy.adaptiveReasoning = reviewReasoningIsAdaptive(cfg, reviewReasoningOverride())
 	policy.engine = arbEngine
@@ -272,24 +274,37 @@ func reviewReasoningOverride() string {
 	return effort
 }
 
-func resolveReviewModel(cfg *config.Config) string {
+func resolveReviewModelSelector(cfg *config.Config) string {
 	modelID := strings.TrimSpace(modelOverrideFlag)
-	if modelID != "" {
-		modelID = normalizeModelIDWithReasoning(cfg, modelID)
-	}
 	if modelID == "" {
-		modelID = normalizeModelIDWithReasoning(cfg, os.Getenv("BUCKLEY_MODEL_REVIEW"))
+		modelID = strings.TrimSpace(os.Getenv("BUCKLEY_MODEL_REVIEW"))
 	}
 	if modelID == "" && cfg != nil {
-		modelID = cfg.Buckbot.Model
+		modelID = strings.TrimSpace(cfg.Buckbot.Model)
 	}
 	if modelID == "" && cfg != nil {
-		modelID = cfg.Models.Review
+		modelID = strings.TrimSpace(cfg.Models.Review)
 	}
 	if modelID == "" && cfg != nil {
-		modelID = cfg.Models.Execution
+		modelID = strings.TrimSpace(cfg.Models.Execution)
 	}
 	return modelID
+}
+
+func resolveReviewModel(cfg *config.Config) string {
+	modelID := resolveReviewModelSelector(cfg)
+	if isAdaptiveCodexReviewSelector(modelID) {
+		return codexReviewModelStandard
+	}
+	return normalizeModelIDWithReasoning(cfg, modelID)
+}
+
+func printReviewModelSelection(runtime *reviewCommandRuntime) {
+	if runtime.policy.adaptiveCodexModel {
+		termOut.Dim("Using model: Codex adaptive (Luna → Terra → Sol)")
+		return
+	}
+	termOut.Dim("Using model: %s", runtime.modelID)
 }
 
 func runReview(ctx context.Context, opts reviewCommandOptions, framework *oneshot.Framework) (*reviewCommandResult, error) {
@@ -357,6 +372,7 @@ func runProjectReviewWithPolicy(ctx context.Context, framework *oneshot.Framewor
 		ExplorationTimeout:       reviewPolicy.explorationTimeout,
 		SynthesisLead:            reviewPolicy.synthesisLead,
 		VerificationTimeout:      reviewPolicy.verificationTimeout,
+		ModelID:                  reviewPolicy.modelID,
 		ReasoningEffort:          reviewPolicy.reasoningEffort,
 		SnapshotPolicy:           policy,
 		ReviewSnapshot:           snapshot,
@@ -445,6 +461,7 @@ func runBranchReviewWithPolicy(ctx context.Context, opts reviewCommandOptions, f
 		ExplorationTimeout:       reviewPolicy.explorationTimeout,
 		SynthesisLead:            reviewPolicy.synthesisLead,
 		VerificationTimeout:      reviewPolicy.verificationTimeout,
+		ModelID:                  reviewPolicy.modelID,
 		ReasoningEffort:          reviewPolicy.reasoningEffort,
 		SnapshotPolicy:           policy,
 		ReviewSnapshot:           snapshot,

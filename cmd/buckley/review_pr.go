@@ -37,7 +37,7 @@ func parseReviewPRCommandOptions(args []string) (reviewPRCommandOptions, error) 
 	verbose := fs.Bool("verbose", false, "show full context and reasoning")
 	showCost := fs.Bool("cost", true, "show token/cost breakdown")
 	post := fs.Bool("post", false, "post the completed review to GitHub (default: dry run)")
-	modelFlag := fs.String("model", "", "model to use (default: BUCKLEY_MODEL_REVIEW or buckbot.model)")
+	modelFlag := fs.String("model", "", "model to use; codex/auto scales Luna to Terra to Sol")
 	criticModel := fs.String("critic-model", "", "opt-in approval critic model for large or business-critical reviews")
 	timeout := fs.Duration("timeout", defaultReviewTimeout, "total review timeout")
 	outputFile := fs.String("output", "", "write review to file instead of stdout")
@@ -117,7 +117,7 @@ func reviewPRFlagTakesValue(name string) bool {
 }
 
 func reviewPRUsageError() error {
-	return fmt.Errorf("usage: buckley review-pr <pr-number-or-url> [flags]\n\nExamples:\n  buckley review-pr 123\n  buckley review-pr 123 -model codex/gpt-5.6-terra-high\n  buckley review-pr https://github.com/owner/repo/pull/123")
+	return fmt.Errorf("usage: buckley review-pr <pr-number-or-url> [flags]\n\nExamples:\n  buckley review-pr 123\n  buckley review-pr 123 -model codex/auto\n  buckley review-pr 123 -model codex/gpt-5.6-terra-high\n  buckley review-pr https://github.com/owner/repo/pull/123")
 }
 
 // runReviewPRCommand reviews a remote PR using gh CLI integration.
@@ -150,7 +150,7 @@ func runReviewPRCommand(args []string) error {
 	defer cancel()
 
 	if !quietMode {
-		termOut.Dim("Using model: %s", runtime.modelID)
+		printReviewModelSelection(runtime)
 		if runtime.policy.adaptiveReasoning {
 			termOut.Dim("Reasoning effort: adaptive (low, medium, or high)")
 		} else if runtime.reasoningEffort != "" {
@@ -249,7 +249,9 @@ type automatedReviewOptions struct {
 	explorationTimeout  time.Duration
 	synthesisLead       time.Duration
 	sizeClass           string
+	modelID             string
 	reasoningEffort     string
+	adaptiveCodexModel  bool
 	adaptiveReasoning   bool
 	engine              *rules.Engine
 }
@@ -335,6 +337,7 @@ func runPRReviewWithOptions(ctx context.Context, prRef string, framework *onesho
 		ExplorationTimeout:       opts.explorationTimeout,
 		SynthesisLead:            opts.synthesisLead,
 		VerificationTimeout:      opts.verificationTimeout,
+		ModelID:                  opts.modelID,
 		ReasoningEffort:          opts.reasoningEffort,
 		SnapshotPolicy: model.ReviewSnapshotPolicy{
 			Mode:           model.ReviewSnapshotHead,

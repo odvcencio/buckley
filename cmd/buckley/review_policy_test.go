@@ -111,9 +111,41 @@ func TestReviewExecutionPlanPreservesExplicitTurnOverride(t *testing.T) {
 	}
 }
 
+func TestReviewExecutionPlanScalesAdaptiveCodexModels(t *testing.T) {
+	tests := []struct {
+		size string
+		want string
+	}{
+		{size: "focused", want: codexReviewModelFocused},
+		{size: "standard", want: codexReviewModelStandard},
+		{size: "broad", want: codexReviewModelBroad},
+		{size: "project", want: codexReviewModelBroad},
+	}
+	for _, tt := range tests {
+		opts := automatedReviewOptions{
+			modelID:            codexReviewModelStandard,
+			adaptiveCodexModel: true,
+		}.withExecutionPlan(reviewExecutionPlan{sizeClass: tt.size})
+		if opts.modelID != tt.want {
+			t.Fatalf("%s model = %q, want %q", tt.size, opts.modelID, tt.want)
+		}
+	}
+}
+
+func TestReviewExecutionPlanPreservesExactModel(t *testing.T) {
+	opts := automatedReviewOptions{
+		modelID:            "codex/gpt-5.6-terra",
+		adaptiveCodexModel: false,
+	}.withExecutionPlan(reviewExecutionPlan{sizeClass: "broad"})
+	if opts.modelID != "codex/gpt-5.6-terra" {
+		t.Fatalf("model = %q, want exact Terra override", opts.modelID)
+	}
+}
+
 func TestAppendReviewExecutionPlanGuidesBoundedEvidenceCollection(t *testing.T) {
 	prompt := appendReviewExecutionPlan("review this", automatedReviewOptions{
 		sizeClass:           "focused",
+		modelID:             "codex/gpt-5.6-luna",
 		reasoningEffort:     "low",
 		maxIterations:       8,
 		maxToolCalls:        12,
@@ -123,6 +155,7 @@ func TestAppendReviewExecutionPlanGuidesBoundedEvidenceCollection(t *testing.T) 
 	})
 	for _, want := range []string{
 		"Size class: FOCUSED",
+		"Model: codex/gpt-5.6-luna",
 		"Reasoning effort: LOW",
 		"at most 8 model turns and 12 total",
 		"Limit each verification command to 90 seconds",

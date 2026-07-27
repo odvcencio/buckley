@@ -84,7 +84,7 @@ func (r *RLMRunner) Run(ctx context.Context, systemPrompt, task string, allowedT
 	if r.models == nil {
 		return nil, fmt.Errorf("model manager required")
 	}
-	if r.modelID == "" {
+	if r.modelID == "" && strings.TrimSpace(opts.ModelID) == "" {
 		return nil, fmt.Errorf("model ID required")
 	}
 
@@ -92,7 +92,10 @@ func (r *RLMRunner) Run(ctx context.Context, systemPrompt, task string, allowedT
 	traceID := fmt.Sprintf("rlm-%d", time.Now().UnixNano())
 
 	// Determine model for sub-agent
-	modelToUse := r.modelID
+	modelToUse := strings.TrimSpace(opts.ModelID)
+	if modelToUse == "" {
+		modelToUse = r.modelID
+	}
 	providerID := r.models.ProviderIDForModel(modelToUse)
 	agentRegistry := r.registry
 	snapshotWorkDir := ""
