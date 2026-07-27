@@ -63,6 +63,9 @@ func TestReviewPromptsMakeApprovalVerificationPolicyExplicit(t *testing.T) {
 
 	pr := reviewPRDefault(time.Unix(0, 0))
 	for _, want := range []string{
+		"## Structural Impact",
+		"exact changed symbol and file counts",
+		"Never estimate a structural metric",
 		"aggregate remote CI status as authoritative",
 		"passing (N/N)",
 		"Failing, pending, unknown, or absent checks block approval",
@@ -70,6 +73,8 @@ func TestReviewPromptsMakeApprovalVerificationPolicyExplicit(t *testing.T) {
 		"Do not rerun the full suite solely",
 		"falsify a concrete risk",
 		"do not replace the required remote gate",
+		"smallest changed right-side line",
+		"exact replacement for the anchored changed lines",
 	} {
 		if !strings.Contains(pr, want) {
 			t.Errorf("PR prompt missing %q", want)

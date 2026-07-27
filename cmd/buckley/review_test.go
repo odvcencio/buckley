@@ -75,6 +75,24 @@ func TestParseReviewCommandOptions(t *testing.T) {
 	}
 }
 
+func TestReviewCommandsReserveEnoughTimeByDefault(t *testing.T) {
+	branch, err := parseReviewCommandOptions(nil)
+	if err != nil {
+		t.Fatalf("parseReviewCommandOptions() error = %v", err)
+	}
+	if branch.timeout != defaultReviewTimeout {
+		t.Fatalf("branch timeout = %s, want %s", branch.timeout, defaultReviewTimeout)
+	}
+
+	pr, err := parseReviewPRCommandOptions([]string{"123"})
+	if err != nil {
+		t.Fatalf("parseReviewPRCommandOptions() error = %v", err)
+	}
+	if pr.timeout != defaultReviewTimeout {
+		t.Fatalf("PR timeout = %s, want %s", pr.timeout, defaultReviewTimeout)
+	}
+}
+
 func TestResolveReviewModelPrecedence(t *testing.T) {
 	previous := modelOverrideFlag
 	modelOverrideFlag = ""
@@ -125,6 +143,22 @@ func TestResolveReviewModelAppliesCommandReasoningSuffix(t *testing.T) {
 	}
 	if cfg.Models.Reasoning != "high" {
 		t.Fatalf("reasoning = %q, want high", cfg.Models.Reasoning)
+	}
+	if got := reviewReasoningOverride(); got != "high" {
+		t.Fatalf("review reasoning override = %q, want high", got)
+	}
+}
+
+func TestResolveReviewModelUsesCodexAdaptiveBaseline(t *testing.T) {
+	previous := modelOverrideFlag
+	modelOverrideFlag = "codex/auto"
+	t.Cleanup(func() { modelOverrideFlag = previous })
+
+	if got := resolveReviewModel(config.DefaultConfig()); got != codexReviewModelStandard {
+		t.Fatalf("resolveReviewModel() = %q, want Terra baseline", got)
+	}
+	if !isAdaptiveCodexReviewSelector(resolveReviewModelSelector(config.DefaultConfig())) {
+		t.Fatal("codex/auto did not enable adaptive model selection")
 	}
 }
 

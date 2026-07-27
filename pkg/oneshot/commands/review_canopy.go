@@ -13,9 +13,11 @@ import (
 const (
 	maxCanopyReviewBytes  = 64 << 10
 	maxCanopyProjectBytes = 24 << 10
+	canopyReviewTimeout   = 45 * time.Second
+	canopyPipeWaitDelay   = 2 * time.Second
 )
 
-func collectCanopyReview(repoRoot, baseCommit string) (string, string) {
+func collectCanopyReview(parent context.Context, repoRoot, baseCommit string) (string, string) {
 	executable, err := findCanopyExecutable()
 	if err != nil {
 		return "", "not installed"
@@ -25,10 +27,11 @@ func collectCanopyReview(repoRoot, baseCommit string) (string, string) {
 		return "", "base commit unavailable"
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	ctx, cancel := context.WithTimeout(nonNilReviewContext(parent), canopyReviewTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, executable, "analyze", "review", "--base", baseCommit, "--json", "--no-cache", ".")
 	cmd.Dir = repoRoot
+	cmd.WaitDelay = canopyPipeWaitDelay
 	output, err := cmd.Output()
 	if ctx.Err() != nil {
 		return "", "timed out"
@@ -46,16 +49,17 @@ func collectCanopyReview(repoRoot, baseCommit string) (string, string) {
 	return string(output), "available"
 }
 
-func collectCanopyProjectSummary(repoRoot string) (string, string) {
+func collectCanopyProjectSummary(parent context.Context, repoRoot string) (string, string) {
 	executable, err := findCanopyExecutable()
 	if err != nil {
 		return "", "not installed"
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	ctx, cancel := context.WithTimeout(nonNilReviewContext(parent), canopyReviewTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, executable, "analyze", "summary", "--json", ".")
 	cmd.Dir = repoRoot
+	cmd.WaitDelay = canopyPipeWaitDelay
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
 	output, err := cmd.Output()
@@ -77,6 +81,13 @@ func collectCanopyProjectSummary(repoRoot string) (string, string) {
 		status += "; " + compactCanopyStatus(note, 200)
 	}
 	return string(output), status
+}
+
+func nonNilReviewContext(ctx context.Context) context.Context {
+	if ctx != nil {
+		return ctx
+	}
+	return context.Background()
 }
 
 func compactCanopyStatus(value string, maxLen int) string {

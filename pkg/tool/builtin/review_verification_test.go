@@ -3,6 +3,7 @@ package builtin
 import (
 	"context"
 	"testing"
+	"time"
 
 	"m31labs.dev/buckley/pkg/reviewsandbox"
 )
@@ -75,6 +76,41 @@ func TestRunVerificationToolSuccessRequiresPassAndZeroExit(t *testing.T) {
 				t.Fatalf("trusted argv missing: %#v", result.Data["argv"])
 			}
 		})
+	}
+}
+
+func TestRunVerificationToolClampsRequestedTimeoutToReviewPlan(t *testing.T) {
+	tool, err := NewRunVerificationTool(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	tool.SetTimeoutLimit(90 * time.Second)
+	fake := &fakeReviewVerifier{result: reviewsandbox.Result{
+		Kind:     reviewsandbox.KindTest,
+		Language: reviewsandbox.LanguageGo,
+		Path:     ".",
+		ExitCode: 0,
+		Status:   reviewsandbox.StatusPass,
+	}}
+	tool.verifier = fake
+
+	result, err := tool.Execute(map[string]any{
+		"kind":            "test",
+		"language":        "go",
+		"timeout_seconds": 300,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Success {
+		t.Fatalf("clamped verification failed: %#v", result)
+	}
+	if fake.request.Timeout != 90*time.Second {
+		t.Fatalf("verification timeout = %s, want 90s", fake.request.Timeout)
+	}
+	parameters := tool.Parameters()
+	if got := parameters.Properties["timeout_seconds"].Default; got != 90 {
+		t.Fatalf("schema default timeout = %v, want 90", got)
 	}
 }
 

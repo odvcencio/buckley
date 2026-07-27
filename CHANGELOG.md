@@ -17,12 +17,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Interactive tool execution continues until completion while remaining sequential and visible as a persistent event stream.
 - Provider-supplied reasoning and tool results render as durable progress entries instead of transient status messages.
 - Project reviews use bounded structural sampling to reduce elapsed time and token spend.
+- Buckbot uses `qwen/qwen3.7-plus` with low, medium, or high reasoning selected from the governed change size.
+- `codex/auto` scales Buckbot from Luna to Terra to Sol as review size increases. Luna uses xhigh reasoning for small diffs. Sol uses medium reasoning to avoid a long latency tail. Exact model overrides remain fixed.
+- Pull request reviews stay local unless the caller uses `--post`.
 
 ### Fixed
 - OpenRouter requests now gate optional fields by each model's advertised parameters.
 - Tool JSON schemas declare concrete nested item types accepted by Moonshot/Kimi providers.
 - Unrestricted one-shot sessions no longer collapse into an empty tool allowlist.
 - Task workspace discovery prefers the requested repository instead of an unrelated ancestor checkout.
+- Reviews now enforce hard model-call deadlines, stop evidence collection by change size, and reserve time for final synthesis.
+- Reviews now cap verification commands and prevent duplicate work before the command deadline.
+- Reviews now stop Canopy context collection when the review deadline expires.
+- GitHub reviews preserve valid line comments after one invalid comment rejects a batch.
+- GitHub reviews show Canopy structural metrics and collapse detailed evidence for easier scanning.
 
 ### Release
 - Tag pushes and manual releases share strict semantic-tag, vanity-path, preflight, and post-install verification.

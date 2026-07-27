@@ -79,6 +79,9 @@ func mergeBuckbotConfig(base, override *Config, raw map[string]any) {
 	if boolFieldSet(raw, "buckbot", "critic_model") {
 		base.Buckbot.CriticModel = override.Buckbot.CriticModel
 	}
+	if boolFieldSet(raw, "buckbot", "reasoning") {
+		base.Buckbot.Reasoning = override.Buckbot.Reasoning
+	}
 	if boolFieldSet(raw, "buckbot", "per_review_budget_usd") {
 		base.Buckbot.PerReviewBudgetUSD = override.Buckbot.PerReviewBudgetUSD
 	}

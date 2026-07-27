@@ -101,6 +101,16 @@ type OneshotFacts struct {
 	TokenCount int    `arb:"token_count"`
 }
 
+// ReviewPlanFacts carries change-size signals for bounded review execution.
+type ReviewPlanFacts struct {
+	FileCount         int  `arb:"file_count"`
+	DiffBytes         int  `arb:"diff_bytes"`
+	ContextIncomplete bool `arb:"context_incomplete"`
+	HasFeedback       bool `arb:"has_feedback"`
+}
+
+func (f ReviewPlanFacts) ToMap() map[string]any { return structToMap(f) }
+
 // SpawningFacts carries signals for subagent configuration decisions.
 type SpawningFacts struct {
 	TaskType     string `arb:"task.type"`

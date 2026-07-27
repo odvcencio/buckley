@@ -70,9 +70,9 @@ func parseReviewCommandOptions(args []string) (reviewCommandOptions, error) {
 	fs.Var(&untrackedPaths, "include-untracked", "include one untracked repository-relative text path in model input (repeatable; review for secrets)")
 	verbose := fs.Bool("verbose", false, "show full context and reasoning")
 	showCost := fs.Bool("cost", true, "show token/cost breakdown")
-	modelFlag := fs.String("model", "", "model to use (default: BUCKLEY_MODEL_REVIEW or buckbot.model)")
+	modelFlag := fs.String("model", "", "model to use; codex/auto scales Luna to Terra to Sol")
 	criticModel := fs.String("critic-model", "", "opt-in approval critic model for large or business-critical reviews")
-	timeout := fs.Duration("timeout", 5*time.Minute, "timeout for model request")
+	timeout := fs.Duration("timeout", defaultReviewTimeout, "total review timeout")
 	outputFile := fs.String("output", "", "write review to file instead of stdout")
 	interactive := fs.Bool("interactive", true, "show interactive menu to fix findings")
 	noInteractive := fs.Bool("no-interactive", false, "disable interactive mode")
@@ -142,8 +142,10 @@ func runReviewCommand(args []string) error {
 	defer cancel()
 
 	if !quietMode {
-		termOut.Dim("Using model: %s", runtime.modelID)
-		if runtime.reasoningEffort != "" {
+		printReviewModelSelection(runtime)
+		if runtime.policy.adaptiveReasoning {
+			termOut.Dim("Reasoning effort: adaptive by model and review size")
+		} else if runtime.reasoningEffort != "" {
 			termOut.Dim("Reasoning effort: %s", runtime.reasoningEffort)
 		}
 	}
@@ -205,7 +207,7 @@ func newReviewCommandRuntime(cfg *config.Config, mgr *model.Manager) (*reviewCom
 	if modelID == "" {
 		return nil, fmt.Errorf("no review model configured")
 	}
-	reasoningEffort := model.ResolveReasoningEffort(cfg, mgr, nil, modelID, "review")
+	reasoningEffort := resolveReviewReasoningEffort(cfg, mgr, modelID, reviewReasoningOverride())
 	arbEngine, err := rules.NewDefaultEngine()
 	if err != nil {
 		return nil, fmt.Errorf("initialize rules engine: %w", err)
@@ -226,6 +228,11 @@ func newReviewCommandRuntime(cfg *config.Config, mgr *model.Manager) (*reviewCom
 	})
 	framework := oneshot.NewFramework(nil, arbEngine).WithRLMRunner(rlmRunner)
 	policy := defaultAutomatedReviewOptions(cfg)
+	policy.modelID = modelID
+	policy.adaptiveCodexModel = isAdaptiveCodexReviewSelector(resolveReviewModelSelector(cfg))
+	policy.reasoningEffort = reasoningEffort
+	policy.adaptiveReasoning = reviewReasoningIsAdaptive(cfg, reviewReasoningOverride())
+	policy.engine = arbEngine
 	criticModel := ""
 	if cfg != nil {
 		criticModel = strings.TrimSpace(cfg.Buckbot.CriticModel)
@@ -236,7 +243,7 @@ func newReviewCommandRuntime(cfg *config.Config, mgr *model.Manager) (*reviewCom
 			Registry:        registry,
 			Ledger:          ledger,
 			ModelID:         criticModel,
-			ReasoningEffort: model.ResolveReasoningEffort(cfg, mgr, nil, criticModel, "review"),
+			ReasoningEffort: resolveReviewReasoningEffort(cfg, mgr, criticModel, ""),
 		})
 		framework = framework.WithApprovalCriticRunner(criticRunner)
 		policy.criticReserveUSD = policy.maxCostUSD * 0.12
@@ -255,24 +262,49 @@ func newReviewCommandRuntime(cfg *config.Config, mgr *model.Manager) (*reviewCom
 	}, nil
 }
 
-func resolveReviewModel(cfg *config.Config) string {
+func reviewReasoningOverride() string {
+	rawModelID := strings.TrimSpace(modelOverrideFlag)
+	if rawModelID == "" {
+		rawModelID = strings.TrimSpace(os.Getenv("BUCKLEY_MODEL_REVIEW"))
+	}
+	if rawModelID == "" {
+		return ""
+	}
+	_, effort := config.SplitReasoningSuffix(rawModelID)
+	return effort
+}
+
+func resolveReviewModelSelector(cfg *config.Config) string {
 	modelID := strings.TrimSpace(modelOverrideFlag)
-	if modelID != "" {
-		modelID = normalizeModelIDWithReasoning(cfg, modelID)
-	}
 	if modelID == "" {
-		modelID = normalizeModelIDWithReasoning(cfg, os.Getenv("BUCKLEY_MODEL_REVIEW"))
+		modelID = strings.TrimSpace(os.Getenv("BUCKLEY_MODEL_REVIEW"))
 	}
 	if modelID == "" && cfg != nil {
-		modelID = cfg.Buckbot.Model
+		modelID = strings.TrimSpace(cfg.Buckbot.Model)
 	}
 	if modelID == "" && cfg != nil {
-		modelID = cfg.Models.Review
+		modelID = strings.TrimSpace(cfg.Models.Review)
 	}
 	if modelID == "" && cfg != nil {
-		modelID = cfg.Models.Execution
+		modelID = strings.TrimSpace(cfg.Models.Execution)
 	}
 	return modelID
+}
+
+func resolveReviewModel(cfg *config.Config) string {
+	modelID := resolveReviewModelSelector(cfg)
+	if isAdaptiveCodexReviewSelector(modelID) {
+		return codexReviewModelStandard
+	}
+	return normalizeModelIDWithReasoning(cfg, modelID)
+}
+
+func printReviewModelSelection(runtime *reviewCommandRuntime) {
+	if runtime.policy.adaptiveCodexModel {
+		termOut.Dim("Using model: Codex adaptive (Luna → Terra → Sol)")
+		return
+	}
+	termOut.Dim("Using model: %s", runtime.modelID)
 }
 
 func runReview(ctx context.Context, opts reviewCommandOptions, framework *oneshot.Framework) (*reviewCommandResult, error) {
@@ -301,6 +333,7 @@ func runProjectReviewWithPolicy(ctx context.Context, framework *oneshot.Framewor
 	}
 
 	opts := commands.DefaultProjectContextOptions()
+	opts.Context = ctx
 	projectCtx, audit, err := commands.AssembleProjectContext(opts)
 	if err != nil {
 		spinner.StopWithError(err.Error())
@@ -316,14 +349,31 @@ func runProjectReviewWithPolicy(ctx context.Context, framework *oneshot.Framewor
 		return nil, err
 	}
 
-	userPrompt := commands.BuildProjectPrompt(projectCtx)
+	plan := reviewExecutionPlan{
+		sizeClass:           "project",
+		reasoningEffort:     "high",
+		maxIterations:       8,
+		maxToolCalls:        8,
+		verificationTimeout: 90 * time.Second,
+		explorationTimeout:  3 * time.Minute,
+		synthesisLead:       75 * time.Second,
+	}
+	reviewPolicy = reviewPolicy.withExecutionPlan(plan)
+	spinner.SetMessage(fmt.Sprintf("Running %s review with %s reasoning...", reviewPolicy.sizeClass, reviewPolicy.reasoningEffort))
+	userPrompt := appendReviewExecutionPlan(commands.BuildProjectPrompt(projectCtx), reviewPolicy)
 	fwResult, runErr := framework.RunRLM(ctx, commands.ReviewProjectDef{}, oneshot.RLMRunOpts{
 		UserPrompt:               userPrompt,
 		Audit:                    audit,
 		MaxRetries:               reviewPolicy.maxRetries,
 		MaxIterations:            reviewPolicy.maxIterations,
+		MaxToolCalls:             reviewPolicy.maxToolCalls,
 		MaxCostUSD:               reviewPolicy.maxCostUSD,
 		ApprovalCriticReserveUSD: reviewPolicy.criticReserveUSD,
+		ExplorationTimeout:       reviewPolicy.explorationTimeout,
+		SynthesisLead:            reviewPolicy.synthesisLead,
+		VerificationTimeout:      reviewPolicy.verificationTimeout,
+		ModelID:                  reviewPolicy.modelID,
+		ReasoningEffort:          reviewPolicy.reasoningEffort,
 		SnapshotPolicy:           policy,
 		ReviewSnapshot:           snapshot,
 	})
@@ -356,6 +406,7 @@ func runBranchReviewWithPolicy(ctx context.Context, opts reviewCommandOptions, f
 	}
 
 	contextOpts := commands.DefaultBranchContextOptions()
+	contextOpts.Context = ctx
 	contextOpts.BaseBranch = opts.baseBranch
 	contextOpts.IncludeUnstaged = opts.includeUnstaged
 	contextOpts.UntrackedPaths = append([]string(nil), opts.untrackedPaths...)
@@ -386,7 +437,14 @@ func runBranchReviewWithPolicy(ctx context.Context, opts reviewCommandOptions, f
 		return nil, fmt.Errorf("revalidate branch review context: %w", err)
 	}
 
-	userPrompt := commands.BuildBranchPrompt(branchCtx)
+	plan := resolveReviewExecutionPlan(reviewPolicy.engine, rules.ReviewPlanFacts{
+		FileCount:         len(branchCtx.Files),
+		DiffBytes:         len(branchCtx.Diff) + len(branchCtx.Unstaged),
+		ContextIncomplete: branchCtx.DiffTruncated || branchCtx.UnstagedTruncated || branchCtx.ContextIncomplete,
+	})
+	reviewPolicy = reviewPolicy.withExecutionPlan(plan)
+	spinner.SetMessage(fmt.Sprintf("Running %s review with %s reasoning...", reviewPolicy.sizeClass, reviewPolicy.reasoningEffort))
+	userPrompt := appendReviewExecutionPlan(commands.BuildBranchPrompt(branchCtx), reviewPolicy)
 	reviewDef := commands.ReviewBranchDef{
 		ChangedFiles:      reviewChangedFilePaths(branchCtx.Files),
 		ContextIncomplete: branchCtx.DiffTruncated || branchCtx.UnstagedTruncated || branchCtx.ContextIncomplete,
@@ -397,8 +455,14 @@ func runBranchReviewWithPolicy(ctx context.Context, opts reviewCommandOptions, f
 		Audit:                    audit,
 		MaxRetries:               reviewPolicy.maxRetries,
 		MaxIterations:            reviewPolicy.maxIterations,
+		MaxToolCalls:             reviewPolicy.maxToolCalls,
 		MaxCostUSD:               reviewPolicy.maxCostUSD,
 		ApprovalCriticReserveUSD: reviewPolicy.criticReserveUSD,
+		ExplorationTimeout:       reviewPolicy.explorationTimeout,
+		SynthesisLead:            reviewPolicy.synthesisLead,
+		VerificationTimeout:      reviewPolicy.verificationTimeout,
+		ModelID:                  reviewPolicy.modelID,
+		ReasoningEffort:          reviewPolicy.reasoningEffort,
 		SnapshotPolicy:           policy,
 		ReviewSnapshot:           snapshot,
 	})

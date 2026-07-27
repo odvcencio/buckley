@@ -20,12 +20,13 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.Models.Review != "z-ai/glm-5.2" {
 		t.Fatalf("expected default review model to be z-ai/glm-5.2, got %s", cfg.Models.Review)
 	}
-	if cfg.Buckbot.Model != "qwen/qwen3.6-flash" ||
+	if cfg.Buckbot.Model != "qwen/qwen3.7-plus" ||
 		cfg.Buckbot.CriticModel != "" ||
+		cfg.Buckbot.Reasoning != "auto" ||
 		cfg.Buckbot.PerReviewBudgetUSD != 0.15 ||
 		cfg.Buckbot.MaxReviewIterations != 0 ||
 		cfg.Buckbot.MaxValidationAttempts != 2 ||
-		cfg.Buckbot.MaxDiffBytes != 80_000 {
+		cfg.Buckbot.MaxDiffBytes != 240_000 {
 		t.Fatalf("unexpected Buckbot efficiency defaults: %+v", cfg.Buckbot)
 	}
 	wantCurated := []string{"z-ai/glm-5.2", "moonshotai/kimi-k2.7-code", "qwen/qwen3.7-max"}
@@ -55,6 +56,13 @@ func TestDefaultConfig(t *testing.T) {
 	}
 	if cfg.Memory.AutoCompactThreshold <= 0 || cfg.Memory.AutoCompactThreshold > 1 {
 		t.Fatalf("unexpected compaction threshold: %f", cfg.Memory.AutoCompactThreshold)
+	}
+}
+
+func TestSplitReasoningSuffixSupportsQwenReviewModel(t *testing.T) {
+	modelID, effort := config.SplitReasoningSuffix("qwen/qwen3.7-plus-medium")
+	if modelID != "qwen/qwen3.7-plus" || effort != "medium" {
+		t.Fatalf("SplitReasoningSuffix() = %q, %q", modelID, effort)
 	}
 }
 

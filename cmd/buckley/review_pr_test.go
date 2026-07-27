@@ -14,6 +14,7 @@ func TestParseReviewPRCommandOptions(t *testing.T) {
 	opts, err := parseReviewPRCommandOptions([]string{
 		"-verbose",
 		"-cost=false",
+		"-post=false",
 		"-model", "test/reviewer",
 		"-critic-model", "test/critic",
 		"-timeout", "30s",
@@ -33,6 +34,9 @@ func TestParseReviewPRCommandOptions(t *testing.T) {
 	}
 	if opts.showCost {
 		t.Fatal("showCost = true, want false")
+	}
+	if opts.post {
+		t.Fatal("post = true, want false")
 	}
 	if opts.model != "test/reviewer" {
 		t.Fatalf("model = %q, want test/reviewer", opts.model)
@@ -58,8 +62,9 @@ func TestParseReviewPRCommandOptions(t *testing.T) {
 func TestDefaultAutomatedReviewOptionsAndOverrides(t *testing.T) {
 	cfg := config.DefaultConfig()
 	defaults := defaultAutomatedReviewOptions(cfg)
-	if defaults.maxIterations != 0 || defaults.maxRetries != 2 || defaults.maxDiffBytes != 80_000 ||
-		defaults.maxCostUSD != 0.15 || defaults.criticReserveUSD != 0 || defaults.approvalCritic {
+	if defaults.maxIterations != 0 || defaults.maxRetries != 2 || defaults.maxDiffBytes != 240_000 ||
+		defaults.maxCostUSD != 0.15 || defaults.criticReserveUSD != 0 || defaults.approvalCritic ||
+		defaults.reasoningEffort != "medium" || !defaults.adaptiveReasoning {
 		t.Fatalf("defaults = %#v, want Buckbot defaults", defaults)
 	}
 
@@ -67,7 +72,7 @@ func TestDefaultAutomatedReviewOptionsAndOverrides(t *testing.T) {
 		maxIterations: 5,
 		maxCostUSD:    0.10,
 	})
-	if got.maxIterations != 5 || got.maxRetries != 2 || got.maxDiffBytes != 80_000 ||
+	if got.maxIterations != 5 || got.maxRetries != 2 || got.maxDiffBytes != 240_000 ||
 		got.maxCostUSD != 0.10 || got.criticReserveUSD != 0 || got.approvalCritic {
 		t.Fatalf("overrides = %#v, want selective CLI overrides", got)
 	}
@@ -76,6 +81,23 @@ func TestDefaultAutomatedReviewOptionsAndOverrides(t *testing.T) {
 	withCritic := defaultAutomatedReviewOptions(cfg).withOverrides(automatedReviewOptions{maxCostUSD: 0.10})
 	if withCritic.criticReserveUSD != 0.012 || !withCritic.approvalCritic {
 		t.Fatalf("critic policy = %#v, want enabled with $0.012 reserve", withCritic)
+	}
+}
+
+func TestMarkIncompleteReviewPreservesCompletedRevalidationWork(t *testing.T) {
+	review := markIncompleteReview(
+		"## Summary\n\nCompleted review evidence.",
+		"review target could not be revalidated: GitHub rate limited the request",
+	)
+	for _, want := range []string{
+		"Incomplete review",
+		"must not be used as an approval",
+		"GitHub rate limited the request",
+		"Completed review evidence",
+	} {
+		if !strings.Contains(review, want) {
+			t.Fatalf("salvaged review missing %q:\n%s", want, review)
+		}
 	}
 }
 
@@ -108,6 +130,9 @@ func TestParseReviewPRCommandOptionsAcceptsFlagsAfterReference(t *testing.T) {
 	}
 	if !opts.verbose {
 		t.Fatal("verbose = false, want true")
+	}
+	if opts.post {
+		t.Fatal("post = true, want default false")
 	}
 }
 

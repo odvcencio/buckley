@@ -22,15 +22,21 @@ func (p partialRLMExecutor) Run(context.Context, string, string, []string, RLMEx
 }
 
 type scriptedRLMExecutor struct {
-	responses  []string
-	systems    []string
-	prompts    []string
-	tools      [][]string
-	snapshots  []*model.ReviewSnapshot
-	traces     []*transparency.Trace
-	providers  []string
-	iterations []int
-	maxCosts   []float64
+	responses    []string
+	systems      []string
+	prompts      []string
+	tools        [][]string
+	snapshots    []*model.ReviewSnapshot
+	traces       []*transparency.Trace
+	providers    []string
+	iterations   []int
+	toolLimits   []int
+	exploration  []time.Duration
+	synthesis    []time.Duration
+	verification []time.Duration
+	models       []string
+	reasoning    []string
+	maxCosts     []float64
 }
 
 func (s *scriptedRLMExecutor) Run(_ context.Context, system string, task string, allowedTools []string, opts RLMExecutionOpts) (*RLMResult, error) {
@@ -39,6 +45,12 @@ func (s *scriptedRLMExecutor) Run(_ context.Context, system string, task string,
 	s.tools = append(s.tools, append([]string(nil), allowedTools...))
 	s.snapshots = append(s.snapshots, opts.ReviewSnapshot)
 	s.iterations = append(s.iterations, opts.MaxIterations)
+	s.toolLimits = append(s.toolLimits, opts.MaxToolCalls)
+	s.exploration = append(s.exploration, opts.ExplorationTimeout)
+	s.synthesis = append(s.synthesis, opts.SynthesisLead)
+	s.verification = append(s.verification, opts.VerificationTimeout)
+	s.models = append(s.models, opts.ModelID)
+	s.reasoning = append(s.reasoning, opts.ReasoningEffort)
 	s.maxCosts = append(s.maxCosts, opts.MaxCostUSD)
 	if len(s.responses) == 0 {
 		return nil, fmt.Errorf("no scripted response")
@@ -120,8 +132,9 @@ func TestRunRLMRetriesValidationFailureWithGuidance(t *testing.T) {
 	framework := NewFramework(nil, nil).WithRLMRunner(runner)
 
 	result, err := framework.RunRLM(context.Background(), validatingRLMDefinition{}, RLMRunOpts{
-		UserPrompt: "review this change",
-		MaxRetries: 2,
+		UserPrompt:    "review this change",
+		MaxRetries:    2,
+		MaxIterations: 8,
 	})
 	if err != nil {
 		t.Fatalf("RunRLM() error = %v", err)
@@ -138,6 +151,15 @@ func TestRunRLMRetriesValidationFailureWithGuidance(t *testing.T) {
 	}
 	if !strings.Contains(runner.prompts[1], "missing coverage evidence") {
 		t.Fatalf("retry prompt missing validation guidance: %q", runner.prompts[1])
+	}
+	if !strings.Contains(runner.prompts[1], "PRIOR REVIEW:\nincomplete") {
+		t.Fatalf("retry prompt missing prior review: %q", runner.prompts[1])
+	}
+	if strings.Contains(runner.prompts[1], "review this change") {
+		t.Fatalf("repair prompt repeated the original evidence: %q", runner.prompts[1])
+	}
+	if got := runner.iterations; len(got) != 2 || got[0] != 8 || got[1] != 1 {
+		t.Fatalf("iteration budgets = %v, want [8 1]", got)
 	}
 	if got := strings.Join(runner.tools[0], ","); got != "read_file,run_shell" {
 		t.Fatalf("allowed tools = %q, want exact registry names", got)
@@ -187,6 +209,41 @@ func TestRunRLMAppliesCallerIterationBudget(t *testing.T) {
 	}
 	if len(runner.iterations) != 1 || runner.iterations[0] != 3 {
 		t.Fatalf("iteration budgets = %v, want [3]", runner.iterations)
+	}
+}
+
+func TestRunRLMPropagatesBoundedReviewPlan(t *testing.T) {
+	runner := &scriptedRLMExecutor{responses: []string{"valid"}}
+	framework := NewFramework(nil, nil).WithRLMRunner(runner)
+	if _, err := framework.RunRLM(context.Background(), validatingRLMDefinition{}, RLMRunOpts{
+		MaxRetries:          1,
+		MaxIterations:       8,
+		MaxToolCalls:        12,
+		ExplorationTimeout:  3 * time.Minute,
+		SynthesisLead:       75 * time.Second,
+		VerificationTimeout: 90 * time.Second,
+		ModelID:             "codex/gpt-5.6-luna",
+		ReasoningEffort:     "low",
+	}); err != nil {
+		t.Fatalf("RunRLM() error = %v", err)
+	}
+	if len(runner.toolLimits) != 1 || runner.toolLimits[0] != 12 {
+		t.Fatalf("tool limits = %v, want [12]", runner.toolLimits)
+	}
+	if len(runner.exploration) != 1 || runner.exploration[0] != 3*time.Minute {
+		t.Fatalf("exploration limits = %v, want [3m]", runner.exploration)
+	}
+	if len(runner.synthesis) != 1 || runner.synthesis[0] != 75*time.Second {
+		t.Fatalf("synthesis reserves = %v, want [75s]", runner.synthesis)
+	}
+	if len(runner.verification) != 1 || runner.verification[0] != 90*time.Second {
+		t.Fatalf("verification limits = %v, want [90s]", runner.verification)
+	}
+	if len(runner.reasoning) != 1 || runner.reasoning[0] != "low" {
+		t.Fatalf("reasoning efforts = %v, want [low]", runner.reasoning)
+	}
+	if len(runner.models) != 1 || runner.models[0] != "codex/gpt-5.6-luna" {
+		t.Fatalf("models = %v, want [codex/gpt-5.6-luna]", runner.models)
 	}
 }
 
@@ -274,8 +331,12 @@ func TestRunRLMRetriesExecutionEvidenceFailureWithGuidance(t *testing.T) {
 	framework := NewFramework(nil, nil).WithRLMRunner(runner)
 
 	result, err := framework.RunRLM(context.Background(), executionValidatingRLMDefinition{}, RLMRunOpts{
-		UserPrompt: "review this change",
-		MaxRetries: 2,
+		UserPrompt:         "review this change",
+		MaxRetries:         2,
+		MaxIterations:      14,
+		MaxToolCalls:       24,
+		ExplorationTimeout: 3 * time.Minute,
+		SynthesisLead:      time.Minute,
 	})
 	if err != nil {
 		t.Fatalf("RunRLM() error = %v", err)
@@ -285,6 +346,18 @@ func TestRunRLMRetriesExecutionEvidenceFailureWithGuidance(t *testing.T) {
 	}
 	if len(runner.prompts) != 2 || !strings.Contains(runner.prompts[1], "missing execution evidence") {
 		t.Fatalf("retry prompt missing execution-evidence guidance: %#v", runner.prompts)
+	}
+	if got := runner.iterations; len(got) != 2 || got[0] != 14 || got[1] != evidenceRepairMaxIterations {
+		t.Fatalf("iteration budgets = %v, want [14 %d]", got, evidenceRepairMaxIterations)
+	}
+	if got := runner.toolLimits; len(got) != 2 || got[0] != 24 || got[1] != evidenceRepairMaxToolCalls {
+		t.Fatalf("tool budgets = %v, want [24 %d]", got, evidenceRepairMaxToolCalls)
+	}
+	if strings.Contains(runner.prompts[1], "review this change") {
+		t.Fatalf("evidence repair repeated the original evidence: %q", runner.prompts[1])
+	}
+	if !strings.Contains(runner.prompts[1], "Gather only the missing evidence") {
+		t.Fatalf("evidence repair prompt = %q", runner.prompts[1])
 	}
 }
 
@@ -327,6 +400,29 @@ func TestRunRLMApprovalCriticApproves(t *testing.T) {
 	}
 	if len(runner.snapshots) != 2 || runner.snapshots[0] != snapshot || runner.snapshots[1] != snapshot {
 		t.Fatalf("primary/critic did not reuse one immutable snapshot: %#v", runner.snapshots)
+	}
+}
+
+func TestRunRLMDedicatedCriticKeepsItsConfiguredModel(t *testing.T) {
+	primary := &scriptedRLMExecutor{responses: []string{"approve"}}
+	critic := &scriptedRLMExecutor{responses: []string{"approve"}}
+	framework := NewFramework(nil, nil).
+		WithRLMRunner(primary).
+		WithApprovalCriticRunner(critic)
+
+	_, err := framework.RunRLM(context.Background(), criticRLMDefinition{}, RLMRunOpts{
+		UserPrompt: "diff evidence",
+		MaxRetries: 1,
+		ModelID:    "codex/gpt-5.6-sol",
+	})
+	if err != nil {
+		t.Fatalf("RunRLM() error = %v", err)
+	}
+	if got := primary.models; len(got) != 1 || got[0] != "codex/gpt-5.6-sol" {
+		t.Fatalf("primary models = %v, want adaptive Sol override", got)
+	}
+	if got := critic.models; len(got) != 1 || got[0] != "" {
+		t.Fatalf("critic models = %v, want configured runner model", got)
 	}
 }
 

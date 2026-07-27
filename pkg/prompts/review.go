@@ -75,6 +75,9 @@ NON-NEGOTIABLE REVIEW RULES:
 - Build and Tests must each start with exactly one normalized state: PASS, FAIL, PENDING, NOT_RUN, UNAVAILABLE, or UNKNOWN. Do not write arbitrary prose in place of the state.
 - PASS must cite the focused command or named remote checks that passed. FAIL, PENDING, NOT_RUN, UNAVAILABLE, and UNKNOWN never permit approval.
 - If the diff or GitHub context is marked partial/truncated, do not approve; state exactly what evidence is missing.
+- Anchor each finding to the smallest changed right-side line that demonstrates the defect. GitHub must accept the line as an inline comment.
+- If supporting evidence is outside the diff, cite it in Evidence. Keep the finding anchored to the causal changed line.
+- Include a suggestion block only when it is an exact replacement for the anchored changed lines. Otherwise, omit the block.
 
 %s
 
@@ -111,6 +114,14 @@ Grading criteria:
 - **Blast Radius**: What breaks if this has bugs?
 - **Rollback Complexity**: Easy / Medium / Hard
 
+## Structural Impact
+- **Canopy**: PASS|WARN|UNAVAILABLE — index scope and measured runtime
+- **Changed surface**: exact changed symbol and file counts reported by Canopy
+- **Dependents**: direct and transitive consumers reported by Canopy
+- **Complexity**: changed hotspots or deltas reported by Canopy
+- **Boundaries**: architecture violations, or NONE
+- Use "not reported" for any metric absent from the supplied Canopy evidence. Never estimate a structural metric.
+
 ## CI Status
 - Build: PASS|FAIL|PENDING|NOT_RUN|UNAVAILABLE|UNKNOWN — command or named remote-check evidence
 - Tests: PASS|FAIL|PENDING|NOT_RUN|UNAVAILABLE|UNKNOWN — command or named remote-check evidence
@@ -146,6 +157,7 @@ Report each finding in this EXACT format:
 `+"```"+`suggested
 // exact replacement code here
 `+"```"+`
+Omit the suggestion block when no safe exact replacement exists.
 
 Continue with FINDING-002, FINDING-003, etc.
 

@@ -48,12 +48,14 @@ func TestMergeConfigsRespectsBuckbotEfficiencyOverrides(t *testing.T) {
 	base := DefaultConfig()
 	override := &Config{Buckbot: BuckbotConfig{
 		CriticModel:           "z-ai/glm-5.2",
+		Reasoning:             "medium",
 		MaxValidationAttempts: 1,
 		MaxDiffBytes:          60_000,
 	}}
 	raw := map[string]any{
 		"buckbot": map[string]any{
 			"critic_model":            "z-ai/glm-5.2",
+			"reasoning":               "medium",
 			"max_validation_attempts": 1,
 			"max_diff_bytes":          60_000,
 		},
@@ -62,6 +64,7 @@ func TestMergeConfigsRespectsBuckbotEfficiencyOverrides(t *testing.T) {
 	mergeConfigs(base, override, raw, false)
 
 	if base.Buckbot.CriticModel != "z-ai/glm-5.2" ||
+		base.Buckbot.Reasoning != "medium" ||
 		base.Buckbot.MaxValidationAttempts != 1 ||
 		base.Buckbot.MaxDiffBytes != 60_000 {
 		t.Fatalf("Buckbot overrides not merged: %+v", base.Buckbot)

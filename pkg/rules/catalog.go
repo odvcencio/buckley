@@ -44,6 +44,7 @@ var factContractSpecs = []factContractSpec{
 		field("model.supports_reasoning", "bool"),
 	)},
 	{domain: "oneshot", purpose: "one-shot command mode selection", facts: OneshotFacts{}},
+	{domain: "review_plan", purpose: "change-size review budget selection", facts: ReviewPlanFacts{}},
 	{domain: "spawning", purpose: "subagent spawn routing", facts: SpawningFacts{}},
 	{domain: "coordinator", purpose: "coordinator budget tuning", facts: CoordinatorFacts{}},
 	{domain: "tool_budget", purpose: "tool tier and call budget enforcement", facts: ToolBudgetFacts{}},

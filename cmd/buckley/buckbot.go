@@ -27,13 +27,14 @@ import (
 
 var buckbotLoadConfigFn = config.Load
 var buckbotListenFn = http.ListenAndServe
+var postBuckbotReviewPayloadFn = postBuckbotReviewPayload
 
 type buckbotReviewer func(context.Context, gitwatcher.PullRequestEvent) (string, float64, error)
 type buckbotPoster func(context.Context, gitwatcher.PullRequestEvent, string) error
 type buckbotSalvager func(gitwatcher.PullRequestEvent, string, error) (string, error)
 
 const (
-	buckbotReviewAttemptTimeout = 5 * time.Minute
+	buckbotReviewAttemptTimeout = defaultReviewTimeout
 	buckbotPostAttemptTimeout   = time.Minute
 	buckbotInitialRetryDelay    = 15 * time.Second
 	buckbotMaxRetryDelay        = 5 * time.Minute
@@ -433,6 +434,7 @@ func saveBuckbotSpend(store *storage.Store, event gitwatcher.PullRequestEvent, m
 
 func postBuckbotReview(ctx context.Context, event gitwatcher.PullRequestEvent, review string) error {
 	parsed := commands.ParseReview(review)
+	review = formatBuckbotGitHubReview(parsed, review, event.HeadSHA)
 	inlineComments := make([]map[string]any, 0, len(parsed.Findings))
 	for _, finding := range parsed.Findings {
 		if finding.Line <= 0 || strings.TrimSpace(finding.File) == "" {
@@ -445,16 +447,84 @@ func postBuckbotReview(ctx context.Context, event gitwatcher.PullRequestEvent, r
 			"body": formatBuckbotInlineFinding(finding),
 		})
 	}
-	if err := postBuckbotReviewPayload(ctx, event, review, inlineComments); err != nil {
+	if err := postBuckbotReviewPayloadFn(ctx, event, review, inlineComments); err != nil {
 		if len(inlineComments) == 0 {
 			return err
 		}
-		slog.Warn("Buckbot inline review was rejected; posting summary without inline comments", "repository", event.Repository, "pr", event.Number, "error", err)
-		if fallbackErr := postBuckbotReviewPayload(ctx, event, review, nil); fallbackErr != nil {
+		slog.Warn("Buckbot inline review batch was rejected; preserving the summary and retrying each line comment", "repository", event.Repository, "pr", event.Number, "error", err)
+		if fallbackErr := postBuckbotReviewPayloadFn(ctx, event, review, nil); fallbackErr != nil {
 			return fmt.Errorf("%v; summary fallback: %w", err, fallbackErr)
+		}
+		for _, comment := range inlineComments {
+			if commentErr := postBuckbotReviewPayloadFn(ctx, event, "", []map[string]any{comment}); commentErr != nil {
+				slog.Warn("Buckbot skipped one rejected inline comment", "repository", event.Repository, "pr", event.Number, "path", comment["path"], "line", comment["line"], "error", commentErr)
+			}
 		}
 	}
 	return nil
+}
+
+func formatBuckbotGitHubReview(parsed *commands.ParsedReview, review, headSHA string) string {
+	review = strings.TrimSpace(review)
+	if review == "" || parsed == nil {
+		return review
+	}
+	revision := strings.TrimSpace(headSHA)
+	if len(revision) > 12 {
+		revision = revision[:12]
+	}
+	grade := string(parsed.Grade)
+	if grade == "" {
+		grade = "ungraded"
+	}
+	verdict := "NEEDS FOLLOW-UP"
+	noteType := "NOTE"
+	if parsed.Approved {
+		verdict = "READY TO MERGE"
+		noteType = "TIP"
+	} else if parsed.HasBlockers() {
+		verdict = "CHANGES REQUESTED"
+		noteType = "CAUTION"
+	}
+	review = collapseBuckbotEvidence(review)
+	return fmt.Sprintf(
+		"> [!%s]\n> **Buckbot · Grade %s · %s**\n> Reviewed commit `%s`. Line comments contain only demonstrated findings.\n\n%s",
+		noteType,
+		grade,
+		verdict,
+		revision,
+		review,
+	)
+}
+
+func collapseBuckbotEvidence(review string) string {
+	for _, section := range []struct {
+		heading string
+		label   string
+	}{
+		{heading: "Coverage", label: "Full changed-file coverage ledger"},
+		{heading: "Invariant Audit", label: "Cross-file invariant audit"},
+		{heading: "Falsification", label: "Strongest-failure falsification"},
+	} {
+		review = collapseBuckbotSection(review, section.heading, section.label)
+	}
+	return review
+}
+
+func collapseBuckbotSection(review, heading, label string) string {
+	marker := "## " + heading
+	start := strings.Index(review, marker)
+	if start < 0 || (start > 0 && review[start-1] != '\n') {
+		return review
+	}
+	contentStart := start + len(marker)
+	end := len(review)
+	if next := strings.Index(review[contentStart:], "\n## "); next >= 0 {
+		end = contentStart + next
+	}
+	section := strings.TrimSpace(review[start:end])
+	replacement := fmt.Sprintf("<details>\n<summary><strong>%s</strong></summary>\n\n%s\n\n</details>", label, section)
+	return review[:start] + replacement + review[end:]
 }
 
 func postBuckbotReviewPayload(ctx context.Context, event gitwatcher.PullRequestEvent, review string, inlineComments []map[string]any) error {
@@ -497,12 +567,12 @@ func postBuckbotReviewStarted(cfg config.BuckbotConfig) buckbotPoster {
 
 func formatBuckbotInlineFinding(finding commands.Finding) string {
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "**%s · %s: %s**\n\n%s", finding.ID, finding.Severity, finding.Title, finding.Evidence)
+	fmt.Fprintf(&sb, "<!-- buckbot:%s -->\n**%s · %s**\n\n%s", finding.ID, finding.Severity, finding.Title, finding.Evidence)
 	if finding.Impact != "" {
 		fmt.Fprintf(&sb, "\n\n**Impact:** %s", finding.Impact)
 	}
 	if finding.Fix != "" {
-		fmt.Fprintf(&sb, "\n\n**Suggested fix:** %s", finding.Fix)
+		fmt.Fprintf(&sb, "\n\n**Recommended change:** %s", finding.Fix)
 	}
 	if finding.SuggestedFix != "" {
 		fmt.Fprintf(&sb, "\n\n```suggestion\n%s\n```", strings.TrimSpace(finding.SuggestedFix))

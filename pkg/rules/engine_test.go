@@ -753,6 +753,79 @@ func TestEngine_EvalStrategy_Oneshot_AllScenarios(t *testing.T) {
 	}
 }
 
+func TestEngine_EvalStrategy_ReviewPlan_AllSizes(t *testing.T) {
+	e := mustNewTestEngine(t)
+
+	tests := []struct {
+		name             string
+		facts            ReviewPlanFacts
+		wantSize         string
+		wantIterations   float64
+		wantToolCalls    float64
+		wantVerification float64
+		wantReserve      float64
+	}{
+		{
+			name:             "focused change",
+			facts:            ReviewPlanFacts{FileCount: 4, DiffBytes: 12_000},
+			wantSize:         "focused",
+			wantIterations:   8,
+			wantToolCalls:    12,
+			wantVerification: 60,
+			wantReserve:      60,
+		},
+		{
+			name:             "feedback gets standard budget",
+			facts:            ReviewPlanFacts{FileCount: 4, DiffBytes: 12_000, HasFeedback: true},
+			wantSize:         "standard",
+			wantIterations:   11,
+			wantToolCalls:    18,
+			wantVerification: 75,
+			wantReserve:      75,
+		},
+		{
+			name:             "large change stays bounded",
+			facts:            ReviewPlanFacts{FileCount: 21, DiffBytes: 75_000},
+			wantSize:         "broad",
+			wantIterations:   14,
+			wantToolCalls:    24,
+			wantVerification: 90,
+			wantReserve:      90,
+		},
+		{
+			name:             "incomplete context stays bounded",
+			facts:            ReviewPlanFacts{FileCount: 2, DiffBytes: 8_000, ContextIncomplete: true},
+			wantSize:         "broad",
+			wantIterations:   14,
+			wantToolCalls:    24,
+			wantVerification: 90,
+			wantReserve:      90,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := e.EvalStrategy("review_plan", "review_plan", tt.facts.ToMap())
+			if err != nil {
+				t.Fatalf("EvalStrategy: %v", err)
+			}
+			if got := result.Params["size_class"]; got != tt.wantSize {
+				t.Fatalf("size_class = %v, want %s", got, tt.wantSize)
+			}
+			for key, want := range map[string]float64{
+				"max_iterations":               tt.wantIterations,
+				"max_tool_calls":               tt.wantToolCalls,
+				"verification_timeout_seconds": tt.wantVerification,
+				"synthesis_reserve_seconds":    tt.wantReserve,
+			} {
+				if got, ok := result.Params[key].(float64); !ok || got != want {
+					t.Errorf("%s = %v, want %.0f", key, result.Params[key], want)
+				}
+			}
+		})
+	}
+}
+
 // --- EvalMap (for rules subcommand) ---
 
 func TestEngine_EvalMap(t *testing.T) {

@@ -352,14 +352,93 @@ func TestFormatBuckbotInlineFinding(t *testing.T) {
 		Fix:      "Reject non-positive budgets.",
 	})
 	for _, want := range []string{
-		"FINDING-001 · MAJOR: Budget bypass",
+		"<!-- buckbot:FINDING-001 -->",
+		"MAJOR · Budget bypass",
 		"A zero value skips the guard.",
 		"**Impact:** A review can exceed its cap.",
-		"**Suggested fix:** Reject non-positive budgets.",
+		"**Recommended change:** Reject non-positive budgets.",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("inline finding = %q, want %q", got, want)
 		}
+	}
+}
+
+func TestFormatBuckbotGitHubReview(t *testing.T) {
+	approved := commands.ParseReview("## Grade: A\n\n## Coverage\n- every file\n\n## Invariant Audit\n- bounds\n\n## Falsification\n- disproved\n\n## Verdict\n- **Approved**: YES\n- **Blockers**: NONE")
+	got := formatBuckbotGitHubReview(approved, approved.RawReview, "1234567890abcdef")
+	for _, want := range []string{
+		"[!TIP]",
+		"Buckbot · Grade A · READY TO MERGE",
+		"`1234567890ab`",
+		"Line comments contain only demonstrated findings.",
+		"<summary><strong>Full changed-file coverage ledger</strong></summary>",
+		"<summary><strong>Cross-file invariant audit</strong></summary>",
+		"<summary><strong>Strongest-failure falsification</strong></summary>",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("GitHub review = %q, want %q", got, want)
+		}
+	}
+}
+
+func TestPostBuckbotReviewPreservesValidInlineCommentsAfterBatchRejection(t *testing.T) {
+	original := postBuckbotReviewPayloadFn
+	t.Cleanup(func() { postBuckbotReviewPayloadFn = original })
+
+	type postCall struct {
+		body     string
+		comments []map[string]any
+	}
+	var calls []postCall
+	postBuckbotReviewPayloadFn = func(_ context.Context, _ gitwatcher.PullRequestEvent, body string, comments []map[string]any) error {
+		calls = append(calls, postCall{body: body, comments: comments})
+		if len(calls) == 1 {
+			return errors.New("one line is outside the diff")
+		}
+		if len(calls) == 4 {
+			return errors.New("second line remains invalid")
+		}
+		return nil
+	}
+
+	review := `## Grade: C
+
+## Findings
+### FINDING-001: [MAJOR] First defect
+- **File**: first.go:12
+- **Evidence**: The first condition fails.
+- **Impact**: Users receive the wrong result.
+- **Fix**: Correct the first condition.
+
+### FINDING-002: [MINOR] Second defect
+- **File**: second.go:24
+- **Evidence**: The second condition fails.
+- **Impact**: Logs contain the wrong value.
+- **Fix**: Correct the second condition.
+
+## Verdict
+- **Approved**: NO
+- **Blockers**: FINDING-001`
+
+	err := postBuckbotReview(context.Background(), gitwatcher.PullRequestEvent{
+		Repository: "owner/repo",
+		Number:     42,
+		HeadSHA:    "1234567890abcdef",
+	}, review)
+	if err != nil {
+		t.Fatalf("postBuckbotReview() error = %v", err)
+	}
+	if len(calls) != 4 {
+		t.Fatalf("post calls = %d, want batch, summary, and two individual comments", len(calls))
+	}
+	if len(calls[0].comments) != 2 || len(calls[1].comments) != 0 ||
+		len(calls[2].comments) != 1 || len(calls[3].comments) != 1 {
+		t.Fatalf("post comment counts = %d/%d/%d/%d, want 2/0/1/1",
+			len(calls[0].comments), len(calls[1].comments), len(calls[2].comments), len(calls[3].comments))
+	}
+	if !strings.Contains(calls[1].body, "Buckbot · Grade C · CHANGES REQUESTED") {
+		t.Fatalf("summary fallback = %q, want formatted review", calls[1].body)
 	}
 }
 

@@ -9,15 +9,18 @@ import (
 	"time"
 
 	"m31labs.dev/buckley/pkg/config"
+	"m31labs.dev/buckley/pkg/gitwatcher"
 	"m31labs.dev/buckley/pkg/model"
 	"m31labs.dev/buckley/pkg/oneshot"
 	"m31labs.dev/buckley/pkg/oneshot/commands"
+	"m31labs.dev/buckley/pkg/rules"
 	"m31labs.dev/buckley/pkg/terminal"
 )
 
 type reviewPRCommandOptions struct {
 	verbose     bool
 	showCost    bool
+	post        bool
 	model       string
 	criticModel string
 	timeout     time.Duration
@@ -33,9 +36,10 @@ func parseReviewPRCommandOptions(args []string) (reviewPRCommandOptions, error) 
 	fs := flag.NewFlagSet("review-pr", flag.ContinueOnError)
 	verbose := fs.Bool("verbose", false, "show full context and reasoning")
 	showCost := fs.Bool("cost", true, "show token/cost breakdown")
-	modelFlag := fs.String("model", "", "model to use (default: BUCKLEY_MODEL_REVIEW or buckbot.model)")
+	post := fs.Bool("post", false, "post the completed review to GitHub (default: dry run)")
+	modelFlag := fs.String("model", "", "model to use; codex/auto scales Luna to Terra to Sol")
 	criticModel := fs.String("critic-model", "", "opt-in approval critic model for large or business-critical reviews")
-	timeout := fs.Duration("timeout", 5*time.Minute, "timeout for model request")
+	timeout := fs.Duration("timeout", defaultReviewTimeout, "total review timeout")
 	outputFile := fs.String("output", "", "write review to file instead of stdout")
 	budgetUSD := fs.Float64("budget", 0, "maximum model spend in USD (0 = Buckbot default)")
 	maxTurns := fs.Int("max-turns", 0, "hard model turn limit per review pass (0 = adaptive)")
@@ -52,6 +56,7 @@ func parseReviewPRCommandOptions(args []string) (reviewPRCommandOptions, error) 
 	return reviewPRCommandOptions{
 		verbose:     *verbose,
 		showCost:    *showCost,
+		post:        *post,
 		model:       *modelFlag,
 		criticModel: *criticModel,
 		timeout:     *timeout,
@@ -112,7 +117,7 @@ func reviewPRFlagTakesValue(name string) bool {
 }
 
 func reviewPRUsageError() error {
-	return fmt.Errorf("usage: buckley review-pr <pr-number-or-url> [flags]\n\nExamples:\n  buckley review-pr 123\n  buckley review-pr 123 -model codex/gpt-5.6-terra-high\n  buckley review-pr https://github.com/owner/repo/pull/123")
+	return fmt.Errorf("usage: buckley review-pr <pr-number-or-url> [flags]\n\nExamples:\n  buckley review-pr 123\n  buckley review-pr 123 -model codex/auto\n  buckley review-pr 123 -model codex/gpt-5.6-terra-high\n  buckley review-pr https://github.com/owner/repo/pull/123")
 }
 
 // runReviewPRCommand reviews a remote PR using gh CLI integration.
@@ -145,8 +150,10 @@ func runReviewPRCommand(args []string) error {
 	defer cancel()
 
 	if !quietMode {
-		termOut.Dim("Using model: %s", runtime.modelID)
-		if runtime.reasoningEffort != "" {
+		printReviewModelSelection(runtime)
+		if runtime.policy.adaptiveReasoning {
+			termOut.Dim("Reasoning effort: adaptive by model and review size")
+		} else if runtime.reasoningEffort != "" {
 			termOut.Dim("Reasoning effort: %s", runtime.reasoningEffort)
 		}
 		termOut.Dim("Reviewing PR: %s", opts.prRef)
@@ -186,12 +193,40 @@ func runReviewPRCommand(args []string) error {
 	if err := writePRReviewOutput(opts.outputFile, result.reviewText, prInfo); err != nil {
 		return err
 	}
+	if opts.post {
+		postCtx, postCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer postCancel()
+		if err := postCompletedPRReview(postCtx, prInfo, result.reviewText); err != nil {
+			return err
+		}
+		if !quietMode {
+			termOut.Success("Review posted to GitHub")
+		}
+	}
 
 	if opts.showCost && result.trace != nil {
 		printReviewCost(result.trace, runtime.ledger)
 	}
 
 	return nil
+}
+
+func postCompletedPRReview(ctx context.Context, prInfo *commands.PRInfo, reviewText string) error {
+	if prInfo == nil {
+		return fmt.Errorf("post GitHub review: pull request metadata unavailable")
+	}
+	if prInfo.Host != "" && prInfo.Host != "github.com" {
+		return fmt.Errorf("post GitHub review: unsupported host %q", prInfo.Host)
+	}
+	if strings.TrimSpace(prInfo.Repository) == "" || prInfo.Number <= 0 || strings.TrimSpace(prInfo.HeadSHA) == "" {
+		return fmt.Errorf("post GitHub review: incomplete pull request identity")
+	}
+	event := gitwatcher.PullRequestEvent{
+		Repository: prInfo.Repository,
+		Number:     prInfo.Number,
+		HeadSHA:    prInfo.HeadSHA,
+	}
+	return postBuckbotReview(ctx, event, reviewText)
 }
 
 func runPRReview(ctx context.Context, prRef string, framework *oneshot.Framework) (*reviewCommandResult, *commands.PRInfo, error) {
@@ -203,12 +238,22 @@ func runPRReviewWithIterationLimit(ctx context.Context, prRef string, framework 
 }
 
 type automatedReviewOptions struct {
-	maxIterations    int
-	maxRetries       int
-	maxDiffBytes     int
-	maxCostUSD       float64
-	criticReserveUSD float64
-	approvalCritic   bool
+	maxIterations       int
+	maxToolCalls        int
+	maxRetries          int
+	maxDiffBytes        int
+	maxCostUSD          float64
+	criticReserveUSD    float64
+	approvalCritic      bool
+	verificationTimeout time.Duration
+	explorationTimeout  time.Duration
+	synthesisLead       time.Duration
+	sizeClass           string
+	modelID             string
+	reasoningEffort     string
+	adaptiveCodexModel  bool
+	adaptiveReasoning   bool
+	engine              *rules.Engine
 }
 
 func defaultAutomatedReviewOptions(cfg *config.Config) automatedReviewOptions {
@@ -216,10 +261,12 @@ func defaultAutomatedReviewOptions(cfg *config.Config) automatedReviewOptions {
 		return automatedReviewOptions{}
 	}
 	opts := automatedReviewOptions{
-		maxIterations: cfg.Buckbot.MaxReviewIterations,
-		maxRetries:    cfg.Buckbot.MaxValidationAttempts,
-		maxDiffBytes:  cfg.Buckbot.MaxDiffBytes,
-		maxCostUSD:    cfg.Buckbot.PerReviewBudgetUSD,
+		maxIterations:     cfg.Buckbot.MaxReviewIterations,
+		maxRetries:        cfg.Buckbot.MaxValidationAttempts,
+		maxDiffBytes:      cfg.Buckbot.MaxDiffBytes,
+		maxCostUSD:        cfg.Buckbot.PerReviewBudgetUSD,
+		reasoningEffort:   resolveConfiguredReviewReasoning(cfg),
+		adaptiveReasoning: reviewReasoningIsAdaptive(cfg, reviewReasoningOverride()),
 	}
 	if strings.TrimSpace(cfg.Buckbot.CriticModel) != "" {
 		opts.criticReserveUSD = cfg.Buckbot.PerReviewBudgetUSD * 0.12
@@ -260,9 +307,15 @@ func runPRReviewWithOptions(ctx context.Context, prRef string, framework *onesho
 		spinner.StopWithError(err.Error())
 		return nil, nil, fmt.Errorf("assemble PR context: %w", err)
 	}
-	spinner.SetMessage("Running model review...")
-
-	userPrompt := commands.BuildPRPrompt(prCtx)
+	plan := resolveReviewExecutionPlan(opts.engine, rules.ReviewPlanFacts{
+		FileCount:         len(prCtx.Files),
+		DiffBytes:         len(prCtx.Diff),
+		ContextIncomplete: prCtx.HasIncompleteContext(),
+		HasFeedback:       prCtx.HasReviewFeedback(),
+	})
+	opts = opts.withExecutionPlan(plan)
+	spinner.SetMessage(fmt.Sprintf("Running %s review with %s reasoning...", opts.sizeClass, opts.reasoningEffort))
+	userPrompt := appendReviewExecutionPlan(commands.BuildPRPrompt(prCtx), opts)
 	reviewDef := commands.ReviewPRDef{
 		ChangedFiles:                prCtx.Files,
 		ContextIncomplete:           prCtx.HasIncompleteContext(),
@@ -277,8 +330,15 @@ func runPRReviewWithOptions(ctx context.Context, prRef string, framework *onesho
 		UserPrompt:               userPrompt,
 		Audit:                    audit,
 		MaxRetries:               opts.maxRetries,
+		MaxIterations:            opts.maxIterations,
+		MaxToolCalls:             opts.maxToolCalls,
 		MaxCostUSD:               opts.maxCostUSD,
 		ApprovalCriticReserveUSD: opts.criticReserveUSD,
+		ExplorationTimeout:       opts.explorationTimeout,
+		SynthesisLead:            opts.synthesisLead,
+		VerificationTimeout:      opts.verificationTimeout,
+		ModelID:                  opts.modelID,
+		ReasoningEffort:          opts.reasoningEffort,
 		SnapshotPolicy: model.ReviewSnapshotPolicy{
 			Mode:           model.ReviewSnapshotHead,
 			ExpectedCommit: prCtx.PR.HeadSHA,
@@ -295,7 +355,13 @@ func runPRReviewWithOptions(ctx context.Context, prRef string, framework *onesho
 	}
 	if err := commands.RevalidatePRContext(prCtx); err != nil {
 		spinner.StopWithError(err.Error())
-		return nil, prCtx.PR, fmt.Errorf("review target changed: %w", err)
+		revalidationErr := fmt.Errorf("review target changed or could not be revalidated: %w", err)
+		partial := reviewResultFromRLM(fwResult, audit)
+		partial.incomplete = true
+		partial.incompleteWhy = revalidationErr.Error()
+		partial.reviewText = markIncompleteReview(partial.reviewText, partial.incompleteWhy)
+		partial.parsed = nil
+		return partial, prCtx.PR, revalidationErr
 	}
 
 	spinner.StopWithSuccess("PR review complete")
