@@ -49,6 +49,9 @@ type RLMResult struct {
 	// Response is the final text response
 	Response string
 
+	// FinishReason records why the provider stopped the final model turn.
+	FinishReason string
+
 	// ToolCalls lists all tools that were called
 	ToolCalls []rlm.SubAgentToolCall
 
@@ -187,6 +190,7 @@ func (r *RLMRunner) Run(ctx context.Context, systemPrompt, task string, allowedT
 	// Build result
 	result := &RLMResult{
 		Response:          response,
+		FinishReason:      agentResult.FinishReason,
 		ToolCalls:         agentResult.ToolCalls,
 		TokensUsed:        agentResult.TokensUsed,
 		InputTokens:       agentResult.InputTokens,

@@ -114,6 +114,16 @@ func TestFinalSynthesisMessagesPreservesHistoryAndRequiresAnswer(t *testing.T) {
 	}
 }
 
+func TestMarshalSubAgentRawPreservesFinishReason(t *testing.T) {
+	raw := marshalSubAgentRaw(&SubAgentResult{
+		Summary:      "partial review",
+		FinishReason: "length",
+	})
+	if !strings.Contains(string(raw), `"finish_reason":"length"`) {
+		t.Fatalf("raw result omitted the finish reason: %s", raw)
+	}
+}
+
 func TestAssistantToolCallMessagePreservesReasoningContinuity(t *testing.T) {
 	source := model.Message{
 		Content:   "inspect the selected files",

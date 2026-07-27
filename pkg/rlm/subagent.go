@@ -125,6 +125,7 @@ type SubAgentResult struct {
 	AgentID           string
 	ModelUsed         string
 	Summary           string
+	FinishReason      string
 	RawKey            string
 	Raw               []byte
 	TokensUsed        int
@@ -311,6 +312,7 @@ func (a *SubAgent) Execute(ctx context.Context, task string) (*SubAgentResult, e
 		}
 
 		choice := resp.Choices[0]
+		result.FinishReason = strings.TrimSpace(choice.FinishReason)
 
 		if len(choice.Message.ToolCalls) > 0 {
 			toolCtx, cancelTools := a.explorationContext(ctx, start)
@@ -863,6 +865,7 @@ func marshalSubAgentRaw(result *SubAgentResult) []byte {
 	}
 	payload := map[string]any{
 		"summary":            result.Summary,
+		"finish_reason":      result.FinishReason,
 		"tool_calls":         result.ToolCalls,
 		"execution_evidence": result.ExecutionEvidence,
 		"tokens_used":        result.TokensUsed,
