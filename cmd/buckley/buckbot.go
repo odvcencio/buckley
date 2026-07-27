@@ -5,11 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"log/slog"
 	"net"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -25,13 +23,19 @@ import (
 	"m31labs.dev/buckley/pkg/transparency"
 )
 
-var buckbotLoadConfigFn = config.Load
-var buckbotListenFn = http.ListenAndServe
 var postBuckbotReviewPayloadFn = postBuckbotReviewPayload
+var runBuckbotGitHubFn = runBuckbotGitHub
 
 type buckbotReviewer func(context.Context, gitwatcher.PullRequestEvent) (string, float64, error)
 type buckbotPoster func(context.Context, gitwatcher.PullRequestEvent, string) error
 type buckbotSalvager func(gitwatcher.PullRequestEvent, string, error) (string, error)
+
+type buckbotReviewIntake struct {
+	Model           string
+	ReasoningEffort string
+	SizeClass       string
+	BudgetUSD       float64
+}
 
 const (
 	buckbotReviewAttemptTimeout = defaultReviewTimeout
@@ -248,48 +252,10 @@ func waitForBuckbotRetry(ctx context.Context, delay time.Duration) error {
 }
 
 func runBuckbotCommand(args []string) error {
-	fs := flag.NewFlagSet("buckbot", flag.ContinueOnError)
-	bind := fs.String("bind", "", "address to bind (default: buckbot.webhook_bind or 127.0.0.1:8086)")
-	secret := fs.String("secret", "", "shared webhook secret (overrides config)")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	cfg, err := buckbotLoadConfigFn()
-	if err != nil {
-		return withExitCode(err, 2)
-	}
-	if !cfg.Buckbot.Enabled {
-		return withExitCode(fmt.Errorf("buckbot disabled in config; enable buckbot.enabled to run this daemon"), 2)
-	}
-	addr := strings.TrimSpace(*bind)
-	if addr == "" {
-		addr = strings.TrimSpace(cfg.Buckbot.WebhookBind)
-	}
-	if addr == "" {
-		addr = "127.0.0.1:8086"
-	}
-	webhookSecret := strings.TrimSpace(chooseSecret(*secret, cfg.Buckbot.Secret))
-	if !isLoopbackAddress(addr) && webhookSecret == "" {
-		return withExitCode(fmt.Errorf("refusing to bind buckbot to %q without a shared secret", addr), 2)
-	}
-	dbPath, err := resolveDBPath()
-	if err != nil {
-		return err
-	}
-	costStore, err := storage.New(dbPath)
-	if err != nil {
-		return fmt.Errorf("open Buckbot cost store: %w", err)
-	}
-	defer func() { _ = costStore.Close() }()
-	monthlySpend, err := costStore.GetMonthlyCostForPrincipal("buckbot")
-	if err != nil {
-		return fmt.Errorf("load Buckbot monthly spend: %w", err)
-	}
-	service := newBuckbotService(cfg.Buckbot, newBuckbotReviewer(cfg.Buckbot, costStore), postBuckbotReview)
-	service.announce = postBuckbotReviewStarted(cfg.Buckbot)
-	service.spentUSD = monthlySpend
-	fmt.Printf("Buckbot listening for pull_request webhooks on %s using %s\n", addr, cfg.Buckbot.Model)
-	return buckbotListenFn(addr, gitwatcher.NewPullRequestHandler(webhookSecret, service.handle))
+	_ = args
+	return withExitCode(fmt.Errorf(
+		"automatic Buckbot webhook posting is retired; use `buckley review-pr <PR> -post` for an on-demand GitHub review",
+	), 2)
 }
 
 func newBuckbotReviewer(botCfg config.BuckbotConfig, costStore *storage.Store) buckbotReviewer {
@@ -433,6 +399,9 @@ func saveBuckbotSpend(store *storage.Store, event gitwatcher.PullRequestEvent, m
 }
 
 func postBuckbotReview(ctx context.Context, event gitwatcher.PullRequestEvent, review string) error {
+	if err := validateBuckbotReviewEvent(event); err != nil {
+		return err
+	}
 	parsed := commands.ParseReview(review)
 	review = formatBuckbotGitHubReview(parsed, review, event.HeadSHA)
 	inlineComments := make([]map[string]any, 0, len(parsed.Findings))
@@ -446,6 +415,12 @@ func postBuckbotReview(ctx context.Context, event gitwatcher.PullRequestEvent, r
 			"side": "RIGHT",
 			"body": formatBuckbotInlineFinding(finding),
 		})
+	}
+	finalMarker := buckbotFinalReviewMarker(event, review, inlineComments)
+	review = finalMarker + "\n" + review
+	for _, comment := range inlineComments {
+		marker := buckbotInlineReviewMarker(event, finalMarker, comment)
+		comment["body"] = marker + "\n" + fmt.Sprint(comment["body"])
 	}
 	if err := postBuckbotReviewPayloadFn(ctx, event, review, inlineComments); err != nil {
 		if len(inlineComments) == 0 {
@@ -528,6 +503,69 @@ func collapseBuckbotSection(review, heading, label string) string {
 }
 
 func postBuckbotReviewPayload(ctx context.Context, event gitwatcher.PullRequestEvent, review string, inlineComments []map[string]any) error {
+	if err := validateBuckbotReviewEvent(event); err != nil {
+		return err
+	}
+	finalMarker := leadingBuckbotMarker(review, buckbotFinalReviewMarkerPrefix)
+	inlineMarkers := buckbotInlineMarkers(inlineComments)
+	effectiveReview := review
+	effectiveComments := inlineComments
+	if finalMarker != "" || len(inlineMarkers) > 0 {
+		state, err := readBuckbotFinalReviewState(ctx, event, finalMarker, inlineMarkers)
+		if err != nil {
+			return fmt.Errorf("check existing GitHub review: %w", err)
+		}
+		if state.complete(finalMarker, inlineMarkers) {
+			return nil
+		}
+		if state.SummaryFound {
+			effectiveReview = ""
+		}
+		effectiveComments = filterMissingBuckbotInlineComments(inlineComments, state)
+	}
+
+	restErr := postBuckbotReviewPayloadREST(ctx, event, effectiveReview, effectiveComments)
+	if restErr == nil {
+		return nil
+	}
+	if finalMarker != "" || len(inlineMarkers) > 0 {
+		state, stateErr := readBuckbotFinalReviewState(ctx, event, finalMarker, inlineMarkers)
+		if stateErr != nil {
+			return fmt.Errorf("%v; post-state check: %w", restErr, stateErr)
+		}
+		if state.complete(finalMarker, inlineMarkers) {
+			return nil
+		}
+		if state.SummaryFound {
+			effectiveReview = ""
+		}
+		effectiveComments = filterMissingBuckbotInlineComments(inlineComments, state)
+	}
+	if !isGitHubRESTThrottleError(restErr) {
+		return restErr
+	}
+
+	slog.Warn("Buckbot REST post was throttled; retrying through GraphQL", "repository", event.Repository, "pr", event.Number, "error", restErr)
+	graphErr := postBuckbotReviewPayloadGraphQL(ctx, event, effectiveReview, effectiveComments)
+	if graphErr == nil {
+		return nil
+	}
+	if finalMarker != "" || len(inlineMarkers) > 0 {
+		state, stateErr := readBuckbotFinalReviewState(ctx, event, finalMarker, inlineMarkers)
+		if stateErr != nil {
+			return fmt.Errorf("%v; GraphQL fallback: %v; post-state check: %w", restErr, graphErr, stateErr)
+		}
+		if state.complete(finalMarker, inlineMarkers) {
+			return nil
+		}
+	}
+	return fmt.Errorf("%v; GraphQL fallback: %w", restErr, graphErr)
+}
+
+func postBuckbotReviewPayloadREST(ctx context.Context, event gitwatcher.PullRequestEvent, review string, inlineComments []map[string]any) error {
+	if err := validateBuckbotReviewEvent(event); err != nil {
+		return err
+	}
 	payload, err := json.Marshal(map[string]any{
 		"body":      review,
 		"commit_id": event.HeadSHA,
@@ -537,32 +575,418 @@ func postBuckbotReviewPayload(ctx context.Context, event gitwatcher.PullRequestE
 	if err != nil {
 		return fmt.Errorf("encode GitHub review: %w", err)
 	}
-	cmd := exec.CommandContext(ctx, "gh", "api", fmt.Sprintf("repos/%s/pulls/%d/reviews", event.Repository, event.Number), "--method", "POST", "--input", "-")
-	cmd.Stdin = bytes.NewReader(payload)
-	if output, err := cmd.CombinedOutput(); err != nil {
+	output, err := runBuckbotGitHubFn(ctx, []string{
+		"api",
+		fmt.Sprintf("repos/%s/pulls/%d/reviews", event.Repository, event.Number),
+		"--method", "POST",
+		"--input", "-",
+	}, payload)
+	if err != nil {
 		return fmt.Errorf("post GitHub review: %w: %s", err, strings.TrimSpace(string(output)))
 	}
 	return nil
 }
 
+const buckbotReviewPostIdentityQuery = `query($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) { id headRefOid }
+  }
+}`
+
+const buckbotReviewPostMutation = `mutation(
+  $pullRequestId: ID!,
+  $commitOID: GitObjectID!,
+  $body: String,
+  $threads: [DraftPullRequestReviewThread!]
+) {
+  addPullRequestReview(input: {
+    pullRequestId: $pullRequestId,
+    commitOID: $commitOID,
+    body: $body,
+    event: COMMENT,
+    threads: $threads
+  }) {
+    pullRequestReview { id url }
+  }
+}`
+
+func postBuckbotReviewPayloadGraphQL(ctx context.Context, event gitwatcher.PullRequestEvent, review string, inlineComments []map[string]any) error {
+	if err := validateBuckbotReviewEvent(event); err != nil {
+		return err
+	}
+	owner, repo, err := splitBuckbotRepository(event.Repository)
+	if err != nil {
+		return err
+	}
+	output, err := runBuckbotGraphQL(ctx, buckbotReviewPostIdentityQuery, map[string]any{
+		"owner":  owner,
+		"name":   repo,
+		"number": event.Number,
+	})
+	if err != nil {
+		return fmt.Errorf("read GitHub review target: %w", err)
+	}
+	var identityResponse struct {
+		Data struct {
+			Repository *struct {
+				PullRequest *struct {
+					ID         string `json:"id"`
+					HeadRefOID string `json:"headRefOid"`
+				} `json:"pullRequest"`
+			} `json:"repository"`
+		} `json:"data"`
+		Errors []struct {
+			Message string `json:"message"`
+		} `json:"errors"`
+	}
+	if err := json.Unmarshal(output, &identityResponse); err != nil {
+		return fmt.Errorf("decode GitHub review target: %w", err)
+	}
+	if len(identityResponse.Errors) > 0 {
+		return fmt.Errorf("read GitHub review target: %s", identityResponse.Errors[0].Message)
+	}
+	if identityResponse.Data.Repository == nil || identityResponse.Data.Repository.PullRequest == nil {
+		return fmt.Errorf("read GitHub review target: pull request not found")
+	}
+	pr := identityResponse.Data.Repository.PullRequest
+	if pr.HeadRefOID != event.HeadSHA {
+		return fmt.Errorf("post GitHub review: head changed from %s to %s", event.HeadSHA, pr.HeadRefOID)
+	}
+
+	threads, err := buckbotGraphQLReviewThreads(inlineComments)
+	if err != nil {
+		return err
+	}
+	output, err = runBuckbotGraphQL(ctx, buckbotReviewPostMutation, map[string]any{
+		"pullRequestId": pr.ID,
+		"commitOID":     event.HeadSHA,
+		"body":          review,
+		"threads":       threads,
+	})
+	if err != nil {
+		return fmt.Errorf("post GitHub review through GraphQL: %w", err)
+	}
+	var mutationResponse struct {
+		Data struct {
+			AddPullRequestReview *struct {
+				PullRequestReview *struct {
+					ID string `json:"id"`
+				} `json:"pullRequestReview"`
+			} `json:"addPullRequestReview"`
+		} `json:"data"`
+		Errors []struct {
+			Message string `json:"message"`
+		} `json:"errors"`
+	}
+	if err := json.Unmarshal(output, &mutationResponse); err != nil {
+		return fmt.Errorf("decode GitHub review response: %w", err)
+	}
+	if len(mutationResponse.Errors) > 0 {
+		return fmt.Errorf("post GitHub review through GraphQL: %s", mutationResponse.Errors[0].Message)
+	}
+	if mutationResponse.Data.AddPullRequestReview == nil ||
+		mutationResponse.Data.AddPullRequestReview.PullRequestReview == nil ||
+		strings.TrimSpace(mutationResponse.Data.AddPullRequestReview.PullRequestReview.ID) == "" {
+		return fmt.Errorf("post GitHub review through GraphQL: response omitted the review ID")
+	}
+	return nil
+}
+
+func buckbotGraphQLReviewThreads(inlineComments []map[string]any) ([]map[string]any, error) {
+	threads := make([]map[string]any, 0, len(inlineComments))
+	for _, comment := range inlineComments {
+		path, pathOK := comment["path"].(string)
+		body, bodyOK := comment["body"].(string)
+		line, lineOK := comment["line"].(int)
+		side, sideOK := comment["side"].(string)
+		if !pathOK || !bodyOK || !lineOK || !sideOK || path == "" || body == "" || line <= 0 {
+			return nil, fmt.Errorf("post GitHub review through GraphQL: invalid inline comment")
+		}
+		threads = append(threads, map[string]any{
+			"path": path,
+			"line": line,
+			"side": side,
+			"body": body,
+		})
+	}
+	return threads, nil
+}
+
+func isGitHubRESTThrottleError(err error) bool {
+	if err == nil {
+		return false
+	}
+	detail := strings.ToLower(err.Error())
+	rateLimited := strings.Contains(detail, "rate limit") ||
+		strings.Contains(detail, "secondary rate") ||
+		strings.Contains(detail, "abuse detection")
+	return rateLimited && (strings.Contains(detail, "http 403") || strings.Contains(detail, "http 429"))
+}
+
+func isRetryableBuckbotPostError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if isRetryableBuckbotError(err) || isGitHubRESTThrottleError(err) {
+		return true
+	}
+	detail := strings.ToLower(err.Error())
+	for _, status := range []string{"http 429", "http 500", "http 502", "http 503", "http 504"} {
+		if strings.Contains(detail, status) {
+			return true
+		}
+	}
+	return strings.Contains(detail, "temporarily unavailable")
+}
+
 func postBuckbotReviewStarted(cfg config.BuckbotConfig) buckbotPoster {
 	return func(ctx context.Context, event gitwatcher.PullRequestEvent, _ string) error {
-		sha := strings.TrimSpace(event.HeadSHA)
-		if len(sha) > 12 {
-			sha = sha[:12]
-		}
-		body := fmt.Sprintf(
-			"🔎 **Buckbot is reviewing `%s`.**\n\nI’m mapping the changed surface with Canopy, tracing affected consumers and boundaries, and checking concrete risks against CI. A final summary and any line-level findings will follow.\n\n_Model: `%s` · hard cost cap: $%.2f_",
-			sha,
-			cfg.Model,
-			cfg.PerReviewBudgetUSD,
-		)
-		cmd := exec.CommandContext(ctx, "gh", "pr", "comment", fmt.Sprint(event.Number), "--repo", event.Repository, "--body", body)
-		if output, err := cmd.CombinedOutput(); err != nil {
-			return fmt.Errorf("post GitHub review-started comment: %w: %s", err, strings.TrimSpace(string(output)))
-		}
-		return nil
+		return postBuckbotReviewLifecycle(ctx, event, buckbotReviewIntake{
+			Model:     cfg.Model,
+			BudgetUSD: cfg.PerReviewBudgetUSD,
+		})
 	}
+}
+
+const buckbotReviewLifecycleQuery = `query($owner: String!, $name: String!, $number: Int!, $after: String) {
+  viewer { login }
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      id
+      headRefOid
+      comments(first: 100, after: $after) {
+        pageInfo { hasNextPage endCursor }
+        nodes {
+          author { login }
+          body
+        }
+      }
+    }
+  }
+}`
+
+const buckbotReviewLifecycleMutation = `mutation($subjectId: ID!, $body: String!, $postIntake: Boolean!) {
+  eyes: addReaction(input: {subjectId: $subjectId, content: EYES}) {
+    reaction { content }
+  }
+  intake: addComment(input: {subjectId: $subjectId, body: $body}) @include(if: $postIntake) {
+    commentEdge { node { id } }
+  }
+}`
+
+func postBuckbotReviewLifecycle(ctx context.Context, event gitwatcher.PullRequestEvent, intake buckbotReviewIntake) error {
+	if err := validateBuckbotReviewEvent(event); err != nil {
+		return fmt.Errorf("post GitHub review intake: %w", err)
+	}
+	owner, repo, err := splitBuckbotRepository(event.Repository)
+	if err != nil {
+		return err
+	}
+
+	marker := commands.BuckbotReviewIntakeMarker(event.HeadSHA)
+	prID, postIntake, err := readBuckbotReviewLifecycleState(ctx, event, owner, repo, marker)
+	if err != nil {
+		return err
+	}
+	output, err := runBuckbotGraphQL(ctx, buckbotReviewLifecycleMutation, map[string]any{
+		"subjectId":  prID,
+		"body":       formatBuckbotReviewIntake(marker, event.HeadSHA, intake),
+		"postIntake": postIntake,
+	})
+	if err != nil {
+		return fmt.Errorf("post GitHub review intake: %w", err)
+	}
+	var mutationResponse struct {
+		Data struct {
+			Eyes *struct {
+				Reaction *struct {
+					Content string `json:"content"`
+				} `json:"reaction"`
+			} `json:"eyes"`
+			Intake *struct {
+				CommentEdge *struct {
+					Node *struct {
+						ID string `json:"id"`
+					} `json:"node"`
+				} `json:"commentEdge"`
+			} `json:"intake"`
+		} `json:"data"`
+		Errors []struct {
+			Message string `json:"message"`
+		} `json:"errors"`
+	}
+	if err := json.Unmarshal(output, &mutationResponse); err != nil {
+		return fmt.Errorf("decode GitHub review intake response: %w", err)
+	}
+	if len(mutationResponse.Errors) > 0 {
+		return fmt.Errorf("post GitHub review intake: %s", mutationResponse.Errors[0].Message)
+	}
+	if mutationResponse.Data.Eyes == nil || mutationResponse.Data.Eyes.Reaction == nil ||
+		mutationResponse.Data.Eyes.Reaction.Content != "EYES" {
+		return fmt.Errorf("post GitHub review intake: response omitted the EYES reaction")
+	}
+	if postIntake && (mutationResponse.Data.Intake == nil ||
+		mutationResponse.Data.Intake.CommentEdge == nil ||
+		mutationResponse.Data.Intake.CommentEdge.Node == nil ||
+		strings.TrimSpace(mutationResponse.Data.Intake.CommentEdge.Node.ID) == "") {
+		return fmt.Errorf("post GitHub review intake: response omitted the intake comment ID")
+	}
+	return nil
+}
+
+func readBuckbotReviewLifecycleState(
+	ctx context.Context,
+	event gitwatcher.PullRequestEvent,
+	owner string,
+	repo string,
+	marker string,
+) (string, bool, error) {
+	var prID string
+	var viewerLogin string
+	postIntake := true
+	after := ""
+	seenCursors := make(map[string]struct{})
+	for {
+		variables := map[string]any{
+			"owner":  owner,
+			"name":   repo,
+			"number": event.Number,
+			"after":  nil,
+		}
+		if after != "" {
+			variables["after"] = after
+		}
+		output, err := runBuckbotGraphQL(ctx, buckbotReviewLifecycleQuery, variables)
+		if err != nil {
+			return "", false, fmt.Errorf("read GitHub review intake state: %w", err)
+		}
+		var response struct {
+			Data struct {
+				Viewer struct {
+					Login string `json:"login"`
+				} `json:"viewer"`
+				Repository *struct {
+					PullRequest *struct {
+						ID         string `json:"id"`
+						HeadRefOID string `json:"headRefOid"`
+						Comments   struct {
+							PageInfo struct {
+								HasNextPage bool   `json:"hasNextPage"`
+								EndCursor   string `json:"endCursor"`
+							} `json:"pageInfo"`
+							Nodes []struct {
+								Author struct {
+									Login string `json:"login"`
+								} `json:"author"`
+								Body string `json:"body"`
+							} `json:"nodes"`
+						} `json:"comments"`
+					} `json:"pullRequest"`
+				} `json:"repository"`
+			} `json:"data"`
+			Errors []struct {
+				Message string `json:"message"`
+			} `json:"errors"`
+		}
+		if err := json.Unmarshal(output, &response); err != nil {
+			return "", false, fmt.Errorf("decode GitHub review intake state: %w", err)
+		}
+		if len(response.Errors) > 0 {
+			return "", false, fmt.Errorf("read GitHub review intake state: %s", response.Errors[0].Message)
+		}
+		if response.Data.Repository == nil || response.Data.Repository.PullRequest == nil {
+			return "", false, fmt.Errorf("read GitHub review intake state: pull request not found")
+		}
+		if response.Data.Viewer.Login == "" {
+			return "", false, fmt.Errorf("read GitHub review intake state: authenticated viewer missing")
+		}
+		pr := response.Data.Repository.PullRequest
+		if pr.HeadRefOID != event.HeadSHA {
+			return "", false, fmt.Errorf("post GitHub review intake: head changed from %s to %s", event.HeadSHA, pr.HeadRefOID)
+		}
+		if prID == "" {
+			prID = pr.ID
+			viewerLogin = response.Data.Viewer.Login
+		} else if pr.ID != prID {
+			return "", false, fmt.Errorf("read GitHub review intake state: pull request identity changed during pagination")
+		} else if response.Data.Viewer.Login != viewerLogin {
+			return "", false, fmt.Errorf("read GitHub review intake state: authenticated viewer changed during pagination")
+		}
+		for _, comment := range pr.Comments.Nodes {
+			if comment.Author.Login == viewerLogin && hasExactLeadingBuckbotMarker(comment.Body, marker) {
+				postIntake = false
+			}
+		}
+		if !pr.Comments.PageInfo.HasNextPage {
+			return prID, postIntake, nil
+		}
+		cursor := pr.Comments.PageInfo.EndCursor
+		if cursor == "" {
+			return "", false, fmt.Errorf("read GitHub review intake state: pagination omitted the next cursor")
+		}
+		if _, duplicate := seenCursors[cursor]; duplicate {
+			return "", false, fmt.Errorf("read GitHub review intake state: pagination repeated cursor %q", cursor)
+		}
+		seenCursors[cursor] = struct{}{}
+		after = cursor
+	}
+}
+
+func formatBuckbotReviewIntake(marker, headSHA string, intake buckbotReviewIntake) string {
+	revision := strings.TrimSpace(headSHA)
+	if len(revision) > 12 {
+		revision = revision[:12]
+	}
+	var details []string
+	if modelID := strings.TrimSpace(intake.Model); modelID != "" {
+		details = append(details, "model `"+modelID+"`")
+	}
+	if sizeClass := strings.TrimSpace(intake.SizeClass); sizeClass != "" {
+		details = append(details, strings.ToLower(sizeClass)+" review")
+	}
+	if effort := strings.TrimSpace(intake.ReasoningEffort); effort != "" {
+		details = append(details, strings.ToLower(effort)+" reasoning")
+	}
+	if intake.BudgetUSD > 0 {
+		details = append(details, fmt.Sprintf("$%.2f limit", intake.BudgetUSD))
+	}
+	suffix := ""
+	if len(details) > 0 {
+		suffix = "\n\n_" + strings.Join(details, " · ") + "_"
+	}
+	return fmt.Sprintf(
+		"%s\n## Buckbot review started\n\nI captured commit `%s`. I will inspect the changed surface and check concrete risks against CI.\n\nA deeper review will follow with the verdict, evidence, and demonstrated line findings.%s",
+		marker,
+		revision,
+		suffix,
+	)
+}
+
+func splitBuckbotRepository(repository string) (string, string, error) {
+	parts := strings.Split(strings.TrimSpace(repository), "/")
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return "", "", fmt.Errorf("post GitHub review: invalid repository %q", repository)
+	}
+	return parts[0], parts[1], nil
+}
+
+func runBuckbotGraphQL(ctx context.Context, query string, variables map[string]any) ([]byte, error) {
+	payload, err := json.Marshal(map[string]any{
+		"query":     query,
+		"variables": variables,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return runBuckbotGitHubFn(ctx, []string{"api", "graphql", "--input", "-"}, payload)
+}
+
+func runBuckbotGitHub(ctx context.Context, args []string, input []byte) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, "gh", args...)
+	if len(input) > 0 {
+		cmd.Stdin = bytes.NewReader(input)
+	}
+	return cmd.CombinedOutput()
 }
 
 func formatBuckbotInlineFinding(finding commands.Finding) string {

@@ -670,7 +670,7 @@ func printHelp() {
 	fmt.Println("  remote <subcommand>              Remote session operations (attach, sessions, tokens, login, console)")
 	fmt.Println("  batch prune-workspaces           Garbage-collect stale batch workspaces (k8s/CI)")
 	fmt.Println("  git-webhook                      Listen for merge webhooks and run regression/release commands")
-	fmt.Println("  buckbot                          Review GitHub pull requests from signed webhooks")
+	fmt.Println("  buckbot                          Retired; use review-pr <PR> -post")
 	fmt.Println("  agent init [path]                Create a filesystem-first agent/ layout")
 	fmt.Println("  agent list                       List discovered project agent profiles")
 	fmt.Println("  agent check [--project|path]     Validate a Buckley agent profile")

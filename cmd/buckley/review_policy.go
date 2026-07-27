@@ -11,7 +11,7 @@ import (
 )
 
 const (
-	defaultReviewTimeout     = 4*time.Minute + 45*time.Second
+	defaultReviewTimeout     = 4*time.Minute + 25*time.Second
 	codexReviewModelFocused  = "codex/gpt-5.6-luna"
 	codexReviewModelStandard = "codex/gpt-5.6-terra"
 	codexReviewModelBroad    = "codex/gpt-5.6-sol"
@@ -20,6 +20,7 @@ const (
 type reviewExecutionPlan struct {
 	sizeClass           string
 	reasoningEffort     string
+	reasoningMaxTokens  int
 	maxIterations       int
 	maxToolCalls        int
 	verificationTimeout time.Duration
@@ -57,11 +58,12 @@ func resolveReviewExecutionPlan(engine *rules.Engine, facts rules.ReviewPlanFact
 	plan := reviewExecutionPlan{
 		sizeClass:           "standard",
 		reasoningEffort:     "medium",
-		maxIterations:       11,
-		maxToolCalls:        18,
+		reasoningMaxTokens:  3072,
+		maxIterations:       8,
+		maxToolCalls:        8,
 		verificationTimeout: 75 * time.Second,
-		explorationTimeout:  165 * time.Second,
-		synthesisLead:       75 * time.Second,
+		explorationTimeout:  120 * time.Second,
+		synthesisLead:       105 * time.Second,
 	}
 	if engine == nil {
 		return plan
@@ -76,6 +78,7 @@ func resolveReviewExecutionPlan(engine *rules.Engine, facts rules.ReviewPlanFact
 	if value, ok := result.Params["reasoning_effort"].(string); ok && validReviewReasoningEffort(value) {
 		plan.reasoningEffort = strings.ToLower(strings.TrimSpace(value))
 	}
+	plan.reasoningMaxTokens = reviewPlanInt(result.Params["reasoning_max_tokens"], plan.reasoningMaxTokens)
 	plan.maxIterations = reviewPlanInt(result.Params["max_iterations"], plan.maxIterations)
 	plan.maxToolCalls = reviewPlanInt(result.Params["max_tool_calls"], plan.maxToolCalls)
 	verificationSeconds := reviewPlanInt(result.Params["verification_timeout_seconds"], int(plan.verificationTimeout/time.Second))
@@ -106,6 +109,7 @@ func (opts automatedReviewOptions) withExecutionPlan(plan reviewExecutionPlan) a
 		opts.maxIterations = plan.maxIterations
 	}
 	opts.maxToolCalls = plan.maxToolCalls
+	opts.reasoningMaxTokens = plan.reasoningMaxTokens
 	opts.verificationTimeout = plan.verificationTimeout
 	opts.explorationTimeout = plan.explorationTimeout
 	opts.synthesisLead = plan.synthesisLead
@@ -130,17 +134,21 @@ func appendReviewExecutionPlan(prompt string, opts automatedReviewOptions) strin
 - Size class: %s
 - Model: %s
 - Reasoning effort: %s
+- Limit each model turn to %d reasoning tokens.
 - Use at most %d model turns and %d total inspection or verification calls.
 - Limit each verification command to %d seconds.
 - Finish evidence collection within %d seconds.
 - Keep the final %d seconds for a complete verdict.
 - Inspect the supplied diff and structural evidence before you call a tool.
+- Do not read a changed file when the supplied diff already shows the required lines.
+- Use tools only for omitted definitions, callers, invariants, or targeted verification.
 - Do not repeat equivalent searches, builds, or tests.
 - If required evidence cannot fit or project guidance forbids it, finish with a non-approval verdict.
 `,
 		strings.ToUpper(opts.sizeClass),
 		opts.modelID,
 		strings.ToUpper(opts.reasoningEffort),
+		opts.reasoningMaxTokens,
 		opts.maxIterations,
 		opts.maxToolCalls,
 		int(opts.verificationTimeout/time.Second),

@@ -17,6 +17,16 @@ import (
 	"m31labs.dev/buckley/pkg/terminal"
 )
 
+var postCompletedBuckbotReviewFn buckbotPoster = postBuckbotReview
+var waitCompletedBuckbotPostRetryFn = waitForBuckbotRetry
+
+const (
+	maxCompletedBuckbotPostAttempts  = 3
+	completedBuckbotPostRetryDelay   = time.Second
+	completedBuckbotPostAttemptLimit = 7 * time.Second
+	completedBuckbotPostBudget       = 25 * time.Second
+)
+
 type reviewPRCommandOptions struct {
 	verbose     bool
 	showCost    bool
@@ -146,7 +156,11 @@ func runReviewPRCommand(args []string) error {
 		return fmt.Errorf("no model configured (set BUCKLEY_MODEL_REVIEW or configure models.review)")
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), opts.timeout)
+	reviewTimeout := opts.timeout
+	if opts.post && reviewTimeout > defaultReviewTimeout {
+		reviewTimeout = defaultReviewTimeout
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), reviewTimeout)
 	defer cancel()
 
 	if !quietMode {
@@ -165,6 +179,23 @@ func runReviewPRCommand(args []string) error {
 		maxDiffBytes:  opts.maxDiff,
 		maxCostUSD:    opts.budgetUSD,
 	})
+	if opts.post {
+		policy.contextReady = func(ctx context.Context, prInfo *commands.PRInfo, plan automatedReviewOptions) error {
+			if prInfo == nil {
+				return fmt.Errorf("post GitHub review intake: pull request metadata unavailable")
+			}
+			return postBuckbotReviewLifecycle(ctx, gitwatcher.PullRequestEvent{
+				Repository: prInfo.Repository,
+				Number:     prInfo.Number,
+				HeadSHA:    prInfo.HeadSHA,
+			}, buckbotReviewIntake{
+				Model:           plan.modelID,
+				ReasoningEffort: plan.reasoningEffort,
+				SizeClass:       plan.sizeClass,
+				BudgetUSD:       plan.maxCostUSD,
+			})
+		}
+	}
 	result, prInfo, reviewErr := runPRReviewWithOptions(ctx, opts.prRef, runtime.framework, policy)
 
 	if opts.verbose && result != nil && result.contextAudit != nil {
@@ -194,7 +225,7 @@ func runReviewPRCommand(args []string) error {
 		return err
 	}
 	if opts.post {
-		postCtx, postCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		postCtx, postCancel := context.WithTimeout(context.Background(), completedBuckbotPostBudget)
 		defer postCancel()
 		if err := postCompletedPRReview(postCtx, prInfo, result.reviewText); err != nil {
 			return err
@@ -226,7 +257,23 @@ func postCompletedPRReview(ctx context.Context, prInfo *commands.PRInfo, reviewT
 		Number:     prInfo.Number,
 		HeadSHA:    prInfo.HeadSHA,
 	}
-	return postBuckbotReview(ctx, event, reviewText)
+	var lastErr error
+	for attempt := 0; attempt < maxCompletedBuckbotPostAttempts; attempt++ {
+		attemptCtx, attemptCancel := context.WithTimeout(ctx, completedBuckbotPostAttemptLimit)
+		lastErr = postCompletedBuckbotReviewFn(attemptCtx, event, reviewText)
+		attemptCancel()
+		if lastErr == nil {
+			return nil
+		}
+		if !isRetryableBuckbotPostError(lastErr) || attempt+1 == maxCompletedBuckbotPostAttempts {
+			return lastErr
+		}
+		delay := completedBuckbotPostRetryDelay * time.Duration(1<<attempt)
+		if err := waitCompletedBuckbotPostRetryFn(ctx, delay); err != nil {
+			return fmt.Errorf("post GitHub review retry: %w", err)
+		}
+	}
+	return lastErr
 }
 
 func runPRReview(ctx context.Context, prRef string, framework *oneshot.Framework) (*reviewCommandResult, *commands.PRInfo, error) {
@@ -251,9 +298,11 @@ type automatedReviewOptions struct {
 	sizeClass           string
 	modelID             string
 	reasoningEffort     string
+	reasoningMaxTokens  int
 	adaptiveCodexModel  bool
 	adaptiveReasoning   bool
 	engine              *rules.Engine
+	contextReady        func(context.Context, *commands.PRInfo, automatedReviewOptions) error
 }
 
 func defaultAutomatedReviewOptions(cfg *config.Config) automatedReviewOptions {
@@ -299,6 +348,7 @@ func runPRReviewWithOptions(ctx context.Context, prRef string, framework *onesho
 	spinner.Start()
 
 	contextOpts := commands.DefaultPRContextOptions()
+	contextOpts.Context = ctx
 	if opts.maxDiffBytes > 0 {
 		contextOpts.MaxDiffBytes = opts.maxDiffBytes
 	}
@@ -314,6 +364,12 @@ func runPRReviewWithOptions(ctx context.Context, prRef string, framework *onesho
 		HasFeedback:       prCtx.HasReviewFeedback(),
 	})
 	opts = opts.withExecutionPlan(plan)
+	if opts.contextReady != nil {
+		if err := opts.contextReady(ctx, prCtx.PR, opts); err != nil {
+			spinner.StopWithError(err.Error())
+			return nil, prCtx.PR, fmt.Errorf("prepare posted review: %w", err)
+		}
+	}
 	spinner.SetMessage(fmt.Sprintf("Running %s review with %s reasoning...", opts.sizeClass, opts.reasoningEffort))
 	userPrompt := appendReviewExecutionPlan(commands.BuildPRPrompt(prCtx), opts)
 	reviewDef := commands.ReviewPRDef{
@@ -339,6 +395,7 @@ func runPRReviewWithOptions(ctx context.Context, prRef string, framework *onesho
 		VerificationTimeout:      opts.verificationTimeout,
 		ModelID:                  opts.modelID,
 		ReasoningEffort:          opts.reasoningEffort,
+		ReasoningMaxTokens:       opts.reasoningMaxTokens,
 		SnapshotPolicy: model.ReviewSnapshotPolicy{
 			Mode:           model.ReviewSnapshotHead,
 			ExpectedCommit: prCtx.PR.HeadSHA,

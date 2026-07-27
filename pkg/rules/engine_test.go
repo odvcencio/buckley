@@ -760,6 +760,7 @@ func TestEngine_EvalStrategy_ReviewPlan_AllSizes(t *testing.T) {
 		name             string
 		facts            ReviewPlanFacts
 		wantSize         string
+		wantReasoning    float64
 		wantIterations   float64
 		wantToolCalls    float64
 		wantVerification float64
@@ -769,37 +770,41 @@ func TestEngine_EvalStrategy_ReviewPlan_AllSizes(t *testing.T) {
 			name:             "focused change",
 			facts:            ReviewPlanFacts{FileCount: 4, DiffBytes: 12_000},
 			wantSize:         "focused",
-			wantIterations:   8,
-			wantToolCalls:    12,
+			wantReasoning:    2048,
+			wantIterations:   6,
+			wantToolCalls:    6,
 			wantVerification: 60,
-			wantReserve:      60,
+			wantReserve:      90,
 		},
 		{
 			name:             "feedback gets standard budget",
 			facts:            ReviewPlanFacts{FileCount: 4, DiffBytes: 12_000, HasFeedback: true},
 			wantSize:         "standard",
-			wantIterations:   11,
-			wantToolCalls:    18,
+			wantReasoning:    3072,
+			wantIterations:   8,
+			wantToolCalls:    8,
 			wantVerification: 75,
-			wantReserve:      75,
+			wantReserve:      105,
 		},
 		{
 			name:             "large change stays bounded",
 			facts:            ReviewPlanFacts{FileCount: 21, DiffBytes: 75_000},
 			wantSize:         "broad",
-			wantIterations:   14,
-			wantToolCalls:    24,
+			wantReasoning:    4096,
+			wantIterations:   8,
+			wantToolCalls:    8,
 			wantVerification: 90,
-			wantReserve:      90,
+			wantReserve:      120,
 		},
 		{
 			name:             "incomplete context stays bounded",
 			facts:            ReviewPlanFacts{FileCount: 2, DiffBytes: 8_000, ContextIncomplete: true},
 			wantSize:         "broad",
-			wantIterations:   14,
-			wantToolCalls:    24,
+			wantReasoning:    4096,
+			wantIterations:   8,
+			wantToolCalls:    8,
 			wantVerification: 90,
-			wantReserve:      90,
+			wantReserve:      120,
 		},
 	}
 
@@ -813,6 +818,7 @@ func TestEngine_EvalStrategy_ReviewPlan_AllSizes(t *testing.T) {
 				t.Fatalf("size_class = %v, want %s", got, tt.wantSize)
 			}
 			for key, want := range map[string]float64{
+				"reasoning_max_tokens":         tt.wantReasoning,
 				"max_iterations":               tt.wantIterations,
 				"max_tool_calls":               tt.wantToolCalls,
 				"verification_timeout_seconds": tt.wantVerification,

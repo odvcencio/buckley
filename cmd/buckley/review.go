@@ -352,6 +352,7 @@ func runProjectReviewWithPolicy(ctx context.Context, framework *oneshot.Framewor
 	plan := reviewExecutionPlan{
 		sizeClass:           "project",
 		reasoningEffort:     "high",
+		reasoningMaxTokens:  4096,
 		maxIterations:       8,
 		maxToolCalls:        8,
 		verificationTimeout: 90 * time.Second,
@@ -374,6 +375,7 @@ func runProjectReviewWithPolicy(ctx context.Context, framework *oneshot.Framewor
 		VerificationTimeout:      reviewPolicy.verificationTimeout,
 		ModelID:                  reviewPolicy.modelID,
 		ReasoningEffort:          reviewPolicy.reasoningEffort,
+		ReasoningMaxTokens:       reviewPolicy.reasoningMaxTokens,
 		SnapshotPolicy:           policy,
 		ReviewSnapshot:           snapshot,
 	})
@@ -463,6 +465,7 @@ func runBranchReviewWithPolicy(ctx context.Context, opts reviewCommandOptions, f
 		VerificationTimeout:      reviewPolicy.verificationTimeout,
 		ModelID:                  reviewPolicy.modelID,
 		ReasoningEffort:          reviewPolicy.reasoningEffort,
+		ReasoningMaxTokens:       reviewPolicy.reasoningMaxTokens,
 		SnapshotPolicy:           policy,
 		ReviewSnapshot:           snapshot,
 	})

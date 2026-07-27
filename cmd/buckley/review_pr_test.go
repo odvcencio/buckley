@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -8,6 +10,8 @@ import (
 	"time"
 
 	"m31labs.dev/buckley/pkg/config"
+	"m31labs.dev/buckley/pkg/gitwatcher"
+	"m31labs.dev/buckley/pkg/oneshot/commands"
 )
 
 func TestParseReviewPRCommandOptions(t *testing.T) {
@@ -170,5 +174,71 @@ func TestWritePRReviewOutputWritesFile(t *testing.T) {
 	}
 	if string(got) != "review body" {
 		t.Fatalf("output = %q, want review body", got)
+	}
+}
+
+func TestPostCompletedPRReviewRetriesWithoutAnotherModelRun(t *testing.T) {
+	originalPost := postCompletedBuckbotReviewFn
+	originalWait := waitCompletedBuckbotPostRetryFn
+	t.Cleanup(func() {
+		postCompletedBuckbotReviewFn = originalPost
+		waitCompletedBuckbotPostRetryFn = originalWait
+	})
+
+	var posts, waits int
+	postCompletedBuckbotReviewFn = func(ctx context.Context, event gitwatcher.PullRequestEvent, review string) error {
+		posts++
+		if event.HeadSHA != "head-sha" || review != "validated review" {
+			t.Fatalf("post input = %#v / %q", event, review)
+		}
+		deadline, ok := ctx.Deadline()
+		if !ok || time.Until(deadline) > completedBuckbotPostAttemptLimit {
+			t.Fatalf("post attempt deadline = %v, want at most %s", deadline, completedBuckbotPostAttemptLimit)
+		}
+		if posts == 1 {
+			return errors.New("GitHub secondary rate limit (HTTP 403)")
+		}
+		return nil
+	}
+	waitCompletedBuckbotPostRetryFn = func(_ context.Context, delay time.Duration) error {
+		waits++
+		if delay != time.Second {
+			t.Fatalf("retry delay = %s, want 1s", delay)
+		}
+		return nil
+	}
+
+	err := postCompletedPRReview(context.Background(), &commands.PRInfo{
+		Host:       "github.com",
+		Repository: "owner/repo",
+		Number:     42,
+		HeadSHA:    "head-sha",
+	}, "validated review")
+	if err != nil {
+		t.Fatalf("postCompletedPRReview() error = %v", err)
+	}
+	if posts != 2 || waits != 1 {
+		t.Fatalf("posts/waits = %d/%d, want 2/1", posts, waits)
+	}
+}
+
+func TestPostedReviewBudgetsStayBelowFiveMinutes(t *testing.T) {
+	const observedQwenReview = 4*time.Minute + 9*time.Second
+	if defaultReviewTimeout < observedQwenReview {
+		t.Fatalf("review budget = %s, want at least observed qwen run %s", defaultReviewTimeout, observedQwenReview)
+	}
+	if total := defaultReviewTimeout + completedBuckbotPostBudget; total >= 5*time.Minute {
+		t.Fatalf("review plus post budget = %s, want less than five minutes", total)
+	}
+	retryDelay := completedBuckbotPostRetryDelay + 2*completedBuckbotPostRetryDelay
+	attemptBudget := maxCompletedBuckbotPostAttempts*completedBuckbotPostAttemptLimit + retryDelay
+	if attemptBudget > completedBuckbotPostBudget {
+		t.Fatalf("post attempt schedule = %s, exceeds post budget %s", attemptBudget, completedBuckbotPostBudget)
+	}
+	if defaultReviewTimeout != 4*time.Minute+25*time.Second ||
+		completedBuckbotPostBudget != 25*time.Second ||
+		completedBuckbotPostAttemptLimit != 7*time.Second {
+		t.Fatalf("production budgets changed: review=%s post=%s attempt=%s",
+			defaultReviewTimeout, completedBuckbotPostBudget, completedBuckbotPostAttemptLimit)
 	}
 }

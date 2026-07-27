@@ -2,6 +2,7 @@ outcome ReviewPlan {
     action: string
     size_class: string
     reasoning_effort: string
+    reasoning_max_tokens: number
     max_iterations: number
     max_tool_calls: number
     verification_timeout_seconds: number
@@ -17,12 +18,13 @@ strategy review_plan returns ReviewPlan {
     } then BroadReview {
         action: "bound_review",
         size_class: "broad",
-        reasoning_effort: "high",
-        max_iterations: 14,
-        max_tool_calls: 24,
+        reasoning_effort: "medium",
+        reasoning_max_tokens: 4096,
+        max_iterations: 8,
+        max_tool_calls: 8,
         verification_timeout_seconds: 90,
-        exploration_timeout_seconds: 180,
-        synthesis_reserve_seconds: 90,
+        exploration_timeout_seconds: 105,
+        synthesis_reserve_seconds: 120,
     }
 
     when {
@@ -33,21 +35,23 @@ strategy review_plan returns ReviewPlan {
         action: "bound_review",
         size_class: "standard",
         reasoning_effort: "medium",
-        max_iterations: 11,
-        max_tool_calls: 18,
+        reasoning_max_tokens: 3072,
+        max_iterations: 8,
+        max_tool_calls: 8,
         verification_timeout_seconds: 75,
-        exploration_timeout_seconds: 165,
-        synthesis_reserve_seconds: 75,
+        exploration_timeout_seconds: 120,
+        synthesis_reserve_seconds: 105,
     }
 
     else FocusedReview {
         action: "bound_review",
         size_class: "focused",
         reasoning_effort: "low",
-        max_iterations: 8,
-        max_tool_calls: 12,
+        reasoning_max_tokens: 2048,
+        max_iterations: 6,
+        max_tool_calls: 6,
         verification_timeout_seconds: 60,
-        exploration_timeout_seconds: 120,
-        synthesis_reserve_seconds: 60,
+        exploration_timeout_seconds: 90,
+        synthesis_reserve_seconds: 90,
     }
 }

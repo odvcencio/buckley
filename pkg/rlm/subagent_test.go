@@ -114,6 +114,32 @@ func TestFinalSynthesisMessagesPreservesHistoryAndRequiresAnswer(t *testing.T) {
 	}
 }
 
+func TestAssistantToolCallMessagePreservesReasoningContinuity(t *testing.T) {
+	source := model.Message{
+		Content:   "inspect the selected files",
+		ToolCalls: []model.ToolCall{{ID: "call-1"}},
+		Reasoning: "the supplied diff leaves one invariant unclear",
+		ReasoningDetails: []model.ReasoningDetail{{
+			Type: "reasoning.text",
+			Text: "inspect the exact invariant before the verdict",
+		}},
+	}
+
+	got := assistantToolCallMessage(source)
+	if got.Role != "assistant" || got.Reasoning != source.Reasoning {
+		t.Fatalf("assistant tool message = %#v", got)
+	}
+	if len(got.ReasoningDetails) != 1 || got.ReasoningDetails[0].Text != source.ReasoningDetails[0].Text {
+		t.Fatalf("reasoning details = %#v", got.ReasoningDetails)
+	}
+
+	source.ToolCalls[0].ID = "changed"
+	source.ReasoningDetails[0].Text = "changed"
+	if got.ToolCalls[0].ID != "call-1" || got.ReasoningDetails[0].Text == "changed" {
+		t.Fatal("assistant tool message shares mutable slices with the provider response")
+	}
+}
+
 func TestSubAgentDefaultPrompt(t *testing.T) {
 	// Verify the default prompt is set when empty
 	if defaultSubAgentPrompt == "" {
@@ -132,6 +158,45 @@ func TestSubAgentDefaultPrompt(t *testing.T) {
 		if !containsString(defaultSubAgentPrompt, kw) {
 			t.Errorf("default prompt should contain %q", kw)
 		}
+	}
+}
+
+func TestNewSubAgentBoundsReasoningTokens(t *testing.T) {
+	agent, err := NewSubAgent(SubAgentConfig{
+		ID:                 "bounded-reasoning",
+		Model:              "test-model",
+		Reasoning:          "medium",
+		ReasoningMaxTokens: 4096,
+	}, SubAgentDeps{
+		Models:   &model.Manager{},
+		Registry: tool.NewEmptyRegistry(),
+	})
+	if err != nil {
+		t.Fatalf("NewSubAgent() error = %v", err)
+	}
+	if agent.reasoning != "medium" || agent.reasoningMaxTokens != 4096 {
+		t.Fatalf("reasoning policy = %q/%d", agent.reasoning, agent.reasoningMaxTokens)
+	}
+}
+
+func TestSubAgentReasoningConfigUsesOneProviderControl(t *testing.T) {
+	api := subAgentReasoningConfig("openrouter", "medium", 4096)
+	if api == nil || api.Effort != "" || api.MaxTokens != 4096 {
+		t.Fatalf("API reasoning config = %#v", api)
+	}
+
+	codex := subAgentReasoningConfig("codex", "xhigh", 2048)
+	if codex == nil || codex.Effort != "xhigh" || codex.MaxTokens != 0 {
+		t.Fatalf("Codex reasoning config = %#v", codex)
+	}
+
+	effortOnly := subAgentReasoningConfig("openrouter", "low", 0)
+	if effortOnly == nil || effortOnly.Effort != "low" || effortOnly.MaxTokens != 0 {
+		t.Fatalf("effort-only reasoning config = %#v", effortOnly)
+	}
+
+	if got := subAgentReasoningConfig("openrouter", "", 0); got != nil {
+		t.Fatalf("empty reasoning config = %#v, want nil", got)
 	}
 }
 
