@@ -52,10 +52,14 @@ type PRContext struct {
 	CIProvenance            string
 	CIRevision              string
 	Files                   []string
-	AgentsMD                string
-	CheckoutSHA             string
-	ContextStatus           []PRContextStatus
-	target                  prReference
+	// LowSignalFiles maps a changed path to the reason its diff content was
+	// not shown at full fidelity (binary, a generated/build path, or
+	// minified). See BranchContext.LowSignalFiles for the same contract.
+	LowSignalFiles map[string]diffsignal.Reason
+	AgentsMD       string
+	CheckoutSHA    string
+	ContextStatus  []PRContextStatus
+	target         prReference
 }
 
 const (
@@ -124,6 +128,7 @@ type prDiff struct {
 	Text          string
 	Truncated     bool
 	OriginalBytes int
+	LowSignal     map[string]diffsignal.Reason
 }
 
 type prReference struct {
@@ -190,6 +195,7 @@ func assemblePRContextWithOptions(prRef string, deps prContextDependencies, opts
 		return nil, nil, fmt.Errorf("failed to get PR diff: %w", err)
 	}
 	prCtx.Diff = diff.Text
+	prCtx.LowSignalFiles = diff.LowSignal
 	if diff.Truncated {
 		audit.AddTruncated("PR diff", reviewEstimateTokens(diff.Text), estimatePRBytesTokens(diff.OriginalBytes))
 		prCtx.addStatus("PR diff", "truncated", fmt.Sprintf("%d original bytes; review coverage is partial", diff.OriginalBytes), true)
@@ -1211,6 +1217,7 @@ func getPRDiffWithBudget(run prCommandRunner, target prReference, maxBytes int) 
 		Text:          diff,
 		Truncated:     res.Truncated,
 		OriginalBytes: len(output),
+		LowSignal:     diffsignal.LowSignalPaths(string(output)),
 	}, nil
 }
 

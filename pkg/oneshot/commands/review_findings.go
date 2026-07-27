@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 
+	"m31labs.dev/buckley/pkg/diffsignal"
 	"m31labs.dev/buckley/pkg/oneshot"
 )
 
@@ -103,14 +104,19 @@ const (
 
 // ParsedReview contains the structured review data.
 type ParsedReview struct {
-	Grade                      Grade
-	Summary                    string
-	BuildStatus                string
-	TestStatus                 string
-	BuildVerification          VerificationState
-	TestVerification           VerificationState
-	Coverage                   string
-	CoverageEntries            []CoverageEntry
+	Grade             Grade
+	Summary           string
+	BuildStatus       string
+	TestStatus        string
+	BuildVerification VerificationState
+	TestVerification  VerificationState
+	Coverage          string
+	CoverageEntries   []CoverageEntry
+	// GeneratedEntries are Coverage ledger entries under the Generated
+	// heading: a lightweight, still machine-checked acknowledgement that a
+	// non-reviewable changed file (binary, generated, or minified) was
+	// noticed, without demanding hunk-level review evidence for it.
+	GeneratedEntries           []CoverageEntry
 	FeedbackDisposition        FeedbackDisposition
 	FeedbackDispositionDetails string
 	FeedbackEntries            []FeedbackEntry
@@ -143,7 +149,7 @@ func ParseReview(review string) *ParsedReview {
 	parsed.BuildVerification = parseVerificationState(parsed.BuildStatus)
 	parsed.TestVerification = parseVerificationState(parsed.TestStatus)
 	parsed.Coverage = extractSection(review, "Coverage")
-	parsed.CoverageEntries, parsed.FeedbackDisposition, parsed.FeedbackDispositionDetails, parsed.FeedbackEntries = parseCoverageLedger(parsed.Coverage)
+	parsed.CoverageEntries, parsed.GeneratedEntries, parsed.FeedbackDisposition, parsed.FeedbackDispositionDetails, parsed.FeedbackEntries = parseCoverageLedger(parsed.Coverage)
 	parsed.InvariantAudit = extractSection(review, "Invariant Audit")
 	parsed.Falsification = extractSection(review, "Falsification")
 	parsed.FalsificationConclusion = parseFalsificationConclusion(parsed.Falsification)
@@ -159,7 +165,12 @@ func ParseReview(review string) *ParsedReview {
 // ReviewValidationOptions describes evidence that a structured review must
 // account for before the CLI can present it as a valid result.
 type ReviewValidationOptions struct {
-	ChangedFiles                []string
+	ChangedFiles []string
+	// LowSignalFiles maps a changed path to the reason its diff content was
+	// not shown at full fidelity (binary, a generated/build path, or
+	// minified). These paths are validated against the Generated ledger
+	// instead of the File ledger; see validateCoverageLedger.
+	LowSignalFiles              map[string]diffsignal.Reason
 	ContextIncomplete           bool
 	CIStatus                    string
 	CIProvenance                string
@@ -219,7 +230,7 @@ func ValidateParsedReview(parsed *ParsedReview, opts ReviewValidationOptions) er
 		return fmt.Errorf("verdict decision is inconsistent with the parsed approval state")
 	}
 
-	if err := validateCoverageLedger(parsed.CoverageEntries, opts.ChangedFiles); err != nil {
+	if err := validateCoverageLedger(parsed.CoverageEntries, parsed.GeneratedEntries, opts.ChangedFiles, opts.LowSignalFiles); err != nil {
 		return err
 	}
 	if opts.RequiresFeedbackDisposition && len(opts.RequiredFeedbackIDs) == 0 {
@@ -367,8 +378,9 @@ func parseFalsificationConclusion(section string) FalsificationConclusion {
 	return FalsificationConclusion(strings.ToUpper(matches[1]))
 }
 
-func parseCoverageLedger(section string) ([]CoverageEntry, FeedbackDisposition, string, []FeedbackEntry) {
+func parseCoverageLedger(section string) ([]CoverageEntry, []CoverageEntry, FeedbackDisposition, string, []FeedbackEntry) {
 	var entries []CoverageEntry
+	var generatedEntries []CoverageEntry
 	var disposition FeedbackDisposition
 	var dispositionDetails string
 	var feedbackEntries []FeedbackEntry
@@ -378,23 +390,24 @@ func parseCoverageLedger(section string) ([]CoverageEntry, FeedbackDisposition, 
 		normalized := strings.TrimSpace(strings.TrimPrefix(line, "-"))
 		lower := strings.ToLower(normalized)
 		const filePrefix = "**file**:"
+		const generatedPrefix = "**generated**:"
 		const feedbackPrefix = "**feedback disposition**:"
 		const feedbackEntryPrefix = "**feedback**:"
 
 		switch {
 		case strings.HasPrefix(lower, filePrefix):
-			rest := strings.TrimSpace(normalized[len(filePrefix):])
-			if !strings.HasPrefix(rest, "`") {
+			rawPath, evidence, ok := parseCoverageFileEntry(normalized[len(filePrefix):])
+			if !ok {
 				continue
 			}
-			closing := strings.Index(rest[1:], "`")
-			if closing < 0 {
-				continue
-			}
-			closing++
-			rawPath := rest[1:closing]
-			evidence := trimCoverageSeparator(rest[closing+1:])
 			entries = append(entries, CoverageEntry{Path: rawPath, Evidence: evidence})
+
+		case strings.HasPrefix(lower, generatedPrefix):
+			rawPath, evidence, ok := parseCoverageFileEntry(normalized[len(generatedPrefix):])
+			if !ok {
+				continue
+			}
+			generatedEntries = append(generatedEntries, CoverageEntry{Path: rawPath, Evidence: evidence})
 
 		case strings.HasPrefix(lower, feedbackPrefix):
 			rest := strings.TrimSpace(normalized[len(feedbackPrefix):])
@@ -412,7 +425,24 @@ func parseCoverageLedger(section string) ([]CoverageEntry, FeedbackDisposition, 
 		}
 	}
 
-	return entries, disposition, dispositionDetails, feedbackEntries
+	return entries, generatedEntries, disposition, dispositionDetails, feedbackEntries
+}
+
+// parseCoverageFileEntry parses the backtick-path-then-evidence shape shared
+// by both the File and Generated coverage ledger lines.
+func parseCoverageFileEntry(value string) (rawPath, evidence string, ok bool) {
+	rest := strings.TrimSpace(value)
+	if !strings.HasPrefix(rest, "`") {
+		return "", "", false
+	}
+	closing := strings.Index(rest[1:], "`")
+	if closing < 0 {
+		return "", "", false
+	}
+	closing++
+	rawPath = rest[1:closing]
+	evidence = trimCoverageSeparator(rest[closing+1:])
+	return rawPath, evidence, true
 }
 
 func parseFeedbackEntry(value string) (FeedbackEntry, bool) {
@@ -487,7 +517,59 @@ func trimCoverageSeparator(value string) string {
 	return value
 }
 
-func validateCoverageLedger(entries []CoverageEntry, changedFiles []string) error {
+// validateCoverageLedger enforces the exact-match invariant against two
+// ledgers instead of one. changedFiles that classify as low-signal (binary,
+// a generated/build path, or minified — see diffsignal) must appear exactly
+// once in the Generated ledger with a short acknowledgement; every other
+// changed file must still appear exactly once in the File ledger with real
+// review evidence. Splitting the requirement this way keeps every changed
+// file accounted for in a machine-checked ledger without demanding
+// hunk-level evidence a model cannot honestly produce for a minified bundle.
+func validateCoverageLedger(entries, generatedEntries []CoverageEntry, changedFiles []string, lowSignalFiles map[string]diffsignal.Reason) error {
+	reviewable, generated := partitionCoverageChangedFiles(changedFiles, lowSignalFiles)
+
+	var problems []string
+	if problem := ledgerMismatch(entries, reviewable); problem != "" {
+		problems = append(problems, "File ledger: "+problem)
+	}
+	if problem := ledgerMismatch(generatedEntries, generated); problem != "" {
+		problems = append(problems, "Generated ledger: "+problem)
+	}
+	if len(problems) > 0 {
+		return fmt.Errorf("coverage ledger does not exactly match changed files: %s", strings.Join(problems, "; "))
+	}
+	return nil
+}
+
+// partitionCoverageChangedFiles splits changedFiles into the paths that
+// require full File-ledger review evidence and the paths already classified
+// as low-signal, which require only a Generated-ledger acknowledgement.
+func partitionCoverageChangedFiles(changedFiles []string, lowSignalFiles map[string]diffsignal.Reason) (reviewable, generated []string) {
+	lowSignal := make(map[string]struct{}, len(lowSignalFiles))
+	for rawPath := range lowSignalFiles {
+		if normalized := normalizeCoveragePath(rawPath); normalized != "" {
+			lowSignal[normalized] = struct{}{}
+		}
+	}
+	for _, changedFile := range changedFiles {
+		normalized := normalizeCoveragePath(changedFile)
+		if normalized == "" {
+			continue
+		}
+		if _, ok := lowSignal[normalized]; ok {
+			generated = append(generated, changedFile)
+			continue
+		}
+		reviewable = append(reviewable, changedFile)
+	}
+	return reviewable, generated
+}
+
+// ledgerMismatch reports the exact-match problems between entries and the
+// expected changed-file paths, joined into one string, or "" when they match
+// exactly. Every expected path must appear exactly once with non-empty
+// evidence text, and no other path may be listed.
+func ledgerMismatch(entries []CoverageEntry, changedFiles []string) string {
 	expected := make(map[string]struct{}, len(changedFiles))
 	for _, changedFile := range changedFiles {
 		if normalized := normalizeCoveragePath(changedFile); normalized != "" {
@@ -541,10 +623,7 @@ func validateCoverageLedger(entries []CoverageEntry, changedFiles []string) erro
 	if len(missingEvidence) > 0 {
 		problems = append(problems, "missing evidence for "+strings.Join(missingEvidence, ", "))
 	}
-	if len(problems) > 0 {
-		return fmt.Errorf("coverage ledger does not exactly match changed files: %s", strings.Join(problems, "; "))
-	}
-	return nil
+	return strings.Join(problems, "; ")
 }
 
 func validateFeedbackLedger(entries []FeedbackEntry, requiredIDs []string) error {

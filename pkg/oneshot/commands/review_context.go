@@ -38,6 +38,13 @@ type BranchContext struct {
 	Stats             DiffStats
 	Diff              string
 	Unstaged          string
+	// LowSignalFiles maps a changed path to the reason its diff content was
+	// not shown at full fidelity (binary, a generated/build path, or
+	// minified). Review coverage validation uses it to require a lightweight
+	// acknowledgement instead of hunk-level evidence for these paths. Paths
+	// demoted only by the byte budget (diffsignal.ReasonOverBudget) are
+	// excluded; that content is reviewable, it just was not sent this call.
+	LowSignalFiles    map[string]diffsignal.Reason
 	DiffTruncated     bool
 	UnstagedTruncated bool
 	ContextIncomplete bool
@@ -193,6 +200,7 @@ func AssembleBranchContext(opts BranchContextOptions) (*BranchContext, *transpar
 		diffRes := diffsignal.Prioritize(diff, opts.MaxDiffBytes)
 		ctx.Diff = diffRes.Context
 		ctx.DiffTruncated = rawTruncated || diffRes.Truncated
+		ctx.mergeLowSignalFiles(diff)
 		diffTokens := reviewEstimateTokens(ctx.Diff)
 		if ctx.DiffTruncated {
 			audit.AddTruncated("local changes", diffTokens, opts.MaxDiffBytes/4)
@@ -222,6 +230,7 @@ func AssembleBranchContext(opts BranchContextOptions) (*BranchContext, *transpar
 		diffRes := diffsignal.Prioritize(diff, opts.MaxDiffBytes)
 		ctx.Diff = diffRes.Context
 		ctx.DiffTruncated = rawTruncated || diffRes.Truncated
+		ctx.mergeLowSignalFiles(diff)
 		diffTokens := reviewEstimateTokens(ctx.Diff)
 		if ctx.DiffTruncated {
 			audit.AddTruncated("git diff", diffTokens, opts.MaxDiffBytes/4)
@@ -284,6 +293,7 @@ func AssembleBranchContext(opts BranchContextOptions) (*BranchContext, *transpar
 				unstagedRes := diffsignal.Prioritize(localChanges, unstagedBudget)
 				ctx.Unstaged = unstagedRes.Context
 				ctx.UnstagedTruncated = localRawTrunc || unstagedRes.Truncated
+				ctx.mergeLowSignalFiles(localChanges)
 				if ctx.UnstagedTruncated {
 					ctx.Unstaged += truncMarker
 					audit.AddTruncated("worktree changes", reviewEstimateTokens(ctx.Unstaged), opts.MaxDiffBytes/4)
@@ -297,6 +307,18 @@ func AssembleBranchContext(opts BranchContextOptions) (*BranchContext, *transpar
 	enrichBranchReviewContext(opts, ctx, audit)
 
 	return ctx, audit, nil
+}
+
+// mergeLowSignalFiles classifies raw (a complete unified diff, not yet
+// budget-trimmed) and records every low-signal path it finds. It is safe to
+// call more than once per context; later calls only add entries.
+func (ctx *BranchContext) mergeLowSignalFiles(raw string) {
+	for path, reason := range diffsignal.LowSignalPaths(raw) {
+		if ctx.LowSignalFiles == nil {
+			ctx.LowSignalFiles = make(map[string]diffsignal.Reason)
+		}
+		ctx.LowSignalFiles[path] = reason
+	}
 }
 
 func enrichBranchReviewContext(opts BranchContextOptions, ctx *BranchContext, audit *transparency.ContextAudit) {

@@ -103,6 +103,30 @@ type Result struct {
 	LowSignal int
 }
 
+// LowSignalPaths classifies raw (a complete unified diff) and returns every
+// changed path whose content was reduced to a one-line summary, mapped to the
+// reason. Paths demoted only because the total diff exceeded its byte budget
+// (ReasonOverBudget) are excluded: that content is reviewable, it simply was
+// not sent in this particular call, which is a different failure mode from
+// "not reviewable source" and must not be conflated with it by a caller.
+func LowSignalPaths(raw string) map[string]Reason {
+	files := Split(raw)
+	if len(files) == 0 {
+		return nil
+	}
+	paths := make(map[string]Reason, len(files))
+	for _, f := range files {
+		if f.Path == "" || !f.LowSignal() || f.Reason == ReasonOverBudget {
+			continue
+		}
+		paths[f.Path] = f.Reason
+	}
+	if len(paths) == 0 {
+		return nil
+	}
+	return paths
+}
+
 // Split parses a unified diff into per-file segments and classifies each.
 // Concatenating the returned Segments reproduces the input from the first
 // "diff --git" boundary onward.

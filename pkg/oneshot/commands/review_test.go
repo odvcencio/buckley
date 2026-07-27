@@ -418,7 +418,7 @@ func TestApprovedAPIReviewRequiresSuccessfulVerificationToolEvidence(t *testing.
 	result := &ReviewRLMResult{Parsed: &ParsedReview{Approved: true}}
 	execution := &oneshot.RLMResult{ProviderID: "openai"}
 	changedFiles := []string{"pkg/oneshot/commands/review.go"}
-	assert.ErrorContains(t, validateReviewExecutionEvidence(result, execution, changedFiles), "does not cover")
+	assert.ErrorContains(t, validateReviewExecutionEvidence(result, execution, changedFiles, nil), "does not cover")
 
 	execution.ToolCalls = []rlm.SubAgentToolCall{
 		{Name: "run_verification", Success: true, Data: map[string]any{
@@ -428,23 +428,23 @@ func TestApprovedAPIReviewRequiresSuccessfulVerificationToolEvidence(t *testing.
 			"kind": "test", "language": "go", "path": "pkg/oneshot/commands", "pattern": "", "status": "FAIL", "exit_code": 1,
 		}},
 	}
-	assert.ErrorContains(t, validateReviewExecutionEvidence(result, execution, changedFiles), "does not cover")
+	assert.ErrorContains(t, validateReviewExecutionEvidence(result, execution, changedFiles, nil), "does not cover")
 
 	execution.ToolCalls[1].Success = true
 	execution.ToolCalls[1].Data["status"] = "PASS"
 	execution.ToolCalls[1].Data["exit_code"] = 0
-	assert.NoError(t, validateReviewExecutionEvidence(result, execution, changedFiles))
+	assert.NoError(t, validateReviewExecutionEvidence(result, execution, changedFiles, nil))
 
 	execution.ToolCalls[1].Data["pattern"] = "NoSuchTest"
-	assert.ErrorContains(t, validateReviewExecutionEvidence(result, execution, changedFiles), "does not cover")
+	assert.ErrorContains(t, validateReviewExecutionEvidence(result, execution, changedFiles, nil), "does not cover")
 	execution.ToolCalls[1].Data["pattern"] = "TestFocused"
 	execution.ToolCalls[1].Data["stdout"] = "=== RUN   TestFocused\n--- PASS: TestFocused (0.00s)\nPASS"
-	assert.NoError(t, validateReviewExecutionEvidence(result, execution, changedFiles))
+	assert.NoError(t, validateReviewExecutionEvidence(result, execution, changedFiles, nil))
 	execution.ToolCalls[1].Data["pattern"] = ""
 
 	execution.ProviderID = "codex"
 	execution.ToolCalls = nil
-	assert.ErrorContains(t, validateReviewExecutionEvidence(result, execution, changedFiles), "does not cover")
+	assert.ErrorContains(t, validateReviewExecutionEvidence(result, execution, changedFiles, nil), "does not cover")
 
 	exitZero := 0
 	execution.ExecutionEvidence = []model.CommandExecutionEvidence{
@@ -464,11 +464,11 @@ func TestApprovedAPIReviewRequiresSuccessfulVerificationToolEvidence(t *testing.
 			RepositoryRoot:   "/snapshot",
 		},
 	}
-	assert.NoError(t, validateReviewExecutionEvidence(result, execution, changedFiles))
+	assert.NoError(t, validateReviewExecutionEvidence(result, execution, changedFiles, nil))
 
 	result.Parsed.Approved = false
 	execution.ProviderID = "openai"
-	assert.NoError(t, validateReviewExecutionEvidence(result, execution, changedFiles))
+	assert.NoError(t, validateReviewExecutionEvidence(result, execution, changedFiles, nil))
 }
 
 func TestReviewVerificationTargetsListsChangedSourcePackages(t *testing.T) {
@@ -918,6 +918,83 @@ func TestReviewCoverageLedgerUsesNormalizedExactPaths(t *testing.T) {
 	err = def.ValidateResult(result)
 	assert.ErrorContains(t, err, "missing pkg/ratchet.go")
 	assert.ErrorContains(t, err, "unexpected pkg/ratchet.go.bak")
+}
+
+// TestReviewCoverageLedgerWithoutClassificationStillDemandsFullEvidenceForGeneratedFiles
+// reproduces the reported failure directly: a real model cannot honestly
+// produce hunk-level review evidence for a rebuilt minified bundle, so
+// without low-signal classification the ledger still demands a File entry
+// for it and validation fails, exactly as buckley did in production.
+func TestReviewCoverageLedgerWithoutClassificationStillDemandsFullEvidenceForGeneratedFiles(t *testing.T) {
+	def := ReviewPRDef{
+		ChangedFiles: []string{"cmd/bootstrap/main.go", "client/js/bootstrap-lite.js"},
+		CIStatus:     "passing (1/1)",
+		CIProvenance: prCISourceHead,
+	}
+	coverage := "- **File**: `cmd/bootstrap/main.go` — reviewed the changed bootstrap wiring.\n" +
+		"- **Feedback disposition**: `NONE_SUPPLIED` — no prior feedback was supplied.\n" +
+		"- **Verification**: focused test passed."
+	result, err := def.ParseResult(completeReviewWithCoverage(coverage))
+	assert.NoError(t, err)
+	assert.ErrorContains(t, def.ValidateResult(result), "missing client/js/bootstrap-lite.js")
+}
+
+// TestReviewCoverageLedgerAcceptsGeneratedAcknowledgementForLowSignalFiles is
+// the Gap 1 regression test: given the diff-derived classification of a
+// minified bundle and its .br/.gz/.map siblings as low-signal, the review
+// may acknowledge them under a Generated ledger entry instead of fabricating
+// hunk-level File evidence, and still validate cleanly.
+func TestReviewCoverageLedgerAcceptsGeneratedAcknowledgementForLowSignalFiles(t *testing.T) {
+	changedFiles := []string{
+		"cmd/bootstrap/main.go",
+		"client/js/bootstrap-lite.js",
+		"client/js/bootstrap-lite.js.br",
+		"client/js/bootstrap-lite.js.gz",
+		"client/js/bootstrap-lite.js.map",
+	}
+	lowSignal := map[string]diffsignal.Reason{
+		"client/js/bootstrap-lite.js":     diffsignal.ReasonMinified,
+		"client/js/bootstrap-lite.js.br":  diffsignal.ReasonGeneratedPath,
+		"client/js/bootstrap-lite.js.gz":  diffsignal.ReasonGeneratedPath,
+		"client/js/bootstrap-lite.js.map": diffsignal.ReasonGeneratedPath,
+	}
+	def := ReviewPRDef{
+		ChangedFiles:   changedFiles,
+		LowSignalFiles: lowSignal,
+		CIStatus:       "passing (1/1)",
+		CIProvenance:   prCISourceHead,
+	}
+	coverage := "- **File**: `cmd/bootstrap/main.go` — reviewed the changed bootstrap wiring and its paired test.\n" +
+		"- **Generated**: `client/js/bootstrap-lite.js` — rebuilt minified bundle, not independently reviewed.\n" +
+		"- **Generated**: `client/js/bootstrap-lite.js.br` — regenerated compressed sibling.\n" +
+		"- **Generated**: `client/js/bootstrap-lite.js.gz` — regenerated compressed sibling.\n" +
+		"- **Generated**: `client/js/bootstrap-lite.js.map` — regenerated source map.\n" +
+		"- **Feedback disposition**: `NONE_SUPPLIED` — no prior feedback was supplied.\n" +
+		"- **Verification**: focused Go build and test passed; the bundle comes from the standard build step."
+	result, err := def.ParseResult(completeReviewWithCoverage(coverage))
+	assert.NoError(t, err)
+	assert.NoError(t, def.ValidateResult(result))
+}
+
+// TestReviewCoverageLedgerRejectsMissingGeneratedAcknowledgement proves the
+// classification never lets a changed file disappear from the review
+// entirely: even once client/js/bootstrap-lite.js is classified low-signal,
+// omitting its Generated ledger entry is still a validation failure.
+func TestReviewCoverageLedgerRejectsMissingGeneratedAcknowledgement(t *testing.T) {
+	def := ReviewPRDef{
+		ChangedFiles:   []string{"cmd/bootstrap/main.go", "client/js/bootstrap-lite.js"},
+		LowSignalFiles: map[string]diffsignal.Reason{"client/js/bootstrap-lite.js": diffsignal.ReasonMinified},
+		CIStatus:       "passing (1/1)",
+		CIProvenance:   prCISourceHead,
+	}
+	coverage := "- **File**: `cmd/bootstrap/main.go` — reviewed the changed bootstrap wiring.\n" +
+		"- **Feedback disposition**: `NONE_SUPPLIED` — no prior feedback was supplied.\n" +
+		"- **Verification**: focused test passed."
+	result, err := def.ParseResult(completeReviewWithCoverage(coverage))
+	assert.NoError(t, err)
+	err = def.ValidateResult(result)
+	assert.ErrorContains(t, err, "Generated ledger")
+	assert.ErrorContains(t, err, "missing client/js/bootstrap-lite.js")
 }
 
 func TestReviewCoverageLedgerRequiresExplicitFeedbackDisposition(t *testing.T) {
@@ -1636,6 +1713,48 @@ func TestAssembleBranchContextPinsAndRevalidatesImmutableIdentity(t *testing.T) 
 	gitInCmd(t, dir, "commit", "-m", "move head")
 	if err := RevalidateBranchContext(ctx); err == nil || !strings.Contains(err.Error(), "review HEAD moved") {
 		t.Fatalf("HEAD movement revalidation error = %v", err)
+	}
+}
+
+// TestAssembleBranchContextClassifiesLowSignalFiles exercises the real
+// wiring end to end: a branch review scope diff containing both a
+// hand-written source change and a rebuilt minified bundle must populate
+// ctx.LowSignalFiles for the bundle only, not the source file.
+func TestAssembleBranchContextClassifiesLowSignalFiles(t *testing.T) {
+	dir := t.TempDir()
+	gitInCmd(t, dir, "init", "-q")
+	if err := os.WriteFile(filepath.Join(dir, "server.go"), []byte("package p\n\nfunc handler() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "bundle.js"), []byte("(()=>{})();\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitInCmd(t, dir, "add", ".")
+	gitInCmd(t, dir, "commit", "-m", "base")
+
+	if err := os.WriteFile(filepath.Join(dir, "server.go"), []byte("package p\n\nfunc handler() { /* retry */ }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	minified := "var a=1;" + strings.Repeat("b", 3_000)
+	if err := os.WriteFile(filepath.Join(dir, "bundle.js"), []byte(minified+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitInCmd(t, dir, "add", ".")
+	t.Chdir(dir)
+
+	ctx, _, err := AssembleBranchContext(BranchContextOptions{
+		MaxDiffBytes:    20_000,
+		IncludeUnstaged: true,
+		Scope:           ReviewScopeChanges,
+	})
+	if err != nil {
+		t.Fatalf("AssembleBranchContext: %v", err)
+	}
+	if _, ok := ctx.LowSignalFiles["bundle.js"]; !ok {
+		t.Fatalf("LowSignalFiles = %#v, want bundle.js classified", ctx.LowSignalFiles)
+	}
+	if _, ok := ctx.LowSignalFiles["server.go"]; ok {
+		t.Fatalf("LowSignalFiles = %#v, want server.go left unclassified", ctx.LowSignalFiles)
 	}
 }
 

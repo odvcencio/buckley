@@ -149,7 +149,7 @@ func (e *Executor) Verify(parent context.Context, request Request) Result {
 		return result
 	}
 	result.Language = language
-	plan, err := verificationPlan(request.Kind, language, request.Pattern, workDir)
+	plan, err := verificationPlan(request.Kind, language, request.Pattern, root, workDir)
 	if err != nil {
 		result.Error = err.Error()
 		return result
@@ -321,7 +321,7 @@ type plan struct {
 	args    []string
 }
 
-func verificationPlan(kind Kind, language Language, pattern, workDir string) (plan, error) {
+func verificationPlan(kind Kind, language Language, pattern, root, workDir string) (plan, error) {
 	if kind != KindBuild && kind != KindTest && kind != KindCheck {
 		return plan{}, fmt.Errorf("verification kind must be build, test, or check")
 	}
@@ -373,6 +373,19 @@ func verificationPlan(kind Kind, language Language, pattern, workDir string) (pl
 			return plan{"python3", append(args, ".")}, nil
 		}
 	case LanguageNode:
+		return nodeVerificationPlan(kind, pattern, root, workDir)
+	}
+	return plan{}, fmt.Errorf("verification language %q is unsupported", language)
+}
+
+// nodeVerificationPlan builds the Node verification command. A package.json
+// in workDir keeps the existing npm-script behavior. Projects that run
+// JavaScript tests without npm (no package.json anywhere) fall back to a
+// Makefile target discovered by walking from workDir up to root, matching
+// how resolveLanguage already treats a manifest file as the toolchain
+// signal for every other language.
+func nodeVerificationPlan(kind Kind, pattern, root, workDir string) (plan, error) {
+	if info, statErr := os.Stat(filepath.Join(workDir, "package.json")); statErr == nil && !info.IsDir() {
 		script, err := nodeScriptForKind(kind, workDir)
 		if err != nil {
 			return plan{}, err
@@ -383,7 +396,109 @@ func verificationPlan(kind Kind, language Language, pattern, workDir string) (pl
 		}
 		return plan{"npm", args}, nil
 	}
-	return plan{}, fmt.Errorf("verification language %q is unsupported", language)
+
+	makeDir, target, findErr := findMakeTarget(kind, root, workDir)
+	if findErr != nil {
+		return plan{}, fmt.Errorf("no package.json in %q and no matching Makefile %s target between %q and %q", workDir, kind, workDir, root)
+	}
+	if pattern != "" {
+		return plan{}, fmt.Errorf("verification pattern is not supported for Makefile-driven node %s target %q", kind, target)
+	}
+	relToMake, relErr := filepath.Rel(workDir, makeDir)
+	if relErr != nil {
+		return plan{}, fmt.Errorf("resolve Makefile directory: %w", relErr)
+	}
+	return plan{"make", []string{"-C", filepath.ToSlash(relToMake), target}}, nil
+}
+
+// makeTargetPattern matches a Makefile rule's target name(s): a bare word at
+// the start of a line, immediately followed by a colon that is not part of a
+// variable assignment (":=", "::="). Recipe lines (tab-indented) and comments
+// never match because the target must start at column zero with a word
+// character.
+var makeTargetPattern = regexp.MustCompile(`(?m)^([A-Za-z0-9][A-Za-z0-9_./-]*)\s*::?(?:\s|$)`)
+
+// findMakeTarget walks from workDir up to (and including) root looking for a
+// Makefile or makefile that declares a target matching kind for the node
+// toolchain (for example "test-js" for KindTest). It returns the directory
+// that contains the matching Makefile and the exact target name.
+func findMakeTarget(kind Kind, root, workDir string) (dir, target string, err error) {
+	root = filepath.Clean(root)
+	dir = filepath.Clean(workDir)
+	for {
+		if name := makeTargetInDir(kind, dir); name != "" {
+			return dir, name, nil
+		}
+		if dir == root {
+			return "", "", fmt.Errorf("no Makefile node %s target found between %q and %q", kind, workDir, root)
+		}
+		dir = filepath.Dir(dir)
+	}
+}
+
+func makeTargetInDir(kind Kind, dir string) string {
+	for _, name := range []string{"Makefile", "makefile"} {
+		content, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil {
+			continue
+		}
+		if target := selectMakeTarget(kind, string(content)); target != "" {
+			return target
+		}
+	}
+	return ""
+}
+
+// selectMakeTarget picks the Makefile target that represents kind for the
+// node toolchain. It prefers the conventional "<verb>-js" / "js-<verb>"
+// spellings, then falls back to any target whose name contains both the
+// verb and "js" so unconventional but clearly-labeled targets still work.
+func selectMakeTarget(kind Kind, content string) string {
+	var verb string
+	switch kind {
+	case KindBuild:
+		verb = "build"
+	case KindTest:
+		verb = "test"
+	case KindCheck:
+		verb = "check"
+	default:
+		return ""
+	}
+
+	targets := makeTargetNames(content)
+	for _, candidate := range []string{verb + "-js", "js-" + verb, verb + "_js", "js_" + verb} {
+		for _, name := range targets {
+			if strings.EqualFold(name, candidate) {
+				return name
+			}
+		}
+	}
+	for _, name := range targets {
+		lower := strings.ToLower(name)
+		if strings.Contains(lower, verb) && strings.Contains(lower, "js") {
+			return name
+		}
+	}
+	return ""
+}
+
+func makeTargetNames(content string) []string {
+	matches := makeTargetPattern.FindAllStringSubmatch(content, -1)
+	if len(matches) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(matches))
+	names := make([]string, 0, len(matches))
+	for _, match := range matches {
+		name := match[1]
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		names = append(names, name)
+	}
+	return names
 }
 
 func resolveSnapshotDirectory(snapshotRoot, requested string) (string, string, error) {

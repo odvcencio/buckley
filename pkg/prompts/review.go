@@ -129,7 +129,9 @@ Grading criteria:
 
 ## Coverage
 - **File**: `+"`"+`path/to/changed-file`+"`"+` — hunks reviewed, contract/invariant checked, and verification evidence
-- Repeat that exact File ledger entry for EVERY changed file and no unchanged files
+- Repeat that exact File ledger entry for EVERY changed, human-reviewable file and no unchanged files
+- **Generated**: `+"`"+`path/to/generated-file`+"`"+` — one line naming why it is not reviewable source (binary, minified, or a build/vendor path)
+- The supplied diff marks each such file under "Low-signal changes (diff content omitted)". Repeat a Generated ledger entry once for EVERY file marked that way, in place of a File entry. Do not invent hunk-level evidence for it.
 - **Feedback disposition**: `+"`"+`DISPOSITIONED`+"`"+` — disposition of every supplied review/thread; or `+"`"+`NONE_SUPPLIED`+"`"+` — no prior feedback was supplied
 - **Feedback**: `+"`"+`feedback-id-exactly-as-supplied`+"`"+` — `+"`"+`ADDRESSED|DISPUTED|UNRESOLVED`+"`"+` — concrete source/test evidence for that one disposition
 - When feedback IDs are supplied, repeat the exact Feedback ledger entry once for EVERY supplied ID and no other IDs. Omit Feedback entries only when NONE_SUPPLIED.
@@ -219,7 +221,9 @@ Two or three sentences on behavior and impact.
 
 ## Coverage
 - **File**: `+"`"+`path/to/changed-file`+"`"+` — hunks, contract/invariant, evidence
-- Repeat for every changed file and no unchanged files
+- Repeat for every changed, human-reviewable file and no unchanged files
+- **Generated**: `+"`"+`path/to/generated-file`+"`"+` — one line naming why it is not reviewable source (binary, minified, or a build/vendor path)
+- The supplied diff marks each such file under "Low-signal changes (diff content omitted)". Use Generated, not File, for those; no hunk-level evidence is required.
 - **Feedback disposition**: `+"`"+`DISPOSITIONED`+"`"+` or `+"`"+`NONE_SUPPLIED`+"`"+`
 - **Feedback**: `+"`"+`feedback-id-exactly-as-supplied`+"`"+` — `+"`"+`ADDRESSED|DISPUTED|UNRESOLVED`+"`"+` — evidence; repeat once for every supplied ID
 - **Verification**: exact commands, or "not independently run"

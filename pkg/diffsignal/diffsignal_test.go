@@ -566,3 +566,55 @@ index bbbbbbb..ccccccc 100644
 		t.Errorf("Reason = %q, want %q (ratio heuristic)", files[0].Reason, ReasonMinified)
 	}
 }
+
+// LowSignalPaths must classify a minified bundle, its generated-path
+// siblings, and a binary file, while leaving a normal source change out of
+// the map entirely. This is the classification review coverage validation
+// relies on to distinguish reviewable source from generated artifacts.
+func TestLowSignalPathsClassifiesMixedChangeset(t *testing.T) {
+	raw := strings.Join([]string{
+		sourceFileDiff("cmd/bootstrap/main.go", "add retry handler"),
+		minifiedFileDiff("client/js/bootstrap-lite.js", 50_000),
+		sourceFileDiff("client/js/bootstrap-lite.js.map", "map body"),
+		sourceFileDiff("client/js/bootstrap-lite.js.br", "br body"),
+		binaryFileDiff("client/js/bootstrap-lite.js.gz"),
+	}, "")
+
+	got := LowSignalPaths(strings.TrimSpace(raw))
+	want := map[string]Reason{
+		"client/js/bootstrap-lite.js":     ReasonMinified,
+		"client/js/bootstrap-lite.js.map": ReasonGeneratedPath,
+		"client/js/bootstrap-lite.js.br":  ReasonGeneratedPath,
+		"client/js/bootstrap-lite.js.gz":  ReasonBinary,
+	}
+	if len(got) != len(want) {
+		t.Fatalf("LowSignalPaths() = %#v, want %#v", got, want)
+	}
+	for path, reason := range want {
+		if got[path] != reason {
+			t.Errorf("LowSignalPaths()[%q] = %q, want %q", path, got[path], reason)
+		}
+	}
+	if _, ok := got["cmd/bootstrap/main.go"]; ok {
+		t.Errorf("normal source file must not be classified low-signal: %#v", got)
+	}
+}
+
+// LowSignalPaths must exclude files demoted only by the byte budget: that
+// content is reviewable, it was simply not sent in this call, which is a
+// different failure mode than "not reviewable source."
+func TestLowSignalPathsExcludesOverBudgetFiles(t *testing.T) {
+	small := sourceFileDiff("cmd/bootstrap/main.go", "keep me")
+	large := largeSourceDiff("pkg/generated_helpers.go", 40_000)
+	raw := strings.TrimSpace(small + large)
+
+	res := Prioritize(raw, len(small)+200)
+	if res.LowSignal == 0 {
+		t.Fatalf("expected the oversized file to be demoted to a summary line")
+	}
+
+	got := LowSignalPaths(raw)
+	if _, ok := got["pkg/generated_helpers.go"]; ok {
+		t.Fatalf("LowSignalPaths() must not classify a budget-only demotion as generated: %#v", got)
+	}
+}

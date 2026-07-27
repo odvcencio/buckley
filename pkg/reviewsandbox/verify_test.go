@@ -142,12 +142,93 @@ func TestExecutorReportsPassWithExactArgvAndNormalizedScope(t *testing.T) {
 	}
 }
 
+// TestNodeVerificationFallsBackToMakefileTargetWithoutPackageJSON covers a
+// pure-Go repository whose JavaScript tests run through `make test-js`
+// instead of npm: no package.json exists anywhere in the snapshot, so
+// resolveLanguage's node auto-detect never applies, but the required
+// verification target (as required-target prompts explicitly name it, e.g.
+// "node: client/js") still names the node toolchain directly. Before the
+// Makefile fallback, this always failed with a `package.json`-not-found
+// error, exactly as reported: "Snapshot lacks client/js/package.json ...
+// required for the `node: client/js` target."
+func TestNodeVerificationFallsBackToMakefileTargetWithoutPackageJSON(t *testing.T) {
+	root := t.TempDir()
+	jsDir := filepath.Join(root, "client", "js")
+	if err := os.MkdirAll(jsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(jsDir, "bootstrap-lite.js"), []byte("// js"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	makefile := ".PHONY: build-js test-js\n\nbuild-js:\n\tnode build.js\n\ntest-js:\n\tnode --test client/js\n"
+	if err := os.WriteFile(filepath.Join(root, "Makefile"), []byte(makefile), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	executor := testExecutor(t)
+	var invocations []commandInvocation
+	executor.run = func(_ context.Context, invocation commandInvocation, _ int) (commandOutput, error) {
+		invocations = append(invocations, invocation)
+		return commandOutput{ExitCode: 0, Stdout: "# pass 3\n# fail 0"}, nil
+	}
+	result := executor.Verify(context.Background(), Request{
+		SnapshotRoot: root,
+		Kind:         KindTest,
+		Language:     LanguageNode,
+		Path:         "client/js",
+		Timeout:      time.Second,
+	})
+
+	if result.Status != StatusPass || result.ExitCode != 0 {
+		t.Fatalf("verification = %#v", result)
+	}
+	wantArgv := []string{"/usr/bin/make", "-C", "../..", "test-js"}
+	if !reflect.DeepEqual(result.Argv, wantArgv) {
+		t.Fatalf("argv = %#v, want %#v", result.Argv, wantArgv)
+	}
+	if len(invocations) != 2 {
+		t.Fatalf("invocations = %d, want sandbox preflight + verification", len(invocations))
+	}
+}
+
+// TestNodeVerificationReportsBothMissingSignalsWhenNeitherIsPresent ensures
+// the Makefile fallback does not silently mask the original package.json
+// signal: with no package.json and no matching Makefile target anywhere
+// between workDir and root, the command is still UNAVAILABLE.
+func TestNodeVerificationReportsBothMissingSignalsWhenNeitherIsPresent(t *testing.T) {
+	root := t.TempDir()
+	jsDir := filepath.Join(root, "client", "js")
+	if err := os.MkdirAll(jsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	executor := testExecutor(t)
+	executor.run = func(context.Context, commandInvocation, int) (commandOutput, error) {
+		t.Fatal("verification command should not run without a resolved plan")
+		return commandOutput{}, nil
+	}
+	result := executor.Verify(context.Background(), Request{
+		SnapshotRoot: root,
+		Kind:         KindTest,
+		Language:     LanguageNode,
+		Path:         "client/js",
+		Timeout:      time.Second,
+	})
+
+	if result.Status != StatusUnavailable {
+		t.Fatalf("status = %v, want UNAVAILABLE", result.Status)
+	}
+	if !strings.Contains(result.Error, "package.json") || !strings.Contains(result.Error, "Makefile") {
+		t.Fatalf("error = %q, want it to name both missing signals", result.Error)
+	}
+}
+
 func TestVerificationPlanAcceptsLongFocusedGoPattern(t *testing.T) {
 	pattern := "^(" + strings.Repeat("TestFocused|", 120) + "TestLast)$"
 	if len(pattern) <= 256 || len(pattern) >= maximumPatternBytes {
 		t.Fatalf("test pattern length = %d, want between old and new limits", len(pattern))
 	}
-	plan, err := verificationPlan(KindTest, LanguageGo, pattern, ".")
+	plan, err := verificationPlan(KindTest, LanguageGo, pattern, ".", ".")
 	if err != nil {
 		t.Fatalf("verificationPlan() error = %v", err)
 	}
@@ -155,7 +236,7 @@ func TestVerificationPlanAcceptsLongFocusedGoPattern(t *testing.T) {
 		t.Fatalf("verification argv omitted pattern: %q", got)
 	}
 
-	_, err = verificationPlan(KindTest, LanguageGo, strings.Repeat("x", maximumPatternBytes+1), ".")
+	_, err = verificationPlan(KindTest, LanguageGo, strings.Repeat("x", maximumPatternBytes+1), ".", ".")
 	if err == nil || !strings.Contains(err.Error(), "pattern is invalid") {
 		t.Fatalf("oversized pattern error = %v", err)
 	}
@@ -229,6 +310,8 @@ func testExecutor(t *testing.T) *Executor {
 		switch name {
 		case "go":
 			return "/usr/local/go/bin/go", nil
+		case "make":
+			return "/usr/bin/make", nil
 		case "true":
 			return "/usr/bin/true", nil
 		default:

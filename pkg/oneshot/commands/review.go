@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"m31labs.dev/buckley/pkg/diffsignal"
 	"m31labs.dev/buckley/pkg/oneshot"
 	"m31labs.dev/buckley/pkg/prompts"
 )
@@ -17,7 +18,10 @@ import (
 // inside an OS-enforced read-only-source sandbox.
 // The agent produces free-form markdown which is parsed into structured data.
 type ReviewBranchDef struct {
-	ChangedFiles      []string
+	ChangedFiles []string
+	// LowSignalFiles maps a changed path to the reason its diff content was
+	// not shown at full fidelity. See ReviewValidationOptions.LowSignalFiles.
+	LowSignalFiles    map[string]diffsignal.Reason
 	ContextIncomplete bool
 	ApprovalCritic    bool
 }
@@ -46,12 +50,13 @@ func (d ReviewBranchDef) ValidateResult(result any) error {
 	}
 	return ValidateParsedReview(review.Parsed, ReviewValidationOptions{
 		ChangedFiles:      d.ChangedFiles,
+		LowSignalFiles:    d.LowSignalFiles,
 		ContextIncomplete: d.ContextIncomplete,
 	})
 }
 
 func (d ReviewBranchDef) ValidateRLMExecution(result any, execution *oneshot.RLMResult) error {
-	return validateReviewExecutionEvidence(result, execution, d.ChangedFiles)
+	return validateReviewExecutionEvidence(result, execution, d.ChangedFiles, d.LowSignalFiles)
 }
 
 func (d ReviewBranchDef) RequiresApprovalCritic(result any) bool {
@@ -105,7 +110,10 @@ func (ReviewProjectDef) ValidateResult(result any) error {
 
 // ReviewPRDef implements oneshot.RLMDefinition for PR review.
 type ReviewPRDef struct {
-	ChangedFiles                []string
+	ChangedFiles []string
+	// LowSignalFiles maps a changed path to the reason its diff content was
+	// not shown at full fidelity. See ReviewValidationOptions.LowSignalFiles.
+	LowSignalFiles              map[string]diffsignal.Reason
 	ContextIncomplete           bool
 	CIStatus                    string
 	CIProvenance                string
@@ -145,6 +153,7 @@ func (d ReviewPRDef) ValidateResult(result any) error {
 	}
 	return ValidateParsedReview(review.Parsed, ReviewValidationOptions{
 		ChangedFiles:                d.ChangedFiles,
+		LowSignalFiles:              d.LowSignalFiles,
 		ContextIncomplete:           d.ContextIncomplete,
 		CIStatus:                    d.CIStatus,
 		CIProvenance:                d.CIProvenance,
@@ -161,10 +170,10 @@ func (d ReviewPRDef) ValidateRLMExecution(result any, execution *oneshot.RLMResu
 		(d.CIProvenance == prCISourceHead || d.CIProvenance == prCISourceBase) {
 		return nil
 	}
-	return validateReviewExecutionEvidence(result, execution, d.ChangedFiles)
+	return validateReviewExecutionEvidence(result, execution, d.ChangedFiles, d.LowSignalFiles)
 }
 
-func validateReviewExecutionEvidence(result any, execution *oneshot.RLMResult, changedFiles []string) error {
+func validateReviewExecutionEvidence(result any, execution *oneshot.RLMResult, changedFiles []string, lowSignalFiles map[string]diffsignal.Reason) error {
 	review, ok := result.(*ReviewRLMResult)
 	if !ok || review.Parsed == nil || !review.Parsed.Approved {
 		return nil
@@ -174,7 +183,7 @@ func validateReviewExecutionEvidence(result any, execution *oneshot.RLMResult, c
 		// (for PRs) authoritative remote CI. The execution gate revalidates the
 		// exact per-file ledger here so documentation-only approvals are grounded
 		// in diff claims without manufacturing unrelated source commands.
-		if err := validateCoverageLedger(review.Parsed.CoverageEntries, changedFiles); err != nil {
+		if err := validateCoverageLedger(review.Parsed.CoverageEntries, review.Parsed.GeneratedEntries, changedFiles, lowSignalFiles); err != nil {
 			return fmt.Errorf("documentation-only approval requires exact changed-file diff evidence: %w", err)
 		}
 		return nil

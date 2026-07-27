@@ -318,6 +318,7 @@ func runPRReviewWithOptions(ctx context.Context, prRef string, framework *onesho
 	userPrompt := appendReviewExecutionPlan(commands.BuildPRPrompt(prCtx), opts)
 	reviewDef := commands.ReviewPRDef{
 		ChangedFiles:                prCtx.Files,
+		LowSignalFiles:              prCtx.LowSignalFiles,
 		ContextIncomplete:           prCtx.HasIncompleteContext(),
 		CIStatus:                    prCtx.PR.CIStatus,
 		CIProvenance:                prCtx.CIProvenance,

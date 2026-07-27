@@ -447,6 +447,7 @@ func runBranchReviewWithPolicy(ctx context.Context, opts reviewCommandOptions, f
 	userPrompt := appendReviewExecutionPlan(commands.BuildBranchPrompt(branchCtx), reviewPolicy)
 	reviewDef := commands.ReviewBranchDef{
 		ChangedFiles:      reviewChangedFilePaths(branchCtx.Files),
+		LowSignalFiles:    branchCtx.LowSignalFiles,
 		ContextIncomplete: branchCtx.DiffTruncated || branchCtx.UnstagedTruncated || branchCtx.ContextIncomplete,
 		ApprovalCritic:    reviewPolicy.approvalCritic,
 	}
