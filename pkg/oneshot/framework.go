@@ -419,9 +419,15 @@ func (f *Framework) runValidatedRLMPhase(
 	userPrompt := basePrompt
 	var result rlmPhaseResult
 	var lastErr error
+	repairOnly := false
 
 	for attempt := 0; attempt < maxRetries; attempt++ {
 		attemptOpts := executionOpts
+		if attempt > 0 && repairOnly {
+			attemptOpts.MaxIterations = 1
+			attemptOpts.MaxToolCalls = 0
+			attemptOpts.ExplorationTimeout = 0
+		}
 		if executionOpts.MaxCostUSD > 0 {
 			attemptOpts.MaxCostUSD = executionOpts.MaxCostUSD - result.cost
 			if attemptOpts.MaxCostUSD <= 0 {
@@ -450,16 +456,20 @@ func (f *Framework) runValidatedRLMPhase(
 		}
 		if rlmResult == nil {
 			lastErr = fmt.Errorf("RLM runner returned no result")
+			repairOnly = false
 		} else {
 			result.value, lastErr = def.ParseResult(rlmResult.Response)
+			repairOnly = lastErr != nil
 			if lastErr == nil {
 				if validator, ok := def.(RLMResultValidator); ok {
 					lastErr = validator.ValidateResult(result.value)
+					repairOnly = lastErr != nil
 				}
 			}
 			if lastErr == nil {
 				if validator, ok := def.(RLMExecutionValidator); ok {
 					lastErr = validator.ValidateRLMExecution(result.value, rlmResult)
+					repairOnly = false
 				}
 			}
 		}
@@ -467,13 +477,30 @@ func (f *Framework) runValidatedRLMPhase(
 			return result
 		}
 
-		userPrompt = basePrompt + "\n\nQUALITY GATE: The previous " + phase + " review was rejected: " +
-			strings.TrimSpace(lastErr.Error()) +
-			". Re-run the review from the supplied evidence and return a complete, internally consistent review in the required format."
+		userPrompt = buildRLMValidationRetryPrompt(
+			basePrompt,
+			rlmResult,
+			phase,
+			lastErr,
+			repairOnly,
+		)
 	}
 
 	result.err = fmt.Errorf("%s review validation failed after %d attempts for %q: %w", phase, maxRetries, def.Name(), lastErr)
 	return result
+}
+
+func buildRLMValidationRetryPrompt(basePrompt string, previous *RLMResult, phase string, validationErr error, repairOnly bool) string {
+	guidance := basePrompt + "\n\nQUALITY GATE: The previous " + phase + " review was rejected: " +
+		strings.TrimSpace(validationErr.Error()) + ". "
+	if repairOnly && previous != nil && strings.TrimSpace(previous.Response) != "" {
+		return guidance +
+			"Repair the prior review without new tool calls. Preserve its technical judgment and evidence. " +
+			"Return one complete review in the required format.\n\nPRIOR REVIEW:\n" +
+			previous.Response
+	}
+	return guidance +
+		"Re-run the review from the supplied evidence and return a complete, internally consistent review in the required format."
 }
 
 // resolveMaxRetries determines the retry count from opts, arbiter, or defaults.

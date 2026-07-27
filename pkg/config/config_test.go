@@ -25,7 +25,7 @@ func TestDefaultConfig(t *testing.T) {
 		cfg.Buckbot.Reasoning != "medium" ||
 		cfg.Buckbot.PerReviewBudgetUSD != 0.15 ||
 		cfg.Buckbot.MaxReviewIterations != 0 ||
-		cfg.Buckbot.MaxValidationAttempts != 1 ||
+		cfg.Buckbot.MaxValidationAttempts != 2 ||
 		cfg.Buckbot.MaxDiffBytes != 80_000 {
 		t.Fatalf("unexpected Buckbot efficiency defaults: %+v", cfg.Buckbot)
 	}

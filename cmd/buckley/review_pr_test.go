@@ -58,7 +58,7 @@ func TestParseReviewPRCommandOptions(t *testing.T) {
 func TestDefaultAutomatedReviewOptionsAndOverrides(t *testing.T) {
 	cfg := config.DefaultConfig()
 	defaults := defaultAutomatedReviewOptions(cfg)
-	if defaults.maxIterations != 0 || defaults.maxRetries != 1 || defaults.maxDiffBytes != 80_000 ||
+	if defaults.maxIterations != 0 || defaults.maxRetries != 2 || defaults.maxDiffBytes != 80_000 ||
 		defaults.maxCostUSD != 0.15 || defaults.criticReserveUSD != 0 || defaults.approvalCritic {
 		t.Fatalf("defaults = %#v, want Buckbot defaults", defaults)
 	}
@@ -67,7 +67,7 @@ func TestDefaultAutomatedReviewOptionsAndOverrides(t *testing.T) {
 		maxIterations: 5,
 		maxCostUSD:    0.10,
 	})
-	if got.maxIterations != 5 || got.maxRetries != 1 || got.maxDiffBytes != 80_000 ||
+	if got.maxIterations != 5 || got.maxRetries != 2 || got.maxDiffBytes != 80_000 ||
 		got.maxCostUSD != 0.10 || got.criticReserveUSD != 0 || got.approvalCritic {
 		t.Fatalf("overrides = %#v, want selective CLI overrides", got)
 	}

@@ -128,8 +128,9 @@ func TestRunRLMRetriesValidationFailureWithGuidance(t *testing.T) {
 	framework := NewFramework(nil, nil).WithRLMRunner(runner)
 
 	result, err := framework.RunRLM(context.Background(), validatingRLMDefinition{}, RLMRunOpts{
-		UserPrompt: "review this change",
-		MaxRetries: 2,
+		UserPrompt:    "review this change",
+		MaxRetries:    2,
+		MaxIterations: 8,
 	})
 	if err != nil {
 		t.Fatalf("RunRLM() error = %v", err)
@@ -146,6 +147,12 @@ func TestRunRLMRetriesValidationFailureWithGuidance(t *testing.T) {
 	}
 	if !strings.Contains(runner.prompts[1], "missing coverage evidence") {
 		t.Fatalf("retry prompt missing validation guidance: %q", runner.prompts[1])
+	}
+	if !strings.Contains(runner.prompts[1], "PRIOR REVIEW:\nincomplete") {
+		t.Fatalf("retry prompt missing prior review: %q", runner.prompts[1])
+	}
+	if got := runner.iterations; len(got) != 2 || got[0] != 8 || got[1] != 1 {
+		t.Fatalf("iteration budgets = %v, want [8 1]", got)
 	}
 	if got := strings.Join(runner.tools[0], ","); got != "read_file,run_shell" {
 		t.Fatalf("allowed tools = %q, want exact registry names", got)
@@ -309,8 +316,9 @@ func TestRunRLMRetriesExecutionEvidenceFailureWithGuidance(t *testing.T) {
 	framework := NewFramework(nil, nil).WithRLMRunner(runner)
 
 	result, err := framework.RunRLM(context.Background(), executionValidatingRLMDefinition{}, RLMRunOpts{
-		UserPrompt: "review this change",
-		MaxRetries: 2,
+		UserPrompt:    "review this change",
+		MaxRetries:    2,
+		MaxIterations: 8,
 	})
 	if err != nil {
 		t.Fatalf("RunRLM() error = %v", err)
@@ -320,6 +328,9 @@ func TestRunRLMRetriesExecutionEvidenceFailureWithGuidance(t *testing.T) {
 	}
 	if len(runner.prompts) != 2 || !strings.Contains(runner.prompts[1], "missing execution evidence") {
 		t.Fatalf("retry prompt missing execution-evidence guidance: %#v", runner.prompts)
+	}
+	if got := runner.iterations; len(got) != 2 || got[0] != 8 || got[1] != 8 {
+		t.Fatalf("iteration budgets = %v, want [8 8]", got)
 	}
 }
 
