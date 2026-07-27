@@ -277,13 +277,16 @@ func TestRunRLMRepairsSavedUnfinishedToolCallOnce(t *testing.T) {
 	cleanPrompt := runner.prompts[2]
 	for _, required := range []string{
 		"review this exact diff and manifest",
-		savedFailure,
+		"I need to address the rejection",
 		"Complete one clean repair",
 		"Do not emit tool-call markup",
 	} {
 		if !strings.Contains(cleanPrompt, required) {
 			t.Fatalf("clean repair prompt omitted %q: %q", required, cleanPrompt)
 		}
+	}
+	if strings.Contains(cleanPrompt, "<tool_call>") {
+		t.Fatalf("clean repair prompt retained tool-call markup: %q", cleanPrompt)
 	}
 }
 
@@ -332,7 +335,7 @@ go test ./pkg/oneshot/commands -run TestAssemblePRContext
 	cleanPrompt := runner.prompts[2]
 	for _, required := range []string{
 		"review this exact diff and manifest",
-		savedFailure,
+		"I'll conduct a fresh, rigorous review",
 		"provider returned a tool call as final text",
 		"Complete one clean repair",
 		"Do not emit tool-call markup",
@@ -340,6 +343,36 @@ go test ./pkg/oneshot/commands -run TestAssemblePRContext
 		if !strings.Contains(cleanPrompt, required) {
 			t.Fatalf("clean repair prompt omitted %q: %q", required, cleanPrompt)
 		}
+	}
+	for _, removed := range []string{"<tool_call>", "run_verification", "go test ./pkg/oneshot/commands"} {
+		if strings.Contains(cleanPrompt, removed) {
+			t.Fatalf("clean repair prompt retained %q: %q", removed, cleanPrompt)
+		}
+	}
+}
+
+func TestRunRLMRepairsFinalToolCallFinishReasonDirectly(t *testing.T) {
+	runner := &scriptedRLMExecutor{
+		responses:     []string{"Executed 5 tool calls: read_file", "valid"},
+		finishReasons: []string{"tool_calls", "stop"},
+	}
+	framework := NewFramework(nil, nil).WithRLMRunner(runner)
+
+	result, err := framework.RunRLM(context.Background(), validatingRLMDefinition{}, RLMRunOpts{
+		UserPrompt: "review this exact diff",
+		MaxRetries: 2,
+	})
+	if err != nil {
+		t.Fatalf("RunRLM() error = %v", err)
+	}
+	if result.Value != "valid" || result.Attempts != 2 {
+		t.Fatalf("result = %#v, want one direct clean repair", result)
+	}
+	if got := runner.toolLimits; len(got) != 2 || got[1] != 0 {
+		t.Fatalf("tool budgets = %v, want the repair to disable tools", got)
+	}
+	if !strings.Contains(runner.prompts[1], "stopped the final response to request a tool") {
+		t.Fatalf("clean repair omitted the finish reason: %q", runner.prompts[1])
 	}
 }
 

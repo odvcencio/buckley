@@ -249,6 +249,7 @@ func (r *RLMRunner) Run(ctx context.Context, systemPrompt, task string, allowedT
 	}
 
 	result.Trace = builder.Complete(tokens, cost)
+	result.Trace.Duration = duration
 
 	// Record in ledger
 	if r.ledger != nil {

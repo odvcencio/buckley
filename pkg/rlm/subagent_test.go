@@ -103,14 +103,45 @@ func TestBudgetedMaxOutputTokensRejectsUnaffordableRequest(t *testing.T) {
 func TestFinalSynthesisMessagesPreservesHistoryAndRequiresAnswer(t *testing.T) {
 	history := []model.Message{{Role: "tool", Content: "evidence"}}
 	got := finalSynthesisMessages(history)
-	if len(got) != 2 || got[0].Content != "evidence" {
+	if len(got) != 3 || got[1].Content != "evidence" {
 		t.Fatalf("final synthesis messages = %#v, want preserved history", got)
 	}
-	if got[1].Role != "user" || !strings.Contains(fmt.Sprint(got[1].Content), "complete final answer now") {
-		t.Fatalf("final synthesis instruction = %#v", got[1])
+	if got[0].Role != "system" || !strings.Contains(fmt.Sprint(got[0].Content), "Tools are unavailable") {
+		t.Fatalf("final synthesis system instruction = %#v", got[0])
+	}
+	if got[2].Role != "user" || !strings.Contains(fmt.Sprint(got[2].Content), "complete final answer now") {
+		t.Fatalf("final synthesis instruction = %#v", got[2])
 	}
 	if len(history) != 1 {
 		t.Fatalf("final synthesis mutated history: %#v", history)
+	}
+}
+
+func TestFinalSynthesisMessagesStrengthensExistingSystemPrompt(t *testing.T) {
+	history := []model.Message{
+		{Role: "system", Content: "Review the change with tools."},
+		{Role: "user", Content: "review this diff"},
+	}
+	got := finalSynthesisMessages(history)
+	if len(got) != 3 {
+		t.Fatalf("final synthesis messages = %#v, want one added instruction", got)
+	}
+	system := fmt.Sprint(got[0].Content)
+	if !strings.Contains(system, "Review the change with tools.") || !strings.Contains(system, "Tools are unavailable") {
+		t.Fatalf("final synthesis system prompt = %q", system)
+	}
+	if history[0].Content != "Review the change with tools." {
+		t.Fatalf("final synthesis mutated history: %#v", history)
+	}
+}
+
+func TestSummarizeRejectedToolCallsDoesNotEmitToolMarkup(t *testing.T) {
+	got := summarizeRejectedToolCalls([]model.ToolCall{
+		{Function: model.FunctionCall{Name: "read_file"}},
+		{Function: model.FunctionCall{Name: "search_text"}},
+	})
+	if !strings.Contains(got, "read_file, search_text") || strings.Contains(got, "<tool_call>") {
+		t.Fatalf("rejected tool summary = %q", got)
 	}
 }
 

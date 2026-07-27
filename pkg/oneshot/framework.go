@@ -577,6 +577,8 @@ func incompleteRLMOutputError(result *RLMResult) error {
 	switch strings.ToLower(strings.TrimSpace(result.FinishReason)) {
 	case "length", "max_tokens":
 		return fmt.Errorf("provider stopped the response at its token limit")
+	case "tool_call", "tool_calls":
+		return fmt.Errorf("provider stopped the final response to request a tool")
 	}
 	if hasUnclosedToolCallMarkup(result.Response) {
 		return fmt.Errorf("provider returned unfinished tool-call markup")
@@ -637,14 +639,45 @@ func buildRLMValidationRetryPrompt(
 			previous.Response
 	}
 	if retryMode == rlmValidationRetryClean && previous != nil && strings.TrimSpace(previous.Response) != "" {
+		rejected := sanitizeCleanRepairResponse(previous.Response)
 		return basePrompt + "\n\n" + rejection +
 			"Complete one clean repair with no tool calls. Use only the supplied evidence. " +
 			"Do not emit tool-call markup, tool-call JSON, progress text, or a plan. " +
 			"Start with the required review format. Return the complete final review.\n\nREJECTED RESPONSE:\n" +
-			previous.Response
+			rejected
 	}
 	return basePrompt + "\n\n" + rejection +
 		"Re-run the review from the supplied evidence and return a complete, internally consistent review in the required format."
+}
+
+func sanitizeCleanRepairResponse(response string) string {
+	for _, delimiters := range [][2]string{
+		{"<tool_call>", "</tool_call>"},
+		{"<|tool_call_begin|>", "<|tool_call_end|>"},
+		{"<|tool_calls_section_begin|>", "<|tool_calls_section_end|>"},
+	} {
+		response = removeDelimitedToolCallBlocks(response, delimiters[0], delimiters[1])
+	}
+	response = strings.TrimSpace(response)
+	if response == "" {
+		return "[The rejected tool request was removed. Reconstruct the review from the supplied evidence.]"
+	}
+	return response
+}
+
+func removeDelimitedToolCallBlocks(response, opening, closing string) string {
+	for {
+		start := strings.Index(response, opening)
+		if start < 0 {
+			return response
+		}
+		afterOpening := response[start+len(opening):]
+		end := strings.Index(afterOpening, closing)
+		if end < 0 {
+			return response[:start]
+		}
+		response = response[:start] + afterOpening[end+len(closing):]
+	}
 }
 
 func boundedPositiveLimit(value, limit int) int {
