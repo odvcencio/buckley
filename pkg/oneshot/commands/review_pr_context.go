@@ -59,6 +59,7 @@ type PRContext struct {
 	CanopyReview            string
 	CanopyRuntime           time.Duration
 	CanopyIndexScope        string
+	CanopyIndexScopeSource  string
 	ContextStatus           []PRContextStatus
 	target                  prReference
 	localRepoRoot           string
@@ -489,7 +490,11 @@ func BuildPRPrompt(ctx *PRContext) string {
 		sb.WriteString("## Primary Structural Review (Canopy)\n\n")
 		sb.WriteString("Use this diff-scoped evidence before you open more files. Validate each finding against the immutable snapshot.\n\n")
 		fmt.Fprintf(&sb, "- **Measured runtime**: %s\n", formatCanopyRuntime(ctx.CanopyRuntime))
-		fmt.Fprintf(&sb, "- **Index scope**: %s\n", ctx.CanopyIndexScope)
+		fmt.Fprintf(&sb, "- **Index scope**: %s", ctx.CanopyIndexScope)
+		if ctx.CanopyIndexScopeSource != "" {
+			fmt.Fprintf(&sb, " (%s)", ctx.CanopyIndexScopeSource)
+		}
+		sb.WriteString("\n")
 		fmt.Fprintf(&sb, "- **Snapshot**: local checkout at %s\n\n", displayPRRevision(ctx.CheckoutSHA))
 		sb.WriteString("```json\n")
 		sb.WriteString(ctx.CanopyReview)
@@ -2247,6 +2252,7 @@ func assemblePRCanopyContext(
 	ctx.CanopyReview = evidence.Output
 	ctx.CanopyRuntime = evidence.Runtime
 	ctx.CanopyIndexScope = evidence.IndexScope
+	ctx.CanopyIndexScopeSource = evidence.IndexScopeSource
 	ctx.addStatus("Canopy structural review", "complete",
 		fmt.Sprintf("measured runtime %s; index scope %s", formatCanopyRuntime(evidence.Runtime), evidence.IndexScope), false)
 	audit.Add("Canopy structural review", reviewEstimateTokens(evidence.Output))
