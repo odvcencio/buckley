@@ -177,9 +177,10 @@ func canonicalFinalReview(response string) (string, error) {
 	fence := ""
 	for i, line := range lines {
 		if marker := reviewFenceMarker(line); marker != "" {
-			if fence == "" {
+			switch fence {
+			case "":
 				fence = marker
-			} else if fence == marker {
+			case marker:
 				fence = ""
 			}
 			continue
@@ -230,9 +231,10 @@ func validateCanonicalFinalReview(review string) error {
 	fence := ""
 	for _, line := range lines {
 		if marker := reviewFenceMarker(line); marker != "" {
-			if fence == "" {
+			switch fence {
+			case "":
 				fence = marker
-			} else if fence == marker {
+			case marker:
 				fence = ""
 			}
 			continue
