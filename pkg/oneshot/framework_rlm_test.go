@@ -166,6 +166,39 @@ func TestRunRLMRetriesValidationFailureWithGuidance(t *testing.T) {
 	}
 }
 
+func TestRunRLMToolSummaryRepairRestoresOriginalEvidence(t *testing.T) {
+	runner := &scriptedRLMExecutor{responses: []string{
+		"Executed 3 tool calls: read_file, read_file, search_text",
+		"valid",
+	}}
+	framework := NewFramework(nil, nil).WithRLMRunner(runner)
+
+	result, err := framework.RunRLM(context.Background(), validatingRLMDefinition{}, RLMRunOpts{
+		UserPrompt:    "review this exact diff",
+		MaxRetries:    2,
+		MaxIterations: 3,
+	})
+	if err != nil {
+		t.Fatalf("RunRLM() error = %v", err)
+	}
+	if got, want := result.Value, any("valid"); got != want {
+		t.Fatalf("result.Value = %#v, want %#v", got, want)
+	}
+	if len(runner.prompts) != 2 {
+		t.Fatalf("attempts = %d, want 2", len(runner.prompts))
+	}
+	repair := runner.prompts[1]
+	if !strings.Contains(repair, "review this exact diff") {
+		t.Fatalf("tool-summary repair omitted original evidence: %q", repair)
+	}
+	if !strings.Contains(repair, "PRIOR REVIEW:\nExecuted 3 tool calls") {
+		t.Fatalf("tool-summary repair omitted prior summary: %q", repair)
+	}
+	if got := runner.iterations; len(got) != 2 || got[0] != 3 || got[1] != 1 {
+		t.Fatalf("iteration budgets = %v, want [3 1]", got)
+	}
+}
+
 func TestRunRLMPreservesPartialValueOnExecutionDeadline(t *testing.T) {
 	trace := newTestRLMTrace("partial", 100, 10, 0.01)
 	framework := NewFramework(nil, nil).WithRLMRunner(partialRLMExecutor{
