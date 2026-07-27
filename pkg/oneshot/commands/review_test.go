@@ -763,6 +763,7 @@ func TestApprovalCriticIsExplicitlyOptIn(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Contains(t, branchCriticPrompt, "ORIGINAL DIFF")
 	assert.Contains(t, branchCriticPrompt, approval)
+	assert.Contains(t, branchCriticPrompt, "Re-read relevant source with tools")
 	assert.Contains(t, branchCriticPrompt, "complete machine-validated review becomes the final result")
 
 	pr := ReviewPRDef{
@@ -779,6 +780,11 @@ func TestApprovalCriticIsExplicitlyOptIn(t *testing.T) {
 	assert.False(t, pr.RequiresApprovalCritic(prResult))
 	pr.ApprovalCritic = true
 	assert.Contains(t, pr.ApprovalCriticSystemPrompt(), "INDEPENDENT APPROVAL CRITIC ROLE")
+	prCriticPrompt, err := pr.BuildApprovalCriticPrompt("ORIGINAL DIFF", prResult)
+	assert.NoError(t, err)
+	assert.Contains(t, prCriticPrompt, "Use one direct evidence pass")
+	assert.Contains(t, prCriticPrompt, "Tools are unavailable")
+	assert.NotContains(t, prCriticPrompt, "Re-read relevant source with tools")
 
 	nonApproval := strings.Replace(approval, "## Grade: A", "## Grade: C", 1)
 	nonApproval = strings.Replace(nonApproval, "**Conclusion**: DISPROVED", "**Conclusion**: PROVED", 1)

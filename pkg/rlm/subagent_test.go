@@ -408,6 +408,13 @@ func TestSubAgentExplicitLimitStillForcesFinalTurn(t *testing.T) {
 	}
 }
 
+func TestSubAgentSingleIterationStartsWithoutTools(t *testing.T) {
+	agent := &SubAgent{maxIterations: 1}
+	if !agent.shouldSynthesize(context.Background(), 0, 1, time.Now()) {
+		t.Fatal("one-turn agent did not start in final response mode")
+	}
+}
+
 func TestSynthesisBudgetRequiredReservesFinalResponse(t *testing.T) {
 	pricing := model.ModelPricing{Prompt: 0.32, Completion: 1.28}
 	if synthesisBudgetRequired(pricing, 10_000, 0, 0.15) {
