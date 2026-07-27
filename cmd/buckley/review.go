@@ -144,7 +144,7 @@ func runReviewCommand(args []string) error {
 	if !quietMode {
 		printReviewModelSelection(runtime)
 		if runtime.policy.adaptiveReasoning {
-			termOut.Dim("Reasoning effort: adaptive (low, medium, or high)")
+			termOut.Dim("Reasoning effort: adaptive by model and review size")
 		} else if runtime.reasoningEffort != "" {
 			termOut.Dim("Reasoning effort: %s", runtime.reasoningEffort)
 		}
