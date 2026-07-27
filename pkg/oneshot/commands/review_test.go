@@ -617,6 +617,79 @@ func TestReviewBranchDef_Interface(t *testing.T) {
 	assert.Equal(t, GradeA, rlmResult.Parsed.Grade)
 }
 
+func TestReviewResultCanonicalizationStripsAnalysisPreamble(t *testing.T) {
+	canonical := "## Grade: A\n\nLooks good"
+	response := `<think>
+I should inspect one more invariant before I answer.
+</think>
+
+The evidence is sufficient.
+
+` + canonical
+
+	for _, parse := range []struct {
+		name string
+		run  func(string) (any, error)
+	}{
+		{name: "branch", run: (ReviewBranchDef{}).ParseResult},
+		{name: "PR", run: (ReviewPRDef{}).ParseResult},
+	} {
+		t.Run(parse.name, func(t *testing.T) {
+			result, err := parse.run(response)
+			assert.NoError(t, err)
+			parsed, ok := result.(*ReviewRLMResult)
+			assert.True(t, ok)
+			assert.Equal(t, canonical, parsed.Review)
+			assert.Equal(t, canonical, parsed.Parsed.RawReview)
+		})
+	}
+}
+
+func TestReviewResultCanonicalizationRejectsInvalidSchemaBoundary(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		response string
+		want     string
+	}{
+		{
+			name:     "missing grade heading",
+			response: "Analysis complete.\n\n## Summary\nNo grade was supplied.",
+			want:     "missing a schema heading",
+		},
+		{
+			name: "grade heading only in a fence",
+			response: "Analysis complete.\n\n```markdown\n" +
+				"## Grade: A\n\n## Summary\nThis is an example.\n```\n",
+			want: "missing a schema heading",
+		},
+		{
+			name: "duplicate grade headings",
+			response: "Analysis complete.\n\n## Grade: A\n\n## Summary\nFirst.\n\n" +
+				"## Grade: A\n\n## Summary\nSecond.",
+			want: "exactly one schema grade heading",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := (ReviewPRDef{}).ParseResult(tt.response)
+			assert.Nil(t, result)
+			assert.ErrorContains(t, err, tt.want)
+		})
+	}
+}
+
+func TestReviewValidationRejectsNonCanonicalFinalEnvelope(t *testing.T) {
+	canonical := completeReviewWithCoverage("- **File**: `ratchet.go` — reviewed the exact changed file.\n" +
+		"- **Feedback disposition**: `NONE_SUPPLIED` — no prior feedback was supplied.\n" +
+		"- **Verification**: focused test passed.")
+	result := &ReviewRLMResult{
+		Review: "Raw analysis must not be posted.\n\n" + canonical,
+		Parsed: ParseReview(canonical),
+	}
+
+	err := (ReviewBranchDef{ChangedFiles: []string{"ratchet.go"}}).ValidateResult(result)
+	assert.ErrorContains(t, err, "must start with one schema heading")
+}
+
 func TestReviewProjectDef_Interface(t *testing.T) {
 	def := ReviewProjectDef{}
 

@@ -2,6 +2,7 @@ package commands
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -33,16 +34,16 @@ func (ReviewBranchDef) AllowedTools() []string {
 }
 
 func (ReviewBranchDef) ParseResult(response string) (any, error) {
-	return &ReviewRLMResult{
-		Review: response,
-		Parsed: ParseReview(response),
-	}, nil
+	return parseFinalReviewResult(response)
 }
 
 func (d ReviewBranchDef) ValidateResult(result any) error {
 	review, ok := result.(*ReviewRLMResult)
 	if !ok {
 		return fmt.Errorf("unexpected branch review result type %T", result)
+	}
+	if err := validateFinalReviewResult(review); err != nil {
+		return err
 	}
 	return ValidateParsedReview(review.Parsed, ReviewValidationOptions{
 		ChangedFiles:      d.ChangedFiles,
@@ -132,16 +133,16 @@ func reviewAllowedTools() []string {
 }
 
 func (ReviewPRDef) ParseResult(response string) (any, error) {
-	return &ReviewRLMResult{
-		Review: response,
-		Parsed: ParseReview(response),
-	}, nil
+	return parseFinalReviewResult(response)
 }
 
 func (d ReviewPRDef) ValidateResult(result any) error {
 	review, ok := result.(*ReviewRLMResult)
 	if !ok {
 		return fmt.Errorf("unexpected PR review result type %T", result)
+	}
+	if err := validateFinalReviewResult(review); err != nil {
+		return err
 	}
 	return ValidateParsedReview(review.Parsed, ReviewValidationOptions{
 		ChangedFiles:                d.ChangedFiles,
@@ -152,6 +153,112 @@ func (d ReviewPRDef) ValidateResult(result any) error {
 		RequiredFeedbackIDs:         d.RequiredFeedbackIDs,
 		RequirePassingRemoteCI:      true,
 	})
+}
+
+var finalReviewGradeHeadingRE = regexp.MustCompile(`^## Grade:\s*\[?[A-F]\]?\s*$`)
+
+func parseFinalReviewResult(response string) (*ReviewRLMResult, error) {
+	review, err := canonicalFinalReview(response)
+	if err != nil {
+		return nil, err
+	}
+	return &ReviewRLMResult{
+		Review: review,
+		Parsed: ParseReview(review),
+	}, nil
+}
+
+func canonicalFinalReview(response string) (string, error) {
+	normalized := strings.ReplaceAll(response, "\r\n", "\n")
+	normalized = strings.ReplaceAll(normalized, "\r", "\n")
+	lines := strings.Split(strings.TrimSpace(normalized), "\n")
+
+	start := -1
+	fence := ""
+	for i, line := range lines {
+		if marker := reviewFenceMarker(line); marker != "" {
+			switch fence {
+			case "":
+				fence = marker
+			case marker:
+				fence = ""
+			}
+			continue
+		}
+		if fence == "" && finalReviewGradeHeadingRE.MatchString(line) {
+			start = i
+			break
+		}
+	}
+	if start < 0 {
+		return "", fmt.Errorf(`final review is missing a schema heading such as "## Grade: A"`)
+	}
+
+	review := strings.TrimSpace(strings.Join(lines[start:], "\n"))
+	if err := validateCanonicalFinalReview(review); err != nil {
+		return "", err
+	}
+	return review, nil
+}
+
+func validateFinalReviewResult(review *ReviewRLMResult) error {
+	if review == nil {
+		return fmt.Errorf("final review result is missing")
+	}
+	if err := validateCanonicalFinalReview(review.Review); err != nil {
+		return err
+	}
+	if review.Parsed == nil {
+		return fmt.Errorf("parsed review is missing")
+	}
+	if review.Parsed.RawReview != review.Review {
+		return fmt.Errorf("parsed review does not match the canonical final review")
+	}
+	return nil
+}
+
+func validateCanonicalFinalReview(review string) error {
+	if review == "" || strings.TrimSpace(review) != review {
+		return fmt.Errorf(`final review must start with one schema heading such as "## Grade: A"`)
+	}
+
+	lines := strings.Split(review, "\n")
+	if len(lines) == 0 || !finalReviewGradeHeadingRE.MatchString(lines[0]) {
+		return fmt.Errorf(`final review must start with one schema heading such as "## Grade: A"`)
+	}
+
+	headings := 0
+	fence := ""
+	for _, line := range lines {
+		if marker := reviewFenceMarker(line); marker != "" {
+			switch fence {
+			case "":
+				fence = marker
+			case marker:
+				fence = ""
+			}
+			continue
+		}
+		if fence == "" && finalReviewGradeHeadingRE.MatchString(line) {
+			headings++
+		}
+	}
+	if headings != 1 {
+		return fmt.Errorf("final review must contain exactly one schema grade heading, got %d", headings)
+	}
+	return nil
+}
+
+func reviewFenceMarker(line string) string {
+	trimmed := strings.TrimSpace(line)
+	switch {
+	case strings.HasPrefix(trimmed, "```"):
+		return "```"
+	case strings.HasPrefix(trimmed, "~~~"):
+		return "~~~"
+	default:
+		return ""
+	}
 }
 
 func (d ReviewPRDef) ValidateRLMExecution(result any, execution *oneshot.RLMResult) error {
