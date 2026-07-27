@@ -88,6 +88,11 @@ NON-NEGOTIABLE REVIEW RULES:
 - APPROVE requires Grade A with no Findings and no Suggestions. Put useful non-defect observations in Remarks.
 - A finding must prove a changed behavior, contract, security, data, performance, or test defect.
 - Do not report wording, comments, naming, style, documentation, maintainability, extensibility, or future support as findings without a demonstrated failure.
+- Never report ASD-STE100, prose, voice, noun-cluster, wording, naming, or documentation-style findings. Put them in Remarks unless a required validator or CI check fails.
+- A rule that forbids noun clusters longer than three nouns permits clusters of three nouns.
+- Do not ask for more test shapes only because more shapes exist. Report missing coverage only when a current contract route remains untested or unresolved.
+- If Falsification concludes DISPROVED, omit findings based only on a future recurrence of that disproved failure.
+- Copy source identifiers, registry keys, check names, and paths exactly from supplied evidence. Do not invent or paraphrase an identifier.
 - Do not claim provider finish-reason support without an exact changed branch or test that proves the claim.
 
 %s
@@ -183,6 +188,7 @@ Notable observations that aren't issues:
 - **Recommendation**: APPROVE / REQUEST CHANGES / NEEDS DISCUSSION
 - **Blockers**: FINDING IDs that must be resolved before merge
 - **Suggestions**: FINDING IDs that are optional improvements
+- REQUEST CHANGES requires at least one Blocker or a proved current failure. Use NEEDS DISCUSSION for non-blocking Suggestions.
 
 SEVERITY DEFINITIONS:
 - CRITICAL: Security issues, data integrity risks, breaking changes

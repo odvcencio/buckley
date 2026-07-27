@@ -121,6 +121,18 @@ func TestPRReviewPromptRestrictsMinorFindingsToRealDefects(t *testing.T) {
 	if strings.Contains(prompt, "MINOR: Style, naming, documentation, minor improvements") {
 		t.Fatal("PR prompt still classifies style as a general MINOR finding")
 	}
+	for _, want := range []string{
+		"Never report ASD-STE100",
+		"permits clusters of three nouns",
+		"more test shapes only because more shapes exist",
+		"Falsification concludes DISPROVED",
+		"Do not invent or paraphrase an identifier",
+		"REQUEST CHANGES requires at least one Blocker",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("PR prompt missing %q", want)
+		}
+	}
 }
 
 func TestBranchReviewPromptDoesNotMandateBroadGoSweep(t *testing.T) {

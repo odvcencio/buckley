@@ -1039,8 +1039,85 @@ func TestReviewApprovalRequiresGradeAWithoutFindingsOrSuggestions(t *testing.T) 
 	result, err = def.ParseResult(withSuggestion)
 	assert.NoError(t, err)
 	validationErr := def.ValidateResult(result)
-	assert.ErrorContains(t, validationErr, "Findings is not empty")
-	assert.ErrorContains(t, validationErr, "Suggestions is not empty")
+	assert.ErrorContains(t, validationErr, "speculative or self-disproved evidence")
+}
+
+func TestReviewValidationRejectsNonDemonstratedFindings(t *testing.T) {
+	coverage := "- **File**: `ratchet.go` — reviewed the changed behavior.\n" +
+		"- **Feedback disposition**: `NONE_SUPPLIED` — no prior feedback was supplied.\n" +
+		"- **Verification**: named remote checks passed."
+	def := ReviewPRDef{
+		ChangedFiles: []string{"ratchet.go"},
+		CIStatus:     "passing (1/1)",
+		CIProvenance: prCISourceHead,
+	}
+
+	tests := []struct {
+		name    string
+		finding string
+		want    string
+	}{
+		{
+			name: "style",
+			finding: `### FINDING-001: [MINOR] ASD-STE100 prose violation
+- **File**: ratchet.go:1
+- **Evidence**: The sentence contains a three-word noun cluster.
+- **Business Impact**: The wording could slow future maintenance.
+- **Fix**: Rewrite the prose.`,
+			want: "reports prose or style",
+		},
+		{
+			name: "future-only",
+			finding: `### FINDING-001: [MINOR] Add another future fixture
+- **File**: ratchet.go:1
+- **Evidence**: Current tests disprove the risk, but a future provider could add another value.
+- **Business Impact**: Future provider maintenance could need another test.
+- **Fix**: Add a speculative fixture.`,
+			want: "speculative or self-disproved evidence",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			review := strings.Replace(completeReviewWithCoverage(coverage), "## Grade: A", "## Grade: B", 1)
+			review = strings.Replace(review, "## Findings\nNone.", "## Findings\n"+tc.finding, 1)
+			review = strings.Replace(review, "**Recommendation**: APPROVE", "**Recommendation**: NEEDS DISCUSSION", 1)
+			review = strings.Replace(review, "**Suggestions**: None", "**Suggestions**: FINDING-001", 1)
+
+			result, err := def.ParseResult(review)
+			assert.NoError(t, err)
+			assert.ErrorContains(t, def.ValidateResult(result), tc.want)
+		})
+	}
+}
+
+func TestReviewValidationRequiresBlockerForRequestChanges(t *testing.T) {
+	coverage := "- **File**: `ratchet.go` — reviewed the changed behavior.\n" +
+		"- **Feedback disposition**: `NONE_SUPPLIED` — no prior feedback was supplied.\n" +
+		"- **Verification**: named remote checks passed."
+	review := strings.Replace(completeReviewWithCoverage(coverage), "## Grade: A", "## Grade: B", 1)
+	review = strings.Replace(review, "## Findings\nNone.", `## Findings
+### FINDING-001: [MINOR] Empty input returns the wrong status
+- **File**: ratchet.go:1
+- **Evidence**: The changed empty branch returns success instead of the required unavailable status.
+- **Business Impact**: Callers accept an unavailable result.
+- **Fix**: Return the unavailable status.`, 1)
+	review = strings.Replace(review, "**Recommendation**: APPROVE", "**Recommendation**: REQUEST CHANGES", 1)
+	review = strings.Replace(review, "**Suggestions**: None", "**Suggestions**: FINDING-001", 1)
+
+	def := ReviewPRDef{
+		ChangedFiles: []string{"ratchet.go"},
+		CIStatus:     "passing (1/1)",
+		CIProvenance: prCISourceHead,
+	}
+	result, err := def.ParseResult(review)
+	assert.NoError(t, err)
+	assert.ErrorContains(t, def.ValidateResult(result), "REQUEST CHANGES requires a blocker")
+
+	discussion := strings.Replace(review, "**Recommendation**: REQUEST CHANGES", "**Recommendation**: NEEDS DISCUSSION", 1)
+	result, err = def.ParseResult(discussion)
+	assert.NoError(t, err)
+	assert.NoError(t, def.ValidateResult(result))
 }
 
 func TestReviewCoverageLedgerUsesNormalizedExactPaths(t *testing.T) {
