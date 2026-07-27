@@ -101,12 +101,12 @@ func DefaultConfig() *Config {
 		Buckbot: BuckbotConfig{
 			Model:                 defaultOpenRouterCommitModel,
 			CriticModel:           "",
-			Reasoning:             "medium",
+			Reasoning:             "auto",
 			PerReviewBudgetUSD:    0.15,
 			MonthlyBudgetUSD:      25.00,
 			MaxReviewIterations:   0,
 			MaxValidationAttempts: 2,
-			MaxDiffBytes:          80_000,
+			MaxDiffBytes:          240_000,
 		},
 		Models: ModelConfig{
 			Planning:  defaultOpenRouterModel,

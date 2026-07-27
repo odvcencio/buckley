@@ -1,6 +1,7 @@
 outcome ReviewPlan {
     action: string
     size_class: string
+    reasoning_effort: string
     max_iterations: number
     max_tool_calls: number
     verification_timeout_seconds: number
@@ -16,6 +17,7 @@ strategy review_plan returns ReviewPlan {
     } then BroadReview {
         action: "bound_review",
         size_class: "broad",
+        reasoning_effort: "high",
         max_iterations: 14,
         max_tool_calls: 24,
         verification_timeout_seconds: 90,
@@ -30,6 +32,7 @@ strategy review_plan returns ReviewPlan {
     } then StandardReview {
         action: "bound_review",
         size_class: "standard",
+        reasoning_effort: "medium",
         max_iterations: 11,
         max_tool_calls: 18,
         verification_timeout_seconds: 75,
@@ -40,6 +43,7 @@ strategy review_plan returns ReviewPlan {
     else FocusedReview {
         action: "bound_review",
         size_class: "focused",
+        reasoning_effort: "low",
         max_iterations: 8,
         max_tool_calls: 12,
         verification_timeout_seconds: 60,

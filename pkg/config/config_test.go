@@ -22,11 +22,11 @@ func TestDefaultConfig(t *testing.T) {
 	}
 	if cfg.Buckbot.Model != "qwen/qwen3.7-plus" ||
 		cfg.Buckbot.CriticModel != "" ||
-		cfg.Buckbot.Reasoning != "medium" ||
+		cfg.Buckbot.Reasoning != "auto" ||
 		cfg.Buckbot.PerReviewBudgetUSD != 0.15 ||
 		cfg.Buckbot.MaxReviewIterations != 0 ||
 		cfg.Buckbot.MaxValidationAttempts != 2 ||
-		cfg.Buckbot.MaxDiffBytes != 80_000 {
+		cfg.Buckbot.MaxDiffBytes != 240_000 {
 		t.Fatalf("unexpected Buckbot efficiency defaults: %+v", cfg.Buckbot)
 	}
 	wantCurated := []string{"z-ai/glm-5.2", "moonshotai/kimi-k2.7-code", "qwen/qwen3.7-max"}

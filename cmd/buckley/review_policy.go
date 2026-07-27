@@ -16,6 +16,7 @@ const (
 
 type reviewExecutionPlan struct {
 	sizeClass           string
+	reasoningEffort     string
 	maxIterations       int
 	maxToolCalls        int
 	verificationTimeout time.Duration
@@ -52,6 +53,7 @@ func resolveReviewReasoningEffort(cfg *config.Config, checker model.ReasoningChe
 func resolveReviewExecutionPlan(engine *rules.Engine, facts rules.ReviewPlanFacts) reviewExecutionPlan {
 	plan := reviewExecutionPlan{
 		sizeClass:           "standard",
+		reasoningEffort:     "medium",
 		maxIterations:       11,
 		maxToolCalls:        18,
 		verificationTimeout: 75 * time.Second,
@@ -67,6 +69,9 @@ func resolveReviewExecutionPlan(engine *rules.Engine, facts rules.ReviewPlanFact
 	}
 	if value, ok := result.Params["size_class"].(string); ok && strings.TrimSpace(value) != "" {
 		plan.sizeClass = strings.TrimSpace(value)
+	}
+	if value, ok := result.Params["reasoning_effort"].(string); ok && validReviewReasoningEffort(value) {
+		plan.reasoningEffort = strings.ToLower(strings.TrimSpace(value))
 	}
 	plan.maxIterations = reviewPlanInt(result.Params["max_iterations"], plan.maxIterations)
 	plan.maxToolCalls = reviewPlanInt(result.Params["max_tool_calls"], plan.maxToolCalls)
@@ -102,6 +107,9 @@ func (opts automatedReviewOptions) withExecutionPlan(plan reviewExecutionPlan) a
 	opts.explorationTimeout = plan.explorationTimeout
 	opts.synthesisLead = plan.synthesisLead
 	opts.sizeClass = plan.sizeClass
+	if opts.adaptiveReasoning {
+		opts.reasoningEffort = plan.reasoningEffort
+	}
 	return opts
 }
 
@@ -111,6 +119,7 @@ func appendReviewExecutionPlan(prompt string, opts automatedReviewOptions) strin
 ## Bounded Review Plan
 
 - Size class: %s
+- Reasoning effort: %s
 - Use at most %d model turns and %d total inspection or verification calls.
 - Limit each verification command to %d seconds.
 - Finish evidence collection within %d seconds.
@@ -120,10 +129,43 @@ func appendReviewExecutionPlan(prompt string, opts automatedReviewOptions) strin
 - If required evidence cannot fit or project guidance forbids it, finish with a non-approval verdict.
 `,
 		strings.ToUpper(opts.sizeClass),
+		strings.ToUpper(opts.reasoningEffort),
 		opts.maxIterations,
 		opts.maxToolCalls,
 		int(opts.verificationTimeout/time.Second),
 		int(opts.explorationTimeout/time.Second),
 		int(opts.synthesisLead/time.Second),
 	)
+}
+
+func resolveConfiguredReviewReasoning(cfg *config.Config) string {
+	if cfg == nil {
+		return "medium"
+	}
+	switch value := strings.ToLower(strings.TrimSpace(cfg.Buckbot.Reasoning)); value {
+	case "minimal", "low", "medium", "high", "xhigh":
+		return value
+	default:
+		return "medium"
+	}
+}
+
+func reviewReasoningIsAdaptive(cfg *config.Config, explicit string) bool {
+	if validReviewReasoningEffort(explicit) {
+		return false
+	}
+	if cfg == nil {
+		return true
+	}
+	value := strings.ToLower(strings.TrimSpace(cfg.Buckbot.Reasoning))
+	return value == "" || value == "auto"
+}
+
+func validReviewReasoningEffort(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "minimal", "low", "medium", "high", "xhigh":
+		return true
+	default:
+		return false
+	}
 }

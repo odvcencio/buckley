@@ -36,7 +36,7 @@ func parseReviewPRCommandOptions(args []string) (reviewPRCommandOptions, error) 
 	fs := flag.NewFlagSet("review-pr", flag.ContinueOnError)
 	verbose := fs.Bool("verbose", false, "show full context and reasoning")
 	showCost := fs.Bool("cost", true, "show token/cost breakdown")
-	post := fs.Bool("post", true, "post the completed review to GitHub")
+	post := fs.Bool("post", false, "post the completed review to GitHub (default: dry run)")
 	modelFlag := fs.String("model", "", "model to use (default: BUCKLEY_MODEL_REVIEW or buckbot.model)")
 	criticModel := fs.String("critic-model", "", "opt-in approval critic model for large or business-critical reviews")
 	timeout := fs.Duration("timeout", defaultReviewTimeout, "total review timeout")
@@ -247,6 +247,8 @@ type automatedReviewOptions struct {
 	explorationTimeout  time.Duration
 	synthesisLead       time.Duration
 	sizeClass           string
+	reasoningEffort     string
+	adaptiveReasoning   bool
 	engine              *rules.Engine
 }
 
@@ -255,10 +257,12 @@ func defaultAutomatedReviewOptions(cfg *config.Config) automatedReviewOptions {
 		return automatedReviewOptions{}
 	}
 	opts := automatedReviewOptions{
-		maxIterations: cfg.Buckbot.MaxReviewIterations,
-		maxRetries:    cfg.Buckbot.MaxValidationAttempts,
-		maxDiffBytes:  cfg.Buckbot.MaxDiffBytes,
-		maxCostUSD:    cfg.Buckbot.PerReviewBudgetUSD,
+		maxIterations:     cfg.Buckbot.MaxReviewIterations,
+		maxRetries:        cfg.Buckbot.MaxValidationAttempts,
+		maxDiffBytes:      cfg.Buckbot.MaxDiffBytes,
+		maxCostUSD:        cfg.Buckbot.PerReviewBudgetUSD,
+		reasoningEffort:   resolveConfiguredReviewReasoning(cfg),
+		adaptiveReasoning: reviewReasoningIsAdaptive(cfg, reviewReasoningOverride()),
 	}
 	if strings.TrimSpace(cfg.Buckbot.CriticModel) != "" {
 		opts.criticReserveUSD = cfg.Buckbot.PerReviewBudgetUSD * 0.12
@@ -330,6 +334,7 @@ func runPRReviewWithOptions(ctx context.Context, prRef string, framework *onesho
 		ExplorationTimeout:       opts.explorationTimeout,
 		SynthesisLead:            opts.synthesisLead,
 		VerificationTimeout:      opts.verificationTimeout,
+		ReasoningEffort:          opts.reasoningEffort,
 		SnapshotPolicy: model.ReviewSnapshotPolicy{
 			Mode:           model.ReviewSnapshotHead,
 			ExpectedCommit: prCtx.PR.HeadSHA,

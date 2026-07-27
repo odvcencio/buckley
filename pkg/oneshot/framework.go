@@ -50,6 +50,7 @@ type RLMExecutionOpts struct {
 	ExplorationTimeout  time.Duration
 	SynthesisLead       time.Duration
 	VerificationTimeout time.Duration
+	ReasoningEffort     string
 }
 
 // ToolInvoker runs a single tool-shaped one-shot model invocation.
@@ -259,6 +260,9 @@ type RLMRunOpts struct {
 	// VerificationTimeout caps each snapshot verification command.
 	VerificationTimeout time.Duration
 
+	// ReasoningEffort overrides the runner default for this review plan.
+	ReasoningEffort string
+
 	// SnapshotPolicy captures the exact Git state that native review
 	// verification may inspect. It is captured once before the primary pass and
 	// reused unchanged for validation retries and the approval critic.
@@ -323,6 +327,7 @@ func (f *Framework) RunRLM(ctx context.Context, def RLMDefinition, opts RLMRunOp
 		ExplorationTimeout:  opts.ExplorationTimeout,
 		SynthesisLead:       opts.SynthesisLead,
 		VerificationTimeout: opts.VerificationTimeout,
+		ReasoningEffort:     opts.ReasoningEffort,
 	}
 	if opts.MaxIterations > 0 {
 		executionOpts.MaxIterations = opts.MaxIterations

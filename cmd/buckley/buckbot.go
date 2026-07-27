@@ -486,6 +486,7 @@ func formatBuckbotGitHubReview(parsed *commands.ParsedReview, review, headSHA st
 		verdict = "CHANGES REQUESTED"
 		noteType = "CAUTION"
 	}
+	review = collapseBuckbotEvidence(review)
 	return fmt.Sprintf(
 		"> [!%s]\n> **Buckbot · Grade %s · %s**\n> Reviewed commit `%s`. Line comments contain only demonstrated findings.\n\n%s",
 		noteType,
@@ -494,6 +495,36 @@ func formatBuckbotGitHubReview(parsed *commands.ParsedReview, review, headSHA st
 		revision,
 		review,
 	)
+}
+
+func collapseBuckbotEvidence(review string) string {
+	for _, section := range []struct {
+		heading string
+		label   string
+	}{
+		{heading: "Coverage", label: "Full changed-file coverage ledger"},
+		{heading: "Invariant Audit", label: "Cross-file invariant audit"},
+		{heading: "Falsification", label: "Strongest-failure falsification"},
+	} {
+		review = collapseBuckbotSection(review, section.heading, section.label)
+	}
+	return review
+}
+
+func collapseBuckbotSection(review, heading, label string) string {
+	marker := "## " + heading
+	start := strings.Index(review, marker)
+	if start < 0 || (start > 0 && review[start-1] != '\n') {
+		return review
+	}
+	contentStart := start + len(marker)
+	end := len(review)
+	if next := strings.Index(review[contentStart:], "\n## "); next >= 0 {
+		end = contentStart + next
+	}
+	section := strings.TrimSpace(review[start:end])
+	replacement := fmt.Sprintf("<details>\n<summary><strong>%s</strong></summary>\n\n%s\n\n</details>", label, section)
+	return review[:start] + replacement + review[end:]
 }
 
 func postBuckbotReviewPayload(ctx context.Context, event gitwatcher.PullRequestEvent, review string, inlineComments []map[string]any) error {

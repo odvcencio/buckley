@@ -114,6 +114,14 @@ Grading criteria:
 - **Blast Radius**: What breaks if this has bugs?
 - **Rollback Complexity**: Easy / Medium / Hard
 
+## Structural Impact
+- **Canopy**: PASS|WARN|UNAVAILABLE — index scope and measured runtime
+- **Changed surface**: exact changed symbol and file counts reported by Canopy
+- **Dependents**: direct and transitive consumers reported by Canopy
+- **Complexity**: changed hotspots or deltas reported by Canopy
+- **Boundaries**: architecture violations, or NONE
+- Use "not reported" for any metric absent from the supplied Canopy evidence. Never estimate a structural metric.
+
 ## CI Status
 - Build: PASS|FAIL|PENDING|NOT_RUN|UNAVAILABLE|UNKNOWN — command or named remote-check evidence
 - Tests: PASS|FAIL|PENDING|NOT_RUN|UNAVAILABLE|UNKNOWN — command or named remote-check evidence

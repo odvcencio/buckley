@@ -128,10 +128,14 @@ func (r *RLMRunner) Run(ctx context.Context, systemPrompt, task string, allowedT
 	defer cleanupSnapshot()
 
 	// Create sub-agent configuration
+	reasoningEffort := r.reasoning
+	if override := normalizeRLMReasoningEffort(opts.ReasoningEffort); override != "" {
+		reasoningEffort = override
+	}
 	agentCfg := rlm.SubAgentInstanceConfig{
 		ID:                 fmt.Sprintf("oneshot-%d", time.Now().UnixNano()),
 		Model:              modelToUse,
-		Reasoning:          r.reasoning,
+		Reasoning:          reasoningEffort,
 		SystemPrompt:       systemPrompt,
 		MaxIterations:      opts.MaxIterations,
 		MaxToolCalls:       opts.MaxToolCalls,

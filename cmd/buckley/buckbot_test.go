@@ -365,13 +365,16 @@ func TestFormatBuckbotInlineFinding(t *testing.T) {
 }
 
 func TestFormatBuckbotGitHubReview(t *testing.T) {
-	approved := commands.ParseReview("## Grade: A\n\n## Verdict\n- **Approved**: YES\n- **Blockers**: NONE")
+	approved := commands.ParseReview("## Grade: A\n\n## Coverage\n- every file\n\n## Invariant Audit\n- bounds\n\n## Falsification\n- disproved\n\n## Verdict\n- **Approved**: YES\n- **Blockers**: NONE")
 	got := formatBuckbotGitHubReview(approved, approved.RawReview, "1234567890abcdef")
 	for _, want := range []string{
 		"[!TIP]",
 		"Buckbot · Grade A · READY TO MERGE",
 		"`1234567890ab`",
 		"Line comments contain only demonstrated findings.",
+		"<summary><strong>Full changed-file coverage ledger</strong></summary>",
+		"<summary><strong>Cross-file invariant audit</strong></summary>",
+		"<summary><strong>Strongest-failure falsification</strong></summary>",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("GitHub review = %q, want %q", got, want)

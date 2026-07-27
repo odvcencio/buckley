@@ -34,6 +34,7 @@ type scriptedRLMExecutor struct {
 	exploration  []time.Duration
 	synthesis    []time.Duration
 	verification []time.Duration
+	reasoning    []string
 	maxCosts     []float64
 }
 
@@ -47,6 +48,7 @@ func (s *scriptedRLMExecutor) Run(_ context.Context, system string, task string,
 	s.exploration = append(s.exploration, opts.ExplorationTimeout)
 	s.synthesis = append(s.synthesis, opts.SynthesisLead)
 	s.verification = append(s.verification, opts.VerificationTimeout)
+	s.reasoning = append(s.reasoning, opts.ReasoningEffort)
 	s.maxCosts = append(s.maxCosts, opts.MaxCostUSD)
 	if len(s.responses) == 0 {
 		return nil, fmt.Errorf("no scripted response")
@@ -218,6 +220,7 @@ func TestRunRLMPropagatesBoundedReviewPlan(t *testing.T) {
 		ExplorationTimeout:  3 * time.Minute,
 		SynthesisLead:       75 * time.Second,
 		VerificationTimeout: 90 * time.Second,
+		ReasoningEffort:     "low",
 	}); err != nil {
 		t.Fatalf("RunRLM() error = %v", err)
 	}
@@ -232,6 +235,9 @@ func TestRunRLMPropagatesBoundedReviewPlan(t *testing.T) {
 	}
 	if len(runner.verification) != 1 || runner.verification[0] != 90*time.Second {
 		t.Fatalf("verification limits = %v, want [90s]", runner.verification)
+	}
+	if len(runner.reasoning) != 1 || runner.reasoning[0] != "low" {
+		t.Fatalf("reasoning efforts = %v, want [low]", runner.reasoning)
 	}
 }
 

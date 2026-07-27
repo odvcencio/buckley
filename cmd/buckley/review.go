@@ -226,6 +226,8 @@ func newReviewCommandRuntime(cfg *config.Config, mgr *model.Manager) (*reviewCom
 	})
 	framework := oneshot.NewFramework(nil, arbEngine).WithRLMRunner(rlmRunner)
 	policy := defaultAutomatedReviewOptions(cfg)
+	policy.reasoningEffort = reasoningEffort
+	policy.adaptiveReasoning = reviewReasoningIsAdaptive(cfg, reviewReasoningOverride())
 	policy.engine = arbEngine
 	criticModel := ""
 	if cfg != nil {
@@ -351,6 +353,7 @@ func runProjectReviewWithPolicy(ctx context.Context, framework *oneshot.Framewor
 		ExplorationTimeout:       reviewPolicy.explorationTimeout,
 		SynthesisLead:            reviewPolicy.synthesisLead,
 		VerificationTimeout:      reviewPolicy.verificationTimeout,
+		ReasoningEffort:          reviewPolicy.reasoningEffort,
 		SnapshotPolicy:           policy,
 		ReviewSnapshot:           snapshot,
 	})
@@ -437,6 +440,7 @@ func runBranchReviewWithPolicy(ctx context.Context, opts reviewCommandOptions, f
 		ExplorationTimeout:       reviewPolicy.explorationTimeout,
 		SynthesisLead:            reviewPolicy.synthesisLead,
 		VerificationTimeout:      reviewPolicy.verificationTimeout,
+		ReasoningEffort:          reviewPolicy.reasoningEffort,
 		SnapshotPolicy:           policy,
 		ReviewSnapshot:           snapshot,
 	})

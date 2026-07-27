@@ -25,6 +25,7 @@ func (c reviewReasoningChecker) SupportsReasoning(string) bool {
 
 func TestResolveReviewReasoningEffortUsesBuckbotOverride(t *testing.T) {
 	cfg := config.DefaultConfig()
+	cfg.Buckbot.Reasoning = "medium"
 	cfg.Models.Reasoning = "xhigh"
 
 	got := resolveReviewReasoningEffort(cfg, reviewReasoningChecker{supported: true}, "qwen/qwen3.7-plus", "")
@@ -70,7 +71,8 @@ func TestResolveReviewExecutionPlanUsesGovernedSizeClasses(t *testing.T) {
 		FileCount: 3,
 		DiffBytes: 8_000,
 	})
-	if focused.sizeClass != "focused" || focused.maxIterations != 8 || focused.maxToolCalls != 12 ||
+	if focused.sizeClass != "focused" || focused.reasoningEffort != "low" ||
+		focused.maxIterations != 8 || focused.maxToolCalls != 12 ||
 		focused.verificationTimeout != 60*time.Second || focused.explorationTimeout != 2*time.Minute ||
 		focused.synthesisLead != 60*time.Second {
 		t.Fatalf("focused plan = %#v", focused)
@@ -81,7 +83,8 @@ func TestResolveReviewExecutionPlanUsesGovernedSizeClasses(t *testing.T) {
 		DiffBytes:         8_000,
 		ContextIncomplete: true,
 	})
-	if broad.sizeClass != "broad" || broad.maxIterations != 14 || broad.maxToolCalls != 24 ||
+	if broad.sizeClass != "broad" || broad.reasoningEffort != "high" ||
+		broad.maxIterations != 14 || broad.maxToolCalls != 24 ||
 		broad.verificationTimeout != 90*time.Second || broad.explorationTimeout != 3*time.Minute ||
 		broad.synthesisLead != 90*time.Second {
 		t.Fatalf("broad plan = %#v", broad)
@@ -89,8 +92,9 @@ func TestResolveReviewExecutionPlanUsesGovernedSizeClasses(t *testing.T) {
 }
 
 func TestReviewExecutionPlanPreservesExplicitTurnOverride(t *testing.T) {
-	opts := automatedReviewOptions{maxIterations: 5}.withExecutionPlan(reviewExecutionPlan{
+	opts := automatedReviewOptions{maxIterations: 5, adaptiveReasoning: true}.withExecutionPlan(reviewExecutionPlan{
 		sizeClass:           "standard",
+		reasoningEffort:     "medium",
 		maxIterations:       11,
 		maxToolCalls:        18,
 		verificationTimeout: 2 * time.Minute,
@@ -101,7 +105,8 @@ func TestReviewExecutionPlanPreservesExplicitTurnOverride(t *testing.T) {
 		t.Fatalf("maxIterations = %d, want explicit override 5", opts.maxIterations)
 	}
 	if opts.maxToolCalls != 18 || opts.verificationTimeout != 2*time.Minute ||
-		opts.explorationTimeout != 4*time.Minute || opts.synthesisLead != 90*time.Second {
+		opts.explorationTimeout != 4*time.Minute || opts.synthesisLead != 90*time.Second ||
+		opts.reasoningEffort != "medium" {
 		t.Fatalf("execution plan was not applied: %#v", opts)
 	}
 }
@@ -109,6 +114,7 @@ func TestReviewExecutionPlanPreservesExplicitTurnOverride(t *testing.T) {
 func TestAppendReviewExecutionPlanGuidesBoundedEvidenceCollection(t *testing.T) {
 	prompt := appendReviewExecutionPlan("review this", automatedReviewOptions{
 		sizeClass:           "focused",
+		reasoningEffort:     "low",
 		maxIterations:       8,
 		maxToolCalls:        12,
 		verificationTimeout: 90 * time.Second,
@@ -117,6 +123,7 @@ func TestAppendReviewExecutionPlanGuidesBoundedEvidenceCollection(t *testing.T) 
 	})
 	for _, want := range []string{
 		"Size class: FOCUSED",
+		"Reasoning effort: LOW",
 		"at most 8 model turns and 12 total",
 		"Limit each verification command to 90 seconds",
 		"Finish evidence collection within 180 seconds",
@@ -127,5 +134,18 @@ func TestAppendReviewExecutionPlanGuidesBoundedEvidenceCollection(t *testing.T) 
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("prompt missing %q:\n%s", want, prompt)
 		}
+	}
+}
+
+func TestReviewExecutionPlanPreservesFixedReasoning(t *testing.T) {
+	opts := automatedReviewOptions{
+		reasoningEffort:   "medium",
+		adaptiveReasoning: false,
+	}.withExecutionPlan(reviewExecutionPlan{
+		sizeClass:       "broad",
+		reasoningEffort: "high",
+	})
+	if opts.reasoningEffort != "medium" {
+		t.Fatalf("reasoning effort = %q, want fixed medium", opts.reasoningEffort)
 	}
 }
