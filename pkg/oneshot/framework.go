@@ -498,8 +498,11 @@ func (f *Framework) runValidatedRLMPhase(
 		if err != nil {
 			if rlmResult != nil && strings.TrimSpace(rlmResult.Response) != "" {
 				// Preserve parseable partial work for callers that explicitly
-				// handle incomplete results. Never validate or accept it here.
-				result.value, _ = def.ParseResult(rlmResult.Response)
+				// handle incomplete results. Keep an earlier rejected response
+				// when the new attempt contains only an execution salvage.
+				if result.value == nil || !rlmResult.Incomplete {
+					result.value, _ = def.ParseResult(rlmResult.Response)
+				}
 			}
 			result.err = fmt.Errorf("RLM %s execution failed for %q: %w", phase, def.Name(), err)
 			return result

@@ -21,6 +21,21 @@ func (p partialRLMExecutor) Run(context.Context, string, string, []string, RLMEx
 	return p.result, p.err
 }
 
+type deadlineAfterRejectedRLMExecutor struct {
+	calls int
+}
+
+func (r *deadlineAfterRejectedRLMExecutor) Run(context.Context, string, string, []string, RLMExecutionOpts) (*RLMResult, error) {
+	r.calls++
+	if r.calls == 1 {
+		return &RLMResult{Response: "prior rejected review", FinishReason: "stop"}, nil
+	}
+	return &RLMResult{
+		Response:   "> [!WARNING]\n> **Incomplete agent result.**\n\nNo completed model output.",
+		Incomplete: true,
+	}, context.DeadlineExceeded
+}
+
 type scriptedRLMExecutor struct {
 	responses     []string
 	systems       []string
@@ -391,6 +406,25 @@ func TestRunRLMPreservesPartialValueOnExecutionDeadline(t *testing.T) {
 	}
 	if result.Trace == nil || result.Trace.Tokens.Input != 100 {
 		t.Fatalf("partial trace = %#v, want retained accounting", result.Trace)
+	}
+}
+
+func TestRunRLMDeadlineKeepsEarlierRejectedResponse(t *testing.T) {
+	runner := &deadlineAfterRejectedRLMExecutor{}
+	framework := NewFramework(nil, nil).WithRLMRunner(runner)
+
+	result, err := framework.RunRLM(context.Background(), validatingRLMDefinition{}, RLMRunOpts{
+		UserPrompt: "review this change",
+		MaxRetries: 2,
+	})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("RunRLM() error = %v, want deadline", err)
+	}
+	if result == nil || result.Value != "prior rejected review" {
+		t.Fatalf("result = %#v, want the earlier rejected response", result)
+	}
+	if runner.calls != 2 {
+		t.Fatalf("model calls = %d, want 2", runner.calls)
 	}
 }
 

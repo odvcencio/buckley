@@ -400,16 +400,7 @@ func (a *SubAgent) shouldSynthesize(ctx context.Context, iteration, maxIteration
 	if !ok {
 		return false
 	}
-	lead := a.effectiveSynthesisLead(deadline, startedAt)
-	return time.Until(deadline) <= lead
-}
-
-func (a *SubAgent) effectiveSynthesisLead(deadline, startedAt time.Time) time.Duration {
-	lead := a.synthesisLead
-	if proportionalLead := deadline.Sub(startedAt) / 3; proportionalLead < lead {
-		lead = proportionalLead
-	}
-	return lead
+	return time.Until(deadline) <= a.synthesisLead
 }
 
 func (a *SubAgent) explorationContext(ctx context.Context, startedAt time.Time) (context.Context, context.CancelFunc) {
@@ -423,7 +414,7 @@ func (a *SubAgent) explorationContext(ctx context.Context, startedAt time.Time) 
 	if !ok {
 		return context.WithCancel(ctx)
 	}
-	toolDeadline := deadline.Add(-a.effectiveSynthesisLead(deadline, startedAt))
+	toolDeadline := deadline.Add(-a.synthesisLead)
 	if a.explorationTimeout > 0 {
 		explorationDeadline := startedAt.Add(a.explorationTimeout)
 		if explorationDeadline.Before(toolDeadline) {

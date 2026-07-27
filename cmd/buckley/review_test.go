@@ -9,6 +9,7 @@ import (
 	"m31labs.dev/buckley/pkg/model"
 	"m31labs.dev/buckley/pkg/oneshot"
 	"m31labs.dev/buckley/pkg/oneshot/commands"
+	"m31labs.dev/buckley/pkg/transparency"
 )
 
 func TestParseReviewCommandOptions(t *testing.T) {
@@ -247,11 +248,33 @@ func TestReviewResultFromRLMExposesPrimaryAndCriticAttempts(t *testing.T) {
 
 func TestReviewResultFromRLMPreservesIncompleteState(t *testing.T) {
 	got := reviewResultFromRLM(&oneshot.RunResult{
-		Value:            &commands.ReviewRLMResult{Review: "partial review"},
+		Value: &commands.ReviewRLMResult{Review: "partial review"},
+		Trace: &transparency.Trace{Attempts: []transparency.TraceAttempt{{
+			Phase:   "primary",
+			Attempt: 1,
+			Trace: &transparency.Trace{
+				Content:  "raw rejected response",
+				Duration: 2 * time.Second,
+				Tokens:   transparency.TokenUsage{Input: 120, Output: 30},
+				Response: &transparency.ResponseTrace{FinishReason: "stop"},
+			},
+		}}},
 		Incomplete:       true,
 		IncompleteReason: "context deadline exceeded",
 	}, nil)
-	if !got.incomplete || !strings.Contains(got.reviewText, "Incomplete review") || !strings.Contains(got.reviewText, "partial review") || !strings.Contains(got.incompleteWhy, "deadline") {
+	for _, want := range []string{
+		"Incomplete review",
+		"partial review",
+		"Review attempt diagnostics",
+		"Finish reason: `stop`",
+		"120 input and 30 output",
+		"raw rejected response",
+	} {
+		if !strings.Contains(got.reviewText, want) {
+			t.Fatalf("incomplete review missing %q: %#v", want, got)
+		}
+	}
+	if !got.incomplete || !strings.Contains(got.incompleteWhy, "deadline") {
 		t.Fatalf("incomplete review result = %#v", got)
 	}
 	if got.parsed != nil {

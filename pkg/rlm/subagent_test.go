@@ -257,6 +257,27 @@ func TestSubAgentToolDeadlinePreservesSynthesisWindow(t *testing.T) {
 	}
 }
 
+func TestSubAgentToolDeadlineHonorsConfiguredReviewReserve(t *testing.T) {
+	agent := &SubAgent{
+		adaptive:      true,
+		synthesisLead: 165 * time.Second,
+	}
+	startedAt := time.Now()
+	parent, cancelParent := context.WithDeadline(context.Background(), startedAt.Add(255*time.Second))
+	defer cancelParent()
+
+	toolCtx, cancelTools := agent.explorationContext(parent, startedAt)
+	defer cancelTools()
+	got, ok := toolCtx.Deadline()
+	if !ok {
+		t.Fatal("tool context has no deadline")
+	}
+	want := startedAt.Add(90 * time.Second)
+	if delta := got.Sub(want); delta < -time.Second || delta > time.Second {
+		t.Fatalf("tool deadline = %s, want about %s", got, want)
+	}
+}
+
 func TestSubAgentExplorationDeadlineUsesShorterSizeBudget(t *testing.T) {
 	agent := &SubAgent{
 		adaptive:           true,

@@ -49,6 +49,9 @@ type RLMResult struct {
 	// Response is the final text response
 	Response string
 
+	// Incomplete reports that execution ended before a final model response.
+	Incomplete bool
+
 	// FinishReason records why the provider stopped the final model turn.
 	FinishReason string
 
@@ -190,6 +193,7 @@ func (r *RLMRunner) Run(ctx context.Context, systemPrompt, task string, allowedT
 	// Build result
 	result := &RLMResult{
 		Response:          response,
+		Incomplete:        executionErr != nil,
 		FinishReason:      agentResult.FinishReason,
 		ToolCalls:         agentResult.ToolCalls,
 		TokensUsed:        agentResult.TokensUsed,

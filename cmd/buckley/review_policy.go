@@ -59,11 +59,11 @@ func resolveReviewExecutionPlan(engine *rules.Engine, facts rules.ReviewPlanFact
 		sizeClass:           "standard",
 		reasoningEffort:     "medium",
 		reasoningMaxTokens:  3072,
-		maxIterations:       8,
-		maxToolCalls:        8,
-		verificationTimeout: 75 * time.Second,
-		explorationTimeout:  120 * time.Second,
-		synthesisLead:       105 * time.Second,
+		maxIterations:       5,
+		maxToolCalls:        5,
+		verificationTimeout: 60 * time.Second,
+		explorationTimeout:  75 * time.Second,
+		synthesisLead:       165 * time.Second,
 	}
 	if engine == nil {
 		return plan
