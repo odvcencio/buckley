@@ -18,7 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Provider-supplied reasoning and tool results render as durable progress entries instead of transient status messages.
 - Project reviews use bounded structural sampling to reduce elapsed time and token spend.
 - Buckbot uses `qwen/qwen3.7-plus` with low, medium, or high reasoning selected from the governed change size.
-- `codex/auto` scales Buckbot from Luna to Terra to Sol as review size increases. Exact model overrides remain fixed.
+- `codex/auto` scales Buckbot from Luna to Terra to Sol as review size increases. Sol uses medium reasoning to avoid a long latency tail. Exact model overrides remain fixed.
 - Pull request reviews stay local unless the caller uses `--post`.
 
 ### Fixed

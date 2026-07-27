@@ -125,9 +125,17 @@ func TestReviewExecutionPlanScalesAdaptiveCodexModels(t *testing.T) {
 		opts := automatedReviewOptions{
 			modelID:            codexReviewModelStandard,
 			adaptiveCodexModel: true,
+			adaptiveReasoning:  true,
 		}.withExecutionPlan(reviewExecutionPlan{sizeClass: tt.size})
 		if opts.modelID != tt.want {
 			t.Fatalf("%s model = %q, want %q", tt.size, opts.modelID, tt.want)
+		}
+		wantReasoning := "medium"
+		if tt.size == "focused" {
+			wantReasoning = "low"
+		}
+		if opts.reasoningEffort != wantReasoning {
+			t.Fatalf("%s reasoning = %q, want %q", tt.size, opts.reasoningEffort, wantReasoning)
 		}
 	}
 }

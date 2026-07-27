@@ -115,6 +115,9 @@ func (opts automatedReviewOptions) withExecutionPlan(plan reviewExecutionPlan) a
 	}
 	if opts.adaptiveReasoning {
 		opts.reasoningEffort = plan.reasoningEffort
+		if opts.adaptiveCodexModel {
+			opts.reasoningEffort = codexReviewReasoningForSize(plan.sizeClass)
+		}
 	}
 	return opts
 }
@@ -164,6 +167,15 @@ func codexReviewModelForSize(sizeClass string) string {
 	default:
 		return codexReviewModelStandard
 	}
+}
+
+func codexReviewReasoningForSize(sizeClass string) string {
+	if strings.EqualFold(strings.TrimSpace(sizeClass), "focused") {
+		return "low"
+	}
+	// Terra and Sol use medium reasoning. Sol supplies the broad-review
+	// capacity without the long tail observed with high reasoning.
+	return "medium"
 }
 
 func resolveConfiguredReviewReasoning(cfg *config.Config) string {
