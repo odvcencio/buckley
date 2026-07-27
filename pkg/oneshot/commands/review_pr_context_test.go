@@ -1,11 +1,13 @@
 package commands
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"m31labs.dev/buckley/pkg/diffsignal"
 	"m31labs.dev/buckley/pkg/transparency"
@@ -519,6 +521,74 @@ func TestPRContextCompletenessRejectsCheckoutMismatch(t *testing.T) {
 	}}
 	if !ctx.HasIncompleteContext() {
 		t.Fatal("checkout mismatch must prevent an authoritative clean verdict")
+	}
+}
+
+func TestAssemblePRCanopyContextRunsOnceForImmutableCleanHead(t *testing.T) {
+	ctx := &PRContext{
+		PR:                 &PRInfo{Number: 41, Title: "Tune review", BaseSHA: "base-sha", HeadSHA: "head-sha"},
+		CheckoutSHA:        "head-sha",
+		localRepoRoot:      "/repo",
+		localHeadMatches:   true,
+		localWorktreeClean: true,
+	}
+	audit := transparency.NewContextAudit()
+	calls := 0
+	collect := func(_ context.Context, repoRoot, baseSHA string) canopyReviewEvidence {
+		calls++
+		if repoRoot != "/repo" || baseSHA != "base-sha" {
+			t.Fatalf("snapshot = %s at %s", baseSHA, repoRoot)
+		}
+		return canopyReviewEvidence{
+			Output:     `{"index_scope":"changed","blast_radius":4}`,
+			Status:     "available",
+			Runtime:    4600 * time.Millisecond,
+			IndexScope: "changed",
+		}
+	}
+
+	assemblePRCanopyContext(context.Background(), ctx, audit, collect)
+	firstPrompt := BuildPRPrompt(ctx)
+	secondPrompt := BuildPRPrompt(ctx)
+	if calls != 1 {
+		t.Fatalf("Canopy calls = %d, want one", calls)
+	}
+	for _, prompt := range []string{firstPrompt, secondPrompt} {
+		for _, want := range []string{
+			"## Primary Structural Review (Canopy)",
+			"**Measured runtime**: 4.6s",
+			"**Index scope**: changed",
+			`"blast_radius":4`,
+		} {
+			if !strings.Contains(prompt, want) {
+				t.Errorf("prompt missing %q:\n%s", want, prompt)
+			}
+		}
+	}
+}
+
+func TestAssemblePRCanopyContextOmitsEvidenceForCheckoutMismatch(t *testing.T) {
+	ctx := &PRContext{
+		PR:                 &PRInfo{Number: 42, Title: "Moved review", BaseSHA: "base-sha", HeadSHA: "expected-head"},
+		CheckoutSHA:        "different-head",
+		localRepoRoot:      "/repo",
+		localWorktreeClean: true,
+	}
+	audit := transparency.NewContextAudit()
+	calls := 0
+
+	assemblePRCanopyContext(context.Background(), ctx, audit,
+		func(context.Context, string, string) canopyReviewEvidence {
+			calls++
+			return canopyReviewEvidence{Output: `{"index_scope":"changed"}`, IndexScope: "changed"}
+		})
+
+	if calls != 0 {
+		t.Fatalf("Canopy calls = %d, want zero", calls)
+	}
+	prompt := BuildPRPrompt(ctx)
+	if strings.Contains(prompt, "Primary Structural Review") || strings.Contains(prompt, "Index scope") {
+		t.Fatalf("mismatched checkout leaked Canopy evidence:\n%s", prompt)
 	}
 }
 

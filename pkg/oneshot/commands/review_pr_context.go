@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
@@ -13,6 +14,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"m31labs.dev/buckley/pkg/diffsignal"
 	"m31labs.dev/buckley/pkg/transparency"
@@ -54,8 +56,14 @@ type PRContext struct {
 	Files                   []string
 	AgentsMD                string
 	CheckoutSHA             string
+	CanopyReview            string
+	CanopyRuntime           time.Duration
+	CanopyIndexScope        string
 	ContextStatus           []PRContextStatus
 	target                  prReference
+	localRepoRoot           string
+	localHeadMatches        bool
+	localWorktreeClean      bool
 }
 
 const (
@@ -105,7 +113,8 @@ type PRCheck struct {
 type prCommandRunner func(name string, args ...string) ([]byte, error)
 
 type prContextDependencies struct {
-	run prCommandRunner
+	run           prCommandRunner
+	collectCanopy func(context.Context, string, string) canopyReviewEvidence
 }
 
 // PRContextOptions controls automated-review context limits. Interactive
@@ -113,6 +122,7 @@ type prContextDependencies struct {
 // reduce only the diff while retaining metadata, feedback, and CI evidence.
 type PRContextOptions struct {
 	MaxDiffBytes int
+	Context      context.Context
 }
 
 // DefaultPRContextOptions returns the full interactive review context budget.
@@ -160,7 +170,8 @@ func AssemblePRContext(prRef string) (*PRContext, *transparency.ContextAudit, er
 // AssemblePRContextWithOptions gathers PR context with explicit size limits.
 func AssemblePRContextWithOptions(prRef string, opts PRContextOptions) (*PRContext, *transparency.ContextAudit, error) {
 	return assemblePRContextWithOptions(prRef, prContextDependencies{
-		run: defaultPRCommandRunner,
+		run:           defaultPRCommandRunner,
+		collectCanopy: collectCanopyReviewEvidence,
 	}, opts)
 }
 
@@ -292,6 +303,7 @@ func assemblePRContextWithOptions(prRef string, deps prContextDependencies, opts
 	}
 
 	assemblePRAgentsContext(prCtx, audit, deps)
+	assemblePRCanopyContext(opts.Context, prCtx, audit, deps.collectCanopy)
 	revalidateAssembledPRMetadata(prCtx, audit, deps.run)
 	audit.Add("context completeness", reviewEstimateTokens(formatPRContextStatus(prCtx.ContextStatus)))
 
@@ -422,6 +434,17 @@ func BuildPRPrompt(ctx *PRContext) string {
 		sb.WriteString("## Project Guidelines (applicable AGENTS.md chain)\n\n")
 		sb.WriteString(ctx.AgentsMD)
 		sb.WriteString("\n\n")
+	}
+
+	if ctx.CanopyReview != "" {
+		sb.WriteString("## Primary Structural Review (Canopy)\n\n")
+		sb.WriteString("Use this diff-scoped evidence before you open more files. Validate each finding against the immutable snapshot.\n\n")
+		sb.WriteString(fmt.Sprintf("- **Measured runtime**: %s\n", formatCanopyRuntime(ctx.CanopyRuntime)))
+		sb.WriteString(fmt.Sprintf("- **Index scope**: %s\n", ctx.CanopyIndexScope))
+		sb.WriteString(fmt.Sprintf("- **Snapshot**: local checkout at %s\n\n", displayPRRevision(ctx.CheckoutSHA)))
+		sb.WriteString("```json\n")
+		sb.WriteString(ctx.CanopyReview)
+		sb.WriteString("\n```\n\n")
 	}
 
 	sb.WriteString("## Diff\n\n")
@@ -1777,6 +1800,7 @@ func assemblePRAgentsContext(ctx *PRContext, audit *transparency.ContextAudit, d
 		recordPRContextFailure(ctx, audit, "Root AGENTS.md", fmt.Errorf("repository root was empty"))
 		return
 	}
+	ctx.localRepoRoot = root
 	if headOutput, headErr := deps.run("git", "--no-pager", "-C", root, "rev-parse", "HEAD"); headErr != nil {
 		recordPRContextFailure(ctx, audit, "Local verification checkout", headErr)
 	} else {
@@ -1786,6 +1810,7 @@ func assemblePRAgentsContext(ctx *PRContext, audit *transparency.ContextAudit, d
 				fmt.Sprintf("local HEAD %s does not match PR head %s; local read/search/shell evidence is not authoritative", ctx.CheckoutSHA, ctx.PR.HeadSHA), false)
 			audit.Add("local checkout mismatch", reviewEstimateTokens(ctx.CheckoutSHA+ctx.PR.HeadSHA))
 		} else {
+			ctx.localHeadMatches = ctx.PR != nil && ctx.PR.HeadSHA != "" && ctx.CheckoutSHA == ctx.PR.HeadSHA
 			ctx.addStatus("Local verification checkout", "complete", "local tools are pinned to the PR head", false)
 			audit.Add("local checkout", reviewEstimateTokens(ctx.CheckoutSHA))
 		}
@@ -1797,6 +1822,7 @@ func assemblePRAgentsContext(ctx *PRContext, audit *transparency.ContextAudit, d
 			"uncommitted files can contaminate local read/search/shell evidence", false)
 		audit.Add("dirty local verification worktree", reviewEstimateTokens(dirty))
 	} else {
+		ctx.localWorktreeClean = true
 		ctx.addStatus("Local verification worktree", "complete", "no uncommitted files", false)
 		audit.Add("clean local verification worktree", 0)
 	}
@@ -1823,6 +1849,46 @@ func assemblePRAgentsContext(ctx *PRContext, audit *transparency.ContextAudit, d
 		ctx.addStatus("Root AGENTS.md", "complete", fmt.Sprintf("%d bytes", len(content)), false)
 	}
 	appendNestedPRAgentsContext(ctx, audit, deps.run, root, agentsLimit)
+}
+
+func assemblePRCanopyContext(
+	parent context.Context,
+	ctx *PRContext,
+	audit *transparency.ContextAudit,
+	collect func(context.Context, string, string) canopyReviewEvidence,
+) {
+	if collect == nil {
+		return
+	}
+	if ctx == nil {
+		return
+	}
+	if ctx.PR == nil || !ctx.localHeadMatches || !ctx.localWorktreeClean || ctx.localRepoRoot == "" {
+		ctx.addStatus("Canopy structural review", "missing",
+			"requires a clean local checkout at the immutable PR head", false)
+		audit.Add("Canopy structural review (snapshot unavailable)", 0)
+		return
+	}
+
+	evidence := collect(parent, ctx.localRepoRoot, ctx.PR.BaseSHA)
+	if evidence.Output == "" || evidence.IndexScope == "" {
+		ctx.addStatus("Canopy structural review", "missing", evidence.Status, false)
+		audit.Add("Canopy structural review ("+evidence.Status+")", 0)
+		return
+	}
+	ctx.CanopyReview = evidence.Output
+	ctx.CanopyRuntime = evidence.Runtime
+	ctx.CanopyIndexScope = evidence.IndexScope
+	ctx.addStatus("Canopy structural review", "complete",
+		fmt.Sprintf("measured runtime %s; index scope %s", formatCanopyRuntime(evidence.Runtime), evidence.IndexScope), false)
+	audit.Add("Canopy structural review", reviewEstimateTokens(evidence.Output))
+}
+
+func formatCanopyRuntime(runtime time.Duration) string {
+	if runtime < time.Millisecond {
+		return "<1ms"
+	}
+	return runtime.Round(time.Millisecond).String()
 }
 
 func appendNestedPRAgentsContext(ctx *PRContext, audit *transparency.ContextAudit, run prCommandRunner, root string, perFileLimit int) {

@@ -347,6 +347,7 @@ func runPRReviewWithOptions(ctx context.Context, prRef string, framework *onesho
 	spinner.Start()
 
 	contextOpts := commands.DefaultPRContextOptions()
+	contextOpts.Context = ctx
 	if opts.maxDiffBytes > 0 {
 		contextOpts.MaxDiffBytes = opts.maxDiffBytes
 	}
