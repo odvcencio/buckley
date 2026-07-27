@@ -153,7 +153,7 @@ Grading criteria:
 - **File**: `+"`"+`path/to/changed-file`+"`"+` — hunks reviewed, contract/invariant checked, and verification evidence
 - Repeat that exact File ledger entry for EVERY changed file and no unchanged files
 - **Feedback disposition**: `+"`"+`DISPOSITIONED`+"`"+` — disposition of every supplied review/thread; or `+"`"+`NONE_SUPPLIED`+"`"+` — no prior feedback was supplied
-- **Feedback**: `+"`"+`feedback-id-exactly-as-supplied`+"`"+` — `+"`"+`ADDRESSED|DISPUTED|UNRESOLVED`+"`"+` — concrete source/test evidence for that one disposition
+- **Feedback**: `+"`"+`feedback-id-exactly-as-supplied`+"`"+` — `+"`"+`ADDRESSED|DISPUTED|DISPOSITIONED|UNRESOLVED`+"`"+` — concrete source/test evidence for that one disposition
 - When feedback IDs are supplied, repeat the exact Feedback ledger entry once for EVERY supplied ID and no other IDs. Omit Feedback entries only when NONE_SUPPLIED.
 - **Verification**: exact focused commands or CI evidence used; say "not independently run" when applicable
 
@@ -251,7 +251,7 @@ Two or three sentences on behavior and impact.
 - **File**: `+"`"+`path/to/changed-file`+"`"+` — hunks, contract/invariant, evidence
 - Repeat for every changed file and no unchanged files
 - **Feedback disposition**: `+"`"+`DISPOSITIONED`+"`"+` or `+"`"+`NONE_SUPPLIED`+"`"+`
-- **Feedback**: `+"`"+`feedback-id-exactly-as-supplied`+"`"+` — `+"`"+`ADDRESSED|DISPUTED|UNRESOLVED`+"`"+` — evidence; repeat once for every supplied ID
+- **Feedback**: `+"`"+`feedback-id-exactly-as-supplied`+"`"+` — `+"`"+`ADDRESSED|DISPUTED|DISPOSITIONED|UNRESOLVED`+"`"+` — evidence; repeat once for every supplied ID
 - **Verification**: exact commands, or "not independently run"
 
 ## Invariant Audit

@@ -484,6 +484,9 @@ func TestReviewPRDefSkipsDuplicateVerificationForAuthoritativeRemoteCI(t *testin
 	if !strings.Contains(def.SystemPrompt(), "run_verification tool is disabled") {
 		t.Fatal("system prompt did not explain the remote CI execution policy")
 	}
+	if !strings.Contains(def.SystemPrompt(), "Do not lower the grade or recommendation") {
+		t.Fatal("system prompt did not forbid penalties for disabled duplicate verification")
+	}
 
 	pending := ReviewPRDef{
 		CIStatus:     "pending (3/8)",
@@ -1001,7 +1004,7 @@ func TestReviewPRDefValidateResultAcceptsCompleteApproval(t *testing.T) {
 		RequiresFeedbackDisposition: true,
 		RequiredFeedbackIDs:         []string{"thread:PRRT_1"},
 	}
-	result, err := def.ParseResult(`## Grade: A
+	base := `## Grade: A
 
 ## Summary
 The paired ratchet is exact and the change is ready.
@@ -1031,7 +1034,18 @@ None.
 ## Verdict
 - **Recommendation**: APPROVE
 - **Blockers**: None
-- **Suggestions**: None`)
+- **Suggestions**: None`
+	result, err := def.ParseResult(base)
+	assert.NoError(t, err)
+	assert.NoError(t, def.ValidateResult(result))
+
+	informationalFeedback := strings.Replace(
+		base,
+		"`ADDRESSED` — the empty-boundary test proves the requested fix.",
+		"`DISPOSITIONED` — the supplied comment is informational and requires no code change.",
+		1,
+	)
+	result, err = def.ParseResult(informationalFeedback)
 	assert.NoError(t, err)
 	assert.NoError(t, def.ValidateResult(result))
 }
@@ -1408,6 +1422,11 @@ func TestReviewApprovalRequiresDisprovedFalsification(t *testing.T) {
 	result, err = def.ParseResult(ambiguous)
 	assert.NoError(t, err)
 	assert.ErrorContains(t, def.ValidateResult(result), "Falsification conclusion")
+
+	plainLabel := strings.Replace(base, "**Conclusion**: DISPROVED", "Conclusion: DISPROVED", 1)
+	result, err = def.ParseResult(plainLabel)
+	assert.NoError(t, err)
+	assert.NoError(t, def.ValidateResult(result))
 }
 
 func completeReviewWithCoverage(coverage string) string {

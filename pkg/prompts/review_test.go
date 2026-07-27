@@ -24,7 +24,7 @@ func TestReviewPromptsRequireEvidenceCoverageAndExactTools(t *testing.T) {
 				"DISPOSITIONED",
 				"NONE_SUPPLIED",
 				"**Feedback**: `feedback-id-exactly-as-supplied`",
-				"ADDRESSED|DISPUTED|UNRESOLVED",
+				"ADDRESSED|DISPUTED|DISPOSITIONED|UNRESOLVED",
 				"PASS|FAIL|PENDING|NOT_RUN|UNAVAILABLE|UNKNOWN",
 				"every changed file",
 				"ratchet",

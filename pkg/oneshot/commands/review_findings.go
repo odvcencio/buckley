@@ -81,9 +81,10 @@ const (
 type FeedbackStatus string
 
 const (
-	FeedbackAddressed  FeedbackStatus = "ADDRESSED"
-	FeedbackDisputed   FeedbackStatus = "DISPUTED"
-	FeedbackUnresolved FeedbackStatus = "UNRESOLVED"
+	FeedbackAddressed         FeedbackStatus = "ADDRESSED"
+	FeedbackDisputed          FeedbackStatus = "DISPUTED"
+	FeedbackDispositionedItem FeedbackStatus = "DISPOSITIONED"
+	FeedbackUnresolved        FeedbackStatus = "UNRESOLVED"
 )
 
 // FeedbackEntry is one exact-ID entry in the Coverage feedback ledger.
@@ -566,7 +567,7 @@ func parseRemoteCIState(value string) VerificationState {
 }
 
 func parseFalsificationConclusion(section string) FalsificationConclusion {
-	re := regexp.MustCompile("(?mi)^\\s*(?:-\\s+)?\\*\\*Conclusion\\*\\*:\\s*`?(PROVED|DISPROVED|UNRESOLVED)`?(.*)$")
+	re := regexp.MustCompile("(?mi)^\\s*(?:-\\s+)?(?:\\*\\*Conclusion\\*\\*|Conclusion):\\s*`?(PROVED|DISPROVED|UNRESOLVED)`?(.*)$")
 	matches := re.FindAllStringSubmatch(section, -1)
 	if len(matches) != 1 || len(matches[0]) < 3 {
 		return ""
@@ -650,7 +651,10 @@ func parseFeedbackEntry(value string) (FeedbackEntry, bool) {
 		statusRest = strings.TrimPrefix(statusValue, fields[0])
 	}
 	status := FeedbackStatus(strings.ToUpper(strings.TrimSpace(statusToken)))
-	if status != FeedbackAddressed && status != FeedbackDisputed && status != FeedbackUnresolved {
+	if status != FeedbackAddressed &&
+		status != FeedbackDisputed &&
+		status != FeedbackDispositionedItem &&
+		status != FeedbackUnresolved {
 		return FeedbackEntry{ID: strings.TrimSpace(id)}, true
 	}
 	return FeedbackEntry{
@@ -801,7 +805,10 @@ func validateFeedbackLedger(entries []FeedbackEntry, requiredIDs []string) error
 		if _, exists := expected[id]; !exists {
 			unexpected = append(unexpected, id)
 		}
-		if entry.Status != FeedbackAddressed && entry.Status != FeedbackDisputed && entry.Status != FeedbackUnresolved {
+		if entry.Status != FeedbackAddressed &&
+			entry.Status != FeedbackDisputed &&
+			entry.Status != FeedbackDispositionedItem &&
+			entry.Status != FeedbackUnresolved {
 			invalidStatus = append(invalidStatus, id)
 		}
 		if strings.TrimSpace(entry.Evidence) == "" {

@@ -127,7 +127,9 @@ func (d ReviewPRDef) SystemPrompt() string {
 
 REMOTE CI EXECUTION POLICY:
 - Authoritative remote continuous integration already passed for this immutable revision.
-- The run_verification tool is disabled. Use the named remote checks for Build and Tests evidence.`
+- The run_verification tool is disabled. Use the named remote checks for Build and Tests evidence.
+- Do not lower the grade or recommendation because run_verification is unavailable.
+- Treat the named immutable-revision checks as complete execution evidence.`
 	}
 	return prompt
 }

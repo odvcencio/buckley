@@ -1494,7 +1494,10 @@ func TestGetPRDiffWithBudgetFallsBackToImmutableLocalDiffOnThrottle(t *testing.T
 	run := func(name string, args ...string) ([]byte, error) {
 		switch {
 		case name == "gh" && hasPRArgPrefix(args, "pr", "diff", "7"):
-			return nil, errors.New("gh: API rate limit exceeded (HTTP 403)")
+			return nil, errors.New(
+				"could not find pull request diff: HTTP 403: API rate limit exceeded for user ID 9220505. " +
+					"(https://api.github.com/repos/odvcencio/gotreesitter/pulls/484): exit status 1",
+			)
 		case name == "git" && matchesPRArgs(args, "--no-pager", "rev-parse", "--show-toplevel"):
 			return []byte("/fixture/repo\n"), nil
 		case name == "git" && matchesPRArgs(
