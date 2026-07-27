@@ -1118,6 +1118,81 @@ func TestReviewValidationRejectsNonDemonstratedFindings(t *testing.T) {
 	}
 }
 
+func TestReviewValidationRequiresProvedFalsificationForFindings(t *testing.T) {
+	coverage := "- **File**: `ratchet.go` — reviewed the changed behavior.\n" +
+		"- **Feedback disposition**: `NONE_SUPPLIED` — no prior feedback was supplied.\n" +
+		"- **Verification**: named remote checks passed."
+	def := ReviewPRDef{
+		ChangedFiles: []string{"ratchet.go"},
+		CIStatus:     "passing (1/1)",
+		CIProvenance: prCISourceHead,
+	}
+
+	withFinding := strings.Replace(completeReviewWithCoverage(coverage), "## Grade: A", "## Grade: B", 1)
+	withFinding = strings.Replace(withFinding, "## Findings\nNone.", `## Findings
+### FINDING-001: [MINOR] Empty input returns the wrong status
+- **File**: ratchet.go:1
+- **Evidence**: The changed empty branch returns success instead of the required unavailable status.
+- **Business Impact**: Callers accept an unavailable result.
+- **Fix**: Return the unavailable status.`, 1)
+	withFinding = strings.Replace(withFinding, "**Conclusion**: DISPROVED", "**Conclusion**: PROVED", 1)
+	withFinding = strings.Replace(withFinding, "**Recommendation**: APPROVE", "**Recommendation**: NEEDS DISCUSSION", 1)
+	withFinding = strings.Replace(withFinding, "**Suggestions**: None", "**Suggestions**: FINDING-001", 1)
+
+	result, err := def.ParseResult(withFinding)
+	assert.NoError(t, err)
+	assert.NoError(t, def.ValidateResult(result))
+
+	tests := []struct {
+		name       string
+		conclusion string
+	}{
+		{name: "disproved", conclusion: "DISPROVED"},
+		{name: "unresolved", conclusion: "UNRESOLVED"},
+		{name: "ambiguous", conclusion: "PROVED for one route, but UNRESOLVED for another"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			review := strings.Replace(
+				withFinding,
+				"**Conclusion**: PROVED",
+				"**Conclusion**: "+tc.conclusion,
+				1,
+			)
+			result, parseErr := def.ParseResult(review)
+			assert.NoError(t, parseErr)
+			assert.ErrorContains(
+				t,
+				def.ValidateResult(result),
+				"a non-empty Findings section requires a PROVED falsification conclusion",
+			)
+		})
+	}
+}
+
+func TestReviewValidationPreservesNoFindingsFalsificationOutcomes(t *testing.T) {
+	coverage := "- **File**: `ratchet.go` — reviewed the changed behavior.\n" +
+		"- **Feedback disposition**: `NONE_SUPPLIED` — no prior feedback was supplied.\n" +
+		"- **Verification**: named remote checks passed."
+	def := ReviewPRDef{
+		ChangedFiles: []string{"ratchet.go"},
+		CIStatus:     "passing (1/1)",
+		CIProvenance: prCISourceHead,
+	}
+
+	for _, conclusion := range []string{"PROVED", "DISPROVED", "UNRESOLVED"} {
+		t.Run(strings.ToLower(conclusion), func(t *testing.T) {
+			review := strings.Replace(completeReviewWithCoverage(coverage), "## Grade: A", "## Grade: B", 1)
+			review = strings.Replace(review, "**Conclusion**: DISPROVED", "**Conclusion**: "+conclusion, 1)
+			review = strings.Replace(review, "**Recommendation**: APPROVE", "**Recommendation**: NEEDS DISCUSSION", 1)
+
+			result, err := def.ParseResult(review)
+			assert.NoError(t, err)
+			assert.NoError(t, def.ValidateResult(result))
+		})
+	}
+}
+
 func TestReviewValidationReportsIndependentRepairProblemsTogether(t *testing.T) {
 	coverage := "- **File**: `ratchet.go` — reviewed the changed behavior.\n" +
 		"- **Feedback disposition**: `NONE_SUPPLIED` — no prior feedback was supplied.\n" +
@@ -1151,14 +1226,7 @@ func TestReviewValidationRequiresBlockerForRequestChanges(t *testing.T) {
 		"- **Feedback disposition**: `NONE_SUPPLIED` — no prior feedback was supplied.\n" +
 		"- **Verification**: named remote checks passed."
 	review := strings.Replace(completeReviewWithCoverage(coverage), "## Grade: A", "## Grade: B", 1)
-	review = strings.Replace(review, "## Findings\nNone.", `## Findings
-### FINDING-001: [MINOR] Empty input returns the wrong status
-- **File**: ratchet.go:1
-- **Evidence**: The changed empty branch returns success instead of the required unavailable status.
-- **Business Impact**: Callers accept an unavailable result.
-- **Fix**: Return the unavailable status.`, 1)
 	review = strings.Replace(review, "**Recommendation**: APPROVE", "**Recommendation**: REQUEST CHANGES", 1)
-	review = strings.Replace(review, "**Suggestions**: None", "**Suggestions**: FINDING-001", 1)
 
 	def := ReviewPRDef{
 		ChangedFiles: []string{"ratchet.go"},

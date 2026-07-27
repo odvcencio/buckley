@@ -188,6 +188,7 @@ func TestAppendReviewExecutionPlanGuidesBoundedEvidenceCollection(t *testing.T) 
 		"List MINOR findings as Suggestions, not Blockers",
 		"Use REQUEST CHANGES only with a Blocker or proved current failure",
 		"Write the Falsification conclusion as one bare token",
+		"Write Findings only when Falsification concludes PROVED",
 		"Require a current failing input, violated invariant, failing check, or reproducible behavior",
 		"Move possible rename, regeneration, test drift, and private test-hook concerns to Remarks",
 		"Do not expose analysis, repair commentary, progress text, or a plan",

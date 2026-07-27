@@ -152,6 +152,8 @@ func appendReviewExecutionPlan(prompt string, opts automatedReviewOptions) strin
 - List MINOR findings as Suggestions, not Blockers.
 - Use REQUEST CHANGES only with a Blocker or proved current failure.
 - Write the Falsification conclusion as one bare token with no words after it.
+- Write Findings only when Falsification concludes PROVED.
+- If Falsification concludes DISPROVED or UNRESOLVED, move concerns to Remarks or omit them.
 - Require a current failing input, violated invariant, failing check, or reproducible behavior for every Finding.
 - Move possible rename, regeneration, test drift, and private test-hook concerns to Remarks.
 - Do not expose analysis, repair commentary, progress text, or a plan.

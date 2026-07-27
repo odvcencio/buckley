@@ -94,7 +94,8 @@ NON-NEGOTIABLE REVIEW RULES:
 - A rule that forbids noun clusters longer than three nouns permits clusters of three nouns.
 - Do not ask for more test shapes only because more shapes exist. Report missing coverage only when a current contract route remains untested or unresolved.
 - Do not reject a malformed historical fixture when it reproduces a parser defect and a separate valid witness covers the generalized route.
-- If Falsification concludes DISPROVED, omit findings based only on a future recurrence of that disproved failure.
+- Write Findings only when Falsification concludes PROVED.
+- If Falsification concludes DISPROVED or UNRESOLVED, move concerns to Remarks or omit them.
 - Copy source identifiers, registry keys, check names, and paths exactly from supplied evidence. Do not invent or paraphrase an identifier.
 - Do not claim provider finish-reason support without an exact changed branch or test that proves the claim.
 
@@ -224,6 +225,8 @@ Approval rules:
 - Documentation-only exception: if every changed path is documentation, use exact changed claims, links, or diff hunks; do not manufacture source checks. Mixed, source, and configuration changes do not qualify.
 - Cache/temp variables are already supplied by the sandbox. Do not override PATH or tool options. Native Build and Tests must be separate, standalone commands at snapshot root with no chains, pipes, redirections, or cd.
 - Treat claims as hypotheses. Report only proven findings with exact file:line evidence and a concrete fix. If evidence is incomplete or truncated, do not approve.
+- Write Findings only when Falsification concludes PROVED.
+- If Falsification concludes DISPROVED or UNRESOLVED, move concerns to Remarks or omit them.
 
 %s
 

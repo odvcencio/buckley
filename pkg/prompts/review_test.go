@@ -125,7 +125,7 @@ func TestPRReviewPromptRestrictsMinorFindingsToRealDefects(t *testing.T) {
 		"Never report ASD-STE100",
 		"permits clusters of three nouns",
 		"more test shapes only because more shapes exist",
-		"Falsification concludes DISPROVED",
+		"Write Findings only when Falsification concludes PROVED",
 		"Do not invent or paraphrase an identifier",
 		"REQUEST CHANGES requires at least one Blocker",
 		"current failing input, violated invariant, failing check, or reproducible current behavior",
@@ -136,6 +136,13 @@ func TestPRReviewPromptRestrictsMinorFindingsToRealDefects(t *testing.T) {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("PR prompt missing %q", want)
 		}
+	}
+}
+
+func TestBranchReviewPromptRequiresProvedFalsificationForFindings(t *testing.T) {
+	prompt := reviewBranchWithToolsDefault(time.Unix(0, 0))
+	if !strings.Contains(prompt, "Write Findings only when Falsification concludes PROVED") {
+		t.Fatal("branch prompt does not require proved falsification for findings")
 	}
 }
 

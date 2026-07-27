@@ -237,6 +237,9 @@ func ValidateParsedReview(parsed *ParsedReview, opts ReviewValidationOptions) er
 	if err := validateDemonstratedFindings(parsed.Findings); err != nil {
 		problems = append(problems, err.Error())
 	}
+	if err := validateFalsificationDisposition(parsed); err != nil {
+		problems = append(problems, err.Error())
+	}
 	if strings.TrimSpace(parsed.Verdict) != "" {
 		if err := validateVerdictDisposition(parsed); err != nil {
 			problems = append(problems, err.Error())
@@ -457,6 +460,19 @@ func validateDemonstratedFindings(findings []Finding) error {
 				)
 			}
 		}
+	}
+	return nil
+}
+
+func validateFalsificationDisposition(parsed *ParsedReview) error {
+	if len(parsed.Findings) == 0 {
+		return nil
+	}
+	if parsed.FalsificationConclusion != FalsificationProved {
+		return fmt.Errorf(
+			"a non-empty Findings section requires a PROVED falsification conclusion, got %q; move disproved or unresolved concerns to Remarks or omit them",
+			parsed.FalsificationConclusion,
+		)
 	}
 	return nil
 }
