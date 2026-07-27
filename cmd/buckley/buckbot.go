@@ -5,11 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"log/slog"
 	"net"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -25,8 +23,6 @@ import (
 	"m31labs.dev/buckley/pkg/transparency"
 )
 
-var buckbotLoadConfigFn = config.Load
-var buckbotListenFn = http.ListenAndServe
 var postBuckbotReviewPayloadFn = postBuckbotReviewPayload
 var runBuckbotGitHubFn = runBuckbotGitHub
 
@@ -256,48 +252,10 @@ func waitForBuckbotRetry(ctx context.Context, delay time.Duration) error {
 }
 
 func runBuckbotCommand(args []string) error {
-	fs := flag.NewFlagSet("buckbot", flag.ContinueOnError)
-	bind := fs.String("bind", "", "address to bind (default: buckbot.webhook_bind or 127.0.0.1:8086)")
-	secret := fs.String("secret", "", "shared webhook secret (overrides config)")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	cfg, err := buckbotLoadConfigFn()
-	if err != nil {
-		return withExitCode(err, 2)
-	}
-	if !cfg.Buckbot.Enabled {
-		return withExitCode(fmt.Errorf("buckbot disabled in config; enable buckbot.enabled to run this daemon"), 2)
-	}
-	addr := strings.TrimSpace(*bind)
-	if addr == "" {
-		addr = strings.TrimSpace(cfg.Buckbot.WebhookBind)
-	}
-	if addr == "" {
-		addr = "127.0.0.1:8086"
-	}
-	webhookSecret := strings.TrimSpace(chooseSecret(*secret, cfg.Buckbot.Secret))
-	if !isLoopbackAddress(addr) && webhookSecret == "" {
-		return withExitCode(fmt.Errorf("refusing to bind buckbot to %q without a shared secret", addr), 2)
-	}
-	dbPath, err := resolveDBPath()
-	if err != nil {
-		return err
-	}
-	costStore, err := storage.New(dbPath)
-	if err != nil {
-		return fmt.Errorf("open Buckbot cost store: %w", err)
-	}
-	defer func() { _ = costStore.Close() }()
-	monthlySpend, err := costStore.GetMonthlyCostForPrincipal("buckbot")
-	if err != nil {
-		return fmt.Errorf("load Buckbot monthly spend: %w", err)
-	}
-	service := newBuckbotService(cfg.Buckbot, newBuckbotReviewer(cfg.Buckbot, costStore), postBuckbotReview)
-	service.announce = postBuckbotReviewStarted(cfg.Buckbot)
-	service.spentUSD = monthlySpend
-	fmt.Printf("Buckbot listening for pull_request webhooks on %s using %s\n", addr, cfg.Buckbot.Model)
-	return buckbotListenFn(addr, gitwatcher.NewPullRequestHandler(webhookSecret, service.handle))
+	_ = args
+	return withExitCode(fmt.Errorf(
+		"automatic Buckbot webhook posting is retired; use `buckley review-pr <PR> -post` for an on-demand GitHub review",
+	), 2)
 }
 
 func newBuckbotReviewer(botCfg config.BuckbotConfig, costStore *storage.Store) buckbotReviewer {

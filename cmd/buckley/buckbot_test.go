@@ -36,6 +36,25 @@ func TestBuckbotService_DeduplicatesRevisionAndPostsWithinBudget(t *testing.T) {
 	}
 }
 
+func TestRunBuckbotCommandRequiresOnDemandPosting(t *testing.T) {
+	err := runBuckbotCommand([]string{"--bind", "0.0.0.0:8086"})
+	if err == nil {
+		t.Fatal("runBuckbotCommand() unexpectedly enabled automatic posting")
+	}
+	if code := exitCodeForError(err); code != 2 {
+		t.Fatalf("exit code = %d, want 2", code)
+	}
+	for _, want := range []string{
+		"automatic Buckbot webhook posting is retired",
+		"buckley review-pr <PR> -post",
+		"on-demand GitHub review",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("migration error = %q, want %q", err, want)
+		}
+	}
+}
+
 func TestBuckbotService_FailedReviewCanBeRetried(t *testing.T) {
 	var reviewed, posted atomic.Int32
 	service := newBuckbotService(config.BuckbotConfig{PerReviewBudgetUSD: 0.25, MonthlyBudgetUSD: 25}, func(context.Context, gitwatcher.PullRequestEvent) (string, float64, error) {

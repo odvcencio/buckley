@@ -760,8 +760,8 @@ type GitEventsConfig struct {
 	FailureCommand     string `yaml:"failure_command"`
 }
 
-// BuckbotConfig controls automatic pull-request reviews posted through the
-// authenticated gh CLI identity on the host running the daemon.
+// BuckbotConfig controls on-demand pull-request reviews. Enabled, Secret, and
+// WebhookBind remain for configuration compatibility with the retired daemon.
 type BuckbotConfig struct {
 	Enabled               bool    `yaml:"enabled"`
 	Secret                string  `yaml:"secret"`

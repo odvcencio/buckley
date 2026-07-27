@@ -168,6 +168,21 @@ buckley pr --dry-run          # Preview PR title and body
 buckley pr --base develop     # Target specific base branch
 ```
 
+### review-pr
+
+Review a GitHub pull request. The command uses dry-run output by default.
+
+```bash
+buckley review-pr 123
+buckley review-pr 123 -post
+```
+
+Use `-post` only when you want Buckbot to write to GitHub. A posted review adds
+an eyes reaction, an intake comment, and the final review.
+
+The `buckley buckbot` webhook daemon is retired. Use
+`buckley review-pr <PR> -post` for each on-demand review.
+
 ### Prose style (ASD-STE100)
 
 Buckley writes commit messages, PR titles, and PR bodies in ASD-STE100
