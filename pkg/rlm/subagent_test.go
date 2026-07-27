@@ -179,6 +179,27 @@ func TestNewSubAgentBoundsReasoningTokens(t *testing.T) {
 	}
 }
 
+func TestSubAgentReasoningConfigUsesOneProviderControl(t *testing.T) {
+	api := subAgentReasoningConfig("openrouter", "medium", 4096)
+	if api == nil || api.Effort != "" || api.MaxTokens != 4096 {
+		t.Fatalf("API reasoning config = %#v", api)
+	}
+
+	codex := subAgentReasoningConfig("codex", "xhigh", 2048)
+	if codex == nil || codex.Effort != "xhigh" || codex.MaxTokens != 0 {
+		t.Fatalf("Codex reasoning config = %#v", codex)
+	}
+
+	effortOnly := subAgentReasoningConfig("openrouter", "low", 0)
+	if effortOnly == nil || effortOnly.Effort != "low" || effortOnly.MaxTokens != 0 {
+		t.Fatalf("effort-only reasoning config = %#v", effortOnly)
+	}
+
+	if got := subAgentReasoningConfig("openrouter", "", 0); got != nil {
+		t.Fatalf("empty reasoning config = %#v, want nil", got)
+	}
+}
+
 func TestSubAgentMaxIterationsDefault(t *testing.T) {
 	if defaultSubAgentMaxIterations <= 0 {
 		t.Errorf("defaultSubAgentMaxIterations should be positive, got %d", defaultSubAgentMaxIterations)

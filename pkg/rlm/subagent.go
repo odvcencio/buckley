@@ -238,6 +238,7 @@ func (a *SubAgent) Execute(ctx context.Context, task string) (*SubAgentResult, e
 		ModelUsed: a.model,
 	}
 	contextWindow, _ := a.client.GetContextLength(a.model)
+	providerID := a.client.ProviderIDForModel(a.model)
 	maxIterations := a.maxIterations
 	if maxIterations <= 0 {
 		if _, hasDeadline := ctx.Deadline(); !hasDeadline && a.maxCostUSD <= 0 {
@@ -264,12 +265,7 @@ func (a *SubAgent) Execute(ctx context.Context, task string) (*SubAgentResult, e
 			requestMessages = finalSynthesisMessages(messages)
 		}
 		applyExecutionPolicy(&req, a.readOnly, a.reviewSnapshot)
-		if a.reasoning != "" {
-			req.Reasoning = &model.ReasoningConfig{
-				Effort:    a.reasoning,
-				MaxTokens: a.reasoningMaxTokens,
-			}
-		}
+		req.Reasoning = subAgentReasoningConfig(providerID, a.reasoning, a.reasoningMaxTokens)
 		req.Messages = conversation.CompactModelMessagesForRequest(requestMessages, req, contextWindow)
 		if len(req.Tools) > 0 && a.shouldSynthesizeForBudget(req, result) {
 			req.Tools = nil
@@ -361,6 +357,21 @@ func (a *SubAgent) Execute(ctx context.Context, task string) (*SubAgentResult, e
 	}
 
 	return result, nil
+}
+
+func subAgentReasoningConfig(providerID, effort string, maxTokens int) *model.ReasoningConfig {
+	effort = normalizeSubAgentReasoning(effort)
+	maxTokens = max(0, maxTokens)
+	if providerID == "codex" && effort != "" {
+		return &model.ReasoningConfig{Effort: effort}
+	}
+	if maxTokens > 0 {
+		return &model.ReasoningConfig{MaxTokens: maxTokens}
+	}
+	if effort != "" {
+		return &model.ReasoningConfig{Effort: effort}
+	}
+	return nil
 }
 
 func assistantToolCallMessage(message model.Message) model.Message {
