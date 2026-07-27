@@ -88,6 +88,29 @@ func TestDefaultAutomatedReviewOptionsAndOverrides(t *testing.T) {
 	}
 }
 
+func TestBoundPRApprovalCriticUsesOnePassOnlyForAuthoritativeCI(t *testing.T) {
+	base := automatedReviewOptions{
+		approvalCritic:      true,
+		criticMaxIterations: 2,
+		criticMaxToolCalls:  2,
+	}
+	passing := boundPRApprovalCritic(base, commands.ReviewPRDef{
+		CIStatus:     "passing (3/3)",
+		CIProvenance: "pull request head",
+	})
+	if passing.criticMaxIterations != 1 || passing.criticMaxToolCalls != 1 {
+		t.Fatalf("passing CI critic = %#v, want one direct pass", passing)
+	}
+
+	pending := boundPRApprovalCritic(base, commands.ReviewPRDef{
+		CIStatus:     "pending (2/3)",
+		CIProvenance: "pull request head",
+	})
+	if pending.criticMaxIterations != 2 || pending.criticMaxToolCalls != 2 {
+		t.Fatalf("pending CI critic = %#v, want independent verification pass", pending)
+	}
+}
+
 func TestMarkIncompleteReviewPreservesCompletedRevalidationWork(t *testing.T) {
 	review := markIncompleteReview(
 		"## Summary\n\nCompleted review evidence.",

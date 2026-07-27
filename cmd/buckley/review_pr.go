@@ -389,6 +389,7 @@ func runPRReviewWithOptions(ctx context.Context, prRef string, framework *onesho
 		MaxIterations:               opts.maxIterations,
 		ApprovalCritic:              opts.approvalCritic,
 	}
+	opts = boundPRApprovalCritic(opts, reviewDef)
 	fwResult, runErr := framework.RunRLM(ctx, reviewDef, oneshot.RLMRunOpts{
 		UserPrompt:               userPrompt,
 		Audit:                    audit,
@@ -436,6 +437,15 @@ func runPRReviewWithOptions(ctx context.Context, prRef string, framework *onesho
 
 	spinner.StopWithSuccess("PR review complete")
 	return reviewResultFromRLM(fwResult, audit), prCtx.PR, nil
+}
+
+func boundPRApprovalCritic(opts automatedReviewOptions, def commands.ReviewPRDef) automatedReviewOptions {
+	if !opts.approvalCritic || !def.AuthoritativeRemoteCIPasses() {
+		return opts
+	}
+	opts.criticMaxIterations = 1
+	opts.criticMaxToolCalls = 1
+	return opts
 }
 
 func writePRReviewOutput(outputFile, reviewText string, prInfo *commands.PRInfo) error {

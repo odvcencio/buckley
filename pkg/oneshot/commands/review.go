@@ -64,7 +64,7 @@ func (d ReviewBranchDef) ApprovalCriticSystemPrompt() string {
 }
 
 func (d ReviewBranchDef) BuildApprovalCriticPrompt(originalPrompt string, primaryResult any) (string, error) {
-	return buildApprovalCriticPrompt(originalPrompt, primaryResult)
+	return buildApprovalCriticPrompt(originalPrompt, primaryResult, false)
 }
 
 // ReviewProjectDef implements oneshot.RLMDefinition for project-wide review.
@@ -145,6 +145,12 @@ func (d ReviewPRDef) AllowedTools() []string {
 func (d ReviewPRDef) authoritativeRemoteCIPasses() bool {
 	return parseRemoteCIState(d.CIStatus) == VerificationPass &&
 		(d.CIProvenance == prCISourceHead || d.CIProvenance == prCISourceBase)
+}
+
+// AuthoritativeRemoteCIPasses reports whether immutable remote checks can
+// replace duplicate critic verification.
+func (d ReviewPRDef) AuthoritativeRemoteCIPasses() bool {
+	return d.authoritativeRemoteCIPasses()
 }
 
 func reviewAllowedTools() []string {
@@ -385,7 +391,7 @@ func (d ReviewPRDef) ApprovalCriticSystemPrompt() string {
 }
 
 func (d ReviewPRDef) BuildApprovalCriticPrompt(originalPrompt string, primaryResult any) (string, error) {
-	return buildApprovalCriticPrompt(originalPrompt, primaryResult)
+	return buildApprovalCriticPrompt(originalPrompt, primaryResult, d.authoritativeRemoteCIPasses())
 }
 
 func reviewResultIsApproved(result any) bool {
@@ -393,7 +399,7 @@ func reviewResultIsApproved(result any) bool {
 	return ok && review.Parsed != nil && review.Parsed.Approved
 }
 
-func buildApprovalCriticPrompt(originalPrompt string, primaryResult any) (string, error) {
+func buildApprovalCriticPrompt(originalPrompt string, primaryResult any, directEvidencePass bool) (string, error) {
 	review, ok := primaryResult.(*ReviewRLMResult)
 	if !ok || review.Parsed == nil {
 		return "", fmt.Errorf("unexpected approval result type %T", primaryResult)
@@ -402,9 +408,18 @@ func buildApprovalCriticPrompt(originalPrompt string, primaryResult any) (string
 		return "", fmt.Errorf("approval critic requested for a non-approval result")
 	}
 
+	evidenceInstructions := `Re-read relevant source with tools. Look for evidence the prior review missed.`
+	outcomeInstructions := `Independently decide whether approval survives. Your complete machine-validated review becomes the final result.`
+	if directEvidencePass {
+		evidenceInstructions = `Use one direct evidence pass. Tools are unavailable in this critic phase. The original prompt contains the exact snapshot and remote continuous integration evidence.`
+		outcomeInstructions = `Independently decide whether approval survives. Do not request more evidence or another pass. Your complete machine-validated review becomes the final result.`
+	}
+
 	return `Perform an independent adversarial second-pass review using the original evidence below.
 
-The prior review is included only so you can identify and verify its claims. Do not trust its verdict, coverage, or falsification conclusion. Re-read relevant source with tools, look for evidence it missed, and return a complete replacement review in the command's exact required format.
+` + evidenceInstructions + `
+
+The prior review is included only so you can challenge its claims. Do not trust its verdict, coverage, or falsification conclusion. Return a complete replacement review in the command's exact required format.
 
 ## Original Review Evidence
 
@@ -416,7 +431,7 @@ The prior review is included only so you can identify and verify its claims. Do 
 
 ## Required Critic Outcome
 
-Independently decide whether approval survives. Your complete machine-validated review becomes the final result.`, nil
+` + outcomeInstructions, nil
 }
 
 // FixFindingDef implements oneshot.RLMDefinition for applying a fix to a finding.
