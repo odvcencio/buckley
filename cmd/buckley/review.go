@@ -143,7 +143,9 @@ func runReviewCommand(args []string) error {
 
 	if !quietMode {
 		termOut.Dim("Using model: %s", runtime.modelID)
-		if runtime.reasoningEffort != "" {
+		if runtime.policy.adaptiveReasoning {
+			termOut.Dim("Reasoning effort: adaptive (low, medium, or high)")
+		} else if runtime.reasoningEffort != "" {
 			termOut.Dim("Reasoning effort: %s", runtime.reasoningEffort)
 		}
 	}
@@ -334,6 +336,7 @@ func runProjectReviewWithPolicy(ctx context.Context, framework *oneshot.Framewor
 
 	plan := reviewExecutionPlan{
 		sizeClass:           "project",
+		reasoningEffort:     "high",
 		maxIterations:       8,
 		maxToolCalls:        8,
 		verificationTimeout: 90 * time.Second,
@@ -341,6 +344,7 @@ func runProjectReviewWithPolicy(ctx context.Context, framework *oneshot.Framewor
 		synthesisLead:       75 * time.Second,
 	}
 	reviewPolicy = reviewPolicy.withExecutionPlan(plan)
+	spinner.SetMessage(fmt.Sprintf("Running %s review with %s reasoning...", reviewPolicy.sizeClass, reviewPolicy.reasoningEffort))
 	userPrompt := appendReviewExecutionPlan(commands.BuildProjectPrompt(projectCtx), reviewPolicy)
 	fwResult, runErr := framework.RunRLM(ctx, commands.ReviewProjectDef{}, oneshot.RLMRunOpts{
 		UserPrompt:               userPrompt,
@@ -423,6 +427,7 @@ func runBranchReviewWithPolicy(ctx context.Context, opts reviewCommandOptions, f
 		ContextIncomplete: branchCtx.DiffTruncated || branchCtx.UnstagedTruncated || branchCtx.ContextIncomplete,
 	})
 	reviewPolicy = reviewPolicy.withExecutionPlan(plan)
+	spinner.SetMessage(fmt.Sprintf("Running %s review with %s reasoning...", reviewPolicy.sizeClass, reviewPolicy.reasoningEffort))
 	userPrompt := appendReviewExecutionPlan(commands.BuildBranchPrompt(branchCtx), reviewPolicy)
 	reviewDef := commands.ReviewBranchDef{
 		ChangedFiles:      reviewChangedFilePaths(branchCtx.Files),

@@ -151,7 +151,9 @@ func runReviewPRCommand(args []string) error {
 
 	if !quietMode {
 		termOut.Dim("Using model: %s", runtime.modelID)
-		if runtime.reasoningEffort != "" {
+		if runtime.policy.adaptiveReasoning {
+			termOut.Dim("Reasoning effort: adaptive (low, medium, or high)")
+		} else if runtime.reasoningEffort != "" {
 			termOut.Dim("Reasoning effort: %s", runtime.reasoningEffort)
 		}
 		termOut.Dim("Reviewing PR: %s", opts.prRef)
@@ -303,8 +305,6 @@ func runPRReviewWithOptions(ctx context.Context, prRef string, framework *onesho
 		spinner.StopWithError(err.Error())
 		return nil, nil, fmt.Errorf("assemble PR context: %w", err)
 	}
-	spinner.SetMessage("Running model review...")
-
 	plan := resolveReviewExecutionPlan(opts.engine, rules.ReviewPlanFacts{
 		FileCount:         len(prCtx.Files),
 		DiffBytes:         len(prCtx.Diff),
@@ -312,6 +312,7 @@ func runPRReviewWithOptions(ctx context.Context, prRef string, framework *onesho
 		HasFeedback:       prCtx.HasReviewFeedback(),
 	})
 	opts = opts.withExecutionPlan(plan)
+	spinner.SetMessage(fmt.Sprintf("Running %s review with %s reasoning...", opts.sizeClass, opts.reasoningEffort))
 	userPrompt := appendReviewExecutionPlan(commands.BuildPRPrompt(prCtx), opts)
 	reviewDef := commands.ReviewPRDef{
 		ChangedFiles:                prCtx.Files,
