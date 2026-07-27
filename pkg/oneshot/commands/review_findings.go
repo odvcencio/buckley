@@ -496,7 +496,7 @@ func validateVerdictDisposition(parsed *ParsedReview) error {
 		}
 	}
 	return fmt.Errorf(
-		"REQUEST CHANGES requires a blocker or proved current failure; use NEEDS DISCUSSION for non-blocking suggestions",
+		"REQUEST CHANGES requires a blocker or proved current failure; pending or unavailable CI alone requires NEEDS DISCUSSION",
 	)
 }
 

@@ -151,6 +151,8 @@ func appendReviewExecutionPlan(prompt string, opts automatedReviewOptions) strin
 - Compare measurements only when their workload labels and settings match.
 - List MINOR findings as Suggestions, not Blockers.
 - Use REQUEST CHANGES only with a Blocker or proved current failure.
+- Pending, unknown, absent, or stale remote CI alone requires Grade B with NEEDS DISCUSSION.
+- Keep a pending or unavailable CI condition in CI Status and Remarks, not Blockers or Findings.
 - Write the Falsification conclusion as one bare token with no words after it.
 - Write Findings only when Falsification concludes PROVED.
 - If Falsification concludes DISPROVED or UNRESOLVED, move concerns to Remarks or omit them.

@@ -187,6 +187,8 @@ func TestAppendReviewExecutionPlanGuidesBoundedEvidenceCollection(t *testing.T) 
 		"Compare measurements only when their workload labels and settings match",
 		"List MINOR findings as Suggestions, not Blockers",
 		"Use REQUEST CHANGES only with a Blocker or proved current failure",
+		"Pending, unknown, absent, or stale remote CI alone requires Grade B with NEEDS DISCUSSION",
+		"not Blockers or Findings",
 		"Write the Falsification conclusion as one bare token",
 		"Write Findings only when Falsification concludes PROVED",
 		"Require a current failing input, violated invariant, failing check, or reproducible behavior",
