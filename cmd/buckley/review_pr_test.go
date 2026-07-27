@@ -186,10 +186,14 @@ func TestPostCompletedPRReviewRetriesWithoutAnotherModelRun(t *testing.T) {
 	})
 
 	var posts, waits int
-	postCompletedBuckbotReviewFn = func(_ context.Context, event gitwatcher.PullRequestEvent, review string) error {
+	postCompletedBuckbotReviewFn = func(ctx context.Context, event gitwatcher.PullRequestEvent, review string) error {
 		posts++
 		if event.HeadSHA != "head-sha" || review != "validated review" {
 			t.Fatalf("post input = %#v / %q", event, review)
+		}
+		deadline, ok := ctx.Deadline()
+		if !ok || time.Until(deadline) > completedBuckbotPostAttemptLimit {
+			t.Fatalf("post attempt deadline = %v, want at most %s", deadline, completedBuckbotPostAttemptLimit)
 		}
 		if posts == 1 {
 			return errors.New("GitHub secondary rate limit (HTTP 403)")
@@ -215,5 +219,26 @@ func TestPostCompletedPRReviewRetriesWithoutAnotherModelRun(t *testing.T) {
 	}
 	if posts != 2 || waits != 1 {
 		t.Fatalf("posts/waits = %d/%d, want 2/1", posts, waits)
+	}
+}
+
+func TestPostedReviewBudgetsStayBelowFiveMinutes(t *testing.T) {
+	const observedQwenReview = 4*time.Minute + 9*time.Second
+	if defaultReviewTimeout < observedQwenReview {
+		t.Fatalf("review budget = %s, want at least observed qwen run %s", defaultReviewTimeout, observedQwenReview)
+	}
+	if total := defaultReviewTimeout + completedBuckbotPostBudget; total >= 5*time.Minute {
+		t.Fatalf("review plus post budget = %s, want less than five minutes", total)
+	}
+	retryDelay := completedBuckbotPostRetryDelay + 2*completedBuckbotPostRetryDelay
+	attemptBudget := maxCompletedBuckbotPostAttempts*completedBuckbotPostAttemptLimit + retryDelay
+	if attemptBudget > completedBuckbotPostBudget {
+		t.Fatalf("post attempt schedule = %s, exceeds post budget %s", attemptBudget, completedBuckbotPostBudget)
+	}
+	if defaultReviewTimeout != 4*time.Minute+25*time.Second ||
+		completedBuckbotPostBudget != 25*time.Second ||
+		completedBuckbotPostAttemptLimit != 7*time.Second {
+		t.Fatalf("production budgets changed: review=%s post=%s attempt=%s",
+			defaultReviewTimeout, completedBuckbotPostBudget, completedBuckbotPostAttemptLimit)
 	}
 }

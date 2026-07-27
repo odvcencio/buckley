@@ -149,7 +149,7 @@ func BuckbotReviewIntakeMarker(headSHA string) string {
 }
 
 func isBuckbotOperationalComment(body string) bool {
-	return strings.Contains(body, buckbotOperationalCommentPrefix)
+	return strings.HasPrefix(strings.TrimSpace(body), buckbotOperationalCommentPrefix)
 }
 
 // AssemblePRContext gathers context for PR review using gh CLI.
@@ -1272,7 +1272,11 @@ func getPRComments(run prCommandRunner, target prReference) ([]PRComment, error)
 	if graphErr == nil {
 		return comments, nil
 	}
-	return getPRCommentsREST(run, target)
+	comments, restErr := getPRCommentsREST(run, target)
+	if restErr != nil {
+		return nil, fmt.Errorf("GraphQL top-level comments failed: %v; REST top-level comments failed: %w", graphErr, restErr)
+	}
+	return comments, nil
 }
 
 func getPRCommentsGraphQL(run prCommandRunner, target prReference) ([]PRComment, error) {

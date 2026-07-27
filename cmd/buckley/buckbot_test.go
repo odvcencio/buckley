@@ -398,6 +398,7 @@ func TestPostBuckbotReviewLifecycleReactsAndPostsOneIntake(t *testing.T) {
 		{name: "new revision", wantPostIntake: true},
 		{name: "existing intake", existingBody: marker + "\nalready posted", existingAuthor: "buckbot", wantPostIntake: false},
 		{name: "forged intake", existingBody: marker + "\nforged", existingAuthor: "attacker", wantPostIntake: true},
+		{name: "quoted intake", existingBody: "quoted\n" + marker, existingAuthor: "buckbot", wantPostIntake: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -449,6 +450,9 @@ func TestPostBuckbotReviewLifecycleReactsAndPostsOneIntake(t *testing.T) {
 				if !strings.Contains(request.Query, "addReaction") || !strings.Contains(request.Query, "content: EYES") {
 					t.Fatalf("mutation does not add EYES reaction:\n%s", request.Query)
 				}
+				if tt.wantPostIntake {
+					return []byte(`{"data":{"eyes":{"reaction":{"content":"EYES"}},"intake":{"commentEdge":{"node":{"id":"intake"}}}}}`), nil
+				}
 				return []byte(`{"data":{"eyes":{"reaction":{"content":"EYES"}}}}`), nil
 			}
 
@@ -491,6 +495,31 @@ func TestPostBuckbotReviewLifecycleRejectsMovedHead(t *testing.T) {
 	}
 	if calls != 1 {
 		t.Fatalf("GraphQL calls = %d, want query only", calls)
+	}
+}
+
+func TestPostBuckbotReviewLifecycleRequiresMutationEvidence(t *testing.T) {
+	original := runBuckbotGitHubFn
+	t.Cleanup(func() { runBuckbotGitHubFn = original })
+
+	const head = "1234567890abcdef1234567890abcdef12345678"
+	var calls int
+	runBuckbotGitHubFn = func(context.Context, []string, []byte) ([]byte, error) {
+		calls++
+		if calls == 1 {
+			return []byte(`{"data":{"viewer":{"login":"buckbot"},"repository":{"pullRequest":{` +
+				`"id":"PR_node","headRefOid":"` + head + `","comments":{"pageInfo":{"hasNextPage":false},"nodes":[]}` +
+				`}}}}`), nil
+		}
+		return []byte(`{"data":{"eyes":{"reaction":{"content":"EYES"}},"intake":{"commentEdge":{"node":{"id":""}}}}}`), nil
+	}
+	err := postBuckbotReviewLifecycle(context.Background(), gitwatcher.PullRequestEvent{
+		Repository: "owner/repo",
+		Number:     42,
+		HeadSHA:    head,
+	}, buckbotReviewIntake{})
+	if err == nil || !strings.Contains(err.Error(), "omitted the intake comment ID") {
+		t.Fatalf("error = %v, want missing intake evidence", err)
 	}
 }
 
@@ -645,6 +674,57 @@ func TestPostBuckbotReviewPayloadDoesNotMaskNonThrottleRESTFailure(t *testing.T)
 	}
 	if calls != 1 {
 		t.Fatalf("calls = %d, want no GraphQL fallback", calls)
+	}
+}
+
+func TestPostBuckbotReviewPayloadGraphQLRequiresReviewID(t *testing.T) {
+	original := runBuckbotGitHubFn
+	t.Cleanup(func() { runBuckbotGitHubFn = original })
+
+	const head = "1234567890abcdef1234567890abcdef12345678"
+	var calls int
+	runBuckbotGitHubFn = func(context.Context, []string, []byte) ([]byte, error) {
+		calls++
+		if calls == 1 {
+			return []byte(`{"data":{"repository":{"pullRequest":{"id":"PR","headRefOid":"` + head + `"}}}}`), nil
+		}
+		return []byte(`{"data":{"addPullRequestReview":{"pullRequestReview":{"id":""}}}}`), nil
+	}
+	err := postBuckbotReviewPayloadGraphQL(context.Background(), gitwatcher.PullRequestEvent{
+		Repository: "owner/repo",
+		Number:     42,
+		HeadSHA:    head,
+	}, "review", nil)
+	if err == nil || !strings.Contains(err.Error(), "omitted the review ID") {
+		t.Fatalf("error = %v, want missing review evidence", err)
+	}
+}
+
+func TestBuckbotReviewPayloadHelpersRejectIncompleteIdentity(t *testing.T) {
+	original := runBuckbotGitHubFn
+	t.Cleanup(func() { runBuckbotGitHubFn = original })
+	runBuckbotGitHubFn = func(context.Context, []string, []byte) ([]byte, error) {
+		t.Fatal("incomplete identity must fail before GitHub access")
+		return nil, nil
+	}
+
+	event := gitwatcher.PullRequestEvent{Repository: "owner/repo", Number: 42}
+	for name, post := range map[string]func() error{
+		"wrapper": func() error {
+			return postBuckbotReviewPayload(context.Background(), event, "review", nil)
+		},
+		"REST": func() error {
+			return postBuckbotReviewPayloadREST(context.Background(), event, "review", nil)
+		},
+		"GraphQL": func() error {
+			return postBuckbotReviewPayloadGraphQL(context.Background(), event, "review", nil)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := post(); err == nil || !strings.Contains(err.Error(), "incomplete pull request identity") {
+				t.Fatalf("error = %v, want identity rejection", err)
+			}
+		})
 	}
 }
 

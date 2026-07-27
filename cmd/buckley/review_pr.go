@@ -21,8 +21,10 @@ var postCompletedBuckbotReviewFn buckbotPoster = postBuckbotReview
 var waitCompletedBuckbotPostRetryFn = waitForBuckbotRetry
 
 const (
-	maxCompletedBuckbotPostAttempts = 3
-	completedBuckbotPostRetryDelay  = time.Second
+	maxCompletedBuckbotPostAttempts  = 3
+	completedBuckbotPostRetryDelay   = time.Second
+	completedBuckbotPostAttemptLimit = 7 * time.Second
+	completedBuckbotPostBudget       = 25 * time.Second
 )
 
 type reviewPRCommandOptions struct {
@@ -154,7 +156,11 @@ func runReviewPRCommand(args []string) error {
 		return fmt.Errorf("no model configured (set BUCKLEY_MODEL_REVIEW or configure models.review)")
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), opts.timeout)
+	reviewTimeout := opts.timeout
+	if opts.post && reviewTimeout > defaultReviewTimeout {
+		reviewTimeout = defaultReviewTimeout
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), reviewTimeout)
 	defer cancel()
 
 	if !quietMode {
@@ -219,7 +225,7 @@ func runReviewPRCommand(args []string) error {
 		return err
 	}
 	if opts.post {
-		postCtx, postCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		postCtx, postCancel := context.WithTimeout(context.Background(), completedBuckbotPostBudget)
 		defer postCancel()
 		if err := postCompletedPRReview(postCtx, prInfo, result.reviewText); err != nil {
 			return err
@@ -253,7 +259,9 @@ func postCompletedPRReview(ctx context.Context, prInfo *commands.PRInfo, reviewT
 	}
 	var lastErr error
 	for attempt := 0; attempt < maxCompletedBuckbotPostAttempts; attempt++ {
-		lastErr = postCompletedBuckbotReviewFn(ctx, event, reviewText)
+		attemptCtx, attemptCancel := context.WithTimeout(ctx, completedBuckbotPostAttemptLimit)
+		lastErr = postCompletedBuckbotReviewFn(attemptCtx, event, reviewText)
+		attemptCancel()
 		if lastErr == nil {
 			return nil
 		}

@@ -11,7 +11,7 @@ import (
 )
 
 const (
-	defaultReviewTimeout     = 4*time.Minute + 45*time.Second
+	defaultReviewTimeout     = 4*time.Minute + 25*time.Second
 	codexReviewModelFocused  = "codex/gpt-5.6-luna"
 	codexReviewModelStandard = "codex/gpt-5.6-terra"
 	codexReviewModelBroad    = "codex/gpt-5.6-sol"
