@@ -82,6 +82,16 @@ func TestReviewPromptsMakeApprovalVerificationPolicyExplicit(t *testing.T) {
 	}
 }
 
+func TestPRReviewPromptRestrictsMinorFindingsToRealDefects(t *testing.T) {
+	prompt := reviewPRDefault(time.Unix(0, 0))
+	if !strings.Contains(prompt, "MINOR: A real non-blocking behavior, validation, test, or operational defect") {
+		t.Fatal("PR prompt does not restrict MINOR findings to real defects")
+	}
+	if strings.Contains(prompt, "MINOR: Style, naming, documentation, minor improvements") {
+		t.Fatal("PR prompt still classifies style as a general MINOR finding")
+	}
+}
+
 func TestBranchReviewPromptDoesNotMandateBroadGoSweep(t *testing.T) {
 	prompt := reviewBranchWithToolsDefault(time.Unix(0, 0))
 	for _, forbidden := range []string{"Run 'go build ./...'", "Run 'go test ./...'"} {

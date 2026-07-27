@@ -72,7 +72,7 @@ func TestResolveReviewExecutionPlanUsesGovernedSizeClasses(t *testing.T) {
 		DiffBytes: 8_000,
 	})
 	if focused.sizeClass != "focused" || focused.reasoningEffort != "low" ||
-		focused.reasoningMaxTokens != 2048 ||
+		focused.reasoningMaxTokens != 1024 ||
 		focused.maxIterations != 4 || focused.maxToolCalls != 4 ||
 		focused.verificationTimeout != 60*time.Second || focused.explorationTimeout != 60*time.Second ||
 		focused.synthesisLead != 150*time.Second {
@@ -85,7 +85,7 @@ func TestResolveReviewExecutionPlanUsesGovernedSizeClasses(t *testing.T) {
 		ContextIncomplete: true,
 	})
 	if broad.sizeClass != "broad" || broad.reasoningEffort != "medium" ||
-		broad.reasoningMaxTokens != 4096 ||
+		broad.reasoningMaxTokens != 2048 ||
 		broad.maxIterations != 6 || broad.maxToolCalls != 6 ||
 		broad.verificationTimeout != 75*time.Second || broad.explorationTimeout != 90*time.Second ||
 		broad.synthesisLead != 165*time.Second {
@@ -174,6 +174,10 @@ func TestAppendReviewExecutionPlanGuidesBoundedEvidenceCollection(t *testing.T) 
 		"Limit each verification command to 90 seconds",
 		"Finish evidence collection within 180 seconds",
 		"Keep the final 75 seconds",
+		`Return only the final review`,
+		`Start the first line with "## Grade:"`,
+		"Do not expose analysis, repair commentary, progress text, or a plan",
+		"Keep the final review concise enough to fit the output limit",
 		"Do not repeat equivalent searches, builds, or tests",
 		"finish with a non-approval verdict",
 	} {

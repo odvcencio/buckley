@@ -58,7 +58,7 @@ func resolveReviewExecutionPlan(engine *rules.Engine, facts rules.ReviewPlanFact
 	plan := reviewExecutionPlan{
 		sizeClass:           "standard",
 		reasoningEffort:     "medium",
-		reasoningMaxTokens:  3072,
+		reasoningMaxTokens:  1536,
 		maxIterations:       5,
 		maxToolCalls:        5,
 		verificationTimeout: 60 * time.Second,
@@ -139,6 +139,10 @@ func appendReviewExecutionPlan(prompt string, opts automatedReviewOptions) strin
 - Limit each verification command to %d seconds.
 - Finish evidence collection within %d seconds.
 - Keep the final %d seconds for a complete verdict.
+- Return only the final review.
+- Start the first line with "## Grade:".
+- Do not expose analysis, repair commentary, progress text, or a plan.
+- Keep the final review concise enough to fit the output limit.
 - Inspect the supplied diff and structural evidence before you call a tool.
 - Do not read a changed file when the supplied diff already shows the required lines.
 - Use tools only for omitted definitions, callers, invariants, or targeted verification.

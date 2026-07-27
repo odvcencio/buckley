@@ -179,7 +179,7 @@ Notable observations that aren't issues:
 SEVERITY DEFINITIONS:
 - CRITICAL: Security issues, data integrity risks, breaking changes
 - MAJOR: Bugs, missing validation, incorrect business logic
-- MINOR: Style, naming, documentation, minor improvements
+- MINOR: A real non-blocking behavior, validation, test, or operational defect
 
 GUIDELINES:
 - Focus on correctness and business impact, not code style

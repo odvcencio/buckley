@@ -100,6 +100,26 @@ func TestBudgetedMaxOutputTokensRejectsUnaffordableRequest(t *testing.T) {
 	}
 }
 
+func TestBoundedOutputTokenLimitPreservesSmallerLimit(t *testing.T) {
+	tests := []struct {
+		name       string
+		configured int
+		budgeted   int
+		want       int
+	}{
+		{name: "no configured limit", budgeted: 5935, want: 5935},
+		{name: "configured limit is smaller", configured: 4096, budgeted: 5935, want: 4096},
+		{name: "cost limit is smaller", configured: 4096, budgeted: 2048, want: 2048},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := boundedOutputTokenLimit(tt.configured, tt.budgeted); got != tt.want {
+				t.Fatalf("boundedOutputTokenLimit(%d, %d) = %d, want %d", tt.configured, tt.budgeted, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestFinalSynthesisMessagesPreservesHistoryAndRequiresAnswer(t *testing.T) {
 	history := []model.Message{{Role: "tool", Content: "evidence"}}
 	got := finalSynthesisMessages(history)
@@ -208,6 +228,7 @@ func TestNewSubAgentBoundsReasoningTokens(t *testing.T) {
 		Model:              "test-model",
 		Reasoning:          "medium",
 		ReasoningMaxTokens: 4096,
+		MaxOutputTokens:    2048,
 	}, SubAgentDeps{
 		Models:   &model.Manager{},
 		Registry: tool.NewEmptyRegistry(),
@@ -217,6 +238,9 @@ func TestNewSubAgentBoundsReasoningTokens(t *testing.T) {
 	}
 	if agent.reasoning != "medium" || agent.reasoningMaxTokens != 4096 {
 		t.Fatalf("reasoning policy = %q/%d", agent.reasoning, agent.reasoningMaxTokens)
+	}
+	if agent.maxOutputTokens != 2048 {
+		t.Fatalf("max output tokens = %d, want 2048", agent.maxOutputTokens)
 	}
 }
 

@@ -77,6 +77,7 @@ type SubAgent struct {
 	systemPrompt       string
 	reasoning          string
 	reasoningMaxTokens int
+	maxOutputTokens    int
 	maxIterations      int
 	maxToolCalls       int
 	maxCostUSD         float64
@@ -102,6 +103,7 @@ type SubAgentConfig struct {
 	Model              string
 	Reasoning          string
 	ReasoningMaxTokens int
+	MaxOutputTokens    int
 	SystemPrompt       string
 	MaxIterations      int
 	MaxToolCalls       int
@@ -198,6 +200,7 @@ func NewSubAgent(cfg SubAgentConfig, deps SubAgentDeps) (*SubAgent, error) {
 		systemPrompt:       prompt,
 		reasoning:          normalizeSubAgentReasoning(cfg.Reasoning),
 		reasoningMaxTokens: max(0, cfg.ReasoningMaxTokens),
+		maxOutputTokens:    max(0, cfg.MaxOutputTokens),
 		maxIterations:      maxIterations,
 		maxToolCalls:       cfg.MaxToolCalls,
 		maxCostUSD:         cfg.MaxCostUSD,
@@ -257,6 +260,7 @@ func (a *SubAgent) Execute(ctx context.Context, task string) (*SubAgentResult, e
 	for i := 0; maxIterations <= 0 || i < maxIterations; i++ {
 		req := model.ChatRequest{
 			Model:     a.model,
+			MaxTokens: a.maxOutputTokens,
 			Tools:     toolDefs,
 			SessionID: "rlm-subagent-" + a.id,
 			ToolChoice: func() string {
@@ -563,8 +567,15 @@ func (a *SubAgent) applyCostBudget(req *model.ChatRequest, result *SubAgentResul
 	if err != nil {
 		return err
 	}
-	req.MaxTokens = maxOutputTokens
+	req.MaxTokens = boundedOutputTokenLimit(req.MaxTokens, maxOutputTokens)
 	return nil
+}
+
+func boundedOutputTokenLimit(configured, budgeted int) int {
+	if configured <= 0 {
+		return budgeted
+	}
+	return min(configured, budgeted)
 }
 
 func budgetedMaxOutputTokens(pricing model.ModelPricing, estimatedInputTokens int, spentUSD, maxCostUSD float64) (int, error) {
