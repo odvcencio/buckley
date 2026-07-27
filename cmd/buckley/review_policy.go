@@ -141,6 +141,13 @@ func appendReviewExecutionPlan(prompt string, opts automatedReviewOptions) strin
 - Keep the final %d seconds for a complete verdict.
 - Return only the final review.
 - Start the first line with "## Grade:".
+- In "## CI Status", write "- Build: STATE" and "- Tests: STATE".
+- Do not bold the Build or Tests labels.
+- When no feedback IDs exist, write exactly "- **Feedback disposition**: `+"`NONE_SUPPLIED`"+` — no prior feedback was supplied."
+- When feedback IDs exist, use `+"`DISPOSITIONED`"+` and copy every exact ID.
+- Omit a candidate finding when your own analysis disproves or withdraws it.
+- Compare measurements only when their workload labels and settings match.
+- List MINOR findings as Suggestions, not Blockers.
 - Do not expose analysis, repair commentary, progress text, or a plan.
 - Keep the final review concise enough to fit the output limit.
 - Inspect the supplied diff and structural evidence before you call a tool.
