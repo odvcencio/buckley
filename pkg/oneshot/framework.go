@@ -578,6 +578,9 @@ func incompleteRLMOutputError(result *RLMResult) error {
 	if hasUnclosedToolCallMarkup(result.Response) {
 		return fmt.Errorf("provider returned unfinished tool-call markup")
 	}
+	if endsWithToolCallMarkup(result.Response) {
+		return fmt.Errorf("provider returned a tool call as final text")
+	}
 	return nil
 }
 
@@ -588,6 +591,20 @@ func hasUnclosedToolCallMarkup(response string) bool {
 		{"<|tool_calls_section_begin|>", "<|tool_calls_section_end|>"},
 	} {
 		if strings.Count(response, delimiters[0]) > strings.Count(response, delimiters[1]) {
+			return true
+		}
+	}
+	return false
+}
+
+func endsWithToolCallMarkup(response string) bool {
+	response = strings.TrimSpace(response)
+	for _, closing := range []string{
+		"</tool_call>",
+		"<|tool_call_end|>",
+		"<|tool_calls_section_end|>",
+	} {
+		if strings.HasSuffix(response, closing) {
 			return true
 		}
 	}

@@ -193,6 +193,12 @@ func (tb *TraceBuilder) WithContent(content string) *TraceBuilder {
 	return tb
 }
 
+// WithResponse adds provider completion metadata.
+func (tb *TraceBuilder) WithResponse(response *ResponseTrace) *TraceBuilder {
+	tb.trace.Response = response
+	return tb
+}
+
 // WithError marks the trace as failed.
 func (tb *TraceBuilder) WithError(err error) *TraceBuilder {
 	if err != nil {

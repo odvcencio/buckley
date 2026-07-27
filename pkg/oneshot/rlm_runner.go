@@ -223,6 +223,9 @@ func (r *RLMRunner) Run(ctx context.Context, systemPrompt, task string, allowedT
 	}
 
 	builder.WithContent(response)
+	builder.WithResponse(&transparency.ResponseTrace{
+		FinishReason: agentResult.FinishReason,
+	})
 
 	// Calculate API cost only when the provider publishes token pricing.
 	// Native Codex runs through the user's CLI subscription.

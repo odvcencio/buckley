@@ -272,6 +272,62 @@ func TestRunRLMRepairsSavedUnfinishedToolCallOnce(t *testing.T) {
 	}
 }
 
+func TestRunRLMRepairsSavedBalancedToolCallOnce(t *testing.T) {
+	const savedFailure = `I'll conduct a fresh, rigorous review of this PR. Let me start by examining the project guidance, diff, and structural evidence.
+
+## Analysis
+
+The manifest fallback validates the exact diff before use. Let me verify one changed test:
+
+<tool_call>
+<function=run_verification>
+<parameter=command>
+go test ./pkg/oneshot/commands -run TestAssemblePRContext
+</parameter>
+</function>
+</tool_call>`
+	runner := &scriptedRLMExecutor{
+		responses: []string{
+			"incomplete",
+			savedFailure,
+			"valid",
+		},
+		finishReasons: []string{"stop", "stop", "stop"},
+	}
+	framework := NewFramework(nil, nil).WithRLMRunner(runner)
+
+	result, err := framework.RunRLM(context.Background(), validatingRLMDefinition{}, RLMRunOpts{
+		UserPrompt:    "review this exact diff and manifest",
+		MaxRetries:    2,
+		MaxIterations: 8,
+		MaxToolCalls:  12,
+	})
+	if err != nil {
+		t.Fatalf("RunRLM() error = %v", err)
+	}
+	if result.Value != "valid" || result.Attempts != 3 {
+		t.Fatalf("result = %#v, want valid result after three attempts", result)
+	}
+	if got := runner.iterations; len(got) != 3 || got[0] != 8 || got[1] != 1 || got[2] != 1 {
+		t.Fatalf("iteration budgets = %v, want [8 1 1]", got)
+	}
+	if got := runner.toolLimits; len(got) != 3 || got[0] != 12 || got[1] != 0 || got[2] != 0 {
+		t.Fatalf("tool budgets = %v, want [12 0 0]", got)
+	}
+	cleanPrompt := runner.prompts[2]
+	for _, required := range []string{
+		"review this exact diff and manifest",
+		savedFailure,
+		"provider returned a tool call as final text",
+		"Complete one clean repair",
+		"Do not emit tool-call markup",
+	} {
+		if !strings.Contains(cleanPrompt, required) {
+			t.Fatalf("clean repair prompt omitted %q: %q", required, cleanPrompt)
+		}
+	}
+}
+
 func TestRunRLMRejectsRepeatedUnfinishedToolCallsWithoutLoop(t *testing.T) {
 	const malformed = "review progress\n\n<tool_call>"
 	runner := &scriptedRLMExecutor{responses: []string{
