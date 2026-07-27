@@ -439,9 +439,9 @@ func BuildPRPrompt(ctx *PRContext) string {
 	if ctx.CanopyReview != "" {
 		sb.WriteString("## Primary Structural Review (Canopy)\n\n")
 		sb.WriteString("Use this diff-scoped evidence before you open more files. Validate each finding against the immutable snapshot.\n\n")
-		sb.WriteString(fmt.Sprintf("- **Measured runtime**: %s\n", formatCanopyRuntime(ctx.CanopyRuntime)))
-		sb.WriteString(fmt.Sprintf("- **Index scope**: %s\n", ctx.CanopyIndexScope))
-		sb.WriteString(fmt.Sprintf("- **Snapshot**: local checkout at %s\n\n", displayPRRevision(ctx.CheckoutSHA)))
+		fmt.Fprintf(&sb, "- **Measured runtime**: %s\n", formatCanopyRuntime(ctx.CanopyRuntime))
+		fmt.Fprintf(&sb, "- **Index scope**: %s\n", ctx.CanopyIndexScope)
+		fmt.Fprintf(&sb, "- **Snapshot**: local checkout at %s\n\n", displayPRRevision(ctx.CheckoutSHA))
 		sb.WriteString("```json\n")
 		sb.WriteString(ctx.CanopyReview)
 		sb.WriteString("\n```\n\n")

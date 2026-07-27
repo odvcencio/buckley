@@ -72,9 +72,9 @@ func TestResolveReviewExecutionPlanUsesGovernedSizeClasses(t *testing.T) {
 		DiffBytes: 8_000,
 	})
 	if focused.sizeClass != "focused" || focused.reasoningEffort != "low" ||
-		focused.maxIterations != 8 || focused.maxToolCalls != 12 ||
-		focused.verificationTimeout != 60*time.Second || focused.explorationTimeout != 2*time.Minute ||
-		focused.synthesisLead != 60*time.Second {
+		focused.maxIterations != 6 || focused.maxToolCalls != 6 ||
+		focused.verificationTimeout != 60*time.Second || focused.explorationTimeout != 90*time.Second ||
+		focused.synthesisLead != 90*time.Second {
 		t.Fatalf("focused plan = %#v", focused)
 	}
 
@@ -83,10 +83,10 @@ func TestResolveReviewExecutionPlanUsesGovernedSizeClasses(t *testing.T) {
 		DiffBytes:         8_000,
 		ContextIncomplete: true,
 	})
-	if broad.sizeClass != "broad" || broad.reasoningEffort != "high" ||
-		broad.maxIterations != 14 || broad.maxToolCalls != 24 ||
-		broad.verificationTimeout != 90*time.Second || broad.explorationTimeout != 3*time.Minute ||
-		broad.synthesisLead != 90*time.Second {
+	if broad.sizeClass != "broad" || broad.reasoningEffort != "medium" ||
+		broad.maxIterations != 8 || broad.maxToolCalls != 8 ||
+		broad.verificationTimeout != 90*time.Second || broad.explorationTimeout != 105*time.Second ||
+		broad.synthesisLead != 2*time.Minute {
 		t.Fatalf("broad plan = %#v", broad)
 	}
 }

@@ -57,11 +57,11 @@ func resolveReviewExecutionPlan(engine *rules.Engine, facts rules.ReviewPlanFact
 	plan := reviewExecutionPlan{
 		sizeClass:           "standard",
 		reasoningEffort:     "medium",
-		maxIterations:       11,
-		maxToolCalls:        18,
+		maxIterations:       8,
+		maxToolCalls:        8,
 		verificationTimeout: 75 * time.Second,
-		explorationTimeout:  165 * time.Second,
-		synthesisLead:       75 * time.Second,
+		explorationTimeout:  120 * time.Second,
+		synthesisLead:       105 * time.Second,
 	}
 	if engine == nil {
 		return plan
@@ -135,6 +135,8 @@ func appendReviewExecutionPlan(prompt string, opts automatedReviewOptions) strin
 - Finish evidence collection within %d seconds.
 - Keep the final %d seconds for a complete verdict.
 - Inspect the supplied diff and structural evidence before you call a tool.
+- Do not read a changed file when the supplied diff already shows the required lines.
+- Use tools only for omitted definitions, callers, invariants, or targeted verification.
 - Do not repeat equivalent searches, builds, or tests.
 - If required evidence cannot fit or project guidance forbids it, finish with a non-approval verdict.
 `,
