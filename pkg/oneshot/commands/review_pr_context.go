@@ -135,6 +135,7 @@ type prDiff struct {
 	Truncated     bool
 	OriginalBytes int
 	Files         []string
+	LocalFallback bool
 }
 
 type prReference struct {
@@ -253,17 +254,23 @@ func assemblePRContextWithOptions(prRef string, deps prContextDependencies, opts
 	audit.Add("PR metadata", reviewEstimateTokens(metadata))
 	prCtx.addStatus("PR metadata", "complete", "immutable repository and base/head revisions captured", false)
 
-	diff, err := getPRDiffWithBudget(deps.run, target, opts.MaxDiffBytes)
+	diff, err := getPRDiffWithBudgetAtRevisions(deps.run, target, pr.BaseSHA, pr.HeadSHA, opts.MaxDiffBytes)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to get PR diff: %w", err)
 	}
 	prCtx.Diff = diff.Text
+	diffAuditSource := "PR diff"
+	diffDetail := fmt.Sprintf("%d bytes", diff.OriginalBytes)
+	if diff.LocalFallback {
+		diffAuditSource += " (immutable local fallback)"
+		diffDetail += "; immutable local git diff used after GitHub throttled the remote diff"
+	}
 	if diff.Truncated {
-		audit.AddTruncated("PR diff", reviewEstimateTokens(diff.Text), estimatePRBytesTokens(diff.OriginalBytes))
-		prCtx.addStatus("PR diff", "truncated", fmt.Sprintf("%d original bytes; review coverage is partial", diff.OriginalBytes), true)
+		audit.AddTruncated(diffAuditSource, reviewEstimateTokens(diff.Text), estimatePRBytesTokens(diff.OriginalBytes))
+		prCtx.addStatus("PR diff", "truncated", diffDetail+"; review coverage is partial", true)
 	} else {
-		audit.Add("PR diff", reviewEstimateTokens(diff.Text))
-		prCtx.addStatus("PR diff", "complete", fmt.Sprintf("%d bytes", diff.OriginalBytes), false)
+		audit.Add(diffAuditSource, reviewEstimateTokens(diff.Text))
+		prCtx.addStatus("PR diff", "complete", diffDetail, false)
 	}
 
 	headChecks, headChecksErr := getPRChecks(deps.run, target)
@@ -553,6 +560,17 @@ func isJSONPRChecksCommand(name string, args []string) bool {
 		}
 	}
 	return false
+}
+
+func isPRGitHubThrottleError(err error) bool {
+	if err == nil {
+		return false
+	}
+	detail := strings.ToLower(err.Error())
+	rateLimited := strings.Contains(detail, "rate limit") ||
+		strings.Contains(detail, "secondary rate") ||
+		strings.Contains(detail, "abuse detection")
+	return rateLimited && (strings.Contains(detail, "http 403") || strings.Contains(detail, "http 429"))
 }
 
 func parsePRRef(ref string) (prReference, error) {
@@ -1268,10 +1286,29 @@ func getPRDiff(run prCommandRunner, target prReference) (prDiff, error) {
 }
 
 func getPRDiffWithBudget(run prCommandRunner, target prReference, maxBytes int) (prDiff, error) {
+	return getPRDiffWithBudgetAtRevisions(run, target, "", "", maxBytes)
+}
+
+func getPRDiffWithBudgetAtRevisions(
+	run prCommandRunner,
+	target prReference,
+	baseSHA string,
+	headSHA string,
+	maxBytes int,
+) (prDiff, error) {
 	args := withPRTarget([]string{"pr", "diff", strconv.Itoa(target.Number)}, target)
 	output, err := run("gh", args...)
+	localFallback := false
 	if err != nil {
-		return prDiff{}, err
+		if !isPRGitHubThrottleError(err) || strings.TrimSpace(baseSHA) == "" || strings.TrimSpace(headSHA) == "" {
+			return prDiff{}, err
+		}
+		fallbackOutput, fallbackErr := getLocalImmutablePRDiff(run, baseSHA, headSHA)
+		if fallbackErr != nil {
+			return prDiff{}, fmt.Errorf("%w; immutable local diff fallback: %v", err, fallbackErr)
+		}
+		output = fallbackOutput
+		localFallback = true
 	}
 	files, err := changedFilesFromPRDiff(string(output))
 	if err != nil {
@@ -1294,7 +1331,29 @@ func getPRDiffWithBudget(run prCommandRunner, target prReference, maxBytes int) 
 		Truncated:     res.Truncated,
 		OriginalBytes: len(output),
 		Files:         files,
+		LocalFallback: localFallback,
 	}, nil
+}
+
+func getLocalImmutablePRDiff(run prCommandRunner, baseSHA, headSHA string) ([]byte, error) {
+	rootOutput, err := run("git", "--no-pager", "rev-parse", "--show-toplevel")
+	if err != nil {
+		return nil, fmt.Errorf("resolve repository root: %w", err)
+	}
+	root := strings.TrimSpace(string(rootOutput))
+	if root == "" {
+		return nil, fmt.Errorf("repository root was empty")
+	}
+	revisionRange := strings.TrimSpace(baseSHA) + "..." + strings.TrimSpace(headSHA)
+	output, err := run(
+		"git", "--no-pager", "-C", root, "diff",
+		"--no-ext-diff", "--no-textconv", "--no-color", "--find-renames",
+		revisionRange, "--",
+	)
+	if err != nil {
+		return nil, err
+	}
+	return output, nil
 }
 
 func changedFilesFromPRDiff(raw string) ([]string, error) {
@@ -1594,6 +1653,18 @@ func getPRCommentsREST(run prCommandRunner, target prReference) ([]PRComment, er
 }
 
 func getPRReviews(run prCommandRunner, target prReference) ([]PRReview, error) {
+	reviews, err := getPRReviewsREST(run, target)
+	if err == nil || !isPRGitHubThrottleError(err) {
+		return reviews, err
+	}
+	graphReviews, graphErr := getPRReviewsGraphQL(run, target)
+	if graphErr != nil {
+		return nil, fmt.Errorf("%w; GraphQL submitted-review fallback: %v", err, graphErr)
+	}
+	return graphReviews, nil
+}
+
+func getPRReviewsREST(run prCommandRunner, target prReference) ([]PRReview, error) {
 	owner, repo, err := splitPRRepository(target.Repository)
 	if err != nil {
 		return nil, fmt.Errorf("resolve repository for paginated submitted reviews: %w", err)
@@ -1637,6 +1708,120 @@ func getPRReviews(run prCommandRunner, target prReference) ([]PRReview, error) {
 		}
 	}
 	return reviews, nil
+}
+
+const prSubmittedReviewsQuery = `query($owner: String!, $name: String!, $number: Int!, $after: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      reviews(first: 100, after: $after) {
+        pageInfo { hasNextPage endCursor }
+        nodes {
+          id
+          author { login }
+          body
+          state
+          submittedAt
+        }
+      }
+    }
+  }
+}`
+
+func getPRReviewsGraphQL(run prCommandRunner, target prReference) ([]PRReview, error) {
+	owner, repo, err := splitPRRepository(target.Repository)
+	if err != nil {
+		return nil, fmt.Errorf("resolve repository for GraphQL submitted reviews: %w", err)
+	}
+
+	type graphReview struct {
+		ID     string `json:"id"`
+		Author struct {
+			Login string `json:"login"`
+		} `json:"author"`
+		Body        string `json:"body"`
+		State       string `json:"state"`
+		SubmittedAt string `json:"submittedAt"`
+	}
+	type graphResponse struct {
+		Data struct {
+			Repository *struct {
+				PullRequest *struct {
+					Reviews struct {
+						PageInfo struct {
+							HasNextPage bool   `json:"hasNextPage"`
+							EndCursor   string `json:"endCursor"`
+						} `json:"pageInfo"`
+						Nodes []graphReview `json:"nodes"`
+					} `json:"reviews"`
+				} `json:"pullRequest"`
+			} `json:"repository"`
+		} `json:"data"`
+		Errors []struct {
+			Message string `json:"message"`
+		} `json:"errors"`
+	}
+
+	var reviews []PRReview
+	after := ""
+	seenCursors := make(map[string]struct{})
+	for {
+		args := []string{
+			"api", "graphql",
+			"-F", "owner=" + owner,
+			"-F", "name=" + repo,
+			"-F", "number=" + strconv.Itoa(target.Number),
+			"-f", "query=" + prSubmittedReviewsQuery,
+		}
+		if after != "" {
+			args = append(args, "-F", "after="+after)
+		}
+		args = withPRAPIHostname(args, target.Host)
+		output, err := run("gh", args...)
+		if err != nil {
+			return nil, err
+		}
+
+		var response graphResponse
+		if err := json.Unmarshal(output, &response); err != nil {
+			return nil, err
+		}
+		if len(response.Errors) > 0 {
+			return nil, fmt.Errorf("%s", response.Errors[0].Message)
+		}
+		if response.Data.Repository == nil || response.Data.Repository.PullRequest == nil {
+			return nil, fmt.Errorf("pull request not found in GraphQL response")
+		}
+
+		connection := response.Data.Repository.PullRequest.Reviews
+		for _, review := range connection.Nodes {
+			reviews = append(reviews, PRReview{
+				ID: stablePRFeedbackSourceID(
+					review.ID,
+					"submitted-review",
+					review.Author.Login,
+					review.State,
+					review.SubmittedAt,
+					review.Body,
+				),
+				Author:      review.Author.Login,
+				Body:        review.Body,
+				State:       review.State,
+				SubmittedAt: review.SubmittedAt,
+			})
+		}
+		if !connection.PageInfo.HasNextPage {
+			return reviews, nil
+		}
+		cursor := connection.PageInfo.EndCursor
+		if cursor == "" {
+			return nil, fmt.Errorf("submitted-review pagination omitted the next cursor")
+		}
+		if _, duplicate := seenCursors[cursor]; duplicate {
+			return nil, fmt.Errorf("submitted-review pagination repeated cursor %q", cursor)
+		}
+		seenCursors[cursor] = struct{}{}
+		after = cursor
+	}
 }
 
 func prRESTID(raw json.RawMessage) string {

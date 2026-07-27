@@ -518,6 +518,138 @@ func TestAssemblePRContext_FallbackAndFetchFailuresAreVisible(t *testing.T) {
 	assertAuditSource(t, audit, "Root AGENTS.md (fetch failed)", false)
 }
 
+func TestAssemblePRContext_RESTThrottleKeepsImmutableEvidenceComplete(t *testing.T) {
+	const (
+		baseSHA = "1111111111111111111111111111111111111111"
+		headSHA = "2222222222222222222222222222222222222222"
+	)
+	diff := "diff --git a/a.go b/a.go\n--- a/a.go\n+++ b/a.go\n@@ -1 +1 @@\n-old\n+new\n"
+	metadata := fmt.Sprintf(`{
+  "number": 208,
+  "title": "Keep review evidence available",
+  "author": {"login": "author"},
+  "state": "OPEN",
+  "url": "https://github.com/m31labs/buckley/pull/208",
+  "body": "Preserve an immutable review snapshot.",
+  "labels": [],
+  "baseRefName": "main",
+  "baseRefOid": %q,
+  "headRefName": "rest-quota-fallback",
+  "headRefOid": %q,
+  "reviewDecision": "REVIEW_REQUIRED",
+  "additions": 1,
+  "deletions": 1,
+  "changedFiles": 1
+}`, baseSHA, headSHA)
+	throttle := errors.New("gh: API rate limit exceeded (HTTP 403)")
+
+	run := func(name string, args ...string) ([]byte, error) {
+		joined := strings.Join(args, " ")
+		switch {
+		case name == "gh" && hasPRArgPrefix(args, "pr", "view", "208", "--json"):
+			return []byte(metadata), nil
+		case name == "gh" && hasPRArgPrefix(args, "pr", "checks", "208", "--json"):
+			return []byte(`[{"name":"unit","state":"SUCCESS"}]`), nil
+		case name == "gh" && hasPRArgPrefix(args, "pr", "diff", "208"):
+			return nil, throttle
+		case name == "gh" && strings.Contains(joined, "comments(first: 100"):
+			return []byte(`{
+  "data": {
+    "viewer": {"login": "buckbot"},
+    "repository": {
+      "pullRequest": {
+        "comments": {
+          "pageInfo": {"hasNextPage": false, "endCursor": ""},
+          "nodes": []
+        }
+      }
+    }
+  }
+}`), nil
+		case name == "gh" && hasPRArgPrefix(args, "api", "--paginate", "--slurp") &&
+			hasPRArg(args, "repos/m31labs/buckley/pulls/208/reviews?per_page=100"):
+			return nil, throttle
+		case name == "gh" && strings.Contains(joined, "reviews(first: 100"):
+			return []byte(`{
+  "data": {
+    "repository": {
+      "pullRequest": {
+        "reviews": {
+          "pageInfo": {"hasNextPage": false, "endCursor": ""},
+          "nodes": []
+        }
+      }
+    }
+  }
+}`), nil
+		case name == "gh" && strings.Contains(joined, "reviewThreads(first: 100"):
+			return []byte(`{
+  "data": {
+    "viewer": {"login": "buckbot"},
+    "repository": {
+      "pullRequest": {
+        "reviewThreads": {
+          "pageInfo": {"hasNextPage": false, "endCursor": ""},
+          "nodes": []
+        }
+      }
+    }
+  }
+}`), nil
+		case name == "gh" && hasPRArgPrefix(args, "api", "--paginate", "--slurp") &&
+			hasPRArg(args, "repos/m31labs/buckley/pulls/208/files?per_page=100"):
+			return nil, throttle
+		case name == "git" && matchesPRArgs(args, "--no-pager", "rev-parse", "--show-toplevel"):
+			return []byte("/fixture/repo\n"), nil
+		case name == "git" && matchesPRArgs(
+			args,
+			"--no-pager", "-C", "/fixture/repo", "diff",
+			"--no-ext-diff", "--no-textconv", "--no-color", "--find-renames",
+			baseSHA+"..."+headSHA, "--",
+		):
+			return []byte(diff), nil
+		case name == "git" && matchesPRArgs(args, "--no-pager", "-C", "/fixture/repo", "rev-parse", "HEAD"):
+			return []byte(headSHA + "\n"), nil
+		case name == "git" && matchesPRArgs(args, "--no-pager", "-C", "/fixture/repo", "status", "--porcelain"):
+			return nil, nil
+		case name == "git" && matchesPRArgs(args, "--no-pager", "-C", "/fixture/repo", "ls-tree", headSHA, "--", "AGENTS.md"):
+			return nil, nil
+		default:
+			return nil, fmt.Errorf("unexpected command: %s %s", name, joined)
+		}
+	}
+
+	ctx, audit, err := assemblePRContext("208", prContextDependencies{run: run})
+	if err != nil {
+		t.Fatalf("assemblePRContext: %v", err)
+	}
+	if ctx.HasIncompleteContext() {
+		t.Fatalf("REST throttling made immutable context incomplete: %#v", ctx.ContextStatus)
+	}
+	wantDiff := strings.TrimSuffix(diff, "\n")
+	if ctx.Diff != wantDiff {
+		t.Fatalf("Diff = %q, want immutable local diff %q", ctx.Diff, wantDiff)
+	}
+	if got := fmt.Sprint(ctx.Files); got != "[a.go]" {
+		t.Fatalf("Files = %s, want [a.go]", got)
+	}
+	for _, expected := range []string{
+		"**PR diff**: complete",
+		"immutable local git diff used after GitHub throttled the remote diff",
+		"**Submitted reviews**: complete",
+		"**Changed files**: complete",
+		"exact diff manifest matched metadata after the files API failed",
+		"**PR evidence revalidation**: complete",
+	} {
+		if prompt := BuildPRPrompt(ctx); !strings.Contains(prompt, expected) {
+			t.Errorf("prompt missing %q", expected)
+		}
+	}
+	assertAuditSource(t, audit, "PR diff (immutable local fallback)", false)
+	assertAuditSource(t, audit, "submitted reviews", false)
+	assertAuditSource(t, audit, "PR evidence revalidation", false)
+}
+
 func TestPRContextCompletenessRejectsCheckoutMismatch(t *testing.T) {
 	ctx := &PRContext{ContextStatus: []PRContextStatus{
 		{Source: "PR diff", Status: "complete"},
@@ -998,6 +1130,50 @@ func TestPaginatedPRFeedbackReadsEveryRESTPage(t *testing.T) {
 	}
 }
 
+func TestGetPRReviewsFallsBackToPaginatedGraphQLOnRESTThrottle(t *testing.T) {
+	target := prReference{Number: 208, Host: "github.example", Repository: "m31labs/buckley"}
+	var graphPages int
+	run := func(name string, args ...string) ([]byte, error) {
+		switch {
+		case name == "gh" &&
+			hasPRArgPrefix(args, "api", "--paginate", "--slurp") &&
+			hasPRArg(args, "repos/m31labs/buckley/pulls/208/reviews?per_page=100"):
+			return nil, errors.New("gh: secondary rate limit (HTTP 403)")
+		case name == "gh" &&
+			hasPRArgPrefix(args, "api", "graphql") &&
+			hasPRArgPair(args, "--hostname", "github.example"):
+			graphPages++
+			if hasPRArgPair(args, "-F", "after=next-page") {
+				return []byte(`{"data":{"repository":{"pullRequest":{"reviews":{` +
+					`"pageInfo":{"hasNextPage":false,"endCursor":""},` +
+					`"nodes":[{"id":"PRR_two","author":{"login":"two"},"body":"second",` +
+					`"state":"APPROVED","submittedAt":"2026-07-10T13:00:00Z"}]}}}}}`), nil
+			}
+			return []byte(`{"data":{"repository":{"pullRequest":{"reviews":{` +
+				`"pageInfo":{"hasNextPage":true,"endCursor":"next-page"},` +
+				`"nodes":[{"id":"PRR_one","author":{"login":"one"},"body":"first",` +
+				`"state":"COMMENTED","submittedAt":"2026-07-10T12:00:00Z"}]}}}}}`), nil
+		default:
+			return nil, fmt.Errorf("unexpected command: %s %s", name, strings.Join(args, " "))
+		}
+	}
+
+	reviews, err := getPRReviews(run, target)
+	if err != nil {
+		t.Fatalf("getPRReviews() error = %v", err)
+	}
+	if graphPages != 2 {
+		t.Fatalf("GraphQL pages = %d, want 2", graphPages)
+	}
+	if len(reviews) != 2 {
+		t.Fatalf("reviews = %#v, want 2 entries", reviews)
+	}
+	if reviews[0].ID != "PRR_one" || reviews[0].State != "COMMENTED" ||
+		reviews[1].ID != "PRR_two" || reviews[1].State != "APPROVED" {
+		t.Fatalf("reviews = %#v, want both GraphQL pages", reviews)
+	}
+}
+
 func TestPRCommentsExcludeBuckbotOperationalNotices(t *testing.T) {
 	target := prReference{Number: 208, Host: "github.com", Repository: "m31labs/buckley"}
 	marker := BuckbotReviewIntakeMarker("head-sha")
@@ -1300,6 +1476,80 @@ func TestGetPRDiffWithBudgetBoundsAutomatedContext(t *testing.T) {
 	}
 	if len(diff.Files) != 1 || diff.Files[0] != "file.go" {
 		t.Fatalf("changed-file manifest = %v, want file.go", diff.Files)
+	}
+}
+
+func TestGetPRDiffWithBudgetFallsBackToImmutableLocalDiffOnThrottle(t *testing.T) {
+	const (
+		baseSHA = "1111111111111111111111111111111111111111"
+		headSHA = "2222222222222222222222222222222222222222"
+	)
+	diffText := "diff --git a/file.go b/file.go\n--- a/file.go\n+++ b/file.go\n@@ -1 +1 @@\n-old\n+new\n"
+	var gitDiffCalls int
+	run := func(name string, args ...string) ([]byte, error) {
+		switch {
+		case name == "gh" && hasPRArgPrefix(args, "pr", "diff", "7"):
+			return nil, errors.New("gh: API rate limit exceeded (HTTP 403)")
+		case name == "git" && matchesPRArgs(args, "--no-pager", "rev-parse", "--show-toplevel"):
+			return []byte("/fixture/repo\n"), nil
+		case name == "git" && matchesPRArgs(
+			args,
+			"--no-pager", "-C", "/fixture/repo", "diff",
+			"--no-ext-diff", "--no-textconv", "--no-color", "--find-renames",
+			baseSHA+"..."+headSHA, "--",
+		):
+			gitDiffCalls++
+			return []byte(diffText), nil
+		default:
+			return nil, fmt.Errorf("unexpected command: %s %s", name, strings.Join(args, " "))
+		}
+	}
+
+	diff, err := getPRDiffWithBudgetAtRevisions(
+		run,
+		prReference{Number: 7, Host: "github.com", Repository: "m31labs/buckley"},
+		baseSHA,
+		headSHA,
+		1024,
+	)
+	if err != nil {
+		t.Fatalf("getPRDiffWithBudgetAtRevisions() error = %v", err)
+	}
+	if !diff.LocalFallback {
+		t.Fatal("immutable local diff fallback was not reported")
+	}
+	if gitDiffCalls != 1 {
+		t.Fatalf("git diff calls = %d, want 1", gitDiffCalls)
+	}
+	if diff.Text != strings.TrimSuffix(diffText, "\n") {
+		t.Fatalf("diff text = %q, want %q", diff.Text, diffText)
+	}
+	if len(diff.Files) != 1 || diff.Files[0] != "file.go" {
+		t.Fatalf("changed-file manifest = %v, want file.go", diff.Files)
+	}
+}
+
+func TestGetPRDiffWithBudgetDoesNotMaskGitHubPermissionError(t *testing.T) {
+	var gitCalls int
+	run := func(name string, args ...string) ([]byte, error) {
+		if name == "git" {
+			gitCalls++
+		}
+		return nil, errors.New("gh: Resource not accessible by integration (HTTP 403)")
+	}
+
+	_, err := getPRDiffWithBudgetAtRevisions(
+		run,
+		prReference{Number: 7},
+		"base",
+		"head",
+		1024,
+	)
+	if err == nil || !strings.Contains(err.Error(), "Resource not accessible") {
+		t.Fatalf("getPRDiffWithBudgetAtRevisions() error = %v, want permission error", err)
+	}
+	if gitCalls != 0 {
+		t.Fatalf("git calls = %d, want 0", gitCalls)
 	}
 }
 
