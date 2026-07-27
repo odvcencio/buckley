@@ -128,6 +128,10 @@ func TestPRReviewPromptRestrictsMinorFindingsToRealDefects(t *testing.T) {
 		"Falsification concludes DISPROVED",
 		"Do not invent or paraphrase an identifier",
 		"REQUEST CHANGES requires at least one Blocker",
+		"current failing input, violated invariant, failing check, or reproducible current behavior",
+		"possible rename, regeneration, test drift, or private test-hook change is not a finding",
+		"malformed historical fixture",
+		"Write no words after the token",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("PR prompt missing %q", want)

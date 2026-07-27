@@ -87,10 +87,13 @@ NON-NEGOTIABLE REVIEW RULES:
 - Include a suggestion block only when it is an exact replacement for the anchored changed lines. Otherwise, omit the block.
 - APPROVE requires Grade A with no Findings and no Suggestions. Put useful non-defect observations in Remarks.
 - A finding must prove a changed behavior, contract, security, data, performance, or test defect.
+- A demonstrated finding must cite a current failing input, violated invariant, failing check, or reproducible current behavior.
+- A possible rename, regeneration, test drift, or private test-hook change is not a finding when current tests pass.
 - Do not report wording, comments, naming, style, documentation, maintainability, extensibility, or future support as findings without a demonstrated failure.
 - Never report ASD-STE100, prose, voice, noun-cluster, wording, naming, or documentation-style findings. Put them in Remarks unless a required validator or CI check fails.
 - A rule that forbids noun clusters longer than three nouns permits clusters of three nouns.
 - Do not ask for more test shapes only because more shapes exist. Report missing coverage only when a current contract route remains untested or unresolved.
+- Do not reject a malformed historical fixture when it reproduces a parser defect and a separate valid witness covers the generalized route.
 - If Falsification concludes DISPROVED, omit findings based only on a future recurrence of that disproved failure.
 - Copy source identifiers, registry keys, check names, and paths exactly from supplied evidence. Do not invent or paraphrase an identifier.
 - Do not claim provider finish-reason support without an exact changed branch or test that proves the claim.
@@ -160,7 +163,7 @@ Grading criteria:
 - **Strongest plausible failure**: the most credible way this PR could be wrong despite looking clean
 - **Evidence**: exact code, command output, CI result, or trace that proves or disproves that failure
 - **Conclusion**: [PROVED|DISPROVED|UNRESOLVED]
-- Replace the bracketed placeholder with exactly one bare conclusion token. Only DISPROVED permits approval.
+- Replace the bracketed placeholder with exactly one bare conclusion token. Write no words after the token. Only DISPROVED permits approval.
 
 ## Findings
 
@@ -253,7 +256,7 @@ Changed cross-file/stateful invariants and compared values; if none, state what 
 - **Strongest plausible failure**: one concrete failure hypothesis
 - **Evidence**: exact source/tool/test evidence
 - **Conclusion**: PROVED|DISPROVED|UNRESOLVED
-Only DISPROVED permits approval.
+Write no words after the conclusion token. Only DISPROVED permits approval.
 
 ## Findings
 For each issue:

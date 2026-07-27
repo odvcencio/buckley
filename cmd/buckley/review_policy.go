@@ -151,6 +151,9 @@ func appendReviewExecutionPlan(prompt string, opts automatedReviewOptions) strin
 - Compare measurements only when their workload labels and settings match.
 - List MINOR findings as Suggestions, not Blockers.
 - Use REQUEST CHANGES only with a Blocker or proved current failure.
+- Write the Falsification conclusion as one bare token with no words after it.
+- Require a current failing input, violated invariant, failing check, or reproducible behavior for every Finding.
+- Move possible rename, regeneration, test drift, and private test-hook concerns to Remarks.
 - Do not expose analysis, repair commentary, progress text, or a plan.
 - Keep the final review concise enough to fit the output limit.
 - Inspect the supplied diff and structural evidence before you call a tool.
