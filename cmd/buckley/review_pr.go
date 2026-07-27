@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"m31labs.dev/buckley/pkg/config"
+	"m31labs.dev/buckley/pkg/gitwatcher"
 	"m31labs.dev/buckley/pkg/model"
 	"m31labs.dev/buckley/pkg/oneshot"
 	"m31labs.dev/buckley/pkg/oneshot/commands"
@@ -19,6 +20,7 @@ import (
 type reviewPRCommandOptions struct {
 	verbose     bool
 	showCost    bool
+	post        bool
 	model       string
 	criticModel string
 	timeout     time.Duration
@@ -34,6 +36,7 @@ func parseReviewPRCommandOptions(args []string) (reviewPRCommandOptions, error) 
 	fs := flag.NewFlagSet("review-pr", flag.ContinueOnError)
 	verbose := fs.Bool("verbose", false, "show full context and reasoning")
 	showCost := fs.Bool("cost", true, "show token/cost breakdown")
+	post := fs.Bool("post", true, "post the completed review to GitHub")
 	modelFlag := fs.String("model", "", "model to use (default: BUCKLEY_MODEL_REVIEW or buckbot.model)")
 	criticModel := fs.String("critic-model", "", "opt-in approval critic model for large or business-critical reviews")
 	timeout := fs.Duration("timeout", defaultReviewTimeout, "total review timeout")
@@ -53,6 +56,7 @@ func parseReviewPRCommandOptions(args []string) (reviewPRCommandOptions, error) 
 	return reviewPRCommandOptions{
 		verbose:     *verbose,
 		showCost:    *showCost,
+		post:        *post,
 		model:       *modelFlag,
 		criticModel: *criticModel,
 		timeout:     *timeout,
@@ -187,12 +191,40 @@ func runReviewPRCommand(args []string) error {
 	if err := writePRReviewOutput(opts.outputFile, result.reviewText, prInfo); err != nil {
 		return err
 	}
+	if opts.post {
+		postCtx, postCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer postCancel()
+		if err := postCompletedPRReview(postCtx, prInfo, result.reviewText); err != nil {
+			return err
+		}
+		if !quietMode {
+			termOut.Success("Review posted to GitHub")
+		}
+	}
 
 	if opts.showCost && result.trace != nil {
 		printReviewCost(result.trace, runtime.ledger)
 	}
 
 	return nil
+}
+
+func postCompletedPRReview(ctx context.Context, prInfo *commands.PRInfo, reviewText string) error {
+	if prInfo == nil {
+		return fmt.Errorf("post GitHub review: pull request metadata unavailable")
+	}
+	if prInfo.Host != "" && prInfo.Host != "github.com" {
+		return fmt.Errorf("post GitHub review: unsupported host %q", prInfo.Host)
+	}
+	if strings.TrimSpace(prInfo.Repository) == "" || prInfo.Number <= 0 || strings.TrimSpace(prInfo.HeadSHA) == "" {
+		return fmt.Errorf("post GitHub review: incomplete pull request identity")
+	}
+	event := gitwatcher.PullRequestEvent{
+		Repository: prInfo.Repository,
+		Number:     prInfo.Number,
+		HeadSHA:    prInfo.HeadSHA,
+	}
+	return postBuckbotReview(ctx, event, reviewText)
 }
 
 func runPRReview(ctx context.Context, prRef string, framework *oneshot.Framework) (*reviewCommandResult, *commands.PRInfo, error) {

@@ -70,6 +70,8 @@ func TestReviewPromptsMakeApprovalVerificationPolicyExplicit(t *testing.T) {
 		"Do not rerun the full suite solely",
 		"falsify a concrete risk",
 		"do not replace the required remote gate",
+		"smallest changed right-side line",
+		"exact replacement for the anchored changed lines",
 	} {
 		if !strings.Contains(pr, want) {
 			t.Errorf("PR prompt missing %q", want)

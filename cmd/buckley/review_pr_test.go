@@ -14,6 +14,7 @@ func TestParseReviewPRCommandOptions(t *testing.T) {
 	opts, err := parseReviewPRCommandOptions([]string{
 		"-verbose",
 		"-cost=false",
+		"-post=false",
 		"-model", "test/reviewer",
 		"-critic-model", "test/critic",
 		"-timeout", "30s",
@@ -33,6 +34,9 @@ func TestParseReviewPRCommandOptions(t *testing.T) {
 	}
 	if opts.showCost {
 		t.Fatal("showCost = true, want false")
+	}
+	if opts.post {
+		t.Fatal("post = true, want false")
 	}
 	if opts.model != "test/reviewer" {
 		t.Fatalf("model = %q, want test/reviewer", opts.model)
@@ -108,6 +112,9 @@ func TestParseReviewPRCommandOptionsAcceptsFlagsAfterReference(t *testing.T) {
 	}
 	if !opts.verbose {
 		t.Fatal("verbose = false, want true")
+	}
+	if !opts.post {
+		t.Fatal("post = false, want default true")
 	}
 }
 
