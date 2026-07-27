@@ -140,6 +140,18 @@ type inlineCommentsResult struct {
 	FallbackReason          string
 }
 
+const buckbotOperationalCommentPrefix = "<!-- buckbot:operation:"
+
+// BuckbotReviewIntakeMarker identifies a review-start notice. Context assembly
+// excludes these notices from the prior-feedback ledger.
+func BuckbotReviewIntakeMarker(headSHA string) string {
+	return buckbotOperationalCommentPrefix + "review-intake:" + strings.TrimSpace(headSHA) + " -->"
+}
+
+func isBuckbotOperationalComment(body string) bool {
+	return strings.Contains(body, buckbotOperationalCommentPrefix)
+}
+
 // AssemblePRContext gathers context for PR review using gh CLI.
 func AssemblePRContext(prRef string) (*PRContext, *transparency.ContextAudit, error) {
 	return AssemblePRContextWithOptions(prRef, DefaultPRContextOptions())
@@ -1270,6 +1282,9 @@ func getPRComments(run prCommandRunner, target prReference) ([]PRComment, error)
 	var comments []PRComment
 	for _, page := range pages {
 		for _, c := range page {
+			if isBuckbotOperationalComment(c.Body) {
+				continue
+			}
 			id := prRESTID(c.ID)
 			comments = append(comments, PRComment{
 				ID:     stablePRFeedbackSourceID(id, "top-level-comment", c.User.Login, c.Body),

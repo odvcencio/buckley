@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -382,6 +383,112 @@ func TestFormatBuckbotGitHubReview(t *testing.T) {
 	}
 }
 
+func TestPostBuckbotReviewLifecycleReactsAndPostsOneIntake(t *testing.T) {
+	original := runBuckbotGitHubFn
+	t.Cleanup(func() { runBuckbotGitHubFn = original })
+
+	const head = "1234567890abcdef1234567890abcdef12345678"
+	marker := commands.BuckbotReviewIntakeMarker(head)
+	tests := []struct {
+		name           string
+		existingBody   string
+		wantPostIntake bool
+	}{
+		{name: "new revision", wantPostIntake: true},
+		{name: "existing intake", existingBody: marker + "\nalready posted", wantPostIntake: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var calls int
+			runBuckbotGitHubFn = func(_ context.Context, args []string, input []byte) ([]byte, error) {
+				calls++
+				if strings.Join(args, " ") != "api graphql --input -" {
+					t.Fatalf("GitHub args = %v", args)
+				}
+				var request struct {
+					Query     string         `json:"query"`
+					Variables map[string]any `json:"variables"`
+				}
+				if err := json.Unmarshal(input, &request); err != nil {
+					t.Fatalf("decode GraphQL request: %v", err)
+				}
+				if calls == 1 {
+					if request.Variables["owner"] != "owner" || request.Variables["name"] != "repo" ||
+						request.Variables["number"] != float64(42) {
+						t.Fatalf("query variables = %#v", request.Variables)
+					}
+					return []byte(`{"data":{"repository":{"pullRequest":{"id":"PR_node","headRefOid":"` + head + `","comments":{"nodes":[{"body":` + mustJSONQuote(t, tt.existingBody) + `}]}}}}}`), nil
+				}
+				if calls != 2 {
+					t.Fatalf("GraphQL calls = %d, want 2", calls)
+				}
+				if request.Variables["subjectId"] != "PR_node" ||
+					request.Variables["postIntake"] != tt.wantPostIntake {
+					t.Fatalf("mutation variables = %#v", request.Variables)
+				}
+				body, _ := request.Variables["body"].(string)
+				for _, want := range []string{
+					marker,
+					"Buckbot review started",
+					"I captured commit `1234567890ab`.",
+					"A deeper review will follow",
+					"model `qwen/qwen3.7-plus`",
+					"focused review",
+					"high reasoning",
+					"$0.15 limit",
+				} {
+					if !strings.Contains(body, want) {
+						t.Fatalf("intake body missing %q:\n%s", want, body)
+					}
+				}
+				if !strings.Contains(request.Query, "addReaction") || !strings.Contains(request.Query, "content: EYES") {
+					t.Fatalf("mutation does not add EYES reaction:\n%s", request.Query)
+				}
+				return []byte(`{"data":{"eyes":{"reaction":{"content":"EYES"}}}}`), nil
+			}
+
+			err := postBuckbotReviewLifecycle(context.Background(), gitwatcher.PullRequestEvent{
+				Repository: "owner/repo",
+				Number:     42,
+				HeadSHA:    head,
+			}, buckbotReviewIntake{
+				Model:           "qwen/qwen3.7-plus",
+				ReasoningEffort: "high",
+				SizeClass:       "focused",
+				BudgetUSD:       0.15,
+			})
+			if err != nil {
+				t.Fatalf("postBuckbotReviewLifecycle() error = %v", err)
+			}
+			if calls != 2 {
+				t.Fatalf("GraphQL calls = %d, want 2", calls)
+			}
+		})
+	}
+}
+
+func TestPostBuckbotReviewLifecycleRejectsMovedHead(t *testing.T) {
+	original := runBuckbotGitHubFn
+	t.Cleanup(func() { runBuckbotGitHubFn = original })
+
+	var calls int
+	runBuckbotGitHubFn = func(context.Context, []string, []byte) ([]byte, error) {
+		calls++
+		return []byte(`{"data":{"repository":{"pullRequest":{"id":"PR_node","headRefOid":"new","comments":{"nodes":[]}}}}}`), nil
+	}
+	err := postBuckbotReviewLifecycle(context.Background(), gitwatcher.PullRequestEvent{
+		Repository: "owner/repo",
+		Number:     42,
+		HeadSHA:    "old",
+	}, buckbotReviewIntake{})
+	if err == nil || !strings.Contains(err.Error(), "head changed from old to new") {
+		t.Fatalf("error = %v, want moved-head rejection", err)
+	}
+	if calls != 1 {
+		t.Fatalf("GraphQL calls = %d, want query only", calls)
+	}
+}
+
 func TestPostBuckbotReviewPreservesValidInlineCommentsAfterBatchRejection(t *testing.T) {
 	original := postBuckbotReviewPayloadFn
 	t.Cleanup(func() { postBuckbotReviewPayloadFn = original })
@@ -440,6 +547,15 @@ func TestPostBuckbotReviewPreservesValidInlineCommentsAfterBatchRejection(t *tes
 	if !strings.Contains(calls[1].body, "Buckbot · Grade C · CHANGES REQUESTED") {
 		t.Fatalf("summary fallback = %q, want formatted review", calls[1].body)
 	}
+}
+
+func mustJSONQuote(t *testing.T, value string) string {
+	t.Helper()
+	data, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
 }
 
 func TestFormatBuckbotCount(t *testing.T) {

@@ -3,6 +3,7 @@ package commands
 import (
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -917,6 +918,32 @@ func TestPaginatedPRFeedbackReadsEveryRESTPage(t *testing.T) {
 	reviews, err := getPRReviews(run, target)
 	if err != nil || len(reviews) != 2 || reviews[0].ID != "3" || reviews[1].ID != "4" {
 		t.Fatalf("paginated reviews = %#v, err=%v", reviews, err)
+	}
+}
+
+func TestPRCommentsExcludeBuckbotOperationalNotices(t *testing.T) {
+	target := prReference{Number: 208, Host: "github.com", Repository: "m31labs/buckley"}
+	marker := BuckbotReviewIntakeMarker("head-sha")
+	run := func(name string, args ...string) ([]byte, error) {
+		if name != "gh" || !hasPRArg(args, "repos/m31labs/buckley/issues/208/comments?per_page=100") {
+			return nil, fmt.Errorf("unexpected command: %s %s", name, strings.Join(args, " "))
+		}
+		return []byte(`[[` +
+			`{"id":1,"user":{"login":"buckbot"},"body":` + strconv.Quote(marker+"\nreview started") + `},` +
+			`{"id":2,"user":{"login":"reviewer"},"body":"Preserve this actionable comment."}` +
+			`]]`), nil
+	}
+
+	comments, err := getPRComments(run, target)
+	if err != nil {
+		t.Fatalf("getPRComments() error = %v", err)
+	}
+	if len(comments) != 1 || comments[0].ID != "2" || comments[0].Body != "Preserve this actionable comment." {
+		t.Fatalf("actionable comments = %#v", comments)
+	}
+	ctx := &PRContext{Comments: comments}
+	if got := ctx.RequiredFeedbackIDs(); len(got) != 1 || got[0] != "top-level-comment:2" {
+		t.Fatalf("required feedback = %v, want only actionable comment", got)
 	}
 }
 

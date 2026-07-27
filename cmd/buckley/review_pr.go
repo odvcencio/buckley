@@ -165,6 +165,23 @@ func runReviewPRCommand(args []string) error {
 		maxDiffBytes:  opts.maxDiff,
 		maxCostUSD:    opts.budgetUSD,
 	})
+	if opts.post {
+		policy.contextReady = func(ctx context.Context, prInfo *commands.PRInfo, plan automatedReviewOptions) error {
+			if prInfo == nil {
+				return fmt.Errorf("post GitHub review intake: pull request metadata unavailable")
+			}
+			return postBuckbotReviewLifecycle(ctx, gitwatcher.PullRequestEvent{
+				Repository: prInfo.Repository,
+				Number:     prInfo.Number,
+				HeadSHA:    prInfo.HeadSHA,
+			}, buckbotReviewIntake{
+				Model:           plan.modelID,
+				ReasoningEffort: plan.reasoningEffort,
+				SizeClass:       plan.sizeClass,
+				BudgetUSD:       plan.maxCostUSD,
+			})
+		}
+	}
 	result, prInfo, reviewErr := runPRReviewWithOptions(ctx, opts.prRef, runtime.framework, policy)
 
 	if opts.verbose && result != nil && result.contextAudit != nil {
@@ -254,6 +271,7 @@ type automatedReviewOptions struct {
 	adaptiveCodexModel  bool
 	adaptiveReasoning   bool
 	engine              *rules.Engine
+	contextReady        func(context.Context, *commands.PRInfo, automatedReviewOptions) error
 }
 
 func defaultAutomatedReviewOptions(cfg *config.Config) automatedReviewOptions {
@@ -314,6 +332,12 @@ func runPRReviewWithOptions(ctx context.Context, prRef string, framework *onesho
 		HasFeedback:       prCtx.HasReviewFeedback(),
 	})
 	opts = opts.withExecutionPlan(plan)
+	if opts.contextReady != nil {
+		if err := opts.contextReady(ctx, prCtx.PR, opts); err != nil {
+			spinner.StopWithError(err.Error())
+			return nil, prCtx.PR, fmt.Errorf("prepare posted review: %w", err)
+		}
+	}
 	spinner.SetMessage(fmt.Sprintf("Running %s review with %s reasoning...", opts.sizeClass, opts.reasoningEffort))
 	userPrompt := appendReviewExecutionPlan(commands.BuildPRPrompt(prCtx), opts)
 	reviewDef := commands.ReviewPRDef{

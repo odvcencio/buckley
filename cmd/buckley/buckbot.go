@@ -28,10 +28,18 @@ import (
 var buckbotLoadConfigFn = config.Load
 var buckbotListenFn = http.ListenAndServe
 var postBuckbotReviewPayloadFn = postBuckbotReviewPayload
+var runBuckbotGitHubFn = runBuckbotGitHub
 
 type buckbotReviewer func(context.Context, gitwatcher.PullRequestEvent) (string, float64, error)
 type buckbotPoster func(context.Context, gitwatcher.PullRequestEvent, string) error
 type buckbotSalvager func(gitwatcher.PullRequestEvent, string, error) (string, error)
+
+type buckbotReviewIntake struct {
+	Model           string
+	ReasoningEffort string
+	SizeClass       string
+	BudgetUSD       float64
+}
 
 const (
 	buckbotReviewAttemptTimeout = defaultReviewTimeout
@@ -547,22 +555,166 @@ func postBuckbotReviewPayload(ctx context.Context, event gitwatcher.PullRequestE
 
 func postBuckbotReviewStarted(cfg config.BuckbotConfig) buckbotPoster {
 	return func(ctx context.Context, event gitwatcher.PullRequestEvent, _ string) error {
-		sha := strings.TrimSpace(event.HeadSHA)
-		if len(sha) > 12 {
-			sha = sha[:12]
-		}
-		body := fmt.Sprintf(
-			"🔎 **Buckbot is reviewing `%s`.**\n\nI’m mapping the changed surface with Canopy, tracing affected consumers and boundaries, and checking concrete risks against CI. A final summary and any line-level findings will follow.\n\n_Model: `%s` · hard cost cap: $%.2f_",
-			sha,
-			cfg.Model,
-			cfg.PerReviewBudgetUSD,
-		)
-		cmd := exec.CommandContext(ctx, "gh", "pr", "comment", fmt.Sprint(event.Number), "--repo", event.Repository, "--body", body)
-		if output, err := cmd.CombinedOutput(); err != nil {
-			return fmt.Errorf("post GitHub review-started comment: %w: %s", err, strings.TrimSpace(string(output)))
-		}
-		return nil
+		return postBuckbotReviewLifecycle(ctx, event, buckbotReviewIntake{
+			Model:     cfg.Model,
+			BudgetUSD: cfg.PerReviewBudgetUSD,
+		})
 	}
+}
+
+const buckbotReviewLifecycleQuery = `query($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      id
+      headRefOid
+      comments(last: 100) { nodes { body } }
+    }
+  }
+}`
+
+const buckbotReviewLifecycleMutation = `mutation($subjectId: ID!, $body: String!, $postIntake: Boolean!) {
+  eyes: addReaction(input: {subjectId: $subjectId, content: EYES}) {
+    reaction { content }
+  }
+  intake: addComment(input: {subjectId: $subjectId, body: $body}) @include(if: $postIntake) {
+    commentEdge { node { id } }
+  }
+}`
+
+func postBuckbotReviewLifecycle(ctx context.Context, event gitwatcher.PullRequestEvent, intake buckbotReviewIntake) error {
+	owner, repo, err := splitBuckbotRepository(event.Repository)
+	if err != nil {
+		return err
+	}
+	if event.Number <= 0 || strings.TrimSpace(event.HeadSHA) == "" {
+		return fmt.Errorf("post GitHub review intake: incomplete pull request identity")
+	}
+
+	output, err := runBuckbotGraphQL(ctx, buckbotReviewLifecycleQuery, map[string]any{
+		"owner":  owner,
+		"name":   repo,
+		"number": event.Number,
+	})
+	if err != nil {
+		return fmt.Errorf("read GitHub review intake state: %w", err)
+	}
+	var response struct {
+		Data struct {
+			Repository *struct {
+				PullRequest *struct {
+					ID         string `json:"id"`
+					HeadRefOID string `json:"headRefOid"`
+					Comments   struct {
+						Nodes []struct {
+							Body string `json:"body"`
+						} `json:"nodes"`
+					} `json:"comments"`
+				} `json:"pullRequest"`
+			} `json:"repository"`
+		} `json:"data"`
+		Errors []struct {
+			Message string `json:"message"`
+		} `json:"errors"`
+	}
+	if err := json.Unmarshal(output, &response); err != nil {
+		return fmt.Errorf("decode GitHub review intake state: %w", err)
+	}
+	if len(response.Errors) > 0 {
+		return fmt.Errorf("read GitHub review intake state: %s", response.Errors[0].Message)
+	}
+	if response.Data.Repository == nil || response.Data.Repository.PullRequest == nil {
+		return fmt.Errorf("read GitHub review intake state: pull request not found")
+	}
+	pr := response.Data.Repository.PullRequest
+	if pr.HeadRefOID != event.HeadSHA {
+		return fmt.Errorf("post GitHub review intake: head changed from %s to %s", event.HeadSHA, pr.HeadRefOID)
+	}
+
+	marker := commands.BuckbotReviewIntakeMarker(event.HeadSHA)
+	postIntake := true
+	for _, comment := range pr.Comments.Nodes {
+		if strings.Contains(comment.Body, marker) {
+			postIntake = false
+			break
+		}
+	}
+	output, err = runBuckbotGraphQL(ctx, buckbotReviewLifecycleMutation, map[string]any{
+		"subjectId":  pr.ID,
+		"body":       formatBuckbotReviewIntake(marker, event.HeadSHA, intake),
+		"postIntake": postIntake,
+	})
+	if err != nil {
+		return fmt.Errorf("post GitHub review intake: %w", err)
+	}
+	var mutationResponse struct {
+		Errors []struct {
+			Message string `json:"message"`
+		} `json:"errors"`
+	}
+	if err := json.Unmarshal(output, &mutationResponse); err != nil {
+		return fmt.Errorf("decode GitHub review intake response: %w", err)
+	}
+	if len(mutationResponse.Errors) > 0 {
+		return fmt.Errorf("post GitHub review intake: %s", mutationResponse.Errors[0].Message)
+	}
+	return nil
+}
+
+func formatBuckbotReviewIntake(marker, headSHA string, intake buckbotReviewIntake) string {
+	revision := strings.TrimSpace(headSHA)
+	if len(revision) > 12 {
+		revision = revision[:12]
+	}
+	var details []string
+	if modelID := strings.TrimSpace(intake.Model); modelID != "" {
+		details = append(details, "model `"+modelID+"`")
+	}
+	if sizeClass := strings.TrimSpace(intake.SizeClass); sizeClass != "" {
+		details = append(details, strings.ToLower(sizeClass)+" review")
+	}
+	if effort := strings.TrimSpace(intake.ReasoningEffort); effort != "" {
+		details = append(details, strings.ToLower(effort)+" reasoning")
+	}
+	if intake.BudgetUSD > 0 {
+		details = append(details, fmt.Sprintf("$%.2f limit", intake.BudgetUSD))
+	}
+	suffix := ""
+	if len(details) > 0 {
+		suffix = "\n\n_" + strings.Join(details, " · ") + "_"
+	}
+	return fmt.Sprintf(
+		"%s\n## Buckbot review started\n\nI captured commit `%s`. I will map the changed surface with Canopy and check concrete risks against CI.\n\nA deeper review will follow with the verdict, evidence, and demonstrated line findings.%s",
+		marker,
+		revision,
+		suffix,
+	)
+}
+
+func splitBuckbotRepository(repository string) (string, string, error) {
+	parts := strings.Split(strings.TrimSpace(repository), "/")
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return "", "", fmt.Errorf("post GitHub review: invalid repository %q", repository)
+	}
+	return parts[0], parts[1], nil
+}
+
+func runBuckbotGraphQL(ctx context.Context, query string, variables map[string]any) ([]byte, error) {
+	payload, err := json.Marshal(map[string]any{
+		"query":     query,
+		"variables": variables,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return runBuckbotGitHubFn(ctx, []string{"api", "graphql", "--input", "-"}, payload)
+}
+
+func runBuckbotGitHub(ctx context.Context, args []string, input []byte) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, "gh", args...)
+	if len(input) > 0 {
+		cmd.Stdin = bytes.NewReader(input)
+	}
+	return cmd.CombinedOutput()
 }
 
 func formatBuckbotInlineFinding(finding commands.Finding) string {
