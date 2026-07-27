@@ -327,10 +327,10 @@ func validateFindingDisposition(parsed *ParsedReview) error {
 	blockers := make(map[string]struct{}, len(parsed.Blockers))
 	for _, id := range parsed.Blockers {
 		if _, exists := findings[id]; !exists {
-			return fmt.Errorf("Blockers references unknown finding %s", id)
+			return fmt.Errorf("blockers references unknown finding %s", id)
 		}
 		if _, exists := blockers[id]; exists {
-			return fmt.Errorf("Blockers repeats finding %s", id)
+			return fmt.Errorf("blockers repeats finding %s", id)
 		}
 		blockers[id] = struct{}{}
 	}
@@ -338,10 +338,10 @@ func validateFindingDisposition(parsed *ParsedReview) error {
 	suggestions := make(map[string]struct{}, len(parsed.Suggestions))
 	for _, id := range parsed.Suggestions {
 		if _, exists := findings[id]; !exists {
-			return fmt.Errorf("Suggestions references unknown finding %s", id)
+			return fmt.Errorf("suggestions references unknown finding %s", id)
 		}
 		if _, exists := suggestions[id]; exists {
-			return fmt.Errorf("Suggestions repeats finding %s", id)
+			return fmt.Errorf("suggestions repeats finding %s", id)
 		}
 		if _, blocked := blockers[id]; blocked {
 			return fmt.Errorf("finding %s cannot be both a Blocker and a Suggestion", id)
