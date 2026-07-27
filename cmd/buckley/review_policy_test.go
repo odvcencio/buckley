@@ -132,7 +132,7 @@ func TestReviewExecutionPlanScalesAdaptiveCodexModels(t *testing.T) {
 		}
 		wantReasoning := "medium"
 		if tt.size == "focused" {
-			wantReasoning = "low"
+			wantReasoning = "xhigh"
 		}
 		if opts.reasoningEffort != wantReasoning {
 			t.Fatalf("%s reasoning = %q, want %q", tt.size, opts.reasoningEffort, wantReasoning)

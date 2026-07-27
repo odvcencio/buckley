@@ -171,7 +171,9 @@ func codexReviewModelForSize(sizeClass string) string {
 
 func codexReviewReasoningForSize(sizeClass string) string {
 	if strings.EqualFold(strings.TrimSpace(sizeClass), "focused") {
-		return "low"
+		// Luna can spend more reasoning on a small diff without creating the
+		// broad-review latency tail seen with Sol.
+		return "xhigh"
 	}
 	// Terra and Sol use medium reasoning. Sol supplies the broad-review
 	// capacity without the long tail observed with high reasoning.
