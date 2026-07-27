@@ -176,6 +176,8 @@ func TestAppendReviewExecutionPlanGuidesBoundedEvidenceCollection(t *testing.T) 
 		"Keep the final 75 seconds",
 		`Return only the final review`,
 		`Start the first line with "## Grade:"`,
+		`In "## CI Status", write "- Build: STATE" and "- Tests: STATE"`,
+		"Do not bold the Build or Tests labels",
 		"Do not expose analysis, repair commentary, progress text, or a plan",
 		"Keep the final review concise enough to fit the output limit",
 		"Do not repeat equivalent searches, builds, or tests",

@@ -141,6 +141,8 @@ func appendReviewExecutionPlan(prompt string, opts automatedReviewOptions) strin
 - Keep the final %d seconds for a complete verdict.
 - Return only the final review.
 - Start the first line with "## Grade:".
+- In "## CI Status", write "- Build: STATE" and "- Tests: STATE".
+- Do not bold the Build or Tests labels.
 - Do not expose analysis, repair commentary, progress text, or a plan.
 - Keep the final review concise enough to fit the output limit.
 - Inspect the supplied diff and structural evidence before you call a tool.
