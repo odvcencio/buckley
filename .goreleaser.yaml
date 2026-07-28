@@ -104,7 +104,7 @@ dockers_v2:
     ids:
       - buckley
     images:
-      - ghcr.io/odvcencio/buckley
+      - harbor.draco.quest/buckley
     tags:
       - "{{ .Version }}"
       - "{{ if and (not .IsNightly) (eq .Prerelease \"\") }}latest{{ end }}"
@@ -124,7 +124,7 @@ dockers_v2:
     ids:
       - buckley
     images:
-      - ghcr.io/odvcencio/buckley-worker
+      - harbor.draco.quest/buckley-worker
     tags:
       - "{{ .Version }}"
       - "{{ if and (not .IsNightly) (eq .Prerelease \"\") }}latest{{ end }}"
@@ -171,12 +171,13 @@ changelog:
       order: 999
 
 release:
+  disable: '{{ eq .Env.GORELEASER_DISABLE_SCM "true" }}'
   github:
     owner: odvcencio
     name: buckley
   draft: false
   prerelease: auto
-  mode: append
+  mode: keep-existing
   header: |
     ## Buckley {{ .Version }}
 

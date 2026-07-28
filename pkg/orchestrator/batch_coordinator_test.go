@@ -19,7 +19,7 @@ func TestBatchCoordinatorBuildJobRendersTemplates(t *testing.T) {
 			RemoteName: "origin",
 		},
 		JobTemplate: config.BatchJobTemplateConfig{
-			Image:              "ghcr.io/test/buckley:latest",
+			Image:              "harbor.draco.quest/buckley:latest",
 			ImagePullPolicy:    "IfNotPresent",
 			ServiceAccount:     "buckley",
 			Command:            []string{"buckley"},
