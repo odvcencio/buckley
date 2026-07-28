@@ -2,6 +2,7 @@ package diffsignal
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -565,4 +566,306 @@ index bbbbbbb..ccccccc 100644
 	if files[0].Reason != ReasonMinified {
 		t.Errorf("Reason = %q, want %q (ratio heuristic)", files[0].Reason, ReasonMinified)
 	}
+}
+
+// --- PrioritizeShards -------------------------------------------------------
+
+// manySourceDiffs builds n small, distinct source-file diffs spread across a
+// handful of directories so directory-first grouping has something to group.
+func manySourceDiffs(n int) (raw string, paths []string) {
+	dirs := []string{"pkg/alpha", "pkg/beta", "pkg/gamma", "pkg/delta"}
+	var b strings.Builder
+	for i := 0; i < n; i++ {
+		p := fmt.Sprintf("%s/file%04d.go", dirs[i%len(dirs)], i)
+		paths = append(paths, p)
+		b.WriteString(sourceFileDiff(p, fmt.Sprintf("marker-%d", i)))
+	}
+	return b.String(), paths
+}
+
+func sortedCopy(s []string) []string {
+	out := append([]string(nil), s...)
+	sort.Strings(out)
+	return out
+}
+
+// shardFileSet returns the union of every shard's Files, and reports how
+// many files appeared more than once (which must always be zero: a file may
+// never be split across, or duplicated into, two shards).
+func shardFileSet(result ShardResult) (files []string, duplicates int) {
+	seen := make(map[string]int)
+	for _, shard := range result.Shards {
+		for _, f := range shard.Files {
+			seen[f]++
+			files = append(files, f)
+		}
+	}
+	for _, count := range seen {
+		if count > 1 {
+			duplicates++
+		}
+	}
+	return files, duplicates
+}
+
+func TestPrioritizeShards_TableDriven(t *testing.T) {
+	tests := []struct {
+		name           string
+		raw            string
+		expectPaths    []string
+		shardBudget    int
+		wantShardCount int // -1 means "don't check exact count"
+		wantMinShards  int
+		wantLowSignal  int
+	}{
+		{
+			// Mutation: revert packShards to always start a fresh shard per
+			// file (drop the "fits in current shard" check) and this still
+			// passes (1 file trivially fits alone); the case that actually
+			// catches that mutation is "over budget" below. This case instead
+			// catches a mutation that makes PrioritizeShards demote to a
+			// summary line (Prioritize's old behavior) instead of sharding:
+			// if that regression lands, wantShardCount would need to become 0.
+			name:           "under budget: one shard, every high-signal file present",
+			raw:            mustJoin(sourceFileDiff("pkg/a/one.go", "m1"), sourceFileDiff("pkg/a/two.go", "m2")),
+			expectPaths:    []string{"pkg/a/one.go", "pkg/a/two.go"},
+			shardBudget:    ReviewShardBudget,
+			wantShardCount: 1,
+		},
+		{
+			name: "over budget: multiple shards, every high-signal file in exactly one",
+			raw: mustJoin(
+				largeSourceDiff("pkg/big/one.go", 4000),
+				largeSourceDiff("pkg/big2/two.go", 4000),
+				largeSourceDiff("pkg/big3/three.go", 4000),
+			),
+			expectPaths:    []string{"pkg/big/one.go", "pkg/big2/two.go", "pkg/big3/three.go"},
+			shardBudget:    4500, // each file alone is ~4000-4500B; budget forces 3 separate shards
+			wantShardCount: -1,
+			wantMinShards:  2,
+		},
+		{
+			name:           "all low-signal input: zero shards",
+			raw:            mustJoin(minifiedFileDiff("dist/bundle.js", 20_000), binaryFileDiff("assets/logo.png")),
+			expectPaths:    nil,
+			shardBudget:    ReviewShardBudget,
+			wantShardCount: 0,
+			wantLowSignal:  2,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			result := PrioritizeShards(tc.raw, tc.shardBudget)
+
+			if tc.wantShardCount >= 0 && len(result.Shards) != tc.wantShardCount {
+				t.Errorf("len(Shards) = %d, want %d", len(result.Shards), tc.wantShardCount)
+			}
+			if tc.wantMinShards > 0 && len(result.Shards) < tc.wantMinShards {
+				t.Errorf("len(Shards) = %d, want >= %d", len(result.Shards), tc.wantMinShards)
+			}
+			if len(result.LowSignal) != tc.wantLowSignal {
+				t.Errorf("len(LowSignal) = %d, want %d", len(result.LowSignal), tc.wantLowSignal)
+			}
+
+			got, duplicates := shardFileSet(result)
+			if duplicates != 0 {
+				t.Errorf("%d files appeared in more than one shard", duplicates)
+			}
+			if !equalStringSets(got, tc.expectPaths) {
+				t.Errorf("shard file union = %v, want %v", sortedCopy(got), sortedCopy(tc.expectPaths))
+			}
+		})
+	}
+}
+
+// TestPrioritizeShards_MetricExcludesLowSignal proves the fan-out trigger is
+// post-classification content, not raw file count or byte count: 500
+// generated/minified files must measure ~0 high-signal bytes and trigger
+// zero shards, even though the raw input is large.
+//
+// Mutation: change HighSignalBytes accounting (or the classification it
+// reads) to count LowSignal files too, and this test fails because
+// HighSignalBytes/HighSignalFiles would be far from zero and Shards would be
+// non-empty.
+func TestPrioritizeShards_MetricExcludesLowSignal(t *testing.T) {
+	var b strings.Builder
+	for i := 0; i < 500; i++ {
+		b.WriteString(minifiedFileDiff(fmt.Sprintf("dist/chunk%04d.min.js", i), 2000))
+	}
+
+	result := PrioritizeShards(b.String(), ReviewShardBudget)
+
+	if result.HighSignalBytes != 0 {
+		t.Errorf("HighSignalBytes = %d, want 0 for an all-generated/minified diff", result.HighSignalBytes)
+	}
+	if result.HighSignalFiles != 0 {
+		t.Errorf("HighSignalFiles = %d, want 0", result.HighSignalFiles)
+	}
+	if len(result.Shards) != 0 {
+		t.Errorf("len(Shards) = %d, want 0: low-signal files must never consume a review pass", len(result.Shards))
+	}
+	if len(result.LowSignal) != 500 {
+		t.Errorf("len(LowSignal) = %d, want 500", len(result.LowSignal))
+	}
+
+	statsBytes, statsFiles := HighSignalStats(b.String())
+	if statsBytes != result.HighSignalBytes || statsFiles != result.HighSignalFiles {
+		t.Errorf("HighSignalStats = (%d, %d), want to match PrioritizeShards (%d, %d)",
+			statsBytes, statsFiles, result.HighSignalBytes, result.HighSignalFiles)
+	}
+}
+
+// TestPrioritizeShards_JustUnderVsJustOverBudget proves the shard count is a
+// direct function of HighSignalBytes vs. the budget: one byte under the
+// per-shard budget must still produce one shard, and crossing it must
+// produce a second.
+//
+// Mutation: change the packing comparison from `> shardBudget` to
+// `>= shardBudget` (or drop the "fits in current shard" check entirely and
+// always start a new shard per group) and the "just under" case starts
+// reporting 2 shards for content that fits in 1, failing this test.
+func TestPrioritizeShards_JustUnderVsJustOverBudget(t *testing.T) {
+	const budget = 5000
+
+	// One directory (one group) so the whole file set is a single atomic
+	// unit for packing purposes.
+	under := largeSourceDiff("pkg/one/file.go", budget-200)
+	stats, _ := HighSignalStats(under)
+	if stats >= budget {
+		t.Fatalf("fixture HighSignalBytes = %d, want < %d for the 'just under' case", stats, budget)
+	}
+	res := PrioritizeShards(under, budget)
+	if len(res.Shards) != 1 {
+		t.Errorf("just-under-budget: len(Shards) = %d, want 1 (got %d high-signal bytes vs budget %d)",
+			len(res.Shards), res.HighSignalBytes, budget)
+	}
+
+	// Two separate directories/files whose combined size crosses the
+	// budget: must split into 2 shards.
+	over := mustJoin(largeSourceDiff("pkg/one/file.go", budget-200), largeSourceDiff("pkg/two/file.go", budget-200))
+	res = PrioritizeShards(over, budget)
+	if len(res.Shards) < 2 {
+		t.Errorf("just-over-budget: len(Shards) = %d, want >= 2 (got %d high-signal bytes vs budget %d)",
+			len(res.Shards), res.HighSignalBytes, budget)
+	}
+}
+
+// TestPrioritizeShards_NeverSplitsOversizedFileAcrossShards proves a single
+// file bigger than the per-shard budget lands entirely in one shard rather
+// than being cut across two.
+//
+// Mutation: change packShards' per-file loop to flush and slice `f.Segment`
+// itself into pieces (splitting one file's diff across shards) and this
+// test fails because more than one shard would contain a prefix of the
+// oversized file's path, or the file's content would be fragmented.
+func TestPrioritizeShards_NeverSplitsOversizedFileAcrossShards(t *testing.T) {
+	const budget = 4000
+	huge := largeSourceDiff("pkg/huge/file.go", budget*3)
+	small := sourceFileDiff("pkg/small/file.go", "tiny")
+
+	res := PrioritizeShards(mustJoin(huge, small), budget)
+
+	shardsWithHuge := 0
+	for _, shard := range res.Shards {
+		for _, f := range shard.Files {
+			if f == "pkg/huge/file.go" {
+				shardsWithHuge++
+			}
+		}
+	}
+	if shardsWithHuge != 1 {
+		t.Errorf("pkg/huge/file.go appeared in %d shards, want exactly 1 (never split a file across shards)", shardsWithHuge)
+	}
+}
+
+// TestPrioritizeShards_FullCoverageInvariant is the load-bearing honesty
+// check: at 1, 10, and 500+ shard scale, the union of every shard's Files
+// must equal the high-signal file set exactly, with no remainder bucket and
+// no duplicate.
+//
+// Mutation: reintroduce a clamp (for example, "if len(shards) >= 12, stop
+// packing and drop the rest") and this test fails at the 500-shard scale
+// because the file-set union would be missing entries.
+func TestPrioritizeShards_FullCoverageInvariant(t *testing.T) {
+	for _, n := range []int{1, 10, 2500} {
+		t.Run(fmt.Sprintf("%d files", n), func(t *testing.T) {
+			raw, paths := manySourceDiffs(n)
+			// Force many shards deterministically: each file's own segment
+			// is a few hundred bytes, so a tiny budget guarantees far more
+			// than one shard once n is large.
+			res := PrioritizeShards(raw, 300)
+
+			got, duplicates := shardFileSet(res)
+			if duplicates != 0 {
+				t.Errorf("%d files appeared in more than one shard", duplicates)
+			}
+			if !equalStringSets(got, paths) {
+				missing, extra := diffStringSets(paths, got)
+				t.Errorf("shard file union does not equal high-signal file set: missing=%v extra=%v", missing, extra)
+			}
+			if res.HighSignalFiles != n {
+				t.Errorf("HighSignalFiles = %d, want %d", res.HighSignalFiles, n)
+			}
+			if n > 100 && len(res.Shards) < 10 {
+				t.Errorf("len(Shards) = %d, want a large PR to actually fan out (>= 10) rather than being capped", len(res.Shards))
+			}
+		})
+	}
+}
+
+func TestEffectiveShardBudget(t *testing.T) {
+	tests := []struct {
+		name            string
+		highSignalBytes int
+		wantShards      int
+		want            int
+	}{
+		{"zero shards requested", 1000, 0, 0},
+		{"zero bytes", 0, 4, 0},
+		{"even split", 1000, 4, 250},
+		{"rounds up", 1001, 4, 251},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := EffectiveShardBudget(tc.highSignalBytes, tc.wantShards); got != tc.want {
+				t.Errorf("EffectiveShardBudget(%d, %d) = %d, want %d", tc.highSignalBytes, tc.wantShards, got, tc.want)
+			}
+		})
+	}
+}
+
+func mustJoin(parts ...string) string {
+	return strings.Join(parts, "")
+}
+
+func equalStringSets(a, b []string) bool {
+	missing, extra := diffStringSets(a, b)
+	return len(missing) == 0 && len(extra) == 0
+}
+
+// diffStringSets treats a as "expected" and b as "got": missing is present
+// in a but not b, extra is present in b but not a. Both inputs may contain
+// duplicates; the comparison is set-based (membership only), matching how
+// callers use it to check file-set coverage.
+func diffStringSets(expected, got []string) (missing, extra []string) {
+	expectedSet := make(map[string]bool, len(expected))
+	for _, v := range expected {
+		expectedSet[v] = true
+	}
+	gotSet := make(map[string]bool, len(got))
+	for _, v := range got {
+		gotSet[v] = true
+	}
+	for v := range expectedSet {
+		if !gotSet[v] {
+			missing = append(missing, v)
+		}
+	}
+	for v := range gotSet {
+		if !expectedSet[v] {
+			extra = append(extra, v)
+		}
+	}
+	return missing, extra
 }
