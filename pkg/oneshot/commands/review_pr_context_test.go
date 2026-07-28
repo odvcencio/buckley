@@ -317,12 +317,19 @@ func TestBuildPRPromptLabelsDescriptionVerificationAsSuppliedEvidence(t *testing
 			BaseSHA:      strings.Repeat("b", 40),
 			ChangedFiles: 1,
 		},
+		Files: []string{"parser.go"},
+		AgentsMD: `
+- Do not run repo-wide ` + "`go test ./...`" + ` on the host.
+- Focused package/unit tests inside Docker.
+`,
 	})
 	for _, want := range []string{
 		"## Supplied Verification Policy",
 		"supplied evidence for analysis",
 		"Do not report NOT_RUN",
 		"Only immutable head checks or snapshot-bound execution can authorize approval",
+		"## Repository Verification Constraints",
+		"Use supplied immutable test evidence when present",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("PR prompt missing %q:\n%s", want, prompt)

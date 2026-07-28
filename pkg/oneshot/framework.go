@@ -616,7 +616,10 @@ func (f *Framework) runValidatedRLMPhase(
 				if validator, ok := def.(RLMExecutionValidator); ok {
 					lastErr = validator.ValidateRLMExecution(result.value, rlmResult)
 					if lastErr != nil {
-						retryMode = rlmValidationRetryEvidence
+						retryMode = rlmValidationRetryText
+						if IsRLMExecutionEvidenceRequired(lastErr) {
+							retryMode = rlmValidationRetryEvidence
+						}
 					}
 				}
 			}
@@ -707,6 +710,8 @@ func buildRLMValidationRetryPrompt(
 			"If the conclusion is DISPROVED or UNRESOLVED, replace Findings with `None.` and remove every finding ID from Blockers and Suggestions. " +
 			"Move a non-defect observation to Remarks. " +
 			"If a current defect is demonstrated, make that defect the strongest plausible failure, use conclusion PROVED, and keep a non-approval verdict. " +
+			"If verification is PENDING, NOT_RUN, UNAVAILABLE, or UNKNOWN, use Grade B and a non-approval NEEDS DISCUSSION verdict unless independent evidence proves a defect. " +
+			"For that verdict, write `- **Recommendation**: NEEDS DISCUSSION` and `- **Blockers**: NONE`. Never put NEEDS DISCUSSION in Blockers. " +
 			"Never return findings with a DISPROVED or UNRESOLVED conclusion. " +
 			"Return one complete review in the required format.\n\nPRIOR REVIEW:\n" +
 			previous.Response

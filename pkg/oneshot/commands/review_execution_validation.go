@@ -5,11 +5,18 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"m31labs.dev/buckley/pkg/reviewpolicy"
 )
 
-func appendReviewVerificationTargets(sb *strings.Builder, changedFiles []string) {
+func appendReviewVerificationTargets(sb *strings.Builder, changedFiles []string, agentsMD string) {
 	targets := reviewVerificationTargets(changedFiles)
-	if sb == nil || len(targets) == 0 {
+	if sb == nil {
+		return
+	}
+	constraints := reviewpolicy.ParseVerificationConstraints(agentsMD)
+	appendReviewVerificationConstraints(sb, constraints)
+	if len(targets) == 0 || constraints.TestsRequireContainer {
 		return
 	}
 	sb.WriteString("## Required Local Verification Targets\n\n")
@@ -18,6 +25,23 @@ func appendReviewVerificationTargets(sb *strings.Builder, changedFiles []string)
 		sb.WriteString("- ")
 		sb.WriteString(target)
 		sb.WriteString("\n")
+	}
+	sb.WriteString("\n")
+}
+
+func appendReviewVerificationConstraints(sb *strings.Builder, constraints reviewpolicy.VerificationConstraints) {
+	if sb == nil || (!constraints.TestsRequireContainer && !constraints.ForbidHostRepoWideGo) {
+		return
+	}
+	sb.WriteString("## Repository Verification Constraints\n\n")
+	if constraints.TestsRequireContainer {
+		sb.WriteString("- Project directives require tests in Docker or a dedicated container.\n")
+		sb.WriteString("- The host `run_verification` tool cannot satisfy that requirement. Do not call it with `kind=test`.\n")
+		sb.WriteString("- Use supplied immutable test evidence when present. Otherwise report Tests as UNAVAILABLE.\n")
+		sb.WriteString("- Missing container evidence is a review limitation. It is not a product defect and cannot lower the grade below B.\n")
+	}
+	if constraints.ForbidHostRepoWideGo {
+		sb.WriteString("- Project directives forbid repo-wide Go commands on the host. Never substitute `go test ./...` or `go build ./...`.\n")
 	}
 	sb.WriteString("\n")
 }

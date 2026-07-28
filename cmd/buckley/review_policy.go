@@ -206,6 +206,8 @@ func appendReviewExecutionPlan(prompt string, opts automatedReviewOptions) strin
 - Use REQUEST CHANGES only with a Blocker or proved current failure.
 - Pending, unknown, absent, or stale remote CI alone requires Grade B with NEEDS DISCUSSION.
 - Keep a pending or unavailable CI condition in CI Status and Remarks, not Blockers or Findings.
+- For that case, write "- **Recommendation**: NEEDS DISCUSSION" and "- **Blockers**: NONE".
+- Never write NEEDS DISCUSSION as the Blockers value.
 - Cite supplied commands and results even when this review makes no duplicate tool call.
 - Missing duplicate verification alone requires Grade B with NEEDS DISCUSSION, not Grade C.
 - Write the Falsification conclusion as one bare token with no words after it.
@@ -216,6 +218,9 @@ func appendReviewExecutionPlan(prompt string, opts automatedReviewOptions) strin
 - Never let a filename, field-visibility, or source-shape heuristic override a passing focused test.
 - Treat INCONCLUSIVE, timeout, cancellation, and unavailable verification as unknown evidence, never proof of failure.
 - Report an INCONCLUSIVE verification as UNAVAILABLE in Build and Tests. INCONCLUSIVE is not an output state.
+- Treat repository verification directives as execution policy. Never replace a required Docker or CI gate with a host command.
+- A self-selected verification timeout is a review limitation. It cannot create a Finding, Blocker, FAIL state, or Grade C.
+- Use exact Go test names. The verification tool anchors the complete -run alternation.
 - For Go approval evidence, call run_verification with kind=test. Go kind=build does not execute tests.
 - Put required verification in the first tool-call batch. Do not defer it until final synthesis.
 - Omit ASD-STE100, comment-length, wording, naming, and style observations from every section.

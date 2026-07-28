@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -125,7 +126,7 @@ func TestExecutorReportsPassWithExactArgvAndNormalizedScope(t *testing.T) {
 	if result.Path != "pkg" || result.Pattern != "TestFocused" {
 		t.Fatalf("normalized scope = path %q pattern %q", result.Path, result.Pattern)
 	}
-	wantArgv := []string{"/usr/local/go/bin/go", "test", "-count=1", "-v", "-run", "TestFocused", "."}
+	wantArgv := []string{"/usr/local/go/bin/go", "test", "-count=1", "-v", "-run", "^(TestFocused)$", "."}
 	if !reflect.DeepEqual(result.Argv, wantArgv) {
 		t.Fatalf("argv = %#v, want %#v", result.Argv, wantArgv)
 	}
@@ -158,6 +159,28 @@ func TestVerificationPlanAcceptsLongFocusedGoPattern(t *testing.T) {
 	_, err = verificationPlan(KindTest, LanguageGo, strings.Repeat("x", maximumPatternBytes+1), ".")
 	if err == nil || !strings.Contains(err.Error(), "pattern is invalid") {
 		t.Fatalf("oversized pattern error = %v", err)
+	}
+}
+
+func TestVerificationPlanAnchorsWholeGoTestAlternation(t *testing.T) {
+	pattern := "TestMergeStacks|TestFaithful|TestResolveParseMergePerKeyCap"
+	plan, err := verificationPlan(KindTest, LanguageGo, pattern, ".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "^(" + pattern + ")$"
+	index := indexOf(plan.args, "-run")
+	if index < 0 || index+1 >= len(plan.args) {
+		t.Fatalf("verification args omitted -run: %#v", plan.args)
+	}
+	if got := plan.args[index+1]; got != want {
+		t.Fatalf("Go -run pattern = %q, want whole-alternation anchor %q", got, want)
+	}
+	if _, err := regexp.Compile(want); err != nil {
+		t.Fatalf("anchored Go pattern is invalid: %v", err)
+	}
+	if got := anchorGoTestPattern("TestParser/CaseOne|CaseTwo"); got != "^(TestParser)$/^(CaseOne|CaseTwo)$" {
+		t.Fatalf("subtest pattern = %q", got)
 	}
 }
 

@@ -374,10 +374,12 @@ func validateReviewExecutionEvidence(result any, execution *oneshot.RLMResult, c
 }
 
 func validateInconclusiveVerificationClaims(parsed *ParsedReview, execution *oneshot.RLMResult) error {
-	if parsed == nil || execution == nil || parsed.FalsificationConclusion != FalsificationProved {
+	if parsed == nil || execution == nil {
 		return nil
 	}
 	hasTimedOutVerification := false
+	inconclusiveKinds := make(map[string]bool)
+	confirmedFailureKinds := make(map[string]bool)
 	for _, call := range execution.ToolCalls {
 		if call.Name != "run_verification" {
 			continue
@@ -388,22 +390,41 @@ func validateInconclusiveVerificationClaims(parsed *ParsedReview, execution *one
 				text += " " + strings.ToLower(value)
 			}
 		}
+		kind, _ := call.Data["kind"].(string)
+		kind = strings.ToLower(strings.TrimSpace(kind))
+		evidence, _ := call.Data["evidence"].(string)
+		status, _ := call.Data["status"].(string)
+		if strings.EqualFold(strings.TrimSpace(evidence), "CONFIRMED_FAIL") ||
+			strings.EqualFold(strings.TrimSpace(status), "FAIL") {
+			confirmedFailureKinds[kind] = true
+		}
 		if reviewTextMentionsInconclusiveExecution(text) {
 			hasTimedOutVerification = true
-			break
+			inconclusiveKinds[kind] = true
 		}
 	}
 	if !hasTimedOutVerification {
 		return nil
 	}
 
-	if reviewTextMentionsInconclusiveExecution(parsed.Falsification) {
+	if parsed.BuildVerification == VerificationFail &&
+		(inconclusiveKinds[reviewEvidenceBuild] || inconclusiveKinds[""]) &&
+		!confirmedFailureKinds[reviewEvidenceBuild] && !confirmedFailureKinds[""] {
+		return fmt.Errorf("inconclusive build verification cannot be reported as FAIL")
+	}
+	if parsed.TestVerification == VerificationFail &&
+		(inconclusiveKinds[reviewEvidenceTest] || inconclusiveKinds[""]) &&
+		!confirmedFailureKinds[reviewEvidenceTest] && !confirmedFailureKinds[""] {
+		return fmt.Errorf("inconclusive test verification cannot be reported as FAIL")
+	}
+	if parsed.FalsificationConclusion == FalsificationProved &&
+		reviewClaimMentionsInconclusiveExecution(parsed.Falsification) {
 		return fmt.Errorf("verification timeout is inconclusive and cannot prove the falsification hypothesis")
 	}
 	for _, finding := range parsed.Findings {
 		claim := strings.Join([]string{finding.Title, finding.Evidence, finding.Impact, finding.Fix}, " ")
-		if reviewTextMentionsInconclusiveExecution(claim) {
-			return fmt.Errorf("finding %s treats an inconclusive verification timeout as proof", finding.ID)
+		if reviewClaimMentionsInconclusiveExecution(claim) {
+			return fmt.Errorf("finding %s treats inconclusive verification as a product defect", finding.ID)
 		}
 	}
 	return nil
@@ -418,6 +439,29 @@ func reviewTextMentionsInconclusiveExecution(text string) bool {
 		"context deadline",
 		"cancelled",
 		"canceled",
+		"inconclusive",
+		"unavailable",
+		"not started",
+	} {
+		if strings.Contains(text, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func reviewClaimMentionsInconclusiveExecution(text string) bool {
+	text = strings.ToLower(text)
+	for _, marker := range []string{
+		"timed out",
+		"timeout",
+		"deadline exceeded",
+		"context deadline",
+		"verification unavailable",
+		"test unavailable",
+		"command unavailable",
+		"inconclusive verification",
+		"verification was not started",
 	} {
 		if strings.Contains(text, marker) {
 			return true

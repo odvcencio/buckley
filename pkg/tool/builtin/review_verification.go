@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"m31labs.dev/buckley/pkg/reviewpolicy"
 	"m31labs.dev/buckley/pkg/reviewsandbox"
 )
 
@@ -79,7 +80,7 @@ func (t *RunVerificationTool) SetTimeoutLimit(limit time.Duration) {
 func (t *RunVerificationTool) Name() string { return "run_verification" }
 
 func (t *RunVerificationTool) Description() string {
-	return "Run a focused build, test, or check in the immutable review snapshot. For Go approval evidence, use kind=test because it compiles the target and executes tests. Source is OS-enforced read-only, temporary build output is private, and network access is disabled."
+	return "Run a focused build, test, or check in the immutable review snapshot. Repository AGENTS.md rules are enforced before process launch. Requests that require Docker, CI, or another unavailable execution surface return INCONCLUSIVE without running a host command. For Go approval evidence, use kind=test because it compiles the target and executes tests. Source is OS-enforced read-only, temporary build output is private, and network access is disabled."
 }
 
 func (t *RunVerificationTool) Parameters() ParameterSchema {
@@ -170,6 +171,13 @@ func (t *RunVerificationTool) ExecuteWithContext(ctx context.Context, params map
 	}
 	if t == nil || strings.TrimSpace(t.snapshotRoot) == "" {
 		return unavailableVerificationResult(kind, language, "run_verification requires an immutable snapshot-bound registry"), nil
+	}
+	constraints, policyErr := reviewpolicy.LoadApplicableVerificationConstraints(t.snapshotRoot, path)
+	if policyErr != nil {
+		return unavailableVerificationResult(kind, language, "repository verification policy is unavailable: "+policyErr.Error()), nil
+	}
+	if rejection := constraints.HostRejection(kind, language, path); rejection != "" {
+		return unavailableVerificationResult(kind, language, rejection), nil
 	}
 
 	verifier := t.verifier

@@ -474,7 +474,7 @@ func BuildBranchPrompt(ctx *BranchContext) string {
 	for _, file := range ctx.Files {
 		changedPaths = append(changedPaths, file.Path)
 	}
-	appendReviewVerificationTargets(&sb, changedPaths)
+	appendReviewVerificationTargets(&sb, changedPaths, ctx.AgentsMD)
 
 	if ctx.CanopyReview != "" {
 		sb.WriteString("## Primary Structural Review (Canopy)\n\n")

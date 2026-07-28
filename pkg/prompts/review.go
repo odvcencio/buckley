@@ -69,6 +69,8 @@ EXECUTION SAFETY:
 
 NON-NEGOTIABLE REVIEW RULES:
 - Read and obey the supplied AGENTS.md before choosing commands. Never run a repo-wide gate that project guidance forbids.
+- Repository verification directives are execution policy. If they require Docker, CI, or another unavailable surface, do not substitute a host command.
+- Use exact Go test names. The verification tool anchors the complete `+"`-run`"+` alternation to prevent shared prefixes from selecting larger test families.
 - Account for every changed file and every diff hunk. A clean verdict requires explicit coverage, not an impressionistic scan.
 - Treat the PR's claims as hypotheses to falsify. Trace each changed definition through its consumers, tests, and CI trigger.
 - When a change adds state, trace it through every derived cache, summary flag, dispatch gate, and optimized path.
@@ -105,6 +107,7 @@ NON-NEGOTIABLE REVIEW RULES:
 - If Falsification concludes DISPROVED or UNRESOLVED, move concerns to Remarks or omit them.
 - A passing focused test outranks a filename, field-visibility, or source-shape heuristic for the behavior that the test exercises.
 - A verification timeout, cancellation, or unavailable result is inconclusive. It cannot prove a Finding.
+- A self-selected verification timeout is a review limitation. Report UNAVAILABLE and Grade B unless independent evidence proves a product defect.
 - Copy source identifiers, registry keys, check names, and paths exactly from supplied evidence. Do not invent or paraphrase an identifier.
 - Do not claim provider finish-reason support without an exact changed branch or test that proves the claim.
 
@@ -288,9 +291,10 @@ Continue numbering. Omit speculative and style-only findings.
 Brief non-blocking observations, or "None."
 
 ## Verdict
-- **Approved**: YES/NO
+- **Recommendation**: APPROVE / REQUEST CHANGES / NEEDS DISCUSSION
 - **Blockers**: finding IDs or NONE
-- **Optional**: finding IDs or NONE
+- **Suggestions**: finding IDs or NONE
+- Use NEEDS DISCUSSION with Blockers NONE when required verification is unavailable and no product defect is proved.
 
 Severity: CRITICAL = security/data loss/crash/build failure; MAJOR = broken behavior or missing required validation; MINOR = real non-blocking defect. Current date/time: %s
 `, ste100ReviewTenet, now.Format(time.RFC3339))

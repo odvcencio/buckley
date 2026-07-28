@@ -102,13 +102,22 @@ type validatingRLMDefinition struct{}
 
 type executionValidatingRLMDefinition struct{ validatingRLMDefinition }
 
+type textRepairExecutionValidatingRLMDefinition struct{ validatingRLMDefinition }
+
 type budgetedRLMDefinition struct{ validatingRLMDefinition }
 
 func (budgetedRLMDefinition) MaxRLMIterations() int { return 8 }
 
 func (executionValidatingRLMDefinition) ValidateRLMExecution(_ any, execution *RLMResult) error {
 	if execution == nil || execution.ProviderID != "verified" {
-		return fmt.Errorf("missing execution evidence")
+		return RequireRLMExecutionEvidence(fmt.Errorf("missing execution evidence"))
+	}
+	return nil
+}
+
+func (textRepairExecutionValidatingRLMDefinition) ValidateRLMExecution(_ any, execution *RLMResult) error {
+	if execution == nil || execution.ProviderID != "verified" {
+		return fmt.Errorf("reported execution evidence is not present")
 	}
 	return nil
 }
@@ -770,6 +779,40 @@ func TestRunRLMRetriesExecutionEvidenceFailureWithGuidance(t *testing.T) {
 	}
 	if !strings.Contains(runner.prompts[1], "Gather only the missing evidence") {
 		t.Fatalf("evidence repair prompt = %q", runner.prompts[1])
+	}
+}
+
+func TestRunRLMRepairsUntrustedExecutionClaimWithoutMoreTools(t *testing.T) {
+	runner := &scriptedRLMExecutor{
+		responses: []string{"valid", "valid"},
+		providers: []string{"unverified", "verified"},
+	}
+	framework := NewFramework(nil, nil).WithRLMRunner(runner)
+
+	result, err := framework.RunRLM(context.Background(), textRepairExecutionValidatingRLMDefinition{}, RLMRunOpts{
+		UserPrompt:    "review this change",
+		MaxRetries:    2,
+		MaxIterations: 8,
+		MaxToolCalls:  6,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Attempts != 2 {
+		t.Fatalf("attempts = %d, want 2", result.Attempts)
+	}
+	if got := runner.toolLimits; len(got) != 2 || got[1] != 0 {
+		t.Fatalf("tool budgets = %v, want text-only repair", got)
+	}
+	for _, want := range []string{
+		"reported execution evidence is not present",
+		"use Grade B and a non-approval NEEDS DISCUSSION verdict",
+		"`- **Recommendation**: NEEDS DISCUSSION`",
+		"`- **Blockers**: NONE`",
+	} {
+		if !strings.Contains(runner.prompts[1], want) {
+			t.Fatalf("text repair omitted %q: %q", want, runner.prompts[1])
+		}
 	}
 }
 

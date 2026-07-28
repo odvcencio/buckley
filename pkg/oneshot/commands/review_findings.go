@@ -290,16 +290,24 @@ func ValidateParsedReview(parsed *ParsedReview, opts ReviewValidationOptions) er
 			return fmt.Errorf("an approval cannot be issued from incomplete or truncated review context")
 		}
 		if parsed.BuildVerification != VerificationPass {
-			return oneshot.RequireRLMExecutionEvidence(fmt.Errorf(
+			err := fmt.Errorf(
 				"an approval requires Build status PASS, got %s",
 				parsed.BuildVerification,
-			))
+			)
+			if parsed.BuildVerification == VerificationUnavailable {
+				return err
+			}
+			return oneshot.RequireRLMExecutionEvidence(err)
 		}
 		if parsed.TestVerification != VerificationPass {
-			return oneshot.RequireRLMExecutionEvidence(fmt.Errorf(
+			err := fmt.Errorf(
 				"an approval requires Tests status PASS, got %s",
 				parsed.TestVerification,
-			))
+			)
+			if parsed.TestVerification == VerificationUnavailable {
+				return err
+			}
+			return oneshot.RequireRLMExecutionEvidence(err)
 		}
 		if opts.RequirePassingRemoteCI {
 			ciState := parseRemoteCIState(opts.CIStatus)

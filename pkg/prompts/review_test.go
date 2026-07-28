@@ -58,6 +58,8 @@ func TestReviewPromptsMakeApprovalVerificationPolicyExplicit(t *testing.T) {
 		"For Go, call run_verification with kind=test",
 		"CONFIRMED_PASS",
 		"INCONCLUSIVE",
+		"**Recommendation**: APPROVE / REQUEST CHANGES / NEEDS DISCUSSION",
+		"Use NEEDS DISCUSSION with Blockers NONE",
 	} {
 		if !strings.Contains(branch, want) {
 			t.Errorf("branch prompt missing %q", want)

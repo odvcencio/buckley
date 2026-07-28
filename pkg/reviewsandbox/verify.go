@@ -394,7 +394,7 @@ func verificationPlan(kind Kind, language Language, pattern, workDir string) (pl
 		case KindTest:
 			args := []string{"test", "-count=1"}
 			if pattern != "" {
-				args = append(args, "-v", "-run", pattern)
+				args = append(args, "-v", "-run", anchorGoTestPattern(pattern))
 			}
 			return plan{"go", append(args, ".")}, nil
 		case KindCheck:
@@ -437,6 +437,14 @@ func verificationPlan(kind Kind, language Language, pattern, workDir string) (pl
 		return plan{"npm", args}, nil
 	}
 	return plan{}, fmt.Errorf("verification language %q is unsupported", language)
+}
+
+func anchorGoTestPattern(pattern string) string {
+	parts := strings.Split(pattern, "/")
+	for index, part := range parts {
+		parts[index] = "^(" + part + ")$"
+	}
+	return strings.Join(parts, "/")
 }
 
 func resolveSnapshotDirectory(snapshotRoot, requested string) (string, string, error) {

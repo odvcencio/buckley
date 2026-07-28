@@ -2,6 +2,9 @@ package builtin
 
 import (
 	"context"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -12,9 +15,11 @@ type fakeReviewVerifier struct {
 	result  reviewsandbox.Result
 	request reviewsandbox.Request
 	ctx     context.Context
+	calls   int
 }
 
 func (f *fakeReviewVerifier) Verify(ctx context.Context, request reviewsandbox.Request) reviewsandbox.Result {
+	f.calls++
 	f.ctx = ctx
 	f.request = request
 	return f.result
@@ -167,5 +172,46 @@ func TestNewRunVerificationToolRejectsInvalidSnapshot(t *testing.T) {
 	}
 	if _, err := NewRunVerificationTool(t.TempDir() + "/missing"); err == nil {
 		t.Fatal("missing snapshot root was accepted")
+	}
+}
+
+func TestRunVerificationToolRejectsHostTestRequiredInDocker(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "AGENTS.md"), []byte(`
+- Do not run repo-wide `+"`go test ./...`"+` on the host.
+- Focused package/unit tests inside Docker, scoped with `+"`-run`"+` whenever possible.
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tool, err := NewRunVerificationTool(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake := &fakeReviewVerifier{result: reviewsandbox.Result{
+		Kind:     reviewsandbox.KindTest,
+		Language: reviewsandbox.LanguageGo,
+		Status:   reviewsandbox.StatusPass,
+		ExitCode: 0,
+	}}
+	tool.verifier = fake
+
+	result, err := tool.Execute(map[string]any{
+		"kind":     "test",
+		"language": "go",
+		"path":     ".",
+		"pattern":  "TestMergeStacks|TestFaithful",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fake.calls != 0 {
+		t.Fatalf("forbidden host test reached verifier %d times", fake.calls)
+	}
+	if result.Success || result.Data["status"] != string(reviewsandbox.StatusUnavailable) ||
+		result.Data["evidence"] != "INCONCLUSIVE" {
+		t.Fatalf("policy rejection = %#v", result)
+	}
+	if !strings.Contains(result.Error, "Docker") || !strings.Contains(result.Error, "not started") {
+		t.Fatalf("policy rejection error = %q", result.Error)
 	}
 }

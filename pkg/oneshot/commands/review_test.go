@@ -292,6 +292,34 @@ func TestBuildBranchPrompt_WithAgentsMD(t *testing.T) {
 	assert.Contains(t, prompt, "Follow these rules")
 }
 
+func TestBuildBranchPrompt_RepositoryPolicySuppressesHostTestPlan(t *testing.T) {
+	ctx := &BranchContext{
+		Branch:     "parser-fix",
+		BaseBranch: "main",
+		Files:      []FileChange{{Status: "M", Path: "parser.go"}},
+		Diff:       "some diff",
+		AgentsMD: `
+- Do not run repo-wide ` + "`go test ./...`" + ` on the host.
+- Focused package/unit tests inside Docker, scoped with ` + "`-run`" + ` whenever possible.
+`,
+	}
+	prompt := BuildBranchPrompt(ctx)
+	for _, want := range []string{
+		"## Repository Verification Constraints",
+		"require tests in Docker",
+		"Do not call it with `kind=test`",
+		"cannot lower the grade below B",
+		"Never substitute `go test ./...` or `go build ./...`",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("directive-aware prompt omitted %q:\n%s", want, prompt)
+		}
+	}
+	if strings.Contains(prompt, "## Required Local Verification Targets") {
+		t.Fatalf("prompt planned a prohibited host test:\n%s", prompt)
+	}
+}
+
 func TestBuildProjectPrompt(t *testing.T) {
 	ctx := &ProjectContext{
 		RepoRoot:  "/home/user/project",
@@ -506,6 +534,65 @@ func TestReviewExecutionRejectsTimeoutAsProvedFindingEvidence(t *testing.T) {
 	result.Parsed.Falsification = "Source tracing proves the changed decoder skips exported fields.\n- **Conclusion**: PROVED"
 	result.Parsed.Findings[0].Evidence = "The decoder returns before it visits the changed exported field."
 	assert.NoError(t, validateReviewExecutionEvidence(result, execution, []string{"language.go"}))
+}
+
+func TestReviewExecutionKeepsTimeoutNeutralForGradeAndFindings(t *testing.T) {
+	result := &ReviewRLMResult{Parsed: &ParsedReview{
+		Grade:                   GradeC,
+		BuildVerification:       VerificationPass,
+		TestVerification:        VerificationFail,
+		Falsification:           "The selected root test timed out.\n- **Conclusion**: UNRESOLVED",
+		FalsificationConclusion: FalsificationUnresolved,
+		Findings: []Finding{{
+			ID:       "FINDING-001",
+			Title:    "Test timeout blocks verification",
+			Evidence: "The focused root test timed out after 75 seconds.",
+			Impact:   "The review could not verify the parser change.",
+		}},
+	}}
+	execution := &oneshot.RLMResult{
+		ProviderID: "openai",
+		ToolCalls: []rlm.SubAgentToolCall{{
+			Name:    "run_verification",
+			Success: false,
+			Result:  "repository verification timed out after 75s",
+			Data: map[string]any{
+				"kind":     "test",
+				"status":   "UNAVAILABLE",
+				"evidence": "INCONCLUSIVE",
+				"error":    "verification timed out after 75s",
+			},
+		}},
+	}
+	err := validateReviewExecutionEvidence(result, execution, []string{"parser.go"})
+	assert.ErrorContains(t, err, "cannot be reported as FAIL")
+
+	result.Parsed.TestVerification = VerificationUnavailable
+	err = validateReviewExecutionEvidence(result, execution, []string{"parser.go"})
+	assert.ErrorContains(t, err, "product defect")
+
+	result.Parsed.Findings = nil
+	assert.NoError(t, validateReviewExecutionEvidence(result, execution, []string{"parser.go"}))
+}
+
+func TestReviewExecutionAllowsConfirmedTestFailure(t *testing.T) {
+	result := &ReviewRLMResult{Parsed: &ParsedReview{
+		TestVerification: VerificationFail,
+	}}
+	execution := &oneshot.RLMResult{
+		ProviderID: "openai",
+		ToolCalls: []rlm.SubAgentToolCall{{
+			Name:    "run_verification",
+			Success: false,
+			Result:  "focused assertion failed",
+			Data: map[string]any{
+				"kind":     "test",
+				"status":   "FAIL",
+				"evidence": "CONFIRMED_FAIL",
+			},
+		}},
+	}
+	assert.NoError(t, validateInconclusiveVerificationClaims(result.Parsed, execution))
 }
 
 func TestProceduralVerificationGapCannotProduceDefectGrade(t *testing.T) {
@@ -1584,7 +1671,7 @@ func TestReviewApprovalRequiresNormalizedPassingBuildAndTests(t *testing.T) {
 			assert.NoError(t, err)
 			validationErr := def.ValidateResult(result)
 			assert.ErrorContains(t, validationErr, "requires Build status PASS")
-			assert.True(t, oneshot.IsRLMExecutionEvidenceRequired(validationErr))
+			assert.Equal(t, state != "UNAVAILABLE", oneshot.IsRLMExecutionEvidenceRequired(validationErr))
 		})
 		t.Run("tests "+state, func(t *testing.T) {
 			review := strings.Replace(base, "- Tests: PASS", "- Tests: "+state, 1)
@@ -1592,7 +1679,7 @@ func TestReviewApprovalRequiresNormalizedPassingBuildAndTests(t *testing.T) {
 			assert.NoError(t, err)
 			validationErr := def.ValidateResult(result)
 			assert.ErrorContains(t, validationErr, "requires Tests status PASS")
-			assert.True(t, oneshot.IsRLMExecutionEvidenceRequired(validationErr))
+			assert.Equal(t, state != "UNAVAILABLE", oneshot.IsRLMExecutionEvidenceRequired(validationErr))
 		})
 	}
 
