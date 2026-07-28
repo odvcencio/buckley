@@ -12,8 +12,8 @@ package tool
 import (
 	reflect "reflect"
 
-	builtin "m31labs.dev/buckley/pkg/tool/builtin"
 	gomock "go.uber.org/mock/gomock"
+	builtin "m31labs.dev/buckley/pkg/tool/builtin"
 )
 
 // MockTool is a mock of Tool interface.

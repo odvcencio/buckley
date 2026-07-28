@@ -8,8 +8,8 @@ import (
 	connect "connectrpc.com/connect"
 	context "context"
 	errors "errors"
-	proto "m31labs.dev/buckley/pkg/ipc/proto"
 	emptypb "google.golang.org/protobuf/types/known/emptypb"
+	proto "m31labs.dev/buckley/pkg/ipc/proto"
 	http "net/http"
 	strings "strings"
 )

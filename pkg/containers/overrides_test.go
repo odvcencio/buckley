@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"m31labs.dev/buckley/pkg/envdetect"
 	"gopkg.in/yaml.v3"
+	"m31labs.dev/buckley/pkg/envdetect"
 )
 
 func TestLoadOverrides_FileNotFound(t *testing.T) {

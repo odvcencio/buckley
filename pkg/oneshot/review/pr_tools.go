@@ -73,7 +73,7 @@ func (p *PRTools) Definitions() []tools.Definition {
 			Name:        "get_pr_review_comments",
 			Description: "Get inline review comments on specific files. Use this to see existing feedback on code lines.",
 			Parameters: tools.Schema{
-				Type: "object",
+				Type:       "object",
 				Properties: map[string]tools.Property{},
 			},
 		},
@@ -81,7 +81,7 @@ func (p *PRTools) Definitions() []tools.Definition {
 			Name:        "check_merge_conflicts",
 			Description: "Check if the PR has merge conflicts with the base branch.",
 			Parameters: tools.Schema{
-				Type: "object",
+				Type:       "object",
 				Properties: map[string]tools.Property{},
 			},
 		},
@@ -126,8 +126,8 @@ func (p *PRTools) getFileContent(params map[string]any) (string, error) {
 	}
 
 	var prData struct {
-		HeadRefName         string `json:"headRefName"`
-		HeadRepository      struct{ Name string } `json:"headRepository"`
+		HeadRefName         string                 `json:"headRefName"`
+		HeadRepository      struct{ Name string }  `json:"headRepository"`
 		HeadRepositoryOwner struct{ Login string } `json:"headRepositoryOwner"`
 	}
 	if err := json.Unmarshal(output, &prData); err != nil {

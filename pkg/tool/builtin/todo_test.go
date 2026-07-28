@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"m31labs.dev/buckley/pkg/model"
 	"go.uber.org/mock/gomock"
+	"m31labs.dev/buckley/pkg/model"
 )
 
 func TestTodoTool_Name(t *testing.T) {

@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"net"
 
-	"m31labs.dev/buckley/pkg/sdk"
 	"google.golang.org/grpc"
 	"google.golang.org/protobuf/types/known/emptypb"
+	"m31labs.dev/buckley/pkg/sdk"
 )
 
 // BuckleyServiceServer describes the RPC surface for automation clients.

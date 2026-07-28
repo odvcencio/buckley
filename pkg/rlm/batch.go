@@ -9,6 +9,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/oklog/ulid/v2"
+	"golang.org/x/time/rate"
 	"m31labs.dev/buckley/pkg/bus"
 	"m31labs.dev/buckley/pkg/coordination/reliability"
 	"m31labs.dev/buckley/pkg/coordination/security"
@@ -16,8 +18,6 @@ import (
 	"m31labs.dev/buckley/pkg/model"
 	"m31labs.dev/buckley/pkg/rules"
 	"m31labs.dev/buckley/pkg/tool"
-	"github.com/oklog/ulid/v2"
-	"golang.org/x/time/rate"
 )
 
 const defaultBatchConcurrency = 4

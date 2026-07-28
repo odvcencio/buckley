@@ -3,10 +3,10 @@ package orchestrator
 import (
 	"testing"
 
-	"m31labs.dev/buckley/pkg/config"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/client-go/kubernetes/fake"
+	"m31labs.dev/buckley/pkg/config"
 )
 
 func TestBatchCoordinatorBuildJobRendersTemplates(t *testing.T) {
