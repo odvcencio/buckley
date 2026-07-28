@@ -61,6 +61,17 @@ func TestResolveReviewReasoningEffortUsesExplicitSuffix(t *testing.T) {
 	}
 }
 
+func TestCriticModelReasoningSuffixStaysIndependent(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Models.Reasoning = "low"
+	modelID, explicit := config.SplitReasoningSuffix("qwen/qwen3.7-plus-xhigh")
+
+	got := resolveReviewReasoningEffort(cfg, reviewReasoningChecker{supported: true}, modelID, explicit)
+	if modelID != "qwen/qwen3.7-plus" || got != "xhigh" {
+		t.Fatalf("critic selection = %q/%q, want qwen/qwen3.7-plus/xhigh", modelID, got)
+	}
+}
+
 func TestResolveReviewExecutionPlanUsesGovernedSizeClasses(t *testing.T) {
 	engine, err := rules.NewEngine()
 	if err != nil {
@@ -75,7 +86,7 @@ func TestResolveReviewExecutionPlanUsesGovernedSizeClasses(t *testing.T) {
 		focused.reasoningMaxTokens != 1024 ||
 		focused.maxIterations != 4 || focused.maxToolCalls != 4 ||
 		focused.maxVerificationCalls != 1 ||
-		focused.verificationTimeout != 25*time.Second || focused.explorationTimeout != 45*time.Second ||
+		focused.verificationTimeout != 60*time.Second || focused.explorationTimeout != 45*time.Second ||
 		focused.synthesisLead != 85*time.Second || focused.criticReserve != 70*time.Second ||
 		focused.criticMaxIterations != 2 || focused.criticMaxToolCalls != 2 ||
 		focused.criticExploration != 15*time.Second || focused.criticSynthesisLead != 45*time.Second {
@@ -91,7 +102,7 @@ func TestResolveReviewExecutionPlanUsesGovernedSizeClasses(t *testing.T) {
 		broad.reasoningMaxTokens != 2048 ||
 		broad.maxIterations != 6 || broad.maxToolCalls != 6 ||
 		broad.maxVerificationCalls != 1 ||
-		broad.verificationTimeout != 30*time.Second || broad.explorationTimeout != 55*time.Second ||
+		broad.verificationTimeout != 60*time.Second || broad.explorationTimeout != 55*time.Second ||
 		broad.synthesisLead != 90*time.Second || broad.criticReserve != 80*time.Second ||
 		broad.criticMaxIterations != 2 || broad.criticMaxToolCalls != 2 ||
 		broad.criticExploration != 20*time.Second || broad.criticSynthesisLead != 50*time.Second {
@@ -118,6 +129,38 @@ func TestReviewExecutionPlanPreservesExplicitTurnOverride(t *testing.T) {
 		opts.explorationTimeout != 4*time.Minute || opts.synthesisLead != 90*time.Second ||
 		opts.reasoningEffort != "medium" || opts.reasoningMaxTokens != 4096 {
 		t.Fatalf("execution plan was not applied: %#v", opts)
+	}
+}
+
+func TestReviewExecutionPlanBoundsDefaultQwenTurns(t *testing.T) {
+	plan := reviewExecutionPlan{
+		sizeClass:            "broad",
+		maxIterations:        6,
+		maxToolCalls:         6,
+		maxVerificationCalls: 1,
+	}
+	bounded := automatedReviewOptions{
+		modelID: "qwen/qwen3.7-plus",
+	}.withExecutionPlan(plan)
+	if bounded.maxIterations != 2 || bounded.maxToolCalls != 6 ||
+		bounded.explorationTimeout != qwenReviewExploration ||
+		bounded.criticExploration != qwenCriticExploration {
+		t.Fatalf("bounded Qwen plan = %#v, want two turns and Qwen exploration windows", bounded)
+	}
+
+	explicit := automatedReviewOptions{
+		modelID:       "qwen/qwen3.7-plus",
+		maxIterations: 5,
+	}.withExecutionPlan(plan)
+	if explicit.maxIterations != 5 {
+		t.Fatalf("explicit Qwen turns = %d, want 5", explicit.maxIterations)
+	}
+
+	other := automatedReviewOptions{
+		modelID: "other/reviewer",
+	}.withExecutionPlan(plan)
+	if other.maxIterations != 6 {
+		t.Fatalf("other model turns = %d, want 6", other.maxIterations)
 	}
 }
 
@@ -195,10 +238,13 @@ func TestAppendReviewExecutionPlanGuidesBoundedEvidenceCollection(t *testing.T) 
 		"List MINOR findings as Suggestions, not Blockers",
 		"Use REQUEST CHANGES only with a Blocker or proved current failure",
 		"Pending, unknown, absent, or stale remote CI alone requires Grade B with NEEDS DISCUSSION",
+		"Missing duplicate verification alone requires Grade B",
 		"not Blockers or Findings",
 		"Write the Falsification conclusion as one bare token",
 		"Write Findings only when Falsification concludes PROVED",
 		"Require a current failing input, violated invariant, failing check, or reproducible behavior",
+		"Put required verification in the first tool-call batch",
+		"Report an INCONCLUSIVE verification as UNAVAILABLE",
 		"Move possible rename, regeneration, test drift, and private test-hook concerns to Remarks",
 		"Do not expose analysis, repair commentary, progress text, or a plan",
 		"Keep the final review concise enough to fit the output limit",

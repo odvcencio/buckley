@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -125,7 +126,7 @@ func TestExecutorReportsPassWithExactArgvAndNormalizedScope(t *testing.T) {
 	if result.Path != "pkg" || result.Pattern != "TestFocused" {
 		t.Fatalf("normalized scope = path %q pattern %q", result.Path, result.Pattern)
 	}
-	wantArgv := []string{"/usr/local/go/bin/go", "test", "-count=1", "-v", "-run", "TestFocused", "."}
+	wantArgv := []string{"/usr/local/go/bin/go", "test", "-count=1", "-v", "-run", "^(TestFocused)$", "."}
 	if !reflect.DeepEqual(result.Argv, wantArgv) {
 		t.Fatalf("argv = %#v, want %#v", result.Argv, wantArgv)
 	}
@@ -158,6 +159,28 @@ func TestVerificationPlanAcceptsLongFocusedGoPattern(t *testing.T) {
 	_, err = verificationPlan(KindTest, LanguageGo, strings.Repeat("x", maximumPatternBytes+1), ".")
 	if err == nil || !strings.Contains(err.Error(), "pattern is invalid") {
 		t.Fatalf("oversized pattern error = %v", err)
+	}
+}
+
+func TestVerificationPlanAnchorsWholeGoTestAlternation(t *testing.T) {
+	pattern := "TestMergeStacks|TestFaithful|TestResolveParseMergePerKeyCap"
+	plan, err := verificationPlan(KindTest, LanguageGo, pattern, ".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "^(" + pattern + ")$"
+	index := indexOf(plan.args, "-run")
+	if index < 0 || index+1 >= len(plan.args) {
+		t.Fatalf("verification args omitted -run: %#v", plan.args)
+	}
+	if got := plan.args[index+1]; got != want {
+		t.Fatalf("Go -run pattern = %q, want whole-alternation anchor %q", got, want)
+	}
+	if _, err := regexp.Compile(want); err != nil {
+		t.Fatalf("anchored Go pattern is invalid: %v", err)
+	}
+	if got := anchorGoTestPattern("TestParser/CaseOne|CaseTwo"); got != "^(TestParser)$/^(CaseOne|CaseTwo)$" {
+		t.Fatalf("subtest pattern = %q", got)
 	}
 }
 
@@ -194,6 +217,28 @@ func TestExecutorClassifiesCommandFailureAndSandboxUnavailable(t *testing.T) {
 		}
 	})
 
+	t.Run("verification timeout is inconclusive", func(t *testing.T) {
+		executor := testExecutor(t)
+		calls := 0
+		executor.run = func(context.Context, commandInvocation, int) (commandOutput, error) {
+			calls++
+			if calls == 1 {
+				return commandOutput{ExitCode: 0}, nil
+			}
+			return commandOutput{ExitCode: -1}, context.DeadlineExceeded
+		}
+		result := executor.Verify(context.Background(), Request{
+			SnapshotRoot: root,
+			Kind:         KindTest,
+			Language:     LanguageGo,
+			Timeout:      time.Second,
+		})
+		if result.Status != StatusUnavailable || result.ExitCode != 124 ||
+			!strings.Contains(result.Error, "timed out") {
+			t.Fatalf("timeout = %#v", result)
+		}
+	})
+
 	t.Run("successful command with no tests", func(t *testing.T) {
 		executor := testExecutor(t)
 		calls := 0
@@ -209,6 +254,43 @@ func TestExecutorClassifiesCommandFailureAndSandboxUnavailable(t *testing.T) {
 			t.Fatalf("no-test result = %#v", result)
 		}
 	})
+}
+
+func TestSessionExecutorReusesAndRemovesPrivateRuntime(t *testing.T) {
+	executor := testExecutor(t)
+	executor.reuseRuntime = true
+	base := t.TempDir()
+	created := 0
+	removed := ""
+	executor.tempDir = func(string, string) (string, error) {
+		created++
+		runtimeDir := filepath.Join(base, "runtime")
+		return runtimeDir, os.Mkdir(runtimeDir, 0o700)
+	}
+	executor.removeAll = func(path string) error {
+		removed = path
+		return os.RemoveAll(path)
+	}
+
+	first, firstCleanup, err := executor.prepareRuntime()
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstCleanup()
+	second, secondCleanup, err := executor.prepareRuntime()
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondCleanup()
+	if first != second || created != 1 || removed != "" {
+		t.Fatalf("runtime reuse = first %q, second %q, created %d, removed %q", first, second, created, removed)
+	}
+	if err := executor.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if removed != first {
+		t.Fatalf("removed runtime = %q, want %q", removed, first)
+	}
 }
 
 func TestResolveSnapshotDirectoryRejectsEscape(t *testing.T) {

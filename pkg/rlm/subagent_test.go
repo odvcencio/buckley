@@ -165,6 +165,25 @@ func TestSummarizeRejectedToolCallsDoesNotEmitToolMarkup(t *testing.T) {
 	}
 }
 
+func TestPrepareFinalToolRepairAddsOneStrictSynthesisTurn(t *testing.T) {
+	history := []model.Message{{Role: "tool", Content: "verified PASS"}}
+	got, iterations, retry := prepareFinalToolRepair(history, 2, false)
+	if !retry || iterations != 3 || len(got) != 2 {
+		t.Fatalf("repair = retry %v, iterations %d, messages %#v", retry, iterations, got)
+	}
+	if !strings.Contains(fmt.Sprint(got[1].Content), "completed evidence") {
+		t.Fatalf("repair prompt = %#v", got[1])
+	}
+	if len(history) != 1 {
+		t.Fatalf("repair mutated history: %#v", history)
+	}
+
+	got, iterations, retry = prepareFinalToolRepair(got, iterations, true)
+	if retry || iterations != 3 || len(got) != 2 {
+		t.Fatalf("second repair = retry %v, iterations %d, messages %#v", retry, iterations, got)
+	}
+}
+
 func TestMarshalSubAgentRawPreservesFinishReason(t *testing.T) {
 	raw := marshalSubAgentRaw(&SubAgentResult{
 		Summary:      "partial review",

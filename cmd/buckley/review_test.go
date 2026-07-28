@@ -246,6 +246,18 @@ func TestReviewResultFromRLMExposesPrimaryAndCriticAttempts(t *testing.T) {
 	}
 }
 
+func TestReviewResultFromRLMIgnoresTypedNilReview(t *testing.T) {
+	var typedNil *commands.ReviewRLMResult
+	got := reviewResultFromRLM(&oneshot.RunResult{Value: typedNil}, nil)
+
+	if got == nil {
+		t.Fatal("reviewResultFromRLM() = nil, want an empty result")
+	}
+	if got.reviewText != "" || got.parsed != nil {
+		t.Fatalf("review result = %#v, want no review content", got)
+	}
+}
+
 func TestReviewValidationRepairLinesExplainBoundedRetries(t *testing.T) {
 	longReason := strings.Repeat("x", 220)
 	trace := &transparency.Trace{Attempts: []transparency.TraceAttempt{

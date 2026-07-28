@@ -3,6 +3,7 @@ package oneshot
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"strings"
 	"time"
 
@@ -446,7 +447,7 @@ func (f *Framework) RunRLM(ctx context.Context, def RLMDefinition, opts RLMRunOp
 	traceAttempts = append(traceAttempts, critic.traces...)
 	result.Trace = transparency.AggregateTraceAttempts(traceAttempts)
 	if critic.err != nil {
-		if critic.value != nil {
+		if hasRLMValue(critic.value) {
 			result.Value = critic.value
 		}
 		result.Incomplete = true
@@ -459,6 +460,19 @@ func (f *Framework) RunRLM(ctx context.Context, def RLMDefinition, opts RLMRunOp
 	// authoritative final review.
 	result.Value = critic.value
 	return result, nil
+}
+
+func hasRLMValue(value any) bool {
+	if value == nil {
+		return false
+	}
+	reflected := reflect.ValueOf(value)
+	switch reflected.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return !reflected.IsNil()
+	default:
+		return true
+	}
 }
 
 func contextWithReservedTime(ctx context.Context, reserve time.Duration) (context.Context, context.CancelFunc) {
@@ -602,7 +616,10 @@ func (f *Framework) runValidatedRLMPhase(
 				if validator, ok := def.(RLMExecutionValidator); ok {
 					lastErr = validator.ValidateRLMExecution(result.value, rlmResult)
 					if lastErr != nil {
-						retryMode = rlmValidationRetryEvidence
+						retryMode = rlmValidationRetryText
+						if IsRLMExecutionEvidenceRequired(lastErr) {
+							retryMode = rlmValidationRetryEvidence
+						}
 					}
 				}
 			}
@@ -693,6 +710,8 @@ func buildRLMValidationRetryPrompt(
 			"If the conclusion is DISPROVED or UNRESOLVED, replace Findings with `None.` and remove every finding ID from Blockers and Suggestions. " +
 			"Move a non-defect observation to Remarks. " +
 			"If a current defect is demonstrated, make that defect the strongest plausible failure, use conclusion PROVED, and keep a non-approval verdict. " +
+			"If verification is PENDING, NOT_RUN, UNAVAILABLE, or UNKNOWN, use Grade B and a non-approval NEEDS DISCUSSION verdict unless independent evidence proves a defect. " +
+			"For that verdict, write `- **Recommendation**: NEEDS DISCUSSION` and `- **Blockers**: NONE`. Never put NEEDS DISCUSSION in Blockers. " +
 			"Never return findings with a DISPROVED or UNRESOLVED conclusion. " +
 			"Return one complete review in the required format.\n\nPRIOR REVIEW:\n" +
 			previous.Response

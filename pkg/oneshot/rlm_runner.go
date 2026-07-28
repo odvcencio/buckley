@@ -106,6 +106,7 @@ func (r *RLMRunner) Run(ctx context.Context, systemPrompt, task string, allowedT
 	agentRegistry := r.registry
 	snapshotWorkDir := ""
 	cleanupSnapshot := func() {}
+	closeAgentRegistry := false
 	if opts.ReviewSnapshot != nil {
 		if providerID == "codex" || strings.HasPrefix(modelToUse, "codex/") {
 			// Codex uses its native shell in a separately materialized workspace;
@@ -132,9 +133,13 @@ func (r *RLMRunner) Run(ctx context.Context, systemPrompt, task string, allowedT
 				cleanupSnapshot()
 				return nil, err
 			}
+			closeAgentRegistry = true
 		}
 	}
 	defer cleanupSnapshot()
+	if closeAgentRegistry {
+		defer func() { _ = agentRegistry.Close() }()
+	}
 
 	// Create sub-agent configuration
 	reasoningEffort := r.reasoning

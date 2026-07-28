@@ -259,6 +259,7 @@ func (a *SubAgent) Execute(ctx context.Context, task string) (*SubAgentResult, e
 			maxIterations = defaultSubAgentMaxIterations
 		}
 	}
+	finalToolRepairUsed := false
 
 	for i := 0; maxIterations <= 0 || i < maxIterations; i++ {
 		req := model.ChatRequest{
@@ -333,6 +334,16 @@ func (a *SubAgent) Execute(ctx context.Context, task string) (*SubAgentResult, e
 
 		if len(choice.Message.ToolCalls) > 0 {
 			if synthesizing {
+				var retry bool
+				messages, maxIterations, retry = prepareFinalToolRepair(
+					messages,
+					maxIterations,
+					finalToolRepairUsed,
+				)
+				if retry {
+					finalToolRepairUsed = true
+					continue
+				}
 				result.Summary = summarizeRejectedToolCalls(choice.Message.ToolCalls)
 				break
 			}
@@ -380,6 +391,21 @@ func (a *SubAgent) Execute(ctx context.Context, task string) (*SubAgentResult, e
 	}
 
 	return result, nil
+}
+
+func prepareFinalToolRepair(messages []model.Message, maxIterations int, alreadyUsed bool) ([]model.Message, int, bool) {
+	if alreadyUsed {
+		return messages, maxIterations, false
+	}
+	messages = append(messages, model.Message{
+		Role: "user",
+		Content: "Your final tool request was rejected. Use the completed evidence already in this conversation. " +
+			"Return the complete final answer now without tools.",
+	})
+	if maxIterations > 0 {
+		maxIterations++
+	}
+	return messages, maxIterations, true
 }
 
 func subAgentReasoningConfig(providerID, effort string, maxTokens int) *model.ReasoningConfig {

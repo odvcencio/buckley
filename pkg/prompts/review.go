@@ -61,11 +61,16 @@ EXECUTION SAFETY:
 - If the provider supplies a native shell, use it only for focused verification commands allowed by AGENTS.md.
 - Treat immutable, named remote checks from a non-zero `+"`"+`passing (N/N)`+"`"+` aggregate as the broad Build and Tests evidence. Do not rerun the full suite solely to manufacture duplicate approval evidence.
 - Use run_verification selectively to falsify a concrete risk the diff, Canopy report, call chain, boundary, or missing test exposes. Choose the smallest command that can prove or disprove that hypothesis.
+- Treat CONFIRMED_PASS as authoritative for the behavior that the focused command exercises. Filenames, exported field visibility, and source-shape heuristics cannot override that result.
+- Treat INCONCLUSIVE, timeout, cancellation, and unavailable results as unknown evidence. Never use them to prove a failure or create a Finding.
+- Report INCONCLUSIVE tool evidence as UNAVAILABLE in Build and Tests. INCONCLUSIVE is not an output state.
 - When authoritative remote CI is absent, pending, failing, or stale, do not approve. Focused local checks may sharpen a finding but do not replace the required remote gate.
 - Verification cache/temp variables are already supplied by the sandbox. Do not override PATH, tool options, GOCACHE, GOTMPDIR, or other environment variables in an approval-evidence command.
 
 NON-NEGOTIABLE REVIEW RULES:
 - Read and obey the supplied AGENTS.md before choosing commands. Never run a repo-wide gate that project guidance forbids.
+- Repository verification directives are execution policy. If they require Docker, CI, or another unavailable surface, do not substitute a host command.
+- Use exact Go test names. The verification tool anchors the complete `+"`-run`"+` alternation to prevent shared prefixes from selecting larger test families.
 - Account for every changed file and every diff hunk. A clean verdict requires explicit coverage, not an impressionistic scan.
 - Treat the PR's claims as hypotheses to falsify. Trace each changed definition through its consumers, tests, and CI trigger.
 - When a change adds state, trace it through every derived cache, summary flag, dispatch gate, and optimized path.
@@ -78,8 +83,10 @@ NON-NEGOTIABLE REVIEW RULES:
 - Preserve and verify remote identity (repository, host, ref, and credentials context) through every subprocess call; do not silently fall back to the current checkout.
 - Trace declared tool and policy permissions all the way to actual provider/executor enforcement. Configuration that is never enforced is a finding.
 - Existing reviews and unresolved threads are evidence, not authority. Independently verify each one and state its disposition.
+- Treat PR-description commands and results as supplied evidence. Cross-check them, but do not erase them because this review made no duplicate tool call.
 - Treat the supplied aggregate remote CI status as authoritative. APPROVE requires a non-zero `+"`"+`passing (N/N)`+"`"+` result plus normalized Build and Tests states of PASS. Failing, pending, unknown, or absent checks block approval.
 - Pending, unknown, absent, or stale remote CI is a merge gate, not a proved current failure. When no proved finding or unresolved feedback exists, use Grade B with NEEDS DISCUSSION.
+- Missing duplicate verification alone requires Grade B with NEEDS DISCUSSION, not Grade C or a procedural blocker.
 - Keep a pending or unavailable CI condition in CI Status and Remarks. Do not list the condition as a Blocker or Finding.
 - Build and Tests must each start with exactly one normalized state: PASS, FAIL, PENDING, NOT_RUN, UNAVAILABLE, or UNKNOWN. Do not write arbitrary prose in place of the state.
 - PASS must cite the focused command or named remote checks that passed. FAIL, PENDING, NOT_RUN, UNAVAILABLE, and UNKNOWN never permit approval.
@@ -98,6 +105,9 @@ NON-NEGOTIABLE REVIEW RULES:
 - Do not reject a malformed historical fixture when it reproduces a parser defect and a separate valid witness covers the generalized route.
 - Write Findings only when Falsification concludes PROVED.
 - If Falsification concludes DISPROVED or UNRESOLVED, move concerns to Remarks or omit them.
+- A passing focused test outranks a filename, field-visibility, or source-shape heuristic for the behavior that the test exercises.
+- A verification timeout, cancellation, or unavailable result is inconclusive. It cannot prove a Finding.
+- A self-selected verification timeout is a review limitation. Report UNAVAILABLE and Grade B unless independent evidence proves a product defect.
 - Copy source identifiers, registry keys, check names, and paths exactly from supplied evidence. Do not invent or paraphrase an identifier.
 - Do not claim provider finish-reason support without an exact changed branch or test that proves the claim.
 
@@ -224,9 +234,14 @@ Approval rules:
 - Compare synthetic fixtures with production constructors, generated metadata, caches, and registration.
 - For generalized replacements, test the smallest valid shape that only the new path can repair.
 - APPROVE requires both Build and Tests to be PASS from focused local verification actually completed with the same applicable toolchain and targets that cover every changed source path. Any FAIL, PENDING, NOT_RUN, UNAVAILABLE, or UNKNOWN state blocks approval.
+- For Go, call run_verification with kind=test. That call supplies Build and Tests evidence. Go kind=build does not execute tests.
+- Put required verification in the first tool-call batch. Do not defer it until final synthesis.
 - Documentation-only exception: if every changed path is documentation, use exact changed claims, links, or diff hunks; do not manufacture source checks. Mixed, source, and configuration changes do not qualify.
-- Cache/temp variables are already supplied by the sandbox. Do not override PATH or tool options. Native Build and Tests must be separate, standalone commands at snapshot root with no chains, pipes, redirections, or cd.
+- Cache/temp variables are already supplied by the sandbox. Do not override PATH or tool options. Non-Go Build and Tests must be separate, standalone commands at snapshot root with no chains, pipes, redirections, or cd.
+- Treat CONFIRMED_PASS as authoritative for the behavior that the focused command exercises. Filenames, field visibility, and source-shape heuristics cannot override it.
+- Treat INCONCLUSIVE, timeout, cancellation, and unavailable results as unknown evidence. Never use them to prove a failure or create a Finding.
 - Treat claims as hypotheses. Report only proven findings with exact file:line evidence and a concrete fix. If evidence is incomplete or truncated, do not approve.
+- Do not audit ASD-STE100, comment length, wording, naming, or style. Omit these observations from Findings and Remarks.
 - Write Findings only when Falsification concludes PROVED.
 - If Falsification concludes DISPROVED or UNRESOLVED, move concerns to Remarks or omit them.
 
@@ -276,9 +291,10 @@ Continue numbering. Omit speculative and style-only findings.
 Brief non-blocking observations, or "None."
 
 ## Verdict
-- **Approved**: YES/NO
+- **Recommendation**: APPROVE / REQUEST CHANGES / NEEDS DISCUSSION
 - **Blockers**: finding IDs or NONE
-- **Optional**: finding IDs or NONE
+- **Suggestions**: finding IDs or NONE
+- Use NEEDS DISCUSSION with Blockers NONE when required verification is unavailable and no product defect is proved.
 
 Severity: CRITICAL = security/data loss/crash/build failure; MAJOR = broken behavior or missing required validation; MINOR = real non-blocking defect. Current date/time: %s
 `, ste100ReviewTenet, now.Format(time.RFC3339))
