@@ -9,12 +9,14 @@ import (
 	"time"
 
 	"m31labs.dev/buckley/pkg/config"
+	"m31labs.dev/buckley/pkg/diffsignal"
 	"m31labs.dev/buckley/pkg/gitwatcher"
 	"m31labs.dev/buckley/pkg/model"
 	"m31labs.dev/buckley/pkg/oneshot"
 	"m31labs.dev/buckley/pkg/oneshot/commands"
 	"m31labs.dev/buckley/pkg/rules"
 	"m31labs.dev/buckley/pkg/terminal"
+	"m31labs.dev/buckley/pkg/transparency"
 )
 
 var postCompletedBuckbotReviewFn buckbotPoster = postBuckbotReview
@@ -28,18 +30,21 @@ const (
 )
 
 type reviewPRCommandOptions struct {
-	verbose     bool
-	showCost    bool
-	post        bool
-	model       string
-	criticModel string
-	timeout     time.Duration
-	outputFile  string
-	prRef       string
-	budgetUSD   float64
-	maxTurns    int
-	maxDiff     int
-	maxRetries  int
+	verbose         bool
+	showCost        bool
+	post            bool
+	model           string
+	criticModel     string
+	timeout         time.Duration
+	outputFile      string
+	prRef           string
+	budgetUSD       float64
+	maxTurns        int
+	maxDiff         int
+	maxRetries      int
+	forceSinglePass bool
+	forceShards     int
+	concurrency     int
 }
 
 func parseReviewPRCommandOptions(args []string) (reviewPRCommandOptions, error) {
@@ -55,6 +60,9 @@ func parseReviewPRCommandOptions(args []string) (reviewPRCommandOptions, error) 
 	maxTurns := fs.Int("max-turns", 0, "hard model turn limit per review pass (0 = adaptive)")
 	maxDiff := fs.Int("max-diff-bytes", 0, "maximum prioritized diff bytes (0 = Buckbot default)")
 	maxRetries := fs.Int("max-validation-attempts", 0, "maximum schema-validation attempts (0 = Buckbot default)")
+	singlePass := fs.Bool("single-pass", false, "force one review pass even if the diff would otherwise fan out into shards")
+	shards := fs.Int("shards", 0, "force fan-out into exactly this many shards, for testing (0 = derive from content)")
+	concurrency := fs.Int("concurrency", defaultShardConcurrency, "maximum number of shards reviewed at once")
 
 	if err := fs.Parse(interspersedReviewPRArgs(args)); err != nil {
 		return reviewPRCommandOptions{}, err
@@ -64,18 +72,21 @@ func parseReviewPRCommandOptions(args []string) (reviewPRCommandOptions, error) 
 		return reviewPRCommandOptions{}, reviewPRUsageError()
 	}
 	return reviewPRCommandOptions{
-		verbose:     *verbose,
-		showCost:    *showCost,
-		post:        *post,
-		model:       *modelFlag,
-		criticModel: *criticModel,
-		timeout:     *timeout,
-		outputFile:  *outputFile,
-		prRef:       fs.Arg(0),
-		budgetUSD:   *budgetUSD,
-		maxTurns:    *maxTurns,
-		maxDiff:     *maxDiff,
-		maxRetries:  *maxRetries,
+		verbose:         *verbose,
+		showCost:        *showCost,
+		post:            *post,
+		model:           *modelFlag,
+		criticModel:     *criticModel,
+		timeout:         *timeout,
+		outputFile:      *outputFile,
+		prRef:           fs.Arg(0),
+		budgetUSD:       *budgetUSD,
+		maxTurns:        *maxTurns,
+		maxDiff:         *maxDiff,
+		maxRetries:      *maxRetries,
+		forceSinglePass: *singlePass,
+		forceShards:     *shards,
+		concurrency:     *concurrency,
 	}, nil
 }
 
@@ -119,7 +130,8 @@ func reviewPRFlagName(arg string) (string, bool) {
 
 func reviewPRFlagTakesValue(name string) bool {
 	switch name {
-	case "model", "critic-model", "timeout", "output", "budget", "max-turns", "max-diff-bytes", "max-validation-attempts":
+	case "model", "critic-model", "timeout", "output", "budget", "max-turns", "max-diff-bytes", "max-validation-attempts",
+		"shards", "concurrency":
 		return true
 	default:
 		return false
@@ -174,10 +186,13 @@ func runReviewPRCommand(args []string) error {
 	}
 
 	policy := runtime.policy.withOverrides(automatedReviewOptions{
-		maxIterations: opts.maxTurns,
-		maxRetries:    opts.maxRetries,
-		maxDiffBytes:  opts.maxDiff,
-		maxCostUSD:    opts.budgetUSD,
+		maxIterations:   opts.maxTurns,
+		maxRetries:      opts.maxRetries,
+		maxDiffBytes:    opts.maxDiff,
+		maxCostUSD:      opts.budgetUSD,
+		forceSinglePass: opts.forceSinglePass,
+		forceShards:     opts.forceShards,
+		concurrency:     opts.concurrency,
 	})
 	if opts.post {
 		policy.contextReady = func(ctx context.Context, prInfo *commands.PRInfo, plan automatedReviewOptions) error {
@@ -196,7 +211,7 @@ func runReviewPRCommand(args []string) error {
 			})
 		}
 	}
-	result, prInfo, reviewErr := runPRReviewWithOptions(ctx, opts.prRef, runtime.framework, policy)
+	result, prInfo, reviewErr := runPRReviewWithOptions(ctx, opts.prRef, runtime.framework, policy, opts.post)
 
 	if opts.verbose && result != nil && result.contextAudit != nil {
 		printReviewContextAudit(result.contextAudit)
@@ -281,8 +296,16 @@ func runPRReview(ctx context.Context, prRef string, framework *oneshot.Framework
 }
 
 func runPRReviewWithIterationLimit(ctx context.Context, prRef string, framework *oneshot.Framework, maxIterations int) (*reviewCommandResult, *commands.PRInfo, error) {
-	return runPRReviewWithOptions(ctx, prRef, framework, automatedReviewOptions{maxIterations: maxIterations})
+	// A local/dry-run review (willPost=false) is always unrestricted,
+	// regardless of PR size or author: see runPRReviewWithOptions.
+	return runPRReviewWithOptions(ctx, prRef, framework, automatedReviewOptions{maxIterations: maxIterations}, false)
 }
+
+// defaultShardConcurrency bounds how many shards review-pr reviews at once
+// when a PR fans out. Shard count itself has no cap (see
+// diffsignal.PrioritizeShards); this only bounds wall-clock parallelism, so
+// cost and time scale with PR size instead of coverage being sacrificed.
+const defaultShardConcurrency = 4
 
 type automatedReviewOptions struct {
 	maxIterations        int
@@ -309,6 +332,64 @@ type automatedReviewOptions struct {
 	adaptiveReasoning    bool
 	engine               *rules.Engine
 	contextReady         func(context.Context, *commands.PRInfo, automatedReviewOptions) error
+
+	// forceSinglePass and forceShards are CLI testing knobs (see -single-pass
+	// and -shards on review-pr). forceShards > 0 targets that many shards by
+	// computing an effective per-shard budget; forceSinglePass overrides it
+	// back to exactly one shard covering the whole diff.
+	forceSinglePass bool
+	forceShards     int
+
+	// concurrency bounds how many shards run at once; it never bounds shard
+	// count. 0 uses defaultShardConcurrency.
+	concurrency int
+
+	// costPerMillionTokens feeds commands.ProjectShardCost's dollar
+	// estimate. 0 skips the dollar projection (token/shard counts still
+	// report) rather than fabricating a rate.
+	costPerMillionTokens float64
+
+	// postingGate configures the posted-review size gate (see
+	// runPRReviewWithOptions's willPost parameter). A zero value (nil
+	// CoreAssociations) means "unset"; postingGateOrDefault substitutes
+	// commands.DefaultPostingGateConfig() in that case.
+	postingGate commands.PostingGateConfig
+}
+
+func (opts automatedReviewOptions) postingGateOrDefault() commands.PostingGateConfig {
+	if opts.postingGate.CoreAssociations == nil {
+		return commands.DefaultPostingGateConfig()
+	}
+	return opts.postingGate
+}
+
+// buckbotPostingGateConfig builds the posting gate config from Buckbot's
+// configuration section, falling back to commands.DefaultPostingGateConfig
+// for any field left at its zero value.
+func buckbotPostingGateConfig(cfg config.BuckbotConfig) commands.PostingGateConfig {
+	gate := commands.DefaultPostingGateConfig()
+	if len(cfg.PostingCoreAssociations) > 0 {
+		gate.CoreAssociations = make(map[string]bool, len(cfg.PostingCoreAssociations))
+		for _, association := range cfg.PostingCoreAssociations {
+			association = strings.TrimSpace(association)
+			if association != "" {
+				gate.CoreAssociations[association] = true
+			}
+		}
+	}
+	if len(cfg.PostingAllowlist) > 0 {
+		gate.AllowlistUsernames = make(map[string]bool, len(cfg.PostingAllowlist))
+		for _, username := range cfg.PostingAllowlist {
+			username = strings.ToLower(strings.TrimSpace(username))
+			if username != "" {
+				gate.AllowlistUsernames[username] = true
+			}
+		}
+	}
+	if cfg.PostingSizeThresholdBytes > 0 {
+		gate.HighSignalByteThreshold = cfg.PostingSizeThresholdBytes
+	}
+	return gate
 }
 
 func defaultAutomatedReviewOptions(cfg *config.Config) automatedReviewOptions {
@@ -322,6 +403,7 @@ func defaultAutomatedReviewOptions(cfg *config.Config) automatedReviewOptions {
 		maxCostUSD:        cfg.Buckbot.PerReviewBudgetUSD,
 		reasoningEffort:   resolveConfiguredReviewReasoning(cfg),
 		adaptiveReasoning: reviewReasoningIsAdaptive(cfg, reviewReasoningOverride()),
+		postingGate:       buckbotPostingGateConfig(cfg.Buckbot),
 	}
 	if strings.TrimSpace(cfg.Buckbot.CriticModel) != "" {
 		opts.criticReserveUSD = cfg.Buckbot.PerReviewBudgetUSD * 0.12
@@ -346,10 +428,29 @@ func (defaults automatedReviewOptions) withOverrides(overrides automatedReviewOp
 			defaults.criticReserveUSD = overrides.maxCostUSD * 0.12
 		}
 	}
+	if overrides.forceSinglePass {
+		defaults.forceSinglePass = true
+	}
+	if overrides.forceShards > 0 {
+		defaults.forceShards = overrides.forceShards
+	}
+	if overrides.concurrency > 0 {
+		defaults.concurrency = overrides.concurrency
+	}
+	if overrides.costPerMillionTokens > 0 {
+		defaults.costPerMillionTokens = overrides.costPerMillionTokens
+	}
 	return defaults
 }
 
-func runPRReviewWithOptions(ctx context.Context, prRef string, framework *oneshot.Framework, opts automatedReviewOptions) (*reviewCommandResult, *commands.PRInfo, error) {
+// runPRReviewWithOptions reviews prRef. willPost tells the posting-size gate
+// whether this run's result will be written back to the pull request: a
+// local/dry-run review (willPost=false) is always unrestricted, at any PR
+// size and from any author, because its cost is the caller's own to spend.
+// A posted review (willPost=true) that exceeds the gate's high-signal-byte
+// threshold requires a core maintainer or owner author; otherwise it
+// declines before running any shard (see commands.EvaluatePostingGate).
+func runPRReviewWithOptions(ctx context.Context, prRef string, framework *oneshot.Framework, opts automatedReviewOptions, willPost bool) (*reviewCommandResult, *commands.PRInfo, error) {
 	spinner := terminal.NewSpinner("Fetching PR details...")
 	spinner.Start()
 
@@ -363,6 +464,21 @@ func runPRReviewWithOptions(ctx context.Context, prRef string, framework *onesho
 		spinner.StopWithError(err.Error())
 		return nil, nil, fmt.Errorf("assemble PR context: %w", err)
 	}
+
+	if willPost {
+		gateCfg := opts.postingGateOrDefault()
+		decision := commands.EvaluatePostingGate(gateCfg, true, prCtx.Shards, prCtx.PR.Author, prCtx.PR.AuthorAssoc, nil)
+		if decision.Blocked {
+			spinner.StopWithError("declined: pull request exceeds the posting size threshold")
+			comment := commands.BuildDeclineComment(decision, gateCfg.HighSignalByteThreshold)
+			return &reviewCommandResult{reviewText: comment, contextAudit: audit}, prCtx.PR, nil
+		}
+	}
+	shards := effectivePRShards(prCtx, opts)
+	if len(shards.Shards) > 1 {
+		return runPRReviewSharded(ctx, framework, opts, prCtx, audit, shards, spinner)
+	}
+
 	plan := resolveReviewExecutionPlan(opts.engine, rules.ReviewPlanFacts{
 		FileCount:         len(prCtx.Files),
 		DiffBytes:         len(prCtx.Diff),
@@ -446,6 +562,150 @@ func boundPRApprovalCritic(opts automatedReviewOptions, def commands.ReviewPRDef
 	opts.criticMaxIterations = 1
 	opts.criticMaxToolCalls = 1
 	return opts
+}
+
+// effectivePRShards decides the shard partitioning runPRReviewWithOptions
+// reviews against: prCtx.Shards by default, forced to exactly one shard
+// (opts.forceSinglePass) or a caller-chosen shard count (opts.forceShards),
+// for testing. Shard count itself is otherwise derived purely from content
+// (see diffsignal.PrioritizeShards) and never capped.
+func effectivePRShards(prCtx *commands.PRContext, opts automatedReviewOptions) diffsignal.ShardResult {
+	switch {
+	case opts.forceSinglePass:
+		return diffsignal.ShardResult{
+			Shards:          []diffsignal.Shard{{Context: prCtx.Diff, Files: append([]string(nil), prCtx.Files...)}},
+			LowSignal:       prCtx.Shards.LowSignal,
+			Summary:         prCtx.Shards.Summary,
+			HighSignalBytes: prCtx.Shards.HighSignalBytes,
+			HighSignalFiles: prCtx.Shards.HighSignalFiles,
+			Truncated:       prCtx.Shards.Truncated,
+		}
+	case opts.forceShards > 0 && prCtx.Shards.HighSignalBytes > 0:
+		budget := diffsignal.EffectiveShardBudget(prCtx.Shards.HighSignalBytes, opts.forceShards)
+		return diffsignal.PrioritizeShards(prCtx.RawDiff, budget)
+	default:
+		return prCtx.Shards
+	}
+}
+
+// runPRReviewSharded reviews a PR whose diff was fanned out into more than
+// one shard: it projects and logs the cost before running anything, refuses
+// (without running a single shard) if the projection exceeds a configured
+// budget, runs every shard through a concurrency-bounded worker pool, and
+// reduces the results into one final review. Every high-signal file is
+// reviewed by exactly one shard; low-signal files and shards that never ran
+// are never silently omitted from the final coverage ledger (see
+// commands.MergeShardedPRReview).
+func runPRReviewSharded(
+	ctx context.Context,
+	framework *oneshot.Framework,
+	opts automatedReviewOptions,
+	prCtx *commands.PRContext,
+	audit *transparency.ContextAudit,
+	shards diffsignal.ShardResult,
+	spinner *terminal.Spinner,
+) (*reviewCommandResult, *commands.PRInfo, error) {
+	concurrency := opts.concurrency
+	if concurrency <= 0 {
+		concurrency = defaultShardConcurrency
+	}
+
+	projection := commands.ProjectShardCost(shards, opts.costPerMillionTokens)
+	if !quietMode {
+		termOut.Dim("PR fan-out: %d shards, %d high-signal bytes across %d files, concurrency %d, ~%d estimated tokens",
+			projection.ShardCount, projection.HighSignalBytes, projection.HighSignalFiles, concurrency, projection.EstimatedTotalTokens)
+		if projection.EstimatedTotalCostUSD > 0 {
+			termOut.Dim("Estimated shard review cost: $%.4f", projection.EstimatedTotalCostUSD)
+		}
+	}
+	if opts.maxCostUSD > 0 && projection.EstimatedTotalCostUSD > opts.maxCostUSD {
+		spinner.StopWithError("projected shard review cost exceeds budget")
+		return nil, prCtx.PR, fmt.Errorf(
+			"refusing to run: reviewing all %d shards is projected to cost $%.4f, which exceeds the $%.4f budget; "+
+				"raise -budget to at least $%.4f for full coverage, or split the pull request",
+			projection.ShardCount, projection.EstimatedTotalCostUSD, opts.maxCostUSD, projection.EstimatedTotalCostUSD)
+	}
+
+	plan := resolveReviewExecutionPlan(opts.engine, rules.ReviewPlanFacts{
+		FileCount:         len(prCtx.Files),
+		DiffBytes:         len(prCtx.Diff),
+		ContextIncomplete: prCtx.HasIncompleteContext(),
+		HasFeedback:       prCtx.HasReviewFeedback(),
+	})
+	opts = opts.withExecutionPlan(plan)
+	if opts.contextReady != nil {
+		if err := opts.contextReady(ctx, prCtx.PR, opts); err != nil {
+			spinner.StopWithError(err.Error())
+			return nil, prCtx.PR, fmt.Errorf("prepare posted review: %w", err)
+		}
+	}
+	spinner.SetMessage(fmt.Sprintf("Running %d-shard review with %s reasoning...", len(shards.Shards), opts.reasoningEffort))
+
+	run := func(shardCtx context.Context, shard diffsignal.Shard, index int) (*commands.ParsedReview, error) {
+		primary := index == 0
+		prompt := appendReviewExecutionPlan(commands.BuildPRShardPrompt(prCtx, shard, index, len(shards.Shards), primary), opts)
+		reviewDef := commands.ReviewPRDef{
+			ChangedFiles:      shard.Files,
+			ContextIncomplete: prCtx.HasIncompleteContext(),
+			CIStatus:          prCtx.PR.CIStatus,
+			CIProvenance:      prCtx.CIProvenance,
+			MaxIterations:     opts.maxIterations,
+		}
+		if primary {
+			reviewDef.RequiresFeedbackDisposition = prCtx.HasReviewFeedback()
+			reviewDef.RequiredFeedbackIDs = prCtx.RequiredFeedbackIDs()
+		}
+		fwResult, runErr := framework.RunRLM(shardCtx, reviewDef, oneshot.RLMRunOpts{
+			UserPrompt:          prompt,
+			MaxRetries:          opts.maxRetries,
+			MaxIterations:       opts.maxIterations,
+			MaxToolCalls:        opts.maxToolCalls,
+			MaxCostUSD:          opts.maxCostUSD,
+			ExplorationTimeout:  opts.explorationTimeout,
+			SynthesisLead:       opts.synthesisLead,
+			VerificationTimeout: opts.verificationTimeout,
+			ModelID:             opts.modelID,
+			ReasoningEffort:     opts.reasoningEffort,
+			SnapshotPolicy: model.ReviewSnapshotPolicy{
+				Mode:           model.ReviewSnapshotHead,
+				ExpectedCommit: prCtx.PR.HeadSHA,
+			},
+		})
+		if runErr != nil {
+			return nil, runErr
+		}
+		result, ok := fwResult.Value.(*commands.ReviewRLMResult)
+		if !ok || result.Parsed == nil {
+			return nil, fmt.Errorf("shard %d produced no parsed review", index+1)
+		}
+		return result.Parsed, nil
+	}
+
+	shardReviews, runErr := commands.RunPRShardsConcurrently(ctx, shards.Shards, concurrency, run)
+	if runErr != nil {
+		spinner.StopWithError(runErr.Error())
+		return nil, prCtx.PR, fmt.Errorf("sharded review failed: %w", runErr)
+	}
+
+	merged, rendered := commands.MergeShardedPRReview(shardReviews, shards.LowSignal, prCtx.Files, commands.DefaultSynthesisFanIn)
+
+	if err := commands.RevalidatePRContext(prCtx); err != nil {
+		spinner.StopWithError(err.Error())
+		revalidationErr := fmt.Errorf("review target changed or could not be revalidated: %w", err)
+		return &reviewCommandResult{
+			reviewText:    markIncompleteReview(rendered, revalidationErr.Error()),
+			incomplete:    true,
+			incompleteWhy: revalidationErr.Error(),
+			contextAudit:  audit,
+		}, prCtx.PR, revalidationErr
+	}
+
+	spinner.StopWithSuccess(fmt.Sprintf("%d-shard PR review complete", len(shards.Shards)))
+	return &reviewCommandResult{
+		reviewText:   rendered,
+		parsed:       merged,
+		contextAudit: audit,
+	}, prCtx.PR, nil
 }
 
 func writePRReviewOutput(outputFile, reviewText string, prInfo *commands.PRInfo) error {

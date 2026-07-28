@@ -26,6 +26,7 @@ type PRInfo struct {
 	Number         int
 	Title          string
 	Author         string
+	AuthorAssoc    string // GitHub's authorAssociation: OWNER, MEMBER, COLLABORATOR, CONTRIBUTOR, FIRST_TIME_CONTRIBUTOR, FIRST_TIMER, or NONE
 	State          string
 	URL            string
 	Host           string
@@ -45,8 +46,22 @@ type PRInfo struct {
 
 // PRContext contains context for PR review.
 type PRContext struct {
-	PR                      *PRInfo
-	Diff                    string
+	PR   *PRInfo
+	Diff string
+
+	// RawDiff is the fetched diff text before Prioritize shaped it into
+	// Diff. Callers that need to re-shard at a caller-chosen shard count or
+	// budget (for example, a CLI testing flag) call
+	// diffsignal.PrioritizeShards on this instead of re-fetching.
+	RawDiff string
+
+	// Shards is the diff partitioned for fan-out review: every high-signal
+	// file assigned to exactly one shard, with no upper bound on shard
+	// count. A PR whose HighSignalBytes fits opts.MaxDiffBytes always
+	// produces exactly one shard, identical in content to Diff; a caller
+	// only needs the multi-pass path when len(Shards.Shards) > 1.
+	Shards diffsignal.ShardResult
+
 	Comments                []PRComment
 	Reviews                 []PRReview
 	InlineComments          []PRComment
@@ -139,6 +154,38 @@ type prDiff struct {
 	OriginalBytes int
 	Files         []string
 	LocalFallback bool
+
+	// Raw is the fetched diff text before Prioritize shaped it: the exact
+	// bytes getPRDiffWithBudget classified. Callers that need to shard a
+	// large diff across multiple review passes (see diffsignal.PrioritizeShards)
+	// use this instead of Text, because Text has already been flattened
+	// into a single budget-bound pass.
+	Raw string
+
+	// Reconstructed is true when "gh pr diff" itself failed (for example,
+	// GitHub's ".diff" endpoint 406s past 300 changed files) and the diff
+	// was rebuilt from a fallback source instead.
+	Reconstructed bool
+
+	// ReconstructionNote explains which fallback supplied Raw and why the
+	// primary source failed, for display in PRContextStatus.
+	ReconstructionNote string
+}
+
+// prDiffFallbackContext supplies the extra evidence getPRDiffWithBudget needs
+// to reconstruct a diff when "gh pr diff" fails outright. Both fields are
+// optional; when empty, the local-git fallback is skipped.
+type prDiffFallbackContext struct {
+	BaseSHA string
+	HeadSHA string
+}
+
+// prDiffSource is the raw diff text plus fallback provenance, before any
+// budget shaping.
+type prDiffSource struct {
+	Text          string
+	Reconstructed bool
+	Note          string
 }
 
 type prReference struct {
@@ -262,18 +309,32 @@ func assemblePRContextWithOptions(prRef string, deps prContextDependencies, opts
 		return nil, nil, fmt.Errorf("failed to get PR diff: %w", err)
 	}
 	prCtx.Diff = diff.Text
+	prCtx.RawDiff = diff.Raw
+	prCtx.Shards = diffsignal.PrioritizeShards(diff.Raw, opts.MaxDiffBytes)
 	diffAuditSource := "PR diff"
-	diffDetail := fmt.Sprintf("%d bytes", diff.OriginalBytes)
 	if diff.LocalFallback {
 		diffAuditSource += " (immutable local fallback)"
-		diffDetail += "; immutable local git diff used after GitHub throttled the remote diff"
 	}
 	if diff.Truncated {
+		detail := fmt.Sprintf("%d original bytes; review coverage is partial", diff.OriginalBytes)
+		if diff.Reconstructed {
+			detail += "; " + diff.ReconstructionNote
+		}
+		if diff.LocalFallback {
+			detail += "; immutable local git diff used after GitHub throttled the remote diff"
+		}
 		audit.AddTruncated(diffAuditSource, reviewEstimateTokens(diff.Text), estimatePRBytesTokens(diff.OriginalBytes))
-		prCtx.addStatus("PR diff", "truncated", diffDetail+"; review coverage is partial", true)
+		prCtx.addStatus("PR diff", "truncated", detail, true)
 	} else {
+		detail := fmt.Sprintf("%d bytes", diff.OriginalBytes)
+		if diff.Reconstructed {
+			detail += "; " + diff.ReconstructionNote
+		}
+		if diff.LocalFallback {
+			detail += "; immutable local git diff used after GitHub throttled the remote diff"
+		}
 		audit.Add(diffAuditSource, reviewEstimateTokens(diff.Text))
-		prCtx.addStatus("PR diff", "complete", diffDetail, false)
+		prCtx.addStatus("PR diff", "complete", detail, false)
 	}
 
 	headChecks, headChecksErr := getPRChecks(deps.run, target)
@@ -608,7 +669,46 @@ func parsePRRef(ref string) (prReference, error) {
 	return prReference{}, fmt.Errorf("invalid PR reference: %s (use PR number or GitHub URL)", ref)
 }
 
+// getPRAuthorAssociation reads the pull request's author_association from the
+// REST API. The posting gate uses it to decide whether an author may spend an
+// unbounded review on a large pull request.
+//
+// It is a separate call because `gh pr view --json` does not offer the field;
+// asking for it there makes gh exit non-zero and take every review down with
+// it, gated or not.
+//
+// It returns "" on ANY failure, and the gate treats "" as not-core. That is the
+// fail-closed direction: an author we cannot identify never unlocks the spend.
+// A missing association must not fail the review either, because a review that
+// is not being posted does not need one.
+func getPRAuthorAssociation(run prCommandRunner, target prReference, host, repository string) string {
+	// The REST route wants owner/repo. `repository` is already in that form —
+	// only qualifiedPRRepository prepends the host, and --hostname carries the
+	// host for an enterprise instance, so do not qualify here.
+	repo := repository
+	if repo == "" {
+		repo = target.Repository
+	}
+	if repo == "" {
+		return ""
+	}
+	args := withPRAPIHostname([]string{
+		"api", fmt.Sprintf("repos/%s/pulls/%d", repo, target.Number),
+		"--jq", ".author_association",
+	}, host)
+	output, err := run("gh", args...)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(output))
+}
+
 func getPRInfo(run prCommandRunner, target prReference) (*PRInfo, error) {
+	// authorAssociation is deliberately absent here. `gh pr view --json` accepts
+	// only its own GraphQL-backed field set, and that field is not in it — asking
+	// for it makes gh exit 1 and print the whole valid list, which failed EVERY
+	// review, not just gated ones. getPRAuthorAssociation reads it from the REST
+	// API instead, where it does exist.
 	args := withPRTarget([]string{"pr", "view", strconv.Itoa(target.Number), "--json",
 		"number,title,author,state,url,body,labels,baseRefName,baseRefOid,headRefName,headRefOid,additions,deletions,changedFiles,reviewDecision"}, target)
 	output, err := run("gh", args...)
@@ -658,6 +758,7 @@ func getPRInfo(run prCommandRunner, target prReference) (*PRInfo, error) {
 		Number:         data.Number,
 		Title:          data.Title,
 		Author:         data.Author.Login,
+		AuthorAssoc:    getPRAuthorAssociation(run, target, host, repository),
 		State:          data.State,
 		URL:            data.URL,
 		Host:           host,
@@ -1295,11 +1396,7 @@ func getCommitStatuses(run prCommandRunner, host, repository, revision string) (
 }
 
 func getPRDiff(run prCommandRunner, target prReference) (prDiff, error) {
-	return getPRDiffWithBudget(run, target, diffsignal.ReviewDiffBudget)
-}
-
-func getPRDiffWithBudget(run prCommandRunner, target prReference, maxBytes int) (prDiff, error) {
-	return getPRDiffWithBudgetAtRevisions(run, target, "", "", maxBytes)
+	return getPRDiffWithBudget(run, target, diffsignal.ReviewDiffBudget, prDiffFallbackContext{})
 }
 
 func getPRDiffWithBudgetAtRevisions(
@@ -1309,21 +1406,18 @@ func getPRDiffWithBudgetAtRevisions(
 	headSHA string,
 	maxBytes int,
 ) (prDiff, error) {
-	args := withPRTarget([]string{"pr", "diff", strconv.Itoa(target.Number)}, target)
-	output, err := run("gh", args...)
-	localFallback := false
+	return getPRDiffWithBudget(run, target, maxBytes, prDiffFallbackContext{
+		BaseSHA: baseSHA,
+		HeadSHA: headSHA,
+	})
+}
+
+func getPRDiffWithBudget(run prCommandRunner, target prReference, maxBytes int, fallback prDiffFallbackContext) (prDiff, error) {
+	source, err := fetchPRDiffSource(run, target, fallback)
 	if err != nil {
-		if !isPRGitHubThrottleError(err) || strings.TrimSpace(baseSHA) == "" || strings.TrimSpace(headSHA) == "" {
-			return prDiff{}, err
-		}
-		fallbackOutput, fallbackErr := getLocalImmutablePRDiff(run, baseSHA, headSHA)
-		if fallbackErr != nil {
-			return prDiff{}, fmt.Errorf("%w; immutable local diff fallback: %v", err, fallbackErr)
-		}
-		output = fallbackOutput
-		localFallback = true
+		return prDiff{}, err
 	}
-	files, err := changedFilesFromPRDiff(string(output))
+	files, err := changedFilesFromPRDiff(source.Text)
 	if err != nil {
 		return prDiff{}, fmt.Errorf("parse changed-file manifest from PR diff: %w", err)
 	}
@@ -1334,17 +1428,20 @@ func getPRDiffWithBudgetAtRevisions(
 		maxBytes = diffsignal.ReviewDiffBudget
 	}
 	budget := maxBytes - len(truncMarker)
-	res := diffsignal.Prioritize(string(output), budget)
+	res := diffsignal.Prioritize(source.Text, budget)
 	diff := res.Context
 	if res.Truncated {
 		diff += truncMarker
 	}
 	return prDiff{
-		Text:          diff,
-		Truncated:     res.Truncated,
-		OriginalBytes: len(output),
-		Files:         files,
-		LocalFallback: localFallback,
+		Text:               diff,
+		Truncated:          res.Truncated,
+		OriginalBytes:      len(source.Text),
+		Files:              files,
+		LocalFallback:      source.Reconstructed && strings.Contains(source.Note, "local git diff"),
+		Raw:                source.Text,
+		Reconstructed:      source.Reconstructed,
+		ReconstructionNote: source.Note,
 	}, nil
 }
 
@@ -1466,6 +1563,224 @@ func formatPRManifestPaths(files []string) string {
 		return "none"
 	}
 	return strings.Join(files, ", ")
+}
+
+// fetchPRDiffSource fetches the PR's diff text, falling back past two
+// failure modes of "gh pr diff": GitHub's ".diff" endpoint hard-caps at 300
+// changed files and returns HTTP 406 beyond that, and the command can fail
+// for other transient reasons (rate limiting, network). Without a fallback,
+// any PR over the file cap is unreviewable by construction (see PR review
+// evidence: 605- and 347-file PRs failed outright with "diff exceeded the
+// maximum number of files (300)").
+//
+// Fallback order:
+//  1. gh pr diff (primary; unchanged for every PR under the cap).
+//  2. The paginated pull request files API, which has no file-count cap.
+//     GitHub omits `patch` for binary content and diffs that exceed its own
+//     size threshold; those files are still emitted, marked with
+//     diffsignal.UnavailableMarker, so they surface as an explicit
+//     diffsignal.ReasonUnavailable entry instead of vanishing.
+//  3. A local git diff of the merge-base against the PR head, when the
+//     files API is itself unavailable (for example, a non-GitHub host) and
+//     the local checkout already has both revisions.
+func fetchPRDiffSource(run prCommandRunner, target prReference, fallback prDiffFallbackContext) (prDiffSource, error) {
+	args := withPRTarget([]string{"pr", "diff", strconv.Itoa(target.Number)}, target)
+	output, ghErr := run("gh", args...)
+	if ghErr == nil {
+		return prDiffSource{Text: string(output)}, nil
+	}
+	if isPRGitHubThrottleError(ghErr) {
+		localDiff, localErr := getLocalImmutablePRDiff(run, fallback.BaseSHA, fallback.HeadSHA)
+		if localErr != nil {
+			return prDiffSource{}, fmt.Errorf("%w; immutable local diff fallback: %v", ghErr, localErr)
+		}
+		return prDiffSource{
+			Text:          string(localDiff),
+			Reconstructed: true,
+			Note: fmt.Sprintf("gh pr diff was throttled (%s); diff reconstructed from an immutable local git diff",
+				compactPRContextErrorText(ghErr.Error())),
+		}, nil
+	}
+	if isPRGitHubPermissionError(ghErr) {
+		return prDiffSource{}, ghErr
+	}
+
+	reconstructed, apiErr := reconstructPRDiffFromFiles(run, target)
+	if apiErr == nil {
+		return prDiffSource{
+			Text:          reconstructed,
+			Reconstructed: true,
+			Note: fmt.Sprintf("gh pr diff failed (%s); diff reconstructed from the paginated pull request files API",
+				compactPRContextErrorText(ghErr.Error())),
+		}, nil
+	}
+
+	localDiff, localErr := reconstructPRDiffFromLocalGit(run, fallback.BaseSHA, fallback.HeadSHA)
+	if localErr == nil {
+		return prDiffSource{
+			Text:          localDiff,
+			Reconstructed: true,
+			Note: fmt.Sprintf("gh pr diff failed (%s); files API fallback failed (%s); diff reconstructed from a local merge-base git diff",
+				compactPRContextErrorText(ghErr.Error()), compactPRContextErrorText(apiErr.Error())),
+		}, nil
+	}
+
+	return prDiffSource{}, fmt.Errorf(
+		"could not find pull request diff: %w (files API fallback: %v; local git fallback: %v)",
+		ghErr, apiErr, localErr)
+}
+
+func isPRGitHubPermissionError(err error) bool {
+	if err == nil {
+		return false
+	}
+	detail := strings.ToLower(err.Error())
+	return (strings.Contains(detail, "http 401") || strings.Contains(detail, "http 403")) &&
+		(strings.Contains(detail, "resource not accessible") ||
+			strings.Contains(detail, "bad credentials") ||
+			strings.Contains(detail, "requires authentication"))
+}
+
+// prDiffFile is one entry from GitHub's paginated pull request files API,
+// the fields reconstructPRDiffFromFiles needs to rebuild a unified diff.
+type prDiffFile struct {
+	Filename         string `json:"filename"`
+	PreviousFilename string `json:"previous_filename"`
+	Status           string `json:"status"`
+	Patch            string `json:"patch"`
+}
+
+// reconstructPRDiffFromFiles pages through the pull request files API (no
+// file-count cap, unlike "gh pr diff") and rebuilds a unified diff from each
+// entry's `patch` field. Entries GitHub returns without a patch (binary
+// content, or a diff that exceeds GitHub's own size threshold) still appear,
+// marked with diffsignal.UnavailableMarker.
+func reconstructPRDiffFromFiles(run prCommandRunner, target prReference) (string, error) {
+	owner, repo, err := splitPRRepository(target.Repository)
+	if err != nil {
+		return "", fmt.Errorf("resolve repository for paginated diff reconstruction: %w", err)
+	}
+	endpoint := fmt.Sprintf("repos/%s/%s/pulls/%d/files?per_page=100", owner, repo, target.Number)
+	args := withPRAPIHostname([]string{"api", "--paginate", "--slurp", endpoint}, target.Host)
+	output, err := run("gh", args...)
+	if err != nil {
+		return "", err
+	}
+
+	var pages [][]prDiffFile
+	if err := json.Unmarshal(output, &pages); err != nil {
+		var flat []prDiffFile
+		if flatErr := json.Unmarshal(output, &flat); flatErr != nil {
+			return "", err
+		}
+		pages = [][]prDiffFile{flat}
+	}
+
+	var sb strings.Builder
+	fileCount := 0
+	for _, page := range pages {
+		for _, file := range page {
+			if strings.TrimSpace(file.Filename) == "" {
+				continue
+			}
+			fileCount++
+			writeSyntheticFileDiff(&sb, file)
+		}
+	}
+	if fileCount == 0 {
+		return "", fmt.Errorf("paginated files API returned no changed files")
+	}
+	return sb.String(), nil
+}
+
+// writeSyntheticFileDiff appends one file's reconstructed diff segment.
+// GitHub's files API omits the "diff --git"/"---"/"+++" header lines that
+// "gh pr diff" (and diffsignal's parser) rely on, so this synthesizes them
+// around the raw `patch` hunks, matching the conventions git itself uses:
+// /dev/null on the added/removed side, and rename lines for pure renames.
+func writeSyntheticFileDiff(sb *strings.Builder, file prDiffFile) {
+	newPath := file.Filename
+	oldPath := file.Filename
+	rename := file.Status == "renamed" && file.PreviousFilename != "" && file.PreviousFilename != file.Filename
+	if rename {
+		oldPath = file.PreviousFilename
+	}
+
+	sb.WriteString("diff --git a/")
+	sb.WriteString(oldPath)
+	sb.WriteString(" b/")
+	sb.WriteString(newPath)
+	sb.WriteString("\n")
+
+	if rename {
+		sb.WriteString("rename from ")
+		sb.WriteString(oldPath)
+		sb.WriteString("\nrename to ")
+		sb.WriteString(newPath)
+		sb.WriteString("\n")
+	}
+
+	if strings.TrimSpace(file.Patch) == "" {
+		sb.WriteString(diffsignal.UnavailableMarker)
+		sb.WriteString("\n")
+		return
+	}
+
+	if file.Status == "added" {
+		sb.WriteString("--- /dev/null\n")
+	} else {
+		sb.WriteString("--- a/")
+		sb.WriteString(oldPath)
+		sb.WriteString("\n")
+	}
+	if file.Status == "removed" {
+		sb.WriteString("+++ /dev/null\n")
+	} else {
+		sb.WriteString("+++ b/")
+		sb.WriteString(newPath)
+		sb.WriteString("\n")
+	}
+	sb.WriteString(file.Patch)
+	if !strings.HasSuffix(file.Patch, "\n") {
+		sb.WriteString("\n")
+	}
+}
+
+// reconstructPRDiffFromLocalGit diffs the merge-base of baseSHA and headSHA
+// against headSHA in the local checkout. It is the last-resort fallback,
+// used only when both "gh pr diff" and the paginated files API failed (for
+// example, a non-GitHub host); it requires the local repository to already
+// have both revisions.
+func reconstructPRDiffFromLocalGit(run prCommandRunner, baseSHA, headSHA string) (string, error) {
+	baseSHA = strings.TrimSpace(baseSHA)
+	headSHA = strings.TrimSpace(headSHA)
+	if baseSHA == "" || headSHA == "" {
+		return "", fmt.Errorf("base and head revisions are required for a local git diff fallback")
+	}
+	rootOutput, err := run("git", "--no-pager", "rev-parse", "--show-toplevel")
+	if err != nil {
+		return "", fmt.Errorf("repository root: %w", err)
+	}
+	root := strings.TrimSpace(string(rootOutput))
+	if root == "" {
+		return "", fmt.Errorf("repository root was empty")
+	}
+	mergeBaseOutput, err := run("git", "--no-pager", "-C", root, "merge-base", baseSHA, headSHA)
+	if err != nil {
+		return "", fmt.Errorf("merge-base %s %s: %w", baseSHA, headSHA, err)
+	}
+	mergeBase := strings.TrimSpace(string(mergeBaseOutput))
+	if mergeBase == "" {
+		return "", fmt.Errorf("merge-base returned no revision")
+	}
+	diffOutput, err := run("git", "--no-pager", "-C", root, "diff", "--no-color", mergeBase, headSHA)
+	if err != nil {
+		return "", fmt.Errorf("diff %s %s: %w", mergeBase, headSHA, err)
+	}
+	if strings.TrimSpace(string(diffOutput)) == "" {
+		return "", fmt.Errorf("local git diff produced no output")
+	}
+	return string(diffOutput), nil
 }
 
 func getPRChecks(run prCommandRunner, target prReference) ([]PRCheck, error) {

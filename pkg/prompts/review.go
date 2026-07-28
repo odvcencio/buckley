@@ -78,6 +78,10 @@ NON-NEGOTIABLE REVIEW RULES:
 - Compare synthetic test fixtures with production initialization. Include constructors, generated metadata, caches, and registration steps.
 - When generalized logic replaces special cases, test the smallest valid shape that only the new logic can repair.
 - Audit cross-file invariants: maps and their count/limit ratchets, allow/deny/skip lists, budgets, thresholds, feature gates, serialization pairs, cleanup on every exit path, and zero/empty boundary values. A cleared collection paired with a non-zero maximum is a finding.
+- When a change removes or replaces an implementation path, compare observable behavior before and after it. Trace submit, click, navigation, reset, error, loading, focus, and accessibility state as applicable. Passing compile checks are not enough.
+- For framework-generated or convention-shaped state, trace the real producer, serializer, runtime binding, and consumer key shape. Verify success, failure, empty/default, and redirect/reload paths when applicable.
+- For visual, canvas, shader, or layout changes, verify coordinate space against the actual render or mount box, responsive transforms, overflow, and initial and settled states. Require pixel or screenshot evidence when visual correctness is the claim; metrics alone cannot approve it.
+- Distinguish generated or framework-owned runtime code from app-owned bespoke JavaScript before recommending retirement. Do not count generated runtime as bespoke app code.
 - Exercise negative and default CLI flag paths, especially boolean flags where omission, true, and false select different evidence or behavior.
 - For fetched lists, verify cardinality, pagination, filtering, and empty/single-page boundaries rather than trusting the first response page.
 - Preserve and verify remote identity (repository, host, ref, and credentials context) through every subprocess call; do not silently fall back to the current checkout.
@@ -233,6 +237,10 @@ Approval rules:
 - Prove production dispatch reaches new behavior. Direct helper tests do not prove reachability.
 - Compare synthetic fixtures with production constructors, generated metadata, caches, and registration.
 - For generalized replacements, test the smallest valid shape that only the new path can repair.
+- When a change removes or replaces an implementation path, compare observable behavior: submit, click, navigation, reset, error, loading, focus, and accessibility.
+- For framework-generated or convention-shaped state, trace the real producer, serializer, runtime binding, and consumer key shape; cover success, failure, empty/default, and redirect/reload.
+- For visual/canvas/shader/layout changes, verify coordinate space against the actual render or mount box, responsive transforms, overflow, and initial/settled states. Require pixel or screenshot evidence; metrics alone cannot approve.
+- Distinguish generated or framework-owned runtime code from app-owned bespoke JavaScript; do not count generated runtime as bespoke app code.
 - APPROVE requires both Build and Tests to be PASS from focused local verification actually completed with the same applicable toolchain and targets that cover every changed source path. Any FAIL, PENDING, NOT_RUN, UNAVAILABLE, or UNKNOWN state blocks approval.
 - For Go, call run_verification with kind=test. That call supplies Build and Tests evidence. Go kind=build does not execute tests.
 - Put required verification in the first tool-call batch. Do not defer it until final synthesis.

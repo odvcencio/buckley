@@ -97,6 +97,15 @@ func mergeBuckbotConfig(base, override *Config, raw map[string]any) {
 	if boolFieldSet(raw, "buckbot", "max_diff_bytes") {
 		base.Buckbot.MaxDiffBytes = override.Buckbot.MaxDiffBytes
 	}
+	if boolFieldSet(raw, "buckbot", "posting_core_associations") {
+		base.Buckbot.PostingCoreAssociations = override.Buckbot.PostingCoreAssociations
+	}
+	if boolFieldSet(raw, "buckbot", "posting_allowlist") {
+		base.Buckbot.PostingAllowlist = override.Buckbot.PostingAllowlist
+	}
+	if boolFieldSet(raw, "buckbot", "posting_size_threshold_bytes") {
+		base.Buckbot.PostingSizeThresholdBytes = override.Buckbot.PostingSizeThresholdBytes
+	}
 }
 
 func boolFieldSet(raw map[string]any, path ...string) bool {

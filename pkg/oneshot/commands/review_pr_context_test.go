@@ -1453,6 +1453,12 @@ func TestEnterprisePRURLTargetsEveryGitHubOperation(t *testing.T) {
 			if hasPRArg(args, "repos/m31labs/buckley/issues/208/comments?per_page=100") || hasPRArg(args, "repos/m31labs/buckley/pulls/208/reviews?per_page=100") {
 				return []byte(`[]`), nil
 			}
+			// The posting gate's author_association lookup. It must be pinned to
+			// the URL repository like every other REST call, which is what the
+			// path assertion here checks.
+			if hasPRArg(args, "repos/m31labs/buckley/pulls/208") && hasPRArgPair(args, "--jq", ".author_association") {
+				return []byte("OWNER\n"), nil
+			}
 			if !hasPRArg(args, "repos/m31labs/buckley/pulls/208/files?per_page=100") {
 				t.Errorf("REST operation was not pinned to URL repository: %s", strings.Join(args, " "))
 			}
@@ -1486,8 +1492,11 @@ func TestEnterprisePRURLTargetsEveryGitHubOperation(t *testing.T) {
 	if _, err := getPRFiles(run, pr); err != nil {
 		t.Fatalf("getPRFiles: %v", err)
 	}
-	if prCalls != 3 || apiCalls != 4 {
-		t.Fatalf("observed %d gh pr calls and %d gh api calls, want 3 and 4", prCalls, apiCalls)
+	// 5 gh api calls, not 4: getPRInfo makes one extra REST call for the
+	// author_association the posting gate needs. `gh pr view --json` cannot
+	// supply that field, so it cannot be folded into the pr view above.
+	if prCalls != 3 || apiCalls != 5 {
+		t.Fatalf("observed %d gh pr calls and %d gh api calls, want 3 and 5", prCalls, apiCalls)
 	}
 }
 
@@ -1496,7 +1505,7 @@ func TestGetPRDiffWithBudgetBoundsAutomatedContext(t *testing.T) {
 		return []byte("diff --git a/file.go b/file.go\n--- a/file.go\n+++ b/file.go\n@@ -1 +1 @@\n" +
 			strings.Repeat("+changed line\n", 100)), nil
 	}
-	diff, err := getPRDiffWithBudget(run, prReference{Number: 7}, 160)
+	diff, err := getPRDiffWithBudget(run, prReference{Number: 7}, 160, prDiffFallbackContext{})
 	if err != nil {
 		t.Fatalf("getPRDiffWithBudget() error = %v", err)
 	}
@@ -1645,6 +1654,191 @@ func TestResolvePRChangedFiles_RejectsManifestIdentityMismatch(t *testing.T) {
 	)
 	if err == nil || !strings.Contains(err.Error(), "files API manifest does not match the exact diff") {
 		t.Fatalf("resolvePRChangedFiles() error = %v, want identity mismatch", err)
+	}
+}
+
+// the406DiffError is the literal failure "gh pr diff" reports past GitHub's
+// 300-changed-file cap on the ".diff" endpoint, reproduced verbatim from
+// observed review-pr output so the fallback trigger matches production.
+const the406DiffError = "HTTP 406: Sorry, the diff exceeded the maximum number of files (300). Consider fetching the raw diff directly (https://docs.github.com/rest/commits/commits#compare-two-commits). (https://api.github.com/repos/m31labs/gosx/pulls/95) (pull.diff too_large)"
+
+// TestFetchPRDiffSource_FallsBackToFilesAPIPastFileCap proves the primary
+// defect fix: a PR whose "gh pr diff" 406s past GitHub's 300-file cap is no
+// longer unreviewable. The files API has no such cap.
+//
+// Mutation: remove the reconstructPRDiffFromFiles call from
+// fetchPRDiffSource (return the gh error immediately instead) and this test
+// fails because fetchPRDiffSource would return an error instead of the
+// reconstructed diff.
+func TestFetchPRDiffSource_FallsBackToFilesAPIPastFileCap(t *testing.T) {
+	target := prReference{Number: 95, Host: "github.com", Repository: "m31labs/gosx"}
+	filesAPICalled := false
+	run := func(name string, args ...string) ([]byte, error) {
+		switch {
+		case name == "gh" && hasPRArgPrefix(args, "pr", "diff", "95"):
+			return []byte(the406DiffError), errors.New(the406DiffError)
+		case name == "gh" && hasPRArgPrefix(args, "api", "--paginate", "--slurp") &&
+			hasPRArg(args, "repos/m31labs/gosx/pulls/95/files?per_page=100"):
+			filesAPICalled = true
+			return []byte(`[[
+				{"filename":"a.go","status":"modified","patch":"@@ -1 +1 @@\n-old\n+new"},
+				{"filename":"b/new.go","status":"added","patch":"@@ -0,0 +1 @@\n+added line"},
+				{"filename":"assets/logo.png","status":"modified"}
+			]]`), nil
+		}
+		return nil, fmt.Errorf("unexpected command: %s %s", name, strings.Join(args, " "))
+	}
+
+	source, err := fetchPRDiffSource(run, target, prDiffFallbackContext{})
+	if err != nil {
+		t.Fatalf("fetchPRDiffSource() error = %v, want the files-API fallback to succeed", err)
+	}
+	if !filesAPICalled {
+		t.Fatal("files API fallback was never called")
+	}
+	if !source.Reconstructed {
+		t.Fatal("source.Reconstructed = false, want true")
+	}
+	if !strings.Contains(source.Note, "gh pr diff failed") || !strings.Contains(source.Note, "paginated pull request files API") {
+		t.Fatalf("source.Note = %q, want it to explain the fallback", source.Note)
+	}
+
+	files := diffsignal.Split(source.Text)
+	if len(files) != 3 {
+		t.Fatalf("reconstructed diff has %d files, want 3: %q", len(files), source.Text)
+	}
+	byPath := make(map[string]diffsignal.FileDiff, len(files))
+	for _, f := range files {
+		byPath[f.Path] = f
+	}
+	if got := byPath["a.go"]; got.Insertions != 1 || got.Deletions != 1 || got.LowSignal() {
+		t.Errorf("a.go = %+v, want a reviewable 1-insertion/1-deletion modification", got)
+	}
+	if got := byPath["b/new.go"]; got.Insertions != 1 || got.LowSignal() {
+		t.Errorf("b/new.go = %+v, want a reviewable added file", got)
+	}
+	if got := byPath["assets/logo.png"]; got.Reason != diffsignal.ReasonUnavailable {
+		t.Errorf("assets/logo.png Reason = %q, want %q (GitHub returned no patch)", got.Reason, diffsignal.ReasonUnavailable)
+	}
+}
+
+// TestFetchPRDiffSource_FallsBackToLocalGitWhenFilesAPIFails proves the
+// second-order fallback: when both "gh pr diff" and the files API fail (for
+// example, a non-GitHub host with no REST access), a local checkout that
+// already has both revisions still lets the review proceed.
+//
+// Mutation: remove the reconstructPRDiffFromLocalGit call (return the API
+// error immediately instead) and this test fails because fetchPRDiffSource
+// would return an error instead of the local diff.
+func TestFetchPRDiffSource_FallsBackToLocalGitWhenFilesAPIFails(t *testing.T) {
+	target := prReference{Number: 12, Host: "git.example.com", Repository: "team/repo"}
+	localDiffCalled := false
+	run := func(name string, args ...string) ([]byte, error) {
+		switch {
+		case name == "gh" && hasPRArgPrefix(args, "pr", "diff", "12"):
+			return nil, errors.New("connection reset by peer")
+		case name == "gh" && hasPRArgPrefix(args, "api"):
+			return nil, errors.New("unsupported enterprise host")
+		case name == "git" && hasPRArgPrefix(args, "--no-pager", "rev-parse", "--show-toplevel"):
+			return []byte("/repo\n"), nil
+		case name == "git" && hasPRArgPrefix(args, "--no-pager", "-C", "/repo", "merge-base", "base-sha", "head-sha"):
+			return []byte("merge-base-sha\n"), nil
+		case name == "git" && hasPRArgPrefix(args, "--no-pager", "-C", "/repo", "diff", "--no-color", "merge-base-sha", "head-sha"):
+			localDiffCalled = true
+			return []byte("diff --git a/local.go b/local.go\n@@ -1 +1 @@\n-x\n+y\n"), nil
+		}
+		return nil, fmt.Errorf("unexpected command: %s %s", name, strings.Join(args, " "))
+	}
+
+	source, err := fetchPRDiffSource(run, target, prDiffFallbackContext{BaseSHA: "base-sha", HeadSHA: "head-sha"})
+	if err != nil {
+		t.Fatalf("fetchPRDiffSource() error = %v, want the local git fallback to succeed", err)
+	}
+	if !localDiffCalled {
+		t.Fatal("local git diff fallback was never called")
+	}
+	if !source.Reconstructed || !strings.Contains(source.Note, "local merge-base git diff") {
+		t.Fatalf("source = %+v, want a local-git reconstruction note", source)
+	}
+	if !strings.Contains(source.Text, "local.go") {
+		t.Fatalf("source.Text = %q, want the local diff content", source.Text)
+	}
+}
+
+// TestFetchPRDiffSource_AllFallbacksFailReportsAllThree proves the failure
+// path stays honest when every source is unavailable: the error must name
+// all three attempts, not just the first.
+func TestFetchPRDiffSource_AllFallbacksFailReportsAllThree(t *testing.T) {
+	target := prReference{Number: 3, Host: "github.com", Repository: "m31labs/gosx"}
+	run := func(name string, args ...string) ([]byte, error) {
+		switch {
+		case name == "gh" && hasPRArgPrefix(args, "pr", "diff"):
+			return nil, errors.New("primary diff failure")
+		case name == "gh" && hasPRArgPrefix(args, "api"):
+			return nil, errors.New("files api failure")
+		case name == "git":
+			return nil, errors.New("no local checkout")
+		}
+		return nil, fmt.Errorf("unexpected command: %s %s", name, strings.Join(args, " "))
+	}
+
+	_, err := fetchPRDiffSource(run, target, prDiffFallbackContext{BaseSHA: "b", HeadSHA: "h"})
+	if err == nil {
+		t.Fatal("fetchPRDiffSource() error = nil, want an error when every fallback fails")
+	}
+	for _, want := range []string{"primary diff failure", "files api failure", "no local checkout"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not mention %q", err.Error(), want)
+		}
+	}
+}
+
+// TestGetPRDiffWithBudget_ReconstructsPast300FileCap is the end-to-end proof
+// for the evidence in the task brief: a PR that hard-fails today because
+// "gh pr diff" 406s past 300 files must still produce a reviewable diff.
+//
+// Mutation: revert getPRDiffWithBudget to call "gh pr diff" directly without
+// fetchPRDiffSource's fallback, and this test fails with the 406 error
+// instead of returning a diff.
+func TestGetPRDiffWithBudget_ReconstructsPast300FileCap(t *testing.T) {
+	const fileCount = 305
+	target := prReference{Number: 95, Host: "github.com", Repository: "m31labs/gosx"}
+	run := func(name string, args ...string) ([]byte, error) {
+		switch {
+		case name == "gh" && hasPRArgPrefix(args, "pr", "diff", "95"):
+			return nil, errors.New(the406DiffError)
+		case name == "gh" && hasPRArgPrefix(args, "api", "--paginate", "--slurp") &&
+			hasPRArg(args, "repos/m31labs/gosx/pulls/95/files?per_page=100"):
+			var sb strings.Builder
+			sb.WriteString("[[")
+			for i := 0; i < fileCount; i++ {
+				if i > 0 {
+					sb.WriteString(",")
+				}
+				fmt.Fprintf(&sb, `{"filename":"pkg/file%03d.go","status":"modified","patch":"@@ -1 +1 @@\n-old%03d\n+new%03d"}`, i, i, i)
+			}
+			sb.WriteString("]]")
+			return []byte(sb.String()), nil
+		}
+		return nil, fmt.Errorf("unexpected command: %s %s", name, strings.Join(args, " "))
+	}
+
+	diff, err := getPRDiffWithBudget(run, target, diffsignal.ReviewDiffBudget, prDiffFallbackContext{})
+	if err != nil {
+		t.Fatalf("getPRDiffWithBudget() error = %v, want the 300-file cap to be worked around", err)
+	}
+	if !diff.Reconstructed {
+		t.Fatal("diff.Reconstructed = false, want true past the file cap")
+	}
+	files := diffsignal.Split(diff.Raw)
+	if len(files) != fileCount {
+		t.Fatalf("reconstructed diff has %d files, want %d", len(files), fileCount)
+	}
+	for i := 0; i < fileCount; i++ {
+		path := fmt.Sprintf("pkg/file%03d.go", i)
+		if !strings.Contains(diff.Raw, path) {
+			t.Errorf("reconstructed diff is missing %s", path)
+		}
 	}
 }
 

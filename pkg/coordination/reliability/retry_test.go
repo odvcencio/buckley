@@ -241,25 +241,18 @@ func TestRetryStrategy_MaxDelayEnforcement(t *testing.T) {
 		Multiplier: 2.0,
 	}
 
-	attempts := 0
-	attemptTimes := []time.Time{}
-	fn := func() error {
-		attempts++
-		attemptTimes = append(attemptTimes, time.Now())
-		return status.Error(codes.Unavailable, "service unavailable")
+	delay := strategy.BaseDelay
+	want := []time.Duration{
+		20 * time.Millisecond,
+		40 * time.Millisecond,
+		50 * time.Millisecond,
+		50 * time.Millisecond,
+		50 * time.Millisecond,
 	}
-
-	ctx := context.Background()
-	strategy.Execute(ctx, fn)
-
-	// After several exponential increases, delays should cap at MaxDelay
-	// Expected: 10ms, 20ms, 40ms, 50ms (capped), 50ms (capped), ...
-	// With jitter (±25%), max delay could be up to MaxDelay * 1.25
-	maxAllowedDelay := time.Duration(float64(strategy.MaxDelay) * 1.3) // 30% buffer for timing + jitter
-	for i := 4; i < len(attemptTimes); i++ {
-		delay := attemptTimes[i].Sub(attemptTimes[i-1])
-		if delay > maxAllowedDelay {
-			t.Errorf("delay at attempt %d = %v, want <= %v (MaxDelay=%v + jitter)", i, delay, maxAllowedDelay, strategy.MaxDelay)
+	for attempt, expected := range want {
+		delay = nextRetryDelay(delay, strategy.MaxDelay, strategy.Multiplier)
+		if delay != expected {
+			t.Errorf("delay at attempt %d = %v, want %v", attempt+1, delay, expected)
 		}
 	}
 }

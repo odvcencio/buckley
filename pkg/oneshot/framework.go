@@ -705,6 +705,9 @@ func buildRLMValidationRetryPrompt(
 		strings.TrimSpace(validationErr.Error()) + ". "
 	if retryMode == rlmValidationRetryText && previous != nil && strings.TrimSpace(previous.Response) != "" {
 		return basePrompt + "\n\n" + rejection +
+			"First apply every exact correction named in the rejection, then repair format or schema issues. " +
+			"If coverage ledger paths differ, preserve valid File entries, add every exact missing path, remove every exact unexpected path, and reconcile the final ledger against the rejection. " +
+			"Self-check the final review against the rejection before returning. " +
 			"Repair the prior review without new tool calls. Preserve judgments and evidence that satisfy the gate. " +
 			"Treat Falsification, Findings, Remarks, Grade, and Verdict as one coupled outcome. " +
 			"If the conclusion is DISPROVED or UNRESOLVED, replace Findings with `None.` and remove every finding ID from Blockers and Suggestions. " +

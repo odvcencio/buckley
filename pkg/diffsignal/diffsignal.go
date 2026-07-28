@@ -12,6 +12,7 @@ package diffsignal
 
 import (
 	"fmt"
+	"path"
 	"strings"
 )
 
@@ -45,6 +46,16 @@ const (
 	// not depend on Git history that is intentionally absent from an isolated
 	// snapshot workspace.
 	ReviewDiffBudget = 1_000_000
+
+	// ReviewShardBudget is the high-signal byte target per shard when a diff
+	// is too large for one review pass. PrioritizeShards derives the shard
+	// count purely from content (ceil(HighSignalBytes/ReviewShardBudget));
+	// there is no upper bound on shard count, because the requirement is
+	// full coverage of a PR of any size, not a cap that silently drops
+	// content. Concurrency (how many shards run at once), not shard count,
+	// is where callers bound cost — that limit belongs in the orchestration
+	// layer that runs each shard through a model, not here.
+	ReviewShardBudget = ReviewDiffBudget
 )
 
 // summaryHeader introduces the low-signal section of the assembled context.
@@ -61,7 +72,25 @@ const (
 	ReasonGeneratedPath Reason = "generated path"
 	ReasonMinified      Reason = "minified"
 	ReasonOverBudget    Reason = "over budget"
+
+	// ReasonUnavailable marks a file whose diff content could not be
+	// retrieved from the source at all. For example, GitHub's pull request
+	// files API omits the `patch` field for binary content and for diffs
+	// that exceed GitHub's own size threshold; a caller reconstructing a
+	// diff from that API has no hunks to show for such a file. This differs
+	// from ReasonOverBudget, which demotes content Buckley itself chose not
+	// to show; ReasonUnavailable means the content was never available to
+	// demote in the first place.
+	ReasonUnavailable Reason = "diff unavailable"
 )
+
+// UnavailableMarker is the sentinel line a diff reconstructor can insert in
+// place of a file's hunks when the upstream source withheld the content
+// entirely. Split classifies any file whose segment contains this exact
+// line as ReasonUnavailable, so the file still surfaces as an explicit,
+// honestly-labeled entry instead of vanishing or being misread as an empty
+// (no-op) change.
+const UnavailableMarker = "Buckley: diff content unavailable from source (binary, or exceeds the source's own diff size threshold)"
 
 // generatedSuffixes are file suffixes for common built artifacts.
 var generatedSuffixes = []string{".min.js", ".min.mjs", ".min.css", ".map", ".gz", ".br"}
@@ -76,13 +105,14 @@ var generatedDirs = map[string]bool{
 
 // FileDiff is one file's segment of a unified diff.
 type FileDiff struct {
-	Path       string
-	OldPath    string // set for renames/copies
-	Segment    string // raw segment text, exactly as emitted by git
-	Insertions int
-	Deletions  int
-	Binary     bool
-	Reason     Reason
+	Path        string
+	OldPath     string // set for renames/copies
+	Segment     string // raw segment text, exactly as emitted by git
+	Insertions  int
+	Deletions   int
+	Binary      bool
+	Unavailable bool // segment contains UnavailableMarker
+	Reason      Reason
 }
 
 // LowSignal reports whether the file's content was classified as noise.
@@ -268,6 +298,280 @@ func Prioritize(raw string, maxBytes int) Result {
 	return Result{Context: out, Truncated: truncated, LowSignal: summarized}
 }
 
+// Shard is one review pass's worth of high-signal diff content: a coherent
+// slice of files that fits ReviewShardBudget (or a caller-chosen budget) on
+// its own.
+type Shard struct {
+	// Context is the concatenated segment text for this shard's files, in
+	// the same emission order PrioritizeShards assigned them.
+	Context string
+
+	// Files lists, in emission order, the high-signal file paths carried by
+	// this shard. Every high-signal file appears in exactly one Shard's
+	// Files across a ShardResult: PrioritizeShards never splits a single
+	// file's diff across two shards, and never drops one.
+	Files []string
+}
+
+// ShardResult is the fan-out counterpart to Result. Prioritize compresses
+// budget overflow into one-line summaries; PrioritizeShards instead keeps
+// every high-signal file at full fidelity by splitting them across as many
+// shards as the content requires. Shard count is derived only from content
+// (ceil(HighSignalBytes/shardBudget)) and has no upper bound: a PR of any
+// size gets full coverage, never a truncated subset. Low-signal files never
+// consume a shard; they are reported once, in Summary and LowSignal, for
+// whichever synthesis step needs the accounting.
+type ShardResult struct {
+	// Shards holds one entry per review pass, in file-emission order. Empty
+	// when every changed file was low-signal (there is nothing to review).
+	Shards []Shard
+
+	// LowSignal is every file classified as generated, minified, binary, or
+	// diff-unavailable. These are reported by Reason, never silently
+	// dropped, and never counted toward HighSignalBytes/HighSignalFiles.
+	LowSignal []FileDiff
+
+	// Summary is the rendered low-signal section (one line per LowSignal
+	// entry). Empty when LowSignal is empty.
+	Summary string
+
+	// HighSignalBytes is the total reviewable-content size PrioritizeShards
+	// measured: the sum of each high-signal file's segment length, after
+	// the same per-file MaxFileDiffBytes cap Prioritize applies. This is
+	// the number the shard count is derived from; it deliberately excludes
+	// every LowSignal file, so a PR whose bulk is generated bundles reports
+	// a small number here even when its raw byte count or file count is
+	// large.
+	HighSignalBytes int
+
+	// HighSignalFiles is len(LowSignal)'s complement: the count of files
+	// that actually consumed shard space.
+	HighSignalFiles int
+
+	// Truncated is true only when a per-file cap (MaxFileDiffBytes) or the
+	// MaxParseBytes raw-input ceiling cut real content. Shard count itself
+	// never truncates content: PrioritizeShards adds shards instead of
+	// demoting or dropping high-signal files.
+	Truncated bool
+}
+
+// HighSignalStats classifies raw without allocating shard content, for
+// callers that need the fan-out metric (to project shard count and cost, or
+// to decide whether sharding is needed at all) before committing to full
+// partitioning.
+func HighSignalStats(raw string) (bytes, files int) {
+	_, parsed, _ := splitForShardPrioritization(raw)
+	for _, f := range parsed {
+		if f.LowSignal() {
+			continue
+		}
+		bytes += highSignalFileBytes(f)
+		files++
+	}
+	return bytes, files
+}
+
+// EffectiveShardBudget returns the per-shard budget that targets exactly
+// wantShards shards for a diff whose HighSignalBytes total is known. Callers
+// that need to force a specific shard count (for example, a CLI testing
+// flag) compute HighSignalStats once and pass the byte total here.
+func EffectiveShardBudget(highSignalBytes, wantShards int) int {
+	if wantShards <= 0 || highSignalBytes <= 0 {
+		return 0
+	}
+	budget := (highSignalBytes + wantShards - 1) / wantShards
+	if budget < 1 {
+		budget = 1
+	}
+	return budget
+}
+
+// highSignalFileBytes is the size PrioritizeShards and HighSignalStats count
+// toward HighSignalBytes for one file: its segment length after the same
+// MaxFileDiffBytes cap Prioritize applies, so the metric matches what a
+// shard will actually contain.
+func highSignalFileBytes(f FileDiff) int {
+	if len(f.Segment) > MaxFileDiffBytes {
+		return MaxFileDiffBytes
+	}
+	return len(f.Segment)
+}
+
+// splitForShardPrioritization applies the same raw-size ceiling and
+// stub-entry scanning Prioritize uses, then classifies the remainder into
+// per-file segments. It is factored out so HighSignalStats and
+// PrioritizeShards agree exactly on what counts as high-signal without
+// duplicating the MaxParseBytes handling.
+func splitForShardPrioritization(raw string) (preamble string, files []FileDiff, truncated bool) {
+	var overBudgetFiles []FileDiff
+	if len(raw) > MaxParseBytes {
+		overBudgetFiles = scanBoundariesBeyond(raw, MaxParseBytes)
+		raw = cutAtLineBoundary(raw, MaxParseBytes)
+		truncated = true
+	}
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", nil, truncated
+	}
+	preamble, files = splitWithPreamble(raw)
+	files = append(files, overBudgetFiles...)
+	return preamble, files, truncated
+}
+
+// PrioritizeShards partitions a unified diff into one or more budget-bound
+// shards. Unlike Prioritize, high-signal content that exceeds shardBudget is
+// never demoted to a summary line and never dropped: it is split into
+// additional shards instead, one per review pass, with no upper bound on
+// shard count. Low-signal files (generated, minified, binary,
+// diff-unavailable) are summarized once and never consume a shard.
+//
+// Files are grouped by directory first, and a group is split across shards
+// only when the group alone exceeds shardBudget; a single file's diff is
+// never split across two shards. Directory-first grouping is nearly free:
+// git (and GitHub's files API) already emits changed files in path order,
+// which already clusters a directory's files together, so this mostly
+// preserves emission order and only reorders when a caller's input is not
+// already path-sorted.
+//
+// shardBudget <= 0 uses ReviewShardBudget.
+func PrioritizeShards(raw string, shardBudget int) ShardResult {
+	if shardBudget <= 0 {
+		shardBudget = ReviewShardBudget
+	}
+
+	_, files, truncated := splitForShardPrioritization(raw)
+
+	var highSignal, lowSignal []FileDiff
+	for _, f := range files {
+		if f.LowSignal() {
+			lowSignal = append(lowSignal, f)
+		} else {
+			highSignal = append(highSignal, f)
+		}
+	}
+
+	highSignalBytes := 0
+	for _, f := range highSignal {
+		highSignalBytes += highSignalFileBytes(f)
+	}
+
+	shards, capTruncated := packShards(highSignal, shardBudget)
+	if capTruncated {
+		truncated = true
+	}
+
+	return ShardResult{
+		Shards:          shards,
+		LowSignal:       lowSignal,
+		Summary:         renderLowSignalSummary(lowSignal),
+		HighSignalBytes: highSignalBytes,
+		HighSignalFiles: len(highSignal),
+		Truncated:       truncated,
+	}
+}
+
+// packShards groups high-signal files by directory (stably, preserving each
+// directory's first-appearance order) and greedily bin-packs whole
+// directory groups into shards. A group is split at file granularity only
+// when the group's own total exceeds shardBudget; a single file is never
+// split across shards, even if capping it at MaxFileDiffBytes was already
+// necessary (that per-file cap is orthogonal to sharding and matches
+// Prioritize's existing behavior).
+func packShards(highSignal []FileDiff, shardBudget int) (shards []Shard, truncated bool) {
+	if len(highSignal) == 0 {
+		return nil, false
+	}
+
+	type group struct {
+		dir   string
+		files []FileDiff
+		size  int
+	}
+	order := make([]string, 0)
+	groups := make(map[string]*group)
+	for _, f := range highSignal {
+		seg := f.Segment
+		if len(seg) > MaxFileDiffBytes {
+			seg = cutAtLineBoundary(seg, MaxFileDiffBytes) +
+				fmt.Sprintf("\n[... %s: diff truncated at %d bytes ...]\n", f.Path, MaxFileDiffBytes)
+			f.Segment = seg
+			truncated = true
+		}
+		dir := path.Dir(f.Path)
+		g, ok := groups[dir]
+		if !ok {
+			g = &group{dir: dir}
+			groups[dir] = g
+			order = append(order, dir)
+		}
+		g.files = append(g.files, f)
+		g.size += len(seg)
+	}
+
+	var currentFiles []string
+	var currentContent strings.Builder
+	flush := func() {
+		if currentContent.Len() == 0 {
+			return
+		}
+		shards = append(shards, Shard{Context: currentContent.String(), Files: currentFiles})
+		currentContent.Reset()
+		currentFiles = nil
+	}
+	appendFile := func(f FileDiff) {
+		currentContent.WriteString(f.Segment)
+		currentFiles = append(currentFiles, f.Path)
+	}
+
+	for _, dir := range order {
+		g := groups[dir]
+		if g.size <= shardBudget {
+			// The whole group must land in one shard: start a fresh shard
+			// if it does not fit in whatever the current shard has left.
+			if currentContent.Len() > 0 && currentContent.Len()+g.size > shardBudget {
+				flush()
+			}
+			for _, f := range g.files {
+				appendFile(f)
+			}
+			continue
+		}
+		// The group alone exceeds shardBudget: it must split, but never a
+		// single file's own diff.
+		flush()
+		for _, f := range g.files {
+			if currentContent.Len() > 0 && currentContent.Len()+len(f.Segment) > shardBudget {
+				flush()
+			}
+			appendFile(f)
+		}
+	}
+	flush()
+
+	return shards, truncated
+}
+
+// renderLowSignalSummary renders the shared low-signal section for
+// PrioritizeShards callers: one line per suppressed file, in original
+// emission order, with no arbitrary length cap. Unlike Prioritize's summary
+// section (which shares a single output budget with high-signal content and
+// so can itself overflow), PrioritizeShards keeps high-signal content out of
+// this budget entirely by sharding, and the low-signal section alone is
+// bounded by the number of changed files, not by shardBudget.
+func renderLowSignalSummary(lowSignal []FileDiff) string {
+	if len(lowSignal) == 0 {
+		return ""
+	}
+	var sb strings.Builder
+	sb.WriteString(summaryHeader)
+	sb.WriteString("\n")
+	for _, f := range lowSignal {
+		sb.WriteString(summaryLine(f))
+		sb.WriteString("\n")
+	}
+	return strings.TrimRight(sb.String(), "\n")
+}
+
 // scanBoundariesBeyond finds all "diff --git" file headers that start at or
 // after byteOffset in s.  It returns stub FileDiff entries (no segment content,
 // just path and [over budget] reason) so those files still appear as summary
@@ -402,6 +706,8 @@ func parseSegment(seg string) FileDiff {
 				fd.Binary = true
 			case line == "GIT binary patch":
 				fd.Binary = true
+			case line == UnavailableMarker:
+				fd.Unavailable = true
 			}
 			continue
 		}
@@ -534,6 +840,8 @@ func classify(fd *FileDiff) {
 	switch {
 	case fd.Binary:
 		fd.Reason = ReasonBinary
+	case fd.Unavailable:
+		fd.Reason = ReasonUnavailable
 	case isGeneratedPath(fd.Path) || (fd.OldPath != "" && isGeneratedPath(fd.OldPath)):
 		fd.Reason = ReasonGeneratedPath
 	case isMinifiedBody(hunkBody(fd.Segment)):

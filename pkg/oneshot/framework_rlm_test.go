@@ -517,6 +517,38 @@ func TestRunRLMRepairsTokenLimitedResponseOnce(t *testing.T) {
 	}
 }
 
+func TestBuildRLMValidationRetryPromptHardensTextRepair(t *testing.T) {
+	validationErr := fmt.Errorf("coverage ledger does not exactly match changed files: missing app/build/page.gsx; unexpected app/old/page.gsx")
+	previous := &RLMResult{Response: "## Coverage Ledger\n- File: app/page.gsx\n\n## Review\nNo findings."}
+
+	prompt := buildRLMValidationRetryPrompt(
+		"review this exact diff",
+		previous,
+		"primary",
+		validationErr,
+		rlmValidationRetryText,
+	)
+
+	for _, want := range []string{
+		"coverage ledger does not exactly match changed files: missing app/build/page.gsx; unexpected app/old/page.gsx",
+		"PRIOR REVIEW:\n## Coverage Ledger\n- File: app/page.gsx",
+		"without new tool calls",
+		"First apply every exact correction named in the rejection",
+		"preserve valid File entries",
+		"add every exact missing path",
+		"remove every exact unexpected path",
+		"reconcile the final ledger against the rejection",
+		"Self-check the final review against the rejection before returning",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("repair prompt missing %q:\n%s", want, prompt)
+		}
+	}
+	if !strings.Contains(prompt, "review this exact diff") {
+		t.Fatalf("text repair prompt omitted the original evidence: %q", prompt)
+	}
+}
+
 func TestRunRLMPreservesPartialValueOnExecutionDeadline(t *testing.T) {
 	trace := newTestRLMTrace("partial", 100, 10, 0.01)
 	framework := NewFramework(nil, nil).WithRLMRunner(partialRLMExecutor{

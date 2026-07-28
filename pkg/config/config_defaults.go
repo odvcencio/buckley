@@ -99,14 +99,17 @@ func defaultNATSURL() string {
 func DefaultConfig() *Config {
 	return &Config{
 		Buckbot: BuckbotConfig{
-			Model:                 defaultOpenRouterCommitModel,
-			CriticModel:           "",
-			Reasoning:             "auto",
-			PerReviewBudgetUSD:    0.15,
-			MonthlyBudgetUSD:      25.00,
-			MaxReviewIterations:   0,
-			MaxValidationAttempts: 2,
-			MaxDiffBytes:          240_000,
+			Model:                     defaultOpenRouterCommitModel,
+			CriticModel:               "",
+			Reasoning:                 "auto",
+			PerReviewBudgetUSD:        0.15,
+			MonthlyBudgetUSD:          25.00,
+			MaxReviewIterations:       0,
+			MaxValidationAttempts:     2,
+			MaxDiffBytes:              240_000,
+			PostingCoreAssociations:   []string{"OWNER", "MEMBER", "COLLABORATOR"},
+			PostingAllowlist:          nil,
+			PostingSizeThresholdBytes: 0,
 		},
 		Models: ModelConfig{
 			Planning:  defaultOpenRouterModel,

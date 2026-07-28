@@ -774,4 +774,21 @@ type BuckbotConfig struct {
 	MaxReviewIterations   int     `yaml:"max_review_iterations"`
 	MaxValidationAttempts int     `yaml:"max_validation_attempts"`
 	MaxDiffBytes          int     `yaml:"max_diff_bytes"`
+
+	// PostingCoreAssociations lists the GitHub authorAssociation values
+	// treated as core maintainer/owner for the posted-review size gate
+	// (see pkg/oneshot/commands.PostingGateConfig). Empty uses the default
+	// (OWNER, MEMBER, COLLABORATOR).
+	PostingCoreAssociations []string `yaml:"posting_core_associations"`
+
+	// PostingAllowlist names authors treated as core regardless of their
+	// GitHub association, for maintainers whose fork PRs GitHub reports as
+	// CONTRIBUTOR.
+	PostingAllowlist []string `yaml:"posting_allowlist"`
+
+	// PostingSizeThresholdBytes is the HighSignalBytes ceiling above which
+	// a posted review requires a core author (see
+	// pkg/oneshot/commands.PostingGateConfig.HighSignalByteThreshold). 0
+	// uses diffsignal.ReviewShardBudget.
+	PostingSizeThresholdBytes int `yaml:"posting_size_threshold_bytes"`
 }

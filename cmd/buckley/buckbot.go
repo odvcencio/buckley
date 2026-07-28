@@ -276,7 +276,14 @@ func newBuckbotReviewer(botCfg config.BuckbotConfig, costStore *storage.Store) b
 		}
 		criticModel := strings.TrimSpace(botCfg.CriticModel)
 		ref := fmt.Sprintf("https://github.com/%s/pull/%d", event.Repository, event.Number)
-		result, _, reviewErr := runPRReviewWithOptions(ctx, ref, runtime.framework, runtime.policy)
+		// willPost=true: Buckbot always writes its result back to the pull
+		// request, so the posting-size gate applies (see
+		// runPRReviewWithOptions). A decline for a huge PR from a non-core
+		// author flows through the same review/post/dedup pipeline as a
+		// normal review: the decline text becomes "the review", costs
+		// nothing to produce, and s.seen still dedupes repeat webhook
+		// deliveries for the same head commit once it posts successfully.
+		result, _, reviewErr := runPRReviewWithOptions(ctx, ref, runtime.framework, runtime.policy, true)
 		entries := runtime.ledger.Entries()
 		cost := runtime.ledger.SessionTotal()
 		partialReview := ""
