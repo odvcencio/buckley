@@ -80,10 +80,14 @@ func TestMachineBridge_TranslatesStateChange(t *testing.T) {
 	}
 
 	var notif Notification
-	json.Unmarshal([]byte(strings.TrimSpace(output)), &notif)
+	if err := json.Unmarshal([]byte(strings.TrimSpace(output)), &notif); err != nil {
+		t.Fatalf("unmarshal notification: %v", err)
+	}
 
 	var params SessionUpdateNotification
-	json.Unmarshal(notif.Params, &params)
+	if err := json.Unmarshal(notif.Params, &params); err != nil {
+		t.Fatalf("unmarshal params: %v", err)
+	}
 	if params.Update.SessionUpdate != SessionUpdateMachineState {
 		t.Errorf("sessionUpdate = %q", params.Update.SessionUpdate)
 	}
@@ -114,10 +118,14 @@ func TestMachineBridge_TranslatesLockAcquired(t *testing.T) {
 	}
 
 	var notif Notification
-	json.Unmarshal([]byte(strings.TrimSpace(output)), &notif)
+	if err := json.Unmarshal([]byte(strings.TrimSpace(output)), &notif); err != nil {
+		t.Fatalf("unmarshal notification: %v", err)
+	}
 
 	var params SessionUpdateNotification
-	json.Unmarshal(notif.Params, &params)
+	if err := json.Unmarshal(notif.Params, &params); err != nil {
+		t.Fatalf("unmarshal params: %v", err)
+	}
 	if params.Update.SessionUpdate != SessionUpdateMachineLock {
 		t.Errorf("sessionUpdate = %q", params.Update.SessionUpdate)
 	}

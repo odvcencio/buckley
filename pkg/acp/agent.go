@@ -287,28 +287,28 @@ func (a *Agent) handleSessionPrompt(ctx context.Context, req *Request) {
 
 	// Call the handler
 	if a.handlers.OnPrompt == nil {
-		a.transport.SendError(req.ID, ErrCodeInternal, "No prompt handler configured", nil)
+		_ = a.transport.SendError(req.ID, ErrCodeInternal, "No prompt handler configured", nil)
 		return
 	}
 
 	result, err := a.handlers.OnPrompt(promptCtx, session, params.Prompt, streamFunc)
 	if err != nil {
 		if promptCtx.Err() == context.Canceled {
-			a.transport.SendResponse(req.ID, PromptResult{StopReason: "cancelled"})
+			_ = a.transport.SendResponse(req.ID, PromptResult{StopReason: "cancelled"})
 			return
 		}
-		a.transport.SendError(req.ID, ErrCodeInternal, "Prompt failed", err.Error())
+		_ = a.transport.SendError(req.ID, ErrCodeInternal, "Prompt failed", err.Error())
 		return
 	}
 
-	a.transport.SendResponse(req.ID, result)
+	_ = a.transport.SendResponse(req.ID, result)
 }
 
 // handleSessionSetMode changes the session mode.
 func (a *Agent) handleSessionSetMode(ctx context.Context, req *Request) {
 	params, err := ParseParams[SetModeParams](req)
 	if err != nil {
-		a.transport.SendError(req.ID, ErrCodeInvalidParams, "Invalid params", err.Error())
+		_ = a.transport.SendError(req.ID, ErrCodeInvalidParams, "Invalid params", err.Error())
 		return
 	}
 
@@ -325,7 +325,7 @@ func (a *Agent) handleSessionSetMode(ctx context.Context, req *Request) {
 			}
 			if !valid {
 				a.sessionsMu.Unlock()
-				a.transport.SendError(req.ID, ErrCodeInvalidParams, "Unknown mode", params.ModeID)
+				_ = a.transport.SendError(req.ID, ErrCodeInvalidParams, "Unknown mode", params.ModeID)
 				return
 			}
 		}
@@ -337,11 +337,11 @@ func (a *Agent) handleSessionSetMode(ctx context.Context, req *Request) {
 	a.sessionsMu.Unlock()
 
 	if !exists {
-		a.transport.SendError(req.ID, ErrCodeSessionNotFound, "Session not found", params.SessionID)
+		_ = a.transport.SendError(req.ID, ErrCodeSessionNotFound, "Session not found", params.SessionID)
 		return
 	}
 
-	a.transport.SendResponse(req.ID, SetModeResult{})
+	_ = a.transport.SendResponse(req.ID, SetModeResult{})
 	if exists {
 		_ = a.transport.SendNotification("session/update", SessionUpdateNotification{
 			SessionID: params.SessionID,
@@ -376,7 +376,7 @@ func (a *Agent) handleShutdown(ctx context.Context, req *Request) {
 	}
 	a.activePromptsMu.Unlock()
 
-	a.transport.SendResponse(req.ID, nil)
+	_ = a.transport.SendResponse(req.ID, nil)
 }
 
 // Client method helpers (for calling back to the editor)
