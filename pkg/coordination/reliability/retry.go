@@ -28,6 +28,14 @@ func retryDelayWithJitter(delay time.Duration) time.Duration {
 	return time.Duration(float64(delay) * jitterFactor)
 }
 
+func nextRetryDelay(delay, maxDelay time.Duration, multiplier float64) time.Duration {
+	delay = time.Duration(float64(delay) * multiplier)
+	if delay > maxDelay {
+		return maxDelay
+	}
+	return delay
+}
+
 // RetryStrategy implements exponential backoff with jitter for retrying failed operations.
 // It supports automatic retry for retriable errors (network failures, timeouts, rate limits)
 // while failing fast on non-retriable errors (invalid arguments, auth failures).
@@ -77,10 +85,7 @@ func (s *RetryStrategy) Execute(ctx context.Context, fn func() error) error {
 			}
 
 			// Calculate next delay with exponential backoff
-			delay = time.Duration(float64(delay) * s.Multiplier)
-			if delay > s.MaxDelay {
-				delay = s.MaxDelay
-			}
+			delay = nextRetryDelay(delay, s.MaxDelay, s.Multiplier)
 		}
 
 		// Execute the function
