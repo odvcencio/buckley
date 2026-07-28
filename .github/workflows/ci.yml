@@ -34,6 +34,9 @@ jobs:
       - name: Download dependencies
         run: go mod download
 
+      - name: Check release metadata
+        run: ./scripts/check-release.sh
+
       - name: Check gofmt (changed files)
         env:
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
