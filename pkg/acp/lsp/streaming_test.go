@@ -9,13 +9,13 @@ import (
 	"testing"
 	"time"
 
-	pb "m31labs.dev/buckley/pkg/acp/proto"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
+	pb "m31labs.dev/buckley/pkg/acp/proto"
 )
 
 // mockStreamTaskClient implements the streaming client interface

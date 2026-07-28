@@ -371,7 +371,7 @@ func TestEstimateTokens(t *testing.T) {
 		{"abc", 1},
 		{"abcd", 1},
 		{"abcde", 2},
-		{"hello world", 3},                                 // 11 chars -> (11+3)/4 = 3
+		{"hello world", 3}, // 11 chars -> (11+3)/4 = 3
 		{"this is a longer string with more tokens", 10}, // 40 chars -> (40+3)/4 = 10
 	}
 
@@ -437,8 +437,8 @@ func TestIsSecretFile(t *testing.T) {
 		// pattern exclusions on line 357 can take effect. This is the actual code behavior.
 		// Only .env.example is properly excluded because it doesn't match .env suffix
 		// (it matches ".env.example" in exact check which doesn't exist).
-		{"sample.env", "sample.env", true},  // Matches .env suffix in exact check
-		{"example.env", "example.env", true}, // Matches .env suffix in exact check
+		{"sample.env", "sample.env", true},      // Matches .env suffix in exact check
+		{"example.env", "example.env", true},    // Matches .env suffix in exact check
 		{".env.example", ".env.example", false}, // Excluded by pattern on line 357
 
 		// Normal files

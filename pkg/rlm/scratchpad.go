@@ -9,8 +9,8 @@ import (
 	"sync"
 	"time"
 
-	"m31labs.dev/buckley/pkg/storage"
 	"github.com/oklog/ulid/v2"
+	"m31labs.dev/buckley/pkg/storage"
 )
 
 const defaultScratchpadSummaryLimit = 200

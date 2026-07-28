@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	"m31labs.dev/buckley/pkg/sdk"
 	"google.golang.org/protobuf/types/known/emptypb"
+	"m31labs.dev/buckley/pkg/sdk"
 )
 
 func TestNewService(t *testing.T) {

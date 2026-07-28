@@ -6,12 +6,12 @@ import (
 	"strings"
 	"testing"
 
+	"go.uber.org/mock/gomock"
 	"m31labs.dev/buckley/pkg/config"
 	"m31labs.dev/buckley/pkg/model"
 	orchmocks "m31labs.dev/buckley/pkg/orchestrator/mocks"
 	"m31labs.dev/buckley/pkg/tool"
 	"m31labs.dev/buckley/pkg/tool/builtin"
-	"go.uber.org/mock/gomock"
 )
 
 func TestBuilderGenerateWithTools_AppendsToolResultsAndContinues(t *testing.T) {

@@ -3,8 +3,8 @@ package containerexec
 import (
 	"testing"
 
-	"m31labs.dev/buckley/pkg/tool/builtin"
 	"go.uber.org/mock/gomock"
+	"m31labs.dev/buckley/pkg/tool/builtin"
 )
 
 func TestCanRunOnHost(t *testing.T) {
