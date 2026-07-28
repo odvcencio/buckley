@@ -422,6 +422,13 @@ func TestApprovedAPIReviewRequiresSuccessfulVerificationToolEvidence(t *testing.
 
 	execution.ToolCalls = []rlm.SubAgentToolCall{
 		{Name: "run_verification", Success: true, Data: map[string]any{
+			"kind": "test", "language": "go", "path": "pkg/oneshot/commands", "pattern": "", "status": "PASS", "exit_code": 0,
+		}},
+	}
+	assert.NoError(t, validateReviewExecutionEvidence(result, execution, changedFiles))
+
+	execution.ToolCalls = []rlm.SubAgentToolCall{
+		{Name: "run_verification", Success: true, Data: map[string]any{
 			"kind": "build", "language": "go", "path": "pkg/oneshot/commands", "pattern": "", "status": "PASS", "exit_code": 0,
 		}},
 		{Name: "run_verification", Success: false, Data: map[string]any{
@@ -469,6 +476,58 @@ func TestApprovedAPIReviewRequiresSuccessfulVerificationToolEvidence(t *testing.
 	result.Parsed.Approved = false
 	execution.ProviderID = "openai"
 	assert.NoError(t, validateReviewExecutionEvidence(result, execution, changedFiles))
+}
+
+func TestReviewExecutionRejectsTimeoutAsProvedFindingEvidence(t *testing.T) {
+	result := &ReviewRLMResult{Parsed: &ParsedReview{
+		Falsification:           "The focused test timed out, so serialization is broken.\n- **Conclusion**: PROVED",
+		FalsificationConclusion: FalsificationProved,
+		Findings: []Finding{{
+			ID:       "FINDING-001",
+			Title:    "Serialization is incomplete",
+			Evidence: "The focused round-trip test timed out.",
+		}},
+	}}
+	execution := &oneshot.RLMResult{
+		ProviderID: "openai",
+		ToolCalls: []rlm.SubAgentToolCall{{
+			Name:    "run_verification",
+			Success: false,
+			Result:  "verification timed out after 30s",
+			Data: map[string]any{
+				"status":   "UNAVAILABLE",
+				"evidence": "INCONCLUSIVE",
+				"error":    "verification timed out after 30s",
+			},
+		}},
+	}
+	assert.ErrorContains(t, validateReviewExecutionEvidence(result, execution, []string{"language.go"}), "inconclusive")
+
+	result.Parsed.Falsification = "Source tracing proves the changed decoder skips exported fields.\n- **Conclusion**: PROVED"
+	result.Parsed.Findings[0].Evidence = "The decoder returns before it visits the changed exported field."
+	assert.NoError(t, validateReviewExecutionEvidence(result, execution, []string{"language.go"}))
+}
+
+func TestProceduralVerificationGapCannotProduceDefectGrade(t *testing.T) {
+	parsed := &ParsedReview{
+		Grade:                   GradeC,
+		BuildVerification:       VerificationUnavailable,
+		TestVerification:        VerificationUnavailable,
+		FalsificationConclusion: FalsificationUnresolved,
+	}
+	assert.ErrorContains(t, validateProceduralGateGrade(parsed), "requires Grade B")
+
+	parsed.Grade = GradeB
+	assert.NoError(t, validateProceduralGateGrade(parsed))
+
+	parsed.Verdict = "- **Approved**: NO\n- **Blockers**: missing verification"
+	assert.ErrorContains(t, validateProceduralGateGrade(parsed), "not a procedural blocker")
+	parsed.Verdict = "- **Approved**: NO\n- **Blockers**: NONE"
+	assert.NoError(t, validateProceduralGateGrade(parsed))
+
+	parsed.Grade = GradeC
+	parsed.BuildVerification = VerificationFail
+	assert.NoError(t, validateProceduralGateGrade(parsed))
 }
 
 func TestReviewPRDefSkipsDuplicateVerificationForAuthoritativeRemoteCI(t *testing.T) {

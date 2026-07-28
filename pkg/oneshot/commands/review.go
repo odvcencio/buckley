@@ -297,7 +297,13 @@ func (d ReviewPRDef) ValidateRLMExecution(result any, execution *oneshot.RLMResu
 
 func validateReviewExecutionEvidence(result any, execution *oneshot.RLMResult, changedFiles []string) error {
 	review, ok := result.(*ReviewRLMResult)
-	if !ok || review.Parsed == nil || !review.Parsed.Approved {
+	if !ok || review.Parsed == nil {
+		return nil
+	}
+	if err := validateInconclusiveVerificationClaims(review.Parsed, execution); err != nil {
+		return err
+	}
+	if !review.Parsed.Approved {
 		return nil
 	}
 	if reviewChangedFilesDocumentationOnly(changedFiles) {
@@ -362,9 +368,62 @@ func validateReviewExecutionEvidence(result any, execution *oneshot.RLMResult, c
 		})
 	}
 	if err := validateReviewEvidenceCoverage(changedFiles, trusted); err != nil {
-		return fmt.Errorf("API-backed approval requires successful snapshot-bound run_verification evidence: %w", err)
+		return fmt.Errorf("API-backed approval requires successful snapshot-bound run_verification evidence: %w; for Go, call kind=test because kind=build does not execute tests", err)
 	}
 	return nil
+}
+
+func validateInconclusiveVerificationClaims(parsed *ParsedReview, execution *oneshot.RLMResult) error {
+	if parsed == nil || execution == nil || parsed.FalsificationConclusion != FalsificationProved {
+		return nil
+	}
+	hasTimedOutVerification := false
+	for _, call := range execution.ToolCalls {
+		if call.Name != "run_verification" {
+			continue
+		}
+		text := strings.ToLower(call.Result)
+		for _, key := range []string{"error", "evidence", "status"} {
+			if value, ok := call.Data[key].(string); ok {
+				text += " " + strings.ToLower(value)
+			}
+		}
+		if reviewTextMentionsInconclusiveExecution(text) {
+			hasTimedOutVerification = true
+			break
+		}
+	}
+	if !hasTimedOutVerification {
+		return nil
+	}
+
+	if reviewTextMentionsInconclusiveExecution(parsed.Falsification) {
+		return fmt.Errorf("verification timeout is inconclusive and cannot prove the falsification hypothesis")
+	}
+	for _, finding := range parsed.Findings {
+		claim := strings.Join([]string{finding.Title, finding.Evidence, finding.Impact, finding.Fix}, " ")
+		if reviewTextMentionsInconclusiveExecution(claim) {
+			return fmt.Errorf("finding %s treats an inconclusive verification timeout as proof", finding.ID)
+		}
+	}
+	return nil
+}
+
+func reviewTextMentionsInconclusiveExecution(text string) bool {
+	text = strings.ToLower(text)
+	for _, marker := range []string{
+		"timed out",
+		"timeout",
+		"deadline exceeded",
+		"context deadline",
+		"cancelled",
+		"canceled",
+	} {
+		if strings.Contains(text, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func reviewEvidenceExitCode(value any) (int, bool) {

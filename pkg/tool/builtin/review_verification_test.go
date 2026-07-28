@@ -72,6 +72,22 @@ func TestRunVerificationToolSuccessRequiresPassAndZeroExit(t *testing.T) {
 					t.Fatalf("Data[%q] = %#v, want %#v", key, got, want)
 				}
 			}
+			wantEvidence := "INCONCLUSIVE"
+			if test.status == reviewsandbox.StatusPass && test.exitCode == 0 {
+				wantEvidence = "CONFIRMED_PASS"
+			} else if test.status == reviewsandbox.StatusFail {
+				wantEvidence = "CONFIRMED_FAIL"
+			}
+			if got := result.Data["evidence"]; got != wantEvidence {
+				t.Fatalf("Data[evidence] = %#v, want %q", got, wantEvidence)
+			}
+			wantProofs := 0
+			if test.status == reviewsandbox.StatusPass && test.exitCode == 0 {
+				wantProofs = 2
+			}
+			if got, ok := result.Data["proves"].([]string); !ok || len(got) != wantProofs {
+				t.Fatalf("Data[proves] = %#v, want %d entries", result.Data["proves"], wantProofs)
+			}
 			if got, ok := result.Data["argv"].([]string); !ok || len(got) == 0 {
 				t.Fatalf("trusted argv missing: %#v", result.Data["argv"])
 			}

@@ -55,6 +55,9 @@ func TestReviewPromptsMakeApprovalVerificationPolicyExplicit(t *testing.T) {
 		"Documentation-only exception",
 		"exact changed claims, links, or diff hunks",
 		"Mixed, source, and configuration changes do not qualify",
+		"For Go, call run_verification with kind=test",
+		"CONFIRMED_PASS",
+		"INCONCLUSIVE",
 	} {
 		if !strings.Contains(branch, want) {
 			t.Errorf("branch prompt missing %q", want)
@@ -71,6 +74,7 @@ func TestReviewPromptsMakeApprovalVerificationPolicyExplicit(t *testing.T) {
 		"Failing, pending, unknown, or absent checks block approval",
 		"Pending, unknown, absent, or stale remote CI is a merge gate, not a proved current failure",
 		"use Grade B with NEEDS DISCUSSION",
+		"Missing duplicate verification alone requires Grade B",
 		"Do not list the condition as a Blocker or Finding",
 		"repeat the exact Feedback ledger entry once for EVERY supplied ID",
 		"Do not rerun the full suite solely",
@@ -78,6 +82,9 @@ func TestReviewPromptsMakeApprovalVerificationPolicyExplicit(t *testing.T) {
 		"do not replace the required remote gate",
 		"smallest changed right-side line",
 		"exact replacement for the anchored changed lines",
+		"CONFIRMED_PASS",
+		"INCONCLUSIVE",
+		"cannot override that result",
 	} {
 		if !strings.Contains(pr, want) {
 			t.Errorf("PR prompt missing %q", want)

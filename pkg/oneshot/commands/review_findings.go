@@ -246,6 +246,9 @@ func ValidateParsedReview(parsed *ParsedReview, opts ReviewValidationOptions) er
 			problems = append(problems, err.Error())
 		}
 	}
+	if err := validateProceduralGateGrade(parsed); err != nil {
+		problems = append(problems, err.Error())
+	}
 	if strings.TrimSpace(parsed.Coverage) != "" {
 		if err := validateCoverageLedger(parsed.CoverageEntries, opts.ChangedFiles); err != nil {
 			problems = append(problems, err.Error())
@@ -347,6 +350,47 @@ func ValidateParsedReview(parsed *ParsedReview, opts ReviewValidationOptions) er
 	}
 
 	return nil
+}
+
+func validateProceduralGateGrade(parsed *ParsedReview) error {
+	if parsed == nil || parsed.Approved || len(parsed.Findings) > 0 ||
+		parsed.FalsificationConclusion == FalsificationProved ||
+		parsed.BuildVerification == VerificationFail ||
+		parsed.TestVerification == VerificationFail {
+		return nil
+	}
+	if blocker := verdictLabelValue(parsed.Verdict, "Blockers"); blocker != "" &&
+		!reviewVerdictValueIsNone(blocker) {
+		return fmt.Errorf("missing, pending, or unavailable verification is a gate, not a procedural blocker")
+	}
+	switch parsed.Grade {
+	case GradeC, GradeD, GradeF:
+		return fmt.Errorf(
+			"missing, pending, or unavailable verification without a proved defect requires Grade B, not Grade %s",
+			parsed.Grade,
+		)
+	default:
+		return nil
+	}
+}
+
+func verdictLabelValue(section, label string) string {
+	expression := `(?im)^\s*(?:[-*]\s*)?\*\*` + regexp.QuoteMeta(label) + `\*\*:\s*(.*?)\s*$`
+	matches := regexp.MustCompile(expression).FindAllStringSubmatch(section, -1)
+	if len(matches) != 1 || len(matches[0]) < 2 {
+		return ""
+	}
+	return strings.TrimSpace(matches[0][1])
+}
+
+func reviewVerdictValueIsNone(value string) bool {
+	value = strings.Trim(strings.TrimSpace(value), "`*_ .")
+	switch strings.ToUpper(value) {
+	case "", "NONE", "N/A":
+		return true
+	default:
+		return false
+	}
 }
 
 func validateFindingDisposition(parsed *ParsedReview) error {

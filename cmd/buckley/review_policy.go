@@ -15,6 +15,8 @@ const (
 	codexReviewModelFocused  = "codex/gpt-5.6-luna"
 	codexReviewModelStandard = "codex/gpt-5.6-terra"
 	codexReviewModelBroad    = "codex/gpt-5.6-sol"
+	qwenReviewExploration    = 100 * time.Second
+	qwenCriticExploration    = 75 * time.Second
 )
 
 type reviewExecutionPlan struct {
@@ -68,7 +70,7 @@ func resolveReviewExecutionPlan(engine *rules.Engine, facts rules.ReviewPlanFact
 		maxIterations:        5,
 		maxToolCalls:         5,
 		maxVerificationCalls: 1,
-		verificationTimeout:  30 * time.Second,
+		verificationTimeout:  60 * time.Second,
 		explorationTimeout:   50 * time.Second,
 		synthesisLead:        90 * time.Second,
 		criticReserve:        75 * time.Second,
@@ -135,6 +137,9 @@ func enabledReviewDuration(enabled bool, value time.Duration) time.Duration {
 func (opts automatedReviewOptions) withExecutionPlan(plan reviewExecutionPlan) automatedReviewOptions {
 	if opts.maxIterations <= 0 {
 		opts.maxIterations = plan.maxIterations
+		if isQwen37PlusReviewModel(opts.modelID) && opts.maxIterations > 2 {
+			opts.maxIterations = 2
+		}
 	}
 	opts.maxToolCalls = plan.maxToolCalls
 	opts.maxVerificationCalls = plan.maxVerificationCalls
@@ -157,7 +162,20 @@ func (opts automatedReviewOptions) withExecutionPlan(plan reviewExecutionPlan) a
 			opts.reasoningEffort = codexReviewReasoningForSize(plan.sizeClass)
 		}
 	}
+	if isQwen37PlusReviewModel(opts.modelID) {
+		if opts.explorationTimeout < qwenReviewExploration {
+			opts.explorationTimeout = qwenReviewExploration
+		}
+		if opts.criticExploration < qwenCriticExploration {
+			opts.criticExploration = qwenCriticExploration
+		}
+	}
 	return opts
+}
+
+func isQwen37PlusReviewModel(modelID string) bool {
+	modelID = strings.ToLower(strings.TrimSpace(modelID))
+	return modelID == "qwen/qwen3.7-plus" || strings.HasSuffix(modelID, "/qwen3.7-plus")
 }
 
 func appendReviewExecutionPlan(prompt string, opts automatedReviewOptions) string {
@@ -188,10 +206,19 @@ func appendReviewExecutionPlan(prompt string, opts automatedReviewOptions) strin
 - Use REQUEST CHANGES only with a Blocker or proved current failure.
 - Pending, unknown, absent, or stale remote CI alone requires Grade B with NEEDS DISCUSSION.
 - Keep a pending or unavailable CI condition in CI Status and Remarks, not Blockers or Findings.
+- Cite supplied commands and results even when this review makes no duplicate tool call.
+- Missing duplicate verification alone requires Grade B with NEEDS DISCUSSION, not Grade C.
 - Write the Falsification conclusion as one bare token with no words after it.
 - Write Findings only when Falsification concludes PROVED.
 - If Falsification concludes DISPROVED or UNRESOLVED, move concerns to Remarks or omit them.
 - Require a current failing input, violated invariant, failing check, or reproducible behavior for every Finding.
+- Treat CONFIRMED_PASS as authoritative for the behavior that its focused command exercises.
+- Never let a filename, field-visibility, or source-shape heuristic override a passing focused test.
+- Treat INCONCLUSIVE, timeout, cancellation, and unavailable verification as unknown evidence, never proof of failure.
+- Report an INCONCLUSIVE verification as UNAVAILABLE in Build and Tests. INCONCLUSIVE is not an output state.
+- For Go approval evidence, call run_verification with kind=test. Go kind=build does not execute tests.
+- Put required verification in the first tool-call batch. Do not defer it until final synthesis.
+- Omit ASD-STE100, comment-length, wording, naming, and style observations from every section.
 - Move possible rename, regeneration, test drift, and private test-hook concerns to Remarks.
 - Do not expose analysis, repair commentary, progress text, or a plan.
 - Keep the final review concise enough to fit the output limit.

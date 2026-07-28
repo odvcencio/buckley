@@ -13,7 +13,7 @@ func appendReviewVerificationTargets(sb *strings.Builder, changedFiles []string)
 		return
 	}
 	sb.WriteString("## Required Local Verification Targets\n\n")
-	sb.WriteString("For an approval, call `run_verification` for both `build` and `test` on every target below. Use the exact language and repository-relative path shown; do not substitute only remote CI.\n\n")
+	sb.WriteString("For each Go target, call `run_verification` once with `kind=test`; that call supplies build and test evidence. Do not use `kind=build` because it does not execute tests. For other languages, call both kinds. Use each exact language and repository-relative path.\n\n")
 	for _, target := range targets {
 		sb.WriteString("- ")
 		sb.WriteString(target)
@@ -63,6 +63,9 @@ func validateReviewEvidenceCoverage(changedFiles []string, evidence []reviewComm
 				byLanguage[item.Language] = make(map[string]bool)
 			}
 			byLanguage[item.Language][item.Kind] = true
+			if item.Language == "go" && item.Kind == reviewEvidenceTest {
+				byLanguage[item.Language][reviewEvidenceBuild] = true
+			}
 		}
 		for _, kinds := range byLanguage {
 			if kinds[reviewEvidenceBuild] && kinds[reviewEvidenceTest] {
@@ -117,7 +120,9 @@ func reviewEvidenceCoversRepositoryRoot(item reviewCommandEvidenceDetails) bool 
 func reviewEvidenceCoversFile(evidence []reviewCommandEvidenceDetails, language, kind, file string) bool {
 	fileDir := filepath.ToSlash(filepath.Dir(file))
 	for _, item := range evidence {
-		if item.Kind != kind || item.Language != language {
+		kindMatches := item.Kind == kind ||
+			(language == "go" && kind == reviewEvidenceBuild && item.Kind == reviewEvidenceTest)
+		if !kindMatches || item.Language != language {
 			continue
 		}
 		for _, target := range item.Targets {

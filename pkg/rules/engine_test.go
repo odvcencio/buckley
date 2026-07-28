@@ -773,7 +773,7 @@ func TestEngine_EvalStrategy_ReviewPlan_AllSizes(t *testing.T) {
 			wantReasoning:    1024,
 			wantIterations:   4,
 			wantToolCalls:    4,
-			wantVerification: 25,
+			wantVerification: 60,
 			wantReserve:      85,
 		},
 		{
@@ -783,7 +783,7 @@ func TestEngine_EvalStrategy_ReviewPlan_AllSizes(t *testing.T) {
 			wantReasoning:    1536,
 			wantIterations:   5,
 			wantToolCalls:    5,
-			wantVerification: 30,
+			wantVerification: 60,
 			wantReserve:      90,
 		},
 		{
@@ -793,7 +793,7 @@ func TestEngine_EvalStrategy_ReviewPlan_AllSizes(t *testing.T) {
 			wantReasoning:    2048,
 			wantIterations:   6,
 			wantToolCalls:    6,
-			wantVerification: 30,
+			wantVerification: 60,
 			wantReserve:      90,
 		},
 		{
@@ -803,7 +803,7 @@ func TestEngine_EvalStrategy_ReviewPlan_AllSizes(t *testing.T) {
 			wantReasoning:    2048,
 			wantIterations:   6,
 			wantToolCalls:    6,
-			wantVerification: 30,
+			wantVerification: 60,
 			wantReserve:      90,
 		},
 		{
@@ -813,7 +813,7 @@ func TestEngine_EvalStrategy_ReviewPlan_AllSizes(t *testing.T) {
 			wantReasoning:    2048,
 			wantIterations:   6,
 			wantToolCalls:    6,
-			wantVerification: 30,
+			wantVerification: 60,
 			wantReserve:      90,
 		},
 	}

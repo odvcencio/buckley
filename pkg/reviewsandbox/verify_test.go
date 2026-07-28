@@ -194,6 +194,28 @@ func TestExecutorClassifiesCommandFailureAndSandboxUnavailable(t *testing.T) {
 		}
 	})
 
+	t.Run("verification timeout is inconclusive", func(t *testing.T) {
+		executor := testExecutor(t)
+		calls := 0
+		executor.run = func(context.Context, commandInvocation, int) (commandOutput, error) {
+			calls++
+			if calls == 1 {
+				return commandOutput{ExitCode: 0}, nil
+			}
+			return commandOutput{ExitCode: -1}, context.DeadlineExceeded
+		}
+		result := executor.Verify(context.Background(), Request{
+			SnapshotRoot: root,
+			Kind:         KindTest,
+			Language:     LanguageGo,
+			Timeout:      time.Second,
+		})
+		if result.Status != StatusUnavailable || result.ExitCode != 124 ||
+			!strings.Contains(result.Error, "timed out") {
+			t.Fatalf("timeout = %#v", result)
+		}
+	})
+
 	t.Run("successful command with no tests", func(t *testing.T) {
 		executor := testExecutor(t)
 		calls := 0
@@ -209,6 +231,43 @@ func TestExecutorClassifiesCommandFailureAndSandboxUnavailable(t *testing.T) {
 			t.Fatalf("no-test result = %#v", result)
 		}
 	})
+}
+
+func TestSessionExecutorReusesAndRemovesPrivateRuntime(t *testing.T) {
+	executor := testExecutor(t)
+	executor.reuseRuntime = true
+	base := t.TempDir()
+	created := 0
+	removed := ""
+	executor.tempDir = func(string, string) (string, error) {
+		created++
+		runtimeDir := filepath.Join(base, "runtime")
+		return runtimeDir, os.Mkdir(runtimeDir, 0o700)
+	}
+	executor.removeAll = func(path string) error {
+		removed = path
+		return os.RemoveAll(path)
+	}
+
+	first, firstCleanup, err := executor.prepareRuntime()
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstCleanup()
+	second, secondCleanup, err := executor.prepareRuntime()
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondCleanup()
+	if first != second || created != 1 || removed != "" {
+		t.Fatalf("runtime reuse = first %q, second %q, created %d, removed %q", first, second, created, removed)
+	}
+	if err := executor.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if removed != first {
+		t.Fatalf("removed runtime = %q, want %q", removed, first)
+	}
 }
 
 func TestResolveSnapshotDirectoryRejectsEscape(t *testing.T) {

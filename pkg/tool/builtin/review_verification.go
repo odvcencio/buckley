@@ -43,7 +43,22 @@ func NewRunVerificationTool(snapshotRoot string, codexCommand ...string) (*RunVe
 	if len(codexCommand) > 0 {
 		command = strings.TrimSpace(codexCommand[0])
 	}
-	return &RunVerificationTool{snapshotRoot: filepath.Clean(root), codexCommand: command}, nil
+	return &RunVerificationTool{
+		snapshotRoot: filepath.Clean(root),
+		codexCommand: command,
+		verifier:     reviewsandbox.NewSessionExecutorWithCodexCommand(command),
+	}, nil
+}
+
+// Close removes the private compiler caches for this review session.
+func (t *RunVerificationTool) Close() error {
+	if t == nil {
+		return nil
+	}
+	if closer, ok := t.verifier.(interface{ Close() error }); ok {
+		return closer.Close()
+	}
+	return nil
 }
 
 func (t *RunVerificationTool) SetMaxOutputBytes(max int) {
@@ -64,7 +79,7 @@ func (t *RunVerificationTool) SetTimeoutLimit(limit time.Duration) {
 func (t *RunVerificationTool) Name() string { return "run_verification" }
 
 func (t *RunVerificationTool) Description() string {
-	return "Run a focused build, test, or check in the immutable review snapshot. Source is OS-enforced read-only, temporary build output is private, and network access is disabled."
+	return "Run a focused build, test, or check in the immutable review snapshot. For Go approval evidence, use kind=test because it compiles the target and executes tests. Source is OS-enforced read-only, temporary build output is private, and network access is disabled."
 }
 
 func (t *RunVerificationTool) Parameters() ParameterSchema {
@@ -79,7 +94,7 @@ func (t *RunVerificationTool) Parameters() ParameterSchema {
 		Properties: map[string]PropertySchema{
 			"kind": {
 				Type:        "string",
-				Description: "Verification operation",
+				Description: "Verification operation. For Go approval evidence, select test; build compiles but does not execute tests.",
 				Enum:        []string{"build", "test", "check"},
 			},
 			"language": {
@@ -180,8 +195,11 @@ func (t *RunVerificationTool) ExecuteWithContext(ctx context.Context, params map
 		"argv":        append([]string(nil), verification.Argv...),
 		"exit_code":   verification.ExitCode,
 		"status":      string(verification.Status),
+		"evidence":    verificationEvidenceClass(verification),
+		"proves":      verificationProofKinds(verification),
 		"stdout":      verification.Stdout,
 		"stderr":      verification.Stderr,
+		"error":       verification.Error,
 		"duration_ms": verification.Duration.Milliseconds(),
 		"truncated":   verification.Truncated,
 	}
@@ -203,10 +221,42 @@ func (t *RunVerificationTool) ExecuteWithContext(ctx context.Context, params map
 			"argv":      append([]string(nil), verification.Argv...),
 			"exit_code": verification.ExitCode,
 			"status":    string(verification.Status),
+			"evidence":  verificationEvidenceClass(verification),
+			"proves":    verificationProofKinds(verification),
 			"error":     verification.Error,
 		}
 	}
 	return result, nil
+}
+
+func verificationProofKinds(verification reviewsandbox.Result) []string {
+	if verification.Status != reviewsandbox.StatusPass || verification.ExitCode != 0 {
+		return []string{}
+	}
+	if verification.Language == reviewsandbox.LanguageGo && verification.Kind == reviewsandbox.KindTest {
+		return []string{"build", "test"}
+	}
+	switch verification.Kind {
+	case reviewsandbox.KindBuild:
+		return []string{"build"}
+	case reviewsandbox.KindTest:
+		return []string{"test"}
+	case reviewsandbox.KindCheck:
+		return []string{"check"}
+	default:
+		return []string{}
+	}
+}
+
+func verificationEvidenceClass(verification reviewsandbox.Result) string {
+	switch {
+	case verification.Status == reviewsandbox.StatusPass && verification.ExitCode == 0:
+		return "CONFIRMED_PASS"
+	case verification.Status == reviewsandbox.StatusFail:
+		return "CONFIRMED_FAIL"
+	default:
+		return "INCONCLUSIVE"
+	}
 }
 
 func unavailableVerificationResult(kind, language, reason string) *Result {
@@ -222,6 +272,9 @@ func unavailableVerificationResult(kind, language, reason string) *Result {
 			"argv":      []string{},
 			"exit_code": -1,
 			"status":    string(reviewsandbox.StatusUnavailable),
+			"evidence":  "INCONCLUSIVE",
+			"proves":    []string{},
+			"error":     reason,
 		},
 	}
 }

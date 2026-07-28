@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -103,6 +104,9 @@ type Executor struct {
 	run          commandRunner
 	tempDir      func(string, string) (string, error)
 	removeAll    func(string) error
+	reuseRuntime bool
+	runtimeMu    sync.Mutex
+	runtimeDir   string
 }
 
 func NewExecutor() *Executor {
@@ -119,6 +123,29 @@ func NewExecutorWithCodexCommand(command string) *Executor {
 		tempDir:      os.MkdirTemp,
 		removeAll:    os.RemoveAll,
 	}
+}
+
+// NewSessionExecutorWithCodexCommand reuses one private build runtime until
+// Close. This lets verification calls share safe compiler caches.
+func NewSessionExecutorWithCodexCommand(command string) *Executor {
+	executor := NewExecutorWithCodexCommand(command)
+	executor.reuseRuntime = true
+	return executor
+}
+
+// Close removes a session executor's private build runtime.
+func (e *Executor) Close() error {
+	if e == nil {
+		return nil
+	}
+	e.runtimeMu.Lock()
+	runtimeDir := e.runtimeDir
+	e.runtimeDir = ""
+	e.runtimeMu.Unlock()
+	if runtimeDir == "" || e.removeAll == nil {
+		return nil
+	}
+	return e.removeAll(runtimeDir)
 }
 
 func (e *Executor) Verify(parent context.Context, request Request) Result {
@@ -188,16 +215,12 @@ func (e *Executor) Verify(parent context.Context, request Request) Result {
 		codex = canonical
 	}
 
-	runtimeDir, err := e.tempDir("", "buckley-review-verification-*")
+	runtimeDir, cleanupRuntime, err := e.prepareRuntime()
 	if err != nil {
 		result.Error = fmt.Sprintf("create private verification runtime: %v", err)
 		return result
 	}
-	defer func() { _ = e.removeAll(runtimeDir) }()
-	if err := PrepareRuntime(runtimeDir); err != nil {
-		result.Error = fmt.Sprintf("prepare private verification runtime: %v", err)
-		return result
-	}
+	defer cleanupRuntime()
 
 	timeout := request.Timeout
 	if timeout <= 0 {
@@ -263,7 +286,7 @@ func (e *Executor) Verify(parent context.Context, request Request) Result {
 	if runErr != nil {
 		if errors.Is(runErr, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			result.ExitCode = 124
-			result.Status = StatusFail
+			result.Status = StatusUnavailable
 			result.Error = fmt.Sprintf("verification timed out after %s", timeout)
 			return result
 		}
@@ -295,6 +318,36 @@ func (e *Executor) Verify(parent context.Context, request Request) Result {
 	}
 	result.Status = StatusPass
 	return result
+}
+
+func (e *Executor) prepareRuntime() (string, func(), error) {
+	if !e.reuseRuntime {
+		runtimeDir, err := e.tempDir("", "buckley-review-verification-*")
+		if err != nil {
+			return "", func() {}, err
+		}
+		if err := PrepareRuntime(runtimeDir); err != nil {
+			_ = e.removeAll(runtimeDir)
+			return "", func() {}, err
+		}
+		return runtimeDir, func() { _ = e.removeAll(runtimeDir) }, nil
+	}
+
+	e.runtimeMu.Lock()
+	defer e.runtimeMu.Unlock()
+	if e.runtimeDir != "" {
+		return e.runtimeDir, func() {}, nil
+	}
+	runtimeDir, err := e.tempDir("", "buckley-review-verification-*")
+	if err != nil {
+		return "", func() {}, err
+	}
+	if err := PrepareRuntime(runtimeDir); err != nil {
+		_ = e.removeAll(runtimeDir)
+		return "", func() {}, err
+	}
+	e.runtimeDir = runtimeDir
+	return runtimeDir, func() {}, nil
 }
 
 func verificationOutputShowsNoTests(language Language, output string) bool {
