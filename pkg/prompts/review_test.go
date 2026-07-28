@@ -94,7 +94,7 @@ func TestReviewPromptsMakeApprovalVerificationPolicyExplicit(t *testing.T) {
 	}
 }
 
-func TestReviewPromptsRequireProductionReachabilityAudit(t *testing.T) {
+func TestReviewPromptsRequireReachabilityBehaviorBindingsVisualsAndRuntimeOwnership(t *testing.T) {
 	for name, prompt := range map[string]string{
 		"branch": reviewBranchWithToolsDefault(time.Unix(0, 0)),
 		"PR":     reviewPRDefault(time.Unix(0, 0)),
@@ -109,6 +109,40 @@ func TestReviewPromptsRequireProductionReachabilityAudit(t *testing.T) {
 				"synthetic",
 				"generated metadata",
 				"smallest valid shape",
+				"removes or replaces an implementation path",
+				"compare",
+				"observable behavior",
+				"submit",
+				"click",
+				"navigation",
+				"reset",
+				"error",
+				"loading",
+				"focus",
+				"accessibility",
+				"framework-generated or convention-shaped state",
+				"real producer",
+				"serializer",
+				"runtime binding",
+				"consumer key shape",
+				"success",
+				"failure",
+				"empty/default",
+				"redirect/reload",
+				"visual",
+				"canvas",
+				"shader",
+				"coordinate space",
+				"actual render or mount box",
+				"responsive transforms",
+				"overflow",
+				"initial",
+				"settled",
+				"pixel or screenshot evidence",
+				"metrics alone cannot approve",
+				"generated or framework-owned runtime code",
+				"app-owned bespoke JavaScript",
+				"do not count generated runtime as bespoke app code",
 			} {
 				if !strings.Contains(strings.ToLower(prompt), strings.ToLower(want)) {
 					t.Errorf("prompt missing %q", want)
@@ -169,7 +203,7 @@ func TestBranchReviewPromptDoesNotMandateBroadGoSweep(t *testing.T) {
 
 func TestBranchReviewPromptStaysCompact(t *testing.T) {
 	prompt := reviewBranchWithToolsDefault(time.Unix(0, 0))
-	const maxBytes = 6_000
+	const maxBytes = 6_750
 	if len(prompt) > maxBytes {
 		t.Fatalf("branch review system prompt grew to %d bytes; budget is %d", len(prompt), maxBytes)
 	}

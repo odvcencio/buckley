@@ -1453,6 +1453,12 @@ func TestEnterprisePRURLTargetsEveryGitHubOperation(t *testing.T) {
 			if hasPRArg(args, "repos/m31labs/buckley/issues/208/comments?per_page=100") || hasPRArg(args, "repos/m31labs/buckley/pulls/208/reviews?per_page=100") {
 				return []byte(`[]`), nil
 			}
+			// The posting gate's author_association lookup. It must be pinned to
+			// the URL repository like every other REST call, which is what the
+			// path assertion here checks.
+			if hasPRArg(args, "repos/m31labs/buckley/pulls/208") && hasPRArgPair(args, "--jq", ".author_association") {
+				return []byte("OWNER\n"), nil
+			}
 			if !hasPRArg(args, "repos/m31labs/buckley/pulls/208/files?per_page=100") {
 				t.Errorf("REST operation was not pinned to URL repository: %s", strings.Join(args, " "))
 			}
@@ -1486,8 +1492,11 @@ func TestEnterprisePRURLTargetsEveryGitHubOperation(t *testing.T) {
 	if _, err := getPRFiles(run, pr); err != nil {
 		t.Fatalf("getPRFiles: %v", err)
 	}
-	if prCalls != 3 || apiCalls != 4 {
-		t.Fatalf("observed %d gh pr calls and %d gh api calls, want 3 and 4", prCalls, apiCalls)
+	// 5 gh api calls, not 4: getPRInfo makes one extra REST call for the
+	// author_association the posting gate needs. `gh pr view --json` cannot
+	// supply that field, so it cannot be folded into the pr view above.
+	if prCalls != 3 || apiCalls != 5 {
+		t.Fatalf("observed %d gh pr calls and %d gh api calls, want 3 and 5", prCalls, apiCalls)
 	}
 }
 

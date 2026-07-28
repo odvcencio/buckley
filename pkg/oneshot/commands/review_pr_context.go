@@ -669,9 +669,48 @@ func parsePRRef(ref string) (prReference, error) {
 	return prReference{}, fmt.Errorf("invalid PR reference: %s (use PR number or GitHub URL)", ref)
 }
 
+// getPRAuthorAssociation reads the pull request's author_association from the
+// REST API. The posting gate uses it to decide whether an author may spend an
+// unbounded review on a large pull request.
+//
+// It is a separate call because `gh pr view --json` does not offer the field;
+// asking for it there makes gh exit non-zero and take every review down with
+// it, gated or not.
+//
+// It returns "" on ANY failure, and the gate treats "" as not-core. That is the
+// fail-closed direction: an author we cannot identify never unlocks the spend.
+// A missing association must not fail the review either, because a review that
+// is not being posted does not need one.
+func getPRAuthorAssociation(run prCommandRunner, target prReference, host, repository string) string {
+	// The REST route wants owner/repo. `repository` is already in that form —
+	// only qualifiedPRRepository prepends the host, and --hostname carries the
+	// host for an enterprise instance, so do not qualify here.
+	repo := repository
+	if repo == "" {
+		repo = target.Repository
+	}
+	if repo == "" {
+		return ""
+	}
+	args := withPRAPIHostname([]string{
+		"api", fmt.Sprintf("repos/%s/pulls/%d", repo, target.Number),
+		"--jq", ".author_association",
+	}, host)
+	output, err := run("gh", args...)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(output))
+}
+
 func getPRInfo(run prCommandRunner, target prReference) (*PRInfo, error) {
+	// authorAssociation is deliberately absent here. `gh pr view --json` accepts
+	// only its own GraphQL-backed field set, and that field is not in it — asking
+	// for it makes gh exit 1 and print the whole valid list, which failed EVERY
+	// review, not just gated ones. getPRAuthorAssociation reads it from the REST
+	// API instead, where it does exist.
 	args := withPRTarget([]string{"pr", "view", strconv.Itoa(target.Number), "--json",
-		"number,title,author,authorAssociation,state,url,body,labels,baseRefName,baseRefOid,headRefName,headRefOid,additions,deletions,changedFiles,reviewDecision"}, target)
+		"number,title,author,state,url,body,labels,baseRefName,baseRefOid,headRefName,headRefOid,additions,deletions,changedFiles,reviewDecision"}, target)
 	output, err := run("gh", args...)
 	if err != nil {
 		return nil, fmt.Errorf("gh pr view failed: %w", err)
@@ -683,11 +722,10 @@ func getPRInfo(run prCommandRunner, target prReference) (*PRInfo, error) {
 		Author struct {
 			Login string `json:"login"`
 		} `json:"author"`
-		AuthorAssociation string `json:"authorAssociation"`
-		State             string `json:"state"`
-		URL               string `json:"url"`
-		Body              string `json:"body"`
-		Labels            []struct {
+		State  string `json:"state"`
+		URL    string `json:"url"`
+		Body   string `json:"body"`
+		Labels []struct {
 			Name string `json:"name"`
 		} `json:"labels"`
 		BaseRefName    string `json:"baseRefName"`
@@ -720,7 +758,7 @@ func getPRInfo(run prCommandRunner, target prReference) (*PRInfo, error) {
 		Number:         data.Number,
 		Title:          data.Title,
 		Author:         data.Author.Login,
-		AuthorAssoc:    data.AuthorAssociation,
+		AuthorAssoc:    getPRAuthorAssociation(run, target, host, repository),
 		State:          data.State,
 		URL:            data.URL,
 		Host:           host,
