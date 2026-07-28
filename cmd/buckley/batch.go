@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"time"
 
-	"m31labs.dev/buckley/pkg/config"
-	"m31labs.dev/buckley/pkg/orchestrator"
+	"m31labs.dev/buckley/v2/pkg/config"
+	"m31labs.dev/buckley/v2/pkg/orchestrator"
 )
 
 type batchCoordinator interface {

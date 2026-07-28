@@ -5,7 +5,7 @@ import (
 	"sort"
 	"strings"
 
-	"m31labs.dev/buckley/pkg/model"
+	"m31labs.dev/buckley/v2/pkg/model"
 )
 
 // CatalogProvider supplies the model catalog for routing decisions.

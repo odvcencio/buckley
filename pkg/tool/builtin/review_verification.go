@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
-	"m31labs.dev/buckley/pkg/reviewpolicy"
-	"m31labs.dev/buckley/pkg/reviewsandbox"
+	"m31labs.dev/buckley/v2/pkg/reviewpolicy"
+	"m31labs.dev/buckley/v2/pkg/reviewsandbox"
 )
 
 // RunVerificationTool runs one focused build, test, or check against the

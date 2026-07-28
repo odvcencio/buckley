@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"m31labs.dev/buckley/pkg/tools"
+	"m31labs.dev/buckley/v2/pkg/tools"
 )
 
 func TestCLIInvokerCodexUsesOutputSchemaFile(t *testing.T) {

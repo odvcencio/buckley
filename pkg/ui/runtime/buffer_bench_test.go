@@ -3,7 +3,7 @@ package runtime
 import (
 	"testing"
 
-	"m31labs.dev/buckley/pkg/ui/backend"
+	"m31labs.dev/buckley/v2/pkg/ui/backend"
 )
 
 // BenchmarkBuffer_Set measures single cell writes.

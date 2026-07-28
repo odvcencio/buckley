@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"m31labs.dev/buckley/pkg/config"
+	"m31labs.dev/buckley/v2/pkg/config"
 )
 
 // Request describes a command to execute inside the sandbox.

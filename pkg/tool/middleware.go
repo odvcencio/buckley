@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	"m31labs.dev/buckley/pkg/tool/builtin"
+	"m31labs.dev/buckley/v2/pkg/tool/builtin"
 )
 
 // ExecutionContext carries request metadata through the middleware chain.

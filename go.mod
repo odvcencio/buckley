@@ -1,4 +1,4 @@
-module m31labs.dev/buckley
+module m31labs.dev/buckley/v2
 
 go 1.26
 

@@ -7,7 +7,7 @@ import (
 
 	"go.uber.org/mock/gomock"
 
-	"m31labs.dev/buckley/pkg/storage"
+	"m31labs.dev/buckley/v2/pkg/storage"
 )
 
 func newTrackerWithMocks(t *testing.T, session *storage.Session, daily, monthly float64) (*Tracker, *MockcostStore, *MockCostCalculator) {

@@ -16,9 +16,9 @@ import (
 	"strings"
 	"time"
 
-	"m31labs.dev/buckley/pkg/diffsignal"
-	"m31labs.dev/buckley/pkg/reviewpolicy"
-	"m31labs.dev/buckley/pkg/transparency"
+	"m31labs.dev/buckley/v2/pkg/diffsignal"
+	"m31labs.dev/buckley/v2/pkg/reviewpolicy"
+	"m31labs.dev/buckley/v2/pkg/transparency"
 )
 
 // PRInfo contains parsed PR metadata.

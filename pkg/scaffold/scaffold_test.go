@@ -5,8 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"m31labs.dev/buckley/pkg/config"
-	projectcontext "m31labs.dev/buckley/pkg/context"
+	"m31labs.dev/buckley/v2/pkg/config"
+	projectcontext "m31labs.dev/buckley/v2/pkg/context"
 )
 
 func TestGeneratePersonaCreatesSluggedFile(t *testing.T) {

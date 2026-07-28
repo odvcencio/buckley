@@ -9,11 +9,11 @@ import (
 	"strings"
 
 	"github.com/go-chi/chi/v5"
-	"m31labs.dev/buckley/pkg/giturl"
+	"m31labs.dev/buckley/v2/pkg/giturl"
 
-	"m31labs.dev/buckley/pkg/headless"
-	"m31labs.dev/buckley/pkg/ipc/command"
-	"m31labs.dev/buckley/pkg/storage"
+	"m31labs.dev/buckley/v2/pkg/headless"
+	"m31labs.dev/buckley/v2/pkg/ipc/command"
+	"m31labs.dev/buckley/v2/pkg/storage"
 )
 
 // HeadlessRegistry provides access to headless session management.

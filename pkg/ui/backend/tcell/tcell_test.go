@@ -4,7 +4,7 @@ import (
 	"testing"
 
 	tcellv2 "github.com/gdamore/tcell/v2"
-	"m31labs.dev/buckley/pkg/ui/terminal"
+	"m31labs.dev/buckley/v2/pkg/ui/terminal"
 )
 
 func TestHandlePasteEvent_AccumulatesBracketedPaste(t *testing.T) {

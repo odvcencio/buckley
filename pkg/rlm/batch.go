@@ -11,13 +11,13 @@ import (
 
 	"github.com/oklog/ulid/v2"
 	"golang.org/x/time/rate"
-	"m31labs.dev/buckley/pkg/bus"
-	"m31labs.dev/buckley/pkg/coordination/reliability"
-	"m31labs.dev/buckley/pkg/coordination/security"
-	"m31labs.dev/buckley/pkg/graft"
-	"m31labs.dev/buckley/pkg/model"
-	"m31labs.dev/buckley/pkg/rules"
-	"m31labs.dev/buckley/pkg/tool"
+	"m31labs.dev/buckley/v2/pkg/bus"
+	"m31labs.dev/buckley/v2/pkg/coordination/reliability"
+	"m31labs.dev/buckley/v2/pkg/coordination/security"
+	"m31labs.dev/buckley/v2/pkg/graft"
+	"m31labs.dev/buckley/v2/pkg/model"
+	"m31labs.dev/buckley/v2/pkg/rules"
+	"m31labs.dev/buckley/v2/pkg/tool"
 )
 
 const defaultBatchConcurrency = 4

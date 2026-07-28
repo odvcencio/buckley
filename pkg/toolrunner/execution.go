@@ -8,9 +8,9 @@ import (
 	"sync"
 	"time"
 
-	"m31labs.dev/buckley/pkg/conversation"
-	"m31labs.dev/buckley/pkg/model"
-	"m31labs.dev/buckley/pkg/tool"
+	"m31labs.dev/buckley/v2/pkg/conversation"
+	"m31labs.dev/buckley/v2/pkg/model"
+	"m31labs.dev/buckley/v2/pkg/tool"
 )
 
 // executeWithTools uses streaming for real-time output and proper tool call accumulation.

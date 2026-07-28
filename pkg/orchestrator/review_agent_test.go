@@ -7,8 +7,8 @@ import (
 
 	"go.uber.org/mock/gomock"
 
-	"m31labs.dev/buckley/pkg/config"
-	"m31labs.dev/buckley/pkg/tool"
+	"m31labs.dev/buckley/v2/pkg/config"
+	"m31labs.dev/buckley/v2/pkg/tool"
 )
 
 func TestReviewAgentReviewApproved(t *testing.T) {

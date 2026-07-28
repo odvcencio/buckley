@@ -5,8 +5,8 @@ import (
 	"encoding/json"
 	"sync"
 
-	"m31labs.dev/buckley/pkg/bus"
-	"m31labs.dev/buckley/pkg/telemetry"
+	"m31labs.dev/buckley/v2/pkg/bus"
+	"m31labs.dev/buckley/v2/pkg/telemetry"
 )
 
 // TelemetryBusBridge forwards telemetry events to the MessageBus.

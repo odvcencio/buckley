@@ -6,8 +6,8 @@ import (
 	"strings"
 	"time"
 
-	"m31labs.dev/buckley/pkg/model"
-	"m31labs.dev/buckley/pkg/storage"
+	"m31labs.dev/buckley/v2/pkg/model"
+	"m31labs.dev/buckley/v2/pkg/storage"
 )
 
 // Message represents a conversation message

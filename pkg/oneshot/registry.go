@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"sync"
 
-	"m31labs.dev/buckley/pkg/tools"
+	"m31labs.dev/buckley/v2/pkg/tools"
 )
 
 // Command represents a registered one-shot command.

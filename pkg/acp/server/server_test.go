@@ -9,11 +9,11 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	acppb "m31labs.dev/buckley/pkg/acp/proto"
-	"m31labs.dev/buckley/pkg/config"
-	"m31labs.dev/buckley/pkg/coordination/coordinator"
-	"m31labs.dev/buckley/pkg/coordination/events"
-	"m31labs.dev/buckley/pkg/storage"
+	acppb "m31labs.dev/buckley/v2/pkg/acp/proto"
+	"m31labs.dev/buckley/v2/pkg/config"
+	"m31labs.dev/buckley/v2/pkg/coordination/coordinator"
+	"m31labs.dev/buckley/v2/pkg/coordination/events"
+	"m31labs.dev/buckley/v2/pkg/storage"
 )
 
 func TestNewServer(t *testing.T) {

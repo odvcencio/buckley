@@ -5,9 +5,9 @@ import (
 	"strings"
 	"time"
 
-	"m31labs.dev/buckley/pkg/config"
-	"m31labs.dev/buckley/pkg/model"
-	"m31labs.dev/buckley/pkg/rules"
+	"m31labs.dev/buckley/v2/pkg/config"
+	"m31labs.dev/buckley/v2/pkg/model"
+	"m31labs.dev/buckley/v2/pkg/rules"
 )
 
 const (

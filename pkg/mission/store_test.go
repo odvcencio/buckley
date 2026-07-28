@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"m31labs.dev/buckley/pkg/storage"
+	"m31labs.dev/buckley/v2/pkg/storage"
 )
 
 // setupTestStore creates a test store with required sessions

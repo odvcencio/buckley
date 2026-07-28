@@ -8,7 +8,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"m31labs.dev/buckley/pkg/model"
+	"m31labs.dev/buckley/v2/pkg/model"
 )
 
 // EfficientContextOptions controls the request-time projection of durable

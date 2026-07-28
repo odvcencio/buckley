@@ -4,8 +4,8 @@ import (
 	"context"
 	"time"
 
-	"m31labs.dev/buckley/pkg/model"
-	"m31labs.dev/buckley/pkg/tool"
+	"m31labs.dev/buckley/v2/pkg/model"
+	"m31labs.dev/buckley/v2/pkg/tool"
 )
 
 // ModelClient defines the interface for LLM interactions used by the runner.

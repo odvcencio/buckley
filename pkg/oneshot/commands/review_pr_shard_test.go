@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"m31labs.dev/buckley/pkg/diffsignal"
+	"m31labs.dev/buckley/v2/pkg/diffsignal"
 )
 
 func baseParsedReview(grade Grade, approved bool) *ParsedReview {

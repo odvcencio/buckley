@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"m31labs.dev/buckley/pkg/oneshot"
+	"m31labs.dev/buckley/v2/pkg/oneshot"
 )
 
 func TestPRResultHeaderComposesCommitGrammar(t *testing.T) {

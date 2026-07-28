@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"m31labs.dev/buckley/pkg/types"
+	"m31labs.dev/buckley/v2/pkg/types"
 )
 
 // Executable is the unified interface for both tools and slash commands.

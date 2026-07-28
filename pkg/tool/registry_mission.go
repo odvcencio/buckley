@@ -11,9 +11,9 @@ import (
 	"github.com/oklog/ulid/v2"
 	"github.com/pmezard/go-difflib/difflib"
 
-	"m31labs.dev/buckley/pkg/mission"
-	"m31labs.dev/buckley/pkg/telemetry"
-	"m31labs.dev/buckley/pkg/tool/builtin"
+	"m31labs.dev/buckley/v2/pkg/mission"
+	"m31labs.dev/buckley/v2/pkg/telemetry"
+	"m31labs.dev/buckley/v2/pkg/tool/builtin"
 )
 
 func (r *Registry) executeWithShellTelemetry(execFn func(map[string]any) (*builtin.Result, error), params map[string]any) (*builtin.Result, error) {

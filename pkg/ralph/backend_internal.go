@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"m31labs.dev/buckley/pkg/conversation"
+	"m31labs.dev/buckley/v2/pkg/conversation"
 )
 
 // InternalOptions configures the internal Buckley backend.

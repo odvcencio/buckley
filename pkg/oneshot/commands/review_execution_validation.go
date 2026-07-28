@@ -6,7 +6,7 @@ import (
 	"sort"
 	"strings"
 
-	"m31labs.dev/buckley/pkg/reviewpolicy"
+	"m31labs.dev/buckley/v2/pkg/reviewpolicy"
 )
 
 func appendReviewVerificationTargets(sb *strings.Builder, changedFiles []string, agentsMD string) {

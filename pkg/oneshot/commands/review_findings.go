@@ -10,7 +10,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"m31labs.dev/buckley/pkg/oneshot"
+	"m31labs.dev/buckley/v2/pkg/oneshot"
 )
 
 // Severity levels for findings.

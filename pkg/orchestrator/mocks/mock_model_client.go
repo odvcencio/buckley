@@ -9,7 +9,7 @@ import (
 	reflect "reflect"
 
 	gomock "go.uber.org/mock/gomock"
-	model "m31labs.dev/buckley/pkg/model"
+	model "m31labs.dev/buckley/v2/pkg/model"
 )
 
 // MockModelClient is a mock of ModelClient interface.

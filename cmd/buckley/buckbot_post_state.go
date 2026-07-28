@@ -8,7 +8,7 @@ import (
 	"strconv"
 	"strings"
 
-	"m31labs.dev/buckley/pkg/gitwatcher"
+	"m31labs.dev/buckley/v2/pkg/gitwatcher"
 )
 
 const (

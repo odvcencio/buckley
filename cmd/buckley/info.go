@@ -9,11 +9,11 @@ import (
 	"sort"
 	"strings"
 
-	"m31labs.dev/buckley/pkg/agentspec"
-	"m31labs.dev/buckley/pkg/config"
-	"m31labs.dev/buckley/pkg/skill"
-	"m31labs.dev/buckley/pkg/tool"
-	"m31labs.dev/buckley/pkg/tool/builtin"
+	"m31labs.dev/buckley/v2/pkg/agentspec"
+	"m31labs.dev/buckley/v2/pkg/config"
+	"m31labs.dev/buckley/v2/pkg/skill"
+	"m31labs.dev/buckley/v2/pkg/tool"
+	"m31labs.dev/buckley/v2/pkg/tool/builtin"
 )
 
 type infoSnapshot struct {

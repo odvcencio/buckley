@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 
-	"m31labs.dev/buckley/pkg/tools"
+	"m31labs.dev/buckley/v2/pkg/tools"
 )
 
 // ContextSource describes a source of context for a oneshot command.

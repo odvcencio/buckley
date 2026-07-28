@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"m31labs.dev/buckley/pkg/config"
-	"m31labs.dev/buckley/pkg/telemetry"
+	"m31labs.dev/buckley/v2/pkg/config"
+	"m31labs.dev/buckley/v2/pkg/telemetry"
 )
 
 func TestFormatCodexCLIErrorPrefersStructuredStdoutDiagnostic(t *testing.T) {

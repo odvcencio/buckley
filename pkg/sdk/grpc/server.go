@@ -7,7 +7,7 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/protobuf/types/known/emptypb"
-	"m31labs.dev/buckley/pkg/sdk"
+	"m31labs.dev/buckley/v2/pkg/sdk"
 )
 
 // BuckleyServiceServer describes the RPC surface for automation clients.
