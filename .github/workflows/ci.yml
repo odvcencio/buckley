@@ -84,8 +84,7 @@ jobs:
         uses: golangci/golangci-lint-action@v9
         with:
           version: v2.12.2
-          only-new-issues: true
-          args: --timeout=5m
+          args: --timeout=5m --new-from-rev=${{ github.event.pull_request.base.sha }}
 
       - name: Run tests
         run: ./scripts/test.sh
