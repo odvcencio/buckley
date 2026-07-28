@@ -11,8 +11,8 @@ import (
 	"sync"
 	"time"
 
-	"m31labs.dev/buckley/pkg/subagent"
-	"m31labs.dev/buckley/pkg/telemetry"
+	"m31labs.dev/buckley/v2/pkg/subagent"
+	"m31labs.dev/buckley/v2/pkg/telemetry"
 )
 
 // delegationCheck performs guardrail checks before delegation

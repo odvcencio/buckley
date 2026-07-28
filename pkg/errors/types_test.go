@@ -221,7 +221,7 @@ func TestStackTrace(t *testing.T) {
 
 func TestFrame_String(t *testing.T) {
 	frame := Frame{
-		Function: "m31labs.dev/buckley/pkg/errors.TestFunc",
+		Function: "m31labs.dev/buckley/v2/pkg/errors.TestFunc",
 		File:     "/path/to/file.go",
 		Line:     42,
 	}

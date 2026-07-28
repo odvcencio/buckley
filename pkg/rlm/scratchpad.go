@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/oklog/ulid/v2"
-	"m31labs.dev/buckley/pkg/storage"
+	"m31labs.dev/buckley/v2/pkg/storage"
 )
 
 const defaultScratchpadSummaryLimit = 200

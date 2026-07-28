@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [2.0.0] - 2026-07-28
 
 ### Breaking
+- The Go module and all import paths now use the semantic-import-versioned `m31labs.dev/buckley/v2` path.
 - Removed legacy UI import-path mirrors and obsolete shell-mode helpers. External UI integrations must migrate to the canonical `pkg/ui/...` surfaces or remain on v1.6.1 while migrating.
 - Consolidated terminal behavior around the current `pkg/ui/terminal`, `pkg/ui/tui`, and retained component APIs.
 

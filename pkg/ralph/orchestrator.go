@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"golang.org/x/sync/errgroup"
-	"m31labs.dev/buckley/pkg/conversation"
+	"m31labs.dev/buckley/v2/pkg/conversation"
 )
 
 const (

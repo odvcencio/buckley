@@ -10,7 +10,7 @@ import (
 	"strings"
 
 	"m31labs.dev/arbiter"
-	"m31labs.dev/buckley/pkg/rules"
+	"m31labs.dev/buckley/v2/pkg/rules"
 )
 
 // runRulesCommand dispatches buckley rules subcommands.

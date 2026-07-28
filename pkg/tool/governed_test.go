@@ -3,8 +3,8 @@ package tool
 import (
 	"testing"
 
-	"m31labs.dev/buckley/pkg/tool/builtin"
-	"m31labs.dev/buckley/pkg/types"
+	"m31labs.dev/buckley/v2/pkg/tool/builtin"
+	"m31labs.dev/buckley/v2/pkg/types"
 )
 
 type governedTestTool struct {

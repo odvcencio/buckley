@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"m31labs.dev/buckley/pkg/gitwatcher"
+	"m31labs.dev/buckley/v2/pkg/gitwatcher"
 )
 
 func TestReadBuckbotFinalReviewStatePaginatesReviewsAndComments(t *testing.T) {

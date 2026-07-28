@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
-	"m31labs.dev/buckley/pkg/envdetect"
+	"m31labs.dev/buckley/v2/pkg/envdetect"
 )
 
 func TestGenerator_GenerateGoProject(t *testing.T) {
@@ -112,7 +112,9 @@ func TestGenerator_GenerateWithPostgres(t *testing.T) {
 	// Parse compose file
 	data, _ := os.ReadFile(outputPath)
 	var compose ComposeFile
-	yaml.Unmarshal(data, &compose)
+	if err := yaml.Unmarshal(data, &compose); err != nil {
+		t.Fatalf("unmarshal compose file: %v", err)
+	}
 
 	// Verify postgres service
 	if _, exists := compose.Services["postgres"]; !exists {
@@ -167,7 +169,9 @@ func TestGenerator_GenerateMultiLanguage(t *testing.T) {
 	// Parse compose file
 	data, _ := os.ReadFile(outputPath)
 	var compose ComposeFile
-	yaml.Unmarshal(data, &compose)
+	if err := yaml.Unmarshal(data, &compose); err != nil {
+		t.Fatalf("unmarshal compose file: %v", err)
+	}
 
 	// Verify both dev services exist
 	if _, exists := compose.Services["dev-go"]; !exists {
@@ -212,7 +216,9 @@ func TestGenerator_GenerateWithRedis(t *testing.T) {
 	// Parse compose file
 	data, _ := os.ReadFile(outputPath)
 	var compose ComposeFile
-	yaml.Unmarshal(data, &compose)
+	if err := yaml.Unmarshal(data, &compose); err != nil {
+		t.Fatalf("unmarshal compose file: %v", err)
+	}
 
 	// Verify redis service
 	redis, exists := compose.Services["redis"]
@@ -252,7 +258,9 @@ func TestGenerator_EmptyProfile(t *testing.T) {
 	// Parse compose file
 	data, _ := os.ReadFile(outputPath)
 	var compose ComposeFile
-	yaml.Unmarshal(data, &compose)
+	if err := yaml.Unmarshal(data, &compose); err != nil {
+		t.Fatalf("unmarshal compose file: %v", err)
+	}
 
 	// Should have network but no services
 	if len(compose.Services) != 0 {

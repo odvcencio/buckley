@@ -6,7 +6,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"m31labs.dev/buckley/pkg/orchestrator"
+	"m31labs.dev/buckley/v2/pkg/orchestrator"
 )
 
 // Task is a unit of work for the daemon.

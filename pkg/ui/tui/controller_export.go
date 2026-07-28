@@ -7,7 +7,7 @@ import (
 	"time"
 	"unicode"
 
-	"m31labs.dev/buckley/pkg/conversation"
+	"m31labs.dev/buckley/v2/pkg/conversation"
 )
 
 const conversationExportContentMaxBytes = 16 * 1024

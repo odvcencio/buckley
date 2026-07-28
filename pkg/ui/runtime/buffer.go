@@ -1,6 +1,6 @@
 package runtime
 
-import "m31labs.dev/buckley/pkg/ui/backend"
+import "m31labs.dev/buckley/v2/pkg/ui/backend"
 
 // Cell represents a single character cell in the buffer.
 type Cell struct {

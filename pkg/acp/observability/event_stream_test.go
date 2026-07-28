@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	"m31labs.dev/buckley/pkg/coordination/events"
+	"m31labs.dev/buckley/v2/pkg/coordination/events"
 )
 
 func TestEventStream_Subscribe(t *testing.T) {

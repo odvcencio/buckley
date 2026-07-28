@@ -4,7 +4,7 @@ import (
 	"slices"
 	"testing"
 
-	"m31labs.dev/buckley/pkg/ui/filepicker"
+	"m31labs.dev/buckley/v2/pkg/ui/filepicker"
 	"m31labs.dev/fluffyui/backend"
 	"m31labs.dev/fluffyui/runtime"
 	"m31labs.dev/fluffyui/terminal"

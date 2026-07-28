@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"m31labs.dev/buckley/pkg/types"
+	"m31labs.dev/buckley/v2/pkg/types"
 )
 
 // --- Mock evaluator ---

@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"m31labs.dev/buckley/pkg/conversation"
-	"m31labs.dev/buckley/pkg/model"
+	"m31labs.dev/buckley/v2/pkg/conversation"
+	"m31labs.dev/buckley/v2/pkg/model"
 	"m31labs.dev/fluffyui/backend/sim"
 )
 

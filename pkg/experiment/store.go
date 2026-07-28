@@ -10,7 +10,7 @@ import (
 
 	"github.com/oklog/ulid/v2"
 
-	"m31labs.dev/buckley/pkg/storage"
+	"m31labs.dev/buckley/v2/pkg/storage"
 )
 
 // ErrStoreUnavailable indicates the experiment store is not configured.

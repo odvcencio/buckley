@@ -6,7 +6,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/client-go/kubernetes/fake"
-	"m31labs.dev/buckley/pkg/config"
+	"m31labs.dev/buckley/v2/pkg/config"
 )
 
 func TestBatchCoordinatorBuildJobRendersTemplates(t *testing.T) {

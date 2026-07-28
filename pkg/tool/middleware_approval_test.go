@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"m31labs.dev/buckley/pkg/mission"
-	"m31labs.dev/buckley/pkg/storage"
-	"m31labs.dev/buckley/pkg/tool/builtin"
+	"m31labs.dev/buckley/v2/pkg/mission"
+	"m31labs.dev/buckley/v2/pkg/storage"
+	"m31labs.dev/buckley/v2/pkg/tool/builtin"
 )
 
 func TestApprovalMiddlewareWriteFile(t *testing.T) {

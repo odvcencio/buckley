@@ -3,8 +3,8 @@ package headless
 import (
 	"time"
 
-	"m31labs.dev/buckley/pkg/storage"
-	"m31labs.dev/buckley/pkg/tool/builtin"
+	"m31labs.dev/buckley/v2/pkg/storage"
+	"m31labs.dev/buckley/v2/pkg/tool/builtin"
 )
 
 type todoStoreAdapter struct {

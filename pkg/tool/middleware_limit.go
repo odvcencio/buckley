@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 
-	"m31labs.dev/buckley/pkg/tool/builtin"
+	"m31labs.dev/buckley/v2/pkg/tool/builtin"
 )
 
 // ResultSizeLimit truncates oversized tool results.

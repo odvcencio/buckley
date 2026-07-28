@@ -14,11 +14,11 @@ import (
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/peer"
-	acppb "m31labs.dev/buckley/pkg/acp/proto"
-	"m31labs.dev/buckley/pkg/config"
-	"m31labs.dev/buckley/pkg/coordination/coordinator"
-	"m31labs.dev/buckley/pkg/coordination/events"
-	"m31labs.dev/buckley/pkg/coordination/security"
+	acppb "m31labs.dev/buckley/v2/pkg/acp/proto"
+	"m31labs.dev/buckley/v2/pkg/config"
+	"m31labs.dev/buckley/v2/pkg/coordination/coordinator"
+	"m31labs.dev/buckley/v2/pkg/coordination/events"
+	"m31labs.dev/buckley/v2/pkg/coordination/security"
 )
 
 func TestUnaryAuthInterceptor(t *testing.T) {

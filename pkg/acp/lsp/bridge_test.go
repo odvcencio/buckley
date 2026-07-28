@@ -5,8 +5,8 @@ import (
 	"context"
 	"testing"
 
-	pb "m31labs.dev/buckley/pkg/acp/proto"
-	buckleyversion "m31labs.dev/buckley/pkg/version"
+	pb "m31labs.dev/buckley/v2/pkg/acp/proto"
+	buckleyversion "m31labs.dev/buckley/v2/pkg/version"
 )
 
 func TestNewLSPBridge(t *testing.T) {

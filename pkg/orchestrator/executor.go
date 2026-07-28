@@ -8,15 +8,15 @@ import (
 	"strings"
 	"time"
 
-	"m31labs.dev/buckley/pkg/artifact"
-	"m31labs.dev/buckley/pkg/config"
-	"m31labs.dev/buckley/pkg/encoding/toon"
-	"m31labs.dev/buckley/pkg/model"
-	"m31labs.dev/buckley/pkg/personality"
-	"m31labs.dev/buckley/pkg/rules"
-	"m31labs.dev/buckley/pkg/storage"
-	"m31labs.dev/buckley/pkg/telemetry"
-	"m31labs.dev/buckley/pkg/tool"
+	"m31labs.dev/buckley/v2/pkg/artifact"
+	"m31labs.dev/buckley/v2/pkg/config"
+	"m31labs.dev/buckley/v2/pkg/encoding/toon"
+	"m31labs.dev/buckley/v2/pkg/model"
+	"m31labs.dev/buckley/v2/pkg/personality"
+	"m31labs.dev/buckley/v2/pkg/rules"
+	"m31labs.dev/buckley/v2/pkg/storage"
+	"m31labs.dev/buckley/v2/pkg/telemetry"
+	"m31labs.dev/buckley/v2/pkg/tool"
 )
 
 var issuesCodec = toon.New(true)

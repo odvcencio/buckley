@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"m31labs.dev/buckley/pkg/tool/builtin"
+	"m31labs.dev/buckley/v2/pkg/tool/builtin"
 )
 
 // ExecutableTool matches the Buckley Tool interface without importing the tool package.

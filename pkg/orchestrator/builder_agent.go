@@ -11,15 +11,15 @@ import (
 	"sync"
 	"time"
 
-	"m31labs.dev/buckley/pkg/artifact"
-	"m31labs.dev/buckley/pkg/config"
-	"m31labs.dev/buckley/pkg/conversation"
-	"m31labs.dev/buckley/pkg/encoding/toon"
-	"m31labs.dev/buckley/pkg/model"
-	"m31labs.dev/buckley/pkg/paths"
-	"m31labs.dev/buckley/pkg/skill"
-	"m31labs.dev/buckley/pkg/telemetry"
-	"m31labs.dev/buckley/pkg/tool"
+	"m31labs.dev/buckley/v2/pkg/artifact"
+	"m31labs.dev/buckley/v2/pkg/config"
+	"m31labs.dev/buckley/v2/pkg/conversation"
+	"m31labs.dev/buckley/v2/pkg/encoding/toon"
+	"m31labs.dev/buckley/v2/pkg/model"
+	"m31labs.dev/buckley/v2/pkg/paths"
+	"m31labs.dev/buckley/v2/pkg/skill"
+	"m31labs.dev/buckley/v2/pkg/telemetry"
+	"m31labs.dev/buckley/v2/pkg/tool"
 )
 
 // ContextEnricher produces an optional code-intelligence section for LLM prompts.

@@ -6,8 +6,8 @@ import (
 
 	"google.golang.org/protobuf/types/known/structpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
-	"m31labs.dev/buckley/pkg/browser"
-	browserdpb "m31labs.dev/buckley/pkg/browser/adapters/servo/proto"
+	"m31labs.dev/buckley/v2/pkg/browser"
+	browserdpb "m31labs.dev/buckley/v2/pkg/browser/adapters/servo/proto"
 )
 
 func toProtoSessionConfig(cfg browser.SessionConfig) *browserdpb.SessionConfig {

@@ -1,7 +1,7 @@
 package coordinator
 
 import (
-	"m31labs.dev/buckley/pkg/coordination/capabilities"
+	"m31labs.dev/buckley/v2/pkg/coordination/capabilities"
 )
 
 // Config holds coordinator configuration

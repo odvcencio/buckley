@@ -4,9 +4,9 @@ import (
 	"strings"
 	"time"
 
-	"m31labs.dev/buckley/pkg/telemetry"
-	"m31labs.dev/buckley/pkg/tool/builtin"
-	"m31labs.dev/buckley/pkg/touch"
+	"m31labs.dev/buckley/v2/pkg/telemetry"
+	"m31labs.dev/buckley/v2/pkg/tool/builtin"
+	"m31labs.dev/buckley/v2/pkg/touch"
 )
 
 func (r *Registry) telemetryMiddleware() Middleware {

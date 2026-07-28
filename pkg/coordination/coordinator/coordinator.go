@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"m31labs.dev/buckley/pkg/coordination/events"
+	"m31labs.dev/buckley/v2/pkg/coordination/events"
 )
 
 // Coordinator manages Buckley-internal agent coordination (distinct from the Zed ACP protocol).

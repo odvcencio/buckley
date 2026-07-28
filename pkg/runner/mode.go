@@ -1,7 +1,7 @@
 package runner
 
 import (
-	"m31labs.dev/buckley/pkg/types"
+	"m31labs.dev/buckley/v2/pkg/types"
 )
 
 // RunnerMode identifies the execution mode.

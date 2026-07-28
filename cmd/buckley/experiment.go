@@ -13,12 +13,12 @@ import (
 
 	"github.com/oklog/ulid/v2"
 
-	"m31labs.dev/buckley/pkg/config"
-	projectcontext "m31labs.dev/buckley/pkg/context"
-	"m31labs.dev/buckley/pkg/experiment"
-	"m31labs.dev/buckley/pkg/notify"
-	"m31labs.dev/buckley/pkg/storage"
-	"m31labs.dev/buckley/pkg/worktree"
+	"m31labs.dev/buckley/v2/pkg/config"
+	projectcontext "m31labs.dev/buckley/v2/pkg/context"
+	"m31labs.dev/buckley/v2/pkg/experiment"
+	"m31labs.dev/buckley/v2/pkg/notify"
+	"m31labs.dev/buckley/v2/pkg/storage"
+	"m31labs.dev/buckley/v2/pkg/worktree"
 )
 
 type stringSliceFlag []string

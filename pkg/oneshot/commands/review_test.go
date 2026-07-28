@@ -9,10 +9,10 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
-	"m31labs.dev/buckley/pkg/diffsignal"
-	"m31labs.dev/buckley/pkg/model"
-	"m31labs.dev/buckley/pkg/oneshot"
-	"m31labs.dev/buckley/pkg/rlm"
+	"m31labs.dev/buckley/v2/pkg/diffsignal"
+	"m31labs.dev/buckley/v2/pkg/model"
+	"m31labs.dev/buckley/v2/pkg/oneshot"
+	"m31labs.dev/buckley/v2/pkg/rlm"
 )
 
 func TestDefaultBranchContextOptions(t *testing.T) {
@@ -492,7 +492,7 @@ func TestApprovedAPIReviewRequiresSuccessfulVerificationToolEvidence(t *testing.
 		},
 		{
 			Command:          `/bin/bash -lc 'go test ./pkg/oneshot/commands'`,
-			AggregatedOutput: "ok  m31labs.dev/buckley/pkg/oneshot/commands",
+			AggregatedOutput: "ok  m31labs.dev/buckley/v2/pkg/oneshot/commands",
 			ExitCode:         &exitZero,
 			Status:           "completed",
 			WorkingDirectory: "/snapshot",

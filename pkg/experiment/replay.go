@@ -8,7 +8,7 @@ import (
 
 	"github.com/oklog/ulid/v2"
 
-	"m31labs.dev/buckley/pkg/storage"
+	"m31labs.dev/buckley/v2/pkg/storage"
 )
 
 // ReplayConfig specifies how to replay a session.

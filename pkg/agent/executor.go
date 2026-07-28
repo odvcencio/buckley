@@ -7,10 +7,10 @@ import (
 	"strings"
 	"time"
 
-	"m31labs.dev/buckley/pkg/bus"
-	"m31labs.dev/buckley/pkg/model"
-	"m31labs.dev/buckley/pkg/tool"
-	"m31labs.dev/buckley/pkg/toolrunner"
+	"m31labs.dev/buckley/v2/pkg/bus"
+	"m31labs.dev/buckley/v2/pkg/model"
+	"m31labs.dev/buckley/v2/pkg/tool"
+	"m31labs.dev/buckley/v2/pkg/toolrunner"
 )
 
 // TaskResult represents the outcome of a task execution.

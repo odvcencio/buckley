@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"m31labs.dev/buckley/pkg/diffsignal"
+	"m31labs.dev/buckley/v2/pkg/diffsignal"
 )
 
 func shardsOfSize(highSignalBytes int) diffsignal.ShardResult {

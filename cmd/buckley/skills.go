@@ -11,7 +11,7 @@ import (
 	"strings"
 	"unicode"
 
-	"m31labs.dev/buckley/pkg/skill"
+	"m31labs.dev/buckley/v2/pkg/skill"
 )
 
 type skillsInitResult struct {

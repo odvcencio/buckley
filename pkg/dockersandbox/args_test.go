@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"m31labs.dev/buckley/pkg/config"
+	"m31labs.dev/buckley/v2/pkg/config"
 )
 
 func TestBuildCreateArgs_Defaults(t *testing.T) {

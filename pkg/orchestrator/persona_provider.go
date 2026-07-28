@@ -6,8 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"m31labs.dev/buckley/pkg/config"
-	"m31labs.dev/buckley/pkg/personality"
+	"m31labs.dev/buckley/v2/pkg/config"
+	"m31labs.dev/buckley/v2/pkg/personality"
 )
 
 func BuildPersonaProvider(cfg *config.Config, projectRoot string) *personality.PersonaProvider {

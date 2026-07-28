@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"m31labs.dev/buckley/pkg/model"
+	"m31labs.dev/buckley/v2/pkg/model"
 )
 
 func TestStagnationNudge_TriggersOnThirdIdenticalExecution(t *testing.T) {

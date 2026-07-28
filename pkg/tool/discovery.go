@@ -5,7 +5,7 @@ import (
 	"strings"
 	"unicode"
 
-	"m31labs.dev/buckley/pkg/tool/builtin"
+	"m31labs.dev/buckley/v2/pkg/tool/builtin"
 )
 
 // DefaultDiscoveryTools is the small, general-purpose tool prefix sent on

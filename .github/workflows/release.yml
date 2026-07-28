@@ -65,8 +65,8 @@ jobs:
             exit 1
           fi
           test "$(git describe --tags --exact-match)" = "$RELEASE_TAG"
-          test "$(go list -m)" = "m31labs.dev/buckley"
-          curl --fail --silent --show-error 'https://m31labs.dev/buckley?go-get=1' \
+          test "$(go list -m)" = "m31labs.dev/buckley/v2"
+          curl --fail --silent --show-error 'https://m31labs.dev/buckley/v2?go-get=1' \
             | grep -F 'm31labs.dev/buckley git https://github.com/odvcencio/buckley'
           ./scripts/check-release.sh "${RELEASE_TAG}"
 
@@ -164,7 +164,7 @@ jobs:
         run: |
           set -euo pipefail
           for attempt in 1 2 3 4 5; do
-            if go install "m31labs.dev/buckley/cmd/buckley@${RELEASE_TAG}"; then
+            if go install "m31labs.dev/buckley/v2/cmd/buckley@${RELEASE_TAG}"; then
               buckley version
               exit 0
             fi

@@ -1,6 +1,6 @@
 # Buckley
 
-[![Go Reference](https://pkg.go.dev/badge/m31labs.dev/buckley.svg)](https://pkg.go.dev/m31labs.dev/buckley)
+[![Go Reference](https://pkg.go.dev/badge/m31labs.dev/buckley/v2.svg)](https://pkg.go.dev/m31labs.dev/buckley/v2)
 [![CI](https://github.com/odvcencio/buckley/actions/workflows/ci.yml/badge.svg)](https://github.com/odvcencio/buckley/actions/workflows/ci.yml)
 [![Release](https://github.com/odvcencio/buckley/actions/workflows/release.yml/badge.svg)](https://github.com/odvcencio/buckley/actions/workflows/release.yml)
 
@@ -23,7 +23,7 @@ Agents working with Buckley should use the [using-buckley](https://github.com/od
 ## Quick Start
 
 ```bash
-go install m31labs.dev/buckley/cmd/buckley@latest
+go install m31labs.dev/buckley/v2/cmd/buckley@latest
 export OPENROUTER_API_KEY="your-key"
 buckley
 ```

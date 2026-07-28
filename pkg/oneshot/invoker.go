@@ -7,10 +7,10 @@ import (
 	"strings"
 	"time"
 
-	"m31labs.dev/buckley/pkg/conversation"
-	"m31labs.dev/buckley/pkg/model"
-	"m31labs.dev/buckley/pkg/tools"
-	"m31labs.dev/buckley/pkg/transparency"
+	"m31labs.dev/buckley/v2/pkg/conversation"
+	"m31labs.dev/buckley/v2/pkg/model"
+	"m31labs.dev/buckley/v2/pkg/tools"
+	"m31labs.dev/buckley/v2/pkg/transparency"
 )
 
 // ModelClient is the interface for making model requests.

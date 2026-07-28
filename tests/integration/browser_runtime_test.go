@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"m31labs.dev/buckley/pkg/browser"
-	"m31labs.dev/buckley/pkg/browser/adapters/servo"
+	"m31labs.dev/buckley/v2/pkg/browser"
+	"m31labs.dev/buckley/v2/pkg/browser/adapters/servo"
 )
 
 // TestBrowserRuntimeLifecycle tests the full browser runtime lifecycle:

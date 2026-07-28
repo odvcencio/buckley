@@ -6,9 +6,9 @@ import (
 	"net/http"
 	"strings"
 
-	"m31labs.dev/buckley/pkg/config"
-	"m31labs.dev/buckley/pkg/gitwatcher"
-	"m31labs.dev/buckley/pkg/regression"
+	"m31labs.dev/buckley/v2/pkg/config"
+	"m31labs.dev/buckley/v2/pkg/gitwatcher"
+	"m31labs.dev/buckley/v2/pkg/regression"
 )
 
 var gitWebhookLoadConfigFn = config.Load

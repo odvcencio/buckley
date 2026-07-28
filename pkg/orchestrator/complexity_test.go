@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"m31labs.dev/buckley/pkg/rules"
+	"m31labs.dev/buckley/v2/pkg/rules"
 )
 
 func TestComplexityDetector_Analyze_SimpleTask(t *testing.T) {

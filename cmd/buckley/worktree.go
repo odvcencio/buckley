@@ -6,8 +6,8 @@ import (
 	"os"
 	"strings"
 
-	"m31labs.dev/buckley/pkg/config"
-	"m31labs.dev/buckley/pkg/worktree"
+	"m31labs.dev/buckley/v2/pkg/config"
+	"m31labs.dev/buckley/v2/pkg/worktree"
 )
 
 func runWorktreeCommand(args []string) error {

@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"strings"
 
-	"m31labs.dev/buckley/pkg/commitmsg"
-	"m31labs.dev/buckley/pkg/oneshot"
-	"m31labs.dev/buckley/pkg/tools"
+	"m31labs.dev/buckley/v2/pkg/commitmsg"
+	"m31labs.dev/buckley/v2/pkg/oneshot"
+	"m31labs.dev/buckley/v2/pkg/tools"
 )
 
 // PRDefinition implements oneshot.Definition for pull request generation.
