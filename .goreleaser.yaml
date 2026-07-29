@@ -104,7 +104,7 @@ dockers_v2:
     ids:
       - buckley
     images:
-      - harbor.draco.quest/buckley
+      - harbor.draco.quest/library/buckley
     tags:
       - "{{ .Version }}"
       - "{{ if and (not .IsNightly) (eq .Prerelease \"\") }}latest{{ end }}"
@@ -124,7 +124,7 @@ dockers_v2:
     ids:
       - buckley
     images:
-      - harbor.draco.quest/buckley-worker
+      - harbor.draco.quest/library/buckley-worker
     tags:
       - "{{ .Version }}"
       - "{{ if and (not .IsNightly) (eq .Prerelease \"\") }}latest{{ end }}"
