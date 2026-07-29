@@ -62,6 +62,7 @@ jobs:
           args: release --clean --skip=docker
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GORELEASER_DISABLE_SCM: "false"
 
       - name: Verify module installation
         env:
