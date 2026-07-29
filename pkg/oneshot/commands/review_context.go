@@ -158,9 +158,10 @@ func AssembleBranchContext(opts BranchContextOptions) (*BranchContext, *transpar
 	}
 	audit.Add("review scope", reviewEstimateTokens(ctx.Scope))
 
-	ctx.BaseBranch = opts.BaseBranch
-	if ctx.BaseBranch == "" && ctx.Scope != ReviewScopeChanges {
-		ctx.BaseBranch = detectBaseBranch(ctx.RepoRoot)
+	requestedBaseBranch := strings.TrimSpace(opts.BaseBranch)
+	ctx.BaseBranch = requestedBaseBranch
+	if ctx.Scope != ReviewScopeChanges {
+		ctx.BaseBranch = resolveBranchReviewBase(ctx.RepoRoot, ctx.BaseBranch)
 	}
 	if ctx.Scope == ReviewScopeChanges {
 		ctx.BaseBranch = "(local changes)"
@@ -172,7 +173,11 @@ func AssembleBranchContext(opts BranchContextOptions) (*BranchContext, *transpar
 		}
 	}
 	if ctx.BaseBranch != "" {
-		audit.Add("base branch", reviewEstimateTokens(ctx.BaseBranch))
+		auditName := "base branch"
+		if requestedBaseBranch != "" && ctx.BaseBranch != requestedBaseBranch {
+			auditName = fmt.Sprintf("base branch (%s -> %s; upstream ahead)", requestedBaseBranch, ctx.BaseBranch)
+		}
+		audit.Add(auditName, reviewEstimateTokens(ctx.BaseBranch))
 	}
 	if ctx.BaseCommit != "" {
 		audit.Add("base commit", reviewEstimateTokens(ctx.BaseCommit))
@@ -601,6 +606,47 @@ func detectBaseBranch(root string) string {
 		return "master"
 	}
 	return "main"
+}
+
+// resolveBranchReviewBase protects explicit short branch names from stale local
+// refs. When the corresponding remote-tracking branch is strictly ahead,
+// review the ref that represents the current integration base. Fully-qualified
+// refs and immutable revisions remain exact escape hatches.
+func resolveBranchReviewBase(root, requested string) string {
+	requested = strings.TrimSpace(requested)
+	if requested == "" {
+		return detectBaseBranch(root)
+	}
+
+	localRef := "refs/heads/" + requested
+	localCommit, err := resolveReviewCommit(root, localRef)
+	if err != nil {
+		return requested
+	}
+
+	upstream, err := reviewGitOutputAt(
+		root,
+		"for-each-ref",
+		"--format=%(upstream:short)",
+		"--count=1",
+		localRef,
+	)
+	if err != nil {
+		return requested
+	}
+	upstream = strings.TrimSpace(upstream)
+	if upstream == "" {
+		upstream = "origin/" + requested
+	}
+
+	upstreamCommit, err := resolveReviewCommit(root, upstream)
+	if err != nil || upstreamCommit == localCommit {
+		return requested
+	}
+	if _, err := reviewGitOutputAt(root, "merge-base", "--is-ancestor", localCommit, upstreamCommit); err != nil {
+		return requested
+	}
+	return upstream
 }
 
 func parseNameStatus(output string) []FileChange {
