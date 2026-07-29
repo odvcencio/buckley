@@ -11,6 +11,7 @@ import (
 	"m31labs.dev/buckley/v2/pkg/config"
 	"m31labs.dev/buckley/v2/pkg/diffsignal"
 	"m31labs.dev/buckley/v2/pkg/gitwatcher"
+	knowledgehyphae "m31labs.dev/buckley/v2/pkg/knowledge/hyphae"
 	"m31labs.dev/buckley/v2/pkg/model"
 	"m31labs.dev/buckley/v2/pkg/oneshot"
 	"m31labs.dev/buckley/v2/pkg/oneshot/commands"
@@ -30,21 +31,22 @@ const (
 )
 
 type reviewPRCommandOptions struct {
-	verbose         bool
-	showCost        bool
-	post            bool
-	model           string
-	criticModel     string
-	timeout         time.Duration
-	outputFile      string
-	prRef           string
-	budgetUSD       float64
-	maxTurns        int
-	maxDiff         int
-	maxRetries      int
-	forceSinglePass bool
-	forceShards     int
-	concurrency     int
+	verbose              bool
+	showCost             bool
+	post                 bool
+	model                string
+	criticModel          string
+	timeout              time.Duration
+	outputFile           string
+	prRef                string
+	budgetUSD            float64
+	maxTurns             int
+	maxDiff              int
+	maxSupportingContext int
+	maxRetries           int
+	forceSinglePass      bool
+	forceShards          int
+	concurrency          int
 }
 
 func parseReviewPRCommandOptions(args []string) (reviewPRCommandOptions, error) {
@@ -59,6 +61,7 @@ func parseReviewPRCommandOptions(args []string) (reviewPRCommandOptions, error) 
 	budgetUSD := fs.Float64("budget", 0, "maximum model spend in USD (0 = Buckbot default)")
 	maxTurns := fs.Int("max-turns", 0, "hard model turn limit per review pass (0 = adaptive)")
 	maxDiff := fs.Int("max-diff-bytes", 0, "maximum prioritized diff bytes (0 = Buckbot default)")
+	maxSupportingContext := fs.Int("max-context-tokens", 0, "maximum supporting-context tokens; diff and evidence IDs are protected (0 = Buckbot default)")
 	maxRetries := fs.Int("max-validation-attempts", 0, "maximum schema-validation attempts (0 = Buckbot default)")
 	singlePass := fs.Bool("single-pass", false, "force one review pass even if the diff would otherwise fan out into shards")
 	shards := fs.Int("shards", 0, "force fan-out into exactly this many shards, for testing (0 = derive from content)")
@@ -72,21 +75,22 @@ func parseReviewPRCommandOptions(args []string) (reviewPRCommandOptions, error) 
 		return reviewPRCommandOptions{}, reviewPRUsageError()
 	}
 	return reviewPRCommandOptions{
-		verbose:         *verbose,
-		showCost:        *showCost,
-		post:            *post,
-		model:           *modelFlag,
-		criticModel:     *criticModel,
-		timeout:         *timeout,
-		outputFile:      *outputFile,
-		prRef:           fs.Arg(0),
-		budgetUSD:       *budgetUSD,
-		maxTurns:        *maxTurns,
-		maxDiff:         *maxDiff,
-		maxRetries:      *maxRetries,
-		forceSinglePass: *singlePass,
-		forceShards:     *shards,
-		concurrency:     *concurrency,
+		verbose:              *verbose,
+		showCost:             *showCost,
+		post:                 *post,
+		model:                *modelFlag,
+		criticModel:          *criticModel,
+		timeout:              *timeout,
+		outputFile:           *outputFile,
+		prRef:                fs.Arg(0),
+		budgetUSD:            *budgetUSD,
+		maxTurns:             *maxTurns,
+		maxDiff:              *maxDiff,
+		maxSupportingContext: *maxSupportingContext,
+		maxRetries:           *maxRetries,
+		forceSinglePass:      *singlePass,
+		forceShards:          *shards,
+		concurrency:          *concurrency,
 	}, nil
 }
 
@@ -130,7 +134,7 @@ func reviewPRFlagName(arg string) (string, bool) {
 
 func reviewPRFlagTakesValue(name string) bool {
 	switch name {
-	case "model", "critic-model", "timeout", "output", "budget", "max-turns", "max-diff-bytes", "max-validation-attempts",
+	case "model", "critic-model", "timeout", "output", "budget", "max-turns", "max-diff-bytes", "max-context-tokens", "max-validation-attempts",
 		"shards", "concurrency":
 		return true
 	default:
@@ -186,13 +190,14 @@ func runReviewPRCommand(args []string) error {
 	}
 
 	policy := runtime.policy.withOverrides(automatedReviewOptions{
-		maxIterations:   opts.maxTurns,
-		maxRetries:      opts.maxRetries,
-		maxDiffBytes:    opts.maxDiff,
-		maxCostUSD:      opts.budgetUSD,
-		forceSinglePass: opts.forceSinglePass,
-		forceShards:     opts.forceShards,
-		concurrency:     opts.concurrency,
+		maxIterations:              opts.maxTurns,
+		maxRetries:                 opts.maxRetries,
+		maxDiffBytes:               opts.maxDiff,
+		maxSupportingContextTokens: opts.maxSupportingContext,
+		maxCostUSD:                 opts.budgetUSD,
+		forceSinglePass:            opts.forceSinglePass,
+		forceShards:                opts.forceShards,
+		concurrency:                opts.concurrency,
 	})
 	if opts.post {
 		policy.contextReady = func(ctx context.Context, prInfo *commands.PRInfo, plan automatedReviewOptions) error {
@@ -308,30 +313,31 @@ func runPRReviewWithIterationLimit(ctx context.Context, prRef string, framework 
 const defaultShardConcurrency = 4
 
 type automatedReviewOptions struct {
-	maxIterations        int
-	maxToolCalls         int
-	maxVerificationCalls int
-	maxRetries           int
-	maxDiffBytes         int
-	maxCostUSD           float64
-	criticReserveUSD     float64
-	approvalCritic       bool
-	verificationTimeout  time.Duration
-	explorationTimeout   time.Duration
-	synthesisLead        time.Duration
-	criticReserve        time.Duration
-	criticMaxIterations  int
-	criticMaxToolCalls   int
-	criticExploration    time.Duration
-	criticSynthesisLead  time.Duration
-	sizeClass            string
-	modelID              string
-	reasoningEffort      string
-	reasoningMaxTokens   int
-	adaptiveCodexModel   bool
-	adaptiveReasoning    bool
-	engine               *rules.Engine
-	contextReady         func(context.Context, *commands.PRInfo, automatedReviewOptions) error
+	maxIterations              int
+	maxToolCalls               int
+	maxVerificationCalls       int
+	maxRetries                 int
+	maxDiffBytes               int
+	maxSupportingContextTokens int
+	maxCostUSD                 float64
+	criticReserveUSD           float64
+	approvalCritic             bool
+	verificationTimeout        time.Duration
+	explorationTimeout         time.Duration
+	synthesisLead              time.Duration
+	criticReserve              time.Duration
+	criticMaxIterations        int
+	criticMaxToolCalls         int
+	criticExploration          time.Duration
+	criticSynthesisLead        time.Duration
+	sizeClass                  string
+	modelID                    string
+	reasoningEffort            string
+	reasoningMaxTokens         int
+	adaptiveCodexModel         bool
+	adaptiveReasoning          bool
+	engine                     *rules.Engine
+	contextReady               func(context.Context, *commands.PRInfo, automatedReviewOptions) error
 
 	// forceSinglePass and forceShards are CLI testing knobs (see -single-pass
 	// and -shards on review-pr). forceShards > 0 targets that many shards by
@@ -397,13 +403,14 @@ func defaultAutomatedReviewOptions(cfg *config.Config) automatedReviewOptions {
 		return automatedReviewOptions{}
 	}
 	opts := automatedReviewOptions{
-		maxIterations:     cfg.Buckbot.MaxReviewIterations,
-		maxRetries:        cfg.Buckbot.MaxValidationAttempts,
-		maxDiffBytes:      cfg.Buckbot.MaxDiffBytes,
-		maxCostUSD:        cfg.Buckbot.PerReviewBudgetUSD,
-		reasoningEffort:   resolveConfiguredReviewReasoning(cfg),
-		adaptiveReasoning: reviewReasoningIsAdaptive(cfg, reviewReasoningOverride()),
-		postingGate:       buckbotPostingGateConfig(cfg.Buckbot),
+		maxIterations:              cfg.Buckbot.MaxReviewIterations,
+		maxRetries:                 cfg.Buckbot.MaxValidationAttempts,
+		maxDiffBytes:               cfg.Buckbot.MaxDiffBytes,
+		maxSupportingContextTokens: cfg.Buckbot.MaxSupportingContextTokens,
+		maxCostUSD:                 cfg.Buckbot.PerReviewBudgetUSD,
+		reasoningEffort:            resolveConfiguredReviewReasoning(cfg),
+		adaptiveReasoning:          reviewReasoningIsAdaptive(cfg, reviewReasoningOverride()),
+		postingGate:                buckbotPostingGateConfig(cfg.Buckbot),
 	}
 	if strings.TrimSpace(cfg.Buckbot.CriticModel) != "" {
 		opts.criticReserveUSD = cfg.Buckbot.PerReviewBudgetUSD * 0.12
@@ -421,6 +428,9 @@ func (defaults automatedReviewOptions) withOverrides(overrides automatedReviewOp
 	}
 	if overrides.maxDiffBytes > 0 {
 		defaults.maxDiffBytes = overrides.maxDiffBytes
+	}
+	if overrides.maxSupportingContextTokens > 0 {
+		defaults.maxSupportingContextTokens = overrides.maxSupportingContextTokens
 	}
 	if overrides.maxCostUSD > 0 {
 		defaults.maxCostUSD = overrides.maxCostUSD
@@ -443,6 +453,14 @@ func (defaults automatedReviewOptions) withOverrides(overrides automatedReviewOp
 	return defaults
 }
 
+func reviewContextProvidersForModel(modelID string) []commands.PRContextProvider {
+	providers := []commands.PRContextProvider{knowledgehyphae.NewReviewContextProvider()}
+	if isQwen37PlusReviewModel(modelID) {
+		providers = append(providers, commands.NewWorkflowRiskContextProvider())
+	}
+	return providers
+}
+
 // runPRReviewWithOptions reviews prRef. willPost tells the posting-size gate
 // whether this run's result will be written back to the pull request: a
 // local/dry-run review (willPost=false) is always unrestricted, at any PR
@@ -456,8 +474,12 @@ func runPRReviewWithOptions(ctx context.Context, prRef string, framework *onesho
 
 	contextOpts := commands.DefaultPRContextOptions()
 	contextOpts.Context = ctx
+	contextOpts.Providers = reviewContextProvidersForModel(opts.modelID)
 	if opts.maxDiffBytes > 0 {
 		contextOpts.MaxDiffBytes = opts.maxDiffBytes
+	}
+	if opts.maxSupportingContextTokens > 0 {
+		contextOpts.MaxSupportingContextTokens = opts.maxSupportingContextTokens
 	}
 	prCtx, audit, err := commands.AssemblePRContextWithOptions(prRef, contextOpts)
 	if err != nil {
@@ -610,7 +632,7 @@ func runPRReviewSharded(
 		concurrency = defaultShardConcurrency
 	}
 
-	projection := commands.ProjectShardCost(shards, opts.costPerMillionTokens)
+	projection := commands.ProjectShardCostWithContext(shards, prCtx, opts.costPerMillionTokens)
 	if !quietMode {
 		termOut.Dim("PR fan-out: %d shards, %d high-signal bytes across %d files, concurrency %d, ~%d estimated tokens",
 			projection.ShardCount, projection.HighSignalBytes, projection.HighSignalFiles, concurrency, projection.EstimatedTotalTokens)

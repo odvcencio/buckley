@@ -77,11 +77,15 @@ type PRContext struct {
 	CanopyIndexScope        string
 	CanopyIndexScopeSource  string
 	CanopyBlastRadius       int
+	ProviderEvidence        []PRContextEvidence
+	ContextCuration         PRContextCuration
 	ContextStatus           []PRContextStatus
 	target                  prReference
 	localRepoRoot           string
 	localHeadMatches        bool
 	localWorktreeClean      bool
+	promptContext           *PRContext
+	feedbackIDCache         *prFeedbackIDSet
 }
 
 const (
@@ -136,16 +140,21 @@ type prContextDependencies struct {
 }
 
 // PRContextOptions controls automated-review context limits. Interactive
-// reviews use the larger default; callers with a strict cost envelope can
-// reduce only the diff while retaining metadata, feedback, and CI evidence.
+// reviews use the larger defaults; callers can independently budget the diff
+// and supporting prose while retaining metadata, feedback IDs, and CI evidence.
 type PRContextOptions struct {
-	MaxDiffBytes int
-	Context      context.Context
+	MaxDiffBytes               int
+	MaxSupportingContextTokens int
+	Context                    context.Context
+	Providers                  []PRContextProvider
 }
 
 // DefaultPRContextOptions returns the full interactive review context budget.
 func DefaultPRContextOptions() PRContextOptions {
-	return PRContextOptions{MaxDiffBytes: diffsignal.ReviewDiffBudget}
+	return PRContextOptions{
+		MaxDiffBytes:               diffsignal.ReviewDiffBudget,
+		MaxSupportingContextTokens: DefaultPRSupportingContextTokens,
+	}
 }
 
 type prDiff struct {
@@ -284,6 +293,9 @@ func assemblePRContextWithOptions(prRef string, deps prContextDependencies, opts
 	if opts.MaxDiffBytes <= 0 {
 		opts.MaxDiffBytes = diffsignal.ReviewDiffBudget
 	}
+	if opts.MaxSupportingContextTokens <= 0 {
+		opts.MaxSupportingContextTokens = DefaultPRSupportingContextTokens
+	}
 
 	target, err := parsePRRef(prRef)
 	if err != nil {
@@ -300,7 +312,7 @@ func assemblePRContextWithOptions(prRef string, deps prContextDependencies, opts
 	target.Host = firstPRString(target.Host, pr.Host)
 	target.Repository = firstPRString(target.Repository, pr.Repository)
 	prCtx.target = target
-	metadata := pr.Title + pr.Body + pr.Host + pr.Repository + pr.HeadSHA + pr.BaseSHA + pr.ReviewDecision
+	metadata := pr.Title + pr.Host + pr.Repository + pr.HeadSHA + pr.BaseSHA + pr.ReviewDecision
 	audit.Add("PR metadata", reviewEstimateTokens(metadata))
 	prCtx.addStatus("PR metadata", "complete", "immutable repository and base/head revisions captured", false)
 
@@ -344,7 +356,7 @@ func assemblePRContextWithOptions(prRef string, deps prContextDependencies, opts
 	if err == nil {
 		viewerLogin = commentResult.ViewerLogin
 		prCtx.Comments = commentResult.Comments
-		audit.Add("top-level comments", reviewEstimateTokens(prCommentBodies(commentResult.Comments)))
+		audit.Add("top-level comments", 0)
 		prCtx.addStatus("Top-level comments", "complete", fmt.Sprintf("%d comments", len(commentResult.Comments)), false)
 	} else {
 		recordPRContextFailure(prCtx, audit, "Top-level comments", err)
@@ -354,7 +366,7 @@ func assemblePRContextWithOptions(prRef string, deps prContextDependencies, opts
 	if err == nil {
 		reviews = filterOwnBuckbotLifecycleReviews(reviews, viewerLogin)
 		prCtx.Reviews = reviews
-		audit.Add("submitted reviews", reviewEstimateTokens(prReviewBodies(reviews)))
+		audit.Add("submitted reviews", 0)
 		prCtx.addStatus("Submitted reviews", "complete", fmt.Sprintf("%d reviews", len(reviews)), false)
 	} else {
 		recordPRContextFailure(prCtx, audit, "Submitted reviews", err)
@@ -377,9 +389,9 @@ func assemblePRContextWithOptions(prRef string, deps prContextDependencies, opts
 		if inline.Truncated {
 			status = "truncated"
 			detail += "; additional inline review context was not fetched"
-			audit.AddTruncated(name, reviewEstimateTokens(prCommentBodies(inline.Comments)), reviewEstimateTokens(prCommentBodies(inline.Comments))+1)
+			audit.AddTruncated(name, 0, 1)
 		} else {
-			audit.Add(name, reviewEstimateTokens(prCommentBodies(inline.Comments)))
+			audit.Add(name, 0)
 		}
 		prCtx.addStatus("Inline review threads", status, detail, inline.Truncated)
 	} else {
@@ -417,14 +429,23 @@ func assemblePRContextWithOptions(prRef string, deps prContextDependencies, opts
 
 	assemblePRAgentsContext(prCtx, audit, deps)
 	assemblePRCanopyContext(opts.Context, prCtx, audit, deps.collectCanopy)
+	collectPRContextProviderEvidence(opts.Context, prCtx, opts.Providers)
 	revalidateAssembledPRMetadata(prCtx, audit, deps.run)
 	audit.Add("context completeness", reviewEstimateTokens(formatPRContextStatus(prCtx.ContextStatus)))
+	promptCtx, curation := CuratePRContext(prCtx, opts.MaxSupportingContextTokens)
+	prCtx.ContextCuration = curation
+	prCtx.promptContext = promptCtx
+	recordPRContextCuration(audit, curation)
 
 	return prCtx, audit, nil
 }
 
 // BuildPRPrompt builds the user prompt for PR review.
 func BuildPRPrompt(ctx *PRContext) string {
+	ctx = promptPRContext(ctx)
+	if ctx == nil || ctx.PR == nil {
+		return ""
+	}
 	var sb strings.Builder
 	feedbackIDs := ctx.feedbackIDs()
 
@@ -463,6 +484,8 @@ func BuildPRPrompt(ctx *PRContext) string {
 		}
 		sb.WriteString("\n")
 	}
+
+	appendPRContextCurationNotice(&sb, ctx.ContextCuration)
 
 	if ctx.PR.Body != "" {
 		sb.WriteString("## PR Description\n\n")
@@ -569,6 +592,8 @@ func BuildPRPrompt(ctx *PRContext) string {
 		sb.WriteString(ctx.CanopyReview)
 		sb.WriteString("\n```\n\n")
 	}
+
+	appendPRContextProviderEvidence(&sb, ctx.ProviderEvidence)
 
 	sb.WriteString("## Diff\n\n")
 	sb.WriteString("```diff\n")
@@ -2537,11 +2562,11 @@ func assemblePRAgentsContext(ctx *PRContext, audit *transparency.ContextAudit, d
 		recordPRContextFailure(ctx, audit, "Root AGENTS.md", err)
 	case truncated:
 		ctx.AgentsMD = content
-		audit.AddTruncated("AGENTS.md", reviewEstimateTokens(content), reviewEstimateTokens(content)+1)
+		audit.AddTruncated("AGENTS.md", 0, reviewEstimateTokens(content)+1)
 		ctx.addStatus("Root AGENTS.md", "truncated", fmt.Sprintf("limited to %d bytes", agentsLimit), true)
 	default:
 		ctx.AgentsMD = content
-		audit.Add("AGENTS.md", reviewEstimateTokens(content))
+		audit.Add("AGENTS.md", 0)
 		ctx.addStatus("Root AGENTS.md", "complete", fmt.Sprintf("%d bytes", len(content)), false)
 	}
 	appendNestedPRAgentsContext(ctx, audit, deps.run, root, agentsLimit)
@@ -2579,7 +2604,6 @@ func assemblePRCanopyContext(
 	ctx.CanopyBlastRadius = evidence.BlastRadius
 	ctx.addStatus("Canopy structural review", "complete",
 		fmt.Sprintf("measured runtime %s; index scope %s", formatCanopyRuntime(evidence.Runtime), evidence.IndexScope), false)
-	audit.Add("Canopy structural review", reviewEstimateTokens(evidence.Output))
 }
 
 func formatCanopyRuntime(runtime time.Duration) string {
@@ -2624,7 +2648,7 @@ func appendNestedPRAgentsContext(ctx *PRContext, audit *transparency.ContextAudi
 		ctx.AgentsMD += "### " + candidate + "\n\n" + content
 		if truncated {
 			ctx.addStatus("Nested AGENTS.md ("+candidate+")", "truncated", fmt.Sprintf("limited to %d bytes", limit), true)
-			audit.AddTruncated(candidate, reviewEstimateTokens(content), reviewEstimateTokens(content)+1)
+			audit.AddTruncated(candidate, 0, reviewEstimateTokens(content)+1)
 		}
 	}
 	if applicable == 0 {
@@ -2632,7 +2656,6 @@ func appendNestedPRAgentsContext(ctx *PRContext, audit *transparency.ContextAudi
 		return
 	}
 	ctx.addStatus("Nested AGENTS.md", "complete", fmt.Sprintf("%d applicable instruction files", applicable), false)
-	audit.Add("nested AGENTS.md", reviewEstimateTokens(ctx.AgentsMD))
 }
 
 func nestedPRAgentsCandidates(files []string) []string {
@@ -2701,7 +2724,7 @@ func (ctx *PRContext) HasIncompleteContext() bool {
 	}
 	for _, status := range ctx.ContextStatus {
 		switch status.Status {
-		case "complete", "missing":
+		case "complete", "missing", "advisory unavailable":
 			continue
 		default:
 			return true
@@ -2739,6 +2762,9 @@ func (ctx *PRContext) feedbackIDs() prFeedbackIDSet {
 	var result prFeedbackIDSet
 	if ctx == nil {
 		return result
+	}
+	if ctx.feedbackIDCache != nil {
+		return *ctx.feedbackIDCache
 	}
 
 	used := make(map[string]int, len(ctx.Comments)+len(ctx.Reviews)+len(ctx.InlineComments))

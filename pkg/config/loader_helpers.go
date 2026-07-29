@@ -97,6 +97,9 @@ func mergeBuckbotConfig(base, override *Config, raw map[string]any) {
 	if boolFieldSet(raw, "buckbot", "max_diff_bytes") {
 		base.Buckbot.MaxDiffBytes = override.Buckbot.MaxDiffBytes
 	}
+	if boolFieldSet(raw, "buckbot", "max_supporting_context_tokens") {
+		base.Buckbot.MaxSupportingContextTokens = override.Buckbot.MaxSupportingContextTokens
+	}
 	if boolFieldSet(raw, "buckbot", "posting_core_associations") {
 		base.Buckbot.PostingCoreAssociations = override.Buckbot.PostingCoreAssociations
 	}

@@ -164,6 +164,68 @@ func TestReviewExecutionPlanBoundsDefaultQwenTurns(t *testing.T) {
 	}
 }
 
+func TestReviewExecutionPlanAdaptsQwenReasoningBudget(t *testing.T) {
+	tests := []struct {
+		size string
+		want int
+	}{
+		{size: "focused", want: qwenFocusedReasoning},
+		{size: "standard", want: qwenStandardReasoning},
+		{size: "broad", want: qwenBroadReasoning},
+		{size: "project", want: qwenBroadReasoning},
+	}
+	for _, tt := range tests {
+		t.Run(tt.size, func(t *testing.T) {
+			got := automatedReviewOptions{
+				modelID:           "qwen/qwen3.7-plus",
+				adaptiveReasoning: true,
+			}.withExecutionPlan(reviewExecutionPlan{
+				sizeClass:          tt.size,
+				reasoningEffort:    "medium",
+				reasoningMaxTokens: 1024,
+			})
+			if got.reasoningMaxTokens != tt.want {
+				t.Fatalf("reasoning budget = %d, want %d", got.reasoningMaxTokens, tt.want)
+			}
+		})
+	}
+}
+
+func TestReviewExecutionPlanMapsFixedQwenReasoningEffortToBudget(t *testing.T) {
+	tests := []struct {
+		effort string
+		want   int
+	}{
+		{effort: "minimal", want: 512},
+		{effort: "low", want: 1024},
+		{effort: "medium", want: 2048},
+		{effort: "high", want: 4096},
+		{effort: "xhigh", want: 8192},
+	}
+	for _, tt := range tests {
+		t.Run(tt.effort, func(t *testing.T) {
+			got := automatedReviewOptions{
+				modelID:           "qwen/qwen3.7-plus",
+				reasoningEffort:   tt.effort,
+				adaptiveReasoning: false,
+			}.withExecutionPlan(reviewExecutionPlan{
+				sizeClass:          "focused",
+				reasoningEffort:    "low",
+				reasoningMaxTokens: 1024,
+			})
+			if got.reasoningEffort != tt.effort || got.reasoningMaxTokens != tt.want {
+				t.Fatalf(
+					"fixed reasoning = %q/%d, want %q/%d",
+					got.reasoningEffort,
+					got.reasoningMaxTokens,
+					tt.effort,
+					tt.want,
+				)
+			}
+		})
+	}
+}
+
 func TestReviewExecutionPlanScalesAdaptiveCodexModels(t *testing.T) {
 	tests := []struct {
 		size string

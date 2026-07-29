@@ -279,7 +279,9 @@ func reviewRLMOutputTokenLimit(reasoningMaxTokens int) int {
 	if reasoningMaxTokens <= 0 {
 		return 0
 	}
-	return 4096
+	// OpenRouter counts reasoning against the completion limit. Keep the
+	// existing final-answer allowance in addition to the thinking budget.
+	return reasoningMaxTokens + 4096
 }
 
 func effectiveRLMMaxCostUSD(providerID string, configured float64) float64 {

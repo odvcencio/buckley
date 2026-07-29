@@ -763,17 +763,18 @@ type GitEventsConfig struct {
 // BuckbotConfig controls on-demand pull-request reviews. Enabled, Secret, and
 // WebhookBind remain for configuration compatibility with the retired daemon.
 type BuckbotConfig struct {
-	Enabled               bool    `yaml:"enabled"`
-	Secret                string  `yaml:"secret"`
-	WebhookBind           string  `yaml:"webhook_bind"`
-	Model                 string  `yaml:"model"`
-	CriticModel           string  `yaml:"critic_model"`
-	Reasoning             string  `yaml:"reasoning"`
-	PerReviewBudgetUSD    float64 `yaml:"per_review_budget_usd"`
-	MonthlyBudgetUSD      float64 `yaml:"monthly_budget_usd"`
-	MaxReviewIterations   int     `yaml:"max_review_iterations"`
-	MaxValidationAttempts int     `yaml:"max_validation_attempts"`
-	MaxDiffBytes          int     `yaml:"max_diff_bytes"`
+	Enabled                    bool    `yaml:"enabled"`
+	Secret                     string  `yaml:"secret"`
+	WebhookBind                string  `yaml:"webhook_bind"`
+	Model                      string  `yaml:"model"`
+	CriticModel                string  `yaml:"critic_model"`
+	Reasoning                  string  `yaml:"reasoning"`
+	PerReviewBudgetUSD         float64 `yaml:"per_review_budget_usd"`
+	MonthlyBudgetUSD           float64 `yaml:"monthly_budget_usd"`
+	MaxReviewIterations        int     `yaml:"max_review_iterations"`
+	MaxValidationAttempts      int     `yaml:"max_validation_attempts"`
+	MaxDiffBytes               int     `yaml:"max_diff_bytes"`
+	MaxSupportingContextTokens int     `yaml:"max_supporting_context_tokens"`
 
 	// PostingCoreAssociations lists the GitHub authorAssociation values
 	// treated as core maintainer/owner for the posted-review size gate
