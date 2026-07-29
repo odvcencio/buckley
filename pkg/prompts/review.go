@@ -19,7 +19,7 @@ func ReviewProjectPrompt(now time.Time) string {
 
 // ReviewPRPrompt returns the prompt for remote PR review focused on business impact.
 func ReviewPRPrompt(now time.Time) string {
-	return resolvePrompt("review-pr", reviewPRDefault(now), now)
+	return resolvePrompt("review-pr", reviewPRCompactDefault(now), now)
 }
 
 // ReviewApprovalCriticPrompt turns a review prompt into an independent,

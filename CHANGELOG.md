@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.1.0] - 2026-07-29
+
+### Added
+- Pluggable, token-budgeted pull-request context providers with native Hyphae knowledge enrichment.
+- A Qwen 3.7 Plus review profile with adaptive thinking budgets and deterministic workflow-provenance analysis.
+
+### Changed
+- Buckbot curates supporting review context separately from protected diffs, immutable CI evidence, changed-file coverage, and feedback identifiers.
+- Pull-request shard cost projections account for curated provider and repository context.
+
+### Fixed
+- Manual release dispatches validate the checked-out tag commit rather than the workflow event SHA.
+- Review output limits preserve final-answer headroom in addition to provider reasoning tokens.
+- Schema-only repair attempts preserve demonstrated findings and their severity-based verdict disposition.
+
 ## [2.0.0] - 2026-07-28
 
 ### Breaking
@@ -176,7 +191,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Telemetry is local-only by default.
 - Plugin discovery limited to local paths only.
 
-[Unreleased]: https://github.com/odvcencio/buckley/compare/v2.0.0...HEAD
+[Unreleased]: https://github.com/odvcencio/buckley/compare/v2.1.0...HEAD
+[2.1.0]: https://github.com/odvcencio/buckley/compare/v2.0.0...v2.1.0
 [2.0.0]: https://github.com/odvcencio/buckley/compare/v1.6.1...v2.0.0
 [1.6.1]: https://github.com/odvcencio/buckley/compare/v1.6.0...v1.6.1
 [1.6.0]: https://github.com/odvcencio/buckley/compare/v1.5.0...v1.6.0

@@ -26,6 +26,7 @@ func TestParseReviewPRCommandOptions(t *testing.T) {
 		"-budget", "0.25",
 		"-max-turns", "3",
 		"-max-diff-bytes", "80000",
+		"-max-context-tokens", "9000",
 		"-max-validation-attempts", "2",
 		"https://github.com/owner/repo/pull/123",
 	})
@@ -54,9 +55,9 @@ func TestParseReviewPRCommandOptions(t *testing.T) {
 	if opts.outputFile != "review.md" {
 		t.Fatalf("outputFile = %q, want review.md", opts.outputFile)
 	}
-	if opts.budgetUSD != 0.25 || opts.maxTurns != 3 || opts.maxDiff != 80_000 || opts.maxRetries != 2 {
-		t.Fatalf("budget controls = $%.2f/%d/%d/%d, want $0.25/3/80000/2",
-			opts.budgetUSD, opts.maxTurns, opts.maxDiff, opts.maxRetries)
+	if opts.budgetUSD != 0.25 || opts.maxTurns != 3 || opts.maxDiff != 80_000 || opts.maxSupportingContext != 9_000 || opts.maxRetries != 2 {
+		t.Fatalf("budget controls = $%.2f/%d/%d/%d/%d, want $0.25/3/80000/9000/2",
+			opts.budgetUSD, opts.maxTurns, opts.maxDiff, opts.maxSupportingContext, opts.maxRetries)
 	}
 	if opts.prRef != "https://github.com/owner/repo/pull/123" {
 		t.Fatalf("prRef = %q, want PR URL", opts.prRef)
@@ -67,6 +68,7 @@ func TestDefaultAutomatedReviewOptionsAndOverrides(t *testing.T) {
 	cfg := config.DefaultConfig()
 	defaults := defaultAutomatedReviewOptions(cfg)
 	if defaults.maxIterations != 0 || defaults.maxRetries != 2 || defaults.maxDiffBytes != 240_000 ||
+		defaults.maxSupportingContextTokens != 12_000 ||
 		defaults.maxCostUSD != 0.15 || defaults.criticReserveUSD != 0 || defaults.approvalCritic ||
 		defaults.reasoningEffort != "medium" || !defaults.adaptiveReasoning {
 		t.Fatalf("defaults = %#v, want Buckbot defaults", defaults)
@@ -77,6 +79,7 @@ func TestDefaultAutomatedReviewOptionsAndOverrides(t *testing.T) {
 		maxCostUSD:    0.10,
 	})
 	if got.maxIterations != 5 || got.maxRetries != 2 || got.maxDiffBytes != 240_000 ||
+		got.maxSupportingContextTokens != 12_000 ||
 		got.maxCostUSD != 0.10 || got.criticReserveUSD != 0 || got.approvalCritic {
 		t.Fatalf("overrides = %#v, want selective CLI overrides", got)
 	}

@@ -17,6 +17,9 @@ const (
 	codexReviewModelBroad    = "codex/gpt-5.6-sol"
 	qwenReviewExploration    = 100 * time.Second
 	qwenCriticExploration    = 75 * time.Second
+	qwenFocusedReasoning     = 2048
+	qwenStandardReasoning    = 3072
+	qwenBroadReasoning       = 4096
 )
 
 type reviewExecutionPlan struct {
@@ -163,6 +166,11 @@ func (opts automatedReviewOptions) withExecutionPlan(plan reviewExecutionPlan) a
 		}
 	}
 	if isQwen37PlusReviewModel(opts.modelID) {
+		if opts.adaptiveReasoning {
+			opts.reasoningMaxTokens = qwenReviewReasoningForSize(plan.sizeClass)
+		} else {
+			opts.reasoningMaxTokens = qwenReviewReasoningForEffort(opts.reasoningEffort)
+		}
 		if opts.explorationTimeout < qwenReviewExploration {
 			opts.explorationTimeout = qwenReviewExploration
 		}
@@ -178,7 +186,62 @@ func isQwen37PlusReviewModel(modelID string) bool {
 	return modelID == "qwen/qwen3.7-plus" || strings.HasSuffix(modelID, "/qwen3.7-plus")
 }
 
+func qwenReviewReasoningForSize(sizeClass string) int {
+	switch strings.ToLower(strings.TrimSpace(sizeClass)) {
+	case "focused":
+		return qwenFocusedReasoning
+	case "broad", "project":
+		return qwenBroadReasoning
+	default:
+		return qwenStandardReasoning
+	}
+}
+
+func qwenReviewReasoningForEffort(effort string) int {
+	switch strings.ToLower(strings.TrimSpace(effort)) {
+	case "minimal":
+		return 512
+	case "low":
+		return 1024
+	case "high":
+		return 4096
+	case "xhigh":
+		return 8192
+	default:
+		return 2048
+	}
+}
+
+func appendQwenReviewExecutionPlan(prompt string, opts automatedReviewOptions) string {
+	return prompt + fmt.Sprintf(`
+
+## Qwen Review Profile
+
+- Scope: %s. Thinking budget: %d tokens per turn. Limits: %d turns, %d inspection/verification calls, %d verification calls.
+- Read deterministic evidence before summarizing the diff. Treat hypotheses as tests, but treat provider-labeled violations as demonstrated defects unless exact counterevidence disproves them.
+- Rank at most three concrete changed-behavior failures. Prefer identity/provenance mismatches, routing and bypass gates, producer/consumer key drift, and empty or failure paths over broad commentary.
+- For workflow or release changes, trace event input -> checkout ref -> validated commit -> built bytes -> published identifier. Never assume checkout rewrites event variables.
+- Use the supplied diff first. Make one focused first-batch tool call only when a named invariant still lacks proof; do not repeat searches or tests.
+- Finish evidence collection within %d seconds and reserve the final %d seconds for synthesis.
+- Follow the exact response schema from the system prompt. Account for every changed file, copy Feedback IDs exactly, cite immutable CI precisely, and return only the final review.
+- Start exactly once with one ## Grade: heading. Never restart, repeat, or append a second copy of the review.
+- Put each Finding ID in exactly one Verdict list: CRITICAL and MAJOR are Blockers; MINOR is a Suggestion. Never list the same ID in both.
+- APPROVE only after the strongest concrete failure is DISPROVED. Otherwise return the evidence-supported non-approval verdict.
+`,
+		strings.ToUpper(opts.sizeClass),
+		opts.reasoningMaxTokens,
+		opts.maxIterations,
+		opts.maxToolCalls,
+		opts.maxVerificationCalls,
+		int(opts.explorationTimeout/time.Second),
+		int(opts.synthesisLead/time.Second),
+	)
+}
+
 func appendReviewExecutionPlan(prompt string, opts automatedReviewOptions) string {
+	if isQwen37PlusReviewModel(opts.modelID) {
+		return appendQwenReviewExecutionPlan(prompt, opts)
+	}
 	return prompt + fmt.Sprintf(`
 
 ## Bounded Review Plan
