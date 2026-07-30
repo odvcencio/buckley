@@ -37,6 +37,10 @@ type ShardReview struct {
 // checks satisfied without any change to that validation code: each shard's
 // ChangedFiles is simply its own Files slice.
 func BuildPRShardPrompt(ctx *PRContext, shard diffsignal.Shard, index, total int, primary bool) string {
+	ctx = promptPRContext(ctx)
+	if ctx == nil || ctx.PR == nil {
+		return ""
+	}
 	var sb strings.Builder
 
 	fmt.Fprintf(&sb, "## Pull Request (shard %d of %d)\n\n", index+1, total)
@@ -69,6 +73,8 @@ func BuildPRShardPrompt(ctx *PRContext, shard diffsignal.Shard, index, total int
 		sb.WriteString("You are the primary shard. In addition to reviewing your files, disposition every supplied feedback item below ")
 		sb.WriteString("using its exact Feedback ID.\n\n")
 	}
+
+	appendPRContextCurationNotice(&sb, ctx.ContextCuration)
 
 	if ctx.PR.Body != "" {
 		sb.WriteString("## PR Description\n\n")
@@ -111,6 +117,8 @@ func BuildPRShardPrompt(ctx *PRContext, shard diffsignal.Shard, index, total int
 		}
 	}
 
+	appendPRContextProviderEvidence(&sb, prContextEvidenceForShard(ctx.ProviderEvidence, shard.Files, primary))
+
 	if ctx.AgentsMD != "" {
 		sb.WriteString("## Project Guidelines (applicable AGENTS.md chain)\n\n")
 		sb.WriteString(ctx.AgentsMD)
@@ -143,20 +151,31 @@ type ShardCostProjection struct {
 // (ShardCostProjection.EstimatedTotalCostUSD stays 0) while still reporting
 // shard count and token estimates.
 func ProjectShardCost(shards diffsignal.ShardResult, costPerMillionTokens float64) ShardCostProjection {
+	return ProjectShardCostWithContext(shards, nil, costPerMillionTokens)
+}
+
+// ProjectShardCostWithContext includes the exact projected user prompt for
+// every shard. This accounts for shared metadata and curated deterministic
+// evidence that the legacy diff-only projection intentionally cannot see.
+func ProjectShardCostWithContext(
+	shards diffsignal.ShardResult,
+	ctx *PRContext,
+	costPerMillionTokens float64,
+) ShardCostProjection {
 	projection := ShardCostProjection{
 		ShardCount:      len(shards.Shards),
 		HighSignalBytes: shards.HighSignalBytes,
 		HighSignalFiles: shards.HighSignalFiles,
 	}
-	for _, shard := range shards.Shards {
-		projection.EstimatedTokensPerShard += reviewEstimateTokens(shard.Context)
+	for index, shard := range shards.Shards {
+		prompt := shard.Context
+		if ctx != nil {
+			prompt = BuildPRShardPrompt(ctx, shard, index, len(shards.Shards), index == 0)
+		}
+		projection.EstimatedTotalTokens += reviewEstimateTokens(prompt)
 	}
 	if len(shards.Shards) > 0 {
-		projection.EstimatedTokensPerShard /= len(shards.Shards)
-	}
-	projection.EstimatedTotalTokens = 0
-	for _, shard := range shards.Shards {
-		projection.EstimatedTotalTokens += reviewEstimateTokens(shard.Context)
+		projection.EstimatedTokensPerShard = projection.EstimatedTotalTokens / len(shards.Shards)
 	}
 	if costPerMillionTokens > 0 {
 		// Reviews read the diff and write a structured report; output tokens

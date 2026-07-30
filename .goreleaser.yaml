@@ -98,48 +98,6 @@ checksum:
   name_template: 'checksums.txt'
   algorithm: sha256
 
-dockers_v2:
-  - id: buckley
-    dockerfile: build/docker/Dockerfile.runtime
-    ids:
-      - buckley
-    images:
-      - harbor.draco.quest/buckley
-    tags:
-      - "{{ .Version }}"
-      - "{{ if and (not .IsNightly) (eq .Prerelease \"\") }}latest{{ end }}"
-    platforms:
-      - linux/amd64
-      - linux/arm64
-    labels:
-      org.opencontainers.image.title: "{{ .ProjectName }}"
-      org.opencontainers.image.description: Governed AI agent harness for serious repository work.
-      org.opencontainers.image.url: https://github.com/odvcencio/buckley
-      org.opencontainers.image.source: https://github.com/odvcencio/buckley
-      org.opencontainers.image.version: "{{ .Version }}"
-      org.opencontainers.image.revision: "{{ .FullCommit }}"
-      org.opencontainers.image.created: "{{ .Date }}"
-  - id: buckley-worker
-    dockerfile: build/docker/Dockerfile.worker
-    ids:
-      - buckley
-    images:
-      - harbor.draco.quest/buckley-worker
-    tags:
-      - "{{ .Version }}"
-      - "{{ if and (not .IsNightly) (eq .Prerelease \"\") }}latest{{ end }}"
-    platforms:
-      - linux/amd64
-      - linux/arm64
-    labels:
-      org.opencontainers.image.title: "{{ .ProjectName }} Worker"
-      org.opencontainers.image.description: Governed AI agent harness worker image (includes build tools).
-      org.opencontainers.image.url: https://github.com/odvcencio/buckley
-      org.opencontainers.image.source: https://github.com/odvcencio/buckley
-      org.opencontainers.image.version: "{{ .Version }}"
-      org.opencontainers.image.revision: "{{ .FullCommit }}"
-      org.opencontainers.image.created: "{{ .Date }}"
-
 snapshot:
   version_template: "{{ incpatch .Version }}-next"
 

@@ -534,6 +534,7 @@ func TestBuildRLMValidationRetryPromptHardensTextRepair(t *testing.T) {
 		"PRIOR REVIEW:\n## Coverage Ledger\n- File: app/page.gsx",
 		"without new tool calls",
 		"First apply every exact correction named in the rejection",
+		"preserve the finding and its evidence",
 		"preserve valid File entries",
 		"add every exact missing path",
 		"remove every exact unexpected path",
