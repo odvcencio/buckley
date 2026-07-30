@@ -37,7 +37,12 @@ func providerFactory(cfg *config.Config) (map[string]Provider, error) {
 		providers["openrouter"] = &OpenRouterProvider{client: client}
 	}
 
-	if cfg.Providers.OpenAI.Enabled && cfg.Providers.OpenAI.APIKey != "" {
+	// OPENAI_API_KEY makes the direct provider available, but it does not make
+	// it the implicit transport for openai/* model IDs. When OpenRouter is the
+	// selected backend, those model IDs remain on OpenRouter. Selecting the
+	// openai default provider (or using OpenAI as the only ready API backend)
+	// opts into the native OpenAI API.
+	if shouldRegisterOpenAIProvider(cfg) {
 		provider := NewOpenAIProvider(cfg.Providers.OpenAI.APIKey, cfg.Providers.OpenAI.BaseURL, networkLogsEnabled)
 		providers["openai"] = provider
 	}
@@ -73,6 +78,20 @@ func providerFactory(cfg *config.Config) (map[string]Provider, error) {
 	return providers, nil
 }
 
+func shouldRegisterOpenAIProvider(cfg *config.Config) bool {
+	if cfg == nil || !cfg.Providers.OpenAI.Enabled || strings.TrimSpace(cfg.Providers.OpenAI.APIKey) == "" {
+		return false
+	}
+
+	defaultProvider := strings.ToLower(strings.TrimSpace(cfg.Models.DefaultProvider))
+	if defaultProvider == "" || defaultProvider == "openai" {
+		return true
+	}
+
+	openRouterReady := cfg.Providers.OpenRouter.Enabled && strings.TrimSpace(cfg.Providers.OpenRouter.APIKey) != ""
+	return !openRouterReady
+}
+
 // normalizeModelForProvider converts model IDs to the form expected by the
 // selected backend. Native APIs receive their provider prefix stripped, while
 // OpenRouter receives fully-qualified OpenAI slugs.
@@ -102,7 +121,7 @@ func isUnqualifiedOpenAIModel(modelID string) bool {
 	if len(modelID) < 2 || modelID[0] != 'o' || modelID[1] < '1' || modelID[1] > '9' {
 		return false
 	}
-	return len(modelID) == 2 || modelID[2] == '-' || modelID[2] == ':'
+	return len(modelID) == 2 || modelID[2] == '-' || modelID[2] == '.' || modelID[2] == ':'
 }
 
 func messageContentToText(content any) string {
