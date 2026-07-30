@@ -37,7 +37,11 @@ func providerFactory(cfg *config.Config) (map[string]Provider, error) {
 		providers["openrouter"] = &OpenRouterProvider{client: client}
 	}
 
-	if cfg.Providers.OpenAI.Enabled && cfg.Providers.OpenAI.APIKey != "" {
+	// Keep the native OpenAI API available without letting the mere presence
+	// of OPENAI_API_KEY divert openai/* models away from OpenRouter. The
+	// native provider becomes active when it is the selected backend, or when
+	// OpenRouter is unavailable and OpenAI is the remaining API fallback.
+	if shouldRegisterOpenAIProvider(cfg) {
 		provider := NewOpenAIProvider(cfg.Providers.OpenAI.APIKey, cfg.Providers.OpenAI.BaseURL, networkLogsEnabled)
 		providers["openai"] = provider
 	}
@@ -73,14 +77,50 @@ func providerFactory(cfg *config.Config) (map[string]Provider, error) {
 	return providers, nil
 }
 
-// normalizeModelForProvider strips provider prefixes (openai/, anthropic/, etc.)
-// before sending requests to the underlying APIs.
+func shouldRegisterOpenAIProvider(cfg *config.Config) bool {
+	if cfg == nil || !cfg.Providers.OpenAI.Enabled || strings.TrimSpace(cfg.Providers.OpenAI.APIKey) == "" {
+		return false
+	}
+
+	defaultProvider := strings.ToLower(strings.TrimSpace(cfg.Models.DefaultProvider))
+	if defaultProvider == "" || defaultProvider == "openai" {
+		return true
+	}
+
+	openRouterReady := cfg.Providers.OpenRouter.Enabled && strings.TrimSpace(cfg.Providers.OpenRouter.APIKey) != ""
+	return !openRouterReady
+}
+
+// normalizeModelForProvider converts model IDs to the form expected by the
+// selected backend. Native APIs receive their provider prefix stripped, while
+// OpenRouter receives fully-qualified OpenAI slugs.
 func normalizeModelForProvider(modelID, providerID string) string {
+	modelID = strings.TrimSpace(modelID)
+	providerID = strings.TrimSpace(providerID)
+
+	if strings.EqualFold(providerID, "openrouter") && isUnqualifiedOpenAIModel(modelID) {
+		return "openai/" + modelID
+	}
+
 	prefix := providerID + "/"
 	if strings.HasPrefix(modelID, prefix) {
 		return strings.TrimPrefix(modelID, prefix)
 	}
 	return modelID
+}
+
+func isUnqualifiedOpenAIModel(modelID string) bool {
+	modelID = strings.ToLower(strings.TrimSpace(modelID))
+	if modelID == "" || strings.Contains(modelID, "/") {
+		return false
+	}
+	if strings.HasPrefix(modelID, "gpt-") || strings.HasPrefix(modelID, "chatgpt-") {
+		return true
+	}
+	if len(modelID) < 2 || modelID[0] != 'o' || modelID[1] < '1' || modelID[1] > '9' {
+		return false
+	}
+	return len(modelID) == 2 || modelID[2] == '-' || modelID[2] == ':'
 }
 
 func messageContentToText(content any) string {
