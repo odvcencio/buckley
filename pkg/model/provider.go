@@ -37,11 +37,7 @@ func providerFactory(cfg *config.Config) (map[string]Provider, error) {
 		providers["openrouter"] = &OpenRouterProvider{client: client}
 	}
 
-	// Keep the native OpenAI API available without letting the mere presence
-	// of OPENAI_API_KEY divert openai/* models away from OpenRouter. The
-	// native provider becomes active when it is the selected backend, or when
-	// OpenRouter is unavailable and OpenAI is the remaining API fallback.
-	if shouldRegisterOpenAIProvider(cfg) {
+	if cfg.Providers.OpenAI.Enabled && cfg.Providers.OpenAI.APIKey != "" {
 		provider := NewOpenAIProvider(cfg.Providers.OpenAI.APIKey, cfg.Providers.OpenAI.BaseURL, networkLogsEnabled)
 		providers["openai"] = provider
 	}
@@ -75,20 +71,6 @@ func providerFactory(cfg *config.Config) (map[string]Provider, error) {
 	}
 
 	return providers, nil
-}
-
-func shouldRegisterOpenAIProvider(cfg *config.Config) bool {
-	if cfg == nil || !cfg.Providers.OpenAI.Enabled || strings.TrimSpace(cfg.Providers.OpenAI.APIKey) == "" {
-		return false
-	}
-
-	defaultProvider := strings.ToLower(strings.TrimSpace(cfg.Models.DefaultProvider))
-	if defaultProvider == "" || defaultProvider == "openai" {
-		return true
-	}
-
-	openRouterReady := cfg.Providers.OpenRouter.Enabled && strings.TrimSpace(cfg.Providers.OpenRouter.APIKey) != ""
-	return !openRouterReady
 }
 
 // normalizeModelForProvider converts model IDs to the form expected by the
