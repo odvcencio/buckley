@@ -60,14 +60,24 @@ func nextContextProjectionScale(current float64) float64 {
 }
 
 func contextProjectionStatus(stats conversation.ContextProjectionStats) string {
-	if !stats.Compacted || stats.OriginalTokens <= 0 || stats.ProjectedTokens <= 0 {
-		return ""
+	var label string
+	if stats.Compacted && stats.OriginalTokens > 0 && stats.ProjectedTokens > 0 {
+		label = fmt.Sprintf("context ~%.1fk→%.1fk", float64(stats.OriginalTokens)/1000, float64(stats.ProjectedTokens)/1000)
+		if stats.Emergency {
+			label += " emergency"
+		} else {
+			label += " compacted"
+		}
 	}
-	label := fmt.Sprintf("context ~%.1fk→%.1fk", float64(stats.OriginalTokens)/1000, float64(stats.ProjectedTokens)/1000)
-	if stats.Emergency {
-		label += " emergency"
-	} else {
-		label += " compacted"
+	if stats.ContinuationActive {
+		continuationLabel := "continuation: reset"
+		if stats.ContinuationHit {
+			continuationLabel = "continuation: hit"
+		}
+		if label != "" {
+			label += ", "
+		}
+		label += continuationLabel
 	}
 	return label
 }

@@ -182,6 +182,10 @@ type ModelConfig struct {
 	DefaultProvider string              `yaml:"default_provider"` // Default provider (openrouter, openai, anthropic, google, codex)
 	Reasoning       string              `yaml:"reasoning"`        // Reasoning level: "off", "minimal", "low", "medium", "high", "xhigh", or "" for auto-detect
 
+	// ProviderContinuation opts into provider-native continuation state
+	// (decision 0001) for models/providers that support it. Off by default.
+	ProviderContinuation bool `yaml:"provider_continuation"`
+
 	// Utility models for utility tasks.
 	Utility UtilityModelConfig `yaml:"utility"`
 }

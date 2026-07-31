@@ -22,6 +22,13 @@ type toolLoopState struct {
 	contextScale   float64
 	contextRetries int
 	projection     conversation.ContextProjectionStats
+
+	// continuation and useContinuation carry this turn's provider
+	// continuation decision (decision 0001), behind the
+	// models.provider_continuation flag. continuation is nil unless the
+	// session is eligible and the flag is on.
+	continuation    *model.ContinuationCoordinator
+	useContinuation bool
 }
 
 type toolLoopProgress struct {
@@ -82,6 +89,34 @@ func (c *Controller) newToolLoopState(sess *SessionState, modelID string) toolLo
 	}
 }
 
+// continuationCoordinatorForSession lazily creates and caches this session's
+// ContinuationCursor coordinator (decision 0001), restoring persisted state
+// for the resolved provider/model on first use. It returns nil when the
+// coordinator is unavailable (no model manager).
+func (c *Controller) continuationCoordinatorForSession(sess *SessionState) *model.ContinuationCoordinator {
+	if c == nil || sess == nil || c.modelMgr == nil {
+		return nil
+	}
+	if sess.continuation == nil {
+		var store model.ContinuationStore
+		if c.store != nil {
+			store = c.store
+		}
+		sess.continuation = model.NewContinuationCoordinator(c.modelMgr, store, sess.ID)
+	}
+	return sess.continuation
+}
+
+// continuationEligible reports whether this turn should attempt provider
+// continuation: the opt-in flag is on, the resolved provider implements
+// ContinuationClient, and it advertises support for modelID.
+func (c *Controller) continuationEligible(modelID string) bool {
+	if c == nil || c.cfg == nil || !c.cfg.Models.ProviderContinuation || c.modelMgr == nil {
+		return false
+	}
+	return c.modelMgr.SupportsContinuation(modelID)
+}
+
 func (c *Controller) runToolLoopIteration(ctx context.Context, sess *SessionState, modelID string, iteration int, state *toolLoopState) (toolLoopIterationResult, error) {
 	if ctx.Err() != nil {
 		return toolLoopIterationResult{}, ctx.Err()
@@ -91,7 +126,7 @@ func (c *Controller) runToolLoopIteration(ctx context.Context, sess *SessionStat
 	req, nextUseTools := c.buildToolLoopRequestWithState(sess, modelID, state.useTools, allowedTools, state)
 	state.useTools = nextUseTools
 
-	resp, err := c.callToolLoopModel(ctx, req, modelID, iteration, state)
+	resp, err := c.callToolLoopTurn(ctx, modelID, iteration, req, state)
 	if err != nil {
 		return toolLoopIterationResult{}, c.handleToolLoopModelError(err, state)
 	}
@@ -102,6 +137,42 @@ func (c *Controller) runToolLoopIteration(ctx context.Context, sess *SessionStat
 		return toolLoopIterationResult{}, err
 	}
 	return c.handleToolLoopChoice(ctx, sess, choice.Message, allowedTools, choice.FinishReason, state), nil
+}
+
+// callToolLoopTurn executes one model turn, using the continuation-aware
+// non-streaming path when this turn is eligible (decision 0001) and falling
+// back to the normal streaming path otherwise. req already carries the full
+// projected message list either way, so a continuation error can retry
+// through the normal streaming path with the same request: a broken
+// continuation never fails the turn.
+func (c *Controller) callToolLoopTurn(ctx context.Context, modelID string, iteration int, req model.ChatRequest, state *toolLoopState) (*model.ChatResponse, error) {
+	if !state.useContinuation || state.continuation == nil {
+		return c.callToolLoopModel(ctx, req, modelID, iteration, state)
+	}
+
+	// Predict hit/reset for the in-flight status line from whether the
+	// cursor currently holds a represented prefix to reuse; Call below
+	// records the actual outcome once it is known.
+	state.projection.ContinuationHit = state.continuation.Active()
+	status := modelProcessStatus(modelID, iteration, len(req.Tools), req.Reasoning)
+	if projection := contextProjectionStatus(state.projection); projection != "" {
+		status += ", " + projection
+	}
+	c.app.StartProcessStatus(status)
+	resp, err := state.continuation.Call(ctx, req)
+	c.app.StopProcessStatus()
+	if err == nil {
+		state.projection.ContinuationHit = state.continuation.Hit()
+		return resp, nil
+	}
+
+	// Continuation broke; reset and retry once through the normal streaming
+	// path rather than failing the turn.
+	state.continuation.Reset()
+	if c.app != nil {
+		c.app.SetStatus("Continuation unavailable; retrying without it")
+	}
+	return c.callToolLoopModel(ctx, req, modelID, iteration, state)
 }
 
 func (c *Controller) handleToolLoopModelError(err error, state *toolLoopState) error {
@@ -143,10 +214,21 @@ func (c *Controller) buildToolLoopRequest(sess *SessionState, modelID string, us
 }
 
 func (c *Controller) buildToolLoopRequestWithState(sess *SessionState, modelID string, useTools bool, allowedTools []string, state *toolLoopState) (model.ChatRequest, bool) {
+	useContinuation := state != nil && c.continuationEligible(modelID)
+	var coordinator *model.ContinuationCoordinator
+	if useContinuation {
+		coordinator = c.continuationCoordinatorForSession(sess)
+		useContinuation = coordinator != nil
+	}
+
 	req := model.ChatRequest{
 		Model:     modelID,
-		Messages:  c.buildMessagesForSession(sess),
 		SessionID: sess.ID,
+	}
+	if useContinuation {
+		req.Messages = c.buildContinuationMessagesForSession(sess)
+	} else {
+		req.Messages = c.buildMessagesForSession(sess)
 	}
 
 	if useTools && sess.ToolRegistry != nil {
@@ -185,10 +267,31 @@ func (c *Controller) buildToolLoopRequestWithState(sess *SessionState, modelID s
 	if state != nil && state.contextScale > 0 {
 		scale = state.contextScale
 	}
-	projected, projection := conversation.ProjectModelMessagesForRequest(req.Messages, req, contextWindow, scale)
+
+	pinnedFromIndex := 0
+	if useContinuation {
+		providerID := c.modelMgr.ProviderIDForModel(modelID)
+		coordinator.Restore(providerID, modelID, req.Messages)
+		pinnedFromIndex = coordinator.PinnedFromIndex()
+	}
+
+	rawMessages := req.Messages
+	projected, projection := conversation.ProjectModelMessagesForRequestPinned(rawMessages, req, contextWindow, scale, pinnedFromIndex)
+	if pinnedFromIndex > 0 && projection.ProjectedTokens > projection.BudgetTokens {
+		// Epoch rule (decision 0001): projection cannot fit the request
+		// without compacting inside the region the cursor represents. Reset
+		// the cursor deliberately -- one full recompiled request -- so this
+		// is an intentional epoch boundary rather than a fingerprint
+		// mismatch discovered mid-turn.
+		coordinator.Reset()
+		pinnedFromIndex = 0
+		projected, projection = conversation.ProjectModelMessagesForRequestPinned(rawMessages, req, contextWindow, scale, 0)
+	}
 	req.Messages = projected
 	if state != nil {
 		state.projection = projection
+		state.useContinuation = useContinuation
+		state.continuation = coordinator
 	}
 	return req, useTools
 }

@@ -45,3 +45,14 @@ type ReasoningClient interface {
 	CompletionClient
 	ReasoningSupportProvider
 }
+
+// ContinuationClient is implemented by providers that can carry native
+// working state across turns instead of retransmitting the full transcript.
+type ContinuationClient interface {
+	// SupportsContinuation reports whether a model can carry provider-native
+	// continuation state through the turn engine.
+	SupportsContinuation(modelID string) bool
+	// ChatCompletionWithContinuation executes a turn using an optional prior
+	// continuation and returns the opaque state for the next turn.
+	ChatCompletionWithContinuation(ctx context.Context, req ContinuationRequest) (*ContinuationResponse, error)
+}

@@ -130,6 +130,10 @@ type Runner struct {
 	maxToolExecTime       time.Duration
 	maxRuntime            time.Duration
 
+	// continuation lazily holds this session's provider continuation cursor
+	// (decision 0001), behind the models.provider_continuation flag.
+	continuation *model.ContinuationCoordinator
+
 	state               RunnerState
 	lastActive          time.Time
 	idleTimeout         time.Duration
@@ -598,10 +602,10 @@ func (r *Runner) runConversationLoop() error {
 		}
 
 		// Build request
-		req := r.buildChatRequest()
+		req, useContinuation := r.buildChatRequest()
 
 		// Call model
-		response, err := r.callModel(ctx, req)
+		response, err := r.callModel(ctx, req, useContinuation)
 		if err != nil {
 			if errors.Is(err, context.Canceled) {
 				return err
@@ -658,12 +662,56 @@ func (r *Runner) runConversationLoop() error {
 	return nil
 }
 
-func (r *Runner) buildChatRequest() model.ChatRequest {
+// continuationEligible reports whether this turn should attempt provider
+// continuation (decision 0001): the opt-in flag is on, and the resolved
+// provider implements ContinuationClient for modelID.
+func (r *Runner) continuationEligible(modelID string) bool {
+	if r == nil || r.config == nil || !r.config.Models.ProviderContinuation || r.modelManager == nil {
+		return false
+	}
+	return r.modelManager.SupportsContinuation(modelID)
+}
+
+// continuationCoordinator lazily creates and caches this session's
+// ContinuationCursor coordinator (decision 0001).
+func (r *Runner) continuationCoordinator() *model.ContinuationCoordinator {
+	if r == nil || r.modelManager == nil {
+		return nil
+	}
+	if r.continuation == nil {
+		var store model.ContinuationStore
+		if r.store != nil {
+			store = r.store
+		}
+		r.continuation = model.NewContinuationCoordinator(r.modelManager, store, r.sessionID)
+	}
+	return r.continuation
+}
+
+// buildChatRequest builds the next turn's request and reports whether it
+// should be sent through the continuation-aware path.
+func (r *Runner) buildChatRequest() (model.ChatRequest, bool) {
 	modelID := r.resolveExecutionModel()
+
+	useContinuation := r.continuationEligible(modelID)
+	var coordinator *model.ContinuationCoordinator
+	if useContinuation {
+		coordinator = r.continuationCoordinator()
+		useContinuation = coordinator != nil
+	}
+
 	req := model.ChatRequest{
 		Model:     modelID,
-		Messages:  r.conv.ToEfficientModelMessages(),
 		SessionID: r.sessionID,
+	}
+	if useContinuation {
+		// Skip ToEfficientModelMessages's independent compaction pass so an
+		// earlier, pin-unaware pass cannot strip reasoning from the region a
+		// continuation window represents; ProjectModelMessagesForRequestPinned
+		// below does the only compaction pass for this turn.
+		req.Messages = r.conv.ToModelMessages()
+	} else {
+		req.Messages = r.conv.ToEfficientModelMessages()
 	}
 	if r.tools != nil && r.modelManager != nil && r.modelManager.SupportsTools(modelID) {
 		req.Tools = r.tools.ToOpenAIFunctionsGoverned(r.evaluator, "interactive", "coding", nil, 0)
@@ -682,11 +730,35 @@ func (r *Runner) buildChatRequest() model.ChatRequest {
 	if r.modelManager != nil {
 		contextWindow, _ = r.modelManager.GetContextLength(modelID)
 	}
-	req.Messages = conversation.CompactModelMessagesForRequest(req.Messages, req, contextWindow)
-	return req
+
+	pinnedFromIndex := 0
+	if useContinuation {
+		providerID := r.modelManager.ProviderIDForModel(modelID)
+		coordinator.Restore(providerID, modelID, req.Messages)
+		pinnedFromIndex = coordinator.PinnedFromIndex()
+	}
+
+	rawMessages := req.Messages
+	projected, projection := conversation.ProjectModelMessagesForRequestPinned(rawMessages, req, contextWindow, 1, pinnedFromIndex)
+	if pinnedFromIndex > 0 && projection.ProjectedTokens > projection.BudgetTokens {
+		// Epoch rule (decision 0001): projection cannot fit the request
+		// without compacting inside the region the cursor represents. Reset
+		// the cursor deliberately -- one full recompiled request -- so this
+		// is an intentional epoch boundary rather than a fingerprint
+		// mismatch discovered mid-turn.
+		coordinator.Reset()
+		projected, _ = conversation.ProjectModelMessagesForRequestPinned(rawMessages, req, contextWindow, 1, 0)
+	}
+	req.Messages = projected
+	return req, useContinuation
 }
 
-func (r *Runner) callModel(ctx context.Context, req model.ChatRequest) (*model.ChatResponse, error) {
+// callModel executes one model turn. When useContinuation is set, it calls
+// through the session's ContinuationCursor coordinator (decision 0001)
+// instead of the normal ChatCompletion path. On any continuation error it
+// resets the cursor and retries once via the normal path -- a broken
+// continuation never fails the turn.
+func (r *Runner) callModel(ctx context.Context, req model.ChatRequest, useContinuation bool) (*model.ChatResponse, error) {
 	startTime := time.Now()
 
 	if r.telemetry != nil {
@@ -701,7 +773,23 @@ func (r *Runner) callModel(ctx context.Context, req model.ChatRequest) (*model.C
 		})
 	}
 
-	resp, err := r.modelManager.ChatCompletion(ctx, req)
+	continuationStatus := ""
+	var resp *model.ChatResponse
+	var err error
+	if useContinuation && r.continuation != nil {
+		resp, err = r.continuation.Call(ctx, req)
+		if err != nil {
+			r.continuation.Reset()
+			resp, err = r.modelManager.ChatCompletion(ctx, req)
+			continuationStatus = "reset"
+		} else if r.continuation.Hit() {
+			continuationStatus = "hit"
+		} else {
+			continuationStatus = "reset"
+		}
+	} else {
+		resp, err = r.modelManager.ChatCompletion(ctx, req)
+	}
 
 	if r.telemetry != nil {
 		duration := time.Since(startTime)
@@ -710,6 +798,9 @@ func (r *Runner) callModel(ctx context.Context, req model.ChatRequest) (*model.C
 			"model":       req.Model,
 			"duration_ms": duration.Milliseconds(),
 			"source":      "headless",
+		}
+		if continuationStatus != "" {
+			data["continuation"] = continuationStatus
 		}
 		if err != nil {
 			eventType = telemetry.EventBuilderFailed

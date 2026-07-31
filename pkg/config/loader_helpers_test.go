@@ -238,3 +238,38 @@ func TestMergeConfigsRespectsModelUtilityOverrides(t *testing.T) {
 		t.Fatalf("expected models.fallback_chains to be overridable to an empty map")
 	}
 }
+
+func TestMergeConfigsRespectsModelProviderContinuationOverride(t *testing.T) {
+	base := DefaultConfig()
+	if base.Models.ProviderContinuation {
+		t.Fatalf("expected provider_continuation to default to false")
+	}
+
+	override := &Config{Models: ModelConfig{ProviderContinuation: true}}
+	raw := map[string]any{
+		"models": map[string]any{
+			"provider_continuation": true,
+		},
+	}
+
+	mergeConfigs(base, override, raw, false)
+
+	if !base.Models.ProviderContinuation {
+		t.Fatalf("expected models.provider_continuation to be overridden")
+	}
+
+	// An explicit false override must also take effect (not be mistaken for
+	// "unset" the way a plain zero-value bool would be).
+	base2 := DefaultConfig()
+	base2.Models.ProviderContinuation = true
+	override2 := &Config{Models: ModelConfig{ProviderContinuation: false}}
+	raw2 := map[string]any{
+		"models": map[string]any{
+			"provider_continuation": false,
+		},
+	}
+	mergeConfigs(base2, override2, raw2, false)
+	if base2.Models.ProviderContinuation {
+		t.Fatalf("expected explicit models.provider_continuation=false to be honored")
+	}
+}

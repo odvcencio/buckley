@@ -142,7 +142,8 @@ func DefaultConfig() *Config {
 					defaultOpenRouterUtilityModel,
 				},
 			},
-			DefaultProvider: "openrouter",
+			DefaultProvider:      "openrouter",
+			ProviderContinuation: false,
 			Utility: UtilityModelConfig{
 				Commit:     DefaultCommitModel,
 				PR:         DefaultUtilityModel,

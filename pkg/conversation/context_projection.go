@@ -20,6 +20,17 @@ type ContextProjectionStats struct {
 	Compacted       bool
 	Emergency       bool
 	Scale           float64
+
+	// ContinuationActive is true when this projection pinned a suffix of
+	// history as owned by an active provider continuation window (decision
+	// 0001), suspending reasoning stripping and pruning for that suffix.
+	ContinuationActive bool
+	// ContinuationHit reports whether the provider continuation cursor's
+	// represented prefix was still valid for this request (an incremental
+	// request was sent) rather than reset (a full recompiled request). It is
+	// only meaningful when ContinuationActive is true or a continuation
+	// attempt was made; callers outside the continuation path leave it false.
+	ContinuationHit bool
 }
 
 // ProjectModelMessagesForRequest preserves full history while it fits within
@@ -27,25 +38,36 @@ type ContextProjectionStats struct {
 // pressure rises. scale is normally 1; callers may lower it for an emergency
 // retry after a provider reports an unexpectedly smaller effective window.
 func ProjectModelMessagesForRequest(messages []model.Message, req model.ChatRequest, contextWindow int, scale float64) ([]model.Message, ContextProjectionStats) {
+	return ProjectModelMessagesForRequestPinned(messages, req, contextWindow, scale, 0)
+}
+
+// ProjectModelMessagesForRequestPinned behaves like ProjectModelMessagesForRequest,
+// except every message at or after pinnedFromIndex is treated as already
+// represented inside an active provider continuation window (decision 0001):
+// the provider owns that suffix, so projection and compaction leave it
+// untouched. A pinnedFromIndex <= 0 disables the pin.
+func ProjectModelMessagesForRequestPinned(messages []model.Message, req model.ChatRequest, contextWindow int, scale float64, pinnedFromIndex int) ([]model.Message, ContextProjectionStats) {
 	scale = normalizedProjectionScale(scale)
 	fullReq := req
 	fullReq.Messages = messages
 	originalEstimate := model.EstimateRequestTokens(fullReq)
 	stats := ContextProjectionStats{
-		ContextWindow:   contextWindow,
-		OriginalTokens:  originalEstimate.Total,
-		ProjectedTokens: originalEstimate.Total,
-		OriginalBytes:   modelMessagesBytes(messages),
-		ProjectedBytes:  modelMessagesBytes(messages),
-		MessagesBefore:  len(messages),
-		MessagesAfter:   len(messages),
-		Emergency:       scale < 0.999,
-		Scale:           scale,
+		ContextWindow:      contextWindow,
+		OriginalTokens:     originalEstimate.Total,
+		ProjectedTokens:    originalEstimate.Total,
+		OriginalBytes:      modelMessagesBytes(messages),
+		ProjectedBytes:     modelMessagesBytes(messages),
+		MessagesBefore:     len(messages),
+		MessagesAfter:      len(messages),
+		Emergency:          scale < 0.999,
+		Scale:              scale,
+		ContinuationActive: pinnedFromIndex > 0,
 	}
 
 	if contextWindow <= 0 {
 		opts := DefaultEfficientContextOptions()
 		opts.MaxBytes = maxProjectionInt(16*1024, int(float64(opts.MaxBytes)*scale))
+		opts.PinnedFromIndex = pinnedFromIndex
 		stats.BudgetTokens = opts.MaxBytes / 4
 		projected := CompactModelMessages(messages, opts)
 		return finishProjectionStats(projected, req, stats)
@@ -58,6 +80,7 @@ func ProjectModelMessagesForRequest(messages []model.Message, req model.ChatRequ
 	}
 
 	opts := adaptiveContextOptions(contextWindow, messageBudget, scale)
+	opts.PinnedFromIndex = pinnedFromIndex
 	projected := CompactModelMessages(messages, opts)
 	for attempt := 0; attempt < 5; attempt++ {
 		projectedReq := req

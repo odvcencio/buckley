@@ -338,6 +338,55 @@ func (m *Manager) ChatCompletion(ctx context.Context, req ChatRequest) (*ChatRes
 	return resp, nil
 }
 
+// SupportsContinuation reports whether the provider selected for modelID
+// offers provider-native continuation state (decision 0001).
+func (m *Manager) SupportsContinuation(modelID string) bool {
+	if m == nil {
+		return false
+	}
+	selectedModel, provider := m.resolveModel(modelID)
+	client, ok := provider.(ContinuationClient)
+	if !ok {
+		return false
+	}
+	return client.SupportsContinuation(selectedModel)
+}
+
+// ChatCompletionWithContinuation performs a continuation-aware chat completion
+// routed to the provider selected for the model, applying the same request
+// transforms as ChatCompletion. It returns an error if the resolved provider
+// does not implement ContinuationClient; callers should check
+// SupportsContinuation first and fall back to ChatCompletion otherwise.
+func (m *Manager) ChatCompletionWithContinuation(ctx context.Context, continuationReq ContinuationRequest) (*ContinuationResponse, error) {
+	req := continuationReq.Request
+	selectedModel, provider := m.resolveModel(req.Model)
+	if provider == nil {
+		return nil, fmt.Errorf("no provider configured for model %s", req.Model)
+	}
+	client, ok := provider.(ContinuationClient)
+	if !ok {
+		return nil, fmt.Errorf("provider %s does not support continuation", provider.ID())
+	}
+	req.Model = selectedModel
+	req = m.applyFallbackChain(req, selectedModel, provider.ID())
+	req = applyProviderTransforms(req, provider.ID())
+	req = m.applyPromptCache(req, provider.ID())
+	req.Model = normalizeModelForProvider(req.Model, provider.ID())
+	continuationReq.Request = req
+
+	resp, err := client.ChatCompletionWithContinuation(ctx, continuationReq)
+	if err != nil {
+		return nil, err
+	}
+	if resp == nil || resp.Response == nil {
+		return nil, fmt.Errorf("empty continuation response for model %s", req.Model)
+	}
+	if len(resp.Response.Choices) == 0 {
+		return nil, NoResponseChoicesError(req, resp.Response)
+	}
+	return resp, nil
+}
+
 // ChatCompletionStream performs a streaming chat completion
 func (m *Manager) ChatCompletionStream(ctx context.Context, req ChatRequest) (<-chan StreamChunk, <-chan error) {
 	selectedModel, provider := m.resolveModel(req.Model)

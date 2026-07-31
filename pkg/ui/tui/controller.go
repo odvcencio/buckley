@@ -85,6 +85,10 @@ type SessionState struct {
 	MessageQueue  []QueuedMessage // Messages queued while streaming
 
 	DisableToolsNextTurn bool
+
+	// continuation lazily holds this session's provider continuation cursor
+	// (decision 0001), behind the models.provider_continuation flag.
+	continuation *model.ContinuationCoordinator
 }
 
 // ControllerConfig configures the controller.
@@ -972,6 +976,19 @@ func (c *Controller) newSession() {
 
 // buildMessagesForSession constructs the message list for the API using a specific session.
 func (c *Controller) buildMessagesForSession(sess *SessionState) []model.Message {
+	return c.buildMessagesForSessionHistory(sess, false)
+}
+
+// buildContinuationMessagesForSession constructs the message list using the
+// raw durable transcript rather than ToEfficientModelMessages's independent
+// compaction pass. A continuation-aware turn compacts once, via
+// ProjectModelMessagesForRequestPinned, so the represented/pinned suffix
+// (decision 0001) is never touched by an earlier, pin-unaware pass.
+func (c *Controller) buildContinuationMessagesForSession(sess *SessionState) []model.Message {
+	return c.buildMessagesForSessionHistory(sess, true)
+}
+
+func (c *Controller) buildMessagesForSessionHistory(sess *SessionState, rawHistory bool) []model.Message {
 	messages := []model.Message{}
 
 	// System prompt
@@ -983,7 +1000,11 @@ func (c *Controller) buildMessagesForSession(sess *SessionState) []model.Message
 
 	// Add conversation history from session
 	if sess != nil && sess.Conversation != nil {
-		messages = append(messages, sess.Conversation.ToEfficientModelMessages()...)
+		if rawHistory {
+			messages = append(messages, sess.Conversation.ToModelMessages()...)
+		} else {
+			messages = append(messages, sess.Conversation.ToEfficientModelMessages()...)
+		}
 	}
 
 	return truncateModelToolMessages(messages, defaultTUIToolModelMaxBytes)
