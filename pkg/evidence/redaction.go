@@ -19,7 +19,7 @@ var secretPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`-----BEGIN (RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----`),   // PEM private key
 	regexp.MustCompile(`ghp_[A-Za-z0-9]{36}`),                                    // GitHub personal access token
 	regexp.MustCompile(`gh[pousr]_[A-Za-z0-9]{20,}`),                             // Other GitHub token variants
-	regexp.MustCompile(`sk-[A-Za-z0-9]{20,}`),                                    // OpenAI-style API key
+	regexp.MustCompile(`sk-[A-Za-z0-9_-]{20,}`),                                  // OpenAI-style API key, including sk-proj-/sk-svcacct- forms
 	regexp.MustCompile(`xox[baprs]-[A-Za-z0-9-]{10,}`),                           // Slack token
 	regexp.MustCompile(`(?i)bearer\s+[A-Za-z0-9\-._~+/]{20,}=*`),                 // Bearer token
 }

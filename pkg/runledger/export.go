@@ -2,6 +2,7 @@ package runledger
 
 import (
 	"context"
+	"encoding/json"
 	"time"
 
 	"m31labs.dev/buckley/v2/pkg/evidence"
@@ -43,15 +44,40 @@ func redactEventPayload(ev Event) Event {
 		return ev
 	}
 	out := ev
-	out.Payload = make(map[string]any, len(ev.Payload))
-	for k, v := range ev.Payload {
-		if s, ok := v.(string); ok {
-			out.Payload[k] = string(evidence.Redact([]byte(s)))
-			continue
-		}
-		out.Payload[k] = v
+	normalized, err := json.Marshal(ev.Payload)
+	if err != nil {
+		out.Payload = map[string]any{"redaction_error": "payload is not exportable"}
+		return out
 	}
+	var generic map[string]any
+	if err := json.Unmarshal(normalized, &generic); err != nil {
+		out.Payload = map[string]any{"redaction_error": "payload is not exportable"}
+		return out
+	}
+	redacted, _ := redactValue(generic).(map[string]any)
+	out.Payload = redacted
 	return out
+}
+
+// redactValue walks a JSON-normalized value so every string, at any nesting
+// depth, passes through evidence.Redact before export.
+func redactValue(v any) any {
+	switch t := v.(type) {
+	case string:
+		return string(evidence.Redact([]byte(t)))
+	case map[string]any:
+		for k, val := range t {
+			t[k] = redactValue(val)
+		}
+		return t
+	case []any:
+		for i, val := range t {
+			t[i] = redactValue(val)
+		}
+		return t
+	default:
+		return v
+	}
 }
 
 // ContextReceiptSchemaVersion identifies the exportable context receipt

@@ -186,3 +186,24 @@ func TestGoldenContextReceipt_MatchesAppendixAShape(t *testing.T) {
 		}
 	}
 }
+
+func TestExportRunRedactsNestedPayloadSecrets(t *testing.T) {
+	payload := map[string]any{
+		"result": map[string]any{
+			"stderr": "failure: AKIAIOSFODNN7EXAMPLE was rejected",
+			"attempts": []any{
+				map[string]any{"token": "sk-proj-abcdef1234567890abcdef1234567890"},
+			},
+		},
+	}
+	ev := redactEventPayload(Event{Payload: payload})
+	raw, err := json.Marshal(ev.Payload)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	for _, secret := range []string{"AKIAIOSFODNN7EXAMPLE", "sk-proj-abcdef1234567890abcdef1234567890"} {
+		if strings.Contains(string(raw), secret) {
+			t.Fatalf("nested secret %q survived export redaction: %s", secret, raw)
+		}
+	}
+}
