@@ -110,6 +110,12 @@ func TestBoundary(t *testing.T) {
     if err := os.WriteFile(marker, []byte("ok"), 0600); err != nil {
         t.Fatalf("private temp directory was not writable: %v", err)
     }
+    // The private runtime directory must be the only writable location. A
+    // hardcoded write to the shared /tmp root (outside os.TempDir(), which
+    // this sandbox redirects to the private runtime dir) must fail.
+    if err := os.WriteFile("/tmp/native-sandbox-escape-probe", []byte("forbidden"), 0600); err == nil {
+        t.Fatal("the shared /tmp root was writable outside the private runtime directory")
+    }
     connection, err := net.DialTimeout("tcp", "1.1.1.1:53", 250*time.Millisecond)
     if err == nil {
         connection.Close()

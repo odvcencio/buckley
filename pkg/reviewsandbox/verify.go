@@ -375,7 +375,13 @@ func (e *Executor) runViaNativeGo(ctx context.Context, bwrap string, params laun
 		args = append(args, "--ro-bind-try", optional, optional)
 	}
 	args = append(args,
+		// Bind the private runtime directory writable, then remount the /tmp
+		// tmpfs itself read-only. bwrap's remount-ro applies only to the exact
+		// mount point given, so the nested runtimeDir bind stays writable while
+		// the rest of /tmp is not: the private runtime directory remains the
+		// only writable location, matching the Codex sandbox invariant exactly.
 		"--bind", params.runtimeDir, params.runtimeDir,
+		"--remount-ro", "/tmp",
 		"--proc", "/proc",
 		"--dev", "/dev",
 		"--unshare-net",
