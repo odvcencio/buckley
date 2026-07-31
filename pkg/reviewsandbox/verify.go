@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -196,23 +197,29 @@ func (e *Executor) Verify(parent context.Context, request Request) Result {
 	result.Command = resolved
 	result.Argv = append([]string{resolved}, plan.args...)
 
-	var codex string
-	if e.codexCommand != "" {
-		codex, err = resolveExplicitExecutable(e.codexCommand)
-	} else {
-		codex, err = e.lookPath("codex")
+	// The Codex sandbox is the preferred launcher whenever it is installed,
+	// independent of which model backend is driving the review: it is a pure
+	// OS-isolation launcher here, not a review model. When Codex is missing,
+	// a recognized Go build/test/check command still runs under a native,
+	// equally OS-enforced (bubblewrap) sandbox instead of failing outright.
+	codex, codexErr := e.resolveCodex()
+	var bwrap string
+	var bwrapErr error
+	nativeGoEligible := codexErr != nil && language == LanguageGo
+	if nativeGoEligible {
+		bwrap, bwrapErr = e.lookPath("bwrap")
 	}
-	if err != nil {
-		result.Error = fmt.Sprintf("Codex sandbox is unavailable: %v", err)
+	if codexErr != nil && (!nativeGoEligible || bwrapErr != nil) {
+		if nativeGoEligible {
+			result.Error = fmt.Sprintf(
+				"no verification sandbox executor is available: Codex was not found (%v) and the native Go sandbox (bwrap) was not found (%v)",
+				codexErr, bwrapErr)
+		} else {
+			result.Error = fmt.Sprintf(
+				"unsupported verification command: %s %s verification requires the Codex sandbox executor, which is unavailable (%v); only Go build, test, and check commands run without Codex",
+				language, request.Kind, codexErr)
+		}
 		return result
-	}
-	codex, err = filepath.Abs(codex)
-	if err != nil {
-		result.Error = fmt.Sprintf("resolve Codex sandbox executable: %v", err)
-		return result
-	}
-	if canonical, evalErr := filepath.EvalSymlinks(codex); evalErr == nil {
-		codex = canonical
 	}
 
 	runtimeDir, cleanupRuntime, err := e.prepareRuntime()
@@ -241,50 +248,182 @@ func (e *Executor) Verify(parent context.Context, request Request) Result {
 
 	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
-	readRoots := []string{root, filepath.Dir(resolved)}
-	if canonical, evalErr := filepath.EvalSymlinks(resolved); evalErr == nil {
-		readRoots = append(readRoots, filepath.Dir(canonical))
+
+	params := launchParams{root: root, workDir: workDir, resolved: resolved, plan: plan, runtimeDir: runtimeDir, maxOutput: maxOutput}
+	var output commandOutput
+	var runErr error
+	var launchFailure, launcherLabel string
+	if codexErr == nil {
+		launcherLabel = "Codex sandbox"
+		output, runErr, launchFailure = e.runViaCodex(ctx, codex, params)
+	} else {
+		launcherLabel = "native Go sandbox"
+		output, runErr, launchFailure = e.runViaNativeGo(ctx, bwrap, params)
 	}
-	policyArgs := PermissionArgsWithReadRoots(codex, runtimeDir, readRoots...)
-	preflightExecutable, preflightErr := e.lookPath("true")
-	if preflightErr != nil {
-		result.Error = fmt.Sprintf("Codex sandbox preflight is unavailable: %v", preflightErr)
+	if launchFailure != "" {
+		result.Error = launchFailure
 		return result
 	}
-	preflightArgs := []string{"sandbox", "-P", PermissionProfileName, "-C", workDir}
+	return classifyVerificationRun(result, request, language, timeout, launcherLabel, output, runErr)
+}
+
+// resolveCodex resolves the configured or trusted Codex sandbox executable.
+func (e *Executor) resolveCodex() (string, error) {
+	var codex string
+	var err error
+	if e.codexCommand != "" {
+		codex, err = resolveExplicitExecutable(e.codexCommand)
+	} else {
+		codex, err = e.lookPath("codex")
+	}
+	if err != nil {
+		return "", err
+	}
+	codex, err = filepath.Abs(codex)
+	if err != nil {
+		return "", err
+	}
+	if canonical, evalErr := filepath.EvalSymlinks(codex); evalErr == nil {
+		codex = canonical
+	}
+	return codex, nil
+}
+
+// launchParams carries the resolved, already-validated invocation details
+// shared by every sandbox launcher.
+type launchParams struct {
+	root       string
+	workDir    string
+	resolved   string
+	plan       plan
+	runtimeDir string
+	maxOutput  int
+}
+
+// runViaCodex launches the resolved verification command inside Codex's OS
+// sandbox profile. Behavior is unchanged from before this executor gained a
+// native Go verification path: same preflight check, same read-only
+// workspace/toolchain permission profile, same restricted environment.
+func (e *Executor) runViaCodex(ctx context.Context, codex string, params launchParams) (commandOutput, error, string) {
+	readRoots := []string{params.root, filepath.Dir(params.resolved)}
+	if canonical, evalErr := filepath.EvalSymlinks(params.resolved); evalErr == nil {
+		readRoots = append(readRoots, filepath.Dir(canonical))
+	}
+	policyArgs := PermissionArgsWithReadRoots(codex, params.runtimeDir, readRoots...)
+	preflightExecutable, preflightErr := e.lookPath("true")
+	if preflightErr != nil {
+		return commandOutput{}, nil, fmt.Sprintf("Codex sandbox preflight is unavailable: %v", preflightErr)
+	}
+	preflightArgs := []string{"sandbox", "-P", PermissionProfileName, "-C", params.workDir}
 	preflightArgs = append(preflightArgs, policyArgs...)
 	preflightArgs = append(preflightArgs, "--", preflightExecutable)
 	preflight, preflightRunErr := e.run(ctx, commandInvocation{
 		Name: codex,
 		Args: preflightArgs,
-		Dir:  workDir,
-		Env:  RestrictedCommandEnvironment(runtimeDir),
+		Dir:  params.workDir,
+		Env:  RestrictedCommandEnvironment(params.runtimeDir),
 	}, 16*1024)
 	if preflightRunErr != nil || preflight.ExitCode != 0 {
-		result.Error = strings.TrimSpace("Codex sandbox preflight failed: " + preflight.Stderr)
-		if result.Error == "Codex sandbox preflight failed:" {
-			result.Error = fmt.Sprintf("Codex sandbox preflight failed: %v", preflightRunErr)
+		message := strings.TrimSpace("Codex sandbox preflight failed: " + preflight.Stderr)
+		if message == "Codex sandbox preflight failed:" {
+			message = fmt.Sprintf("Codex sandbox preflight failed: %v", preflightRunErr)
 		}
-		return result
+		return commandOutput{}, nil, message
 	}
 
-	sandboxArgs := []string{"sandbox", "-P", PermissionProfileName, "-C", workDir}
+	sandboxArgs := []string{"sandbox", "-P", PermissionProfileName, "-C", params.workDir}
 	sandboxArgs = append(sandboxArgs, policyArgs...)
-	sandboxArgs = append(sandboxArgs, "--", resolved)
-	sandboxArgs = append(sandboxArgs, plan.args...)
+	sandboxArgs = append(sandboxArgs, "--", params.resolved)
+	sandboxArgs = append(sandboxArgs, params.plan.args...)
 	output, runErr := e.run(ctx, commandInvocation{
 		Name: codex,
 		Args: sandboxArgs,
-		Dir:  workDir,
-		Env:  RestrictedCommandEnvironment(runtimeDir),
-	}, maxOutput)
+		Dir:  params.workDir,
+		Env:  RestrictedCommandEnvironment(params.runtimeDir),
+	}, params.maxOutput)
+	return output, runErr, ""
+}
+
+// runViaNativeGo launches a recognized Go build/test/check command through a
+// bubblewrap (bwrap) mount- and network-namespace sandbox when Codex is not
+// installed. It enforces the same invariants as the Codex path: the entire
+// immutable snapshot root and Go toolchain are bind-mounted read-only, the
+// only writable location is the private per-run runtime directory, and the
+// network namespace is unshared so the process has no network access.
+func (e *Executor) runViaNativeGo(ctx context.Context, bwrap string, params launchParams) (commandOutput, error, string) {
+	goRoot := filepath.Dir(filepath.Dir(params.resolved))
+	readRoots := []string{params.root, goRoot}
+	if canonical, evalErr := filepath.EvalSymlinks(params.resolved); evalErr == nil {
+		readRoots = append(readRoots, filepath.Dir(canonical))
+	}
+	home, _ := os.UserHomeDir()
+	if modCache := firstExistingDirectory(filepath.Join(home, "go", "pkg", "mod")); modCache != "" {
+		readRoots = append(readRoots, modCache)
+	}
+	for _, systemRoot := range []string{"/usr", "/etc"} {
+		if info, statErr := os.Stat(systemRoot); statErr == nil && info.IsDir() {
+			readRoots = append(readRoots, systemRoot)
+		}
+	}
+	readRoots = canonicalExistingDirectories(readRoots)
+
+	args := []string{"--tmpfs", "/tmp"}
+	for _, readRoot := range readRoots {
+		args = append(args, "--ro-bind", readRoot, readRoot)
+	}
+	for _, optional := range []string{"/lib", "/lib64"} {
+		args = append(args, "--ro-bind-try", optional, optional)
+	}
+	args = append(args,
+		// Bind the private runtime directory writable, then remount the /tmp
+		// tmpfs itself read-only. bwrap's remount-ro applies only to the exact
+		// mount point given, so the nested runtimeDir bind stays writable while
+		// the rest of /tmp is not: the private runtime directory remains the
+		// only writable location, matching the Codex sandbox invariant exactly.
+		"--bind", params.runtimeDir, params.runtimeDir,
+		"--remount-ro", "/tmp",
+		"--proc", "/proc",
+		"--dev", "/dev",
+		"--unshare-net",
+		"--unshare-uts",
+		"--unshare-ipc",
+		"--die-with-parent",
+		"--chdir", params.workDir,
+		"--clearenv",
+	)
+
+	env := ToolEnvironment(params.runtimeDir)
+	env["GOROOT"] = goRoot
+	keys := make([]string, 0, len(env))
+	for key := range env {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		args = append(args, "--setenv", key, env[key])
+	}
+	args = append(args, "--", params.resolved)
+	args = append(args, params.plan.args...)
+
+	output, runErr := e.run(ctx, commandInvocation{
+		Name: bwrap,
+		Args: args,
+		Dir:  params.workDir,
+	}, params.maxOutput)
+	return output, runErr, ""
+}
+
+// classifyVerificationRun applies the shared PASS/FAIL/UNAVAILABLE
+// classification to a completed sandbox launch, independent of which
+// launcher produced it.
+func classifyVerificationRun(result Result, request Request, language Language, timeout time.Duration, launcherLabel string, output commandOutput, runErr error) Result {
 	result.Stdout = output.Stdout
 	result.Stderr = output.Stderr
 	result.ExitCode = output.ExitCode
 	result.Duration = output.Duration
 	result.Truncated = output.Truncated
 	if runErr != nil {
-		if errors.Is(runErr, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		if errors.Is(runErr, context.DeadlineExceeded) {
 			result.ExitCode = 124
 			result.Status = StatusUnavailable
 			result.Error = fmt.Sprintf("verification timed out after %s", timeout)
@@ -303,7 +442,7 @@ func (e *Executor) Verify(parent context.Context, request Request) Result {
 		}
 		result.Status = StatusUnavailable
 		result.ExitCode = -1
-		result.Error = fmt.Sprintf("Codex sandbox failed to launch: %v", runErr)
+		result.Error = fmt.Sprintf("%s failed to launch: %v", launcherLabel, runErr)
 		return result
 	}
 	if output.ExitCode != 0 {

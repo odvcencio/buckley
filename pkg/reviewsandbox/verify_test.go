@@ -72,10 +72,17 @@ func TestTrustedExecutableDirectoriesPreserveToolchainPriority(t *testing.T) {
 
 func TestSandboxPathPrefersLocalGoToolchainOverSystemGo(t *testing.T) {
 	localGo := filepath.Clean("/usr/local/go/bin/go")
-	systemGo := filepath.Clean("/usr/bin/go")
-	for _, executable := range []string{localGo, systemGo} {
-		if _, err := os.Stat(executable); err != nil {
-			t.Skipf("toolchain priority regression requires %s: %v", executable, err)
+	if _, err := os.Stat(localGo); err != nil {
+		t.Skipf("toolchain priority regression requires %s: %v", localGo, err)
+	}
+	want := localGo
+	home, _ := os.UserHomeDir()
+	sdkBins := appendGlobDirectoriesDescending(nil, filepath.Join(home, "sdk", "go*", "bin"))
+	for _, sdkBin := range sdkBins {
+		candidate := filepath.Join(sdkBin, "go")
+		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+			want = filepath.Clean(candidate)
+			break
 		}
 	}
 
@@ -83,15 +90,49 @@ func TestSandboxPathPrefersLocalGoToolchainOverSystemGo(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resolved != localGo {
-		t.Fatalf("trusted Go executable = %q, want preferred toolchain %q", resolved, localGo)
+	if resolved != want {
+		t.Fatalf("trusted Go executable = %q, want preferred toolchain %q", resolved, want)
 	}
 
 	pathDirectories := filepath.SplitList(ToolEnvironment(t.TempDir())["PATH"])
+	preferredIndex := indexOf(pathDirectories, filepath.Dir(want))
 	localIndex := indexOf(pathDirectories, filepath.Dir(localGo))
-	systemIndex := indexOf(pathDirectories, filepath.Dir(systemGo))
-	if localIndex < 0 || systemIndex < 0 || localIndex >= systemIndex {
-		t.Fatalf("sandbox PATH toolchain priority = %#v, want %q before %q", pathDirectories, filepath.Dir(localGo), filepath.Dir(systemGo))
+	if preferredIndex < 0 || localIndex < 0 || preferredIndex > localIndex {
+		t.Fatalf("sandbox PATH toolchain priority = %#v, want %q no later than %q", pathDirectories, filepath.Dir(want), filepath.Dir(localGo))
+	}
+}
+
+func TestGoSDKDirectoriesUseSemanticVersionOrder(t *testing.T) {
+	root := t.TempDir()
+	for _, version := range []string{"go1.9.7", "go1.26.0", "go1.25.10"} {
+		if err := os.MkdirAll(filepath.Join(root, version, "bin"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got := appendGlobDirectoriesDescending(nil, filepath.Join(root, "go*", "bin"))
+	want := []string{
+		filepath.Join(root, "go1.26.0", "bin"),
+		filepath.Join(root, "go1.25.10", "bin"),
+		filepath.Join(root, "go1.9.7", "bin"),
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("Go SDK order = %#v, want %#v", got, want)
+	}
+}
+
+func TestReviewReadRootsIncludeSelectedGoSDK(t *testing.T) {
+	resolved, err := trustedLookPath("go")
+	if err != nil {
+		t.Skipf("trusted Go toolchain is not installed: %v", err)
+	}
+	home, _ := os.UserHomeDir()
+	sdkRoot := filepath.Join(home, "sdk")
+	goRoot := filepath.Dir(filepath.Dir(resolved))
+	if relative, err := filepath.Rel(sdkRoot, goRoot); err != nil || relative == "." || strings.HasPrefix(relative, "..") {
+		t.Skipf("selected Go toolchain %q is not a user SDK", resolved)
+	}
+	if indexOf(reviewReadRoots("true"), goRoot) < 0 {
+		t.Fatalf("review read roots omit selected Go SDK root %q", goRoot)
 	}
 }
 
@@ -254,6 +295,147 @@ func TestExecutorClassifiesCommandFailureAndSandboxUnavailable(t *testing.T) {
 			t.Fatalf("no-test result = %#v", result)
 		}
 	})
+}
+
+func TestExecutorPrefersCodexOverNativeGoWhenBothAvailable(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module example.test/review\n\ngo 1.25\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	executor := NewExecutorWithCodexCommand("/usr/bin/true")
+	executor.lookPath = func(name string) (string, error) {
+		switch name {
+		case "go":
+			return "/usr/local/go/bin/go", nil
+		case "true":
+			return "/usr/bin/true", nil
+		case "bwrap":
+			return "/usr/bin/bwrap", nil
+		default:
+			return "", errors.New("unexpected executable: " + name)
+		}
+	}
+	var invocations []commandInvocation
+	executor.run = func(_ context.Context, invocation commandInvocation, _ int) (commandOutput, error) {
+		invocations = append(invocations, invocation)
+		return commandOutput{ExitCode: 0}, nil
+	}
+	result := executor.Verify(context.Background(), Request{SnapshotRoot: root, Kind: KindBuild, Language: LanguageGo})
+	if result.Status != StatusPass {
+		t.Fatalf("verification = %#v", result)
+	}
+	if len(invocations) != 2 {
+		t.Fatalf("invocations = %d, want Codex preflight + run", len(invocations))
+	}
+	for _, invocation := range invocations {
+		if invocation.Name != "/usr/bin/true" {
+			t.Fatalf("launcher = %q, want Codex to be preferred over the native bwrap sandbox when both are available", invocation.Name)
+		}
+	}
+}
+
+func TestExecutorRoutesGoVerificationToNativeSandboxWhenCodexUnavailable(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module example.test/review\n\ngo 1.25\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	executor := NewExecutorWithCodexCommand("")
+	executor.lookPath = func(name string) (string, error) {
+		switch name {
+		case "go":
+			return "/usr/local/go/bin/go", nil
+		case "bwrap":
+			return "/usr/bin/bwrap", nil
+		case "codex":
+			return "", errors.New("trusted executable \"codex\" was not found")
+		default:
+			return "", errors.New("unexpected executable: " + name)
+		}
+	}
+	var invocations []commandInvocation
+	executor.run = func(_ context.Context, invocation commandInvocation, _ int) (commandOutput, error) {
+		invocations = append(invocations, invocation)
+		return commandOutput{ExitCode: 0, Stdout: "ok"}, nil
+	}
+	result := executor.Verify(context.Background(), Request{SnapshotRoot: root, Kind: KindTest, Language: LanguageGo, Pattern: "TestFocused"})
+	if result.Status != StatusPass || result.ExitCode != 0 {
+		t.Fatalf("verification = %#v", result)
+	}
+	if len(invocations) != 1 {
+		t.Fatalf("invocations = %d, want exactly one native bwrap launch (no Codex preflight)", len(invocations))
+	}
+	invocation := invocations[0]
+	if invocation.Name != "/usr/bin/bwrap" {
+		t.Fatalf("launcher = %q, want native bwrap sandbox", invocation.Name)
+	}
+	if indexOf(invocation.Args, "--unshare-net") < 0 {
+		t.Fatalf("native sandbox args omit network isolation: %#v", invocation.Args)
+	}
+	wantArgv := []string{"/usr/local/go/bin/go", "test", "-count=1", "-v", "-run", "^(TestFocused)$", "."}
+	separator := indexOf(invocation.Args, "--")
+	if separator < 0 || !reflect.DeepEqual(invocation.Args[separator+1:], wantArgv) {
+		t.Fatalf("native sandbox did not receive exact verification argv: %#v", invocation.Args)
+	}
+}
+
+func TestExecutorReturnsUnsupportedCommandForNonGoLanguageWithoutCodex(t *testing.T) {
+	root := t.TempDir()
+	executor := NewExecutorWithCodexCommand("")
+	executor.lookPath = func(name string) (string, error) {
+		switch name {
+		case "cargo":
+			return "/usr/local/bin/cargo", nil
+		case "codex":
+			return "", errors.New("trusted executable \"codex\" was not found")
+		default:
+			return "", errors.New("unexpected executable: " + name)
+		}
+	}
+	executor.run = func(context.Context, commandInvocation, int) (commandOutput, error) {
+		t.Fatal("a non-Go command must not be launched without Codex")
+		return commandOutput{}, nil
+	}
+	result := executor.Verify(context.Background(), Request{SnapshotRoot: root, Kind: KindBuild, Language: LanguageRust})
+	if result.Status != StatusUnavailable {
+		t.Fatalf("status = %s, want UNAVAILABLE", result.Status)
+	}
+	if !strings.Contains(result.Error, "unsupported verification command") {
+		t.Fatalf("error = %q, want a clear unsupported-command message", result.Error)
+	}
+	if strings.Contains(result.Error, "Codex sandbox is unavailable") {
+		t.Fatalf("error = %q, must not reuse the misleading legacy message", result.Error)
+	}
+}
+
+func TestExecutorReturnsClearMessageWhenNoSandboxLauncherIsAvailableForGo(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module example.test/review\n\ngo 1.25\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	executor := NewExecutorWithCodexCommand("")
+	executor.lookPath = func(name string) (string, error) {
+		switch name {
+		case "go":
+			return "/usr/local/go/bin/go", nil
+		case "codex":
+			return "", errors.New("trusted executable \"codex\" was not found")
+		case "bwrap":
+			return "", errors.New("trusted executable \"bwrap\" was not found")
+		default:
+			return "", errors.New("unexpected executable: " + name)
+		}
+	}
+	executor.run = func(context.Context, commandInvocation, int) (commandOutput, error) {
+		t.Fatal("verification must not launch without any resolved sandbox")
+		return commandOutput{}, nil
+	}
+	result := executor.Verify(context.Background(), Request{SnapshotRoot: root, Kind: KindBuild, Language: LanguageGo})
+	if result.Status != StatusUnavailable {
+		t.Fatalf("status = %s, want UNAVAILABLE", result.Status)
+	}
+	if !strings.Contains(result.Error, "Codex") || !strings.Contains(result.Error, "bwrap") {
+		t.Fatalf("error = %q, want it to name both unavailable launchers", result.Error)
+	}
 }
 
 func TestSessionExecutorReusesAndRemovesPrivateRuntime(t *testing.T) {

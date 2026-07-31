@@ -148,6 +148,13 @@ type Config struct {
 	Input          InputConfig          `yaml:"input"`
 	Diagnostics    DiagnosticsConfig    `yaml:"diagnostics"`
 	Notify         NotifyConfig         `yaml:"notify"`
+
+	// Context Fabric / durable agent runtime scaffolding. All flags default
+	// off or to current (legacy) behavior; no runtime code reads these yet.
+	ContextFabric   ContextFabricConfig   `yaml:"context_fabric"`
+	AgentController AgentControllerConfig `yaml:"agent_controller"`
+	AgentOperations AgentOperationsConfig `yaml:"agent_operations"`
+	Metrics         MetricsConfig         `yaml:"metrics"`
 }
 
 // NotifyConfig controls async notifications for human-in-the-loop workflows
@@ -314,6 +321,15 @@ type MemoryConfig struct {
 	RetrievalEnabled     bool    `yaml:"retrieval_enabled"`
 	RetrievalLimit       int     `yaml:"retrieval_limit"`
 	RetrievalMaxTokens   int     `yaml:"retrieval_max_tokens"`
+
+	// M31 memory adapter scaffolding (Context Fabric spec section 27). Every
+	// external adapter is optional; a missing binary or service MUST NOT
+	// prevent local Buckley operation.
+	RalphCompatibility bool `yaml:"ralph_compatibility"`
+	HyphaeRecall       bool `yaml:"hyphae_recall"`
+	HyphaePromotion    bool `yaml:"hyphae_promotion"`
+	TillerInterchange  bool `yaml:"tiller_interchange"`
+	GraftVCS           bool `yaml:"graft_vcs"`
 }
 
 // OrchestratorConfig controls feature orchestration
