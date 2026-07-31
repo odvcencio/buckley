@@ -341,8 +341,28 @@ type RequestTokenEstimate struct {
 }
 
 // EstimateRequestTokens includes tool schemas and request controls, which the
-// conversation-only char/4 estimator historically missed.
+// conversation-only char/4 estimator historically missed. It walks the
+// request fields directly instead of JSON-marshaling the whole request (the
+// prior implementation, kept unexported below as
+// estimateRequestTokensByMarshal for differential testing), adding a JSON
+// envelope estimate -- key names, quotes, and an escaping approximation for
+// the characters Go's encoder treats specially -- on top of each field's raw
+// byte length so the result tracks the marshal-based byte count.
 func EstimateRequestTokens(req ChatRequest) RequestTokenEstimate {
+	estimate := RequestTokenEstimate{
+		Messages: estimateMessagesBytes(req.Messages) / 4,
+		Tools:    estimateToolsBytes(req.Tools) / 4,
+		Fixed:    estimateFixedRequestBytes(req) / 4,
+	}
+	estimate.Total = estimate.Messages + estimate.Tools + estimate.Fixed
+	return estimate
+}
+
+// estimateRequestTokensByMarshal is the original JSON-marshal-based
+// estimator. It stays unexported and unused in production so the
+// differential test in types_field_estimate_test.go can assert the
+// field-walk estimate above tracks it within tolerance.
+func estimateRequestTokensByMarshal(req ChatRequest) RequestTokenEstimate {
 	messages, _ := json.Marshal(req.Messages)
 	tools, _ := json.Marshal(req.Tools)
 	copyReq := req
@@ -356,6 +376,559 @@ func EstimateRequestTokens(req ChatRequest) RequestTokenEstimate {
 	}
 	estimate.Total = estimate.Messages + estimate.Tools + estimate.Fixed
 	return estimate
+}
+
+// jsonStringBytes approximates the JSON-encoded byte length of s as a quoted
+// string literal, including the escaping Go's encoder applies to quotes,
+// backslashes, common control characters, and (by default) the HTML-unsafe
+// runes '<', '>', and '&'.
+func jsonStringBytes(s string) int {
+	n := len(s) + 2 // opening and closing quotes
+	for i := 0; i < len(s); i++ {
+		switch c := s[i]; {
+		case c == '"' || c == '\\':
+			n++ // one raw byte becomes a two-byte escape
+		case c == '\n' || c == '\r' || c == '\t' || c == '\b' || c == '\f':
+			n++ // one raw byte becomes a two-byte escape
+		case c < 0x20:
+			n += 5 // one raw byte becomes a six-byte \u00XX escape
+		case c == '<' || c == '>' || c == '&':
+			n += 5 // one raw byte becomes a six-byte \uXXXX escape
+		}
+	}
+	return n
+}
+
+func jsonNumberBytes(n int) int {
+	if n == 0 {
+		return 1
+	}
+	digits := 0
+	if n < 0 {
+		digits++
+		n = -n
+	}
+	for n > 0 {
+		digits++
+		n /= 10
+	}
+	return digits
+}
+
+func jsonFloatBytes(f float64) int {
+	return len(strconv.FormatFloat(f, 'g', -1, 64))
+}
+
+func jsonBoolBytes(b bool) int {
+	if b {
+		return 4 // true
+	}
+	return 5 // false
+}
+
+// jsonKeyValueBytes returns the bytes contributed by one "key":value pair
+// (excluding the separating comma, which callers add between fields).
+func jsonKeyValueBytes(key string, valueBytes int) int {
+	return len(key) + 3 + valueBytes // quotes (2) + colon (1)
+}
+
+// estimateAnyBytes walks an arbitrary decoded-JSON value (as produced by
+// map[string]any/[]any-shaped request fields such as tool schemas and
+// provider routing preferences) without marshaling it. Shapes outside the
+// common decoded-JSON set fall back to json.Marshal; those fields are small
+// and infrequent relative to message content, so the allocation there does
+// not reintroduce the cost this estimator avoids for the message-heavy path.
+func estimateAnyBytes(v any) int {
+	switch t := v.(type) {
+	case nil:
+		return 4 // null
+	case string:
+		return jsonStringBytes(t)
+	case bool:
+		return jsonBoolBytes(t)
+	case float64:
+		return jsonFloatBytes(t)
+	case int:
+		return jsonNumberBytes(t)
+	case json.RawMessage:
+		if t == nil {
+			return 4
+		}
+		return len(t)
+	case map[string]any:
+		return estimateAnyMapBytes(t)
+	case []any:
+		return estimateAnySliceBytes(t)
+	default:
+		encoded, err := json.Marshal(v)
+		if err != nil {
+			return 4
+		}
+		return len(encoded)
+	}
+}
+
+func estimateAnyMapBytes(m map[string]any) int {
+	if m == nil {
+		return 4
+	}
+	if len(m) == 0 {
+		return 2
+	}
+	n := 2
+	i := 0
+	for key, value := range m {
+		if i > 0 {
+			n++
+		}
+		n += jsonKeyValueBytes(key, estimateAnyBytes(value))
+		i++
+	}
+	return n
+}
+
+func estimateAnySliceBytes(values []any) int {
+	if values == nil {
+		return 4
+	}
+	if len(values) == 0 {
+		return 2
+	}
+	n := 2
+	for i, value := range values {
+		if i > 0 {
+			n++
+		}
+		n += estimateAnyBytes(value)
+	}
+	return n
+}
+
+func estimateStringMapBytes(m map[string]string) int {
+	if m == nil {
+		return 4
+	}
+	if len(m) == 0 {
+		return 2
+	}
+	n := 2
+	i := 0
+	for key, value := range m {
+		if i > 0 {
+			n++
+		}
+		n += jsonKeyValueBytes(key, jsonStringBytes(value))
+		i++
+	}
+	return n
+}
+
+func estimateStringSliceBytes(values []string) int {
+	if values == nil {
+		return 4
+	}
+	if len(values) == 0 {
+		return 2
+	}
+	n := 2
+	for i, value := range values {
+		if i > 0 {
+			n++
+		}
+		n += jsonStringBytes(value)
+	}
+	return n
+}
+
+func estimateMessagesBytes(messages []Message) int {
+	if messages == nil {
+		return 4
+	}
+	if len(messages) == 0 {
+		return 2
+	}
+	n := 2
+	for i, msg := range messages {
+		if i > 0 {
+			n++
+		}
+		n += estimateMessageBytes(msg)
+	}
+	return n
+}
+
+// estimateMessageBytes mirrors Message.MarshalJSON's field order and
+// omitempty rules (role and content differ: role has no omitempty tag, and
+// an any-typed content field with omitempty is only skipped when the
+// interface itself is nil, not when it holds an empty string).
+func estimateMessageBytes(msg Message) int {
+	n := 2
+	fields := 0
+
+	n += jsonKeyValueBytes("role", jsonStringBytes(msg.Role))
+	fields++
+
+	if msg.Content != nil {
+		n += jsonKeyValueBytes("content", estimateContentBytes(msg.Content))
+		fields++
+	}
+	if len(msg.ToolCalls) > 0 {
+		n += jsonKeyValueBytes("tool_calls", estimateToolCallsBytes(msg.ToolCalls))
+		fields++
+	}
+	if msg.ToolCallID != "" {
+		n += jsonKeyValueBytes("tool_call_id", jsonStringBytes(msg.ToolCallID))
+		fields++
+	}
+	if msg.Name != "" {
+		n += jsonKeyValueBytes("name", jsonStringBytes(msg.Name))
+		fields++
+	}
+	if msg.Reasoning != "" {
+		n += jsonKeyValueBytes("reasoning", jsonStringBytes(msg.Reasoning))
+		fields++
+	}
+	if len(msg.ReasoningDetails) > 0 {
+		n += jsonKeyValueBytes("reasoning_details", estimateReasoningDetailsBytes(msg.ReasoningDetails))
+		fields++
+	}
+	if fields > 1 {
+		n += fields - 1
+	}
+	return n
+}
+
+func estimateContentBytes(content any) int {
+	switch v := content.(type) {
+	case string:
+		return jsonStringBytes(v)
+	case []ContentPart:
+		return estimateContentPartsBytes(v)
+	default:
+		// Rare shapes (e.g. []any content parts from a JSON round-trip) are
+		// not on the hot per-turn estimation path, so a direct marshal here
+		// trades a small, infrequent allocation for correctness.
+		encoded, err := json.Marshal(v)
+		if err != nil {
+			return 4
+		}
+		return len(encoded)
+	}
+}
+
+func estimateContentPartsBytes(parts []ContentPart) int {
+	if parts == nil {
+		return 4
+	}
+	if len(parts) == 0 {
+		return 2
+	}
+	n := 2
+	for i, part := range parts {
+		if i > 0 {
+			n++
+		}
+		n += estimateContentPartBytes(part)
+	}
+	return n
+}
+
+func estimateContentPartBytes(part ContentPart) int {
+	n := 2
+	fields := 1
+	n += jsonKeyValueBytes("type", jsonStringBytes(part.Type))
+	if part.Text != "" {
+		n += jsonKeyValueBytes("text", jsonStringBytes(part.Text))
+		fields++
+	}
+	if part.ImageURL != nil {
+		n += jsonKeyValueBytes("image_url", estimateImageURLBytes(*part.ImageURL))
+		fields++
+	}
+	if part.CacheControl != nil {
+		n += jsonKeyValueBytes("cache_control", estimateCacheControlBytes(*part.CacheControl))
+		fields++
+	}
+	if fields > 1 {
+		n += fields - 1
+	}
+	return n
+}
+
+func estimateImageURLBytes(img ImageURL) int {
+	n := 2
+	fields := 1
+	n += jsonKeyValueBytes("url", jsonStringBytes(img.URL))
+	if img.Detail != "" {
+		n += jsonKeyValueBytes("detail", jsonStringBytes(img.Detail))
+		fields++
+	}
+	if fields > 1 {
+		n += fields - 1
+	}
+	return n
+}
+
+func estimateCacheControlBytes(cc CacheControl) int {
+	n := 2
+	fields := 1
+	n += jsonKeyValueBytes("type", jsonStringBytes(cc.Type))
+	if cc.TTL != "" {
+		n += jsonKeyValueBytes("ttl", jsonStringBytes(cc.TTL))
+		fields++
+	}
+	if fields > 1 {
+		n += fields - 1
+	}
+	return n
+}
+
+func estimateToolCallsBytes(calls []ToolCall) int {
+	if calls == nil {
+		return 4
+	}
+	if len(calls) == 0 {
+		return 2
+	}
+	n := 2
+	for i, call := range calls {
+		if i > 0 {
+			n++
+		}
+		n += estimateToolCallBytes(call)
+	}
+	return n
+}
+
+func estimateToolCallBytes(call ToolCall) int {
+	n := 2
+	n += jsonKeyValueBytes("id", jsonStringBytes(call.ID))
+	n++
+	n += jsonKeyValueBytes("type", jsonStringBytes(call.Type))
+	n++
+	n += jsonKeyValueBytes("function", estimateFunctionCallBytes(call.Function))
+	return n
+}
+
+func estimateFunctionCallBytes(fn FunctionCall) int {
+	n := 2
+	n += jsonKeyValueBytes("name", jsonStringBytes(fn.Name))
+	n++
+	n += jsonKeyValueBytes("arguments", jsonStringBytes(fn.Arguments))
+	return n
+}
+
+func estimateReasoningDetailsBytes(details []ReasoningDetail) int {
+	if details == nil {
+		return 4
+	}
+	if len(details) == 0 {
+		return 2
+	}
+	n := 2
+	for i, detail := range details {
+		if i > 0 {
+			n++
+		}
+		n += estimateReasoningDetailBytes(detail)
+	}
+	return n
+}
+
+// estimateReasoningDetailBytes mirrors ReasoningDetail.MarshalJSON's field
+// set (Extra keys plus the conditionally-included named fields).
+func estimateReasoningDetailBytes(detail ReasoningDetail) int {
+	n := 2
+	fields := 0
+	for key, raw := range detail.Extra {
+		n += jsonKeyValueBytes(key, len(raw))
+		fields++
+	}
+	if detail.Type != "" {
+		n += jsonKeyValueBytes("type", jsonStringBytes(detail.Type))
+		fields++
+	}
+	if detail.ID != "" {
+		n += jsonKeyValueBytes("id", jsonStringBytes(detail.ID))
+		fields++
+	}
+	if detail.HasIndex || detail.Index != 0 {
+		n += jsonKeyValueBytes("index", jsonNumberBytes(detail.Index))
+		fields++
+	}
+	if detail.Text != "" {
+		n += jsonKeyValueBytes("text", jsonStringBytes(detail.Text))
+		fields++
+	}
+	if detail.Summary != "" {
+		n += jsonKeyValueBytes("summary", jsonStringBytes(detail.Summary))
+		fields++
+	}
+	if detail.Data != "" {
+		n += jsonKeyValueBytes("data", jsonStringBytes(detail.Data))
+		fields++
+	}
+	if detail.Signature != nil {
+		n += jsonKeyValueBytes("signature", jsonStringBytes(*detail.Signature))
+		fields++
+	}
+	if detail.Format != "" {
+		n += jsonKeyValueBytes("format", jsonStringBytes(detail.Format))
+		fields++
+	}
+	if fields > 1 {
+		n += fields - 1
+	}
+	return n
+}
+
+func estimateToolsBytes(tools []map[string]any) int {
+	if tools == nil {
+		return 4
+	}
+	if len(tools) == 0 {
+		return 2
+	}
+	n := 2
+	for i, tool := range tools {
+		if i > 0 {
+			n++
+		}
+		n += estimateAnyMapBytes(tool)
+	}
+	return n
+}
+
+func estimateReasoningConfigBytes(cfg ReasoningConfig) int {
+	n := 2
+	fields := 0
+	if cfg.Effort != "" {
+		n += jsonKeyValueBytes("effort", jsonStringBytes(cfg.Effort))
+		fields++
+	}
+	if cfg.MaxTokens != 0 {
+		n += jsonKeyValueBytes("max_tokens", jsonNumberBytes(cfg.MaxTokens))
+		fields++
+	}
+	if cfg.Enabled != nil {
+		n += jsonKeyValueBytes("enabled", jsonBoolBytes(*cfg.Enabled))
+		fields++
+	}
+	if cfg.Exclude != nil {
+		n += jsonKeyValueBytes("exclude", jsonBoolBytes(*cfg.Exclude))
+		fields++
+	}
+	if fields > 1 {
+		n += fields - 1
+	}
+	return n
+}
+
+// estimateFixedRequestBytes mirrors ChatRequest's field order and omitempty
+// rules for every field except Messages and Tools, which EstimateRequestTokens
+// accounts for separately (matching estimateRequestTokensByMarshal, which
+// nils those two fields before marshaling the rest). Messages has no
+// omitempty tag, so even nilled it contributes a "messages":null pair; Tools
+// has omitempty, so nilled it contributes nothing here.
+func estimateFixedRequestBytes(req ChatRequest) int {
+	n := 2
+	fields := 0
+
+	n += jsonKeyValueBytes("model", jsonStringBytes(req.Model))
+	fields++
+
+	if len(req.Models) > 0 {
+		n += jsonKeyValueBytes("models", estimateStringSliceBytes(req.Models))
+		fields++
+	}
+
+	n += jsonKeyValueBytes("messages", 4) // "messages":null
+	fields++
+
+	if req.Temperature != 0 {
+		n += jsonKeyValueBytes("temperature", jsonFloatBytes(req.Temperature))
+		fields++
+	}
+	if req.MaxTokens != 0 {
+		n += jsonKeyValueBytes("max_tokens", jsonNumberBytes(req.MaxTokens))
+		fields++
+	}
+	if req.MaxCompletionTokens != 0 {
+		n += jsonKeyValueBytes("max_completion_tokens", jsonNumberBytes(req.MaxCompletionTokens))
+		fields++
+	}
+
+	n += jsonKeyValueBytes("stream", jsonBoolBytes(req.Stream))
+	fields++
+
+	// Tools is intentionally skipped: EstimateRequestTokens computes it via
+	// estimateToolsBytes, same as the marshal-based split.
+
+	if req.ToolChoice != "" {
+		n += jsonKeyValueBytes("tool_choice", jsonStringBytes(req.ToolChoice))
+		fields++
+	}
+	if req.ParallelToolCalls != nil {
+		n += jsonKeyValueBytes("parallel_tool_calls", jsonBoolBytes(*req.ParallelToolCalls))
+		fields++
+	}
+	if req.Reasoning != nil {
+		n += jsonKeyValueBytes("reasoning", estimateReasoningConfigBytes(*req.Reasoning))
+		fields++
+	}
+	if req.IncludeReasoning != nil {
+		n += jsonKeyValueBytes("include_reasoning", jsonBoolBytes(*req.IncludeReasoning))
+		fields++
+	}
+	if len(req.Transforms) > 0 {
+		n += jsonKeyValueBytes("transforms", estimateStringSliceBytes(req.Transforms))
+		fields++
+	}
+	if len(req.Provider) > 0 {
+		n += jsonKeyValueBytes("provider", estimateAnyMapBytes(req.Provider))
+		fields++
+	}
+	if len(req.ResponseFormat) > 0 {
+		n += jsonKeyValueBytes("response_format", estimateAnyMapBytes(req.ResponseFormat))
+		fields++
+	}
+	if req.Seed != nil {
+		n += jsonKeyValueBytes("seed", jsonNumberBytes(*req.Seed))
+		fields++
+	}
+	if req.ServiceTier != "" {
+		n += jsonKeyValueBytes("service_tier", jsonStringBytes(req.ServiceTier))
+		fields++
+	}
+	if req.SessionID != "" {
+		n += jsonKeyValueBytes("session_id", jsonStringBytes(req.SessionID))
+		fields++
+	}
+	if len(req.Metadata) > 0 {
+		n += jsonKeyValueBytes("metadata", estimateStringMapBytes(req.Metadata))
+		fields++
+	}
+	if len(req.Trace) > 0 {
+		n += jsonKeyValueBytes("trace", estimateStringMapBytes(req.Trace))
+		fields++
+	}
+	if req.CacheControl != nil {
+		n += jsonKeyValueBytes("cache_control", estimateCacheControlBytes(*req.CacheControl))
+		fields++
+	}
+	if req.PromptCacheKey != "" {
+		n += jsonKeyValueBytes("prompt_cache_key", jsonStringBytes(req.PromptCacheKey))
+		fields++
+	}
+	if req.PromptCacheRetention != "" {
+		n += jsonKeyValueBytes("prompt_cache_retention", jsonStringBytes(req.PromptCacheRetention))
+		fields++
+	}
+
+	if fields > 1 {
+		n += fields - 1
+	}
+	return n
 }
 
 // ModelCatalog represents the list of available models
