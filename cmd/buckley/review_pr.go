@@ -486,6 +486,7 @@ func runPRReviewWithOptions(ctx context.Context, prRef string, framework *onesho
 		spinner.StopWithError(err.Error())
 		return nil, nil, fmt.Errorf("assemble PR context: %w", err)
 	}
+	spinner.SetMessage("Reviewing immutable PR head...")
 
 	if willPost {
 		gateCfg := opts.postingGateOrDefault()
@@ -562,6 +563,7 @@ func runPRReviewWithOptions(ctx context.Context, prRef string, framework *onesho
 		}
 		return nil, prCtx.PR, fmt.Errorf("review failed: %w", runErr)
 	}
+	spinner.SetMessage("Revalidating PR head...")
 	if err := commands.RevalidatePRContext(prCtx); err != nil {
 		spinner.StopWithError(err.Error())
 		revalidationErr := fmt.Errorf("review target changed or could not be revalidated: %w", err)
