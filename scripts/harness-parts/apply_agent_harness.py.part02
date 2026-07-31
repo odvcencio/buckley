@@ -94,6 +94,7 @@ replace_once(
 )
 
 # Both shell and dynamic code inherit the same optional compose-container mode.
+replace_once("pkg/tool/containers.go", '\t"m31labs.dev/buckley/v2/pkg/tool/builtin"\n', "")
 replace_section(
     "pkg/tool/containers.go",
     "func (r *Registry) enableShellContainerMode(composePath, service, workDir string) {",
@@ -113,10 +114,18 @@ replace_section(
 }
 ''',
 )
-replace_section(
+replace_once(
     "pkg/tool/containers.go",
-    "func (r *Registry) disableShellContainerMode() {",
-    "\n}",
+    '''func (r *Registry) disableShellContainerMode() {
+	tool, ok := r.Get("run_shell")
+	if !ok {
+		return
+	}
+	if shell, ok := tool.(*builtin.ShellCommandTool); ok {
+		shell.ConfigureContainerMode("", "", "")
+	}
+}
+''',
     '''func (r *Registry) disableShellContainerMode() {
 	for _, name := range []string{"run_shell", "run_code"} {
 		current, ok := r.Get(name)
@@ -129,6 +138,7 @@ replace_section(
 			configurable.ConfigureContainerMode("", "", "")
 		}
 	}
+}
 ''',
 )
 
