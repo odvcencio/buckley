@@ -1,0 +1,71 @@
+name: Apply adaptive agent harness
+
+on:
+  push:
+    branches:
+      - agent/clickable-sidebar-activity
+    paths:
+      - .github/workflows/apply-agent-harness.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: ${{ !contains(github.event.head_commit.message, '[harness-applied]') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          ref: agent/clickable-sidebar-activity
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Apply harness source transform
+        run: |
+          cat scripts/harness-parts/apply_agent_harness.py.part01 \
+              scripts/harness-parts/apply_agent_harness.py.part02 \
+              > scripts/apply_agent_harness.py
+          python scripts/apply_agent_harness.py
+
+      - name: Format and validate changed source
+        run: |
+          gofmt -w \
+            pkg/agentloop/governor.go \
+            pkg/agentloop/governor_test.go \
+            pkg/conversation/context_projection.go \
+            pkg/conversation/context_projection_test.go \
+            pkg/conversation/efficient_context.go \
+            pkg/model/context_error.go \
+            pkg/model/context_error_test.go \
+            pkg/tool/builtin/run_code.go \
+            pkg/tool/builtin/run_code_test.go \
+            pkg/tool/containers.go \
+            pkg/tool/middleware_sandbox.go \
+            pkg/tool/registry_setup.go \
+            pkg/toolrunner/execution.go \
+            pkg/toolrunner/loop_guard.go \
+            pkg/toolrunner/loop_guard_test.go \
+            pkg/ui/tui/tool_loop.go \
+            pkg/ui/tui/tool_loop_guard.go \
+            pkg/ui/tui/tool_loop_guard_test.go
+          git diff --check
+
+      - name: Run repository Go tests
+        run: ./scripts/test.sh
+
+      - name: Commit applied harness
+        run: |
+          rm -f scripts/apply_agent_harness.py
+          rm -rf scripts/harness-parts
+          rm -f .github/workflows/apply-agent-harness.yml
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add -A
+          git commit -m "feat(agent): add adaptive context and loop governor [harness-applied]"
+          git push
