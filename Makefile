@@ -37,6 +37,14 @@ build-cli:
 .PHONY: build
 build: web build-cli
 
+# Kubernetes batch execution (pkg/orchestrator/batch_coordinator.go) is gated
+# behind the batch_k8s build tag so the default binary does not carry the
+# k8s.io/client-go dependency tree. Use this target for batch-capable builds.
+.PHONY: build-batch
+build-batch:
+	@echo "Building buckley (with Kubernetes batch support)..."
+	CGO_ENABLED=0 go build -tags batch_k8s -ldflags="-s -w" -o buckley ./cmd/buckley
+
 .PHONY: dev
 dev:
 	@echo "Building and running buckley..."

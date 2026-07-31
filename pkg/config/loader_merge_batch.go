@@ -1,7 +1,5 @@
 package config
 
-import corev1 "k8s.io/api/core/v1"
-
 func mergeBatchConfig(base, override *Config, raw map[string]any) {
 	if boolFieldSet(raw, "batch", "enabled") {
 		base.Batch.Enabled = override.Batch.Enabled
@@ -94,7 +92,7 @@ func mergeBatchConfig(base, override *Config, raw map[string]any) {
 		}
 	}
 	if boolFieldSet(raw, "batch", "job_template", "tolerations") {
-		base.Batch.JobTemplate.Tolerations = append([]corev1.Toleration{}, override.Batch.JobTemplate.Tolerations...)
+		base.Batch.JobTemplate.Tolerations = append([]BatchTolerationConfig{}, override.Batch.JobTemplate.Tolerations...)
 	}
 	if boolFieldSet(raw, "batch", "job_template", "affinity") {
 		base.Batch.JobTemplate.Affinity = override.Batch.JobTemplate.Affinity

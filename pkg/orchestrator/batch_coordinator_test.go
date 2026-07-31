@@ -1,10 +1,11 @@
+//go:build batch_k8s
+
 package orchestrator
 
 import (
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/client-go/kubernetes/fake"
 	"m31labs.dev/buckley/v2/pkg/config"
 )
@@ -28,29 +29,25 @@ func TestBatchCoordinatorBuildJobRendersTemplates(t *testing.T) {
 			WorkspaceClaim:     "buckley-workspace",
 			WorkspaceMountPath: "/workspace",
 			BackoffLimit:       1,
-			Resources: corev1.ResourceRequirements{
-				Limits: corev1.ResourceList{
-					corev1.ResourceCPU: resource.MustParse("500m"),
-				},
-				Requests: corev1.ResourceList{
-					corev1.ResourceMemory: resource.MustParse("256Mi"),
-				},
+			Resources: config.BatchResourcesConfig{
+				Limits:   map[string]string{"cpu": "500m"},
+				Requests: map[string]string{"memory": "256Mi"},
 			},
 			EnvFromSecrets:    []string{"buckley-env"},
 			EnvFromConfigMaps: []string{"buckley-configmap"},
 			NodeSelector: map[string]string{
 				"kubernetes.io/os": "linux",
 			},
-			Tolerations: []corev1.Toleration{
+			Tolerations: []config.BatchTolerationConfig{
 				{
 					Key:      "dedicated",
-					Operator: corev1.TolerationOpEqual,
+					Operator: "Equal",
 					Value:    "buckley",
-					Effect:   corev1.TaintEffectNoSchedule,
+					Effect:   "NoSchedule",
 				},
 			},
-			Affinity: &corev1.Affinity{
-				NodeAffinity: &corev1.NodeAffinity{},
+			Affinity: map[string]any{
+				"nodeAffinity": map[string]any{},
 			},
 			ConfigMap:          "buckley-config",
 			ConfigMapMountPath: "/home/buckley/.buckley/config.yaml",
@@ -67,7 +64,10 @@ func TestBatchCoordinatorBuildJobRendersTemplates(t *testing.T) {
 	task := &Task{ID: "task-1", Title: "Implement", Type: TaskTypeImplementation}
 
 	vars := bc.templateVars(plan, task, "automation/demo-implement")
-	job := bc.buildJob("buckley-plan-1", vars)
+	job, err := bc.buildJob("buckley-plan-1", vars)
+	if err != nil {
+		t.Fatalf("buildJob: %v", err)
+	}
 
 	container := job.Spec.Template.Spec.Containers[0]
 	if container.Image != cfg.JobTemplate.Image {
