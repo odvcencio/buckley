@@ -28,6 +28,7 @@ type TelemetryUIBridge struct {
 	taskProgress       int
 	planTasks          []widgets.PlanTask
 	runningTools       map[string]widgets.RunningTool
+	activities         map[string]widgets.ActivityRecord
 	activeTouches      map[string]touchEntry
 	recentFiles        []string
 	experimentID       string
@@ -56,6 +57,7 @@ func NewTelemetryUIBridge(hub *telemetry.Hub, app *WidgetApp) *TelemetryUIBridge
 		eventCh:            eventCh,
 		unsubscribe:        unsub,
 		runningTools:       make(map[string]widgets.RunningTool),
+		activities:         make(map[string]widgets.ActivityRecord),
 		activeTouches:      make(map[string]touchEntry),
 		experimentVariants: make(map[string]widgets.ExperimentVariant),
 	}
@@ -146,12 +148,20 @@ func (b *TelemetryUIBridge) handleEvent(event telemetry.Event) {
 
 	// Tool events (active touches)
 	case telemetry.EventToolStarted:
+		b.handleToolActivity(event, widgets.ActivityRunning)
 		b.handleToolStarted(event)
 	case telemetry.EventToolCompleted, telemetry.EventToolFailed:
+		status := widgets.ActivityCompleted
+		if event.Type == telemetry.EventToolFailed {
+			status = widgets.ActivityFailed
+		}
+		b.handleToolActivity(event, status)
 		b.handleToolFinished(event)
 	case telemetry.EventSubagentSpawned, telemetry.EventSubagentState:
+		b.handleSubagentActivity(event)
 		b.handleSubagentActive(event)
 	case telemetry.EventSubagentCompleted, telemetry.EventSubagentFailed, telemetry.EventSubagentCancelled:
+		b.handleSubagentActivity(event)
 		b.removeRunningTool(event.TaskID)
 
 	// Experiment events
@@ -363,6 +373,7 @@ func (b *TelemetryUIBridge) updateSidebar() {
 	b.app.SetRunningTools(tools)
 	b.app.SetActiveTouches(touches)
 	b.app.SetRLMStatus(b.rlmStatus, b.rlmScratchpad)
+	b.app.SetActivities(b.collectActivities())
 	b.app.sidebar.SetExperiment(b.experiment, b.experimentStatus, experimentVariants)
 	b.app.sidebar.SetRecentFiles(b.recentFiles)
 	b.app.Refresh()

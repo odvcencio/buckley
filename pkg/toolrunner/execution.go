@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"m31labs.dev/buckley/v2/pkg/agentloop"
 	"m31labs.dev/buckley/v2/pkg/conversation"
 	"m31labs.dev/buckley/v2/pkg/model"
 	"m31labs.dev/buckley/v2/pkg/tool"
@@ -41,6 +42,7 @@ func (r *Runner) executeWithTools(ctx context.Context, req Request, tools []tool
 	if provider, ok := r.config.Models.(model.ContextWindowProvider); ok {
 		contextWindow, _ = provider.GetContextLength(modelID)
 	}
+	governor := newRunnerLoopGovernor(maxIterations)
 
 	for iteration := 0; iteration < maxIterations; iteration++ {
 		result.Iterations = iteration + 1
@@ -215,17 +217,31 @@ func (r *Runner) executeWithTools(ctx context.Context, req Request, tools []tool
 			r.notifyStreamError(err)
 			return result, err
 		}
+		guardReason := ""
 		for _, tr := range toolResults {
 			content := deduper.messageFor(tr)
+			var decision agentloop.Decision
+			content, decision = applyRunnerLoopGuard(governor, tr, content)
 			messages = append(messages, model.Message{
 				Role:       "tool",
 				ToolCallID: tr.ID,
 				Name:       tr.Name,
 				Content:    content,
 			})
+			if decision.Stop && guardReason == "" {
+				guardReason = decision.Reason
+			}
 		}
-		// Release the pooled slice after processing
+		// Release the pooled slice after processing.
 		releaseToolCallRecordSlice(toolResults)
+		if guardReason != "" {
+			result.Content = runnerLoopGuardMessage(guardReason)
+			result.FinishReason = "loop_guard"
+			if r.streamHandler != nil {
+				r.streamHandler.OnComplete(result)
+			}
+			return result, nil
+		}
 	}
 
 	result.Content = "Maximum iterations reached. Please try a simpler request."

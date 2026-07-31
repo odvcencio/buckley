@@ -38,7 +38,8 @@ type ChatView struct {
 	lastContent string
 
 	// Callbacks
-	onScrollChange func(top, total, viewHeight int)
+	onScrollChange    func(top, total, viewHeight int)
+	scrollbarDragging bool
 }
 
 // NewChatView creates a new chat view widget.
@@ -193,7 +194,7 @@ func (c *ChatView) renderPlainLines(content, source string) []scrollback.Line {
 }
 
 func (c *ChatView) renderMarkdownLines(content, source string) []scrollback.Line {
-	mdLines := c.mdRenderer.RenderWidth(source, markdownPPForTerminal(content), c.markdownRenderWidth())
+	mdLines := prepareMarkdownForWorkspace(c.mdRenderer.RenderWidth(source, markdownPPForTerminal(content), c.markdownRenderWidth()))
 	lines := make([]scrollback.Line, 0, len(mdLines))
 	for _, line := range mdLines {
 		spans := convertMarkdownSpans(line.Spans)
@@ -521,32 +522,9 @@ func fillChatRow(buf *runtime.Buffer, x, y, maxX int, style backend.Style) {
 	}
 }
 
-// renderScrollbar draws the scrollbar on the right edge.
+// renderScrollbar draws a semantic scrollbar with turn bookmarks.
 func (c *ChatView) renderScrollbar(ctx runtime.RenderContext, bounds runtime.Rect) {
-	top, total, viewH := c.buffer.ScrollPosition()
-
-	if total <= viewH {
-		return // No scrollbar needed
-	}
-
-	// Calculate thumb position and size
-	thumbSize := max(1, (viewH*viewH)/total)
-	thumbPos := (top * (viewH - thumbSize)) / (total - viewH)
-
-	scrollX := bounds.X + bounds.Width - 1
-
-	for y := 0; y < bounds.Height; y++ {
-		var r rune
-		var style backend.Style
-		if y >= thumbPos && y < thumbPos+thumbSize {
-			r = '█'
-			style = c.scrollThumb
-		} else {
-			r = '░'
-			style = c.scrollbarStyle
-		}
-		ctx.Buffer.Set(scrollX, bounds.Y+y, r, style)
-	}
+	c.renderSemanticScrollbar(ctx, bounds)
 }
 
 func chatViewport(bounds runtime.Rect) runtime.Rect {
@@ -562,6 +540,9 @@ func chatViewport(bounds runtime.Rect) runtime.Rect {
 
 // HandleMessage processes input events.
 func (c *ChatView) HandleMessage(msg runtime.Message) runtime.HandleResult {
+	if mouse, ok := msg.(runtime.MouseMsg); ok {
+		return c.handleScrollbarMouse(mouse)
+	}
 	key, ok := msg.(runtime.KeyMsg)
 	if !ok {
 		return runtime.Unhandled()

@@ -516,3 +516,39 @@ diagnostics:
 		t.Fatalf("expected network logs disabled from project config")
 	}
 }
+
+func TestDefaultConfigDisablesTelemetryPayloadsOverNetwork(t *testing.T) {
+	cfg := config.DefaultConfig()
+	if cfg.Diagnostics.TelemetryPayloadsOverNetwork {
+		t.Fatalf("expected telemetry payloads over network to default to false")
+	}
+}
+
+func TestLoadProjectConfigCanEnableTelemetryPayloadsOverNetwork(t *testing.T) {
+	home := t.TempDir()
+	project := t.TempDir()
+
+	t.Setenv("HOME", home)
+
+	projectCfgDir := filepath.Join(project, ".buckley")
+	if err := os.MkdirAll(projectCfgDir, 0o755); err != nil {
+		t.Fatalf("mkdir project config: %v", err)
+	}
+	projectCfg := `
+diagnostics:
+  telemetry_payloads_over_network: true
+`
+	if err := os.WriteFile(filepath.Join(projectCfgDir, "config.yaml"), []byte(projectCfg), 0o644); err != nil {
+		t.Fatalf("write project config: %v", err)
+	}
+
+	t.Chdir(project)
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("config.Load returned error: %v", err)
+	}
+	if !cfg.Diagnostics.TelemetryPayloadsOverNetwork {
+		t.Fatalf("expected telemetry payloads over network enabled from project config")
+	}
+}

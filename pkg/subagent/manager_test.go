@@ -3,6 +3,7 @@ package subagent
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -99,6 +100,56 @@ func TestManager_PublishesLifecycleTelemetry(t *testing.T) {
 			}
 		case <-time.After(time.Second):
 			t.Fatalf("timed out waiting for %s", eventType)
+		}
+	}
+}
+
+// TestManager_PublishesRedactedOutput guards against subagent output
+// reaching telemetry unredacted: the manager bounded it but never sanitized
+// it before this fix.
+func TestManager_PublishesRedactedOutput(t *testing.T) {
+	hub := telemetry.NewHub()
+	defer hub.Close()
+	events, unsubscribe := hub.Subscribe()
+	defer unsubscribe()
+
+	const secretOutput = `{"api_key": "sk-super-secret-value", "note": "done"}`
+	manager := NewManager(runnerFunc(func(_ context.Context, _ Request, _ func(int)) (string, error) {
+		return secretOutput, nil
+	}), 1)
+	manager.SetTelemetry(hub, "parent-telemetry")
+	t.Cleanup(func() { _ = manager.Close() })
+
+	spawned, err := manager.Spawn("reviewer", "", "leak secrets", 30)
+	if err != nil {
+		t.Fatal(err)
+	}
+	finished, err := manager.Wait(context.Background(), spawned.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The snapshot API itself still carries the raw output for in-process
+	// consumers; only the telemetry copy is redacted.
+	if !strings.Contains(finished.Output, "sk-super-secret-value") {
+		t.Fatalf("snapshot output unexpectedly redacted: %q", finished.Output)
+	}
+
+	for {
+		select {
+		case event := <-events:
+			if event.Type != telemetry.EventSubagentCompleted {
+				continue
+			}
+			output, _ := event.Data["output"].(string)
+			if strings.Contains(output, "sk-super-secret-value") {
+				t.Fatalf("secret leaked into subagent telemetry: %s", output)
+			}
+			if !strings.Contains(output, "[REDACTED]") {
+				t.Fatalf("expected redaction marker in telemetry output: %s", output)
+			}
+			return
+		case <-time.After(time.Second):
+			t.Fatalf("timed out waiting for completion event")
 		}
 	}
 }

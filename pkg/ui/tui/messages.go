@@ -176,6 +176,15 @@ type ModelPickerMsg struct {
 
 func (ModelPickerMsg) isMessage() {}
 
+// SetActivitiesMsg replaces the inspector's activity records. Telemetry
+// forwards it through Post so the widget tree is only mutated on the UI
+// goroutine, never from the telemetry forwarding goroutine directly.
+type SetActivitiesMsg struct {
+	Records []widgets.ActivityRecord
+}
+
+func (SetActivitiesMsg) isMessage() {}
+
 // --- Overlay/Mode Events ---
 
 // ModeChangeMsg signals input mode change.

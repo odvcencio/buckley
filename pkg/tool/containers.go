@@ -7,7 +7,6 @@ import (
 
 	"m31labs.dev/buckley/v2/pkg/config"
 	"m31labs.dev/buckley/v2/pkg/dockersandbox"
-	"m31labs.dev/buckley/v2/pkg/tool/builtin"
 	"m31labs.dev/buckley/v2/pkg/worktree"
 )
 
@@ -87,21 +86,29 @@ func (a *dockerSandboxAdapter) Close() error {
 }
 
 func (r *Registry) enableShellContainerMode(composePath, service, workDir string) {
-	tool, ok := r.Get("run_shell")
-	if !ok {
-		return
-	}
-	if shell, ok := tool.(*builtin.ShellCommandTool); ok {
-		shell.ConfigureContainerMode(composePath, service, workDir)
+	for _, name := range []string{"run_shell", "run_code"} {
+		current, ok := r.Get(name)
+		if !ok {
+			continue
+		}
+		if configurable, ok := current.(interface {
+			ConfigureContainerMode(string, string, string)
+		}); ok {
+			configurable.ConfigureContainerMode(composePath, service, workDir)
+		}
 	}
 }
 
 func (r *Registry) disableShellContainerMode() {
-	tool, ok := r.Get("run_shell")
-	if !ok {
-		return
-	}
-	if shell, ok := tool.(*builtin.ShellCommandTool); ok {
-		shell.ConfigureContainerMode("", "", "")
+	for _, name := range []string{"run_shell", "run_code"} {
+		current, ok := r.Get(name)
+		if !ok {
+			continue
+		}
+		if configurable, ok := current.(interface {
+			ConfigureContainerMode(string, string, string)
+		}); ok {
+			configurable.ConfigureContainerMode("", "", "")
+		}
 	}
 }
