@@ -183,6 +183,7 @@ var migrations = []Migration{
 	{15, "ipc_events", ensureIPCEventsSchema},
 	{16, "normalize_legacy_timestamps", normalizeLegacyTimestamps},
 	{17, "normalize_session_lifecycle_timestamps", normalizeLegacyTimestamps},
+	{18, "provider_continuations", ensureProviderContinuationsSchema},
 }
 
 func sqliteTimestamp(value time.Time) string {
@@ -249,6 +250,22 @@ func ensureProviderThreadsSchema(db *sql.DB) error {
 	)`)
 	if err != nil {
 		return fmt.Errorf("create provider_threads: %w", err)
+	}
+	return nil
+}
+
+func ensureProviderContinuationsSchema(db *sql.DB) error {
+	_, err := db.Exec(`CREATE TABLE IF NOT EXISTS provider_continuations (
+		session_id TEXT NOT NULL,
+		provider_id TEXT NOT NULL,
+		model_id TEXT NOT NULL,
+		state TEXT NOT NULL,
+		updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+		PRIMARY KEY (session_id, provider_id, model_id),
+		FOREIGN KEY (session_id) REFERENCES sessions(session_id) ON DELETE CASCADE
+	)`)
+	if err != nil {
+		return fmt.Errorf("create provider_continuations: %w", err)
 	}
 	return nil
 }

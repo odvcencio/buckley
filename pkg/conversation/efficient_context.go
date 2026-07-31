@@ -20,6 +20,16 @@ type EfficientContextOptions struct {
 	OldAssistantBytes    int
 	KeepReasoningRecent  int
 	MaxBytes             int
+
+	// PinnedFromIndex marks the end of the represented prefix: every message
+	// at an index below it must pass through byte-identical — no reasoning
+	// stripping, no content truncation, no collapsing. That prefix is the
+	// region an active provider continuation window already owns (decision
+	// 0001): the provider shapes that context, and the continuation cursor
+	// fingerprints it, so any mutation forces a full-retransmit reset.
+	// Shaping applies only to the suffix at or after this index. Zero or
+	// negative disables the pin (no active continuation window).
+	PinnedFromIndex int
 }
 
 // DefaultEfficientContextOptions keeps enough exact history for the current
@@ -52,11 +62,27 @@ func CompactModelMessagesForRequest(messages []model.Message, req model.ChatRequ
 	return projected
 }
 
+// CompactModelMessagesForRequestPinned behaves like CompactModelMessagesForRequest,
+// except every message before pinnedFromIndex is treated as already
+// represented inside an active provider continuation window (decision 0001)
+// and passed through untouched; only the suffix from pinnedFromIndex on may
+// be shaped.
+func CompactModelMessagesForRequestPinned(messages []model.Message, req model.ChatRequest, contextWindow, pinnedFromIndex int) []model.Message {
+	projected, _ := ProjectModelMessagesForRequestPinned(messages, req, contextWindow, 1, pinnedFromIndex)
+	return projected
+}
+
 // CompactModelMessages prunes stale high-volume fields without removing tool
-// call/result pairs required by chat-completion APIs.
+// call/result pairs required by chat-completion APIs. It never strips
+// Reasoning/ReasoningDetails from an assistant message whose tool calls lack a
+// recorded tool result: providers hard-error when a thinking block detaches
+// from its tool_use, so this protocol-correctness rule applies regardless of
+// recency windows.
 func CompactModelMessages(messages []model.Message, opts EfficientContextOptions) []model.Message {
 	if opts.RecentMessages <= 0 {
+		pinned := opts.PinnedFromIndex
 		opts = DefaultEfficientContextOptions()
+		opts.PinnedFromIndex = pinned
 	}
 	result := make([]model.Message, len(messages))
 	copy(result, messages)
@@ -73,10 +99,13 @@ func CompactModelMessages(messages []model.Message, opts EfficientContextOptions
 		reasoningStart = 0
 	}
 
+	protectedReasoning := unansweredToolCallIndices(result)
+
 	seenToolResults := make(map[[32]byte]int)
 	for i := len(result) - 1; i >= 0; i-- {
 		msg := &result[i]
-		if i < reasoningStart && msg.Role == "assistant" {
+		pinned := opts.PinnedFromIndex > 0 && i < opts.PinnedFromIndex
+		if i < reasoningStart && msg.Role == "assistant" && !pinned && !protectedReasoning[i] {
 			msg.Reasoning = ""
 			msg.ReasoningDetails = nil
 		}
@@ -88,7 +117,7 @@ func CompactModelMessages(messages []model.Message, opts EfficientContextOptions
 				hasToolDigest = true
 			}
 		}
-		if i >= recentStart {
+		if i >= recentStart || pinned {
 			if hasToolDigest {
 				seenToolResults[toolDigest] = i
 			}
@@ -116,10 +145,36 @@ func CompactModelMessages(messages []model.Message, opts EfficientContextOptions
 			}
 		}
 	}
-	return compactToBudget(result, opts)
+	return compactToBudget(result, opts, protectedReasoning)
 }
 
-func compactToBudget(messages []model.Message, opts EfficientContextOptions) []model.Message {
+// unansweredToolCallIndices returns the indices of assistant messages that
+// have at least one tool call without a matching tool-result message
+// elsewhere in the list. Reasoning belonging to these messages must never be
+// stripped by projection or compaction (decision 0001, pin rule).
+func unansweredToolCallIndices(messages []model.Message) map[int]bool {
+	answered := make(map[string]bool)
+	for _, msg := range messages {
+		if msg.Role == "tool" && msg.ToolCallID != "" {
+			answered[msg.ToolCallID] = true
+		}
+	}
+	protected := make(map[int]bool)
+	for i, msg := range messages {
+		if msg.Role != "assistant" || len(msg.ToolCalls) == 0 {
+			continue
+		}
+		for _, call := range msg.ToolCalls {
+			if !answered[call.ID] {
+				protected[i] = true
+				break
+			}
+		}
+	}
+	return protected
+}
+
+func compactToBudget(messages []model.Message, opts EfficientContextOptions, protectedReasoning map[int]bool) []model.Message {
 	totalBytes := modelMessagesBytes(messages)
 	if opts.MaxBytes <= 0 || totalBytes <= opts.MaxBytes {
 		return messages
@@ -131,7 +186,14 @@ func compactToBudget(messages []model.Message, opts EfficientContextOptions) []m
 	if stop < 0 {
 		stop = 0
 	}
-	for i := 0; i < stop && totalBytes > opts.MaxBytes; i++ {
+	start := 0
+	if opts.PinnedFromIndex > 0 {
+		// The represented prefix is immutable; the squeeze may only shape the
+		// unrepresented suffix. If that cannot reach the budget, the caller's
+		// epoch rule resets the continuation and recompiles in full.
+		start = opts.PinnedFromIndex
+	}
+	for i := start; i < stop && totalBytes > opts.MaxBytes; i++ {
 		msg := &messages[i]
 		before := modelMessageBytes(*msg)
 		switch msg.Role {
@@ -140,8 +202,10 @@ func compactToBudget(messages []model.Message, opts EfficientContextOptions) []m
 				msg.Content = compactHistoricalContent(content, opts.OldToolBytes, "tool output")
 			}
 		case "assistant":
-			msg.Reasoning = ""
-			msg.ReasoningDetails = nil
+			if !protectedReasoning[i] {
+				msg.Reasoning = ""
+				msg.ReasoningDetails = nil
+			}
 			if len(msg.ToolCalls) > 0 {
 				compactToolCallArguments(msg.ToolCalls, opts.OldToolArgumentBytes)
 			} else {
@@ -156,7 +220,7 @@ func compactToBudget(messages []model.Message, opts EfficientContextOptions) []m
 		}
 		totalBytes += modelMessageBytes(*msg) - before
 	}
-	for i := 0; i < stop && totalBytes > opts.MaxBytes; i++ {
+	for i := start; i < stop && totalBytes > opts.MaxBytes; i++ {
 		msg := &messages[i]
 		before := modelMessageBytes(*msg)
 		switch msg.Role {
@@ -165,8 +229,10 @@ func compactToBudget(messages []model.Message, opts EfficientContextOptions) []m
 				msg.Content = compactHistoricalContent(content, 192, "tool output")
 			}
 		case "assistant":
-			msg.Reasoning = ""
-			msg.ReasoningDetails = nil
+			if !protectedReasoning[i] {
+				msg.Reasoning = ""
+				msg.ReasoningDetails = nil
+			}
 			if len(msg.ToolCalls) > 0 {
 				compactToolCallArguments(msg.ToolCalls, 192)
 			} else if content, ok := msg.Content.(string); ok {
@@ -180,16 +246,24 @@ func compactToBudget(messages []model.Message, opts EfficientContextOptions) []m
 		totalBytes += modelMessageBytes(*msg) - before
 	}
 	if totalBytes > opts.MaxBytes {
-		return collapseHistoricalPrefix(messages, opts.MaxBytes)
+		return collapseHistoricalPrefix(messages, opts.MaxBytes, opts.PinnedFromIndex)
 	}
 	return messages
 }
 
-func collapseHistoricalPrefix(messages []model.Message, maxBytes int) []model.Message {
+func collapseHistoricalPrefix(messages []model.Message, maxBytes, pinnedFromIndex int) []model.Message {
 	if len(messages) <= 2 {
 		return messages
 	}
-	tailStart := safeToolPairTailStart(messages, len(messages)-2)
+	if pinnedFromIndex > 0 {
+		// The historical prefix is exactly the region an active continuation
+		// window represents; collapsing it would break the cursor fingerprint.
+		// Return unchanged and let the caller's epoch rule reset the
+		// continuation deliberately before recompiling in full.
+		return messages
+	}
+	tailBoundary := len(messages) - 2
+	tailStart := safeToolPairTailStart(messages, tailBoundary)
 	if tailStart <= 0 {
 		return messages
 	}

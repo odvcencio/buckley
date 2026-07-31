@@ -72,6 +72,9 @@ func mergeModelConfig(base, override *Config, raw map[string]any) {
 	if boolFieldSet(raw, "models", "reasoning") {
 		base.Models.Reasoning = override.Models.Reasoning
 	}
+	if boolFieldSet(raw, "models", "provider_continuation") {
+		base.Models.ProviderContinuation = override.Models.ProviderContinuation
+	}
 	if boolFieldSet(raw, "models", "utility", "commit") {
 		base.Models.Utility.Commit = override.Models.Utility.Commit
 	}

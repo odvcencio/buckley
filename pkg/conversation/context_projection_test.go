@@ -77,6 +77,34 @@ func TestProjectModelMessagesForRequest_EmergencyScaleTightensProjection(t *test
 	}
 }
 
+func TestProjectModelMessagesForRequestPinned_RepresentedPrefixPassesThroughUntouched(t *testing.T) {
+	messages := make([]model.Message, 60)
+	for i := range messages {
+		messages[i] = model.Message{
+			Role:      "assistant",
+			Content:   strings.Repeat("large tool evidence ", 500),
+			Reasoning: "reasoning that must not be stripped once pinned",
+		}
+	}
+	pinnedFromIndex := 40
+
+	projected, stats := ProjectModelMessagesForRequestPinned(messages, model.ChatRequest{MaxTokens: 2048}, 16_384, 1, pinnedFromIndex)
+	if !stats.ContinuationActive {
+		t.Fatal("expected ContinuationActive to be reported")
+	}
+	// The represented prefix must survive byte-for-byte and by absolute
+	// index: the continuation cursor fingerprints messages[0:pin], so no
+	// message in that range may move, shrink, or lose reasoning.
+	if len(projected) < pinnedFromIndex {
+		t.Fatalf("projected messages = %d, want at least the represented prefix of %d", len(projected), pinnedFromIndex)
+	}
+	for i := 0; i < pinnedFromIndex; i++ {
+		if projected[i].Content != messages[i].Content || projected[i].Reasoning != messages[i].Reasoning {
+			t.Fatalf("represented message %d was modified: got %#v, want %#v", i, projected[i], messages[i])
+		}
+	}
+}
+
 func TestProjectModelMessagesForRequest_UnknownWindowKeepsStableFallback(t *testing.T) {
 	messages := make([]model.Message, 40)
 	for i := range messages {

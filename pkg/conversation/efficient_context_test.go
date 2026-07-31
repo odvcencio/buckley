@@ -2,6 +2,7 @@ package conversation
 
 import (
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -156,6 +157,130 @@ func TestCompactModelMessages_DeduplicatesOldToolResults(t *testing.T) {
 	got := CompactModelMessages(messages, EfficientContextOptions{RecentMessages: 1, OldToolBytes: 100, KeepReasoningRecent: 1, MaxBytes: 1 << 20})
 	if !strings.Contains(got[0].Content.(string), "duplicate") {
 		t.Fatalf("duplicate result not replaced: %q", got[0].Content)
+	}
+}
+
+func TestCompactModelMessages_UnansweredToolCallReasoningSurvivesAggressiveCompaction(t *testing.T) {
+	messages := []model.Message{
+		{Role: "user", Content: "investigate the failure"},
+		{Role: "assistant", Content: strings.Repeat("padding ", 400)},
+		{Role: "user", Content: "keep going"},
+		{Role: "assistant", Content: strings.Repeat("padding ", 400)},
+		{Role: "user", Content: "and more"},
+		// The final assistant turn calls a tool but has no matching tool
+		// result yet: its reasoning must survive even with KeepReasoningRecent
+		// forced to zero and RecentMessages forced to one.
+		{
+			Role:      "assistant",
+			Reasoning: "still deciding which file needs the fix",
+			ToolCalls: []model.ToolCall{{
+				ID:       "pending-1",
+				Type:     "function",
+				Function: model.FunctionCall{Name: "read_file", Arguments: `{"path":"main.go"}`},
+			}},
+		},
+	}
+
+	got := CompactModelMessages(messages, EfficientContextOptions{
+		RecentMessages:       1,
+		OldToolBytes:         64,
+		OldToolArgumentBytes: 64,
+		OldAssistantBytes:    64,
+		KeepReasoningRecent:  0,
+		MaxBytes:             1 << 20,
+	})
+
+	last := got[len(got)-1]
+	if last.Reasoning != "still deciding which file needs the fix" {
+		t.Fatalf("unanswered tool call reasoning was stripped: %q", last.Reasoning)
+	}
+	if len(last.ToolCalls) != 1 || last.ToolCalls[0].ID != "pending-1" {
+		t.Fatalf("unanswered tool call was altered: %#v", last.ToolCalls)
+	}
+}
+
+func TestCompactModelMessages_UnansweredToolCallReasoningSurvivesBudgetSqueeze(t *testing.T) {
+	large := strings.Repeat("x", 5000)
+	messages := make([]model.Message, 0, 12)
+	for i := 0; i < 8; i++ {
+		messages = append(messages,
+			model.Message{Role: "user", Content: large},
+			model.Message{Role: "assistant", Content: large, Reasoning: "old thought"},
+		)
+	}
+	messages = append(messages, model.Message{
+		Role:      "assistant",
+		Reasoning: "must not be stripped: awaiting tool result",
+		ToolCalls: []model.ToolCall{{
+			ID:       "pending-2",
+			Type:     "function",
+			Function: model.FunctionCall{Name: "run_shell", Arguments: `{"command":"go test ./..."}`},
+		}},
+	})
+
+	// A tiny MaxBytes forces the budget squeeze pass (and, if still over
+	// budget, the historical-prefix collapse) to run over every message.
+	got := CompactModelMessages(messages, EfficientContextOptions{
+		RecentMessages:       2,
+		OldToolBytes:         64,
+		OldToolArgumentBytes: 64,
+		OldAssistantBytes:    64,
+		KeepReasoningRecent:  1,
+		MaxBytes:             512,
+	})
+
+	var found bool
+	for _, msg := range got {
+		for _, call := range msg.ToolCalls {
+			if call.ID == "pending-2" {
+				found = true
+				if msg.Reasoning != "must not be stripped: awaiting tool result" {
+					t.Fatalf("unanswered tool call reasoning was stripped under budget pressure: %q", msg.Reasoning)
+				}
+			}
+		}
+	}
+	if !found {
+		t.Fatal("pending tool call message was dropped entirely by budget squeeze")
+	}
+}
+
+func TestCompactModelMessages_PinnedFromIndexPassesRepresentedPrefixThroughUntouched(t *testing.T) {
+	large := strings.Repeat("y", 6000)
+	messages := []model.Message{
+		// Represented prefix: everything before the boundary is inside the
+		// provider's continuation window and must stay byte-identical.
+		{Role: "system", Content: "instructions"},
+		{Role: "user", Content: large},
+		{Role: "assistant", Content: large, Reasoning: "pinned reasoning must survive"},
+		// Unrepresented suffix: new messages since the last commit; these
+		// remain eligible for shaping.
+		{Role: "user", Content: "continue the investigation"},
+		{Role: "assistant", Reasoning: "stale reasoning", Content: large},
+		{Role: "tool", Name: "read_file", ToolCallID: "n/a", Content: large},
+	}
+	pinnedFromIndex := 3
+
+	got := CompactModelMessages(messages, EfficientContextOptions{
+		RecentMessages:       1,
+		OldToolBytes:         32,
+		OldToolArgumentBytes: 32,
+		OldAssistantBytes:    32,
+		KeepReasoningRecent:  0,
+		MaxBytes:             1 << 20, // large enough to avoid the historical-prefix collapse path
+		PinnedFromIndex:      pinnedFromIndex,
+	})
+
+	for i := 0; i < pinnedFromIndex; i++ {
+		if !reflect.DeepEqual(got[i], messages[i]) {
+			t.Fatalf("represented message %d was modified: got %#v, want %#v", i, got[i], messages[i])
+		}
+	}
+	// The unrepresented suffix remains eligible for compaction where the
+	// recency windows allow it (the reasoning-strip rule still applies to
+	// suffix messages outside KeepReasoningRecent).
+	if got[4].Reasoning == messages[4].Reasoning {
+		t.Fatal("expected unrepresented suffix reasoning outside the recency window to be stripped")
 	}
 }
 
