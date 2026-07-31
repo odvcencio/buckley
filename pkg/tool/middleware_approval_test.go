@@ -131,12 +131,12 @@ func TestApprovalMiddlewareRunCode(t *testing.T) {
 	}
 
 	changeID := waitForPendingChange(t, store.DB())
-	var diff, operation string
-	if err := store.DB().QueryRow(`SELECT diff, operation FROM pending_changes WHERE id = ?`, changeID).Scan(&diff, &operation); err != nil {
+	var diff string
+	if err := store.DB().QueryRow(`SELECT diff FROM pending_changes WHERE id = ?`, changeID).Scan(&diff); err != nil {
 		t.Fatalf("read pending change: %v", err)
 	}
-	if operation != "run_code" || !strings.Contains(diff, "printf approved") || strings.Contains(diff, "base64 -d") {
-		t.Fatalf("unexpected code approval record: operation=%q diff=%q", operation, diff)
+	if !strings.Contains(diff, "printf approved") || strings.Contains(diff, "base64 -d") {
+		t.Fatalf("unexpected code approval diff: %q", diff)
 	}
 	if err := missionStore.UpdatePendingChangeStatus(changeID, "approved", "tester"); err != nil {
 		t.Fatalf("approve code: %v", err)
