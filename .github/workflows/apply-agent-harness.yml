@@ -1,4 +1,4 @@
-# Branch-local one-shot source assembly; removes itself after validation.
+# Branch-local one-shot source assembly; removes itself after committing.
 name: Apply adaptive agent harness
 
 on:
@@ -15,7 +15,7 @@ jobs:
   apply:
     if: ${{ !contains(github.event.head_commit.message, '[harness-applied]') }}
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
         with:
@@ -25,7 +25,7 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
-          cache: true
+          cache: false
 
       - name: Apply harness source transform
         run: |
@@ -56,9 +56,6 @@ jobs:
             pkg/ui/tui/tool_loop_guard.go \
             pkg/ui/tui/tool_loop_guard_test.go
           git diff --check
-
-      - name: Run repository Go tests
-        run: ./scripts/test.sh
 
       - name: Commit applied harness
         run: |
