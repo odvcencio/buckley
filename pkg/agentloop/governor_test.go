@@ -22,29 +22,44 @@ func TestGovernorWarnsThenStopsExactRepeat(t *testing.T) {
 	}
 }
 
-func TestGovernorDetectsShortActionCycle(t *testing.T) {
+func TestGovernorDetectsShortActionEvidenceCycle(t *testing.T) {
 	config := DefaultConfig()
 	config.ExactRepeatLimit = 20
 	config.OutcomeRepeatLimit = 20
 	governor := New(config)
 
 	actions := []struct {
-		name string
-		args string
+		name   string
+		args   string
+		result string
 	}{
-		{"read_file", `{"path":"a.go"}`},
-		{"search_text", `{"pattern":"missing"}`},
-		{"read_file", `{"path":"a.go"}`},
-		{"search_text", `{"pattern":"missing"}`},
-		{"read_file", `{"path":"a.go"}`},
-		{"search_text", `{"pattern":"missing"}`},
+		{"read_file", `{"path":"a.go"}`, "a unchanged"},
+		{"search_text", `{"pattern":"missing"}`, "no matches"},
+		{"read_file", `{"path":"a.go"}`, "a unchanged"},
+		{"search_text", `{"pattern":"missing"}`, "no matches"},
+		{"read_file", `{"path":"a.go"}`, "a unchanged"},
+		{"search_text", `{"pattern":"missing"}`, "no matches"},
 	}
 	var decision Decision
-	for i, action := range actions {
-		decision = governor.Observe(action.name, action.args, "result "+string(rune('a'+i)), true)
+	for _, action := range actions {
+		decision = governor.Observe(action.name, action.args, action.result, true)
 	}
 	if !decision.Stop || decision.Kind != "action_cycle" {
 		t.Fatalf("decision = %+v, want action-cycle stop", decision)
+	}
+}
+
+func TestGovernorAllowsRepeatedPollingWhenEvidenceChanges(t *testing.T) {
+	config := DefaultConfig()
+	config.ExactRepeatLimit = 20
+	config.OutcomeRepeatLimit = 20
+	governor := New(config)
+
+	for _, result := range []string{"queued", "starting", "running 10%", "running 50%", "running 90%", "complete"} {
+		decision := governor.Observe("job_status", `{"id":"build-1"}`, result, true)
+		if decision.Stop {
+			t.Fatalf("progressing poll %q stopped: %+v", result, decision)
+		}
 	}
 }
 
