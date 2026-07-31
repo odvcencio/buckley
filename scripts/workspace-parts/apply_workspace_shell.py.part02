@@ -1,0 +1,166 @@
+replace_once(
+    "pkg/tool/registry_events.go",
+    '''\tif res != nil {
+\t\tpayload["success"] = res.Success
+\t\tif strings.TrimSpace(toolName) == "browser_stream" {
+''',
+    '''\tif res != nil {
+\t\tpayload["success"] = res.Success
+\t\tif detail := telemetryResultDetail(res); detail != "" {
+\t\t\tpayload["result"] = detail
+\t\t}
+\t\tif strings.TrimSpace(toolName) == "browser_stream" {
+''',
+)
+replace_once(
+    "pkg/tool/registry_events.go",
+    '''\tif metadata != nil {
+\t\tif stack, ok := metadata["panic_stack"].(string); ok && strings.TrimSpace(stack) != "" {
+''',
+    '''\tif metadata != nil {
+\t\tif arguments, ok := metadata["arguments"].(string); ok && strings.TrimSpace(arguments) != "" {
+\t\t\tpayload["arguments"] = arguments
+\t\t}
+\t\tif stack, ok := metadata["panic_stack"].(string); ok && strings.TrimSpace(stack) != "" {
+''',
+)
+
+# Subagent details become inspectable activity records.
+replace_once(
+    "pkg/subagent/manager.go",
+    '''\tif snapshot.Spec != "" {
+\t\tdata["spec"] = snapshot.Spec
+\t}
+''',
+    '''\tif snapshot.Task != "" {
+\t\tdata["task"] = snapshot.Task
+\t}
+\tif snapshot.Output != "" {
+\t\tdata["output"] = boundedTelemetryOutput(snapshot.Output)
+\t}
+\tif snapshot.Spec != "" {
+\t\tdata["spec"] = snapshot.Spec
+\t}
+''',
+)
+replace_once(
+    "pkg/subagent/manager.go",
+    '''func boundedTask(task string) string {
+\ttask = strings.TrimSpace(task)
+\tif len(task) <= 4096 {
+\t\treturn task
+\t}
+\treturn task[:4093] + "..."
+}
+''',
+    '''func boundedTask(task string) string {
+\ttask = strings.TrimSpace(task)
+\tif len(task) <= 4096 {
+\t\treturn task
+\t}
+\treturn task[:4093] + "..."
+}
+
+func boundedTelemetryOutput(output string) string {
+\tconst limit = 64 * 1024
+\toutput = strings.TrimSpace(output)
+\tif len(output) <= limit {
+\t\treturn output
+\t}
+\tconst marker = "\\n... subagent telemetry truncated ...\\n"
+\tavailable := limit - len(marker)
+\thead := available * 2 / 3
+\ttail := available - head
+\treturn output[:head] + marker + output[len(output)-tail:]
+}
+''',
+)
+
+# Markdown++ terminal affordances and semantic scrollbar interaction.
+replace_once(
+    "pkg/ui/widgets/chatview.go",
+    '''\t// Callbacks
+\tonScrollChange func(top, total, viewHeight int)
+''',
+    '''\t// Callbacks
+\tonScrollChange  func(top, total, viewHeight int)
+\tscrollbarDragging bool
+''',
+)
+replace_once(
+    "pkg/ui/widgets/chatview.go",
+    '''\tmdLines := c.mdRenderer.RenderWidth(source, markdownPPForTerminal(content), c.markdownRenderWidth())
+''',
+    '''\tmdLines := prepareMarkdownForWorkspace(c.mdRenderer.RenderWidth(source, markdownPPForTerminal(content), c.markdownRenderWidth()))
+''',
+)
+replace_once(
+    "pkg/ui/widgets/chatview.go",
+    '''// renderScrollbar draws the scrollbar on the right edge.
+func (c *ChatView) renderScrollbar(ctx runtime.RenderContext, bounds runtime.Rect) {
+\ttop, total, viewH := c.buffer.ScrollPosition()
+
+\tif total <= viewH {
+\t\treturn // No scrollbar needed
+\t}
+
+\t// Calculate thumb position and size
+\tthumbSize := max(1, (viewH*viewH)/total)
+\tthumbPos := (top * (viewH - thumbSize)) / (total - viewH)
+
+\tscrollX := bounds.X + bounds.Width - 1
+
+\tfor y := 0; y < bounds.Height; y++ {
+\t\tvar r rune
+\t\tvar style backend.Style
+\t\tif y >= thumbPos && y < thumbPos+thumbSize {
+\t\t\tr = '█'
+\t\t\tstyle = c.scrollThumb
+\t\t} else {
+\t\t\tr = '░'
+\t\t\tstyle = c.scrollbarStyle
+\t\t}
+\t\tctx.Buffer.Set(scrollX, bounds.Y+y, r, style)
+\t}
+}
+''',
+    '''// renderScrollbar draws a semantic scrollbar with turn bookmarks.
+func (c *ChatView) renderScrollbar(ctx runtime.RenderContext, bounds runtime.Rect) {
+\tc.renderSemanticScrollbar(ctx, bounds)
+}
+''',
+)
+replace_once(
+    "pkg/ui/widgets/chatview.go",
+    '''func (c *ChatView) HandleMessage(msg runtime.Message) runtime.HandleResult {
+\tkey, ok := msg.(runtime.KeyMsg)
+\tif !ok {
+\t\treturn runtime.Unhandled()
+\t}
+
+\tswitch key.Key {
+''',
+    '''func (c *ChatView) HandleMessage(msg runtime.Message) runtime.HandleResult {
+\tif mouse, ok := msg.(runtime.MouseMsg); ok {
+\t\treturn c.handleScrollbarMouse(mouse)
+\t}
+\tkey, ok := msg.(runtime.KeyMsg)
+\tif !ok {
+\t\treturn runtime.Unhandled()
+\t}
+
+\tswitch key.Key {
+''',
+)
+
+# The left panel remains the navigator; active work is distinguished from
+# persistent detail in the right inspector.
+replace_once(
+    "pkg/ui/widgets/sidebar.go",
+    '''\tbuf.SetString(x+2, y, "Tools Running", s.headerStyle)
+''',
+    '''\tbuf.SetString(x+2, y, "Active", s.headerStyle)
+''',
+)
+
+print("workspace shell replacements applied")
