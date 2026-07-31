@@ -52,6 +52,17 @@ type ActivityPanel struct {
 	textStyle     backend.Style
 	selectedStyle backend.Style
 	mutedStyle    backend.Style
+
+	// detailLines caches the last wrapped-line output of activityDetailLines,
+	// which re-wraps up to ~32 KB of Detail text word by word. Render runs
+	// every frame and clampOffsets runs on every scroll/layout event, so
+	// without this cache the same record gets re-wrapped repeatedly even
+	// when nothing about it changed. See detailLinesFor.
+	detailLinesID    string
+	detailLinesWidth int
+	detailLinesLen   int
+	detailLinesValid bool
+	detailLines      []string
 }
 
 // NewActivityPanel creates an empty activity inspector.
@@ -182,12 +193,9 @@ func (p *ActivityPanel) renderDetail(buf *runtime.Buffer) {
 	width := b.Width - 3
 	record := p.records[p.selected]
 	buf.SetString(x, b.Y, truncateString("← "+activityRecordLabel(record), width), p.headerStyle)
-	lines := activityDetailLines(record, width)
+	lines := p.detailLinesFor(record, width)
 	visible := maxActivityPanel(0, b.Height-2)
-	maxOffset := maxActivityPanel(0, len(lines)-visible)
-	if p.detailOffset > maxOffset {
-		p.detailOffset = maxOffset
-	}
+	p.detailOffset = clampDetailOffset(p.detailOffset, len(lines), visible)
 	for row := 0; row < visible; row++ {
 		idx := p.detailOffset + row
 		if idx >= len(lines) {
@@ -420,15 +428,45 @@ func (p *ActivityPanel) clampOffsets() {
 		p.listOffset = 0
 	}
 	if p.showDetail && p.selected >= 0 && p.selected < len(p.records) {
-		lines := activityDetailLines(p.records[p.selected], maxActivityPanel(1, p.bounds.Width-3))
-		maxDetail := maxActivityPanel(0, len(lines)-maxActivityPanel(1, p.bounds.Height-2))
-		if p.detailOffset > maxDetail {
-			p.detailOffset = maxDetail
-		}
+		lines := p.detailLinesFor(p.records[p.selected], maxActivityPanel(1, p.bounds.Width-3))
+		visible := maxActivityPanel(1, p.bounds.Height-2)
+		p.detailOffset = clampDetailOffset(p.detailOffset, len(lines), visible)
 	}
 	if p.detailOffset < 0 {
 		p.detailOffset = 0
 	}
+}
+
+// detailLinesFor returns record's wrapped detail lines, re-wrapping via
+// activityDetailLines only when record's ID, width, or Detail length have
+// changed since the last call. Records are replaced wholesale (not mutated
+// in place) whenever their content changes, so ID+width+len(Detail) is
+// enough to detect staleness without hashing the full text on every call.
+func (p *ActivityPanel) detailLinesFor(record ActivityRecord, width int) []string {
+	if p.detailLinesValid &&
+		p.detailLinesID == record.ID &&
+		p.detailLinesWidth == width &&
+		p.detailLinesLen == len(record.Detail) {
+		return p.detailLines
+	}
+	lines := activityDetailLines(record, width)
+	p.detailLinesID = record.ID
+	p.detailLinesWidth = width
+	p.detailLinesLen = len(record.Detail)
+	p.detailLinesValid = true
+	p.detailLines = lines
+	return lines
+}
+
+// clampDetailOffset returns offset clamped so the detail view never scrolls
+// past the point where the last line is visible, given lineCount total
+// lines and visible rows on screen.
+func clampDetailOffset(offset, lineCount, visible int) int {
+	maxOffset := maxActivityPanel(0, lineCount-visible)
+	if offset > maxOffset {
+		return maxOffset
+	}
+	return offset
 }
 
 func maxActivityPanel(a, b int) int {
