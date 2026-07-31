@@ -80,12 +80,18 @@ func (c *ContinuationCursor) Prepare(req ChatRequest) (ContinuationRequest, erro
 		return ContinuationRequest{Request: req}, nil
 	}
 
-	fingerprints, err := fingerprintMessages(req.Messages)
+	if len(req.Messages) < len(c.represented) {
+		c.Reset()
+		return ContinuationRequest{Request: req}, nil
+	}
+
+	// Only the represented prefix needs hashing to check for a match; the
+	// suffix beyond it is new and irrelevant to the comparison.
+	fingerprints, err := fingerprintMessages(req.Messages[:len(c.represented)])
 	if err != nil {
 		return ContinuationRequest{}, err
 	}
-	if len(fingerprints) < len(c.represented) ||
-		!equalMessagePrefix(fingerprints, c.represented) {
+	if !equalMessagePrefix(fingerprints, c.represented) {
 		c.Reset()
 		return ContinuationRequest{Request: req}, nil
 	}
@@ -100,6 +106,14 @@ func (c *ContinuationCursor) Prepare(req ChatRequest) (ContinuationRequest, erro
 // Commit records that provider state represents the request messages followed
 // by the translated assistant message. Tool results added after that assistant
 // message remain unsent and become the next request's incremental suffix.
+//
+// Commit reuses the cached prefix fingerprints from the cursor's current
+// state instead of re-hashing them: Prepare, called earlier in the same turn,
+// already verified req.Messages[:len(c.represented)] hashes to exactly
+// c.represented, so those digests need only be carried forward, not
+// recomputed. Only the new suffix and the assistant reply are hashed. Reset
+// clears c.represented entirely, so a cursor with no prior commit (or one
+// invalidated this turn) naturally falls back to hashing everything.
 func (c *ContinuationCursor) Commit(req ChatRequest, resp *ContinuationResponse) error {
 	if c == nil {
 		return nil
@@ -110,15 +124,27 @@ func (c *ContinuationCursor) Commit(req ChatRequest, resp *ContinuationResponse)
 		return nil
 	}
 
-	messages := make([]Message, 0, len(req.Messages)+1)
-	messages = append(messages, req.Messages...)
-	messages = append(messages, portableAssistantHistoryMessage(resp.Response.Choices[0].Message))
-	fingerprints, err := fingerprintMessages(messages)
+	prefixLen := len(c.represented)
+	if prefixLen > len(req.Messages) {
+		// Defensive: the cached prefix no longer fits req.Messages (Commit
+		// called without a matching Prepare this turn). Fall back to hashing
+		// the whole message list, same as a cursor with no cached prefix.
+		prefixLen = 0
+	}
+
+	suffix := make([]Message, 0, len(req.Messages)-prefixLen+1)
+	suffix = append(suffix, req.Messages[prefixLen:]...)
+	suffix = append(suffix, portableAssistantHistoryMessage(resp.Response.Choices[0].Message))
+	suffixFingerprints, err := fingerprintMessages(suffix)
 	if err != nil {
 		return err
 	}
 
-	c.represented = fingerprints
+	represented := make([][sha256.Size]byte, 0, prefixLen+len(suffixFingerprints))
+	represented = append(represented, c.represented[:prefixLen]...)
+	represented = append(represented, suffixFingerprints...)
+
+	c.represented = represented
 	c.continuation = resp.Continuation.Clone()
 	return nil
 }
