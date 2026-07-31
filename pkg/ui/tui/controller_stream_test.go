@@ -3,7 +3,7 @@ package tui
 import (
 	"testing"
 
-	"m31labs.dev/buckley/pkg/model"
+	"m31labs.dev/buckley/v2/pkg/model"
 )
 
 func TestStreamUsageStats_UsesProviderUsage(t *testing.T) {
@@ -35,5 +35,12 @@ func TestStreamUsageStats_EmptyFallback(t *testing.T) {
 	stats := streamUsageStats("test/model", "", nil, nil)
 	if stats.tokens != 0 {
 		t.Fatalf("tokens = %d, want 0", stats.tokens)
+	}
+}
+
+func TestStoredToolResultProgressSummaryIncludesPersistedError(t *testing.T) {
+	got := storedToolResultProgressSummary("run_shell", `{"success":false,"error":"command exited with code 1: compile failed"}`)
+	if got != "✗ run_shell — command exited with code 1: compile failed" {
+		t.Fatalf("unexpected progress summary: %q", got)
 	}
 }

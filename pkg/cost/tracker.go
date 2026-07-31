@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"m31labs.dev/buckley/pkg/storage"
+	"m31labs.dev/buckley/v2/pkg/storage"
 )
 
 // costStore defines the storage operations required by the tracker.

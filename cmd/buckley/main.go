@@ -23,31 +23,31 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 
-	acppb "m31labs.dev/buckley/pkg/acp/proto"
-	acpserver "m31labs.dev/buckley/pkg/acp/server"
-	"m31labs.dev/buckley/pkg/agentspec"
-	"m31labs.dev/buckley/pkg/config"
-	projectcontext "m31labs.dev/buckley/pkg/context"
-	projectconversation "m31labs.dev/buckley/pkg/conversation"
-	coordination "m31labs.dev/buckley/pkg/coordination/coordinator"
-	coordevents "m31labs.dev/buckley/pkg/coordination/events"
-	"m31labs.dev/buckley/pkg/graft"
-	"m31labs.dev/buckley/pkg/gts"
-	"m31labs.dev/buckley/pkg/ipc"
-	"m31labs.dev/buckley/pkg/ipc/command"
-	"m31labs.dev/buckley/pkg/model"
-	"m31labs.dev/buckley/pkg/orchestrator"
-	rlmrunner "m31labs.dev/buckley/pkg/rlm/runner"
-	"m31labs.dev/buckley/pkg/rules"
-	"m31labs.dev/buckley/pkg/setup"
-	"m31labs.dev/buckley/pkg/skill"
-	"m31labs.dev/buckley/pkg/storage"
-	"m31labs.dev/buckley/pkg/telemetry"
-	"m31labs.dev/buckley/pkg/tool"
-	"m31labs.dev/buckley/pkg/tool/builtin"
-	"m31labs.dev/buckley/pkg/types"
-	"m31labs.dev/buckley/pkg/ui/tui"
-	buckleyversion "m31labs.dev/buckley/pkg/version"
+	acppb "m31labs.dev/buckley/v2/pkg/acp/proto"
+	acpserver "m31labs.dev/buckley/v2/pkg/acp/server"
+	"m31labs.dev/buckley/v2/pkg/agentspec"
+	"m31labs.dev/buckley/v2/pkg/config"
+	projectcontext "m31labs.dev/buckley/v2/pkg/context"
+	projectconversation "m31labs.dev/buckley/v2/pkg/conversation"
+	coordination "m31labs.dev/buckley/v2/pkg/coordination/coordinator"
+	coordevents "m31labs.dev/buckley/v2/pkg/coordination/events"
+	"m31labs.dev/buckley/v2/pkg/graft"
+	"m31labs.dev/buckley/v2/pkg/gts"
+	"m31labs.dev/buckley/v2/pkg/ipc"
+	"m31labs.dev/buckley/v2/pkg/ipc/command"
+	"m31labs.dev/buckley/v2/pkg/model"
+	"m31labs.dev/buckley/v2/pkg/orchestrator"
+	rlmrunner "m31labs.dev/buckley/v2/pkg/rlm/runner"
+	"m31labs.dev/buckley/v2/pkg/rules"
+	"m31labs.dev/buckley/v2/pkg/setup"
+	"m31labs.dev/buckley/v2/pkg/skill"
+	"m31labs.dev/buckley/v2/pkg/storage"
+	"m31labs.dev/buckley/v2/pkg/telemetry"
+	"m31labs.dev/buckley/v2/pkg/tool"
+	"m31labs.dev/buckley/v2/pkg/tool/builtin"
+	"m31labs.dev/buckley/v2/pkg/types"
+	"m31labs.dev/buckley/v2/pkg/ui/tui"
+	buckleyversion "m31labs.dev/buckley/v2/pkg/version"
 )
 
 // Version information - set via ldflags during build
@@ -249,6 +249,7 @@ func main() {
 		os.Exit(1)
 	}
 	defer store.Close()
+	modelManager.SetProviderThreadStore(store)
 
 	// Load project context (AGENTS.md)
 	loader := projectcontext.NewLoader(cwd)
@@ -295,13 +296,14 @@ func main() {
 
 	// Create and run TUI
 	ctrl, err := tui.NewController(tui.ControllerConfig{
-		Config:       cfg,
-		ModelManager: modelManager,
-		Store:        store,
-		ProjectCtx:   projectContext,
-		Telemetry:    telemetryHub,
-		SessionID:    resumeSessionID,
-		AgentProfile: agentPromptSection(agentProfile),
+		Config:        cfg,
+		ModelManager:  modelManager,
+		Store:         store,
+		ProjectCtx:    projectContext,
+		Telemetry:     telemetryHub,
+		SessionID:     resumeSessionID,
+		AgentProfile:  agentPromptSection(agentProfile),
+		ModelOverride: modelOverrideFlag,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error creating TUI: %v\n", err)
@@ -372,7 +374,9 @@ func executeOneShot(prompt string, cfg *config.Config, mgr *model.Manager, store
 	createTool := &builtin.CreateSkillTool{Registry: skills}
 	createTool.SetWorkDir(cwd)
 	registry.Register(createTool)
-	skillState.SetToolFilter(resolveOneShotToolFilter(agentProfile, registry, allowedTools))
+	if toolFilter := resolveOneShotToolFilter(agentProfile, registry, allowedTools); toolFilter != nil {
+		skillState.SetToolFilter(toolFilter)
+	}
 
 	conv.AddSystemMessage(buildACPSystemPrompt(projectContext, cwd, skills, engine, agentPromptSection(agentProfile)))
 	conv.AddUserMessage(prompt)
@@ -628,6 +632,7 @@ func initDependencies() (*config.Config, *model.Manager, *storage.Store, error) 
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("failed to initialize storage: %w", err)
 	}
+	modelManager.SetProviderThreadStore(store)
 
 	return cfg, modelManager, store, nil
 }
@@ -665,6 +670,7 @@ func printHelp() {
 	fmt.Println("  remote <subcommand>              Remote session operations (attach, sessions, tokens, login, console)")
 	fmt.Println("  batch prune-workspaces           Garbage-collect stale batch workspaces (k8s/CI)")
 	fmt.Println("  git-webhook                      Listen for merge webhooks and run regression/release commands")
+	fmt.Println("  buckbot                          Retired; use review-pr <PR> -post")
 	fmt.Println("  agent init [path]                Create a filesystem-first agent/ layout")
 	fmt.Println("  agent list                       List discovered project agent profiles")
 	fmt.Println("  agent check [--project|path]     Validate a Buckley agent profile")
@@ -1276,6 +1282,8 @@ func dispatchSubcommand(args []string) (bool, int) {
 		return true, runCommand(runBatchCommand, args[1:])
 	case "git-webhook":
 		return true, runCommand(runGitWebhookCommand, args[1:])
+	case "buckbot":
+		return true, runCommand(runBuckbotCommand, args[1:])
 	case "agent":
 		return true, runCommand(runAgentCommand, args[1:])
 	case "execute-task":

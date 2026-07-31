@@ -2,8 +2,9 @@ package oneshot
 
 import (
 	"encoding/json"
+	"errors"
 
-	"m31labs.dev/buckley/pkg/tools"
+	"m31labs.dev/buckley/v2/pkg/tools"
 )
 
 // ContextSource describes a source of context for a oneshot command.
@@ -83,6 +84,12 @@ type RLMDefinition interface {
 	ParseResult(response string) (any, error)
 }
 
+// RLMExecutionBudget optionally caps model/tool iterations for commands where
+// bounded sampling is part of the product contract.
+type RLMExecutionBudget interface {
+	MaxRLMIterations() int
+}
+
 // RLMResultValidator optionally adds semantic validation to an RLM command.
 // RunRLM retries responses that fail this validation, using the validation
 // error as corrective guidance for the next attempt.
@@ -96,6 +103,40 @@ type RLMResultValidator interface {
 // verification without successful snapshot-bound verification tool calls.
 type RLMExecutionValidator interface {
 	ValidateRLMExecution(result any, execution *RLMResult) error
+}
+
+// RLMExecutionEvidenceRequiredError marks a validation failure that needs new
+// inspection or verification evidence. A text-only repair cannot resolve it.
+type RLMExecutionEvidenceRequiredError struct {
+	err error
+}
+
+func (e *RLMExecutionEvidenceRequiredError) Error() string {
+	if e == nil || e.err == nil {
+		return "RLM execution evidence is required"
+	}
+	return e.err.Error()
+}
+
+func (e *RLMExecutionEvidenceRequiredError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.err
+}
+
+// RequireRLMExecutionEvidence marks an error for a bounded tool-enabled retry.
+func RequireRLMExecutionEvidence(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &RLMExecutionEvidenceRequiredError{err: err}
+}
+
+// IsRLMExecutionEvidenceRequired reports whether validation needs new evidence.
+func IsRLMExecutionEvidenceRequired(err error) bool {
+	var target *RLMExecutionEvidenceRequiredError
+	return errors.As(err, &target)
 }
 
 // RLMApprovalCritic optionally requires an independent adversarial pass after

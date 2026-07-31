@@ -11,6 +11,7 @@ import (
 )
 
 type MergeCallback func(MergeEvent)
+type PullRequestCallback func(PullRequestEvent)
 
 type MergeEvent struct {
 	Repository string
@@ -18,13 +19,30 @@ type MergeEvent struct {
 	SHA        string
 }
 
+// PullRequestEvent is the stable subset of a GitHub pull_request webhook that
+// an automated reviewer needs. It intentionally excludes untrusted PR text.
+type PullRequestEvent struct {
+	Repository string
+	Number     int
+	Action     string
+	HeadSHA    string
+	Draft      bool
+}
+
 type Handler struct {
-	secret   string
-	callback MergeCallback
+	secret              string
+	callback            MergeCallback
+	pullRequestCallback PullRequestCallback
 }
 
 func NewHandler(secret string, callback MergeCallback) *Handler {
 	return &Handler{secret: strings.TrimSpace(secret), callback: callback}
+}
+
+// NewPullRequestHandler accepts signed pull_request events and invokes the
+// callback only for reviewable revisions.
+func NewPullRequestHandler(secret string, callback PullRequestCallback) *Handler {
+	return &Handler{secret: strings.TrimSpace(secret), pullRequestCallback: callback}
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -46,12 +64,24 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unprocessable entity", http.StatusUnprocessableEntity)
 		return
 	}
-	go h.handleEvent(event)
+	go h.handleEvent(r.Header.Get("X-GitHub-Event"), event)
 	w.WriteHeader(http.StatusAccepted)
 	_, _ = w.Write([]byte("ok"))
 }
 
-func (h *Handler) handleEvent(event map[string]any) {
+func (h *Handler) handleEvent(eventName string, event map[string]any) {
+	if eventName == "pull_request" && h.pullRequestCallback != nil {
+		action := readString(event, "action")
+		if isReviewablePullRequestAction(action) && !readNestedBool(event, "pull_request", "draft") {
+			repo := readNestedString(event, "repository", "full_name")
+			number := readInt(event, "number")
+			headSHA := readNestedString(event, "pull_request", "head", "sha")
+			if repo != "" && number > 0 && headSHA != "" {
+				h.pullRequestCallback(PullRequestEvent{Repository: repo, Number: number, Action: action, HeadSHA: headSHA, Draft: false})
+			}
+		}
+		return
+	}
 	action := readString(event, "action")
 	merged := readBool(event, "merged")
 	if action == "closed" && merged && h.callback != nil {
@@ -62,6 +92,15 @@ func (h *Handler) handleEvent(event map[string]any) {
 			return
 		}
 		h.callback(MergeEvent{Repository: repo, Branch: branch, SHA: sha})
+	}
+}
+
+func isReviewablePullRequestAction(action string) bool {
+	switch action {
+	case "opened", "reopened", "ready_for_review", "synchronize":
+		return true
+	default:
+		return false
 	}
 }
 
@@ -93,6 +132,33 @@ func readString(payload map[string]any, key string) string {
 func readBool(payload map[string]any, key string) bool {
 	if val, ok := payload[key].(bool); ok {
 		return val
+	}
+	return false
+}
+
+func readInt(payload map[string]any, key string) int {
+	if val, ok := payload[key].(float64); ok && val == float64(int(val)) {
+		return int(val)
+	}
+	return 0
+}
+
+func readNestedBool(payload map[string]any, keys ...string) bool {
+	current := payload
+	for i, key := range keys {
+		value, ok := current[key]
+		if !ok {
+			return false
+		}
+		if i == len(keys)-1 {
+			value, _ := value.(bool)
+			return value
+		}
+		next, ok := value.(map[string]any)
+		if !ok {
+			return false
+		}
+		current = next
 	}
 	return false
 }

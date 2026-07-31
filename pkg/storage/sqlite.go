@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	sqlite "modernc.org/sqlite"
 	sqlite3 "modernc.org/sqlite/lib"
@@ -177,6 +178,79 @@ var migrations = []Migration{
 	{10, "messages_search", ensureMessagesSearchSchema},
 	{11, "memories_project_path", ensureMemoriesSchema},
 	{12, "message_tool_turns", ensureMessagesSchema},
+	{13, "provider_threads", ensureProviderThreadsSchema},
+	{14, "session_model", ensureSessionSchema},
+	{15, "ipc_events", ensureIPCEventsSchema},
+	{16, "normalize_legacy_timestamps", normalizeLegacyTimestamps},
+	{17, "normalize_session_lifecycle_timestamps", normalizeLegacyTimestamps},
+}
+
+func sqliteTimestamp(value time.Time) string {
+	return value.UTC().Format(time.RFC3339Nano)
+}
+
+func normalizeLegacyTimestamps(db *sql.DB) error {
+	for _, target := range []struct{ table, column string }{
+		{"sessions", "created_at"}, {"sessions", "last_active"},
+		{"sessions", "completed_at"},
+		{"messages", "timestamp"}, {"api_calls", "timestamp"}, {"ipc_events", "created_at"},
+	} {
+		rows, err := db.Query("SELECT rowid, " + target.column + " FROM " + target.table + " WHERE " + target.column + " IS NOT NULL")
+		if err != nil {
+			return fmt.Errorf("read legacy %s.%s: %w", target.table, target.column, err)
+		}
+		for rows.Next() {
+			var id int64
+			var raw string
+			if err := rows.Scan(&id, &raw); err != nil {
+				_ = rows.Close()
+				return fmt.Errorf("scan legacy %s.%s: %w", target.table, target.column, err)
+			}
+			if parsed := parseSQLiteTimestamp(raw); !parsed.IsZero() && raw != sqliteTimestamp(parsed) {
+				if _, err := db.Exec("UPDATE "+target.table+" SET "+target.column+" = ? WHERE rowid = ?", sqliteTimestamp(parsed), id); err != nil {
+					_ = rows.Close()
+					return fmt.Errorf("normalize %s.%s: %w", target.table, target.column, err)
+				}
+			}
+		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		_ = rows.Close()
+	}
+	return nil
+}
+
+func ensureIPCEventsSchema(db *sql.DB) error {
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS ipc_events (
+		event_id TEXT PRIMARY KEY,
+		session_id TEXT,
+		event_type TEXT NOT NULL,
+		payload_json TEXT,
+		created_at TIMESTAMP NOT NULL
+	)`); err != nil {
+		return fmt.Errorf("create ipc_events: %w", err)
+	}
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_ipc_events_session_id ON ipc_events(session_id, event_id)`); err != nil {
+		return fmt.Errorf("index ipc_events: %w", err)
+	}
+	return nil
+}
+
+func ensureProviderThreadsSchema(db *sql.DB) error {
+	_, err := db.Exec(`CREATE TABLE IF NOT EXISTS provider_threads (
+		session_id TEXT NOT NULL,
+		provider_id TEXT NOT NULL,
+		thread_id TEXT NOT NULL,
+		updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+		PRIMARY KEY (session_id, provider_id),
+		FOREIGN KEY (session_id) REFERENCES sessions(session_id) ON DELETE CASCADE
+	)`)
+	if err != nil {
+		return fmt.Errorf("create provider_threads: %w", err)
+	}
+	return nil
 }
 
 // runMigrations runs the schema migrations with version tracking
@@ -378,6 +452,12 @@ func ensureSessionSchema(db *sql.DB) error {
 	if !cols["git_branch"] {
 		if _, err := db.Exec(`ALTER TABLE sessions ADD COLUMN git_branch TEXT`); err != nil {
 			return fmt.Errorf("add session git_branch: %w", err)
+		}
+	}
+
+	if !cols["model"] {
+		if _, err := db.Exec(`ALTER TABLE sessions ADD COLUMN model TEXT`); err != nil {
+			return fmt.Errorf("add session model: %w", err)
 		}
 	}
 

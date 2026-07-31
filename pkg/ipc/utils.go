@@ -14,8 +14,8 @@ import (
 	"sync"
 	"time"
 
-	apperrors "m31labs.dev/buckley/pkg/errors"
-	"m31labs.dev/buckley/pkg/storage"
+	apperrors "m31labs.dev/buckley/v2/pkg/errors"
+	"m31labs.dev/buckley/v2/pkg/storage"
 )
 
 // rateLimiter provides simple per-key rate limiting.
@@ -72,11 +72,25 @@ func parseIntDefault(raw string, def int) int {
 
 // respondJSON sends a JSON response with appropriate headers.
 func respondJSON(w http.ResponseWriter, payload any) {
+	setJSONResponseHeaders(w)
+	encodeJSONResponse(w, payload)
+}
+
+func respondJSONStatus(w http.ResponseWriter, status int, payload any) {
+	setJSONResponseHeaders(w)
+	w.WriteHeader(status)
+	encodeJSONResponse(w, payload)
+}
+
+func setJSONResponseHeaders(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("X-Frame-Options", "DENY")
 	w.Header().Set("Referrer-Policy", "no-referrer")
+}
+
+func encodeJSONResponse(w http.ResponseWriter, payload any) {
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
 	if err := enc.Encode(payload); err != nil {

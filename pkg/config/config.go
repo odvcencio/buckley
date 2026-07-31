@@ -4,15 +4,16 @@ import (
 	"strings"
 	"time"
 
-	"m31labs.dev/buckley/pkg/giturl"
-	"m31labs.dev/buckley/pkg/personality"
-	"m31labs.dev/buckley/pkg/sandbox"
+	"m31labs.dev/buckley/v2/pkg/giturl"
+	"m31labs.dev/buckley/v2/pkg/personality"
+	"m31labs.dev/buckley/v2/pkg/sandbox"
 )
 
 const (
 	defaultOpenRouterModel        = defaultOpenRouterChatModel
 	defaultOpenRouterChatModel    = "z-ai/glm-5.2"
 	defaultOpenRouterUtilityModel = "qwen/qwen3.6-flash"
+	defaultOpenRouterCommitModel  = "qwen/qwen3.7-plus"
 	defaultOpenRouterKimiCode     = "moonshotai/kimi-k2.7-code"
 	defaultOpenRouterQwenMax      = "qwen/qwen3.7-max"
 	legacyOpenRouterChatModel     = "qwen/qwen3.6-max-preview"
@@ -68,7 +69,7 @@ var providerDefaultModels = map[string]providerModelDefaults{
 		Planning:          defaultOpenRouterChatModel,
 		Execution:         defaultOpenRouterChatModel,
 		Review:            defaultOpenRouterChatModel,
-		UtilityCommit:     defaultOpenRouterUtilityModel,
+		UtilityCommit:     defaultOpenRouterCommitModel,
 		UtilityPR:         defaultOpenRouterUtilityModel,
 		UtilityCompaction: defaultOpenRouterUtilityModel,
 		UtilityTodoPlan:   defaultOpenRouterUtilityModel,
@@ -143,6 +144,7 @@ type Config struct {
 	WebUI          WebUIConfig          `yaml:"web_ui"`
 	Commenting     CommentingConfig     `yaml:"commenting"`
 	GitEvents      GitEventsConfig      `yaml:"git_events"`
+	Buckbot        BuckbotConfig        `yaml:"buckbot"`
 	Input          InputConfig          `yaml:"input"`
 	Diagnostics    DiagnosticsConfig    `yaml:"diagnostics"`
 	Notify         NotifyConfig         `yaml:"notify"`
@@ -195,12 +197,15 @@ type UtilityModelConfig struct {
 // DefaultUtilityModel is the default model for utility tasks.
 const DefaultUtilityModel = defaultOpenRouterUtilityModel
 
+// DefaultCommitModel is the default model for commit message generation.
+const DefaultCommitModel = defaultOpenRouterCommitModel
+
 // GetUtilityCommitModel returns the model for commit message generation
 func (c *Config) GetUtilityCommitModel() string {
 	if c.Models.Utility.Commit != "" {
 		return c.Models.Utility.Commit
 	}
-	return DefaultUtilityModel
+	return DefaultCommitModel
 }
 
 // GetUtilityPRModel returns the model for PR description generation
@@ -408,6 +413,13 @@ type InputConfig struct {
 // DiagnosticsConfig controls diagnostic logging and debugging behavior.
 type DiagnosticsConfig struct {
 	NetworkLogsEnabled bool `yaml:"network_logs_enabled"`
+	// TelemetryPayloadsOverNetwork controls whether full tool call arguments
+	// and results are included in telemetry events sent over network
+	// transports (IPC WebSocket, ACP). Tool output can contain file
+	// contents and other sensitive data that key-name redaction can't
+	// protect, so this defaults to false; the in-process TUI always
+	// receives full payloads regardless of this setting.
+	TelemetryPayloadsOverNetwork bool `yaml:"telemetry_payloads_over_network"`
 }
 
 // TranscriptionConfig controls audio-to-text conversion
@@ -753,4 +765,38 @@ type GitEventsConfig struct {
 	RegressionCommand  string `yaml:"regression_command"`
 	ReleaseCommand     string `yaml:"release_command"`
 	FailureCommand     string `yaml:"failure_command"`
+}
+
+// BuckbotConfig controls on-demand pull-request reviews. Enabled, Secret, and
+// WebhookBind remain for configuration compatibility with the retired daemon.
+type BuckbotConfig struct {
+	Enabled                    bool    `yaml:"enabled"`
+	Secret                     string  `yaml:"secret"`
+	WebhookBind                string  `yaml:"webhook_bind"`
+	Model                      string  `yaml:"model"`
+	CriticModel                string  `yaml:"critic_model"`
+	Reasoning                  string  `yaml:"reasoning"`
+	PerReviewBudgetUSD         float64 `yaml:"per_review_budget_usd"`
+	MonthlyBudgetUSD           float64 `yaml:"monthly_budget_usd"`
+	MaxReviewIterations        int     `yaml:"max_review_iterations"`
+	MaxValidationAttempts      int     `yaml:"max_validation_attempts"`
+	MaxDiffBytes               int     `yaml:"max_diff_bytes"`
+	MaxSupportingContextTokens int     `yaml:"max_supporting_context_tokens"`
+
+	// PostingCoreAssociations lists the GitHub authorAssociation values
+	// treated as core maintainer/owner for the posted-review size gate
+	// (see pkg/oneshot/commands.PostingGateConfig). Empty uses the default
+	// (OWNER, MEMBER, COLLABORATOR).
+	PostingCoreAssociations []string `yaml:"posting_core_associations"`
+
+	// PostingAllowlist names authors treated as core regardless of their
+	// GitHub association, for maintainers whose fork PRs GitHub reports as
+	// CONTRIBUTOR.
+	PostingAllowlist []string `yaml:"posting_allowlist"`
+
+	// PostingSizeThresholdBytes is the HighSignalBytes ceiling above which
+	// a posted review requires a core author (see
+	// pkg/oneshot/commands.PostingGateConfig.HighSignalByteThreshold). 0
+	// uses diffsignal.ReviewShardBudget.
+	PostingSizeThresholdBytes int `yaml:"posting_size_threshold_bytes"`
 }

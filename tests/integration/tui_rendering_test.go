@@ -12,11 +12,11 @@ import (
 	"strings"
 	"testing"
 
-	"m31labs.dev/buckley/pkg/ui/backend"
-	"m31labs.dev/buckley/pkg/ui/backend/sim"
-	"m31labs.dev/buckley/pkg/ui/runtime"
-	"m31labs.dev/buckley/pkg/ui/theme"
-	"m31labs.dev/buckley/pkg/ui/widgets"
+	"m31labs.dev/buckley/v2/pkg/ui/backend"
+	"m31labs.dev/buckley/v2/pkg/ui/backend/sim"
+	"m31labs.dev/buckley/v2/pkg/ui/runtime"
+	"m31labs.dev/buckley/v2/pkg/ui/theme"
+	"m31labs.dev/buckley/v2/pkg/ui/widgets"
 )
 
 // TestTUI_HeaderRendering tests that the header widget renders correctly.

@@ -5,18 +5,19 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	stdruntime "runtime"
 	"strings"
 	"sync"
 	"time"
 
-	"m31labs.dev/buckley/pkg/ui/backend"
-	"m31labs.dev/buckley/pkg/ui/backend/tcell"
-	"m31labs.dev/buckley/pkg/ui/filepicker"
-	"m31labs.dev/buckley/pkg/ui/markdown"
-	"m31labs.dev/buckley/pkg/ui/runtime"
-	"m31labs.dev/buckley/pkg/ui/terminal"
-	"m31labs.dev/buckley/pkg/ui/theme"
-	"m31labs.dev/buckley/pkg/ui/widgets"
+	"m31labs.dev/buckley/v2/pkg/ui/filepicker"
+	"m31labs.dev/buckley/v2/pkg/ui/widgets"
+	"m31labs.dev/fluffyui/backend"
+	"m31labs.dev/fluffyui/backend/tcell"
+	"m31labs.dev/fluffyui/markdown"
+	"m31labs.dev/fluffyui/runtime"
+	"m31labs.dev/fluffyui/terminal"
+	"m31labs.dev/fluffyui/theme"
 )
 
 // RenderMetrics tracks rendering performance statistics.
@@ -38,6 +39,13 @@ const (
 
 var processSpinnerFrames = [...]string{"-", "\\", "|", "/"}
 
+// expandFromZero avoids treating a fill widget's unconstrained measurement as
+// its flex basis. Nested flex layouts otherwise measure the chat view at the
+// maximum integer size and collapse it when distributing the real viewport.
+func expandFromZero(widget runtime.Widget) runtime.FlexChild {
+	return runtime.FlexChild{Widget: widget, Grow: 1, Shrink: 1, Basis: 0}
+}
+
 // WidgetApp is the main TUI application using the widget tree architecture.
 type WidgetApp struct {
 	screen  *runtime.Screen
@@ -45,18 +53,24 @@ type WidgetApp struct {
 	running bool
 
 	// Widget tree
-	header    *widgets.Header
-	chatView  *widgets.ChatView
-	inputArea *widgets.InputArea
-	statusBar *widgets.StatusBar
-	sidebar   *widgets.Sidebar
-	root      runtime.Widget
-	mainArea  *runtime.Flex // HBox containing chatView + sidebar
+	header        *widgets.Header
+	chatView      *widgets.ChatView
+	inputArea     *widgets.InputArea
+	statusBar     *widgets.StatusBar
+	sidebar       *widgets.Sidebar
+	activityPanel *widgets.ActivityPanel
+	root          runtime.Widget
+	mainArea      *runtime.Flex // HBox containing navigator + chat + inspector
 
-	// Sidebar state
-	sidebarVisible     bool
-	sidebarWanted      bool
-	minWidthForSidebar int // Auto-hide below this width
+	// Workspace panel state
+	sidebarVisible       bool
+	sidebarWanted        bool
+	sidebarWidth         int
+	minWidthForSidebar   int // Auto-hide below this width
+	activityPanelVisible bool
+	activityPanelWanted  bool
+	activityPanelTouched bool
+	activityPanelWidth   int
 
 	// File picker
 	filePicker *filepicker.FilePicker
@@ -109,6 +123,7 @@ type WidgetApp struct {
 	onNextSession func()
 	onPrevSession func()
 	onApproval    func(requestID string, approved, alwaysAllow bool)
+	onInterrupt   func()
 
 	// Configuration
 	theme       *theme.Theme
@@ -165,7 +180,7 @@ func NewWidgetApp(cfg WidgetAppConfig) (*WidgetApp, error) {
 	// Get theme
 	th := cfg.Theme
 	if th == nil {
-		th = theme.DefaultTheme()
+		th = defaultBuckleyTheme()
 	}
 
 	// Create widgets
@@ -225,36 +240,40 @@ func NewWidgetApp(cfg WidgetAppConfig) (*WidgetApp, error) {
 		themeToBackendStyle(th.TextMuted),
 	)
 
-	// Determine if sidebar should be visible based on terminal width and content
-	sidebarVisible := w >= 100 && sidebar.HasContent()
+	// Create the persistent activity/detail inspector. It starts collapsed
+	// and opens automatically when the first inspectable activity arrives.
+	activityPanel := widgets.NewActivityPanel()
+	activityPanel.SetStyles(
+		themeToBackendStyle(th.Border),
+		themeToBackendStyle(th.TextSecondary),
+		themeToBackendStyle(th.TextPrimary),
+		themeToBackendStyle(th.Selection),
+		themeToBackendStyle(th.TextMuted),
+	)
 
-	// Build main content area with HBox (ChatView + Sidebar)
-	var mainArea *runtime.Flex
-	if sidebarVisible {
-		mainArea = runtime.HBox(
-			runtime.Flexible(chatView, 3), // 75% for chat
-			runtime.Sized(sidebar, 24),    // Fixed 24 cols for sidebar
-		)
-	} else {
-		mainArea = runtime.HBox(
-			runtime.Expanded(chatView), // Full width when sidebar hidden
-		)
-	}
+	mainArea := workspaceMainArea(
+		chatView,
+		sidebar,
+		activityPanel,
+		workspaceVisibility{},
+		defaultSidebarWidth,
+		defaultActivityPanelWidth,
+	)
 
 	// Build widget tree using VBox layout
 	// Header (fixed 1 row)
-	// MainArea (HBox: ChatView + Sidebar)
+	// MainArea (HBox: Navigator + ChatView + Inspector)
 	// InputArea (fixed 2+ rows)
 	// StatusBar (fixed 1 row)
 	root := runtime.VBox(
 		runtime.Fixed(header),
-		runtime.Expanded(mainArea),
+		expandFromZero(mainArea),
 		runtime.Fixed(inputArea),
 		runtime.Fixed(statusBar),
 	)
 
 	// Create screen
-	screen := runtime.NewScreen(w, h, th)
+	screen := runtime.NewScreen(w, h)
 
 	// Add root layer (focus scope is created internally)
 	screen.PushLayer(root, false)
@@ -266,30 +285,35 @@ func NewWidgetApp(cfg WidgetAppConfig) (*WidgetApp, error) {
 	fp := filepicker.NewFilePicker(projectRoot)
 
 	app := &WidgetApp{
-		screen:              screen,
-		backend:             be,
-		header:              header,
-		chatView:            chatView,
-		inputArea:           inputArea,
-		statusBar:           statusBar,
-		sidebar:             sidebar,
-		root:                root,
-		mainArea:            mainArea,
-		sidebarVisible:      sidebarVisible,
-		sidebarWanted:       sidebarVisible,
-		minWidthForSidebar:  100,
-		filePicker:          fp,
-		theme:               th,
-		workDir:             workDir,
-		projectRoot:         projectRoot,
-		onSubmit:            cfg.OnSubmit,
-		onQuit:              cfg.OnQuit,
-		messages:            make(chan Message, 256),
-		statusText:          "Ready",
-		cursorPulseStart:    time.Now(),
-		cursorPulsePeriod:   2600 * time.Millisecond,
-		cursorPulseInterval: 50 * time.Millisecond,
-		inputMeasuredHeight: inputArea.Measure(runtime.Constraints{MaxWidth: w, MaxHeight: h}).Height,
+		screen:               screen,
+		backend:              be,
+		header:               header,
+		chatView:             chatView,
+		inputArea:            inputArea,
+		statusBar:            statusBar,
+		sidebar:              sidebar,
+		activityPanel:        activityPanel,
+		root:                 root,
+		mainArea:             mainArea,
+		sidebarVisible:       false,
+		sidebarWanted:        false,
+		sidebarWidth:         defaultSidebarWidth,
+		minWidthForSidebar:   100,
+		activityPanelVisible: false,
+		activityPanelWanted:  false,
+		activityPanelWidth:   defaultActivityPanelWidth,
+		filePicker:           fp,
+		theme:                th,
+		workDir:              workDir,
+		projectRoot:          projectRoot,
+		onSubmit:             cfg.OnSubmit,
+		onQuit:               cfg.OnQuit,
+		messages:             make(chan Message, 256),
+		statusText:           "Ready",
+		cursorPulseStart:     time.Now(),
+		cursorPulsePeriod:    2600 * time.Millisecond,
+		cursorPulseInterval:  50 * time.Millisecond,
+		inputMeasuredHeight:  inputArea.Measure(runtime.Constraints{MaxWidth: w, MaxHeight: h}).Height,
 	}
 
 	// Create coalescer for smooth streaming
@@ -441,9 +465,16 @@ func (a *WidgetApp) showCommandPalette() {
 		{ID: "export", Category: "Session", Label: "Export Conversation", Shortcut: "/export"},
 		{ID: "compact", Category: "Session", Label: "Compact Context", Shortcut: "/compact"},
 		{ID: "cancel", Category: "Session", Label: "Cancel Response", Shortcut: "/cancel"},
+		{ID: "steer", Category: "Session", Label: "Steer Active Response", Shortcut: "/steer"},
+		{ID: "queue", Category: "Session", Label: "Queue Follow-up", Shortcut: "/queue"},
 
 		// Navigation commands
-		{ID: "toggle-sidebar", Category: "View", Label: "Toggle Sidebar", Shortcut: "Ctrl+B"},
+		{ID: "toggle-sidebar", Category: "View", Label: "Toggle Navigator", Shortcut: "Ctrl+B"},
+		{ID: "toggle-activity", Category: "View", Label: "Toggle Activity Inspector", Shortcut: "Ctrl+Shift+B"},
+		{ID: "navigator-narrower", Category: "View", Label: "Narrow Navigator", Shortcut: "Alt+["},
+		{ID: "navigator-wider", Category: "View", Label: "Widen Navigator", Shortcut: "Alt+]"},
+		{ID: "inspector-narrower", Category: "View", Label: "Narrow Inspector", Shortcut: "Alt+{"},
+		{ID: "inspector-wider", Category: "View", Label: "Widen Inspector", Shortcut: "Alt+}"},
 		{ID: "file-picker", Category: "View", Label: "Open File Picker", Shortcut: "@"},
 		{ID: "scroll-top", Category: "View", Label: "Scroll to Top"},
 		{ID: "scroll-bottom", Category: "View", Label: "Scroll to Bottom", Shortcut: "Alt+End"},
@@ -497,7 +528,10 @@ func (a *WidgetApp) showSlashCommandPalette() {
 		{ID: "/history", Label: "/history", Description: "Show recent turns"},
 		{ID: "/export", Label: "/export", Description: "Export conversation to Markdown"},
 		{ID: "/cancel", Label: "/cancel", Description: "Cancel current response"},
-		{ID: "/sessions", Label: "/sessions", Description: "List active sessions"},
+		{ID: "/steer ", Label: "/steer", Description: "Interrupt and redirect the active response"},
+		{ID: "/queue ", Label: "/queue", Description: "Queue a follow-up without interrupting"},
+		{ID: "/sessions", Label: "/sessions", Description: "List saved sessions"},
+		{ID: "/resume ", Label: "/resume", Description: "Resume a saved session"},
 		{ID: "/next", Label: "/next", Description: "Switch to next session"},
 		{ID: "/prev", Label: "/prev", Description: "Switch to previous session"},
 		{ID: "/model", Label: "/model", Description: "Select execution model"},
@@ -510,6 +544,10 @@ func (a *WidgetApp) showSlashCommandPalette() {
 	palette.SetItems(items)
 
 	palette.SetOnSelect(func(item widgets.PaletteItem) {
+		if strings.HasSuffix(item.ID, " ") {
+			a.prefillInput(item.ID)
+			return
+		}
 		// Execute the slash command
 		if a.onSubmit != nil {
 			a.onSubmit(item.ID)
@@ -534,6 +572,10 @@ func (a *WidgetApp) showSlashCommandPalette() {
 
 // ShowModelPicker displays a model picker overlay.
 func (a *WidgetApp) ShowModelPicker(items []widgets.PaletteItem, onSelect func(item widgets.PaletteItem)) {
+	a.Post(ModelPickerMsg{Items: items, OnSelect: onSelect})
+}
+
+func (a *WidgetApp) showModelPicker(items []widgets.PaletteItem, onSelect func(item widgets.PaletteItem)) {
 	palette := widgets.NewPaletteWidget("Models")
 	palette.SetPlaceholder("search models...")
 	palette.SetMaxVisible(16)
@@ -669,6 +711,9 @@ func (a *WidgetApp) pollEvents() {
 
 // handleMouseMsg processes mouse input.
 func (a *WidgetApp) handleMouseMsg(m MouseMsg) bool {
+	if a.handleChatScrollbarMouse(m) {
+		return true
+	}
 	if a.handleMouseWheel(m) {
 		return true
 	}
@@ -685,6 +730,9 @@ func (a *WidgetApp) handleMouseMsg(m MouseMsg) bool {
 }
 
 func (a *WidgetApp) handleMouseWheel(m MouseMsg) bool {
+	if _, _, ok := a.chatView.PositionForPoint(m.X, m.Y); !ok {
+		return false
+	}
 	switch m.Button {
 	case MouseWheelUp:
 		a.chatView.ScrollUp(3)
@@ -813,13 +861,7 @@ func (a *WidgetApp) refreshInputLayout() {
 }
 
 func (a *WidgetApp) updateSidebarVisibility() {
-	w, _ := a.screen.Size()
-	shouldShow := a.sidebarWanted && w >= a.minWidthForSidebar
-	if shouldShow == a.sidebarVisible {
-		return
-	}
-	a.sidebarVisible = shouldShow
-	a.rebuildLayout()
+	a.updateWorkspaceVisibility()
 }
 
 func (a *WidgetApp) updateScrollStatus() bool {
@@ -904,7 +946,7 @@ func (a *WidgetApp) handleCommand(cmd runtime.Command) {
 		if a.onFileSelect != nil {
 			a.onFileSelect(c.Path)
 		}
-	case runtime.ApprovalResponse:
+	case widgets.ApprovalResponse:
 		// Notify callback with approval decision
 		if a.onApproval != nil {
 			a.onApproval(c.RequestID, c.Approved, c.AlwaysAllow)
@@ -949,10 +991,24 @@ func (a *WidgetApp) handlePaletteCommand(id string) {
 		if a.onSubmit != nil {
 			a.onSubmit("/cancel")
 		}
+	case "steer":
+		a.prefillInput("/steer ")
+	case "queue":
+		a.prefillInput("/queue ")
 
 	// View commands
 	case "toggle-sidebar":
 		a.toggleSidebar()
+	case "toggle-activity":
+		a.toggleActivityPanel()
+	case "navigator-narrower":
+		a.resizeSidebar(-panelResizeStep)
+	case "navigator-wider":
+		a.resizeSidebar(panelResizeStep)
+	case "inspector-narrower":
+		a.resizeActivityPanel(-panelResizeStep)
+	case "inspector-wider":
+		a.resizeActivityPanel(panelResizeStep)
 	case "file-picker":
 		a.showFilePicker()
 	case "scroll-top":
@@ -995,6 +1051,13 @@ func (a *WidgetApp) handlePaletteCommand(id string) {
 	case "quit":
 		a.Quit()
 	}
+}
+
+func (a *WidgetApp) prefillInput(text string) {
+	a.inputArea.SetText(text)
+	a.inputArea.Focus()
+	a.refreshInputLayout()
+	a.dirty = true
 }
 
 // Quit stops the application.
@@ -1077,6 +1140,13 @@ func (a *WidgetApp) AddMessage(content, source string) {
 	a.Post(AddMessageMsg{Content: content, Source: source})
 }
 
+// addMessageImmediately hydrates transcript content before the next frame.
+// Callers must already be on the UI goroutine or before Run starts.
+func (a *WidgetApp) addMessageImmediately(content, source string) {
+	a.chatView.AddMessage(content, source)
+	a.updateScrollStatus()
+}
+
 // RemoveThinkingIndicator removes the thinking indicator.
 func (a *WidgetApp) RemoveThinkingIndicator() {
 	a.Post(ThinkingMsg{Show: false})
@@ -1090,6 +1160,11 @@ func (a *WidgetApp) ShowThinkingIndicator() {
 // AppendToLastMessage appends text. Thread-safe via message passing.
 func (a *WidgetApp) AppendToLastMessage(text string) {
 	a.Post(AppendMsg{Text: text})
+}
+
+// ReplaceLastMessage replaces the current message content.
+func (a *WidgetApp) ReplaceLastMessage(content string) {
+	a.Post(ReplaceLastMessageMsg{Content: content})
 }
 
 // StreamChunk sends a streaming chunk through the coalescer.
@@ -1145,6 +1220,11 @@ func (a *WidgetApp) SetSessionCallbacks(onNext, onPrev func()) {
 	a.onPrevSession = onPrev
 }
 
+// SetInterruptCallback sets the callback used to stop an active model or tool process.
+func (a *WidgetApp) SetInterruptCallback(onInterrupt func()) {
+	a.onInterrupt = onInterrupt
+}
+
 // SetApprovalCallback sets the callback for tool approval decisions.
 func (a *WidgetApp) SetApprovalCallback(onApproval func(requestID string, approved, alwaysAllow bool)) {
 	a.onApproval = onApproval
@@ -1156,47 +1236,29 @@ func (a *WidgetApp) RequestApproval(req ApprovalRequestMsg) {
 	a.Post(req)
 }
 
-// toggleSidebar toggles the sidebar visibility and rebuilds the layout.
+// toggleSidebar toggles the navigator visibility and rebuilds the layout.
 func (a *WidgetApp) toggleSidebar() {
 	a.sidebarWanted = !a.sidebarWanted
 	a.updateSidebarVisibility()
 	if a.sidebarVisible {
-		a.setStatusOverride("Sidebar shown", 2*time.Second)
+		a.setStatusOverride("Navigator shown", 2*time.Second)
 	} else {
-		a.setStatusOverride("Sidebar hidden", 2*time.Second)
+		a.setStatusOverride("Navigator hidden", 2*time.Second)
 	}
 }
 
-// rebuildLayout rebuilds the main area layout based on sidebar visibility.
+// rebuildLayout rebuilds the three-region workspace based on panel state.
 func (a *WidgetApp) rebuildLayout() {
-	// Get current screen size
 	w, h := a.screen.Size()
-
-	// Rebuild main area with or without sidebar
-	if a.sidebarVisible {
-		a.mainArea = runtime.HBox(
-			runtime.Flexible(a.chatView, 3),
-			runtime.Sized(a.sidebar, 24),
-		)
-	} else {
-		a.mainArea = runtime.HBox(
-			runtime.Expanded(a.chatView),
-		)
-	}
-
-	// Rebuild root with new main area
+	a.mainArea = a.buildWorkspaceMainArea()
 	a.root = runtime.VBox(
 		runtime.Fixed(a.header),
-		runtime.Expanded(a.mainArea),
+		expandFromZero(a.mainArea),
 		runtime.Fixed(a.inputArea),
 		runtime.Fixed(a.statusBar),
 	)
-
-	// Update screen with new root
-	a.screen.PopLayer()
-	a.screen.PushLayer(a.root, false)
+	a.screen.SetRoot(a.root)
 	a.screen.Resize(w, h)
-
 	a.dirty = true
 }
 
@@ -1297,6 +1359,9 @@ func (a *WidgetApp) WelcomeScreen() {
 		"  • Use $ to view environment variables",
 		"  • Use /help to see available commands",
 		"  • Use Ctrl+F to search conversation",
+		"  • Use Ctrl+B / Ctrl+Shift+B to toggle workspace panels",
+		"  • Use Alt+[ and Alt+] to resize the navigator",
+		"  • Use Alt+{ and Alt+} to resize the inspector",
 		"  • Use Alt+End to jump to latest",
 		"  • Press Ctrl+C twice to quit",
 		"",
@@ -1308,23 +1373,54 @@ func (a *WidgetApp) WelcomeScreen() {
 }
 
 func copyToClipboard(text string) error {
-	cmds := [][]string{
-		{"pbcopy"},                           // macOS
-		{"xclip", "-selection", "clipboard"}, // Linux X11
-		{"xsel", "--clipboard", "--input"},   // Linux X11 alt
-		{"wl-copy"},                          // Linux Wayland
-		{"clip.exe"},                         // WSL/Windows
-	}
-
+	cmds := clipboardCommands()
+	var failures []string
 	for _, args := range cmds {
+		if !clipboardCommandAvailable(args[0]) {
+			continue
+		}
 		cmd := exec.Command(args[0], args[1:]...)
 		cmd.Stdin = strings.NewReader(text)
 		if err := cmd.Run(); err == nil {
 			return nil
+		} else {
+			failures = append(failures, fmt.Sprintf("%s: %v", args[0], err))
 		}
 	}
+	if len(failures) > 0 {
+		return fmt.Errorf("clipboard command failed: %s", strings.Join(failures, "; "))
+	}
+	return fmt.Errorf("clipboard unavailable (install wl-clipboard, xclip, or xsel)")
+}
 
-	return fmt.Errorf("no clipboard command available")
+func clipboardCommands() [][]string {
+	return clipboardCommandsFor(stdruntime.GOOS)
+}
+
+func clipboardCommandsFor(goos string) [][]string {
+	switch goos {
+	case "darwin":
+		return [][]string{{"pbcopy"}}
+	case "windows":
+		return [][]string{{"clip.exe"}}
+	default:
+		return [][]string{
+			{"wl-copy"},
+			{"xclip", "-selection", "clipboard"},
+			{"xsel", "--clipboard", "--input"},
+			{"clip.exe"},
+			{"/mnt/c/Windows/System32/clip.exe"},
+		}
+	}
+}
+
+func clipboardCommandAvailable(name string) bool {
+	if strings.ContainsRune(name, os.PathSeparator) {
+		info, err := os.Stat(name)
+		return err == nil && !info.IsDir()
+	}
+	_, err := exec.LookPath(name)
+	return err == nil
 }
 
 func max(a, b int) int {

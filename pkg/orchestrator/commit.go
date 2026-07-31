@@ -10,9 +10,10 @@ import (
 	"strings"
 	"time"
 
-	"m31labs.dev/buckley/pkg/commitmsg"
-	"m31labs.dev/buckley/pkg/config"
-	"m31labs.dev/buckley/pkg/model"
+	"m31labs.dev/buckley/v2/pkg/commitmsg"
+	"m31labs.dev/buckley/v2/pkg/config"
+	"m31labs.dev/buckley/v2/pkg/model"
+	"m31labs.dev/buckley/v2/pkg/prompts"
 )
 
 type CommitGenerator struct {
@@ -58,6 +59,8 @@ Rules:
   references ("Refs #N") and do NOT close anything. Never write "Closes #N",
   "Fixes #N", or "Resolves #N", and do not list an issue number just because it
   appears in the diff text (e.g. a changelog "(roadmap: #123)" attribution).
+
+` + prompts.STE100ProseBlock() + `
 
 Output JSON:
 {

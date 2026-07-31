@@ -3,8 +3,8 @@ package widgets
 import (
 	"testing"
 
-	"m31labs.dev/buckley/pkg/ui/runtime"
-	"m31labs.dev/buckley/pkg/ui/terminal"
+	"m31labs.dev/fluffyui/runtime"
+	"m31labs.dev/fluffyui/terminal"
 )
 
 func TestSearchWidget_New(t *testing.T) {
@@ -179,8 +179,8 @@ func TestSearchWidget_RenderUnicodeCursorUsesRuneColumns(t *testing.T) {
 	buf := runtime.NewBuffer(40, 4)
 	s.Render(runtime.RenderContext{Buffer: buf})
 
-	if got := readBufferRunes(buf, 0, 3, 5); got != "/ 模型█" {
-		t.Fatalf("rendered search query = %q, want %q", got, "/ 模型█")
+	if got := readBufferRunes(buf, 0, 3, 7); got != "/ 模 型 █" {
+		t.Fatalf("rendered search query = %q, want %q", got, "/ 模 型 █")
 	}
 }
 
@@ -195,8 +195,8 @@ func TestSearchWidget_RenderLongUnicodeQueryShowsSuffix(t *testing.T) {
 	buf := runtime.NewBuffer(24, 4)
 	s.Render(runtime.RenderContext{Buffer: buf})
 
-	if got := readBufferRunes(buf, 2, 3, 4); got != "模型路径" {
-		t.Fatalf("rendered suffix = %q, want %q", got, "模型路径")
+	if got := readBufferRunes(buf, 2, 3, 4); got != "路 径 " {
+		t.Fatalf("rendered suffix = %q, want %q", got, "路 径 ")
 	}
 }
 

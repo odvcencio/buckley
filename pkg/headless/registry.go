@@ -10,15 +10,15 @@ import (
 	"sync"
 	"time"
 
-	"m31labs.dev/buckley/pkg/config"
-	"m31labs.dev/buckley/pkg/giturl"
-	"m31labs.dev/buckley/pkg/ipc/command"
-	"m31labs.dev/buckley/pkg/mission"
-	"m31labs.dev/buckley/pkg/model"
-	"m31labs.dev/buckley/pkg/session"
-	"m31labs.dev/buckley/pkg/storage"
-	"m31labs.dev/buckley/pkg/telemetry"
-	"m31labs.dev/buckley/pkg/tool"
+	"m31labs.dev/buckley/v2/pkg/config"
+	"m31labs.dev/buckley/v2/pkg/giturl"
+	"m31labs.dev/buckley/v2/pkg/ipc/command"
+	"m31labs.dev/buckley/v2/pkg/mission"
+	"m31labs.dev/buckley/v2/pkg/model"
+	"m31labs.dev/buckley/v2/pkg/session"
+	"m31labs.dev/buckley/v2/pkg/storage"
+	"m31labs.dev/buckley/v2/pkg/telemetry"
+	"m31labs.dev/buckley/v2/pkg/tool"
 )
 
 // CreateSessionRequest contains parameters for creating a headless session.
@@ -191,6 +191,7 @@ func (r *Registry) CreateSession(req CreateSessionRequest) (*SessionInfo, error)
 		ProjectPath: projectPath,
 		GitRepo:     gitRepo,
 		GitBranch:   gitBranch,
+		Model:       modelID,
 		CreatedAt:   time.Now(),
 		LastActive:  time.Now(),
 		Status:      storage.SessionStatusActive,
@@ -293,8 +294,8 @@ func (r *Registry) EnsureSession(sessionID string) (*Runner, error) {
 	}
 
 	idleTimeout := r.maxIdleTime
-	modelID := ""
-	if r.config != nil {
+	modelID := strings.TrimSpace(sess.Model)
+	if modelID == "" && r.config != nil {
 		modelID = r.config.Models.Execution
 		if modelID == "" {
 			modelID = r.config.Models.Planning
@@ -327,7 +328,10 @@ func (r *Registry) EnsureSession(sessionID string) (*Runner, error) {
 
 func (r *Registry) buildToolRegistry(sessionID string, project string) *tool.Registry {
 	tools := tool.NewRegistry()
-	tools.SetMaxOutputBytes(defaultHeadlessMaxOutputBytes)
+	tool.ApplyToolMiddlewareConfig(tools, r.config)
+	if r.config == nil || r.config.ToolMiddleware.MaxResultBytes <= 0 {
+		tools.SetMaxOutputBytes(defaultHeadlessMaxOutputBytes)
+	}
 	if strings.TrimSpace(project) != "" && r.config != nil {
 		tools.ConfigureContainers(r.config, project)
 	}
@@ -349,6 +353,7 @@ func (r *Registry) buildToolRegistry(sessionID string, project string) *tool.Reg
 	if strings.TrimSpace(project) != "" {
 		tools.SetWorkDir(project)
 	}
+	tools.EnableDynamicDiscovery(nil)
 	return tools
 }
 
@@ -420,7 +425,7 @@ func (r *Registry) GetSessionInfo(sessionID string) (*SessionInfo, bool) {
 		ID:           sessionID,
 		Project:      runnerProjectPath(runner),
 		Branch:       strings.TrimSpace(runner.session.GitBranch),
-		Model:        strings.TrimSpace(runner.modelOverride),
+		Model:        runner.Model(),
 		State:        runner.State(),
 		CreatedAt:    runner.session.CreatedAt,
 		LastActive:   runner.LastActive(),
@@ -439,7 +444,7 @@ func (r *Registry) ListSessions() []SessionInfo {
 			ID:           id,
 			Project:      runnerProjectPath(runner),
 			Branch:       strings.TrimSpace(runner.session.GitBranch),
-			Model:        strings.TrimSpace(runner.modelOverride),
+			Model:        runner.Model(),
 			State:        runner.State(),
 			CreatedAt:    runner.session.CreatedAt,
 			LastActive:   runner.LastActive(),

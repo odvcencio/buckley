@@ -28,14 +28,14 @@ import (
 	"testing"
 	"time"
 
-	"m31labs.dev/buckley/pkg/config"
-	"m31labs.dev/buckley/pkg/conversation"
-	"m31labs.dev/buckley/pkg/headless"
-	"m31labs.dev/buckley/pkg/ipc/command"
-	"m31labs.dev/buckley/pkg/model"
-	"m31labs.dev/buckley/pkg/storage"
-	"m31labs.dev/buckley/pkg/tool"
-	"m31labs.dev/buckley/pkg/toolrunner"
+	"m31labs.dev/buckley/v2/pkg/config"
+	"m31labs.dev/buckley/v2/pkg/conversation"
+	"m31labs.dev/buckley/v2/pkg/headless"
+	"m31labs.dev/buckley/v2/pkg/ipc/command"
+	"m31labs.dev/buckley/v2/pkg/model"
+	"m31labs.dev/buckley/v2/pkg/storage"
+	"m31labs.dev/buckley/v2/pkg/tool"
+	"m31labs.dev/buckley/v2/pkg/toolrunner"
 )
 
 // maxTestCost returns the maximum cost allowed per test

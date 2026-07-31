@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"time"
 
-	"m31labs.dev/buckley/pkg/personality"
+	"m31labs.dev/buckley/v2/pkg/personality"
 )
 
 // ExecutionPrompt generates the system prompt for the execution model

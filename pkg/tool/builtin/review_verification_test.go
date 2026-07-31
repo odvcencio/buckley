@@ -2,18 +2,24 @@ package builtin
 
 import (
 	"context"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
-	"m31labs.dev/buckley/pkg/reviewsandbox"
+	"m31labs.dev/buckley/v2/pkg/reviewsandbox"
 )
 
 type fakeReviewVerifier struct {
 	result  reviewsandbox.Result
 	request reviewsandbox.Request
 	ctx     context.Context
+	calls   int
 }
 
 func (f *fakeReviewVerifier) Verify(ctx context.Context, request reviewsandbox.Request) reviewsandbox.Result {
+	f.calls++
 	f.ctx = ctx
 	f.request = request
 	return f.result
@@ -71,10 +77,61 @@ func TestRunVerificationToolSuccessRequiresPassAndZeroExit(t *testing.T) {
 					t.Fatalf("Data[%q] = %#v, want %#v", key, got, want)
 				}
 			}
+			wantEvidence := "INCONCLUSIVE"
+			if test.status == reviewsandbox.StatusPass && test.exitCode == 0 {
+				wantEvidence = "CONFIRMED_PASS"
+			} else if test.status == reviewsandbox.StatusFail {
+				wantEvidence = "CONFIRMED_FAIL"
+			}
+			if got := result.Data["evidence"]; got != wantEvidence {
+				t.Fatalf("Data[evidence] = %#v, want %q", got, wantEvidence)
+			}
+			wantProofs := 0
+			if test.status == reviewsandbox.StatusPass && test.exitCode == 0 {
+				wantProofs = 2
+			}
+			if got, ok := result.Data["proves"].([]string); !ok || len(got) != wantProofs {
+				t.Fatalf("Data[proves] = %#v, want %d entries", result.Data["proves"], wantProofs)
+			}
 			if got, ok := result.Data["argv"].([]string); !ok || len(got) == 0 {
 				t.Fatalf("trusted argv missing: %#v", result.Data["argv"])
 			}
 		})
+	}
+}
+
+func TestRunVerificationToolClampsRequestedTimeoutToReviewPlan(t *testing.T) {
+	tool, err := NewRunVerificationTool(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	tool.SetTimeoutLimit(90 * time.Second)
+	fake := &fakeReviewVerifier{result: reviewsandbox.Result{
+		Kind:     reviewsandbox.KindTest,
+		Language: reviewsandbox.LanguageGo,
+		Path:     ".",
+		ExitCode: 0,
+		Status:   reviewsandbox.StatusPass,
+	}}
+	tool.verifier = fake
+
+	result, err := tool.Execute(map[string]any{
+		"kind":            "test",
+		"language":        "go",
+		"timeout_seconds": 300,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Success {
+		t.Fatalf("clamped verification failed: %#v", result)
+	}
+	if fake.request.Timeout != 90*time.Second {
+		t.Fatalf("verification timeout = %s, want 90s", fake.request.Timeout)
+	}
+	parameters := tool.Parameters()
+	if got := parameters.Properties["timeout_seconds"].Default; got != 90 {
+		t.Fatalf("schema default timeout = %v, want 90", got)
 	}
 }
 
@@ -115,5 +172,46 @@ func TestNewRunVerificationToolRejectsInvalidSnapshot(t *testing.T) {
 	}
 	if _, err := NewRunVerificationTool(t.TempDir() + "/missing"); err == nil {
 		t.Fatal("missing snapshot root was accepted")
+	}
+}
+
+func TestRunVerificationToolRejectsHostTestRequiredInDocker(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "AGENTS.md"), []byte(`
+- Do not run repo-wide `+"`go test ./...`"+` on the host.
+- Focused package/unit tests inside Docker, scoped with `+"`-run`"+` whenever possible.
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tool, err := NewRunVerificationTool(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake := &fakeReviewVerifier{result: reviewsandbox.Result{
+		Kind:     reviewsandbox.KindTest,
+		Language: reviewsandbox.LanguageGo,
+		Status:   reviewsandbox.StatusPass,
+		ExitCode: 0,
+	}}
+	tool.verifier = fake
+
+	result, err := tool.Execute(map[string]any{
+		"kind":     "test",
+		"language": "go",
+		"path":     ".",
+		"pattern":  "TestMergeStacks|TestFaithful",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fake.calls != 0 {
+		t.Fatalf("forbidden host test reached verifier %d times", fake.calls)
+	}
+	if result.Success || result.Data["status"] != string(reviewsandbox.StatusUnavailable) ||
+		result.Data["evidence"] != "INCONCLUSIVE" {
+		t.Fatalf("policy rejection = %#v", result)
+	}
+	if !strings.Contains(result.Error, "Docker") || !strings.Contains(result.Error, "not started") {
+		t.Fatalf("policy rejection error = %q", result.Error)
 	}
 }

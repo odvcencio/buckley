@@ -5,8 +5,8 @@ import (
 	"errors"
 	"testing"
 
-	"m31labs.dev/buckley/pkg/config"
 	"go.uber.org/mock/gomock"
+	"m31labs.dev/buckley/v2/pkg/config"
 )
 
 func TestManagerGetModelInfo_FromCatalog(t *testing.T) {

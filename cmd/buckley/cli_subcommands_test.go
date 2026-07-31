@@ -8,12 +8,12 @@ import (
 	"strings"
 	"testing"
 
-	"m31labs.dev/buckley/pkg/agentspec"
-	"m31labs.dev/buckley/pkg/config"
-	"m31labs.dev/buckley/pkg/model"
-	"m31labs.dev/buckley/pkg/storage"
-	"m31labs.dev/buckley/pkg/tool"
-	"m31labs.dev/buckley/pkg/tool/builtin"
+	"m31labs.dev/buckley/v2/pkg/agentspec"
+	"m31labs.dev/buckley/v2/pkg/config"
+	"m31labs.dev/buckley/v2/pkg/model"
+	"m31labs.dev/buckley/v2/pkg/storage"
+	"m31labs.dev/buckley/v2/pkg/tool"
+	"m31labs.dev/buckley/v2/pkg/tool/builtin"
 )
 
 func TestRunPlanCommandUsageError(t *testing.T) {
@@ -1265,6 +1265,19 @@ func TestResolveOneShotToolFilterRespectsAgentTierAndDeny(t *testing.T) {
 	got = resolveOneShotToolFilter(profile, registry, []string{"read_file", "read_file"})
 	if strings.Join(got, ",") != "read_file" {
 		t.Fatalf("explicit filter=%v want read_file", got)
+	}
+}
+
+// TestToolsForTierExcludesRunCodeFromReadOnly guards against run_code (which
+// executes arbitrary Python/JS/Go/Bash) reappearing in the read_only tool
+// tier because metadata inference doesn't recognize its name.
+func TestToolsForTierExcludesRunCodeFromReadOnly(t *testing.T) {
+	registry := tool.NewRegistry()
+	allowed := toolsForTier(registry, "read_only")
+	for _, name := range allowed {
+		if name == "run_code" || name == "run_shell" {
+			t.Fatalf("read_only tier unexpectedly allows %q: %v", name, allowed)
+		}
 	}
 }
 

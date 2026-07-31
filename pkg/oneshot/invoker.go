@@ -7,9 +7,10 @@ import (
 	"strings"
 	"time"
 
-	"m31labs.dev/buckley/pkg/model"
-	"m31labs.dev/buckley/pkg/tools"
-	"m31labs.dev/buckley/pkg/transparency"
+	"m31labs.dev/buckley/v2/pkg/conversation"
+	"m31labs.dev/buckley/v2/pkg/model"
+	"m31labs.dev/buckley/v2/pkg/tools"
+	"m31labs.dev/buckley/v2/pkg/transparency"
 )
 
 // ModelClient is the interface for making model requests.
@@ -480,18 +481,22 @@ func (inv *DefaultInvoker) InvokeWithTools(ctx context.Context, systemPrompt, us
 
 	var totalTokens transparency.TokenUsage
 	var allToolCalls []tools.ToolCall
+	contextWindow := 0
+	if provider, ok := inv.client.(model.ContextWindowProvider); ok {
+		contextWindow, _ = provider.GetContextLength(inv.model)
+	}
 
 	// Tool loop
 	for iteration := 0; iteration < maxIterations; iteration++ {
 		req := model.ChatRequest{
 			Model:      inv.model,
-			Messages:   messages,
 			Tools:      toolSpecs,
 			ToolChoice: "auto",
 			Reasoning:  inv.requestReasoning(),
 			SessionID:  traceID,
 			Trace:      map[string]string{"trace_id": traceID, "trace_name": "oneshot-tools"},
 		}
+		req.Messages = conversation.CompactModelMessagesForRequest(messages, req, contextWindow)
 
 		resp, err := inv.client.ChatCompletion(ctx, req)
 		if err != nil {

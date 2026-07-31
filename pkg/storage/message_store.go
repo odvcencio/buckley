@@ -153,7 +153,7 @@ func (s *Store) SaveMessage(msg *Message) error {
 		nullIfEmpty(msg.Name),
 		nullIfEmpty(msg.Reasoning),
 		nullIfEmpty(msg.ReasoningDetails),
-		msg.Timestamp,
+		sqliteTimestamp(msg.Timestamp),
 		msg.Tokens,
 		msg.IsSummary,
 		msg.IsTruncated,
@@ -175,7 +175,7 @@ func (s *Store) SaveMessage(msg *Message) error {
 		    last_active = ?
 		WHERE session_id = ?
 	`
-	if _, err := tx.Exec(update, msg.Tokens, now, msg.SessionID); err != nil {
+	if _, err := tx.Exec(update, msg.Tokens, sqliteTimestamp(now), msg.SessionID); err != nil {
 		return fmt.Errorf("saving message: update session stats: %w", err)
 	}
 
@@ -246,7 +246,7 @@ func (s *Store) ReplaceMessages(sessionID string, messages []Message) error {
 			nullIfEmpty(msg.Name),
 			nullIfEmpty(msg.Reasoning),
 			nullIfEmpty(msg.ReasoningDetails),
-			ts,
+			sqliteTimestamp(ts),
 			msg.Tokens,
 			msg.IsSummary,
 			msg.IsTruncated,
@@ -264,7 +264,7 @@ func (s *Store) ReplaceMessages(sessionID string, messages []Message) error {
 		UPDATE sessions
 		SET message_count = ?, total_tokens = ?, last_active = ?
 		WHERE session_id = ?
-	`, len(messages), totalTokens, latest, sessionID); err != nil {
+	`, len(messages), totalTokens, sqliteTimestamp(latest), sessionID); err != nil {
 		return fmt.Errorf("replacing messages: update session stats: %w", err)
 	}
 
@@ -383,7 +383,8 @@ func (s *Store) GetMessagesWithCursor(sessionID string, cursor *Cursor, limit in
 			ORDER BY timestamp ASC, id ASC
 			LIMIT ?
 		`
-		args = []any{sessionID, cursor.Timestamp, cursor.Timestamp, cursor.ID, limit + 1}
+		cursorTimestamp := sqliteTimestamp(cursor.Timestamp)
+		args = []any{sessionID, cursorTimestamp, cursorTimestamp, cursor.ID, limit + 1}
 	}
 
 	rows, err := s.db.Query(query, args...)
@@ -393,7 +394,6 @@ func (s *Store) GetMessagesWithCursor(sessionID string, cursor *Cursor, limit in
 	defer rows.Close()
 
 	messages := make([]Message, 0, limit)
-	var lastMsg Message
 	count := 0
 
 	for rows.Next() {
@@ -435,7 +435,6 @@ func (s *Store) GetMessagesWithCursor(sessionID string, cursor *Cursor, limit in
 		if count < limit {
 			messages = append(messages, msg)
 		}
-		lastMsg = msg
 		count++
 	}
 
@@ -445,9 +444,10 @@ func (s *Store) GetMessagesWithCursor(sessionID string, cursor *Cursor, limit in
 
 	var nextCursor *Cursor
 	if count > limit {
+		lastReturned := messages[len(messages)-1]
 		nextCursor = &Cursor{
-			ID:        lastMsg.ID,
-			Timestamp: lastMsg.Timestamp,
+			ID:        lastReturned.ID,
+			Timestamp: lastReturned.Timestamp,
 		}
 	}
 
@@ -848,7 +848,7 @@ func (s *Store) SaveMessagesBatch(messages []*Message) error {
 			nullIfEmpty(msg.Name),
 			nullIfEmpty(msg.Reasoning),
 			nullIfEmpty(msg.ReasoningDetails),
-			msg.Timestamp,
+			sqliteTimestamp(msg.Timestamp),
 			msg.Tokens,
 			msg.IsSummary,
 			msg.IsTruncated,

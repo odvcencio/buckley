@@ -3,7 +3,7 @@ package ipc
 import (
 	"testing"
 
-	"m31labs.dev/buckley/pkg/mission"
+	"m31labs.dev/buckley/v2/pkg/mission"
 )
 
 func TestFilterAgentsBySession(t *testing.T) {

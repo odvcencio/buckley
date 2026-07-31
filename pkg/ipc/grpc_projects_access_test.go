@@ -8,8 +8,8 @@ import (
 	"connectrpc.com/connect"
 	"google.golang.org/protobuf/types/known/emptypb"
 
-	"m31labs.dev/buckley/pkg/config"
-	"m31labs.dev/buckley/pkg/storage"
+	"m31labs.dev/buckley/v2/pkg/config"
+	"m31labs.dev/buckley/v2/pkg/storage"
 )
 
 func TestGRPCListProjectsFiltersByPrincipal(t *testing.T) {

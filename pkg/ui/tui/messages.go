@@ -1,7 +1,11 @@
 // Package tui provides the terminal user interface.
 package tui
 
-import "time"
+import (
+	"time"
+
+	"m31labs.dev/buckley/v2/pkg/ui/widgets"
+)
 
 // Message is the interface for all events flowing through the UI.
 // All UI state mutations happen through message processing.
@@ -150,12 +154,36 @@ type AppendMsg struct {
 
 func (AppendMsg) isMessage() {}
 
+// ReplaceLastMessageMsg replaces the content of the last message.
+type ReplaceLastMessageMsg struct {
+	Content string
+}
+
+func (ReplaceLastMessageMsg) isMessage() {}
+
 // ThinkingMsg shows/hides the thinking indicator.
 type ThinkingMsg struct {
 	Show bool
 }
 
 func (ThinkingMsg) isMessage() {}
+
+// ModelPickerMsg opens a searchable model catalog overlay on the UI loop.
+type ModelPickerMsg struct {
+	Items    []widgets.PaletteItem
+	OnSelect func(item widgets.PaletteItem)
+}
+
+func (ModelPickerMsg) isMessage() {}
+
+// SetActivitiesMsg replaces the inspector's activity records. Telemetry
+// forwards it through Post so the widget tree is only mutated on the UI
+// goroutine, never from the telemetry forwarding goroutine directly.
+type SetActivitiesMsg struct {
+	Records []widgets.ActivityRecord
+}
+
+func (SetActivitiesMsg) isMessage() {}
 
 // --- Overlay/Mode Events ---
 

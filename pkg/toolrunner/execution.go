@@ -8,8 +8,10 @@ import (
 	"sync"
 	"time"
 
-	"m31labs.dev/buckley/pkg/model"
-	"m31labs.dev/buckley/pkg/tool"
+	"m31labs.dev/buckley/v2/pkg/agentloop"
+	"m31labs.dev/buckley/v2/pkg/conversation"
+	"m31labs.dev/buckley/v2/pkg/model"
+	"m31labs.dev/buckley/v2/pkg/tool"
 )
 
 // executeWithTools uses streaming for real-time output and proper tool call accumulation.
@@ -31,6 +33,16 @@ func (r *Runner) executeWithTools(ctx context.Context, req Request, tools []tool
 	}
 
 	deduper := newToolResultDeduper()
+	modelID := r.requestModel(req)
+	sessionID := strings.TrimSpace(req.SessionID)
+	if sessionID == "" {
+		sessionID = fmt.Sprintf("toolrunner-%d", time.Now().UnixNano())
+	}
+	contextWindow := 0
+	if provider, ok := r.config.Models.(model.ContextWindowProvider); ok {
+		contextWindow, _ = provider.GetContextLength(modelID)
+	}
+	governor := newRunnerLoopGovernor(maxIterations)
 
 	for iteration := 0; iteration < maxIterations; iteration++ {
 		result.Iterations = iteration + 1
@@ -41,14 +53,15 @@ func (r *Runner) executeWithTools(ctx context.Context, req Request, tools []tool
 		}
 
 		apiReq := model.ChatRequest{
-			Model:    r.requestModel(req),
-			Messages: messages,
-			Tools:    toolDefs,
-			Stream:   true,
+			Model:     modelID,
+			Tools:     toolDefs,
+			Stream:    true,
+			SessionID: sessionID,
 		}
 		if len(toolDefs) > 0 {
 			apiReq.ToolChoice = "auto"
 		}
+		apiReq.Messages = conversation.CompactModelMessagesForRequest(messages, apiReq, contextWindow)
 
 		// Use streaming
 		chunkChan, errChan := r.config.Models.ChatCompletionStream(ctx, apiReq)
@@ -143,9 +156,7 @@ func (r *Runner) executeWithTools(ctx context.Context, req Request, tools []tool
 
 		// Update usage from accumulated response
 		if usage := acc.Usage(); usage != nil {
-			result.Usage.PromptTokens += usage.PromptTokens
-			result.Usage.CompletionTokens += usage.CompletionTokens
-			result.Usage.TotalTokens += usage.TotalTokens
+			result.Usage = model.AddUsage(result.Usage, *usage)
 		}
 
 		result.FinishReason = finishReason
@@ -206,17 +217,31 @@ func (r *Runner) executeWithTools(ctx context.Context, req Request, tools []tool
 			r.notifyStreamError(err)
 			return result, err
 		}
+		guardReason := ""
 		for _, tr := range toolResults {
 			content := deduper.messageFor(tr)
+			var decision agentloop.Decision
+			content, decision = applyRunnerLoopGuard(governor, tr, content)
 			messages = append(messages, model.Message{
 				Role:       "tool",
 				ToolCallID: tr.ID,
 				Name:       tr.Name,
 				Content:    content,
 			})
+			if decision.Stop && guardReason == "" {
+				guardReason = decision.Reason
+			}
 		}
-		// Release the pooled slice after processing
+		// Release the pooled slice after processing.
 		releaseToolCallRecordSlice(toolResults)
+		if guardReason != "" {
+			result.Content = runnerLoopGuardMessage(guardReason)
+			result.FinishReason = "loop_guard"
+			if r.streamHandler != nil {
+				r.streamHandler.OnComplete(result)
+			}
+			return result, nil
+		}
 	}
 
 	result.Content = "Maximum iterations reached. Please try a simpler request."
@@ -426,7 +451,7 @@ func (r *Runner) executeToolDefault(ctx context.Context, name string, args map[s
 
 	success := toolResult.Success
 	if toolResult.Data != nil {
-		if result, err := tool.ToJSON(toolResult); err == nil {
+		if result, err := tool.ToModelOutput(toolResult); err == nil {
 			return ToolExecutionResult{
 				Result:  result,
 				Success: success,

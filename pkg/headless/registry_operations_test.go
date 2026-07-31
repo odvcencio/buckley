@@ -6,9 +6,9 @@ import (
 	"testing"
 	"time"
 
-	"m31labs.dev/buckley/pkg/config"
-	"m31labs.dev/buckley/pkg/ipc/command"
-	"m31labs.dev/buckley/pkg/storage"
+	"m31labs.dev/buckley/v2/pkg/config"
+	"m31labs.dev/buckley/v2/pkg/ipc/command"
+	"m31labs.dev/buckley/v2/pkg/storage"
 )
 
 func TestNewRegistry(t *testing.T) {

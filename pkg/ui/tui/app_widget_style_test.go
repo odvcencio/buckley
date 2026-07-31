@@ -3,8 +3,8 @@ package tui
 import (
 	"testing"
 
-	"m31labs.dev/buckley/pkg/ui/backend"
-	"m31labs.dev/buckley/pkg/ui/compositor"
+	"m31labs.dev/fluffyui/backend"
+	"m31labs.dev/fluffyui/compositor"
 )
 
 func TestThemeToBackendStyle_ConvertsColorsAndAttributes(t *testing.T) {

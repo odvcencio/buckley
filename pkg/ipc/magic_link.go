@@ -10,7 +10,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
-	"m31labs.dev/buckley/pkg/storage"
+	"m31labs.dev/buckley/v2/pkg/storage"
 )
 
 // MagicLinkRequest contains parameters for generating a magic link.

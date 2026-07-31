@@ -23,6 +23,9 @@ func normalizeProviderChatRequest(req ChatRequest, providerID string) ChatReques
 			req.ToolChoice = "auto"
 		}
 	}
+	if len(req.Tools) == 0 {
+		req.ToolChoice = ""
+	}
 	return req
 }
 

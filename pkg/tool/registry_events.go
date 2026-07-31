@@ -7,9 +7,9 @@ import (
 
 	"github.com/oklog/ulid/v2"
 
-	"m31labs.dev/buckley/pkg/telemetry"
-	"m31labs.dev/buckley/pkg/tool/builtin"
-	"m31labs.dev/buckley/pkg/touch"
+	"m31labs.dev/buckley/v2/pkg/telemetry"
+	"m31labs.dev/buckley/v2/pkg/tool/builtin"
+	"m31labs.dev/buckley/v2/pkg/touch"
 )
 
 func (r *Registry) publishShellEvent(eventType telemetry.EventType, data map[string]any) {
@@ -51,6 +51,9 @@ func (r *Registry) publishToolEvent(eventType telemetry.EventType, callID, toolN
 	}
 	if res != nil {
 		payload["success"] = res.Success
+		if detail := telemetryResultDetail(res); detail != "" {
+			payload["result"] = detail
+		}
 		if strings.TrimSpace(toolName) == "browser_stream" {
 			if rawEvents, ok := res.Data["events"]; ok {
 				summary := summarizeBrowserEvents(rawEvents, 25)
@@ -67,6 +70,9 @@ func (r *Registry) publishToolEvent(eventType telemetry.EventType, callID, toolN
 		payload["error"] = err.Error()
 	}
 	if metadata != nil {
+		if arguments, ok := metadata["arguments"].(string); ok && strings.TrimSpace(arguments) != "" {
+			payload["arguments"] = arguments
+		}
 		if stack, ok := metadata["panic_stack"].(string); ok && strings.TrimSpace(stack) != "" {
 			payload["panic_stack"] = stack
 		}

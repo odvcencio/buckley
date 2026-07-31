@@ -6,8 +6,8 @@ import (
 	"strings"
 	"time"
 
-	"m31labs.dev/buckley/pkg/containerexec"
-	"m31labs.dev/buckley/pkg/tool/builtin"
+	"m31labs.dev/buckley/v2/pkg/containerexec"
+	"m31labs.dev/buckley/v2/pkg/tool/builtin"
 )
 
 // Execute executes a tool by name using a background context.
@@ -122,7 +122,7 @@ func (r *Registry) executeTool(ctx *ExecutionContext, tool Tool, params map[stri
 	if r.containerExecute && r.containerCompose != "" {
 		service := containerexec.GetServiceForTool(strings.TrimSpace(ctx.ToolName))
 		runner := containerexec.NewContainerRunner(r.containerCompose, service, r.containerWorkDir, tool)
-		return runner.Execute(params)
+		return runner.ExecuteWithContext(ctx.Context, params)
 	}
 	if tool == nil {
 		return nil, fmt.Errorf("tool required")
@@ -162,9 +162,23 @@ func (r *Registry) Close() error {
 	r.mu.Lock()
 	sb := r.sandbox
 	r.sandbox = nil
-	r.mu.Unlock()
-	if sb != nil {
-		return sb.Close()
+	tools := make([]Tool, 0, len(r.tools))
+	for _, current := range r.tools {
+		tools = append(tools, current)
 	}
-	return nil
+	r.mu.Unlock()
+	var firstErr error
+	for _, current := range tools {
+		if closer, ok := current.(interface{ Close() error }); ok {
+			if err := closer.Close(); err != nil && firstErr == nil {
+				firstErr = err
+			}
+		}
+	}
+	if sb != nil {
+		if err := sb.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
 }

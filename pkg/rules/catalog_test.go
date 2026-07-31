@@ -14,7 +14,7 @@ func TestFactContractsIncludesCoreDomains(t *testing.T) {
 			t.Fatalf("domain %q has no facts", contract.Domain)
 		}
 	}
-	for _, domain := range []string{"approval", "risk", "tool_budget", "permissions/sandbox", "cost/budgets", "session/compaction"} {
+	for _, domain := range []string{"approval", "risk", "review_plan", "tool_budget", "permissions/sandbox", "cost/budgets", "session/compaction"} {
 		if _, ok := byDomain[domain]; !ok {
 			t.Fatalf("missing contract for domain %q", domain)
 		}
@@ -24,6 +24,8 @@ func TestFactContractsIncludesCoreDomains(t *testing.T) {
 	assertFact(t, byDomain["routing"], "task.phase")
 	assertFact(t, byDomain["routing"], "model.supports_reasoning")
 	assertFact(t, byDomain["tool_budget"], "agent.max_tool_calls")
+	assertFact(t, byDomain["review_plan"], "diff_bytes")
+	assertFact(t, byDomain["review_plan"], "blast_radius")
 	assertFact(t, byDomain["permissions/sandbox"], "risk_score")
 }
 

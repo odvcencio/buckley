@@ -1,13 +1,15 @@
 package main
 
 import (
+	"strings"
 	"testing"
 	"time"
 
-	"m31labs.dev/buckley/pkg/config"
-	"m31labs.dev/buckley/pkg/model"
-	"m31labs.dev/buckley/pkg/oneshot"
-	"m31labs.dev/buckley/pkg/oneshot/commands"
+	"m31labs.dev/buckley/v2/pkg/config"
+	"m31labs.dev/buckley/v2/pkg/model"
+	"m31labs.dev/buckley/v2/pkg/oneshot"
+	"m31labs.dev/buckley/v2/pkg/oneshot/commands"
+	"m31labs.dev/buckley/v2/pkg/transparency"
 )
 
 func TestParseReviewCommandOptions(t *testing.T) {
@@ -19,9 +21,14 @@ func TestParseReviewCommandOptions(t *testing.T) {
 		"-verbose",
 		"-cost=false",
 		"-model", "test/reviewer",
+		"-critic-model", "test/critic",
 		"-timeout", "12s",
 		"-output", "review.md",
 		"-no-interactive",
+		"-budget", "0.20",
+		"-max-turns", "4",
+		"-max-diff-bytes", "64000",
+		"-max-validation-attempts", "1",
 	})
 	if err != nil {
 		t.Fatalf("parseReviewCommandOptions() error = %v", err)
@@ -51,6 +58,9 @@ func TestParseReviewCommandOptions(t *testing.T) {
 	if opts.model != "test/reviewer" {
 		t.Fatalf("model = %q, want test/reviewer", opts.model)
 	}
+	if opts.criticModel != "test/critic" {
+		t.Fatalf("criticModel = %q, want test/critic", opts.criticModel)
+	}
 	if opts.timeout != 12*time.Second {
 		t.Fatalf("timeout = %v, want 12s", opts.timeout)
 	}
@@ -59,6 +69,28 @@ func TestParseReviewCommandOptions(t *testing.T) {
 	}
 	if opts.interactive {
 		t.Fatal("interactive = true, want false when -no-interactive is set")
+	}
+	if opts.budgetUSD != 0.20 || opts.maxTurns != 4 || opts.maxDiff != 64_000 || opts.maxRetries != 1 {
+		t.Fatalf("budget controls = $%.2f/%d/%d/%d, want $0.20/4/64000/1",
+			opts.budgetUSD, opts.maxTurns, opts.maxDiff, opts.maxRetries)
+	}
+}
+
+func TestReviewCommandsReserveEnoughTimeByDefault(t *testing.T) {
+	branch, err := parseReviewCommandOptions(nil)
+	if err != nil {
+		t.Fatalf("parseReviewCommandOptions() error = %v", err)
+	}
+	if branch.timeout != defaultReviewTimeout {
+		t.Fatalf("branch timeout = %s, want %s", branch.timeout, defaultReviewTimeout)
+	}
+
+	pr, err := parseReviewPRCommandOptions([]string{"123"})
+	if err != nil {
+		t.Fatalf("parseReviewPRCommandOptions() error = %v", err)
+	}
+	if pr.timeout != defaultReviewTimeout {
+		t.Fatalf("PR timeout = %s, want %s", pr.timeout, defaultReviewTimeout)
 	}
 }
 
@@ -84,6 +116,22 @@ func TestResolveReviewModelPrecedence(t *testing.T) {
 	}
 }
 
+func TestResolveReviewModelDefaultsToBuckbot(t *testing.T) {
+	previous := modelOverrideFlag
+	modelOverrideFlag = ""
+	t.Cleanup(func() { modelOverrideFlag = previous })
+	t.Setenv("BUCKLEY_MODEL_REVIEW", "")
+
+	cfg := config.DefaultConfig()
+	cfg.Buckbot.Model = "buckbot/reviewer"
+	cfg.Models.Review = "config/reviewer"
+	cfg.Models.Execution = "config/executor"
+
+	if got := resolveReviewModel(cfg); got != "buckbot/reviewer" {
+		t.Fatalf("resolveReviewModel() = %q, want buckbot/reviewer", got)
+	}
+}
+
 func TestResolveReviewModelAppliesCommandReasoningSuffix(t *testing.T) {
 	previous := modelOverrideFlag
 	modelOverrideFlag = "codex/gpt-5.6-terra-high"
@@ -96,6 +144,22 @@ func TestResolveReviewModelAppliesCommandReasoningSuffix(t *testing.T) {
 	}
 	if cfg.Models.Reasoning != "high" {
 		t.Fatalf("reasoning = %q, want high", cfg.Models.Reasoning)
+	}
+	if got := reviewReasoningOverride(); got != "high" {
+		t.Fatalf("review reasoning override = %q, want high", got)
+	}
+}
+
+func TestResolveReviewModelUsesCodexAdaptiveBaseline(t *testing.T) {
+	previous := modelOverrideFlag
+	modelOverrideFlag = "codex/auto"
+	t.Cleanup(func() { modelOverrideFlag = previous })
+
+	if got := resolveReviewModel(config.DefaultConfig()); got != codexReviewModelStandard {
+		t.Fatalf("resolveReviewModel() = %q, want Terra baseline", got)
+	}
+	if !isAdaptiveCodexReviewSelector(resolveReviewModelSelector(config.DefaultConfig())) {
+		t.Fatal("codex/auto did not enable adaptive model selection")
 	}
 }
 
@@ -179,5 +243,73 @@ func TestReviewResultFromRLMExposesPrimaryAndCriticAttempts(t *testing.T) {
 	if got.attempts != 3 || got.primary != 1 || got.criticAttempts != 2 {
 		t.Fatalf("attempt counts = total:%d primary:%d critic:%d, want 3/1/2",
 			got.attempts, got.primary, got.criticAttempts)
+	}
+}
+
+func TestReviewResultFromRLMIgnoresTypedNilReview(t *testing.T) {
+	var typedNil *commands.ReviewRLMResult
+	got := reviewResultFromRLM(&oneshot.RunResult{Value: typedNil}, nil)
+
+	if got == nil {
+		t.Fatal("reviewResultFromRLM() = nil, want an empty result")
+	}
+	if got.reviewText != "" || got.parsed != nil {
+		t.Fatalf("review result = %#v, want no review content", got)
+	}
+}
+
+func TestReviewValidationRepairLinesExplainBoundedRetries(t *testing.T) {
+	longReason := strings.Repeat("x", 220)
+	trace := &transparency.Trace{Attempts: []transparency.TraceAttempt{
+		{Phase: "primary", Attempt: 1, ValidationError: "missing coverage evidence"},
+		{Phase: "primary", Attempt: 2},
+		{Phase: "approval critic", Attempt: 1, ValidationError: longReason},
+	}}
+
+	got := reviewValidationRepairLines(trace)
+	if len(got) != 2 {
+		t.Fatalf("repair lines = %v, want two", got)
+	}
+	if got[0] != "Primary attempt 1: missing coverage evidence" {
+		t.Fatalf("first repair line = %q", got[0])
+	}
+	if !strings.HasPrefix(got[1], "Approval critic attempt 1: ") || !strings.HasSuffix(got[1], "…") {
+		t.Fatalf("second repair line = %q", got[1])
+	}
+}
+
+func TestReviewResultFromRLMPreservesIncompleteState(t *testing.T) {
+	got := reviewResultFromRLM(&oneshot.RunResult{
+		Value: &commands.ReviewRLMResult{Review: "partial review"},
+		Trace: &transparency.Trace{Attempts: []transparency.TraceAttempt{{
+			Phase:   "primary",
+			Attempt: 1,
+			Trace: &transparency.Trace{
+				Content:  "raw rejected response",
+				Duration: 2 * time.Second,
+				Tokens:   transparency.TokenUsage{Input: 120, Output: 30},
+				Response: &transparency.ResponseTrace{FinishReason: "stop"},
+			},
+		}}},
+		Incomplete:       true,
+		IncompleteReason: "context deadline exceeded",
+	}, nil)
+	for _, want := range []string{
+		"Incomplete review",
+		"partial review",
+		"Review attempt diagnostics",
+		"Finish reason: `stop`",
+		"120 input and 30 output",
+		"raw rejected response",
+	} {
+		if !strings.Contains(got.reviewText, want) {
+			t.Fatalf("incomplete review missing %q: %#v", want, got)
+		}
+	}
+	if !got.incomplete || !strings.Contains(got.incompleteWhy, "deadline") {
+		t.Fatalf("incomplete review result = %#v", got)
+	}
+	if got.parsed != nil {
+		t.Fatal("incomplete review must not retain a parsed merge verdict")
 	}
 }

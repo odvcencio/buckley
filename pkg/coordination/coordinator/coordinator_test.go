@@ -4,10 +4,10 @@ import (
 	"context"
 	"testing"
 
-	"m31labs.dev/buckley/pkg/coordination/capabilities"
-	"m31labs.dev/buckley/pkg/coordination/events"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"m31labs.dev/buckley/v2/pkg/coordination/capabilities"
+	"m31labs.dev/buckley/v2/pkg/coordination/events"
 )
 
 func TestNewCoordinator(t *testing.T) {

@@ -7,6 +7,10 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode"
+	"unicode/utf8"
+
+	"m31labs.dev/buckley/v2/pkg/oneshot"
 )
 
 // Severity levels for findings.
@@ -77,9 +81,10 @@ const (
 type FeedbackStatus string
 
 const (
-	FeedbackAddressed  FeedbackStatus = "ADDRESSED"
-	FeedbackDisputed   FeedbackStatus = "DISPUTED"
-	FeedbackUnresolved FeedbackStatus = "UNRESOLVED"
+	FeedbackAddressed         FeedbackStatus = "ADDRESSED"
+	FeedbackDisputed          FeedbackStatus = "DISPUTED"
+	FeedbackDispositionedItem FeedbackStatus = "DISPOSITIONED"
+	FeedbackUnresolved        FeedbackStatus = "UNRESOLVED"
 )
 
 // FeedbackEntry is one exact-ID entry in the Coverage feedback ledger.
@@ -173,6 +178,7 @@ func ValidateParsedReview(parsed *ParsedReview, opts ReviewValidationOptions) er
 	if parsed == nil {
 		return fmt.Errorf("parsed review is missing")
 	}
+	var problems []string
 	var missing []string
 	if parsed.Grade == "" {
 		missing = append(missing, "grade")
@@ -192,7 +198,10 @@ func ValidateParsedReview(parsed *ParsedReview, opts ReviewValidationOptions) er
 	if strings.TrimSpace(parsed.Falsification) == "" {
 		missing = append(missing, "Falsification section")
 	} else if parsed.FalsificationConclusion == "" {
-		missing = append(missing, "Falsification conclusion (PROVED, DISPROVED, or UNRESOLVED)")
+		missing = append(
+			missing,
+			`Falsification conclusion (write "- **Conclusion**: PROVED", DISPROVED, or UNRESOLVED)`,
+		)
 	}
 	if parsed.FeedbackDisposition == "" {
 		missing = append(missing, "explicit feedback disposition")
@@ -201,37 +210,76 @@ func ValidateParsedReview(parsed *ParsedReview, opts ReviewValidationOptions) er
 		missing = append(missing, "Verdict section")
 	}
 	if len(missing) > 0 {
-		return fmt.Errorf("review is missing required evidence: %s", strings.Join(missing, ", "))
+		problems = append(problems, "review is missing required evidence: "+strings.Join(missing, ", "))
 	}
 	if parsed.BuildVerification == "" {
-		return fmt.Errorf("build status must start with one exact verification state: %s", verificationStateList())
+		problems = append(
+			problems,
+			fmt.Sprintf("build status must start with one exact verification state: %s", verificationStateList()),
+		)
 	}
 	if parsed.TestVerification == "" {
-		return fmt.Errorf("tests status must start with one exact verification state: %s", verificationStateList())
+		problems = append(
+			problems,
+			fmt.Sprintf("tests status must start with one exact verification state: %s", verificationStateList()),
+		)
 	}
-	verdictApproved, err := parseVerdictApproval(parsed.Verdict)
-	if err != nil {
-		return fmt.Errorf("invalid Verdict decision: %w", err)
+	if strings.TrimSpace(parsed.Verdict) != "" {
+		verdictApproved, err := parseVerdictApproval(parsed.Verdict)
+		if err != nil {
+			problems = append(problems, fmt.Sprintf("invalid Verdict decision: %v", err))
+		} else if verdictApproved != parsed.Approved {
+			problems = append(problems, "verdict decision is inconsistent with the parsed approval state")
+		}
 	}
-	if verdictApproved != parsed.Approved {
-		return fmt.Errorf("verdict decision is inconsistent with the parsed approval state")
+	if err := validateFindingDisposition(parsed); err != nil {
+		problems = append(problems, err.Error())
 	}
-
-	if err := validateCoverageLedger(parsed.CoverageEntries, opts.ChangedFiles); err != nil {
-		return err
+	if err := validateDemonstratedFindings(parsed.Findings); err != nil {
+		problems = append(problems, err.Error())
+	}
+	if err := validateFalsificationDisposition(parsed); err != nil {
+		problems = append(problems, err.Error())
+	}
+	if strings.TrimSpace(parsed.Verdict) != "" {
+		if err := validateVerdictDisposition(parsed); err != nil {
+			problems = append(problems, err.Error())
+		}
+	}
+	if err := validateProceduralGateGrade(parsed); err != nil {
+		problems = append(problems, err.Error())
+	}
+	if strings.TrimSpace(parsed.Coverage) != "" {
+		if err := validateCoverageLedger(parsed.CoverageEntries, opts.ChangedFiles); err != nil {
+			problems = append(problems, err.Error())
+		}
 	}
 	if opts.RequiresFeedbackDisposition && len(opts.RequiredFeedbackIDs) == 0 {
-		return fmt.Errorf("review context supplied feedback but no required feedback IDs were provided for exact disposition")
+		problems = append(
+			problems,
+			"review context supplied feedback but no required feedback IDs were provided for exact disposition",
+		)
 	}
-	if len(opts.RequiredFeedbackIDs) > 0 {
-		if parsed.FeedbackDisposition != FeedbackDispositioned {
-			return fmt.Errorf("coverage must mark supplied review feedback as %s", FeedbackDispositioned)
+	if parsed.FeedbackDisposition != "" {
+		if len(opts.RequiredFeedbackIDs) > 0 {
+			if parsed.FeedbackDisposition != FeedbackDispositioned {
+				problems = append(
+					problems,
+					fmt.Sprintf("coverage must mark supplied review feedback as %s", FeedbackDispositioned),
+				)
+			}
+		} else if parsed.FeedbackDisposition != FeedbackNoneSupplied {
+			problems = append(
+				problems,
+				fmt.Sprintf("coverage must mark feedback as %s when no feedback IDs were supplied", FeedbackNoneSupplied),
+			)
 		}
-	} else if parsed.FeedbackDisposition != FeedbackNoneSupplied {
-		return fmt.Errorf("coverage must mark feedback as %s when no feedback IDs were supplied", FeedbackNoneSupplied)
 	}
 	if err := validateFeedbackLedger(parsed.FeedbackEntries, opts.RequiredFeedbackIDs); err != nil {
-		return err
+		problems = append(problems, err.Error())
+	}
+	if len(problems) > 0 {
+		return fmt.Errorf("review validation failed: %s", strings.Join(problems, "; "))
 	}
 
 	if parsed.Approved {
@@ -242,10 +290,24 @@ func ValidateParsedReview(parsed *ParsedReview, opts ReviewValidationOptions) er
 			return fmt.Errorf("an approval cannot be issued from incomplete or truncated review context")
 		}
 		if parsed.BuildVerification != VerificationPass {
-			return fmt.Errorf("an approval requires Build status PASS, got %s", parsed.BuildVerification)
+			err := fmt.Errorf(
+				"an approval requires Build status PASS, got %s",
+				parsed.BuildVerification,
+			)
+			if parsed.BuildVerification == VerificationUnavailable {
+				return err
+			}
+			return oneshot.RequireRLMExecutionEvidence(err)
 		}
 		if parsed.TestVerification != VerificationPass {
-			return fmt.Errorf("an approval requires Tests status PASS, got %s", parsed.TestVerification)
+			err := fmt.Errorf(
+				"an approval requires Tests status PASS, got %s",
+				parsed.TestVerification,
+			)
+			if parsed.TestVerification == VerificationUnavailable {
+				return err
+			}
+			return oneshot.RequireRLMExecutionEvidence(err)
 		}
 		if opts.RequirePassingRemoteCI {
 			ciState := parseRemoteCIState(opts.CIStatus)
@@ -267,9 +329,6 @@ func ValidateParsedReview(parsed *ParsedReview, opts ReviewValidationOptions) er
 				return fmt.Errorf("an approval is inconsistent with unresolved feedback %s", feedback.ID)
 			}
 		}
-		if parsed.Grade != GradeA && parsed.Grade != GradeB {
-			return fmt.Errorf("approval is inconsistent with grade %s", parsed.Grade)
-		}
 		if len(parsed.Blockers) > 0 {
 			return fmt.Errorf("approval is inconsistent with blockers: %s", strings.Join(parsed.Blockers, ", "))
 		}
@@ -278,11 +337,220 @@ func ValidateParsedReview(parsed *ParsedReview, opts ReviewValidationOptions) er
 				return fmt.Errorf("approval is inconsistent with blocking finding %s", finding.ID)
 			}
 		}
+		var qualityProblems []string
+		if parsed.Grade != GradeA {
+			qualityProblems = append(qualityProblems, fmt.Sprintf("grade is %s instead of A", parsed.Grade))
+		}
+		if len(parsed.Findings) > 0 {
+			qualityProblems = append(qualityProblems, "Findings is not empty")
+		}
+		if len(parsed.Suggestions) > 0 {
+			qualityProblems = append(qualityProblems, "Suggestions is not empty")
+		}
+		if len(qualityProblems) > 0 {
+			return fmt.Errorf(
+				"approval quality gate failed: %s; remove non-defect observations or return a non-approval verdict for demonstrated defects",
+				strings.Join(qualityProblems, ", "),
+			)
+		}
 	} else if parsed.Grade == GradeA {
 		return fmt.Errorf("grade A is inconsistent with a non-approval verdict")
 	}
 
 	return nil
+}
+
+func validateProceduralGateGrade(parsed *ParsedReview) error {
+	if parsed == nil || parsed.Approved || len(parsed.Findings) > 0 ||
+		parsed.FalsificationConclusion == FalsificationProved ||
+		parsed.BuildVerification == VerificationFail ||
+		parsed.TestVerification == VerificationFail {
+		return nil
+	}
+	if blocker := verdictLabelValue(parsed.Verdict, "Blockers"); blocker != "" &&
+		!reviewVerdictValueIsNone(blocker) {
+		return fmt.Errorf("missing, pending, or unavailable verification is a gate, not a procedural blocker")
+	}
+	switch parsed.Grade {
+	case GradeC, GradeD, GradeF:
+		return fmt.Errorf(
+			"missing, pending, or unavailable verification without a proved defect requires Grade B, not Grade %s",
+			parsed.Grade,
+		)
+	default:
+		return nil
+	}
+}
+
+func verdictLabelValue(section, label string) string {
+	expression := `(?im)^\s*(?:[-*]\s*)?\*\*` + regexp.QuoteMeta(label) + `\*\*:\s*(.*?)\s*$`
+	matches := regexp.MustCompile(expression).FindAllStringSubmatch(section, -1)
+	if len(matches) != 1 || len(matches[0]) < 2 {
+		return ""
+	}
+	return strings.TrimSpace(matches[0][1])
+}
+
+func reviewVerdictValueIsNone(value string) bool {
+	value = strings.Trim(strings.TrimSpace(value), "`*_ .")
+	switch strings.ToUpper(value) {
+	case "", "NONE", "N/A":
+		return true
+	default:
+		return false
+	}
+}
+
+func validateFindingDisposition(parsed *ParsedReview) error {
+	findings := make(map[string]Finding, len(parsed.Findings))
+	for _, finding := range parsed.Findings {
+		if _, exists := findings[finding.ID]; exists {
+			return fmt.Errorf("duplicate finding ID %s", finding.ID)
+		}
+		findings[finding.ID] = finding
+	}
+
+	blockers := make(map[string]struct{}, len(parsed.Blockers))
+	for _, id := range parsed.Blockers {
+		if _, exists := findings[id]; !exists {
+			return fmt.Errorf("blockers references unknown finding %s", id)
+		}
+		if _, exists := blockers[id]; exists {
+			return fmt.Errorf("blockers repeats finding %s", id)
+		}
+		blockers[id] = struct{}{}
+	}
+
+	suggestions := make(map[string]struct{}, len(parsed.Suggestions))
+	for _, id := range parsed.Suggestions {
+		if _, exists := findings[id]; !exists {
+			return fmt.Errorf("suggestions references unknown finding %s", id)
+		}
+		if _, exists := suggestions[id]; exists {
+			return fmt.Errorf("suggestions repeats finding %s", id)
+		}
+		if _, blocked := blockers[id]; blocked {
+			return fmt.Errorf("finding %s cannot be both a Blocker and a Suggestion", id)
+		}
+		suggestions[id] = struct{}{}
+	}
+
+	for _, finding := range parsed.Findings {
+		_, blocked := blockers[finding.ID]
+		_, suggested := suggestions[finding.ID]
+		switch finding.Severity {
+		case SeverityCritical, SeverityMajor:
+			if !blocked {
+				return fmt.Errorf("%s finding %s must be listed as a Blocker", finding.Severity, finding.ID)
+			}
+		case SeverityMinor:
+			if !suggested {
+				return fmt.Errorf("MINOR finding %s must be listed as a Suggestion", finding.ID)
+			}
+		}
+	}
+	return nil
+}
+
+func validateDemonstratedFindings(findings []Finding) error {
+	styleMarkers := []string{
+		"asd-ste100",
+		"ste100",
+		"noun cluster",
+		"passive voice",
+		"prose violation",
+		"documentation style",
+	}
+	speculationMarkers := []string{
+		"any rename",
+		"are regenerated",
+		"can rename",
+		"could rename",
+		"future provider",
+		"future grammar",
+		"future revision",
+		"future maintenance",
+		"if the grammar ever",
+		"if the pinned",
+		"if the scanner ever",
+		"if the witness no longer",
+		"is regenerated",
+		"later shifts",
+		"linkage-contract",
+		"private api surface",
+		"private-api surface",
+		"signature change",
+		"test package must track",
+		"could reappear silently",
+		"disprove the risk",
+		"disproves the risk",
+		"no demonstrated failure",
+		"hypothetical",
+	}
+
+	for _, finding := range findings {
+		text := strings.ToLower(strings.Join([]string{
+			finding.Title,
+			finding.Evidence,
+			finding.Impact,
+			finding.Fix,
+		}, "\n"))
+		for _, marker := range styleMarkers {
+			if strings.Contains(text, marker) {
+				return fmt.Errorf(
+					"finding %s reports prose or style (%q), not a demonstrated current defect; move it to Remarks or omit it",
+					finding.ID,
+					marker,
+				)
+			}
+		}
+		for _, marker := range speculationMarkers {
+			if strings.Contains(text, marker) {
+				return fmt.Errorf(
+					"finding %s relies on speculative or self-disproved evidence (%q); move it to Remarks or omit it",
+					finding.ID,
+					marker,
+				)
+			}
+		}
+	}
+	return nil
+}
+
+func validateFalsificationDisposition(parsed *ParsedReview) error {
+	if len(parsed.Findings) == 0 {
+		return nil
+	}
+	if parsed.FalsificationConclusion != FalsificationProved {
+		return fmt.Errorf(
+			"a non-empty Findings section requires a PROVED falsification conclusion, got %q; move disproved or unresolved concerns to Remarks or omit them",
+			parsed.FalsificationConclusion,
+		)
+	}
+	return nil
+}
+
+func validateVerdictDisposition(parsed *ParsedReview) error {
+	decision, err := parseVerdictDecision(parsed.Verdict)
+	if err != nil {
+		return err
+	}
+	if decision != "REQUEST CHANGES" || len(parsed.Blockers) > 0 {
+		return nil
+	}
+	if parsed.FalsificationConclusion == FalsificationProved ||
+		parsed.BuildVerification == VerificationFail ||
+		parsed.TestVerification == VerificationFail {
+		return nil
+	}
+	for _, feedback := range parsed.FeedbackEntries {
+		if feedback.Status == FeedbackUnresolved {
+			return nil
+		}
+	}
+	return fmt.Errorf(
+		"REQUEST CHANGES requires a blocker or proved current failure; pending or unavailable CI alone requires NEEDS DISCUSSION",
+	)
 }
 
 func verificationStateList() string {
@@ -351,12 +619,23 @@ func parseRemoteCIState(value string) VerificationState {
 }
 
 func parseFalsificationConclusion(section string) FalsificationConclusion {
-	re := regexp.MustCompile("(?mi)^\\s*-\\s+\\*\\*Conclusion\\*\\*:\\s*`?(PROVED|DISPROVED|UNRESOLVED)`?\\.?\\s*$")
-	matches := re.FindStringSubmatch(section)
-	if len(matches) < 2 {
+	re := regexp.MustCompile("(?mi)^\\s*(?:-\\s+)?(?:\\*\\*Conclusion\\*\\*|Conclusion):\\s*`?(PROVED|DISPROVED|UNRESOLVED)`?(.*)$")
+	matches := re.FindAllStringSubmatch(section, -1)
+	if len(matches) != 1 || len(matches[0]) < 3 {
 		return ""
 	}
-	return FalsificationConclusion(strings.ToUpper(matches[1]))
+	rawSuffix := matches[0][2]
+	if rawSuffix != "" {
+		first, _ := utf8.DecodeRuneInString(rawSuffix)
+		if !unicode.IsSpace(first) && !strings.ContainsRune(".—:;,(-[", first) {
+			return ""
+		}
+	}
+	suffix := strings.TrimSpace(rawSuffix)
+	if regexp.MustCompile(`(?i)\b(PROVED|DISPROVED|UNRESOLVED)\b`).MatchString(suffix) {
+		return ""
+	}
+	return FalsificationConclusion(strings.ToUpper(matches[0][1]))
 }
 
 func parseCoverageLedger(section string) ([]CoverageEntry, FeedbackDisposition, string, []FeedbackEntry) {
@@ -367,14 +646,15 @@ func parseCoverageLedger(section string) ([]CoverageEntry, FeedbackDisposition, 
 
 	for _, rawLine := range strings.Split(section, "\n") {
 		line := strings.TrimSpace(rawLine)
-		lower := strings.ToLower(line)
-		const filePrefix = "- **file**:"
-		const feedbackPrefix = "- **feedback disposition**:"
-		const feedbackEntryPrefix = "- **feedback**:"
+		normalized := strings.TrimSpace(strings.TrimPrefix(line, "-"))
+		lower := strings.ToLower(normalized)
+		const filePrefix = "**file**:"
+		const feedbackPrefix = "**feedback disposition**:"
+		const feedbackEntryPrefix = "**feedback**:"
 
 		switch {
 		case strings.HasPrefix(lower, filePrefix):
-			rest := strings.TrimSpace(line[len(filePrefix):])
+			rest := strings.TrimSpace(normalized[len(filePrefix):])
 			if !strings.HasPrefix(rest, "`") {
 				continue
 			}
@@ -388,7 +668,7 @@ func parseCoverageLedger(section string) ([]CoverageEntry, FeedbackDisposition, 
 			entries = append(entries, CoverageEntry{Path: rawPath, Evidence: evidence})
 
 		case strings.HasPrefix(lower, feedbackPrefix):
-			rest := strings.TrimSpace(line[len(feedbackPrefix):])
+			rest := strings.TrimSpace(normalized[len(feedbackPrefix):])
 			status, details := parseFeedbackDisposition(rest)
 			if status != "" {
 				disposition = status
@@ -396,7 +676,7 @@ func parseCoverageLedger(section string) ([]CoverageEntry, FeedbackDisposition, 
 			}
 
 		case strings.HasPrefix(lower, feedbackEntryPrefix):
-			rest := strings.TrimSpace(line[len(feedbackEntryPrefix):])
+			rest := strings.TrimSpace(normalized[len(feedbackEntryPrefix):])
 			if entry, ok := parseFeedbackEntry(rest); ok {
 				feedbackEntries = append(feedbackEntries, entry)
 			}
@@ -412,18 +692,27 @@ func parseFeedbackEntry(value string) (FeedbackEntry, bool) {
 		return FeedbackEntry{}, false
 	}
 	rest = trimCoverageSeparator(rest)
-	statusToken, rest, ok := parseBacktickToken(rest)
+	statusValue := rest
+	statusToken, statusRest, ok := parseBacktickToken(statusValue)
 	if !ok {
-		return FeedbackEntry{}, false
+		fields := strings.Fields(statusValue)
+		if len(fields) == 0 {
+			return FeedbackEntry{}, false
+		}
+		statusToken = fields[0]
+		statusRest = strings.TrimPrefix(statusValue, fields[0])
 	}
 	status := FeedbackStatus(strings.ToUpper(strings.TrimSpace(statusToken)))
-	if status != FeedbackAddressed && status != FeedbackDisputed && status != FeedbackUnresolved {
+	if status != FeedbackAddressed &&
+		status != FeedbackDisputed &&
+		status != FeedbackDispositionedItem &&
+		status != FeedbackUnresolved {
 		return FeedbackEntry{ID: strings.TrimSpace(id)}, true
 	}
 	return FeedbackEntry{
 		ID:       strings.TrimSpace(id),
 		Status:   status,
-		Evidence: trimCoverageSeparator(rest),
+		Evidence: trimCoverageSeparator(statusRest),
 	}, true
 }
 
@@ -568,7 +857,10 @@ func validateFeedbackLedger(entries []FeedbackEntry, requiredIDs []string) error
 		if _, exists := expected[id]; !exists {
 			unexpected = append(unexpected, id)
 		}
-		if entry.Status != FeedbackAddressed && entry.Status != FeedbackDisputed && entry.Status != FeedbackUnresolved {
+		if entry.Status != FeedbackAddressed &&
+			entry.Status != FeedbackDisputed &&
+			entry.Status != FeedbackDispositionedItem &&
+			entry.Status != FeedbackUnresolved {
 			invalidStatus = append(invalidStatus, id)
 		}
 		if strings.TrimSpace(entry.Evidence) == "" {
@@ -709,19 +1001,31 @@ func extractFindings(review string) []Finding {
 }
 
 func extractFileLine(content string) (file string, line int) {
-	re := regexp.MustCompile(`\*\*File\*\*:\s*([^\s:]+)(?::(\d+))?`)
+	re := regexp.MustCompile(`(?m)^\s*(?:-\s*)?\*\*File\*\*:\s*(.+?)\s*$`)
 	matches := re.FindStringSubmatch(content)
-	if len(matches) >= 2 {
-		file = matches[1]
-		if len(matches) >= 3 && matches[2] != "" {
-			var n int
-			for _, c := range matches[2] {
-				n = n*10 + int(c-'0')
-			}
-			line = n
+	if len(matches) < 2 {
+		return "", 0
+	}
+
+	location := strings.TrimSpace(matches[1])
+	if strings.HasPrefix(location, "`") {
+		if closing := strings.Index(location[1:], "`"); closing >= 0 {
+			closing++
+			location = location[1:closing] + strings.TrimSpace(location[closing+1:])
 		}
 	}
-	return
+
+	locationRe := regexp.MustCompile(`^(.+?):(\d+)(?:-\d+)?$`)
+	locationMatches := locationRe.FindStringSubmatch(location)
+	if len(locationMatches) < 3 {
+		return strings.TrimSpace(strings.Trim(location, "`")), 0
+	}
+
+	line, err := strconv.Atoi(locationMatches[2])
+	if err != nil {
+		return strings.TrimSpace(strings.Trim(location, "`")), 0
+	}
+	return strings.TrimSpace(strings.Trim(locationMatches[1], "`")), line
 }
 
 func extractField(content, field string) string {
@@ -785,9 +1089,17 @@ var verdictDecisionLineRE = regexp.MustCompile(`(?im)^\s*(?:[-*]\s*)?\*\*(Approv
 // decision fields so an ambiguous template can never be interpreted as an
 // approval by substring matching.
 func parseVerdictApproval(section string) (bool, error) {
+	decision, err := parseVerdictDecision(section)
+	if err != nil {
+		return false, err
+	}
+	return decision == "APPROVE" || decision == "YES", nil
+}
+
+func parseVerdictDecision(section string) (string, error) {
 	matches := verdictDecisionLineRE.FindAllStringSubmatch(section, -1)
 	if len(matches) != 1 {
-		return false, fmt.Errorf(
+		return "", fmt.Errorf(
 			"expected exactly one **Approved** or **Recommendation** decision line, got %d",
 			len(matches),
 		)
@@ -799,26 +1111,26 @@ func parseVerdictApproval(section string) (bool, error) {
 	case "approved":
 		switch value {
 		case "YES":
-			return true, nil
+			return value, nil
 		case "NO":
-			return false, nil
+			return value, nil
 		default:
-			return false, fmt.Errorf("**Approved** must be exactly YES or NO, got %q", matches[0][2])
+			return "", fmt.Errorf("**Approved** must be exactly YES or NO, got %q", matches[0][2])
 		}
 	case "recommendation":
 		switch value {
 		case "APPROVE":
-			return true, nil
+			return value, nil
 		case "REQUEST CHANGES", "NEEDS DISCUSSION":
-			return false, nil
+			return value, nil
 		default:
-			return false, fmt.Errorf(
+			return "", fmt.Errorf(
 				"**Recommendation** must be exactly APPROVE, REQUEST CHANGES, or NEEDS DISCUSSION, got %q",
 				matches[0][2],
 			)
 		}
 	default:
-		return false, fmt.Errorf("unsupported Verdict decision field %q", matches[0][1])
+		return "", fmt.Errorf("unsupported Verdict decision field %q", matches[0][1])
 	}
 }
 

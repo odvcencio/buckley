@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"m31labs.dev/buckley/pkg/ui/backend/sim"
-	"m31labs.dev/buckley/pkg/ui/terminal"
+	"m31labs.dev/fluffyui/backend/sim"
+	"m31labs.dev/fluffyui/terminal"
 )
 
 func newKeyTestWidgetApp(t *testing.T, cfg WidgetAppConfig) *WidgetApp {
@@ -51,6 +51,27 @@ func TestWidgetAppCtrlCClearsInputBeforeQuit(t *testing.T) {
 	}
 	if app.running {
 		t.Fatal("app should no longer be running after confirmed quit")
+	}
+}
+
+func TestWidgetAppCtrlCInterruptsActiveProcess(t *testing.T) {
+	interrupts := 0
+	app := newKeyTestWidgetApp(t, WidgetAppConfig{})
+	app.running = true
+	app.processActive = true
+	app.SetInterruptCallback(func() { interrupts++ })
+
+	if !app.handleKeyMsg(KeyMsg{Key: int(terminal.KeyCtrlC)}) {
+		t.Fatal("Ctrl+C should request a render after interrupting")
+	}
+	if interrupts != 1 {
+		t.Fatalf("interrupt count = %d, want 1", interrupts)
+	}
+	if !app.ctrlCArmedUntil.IsZero() {
+		t.Fatal("interrupt should not arm the quit shortcut")
+	}
+	if got := app.statusBar.Status(); !strings.Contains(got, "Interrupt requested") {
+		t.Fatalf("status = %q, want interrupt feedback", got)
 	}
 }
 

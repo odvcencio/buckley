@@ -9,14 +9,14 @@ import (
 	"strings"
 	"time"
 
-	"m31labs.dev/buckley/pkg/config"
-	"m31labs.dev/buckley/pkg/model"
-	"m31labs.dev/buckley/pkg/oneshot"
-	"m31labs.dev/buckley/pkg/oneshot/commands"
-	"m31labs.dev/buckley/pkg/rules"
-	"m31labs.dev/buckley/pkg/terminal"
-	"m31labs.dev/buckley/pkg/tool"
-	"m31labs.dev/buckley/pkg/transparency"
+	"m31labs.dev/buckley/v2/pkg/config"
+	"m31labs.dev/buckley/v2/pkg/model"
+	"m31labs.dev/buckley/v2/pkg/oneshot"
+	"m31labs.dev/buckley/v2/pkg/oneshot/commands"
+	"m31labs.dev/buckley/v2/pkg/rules"
+	"m31labs.dev/buckley/v2/pkg/terminal"
+	"m31labs.dev/buckley/v2/pkg/tool"
+	"m31labs.dev/buckley/v2/pkg/transparency"
 )
 
 type reviewCommandOptions struct {
@@ -28,9 +28,14 @@ type reviewCommandOptions struct {
 	verbose         bool
 	showCost        bool
 	model           string
+	criticModel     string
 	timeout         time.Duration
 	outputFile      string
 	interactive     bool
+	budgetUSD       float64
+	maxTurns        int
+	maxDiff         int
+	maxRetries      int
 }
 
 type reviewCommandRuntime struct {
@@ -40,6 +45,7 @@ type reviewCommandRuntime struct {
 	framework       *oneshot.Framework
 	modelID         string
 	reasoningEffort string
+	policy          automatedReviewOptions
 }
 
 type reviewCommandResult struct {
@@ -50,6 +56,8 @@ type reviewCommandResult struct {
 	attempts       int
 	primary        int
 	criticAttempts int
+	incomplete     bool
+	incompleteWhy  string
 }
 
 func parseReviewCommandOptions(args []string) (reviewCommandOptions, error) {
@@ -62,11 +70,16 @@ func parseReviewCommandOptions(args []string) (reviewCommandOptions, error) {
 	fs.Var(&untrackedPaths, "include-untracked", "include one untracked repository-relative text path in model input (repeatable; review for secrets)")
 	verbose := fs.Bool("verbose", false, "show full context and reasoning")
 	showCost := fs.Bool("cost", true, "show token/cost breakdown")
-	modelFlag := fs.String("model", "", "model to use (default: BUCKLEY_MODEL_REVIEW, models.review, or execution model)")
-	timeout := fs.Duration("timeout", 5*time.Minute, "timeout for model request")
+	modelFlag := fs.String("model", "", "model to use; codex/auto scales Luna to Terra to Sol")
+	criticModel := fs.String("critic-model", "", "opt-in approval critic model for large or business-critical reviews")
+	timeout := fs.Duration("timeout", defaultReviewTimeout, "total review timeout")
 	outputFile := fs.String("output", "", "write review to file instead of stdout")
 	interactive := fs.Bool("interactive", true, "show interactive menu to fix findings")
 	noInteractive := fs.Bool("no-interactive", false, "disable interactive mode")
+	budgetUSD := fs.Float64("budget", 0, "maximum model spend in USD (0 = Buckbot default)")
+	maxTurns := fs.Int("max-turns", 0, "hard model turn limit per review pass (0 = adaptive)")
+	maxDiff := fs.Int("max-diff-bytes", 0, "maximum prioritized diff bytes (0 = Buckbot default)")
+	maxRetries := fs.Int("max-validation-attempts", 0, "maximum schema-validation attempts (0 = Buckbot default)")
 
 	if err := fs.Parse(args); err != nil {
 		return reviewCommandOptions{}, err
@@ -81,9 +94,14 @@ func parseReviewCommandOptions(args []string) (reviewCommandOptions, error) {
 		verbose:         *verbose,
 		showCost:        *showCost,
 		model:           *modelFlag,
+		criticModel:     *criticModel,
 		timeout:         *timeout,
 		outputFile:      *outputFile,
 		interactive:     *interactive,
+		budgetUSD:       *budgetUSD,
+		maxTurns:        *maxTurns,
+		maxDiff:         *maxDiff,
+		maxRetries:      *maxRetries,
 	}
 	if *noInteractive {
 		opts.interactive = false
@@ -111,6 +129,9 @@ func runReviewCommand(args []string) error {
 	if err != nil {
 		return fmt.Errorf("init dependencies: %w", err)
 	}
+	if strings.TrimSpace(opts.criticModel) != "" {
+		cfg.Buckbot.CriticModel = strings.TrimSpace(opts.criticModel)
+	}
 
 	runtime, err := newReviewCommandRuntime(cfg, mgr)
 	if err != nil {
@@ -121,19 +142,36 @@ func runReviewCommand(args []string) error {
 	defer cancel()
 
 	if !quietMode {
-		termOut.Dim("Using model: %s", runtime.modelID)
-		if runtime.reasoningEffort != "" {
+		printReviewModelSelection(runtime)
+		if runtime.policy.adaptiveReasoning {
+			termOut.Dim("Reasoning effort: adaptive by model and review size")
+		} else if runtime.reasoningEffort != "" {
 			termOut.Dim("Reasoning effort: %s", runtime.reasoningEffort)
 		}
 	}
 
-	result, err := runReview(ctx, opts, runtime.framework)
-	if err != nil {
-		return err
-	}
+	policy := runtime.policy.withOverrides(automatedReviewOptions{
+		maxIterations: opts.maxTurns,
+		maxRetries:    opts.maxRetries,
+		maxDiffBytes:  opts.maxDiff,
+		maxCostUSD:    opts.budgetUSD,
+	})
+	result, reviewErr := runReviewWithPolicy(ctx, opts, runtime.framework, policy)
 
-	if opts.verbose && result.contextAudit != nil {
+	if opts.verbose && result != nil && result.contextAudit != nil {
 		printReviewContextAudit(result.contextAudit)
+	}
+	if reviewErr != nil {
+		if result == nil || !result.incomplete || strings.TrimSpace(result.reviewText) == "" {
+			return reviewErr
+		}
+		if err := writeReviewOutput(opts.outputFile, result.reviewText); err != nil {
+			return fmt.Errorf("%w; also failed to write salvaged review: %v", reviewErr, err)
+		}
+		if opts.showCost && result.trace != nil {
+			printReviewCost(result.trace, runtime.ledger)
+		}
+		return fmt.Errorf("%w; incomplete review salvaged%s", reviewErr, reviewSalvageDestination(opts.outputFile))
 	}
 
 	if result.reviewText == "" {
@@ -169,7 +207,7 @@ func newReviewCommandRuntime(cfg *config.Config, mgr *model.Manager) (*reviewCom
 	if modelID == "" {
 		return nil, fmt.Errorf("no review model configured")
 	}
-	reasoningEffort := model.ResolveReasoningEffort(cfg, mgr, nil, modelID, "review")
+	reasoningEffort := resolveReviewReasoningEffort(cfg, mgr, modelID, reviewReasoningOverride())
 	arbEngine, err := rules.NewDefaultEngine()
 	if err != nil {
 		return nil, fmt.Errorf("initialize rules engine: %w", err)
@@ -188,42 +226,105 @@ func newReviewCommandRuntime(cfg *config.Config, mgr *model.Manager) (*reviewCom
 		ModelID:         modelID,
 		ReasoningEffort: reasoningEffort,
 	})
+	framework := oneshot.NewFramework(nil, arbEngine).WithRLMRunner(rlmRunner)
+	policy := defaultAutomatedReviewOptions(cfg)
+	policy.modelID = modelID
+	policy.adaptiveCodexModel = isAdaptiveCodexReviewSelector(resolveReviewModelSelector(cfg))
+	policy.reasoningEffort = reasoningEffort
+	policy.adaptiveReasoning = reviewReasoningIsAdaptive(cfg, reviewReasoningOverride())
+	policy.engine = arbEngine
+	criticModel := ""
+	if cfg != nil {
+		criticModel = strings.TrimSpace(cfg.Buckbot.CriticModel)
+	}
+	criticReasoning := ""
+	criticModel, criticReasoning = config.SplitReasoningSuffix(criticModel)
+	if criticModel != "" && criticModel != modelID {
+		criticRunner := oneshot.NewRLMRunner(oneshot.RLMRunnerConfig{
+			Models:          mgr,
+			Registry:        registry,
+			Ledger:          ledger,
+			ModelID:         criticModel,
+			ReasoningEffort: resolveReviewReasoningEffort(cfg, mgr, criticModel, criticReasoning),
+		})
+		framework = framework.WithApprovalCriticRunner(criticRunner)
+		policy.criticReserveUSD = policy.maxCostUSD * 0.12
+	} else {
+		policy.criticReserveUSD = 0
+	}
 
 	return &reviewCommandRuntime{
 		mgr:             mgr,
 		registry:        registry,
 		ledger:          ledger,
-		framework:       oneshot.NewFramework(nil, arbEngine).WithRLMRunner(rlmRunner),
+		framework:       framework,
 		modelID:         modelID,
 		reasoningEffort: reasoningEffort,
+		policy:          policy,
 	}, nil
 }
 
-func resolveReviewModel(cfg *config.Config) string {
+func reviewReasoningOverride() string {
+	rawModelID := strings.TrimSpace(modelOverrideFlag)
+	if rawModelID == "" {
+		rawModelID = strings.TrimSpace(os.Getenv("BUCKLEY_MODEL_REVIEW"))
+	}
+	if rawModelID == "" {
+		return ""
+	}
+	_, effort := config.SplitReasoningSuffix(rawModelID)
+	return effort
+}
+
+func resolveReviewModelSelector(cfg *config.Config) string {
 	modelID := strings.TrimSpace(modelOverrideFlag)
-	if modelID != "" {
-		modelID = normalizeModelIDWithReasoning(cfg, modelID)
-	}
 	if modelID == "" {
-		modelID = normalizeModelIDWithReasoning(cfg, os.Getenv("BUCKLEY_MODEL_REVIEW"))
+		modelID = strings.TrimSpace(os.Getenv("BUCKLEY_MODEL_REVIEW"))
 	}
 	if modelID == "" && cfg != nil {
-		modelID = cfg.Models.Review
+		modelID = strings.TrimSpace(cfg.Buckbot.Model)
 	}
 	if modelID == "" && cfg != nil {
-		modelID = cfg.Models.Execution
+		modelID = strings.TrimSpace(cfg.Models.Review)
+	}
+	if modelID == "" && cfg != nil {
+		modelID = strings.TrimSpace(cfg.Models.Execution)
 	}
 	return modelID
 }
 
-func runReview(ctx context.Context, opts reviewCommandOptions, framework *oneshot.Framework) (*reviewCommandResult, error) {
-	if opts.projectMode {
-		return runProjectReview(ctx, framework)
+func resolveReviewModel(cfg *config.Config) string {
+	modelID := resolveReviewModelSelector(cfg)
+	if isAdaptiveCodexReviewSelector(modelID) {
+		return codexReviewModelStandard
 	}
-	return runBranchReview(ctx, opts, framework)
+	return normalizeModelIDWithReasoning(cfg, modelID)
+}
+
+func printReviewModelSelection(runtime *reviewCommandRuntime) {
+	if runtime.policy.adaptiveCodexModel {
+		termOut.Dim("Using model: Codex adaptive (Luna → Terra → Sol)")
+		return
+	}
+	termOut.Dim("Using model: %s", runtime.modelID)
+}
+
+func runReview(ctx context.Context, opts reviewCommandOptions, framework *oneshot.Framework) (*reviewCommandResult, error) {
+	return runReviewWithPolicy(ctx, opts, framework, automatedReviewOptions{})
+}
+
+func runReviewWithPolicy(ctx context.Context, opts reviewCommandOptions, framework *oneshot.Framework, policy automatedReviewOptions) (*reviewCommandResult, error) {
+	if opts.projectMode {
+		return runProjectReviewWithPolicy(ctx, framework, policy)
+	}
+	return runBranchReviewWithPolicy(ctx, opts, framework, policy)
 }
 
 func runProjectReview(ctx context.Context, framework *oneshot.Framework) (*reviewCommandResult, error) {
+	return runProjectReviewWithPolicy(ctx, framework, automatedReviewOptions{})
+}
+
+func runProjectReviewWithPolicy(ctx context.Context, framework *oneshot.Framework, reviewPolicy automatedReviewOptions) (*reviewCommandResult, error) {
 	spinner := terminal.NewSpinner("Analyzing project...")
 	spinner.Start()
 	policy := model.ReviewSnapshotPolicy{Mode: model.ReviewSnapshotTrackedWorktree}
@@ -234,6 +335,7 @@ func runProjectReview(ctx context.Context, framework *oneshot.Framework) (*revie
 	}
 
 	opts := commands.DefaultProjectContextOptions()
+	opts.Context = ctx
 	projectCtx, audit, err := commands.AssembleProjectContext(opts)
 	if err != nil {
 		spinner.StopWithError(err.Error())
@@ -249,15 +351,44 @@ func runProjectReview(ctx context.Context, framework *oneshot.Framework) (*revie
 		return nil, err
 	}
 
-	userPrompt := commands.BuildProjectPrompt(projectCtx)
+	plan := reviewExecutionPlan{
+		sizeClass:            "project",
+		reasoningEffort:      "high",
+		reasoningMaxTokens:   4096,
+		maxIterations:        8,
+		maxToolCalls:         8,
+		maxVerificationCalls: 1,
+		verificationTimeout:  90 * time.Second,
+		explorationTimeout:   3 * time.Minute,
+		synthesisLead:        75 * time.Second,
+	}
+	reviewPolicy = reviewPolicy.withExecutionPlan(plan)
+	spinner.SetMessage(fmt.Sprintf("Running %s review with %s reasoning...", reviewPolicy.sizeClass, reviewPolicy.reasoningEffort))
+	userPrompt := appendReviewExecutionPlan(commands.BuildProjectPrompt(projectCtx), reviewPolicy)
 	fwResult, runErr := framework.RunRLM(ctx, commands.ReviewProjectDef{}, oneshot.RLMRunOpts{
-		UserPrompt:     userPrompt,
-		Audit:          audit,
-		SnapshotPolicy: policy,
-		ReviewSnapshot: snapshot,
+		UserPrompt:               userPrompt,
+		Audit:                    audit,
+		MaxRetries:               reviewPolicy.maxRetries,
+		MaxIterations:            reviewPolicy.maxIterations,
+		MaxToolCalls:             reviewPolicy.maxToolCalls,
+		MaxVerificationCalls:     reviewPolicy.maxVerificationCalls,
+		MaxCostUSD:               reviewPolicy.maxCostUSD,
+		ApprovalCriticReserveUSD: reviewPolicy.criticReserveUSD,
+		ExplorationTimeout:       reviewPolicy.explorationTimeout,
+		SynthesisLead:            reviewPolicy.synthesisLead,
+		VerificationTimeout:      reviewPolicy.verificationTimeout,
+		ModelID:                  reviewPolicy.modelID,
+		ReasoningEffort:          reviewPolicy.reasoningEffort,
+		ReasoningMaxTokens:       reviewPolicy.reasoningMaxTokens,
+		SnapshotPolicy:           policy,
+		ReviewSnapshot:           snapshot,
 	})
 	if runErr != nil {
 		spinner.StopWithError(runErr.Error())
+		partial := reviewResultFromRLM(fwResult, audit)
+		if strings.TrimSpace(partial.reviewText) != "" {
+			return partial, fmt.Errorf("review failed: %w", runErr)
+		}
 		return nil, fmt.Errorf("review failed: %w", runErr)
 	}
 
@@ -266,6 +397,10 @@ func runProjectReview(ctx context.Context, framework *oneshot.Framework) (*revie
 }
 
 func runBranchReview(ctx context.Context, opts reviewCommandOptions, framework *oneshot.Framework) (*reviewCommandResult, error) {
+	return runBranchReviewWithPolicy(ctx, opts, framework, automatedReviewOptions{})
+}
+
+func runBranchReviewWithPolicy(ctx context.Context, opts reviewCommandOptions, framework *oneshot.Framework, reviewPolicy automatedReviewOptions) (*reviewCommandResult, error) {
 	reviewScope := normalizeReviewCommandScope(opts.scope)
 	spinner := terminal.NewSpinner(fmt.Sprintf("Analyzing %s changes...", reviewScope))
 	spinner.Start()
@@ -277,10 +412,14 @@ func runBranchReview(ctx context.Context, opts reviewCommandOptions, framework *
 	}
 
 	contextOpts := commands.DefaultBranchContextOptions()
+	contextOpts.Context = ctx
 	contextOpts.BaseBranch = opts.baseBranch
 	contextOpts.IncludeUnstaged = opts.includeUnstaged
 	contextOpts.UntrackedPaths = append([]string(nil), opts.untrackedPaths...)
 	contextOpts.Scope = reviewScope
+	if reviewPolicy.maxDiffBytes > 0 {
+		contextOpts.MaxDiffBytes = reviewPolicy.maxDiffBytes
+	}
 	if snapshot != nil && policy.Mode == model.ReviewSnapshotWorktree {
 		contextOpts.CapturedUntracked = snapshot.UntrackedFiles()
 	}
@@ -304,19 +443,48 @@ func runBranchReview(ctx context.Context, opts reviewCommandOptions, framework *
 		return nil, fmt.Errorf("revalidate branch review context: %w", err)
 	}
 
-	userPrompt := commands.BuildBranchPrompt(branchCtx)
+	plan := resolveReviewExecutionPlan(reviewPolicy.engine, rules.ReviewPlanFacts{
+		FileCount:         len(branchCtx.Files),
+		DiffBytes:         len(branchCtx.Diff) + len(branchCtx.Unstaged),
+		ContextIncomplete: branchCtx.DiffTruncated || branchCtx.UnstagedTruncated || branchCtx.ContextIncomplete,
+	})
+	reviewPolicy = reviewPolicy.withExecutionPlan(plan)
+	spinner.SetMessage(fmt.Sprintf("Running %s review with %s reasoning...", reviewPolicy.sizeClass, reviewPolicy.reasoningEffort))
+	userPrompt := appendReviewExecutionPlan(commands.BuildBranchPrompt(branchCtx), reviewPolicy)
 	reviewDef := commands.ReviewBranchDef{
 		ChangedFiles:      reviewChangedFilePaths(branchCtx.Files),
 		ContextIncomplete: branchCtx.DiffTruncated || branchCtx.UnstagedTruncated || branchCtx.ContextIncomplete,
+		ApprovalCritic:    reviewPolicy.approvalCritic,
 	}
 	fwResult, runErr := framework.RunRLM(ctx, reviewDef, oneshot.RLMRunOpts{
-		UserPrompt:     userPrompt,
-		Audit:          audit,
-		SnapshotPolicy: policy,
-		ReviewSnapshot: snapshot,
+		UserPrompt:               userPrompt,
+		Audit:                    audit,
+		MaxRetries:               reviewPolicy.maxRetries,
+		MaxIterations:            reviewPolicy.maxIterations,
+		MaxToolCalls:             reviewPolicy.maxToolCalls,
+		MaxVerificationCalls:     reviewPolicy.maxVerificationCalls,
+		MaxCostUSD:               reviewPolicy.maxCostUSD,
+		ApprovalCriticReserveUSD: reviewPolicy.criticReserveUSD,
+		ApprovalCriticReserve:    enabledReviewDuration(reviewPolicy.approvalCritic, reviewPolicy.criticReserve),
+		CriticMaxIterations:      reviewPolicy.criticMaxIterations,
+		CriticMaxToolCalls:       reviewPolicy.criticMaxToolCalls,
+		CriticExplorationTimeout: reviewPolicy.criticExploration,
+		CriticSynthesisLead:      reviewPolicy.criticSynthesisLead,
+		ExplorationTimeout:       reviewPolicy.explorationTimeout,
+		SynthesisLead:            reviewPolicy.synthesisLead,
+		VerificationTimeout:      reviewPolicy.verificationTimeout,
+		ModelID:                  reviewPolicy.modelID,
+		ReasoningEffort:          reviewPolicy.reasoningEffort,
+		ReasoningMaxTokens:       reviewPolicy.reasoningMaxTokens,
+		SnapshotPolicy:           policy,
+		ReviewSnapshot:           snapshot,
 	})
 	if runErr != nil {
 		spinner.StopWithError(runErr.Error())
+		partial := reviewResultFromRLM(fwResult, audit)
+		if strings.TrimSpace(partial.reviewText) != "" {
+			return partial, fmt.Errorf("review failed: %w", runErr)
+		}
 		return nil, fmt.Errorf("review failed: %w", runErr)
 	}
 
@@ -363,7 +531,7 @@ func reviewResultFromRLM(fwResult *oneshot.RunResult, audit *transparency.Contex
 	if fwResult == nil {
 		return result
 	}
-	if rlmResult, ok := fwResult.Value.(*commands.ReviewRLMResult); ok {
+	if rlmResult, ok := fwResult.Value.(*commands.ReviewRLMResult); ok && rlmResult != nil {
 		result.reviewText = rlmResult.Review
 		result.parsed = rlmResult.Parsed
 	}
@@ -371,7 +539,94 @@ func reviewResultFromRLM(fwResult *oneshot.RunResult, audit *transparency.Contex
 	result.attempts = fwResult.Attempts
 	result.primary = fwResult.PrimaryAttempts
 	result.criticAttempts = fwResult.CriticAttempts
+	result.incomplete = fwResult.Incomplete
+	result.incompleteWhy = fwResult.IncompleteReason
+	if result.incomplete {
+		result.reviewText = appendReviewAttemptDiagnostics(result.reviewText, result.trace)
+		result.reviewText = markIncompleteReview(result.reviewText, result.incompleteWhy)
+		result.parsed = nil
+	}
 	return result
+}
+
+func appendReviewAttemptDiagnostics(review string, trace *transparency.Trace) string {
+	if trace == nil || len(trace.Attempts) == 0 {
+		return review
+	}
+	var b strings.Builder
+	b.WriteString(strings.TrimSpace(review))
+	b.WriteString("\n\n## Review attempt diagnostics\n")
+	for _, attempt := range trace.Attempts {
+		if attempt.Trace == nil {
+			continue
+		}
+		attemptTrace := attempt.Trace
+		fmt.Fprintf(
+			&b,
+			"\n### %s attempt %d\n\n- Finish reason: `%s`\n- Tokens: %d input and %d output\n- Duration: %s\n",
+			reviewAttemptPhase(attempt.Phase),
+			attempt.Attempt,
+			reviewAttemptFinishReason(attemptTrace),
+			attemptTrace.Tokens.Input,
+			attemptTrace.Tokens.Output,
+			attemptTrace.Duration.Round(time.Millisecond),
+		)
+		if excerpt := reviewAttemptExcerpt(attemptTrace.Content, 4000); excerpt != "" {
+			b.WriteString("\nResponse excerpt:\n\n> ")
+			b.WriteString(strings.ReplaceAll(excerpt, "\n", "\n> "))
+			b.WriteString("\n")
+		}
+	}
+	return strings.TrimSpace(b.String())
+}
+
+func reviewAttemptPhase(phase string) string {
+	switch strings.ToLower(strings.TrimSpace(phase)) {
+	case "primary":
+		return "Primary"
+	case "approval critic":
+		return "Approval critic"
+	default:
+		return "Review"
+	}
+}
+
+func reviewAttemptFinishReason(trace *transparency.Trace) string {
+	if trace == nil || trace.Response == nil || strings.TrimSpace(trace.Response.FinishReason) == "" {
+		return "unavailable"
+	}
+	return strings.TrimSpace(trace.Response.FinishReason)
+}
+
+func reviewAttemptExcerpt(content string, limit int) string {
+	content = strings.TrimSpace(content)
+	runes := []rune(content)
+	if limit > 0 && len(runes) > limit {
+		return string(runes[:limit]) + "…"
+	}
+	return content
+}
+
+func markIncompleteReview(review, reason string) string {
+	review = strings.TrimSpace(review)
+	if strings.Contains(review, "**Incomplete review") {
+		return review + "\n"
+	}
+	if strings.TrimSpace(reason) == "" {
+		reason = "the review run ended before validation completed"
+	}
+	return fmt.Sprintf(
+		"> [!WARNING]\n> **Incomplete review — salvaged from completed work.**\n> This artifact is not a merge verdict and must not be used as an approval.\n> Cause: %s\n\n%s\n",
+		reason,
+		review,
+	)
+}
+
+func reviewSalvageDestination(outputFile string) string {
+	if strings.TrimSpace(outputFile) == "" {
+		return " to standard output"
+	}
+	return " to " + outputFile
 }
 
 func printReviewAttemptCounts(result *reviewCommandResult) {
@@ -384,6 +639,34 @@ func printReviewAttemptCounts(result *reviewCommandResult) {
 		result.criticAttempts,
 		result.attempts,
 	)
+	for _, line := range reviewValidationRepairLines(result.trace) {
+		termOut.Dim("Review repair: %s", line)
+	}
+}
+
+func reviewValidationRepairLines(trace *transparency.Trace) []string {
+	if trace == nil {
+		return nil
+	}
+	var lines []string
+	for _, attempt := range trace.Attempts {
+		reason := strings.TrimSpace(attempt.ValidationError)
+		if reason == "" {
+			continue
+		}
+		const maxReasonRunes = 180
+		runes := []rune(reason)
+		if len(runes) > maxReasonRunes {
+			reason = string(runes[:maxReasonRunes]) + "…"
+		}
+		lines = append(lines, fmt.Sprintf(
+			"%s attempt %d: %s",
+			reviewAttemptPhase(attempt.Phase),
+			attempt.Attempt,
+			reason,
+		))
+	}
+	return lines
 }
 
 func writeReviewOutput(outputFile, reviewText string) error {

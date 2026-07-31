@@ -4,7 +4,7 @@ import (
 	"strings"
 	"time"
 
-	"m31labs.dev/buckley/pkg/ui/runtime"
+	"m31labs.dev/fluffyui/runtime"
 )
 
 // update processes a message and returns true if a render is needed.
@@ -25,6 +25,8 @@ func (a *WidgetApp) update(msg Message) bool {
 		return a.handleAddMessageMsg(m)
 	case AppendMsg:
 		return a.handleAppendMsg(m)
+	case ReplaceLastMessageMsg:
+		return a.handleReplaceLastMessageMsg(m)
 	case StatusMsg:
 		return a.handleStatusMsg(m, time.Now())
 	case ProcessStatusMsg:
@@ -37,6 +39,12 @@ func (a *WidgetApp) update(msg Message) bool {
 		return true
 	case ThinkingMsg:
 		return a.handleThinkingMsg(m)
+	case ModelPickerMsg:
+		a.showModelPicker(m.Items, m.OnSelect)
+		return true
+	case SetActivitiesMsg:
+		a.applySetActivities(m.Records)
+		return true
 	case RefreshMsg:
 		return true
 	case QuitMsg:
@@ -90,6 +98,12 @@ func (a *WidgetApp) handleAddMessageMsg(m AddMessageMsg) bool {
 
 func (a *WidgetApp) handleAppendMsg(m AppendMsg) bool {
 	a.chatView.AppendText(m.Text)
+	a.updateScrollStatus()
+	return true
+}
+
+func (a *WidgetApp) handleReplaceLastMessageMsg(m ReplaceLastMessageMsg) bool {
+	a.chatView.ReplaceText(m.Content)
 	a.updateScrollStatus()
 	return true
 }

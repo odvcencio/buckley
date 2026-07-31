@@ -9,8 +9,8 @@ import (
 	"slices"
 	"strings"
 
-	"m31labs.dev/buckley/pkg/config"
-	"m31labs.dev/buckley/pkg/giturl"
+	"m31labs.dev/buckley/v2/pkg/config"
+	"m31labs.dev/buckley/v2/pkg/giturl"
 )
 
 const (
@@ -92,11 +92,16 @@ func enterTaskWorkdir(opts taskWorkspaceOptions) error {
 }
 
 func enterExistingTaskRepo() (string, bool, error) {
-	if repoRoot, ok, err := enterGitRepoRoot("."); ok || err != nil {
-		return repoRoot, ok, err
+	if _, err := os.Stat(".git"); err == nil {
+		return chdirAndConfigureRepoRoot(".")
+	} else if !os.IsNotExist(err) {
+		return "", false, fmt.Errorf("stat current repo marker: %w", err)
 	}
 	if repoRoot, ok := findSingleChildGitRepo("."); ok {
 		return chdirAndConfigureRepoRoot(repoRoot)
+	}
+	if repoRoot, ok, err := enterGitRepoRoot("."); ok || err != nil {
+		return repoRoot, ok, err
 	}
 	return "", false, nil
 }

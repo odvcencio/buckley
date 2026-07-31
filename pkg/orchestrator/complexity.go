@@ -4,7 +4,7 @@ import (
 	"regexp"
 	"strings"
 
-	"m31labs.dev/buckley/pkg/rules"
+	"m31labs.dev/buckley/v2/pkg/rules"
 )
 
 // defaultComplexitySignal returns a conservative default for when no arbiter

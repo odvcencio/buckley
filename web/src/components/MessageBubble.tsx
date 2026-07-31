@@ -147,6 +147,16 @@ export function MessageBubble({ message }: Props) {
         >
           {/* Content with proper prose styling */}
           <div className="message-markdown">
+			{message.reasoning ? (
+				<details className="mb-3 border-l-2 border-[var(--color-reasoning)] pl-3 text-left" open={isStreaming}>
+					<summary className="cursor-pointer select-none text-xs font-medium text-[var(--color-reasoning)]">Reasoning trace</summary>
+					<div className="mt-2 text-xs text-[var(--color-text-secondary)]">
+						<ReactMarkdown remarkPlugins={[remarkGfm, remarkBreaks]} skipHtml>
+							{message.reasoning}
+						</ReactMarkdown>
+					</div>
+				</details>
+			) : null}
             <ReactMarkdown
               remarkPlugins={[remarkGfm, remarkBreaks]}
               rehypePlugins={[rehypeHighlight]}

@@ -9,10 +9,10 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
-	"m31labs.dev/buckley/pkg/diffsignal"
-	"m31labs.dev/buckley/pkg/model"
-	"m31labs.dev/buckley/pkg/oneshot"
-	"m31labs.dev/buckley/pkg/rlm"
+	"m31labs.dev/buckley/v2/pkg/diffsignal"
+	"m31labs.dev/buckley/v2/pkg/model"
+	"m31labs.dev/buckley/v2/pkg/oneshot"
+	"m31labs.dev/buckley/v2/pkg/rlm"
 )
 
 func TestDefaultBranchContextOptions(t *testing.T) {
@@ -24,11 +24,24 @@ func TestDefaultBranchContextOptions(t *testing.T) {
 	assert.Empty(t, opts.BaseBranch)
 }
 
+func TestParseReviewAcceptsEquivalentUnbulletedEvidenceLabels(t *testing.T) {
+	review := `## Coverage
+**Feedback disposition**: ` + "`NONE_SUPPLIED`" + ` — no prior feedback was supplied.
+
+## Falsification
+**Conclusion**: DISPROVED (the evidence rules out the failure)
+`
+	parsed := ParseReview(review)
+	assert.Equal(t, FeedbackNoneSupplied, parsed.FeedbackDisposition)
+	assert.Equal(t, FalsificationDisproved, parsed.FalsificationConclusion)
+}
+
 func TestDefaultProjectContextOptions(t *testing.T) {
 	opts := DefaultProjectContextOptions()
 
-	assert.Equal(t, 3, opts.MaxTreeDepth)
+	assert.Equal(t, 2, opts.MaxTreeDepth)
 	assert.True(t, opts.IncludeAgents)
+	assert.True(t, opts.IncludeCanopy)
 }
 
 func TestReviewDefinitionsExposeOnlySnapshotReviewTools(t *testing.T) {
@@ -43,6 +56,7 @@ func TestReviewDefinitionsExposeOnlySnapshotReviewTools(t *testing.T) {
 	projectTools := (ReviewProjectDef{}).AllowedTools()
 	assert.Equal(t, []string{"read_file", "find_files", "search_text"}, projectTools)
 	assert.NotContains(t, projectTools, "run_verification")
+	assert.Equal(t, 8, (ReviewProjectDef{}).MaxRLMIterations())
 
 	for _, definition := range definitions {
 		t.Run(definition.name, func(t *testing.T) {
@@ -278,6 +292,34 @@ func TestBuildBranchPrompt_WithAgentsMD(t *testing.T) {
 	assert.Contains(t, prompt, "Follow these rules")
 }
 
+func TestBuildBranchPrompt_RepositoryPolicySuppressesHostTestPlan(t *testing.T) {
+	ctx := &BranchContext{
+		Branch:     "parser-fix",
+		BaseBranch: "main",
+		Files:      []FileChange{{Status: "M", Path: "parser.go"}},
+		Diff:       "some diff",
+		AgentsMD: `
+- Do not run repo-wide ` + "`go test ./...`" + ` on the host.
+- Focused package/unit tests inside Docker, scoped with ` + "`-run`" + ` whenever possible.
+`,
+	}
+	prompt := BuildBranchPrompt(ctx)
+	for _, want := range []string{
+		"## Repository Verification Constraints",
+		"require tests in Docker",
+		"Do not call it with `kind=test`",
+		"cannot lower the grade below B",
+		"Never substitute `go test ./...` or `go build ./...`",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("directive-aware prompt omitted %q:\n%s", want, prompt)
+		}
+	}
+	if strings.Contains(prompt, "## Required Local Verification Targets") {
+		t.Fatalf("prompt planned a prohibited host test:\n%s", prompt)
+	}
+}
+
 func TestBuildProjectPrompt(t *testing.T) {
 	ctx := &ProjectContext{
 		RepoRoot:  "/home/user/project",
@@ -408,6 +450,13 @@ func TestApprovedAPIReviewRequiresSuccessfulVerificationToolEvidence(t *testing.
 
 	execution.ToolCalls = []rlm.SubAgentToolCall{
 		{Name: "run_verification", Success: true, Data: map[string]any{
+			"kind": "test", "language": "go", "path": "pkg/oneshot/commands", "pattern": "", "status": "PASS", "exit_code": 0,
+		}},
+	}
+	assert.NoError(t, validateReviewExecutionEvidence(result, execution, changedFiles))
+
+	execution.ToolCalls = []rlm.SubAgentToolCall{
+		{Name: "run_verification", Success: true, Data: map[string]any{
 			"kind": "build", "language": "go", "path": "pkg/oneshot/commands", "pattern": "", "status": "PASS", "exit_code": 0,
 		}},
 		{Name: "run_verification", Success: false, Data: map[string]any{
@@ -443,7 +492,7 @@ func TestApprovedAPIReviewRequiresSuccessfulVerificationToolEvidence(t *testing.
 		},
 		{
 			Command:          `/bin/bash -lc 'go test ./pkg/oneshot/commands'`,
-			AggregatedOutput: "ok  m31labs.dev/buckley/pkg/oneshot/commands",
+			AggregatedOutput: "ok  m31labs.dev/buckley/v2/pkg/oneshot/commands",
 			ExitCode:         &exitZero,
 			Status:           "completed",
 			WorkingDirectory: "/snapshot",
@@ -455,6 +504,158 @@ func TestApprovedAPIReviewRequiresSuccessfulVerificationToolEvidence(t *testing.
 	result.Parsed.Approved = false
 	execution.ProviderID = "openai"
 	assert.NoError(t, validateReviewExecutionEvidence(result, execution, changedFiles))
+}
+
+func TestReviewExecutionRejectsTimeoutAsProvedFindingEvidence(t *testing.T) {
+	result := &ReviewRLMResult{Parsed: &ParsedReview{
+		Falsification:           "The focused test timed out, so serialization is broken.\n- **Conclusion**: PROVED",
+		FalsificationConclusion: FalsificationProved,
+		Findings: []Finding{{
+			ID:       "FINDING-001",
+			Title:    "Serialization is incomplete",
+			Evidence: "The focused round-trip test timed out.",
+		}},
+	}}
+	execution := &oneshot.RLMResult{
+		ProviderID: "openai",
+		ToolCalls: []rlm.SubAgentToolCall{{
+			Name:    "run_verification",
+			Success: false,
+			Result:  "verification timed out after 30s",
+			Data: map[string]any{
+				"status":   "UNAVAILABLE",
+				"evidence": "INCONCLUSIVE",
+				"error":    "verification timed out after 30s",
+			},
+		}},
+	}
+	assert.ErrorContains(t, validateReviewExecutionEvidence(result, execution, []string{"language.go"}), "inconclusive")
+
+	result.Parsed.Falsification = "Source tracing proves the changed decoder skips exported fields.\n- **Conclusion**: PROVED"
+	result.Parsed.Findings[0].Evidence = "The decoder returns before it visits the changed exported field."
+	assert.NoError(t, validateReviewExecutionEvidence(result, execution, []string{"language.go"}))
+}
+
+func TestReviewExecutionKeepsTimeoutNeutralForGradeAndFindings(t *testing.T) {
+	result := &ReviewRLMResult{Parsed: &ParsedReview{
+		Grade:                   GradeC,
+		BuildVerification:       VerificationPass,
+		TestVerification:        VerificationFail,
+		Falsification:           "The selected root test timed out.\n- **Conclusion**: UNRESOLVED",
+		FalsificationConclusion: FalsificationUnresolved,
+		Findings: []Finding{{
+			ID:       "FINDING-001",
+			Title:    "Test timeout blocks verification",
+			Evidence: "The focused root test timed out after 75 seconds.",
+			Impact:   "The review could not verify the parser change.",
+		}},
+	}}
+	execution := &oneshot.RLMResult{
+		ProviderID: "openai",
+		ToolCalls: []rlm.SubAgentToolCall{{
+			Name:    "run_verification",
+			Success: false,
+			Result:  "repository verification timed out after 75s",
+			Data: map[string]any{
+				"kind":     "test",
+				"status":   "UNAVAILABLE",
+				"evidence": "INCONCLUSIVE",
+				"error":    "verification timed out after 75s",
+			},
+		}},
+	}
+	err := validateReviewExecutionEvidence(result, execution, []string{"parser.go"})
+	assert.ErrorContains(t, err, "cannot be reported as FAIL")
+
+	result.Parsed.TestVerification = VerificationUnavailable
+	err = validateReviewExecutionEvidence(result, execution, []string{"parser.go"})
+	assert.ErrorContains(t, err, "product defect")
+
+	result.Parsed.Findings = nil
+	assert.NoError(t, validateReviewExecutionEvidence(result, execution, []string{"parser.go"}))
+}
+
+func TestReviewExecutionAllowsConfirmedTestFailure(t *testing.T) {
+	result := &ReviewRLMResult{Parsed: &ParsedReview{
+		TestVerification: VerificationFail,
+	}}
+	execution := &oneshot.RLMResult{
+		ProviderID: "openai",
+		ToolCalls: []rlm.SubAgentToolCall{{
+			Name:    "run_verification",
+			Success: false,
+			Result:  "focused assertion failed",
+			Data: map[string]any{
+				"kind":     "test",
+				"status":   "FAIL",
+				"evidence": "CONFIRMED_FAIL",
+			},
+		}},
+	}
+	assert.NoError(t, validateInconclusiveVerificationClaims(result.Parsed, execution))
+}
+
+func TestProceduralVerificationGapCannotProduceDefectGrade(t *testing.T) {
+	parsed := &ParsedReview{
+		Grade:                   GradeC,
+		BuildVerification:       VerificationUnavailable,
+		TestVerification:        VerificationUnavailable,
+		FalsificationConclusion: FalsificationUnresolved,
+	}
+	assert.ErrorContains(t, validateProceduralGateGrade(parsed), "requires Grade B")
+
+	parsed.Grade = GradeB
+	assert.NoError(t, validateProceduralGateGrade(parsed))
+
+	parsed.Verdict = "- **Approved**: NO\n- **Blockers**: missing verification"
+	assert.ErrorContains(t, validateProceduralGateGrade(parsed), "not a procedural blocker")
+	parsed.Verdict = "- **Approved**: NO\n- **Blockers**: NONE"
+	assert.NoError(t, validateProceduralGateGrade(parsed))
+
+	parsed.Grade = GradeC
+	parsed.BuildVerification = VerificationFail
+	assert.NoError(t, validateProceduralGateGrade(parsed))
+}
+
+func TestReviewPRDefSkipsDuplicateVerificationForAuthoritativeRemoteCI(t *testing.T) {
+	def := ReviewPRDef{
+		CIStatus:     "passing (8/8)",
+		CIProvenance: prCISourceHead,
+	}
+	for _, name := range def.AllowedTools() {
+		if name == "run_verification" {
+			t.Fatal("authoritative remote CI still exposed run_verification")
+		}
+	}
+	if !strings.Contains(def.SystemPrompt(), "run_verification tool is disabled") {
+		t.Fatal("system prompt did not explain the remote CI execution policy")
+	}
+	if !strings.Contains(def.SystemPrompt(), "Do not lower the grade or recommendation") {
+		t.Fatal("system prompt did not forbid penalties for disabled duplicate verification")
+	}
+
+	pending := ReviewPRDef{
+		CIStatus:     "pending (3/8)",
+		CIProvenance: prCISourceHead,
+	}
+	hasVerification := false
+	for _, name := range pending.AllowedTools() {
+		hasVerification = hasVerification || name == "run_verification"
+	}
+	if !hasVerification {
+		t.Fatal("pending CI removed focused verification")
+	}
+}
+
+func TestReviewVerificationTargetsListsChangedSourcePackages(t *testing.T) {
+	got := reviewVerificationTargets([]string{
+		"cmd/buckley/review.go",
+		"cmd/buckley/review_test.go",
+		"pkg/model/client.go",
+		"README.md",
+	})
+	want := []string{"go: cmd/buckley", "go: pkg/model"}
+	assert.Equal(t, want, got)
 }
 
 func TestApprovedPRDocumentationReviewUsesExactDiffLedgerInsteadOfUnrelatedCommands(t *testing.T) {
@@ -472,6 +673,33 @@ func TestApprovedPRDocumentationReviewUsesExactDiffLedgerInsteadOfUnrelatedComma
 
 	result.Parsed.CoverageEntries = result.Parsed.CoverageEntries[:1]
 	assert.ErrorContains(t, def.ValidateRLMExecution(result, nil), "documentation-only approval requires exact changed-file diff evidence")
+}
+
+func TestApprovedPRUsesAuthoritativeRemoteCIInsteadOfDuplicateLocalSuite(t *testing.T) {
+	result := &ReviewRLMResult{Parsed: &ParsedReview{Approved: true}}
+
+	for _, provenance := range []string{prCISourceHead, prCISourceBase} {
+		def := ReviewPRDef{
+			ChangedFiles: []string{"pkg/model/client.go"},
+			CIStatus:     "passing (4/4)",
+			CIProvenance: provenance,
+		}
+		assert.NoError(t, def.ValidateRLMExecution(result, nil))
+	}
+
+	pending := ReviewPRDef{
+		ChangedFiles: []string{"pkg/model/client.go"},
+		CIStatus:     "pending (3/4)",
+		CIProvenance: prCISourceHead,
+	}
+	assert.ErrorContains(t, pending.ValidateRLMExecution(result, nil), "missing execution evidence")
+
+	untrusted := ReviewPRDef{
+		ChangedFiles: []string{"pkg/model/client.go"},
+		CIStatus:     "passing (4/4)",
+		CIProvenance: "working tree",
+	}
+	assert.ErrorContains(t, untrusted.ValidateRLMExecution(result, nil), "missing execution evidence")
 }
 
 func TestReviewPRRuntimeAcceptsExactChangelogDocumentationLedger(t *testing.T) {
@@ -565,6 +793,79 @@ func TestReviewBranchDef_Interface(t *testing.T) {
 	assert.Equal(t, GradeA, rlmResult.Parsed.Grade)
 }
 
+func TestReviewResultCanonicalizationStripsAnalysisPreamble(t *testing.T) {
+	canonical := "## Grade: A\n\nLooks good"
+	response := `<think>
+I should inspect one more invariant before I answer.
+</think>
+
+The evidence is sufficient.
+
+` + canonical
+
+	for _, parse := range []struct {
+		name string
+		run  func(string) (any, error)
+	}{
+		{name: "branch", run: (ReviewBranchDef{}).ParseResult},
+		{name: "PR", run: (ReviewPRDef{}).ParseResult},
+	} {
+		t.Run(parse.name, func(t *testing.T) {
+			result, err := parse.run(response)
+			assert.NoError(t, err)
+			parsed, ok := result.(*ReviewRLMResult)
+			assert.True(t, ok)
+			assert.Equal(t, canonical, parsed.Review)
+			assert.Equal(t, canonical, parsed.Parsed.RawReview)
+		})
+	}
+}
+
+func TestReviewResultCanonicalizationRejectsInvalidSchemaBoundary(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		response string
+		want     string
+	}{
+		{
+			name:     "missing grade heading",
+			response: "Analysis complete.\n\n## Summary\nNo grade was supplied.",
+			want:     "missing a schema heading",
+		},
+		{
+			name: "grade heading only in a fence",
+			response: "Analysis complete.\n\n```markdown\n" +
+				"## Grade: A\n\n## Summary\nThis is an example.\n```\n",
+			want: "missing a schema heading",
+		},
+		{
+			name: "duplicate grade headings",
+			response: "Analysis complete.\n\n## Grade: A\n\n## Summary\nFirst.\n\n" +
+				"## Grade: A\n\n## Summary\nSecond.",
+			want: "exactly one schema grade heading",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := (ReviewPRDef{}).ParseResult(tt.response)
+			assert.Nil(t, result)
+			assert.ErrorContains(t, err, tt.want)
+		})
+	}
+}
+
+func TestReviewValidationRejectsNonCanonicalFinalEnvelope(t *testing.T) {
+	canonical := completeReviewWithCoverage("- **File**: `ratchet.go` — reviewed the exact changed file.\n" +
+		"- **Feedback disposition**: `NONE_SUPPLIED` — no prior feedback was supplied.\n" +
+		"- **Verification**: focused test passed.")
+	result := &ReviewRLMResult{
+		Review: "Raw analysis must not be posted.\n\n" + canonical,
+		Parsed: ParseReview(canonical),
+	}
+
+	err := (ReviewBranchDef{ChangedFiles: []string{"ratchet.go"}}).ValidateResult(result)
+	assert.ErrorContains(t, err, "must start with one schema heading")
+}
+
 func TestReviewProjectDef_Interface(t *testing.T) {
 	def := ReviewProjectDef{}
 
@@ -592,29 +893,44 @@ func TestReviewPRDef_Interface(t *testing.T) {
 	assert.NotContains(t, def.AllowedTools(), "write_file")
 }
 
-func TestApprovalReviewsRequireIndependentCritic(t *testing.T) {
+func TestApprovalCriticIsExplicitlyOptIn(t *testing.T) {
 	approval := completeReviewWithCoverage("- **File**: `ratchet.go` — reviewed the exact changed file and paired bound.\n" +
 		"- **Feedback disposition**: `NONE_SUPPLIED` — no prior feedback was supplied.\n" +
 		"- **Verification**: focused test passed.")
 
-	branch := ReviewBranchDef{ChangedFiles: []string{"ratchet.go"}}
+	branch := ReviewBranchDef{ChangedFiles: []string{"ratchet.go"}, ApprovalCritic: true}
 	branchResult, err := branch.ParseResult(approval)
 	assert.NoError(t, err)
 	assert.NoError(t, branch.ValidateResult(branchResult))
 	assert.True(t, branch.RequiresApprovalCritic(branchResult))
+	assert.False(t, (ReviewBranchDef{}).RequiresApprovalCritic(branchResult))
 	assert.Contains(t, branch.ApprovalCriticSystemPrompt(), "INDEPENDENT APPROVAL CRITIC ROLE")
 	branchCriticPrompt, err := branch.BuildApprovalCriticPrompt("ORIGINAL DIFF", branchResult)
 	assert.NoError(t, err)
 	assert.Contains(t, branchCriticPrompt, "ORIGINAL DIFF")
 	assert.Contains(t, branchCriticPrompt, approval)
+	assert.Contains(t, branchCriticPrompt, "Re-read relevant source with tools")
 	assert.Contains(t, branchCriticPrompt, "complete machine-validated review becomes the final result")
 
-	pr := ReviewPRDef{ChangedFiles: []string{"ratchet.go"}, CIStatus: "passing (1/1)", CIProvenance: prCISourceHead}
+	pr := ReviewPRDef{
+		ChangedFiles:   []string{"ratchet.go"},
+		CIStatus:       "passing (1/1)",
+		CIProvenance:   prCISourceHead,
+		ApprovalCritic: true,
+	}
 	prResult, err := pr.ParseResult(approval)
 	assert.NoError(t, err)
 	assert.NoError(t, pr.ValidateResult(prResult))
 	assert.True(t, pr.RequiresApprovalCritic(prResult))
+	pr.ApprovalCritic = false
+	assert.False(t, pr.RequiresApprovalCritic(prResult))
+	pr.ApprovalCritic = true
 	assert.Contains(t, pr.ApprovalCriticSystemPrompt(), "INDEPENDENT APPROVAL CRITIC ROLE")
+	prCriticPrompt, err := pr.BuildApprovalCriticPrompt("ORIGINAL DIFF", prResult)
+	assert.NoError(t, err)
+	assert.Contains(t, prCriticPrompt, "Use one direct evidence pass")
+	assert.Contains(t, prCriticPrompt, "Tools are unavailable")
+	assert.NotContains(t, prCriticPrompt, "Re-read relevant source with tools")
 
 	nonApproval := strings.Replace(approval, "## Grade: A", "## Grade: C", 1)
 	nonApproval = strings.Replace(nonApproval, "**Conclusion**: DISPROVED", "**Conclusion**: PROVED", 1)
@@ -703,6 +1019,42 @@ Code has issues.
 	assert.False(t, parsed.Approved)
 	assert.Equal(t, []string{"FINDING-001"}, parsed.Blockers)
 	assert.Equal(t, []string{"FINDING-002"}, parsed.Suggestions)
+}
+
+func TestExtractFileLineAcceptsMarkdownCodeLocations(t *testing.T) {
+	tests := []struct {
+		name     string
+		location string
+		wantFile string
+		wantLine int
+	}{
+		{
+			name:     "plain location",
+			location: "pkg/db/query.go:42",
+			wantFile: "pkg/db/query.go",
+			wantLine: 42,
+		},
+		{
+			name:     "code location with range",
+			location: "`cmd/buckley/review_pr_test.go:228-242`",
+			wantFile: "cmd/buckley/review_pr_test.go",
+			wantLine: 228,
+		},
+		{
+			name:     "code path with external line",
+			location: "`pkg/rlm/subagent.go`:362",
+			wantFile: "pkg/rlm/subagent.go",
+			wantLine: 362,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			file, line := extractFileLine("- **File**: " + test.location)
+			assert.Equal(t, test.wantFile, file)
+			assert.Equal(t, test.wantLine, line)
+		})
+	}
 }
 
 func TestParseVerdictApprovalRequiresOneExactNormalizedDecision(t *testing.T) {
@@ -804,7 +1156,7 @@ func TestReviewPRDefValidateResultAcceptsCompleteApproval(t *testing.T) {
 		RequiresFeedbackDisposition: true,
 		RequiredFeedbackIDs:         []string{"thread:PRRT_1"},
 	}
-	result, err := def.ParseResult(`## Grade: A
+	base := `## Grade: A
 
 ## Summary
 The paired ratchet is exact and the change is ready.
@@ -834,9 +1186,301 @@ None.
 ## Verdict
 - **Recommendation**: APPROVE
 - **Blockers**: None
-- **Suggestions**: None`)
+- **Suggestions**: None`
+	result, err := def.ParseResult(base)
 	assert.NoError(t, err)
 	assert.NoError(t, def.ValidateResult(result))
+
+	informationalFeedback := strings.Replace(
+		base,
+		"`ADDRESSED` — the empty-boundary test proves the requested fix.",
+		"`DISPOSITIONED` — the supplied comment is informational and requires no code change.",
+		1,
+	)
+	result, err = def.ParseResult(informationalFeedback)
+	assert.NoError(t, err)
+	assert.NoError(t, def.ValidateResult(result))
+}
+
+func TestReviewApprovalRequiresGradeAWithoutFindingsOrSuggestions(t *testing.T) {
+	coverage := "- **File**: `ratchet.go` — reviewed the changed bound and its consumer.\n" +
+		"- **Feedback disposition**: `NONE_SUPPLIED` — no prior feedback was supplied.\n" +
+		"- **Verification**: named remote checks passed."
+	def := ReviewPRDef{
+		ChangedFiles: []string{"ratchet.go"},
+		CIStatus:     "passing (1/1)",
+		CIProvenance: prCISourceHead,
+	}
+
+	gradeB := strings.Replace(completeReviewWithCoverage(coverage), "## Grade: A", "## Grade: B", 1)
+	result, err := def.ParseResult(gradeB)
+	assert.NoError(t, err)
+	assert.ErrorContains(t, def.ValidateResult(result), "grade is B instead of A")
+
+	withSuggestion := strings.Replace(
+		completeReviewWithCoverage(coverage),
+		"## Findings\nNone.",
+		`## Findings
+### FINDING-001: [MINOR] Document finish-reason mappings for future providers
+- **File**: ratchet.go:1
+- **Evidence**: The switch has no comment that claims support for other provider values.
+- **Business Impact**: Future provider maintenance could be easier.
+- **Fix**: Add unsupported provider mappings to a comment.`,
+		1,
+	)
+	withSuggestion = strings.Replace(withSuggestion, "**Suggestions**: None", "**Suggestions**: FINDING-001", 1)
+	result, err = def.ParseResult(withSuggestion)
+	assert.NoError(t, err)
+	validationErr := def.ValidateResult(result)
+	assert.ErrorContains(t, validationErr, "speculative or self-disproved evidence")
+}
+
+func TestReviewValidationRejectsNonDemonstratedFindings(t *testing.T) {
+	coverage := "- **File**: `ratchet.go` — reviewed the changed behavior.\n" +
+		"- **Feedback disposition**: `NONE_SUPPLIED` — no prior feedback was supplied.\n" +
+		"- **Verification**: named remote checks passed."
+	def := ReviewPRDef{
+		ChangedFiles: []string{"ratchet.go"},
+		CIStatus:     "passing (1/1)",
+		CIProvenance: prCISourceHead,
+	}
+
+	tests := []struct {
+		name    string
+		finding string
+		want    string
+	}{
+		{
+			name: "style",
+			finding: `### FINDING-001: [MINOR] ASD-STE100 prose violation
+- **File**: ratchet.go:1
+- **Evidence**: The sentence contains a three-word noun cluster.
+- **Business Impact**: The wording could slow future maintenance.
+- **Fix**: Rewrite the prose.`,
+			want: "reports prose or style",
+		},
+		{
+			name: "future-only",
+			finding: `### FINDING-001: [MINOR] Add another future fixture
+- **File**: ratchet.go:1
+- **Evidence**: Current tests disprove the risk, but a future provider could add another value.
+- **Business Impact**: Future provider maintenance could need another test.
+- **Fix**: Add a speculative fixture.`,
+			want: "speculative or self-disproved evidence",
+		},
+		{
+			name: "rename-only",
+			finding: `### FINDING-001: [MINOR] Private test hook can change
+- **File**: ratchet.go:1
+- **Evidence**: Any rename or signature change would fail at link time.
+- **Business Impact**: The test package must track the private API surface.
+- **Fix**: Add the hook to a linkage-contract list.`,
+			want: "speculative or self-disproved evidence",
+		},
+		{
+			name: "regeneration-only",
+			finding: `### FINDING-001: [MINOR] Generated name can drift
+- **File**: ratchet.go:1
+- **Evidence**: If the pinned grammars are regenerated, the symbol can rename.
+- **Business Impact**: The assertion could silently pass after regeneration.
+- **Fix**: Resolve the symbol at test initialization.`,
+			want: "speculative or self-disproved evidence",
+		},
+		{
+			name: "witness-drift-only",
+			finding: `### FINDING-001: [MINOR] Historical witness can drift
+- **File**: ratchet.go:1
+- **Evidence**: The current fixture is intentionally malformed.
+- **Business Impact**: If the witness no longer reaches the old branch, a regression can hide.
+- **Fix**: Add another historical fixture.`,
+			want: "speculative or self-disproved evidence",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			review := strings.Replace(completeReviewWithCoverage(coverage), "## Grade: A", "## Grade: B", 1)
+			review = strings.Replace(review, "## Findings\nNone.", "## Findings\n"+tc.finding, 1)
+			review = strings.Replace(review, "**Recommendation**: APPROVE", "**Recommendation**: NEEDS DISCUSSION", 1)
+			review = strings.Replace(review, "**Suggestions**: None", "**Suggestions**: FINDING-001", 1)
+
+			result, err := def.ParseResult(review)
+			assert.NoError(t, err)
+			assert.ErrorContains(t, def.ValidateResult(result), tc.want)
+		})
+	}
+}
+
+func TestReviewValidationRequiresProvedFalsificationForFindings(t *testing.T) {
+	coverage := "- **File**: `ratchet.go` — reviewed the changed behavior.\n" +
+		"- **Feedback disposition**: `NONE_SUPPLIED` — no prior feedback was supplied.\n" +
+		"- **Verification**: named remote checks passed."
+	def := ReviewPRDef{
+		ChangedFiles: []string{"ratchet.go"},
+		CIStatus:     "passing (1/1)",
+		CIProvenance: prCISourceHead,
+	}
+
+	withFinding := strings.Replace(completeReviewWithCoverage(coverage), "## Grade: A", "## Grade: B", 1)
+	withFinding = strings.Replace(withFinding, "## Findings\nNone.", `## Findings
+### FINDING-001: [MINOR] Empty input returns the wrong status
+- **File**: ratchet.go:1
+- **Evidence**: The changed empty branch returns success instead of the required unavailable status.
+- **Business Impact**: Callers accept an unavailable result.
+- **Fix**: Return the unavailable status.`, 1)
+	withFinding = strings.Replace(withFinding, "**Conclusion**: DISPROVED", "**Conclusion**: PROVED", 1)
+	withFinding = strings.Replace(withFinding, "**Recommendation**: APPROVE", "**Recommendation**: NEEDS DISCUSSION", 1)
+	withFinding = strings.Replace(withFinding, "**Suggestions**: None", "**Suggestions**: FINDING-001", 1)
+
+	result, err := def.ParseResult(withFinding)
+	assert.NoError(t, err)
+	assert.NoError(t, def.ValidateResult(result))
+
+	tests := []struct {
+		name       string
+		conclusion string
+	}{
+		{name: "disproved", conclusion: "DISPROVED"},
+		{name: "unresolved", conclusion: "UNRESOLVED"},
+		{name: "ambiguous", conclusion: "PROVED for one route, but UNRESOLVED for another"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			review := strings.Replace(
+				withFinding,
+				"**Conclusion**: PROVED",
+				"**Conclusion**: "+tc.conclusion,
+				1,
+			)
+			result, parseErr := def.ParseResult(review)
+			assert.NoError(t, parseErr)
+			assert.ErrorContains(
+				t,
+				def.ValidateResult(result),
+				"a non-empty Findings section requires a PROVED falsification conclusion",
+			)
+		})
+	}
+}
+
+func TestReviewValidationPreservesNoFindingsFalsificationOutcomes(t *testing.T) {
+	coverage := "- **File**: `ratchet.go` — reviewed the changed behavior.\n" +
+		"- **Feedback disposition**: `NONE_SUPPLIED` — no prior feedback was supplied.\n" +
+		"- **Verification**: named remote checks passed."
+	def := ReviewPRDef{
+		ChangedFiles: []string{"ratchet.go"},
+		CIStatus:     "passing (1/1)",
+		CIProvenance: prCISourceHead,
+	}
+
+	for _, conclusion := range []string{"PROVED", "DISPROVED", "UNRESOLVED"} {
+		t.Run(strings.ToLower(conclusion), func(t *testing.T) {
+			review := strings.Replace(completeReviewWithCoverage(coverage), "## Grade: A", "## Grade: B", 1)
+			review = strings.Replace(review, "**Conclusion**: DISPROVED", "**Conclusion**: "+conclusion, 1)
+			review = strings.Replace(review, "**Recommendation**: APPROVE", "**Recommendation**: NEEDS DISCUSSION", 1)
+
+			result, err := def.ParseResult(review)
+			assert.NoError(t, err)
+			assert.NoError(t, def.ValidateResult(result))
+		})
+	}
+}
+
+func TestReviewValidationReportsIndependentRepairProblemsTogether(t *testing.T) {
+	coverage := "- **File**: `ratchet.go` — reviewed the changed behavior.\n" +
+		"- **Feedback disposition**: `NONE_SUPPLIED` — no prior feedback was supplied.\n" +
+		"- **Verification**: named remote checks passed."
+	review := strings.Replace(completeReviewWithCoverage(coverage), "## Grade: A", "## Grade: B", 1)
+	review = strings.Replace(review, "**Conclusion**: DISPROVED", "**Conclusion**: CLEAN", 1)
+	review = strings.Replace(review, "## Findings\nNone.", `## Findings
+### FINDING-001: [MINOR] ASD-STE100 prose violation
+- **File**: ratchet.go:1
+- **Evidence**: The sentence contains a noun cluster.
+- **Business Impact**: The wording could slow future maintenance.
+- **Fix**: Rewrite the prose.`, 1)
+	review = strings.Replace(review, "**Recommendation**: APPROVE", "**Recommendation**: REQUEST CHANGES", 1)
+	review = strings.Replace(review, "**Blockers**: None", "**Blockers**: FINDING-001", 1)
+
+	def := ReviewPRDef{
+		ChangedFiles: []string{"ratchet.go"},
+		CIStatus:     "passing (1/1)",
+		CIProvenance: prCISourceHead,
+	}
+	result, err := def.ParseResult(review)
+	assert.NoError(t, err)
+	validationErr := def.ValidateResult(result)
+	assert.ErrorContains(t, validationErr, "Falsification conclusion")
+	assert.ErrorContains(t, validationErr, "MINOR finding FINDING-001 must be listed as a Suggestion")
+	assert.ErrorContains(t, validationErr, "reports prose or style")
+}
+
+func TestReviewValidationRequiresBlockerForRequestChanges(t *testing.T) {
+	coverage := "- **File**: `ratchet.go` — reviewed the changed behavior.\n" +
+		"- **Feedback disposition**: `NONE_SUPPLIED` — no prior feedback was supplied.\n" +
+		"- **Verification**: named remote checks passed."
+	review := strings.Replace(completeReviewWithCoverage(coverage), "## Grade: A", "## Grade: B", 1)
+	review = strings.Replace(review, "**Recommendation**: APPROVE", "**Recommendation**: REQUEST CHANGES", 1)
+
+	def := ReviewPRDef{
+		ChangedFiles: []string{"ratchet.go"},
+		CIStatus:     "passing (1/1)",
+		CIProvenance: prCISourceHead,
+	}
+	result, err := def.ParseResult(review)
+	assert.NoError(t, err)
+	assert.ErrorContains(t, def.ValidateResult(result), "REQUEST CHANGES requires a blocker")
+
+	discussion := strings.Replace(review, "**Recommendation**: REQUEST CHANGES", "**Recommendation**: NEEDS DISCUSSION", 1)
+	result, err = def.ParseResult(discussion)
+	assert.NoError(t, err)
+	assert.NoError(t, def.ValidateResult(result))
+
+	t.Run("pending CI requires discussion", func(t *testing.T) {
+		pendingReview := strings.ReplaceAll(review, "- Build: PASS", "- Build: PENDING")
+		pendingReview = strings.ReplaceAll(pendingReview, "- Tests: PASS", "- Tests: PENDING")
+		pendingDef := ReviewPRDef{
+			ChangedFiles: []string{"ratchet.go"},
+			CIStatus:     "pending (1/2)",
+			CIProvenance: prCISourceHead,
+		}
+		pendingResult, parseErr := pendingDef.ParseResult(pendingReview)
+		assert.NoError(t, parseErr)
+		assert.ErrorContains(
+			t,
+			pendingDef.ValidateResult(pendingResult),
+			"pending or unavailable CI alone requires NEEDS DISCUSSION",
+		)
+
+		pendingDiscussion := strings.Replace(
+			pendingReview,
+			"**Recommendation**: REQUEST CHANGES",
+			"**Recommendation**: NEEDS DISCUSSION",
+			1,
+		)
+		pendingResult, parseErr = pendingDef.ParseResult(pendingDiscussion)
+		assert.NoError(t, parseErr)
+		assert.NoError(t, pendingDef.ValidateResult(pendingResult))
+	})
+
+	t.Run("unresolved feedback permits request changes", func(t *testing.T) {
+		unresolved := strings.Replace(
+			review,
+			"`NONE_SUPPLIED` — no prior feedback was supplied.",
+			"`DISPOSITIONED` — verified the supplied feedback.\n"+
+				"- **Feedback**: `thread:PRRT_1` — `UNRESOLVED` — the requested regression test is still absent.",
+			1,
+		)
+		unresolvedDef := ReviewPRDef{
+			ChangedFiles:                []string{"ratchet.go"},
+			CIStatus:                    "passing (1/1)",
+			CIProvenance:                prCISourceHead,
+			RequiresFeedbackDisposition: true,
+			RequiredFeedbackIDs:         []string{"thread:PRRT_1"},
+		}
+		unresolvedResult, parseErr := unresolvedDef.ParseResult(unresolved)
+		assert.NoError(t, parseErr)
+		assert.NoError(t, unresolvedDef.ValidateResult(unresolvedResult))
+	})
 }
 
 func TestReviewCoverageLedgerUsesNormalizedExactPaths(t *testing.T) {
@@ -888,7 +1532,11 @@ func TestReviewCoverageLedgerRequiresExplicitFeedbackDisposition(t *testing.T) {
 }
 
 func TestReviewApprovalRequiresDisprovedFalsification(t *testing.T) {
-	def := ReviewPRDef{ChangedFiles: []string{"ratchet.go"}}
+	def := ReviewPRDef{
+		ChangedFiles: []string{"ratchet.go"},
+		CIStatus:     "passing (1/1)",
+		CIProvenance: prCISourceHead,
+	}
 	base := completeReviewWithCoverage("- **File**: `ratchet.go` — reviewed the exact changed file.\n" +
 		"- **Feedback disposition**: `NONE_SUPPLIED` — no prior feedback was supplied.\n" +
 		"- **Verification**: focused test passed.")
@@ -906,6 +1554,31 @@ func TestReviewApprovalRequiresDisprovedFalsification(t *testing.T) {
 	result, err := def.ParseResult(invalid)
 	assert.NoError(t, err)
 	assert.ErrorContains(t, def.ValidateResult(result), "Falsification conclusion")
+
+	for _, suffix := range []string{
+		" for the currently exercised routes",
+		". The focused failure was not reproduced.",
+	} {
+		review := strings.Replace(base, "**Conclusion**: DISPROVED", "**Conclusion**: DISPROVED"+suffix, 1)
+		result, err := def.ParseResult(review)
+		assert.NoError(t, err)
+		assert.NoError(t, def.ValidateResult(result))
+	}
+
+	ambiguous := strings.Replace(
+		base,
+		"**Conclusion**: DISPROVED",
+		"**Conclusion**: DISPROVED for one route, but UNRESOLVED for another",
+		1,
+	)
+	result, err = def.ParseResult(ambiguous)
+	assert.NoError(t, err)
+	assert.ErrorContains(t, def.ValidateResult(result), "Falsification conclusion")
+
+	plainLabel := strings.Replace(base, "**Conclusion**: DISPROVED", "Conclusion: DISPROVED", 1)
+	result, err = def.ParseResult(plainLabel)
+	assert.NoError(t, err)
+	assert.NoError(t, def.ValidateResult(result))
 }
 
 func completeReviewWithCoverage(coverage string) string {
@@ -996,13 +1669,17 @@ func TestReviewApprovalRequiresNormalizedPassingBuildAndTests(t *testing.T) {
 			review := strings.Replace(base, "- Build: PASS", "- Build: "+state, 1)
 			result, err := def.ParseResult(review)
 			assert.NoError(t, err)
-			assert.ErrorContains(t, def.ValidateResult(result), "requires Build status PASS")
+			validationErr := def.ValidateResult(result)
+			assert.ErrorContains(t, validationErr, "requires Build status PASS")
+			assert.Equal(t, state != "UNAVAILABLE", oneshot.IsRLMExecutionEvidenceRequired(validationErr))
 		})
 		t.Run("tests "+state, func(t *testing.T) {
 			review := strings.Replace(base, "- Tests: PASS", "- Tests: "+state, 1)
 			result, err := def.ParseResult(review)
 			assert.NoError(t, err)
-			assert.ErrorContains(t, def.ValidateResult(result), "requires Tests status PASS")
+			validationErr := def.ValidateResult(result)
+			assert.ErrorContains(t, validationErr, "requires Tests status PASS")
+			assert.Equal(t, state != "UNAVAILABLE", oneshot.IsRLMExecutionEvidenceRequired(validationErr))
 		})
 	}
 
@@ -1019,7 +1696,9 @@ func TestReviewApprovalRequiresNormalizedPassingBuildAndTests(t *testing.T) {
 			review := strings.Replace(base, tc.oldStatus, tc.newStatus, 1)
 			result, err := def.ParseResult(review)
 			assert.NoError(t, err)
-			assert.ErrorContains(t, def.ValidateResult(result), tc.wantMessage)
+			validationErr := def.ValidateResult(result)
+			assert.ErrorContains(t, validationErr, tc.wantMessage)
+			assert.False(t, oneshot.IsRLMExecutionEvidenceRequired(validationErr))
 		})
 	}
 }
@@ -1091,6 +1770,20 @@ func TestReviewFeedbackLedgerRequiresExactPerIDDisposition(t *testing.T) {
 		{ID: "thread:PRRT_1", Status: FeedbackAddressed, Evidence: "focused test proves the requested boundary fix."},
 		{ID: "review:123", Status: FeedbackDisputed, Evidence: "source trace proves the concern does not apply."},
 	}, result.(*ReviewRLMResult).Parsed.FeedbackEntries)
+
+	bareStatus := completeReviewWithCoverage(
+		fileLine + disposition +
+			"- **Feedback**: `thread:PRRT_1` — ADDRESSED — focused test proves the requested boundary fix.\n" +
+			"- **Feedback**: `review:123` — DISPUTED — source trace proves the concern does not apply.\n" +
+			verification,
+	)
+	result, err = def.ParseResult(bareStatus)
+	assert.NoError(t, err)
+	assert.Equal(t, []FeedbackEntry{
+		{ID: "thread:PRRT_1", Status: FeedbackAddressed, Evidence: "focused test proves the requested boundary fix."},
+		{ID: "review:123", Status: FeedbackDisputed, Evidence: "source trace proves the concern does not apply."},
+	}, result.(*ReviewRLMResult).Parsed.FeedbackEntries)
+	assert.NoError(t, def.ValidateResult(result))
 
 	tests := []struct {
 		name    string
@@ -1451,6 +2144,95 @@ func TestDetectBaseBranchPrefersRemoteTrackingBranch(t *testing.T) {
 
 	if got := detectBaseBranch(dir); got != "origin/main" {
 		t.Fatalf("detectBaseBranch() = %q, want origin/main", got)
+	}
+}
+
+func TestAssembleBranchContextPrefersAdvancedUpstreamForExplicitLocalBase(t *testing.T) {
+	dir := t.TempDir()
+	gitInCmd(t, dir, "init", "-q", "-b", "main")
+	if err := os.WriteFile(filepath.Join(dir, "base.txt"), []byte("base\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitInCmd(t, dir, "add", "base.txt")
+	gitInCmd(t, dir, "commit", "-m", "base")
+	staleLocalMain, err := resolveReviewCommit(dir, "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	gitInCmd(t, dir, "remote", "add", "origin", ".")
+	if err := os.WriteFile(filepath.Join(dir, "upstream.txt"), []byte("current upstream\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitInCmd(t, dir, "add", "upstream.txt")
+	gitInCmd(t, dir, "commit", "-m", "advance upstream")
+	gitInCmd(t, dir, "update-ref", "refs/remotes/origin/main", "HEAD")
+	currentUpstream, err := resolveReviewCommit(dir, "origin/main")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	gitInCmd(t, dir, "switch", "-c", "feature")
+	if err := os.WriteFile(filepath.Join(dir, "feature.txt"), []byte("feature\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitInCmd(t, dir, "add", "feature.txt")
+	gitInCmd(t, dir, "commit", "-m", "feature")
+	gitInCmd(t, dir, "update-ref", "refs/heads/main", staleLocalMain)
+	t.Chdir(dir)
+
+	ctx, audit, err := AssembleBranchContext(BranchContextOptions{
+		BaseBranch:   "main",
+		Scope:        ReviewScopeBranch,
+		MaxDiffBytes: 20_000,
+	})
+	if err != nil {
+		t.Fatalf("AssembleBranchContext: %v", err)
+	}
+	if ctx.BaseBranch != "origin/main" {
+		t.Fatalf("base branch = %q, want advanced upstream origin/main", ctx.BaseBranch)
+	}
+	if ctx.BaseCommit != currentUpstream {
+		t.Fatalf("base commit = %q, want upstream commit %q", ctx.BaseCommit, currentUpstream)
+	}
+	if len(ctx.Files) != 1 || ctx.Files[0].Path != "feature.txt" {
+		t.Fatalf("changed files = %#v, want only feature.txt", ctx.Files)
+	}
+	if strings.Contains(ctx.Diff, "upstream.txt") {
+		t.Fatalf("review diff included historical upstream change:\n%s", ctx.Diff)
+	}
+	var surfacedResolution bool
+	for _, source := range audit.Sources() {
+		if source.Name == "base branch (main -> origin/main; upstream ahead)" {
+			surfacedResolution = true
+			break
+		}
+	}
+	if !surfacedResolution {
+		t.Fatalf("context audit did not surface base resolution: %#v", audit.Sources())
+	}
+}
+
+func TestResolveBranchReviewBasePreservesLocalAheadAndExactRefs(t *testing.T) {
+	dir := t.TempDir()
+	gitInCmd(t, dir, "init", "-q", "-b", "main")
+	if err := os.WriteFile(filepath.Join(dir, "base.txt"), []byte("base\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitInCmd(t, dir, "add", "base.txt")
+	gitInCmd(t, dir, "commit", "-m", "base")
+	gitInCmd(t, dir, "update-ref", "refs/remotes/origin/main", "HEAD")
+
+	if err := os.WriteFile(filepath.Join(dir, "local.txt"), []byte("local ahead\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitInCmd(t, dir, "add", "local.txt")
+	gitInCmd(t, dir, "commit", "-m", "local ahead")
+
+	for _, requested := range []string{"main", "refs/heads/main", "origin/main", "HEAD"} {
+		if got := resolveBranchReviewBase(dir, requested); got != requested {
+			t.Fatalf("resolveBranchReviewBase(%q) = %q, want exact request", requested, got)
+		}
 	}
 }
 

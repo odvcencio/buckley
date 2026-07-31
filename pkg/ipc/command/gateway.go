@@ -1,12 +1,41 @@
 package command
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+
+	"github.com/oklog/ulid/v2"
+)
 
 // SessionCommand represents a high-level user instruction targeting a session.
 type SessionCommand struct {
 	SessionID string `json:"sessionId"`
+	ID        string `json:"commandId,omitempty"`
 	Type      string `json:"type"`
 	Content   string `json:"content"`
+}
+
+// EnsureID assigns the stable identity returned to clients and carried by
+// command lifecycle events.
+func (c *SessionCommand) EnsureID() string {
+	if c == nil {
+		return ""
+	}
+	c.ID = strings.TrimSpace(c.ID)
+	if c.ID == "" {
+		c.ID = strings.ToLower(ulid.Make().String())
+	}
+	return c.ID
+}
+
+// RequiresContent reports whether a command carries user-authored input.
+func RequiresContent(commandType string) bool {
+	switch strings.TrimSpace(commandType) {
+	case "input", "slash", "steer", "queue", "model":
+		return true
+	default:
+		return false
+	}
 }
 
 // Handler executes a session command.

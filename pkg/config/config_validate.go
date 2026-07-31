@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"m31labs.dev/buckley/pkg/sandbox"
+	"m31labs.dev/buckley/v2/pkg/sandbox"
 )
 
 // Validate checks configuration values for correctness and returns an error for any invalid settings.

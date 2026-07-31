@@ -3,7 +3,7 @@ package tui
 import (
 	"testing"
 
-	"m31labs.dev/buckley/pkg/ui/theme"
+	"m31labs.dev/fluffyui/theme"
 )
 
 func TestLayoutConstants(t *testing.T) {

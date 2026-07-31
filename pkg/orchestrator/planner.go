@@ -11,11 +11,11 @@ import (
 	"strings"
 	"time"
 
-	"m31labs.dev/buckley/pkg/config"
-	"m31labs.dev/buckley/pkg/model"
-	"m31labs.dev/buckley/pkg/personality"
-	"m31labs.dev/buckley/pkg/rules"
-	"m31labs.dev/buckley/pkg/storage"
+	"m31labs.dev/buckley/v2/pkg/config"
+	"m31labs.dev/buckley/v2/pkg/model"
+	"m31labs.dev/buckley/v2/pkg/personality"
+	"m31labs.dev/buckley/v2/pkg/rules"
+	"m31labs.dev/buckley/v2/pkg/storage"
 )
 
 type Planner struct {

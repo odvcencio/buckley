@@ -11,10 +11,10 @@ import (
 	"strings"
 	"time"
 
-	"m31labs.dev/buckley/pkg/oneshot"
-	"m31labs.dev/buckley/pkg/oneshot/commands"
-	"m31labs.dev/buckley/pkg/terminal"
-	"m31labs.dev/buckley/pkg/transparency"
+	"m31labs.dev/buckley/v2/pkg/oneshot"
+	"m31labs.dev/buckley/v2/pkg/oneshot/commands"
+	"m31labs.dev/buckley/v2/pkg/terminal"
+	"m31labs.dev/buckley/v2/pkg/transparency"
 )
 
 // scopedCommitDefinition wraps CommitDefinition and restricts diff/file

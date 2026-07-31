@@ -46,6 +46,8 @@ OUTPUT REQUIREMENTS (plain text only):
   - Match detail to the size of the diff using "Diff Summary" / "Diffstat" (small: 1–2 bullets; medium: 2–4; large: 4–7; huge: 6–12).
   - Do not paste diff hunks, stack traces, or exhaustive file lists.
 
+%s
+
 IF UNSURE:
 - If you cannot produce a confident message that follows the format, output this safe fallback:
   update(changes): staged changes
@@ -58,5 +60,5 @@ STYLE EXAMPLES (format only):
 - update(deps): refresh generated artifacts
 
 Current date/time: %s
-`, now.Format(time.RFC3339))
+`, ste100ProseBlock, now.Format(time.RFC3339))
 }

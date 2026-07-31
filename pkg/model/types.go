@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -192,6 +193,7 @@ type StreamChunk struct {
 	Model   string         `json:"model"`
 	Choices []StreamChoice `json:"choices"`
 	Usage   *Usage         `json:"usage,omitempty"` // Only present in final chunk
+	Error   *ErrorDetail   `json:"error,omitempty"` // OpenRouter may report mid-stream failures in-band
 }
 
 // StreamChoice represents a streaming choice
@@ -292,9 +294,68 @@ type FunctionCallDelta struct {
 
 // Usage tracks token consumption for a single request.
 type Usage struct {
-	PromptTokens     int `json:"prompt_tokens"`
-	CompletionTokens int `json:"completion_tokens"`
-	TotalTokens      int `json:"total_tokens"`
+	PromptTokens           int                     `json:"prompt_tokens"`
+	CompletionTokens       int                     `json:"completion_tokens"`
+	TotalTokens            int                     `json:"total_tokens"`
+	PromptTokensDetails    *PromptTokensDetails    `json:"prompt_tokens_details,omitempty"`
+	CompletionTokenDetails *CompletionTokenDetails `json:"completion_tokens_details,omitempty"`
+	CacheWriteTokens       int                     `json:"cache_write_tokens,omitempty"`
+}
+
+type PromptTokensDetails struct {
+	CachedTokens int `json:"cached_tokens,omitempty"`
+}
+
+type CompletionTokenDetails struct {
+	ReasoningTokens int `json:"reasoning_tokens,omitempty"`
+}
+
+// AddUsage combines provider usage without dropping cache or reasoning detail
+// fields when a harness makes several requests for one turn.
+func AddUsage(total Usage, next Usage) Usage {
+	total.PromptTokens += next.PromptTokens
+	total.CompletionTokens += next.CompletionTokens
+	total.TotalTokens += next.TotalTokens
+	total.CacheWriteTokens += next.CacheWriteTokens
+	if next.PromptTokensDetails != nil {
+		if total.PromptTokensDetails == nil {
+			total.PromptTokensDetails = &PromptTokensDetails{}
+		}
+		total.PromptTokensDetails.CachedTokens += next.PromptTokensDetails.CachedTokens
+	}
+	if next.CompletionTokenDetails != nil {
+		if total.CompletionTokenDetails == nil {
+			total.CompletionTokenDetails = &CompletionTokenDetails{}
+		}
+		total.CompletionTokenDetails.ReasoningTokens += next.CompletionTokenDetails.ReasoningTokens
+	}
+	return total
+}
+
+// RequestTokenEstimate describes the approximate model input footprint.
+type RequestTokenEstimate struct {
+	Messages int
+	Tools    int
+	Fixed    int
+	Total    int
+}
+
+// EstimateRequestTokens includes tool schemas and request controls, which the
+// conversation-only char/4 estimator historically missed.
+func EstimateRequestTokens(req ChatRequest) RequestTokenEstimate {
+	messages, _ := json.Marshal(req.Messages)
+	tools, _ := json.Marshal(req.Tools)
+	copyReq := req
+	copyReq.Messages = nil
+	copyReq.Tools = nil
+	fixed, _ := json.Marshal(copyReq)
+	estimate := RequestTokenEstimate{
+		Messages: len(messages) / 4,
+		Tools:    len(tools) / 4,
+		Fixed:    len(fixed) / 4,
+	}
+	estimate.Total = estimate.Messages + estimate.Tools + estimate.Fixed
+	return estimate
 }
 
 // ModelCatalog represents the list of available models
@@ -375,9 +436,36 @@ type ErrorResponse struct {
 
 // ErrorDetail contains error information
 type ErrorDetail struct {
-	Message string `json:"message"`
-	Type    string `json:"type"`
-	Code    string `json:"code"`
+	Message  string          `json:"message"`
+	Type     string          `json:"type"`
+	Code     string          `json:"code"`
+	Metadata json.RawMessage `json:"metadata,omitempty"`
+}
+
+// UnmarshalJSON accepts the string and numeric error codes used by
+// OpenRouter's regular and streaming error envelopes.
+func (e *ErrorDetail) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		Message  string          `json:"message"`
+		Type     string          `json:"type"`
+		Code     json.RawMessage `json:"code"`
+		Metadata json.RawMessage `json:"metadata"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	e.Message = raw.Message
+	e.Type = raw.Type
+	e.Metadata = append(e.Metadata[:0], raw.Metadata...)
+	e.Code = ""
+	if len(raw.Code) == 0 || string(raw.Code) == "null" {
+		return nil
+	}
+	if err := json.Unmarshal(raw.Code, &e.Code); err == nil {
+		return nil
+	}
+	e.Code = strings.TrimSpace(string(raw.Code))
+	return nil
 }
 
 // APIError represents a structured API error with retry information
@@ -386,16 +474,38 @@ type APIError struct {
 	Message    string
 	Type       string
 	Code       string
+	Provider   string
+	Details    string
+	RequestID  string
 	Retryable  bool
 	RetryAfter time.Duration
 }
 
 // Error implements the error interface
 func (e *APIError) Error() string {
+	message := fmt.Sprintf("HTTP %d: %s", e.StatusCode, e.Message)
 	if e.Type != "" && e.Code != "" {
-		return fmt.Sprintf("HTTP %d: %s (type: %s, code: %s)", e.StatusCode, e.Message, e.Type, e.Code)
+		message += fmt.Sprintf(" (type: %s, code: %s)", e.Type, e.Code)
 	}
-	return fmt.Sprintf("HTTP %d: %s", e.StatusCode, e.Message)
+
+	qualifiers := make([]string, 0, 3)
+	if e.Provider != "" {
+		qualifiers = append(qualifiers, "provider: "+e.Provider)
+	}
+	if e.RequestID != "" {
+		qualifiers = append(qualifiers, "request: "+e.RequestID)
+	}
+	if e.RetryAfter > 0 {
+		qualifiers = append(qualifiers, "retry after: "+e.RetryAfter.String())
+	}
+
+	if len(qualifiers) > 0 {
+		message += " (" + strings.Join(qualifiers, "; ") + ")"
+	}
+	if e.Details != "" && e.Details != e.Message {
+		message += ": " + e.Details
+	}
+	return message
 }
 
 // IsRateLimitError returns true if this is a rate limit error

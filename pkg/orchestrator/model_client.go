@@ -3,7 +3,7 @@ package orchestrator
 import (
 	"context"
 
-	"m31labs.dev/buckley/pkg/model"
+	"m31labs.dev/buckley/v2/pkg/model"
 )
 
 // ModelClient defines the subset of model.Manager capabilities the orchestrator needs.

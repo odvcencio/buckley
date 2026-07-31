@@ -7,6 +7,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.1.0] - 2026-07-29
+
+### Added
+- Pluggable, token-budgeted pull-request context providers with native Hyphae knowledge enrichment.
+- A Qwen 3.7 Plus review profile with adaptive thinking budgets and deterministic workflow-provenance analysis.
+
+### Changed
+- Buckbot curates supporting review context separately from protected diffs, immutable CI evidence, changed-file coverage, and feedback identifiers.
+- Pull-request shard cost projections account for curated provider and repository context.
+
+### Fixed
+- Manual release dispatches validate the checked-out tag commit rather than the workflow event SHA.
+- Review output limits preserve final-answer headroom in addition to provider reasoning tokens.
+- Schema-only repair attempts preserve demonstrated findings and their severity-based verdict disposition.
+
+## [2.0.0] - 2026-07-28
+
+### Breaking
+- The Go module and all import paths now use the semantic-import-versioned `m31labs.dev/buckley/v2` path.
+- Removed legacy UI import-path mirrors and obsolete shell-mode helpers. External UI integrations must migrate to the canonical `pkg/ui/...` surfaces or remain on v1.6.1 while migrating.
+- Consolidated terminal behavior around the current `pkg/ui/terminal`, `pkg/ui/tui`, and retained component APIs.
+
+### Added
+- Live OpenRouter catalog refresh and fuzzy model selection during an active chat.
+- Steering, queued input, interrupt handling, durable provider threads, and asynchronous subagent progress.
+- Canopy-first branch and project review context with compact prompts and repository-health reporting.
+- FluffyUI terminal rendering and an accepted staged path for a GoSX browser/desktop client.
+- Filesystem-discovered agent profiles, skills, named subagents, scoped tool tiers, and invocation previews.
+- Project chat-check suites with artifacts, JUnit reports, health checks, and scenario inspection.
+- Top-level `doctor`, `info`, and `skills` inspection surfaces with expanded agent initialization, discovery, and run workflows.
+- Sharded pull-request review with bounded concurrency, projected cost, full high-signal coverage, and a governed posting gate.
+
+### Changed
+- Interactive tool execution continues until completion while remaining sequential and visible as a persistent event stream.
+- Provider-supplied reasoning and tool results render as durable progress entries instead of transient status messages.
+- Project reviews use bounded structural sampling to reduce elapsed time and token spend.
+- Buckbot uses `qwen/qwen3.7-plus` with low, medium, or high reasoning selected from the governed change size.
+- `codex/auto` scales Buckbot from Luna to Terra to Sol as review size increases. Luna uses xhigh reasoning for small diffs. Sol uses medium reasoning to avoid a long latency tail. Exact model overrides remain fixed.
+- Pull request reviews stay local unless the caller uses `--post`.
+- One-shot commit, PR, and review flows use focused command surfaces with governed Codex and API backends.
+- The TUI, ACP, experiment, and task-workspace paths are split into smaller components while preserving behavior.
+- Terminal input, search, file-picker, status-bar, and chat wrapping are rune-aware.
+
+### Fixed
+- OpenRouter requests now gate optional fields by each model's advertised parameters.
+- Tool JSON schemas declare concrete nested item types accepted by Moonshot/Kimi providers.
+- Unrestricted one-shot sessions no longer collapse into an empty tool allowlist.
+- Task workspace discovery prefers the requested repository instead of an unrelated ancestor checkout.
+- Reviews now enforce hard model-call deadlines, stop evidence collection by change size, and reserve time for final synthesis.
+- Reviews now cap verification commands and prevent duplicate work before the command deadline.
+- Reviews now stop Canopy context collection when the review deadline expires.
+- GitHub reviews preserve valid line comments after one invalid comment rejects a batch.
+- GitHub reviews show Canopy structural metrics and collapse detailed evidence for easier scanning.
+- Pull-request context binds every operation to the resolved repository and immutable base/head revisions, validates exact changed-file manifests, and fails closed on incomplete CI evidence.
+- Oversized GitHub diffs reconstruct through the paginated files API, with explicit unavailable-file evidence and immutable local fallback for throttled requests.
+- Review repair preserves exact evidence, rejects speculative findings, bounds critic and verification work, and revalidates the target before posting.
+- Retry backoff cap coverage is deterministic rather than dependent on scheduler timing.
+
+### Release
+- Tag pushes and manual releases share strict semantic-tag, vanity-path, preflight, and post-install verification.
+
 ## [1.6.1] - 2026-06-17
 
 ### Fixed
@@ -130,7 +191,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Telemetry is local-only by default.
 - Plugin discovery limited to local paths only.
 
-[Unreleased]: https://github.com/odvcencio/buckley/compare/v1.6.1...HEAD
+[Unreleased]: https://github.com/odvcencio/buckley/compare/v2.1.0...HEAD
+[2.1.0]: https://github.com/odvcencio/buckley/compare/v2.0.0...v2.1.0
+[2.0.0]: https://github.com/odvcencio/buckley/compare/v1.6.1...v2.0.0
 [1.6.1]: https://github.com/odvcencio/buckley/compare/v1.6.0...v1.6.1
 [1.6.0]: https://github.com/odvcencio/buckley/compare/v1.5.0...v1.6.0
 [1.5.0]: https://github.com/odvcencio/buckley/compare/v1.4.1...v1.5.0

@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
-	"m31labs.dev/buckley/pkg/envdetect"
-	"m31labs.dev/buckley/pkg/tool"
+	"m31labs.dev/buckley/v2/pkg/envdetect"
+	"m31labs.dev/buckley/v2/pkg/tool"
 )
 
 // Validator handles pre-execution validation of tasks

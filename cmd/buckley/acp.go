@@ -13,17 +13,17 @@ import (
 	"sync"
 	"syscall"
 
-	"m31labs.dev/buckley/pkg/acp"
-	"m31labs.dev/buckley/pkg/config"
-	projectcontext "m31labs.dev/buckley/pkg/context"
-	"m31labs.dev/buckley/pkg/conversation"
-	"m31labs.dev/buckley/pkg/model"
-	"m31labs.dev/buckley/pkg/prompts"
-	"m31labs.dev/buckley/pkg/rules"
-	"m31labs.dev/buckley/pkg/skill"
-	"m31labs.dev/buckley/pkg/storage"
-	"m31labs.dev/buckley/pkg/tool"
-	"m31labs.dev/buckley/pkg/tool/builtin"
+	"m31labs.dev/buckley/v2/pkg/acp"
+	"m31labs.dev/buckley/v2/pkg/config"
+	projectcontext "m31labs.dev/buckley/v2/pkg/context"
+	"m31labs.dev/buckley/v2/pkg/conversation"
+	"m31labs.dev/buckley/v2/pkg/model"
+	"m31labs.dev/buckley/v2/pkg/prompts"
+	"m31labs.dev/buckley/v2/pkg/rules"
+	"m31labs.dev/buckley/v2/pkg/skill"
+	"m31labs.dev/buckley/v2/pkg/storage"
+	"m31labs.dev/buckley/v2/pkg/tool"
+	"m31labs.dev/buckley/v2/pkg/tool/builtin"
 )
 
 const defaultACPSystemPrompt = `You are Buckley, an AI development assistant with access to tools.
@@ -321,6 +321,7 @@ func getACPSessionState(
 	skillState := skill.NewRuntimeState(conv.AddSystemMessage)
 
 	registry := tool.NewRegistry()
+	tool.ApplyToolMiddlewareConfig(registry, cfg)
 	if err := registry.LoadDefaultPlugins(); err != nil && logf != nil {
 		logf("load plugins warning: %v", err)
 	}
@@ -337,6 +338,7 @@ func getACPSessionState(
 		createTool.SetWorkDir(workDir)
 	}
 	registry.Register(createTool)
+	registry.EnableDynamicDiscovery(nil)
 
 	// Wire todo persistence for the ACP session
 	registry.SetTodoStore(&acpTodoStoreAdapter{sessionID: session.ID})
@@ -616,6 +618,8 @@ func runACPLoop(
 	evaluator := newACPEvaluator(engine)
 	useTools := acpModelCanUseTools(registry, mgr, modelID)
 	nudgeCount := 0
+	finalizeNudgeCount := 0
+	toolsExecuted := false
 	lastPhase := ""
 	for {
 		if ctx.Err() != nil {
@@ -646,10 +650,21 @@ func runACPLoop(
 			if err != nil {
 				return "", err
 			}
+			if strings.TrimSpace(text) == "" && toolsExecuted {
+				if finalizeNudgeCount == 0 {
+					finalizeNudgeCount++
+					conv.AddUserMessage("Return the final answer now using the completed tool results. Do not leave the response empty.")
+					continue
+				}
+				return "", fmt.Errorf("model returned an empty final response after tool execution")
+			}
 			if shouldNudgeACPToolUse(useTools, toolTurn.Enabled, nudgeCount, text) {
 				nudgeCount++
 				conv.AddUserMessage("Use tools to take action now. Pick a tool and call it; do not answer with prose alone.")
 				continue
+			}
+			if strings.TrimSpace(text) == "" {
+				return "", fmt.Errorf("model returned an empty response")
 			}
 			sendACPPhaseUpdate(stream, lastPhase, "Finalizing response…")
 			conv.AddAssistantMessageWithReasoningDetails(text, msg.Reasoning, msg.ReasoningDetails)
@@ -659,7 +674,8 @@ func runACPLoop(
 		lastPhase = sendACPPhaseUpdate(stream, lastPhase, fmt.Sprintf("Executing %d tool call(s)…", len(msg.ToolCalls)))
 		normalizeACPToolCallIDs(msg.ToolCalls)
 		conv.AddToolCallMessageWithReasoning(msg.ToolCalls, msg.Reasoning, msg.ReasoningDetails)
-		lastPhase = executeACPToolCalls(conv, registry, stream, msg.ToolCalls, toolTurn.AllowedTools, lastPhase)
+		lastPhase = executeACPToolCalls(ctx, conv, registry, stream, msg.ToolCalls, toolTurn.AllowedTools, lastPhase)
+		toolsExecuted = true
 	}
 }
 
@@ -719,21 +735,31 @@ func buildACPToolTurn(registry *tool.Registry, skillState *skill.RuntimeState, e
 func buildACPChatRequest(cfg *config.Config, mgr *model.Manager, engine *rules.Engine, conv *conversation.Conversation, modelID string, turn acpToolTurn) model.ChatRequest {
 	req := model.ChatRequest{
 		Model:     modelID,
-		Messages:  conv.ToModelMessages(),
+		Messages:  conv.ToEfficientModelMessages(),
 		SessionID: conv.SessionID,
 	}
 	if turn.UseTools {
 		req.Tools = turn.Tools
 		req.ToolChoice = "auto"
+		if mgr != nil && mgr.SupportsParameter(modelID, "parallel_tool_calls") {
+			sequential := false
+			req.ParallelToolCalls = &sequential
+		}
 	}
 	if effort := model.ResolveReasoningEffort(cfg, acpReasoningChecker(mgr), engine, modelID, "execution"); effort != "" {
 		req.Reasoning = &model.ReasoningConfig{Effort: effort}
 	}
+	contextWindow := 0
+	if mgr != nil {
+		contextWindow, _ = mgr.GetContextLength(modelID)
+	}
+	req.Messages = conversation.CompactModelMessagesForRequest(req.Messages, req, contextWindow)
 	return req
 }
 
 func shouldNudgeACPToolUse(useTools, toolsEnabled bool, nudgeCount int, text string) bool {
-	return useTools && toolsEnabled && nudgeCount < acpMaxToolNudges && shouldNudgeForTools(text)
+	return useTools && toolsEnabled && nudgeCount < acpMaxToolNudges &&
+		(strings.TrimSpace(text) == "" || shouldNudgeForTools(text))
 }
 
 func normalizeACPToolCallIDs(calls []model.ToolCall) {
@@ -744,8 +770,11 @@ func normalizeACPToolCallIDs(calls []model.ToolCall) {
 	}
 }
 
-func executeACPToolCalls(conv *conversation.Conversation, registry *tool.Registry, stream acp.StreamFunc, calls []model.ToolCall, allowedTools []string, lastPhase string) string {
+func executeACPToolCalls(ctx context.Context, conv *conversation.Conversation, registry *tool.Registry, stream acp.StreamFunc, calls []model.ToolCall, allowedTools []string, lastPhase string) string {
 	for i, tc := range calls {
+		if ctx.Err() != nil {
+			return lastPhase
+		}
 		params, err := parseACPToolParams(tc.Function.Arguments)
 		if err != nil {
 			rawParams := map[string]any{"raw": tc.Function.Arguments}
@@ -771,7 +800,7 @@ func executeACPToolCalls(conv *conversation.Conversation, registry *tool.Registr
 			continue
 		}
 
-		result, execErr := executeACPToolCall(registry, tc.Function.Name, params, tc.ID)
+		result, execErr := executeACPToolCall(ctx, registry, tc.Function.Name, params, tc.ID)
 		toolText := formatACPToolResult(result, execErr)
 		displayText := formatACPToolDisplay(result, execErr)
 		conv.AddToolResponseMessage(tc.ID, tc.Function.Name, toolText)
@@ -1061,7 +1090,7 @@ func isToolUnsupportedError(err error) bool {
 	return false
 }
 
-func executeACPToolCall(registry *tool.Registry, name string, params map[string]any, callID string) (*builtin.Result, error) {
+func executeACPToolCall(ctx context.Context, registry *tool.Registry, name string, params map[string]any, callID string) (*builtin.Result, error) {
 	if registry == nil {
 		return nil, fmt.Errorf("tool registry unavailable")
 	}
@@ -1071,7 +1100,7 @@ func executeACPToolCall(registry *tool.Registry, name string, params map[string]
 	if callID != "" {
 		params[tool.ToolCallIDParam] = callID
 	}
-	return registry.Execute(name, params)
+	return registry.ExecuteWithContext(ctx, name, params)
 }
 
 func formatACPToolResult(result *builtin.Result, err error) string {

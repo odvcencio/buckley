@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"m31labs.dev/buckley/pkg/tool/builtin"
 	"go.uber.org/mock/gomock"
+	"m31labs.dev/buckley/v2/pkg/tool/builtin"
 )
 
 func TestDefaultActivityGroupingConfig(t *testing.T) {

@@ -1,134 +1,80 @@
 name: Release
 
-# Temporarily manual-only while GitHub Actions minutes are exhausted.
-# Re-enable tag-push triggers for the OSS launch gate.
 on:
+  push:
+    tags: ['v*']
   workflow_dispatch:
     inputs:
       tag:
-        description: "Git tag to release (e.g. v1.0.0)"
+        description: "Git tag to release (e.g. v2.0.1)"
         required: true
         type: string
-      full:
-        description: "Build/sign containers and SBOMs"
-        required: false
-        default: false
-        type: boolean
 
 permissions:
   contents: write
-  packages: write
-  id-token: write
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
 
 jobs:
   release:
     name: Release
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
-          ref: ${{ inputs.tag }}
+          ref: ${{ inputs.tag || github.ref_name }}
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
-          go-version: '1.25'
+          go-version-file: go.mod
           cache: true
-
-      - name: Install release tooling (syft, cosign)
-        if: ${{ inputs.full }}
-        run: |
-          set -euo pipefail
-          go install github.com/anchore/syft/cmd/syft@v1.38.2
-          go install github.com/sigstore/cosign/v2/cmd/cosign@v2.6.1
-          echo "$HOME/go/bin" >> "$GITHUB_PATH"
 
       - name: Set up Bun
         uses: oven-sh/setup-bun@v2
         with:
           bun-version: '1.2.21'
 
-      - name: Set up Docker Buildx
-        if: ${{ inputs.full }}
-        uses: docker/setup-buildx-action@v3
+      - name: Validate release tag
+        run: |
+          set -euo pipefail
+          if [[ ! "${RELEASE_TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "release tag must be semantic versioning: ${RELEASE_TAG}" >&2
+            exit 1
+          fi
+          test "$(git describe --tags --exact-match)" = "${RELEASE_TAG}"
+          test "$(go list -m)" = "m31labs.dev/buckley/v2"
+          git merge-base --is-ancestor HEAD "origin/main"
+          ./scripts/check-release.sh "${RELEASE_TAG}"
 
-      - name: Log in to GitHub Container Registry
-        if: ${{ inputs.full }}
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Run GoReleaser
-        if: ${{ !inputs.full }}
-        uses: goreleaser/goreleaser-action@v6
+      - name: Publish GitHub release
+        uses: goreleaser/goreleaser-action@v7
         with:
           distribution: goreleaser
           version: v2.13.1
           args: release --clean --skip=docker
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GORELEASER_DISABLE_SCM: "false"
 
-      - name: Run GoReleaser with containers
-        if: ${{ inputs.full }}
-        uses: goreleaser/goreleaser-action@v6
-        with:
-          distribution: goreleaser
-          version: v2.13.1
-          args: release --clean
+      - name: Verify module installation
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Generate SBOMs (source + container)
-        if: ${{ inputs.full }}
+          GOPROXY: direct
+          GONOSUMDB: m31labs.dev
         run: |
           set -euo pipefail
-          tag="${{ inputs.tag }}"
-          version="${tag#v}"
-          mkdir -p dist
-          syft dir:. -o cyclonedx-json=dist/sbom-source.cdx.json
-          syft "ghcr.io/${GITHUB_REPOSITORY_OWNER}/buckley:${version}" -o cyclonedx-json=dist/sbom-image.cdx.json
-
-      - name: Sign checksums + SBOMs (keyless)
-        if: ${{ inputs.full }}
-        env:
-          COSIGN_YES: "true"
-        run: |
-          set -euo pipefail
-          cosign sign-blob dist/checksums.txt \
-            --output-signature dist/checksums.txt.sig \
-            --output-certificate dist/checksums.txt.pem
-          cosign sign-blob dist/sbom-source.cdx.json \
-            --output-signature dist/sbom-source.cdx.json.sig \
-            --output-certificate dist/sbom-source.cdx.json.pem
-          cosign sign-blob dist/sbom-image.cdx.json \
-            --output-signature dist/sbom-image.cdx.json.sig \
-            --output-certificate dist/sbom-image.cdx.json.pem
-
-      - name: Sign container image (keyless)
-        if: ${{ inputs.full }}
-        env:
-          COSIGN_YES: "true"
-        run: |
-          set -euo pipefail
-          tag="${{ inputs.tag }}"
-          version="${tag#v}"
-          cosign sign "ghcr.io/${GITHUB_REPOSITORY_OWNER}/buckley:${version}"
-          if [[ "$version" != *-* ]]; then
-            cosign sign "ghcr.io/${GITHUB_REPOSITORY_OWNER}/buckley:latest"
-          fi
-
-      - name: Upload signatures + SBOMs to GitHub Release
-        if: ${{ inputs.full }}
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          tag="${{ inputs.tag }}"
-          gh release upload "${tag}" \
-            dist/checksums.txt.sig dist/checksums.txt.pem \
-            dist/sbom-source.cdx.json dist/sbom-source.cdx.json.sig dist/sbom-source.cdx.json.pem \
-            dist/sbom-image.cdx.json dist/sbom-image.cdx.json.sig dist/sbom-image.cdx.json.pem \
-            --clobber
+          for attempt in 1 2 3; do
+            if go install "m31labs.dev/buckley/v2/cmd/buckley@${RELEASE_TAG}"; then
+              buckley version
+              exit 0
+            fi
+            sleep 5
+          done
+          exit 1

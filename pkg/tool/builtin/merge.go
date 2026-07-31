@@ -21,9 +21,8 @@ func (t *ListMergeConflictsTool) Description() string {
 
 func (t *ListMergeConflictsTool) Parameters() ParameterSchema {
 	return ParameterSchema{
-		Type:       "object",
-		Properties: map[string]PropertySchema{},
-		Required:   []string{},
+		Type:                 "object",
+		AdditionalProperties: false,
 	}
 }
 

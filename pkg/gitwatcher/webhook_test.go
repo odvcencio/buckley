@@ -174,6 +174,40 @@ func TestHandler_NotMerged(t *testing.T) {
 	}
 }
 
+func TestPullRequestHandler_ReviewableRevision(t *testing.T) {
+	events := make(chan PullRequestEvent, 1)
+	handler := NewPullRequestHandler("", func(event PullRequestEvent) { events <- event })
+	payload := []byte(`{"action":"synchronize","number":42,"repository":{"full_name":"owner/repo"},"pull_request":{"draft":false,"head":{"sha":"deadbeef"}}}`)
+	req := httptest.NewRequest(http.MethodPost, "/webhook", bytes.NewReader(payload))
+	req.Header.Set("X-GitHub-Event", "pull_request")
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+	select {
+	case event := <-events:
+		if event.Repository != "owner/repo" || event.Number != 42 || event.HeadSHA != "deadbeef" {
+			t.Fatalf("unexpected event: %+v", event)
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("expected reviewable pull request callback")
+	}
+}
+
+func TestPullRequestHandler_SkipsDraft(t *testing.T) {
+	events := make(chan PullRequestEvent, 1)
+	handler := NewPullRequestHandler("", func(event PullRequestEvent) { events <- event })
+	payload := []byte(`{"action":"opened","number":42,"repository":{"full_name":"owner/repo"},"pull_request":{"draft":true,"head":{"sha":"deadbeef"}}}`)
+	req := httptest.NewRequest(http.MethodPost, "/webhook", bytes.NewReader(payload))
+	req.Header.Set("X-GitHub-Event", "pull_request")
+
+	handler.ServeHTTP(httptest.NewRecorder(), req)
+	select {
+	case <-events:
+		t.Fatal("draft PR must not be reviewed")
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
 func TestValidateSignature_Valid(t *testing.T) {
 	payload := []byte("test payload")
 	secret := "mysecret"

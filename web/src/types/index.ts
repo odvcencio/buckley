@@ -155,6 +155,7 @@ export interface DisplayMessage {
   content: string
   timestamp: string
   streaming?: boolean
+	reasoning?: string
 }
 
 // Storage-layer message shape (used by older handlers and some RPC payloads).
@@ -220,7 +221,7 @@ export interface ConversationState {
 // Command types for sending to backend
 export interface SessionCommand {
   sessionId: string
-  type: 'input' | 'slash' | 'approval'
+  type: 'input' | 'slash' | 'approval' | 'steer' | 'queue' | 'interrupt' | 'model'
   content: string
 }
 

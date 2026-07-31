@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"strings"
 
-	"m31labs.dev/buckley/pkg/commitmsg"
-	"m31labs.dev/buckley/pkg/oneshot"
-	"m31labs.dev/buckley/pkg/tools"
+	"m31labs.dev/buckley/v2/pkg/commitmsg"
+	"m31labs.dev/buckley/v2/pkg/oneshot"
+	"m31labs.dev/buckley/v2/pkg/tools"
 )
 
 // commitActions are the allowed action verbs for commits.
@@ -47,7 +47,7 @@ func (cr CommitResult) Header() string {
 func (cr CommitResult) Format() string {
 	msg := cr.Header() + "\n\n"
 	for _, bullet := range cr.Body {
-		msg += "- " + commitmsg.NeutralizeCloseDirectives(bullet) + "\n"
+		msg += "- " + commitmsg.NeutralizeCloseDirectives(trimBulletMarker(bullet)) + "\n"
 	}
 	if cr.Breaking {
 		msg += "\nBREAKING CHANGE: " + cr.Subject + "\n"

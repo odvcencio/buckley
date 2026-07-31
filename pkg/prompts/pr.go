@@ -50,6 +50,8 @@ BODY RULES:
   - Testing (if unknown, use: "Not run (not requested)")
   - Notes / Risks (migrations, config changes, rollouts, breaking changes, follow-ups)
 
+%s
+
 Current date/time: %s
-`, now.Format(time.RFC3339))
+`, ste100ProseBlock, now.Format(time.RFC3339))
 }

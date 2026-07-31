@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strings"
 
-	"m31labs.dev/buckley/pkg/model"
+	"m31labs.dev/buckley/v2/pkg/model"
 )
 
 // SummaryInput provides the raw turns for summary generation.

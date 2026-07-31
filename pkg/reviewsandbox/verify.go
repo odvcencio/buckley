@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -42,10 +43,12 @@ const (
 )
 
 const (
-	defaultTimeout   = 5 * time.Minute
-	maximumTimeout   = 15 * time.Minute
-	defaultMaxOutput = 256 * 1024
-	maximumMaxOutput = 2 * 1024 * 1024
+	defaultTimeout              = 5 * time.Minute
+	maximumTimeout              = 15 * time.Minute
+	defaultMaxOutput            = 256 * 1024
+	maximumMaxOutput            = 2 * 1024 * 1024
+	maximumPatternBytes         = 4096
+	verificationProcessWaitTime = 2 * time.Second
 )
 
 type Request struct {
@@ -101,6 +104,9 @@ type Executor struct {
 	run          commandRunner
 	tempDir      func(string, string) (string, error)
 	removeAll    func(string) error
+	reuseRuntime bool
+	runtimeMu    sync.Mutex
+	runtimeDir   string
 }
 
 func NewExecutor() *Executor {
@@ -117,6 +123,29 @@ func NewExecutorWithCodexCommand(command string) *Executor {
 		tempDir:      os.MkdirTemp,
 		removeAll:    os.RemoveAll,
 	}
+}
+
+// NewSessionExecutorWithCodexCommand reuses one private build runtime until
+// Close. This lets verification calls share safe compiler caches.
+func NewSessionExecutorWithCodexCommand(command string) *Executor {
+	executor := NewExecutorWithCodexCommand(command)
+	executor.reuseRuntime = true
+	return executor
+}
+
+// Close removes a session executor's private build runtime.
+func (e *Executor) Close() error {
+	if e == nil {
+		return nil
+	}
+	e.runtimeMu.Lock()
+	runtimeDir := e.runtimeDir
+	e.runtimeDir = ""
+	e.runtimeMu.Unlock()
+	if runtimeDir == "" || e.removeAll == nil {
+		return nil
+	}
+	return e.removeAll(runtimeDir)
 }
 
 func (e *Executor) Verify(parent context.Context, request Request) Result {
@@ -186,16 +215,12 @@ func (e *Executor) Verify(parent context.Context, request Request) Result {
 		codex = canonical
 	}
 
-	runtimeDir, err := e.tempDir("", "buckley-review-verification-*")
+	runtimeDir, cleanupRuntime, err := e.prepareRuntime()
 	if err != nil {
 		result.Error = fmt.Sprintf("create private verification runtime: %v", err)
 		return result
 	}
-	defer func() { _ = e.removeAll(runtimeDir) }()
-	if err := PrepareRuntime(runtimeDir); err != nil {
-		result.Error = fmt.Sprintf("prepare private verification runtime: %v", err)
-		return result
-	}
+	defer cleanupRuntime()
 
 	timeout := request.Timeout
 	if timeout <= 0 {
@@ -261,7 +286,7 @@ func (e *Executor) Verify(parent context.Context, request Request) Result {
 	if runErr != nil {
 		if errors.Is(runErr, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			result.ExitCode = 124
-			result.Status = StatusFail
+			result.Status = StatusUnavailable
 			result.Error = fmt.Sprintf("verification timed out after %s", timeout)
 			return result
 		}
@@ -295,6 +320,36 @@ func (e *Executor) Verify(parent context.Context, request Request) Result {
 	return result
 }
 
+func (e *Executor) prepareRuntime() (string, func(), error) {
+	if !e.reuseRuntime {
+		runtimeDir, err := e.tempDir("", "buckley-review-verification-*")
+		if err != nil {
+			return "", func() {}, err
+		}
+		if err := PrepareRuntime(runtimeDir); err != nil {
+			_ = e.removeAll(runtimeDir)
+			return "", func() {}, err
+		}
+		return runtimeDir, func() { _ = e.removeAll(runtimeDir) }, nil
+	}
+
+	e.runtimeMu.Lock()
+	defer e.runtimeMu.Unlock()
+	if e.runtimeDir != "" {
+		return e.runtimeDir, func() {}, nil
+	}
+	runtimeDir, err := e.tempDir("", "buckley-review-verification-*")
+	if err != nil {
+		return "", func() {}, err
+	}
+	if err := PrepareRuntime(runtimeDir); err != nil {
+		_ = e.removeAll(runtimeDir)
+		return "", func() {}, err
+	}
+	e.runtimeDir = runtimeDir
+	return runtimeDir, func() {}, nil
+}
+
 func verificationOutputShowsNoTests(language Language, output string) bool {
 	lower := strings.ToLower(output)
 	for _, marker := range []string{
@@ -324,7 +379,7 @@ func verificationPlan(kind Kind, language Language, pattern, workDir string) (pl
 		return plan{}, fmt.Errorf("verification kind must be build, test, or check")
 	}
 	pattern = strings.TrimSpace(pattern)
-	if len(pattern) > 256 || strings.ContainsRune(pattern, 0) || strings.HasPrefix(pattern, "-") {
+	if len(pattern) > maximumPatternBytes || strings.ContainsRune(pattern, 0) || strings.HasPrefix(pattern, "-") {
 		return plan{}, fmt.Errorf("verification pattern is invalid")
 	}
 	if kind != KindTest && pattern != "" {
@@ -339,7 +394,7 @@ func verificationPlan(kind Kind, language Language, pattern, workDir string) (pl
 		case KindTest:
 			args := []string{"test", "-count=1"}
 			if pattern != "" {
-				args = append(args, "-v", "-run", pattern)
+				args = append(args, "-v", "-run", anchorGoTestPattern(pattern))
 			}
 			return plan{"go", append(args, ".")}, nil
 		case KindCheck:
@@ -382,6 +437,14 @@ func verificationPlan(kind Kind, language Language, pattern, workDir string) (pl
 		return plan{"npm", args}, nil
 	}
 	return plan{}, fmt.Errorf("verification language %q is unsupported", language)
+}
+
+func anchorGoTestPattern(pattern string) string {
+	parts := strings.Split(pattern, "/")
+	for index, part := range parts {
+		parts[index] = "^(" + part + ")$"
+	}
+	return strings.Join(parts, "/")
 }
 
 func resolveSnapshotDirectory(snapshotRoot, requested string) (string, string, error) {
@@ -480,6 +543,7 @@ func runCommand(ctx context.Context, invocation commandInvocation, maxOutput int
 	cmd.Env = append([]string(nil), invocation.Env...)
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
+	cmd.WaitDelay = verificationProcessWaitTime
 	err := cmd.Run()
 	exitCode := 0
 	if err != nil {

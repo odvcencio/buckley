@@ -12,8 +12,8 @@ package orchestrator
 import (
 	reflect "reflect"
 
-	"m31labs.dev/buckley/pkg/skill"
 	gomock "go.uber.org/mock/gomock"
+	"m31labs.dev/buckley/v2/pkg/skill"
 )
 
 // MockSkillRegistry is a mock of SkillRegistry interface.

@@ -177,7 +177,7 @@ func categorizeToolCall(call ToolCall) ToolCategory {
 	}
 
 	// Shell commands
-	if strings.Contains(name, "shell") || strings.Contains(name, "bash") || strings.Contains(name, "exec") || name == "run_shell" {
+	if strings.Contains(name, "shell") || strings.Contains(name, "bash") || strings.Contains(name, "exec") || name == "run_shell" || name == "run_code" {
 		return CategoryShell
 	}
 

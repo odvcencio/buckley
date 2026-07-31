@@ -5,7 +5,65 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"m31labs.dev/buckley/v2/pkg/reviewpolicy"
 )
+
+func appendReviewVerificationTargets(sb *strings.Builder, changedFiles []string, agentsMD string) {
+	targets := reviewVerificationTargets(changedFiles)
+	if sb == nil {
+		return
+	}
+	constraints := reviewpolicy.ParseVerificationConstraints(agentsMD)
+	appendReviewVerificationConstraints(sb, constraints)
+	if len(targets) == 0 || constraints.TestsRequireContainer {
+		return
+	}
+	sb.WriteString("## Required Local Verification Targets\n\n")
+	sb.WriteString("For each Go target, call `run_verification` once with `kind=test`; that call supplies build and test evidence. Do not use `kind=build` because it does not execute tests. For other languages, call both kinds. Use each exact language and repository-relative path.\n\n")
+	for _, target := range targets {
+		sb.WriteString("- ")
+		sb.WriteString(target)
+		sb.WriteString("\n")
+	}
+	sb.WriteString("\n")
+}
+
+func appendReviewVerificationConstraints(sb *strings.Builder, constraints reviewpolicy.VerificationConstraints) {
+	if sb == nil || (!constraints.TestsRequireContainer && !constraints.ForbidHostRepoWideGo) {
+		return
+	}
+	sb.WriteString("## Repository Verification Constraints\n\n")
+	if constraints.TestsRequireContainer {
+		sb.WriteString("- Project directives require tests in Docker or a dedicated container.\n")
+		sb.WriteString("- The host `run_verification` tool cannot satisfy that requirement. Do not call it with `kind=test`.\n")
+		sb.WriteString("- Use supplied immutable test evidence when present. Otherwise report Tests as UNAVAILABLE.\n")
+		sb.WriteString("- Missing container evidence is a review limitation. It is not a product defect and cannot lower the grade below B.\n")
+	}
+	if constraints.ForbidHostRepoWideGo {
+		sb.WriteString("- Project directives forbid repo-wide Go commands on the host. Never substitute `go test ./...` or `go build ./...`.\n")
+	}
+	sb.WriteString("\n")
+}
+
+func reviewVerificationTargets(changedFiles []string) []string {
+	seen := make(map[string]struct{})
+	for _, file := range changedFiles {
+		file = normalizeReviewEvidencePath(file)
+		language := reviewChangedFileLanguage(file)
+		if file == "" || language == "" {
+			continue
+		}
+		target := language + ": " + filepath.ToSlash(filepath.Dir(file))
+		seen[target] = struct{}{}
+	}
+	targets := make([]string, 0, len(seen))
+	for target := range seen {
+		targets = append(targets, target)
+	}
+	sort.Strings(targets)
+	return targets
+}
 
 func validateReviewEvidenceCoverage(changedFiles []string, evidence []reviewCommandEvidenceDetails) error {
 	required := make(map[string][]string)
@@ -29,6 +87,9 @@ func validateReviewEvidenceCoverage(changedFiles []string, evidence []reviewComm
 				byLanguage[item.Language] = make(map[string]bool)
 			}
 			byLanguage[item.Language][item.Kind] = true
+			if item.Language == "go" && item.Kind == reviewEvidenceTest {
+				byLanguage[item.Language][reviewEvidenceBuild] = true
+			}
 		}
 		for _, kinds := range byLanguage {
 			if kinds[reviewEvidenceBuild] && kinds[reviewEvidenceTest] {
@@ -83,7 +144,9 @@ func reviewEvidenceCoversRepositoryRoot(item reviewCommandEvidenceDetails) bool 
 func reviewEvidenceCoversFile(evidence []reviewCommandEvidenceDetails, language, kind, file string) bool {
 	fileDir := filepath.ToSlash(filepath.Dir(file))
 	for _, item := range evidence {
-		if item.Kind != kind || item.Language != language {
+		kindMatches := item.Kind == kind ||
+			(language == "go" && kind == reviewEvidenceBuild && item.Kind == reviewEvidenceTest)
+		if !kindMatches || item.Language != language {
 			continue
 		}
 		for _, target := range item.Targets {

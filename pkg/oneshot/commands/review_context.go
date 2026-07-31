@@ -13,9 +13,9 @@ import (
 	"strconv"
 	"strings"
 
-	"m31labs.dev/buckley/pkg/diffsignal"
-	"m31labs.dev/buckley/pkg/model"
-	"m31labs.dev/buckley/pkg/transparency"
+	"m31labs.dev/buckley/v2/pkg/diffsignal"
+	"m31labs.dev/buckley/v2/pkg/model"
+	"m31labs.dev/buckley/v2/pkg/transparency"
 )
 
 const (
@@ -43,6 +43,8 @@ type BranchContext struct {
 	ContextIncomplete bool
 	RecentLog         string
 	AgentsMD          string
+	CanopyReview      string
+	CanopyStatus      string
 }
 
 // ProjectContext contains context for project review.
@@ -56,6 +58,8 @@ type ProjectContext struct {
 	ReadmeMD          string
 	AgentsMD          string
 	RecentLog         string
+	CanopySummary     string
+	CanopyStatus      string
 	ContextIncomplete bool
 }
 
@@ -80,12 +84,14 @@ func (ds DiffStats) TotalChanges() int {
 
 // BranchContextOptions configures branch context assembly.
 type BranchContextOptions struct {
+	Context         context.Context
 	MaxDiffBytes    int
 	IncludeUnstaged bool
 	// UntrackedPaths explicitly allowlists repository-relative untracked text
 	// paths for model input. Callers must obtain clear user authorization.
 	UntrackedPaths []string
 	IncludeAgents  bool
+	IncludeCanopy  bool
 	BaseBranch     string
 	Scope          string
 	// CapturedUntracked is immutable worktree evidence supplied by the review
@@ -101,6 +107,7 @@ func DefaultBranchContextOptions() BranchContextOptions {
 		MaxDiffBytes:    diffsignal.ReviewDiffBudget,
 		IncludeUnstaged: true,
 		IncludeAgents:   true,
+		IncludeCanopy:   true,
 		BaseBranch:      "",
 		Scope:           ReviewScopeWorktree,
 	}
@@ -108,15 +115,18 @@ func DefaultBranchContextOptions() BranchContextOptions {
 
 // ProjectContextOptions configures project context assembly.
 type ProjectContextOptions struct {
+	Context       context.Context
 	MaxTreeDepth  int
 	IncludeAgents bool
+	IncludeCanopy bool
 }
 
 // DefaultProjectContextOptions returns sensible defaults.
 func DefaultProjectContextOptions() ProjectContextOptions {
 	return ProjectContextOptions{
-		MaxTreeDepth:  3,
+		MaxTreeDepth:  2,
 		IncludeAgents: true,
+		IncludeCanopy: true,
 	}
 }
 
@@ -148,9 +158,10 @@ func AssembleBranchContext(opts BranchContextOptions) (*BranchContext, *transpar
 	}
 	audit.Add("review scope", reviewEstimateTokens(ctx.Scope))
 
-	ctx.BaseBranch = opts.BaseBranch
-	if ctx.BaseBranch == "" && ctx.Scope != ReviewScopeChanges {
-		ctx.BaseBranch = detectBaseBranch(ctx.RepoRoot)
+	requestedBaseBranch := strings.TrimSpace(opts.BaseBranch)
+	ctx.BaseBranch = requestedBaseBranch
+	if ctx.Scope != ReviewScopeChanges {
+		ctx.BaseBranch = resolveBranchReviewBase(ctx.RepoRoot, ctx.BaseBranch)
 	}
 	if ctx.Scope == ReviewScopeChanges {
 		ctx.BaseBranch = "(local changes)"
@@ -162,7 +173,11 @@ func AssembleBranchContext(opts BranchContextOptions) (*BranchContext, *transpar
 		}
 	}
 	if ctx.BaseBranch != "" {
-		audit.Add("base branch", reviewEstimateTokens(ctx.BaseBranch))
+		auditName := "base branch"
+		if requestedBaseBranch != "" && ctx.BaseBranch != requestedBaseBranch {
+			auditName = fmt.Sprintf("base branch (%s -> %s; upstream ahead)", requestedBaseBranch, ctx.BaseBranch)
+		}
+		audit.Add(auditName, reviewEstimateTokens(ctx.BaseBranch))
 	}
 	if ctx.BaseCommit != "" {
 		audit.Add("base commit", reviewEstimateTokens(ctx.BaseCommit))
@@ -284,9 +299,22 @@ func AssembleBranchContext(opts BranchContextOptions) (*BranchContext, *transpar
 		}
 	}
 
-	logArgs := []string{"log", "--oneline", "-20", ctx.HeadCommit}
+	enrichBranchReviewContext(opts, ctx, audit)
+
+	return ctx, audit, nil
+}
+
+func enrichBranchReviewContext(opts BranchContextOptions, ctx *BranchContext, audit *transparency.ContextAudit) {
+	if opts.IncludeCanopy {
+		ctx.CanopyReview, ctx.CanopyStatus = collectCanopyReview(opts.Context, ctx.RepoRoot, ctx.BaseCommit)
+		if ctx.CanopyReview != "" {
+			audit.Add("canopy structural review", reviewEstimateTokens(ctx.CanopyReview))
+		}
+	}
+
+	logArgs := []string{"log", "--oneline", "--max-count=10", ctx.HeadCommit}
 	if ctx.Scope != ReviewScopeChanges {
-		logArgs = []string{"log", "--oneline", "-20", ctx.BaseCommit + ".." + ctx.HeadCommit}
+		logArgs = []string{"log", "--oneline", "--max-count=10", ctx.BaseCommit + ".." + ctx.HeadCommit}
 	}
 	log, _ := reviewGitOutputAt(ctx.RepoRoot, logArgs...)
 	if strings.TrimSpace(log) != "" {
@@ -303,8 +331,6 @@ func AssembleBranchContext(opts BranchContextOptions) (*BranchContext, *transpar
 			audit,
 		)
 	}
-
-	return ctx, audit, nil
 }
 
 // AssembleProjectContext gathers context for project review.
@@ -367,7 +393,7 @@ func AssembleProjectContext(opts ProjectContextOptions) (*ProjectContext, *trans
 		audit.Add("package.json", reviewEstimateTokens(content))
 	}
 
-	if content, truncated, readErr := readTrackedProjectFile(ctx.RepoRoot, tracked, "README.md", 20_000); readErr != nil {
+	if content, truncated, readErr := readTrackedProjectFile(ctx.RepoRoot, tracked, "README.md", 8_000); readErr != nil {
 		ctx.ContextIncomplete = true
 		audit.Add("README.md (unavailable)", 0)
 	} else if truncated {
@@ -391,7 +417,16 @@ func AssembleProjectContext(opts ProjectContextOptions) (*ProjectContext, *trans
 		ctx.ContextIncomplete = ctx.ContextIncomplete || incomplete
 	}
 
-	log, _ := reviewGitOutputAt(ctx.RepoRoot, "log", "--oneline", "-30", ctx.HeadCommit)
+	if opts.IncludeCanopy {
+		ctx.CanopySummary, ctx.CanopyStatus = collectCanopyProjectSummary(opts.Context, ctx.RepoRoot)
+		if ctx.CanopySummary != "" {
+			audit.Add("Canopy project summary", reviewEstimateTokens(ctx.CanopySummary))
+		} else {
+			audit.Add("Canopy project summary ("+ctx.CanopyStatus+")", 0)
+		}
+	}
+
+	log, _ := reviewGitOutputAt(ctx.RepoRoot, "log", "--oneline", "--max-count=5", ctx.HeadCommit)
 	if strings.TrimSpace(log) != "" {
 		ctx.RecentLog = log
 		audit.Add("recent commits", reviewEstimateTokens(log))
@@ -440,6 +475,21 @@ func BuildBranchPrompt(ctx *BranchContext) string {
 		sb.WriteString(fmt.Sprintf("%s\t%s\n", f.Status, f.Path))
 	}
 	sb.WriteString("```\n\n")
+	changedPaths := make([]string, 0, len(ctx.Files))
+	for _, file := range ctx.Files {
+		changedPaths = append(changedPaths, file.Path)
+	}
+	appendReviewVerificationTargets(&sb, changedPaths, ctx.AgentsMD)
+
+	if ctx.CanopyReview != "" {
+		sb.WriteString("## Primary Structural Review (Canopy)\n\n")
+		sb.WriteString("Use this diff-scoped structural evidence before opening additional files. Validate findings against the supplied diff and snapshot tools.\n\n")
+		sb.WriteString("```json\n")
+		sb.WriteString(ctx.CanopyReview)
+		sb.WriteString("\n```\n\n")
+	} else if ctx.CanopyStatus != "" {
+		sb.WriteString("- **Canopy**: unavailable for this snapshot (" + ctx.CanopyStatus + ")\n\n")
+	}
 
 	sb.WriteString("## Full Diff\n\n")
 	sb.WriteString("```diff\n")
@@ -494,6 +544,17 @@ func BuildProjectPrompt(ctx *ProjectContext) string {
 		sb.WriteString("\n```\n\n")
 	}
 
+	if ctx.CanopySummary != "" {
+		sb.WriteString("## Primary Project Health Map (Canopy)\n\n")
+		sb.WriteString("Use this structural baseline to choose a small number of high-value inspections. Do not rescan the repository file-by-file.\n\n")
+		sb.WriteString("- **Source status**: " + ctx.CanopyStatus + "\n\n")
+		sb.WriteString("```json\n")
+		sb.WriteString(ctx.CanopySummary)
+		sb.WriteString("\n```\n\n")
+	} else if ctx.CanopyStatus != "" {
+		sb.WriteString("- **Canopy**: unavailable (" + ctx.CanopyStatus + ")\n\n")
+	}
+
 	if ctx.GoMod != "" {
 		sb.WriteString("## go.mod\n\n")
 		sb.WriteString("```\n")
@@ -545,6 +606,47 @@ func detectBaseBranch(root string) string {
 		return "master"
 	}
 	return "main"
+}
+
+// resolveBranchReviewBase protects explicit short branch names from stale local
+// refs. When the corresponding remote-tracking branch is strictly ahead,
+// review the ref that represents the current integration base. Fully-qualified
+// refs and immutable revisions remain exact escape hatches.
+func resolveBranchReviewBase(root, requested string) string {
+	requested = strings.TrimSpace(requested)
+	if requested == "" {
+		return detectBaseBranch(root)
+	}
+
+	localRef := "refs/heads/" + requested
+	localCommit, err := resolveReviewCommit(root, localRef)
+	if err != nil {
+		return requested
+	}
+
+	upstream, err := reviewGitOutputAt(
+		root,
+		"for-each-ref",
+		"--format=%(upstream:short)",
+		"--count=1",
+		localRef,
+	)
+	if err != nil {
+		return requested
+	}
+	upstream = strings.TrimSpace(upstream)
+	if upstream == "" {
+		upstream = "origin/" + requested
+	}
+
+	upstreamCommit, err := resolveReviewCommit(root, upstream)
+	if err != nil || upstreamCommit == localCommit {
+		return requested
+	}
+	if _, err := reviewGitOutputAt(root, "merge-base", "--is-ancestor", localCommit, upstreamCommit); err != nil {
+		return requested
+	}
+	return upstream
 }
 
 func parseNameStatus(output string) []FileChange {

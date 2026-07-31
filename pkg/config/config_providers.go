@@ -98,7 +98,7 @@ func (c *Config) replaceModelIfDefault(field *string, fallback string) {
 
 func isOpenRouterDefaultModel(modelID string) bool {
 	switch strings.TrimSpace(modelID) {
-	case defaultOpenRouterChatModel, defaultOpenRouterUtilityModel, legacyOpenRouterChatModel, legacyOpenRouterModel:
+	case defaultOpenRouterChatModel, defaultOpenRouterUtilityModel, defaultOpenRouterCommitModel, legacyOpenRouterChatModel, legacyOpenRouterModel:
 		return true
 	default:
 		return false

@@ -88,6 +88,55 @@ export async function listProjectFiles(prefix = '', limit = 60, signal?: AbortSi
   return Array.isArray(payload.files) ? payload.files : []
 }
 
+export type ModelOption = {
+  id: string
+  name: string
+  description?: string
+  contextLength?: number
+  supportedParameters?: string[]
+}
+
+export async function listModels(refresh = false, signal?: AbortSignal): Promise<{ models: ModelOption[]; warning?: string }> {
+  const url = new URL('/api/models', window.location.origin)
+  if (refresh) url.searchParams.set('refresh', '1')
+  const resp = await fetch(url.toString(), {
+    method: 'GET',
+    headers: createAuthHeaders(),
+    signal,
+  })
+  if (!resp.ok) {
+    throw new ApiError(resp.status, `list models failed: ${resp.status} ${await readErrorText(resp)}`)
+  }
+  const payload = (await resp.json()) as {
+    models?: Array<{
+      id?: unknown
+      name?: unknown
+      description?: unknown
+      context_length?: unknown
+      supported_parameters?: unknown
+    }>
+    warning?: unknown
+  }
+  const models = Array.isArray(payload.models)
+    ? payload.models.flatMap((entry) => {
+        if (typeof entry.id !== 'string' || entry.id.trim() === '') return []
+        return [{
+          id: entry.id,
+          name: typeof entry.name === 'string' && entry.name.trim() !== '' ? entry.name : entry.id,
+          description: typeof entry.description === 'string' ? entry.description : undefined,
+          contextLength: typeof entry.context_length === 'number' ? entry.context_length : undefined,
+          supportedParameters: Array.isArray(entry.supported_parameters)
+            ? entry.supported_parameters.filter((value): value is string => typeof value === 'string')
+            : undefined,
+        }]
+      })
+    : []
+  return {
+    models,
+    warning: typeof payload.warning === 'string' && payload.warning.trim() !== '' ? payload.warning : undefined,
+  }
+}
+
 export type APITokenRecord = {
   id: string
   name: string

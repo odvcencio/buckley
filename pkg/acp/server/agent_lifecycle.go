@@ -3,11 +3,11 @@ package server
 import (
 	"context"
 
-	acppb "m31labs.dev/buckley/pkg/acp/proto"
-	"m31labs.dev/buckley/pkg/coordination/coordinator"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/emptypb"
+	acppb "m31labs.dev/buckley/v2/pkg/acp/proto"
+	"m31labs.dev/buckley/v2/pkg/coordination/coordinator"
 )
 
 // RegisterAgent handles agent registration requests

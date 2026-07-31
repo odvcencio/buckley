@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"m31labs.dev/buckley/pkg/tool"
-	"m31labs.dev/buckley/pkg/tool/builtin"
+	"m31labs.dev/buckley/v2/pkg/tool"
+	"m31labs.dev/buckley/v2/pkg/tool/builtin"
 )
 
 func TestNewConditionWaiter(t *testing.T) {

@@ -7,8 +7,8 @@ import (
 	"regexp"
 	"strings"
 
-	"m31labs.dev/buckley/pkg/skill"
 	"gopkg.in/yaml.v3"
+	"m31labs.dev/buckley/v2/pkg/skill"
 )
 
 // CreateSkillTool writes a new SKILL.md into the project or personal skill directory.

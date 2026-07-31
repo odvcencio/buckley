@@ -4,7 +4,7 @@ import (
 	"strings"
 	"time"
 
-	"m31labs.dev/buckley/pkg/personality"
+	"m31labs.dev/buckley/v2/pkg/personality"
 )
 
 // Phase represents a workflow phase

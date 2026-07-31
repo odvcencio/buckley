@@ -3,7 +3,7 @@ package commands
 import (
 	"testing"
 
-	"m31labs.dev/buckley/pkg/model"
+	"m31labs.dev/buckley/v2/pkg/model"
 )
 
 func TestClassifyReviewCommandEvidence(t *testing.T) {

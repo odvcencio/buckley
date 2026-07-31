@@ -5,7 +5,7 @@ import (
 	"net"
 	"strings"
 
-	"m31labs.dev/buckley/pkg/sandbox"
+	"m31labs.dev/buckley/v2/pkg/sandbox"
 )
 
 func isLoopbackBindAddress(addr string) bool {

@@ -7,12 +7,12 @@ import (
 	"testing"
 	"time"
 
-	pb "m31labs.dev/buckley/pkg/acp/proto"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	pb "m31labs.dev/buckley/v2/pkg/acp/proto"
 )
 
 // mockAgentCommunicationClient is a mock implementation of the gRPC client

@@ -6,11 +6,11 @@ import (
 	"strings"
 	"time"
 
-	"m31labs.dev/buckley/pkg/model"
-	"m31labs.dev/buckley/pkg/rlm"
-	"m31labs.dev/buckley/pkg/tool"
-	"m31labs.dev/buckley/pkg/tool/builtin"
-	"m31labs.dev/buckley/pkg/transparency"
+	"m31labs.dev/buckley/v2/pkg/model"
+	"m31labs.dev/buckley/v2/pkg/rlm"
+	"m31labs.dev/buckley/v2/pkg/tool"
+	"m31labs.dev/buckley/v2/pkg/tool/builtin"
+	"m31labs.dev/buckley/v2/pkg/transparency"
 )
 
 // RLMRunner executes oneshot tasks using the full RLM tool ecosystem.
@@ -49,6 +49,12 @@ type RLMResult struct {
 	// Response is the final text response
 	Response string
 
+	// Incomplete reports that execution ended before a final model response.
+	Incomplete bool
+
+	// FinishReason records why the provider stopped the final model turn.
+	FinishReason string
+
 	// ToolCalls lists all tools that were called
 	ToolCalls []rlm.SubAgentToolCall
 
@@ -84,7 +90,7 @@ func (r *RLMRunner) Run(ctx context.Context, systemPrompt, task string, allowedT
 	if r.models == nil {
 		return nil, fmt.Errorf("model manager required")
 	}
-	if r.modelID == "" {
+	if r.modelID == "" && strings.TrimSpace(opts.ModelID) == "" {
 		return nil, fmt.Errorf("model ID required")
 	}
 
@@ -92,11 +98,15 @@ func (r *RLMRunner) Run(ctx context.Context, systemPrompt, task string, allowedT
 	traceID := fmt.Sprintf("rlm-%d", time.Now().UnixNano())
 
 	// Determine model for sub-agent
-	modelToUse := r.modelID
+	modelToUse := strings.TrimSpace(opts.ModelID)
+	if modelToUse == "" {
+		modelToUse = r.modelID
+	}
 	providerID := r.models.ProviderIDForModel(modelToUse)
 	agentRegistry := r.registry
 	snapshotWorkDir := ""
 	cleanupSnapshot := func() {}
+	closeAgentRegistry := false
 	if opts.ReviewSnapshot != nil {
 		if providerID == "codex" || strings.HasPrefix(modelToUse, "codex/") {
 			// Codex uses its native shell in a separately materialized workspace;
@@ -113,24 +123,46 @@ func (r *RLMRunner) Run(ctx context.Context, systemPrompt, task string, allowedT
 				cleanupSnapshot()
 				return nil, fmt.Errorf("resolve API review snapshot root: %w", rootErr)
 			}
-			agentRegistry, err = newReviewSnapshotRegistry(snapshotRoot, allowedTools, r.models.ReviewSandboxCommand())
+			agentRegistry, err = newReviewSnapshotRegistryWithLimits(
+				snapshotRoot,
+				allowedTools,
+				opts.VerificationTimeout,
+				r.models.ReviewSandboxCommand(),
+			)
 			if err != nil {
 				cleanupSnapshot()
 				return nil, err
 			}
+			closeAgentRegistry = true
 		}
 	}
 	defer cleanupSnapshot()
+	if closeAgentRegistry {
+		defer func() { _ = agentRegistry.Close() }()
+	}
 
 	// Create sub-agent configuration
+	reasoningEffort := r.reasoning
+	if override := normalizeRLMReasoningEffort(opts.ReasoningEffort); override != "" {
+		reasoningEffort = override
+	}
+	maxCostUSD := effectiveRLMMaxCostUSD(providerID, opts.MaxCostUSD)
 	agentCfg := rlm.SubAgentInstanceConfig{
-		ID:             fmt.Sprintf("oneshot-%d", time.Now().UnixNano()),
-		Model:          modelToUse,
-		Reasoning:      r.reasoning,
-		SystemPrompt:   systemPrompt,
-		MaxIterations:  25, // Allow more iterations for complex tasks
-		AllowedTools:   allowedTools,
-		ReviewSnapshot: opts.ReviewSnapshot,
+		ID:                   fmt.Sprintf("oneshot-%d", time.Now().UnixNano()),
+		Model:                modelToUse,
+		Reasoning:            reasoningEffort,
+		ReasoningMaxTokens:   opts.ReasoningMaxTokens,
+		MaxOutputTokens:      reviewRLMOutputTokenLimit(opts.ReasoningMaxTokens),
+		SystemPrompt:         systemPrompt,
+		MaxIterations:        opts.MaxIterations,
+		MaxToolCalls:         opts.MaxToolCalls,
+		MaxVerificationCalls: opts.MaxVerificationCalls,
+		MaxCostUSD:           maxCostUSD,
+		Adaptive:             opts.MaxIterations <= 0 || opts.SynthesisLead > 0,
+		ExplorationTimeout:   opts.ExplorationTimeout,
+		SynthesisLead:        opts.SynthesisLead,
+		AllowedTools:         allowedTools,
+		ReviewSnapshot:       opts.ReviewSnapshot,
 	}
 
 	// Create sub-agent with full tool access
@@ -143,7 +175,7 @@ func (r *RLMRunner) Run(ctx context.Context, systemPrompt, task string, allowedT
 	}
 
 	// Execute task
-	agentResult, err := agent.Execute(ctx, task)
+	agentResult, executionErr := agent.Execute(ctx, task)
 	if opts.ReviewSnapshot != nil && snapshotWorkDir != "" {
 		verifyCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		verifyErr := model.VerifyReviewWorkspace(verifyCtx, snapshotWorkDir, opts.ReviewSnapshot)
@@ -152,15 +184,24 @@ func (r *RLMRunner) Run(ctx context.Context, systemPrompt, task string, allowedT
 			return nil, fmt.Errorf("API review changed the captured source snapshot: %w", verifyErr)
 		}
 	}
-	if err != nil {
-		return nil, fmt.Errorf("execute task: %w", err)
+	if agentResult == nil {
+		if executionErr != nil {
+			return nil, fmt.Errorf("execute task: %w", executionErr)
+		}
+		return nil, fmt.Errorf("execute task returned no result")
 	}
 
 	duration := time.Since(start)
+	response := agentResult.Summary
+	if executionErr != nil {
+		response = formatIncompleteRLMResponse(agentResult, executionErr)
+	}
 
 	// Build result
 	result := &RLMResult{
-		Response:          agentResult.Summary,
+		Response:          response,
+		Incomplete:        executionErr != nil,
+		FinishReason:      agentResult.FinishReason,
 		ToolCalls:         agentResult.ToolCalls,
 		TokensUsed:        agentResult.TokensUsed,
 		InputTokens:       agentResult.InputTokens,
@@ -192,22 +233,30 @@ func (r *RLMRunner) Run(ctx context.Context, systemPrompt, task string, allowedT
 		})
 	}
 
-	builder.WithContent(agentResult.Summary)
+	builder.WithContent(response)
+	builder.WithResponse(&transparency.ResponseTrace{
+		FinishReason: agentResult.FinishReason,
+	})
 
-	// Calculate cost (rough estimate)
-	pricing := transparency.ModelPricing{
-		InputPerMillion:  3.0,
-		OutputPerMillion: 15.0,
-	}
-	if r.models != nil {
-		if info, err := r.models.GetModelInfo(modelToUse); err == nil {
-			pricing.InputPerMillion = info.Pricing.Prompt
-			pricing.OutputPerMillion = info.Pricing.Completion
+	// Calculate API cost only when the provider publishes token pricing.
+	// Native Codex runs through the user's CLI subscription.
+	cost := 0.0
+	if providerID != "codex" {
+		pricing := transparency.ModelPricing{
+			InputPerMillion:  3.0,
+			OutputPerMillion: 15.0,
 		}
+		if r.models != nil {
+			if info, err := r.models.GetModelInfo(modelToUse); err == nil {
+				pricing.InputPerMillion = info.Pricing.Prompt
+				pricing.OutputPerMillion = info.Pricing.Completion
+			}
+		}
+		cost = effectiveRLMInvocationCost(providerID, pricing, tokens)
 	}
-	cost := pricing.Calculate(tokens)
 
 	result.Trace = builder.Complete(tokens, cost)
+	result.Trace.Duration = duration
 
 	// Record in ledger
 	if r.ledger != nil {
@@ -220,10 +269,99 @@ func (r *RLMRunner) Run(ctx context.Context, systemPrompt, task string, allowedT
 		})
 	}
 
+	if executionErr != nil {
+		return result, fmt.Errorf("execute task: %w", executionErr)
+	}
 	return result, nil
 }
 
+func reviewRLMOutputTokenLimit(reasoningMaxTokens int) int {
+	if reasoningMaxTokens <= 0 {
+		return 0
+	}
+	// OpenRouter counts reasoning against the completion limit. Keep the
+	// existing final-answer allowance in addition to the thinking budget.
+	return reasoningMaxTokens + 4096
+}
+
+func effectiveRLMMaxCostUSD(providerID string, configured float64) float64 {
+	if providerID == "codex" {
+		// Native Codex execution has no per-token API price that Buckley can
+		// enforce. Keep its turn, tool, and elapsed-time budgets authoritative.
+		return 0
+	}
+	return configured
+}
+
+func effectiveRLMInvocationCost(providerID string, pricing transparency.ModelPricing, tokens transparency.TokenUsage) float64 {
+	if providerID == "codex" {
+		return 0
+	}
+	return pricing.Calculate(tokens)
+}
+
+func formatIncompleteRLMResponse(result *rlm.SubAgentResult, cause error) string {
+	var b strings.Builder
+	b.WriteString("> [!WARNING]\n")
+	b.WriteString("> **Incomplete agent result — salvaged from completed work.**\n")
+	b.WriteString("> The run ended before validation completed. This artifact is not a completed or validated result.\n\n")
+	b.WriteString("## Interruption\n\n")
+	b.WriteString(salvageText(cause.Error(), 2000))
+	b.WriteString("\n")
+
+	if summary := strings.TrimSpace(result.Summary); summary != "" {
+		b.WriteString("\n## Partial Model Output\n\n")
+		b.WriteString(salvageText(summary, 8000))
+		b.WriteString("\n")
+	}
+
+	if len(result.ToolCalls) > 0 {
+		b.WriteString("\n## Completed Evidence\n")
+		start := max(0, len(result.ToolCalls)-12)
+		for _, call := range result.ToolCalls[start:] {
+			status := "failed"
+			if call.Success {
+				status = "completed"
+			}
+			b.WriteString("\n- `")
+			b.WriteString(salvageText(call.Name, 200))
+			b.WriteString("` — ")
+			b.WriteString(status)
+			if arguments := strings.TrimSpace(call.Arguments); arguments != "" {
+				b.WriteString("\n  - Arguments: `")
+				b.WriteString(salvageText(arguments, 800))
+				b.WriteString("`")
+			}
+			if output := strings.TrimSpace(call.Result); output != "" {
+				b.WriteString("\n  - Result:\n\n    ```text\n    ")
+				output = strings.ReplaceAll(salvageText(output, 4000), "\n", "\n    ")
+				b.WriteString(output)
+				b.WriteString("\n    ```\n")
+			}
+		}
+	}
+
+	b.WriteString("\n## Accounting\n\n")
+	fmt.Fprintf(&b, "- Completed model tokens: %d input, %d output, %d total\n", result.InputTokens, result.OutputTokens, result.TokensUsed)
+	fmt.Fprintf(&b, "- Completed tool calls retained: %d\n", len(result.ToolCalls))
+	return strings.TrimSpace(b.String()) + "\n"
+}
+
+func salvageText(value string, limit int) string {
+	value = strings.TrimSpace(value)
+	value = strings.ReplaceAll(value, "```", "` ` `")
+	runes := []rune(value)
+	if limit > 0 && len(runes) > limit {
+		return string(runes[:limit]) + "…"
+	}
+	return value
+}
+
 func newReviewSnapshotRegistry(root string, allowedTools []string, codexCommand ...string) (*tool.Registry, error) {
+	return newReviewSnapshotRegistryWithLimits(root, allowedTools, 0, codexCommand...)
+}
+
+func newReviewSnapshotRegistryWithLimits(root string, allowedTools []string, verificationTimeout time.Duration, codexCommand ...string) (*tool.Registry, error) {
 	allowed := make(map[string]struct{}, len(allowedTools))
 	for _, name := range allowedTools {
 		name = strings.TrimSpace(name)
@@ -247,6 +385,9 @@ func newReviewSnapshotRegistry(root string, allowedTools []string, codexCommand 
 		verification, err := builtin.NewRunVerificationTool(root, codexCommand...)
 		if err != nil {
 			return nil, fmt.Errorf("create sealed review verification tool: %w", err)
+		}
+		if verificationTimeout > 0 {
+			verification.SetTimeoutLimit(verificationTimeout)
 		}
 		registry.Register(verification)
 		registry.SetToolKind(verification.Name(), "execute")

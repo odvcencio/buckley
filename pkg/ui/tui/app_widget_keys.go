@@ -3,8 +3,8 @@ package tui
 import (
 	"time"
 
-	"m31labs.dev/buckley/pkg/ui/runtime"
-	"m31labs.dev/buckley/pkg/ui/terminal"
+	"m31labs.dev/fluffyui/runtime"
+	"m31labs.dev/fluffyui/terminal"
 )
 
 type keyDispatchResult struct {
@@ -55,6 +55,13 @@ func (a *WidgetApp) handleCtrlCKey(key terminal.Key) keyDispatchResult {
 	if key != terminal.KeyCtrlC {
 		return keyDispatchResult{}
 	}
+	if a.processActive && a.onInterrupt != nil {
+		a.inputArea.Clear()
+		a.ctrlCArmedUntil = time.Time{}
+		a.onInterrupt()
+		a.setStatusOverride("Interrupt requested · stopping active process…", 3*time.Second)
+		return keyDispatchResult{handled: true, dirty: true}
+	}
 
 	now := time.Now()
 	if now.Before(a.ctrlCArmedUntil) {
@@ -75,7 +82,9 @@ func (a *WidgetApp) handleCtrlCKey(key terminal.Key) keyDispatchResult {
 
 func (a *WidgetApp) handleControlShortcut(m KeyMsg, key terminal.Key) bool {
 	switch {
-	case key == terminal.KeyCtrlB || (m.Ctrl && m.Rune == 'b'):
+	case m.Ctrl && m.Shift && (key == terminal.KeyCtrlB || m.Rune == 'b' || m.Rune == 'B'):
+		a.toggleActivityPanel()
+	case key == terminal.KeyCtrlB || (m.Ctrl && (m.Rune == 'b' || m.Rune == 'B')):
 		a.toggleSidebar()
 	case key == terminal.KeyCtrlP || (m.Ctrl && m.Rune == 'p'):
 		a.showCommandPalette()
@@ -90,6 +99,23 @@ func (a *WidgetApp) handleControlShortcut(m KeyMsg, key terminal.Key) bool {
 func (a *WidgetApp) handleAltShortcut(m KeyMsg, key terminal.Key) bool {
 	if !m.Alt {
 		return false
+	}
+
+	if key == terminal.KeyRune {
+		switch m.Rune {
+		case '[':
+			a.resizeSidebar(-panelResizeStep)
+			return true
+		case ']':
+			a.resizeSidebar(panelResizeStep)
+			return true
+		case '{':
+			a.resizeActivityPanel(-panelResizeStep)
+			return true
+		case '}':
+			a.resizeActivityPanel(panelResizeStep)
+			return true
+		}
 	}
 
 	if key == terminal.KeyRune && (m.Rune == 'c' || m.Rune == 'C') {

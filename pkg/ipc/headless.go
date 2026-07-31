@@ -9,11 +9,11 @@ import (
 	"strings"
 
 	"github.com/go-chi/chi/v5"
-	"m31labs.dev/buckley/pkg/giturl"
+	"m31labs.dev/buckley/v2/pkg/giturl"
 
-	"m31labs.dev/buckley/pkg/headless"
-	"m31labs.dev/buckley/pkg/ipc/command"
-	"m31labs.dev/buckley/pkg/storage"
+	"m31labs.dev/buckley/v2/pkg/headless"
+	"m31labs.dev/buckley/v2/pkg/ipc/command"
+	"m31labs.dev/buckley/v2/pkg/storage"
 )
 
 // HeadlessRegistry provides access to headless session management.
@@ -318,20 +318,27 @@ func (s *Server) handleHeadlessCommand(w http.ResponseWriter, r *http.Request) {
 	if payload.Type == "" {
 		payload.Type = "input"
 	}
+	if command.RequiresContent(payload.Type) && strings.TrimSpace(payload.Content) == "" {
+		respondError(w, http.StatusBadRequest, fmt.Errorf("content required"))
+		return
+	}
 
 	cmd := command.SessionCommand{
 		SessionID: sessionID,
 		Type:      payload.Type,
 		Content:   payload.Content,
 	}
+	cmd.EnsureID()
 
 	if err := s.headlessRegistry.DispatchCommand(cmd); err != nil {
 		respondError(w, http.StatusInternalServerError, err)
 		return
 	}
 
-	w.WriteHeader(http.StatusAccepted)
-	respondJSON(w, map[string]string{"status": "accepted"})
+	respondJSONStatus(w, http.StatusAccepted, map[string]string{
+		"status":    "accepted",
+		"commandId": cmd.ID,
+	})
 }
 
 func (s *Server) handleAdoptHeadlessSession(w http.ResponseWriter, r *http.Request) {

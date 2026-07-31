@@ -11,14 +11,15 @@ import (
 	"sync"
 	"time"
 
-	"m31labs.dev/buckley/pkg/artifact"
-	"m31labs.dev/buckley/pkg/config"
-	"m31labs.dev/buckley/pkg/encoding/toon"
-	"m31labs.dev/buckley/pkg/model"
-	"m31labs.dev/buckley/pkg/paths"
-	"m31labs.dev/buckley/pkg/skill"
-	"m31labs.dev/buckley/pkg/telemetry"
-	"m31labs.dev/buckley/pkg/tool"
+	"m31labs.dev/buckley/v2/pkg/artifact"
+	"m31labs.dev/buckley/v2/pkg/config"
+	"m31labs.dev/buckley/v2/pkg/conversation"
+	"m31labs.dev/buckley/v2/pkg/encoding/toon"
+	"m31labs.dev/buckley/v2/pkg/model"
+	"m31labs.dev/buckley/v2/pkg/paths"
+	"m31labs.dev/buckley/v2/pkg/skill"
+	"m31labs.dev/buckley/v2/pkg/telemetry"
+	"m31labs.dev/buckley/v2/pkg/tool"
 )
 
 // ContextEnricher produces an optional code-intelligence section for LLM prompts.
@@ -353,8 +354,15 @@ func (a *BuilderAgent) generateWithTools(req model.ChatRequest, task *Task) (str
 	ctx := context.Background()
 	maxIterations := 10 // Prevent infinite loops
 	messages := req.Messages
+	if req.SessionID == "" {
+		req.SessionID = fmt.Sprintf("builder-%d", time.Now().UnixNano())
+	}
 	skillState := (*skill.RuntimeState)(nil)
 	var baseInjector func(string)
+	contextWindow := 0
+	if provider, ok := a.modelClient.(model.ContextWindowProvider); ok {
+		contextWindow, _ = provider.GetContextLength(req.Model)
+	}
 
 	if a.workflow != nil {
 		skillState = a.workflow.skillState
@@ -391,7 +399,7 @@ func (a *BuilderAgent) generateWithTools(req model.ChatRequest, task *Task) (str
 		}
 
 		// Update request with current messages
-		req.Messages = messages
+		req.Messages = conversation.CompactModelMessagesForRequest(messages, req, contextWindow)
 
 		// Call model
 		resp, err := a.modelClient.ChatCompletion(ctx, req)

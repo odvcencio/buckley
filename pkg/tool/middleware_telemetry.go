@@ -4,9 +4,9 @@ import (
 	"strings"
 	"time"
 
-	"m31labs.dev/buckley/pkg/telemetry"
-	"m31labs.dev/buckley/pkg/tool/builtin"
-	"m31labs.dev/buckley/pkg/touch"
+	"m31labs.dev/buckley/v2/pkg/telemetry"
+	"m31labs.dev/buckley/v2/pkg/tool/builtin"
+	"m31labs.dev/buckley/v2/pkg/touch"
 )
 
 func (r *Registry) telemetryMiddleware() Middleware {
@@ -33,7 +33,8 @@ func (r *Registry) telemetryMiddleware() Middleware {
 			}
 
 			rich := touch.ExtractFromArgs(name, params)
-			r.publishToolEvent(telemetry.EventToolStarted, ctx.CallID, name, rich, ctx.StartTime, nil, nil, ctx.Attempt, ctx.Metadata)
+			metadata := withTelemetryArguments(ctx.Metadata, params)
+			r.publishToolEvent(telemetry.EventToolStarted, ctx.CallID, name, rich, ctx.StartTime, nil, nil, ctx.Attempt, metadata)
 
 			execFn := func(p map[string]any) (*builtin.Result, error) {
 				ctx.Params = p
@@ -50,7 +51,7 @@ func (r *Registry) telemetryMiddleware() Middleware {
 				res, err = execFn(params)
 			}
 
-			r.publishToolEvent(eventTypeForResult(res, err), ctx.CallID, name, rich, time.Now(), res, err, ctx.Attempt, ctx.Metadata)
+			r.publishToolEvent(eventTypeForResult(res, err), ctx.CallID, name, rich, time.Now(), res, err, ctx.Attempt, metadata)
 			return res, err
 		}
 	}

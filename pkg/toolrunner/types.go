@@ -4,8 +4,8 @@ import (
 	"context"
 	"time"
 
-	"m31labs.dev/buckley/pkg/model"
-	"m31labs.dev/buckley/pkg/tool"
+	"m31labs.dev/buckley/v2/pkg/model"
+	"m31labs.dev/buckley/v2/pkg/tool"
 )
 
 // ModelClient defines the interface for LLM interactions used by the runner.
@@ -33,6 +33,7 @@ type Request struct {
 	AllowedTools    []string
 	MaxIterations   int
 	Model           string
+	SessionID       string
 }
 
 // Result contains the output from tool runner execution.

@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"m31labs.dev/buckley/pkg/config"
+	"m31labs.dev/buckley/v2/pkg/config"
 )
 
 func TestExtractJSON_CodeBlockPriority(t *testing.T) {
@@ -144,9 +144,9 @@ func TestCommitGenerator_getUtilityModel(t *testing.T) {
 			expected: config.DefaultUtilityModel,
 		},
 		{
-			name:     "default config uses default utility model",
+			name:     "default config uses default commit model",
 			cfg:      config.DefaultConfig(),
-			expected: config.DefaultUtilityModel,
+			expected: config.DefaultCommitModel,
 		},
 		{
 			name: "custom commit model",

@@ -3,7 +3,7 @@ package runner
 import (
 	"testing"
 
-	"m31labs.dev/buckley/pkg/types"
+	"m31labs.dev/buckley/v2/pkg/types"
 )
 
 type modeEvaluator struct{}

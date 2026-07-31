@@ -6,8 +6,8 @@ import (
 	"sync"
 	"time"
 
-	"m31labs.dev/buckley/pkg/mission"
-	"m31labs.dev/buckley/pkg/telemetry"
+	"m31labs.dev/buckley/v2/pkg/mission"
+	"m31labs.dev/buckley/v2/pkg/telemetry"
 )
 
 // ToolCallIDParam allows callers to attach a stable tool call ID for telemetry.
@@ -34,6 +34,10 @@ type Registry struct {
 	missionAgent           string
 	missionTimeout         time.Duration
 	requireMissionApproval bool
+
+	discoveryEnabled bool
+	discoveryCore    map[string]struct{}
+	discoveryExposed map[string]struct{}
 }
 
 type registryOptions struct {

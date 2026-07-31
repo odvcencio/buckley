@@ -3,7 +3,7 @@ package grpcsdk
 import (
 	"testing"
 
-	"m31labs.dev/buckley/pkg/orchestrator"
+	"m31labs.dev/buckley/v2/pkg/orchestrator"
 )
 
 func TestPlanRequest(t *testing.T) {

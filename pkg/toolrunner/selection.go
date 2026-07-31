@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"strings"
 
-	"m31labs.dev/buckley/pkg/model"
-	"m31labs.dev/buckley/pkg/tool"
+	"m31labs.dev/buckley/v2/pkg/model"
+	"m31labs.dev/buckley/v2/pkg/tool"
 )
 
 func (r *Runner) availableTools(allowed []string) []tool.Tool {

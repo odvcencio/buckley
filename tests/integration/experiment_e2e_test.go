@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"m31labs.dev/buckley/pkg/experiment"
-	"m31labs.dev/buckley/pkg/storage"
+	"m31labs.dev/buckley/v2/pkg/experiment"
+	"m31labs.dev/buckley/v2/pkg/storage"
 )
 
 // TestExperimentStorePersistence tests the full experiment persistence lifecycle

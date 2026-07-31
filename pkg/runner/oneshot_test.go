@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	"m31labs.dev/buckley/pkg/orchestrator"
-	"m31labs.dev/buckley/pkg/types"
+	"m31labs.dev/buckley/v2/pkg/orchestrator"
+	"m31labs.dev/buckley/v2/pkg/types"
 )
 
 // --- test doubles ---

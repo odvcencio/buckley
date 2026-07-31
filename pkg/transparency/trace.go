@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"time"
 
-	"m31labs.dev/buckley/pkg/tools"
+	"m31labs.dev/buckley/v2/pkg/tools"
 )
 
 // Trace captures everything about an LLM invocation.
@@ -61,9 +61,10 @@ type Trace struct {
 // TraceAttempt attributes one preserved model invocation to a logical phase
 // and the one-based attempt number within that phase.
 type TraceAttempt struct {
-	Phase   string `json:"phase"`
-	Attempt int    `json:"attempt"`
-	Trace   *Trace `json:"trace"`
+	Phase           string `json:"phase"`
+	Attempt         int    `json:"attempt"`
+	ValidationError string `json:"validation_error,omitempty"`
+	Trace           *Trace `json:"trace"`
 }
 
 // RequestTrace captures request details for debugging.
@@ -193,6 +194,12 @@ func (tb *TraceBuilder) WithContent(content string) *TraceBuilder {
 	return tb
 }
 
+// WithResponse adds provider completion metadata.
+func (tb *TraceBuilder) WithResponse(response *ResponseTrace) *TraceBuilder {
+	tb.trace.Response = response
+	return tb
+}
+
 // WithError marks the trace as failed.
 func (tb *TraceBuilder) WithError(err error) *TraceBuilder {
 	if err != nil {
@@ -220,9 +227,10 @@ func AggregateTraceAttempts(attempts []TraceAttempt) *Trace {
 		child := *attempt.Trace
 		child.Attempts = nil
 		valid = append(valid, TraceAttempt{
-			Phase:   attempt.Phase,
-			Attempt: attempt.Attempt,
-			Trace:   &child,
+			Phase:           attempt.Phase,
+			Attempt:         attempt.Attempt,
+			ValidationError: attempt.ValidationError,
+			Trace:           &child,
 		})
 	}
 	if len(valid) == 0 {

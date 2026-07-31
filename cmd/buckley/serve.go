@@ -14,14 +14,14 @@ import (
 	"strings"
 	"syscall"
 
-	"m31labs.dev/buckley/pkg/config"
-	"m31labs.dev/buckley/pkg/headless"
-	"m31labs.dev/buckley/pkg/ipc"
-	"m31labs.dev/buckley/pkg/ipc/command"
-	"m31labs.dev/buckley/pkg/model"
-	"m31labs.dev/buckley/pkg/orchestrator"
-	"m31labs.dev/buckley/pkg/storage"
-	"m31labs.dev/buckley/pkg/telemetry"
+	"m31labs.dev/buckley/v2/pkg/config"
+	"m31labs.dev/buckley/v2/pkg/headless"
+	"m31labs.dev/buckley/v2/pkg/ipc"
+	"m31labs.dev/buckley/v2/pkg/ipc/command"
+	"m31labs.dev/buckley/v2/pkg/model"
+	"m31labs.dev/buckley/v2/pkg/orchestrator"
+	"m31labs.dev/buckley/v2/pkg/storage"
+	"m31labs.dev/buckley/v2/pkg/telemetry"
 )
 
 type ipcServer interface {
@@ -259,6 +259,9 @@ func runServeCommand(args []string) error {
 	commandGateway := command.NewGateway()
 	planStore := orchestrator.NewFilePlanStore(appCfg.Artifacts.PlanningDir)
 	models := initServeModels(appCfg)
+	if models != nil {
+		models.SetProviderThreadStore(store)
+	}
 
 	if stopACP, err := maybeStartServeACP(appCfg, models, store, opts.bind); err != nil {
 		return err

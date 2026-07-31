@@ -28,6 +28,9 @@ coverage.out
 .buckley/memory.db
 .buckley/cache/
 .buckley/*.db
+
+# Structural analysis cache
+.canopy/
 docs/plans/
 docs/blog-outlines/
 docs/execution/

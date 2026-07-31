@@ -225,7 +225,7 @@ func (t *RunTestsTool) runTestsForFramework(ctx context.Context, framework, path
 		if pattern != "" {
 			args = append(args, "-run", pattern)
 		}
-		args = append(args, path)
+		args = append(args, localGoTestPath(path))
 		cmd = execCommandContext(ctx, "go", args...)
 
 	case "jest":
@@ -294,6 +294,14 @@ func (t *RunTestsTool) runTestsForFramework(ctx context.Context, framework, path
 
 	output := stdout.String() + stderr.String()
 	return output, exitCode, duration, nil
+}
+
+func localGoTestPath(path string) string {
+	path = filepath.ToSlash(strings.TrimSpace(path))
+	if path == "" || path == "." || strings.HasPrefix(path, ".") || filepath.IsAbs(path) {
+		return path
+	}
+	return "./" + path
 }
 
 func (t *RunTestsTool) parseTestResults(framework, output string) (passed, failed, skipped int) {

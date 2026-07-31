@@ -416,3 +416,78 @@ func TestHasGUIEnvironment(t *testing.T) {
 	result := hasGUIEnvironment()
 	_ = result // result depends on OS and environment
 }
+
+func TestShellCommandTool_CancelStopsDescendantHoldingOutputPipe(t *testing.T) {
+	tool := &ShellCommandTool{}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	started := time.Now()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = tool.ExecuteWithContext(ctx, map[string]any{
+			"command":         "sleep 10 & wait",
+			"timeout_seconds": 30,
+		})
+	}()
+	time.Sleep(100 * time.Millisecond)
+	cancel()
+
+	select {
+	case <-done:
+		if elapsed := time.Since(started); elapsed > 3*time.Second {
+			t.Fatalf("cancel returned after %s, want under 3s", elapsed)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("shell remained blocked after cancellation")
+	}
+}
+
+func TestShellCommandTool_TimeoutStopsDescendantHoldingOutputPipe(t *testing.T) {
+	tool := &ShellCommandTool{}
+	started := time.Now()
+	result, err := tool.ExecuteWithContext(context.Background(), map[string]any{
+		"command":         "sleep 10 & wait",
+		"timeout_seconds": 1,
+	})
+	if err != nil {
+		t.Fatalf("ExecuteWithContext: %v", err)
+	}
+	if result == nil || result.Success {
+		t.Fatalf("result = %#v, want timeout failure", result)
+	}
+	if elapsed := time.Since(started); elapsed > 3*time.Second {
+		t.Fatalf("timeout returned after %s, want under 3s", elapsed)
+	}
+}
+
+func TestShellCommandTool_StreamsOutputThroughContext(t *testing.T) {
+	tool := &ShellCommandTool{}
+	var stdout strings.Builder
+	var stderr strings.Builder
+	ctx := WithShellOutputSink(context.Background(), func(stream, text string) {
+		switch stream {
+		case "stdout":
+			stdout.WriteString(text)
+		case "stderr":
+			stderr.WriteString(text)
+		}
+	})
+
+	result, err := tool.ExecuteWithContext(ctx, map[string]any{
+		"command": "printf out; printf err >&2",
+	})
+	if err != nil {
+		t.Fatalf("ExecuteWithContext: %v", err)
+	}
+	if result == nil || !result.Success {
+		t.Fatalf("result = %#v, want success", result)
+	}
+	if got := stdout.String(); got != "out" {
+		t.Fatalf("stdout progress = %q, want %q", got, "out")
+	}
+	if got := stderr.String(); got != "err" {
+		t.Fatalf("stderr progress = %q, want %q", got, "err")
+	}
+}

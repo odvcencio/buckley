@@ -237,3 +237,28 @@ func TestSessionCommand_Fields(t *testing.T) {
 		t.Errorf("Content = %s, want 'implement feature X'", cmd.Content)
 	}
 }
+
+func TestSessionCommandEnsureID_Stable(t *testing.T) {
+	cmd := SessionCommand{}
+	first := cmd.EnsureID()
+	second := cmd.EnsureID()
+	if first == "" {
+		t.Fatal("EnsureID returned an empty ID")
+	}
+	if second != first {
+		t.Fatalf("EnsureID changed ID: first=%q second=%q", first, second)
+	}
+}
+
+func TestRequiresContent(t *testing.T) {
+	for _, commandType := range []string{"input", "slash", "steer", "queue", "model"} {
+		if !RequiresContent(commandType) {
+			t.Errorf("RequiresContent(%q)=false want true", commandType)
+		}
+	}
+	for _, commandType := range []string{"interrupt", "pause", "resume"} {
+		if RequiresContent(commandType) {
+			t.Errorf("RequiresContent(%q)=true want false", commandType)
+		}
+	}
+}

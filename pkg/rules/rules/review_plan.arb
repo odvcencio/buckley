@@ -1,0 +1,83 @@
+outcome ReviewPlan {
+    action: string
+    size_class: string
+    reasoning_effort: string
+    reasoning_max_tokens: number
+    max_iterations: number
+    max_tool_calls: number
+    max_verification_calls: number
+    verification_timeout_seconds: number
+    exploration_timeout_seconds: number
+    synthesis_reserve_seconds: number
+    approval_critic_reserve_seconds: number
+    critic_max_iterations: number
+    critic_max_tool_calls: number
+    critic_exploration_timeout_seconds: number
+    critic_synthesis_reserve_seconds: number
+}
+
+strategy review_plan returns ReviewPlan {
+    when {
+        context_incomplete == true
+        or file_count > 20
+        or diff_bytes > 80000
+        or blast_radius >= 1000
+    } then BroadReview {
+        action: "bound_review",
+        size_class: "broad",
+        reasoning_effort: "medium",
+        reasoning_max_tokens: 2048,
+        max_iterations: 6,
+        max_tool_calls: 6,
+        max_verification_calls: 1,
+        verification_timeout_seconds: 60,
+        exploration_timeout_seconds: 55,
+        synthesis_reserve_seconds: 90,
+        approval_critic_reserve_seconds: 80,
+        critic_max_iterations: 2,
+        critic_max_tool_calls: 2,
+        critic_exploration_timeout_seconds: 20,
+        critic_synthesis_reserve_seconds: 50,
+    }
+
+    when {
+        file_count > 8
+        or diff_bytes > 24000
+        or has_feedback == true
+        or blast_radius >= 250
+    } then StandardReview {
+        action: "bound_review",
+        size_class: "standard",
+        reasoning_effort: "medium",
+        reasoning_max_tokens: 1536,
+        max_iterations: 5,
+        max_tool_calls: 5,
+        max_verification_calls: 1,
+        verification_timeout_seconds: 60,
+        exploration_timeout_seconds: 50,
+        synthesis_reserve_seconds: 90,
+        approval_critic_reserve_seconds: 75,
+        critic_max_iterations: 2,
+        critic_max_tool_calls: 2,
+        critic_exploration_timeout_seconds: 20,
+        critic_synthesis_reserve_seconds: 45,
+    }
+
+    else FocusedReview {
+        action: "bound_review",
+        size_class: "focused",
+        reasoning_effort: "low",
+        reasoning_max_tokens: 1024,
+        max_iterations: 4,
+        max_tool_calls: 4,
+        max_verification_calls: 1,
+        verification_timeout_seconds: 60,
+        exploration_timeout_seconds: 45,
+        synthesis_reserve_seconds: 85,
+        approval_critic_reserve_seconds: 70,
+        critic_max_iterations: 2,
+        critic_max_tool_calls: 2,
+        critic_exploration_timeout_seconds: 15,
+        critic_synthesis_reserve_seconds: 45,
+    }
+}

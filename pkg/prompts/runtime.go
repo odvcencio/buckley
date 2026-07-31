@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"m31labs.dev/buckley/pkg/types"
+	"m31labs.dev/buckley/v2/pkg/types"
 )
 
 // DefaultToolUseSystemPrompt is the shared Buckley operating contract for tool-first sessions.

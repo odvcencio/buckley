@@ -17,6 +17,11 @@ type ExecutionModelProvider interface {
 	GetExecutionModel() string
 }
 
+// ContextWindowProvider exposes the input/output token capacity for a model.
+type ContextWindowProvider interface {
+	GetContextLength(modelID string) (int, error)
+}
+
 // ReasoningSupportProvider reports whether a model supports reasoning mode.
 type ReasoningSupportProvider interface {
 	SupportsReasoning(modelID string) bool

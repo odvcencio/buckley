@@ -6,8 +6,8 @@ import (
 	"sync"
 	"time"
 
-	"m31labs.dev/buckley/pkg/telemetry"
-	"m31labs.dev/buckley/pkg/touch"
+	"m31labs.dev/buckley/v2/pkg/telemetry"
+	"m31labs.dev/buckley/v2/pkg/touch"
 )
 
 const maxRecentFiles = 5

@@ -8,16 +8,17 @@ import (
 	"sync"
 	"time"
 
-	"m31labs.dev/buckley/pkg/bus"
-	"m31labs.dev/buckley/pkg/coordination/security"
-	"m31labs.dev/buckley/pkg/encoding/toon"
-	"m31labs.dev/buckley/pkg/graft"
-	"m31labs.dev/buckley/pkg/model"
-	"m31labs.dev/buckley/pkg/rules"
-	"m31labs.dev/buckley/pkg/storage"
-	"m31labs.dev/buckley/pkg/telemetry"
-	"m31labs.dev/buckley/pkg/tool"
-	"m31labs.dev/buckley/pkg/tool/builtin"
+	"m31labs.dev/buckley/v2/pkg/bus"
+	"m31labs.dev/buckley/v2/pkg/conversation"
+	"m31labs.dev/buckley/v2/pkg/coordination/security"
+	"m31labs.dev/buckley/v2/pkg/encoding/toon"
+	"m31labs.dev/buckley/v2/pkg/graft"
+	"m31labs.dev/buckley/v2/pkg/model"
+	"m31labs.dev/buckley/v2/pkg/rules"
+	"m31labs.dev/buckley/v2/pkg/storage"
+	"m31labs.dev/buckley/v2/pkg/telemetry"
+	"m31labs.dev/buckley/v2/pkg/tool"
+	"m31labs.dev/buckley/v2/pkg/tool/builtin"
 )
 
 const coordinatorSystemPrompt = `You are the Buckley RLM Coordinator - an orchestration layer that delegates work to specialized sub-agents while maintaining strategic oversight.
@@ -284,6 +285,9 @@ func (r *Runtime) Execute(ctx context.Context, task string) (*Answer, error) {
 		{Role: "system", Content: coordinatorSystemPrompt},
 		{Role: "user", Content: r.buildCoordinatorContext(ctx, task, &answer, start, maxTokens, confidenceThreshold)},
 	}
+	coordinatorModel := r.coordinatorModelID()
+	sessionID := fmt.Sprintf("rlm-coordinator-%d", start.UnixNano())
+	contextWindow, _ := r.models.GetContextLength(coordinatorModel)
 
 	for answer.Iteration < maxIterations && !answer.Ready {
 		if err := ctx.Err(); err != nil {
@@ -296,12 +300,14 @@ func (r *Runtime) Execute(ctx context.Context, task string) (*Answer, error) {
 
 		answer.Iteration++
 
-		resp, err := r.models.ChatCompletion(ctx, model.ChatRequest{
-			Model:      r.coordinatorModelID(),
-			Messages:   messages,
+		req := model.ChatRequest{
+			Model:      coordinatorModel,
 			Tools:      toolDefs,
 			ToolChoice: toolChoice,
-		})
+			SessionID:  sessionID,
+		}
+		req.Messages = conversation.CompactModelMessagesForRequest(messages, req, contextWindow)
+		resp, err := r.models.ChatCompletion(ctx, req)
 		if err != nil {
 			return &answer, err
 		}
@@ -501,7 +507,7 @@ func (r *Runtime) executeCoordinatorTools(ctx context.Context, registry *tool.Re
 		if call.ID != "" {
 			args[tool.ToolCallIDParam] = call.ID
 		}
-		res, err := registry.Execute(name, args)
+		res, err := registry.ExecuteWithContext(ctx, name, args)
 		if err != nil {
 			result.Result = fmt.Sprintf("execution error: %v", err)
 		} else {

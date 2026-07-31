@@ -12,8 +12,8 @@ package prompts
 import (
 	reflect "reflect"
 
-	personality "m31labs.dev/buckley/pkg/personality"
 	gomock "go.uber.org/mock/gomock"
+	personality "m31labs.dev/buckley/v2/pkg/personality"
 )
 
 // MockPersonaProvider is a mock of PersonaProvider interface.

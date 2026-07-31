@@ -3,8 +3,8 @@ package widgets
 import (
 	"testing"
 
-	"m31labs.dev/buckley/pkg/ui/runtime"
-	"m31labs.dev/buckley/pkg/ui/terminal"
+	"m31labs.dev/fluffyui/runtime"
+	"m31labs.dev/fluffyui/terminal"
 )
 
 func TestPaletteWidget_New(t *testing.T) {
@@ -289,12 +289,12 @@ func TestPaletteWidget_Render_QueryCursorUsesRuneColumns(t *testing.T) {
 
 	bounds := p.Bounds()
 	y := bounds.Y + 1
-	for x, want := range []rune("/模型") {
+	for x, want := range []rune{'/', '模', ' ', '型', ' '} {
 		if got := buf.Get(bounds.X+2+x, y).Rune; got != want {
 			t.Fatalf("query cell %d = %q, want %q", x, got, want)
 		}
 	}
-	if got := buf.Get(bounds.X+2+len([]rune("/模型")), y).Rune; got != '█' {
+	if got := buf.Get(bounds.X+2+displayWidth("/模型"), y).Rune; got != '█' {
 		t.Fatalf("cursor = %q, want block", got)
 	}
 }

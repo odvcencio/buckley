@@ -11,15 +11,15 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
-	acppb "m31labs.dev/buckley/pkg/acp/proto"
-	"m31labs.dev/buckley/pkg/agentserver"
-	"m31labs.dev/buckley/pkg/config"
-	"m31labs.dev/buckley/pkg/ipc"
-	"m31labs.dev/buckley/pkg/ipc/command"
-	"m31labs.dev/buckley/pkg/model"
-	"m31labs.dev/buckley/pkg/orchestrator"
-	"m31labs.dev/buckley/pkg/storage"
-	"m31labs.dev/buckley/pkg/telemetry"
+	acppb "m31labs.dev/buckley/v2/pkg/acp/proto"
+	"m31labs.dev/buckley/v2/pkg/agentserver"
+	"m31labs.dev/buckley/v2/pkg/config"
+	"m31labs.dev/buckley/v2/pkg/ipc"
+	"m31labs.dev/buckley/v2/pkg/ipc/command"
+	"m31labs.dev/buckley/v2/pkg/model"
+	"m31labs.dev/buckley/v2/pkg/orchestrator"
+	"m31labs.dev/buckley/v2/pkg/storage"
+	"m31labs.dev/buckley/v2/pkg/telemetry"
 )
 
 type fakeBatchCoordinator struct {

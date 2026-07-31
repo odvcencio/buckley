@@ -6,8 +6,8 @@ import (
 	"strings"
 	"time"
 
-	"m31labs.dev/buckley/pkg/orchestrator"
-	"m31labs.dev/buckley/pkg/storage"
+	"m31labs.dev/buckley/v2/pkg/orchestrator"
+	"m31labs.dev/buckley/v2/pkg/storage"
 )
 
 const defaultMessageLimit = 120

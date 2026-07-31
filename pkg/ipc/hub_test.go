@@ -78,3 +78,19 @@ func TestHubBroadcastFiltersAndDropsSlowClients(t *testing.T) {
 		t.Fatalf("expected slow client to be removed")
 	}
 }
+
+func TestHubBroadcastAssignsIDBeforeRecording(t *testing.T) {
+	hub := NewHub()
+	var recorded Event
+	hub.SetRecorder(func(event Event) error {
+		recorded = event
+		return nil
+	})
+	hub.Broadcast(Event{Type: "command.started"})
+	if recorded.EventID == "" {
+		t.Fatal("recorded event ID is empty")
+	}
+	if recorded.Timestamp.IsZero() {
+		t.Fatal("recorded timestamp is zero")
+	}
+}

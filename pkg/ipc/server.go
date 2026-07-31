@@ -27,22 +27,22 @@ import (
 
 	"connectrpc.com/connect"
 
-	"m31labs.dev/buckley/pkg/config"
-	projectcontext "m31labs.dev/buckley/pkg/context"
-	"m31labs.dev/buckley/pkg/ipc/command"
-	"m31labs.dev/buckley/pkg/ipc/proto/ipcpbconnect"
-	"m31labs.dev/buckley/pkg/ipc/push"
-	"m31labs.dev/buckley/pkg/mission"
-	"m31labs.dev/buckley/pkg/model"
-	"m31labs.dev/buckley/pkg/orchestrator"
-	"m31labs.dev/buckley/pkg/paths"
-	"m31labs.dev/buckley/pkg/personality"
-	"m31labs.dev/buckley/pkg/prompts"
-	"m31labs.dev/buckley/pkg/scaffold"
-	"m31labs.dev/buckley/pkg/session"
-	"m31labs.dev/buckley/pkg/storage"
-	"m31labs.dev/buckley/pkg/telemetry"
-	"m31labs.dev/buckley/pkg/ui/viewmodel"
+	"m31labs.dev/buckley/v2/pkg/config"
+	projectcontext "m31labs.dev/buckley/v2/pkg/context"
+	"m31labs.dev/buckley/v2/pkg/ipc/command"
+	"m31labs.dev/buckley/v2/pkg/ipc/proto/ipcpbconnect"
+	"m31labs.dev/buckley/v2/pkg/ipc/push"
+	"m31labs.dev/buckley/v2/pkg/mission"
+	"m31labs.dev/buckley/v2/pkg/model"
+	"m31labs.dev/buckley/v2/pkg/orchestrator"
+	"m31labs.dev/buckley/v2/pkg/paths"
+	"m31labs.dev/buckley/v2/pkg/personality"
+	"m31labs.dev/buckley/v2/pkg/prompts"
+	"m31labs.dev/buckley/v2/pkg/scaffold"
+	"m31labs.dev/buckley/v2/pkg/session"
+	"m31labs.dev/buckley/v2/pkg/storage"
+	"m31labs.dev/buckley/v2/pkg/telemetry"
+	"m31labs.dev/buckley/v2/pkg/ui/viewmodel"
 )
 
 var allowedSettingKeys = []string{"remote.base_url", "remote.notes"}
@@ -178,9 +178,30 @@ func NewServer(cfg Config, store *storage.Store, telemetryHub *telemetry.Hub, co
 		runtimeTracker:   runtimeTracker,
 		viewAssembler:    viewmodel.NewAssembler(store, planStore, workflow).WithRuntimeTracker(runtimeTracker),
 	}
+	s.hub.SetRecorder(func(event Event) error {
+		if !shouldPersistEvent(event.Type) {
+			return nil
+		}
+		payload, err := json.Marshal(event.Payload)
+		if err != nil {
+			return fmt.Errorf("marshal event payload: %w", err)
+		}
+		return store.SaveIPCEvent(storage.IPCEvent{
+			ID:        event.EventID,
+			SessionID: event.SessionID,
+			Type:      event.Type,
+			Payload:   payload,
+			CreatedAt: event.Timestamp,
+		})
+	})
 
 	store.AddObserver(storage.ObserverFunc(s.onStorageEvent))
 	return s
+}
+
+func shouldPersistEvent(eventType string) bool {
+	eventType = strings.TrimSpace(eventType)
+	return eventType != "" && eventType != "view.patch" && eventType != "sessions.snapshot" && !strings.HasPrefix(eventType, "server.")
 }
 
 // Start runs the HTTP server until the context is cancelled.
@@ -220,6 +241,7 @@ func (s *Server) Start(ctx context.Context) error {
 		r.Post("/magic-link", s.handleCreateMagicLink)
 	})
 	api.Get("/sessions", s.handleListSessions)
+	api.Get("/models", s.handleListModels)
 	api.Get("/sessions/{sessionID}", s.handleSessionDetail)
 	api.Get("/sessions/{sessionID}/messages", s.handleSessionMessages)
 	api.Get("/sessions/{sessionID}/todos", s.handleSessionTodos)
@@ -509,6 +531,35 @@ func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, map[string]any{
 		"sessions":  filtered,
 		"summaries": filteredSummaries,
+	})
+}
+
+func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
+	if _, ok := requireScope(w, r, storage.TokenScopeViewer); !ok {
+		return
+	}
+	if s.models == nil {
+		respondError(w, http.StatusServiceUnavailable, stdliberrors.New("model catalog unavailable"))
+		return
+	}
+
+	var warning string
+	if r.URL.Query().Get("refresh") == "1" || strings.EqualFold(r.URL.Query().Get("refresh"), "true") {
+		if err := s.models.RefreshProviderCatalog("openrouter"); err != nil {
+			warning = err.Error()
+		}
+	}
+
+	catalog := s.models.GetCatalog()
+	models := make([]model.ModelInfo, 0, len(catalog.Data))
+	for _, info := range catalog.Data {
+		if s.models.ProviderIDForModel(info.ID) == "openrouter" {
+			models = append(models, info)
+		}
+	}
+	respondJSON(w, map[string]any{
+		"models":  models,
+		"warning": warning,
 	})
 }
 
@@ -1263,19 +1314,22 @@ func (s *Server) handleSessionCommand(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusTooManyRequests, fmt.Errorf("rate limit exceeded"))
 		return
 	}
-	if strings.TrimSpace(payload.Content) == "" {
-		respondError(w, http.StatusBadRequest, fmt.Errorf("content required"))
-		return
-	}
 	if payload.Type == "" {
 		payload.Type = "input"
 	}
+	if command.RequiresContent(payload.Type) && strings.TrimSpace(payload.Content) == "" {
+		respondError(w, http.StatusBadRequest, fmt.Errorf("content required"))
+		return
+	}
+	payload.EnsureID()
 	if err := s.commandGW.Dispatch(payload); err != nil {
 		respondError(w, http.StatusServiceUnavailable, err)
 		return
 	}
-	w.WriteHeader(http.StatusAccepted)
-	respondJSON(w, map[string]string{"status": "accepted"})
+	respondJSONStatus(w, http.StatusAccepted, map[string]string{
+		"status":    "accepted",
+		"commandId": payload.ID,
+	})
 }
 
 func (s *Server) handleWorkflowAction(w http.ResponseWriter, r *http.Request) {
@@ -1333,11 +1387,12 @@ func (s *Server) handleWorkflowAction(w http.ResponseWriter, r *http.Request) {
 		Type:      "slash",
 		Content:   content,
 	}
+	cmd.EnsureID()
 	if err := s.commandGW.Dispatch(cmd); err != nil {
 		respondError(w, http.StatusServiceUnavailable, err)
 		return
 	}
-	respondJSON(w, map[string]string{"status": "accepted"})
+	respondJSON(w, map[string]string{"status": "accepted", "commandId": cmd.ID})
 }
 
 func (s *Server) handleCostMetrics(w http.ResponseWriter, r *http.Request) {
@@ -2105,6 +2160,7 @@ func (s *Server) onStorageEvent(event storage.Event) {
 		SessionID: event.SessionID,
 		Payload:   event.Data,
 		Timestamp: event.Timestamp,
+		Transient: true,
 	}
 	s.hub.Broadcast(ipcEvent)
 
@@ -2128,12 +2184,23 @@ func (s *Server) broadcastTelemetry(event telemetry.Event) {
 	if event.Timestamp.IsZero() {
 		event.Timestamp = time.Now()
 	}
+	if !s.allowFullTelemetryPayloads() {
+		event = telemetry.StripToolPayloads(event)
+	}
 	s.hub.Broadcast(Event{
 		Type:      fmt.Sprintf("telemetry.%s", event.Type),
 		SessionID: event.SessionID,
 		Payload:   event,
 		Timestamp: event.Timestamp,
 	})
+}
+
+// allowFullTelemetryPayloads reports whether full tool call arguments and
+// results may leave the process over this network transport. Defaults to
+// false: key-name redaction can't protect file contents or other
+// unstructured tool output that riders along in these fields.
+func (s *Server) allowFullTelemetryPayloads() bool {
+	return s.appConfig != nil && s.appConfig.Diagnostics.TelemetryPayloadsOverNetwork
 }
 
 func (s *Server) broadcastViewPatch(sessionID string) {

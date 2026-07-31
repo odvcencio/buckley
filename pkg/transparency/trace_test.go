@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"m31labs.dev/buckley/pkg/tools"
+	"m31labs.dev/buckley/v2/pkg/tools"
 )
 
 func TestTrace(t *testing.T) {
@@ -93,6 +93,7 @@ func TestTraceBuilder(t *testing.T) {
 	builder.WithContext(audit)
 	builder.WithReasoning("I thought about it...")
 	builder.WithContent("Here's the result")
+	builder.WithResponse(&ResponseTrace{FinishReason: "stop"})
 	builder.WithToolCalls([]tools.ToolCall{
 		{ID: "call_1", Name: "tool_a"},
 	})
@@ -116,6 +117,9 @@ func TestTraceBuilder(t *testing.T) {
 	}
 	if trace.Content != "Here's the result" {
 		t.Errorf("unexpected content: %q", trace.Content)
+	}
+	if trace.Response == nil || trace.Response.FinishReason != "stop" {
+		t.Errorf("unexpected response metadata: %#v", trace.Response)
 	}
 	if len(trace.ToolCalls) != 1 {
 		t.Errorf("expected 1 tool call, got %d", len(trace.ToolCalls))
@@ -171,7 +175,7 @@ func TestAggregateTraceAttemptsPreservesAttributionAndTotals(t *testing.T) {
 	}
 
 	aggregate := AggregateTraceAttempts([]TraceAttempt{
-		{Phase: "primary", Attempt: 1, Trace: first},
+		{Phase: "primary", Attempt: 1, ValidationError: "missing evidence", Trace: first},
 		{Phase: "approval critic", Attempt: 1, Trace: last},
 	})
 	if aggregate == nil {
@@ -194,6 +198,9 @@ func TestAggregateTraceAttemptsPreservesAttributionAndTotals(t *testing.T) {
 	}
 	if len(aggregate.Attempts) != 2 || aggregate.Attempts[0].Phase != "primary" || aggregate.Attempts[1].Phase != "approval critic" {
 		t.Fatalf("aggregate.Attempts = %#v", aggregate.Attempts)
+	}
+	if aggregate.Attempts[0].ValidationError != "missing evidence" {
+		t.Fatalf("validation error = %q, want missing evidence", aggregate.Attempts[0].ValidationError)
 	}
 	if aggregate.Attempts[0].Trace == first || aggregate.Attempts[1].Trace == last {
 		t.Fatal("aggregate retained mutable caller trace pointers")

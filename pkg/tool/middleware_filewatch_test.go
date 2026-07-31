@@ -5,8 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"m31labs.dev/buckley/pkg/filewatch"
-	"m31labs.dev/buckley/pkg/tool/builtin"
+	"m31labs.dev/buckley/v2/pkg/filewatch"
+	"m31labs.dev/buckley/v2/pkg/tool/builtin"
 )
 
 func TestFileChangeTracking_TracksWriteFile(t *testing.T) {

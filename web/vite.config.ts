@@ -30,12 +30,16 @@ export default defineConfig({
   build: {
     outDir: '../pkg/ipc/ui',
     emptyOutDir: true,
+    minify: 'terser',
+    terserOptions: {
+      maxWorkers: 1,
+    },
     rollupOptions: {
       output: {
-        // Clean asset names for embedding
-        entryFileNames: 'assets/[name]-[hash].js',
-        chunkFileNames: 'assets/[name]-[hash].js',
-        assetFileNames: 'assets/[name]-[hash].[ext]',
+        // Stable names keep embedded asset verification reproducible across builders.
+        entryFileNames: 'assets/[name].js',
+        chunkFileNames: 'assets/[name].js',
+        assetFileNames: 'assets/[name].[ext]',
       },
     },
   },

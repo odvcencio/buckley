@@ -3,9 +3,9 @@ package widgets
 import (
 	"strconv"
 
-	"m31labs.dev/buckley/pkg/ui/backend"
-	"m31labs.dev/buckley/pkg/ui/runtime"
-	"m31labs.dev/buckley/pkg/ui/terminal"
+	"m31labs.dev/fluffyui/backend"
+	"m31labs.dev/fluffyui/runtime"
+	"m31labs.dev/fluffyui/terminal"
 )
 
 // SearchWidget provides a search input overlay for the chat view.
@@ -126,14 +126,14 @@ func (s *SearchWidget) renderPrefix(buf *runtime.Buffer, b runtime.Rect) {
 
 func (s *SearchWidget) renderQuery(buf *runtime.Buffer, b runtime.Rect) string {
 	queryX := b.X + 2
-	query := suffixRunes(s.query, searchQueryWidth(b.Width))
+	query := suffixDisplayWidth(s.query, searchQueryWidth(b.Width))
 	buf.SetString(queryX, b.Y, query, s.textStyle)
 	return query
 }
 
 func (s *SearchWidget) renderCursor(buf *runtime.Buffer, b runtime.Rect, query string) {
 	queryX := b.X + 2
-	cursorX := queryX + runeLen(query)
+	cursorX := queryX + displayWidth(query)
 	if cursorX < b.X+b.Width-15 && s.focused {
 		buf.Set(cursorX, b.Y, '█', s.textStyle)
 	}
@@ -144,7 +144,7 @@ func (s *SearchWidget) renderMatchInfo(buf *runtime.Buffer, b runtime.Rect) {
 	if info == "" {
 		return
 	}
-	infoX := b.X + b.Width - runeLen(info) - 2
+	infoX := b.X + b.Width - displayWidth(info) - 2
 	if infoX >= b.X+2 {
 		buf.SetString(infoX, b.Y, info, s.matchStyle)
 	}

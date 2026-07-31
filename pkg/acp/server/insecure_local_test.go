@@ -7,12 +7,12 @@ import (
 	"testing"
 	"time"
 
-	acppb "m31labs.dev/buckley/pkg/acp/proto"
-	"m31labs.dev/buckley/pkg/config"
-	"m31labs.dev/buckley/pkg/coordination/coordinator"
-	"m31labs.dev/buckley/pkg/coordination/events"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+	acppb "m31labs.dev/buckley/v2/pkg/acp/proto"
+	"m31labs.dev/buckley/v2/pkg/config"
+	"m31labs.dev/buckley/v2/pkg/coordination/coordinator"
+	"m31labs.dev/buckley/v2/pkg/coordination/events"
 )
 
 func TestInsecureLocalAuth_AllowsStreamRPCWithoutMTLS(t *testing.T) {

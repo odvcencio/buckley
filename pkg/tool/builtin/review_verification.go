@@ -9,7 +9,8 @@ import (
 	"strings"
 	"time"
 
-	"m31labs.dev/buckley/pkg/reviewsandbox"
+	"m31labs.dev/buckley/v2/pkg/reviewpolicy"
+	"m31labs.dev/buckley/v2/pkg/reviewsandbox"
 )
 
 // RunVerificationTool runs one focused build, test, or check against the
@@ -20,6 +21,7 @@ type RunVerificationTool struct {
 	codexCommand   string
 	verifier       reviewsandbox.Verifier
 	maxOutputBytes int
+	timeoutLimit   time.Duration
 }
 
 // NewRunVerificationTool seals the tool to one canonical immutable snapshot.
@@ -42,7 +44,22 @@ func NewRunVerificationTool(snapshotRoot string, codexCommand ...string) (*RunVe
 	if len(codexCommand) > 0 {
 		command = strings.TrimSpace(codexCommand[0])
 	}
-	return &RunVerificationTool{snapshotRoot: filepath.Clean(root), codexCommand: command}, nil
+	return &RunVerificationTool{
+		snapshotRoot: filepath.Clean(root),
+		codexCommand: command,
+		verifier:     reviewsandbox.NewSessionExecutorWithCodexCommand(command),
+	}, nil
+}
+
+// Close removes the private compiler caches for this review session.
+func (t *RunVerificationTool) Close() error {
+	if t == nil {
+		return nil
+	}
+	if closer, ok := t.verifier.(interface{ Close() error }); ok {
+		return closer.Close()
+	}
+	return nil
 }
 
 func (t *RunVerificationTool) SetMaxOutputBytes(max int) {
@@ -52,19 +69,33 @@ func (t *RunVerificationTool) SetMaxOutputBytes(max int) {
 	t.maxOutputBytes = max
 }
 
+// SetTimeoutLimit caps every verification command and changes its default.
+func (t *RunVerificationTool) SetTimeoutLimit(limit time.Duration) {
+	if t == nil || limit <= 0 {
+		return
+	}
+	t.timeoutLimit = limit
+}
+
 func (t *RunVerificationTool) Name() string { return "run_verification" }
 
 func (t *RunVerificationTool) Description() string {
-	return "Run a focused build, test, or check in the immutable review snapshot. Source is OS-enforced read-only, temporary build output is private, and network access is disabled."
+	return "Run a focused build, test, or check in the immutable review snapshot. Repository AGENTS.md rules are enforced before process launch. Requests that require Docker, CI, or another unavailable execution surface return INCONCLUSIVE without running a host command. For Go approval evidence, use kind=test because it compiles the target and executes tests. Source is OS-enforced read-only, temporary build output is private, and network access is disabled."
 }
 
 func (t *RunVerificationTool) Parameters() ParameterSchema {
+	defaultTimeout := 300
+	maxTimeout := 900
+	if t != nil && t.timeoutLimit > 0 {
+		maxTimeout = max(1, int(t.timeoutLimit/time.Second))
+		defaultTimeout = maxTimeout
+	}
 	return ParameterSchema{
 		Type: "object",
 		Properties: map[string]PropertySchema{
 			"kind": {
 				Type:        "string",
-				Description: "Verification operation",
+				Description: "Verification operation. For Go approval evidence, select test; build compiles but does not execute tests.",
 				Enum:        []string{"build", "test", "check"},
 			},
 			"language": {
@@ -80,12 +111,12 @@ func (t *RunVerificationTool) Parameters() ParameterSchema {
 			},
 			"pattern": {
 				Type:        "string",
-				Description: "Optional test-name pattern; accepted only for kind=test",
+				Description: "Optional test-name pattern, at most 4096 bytes; accepted only for kind=test",
 			},
 			"timeout_seconds": {
 				Type:        "integer",
-				Description: "Timeout from 1 to 900 seconds",
-				Default:     300,
+				Description: fmt.Sprintf("Timeout from 1 to %d seconds", maxTimeout),
+				Default:     defaultTimeout,
 			},
 		},
 		Required: []string{"kind"},
@@ -109,7 +140,12 @@ func (t *RunVerificationTool) ExecuteWithContext(ctx context.Context, params map
 	}
 	path, _ := params["path"].(string)
 	pattern, _ := params["pattern"].(string)
+	maxTimeout := 900
 	timeout := 300
+	if t != nil && t.timeoutLimit > 0 {
+		maxTimeout = max(1, int(t.timeoutLimit/time.Second))
+		timeout = maxTimeout
+	}
 	if raw, ok := params["timeout_seconds"]; ok {
 		switch value := raw.(type) {
 		case int:
@@ -127,11 +163,21 @@ func (t *RunVerificationTool) ExecuteWithContext(ctx context.Context, params map
 			return unavailableVerificationResult(kind, language, "timeout_seconds must be an integer"), nil
 		}
 	}
-	if timeout < 1 || timeout > 900 {
-		return unavailableVerificationResult(kind, language, "timeout_seconds must be between 1 and 900"), nil
+	if timeout < 1 {
+		return unavailableVerificationResult(kind, language, fmt.Sprintf("timeout_seconds must be between 1 and %d", maxTimeout)), nil
+	}
+	if timeout > maxTimeout {
+		timeout = maxTimeout
 	}
 	if t == nil || strings.TrimSpace(t.snapshotRoot) == "" {
 		return unavailableVerificationResult(kind, language, "run_verification requires an immutable snapshot-bound registry"), nil
+	}
+	constraints, policyErr := reviewpolicy.LoadApplicableVerificationConstraints(t.snapshotRoot, path)
+	if policyErr != nil {
+		return unavailableVerificationResult(kind, language, "repository verification policy is unavailable: "+policyErr.Error()), nil
+	}
+	if rejection := constraints.HostRejection(kind, language, path); rejection != "" {
+		return unavailableVerificationResult(kind, language, rejection), nil
 	}
 
 	verifier := t.verifier
@@ -157,8 +203,11 @@ func (t *RunVerificationTool) ExecuteWithContext(ctx context.Context, params map
 		"argv":        append([]string(nil), verification.Argv...),
 		"exit_code":   verification.ExitCode,
 		"status":      string(verification.Status),
+		"evidence":    verificationEvidenceClass(verification),
+		"proves":      verificationProofKinds(verification),
 		"stdout":      verification.Stdout,
 		"stderr":      verification.Stderr,
+		"error":       verification.Error,
 		"duration_ms": verification.Duration.Milliseconds(),
 		"truncated":   verification.Truncated,
 	}
@@ -180,10 +229,42 @@ func (t *RunVerificationTool) ExecuteWithContext(ctx context.Context, params map
 			"argv":      append([]string(nil), verification.Argv...),
 			"exit_code": verification.ExitCode,
 			"status":    string(verification.Status),
+			"evidence":  verificationEvidenceClass(verification),
+			"proves":    verificationProofKinds(verification),
 			"error":     verification.Error,
 		}
 	}
 	return result, nil
+}
+
+func verificationProofKinds(verification reviewsandbox.Result) []string {
+	if verification.Status != reviewsandbox.StatusPass || verification.ExitCode != 0 {
+		return []string{}
+	}
+	if verification.Language == reviewsandbox.LanguageGo && verification.Kind == reviewsandbox.KindTest {
+		return []string{"build", "test"}
+	}
+	switch verification.Kind {
+	case reviewsandbox.KindBuild:
+		return []string{"build"}
+	case reviewsandbox.KindTest:
+		return []string{"test"}
+	case reviewsandbox.KindCheck:
+		return []string{"check"}
+	default:
+		return []string{}
+	}
+}
+
+func verificationEvidenceClass(verification reviewsandbox.Result) string {
+	switch {
+	case verification.Status == reviewsandbox.StatusPass && verification.ExitCode == 0:
+		return "CONFIRMED_PASS"
+	case verification.Status == reviewsandbox.StatusFail:
+		return "CONFIRMED_FAIL"
+	default:
+		return "INCONCLUSIVE"
+	}
 }
 
 func unavailableVerificationResult(kind, language, reason string) *Result {
@@ -199,6 +280,9 @@ func unavailableVerificationResult(kind, language, reason string) *Result {
 			"argv":      []string{},
 			"exit_code": -1,
 			"status":    string(reviewsandbox.StatusUnavailable),
+			"evidence":  "INCONCLUSIVE",
+			"proves":    []string{},
+			"error":     reason,
 		},
 	}
 }

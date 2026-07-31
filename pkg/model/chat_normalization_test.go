@@ -190,6 +190,22 @@ func TestApplyProviderTransformsAddsLiteLLMNoopToolForToolHistory(t *testing.T) 
 	}
 }
 
+func TestApplyProviderTransformsDropsToolChoiceWithoutTools(t *testing.T) {
+	req := ChatRequest{
+		Model:      "x-ai/grok-4.5",
+		ToolChoice: "none",
+		Messages: []Message{
+			{Role: "user", Content: "return the final answer"},
+		},
+	}
+
+	got := applyProviderTransforms(req, "openrouter")
+
+	if got.ToolChoice != "" {
+		t.Fatalf("tool choice=%q want omitted when tools are absent", got.ToolChoice)
+	}
+}
+
 func TestApplyProviderTransformsDropsEmptyAssistantMessages(t *testing.T) {
 	req := ChatRequest{
 		Model: "openai/gpt-4o",

@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"m31labs.dev/buckley/pkg/tool/builtin"
+	"m31labs.dev/buckley/v2/pkg/tool/builtin"
 )
 
 func (r *Registry) approvalMiddleware() Middleware {
@@ -42,6 +42,11 @@ func (r *Registry) approvalMiddleware() Middleware {
 					ctx.Params = params
 					return next(ctx)
 				})
+			case "run_code":
+				return r.executeWithMissionCode(execCtx, ctx.Params, func(params map[string]any) (*builtin.Result, error) {
+					ctx.Params = params
+					return next(ctx)
+				})
 			default:
 				return next(ctx)
 			}
@@ -72,5 +77,45 @@ func (r *Registry) executeWithMissionShell(ctx context.Context, params map[strin
 		return &builtin.Result{Success: false, Error: fmt.Sprintf("change %s %s by %s", change.ID, change.Status, change.ReviewedBy)}, nil
 	}
 
+	return execFn(params)
+}
+
+// executeWithMissionCode gives dynamic code the same approval boundary as a
+// shell command while presenting readable source rather than the encoded shell
+// wrapper used by the execution backend.
+func (r *Registry) executeWithMissionCode(ctx context.Context, params map[string]any, execFn func(map[string]any) (*builtin.Result, error)) (*builtin.Result, error) {
+	language, _ := params["language"].(string)
+	code, _ := params["code"].(string)
+	language = strings.TrimSpace(language)
+	code = strings.TrimSpace(code)
+	if language == "" {
+		return &builtin.Result{Success: false, Error: "language parameter is required"}, nil
+	}
+	if code == "" {
+		return &builtin.Result{Success: false, Error: "code parameter is required"}, nil
+	}
+	// Reuse the tool's canonical validator before displaying or approving work.
+	if _, err := builtin.DynamicCodeCommand(params); err != nil {
+		return &builtin.Result{Success: false, Error: err.Error()}, nil
+	}
+
+	preview := code
+	const maxPreviewBytes = 16 * 1024
+	if len(preview) > maxPreviewBytes {
+		preview = preview[:maxPreviewBytes] + fmt.Sprintf("\n... %d code bytes omitted from approval preview ...", len(code)-maxPreviewBytes)
+	}
+	diff := fmt.Sprintf("%s code requested:\n\n%s", language, preview)
+
+	changeID, err := r.recordPendingChange("code://run_code", diff, "run_code")
+	if err != nil {
+		return &builtin.Result{Success: false, Error: fmt.Sprintf("failed to create pending change: %v", err)}, nil
+	}
+	change, err := r.awaitDecision(ctx, changeID)
+	if err != nil {
+		return &builtin.Result{Success: false, Error: fmt.Sprintf("approval wait failed: %v", err)}, nil
+	}
+	if change.Status != "approved" {
+		return &builtin.Result{Success: false, Error: fmt.Sprintf("change %s %s by %s", change.ID, change.Status, change.ReviewedBy)}, nil
+	}
 	return execFn(params)
 }

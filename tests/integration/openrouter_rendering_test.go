@@ -16,10 +16,10 @@ import (
 	"testing"
 	"time"
 
-	"m31labs.dev/buckley/pkg/model"
-	"m31labs.dev/buckley/pkg/oneshot"
-	"m31labs.dev/buckley/pkg/tools"
-	"m31labs.dev/buckley/pkg/transparency"
+	"m31labs.dev/buckley/v2/pkg/model"
+	"m31labs.dev/buckley/v2/pkg/oneshot"
+	"m31labs.dev/buckley/v2/pkg/tools"
+	"m31labs.dev/buckley/v2/pkg/transparency"
 )
 
 // skipWithoutOpenRouter skips the test if no OpenRouter API key is set.

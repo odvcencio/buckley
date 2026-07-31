@@ -3,13 +3,15 @@ package widgets
 import (
 	"strings"
 
-	"m31labs.dev/buckley/pkg/ui/backend"
-	"m31labs.dev/buckley/pkg/ui/compositor"
-	"m31labs.dev/buckley/pkg/ui/markdown"
-	"m31labs.dev/buckley/pkg/ui/runtime"
-	"m31labs.dev/buckley/pkg/ui/scrollback"
-	"m31labs.dev/buckley/pkg/ui/terminal"
+	"m31labs.dev/buckley/v2/pkg/ui/scrollback"
+	"m31labs.dev/fluffyui/backend"
+	"m31labs.dev/fluffyui/compositor"
+	"m31labs.dev/fluffyui/markdown"
+	"m31labs.dev/fluffyui/runtime"
+	"m31labs.dev/fluffyui/terminal"
 )
+
+const maxChatTextWidth = 110
 
 // ChatView displays the conversation history with scrolling.
 type ChatView struct {
@@ -36,7 +38,8 @@ type ChatView struct {
 	lastContent string
 
 	// Callbacks
-	onScrollChange func(top, total, viewHeight int)
+	onScrollChange    func(top, total, viewHeight int)
+	scrollbarDragging bool
 }
 
 // NewChatView creates a new chat view widget.
@@ -85,20 +88,18 @@ func (c *ChatView) OnScrollChange(fn func(top, total, viewHeight int)) {
 
 // AddMessage adds a message to the chat.
 func (c *ChatView) AddMessage(content, source string) {
-	switch source {
-	case "thinking":
+	if source == "thinking" && strings.TrimSpace(content) == "" {
 		c.buffer.AppendAuxLine("  ◦ thinking...", scrollback.LineStyle{
 			FG:     extractFG(c.thinkingStyle),
 			Italic: true,
 			Dim:    true,
 		}, "thinking")
 		return
-	default:
-		lines := c.buildMessageLines(content, source)
-		c.buffer.AppendMessage(lines)
-		c.lastSource = source
-		c.lastContent = content
 	}
+	lines := c.buildMessageLines(content, source)
+	c.buffer.AppendMessage(lines)
+	c.lastSource = source
+	c.lastContent = content
 }
 
 // AppendText appends text to the last message (for streaming).
@@ -111,6 +112,15 @@ func (c *ChatView) AppendText(text string) {
 	c.lastContent += text
 	lines := c.buildMessageLines(c.lastContent, c.lastSource)
 	c.buffer.ReplaceLastMessage(lines)
+}
+
+// ReplaceText replaces the content of the last message while preserving its source.
+func (c *ChatView) ReplaceText(content string) {
+	if c.lastSource == "" {
+		return
+	}
+	c.lastContent = content
+	c.buffer.ReplaceLastMessage(c.buildMessageLines(content, c.lastSource))
 }
 
 func (c *ChatView) buildMessageLines(content, source string) []scrollback.Line {
@@ -184,7 +194,7 @@ func (c *ChatView) renderPlainLines(content, source string) []scrollback.Line {
 }
 
 func (c *ChatView) renderMarkdownLines(content, source string) []scrollback.Line {
-	mdLines := c.mdRenderer.Render(source, content)
+	mdLines := prepareMarkdownForWorkspace(c.mdRenderer.RenderWidth(source, markdownPPForTerminal(content), c.markdownRenderWidth()))
 	lines := make([]scrollback.Line, 0, len(mdLines))
 	for _, line := range mdLines {
 		spans := convertMarkdownSpans(line.Spans)
@@ -204,6 +214,14 @@ func (c *ChatView) renderMarkdownLines(content, source string) []scrollback.Line
 		})
 	}
 	return lines
+}
+
+func (c *ChatView) markdownRenderWidth() int {
+	viewport := chatViewport(c.bounds)
+	if viewport.Width <= 2 {
+		return maxChatTextWidth
+	}
+	return min(maxChatTextWidth, viewport.Width-2)
 }
 
 func convertMarkdownSpans(spans []markdown.StyledSpan) []scrollback.Span {
@@ -296,7 +314,7 @@ func (c *ChatView) ScrollPosition() (top, total, viewHeight int) {
 
 // PositionForPoint maps screen coordinates to a buffer position.
 func (c *ChatView) PositionForPoint(x, y int) (line, col int, ok bool) {
-	bounds := c.bounds
+	bounds := chatViewport(c.bounds)
 	if x < bounds.X || y < bounds.Y || y >= bounds.Y+bounds.Height {
 		return 0, 0, false
 	}
@@ -380,7 +398,8 @@ func (c *ChatView) Measure(constraints runtime.Constraints) runtime.Size {
 // Layout updates the scrollback buffer size.
 func (c *ChatView) Layout(bounds runtime.Rect) {
 	c.bounds = bounds
-	c.buffer.Resize(bounds.Width, bounds.Height)
+	viewport := chatViewport(bounds)
+	c.buffer.Resize(viewport.Width, viewport.Height)
 }
 
 // Render draws the chat view.
@@ -390,8 +409,10 @@ func (c *ChatView) Render(ctx runtime.RenderContext) {
 		return
 	}
 
-	c.renderVisibleLines(ctx, c.buffer.GetVisibleLines(), bounds)
-	c.renderScrollbar(ctx)
+	ctx.Buffer.Fill(bounds, ' ', backend.DefaultStyle())
+	viewport := chatViewport(bounds)
+	c.renderVisibleLines(ctx, c.buffer.GetVisibleLines(), viewport)
+	c.renderScrollbar(ctx, viewport)
 }
 
 func (c *ChatView) renderVisibleLines(ctx runtime.RenderContext, lines []scrollback.VisibleLine, bounds runtime.Rect) {
@@ -501,37 +522,27 @@ func fillChatRow(buf *runtime.Buffer, x, y, maxX int, style backend.Style) {
 	}
 }
 
-// renderScrollbar draws the scrollbar on the right edge.
-func (c *ChatView) renderScrollbar(ctx runtime.RenderContext) {
-	bounds := c.bounds
-	top, total, viewH := c.buffer.ScrollPosition()
+// renderScrollbar draws a semantic scrollbar with turn bookmarks.
+func (c *ChatView) renderScrollbar(ctx runtime.RenderContext, bounds runtime.Rect) {
+	c.renderSemanticScrollbar(ctx, bounds)
+}
 
-	if total <= viewH {
-		return // No scrollbar needed
-	}
-
-	// Calculate thumb position and size
-	thumbSize := max(1, (viewH*viewH)/total)
-	thumbPos := (top * (viewH - thumbSize)) / (total - viewH)
-
-	scrollX := bounds.X + bounds.Width - 1
-
-	for y := 0; y < bounds.Height; y++ {
-		var r rune
-		var style backend.Style
-		if y >= thumbPos && y < thumbPos+thumbSize {
-			r = '█'
-			style = c.scrollThumb
-		} else {
-			r = '░'
-			style = c.scrollbarStyle
-		}
-		ctx.Buffer.Set(scrollX, bounds.Y+y, r, style)
+func chatViewport(bounds runtime.Rect) runtime.Rect {
+	maxWidth := maxChatTextWidth + 2 // wrapping inset plus scrollbar
+	width := min(bounds.Width, maxWidth)
+	return runtime.Rect{
+		X:      bounds.X + max(0, (bounds.Width-width)/2),
+		Y:      bounds.Y,
+		Width:  width,
+		Height: bounds.Height,
 	}
 }
 
 // HandleMessage processes input events.
 func (c *ChatView) HandleMessage(msg runtime.Message) runtime.HandleResult {
+	if mouse, ok := msg.(runtime.MouseMsg); ok {
+		return c.handleScrollbarMouse(mouse)
+	}
 	key, ok := msg.(runtime.KeyMsg)
 	if !ok {
 		return runtime.Unhandled()

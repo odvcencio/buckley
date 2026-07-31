@@ -58,6 +58,14 @@ func (t *ExcelTool) Parameters() ParameterSchema {
 			"data": {
 				Type:        "array",
 				Description: "Array of arrays for batch write operations. Each inner array is a row. Example: [['Name', 'Age'], ['Alice', 30], ['Bob', 25]]",
+				Items: &PropertySchema{
+					Type:        "array",
+					Description: "A single row of cell values",
+					Items: &PropertySchema{
+						Type:        "string",
+						Description: "A cell value; format numbers and booleans as text",
+					},
+				},
 			},
 			"start_cell": {
 				Type:        "string",

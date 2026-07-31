@@ -2,6 +2,7 @@ package skill
 
 import (
 	"embed"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -89,14 +90,14 @@ func (l *Loader) LoadFromPlugins(skills map[string]*Skill) error {
 	}
 
 	// Load from all discovered plugin skill directories
+	var loadErrs []error
 	for _, dir := range pluginDirs {
 		if err := l.loadFromDirectory(dir, "plugin", skills); err != nil {
-			// Plugin directories may not exist, which is fine
-			continue
+			loadErrs = append(loadErrs, err)
 		}
 	}
 
-	return nil
+	return errors.Join(loadErrs...)
 }
 
 // LoadPersonal loads skills from ~/.buckley/skills/
@@ -127,14 +128,17 @@ func (l *Loader) LoadProjectAgent(skills map[string]*Skill) error {
 	if err != nil {
 		return nil // Not an error if cwd can't be determined
 	}
-	skillsDir, ok, err := findProjectAgentSkillsDir(cwd)
+	skillDirs, err := findProjectAgentSkillDirs(cwd)
 	if err != nil {
 		return err
 	}
-	if !ok {
-		return nil
+	var loadErrs []error
+	for _, skillsDir := range skillDirs {
+		if err := l.loadAgentSkillDirectory(skillsDir, "agent", skills); err != nil {
+			loadErrs = append(loadErrs, err)
+		}
 	}
-	return l.loadAgentSkillDirectory(skillsDir, "agent", skills)
+	return errors.Join(loadErrs...)
 }
 
 // loadFromDirectory loads all SKILL.md files from a directory
@@ -147,54 +151,74 @@ func (l *Loader) loadFromDirectory(dir, source string, skills map[string]*Skill)
 		return err
 	}
 
+	var loadErrs []error
 	for _, entry := range entries {
 		if entry.IsDir() {
 			// Check for SKILL.md in subdirectory
 			skillFile := filepath.Join(dir, entry.Name(), "SKILL.md")
-			if err := l.loadSkillFile(skillFile, source, skills); err != nil {
-				// Log but don't fail on individual skill errors
+			if _, err := os.Stat(skillFile); os.IsNotExist(err) {
 				continue
+			}
+			if err := l.loadSkillFile(skillFile, source, skills); err != nil {
+				loadErrs = append(loadErrs, fmt.Errorf("%s: %w", skillFile, err))
 			}
 		} else if strings.HasSuffix(entry.Name(), ".md") {
 			// Load markdown file directly
 			skillFile := filepath.Join(dir, entry.Name())
 			if err := l.loadSkillFile(skillFile, source, skills); err != nil {
-				continue
+				loadErrs = append(loadErrs, fmt.Errorf("%s: %w", skillFile, err))
 			}
 		}
 	}
 
-	return nil
+	return errors.Join(loadErrs...)
 }
 
-func findProjectAgentSkillsDir(start string) (string, bool, error) {
+var projectAgentSkillRoots = []string{
+	filepath.Join("agent", "skills"),
+	filepath.Join(".agent", "skills"),
+	filepath.Join(".agents", "skills"),
+	filepath.Join(".codex", "skills"),
+}
+
+func findProjectAgentSkillDirs(start string) ([]string, error) {
 	start = strings.TrimSpace(start)
 	if start == "" {
 		start = "."
 	}
 	dir, err := filepath.Abs(start)
 	if err != nil {
-		return "", false, fmt.Errorf("resolve project agent skills start: %w", err)
+		return nil, fmt.Errorf("resolve project agent skills start: %w", err)
 	}
 	info, err := os.Stat(dir)
 	if err != nil {
-		return "", false, fmt.Errorf("stat project agent skills start: %w", err)
+		return nil, fmt.Errorf("stat project agent skills start: %w", err)
 	}
 	if !info.IsDir() {
 		dir = filepath.Dir(dir)
 	}
 
 	for {
-		candidate := filepath.Join(dir, "agent", "skills")
-		info, err := os.Stat(candidate)
-		if err == nil {
-			if !info.IsDir() {
-				return "", false, fmt.Errorf("project agent skills path is not a directory: %s", candidate)
+		var found []string
+		for _, rel := range projectAgentSkillRoots {
+			candidate := filepath.Join(dir, rel)
+			info, err := os.Stat(candidate)
+			if err == nil {
+				if !info.IsDir() {
+					return nil, fmt.Errorf("project agent skills path is not a directory: %s", candidate)
+				}
+				found = append(found, candidate)
+				continue
 			}
-			return candidate, true, nil
+			if !os.IsNotExist(err) {
+				return nil, fmt.Errorf("stat project agent skills: %w", err)
+			}
 		}
-		if !os.IsNotExist(err) {
-			return "", false, fmt.Errorf("stat project agent skills: %w", err)
+		if len(found) > 0 {
+			return found, nil
+		}
+		if isProjectBoundary(dir) {
+			break
 		}
 		parent := filepath.Dir(dir)
 		if parent == dir {
@@ -202,7 +226,16 @@ func findProjectAgentSkillsDir(start string) (string, bool, error) {
 		}
 		dir = parent
 	}
-	return "", false, nil
+	return nil, nil
+}
+
+func isProjectBoundary(dir string) bool {
+	for _, marker := range []string{".git", ".hg"} {
+		if _, err := os.Stat(filepath.Join(dir, marker)); err == nil {
+			return true
+		}
+	}
+	return false
 }
 
 func (l *Loader) loadAgentSkillDirectory(dir, source string, skills map[string]*Skill) error {
@@ -217,7 +250,8 @@ func (l *Loader) loadAgentSkillDirectory(dir, source string, skills map[string]*
 		return fmt.Errorf("agent skills path is not a directory: %s", dir)
 	}
 
-	if err := filepath.WalkDir(dir, func(path string, entry os.DirEntry, walkErr error) error {
+	var loadErrs []error
+	walkErr := filepath.WalkDir(dir, func(path string, entry os.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}
@@ -231,6 +265,7 @@ func (l *Loader) loadAgentSkillDirectory(dir, source string, skills map[string]*
 					return err
 				}
 				if err := l.loadAgentSkillFile(filepath.Join(path, "SKILL.md"), source, name, skills); err != nil {
+					loadErrs = append(loadErrs, err)
 					return filepath.SkipDir
 				}
 				return filepath.SkipDir
@@ -247,12 +282,15 @@ func (l *Loader) loadAgentSkillDirectory(dir, source string, skills map[string]*
 		if err != nil {
 			return err
 		}
-		_ = l.loadAgentSkillFile(path, source, name, skills)
+		if err := l.loadAgentSkillFile(path, source, name, skills); err != nil {
+			loadErrs = append(loadErrs, err)
+		}
 		return nil
-	}); err != nil {
-		return fmt.Errorf("read project agent skills: %w", err)
+	})
+	if walkErr != nil {
+		loadErrs = append(loadErrs, fmt.Errorf("read project agent skills: %w", walkErr))
 	}
-	return nil
+	return errors.Join(loadErrs...)
 }
 
 func hasAgentSkillPackage(dir string) bool {
@@ -282,7 +320,7 @@ func (l *Loader) loadAgentSkillFile(path, source, fallbackName string, skills ma
 	skill.FilePath = path
 	skill.LoadedAt = time.Now()
 	if err := skill.Validate(); err != nil {
-		return err
+		return fmt.Errorf("validate %s: %w", path, err)
 	}
 	skills[skill.Name] = skill
 	return nil

@@ -63,4 +63,12 @@ func TestAPICallStoreTracking(t *testing.T) {
 	if monthly < daily {
 		t.Fatalf("expected monthly cost >= daily cost, got monthly=%f daily=%f", monthly, daily)
 	}
+
+	principalMonthly, err := store.GetMonthlyCostForPrincipal("")
+	if err != nil {
+		t.Fatalf("monthly cost for principal: %v", err)
+	}
+	if principalMonthly != 0 {
+		t.Fatalf("expected no spend for empty principal, got %f", principalMonthly)
+	}
 }

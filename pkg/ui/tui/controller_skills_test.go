@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"m31labs.dev/buckley/pkg/skill"
-	"m31labs.dev/buckley/pkg/tool/builtin"
+	"m31labs.dev/buckley/v2/pkg/skill"
+	"m31labs.dev/buckley/v2/pkg/tool/builtin"
 )
 
 func TestFormatSkillList(t *testing.T) {

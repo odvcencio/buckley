@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"m31labs.dev/buckley/pkg/giturl"
+	"m31labs.dev/buckley/v2/pkg/giturl"
 )
 
 func defaultACPStore() string {
@@ -98,6 +98,20 @@ func defaultNATSURL() string {
 // DefaultConfig returns sensible defaults
 func DefaultConfig() *Config {
 	return &Config{
+		Buckbot: BuckbotConfig{
+			Model:                      defaultOpenRouterCommitModel,
+			CriticModel:                "",
+			Reasoning:                  "auto",
+			PerReviewBudgetUSD:         0.15,
+			MonthlyBudgetUSD:           25.00,
+			MaxReviewIterations:        0,
+			MaxValidationAttempts:      2,
+			MaxDiffBytes:               240_000,
+			MaxSupportingContextTokens: 12_000,
+			PostingCoreAssociations:    []string{"OWNER", "MEMBER", "COLLABORATOR"},
+			PostingAllowlist:           nil,
+			PostingSizeThresholdBytes:  0,
+		},
 		Models: ModelConfig{
 			Planning:  defaultOpenRouterModel,
 			Execution: defaultOpenRouterModel,
@@ -130,7 +144,7 @@ func DefaultConfig() *Config {
 			},
 			DefaultProvider: "openrouter",
 			Utility: UtilityModelConfig{
-				Commit:     DefaultUtilityModel,
+				Commit:     DefaultCommitModel,
 				PR:         DefaultUtilityModel,
 				Compaction: DefaultUtilityModel,
 				TodoPlan:   DefaultUtilityModel,
@@ -194,7 +208,8 @@ func DefaultConfig() *Config {
 			UseToon: true,
 		},
 		Diagnostics: DiagnosticsConfig{
-			NetworkLogsEnabled: false,
+			NetworkLogsEnabled:           false,
+			TelemetryPayloadsOverNetwork: false,
 		},
 		Personality: PersonalityConfig{
 			Enabled:          true,

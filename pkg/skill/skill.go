@@ -2,16 +2,23 @@ package skill
 
 import (
 	"fmt"
+	"strings"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 // Skill represents a workflow guidance document that can be activated to provide
 // structured instructions to the AI agent.
 type Skill struct {
-	// Core fields (Claude Code compatible)
-	Name         string   `yaml:"name"`
-	Description  string   `yaml:"description"`
-	AllowedTools []string `yaml:"allowed_tools,omitempty"`
+	// Core Agent Skills fields plus Buckley's legacy restrictive allowlist.
+	Name             string         `yaml:"name"`
+	Description      string         `yaml:"description"`
+	AllowedTools     []string       `yaml:"allowed_tools,omitempty"`
+	PreapprovedTools []string       `yaml:"-"`
+	License          string         `yaml:"license,omitempty"`
+	Compatibility    string         `yaml:"compatibility,omitempty"`
+	Metadata         map[string]any `yaml:"metadata,omitempty"`
 
 	// Buckley extensions (optional)
 	Phase        string `yaml:"phase,omitempty"`         // planning|execute|review
@@ -29,6 +36,69 @@ type Skill struct {
 	Source   string    `yaml:"-"` // Where loaded from (bundled|plugin|personal|project)
 	FilePath string    `yaml:"-"` // Full path to SKILL.md
 	LoadedAt time.Time `yaml:"-"`
+}
+
+// UnmarshalYAML accepts both Buckley's legacy allowed_tools list and the
+// Agent Skills specification's space-delimited allowed-tools field.
+func (s *Skill) UnmarshalYAML(node *yaml.Node) error {
+	type skillFrontmatter struct {
+		Name          string         `yaml:"name"`
+		Description   string         `yaml:"description"`
+		AllowedTools  yaml.Node      `yaml:"allowed-tools"`
+		LegacyTools   yaml.Node      `yaml:"allowed_tools"`
+		License       string         `yaml:"license,omitempty"`
+		Compatibility string         `yaml:"compatibility,omitempty"`
+		Metadata      map[string]any `yaml:"metadata,omitempty"`
+		Phase         string         `yaml:"phase,omitempty"`
+		RequiresTodo  bool           `yaml:"requires_todo,omitempty"`
+		Priority      int            `yaml:"priority,omitempty"`
+		Model         string         `yaml:"model,omitempty"`
+		TodoTemplate  string         `yaml:"todo_template,omitempty"`
+	}
+
+	var frontmatter skillFrontmatter
+	if err := node.Decode(&frontmatter); err != nil {
+		return err
+	}
+	preapprovedTools, err := decodeAllowedTools(frontmatter.AllowedTools)
+	if err != nil {
+		return fmt.Errorf("allowed-tools: %w", err)
+	}
+	legacyTools, err := decodeAllowedTools(frontmatter.LegacyTools)
+	if err != nil {
+		return fmt.Errorf("allowed_tools: %w", err)
+	}
+
+	s.Name = frontmatter.Name
+	s.Description = frontmatter.Description
+	s.AllowedTools = legacyTools
+	s.PreapprovedTools = preapprovedTools
+	s.License = frontmatter.License
+	s.Compatibility = frontmatter.Compatibility
+	s.Metadata = frontmatter.Metadata
+	s.Phase = frontmatter.Phase
+	s.RequiresTodo = frontmatter.RequiresTodo
+	s.Priority = frontmatter.Priority
+	s.Model = frontmatter.Model
+	s.TodoTemplate = frontmatter.TodoTemplate
+	return nil
+}
+
+func decodeAllowedTools(node yaml.Node) ([]string, error) {
+	switch node.Kind {
+	case 0:
+		return nil, nil
+	case yaml.ScalarNode:
+		return strings.Fields(node.Value), nil
+	case yaml.SequenceNode:
+		var tools []string
+		if err := node.Decode(&tools); err != nil {
+			return nil, err
+		}
+		return tools, nil
+	default:
+		return nil, fmt.Errorf("must be a space-delimited string or list")
+	}
 }
 
 // ActiveSkill represents a skill that is currently active in a conversation

@@ -115,6 +115,37 @@ func TestPrepareTaskWorkspaceUsesSingleChildRepoRoot(t *testing.T) {
 	}
 }
 
+func TestPrepareTaskWorkspacePrefersSingleChildRepoOverAncestor(t *testing.T) {
+	oldWD, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	root := t.TempDir()
+	workspace := filepath.Join(root, "workspace")
+	repo := filepath.Join(workspace, "repo")
+	for _, dir := range []string{filepath.Join(root, ".git"), filepath.Join(repo, ".git")} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+	if err := os.Chdir(workspace); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(oldWD); err != nil {
+			t.Fatalf("restore cwd: %v", err)
+		}
+	})
+
+	got, err := prepareTaskWorkspace("", "", "", "")
+	if err != nil {
+		t.Fatalf("prepareTaskWorkspace: %v", err)
+	}
+	if got != repo {
+		t.Fatalf("repo root = %q, want %q", got, repo)
+	}
+}
+
 func TestGitCommandEnvOverridesNonInteractive(t *testing.T) {
 	oldTerminal := stdinIsTerminalFn
 	stdinIsTerminalFn = func() bool { return false }

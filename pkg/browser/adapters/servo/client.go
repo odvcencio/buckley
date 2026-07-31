@@ -10,8 +10,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	browserdpb "m31labs.dev/buckley/pkg/browser/adapters/servo/proto"
 	"google.golang.org/protobuf/proto"
+	browserdpb "m31labs.dev/buckley/v2/pkg/browser/adapters/servo/proto"
 )
 
 type client struct {

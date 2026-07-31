@@ -12,12 +12,12 @@ import (
 	"connectrpc.com/connect"
 	"google.golang.org/protobuf/types/known/emptypb"
 
-	"m31labs.dev/buckley/pkg/config"
-	"m31labs.dev/buckley/pkg/headless"
-	"m31labs.dev/buckley/pkg/ipc/command"
-	ipcpb "m31labs.dev/buckley/pkg/ipc/proto"
-	"m31labs.dev/buckley/pkg/orchestrator"
-	"m31labs.dev/buckley/pkg/storage"
+	"m31labs.dev/buckley/v2/pkg/config"
+	"m31labs.dev/buckley/v2/pkg/headless"
+	"m31labs.dev/buckley/v2/pkg/ipc/command"
+	ipcpb "m31labs.dev/buckley/v2/pkg/ipc/proto"
+	"m31labs.dev/buckley/v2/pkg/orchestrator"
+	"m31labs.dev/buckley/v2/pkg/storage"
 )
 
 func TestGRPCSendCommandScopeEnforced(t *testing.T) {
@@ -75,6 +75,9 @@ func TestGRPCSendCommandScopeEnforced(t *testing.T) {
 	}
 	if resp.Msg.Status != "accepted" {
 		t.Fatalf("SendCommand status=%q want accepted", resp.Msg.Status)
+	}
+	if resp.Msg.CommandId == "" {
+		t.Fatal("SendCommand returned an empty command ID")
 	}
 }
 

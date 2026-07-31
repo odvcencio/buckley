@@ -8,7 +8,7 @@ import (
 	"strconv"
 	"strings"
 
-	"m31labs.dev/buckley/pkg/diffsignal"
+	"m31labs.dev/buckley/v2/pkg/diffsignal"
 )
 
 // ContextOpts configures context building behavior.

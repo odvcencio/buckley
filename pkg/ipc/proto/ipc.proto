@@ -180,7 +180,7 @@ message Event {
 message CommandRequest {
   string session_id = 1;
 
-  // Command type: "input", "slash", "interrupt", "approve", "reject"
+  // Command type: "input", "slash", "steer", "queue", "interrupt", "model", "approve", "reject"
   string type = 2;
 
   // Command content (user message or slash command)

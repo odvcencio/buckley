@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
@@ -13,9 +14,11 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
-	"m31labs.dev/buckley/pkg/diffsignal"
-	"m31labs.dev/buckley/pkg/transparency"
+	"m31labs.dev/buckley/v2/pkg/diffsignal"
+	"m31labs.dev/buckley/v2/pkg/reviewpolicy"
+	"m31labs.dev/buckley/v2/pkg/transparency"
 )
 
 // PRInfo contains parsed PR metadata.
@@ -23,6 +26,7 @@ type PRInfo struct {
 	Number         int
 	Title          string
 	Author         string
+	AuthorAssoc    string // GitHub's authorAssociation: OWNER, MEMBER, COLLABORATOR, CONTRIBUTOR, FIRST_TIME_CONTRIBUTOR, FIRST_TIMER, or NONE
 	State          string
 	URL            string
 	Host           string
@@ -42,8 +46,22 @@ type PRInfo struct {
 
 // PRContext contains context for PR review.
 type PRContext struct {
-	PR                      *PRInfo
-	Diff                    string
+	PR   *PRInfo
+	Diff string
+
+	// RawDiff is the fetched diff text before Prioritize shaped it into
+	// Diff. Callers that need to re-shard at a caller-chosen shard count or
+	// budget (for example, a CLI testing flag) call
+	// diffsignal.PrioritizeShards on this instead of re-fetching.
+	RawDiff string
+
+	// Shards is the diff partitioned for fan-out review: every high-signal
+	// file assigned to exactly one shard, with no upper bound on shard
+	// count. A PR whose HighSignalBytes fits opts.MaxDiffBytes always
+	// produces exactly one shard, identical in content to Diff; a caller
+	// only needs the multi-pass path when len(Shards.Shards) > 1.
+	Shards diffsignal.ShardResult
+
 	Comments                []PRComment
 	Reviews                 []PRReview
 	InlineComments          []PRComment
@@ -54,8 +72,20 @@ type PRContext struct {
 	Files                   []string
 	AgentsMD                string
 	CheckoutSHA             string
+	CanopyReview            string
+	CanopyRuntime           time.Duration
+	CanopyIndexScope        string
+	CanopyIndexScopeSource  string
+	CanopyBlastRadius       int
+	ProviderEvidence        []PRContextEvidence
+	ContextCuration         PRContextCuration
 	ContextStatus           []PRContextStatus
 	target                  prReference
+	localRepoRoot           string
+	localHeadMatches        bool
+	localWorktreeClean      bool
+	promptContext           *PRContext
+	feedbackIDCache         *prFeedbackIDSet
 }
 
 const (
@@ -105,13 +135,66 @@ type PRCheck struct {
 type prCommandRunner func(name string, args ...string) ([]byte, error)
 
 type prContextDependencies struct {
-	run prCommandRunner
+	run           prCommandRunner
+	collectCanopy func(context.Context, string, string) canopyReviewEvidence
+}
+
+// PRContextOptions controls automated-review context limits. Interactive
+// reviews use the larger defaults; callers can independently budget the diff
+// and supporting prose while retaining metadata, feedback IDs, and CI evidence.
+type PRContextOptions struct {
+	MaxDiffBytes               int
+	MaxSupportingContextTokens int
+	Context                    context.Context
+	Providers                  []PRContextProvider
+}
+
+// DefaultPRContextOptions returns the full interactive review context budget.
+func DefaultPRContextOptions() PRContextOptions {
+	return PRContextOptions{
+		MaxDiffBytes:               diffsignal.ReviewDiffBudget,
+		MaxSupportingContextTokens: DefaultPRSupportingContextTokens,
+	}
 }
 
 type prDiff struct {
 	Text          string
 	Truncated     bool
 	OriginalBytes int
+	Files         []string
+	LocalFallback bool
+
+	// Raw is the fetched diff text before Prioritize shaped it: the exact
+	// bytes getPRDiffWithBudget classified. Callers that need to shard a
+	// large diff across multiple review passes (see diffsignal.PrioritizeShards)
+	// use this instead of Text, because Text has already been flattened
+	// into a single budget-bound pass.
+	Raw string
+
+	// Reconstructed is true when "gh pr diff" itself failed (for example,
+	// GitHub's ".diff" endpoint 406s past 300 changed files) and the diff
+	// was rebuilt from a fallback source instead.
+	Reconstructed bool
+
+	// ReconstructionNote explains which fallback supplied Raw and why the
+	// primary source failed, for display in PRContextStatus.
+	ReconstructionNote string
+}
+
+// prDiffFallbackContext supplies the extra evidence getPRDiffWithBudget needs
+// to reconstruct a diff when "gh pr diff" fails outright. Both fields are
+// optional; when empty, the local-git fallback is skipped.
+type prDiffFallbackContext struct {
+	BaseSHA string
+	HeadSHA string
+}
+
+// prDiffSource is the raw diff text plus fallback provenance, before any
+// budget shaping.
+type prDiffSource struct {
+	Text          string
+	Reconstructed bool
+	Note          string
 }
 
 type prReference struct {
@@ -128,18 +211,90 @@ type inlineCommentsResult struct {
 	FallbackReason          string
 }
 
+type prCommentsResult struct {
+	Comments    []PRComment
+	ViewerLogin string
+}
+
+const (
+	buckbotOperationalCommentPrefix = "<!-- buckbot:operation:"
+	buckbotFinalReviewPrefix        = "<!-- buckbot:final:"
+	buckbotInlineReviewPrefix       = "<!-- buckbot:inline:"
+)
+
+// BuckbotReviewIntakeMarker identifies a review-start notice. Context assembly
+// excludes these notices from the prior-feedback ledger.
+func BuckbotReviewIntakeMarker(headSHA string) string {
+	return buckbotOperationalCommentPrefix + "review-intake:" + strings.TrimSpace(headSHA) + " -->"
+}
+
+func isBuckbotOperationalComment(body string) bool {
+	return strings.HasPrefix(strings.TrimSpace(body), buckbotOperationalCommentPrefix)
+}
+
+func isBuckbotLifecycleFeedback(body string) bool {
+	body = strings.TrimSpace(body)
+	return isBuckbotOperationalComment(body) ||
+		strings.HasPrefix(body, buckbotFinalReviewPrefix) ||
+		strings.HasPrefix(body, buckbotInlineReviewPrefix)
+}
+
+func filterOwnBuckbotLifecycleComments(comments []PRComment, viewerLogin string) []PRComment {
+	if strings.TrimSpace(viewerLogin) == "" {
+		return comments
+	}
+	filtered := make([]PRComment, 0, len(comments))
+	for _, comment := range comments {
+		if strings.EqualFold(comment.Author, viewerLogin) && isBuckbotLifecycleFeedback(comment.Body) {
+			continue
+		}
+		filtered = append(filtered, comment)
+	}
+	return filtered
+}
+
+func filterOwnBuckbotLifecycleReviews(reviews []PRReview, viewerLogin string) []PRReview {
+	if strings.TrimSpace(viewerLogin) == "" {
+		return reviews
+	}
+	filtered := make([]PRReview, 0, len(reviews))
+	for _, review := range reviews {
+		if strings.EqualFold(review.Author, viewerLogin) && isBuckbotLifecycleFeedback(review.Body) {
+			continue
+		}
+		filtered = append(filtered, review)
+	}
+	return filtered
+}
+
 // AssemblePRContext gathers context for PR review using gh CLI.
 func AssemblePRContext(prRef string) (*PRContext, *transparency.ContextAudit, error) {
-	return assemblePRContext(prRef, prContextDependencies{
-		run: defaultPRCommandRunner,
-	})
+	return AssemblePRContextWithOptions(prRef, DefaultPRContextOptions())
+}
+
+// AssemblePRContextWithOptions gathers PR context with explicit size limits.
+func AssemblePRContextWithOptions(prRef string, opts PRContextOptions) (*PRContext, *transparency.ContextAudit, error) {
+	return assemblePRContextWithOptions(prRef, prContextDependencies{
+		run:           defaultPRCommandRunner,
+		collectCanopy: collectCanopyReviewEvidence,
+	}, opts)
 }
 
 func assemblePRContext(prRef string, deps prContextDependencies) (*PRContext, *transparency.ContextAudit, error) {
+	return assemblePRContextWithOptions(prRef, deps, DefaultPRContextOptions())
+}
+
+func assemblePRContextWithOptions(prRef string, deps prContextDependencies, opts PRContextOptions) (*PRContext, *transparency.ContextAudit, error) {
 	audit := transparency.NewContextAudit()
 	prCtx := &PRContext{}
 	if deps.run == nil {
 		deps.run = defaultPRCommandRunner
+	}
+	if opts.MaxDiffBytes <= 0 {
+		opts.MaxDiffBytes = diffsignal.ReviewDiffBudget
+	}
+	if opts.MaxSupportingContextTokens <= 0 {
+		opts.MaxSupportingContextTokens = DefaultPRSupportingContextTokens
 	}
 
 	target, err := parsePRRef(prRef)
@@ -157,44 +312,67 @@ func assemblePRContext(prRef string, deps prContextDependencies) (*PRContext, *t
 	target.Host = firstPRString(target.Host, pr.Host)
 	target.Repository = firstPRString(target.Repository, pr.Repository)
 	prCtx.target = target
-	metadata := pr.Title + pr.Body + pr.Host + pr.Repository + pr.HeadSHA + pr.BaseSHA + pr.ReviewDecision
+	metadata := pr.Title + pr.Host + pr.Repository + pr.HeadSHA + pr.BaseSHA + pr.ReviewDecision
 	audit.Add("PR metadata", reviewEstimateTokens(metadata))
 	prCtx.addStatus("PR metadata", "complete", "immutable repository and base/head revisions captured", false)
 
-	diff, err := getPRDiff(deps.run, target)
+	diff, err := getPRDiffWithBudgetAtRevisions(deps.run, target, pr.BaseSHA, pr.HeadSHA, opts.MaxDiffBytes)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to get PR diff: %w", err)
 	}
 	prCtx.Diff = diff.Text
+	prCtx.RawDiff = diff.Raw
+	prCtx.Shards = diffsignal.PrioritizeShards(diff.Raw, opts.MaxDiffBytes)
+	diffAuditSource := "PR diff"
+	if diff.LocalFallback {
+		diffAuditSource += " (immutable local fallback)"
+	}
 	if diff.Truncated {
-		audit.AddTruncated("PR diff", reviewEstimateTokens(diff.Text), estimatePRBytesTokens(diff.OriginalBytes))
-		prCtx.addStatus("PR diff", "truncated", fmt.Sprintf("%d original bytes; review coverage is partial", diff.OriginalBytes), true)
+		detail := fmt.Sprintf("%d original bytes; review coverage is partial", diff.OriginalBytes)
+		if diff.Reconstructed {
+			detail += "; " + diff.ReconstructionNote
+		}
+		if diff.LocalFallback {
+			detail += "; immutable local git diff used after GitHub throttled the remote diff"
+		}
+		audit.AddTruncated(diffAuditSource, reviewEstimateTokens(diff.Text), estimatePRBytesTokens(diff.OriginalBytes))
+		prCtx.addStatus("PR diff", "truncated", detail, true)
 	} else {
-		audit.Add("PR diff", reviewEstimateTokens(diff.Text))
-		prCtx.addStatus("PR diff", "complete", fmt.Sprintf("%d bytes", diff.OriginalBytes), false)
+		detail := fmt.Sprintf("%d bytes", diff.OriginalBytes)
+		if diff.Reconstructed {
+			detail += "; " + diff.ReconstructionNote
+		}
+		if diff.LocalFallback {
+			detail += "; immutable local git diff used after GitHub throttled the remote diff"
+		}
+		audit.Add(diffAuditSource, reviewEstimateTokens(diff.Text))
+		prCtx.addStatus("PR diff", "complete", detail, false)
 	}
 
 	headChecks, headChecksErr := getPRChecks(deps.run, target)
 
-	comments, err := getPRComments(deps.run, target)
+	commentResult, err := getPRCommentsWithViewer(deps.run, target)
+	viewerLogin := ""
 	if err == nil {
-		prCtx.Comments = comments
-		audit.Add("top-level comments", reviewEstimateTokens(prCommentBodies(comments)))
-		prCtx.addStatus("Top-level comments", "complete", fmt.Sprintf("%d comments", len(comments)), false)
+		viewerLogin = commentResult.ViewerLogin
+		prCtx.Comments = commentResult.Comments
+		audit.Add("top-level comments", 0)
+		prCtx.addStatus("Top-level comments", "complete", fmt.Sprintf("%d comments", len(commentResult.Comments)), false)
 	} else {
 		recordPRContextFailure(prCtx, audit, "Top-level comments", err)
 	}
 
 	reviews, err := getPRReviews(deps.run, target)
 	if err == nil {
+		reviews = filterOwnBuckbotLifecycleReviews(reviews, viewerLogin)
 		prCtx.Reviews = reviews
-		audit.Add("submitted reviews", reviewEstimateTokens(prReviewBodies(reviews)))
+		audit.Add("submitted reviews", 0)
 		prCtx.addStatus("Submitted reviews", "complete", fmt.Sprintf("%d reviews", len(reviews)), false)
 	} else {
 		recordPRContextFailure(prCtx, audit, "Submitted reviews", err)
 	}
 
-	inline, err := getPRInlineComments(deps.run, pr)
+	inline, err := getPRInlineCommentsForViewer(deps.run, pr, viewerLogin)
 	if err == nil {
 		prCtx.InlineComments = inline.Comments
 		prCtx.ResolvedThreadsFiltered = inline.ResolvedThreadsFiltered
@@ -211,30 +389,24 @@ func assemblePRContext(prRef string, deps prContextDependencies) (*PRContext, *t
 		if inline.Truncated {
 			status = "truncated"
 			detail += "; additional inline review context was not fetched"
-			audit.AddTruncated(name, reviewEstimateTokens(prCommentBodies(inline.Comments)), reviewEstimateTokens(prCommentBodies(inline.Comments))+1)
+			audit.AddTruncated(name, 0, 1)
 		} else {
-			audit.Add(name, reviewEstimateTokens(prCommentBodies(inline.Comments)))
+			audit.Add(name, 0)
 		}
 		prCtx.addStatus("Inline review threads", status, detail, inline.Truncated)
 	} else {
 		recordPRContextFailure(prCtx, audit, "Inline review threads", err)
 	}
 
-	files, filesErr := getPRFiles(deps.run, pr)
-	filesAuthoritative := filesErr == nil && len(files) == pr.ChangedFiles
-	if filesErr == nil {
-		prCtx.Files = files
-		if len(files) != pr.ChangedFiles {
-			audit.Add("changed files (cardinality mismatch)", len(files)*5)
-			prCtx.addStatus("Changed files", "incomplete",
-				fmt.Sprintf("metadata reports %d files; paginated API returned %d; review coverage is not authoritative", pr.ChangedFiles, len(files)), false)
-		} else {
-			audit.Add("changed files", len(files)*5)
-			prCtx.addStatus("Changed files", "complete", fmt.Sprintf("%d files", len(files)), false)
-		}
-	} else {
-		recordPRContextFailure(prCtx, audit, "Changed files", filesErr)
+	apiFiles, filesErr := getPRFiles(deps.run, pr)
+	files, detail, err := resolvePRChangedFiles(diff.Files, pr.ChangedFiles, apiFiles, filesErr)
+	if err != nil {
+		return nil, nil, fmt.Errorf("resolve authoritative changed files: %w", err)
 	}
+	prCtx.Files = files
+	filesAuthoritative := true
+	audit.Add("changed files", len(files)*5)
+	prCtx.addStatus("Changed files", "complete", detail, false)
 
 	if headChecksErr != nil {
 		prCtx.PR.CIStatus = "unknown"
@@ -256,14 +428,24 @@ func assemblePRContext(prRef string, deps prContextDependencies) (*PRContext, *t
 	}
 
 	assemblePRAgentsContext(prCtx, audit, deps)
+	assemblePRCanopyContext(opts.Context, prCtx, audit, deps.collectCanopy)
+	collectPRContextProviderEvidence(opts.Context, prCtx, opts.Providers)
 	revalidateAssembledPRMetadata(prCtx, audit, deps.run)
 	audit.Add("context completeness", reviewEstimateTokens(formatPRContextStatus(prCtx.ContextStatus)))
+	promptCtx, curation := CuratePRContext(prCtx, opts.MaxSupportingContextTokens)
+	prCtx.ContextCuration = curation
+	prCtx.promptContext = promptCtx
+	recordPRContextCuration(audit, curation)
 
 	return prCtx, audit, nil
 }
 
 // BuildPRPrompt builds the user prompt for PR review.
 func BuildPRPrompt(ctx *PRContext) string {
+	ctx = promptPRContext(ctx)
+	if ctx == nil || ctx.PR == nil {
+		return ""
+	}
 	var sb strings.Builder
 	feedbackIDs := ctx.feedbackIDs()
 
@@ -303,10 +485,17 @@ func BuildPRPrompt(ctx *PRContext) string {
 		sb.WriteString("\n")
 	}
 
+	appendPRContextCurationNotice(&sb, ctx.ContextCuration)
+
 	if ctx.PR.Body != "" {
 		sb.WriteString("## PR Description\n\n")
 		sb.WriteString(ctx.PR.Body)
 		sb.WriteString("\n\n")
+		sb.WriteString("## Supplied Verification Policy\n\n")
+		sb.WriteString("- Treat commands and results in the PR description as supplied evidence for analysis.\n")
+		sb.WriteString("- Cross-check supplied evidence against the exact head checks and changed tests.\n")
+		sb.WriteString("- Do not report NOT_RUN only because this review made no duplicate tool call.\n")
+		sb.WriteString("- Only immutable head checks or snapshot-bound execution can authorize approval.\n\n")
 	}
 
 	if len(ctx.Checks) > 0 {
@@ -328,6 +517,7 @@ func BuildPRPrompt(ctx *PRContext) string {
 		}
 		sb.WriteString("\n")
 	}
+	appendReviewVerificationConstraints(&sb, reviewpolicy.ParseVerificationConstraints(ctx.AgentsMD))
 
 	if len(ctx.Comments) > 0 {
 		sb.WriteString("## Top-Level PR Comments\n\n")
@@ -387,6 +577,23 @@ func BuildPRPrompt(ctx *PRContext) string {
 		sb.WriteString(ctx.AgentsMD)
 		sb.WriteString("\n\n")
 	}
+
+	if ctx.CanopyReview != "" {
+		sb.WriteString("## Primary Structural Review (Canopy)\n\n")
+		sb.WriteString("Use this diff-scoped evidence before you open more files. Validate each finding against the immutable snapshot.\n\n")
+		fmt.Fprintf(&sb, "- **Measured runtime**: %s\n", formatCanopyRuntime(ctx.CanopyRuntime))
+		fmt.Fprintf(&sb, "- **Index scope**: %s", ctx.CanopyIndexScope)
+		if ctx.CanopyIndexScopeSource != "" {
+			fmt.Fprintf(&sb, " (%s)", ctx.CanopyIndexScopeSource)
+		}
+		sb.WriteString("\n")
+		fmt.Fprintf(&sb, "- **Snapshot**: local checkout at %s\n\n", displayPRRevision(ctx.CheckoutSHA))
+		sb.WriteString("```json\n")
+		sb.WriteString(ctx.CanopyReview)
+		sb.WriteString("\n```\n\n")
+	}
+
+	appendPRContextProviderEvidence(&sb, ctx.ProviderEvidence)
 
 	sb.WriteString("## Diff\n\n")
 	sb.WriteString("```diff\n")
@@ -454,6 +661,17 @@ func isJSONPRChecksCommand(name string, args []string) bool {
 	return false
 }
 
+func isPRGitHubThrottleError(err error) bool {
+	if err == nil {
+		return false
+	}
+	detail := strings.ToLower(err.Error())
+	rateLimited := strings.Contains(detail, "rate limit") ||
+		strings.Contains(detail, "secondary rate") ||
+		strings.Contains(detail, "abuse detection")
+	return rateLimited && (strings.Contains(detail, "http 403") || strings.Contains(detail, "http 429"))
+}
+
 func parsePRRef(ref string) (prReference, error) {
 	if n, err := strconv.Atoi(ref); err == nil {
 		return prReference{Number: n}, nil
@@ -476,7 +694,46 @@ func parsePRRef(ref string) (prReference, error) {
 	return prReference{}, fmt.Errorf("invalid PR reference: %s (use PR number or GitHub URL)", ref)
 }
 
+// getPRAuthorAssociation reads the pull request's author_association from the
+// REST API. The posting gate uses it to decide whether an author may spend an
+// unbounded review on a large pull request.
+//
+// It is a separate call because `gh pr view --json` does not offer the field;
+// asking for it there makes gh exit non-zero and take every review down with
+// it, gated or not.
+//
+// It returns "" on ANY failure, and the gate treats "" as not-core. That is the
+// fail-closed direction: an author we cannot identify never unlocks the spend.
+// A missing association must not fail the review either, because a review that
+// is not being posted does not need one.
+func getPRAuthorAssociation(run prCommandRunner, target prReference, host, repository string) string {
+	// The REST route wants owner/repo. `repository` is already in that form —
+	// only qualifiedPRRepository prepends the host, and --hostname carries the
+	// host for an enterprise instance, so do not qualify here.
+	repo := repository
+	if repo == "" {
+		repo = target.Repository
+	}
+	if repo == "" {
+		return ""
+	}
+	args := withPRAPIHostname([]string{
+		"api", fmt.Sprintf("repos/%s/pulls/%d", repo, target.Number),
+		"--jq", ".author_association",
+	}, host)
+	output, err := run("gh", args...)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(output))
+}
+
 func getPRInfo(run prCommandRunner, target prReference) (*PRInfo, error) {
+	// authorAssociation is deliberately absent here. `gh pr view --json` accepts
+	// only its own GraphQL-backed field set, and that field is not in it — asking
+	// for it makes gh exit 1 and print the whole valid list, which failed EVERY
+	// review, not just gated ones. getPRAuthorAssociation reads it from the REST
+	// API instead, where it does exist.
 	args := withPRTarget([]string{"pr", "view", strconv.Itoa(target.Number), "--json",
 		"number,title,author,state,url,body,labels,baseRefName,baseRefOid,headRefName,headRefOid,additions,deletions,changedFiles,reviewDecision"}, target)
 	output, err := run("gh", args...)
@@ -526,6 +783,7 @@ func getPRInfo(run prCommandRunner, target prReference) (*PRInfo, error) {
 		Number:         data.Number,
 		Title:          data.Title,
 		Author:         data.Author.Login,
+		AuthorAssoc:    getPRAuthorAssociation(run, target, host, repository),
 		State:          data.State,
 		URL:            data.URL,
 		Host:           host,
@@ -727,7 +985,7 @@ func fetchPRReviewEvidence(run prCommandRunner, target prReference, metadata prM
 	feedbackTarget.Number = metadata.Number
 	feedbackTarget.Host = firstPRString(feedbackTarget.Host, metadata.Host)
 	feedbackTarget.Repository = firstPRString(feedbackTarget.Repository, metadata.Repository)
-	comments, err := getPRComments(run, feedbackTarget)
+	commentResult, err := getPRCommentsWithViewer(run, feedbackTarget)
 	if err != nil {
 		return prEvidenceSnapshot{}, fmt.Errorf("top-level comments: %w", err)
 	}
@@ -735,11 +993,12 @@ func fetchPRReviewEvidence(run prCommandRunner, target prReference, metadata prM
 	if err != nil {
 		return prEvidenceSnapshot{}, fmt.Errorf("submitted reviews: %w", err)
 	}
-	inline, err := getPRInlineComments(run, &PRInfo{
+	reviews = filterOwnBuckbotLifecycleReviews(reviews, commentResult.ViewerLogin)
+	inline, err := getPRInlineCommentsForViewer(run, &PRInfo{
 		Number:     metadata.Number,
 		Host:       metadata.Host,
 		Repository: metadata.Repository,
-	})
+	}, commentResult.ViewerLogin)
 	if err != nil {
 		return prEvidenceSnapshot{}, fmt.Errorf("inline review threads: %w", err)
 	}
@@ -757,7 +1016,7 @@ func fetchPRReviewEvidence(run prCommandRunner, target prReference, metadata prM
 	if changed := describePRMetadataChanges(metadata, metadataAfter); changed != "" {
 		return prEvidenceSnapshot{}, fmt.Errorf("PR metadata changed during evidence re-fetch: %s", changed)
 	}
-	return newPREvidenceSnapshot(metadataAfter, checks, ciSource, ciRevision, comments, reviews, inline.Comments, inline.ResolvedThreadsFiltered), nil
+	return newPREvidenceSnapshot(metadataAfter, checks, ciSource, ciRevision, commentResult.Comments, reviews, inline.Comments, inline.ResolvedThreadsFiltered), nil
 }
 
 func newPREvidenceSnapshot(
@@ -1162,25 +1421,391 @@ func getCommitStatuses(run prCommandRunner, host, repository, revision string) (
 }
 
 func getPRDiff(run prCommandRunner, target prReference) (prDiff, error) {
-	args := withPRTarget([]string{"pr", "diff", strconv.Itoa(target.Number)}, target)
-	output, err := run("gh", args...)
+	return getPRDiffWithBudget(run, target, diffsignal.ReviewDiffBudget, prDiffFallbackContext{})
+}
+
+func getPRDiffWithBudgetAtRevisions(
+	run prCommandRunner,
+	target prReference,
+	baseSHA string,
+	headSHA string,
+	maxBytes int,
+) (prDiff, error) {
+	return getPRDiffWithBudget(run, target, maxBytes, prDiffFallbackContext{
+		BaseSHA: baseSHA,
+		HeadSHA: headSHA,
+	})
+}
+
+func getPRDiffWithBudget(run prCommandRunner, target prReference, maxBytes int, fallback prDiffFallbackContext) (prDiff, error) {
+	source, err := fetchPRDiffSource(run, target, fallback)
 	if err != nil {
 		return prDiff{}, err
+	}
+	files, err := changedFilesFromPRDiff(source.Text)
+	if err != nil {
+		return prDiff{}, fmt.Errorf("parse changed-file manifest from PR diff: %w", err)
 	}
 
 	// Reserve space for the truncation marker so output stays within budget.
 	const truncMarker = "\n... (truncated)"
-	budget := diffsignal.ReviewDiffBudget - len(truncMarker)
-	res := diffsignal.Prioritize(string(output), budget)
+	if maxBytes <= len(truncMarker) {
+		maxBytes = diffsignal.ReviewDiffBudget
+	}
+	budget := maxBytes - len(truncMarker)
+	res := diffsignal.Prioritize(source.Text, budget)
 	diff := res.Context
 	if res.Truncated {
 		diff += truncMarker
 	}
 	return prDiff{
-		Text:          diff,
-		Truncated:     res.Truncated,
-		OriginalBytes: len(output),
+		Text:               diff,
+		Truncated:          res.Truncated,
+		OriginalBytes:      len(source.Text),
+		Files:              files,
+		LocalFallback:      source.Reconstructed && strings.Contains(source.Note, "local git diff"),
+		Raw:                source.Text,
+		Reconstructed:      source.Reconstructed,
+		ReconstructionNote: source.Note,
 	}, nil
+}
+
+func getLocalImmutablePRDiff(run prCommandRunner, baseSHA, headSHA string) ([]byte, error) {
+	rootOutput, err := run("git", "--no-pager", "rev-parse", "--show-toplevel")
+	if err != nil {
+		return nil, fmt.Errorf("resolve repository root: %w", err)
+	}
+	root := strings.TrimSpace(string(rootOutput))
+	if root == "" {
+		return nil, fmt.Errorf("repository root was empty")
+	}
+	revisionRange := strings.TrimSpace(baseSHA) + "..." + strings.TrimSpace(headSHA)
+	output, err := run(
+		"git", "--no-pager", "-C", root, "diff",
+		"--no-ext-diff", "--no-textconv", "--no-color", "--find-renames",
+		revisionRange, "--",
+	)
+	if err != nil {
+		return nil, err
+	}
+	return output, nil
+}
+
+func changedFilesFromPRDiff(raw string) ([]string, error) {
+	segments := diffsignal.Split(raw)
+	if len(segments) == 0 {
+		if strings.TrimSpace(raw) == "" {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("unified diff contains no file boundaries")
+	}
+
+	files := make([]string, 0, len(segments))
+	seen := make(map[string]struct{}, len(segments))
+	for _, segment := range segments {
+		file := strings.TrimSpace(segment.Path)
+		if file == "" {
+			return nil, fmt.Errorf("unified diff contains an empty changed-file path")
+		}
+		if _, duplicate := seen[file]; duplicate {
+			return nil, fmt.Errorf("unified diff contains duplicate changed-file path %q", file)
+		}
+		seen[file] = struct{}{}
+		files = append(files, file)
+	}
+	return files, nil
+}
+
+func resolvePRChangedFiles(diffFiles []string, reportedCount int, apiFiles []string, apiErr error) ([]string, string, error) {
+	if reportedCount < 0 {
+		return nil, "", fmt.Errorf("metadata reports invalid changed-file count %d", reportedCount)
+	}
+	if err := validatePRChangedFileManifest(diffFiles, reportedCount, "unified diff"); err != nil {
+		return nil, "", err
+	}
+
+	if apiErr != nil {
+		return append([]string(nil), diffFiles...),
+			fmt.Sprintf("%d files; exact diff manifest matched metadata after the files API failed: %s",
+				len(diffFiles), compactPRContextErrorText(apiErr.Error())), nil
+	}
+	if err := validatePRChangedFileManifest(apiFiles, reportedCount, "files API"); err != nil {
+		return nil, "", err
+	}
+	if err := comparePRChangedFileManifests(diffFiles, apiFiles); err != nil {
+		return nil, "", err
+	}
+	return append([]string(nil), diffFiles...),
+		fmt.Sprintf("%d files; exact diff and files API manifests match", len(diffFiles)), nil
+}
+
+func validatePRChangedFileManifest(files []string, reportedCount int, source string) error {
+	if len(files) != reportedCount {
+		return fmt.Errorf("%s manifest has %d files; metadata reports %d", source, len(files), reportedCount)
+	}
+	seen := make(map[string]struct{}, len(files))
+	for _, rawFile := range files {
+		file := strings.TrimSpace(rawFile)
+		if file == "" {
+			return fmt.Errorf("%s manifest contains an empty path", source)
+		}
+		if _, duplicate := seen[file]; duplicate {
+			return fmt.Errorf("%s manifest contains duplicate path %q", source, file)
+		}
+		seen[file] = struct{}{}
+	}
+	return nil
+}
+
+func comparePRChangedFileManifests(diffFiles, apiFiles []string) error {
+	diffSet := make(map[string]struct{}, len(diffFiles))
+	for _, file := range diffFiles {
+		diffSet[strings.TrimSpace(file)] = struct{}{}
+	}
+	var missing []string
+	var unexpected []string
+	for _, rawFile := range apiFiles {
+		file := strings.TrimSpace(rawFile)
+		if _, exists := diffSet[file]; !exists {
+			unexpected = append(unexpected, file)
+		}
+		delete(diffSet, file)
+	}
+	for file := range diffSet {
+		missing = append(missing, file)
+	}
+	sort.Strings(missing)
+	sort.Strings(unexpected)
+	if len(missing) == 0 && len(unexpected) == 0 {
+		return nil
+	}
+	return fmt.Errorf("files API manifest does not match the exact diff: missing %s; unexpected %s",
+		formatPRManifestPaths(missing), formatPRManifestPaths(unexpected))
+}
+
+func formatPRManifestPaths(files []string) string {
+	if len(files) == 0 {
+		return "none"
+	}
+	return strings.Join(files, ", ")
+}
+
+// fetchPRDiffSource fetches the PR's diff text, falling back past two
+// failure modes of "gh pr diff": GitHub's ".diff" endpoint hard-caps at 300
+// changed files and returns HTTP 406 beyond that, and the command can fail
+// for other transient reasons (rate limiting, network). Without a fallback,
+// any PR over the file cap is unreviewable by construction (see PR review
+// evidence: 605- and 347-file PRs failed outright with "diff exceeded the
+// maximum number of files (300)").
+//
+// Fallback order:
+//  1. gh pr diff (primary; unchanged for every PR under the cap).
+//  2. The paginated pull request files API, which has no file-count cap.
+//     GitHub omits `patch` for binary content and diffs that exceed its own
+//     size threshold; those files are still emitted, marked with
+//     diffsignal.UnavailableMarker, so they surface as an explicit
+//     diffsignal.ReasonUnavailable entry instead of vanishing.
+//  3. A local git diff of the merge-base against the PR head, when the
+//     files API is itself unavailable (for example, a non-GitHub host) and
+//     the local checkout already has both revisions.
+func fetchPRDiffSource(run prCommandRunner, target prReference, fallback prDiffFallbackContext) (prDiffSource, error) {
+	args := withPRTarget([]string{"pr", "diff", strconv.Itoa(target.Number)}, target)
+	output, ghErr := run("gh", args...)
+	if ghErr == nil {
+		return prDiffSource{Text: string(output)}, nil
+	}
+	if isPRGitHubThrottleError(ghErr) {
+		localDiff, localErr := getLocalImmutablePRDiff(run, fallback.BaseSHA, fallback.HeadSHA)
+		if localErr != nil {
+			return prDiffSource{}, fmt.Errorf("%w; immutable local diff fallback: %v", ghErr, localErr)
+		}
+		return prDiffSource{
+			Text:          string(localDiff),
+			Reconstructed: true,
+			Note: fmt.Sprintf("gh pr diff was throttled (%s); diff reconstructed from an immutable local git diff",
+				compactPRContextErrorText(ghErr.Error())),
+		}, nil
+	}
+	if isPRGitHubPermissionError(ghErr) {
+		return prDiffSource{}, ghErr
+	}
+
+	reconstructed, apiErr := reconstructPRDiffFromFiles(run, target)
+	if apiErr == nil {
+		return prDiffSource{
+			Text:          reconstructed,
+			Reconstructed: true,
+			Note: fmt.Sprintf("gh pr diff failed (%s); diff reconstructed from the paginated pull request files API",
+				compactPRContextErrorText(ghErr.Error())),
+		}, nil
+	}
+
+	localDiff, localErr := reconstructPRDiffFromLocalGit(run, fallback.BaseSHA, fallback.HeadSHA)
+	if localErr == nil {
+		return prDiffSource{
+			Text:          localDiff,
+			Reconstructed: true,
+			Note: fmt.Sprintf("gh pr diff failed (%s); files API fallback failed (%s); diff reconstructed from a local merge-base git diff",
+				compactPRContextErrorText(ghErr.Error()), compactPRContextErrorText(apiErr.Error())),
+		}, nil
+	}
+
+	return prDiffSource{}, fmt.Errorf(
+		"could not find pull request diff: %w (files API fallback: %v; local git fallback: %v)",
+		ghErr, apiErr, localErr)
+}
+
+func isPRGitHubPermissionError(err error) bool {
+	if err == nil {
+		return false
+	}
+	detail := strings.ToLower(err.Error())
+	return (strings.Contains(detail, "http 401") || strings.Contains(detail, "http 403")) &&
+		(strings.Contains(detail, "resource not accessible") ||
+			strings.Contains(detail, "bad credentials") ||
+			strings.Contains(detail, "requires authentication"))
+}
+
+// prDiffFile is one entry from GitHub's paginated pull request files API,
+// the fields reconstructPRDiffFromFiles needs to rebuild a unified diff.
+type prDiffFile struct {
+	Filename         string `json:"filename"`
+	PreviousFilename string `json:"previous_filename"`
+	Status           string `json:"status"`
+	Patch            string `json:"patch"`
+}
+
+// reconstructPRDiffFromFiles pages through the pull request files API (no
+// file-count cap, unlike "gh pr diff") and rebuilds a unified diff from each
+// entry's `patch` field. Entries GitHub returns without a patch (binary
+// content, or a diff that exceeds GitHub's own size threshold) still appear,
+// marked with diffsignal.UnavailableMarker.
+func reconstructPRDiffFromFiles(run prCommandRunner, target prReference) (string, error) {
+	owner, repo, err := splitPRRepository(target.Repository)
+	if err != nil {
+		return "", fmt.Errorf("resolve repository for paginated diff reconstruction: %w", err)
+	}
+	endpoint := fmt.Sprintf("repos/%s/%s/pulls/%d/files?per_page=100", owner, repo, target.Number)
+	args := withPRAPIHostname([]string{"api", "--paginate", "--slurp", endpoint}, target.Host)
+	output, err := run("gh", args...)
+	if err != nil {
+		return "", err
+	}
+
+	var pages [][]prDiffFile
+	if err := json.Unmarshal(output, &pages); err != nil {
+		var flat []prDiffFile
+		if flatErr := json.Unmarshal(output, &flat); flatErr != nil {
+			return "", err
+		}
+		pages = [][]prDiffFile{flat}
+	}
+
+	var sb strings.Builder
+	fileCount := 0
+	for _, page := range pages {
+		for _, file := range page {
+			if strings.TrimSpace(file.Filename) == "" {
+				continue
+			}
+			fileCount++
+			writeSyntheticFileDiff(&sb, file)
+		}
+	}
+	if fileCount == 0 {
+		return "", fmt.Errorf("paginated files API returned no changed files")
+	}
+	return sb.String(), nil
+}
+
+// writeSyntheticFileDiff appends one file's reconstructed diff segment.
+// GitHub's files API omits the "diff --git"/"---"/"+++" header lines that
+// "gh pr diff" (and diffsignal's parser) rely on, so this synthesizes them
+// around the raw `patch` hunks, matching the conventions git itself uses:
+// /dev/null on the added/removed side, and rename lines for pure renames.
+func writeSyntheticFileDiff(sb *strings.Builder, file prDiffFile) {
+	newPath := file.Filename
+	oldPath := file.Filename
+	rename := file.Status == "renamed" && file.PreviousFilename != "" && file.PreviousFilename != file.Filename
+	if rename {
+		oldPath = file.PreviousFilename
+	}
+
+	sb.WriteString("diff --git a/")
+	sb.WriteString(oldPath)
+	sb.WriteString(" b/")
+	sb.WriteString(newPath)
+	sb.WriteString("\n")
+
+	if rename {
+		sb.WriteString("rename from ")
+		sb.WriteString(oldPath)
+		sb.WriteString("\nrename to ")
+		sb.WriteString(newPath)
+		sb.WriteString("\n")
+	}
+
+	if strings.TrimSpace(file.Patch) == "" {
+		sb.WriteString(diffsignal.UnavailableMarker)
+		sb.WriteString("\n")
+		return
+	}
+
+	if file.Status == "added" {
+		sb.WriteString("--- /dev/null\n")
+	} else {
+		sb.WriteString("--- a/")
+		sb.WriteString(oldPath)
+		sb.WriteString("\n")
+	}
+	if file.Status == "removed" {
+		sb.WriteString("+++ /dev/null\n")
+	} else {
+		sb.WriteString("+++ b/")
+		sb.WriteString(newPath)
+		sb.WriteString("\n")
+	}
+	sb.WriteString(file.Patch)
+	if !strings.HasSuffix(file.Patch, "\n") {
+		sb.WriteString("\n")
+	}
+}
+
+// reconstructPRDiffFromLocalGit diffs the merge-base of baseSHA and headSHA
+// against headSHA in the local checkout. It is the last-resort fallback,
+// used only when both "gh pr diff" and the paginated files API failed (for
+// example, a non-GitHub host); it requires the local repository to already
+// have both revisions.
+func reconstructPRDiffFromLocalGit(run prCommandRunner, baseSHA, headSHA string) (string, error) {
+	baseSHA = strings.TrimSpace(baseSHA)
+	headSHA = strings.TrimSpace(headSHA)
+	if baseSHA == "" || headSHA == "" {
+		return "", fmt.Errorf("base and head revisions are required for a local git diff fallback")
+	}
+	rootOutput, err := run("git", "--no-pager", "rev-parse", "--show-toplevel")
+	if err != nil {
+		return "", fmt.Errorf("repository root: %w", err)
+	}
+	root := strings.TrimSpace(string(rootOutput))
+	if root == "" {
+		return "", fmt.Errorf("repository root was empty")
+	}
+	mergeBaseOutput, err := run("git", "--no-pager", "-C", root, "merge-base", baseSHA, headSHA)
+	if err != nil {
+		return "", fmt.Errorf("merge-base %s %s: %w", baseSHA, headSHA, err)
+	}
+	mergeBase := strings.TrimSpace(string(mergeBaseOutput))
+	if mergeBase == "" {
+		return "", fmt.Errorf("merge-base returned no revision")
+	}
+	diffOutput, err := run("git", "--no-pager", "-C", root, "diff", "--no-color", mergeBase, headSHA)
+	if err != nil {
+		return "", fmt.Errorf("diff %s %s: %w", mergeBase, headSHA, err)
+	}
+	if strings.TrimSpace(string(diffOutput)) == "" {
+		return "", fmt.Errorf("local git diff produced no output")
+	}
+	return string(diffOutput), nil
 }
 
 func getPRChecks(run prCommandRunner, target prReference) ([]PRCheck, error) {
@@ -1208,7 +1833,137 @@ func getPRChecks(run prCommandRunner, target prReference) ([]PRCheck, error) {
 	return checks, nil
 }
 
+const prTopLevelCommentsQuery = `query($owner: String!, $name: String!, $number: Int!, $after: String) {
+  viewer { login }
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      comments(first: 100, after: $after) {
+        pageInfo { hasNextPage endCursor }
+        nodes {
+          id
+          author { login }
+          body
+        }
+      }
+    }
+  }
+}`
+
 func getPRComments(run prCommandRunner, target prReference) ([]PRComment, error) {
+	result, err := getPRCommentsWithViewer(run, target)
+	return result.Comments, err
+}
+
+func getPRCommentsWithViewer(run prCommandRunner, target prReference) (prCommentsResult, error) {
+	result, graphErr := getPRCommentsGraphQL(run, target)
+	if graphErr == nil {
+		result.Comments = filterOwnBuckbotLifecycleComments(result.Comments, result.ViewerLogin)
+		return result, nil
+	}
+	comments, restErr := getPRCommentsREST(run, target)
+	if restErr != nil {
+		return prCommentsResult{}, fmt.Errorf("GraphQL top-level comments failed: %v; REST top-level comments failed: %w", graphErr, restErr)
+	}
+	return prCommentsResult{Comments: comments}, nil
+}
+
+func getPRCommentsGraphQL(run prCommandRunner, target prReference) (prCommentsResult, error) {
+	owner, repo, err := splitPRRepository(target.Repository)
+	if err != nil {
+		return prCommentsResult{}, fmt.Errorf("resolve repository for paginated top-level comments: %w", err)
+	}
+	type graphComment struct {
+		ID     string `json:"id"`
+		Author struct {
+			Login string `json:"login"`
+		} `json:"author"`
+		Body string `json:"body"`
+	}
+	type graphResponse struct {
+		Data struct {
+			Viewer struct {
+				Login string `json:"login"`
+			} `json:"viewer"`
+			Repository *struct {
+				PullRequest *struct {
+					Comments struct {
+						PageInfo struct {
+							HasNextPage bool   `json:"hasNextPage"`
+							EndCursor   string `json:"endCursor"`
+						} `json:"pageInfo"`
+						Nodes []graphComment `json:"nodes"`
+					} `json:"comments"`
+				} `json:"pullRequest"`
+			} `json:"repository"`
+		} `json:"data"`
+		Errors []struct {
+			Message string `json:"message"`
+		} `json:"errors"`
+	}
+
+	var result prCommentsResult
+	after := ""
+	seenCursors := make(map[string]struct{})
+	for {
+		args := []string{
+			"api", "graphql",
+			"-F", "owner=" + owner,
+			"-F", "name=" + repo,
+			"-F", "number=" + strconv.Itoa(target.Number),
+			"-f", "query=" + prTopLevelCommentsQuery,
+		}
+		if after != "" {
+			args = append(args, "-F", "after="+after)
+		}
+		args = withPRAPIHostname(args, target.Host)
+		output, err := run("gh", args...)
+		if err != nil {
+			return prCommentsResult{}, err
+		}
+
+		var response graphResponse
+		if err := json.Unmarshal(output, &response); err != nil {
+			return prCommentsResult{}, err
+		}
+		if len(response.Errors) > 0 {
+			return prCommentsResult{}, fmt.Errorf("%s", response.Errors[0].Message)
+		}
+		if response.Data.Viewer.Login == "" {
+			return prCommentsResult{}, fmt.Errorf("authenticated viewer missing from GraphQL response")
+		}
+		if response.Data.Repository == nil || response.Data.Repository.PullRequest == nil {
+			return prCommentsResult{}, fmt.Errorf("pull request not found in GraphQL response")
+		}
+		if result.ViewerLogin == "" {
+			result.ViewerLogin = response.Data.Viewer.Login
+		} else if !strings.EqualFold(result.ViewerLogin, response.Data.Viewer.Login) {
+			return prCommentsResult{}, fmt.Errorf("authenticated viewer changed during top-level comment pagination")
+		}
+
+		connection := response.Data.Repository.PullRequest.Comments
+		for _, comment := range connection.Nodes {
+			result.Comments = append(result.Comments, PRComment{
+				ID:     stablePRFeedbackSourceID(comment.ID, "top-level-comment", comment.Author.Login, comment.Body),
+				Author: comment.Author.Login,
+				Body:   comment.Body,
+			})
+		}
+		if !connection.PageInfo.HasNextPage {
+			return result, nil
+		}
+		cursor := connection.PageInfo.EndCursor
+		if cursor == "" {
+			return prCommentsResult{}, fmt.Errorf("top-level comment pagination omitted the next cursor")
+		}
+		if _, duplicate := seenCursors[cursor]; duplicate {
+			return prCommentsResult{}, fmt.Errorf("top-level comment pagination repeated cursor %q", cursor)
+		}
+		seenCursors[cursor] = struct{}{}
+		after = cursor
+	}
+}
+
+func getPRCommentsREST(run prCommandRunner, target prReference) ([]PRComment, error) {
 	owner, repo, err := splitPRRepository(target.Repository)
 	if err != nil {
 		return nil, fmt.Errorf("resolve repository for paginated top-level comments: %w", err)
@@ -1251,6 +2006,18 @@ func getPRComments(run prCommandRunner, target prReference) ([]PRComment, error)
 }
 
 func getPRReviews(run prCommandRunner, target prReference) ([]PRReview, error) {
+	reviews, err := getPRReviewsREST(run, target)
+	if err == nil || !isPRGitHubThrottleError(err) {
+		return reviews, err
+	}
+	graphReviews, graphErr := getPRReviewsGraphQL(run, target)
+	if graphErr != nil {
+		return nil, fmt.Errorf("%w; GraphQL submitted-review fallback: %v", err, graphErr)
+	}
+	return graphReviews, nil
+}
+
+func getPRReviewsREST(run prCommandRunner, target prReference) ([]PRReview, error) {
 	owner, repo, err := splitPRRepository(target.Repository)
 	if err != nil {
 		return nil, fmt.Errorf("resolve repository for paginated submitted reviews: %w", err)
@@ -1296,6 +2063,120 @@ func getPRReviews(run prCommandRunner, target prReference) ([]PRReview, error) {
 	return reviews, nil
 }
 
+const prSubmittedReviewsQuery = `query($owner: String!, $name: String!, $number: Int!, $after: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      reviews(first: 100, after: $after) {
+        pageInfo { hasNextPage endCursor }
+        nodes {
+          id
+          author { login }
+          body
+          state
+          submittedAt
+        }
+      }
+    }
+  }
+}`
+
+func getPRReviewsGraphQL(run prCommandRunner, target prReference) ([]PRReview, error) {
+	owner, repo, err := splitPRRepository(target.Repository)
+	if err != nil {
+		return nil, fmt.Errorf("resolve repository for GraphQL submitted reviews: %w", err)
+	}
+
+	type graphReview struct {
+		ID     string `json:"id"`
+		Author struct {
+			Login string `json:"login"`
+		} `json:"author"`
+		Body        string `json:"body"`
+		State       string `json:"state"`
+		SubmittedAt string `json:"submittedAt"`
+	}
+	type graphResponse struct {
+		Data struct {
+			Repository *struct {
+				PullRequest *struct {
+					Reviews struct {
+						PageInfo struct {
+							HasNextPage bool   `json:"hasNextPage"`
+							EndCursor   string `json:"endCursor"`
+						} `json:"pageInfo"`
+						Nodes []graphReview `json:"nodes"`
+					} `json:"reviews"`
+				} `json:"pullRequest"`
+			} `json:"repository"`
+		} `json:"data"`
+		Errors []struct {
+			Message string `json:"message"`
+		} `json:"errors"`
+	}
+
+	var reviews []PRReview
+	after := ""
+	seenCursors := make(map[string]struct{})
+	for {
+		args := []string{
+			"api", "graphql",
+			"-F", "owner=" + owner,
+			"-F", "name=" + repo,
+			"-F", "number=" + strconv.Itoa(target.Number),
+			"-f", "query=" + prSubmittedReviewsQuery,
+		}
+		if after != "" {
+			args = append(args, "-F", "after="+after)
+		}
+		args = withPRAPIHostname(args, target.Host)
+		output, err := run("gh", args...)
+		if err != nil {
+			return nil, err
+		}
+
+		var response graphResponse
+		if err := json.Unmarshal(output, &response); err != nil {
+			return nil, err
+		}
+		if len(response.Errors) > 0 {
+			return nil, fmt.Errorf("%s", response.Errors[0].Message)
+		}
+		if response.Data.Repository == nil || response.Data.Repository.PullRequest == nil {
+			return nil, fmt.Errorf("pull request not found in GraphQL response")
+		}
+
+		connection := response.Data.Repository.PullRequest.Reviews
+		for _, review := range connection.Nodes {
+			reviews = append(reviews, PRReview{
+				ID: stablePRFeedbackSourceID(
+					review.ID,
+					"submitted-review",
+					review.Author.Login,
+					review.State,
+					review.SubmittedAt,
+					review.Body,
+				),
+				Author:      review.Author.Login,
+				Body:        review.Body,
+				State:       review.State,
+				SubmittedAt: review.SubmittedAt,
+			})
+		}
+		if !connection.PageInfo.HasNextPage {
+			return reviews, nil
+		}
+		cursor := connection.PageInfo.EndCursor
+		if cursor == "" {
+			return nil, fmt.Errorf("submitted-review pagination omitted the next cursor")
+		}
+		if _, duplicate := seenCursors[cursor]; duplicate {
+			return nil, fmt.Errorf("submitted-review pagination repeated cursor %q", cursor)
+		}
+		seenCursors[cursor] = struct{}{}
+		after = cursor
+	}
+}
+
 func prRESTID(raw json.RawMessage) string {
 	value := strings.TrimSpace(string(raw))
 	if unquoted, err := strconv.Unquote(value); err == nil {
@@ -1305,6 +2186,7 @@ func prRESTID(raw json.RawMessage) string {
 }
 
 const prReviewThreadsQuery = `query($owner: String!, $name: String!, $number: Int!, $after: String) {
+  viewer { login }
   repository(owner: $owner, name: $name) {
     pullRequest(number: $number) {
       reviewThreads(first: 100, after: $after) {
@@ -1336,12 +2218,16 @@ const prReviewThreadsQuery = `query($owner: String!, $name: String!, $number: In
 }`
 
 func getPRInlineComments(run prCommandRunner, pr *PRInfo) (inlineCommentsResult, error) {
+	return getPRInlineCommentsForViewer(run, pr, "")
+}
+
+func getPRInlineCommentsForViewer(run prCommandRunner, pr *PRInfo, viewerLogin string) (inlineCommentsResult, error) {
 	owner, repo, err := splitPRRepository(pr.Repository)
 	if err != nil {
 		return inlineCommentsResult{}, err
 	}
 
-	result, graphErr := getPRInlineCommentsGraphQL(run, pr.Host, owner, repo, pr.Number)
+	result, graphErr := getPRInlineCommentsGraphQL(run, pr.Host, owner, repo, pr.Number, viewerLogin)
 	if graphErr == nil {
 		return result, nil
 	}
@@ -1350,12 +2236,13 @@ func getPRInlineComments(run prCommandRunner, pr *PRInfo) (inlineCommentsResult,
 	if restErr != nil {
 		return inlineCommentsResult{}, fmt.Errorf("GraphQL review threads failed: %v; REST inline comments failed: %w", graphErr, restErr)
 	}
+	result.Comments = filterOwnBuckbotLifecycleComments(result.Comments, viewerLogin)
 	result.Fallback = true
 	result.FallbackReason = compactPRContextErrorText(graphErr.Error())
 	return result, nil
 }
 
-func getPRInlineCommentsGraphQL(run prCommandRunner, host, owner, repo string, prNumber int) (inlineCommentsResult, error) {
+func getPRInlineCommentsGraphQL(run prCommandRunner, host, owner, repo string, prNumber int, expectedViewer string) (inlineCommentsResult, error) {
 	type graphComment struct {
 		ID     string `json:"id"`
 		Author struct {
@@ -1384,6 +2271,9 @@ func getPRInlineCommentsGraphQL(run prCommandRunner, host, owner, repo string, p
 	}
 	type graphResponse struct {
 		Data struct {
+			Viewer struct {
+				Login string `json:"login"`
+			} `json:"viewer"`
 			Repository *struct {
 				PullRequest *struct {
 					ReviewThreads struct {
@@ -1402,6 +2292,7 @@ func getPRInlineCommentsGraphQL(run prCommandRunner, host, owner, repo string, p
 	}
 
 	var result inlineCommentsResult
+	viewerLogin := ""
 	after := ""
 	for page := 0; ; page++ {
 		args := []string{
@@ -1427,6 +2318,18 @@ func getPRInlineCommentsGraphQL(run prCommandRunner, host, owner, repo string, p
 		if len(response.Errors) > 0 {
 			return inlineCommentsResult{}, fmt.Errorf("%s", response.Errors[0].Message)
 		}
+		currentViewer := response.Data.Viewer.Login
+		if currentViewer == "" {
+			currentViewer = expectedViewer
+		}
+		if viewerLogin == "" {
+			viewerLogin = currentViewer
+			if expectedViewer != "" && !strings.EqualFold(expectedViewer, viewerLogin) {
+				return inlineCommentsResult{}, fmt.Errorf("authenticated viewer changed between review context sources")
+			}
+		} else if currentViewer != "" && !strings.EqualFold(viewerLogin, currentViewer) {
+			return inlineCommentsResult{}, fmt.Errorf("authenticated viewer changed during inline comment pagination")
+		}
 		if response.Data.Repository == nil || response.Data.Repository.PullRequest == nil {
 			return inlineCommentsResult{}, fmt.Errorf("pull request not found in GraphQL response")
 		}
@@ -1442,6 +2345,9 @@ func getPRInlineCommentsGraphQL(run prCommandRunner, host, owner, repo string, p
 			}
 			var threadEvidence strings.Builder
 			for _, comment := range thread.Comments.Nodes {
+				if viewerLogin != "" && strings.EqualFold(comment.Author.Login, viewerLogin) && isBuckbotLifecycleFeedback(comment.Body) {
+					continue
+				}
 				threadEvidence.WriteString(comment.ID)
 				threadEvidence.WriteByte('\n')
 				threadEvidence.WriteString(comment.Author.Login)
@@ -1453,6 +2359,9 @@ func getPRInlineCommentsGraphQL(run prCommandRunner, host, owner, repo string, p
 				thread.Path, strconv.Itoa(thread.Line), strconv.Itoa(thread.StartLine), strconv.Itoa(thread.OriginalLine),
 				strconv.FormatBool(thread.Outdated), threadEvidence.String())
 			for _, comment := range thread.Comments.Nodes {
+				if viewerLogin != "" && strings.EqualFold(comment.Author.Login, viewerLogin) && isBuckbotLifecycleFeedback(comment.Body) {
+					continue
+				}
 				commentID := stablePRFeedbackSourceID(comment.ID, "inline-comment", threadID,
 					comment.Author.Login, comment.Body, comment.Path, strconv.Itoa(comment.Line),
 					strconv.Itoa(comment.StartLine), strconv.Itoa(comment.OriginalLine))
@@ -1612,6 +2521,7 @@ func assemblePRAgentsContext(ctx *PRContext, audit *transparency.ContextAudit, d
 		recordPRContextFailure(ctx, audit, "Root AGENTS.md", fmt.Errorf("repository root was empty"))
 		return
 	}
+	ctx.localRepoRoot = root
 	if headOutput, headErr := deps.run("git", "--no-pager", "-C", root, "rev-parse", "HEAD"); headErr != nil {
 		recordPRContextFailure(ctx, audit, "Local verification checkout", headErr)
 	} else {
@@ -1621,6 +2531,7 @@ func assemblePRAgentsContext(ctx *PRContext, audit *transparency.ContextAudit, d
 				fmt.Sprintf("local HEAD %s does not match PR head %s; local read/search/shell evidence is not authoritative", ctx.CheckoutSHA, ctx.PR.HeadSHA), false)
 			audit.Add("local checkout mismatch", reviewEstimateTokens(ctx.CheckoutSHA+ctx.PR.HeadSHA))
 		} else {
+			ctx.localHeadMatches = ctx.PR != nil && ctx.PR.HeadSHA != "" && ctx.CheckoutSHA == ctx.PR.HeadSHA
 			ctx.addStatus("Local verification checkout", "complete", "local tools are pinned to the PR head", false)
 			audit.Add("local checkout", reviewEstimateTokens(ctx.CheckoutSHA))
 		}
@@ -1632,6 +2543,7 @@ func assemblePRAgentsContext(ctx *PRContext, audit *transparency.ContextAudit, d
 			"uncommitted files can contaminate local read/search/shell evidence", false)
 		audit.Add("dirty local verification worktree", reviewEstimateTokens(dirty))
 	} else {
+		ctx.localWorktreeClean = true
 		ctx.addStatus("Local verification worktree", "complete", "no uncommitted files", false)
 		audit.Add("clean local verification worktree", 0)
 	}
@@ -1650,14 +2562,55 @@ func assemblePRAgentsContext(ctx *PRContext, audit *transparency.ContextAudit, d
 		recordPRContextFailure(ctx, audit, "Root AGENTS.md", err)
 	case truncated:
 		ctx.AgentsMD = content
-		audit.AddTruncated("AGENTS.md", reviewEstimateTokens(content), reviewEstimateTokens(content)+1)
+		audit.AddTruncated("AGENTS.md", 0, reviewEstimateTokens(content)+1)
 		ctx.addStatus("Root AGENTS.md", "truncated", fmt.Sprintf("limited to %d bytes", agentsLimit), true)
 	default:
 		ctx.AgentsMD = content
-		audit.Add("AGENTS.md", reviewEstimateTokens(content))
+		audit.Add("AGENTS.md", 0)
 		ctx.addStatus("Root AGENTS.md", "complete", fmt.Sprintf("%d bytes", len(content)), false)
 	}
 	appendNestedPRAgentsContext(ctx, audit, deps.run, root, agentsLimit)
+}
+
+func assemblePRCanopyContext(
+	parent context.Context,
+	ctx *PRContext,
+	audit *transparency.ContextAudit,
+	collect func(context.Context, string, string) canopyReviewEvidence,
+) {
+	if collect == nil {
+		return
+	}
+	if ctx == nil {
+		return
+	}
+	if ctx.PR == nil || !ctx.localHeadMatches || !ctx.localWorktreeClean || ctx.localRepoRoot == "" {
+		ctx.addStatus("Canopy structural review", "missing",
+			"requires a clean local checkout at the immutable PR head", false)
+		audit.Add("Canopy structural review (snapshot unavailable)", 0)
+		return
+	}
+
+	evidence := collect(parent, ctx.localRepoRoot, ctx.PR.BaseSHA)
+	if evidence.Output == "" || evidence.IndexScope == "" {
+		ctx.addStatus("Canopy structural review", "missing", evidence.Status, false)
+		audit.Add("Canopy structural review ("+evidence.Status+")", 0)
+		return
+	}
+	ctx.CanopyReview = evidence.Output
+	ctx.CanopyRuntime = evidence.Runtime
+	ctx.CanopyIndexScope = evidence.IndexScope
+	ctx.CanopyIndexScopeSource = evidence.IndexScopeSource
+	ctx.CanopyBlastRadius = evidence.BlastRadius
+	ctx.addStatus("Canopy structural review", "complete",
+		fmt.Sprintf("measured runtime %s; index scope %s", formatCanopyRuntime(evidence.Runtime), evidence.IndexScope), false)
+}
+
+func formatCanopyRuntime(runtime time.Duration) string {
+	if runtime < time.Millisecond {
+		return "<1ms"
+	}
+	return runtime.Round(time.Millisecond).String()
 }
 
 func appendNestedPRAgentsContext(ctx *PRContext, audit *transparency.ContextAudit, run prCommandRunner, root string, perFileLimit int) {
@@ -1695,7 +2648,7 @@ func appendNestedPRAgentsContext(ctx *PRContext, audit *transparency.ContextAudi
 		ctx.AgentsMD += "### " + candidate + "\n\n" + content
 		if truncated {
 			ctx.addStatus("Nested AGENTS.md ("+candidate+")", "truncated", fmt.Sprintf("limited to %d bytes", limit), true)
-			audit.AddTruncated(candidate, reviewEstimateTokens(content), reviewEstimateTokens(content)+1)
+			audit.AddTruncated(candidate, 0, reviewEstimateTokens(content)+1)
 		}
 	}
 	if applicable == 0 {
@@ -1703,7 +2656,6 @@ func appendNestedPRAgentsContext(ctx *PRContext, audit *transparency.ContextAudi
 		return
 	}
 	ctx.addStatus("Nested AGENTS.md", "complete", fmt.Sprintf("%d applicable instruction files", applicable), false)
-	audit.Add("nested AGENTS.md", reviewEstimateTokens(ctx.AgentsMD))
 }
 
 func nestedPRAgentsCandidates(files []string) []string {
@@ -1772,7 +2724,7 @@ func (ctx *PRContext) HasIncompleteContext() bool {
 	}
 	for _, status := range ctx.ContextStatus {
 		switch status.Status {
-		case "complete", "missing":
+		case "complete", "missing", "advisory unavailable":
 			continue
 		default:
 			return true
@@ -1810,6 +2762,9 @@ func (ctx *PRContext) feedbackIDs() prFeedbackIDSet {
 	var result prFeedbackIDSet
 	if ctx == nil {
 		return result
+	}
+	if ctx.feedbackIDCache != nil {
+		return *ctx.feedbackIDCache
 	}
 
 	used := make(map[string]int, len(ctx.Comments)+len(ctx.Reviews)+len(ctx.InlineComments))
