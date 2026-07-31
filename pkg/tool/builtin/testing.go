@@ -402,7 +402,7 @@ func (t *GenerateTestTool) Name() string {
 }
 
 func (t *GenerateTestTool) Description() string {
-	return "Generate test scaffolding for a function, method, or file. Auto-detects language and creates appropriate test structure with basic test cases. Supports Go, JavaScript/TypeScript, and Python. Use this to quickly create test skeletons that you can fill in."
+	return "Generate test scaffolding for a function, method, or file. Auto-detects language (Go, JS/TS, Python)."
 }
 
 func (t *GenerateTestTool) Parameters() ParameterSchema {

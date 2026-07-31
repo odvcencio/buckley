@@ -38,6 +38,8 @@ type Registry struct {
 	discoveryEnabled bool
 	discoveryCore    map[string]struct{}
 	discoveryExposed map[string]struct{}
+
+	defaultPoolMode string
 }
 
 type registryOptions struct {
@@ -157,6 +159,29 @@ func (r *Registry) SetMaxOutputBytes(max int) {
 			setter.SetMaxOutputBytes(max)
 		}
 	}
+}
+
+// SetDefaultPoolMode sets the tool pool mode used by GovernedToolNames when
+// no policy evaluator resolves one (evaluator is nil or its lookup fails).
+// An empty mode leaves the registry at its zero value, which GovernedToolNames
+// treats as "full" (no filtering, unchanged behavior).
+func (r *Registry) SetDefaultPoolMode(mode string) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.defaultPoolMode = strings.TrimSpace(mode)
+}
+
+// DefaultPoolMode returns the configured default tool pool mode, or "" if unset.
+func (r *Registry) DefaultPoolMode() string {
+	if r == nil {
+		return ""
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.defaultPoolMode
 }
 
 // SetSandboxConfig configures command sandboxing for tools that support it.

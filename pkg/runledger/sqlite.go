@@ -16,6 +16,8 @@ import (
 	"github.com/oklog/ulid/v2"
 	sqlite "modernc.org/sqlite"
 	sqlite3 "modernc.org/sqlite/lib"
+
+	"m31labs.dev/buckley/v2/pkg/storage"
 )
 
 // DefaultRedactionVersion is applied to an Event when the caller does not
@@ -774,22 +776,15 @@ func ensurePrivateSQLiteFile(path string) error {
 	return f.Close()
 }
 
-// migration is a single, ordered, idempotent schema step, matching the
-// pattern in pkg/storage/sqlite.go and pkg/evidence/store.go.
-type migration struct {
-	Version int
-	Name    string
-	Apply   func(db *sql.DB) error
-}
-
-var migrations = []migration{
-	{1, "agent_runs", createAgentRunsTable},
-	{2, "run_events", createRunEventsTable},
-	{3, "context_receipts", createContextReceiptsTable},
-	{4, "context_receipt_items", createContextReceiptItemsTable},
-	{5, "context_usage", createContextUsageTable},
-	{6, "task_checkpoints", createTaskCheckpointsTable},
-	{7, "agent_metric_samples", createAgentMetricSamplesTable},
+// migrations is the ordered list of schema steps applied via storage.Migrate.
+var migrations = []storage.Migration{
+	{Version: 1, Name: "agent_runs", Apply: createAgentRunsTable},
+	{Version: 2, Name: "run_events", Apply: createRunEventsTable},
+	{Version: 3, Name: "context_receipts", Apply: createContextReceiptsTable},
+	{Version: 4, Name: "context_receipt_items", Apply: createContextReceiptItemsTable},
+	{Version: 5, Name: "context_usage", Apply: createContextUsageTable},
+	{Version: 6, Name: "task_checkpoints", Apply: createTaskCheckpointsTable},
+	{Version: 7, Name: "agent_metric_samples", Apply: createAgentMetricSamplesTable},
 }
 
 func createAgentRunsTable(db *sql.DB) error {
@@ -974,34 +969,10 @@ func createAgentMetricSamplesTable(db *sql.DB) error {
 	return nil
 }
 
-// runMigrations applies pending schema migrations, tracked in
-// runledger_schema_migrations (named distinctly from pkg/storage's and
-// pkg/evidence's own migration-tracking tables so all three can safely
-// share one SQLite file once wiring lands).
+// runMigrations applies pending schema migrations via the shared
+// storage.Migrate runner, tracked in runledger_schema_migrations (named
+// distinctly from pkg/storage's and pkg/evidence's own migration-tracking
+// tables so all three can safely share one SQLite file once wiring lands).
 func runMigrations(db *sql.DB) error {
-	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS runledger_schema_migrations (
-		version INTEGER PRIMARY KEY,
-		name TEXT NOT NULL,
-		applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-	)`); err != nil {
-		return fmt.Errorf("create runledger_schema_migrations: %w", err)
-	}
-
-	var currentVersion int
-	if err := db.QueryRow(`SELECT COALESCE(MAX(version), 0) FROM runledger_schema_migrations`).Scan(&currentVersion); err != nil {
-		return fmt.Errorf("get schema version: %w", err)
-	}
-
-	for _, m := range migrations {
-		if m.Version <= currentVersion {
-			continue
-		}
-		if err := m.Apply(db); err != nil {
-			return fmt.Errorf("migration %d (%s): %w", m.Version, m.Name, err)
-		}
-		if _, err := db.Exec(`INSERT INTO runledger_schema_migrations (version, name) VALUES (?, ?)`, m.Version, m.Name); err != nil {
-			return fmt.Errorf("record migration %d: %w", m.Version, err)
-		}
-	}
-	return nil
+	return storage.Migrate(db, "runledger_schema_migrations", migrations)
 }

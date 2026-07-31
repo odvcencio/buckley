@@ -29,6 +29,7 @@ func ApplyToolMiddlewareConfig(registry *Registry, cfg *config.Config) {
 			Jitter:       middleware.Retry.Jitter,
 		}
 		defaults.MaxOutputBytes = middleware.MaxResultBytes
+		defaults.DefaultPoolMode = cfg.Tools.DefaultPoolMode
 	}
 	ApplyRegistryConfig(registry, defaults)
 }
@@ -71,8 +72,9 @@ type RegistryConfig struct {
 	MissionTimeout         time.Duration
 	RequireMissionApproval bool
 
-	MaxOutputBytes int
-	Middleware     MiddlewareConfig
+	MaxOutputBytes  int
+	Middleware      MiddlewareConfig
+	DefaultPoolMode string
 }
 
 // DefaultMiddlewareStack returns the default middleware chain.
@@ -126,6 +128,9 @@ func ApplyRegistryConfig(registry *Registry, cfg RegistryConfig) {
 	}
 	if cfg.MaxOutputBytes > 0 {
 		registry.SetMaxOutputBytes(cfg.MaxOutputBytes)
+	}
+	if cfg.DefaultPoolMode != "" {
+		registry.SetDefaultPoolMode(cfg.DefaultPoolMode)
 	}
 	if cfg.TelemetryHub != nil {
 		registry.EnableTelemetry(cfg.TelemetryHub, cfg.TelemetrySessionID)

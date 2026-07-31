@@ -16,7 +16,7 @@ func (t *RenameSymbolTool) Name() string {
 }
 
 func (t *RenameSymbolTool) Description() string {
-	return "Rename a symbol (variable, function, type, class) throughout the codebase. Performs word-boundary matching to avoid partial replacements. Shows summary of files modified and total replacements. Use this for safe refactoring when renaming identifiers."
+	return "Rename a symbol throughout the codebase with word-boundary matching. Reports files modified and replacement count."
 }
 
 func (t *RenameSymbolTool) Parameters() ParameterSchema {
@@ -248,7 +248,7 @@ func (t *ExtractFunctionTool) Name() string {
 }
 
 func (t *ExtractFunctionTool) Description() string {
-	return "Extract selected code into a new function. Analyzes the code block to determine parameters and return values based on variable usage. Inserts the new function definition and replaces the original code with a function call. Use this for code organization and reducing duplication."
+	return "Extract selected code into a new function, inferring parameters and return values from variable usage."
 }
 
 func (t *ExtractFunctionTool) Parameters() ParameterSchema {

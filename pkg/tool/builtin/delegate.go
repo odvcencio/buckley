@@ -128,7 +128,7 @@ func (t *CodexTool) Parameters() ParameterSchema {
 		Properties: map[string]PropertySchema{
 			"prompt": {
 				Type:        "string",
-				Description: "The prompt to send to Codex for processing. Be specific and include all necessary context in the prompt itself.",
+				Description: "Prompt to send to Codex. Be specific and include all needed context.",
 			},
 			"timeout_seconds": {
 				Type:        "integer",
@@ -240,7 +240,7 @@ func (t *ClaudeTool) Parameters() ParameterSchema {
 		Properties: map[string]PropertySchema{
 			"prompt": {
 				Type:        "string",
-				Description: "The prompt to send to Claude for processing. Be specific and include all necessary context in the prompt itself.",
+				Description: "Prompt to send to Claude. Be specific and include all needed context.",
 			},
 			"timeout_seconds": {
 				Type:        "integer",
@@ -352,7 +352,7 @@ func (t *BuckleyTool) Parameters() ParameterSchema {
 		Properties: map[string]PropertySchema{
 			"prompt": {
 				Type:        "string",
-				Description: "The task prompt to send to the Buckley subagent. Be specific and include all necessary context.",
+				Description: "Task prompt to send to the Buckley subagent. Be specific and include all needed context.",
 			},
 			"timeout_seconds": {
 				Type:        "integer",

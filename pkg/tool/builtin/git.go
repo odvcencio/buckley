@@ -14,7 +14,7 @@ func (t *GitStatusTool) Name() string {
 }
 
 func (t *GitStatusTool) Description() string {
-	return "Show git working tree status including modified, staged, and untracked files. Use this to see what changes have been made before committing or to check repository state."
+	return "Show git working tree status: modified, staged, and untracked files."
 }
 
 func (t *GitStatusTool) Parameters() ParameterSchema {
@@ -23,11 +23,11 @@ func (t *GitStatusTool) Parameters() ParameterSchema {
 		Properties: map[string]PropertySchema{
 			"path": {
 				Type:        "string",
-				Description: "Optional repository or directory path to inspect. Defaults to Buckley's current workdir.",
+				Description: "Repository or directory path to inspect (default: current workdir)",
 			},
 			"repo_path": {
 				Type:        "string",
-				Description: "Optional repository or directory path to inspect. Alias for path.",
+				Description: "Alias for path",
 			},
 		},
 		Required: []string{},
@@ -80,7 +80,7 @@ func (t *GitDiffTool) Name() string {
 }
 
 func (t *GitDiffTool) Description() string {
-	return "Show git diff of changes. Can show unstaged changes (default), staged changes (--cached), or differences between specific files/commits. Use this to review code changes before committing or to compare versions."
+	return "Show git diff: unstaged changes (default) or staged changes (--cached)."
 }
 
 func (t *GitDiffTool) Parameters() ParameterSchema {
@@ -98,11 +98,11 @@ func (t *GitDiffTool) Parameters() ParameterSchema {
 			},
 			"path": {
 				Type:        "string",
-				Description: "Optional repository or directory path to run git diff in. Defaults to Buckley's current workdir.",
+				Description: "Repository or directory path to diff in (default: current workdir)",
 			},
 			"repo_path": {
 				Type:        "string",
-				Description: "Optional repository or directory path to run git diff in. Alias for path.",
+				Description: "Alias for path",
 			},
 		},
 		Required: []string{},
@@ -188,7 +188,7 @@ func (t *GitLogTool) Name() string {
 }
 
 func (t *GitLogTool) Description() string {
-	return "Show git commit history with configurable count and format. Defaults to last 10 commits in oneline format. Use this to review recent changes, find when features were added, or trace bug origins."
+	return "Show git commit history (default: last 10 commits, oneline format)."
 }
 
 func (t *GitLogTool) Parameters() ParameterSchema {
@@ -207,11 +207,11 @@ func (t *GitLogTool) Parameters() ParameterSchema {
 			},
 			"path": {
 				Type:        "string",
-				Description: "Optional repository or directory path to show log for. Defaults to Buckley's current workdir.",
+				Description: "Repository or directory path to show log for (default: current workdir)",
 			},
 			"repo_path": {
 				Type:        "string",
-				Description: "Optional repository or directory path to show log for. Alias for path.",
+				Description: "Alias for path",
 			},
 		},
 		Required: []string{},
@@ -291,7 +291,7 @@ func (t *GitBlameTool) Name() string {
 }
 
 func (t *GitBlameTool) Description() string {
-	return "Show line-by-line authorship and commit information for a file. Each line shows the commit hash, author, date, and content. Use this to track who wrote specific code, when changes were made, or to find the commit that introduced a bug."
+	return "Show line-by-line authorship for a file: commit hash, author, date, and content."
 }
 
 func (t *GitBlameTool) Parameters() ParameterSchema {
@@ -304,11 +304,11 @@ func (t *GitBlameTool) Parameters() ParameterSchema {
 			},
 			"path": {
 				Type:        "string",
-				Description: "File to show blame for. Kept for compatibility; prefer file.",
+				Description: "Alias for file (compatibility)",
 			},
 			"repo_path": {
 				Type:        "string",
-				Description: "Optional repository or directory path to run git blame in. Defaults to Buckley's current workdir.",
+				Description: "Repository or directory path to run git blame in (default: current workdir)",
 			},
 		},
 		Required: []string{},

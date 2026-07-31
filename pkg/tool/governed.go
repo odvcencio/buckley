@@ -57,6 +57,9 @@ func GovernedToolNames(registry *Registry, evaluator types.RuleEvaluator, role, 
 	}
 
 	mode := "full"
+	if configured := registry.DefaultPoolMode(); configured != "" {
+		mode = configured
+	}
 	excluded := map[string]struct{}{}
 	if evaluator != nil {
 		result, err := evaluator.EvalStrategy("runtime/concurrency", "pool_policy", map[string]any{

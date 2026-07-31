@@ -26,7 +26,7 @@ func (t *SemanticSearchTool) Name() string {
 
 // Description returns the tool description
 func (t *SemanticSearchTool) Description() string {
-	return "Search codebase using semantic similarity. Finds code based on meaning rather than exact text matches. Use when looking for implementations of concepts, similar patterns, or related functionality. Requires index to be built first using manage_embeddings_index."
+	return "Search code by meaning, not exact text. Requires an index built first with manage_embeddings_index."
 }
 
 // Parameters returns the tool parameter schema
@@ -36,7 +36,7 @@ func (t *SemanticSearchTool) Parameters() ParameterSchema {
 		Properties: map[string]PropertySchema{
 			"query": {
 				Type:        "string",
-				Description: "Natural language description of what you're looking for (e.g., 'functions that handle HTTP requests', 'error handling patterns', 'database connection code')",
+				Description: "Natural language description of what to find, e.g. 'error handling patterns'",
 			},
 			"limit": {
 				Type:        "string",
@@ -152,7 +152,7 @@ func (t *IndexManagementTool) Name() string {
 
 // Description returns the tool description
 func (t *IndexManagementTool) Description() string {
-	return "Manage the semantic search index. Build index for a directory to enable semantic_search, clear the index, or check status. Building an index generates embeddings for all code files and may take time depending on codebase size."
+	return "Manage the semantic search index: build, clear, or check status. Building generates embeddings for all code files."
 }
 
 // Parameters returns the tool parameter schema

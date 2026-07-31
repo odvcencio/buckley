@@ -16,7 +16,7 @@ func (t *ExcelTool) Name() string {
 }
 
 func (t *ExcelTool) Description() string {
-	return "**EXCEL FILE OPERATIONS** - Read, write, and manipulate Excel files (.xlsx only). Trigger phrases: 'read spreadsheet', 'edit Excel', 'write to cell', 'add formula', 'create sheet', 'update workbook'. Supports reading cell values, writing data/formulas, creating/deleting sheets, and listing sheet names. Use this whenever user mentions Excel files, spreadsheets, or .xlsx files. Can perform multiple operations in one call for efficiency."
+	return "Read, write, and manage Excel workbooks (.xlsx only): cell/range values, formulas, and sheets."
 }
 
 func (t *ExcelTool) Parameters() ParameterSchema {
@@ -25,51 +25,51 @@ func (t *ExcelTool) Parameters() ParameterSchema {
 		Properties: map[string]PropertySchema{
 			"action": {
 				Type:        "string",
-				Description: "Action to perform: read, write, write_formula, list_sheets, create_sheet, delete_sheet, get_info",
+				Description: "read, write, write_formula, list_sheets, create_sheet, delete_sheet, get_info",
 			},
 			"file_path": {
 				Type:        "string",
-				Description: "Path to Excel file (.xlsx or .xls)",
+				Description: "Path to the .xlsx file",
 			},
 			"sheet": {
 				Type:        "string",
-				Description: "Sheet name (defaults to first sheet if not specified)",
+				Description: "Sheet name (default: first sheet)",
 			},
 			"cell": {
 				Type:        "string",
-				Description: "Cell reference (e.g., 'A1', 'B5') for read/write operations",
+				Description: "Cell reference, e.g. 'A1'",
 			},
 			"range": {
 				Type:        "string",
-				Description: "Cell range (e.g., 'A1:C10') for reading multiple cells",
+				Description: "Cell range, e.g. 'A1:C10'",
 			},
 			"value": {
 				Type:        "string",
-				Description: "Value to write to cell (for write action)",
+				Description: "Value to write (write action)",
 			},
 			"formula": {
 				Type:        "string",
-				Description: "Formula to write (e.g., '=SUM(A1:A10)') for write_formula action",
+				Description: "Formula to write, e.g. '=SUM(A1:A10)' (write_formula action)",
 			},
 			"new_sheet_name": {
 				Type:        "string",
-				Description: "Name for new sheet (for create_sheet action)",
+				Description: "Name for the new sheet (create_sheet action)",
 			},
 			"data": {
 				Type:        "array",
-				Description: "Array of arrays for batch write operations. Each inner array is a row. Example: [['Name', 'Age'], ['Alice', 30], ['Bob', 25]]",
+				Description: "Rows for batch write. Example: [['Name','Age'],['Alice',30]]",
 				Items: &PropertySchema{
 					Type:        "array",
-					Description: "A single row of cell values",
+					Description: "One row of cell values",
 					Items: &PropertySchema{
 						Type:        "string",
-						Description: "A cell value; format numbers and booleans as text",
+						Description: "Cell value as text",
 					},
 				},
 			},
 			"start_cell": {
 				Type:        "string",
-				Description: "Starting cell for batch data write (e.g., 'A1'). Default: 'A1'",
+				Description: "Starting cell for batch write (default: 'A1')",
 			},
 		},
 		Required: []string{"action", "file_path"},

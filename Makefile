@@ -32,15 +32,32 @@ web-install:
 .PHONY: build-cli
 build-cli:
 	@echo "Building buckley (CLI only)..."
-	CGO_ENABLED=0 go build -o buckley ./cmd/buckley
+	CGO_ENABLED=0 go build -ldflags="-s -w" -o buckley ./cmd/buckley
 
 .PHONY: build
 build: web build-cli
 
+# Kubernetes batch execution (pkg/orchestrator/batch_coordinator.go) is gated
+# behind the batch_k8s build tag so the default binary does not carry the
+# k8s.io/client-go dependency tree. Use this target for batch-capable builds.
+.PHONY: build-batch
+build-batch:
+	@echo "Building buckley (with Kubernetes batch support)..."
+	CGO_ENABLED=0 go build -tags batch_k8s -ldflags="-s -w" -o buckley ./cmd/buckley
+
+# The embedded web UI (pkg/ipc/ui.go, ~1.1MB) is gated behind the webui build
+# tag so the default binary omits it. `buckley serve --browser --assets
+# <dir>` still works without this tag by serving assets from disk; use this
+# target when you need the UI embedded as a fallback with no assets dir.
+.PHONY: build-webui
+build-webui:
+	@echo "Building buckley (with embedded web UI)..."
+	CGO_ENABLED=0 go build -tags webui -ldflags="-s -w" -o buckley ./cmd/buckley
+
 .PHONY: dev
 dev:
 	@echo "Building and running buckley..."
-	CGO_ENABLED=0 go build -o buckley ./cmd/buckley && ./buckley
+	CGO_ENABLED=0 go build -ldflags="-s -w" -o buckley ./cmd/buckley && ./buckley
 
 .PHONY: test
 test:

@@ -24,7 +24,7 @@ func (t *FindSymbolTool) Name() string {
 }
 
 func (t *FindSymbolTool) Description() string {
-	return "Find where a symbol (function, class, type, interface) is defined in the codebase. Searches for Go functions, types, interfaces, JavaScript/TypeScript functions/classes, and Python functions/classes. Returns file path and line number of definitions."
+	return "Find where a symbol (function, class, type, interface) is defined in Go, JS/TS, or Python. Returns file and line."
 }
 
 func (t *FindSymbolTool) Parameters() ParameterSchema {
@@ -287,7 +287,7 @@ func (t *FindReferencesTool) Name() string {
 }
 
 func (t *FindReferencesTool) Description() string {
-	return "Find all places where a symbol is referenced or called in the codebase. Searches for function calls, type usage, variable references, etc. Returns file paths and line numbers of all usages. Results limited to first 50 in conversation."
+	return "Find all places where a symbol is referenced or called. Returns file and line for each usage (first 50 shown)."
 }
 
 func (t *FindReferencesTool) Parameters() ParameterSchema {
@@ -451,7 +451,7 @@ func (t *GetFunctionSignatureTool) Name() string {
 }
 
 func (t *GetFunctionSignatureTool) Description() string {
-	return "Get the signature and documentation of a function including parameters, return types, and doc comments. Searches for Go functions with godoc, JavaScript/TypeScript functions with JSDoc, and Python functions with docstrings. Use this to understand how to call a function."
+	return "Get a function's signature and doc comments (godoc, JSDoc, or Python docstring)."
 }
 
 func (t *GetFunctionSignatureTool) Parameters() ParameterSchema {

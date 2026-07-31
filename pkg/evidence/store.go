@@ -14,6 +14,8 @@ import (
 
 	sqlite "modernc.org/sqlite"
 	sqlite3 "modernc.org/sqlite/lib"
+
+	"m31labs.dev/buckley/v2/pkg/storage"
 )
 
 // ErrNotFound is returned when a requested evidence object does not exist.
@@ -501,17 +503,10 @@ func ensurePrivateSQLiteFile(path string) error {
 	return f.Close()
 }
 
-// migration is a single, ordered, idempotent schema step, matching the
-// pattern in pkg/storage/sqlite.go.
-type migration struct {
-	Version int
-	Name    string
-	Apply   func(db *sql.DB) error
-}
-
-var migrations = []migration{
-	{1, "evidence_objects", createEvidenceObjectsTable},
-	{2, "evidence_pins", createEvidencePinsTable},
+// migrations is the ordered list of schema steps applied via storage.Migrate.
+var migrations = []storage.Migration{
+	{Version: 1, Name: "evidence_objects", Apply: createEvidenceObjectsTable},
+	{Version: 2, Name: "evidence_pins", Apply: createEvidencePinsTable},
 }
 
 func createEvidenceObjectsTable(db *sql.DB) error {
@@ -560,34 +555,10 @@ func createEvidencePinsTable(db *sql.DB) error {
 	return nil
 }
 
-// runMigrations applies pending schema migrations, tracked in
-// evidence_schema_migrations (named distinctly from pkg/storage's
-// schema_migrations table so the two packages can safely share one SQLite
-// file once wiring lands).
+// runMigrations applies pending schema migrations via the shared
+// storage.Migrate runner, tracked in evidence_schema_migrations (named
+// distinctly from pkg/storage's schema_migrations table so the two packages
+// can safely share one SQLite file once wiring lands).
 func runMigrations(db *sql.DB) error {
-	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS evidence_schema_migrations (
-		version INTEGER PRIMARY KEY,
-		name TEXT NOT NULL,
-		applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-	)`); err != nil {
-		return fmt.Errorf("create evidence_schema_migrations: %w", err)
-	}
-
-	var currentVersion int
-	if err := db.QueryRow(`SELECT COALESCE(MAX(version), 0) FROM evidence_schema_migrations`).Scan(&currentVersion); err != nil {
-		return fmt.Errorf("get schema version: %w", err)
-	}
-
-	for _, m := range migrations {
-		if m.Version <= currentVersion {
-			continue
-		}
-		if err := m.Apply(db); err != nil {
-			return fmt.Errorf("migration %d (%s): %w", m.Version, m.Name, err)
-		}
-		if _, err := db.Exec(`INSERT INTO evidence_schema_migrations (version, name) VALUES (?, ?)`, m.Version, m.Name); err != nil {
-			return fmt.Errorf("record migration %d: %w", m.Version, err)
-		}
-	}
-	return nil
+	return storage.Migrate(db, "evidence_schema_migrations", migrations)
 }

@@ -1986,8 +1986,8 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 	mode := "API only"
 	hint := "Enable the browser UI with ipc.enable_browser: true (or run `buckley serve --browser`)."
 	if s.cfg.EnableBrowser {
-		mode = "Browser UI unavailable"
-		hint = "The browser UI could not be loaded. Ensure the embedded UI is present or serve custom assets with `buckley serve --browser --assets <dir>`."
+		mode = "Built without web UI"
+		hint = "This binary was built without the embedded web UI (requires -tags webui, see `make build-webui`). Serve assets from disk instead with `buckley serve --browser --assets <dir>`."
 	}
 	fmt.Fprintf(w, `<!doctype html>
 <html lang="en">

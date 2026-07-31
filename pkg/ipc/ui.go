@@ -1,3 +1,7 @@
+//go:build webui
+
+// Package ipc's embedded web UI. Built only with -tags webui; see
+// ui_stub.go for the default build, which omits the ~1.1MB embed.
 package ipc
 
 import (

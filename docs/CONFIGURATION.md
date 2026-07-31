@@ -353,6 +353,12 @@ git_clone:
 
 HTTP/WebSocket server for desktop UI and remote access.
 
+`enable_browser: true` serves the web UI from `--assets <dir>` on disk when
+set, or from the embedded `pkg/ipc/ui.go` filesystem otherwise. The embed is
+gated behind the `webui` build tag (`make build-webui`, ~1.1MB); the default
+`buckley` binary omits it and shows a "built without web UI" fallback page
+when no `--assets` dir is configured.
+
 ```yaml
 ipc:
   enabled: false
@@ -440,6 +446,12 @@ worktrees:
 ### batch
 
 Kubernetes batch execution for CI/CD.
+
+The Kubernetes client (`pkg/orchestrator/batch_coordinator.go`) is gated
+behind the `batch_k8s` build tag, so the default `buckley` binary does not
+carry the `k8s.io/client-go` dependency tree. Build with `make build-batch`
+(or `go build -tags batch_k8s`) to get batch support. A default build with
+`batch.enabled: true` fails with a clear "built without batch support" error.
 
 ```yaml
 batch:

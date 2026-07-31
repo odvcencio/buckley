@@ -1,7 +1,12 @@
+//go:build batch_k8s
+
+// Package orchestrator's Kubernetes batch coordinator. Built only with
+// -tags batch_k8s; see batch_coordinator_stub.go for the default build.
 package orchestrator
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -64,7 +69,10 @@ func (b *BatchCoordinator) DispatchTask(ctx context.Context, plan *Plan, task *T
 	vars := b.templateVars(plan, task, remoteBranch)
 	jobName := b.buildJobName(plan, task)
 
-	job := b.buildJob(jobName, vars)
+	job, err := b.buildJob(jobName, vars)
+	if err != nil {
+		return nil, fmt.Errorf("building batch job: %w", err)
+	}
 
 	// Ensure idempotency by deleting any prior job with the same name
 	propagation := metav1.DeletePropagationBackground
@@ -195,7 +203,7 @@ func (b *BatchCoordinator) CleanupWorkspaces(ctx context.Context, olderThan time
 	return deleted, nil
 }
 
-func (b *BatchCoordinator) buildJob(jobName string, vars map[string]string) *batchv1.Job {
+func (b *BatchCoordinator) buildJob(jobName string, vars map[string]string) (*batchv1.Job, error) {
 	labels := map[string]string{
 		"app":                    "buckley",
 		"app.kubernetes.io/name": "buckley",
@@ -281,7 +289,10 @@ func (b *BatchCoordinator) buildJob(jobName string, vars map[string]string) *bat
 		container.WorkingDir = workspaceMountPath
 	}
 	if len(template.Resources.Limits) > 0 || len(template.Resources.Requests) > 0 {
-		container.Resources = template.Resources
+		resources, err := convertResources(template.Resources)
+		if err == nil {
+			container.Resources = resources
+		}
 	}
 	if len(envFrom) > 0 {
 		container.EnvFrom = envFrom
@@ -399,10 +410,14 @@ func (b *BatchCoordinator) buildJob(jobName string, vars map[string]string) *bat
 		}
 	}
 	if len(template.Tolerations) > 0 {
-		podSpec.Tolerations = append([]corev1.Toleration{}, template.Tolerations...)
+		podSpec.Tolerations = convertTolerations(template.Tolerations)
 	}
-	if template.Affinity != nil {
-		podSpec.Affinity = template.Affinity
+	if len(template.Affinity) > 0 {
+		affinity, err := convertAffinity(template.Affinity)
+		if err != nil {
+			return nil, fmt.Errorf("converting affinity: %w", err)
+		}
+		podSpec.Affinity = affinity
 	}
 
 	backoff := template.BackoffLimit
@@ -423,7 +438,7 @@ func (b *BatchCoordinator) buildJob(jobName string, vars map[string]string) *bat
 		ttl := template.TTLSecondsAfterFinished
 		job.Spec.TTLSecondsAfterFinished = &ttl
 	}
-	return job
+	return job, nil
 }
 
 func (b *BatchCoordinator) templateVars(plan *Plan, task *Task, remoteBranch string) map[string]string {
@@ -618,4 +633,68 @@ func pointerString(val string) *string {
 		return nil
 	}
 	return &val
+}
+
+// convertResources parses config.BatchResourcesConfig's plain quantity
+// strings (e.g. "cpu": "500m") into a corev1.ResourceRequirements.
+func convertResources(cfg config.BatchResourcesConfig) (corev1.ResourceRequirements, error) {
+	var resources corev1.ResourceRequirements
+	if len(cfg.Limits) > 0 {
+		limits, err := parseResourceList(cfg.Limits)
+		if err != nil {
+			return resources, fmt.Errorf("resources.limits: %w", err)
+		}
+		resources.Limits = limits
+	}
+	if len(cfg.Requests) > 0 {
+		requests, err := parseResourceList(cfg.Requests)
+		if err != nil {
+			return resources, fmt.Errorf("resources.requests: %w", err)
+		}
+		resources.Requests = requests
+	}
+	return resources, nil
+}
+
+func parseResourceList(values map[string]string) (corev1.ResourceList, error) {
+	list := make(corev1.ResourceList, len(values))
+	for name, quantity := range values {
+		parsed, err := resource.ParseQuantity(quantity)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", name, err)
+		}
+		list[corev1.ResourceName(name)] = parsed
+	}
+	return list, nil
+}
+
+// convertTolerations maps config.BatchTolerationConfig entries onto
+// corev1.Toleration.
+func convertTolerations(cfg []config.BatchTolerationConfig) []corev1.Toleration {
+	tolerations := make([]corev1.Toleration, 0, len(cfg))
+	for _, t := range cfg {
+		tolerations = append(tolerations, corev1.Toleration{
+			Key:               t.Key,
+			Operator:          corev1.TolerationOperator(t.Operator),
+			Value:             t.Value,
+			Effect:            corev1.TaintEffect(t.Effect),
+			TolerationSeconds: t.TolerationSeconds,
+		})
+	}
+	return tolerations
+}
+
+// convertAffinity round-trips the raw, YAML-decoded affinity map through
+// JSON into a corev1.Affinity, since config.BatchJobTemplateConfig stores
+// affinity as opaque map[string]any to avoid importing k8s.io types.
+func convertAffinity(raw map[string]any) (*corev1.Affinity, error) {
+	data, err := json.Marshal(raw)
+	if err != nil {
+		return nil, err
+	}
+	var affinity corev1.Affinity
+	if err := json.Unmarshal(data, &affinity); err != nil {
+		return nil, err
+	}
+	return &affinity, nil
 }
