@@ -1,0 +1,163 @@
+package evidence
+
+import (
+	"bytes"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+func TestBlobStore_WriteReadRoundTrip(t *testing.T) {
+	root := t.TempDir()
+	blobs, err := NewBlobStore(root)
+	if err != nil {
+		t.Fatalf("NewBlobStore() error = %v", err)
+	}
+
+	content := bytes.Repeat([]byte("evidence blob content "), 1000)
+	sha := ContentSHA256Hex(content)
+
+	path, err := blobs.Write(sha, content)
+	if err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+
+	wantSuffix := filepath.Join("sha256", sha[0:2], sha[2:4], sha+".zst")
+	if !strings.HasSuffix(path, wantSuffix) {
+		t.Fatalf("blob path = %q, want suffix %q", path, wantSuffix)
+	}
+
+	got, err := blobs.Read(path)
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if !bytes.Equal(got, content) {
+		t.Fatalf("round-tripped content mismatch: got %d bytes, want %d bytes", len(got), len(content))
+	}
+}
+
+func TestBlobStore_WritePermissions(t *testing.T) {
+	root := t.TempDir()
+	blobs, err := NewBlobStore(root)
+	if err != nil {
+		t.Fatalf("NewBlobStore() error = %v", err)
+	}
+
+	content := []byte("permission check")
+	sha := ContentSHA256Hex(content)
+	path, err := blobs.Write(sha, content)
+	if err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("Stat() error = %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Fatalf("blob file perm = %v, want 0600", perm)
+	}
+
+	dirInfo, err := os.Stat(filepath.Dir(path))
+	if err != nil {
+		t.Fatalf("Stat() dir error = %v", err)
+	}
+	if perm := dirInfo.Mode().Perm(); perm != 0o700 {
+		t.Fatalf("blob dir perm = %v, want 0700", perm)
+	}
+}
+
+func TestBlobStore_WriteIdempotent(t *testing.T) {
+	root := t.TempDir()
+	blobs, err := NewBlobStore(root)
+	if err != nil {
+		t.Fatalf("NewBlobStore() error = %v", err)
+	}
+
+	content := []byte("idempotent write")
+	sha := ContentSHA256Hex(content)
+
+	first, err := blobs.Write(sha, content)
+	if err != nil {
+		t.Fatalf("first Write() error = %v", err)
+	}
+	second, err := blobs.Write(sha, content)
+	if err != nil {
+		t.Fatalf("second Write() error = %v", err)
+	}
+	if first != second {
+		t.Fatalf("expected identical path on rewrite: %q != %q", first, second)
+	}
+}
+
+// TestBlobStore_WriteLeavesNoTempFiles verifies the write-temp/fsync/rename
+// sequence never leaves a partially written file at the final path: after
+// Write returns, the only file present is the final blob, and no ".tmp"
+// sibling remains. This is the crash-safety property from section 13.2.
+func TestBlobStore_WriteLeavesNoTempFiles(t *testing.T) {
+	root := t.TempDir()
+	blobs, err := NewBlobStore(root)
+	if err != nil {
+		t.Fatalf("NewBlobStore() error = %v", err)
+	}
+
+	content := bytes.Repeat([]byte("z"), 4096)
+	sha := ContentSHA256Hex(content)
+	path, err := blobs.Write(sha, content)
+	if err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+
+	entries, err := os.ReadDir(filepath.Dir(path))
+	if err != nil {
+		t.Fatalf("ReadDir() error = %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected exactly one file in blob dir after write, got %d: %v", len(entries), entries)
+	}
+	if entries[0].Name() != filepath.Base(path) {
+		t.Fatalf("unexpected file left behind: %q", entries[0].Name())
+	}
+}
+
+func TestBlobStore_DeleteMissingIsNotError(t *testing.T) {
+	root := t.TempDir()
+	blobs, err := NewBlobStore(root)
+	if err != nil {
+		t.Fatalf("NewBlobStore() error = %v", err)
+	}
+	if err := blobs.Delete(filepath.Join(root, "sha256", "ab", "cd", "missing.zst")); err != nil {
+		t.Fatalf("Delete() on missing file error = %v, want nil", err)
+	}
+}
+
+func TestBlobStore_Walk(t *testing.T) {
+	root := t.TempDir()
+	blobs, err := NewBlobStore(root)
+	if err != nil {
+		t.Fatalf("NewBlobStore() error = %v", err)
+	}
+
+	var written []string
+	for i := 0; i < 3; i++ {
+		content := []byte{byte(i), byte(i + 1), byte(i + 2)}
+		sha := ContentSHA256Hex(content)
+		path, err := blobs.Write(sha, content)
+		if err != nil {
+			t.Fatalf("Write() error = %v", err)
+		}
+		written = append(written, path)
+	}
+
+	var walked []string
+	if err := blobs.Walk(func(path string) error {
+		walked = append(walked, path)
+		return nil
+	}); err != nil {
+		t.Fatalf("Walk() error = %v", err)
+	}
+	if len(walked) != len(written) {
+		t.Fatalf("Walk() found %d files, want %d", len(walked), len(written))
+	}
+}
