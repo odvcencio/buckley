@@ -81,7 +81,7 @@ func (c *Controller) finishGuardedToolLoop(ctx context.Context, sess *SessionSta
 		c.app.SetStatus("Loop guard stopped tools; synthesizing from existing evidence")
 	}
 
-	req, _ := c.buildToolLoopRequestWithState(sess, modelID, false, state)
+	req, _ := c.buildToolLoopRequestWithState(sess, modelID, false, nil, state)
 	req.Tools = nil
 	req.ToolChoice = ""
 	req.ParallelToolCalls = nil
