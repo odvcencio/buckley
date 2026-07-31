@@ -1,21 +1,22 @@
 name: Apply workspace shell
 
 on:
-  push:
-    branches:
-      - agent/clickable-sidebar-activity
+  pull_request:
+    types: [opened, reopened, synchronize]
+    branches: [main]
 
 permissions:
   contents: write
 
 jobs:
   apply:
-    if: ${{ !contains(github.event.head_commit.message, '[workspace-applied]') }}
+    if: ${{ github.head_ref == 'agent/clickable-sidebar-activity' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
+          ref: agent/clickable-sidebar-activity
 
       - name: Apply workspace source transform
         run: |
@@ -60,4 +61,4 @@ jobs:
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
           git add -A
           git commit -m "feat(tui): add three-panel workspace shell [workspace-applied]"
-          git push
+          git push origin HEAD:agent/clickable-sidebar-activity
