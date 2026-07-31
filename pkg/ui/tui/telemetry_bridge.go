@@ -37,6 +37,12 @@ type TelemetryUIBridge struct {
 	experimentVariants map[string]widgets.ExperimentVariant
 	rlmStatus          *widgets.RLMStatus
 	rlmScratchpad      []widgets.RLMScratchpadEntry
+
+	// detailBuilders accumulates AppendActivityOutput's incremental shell
+	// output per running task ID. See telemetry_activity.go for why this
+	// exists alongside activities[id].Detail.
+	detailBuilders    map[string]*strings.Builder
+	lastActivityFlush time.Time
 }
 
 type touchEntry struct {
@@ -60,6 +66,7 @@ func NewTelemetryUIBridge(hub *telemetry.Hub, app *WidgetApp) *TelemetryUIBridge
 		activities:         make(map[string]widgets.ActivityRecord),
 		activeTouches:      make(map[string]touchEntry),
 		experimentVariants: make(map[string]widgets.ExperimentVariant),
+		detailBuilders:     make(map[string]*strings.Builder),
 	}
 }
 

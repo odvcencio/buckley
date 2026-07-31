@@ -2,6 +2,8 @@ package toolrunner
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"testing"
 
 	"m31labs.dev/buckley/v2/pkg/model"
@@ -457,19 +459,20 @@ func TestRunner_Execute_AllowedToolsFilter(t *testing.T) {
 
 // recordingStreamHandler captures all streaming events for verification.
 type recordingStreamHandler struct {
-	texts      []string
-	reasonings []string
-	toolStarts []string
-	toolEnds   []string
-	errors     []error
-	completed  bool
+	texts              []string
+	reasonings         []string
+	toolStarts         []string
+	toolEnds           []string
+	errors             []error
+	completed          bool
+	reasoningEndCalled bool
 }
 
 func (h *recordingStreamHandler) OnText(text string) { h.texts = append(h.texts, text) }
 func (h *recordingStreamHandler) OnReasoning(reasoning string) {
 	h.reasonings = append(h.reasonings, reasoning)
 }
-func (h *recordingStreamHandler) OnReasoningEnd() {}
+func (h *recordingStreamHandler) OnReasoningEnd() { h.reasoningEndCalled = true }
 func (h *recordingStreamHandler) OnToolStart(name string, _ string) {
 	h.toolStarts = append(h.toolStarts, name)
 }
@@ -657,5 +660,133 @@ func TestToolCallRecord_Fields(t *testing.T) {
 	}
 	if !record.Success {
 		t.Error("Success = false, want true")
+	}
+}
+
+// erroringStreamClient reports a streaming error through errChan. chunkChan
+// is never sent to or closed so it's never select-ready, keeping the test
+// deterministic regardless of goroutine scheduling.
+type erroringStreamClient struct {
+	err error
+}
+
+func (m *erroringStreamClient) ChatCompletion(_ context.Context, _ model.ChatRequest) (*model.ChatResponse, error) {
+	return nil, m.err
+}
+
+func (m *erroringStreamClient) GetExecutionModel() string { return "test-model" }
+
+func (m *erroringStreamClient) ChatCompletionStream(_ context.Context, _ model.ChatRequest) (<-chan model.StreamChunk, <-chan error) {
+	chunkChan := make(chan model.StreamChunk)
+	errChan := make(chan error, 1)
+	errChan <- m.err
+	return chunkChan, errChan
+}
+
+// TestRunner_Execute_StreamingErrorAbortsAndNotifiesOnce exercises
+// consumeToolCallStream's error branch: a non-nil errChan value must wrap
+// and return the error, fire OnError exactly once, and never reach
+// OnComplete.
+func TestRunner_Execute_StreamingErrorAbortsAndNotifiesOnce(t *testing.T) {
+	streamErr := errors.New("boom")
+	registry := emptyRegistry()
+
+	runner, err := New(Config{
+		Models:               &erroringStreamClient{err: streamErr},
+		Registry:             registry,
+		DefaultMaxIterations: 5,
+	})
+	if err != nil {
+		t.Fatalf("failed to create runner: %v", err)
+	}
+
+	handler := &recordingStreamHandler{}
+	runner.SetStreamHandler(handler)
+
+	_, err = runner.Run(context.Background(), Request{
+		Messages: []model.Message{{Role: "user", Content: "hi"}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "streaming chat completion") || !strings.Contains(err.Error(), "boom") {
+		t.Fatalf("err = %v, want wrapped streaming error", err)
+	}
+	if len(handler.errors) != 1 {
+		t.Fatalf("expected OnError to fire exactly once, got %d: %v", len(handler.errors), handler.errors)
+	}
+	if handler.completed {
+		t.Fatal("OnComplete should not fire when the stream errors")
+	}
+}
+
+// reasoningDetailsStreamClient emits reasoning_details (the OpenRouter
+// format) on the first chunk and plain content on the second, both
+// pre-buffered so consumeToolCallStream's select only ever sees chunkChan
+// ready until it closes -- errChan is never sent to or closed.
+type reasoningDetailsStreamClient struct{}
+
+func (m *reasoningDetailsStreamClient) ChatCompletion(_ context.Context, _ model.ChatRequest) (*model.ChatResponse, error) {
+	return nil, errors.New("not used")
+}
+
+func (m *reasoningDetailsStreamClient) GetExecutionModel() string { return "test-model" }
+
+func (m *reasoningDetailsStreamClient) ChatCompletionStream(_ context.Context, _ model.ChatRequest) (<-chan model.StreamChunk, <-chan error) {
+	chunkChan := make(chan model.StreamChunk, 2)
+	errChan := make(chan error)
+	chunkChan <- model.StreamChunk{
+		Choices: []model.StreamChoice{{
+			Index: 0,
+			Delta: model.MessageDelta{
+				ReasoningDetails: []model.ReasoningDetail{{Type: "reasoning.text", Text: "thinking it through"}},
+			},
+		}},
+	}
+	chunkChan <- model.StreamChunk{
+		Choices: []model.StreamChoice{{
+			Index: 0,
+			Delta: model.MessageDelta{Content: "final answer"},
+		}},
+	}
+	close(chunkChan)
+	return chunkChan, errChan
+}
+
+// TestRunner_Execute_ReasoningDetailsRoutedAndSignaled exercises
+// forwardStreamDelta's reasoning_details branch: reasoning_details text
+// must reach OnReasoning (not the think-tag parser), plain content must
+// still reach OnText, and OnReasoningEnd must fire once the stream ends.
+func TestRunner_Execute_ReasoningDetailsRoutedAndSignaled(t *testing.T) {
+	registry := emptyRegistry()
+
+	runner, err := New(Config{
+		Models:               &reasoningDetailsStreamClient{},
+		Registry:             registry,
+		DefaultMaxIterations: 5,
+	})
+	if err != nil {
+		t.Fatalf("failed to create runner: %v", err)
+	}
+
+	handler := &recordingStreamHandler{}
+	runner.SetStreamHandler(handler)
+
+	result, err := runner.Run(context.Background(), Request{
+		Messages: []model.Message{{Role: "user", Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("execution failed: %v", err)
+	}
+
+	if len(handler.reasonings) != 1 || handler.reasonings[0] != "thinking it through" {
+		t.Fatalf("expected reasoning_details text forwarded to OnReasoning, got %v", handler.reasonings)
+	}
+	if !handler.reasoningEndCalled {
+		t.Fatal("expected OnReasoningEnd to fire for reasoning_details format")
+	}
+	streamed := strings.Join(handler.texts, "")
+	if streamed != "final answer" {
+		t.Fatalf("streamed text = %q, want %q", streamed, "final answer")
+	}
+	if result.Content != "final answer" {
+		t.Fatalf("result.Content = %q, want %q", result.Content, "final answer")
 	}
 }
