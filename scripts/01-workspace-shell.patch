@@ -1,0 +1,386 @@
+diff --git a/pkg/ui/tui/app_widget.go b/pkg/ui/tui/app_widget.go
+index dc9a034..0000000 100644
+--- a/pkg/ui/tui/app_widget.go
++++ b/pkg/ui/tui/app_widget.go
+@@ -56,16 +56,22 @@ type WidgetApp struct {
+ 	chatView  *widgets.ChatView
+ 	inputArea *widgets.InputArea
+ 	statusBar *widgets.StatusBar
+ 	sidebar   *widgets.Sidebar
++	activityPanel *widgets.ActivityPanel
+ 	root      runtime.Widget
+-	mainArea  *runtime.Flex // HBox containing chatView + sidebar
++	mainArea  *runtime.Flex // HBox containing navigator + chat + inspector
+ 
+-	// Sidebar state
++	// Workspace panel state
+ 	sidebarVisible     bool
+ 	sidebarWanted      bool
++	sidebarWidth       int
+ 	minWidthForSidebar int // Auto-hide below this width
++	activityPanelVisible bool
++	activityPanelWanted  bool
++	activityPanelWidth   int
+ 
+ 	// File picker
+ 	filePicker *filepicker.FilePicker
+@@ -229,24 +235,31 @@ func NewWidgetApp(cfg WidgetAppConfig) (*WidgetApp, error) {
+ 		themeToBackendStyle(th.TextMuted),
+ 	)
+ 
+-	// Determine if sidebar should be visible based on terminal width and content
+-	sidebarVisible := w >= 100 && sidebar.HasContent()
+-
+-	// Build main content area with HBox (ChatView + Sidebar)
+-	var mainArea *runtime.Flex
+-	if sidebarVisible {
+-		mainArea = runtime.HBox(
+-			expandFromZero(chatView),   // Fill space left by the sidebar
+-			runtime.Sized(sidebar, 24), // Fixed 24 cols for sidebar
+-		)
+-	} else {
+-		mainArea = runtime.HBox(
+-			expandFromZero(chatView), // Full width when sidebar hidden
+-		)
+-	}
++	// Create the persistent activity/detail inspector. It stays collapsed until
++	// telemetry supplies inspectable work.
++	activityPanel := widgets.NewActivityPanel()
++	activityPanel.SetStyles(
++		themeToBackendStyle(th.Border),
++		themeToBackendStyle(th.TextSecondary),
++		themeToBackendStyle(th.TextPrimary),
++		themeToBackendStyle(th.Selection),
++		themeToBackendStyle(th.TextMuted),
++	)
++
++	initialVisibility := resolveWorkspaceVisibility(
++		w,
++		false, sidebar.HasContent(),
++		false, activityPanel.HasContent(),
++		defaultSidebarWidth, defaultActivityPanelWidth,
++	)
++	mainArea := workspaceMainArea(
++		chatView, sidebar, activityPanel,
++		initialVisibility,
++		defaultSidebarWidth, defaultActivityPanelWidth,
++	)
+ 
+ 	// Build widget tree using VBox layout
+ 	// Header (fixed 1 row)
+-	// MainArea (HBox: ChatView + Sidebar)
++	// MainArea (HBox: Navigator + ChatView + Inspector)
+ 	// InputArea (fixed 2+ rows)
+ 	// StatusBar (fixed 1 row)
+@@ -281,16 +294,21 @@ func NewWidgetApp(cfg WidgetAppConfig) (*WidgetApp, error) {
+ 		inputArea:           inputArea,
+ 		statusBar:           statusBar,
+ 		sidebar:             sidebar,
++		activityPanel:       activityPanel,
+ 		root:                root,
+ 		mainArea:            mainArea,
+-		sidebarVisible:      sidebarVisible,
+-		sidebarWanted:       sidebarVisible,
++		sidebarVisible:      initialVisibility.left,
++		sidebarWanted:       false,
++		sidebarWidth:        defaultSidebarWidth,
+ 		minWidthForSidebar:  100,
++		activityPanelVisible: initialVisibility.right,
++		activityPanelWanted:  false,
++		activityPanelWidth:   defaultActivityPanelWidth,
+ 		filePicker:          fp,
+ 		theme:               th,
+ 		workDir:             workDir,
+@@ -458,6 +476,11 @@ func (a *WidgetApp) showCommandPalette() {
+ 
+ 		// Navigation commands
+-		{ID: "toggle-sidebar", Category: "View", Label: "Toggle Sidebar", Shortcut: "Ctrl+B"},
++		{ID: "toggle-sidebar", Category: "View", Label: "Toggle Navigator", Shortcut: "Ctrl+B"},
++		{ID: "toggle-activity", Category: "View", Label: "Toggle Activity Inspector", Shortcut: "Ctrl+Shift+B"},
++		{ID: "navigator-narrower", Category: "View", Label: "Narrow Navigator", Shortcut: "Alt+["},
++		{ID: "navigator-wider", Category: "View", Label: "Widen Navigator", Shortcut: "Alt+]"},
++		{ID: "inspector-narrower", Category: "View", Label: "Narrow Inspector", Shortcut: "Alt+{"},
++		{ID: "inspector-wider", Category: "View", Label: "Widen Inspector", Shortcut: "Alt+}"},
+ 		{ID: "file-picker", Category: "View", Label: "Open File Picker", Shortcut: "@"},
+ 		{ID: "scroll-top", Category: "View", Label: "Scroll to Top"},
+@@ -696,6 +719,9 @@ func (a *WidgetApp) handleMouseWheel(m MouseMsg) bool {
++	if _, _, ok := a.chatView.PositionForPoint(m.X, m.Y); !ok {
++		return false
++	}
+ 	switch m.Button {
+ 	case MouseWheelUp:
+ 		a.chatView.ScrollUp(3)
+@@ -800,14 +826,7 @@ func (a *WidgetApp) updateSidebarVisibility() {
+-	w, _ := a.screen.Size()
+-	shouldShow := a.sidebarWanted && w >= a.minWidthForSidebar
+-	if shouldShow == a.sidebarVisible {
+-		return
+-	}
+-	a.sidebarVisible = shouldShow
+-	a.rebuildLayout()
++	a.updateWorkspaceVisibility()
+ }
+@@ -974,6 +993,16 @@ func (a *WidgetApp) handlePaletteCommand(id string) {
+ 	// View commands
+ 	case "toggle-sidebar":
+ 		a.toggleSidebar()
++	case "toggle-activity":
++		a.toggleActivityPanel()
++	case "navigator-narrower":
++		a.resizeSidebar(-panelResizeStep)
++	case "navigator-wider":
++		a.resizeSidebar(panelResizeStep)
++	case "inspector-narrower":
++		a.resizeActivityPanel(-panelResizeStep)
++	case "inspector-wider":
++		a.resizeActivityPanel(panelResizeStep)
+ 	case "file-picker":
+ 		a.showFilePicker()
+@@ -1229,29 +1258,17 @@ func (a *WidgetApp) toggleSidebar() {
+ 	a.sidebarWanted = !a.sidebarWanted
+ 	a.updateSidebarVisibility()
+ 	if a.sidebarVisible {
+-		a.setStatusOverride("Sidebar shown", 2*time.Second)
++		a.setStatusOverride("Navigator shown", 2*time.Second)
+ 	} else {
+-		a.setStatusOverride("Sidebar hidden", 2*time.Second)
++		a.setStatusOverride("Navigator hidden", 2*time.Second)
+ 	}
+ }
+ 
+-// rebuildLayout rebuilds the main area layout based on sidebar visibility.
++// rebuildLayout rebuilds the three-region workspace based on panel state.
+ func (a *WidgetApp) rebuildLayout() {
+-	// Get current screen size
+ 	w, h := a.screen.Size()
+-
+-	// Rebuild main area with or without sidebar
+-	if a.sidebarVisible {
+-		a.mainArea = runtime.HBox(
+-			expandFromZero(a.chatView),
+-			runtime.Sized(a.sidebar, 24),
+-		)
+-	} else {
+-		a.mainArea = runtime.HBox(
+-			expandFromZero(a.chatView),
+-		)
+-	}
++	a.mainArea = a.buildWorkspaceMainArea()
+ 
+-	// Rebuild root with new main area
+ 	a.root = runtime.VBox(
+ 		runtime.Fixed(a.header),
+ 		expandFromZero(a.mainArea),
+@@ -1260,10 +1277,7 @@ func (a *WidgetApp) rebuildLayout() {
+ 		runtime.Fixed(a.statusBar),
+ 	)
+ 
+-	// Update screen with new root
+-	a.screen.PopLayer()
+-	a.screen.PushLayer(a.root, false)
++	a.screen.SetRoot(a.root)
+ 	a.screen.Resize(w, h)
+-
+ 	a.dirty = true
+ }
+@@ -1380,6 +1394,9 @@ func (a *WidgetApp) WelcomeScreen() {
+ 		"  • Use /help to see available commands",
+ 		"  • Use Ctrl+F to search conversation",
++		"  • Use Ctrl+B / Ctrl+Shift+B to toggle workspace panels",
++		"  • Use Alt+[ and Alt+] to resize the navigator",
++		"  • Use Alt+{ and Alt+} to resize the inspector",
+ 		"  • Use Alt+End to jump to latest",
+ 		"  • Press Ctrl+C twice to quit",
+ 		"",
+diff --git a/pkg/ui/tui/app_widget_keys.go b/pkg/ui/tui/app_widget_keys.go
+index 7d1a53f..0000000 100644
+--- a/pkg/ui/tui/app_widget_keys.go
++++ b/pkg/ui/tui/app_widget_keys.go
+@@ -83,7 +83,9 @@ func (a *WidgetApp) handleControlShortcut(m KeyMsg, key terminal.Key) bool {
+ 	switch {
+-	case key == terminal.KeyCtrlB || (m.Ctrl && m.Rune == 'b'):
++	case m.Ctrl && m.Shift && (key == terminal.KeyCtrlB || m.Rune == 'b' || m.Rune == 'B'):
++		a.toggleActivityPanel()
++	case key == terminal.KeyCtrlB || (m.Ctrl && (m.Rune == 'b' || m.Rune == 'B')):
+ 		a.toggleSidebar()
+ 	case key == terminal.KeyCtrlP || (m.Ctrl && m.Rune == 'p'):
+ 		a.showCommandPalette()
+@@ -99,6 +101,25 @@ func (a *WidgetApp) handleAltShortcut(m KeyMsg, key terminal.Key) bool {
+ 		return false
+ 	}
+ 
++	if key == terminal.KeyRune {
++		switch m.Rune {
++		case '[':
++			a.resizeSidebar(-panelResizeStep)
++			return true
++		case ']':
++			a.resizeSidebar(panelResizeStep)
++			return true
++		case '{':
++			a.resizeActivityPanel(-panelResizeStep)
++			return true
++		case '}':
++			a.resizeActivityPanel(panelResizeStep)
++			return true
++		}
++	}
++
+ 	if key == terminal.KeyRune && (m.Rune == 'c' || m.Rune == 'C') {
+ 		a.copyLatestCodeBlock()
+ 		return true
+diff --git a/pkg/ui/tui/telemetry_bridge.go b/pkg/ui/tui/telemetry_bridge.go
+index e730589..0000000 100644
+--- a/pkg/ui/tui/telemetry_bridge.go
++++ b/pkg/ui/tui/telemetry_bridge.go
+@@ -30,6 +30,7 @@ type TelemetryUIBridge struct {
+ 	taskProgress       int
+ 	planTasks          []widgets.PlanTask
+ 	runningTools       map[string]widgets.RunningTool
++	activities         map[string]widgets.ActivityRecord
+ 	activeTouches      map[string]touchEntry
+ 	recentFiles        []string
+@@ -58,6 +59,7 @@ func NewTelemetryUIBridge(hub *telemetry.Hub, app *WidgetApp) *TelemetryUIBridge {
+ 		eventCh:            eventCh,
+ 		unsubscribe:        unsub,
+ 		runningTools:       make(map[string]widgets.RunningTool),
++		activities:         make(map[string]widgets.ActivityRecord),
+ 		activeTouches:      make(map[string]touchEntry),
+ 		experimentVariants: make(map[string]widgets.ExperimentVariant),
+@@ -148,13 +150,22 @@ func (b *TelemetryUIBridge) handleEvent(event telemetry.Event) {
+ 	// Tool events (active touches)
+ 	case telemetry.EventToolStarted:
++		b.handleToolActivity(event, widgets.ActivityRunning)
+ 		b.handleToolStarted(event)
+ 	case telemetry.EventToolCompleted, telemetry.EventToolFailed:
++		status := widgets.ActivityCompleted
++		if event.Type == telemetry.EventToolFailed {
++			status = widgets.ActivityFailed
++		}
++		b.handleToolActivity(event, status)
+ 		b.handleToolFinished(event)
+ 	case telemetry.EventSubagentSpawned, telemetry.EventSubagentState:
++		b.handleSubagentActivity(event)
+ 		b.handleSubagentActive(event)
+ 	case telemetry.EventSubagentCompleted, telemetry.EventSubagentFailed, telemetry.EventSubagentCancelled:
++		b.handleSubagentActivity(event)
+ 		b.removeRunningTool(event.TaskID)
+@@ -362,6 +373,7 @@ func (b *TelemetryUIBridge) updateSidebar() {
+ 	b.app.SetRunningTools(tools)
+ 	b.app.SetActiveTouches(touches)
+ 	b.app.SetRLMStatus(b.rlmStatus, b.rlmScratchpad)
++	b.app.SetActivities(b.collectActivities())
+ 	b.app.sidebar.SetExperiment(b.experiment, b.experimentStatus, experimentVariants)
+ 	b.app.sidebar.SetRecentFiles(b.recentFiles)
+ 	b.app.Refresh()
+diff --git a/pkg/ui/tui/tool_loop.go b/pkg/ui/tui/tool_loop.go
+index f95e244..0000000 100644
+--- a/pkg/ui/tui/tool_loop.go
++++ b/pkg/ui/tui/tool_loop.go
+@@ -383,20 +383,9 @@ func (c *Controller) executeToolLoopCall(ctx context.Context, sess *SessionState,
+ 	if tc.ID != "" {
+ 		params[tool.ToolCallIDParam] = tc.ID
+ 	}
+ 
+-	toolCtx := ctx
+-	streamingShellOutput := tc.Function.Name == "run_shell"
+-	if streamingShellOutput {
+-		c.app.AppendToLastMessage("\n\n```text\n")
+-		toolCtx = builtin.WithShellOutputSink(ctx, func(_ string, text string) {
+-			c.app.AppendToLastMessage(text)
+-		})
+-	}
+ 	c.app.StartProcessStatus(fmt.Sprintf("Running %s (%d/%d) · Ctrl+C to interrupt", compactStatusText(tc.Function.Name, 36), index, total))
+-	result, execErr := sess.ToolRegistry.ExecuteWithContext(toolCtx, tc.Function.Name, params)
++	result, execErr := sess.ToolRegistry.ExecuteWithContext(ctx, tc.Function.Name, params)
+ 	c.app.StopProcessStatus()
+-	if streamingShellOutput {
+-		c.app.AppendToLastMessage("\n```")
+-	}
+ 	c.appendToolResultProgress(state, tc.Function.Name, result, execErr)
+ 	modelResult := formatToolResultForModel(result, execErr)
+@@ -447,14 +436,7 @@ func toolCallProgressBlock(tc model.ToolCall) string {
+-	name := strings.TrimSpace(tc.Function.Name)
+-	if name == "" {
+-		name = "tool"
+-	}
+-	detail := compactToolArguments(tc.Function.Arguments, 600)
+-	if detail == "" || detail == "{}" {
+-		return "→ " + name
+-	}
+-	return "→ " + name + "\n\n" + detail
++	return "→ " + toolCallProgressSummary(tc)
+ }
+diff --git a/pkg/tool/middleware_telemetry.go b/pkg/tool/middleware_telemetry.go
+index bc6c51f..0000000 100644
+--- a/pkg/tool/middleware_telemetry.go
++++ b/pkg/tool/middleware_telemetry.go
+@@ -34,8 +34,9 @@ func (r *Registry) telemetryMiddleware() Middleware {
+ 			}
+ 
+ 			rich := touch.ExtractFromArgs(name, params)
+-			r.publishToolEvent(telemetry.EventToolStarted, ctx.CallID, name, rich, ctx.StartTime, nil, nil, ctx.Attempt, ctx.Metadata)
++			metadata := withTelemetryArguments(ctx.Metadata, params)
++			r.publishToolEvent(telemetry.EventToolStarted, ctx.CallID, name, rich, ctx.StartTime, nil, nil, ctx.Attempt, metadata)
+@@ -52,7 +53,7 @@ func (r *Registry) telemetryMiddleware() Middleware {
+ 				res, err = execFn(params)
+ 			}
+ 
+-			r.publishToolEvent(eventTypeForResult(res, err), ctx.CallID, name, rich, time.Now(), res, err, ctx.Attempt, ctx.Metadata)
++			r.publishToolEvent(eventTypeForResult(res, err), ctx.CallID, name, rich, time.Now(), res, err, ctx.Attempt, metadata)
+ 			return res, err
+ 		}
+diff --git a/pkg/tool/registry_events.go b/pkg/tool/registry_events.go
+index f285d67..0000000 100644
+--- a/pkg/tool/registry_events.go
++++ b/pkg/tool/registry_events.go
+@@ -53,6 +53,9 @@ func (r *Registry) publishToolEvent(eventType telemetry.EventType, callID, toolNa
+ 	}
+ 	if res != nil {
+ 		payload["success"] = res.Success
++		if detail := telemetryResultDetail(res); detail != "" {
++			payload["result"] = detail
++		}
+ 		if strings.TrimSpace(toolName) == "browser_stream" {
+@@ -69,6 +72,9 @@ func (r *Registry) publishToolEvent(eventType telemetry.EventType, callID, toolNa
+ 		payload["error"] = err.Error()
+ 	}
+ 	if metadata != nil {
++		if arguments, ok := metadata["arguments"].(string); ok && strings.TrimSpace(arguments) != "" {
++			payload["arguments"] = arguments
++		}
+ 		if stack, ok := metadata["panic_stack"].(string); ok && strings.TrimSpace(stack) != "" {
+ 			payload["panic_stack"] = stack
+ diff --git a/pkg/subagent/manager.go b/pkg/subagent/manager.go
+index ce7488d..0000000 100644
+--- a/pkg/subagent/manager.go
++++ b/pkg/subagent/manager.go
+@@ -298,6 +298,12 @@ func (m *Manager) publish(eventType telemetry.EventType, snapshot Snapshot, errTe
+ 		"pid":               snapshot.PID,
+ 		"provider":          "buckley",
+ 	}
++	if snapshot.Task != "" {
++		data["task"] = snapshot.Task
++	}
++	if snapshot.Output != "" {
++		data["output"] = boundedTelemetryOutput(snapshot.Output)
++	}
+ 	if snapshot.Spec != "" {
+ 		data["spec"] = snapshot.Spec
+@@ -338,3 +344,16 @@ func boundedTask(task string) string {
+ 	}
+ 	return task[:4093] + "..."
+ }
++
++func boundedTelemetryOutput(output string) string {
++	const limit = 64 * 1024
++	output = strings.TrimSpace(output)
++	if len(output) <= limit {
++		return output
++	}
++	const marker = "\n... subagent telemetry truncated ...\n"
++	available := limit - len(marker)
++	head := available * 2 / 3
++	tail := available - head
++	return output[:head] + marker + output[len(output)-tail:]
++}
