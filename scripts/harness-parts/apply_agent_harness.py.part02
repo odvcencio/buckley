@@ -1,0 +1,230 @@
+# Generic runner gets the same progress semantics as the interactive harness.
+replace_once(
+    "pkg/toolrunner/execution.go",
+    '''	contextWindow := 0
+	if provider, ok := r.config.Models.(model.ContextWindowProvider); ok {
+		contextWindow, _ = provider.GetContextLength(modelID)
+	}
+
+	for iteration := 0; iteration < maxIterations; iteration++ {
+''',
+    '''	contextWindow := 0
+	if provider, ok := r.config.Models.(model.ContextWindowProvider); ok {
+		contextWindow, _ = provider.GetContextLength(modelID)
+	}
+	governor := newRunnerLoopGovernor(maxIterations)
+
+	for iteration := 0; iteration < maxIterations; iteration++ {
+''',
+)
+replace_once(
+    "pkg/toolrunner/execution.go",
+    '''		for _, tr := range toolResults {
+			content := deduper.messageFor(tr)
+			messages = append(messages, model.Message{
+				Role:       "tool",
+				ToolCallID: tr.ID,
+				Name:       tr.Name,
+				Content:    content,
+			})
+		}
+		// Release the pooled slice after processing
+		releaseToolCallRecordSlice(toolResults)
+''',
+    '''		guardReason := ""
+		for _, tr := range toolResults {
+			content := deduper.messageFor(tr)
+			var decision agentloop.Decision
+			content, decision = applyRunnerLoopGuard(governor, tr, content)
+			messages = append(messages, model.Message{
+				Role:       "tool",
+				ToolCallID: tr.ID,
+				Name:       tr.Name,
+				Content:    content,
+			})
+			if decision.Stop && guardReason == "" {
+				guardReason = decision.Reason
+			}
+		}
+		// Release the pooled slice after processing.
+		releaseToolCallRecordSlice(toolResults)
+		if guardReason != "" {
+			result.Content = runnerLoopGuardMessage(guardReason)
+			result.FinishReason = "loop_guard"
+			if r.streamHandler != nil {
+				r.streamHandler.OnComplete(result)
+			}
+			return result, nil
+		}
+''',
+)
+replace_once(
+    "pkg/toolrunner/execution.go",
+    '''	"time"
+
+	"m31labs.dev/buckley/v2/pkg/conversation"
+''',
+    '''	"time"
+
+	"m31labs.dev/buckley/v2/pkg/agentloop"
+	"m31labs.dev/buckley/v2/pkg/conversation"
+''',
+)
+
+# Register dynamic code as a normal governed execute tool.
+replace_once(
+    "pkg/tool/registry_setup.go",
+    '''	register(&builtin.BrowserCloseTool{})
+	register(&builtin.ShellCommandTool{})
+''',
+    '''	register(&builtin.BrowserCloseTool{})
+	register(&builtin.ShellCommandTool{})
+	register(&builtin.DynamicCodeTool{})
+''',
+)
+replace_once(
+    "pkg/tool/registry_setup.go",
+    '''		// Shell
+		"run_shell": "execute",
+''',
+    '''		// Shell and dynamic code
+		"run_shell": "execute",
+		"run_code":  "execute",
+''',
+)
+
+# Both shell and dynamic code inherit the same optional compose-container mode.
+replace_section(
+    "pkg/tool/containers.go",
+    "func (r *Registry) enableShellContainerMode(composePath, service, workDir string) {",
+    "\nfunc (r *Registry) disableShellContainerMode()",
+    '''func (r *Registry) enableShellContainerMode(composePath, service, workDir string) {
+	for _, name := range []string{"run_shell", "run_code"} {
+		current, ok := r.Get(name)
+		if !ok {
+			continue
+		}
+		if configurable, ok := current.(interface {
+			ConfigureContainerMode(string, string, string)
+		}); ok {
+			configurable.ConfigureContainerMode(composePath, service, workDir)
+		}
+	}
+}
+''',
+)
+replace_section(
+    "pkg/tool/containers.go",
+    "func (r *Registry) disableShellContainerMode() {",
+    "\n}",
+    '''func (r *Registry) disableShellContainerMode() {
+	for _, name := range []string{"run_shell", "run_code"} {
+		current, ok := r.Get(name)
+		if !ok {
+			continue
+		}
+		if configurable, ok := current.(interface {
+			ConfigureContainerMode(string, string, string)
+		}); ok {
+			configurable.ConfigureContainerMode("", "", "")
+		}
+	}
+''',
+)
+
+# Expose dynamic-code command construction to the optional Docker sandbox
+# middleware so encoded snippets cannot silently bypass OS isolation.
+replace_section(
+    "pkg/tool/builtin/run_code.go",
+    "func (t *DynamicCodeTool) ExecuteWithContext(ctx context.Context, params map[string]any) (*Result, error) {",
+    "\nfunc canonicalDynamicLanguage",
+    '''func (t *DynamicCodeTool) ExecuteWithContext(ctx context.Context, params map[string]any) (*Result, error) {
+	language, _ := params["language"].(string)
+	code, _ := params["code"].(string)
+	language = canonicalDynamicLanguage(language)
+	command, err := DynamicCodeCommand(params)
+	if err != nil {
+		return &Result{Success: false, Error: err.Error()}, nil
+	}
+
+	timeout := parseInt(params["timeout_seconds"], defaultDynamicCodeTimeout)
+	if timeout <= 0 || timeout > maxDynamicCodeTimeout {
+		timeout = defaultDynamicCodeTimeout
+	}
+	result, execErr := t.ShellCommandTool.ExecuteWithContext(ctx, map[string]any{
+		"command":         command,
+		"timeout_seconds": timeout,
+	})
+	if result == nil {
+		return result, execErr
+	}
+	if result.Data == nil {
+		result.Data = make(map[string]any)
+	}
+	delete(result.Data, "command")
+	result.Data["language"] = language
+	result.Data["code_bytes"] = len(code)
+	result.DisplayData = map[string]any{
+		"summary": fmt.Sprintf("Executed %s snippet (%d bytes)", language, len(code)),
+	}
+	return result, execErr
+}
+
+// DynamicCodeCommand validates run_code arguments and returns the bounded shell
+// command used by local, compose-container, and Docker-sandbox execution paths.
+func DynamicCodeCommand(params map[string]any) (string, error) {
+	language, _ := params["language"].(string)
+	code, _ := params["code"].(string)
+	language = canonicalDynamicLanguage(language)
+	if language == "" {
+		return "", fmt.Errorf("language must be one of: python, javascript, go, bash")
+	}
+	if strings.TrimSpace(code) == "" {
+		return "", fmt.Errorf("code parameter must be a non-empty string")
+	}
+	if len(code) > maxDynamicCodeBytes {
+		return "", fmt.Errorf("code exceeds %d-byte limit", maxDynamicCodeBytes)
+	}
+	args, err := dynamicCodeArgs(params["args"])
+	if err != nil {
+		return "", err
+	}
+	return dynamicCodeCommand(language, code, args)
+}
+''',
+)
+replace_once(
+    "pkg/tool/middleware_sandbox.go",
+    '''var sandboxedTools = map[string]bool{
+	"run_shell": true,
+	"run_tests": true,
+}
+''',
+    '''var sandboxedTools = map[string]bool{
+	"run_shell": true,
+	"run_code":  true,
+	"run_tests": true,
+}
+''',
+)
+replace_once(
+    "pkg/tool/middleware_sandbox.go",
+    '''	case "run_tests":
+		if cmd, ok := params["command"].(string); ok {
+			return strings.TrimSpace(cmd)
+		}
+	}
+''',
+    '''	case "run_tests":
+		if cmd, ok := params["command"].(string); ok {
+			return strings.TrimSpace(cmd)
+		}
+	case "run_code":
+		if command, err := builtin.DynamicCodeCommand(params); err == nil {
+			return command
+		}
+	}
+''',
+)
+
+print("adaptive context, loop governor, and dynamic code wiring applied")
