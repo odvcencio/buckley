@@ -23,7 +23,7 @@ func (b *Buffer) SemanticMarks() []SemanticMark {
 				marks = append(marks, SemanticMark{Row: row, Source: line.Source})
 			}
 		}
-		if conversationSource && line.Content != "" {
+		if conversationSource {
 			lastSource = line.Source
 		}
 		row += len(line.Wrapped)
