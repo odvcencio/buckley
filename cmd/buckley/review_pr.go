@@ -148,6 +148,8 @@ func reviewPRUsageError() error {
 
 // runReviewPRCommand reviews a remote PR using gh CLI integration.
 func runReviewPRCommand(args []string) error {
+	sweepStaleReviewWorkspaces()
+
 	opts, err := parseReviewPRCommandOptions(args)
 	if err != nil {
 		return err
@@ -294,16 +296,6 @@ func postCompletedPRReview(ctx context.Context, prInfo *commands.PRInfo, reviewT
 		}
 	}
 	return lastErr
-}
-
-func runPRReview(ctx context.Context, prRef string, framework *oneshot.Framework) (*reviewCommandResult, *commands.PRInfo, error) {
-	return runPRReviewWithIterationLimit(ctx, prRef, framework, 0)
-}
-
-func runPRReviewWithIterationLimit(ctx context.Context, prRef string, framework *oneshot.Framework, maxIterations int) (*reviewCommandResult, *commands.PRInfo, error) {
-	// A local/dry-run review (willPost=false) is always unrestricted,
-	// regardless of PR size or author: see runPRReviewWithOptions.
-	return runPRReviewWithOptions(ctx, prRef, framework, automatedReviewOptions{maxIterations: maxIterations}, false)
 }
 
 // defaultShardConcurrency bounds how many shards review-pr reviews at once

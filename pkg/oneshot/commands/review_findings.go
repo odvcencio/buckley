@@ -7,11 +7,30 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"unicode"
 	"unicode/utf8"
 
 	"m31labs.dev/buckley/v2/pkg/oneshot"
 )
+
+// reviewFindingsRegexCache holds regexps compiled from a caller-supplied
+// name (field, label, heading, or code-fence language). Those names are
+// drawn from a small, bounded vocabulary repeated across many findings and
+// many reviews, so caching by the assembled pattern compiles each distinct
+// pattern at most once per process instead of once per call.
+var reviewFindingsRegexCache sync.Map // map[string]*regexp.Regexp
+
+// compiledReviewFindingsPattern returns the cached compiled regexp for
+// pattern, compiling and storing it on the first request.
+func compiledReviewFindingsPattern(pattern string) *regexp.Regexp {
+	if cached, ok := reviewFindingsRegexCache.Load(pattern); ok {
+		return cached.(*regexp.Regexp)
+	}
+	compiled := regexp.MustCompile(pattern)
+	actual, _ := reviewFindingsRegexCache.LoadOrStore(pattern, compiled)
+	return actual.(*regexp.Regexp)
+}
 
 // Severity levels for findings.
 type Severity string
@@ -384,7 +403,7 @@ func validateProceduralGateGrade(parsed *ParsedReview) error {
 
 func verdictLabelValue(section, label string) string {
 	expression := `(?im)^\s*(?:[-*]\s*)?\*\*` + regexp.QuoteMeta(label) + `\*\*:\s*(.*?)\s*$`
-	matches := regexp.MustCompile(expression).FindAllStringSubmatch(section, -1)
+	matches := compiledReviewFindingsPattern(expression).FindAllStringSubmatch(section, -1)
 	if len(matches) != 1 || len(matches[0]) < 2 {
 		return ""
 	}
@@ -584,6 +603,8 @@ func parseVerificationState(value string) VerificationState {
 	}
 }
 
+var remoteCIStateRE = regexp.MustCompile(`^(passing|failing|pending)\s+\((\d+)/(\d+)\)$`)
+
 func parseRemoteCIState(value string) VerificationState {
 	value = strings.TrimSpace(strings.ToLower(value))
 	if value == "" || value == "unknown" {
@@ -593,8 +614,7 @@ func parseRemoteCIState(value string) VerificationState {
 		return VerificationNotRun
 	}
 
-	re := regexp.MustCompile(`^(passing|failing|pending)\s+\((\d+)/(\d+)\)$`)
-	matches := re.FindStringSubmatch(value)
+	matches := remoteCIStateRE.FindStringSubmatch(value)
 	if len(matches) != 4 {
 		return VerificationUnknown
 	}
@@ -618,9 +638,13 @@ func parseRemoteCIState(value string) VerificationState {
 	}
 }
 
+var (
+	falsificationConclusionLineRE = regexp.MustCompile("(?mi)^\\s*(?:-\\s+)?(?:\\*\\*Conclusion\\*\\*|Conclusion):\\s*`?(PROVED|DISPROVED|UNRESOLVED)`?(.*)$")
+	falsificationConclusionWordRE = regexp.MustCompile(`(?i)\b(PROVED|DISPROVED|UNRESOLVED)\b`)
+)
+
 func parseFalsificationConclusion(section string) FalsificationConclusion {
-	re := regexp.MustCompile("(?mi)^\\s*(?:-\\s+)?(?:\\*\\*Conclusion\\*\\*|Conclusion):\\s*`?(PROVED|DISPROVED|UNRESOLVED)`?(.*)$")
-	matches := re.FindAllStringSubmatch(section, -1)
+	matches := falsificationConclusionLineRE.FindAllStringSubmatch(section, -1)
 	if len(matches) != 1 || len(matches[0]) < 3 {
 		return ""
 	}
@@ -632,7 +656,7 @@ func parseFalsificationConclusion(section string) FalsificationConclusion {
 		}
 	}
 	suffix := strings.TrimSpace(rawSuffix)
-	if regexp.MustCompile(`(?i)\b(PROVED|DISPROVED|UNRESOLVED)\b`).MatchString(suffix) {
+	if falsificationConclusionWordRE.MatchString(suffix) {
 		return ""
 	}
 	return FalsificationConclusion(strings.ToUpper(matches[0][1]))
@@ -915,25 +939,30 @@ func normalizeCoveragePath(value string) string {
 	return strings.TrimPrefix(cleaned, "./")
 }
 
+var gradeRE = regexp.MustCompile(`(?m)^## Grade:\s*\[?([A-F])\]?`)
+
 func extractGrade(review string) Grade {
-	re := regexp.MustCompile(`(?m)^## Grade:\s*\[?([A-F])\]?`)
-	matches := re.FindStringSubmatch(review)
+	matches := gradeRE.FindStringSubmatch(review)
 	if len(matches) >= 2 {
 		return Grade(matches[1])
 	}
 	return ""
 }
 
+// nextHeadingRE matches the next `##` section heading. extractSection and
+// extractFindings both use it to find where the section or finding they are
+// scanning ends.
+var nextHeadingRE = regexp.MustCompile(`(?m)^##\s+`)
+
 func extractSection(review, heading string) string {
-	headingRe := regexp.MustCompile(`(?m)^##\s+` + regexp.QuoteMeta(heading) + `\s*$`)
+	headingRe := compiledReviewFindingsPattern(`(?m)^##\s+` + regexp.QuoteMeta(heading) + `\s*$`)
 	loc := headingRe.FindStringIndex(review)
 	if loc == nil {
 		return ""
 	}
 
 	content := review[loc[1]:]
-	nextHeading := regexp.MustCompile(`(?m)^##\s+`)
-	nextLoc := nextHeading.FindStringIndex(content)
+	nextLoc := nextHeadingRE.FindStringIndex(content)
 	if nextLoc != nil {
 		content = content[:nextLoc[0]]
 	}
@@ -955,11 +984,12 @@ func parseStatusSection(section string) (build, test string) {
 	return
 }
 
+var findingHeaderRE = regexp.MustCompile(`(?m)^###\s+(FINDING-\d+):\s*\[?(CRITICAL|MAJOR|MINOR)\]?\s+(.+)$`)
+
 func extractFindings(review string) []Finding {
 	var findings []Finding
 
-	findingRe := regexp.MustCompile(`(?m)^###\s+(FINDING-\d+):\s*\[?(CRITICAL|MAJOR|MINOR)\]?\s+(.+)$`)
-	matches := findingRe.FindAllStringSubmatchIndex(review, -1)
+	matches := findingHeaderRE.FindAllStringSubmatchIndex(review, -1)
 
 	for i, match := range matches {
 		if len(match) < 8 {
@@ -977,8 +1007,7 @@ func extractFindings(review string) []Finding {
 		if i+1 < len(matches) {
 			end = matches[i+1][0]
 		} else {
-			nextSection := regexp.MustCompile(`(?m)^##\s+`)
-			if loc := nextSection.FindStringIndex(review[start:]); loc != nil {
+			if loc := nextHeadingRE.FindStringIndex(review[start:]); loc != nil {
 				end = start + loc[0]
 			}
 		}
@@ -1000,9 +1029,13 @@ func extractFindings(review string) []Finding {
 	return findings
 }
 
+var (
+	fileFieldRE    = regexp.MustCompile(`(?m)^\s*(?:-\s*)?\*\*File\*\*:\s*(.+?)\s*$`)
+	fileLocationRE = regexp.MustCompile(`^(.+?):(\d+)(?:-\d+)?$`)
+)
+
 func extractFileLine(content string) (file string, line int) {
-	re := regexp.MustCompile(`(?m)^\s*(?:-\s*)?\*\*File\*\*:\s*(.+?)\s*$`)
-	matches := re.FindStringSubmatch(content)
+	matches := fileFieldRE.FindStringSubmatch(content)
 	if len(matches) < 2 {
 		return "", 0
 	}
@@ -1015,8 +1048,7 @@ func extractFileLine(content string) (file string, line int) {
 		}
 	}
 
-	locationRe := regexp.MustCompile(`^(.+?):(\d+)(?:-\d+)?$`)
-	locationMatches := locationRe.FindStringSubmatch(location)
+	locationMatches := fileLocationRE.FindStringSubmatch(location)
 	if len(locationMatches) < 3 {
 		return strings.TrimSpace(strings.Trim(location, "`")), 0
 	}
@@ -1029,7 +1061,7 @@ func extractFileLine(content string) (file string, line int) {
 }
 
 func extractField(content, field string) string {
-	re := regexp.MustCompile("(?m)\\*\\*" + regexp.QuoteMeta(field) + "\\*\\*:\\s*(.+?)(?:\\n\\*\\*|\\n" + "```" + "|\\n##|\\n###|$)")
+	re := compiledReviewFindingsPattern("(?m)\\*\\*" + regexp.QuoteMeta(field) + "\\*\\*:\\s*(.+?)(?:\\n\\*\\*|\\n" + "```" + "|\\n##|\\n###|$)")
 	matches := re.FindStringSubmatch(content)
 	if len(matches) >= 2 {
 		return strings.TrimSpace(matches[1])
@@ -1038,7 +1070,7 @@ func extractField(content, field string) string {
 }
 
 func extractCodeBlock(content, lang string) string {
-	re := regexp.MustCompile("(?s)```" + regexp.QuoteMeta(lang) + `?\s*\n(.*?)\n\s*` + "```")
+	re := compiledReviewFindingsPattern("(?s)```" + regexp.QuoteMeta(lang) + `?\s*\n(.*?)\n\s*` + "```")
 	matches := re.FindStringSubmatch(content)
 	if len(matches) >= 2 {
 		return strings.TrimSpace(matches[1])
@@ -1134,15 +1166,16 @@ func parseVerdictDecision(section string) (string, error) {
 	}
 }
 
+var findingIDRE = regexp.MustCompile(`FINDING-\d+`)
+
 func extractFindingIDs(section, field string) []string {
-	re := regexp.MustCompile(`(?i)\*\*` + regexp.QuoteMeta(field) + `\*\*:\s*(.+)`)
+	re := compiledReviewFindingsPattern(`(?i)\*\*` + regexp.QuoteMeta(field) + `\*\*:\s*(.+)`)
 	matches := re.FindStringSubmatch(section)
 	if len(matches) < 2 {
 		return nil
 	}
 
-	idRe := regexp.MustCompile(`FINDING-\d+`)
-	return idRe.FindAllString(matches[1], -1)
+	return findingIDRE.FindAllString(matches[1], -1)
 }
 
 // CriticalFindings returns only critical severity findings.

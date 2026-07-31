@@ -17,7 +17,6 @@ import (
 	"time"
 
 	"m31labs.dev/buckley/v2/pkg/diffsignal"
-	"m31labs.dev/buckley/v2/pkg/reviewpolicy"
 	"m31labs.dev/buckley/v2/pkg/transparency"
 )
 
@@ -351,53 +350,6 @@ func assemblePRContextWithOptions(prRef string, deps prContextDependencies, opts
 
 	headChecks, headChecksErr := getPRChecks(deps.run, target)
 
-	commentResult, err := getPRCommentsWithViewer(deps.run, target)
-	viewerLogin := ""
-	if err == nil {
-		viewerLogin = commentResult.ViewerLogin
-		prCtx.Comments = commentResult.Comments
-		audit.Add("top-level comments", 0)
-		prCtx.addStatus("Top-level comments", "complete", fmt.Sprintf("%d comments", len(commentResult.Comments)), false)
-	} else {
-		recordPRContextFailure(prCtx, audit, "Top-level comments", err)
-	}
-
-	reviews, err := getPRReviews(deps.run, target)
-	if err == nil {
-		reviews = filterOwnBuckbotLifecycleReviews(reviews, viewerLogin)
-		prCtx.Reviews = reviews
-		audit.Add("submitted reviews", 0)
-		prCtx.addStatus("Submitted reviews", "complete", fmt.Sprintf("%d reviews", len(reviews)), false)
-	} else {
-		recordPRContextFailure(prCtx, audit, "Submitted reviews", err)
-	}
-
-	inline, err := getPRInlineCommentsForViewer(deps.run, pr, viewerLogin)
-	if err == nil {
-		prCtx.InlineComments = inline.Comments
-		prCtx.ResolvedThreadsFiltered = inline.ResolvedThreadsFiltered
-		name := "inline review comments"
-		status := "complete"
-		detail := fmt.Sprintf("%s unresolved; %s filtered",
-			formatPRCount(len(inline.Comments), "comment"),
-			formatPRCount(inline.ResolvedThreadsFiltered, "resolved thread"))
-		if inline.Fallback {
-			name += " (REST fallback)"
-			status = "fallback"
-			detail += "; resolution state unavailable; GraphQL failed: " + compactPRContextErrorText(inline.FallbackReason)
-		}
-		if inline.Truncated {
-			status = "truncated"
-			detail += "; additional inline review context was not fetched"
-			audit.AddTruncated(name, 0, 1)
-		} else {
-			audit.Add(name, 0)
-		}
-		prCtx.addStatus("Inline review threads", status, detail, inline.Truncated)
-	} else {
-		recordPRContextFailure(prCtx, audit, "Inline review threads", err)
-	}
-
 	apiFiles, filesErr := getPRFiles(deps.run, pr)
 	files, detail, err := resolvePRChangedFiles(diff.Files, pr.ChangedFiles, apiFiles, filesErr)
 	if err != nil {
@@ -430,7 +382,7 @@ func assemblePRContextWithOptions(prRef string, deps prContextDependencies, opts
 	assemblePRAgentsContext(prCtx, audit, deps)
 	assemblePRCanopyContext(opts.Context, prCtx, audit, deps.collectCanopy)
 	collectPRContextProviderEvidence(opts.Context, prCtx, opts.Providers)
-	revalidateAssembledPRMetadata(prCtx, audit, deps.run)
+	assemblePRFeedbackEvidence(prCtx, audit, deps.run, target)
 	audit.Add("context completeness", reviewEstimateTokens(formatPRContextStatus(prCtx.ContextStatus)))
 	promptCtx, curation := CuratePRContext(prCtx, opts.MaxSupportingContextTokens)
 	prCtx.ContextCuration = curation
@@ -517,7 +469,7 @@ func BuildPRPrompt(ctx *PRContext) string {
 		}
 		sb.WriteString("\n")
 	}
-	appendReviewVerificationConstraints(&sb, reviewpolicy.ParseVerificationConstraints(ctx.AgentsMD))
+	appendReviewVerificationTargets(&sb, ctx.Files, ctx.AgentsMD)
 
 	if len(ctx.Comments) > 0 {
 		sb.WriteString("## Top-Level PR Comments\n\n")
@@ -849,19 +801,77 @@ func RevalidatePRContext(ctx *PRContext) error {
 	return nil
 }
 
-func revalidateAssembledPRMetadata(ctx *PRContext, audit *transparency.ContextAudit, run prCommandRunner) {
-	changed, err := revalidatePRContext(ctx, run)
+// assemblePRFeedbackEvidence performs assembly's single full fetch of
+// top-level comments, submitted reviews, and inline review threads. It runs
+// once, late in assembly (after diff/checks/files/AGENTS.md/canopy/provider
+// evidence), preceded by one cheap PR-metadata re-check comparing against
+// the metadata captured earlier in assembly. This makes the fetch
+// authoritative: its bodies populate ctx directly, so one review pays for
+// one full feedback fetch instead of an early fetch plus a later
+// "revalidation" fetch that only re-derived the same evidence to compare
+// fingerprints and then discarded it.
+func assemblePRFeedbackEvidence(ctx *PRContext, audit *transparency.ContextAudit, run prCommandRunner, target prReference) {
+	capturedMetadata := snapshotPRContextEvidence(ctx).Metadata
+	currentMetadata, err := getPRMetadataSnapshot(run, target)
 	if err != nil {
-		recordPRContextFailure(ctx, audit, "PR evidence revalidation", err)
+		recordPRContextFailure(ctx, audit, "PR evidence revalidation", fmt.Errorf("re-fetch PR metadata: %w", err))
 		return
 	}
-	if changed != "" {
+	if changed := describePRMetadataChanges(capturedMetadata, currentMetadata); changed != "" {
 		ctx.addStatus("PR evidence revalidation", "changed",
 			"PR state moved while evidence was fetched; the assembled diff, comments, checks, and file list are not a coherent snapshot: "+changed, false)
 		audit.Add("PR evidence changed during assembly", reviewEstimateTokens(changed))
 		return
 	}
-	ctx.addStatus("PR evidence revalidation", "complete", "repository, revisions, CI, review decision, and feedback remained stable during evidence assembly", false)
+
+	commentResult, err := getPRCommentsWithViewer(run, target)
+	viewerLogin := ""
+	if err == nil {
+		viewerLogin = commentResult.ViewerLogin
+		ctx.Comments = commentResult.Comments
+		audit.Add("top-level comments", 0)
+		ctx.addStatus("Top-level comments", "complete", fmt.Sprintf("%d comments", len(commentResult.Comments)), false)
+	} else {
+		recordPRContextFailure(ctx, audit, "Top-level comments", err)
+	}
+
+	reviews, err := getPRReviews(run, target)
+	if err == nil {
+		reviews = filterOwnBuckbotLifecycleReviews(reviews, viewerLogin)
+		ctx.Reviews = reviews
+		audit.Add("submitted reviews", 0)
+		ctx.addStatus("Submitted reviews", "complete", fmt.Sprintf("%d reviews", len(reviews)), false)
+	} else {
+		recordPRContextFailure(ctx, audit, "Submitted reviews", err)
+	}
+
+	inline, err := getPRInlineCommentsForViewer(run, ctx.PR, viewerLogin)
+	if err == nil {
+		ctx.InlineComments = inline.Comments
+		ctx.ResolvedThreadsFiltered = inline.ResolvedThreadsFiltered
+		name := "inline review comments"
+		status := "complete"
+		detail := fmt.Sprintf("%s unresolved; %s filtered",
+			formatPRCount(len(inline.Comments), "comment"),
+			formatPRCount(inline.ResolvedThreadsFiltered, "resolved thread"))
+		if inline.Fallback {
+			name += " (REST fallback)"
+			status = "fallback"
+			detail += "; resolution state unavailable; GraphQL failed: " + compactPRContextErrorText(inline.FallbackReason)
+		}
+		if inline.Truncated {
+			status = "truncated"
+			detail += "; additional inline review context was not fetched"
+			audit.AddTruncated(name, 0, 1)
+		} else {
+			audit.Add(name, 0)
+		}
+		ctx.addStatus("Inline review threads", status, detail, inline.Truncated)
+	} else {
+		recordPRContextFailure(ctx, audit, "Inline review threads", err)
+	}
+
+	ctx.addStatus("PR evidence revalidation", "complete", "repository, revisions, and review decision remained stable before feedback evidence was fetched", false)
 	audit.Add("PR evidence revalidation", 0)
 }
 
@@ -2619,6 +2629,15 @@ func appendNestedPRAgentsContext(ctx *PRContext, audit *transparency.ContextAudi
 		ctx.addStatus("Nested AGENTS.md", "missing", "no nested instruction scope applies to changed files", false)
 		return
 	}
+	// One bulk `git ls-tree -r` captures existence and mode for every path
+	// at the PR head; every candidate below is then an in-process map
+	// lookup instead of its own `git ls-tree` spawn, which was almost
+	// always a miss for deeply nested changed directories.
+	index, err := nestedPRHeadPathIndex(run, root, ctx.PR.HeadSHA)
+	if err != nil {
+		recordPRContextFailure(ctx, audit, "Nested AGENTS.md", err)
+		return
+	}
 	const aggregateLimit = 40_000
 	remaining := aggregateLimit
 	applicable := 0
@@ -2632,7 +2651,7 @@ func appendNestedPRAgentsContext(ctx *PRContext, audit *transparency.ContextAudi
 		if limit > remaining {
 			limit = remaining
 		}
-		content, truncated, err := readPRHeadFile(run, root, ctx.PR.HeadSHA, candidate, limit)
+		content, truncated, err := readPRHeadFileIndexed(run, root, ctx.PR.HeadSHA, index, candidate, limit)
 		if os.IsNotExist(err) {
 			continue
 		}
@@ -2682,6 +2701,54 @@ func nestedPRAgentsCandidates(files []string) []string {
 		return candidates[i] < candidates[j]
 	})
 	return candidates
+}
+
+// nestedPRHeadPathIndex captures, in one Git process, the mode of every
+// path at headSHA, so appendNestedPRAgentsContext can resolve each nested
+// AGENTS.md candidate's existence and symlink status with a map lookup
+// instead of a `git ls-tree` spawn per candidate.
+func nestedPRHeadPathIndex(run prCommandRunner, root, headSHA string) (map[string]string, error) {
+	output, err := run("git", "--no-pager", "-C", root, "ls-tree", "-r", headSHA, "--")
+	if err != nil {
+		return nil, err
+	}
+	index := make(map[string]string)
+	for _, line := range strings.Split(string(output), "\n") {
+		if line == "" {
+			continue
+		}
+		tab := strings.IndexByte(line, '\t')
+		if tab < 0 {
+			continue
+		}
+		fields := strings.Fields(line[:tab])
+		if len(fields) == 0 {
+			continue
+		}
+		index[path.Clean(line[tab+1:])] = fields[0]
+	}
+	return index, nil
+}
+
+// readPRHeadFileIndexed reads filePath at headSHA using a pre-built
+// path->mode index (see nestedPRHeadPathIndex) for the existence and
+// symlink checks, so a miss costs zero additional Git processes.
+func readPRHeadFileIndexed(run prCommandRunner, root, headSHA string, index map[string]string, filePath string, maxBytes int) (string, bool, error) {
+	mode, exists := index[filePath]
+	if !exists {
+		return "", false, os.ErrNotExist
+	}
+	if mode == "120000" {
+		return "", false, fmt.Errorf("refusing to follow tracked symlink %s at PR head %s", filePath, headSHA)
+	}
+	content, err := run("git", "--no-pager", "-C", root, "show", headSHA+":"+filePath)
+	if err != nil {
+		return "", false, err
+	}
+	if maxBytes >= 0 && len(content) > maxBytes {
+		return string(content[:maxBytes]), true, nil
+	}
+	return string(content), false, nil
 }
 
 func readPRHeadFile(run prCommandRunner, root, headSHA, path string, maxBytes int) (string, bool, error) {
@@ -2840,32 +2907,6 @@ func formatPRContextStatus(statuses []PRContextStatus) string {
 			sb.WriteString(" ")
 			sb.WriteString(status.Detail)
 		}
-		sb.WriteByte('\n')
-	}
-	return sb.String()
-}
-
-func prCommentBodies(comments []PRComment) string {
-	var sb strings.Builder
-	for _, comment := range comments {
-		sb.WriteString(comment.Author)
-		sb.WriteByte('\n')
-		sb.WriteString(comment.Body)
-		sb.WriteByte('\n')
-		sb.WriteString(comment.Path)
-		sb.WriteByte('\n')
-	}
-	return sb.String()
-}
-
-func prReviewBodies(reviews []PRReview) string {
-	var sb strings.Builder
-	for _, review := range reviews {
-		sb.WriteString(review.Author)
-		sb.WriteByte('\n')
-		sb.WriteString(review.State)
-		sb.WriteByte('\n')
-		sb.WriteString(review.Body)
 		sb.WriteByte('\n')
 	}
 	return sb.String()

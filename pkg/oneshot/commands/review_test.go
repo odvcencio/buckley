@@ -1845,6 +1845,51 @@ func TestReviewFeedbackDispositionRequiresIDsWhenContextSaysFeedbackExists(t *te
 	assert.ErrorContains(t, err, "no required feedback IDs")
 }
 
+func TestCompiledReviewFindingsPatternCachesByExactPattern(t *testing.T) {
+	pattern := `(?i)\*\*Evidence-Cache-Probe\*\*:\s*(.+)`
+	first := compiledReviewFindingsPattern(pattern)
+	second := compiledReviewFindingsPattern(pattern)
+	if first != second {
+		t.Fatal("compiledReviewFindingsPattern recompiled an already-cached pattern instead of reusing it")
+	}
+	if !first.MatchString("**Evidence-Cache-Probe**: value") {
+		t.Fatal("cached pattern lost its matching behavior")
+	}
+
+	otherPattern := `(?i)\*\*Other-Cache-Probe\*\*:\s*(.+)`
+	other := compiledReviewFindingsPattern(otherPattern)
+	if other == first {
+		t.Fatal("compiledReviewFindingsPattern returned the same regexp for two distinct patterns")
+	}
+}
+
+func TestArgumentBuiltRegexHelpersMatchTheirCallers(t *testing.T) {
+	// Regression coverage for the field/label/heading/lang-name lookups that
+	// route through compiledReviewFindingsPattern: each must still extract
+	// exactly the same value it did before the pattern cache was added.
+	if got := verdictLabelValue("- **Blockers**: FINDING-001, FINDING-002", "Blockers"); got != "FINDING-001, FINDING-002" {
+		t.Fatalf("verdictLabelValue = %q", got)
+	}
+	review := "## Coverage\nledger\n## Findings\nfindings\n"
+	if got := extractSection(review, "Coverage"); got != "ledger" {
+		t.Fatalf("extractSection = %q", got)
+	}
+	content := "- **Evidence**: proof text\n- **Fix**: change it\n"
+	if got := extractField(content, "Evidence"); got != "proof text" {
+		t.Fatalf("extractField(Evidence) = %q", got)
+	}
+	if got := extractField(content, "Fix"); got != "change it" {
+		t.Fatalf("extractField(Fix) = %q", got)
+	}
+	code := "```go\nfmt.Println(1)\n```"
+	if got := extractCodeBlock(code, "go"); got != "fmt.Println(1)" {
+		t.Fatalf("extractCodeBlock = %q", got)
+	}
+	if got := extractFindingIDs("- **Blockers**: FINDING-001, FINDING-002", "Blockers"); strings.Join(got, ",") != "FINDING-001,FINDING-002" {
+		t.Fatalf("extractFindingIDs = %v", got)
+	}
+}
+
 func TestParsedReview_FilterMethods(t *testing.T) {
 	parsed := &ParsedReview{
 		Findings: []Finding{
@@ -2142,8 +2187,16 @@ func TestDetectBaseBranchPrefersRemoteTrackingBranch(t *testing.T) {
 	gitInCmd(t, dir, "add", "local.txt")
 	gitInCmd(t, dir, "commit", "-m", "move local main")
 
-	if got := detectBaseBranch(dir); got != "origin/main" {
+	got, gotCommit := detectBaseBranch(dir)
+	if got != "origin/main" {
 		t.Fatalf("detectBaseBranch() = %q, want origin/main", got)
+	}
+	wantCommit, err := resolveReviewCommit(dir, "origin/main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotCommit != wantCommit {
+		t.Fatalf("detectBaseBranch() commit = %q, want %q", gotCommit, wantCommit)
 	}
 }
 
@@ -2230,7 +2283,7 @@ func TestResolveBranchReviewBasePreservesLocalAheadAndExactRefs(t *testing.T) {
 	gitInCmd(t, dir, "commit", "-m", "local ahead")
 
 	for _, requested := range []string{"main", "refs/heads/main", "origin/main", "HEAD"} {
-		if got := resolveBranchReviewBase(dir, requested); got != requested {
+		if got, _ := resolveBranchReviewBase(dir, requested); got != requested {
 			t.Fatalf("resolveBranchReviewBase(%q) = %q, want exact request", requested, got)
 		}
 	}

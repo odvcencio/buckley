@@ -114,6 +114,8 @@ func parseReviewCommandOptions(args []string) (reviewCommandOptions, error) {
 
 // runReviewCommand performs code review on a branch or project.
 func runReviewCommand(args []string) error {
+	sweepStaleReviewWorkspaces()
+
 	opts, err := parseReviewCommandOptions(args)
 	if err != nil {
 		return err
@@ -309,19 +311,11 @@ func printReviewModelSelection(runtime *reviewCommandRuntime) {
 	termOut.Dim("Using model: %s", runtime.modelID)
 }
 
-func runReview(ctx context.Context, opts reviewCommandOptions, framework *oneshot.Framework) (*reviewCommandResult, error) {
-	return runReviewWithPolicy(ctx, opts, framework, automatedReviewOptions{})
-}
-
 func runReviewWithPolicy(ctx context.Context, opts reviewCommandOptions, framework *oneshot.Framework, policy automatedReviewOptions) (*reviewCommandResult, error) {
 	if opts.projectMode {
 		return runProjectReviewWithPolicy(ctx, framework, policy)
 	}
 	return runBranchReviewWithPolicy(ctx, opts, framework, policy)
-}
-
-func runProjectReview(ctx context.Context, framework *oneshot.Framework) (*reviewCommandResult, error) {
-	return runProjectReviewWithPolicy(ctx, framework, automatedReviewOptions{})
 }
 
 func runProjectReviewWithPolicy(ctx context.Context, framework *oneshot.Framework, reviewPolicy automatedReviewOptions) (*reviewCommandResult, error) {
@@ -394,10 +388,6 @@ func runProjectReviewWithPolicy(ctx context.Context, framework *oneshot.Framewor
 
 	spinner.StopWithSuccess("Project review complete")
 	return reviewResultFromRLM(fwResult, audit), nil
-}
-
-func runBranchReview(ctx context.Context, opts reviewCommandOptions, framework *oneshot.Framework) (*reviewCommandResult, error) {
-	return runBranchReviewWithPolicy(ctx, opts, framework, automatedReviewOptions{})
 }
 
 func runBranchReviewWithPolicy(ctx context.Context, opts reviewCommandOptions, framework *oneshot.Framework, reviewPolicy automatedReviewOptions) (*reviewCommandResult, error) {
@@ -743,16 +733,6 @@ func printReviewCost(trace *transparency.Trace, ledger *transparency.CostLedger)
 
 	termOut.Dim("%s", tokensLine)
 	termOut.Dim("%s", costLine)
-}
-
-func printReviewError(err error, trace *transparency.Trace) {
-	termOut.Newline()
-	termOut.Error("%s", err.Error())
-
-	if trace != nil {
-		termOut.Dim("Tokens used: %d · Cost: $%.4f (still charged)",
-			trace.Tokens.Total(), trace.Cost)
-	}
 }
 
 // runReviewMenu displays an interactive menu to fix findings.

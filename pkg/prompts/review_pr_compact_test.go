@@ -28,6 +28,14 @@ func TestCompactPRReviewPrompt_PreservesMachineContract(t *testing.T) {
 	}
 }
 
+func TestCompactPRReviewPrompt_DefinesNoneForEmptyFindings(t *testing.T) {
+	prompt := reviewPRCompactDefault(time.Unix(0, 0))
+	findingsSection := prompt[strings.Index(prompt, "## Findings"):strings.Index(prompt, "## Remarks")]
+	if !strings.Contains(findingsSection, "`None.`") {
+		t.Fatalf("Findings section does not define `None.` for the empty case:\n%s", findingsSection)
+	}
+}
+
 func TestCompactPRReviewPrompt_StaysWithinTokenEnvelope(t *testing.T) {
 	prompt := reviewPRCompactDefault(time.Unix(0, 0))
 	const maxBytes = 7_000

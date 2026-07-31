@@ -160,12 +160,17 @@ func AssembleBranchContext(opts BranchContextOptions) (*BranchContext, *transpar
 
 	requestedBaseBranch := strings.TrimSpace(opts.BaseBranch)
 	ctx.BaseBranch = requestedBaseBranch
+	var resolvedBaseCommit string
 	if ctx.Scope != ReviewScopeChanges {
-		ctx.BaseBranch = resolveBranchReviewBase(ctx.RepoRoot, ctx.BaseBranch)
+		ctx.BaseBranch, resolvedBaseCommit = resolveBranchReviewBase(ctx.RepoRoot, ctx.BaseBranch)
 	}
 	if ctx.Scope == ReviewScopeChanges {
 		ctx.BaseBranch = "(local changes)"
 		ctx.BaseCommit = ctx.HeadCommit
+	} else if resolvedBaseCommit != "" {
+		// resolveBranchReviewBase already resolved this exact ref; avoid
+		// repeating the identical `git rev-parse --verify`.
+		ctx.BaseCommit = resolvedBaseCommit
 	} else {
 		ctx.BaseCommit, err = resolveReviewCommit(ctx.RepoRoot, ctx.BaseBranch)
 		if err != nil {
@@ -323,13 +328,19 @@ func enrichBranchReviewContext(opts BranchContextOptions, ctx *BranchContext, au
 	}
 
 	if opts.IncludeAgents {
-		ctx.AgentsMD, ctx.ContextIncomplete = assembleReviewAgentsContext(
-			nestedBranchAgentsCandidates(ctx.Files),
-			func(path string, maxBytes int) (string, bool, error) {
-				return readBranchSnapshotFile(ctx, opts.IncludeUnstaged, path, maxBytes)
-			},
-			audit,
-		)
+		index, err := reviewBranchAgentsPathIndex(ctx, opts.IncludeUnstaged)
+		if err != nil {
+			ctx.ContextIncomplete = true
+			audit.Add("AGENTS.md (unavailable)", 0)
+		} else {
+			ctx.AgentsMD, ctx.ContextIncomplete = assembleReviewAgentsContext(
+				nestedBranchAgentsCandidates(ctx.Files),
+				func(path string, maxBytes int) (string, bool, error) {
+					return readBranchSnapshotFile(ctx, opts.IncludeUnstaged, index, path, maxBytes)
+				},
+				audit,
+			)
+		}
 	}
 }
 
@@ -591,28 +602,36 @@ func BuildProjectPrompt(ctx *ProjectContext) string {
 	return sb.String()
 }
 
-// detectBaseBranch tries to find main or master branch.
-func detectBaseBranch(root string) string {
-	if _, err := resolveReviewCommit(root, "origin/main"); err == nil {
-		return "origin/main"
+// detectBaseBranch tries to find main or master branch. It also returns the
+// commit that `git rev-parse --verify` already resolved for the returned
+// name, so the caller does not repeat the identical resolution.
+func detectBaseBranch(root string) (string, string) {
+	if commit, err := resolveReviewCommit(root, "origin/main"); err == nil {
+		return "origin/main", commit
 	}
-	if _, err := resolveReviewCommit(root, "origin/master"); err == nil {
-		return "origin/master"
+	if commit, err := resolveReviewCommit(root, "origin/master"); err == nil {
+		return "origin/master", commit
 	}
-	if _, err := resolveReviewCommit(root, "main"); err == nil {
-		return "main"
+	if commit, err := resolveReviewCommit(root, "main"); err == nil {
+		return "main", commit
 	}
-	if _, err := resolveReviewCommit(root, "master"); err == nil {
-		return "master"
+	if commit, err := resolveReviewCommit(root, "master"); err == nil {
+		return "master", commit
 	}
-	return "main"
+	return "main", ""
 }
 
 // resolveBranchReviewBase protects explicit short branch names from stale local
 // refs. When the corresponding remote-tracking branch is strictly ahead,
 // review the ref that represents the current integration base. Fully-qualified
 // refs and immutable revisions remain exact escape hatches.
-func resolveBranchReviewBase(root, requested string) string {
+//
+// The second return value is the commit already resolved for the returned
+// branch name when that name is exactly the ref this function just verified
+// with `git rev-parse --verify`; an empty commit means the caller still
+// needs to resolve the returned name itself (it named a different, unverified
+// ref, e.g. the caller's original request).
+func resolveBranchReviewBase(root, requested string) (string, string) {
 	requested = strings.TrimSpace(requested)
 	if requested == "" {
 		return detectBaseBranch(root)
@@ -621,7 +640,7 @@ func resolveBranchReviewBase(root, requested string) string {
 	localRef := "refs/heads/" + requested
 	localCommit, err := resolveReviewCommit(root, localRef)
 	if err != nil {
-		return requested
+		return requested, ""
 	}
 
 	upstream, err := reviewGitOutputAt(
@@ -632,7 +651,7 @@ func resolveBranchReviewBase(root, requested string) string {
 		localRef,
 	)
 	if err != nil {
-		return requested
+		return requested, ""
 	}
 	upstream = strings.TrimSpace(upstream)
 	if upstream == "" {
@@ -641,12 +660,12 @@ func resolveBranchReviewBase(root, requested string) string {
 
 	upstreamCommit, err := resolveReviewCommit(root, upstream)
 	if err != nil || upstreamCommit == localCommit {
-		return requested
+		return requested, ""
 	}
 	if _, err := reviewGitOutputAt(root, "merge-base", "--is-ancestor", localCommit, upstreamCommit); err != nil {
-		return requested
+		return requested, ""
 	}
-	return upstream
+	return upstream, upstreamCommit
 }
 
 func parseNameStatus(output string) []FileChange {
@@ -1143,12 +1162,16 @@ func sortedNestedAgentsCandidates(seen map[string]struct{}) []string {
 	return candidates
 }
 
-func readBranchSnapshotFile(ctx *BranchContext, includeUnstaged bool, path string, maxBytes int) (string, bool, error) {
+// readBranchSnapshotFile reads path from the snapshot that ctx and
+// includeUnstaged select. index is one path->mode listing captured up front
+// for the whole snapshot (see reviewBranchAgentsPathIndex); every existence
+// and symlink check below is an in-process map lookup against it instead of
+// a per-path `git ls-tree`/`git ls-files` spawn, so a caller checking many
+// candidate paths (nested AGENTS.md discovery) pays for exactly one process
+// per assembly regardless of candidate count.
+func readBranchSnapshotFile(ctx *BranchContext, includeUnstaged bool, index map[string]string, path string, maxBytes int) (string, bool, error) {
 	if ctx.Scope == ReviewScopeBranch {
-		mode, exists, err := reviewGitTreePathMode(ctx.RepoRoot, ctx.HeadCommit, path)
-		if err != nil {
-			return "", false, err
-		}
+		mode, exists := index[path]
 		if !exists {
 			return "", false, os.ErrNotExist
 		}
@@ -1158,10 +1181,7 @@ func readBranchSnapshotFile(ctx *BranchContext, includeUnstaged bool, path strin
 		return reviewGitOutputLimitedAt(ctx.RepoRoot, maxBytes, "show", ctx.HeadCommit+":"+path)
 	}
 	if !includeUnstaged {
-		mode, exists, err := reviewGitIndexPathMode(ctx.RepoRoot, path)
-		if err != nil {
-			return "", false, err
-		}
+		mode, exists := index[path]
 		if !exists {
 			return "", false, os.ErrNotExist
 		}
@@ -1170,10 +1190,70 @@ func readBranchSnapshotFile(ctx *BranchContext, includeUnstaged bool, path strin
 		}
 		return reviewGitOutputLimitedAt(ctx.RepoRoot, maxBytes, "show", ":"+path)
 	}
-	if _, err := reviewGitOutputAt(ctx.RepoRoot, "ls-files", "--error-unmatch", "--", path); err != nil {
+	if _, exists := index[path]; !exists {
 		return "", false, os.ErrNotExist
 	}
 	return readTrackedWorktreeSnapshotFile(ctx.RepoRoot, path, maxBytes)
+}
+
+// reviewBranchAgentsPathIndex captures, in one Git process, every path
+// (with mode where the scope tracks one) that readBranchSnapshotFile needs
+// to resolve AGENTS.md discovery candidates against. Building this once per
+// assembly replaces the previous one-`git`-process-per-candidate existence
+// and symlink check, which was almost always a miss for deeply nested
+// changed directories.
+func reviewBranchAgentsPathIndex(ctx *BranchContext, includeUnstaged bool) (map[string]string, error) {
+	if ctx.Scope == ReviewScopeBranch {
+		output, err := reviewGitBytesAt(ctx.RepoRoot, "ls-tree", "-r", "-z", ctx.HeadCommit, "--")
+		if err != nil {
+			return nil, err
+		}
+		return parseReviewLsTreeModeIndex(output), nil
+	}
+	if !includeUnstaged {
+		output, err := reviewGitBytesAt(ctx.RepoRoot, "ls-files", "--stage", "-z", "--")
+		if err != nil {
+			return nil, err
+		}
+		return parseReviewLsTreeModeIndex(output), nil
+	}
+	output, err := reviewGitBytesAt(ctx.RepoRoot, "ls-files", "-z", "--")
+	if err != nil {
+		return nil, err
+	}
+	index := make(map[string]string)
+	for _, raw := range strings.Split(string(output), "\x00") {
+		path := filepath.ToSlash(filepath.Clean(raw))
+		if path == "" || path == "." {
+			continue
+		}
+		index[path] = ""
+	}
+	return index, nil
+}
+
+// parseReviewLsTreeModeIndex parses the shared "<fields>\t<path>" record
+// format that both `git ls-tree -r -z` (mode, type, object) and
+// `git ls-files --stage -z` (mode, object, stage) emit, keeping only the
+// leading mode field each caller needs for the symlink guard.
+func parseReviewLsTreeModeIndex(output []byte) map[string]string {
+	index := make(map[string]string)
+	for _, record := range strings.Split(string(output), "\x00") {
+		if record == "" {
+			continue
+		}
+		tab := strings.IndexByte(record, '\t')
+		if tab < 0 {
+			continue
+		}
+		fields := strings.Fields(record[:tab])
+		if len(fields) == 0 {
+			continue
+		}
+		path := filepath.ToSlash(filepath.Clean(record[tab+1:]))
+		index[path] = fields[0]
+	}
+	return index
 }
 
 func readTrackedWorktreeSnapshotFile(root, path string, maxBytes int) (string, bool, error) {
@@ -1218,14 +1298,6 @@ func reviewGitTreePathMode(root, treeish, path string) (string, bool, error) {
 	return strings.Fields(output)[0], true, nil
 }
 
-func reviewGitIndexPathMode(root, path string) (string, bool, error) {
-	output, err := reviewGitOutputAt(root, "ls-files", "--stage", "--", path)
-	if err != nil || strings.TrimSpace(output) == "" {
-		return "", false, err
-	}
-	return strings.Fields(output)[0], true, nil
-}
-
 func reviewEstimateTokens(s string) int {
 	if s == "" {
 		return 0
@@ -1256,10 +1328,6 @@ func reviewGitBytesAt(root string, args ...string) ([]byte, error) {
 		return nil, err
 	}
 	return output, nil
-}
-
-func reviewGitOutputLimited(maxBytes int, args ...string) (string, bool, error) {
-	return reviewGitOutputLimitedAt("", maxBytes, args...)
 }
 
 func reviewGitOutputLimitedAt(root string, maxBytes int, args ...string) (string, bool, error) {

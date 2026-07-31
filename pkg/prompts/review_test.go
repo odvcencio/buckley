@@ -159,6 +159,28 @@ func TestReviewPromptsRequireReachabilityBehaviorBindingsVisualsAndRuntimeOwners
 	}
 }
 
+// TestReviewPromptsShareRuleConstants asserts that the PR and branch review
+// prompts both render the exported rule constants byte-for-byte, so a
+// wording change only ever needs to happen in one place.
+func TestReviewPromptsShareRuleConstants(t *testing.T) {
+	rules := []string{
+		RuleFindingsRequireProvedFalsification,
+		RuleDisprovedOrUnresolvedGoesToRemarks,
+	}
+	pr := reviewPRDefault(time.Unix(0, 0))
+	for _, rule := range rules {
+		if !strings.Contains(pr, rule) {
+			t.Fatalf("PR prompt missing shared rule %q", rule)
+		}
+	}
+	branch := reviewBranchWithToolsDefault(time.Unix(0, 0))
+	for _, rule := range append(rules, RuleVerificationInFirstBatch) {
+		if !strings.Contains(branch, rule) {
+			t.Fatalf("branch prompt missing shared rule %q", rule)
+		}
+	}
+}
+
 func TestPRReviewPromptRestrictsMinorFindingsToRealDefects(t *testing.T) {
 	prompt := reviewPRDefault(time.Unix(0, 0))
 	if !strings.Contains(prompt, "MINOR: A real non-blocking behavior, validation, test, or operational defect") {
@@ -189,6 +211,14 @@ func TestBranchReviewPromptRequiresProvedFalsificationForFindings(t *testing.T) 
 	prompt := reviewBranchWithToolsDefault(time.Unix(0, 0))
 	if !strings.Contains(prompt, "Write Findings only when Falsification concludes PROVED") {
 		t.Fatal("branch prompt does not require proved falsification for findings")
+	}
+}
+
+func TestBranchReviewPromptDefinesNoneForEmptyFindings(t *testing.T) {
+	prompt := reviewBranchWithToolsDefault(time.Unix(0, 0))
+	findingsSection := prompt[strings.Index(prompt, "## Findings"):strings.Index(prompt, "## Remarks")]
+	if !strings.Contains(findingsSection, "`None.`") {
+		t.Fatalf("Findings section does not define `None.` for the empty case:\n%s", findingsSection)
 	}
 }
 

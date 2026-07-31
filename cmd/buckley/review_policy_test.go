@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"m31labs.dev/buckley/v2/pkg/config"
+	"m31labs.dev/buckley/v2/pkg/prompts"
 	"m31labs.dev/buckley/v2/pkg/rules"
 )
 
@@ -315,6 +316,32 @@ func TestAppendReviewExecutionPlanGuidesBoundedEvidenceCollection(t *testing.T) 
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("prompt missing %q:\n%s", want, prompt)
+		}
+	}
+}
+
+// TestAppendReviewExecutionPlanReusesSharedRuleConstants asserts the bounded
+// review plan's shared bullets are byte-identical to the single source of
+// truth in pkg/prompts, not a separately maintained copy of the wording.
+func TestAppendReviewExecutionPlanReusesSharedRuleConstants(t *testing.T) {
+	prompt := appendReviewExecutionPlan("review this", automatedReviewOptions{
+		sizeClass:           "focused",
+		modelID:             "codex/gpt-5.6-luna",
+		reasoningEffort:     "low",
+		reasoningMaxTokens:  2048,
+		maxIterations:       8,
+		maxToolCalls:        12,
+		verificationTimeout: 90 * time.Second,
+		explorationTimeout:  3 * time.Minute,
+		synthesisLead:       75 * time.Second,
+	})
+	for _, rule := range []string{
+		prompts.RuleFindingsRequireProvedFalsification,
+		prompts.RuleDisprovedOrUnresolvedGoesToRemarks,
+		prompts.RuleVerificationInFirstBatch,
+	} {
+		if !strings.Contains(prompt, rule) {
+			t.Fatalf("bounded review plan missing shared rule %q:\n%s", rule, prompt)
 		}
 	}
 }

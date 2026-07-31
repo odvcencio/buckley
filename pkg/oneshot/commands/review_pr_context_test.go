@@ -337,6 +337,27 @@ func TestBuildPRPromptLabelsDescriptionVerificationAsSuppliedEvidence(t *testing
 	}
 }
 
+func TestBuildPRPrompt_IncludesRequiredVerificationTargets(t *testing.T) {
+	prompt := BuildPRPrompt(&PRContext{
+		PR: &PRInfo{
+			Number:       512,
+			Title:        "Add verification targets",
+			HeadSHA:      strings.Repeat("a", 40),
+			BaseSHA:      strings.Repeat("b", 40),
+			ChangedFiles: 1,
+		},
+		Files: []string{"pkg/oneshot/commands/review_pr_context.go"},
+	})
+	for _, want := range []string{
+		"## Required Local Verification Targets",
+		"go: pkg/oneshot/commands",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("PR prompt missing %q:\n%s", want, prompt)
+		}
+	}
+}
+
 func TestAssemblePRContext_BuildPromptIncludesReviewEvidence(t *testing.T) {
 	diff := oversizedReviewDiff() +
 		"diff --git a/pkg/oneshot/commands/review_pr_context.go b/pkg/oneshot/commands/review_pr_context.go\n" +
@@ -344,7 +365,7 @@ func TestAssemblePRContext_BuildPromptIncludesReviewEvidence(t *testing.T) {
 		"diff --git a/pkg/ratchet_test.go b/pkg/ratchet_test.go\n"
 	run := func(name string, args ...string) ([]byte, error) {
 		switch {
-		case name == "gh" && hasPRArgPrefix(args, "pr", "view", "208", "--json") && strings.Contains(args[len(args)-1], "headRefOid"):
+		case name == "gh" && hasPRArgPrefix(args, "pr", "view", "208", "--json") && strings.Contains(strings.Join(args, " "), "headRefOid"):
 			return []byte(`{
   "number": 208,
   "title": "Ratchet generated grammar memory",
@@ -423,7 +444,7 @@ func TestAssemblePRContext_BuildPromptIncludesReviewEvidence(t *testing.T) {
 			return []byte("100644 blob aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\tAGENTS.md\n"), nil
 		case name == "git" && matchesPRArgs(args, "--no-pager", "-C", "/fixture/repo", "show", "2222222222222222222222222222222222222222:AGENTS.md"):
 			return []byte("## Review rules\n- Never weaken ratchets.\n"), nil
-		case name == "git" && hasPRArgPrefix(args, "--no-pager", "-C", "/fixture/repo", "ls-tree", "2222222222222222222222222222222222222222", "--") && strings.Contains(args[len(args)-1], "/AGENTS.md"):
+		case name == "git" && matchesPRArgs(args, "--no-pager", "-C", "/fixture/repo", "ls-tree", "-r", "2222222222222222222222222222222222222222", "--"):
 			return nil, nil
 		default:
 			return nil, fmt.Errorf("unexpected command: %s %s", name, strings.Join(args, " "))
@@ -494,7 +515,7 @@ func TestAssemblePRContext_BuildPromptIncludesReviewEvidence(t *testing.T) {
 func TestAssemblePRContext_FallbackAndFetchFailuresAreVisible(t *testing.T) {
 	run := func(name string, args ...string) ([]byte, error) {
 		switch {
-		case name == "gh" && hasPRArgPrefix(args, "pr", "view", "208", "--json") && strings.Contains(args[len(args)-1], "headRefOid"):
+		case name == "gh" && hasPRArgPrefix(args, "pr", "view", "208", "--json") && strings.Contains(strings.Join(args, " "), "headRefOid"):
 			return []byte(`{"number":208,"title":"Fallback coverage","author":{"login":"author"},"state":"OPEN","url":"https://github.com/m31labs/buckley/pull/208","baseRefName":"main","baseRefOid":"base-sha","headRefName":"topic","headRefOid":"head-sha","reviewDecision":"","additions":1,"deletions":0,"changedFiles":1}`), nil
 		case name == "gh" && hasPRArgPrefix(args, "pr", "checks", "208", "--json", "state"):
 			return []byte(`[]`), nil
@@ -786,12 +807,13 @@ func TestAppendNestedPRAgentsUsesImmutableApplicableChain(t *testing.T) {
 			return nil, fmt.Errorf("unexpected command: %s %s", name, strings.Join(args, " "))
 		}
 		switch {
-		case matchesPRArgs(args, "--no-pager", "-C", "/repo", "ls-tree", "head-sha", "--", "src/AGENTS.md"):
-			return []byte("100644 blob aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\tsrc/AGENTS.md\n"), nil
+		case matchesPRArgs(args, "--no-pager", "-C", "/repo", "ls-tree", "-r", "head-sha", "--"):
+			return []byte(
+				"100644 blob aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\tsrc/AGENTS.md\n" +
+					"100644 blob bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\tsrc/deep/AGENTS.md\n",
+			), nil
 		case matchesPRArgs(args, "--no-pager", "-C", "/repo", "show", "head-sha:src/AGENTS.md"):
 			return []byte("src rules\n"), nil
-		case matchesPRArgs(args, "--no-pager", "-C", "/repo", "ls-tree", "head-sha", "--", "src/deep/AGENTS.md"):
-			return []byte("100644 blob bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\tsrc/deep/AGENTS.md\n"), nil
 		case matchesPRArgs(args, "--no-pager", "-C", "/repo", "show", "head-sha:src/deep/AGENTS.md"):
 			return []byte("deep rules\n"), nil
 		default:
@@ -1859,7 +1881,7 @@ func TestAssemblePRContext_RejectsChangedFileCardinalityMismatch(t *testing.T) {
 			t.Errorf("post-metadata PR operation was not pinned to resolved repository: %s", strings.Join(args, " "))
 		}
 		switch {
-		case name == "gh" && hasPRArgPrefix(args, "pr", "view", "208", "--json") && strings.Contains(args[len(args)-1], "headRefOid"):
+		case name == "gh" && hasPRArgPrefix(args, "pr", "view", "208", "--json") && strings.Contains(strings.Join(args, " "), "headRefOid"):
 			return []byte(`{"number":208,"title":"Cardinality","author":{"login":"author"},"state":"OPEN","url":"https://github.com/m31labs/buckley/pull/208","baseRefName":"main","baseRefOid":"base","headRefName":"topic","headRefOid":"head","changedFiles":3}`), nil
 		case name == "gh" && hasPRArgPrefix(args, "pr", "checks", "208", "--json", "state"):
 			return []byte(`[]`), nil

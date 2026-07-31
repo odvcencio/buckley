@@ -80,6 +80,7 @@ For every proved defect:
 - **Evidence**: proof
 - **Business Impact**: concrete effect
 - **Fix**: smallest safe change
+If Falsification concludes DISPROVED or UNRESOLVED, or no defect is proved, write exactly `+"`None.`"+` and omit finding IDs from Blockers and Suggestions.
 
 ## Remarks
 Brief non-blocking evidence or None.

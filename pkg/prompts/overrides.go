@@ -9,11 +9,14 @@ import (
 )
 
 var supportedPrompts = map[string]struct{}{
-	"planning":  {},
-	"execution": {},
-	"review":    {},
-	"commit":    {},
-	"pr":        {},
+	"planning":       {},
+	"execution":      {},
+	"review":         {},
+	"commit":         {},
+	"pr":             {},
+	"review-branch":  {},
+	"review-project": {},
+	"review-pr":      {},
 }
 
 // PromptInfo describes the default/override state of a prompt template.
@@ -61,7 +64,8 @@ func resolveOverride(kind string) string {
 }
 
 func promptEnvKey(kind string) string {
-	return "BUCKLEY_PROMPT_" + strings.ToUpper(strings.TrimSpace(kind))
+	kind = strings.ReplaceAll(strings.TrimSpace(kind), "-", "_")
+	return "BUCKLEY_PROMPT_" + strings.ToUpper(kind)
 }
 
 func applyPlaceholders(template string, defaultPrompt string, now time.Time) string {
