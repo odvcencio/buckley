@@ -1,3 +1,4 @@
+# Branch-local one-shot source assembly; removes itself after validation.
 name: Apply adaptive agent harness
 
 on:
