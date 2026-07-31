@@ -80,7 +80,7 @@ func (t *RunVerificationTool) SetTimeoutLimit(limit time.Duration) {
 func (t *RunVerificationTool) Name() string { return "run_verification" }
 
 func (t *RunVerificationTool) Description() string {
-	return "Run a focused build, test, or check in the immutable review snapshot. Repository AGENTS.md rules are enforced before process launch. Requests that require Docker, CI, or another unavailable execution surface return INCONCLUSIVE without running a host command. For Go approval evidence, use kind=test because it compiles the target and executes tests. Source is OS-enforced read-only, temporary build output is private, and network access is disabled."
+	return "Run a focused build, test, or check in the immutable review snapshot. AGENTS.md rules are enforced before launch. Requests needing Docker, CI, or another unavailable surface return INCONCLUSIVE, not a host command. For Go approval evidence use kind=test (compiles and runs tests). Source is read-only, build output is private, network is disabled."
 }
 
 func (t *RunVerificationTool) Parameters() ParameterSchema {

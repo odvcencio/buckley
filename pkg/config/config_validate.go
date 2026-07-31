@@ -95,6 +95,15 @@ func (c *Config) Validate() error {
 	if c.ToolMiddleware.Retry.Jitter < 0 {
 		return fmt.Errorf("tool_middleware.retry.jitter must be >= 0")
 	}
+
+	if mode := strings.TrimSpace(c.Tools.DefaultPoolMode); mode != "" {
+		validPoolModes := map[string]bool{
+			"full": true, "standard": true, "read_only": true, "simple": true,
+		}
+		if !validPoolModes[strings.ToLower(mode)] {
+			return fmt.Errorf("invalid tools.default_pool_mode: %s (valid: full, standard, read_only, simple)", c.Tools.DefaultPoolMode)
+		}
+	}
 	if c.PromptCache.SystemMessages < 0 {
 		return fmt.Errorf("prompt_cache.system_messages must be >= 0")
 	}

@@ -17,7 +17,7 @@ func (t *ReadFileTool) Name() string {
 }
 
 func (t *ReadFileTool) Description() string {
-	return "Read file contents. Large files (>100 lines) are automatically summarized in conversation while full content remains available for analysis. Use this to examine code, configuration, or documentation files."
+	return "Read file contents. Files over 100 lines are summarized in conversation; full content stays available."
 }
 
 func (t *ReadFileTool) Parameters() ParameterSchema {
@@ -111,7 +111,7 @@ func (t *WriteFileTool) Name() string {
 }
 
 func (t *WriteFileTool) Description() string {
-	return "Write or create a file with specified content. Creates parent directories automatically. Shows a compact summary instead of echoing content back. Use this to create new files or overwrite existing ones."
+	return "Write or create a file with the given content. Creates parent directories. Shows a compact summary, not the content."
 }
 
 func (t *WriteFileTool) Parameters() ParameterSchema {
@@ -224,7 +224,7 @@ func (t *ListDirectoryTool) Name() string {
 }
 
 func (t *ListDirectoryTool) Description() string {
-	return "List files and directories at a path. Returns name, type (file/directory), and size for each entry. Use this to explore directory structure or find files in a specific location."
+	return "List files and directories at a path. Returns name, type, and size for each entry."
 }
 
 func (t *ListDirectoryTool) Parameters() ParameterSchema {
@@ -295,7 +295,7 @@ func (t *PatchFileTool) Name() string {
 }
 
 func (t *PatchFileTool) Description() string {
-	return "Apply a unified diff patch to modify files. Supports standard patch format with configurable path stripping (-pN). Use this to apply code changes from diffs, pull requests, or version control systems."
+	return "Apply a unified diff patch to modify files, with configurable path stripping (-pN)."
 }
 
 func (t *PatchFileTool) Parameters() ParameterSchema {
@@ -410,7 +410,7 @@ func (t *FindFilesTool) Name() string {
 }
 
 func (t *FindFilesTool) Description() string {
-	return "Find files matching a glob pattern. Searches recursively from base directory while skipping common dependency and build-output directories. Patterns like '*.go' match files by extension, 'test_*.py' by prefix. Use this to locate specific files or file types across the codebase."
+	return "Find files matching a glob pattern (e.g. '*.go'), recursively, skipping dependency and build-output directories."
 }
 
 func (t *FindFilesTool) Parameters() ParameterSchema {
@@ -537,7 +537,7 @@ func (t *FileExistsTool) Name() string {
 }
 
 func (t *FileExistsTool) Description() string {
-	return "Check if a file or directory exists and get metadata including name, size, type, permissions, and modification time. Use this before reading/writing files, to verify paths, or to inspect file metadata."
+	return "Check if a file or directory exists and get its metadata: name, size, type, permissions, mtime."
 }
 
 func (t *FileExistsTool) Parameters() ParameterSchema {

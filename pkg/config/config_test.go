@@ -151,6 +151,32 @@ func TestInvalidExecutionModeFailsValidation(t *testing.T) {
 	}
 }
 
+func TestDefaultToolPoolModeIsFull(t *testing.T) {
+	cfg := config.DefaultConfig()
+	if cfg.Tools.DefaultPoolMode != "full" {
+		t.Fatalf("expected default tools.default_pool_mode to be full, got %q", cfg.Tools.DefaultPoolMode)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("expected default config to validate, got %v", err)
+	}
+}
+
+func TestInvalidToolPoolModeFailsValidation(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Tools.DefaultPoolMode = "bogus"
+	if err := cfg.Validate(); err == nil {
+		t.Fatalf("expected validation to fail for invalid tools.default_pool_mode")
+	}
+
+	for _, mode := range []string{"full", "standard", "read_only", "simple"} {
+		cfg = config.DefaultConfig()
+		cfg.Tools.DefaultPoolMode = mode
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("expected tools.default_pool_mode=%s to validate, got %v", mode, err)
+		}
+	}
+}
+
 func TestEnvOverrideBatchEnabled(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.Batch.Enabled = true
