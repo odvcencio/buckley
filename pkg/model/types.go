@@ -226,56 +226,168 @@ type ReasoningDetail struct {
 	Extra     map[string]json.RawMessage `json:"-"`
 }
 
+// UnmarshalJSON decodes the JSON object once into a map[string]json.RawMessage
+// (rather than the prior implementation's two full decodes -- one into a
+// typed struct alias, one into a raw map, both walking the entire document
+// including large Text/Data payloads) and then decodes each known field from
+// its already-isolated raw slice. Whatever keys remain after the known ones
+// are removed become Extra, preserving unknown provider fields.
+//
+// "signature" is deliberately left in the raw map (not deleted alongside the
+// other known keys) so an explicit `"signature":null` -- indistinguishable
+// from an absent key once decoded into the *string field -- still round-trips
+// on re-encoding via Extra; MarshalJSON below skips Extra's copy once the
+// named field has already written the key.
 func (d *ReasoningDetail) UnmarshalJSON(data []byte) error {
-	type alias ReasoningDetail
-	var aux alias
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return err
-	}
-
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return err
 	}
-	_, aux.HasIndex = raw["index"]
+
+	var out ReasoningDetail
+	if v, ok := raw["type"]; ok {
+		if err := json.Unmarshal(v, &out.Type); err != nil {
+			return fmt.Errorf("reasoning detail type: %w", err)
+		}
+	}
+	if v, ok := raw["id"]; ok {
+		if err := json.Unmarshal(v, &out.ID); err != nil {
+			return fmt.Errorf("reasoning detail id: %w", err)
+		}
+	}
+	if v, ok := raw["index"]; ok {
+		if err := json.Unmarshal(v, &out.Index); err != nil {
+			return fmt.Errorf("reasoning detail index: %w", err)
+		}
+		out.HasIndex = true
+	}
+	if v, ok := raw["text"]; ok {
+		if err := json.Unmarshal(v, &out.Text); err != nil {
+			return fmt.Errorf("reasoning detail text: %w", err)
+		}
+	}
+	if v, ok := raw["summary"]; ok {
+		if err := json.Unmarshal(v, &out.Summary); err != nil {
+			return fmt.Errorf("reasoning detail summary: %w", err)
+		}
+	}
+	if v, ok := raw["data"]; ok {
+		if err := json.Unmarshal(v, &out.Data); err != nil {
+			return fmt.Errorf("reasoning detail data: %w", err)
+		}
+	}
+	if v, ok := raw["signature"]; ok {
+		if err := json.Unmarshal(v, &out.Signature); err != nil {
+			return fmt.Errorf("reasoning detail signature: %w", err)
+		}
+	}
+	if v, ok := raw["format"]; ok {
+		if err := json.Unmarshal(v, &out.Format); err != nil {
+			return fmt.Errorf("reasoning detail format: %w", err)
+		}
+	}
+
 	for _, key := range []string{"type", "id", "index", "text", "summary", "data", "format"} {
 		delete(raw, key)
 	}
-	aux.Extra = raw
-	*d = ReasoningDetail(aux)
+	if len(raw) > 0 {
+		out.Extra = raw
+	}
+	*d = out
 	return nil
 }
 
+// MarshalJSON appends each present field directly to a growing byte slice in
+// declared order instead of the prior implementation's approach of building
+// a map[string]any and marshaling it (which allocates the map, reflects over
+// each any-typed value, and sorts keys alphabetically for output). Key order
+// in the result is therefore declaration order, not alphabetical; callers
+// must treat ReasoningDetail JSON as unordered, same as before.
 func (d ReasoningDetail) MarshalJSON() ([]byte, error) {
-	fields := make(map[string]any, len(d.Extra)+8)
-	for key, value := range d.Extra {
-		fields[key] = value
+	buf := make([]byte, 0, 64+len(d.Type)+len(d.ID)+len(d.Text)+len(d.Summary)+len(d.Data)+len(d.Format))
+	buf = append(buf, '{')
+	first := true
+
+	appendField := func(key string, value any) error {
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			return err
+		}
+		if !first {
+			buf = append(buf, ',')
+		}
+		first = false
+		buf = append(buf, '"')
+		buf = append(buf, key...)
+		buf = append(buf, '"', ':')
+		buf = append(buf, encoded...)
+		return nil
 	}
+
 	if d.Type != "" {
-		fields["type"] = d.Type
+		if err := appendField("type", d.Type); err != nil {
+			return nil, err
+		}
 	}
 	if d.ID != "" {
-		fields["id"] = d.ID
+		if err := appendField("id", d.ID); err != nil {
+			return nil, err
+		}
 	}
 	if d.HasIndex || d.Index != 0 {
-		fields["index"] = d.Index
+		if err := appendField("index", d.Index); err != nil {
+			return nil, err
+		}
 	}
 	if d.Text != "" {
-		fields["text"] = d.Text
+		if err := appendField("text", d.Text); err != nil {
+			return nil, err
+		}
 	}
 	if d.Summary != "" {
-		fields["summary"] = d.Summary
+		if err := appendField("summary", d.Summary); err != nil {
+			return nil, err
+		}
 	}
 	if d.Data != "" {
-		fields["data"] = d.Data
+		if err := appendField("data", d.Data); err != nil {
+			return nil, err
+		}
 	}
+	signatureWritten := false
 	if d.Signature != nil {
-		fields["signature"] = d.Signature
+		if err := appendField("signature", d.Signature); err != nil {
+			return nil, err
+		}
+		signatureWritten = true
 	}
 	if d.Format != "" {
-		fields["format"] = d.Format
+		if err := appendField("format", d.Format); err != nil {
+			return nil, err
+		}
 	}
-	return json.Marshal(fields)
+	for key, value := range d.Extra {
+		if key == "signature" && signatureWritten {
+			continue
+		}
+		keyEncoded, err := json.Marshal(key)
+		if err != nil {
+			return nil, err
+		}
+		if !first {
+			buf = append(buf, ',')
+		}
+		first = false
+		buf = append(buf, keyEncoded...)
+		buf = append(buf, ':')
+		if len(value) == 0 {
+			buf = append(buf, 'n', 'u', 'l', 'l')
+		} else {
+			buf = append(buf, value...)
+		}
+	}
+	buf = append(buf, '}')
+	return buf, nil
 }
 
 // ToolCallDelta represents incremental tool call data in streaming
