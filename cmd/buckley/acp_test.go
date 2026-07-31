@@ -134,6 +134,35 @@ func TestBuildACPChatRequestOmitsDisabledTools(t *testing.T) {
 	}
 }
 
+// TestBuildACPChatRequestProjectionAloneBoundsLargeTranscript proves that
+// buildACPChatRequest, now that it starts from the full transcript
+// (conv.ToModelMessages) instead of running an independent
+// ToEfficientModelMessages compaction pass first, still ends up bounded: the
+// single CompactModelMessagesForRequest pass is enough on its own.
+func TestBuildACPChatRequestProjectionAloneBoundsLargeTranscript(t *testing.T) {
+	t.Parallel()
+
+	conv := conversation.New("session-1")
+	for i := 0; i < 400; i++ {
+		conv.AddUserMessage(strings.Repeat("large transcript evidence ", 200))
+		conv.AddAssistantMessage(strings.Repeat("assistant response evidence ", 200))
+	}
+
+	req := buildACPChatRequest(nil, nil, nil, conv, "test/model", acpToolTurn{})
+
+	full := conv.ToModelMessages()
+	fullEstimate := model.EstimateRequestTokens(model.ChatRequest{Model: req.Model, Messages: full})
+	projectedEstimate := model.EstimateRequestTokens(req)
+
+	if projectedEstimate.Total >= fullEstimate.Total {
+		t.Fatalf("projected request (%d tokens) is not smaller than the full transcript (%d tokens)", projectedEstimate.Total, fullEstimate.Total)
+	}
+	const boundedCeiling = 200_000 // generous upper bound for the default fallback budget
+	if projectedEstimate.Total > boundedCeiling {
+		t.Fatalf("projected request = %d tokens, want <= %d (projection alone should bound the request)", projectedEstimate.Total, boundedCeiling)
+	}
+}
+
 func TestNormalizeACPToolCallIDs(t *testing.T) {
 	t.Parallel()
 

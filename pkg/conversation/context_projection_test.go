@@ -1,6 +1,7 @@
 package conversation
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -117,5 +118,35 @@ func TestProjectModelMessagesForRequest_UnknownWindowKeepsStableFallback(t *test
 	}
 	if !stats.Compacted {
 		t.Fatal("unknown-window fallback should retain bounded behavior")
+	}
+}
+
+// TestProjectionTokenBudget_OverheadMatchesNilMessagesProbe proves the
+// formula projectionTokenBudget uses -- 1 + originalEstimate.Tools +
+// originalEstimate.Fixed -- is equivalent to the overhead a Messages=nil
+// probe through EstimateRequestTokens would produce, across representative
+// message counts. A nil Messages slice always estimates to 1 token (the
+// "messages":null JSON envelope), and Tools/Fixed never depend on Messages,
+// so the two must agree for any message count.
+func TestProjectionTokenBudget_OverheadMatchesNilMessagesProbe(t *testing.T) {
+	for _, count := range []int{0, 1, 7, 500} {
+		t.Run(fmt.Sprintf("messages=%d", count), func(t *testing.T) {
+			messages := make([]model.Message, count)
+			for i := range messages {
+				messages[i] = model.Message{Role: "user", Content: strings.Repeat("word ", 20)}
+			}
+			req := model.ChatRequest{Model: "openai/gpt-5.4", Messages: messages, MaxTokens: 4096}
+
+			originalEstimate := model.EstimateRequestTokens(req)
+			formulaOverhead := 1 + originalEstimate.Tools + originalEstimate.Fixed
+
+			probe := req
+			probe.Messages = nil
+			probeOverhead := model.EstimateRequestTokens(probe).Total
+
+			if formulaOverhead != probeOverhead {
+				t.Fatalf("formula overhead = %d, nil-messages probe = %d", formulaOverhead, probeOverhead)
+			}
+		})
 	}
 }

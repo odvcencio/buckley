@@ -16,6 +16,13 @@ import (
 
 // executeWithTools uses streaming for real-time output and proper tool call accumulation.
 // This follows the Kimi K2 / OpenAI streaming pattern where tool call deltas are accumulated by index.
+//
+// Each iteration has four phases, matching the TUI tool loop's seams
+// (see pkg/ui/tui/tool_loop.go): build the request, consume the stream,
+// classify the response (plain text vs tool calls), then either finish or
+// dispatch tools and continue. Those phases are split into
+// buildToolCallAPIRequest, consumeToolCallStream, finalizeNonToolResponse,
+// and runToolDispatchPhase below.
 func (r *Runner) executeWithTools(ctx context.Context, req Request, tools []tool.Tool, result *Result) (*Result, error) {
 	var toolDefs []map[string]any
 	for _, t := range tools {
@@ -52,200 +59,247 @@ func (r *Runner) executeWithTools(ctx context.Context, req Request, tools []tool
 			return result, err
 		}
 
-		apiReq := model.ChatRequest{
-			Model:     modelID,
-			Tools:     toolDefs,
-			Stream:    true,
-			SessionID: sessionID,
-		}
-		if len(toolDefs) > 0 {
-			apiReq.ToolChoice = "auto"
-		}
-		apiReq.Messages = conversation.CompactModelMessagesForRequest(messages, apiReq, contextWindow)
-
-		// Use streaming
+		apiReq := buildToolCallAPIRequest(modelID, sessionID, toolDefs, messages, contextWindow)
 		chunkChan, errChan := r.config.Models.ChatCompletionStream(ctx, apiReq)
 
-		// Accumulate streaming response
 		acc := model.NewStreamAccumulator()
-		var finishReason string
+		thinkParser := r.newThinkTagParser()
 
-		// Initialize think tag parser for streaming content
-		var thinkParser *ThinkTagParser
-		var hasReasoningDetails bool
-
-		if r.streamHandler != nil {
-			thinkParser = NewThinkTagParser(
-				r.streamHandler.OnReasoning,
-				r.streamHandler.OnText,
-				r.streamHandler.OnReasoningEnd,
-			)
-		}
-
-	streamLoop:
-		for {
-			select {
-			case <-ctx.Done():
-				err := ctx.Err()
-				r.notifyStreamError(err)
-				return result, err
-			case err := <-errChan:
-				if err != nil {
-					wrapped := fmt.Errorf("streaming chat completion: %w", err)
-					r.notifyStreamError(wrapped)
-					return result, wrapped
-				}
-				break streamLoop
-			case chunk, ok := <-chunkChan:
-				if !ok {
-					break streamLoop
-				}
-				acc.Add(chunk)
-
-				// Extract finish reason from chunk
-				if len(chunk.Choices) > 0 && chunk.Choices[0].FinishReason != nil {
-					finishReason = *chunk.Choices[0].FinishReason
-				}
-
-				// Stream content to handler with reasoning details and think tag parsing
-				if r.streamHandler != nil && len(chunk.Choices) > 0 {
-					delta := chunk.Choices[0].Delta
-
-					// Handle reasoning_details (OpenRouter format)
-					for _, rd := range delta.ReasoningDetails {
-						hasReasoningDetails = true
-						text := rd.Text
-						if text == "" {
-							text = rd.Summary
-						}
-						if text != "" {
-							r.streamHandler.OnReasoning(text)
-						}
-					}
-
-					// Handle legacy reasoning field
-					if delta.Reasoning != "" && !hasReasoningDetails {
-						r.streamHandler.OnReasoning(delta.Reasoning)
-					}
-
-					// Handle content - route through think parser unless reasoning_details present
-					if delta.Content != "" {
-						filtered := model.FilterToolCallTokens(delta.Content)
-						if filtered != "" {
-							if hasReasoningDetails {
-								// reasoning_details takes precedence, don't parse think tags
-								r.streamHandler.OnText(filtered)
-							} else if thinkParser != nil {
-								thinkParser.Write(filtered)
-							}
-						}
-					}
-				}
-			}
-		}
-
-		// Flush any remaining content from think parser
-		if thinkParser != nil {
-			thinkParser.Flush()
-		}
-
-		// Signal reasoning end for reasoning_details format
-		if hasReasoningDetails && r.streamHandler != nil {
-			r.streamHandler.OnReasoningEnd()
+		finishReason, err := r.consumeToolCallStream(ctx, chunkChan, errChan, acc, thinkParser)
+		if err != nil {
+			r.notifyStreamError(err)
+			return result, err
 		}
 
 		// Update usage from accumulated response
 		if usage := acc.Usage(); usage != nil {
 			result.Usage = model.AddUsage(result.Usage, *usage)
 		}
-
 		result.FinishReason = finishReason
+
 		// Use FinalizeWithTokenParsing to handle models like Kimi K2 that may
 		// embed tool calls as special tokens in the content field
 		msg := acc.FinalizeWithTokenParsing()
-
 		if msg.Reasoning != "" && r.config.EnableReasoning {
 			result.Reasoning = msg.Reasoning
 		}
 
 		// Check for tool calls (including those parsed from special tokens)
 		if len(msg.ToolCalls) == 0 {
-			rawContent, _ := msg.Content.(string)
-			thinking, content := model.ExtractThinkingContent(rawContent)
-			if thinking != "" && result.Reasoning == "" {
-				result.Reasoning = thinking
-			}
-			if strings.TrimSpace(content) == "" {
-				if result.Reasoning != "" {
-					// Model provided reasoning but no response - this is valid
-					result.Content = ""
-					if r.streamHandler != nil {
-						r.streamHandler.OnComplete(result)
-					}
-					return result, nil
-				}
-				err := fmt.Errorf("model returned empty response")
-				r.notifyStreamError(err)
-				return result, err
-			}
-
-			result.Content = content
-			if r.streamHandler != nil {
-				r.streamHandler.OnComplete(result)
-			}
-			return result, nil
+			err := r.finalizeNonToolResponse(msg, result)
+			r.notifyStreamError(err)
+			return result, err
 		}
 
-		// Process tool calls
-		toolCalls := msg.ToolCalls
-
-		// Ensure tool call IDs are set
-		for i := range toolCalls {
-			if toolCalls[i].ID == "" {
-				toolCalls[i].ID = fmt.Sprintf("tool-%d", i+1)
-			}
-		}
-
-		messages = append(messages, model.Message{
-			Role:      "assistant",
-			Content:   msg.Content,
-			ToolCalls: toolCalls,
-		})
-
-		toolResults, err := r.executeToolCalls(ctx, toolCalls, tools, result)
+		var stop bool
+		messages, stop, err = r.runToolDispatchPhase(ctx, msg, messages, tools, result, deduper, governor)
 		if err != nil {
 			r.notifyStreamError(err)
 			return result, err
 		}
-		guardReason := ""
-		for _, tr := range toolResults {
-			content := deduper.messageFor(tr)
-			var decision agentloop.Decision
-			content, decision = applyRunnerLoopGuard(governor, tr, content)
-			messages = append(messages, model.Message{
-				Role:       "tool",
-				ToolCallID: tr.ID,
-				Name:       tr.Name,
-				Content:    content,
-			})
-			if decision.Stop && guardReason == "" {
-				guardReason = decision.Reason
-			}
-		}
-		// Release the pooled slice after processing.
-		releaseToolCallRecordSlice(toolResults)
-		if guardReason != "" {
-			result.Content = runnerLoopGuardMessage(guardReason)
-			result.FinishReason = "loop_guard"
-			if r.streamHandler != nil {
-				r.streamHandler.OnComplete(result)
-			}
+		if stop {
 			return result, nil
 		}
 	}
 
 	result.Content = "Maximum iterations reached. Please try a simpler request."
 	return result, nil
+}
+
+// buildToolCallAPIRequest assembles the streaming ChatRequest for one tool
+// loop iteration, compacting messages to fit contextWindow.
+func buildToolCallAPIRequest(modelID, sessionID string, toolDefs []map[string]any, messages []model.Message, contextWindow int) model.ChatRequest {
+	apiReq := model.ChatRequest{
+		Model:     modelID,
+		Tools:     toolDefs,
+		Stream:    true,
+		SessionID: sessionID,
+	}
+	if len(toolDefs) > 0 {
+		apiReq.ToolChoice = "auto"
+	}
+	apiReq.Messages = conversation.CompactModelMessagesForRequest(messages, apiReq, contextWindow)
+	return apiReq
+}
+
+// newThinkTagParser builds a think-tag parser wired to r.streamHandler, or
+// nil when no handler is configured.
+func (r *Runner) newThinkTagParser() *ThinkTagParser {
+	if r.streamHandler == nil {
+		return nil
+	}
+	return NewThinkTagParser(
+		r.streamHandler.OnReasoning,
+		r.streamHandler.OnText,
+		r.streamHandler.OnReasoningEnd,
+	)
+}
+
+// consumeToolCallStream drains chunkChan/errChan into acc, forwarding
+// reasoning and content deltas to r.streamHandler (through thinkParser for
+// think-tag content) as they arrive. It mirrors the TUI tool loop's
+// streamLoop label semantics: a nil error on errChan, or chunkChan closing,
+// ends the stream normally and falls through to the flush below; ctx
+// cancellation or a non-nil error on errChan aborts immediately without
+// flushing thinkParser or signaling reasoning end, matching the original
+// inline behavior where those return paths bypassed the post-loop cleanup.
+func (r *Runner) consumeToolCallStream(ctx context.Context, chunkChan <-chan model.StreamChunk, errChan <-chan error, acc *model.StreamAccumulator, thinkParser *ThinkTagParser) (finishReason string, err error) {
+	hasReasoningDetails := false
+
+streamLoop:
+	for {
+		select {
+		case <-ctx.Done():
+			return finishReason, ctx.Err()
+		case streamErr := <-errChan:
+			if streamErr != nil {
+				return finishReason, fmt.Errorf("streaming chat completion: %w", streamErr)
+			}
+			break streamLoop
+		case chunk, ok := <-chunkChan:
+			if !ok {
+				break streamLoop
+			}
+			acc.Add(chunk)
+
+			if len(chunk.Choices) > 0 && chunk.Choices[0].FinishReason != nil {
+				finishReason = *chunk.Choices[0].FinishReason
+			}
+			if r.streamHandler != nil && len(chunk.Choices) > 0 {
+				hasReasoningDetails = r.forwardStreamDelta(chunk.Choices[0].Delta, thinkParser, hasReasoningDetails)
+			}
+		}
+	}
+
+	if thinkParser != nil {
+		thinkParser.Flush()
+	}
+	if hasReasoningDetails && r.streamHandler != nil {
+		r.streamHandler.OnReasoningEnd()
+	}
+	return finishReason, nil
+}
+
+// forwardStreamDelta streams one chunk's delta to r.streamHandler (which is
+// non-nil whenever this is called), preferring reasoning_details
+// (OpenRouter format) over the legacy reasoning field, and routing plain
+// content through thinkParser unless reasoning_details already carried the
+// reasoning for this turn. Returns whether reasoning_details have been seen
+// so far this turn, threaded back in by the caller on the next chunk.
+func (r *Runner) forwardStreamDelta(delta model.MessageDelta, thinkParser *ThinkTagParser, hasReasoningDetails bool) bool {
+	for _, rd := range delta.ReasoningDetails {
+		hasReasoningDetails = true
+		text := rd.Text
+		if text == "" {
+			text = rd.Summary
+		}
+		if text != "" {
+			r.streamHandler.OnReasoning(text)
+		}
+	}
+
+	if delta.Reasoning != "" && !hasReasoningDetails {
+		r.streamHandler.OnReasoning(delta.Reasoning)
+	}
+
+	if delta.Content != "" {
+		filtered := model.FilterToolCallTokens(delta.Content)
+		if filtered != "" {
+			if hasReasoningDetails {
+				// reasoning_details takes precedence, don't parse think tags
+				r.streamHandler.OnText(filtered)
+			} else if thinkParser != nil {
+				thinkParser.Write(filtered)
+			}
+		}
+	}
+
+	return hasReasoningDetails
+}
+
+// finalizeNonToolResponse classifies a turn's response when the model
+// returned no tool calls (including tool calls FinalizeWithTokenParsing
+// already parsed out of special tokens): it extracts any <think> tag
+// content, decides whether an empty visible response is valid
+// (reasoning-only) or an error, and reports completion through
+// r.streamHandler. The caller always returns immediately after this call.
+func (r *Runner) finalizeNonToolResponse(msg model.Message, result *Result) error {
+	rawContent, _ := msg.Content.(string)
+	thinking, content := model.ExtractThinkingContent(rawContent)
+	if thinking != "" && result.Reasoning == "" {
+		result.Reasoning = thinking
+	}
+	if strings.TrimSpace(content) == "" {
+		if result.Reasoning != "" {
+			// Model provided reasoning but no response - this is valid
+			result.Content = ""
+			if r.streamHandler != nil {
+				r.streamHandler.OnComplete(result)
+			}
+			return nil
+		}
+		return fmt.Errorf("model returned empty response")
+	}
+
+	result.Content = content
+	if r.streamHandler != nil {
+		r.streamHandler.OnComplete(result)
+	}
+	return nil
+}
+
+// runToolDispatchPhase executes msg's tool calls, appends the assistant and
+// tool-result messages to messages, and applies the loop guard/dedup
+// policy. stop reports whether the guard decided to end the scenario; when
+// stop is true, result.Content/FinishReason are already set and
+// OnComplete has already fired, matching the original inline behavior.
+func (r *Runner) runToolDispatchPhase(ctx context.Context, msg model.Message, messages []model.Message, tools []tool.Tool, result *Result, deduper *toolResultDeduper, governor *agentloop.Governor) (updatedMessages []model.Message, stop bool, err error) {
+	toolCalls := msg.ToolCalls
+	for i := range toolCalls {
+		if toolCalls[i].ID == "" {
+			toolCalls[i].ID = fmt.Sprintf("tool-%d", i+1)
+		}
+	}
+
+	messages = append(messages, model.Message{
+		Role:      "assistant",
+		Content:   msg.Content,
+		ToolCalls: toolCalls,
+	})
+
+	toolResults, err := r.executeToolCalls(ctx, toolCalls, tools, result)
+	if err != nil {
+		return messages, false, err
+	}
+
+	guardReason := ""
+	for _, tr := range toolResults {
+		content := deduper.messageFor(tr)
+		var decision agentloop.Decision
+		content, decision = applyRunnerLoopGuard(governor, tr, content)
+		messages = append(messages, model.Message{
+			Role:       "tool",
+			ToolCallID: tr.ID,
+			Name:       tr.Name,
+			Content:    content,
+		})
+		if decision.Stop && guardReason == "" {
+			guardReason = decision.Reason
+		}
+	}
+	// Release the pooled slice after processing.
+	releaseToolCallRecordSlice(toolResults)
+
+	if guardReason != "" {
+		result.Content = runnerLoopGuardMessage(guardReason)
+		result.FinishReason = "loop_guard"
+		if r.streamHandler != nil {
+			r.streamHandler.OnComplete(result)
+		}
+		return messages, true, nil
+	}
+
+	return messages, false, nil
 }
 
 func (r *Runner) executeToolCalls(ctx context.Context, calls []model.ToolCall, tools []tool.Tool, result *Result) ([]ToolCallRecord, error) {

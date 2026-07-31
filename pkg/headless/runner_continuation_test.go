@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"m31labs.dev/buckley/v2/pkg/config"
@@ -150,6 +151,53 @@ func TestRunner_ContinuationHitsOnSecondTurnAndPersists(t *testing.T) {
 	restored.Restore("openai", "openai/gpt-5.4", finalTranscript)
 	if !restored.Active() {
 		t.Fatal("expected restored coordinator to be active from persisted state")
+	}
+}
+
+// TestRunner_BuildChatRequestProjectionAloneBoundsLargeTranscript proves the
+// non-continuation path in buildChatRequest, now that it starts from the
+// full transcript (conv.ToModelMessages) instead of running an independent
+// ToEfficientModelMessages compaction pass first, still ends up bounded: the
+// single ProjectModelMessagesForRequestPinned pass is enough on its own.
+func TestRunner_BuildChatRequestProjectionAloneBoundsLargeTranscript(t *testing.T) {
+	cfg := newContinuationTestConfig("")
+	cfg.Models.ProviderContinuation = false
+	mgr, err := model.NewManager(cfg)
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	conv := conversation.New("session-1")
+	for i := 0; i < 400; i++ {
+		conv.AddUserMessage(strings.Repeat("large transcript evidence ", 200))
+		conv.AddAssistantMessage(strings.Repeat("assistant response evidence ", 200))
+	}
+
+	runner := &Runner{
+		sessionID:     "session-1",
+		config:        cfg,
+		modelManager:  mgr,
+		conv:          conv,
+		modelOverride: "gpt-4o",
+	}
+
+	req, useContinuation := runner.buildChatRequest()
+	if useContinuation {
+		t.Fatal("expected the non-continuation path for this test")
+	}
+
+	full := conv.ToModelMessages()
+	fullEstimate := model.EstimateRequestTokens(model.ChatRequest{Model: req.Model, Messages: full})
+	projectedEstimate := model.EstimateRequestTokens(req)
+
+	// Compaction shapes content in place rather than dropping messages, so
+	// the bound to check is total estimated size, not message count.
+	if projectedEstimate.Total >= fullEstimate.Total {
+		t.Fatalf("projected request (%d tokens) is not smaller than the full transcript (%d tokens)", projectedEstimate.Total, fullEstimate.Total)
+	}
+	const boundedCeiling = 200_000 // generous upper bound for the default fallback budget
+	if projectedEstimate.Total > boundedCeiling {
+		t.Fatalf("projected request = %d tokens, want <= %d (projection alone should bound the request)", projectedEstimate.Total, boundedCeiling)
 	}
 }
 
