@@ -56,6 +56,7 @@ func redactEventPayload(ev Event) Event {
 	}
 	redacted, _ := redactValue(generic).(map[string]any)
 	out.Payload = redacted
+	out.Redaction = evidence.RedactionVersion
 	return out
 }
 

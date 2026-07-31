@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"m31labs.dev/buckley/v2/pkg/evidence"
 )
 
 func TestExportRun_RedactsPayloadSecrets(t *testing.T) {
@@ -205,5 +207,12 @@ func TestExportRunRedactsNestedPayloadSecrets(t *testing.T) {
 		if strings.Contains(string(raw), secret) {
 			t.Fatalf("nested secret %q survived export redaction: %s", secret, raw)
 		}
+	}
+}
+
+func TestExportedEventsCarryEvidenceRedactionVersion(t *testing.T) {
+	ev := redactEventPayload(Event{Redaction: DefaultRedactionVersion, Payload: map[string]any{"k": "v"}})
+	if ev.Redaction != evidence.RedactionVersion {
+		t.Fatalf("exported event claims ruleset %q, want %q", ev.Redaction, evidence.RedactionVersion)
 	}
 }

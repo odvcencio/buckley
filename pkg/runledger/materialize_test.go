@@ -2,6 +2,7 @@ package runledger
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 )
@@ -185,5 +186,18 @@ func TestLoadGoalTree_FromStore(t *testing.T) {
 	}
 	if tree.Children[0].State.Status != "completed" {
 		t.Fatalf("child materialized status = %q, want completed", tree.Children[0].State.Status)
+	}
+}
+
+func TestMaterializeGoalTreeRejectsParentCycle(t *testing.T) {
+	now := time.Now().UTC()
+	runs := []AgentRun{
+		{RunID: "run-a", ParentRunID: "run-b", StartedAt: now},
+		{RunID: "run-b", ParentRunID: "run-a", StartedAt: now.Add(time.Second)},
+	}
+	if _, err := MaterializeGoalTree("run-a", runs, map[string][]Event{}); err == nil {
+		t.Fatal("expected cycle error, got nil")
+	} else if !strings.Contains(err.Error(), "cycle") {
+		t.Fatalf("expected cycle error, got: %v", err)
 	}
 }

@@ -106,10 +106,14 @@ func MaterializeGoalTree(rootRunID string, runs []AgentRun, eventsByRun map[stri
 	if !ok {
 		return nil, fmt.Errorf("runledger: root run %s not found among supplied runs", rootRunID)
 	}
-	return buildRunNode(root, byParent, eventsByRun)
+	return buildRunNode(root, byParent, eventsByRun, make(map[string]bool, len(runs)))
 }
 
-func buildRunNode(run AgentRun, byParent map[string][]AgentRun, eventsByRun map[string][]Event) (*RunNode, error) {
+func buildRunNode(run AgentRun, byParent map[string][]AgentRun, eventsByRun map[string][]Event, visited map[string]bool) (*RunNode, error) {
+	if visited[run.RunID] {
+		return nil, fmt.Errorf("runledger: run %s appears in its own ancestry; parent links form a cycle", run.RunID)
+	}
+	visited[run.RunID] = true
 	state, err := MaterializeRun(run.RunID, eventsByRun[run.RunID])
 	if err != nil {
 		return nil, err
@@ -120,7 +124,7 @@ func buildRunNode(run AgentRun, byParent map[string][]AgentRun, eventsByRun map[
 	sort.Slice(children, func(i, j int) bool { return children[i].StartedAt.Before(children[j].StartedAt) })
 
 	for _, child := range children {
-		childNode, err := buildRunNode(child, byParent, eventsByRun)
+		childNode, err := buildRunNode(child, byParent, eventsByRun, visited)
 		if err != nil {
 			return nil, err
 		}
