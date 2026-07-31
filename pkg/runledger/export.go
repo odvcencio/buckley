@@ -40,10 +40,11 @@ func ExportRun(ctx context.Context, store Store, runID string) (RunExport, error
 }
 
 func redactEventPayload(ev Event) Event {
-	if len(ev.Payload) == 0 {
-		return ev
-	}
 	out := ev
+	out.Redaction = evidence.RedactionVersion
+	if len(ev.Payload) == 0 {
+		return out
+	}
 	normalized, err := json.Marshal(ev.Payload)
 	if err != nil {
 		out.Payload = map[string]any{"redaction_error": "payload is not exportable"}

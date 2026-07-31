@@ -138,30 +138,37 @@ func buildRunNode(run AgentRun, byParent map[string][]AgentRun, eventsByRun map[
 // read-only composition of Store.GetRun / ListRuns / ListEvents; it never
 // executes tools.
 func LoadGoalTree(ctx context.Context, store Store, rootRunID string) (*RunNode, error) {
-	run, err := store.GetRun(ctx, rootRunID)
+	root, err := store.GetRun(ctx, rootRunID)
 	if err != nil {
 		return nil, err
 	}
-	events, err := store.ListEvents(ctx, EventQuery{RunID: rootRunID})
-	if err != nil {
-		return nil, err
-	}
-	state, err := MaterializeRun(rootRunID, events)
-	if err != nil {
-		return nil, err
-	}
-	node := &RunNode{Run: run, State: state}
 
-	children, err := store.ListRuns(ctx, RunQuery{ParentRunID: rootRunID})
-	if err != nil {
-		return nil, err
-	}
-	for _, child := range children {
-		childNode, err := LoadGoalTree(ctx, store, child.RunID)
+	runs := []AgentRun{root}
+	eventsByRun := make(map[string][]Event)
+	visited := map[string]bool{rootRunID: true}
+	frontier := []string{rootRunID}
+	for len(frontier) > 0 {
+		runID := frontier[0]
+		frontier = frontier[1:]
+
+		events, err := store.ListEvents(ctx, EventQuery{RunID: runID})
 		if err != nil {
 			return nil, err
 		}
-		node.Children = append(node.Children, childNode)
+		eventsByRun[runID] = events
+
+		children, err := store.ListRuns(ctx, RunQuery{ParentRunID: runID})
+		if err != nil {
+			return nil, err
+		}
+		for _, child := range children {
+			if visited[child.RunID] {
+				return nil, fmt.Errorf("runledger: run %s appears in its own ancestry; parent links form a cycle", child.RunID)
+			}
+			visited[child.RunID] = true
+			runs = append(runs, child)
+			frontier = append(frontier, child.RunID)
+		}
 	}
-	return node, nil
+	return MaterializeGoalTree(rootRunID, runs, eventsByRun)
 }
