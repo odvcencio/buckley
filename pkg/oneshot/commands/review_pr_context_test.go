@@ -444,7 +444,7 @@ func TestAssemblePRContext_BuildPromptIncludesReviewEvidence(t *testing.T) {
 			return []byte("100644 blob aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\tAGENTS.md\n"), nil
 		case name == "git" && matchesPRArgs(args, "--no-pager", "-C", "/fixture/repo", "show", "2222222222222222222222222222222222222222:AGENTS.md"):
 			return []byte("## Review rules\n- Never weaken ratchets.\n"), nil
-		case name == "git" && hasPRArgPrefix(args, "--no-pager", "-C", "/fixture/repo", "ls-tree", "2222222222222222222222222222222222222222", "--") && strings.Contains(args[len(args)-1], "/AGENTS.md"):
+		case name == "git" && matchesPRArgs(args, "--no-pager", "-C", "/fixture/repo", "ls-tree", "-r", "2222222222222222222222222222222222222222", "--"):
 			return nil, nil
 		default:
 			return nil, fmt.Errorf("unexpected command: %s %s", name, strings.Join(args, " "))
@@ -807,12 +807,13 @@ func TestAppendNestedPRAgentsUsesImmutableApplicableChain(t *testing.T) {
 			return nil, fmt.Errorf("unexpected command: %s %s", name, strings.Join(args, " "))
 		}
 		switch {
-		case matchesPRArgs(args, "--no-pager", "-C", "/repo", "ls-tree", "head-sha", "--", "src/AGENTS.md"):
-			return []byte("100644 blob aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\tsrc/AGENTS.md\n"), nil
+		case matchesPRArgs(args, "--no-pager", "-C", "/repo", "ls-tree", "-r", "head-sha", "--"):
+			return []byte(
+				"100644 blob aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\tsrc/AGENTS.md\n" +
+					"100644 blob bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\tsrc/deep/AGENTS.md\n",
+			), nil
 		case matchesPRArgs(args, "--no-pager", "-C", "/repo", "show", "head-sha:src/AGENTS.md"):
 			return []byte("src rules\n"), nil
-		case matchesPRArgs(args, "--no-pager", "-C", "/repo", "ls-tree", "head-sha", "--", "src/deep/AGENTS.md"):
-			return []byte("100644 blob bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\tsrc/deep/AGENTS.md\n"), nil
 		case matchesPRArgs(args, "--no-pager", "-C", "/repo", "show", "head-sha:src/deep/AGENTS.md"):
 			return []byte("deep rules\n"), nil
 		default:

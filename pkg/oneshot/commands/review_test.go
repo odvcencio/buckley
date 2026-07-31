@@ -2142,8 +2142,16 @@ func TestDetectBaseBranchPrefersRemoteTrackingBranch(t *testing.T) {
 	gitInCmd(t, dir, "add", "local.txt")
 	gitInCmd(t, dir, "commit", "-m", "move local main")
 
-	if got := detectBaseBranch(dir); got != "origin/main" {
+	got, gotCommit := detectBaseBranch(dir)
+	if got != "origin/main" {
 		t.Fatalf("detectBaseBranch() = %q, want origin/main", got)
+	}
+	wantCommit, err := resolveReviewCommit(dir, "origin/main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotCommit != wantCommit {
+		t.Fatalf("detectBaseBranch() commit = %q, want %q", gotCommit, wantCommit)
 	}
 }
 
@@ -2230,7 +2238,7 @@ func TestResolveBranchReviewBasePreservesLocalAheadAndExactRefs(t *testing.T) {
 	gitInCmd(t, dir, "commit", "-m", "local ahead")
 
 	for _, requested := range []string{"main", "refs/heads/main", "origin/main", "HEAD"} {
-		if got := resolveBranchReviewBase(dir, requested); got != requested {
+		if got, _ := resolveBranchReviewBase(dir, requested); got != requested {
 			t.Fatalf("resolveBranchReviewBase(%q) = %q, want exact request", requested, got)
 		}
 	}

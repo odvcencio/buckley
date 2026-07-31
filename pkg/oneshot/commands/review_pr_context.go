@@ -2618,6 +2618,15 @@ func appendNestedPRAgentsContext(ctx *PRContext, audit *transparency.ContextAudi
 		ctx.addStatus("Nested AGENTS.md", "missing", "no nested instruction scope applies to changed files", false)
 		return
 	}
+	// One bulk `git ls-tree -r` captures existence and mode for every path
+	// at the PR head; every candidate below is then an in-process map
+	// lookup instead of its own `git ls-tree` spawn, which was almost
+	// always a miss for deeply nested changed directories.
+	index, err := nestedPRHeadPathIndex(run, root, ctx.PR.HeadSHA)
+	if err != nil {
+		recordPRContextFailure(ctx, audit, "Nested AGENTS.md", err)
+		return
+	}
 	const aggregateLimit = 40_000
 	remaining := aggregateLimit
 	applicable := 0
@@ -2631,7 +2640,7 @@ func appendNestedPRAgentsContext(ctx *PRContext, audit *transparency.ContextAudi
 		if limit > remaining {
 			limit = remaining
 		}
-		content, truncated, err := readPRHeadFile(run, root, ctx.PR.HeadSHA, candidate, limit)
+		content, truncated, err := readPRHeadFileIndexed(run, root, ctx.PR.HeadSHA, index, candidate, limit)
 		if os.IsNotExist(err) {
 			continue
 		}
@@ -2681,6 +2690,54 @@ func nestedPRAgentsCandidates(files []string) []string {
 		return candidates[i] < candidates[j]
 	})
 	return candidates
+}
+
+// nestedPRHeadPathIndex captures, in one Git process, the mode of every
+// path at headSHA, so appendNestedPRAgentsContext can resolve each nested
+// AGENTS.md candidate's existence and symlink status with a map lookup
+// instead of a `git ls-tree` spawn per candidate.
+func nestedPRHeadPathIndex(run prCommandRunner, root, headSHA string) (map[string]string, error) {
+	output, err := run("git", "--no-pager", "-C", root, "ls-tree", "-r", headSHA, "--")
+	if err != nil {
+		return nil, err
+	}
+	index := make(map[string]string)
+	for _, line := range strings.Split(string(output), "\n") {
+		if line == "" {
+			continue
+		}
+		tab := strings.IndexByte(line, '\t')
+		if tab < 0 {
+			continue
+		}
+		fields := strings.Fields(line[:tab])
+		if len(fields) == 0 {
+			continue
+		}
+		index[path.Clean(line[tab+1:])] = fields[0]
+	}
+	return index, nil
+}
+
+// readPRHeadFileIndexed reads filePath at headSHA using a pre-built
+// path->mode index (see nestedPRHeadPathIndex) for the existence and
+// symlink checks, so a miss costs zero additional Git processes.
+func readPRHeadFileIndexed(run prCommandRunner, root, headSHA string, index map[string]string, filePath string, maxBytes int) (string, bool, error) {
+	mode, exists := index[filePath]
+	if !exists {
+		return "", false, os.ErrNotExist
+	}
+	if mode == "120000" {
+		return "", false, fmt.Errorf("refusing to follow tracked symlink %s at PR head %s", filePath, headSHA)
+	}
+	content, err := run("git", "--no-pager", "-C", root, "show", headSHA+":"+filePath)
+	if err != nil {
+		return "", false, err
+	}
+	if maxBytes >= 0 && len(content) > maxBytes {
+		return string(content[:maxBytes]), true, nil
+	}
+	return string(content), false, nil
 }
 
 func readPRHeadFile(run prCommandRunner, root, headSHA, path string, maxBytes int) (string, bool, error) {
