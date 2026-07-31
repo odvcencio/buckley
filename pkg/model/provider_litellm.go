@@ -1,8 +1,6 @@
 package model
 
 import (
-	"bufio"
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -19,6 +17,7 @@ type LiteLLMProvider struct {
 	baseURL      string
 	apiKey       string
 	httpClient   *http.Client
+	transport    *ProviderTransport
 	modelCache   []ModelInfo
 	cacheTTL     time.Duration
 	cacheTime    time.Time
@@ -37,6 +36,7 @@ func NewLiteLLMProvider(cfg config.LiteLLMConfig, networkLogsEnabled bool) *Lite
 		baseURL:      baseURL,
 		apiKey:       strings.TrimSpace(cfg.APIKey),
 		httpClient:   &http.Client{Timeout: defaultTimeout, Transport: transport},
+		transport:    NewProviderTransport(ProviderTransportOptions{}),
 		cacheTTL:     5 * time.Minute,
 		staticModels: cfg.Models,
 	}
@@ -264,96 +264,31 @@ func (p *LiteLLMProvider) buildStaticModels() []ModelInfo {
 	return models
 }
 
-func (p *LiteLLMProvider) invoke(ctx context.Context, req ChatRequest) (*ChatResponse, error) {
-	body, err := json.Marshal(req)
-	if err != nil {
-		return nil, fmt.Errorf("marshal request: %w", err)
-	}
-
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", p.baseURL+"/chat/completions", bytes.NewReader(body))
-	if err != nil {
-		return nil, fmt.Errorf("creating litellm chat request: %w", err)
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
+func (p *LiteLLMProvider) setAuthHeaders(req *http.Request) {
 	if p.apiKey != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+p.apiKey)
+		req.Header.Set("Authorization", "Bearer "+p.apiKey)
 	}
+}
 
-	resp, err := p.httpClient.Do(httpReq)
+func (p *LiteLLMProvider) invoke(ctx context.Context, req ChatRequest) (*ChatResponse, error) {
+	data, err := p.transport.Do(ctx, p.httpClient, "POST", p.baseURL+"/chat/completions", req, p.setAuthHeaders)
 	if err != nil {
-		return nil, fmt.Errorf("executing litellm chat request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("litellm chat failed (%d): %s", resp.StatusCode, string(body))
+		return nil, err
 	}
 
 	var chatResp ChatResponse
-	if err := json.NewDecoder(resp.Body).Decode(&chatResp); err != nil {
+	if err := json.Unmarshal(data, &chatResp); err != nil {
 		return nil, fmt.Errorf("decode response: %w", err)
 	}
 	return &chatResp, nil
 }
 
 func (p *LiteLLMProvider) invokeStream(ctx context.Context, req ChatRequest, chunkChan chan<- StreamChunk) error {
-	body, err := json.Marshal(req)
+	body, err := p.transport.DoStream(ctx, p.httpClient, "POST", p.baseURL+"/chat/completions", req, p.setAuthHeaders)
 	if err != nil {
-		return fmt.Errorf("marshal request: %w", err)
+		return err
 	}
+	defer body.Close()
 
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", p.baseURL+"/chat/completions", bytes.NewReader(body))
-	if err != nil {
-		return fmt.Errorf("creating litellm stream request: %w", err)
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Accept", "text/event-stream")
-	if p.apiKey != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+p.apiKey)
-	}
-
-	resp, err := p.httpClient.Do(httpReq)
-	if err != nil {
-		return fmt.Errorf("executing litellm stream request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("litellm streaming failed (%d): %s", resp.StatusCode, string(body))
-	}
-
-	scanner := bufio.NewScanner(resp.Body)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024) // 1MB max line
-	for scanner.Scan() {
-		select {
-		case <-ctx.Done():
-			return nil
-		default:
-		}
-
-		data := strings.TrimSpace(scanner.Text())
-		if data == "" || data == "data: [DONE]" {
-			continue
-		}
-		if strings.HasPrefix(data, "data: ") {
-			data = strings.TrimPrefix(data, "data: ")
-		}
-
-		var chunk StreamChunk
-		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
-			continue
-		}
-		select {
-		case chunkChan <- chunk:
-		case <-ctx.Done():
-			return ctx.Err()
-		}
-	}
-
-	if err := scanner.Err(); err != nil {
-		return fmt.Errorf("reading litellm stream: %w", err)
-	}
-	return nil
+	return ParseSSEStream(ctx, body, chunkChan)
 }

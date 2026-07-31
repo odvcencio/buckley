@@ -704,15 +704,13 @@ func (r *Runner) buildChatRequest() (model.ChatRequest, bool) {
 		Model:     modelID,
 		SessionID: r.sessionID,
 	}
-	if useContinuation {
-		// Skip ToEfficientModelMessages's independent compaction pass so an
-		// earlier, pin-unaware pass cannot strip reasoning from the region a
-		// continuation window represents; ProjectModelMessagesForRequestPinned
-		// below does the only compaction pass for this turn.
-		req.Messages = r.conv.ToModelMessages()
-	} else {
-		req.Messages = r.conv.ToEfficientModelMessages()
-	}
+	// Always use the full portable transcript here: ProjectModelMessagesForRequestPinned
+	// below does the only compaction pass for this turn.
+	// ToEfficientModelMessages's independent compaction pass would otherwise
+	// run first -- redundant work always, and unsafe when useContinuation is
+	// set because it is pin-unaware and could strip reasoning from the
+	// region a continuation window represents.
+	req.Messages = r.conv.ToModelMessages()
 	if r.tools != nil && r.modelManager != nil && r.modelManager.SupportsTools(modelID) {
 		req.Tools = r.tools.ToOpenAIFunctionsGoverned(r.evaluator, "interactive", "coding", nil, 0)
 		if len(req.Tools) > 0 {

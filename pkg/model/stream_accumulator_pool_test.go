@@ -1,6 +1,7 @@
 package model
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -57,6 +58,32 @@ func TestReleaseStreamAccumulator_Basic(t *testing.T) {
 func TestReleaseStreamAccumulator_Nil(t *testing.T) {
 	// Should not panic
 	ReleaseStreamAccumulator(nil)
+}
+
+// TestStreamAccumulator_ResetPreservesBufferCapacity proves Reset truncates
+// the content/reasoning buffers (buf[:0]) instead of discarding them, so
+// their allocated capacity survives across Acquire/Release cycles instead of
+// being reallocated from scratch on every reuse.
+func TestStreamAccumulator_ResetPreservesBufferCapacity(t *testing.T) {
+	a := &StreamAccumulator{}
+	large := strings.Repeat("x", 4096)
+	a.Add(StreamChunk{Choices: []StreamChoice{{Delta: MessageDelta{Content: large, Reasoning: large}}}})
+
+	contentCap := cap(a.content)
+	reasoningCap := cap(a.reasoning)
+	if contentCap < len(large) || reasoningCap < len(large) {
+		t.Fatalf("expected buffers to grow to fit content, content cap=%d reasoning cap=%d", contentCap, reasoningCap)
+	}
+
+	a.Reset()
+
+	if len(a.content) != 0 || len(a.reasoning) != 0 {
+		t.Fatalf("expected buffers to be empty after Reset, content len=%d reasoning len=%d", len(a.content), len(a.reasoning))
+	}
+	if cap(a.content) != contentCap || cap(a.reasoning) != reasoningCap {
+		t.Fatalf("expected Reset to preserve buffer capacity: content cap %d -> %d, reasoning cap %d -> %d",
+			contentCap, cap(a.content), reasoningCap, cap(a.reasoning))
+	}
 }
 
 func TestStreamAccumulator_PoolReuse(t *testing.T) {

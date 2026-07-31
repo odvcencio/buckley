@@ -734,8 +734,12 @@ func buildACPToolTurn(registry *tool.Registry, skillState *skill.RuntimeState, e
 
 func buildACPChatRequest(cfg *config.Config, mgr *model.Manager, engine *rules.Engine, conv *conversation.Conversation, modelID string, turn acpToolTurn) model.ChatRequest {
 	req := model.ChatRequest{
-		Model:     modelID,
-		Messages:  conv.ToEfficientModelMessages(),
+		Model: modelID,
+		// ToModelMessages returns the full portable transcript. Compaction
+		// runs once below via CompactModelMessagesForRequest -- an earlier
+		// ToEfficientModelMessages pass here would be a redundant compaction
+		// on top of that projection.
+		Messages:  conv.ToModelMessages(),
 		SessionID: conv.SessionID,
 	}
 	if turn.UseTools {

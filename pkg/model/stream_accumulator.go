@@ -8,8 +8,9 @@ import (
 	"unicode/utf8"
 )
 
-// streamAccumulatorPool provides memory-efficient recycling of StreamAccumulator
-// instances to reduce GC pressure during streaming operations.
+// streamAccumulatorPool recycles StreamAccumulator instances, including their
+// content/reasoning buffer capacity (see Reset), to reduce GC pressure during
+// streaming operations.
 var streamAccumulatorPool = sync.Pool{
 	New: func() any {
 		return &StreamAccumulator{}
@@ -36,8 +37,8 @@ func ReleaseStreamAccumulator(a *StreamAccumulator) {
 // It handles tool call delta accumulation following the OpenAI-compatible pattern
 // used by Kimi K2 and other models.
 type StreamAccumulator struct {
-	content          strings.Builder
-	reasoning        strings.Builder
+	content          []byte
+	reasoning        []byte
 	reasoningDetails []ReasoningDetail
 	toolCalls        []ToolCall
 	usage            *Usage
@@ -69,12 +70,12 @@ func (a *StreamAccumulator) Add(chunk StreamChunk) {
 
 	// Accumulate text content
 	if delta.Content != "" {
-		a.content.WriteString(delta.Content)
+		a.content = append(a.content, delta.Content...)
 	}
 
 	// Accumulate reasoning/thinking content
 	if delta.Reasoning != "" {
-		a.reasoning.WriteString(delta.Reasoning)
+		a.reasoning = append(a.reasoning, delta.Reasoning...)
 	}
 	if len(delta.ReasoningDetails) > 0 {
 		a.reasoningDetails = append(a.reasoningDetails, delta.ReasoningDetails...)
@@ -129,8 +130,8 @@ func (a *StreamAccumulator) accumulateToolCall(delta ToolCallDelta) {
 func (a *StreamAccumulator) Message() Message {
 	return Message{
 		Role:             a.role,
-		Content:          a.content.String(),
-		Reasoning:        NormalizeReasoningText(a.reasoning.String()),
+		Content:          string(a.content),
+		Reasoning:        NormalizeReasoningText(string(a.reasoning)),
 		ReasoningDetails: a.reasoningDetails,
 		ToolCalls:        a.toolCalls,
 	}
@@ -138,12 +139,12 @@ func (a *StreamAccumulator) Message() Message {
 
 // Content returns the accumulated text content.
 func (a *StreamAccumulator) Content() string {
-	return a.content.String()
+	return string(a.content)
 }
 
 // Reasoning returns the accumulated reasoning/thinking content.
 func (a *StreamAccumulator) Reasoning() string {
-	return NormalizeReasoningText(a.reasoning.String())
+	return NormalizeReasoningText(string(a.reasoning))
 }
 
 // NormalizeReasoningText removes provider chunk separators that occasionally
@@ -291,10 +292,13 @@ func (a *StreamAccumulator) Usage() *Usage {
 	return a.usage
 }
 
-// Reset clears the accumulator for reuse.
+// Reset clears the accumulator for reuse. The content and reasoning buffers
+// are truncated (buf[:0]), not replaced, so their backing arrays -- and
+// therefore their allocated capacity -- carry over to the next turn instead
+// of being discarded and reallocated from scratch.
 func (a *StreamAccumulator) Reset() {
-	a.content.Reset()
-	a.reasoning.Reset()
+	a.content = a.content[:0]
+	a.reasoning = a.reasoning[:0]
 	a.reasoningDetails = nil
 	a.toolCalls = nil
 	a.usage = nil
@@ -434,7 +438,7 @@ func extractFunctionName(toolCallID string) string {
 // were received. This handles models like Kimi K2 when the provider doesn't
 // parse the special tokens server-side.
 func (a *StreamAccumulator) FinalizeWithTokenParsing() Message {
-	content := a.content.String()
+	content := string(a.content)
 	toolCalls := a.toolCalls
 
 	// If no structured tool calls but content has special tokens, parse them
@@ -450,7 +454,7 @@ func (a *StreamAccumulator) FinalizeWithTokenParsing() Message {
 	return Message{
 		Role:             a.role,
 		Content:          content,
-		Reasoning:        NormalizeReasoningText(a.reasoning.String()),
+		Reasoning:        NormalizeReasoningText(string(a.reasoning)),
 		ReasoningDetails: a.reasoningDetails,
 		ToolCalls:        toolCalls,
 	}
