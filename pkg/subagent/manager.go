@@ -295,6 +295,12 @@ func (m *Manager) publish(eventType telemetry.EventType, snapshot Snapshot, errT
 		"pid":               snapshot.PID,
 		"provider":          "buckley",
 	}
+	if snapshot.Task != "" {
+		data["task"] = snapshot.Task
+	}
+	if snapshot.Output != "" {
+		data["output"] = boundedTelemetryOutput(snapshot.Output)
+	}
 	if snapshot.Spec != "" {
 		data["spec"] = snapshot.Spec
 	}
@@ -335,4 +341,17 @@ func boundedTask(task string) string {
 		return task
 	}
 	return task[:4093] + "..."
+}
+
+func boundedTelemetryOutput(output string) string {
+	const limit = 64 * 1024
+	output = strings.TrimSpace(output)
+	if len(output) <= limit {
+		return output
+	}
+	const marker = "\n... subagent telemetry truncated ...\n"
+	available := limit - len(marker)
+	head := available * 2 / 3
+	tail := available - head
+	return output[:head] + marker + output[len(output)-tail:]
 }

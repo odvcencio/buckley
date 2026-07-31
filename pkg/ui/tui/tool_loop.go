@@ -379,20 +379,9 @@ func (c *Controller) executeToolLoopCall(ctx context.Context, sess *SessionState
 		params[tool.ToolCallIDParam] = tc.ID
 	}
 
-	toolCtx := ctx
-	streamingShellOutput := tc.Function.Name == "run_shell"
-	if streamingShellOutput {
-		c.app.AppendToLastMessage("\n\n```text\n")
-		toolCtx = builtin.WithShellOutputSink(ctx, func(_ string, text string) {
-			c.app.AppendToLastMessage(text)
-		})
-	}
 	c.app.StartProcessStatus(fmt.Sprintf("Running %s (%d/%d) · Ctrl+C to interrupt", compactStatusText(tc.Function.Name, 36), index, total))
-	result, execErr := sess.ToolRegistry.ExecuteWithContext(toolCtx, tc.Function.Name, params)
+	result, execErr := sess.ToolRegistry.ExecuteWithContext(ctx, tc.Function.Name, params)
 	c.app.StopProcessStatus()
-	if streamingShellOutput {
-		c.app.AppendToLastMessage("\n```")
-	}
 	c.appendToolResultProgress(state, tc.Function.Name, result, execErr)
 	modelResult := formatToolResultForModel(result, execErr)
 	modelResult += stagnationNudge(state, tc, modelResult)
@@ -439,15 +428,7 @@ func (c *Controller) appendToolResultProgress(state *toolLoopState, name string,
 }
 
 func toolCallProgressBlock(tc model.ToolCall) string {
-	name := strings.TrimSpace(tc.Function.Name)
-	if name == "" {
-		name = "tool"
-	}
-	detail := compactToolArguments(tc.Function.Arguments, 600)
-	if detail == "" || detail == "{}" {
-		return "→ " + name
-	}
-	return "→ " + name + "\n\n" + detail
+	return "→ " + toolCallProgressSummary(tc)
 }
 
 func toolCallProgressSummary(tc model.ToolCall) string {
