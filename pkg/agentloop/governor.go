@@ -78,8 +78,8 @@ func (g *Governor) BeginRound() Decision {
 }
 
 // Observe records one completed tool action and detects repeated evidence or a
-// short action cycle. Arguments are canonicalized as JSON when possible so key
-// order and insignificant whitespace do not defeat detection.
+// short action/evidence cycle. Arguments and results are canonicalized as JSON
+// when possible so key order and insignificant whitespace do not defeat detection.
 func (g *Governor) Observe(name, arguments, result string, success bool) Decision {
 	if g == nil {
 		return Decision{}
@@ -98,7 +98,9 @@ func (g *Governor) Observe(name, arguments, result string, success bool) Decisio
 	g.toolCalls++
 	g.exactCounts[exactKey]++
 	g.outcomeCounts[outcomeKey]++
-	g.appendAction(actionKey)
+	// Cycle detection includes the result. Repeating a polling action while its
+	// evidence changes is progress; repeating the same action/evidence sequence is not.
+	g.appendAction(exactKey)
 
 	if g.toolCalls >= g.config.MaxToolCalls {
 		reason := fmt.Sprintf("tool loop reached the %d-call harness limit", g.config.MaxToolCalls)
@@ -112,7 +114,7 @@ func (g *Governor) Observe(name, arguments, result string, success bool) Decisio
 	}
 
 	if width, ok := repeatedSuffix(g.actionHistory, g.config.CycleMaxLength, g.config.CycleRepeats); ok {
-		reason := fmt.Sprintf("tool actions entered a repeating %d-step cycle", width)
+		reason := fmt.Sprintf("tool actions and evidence entered a repeating %d-step cycle", width)
 		return stopDecision("action_cycle", reason, g.config.CycleRepeats)
 	}
 
