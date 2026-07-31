@@ -192,6 +192,14 @@ func TestBranchReviewPromptRequiresProvedFalsificationForFindings(t *testing.T) 
 	}
 }
 
+func TestBranchReviewPromptDefinesNoneForEmptyFindings(t *testing.T) {
+	prompt := reviewBranchWithToolsDefault(time.Unix(0, 0))
+	findingsSection := prompt[strings.Index(prompt, "## Findings"):strings.Index(prompt, "## Remarks")]
+	if !strings.Contains(findingsSection, "`None.`") {
+		t.Fatalf("Findings section does not define `None.` for the empty case:\n%s", findingsSection)
+	}
+}
+
 func TestBranchReviewPromptDoesNotMandateBroadGoSweep(t *testing.T) {
 	prompt := reviewBranchWithToolsDefault(time.Unix(0, 0))
 	for _, forbidden := range []string{"Run 'go build ./...'", "Run 'go test ./...'"} {

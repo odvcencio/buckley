@@ -294,6 +294,7 @@ For each issue:
 - **Impact**: user/product/operational effect
 - **Fix**: smallest specific change
 Continue numbering. Omit speculative and style-only findings.
+If Falsification concludes DISPROVED or UNRESOLVED, or no defect is proved, write exactly `+"`"+`None.`+"`"+` and omit finding IDs from Blockers and Suggestions.
 
 ## Remarks
 Brief non-blocking observations, or "None."
