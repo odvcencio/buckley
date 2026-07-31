@@ -9,15 +9,17 @@ import (
 // ContextProjectionStats describes how durable conversation history was
 // projected into one provider request. Projection never mutates stored history.
 type ContextProjectionStats struct {
-	ContextWindow  int
-	BudgetTokens   int
-	OriginalTokens int
+	ContextWindow   int
+	BudgetTokens    int
+	OriginalTokens  int
 	ProjectedTokens int
-	MessagesBefore int
-	MessagesAfter  int
-	Compacted      bool
-	Emergency      bool
-	Scale          float64
+	OriginalBytes   int
+	ProjectedBytes  int
+	MessagesBefore  int
+	MessagesAfter   int
+	Compacted       bool
+	Emergency       bool
+	Scale           float64
 }
 
 // ProjectModelMessagesForRequest preserves full history while it fits within
@@ -33,6 +35,8 @@ func ProjectModelMessagesForRequest(messages []model.Message, req model.ChatRequ
 		ContextWindow:   contextWindow,
 		OriginalTokens:  originalEstimate.Total,
 		ProjectedTokens: originalEstimate.Total,
+		OriginalBytes:   modelMessagesBytes(messages),
+		ProjectedBytes:  modelMessagesBytes(messages),
 		MessagesBefore:  len(messages),
 		MessagesAfter:   len(messages),
 		Emergency:       scale < 0.999,
@@ -145,22 +149,12 @@ func finishProjectionStats(projected []model.Message, req model.ChatRequest, sta
 	projectedReq := req
 	projectedReq.Messages = projected
 	stats.ProjectedTokens = model.EstimateRequestTokens(projectedReq).Total
+	stats.ProjectedBytes = modelMessagesBytes(projected)
 	stats.MessagesAfter = len(projected)
 	stats.Compacted = stats.MessagesAfter != stats.MessagesBefore ||
-		modelMessagesBytes(projected) < modelMessagesBytes(reqMessagesForComparison(req, stats, projected)) ||
+		stats.ProjectedBytes < stats.OriginalBytes ||
 		stats.ProjectedTokens < stats.OriginalTokens
 	return projected, stats
-}
-
-// reqMessagesForComparison exists only to keep compaction detection independent
-// from token-estimator rounding. The original byte count is reconstructed from
-// stats by callers through OriginalTokens when req.Messages is unavailable, so
-// projected-token reduction remains the primary signal.
-func reqMessagesForComparison(_ model.ChatRequest, stats ContextProjectionStats, projected []model.Message) []model.Message {
-	if stats.ProjectedTokens < stats.OriginalTokens || stats.MessagesAfter != stats.MessagesBefore {
-		return make([]model.Message, len(projected)+1)
-	}
-	return projected
 }
 
 func cloneProjectionMessages(messages []model.Message) []model.Message {
