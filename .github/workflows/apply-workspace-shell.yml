@@ -12,6 +12,7 @@ jobs:
   apply:
     if: ${{ github.head_ref == 'agent/clickable-sidebar-activity' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
         with:
@@ -81,8 +82,8 @@ jobs:
             pkg/tool/telemetry_detail_test.go \
             pkg/subagent/manager.go
 
-      - name: Run Go tests
-        run: go test ./...
+      - name: Run repository Go tests
+        run: ./scripts/test.sh
 
       - name: Commit applied workspace shell
         run: |
