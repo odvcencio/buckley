@@ -413,6 +413,13 @@ type InputConfig struct {
 // DiagnosticsConfig controls diagnostic logging and debugging behavior.
 type DiagnosticsConfig struct {
 	NetworkLogsEnabled bool `yaml:"network_logs_enabled"`
+	// TelemetryPayloadsOverNetwork controls whether full tool call arguments
+	// and results are included in telemetry events sent over network
+	// transports (IPC WebSocket, ACP). Tool output can contain file
+	// contents and other sensitive data that key-name redaction can't
+	// protect, so this defaults to false; the in-process TUI always
+	// receives full payloads regardless of this setting.
+	TelemetryPayloadsOverNetwork bool `yaml:"telemetry_payloads_over_network"`
 }
 
 // TranscriptionConfig controls audio-to-text conversion

@@ -37,6 +37,7 @@ func (b *TelemetryUIBridge) handleToolActivity(event telemetry.Event, status wid
 	}
 	record.Detail = toolActivityDetail(event.Data)
 	b.activities[id] = record
+	b.evictCompletedActivities()
 }
 
 func (b *TelemetryUIBridge) handleSubagentActivity(event telemetry.Event) {
@@ -63,6 +64,80 @@ func (b *TelemetryUIBridge) handleSubagentActivity(event telemetry.Event) {
 	}
 	record.Detail = subagentActivityDetail(event.Data)
 	b.activities[id] = record
+	b.evictCompletedActivities()
+}
+
+// evictCompletedActivities bounds b.activities in place. collectActivities
+// already caps what it returns, but the backing map never shrank on its
+// own: every finished tool or subagent record (each carrying up to tens of
+// kilobytes of Detail) stayed resident for the life of the session. This
+// keeps all running records, plus the newest maxActivityEntries completed
+// ones, and deletes the rest.
+func (b *TelemetryUIBridge) evictCompletedActivities() {
+	var completed []widgets.ActivityRecord
+	for _, record := range b.activities {
+		if record.Status != widgets.ActivityRunning {
+			completed = append(completed, record)
+		}
+	}
+	if len(completed) <= maxActivityEntries {
+		return
+	}
+	sort.Slice(completed, func(i, j int) bool {
+		return activityRecency(completed[i]).After(activityRecency(completed[j]))
+	})
+	for _, record := range completed[maxActivityEntries:] {
+		delete(b.activities, record.ID)
+	}
+}
+
+// AppendActivityOutput streams incremental shell output into the Detail of
+// the running activity identified by taskID, creating a running placeholder
+// record if the tool.started event has not arrived yet. It is safe to call
+// from any goroutine: the shared activities map is guarded by b.mu, and the
+// resulting inspector update flows through WidgetApp.Post (see
+// applySetActivities) so the widget tree is only mutated on the UI
+// goroutine. The appended text is already bounded by the shell tool's own
+// per-stream progress cap (builtin.maxShellProgressBytes via
+// WithShellOutputSink), so no further truncation happens here.
+func (b *TelemetryUIBridge) AppendActivityOutput(taskID, text string) {
+	if b == nil {
+		return
+	}
+	taskID = strings.TrimSpace(taskID)
+	if taskID == "" || text == "" {
+		return
+	}
+
+	b.mu.Lock()
+	record, ok := b.activities[taskID]
+	if !ok {
+		record = widgets.ActivityRecord{
+			ID:        taskID,
+			Kind:      "tool",
+			Title:     "run_shell",
+			Status:    widgets.ActivityRunning,
+			StartedAt: time.Now(),
+		}
+	}
+	record.Detail += text
+	b.activities[taskID] = record
+	var records []widgets.ActivityRecord
+	if b.app != nil {
+		records = b.collectActivities()
+	}
+	b.mu.Unlock()
+
+	if b.app != nil {
+		b.app.SetActivities(records)
+	}
+}
+
+func activityRecency(record widgets.ActivityRecord) time.Time {
+	if !record.FinishedAt.IsZero() {
+		return record.FinishedAt
+	}
+	return record.StartedAt
 }
 
 func activityFallbackID(event telemetry.Event) string {

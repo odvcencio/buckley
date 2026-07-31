@@ -16,6 +16,10 @@ import (
 const (
 	DefaultMaxConcurrent = 4
 	maxCapturedOutput    = 256 * 1024
+	// maxTaskTelemetryBytes matches boundedTask's snapshot-level bound so the
+	// telemetry copy of a task description is never larger than the
+	// snapshot value it was derived from.
+	maxTaskTelemetryBytes = 4096
 )
 
 type State string
@@ -296,10 +300,10 @@ func (m *Manager) publish(eventType telemetry.EventType, snapshot Snapshot, errT
 		"provider":          "buckley",
 	}
 	if snapshot.Task != "" {
-		data["task"] = snapshot.Task
+		data["task"] = telemetry.SanitizeText(snapshot.Task, maxTaskTelemetryBytes)
 	}
 	if snapshot.Output != "" {
-		data["output"] = boundedTelemetryOutput(snapshot.Output)
+		data["output"] = telemetry.SanitizeText(snapshot.Output, telemetry.MaxResultBytes)
 	}
 	if snapshot.Spec != "" {
 		data["spec"] = snapshot.Spec
@@ -341,17 +345,4 @@ func boundedTask(task string) string {
 		return task
 	}
 	return task[:4093] + "..."
-}
-
-func boundedTelemetryOutput(output string) string {
-	const limit = 64 * 1024
-	output = strings.TrimSpace(output)
-	if len(output) <= limit {
-		return output
-	}
-	const marker = "\n... subagent telemetry truncated ...\n"
-	available := limit - len(marker)
-	head := available * 2 / 3
-	tail := available - head
-	return output[:head] + marker + output[len(output)-tail:]
 }

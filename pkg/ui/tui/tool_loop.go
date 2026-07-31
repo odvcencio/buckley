@@ -422,13 +422,31 @@ func (c *Controller) executeToolLoopCall(ctx context.Context, sess *SessionState
 		params[tool.ToolCallIDParam] = tc.ID
 	}
 
+	toolCtx := c.withShellOutputStreaming(ctx, tc)
+
 	c.app.StartProcessStatus(fmt.Sprintf("Running %s (%d/%d) · Ctrl+C to interrupt", compactStatusText(tc.Function.Name, 36), index, total))
-	result, execErr := sess.ToolRegistry.ExecuteWithContext(ctx, tc.Function.Name, params)
+	result, execErr := sess.ToolRegistry.ExecuteWithContext(toolCtx, tc.Function.Name, params)
 	c.app.StopProcessStatus()
 	c.appendToolResultProgress(state, tc.Function.Name, result, execErr)
 	modelResult := formatToolResultForModel(result, execErr)
 	modelResult += applyToolLoopGuard(state, tc, result, execErr, modelResult)
 	c.addToolLoopResponse(sess, tc, modelResult)
+}
+
+// withShellOutputStreaming attaches a shell output sink for run_shell calls
+// so a long-running command's stdout/stderr streams live into the
+// inspector's activity Detail instead of only appearing once the command
+// exits. The transcript keeps its compact single-line progress summary;
+// only the inspector receives the incremental output. Non-shell tools get
+// ctx unchanged.
+func (c *Controller) withShellOutputStreaming(ctx context.Context, tc model.ToolCall) context.Context {
+	if c == nil || c.telemetryBridge == nil || tc.Function.Name != "run_shell" || tc.ID == "" {
+		return ctx
+	}
+	taskID := tc.ID
+	return builtin.WithShellOutputSink(ctx, func(_ string, text string) {
+		c.telemetryBridge.AppendActivityOutput(taskID, text)
+	})
 }
 
 func (c *Controller) addToolLoopResponse(sess *SessionState, tc model.ToolCall, text string) {

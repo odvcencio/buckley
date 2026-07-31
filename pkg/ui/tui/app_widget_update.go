@@ -42,6 +42,9 @@ func (a *WidgetApp) update(msg Message) bool {
 	case ModelPickerMsg:
 		a.showModelPicker(m.Items, m.OnSelect)
 		return true
+	case SetActivitiesMsg:
+		a.applySetActivities(m.Records)
+		return true
 	case RefreshMsg:
 		return true
 	case QuitMsg:

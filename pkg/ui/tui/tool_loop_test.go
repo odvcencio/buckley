@@ -1,12 +1,14 @@
 package tui
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"testing"
 
 	"m31labs.dev/buckley/v2/pkg/conversation"
 	"m31labs.dev/buckley/v2/pkg/model"
+	"m31labs.dev/buckley/v2/pkg/telemetry"
 	"m31labs.dev/buckley/v2/pkg/tool"
 	"m31labs.dev/buckley/v2/pkg/tool/builtin"
 	"m31labs.dev/fluffyui/backend/sim"
@@ -144,5 +146,58 @@ func TestToolProgressSummariesIncludeIntentAndFailureReason(t *testing.T) {
 	got := toolResultProgressSummary("run_shell", result, nil)
 	if !strings.Contains(got, "compile error: missing symbol") || !strings.Contains(got, "command exited with code 1") {
 		t.Fatalf("tool result summary omitted failure reason: %q", got)
+	}
+}
+
+func TestExecuteToolLoopCallStreamsShellOutputIntoInspector(t *testing.T) {
+	app, err := NewWidgetApp(WidgetAppConfig{Backend: sim.New(80, 24)})
+	if err != nil {
+		t.Fatalf("NewWidgetApp: %v", err)
+	}
+	hub := telemetry.NewHub()
+	defer hub.Close()
+	bridge := NewTelemetryUIBridge(hub, app)
+	ctrl := &Controller{app: app, telemetryBridge: bridge}
+
+	registry := tool.NewRegistry(tool.WithBuiltinFilter(func(current tool.Tool) bool {
+		return current.Name() == "run_shell"
+	}))
+	conv := conversation.New("session-1")
+	sess := &SessionState{ID: "session-1", Conversation: conv, ToolRegistry: registry}
+
+	tc := model.ToolCall{
+		ID: "call-1",
+		Function: model.FunctionCall{
+			Name:      "run_shell",
+			Arguments: `{"command":"printf 'stream test output'"}`,
+		},
+	}
+	ctrl.executeToolLoopCall(context.Background(), sess, tc, 1, 1, nil, &toolLoopState{})
+
+	record, ok := bridge.activities["call-1"]
+	if !ok || !strings.Contains(record.Detail, "stream test output") {
+		t.Fatalf("expected shell output streamed into inspector detail for call-1, got %+v (ok=%v)", record, ok)
+	}
+}
+
+func TestWithShellOutputStreamingLeavesOtherToolsUnaffected(t *testing.T) {
+	app, err := NewWidgetApp(WidgetAppConfig{Backend: sim.New(80, 24)})
+	if err != nil {
+		t.Fatalf("NewWidgetApp: %v", err)
+	}
+	hub := telemetry.NewHub()
+	defer hub.Close()
+	ctrl := &Controller{app: app, telemetryBridge: NewTelemetryUIBridge(hub, app)}
+
+	ctx := context.Background()
+	tc := model.ToolCall{ID: "call-2", Function: model.FunctionCall{Name: "read_file"}}
+	if got := ctrl.withShellOutputStreaming(ctx, tc); got != ctx {
+		t.Fatal("non-shell tool calls should not get a shell output sink attached")
+	}
+
+	ctrl.telemetryBridge = nil
+	shellCall := model.ToolCall{ID: "call-3", Function: model.FunctionCall{Name: "run_shell"}}
+	if got := ctrl.withShellOutputStreaming(ctx, shellCall); got != ctx {
+		t.Fatal("without a telemetry bridge, ctx should be returned unchanged")
 	}
 }

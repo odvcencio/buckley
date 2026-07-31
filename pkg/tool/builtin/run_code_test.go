@@ -30,6 +30,22 @@ func TestDynamicCodeCommandEncodesSourceAndEscapesArguments(t *testing.T) {
 	}
 }
 
+// TestDynamicCodeCommandGoUsesPrivateMktempDir guards against the go
+// snippet path writing to a predictable ${TMPDIR}/buckley-code-$$.go name,
+// which a pre-existing symlink at that path could redirect.
+func TestDynamicCodeCommandGoUsesPrivateMktempDir(t *testing.T) {
+	command, err := dynamicCodeCommand("go", "package main\nfunc main(){}", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(command, "mktemp -d") {
+		t.Fatalf("expected go snippet command to use mktemp -d: %q", command)
+	}
+	if strings.Contains(command, "buckley-code-$$.go") {
+		t.Fatalf("go snippet command still uses a predictable path: %q", command)
+	}
+}
+
 func TestDynamicCodeArgsRejectsNonStrings(t *testing.T) {
 	if _, err := dynamicCodeArgs([]any{"ok", 42}); err == nil {
 		t.Fatal("expected non-string argument error")

@@ -13,6 +13,12 @@ type MachineBridge struct {
 	agent     *Agent
 	sessionID string
 
+	// allowFullPayloads controls whether full tool call arguments/results
+	// riding along on telemetry events are forwarded to the (network) ACP
+	// client. Defaults to false: key-name redaction can't protect file
+	// contents or other unstructured tool output in those fields.
+	allowFullPayloads bool
+
 	mu     sync.Mutex
 	closed bool
 	unsub  func()
@@ -20,11 +26,14 @@ type MachineBridge struct {
 }
 
 // NewMachineBridge creates a bridge that forwards machine events from the Hub
-// to the ACP client as session/update notifications.
-func NewMachineBridge(agent *Agent, hub *telemetry.Hub, sessionID string) *MachineBridge {
+// to the ACP client as session/update notifications. allowFullPayloads must
+// be false unless the operator has explicitly opted in to full tool
+// arguments/results leaving the process over this transport.
+func NewMachineBridge(agent *Agent, hub *telemetry.Hub, sessionID string, allowFullPayloads bool) *MachineBridge {
 	b := &MachineBridge{
-		agent:     agent,
-		sessionID: sessionID,
+		agent:             agent,
+		sessionID:         sessionID,
+		allowFullPayloads: allowFullPayloads,
 	}
 
 	ch, unsub := hub.Subscribe()
@@ -60,6 +69,7 @@ func (b *MachineBridge) run(ch <-chan telemetry.Event) {
 			return
 		}
 
+		evt = b.prepareEvent(evt)
 		update, ok := b.translate(evt)
 		if !ok {
 			continue
@@ -75,6 +85,17 @@ func (b *MachineBridge) run(ch <-chan telemetry.Event) {
 			})
 		}
 	}
+}
+
+// prepareEvent applies network payload gating before further processing.
+// translate() doesn't currently read the arguments/result fields for any
+// event type, but this keeps the bridge safe by construction if a future
+// translate() case starts surfacing tool payload data to the ACP client.
+func (b *MachineBridge) prepareEvent(evt telemetry.Event) telemetry.Event {
+	if !b.allowFullPayloads {
+		return telemetry.StripToolPayloads(evt)
+	}
+	return evt
 }
 
 func (b *MachineBridge) translate(evt telemetry.Event) (SessionUpdate, bool) {

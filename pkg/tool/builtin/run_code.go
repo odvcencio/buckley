@@ -180,7 +180,10 @@ func dynamicCodeCommand(language, code string, args []string) (string, error) {
 	case "bash":
 		return encodedInput + " | bash -s --" + argumentText, nil
 	case "go":
-		return "runner=\"$(command -v go)\" || { echo 'go toolchain not found' >&2; exit 127; }; tmp=\"${TMPDIR:-/tmp}/buckley-code-$$.go\"; trap 'rm -f \"$tmp\"' EXIT; " + encodedInput + " > \"$tmp\"; \"$runner\" run \"$tmp\"" + argumentText, nil
+		// mktemp -d creates a fresh, unpredictably-named, private (0700)
+		// directory instead of a guessable ${TMPDIR}/buckley-code-$$.go path,
+		// so a pre-existing symlink at that path can't redirect the write.
+		return "runner=\"$(command -v go)\" || { echo 'go toolchain not found' >&2; exit 127; }; dir=\"$(mktemp -d \"${TMPDIR:-/tmp}/buckley-code.XXXXXX\")\" || { echo 'failed to create secure temp directory' >&2; exit 1; }; trap 'rm -rf \"$dir\"' EXIT; " + encodedInput + " > \"$dir/main.go\"; \"$runner\" run \"$dir/main.go\"" + argumentText, nil
 	default:
 		return "", fmt.Errorf("unsupported dynamic-code language")
 	}

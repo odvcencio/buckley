@@ -37,6 +37,11 @@ func TestCategorizeToolCall(t *testing.T) {
 			expected: CategoryShell,
 		},
 		{
+			name:     "run code",
+			call:     ToolCall{Name: "run_code"},
+			expected: CategoryShell,
+		},
+		{
 			name:     "git status",
 			call:     ToolCall{Name: "git_status"},
 			expected: CategoryGit,

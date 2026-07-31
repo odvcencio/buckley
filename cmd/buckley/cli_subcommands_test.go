@@ -1268,6 +1268,19 @@ func TestResolveOneShotToolFilterRespectsAgentTierAndDeny(t *testing.T) {
 	}
 }
 
+// TestToolsForTierExcludesRunCodeFromReadOnly guards against run_code (which
+// executes arbitrary Python/JS/Go/Bash) reappearing in the read_only tool
+// tier because metadata inference doesn't recognize its name.
+func TestToolsForTierExcludesRunCodeFromReadOnly(t *testing.T) {
+	registry := tool.NewRegistry()
+	allowed := toolsForTier(registry, "read_only")
+	for _, name := range allowed {
+		if name == "run_code" || name == "run_shell" {
+			t.Fatalf("read_only tier unexpectedly allows %q: %v", name, allowed)
+		}
+	}
+}
+
 type metadataTool struct {
 	name     string
 	metadata tool.ToolMetadata

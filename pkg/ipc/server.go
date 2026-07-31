@@ -2184,12 +2184,23 @@ func (s *Server) broadcastTelemetry(event telemetry.Event) {
 	if event.Timestamp.IsZero() {
 		event.Timestamp = time.Now()
 	}
+	if !s.allowFullTelemetryPayloads() {
+		event = telemetry.StripToolPayloads(event)
+	}
 	s.hub.Broadcast(Event{
 		Type:      fmt.Sprintf("telemetry.%s", event.Type),
 		SessionID: event.SessionID,
 		Payload:   event,
 		Timestamp: event.Timestamp,
 	})
+}
+
+// allowFullTelemetryPayloads reports whether full tool call arguments and
+// results may leave the process over this network transport. Defaults to
+// false: key-name redaction can't protect file contents or other
+// unstructured tool output that riders along in these fields.
+func (s *Server) allowFullTelemetryPayloads() bool {
+	return s.appConfig != nil && s.appConfig.Diagnostics.TelemetryPayloadsOverNetwork
 }
 
 func (s *Server) broadcastViewPatch(sessionID string) {

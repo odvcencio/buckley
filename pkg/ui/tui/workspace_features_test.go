@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -22,16 +23,36 @@ func TestResolveWorkspaceVisibilityPrioritizesChat(t *testing.T) {
 	if narrow.left || narrow.right {
 		t.Fatalf("narrow visibility = %+v, want chat only", narrow)
 	}
+	regained := resolveWorkspaceVisibility(90, true, true, 44, 26)
+	if regained.left || !regained.right {
+		t.Fatalf("regained visibility = %+v, want inspector alone once the navigator collapses", regained)
+	}
+}
+
+// drainPostedMessage applies the next message SetActivities (or any other
+// Post-based call) queued on the UI event channel. SetActivities is
+// thread-safe via message passing, like AddMessage, so tests that call it
+// outside the running event loop must pump the queue themselves.
+func drainPostedMessage(t *testing.T, app *WidgetApp) {
+	t.Helper()
+	select {
+	case msg := <-app.messages:
+		app.update(msg)
+	default:
+		t.Fatal("expected a message to be queued")
+	}
 }
 
 func TestSetActivitiesAutoOpensInspectorOnce(t *testing.T) {
 	app := newKeyTestWidgetApp(t, WidgetAppConfig{})
 	app.SetActivities([]widgets.ActivityRecord{{ID: "one", Title: "read_file", Status: widgets.ActivityRunning}})
+	drainPostedMessage(t, app)
 	if !app.activityPanelWanted || !app.IsActivityPanelVisible() {
 		t.Fatal("first activity should open inspector in a wide terminal")
 	}
 	app.SetActivityPanelVisible(false)
 	app.SetActivities([]widgets.ActivityRecord{{ID: "two", Title: "write_file", Status: widgets.ActivityRunning}})
+	drainPostedMessage(t, app)
 	if app.IsActivityPanelVisible() {
 		t.Fatal("explicitly hidden inspector should stay hidden")
 	}
@@ -73,5 +94,74 @@ func TestTelemetryBridgeCapturesSubagentOutput(t *testing.T) {
 	record := bridge.activities["agent-1"]
 	if record.Title != "agent:reviewer" || !strings.Contains(record.Detail, "found two issues") {
 		t.Fatalf("unexpected subagent activity: %+v", record)
+	}
+}
+
+func TestTelemetryBridgeStreamsShellOutputIntoRunningDetail(t *testing.T) {
+	hub := telemetry.NewHub()
+	defer hub.Close()
+	bridge := NewTelemetryUIBridge(hub, nil)
+	bridge.handleEvent(telemetry.Event{Type: telemetry.EventToolStarted, TaskID: "shell-1", Data: map[string]any{
+		"toolName": "run_shell", "command": "go build ./...",
+	}})
+
+	// Simulate a shell sink emitting bounded chunks as a long build runs.
+	bridge.AppendActivityOutput("shell-1", "compiling pkg/a\n")
+	afterFirst := bridge.activities["shell-1"].Detail
+	bridge.AppendActivityOutput("shell-1", "compiling pkg/b\n")
+	afterSecond := bridge.activities["shell-1"].Detail
+
+	if len(afterSecond) <= len(afterFirst) {
+		t.Fatalf("detail did not grow incrementally: first=%q second=%q", afterFirst, afterSecond)
+	}
+	if !strings.Contains(afterSecond, "compiling pkg/a") || !strings.Contains(afterSecond, "compiling pkg/b") {
+		t.Fatalf("detail missing streamed chunks: %q", afterSecond)
+	}
+	if bridge.activities["shell-1"].Status != widgets.ActivityRunning {
+		t.Fatalf("streamed record should still be running, got %s", bridge.activities["shell-1"].Status)
+	}
+}
+
+func TestTelemetryBridgeAppendActivityOutputCreatesPlaceholderRecord(t *testing.T) {
+	hub := telemetry.NewHub()
+	defer hub.Close()
+	bridge := NewTelemetryUIBridge(hub, nil)
+
+	// The sink can fire before tool.started arrives; the inspector should
+	// still show a running placeholder rather than dropping the output.
+	bridge.AppendActivityOutput("shell-2", "first line\n")
+	record, ok := bridge.activities["shell-2"]
+	if !ok || record.Status != widgets.ActivityRunning || !strings.Contains(record.Detail, "first line") {
+		t.Fatalf("expected running placeholder with streamed output, got %+v (ok=%v)", record, ok)
+	}
+}
+
+func TestTelemetryBridgeEvictsOldCompletedActivities(t *testing.T) {
+	hub := telemetry.NewHub()
+	defer hub.Close()
+	bridge := NewTelemetryUIBridge(hub, nil)
+
+	for i := 0; i < 500; i++ {
+		taskID := fmt.Sprintf("tool-%d", i)
+		bridge.handleEvent(telemetry.Event{
+			Type:      telemetry.EventToolCompleted,
+			TaskID:    taskID,
+			Timestamp: time.Now().Add(time.Duration(i) * time.Millisecond),
+			Data:      map[string]any{"toolName": "read_file", "result": strings.Repeat("x", 1024)},
+		})
+	}
+	bridge.handleEvent(telemetry.Event{Type: telemetry.EventToolStarted, TaskID: "running-1", Data: map[string]any{"toolName": "run_shell"}})
+
+	runningCount := 0
+	for _, record := range bridge.activities {
+		if record.Status == widgets.ActivityRunning {
+			runningCount++
+		}
+	}
+	if len(bridge.activities) > maxActivityEntries+runningCount {
+		t.Fatalf("activities map not evicted: len=%d, want <= %d", len(bridge.activities), maxActivityEntries+runningCount)
+	}
+	if runningCount != 1 {
+		t.Fatalf("expected the running record to survive eviction, got %d running", runningCount)
 	}
 }

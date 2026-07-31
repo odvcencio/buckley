@@ -187,4 +187,7 @@ func mergeDiagnosticsConfig(base, override *Config, raw map[string]any) {
 	if boolFieldSet(raw, "diagnostics", "network_logs_enabled") {
 		base.Diagnostics.NetworkLogsEnabled = override.Diagnostics.NetworkLogsEnabled
 	}
+	if boolFieldSet(raw, "diagnostics", "telemetry_payloads_over_network") {
+		base.Diagnostics.TelemetryPayloadsOverNetwork = override.Diagnostics.TelemetryPayloadsOverNetwork
+	}
 }

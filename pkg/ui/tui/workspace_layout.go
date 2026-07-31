@@ -31,6 +31,10 @@ func resolveWorkspaceVisibility(screenWidth int, leftWanted, rightWanted bool, l
 	}
 	if visibility.left && screenWidth-leftWidth < minWorkspaceChatWidth {
 		visibility.left = false
+		// The navigator just freed its width. Give the inspector another
+		// chance against the wider chat area instead of leaving it hidden
+		// from the combined check above.
+		visibility.right = rightWanted
 	}
 	if visibility.right && screenWidth-rightWidth < minWorkspaceChatWidth {
 		visibility.right = false
@@ -138,7 +142,21 @@ func clampWorkspacePanel(value, minimum, maximum int) int {
 // SetActivities updates the persistent inspector. The first inspectable event
 // opens the panel automatically; once the user explicitly toggles it, that
 // preference is respected for the remainder of the session.
+//
+// Telemetry delivers activity updates from its own forwarding goroutine, so
+// this posts a message rather than mutating the widget tree directly. That
+// keeps every mutation of a.activityPanel and the workspace layout on the UI
+// goroutine, matching how AddMessage is made safe to call from any goroutine.
 func (a *WidgetApp) SetActivities(records []widgets.ActivityRecord) {
+	if a == nil {
+		return
+	}
+	a.Post(SetActivitiesMsg{Records: records})
+}
+
+// applySetActivities performs the actual inspector mutation. Callers must
+// already be on the UI goroutine (via the message loop) or before Run starts.
+func (a *WidgetApp) applySetActivities(records []widgets.ActivityRecord) {
 	if a == nil || a.activityPanel == nil {
 		return
 	}

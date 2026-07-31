@@ -5,12 +5,17 @@ import (
 	"fmt"
 	"strings"
 
+	"m31labs.dev/buckley/v2/pkg/telemetry"
 	"m31labs.dev/buckley/v2/pkg/tool/builtin"
 )
 
+// maxTelemetryArgumentsBytes and maxTelemetryResultBytes are aliases for the
+// shared limits in pkg/telemetry, kept so existing call sites and tests in
+// this package don't need to know about the shared package's constant
+// names.
 const (
-	maxTelemetryArgumentsBytes = 16 * 1024
-	maxTelemetryResultBytes    = 64 * 1024
+	maxTelemetryArgumentsBytes = telemetry.MaxArgumentBytes
+	maxTelemetryResultBytes    = telemetry.MaxResultBytes
 )
 
 func withTelemetryArguments(metadata map[string]any, params map[string]any) map[string]any {
@@ -18,9 +23,29 @@ func withTelemetryArguments(metadata map[string]any, params map[string]any) map[
 	for key, value := range metadata {
 		out[key] = value
 	}
-	clean := sanitizeTelemetryValue(params, "")
+	clean := telemetry.NormalizeAndSanitize(stripToolCallID(params), maxTelemetryArgumentsBytes)
 	if encoded, err := json.MarshalIndent(clean, "", "  "); err == nil {
-		out["arguments"] = boundTelemetryText(string(encoded), maxTelemetryArgumentsBytes, "tool arguments")
+		out["arguments"] = telemetry.BoundText(string(encoded), maxTelemetryArgumentsBytes, "tool arguments")
+	}
+	return out
+}
+
+// stripToolCallID returns a shallow copy of params without the internal
+// tool-call-ID bookkeeping field, which callers inject at the top level and
+// which has no business appearing in telemetry.
+func stripToolCallID(params map[string]any) map[string]any {
+	if params == nil {
+		return nil
+	}
+	if _, ok := params[ToolCallIDParam]; !ok {
+		return params
+	}
+	out := make(map[string]any, len(params))
+	for key, value := range params {
+		if key == ToolCallIDParam {
+			continue
+		}
+		out[key] = value
 	}
 	return out
 }
@@ -51,72 +76,10 @@ func telemetryResultDetail(result *builtin.Result) string {
 			"unified_diff":  result.DiffPreview.UnifiedDiff,
 		}
 	}
-	clean := sanitizeTelemetryValue(payload, "")
+	clean := telemetry.NormalizeAndSanitize(payload, maxTelemetryResultBytes)
 	encoded, err := json.MarshalIndent(clean, "", "  ")
 	if err != nil {
-		return boundTelemetryText(fmt.Sprintf("success=%t error=%q", result.Success, result.Error), maxTelemetryResultBytes, "tool result")
+		return telemetry.BoundText(fmt.Sprintf("success=%t error=%q", result.Success, result.Error), maxTelemetryResultBytes, "tool result")
 	}
-	return boundTelemetryText(string(encoded), maxTelemetryResultBytes, "tool result")
-}
-
-func sanitizeTelemetryValue(value any, key string) any {
-	if sensitiveTelemetryKey(key) {
-		return "[REDACTED]"
-	}
-	switch typed := value.(type) {
-	case map[string]any:
-		out := make(map[string]any, len(typed))
-		for childKey, childValue := range typed {
-			if childKey == ToolCallIDParam {
-				continue
-			}
-			out[childKey] = sanitizeTelemetryValue(childValue, childKey)
-		}
-		return out
-	case []any:
-		out := make([]any, len(typed))
-		for i := range typed {
-			out[i] = sanitizeTelemetryValue(typed[i], key)
-		}
-		return out
-	case []string:
-		out := make([]string, len(typed))
-		copy(out, typed)
-		return out
-	case string:
-		return boundTelemetryText(typed, maxTelemetryResultBytes, "value")
-	default:
-		return typed
-	}
-}
-
-func sensitiveTelemetryKey(key string) bool {
-	key = strings.ToLower(strings.TrimSpace(key))
-	if key == "" {
-		return false
-	}
-	for _, fragment := range []string{
-		"password", "passwd", "secret", "token", "api_key", "apikey",
-		"authorization", "credential", "cookie", "private_key", "access_key",
-	} {
-		if strings.Contains(key, fragment) {
-			return true
-		}
-	}
-	return false
-}
-
-func boundTelemetryText(content string, limit int, label string) string {
-	content = strings.TrimSpace(content)
-	if limit <= 0 || len(content) <= limit {
-		return content
-	}
-	marker := fmt.Sprintf("\n... %s truncated (%d bytes omitted) ...\n", label, len(content)-limit)
-	if len(marker) >= limit {
-		return marker[:limit]
-	}
-	available := limit - len(marker)
-	head := available * 2 / 3
-	tail := available - head
-	return content[:head] + marker + content[len(content)-tail:]
+	return telemetry.BoundText(string(encoded), maxTelemetryResultBytes, "tool result")
 }
