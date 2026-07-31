@@ -21,6 +21,21 @@ func mergeMemoryConfig(base, override *Config, raw map[string]any) {
 	if override.Memory.RetrievalMaxTokens != 0 {
 		base.Memory.RetrievalMaxTokens = override.Memory.RetrievalMaxTokens
 	}
+	if boolFieldSet(raw, "memory", "ralph_compatibility") {
+		base.Memory.RalphCompatibility = override.Memory.RalphCompatibility
+	}
+	if boolFieldSet(raw, "memory", "hyphae_recall") {
+		base.Memory.HyphaeRecall = override.Memory.HyphaeRecall
+	}
+	if boolFieldSet(raw, "memory", "hyphae_promotion") {
+		base.Memory.HyphaePromotion = override.Memory.HyphaePromotion
+	}
+	if boolFieldSet(raw, "memory", "tiller_interchange") {
+		base.Memory.TillerInterchange = override.Memory.TillerInterchange
+	}
+	if boolFieldSet(raw, "memory", "graft_vcs") {
+		base.Memory.GraftVCS = override.Memory.GraftVCS
+	}
 }
 
 func mergeOrchestratorConfig(base, override *Config, raw map[string]any) {

@@ -1,0 +1,681 @@
+# Curated agent evaluation corpus (M31 Context Fabric spec, section 31).
+#
+# Every scenario records acceptance criteria, expected evidence, and allowed
+# nondeterminism, per the spec's evaluation-corpus requirement. Scenarios
+# that carry a `fixture` block are synthesized deterministically (from the
+# declared seed and turn shape) by benchmarks/ctxfabric into a
+# model.ChatRequest and measured by the PR 0 baseline benchmark. Scenarios
+# with `fixture: null` describe future behavior (dynamic controller, model
+# switching, adapter degradation) that PR 0 does not implement yet; they are
+# recorded now so later PRs measure against a pre-agreed acceptance bar
+# instead of an invented one.
+version: 1
+scenarios:
+  - id: explore-unknown-repository
+    category: exploration
+    name: Explore unknown repository
+    description: >-
+      Agent is dropped into a repository it has never seen and must build a
+      working mental model before making any change.
+    acceptance_criteria:
+      - Agent identifies the primary language and entry point.
+      - Agent does not call an edit or write tool during exploration.
+    expected_evidence:
+      - Directory-listing and file-read tool calls in the transcript.
+      - No write or patch tool calls before the first user-visible summary.
+    allowed_nondeterminism:
+      - Traversal order of directories and files.
+      - Exact file count read before the agent forms a summary.
+    fixture:
+      seed: 1001
+      system_prompt_bytes: 1400
+      turns:
+        - role: user
+          bytes: 220
+        - role: assistant
+          bytes: 180
+          tool_calls: [list_directory]
+        - role: tool
+          name: list_directory
+          bytes: 900
+        - role: assistant
+          bytes: 220
+          tool_calls: [read_file, read_file]
+        - role: tool
+          name: read_file
+          bytes: 3200
+        - role: tool
+          name: read_file
+          bytes: 2600
+        - role: assistant
+          bytes: 640
+
+  - id: locate-function-among-many-files
+    category: exploration
+    name: Locate one function among many files
+    description: >-
+      Agent must find a specific function definition in a repository with
+      many candidate files and no obvious naming hint in the request.
+    acceptance_criteria:
+      - Agent finds the correct definition without reading unrelated files.
+      - Agent uses symbol search before falling back to brute-force reads.
+    expected_evidence:
+      - A symbol-search or grep tool call preceding any file read.
+      - The final file read contains the target function.
+    allowed_nondeterminism:
+      - Number of near-miss candidates the search tool returns.
+    fixture:
+      seed: 1002
+      system_prompt_bytes: 1400
+      turns:
+        - role: user
+          bytes: 160
+        - role: assistant
+          bytes: 140
+          tool_calls: [find_symbol]
+        - role: tool
+          name: find_symbol
+          bytes: 1800
+        - role: assistant
+          bytes: 120
+          tool_calls: [read_file]
+        - role: tool
+          name: read_file
+          bytes: 2400
+        - role: assistant
+          bytes: 300
+
+  - id: implement-bounded-feature
+    category: implementation
+    name: Implement bounded feature
+    description: >-
+      Agent implements a small, well-specified feature end to end, including
+      a source edit and a matching test.
+    acceptance_criteria:
+      - Agent edits exactly the files relevant to the feature.
+      - Agent adds or updates a test covering the new behavior.
+    expected_evidence:
+      - An edit or patch tool call against the implementation file.
+      - An edit tool call against a `_test.go` (or equivalent) file.
+      - A test-run tool call after the edits.
+    allowed_nondeterminism:
+      - Ordering of the implementation edit versus the test edit.
+    fixture:
+      seed: 1003
+      system_prompt_bytes: 1500
+      turns:
+        - role: user
+          bytes: 480
+        - role: assistant
+          bytes: 200
+          tool_calls: [read_file]
+        - role: tool
+          name: read_file
+          bytes: 2200
+        - role: assistant
+          bytes: 260
+          tool_calls: [edit_file]
+        - role: tool
+          name: edit_file
+          bytes: 400
+        - role: assistant
+          bytes: 220
+          tool_calls: [edit_file]
+        - role: tool
+          name: edit_file
+          bytes: 350
+        - role: assistant
+          bytes: 160
+          tool_calls: [shell_run]
+        - role: tool
+          name: shell_run
+          bytes: 900
+        - role: assistant
+          bytes: 420
+
+  - id: cross-package-api-change
+    category: implementation
+    name: Cross-package API change
+    description: >-
+      Agent changes a function signature and must update every caller across
+      package boundaries.
+    acceptance_criteria:
+      - Agent finds all call sites via references, not manual guessing.
+      - Every call site compiles after the change.
+    expected_evidence:
+      - A find-references tool call before any caller edit.
+      - Edit tool calls in more than one package directory.
+      - A build tool call after the edits.
+    allowed_nondeterminism:
+      - Number of call sites found (repository-dependent).
+    fixture:
+      seed: 1004
+      system_prompt_bytes: 1500
+      turns:
+        - role: user
+          bytes: 360
+        - role: assistant
+          bytes: 160
+          tool_calls: [find_references]
+        - role: tool
+          name: find_references
+          bytes: 2600
+        - role: assistant
+          bytes: 180
+          tool_calls: [edit_file]
+        - role: tool
+          name: edit_file
+          bytes: 300
+        - role: assistant
+          bytes: 180
+          tool_calls: [edit_file]
+        - role: tool
+          name: edit_file
+          bytes: 300
+        - role: assistant
+          bytes: 180
+          tool_calls: [edit_file]
+        - role: tool
+          name: edit_file
+          bytes: 300
+        - role: assistant
+          bytes: 140
+          tool_calls: [shell_run]
+        - role: tool
+          name: shell_run
+          bytes: 1200
+        - role: assistant
+          bytes: 320
+
+  - id: debug-compile-failure
+    category: debug
+    name: Debug compile failure
+    description: >-
+      Agent introduces or inherits a compile failure and must diagnose and
+      fix it from the compiler's error output alone.
+    acceptance_criteria:
+      - Agent reads the compiler error before editing.
+      - The fix resolves the reported error without unrelated changes.
+    expected_evidence:
+      - A build/shell tool call producing a non-zero exit and error text.
+      - An edit tool call targeting the reported file/line.
+      - A follow-up build tool call confirming success.
+    allowed_nondeterminism:
+      - Exact compiler diagnostic wording across Go toolchain versions.
+    fixture:
+      seed: 1005
+      system_prompt_bytes: 1300
+      turns:
+        - role: user
+          bytes: 200
+        - role: assistant
+          bytes: 120
+          tool_calls: [shell_run]
+        - role: tool
+          name: shell_run
+          bytes: 700
+        - role: assistant
+          bytes: 160
+          tool_calls: [read_file]
+        - role: tool
+          name: read_file
+          bytes: 1400
+        - role: assistant
+          bytes: 200
+          tool_calls: [edit_file]
+        - role: tool
+          name: edit_file
+          bytes: 250
+        - role: assistant
+          bytes: 140
+          tool_calls: [shell_run]
+        - role: tool
+          name: shell_run
+          bytes: 300
+        - role: assistant
+          bytes: 260
+
+  - id: debug-failing-test
+    category: debug
+    name: Debug failing test
+    description: >-
+      A single test fails intermittently or deterministically and the agent
+      must isolate the cause and fix production code, not the test.
+    acceptance_criteria:
+      - Agent reproduces the failure before proposing a fix.
+      - Agent does not weaken the test's assertions to make it pass.
+    expected_evidence:
+      - A test-run tool call showing the failure.
+      - Read tool calls into the code under test.
+      - A follow-up test-run tool call showing success.
+    allowed_nondeterminism:
+      - Number of debugging iterations before the root cause is found.
+    fixture:
+      seed: 1006
+      system_prompt_bytes: 1300
+      turns:
+        - role: user
+          bytes: 240
+        - role: assistant
+          bytes: 120
+          tool_calls: [shell_run]
+        - role: tool
+          name: shell_run
+          bytes: 1600
+        - role: assistant
+          bytes: 180
+          tool_calls: [read_file, read_file]
+        - role: tool
+          name: read_file
+          bytes: 1800
+        - role: tool
+          name: read_file
+          bytes: 900
+        - role: assistant
+          bytes: 220
+          tool_calls: [edit_file]
+        - role: tool
+          name: edit_file
+          bytes: 260
+        - role: assistant
+          bytes: 140
+          tool_calls: [shell_run]
+        - role: tool
+          name: shell_run
+          bytes: 500
+        - role: assistant
+          bytes: 300
+
+  - id: poll-changing-job-status
+    category: debug
+    name: Poll changing job status
+    description: >-
+      Agent polls a long-running job (build, deploy, remote test run) whose
+      status changes between polls and must not be flagged as a stuck loop.
+    acceptance_criteria:
+      - Repeated polling of a changing resource is not treated as stagnation.
+      - Agent stops polling once the job reaches a terminal state.
+    expected_evidence:
+      - A sequence of identically-named tool calls with differing results.
+      - A final tool call result in a terminal (success/failure) state.
+    allowed_nondeterminism:
+      - Number of polling iterations before the job completes.
+    fixture: null
+    fixture_status: >-
+      Deferred: exercises the harness stagnation detector (goal #10, section
+      4), which does not exist yet. Token/tool-count shape is not
+      meaningfully different from any other multi-call scenario; the useful
+      signal here is loop-governor behavior, measured once that lands.
+
+  - id: repeated-identical-failed-read
+    category: debug
+    name: Repeated identical failed read
+    description: >-
+      Agent repeats the exact same failing tool call without varying
+      parameters, which the loop governor should catch and interrupt.
+    acceptance_criteria:
+      - Agent is interrupted or redirected after N identical failures.
+      - Agent does not silently retry forever.
+    expected_evidence:
+      - Two or more identical tool calls (same name and arguments) with the
+        same failure result.
+      - A stop/redirect event from the loop governor.
+    allowed_nondeterminism:
+      - Exact N at which the governor intervenes (policy-dependent).
+    fixture: null
+    fixture_status: >-
+      Deferred: this is a governor-behavior regression scenario, not a
+      request-shape scenario. Needs the dynamic controller's stagnation
+      policy (goal #10, section 4) before it produces a meaningful signal.
+
+  - id: high-fan-in-function-edit
+    category: implementation
+    name: High-fan-in function edit
+    description: >-
+      Agent edits a function with many callers across the codebase, which
+      should trigger elevated review scrutiny per the change-risk model.
+    acceptance_criteria:
+      - Agent surfaces the caller count before editing.
+      - The change receives high-risk review coverage (100% per gate table).
+    expected_evidence:
+      - A blast-radius or find-references tool call reporting fan-in.
+      - A review event tagged high-risk for this change.
+    allowed_nondeterminism:
+      - Exact fan-in count (repository-dependent).
+    fixture: null
+    fixture_status: >-
+      Deferred: needs Canopy blast-radius/change-risk scoring (pkg/changeintel,
+      first-pickup checklist) to compute fan-in; not available at the PR 0
+      baseline.
+
+  - id: security-sensitive-change
+    category: review
+    name: Security-sensitive change
+    description: >-
+      Agent proposes a change touching authentication, secrets, or the
+      sandbox boundary, which must receive mandatory high-risk review.
+    acceptance_criteria:
+      - The change is never auto-committed without explicit approval.
+      - Review findings reference the specific security-sensitive lines.
+    expected_evidence:
+      - A review event with a security/high-risk tag.
+      - No commit/push tool call preceding user approval.
+    allowed_nondeterminism:
+      - Specific wording of the review findings.
+    fixture:
+      seed: 1007
+      system_prompt_bytes: 1600
+      turns:
+        - role: user
+          bytes: 420
+        - role: assistant
+          bytes: 180
+          tool_calls: [read_file]
+        - role: tool
+          name: read_file
+          bytes: 2000
+        - role: assistant
+          bytes: 220
+          tool_calls: [edit_file]
+        - role: tool
+          name: edit_file
+          bytes: 380
+        - role: assistant
+          bytes: 160
+          tool_calls: [review_changes]
+        - role: tool
+          name: review_changes
+          bytes: 2600
+        - role: assistant
+          bytes: 380
+
+  - id: documentation-only-review
+    category: review
+    name: Documentation-only review
+    description: >-
+      Agent reviews a change that only touches documentation or comments,
+      which should receive lightweight, low-friction review.
+    acceptance_criteria:
+      - Review does not request tests for a docs-only diff.
+      - Review completes without a build/test tool call.
+    expected_evidence:
+      - A review tool call against a diff limited to doc/comment files.
+      - No test-run tool call in the transcript.
+    allowed_nondeterminism:
+      - Length of the review's prose findings.
+    fixture:
+      seed: 1008
+      system_prompt_bytes: 1300
+      turns:
+        - role: user
+          bytes: 200
+        - role: assistant
+          bytes: 140
+          tool_calls: [read_file]
+        - role: tool
+          name: read_file
+          bytes: 900
+        - role: assistant
+          bytes: 160
+          tool_calls: [review_changes]
+        - role: tool
+          name: review_changes
+          bytes: 700
+        - role: assistant
+          bytes: 220
+
+  - id: large-generated-diff-small-human-change
+    category: review
+    name: Large generated diff plus small human change
+    description: >-
+      A large machine-generated diff (vendored code, generated bindings)
+      accompanies a small, deliberate human edit; review must focus on the
+      human-authored part.
+    acceptance_criteria:
+      - Review findings concentrate on the small human-authored hunk.
+      - The generated portion is summarized, not walked line by line.
+    expected_evidence:
+      - A diff-projection tool call that separates generated from authored
+        hunks (or an explicit generated-file marker).
+      - Review findings referencing only the authored file(s).
+    allowed_nondeterminism:
+      - Byte size of the generated portion (tool/version-dependent).
+    fixture: null
+    fixture_status: >-
+      Deferred: needs Canopy's generated-code detection and LX projection to
+      separate the two hunks meaningfully; not available at the PR 0
+      baseline.
+
+  - id: long-session-100-tool-events
+    category: resume
+    name: Long session with 100+ tool events
+    description: >-
+      A single task accumulates over 100 tool events before completion,
+      stressing context-pressure handling and checkpointing.
+    acceptance_criteria:
+      - Session remains within the model's context window throughout.
+      - A checkpoint exists that can reconstruct task state without replay.
+    expected_evidence:
+      - 100+ tool events recorded in the run ledger.
+      - At least one checkpoint event before the final completion event.
+    allowed_nondeterminism:
+      - Exact iteration count above the 100-event floor.
+    fixture:
+      seed: 1009
+      system_prompt_bytes: 1500
+      turns:
+        - role: user
+          bytes: 260
+        - role: assistant
+          bytes: 100
+          tool_calls: [read_file]
+        - role: tool
+          name: read_file
+          bytes: 800
+        - role: assistant
+          bytes: 100
+          tool_calls: [read_file]
+        - role: tool
+          name: read_file
+          bytes: 800
+        - role: assistant
+          bytes: 100
+          tool_calls: [read_file]
+        - role: tool
+          name: read_file
+          bytes: 800
+        - role: assistant
+          bytes: 100
+          tool_calls: [read_file]
+        - role: tool
+          name: read_file
+          bytes: 800
+        - role: assistant
+          bytes: 100
+          tool_calls: [edit_file]
+        - role: tool
+          name: edit_file
+          bytes: 300
+        - role: assistant
+          bytes: 100
+          tool_calls: [shell_run]
+        - role: tool
+          name: shell_run
+          bytes: 600
+        - role: assistant
+          bytes: 100
+          tool_calls: [shell_run]
+        - role: tool
+          name: shell_run
+          bytes: 600
+        - role: assistant
+          bytes: 100
+          tool_calls: [edit_file]
+        - role: tool
+          name: edit_file
+          bytes: 300
+        - role: assistant
+          bytes: 100
+          tool_calls: [shell_run]
+        - role: tool
+          name: shell_run
+          bytes: 600
+        - role: assistant
+          bytes: 340
+      note: >-
+        A representative slice, not a literal 100+-turn transcript. The
+        request-size and tool-count *rate* this fixture measures is what
+        Context Fabric compaction/dedupe is meant to improve; the full 100+
+        event stress case is exercised by the loop-governor test suite, not
+        this token-shape benchmark.
+
+  - id: crash-and-resume
+    category: resume
+    name: Crash and resume
+    description: >-
+      Buckley process exits mid-task (crash, kill, host restart) and must
+      resume the task from durable state without replaying the full chat.
+    acceptance_criteria:
+      - Resume requires at most 2 requests to reach a useful next action
+        (gate table, section 32).
+      - No provider-invalid assistant/tool-call pairing on resume.
+    expected_evidence:
+      - A checkpoint or task-state record persisted before the crash point.
+      - The first post-resume request references that record, not the full
+        prior transcript.
+    allowed_nondeterminism:
+      - Wall-clock gap between crash and resume.
+    fixture: null
+    fixture_status: >-
+      Deferred: exercises task checkpoint state and Markdown++ resume view
+      (first-pickup checklist), which does not exist yet. PR 0 records the
+      acceptance bar (<=2 requests to useful action) for later comparison.
+
+  - id: subagent-investigation-and-handoff
+    category: resume
+    name: Subagent investigation and handoff
+    description: >-
+      A subagent investigates a question and hands a compact result back to
+      the parent agent, which must continue without the subagent's full
+      transcript.
+    acceptance_criteria:
+      - Parent agent's next request does not include the subagent's raw
+        tool transcript.
+      - Parent agent's next action is consistent with the subagent's finding.
+    expected_evidence:
+      - A subagent.completed event carrying a compact summary/receipt.
+      - No subagent tool-call messages present in the parent's next request.
+    allowed_nondeterminism:
+      - Subagent's internal tool-call count before it concludes.
+    fixture: null
+    fixture_status: >-
+      Deferred: needs the evidence store/receipt handoff between parent and
+      subagent context compilation (goals list, section 4); PR 0 records the
+      acceptance bar for later comparison.
+
+  - id: internal-review-then-fix
+    category: review
+    name: Internal review then fix
+    description: >-
+      Agent's own internal review service finds an issue in its draft change
+      and the agent fixes it before presenting the change to the user.
+    acceptance_criteria:
+      - The review-then-fix loop happens without a recursive CLI call
+        (typed Go service, per design decision #10).
+      - The user-visible summary reflects the fixed, not the original, state.
+    expected_evidence:
+      - A review event followed by an edit event referencing the same file.
+      - A single final review/commit-prep event after the fix.
+    allowed_nondeterminism:
+      - Number of review/fix cycles before the change is accepted.
+    fixture: null
+    fixture_status: >-
+      Deferred: needs the extracted ReviewService (first-pickup checklist)
+      as a typed internal call boundary; not available at the PR 0 baseline.
+
+  - id: commit-preparation
+    category: implementation
+    name: Commit preparation
+    description: >-
+      Agent stages a finished change and prepares (but, per default config,
+      does not push) a commit message and description.
+    acceptance_criteria:
+      - Commit message follows the repository's conventions.
+      - No push tool call runs without explicit user approval
+        (agent_operations.push_changes stays false by default).
+    expected_evidence:
+      - A prepare-commit tool call producing a commit message.
+      - No push-tool call in the transcript unless the user approved one.
+    allowed_nondeterminism:
+      - Exact commit message wording.
+    fixture: null
+    fixture_status: >-
+      Deferred: needs the extracted CommitService (first-pickup checklist);
+      recorded now so the agent_operations defaults (prepare_commit=true,
+      commit_changes=false, push_changes=false) have a scenario to validate
+      against once that service lands.
+
+  - id: model-backend-switch
+    category: implementation
+    name: Model/backend switch
+    description: >-
+      Mid-task, the configured model or provider changes (fallback, manual
+      switch, or backend outage) and the task must continue coherently.
+    acceptance_criteria:
+      - Prior tool-call/response pairing remains provider-valid after the
+        switch.
+      - Task state (goals, plan, evidence) survives the switch unchanged.
+    expected_evidence:
+      - A model.stream_start event with a new model ID mid-session.
+      - No dropped or malformed tool-call/response pair around the switch.
+    allowed_nondeterminism:
+      - Which fallback model is selected (routing-policy-dependent).
+    fixture: null
+    fixture_status: >-
+      Deferred: core orchestration is already model-agnostic (design
+      decision #5), but there is no corpus fixture exercising a live
+      mid-session switch yet; needs a multi-provider test harness.
+
+  - id: context-window-rejection
+    category: debug
+    name: Context-window rejection
+    description: >-
+      A request is rejected by the provider for exceeding the context
+      window, and the agent must recover without losing task state.
+    acceptance_criteria:
+      - Agent detects the rejection and triggers compaction/checkpoint
+        recovery rather than retrying the identical oversized request.
+      - No durable evidence is lost; only the request view shrinks.
+    expected_evidence:
+      - A provider error event indicating context-length exceeded.
+      - A compaction or checkpoint event immediately following it.
+    allowed_nondeterminism:
+      - Exact token count at which the provider rejects the request.
+    fixture: null
+    fixture_status: >-
+      Deferred: needs Context Fabric pressure/compaction (section 27) to
+      exist before a recovery path can be measured; PR 0 records the
+      pressure thresholds (dedupe/checkpoint/compact/emergency) that will
+      gate this behavior.
+
+  - id: missing-optional-m31-adapters
+    category: review
+    name: Missing optional M31 adapters
+    description: >-
+      Hyphae, Graft, Tiller, or remote analytics are unavailable (not
+      installed, not running), and local Buckley operation must be
+      unaffected per design decision #12.
+    acceptance_criteria:
+      - No user-visible error blocks the task when an adapter is missing.
+      - Local review/commit/context-compilation behavior is unchanged.
+    expected_evidence:
+      - An adapter-unavailable event or log line, non-fatal.
+      - Task completion proceeds without adapter-provided data.
+    allowed_nondeterminism:
+      - Which specific adapter(s) are unavailable in a given environment.
+    fixture: null
+    fixture_status: >-
+      Deferred: exercises graceful-degradation paths for adapters that are
+      themselves still optional/unbuilt for Context Fabric; recorded now so
+      the memory.* adapter flags (all optional, section 27) have a scenario
+      to validate once wired.
