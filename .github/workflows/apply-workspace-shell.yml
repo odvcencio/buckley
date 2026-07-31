@@ -30,6 +30,9 @@ jobs:
           source = path.read_text()
           start = source.index("# Keep transcript progress compact and send full output to telemetry/inspector.")
           end = source.index("# Rich, bounded, redacted telemetry details.")
+          source = source[:start] + source[end:]
+          start = source.index("# The left panel remains the navigator; active work is distinguished from")
+          end = source.index('print("workspace shell replacements applied")')
           path.write_text(source[:start] + source[end:])
           PY
           python scripts/apply_workspace_shell.py
@@ -68,7 +71,6 @@ jobs:
             pkg/ui/tui/workspace_layout.go \
             pkg/ui/tui/telemetry_activity.go \
             pkg/ui/tui/workspace_features_test.go \
-            pkg/ui/widgets/sidebar.go \
             pkg/ui/widgets/chatview.go \
             pkg/ui/widgets/activity_panel.go \
             pkg/ui/widgets/markdown_workspace.go \
