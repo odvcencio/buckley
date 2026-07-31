@@ -353,6 +353,12 @@ git_clone:
 
 HTTP/WebSocket server for desktop UI and remote access.
 
+`enable_browser: true` serves the web UI from `--assets <dir>` on disk when
+set, or from the embedded `pkg/ipc/ui.go` filesystem otherwise. The embed is
+gated behind the `webui` build tag (`make build-webui`, ~1.1MB); the default
+`buckley` binary omits it and shows a "built without web UI" fallback page
+when no `--assets` dir is configured.
+
 ```yaml
 ipc:
   enabled: false

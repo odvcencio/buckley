@@ -45,6 +45,15 @@ build-batch:
 	@echo "Building buckley (with Kubernetes batch support)..."
 	CGO_ENABLED=0 go build -tags batch_k8s -ldflags="-s -w" -o buckley ./cmd/buckley
 
+# The embedded web UI (pkg/ipc/ui.go, ~1.1MB) is gated behind the webui build
+# tag so the default binary omits it. `buckley serve --browser --assets
+# <dir>` still works without this tag by serving assets from disk; use this
+# target when you need the UI embedded as a fallback with no assets dir.
+.PHONY: build-webui
+build-webui:
+	@echo "Building buckley (with embedded web UI)..."
+	CGO_ENABLED=0 go build -tags webui -ldflags="-s -w" -o buckley ./cmd/buckley
+
 .PHONY: dev
 dev:
 	@echo "Building and running buckley..."
