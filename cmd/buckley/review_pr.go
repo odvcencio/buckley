@@ -148,6 +148,8 @@ func reviewPRUsageError() error {
 
 // runReviewPRCommand reviews a remote PR using gh CLI integration.
 func runReviewPRCommand(args []string) error {
+	sweepStaleReviewWorkspaces()
+
 	opts, err := parseReviewPRCommandOptions(args)
 	if err != nil {
 		return err

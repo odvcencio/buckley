@@ -114,6 +114,8 @@ func parseReviewCommandOptions(args []string) (reviewCommandOptions, error) {
 
 // runReviewCommand performs code review on a branch or project.
 func runReviewCommand(args []string) error {
+	sweepStaleReviewWorkspaces()
+
 	opts, err := parseReviewCommandOptions(args)
 	if err != nil {
 		return err
