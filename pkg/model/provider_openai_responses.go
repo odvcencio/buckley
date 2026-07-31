@@ -1,11 +1,9 @@
 package model
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 )
@@ -395,30 +393,20 @@ func marshalOpenAIResponseItem(item map[string]any) (json.RawMessage, error) {
 	return raw, nil
 }
 
+// invokeResponse executes the Responses API call through the shared
+// resilient transport. Retrying a transient 429/5xx happens inside this
+// call, before it ever returns to ContinuationCoordinator.Call -- so a
+// single 429 here is invisible to the coordinator and never triggers its
+// error-path Reset, which would otherwise destroy the persisted continuation
+// state and force a full-context resend on the next turn.
 func (p *OpenAIProvider) invokeResponse(ctx context.Context, req openAIResponsesRequest) (*openAIResponsesResponse, error) {
-	body, err := json.Marshal(req)
-	if err != nil {
-		return nil, fmt.Errorf("marshaling openai responses request: %w", err)
-	}
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+"/responses", bytes.NewReader(body))
-	if err != nil {
-		return nil, fmt.Errorf("creating openai responses request: %w", err)
-	}
-	httpReq.Header.Set("Authorization", "Bearer "+p.apiKey)
-	httpReq.Header.Set("Content-Type", "application/json")
-
-	resp, err := p.httpClient.Do(httpReq)
+	data, err := p.transport.Do(ctx, p.httpClient, http.MethodPost, p.baseURL+"/responses", req, p.setAuthHeaders)
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("openai responses request failed (%d): %s", resp.StatusCode, string(body))
-	}
 
 	var response openAIResponsesResponse
-	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+	if err := json.Unmarshal(data, &response); err != nil {
 		return nil, fmt.Errorf("decoding openai responses response: %w", err)
 	}
 	if response.Error != nil {
