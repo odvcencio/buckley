@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/klauspost/compress/zstd"
 )
@@ -129,9 +130,39 @@ func (b *BlobStore) Write(sha256Hex string, content []byte) (string, error) {
 	return finalPath, nil
 }
 
-// Read decompresses and returns the content stored at path.
+// confinePath resolves path and rejects anything that escapes the blob
+// store's root, including relative traversal and symlinked parents, so the
+// public path-based operations keep the same confinement guarantee as
+// PathForHash.
+func (b *BlobStore) confinePath(path string) (string, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", fmt.Errorf("evidence: resolve blob path: %w", err)
+	}
+	rootAbs, err := filepath.Abs(b.root)
+	if err != nil {
+		return "", fmt.Errorf("evidence: resolve blob root: %w", err)
+	}
+	if resolvedRoot, err := filepath.EvalSymlinks(rootAbs); err == nil {
+		rootAbs = resolvedRoot
+	}
+	if resolvedDir, err := filepath.EvalSymlinks(filepath.Dir(abs)); err == nil {
+		abs = filepath.Join(resolvedDir, filepath.Base(abs))
+	}
+	if abs != rootAbs && !strings.HasPrefix(abs, rootAbs+string(filepath.Separator)) {
+		return "", fmt.Errorf("evidence: blob path %q is outside the blob root", path)
+	}
+	return abs, nil
+}
+
+// Read decompresses and returns the content stored at path. The path must
+// resolve inside the blob root.
 func (b *BlobStore) Read(path string) ([]byte, error) {
-	raw, err := os.ReadFile(path)
+	confined, err := b.confinePath(path)
+	if err != nil {
+		return nil, err
+	}
+	raw, err := os.ReadFile(confined)
 	if err != nil {
 		return nil, fmt.Errorf("evidence: read blob: %w", err)
 	}
@@ -139,9 +170,14 @@ func (b *BlobStore) Read(path string) ([]byte, error) {
 }
 
 // Delete removes the blob file at path. Deleting a file that does not exist
-// is not an error, so cleanup passes are safely resumable.
+// is not an error, so cleanup passes are safely resumable. The path must
+// resolve inside the blob root.
 func (b *BlobStore) Delete(path string) error {
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+	confined, err := b.confinePath(path)
+	if err != nil {
+		return err
+	}
+	if err := os.Remove(confined); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("evidence: delete blob: %w", err)
 	}
 	return nil

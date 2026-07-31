@@ -184,3 +184,25 @@ func TestWriteRejectsMismatchedContentHash(t *testing.T) {
 		t.Fatal("Write accepted content whose hash does not match the declared hash")
 	}
 }
+
+func TestReadAndDeleteRejectPathsOutsideRoot(t *testing.T) {
+	b, err := NewBlobStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(t.TempDir(), "victim.zst")
+	if err := os.WriteFile(outside, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, bad := range []string{outside, filepath.Join(b.Root(), "..", "victim.zst"), "/etc/hostname"} {
+		if _, err := b.Read(bad); err == nil {
+			t.Fatalf("Read accepted path outside root: %q", bad)
+		}
+		if err := b.Delete(bad); err == nil {
+			t.Fatalf("Delete accepted path outside root: %q", bad)
+		}
+	}
+	if _, err := os.Stat(outside); err != nil {
+		t.Fatalf("outside file was touched: %v", err)
+	}
+}
