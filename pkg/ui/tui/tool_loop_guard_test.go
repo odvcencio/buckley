@@ -69,3 +69,44 @@ func TestContextProjectionStatus(t *testing.T) {
 		t.Fatalf("projection status = %q", got)
 	}
 }
+
+func TestCompletePendingToolResponsesFillsParallelSuffix(t *testing.T) {
+	messages := []model.Message{
+		{Role: "user", Content: "inspect both files"},
+		{
+			Role: "assistant",
+			ToolCalls: []model.ToolCall{
+				{ID: "call-1", Type: "function", Function: model.FunctionCall{Name: "read_file", Arguments: `{"path":"a.go"}`}},
+				{ID: "call-2", Type: "function", Function: model.FunctionCall{Name: "read_file", Arguments: `{"path":"b.go"}`}},
+			},
+		},
+		{Role: "tool", ToolCallID: "call-1", Name: "read_file", Content: "first result"},
+	}
+
+	completed := completePendingToolResponses(messages, "same action repeated")
+	if len(completed) != len(messages)+1 {
+		t.Fatalf("message count = %d, want %d", len(completed), len(messages)+1)
+	}
+	last := completed[len(completed)-1]
+	if last.Role != "tool" || last.ToolCallID != "call-2" || last.Name != "read_file" {
+		t.Fatalf("unexpected synthetic response: %+v", last)
+	}
+	content, _ := last.Content.(string)
+	if !strings.Contains(content, "loop guard") || !strings.Contains(content, "same action repeated") {
+		t.Fatalf("synthetic content = %q", content)
+	}
+	if len(messages) != 3 {
+		t.Fatal("input messages were mutated")
+	}
+}
+
+func TestCompletePendingToolResponsesLeavesCompleteBatchUntouched(t *testing.T) {
+	messages := []model.Message{
+		{Role: "assistant", ToolCalls: []model.ToolCall{{ID: "call-1", Function: model.FunctionCall{Name: "read_file"}}}},
+		{Role: "tool", ToolCallID: "call-1", Name: "read_file", Content: "done"},
+	}
+	completed := completePendingToolResponses(messages, "guarded")
+	if len(completed) != len(messages) {
+		t.Fatalf("message count = %d, want %d", len(completed), len(messages))
+	}
+}
