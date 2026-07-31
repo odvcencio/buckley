@@ -83,6 +83,31 @@ var toolMetadataOverrides = map[string]ToolMetadata{
 		Intent:   "Executing code snippet",
 		Summary:  "Code snippet executed",
 	},
+	// code_callgraph, code_refs, and code_impact shell out to the canopy CLI
+	// for read-only structural analysis. Explicit entries pin them to the
+	// filesystem/read-only tier rather than relying on inferMetadata's
+	// name-substring fallback.
+	"code_callgraph": {
+		Category: CategoryFilesystem,
+		Impact:   ImpactReadOnly,
+		Cost:     CostFree,
+		Intent:   "Querying call graph",
+		Summary:  "Call graph query completed",
+	},
+	"code_refs": {
+		Category: CategoryFilesystem,
+		Impact:   ImpactReadOnly,
+		Cost:     CostFree,
+		Intent:   "Finding symbol references",
+		Summary:  "Reference query completed",
+	},
+	"code_impact": {
+		Category: CategoryFilesystem,
+		Impact:   ImpactReadOnly,
+		Cost:     CostFree,
+		Intent:   "Computing blast radius",
+		Summary:  "Impact query completed",
+	},
 }
 
 // inferMetadata attempts to infer reasonable metadata from tool name and description

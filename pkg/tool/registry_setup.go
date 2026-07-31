@@ -65,6 +65,11 @@ func (r *Registry) registerBuiltins(cfg registryOptions) {
 	register(&builtin.FindReferencesTool{})
 	register(&builtin.GetFunctionSignatureTool{})
 
+	// Register canopy structural intelligence tools (call graph, refs, impact)
+	register(&builtin.CodeCallgraphTool{})
+	register(&builtin.CodeRefsTool{})
+	register(&builtin.CodeImpactTool{})
+
 	// Register built-in refactoring tools
 	register(&builtin.RenameSymbolTool{})
 	register(&builtin.ExtractFunctionTool{})
@@ -123,6 +128,11 @@ func (r *Registry) applyDefaultKinds() {
 		"find_symbol":            "search",
 		"find_references":        "search",
 		"get_function_signature": "read",
+
+		// Canopy structural intelligence
+		"code_callgraph": "search",
+		"code_refs":      "search",
+		"code_impact":    "read",
 
 		// Refactoring
 		"rename_symbol":    "edit",
