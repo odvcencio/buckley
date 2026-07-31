@@ -5,28 +5,39 @@ import (
 	"testing"
 
 	"m31labs.dev/buckley/v2/pkg/model"
+	"m31labs.dev/buckley/v2/pkg/tool/builtin"
 )
 
-func TestStagnationNudge_TriggersOnThirdIdenticalExecution(t *testing.T) {
-	state := &toolLoopState{executions: make(map[[32]byte]int)}
+func TestToolLoopGuard_WarnsThenStopsIdenticalExecution(t *testing.T) {
+	state := &toolLoopState{governor: newInteractiveToolLoopGovernor()}
 	call := model.ToolCall{Function: model.FunctionCall{Name: "run_tests", Arguments: `{"path":"./..."}`}}
-	if got := stagnationNudge(state, call, "failed"); got != "" {
+	result := &builtin.Result{Success: false, Error: "failed"}
+
+	if got := applyToolLoopGuard(state, call, result, nil, "failed"); got != "" {
 		t.Fatalf("first execution nudge = %q", got)
 	}
-	if got := stagnationNudge(state, call, "failed"); got != "" {
-		t.Fatalf("second execution nudge = %q", got)
+	if got := applyToolLoopGuard(state, call, result, nil, "failed"); !strings.Contains(got, "exact action") {
+		t.Fatalf("second execution nudge = %q, want strategy warning", got)
 	}
-	if got := stagnationNudge(state, call, "failed"); !strings.Contains(got, "repeated 3 times") {
-		t.Fatalf("third execution nudge = %q", got)
+	if got := applyToolLoopGuard(state, call, result, nil, "failed"); !strings.Contains(got, "stopped further tool execution") {
+		t.Fatalf("third execution nudge = %q, want stop notice", got)
+	}
+	if !strings.Contains(state.guardReason, "same action") || !strings.Contains(state.guardReason, "3 times") {
+		t.Fatalf("guard reason = %q", state.guardReason)
 	}
 }
 
-func TestStagnationNudge_DifferentResultResetsFingerprint(t *testing.T) {
-	state := &toolLoopState{executions: make(map[[32]byte]int)}
+func TestToolLoopGuard_DifferentResultDoesNotCountAsExactRepeat(t *testing.T) {
+	state := &toolLoopState{governor: newInteractiveToolLoopGovernor()}
 	call := model.ToolCall{Function: model.FunctionCall{Name: "run_tests", Arguments: `{}`}}
-	_ = stagnationNudge(state, call, "failed once")
-	_ = stagnationNudge(state, call, "failed once")
-	if got := stagnationNudge(state, call, "passed"); got != "" {
-		t.Fatalf("changed result should not trigger nudge: %q", got)
+	result := &builtin.Result{Success: false, Error: "failed"}
+
+	_ = applyToolLoopGuard(state, call, result, nil, "failed once")
+	_ = applyToolLoopGuard(state, call, result, nil, "failed once")
+	if got := applyToolLoopGuard(state, call, &builtin.Result{Success: true}, nil, "passed"); got != "" {
+		t.Fatalf("changed result should not trigger guard: %q", got)
+	}
+	if state.guardReason != "" {
+		t.Fatalf("changed result unexpectedly stopped loop: %q", state.guardReason)
 	}
 }
