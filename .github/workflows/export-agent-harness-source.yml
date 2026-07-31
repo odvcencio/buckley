@@ -1,0 +1,28 @@
+name: Export agent harness source
+
+on:
+  push:
+    branches:
+      - agent/clickable-sidebar-activity
+    paths:
+      - .github/workflows/export-agent-harness-source.yml
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+      - name: Archive source tree
+        run: |
+          tar --exclude=.git -czf buckley-source.tar.gz .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: buckley-agent-harness-source
+          path: buckley-source.tar.gz
+          retention-days: 1
+          if-no-files-found: error
