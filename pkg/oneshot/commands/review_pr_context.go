@@ -350,53 +350,6 @@ func assemblePRContextWithOptions(prRef string, deps prContextDependencies, opts
 
 	headChecks, headChecksErr := getPRChecks(deps.run, target)
 
-	commentResult, err := getPRCommentsWithViewer(deps.run, target)
-	viewerLogin := ""
-	if err == nil {
-		viewerLogin = commentResult.ViewerLogin
-		prCtx.Comments = commentResult.Comments
-		audit.Add("top-level comments", 0)
-		prCtx.addStatus("Top-level comments", "complete", fmt.Sprintf("%d comments", len(commentResult.Comments)), false)
-	} else {
-		recordPRContextFailure(prCtx, audit, "Top-level comments", err)
-	}
-
-	reviews, err := getPRReviews(deps.run, target)
-	if err == nil {
-		reviews = filterOwnBuckbotLifecycleReviews(reviews, viewerLogin)
-		prCtx.Reviews = reviews
-		audit.Add("submitted reviews", 0)
-		prCtx.addStatus("Submitted reviews", "complete", fmt.Sprintf("%d reviews", len(reviews)), false)
-	} else {
-		recordPRContextFailure(prCtx, audit, "Submitted reviews", err)
-	}
-
-	inline, err := getPRInlineCommentsForViewer(deps.run, pr, viewerLogin)
-	if err == nil {
-		prCtx.InlineComments = inline.Comments
-		prCtx.ResolvedThreadsFiltered = inline.ResolvedThreadsFiltered
-		name := "inline review comments"
-		status := "complete"
-		detail := fmt.Sprintf("%s unresolved; %s filtered",
-			formatPRCount(len(inline.Comments), "comment"),
-			formatPRCount(inline.ResolvedThreadsFiltered, "resolved thread"))
-		if inline.Fallback {
-			name += " (REST fallback)"
-			status = "fallback"
-			detail += "; resolution state unavailable; GraphQL failed: " + compactPRContextErrorText(inline.FallbackReason)
-		}
-		if inline.Truncated {
-			status = "truncated"
-			detail += "; additional inline review context was not fetched"
-			audit.AddTruncated(name, 0, 1)
-		} else {
-			audit.Add(name, 0)
-		}
-		prCtx.addStatus("Inline review threads", status, detail, inline.Truncated)
-	} else {
-		recordPRContextFailure(prCtx, audit, "Inline review threads", err)
-	}
-
 	apiFiles, filesErr := getPRFiles(deps.run, pr)
 	files, detail, err := resolvePRChangedFiles(diff.Files, pr.ChangedFiles, apiFiles, filesErr)
 	if err != nil {
@@ -429,7 +382,7 @@ func assemblePRContextWithOptions(prRef string, deps prContextDependencies, opts
 	assemblePRAgentsContext(prCtx, audit, deps)
 	assemblePRCanopyContext(opts.Context, prCtx, audit, deps.collectCanopy)
 	collectPRContextProviderEvidence(opts.Context, prCtx, opts.Providers)
-	revalidateAssembledPRMetadata(prCtx, audit, deps.run)
+	assemblePRFeedbackEvidence(prCtx, audit, deps.run, target)
 	audit.Add("context completeness", reviewEstimateTokens(formatPRContextStatus(prCtx.ContextStatus)))
 	promptCtx, curation := CuratePRContext(prCtx, opts.MaxSupportingContextTokens)
 	prCtx.ContextCuration = curation
@@ -848,19 +801,77 @@ func RevalidatePRContext(ctx *PRContext) error {
 	return nil
 }
 
-func revalidateAssembledPRMetadata(ctx *PRContext, audit *transparency.ContextAudit, run prCommandRunner) {
-	changed, err := revalidatePRContext(ctx, run)
+// assemblePRFeedbackEvidence performs assembly's single full fetch of
+// top-level comments, submitted reviews, and inline review threads. It runs
+// once, late in assembly (after diff/checks/files/AGENTS.md/canopy/provider
+// evidence), preceded by one cheap PR-metadata re-check comparing against
+// the metadata captured earlier in assembly. This makes the fetch
+// authoritative: its bodies populate ctx directly, so one review pays for
+// one full feedback fetch instead of an early fetch plus a later
+// "revalidation" fetch that only re-derived the same evidence to compare
+// fingerprints and then discarded it.
+func assemblePRFeedbackEvidence(ctx *PRContext, audit *transparency.ContextAudit, run prCommandRunner, target prReference) {
+	capturedMetadata := snapshotPRContextEvidence(ctx).Metadata
+	currentMetadata, err := getPRMetadataSnapshot(run, target)
 	if err != nil {
-		recordPRContextFailure(ctx, audit, "PR evidence revalidation", err)
+		recordPRContextFailure(ctx, audit, "PR evidence revalidation", fmt.Errorf("re-fetch PR metadata: %w", err))
 		return
 	}
-	if changed != "" {
+	if changed := describePRMetadataChanges(capturedMetadata, currentMetadata); changed != "" {
 		ctx.addStatus("PR evidence revalidation", "changed",
 			"PR state moved while evidence was fetched; the assembled diff, comments, checks, and file list are not a coherent snapshot: "+changed, false)
 		audit.Add("PR evidence changed during assembly", reviewEstimateTokens(changed))
 		return
 	}
-	ctx.addStatus("PR evidence revalidation", "complete", "repository, revisions, CI, review decision, and feedback remained stable during evidence assembly", false)
+
+	commentResult, err := getPRCommentsWithViewer(run, target)
+	viewerLogin := ""
+	if err == nil {
+		viewerLogin = commentResult.ViewerLogin
+		ctx.Comments = commentResult.Comments
+		audit.Add("top-level comments", 0)
+		ctx.addStatus("Top-level comments", "complete", fmt.Sprintf("%d comments", len(commentResult.Comments)), false)
+	} else {
+		recordPRContextFailure(ctx, audit, "Top-level comments", err)
+	}
+
+	reviews, err := getPRReviews(run, target)
+	if err == nil {
+		reviews = filterOwnBuckbotLifecycleReviews(reviews, viewerLogin)
+		ctx.Reviews = reviews
+		audit.Add("submitted reviews", 0)
+		ctx.addStatus("Submitted reviews", "complete", fmt.Sprintf("%d reviews", len(reviews)), false)
+	} else {
+		recordPRContextFailure(ctx, audit, "Submitted reviews", err)
+	}
+
+	inline, err := getPRInlineCommentsForViewer(run, ctx.PR, viewerLogin)
+	if err == nil {
+		ctx.InlineComments = inline.Comments
+		ctx.ResolvedThreadsFiltered = inline.ResolvedThreadsFiltered
+		name := "inline review comments"
+		status := "complete"
+		detail := fmt.Sprintf("%s unresolved; %s filtered",
+			formatPRCount(len(inline.Comments), "comment"),
+			formatPRCount(inline.ResolvedThreadsFiltered, "resolved thread"))
+		if inline.Fallback {
+			name += " (REST fallback)"
+			status = "fallback"
+			detail += "; resolution state unavailable; GraphQL failed: " + compactPRContextErrorText(inline.FallbackReason)
+		}
+		if inline.Truncated {
+			status = "truncated"
+			detail += "; additional inline review context was not fetched"
+			audit.AddTruncated(name, 0, 1)
+		} else {
+			audit.Add(name, 0)
+		}
+		ctx.addStatus("Inline review threads", status, detail, inline.Truncated)
+	} else {
+		recordPRContextFailure(ctx, audit, "Inline review threads", err)
+	}
+
+	ctx.addStatus("PR evidence revalidation", "complete", "repository, revisions, and review decision remained stable before feedback evidence was fetched", false)
 	audit.Add("PR evidence revalidation", 0)
 }
 

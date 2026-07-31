@@ -365,7 +365,7 @@ func TestAssemblePRContext_BuildPromptIncludesReviewEvidence(t *testing.T) {
 		"diff --git a/pkg/ratchet_test.go b/pkg/ratchet_test.go\n"
 	run := func(name string, args ...string) ([]byte, error) {
 		switch {
-		case name == "gh" && hasPRArgPrefix(args, "pr", "view", "208", "--json") && strings.Contains(args[len(args)-1], "headRefOid"):
+		case name == "gh" && hasPRArgPrefix(args, "pr", "view", "208", "--json") && strings.Contains(strings.Join(args, " "), "headRefOid"):
 			return []byte(`{
   "number": 208,
   "title": "Ratchet generated grammar memory",
@@ -515,7 +515,7 @@ func TestAssemblePRContext_BuildPromptIncludesReviewEvidence(t *testing.T) {
 func TestAssemblePRContext_FallbackAndFetchFailuresAreVisible(t *testing.T) {
 	run := func(name string, args ...string) ([]byte, error) {
 		switch {
-		case name == "gh" && hasPRArgPrefix(args, "pr", "view", "208", "--json") && strings.Contains(args[len(args)-1], "headRefOid"):
+		case name == "gh" && hasPRArgPrefix(args, "pr", "view", "208", "--json") && strings.Contains(strings.Join(args, " "), "headRefOid"):
 			return []byte(`{"number":208,"title":"Fallback coverage","author":{"login":"author"},"state":"OPEN","url":"https://github.com/m31labs/buckley/pull/208","baseRefName":"main","baseRefOid":"base-sha","headRefName":"topic","headRefOid":"head-sha","reviewDecision":"","additions":1,"deletions":0,"changedFiles":1}`), nil
 		case name == "gh" && hasPRArgPrefix(args, "pr", "checks", "208", "--json", "state"):
 			return []byte(`[]`), nil
@@ -1881,7 +1881,7 @@ func TestAssemblePRContext_RejectsChangedFileCardinalityMismatch(t *testing.T) {
 			t.Errorf("post-metadata PR operation was not pinned to resolved repository: %s", strings.Join(args, " "))
 		}
 		switch {
-		case name == "gh" && hasPRArgPrefix(args, "pr", "view", "208", "--json") && strings.Contains(args[len(args)-1], "headRefOid"):
+		case name == "gh" && hasPRArgPrefix(args, "pr", "view", "208", "--json") && strings.Contains(strings.Join(args, " "), "headRefOid"):
 			return []byte(`{"number":208,"title":"Cardinality","author":{"login":"author"},"state":"OPEN","url":"https://github.com/m31labs/buckley/pull/208","baseRefName":"main","baseRefOid":"base","headRefName":"topic","headRefOid":"head","changedFiles":3}`), nil
 		case name == "gh" && hasPRArgPrefix(args, "pr", "checks", "208", "--json", "state"):
 			return []byte(`[]`), nil
