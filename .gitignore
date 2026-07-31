@@ -73,3 +73,6 @@ docs/superpowers/
 .DS_Store
 Thumbs.db
 docs/.vitepress/dist/
+
+# Context Fabric benchmark artifacts (PR 0 measurement baseline)
+benchmarks/ctxfabric/artifacts/

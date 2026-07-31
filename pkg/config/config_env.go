@@ -203,6 +203,23 @@ func applyEnvOverrides(cfg *Config, configEnv map[string]string) {
 		cfg.Batch.Enabled = v
 	}
 
+	// Context Fabric / durable agent runtime scaffolding
+	if v, ok := envBool("BUCKLEY_CONTEXT_FABRIC_ENABLED"); ok {
+		cfg.ContextFabric.Enabled = v
+	}
+	if v, ok := envBool("BUCKLEY_CONTEXT_FABRIC_SHADOW"); ok {
+		cfg.ContextFabric.Shadow = v
+	}
+	if v := os.Getenv("BUCKLEY_AGENT_CONTROLLER_MODE"); v != "" {
+		cfg.AgentController.Mode = v
+	}
+	if v, ok := envBool("BUCKLEY_METRICS_ENABLED"); ok {
+		cfg.Metrics.Enabled = v
+	}
+	if v, ok := envBool("BUCKLEY_METRICS_EXPORT"); ok {
+		cfg.Metrics.Export = v
+	}
+
 	// Notify config
 	if v, ok := envBool("BUCKLEY_NOTIFY_ENABLED"); ok {
 		cfg.Notify.Enabled = v
