@@ -51,6 +51,7 @@ func (r *Registry) registerBuiltins(cfg registryOptions) {
 	register(&builtin.BrowserClipboardWriteTool{})
 	register(&builtin.BrowserCloseTool{})
 	register(&builtin.ShellCommandTool{})
+	register(&builtin.DynamicCodeTool{})
 
 	// Delegation tools with guardrails (depth limits, rate limits, recursion prevention)
 	// See pkg/tool/builtin/delegation_guard.go for safety implementation
@@ -139,8 +140,9 @@ func (r *Registry) applyDefaultKinds() {
 		"generate_docstring": "edit",
 		"explain_code":       "think",
 
-		// Shell
+		// Shell and dynamic code
 		"run_shell": "execute",
+		"run_code":  "execute",
 
 		// Browser
 		"browse_url":              "fetch",

@@ -80,8 +80,8 @@ func TestDynamicCodeToolRunsGo(t *testing.T) {
 	}
 	tool := &DynamicCodeTool{}
 	result, err := tool.Execute(map[string]any{
-		"language": "go",
-		"code":     "package main\nimport \"fmt\"\nfunc main(){fmt.Println(6*7)}",
+		"language":        "go",
+		"code":            "package main\nimport \"fmt\"\nfunc main(){fmt.Println(6*7)}",
 		"timeout_seconds": 30,
 	})
 	if err != nil {

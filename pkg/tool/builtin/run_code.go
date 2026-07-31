@@ -67,20 +67,7 @@ func (t *DynamicCodeTool) ExecuteWithContext(ctx context.Context, params map[str
 	language, _ := params["language"].(string)
 	code, _ := params["code"].(string)
 	language = canonicalDynamicLanguage(language)
-	if language == "" {
-		return &Result{Success: false, Error: "language must be one of: python, javascript, go, bash"}, nil
-	}
-	if strings.TrimSpace(code) == "" {
-		return &Result{Success: false, Error: "code parameter must be a non-empty string"}, nil
-	}
-	if len(code) > maxDynamicCodeBytes {
-		return &Result{Success: false, Error: fmt.Sprintf("code exceeds %d-byte limit", maxDynamicCodeBytes)}, nil
-	}
-	args, err := dynamicCodeArgs(params["args"])
-	if err != nil {
-		return &Result{Success: false, Error: err.Error()}, nil
-	}
-	command, err := dynamicCodeCommand(language, code, args)
+	command, err := DynamicCodeCommand(params)
 	if err != nil {
 		return &Result{Success: false, Error: err.Error()}, nil
 	}
@@ -106,6 +93,28 @@ func (t *DynamicCodeTool) ExecuteWithContext(ctx context.Context, params map[str
 		"summary": fmt.Sprintf("Executed %s snippet (%d bytes)", language, len(code)),
 	}
 	return result, execErr
+}
+
+// DynamicCodeCommand validates run_code arguments and returns the bounded shell
+// command used by local, compose-container, and Docker-sandbox execution paths.
+func DynamicCodeCommand(params map[string]any) (string, error) {
+	language, _ := params["language"].(string)
+	code, _ := params["code"].(string)
+	language = canonicalDynamicLanguage(language)
+	if language == "" {
+		return "", fmt.Errorf("language must be one of: python, javascript, go, bash")
+	}
+	if strings.TrimSpace(code) == "" {
+		return "", fmt.Errorf("code parameter must be a non-empty string")
+	}
+	if len(code) > maxDynamicCodeBytes {
+		return "", fmt.Errorf("code exceeds %d-byte limit", maxDynamicCodeBytes)
+	}
+	args, err := dynamicCodeArgs(params["args"])
+	if err != nil {
+		return "", err
+	}
+	return dynamicCodeCommand(language, code, args)
 }
 
 func canonicalDynamicLanguage(language string) string {

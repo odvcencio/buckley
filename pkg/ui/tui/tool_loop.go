@@ -2,7 +2,6 @@ package tui
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"sort"
@@ -15,10 +14,14 @@ import (
 )
 
 type toolLoopState struct {
-	useTools   bool
-	totalUsage model.Usage
-	progress   toolLoopProgress
-	executions map[[32]byte]int
+	useTools       bool
+	totalUsage     model.Usage
+	progress       toolLoopProgress
+	governor       toolLoopGovernor
+	guardReason    string
+	contextScale   float64
+	contextRetries int
+	projection     conversation.ContextProjectionStats
 }
 
 type toolLoopProgress struct {
@@ -40,9 +43,18 @@ func (c *Controller) runToolLoop(ctx context.Context, sess *SessionState, modelI
 
 	state := c.newToolLoopState(sess, modelID)
 	for iter := 0; ; iter++ {
+		if state.governor != nil {
+			decision := state.governor.BeginRound()
+			if decision.Stop {
+				return c.finishGuardedToolLoop(ctx, sess, modelID, &state, decision.Reason)
+			}
+		}
 		result, err := c.runToolLoopIteration(ctx, sess, modelID, iter, &state)
 		if err != nil {
 			return "", nil, "", err
+		}
+		if state.guardReason != "" {
+			return c.finishGuardedToolLoop(ctx, sess, modelID, &state, state.guardReason)
 		}
 		if result.done {
 			return c.finishToolLoopResponse(sess, result.message, state.totalUsage, result.finishReason)
@@ -65,7 +77,8 @@ func (c *Controller) newToolLoopState(sess *SessionState, modelID string) toolLo
 		useTools: !c.consumeDisableToolsNextTurn(sess) &&
 			sess.ToolRegistry != nil &&
 			c.modelMgr.SupportsTools(modelID),
-		executions: make(map[[32]byte]int),
+		governor:     newInteractiveToolLoopGovernor(),
+		contextScale: 1,
 	}
 }
 
@@ -75,7 +88,7 @@ func (c *Controller) runToolLoopIteration(ctx context.Context, sess *SessionStat
 	}
 
 	allowedTools := toolLoopAllowedTools(sess)
-	req, nextUseTools := c.buildToolLoopRequest(sess, modelID, state.useTools, allowedTools)
+	req, nextUseTools := c.buildToolLoopRequestWithState(sess, modelID, state.useTools, allowedTools, state)
 	state.useTools = nextUseTools
 
 	resp, err := c.callToolLoopModel(ctx, req, modelID, iteration, state)
@@ -92,6 +105,9 @@ func (c *Controller) runToolLoopIteration(ctx context.Context, sess *SessionStat
 }
 
 func (c *Controller) handleToolLoopModelError(err error, state *toolLoopState) error {
+	if c.handleToolLoopContextError(err, state) {
+		return nil
+	}
 	if state != nil && state.useTools && isToolUnsupportedError(err) {
 		c.app.SetStatus("Retrying without tools")
 		state.useTools = false
@@ -123,6 +139,10 @@ func toolLoopAllowedTools(sess *SessionState) []string {
 }
 
 func (c *Controller) buildToolLoopRequest(sess *SessionState, modelID string, useTools bool, allowedTools []string) (model.ChatRequest, bool) {
+	return c.buildToolLoopRequestWithState(sess, modelID, useTools, allowedTools, nil)
+}
+
+func (c *Controller) buildToolLoopRequestWithState(sess *SessionState, modelID string, useTools bool, allowedTools []string, state *toolLoopState) (model.ChatRequest, bool) {
 	req := model.ChatRequest{
 		Model:     modelID,
 		Messages:  c.buildMessagesForSession(sess),
@@ -161,7 +181,15 @@ func (c *Controller) buildToolLoopRequest(sess *SessionState, modelID string, us
 	if c.modelMgr != nil {
 		contextWindow, _ = c.modelMgr.GetContextLength(modelID)
 	}
-	req.Messages = conversation.CompactModelMessagesForRequest(req.Messages, req, contextWindow)
+	scale := 1.0
+	if state != nil && state.contextScale > 0 {
+		scale = state.contextScale
+	}
+	projected, projection := conversation.ProjectModelMessagesForRequest(req.Messages, req, contextWindow, scale)
+	req.Messages = projected
+	if state != nil {
+		state.projection = projection
+	}
 	return req, useTools
 }
 
@@ -169,6 +197,11 @@ func (c *Controller) callToolLoopModel(ctx context.Context, req model.ChatReques
 	status := modelProcessStatus(modelID, iteration, len(req.Tools), req.Reasoning)
 	if estimate := model.EstimateRequestTokens(req); estimate.Total >= 1000 {
 		status += fmt.Sprintf(", ~%.1fk input", float64(estimate.Total)/1000)
+	}
+	if state != nil {
+		if projection := contextProjectionStatus(state.projection); projection != "" {
+			status += ", " + projection
+		}
 	}
 	c.app.StartProcessStatus(status)
 	defer c.app.StopProcessStatus()
@@ -345,10 +378,13 @@ func (c *Controller) recordToolLoopCalls(sess *SessionState, calls []model.ToolC
 
 func (c *Controller) executeToolLoopCalls(ctx context.Context, sess *SessionState, calls []model.ToolCall, allowedTools []string, state *toolLoopState) {
 	for i, tc := range calls {
-		if ctx.Err() != nil {
+		if ctx.Err() != nil || (state != nil && state.guardReason != "") {
 			return
 		}
 		c.executeToolLoopCall(ctx, sess, tc, i+1, len(calls), allowedTools, state)
+		if state != nil && state.guardReason != "" {
+			return
+		}
 	}
 }
 
@@ -356,20 +392,27 @@ func (c *Controller) executeToolLoopCall(ctx context.Context, sess *SessionState
 	c.appendToolCallProgress(state, tc)
 	params, err := parseToolParams(tc.Function.Arguments)
 	if err != nil {
+		guardErr := fmt.Errorf("invalid arguments: %w", err)
 		message := fmt.Sprintf("Error: invalid tool arguments: %v", err)
-		c.appendToolResultProgress(state, tc.Function.Name, nil, fmt.Errorf("invalid arguments: %w", err))
+		message += applyToolLoopGuard(state, tc, nil, guardErr, message)
+		c.appendToolResultProgress(state, tc.Function.Name, nil, guardErr)
 		c.addToolLoopResponse(sess, tc, message)
 		return
 	}
 	if sess.ToolRegistry == nil {
-		c.appendToolResultProgress(state, tc.Function.Name, nil, fmt.Errorf("tool registry unavailable"))
-		c.addToolLoopResponse(sess, tc, "Error: tool registry unavailable")
+		guardErr := fmt.Errorf("tool registry unavailable")
+		message := "Error: tool registry unavailable"
+		message += applyToolLoopGuard(state, tc, nil, guardErr, message)
+		c.appendToolResultProgress(state, tc.Function.Name, nil, guardErr)
+		c.addToolLoopResponse(sess, tc, message)
 		return
 	}
 	if !tool.IsToolAllowed(tc.Function.Name, allowedTools) {
 		err := fmt.Errorf("tool %s not allowed by active skills", tc.Function.Name)
+		message := "Error: " + err.Error()
+		message += applyToolLoopGuard(state, tc, nil, err, message)
 		c.appendToolResultProgress(state, tc.Function.Name, nil, err)
-		c.addToolLoopResponse(sess, tc, "Error: "+err.Error())
+		c.addToolLoopResponse(sess, tc, message)
 		return
 	}
 	if params == nil {
@@ -384,21 +427,8 @@ func (c *Controller) executeToolLoopCall(ctx context.Context, sess *SessionState
 	c.app.StopProcessStatus()
 	c.appendToolResultProgress(state, tc.Function.Name, result, execErr)
 	modelResult := formatToolResultForModel(result, execErr)
-	modelResult += stagnationNudge(state, tc, modelResult)
+	modelResult += applyToolLoopGuard(state, tc, result, execErr, modelResult)
 	c.addToolLoopResponse(sess, tc, modelResult)
-}
-
-func stagnationNudge(state *toolLoopState, call model.ToolCall, result string) string {
-	if state == nil {
-		return ""
-	}
-	fingerprint := sha256.Sum256([]byte(call.Function.Name + "\x00" + call.Function.Arguments + "\x00" + result))
-	state.executions[fingerprint]++
-	count := state.executions[fingerprint]
-	if count < 3 {
-		return ""
-	}
-	return fmt.Sprintf("\n\nHarness notice: this identical action and result has repeated %d times. Reassess the approach, use discover_tools for another capability, ask the user if blocked, or conclude; do not repeat it again unless state changes.", count)
 }
 
 func (c *Controller) addToolLoopResponse(sess *SessionState, tc model.ToolCall, text string) {

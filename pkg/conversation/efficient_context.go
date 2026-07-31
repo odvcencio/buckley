@@ -48,28 +48,8 @@ func (c *Conversation) ToEfficientModelMessages() []model.Message {
 // model context window after accounting for tool schemas, request controls, and
 // a completion reserve. A zero contextWindow uses the stable default budget.
 func CompactModelMessagesForRequest(messages []model.Message, req model.ChatRequest, contextWindow int) []model.Message {
-	opts := DefaultEfficientContextOptions()
-	if contextWindow > 0 {
-		probe := req
-		probe.Messages = nil
-		overhead := model.EstimateRequestTokens(probe).Total
-		completionReserve := req.MaxCompletionTokens
-		if req.MaxTokens > completionReserve {
-			completionReserve = req.MaxTokens
-		}
-		if completionReserve < 2048 {
-			completionReserve = 2048
-		}
-		messageTokens := contextWindow*4/5 - overhead - completionReserve
-		if messageTokens < 1024 {
-			messageTokens = 1024
-		}
-		requestBytes := messageTokens * 4
-		if requestBytes < opts.MaxBytes {
-			opts.MaxBytes = requestBytes
-		}
-	}
-	return CompactModelMessages(messages, opts)
+	projected, _ := ProjectModelMessagesForRequest(messages, req, contextWindow, 1)
+	return projected
 }
 
 // CompactModelMessages prunes stale high-volume fields without removing tool

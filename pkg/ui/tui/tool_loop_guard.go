@@ -104,7 +104,7 @@ func (c *Controller) finishGuardedToolLoop(ctx context.Context, sess *SessionSta
 		state.projection = projection
 	}
 
-	resp, err := c.callToolLoopModel(ctx, req, modelID, projection.MessagesAfter, state)
+	resp, err := c.callToolLoopModel(ctx, req, modelID, 0, state)
 	if err != nil {
 		return c.finishGuardFallback(sess, state, reason, err)
 	}
