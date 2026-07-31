@@ -61,6 +61,10 @@ func mergeConfigs(base, override *Config, raw map[string]any, projectScope bool)
 	mergeUIConfig(base, override, raw)
 	mergeCommentingConfig(base, override, raw)
 	mergeDiagnosticsConfig(base, override, raw)
+	mergeContextFabricConfig(base, override, raw)
+	mergeAgentControllerConfig(base, override, raw)
+	mergeAgentOperationsConfig(base, override, raw)
+	mergeMetricsConfig(base, override, raw)
 }
 
 func mergeBuckbotConfig(base, override *Config, raw map[string]any) {
