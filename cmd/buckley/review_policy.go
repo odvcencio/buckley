@@ -7,6 +7,7 @@ import (
 
 	"m31labs.dev/buckley/v2/pkg/config"
 	"m31labs.dev/buckley/v2/pkg/model"
+	"m31labs.dev/buckley/v2/pkg/prompts"
 	"m31labs.dev/buckley/v2/pkg/rules"
 )
 
@@ -274,8 +275,8 @@ func appendReviewExecutionPlan(prompt string, opts automatedReviewOptions) strin
 - Cite supplied commands and results even when this review makes no duplicate tool call.
 - Missing duplicate verification alone requires Grade B with NEEDS DISCUSSION, not Grade C.
 - Write the Falsification conclusion as one bare token with no words after it.
-- Write Findings only when Falsification concludes PROVED.
-- If Falsification concludes DISPROVED or UNRESOLVED, move concerns to Remarks or omit them.
+`+prompts.RuleFindingsRequireProvedFalsification+`
+`+prompts.RuleDisprovedOrUnresolvedGoesToRemarks+`
 - Require a current failing input, violated invariant, failing check, or reproducible behavior for every Finding.
 - Treat CONFIRMED_PASS as authoritative for the behavior that its focused command exercises.
 - Never let a filename, field-visibility, or source-shape heuristic override a passing focused test.
@@ -285,7 +286,7 @@ func appendReviewExecutionPlan(prompt string, opts automatedReviewOptions) strin
 - A self-selected verification timeout is a review limitation. It cannot create a Finding, Blocker, FAIL state, or Grade C.
 - Use exact Go test names. The verification tool anchors the complete -run alternation.
 - For Go approval evidence, call run_verification with kind=test. Go kind=build does not execute tests.
-- Put required verification in the first tool-call batch. Do not defer it until final synthesis.
+`+prompts.RuleVerificationInFirstBatch+`
 - Omit ASD-STE100, comment-length, wording, naming, and style observations from every section.
 - Move possible rename, regeneration, test drift, and private test-hook concerns to Remarks.
 - Do not expose analysis, repair commentary, progress text, or a plan.

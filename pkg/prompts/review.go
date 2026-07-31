@@ -107,8 +107,8 @@ NON-NEGOTIABLE REVIEW RULES:
 - A rule that forbids noun clusters longer than three nouns permits clusters of three nouns.
 - Do not ask for more test shapes only because more shapes exist. Report missing coverage only when a current contract route remains untested or unresolved.
 - Do not reject a malformed historical fixture when it reproduces a parser defect and a separate valid witness covers the generalized route.
-- Write Findings only when Falsification concludes PROVED.
-- If Falsification concludes DISPROVED or UNRESOLVED, move concerns to Remarks or omit them.
+`+RuleFindingsRequireProvedFalsification+`
+`+RuleDisprovedOrUnresolvedGoesToRemarks+`
 - A passing focused test outranks a filename, field-visibility, or source-shape heuristic for the behavior that the test exercises.
 - A verification timeout, cancellation, or unavailable result is inconclusive. It cannot prove a Finding.
 - A self-selected verification timeout is a review limitation. Report UNAVAILABLE and Grade B unless independent evidence proves a product defect.
@@ -243,15 +243,15 @@ Approval rules:
 - Distinguish generated or framework-owned runtime code from app-owned bespoke JavaScript; do not count generated runtime as bespoke app code.
 - APPROVE requires both Build and Tests to be PASS from focused local verification actually completed with the same applicable toolchain and targets that cover every changed source path. Any FAIL, PENDING, NOT_RUN, UNAVAILABLE, or UNKNOWN state blocks approval.
 - For Go, call run_verification with kind=test. That call supplies Build and Tests evidence. Go kind=build does not execute tests.
-- Put required verification in the first tool-call batch. Do not defer it until final synthesis.
+`+RuleVerificationInFirstBatch+`
 - Documentation-only exception: if every changed path is documentation, use exact changed claims, links, or diff hunks; do not manufacture source checks. Mixed, source, and configuration changes do not qualify.
 - Cache/temp variables are already supplied by the sandbox. Do not override PATH or tool options. Non-Go Build and Tests must be separate, standalone commands at snapshot root with no chains, pipes, redirections, or cd.
 - Treat CONFIRMED_PASS as authoritative for the behavior that the focused command exercises. Filenames, field visibility, and source-shape heuristics cannot override it.
 - Treat INCONCLUSIVE, timeout, cancellation, and unavailable results as unknown evidence. Never use them to prove a failure or create a Finding.
 - Treat claims as hypotheses. Report only proven findings with exact file:line evidence and a concrete fix. If evidence is incomplete or truncated, do not approve.
 - Do not audit ASD-STE100, comment length, wording, naming, or style. Omit these observations from Findings and Remarks.
-- Write Findings only when Falsification concludes PROVED.
-- If Falsification concludes DISPROVED or UNRESOLVED, move concerns to Remarks or omit them.
+`+RuleFindingsRequireProvedFalsification+`
+`+RuleDisprovedOrUnresolvedGoesToRemarks+`
 
 %s
 

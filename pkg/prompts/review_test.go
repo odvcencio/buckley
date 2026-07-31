@@ -159,6 +159,28 @@ func TestReviewPromptsRequireReachabilityBehaviorBindingsVisualsAndRuntimeOwners
 	}
 }
 
+// TestReviewPromptsShareRuleConstants asserts that the PR and branch review
+// prompts both render the exported rule constants byte-for-byte, so a
+// wording change only ever needs to happen in one place.
+func TestReviewPromptsShareRuleConstants(t *testing.T) {
+	rules := []string{
+		RuleFindingsRequireProvedFalsification,
+		RuleDisprovedOrUnresolvedGoesToRemarks,
+	}
+	pr := reviewPRDefault(time.Unix(0, 0))
+	for _, rule := range rules {
+		if !strings.Contains(pr, rule) {
+			t.Fatalf("PR prompt missing shared rule %q", rule)
+		}
+	}
+	branch := reviewBranchWithToolsDefault(time.Unix(0, 0))
+	for _, rule := range append(rules, RuleVerificationInFirstBatch) {
+		if !strings.Contains(branch, rule) {
+			t.Fatalf("branch prompt missing shared rule %q", rule)
+		}
+	}
+}
+
 func TestPRReviewPromptRestrictsMinorFindingsToRealDefects(t *testing.T) {
 	prompt := reviewPRDefault(time.Unix(0, 0))
 	if !strings.Contains(prompt, "MINOR: A real non-blocking behavior, validation, test, or operational defect") {
