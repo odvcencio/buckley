@@ -32,7 +32,7 @@ web-install:
 .PHONY: build-cli
 build-cli:
 	@echo "Building buckley (CLI only)..."
-	CGO_ENABLED=0 go build -o buckley ./cmd/buckley
+	CGO_ENABLED=0 go build -ldflags="-s -w" -o buckley ./cmd/buckley
 
 .PHONY: build
 build: web build-cli
@@ -40,7 +40,7 @@ build: web build-cli
 .PHONY: dev
 dev:
 	@echo "Building and running buckley..."
-	CGO_ENABLED=0 go build -o buckley ./cmd/buckley && ./buckley
+	CGO_ENABLED=0 go build -ldflags="-s -w" -o buckley ./cmd/buckley && ./buckley
 
 .PHONY: test
 test:
