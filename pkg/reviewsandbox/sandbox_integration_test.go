@@ -72,3 +72,72 @@ func TestBoundary(t *testing.T) {
 		t.Fatalf("trusted pattern not retained: %q", result.Pattern)
 	}
 }
+
+// TestNativeGoSandboxBoundary proves the native (non-Codex) Go verification
+// path enforces the same read-only-source, private-writable-temp, and
+// no-network invariants as the Codex-launched sandbox. It exercises the real
+// bubblewrap launcher end to end; it does not mock lookPath or run.
+func TestNativeGoSandboxBoundary(t *testing.T) {
+	if _, err := trustedLookPath("codex"); err == nil {
+		t.Skip("a trusted Codex installation is present; it takes priority over the native Go sandbox")
+	}
+	if _, err := trustedLookPath("bwrap"); err != nil {
+		t.Skipf("trusted bubblewrap installation not found: %v", err)
+	}
+	if _, err := trustedLookPath("go"); err != nil {
+		t.Skipf("trusted Go toolchain not found: %v", err)
+	}
+
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module example.test/nativeboundary\n\ngo 1.25\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	source := `package nativeboundary
+
+import (
+    "net"
+    "os"
+    "path/filepath"
+    "testing"
+    "time"
+)
+
+func TestBoundary(t *testing.T) {
+    if err := os.WriteFile("source-mutation", []byte("forbidden"), 0600); err == nil {
+        t.Fatal("immutable source directory was writable")
+    }
+    marker := filepath.Join(os.TempDir(), "private-temp-write")
+    if err := os.WriteFile(marker, []byte("ok"), 0600); err != nil {
+        t.Fatalf("private temp directory was not writable: %v", err)
+    }
+    // The private runtime directory must be the only writable location. A
+    // hardcoded write to the shared /tmp root (outside os.TempDir(), which
+    // this sandbox redirects to the private runtime dir) must fail.
+    if err := os.WriteFile("/tmp/native-sandbox-escape-probe", []byte("forbidden"), 0600); err == nil {
+        t.Fatal("the shared /tmp root was writable outside the private runtime directory")
+    }
+    connection, err := net.DialTimeout("tcp", "1.1.1.1:53", 250*time.Millisecond)
+    if err == nil {
+        connection.Close()
+        t.Fatal("sandbox unexpectedly had direct network access")
+    }
+}
+`
+	if err := os.WriteFile(filepath.Join(root, "boundary_test.go"), []byte(source), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	result := NewExecutorWithCodexCommand("").Verify(context.Background(), Request{
+		SnapshotRoot: root,
+		Kind:         KindTest,
+		Language:     LanguageGo,
+		Pattern:      "^TestBoundary$",
+		Timeout:      2 * time.Minute,
+	})
+	if result.Status != StatusPass || result.ExitCode != 0 {
+		t.Fatalf("native sandbox boundary probe failed: status=%s exit=%d error=%s\nstdout:\n%s\nstderr:\n%s", result.Status, result.ExitCode, result.Error, result.Stdout, result.Stderr)
+	}
+	if _, err := os.Stat(filepath.Join(root, "source-mutation")); !os.IsNotExist(err) {
+		t.Fatalf("sandbox mutated source snapshot: %v", err)
+	}
+}
