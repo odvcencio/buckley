@@ -39,6 +39,10 @@ type ContinuationCoordinator struct {
 
 	cursor *ContinuationCursor
 	hit    bool
+	// requestModel is the model ID the caller used on the last Call. Persisted
+	// state is keyed by this shape so Restore, which receives the same caller
+	// shape, can find the row (providers persist canonical IDs internally).
+	requestModel string
 }
 
 // NewContinuationCoordinator creates a coordinator for one session. store may
@@ -71,8 +75,8 @@ func (cc *ContinuationCoordinator) Restore(providerID, modelID string, currentMe
 	if cc == nil || cc.store == nil || cc.sessionID == "" || cc.cursor.Active() {
 		return
 	}
-	raw, err := cc.store.LoadProviderContinuation(cc.sessionID, providerID, modelID)
-	if err != nil || strings.TrimSpace(raw) == "" {
+	raw := cc.loadPersisted(providerID, modelID)
+	if strings.TrimSpace(raw) == "" {
 		return
 	}
 	var persisted persistedContinuation
@@ -90,6 +94,26 @@ func (cc *ContinuationCoordinator) Restore(providerID, modelID string, currentMe
 		return
 	}
 	cc.cursor = restored
+}
+
+// loadPersisted looks up persisted state under the given model identity and,
+// on a miss, under the provider-prefixed and provider-trimmed alternates, so
+// a caller-shaped ID (gpt-5.4) finds a row saved under the canonical shape
+// (openai/gpt-5.4) and the reverse.
+func (cc *ContinuationCoordinator) loadPersisted(providerID, modelID string) string {
+	keys := []string{modelID}
+	if prefixed := providerID + "/" + modelID; !strings.Contains(modelID, "/") {
+		keys = append(keys, prefixed)
+	} else if trimmed := strings.TrimPrefix(modelID, providerID+"/"); trimmed != modelID {
+		keys = append(keys, trimmed)
+	}
+	for _, key := range keys {
+		raw, err := cc.store.LoadProviderContinuation(cc.sessionID, providerID, key)
+		if err == nil && strings.TrimSpace(raw) != "" {
+			return raw
+		}
+	}
+	return ""
 }
 
 // PinnedFromIndex returns the request-array index projection/compaction must
@@ -121,6 +145,7 @@ func (cc *ContinuationCoordinator) Call(ctx context.Context, req ChatRequest) (*
 	if cc == nil || cc.manager == nil {
 		return nil, fmt.Errorf("continuation coordinator unavailable")
 	}
+	cc.requestModel = strings.TrimSpace(req.Model)
 	prepared, err := cc.cursor.Prepare(req)
 	if err != nil {
 		cc.Reset()
@@ -133,7 +158,7 @@ func (cc *ContinuationCoordinator) Call(ctx context.Context, req ChatRequest) (*
 		cc.Reset()
 		return nil, err
 	}
-	if err := cc.cursor.Commit(prepared.Request, resp); err != nil {
+	if err := cc.cursor.Commit(req, resp); err != nil {
 		cc.Reset()
 		return nil, err
 	}
@@ -157,7 +182,11 @@ func (cc *ContinuationCoordinator) persist() {
 	if err != nil {
 		return
 	}
-	_ = cc.store.SaveProviderContinuation(cc.sessionID, continuation.ProviderID, continuation.ModelID, string(encoded))
+	modelKey := cc.requestModel
+	if modelKey == "" {
+		modelKey = continuation.ModelID
+	}
+	_ = cc.store.SaveProviderContinuation(cc.sessionID, continuation.ProviderID, modelKey, string(encoded))
 }
 
 // Reset discards runtime cursor state and deletes any persisted state for

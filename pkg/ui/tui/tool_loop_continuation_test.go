@@ -155,7 +155,8 @@ func TestToolLoopContinuation_SecondTurnHitsAndPersistsAcrossRestore(t *testing.
 	conv.AddUserMessage("continue")
 
 	req2, _ := ctrl.buildToolLoopRequestWithState(sess, "gpt-5.4", false, nil, &state)
-	if _, err := ctrl.callToolLoopTurn(context.Background(), "gpt-5.4", 1, req2, &state); err != nil {
+	resp2, err := ctrl.callToolLoopTurn(context.Background(), "gpt-5.4", 1, req2, &state)
+	if err != nil {
 		t.Fatalf("callToolLoopTurn(second) error = %v", err)
 	}
 	if !state.continuation.Hit() {
@@ -177,8 +178,9 @@ func TestToolLoopContinuation_SecondTurnHitsAndPersistsAcrossRestore(t *testing.
 
 	// Persistence: a fresh coordinator restored for the same session should
 	// come back active without another round trip.
+	finalTranscript := append(append([]model.Message(nil), req2.Messages...), resp2.Choices[0].Message)
 	restored := model.NewContinuationCoordinator(mgr, store, "session-1")
-	restored.Restore("openai", "openai/gpt-5.4", req2.Messages)
+	restored.Restore("openai", "openai/gpt-5.4", finalTranscript)
 	if !restored.Active() {
 		t.Fatal("expected restored coordinator to be active from persisted state")
 	}

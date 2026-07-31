@@ -132,7 +132,8 @@ func TestRunner_ContinuationHitsOnSecondTurnAndPersists(t *testing.T) {
 	if !useContinuation2 {
 		t.Fatal("expected continuation to still be used on the second turn")
 	}
-	if _, err := runner.callModel(context.Background(), req2, useContinuation2); err != nil {
+	resp2, err := runner.callModel(context.Background(), req2, useContinuation2)
+	if err != nil {
 		t.Fatalf("callModel(second) error = %v", err)
 	}
 	if !runner.continuation.Hit() {
@@ -144,8 +145,9 @@ func TestRunner_ContinuationHitsOnSecondTurnAndPersists(t *testing.T) {
 
 	// Persistence: a fresh coordinator restored for the same session should
 	// come back active without another round trip.
+	finalTranscript := append(append([]model.Message(nil), req2.Messages...), resp2.Choices[0].Message)
 	restored := model.NewContinuationCoordinator(mgr, store, "session-1")
-	restored.Restore("openai", "openai/gpt-5.4", req2.Messages)
+	restored.Restore("openai", "openai/gpt-5.4", finalTranscript)
 	if !restored.Active() {
 		t.Fatal("expected restored coordinator to be active from persisted state")
 	}

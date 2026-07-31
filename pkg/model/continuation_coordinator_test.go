@@ -136,9 +136,9 @@ func TestContinuationCoordinator_CallAccumulatesHitsAndPersists(t *testing.T) {
 		t.Fatal("expected coordinator to hold continuation state after first call")
 	}
 
-	raw, err := store.LoadProviderContinuation("session-1", "openai", "openai/gpt-5.4")
+	raw, err := store.LoadProviderContinuation("session-1", "openai", "gpt-5.4")
 	if err != nil || strings.TrimSpace(raw) == "" {
-		t.Fatalf("expected persisted continuation state, got %q, err %v", raw, err)
+		t.Fatalf("expected continuation state persisted under the caller's model key, got %q, err %v", raw, err)
 	}
 
 	// Second turn: append the assistant response plus new user input, mirroring
@@ -284,5 +284,26 @@ func TestContinuationCoordinator_RestoreSkipsWhenRepresentedCountExceedsTranscri
 	cc.Restore("openai", "openai/gpt-5.4", []Message{{Role: "user", Content: "hi"}})
 	if cc.Active() {
 		t.Fatal("expected Restore to skip state whose prefix no longer fits the transcript")
+	}
+}
+
+func TestCoordinatorPersistsUnderCallerModelKeyAndRestores(t *testing.T) {
+	store := newFakeContinuationStore()
+	mgr := &Manager{}
+	cc := NewContinuationCoordinator(mgr, store, "sess-1")
+	cc.requestModel = "gpt-5.4"
+	cc.cursor = &ContinuationCursor{
+		continuation: &ProviderContinuation{ProviderID: "openai", ModelID: "openai/gpt-5.4", State: json.RawMessage(`{"v":1}`)},
+	}
+	cc.persist()
+
+	if _, err := store.LoadProviderContinuation("sess-1", "openai", "gpt-5.4"); err != nil {
+		t.Fatalf("state not stored under the caller's model key: %v", err)
+	}
+
+	restored := NewContinuationCoordinator(mgr, store, "sess-1")
+	restored.Restore("openai", "gpt-5.4", nil)
+	if !restored.Active() {
+		t.Fatal("production-shaped Restore(gpt-5.4) failed to load state persisted from a canonical-model continuation")
 	}
 }

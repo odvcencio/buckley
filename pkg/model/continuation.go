@@ -21,13 +21,16 @@ type ProviderContinuation struct {
 }
 
 // Compatible reports whether continuation state belongs to the provider and
-// model selected for the next turn.
+// model selected for the next turn. The provider must match exactly; the
+// model comparison tolerates provider-prefix differences (gpt-5.4 versus
+// openai/gpt-5.4) because callers pass resolved model IDs while providers
+// persist canonical ones.
 func (c *ProviderContinuation) Compatible(providerID, modelID string) bool {
 	if c == nil {
 		return false
 	}
 	return strings.TrimSpace(c.ProviderID) == strings.TrimSpace(providerID) &&
-		strings.TrimSpace(c.ModelID) == strings.TrimSpace(modelID)
+		continuationModelMatches(c.ModelID, modelID)
 }
 
 // Clone returns an independent copy suitable for handing across persistence
