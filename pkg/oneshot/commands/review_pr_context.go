@@ -2844,32 +2844,6 @@ func formatPRContextStatus(statuses []PRContextStatus) string {
 	return sb.String()
 }
 
-func prCommentBodies(comments []PRComment) string {
-	var sb strings.Builder
-	for _, comment := range comments {
-		sb.WriteString(comment.Author)
-		sb.WriteByte('\n')
-		sb.WriteString(comment.Body)
-		sb.WriteByte('\n')
-		sb.WriteString(comment.Path)
-		sb.WriteByte('\n')
-	}
-	return sb.String()
-}
-
-func prReviewBodies(reviews []PRReview) string {
-	var sb strings.Builder
-	for _, review := range reviews {
-		sb.WriteString(review.Author)
-		sb.WriteByte('\n')
-		sb.WriteString(review.State)
-		sb.WriteByte('\n')
-		sb.WriteString(review.Body)
-		sb.WriteByte('\n')
-	}
-	return sb.String()
-}
-
 func splitPRRepository(repository string) (string, string, error) {
 	parts := strings.Split(repository, "/")
 	if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" || strings.TrimSpace(parts[1]) == "" {

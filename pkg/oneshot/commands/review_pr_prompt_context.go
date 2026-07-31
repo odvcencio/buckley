@@ -42,15 +42,6 @@ func appendPRContextProviderEvidence(sb *strings.Builder, evidence []PRContextEv
 	}
 }
 
-func prContextEvidenceBodies(evidence []PRContextEvidence) string {
-	var sb strings.Builder
-	for _, item := range evidence {
-		sb.WriteString(item.Body)
-		sb.WriteByte('\n')
-	}
-	return sb.String()
-}
-
 func projectPRContextEvidenceBodies(evidence []PRContextEvidence, budgetTokens int) {
 	remaining := budgetTokens
 	for i := range evidence {

@@ -1258,10 +1258,6 @@ func reviewGitBytesAt(root string, args ...string) ([]byte, error) {
 	return output, nil
 }
 
-func reviewGitOutputLimited(maxBytes int, args ...string) (string, bool, error) {
-	return reviewGitOutputLimitedAt("", maxBytes, args...)
-}
-
 func reviewGitOutputLimitedAt(root string, maxBytes int, args ...string) (string, bool, error) {
 	gitArgs := []string{"--no-pager"}
 	if strings.TrimSpace(root) != "" {
