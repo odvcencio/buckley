@@ -365,6 +365,9 @@ func DefaultConfig() *Config {
 				Jitter:       0.2,
 			},
 		},
+		Tools: ToolsConfig{
+			DefaultPoolMode: "full",
+		},
 		MCP: MCPConfig{
 			Enabled: false,
 			Servers: []MCPServerConfig{},

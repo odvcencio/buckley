@@ -32,7 +32,7 @@ func (t *AnalyzeComplexityTool) Name() string {
 }
 
 func (t *AnalyzeComplexityTool) Description() string {
-	return "Analyze cyclomatic complexity of functions in a file or directory. Identifies complex functions that may need refactoring. Returns complexity scores and highlights functions above threshold. Use this to find code that needs simplification or better test coverage."
+	return "Analyze cyclomatic complexity of functions in a file or directory. Highlights functions above threshold."
 }
 
 func (t *AnalyzeComplexityTool) Parameters() ParameterSchema {
@@ -353,7 +353,7 @@ func (t *FindDuplicatesTool) Name() string {
 }
 
 func (t *FindDuplicatesTool) Description() string {
-	return "Find duplicate code blocks in a file or directory. Detects similar code patterns that may be candidates for refactoring into shared functions. Returns groups of duplicate code with locations. Use this to identify opportunities for code reuse and DRY improvements."
+	return "Find duplicate code blocks in a file or directory. Returns groups of duplicate code with locations."
 }
 
 func (t *FindDuplicatesTool) Parameters() ParameterSchema {

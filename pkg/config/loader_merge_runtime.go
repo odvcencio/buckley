@@ -222,3 +222,9 @@ func mergeToolMiddlewareConfig(base, override *Config, raw map[string]any) {
 		base.ToolMiddleware.Retry.Jitter = override.ToolMiddleware.Retry.Jitter
 	}
 }
+
+func mergeToolsConfig(base, override *Config, raw map[string]any) {
+	if boolFieldSet(raw, "tools", "default_pool_mode") {
+		base.Tools.DefaultPoolMode = override.Tools.DefaultPoolMode
+	}
+}

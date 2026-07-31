@@ -157,13 +157,6 @@ func (s *Store) notify(event Event) {
 	}
 }
 
-// Migration represents a database schema migration
-type Migration struct {
-	Version int
-	Name    string
-	Apply   func(db *sql.DB) error
-}
-
 // migrations is the ordered list of all migrations
 var migrations = []Migration{
 	{1, "initial_schema", func(db *sql.DB) error { return nil }}, // Base schema from schemaSQL
@@ -272,15 +265,6 @@ func ensureProviderContinuationsSchema(db *sql.DB) error {
 
 // runMigrations runs the schema migrations with version tracking
 func runMigrations(db *sql.DB) error {
-	// First, ensure the schema_migrations table exists so we can track versions
-	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS schema_migrations (
-		version INTEGER PRIMARY KEY,
-		name TEXT NOT NULL,
-		applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-	)`); err != nil {
-		return fmt.Errorf("create schema_migrations: %w", err)
-	}
-
 	// Run pre-schema migrations to add any missing columns to existing tables.
 	// This must happen BEFORE applying the base schema because schema.sql
 	// may contain indexes that reference columns added by migrations.
@@ -293,28 +277,8 @@ func runMigrations(db *sql.DB) error {
 		return fmt.Errorf("apply base schema: %w", err)
 	}
 
-	// Get current schema version
-	currentVersion, err := getSchemaVersion(db)
-	if err != nil {
-		return fmt.Errorf("get schema version: %w", err)
-	}
-
-	// Apply any pending migrations
-	for _, m := range migrations {
-		if m.Version <= currentVersion {
-			continue
-		}
-
-		if err := m.Apply(db); err != nil {
-			return fmt.Errorf("migration %d (%s): %w", m.Version, m.Name, err)
-		}
-
-		if err := recordMigration(db, m.Version, m.Name); err != nil {
-			return fmt.Errorf("record migration %d: %w", m.Version, err)
-		}
-	}
-
-	return nil
+	// Apply any pending migrations, tracked in schema_migrations.
+	return Migrate(db, "schema_migrations", migrations)
 }
 
 // runPreSchemaMigrations adds missing columns to existing tables before the
@@ -362,18 +326,6 @@ func getSchemaVersion(db *sql.DB) (int, error) {
 		return 0, fmt.Errorf("querying schema version: %w", err)
 	}
 	return version, nil
-}
-
-// recordMigration records that a migration was applied
-func recordMigration(db *sql.DB, version int, name string) error {
-	_, err := db.Exec(
-		"INSERT INTO schema_migrations (version, name) VALUES (?, ?)",
-		version, name,
-	)
-	if err != nil {
-		return fmt.Errorf("recording schema migration %d: %w", version, err)
-	}
-	return nil
 }
 
 // GetSchemaVersion returns the current schema version for external use

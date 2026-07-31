@@ -1,7 +1,6 @@
 package model
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -17,6 +16,7 @@ type AnthropicProvider struct {
 	apiKey     string
 	baseURL    string
 	httpClient *http.Client
+	transport  *ProviderTransport
 	version    string
 }
 
@@ -84,7 +84,8 @@ func NewAnthropicProvider(apiKey, baseURL string, networkLogsEnabled bool) *Anth
 			Timeout:   defaultTimeout,
 			Transport: transport,
 		},
-		version: "2023-06-01",
+		transport: NewProviderTransport(ProviderTransportOptions{}),
+		version:   "2023-06-01",
 	}
 }
 
@@ -113,35 +114,22 @@ func (p *AnthropicProvider) ChatCompletion(ctx context.Context, req ChatRequest)
 		return nil, err
 	}
 
-	body, err := json.Marshal(anthReq)
-	if err != nil {
-		return nil, fmt.Errorf("marshal anthropic request: %w", err)
-	}
-
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", p.baseURL+"/v1/messages", bytes.NewReader(body))
+	data, err := p.transport.Do(ctx, p.httpClient, "POST", p.baseURL+"/v1/messages", anthReq, p.setAuthHeaders)
 	if err != nil {
 		return nil, err
-	}
-	httpReq.Header.Set("x-api-key", p.apiKey)
-	httpReq.Header.Set("anthropic-version", p.version)
-	httpReq.Header.Set("content-type", "application/json")
-
-	resp, err := p.httpClient.Do(httpReq)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("anthropic request failed: %s", resp.Status)
 	}
 
 	var anthropicResp anthropicResponse
-	if err := json.NewDecoder(resp.Body).Decode(&anthropicResp); err != nil {
+	if err := json.Unmarshal(data, &anthropicResp); err != nil {
 		return nil, fmt.Errorf("decode anthropic response: %w", err)
 	}
 
 	return anthropicResp.toChatResponse()
+}
+
+func (p *AnthropicProvider) setAuthHeaders(req *http.Request) {
+	req.Header.Set("x-api-key", p.apiKey)
+	req.Header.Set("anthropic-version", p.version)
 }
 
 // ChatCompletionStream falls back to non-streaming implementation for now.

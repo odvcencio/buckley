@@ -287,7 +287,7 @@ func (t *SearchReplaceTool) Name() string {
 }
 
 func (t *SearchReplaceTool) Description() string {
-	return "Search and replace text in a file with literal or regex patterns. Supports case sensitivity control and replacement limits. Shows modification summary (replacements count, line changes) instead of full file content. Use this to update code patterns, fix typos, or refactor naming."
+	return "Search and replace text in a file with literal or regex patterns. Shows a modification summary, not full content."
 }
 
 func (t *SearchReplaceTool) Parameters() ParameterSchema {

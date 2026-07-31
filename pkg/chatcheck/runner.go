@@ -464,133 +464,10 @@ func (r Runner) Run(ctx context.Context, scenario Scenario) (*Result, error) {
 		turnResult.Reasoning = strings.TrimSpace(msg.Reasoning) != "" || len(msg.ReasoningDetails) > 0
 		turnResult.CharLength = len(text)
 
-		if text == "" {
-			err := fmt.Errorf("turn %d returned empty assistant text", i+1)
-			turnResult.Checks = append(turnResult.Checks, CheckResult{
-				Name:    "non_empty_text",
-				Passed:  false,
-				Message: "assistant text was empty",
-			})
-			return failTurn(result, turnResult, err)
-		}
-		turnResult.Checks = append(turnResult.Checks, CheckResult{Name: "non_empty_text", Passed: true})
-		if turn.MinChars > 0 && len(text) < turn.MinChars {
-			err := fmt.Errorf("turn %d response too short: got %d chars, want at least %d", i+1, len(text), turn.MinChars)
-			turnResult.Checks = append(turnResult.Checks, CheckResult{
-				Name:    "min_chars",
-				Passed:  false,
-				Message: fmt.Sprintf("got %d chars, want at least %d", len(text), turn.MinChars),
-			})
-			return failTurn(result, turnResult, err)
-		}
-		if turn.MinChars > 0 {
-			turnResult.Checks = append(turnResult.Checks, CheckResult{
-				Name:    "min_chars",
-				Passed:  true,
-				Message: fmt.Sprintf("got %d chars, want at least %d", len(text), turn.MinChars),
-			})
-		}
-		if turn.MaxChars > 0 && len(text) > turn.MaxChars {
-			err := fmt.Errorf("turn %d response too long: got %d chars, want at most %d", i+1, len(text), turn.MaxChars)
-			turnResult.Checks = append(turnResult.Checks, CheckResult{
-				Name:    "max_chars",
-				Passed:  false,
-				Message: fmt.Sprintf("got %d chars, want at most %d", len(text), turn.MaxChars),
-			})
-			return failTurn(result, turnResult, err)
-		}
-		if turn.MaxChars > 0 {
-			turnResult.Checks = append(turnResult.Checks, CheckResult{
-				Name:    "max_chars",
-				Passed:  true,
-				Message: fmt.Sprintf("got %d chars, want at most %d", len(text), turn.MaxChars),
-			})
-		}
-		for _, want := range turn.WantContains {
-			want = strings.TrimSpace(want)
-			if want == "" {
-				continue
-			}
-			if !strings.Contains(text, want) {
-				err := fmt.Errorf("turn %d response missing %q", i+1, want)
-				turnResult.Checks = append(turnResult.Checks, CheckResult{
-					Name:    "contains",
-					Passed:  false,
-					Message: fmt.Sprintf("missing %q", want),
-				})
+		for _, check := range turnChecks {
+			if err := check(i+1, turn, msg, text, &turnResult.Checks); err != nil {
 				return failTurn(result, turnResult, err)
 			}
-			turnResult.Checks = append(turnResult.Checks, CheckResult{
-				Name:    "contains",
-				Passed:  true,
-				Message: fmt.Sprintf("found %q", want),
-			})
-		}
-		for _, forbidden := range turn.WantNotContains {
-			forbidden = strings.TrimSpace(forbidden)
-			if forbidden == "" {
-				continue
-			}
-			if strings.Contains(text, forbidden) {
-				err := fmt.Errorf("turn %d response included forbidden text %q", i+1, forbidden)
-				turnResult.Checks = append(turnResult.Checks, CheckResult{
-					Name:    "not_contains",
-					Passed:  false,
-					Message: fmt.Sprintf("found forbidden text %q", forbidden),
-				})
-				return failTurn(result, turnResult, err)
-			}
-			turnResult.Checks = append(turnResult.Checks, CheckResult{
-				Name:    "not_contains",
-				Passed:  true,
-				Message: fmt.Sprintf("did not find %q", forbidden),
-			})
-		}
-		for _, pattern := range turn.WantRegex {
-			pattern = strings.TrimSpace(pattern)
-			if pattern == "" {
-				continue
-			}
-			re, err := regexp.Compile(pattern)
-			if err != nil {
-				err := fmt.Errorf("turn %d invalid response regex %q: %w", i+1, pattern, err)
-				turnResult.Checks = append(turnResult.Checks, CheckResult{
-					Name:    "regex",
-					Passed:  false,
-					Message: err.Error(),
-				})
-				return failTurn(result, turnResult, err)
-			}
-			if !re.MatchString(text) {
-				err := fmt.Errorf("turn %d response did not match regex %q", i+1, pattern)
-				turnResult.Checks = append(turnResult.Checks, CheckResult{
-					Name:    "regex",
-					Passed:  false,
-					Message: fmt.Sprintf("did not match %q", pattern),
-				})
-				return failTurn(result, turnResult, err)
-			}
-			turnResult.Checks = append(turnResult.Checks, CheckResult{
-				Name:    "regex",
-				Passed:  true,
-				Message: fmt.Sprintf("matched %q", pattern),
-			})
-		}
-		if turn.MaxToolCalls != nil && len(msg.ToolCalls) > *turn.MaxToolCalls {
-			err := fmt.Errorf("turn %d used too many tool calls: got %d, want at most %d", i+1, len(msg.ToolCalls), *turn.MaxToolCalls)
-			turnResult.Checks = append(turnResult.Checks, CheckResult{
-				Name:    "max_tool_calls",
-				Passed:  false,
-				Message: fmt.Sprintf("got %d tool calls, want at most %d", len(msg.ToolCalls), *turn.MaxToolCalls),
-			})
-			return failTurn(result, turnResult, err)
-		}
-		if turn.MaxToolCalls != nil {
-			turnResult.Checks = append(turnResult.Checks, CheckResult{
-				Name:    "max_tool_calls",
-				Passed:  true,
-				Message: fmt.Sprintf("got %d tool calls, want at most %d", len(msg.ToolCalls), *turn.MaxToolCalls),
-			})
 		}
 
 		turnResult.Passed = true
@@ -604,6 +481,125 @@ func (r Runner) Run(ctx context.Context, scenario Scenario) (*Result, error) {
 	}
 
 	return result, nil
+}
+
+// turnCheckFunc validates one aspect of a turn's response against turn's
+// criteria, appending its CheckResult(s) to *checks. It returns the first
+// failure it finds, or nil if the check passed (or didn't apply).
+type turnCheckFunc func(index int, turn Turn, msg model.Message, text string, checks *[]CheckResult) error
+
+// turnChecks runs in this exact order for every turn. Run stops at the
+// first failure and aborts the whole scenario (see failTurn), so this
+// ordering is an observable part of chatcheck's contract, not just an
+// implementation detail.
+var turnChecks = []turnCheckFunc{
+	nonEmptyTextCheck,
+	minCharsCheck,
+	maxCharsCheck,
+	containsCheck,
+	notContainsCheck,
+	regexCheck,
+	maxToolCallsCheck,
+}
+
+func nonEmptyTextCheck(index int, _ Turn, _ model.Message, text string, checks *[]CheckResult) error {
+	if text != "" {
+		*checks = append(*checks, CheckResult{Name: "non_empty_text", Passed: true})
+		return nil
+	}
+	*checks = append(*checks, CheckResult{Name: "non_empty_text", Passed: false, Message: "assistant text was empty"})
+	return fmt.Errorf("turn %d returned empty assistant text", index)
+}
+
+func minCharsCheck(index int, turn Turn, _ model.Message, text string, checks *[]CheckResult) error {
+	if turn.MinChars <= 0 {
+		return nil
+	}
+	message := fmt.Sprintf("got %d chars, want at least %d", len(text), turn.MinChars)
+	if len(text) < turn.MinChars {
+		*checks = append(*checks, CheckResult{Name: "min_chars", Passed: false, Message: message})
+		return fmt.Errorf("turn %d response too short: %s", index, message)
+	}
+	*checks = append(*checks, CheckResult{Name: "min_chars", Passed: true, Message: message})
+	return nil
+}
+
+func maxCharsCheck(index int, turn Turn, _ model.Message, text string, checks *[]CheckResult) error {
+	if turn.MaxChars <= 0 {
+		return nil
+	}
+	message := fmt.Sprintf("got %d chars, want at most %d", len(text), turn.MaxChars)
+	if len(text) > turn.MaxChars {
+		*checks = append(*checks, CheckResult{Name: "max_chars", Passed: false, Message: message})
+		return fmt.Errorf("turn %d response too long: %s", index, message)
+	}
+	*checks = append(*checks, CheckResult{Name: "max_chars", Passed: true, Message: message})
+	return nil
+}
+
+func containsCheck(index int, turn Turn, _ model.Message, text string, checks *[]CheckResult) error {
+	for _, want := range turn.WantContains {
+		want = strings.TrimSpace(want)
+		if want == "" {
+			continue
+		}
+		if !strings.Contains(text, want) {
+			*checks = append(*checks, CheckResult{Name: "contains", Passed: false, Message: fmt.Sprintf("missing %q", want)})
+			return fmt.Errorf("turn %d response missing %q", index, want)
+		}
+		*checks = append(*checks, CheckResult{Name: "contains", Passed: true, Message: fmt.Sprintf("found %q", want)})
+	}
+	return nil
+}
+
+func notContainsCheck(index int, turn Turn, _ model.Message, text string, checks *[]CheckResult) error {
+	for _, forbidden := range turn.WantNotContains {
+		forbidden = strings.TrimSpace(forbidden)
+		if forbidden == "" {
+			continue
+		}
+		if strings.Contains(text, forbidden) {
+			*checks = append(*checks, CheckResult{Name: "not_contains", Passed: false, Message: fmt.Sprintf("found forbidden text %q", forbidden)})
+			return fmt.Errorf("turn %d response included forbidden text %q", index, forbidden)
+		}
+		*checks = append(*checks, CheckResult{Name: "not_contains", Passed: true, Message: fmt.Sprintf("did not find %q", forbidden)})
+	}
+	return nil
+}
+
+func regexCheck(index int, turn Turn, _ model.Message, text string, checks *[]CheckResult) error {
+	for _, pattern := range turn.WantRegex {
+		pattern = strings.TrimSpace(pattern)
+		if pattern == "" {
+			continue
+		}
+		re, err := regexp.Compile(pattern)
+		if err != nil {
+			wrapped := fmt.Errorf("turn %d invalid response regex %q: %w", index, pattern, err)
+			*checks = append(*checks, CheckResult{Name: "regex", Passed: false, Message: wrapped.Error()})
+			return wrapped
+		}
+		if !re.MatchString(text) {
+			*checks = append(*checks, CheckResult{Name: "regex", Passed: false, Message: fmt.Sprintf("did not match %q", pattern)})
+			return fmt.Errorf("turn %d response did not match regex %q", index, pattern)
+		}
+		*checks = append(*checks, CheckResult{Name: "regex", Passed: true, Message: fmt.Sprintf("matched %q", pattern)})
+	}
+	return nil
+}
+
+func maxToolCallsCheck(index int, turn Turn, msg model.Message, _ string, checks *[]CheckResult) error {
+	if turn.MaxToolCalls == nil {
+		return nil
+	}
+	toolCalls := len(msg.ToolCalls)
+	message := fmt.Sprintf("got %d tool calls, want at most %d", toolCalls, *turn.MaxToolCalls)
+	if toolCalls > *turn.MaxToolCalls {
+		*checks = append(*checks, CheckResult{Name: "max_tool_calls", Passed: false, Message: message})
+		return fmt.Errorf("turn %d used too many tool calls: got %d, want at most %d", index, toolCalls, *turn.MaxToolCalls)
+	}
+	*checks = append(*checks, CheckResult{Name: "max_tool_calls", Passed: true, Message: message})
+	return nil
 }
 
 func (r Runner) RunSuite(ctx context.Context, name string, scenarios []Scenario) (*SuiteResult, error) {

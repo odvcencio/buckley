@@ -276,6 +276,50 @@ func TestContinuationCursor_ThirdTurnRemainsHitWithFullRequestCommit(t *testing.
 	}
 }
 
+// TestContinuationCursor_IncrementalDigestsMatchFromScratch proves the
+// incremental digest cache Commit uses (carrying forward the previously
+// verified prefix and hashing only the new suffix + assistant reply) produces
+// byte-identical fingerprints to hashing the whole message list from scratch,
+// across several turns.
+func TestContinuationCursor_IncrementalDigestsMatchFromScratch(t *testing.T) {
+	cursor := &ContinuationCursor{}
+	history := []Message{{Role: "user", Content: "turn one"}}
+
+	for turn := 1; turn <= 3; turn++ {
+		req := ChatRequest{Model: "openai/gpt-5.4", Messages: append([]Message(nil), history...)}
+		if _, err := cursor.Prepare(req); err != nil {
+			t.Fatalf("turn %d prepare: %v", turn, err)
+		}
+
+		assistant := Message{Role: "assistant", Content: fmt.Sprintf("answer %d", turn)}
+		resp := &ContinuationResponse{
+			Response: &ChatResponse{Choices: []Choice{{Message: assistant}}},
+			Continuation: &ProviderContinuation{
+				ProviderID: "openai", ModelID: "openai/gpt-5.4", State: json.RawMessage(`{"v":1}`),
+			},
+		}
+		if err := cursor.Commit(req, resp); err != nil {
+			t.Fatalf("turn %d commit: %v", turn, err)
+		}
+
+		fullMessages := append(append([]Message(nil), req.Messages...), assistant)
+		want, err := fingerprintMessages(fullMessages)
+		if err != nil {
+			t.Fatalf("turn %d from-scratch fingerprint: %v", turn, err)
+		}
+		if len(cursor.represented) != len(want) {
+			t.Fatalf("turn %d represented length = %d, want %d", turn, len(cursor.represented), len(want))
+		}
+		for i := range want {
+			if cursor.represented[i] != want[i] {
+				t.Fatalf("turn %d fingerprint %d mismatch: incremental=%x want=%x", turn, i, cursor.represented[i], want[i])
+			}
+		}
+
+		history = append(history, assistant, Message{Role: "user", Content: fmt.Sprintf("turn %d follow-up", turn+1)})
+	}
+}
+
 func TestProviderContinuation_CompatibleAcceptsUnprefixedCallerModel(t *testing.T) {
 	c := &ProviderContinuation{ProviderID: "openai", ModelID: "openai/gpt-5.4"}
 	if !c.Compatible("openai", "gpt-5.4") {

@@ -1,8 +1,15 @@
 package model
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestAnthropicProvider_ToAnthropicRequest_WithTools(t *testing.T) {
@@ -171,5 +178,89 @@ func TestAnthropicResponse_ToChatResponse_WithToolUse(t *testing.T) {
 	}
 	if resp.Usage.TotalTokens != 19 {
 		t.Fatalf("expected total tokens 19, got %d", resp.Usage.TotalTokens)
+	}
+}
+
+// TestAnthropicProvider_ChatCompletionRetriesTransientError proves the
+// migration onto the shared ProviderTransport: a transient 429 is retried
+// and recovered inside ChatCompletion instead of surfacing to the caller.
+func TestAnthropicProvider_ChatCompletionRetriesTransientError(t *testing.T) {
+	var requests int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("x-api-key"); got != "test-key" {
+			t.Fatalf("x-api-key = %q, want test-key", got)
+		}
+		if got := r.Header.Get("anthropic-version"); got != "2023-06-01" {
+			t.Fatalf("anthropic-version = %q", got)
+		}
+		if atomic.AddInt32(&requests, 1) == 1 {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = io.WriteString(w, `{"error":{"message":"rate limited","type":"rate_limit_error"}}`)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{
+			"id":"msg_1",
+			"model":"claude-3.5-sonnet",
+			"content":[{"type":"text","text":"recovered"}],
+			"stop_reason":"end_turn",
+			"usage":{"input_tokens":3,"output_tokens":2}
+		}`)
+	}))
+	defer server.Close()
+
+	provider := NewAnthropicProvider("test-key", server.URL, false)
+	provider.httpClient = server.Client()
+	provider.transport.SetRetryConfig(RetryConfig{
+		MaxRetries:          3,
+		MaxRateLimitRetries: 3,
+		InitialInterval:     time.Millisecond,
+		MaxInterval:         2 * time.Millisecond,
+		Multiplier:          2,
+	})
+
+	resp, err := provider.ChatCompletion(context.Background(), ChatRequest{
+		Model:    "anthropic/claude-3.5-sonnet",
+		Messages: []Message{{Role: "user", Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("ChatCompletion() error = %v, want the transient 429 retried transparently", err)
+	}
+	if len(resp.Choices) == 0 || resp.Choices[0].Message.Content != "recovered" {
+		t.Fatalf("response = %#v", resp)
+	}
+	if atomic.LoadInt32(&requests) != 2 {
+		t.Fatalf("requests = %d, want 2", requests)
+	}
+}
+
+// TestAnthropicProvider_ChatCompletionSurfacesStructuredError proves a
+// non-retryable error status becomes a structured *APIError instead of the
+// prior implementation's plain fmt.Errorf(resp.Status).
+func TestAnthropicProvider_ChatCompletionSurfacesStructuredError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, `{"error":{"type":"invalid_request_error","message":"missing model"}}`)
+	}))
+	defer server.Close()
+
+	provider := NewAnthropicProvider("test-key", server.URL, false)
+	provider.httpClient = server.Client()
+
+	_, err := provider.ChatCompletion(context.Background(), ChatRequest{
+		Model:    "anthropic/claude-3.5-sonnet",
+		Messages: []Message{{Role: "user", Content: "hi"}},
+	})
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("error = %v (%T), want *APIError", err, err)
+	}
+	if apiErr.StatusCode != http.StatusBadRequest || apiErr.Message != "missing model" || apiErr.Retryable {
+		t.Fatalf("apiErr = %#v", apiErr)
 	}
 }

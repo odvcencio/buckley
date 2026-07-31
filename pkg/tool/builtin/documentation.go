@@ -19,7 +19,7 @@ func (t *GenerateDocstringTool) Name() string {
 }
 
 func (t *GenerateDocstringTool) Description() string {
-	return "Generate documentation comments (docstrings/godoc/JSDoc) for a function or method. Analyzes function signature, parameters, and return values to create appropriate documentation. Supports Go, JavaScript/TypeScript, and Python. Use this to add or improve code documentation."
+	return "Generate documentation comments (godoc, JSDoc, or docstring) for a function, from its signature. Supports Go, JS/TS, Python."
 }
 
 func (t *GenerateDocstringTool) Parameters() ParameterSchema {
@@ -386,7 +386,7 @@ func (t *ExplainCodeTool) Name() string {
 }
 
 func (t *ExplainCodeTool) Description() string {
-	return "Analyze and explain what a code snippet or function does. Provides a plain English explanation of the code's purpose, logic flow, and key operations. Use this to understand unfamiliar code or document complex logic."
+	return "Explain what a code snippet or function does: purpose, logic flow, and key operations, in plain English."
 }
 
 func (t *ExplainCodeTool) Parameters() ParameterSchema {

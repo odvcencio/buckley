@@ -2,6 +2,8 @@ package model
 
 import (
 	"encoding/json"
+	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -216,6 +218,57 @@ func TestReasoningDetail_RoundTripsUnknownFields(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Fatalf("expected %s in %s", want, out)
 		}
+	}
+}
+
+// TestReasoningDetail_RoundTripPropertyOverRecordedShapes is a property test
+// for the ReasoningDetail codec: for each recorded provider JSON shape,
+// decode -> encode -> decode must produce a struct deeply equal to the first
+// decode (semantically equal; MarshalJSON's field order need not match the
+// source document's key order).
+func TestReasoningDetail_RoundTripPropertyOverRecordedShapes(t *testing.T) {
+	shapes := []string{
+		// Plain reasoning.text with an index.
+		`{"type":"reasoning.text","id":"rt_1","index":0,"text":"because gcd(p,q)=1 forces both p and q even, a contradiction"}`,
+		// reasoning.summary with no index and a format tag.
+		`{"type":"reasoning.summary","summary":"short recap of the proof","format":"anthropic-claude-v1"}`,
+		// reasoning.encrypted with a non-null signature.
+		`{"type":"reasoning.encrypted","id":"rt_2","data":"ZW5jcnlwdGVkLXBheWxvYWQ=","signature":"sig-xyz","index":3}`,
+		// Explicit null signature plus an unknown provider field (the shape the
+		// pre-existing TestReasoningDetail_RoundTripsUnknownFields also covers).
+		`{"type":"reasoning.encrypted","data":"abc","signature":null,"id":"r1","format":"anthropic-claude-v1","index":0,"provider_field":{"x":1}}`,
+		// Text needing JSON escaping: newlines, tabs, quotes, backslashes.
+		`{"type":"reasoning.text","text":"multi\nline\ttext with \"quotes\" and \\ backslash","index":5}`,
+		// Unicode content plus a deeply nested unknown provider field.
+		`{"type":"reasoning.text","text":"unicode café and math ≤ ≥","vendor_meta":{"tier":"high","nested":{"deep":[1,2,3]}}}`,
+		// No type field at all, only unknown fields (degenerate but valid shape).
+		`{"custom_marker":true,"trace_id":"abc-123"}`,
+	}
+
+	for i, shape := range shapes {
+		t.Run(fmt.Sprintf("shape_%d", i), func(t *testing.T) {
+			var first ReasoningDetail
+			if err := json.Unmarshal([]byte(shape), &first); err != nil {
+				t.Fatalf("unmarshal original: %v", err)
+			}
+
+			encoded, err := json.Marshal(first)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			if !json.Valid(encoded) {
+				t.Fatalf("marshal produced invalid JSON: %s", encoded)
+			}
+
+			var second ReasoningDetail
+			if err := json.Unmarshal(encoded, &second); err != nil {
+				t.Fatalf("unmarshal re-encoded: %v", err)
+			}
+
+			if !reflect.DeepEqual(first, second) {
+				t.Fatalf("round trip changed the decoded value:\n first:  %#v\n second: %#v\n encoded: %s", first, second, encoded)
+			}
+		})
 	}
 }
 

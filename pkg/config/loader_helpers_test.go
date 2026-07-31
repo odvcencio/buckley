@@ -44,6 +44,26 @@ func TestMergeConfigsRespectsBooleanOverrides(t *testing.T) {
 	}
 }
 
+func TestMergeConfigsRespectsToolsDefaultPoolModeOverride(t *testing.T) {
+	base := DefaultConfig()
+	if base.Tools.DefaultPoolMode != "full" {
+		t.Fatalf("expected default pool mode to be full before merge, got %q", base.Tools.DefaultPoolMode)
+	}
+
+	override := &Config{Tools: ToolsConfig{DefaultPoolMode: "standard"}}
+	raw := map[string]any{
+		"tools": map[string]any{
+			"default_pool_mode": "standard",
+		},
+	}
+
+	mergeConfigs(base, override, raw, false)
+
+	if base.Tools.DefaultPoolMode != "standard" {
+		t.Fatalf("expected tools.default_pool_mode to be overridden to standard, got %q", base.Tools.DefaultPoolMode)
+	}
+}
+
 func TestMergeConfigsRespectsBuckbotEfficiencyOverrides(t *testing.T) {
 	base := DefaultConfig()
 	override := &Config{Buckbot: BuckbotConfig{

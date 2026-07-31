@@ -8,7 +8,9 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"m31labs.dev/buckley/v2/pkg/config"
 )
@@ -192,6 +194,7 @@ func TestContinuationCoordinator_CallErrorResetsCursor(t *testing.T) {
 		_, _ = io.WriteString(w, `{"error":{"message":"boom"}}`)
 	}
 	manager, _ := newContinuationTestManager(t, handler)
+	setFastProviderRetries(t, manager, "openai")
 	store := newFakeContinuationStore()
 	cc := NewContinuationCoordinator(manager, store, "session-1")
 
@@ -201,6 +204,78 @@ func TestContinuationCoordinator_CallErrorResetsCursor(t *testing.T) {
 	}
 	if cc.Active() {
 		t.Fatal("expected a provider error to reset the cursor")
+	}
+}
+
+// setFastProviderRetries shortens the named provider's retry backoff to
+// near-zero so tests that intentionally exhaust retries (a handler that
+// always fails) or exercise exactly one retry (a handler that fails once,
+// then succeeds) run in milliseconds instead of the real multi-second
+// production backoff.
+func setFastProviderRetries(t *testing.T, manager *Manager, providerID string) {
+	t.Helper()
+	provider, ok := manager.providers[providerID]
+	if !ok {
+		t.Fatalf("no provider registered for %q", providerID)
+	}
+	openAI, ok := provider.(*OpenAIProvider)
+	if !ok {
+		t.Fatalf("provider %q is not *OpenAIProvider", providerID)
+	}
+	openAI.transport.SetRetryConfig(RetryConfig{
+		MaxRetries:          3,
+		MaxRateLimitRetries: 3,
+		InitialInterval:     time.Millisecond,
+		MaxInterval:         2 * time.Millisecond,
+		Multiplier:          2,
+	})
+}
+
+// TestContinuationCoordinator_TransientRetryDoesNotResetCursor is the
+// CRITICAL regression test for the shared resilient transport: a single
+// transient 429 during a continuation turn must be retried and recovered
+// *inside* OpenAIProvider.invokeResponse, before ContinuationCoordinator.Call
+// ever observes an error. If the retry happened above invokeResponse instead,
+// Call's error path would reset the cursor and destroy the persisted
+// continuation state over a purely transient failure.
+func TestContinuationCoordinator_TransientRetryDoesNotResetCursor(t *testing.T) {
+	var requests int32
+	handler := func(w http.ResponseWriter, r *http.Request) {
+		n := atomic.AddInt32(&requests, 1)
+		if n == 1 {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = io.WriteString(w, `{"error":{"message":"rate limited","type":"rate_limit_error"}}`)
+			return
+		}
+		openAIContinuationResponseHandler(t, "recovered")(w, r)
+	}
+	manager, _ := newContinuationTestManager(t, handler)
+	setFastProviderRetries(t, manager, "openai")
+	store := newFakeContinuationStore()
+	cc := NewContinuationCoordinator(manager, store, "session-1")
+
+	req := ChatRequest{Model: "gpt-5.4", Messages: []Message{{Role: "user", Content: "hi"}}}
+	resp, err := cc.Call(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Call() error = %v, want the transient 429 retried transparently", err)
+	}
+	if resp == nil || len(resp.Choices) == 0 || resp.Choices[0].Message.Content != "recovered" {
+		t.Fatalf("Call() response = %#v, want the recovered completion", resp)
+	}
+	if atomic.LoadInt32(&requests) != 2 {
+		t.Fatalf("requests = %d, want 2 (one 429, one retry that succeeds)", requests)
+	}
+	if !cc.Active() {
+		t.Fatal("a transient 429 must not reset the continuation cursor")
+	}
+	if cc.Hit() {
+		t.Fatal("first turn should not itself be a continuation hit (no represented prefix yet)")
+	}
+
+	raw, err := store.LoadProviderContinuation("session-1", "openai", "gpt-5.4")
+	if err != nil || strings.TrimSpace(raw) == "" {
+		t.Fatalf("expected continuation state persisted despite the transient 429, got %q, err %v", raw, err)
 	}
 }
 

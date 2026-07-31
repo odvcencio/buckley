@@ -1,12 +1,9 @@
 package model
 
 import (
-	"bufio"
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"time"
 )
@@ -18,6 +15,7 @@ type OpenAIProvider struct {
 	apiKey     string
 	baseURL    string
 	httpClient *http.Client
+	transport  *ProviderTransport
 }
 
 // openAIModels enumerates a curated subset of models with pricing/context info.
@@ -139,6 +137,7 @@ func NewOpenAIProvider(apiKey, baseURL string, networkLogsEnabled bool) *OpenAIP
 			Timeout:   defaultTimeout,
 			Transport: transport,
 		},
+		transport: NewProviderTransport(ProviderTransportOptions{}),
 	}
 }
 
@@ -190,33 +189,18 @@ func (p *OpenAIProvider) SetTimeout(timeout time.Duration) {
 	}
 }
 
+func (p *OpenAIProvider) setAuthHeaders(req *http.Request) {
+	req.Header.Set("Authorization", "Bearer "+p.apiKey)
+}
+
 func (p *OpenAIProvider) invoke(ctx context.Context, req ChatRequest) (*ChatResponse, error) {
-	body, err := json.Marshal(req)
-	if err != nil {
-		return nil, fmt.Errorf("marshaling request: %w", err)
-	}
-
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", p.baseURL+"/chat/completions", bytes.NewReader(body))
-	if err != nil {
-		return nil, fmt.Errorf("creating request: %w", err)
-	}
-
-	httpReq.Header.Set("Authorization", "Bearer "+p.apiKey)
-	httpReq.Header.Set("Content-Type", "application/json")
-
-	resp, err := p.httpClient.Do(httpReq)
+	data, err := p.transport.Do(ctx, p.httpClient, "POST", p.baseURL+"/chat/completions", req, p.setAuthHeaders)
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("openai request failed (%d): %s", resp.StatusCode, string(body))
-	}
 
 	var chatResp ChatResponse
-	if err := json.NewDecoder(resp.Body).Decode(&chatResp); err != nil {
+	if err := json.Unmarshal(data, &chatResp); err != nil {
 		return nil, fmt.Errorf("decoding response: %w", err)
 	}
 
@@ -224,60 +208,11 @@ func (p *OpenAIProvider) invoke(ctx context.Context, req ChatRequest) (*ChatResp
 }
 
 func (p *OpenAIProvider) invokeStream(ctx context.Context, req ChatRequest, chunkChan chan<- StreamChunk) error {
-	body, err := json.Marshal(req)
-	if err != nil {
-		return fmt.Errorf("marshaling request: %w", err)
-	}
-
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", p.baseURL+"/chat/completions", bytes.NewReader(body))
-	if err != nil {
-		return fmt.Errorf("creating request: %w", err)
-	}
-	httpReq.Header.Set("Authorization", "Bearer "+p.apiKey)
-	httpReq.Header.Set("Content-Type", "application/json")
-
-	resp, err := p.httpClient.Do(httpReq)
+	body, err := p.transport.DoStream(ctx, p.httpClient, "POST", p.baseURL+"/chat/completions", req, p.setAuthHeaders)
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("openai streaming request failed (%d): %s", resp.StatusCode, string(body))
-	}
-
-	scanner := bufio.NewScanner(resp.Body)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024) // 1MB max line
-	for scanner.Scan() {
-		select {
-		case <-ctx.Done():
-			return nil
-		default:
-		}
-
-		data := scanner.Text()
-		if data == "" {
-			continue
-		}
-
-		if len(data) > 6 && data[:6] == "data: " {
-			data = data[6:]
-		}
-		if data == "[DONE]" {
-			break
-		}
-
-		var chunk StreamChunk
-		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
-			continue
-		}
-		select {
-		case chunkChan <- chunk:
-		case <-ctx.Done():
-			return ctx.Err()
-		}
-	}
-
-	return scanner.Err()
+	return ParseSSEStream(ctx, body, chunkChan)
 }

@@ -1,11 +1,9 @@
 package model
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -19,6 +17,7 @@ type GoogleProvider struct {
 	apiKey     string
 	baseURL    string
 	httpClient *http.Client
+	transport  *ProviderTransport
 }
 
 var googleModels = []ModelInfo{
@@ -82,6 +81,7 @@ func NewGoogleProvider(apiKey, baseURL string, networkLogsEnabled bool) *GoogleP
 			Timeout:   defaultTimeout,
 			Transport: transport,
 		},
+		transport: NewProviderTransport(ProviderTransportOptions{}),
 	}
 }
 
@@ -114,31 +114,14 @@ func (p *GoogleProvider) ChatCompletion(ctx context.Context, req ChatRequest) (*
 		return nil, err
 	}
 
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return nil, err
-	}
-
 	endpoint := fmt.Sprintf("%s/models/%s:generateContent?key=%s", p.baseURL, url.PathEscape(payload.Model), url.QueryEscape(p.apiKey))
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", endpoint, bytes.NewReader(body))
+	data, err := p.transport.Do(ctx, p.httpClient, "POST", endpoint, payload, nil)
 	if err != nil {
 		return nil, err
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-
-	resp, err := p.httpClient.Do(httpReq)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		errBody, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("google request failed (%d): %s", resp.StatusCode, string(errBody))
 	}
 
 	var genResp googleResponse
-	if err := json.NewDecoder(resp.Body).Decode(&genResp); err != nil {
+	if err := json.Unmarshal(data, &genResp); err != nil {
 		return nil, err
 	}
 

@@ -10,16 +10,23 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/muesli/termenv"
 	"golang.org/x/term"
+
+	"m31labs.dev/fluffyui/compositor"
+	fluffymd "m31labs.dev/fluffyui/markdown"
+	"m31labs.dev/fluffyui/theme"
 )
+
+// markdownWrapWidth matches the word-wrap width previously passed to
+// glamour.WithWordWrap.
+const markdownWrapWidth = 100
 
 // Writer provides styled terminal output with markdown rendering.
 type Writer struct {
 	out      io.Writer
-	renderer *glamour.TermRenderer
+	renderer *fluffymd.Renderer
 	mu       sync.Mutex
 
 	// Styles
@@ -40,11 +47,8 @@ func New() *Writer {
 
 // NewWithOutput creates a terminal Writer with a custom output destination.
 func NewWithOutput(out io.Writer) *Writer {
-	// Initialize glamour renderer with dark theme
-	renderer, _ := glamour.NewTermRenderer(
-		glamour.WithAutoStyle(),
-		glamour.WithWordWrap(100),
-	)
+	// Initialize the markdown renderer with the default (dark) theme.
+	renderer := fluffymd.NewRenderer(theme.DefaultTheme())
 
 	// Detect color profile for adaptive colors
 	// lipgloss uses this internally for AdaptiveColor
@@ -119,14 +123,42 @@ func (w *Writer) Markdown(md string) error {
 		return nil
 	}
 
-	rendered, err := w.renderer.Render(md)
-	if err != nil {
-		fmt.Fprintln(w.out, md)
-		return err
-	}
-
-	fmt.Fprint(w.out, rendered)
+	lines := w.renderer.RenderWidth("", md, markdownWrapWidth)
+	fmt.Fprintln(w.out, renderStyledLines(lines))
 	return nil
+}
+
+// renderStyledLines converts fluffyui markdown's styled lines into a plain
+// ANSI-escaped string suitable for a non-interactive io.Writer.
+func renderStyledLines(lines []fluffymd.StyledLine) string {
+	var sb strings.Builder
+	for i, line := range lines {
+		if i > 0 {
+			sb.WriteByte('\n')
+		}
+		if line.BlankLine {
+			continue
+		}
+		if line.Indent > 0 {
+			sb.WriteString(strings.Repeat(" ", line.Indent))
+		}
+		writeStyledSpans(&sb, line.Prefix)
+		writeStyledSpans(&sb, line.Spans)
+	}
+	return sb.String()
+}
+
+// writeStyledSpans writes each span with its ANSI style, resetting after
+// every span so styles never bleed into unstyled text.
+func writeStyledSpans(sb *strings.Builder, spans []fluffymd.StyledSpan) {
+	for _, span := range spans {
+		if span.Text == "" {
+			continue
+		}
+		sb.WriteString(compositor.StyleToANSI(span.Style))
+		sb.WriteString(span.Text)
+		sb.WriteString(compositor.ANSIReset)
+	}
 }
 
 // Error prints an error message in red.

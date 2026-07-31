@@ -128,6 +128,7 @@ type Config struct {
 	Approval       ApprovalConfig       `yaml:"approval"`
 	Sandbox        SandboxConfig        `yaml:"sandbox"`
 	ToolMiddleware ToolMiddlewareConfig `yaml:"tool_middleware"`
+	Tools          ToolsConfig          `yaml:"tools"`
 	MCP            MCPConfig            `yaml:"mcp"`
 	ACP            ACPConfig            `yaml:"acp"`
 	Worktrees      WorktreeConfig       `yaml:"worktrees"`
@@ -672,6 +673,14 @@ type ToolMiddlewareConfig struct {
 	PerToolTimeouts map[string]time.Duration `yaml:"per_tool_timeouts"`
 	MaxResultBytes  int                      `yaml:"max_result_bytes"`
 	Retry           ToolRetryConfig          `yaml:"retry"`
+}
+
+// ToolsConfig defines defaults for the tool pool exposed to models.
+type ToolsConfig struct {
+	// DefaultPoolMode is the tool pool mode used when no policy evaluator
+	// resolves one (evaluator is nil or its lookup fails). Valid values:
+	// "full" (all tools, default), "standard", "read_only", "simple".
+	DefaultPoolMode string `yaml:"default_pool_mode"`
 }
 
 // MCPConfig defines MCP server settings for tool integration.

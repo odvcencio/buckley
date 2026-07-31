@@ -17,7 +17,10 @@ ARG VERSION=dev
 ARG COMMIT=unknown
 ARG BUILD_DATE=unknown
 
-RUN CGO_ENABLED=0 go build -ldflags="-s -w \
+# -tags webui embeds pkg/ipc/ui as a fallback UI filesystem; this image also
+# serves --assets /app/assets directly (see COPY below), but the embed keeps
+# the server functional if that mount is ever missing.
+RUN CGO_ENABLED=0 go build -tags webui -ldflags="-s -w \
     -X main.version=${VERSION} \
     -X main.commit=${COMMIT} \
     -X main.buildDate=${BUILD_DATE}" \

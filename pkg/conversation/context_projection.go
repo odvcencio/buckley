@@ -74,7 +74,7 @@ func ProjectModelMessagesForRequestPinned(messages []model.Message, req model.Ch
 		return finishProjectionStats(projected, req, stats)
 	}
 
-	messageBudget, requestBudget := projectionTokenBudget(req, contextWindow, scale)
+	messageBudget, requestBudget := projectionTokenBudget(req, originalEstimate, contextWindow, scale)
 	stats.BudgetTokens = messageBudget
 	if originalEstimate.Messages <= messageBudget && originalEstimate.Total <= requestBudget {
 		return cloneProjectionMessages(messages), stats
@@ -100,10 +100,14 @@ func ProjectModelMessagesForRequestPinned(messages []model.Message, req model.Ch
 	return finishProjectionStats(projected, req, stats)
 }
 
-func projectionTokenBudget(req model.ChatRequest, contextWindow int, scale float64) (messageBudget, requestBudget int) {
-	probe := req
-	probe.Messages = nil
-	overhead := model.EstimateRequestTokens(probe).Total
+// projectionTokenBudget derives the request overhead (everything but message
+// content) from originalEstimate instead of re-running EstimateRequestTokens
+// on a Messages=nil probe. The two are equivalent: EstimateRequestTokens
+// computes Tools and Fixed independently of Messages, and a nil Messages
+// slice always estimates to 1 token (the "messages":null JSON envelope), so
+// the probe's Total is always 1 + originalEstimate.Tools + originalEstimate.Fixed.
+func projectionTokenBudget(req model.ChatRequest, originalEstimate model.RequestTokenEstimate, contextWindow int, scale float64) (messageBudget, requestBudget int) {
+	overhead := 1 + originalEstimate.Tools + originalEstimate.Fixed
 	completionReserve := requestedCompletionReserve(req, contextWindow)
 	safetyReserve := contextWindow / 20
 	if safetyReserve < 1024 {
