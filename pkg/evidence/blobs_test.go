@@ -206,3 +206,25 @@ func TestReadAndDeleteRejectPathsOutsideRoot(t *testing.T) {
 		t.Fatalf("outside file was touched: %v", err)
 	}
 }
+
+func TestReadRejectsFinalComponentSymlink(t *testing.T) {
+	b, err := NewBlobStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(t.TempDir(), "secret.zst")
+	if err := os.WriteFile(outside, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(b.Root(), "sha256", "aa", "bb")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "blob.zst")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if _, err := b.Read(link); err == nil {
+		t.Fatal("Read followed a final-component symlink outside the root")
+	}
+}

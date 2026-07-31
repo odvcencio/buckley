@@ -152,6 +152,9 @@ func (b *BlobStore) confinePath(path string) (string, error) {
 	if abs != rootAbs && !strings.HasPrefix(abs, rootAbs+string(filepath.Separator)) {
 		return "", fmt.Errorf("evidence: blob path %q is outside the blob root", path)
 	}
+	if fi, err := os.Lstat(abs); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+		return "", fmt.Errorf("evidence: blob path %q is a symlink; refusing to follow", path)
+	}
 	return abs, nil
 }
 
