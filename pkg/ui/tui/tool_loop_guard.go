@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -84,6 +85,10 @@ func (c *Controller) finishGuardedToolLoop(ctx context.Context, sess *SessionSta
 	req.Tools = nil
 	req.ToolChoice = ""
 	req.ParallelToolCalls = nil
+	// The guard may stop in the middle of a parallel tool-call batch. Providers
+	// require one tool response for every advertised call before another model
+	// turn, so synthesize explicit skipped responses for the unexecuted suffix.
+	req.Messages = completePendingToolResponses(req.Messages, reason)
 	req.Messages = append(req.Messages, model.Message{
 		Role: "system",
 		Content: "Buckley's harness stopped further tool execution because " + reason + ". " +
@@ -124,6 +129,52 @@ func (c *Controller) finishGuardedToolLoop(ctx context.Context, sess *SessionSta
 		usage = state.totalUsage
 	}
 	return c.finishToolLoopResponse(sess, choice.Message, usage, "loop_guard")
+}
+
+func completePendingToolResponses(messages []model.Message, reason string) []model.Message {
+	result := make([]model.Message, len(messages))
+	copy(result, messages)
+
+	assistantIndex := -1
+	for i := len(result) - 1; i >= 0; i-- {
+		msg := result[i]
+		if msg.Role == "assistant" && len(msg.ToolCalls) > 0 {
+			assistantIndex = i
+			break
+		}
+		if msg.Role == "user" || (msg.Role == "assistant" && len(msg.ToolCalls) == 0) {
+			return result
+		}
+	}
+	if assistantIndex < 0 {
+		return result
+	}
+
+	responded := make(map[string]struct{})
+	for _, msg := range result[assistantIndex+1:] {
+		if msg.Role == "tool" && msg.ToolCallID != "" {
+			responded[msg.ToolCallID] = struct{}{}
+		}
+	}
+	for _, call := range result[assistantIndex].ToolCalls {
+		if call.ID == "" {
+			continue
+		}
+		if _, ok := responded[call.ID]; ok {
+			continue
+		}
+		payload, _ := json.Marshal(map[string]any{
+			"success": false,
+			"error":   "skipped by Buckley loop guard: " + strings.TrimSuffix(reason, "."),
+		})
+		result = append(result, model.Message{
+			Role:       "tool",
+			ToolCallID: call.ID,
+			Name:       call.Function.Name,
+			Content:    string(payload),
+		})
+	}
+	return result
 }
 
 func (c *Controller) finishGuardFallback(sess *SessionState, state *toolLoopState, reason string, cause error) (string, *model.Usage, string, error) {
