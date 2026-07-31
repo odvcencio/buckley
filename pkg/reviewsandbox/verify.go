@@ -489,6 +489,8 @@ func (e *Executor) prepareRuntime() (string, func(), error) {
 	return runtimeDir, func() {}, nil
 }
 
+var rustRunningNonZeroTestsRE = regexp.MustCompile(`(?m)\brunning\s+[1-9][0-9]*\s+tests?\b`)
+
 func verificationOutputShowsNoTests(language Language, output string) bool {
 	lower := strings.ToLower(output)
 	for _, marker := range []string{
@@ -505,7 +507,7 @@ func verificationOutputShowsNoTests(language Language, output string) bool {
 	if language != LanguageRust || !strings.Contains(lower, "running 0 tests") {
 		return false
 	}
-	return !regexp.MustCompile(`(?m)\brunning\s+[1-9][0-9]*\s+tests?\b`).MatchString(lower)
+	return !rustRunningNonZeroTestsRE.MatchString(lower)
 }
 
 type plan struct {
