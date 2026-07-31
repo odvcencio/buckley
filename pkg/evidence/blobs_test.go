@@ -161,3 +161,26 @@ func TestBlobStore_Walk(t *testing.T) {
 		t.Fatalf("Walk() found %d files, want %d", len(walked), len(written))
 	}
 }
+
+func TestPathForHashRejectsTraversalAndMalformedHashes(t *testing.T) {
+	b, err := NewBlobStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, bad := range []string{"....", "..", "ab/cd", "ABCDEF" + strings.Repeat("0", 58), strings.Repeat("0", 63), strings.Repeat("0", 65), "../" + strings.Repeat("a", 61)} {
+		if _, err := b.PathForHash(bad); err == nil {
+			t.Fatalf("PathForHash accepted malformed hash %q", bad)
+		}
+	}
+}
+
+func TestWriteRejectsMismatchedContentHash(t *testing.T) {
+	b, err := NewBlobStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrong := strings.Repeat("a", 64)
+	if _, err := b.Write(wrong, []byte("content that does not hash to that")); err == nil {
+		t.Fatal("Write accepted content whose hash does not match the declared hash")
+	}
+}

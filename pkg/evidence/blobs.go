@@ -40,12 +40,28 @@ func (b *BlobStore) Root() string {
 }
 
 // PathForHash returns the on-disk path for a blob with the given lowercase
-// hex sha256 hash, without checking whether the file exists.
+// hex sha256 hash, without checking whether the file exists. The hash must
+// be exactly 64 lowercase hex characters; anything else is rejected so a
+// caller-controlled value can never introduce path separators or traversal
+// components.
 func (b *BlobStore) PathForHash(sha256Hex string) (string, error) {
-	if len(sha256Hex) < 4 {
+	if !validSHA256Hex(sha256Hex) {
 		return "", fmt.Errorf("evidence: invalid content hash %q", sha256Hex)
 	}
 	return filepath.Join(b.root, "sha256", sha256Hex[0:2], sha256Hex[2:4], sha256Hex+".zst"), nil
+}
+
+func validSHA256Hex(s string) bool {
+	if len(s) != 64 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 // Write compresses content with zstd and durably writes it to the
@@ -56,6 +72,9 @@ func (b *BlobStore) Write(sha256Hex string, content []byte) (string, error) {
 	finalPath, err := b.PathForHash(sha256Hex)
 	if err != nil {
 		return "", err
+	}
+	if actual := ContentSHA256Hex(content); actual != sha256Hex {
+		return "", fmt.Errorf("evidence: content hash mismatch: declared %s, actual %s", sha256Hex, actual)
 	}
 
 	if _, err := os.Stat(finalPath); err == nil {
