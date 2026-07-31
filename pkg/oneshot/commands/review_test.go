@@ -2147,6 +2147,95 @@ func TestDetectBaseBranchPrefersRemoteTrackingBranch(t *testing.T) {
 	}
 }
 
+func TestAssembleBranchContextPrefersAdvancedUpstreamForExplicitLocalBase(t *testing.T) {
+	dir := t.TempDir()
+	gitInCmd(t, dir, "init", "-q", "-b", "main")
+	if err := os.WriteFile(filepath.Join(dir, "base.txt"), []byte("base\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitInCmd(t, dir, "add", "base.txt")
+	gitInCmd(t, dir, "commit", "-m", "base")
+	staleLocalMain, err := resolveReviewCommit(dir, "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	gitInCmd(t, dir, "remote", "add", "origin", ".")
+	if err := os.WriteFile(filepath.Join(dir, "upstream.txt"), []byte("current upstream\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitInCmd(t, dir, "add", "upstream.txt")
+	gitInCmd(t, dir, "commit", "-m", "advance upstream")
+	gitInCmd(t, dir, "update-ref", "refs/remotes/origin/main", "HEAD")
+	currentUpstream, err := resolveReviewCommit(dir, "origin/main")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	gitInCmd(t, dir, "switch", "-c", "feature")
+	if err := os.WriteFile(filepath.Join(dir, "feature.txt"), []byte("feature\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitInCmd(t, dir, "add", "feature.txt")
+	gitInCmd(t, dir, "commit", "-m", "feature")
+	gitInCmd(t, dir, "update-ref", "refs/heads/main", staleLocalMain)
+	t.Chdir(dir)
+
+	ctx, audit, err := AssembleBranchContext(BranchContextOptions{
+		BaseBranch:   "main",
+		Scope:        ReviewScopeBranch,
+		MaxDiffBytes: 20_000,
+	})
+	if err != nil {
+		t.Fatalf("AssembleBranchContext: %v", err)
+	}
+	if ctx.BaseBranch != "origin/main" {
+		t.Fatalf("base branch = %q, want advanced upstream origin/main", ctx.BaseBranch)
+	}
+	if ctx.BaseCommit != currentUpstream {
+		t.Fatalf("base commit = %q, want upstream commit %q", ctx.BaseCommit, currentUpstream)
+	}
+	if len(ctx.Files) != 1 || ctx.Files[0].Path != "feature.txt" {
+		t.Fatalf("changed files = %#v, want only feature.txt", ctx.Files)
+	}
+	if strings.Contains(ctx.Diff, "upstream.txt") {
+		t.Fatalf("review diff included historical upstream change:\n%s", ctx.Diff)
+	}
+	var surfacedResolution bool
+	for _, source := range audit.Sources() {
+		if source.Name == "base branch (main -> origin/main; upstream ahead)" {
+			surfacedResolution = true
+			break
+		}
+	}
+	if !surfacedResolution {
+		t.Fatalf("context audit did not surface base resolution: %#v", audit.Sources())
+	}
+}
+
+func TestResolveBranchReviewBasePreservesLocalAheadAndExactRefs(t *testing.T) {
+	dir := t.TempDir()
+	gitInCmd(t, dir, "init", "-q", "-b", "main")
+	if err := os.WriteFile(filepath.Join(dir, "base.txt"), []byte("base\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitInCmd(t, dir, "add", "base.txt")
+	gitInCmd(t, dir, "commit", "-m", "base")
+	gitInCmd(t, dir, "update-ref", "refs/remotes/origin/main", "HEAD")
+
+	if err := os.WriteFile(filepath.Join(dir, "local.txt"), []byte("local ahead\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitInCmd(t, dir, "add", "local.txt")
+	gitInCmd(t, dir, "commit", "-m", "local ahead")
+
+	for _, requested := range []string{"main", "refs/heads/main", "origin/main", "HEAD"} {
+		if got := resolveBranchReviewBase(dir, requested); got != requested {
+			t.Fatalf("resolveBranchReviewBase(%q) = %q, want exact request", requested, got)
+		}
+	}
+}
+
 func TestWorktreeScopeCollapsesStagedAndUnstagedEditsToFinalState(t *testing.T) {
 	dir := t.TempDir()
 	gitInCmd(t, dir, "init", "-q")
