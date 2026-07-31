@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -85,6 +86,76 @@ func TestApprovalMiddlewareWriteFile(t *testing.T) {
 	}
 	if string(contents) != "new" {
 		t.Errorf("unexpected content: %s", string(contents))
+	}
+}
+
+func TestApprovalMiddlewareRunCode(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, err := storage.New(filepath.Join(tmpDir, "mission.db"))
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	missionStore := mission.NewStore(store.DB())
+	session := &storage.Session{
+		ID:         "session-code",
+		CreatedAt:  time.Now(),
+		LastActive: time.Now(),
+		Status:     storage.SessionStatusActive,
+	}
+	if err := store.CreateSession(session); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	registry := NewEmptyRegistry()
+	registry.Register(&builtin.DynamicCodeTool{})
+	registry.EnableMissionControl(missionStore, "agent-code", true, 2*time.Second)
+	registry.UpdateMissionSession(session.ID)
+
+	done := make(chan struct{})
+	var result *builtin.Result
+	var execErr error
+	go func() {
+		result, execErr = registry.Execute("run_code", map[string]any{
+			"language": "bash",
+			"code":     "printf approved",
+		})
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		t.Fatal("expected run_code to wait for approval")
+	case <-time.After(25 * time.Millisecond):
+	}
+
+	changeID := waitForPendingChange(t, store.DB())
+	var diff string
+	if err := store.DB().QueryRow(`SELECT diff FROM pending_changes WHERE id = ?`, changeID).Scan(&diff); err != nil {
+		t.Fatalf("read pending change: %v", err)
+	}
+	if !strings.Contains(diff, "printf approved") || strings.Contains(diff, "base64 -d") {
+		t.Fatalf("unexpected code approval diff: %q", diff)
+	}
+	if err := missionStore.UpdatePendingChangeStatus(changeID, "approved", "tester"); err != nil {
+		t.Fatalf("approve code: %v", err)
+	}
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("run_code timed out waiting for approval")
+	}
+	if execErr != nil {
+		t.Fatalf("unexpected execute error: %v", execErr)
+	}
+	if result == nil || !result.Success {
+		t.Fatalf("expected success result, got %#v", result)
+	}
+	stdout, _ := result.Data["stdout"].(string)
+	if stdout != "approved" {
+		t.Fatalf("stdout = %q, want approved", stdout)
 	}
 }
 

@@ -12,6 +12,7 @@ import (
 // sandboxedTools are tool names that should be routed through the Docker sandbox.
 var sandboxedTools = map[string]bool{
 	"run_shell": true,
+	"run_code":  true,
 	"run_tests": true,
 }
 
@@ -75,6 +76,10 @@ func extractCommand(toolName string, params map[string]any) string {
 	case "run_tests":
 		if cmd, ok := params["command"].(string); ok {
 			return strings.TrimSpace(cmd)
+		}
+	case "run_code":
+		if command, err := builtin.DynamicCodeCommand(params); err == nil {
+			return command
 		}
 	}
 	return ""

@@ -208,7 +208,8 @@ func DefaultConfig() *Config {
 			UseToon: true,
 		},
 		Diagnostics: DiagnosticsConfig{
-			NetworkLogsEnabled: false,
+			NetworkLogsEnabled:           false,
+			TelemetryPayloadsOverNetwork: false,
 		},
 		Personality: PersonalityConfig{
 			Enabled:          true,

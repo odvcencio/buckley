@@ -981,6 +981,7 @@ func (r *Runner) isDangerousTool(toolName string) bool {
 		"write_file":     true,
 		"apply_patch":    true,
 		"run_shell":      true,
+		"run_code":       true,
 		"search_replace": true,
 	}
 	return dangerousTools[toolName]
@@ -996,7 +997,7 @@ func (r *Runner) clampToolTimeoutArgs(toolName string, args map[string]any) {
 	}
 
 	switch strings.TrimSpace(strings.ToLower(toolName)) {
-	case "run_shell", "run_tests":
+	case "run_shell", "run_code", "run_tests":
 		clampTimeoutSeconds(args, "timeout_seconds", maxSeconds)
 	}
 }
@@ -1821,16 +1822,31 @@ func (r *Runner) assessToolRisk(toolName string, args map[string]any) toolRiskAs
 		Score: 0,
 	}
 
-	if r != nil && r.riskDetector != nil && strings.EqualFold(strings.TrimSpace(toolName), "run_shell") {
-		command := extractCommandArg(args)
-		result := r.riskDetector.Analyze(command)
-		assessment.Level = strings.ToLower(result.Level.String())
-		assessment.Score = riskLevelScore(assessment.Level)
-		assessment.Reasons = append(assessment.Reasons, result.Reasons...)
-		if len(assessment.Reasons) == 0 && command != "" {
-			assessment.Reasons = append(assessment.Reasons, "shell command: "+command)
+	if r != nil && r.riskDetector != nil {
+		switch strings.ToLower(strings.TrimSpace(toolName)) {
+		case "run_shell":
+			command := extractCommandArg(args)
+			result := r.riskDetector.Analyze(command)
+			assessment.Level = strings.ToLower(result.Level.String())
+			assessment.Score = riskLevelScore(assessment.Level)
+			assessment.Reasons = append(assessment.Reasons, result.Reasons...)
+			if len(assessment.Reasons) == 0 && command != "" {
+				assessment.Reasons = append(assessment.Reasons, "shell command: "+command)
+			}
+			return assessment
+		case "run_code":
+			// Inspect the raw code argument, not the base64-wrapped shell
+			// command run_code builds around it.
+			code := extractCodeArg(args)
+			result := r.riskDetector.Analyze(code)
+			assessment.Level = strings.ToLower(result.Level.String())
+			assessment.Score = riskLevelScore(assessment.Level)
+			assessment.Reasons = append(assessment.Reasons, result.Reasons...)
+			if len(assessment.Reasons) == 0 && code != "" {
+				assessment.Reasons = append(assessment.Reasons, "code snippet: "+truncateOutput(code, 200))
+			}
+			return assessment
 		}
-		return assessment
 	}
 
 	if r != nil && r.tools != nil {
@@ -1936,6 +1952,16 @@ func extractCommandArg(args map[string]any) string {
 		if value, ok := args[key].(string); ok {
 			return strings.TrimSpace(value)
 		}
+	}
+	return ""
+}
+
+func extractCodeArg(args map[string]any) string {
+	if args == nil {
+		return ""
+	}
+	if value, ok := args["code"].(string); ok {
+		return strings.TrimSpace(value)
 	}
 	return ""
 }

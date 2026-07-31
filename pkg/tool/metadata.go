@@ -71,10 +71,28 @@ func GetMetadata(t Tool) ToolMetadata {
 	return inferMetadata(t)
 }
 
+// toolMetadataOverrides holds per-tool metadata for tools whose real
+// capability isn't reliably signalled by the generic name-substring rules
+// below. run_code, for example, executes arbitrary Python/JS/Go/Bash and
+// must carry the same category and impact as run_shell.
+var toolMetadataOverrides = map[string]ToolMetadata{
+	"run_code": {
+		Category: CategoryShell,
+		Impact:   ImpactDestructive, // executes arbitrary code, same as run_shell
+		Cost:     CostFree,
+		Intent:   "Executing code snippet",
+		Summary:  "Code snippet executed",
+	},
+}
+
 // inferMetadata attempts to infer reasonable metadata from tool name and description
 func inferMetadata(t Tool) ToolMetadata {
-	metadata := DefaultMetadata()
 	name := t.Name()
+	if override, ok := toolMetadataOverrides[name]; ok {
+		return override
+	}
+
+	metadata := DefaultMetadata()
 
 	// Infer category from name
 	switch {
