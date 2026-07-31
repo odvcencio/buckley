@@ -21,9 +21,9 @@ type ContextProjectionStats struct {
 	Emergency       bool
 	Scale           float64
 
-	// ContinuationActive is true when this projection pinned a suffix of
-	// history as owned by an active provider continuation window (decision
-	// 0001), suspending reasoning stripping and pruning for that suffix.
+	// ContinuationActive is true when this projection pinned the prefix of
+	// history an active provider continuation window represents (decision
+	// 0001), suspending reasoning stripping and pruning for that prefix.
 	ContinuationActive bool
 	// ContinuationHit reports whether the provider continuation cursor's
 	// represented prefix was still valid for this request (an incremental
@@ -42,10 +42,11 @@ func ProjectModelMessagesForRequest(messages []model.Message, req model.ChatRequ
 }
 
 // ProjectModelMessagesForRequestPinned behaves like ProjectModelMessagesForRequest,
-// except every message at or after pinnedFromIndex is treated as already
-// represented inside an active provider continuation window (decision 0001):
-// the provider owns that suffix, so projection and compaction leave it
-// untouched. A pinnedFromIndex <= 0 disables the pin.
+// except every message before pinnedFromIndex is treated as the prefix an
+// active provider continuation window already represents (decision 0001):
+// the provider owns that prefix and the cursor fingerprints it, so
+// projection and compaction leave it byte-identical and shape only the
+// suffix. A pinnedFromIndex <= 0 disables the pin.
 func ProjectModelMessagesForRequestPinned(messages []model.Message, req model.ChatRequest, contextWindow int, scale float64, pinnedFromIndex int) ([]model.Message, ContextProjectionStats) {
 	scale = normalizedProjectionScale(scale)
 	fullReq := req

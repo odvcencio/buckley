@@ -21,11 +21,13 @@ type EfficientContextOptions struct {
 	KeepReasoningRecent  int
 	MaxBytes             int
 
-	// PinnedFromIndex marks the start of a suffix that projection and
-	// compaction must pass through untouched: no reasoning stripping, no
-	// content truncation, no prefix collapsing. It represents the region an
-	// active provider continuation window already owns (decision 0001); the
-	// provider shapes that context, not Buckley's compactor. Zero or
+	// PinnedFromIndex marks the end of the represented prefix: every message
+	// at an index below it must pass through byte-identical — no reasoning
+	// stripping, no content truncation, no collapsing. That prefix is the
+	// region an active provider continuation window already owns (decision
+	// 0001): the provider shapes that context, and the continuation cursor
+	// fingerprints it, so any mutation forces a full-retransmit reset.
+	// Shaping applies only to the suffix at or after this index. Zero or
 	// negative disables the pin (no active continuation window).
 	PinnedFromIndex int
 }
@@ -61,9 +63,10 @@ func CompactModelMessagesForRequest(messages []model.Message, req model.ChatRequ
 }
 
 // CompactModelMessagesForRequestPinned behaves like CompactModelMessagesForRequest,
-// except every message at or after pinnedFromIndex is treated as already
+// except every message before pinnedFromIndex is treated as already
 // represented inside an active provider continuation window (decision 0001)
-// and passed through untouched.
+// and passed through untouched; only the suffix from pinnedFromIndex on may
+// be shaped.
 func CompactModelMessagesForRequestPinned(messages []model.Message, req model.ChatRequest, contextWindow, pinnedFromIndex int) []model.Message {
 	projected, _ := ProjectModelMessagesForRequestPinned(messages, req, contextWindow, 1, pinnedFromIndex)
 	return projected
@@ -101,7 +104,7 @@ func CompactModelMessages(messages []model.Message, opts EfficientContextOptions
 	seenToolResults := make(map[[32]byte]int)
 	for i := len(result) - 1; i >= 0; i-- {
 		msg := &result[i]
-		pinned := opts.PinnedFromIndex > 0 && i >= opts.PinnedFromIndex
+		pinned := opts.PinnedFromIndex > 0 && i < opts.PinnedFromIndex
 		if i < reasoningStart && msg.Role == "assistant" && !pinned && !protectedReasoning[i] {
 			msg.Reasoning = ""
 			msg.ReasoningDetails = nil
@@ -183,10 +186,14 @@ func compactToBudget(messages []model.Message, opts EfficientContextOptions, pro
 	if stop < 0 {
 		stop = 0
 	}
-	if opts.PinnedFromIndex > 0 && opts.PinnedFromIndex < stop {
-		stop = opts.PinnedFromIndex
+	start := 0
+	if opts.PinnedFromIndex > 0 {
+		// The represented prefix is immutable; the squeeze may only shape the
+		// unrepresented suffix. If that cannot reach the budget, the caller's
+		// epoch rule resets the continuation and recompiles in full.
+		start = opts.PinnedFromIndex
 	}
-	for i := 0; i < stop && totalBytes > opts.MaxBytes; i++ {
+	for i := start; i < stop && totalBytes > opts.MaxBytes; i++ {
 		msg := &messages[i]
 		before := modelMessageBytes(*msg)
 		switch msg.Role {
@@ -213,7 +220,7 @@ func compactToBudget(messages []model.Message, opts EfficientContextOptions, pro
 		}
 		totalBytes += modelMessageBytes(*msg) - before
 	}
-	for i := 0; i < stop && totalBytes > opts.MaxBytes; i++ {
+	for i := start; i < stop && totalBytes > opts.MaxBytes; i++ {
 		msg := &messages[i]
 		before := modelMessageBytes(*msg)
 		switch msg.Role {
@@ -248,10 +255,14 @@ func collapseHistoricalPrefix(messages []model.Message, maxBytes, pinnedFromInde
 	if len(messages) <= 2 {
 		return messages
 	}
-	tailBoundary := len(messages) - 2
-	if pinnedFromIndex > 0 && pinnedFromIndex < tailBoundary {
-		tailBoundary = pinnedFromIndex
+	if pinnedFromIndex > 0 {
+		// The historical prefix is exactly the region an active continuation
+		// window represents; collapsing it would break the cursor fingerprint.
+		// Return unchanged and let the caller's epoch rule reset the
+		// continuation deliberately before recompiling in full.
+		return messages
 	}
+	tailBoundary := len(messages) - 2
 	tailStart := safeToolPairTailStart(messages, tailBoundary)
 	if tailStart <= 0 {
 		return messages

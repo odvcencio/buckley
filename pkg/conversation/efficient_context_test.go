@@ -245,16 +245,18 @@ func TestCompactModelMessages_UnansweredToolCallReasoningSurvivesBudgetSqueeze(t
 	}
 }
 
-func TestCompactModelMessages_PinnedFromIndexPassesSuffixThroughUntouched(t *testing.T) {
+func TestCompactModelMessages_PinnedFromIndexPassesRepresentedPrefixThroughUntouched(t *testing.T) {
 	large := strings.Repeat("y", 6000)
 	messages := []model.Message{
+		// Represented prefix: everything before the boundary is inside the
+		// provider's continuation window and must stay byte-identical.
 		{Role: "system", Content: "instructions"},
 		{Role: "user", Content: large},
-		{Role: "assistant", Content: large, Reasoning: "stale reasoning"},
-		// Continuation window boundary: everything from here on is
-		// represented by the provider's continuation state.
+		{Role: "assistant", Content: large, Reasoning: "pinned reasoning must survive"},
+		// Unrepresented suffix: new messages since the last commit; these
+		// remain eligible for shaping.
 		{Role: "user", Content: "continue the investigation"},
-		{Role: "assistant", Reasoning: "pinned reasoning must survive", Content: large},
+		{Role: "assistant", Reasoning: "stale reasoning", Content: large},
 		{Role: "tool", Name: "read_file", ToolCallID: "n/a", Content: large},
 	}
 	pinnedFromIndex := 3
@@ -269,14 +271,16 @@ func TestCompactModelMessages_PinnedFromIndexPassesSuffixThroughUntouched(t *tes
 		PinnedFromIndex:      pinnedFromIndex,
 	})
 
-	for i := pinnedFromIndex; i < len(messages); i++ {
+	for i := 0; i < pinnedFromIndex; i++ {
 		if !reflect.DeepEqual(got[i], messages[i]) {
-			t.Fatalf("pinned message %d was modified: got %#v, want %#v", i, got[i], messages[i])
+			t.Fatalf("represented message %d was modified: got %#v, want %#v", i, got[i], messages[i])
 		}
 	}
-	// Everything before the pin remains eligible for compaction.
-	if got[2].Reasoning == messages[2].Reasoning {
-		t.Fatal("expected unpinned prefix to still be compacted")
+	// The unrepresented suffix remains eligible for compaction where the
+	// recency windows allow it (the reasoning-strip rule still applies to
+	// suffix messages outside KeepReasoningRecent).
+	if got[4].Reasoning == messages[4].Reasoning {
+		t.Fatal("expected unrepresented suffix reasoning outside the recency window to be stripped")
 	}
 }
 

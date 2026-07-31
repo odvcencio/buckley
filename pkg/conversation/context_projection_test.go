@@ -77,7 +77,7 @@ func TestProjectModelMessagesForRequest_EmergencyScaleTightensProjection(t *test
 	}
 }
 
-func TestProjectModelMessagesForRequestPinned_ContinuationWindowSuffixPassesThroughUntouched(t *testing.T) {
+func TestProjectModelMessagesForRequestPinned_RepresentedPrefixPassesThroughUntouched(t *testing.T) {
 	messages := make([]model.Message, 60)
 	for i := range messages {
 		messages[i] = model.Message{
@@ -92,25 +92,16 @@ func TestProjectModelMessagesForRequestPinned_ContinuationWindowSuffixPassesThro
 	if !stats.ContinuationActive {
 		t.Fatal("expected ContinuationActive to be reported")
 	}
-	if !stats.Compacted {
-		t.Fatalf("expected compaction of the unpinned prefix: %+v", stats)
+	// The represented prefix must survive byte-for-byte and by absolute
+	// index: the continuation cursor fingerprints messages[0:pin], so no
+	// message in that range may move, shrink, or lose reasoning.
+	if len(projected) < pinnedFromIndex {
+		t.Fatalf("projected messages = %d, want at least the represented prefix of %d", len(projected), pinnedFromIndex)
 	}
-	// The pinned suffix must survive byte-for-byte even if the unpinned
-	// prefix is aggressively collapsed to fit budget, so compare from the
-	// tail rather than by absolute index.
-	pinnedCount := len(messages) - pinnedFromIndex
-	if len(projected) < pinnedCount {
-		t.Fatalf("projected messages = %d, want at least the pinned suffix of %d", len(projected), pinnedCount)
-	}
-	gotSuffix := projected[len(projected)-pinnedCount:]
-	wantSuffix := messages[pinnedFromIndex:]
-	for i := range wantSuffix {
-		if gotSuffix[i].Content != wantSuffix[i].Content || gotSuffix[i].Reasoning != wantSuffix[i].Reasoning {
-			t.Fatalf("pinned message %d was modified: got %#v, want %#v", i, gotSuffix[i], wantSuffix[i])
+	for i := 0; i < pinnedFromIndex; i++ {
+		if projected[i].Content != messages[i].Content || projected[i].Reasoning != messages[i].Reasoning {
+			t.Fatalf("represented message %d was modified: got %#v, want %#v", i, projected[i], messages[i])
 		}
-	}
-	if len(projected) >= len(messages) {
-		t.Fatal("expected unpinned prefix to be compacted")
 	}
 }
 
