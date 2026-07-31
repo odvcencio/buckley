@@ -34,6 +34,10 @@ func (b *TelemetryUIBridge) handleToolActivity(event telemetry.Event, status wid
 	}
 	if status != widgets.ActivityRunning {
 		record.FinishedAt = activityTimestamp(event.Timestamp)
+		// The tool finished, so AppendActivityOutput's streaming builder (if
+		// any) is done accumulating and its buffered bytes are no longer
+		// needed: record.Detail below fully replaces whatever it held.
+		delete(b.detailBuilders, id)
 	}
 	record.Detail = toolActivityDetail(event.Data)
 	b.activities[id] = record
@@ -88,8 +92,15 @@ func (b *TelemetryUIBridge) evictCompletedActivities() {
 	})
 	for _, record := range completed[maxActivityEntries:] {
 		delete(b.activities, record.ID)
+		delete(b.detailBuilders, record.ID)
 	}
 }
+
+// activityFlushInterval bounds how often AppendActivityOutput publishes the
+// sidebar to the UI: a fast-streaming shell command can call it hundreds of
+// times per second, but collectActivities (map copy + sort) and the
+// resulting redraw only need to happen often enough to look live.
+const activityFlushInterval = 100 * time.Millisecond // ~10 refreshes/sec
 
 // AppendActivityOutput streams incremental shell output into the Detail of
 // the running activity identified by taskID, creating a running placeholder
@@ -100,6 +111,18 @@ func (b *TelemetryUIBridge) evictCompletedActivities() {
 // goroutine. The appended text is already bounded by the shell tool's own
 // per-stream progress cap (builtin.maxShellProgressBytes via
 // WithShellOutputSink), so no further truncation happens here.
+//
+// Two costs scale with a long-running command's output volume, so both are
+// bounded independently of how often the caller calls this function:
+//
+//   - Accumulating Detail used to be `record.Detail += text`, which copies
+//     the entire string-so-far on every call (quadratic total cost). A
+//     per-task strings.Builder accumulates in amortized-constant time
+//     instead; Builder.String() is a zero-copy view of its buffer, so
+//     record.Detail can stay current on every call at no extra cost.
+//   - Publishing to the UI (collectActivities' map copy + sort, plus the
+//     resulting redraw) is throttled to activityFlushInterval instead of
+//     firing on every chunk.
 func (b *TelemetryUIBridge) AppendActivityOutput(taskID, text string) {
 	if b == nil {
 		return
@@ -120,17 +143,39 @@ func (b *TelemetryUIBridge) AppendActivityOutput(taskID, text string) {
 			StartedAt: time.Now(),
 		}
 	}
-	record.Detail += text
+
+	builder := b.detailBuilders[taskID]
+	if builder == nil {
+		builder = &strings.Builder{}
+		builder.WriteString(record.Detail)
+		b.detailBuilders[taskID] = builder
+	}
+	builder.WriteString(text)
+	record.Detail = builder.String()
 	b.activities[taskID] = record
+
+	now := time.Now()
+	flush := shouldFlushActivityDetail(b.lastActivityFlush, now)
 	var records []widgets.ActivityRecord
-	if b.app != nil {
-		records = b.collectActivities()
+	if flush {
+		b.lastActivityFlush = now
+		if b.app != nil {
+			records = b.collectActivities()
+		}
 	}
 	b.mu.Unlock()
 
-	if b.app != nil {
+	if flush && b.app != nil {
 		b.app.SetActivities(records)
 	}
+}
+
+// shouldFlushActivityDetail reports whether enough time has passed since
+// last to publish another sidebar update at now. It's a pure function, kept
+// separate from AppendActivityOutput's locking and I/O, so the throttle
+// boundary can be tested without wall-clock waits or a running UI.
+func shouldFlushActivityDetail(last, now time.Time) bool {
+	return last.IsZero() || now.Sub(last) >= activityFlushInterval
 }
 
 func activityRecency(record widgets.ActivityRecord) time.Time {

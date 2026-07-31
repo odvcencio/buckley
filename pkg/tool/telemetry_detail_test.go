@@ -104,3 +104,61 @@ func TestTelemetryResultDetailValidUTF8WhenTruncated(t *testing.T) {
 		t.Fatalf("truncated telemetry result is not valid UTF-8")
 	}
 }
+
+// TestTelemetryResultDetailPreBoundRedactsSecretBeforeGiantField locks in
+// that the cheap pre-bound pass ahead of NormalizeAndSanitize doesn't weaken
+// redaction: a secret sorted ahead of a multi-megabyte field (json.Marshal
+// sorts map keys, so "api_key" < "giant") must still come out redacted, and
+// the giant field after it must still be bounded to the result limit.
+func TestTelemetryResultDetailPreBoundRedactsSecretBeforeGiantField(t *testing.T) {
+	giant := strings.Repeat("z", 5*maxTelemetryResultBytes) // forces the pre-bound path
+	result := &builtin.Result{
+		Success: true,
+		Data: map[string]any{
+			"api_key": "do-not-log-this-secret",
+			"giant":   giant,
+		},
+	}
+	detail := telemetryResultDetail(result)
+	if strings.Contains(detail, "do-not-log-this-secret") {
+		t.Fatalf("secret leaked into pre-bounded telemetry detail: %s", detail)
+	}
+	if !strings.Contains(detail, "[REDACTED]") {
+		t.Fatalf("expected redaction marker in pre-bounded telemetry detail: %s", detail)
+	}
+	if len(detail) > maxTelemetryResultBytes {
+		t.Fatalf("detail length = %d, want <= %d", len(detail), maxTelemetryResultBytes)
+	}
+}
+
+// TestPreBoundIfOversizedLeavesSmallPayloadsUntouched guards against the
+// pre-bound pass firing (and paying its walk cost) on payloads that were
+// never going to be truncated anyway.
+func TestPreBoundIfOversizedLeavesSmallPayloadsUntouched(t *testing.T) {
+	small := map[string]any{"path": "pkg/main.go", "count": 3}
+	got := preBoundIfOversized(small, maxTelemetryResultBytes)
+	gotMap, ok := got.(map[string]any)
+	if !ok || gotMap["path"] != "pkg/main.go" || gotMap["count"] != 3 {
+		t.Fatalf("small payload was altered: %#v", got)
+	}
+}
+
+// TestPreBoundIfOversizedTrimsGiantStringField checks the pre-bound pass
+// itself: an oversized payload's string values shrink to the per-field
+// limit, but its keys are untouched.
+func TestPreBoundIfOversizedTrimsGiantStringField(t *testing.T) {
+	giant := strings.Repeat("z", 5*maxTelemetryResultBytes)
+	payload := map[string]any{"secret_token": "s3cr3t", "giant": giant}
+	got := preBoundIfOversized(payload, maxTelemetryResultBytes)
+	gotMap, ok := got.(map[string]any)
+	if !ok {
+		t.Fatalf("expected map[string]any, got %#v", got)
+	}
+	if _, ok := gotMap["secret_token"]; !ok {
+		t.Fatalf("pre-bound pass dropped a key it should have left for redaction: %#v", gotMap)
+	}
+	trimmedGiant, ok := gotMap["giant"].(string)
+	if !ok || len(trimmedGiant) > maxTelemetryResultBytes {
+		t.Fatalf("giant field not trimmed to the per-field limit: len=%d", len(trimmedGiant))
+	}
+}
