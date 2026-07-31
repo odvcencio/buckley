@@ -17,6 +17,7 @@ var DefaultDiscoveryTools = []string{
 	"search_text",
 	"find_files",
 	"run_shell",
+	"run_code",
 	"write_file",
 	"patch_file",
 	"run_tests",
