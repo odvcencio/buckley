@@ -45,6 +45,25 @@ func TestBuildPRShardPrompt_ScopesDeterministicEvidence(t *testing.T) {
 	}
 }
 
+func TestBuildPRShardPrompt_IncludesRequiredVerificationTargets(t *testing.T) {
+	ctx := &PRContext{
+		PR:    &PRInfo{Number: 77, Title: "Shard verification targets"},
+		Files: []string{"pkg/api/a.go", "pkg/storage/b.go"},
+	}
+	shard := diffsignal.Shard{Context: "api diff", Files: []string{"pkg/api/a.go"}}
+
+	prompt := BuildPRShardPrompt(ctx, shard, 0, 2, true)
+	if !strings.Contains(prompt, "## Required Local Verification Targets") {
+		t.Fatalf("shard prompt missing verification targets section:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "go: pkg/api") {
+		t.Fatalf("shard prompt missing shard-scoped target:\n%s", prompt)
+	}
+	if strings.Contains(prompt, "go: pkg/storage") {
+		t.Fatal("shard prompt included target outside shard's own files")
+	}
+}
+
 func TestProjectShardCostWithContext_IncludesProjectedSharedEvidence(t *testing.T) {
 	shards := diffsignal.ShardResult{
 		Shards: []diffsignal.Shard{

@@ -337,6 +337,27 @@ func TestBuildPRPromptLabelsDescriptionVerificationAsSuppliedEvidence(t *testing
 	}
 }
 
+func TestBuildPRPrompt_IncludesRequiredVerificationTargets(t *testing.T) {
+	prompt := BuildPRPrompt(&PRContext{
+		PR: &PRInfo{
+			Number:       512,
+			Title:        "Add verification targets",
+			HeadSHA:      strings.Repeat("a", 40),
+			BaseSHA:      strings.Repeat("b", 40),
+			ChangedFiles: 1,
+		},
+		Files: []string{"pkg/oneshot/commands/review_pr_context.go"},
+	})
+	for _, want := range []string{
+		"## Required Local Verification Targets",
+		"go: pkg/oneshot/commands",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("PR prompt missing %q:\n%s", want, prompt)
+		}
+	}
+}
+
 func TestAssemblePRContext_BuildPromptIncludesReviewEvidence(t *testing.T) {
 	diff := oversizedReviewDiff() +
 		"diff --git a/pkg/oneshot/commands/review_pr_context.go b/pkg/oneshot/commands/review_pr_context.go\n" +

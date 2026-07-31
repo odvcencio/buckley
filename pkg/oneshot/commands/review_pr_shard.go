@@ -63,6 +63,8 @@ func BuildPRShardPrompt(ctx *PRContext, shard diffsignal.Shard, index, total int
 	}
 	sb.WriteString("\n")
 
+	appendReviewVerificationTargets(&sb, shard.Files, ctx.AgentsMD)
+
 	if !primary {
 		sb.WriteString("This is a secondary shard. A separate synthesis step, not you, issues the merge verdict ")
 		sb.WriteString("for the whole pull request. Regardless of what you find:\n\n")

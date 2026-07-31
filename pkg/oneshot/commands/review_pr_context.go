@@ -17,7 +17,6 @@ import (
 	"time"
 
 	"m31labs.dev/buckley/v2/pkg/diffsignal"
-	"m31labs.dev/buckley/v2/pkg/reviewpolicy"
 	"m31labs.dev/buckley/v2/pkg/transparency"
 )
 
@@ -517,7 +516,7 @@ func BuildPRPrompt(ctx *PRContext) string {
 		}
 		sb.WriteString("\n")
 	}
-	appendReviewVerificationConstraints(&sb, reviewpolicy.ParseVerificationConstraints(ctx.AgentsMD))
+	appendReviewVerificationTargets(&sb, ctx.Files, ctx.AgentsMD)
 
 	if len(ctx.Comments) > 0 {
 		sb.WriteString("## Top-Level PR Comments\n\n")
