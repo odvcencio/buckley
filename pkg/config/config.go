@@ -717,20 +717,44 @@ type ToolsConfig struct {
 	DefaultPoolMode string `yaml:"default_pool_mode"`
 }
 
-// MCPConfig defines MCP server settings for tool integration.
+// MCPConfig defines MCP client settings: which external stdio tool servers
+// Buckley connects to, and the schema budget applied when bridging their
+// tools into the tool registry (see pkg/tool/mcp_tools.go).
 type MCPConfig struct {
 	Enabled bool              `yaml:"enabled"`
 	Servers []MCPServerConfig `yaml:"servers"`
+	// MaxTools caps how many tools a single server may contribute to the
+	// registry. Servers offering more than MaxTools tools have the excess
+	// dropped, with a log message naming the server and the drop count.
+	// Zero uses DefaultMCPMaxTools.
+	MaxTools int `yaml:"max_tools"`
 }
 
-// MCPServerConfig describes a single MCP server.
+// DefaultMCPMaxTools is the default per-server tool budget (see
+// MCPConfig.MaxTools).
+const DefaultMCPMaxTools = 20
+
+// MaxToolsOrDefault returns MaxTools if set, otherwise DefaultMCPMaxTools.
+func (c MCPConfig) MaxToolsOrDefault() int {
+	if c.MaxTools > 0 {
+		return c.MaxTools
+	}
+	return DefaultMCPMaxTools
+}
+
+// MCPServerConfig describes a single MCP stdio server. Command must be an
+// absolute path or resolvable via PATH (see Validate). Env values support
+// ${VAR} expansion against the ambient process environment.
 type MCPServerConfig struct {
-	Name     string            `yaml:"name"`
-	Command  string            `yaml:"command"`
-	Args     []string          `yaml:"args"`
-	Env      map[string]string `yaml:"env"`
-	Timeout  time.Duration     `yaml:"timeout"`
-	Disabled bool              `yaml:"disabled"`
+	Name    string            `yaml:"name"`
+	Command string            `yaml:"command"`
+	Args    []string          `yaml:"args"`
+	Env     map[string]string `yaml:"env"`
+	Timeout time.Duration     `yaml:"timeout"`
+	// Enabled gates whether Buckley connects to this server. Defaults to
+	// false (zero value) so a server config must opt in explicitly, matching
+	// the conservative posture toward external, untrusted tool servers.
+	Enabled bool `yaml:"enabled"`
 }
 
 // ArtifactsConfig defines artifact storage locations

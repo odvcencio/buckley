@@ -394,8 +394,9 @@ func DefaultConfig() *Config {
 			DefaultPoolMode: "full",
 		},
 		MCP: MCPConfig{
-			Enabled: false,
-			Servers: []MCPServerConfig{},
+			Enabled:  false,
+			Servers:  []MCPServerConfig{},
+			MaxTools: DefaultMCPMaxTools,
 		},
 		ACP: ACPConfig{
 			EventStore:         defaultACPStore(),
