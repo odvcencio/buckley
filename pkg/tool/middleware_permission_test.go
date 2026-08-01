@@ -238,3 +238,16 @@ func TestEmptyWorkspaceRootShellCommandsAreOutside(t *testing.T) {
 		t.Fatal("empty workspace root must fail safe for every command")
 	}
 }
+
+func TestShellTraversalTokensAreOutsideWorkspace(t *testing.T) {
+	root := t.TempDir()
+	if isShellCommandWorkspaceRelative("rm -rf "+root+"/../etc", root) {
+		t.Fatal("dot-dot traversal through the workspace root must classify as outside")
+	}
+	if isShellCommandWorkspaceRelative("cat ../../etc/passwd", root) {
+		t.Fatal("relative traversal must classify as outside")
+	}
+	if !isShellCommandWorkspaceRelative("cat "+root+"/sub/file.go", root) {
+		t.Fatal("clean inside path must stay workspace-relative")
+	}
+}

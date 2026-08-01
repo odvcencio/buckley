@@ -214,9 +214,18 @@ func isShellCommandWorkspaceRelative(cmd, workspaceRoot string) bool {
 	for _, token := range strings.Fields(cmd) {
 		token = strings.Trim(token, `"'`)
 		if !strings.HasPrefix(token, "/") {
+			// Relative tokens containing traversal are also suspect: a
+			// cleaned relative path that climbs out of the workspace is
+			// outside it.
+			if strings.Contains(token, "..") {
+				return false
+			}
 			continue
 		}
-		if token != absRoot && !strings.HasPrefix(token, absRoot+string(filepath.Separator)) {
+		// Clean before comparing so /workspace/../etc resolves to /etc and
+		// fails the prefix check instead of slipping past it.
+		cleaned := filepath.Clean(token)
+		if cleaned != absRoot && !strings.HasPrefix(cleaned, absRoot+string(filepath.Separator)) {
 			return false
 		}
 	}
