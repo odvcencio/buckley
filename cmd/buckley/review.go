@@ -462,10 +462,12 @@ func runBranchReviewWithPolicy(ctx context.Context, opts reviewCommandOptions, f
 		ContextIncomplete: branchCtx.DiffTruncated || branchCtx.UnstagedTruncated || branchCtx.ContextIncomplete,
 	})
 	reviewPolicy = reviewPolicy.withExecutionPlan(plan)
+	changedFiles := reviewChangedFilePaths(branchCtx.Files)
+	reviewPolicy = reviewPolicy.withVerificationTargetBudget(changedFiles)
 	spinner.SetMessage(fmt.Sprintf("Running %s review with %s reasoning...", reviewPolicy.sizeClass, reviewPolicy.reasoningEffort))
 	userPrompt := appendReviewExecutionPlan(commands.BuildBranchPrompt(branchCtx), reviewPolicy)
 	reviewDef := commands.ReviewBranchDef{
-		ChangedFiles:      reviewChangedFilePaths(branchCtx.Files),
+		ChangedFiles:      changedFiles,
 		ContextIncomplete: branchCtx.DiffTruncated || branchCtx.UnstagedTruncated || branchCtx.ContextIncomplete,
 		ApprovalCritic:    reviewPolicy.approvalCritic,
 	}

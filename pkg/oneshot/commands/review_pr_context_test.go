@@ -351,6 +351,7 @@ func TestBuildPRPrompt_IncludesRequiredVerificationTargets(t *testing.T) {
 	for _, want := range []string{
 		"## Required Local Verification Targets",
 		"go: pkg/oneshot/commands",
+		"Never call `run_verification` with Go `path: .`",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("PR prompt missing %q:\n%s", want, prompt)

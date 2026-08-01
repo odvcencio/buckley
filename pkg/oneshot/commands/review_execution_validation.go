@@ -21,12 +21,43 @@ func appendReviewVerificationTargets(sb *strings.Builder, changedFiles []string,
 	}
 	sb.WriteString("## Required Local Verification Targets\n\n")
 	sb.WriteString("For each Go target, call `run_verification` once with `kind=test`; that call supplies build and test evidence. Do not use `kind=build` because it does not execute tests. For other languages, call both kinds. Use each exact language and repository-relative path.\n\n")
+	if hasNestedGoVerificationTarget(targets) {
+		sb.WriteString("Never call `run_verification` with Go `path: .` for these nested targets. A root `go test .` does not cover them and wastes a verification call; use each exact Go directory listed below.\n\n")
+	}
 	for _, target := range targets {
 		sb.WriteString("- ")
 		sb.WriteString(target)
 		sb.WriteString("\n")
 	}
 	sb.WriteString("\n")
+}
+
+// ReviewVerificationCallBudget reports the number of focused verification
+// calls required to satisfy the generated target plan. Go tests cover both
+// build and test evidence, while other languages need one call for each.
+func ReviewVerificationCallBudget(changedFiles []string) int {
+	budget := 0
+	for _, target := range reviewVerificationTargets(changedFiles) {
+		language, _, ok := strings.Cut(target, ": ")
+		if !ok {
+			continue
+		}
+		if language == "go" {
+			budget++
+			continue
+		}
+		budget += 2
+	}
+	return budget
+}
+
+func hasNestedGoVerificationTarget(targets []string) bool {
+	for _, target := range targets {
+		if strings.HasPrefix(target, "go: ") && strings.TrimPrefix(target, "go: ") != "." {
+			return true
+		}
+	}
+	return false
 }
 
 func appendReviewVerificationConstraints(sb *strings.Builder, constraints reviewpolicy.VerificationConstraints) {
