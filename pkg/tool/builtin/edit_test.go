@@ -33,6 +33,9 @@ func TestEditFileTool_Execute(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer os.RemoveAll(tmpDir)
+	if err := os.WriteFile(filepath.Join(tmpDir, "go.mod"), []byte("module example.com/test\n\ngo 1.26\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
 
 	testFile := filepath.Join(tmpDir, "test.go")
 	originalContent := `package main
@@ -77,6 +80,9 @@ func world() {
 	}
 	if result.DiffPreview.LinesAdded == 0 && result.DiffPreview.LinesRemoved == 0 {
 		t.Error("DiffPreview should show line changes")
+	}
+	if diagnostics, ok := result.Data["diagnostics"].(string); !ok || diagnostics == "" {
+		t.Errorf("expected build diagnostics in result data, got %v", result.Data["diagnostics"])
 	}
 }
 
