@@ -155,6 +155,34 @@ func TestWriteFileTool(t *testing.T) {
 		}
 	})
 
+	t.Run("write Go file attaches diagnostics", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(tmpDir, "go.mod"), []byte("module example.com/test\n\ngo 1.26\n"), 0644); err != nil {
+			t.Fatalf("failed to create module: %v", err)
+		}
+
+		tool := &WriteFileTool{}
+		tool.SetWorkDir(tmpDir)
+		result, err := tool.Execute(map[string]any{
+			"path":    "broken.go",
+			"content": "package example\n\nfunc broken( {\n",
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !result.Success {
+			t.Fatalf("expected successful write, got error: %s", result.Error)
+		}
+
+		diagnostics, ok := result.Data["diagnostics"].(string)
+		if !ok || diagnostics == "" {
+			t.Fatalf("expected build diagnostics in result data, got %v", result.Data["diagnostics"])
+		}
+		if result.DisplayData["diagnostics"] != diagnostics {
+			t.Errorf("display diagnostics = %v, want %q", result.DisplayData["diagnostics"], diagnostics)
+		}
+	})
+
 	t.Run("overwrite existing file", func(t *testing.T) {
 		tmpDir := t.TempDir()
 		testFile := filepath.Join(tmpDir, "existing.txt")
