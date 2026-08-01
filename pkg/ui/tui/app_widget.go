@@ -1225,6 +1225,19 @@ func (a *WidgetApp) SetModelVariant(name string) {
 	a.Post(ModelVariantMsg{Name: name})
 }
 
+// SetSessionNav replaces the navigator's Sessions section content.
+// Thread-safe via message passing.
+func (a *WidgetApp) SetSessionNav(nodes []widgets.SessionNavNode) {
+	a.Post(SessionNavMsg{Nodes: nodes})
+}
+
+// SetSessionNavCallback wires the callback fired when a Sessions row is
+// selected. Call once during setup, before Run starts; the sidebar itself
+// invokes it directly from its mouse handler on the UI goroutine.
+func (a *WidgetApp) SetSessionNavCallback(cb func(widgets.SessionNavNode)) {
+	a.sidebar.SetOnSessionSelect(cb)
+}
+
 // SetCallbacks sets the event handlers.
 func (a *WidgetApp) SetCallbacks(onSubmit func(string), onFileSelect func(string), onShellCmd func(string) string) {
 	a.onSubmit = onSubmit

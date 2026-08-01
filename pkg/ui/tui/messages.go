@@ -193,6 +193,15 @@ type SetActivitiesMsg struct {
 
 func (SetActivitiesMsg) isMessage() {}
 
+// SessionNavMsg replaces the navigator's Sessions section content. It is
+// posted (rather than mutating the sidebar directly) because turn
+// completion can refresh it from a background goroutine.
+type SessionNavMsg struct {
+	Nodes []widgets.SessionNavNode
+}
+
+func (SessionNavMsg) isMessage() {}
+
 // --- Overlay/Mode Events ---
 
 // ModeChangeMsg signals input mode change.

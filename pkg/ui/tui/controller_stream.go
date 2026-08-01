@@ -39,6 +39,7 @@ func (c *Controller) finishStreamLifecycle(sess *SessionState) {
 	sess.Cancel = nil
 	c.mu.Unlock()
 	c.emitStreaming(sess.ID, false)
+	c.refreshSessionNav()
 }
 
 func (c *Controller) prepareStreamRequest(prompt string, sess *SessionState) string {

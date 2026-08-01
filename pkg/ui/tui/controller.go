@@ -21,6 +21,7 @@ import (
 	"m31labs.dev/buckley/v2/pkg/model"
 	"m31labs.dev/buckley/v2/pkg/prompts"
 	"m31labs.dev/buckley/v2/pkg/rules"
+	"m31labs.dev/buckley/v2/pkg/runledger"
 	"m31labs.dev/buckley/v2/pkg/session"
 	"m31labs.dev/buckley/v2/pkg/skill"
 	"m31labs.dev/buckley/v2/pkg/storage"
@@ -70,6 +71,15 @@ type Controller struct {
 	// Multi-session support - each session runs independently
 	sessions       []*SessionState // Active sessions for this project
 	currentSession int             // Index into sessions
+
+	// runLedger is the optional read-only run ledger backing the
+	// navigator's Sessions section (see ControllerConfig.RunLedger).
+	runLedger runledger.Store
+	// sessionRunNodes maps a run ID shown in the navigator back to its
+	// materialized run-tree node, so a click can show that run's state in
+	// the inspector. Rebuilt on every refreshSessionNav call; nil when the
+	// navigator is showing the flat session-list fallback.
+	sessionRunNodes map[string]*runledger.RunNode
 }
 
 // QueuedMessage represents a user message queued during streaming.
@@ -135,6 +145,12 @@ type ControllerConfig struct {
 	SessionID     string // Resume session, empty for new
 	AgentProfile  string
 	ModelOverride string // CLI --model override, takes precedence over routing rules
+
+	// RunLedger is an optional, read-only run ledger consulted for the
+	// navigator's Sessions section (see Pillar D: session tree). When nil,
+	// or when no run exists for the current session, the navigator falls
+	// back to the flat session list.
+	RunLedger runledger.Store
 }
 
 func newSessionState(cfg *config.Config, store *storage.Store, workDir string, hub *telemetry.Hub, sessionID string, loadMessages bool) (*SessionState, error) {
@@ -235,6 +251,7 @@ func NewController(cfg ControllerConfig) (*Controller, error) {
 		modelOverride:  strings.TrimSpace(cfg.ModelOverride),
 		sessions:       projectSessions,
 		currentSession: currentIdx,
+		runLedger:      cfg.RunLedger,
 	}
 
 	// Create telemetry bridge for sidebar updates
@@ -249,14 +266,17 @@ func NewController(cfg ControllerConfig) (*Controller, error) {
 		ctrl.handleShellCmd,
 	)
 	app.SetSessionCallbacks(
-		ctrl.nextSession,
-		ctrl.prevSession,
+		ctrl.nextSessionAndRefreshNav,
+		ctrl.prevSessionAndRefreshNav,
 	)
 	app.SetModelVariantCallbacks(
 		ctrl.cycleModelVariant,
 		ctrl.cycleRecentModel,
 	)
 	app.SetInterruptCallback(ctrl.cancelCurrentStream)
+	app.SetSessionNavCallback(ctrl.handleSessionNodeSelected)
+
+	ctrl.refreshSessionNav()
 
 	return ctrl, nil
 }
@@ -453,6 +473,7 @@ func (c *Controller) handleCommand(text string) {
 	switch cmd {
 	case "/new":
 		c.newSession()
+		c.refreshSessionNav()
 
 	case "/clear", "/reset":
 		c.clearCurrentSession()
@@ -466,12 +487,13 @@ func (c *Controller) handleCommand(text string) {
 			return
 		}
 		c.resumeSession(strings.Join(parts[1:], " "))
+		c.refreshSessionNav()
 
 	case "/next", "/n":
-		c.nextSession()
+		c.nextSessionAndRefreshNav()
 
 	case "/prev", "/p":
-		c.prevSession()
+		c.prevSessionAndRefreshNav()
 
 	case "/model", "/models":
 		if len(parts) > 1 {
@@ -1311,6 +1333,20 @@ func (c *Controller) nextSession() {
 
 	c.currentSession = (c.currentSession + 1) % len(c.sessions)
 	c.switchToSessionLocked(c.currentSession)
+}
+
+// nextSessionAndRefreshNav switches to the next session and refreshes the
+// navigator's Sessions section, for callers that cannot append the
+// refresh themselves (the Alt+Right keybind).
+func (c *Controller) nextSessionAndRefreshNav() {
+	c.nextSession()
+	c.refreshSessionNav()
+}
+
+// prevSessionAndRefreshNav is prevSession's Alt+Left counterpart.
+func (c *Controller) prevSessionAndRefreshNav() {
+	c.prevSession()
+	c.refreshSessionNav()
 }
 
 // prevSession switches to the previous session.

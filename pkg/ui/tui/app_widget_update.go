@@ -48,6 +48,9 @@ func (a *WidgetApp) update(msg Message) bool {
 	case SetActivitiesMsg:
 		a.applySetActivities(m.Records)
 		return true
+	case SessionNavMsg:
+		a.sidebar.SetSessionNodes(m.Nodes)
+		return true
 	case RefreshMsg:
 		return true
 	case QuitMsg:

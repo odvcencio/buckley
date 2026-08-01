@@ -78,7 +78,8 @@ type RLMScratchpadEntry struct {
 type sidebarSection int
 
 const (
-	sidebarSectionCurrentTask sidebarSection = iota
+	sidebarSectionSessions sidebarSection = iota
+	sidebarSectionCurrentTask
 	sidebarSectionPlan
 	sidebarSectionTools
 	sidebarSectionRLM
@@ -93,6 +94,7 @@ type sidebarSectionCandidate struct {
 }
 
 var sidebarSectionCandidates = []sidebarSectionCandidate{
+	{section: sidebarSectionSessions, visible: hasSessionsSection},
 	{section: sidebarSectionCurrentTask, visible: hasCurrentTaskSection},
 	{section: sidebarSectionPlan, visible: hasPlanSection},
 	{section: sidebarSectionTools, visible: hasToolsSection},
@@ -105,6 +107,15 @@ var sidebarSectionCandidates = []sidebarSectionCandidate{
 // Sidebar displays task progress, plan, and running tools.
 type Sidebar struct {
 	FocusableBase
+
+	// Sessions section: the current session's ledger run tree, or (when no
+	// ledger run exists) the flat session list.
+	sessionNodes     []SessionNavNode
+	sessionSelected  int
+	showSessions     bool
+	sessionsRowsY    int // first data row's screen Y from the last render, for mouse mapping
+	sessionsRowCount int // number of rows rendered from the last render
+	onSessionSelect  func(SessionNavNode)
 
 	// Current task info
 	currentTask     string
@@ -157,6 +168,8 @@ type Sidebar struct {
 // NewSidebar creates a new sidebar widget.
 func NewSidebar() *Sidebar {
 	return &Sidebar{
+		sessionSelected: -1,
+		showSessions:    true,
 		showCurrentTask: true,
 		showPlan:        true,
 		showTools:       true,
@@ -362,6 +375,8 @@ func hasRecentFilesSection(s *Sidebar) bool {
 
 func (s *Sidebar) renderSection(section sidebarSection, buf *runtime.Buffer, x, y, width, bottom int) int {
 	switch section {
+	case sidebarSectionSessions:
+		return s.renderSessions(buf, x, y, width, bottom-y)
 	case sidebarSectionCurrentTask:
 		return s.renderCurrentTask(buf, x, y, width)
 	case sidebarSectionPlan:
@@ -696,11 +711,17 @@ func (s *Sidebar) renderRecentFiles(buf *runtime.Buffer, x, y, width int) int {
 
 // HandleMessage processes input.
 func (s *Sidebar) HandleMessage(msg runtime.Message) runtime.HandleResult {
-	key, ok := msg.(runtime.KeyMsg)
-	if !ok {
+	switch m := msg.(type) {
+	case runtime.MouseMsg:
+		return s.handleMouse(m)
+	case runtime.KeyMsg:
+		return s.handleKey(m)
+	default:
 		return runtime.Unhandled()
 	}
+}
 
+func (s *Sidebar) handleKey(key runtime.KeyMsg) runtime.HandleResult {
 	switch key.Key {
 	case terminal.KeyUp:
 		if s.planScrollOffset > 0 {
@@ -740,6 +761,9 @@ func (s *Sidebar) HandleMessage(msg runtime.Message) runtime.HandleResult {
 			return runtime.Handled()
 		case '7': // Toggle RLM
 			s.showRLM = !s.showRLM
+			return runtime.Handled()
+		case '8': // Toggle sessions
+			s.showSessions = !s.showSessions
 			return runtime.Handled()
 		}
 	}
