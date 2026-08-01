@@ -1,0 +1,21 @@
+name: hook_logger
+description: >-
+  Example plugin hook contract implementation. Subscribes to tool
+  telemetry events and appends them to a log file, and vetoes calls to
+  the marker tool "hook_logger_marker" to demonstrate the pre-tool veto
+  surface. Its normal (non-hook) invocation is a no-op used to prove the
+  executable still behaves as an ordinary tool.
+parameters:
+  type: object
+  properties: {}
+  required: []
+executable: ./hook_logger.sh
+timeout_ms: 5000
+hooks:
+  events:
+    - "tool.*"
+  pre_tool:
+    tools:
+      - "hook_logger_marker"
+    timeout_ms: 2000
+    enforcing: false
