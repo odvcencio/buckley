@@ -6,6 +6,7 @@ import (
 
 	"m31labs.dev/buckley/v2/pkg/giturl"
 	"m31labs.dev/buckley/v2/pkg/personality"
+	"m31labs.dev/buckley/v2/pkg/policy"
 	"m31labs.dev/buckley/v2/pkg/sandbox"
 )
 
@@ -127,6 +128,8 @@ type Config struct {
 	RLM            RLMConfig            `yaml:"rlm"`
 	Approval       ApprovalConfig       `yaml:"approval"`
 	Sandbox        SandboxConfig        `yaml:"sandbox"`
+	Permissions    PermissionsConfig    `yaml:"permissions"`
+	Postures       PosturesConfig       `yaml:"postures"`
 	ToolMiddleware ToolMiddlewareConfig `yaml:"tool_middleware"`
 	Tools          ToolsConfig          `yaml:"tools"`
 	MCP            MCPConfig            `yaml:"mcp"`
@@ -584,6 +587,37 @@ func (c SandboxConfig) ToSandboxConfig(workDir string) sandbox.Config {
 	}
 
 	return cfg
+}
+
+// PermissionsConfig holds glob-granular allow/ask/deny rules for tool
+// arguments (ADR 0006, pkg/policy). Project and User layers compose with
+// the active posture's layer (see PosturesConfig) and the built-in
+// defaults (policy.BuiltinDefaultRules); a deny in any layer wins
+// regardless of layer order. Project rules load from ./.buckley/config.yaml
+// and User rules from ~/.buckley/config.yaml, matching the existing config
+// hierarchy (pkg/config/config_load.go).
+type PermissionsConfig struct {
+	Project []policy.PermissionRule `yaml:"project"`
+	User    []policy.PermissionRule `yaml:"user"`
+}
+
+// PostureConfig is a named permission layer selectable via
+// BUCKLEY_POSTURE or postures.default. Built-in defaults ship
+// "interactive" (empty layer, today's behavior) and "unattended" (denies
+// outward-facing bash, parks ask decisions instead of blocking on human
+// approval).
+type PostureConfig struct {
+	Rules []policy.PermissionRule `yaml:"rules"`
+	// ParkAskDecisions routes "ask" decisions to a ParkedDecision instead of
+	// blocking on human approval, for postures with nobody present to answer.
+	ParkAskDecisions bool `yaml:"park_ask_decisions"`
+}
+
+// PosturesConfig configures named posture layers and posture selection.
+type PosturesConfig struct {
+	// Default selects the active posture when BUCKLEY_POSTURE is unset.
+	Default string                   `yaml:"default"`
+	Layers  map[string]PostureConfig `yaml:"layers"`
 }
 
 // WorktreeConfig controls git worktree behavior

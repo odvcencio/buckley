@@ -30,6 +30,9 @@ func applyEnvOverrides(cfg *Config, configEnv map[string]string) {
 	if v := os.Getenv("BUCKLEY_APPROVAL_MODE"); v != "" {
 		cfg.Approval.Mode = v
 	}
+	if v := strings.TrimSpace(os.Getenv("BUCKLEY_POSTURE")); v != "" {
+		cfg.Postures.Default = v
+	}
 	if v := os.Getenv("BUCKLEY_TOOL_SANDBOX_MODE"); v != "" {
 		cfg.Sandbox.Mode = v
 	}
