@@ -7,6 +7,7 @@ import (
 
 	"m31labs.dev/buckley/v2/pkg/config"
 	"m31labs.dev/buckley/v2/pkg/model"
+	"m31labs.dev/buckley/v2/pkg/oneshot/commands"
 	"m31labs.dev/buckley/v2/pkg/prompts"
 	"m31labs.dev/buckley/v2/pkg/rules"
 )
@@ -179,6 +180,18 @@ func (opts automatedReviewOptions) withExecutionPlan(plan reviewExecutionPlan) a
 			opts.criticExploration = qwenCriticExploration
 		}
 	}
+	return opts
+}
+
+func (opts automatedReviewOptions) withVerificationTargetBudget(changedFiles []string) automatedReviewOptions {
+	budget := commands.ReviewVerificationCallBudget(changedFiles)
+	if budget <= opts.maxVerificationCalls || opts.maxToolCalls <= 0 {
+		return opts
+	}
+	if budget > opts.maxToolCalls {
+		budget = opts.maxToolCalls
+	}
+	opts.maxVerificationCalls = budget
 	return opts
 }
 

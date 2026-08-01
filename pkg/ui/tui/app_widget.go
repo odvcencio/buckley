@@ -208,6 +208,16 @@ func NewWidgetApp(cfg WidgetAppConfig) (*WidgetApp, error) {
 	)
 	mdRenderer := markdown.NewRenderer(th)
 	chatView.SetMarkdownRenderer(mdRenderer, themeToBackendStyle(mdRenderer.CodeBlockBackground()))
+	chatView.SetCodeSyntaxStyles(
+		themeToBackendStyle(th.TextPrimary),
+		themeToBackendStyle(th.TextMuted),
+		themeToBackendStyle(th.Accent),
+		themeToBackendStyle(th.AccentDim),
+		themeToBackendStyle(th.Success),
+		themeToBackendStyle(th.Warning),
+		themeToBackendStyle(th.Info),
+		themeToBackendStyle(th.Error),
+	)
 
 	inputArea := widgets.NewInputArea()
 	inputArea.SetStyles(
@@ -1363,6 +1373,7 @@ func (a *WidgetApp) WelcomeScreen() {
 		"  • Use Alt+[ and Alt+] to resize the navigator",
 		"  • Use Alt+{ and Alt+} to resize the inspector",
 		"  • Use Alt+End to jump to latest",
+		"  • Press Shift+Enter to add a line without sending",
 		"  • Press Ctrl+C twice to quit",
 		"",
 	}

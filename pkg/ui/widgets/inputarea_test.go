@@ -125,6 +125,25 @@ func TestInputArea_InsertText_Multiline(t *testing.T) {
 	}
 }
 
+func TestInputArea_ShiftEnterInsertsNewlineWithoutSubmitting(t *testing.T) {
+	ia := NewInputArea()
+	ia.Focus()
+	ia.SetText("first line")
+	submitted := false
+	ia.OnSubmit(func(string, InputMode) { submitted = true })
+
+	result := ia.HandleMessage(runtime.KeyMsg{Key: terminal.KeyEnter, Shift: true})
+	if !result.Handled {
+		t.Fatal("Shift+Enter should be handled")
+	}
+	if got := ia.Text(); got != "first line\n" {
+		t.Fatalf("input text = %q, want multiline input", got)
+	}
+	if submitted {
+		t.Fatal("Shift+Enter should not submit the prompt")
+	}
+}
+
 func TestInputArea_Measure_Newlines(t *testing.T) {
 	ia := NewInputArea()
 	ia.SetText("line1\nline2")

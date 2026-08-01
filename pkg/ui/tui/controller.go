@@ -509,7 +509,7 @@ func (c *Controller) handleCommand(text string) {
   /help                - Show this help
   /quit, /exit         - Exit Buckley
 
-Shortcuts: Ctrl+C (interrupt active work), Alt+Right (next), Alt+Left (prev), Ctrl+F (search)`, "system")
+Shortcuts: Shift+Enter (new line), Ctrl+C (interrupt active work), Alt+Right (next), Alt+Left (prev), Alt+C (copy last code), Ctrl+F (search)`, "system")
 
 	case "/quit", "/exit":
 		c.app.Quit()

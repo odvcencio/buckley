@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.0] - 2026-08-01
+
+### Added
+- Tree-sitter syntax highlighting for supported fenced code blocks in terminal chat.
+- Multiline chat input with `Shift+Enter` and copying of the latest code block with `Alt+C`.
+
+### Changed
+- Conversation projection uses a bounded search to retain the largest context that fits each provider request budget.
+- BuckBot allocates focused verification calls to the changed package targets, including sharded reviews.
+
+### Fixed
+- Quiet BuckBot reviews no longer emit terminal progress spinners.
+- BuckBot review guidance prevents a root-level Go test from standing in for nested changed packages.
+
 ## [2.1.0] - 2026-07-29
 
 ### Added
@@ -191,7 +205,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Telemetry is local-only by default.
 - Plugin discovery limited to local paths only.
 
-[Unreleased]: https://github.com/odvcencio/buckley/compare/v2.1.0...HEAD
+[Unreleased]: https://github.com/odvcencio/buckley/compare/v2.2.0...HEAD
+[2.2.0]: https://github.com/odvcencio/buckley/compare/v2.1.0...v2.2.0
 [2.1.0]: https://github.com/odvcencio/buckley/compare/v2.0.0...v2.1.0
 [2.0.0]: https://github.com/odvcencio/buckley/compare/v1.6.1...v2.0.0
 [1.6.1]: https://github.com/odvcencio/buckley/compare/v1.6.0...v1.6.1

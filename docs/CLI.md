@@ -51,6 +51,18 @@ buckley -p "Generate a commit message for the staged changes" --quiet
 echo "Explain this error" | buckley --plain
 ```
 
+### TUI chat shortcuts
+
+| Shortcut | Action |
+| --- | --- |
+| `Enter` | Send the current prompt |
+| `Shift+Enter` | Insert a newline without sending |
+| `Alt+C` | Copy the latest code block |
+
+Fenced code blocks use Tree-sitter syntax highlighting when Buckley has a
+grammar for the declared language. Other code blocks remain readable with the
+standard code style.
+
 ### plan
 
 Generate a feature implementation plan.
@@ -179,6 +191,9 @@ buckley review-pr 123 -post
 
 Use `-post` only when you want Buckbot to write to GitHub. A posted review adds
 an eyes reaction, an intake comment, and the final review.
+
+Buckbot binds review evidence to one PR head and its CI state. Re-run a review
+when the head or CI checks change during a long-running pass.
 
 The `buckley buckbot` webhook daemon is retired. Use
 `buckley review-pr <PR> -post` for each on-demand review.
