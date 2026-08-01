@@ -174,12 +174,13 @@ func filePathCategory(toolName string) string {
 }
 
 // isWorkspaceRelative reports whether path resolves inside workspaceRoot.
-// An empty workspaceRoot means there is no workspace context to compare
-// against, so every path is treated as workspace-relative.
+// An empty workspaceRoot means there is no confirmed workspace, so NOTHING
+// counts as workspace-relative: OutsideWorkspaceOnly protections must fire
+// when the workspace is unknown, never silently stand down (fail-safe).
 func isWorkspaceRelative(path, workspaceRoot string) bool {
 	workspaceRoot = strings.TrimSpace(workspaceRoot)
 	if workspaceRoot == "" {
-		return true
+		return false
 	}
 	absPath, err := filepath.Abs(path)
 	if err != nil {

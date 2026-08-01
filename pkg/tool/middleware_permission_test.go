@@ -220,3 +220,12 @@ func TestNewPermissionMiddleware_PostureLayerComposesWithBuiltins(t *testing.T) 
 		t.Fatalf("expected a parked result, got %#v", result)
 	}
 }
+
+func TestEmptyWorkspaceRootTreatsPathsAsOutside(t *testing.T) {
+	if isWorkspaceRelative("/etc/passwd", "") {
+		t.Fatal("empty workspace root must not classify paths as workspace-relative")
+	}
+	if isWorkspaceRelative("relative/file.go", "  ") {
+		t.Fatal("blank workspace root must not classify paths as workspace-relative")
+	}
+}
