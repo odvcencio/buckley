@@ -146,7 +146,7 @@ func (cc *ContinuationCoordinator) Call(ctx context.Context, req ChatRequest) (*
 		return nil, fmt.Errorf("continuation coordinator unavailable")
 	}
 	cc.requestModel = strings.TrimSpace(req.Model)
-	prepared, err := cc.cursor.Prepare(req)
+	prepared, err := cc.cursor.PrepareForProvider(req, cc.manager.ProviderIDForModel(req.Model))
 	if err != nil {
 		cc.Reset()
 		return nil, err

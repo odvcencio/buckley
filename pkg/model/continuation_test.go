@@ -205,6 +205,46 @@ func TestContinuationCursor_ResetsBeforeSlicingWhenModelChanges(t *testing.T) {
 	}
 }
 
+func TestContinuationCursor_ResetsBeforeSlicingWhenProviderChanges(t *testing.T) {
+	cursor := &ContinuationCursor{}
+	initial := ChatRequest{
+		Model:    "gpt-5.4",
+		Messages: []Message{{Role: "user", Content: "start"}},
+	}
+	if err := cursor.Commit(initial, &ContinuationResponse{
+		Response: &ChatResponse{Choices: []Choice{{Message: Message{
+			Role:    "assistant",
+			Content: "first response",
+		}}}},
+		Continuation: &ProviderContinuation{
+			ProviderID: "openai",
+			ModelID:    "openai/gpt-5.4",
+			State:      json.RawMessage(`{"version":1,"items":[]}`),
+		},
+	}); err != nil {
+		t.Fatalf("Commit() error = %v", err)
+	}
+
+	changed := ChatRequest{
+		Model: "gpt-5.4",
+		Messages: []Message{
+			{Role: "user", Content: "start"},
+			{Role: "assistant", Content: "first response"},
+			{Role: "user", Content: "continue"},
+		},
+	}
+	prepared, err := cursor.PrepareForProvider(changed, "openrouter")
+	if err != nil {
+		t.Fatalf("PrepareForProvider() error = %v", err)
+	}
+	if prepared.Continuation != nil || len(prepared.Request.Messages) != len(changed.Messages) {
+		t.Fatalf("provider change should produce full request, got %#v", prepared)
+	}
+	if cursor.Active() {
+		t.Fatal("provider change should reset the cursor")
+	}
+}
+
 func TestContinuationCursor_MatchesReasoningOnlyPortableHistory(t *testing.T) {
 	cursor := &ContinuationCursor{}
 	initial := ChatRequest{

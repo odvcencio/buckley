@@ -69,13 +69,30 @@ type ContinuationCursor struct {
 }
 
 // Prepare returns only messages added after the prefix represented by the
-// current continuation. If request-time compaction changed that prefix, Prepare
-// resets the cursor and returns the full portable request.
+// current continuation. Callers that know the active provider should prefer
+// PrepareForProvider so a provider switch resets opaque state before it can be
+// replayed.
 func (c *ContinuationCursor) Prepare(req ChatRequest) (ContinuationRequest, error) {
+	return c.prepare(req, "")
+}
+
+// PrepareForProvider returns only messages added after the prefix represented
+// by the current continuation. It resets the cursor and returns the full
+// portable request when either the active provider or model has changed.
+func (c *ContinuationCursor) PrepareForProvider(req ChatRequest, providerID string) (ContinuationRequest, error) {
+	return c.prepare(req, providerID)
+}
+
+func (c *ContinuationCursor) prepare(req ChatRequest, providerID string) (ContinuationRequest, error) {
 	if c == nil || c.continuation == nil {
 		return ContinuationRequest{Request: req}, nil
 	}
-	if !continuationModelMatches(c.continuation.ModelID, req.Model) {
+	if strings.TrimSpace(providerID) != "" {
+		if !c.continuation.Compatible(providerID, req.Model) {
+			c.Reset()
+			return ContinuationRequest{Request: req}, nil
+		}
+	} else if !continuationModelMatches(c.continuation.ModelID, req.Model) {
 		c.Reset()
 		return ContinuationRequest{Request: req}, nil
 	}
