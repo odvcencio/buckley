@@ -116,10 +116,10 @@ type WidgetApp struct {
 	cursorFG            backend.Color
 
 	// Callbacks
-	onSubmit      func(text string)
-	onQuit        func()
-	onFileSelect  func(path string)
-	onShellCmd    func(cmd string) string
+	onSubmit           func(text string)
+	onQuit             func()
+	onFileSelect       func(path string)
+	onShellCmd         func(cmd string) string
 	onNextSession      func()
 	onPrevSession      func()
 	onCycleVariant     func()

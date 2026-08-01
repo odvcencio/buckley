@@ -28,6 +28,7 @@ import (
 	"m31labs.dev/buckley/v2/pkg/tool"
 	"m31labs.dev/buckley/v2/pkg/tool/builtin"
 	"m31labs.dev/buckley/v2/pkg/types"
+	"m31labs.dev/buckley/v2/pkg/ui/shadowgit"
 	"m31labs.dev/buckley/v2/pkg/ui/widgets"
 )
 
@@ -97,6 +98,31 @@ type SessionState struct {
 	// continuation lazily holds this session's provider continuation cursor
 	// (decision 0001), behind the models.provider_continuation flag.
 	continuation *model.ContinuationCoordinator
+
+	// undoStack holds applied turns eligible for /undo, oldest first.
+	// redoStack holds turns /undo removed, most recently undone last, so
+	// /redo pops from its tail. A new turn clears redoStack (see
+	// beginTurnUndo), matching standard undo/redo branch-discard semantics.
+	undoStack []turnUndoRecord
+	redoStack []turnUndoRecord
+
+	// undoStore is this session's shadow-git handle (see pkg/ui/shadowgit),
+	// lazily resolved and cached. It stays nil when the workspace is not a
+	// git repository; undoStoreChecked records that the lookup already ran
+	// so later turns do not retry a doomed rev-parse every time.
+	undoStore        *shadowgit.Store
+	undoStoreChecked bool
+}
+
+// turnUndoRecord captures one undoable assistant turn: the shadow-git tree
+// hashes bracketing it and the conversation messages it appended, so
+// /undo and /redo can restore both the file changes and the conversation
+// tail together.
+type turnUndoRecord struct {
+	beforeTree     string
+	afterTree      string
+	messagesBefore int
+	messages       []conversation.Message
 }
 
 // ControllerConfig configures the controller.
@@ -475,6 +501,12 @@ func (c *Controller) handleCommand(text string) {
 	case "/cancel", "/stop":
 		c.cancelCurrentStream()
 
+	case "/undo":
+		c.undoLastTurn()
+
+	case "/redo":
+		c.redoLastTurn()
+
 	case "/queue":
 		prompt := strings.TrimSpace(strings.TrimPrefix(text, parts[0]))
 		if prompt == "" {
@@ -506,6 +538,8 @@ func (c *Controller) handleCommand(text string) {
   /history             - Show recent conversation turns
   /export [file]       - Export the current conversation to Markdown
   /cancel, /stop       - Cancel the current response and clear queued input
+  /undo                - Revert the last assistant turn's messages and file changes
+  /redo                - Restore a turn /undo reverted
   /steer <message>     - Interrupt and redirect the active response
   /queue <message>     - Run a follow-up after the active response
   /sessions, /tabs     - List active sessions
