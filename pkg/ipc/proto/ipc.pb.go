@@ -190,7 +190,7 @@ func (x *Event) GetAgentId() string {
 type CommandRequest struct {
 	state     protoimpl.MessageState `protogen:"open.v1"`
 	SessionId string                 `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
-	// Command type: "input", "slash", "interrupt", "approve", "reject"
+	// Command type: "input", "slash", "steer", "queue", "interrupt", "model", "approve", "reject"
 	Type string `protobuf:"bytes,2,opt,name=type,proto3" json:"type,omitempty"`
 	// Command content (user message or slash command)
 	Content string `protobuf:"bytes,3,opt,name=content,proto3" json:"content,omitempty"`
@@ -1077,6 +1077,102 @@ func (x *SessionSummaryText) GetGeneratedAt() *timestamppb.Timestamp {
 	return nil
 }
 
+type IssueSessionTokenRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	SessionId     string                 `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *IssueSessionTokenRequest) Reset() {
+	*x = IssueSessionTokenRequest{}
+	mi := &file_ipc_proto_msgTypes[14]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *IssueSessionTokenRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*IssueSessionTokenRequest) ProtoMessage() {}
+
+func (x *IssueSessionTokenRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_ipc_proto_msgTypes[14]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use IssueSessionTokenRequest.ProtoReflect.Descriptor instead.
+func (*IssueSessionTokenRequest) Descriptor() ([]byte, []int) {
+	return file_ipc_proto_rawDescGZIP(), []int{14}
+}
+
+func (x *IssueSessionTokenRequest) GetSessionId() string {
+	if x != nil {
+		return x.SessionId
+	}
+	return ""
+}
+
+type SessionTokenResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	SessionId     string                 `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
+	Token         string                 `protobuf:"bytes,2,opt,name=token,proto3" json:"token,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SessionTokenResponse) Reset() {
+	*x = SessionTokenResponse{}
+	mi := &file_ipc_proto_msgTypes[15]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SessionTokenResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SessionTokenResponse) ProtoMessage() {}
+
+func (x *SessionTokenResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_ipc_proto_msgTypes[15]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SessionTokenResponse.ProtoReflect.Descriptor instead.
+func (*SessionTokenResponse) Descriptor() ([]byte, []int) {
+	return file_ipc_proto_rawDescGZIP(), []int{15}
+}
+
+func (x *SessionTokenResponse) GetSessionId() string {
+	if x != nil {
+		return x.SessionId
+	}
+	return ""
+}
+
+func (x *SessionTokenResponse) GetToken() string {
+	if x != nil {
+		return x.Token
+	}
+	return ""
+}
+
 type CreateHeadlessRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Project path or git URL to clone
@@ -1099,7 +1195,7 @@ type CreateHeadlessRequest struct {
 
 func (x *CreateHeadlessRequest) Reset() {
 	*x = CreateHeadlessRequest{}
-	mi := &file_ipc_proto_msgTypes[14]
+	mi := &file_ipc_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1111,7 +1207,7 @@ func (x *CreateHeadlessRequest) String() string {
 func (*CreateHeadlessRequest) ProtoMessage() {}
 
 func (x *CreateHeadlessRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_ipc_proto_msgTypes[14]
+	mi := &file_ipc_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1124,7 +1220,7 @@ func (x *CreateHeadlessRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateHeadlessRequest.ProtoReflect.Descriptor instead.
 func (*CreateHeadlessRequest) Descriptor() ([]byte, []int) {
-	return file_ipc_proto_rawDescGZIP(), []int{14}
+	return file_ipc_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *CreateHeadlessRequest) GetProject() string {
@@ -1188,7 +1284,7 @@ type ResourceLimits struct {
 
 func (x *ResourceLimits) Reset() {
 	*x = ResourceLimits{}
-	mi := &file_ipc_proto_msgTypes[15]
+	mi := &file_ipc_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1200,7 +1296,7 @@ func (x *ResourceLimits) String() string {
 func (*ResourceLimits) ProtoMessage() {}
 
 func (x *ResourceLimits) ProtoReflect() protoreflect.Message {
-	mi := &file_ipc_proto_msgTypes[15]
+	mi := &file_ipc_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1213,7 +1309,7 @@ func (x *ResourceLimits) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ResourceLimits.ProtoReflect.Descriptor instead.
 func (*ResourceLimits) Descriptor() ([]byte, []int) {
-	return file_ipc_proto_rawDescGZIP(), []int{15}
+	return file_ipc_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *ResourceLimits) GetCpu() string {
@@ -1257,7 +1353,7 @@ type ToolPolicy struct {
 
 func (x *ToolPolicy) Reset() {
 	*x = ToolPolicy{}
-	mi := &file_ipc_proto_msgTypes[16]
+	mi := &file_ipc_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1269,7 +1365,7 @@ func (x *ToolPolicy) String() string {
 func (*ToolPolicy) ProtoMessage() {}
 
 func (x *ToolPolicy) ProtoReflect() protoreflect.Message {
-	mi := &file_ipc_proto_msgTypes[16]
+	mi := &file_ipc_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1282,7 +1378,7 @@ func (x *ToolPolicy) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ToolPolicy.ProtoReflect.Descriptor instead.
 func (*ToolPolicy) Descriptor() ([]byte, []int) {
-	return file_ipc_proto_rawDescGZIP(), []int{16}
+	return file_ipc_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *ToolPolicy) GetAllowedTools() []string {
@@ -1337,7 +1433,7 @@ type HeadlessSession struct {
 
 func (x *HeadlessSession) Reset() {
 	*x = HeadlessSession{}
-	mi := &file_ipc_proto_msgTypes[17]
+	mi := &file_ipc_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1349,7 +1445,7 @@ func (x *HeadlessSession) String() string {
 func (*HeadlessSession) ProtoMessage() {}
 
 func (x *HeadlessSession) ProtoReflect() protoreflect.Message {
-	mi := &file_ipc_proto_msgTypes[17]
+	mi := &file_ipc_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1362,7 +1458,7 @@ func (x *HeadlessSession) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HeadlessSession.ProtoReflect.Descriptor instead.
 func (*HeadlessSession) Descriptor() ([]byte, []int) {
-	return file_ipc_proto_rawDescGZIP(), []int{17}
+	return file_ipc_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *HeadlessSession) GetId() string {
@@ -1434,7 +1530,7 @@ type DeleteHeadlessRequest struct {
 
 func (x *DeleteHeadlessRequest) Reset() {
 	*x = DeleteHeadlessRequest{}
-	mi := &file_ipc_proto_msgTypes[18]
+	mi := &file_ipc_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1446,7 +1542,7 @@ func (x *DeleteHeadlessRequest) String() string {
 func (*DeleteHeadlessRequest) ProtoMessage() {}
 
 func (x *DeleteHeadlessRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_ipc_proto_msgTypes[18]
+	mi := &file_ipc_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1459,7 +1555,7 @@ func (x *DeleteHeadlessRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteHeadlessRequest.ProtoReflect.Descriptor instead.
 func (*DeleteHeadlessRequest) Descriptor() ([]byte, []int) {
-	return file_ipc_proto_rawDescGZIP(), []int{18}
+	return file_ipc_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *DeleteHeadlessRequest) GetSessionId() string {
@@ -1492,7 +1588,7 @@ type HeadlessSessionList struct {
 
 func (x *HeadlessSessionList) Reset() {
 	*x = HeadlessSessionList{}
-	mi := &file_ipc_proto_msgTypes[19]
+	mi := &file_ipc_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1504,7 +1600,7 @@ func (x *HeadlessSessionList) String() string {
 func (*HeadlessSessionList) ProtoMessage() {}
 
 func (x *HeadlessSessionList) ProtoReflect() protoreflect.Message {
-	mi := &file_ipc_proto_msgTypes[19]
+	mi := &file_ipc_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1517,7 +1613,7 @@ func (x *HeadlessSessionList) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HeadlessSessionList.ProtoReflect.Descriptor instead.
 func (*HeadlessSessionList) Descriptor() ([]byte, []int) {
-	return file_ipc_proto_rawDescGZIP(), []int{19}
+	return file_ipc_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *HeadlessSessionList) GetSessions() []*HeadlessSession {
@@ -1546,7 +1642,7 @@ type WorkflowActionRequest struct {
 
 func (x *WorkflowActionRequest) Reset() {
 	*x = WorkflowActionRequest{}
-	mi := &file_ipc_proto_msgTypes[20]
+	mi := &file_ipc_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1558,7 +1654,7 @@ func (x *WorkflowActionRequest) String() string {
 func (*WorkflowActionRequest) ProtoMessage() {}
 
 func (x *WorkflowActionRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_ipc_proto_msgTypes[20]
+	mi := &file_ipc_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1571,7 +1667,7 @@ func (x *WorkflowActionRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WorkflowActionRequest.ProtoReflect.Descriptor instead.
 func (*WorkflowActionRequest) Descriptor() ([]byte, []int) {
-	return file_ipc_proto_rawDescGZIP(), []int{20}
+	return file_ipc_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *WorkflowActionRequest) GetSessionId() string {
@@ -1635,7 +1731,7 @@ type WorkflowActionResponse struct {
 
 func (x *WorkflowActionResponse) Reset() {
 	*x = WorkflowActionResponse{}
-	mi := &file_ipc_proto_msgTypes[21]
+	mi := &file_ipc_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1647,7 +1743,7 @@ func (x *WorkflowActionResponse) String() string {
 func (*WorkflowActionResponse) ProtoMessage() {}
 
 func (x *WorkflowActionResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_ipc_proto_msgTypes[21]
+	mi := &file_ipc_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1660,7 +1756,7 @@ func (x *WorkflowActionResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WorkflowActionResponse.ProtoReflect.Descriptor instead.
 func (*WorkflowActionResponse) Descriptor() ([]byte, []int) {
-	return file_ipc_proto_rawDescGZIP(), []int{21}
+	return file_ipc_proto_rawDescGZIP(), []int{23}
 }
 
 func (x *WorkflowActionResponse) GetStatus() string {
@@ -1718,7 +1814,7 @@ type RegisterAgentRequest struct {
 
 func (x *RegisterAgentRequest) Reset() {
 	*x = RegisterAgentRequest{}
-	mi := &file_ipc_proto_msgTypes[22]
+	mi := &file_ipc_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1730,7 +1826,7 @@ func (x *RegisterAgentRequest) String() string {
 func (*RegisterAgentRequest) ProtoMessage() {}
 
 func (x *RegisterAgentRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_ipc_proto_msgTypes[22]
+	mi := &file_ipc_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1743,7 +1839,7 @@ func (x *RegisterAgentRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RegisterAgentRequest.ProtoReflect.Descriptor instead.
 func (*RegisterAgentRequest) Descriptor() ([]byte, []int) {
-	return file_ipc_proto_rawDescGZIP(), []int{22}
+	return file_ipc_proto_rawDescGZIP(), []int{24}
 }
 
 func (x *RegisterAgentRequest) GetAgentId() string {
@@ -1842,7 +1938,7 @@ type AgentCommand struct {
 
 func (x *AgentCommand) Reset() {
 	*x = AgentCommand{}
-	mi := &file_ipc_proto_msgTypes[23]
+	mi := &file_ipc_proto_msgTypes[25]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1854,7 +1950,7 @@ func (x *AgentCommand) String() string {
 func (*AgentCommand) ProtoMessage() {}
 
 func (x *AgentCommand) ProtoReflect() protoreflect.Message {
-	mi := &file_ipc_proto_msgTypes[23]
+	mi := &file_ipc_proto_msgTypes[25]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1867,7 +1963,7 @@ func (x *AgentCommand) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AgentCommand.ProtoReflect.Descriptor instead.
 func (*AgentCommand) Descriptor() ([]byte, []int) {
-	return file_ipc_proto_rawDescGZIP(), []int{23}
+	return file_ipc_proto_rawDescGZIP(), []int{25}
 }
 
 func (x *AgentCommand) GetCommandId() string {
@@ -2006,7 +2102,7 @@ type ShellCommand struct {
 
 func (x *ShellCommand) Reset() {
 	*x = ShellCommand{}
-	mi := &file_ipc_proto_msgTypes[24]
+	mi := &file_ipc_proto_msgTypes[26]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2018,7 +2114,7 @@ func (x *ShellCommand) String() string {
 func (*ShellCommand) ProtoMessage() {}
 
 func (x *ShellCommand) ProtoReflect() protoreflect.Message {
-	mi := &file_ipc_proto_msgTypes[24]
+	mi := &file_ipc_proto_msgTypes[26]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2031,7 +2127,7 @@ func (x *ShellCommand) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ShellCommand.ProtoReflect.Descriptor instead.
 func (*ShellCommand) Descriptor() ([]byte, []int) {
-	return file_ipc_proto_rawDescGZIP(), []int{24}
+	return file_ipc_proto_rawDescGZIP(), []int{26}
 }
 
 func (x *ShellCommand) GetCommand() string {
@@ -2097,7 +2193,7 @@ type FileOperation struct {
 
 func (x *FileOperation) Reset() {
 	*x = FileOperation{}
-	mi := &file_ipc_proto_msgTypes[25]
+	mi := &file_ipc_proto_msgTypes[27]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2109,7 +2205,7 @@ func (x *FileOperation) String() string {
 func (*FileOperation) ProtoMessage() {}
 
 func (x *FileOperation) ProtoReflect() protoreflect.Message {
-	mi := &file_ipc_proto_msgTypes[25]
+	mi := &file_ipc_proto_msgTypes[27]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2122,7 +2218,7 @@ func (x *FileOperation) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FileOperation.ProtoReflect.Descriptor instead.
 func (*FileOperation) Descriptor() ([]byte, []int) {
-	return file_ipc_proto_rawDescGZIP(), []int{25}
+	return file_ipc_proto_rawDescGZIP(), []int{27}
 }
 
 func (x *FileOperation) GetOperation() string {
@@ -2185,7 +2281,7 @@ type GuiAction struct {
 
 func (x *GuiAction) Reset() {
 	*x = GuiAction{}
-	mi := &file_ipc_proto_msgTypes[26]
+	mi := &file_ipc_proto_msgTypes[28]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2197,7 +2293,7 @@ func (x *GuiAction) String() string {
 func (*GuiAction) ProtoMessage() {}
 
 func (x *GuiAction) ProtoReflect() protoreflect.Message {
-	mi := &file_ipc_proto_msgTypes[26]
+	mi := &file_ipc_proto_msgTypes[28]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2210,7 +2306,7 @@ func (x *GuiAction) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GuiAction.ProtoReflect.Descriptor instead.
 func (*GuiAction) Descriptor() ([]byte, []int) {
-	return file_ipc_proto_rawDescGZIP(), []int{26}
+	return file_ipc_proto_rawDescGZIP(), []int{28}
 }
 
 func (x *GuiAction) GetAction() string {
@@ -2296,7 +2392,7 @@ type ProcessControl struct {
 
 func (x *ProcessControl) Reset() {
 	*x = ProcessControl{}
-	mi := &file_ipc_proto_msgTypes[27]
+	mi := &file_ipc_proto_msgTypes[29]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2308,7 +2404,7 @@ func (x *ProcessControl) String() string {
 func (*ProcessControl) ProtoMessage() {}
 
 func (x *ProcessControl) ProtoReflect() protoreflect.Message {
-	mi := &file_ipc_proto_msgTypes[27]
+	mi := &file_ipc_proto_msgTypes[29]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2321,7 +2417,7 @@ func (x *ProcessControl) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ProcessControl.ProtoReflect.Descriptor instead.
 func (*ProcessControl) Descriptor() ([]byte, []int) {
-	return file_ipc_proto_rawDescGZIP(), []int{27}
+	return file_ipc_proto_rawDescGZIP(), []int{29}
 }
 
 func (x *ProcessControl) GetAction() string {
@@ -2363,7 +2459,7 @@ type SystemQuery struct {
 
 func (x *SystemQuery) Reset() {
 	*x = SystemQuery{}
-	mi := &file_ipc_proto_msgTypes[28]
+	mi := &file_ipc_proto_msgTypes[30]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2375,7 +2471,7 @@ func (x *SystemQuery) String() string {
 func (*SystemQuery) ProtoMessage() {}
 
 func (x *SystemQuery) ProtoReflect() protoreflect.Message {
-	mi := &file_ipc_proto_msgTypes[28]
+	mi := &file_ipc_proto_msgTypes[30]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2388,7 +2484,7 @@ func (x *SystemQuery) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SystemQuery.ProtoReflect.Descriptor instead.
 func (*SystemQuery) Descriptor() ([]byte, []int) {
-	return file_ipc_proto_rawDescGZIP(), []int{28}
+	return file_ipc_proto_rawDescGZIP(), []int{30}
 }
 
 func (x *SystemQuery) GetQueryType() string {
@@ -2431,7 +2527,7 @@ type AgentResult struct {
 
 func (x *AgentResult) Reset() {
 	*x = AgentResult{}
-	mi := &file_ipc_proto_msgTypes[29]
+	mi := &file_ipc_proto_msgTypes[31]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2443,7 +2539,7 @@ func (x *AgentResult) String() string {
 func (*AgentResult) ProtoMessage() {}
 
 func (x *AgentResult) ProtoReflect() protoreflect.Message {
-	mi := &file_ipc_proto_msgTypes[29]
+	mi := &file_ipc_proto_msgTypes[31]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2456,7 +2552,7 @@ func (x *AgentResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AgentResult.ProtoReflect.Descriptor instead.
 func (*AgentResult) Descriptor() ([]byte, []int) {
-	return file_ipc_proto_rawDescGZIP(), []int{29}
+	return file_ipc_proto_rawDescGZIP(), []int{31}
 }
 
 func (x *AgentResult) GetCommandId() string {
@@ -2564,7 +2660,7 @@ type FileInfo struct {
 
 func (x *FileInfo) Reset() {
 	*x = FileInfo{}
-	mi := &file_ipc_proto_msgTypes[30]
+	mi := &file_ipc_proto_msgTypes[32]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2576,7 +2672,7 @@ func (x *FileInfo) String() string {
 func (*FileInfo) ProtoMessage() {}
 
 func (x *FileInfo) ProtoReflect() protoreflect.Message {
-	mi := &file_ipc_proto_msgTypes[30]
+	mi := &file_ipc_proto_msgTypes[32]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2589,7 +2685,7 @@ func (x *FileInfo) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FileInfo.ProtoReflect.Descriptor instead.
 func (*FileInfo) Descriptor() ([]byte, []int) {
-	return file_ipc_proto_rawDescGZIP(), []int{30}
+	return file_ipc_proto_rawDescGZIP(), []int{32}
 }
 
 func (x *FileInfo) GetPath() string {
@@ -2649,7 +2745,7 @@ type AgentHeartbeatRequest struct {
 
 func (x *AgentHeartbeatRequest) Reset() {
 	*x = AgentHeartbeatRequest{}
-	mi := &file_ipc_proto_msgTypes[31]
+	mi := &file_ipc_proto_msgTypes[33]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2661,7 +2757,7 @@ func (x *AgentHeartbeatRequest) String() string {
 func (*AgentHeartbeatRequest) ProtoMessage() {}
 
 func (x *AgentHeartbeatRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_ipc_proto_msgTypes[31]
+	mi := &file_ipc_proto_msgTypes[33]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2674,7 +2770,7 @@ func (x *AgentHeartbeatRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AgentHeartbeatRequest.ProtoReflect.Descriptor instead.
 func (*AgentHeartbeatRequest) Descriptor() ([]byte, []int) {
-	return file_ipc_proto_rawDescGZIP(), []int{31}
+	return file_ipc_proto_rawDescGZIP(), []int{33}
 }
 
 func (x *AgentHeartbeatRequest) GetAgentId() string {
@@ -2726,7 +2822,7 @@ type AgentHeartbeatResponse struct {
 
 func (x *AgentHeartbeatResponse) Reset() {
 	*x = AgentHeartbeatResponse{}
-	mi := &file_ipc_proto_msgTypes[32]
+	mi := &file_ipc_proto_msgTypes[34]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2738,7 +2834,7 @@ func (x *AgentHeartbeatResponse) String() string {
 func (*AgentHeartbeatResponse) ProtoMessage() {}
 
 func (x *AgentHeartbeatResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_ipc_proto_msgTypes[32]
+	mi := &file_ipc_proto_msgTypes[34]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2751,7 +2847,7 @@ func (x *AgentHeartbeatResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AgentHeartbeatResponse.ProtoReflect.Descriptor instead.
 func (*AgentHeartbeatResponse) Descriptor() ([]byte, []int) {
-	return file_ipc_proto_rawDescGZIP(), []int{32}
+	return file_ipc_proto_rawDescGZIP(), []int{34}
 }
 
 func (x *AgentHeartbeatResponse) GetOk() bool {
@@ -2784,7 +2880,7 @@ type AgentList struct {
 
 func (x *AgentList) Reset() {
 	*x = AgentList{}
-	mi := &file_ipc_proto_msgTypes[33]
+	mi := &file_ipc_proto_msgTypes[35]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2796,7 +2892,7 @@ func (x *AgentList) String() string {
 func (*AgentList) ProtoMessage() {}
 
 func (x *AgentList) ProtoReflect() protoreflect.Message {
-	mi := &file_ipc_proto_msgTypes[33]
+	mi := &file_ipc_proto_msgTypes[35]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2809,7 +2905,7 @@ func (x *AgentList) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AgentList.ProtoReflect.Descriptor instead.
 func (*AgentList) Descriptor() ([]byte, []int) {
-	return file_ipc_proto_rawDescGZIP(), []int{33}
+	return file_ipc_proto_rawDescGZIP(), []int{35}
 }
 
 func (x *AgentList) GetAgents() []*AgentInfo {
@@ -2840,7 +2936,7 @@ type AgentInfo struct {
 
 func (x *AgentInfo) Reset() {
 	*x = AgentInfo{}
-	mi := &file_ipc_proto_msgTypes[34]
+	mi := &file_ipc_proto_msgTypes[36]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2852,7 +2948,7 @@ func (x *AgentInfo) String() string {
 func (*AgentInfo) ProtoMessage() {}
 
 func (x *AgentInfo) ProtoReflect() protoreflect.Message {
-	mi := &file_ipc_proto_msgTypes[34]
+	mi := &file_ipc_proto_msgTypes[36]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2865,7 +2961,7 @@ func (x *AgentInfo) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AgentInfo.ProtoReflect.Descriptor instead.
 func (*AgentInfo) Descriptor() ([]byte, []int) {
-	return file_ipc_proto_rawDescGZIP(), []int{34}
+	return file_ipc_proto_rawDescGZIP(), []int{36}
 }
 
 func (x *AgentInfo) GetAgentId() string {
@@ -2963,7 +3059,7 @@ type ListPlansRequest struct {
 
 func (x *ListPlansRequest) Reset() {
 	*x = ListPlansRequest{}
-	mi := &file_ipc_proto_msgTypes[35]
+	mi := &file_ipc_proto_msgTypes[37]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2975,7 +3071,7 @@ func (x *ListPlansRequest) String() string {
 func (*ListPlansRequest) ProtoMessage() {}
 
 func (x *ListPlansRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_ipc_proto_msgTypes[35]
+	mi := &file_ipc_proto_msgTypes[37]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2988,7 +3084,7 @@ func (x *ListPlansRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListPlansRequest.ProtoReflect.Descriptor instead.
 func (*ListPlansRequest) Descriptor() ([]byte, []int) {
-	return file_ipc_proto_rawDescGZIP(), []int{35}
+	return file_ipc_proto_rawDescGZIP(), []int{37}
 }
 
 func (x *ListPlansRequest) GetLimit() int32 {
@@ -3022,7 +3118,7 @@ type ListPlansResponse struct {
 
 func (x *ListPlansResponse) Reset() {
 	*x = ListPlansResponse{}
-	mi := &file_ipc_proto_msgTypes[36]
+	mi := &file_ipc_proto_msgTypes[38]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3034,7 +3130,7 @@ func (x *ListPlansResponse) String() string {
 func (*ListPlansResponse) ProtoMessage() {}
 
 func (x *ListPlansResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_ipc_proto_msgTypes[36]
+	mi := &file_ipc_proto_msgTypes[38]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3047,7 +3143,7 @@ func (x *ListPlansResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListPlansResponse.ProtoReflect.Descriptor instead.
 func (*ListPlansResponse) Descriptor() ([]byte, []int) {
-	return file_ipc_proto_rawDescGZIP(), []int{36}
+	return file_ipc_proto_rawDescGZIP(), []int{38}
 }
 
 func (x *ListPlansResponse) GetPlans() []*PlanSummary {
@@ -3073,7 +3169,7 @@ type GetPlanRequest struct {
 
 func (x *GetPlanRequest) Reset() {
 	*x = GetPlanRequest{}
-	mi := &file_ipc_proto_msgTypes[37]
+	mi := &file_ipc_proto_msgTypes[39]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3085,7 +3181,7 @@ func (x *GetPlanRequest) String() string {
 func (*GetPlanRequest) ProtoMessage() {}
 
 func (x *GetPlanRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_ipc_proto_msgTypes[37]
+	mi := &file_ipc_proto_msgTypes[39]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3098,7 +3194,7 @@ func (x *GetPlanRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetPlanRequest.ProtoReflect.Descriptor instead.
 func (*GetPlanRequest) Descriptor() ([]byte, []int) {
-	return file_ipc_proto_rawDescGZIP(), []int{37}
+	return file_ipc_proto_rawDescGZIP(), []int{39}
 }
 
 func (x *GetPlanRequest) GetPlanId() string {
@@ -3123,7 +3219,7 @@ type Plan struct {
 
 func (x *Plan) Reset() {
 	*x = Plan{}
-	mi := &file_ipc_proto_msgTypes[38]
+	mi := &file_ipc_proto_msgTypes[40]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3135,7 +3231,7 @@ func (x *Plan) String() string {
 func (*Plan) ProtoMessage() {}
 
 func (x *Plan) ProtoReflect() protoreflect.Message {
-	mi := &file_ipc_proto_msgTypes[38]
+	mi := &file_ipc_proto_msgTypes[40]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3148,7 +3244,7 @@ func (x *Plan) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Plan.ProtoReflect.Descriptor instead.
 func (*Plan) Descriptor() ([]byte, []int) {
-	return file_ipc_proto_rawDescGZIP(), []int{38}
+	return file_ipc_proto_rawDescGZIP(), []int{40}
 }
 
 func (x *Plan) GetId() string {
@@ -3215,7 +3311,7 @@ type PlanTask struct {
 
 func (x *PlanTask) Reset() {
 	*x = PlanTask{}
-	mi := &file_ipc_proto_msgTypes[39]
+	mi := &file_ipc_proto_msgTypes[41]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3227,7 +3323,7 @@ func (x *PlanTask) String() string {
 func (*PlanTask) ProtoMessage() {}
 
 func (x *PlanTask) ProtoReflect() protoreflect.Message {
-	mi := &file_ipc_proto_msgTypes[39]
+	mi := &file_ipc_proto_msgTypes[41]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3240,7 +3336,7 @@ func (x *PlanTask) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PlanTask.ProtoReflect.Descriptor instead.
 func (*PlanTask) Descriptor() ([]byte, []int) {
-	return file_ipc_proto_rawDescGZIP(), []int{39}
+	return file_ipc_proto_rawDescGZIP(), []int{41}
 }
 
 func (x *PlanTask) GetId() string {
@@ -3301,7 +3397,7 @@ type ProjectList struct {
 
 func (x *ProjectList) Reset() {
 	*x = ProjectList{}
-	mi := &file_ipc_proto_msgTypes[40]
+	mi := &file_ipc_proto_msgTypes[42]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3313,7 +3409,7 @@ func (x *ProjectList) String() string {
 func (*ProjectList) ProtoMessage() {}
 
 func (x *ProjectList) ProtoReflect() protoreflect.Message {
-	mi := &file_ipc_proto_msgTypes[40]
+	mi := &file_ipc_proto_msgTypes[42]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3326,7 +3422,7 @@ func (x *ProjectList) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ProjectList.ProtoReflect.Descriptor instead.
 func (*ProjectList) Descriptor() ([]byte, []int) {
-	return file_ipc_proto_rawDescGZIP(), []int{40}
+	return file_ipc_proto_rawDescGZIP(), []int{42}
 }
 
 func (x *ProjectList) GetProjects() []*Project {
@@ -3349,7 +3445,7 @@ type Project struct {
 
 func (x *Project) Reset() {
 	*x = Project{}
-	mi := &file_ipc_proto_msgTypes[41]
+	mi := &file_ipc_proto_msgTypes[43]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3361,7 +3457,7 @@ func (x *Project) String() string {
 func (*Project) ProtoMessage() {}
 
 func (x *Project) ProtoReflect() protoreflect.Message {
-	mi := &file_ipc_proto_msgTypes[41]
+	mi := &file_ipc_proto_msgTypes[43]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3374,7 +3470,7 @@ func (x *Project) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Project.ProtoReflect.Descriptor instead.
 func (*Project) Descriptor() ([]byte, []int) {
-	return file_ipc_proto_rawDescGZIP(), []int{41}
+	return file_ipc_proto_rawDescGZIP(), []int{43}
 }
 
 func (x *Project) GetSlug() string {
@@ -3422,7 +3518,7 @@ type CreateProjectRequest struct {
 
 func (x *CreateProjectRequest) Reset() {
 	*x = CreateProjectRequest{}
-	mi := &file_ipc_proto_msgTypes[42]
+	mi := &file_ipc_proto_msgTypes[44]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3434,7 +3530,7 @@ func (x *CreateProjectRequest) String() string {
 func (*CreateProjectRequest) ProtoMessage() {}
 
 func (x *CreateProjectRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_ipc_proto_msgTypes[42]
+	mi := &file_ipc_proto_msgTypes[44]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3447,7 +3543,7 @@ func (x *CreateProjectRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateProjectRequest.ProtoReflect.Descriptor instead.
 func (*CreateProjectRequest) Descriptor() ([]byte, []int) {
-	return file_ipc_proto_rawDescGZIP(), []int{42}
+	return file_ipc_proto_rawDescGZIP(), []int{44}
 }
 
 func (x *CreateProjectRequest) GetName() string {
@@ -3473,7 +3569,7 @@ type PersonaList struct {
 
 func (x *PersonaList) Reset() {
 	*x = PersonaList{}
-	mi := &file_ipc_proto_msgTypes[43]
+	mi := &file_ipc_proto_msgTypes[45]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3485,7 +3581,7 @@ func (x *PersonaList) String() string {
 func (*PersonaList) ProtoMessage() {}
 
 func (x *PersonaList) ProtoReflect() protoreflect.Message {
-	mi := &file_ipc_proto_msgTypes[43]
+	mi := &file_ipc_proto_msgTypes[45]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3498,7 +3594,7 @@ func (x *PersonaList) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PersonaList.ProtoReflect.Descriptor instead.
 func (*PersonaList) Descriptor() ([]byte, []int) {
-	return file_ipc_proto_rawDescGZIP(), []int{43}
+	return file_ipc_proto_rawDescGZIP(), []int{45}
 }
 
 func (x *PersonaList) GetPersonas() []*Persona {
@@ -3521,7 +3617,7 @@ type Persona struct {
 
 func (x *Persona) Reset() {
 	*x = Persona{}
-	mi := &file_ipc_proto_msgTypes[44]
+	mi := &file_ipc_proto_msgTypes[46]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3533,7 +3629,7 @@ func (x *Persona) String() string {
 func (*Persona) ProtoMessage() {}
 
 func (x *Persona) ProtoReflect() protoreflect.Message {
-	mi := &file_ipc_proto_msgTypes[44]
+	mi := &file_ipc_proto_msgTypes[46]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3546,7 +3642,7 @@ func (x *Persona) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Persona.ProtoReflect.Descriptor instead.
 func (*Persona) Descriptor() ([]byte, []int) {
-	return file_ipc_proto_rawDescGZIP(), []int{44}
+	return file_ipc_proto_rawDescGZIP(), []int{46}
 }
 
 func (x *Persona) GetId() string {
@@ -3593,7 +3689,7 @@ type ListPendingApprovalsRequest struct {
 
 func (x *ListPendingApprovalsRequest) Reset() {
 	*x = ListPendingApprovalsRequest{}
-	mi := &file_ipc_proto_msgTypes[45]
+	mi := &file_ipc_proto_msgTypes[47]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3605,7 +3701,7 @@ func (x *ListPendingApprovalsRequest) String() string {
 func (*ListPendingApprovalsRequest) ProtoMessage() {}
 
 func (x *ListPendingApprovalsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_ipc_proto_msgTypes[45]
+	mi := &file_ipc_proto_msgTypes[47]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3618,7 +3714,7 @@ func (x *ListPendingApprovalsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListPendingApprovalsRequest.ProtoReflect.Descriptor instead.
 func (*ListPendingApprovalsRequest) Descriptor() ([]byte, []int) {
-	return file_ipc_proto_rawDescGZIP(), []int{45}
+	return file_ipc_proto_rawDescGZIP(), []int{47}
 }
 
 func (x *ListPendingApprovalsRequest) GetSessionId() string {
@@ -3637,7 +3733,7 @@ type PendingApprovalsList struct {
 
 func (x *PendingApprovalsList) Reset() {
 	*x = PendingApprovalsList{}
-	mi := &file_ipc_proto_msgTypes[46]
+	mi := &file_ipc_proto_msgTypes[48]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3649,7 +3745,7 @@ func (x *PendingApprovalsList) String() string {
 func (*PendingApprovalsList) ProtoMessage() {}
 
 func (x *PendingApprovalsList) ProtoReflect() protoreflect.Message {
-	mi := &file_ipc_proto_msgTypes[46]
+	mi := &file_ipc_proto_msgTypes[48]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3662,7 +3758,7 @@ func (x *PendingApprovalsList) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PendingApprovalsList.ProtoReflect.Descriptor instead.
 func (*PendingApprovalsList) Descriptor() ([]byte, []int) {
-	return file_ipc_proto_rawDescGZIP(), []int{46}
+	return file_ipc_proto_rawDescGZIP(), []int{48}
 }
 
 func (x *PendingApprovalsList) GetApprovals() []*PendingApproval {
@@ -3697,7 +3793,7 @@ type PendingApproval struct {
 
 func (x *PendingApproval) Reset() {
 	*x = PendingApproval{}
-	mi := &file_ipc_proto_msgTypes[47]
+	mi := &file_ipc_proto_msgTypes[49]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3709,7 +3805,7 @@ func (x *PendingApproval) String() string {
 func (*PendingApproval) ProtoMessage() {}
 
 func (x *PendingApproval) ProtoReflect() protoreflect.Message {
-	mi := &file_ipc_proto_msgTypes[47]
+	mi := &file_ipc_proto_msgTypes[49]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3722,7 +3818,7 @@ func (x *PendingApproval) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PendingApproval.ProtoReflect.Descriptor instead.
 func (*PendingApproval) Descriptor() ([]byte, []int) {
-	return file_ipc_proto_rawDescGZIP(), []int{47}
+	return file_ipc_proto_rawDescGZIP(), []int{49}
 }
 
 func (x *PendingApproval) GetId() string {
@@ -3848,7 +3944,7 @@ type DiffLine struct {
 
 func (x *DiffLine) Reset() {
 	*x = DiffLine{}
-	mi := &file_ipc_proto_msgTypes[48]
+	mi := &file_ipc_proto_msgTypes[50]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3860,7 +3956,7 @@ func (x *DiffLine) String() string {
 func (*DiffLine) ProtoMessage() {}
 
 func (x *DiffLine) ProtoReflect() protoreflect.Message {
-	mi := &file_ipc_proto_msgTypes[48]
+	mi := &file_ipc_proto_msgTypes[50]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3873,7 +3969,7 @@ func (x *DiffLine) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DiffLine.ProtoReflect.Descriptor instead.
 func (*DiffLine) Descriptor() ([]byte, []int) {
-	return file_ipc_proto_rawDescGZIP(), []int{48}
+	return file_ipc_proto_rawDescGZIP(), []int{50}
 }
 
 func (x *DiffLine) GetType() string {
@@ -3900,7 +3996,7 @@ type ApproveToolCallRequest struct {
 
 func (x *ApproveToolCallRequest) Reset() {
 	*x = ApproveToolCallRequest{}
-	mi := &file_ipc_proto_msgTypes[49]
+	mi := &file_ipc_proto_msgTypes[51]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3912,7 +4008,7 @@ func (x *ApproveToolCallRequest) String() string {
 func (*ApproveToolCallRequest) ProtoMessage() {}
 
 func (x *ApproveToolCallRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_ipc_proto_msgTypes[49]
+	mi := &file_ipc_proto_msgTypes[51]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3925,7 +4021,7 @@ func (x *ApproveToolCallRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ApproveToolCallRequest.ProtoReflect.Descriptor instead.
 func (*ApproveToolCallRequest) Descriptor() ([]byte, []int) {
-	return file_ipc_proto_rawDescGZIP(), []int{49}
+	return file_ipc_proto_rawDescGZIP(), []int{51}
 }
 
 func (x *ApproveToolCallRequest) GetApprovalId() string {
@@ -3952,7 +4048,7 @@ type ApproveToolCallResponse struct {
 
 func (x *ApproveToolCallResponse) Reset() {
 	*x = ApproveToolCallResponse{}
-	mi := &file_ipc_proto_msgTypes[50]
+	mi := &file_ipc_proto_msgTypes[52]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3964,7 +4060,7 @@ func (x *ApproveToolCallResponse) String() string {
 func (*ApproveToolCallResponse) ProtoMessage() {}
 
 func (x *ApproveToolCallResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_ipc_proto_msgTypes[50]
+	mi := &file_ipc_proto_msgTypes[52]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3977,7 +4073,7 @@ func (x *ApproveToolCallResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ApproveToolCallResponse.ProtoReflect.Descriptor instead.
 func (*ApproveToolCallResponse) Descriptor() ([]byte, []int) {
-	return file_ipc_proto_rawDescGZIP(), []int{50}
+	return file_ipc_proto_rawDescGZIP(), []int{52}
 }
 
 func (x *ApproveToolCallResponse) GetSuccess() bool {
@@ -4004,7 +4100,7 @@ type RejectToolCallRequest struct {
 
 func (x *RejectToolCallRequest) Reset() {
 	*x = RejectToolCallRequest{}
-	mi := &file_ipc_proto_msgTypes[51]
+	mi := &file_ipc_proto_msgTypes[53]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4016,7 +4112,7 @@ func (x *RejectToolCallRequest) String() string {
 func (*RejectToolCallRequest) ProtoMessage() {}
 
 func (x *RejectToolCallRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_ipc_proto_msgTypes[51]
+	mi := &file_ipc_proto_msgTypes[53]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4029,7 +4125,7 @@ func (x *RejectToolCallRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RejectToolCallRequest.ProtoReflect.Descriptor instead.
 func (*RejectToolCallRequest) Descriptor() ([]byte, []int) {
-	return file_ipc_proto_rawDescGZIP(), []int{51}
+	return file_ipc_proto_rawDescGZIP(), []int{53}
 }
 
 func (x *RejectToolCallRequest) GetApprovalId() string {
@@ -4056,7 +4152,7 @@ type RejectToolCallResponse struct {
 
 func (x *RejectToolCallResponse) Reset() {
 	*x = RejectToolCallResponse{}
-	mi := &file_ipc_proto_msgTypes[52]
+	mi := &file_ipc_proto_msgTypes[54]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4068,7 +4164,7 @@ func (x *RejectToolCallResponse) String() string {
 func (*RejectToolCallResponse) ProtoMessage() {}
 
 func (x *RejectToolCallResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_ipc_proto_msgTypes[52]
+	mi := &file_ipc_proto_msgTypes[54]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4081,7 +4177,7 @@ func (x *RejectToolCallResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RejectToolCallResponse.ProtoReflect.Descriptor instead.
 func (*RejectToolCallResponse) Descriptor() ([]byte, []int) {
-	return file_ipc_proto_rawDescGZIP(), []int{52}
+	return file_ipc_proto_rawDescGZIP(), []int{54}
 }
 
 func (x *RejectToolCallResponse) GetSuccess() bool {
@@ -4112,7 +4208,7 @@ type ApprovalPolicy struct {
 
 func (x *ApprovalPolicy) Reset() {
 	*x = ApprovalPolicy{}
-	mi := &file_ipc_proto_msgTypes[53]
+	mi := &file_ipc_proto_msgTypes[55]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4124,7 +4220,7 @@ func (x *ApprovalPolicy) String() string {
 func (*ApprovalPolicy) ProtoMessage() {}
 
 func (x *ApprovalPolicy) ProtoReflect() protoreflect.Message {
-	mi := &file_ipc_proto_msgTypes[53]
+	mi := &file_ipc_proto_msgTypes[55]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4137,7 +4233,7 @@ func (x *ApprovalPolicy) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ApprovalPolicy.ProtoReflect.Descriptor instead.
 func (*ApprovalPolicy) Descriptor() ([]byte, []int) {
-	return file_ipc_proto_rawDescGZIP(), []int{53}
+	return file_ipc_proto_rawDescGZIP(), []int{55}
 }
 
 func (x *ApprovalPolicy) GetId() int64 {
@@ -4193,7 +4289,7 @@ type UpdateApprovalPolicyRequest struct {
 
 func (x *UpdateApprovalPolicyRequest) Reset() {
 	*x = UpdateApprovalPolicyRequest{}
-	mi := &file_ipc_proto_msgTypes[54]
+	mi := &file_ipc_proto_msgTypes[56]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4205,7 +4301,7 @@ func (x *UpdateApprovalPolicyRequest) String() string {
 func (*UpdateApprovalPolicyRequest) ProtoMessage() {}
 
 func (x *UpdateApprovalPolicyRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_ipc_proto_msgTypes[54]
+	mi := &file_ipc_proto_msgTypes[56]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4218,7 +4314,7 @@ func (x *UpdateApprovalPolicyRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UpdateApprovalPolicyRequest.ProtoReflect.Descriptor instead.
 func (*UpdateApprovalPolicyRequest) Descriptor() ([]byte, []int) {
-	return file_ipc_proto_rawDescGZIP(), []int{54}
+	return file_ipc_proto_rawDescGZIP(), []int{56}
 }
 
 func (x *UpdateApprovalPolicyRequest) GetName() string {
@@ -4252,7 +4348,7 @@ type GetAuditLogRequest struct {
 
 func (x *GetAuditLogRequest) Reset() {
 	*x = GetAuditLogRequest{}
-	mi := &file_ipc_proto_msgTypes[55]
+	mi := &file_ipc_proto_msgTypes[57]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4264,7 +4360,7 @@ func (x *GetAuditLogRequest) String() string {
 func (*GetAuditLogRequest) ProtoMessage() {}
 
 func (x *GetAuditLogRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_ipc_proto_msgTypes[55]
+	mi := &file_ipc_proto_msgTypes[57]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4277,7 +4373,7 @@ func (x *GetAuditLogRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetAuditLogRequest.ProtoReflect.Descriptor instead.
 func (*GetAuditLogRequest) Descriptor() ([]byte, []int) {
-	return file_ipc_proto_rawDescGZIP(), []int{55}
+	return file_ipc_proto_rawDescGZIP(), []int{57}
 }
 
 func (x *GetAuditLogRequest) GetSessionId() string {
@@ -4303,7 +4399,7 @@ type AuditLogResponse struct {
 
 func (x *AuditLogResponse) Reset() {
 	*x = AuditLogResponse{}
-	mi := &file_ipc_proto_msgTypes[56]
+	mi := &file_ipc_proto_msgTypes[58]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4315,7 +4411,7 @@ func (x *AuditLogResponse) String() string {
 func (*AuditLogResponse) ProtoMessage() {}
 
 func (x *AuditLogResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_ipc_proto_msgTypes[56]
+	mi := &file_ipc_proto_msgTypes[58]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4328,7 +4424,7 @@ func (x *AuditLogResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AuditLogResponse.ProtoReflect.Descriptor instead.
 func (*AuditLogResponse) Descriptor() ([]byte, []int) {
-	return file_ipc_proto_rawDescGZIP(), []int{56}
+	return file_ipc_proto_rawDescGZIP(), []int{58}
 }
 
 func (x *AuditLogResponse) GetEntries() []*AuditEntry {
@@ -4357,7 +4453,7 @@ type AuditEntry struct {
 
 func (x *AuditEntry) Reset() {
 	*x = AuditEntry{}
-	mi := &file_ipc_proto_msgTypes[57]
+	mi := &file_ipc_proto_msgTypes[59]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4369,7 +4465,7 @@ func (x *AuditEntry) String() string {
 func (*AuditEntry) ProtoMessage() {}
 
 func (x *AuditEntry) ProtoReflect() protoreflect.Message {
-	mi := &file_ipc_proto_msgTypes[57]
+	mi := &file_ipc_proto_msgTypes[59]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4382,7 +4478,7 @@ func (x *AuditEntry) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AuditEntry.ProtoReflect.Descriptor instead.
 func (*AuditEntry) Descriptor() ([]byte, []int) {
-	return file_ipc_proto_rawDescGZIP(), []int{57}
+	return file_ipc_proto_rawDescGZIP(), []int{59}
 }
 
 func (x *AuditEntry) GetId() int64 {
@@ -4474,7 +4570,7 @@ type PushSubscriptionRequest struct {
 
 func (x *PushSubscriptionRequest) Reset() {
 	*x = PushSubscriptionRequest{}
-	mi := &file_ipc_proto_msgTypes[58]
+	mi := &file_ipc_proto_msgTypes[60]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4486,7 +4582,7 @@ func (x *PushSubscriptionRequest) String() string {
 func (*PushSubscriptionRequest) ProtoMessage() {}
 
 func (x *PushSubscriptionRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_ipc_proto_msgTypes[58]
+	mi := &file_ipc_proto_msgTypes[60]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4499,7 +4595,7 @@ func (x *PushSubscriptionRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PushSubscriptionRequest.ProtoReflect.Descriptor instead.
 func (*PushSubscriptionRequest) Descriptor() ([]byte, []int) {
-	return file_ipc_proto_rawDescGZIP(), []int{58}
+	return file_ipc_proto_rawDescGZIP(), []int{60}
 }
 
 func (x *PushSubscriptionRequest) GetEndpoint() string {
@@ -4540,7 +4636,7 @@ type PushSubscriptionResponse struct {
 
 func (x *PushSubscriptionResponse) Reset() {
 	*x = PushSubscriptionResponse{}
-	mi := &file_ipc_proto_msgTypes[59]
+	mi := &file_ipc_proto_msgTypes[61]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4552,7 +4648,7 @@ func (x *PushSubscriptionResponse) String() string {
 func (*PushSubscriptionResponse) ProtoMessage() {}
 
 func (x *PushSubscriptionResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_ipc_proto_msgTypes[59]
+	mi := &file_ipc_proto_msgTypes[61]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4565,7 +4661,7 @@ func (x *PushSubscriptionResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PushSubscriptionResponse.ProtoReflect.Descriptor instead.
 func (*PushSubscriptionResponse) Descriptor() ([]byte, []int) {
-	return file_ipc_proto_rawDescGZIP(), []int{59}
+	return file_ipc_proto_rawDescGZIP(), []int{61}
 }
 
 func (x *PushSubscriptionResponse) GetSuccess() bool {
@@ -4591,7 +4687,7 @@ type UnsubscribePushRequest struct {
 
 func (x *UnsubscribePushRequest) Reset() {
 	*x = UnsubscribePushRequest{}
-	mi := &file_ipc_proto_msgTypes[60]
+	mi := &file_ipc_proto_msgTypes[62]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4603,7 +4699,7 @@ func (x *UnsubscribePushRequest) String() string {
 func (*UnsubscribePushRequest) ProtoMessage() {}
 
 func (x *UnsubscribePushRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_ipc_proto_msgTypes[60]
+	mi := &file_ipc_proto_msgTypes[62]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4616,7 +4712,7 @@ func (x *UnsubscribePushRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UnsubscribePushRequest.ProtoReflect.Descriptor instead.
 func (*UnsubscribePushRequest) Descriptor() ([]byte, []int) {
-	return file_ipc_proto_rawDescGZIP(), []int{60}
+	return file_ipc_proto_rawDescGZIP(), []int{62}
 }
 
 func (x *UnsubscribePushRequest) GetEndpoint() string {
@@ -4635,7 +4731,7 @@ type VAPIDPublicKeyResponse struct {
 
 func (x *VAPIDPublicKeyResponse) Reset() {
 	*x = VAPIDPublicKeyResponse{}
-	mi := &file_ipc_proto_msgTypes[61]
+	mi := &file_ipc_proto_msgTypes[63]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4647,7 +4743,7 @@ func (x *VAPIDPublicKeyResponse) String() string {
 func (*VAPIDPublicKeyResponse) ProtoMessage() {}
 
 func (x *VAPIDPublicKeyResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_ipc_proto_msgTypes[61]
+	mi := &file_ipc_proto_msgTypes[63]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4660,7 +4756,7 @@ func (x *VAPIDPublicKeyResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use VAPIDPublicKeyResponse.ProtoReflect.Descriptor instead.
 func (*VAPIDPublicKeyResponse) Descriptor() ([]byte, []int) {
-	return file_ipc_proto_rawDescGZIP(), []int{61}
+	return file_ipc_proto_rawDescGZIP(), []int{63}
 }
 
 func (x *VAPIDPublicKeyResponse) GetPublicKey() string {
@@ -4772,7 +4868,14 @@ const file_ipc_proto_rawDesc = "" +
 	"\x0fcompleted_tasks\x18\x06 \x01(\x05R\x0ecompletedTasks\"m\n" +
 	"\x12SessionSummaryText\x12\x18\n" +
 	"\asummary\x18\x01 \x01(\tR\asummary\x12=\n" +
-	"\fgenerated_at\x18\x02 \x01(\v2\x1a.google.protobuf.TimestampR\vgeneratedAt\"\xf5\x02\n" +
+	"\fgenerated_at\x18\x02 \x01(\v2\x1a.google.protobuf.TimestampR\vgeneratedAt\"9\n" +
+	"\x18IssueSessionTokenRequest\x12\x1d\n" +
+	"\n" +
+	"session_id\x18\x01 \x01(\tR\tsessionId\"K\n" +
+	"\x14SessionTokenResponse\x12\x1d\n" +
+	"\n" +
+	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x14\n" +
+	"\x05token\x18\x02 \x01(\tR\x05token\"\xf5\x02\n" +
 	"\x15CreateHeadlessRequest\x12\x18\n" +
 	"\aproject\x18\x01 \x01(\tR\aproject\x12%\n" +
 	"\x0einitial_prompt\x18\x02 \x01(\tR\rinitialPrompt\x12\x14\n" +
@@ -5108,14 +5211,15 @@ const file_ipc_proto_rawDesc = "" +
 	"\bendpoint\x18\x01 \x01(\tR\bendpoint\"7\n" +
 	"\x16VAPIDPublicKeyResponse\x12\x1d\n" +
 	"\n" +
-	"public_key\x18\x01 \x01(\tR\tpublicKey2\xb1\x11\n" +
+	"public_key\x18\x01 \x01(\tR\tpublicKey2\x96\x12\n" +
 	"\n" +
 	"BuckleyIPC\x12F\n" +
 	"\tSubscribe\x12 .buckley.ipc.v1.SubscribeRequest\x1a\x15.buckley.ipc.v1.Event0\x01\x12N\n" +
 	"\vSendCommand\x12\x1e.buckley.ipc.v1.CommandRequest\x1a\x1f.buckley.ipc.v1.CommandResponse\x12Y\n" +
 	"\fListSessions\x12#.buckley.ipc.v1.ListSessionsRequest\x1a$.buckley.ipc.v1.ListSessionsResponse\x12N\n" +
 	"\n" +
-	"GetSession\x12!.buckley.ipc.v1.GetSessionRequest\x1a\x1d.buckley.ipc.v1.SessionDetail\x12_\n" +
+	"GetSession\x12!.buckley.ipc.v1.GetSessionRequest\x1a\x1d.buckley.ipc.v1.SessionDetail\x12c\n" +
+	"\x11IssueSessionToken\x12(.buckley.ipc.v1.IssueSessionTokenRequest\x1a$.buckley.ipc.v1.SessionTokenResponse\x12_\n" +
 	"\x15CreateHeadlessSession\x12%.buckley.ipc.v1.CreateHeadlessRequest\x1a\x1f.buckley.ipc.v1.HeadlessSession\x12V\n" +
 	"\x15DeleteHeadlessSession\x12%.buckley.ipc.v1.DeleteHeadlessRequest\x1a\x16.google.protobuf.Empty\x12S\n" +
 	"\x14ListHeadlessSessions\x12\x16.google.protobuf.Empty\x1a#.buckley.ipc.v1.HeadlessSessionList\x12P\n" +
@@ -5138,7 +5242,7 @@ const file_ipc_proto_rawDesc = "" +
 	"\vGetAuditLog\x12\".buckley.ipc.v1.GetAuditLogRequest\x1a .buckley.ipc.v1.AuditLogResponse\x12b\n" +
 	"\rSubscribePush\x12'.buckley.ipc.v1.PushSubscriptionRequest\x1a(.buckley.ipc.v1.PushSubscriptionResponse\x12Q\n" +
 	"\x0fUnsubscribePush\x12&.buckley.ipc.v1.UnsubscribePushRequest\x1a\x16.google.protobuf.Empty\x12S\n" +
-	"\x11GetVAPIDPublicKey\x12\x16.google.protobuf.Empty\x1a&.buckley.ipc.v1.VAPIDPublicKeyResponseB.Z,github.com/odvcencio/buckley/pkg/ipc/proto;ipcpbb\x06proto3"
+	"\x11GetVAPIDPublicKey\x12\x16.google.protobuf.Empty\x1a&.buckley.ipc.v1.VAPIDPublicKeyResponseB,Z*m31labs.dev/buckley/v2/pkg/ipc/proto;ipcpbb\x06proto3"
 
 var (
 	file_ipc_proto_rawDescOnce sync.Once
@@ -5152,7 +5256,7 @@ func file_ipc_proto_rawDescGZIP() []byte {
 	return file_ipc_proto_rawDescData
 }
 
-var file_ipc_proto_msgTypes = make([]protoimpl.MessageInfo, 66)
+var file_ipc_proto_msgTypes = make([]protoimpl.MessageInfo, 68)
 var file_ipc_proto_goTypes = []any{
 	(*SubscribeRequest)(nil),            // 0: buckley.ipc.v1.SubscribeRequest
 	(*Event)(nil),                       // 1: buckley.ipc.v1.Event
@@ -5168,173 +5272,177 @@ var file_ipc_proto_goTypes = []any{
 	(*Skill)(nil),                       // 11: buckley.ipc.v1.Skill
 	(*PlanSummary)(nil),                 // 12: buckley.ipc.v1.PlanSummary
 	(*SessionSummaryText)(nil),          // 13: buckley.ipc.v1.SessionSummaryText
-	(*CreateHeadlessRequest)(nil),       // 14: buckley.ipc.v1.CreateHeadlessRequest
-	(*ResourceLimits)(nil),              // 15: buckley.ipc.v1.ResourceLimits
-	(*ToolPolicy)(nil),                  // 16: buckley.ipc.v1.ToolPolicy
-	(*HeadlessSession)(nil),             // 17: buckley.ipc.v1.HeadlessSession
-	(*DeleteHeadlessRequest)(nil),       // 18: buckley.ipc.v1.DeleteHeadlessRequest
-	(*HeadlessSessionList)(nil),         // 19: buckley.ipc.v1.HeadlessSessionList
-	(*WorkflowActionRequest)(nil),       // 20: buckley.ipc.v1.WorkflowActionRequest
-	(*WorkflowActionResponse)(nil),      // 21: buckley.ipc.v1.WorkflowActionResponse
-	(*RegisterAgentRequest)(nil),        // 22: buckley.ipc.v1.RegisterAgentRequest
-	(*AgentCommand)(nil),                // 23: buckley.ipc.v1.AgentCommand
-	(*ShellCommand)(nil),                // 24: buckley.ipc.v1.ShellCommand
-	(*FileOperation)(nil),               // 25: buckley.ipc.v1.FileOperation
-	(*GuiAction)(nil),                   // 26: buckley.ipc.v1.GuiAction
-	(*ProcessControl)(nil),              // 27: buckley.ipc.v1.ProcessControl
-	(*SystemQuery)(nil),                 // 28: buckley.ipc.v1.SystemQuery
-	(*AgentResult)(nil),                 // 29: buckley.ipc.v1.AgentResult
-	(*FileInfo)(nil),                    // 30: buckley.ipc.v1.FileInfo
-	(*AgentHeartbeatRequest)(nil),       // 31: buckley.ipc.v1.AgentHeartbeatRequest
-	(*AgentHeartbeatResponse)(nil),      // 32: buckley.ipc.v1.AgentHeartbeatResponse
-	(*AgentList)(nil),                   // 33: buckley.ipc.v1.AgentList
-	(*AgentInfo)(nil),                   // 34: buckley.ipc.v1.AgentInfo
-	(*ListPlansRequest)(nil),            // 35: buckley.ipc.v1.ListPlansRequest
-	(*ListPlansResponse)(nil),           // 36: buckley.ipc.v1.ListPlansResponse
-	(*GetPlanRequest)(nil),              // 37: buckley.ipc.v1.GetPlanRequest
-	(*Plan)(nil),                        // 38: buckley.ipc.v1.Plan
-	(*PlanTask)(nil),                    // 39: buckley.ipc.v1.PlanTask
-	(*ProjectList)(nil),                 // 40: buckley.ipc.v1.ProjectList
-	(*Project)(nil),                     // 41: buckley.ipc.v1.Project
-	(*CreateProjectRequest)(nil),        // 42: buckley.ipc.v1.CreateProjectRequest
-	(*PersonaList)(nil),                 // 43: buckley.ipc.v1.PersonaList
-	(*Persona)(nil),                     // 44: buckley.ipc.v1.Persona
-	(*ListPendingApprovalsRequest)(nil), // 45: buckley.ipc.v1.ListPendingApprovalsRequest
-	(*PendingApprovalsList)(nil),        // 46: buckley.ipc.v1.PendingApprovalsList
-	(*PendingApproval)(nil),             // 47: buckley.ipc.v1.PendingApproval
-	(*DiffLine)(nil),                    // 48: buckley.ipc.v1.DiffLine
-	(*ApproveToolCallRequest)(nil),      // 49: buckley.ipc.v1.ApproveToolCallRequest
-	(*ApproveToolCallResponse)(nil),     // 50: buckley.ipc.v1.ApproveToolCallResponse
-	(*RejectToolCallRequest)(nil),       // 51: buckley.ipc.v1.RejectToolCallRequest
-	(*RejectToolCallResponse)(nil),      // 52: buckley.ipc.v1.RejectToolCallResponse
-	(*ApprovalPolicy)(nil),              // 53: buckley.ipc.v1.ApprovalPolicy
-	(*UpdateApprovalPolicyRequest)(nil), // 54: buckley.ipc.v1.UpdateApprovalPolicyRequest
-	(*GetAuditLogRequest)(nil),          // 55: buckley.ipc.v1.GetAuditLogRequest
-	(*AuditLogResponse)(nil),            // 56: buckley.ipc.v1.AuditLogResponse
-	(*AuditEntry)(nil),                  // 57: buckley.ipc.v1.AuditEntry
-	(*PushSubscriptionRequest)(nil),     // 58: buckley.ipc.v1.PushSubscriptionRequest
-	(*PushSubscriptionResponse)(nil),    // 59: buckley.ipc.v1.PushSubscriptionResponse
-	(*UnsubscribePushRequest)(nil),      // 60: buckley.ipc.v1.UnsubscribePushRequest
-	(*VAPIDPublicKeyResponse)(nil),      // 61: buckley.ipc.v1.VAPIDPublicKeyResponse
-	nil,                                 // 62: buckley.ipc.v1.CreateHeadlessRequest.EnvEntry
-	nil,                                 // 63: buckley.ipc.v1.RegisterAgentRequest.MetadataEntry
-	nil,                                 // 64: buckley.ipc.v1.ShellCommand.EnvEntry
-	nil,                                 // 65: buckley.ipc.v1.AgentHeartbeatResponse.ConfigUpdatesEntry
-	(*structpb.Struct)(nil),             // 66: google.protobuf.Struct
-	(*timestamppb.Timestamp)(nil),       // 67: google.protobuf.Timestamp
-	(*emptypb.Empty)(nil),               // 68: google.protobuf.Empty
+	(*IssueSessionTokenRequest)(nil),    // 14: buckley.ipc.v1.IssueSessionTokenRequest
+	(*SessionTokenResponse)(nil),        // 15: buckley.ipc.v1.SessionTokenResponse
+	(*CreateHeadlessRequest)(nil),       // 16: buckley.ipc.v1.CreateHeadlessRequest
+	(*ResourceLimits)(nil),              // 17: buckley.ipc.v1.ResourceLimits
+	(*ToolPolicy)(nil),                  // 18: buckley.ipc.v1.ToolPolicy
+	(*HeadlessSession)(nil),             // 19: buckley.ipc.v1.HeadlessSession
+	(*DeleteHeadlessRequest)(nil),       // 20: buckley.ipc.v1.DeleteHeadlessRequest
+	(*HeadlessSessionList)(nil),         // 21: buckley.ipc.v1.HeadlessSessionList
+	(*WorkflowActionRequest)(nil),       // 22: buckley.ipc.v1.WorkflowActionRequest
+	(*WorkflowActionResponse)(nil),      // 23: buckley.ipc.v1.WorkflowActionResponse
+	(*RegisterAgentRequest)(nil),        // 24: buckley.ipc.v1.RegisterAgentRequest
+	(*AgentCommand)(nil),                // 25: buckley.ipc.v1.AgentCommand
+	(*ShellCommand)(nil),                // 26: buckley.ipc.v1.ShellCommand
+	(*FileOperation)(nil),               // 27: buckley.ipc.v1.FileOperation
+	(*GuiAction)(nil),                   // 28: buckley.ipc.v1.GuiAction
+	(*ProcessControl)(nil),              // 29: buckley.ipc.v1.ProcessControl
+	(*SystemQuery)(nil),                 // 30: buckley.ipc.v1.SystemQuery
+	(*AgentResult)(nil),                 // 31: buckley.ipc.v1.AgentResult
+	(*FileInfo)(nil),                    // 32: buckley.ipc.v1.FileInfo
+	(*AgentHeartbeatRequest)(nil),       // 33: buckley.ipc.v1.AgentHeartbeatRequest
+	(*AgentHeartbeatResponse)(nil),      // 34: buckley.ipc.v1.AgentHeartbeatResponse
+	(*AgentList)(nil),                   // 35: buckley.ipc.v1.AgentList
+	(*AgentInfo)(nil),                   // 36: buckley.ipc.v1.AgentInfo
+	(*ListPlansRequest)(nil),            // 37: buckley.ipc.v1.ListPlansRequest
+	(*ListPlansResponse)(nil),           // 38: buckley.ipc.v1.ListPlansResponse
+	(*GetPlanRequest)(nil),              // 39: buckley.ipc.v1.GetPlanRequest
+	(*Plan)(nil),                        // 40: buckley.ipc.v1.Plan
+	(*PlanTask)(nil),                    // 41: buckley.ipc.v1.PlanTask
+	(*ProjectList)(nil),                 // 42: buckley.ipc.v1.ProjectList
+	(*Project)(nil),                     // 43: buckley.ipc.v1.Project
+	(*CreateProjectRequest)(nil),        // 44: buckley.ipc.v1.CreateProjectRequest
+	(*PersonaList)(nil),                 // 45: buckley.ipc.v1.PersonaList
+	(*Persona)(nil),                     // 46: buckley.ipc.v1.Persona
+	(*ListPendingApprovalsRequest)(nil), // 47: buckley.ipc.v1.ListPendingApprovalsRequest
+	(*PendingApprovalsList)(nil),        // 48: buckley.ipc.v1.PendingApprovalsList
+	(*PendingApproval)(nil),             // 49: buckley.ipc.v1.PendingApproval
+	(*DiffLine)(nil),                    // 50: buckley.ipc.v1.DiffLine
+	(*ApproveToolCallRequest)(nil),      // 51: buckley.ipc.v1.ApproveToolCallRequest
+	(*ApproveToolCallResponse)(nil),     // 52: buckley.ipc.v1.ApproveToolCallResponse
+	(*RejectToolCallRequest)(nil),       // 53: buckley.ipc.v1.RejectToolCallRequest
+	(*RejectToolCallResponse)(nil),      // 54: buckley.ipc.v1.RejectToolCallResponse
+	(*ApprovalPolicy)(nil),              // 55: buckley.ipc.v1.ApprovalPolicy
+	(*UpdateApprovalPolicyRequest)(nil), // 56: buckley.ipc.v1.UpdateApprovalPolicyRequest
+	(*GetAuditLogRequest)(nil),          // 57: buckley.ipc.v1.GetAuditLogRequest
+	(*AuditLogResponse)(nil),            // 58: buckley.ipc.v1.AuditLogResponse
+	(*AuditEntry)(nil),                  // 59: buckley.ipc.v1.AuditEntry
+	(*PushSubscriptionRequest)(nil),     // 60: buckley.ipc.v1.PushSubscriptionRequest
+	(*PushSubscriptionResponse)(nil),    // 61: buckley.ipc.v1.PushSubscriptionResponse
+	(*UnsubscribePushRequest)(nil),      // 62: buckley.ipc.v1.UnsubscribePushRequest
+	(*VAPIDPublicKeyResponse)(nil),      // 63: buckley.ipc.v1.VAPIDPublicKeyResponse
+	nil,                                 // 64: buckley.ipc.v1.CreateHeadlessRequest.EnvEntry
+	nil,                                 // 65: buckley.ipc.v1.RegisterAgentRequest.MetadataEntry
+	nil,                                 // 66: buckley.ipc.v1.ShellCommand.EnvEntry
+	nil,                                 // 67: buckley.ipc.v1.AgentHeartbeatResponse.ConfigUpdatesEntry
+	(*structpb.Struct)(nil),             // 68: google.protobuf.Struct
+	(*timestamppb.Timestamp)(nil),       // 69: google.protobuf.Timestamp
+	(*emptypb.Empty)(nil),               // 70: google.protobuf.Empty
 }
 var file_ipc_proto_depIdxs = []int32{
-	66, // 0: buckley.ipc.v1.Event.payload:type_name -> google.protobuf.Struct
-	67, // 1: buckley.ipc.v1.Event.timestamp:type_name -> google.protobuf.Timestamp
+	68, // 0: buckley.ipc.v1.Event.payload:type_name -> google.protobuf.Struct
+	69, // 1: buckley.ipc.v1.Event.timestamp:type_name -> google.protobuf.Timestamp
 	6,  // 2: buckley.ipc.v1.ListSessionsResponse.sessions:type_name -> buckley.ipc.v1.SessionSummary
-	67, // 3: buckley.ipc.v1.SessionSummary.created_at:type_name -> google.protobuf.Timestamp
-	67, // 4: buckley.ipc.v1.SessionSummary.last_active:type_name -> google.protobuf.Timestamp
+	69, // 3: buckley.ipc.v1.SessionSummary.created_at:type_name -> google.protobuf.Timestamp
+	69, // 4: buckley.ipc.v1.SessionSummary.last_active:type_name -> google.protobuf.Timestamp
 	6,  // 5: buckley.ipc.v1.SessionDetail.session:type_name -> buckley.ipc.v1.SessionSummary
 	9,  // 6: buckley.ipc.v1.SessionDetail.recent_messages:type_name -> buckley.ipc.v1.Message
 	10, // 7: buckley.ipc.v1.SessionDetail.todos:type_name -> buckley.ipc.v1.Todo
 	11, // 8: buckley.ipc.v1.SessionDetail.active_skills:type_name -> buckley.ipc.v1.Skill
 	12, // 9: buckley.ipc.v1.SessionDetail.active_plan:type_name -> buckley.ipc.v1.PlanSummary
 	13, // 10: buckley.ipc.v1.SessionDetail.summary:type_name -> buckley.ipc.v1.SessionSummaryText
-	67, // 11: buckley.ipc.v1.Message.timestamp:type_name -> google.protobuf.Timestamp
-	67, // 12: buckley.ipc.v1.Todo.created_at:type_name -> google.protobuf.Timestamp
-	67, // 13: buckley.ipc.v1.Todo.updated_at:type_name -> google.protobuf.Timestamp
-	67, // 14: buckley.ipc.v1.SessionSummaryText.generated_at:type_name -> google.protobuf.Timestamp
-	62, // 15: buckley.ipc.v1.CreateHeadlessRequest.env:type_name -> buckley.ipc.v1.CreateHeadlessRequest.EnvEntry
-	15, // 16: buckley.ipc.v1.CreateHeadlessRequest.limits:type_name -> buckley.ipc.v1.ResourceLimits
-	16, // 17: buckley.ipc.v1.CreateHeadlessRequest.tool_policy:type_name -> buckley.ipc.v1.ToolPolicy
-	67, // 18: buckley.ipc.v1.HeadlessSession.created_at:type_name -> google.protobuf.Timestamp
-	67, // 19: buckley.ipc.v1.HeadlessSession.updated_at:type_name -> google.protobuf.Timestamp
-	17, // 20: buckley.ipc.v1.HeadlessSessionList.sessions:type_name -> buckley.ipc.v1.HeadlessSession
-	63, // 21: buckley.ipc.v1.RegisterAgentRequest.metadata:type_name -> buckley.ipc.v1.RegisterAgentRequest.MetadataEntry
-	24, // 22: buckley.ipc.v1.AgentCommand.shell:type_name -> buckley.ipc.v1.ShellCommand
-	25, // 23: buckley.ipc.v1.AgentCommand.file:type_name -> buckley.ipc.v1.FileOperation
-	26, // 24: buckley.ipc.v1.AgentCommand.gui:type_name -> buckley.ipc.v1.GuiAction
-	27, // 25: buckley.ipc.v1.AgentCommand.process:type_name -> buckley.ipc.v1.ProcessControl
-	28, // 26: buckley.ipc.v1.AgentCommand.query:type_name -> buckley.ipc.v1.SystemQuery
-	64, // 27: buckley.ipc.v1.ShellCommand.env:type_name -> buckley.ipc.v1.ShellCommand.EnvEntry
-	30, // 28: buckley.ipc.v1.AgentResult.file_info:type_name -> buckley.ipc.v1.FileInfo
-	30, // 29: buckley.ipc.v1.AgentResult.file_list:type_name -> buckley.ipc.v1.FileInfo
-	66, // 30: buckley.ipc.v1.AgentResult.query_result:type_name -> google.protobuf.Struct
-	67, // 31: buckley.ipc.v1.AgentResult.started_at:type_name -> google.protobuf.Timestamp
-	67, // 32: buckley.ipc.v1.AgentResult.completed_at:type_name -> google.protobuf.Timestamp
-	67, // 33: buckley.ipc.v1.FileInfo.modified_at:type_name -> google.protobuf.Timestamp
-	65, // 34: buckley.ipc.v1.AgentHeartbeatResponse.config_updates:type_name -> buckley.ipc.v1.AgentHeartbeatResponse.ConfigUpdatesEntry
-	34, // 35: buckley.ipc.v1.AgentList.agents:type_name -> buckley.ipc.v1.AgentInfo
-	67, // 36: buckley.ipc.v1.AgentInfo.connected_at:type_name -> google.protobuf.Timestamp
-	67, // 37: buckley.ipc.v1.AgentInfo.last_heartbeat:type_name -> google.protobuf.Timestamp
+	69, // 11: buckley.ipc.v1.Message.timestamp:type_name -> google.protobuf.Timestamp
+	69, // 12: buckley.ipc.v1.Todo.created_at:type_name -> google.protobuf.Timestamp
+	69, // 13: buckley.ipc.v1.Todo.updated_at:type_name -> google.protobuf.Timestamp
+	69, // 14: buckley.ipc.v1.SessionSummaryText.generated_at:type_name -> google.protobuf.Timestamp
+	64, // 15: buckley.ipc.v1.CreateHeadlessRequest.env:type_name -> buckley.ipc.v1.CreateHeadlessRequest.EnvEntry
+	17, // 16: buckley.ipc.v1.CreateHeadlessRequest.limits:type_name -> buckley.ipc.v1.ResourceLimits
+	18, // 17: buckley.ipc.v1.CreateHeadlessRequest.tool_policy:type_name -> buckley.ipc.v1.ToolPolicy
+	69, // 18: buckley.ipc.v1.HeadlessSession.created_at:type_name -> google.protobuf.Timestamp
+	69, // 19: buckley.ipc.v1.HeadlessSession.updated_at:type_name -> google.protobuf.Timestamp
+	19, // 20: buckley.ipc.v1.HeadlessSessionList.sessions:type_name -> buckley.ipc.v1.HeadlessSession
+	65, // 21: buckley.ipc.v1.RegisterAgentRequest.metadata:type_name -> buckley.ipc.v1.RegisterAgentRequest.MetadataEntry
+	26, // 22: buckley.ipc.v1.AgentCommand.shell:type_name -> buckley.ipc.v1.ShellCommand
+	27, // 23: buckley.ipc.v1.AgentCommand.file:type_name -> buckley.ipc.v1.FileOperation
+	28, // 24: buckley.ipc.v1.AgentCommand.gui:type_name -> buckley.ipc.v1.GuiAction
+	29, // 25: buckley.ipc.v1.AgentCommand.process:type_name -> buckley.ipc.v1.ProcessControl
+	30, // 26: buckley.ipc.v1.AgentCommand.query:type_name -> buckley.ipc.v1.SystemQuery
+	66, // 27: buckley.ipc.v1.ShellCommand.env:type_name -> buckley.ipc.v1.ShellCommand.EnvEntry
+	32, // 28: buckley.ipc.v1.AgentResult.file_info:type_name -> buckley.ipc.v1.FileInfo
+	32, // 29: buckley.ipc.v1.AgentResult.file_list:type_name -> buckley.ipc.v1.FileInfo
+	68, // 30: buckley.ipc.v1.AgentResult.query_result:type_name -> google.protobuf.Struct
+	69, // 31: buckley.ipc.v1.AgentResult.started_at:type_name -> google.protobuf.Timestamp
+	69, // 32: buckley.ipc.v1.AgentResult.completed_at:type_name -> google.protobuf.Timestamp
+	69, // 33: buckley.ipc.v1.FileInfo.modified_at:type_name -> google.protobuf.Timestamp
+	67, // 34: buckley.ipc.v1.AgentHeartbeatResponse.config_updates:type_name -> buckley.ipc.v1.AgentHeartbeatResponse.ConfigUpdatesEntry
+	36, // 35: buckley.ipc.v1.AgentList.agents:type_name -> buckley.ipc.v1.AgentInfo
+	69, // 36: buckley.ipc.v1.AgentInfo.connected_at:type_name -> google.protobuf.Timestamp
+	69, // 37: buckley.ipc.v1.AgentInfo.last_heartbeat:type_name -> google.protobuf.Timestamp
 	12, // 38: buckley.ipc.v1.ListPlansResponse.plans:type_name -> buckley.ipc.v1.PlanSummary
-	39, // 39: buckley.ipc.v1.Plan.tasks:type_name -> buckley.ipc.v1.PlanTask
-	67, // 40: buckley.ipc.v1.Plan.created_at:type_name -> google.protobuf.Timestamp
-	67, // 41: buckley.ipc.v1.Plan.updated_at:type_name -> google.protobuf.Timestamp
-	67, // 42: buckley.ipc.v1.PlanTask.created_at:type_name -> google.protobuf.Timestamp
-	67, // 43: buckley.ipc.v1.PlanTask.updated_at:type_name -> google.protobuf.Timestamp
-	41, // 44: buckley.ipc.v1.ProjectList.projects:type_name -> buckley.ipc.v1.Project
-	67, // 45: buckley.ipc.v1.Project.last_active:type_name -> google.protobuf.Timestamp
-	44, // 46: buckley.ipc.v1.PersonaList.personas:type_name -> buckley.ipc.v1.Persona
-	47, // 47: buckley.ipc.v1.PendingApprovalsList.approvals:type_name -> buckley.ipc.v1.PendingApproval
-	66, // 48: buckley.ipc.v1.PendingApproval.tool_input:type_name -> google.protobuf.Struct
-	67, // 49: buckley.ipc.v1.PendingApproval.expires_at:type_name -> google.protobuf.Timestamp
-	67, // 50: buckley.ipc.v1.PendingApproval.created_at:type_name -> google.protobuf.Timestamp
-	48, // 51: buckley.ipc.v1.PendingApproval.diff_lines:type_name -> buckley.ipc.v1.DiffLine
-	67, // 52: buckley.ipc.v1.ApprovalPolicy.created_at:type_name -> google.protobuf.Timestamp
-	67, // 53: buckley.ipc.v1.ApprovalPolicy.updated_at:type_name -> google.protobuf.Timestamp
-	57, // 54: buckley.ipc.v1.AuditLogResponse.entries:type_name -> buckley.ipc.v1.AuditEntry
-	67, // 55: buckley.ipc.v1.AuditEntry.executed_at:type_name -> google.protobuf.Timestamp
+	41, // 39: buckley.ipc.v1.Plan.tasks:type_name -> buckley.ipc.v1.PlanTask
+	69, // 40: buckley.ipc.v1.Plan.created_at:type_name -> google.protobuf.Timestamp
+	69, // 41: buckley.ipc.v1.Plan.updated_at:type_name -> google.protobuf.Timestamp
+	69, // 42: buckley.ipc.v1.PlanTask.created_at:type_name -> google.protobuf.Timestamp
+	69, // 43: buckley.ipc.v1.PlanTask.updated_at:type_name -> google.protobuf.Timestamp
+	43, // 44: buckley.ipc.v1.ProjectList.projects:type_name -> buckley.ipc.v1.Project
+	69, // 45: buckley.ipc.v1.Project.last_active:type_name -> google.protobuf.Timestamp
+	46, // 46: buckley.ipc.v1.PersonaList.personas:type_name -> buckley.ipc.v1.Persona
+	49, // 47: buckley.ipc.v1.PendingApprovalsList.approvals:type_name -> buckley.ipc.v1.PendingApproval
+	68, // 48: buckley.ipc.v1.PendingApproval.tool_input:type_name -> google.protobuf.Struct
+	69, // 49: buckley.ipc.v1.PendingApproval.expires_at:type_name -> google.protobuf.Timestamp
+	69, // 50: buckley.ipc.v1.PendingApproval.created_at:type_name -> google.protobuf.Timestamp
+	50, // 51: buckley.ipc.v1.PendingApproval.diff_lines:type_name -> buckley.ipc.v1.DiffLine
+	69, // 52: buckley.ipc.v1.ApprovalPolicy.created_at:type_name -> google.protobuf.Timestamp
+	69, // 53: buckley.ipc.v1.ApprovalPolicy.updated_at:type_name -> google.protobuf.Timestamp
+	59, // 54: buckley.ipc.v1.AuditLogResponse.entries:type_name -> buckley.ipc.v1.AuditEntry
+	69, // 55: buckley.ipc.v1.AuditEntry.executed_at:type_name -> google.protobuf.Timestamp
 	0,  // 56: buckley.ipc.v1.BuckleyIPC.Subscribe:input_type -> buckley.ipc.v1.SubscribeRequest
 	2,  // 57: buckley.ipc.v1.BuckleyIPC.SendCommand:input_type -> buckley.ipc.v1.CommandRequest
 	4,  // 58: buckley.ipc.v1.BuckleyIPC.ListSessions:input_type -> buckley.ipc.v1.ListSessionsRequest
 	7,  // 59: buckley.ipc.v1.BuckleyIPC.GetSession:input_type -> buckley.ipc.v1.GetSessionRequest
-	14, // 60: buckley.ipc.v1.BuckleyIPC.CreateHeadlessSession:input_type -> buckley.ipc.v1.CreateHeadlessRequest
-	18, // 61: buckley.ipc.v1.BuckleyIPC.DeleteHeadlessSession:input_type -> buckley.ipc.v1.DeleteHeadlessRequest
-	68, // 62: buckley.ipc.v1.BuckleyIPC.ListHeadlessSessions:input_type -> google.protobuf.Empty
-	35, // 63: buckley.ipc.v1.BuckleyIPC.ListPlans:input_type -> buckley.ipc.v1.ListPlansRequest
-	37, // 64: buckley.ipc.v1.BuckleyIPC.GetPlan:input_type -> buckley.ipc.v1.GetPlanRequest
-	68, // 65: buckley.ipc.v1.BuckleyIPC.ListProjects:input_type -> google.protobuf.Empty
-	42, // 66: buckley.ipc.v1.BuckleyIPC.CreateProject:input_type -> buckley.ipc.v1.CreateProjectRequest
-	68, // 67: buckley.ipc.v1.BuckleyIPC.ListPersonas:input_type -> google.protobuf.Empty
-	20, // 68: buckley.ipc.v1.BuckleyIPC.WorkflowAction:input_type -> buckley.ipc.v1.WorkflowActionRequest
-	22, // 69: buckley.ipc.v1.BuckleyIPC.RegisterAgent:input_type -> buckley.ipc.v1.RegisterAgentRequest
-	29, // 70: buckley.ipc.v1.BuckleyIPC.ReportAgentResult:input_type -> buckley.ipc.v1.AgentResult
-	31, // 71: buckley.ipc.v1.BuckleyIPC.AgentHeartbeat:input_type -> buckley.ipc.v1.AgentHeartbeatRequest
-	68, // 72: buckley.ipc.v1.BuckleyIPC.ListAgents:input_type -> google.protobuf.Empty
-	45, // 73: buckley.ipc.v1.BuckleyIPC.ListPendingApprovals:input_type -> buckley.ipc.v1.ListPendingApprovalsRequest
-	49, // 74: buckley.ipc.v1.BuckleyIPC.ApproveToolCall:input_type -> buckley.ipc.v1.ApproveToolCallRequest
-	51, // 75: buckley.ipc.v1.BuckleyIPC.RejectToolCall:input_type -> buckley.ipc.v1.RejectToolCallRequest
-	68, // 76: buckley.ipc.v1.BuckleyIPC.GetApprovalPolicy:input_type -> google.protobuf.Empty
-	54, // 77: buckley.ipc.v1.BuckleyIPC.UpdateApprovalPolicy:input_type -> buckley.ipc.v1.UpdateApprovalPolicyRequest
-	55, // 78: buckley.ipc.v1.BuckleyIPC.GetAuditLog:input_type -> buckley.ipc.v1.GetAuditLogRequest
-	58, // 79: buckley.ipc.v1.BuckleyIPC.SubscribePush:input_type -> buckley.ipc.v1.PushSubscriptionRequest
-	60, // 80: buckley.ipc.v1.BuckleyIPC.UnsubscribePush:input_type -> buckley.ipc.v1.UnsubscribePushRequest
-	68, // 81: buckley.ipc.v1.BuckleyIPC.GetVAPIDPublicKey:input_type -> google.protobuf.Empty
-	1,  // 82: buckley.ipc.v1.BuckleyIPC.Subscribe:output_type -> buckley.ipc.v1.Event
-	3,  // 83: buckley.ipc.v1.BuckleyIPC.SendCommand:output_type -> buckley.ipc.v1.CommandResponse
-	5,  // 84: buckley.ipc.v1.BuckleyIPC.ListSessions:output_type -> buckley.ipc.v1.ListSessionsResponse
-	8,  // 85: buckley.ipc.v1.BuckleyIPC.GetSession:output_type -> buckley.ipc.v1.SessionDetail
-	17, // 86: buckley.ipc.v1.BuckleyIPC.CreateHeadlessSession:output_type -> buckley.ipc.v1.HeadlessSession
-	68, // 87: buckley.ipc.v1.BuckleyIPC.DeleteHeadlessSession:output_type -> google.protobuf.Empty
-	19, // 88: buckley.ipc.v1.BuckleyIPC.ListHeadlessSessions:output_type -> buckley.ipc.v1.HeadlessSessionList
-	36, // 89: buckley.ipc.v1.BuckleyIPC.ListPlans:output_type -> buckley.ipc.v1.ListPlansResponse
-	38, // 90: buckley.ipc.v1.BuckleyIPC.GetPlan:output_type -> buckley.ipc.v1.Plan
-	40, // 91: buckley.ipc.v1.BuckleyIPC.ListProjects:output_type -> buckley.ipc.v1.ProjectList
-	41, // 92: buckley.ipc.v1.BuckleyIPC.CreateProject:output_type -> buckley.ipc.v1.Project
-	43, // 93: buckley.ipc.v1.BuckleyIPC.ListPersonas:output_type -> buckley.ipc.v1.PersonaList
-	21, // 94: buckley.ipc.v1.BuckleyIPC.WorkflowAction:output_type -> buckley.ipc.v1.WorkflowActionResponse
-	23, // 95: buckley.ipc.v1.BuckleyIPC.RegisterAgent:output_type -> buckley.ipc.v1.AgentCommand
-	68, // 96: buckley.ipc.v1.BuckleyIPC.ReportAgentResult:output_type -> google.protobuf.Empty
-	32, // 97: buckley.ipc.v1.BuckleyIPC.AgentHeartbeat:output_type -> buckley.ipc.v1.AgentHeartbeatResponse
-	33, // 98: buckley.ipc.v1.BuckleyIPC.ListAgents:output_type -> buckley.ipc.v1.AgentList
-	46, // 99: buckley.ipc.v1.BuckleyIPC.ListPendingApprovals:output_type -> buckley.ipc.v1.PendingApprovalsList
-	50, // 100: buckley.ipc.v1.BuckleyIPC.ApproveToolCall:output_type -> buckley.ipc.v1.ApproveToolCallResponse
-	52, // 101: buckley.ipc.v1.BuckleyIPC.RejectToolCall:output_type -> buckley.ipc.v1.RejectToolCallResponse
-	53, // 102: buckley.ipc.v1.BuckleyIPC.GetApprovalPolicy:output_type -> buckley.ipc.v1.ApprovalPolicy
-	53, // 103: buckley.ipc.v1.BuckleyIPC.UpdateApprovalPolicy:output_type -> buckley.ipc.v1.ApprovalPolicy
-	56, // 104: buckley.ipc.v1.BuckleyIPC.GetAuditLog:output_type -> buckley.ipc.v1.AuditLogResponse
-	59, // 105: buckley.ipc.v1.BuckleyIPC.SubscribePush:output_type -> buckley.ipc.v1.PushSubscriptionResponse
-	68, // 106: buckley.ipc.v1.BuckleyIPC.UnsubscribePush:output_type -> google.protobuf.Empty
-	61, // 107: buckley.ipc.v1.BuckleyIPC.GetVAPIDPublicKey:output_type -> buckley.ipc.v1.VAPIDPublicKeyResponse
-	82, // [82:108] is the sub-list for method output_type
-	56, // [56:82] is the sub-list for method input_type
+	14, // 60: buckley.ipc.v1.BuckleyIPC.IssueSessionToken:input_type -> buckley.ipc.v1.IssueSessionTokenRequest
+	16, // 61: buckley.ipc.v1.BuckleyIPC.CreateHeadlessSession:input_type -> buckley.ipc.v1.CreateHeadlessRequest
+	20, // 62: buckley.ipc.v1.BuckleyIPC.DeleteHeadlessSession:input_type -> buckley.ipc.v1.DeleteHeadlessRequest
+	70, // 63: buckley.ipc.v1.BuckleyIPC.ListHeadlessSessions:input_type -> google.protobuf.Empty
+	37, // 64: buckley.ipc.v1.BuckleyIPC.ListPlans:input_type -> buckley.ipc.v1.ListPlansRequest
+	39, // 65: buckley.ipc.v1.BuckleyIPC.GetPlan:input_type -> buckley.ipc.v1.GetPlanRequest
+	70, // 66: buckley.ipc.v1.BuckleyIPC.ListProjects:input_type -> google.protobuf.Empty
+	44, // 67: buckley.ipc.v1.BuckleyIPC.CreateProject:input_type -> buckley.ipc.v1.CreateProjectRequest
+	70, // 68: buckley.ipc.v1.BuckleyIPC.ListPersonas:input_type -> google.protobuf.Empty
+	22, // 69: buckley.ipc.v1.BuckleyIPC.WorkflowAction:input_type -> buckley.ipc.v1.WorkflowActionRequest
+	24, // 70: buckley.ipc.v1.BuckleyIPC.RegisterAgent:input_type -> buckley.ipc.v1.RegisterAgentRequest
+	31, // 71: buckley.ipc.v1.BuckleyIPC.ReportAgentResult:input_type -> buckley.ipc.v1.AgentResult
+	33, // 72: buckley.ipc.v1.BuckleyIPC.AgentHeartbeat:input_type -> buckley.ipc.v1.AgentHeartbeatRequest
+	70, // 73: buckley.ipc.v1.BuckleyIPC.ListAgents:input_type -> google.protobuf.Empty
+	47, // 74: buckley.ipc.v1.BuckleyIPC.ListPendingApprovals:input_type -> buckley.ipc.v1.ListPendingApprovalsRequest
+	51, // 75: buckley.ipc.v1.BuckleyIPC.ApproveToolCall:input_type -> buckley.ipc.v1.ApproveToolCallRequest
+	53, // 76: buckley.ipc.v1.BuckleyIPC.RejectToolCall:input_type -> buckley.ipc.v1.RejectToolCallRequest
+	70, // 77: buckley.ipc.v1.BuckleyIPC.GetApprovalPolicy:input_type -> google.protobuf.Empty
+	56, // 78: buckley.ipc.v1.BuckleyIPC.UpdateApprovalPolicy:input_type -> buckley.ipc.v1.UpdateApprovalPolicyRequest
+	57, // 79: buckley.ipc.v1.BuckleyIPC.GetAuditLog:input_type -> buckley.ipc.v1.GetAuditLogRequest
+	60, // 80: buckley.ipc.v1.BuckleyIPC.SubscribePush:input_type -> buckley.ipc.v1.PushSubscriptionRequest
+	62, // 81: buckley.ipc.v1.BuckleyIPC.UnsubscribePush:input_type -> buckley.ipc.v1.UnsubscribePushRequest
+	70, // 82: buckley.ipc.v1.BuckleyIPC.GetVAPIDPublicKey:input_type -> google.protobuf.Empty
+	1,  // 83: buckley.ipc.v1.BuckleyIPC.Subscribe:output_type -> buckley.ipc.v1.Event
+	3,  // 84: buckley.ipc.v1.BuckleyIPC.SendCommand:output_type -> buckley.ipc.v1.CommandResponse
+	5,  // 85: buckley.ipc.v1.BuckleyIPC.ListSessions:output_type -> buckley.ipc.v1.ListSessionsResponse
+	8,  // 86: buckley.ipc.v1.BuckleyIPC.GetSession:output_type -> buckley.ipc.v1.SessionDetail
+	15, // 87: buckley.ipc.v1.BuckleyIPC.IssueSessionToken:output_type -> buckley.ipc.v1.SessionTokenResponse
+	19, // 88: buckley.ipc.v1.BuckleyIPC.CreateHeadlessSession:output_type -> buckley.ipc.v1.HeadlessSession
+	70, // 89: buckley.ipc.v1.BuckleyIPC.DeleteHeadlessSession:output_type -> google.protobuf.Empty
+	21, // 90: buckley.ipc.v1.BuckleyIPC.ListHeadlessSessions:output_type -> buckley.ipc.v1.HeadlessSessionList
+	38, // 91: buckley.ipc.v1.BuckleyIPC.ListPlans:output_type -> buckley.ipc.v1.ListPlansResponse
+	40, // 92: buckley.ipc.v1.BuckleyIPC.GetPlan:output_type -> buckley.ipc.v1.Plan
+	42, // 93: buckley.ipc.v1.BuckleyIPC.ListProjects:output_type -> buckley.ipc.v1.ProjectList
+	43, // 94: buckley.ipc.v1.BuckleyIPC.CreateProject:output_type -> buckley.ipc.v1.Project
+	45, // 95: buckley.ipc.v1.BuckleyIPC.ListPersonas:output_type -> buckley.ipc.v1.PersonaList
+	23, // 96: buckley.ipc.v1.BuckleyIPC.WorkflowAction:output_type -> buckley.ipc.v1.WorkflowActionResponse
+	25, // 97: buckley.ipc.v1.BuckleyIPC.RegisterAgent:output_type -> buckley.ipc.v1.AgentCommand
+	70, // 98: buckley.ipc.v1.BuckleyIPC.ReportAgentResult:output_type -> google.protobuf.Empty
+	34, // 99: buckley.ipc.v1.BuckleyIPC.AgentHeartbeat:output_type -> buckley.ipc.v1.AgentHeartbeatResponse
+	35, // 100: buckley.ipc.v1.BuckleyIPC.ListAgents:output_type -> buckley.ipc.v1.AgentList
+	48, // 101: buckley.ipc.v1.BuckleyIPC.ListPendingApprovals:output_type -> buckley.ipc.v1.PendingApprovalsList
+	52, // 102: buckley.ipc.v1.BuckleyIPC.ApproveToolCall:output_type -> buckley.ipc.v1.ApproveToolCallResponse
+	54, // 103: buckley.ipc.v1.BuckleyIPC.RejectToolCall:output_type -> buckley.ipc.v1.RejectToolCallResponse
+	55, // 104: buckley.ipc.v1.BuckleyIPC.GetApprovalPolicy:output_type -> buckley.ipc.v1.ApprovalPolicy
+	55, // 105: buckley.ipc.v1.BuckleyIPC.UpdateApprovalPolicy:output_type -> buckley.ipc.v1.ApprovalPolicy
+	58, // 106: buckley.ipc.v1.BuckleyIPC.GetAuditLog:output_type -> buckley.ipc.v1.AuditLogResponse
+	61, // 107: buckley.ipc.v1.BuckleyIPC.SubscribePush:output_type -> buckley.ipc.v1.PushSubscriptionResponse
+	70, // 108: buckley.ipc.v1.BuckleyIPC.UnsubscribePush:output_type -> google.protobuf.Empty
+	63, // 109: buckley.ipc.v1.BuckleyIPC.GetVAPIDPublicKey:output_type -> buckley.ipc.v1.VAPIDPublicKeyResponse
+	83, // [83:110] is the sub-list for method output_type
+	56, // [56:83] is the sub-list for method input_type
 	56, // [56:56] is the sub-list for extension type_name
 	56, // [56:56] is the sub-list for extension extendee
 	0,  // [0:56] is the sub-list for field type_name
@@ -5345,7 +5453,7 @@ func file_ipc_proto_init() {
 	if File_ipc_proto != nil {
 		return
 	}
-	file_ipc_proto_msgTypes[23].OneofWrappers = []any{
+	file_ipc_proto_msgTypes[25].OneofWrappers = []any{
 		(*AgentCommand_Shell)(nil),
 		(*AgentCommand_File)(nil),
 		(*AgentCommand_Gui)(nil),
@@ -5358,7 +5466,7 @@ func file_ipc_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_ipc_proto_rawDesc), len(file_ipc_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   66,
+			NumMessages:   68,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
