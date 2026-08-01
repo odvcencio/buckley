@@ -23,15 +23,15 @@ type PRDefinition struct {
 // render reference-only ("Refs #N") — never as GitHub close directives.
 // See pkg/commitmsg for why.
 type PRResult struct {
-	Action        string   `json:"action"`
-	Scope         string   `json:"scope,omitempty"`
-	Title         string   `json:"title"`
-	Summary       string   `json:"summary"`
-	Changes       []string `json:"changes"`
-	Testing       []string `json:"testing,omitempty"`
-	Breaking      bool     `json:"breaking,omitempty"`
-	Issues        []string `json:"issues,omitempty"`
-	ReviewersHint string   `json:"reviewers_hint,omitempty"`
+	Action        string     `json:"action"`
+	Scope         string     `json:"scope,omitempty"`
+	Title         string     `json:"title"`
+	Summary       string     `json:"summary"`
+	Changes       bulletList `json:"changes"`
+	Testing       bulletList `json:"testing,omitempty"`
+	Breaking      bool       `json:"breaking,omitempty"`
+	Issues        bulletList `json:"issues,omitempty"`
+	ReviewersHint string     `json:"reviewers_hint,omitempty"`
 }
 
 // Header composes the PR title in the shared commit-header grammar:

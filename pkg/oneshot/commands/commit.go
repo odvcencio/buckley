@@ -23,12 +23,12 @@ type CommitDefinition struct{}
 
 // CommitResult is the strongly-typed result of generate_commit.
 type CommitResult struct {
-	Action   string   `json:"action"`
-	Scope    string   `json:"scope,omitempty"`
-	Subject  string   `json:"subject"`
-	Body     []string `json:"body"`
-	Breaking bool     `json:"breaking,omitempty"`
-	Issues   []string `json:"issues,omitempty"`
+	Action   string     `json:"action"`
+	Scope    string     `json:"scope,omitempty"`
+	Subject  string     `json:"subject"`
+	Body     bulletList `json:"body"`
+	Breaking bool       `json:"breaking,omitempty"`
+	Issues   bulletList `json:"issues,omitempty"`
 }
 
 // Header formats the commit header line.
