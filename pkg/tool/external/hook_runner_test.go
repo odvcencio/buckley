@@ -3,9 +3,11 @@ package external
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -181,6 +183,46 @@ func TestHookRunner_Veto_Timeout_Advisory_Allows(t *testing.T) {
 	denied, _, _ := runner.Veto(context.Background(), "marker_tool", map[string]any{})
 	if denied {
 		t.Fatal("expected advisory (non-enforcing) timeout to allow the call")
+	}
+}
+
+func TestHookRunner_Veto_PluginCrash_Advisory_AllowsAndLogsWarning(t *testing.T) {
+	var mu sync.Mutex
+	var warnings []string
+	runner := NewHookRunner(func(format string, args ...any) {
+		mu.Lock()
+		defer mu.Unlock()
+		warnings = append(warnings, fmt.Sprintf(format, args...))
+	})
+	manifest := manifestWithHooks("gate", nil, &PreToolHooksConfig{
+		Tools:     []string{"marker_tool"},
+		TimeoutMs: 2000,
+		Enforcing: false,
+	})
+	if err := runner.Register(manifest, hookPluginBin, "", map[string]string{"HOOKPLUGIN_CRASH": "immediate"}); err != nil {
+		t.Fatalf("Register failed: %v", err)
+	}
+	t.Cleanup(runner.Close)
+
+	denied, plugin, reason := runner.Veto(context.Background(), "marker_tool", map[string]any{})
+	if denied {
+		t.Fatalf("expected a crashed advisory plugin to allow the call, got denied by %q: %s", plugin, reason)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		mu.Lock()
+		n := len(warnings)
+		mu.Unlock()
+		if n > 0 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(warnings) == 0 {
+		t.Fatal("expected a warning to be logged for the crashed plugin even though the call was allowed")
 	}
 }
 
