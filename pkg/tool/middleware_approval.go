@@ -5,13 +5,27 @@ import (
 	"fmt"
 	"strings"
 
+	"m31labs.dev/buckley/v2/pkg/policy"
 	"m31labs.dev/buckley/v2/pkg/tool/builtin"
 )
 
 func (r *Registry) approvalMiddleware() Middleware {
 	return func(next Executor) Executor {
 		return func(ctx *ExecutionContext) (*builtin.Result, error) {
-			if r == nil || ctx == nil || !r.shouldGateChanges() {
+			if r == nil || ctx == nil {
+				return next(ctx)
+			}
+
+			// Built-in permission defaults (deny reads of .env/credential-shaped
+			// paths and id_rsa keys) run unconditionally for every tool call,
+			// regardless of mission-control state or approval mode: a deny
+			// blocks the call even in yolo mode. See pkg/policy.BuiltinDefaultRules
+			// and ADR 0006 ("denied paths are enforced even in Yolo mode").
+			if result, denied := r.checkBuiltinPermissionDefaults(ctx); denied {
+				return result, nil
+			}
+
+			if !r.shouldGateChanges() {
 				return next(ctx)
 			}
 
@@ -52,6 +66,27 @@ func (r *Registry) approvalMiddleware() Middleware {
 			}
 		}
 	}
+}
+
+// checkBuiltinPermissionDefaults evaluates the built-in glob-permission
+// defaults (pkg/policy.BuiltinDefaultRules) against a tool call using the
+// deterministic Go glob layer, with no dependency on registry configuration.
+// It only reports denied=true for an outright deny; "ask" decisions are left
+// to the coarser approval mechanisms already in the chain (mission control,
+// or a caller-registered permission middleware with posture-aware parking).
+func (r *Registry) checkBuiltinPermissionDefaults(ctx *ExecutionContext) (*builtin.Result, bool) {
+	req, ok := derivePermissionRequest(ctx.ToolName, ctx.Params, "", "")
+	if !ok {
+		return nil, false
+	}
+	dec := policy.EvaluateBuiltinDefaultsGo(req)
+	if !dec.Matched || dec.Action != policy.PermissionDeny {
+		return nil, false
+	}
+	return &builtin.Result{
+		Success: false,
+		Error:   fmt.Sprintf("permission denied: %s %q matches a built-in default deny rule", ctx.ToolName, req.Arg),
+	}, true
 }
 
 // executeWithMissionShell gates shell commands through mission control approval.

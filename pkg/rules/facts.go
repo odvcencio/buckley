@@ -162,6 +162,19 @@ type SandboxFacts struct {
 
 func (f SandboxFacts) ToMap() map[string]any { return structToMap(f) }
 
+// PermissionFacts carries signals for the glob-permission builtin_defaults
+// strategy (pkg/policy). Field order matches the facts map built by
+// policy.EvaluateBuiltinDefaultsArbiter.
+type PermissionFacts struct {
+	Tool              string `arb:"tool"`
+	Category          string `arb:"category"`
+	Arg               string `arb:"arg"`
+	WorkspaceRelative bool   `arb:"workspace_relative"`
+	Posture           string `arb:"posture"`
+}
+
+func (f PermissionFacts) ToMap() map[string]any { return structToMap(f) }
+
 type DelegationFacts struct {
 	Tool            string `arb:"tool"`
 	Role            string `arb:"role"`

@@ -1,0 +1,51 @@
+outcome PermissionOutcome {
+    action: string
+}
+
+// Mirrors policy.BuiltinDefaultRules() (pkg/policy/builtin_defaults.go).
+// Both implementations must agree for every input; see the parity test in
+// pkg/policy/builtin_defaults_test.go.
+strategy builtin_defaults_policy returns PermissionOutcome {
+    when {
+        arg matches "(^|/)\.env$"
+    } then DenyDotEnv {
+        action: "deny",
+    }
+
+    when {
+        arg matches "(^|/)\.env\.[^/]*$"
+    } then DenyDotEnvVariant {
+        action: "deny",
+    }
+
+    when {
+        arg matches "(^|/)[^/]*credentials[^/]*$"
+    } then DenyCredentials {
+        action: "deny",
+    }
+
+    when {
+        arg matches "(^|/)id_rsa[^/]*$"
+    } then DenyIDRSA {
+        action: "deny",
+    }
+
+    when {
+        (tool == "run_shell" or tool == "run_code")
+        and workspace_relative == false
+        and (
+            arg matches "rm -rf"
+            or arg matches "rm -r -f"
+            or arg matches "git push.*--force"
+            or arg matches "git push.*-f"
+            or arg matches "curl.*\|.*sh"
+            or arg matches "curl.*\|.*bash"
+        )
+    } then AskDestructiveBash {
+        action: "ask",
+    }
+
+    else NoMatch {
+        action: "",
+    }
+}

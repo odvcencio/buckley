@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"m31labs.dev/buckley/v2/pkg/giturl"
+	"m31labs.dev/buckley/v2/pkg/policy"
 )
 
 func defaultACPStore() string {
@@ -86,6 +87,28 @@ func defaultDeniedPaths() []string {
 		filepath.Join(home, ".aws"),
 	)
 	return paths
+}
+
+// defaultPosturesConfig ships the two built-in postures: "interactive"
+// (empty layer, today's behavior) and "unattended" (flags outward-facing
+// bash as "ask" and parks those decisions instead of blocking on human
+// approval). The active posture defaults to "interactive" unless
+// overridden by postures.default or the BUCKLEY_POSTURE env var
+// (pkg/policy.SelectPosture).
+func defaultPosturesConfig() PosturesConfig {
+	return PosturesConfig{
+		Default: policy.PostureInteractive,
+		Layers: map[string]PostureConfig{
+			policy.PostureInteractive: {
+				Rules:            nil,
+				ParkAskDecisions: false,
+			},
+			policy.PostureUnattended: {
+				Rules:            policy.UnattendedPostureRules(),
+				ParkAskDecisions: true,
+			},
+		},
+	}
 }
 
 func defaultNATSURL() string {
@@ -353,7 +376,9 @@ func DefaultConfig() *Config {
 				"pytest",
 			},
 		},
-		Sandbox: defaultSandboxConfig(),
+		Sandbox:     defaultSandboxConfig(),
+		Permissions: PermissionsConfig{},
+		Postures:    defaultPosturesConfig(),
 		ToolMiddleware: ToolMiddlewareConfig{
 			DefaultTimeout: 2 * time.Minute,
 			MaxResultBytes: 100_000,

@@ -126,6 +126,12 @@ type Runner struct {
 	pushWorker   *push.Worker
 	toolPolicy   *ToolPolicy
 
+	// posture is the active glob-permission posture (pkg/policy) resolved at
+	// construction time; parkedDecisions collects "ask" decisions the active
+	// posture chose to park instead of blocking on human approval.
+	posture         string
+	parkedDecisions *policy.ParkedDecisionLog
+
 	requiredApprovalTools map[string]struct{}
 	maxToolExecTime       time.Duration
 	maxRuntime            time.Duration
@@ -231,6 +237,17 @@ func NewRunner(cfg RunnerConfig) (*Runner, error) {
 	if rulesEngine != nil {
 		evaluator = rules.NewEngineAdapter(rulesEngine)
 	}
+
+	// Wire the layered glob-permission engine (pkg/policy) as an additional
+	// approval layer: every tool call now also consults posture, project,
+	// user, and built-in-default rules. A deny blocks the call outright; an
+	// "ask" is parked instead of blocked under postures with nobody present
+	// to answer (see gate.ParkAskDecisions). The existing isDangerousTool
+	// check further down keeps working as an additional, coarser layer.
+	posture := policy.SelectPosture(sessionCfg.Postures.Default)
+	parkedDecisions := policy.NewParkedDecisionLog()
+	tools.Use(tool.NewPermissionMiddleware(buildHeadlessPermissionGate(sessionCfg, posture, cfg.Session, evaluator, parkedDecisions)))
+
 	resolver := model.NewResolver(rulesEngine, model.ResolverConfig{
 		Planning:  sessionCfg.Models.Planning,
 		Execution: sessionCfg.Models.Execution,
@@ -285,6 +302,8 @@ func NewRunner(cfg RunnerConfig) (*Runner, error) {
 		policyEngine:          policyEngine,
 		pushWorker:            cfg.PushWorker,
 		toolPolicy:            cfg.ToolPolicy,
+		posture:               posture,
+		parkedDecisions:       parkedDecisions,
 		requiredApprovalTools: requiredApprovalTools,
 		maxToolExecTime:       maxToolExecTime,
 		maxRuntime:            cfg.MaxRuntime,
@@ -2016,6 +2035,61 @@ func buildHeadlessSystemPrompt(basePrompt string, agentProfile string, projectCt
 		ModelTier:      model.InferModelTier(""),
 		GTSAvailable:   binaryAvailable("gts"),
 	})
+}
+
+// buildHeadlessPermissionGate assembles the layered glob-permission
+// configuration (pkg/policy) for a headless session: the active posture's
+// rule layer (highest priority), then project rules, then user rules, with
+// built-in defaults always consulted last (see
+// policy.EvaluatePermissionLayersWithBuiltins). The workspace root is the
+// session's project path, used to decide whether a shell command or file
+// path resolves inside the workspace.
+func buildHeadlessPermissionGate(sessionCfg *config.Config, posture string, sess *storage.Session, evaluator types.RuleEvaluator, sink *policy.ParkedDecisionLog) *tool.PermissionGate {
+	workspaceRoot := ""
+	if sess != nil {
+		workspaceRoot = strings.TrimSpace(sess.ProjectPath)
+	}
+
+	var postureCfg config.PostureConfig
+	var permissions config.PermissionsConfig
+	if sessionCfg != nil {
+		postureCfg = sessionCfg.Postures.Layers[posture]
+		permissions = sessionCfg.Permissions
+	}
+
+	layers := []policy.PermissionLayer{
+		{Name: "posture:" + posture, Rules: postureCfg.Rules},
+		{Name: "project", Rules: permissions.Project},
+		{Name: "user", Rules: permissions.User},
+	}
+
+	return &tool.PermissionGate{
+		Layers:           layers,
+		WorkspaceRoot:    workspaceRoot,
+		Posture:          posture,
+		ParkAskDecisions: postureCfg.ParkAskDecisions,
+		Evaluator:        evaluator,
+		ParkedSink:       sink,
+	}
+}
+
+// Posture returns the glob-permission posture active for this session.
+func (r *Runner) Posture() string {
+	if r == nil {
+		return ""
+	}
+	return r.posture
+}
+
+// ParkedDecisions returns every "ask" decision the active posture parked
+// instead of blocking on human approval (see policy.ParkedDecision). It is
+// non-empty only under postures that set park_ask_decisions, e.g.
+// "unattended".
+func (r *Runner) ParkedDecisions() []policy.ParkedDecision {
+	if r == nil || r.parkedDecisions == nil {
+		return nil
+	}
+	return r.parkedDecisions.List()
 }
 
 func loadRunnerProjectContext(sess *storage.Session) *projectcontext.ProjectContext {
