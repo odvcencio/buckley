@@ -54,6 +54,9 @@ func TestExamplePlugin_HookLogger_DiscoverAndLoad(t *testing.T) {
 	// (its normal, non-hook invocation), not just a hook subscriber.
 	result, err := found.Execute(map[string]any{})
 	skipIfInterpreterUnavailable(t, err)
+	if result != nil && result.Error != "" && strings.Contains(result.Error, "no such file or directory") {
+		t.Skipf("example plugin interpreter unavailable in this environment: %s", result.Error)
+	}
 	if err != nil {
 		t.Fatalf("Execute failed: %v", err)
 	}
