@@ -9,6 +9,7 @@ import (
 	"m31labs.dev/buckley/v2/pkg/model"
 	"m31labs.dev/buckley/v2/pkg/oneshot"
 	"m31labs.dev/buckley/v2/pkg/oneshot/commands"
+	"m31labs.dev/buckley/v2/pkg/terminal"
 	"m31labs.dev/buckley/v2/pkg/transparency"
 )
 
@@ -91,6 +92,21 @@ func TestReviewCommandsReserveEnoughTimeByDefault(t *testing.T) {
 	}
 	if pr.timeout != defaultReviewTimeout {
 		t.Fatalf("PR timeout = %s, want %s", pr.timeout, defaultReviewTimeout)
+	}
+}
+
+func TestNewReviewProgressHonorsQuietMode(t *testing.T) {
+	previous := quietMode
+	t.Cleanup(func() { quietMode = previous })
+
+	quietMode = true
+	if _, ok := newReviewProgress("Reviewing").(silentReviewProgress); !ok {
+		t.Fatal("quiet review should not create a spinner")
+	}
+
+	quietMode = false
+	if _, ok := newReviewProgress("Reviewing").(*terminal.Spinner); !ok {
+		t.Fatal("interactive review should create a spinner")
 	}
 }
 

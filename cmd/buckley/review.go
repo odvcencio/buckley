@@ -60,6 +60,29 @@ type reviewCommandResult struct {
 	incompleteWhy  string
 }
 
+// reviewProgress keeps model-review output machine-readable when the caller
+// requests quiet mode, while preserving the interactive spinner otherwise.
+type reviewProgress interface {
+	Start()
+	SetMessage(string)
+	StopWithSuccess(string)
+	StopWithError(string)
+}
+
+type silentReviewProgress struct{}
+
+func (silentReviewProgress) Start()                 {}
+func (silentReviewProgress) SetMessage(string)      {}
+func (silentReviewProgress) StopWithSuccess(string) {}
+func (silentReviewProgress) StopWithError(string)   {}
+
+func newReviewProgress(message string) reviewProgress {
+	if quietMode {
+		return silentReviewProgress{}
+	}
+	return terminal.NewSpinner(message)
+}
+
 func parseReviewCommandOptions(args []string) (reviewCommandOptions, error) {
 	fs := flag.NewFlagSet("review", flag.ContinueOnError)
 	projectMode := fs.Bool("project", false, "review the entire project instead of branch diff")
@@ -319,7 +342,7 @@ func runReviewWithPolicy(ctx context.Context, opts reviewCommandOptions, framewo
 }
 
 func runProjectReviewWithPolicy(ctx context.Context, framework *oneshot.Framework, reviewPolicy automatedReviewOptions) (*reviewCommandResult, error) {
-	spinner := terminal.NewSpinner("Analyzing project...")
+	spinner := newReviewProgress("Analyzing project...")
 	spinner.Start()
 	policy := model.ReviewSnapshotPolicy{Mode: model.ReviewSnapshotTrackedWorktree}
 	snapshot, err := model.CaptureReviewSnapshot(ctx, "", policy)
@@ -392,7 +415,7 @@ func runProjectReviewWithPolicy(ctx context.Context, framework *oneshot.Framewor
 
 func runBranchReviewWithPolicy(ctx context.Context, opts reviewCommandOptions, framework *oneshot.Framework, reviewPolicy automatedReviewOptions) (*reviewCommandResult, error) {
 	reviewScope := normalizeReviewCommandScope(opts.scope)
-	spinner := terminal.NewSpinner(fmt.Sprintf("Analyzing %s changes...", reviewScope))
+	spinner := newReviewProgress(fmt.Sprintf("Analyzing %s changes...", reviewScope))
 	spinner.Start()
 	policy := branchReviewSnapshotPolicy(reviewScope, opts.includeUnstaged, opts.untrackedPaths)
 	snapshot, err := model.CaptureReviewSnapshot(ctx, "", policy)
