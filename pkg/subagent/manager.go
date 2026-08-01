@@ -10,6 +10,7 @@ import (
 
 	"github.com/oklog/ulid/v2"
 
+	"m31labs.dev/buckley/v2/pkg/persona"
 	"m31labs.dev/buckley/v2/pkg/telemetry"
 )
 
@@ -38,6 +39,26 @@ type Request struct {
 	Spec            string
 	Task            string
 	TimeoutSeconds  int
+	// Persona is the persona name resolved for this spawn, empty when the
+	// spawn did not request one. Set via SpawnOptions.Persona.
+	Persona string
+	// Model is the model alias pinned by the resolved persona, empty when
+	// the persona pins no model (a tier-only pin, or no persona at all).
+	Model string
+	// Tier is the tier persona.ValidateEscalation resolved for this spawn:
+	// the persona's own pin, or persona.DefaultTier for an unpinned
+	// persona. Empty when no persona was requested.
+	Tier persona.Tier
+	// SystemPrompt is the resolved persona's prompt body. A Runner that
+	// builds a model request should prepend it ahead of Task as system
+	// context; Task itself stays the task instruction, unmodified.
+	SystemPrompt string
+	// StepCap is the resolved persona's iteration budget (0 means unset).
+	// buckley's current Runner implementations spawn a single bounded
+	// child process rather than iterating in-process, so no manager-level
+	// loop enforces this yet; it is threaded through for a Runner that
+	// does support an iteration budget to honor.
+	StepCap int
 }
 
 type Runner interface {
@@ -56,6 +77,11 @@ type Snapshot struct {
 	FinishedAt      time.Time `json:"finished_at,omitempty"`
 	Output          string    `json:"output,omitempty"`
 	Error           string    `json:"error,omitempty"`
+	// Persona, Model, and Tier are empty unless the spawn resolved a
+	// persona via SpawnOptions.Persona; see Request for their meaning.
+	Persona string       `json:"persona,omitempty"`
+	Model   string       `json:"model,omitempty"`
+	Tier    persona.Tier `json:"tier,omitempty"`
 }
 
 type run struct {
@@ -73,6 +99,8 @@ type Manager struct {
 	hub           *telemetry.Hub
 	closed        bool
 	wg            sync.WaitGroup
+	personas      *persona.Registry
+	parentPersona persona.Persona
 }
 
 func NewManager(runner Runner, maxConcurrent int) *Manager {
@@ -96,13 +124,88 @@ func (m *Manager) SetTelemetry(hub *telemetry.Hub, parentSession string) {
 	m.mu.Unlock()
 }
 
+// SetPersonaContext registers the persona registry SpawnOptions.Persona
+// resolves against, and records parent as the persona this manager's own
+// spawns run under. parent feeds pkg/persona.ValidateEscalation, tiller's
+// DenyImplicitReasonInheritance discipline: a spawned persona pinning a
+// tier more capable than parent's tier is denied with a
+// *persona.EscalationError rather than spawned. Both arguments may be zero
+// values; a Manager that never calls SetPersonaContext keeps Spawn's
+// legacy, persona-free behavior.
+func (m *Manager) SetPersonaContext(registry *persona.Registry, parent persona.Persona) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	m.personas = registry
+	m.parentPersona = parent
+	m.mu.Unlock()
+}
+
+// SpawnOptions is the additive, persona-aware counterpart to Spawn's
+// positional arguments. Spawn builds one from its arguments and calls
+// SpawnWithOptions; existing Spawn call sites are unaffected.
+type SpawnOptions struct {
+	Agent          string
+	Spec           string
+	Task           string
+	TimeoutSeconds int
+	// Persona is an optional persona name (bare or "@name") resolved
+	// against the registry passed to SetPersonaContext. Empty means "no
+	// persona": Spawn's legacy behavior, no escalation check performed.
+	Persona string
+}
+
 func (m *Manager) Spawn(agent, spec, task string, timeoutSeconds int) (Snapshot, error) {
+	return m.SpawnWithOptions(SpawnOptions{
+		Agent:          agent,
+		Spec:           spec,
+		Task:           task,
+		TimeoutSeconds: timeoutSeconds,
+	})
+}
+
+// SpawnWithOptions spawns a child under opts, resolving opts.Persona
+// against the manager's persona registry when set. A named persona that
+// cannot be resolved is a spawn error. A resolved persona is validated
+// against the manager's parent persona via pkg/persona.ValidateEscalation
+// before the child run starts: an escalating pin returns the resulting
+// *persona.EscalationError (wrapped, so errors.As still finds it) instead
+// of spawning.
+func (m *Manager) SpawnWithOptions(opts SpawnOptions) (Snapshot, error) {
 	if m == nil || m.runner == nil {
 		return Snapshot{}, fmt.Errorf("subagent manager is unavailable")
 	}
-	task = strings.TrimSpace(task)
+	task := strings.TrimSpace(opts.Task)
 	if task == "" {
 		return Snapshot{}, fmt.Errorf("subagent task is required")
+	}
+
+	var (
+		personaName  string
+		model        string
+		tier         persona.Tier
+		systemPrompt string
+		stepCap      int
+	)
+	if personaName = strings.TrimSpace(opts.Persona); personaName != "" {
+		m.mu.RLock()
+		registry := m.personas
+		parentPersona := m.parentPersona
+		m.mu.RUnlock()
+
+		child, ok := registry.Resolve(personaName)
+		if !ok {
+			return Snapshot{}, fmt.Errorf("subagent: persona not found: %s", personaName)
+		}
+		resolvedTier, err := persona.ValidateEscalation(parentPersona, child)
+		if err != nil {
+			return Snapshot{}, fmt.Errorf("subagent: spawn denied: %w", err)
+		}
+		model = child.Model
+		tier = resolvedTier
+		systemPrompt = child.Prompt
+		stepCap = child.StepCap
 	}
 
 	m.mu.Lock()
@@ -116,18 +219,21 @@ func (m *Manager) Spawn(agent, spec, task string, timeoutSeconds int) (Snapshot,
 	}
 	id := ulid.Make().String()
 	ctx, cancel := context.WithCancel(context.Background())
-	if timeoutSeconds > 0 {
-		ctx, cancel = context.WithTimeout(context.Background(), time.Duration(timeoutSeconds)*time.Second)
+	if opts.TimeoutSeconds > 0 {
+		ctx, cancel = context.WithTimeout(context.Background(), time.Duration(opts.TimeoutSeconds)*time.Second)
 	}
 	current := &run{
 		snapshot: Snapshot{
 			ID:              id,
 			ParentSessionID: m.parentSession,
-			Agent:           strings.TrimSpace(agent),
-			Spec:            strings.TrimSpace(spec),
+			Agent:           strings.TrimSpace(opts.Agent),
+			Spec:            strings.TrimSpace(opts.Spec),
 			Task:            boundedTask(task),
 			State:           StateRunning,
 			StartedAt:       time.Now(),
+			Persona:         personaName,
+			Model:           model,
+			Tier:            tier,
 		},
 		cancel: cancel,
 		done:   make(chan struct{}),
@@ -144,7 +250,12 @@ func (m *Manager) Spawn(agent, spec, task string, timeoutSeconds int) (Snapshot,
 		Agent:           snapshot.Agent,
 		Spec:            snapshot.Spec,
 		Task:            task,
-		TimeoutSeconds:  timeoutSeconds,
+		TimeoutSeconds:  opts.TimeoutSeconds,
+		Persona:         personaName,
+		Model:           model,
+		Tier:            tier,
+		SystemPrompt:    systemPrompt,
+		StepCap:         stepCap,
 	})
 	return snapshot, nil
 }
