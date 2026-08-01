@@ -58,6 +58,14 @@ type Controller struct {
 	agentProfile  string
 	modelOverride string
 
+	// modelVariant is the name of the active reasoning preset (see
+	// conversation.ModelVariant), cycled by keybind. Empty until the user
+	// cycles for the first time.
+	modelVariant string
+	// recentModels holds up to maxRecentModels most-recently-used execution
+	// model IDs for this session, most recent first, cycled by keybind.
+	recentModels []string
+
 	// Multi-session support - each session runs independently
 	sessions       []*SessionState // Active sessions for this project
 	currentSession int             // Index into sessions
@@ -217,6 +225,10 @@ func NewController(cfg ControllerConfig) (*Controller, error) {
 	app.SetSessionCallbacks(
 		ctrl.nextSession,
 		ctrl.prevSession,
+	)
+	app.SetModelVariantCallbacks(
+		ctrl.cycleModelVariant,
+		ctrl.cycleRecentModel,
 	)
 	app.SetInterruptCallback(ctrl.cancelCurrentStream)
 
@@ -509,7 +521,7 @@ func (c *Controller) handleCommand(text string) {
   /help                - Show this help
   /quit, /exit         - Exit Buckley
 
-Shortcuts: Shift+Enter (new line), Ctrl+C (interrupt active work), Alt+Right (next), Alt+Left (prev), Alt+C (copy last code), Ctrl+F (search)`, "system")
+Shortcuts: Shift+Enter (new line), Ctrl+C (interrupt active work), Alt+Right (next), Alt+Left (prev), Alt+C (copy last code), Alt+M (cycle model variant), Alt+R (cycle recent model), Ctrl+F (search)`, "system")
 
 	case "/quit", "/exit":
 		c.app.Quit()
@@ -826,6 +838,7 @@ func (c *Controller) setExecutionModelLocked(modelID string) {
 
 	c.cfg.Models.Execution = modelID
 	c.modelOverride = modelID
+	c.rememberRecentModel(modelID)
 	c.app.SetModelName(modelID)
 	notice := "Execution model set to " + modelID
 	if len(c.sessions) > 0 && c.sessions[c.currentSession].Streaming {

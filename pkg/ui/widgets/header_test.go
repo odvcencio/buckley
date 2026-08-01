@@ -42,6 +42,59 @@ func TestHeader_SetModelName_Empty(t *testing.T) {
 	}
 }
 
+func TestHeader_SetVariant(t *testing.T) {
+	h := NewHeader()
+
+	h.SetVariant("fast")
+
+	if h.variantName != "fast" {
+		t.Errorf("expected variant 'fast', got '%s'", h.variantName)
+	}
+}
+
+func TestHeader_Render_WithModelNameAndVariant(t *testing.T) {
+	h := NewHeader()
+	h.SetModelName("gpt-4")
+	h.SetVariant("fast")
+	h.Layout(runtime.Rect{X: 0, Y: 0, Width: 40, Height: 1})
+
+	buf := runtime.NewBuffer(40, 1)
+	ctx := runtime.RenderContext{Buffer: buf}
+
+	h.Render(ctx)
+
+	// "gpt-4 · fast " should render on the right; the model name should
+	// still start before the trailing space.
+	found := false
+	for x := 0; x < 40; x++ {
+		if buf.Get(x, 0).Rune == 'g' {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("expected model name to be rendered")
+	}
+}
+
+func TestHeader_Render_NoVariantOmitsSeparator(t *testing.T) {
+	h := NewHeader()
+	h.SetModelName("gpt-4")
+	h.Layout(runtime.Rect{X: 0, Y: 0, Width: 40, Height: 1})
+
+	buf := runtime.NewBuffer(40, 1)
+	ctx := runtime.RenderContext{Buffer: buf}
+
+	h.Render(ctx)
+
+	// Model name should be on the right with trailing space, unchanged from
+	// TestHeader_Render_WithModelName, since no variant is set.
+	cell := buf.Get(34, 0)
+	if cell.Rune != 'g' {
+		t.Errorf("expected 'g' at (34,0), got '%c'", cell.Rune)
+	}
+}
+
 func TestHeader_SetStyles(t *testing.T) {
 	h := NewHeader()
 

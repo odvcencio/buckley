@@ -123,6 +123,20 @@ func (a *WidgetApp) handleAltShortcut(m KeyMsg, key terminal.Key) bool {
 		return true
 	}
 
+	if key == terminal.KeyRune && (m.Rune == 'm' || m.Rune == 'M') {
+		if a.onCycleVariant != nil {
+			a.onCycleVariant()
+		}
+		return true
+	}
+
+	if key == terminal.KeyRune && (m.Rune == 'r' || m.Rune == 'R') {
+		if a.onCycleRecentModel != nil {
+			a.onCycleRecentModel()
+		}
+		return true
+	}
+
 	switch key {
 	case terminal.KeyLeft:
 		if a.onPrevSession != nil {

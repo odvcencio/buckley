@@ -37,6 +37,9 @@ func (a *WidgetApp) update(msg Message) bool {
 	case ModelMsg:
 		a.header.SetModelName(m.Name)
 		return true
+	case ModelVariantMsg:
+		a.header.SetVariant(m.Name)
+		return true
 	case ThinkingMsg:
 		return a.handleThinkingMsg(m)
 	case ModelPickerMsg:

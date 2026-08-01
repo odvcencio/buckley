@@ -120,10 +120,12 @@ type WidgetApp struct {
 	onQuit        func()
 	onFileSelect  func(path string)
 	onShellCmd    func(cmd string) string
-	onNextSession func()
-	onPrevSession func()
-	onApproval    func(requestID string, approved, alwaysAllow bool)
-	onInterrupt   func()
+	onNextSession      func()
+	onPrevSession      func()
+	onCycleVariant     func()
+	onCycleRecentModel func()
+	onApproval         func(requestID string, approved, alwaysAllow bool)
+	onInterrupt        func()
 
 	// Configuration
 	theme       *theme.Theme
@@ -1217,6 +1219,12 @@ func (a *WidgetApp) SetModelName(name string) {
 	a.Post(ModelMsg{Name: name})
 }
 
+// SetModelVariant updates the active model variant preset display.
+// Thread-safe via message passing.
+func (a *WidgetApp) SetModelVariant(name string) {
+	a.Post(ModelVariantMsg{Name: name})
+}
+
 // SetCallbacks sets the event handlers.
 func (a *WidgetApp) SetCallbacks(onSubmit func(string), onFileSelect func(string), onShellCmd func(string) string) {
 	a.onSubmit = onSubmit
@@ -1228,6 +1236,13 @@ func (a *WidgetApp) SetCallbacks(onSubmit func(string), onFileSelect func(string
 func (a *WidgetApp) SetSessionCallbacks(onNext, onPrev func()) {
 	a.onNextSession = onNext
 	a.onPrevSession = onPrev
+}
+
+// SetModelVariantCallbacks sets the model-variant and recent-model cycling
+// callbacks, triggered by keybind (see app_widget_keys.go).
+func (a *WidgetApp) SetModelVariantCallbacks(onCycleVariant, onCycleRecentModel func()) {
+	a.onCycleVariant = onCycleVariant
+	a.onCycleRecentModel = onCycleRecentModel
 }
 
 // SetInterruptCallback sets the callback used to stop an active model or tool process.
