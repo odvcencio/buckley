@@ -354,7 +354,13 @@ func (r *Registry) buildToolRegistry(sessionID string, project string) (*tool.Re
 		fmt.Fprintf(os.Stderr, "Warning: failed to load some plugins: %v\n", err)
 	}
 	var hooks io.Closer
-	if hookCloser, hookErr := tools.EnableConfiguredHooks(r.config != nil && r.config.Hooks.Enabled, time.Duration(r.config.Hooks.DefaultTimeoutMs)*time.Millisecond); hookErr != nil {
+	hooksEnabled := false
+	hooksTimeout := time.Duration(0)
+	if r.config != nil {
+		hooksEnabled = r.config.Hooks.Enabled
+		hooksTimeout = time.Duration(r.config.Hooks.DefaultTimeoutMs) * time.Millisecond
+	}
+	if hookCloser, hookErr := tools.EnableConfiguredHooks(hooksEnabled, hooksTimeout); hookErr != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to start plugin hooks: %v\n", hookErr)
 	} else if hookCloser != nil {
 		hooks = hookCloser

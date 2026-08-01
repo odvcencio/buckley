@@ -1233,7 +1233,13 @@ func buildRegistry(cfg *config.Config, store *storage.Store, workDir string, hub
 		fmt.Fprintf(os.Stderr, "Warning: failed to load some plugins: %v\n", err)
 	}
 	var hooks io.Closer
-	if hookCloser, hookErr := registry.EnableConfiguredHooks(cfg != nil && cfg.Hooks.Enabled, time.Duration(cfg.Hooks.DefaultTimeoutMs)*time.Millisecond); hookErr != nil {
+	hooksEnabled := false
+	hooksTimeout := time.Duration(0)
+	if cfg != nil {
+		hooksEnabled = cfg.Hooks.Enabled
+		hooksTimeout = time.Duration(cfg.Hooks.DefaultTimeoutMs) * time.Millisecond
+	}
+	if hookCloser, hookErr := registry.EnableConfiguredHooks(hooksEnabled, hooksTimeout); hookErr != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to start plugin hooks: %v\n", hookErr)
 	} else if hookCloser != nil {
 		hooks = hookCloser
