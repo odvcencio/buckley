@@ -699,6 +699,7 @@ func printHelp() {
 	fmt.Println("  db restore --in <path> --force   Restore SQLite backup (stop Buckley first)")
 	fmt.Println("  resume <session-id>              Resume a previous session")
 	fmt.Println("  session export <session-id>      Export a session transcript (--format json|markdown)")
+	fmt.Println("  models refresh [--dry-run]       Merge models.dev capability/pricing metadata into the catalog cache")
 	fmt.Println()
 	fmt.Println("FLAGS:")
 	fmt.Println("  -p <prompt>                      Run prompt in one-shot mode")
@@ -1317,6 +1318,8 @@ func dispatchSubcommand(args []string) (bool, int) {
 		return false, 0
 	case "session":
 		return true, runCommand(runSessionCommand, args[1:])
+	case "models":
+		return true, runCommand(runModelsCommand, args[1:])
 	case "agent-server":
 		return true, runCommand(runAgentServerCommand, args[1:])
 	case "lsp":
