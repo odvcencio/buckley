@@ -603,9 +603,9 @@ type PermissionsConfig struct {
 
 // PostureConfig is a named permission layer selectable via
 // BUCKLEY_POSTURE or postures.default. Built-in defaults ship
-// "interactive" (empty layer, today's behavior) and "unattended" (denies
-// outward-facing bash, parks ask decisions instead of blocking on human
-// approval).
+// "interactive" (empty layer, today's behavior) and "unattended" (flags
+// outward-facing bash as "ask" and parks those decisions instead of
+// blocking on human approval).
 type PostureConfig struct {
 	Rules []policy.PermissionRule `yaml:"rules"`
 	// ParkAskDecisions routes "ask" decisions to a ParkedDecision instead of

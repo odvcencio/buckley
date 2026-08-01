@@ -213,9 +213,10 @@ func TestNewPermissionMiddleware_PostureLayerComposesWithBuiltins(t *testing.T) 
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if result == nil || result.Success {
-		t.Fatalf("expected git push to be denied under the unattended posture layer, got %#v", result)
+		t.Fatalf("expected git push to be parked under the unattended posture layer, got %#v", result)
 	}
-	if !strings.Contains(result.Error, "permission denied") {
-		t.Fatalf("expected a permission-denied error, got %q", result.Error)
+	parked, _ := result.Data["parked"].(bool)
+	if !parked {
+		t.Fatalf("expected a parked result, got %#v", result)
 	}
 }

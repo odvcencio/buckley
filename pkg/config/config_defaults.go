@@ -90,10 +90,11 @@ func defaultDeniedPaths() []string {
 }
 
 // defaultPosturesConfig ships the two built-in postures: "interactive"
-// (empty layer, today's behavior) and "unattended" (denies outward-facing
-// bash and parks ask decisions instead of blocking on human approval).
-// The active posture defaults to "interactive" unless overridden by
-// postures.default or the BUCKLEY_POSTURE env var (pkg/policy.SelectPosture).
+// (empty layer, today's behavior) and "unattended" (flags outward-facing
+// bash as "ask" and parks those decisions instead of blocking on human
+// approval). The active posture defaults to "interactive" unless
+// overridden by postures.default or the BUCKLEY_POSTURE env var
+// (pkg/policy.SelectPosture).
 func defaultPosturesConfig() PosturesConfig {
 	return PosturesConfig{
 		Default: policy.PostureInteractive,

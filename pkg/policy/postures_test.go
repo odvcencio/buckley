@@ -25,7 +25,7 @@ func TestSelectPosture(t *testing.T) {
 	})
 }
 
-func TestUnattendedPostureRules_DenyOutwardBash(t *testing.T) {
+func TestUnattendedPostureRules_AsksBeforeOutwardBash(t *testing.T) {
 	tests := []struct {
 		name string
 		cmd  string
@@ -43,8 +43,11 @@ func TestUnattendedPostureRules_DenyOutwardBash(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			req := PermissionRequest{Tool: "run_shell", Category: "shell", Arg: tt.cmd, Posture: PostureUnattended}
 			dec := EvaluatePermissionLayers(req, layer)
-			if dec.Action != PermissionDeny {
-				t.Fatalf("expected %q to be denied under unattended posture, got %+v", tt.cmd, dec)
+			// The unattended posture flags outward bash as "ask", not a hard
+			// deny; pairing with ParkAskDecisions is what keeps it from
+			// running unattended (see pkg/tool.NewPermissionMiddleware).
+			if dec.Action != PermissionAsk {
+				t.Fatalf("expected %q to be flagged ask under unattended posture, got %+v", tt.cmd, dec)
 			}
 		})
 	}
@@ -55,7 +58,7 @@ func TestUnattendedPostureRules_AllowsSafeCommands(t *testing.T) {
 	req := PermissionRequest{Tool: "run_shell", Category: "shell", Arg: "go test ./...", Posture: PostureUnattended}
 	dec := EvaluatePermissionLayers(req, layer)
 	if dec.Matched {
-		t.Fatalf("expected go test not to match the unattended deny layer, got %+v", dec)
+		t.Fatalf("expected go test not to match the unattended ask layer, got %+v", dec)
 	}
 }
 

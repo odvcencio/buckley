@@ -15,8 +15,10 @@ const PostureEnvVar = "BUCKLEY_POSTURE"
 // preserves today's approval behavior.
 const PostureInteractive = "interactive"
 
-// PostureUnattended denies outward-facing bash (git push, gh, mutation
-// curls) and parks ask decisions instead of blocking on human approval.
+// PostureUnattended flags outward-facing bash (git push, gh, mutation
+// curls) as "ask" and, since this posture parks ask decisions instead of
+// blocking on human approval, those calls are recorded as ParkedDecisions
+// and never execute unattended.
 const PostureUnattended = "unattended"
 
 // SelectPosture resolves the active posture name: BUCKLEY_POSTURE takes
@@ -32,23 +34,25 @@ func SelectPosture(configuredDefault string) string {
 	return PostureInteractive
 }
 
-// UnattendedPostureRules denies outward-facing bash that would touch
-// systems outside this workspace unattended: pushing to a remote, using
-// the gh CLI, and mutating HTTP requests via curl.
+// UnattendedPostureRules flags outward-facing bash that would touch
+// systems outside this workspace unattended as "ask": pushing to a remote,
+// using the gh CLI, and mutating HTTP requests via curl. Paired with
+// PostureConfig.ParkAskDecisions, these calls are parked (recorded, not
+// executed) rather than blocked on a human who isn't present to approve.
 func UnattendedPostureRules() []PermissionRule {
 	return []PermissionRule{
-		{Tool: "run_shell", ArgPattern: "git push*", Action: PermissionDeny},
-		{Tool: "run_shell", ArgPattern: "* git push*", Action: PermissionDeny},
-		{Tool: "run_shell", ArgPattern: "gh *", Action: PermissionDeny},
-		{Tool: "run_shell", ArgPattern: "* gh *", Action: PermissionDeny},
-		{Tool: "run_shell", ArgPattern: "*curl*-X POST*", Action: PermissionDeny},
-		{Tool: "run_shell", ArgPattern: "*curl*-X PUT*", Action: PermissionDeny},
-		{Tool: "run_shell", ArgPattern: "*curl*-X DELETE*", Action: PermissionDeny},
-		{Tool: "run_shell", ArgPattern: "*curl*-X PATCH*", Action: PermissionDeny},
-		{Tool: "run_shell", ArgPattern: "*curl*-X post*", Action: PermissionDeny},
-		{Tool: "run_shell", ArgPattern: "*curl*-X put*", Action: PermissionDeny},
-		{Tool: "run_shell", ArgPattern: "*curl*-X delete*", Action: PermissionDeny},
-		{Tool: "run_shell", ArgPattern: "*curl*-X patch*", Action: PermissionDeny},
+		{Tool: "run_shell", ArgPattern: "git push*", Action: PermissionAsk},
+		{Tool: "run_shell", ArgPattern: "* git push*", Action: PermissionAsk},
+		{Tool: "run_shell", ArgPattern: "gh *", Action: PermissionAsk},
+		{Tool: "run_shell", ArgPattern: "* gh *", Action: PermissionAsk},
+		{Tool: "run_shell", ArgPattern: "*curl*-X POST*", Action: PermissionAsk},
+		{Tool: "run_shell", ArgPattern: "*curl*-X PUT*", Action: PermissionAsk},
+		{Tool: "run_shell", ArgPattern: "*curl*-X DELETE*", Action: PermissionAsk},
+		{Tool: "run_shell", ArgPattern: "*curl*-X PATCH*", Action: PermissionAsk},
+		{Tool: "run_shell", ArgPattern: "*curl*-X post*", Action: PermissionAsk},
+		{Tool: "run_shell", ArgPattern: "*curl*-X put*", Action: PermissionAsk},
+		{Tool: "run_shell", ArgPattern: "*curl*-X delete*", Action: PermissionAsk},
+		{Tool: "run_shell", ArgPattern: "*curl*-X patch*", Action: PermissionAsk},
 	}
 }
 
