@@ -21,6 +21,7 @@ import (
 	"m31labs.dev/buckley/v2/pkg/model"
 	"m31labs.dev/buckley/v2/pkg/prompts"
 	"m31labs.dev/buckley/v2/pkg/rules"
+	"m31labs.dev/buckley/v2/pkg/runledger"
 	"m31labs.dev/buckley/v2/pkg/session"
 	"m31labs.dev/buckley/v2/pkg/skill"
 	"m31labs.dev/buckley/v2/pkg/storage"
@@ -28,6 +29,7 @@ import (
 	"m31labs.dev/buckley/v2/pkg/tool"
 	"m31labs.dev/buckley/v2/pkg/tool/builtin"
 	"m31labs.dev/buckley/v2/pkg/types"
+	"m31labs.dev/buckley/v2/pkg/ui/shadowgit"
 	"m31labs.dev/buckley/v2/pkg/ui/widgets"
 )
 
@@ -58,9 +60,26 @@ type Controller struct {
 	agentProfile  string
 	modelOverride string
 
+	// modelVariant is the name of the active reasoning preset (see
+	// conversation.ModelVariant), cycled by keybind. Empty until the user
+	// cycles for the first time.
+	modelVariant string
+	// recentModels holds up to maxRecentModels most-recently-used execution
+	// model IDs for this session, most recent first, cycled by keybind.
+	recentModels []string
+
 	// Multi-session support - each session runs independently
 	sessions       []*SessionState // Active sessions for this project
 	currentSession int             // Index into sessions
+
+	// runLedger is the optional read-only run ledger backing the
+	// navigator's Sessions section (see ControllerConfig.RunLedger).
+	runLedger runledger.Store
+	// sessionRunNodes maps a run ID shown in the navigator back to its
+	// materialized run-tree node, so a click can show that run's state in
+	// the inspector. Rebuilt on every refreshSessionNav call; nil when the
+	// navigator is showing the flat session-list fallback.
+	sessionRunNodes map[string]*runledger.RunNode
 }
 
 // QueuedMessage represents a user message queued during streaming.
@@ -89,6 +108,31 @@ type SessionState struct {
 	// continuation lazily holds this session's provider continuation cursor
 	// (decision 0001), behind the models.provider_continuation flag.
 	continuation *model.ContinuationCoordinator
+
+	// undoStack holds applied turns eligible for /undo, oldest first.
+	// redoStack holds turns /undo removed, most recently undone last, so
+	// /redo pops from its tail. A new turn clears redoStack (see
+	// beginTurnUndo), matching standard undo/redo branch-discard semantics.
+	undoStack []turnUndoRecord
+	redoStack []turnUndoRecord
+
+	// undoStore is this session's shadow-git handle (see pkg/ui/shadowgit),
+	// lazily resolved and cached. It stays nil when the workspace is not a
+	// git repository; undoStoreChecked records that the lookup already ran
+	// so later turns do not retry a doomed rev-parse every time.
+	undoStore        *shadowgit.Store
+	undoStoreChecked bool
+}
+
+// turnUndoRecord captures one undoable assistant turn: the shadow-git tree
+// hashes bracketing it and the conversation messages it appended, so
+// /undo and /redo can restore both the file changes and the conversation
+// tail together.
+type turnUndoRecord struct {
+	beforeTree     string
+	afterTree      string
+	messagesBefore int
+	messages       []conversation.Message
 }
 
 // ControllerConfig configures the controller.
@@ -101,6 +145,12 @@ type ControllerConfig struct {
 	SessionID     string // Resume session, empty for new
 	AgentProfile  string
 	ModelOverride string // CLI --model override, takes precedence over routing rules
+
+	// RunLedger is an optional, read-only run ledger consulted for the
+	// navigator's Sessions section (see Pillar D: session tree). When nil,
+	// or when no run exists for the current session, the navigator falls
+	// back to the flat session list.
+	RunLedger runledger.Store
 }
 
 func newSessionState(cfg *config.Config, store *storage.Store, workDir string, hub *telemetry.Hub, sessionID string, loadMessages bool) (*SessionState, error) {
@@ -201,6 +251,7 @@ func NewController(cfg ControllerConfig) (*Controller, error) {
 		modelOverride:  strings.TrimSpace(cfg.ModelOverride),
 		sessions:       projectSessions,
 		currentSession: currentIdx,
+		runLedger:      cfg.RunLedger,
 	}
 
 	// Create telemetry bridge for sidebar updates
@@ -215,10 +266,17 @@ func NewController(cfg ControllerConfig) (*Controller, error) {
 		ctrl.handleShellCmd,
 	)
 	app.SetSessionCallbacks(
-		ctrl.nextSession,
-		ctrl.prevSession,
+		ctrl.nextSessionAndRefreshNav,
+		ctrl.prevSessionAndRefreshNav,
+	)
+	app.SetModelVariantCallbacks(
+		ctrl.cycleModelVariant,
+		ctrl.cycleRecentModel,
 	)
 	app.SetInterruptCallback(ctrl.cancelCurrentStream)
+	app.SetSessionNavCallback(ctrl.handleSessionNodeSelected)
+
+	ctrl.refreshSessionNav()
 
 	return ctrl, nil
 }
@@ -415,6 +473,7 @@ func (c *Controller) handleCommand(text string) {
 	switch cmd {
 	case "/new":
 		c.newSession()
+		c.refreshSessionNav()
 
 	case "/clear", "/reset":
 		c.clearCurrentSession()
@@ -428,12 +487,13 @@ func (c *Controller) handleCommand(text string) {
 			return
 		}
 		c.resumeSession(strings.Join(parts[1:], " "))
+		c.refreshSessionNav()
 
 	case "/next", "/n":
-		c.nextSession()
+		c.nextSessionAndRefreshNav()
 
 	case "/prev", "/p":
-		c.prevSession()
+		c.prevSessionAndRefreshNav()
 
 	case "/model", "/models":
 		if len(parts) > 1 {
@@ -462,6 +522,12 @@ func (c *Controller) handleCommand(text string) {
 
 	case "/cancel", "/stop":
 		c.cancelCurrentStream()
+
+	case "/undo":
+		c.undoLastTurn()
+
+	case "/redo":
+		c.redoLastTurn()
 
 	case "/queue":
 		prompt := strings.TrimSpace(strings.TrimPrefix(text, parts[0]))
@@ -494,6 +560,8 @@ func (c *Controller) handleCommand(text string) {
   /history             - Show recent conversation turns
   /export [file]       - Export the current conversation to Markdown
   /cancel, /stop       - Cancel the current response and clear queued input
+  /undo                - Revert the last assistant turn's messages and file changes
+  /redo                - Restore a turn /undo reverted
   /steer <message>     - Interrupt and redirect the active response
   /queue <message>     - Run a follow-up after the active response
   /sessions, /tabs     - List active sessions
@@ -509,7 +577,7 @@ func (c *Controller) handleCommand(text string) {
   /help                - Show this help
   /quit, /exit         - Exit Buckley
 
-Shortcuts: Shift+Enter (new line), Ctrl+C (interrupt active work), Alt+Right (next), Alt+Left (prev), Alt+C (copy last code), Ctrl+F (search)`, "system")
+Shortcuts: Shift+Enter (new line), Ctrl+C (interrupt active work), Alt+Right (next), Alt+Left (prev), Alt+C (copy last code), Alt+M (cycle model variant), Alt+R (cycle recent model), Ctrl+F (search)`, "system")
 
 	case "/quit", "/exit":
 		c.app.Quit()
@@ -826,6 +894,7 @@ func (c *Controller) setExecutionModelLocked(modelID string) {
 
 	c.cfg.Models.Execution = modelID
 	c.modelOverride = modelID
+	c.rememberRecentModel(modelID)
 	c.app.SetModelName(modelID)
 	notice := "Execution model set to " + modelID
 	if len(c.sessions) > 0 && c.sessions[c.currentSession].Streaming {
@@ -1264,6 +1333,20 @@ func (c *Controller) nextSession() {
 
 	c.currentSession = (c.currentSession + 1) % len(c.sessions)
 	c.switchToSessionLocked(c.currentSession)
+}
+
+// nextSessionAndRefreshNav switches to the next session and refreshes the
+// navigator's Sessions section, for callers that cannot append the
+// refresh themselves (the Alt+Right keybind).
+func (c *Controller) nextSessionAndRefreshNav() {
+	c.nextSession()
+	c.refreshSessionNav()
+}
+
+// prevSessionAndRefreshNav is prevSession's Alt+Left counterpart.
+func (c *Controller) prevSessionAndRefreshNav() {
+	c.prevSession()
+	c.refreshSessionNav()
 }
 
 // prevSession switches to the previous session.

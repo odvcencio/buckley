@@ -37,6 +37,9 @@ func (a *WidgetApp) update(msg Message) bool {
 	case ModelMsg:
 		a.header.SetModelName(m.Name)
 		return true
+	case ModelVariantMsg:
+		a.header.SetVariant(m.Name)
+		return true
 	case ThinkingMsg:
 		return a.handleThinkingMsg(m)
 	case ModelPickerMsg:
@@ -44,6 +47,9 @@ func (a *WidgetApp) update(msg Message) bool {
 		return true
 	case SetActivitiesMsg:
 		a.applySetActivities(m.Records)
+		return true
+	case SessionNavMsg:
+		a.sidebar.SetSessionNodes(m.Nodes)
 		return true
 	case RefreshMsg:
 		return true

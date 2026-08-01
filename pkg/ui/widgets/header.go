@@ -8,11 +8,12 @@ import (
 // Header is the Buckley header bar widget.
 type Header struct {
 	Base
-	logo      string
-	modelName string
-	bgStyle   backend.Style
-	logoStyle backend.Style
-	textStyle backend.Style
+	logo        string
+	modelName   string
+	variantName string
+	bgStyle     backend.Style
+	logoStyle   backend.Style
+	textStyle   backend.Style
 }
 
 // NewHeader creates a new header widget.
@@ -28,6 +29,12 @@ func NewHeader() *Header {
 // SetModelName updates the displayed model name.
 func (h *Header) SetModelName(name string) {
 	h.modelName = name
+}
+
+// SetVariant updates the displayed model variant preset name (for example
+// "fast" or "deep+retained"). An empty name hides the preset indicator.
+func (h *Header) SetVariant(name string) {
+	h.variantName = name
 }
 
 // SetStyles sets the header styles.
@@ -58,12 +65,21 @@ func (h *Header) Render(ctx runtime.RenderContext) {
 	// Draw logo on left
 	ctx.Buffer.SetString(bounds.X, bounds.Y, h.logo, h.logoStyle)
 
-	// Draw model name on right
+	// Draw model name (with optional variant preset) on right
 	if h.modelName != "" {
-		modelStr := h.modelName + " "
-		x := bounds.X + bounds.Width - len(modelStr)
+		modelStr := h.modelDisplay() + " "
+		x := bounds.X + bounds.Width - displayWidth(modelStr)
 		if x > bounds.X+len(h.logo) {
 			ctx.Buffer.SetString(x, bounds.Y, modelStr, h.textStyle)
 		}
 	}
+}
+
+// modelDisplay renders the model name with its active variant preset, if
+// any, in "model · preset" form.
+func (h *Header) modelDisplay() string {
+	if h.variantName == "" {
+		return h.modelName
+	}
+	return h.modelName + " · " + h.variantName
 }

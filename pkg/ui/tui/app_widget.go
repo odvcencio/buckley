@@ -116,14 +116,16 @@ type WidgetApp struct {
 	cursorFG            backend.Color
 
 	// Callbacks
-	onSubmit      func(text string)
-	onQuit        func()
-	onFileSelect  func(path string)
-	onShellCmd    func(cmd string) string
-	onNextSession func()
-	onPrevSession func()
-	onApproval    func(requestID string, approved, alwaysAllow bool)
-	onInterrupt   func()
+	onSubmit           func(text string)
+	onQuit             func()
+	onFileSelect       func(path string)
+	onShellCmd         func(cmd string) string
+	onNextSession      func()
+	onPrevSession      func()
+	onCycleVariant     func()
+	onCycleRecentModel func()
+	onApproval         func(requestID string, approved, alwaysAllow bool)
+	onInterrupt        func()
 
 	// Configuration
 	theme       *theme.Theme
@@ -1217,6 +1219,25 @@ func (a *WidgetApp) SetModelName(name string) {
 	a.Post(ModelMsg{Name: name})
 }
 
+// SetModelVariant updates the active model variant preset display.
+// Thread-safe via message passing.
+func (a *WidgetApp) SetModelVariant(name string) {
+	a.Post(ModelVariantMsg{Name: name})
+}
+
+// SetSessionNav replaces the navigator's Sessions section content.
+// Thread-safe via message passing.
+func (a *WidgetApp) SetSessionNav(nodes []widgets.SessionNavNode) {
+	a.Post(SessionNavMsg{Nodes: nodes})
+}
+
+// SetSessionNavCallback wires the callback fired when a Sessions row is
+// selected. Call once during setup, before Run starts; the sidebar itself
+// invokes it directly from its mouse handler on the UI goroutine.
+func (a *WidgetApp) SetSessionNavCallback(cb func(widgets.SessionNavNode)) {
+	a.sidebar.SetOnSessionSelect(cb)
+}
+
 // SetCallbacks sets the event handlers.
 func (a *WidgetApp) SetCallbacks(onSubmit func(string), onFileSelect func(string), onShellCmd func(string) string) {
 	a.onSubmit = onSubmit
@@ -1228,6 +1249,13 @@ func (a *WidgetApp) SetCallbacks(onSubmit func(string), onFileSelect func(string
 func (a *WidgetApp) SetSessionCallbacks(onNext, onPrev func()) {
 	a.onNextSession = onNext
 	a.onPrevSession = onPrev
+}
+
+// SetModelVariantCallbacks sets the model-variant and recent-model cycling
+// callbacks, triggered by keybind (see app_widget_keys.go).
+func (a *WidgetApp) SetModelVariantCallbacks(onCycleVariant, onCycleRecentModel func()) {
+	a.onCycleVariant = onCycleVariant
+	a.onCycleRecentModel = onCycleRecentModel
 }
 
 // SetInterruptCallback sets the callback used to stop an active model or tool process.

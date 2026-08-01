@@ -115,6 +115,39 @@ func TestWidgetAppAltSessionNavigation(t *testing.T) {
 	}
 }
 
+func TestWidgetAppAltMCyclesModelVariant(t *testing.T) {
+	app := newKeyTestWidgetApp(t, WidgetAppConfig{})
+	cycles := 0
+	app.SetModelVariantCallbacks(func() { cycles++ }, nil)
+
+	if !app.handleKeyMsg(KeyMsg{Key: int(terminal.KeyRune), Rune: 'm', Alt: true}) {
+		t.Fatal("Alt+M should be handled")
+	}
+	if cycles != 1 {
+		t.Fatalf("cycle count = %d, want 1", cycles)
+	}
+
+	if !app.handleKeyMsg(KeyMsg{Key: int(terminal.KeyRune), Rune: 'M', Alt: true}) {
+		t.Fatal("Alt+Shift+M should be handled")
+	}
+	if cycles != 2 {
+		t.Fatalf("cycle count = %d, want 2", cycles)
+	}
+}
+
+func TestWidgetAppAltRCyclesRecentModel(t *testing.T) {
+	app := newKeyTestWidgetApp(t, WidgetAppConfig{})
+	cycles := 0
+	app.SetModelVariantCallbacks(nil, func() { cycles++ })
+
+	if !app.handleKeyMsg(KeyMsg{Key: int(terminal.KeyRune), Rune: 'r', Alt: true}) {
+		t.Fatal("Alt+R should be handled")
+	}
+	if cycles != 1 {
+		t.Fatalf("cycle count = %d, want 1", cycles)
+	}
+}
+
 func TestWidgetAppFocusedInputNavigationWinsBeforeChatScroll(t *testing.T) {
 	app := newKeyTestWidgetApp(t, WidgetAppConfig{})
 	app.inputArea.SetText("short\nmuch longer line")

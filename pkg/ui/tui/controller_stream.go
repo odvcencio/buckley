@@ -13,9 +13,11 @@ import (
 func (c *Controller) streamResponse(ctx context.Context, prompt string, sess *SessionState) {
 	defer c.finishStreamLifecycle(sess)
 
+	turnBoundary := c.beginTurnUndo(sess)
 	modelID := c.prepareStreamRequest(prompt, sess)
 	fullResponse, usage, finishReason, err := c.runToolLoop(ctx, sess, modelID)
 	c.app.RemoveThinkingIndicator()
+	c.finishTurnUndo(sess, turnBoundary)
 	if c.handleStreamError(ctx, err) {
 		if ctx.Err() == context.Canceled && c.processMessageQueue(sess) {
 			return
@@ -37,6 +39,7 @@ func (c *Controller) finishStreamLifecycle(sess *SessionState) {
 	sess.Cancel = nil
 	c.mu.Unlock()
 	c.emitStreaming(sess.ID, false)
+	c.refreshSessionNav()
 }
 
 func (c *Controller) prepareStreamRequest(prompt string, sess *SessionState) string {

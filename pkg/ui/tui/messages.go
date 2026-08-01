@@ -139,6 +139,14 @@ type ModelMsg struct {
 
 func (ModelMsg) isMessage() {}
 
+// ModelVariantMsg updates the active model variant preset name shown in
+// the header (see conversation.ModelVariant).
+type ModelVariantMsg struct {
+	Name string
+}
+
+func (ModelVariantMsg) isMessage() {}
+
 // AddMessageMsg adds a new message to the conversation.
 type AddMessageMsg struct {
 	Content string
@@ -184,6 +192,15 @@ type SetActivitiesMsg struct {
 }
 
 func (SetActivitiesMsg) isMessage() {}
+
+// SessionNavMsg replaces the navigator's Sessions section content. It is
+// posted (rather than mutating the sidebar directly) because turn
+// completion can refresh it from a background goroutine.
+type SessionNavMsg struct {
+	Nodes []widgets.SessionNavNode
+}
+
+func (SessionNavMsg) isMessage() {}
 
 // --- Overlay/Mode Events ---
 
