@@ -201,14 +201,15 @@ func isWorkspaceRelative(path, workspaceRoot string) bool {
 func isShellCommandWorkspaceRelative(cmd, workspaceRoot string) bool {
 	workspaceRoot = strings.TrimSpace(workspaceRoot)
 	if workspaceRoot == "" {
-		return true
+		// No confirmed workspace: fail-safe, matching isWorkspaceRelative.
+		return false
 	}
 	if strings.Contains(cmd, "~") {
 		return false
 	}
 	absRoot, err := filepath.Abs(workspaceRoot)
 	if err != nil {
-		return true
+		return false
 	}
 	for _, token := range strings.Fields(cmd) {
 		token = strings.Trim(token, `"'`)

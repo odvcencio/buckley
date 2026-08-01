@@ -229,3 +229,12 @@ func TestEmptyWorkspaceRootTreatsPathsAsOutside(t *testing.T) {
 		t.Fatal("blank workspace root must not classify paths as workspace-relative")
 	}
 }
+
+func TestEmptyWorkspaceRootShellCommandsAreOutside(t *testing.T) {
+	if isShellCommandWorkspaceRelative("rm -rf /etc/passwd", "") {
+		t.Fatal("empty workspace root must not classify shell commands as workspace-relative")
+	}
+	if isShellCommandWorkspaceRelative("ls", "") {
+		t.Fatal("empty workspace root must fail safe for every command")
+	}
+}
