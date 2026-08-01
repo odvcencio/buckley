@@ -86,3 +86,44 @@ func EvaluateBuiltinDefaults(evaluator types.RuleEvaluator, req PermissionReques
 	}
 	return EvaluateBuiltinDefaultsGo(req)
 }
+
+// EvaluatePermissionLayersWithBuiltins composes caller-supplied layers
+// (highest priority first, e.g. posture, project, user) with the built-in
+// defaults layer (lowest priority, evaluated via EvaluateBuiltinDefaults so
+// it prefers the arbiter strategy and falls back to the Go glob layer). The
+// same deny-always-wins / first-match-by-priority semantics as
+// EvaluatePermissionLayers apply across every layer, built-in defaults
+// included.
+func EvaluatePermissionLayersWithBuiltins(evaluator types.RuleEvaluator, req PermissionRequest, layers ...PermissionLayer) PermissionDecision {
+	var firstMatch PermissionDecision
+	haveFirstMatch := false
+
+	for _, layer := range layers {
+		dec, matched := evaluateLayer(req, layer)
+		if !matched {
+			continue
+		}
+		if dec.Action == PermissionDeny {
+			return dec
+		}
+		if !haveFirstMatch {
+			firstMatch = dec
+			haveFirstMatch = true
+		}
+	}
+
+	if builtinDec := EvaluateBuiltinDefaults(evaluator, req); builtinDec.Matched {
+		if builtinDec.Action == PermissionDeny {
+			return builtinDec
+		}
+		if !haveFirstMatch {
+			firstMatch = builtinDec
+			haveFirstMatch = true
+		}
+	}
+
+	if !haveFirstMatch {
+		return PermissionDecision{}
+	}
+	return firstMatch
+}

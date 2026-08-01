@@ -128,6 +128,39 @@ func TestEvaluateBuiltinDefaults_NilEvaluatorFallsBackToGo(t *testing.T) {
 	}
 }
 
+func TestEvaluatePermissionLayersWithBuiltins_ComposesPostureAndBuiltins(t *testing.T) {
+	posture := PermissionLayer{
+		Name:  "posture",
+		Rules: []PermissionRule{{Tool: "run_shell", ArgPattern: "*gh *", Action: PermissionDeny}},
+	}
+
+	// A posture-layer deny wins even though the built-in defaults layer
+	// doesn't match this request at all.
+	req := PermissionRequest{Tool: "run_shell", Category: "shell", Arg: "gh pr create"}
+	dec := EvaluatePermissionLayersWithBuiltins(nil, req, posture)
+	if dec.Action != PermissionDeny || dec.Layer != "posture" {
+		t.Fatalf("expected posture deny to win, got %+v", dec)
+	}
+
+	// A built-in deny (e.g. .env read) wins even when no caller layer
+	// matches at all.
+	envReq := PermissionRequest{Tool: "read_file", Category: "file_read", Arg: ".env"}
+	envDec := EvaluatePermissionLayersWithBuiltins(nil, envReq, posture)
+	if envDec.Action != PermissionDeny {
+		t.Fatalf("expected built-in deny to surface through composition, got %+v", envDec)
+	}
+
+	// A caller-layer allow does not suppress a built-in deny.
+	allowLayer := PermissionLayer{
+		Name:  "project",
+		Rules: []PermissionRule{{Tool: "*", ArgPattern: "**/.env", Action: PermissionAllow}},
+	}
+	overrideDec := EvaluatePermissionLayersWithBuiltins(nil, envReq, allowLayer)
+	if overrideDec.Action != PermissionDeny {
+		t.Fatalf("expected built-in deny to override a project allow, got %+v", overrideDec)
+	}
+}
+
 func TestEvaluateBuiltinDefaults_UsesArbiterWhenAvailable(t *testing.T) {
 	evaluator := mustTestRulesEngine(t)
 	req := PermissionRequest{Tool: "read_file", Category: "file_read", Arg: ".env"}

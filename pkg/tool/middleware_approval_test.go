@@ -159,6 +159,74 @@ func TestApprovalMiddlewareRunCode(t *testing.T) {
 	}
 }
 
+func TestApprovalMiddleware_DeniesDotEnvReadWithoutMissionControl(t *testing.T) {
+	tmpDir := t.TempDir()
+	envPath := filepath.Join(tmpDir, ".env")
+	if err := os.WriteFile(envPath, []byte("SECRET=1"), 0644); err != nil {
+		t.Fatalf("write seed file: %v", err)
+	}
+
+	registry := NewEmptyRegistry()
+	registry.Register(&builtin.ReadFileTool{})
+	// No mission control configured: approvalMiddleware would otherwise be
+	// a pure passthrough. The built-in deny check must still fire.
+
+	result, err := registry.Execute("read_file", map[string]any{"path": envPath})
+	if err != nil {
+		t.Fatalf("unexpected execute error: %v", err)
+	}
+	if result == nil || result.Success {
+		t.Fatalf("expected .env read to be denied, got %#v", result)
+	}
+	if !strings.Contains(result.Error, "permission denied") {
+		t.Fatalf("expected a permission-denied error, got %q", result.Error)
+	}
+}
+
+func TestApprovalMiddleware_DeniesCredentialsFileReadEvenUnderMissionControl(t *testing.T) {
+	tmpDir := t.TempDir()
+	credPath := filepath.Join(tmpDir, "aws-credentials.json")
+	if err := os.WriteFile(credPath, []byte("{}"), 0644); err != nil {
+		t.Fatalf("write seed file: %v", err)
+	}
+
+	dbPath := filepath.Join(tmpDir, "mission.db")
+	store, err := storage.New(dbPath)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	missionStore := mission.NewStore(store.DB())
+	session := &storage.Session{
+		ID:         "session-deny",
+		CreatedAt:  time.Now(),
+		LastActive: time.Now(),
+		Status:     storage.SessionStatusActive,
+	}
+	if err := store.CreateSession(session); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	registry := NewEmptyRegistry()
+	registry.Register(&builtin.ReadFileTool{})
+	registry.EnableMissionControl(missionStore, "agent-deny", true, 2*time.Second)
+	registry.UpdateMissionSession(session.ID)
+
+	// Even with mission control enabled (the "coarse gate"), a built-in
+	// deny rule must block the call without waiting on human approval.
+	result, err := registry.Execute("read_file", map[string]any{"path": credPath})
+	if err != nil {
+		t.Fatalf("unexpected execute error: %v", err)
+	}
+	if result == nil || result.Success {
+		t.Fatalf("expected credentials read to be denied, got %#v", result)
+	}
+	if !strings.Contains(result.Error, "permission denied") {
+		t.Fatalf("expected a permission-denied error, got %q", result.Error)
+	}
+}
+
 func waitForPendingChange(t *testing.T, db *sql.DB) string {
 	t.Helper()
 	deadline := time.After(2 * time.Second)
