@@ -894,29 +894,29 @@ func buildToolCallContents(text string, result *builtin.Result) []acp.ToolCallCo
 					path = abs
 				}
 			}
-			oldText := strings.TrimSpace(diff.OldContent)
-			newText := strings.TrimSpace(diff.NewContent)
-			var oldPtr *string
-			var newPtr *string
-			if oldText != "" {
-				oldText = truncateWithLimit(oldText, maxText)
-				oldPtr = &oldText
-			}
-			if newText != "" {
-				newText = truncateWithLimit(newText, maxText)
-				newPtr = &newText
-			}
 			if preview := strings.TrimSpace(diff.Preview); preview != "" {
 				contents = append(contents, acp.ToolCallContent{
 					Type:    "content",
 					Content: &acp.ContentBlock{Type: "text", Text: truncateWithLimit("[DIFF]\n"+preview, maxText)},
 				})
 			}
+			// The ACP diff content variant requires "path" and "newText"
+			// verbatim -- an empty string is valid JSON and a legitimate
+			// value (e.g. a delete-all edit produces newText ""). Neither
+			// field may be trimmed or truncated: the client renders this
+			// against the real file and a partial diff would not match it.
+			// "oldText" stays nullable and is only omitted for new files.
+			newText := diff.NewContent
+			var oldPtr *string
+			if !diff.IsNew {
+				oldText := diff.OldContent
+				oldPtr = &oldText
+			}
 			contents = append(contents, acp.ToolCallContent{
 				Type:    "diff",
 				Path:    path,
 				OldText: oldPtr,
-				NewText: newPtr,
+				NewText: &newText,
 			})
 		}
 	}
