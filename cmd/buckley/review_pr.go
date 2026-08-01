@@ -16,7 +16,6 @@ import (
 	"m31labs.dev/buckley/v2/pkg/oneshot"
 	"m31labs.dev/buckley/v2/pkg/oneshot/commands"
 	"m31labs.dev/buckley/v2/pkg/rules"
-	"m31labs.dev/buckley/v2/pkg/terminal"
 	"m31labs.dev/buckley/v2/pkg/transparency"
 )
 
@@ -461,7 +460,7 @@ func reviewContextProvidersForModel(modelID string) []commands.PRContextProvider
 // threshold requires a core maintainer or owner author; otherwise it
 // declines before running any shard (see commands.EvaluatePostingGate).
 func runPRReviewWithOptions(ctx context.Context, prRef string, framework *oneshot.Framework, opts automatedReviewOptions, willPost bool) (*reviewCommandResult, *commands.PRInfo, error) {
-	spinner := terminal.NewSpinner("Fetching PR details...")
+	spinner := newReviewProgress("Fetching PR details...")
 	spinner.Start()
 
 	contextOpts := commands.DefaultPRContextOptions()
@@ -619,7 +618,7 @@ func runPRReviewSharded(
 	prCtx *commands.PRContext,
 	audit *transparency.ContextAudit,
 	shards diffsignal.ShardResult,
-	spinner *terminal.Spinner,
+	spinner reviewProgress,
 ) (*reviewCommandResult, *commands.PRInfo, error) {
 	concurrency := opts.concurrency
 	if concurrency <= 0 {
