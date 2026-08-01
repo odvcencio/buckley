@@ -218,6 +218,69 @@ type CancelParams struct {
 // a response must carry either "result" or "error".
 type ShutdownResult struct{}
 
+// Client-bound requests (agent -> client)
+//
+// These are outbound JSON-RPC requests Buckley sends to the client over
+// Transport.SendRequest, answered by the client rather than by Buckley.
+
+// RequestPermissionParams is the "session/request_permission" request
+// Buckley sends before running a tool call that needs user authorization.
+// See: https://agentclientprotocol.com/protocol/v1/tool-calls#requesting-permission
+type RequestPermissionParams struct {
+	SessionID string             `json:"sessionId"`
+	ToolCall  ToolCallUpdate     `json:"toolCall"`
+	Options   []PermissionOption `json:"options"`
+}
+
+// ToolCallUpdate carries the tool-call fields the client needs to render a
+// permission prompt: the same shape session/update tool_call notifications
+// use, without the sessionUpdate discriminator (which only belongs on
+// session/update).
+type ToolCallUpdate struct {
+	ToolCallID string             `json:"toolCallId"`
+	Title      string             `json:"title,omitempty"`
+	Kind       string             `json:"kind,omitempty"`
+	Status     string             `json:"status,omitempty"`
+	RawInput   any                `json:"rawInput,omitempty"`
+	Locations  []ToolCallLocation `json:"locations,omitempty"`
+}
+
+// PermissionOption is a single choice offered to the user in a
+// session/request_permission request.
+type PermissionOption struct {
+	OptionID string `json:"optionId"`
+	Name     string `json:"name"`
+	Kind     string `json:"kind"`
+}
+
+// Permission option kinds, per the ACP schema's PermissionOptionKind union.
+const (
+	PermissionOptionKindAllowOnce    = "allow_once"
+	PermissionOptionKindAllowAlways  = "allow_always"
+	PermissionOptionKindRejectOnce   = "reject_once"
+	PermissionOptionKindRejectAlways = "reject_always"
+)
+
+// RequestPermissionResult is the response body for
+// "session/request_permission".
+type RequestPermissionResult struct {
+	Outcome RequestPermissionOutcome `json:"outcome"`
+}
+
+// RequestPermissionOutcome is the user's decision: either they selected one
+// of the offered options, or the client cancelled the prompt turn (via
+// session/cancel) before they responded.
+type RequestPermissionOutcome struct {
+	Outcome  string `json:"outcome"` // "selected" | "cancelled"
+	OptionID string `json:"optionId,omitempty"`
+}
+
+// RequestPermissionOutcome discriminator values.
+const (
+	RequestPermissionOutcomeSelected  = "selected"
+	RequestPermissionOutcomeCancelled = "cancelled"
+)
+
 // Constructors
 
 const (
