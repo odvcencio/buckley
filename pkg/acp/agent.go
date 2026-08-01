@@ -28,6 +28,10 @@ type Agent struct {
 	activePrompts   map[string]context.CancelFunc
 	activePromptsMu sync.Mutex
 
+	// Capabilities the client advertised at initialize (S9).
+	capsMu             sync.RWMutex
+	clientCapabilities ClientCapabilities
+
 	// Server info
 	name    string
 	version string
@@ -92,6 +96,14 @@ func (a *Agent) SetMachineHandlers(h MachineHandlers) {
 	a.machineHandlers = h
 }
 
+// ClientCapabilities returns the capabilities the client advertised at
+// initialize (S9). Before initialize completes, it returns the zero value.
+func (a *Agent) ClientCapabilities() ClientCapabilities {
+	a.capsMu.RLock()
+	defer a.capsMu.RUnlock()
+	return a.clientCapabilities
+}
+
 // Serve starts the agent on the given reader/writer (typically stdin/stdout).
 // It blocks until the context is cancelled or an error occurs.
 func (a *Agent) Serve(ctx context.Context, reader io.Reader, writer io.Writer) error {
@@ -110,6 +122,18 @@ func (a *Agent) Serve(ctx context.Context, reader io.Reader, writer io.Writer) e
 		}
 		if err != nil {
 			return fmt.Errorf("read message: %w", err)
+		}
+
+		// A response to a request Buckley originated (e.g.
+		// session/request_permission) carries no "method" member. Route it
+		// to the waiting SendRequest caller instead of treating it as an
+		// unrecognized method call.
+		if IsResponseMessage(msg) {
+			var resp Response
+			if err := json.Unmarshal(msg, &resp); err == nil {
+				a.transport.dispatchResponse(&resp)
+			}
+			continue
 		}
 
 		req, err := ParseRequest(msg)
@@ -138,15 +162,15 @@ func (a *Agent) handleRequest(ctx context.Context, req *Request) {
 		a.handleSessionSetMode(ctx, req)
 	case "session/cancel":
 		a.handleSessionCancel(ctx, req)
-	case "shutdown":
+	case "_shutdown":
 		a.handleShutdown(ctx, req)
-	case "machine/spawn_agent":
+	case "_machine/spawn_agent":
 		a.handleMachineSpawnAgent(ctx, req)
-	case "machine/steer_agent":
+	case "_machine/steer_agent":
 		a.handleMachineSteerAgent(ctx, req)
-	case "machine/list_agents":
+	case "_machine/list_agents":
 		a.handleMachineListAgents(ctx, req)
-	case "machine/escalate_mode":
+	case "_machine/escalate_mode":
 		a.handleMachineEscalateMode(ctx, req)
 	default:
 		if !IsNotification(req) {
@@ -163,7 +187,11 @@ func (a *Agent) handleInitialize(ctx context.Context, req *Request) {
 		return
 	}
 
-	_ = params // We could use client info for logging
+	if params.ClientCapabilities != nil {
+		a.capsMu.Lock()
+		a.clientCapabilities = *params.ClientCapabilities
+		a.capsMu.Unlock()
+	}
 
 	title := a.name
 	result := InitializeResult{
@@ -180,8 +208,11 @@ func (a *Agent) handleInitialize(ctx context.Context, req *Request) {
 				SSE:  false,
 			},
 			PromptCapabilities: PromptCapabilities{
-				Audio:           false,
-				EmbeddedContext: false,
+				Audio: false,
+				// The prompt content-block parser (extractACPPrompt) already
+				// handles the "resource" content block variant, so embedded
+				// context is genuinely supported (S4).
+				EmbeddedContext: true,
 				Image:           false,
 			},
 			SessionCapabilities: SessionCapabilities{},
@@ -376,7 +407,7 @@ func (a *Agent) handleShutdown(ctx context.Context, req *Request) {
 	}
 	a.activePromptsMu.Unlock()
 
-	_ = a.transport.SendResponse(req.ID, nil)
+	_ = a.transport.SendResponse(req.ID, ShutdownResult{})
 }
 
 // Client method helpers (for calling back to the editor)
@@ -397,10 +428,48 @@ func (a *Agent) WriteFile(ctx context.Context, path string, content string) erro
 	return fmt.Errorf("write file not supported")
 }
 
-// RequestPermission asks the user for permission to perform an action.
+// RequestPermission asks the user for permission to perform an action using
+// Buckley's local, risk-based fallback (AgentHandlers.OnRequestPermission).
+// This does not talk to the client -- see RequestClientPermission for the
+// ACP-spec session/request_permission flow, which this fallback backs up
+// when the client can't be reached.
 func (a *Agent) RequestPermission(ctx context.Context, tool, description string, args json.RawMessage, risk string) (granted bool, remember bool, err error) {
 	if a.handlers.OnRequestPermission != nil {
 		return a.handlers.OnRequestPermission(ctx, tool, description, args, risk)
 	}
 	return false, false, fmt.Errorf("permission request not supported")
+}
+
+// RequestClientPermission sends a "session/request_permission" request to
+// the client and waits for the user's decision (M3). It returns an error
+// if the transport is unavailable, the request cannot be sent, ctx is
+// cancelled, or the wait exceeds timeout (timeout <= 0 means no timeout,
+// only ctx governs the wait) -- callers should treat any error as "the
+// client could not be reached" and fall back accordingly, never as a
+// crash-worthy condition.
+func (a *Agent) RequestClientPermission(ctx context.Context, sessionID string, toolCall ToolCallUpdate, options []PermissionOption, timeout time.Duration) (*RequestPermissionOutcome, error) {
+	if a.transport == nil {
+		return nil, fmt.Errorf("transport not available")
+	}
+	params := RequestPermissionParams{
+		SessionID: sessionID,
+		ToolCall:  toolCall,
+		Options:   options,
+	}
+	resp, err := a.transport.SendRequest(ctx, "session/request_permission", params, timeout)
+	if err != nil {
+		return nil, err
+	}
+	if resp.Error != nil {
+		return nil, fmt.Errorf("session/request_permission error %d: %s", resp.Error.Code, resp.Error.Message)
+	}
+	data, err := json.Marshal(resp.Result)
+	if err != nil {
+		return nil, fmt.Errorf("marshal permission result: %w", err)
+	}
+	var result RequestPermissionResult
+	if err := json.Unmarshal(data, &result); err != nil {
+		return nil, fmt.Errorf("parse permission result: %w", err)
+	}
+	return &result.Outcome, nil
 }

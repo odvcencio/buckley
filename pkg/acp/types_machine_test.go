@@ -135,14 +135,45 @@ func TestSpawnAgentParams_OmitsEmpty(t *testing.T) {
 	}
 }
 
-func TestMachineSessionUpdateConstants(t *testing.T) {
-	if SessionUpdateMachineState != "machine_state" {
-		t.Errorf("SessionUpdateMachineState = %q", SessionUpdateMachineState)
+func TestMachineEventConstants(t *testing.T) {
+	if MachineEventState != "machine_state" {
+		t.Errorf("MachineEventState = %q", MachineEventState)
 	}
-	if SessionUpdateMachineLock != "machine_lock" {
-		t.Errorf("SessionUpdateMachineLock = %q", SessionUpdateMachineLock)
+	if MachineEventLock != "machine_lock" {
+		t.Errorf("MachineEventLock = %q", MachineEventLock)
 	}
-	if SessionUpdateMachineAgent != "machine_agent" {
-		t.Errorf("SessionUpdateMachineAgent = %q", SessionUpdateMachineAgent)
+	if MachineEventAgent != "machine_agent" {
+		t.Errorf("MachineEventAgent = %q", MachineEventAgent)
+	}
+}
+
+// TestMachineNotifyParams_WireShape locks M4: machine events ride the
+// non-spec "_machine/notify" notification, never the standard sessionUpdate
+// union (a serde-strict client hard-fails on an unrecognized
+// sessionUpdate discriminator).
+func TestMachineNotifyParams_WireShape(t *testing.T) {
+	params := MachineNotifyParams{
+		SessionID: "sess-1",
+		Kind:      MachineEventAgent,
+		Payload:   map[string]any{"event": "spawned", "agentId": "a1"},
+	}
+
+	data, err := json.Marshal(params)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	var raw map[string]any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if raw["sessionId"] != "sess-1" {
+		t.Errorf("sessionId = %v", raw["sessionId"])
+	}
+	if raw["kind"] != "machine_agent" {
+		t.Errorf("kind = %v", raw["kind"])
+	}
+	if _, present := raw["sessionUpdate"]; present {
+		t.Errorf("_machine/notify payload must not carry a sessionUpdate discriminator: %v", raw)
 	}
 }

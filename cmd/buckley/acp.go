@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"m31labs.dev/buckley/v2/pkg/acp"
 	"m31labs.dev/buckley/v2/pkg/config"
@@ -109,12 +110,17 @@ func runACPCommand(args []string) error {
 		// Non-fatal, continue without context
 	}
 
-	// Create the ACP agent
-	agent := acp.NewAgent("Buckley", version, acp.AgentHandlers{
+	// Create the ACP agent. agent is declared before NewAgent so the prompt
+	// handler closure (built by makePromptHandler, below) can hold a
+	// pointer to this variable and see the fully constructed *acp.Agent by
+	// the time a prompt actually runs -- prompts only fire once agent.Serve
+	// is reading messages, well after this assignment completes.
+	var agent *acp.Agent
+	agent = acp.NewAgent("Buckley", version, acp.AgentHandlers{
 		OnSessionModes: func(ctx context.Context, session *acp.AgentSession) (*acp.SessionModeState, error) {
 			return buildACPModelModes(cfg, mgr), nil
 		},
-		OnPrompt: makePromptHandler(cfg, mgr, store, projectContext, cwd, logf),
+		OnPrompt: makePromptHandler(cfg, mgr, store, projectContext, cwd, logf, &agent),
 		OnReadFile: func(ctx context.Context, path string, startLine, endLine int) (string, error) {
 			logf("read file: %s (lines %d-%d)", path, startLine, endLine)
 			data, err := os.ReadFile(path)
@@ -143,20 +149,14 @@ func runACPCommand(args []string) error {
 			logf("write file: %s (%d bytes)", path, len(content))
 			return os.WriteFile(path, []byte(content), 0644)
 		},
+		// OnRequestPermission is Buckley's local, risk-based fallback --
+		// it never talks to the client. The live client flow is
+		// session/request_permission (see requestACPToolPermission), which
+		// this backs up when the client can't be reached or times out
+		// (M3).
 		OnRequestPermission: func(ctx context.Context, toolName, description string, args json.RawMessage, risk string) (bool, bool, error) {
 			logf("permission request: %s (%s risk)", toolName, risk)
-			// In ACP mode, the editor handles permission requests
-			// For now, auto-approve low-risk, deny high-risk
-			switch risk {
-			case "low":
-				return true, false, nil
-			case "medium":
-				return true, false, nil
-			case "high", "destructive":
-				return false, false, nil
-			default:
-				return true, false, nil
-			}
+			return acpFallbackPermissionDecision(risk), false, nil
 		},
 	})
 
@@ -185,6 +185,7 @@ func makePromptHandler(
 	projectContext *projectcontext.ProjectContext,
 	defaultWorkDir string,
 	logf func(string, ...interface{}),
+	agentRef **acp.Agent,
 ) func(context.Context, *acp.AgentSession, []acp.ContentBlock, acp.StreamFunc) (*acp.PromptResult, error) {
 	sessions := make(map[string]*acpSessionState)
 	var sessionsMu sync.Mutex
@@ -215,8 +216,13 @@ func makePromptHandler(
 			return &acp.PromptResult{StopReason: "end_turn"}, nil
 		}
 
+		var agent *acp.Agent
+		if agentRef != nil {
+			agent = *agentRef
+		}
+
 		modelOverride := resolveACPModelOverride(cfg, mgr, session.Mode)
-		responseText, err := runACPLoop(ctx, cfg, mgr, state.conv, state.registry, state.skillState, state.engine, modelOverride, stream)
+		responseText, err := runACPLoop(ctx, cfg, mgr, state.conv, state.registry, state.skillState, state.engine, modelOverride, state.workDir, session.ID, agent, logf, stream)
 		if err != nil {
 			logf("prompt error: %v", err)
 			stream(acp.NewAgentMessageChunk(fmt.Sprintf("\n\nError: %v", err)))
@@ -238,6 +244,10 @@ type acpSessionState struct {
 	skills     *skill.Registry
 	skillState *skill.RuntimeState
 	engine     *rules.Engine
+	// workDir is the session's working directory, used to resolve tool-call
+	// locations and diff paths -- never the ACP process's own cwd, which may
+	// differ from the editor's session/new cwd (S2, S9).
+	workDir string
 }
 
 type acpEmbeddedResource struct {
@@ -360,6 +370,7 @@ func getACPSessionState(
 		skills:     skills,
 		skillState: skillState,
 		engine:     engine,
+		workDir:    workDir,
 	}
 	sessions[session.ID] = state
 	return state
@@ -612,6 +623,10 @@ func runACPLoop(
 	skillState *skill.RuntimeState,
 	engine *rules.Engine,
 	modelOverride string,
+	workDir string,
+	sessionID string,
+	agent *acp.Agent,
+	logf func(string, ...interface{}),
 	stream acp.StreamFunc,
 ) (string, error) {
 	modelID := resolveACPExecutionModel(cfg, mgr, engine, modelOverride)
@@ -674,7 +689,7 @@ func runACPLoop(
 		lastPhase = sendACPPhaseUpdate(stream, lastPhase, fmt.Sprintf("Executing %d tool call(s)…", len(msg.ToolCalls)))
 		normalizeACPToolCallIDs(msg.ToolCalls)
 		conv.AddToolCallMessageWithReasoning(msg.ToolCalls, msg.Reasoning, msg.ReasoningDetails)
-		lastPhase = executeACPToolCalls(ctx, conv, registry, stream, msg.ToolCalls, toolTurn.AllowedTools, lastPhase)
+		lastPhase = executeACPToolCalls(ctx, conv, registry, stream, msg.ToolCalls, toolTurn.AllowedTools, lastPhase, workDir, sessionID, agent, logf)
 		toolsExecuted = true
 	}
 }
@@ -774,7 +789,7 @@ func normalizeACPToolCallIDs(calls []model.ToolCall) {
 	}
 }
 
-func executeACPToolCalls(ctx context.Context, conv *conversation.Conversation, registry *tool.Registry, stream acp.StreamFunc, calls []model.ToolCall, allowedTools []string, lastPhase string) string {
+func executeACPToolCalls(ctx context.Context, conv *conversation.Conversation, registry *tool.Registry, stream acp.StreamFunc, calls []model.ToolCall, allowedTools []string, lastPhase string, workDir string, sessionID string, agent *acp.Agent, logf func(string, ...interface{})) string {
 	for i, tc := range calls {
 		if ctx.Err() != nil {
 			return lastPhase
@@ -783,24 +798,35 @@ func executeACPToolCalls(ctx context.Context, conv *conversation.Conversation, r
 		if err != nil {
 			rawParams := map[string]any{"raw": tc.Function.Arguments}
 			lastPhase = sendACPPhaseUpdate(stream, lastPhase, fmt.Sprintf("Running %s (%d/%d)…", toolCallTitle(tc.Function.Name, nil), i+1, len(calls)))
-			sendACPToolCallStart(stream, tc, rawParams)
+			sendACPToolCallStart(stream, tc, rawParams, workDir)
 			toolText := fmt.Sprintf("Error: invalid tool arguments: %v", err)
 			conv.AddToolResponseMessage(tc.ID, tc.Function.Name, toolText)
 			sendACPToolCallUpdate(stream, tc, rawParams, acp.ToolCallStatusFailed, toolText, map[string]any{
 				"error": err.Error(),
-			}, nil)
+			}, nil, workDir)
 			continue
 		}
 
 		lastPhase = sendACPPhaseUpdate(stream, lastPhase, fmt.Sprintf("Running %s (%d/%d)…", toolCallTitle(tc.Function.Name, params), i+1, len(calls)))
-		sendACPToolCallStart(stream, tc, params)
+		sendACPToolCallStart(stream, tc, params, workDir)
 
 		if !tool.IsToolAllowed(tc.Function.Name, allowedTools) {
 			toolText := fmt.Sprintf("Error: tool %s not allowed by active skills", tc.Function.Name)
 			conv.AddToolResponseMessage(tc.ID, tc.Function.Name, toolText)
 			sendACPToolCallUpdate(stream, tc, params, acp.ToolCallStatusFailed, toolText, map[string]any{
 				"error": toolText,
-			}, nil)
+			}, nil, workDir)
+			continue
+		}
+
+		if allowed, reason := requestACPToolPermission(ctx, agent, registry, sessionID, tc, params, workDir, logf); !allowed {
+			toolText := fmt.Sprintf("Permission denied for %s: %s", tc.Function.Name, reason)
+			result := &builtin.Result{Success: false, Error: toolText}
+			conv.AddToolResponseMessage(tc.ID, tc.Function.Name, toolText)
+			sendACPToolCallUpdate(stream, tc, params, acp.ToolCallStatusFailed, toolText, map[string]any{
+				"error":  toolText,
+				"denied": true,
+			}, result, workDir)
 			continue
 		}
 
@@ -813,9 +839,130 @@ func executeACPToolCalls(ctx context.Context, conv *conversation.Conversation, r
 		if execErr != nil || (result != nil && !result.Success) {
 			status = acp.ToolCallStatusFailed
 		}
-		sendACPToolCallUpdate(stream, tc, params, status, displayText, toolCallRawOutput(result, execErr), result)
+		sendACPToolCallUpdate(stream, tc, params, status, displayText, toolCallRawOutput(result, execErr), result, workDir)
 	}
 	return lastPhase
+}
+
+// acpPermissionRequestTimeout bounds how long Buckley waits for a live
+// client to answer a session/request_permission request. A human decision
+// can take a while, but the turn must never deadlock (M3): once this
+// elapses without an answer, requestACPToolPermission falls back to the
+// default risk policy rather than blocking forever.
+const acpPermissionRequestTimeout = 5 * time.Minute
+
+// acpPermissionOptions is the fixed choice set Buckley offers on a
+// session/request_permission prompt: allow this one operation, or reject
+// it. Buckley does not currently support "remember this choice" (allow/
+// reject_always), since ACP sessions are short-lived and per-turn.
+var acpPermissionOptions = []acp.PermissionOption{
+	{OptionID: "allow", Name: "Allow", Kind: acp.PermissionOptionKindAllowOnce},
+	{OptionID: "reject", Name: "Reject", Kind: acp.PermissionOptionKindRejectOnce},
+}
+
+// acpToolRiskImpact classifies a tool call using the registry's existing
+// danger/approval classification (tool.GetMetadata's Impact: read-only,
+// modifying, destructive) -- the same classification Buckley already uses
+// elsewhere for approval gating, not a new ACP-specific notion.
+func acpToolRiskImpact(registry *tool.Registry, name string) tool.Impact {
+	if registry == nil {
+		return tool.ImpactReadOnly
+	}
+	t, ok := registry.Get(name)
+	if !ok {
+		return tool.ImpactReadOnly
+	}
+	return tool.GetMetadata(t).Impact
+}
+
+// acpRiskLabel maps a tool.Impact to the risk vocabulary Buckley's local
+// fallback policy (acpFallbackPermissionDecision) already understands.
+func acpRiskLabel(impact tool.Impact) string {
+	switch impact {
+	case tool.ImpactDestructive:
+		return "destructive"
+	case tool.ImpactModifying:
+		return "medium"
+	default:
+		return "low"
+	}
+}
+
+// acpFallbackPermissionDecision is Buckley's default policy when no live
+// client answer is available: auto-approve low/medium risk, deny high/
+// destructive. It backs both the AgentHandlers.OnRequestPermission
+// callback and requestACPToolPermission's no-client-response fallback, so
+// the two paths can never diverge.
+func acpFallbackPermissionDecision(risk string) bool {
+	switch risk {
+	case "high", "destructive":
+		return false
+	default:
+		return true
+	}
+}
+
+// requestACPToolPermission decides whether a tool call may proceed, using
+// the default client-response timeout (acpPermissionRequestTimeout). See
+// requestACPToolPermissionWithTimeout for the full behavior.
+func requestACPToolPermission(ctx context.Context, agent *acp.Agent, registry *tool.Registry, sessionID string, tc model.ToolCall, params map[string]any, workDir string, logf func(string, ...interface{})) (allowed bool, reason string) {
+	return requestACPToolPermissionWithTimeout(ctx, agent, registry, sessionID, tc, params, workDir, logf, acpPermissionRequestTimeout)
+}
+
+// requestACPToolPermissionWithTimeout decides whether a tool call may
+// proceed. Read-only tools proceed without asking (they carry nothing to
+// approve). For modifying/destructive tools ("shell/write/destructive" per
+// the registry's existing classification), when a live ACP client is
+// attached (agent != nil -- i.e. this is an interactive editor session, not
+// the headless oneshot CLI path), it sends a spec-shape
+// session/request_permission request and honors the client's
+// allow/deny/cancelled decision. If the client can't be reached (no
+// attached agent, send failure, or timeout) it logs a warning and falls
+// back to Buckley's default risk policy rather than blocking the turn
+// forever or crashing the tool call. A prompt-turn cancellation (ctx done)
+// does not fall back to auto-approval -- it stops the tool call outright.
+// The timeout parameter exists mainly so tests don't have to wait out
+// acpPermissionRequestTimeout to exercise the fallback path.
+func requestACPToolPermissionWithTimeout(ctx context.Context, agent *acp.Agent, registry *tool.Registry, sessionID string, tc model.ToolCall, params map[string]any, workDir string, logf func(string, ...interface{}), timeout time.Duration) (allowed bool, reason string) {
+	impact := acpToolRiskImpact(registry, tc.Function.Name)
+	if impact == tool.ImpactReadOnly {
+		return true, ""
+	}
+
+	if agent != nil {
+		toolCall := acp.ToolCallUpdate{
+			ToolCallID: tc.ID,
+			Title:      toolCallTitle(tc.Function.Name, params),
+			Kind:       toolCallKind(tc.Function.Name),
+			Status:     acp.ToolCallStatusPending,
+			RawInput:   params,
+			Locations:  toolCallLocations(params, workDir),
+		}
+		outcome, err := agent.RequestClientPermission(ctx, sessionID, toolCall, acpPermissionOptions, timeout)
+		if err == nil {
+			if outcome.Outcome == acp.RequestPermissionOutcomeCancelled {
+				return false, "permission request cancelled by client"
+			}
+			if outcome.OptionID == "allow" {
+				return true, ""
+			}
+			return false, "denied by user"
+		}
+		if ctx.Err() != nil {
+			// The prompt turn itself was cancelled (e.g. session/cancel) --
+			// stop the tool call, do not fall back to auto-approval.
+			return false, "prompt cancelled before permission was granted"
+		}
+		if logf != nil {
+			logf("session/request_permission failed for %s: %v; falling back to default risk policy", tc.Function.Name, err)
+		}
+	}
+
+	risk := acpRiskLabel(impact)
+	if !acpFallbackPermissionDecision(risk) {
+		return false, fmt.Sprintf("denied by default risk policy (%s risk, no client response)", risk)
+	}
+	return true, ""
 }
 
 func parseACPToolParams(raw string) (map[string]any, error) {
@@ -832,7 +979,7 @@ func parseACPToolParams(raw string) (map[string]any, error) {
 	return params, nil
 }
 
-func sendACPToolCallStart(stream acp.StreamFunc, call model.ToolCall, params map[string]any) {
+func sendACPToolCallStart(stream acp.StreamFunc, call model.ToolCall, params map[string]any, workDir string) {
 	if stream == nil {
 		return
 	}
@@ -843,12 +990,12 @@ func sendACPToolCallStart(stream acp.StreamFunc, call model.ToolCall, params map
 		Kind:          toolCallKind(call.Function.Name),
 		Status:        acp.ToolCallStatusInProgress,
 		RawInput:      params,
-		Locations:     toolCallLocations(params),
+		Locations:     toolCallLocations(params, workDir),
 	}
 	_ = stream(update)
 }
 
-func sendACPToolCallUpdate(stream acp.StreamFunc, call model.ToolCall, params map[string]any, status, text string, rawOutput any, result *builtin.Result) {
+func sendACPToolCallUpdate(stream acp.StreamFunc, call model.ToolCall, params map[string]any, status, text string, rawOutput any, result *builtin.Result, workDir string) {
 	if stream == nil {
 		return
 	}
@@ -858,7 +1005,7 @@ func sendACPToolCallUpdate(stream acp.StreamFunc, call model.ToolCall, params ma
 		Status:        status,
 		RawOutput:     rawOutput,
 	}
-	contents := buildToolCallContents(text, result)
+	contents := buildToolCallContents(text, result, workDir)
 	if len(contents) > 0 {
 		update.Content = contents
 	}
@@ -874,7 +1021,7 @@ func sendACPPhaseUpdate(stream acp.StreamFunc, last, message string) string {
 	return message
 }
 
-func buildToolCallContents(text string, result *builtin.Result) []acp.ToolCallContent {
+func buildToolCallContents(text string, result *builtin.Result, workDir string) []acp.ToolCallContent {
 	const maxText = 8000
 	var contents []acp.ToolCallContent
 	if trimmed := strings.TrimSpace(text); trimmed != "" {
@@ -888,35 +1035,30 @@ func buildToolCallContents(text string, result *builtin.Result) []acp.ToolCallCo
 		contents = append(contents, toolCallOutputContents(result, maxText)...)
 		if result.DiffPreview != nil {
 			diff := result.DiffPreview
-			path := strings.TrimSpace(diff.FilePath)
-			if path != "" {
-				if abs, err := filepath.Abs(path); err == nil {
-					path = abs
-				}
-			}
-			oldText := strings.TrimSpace(diff.OldContent)
-			newText := strings.TrimSpace(diff.NewContent)
-			var oldPtr *string
-			var newPtr *string
-			if oldText != "" {
-				oldText = truncateWithLimit(oldText, maxText)
-				oldPtr = &oldText
-			}
-			if newText != "" {
-				newText = truncateWithLimit(newText, maxText)
-				newPtr = &newText
-			}
+			path := resolveACPPath(diff.FilePath, workDir)
 			if preview := strings.TrimSpace(diff.Preview); preview != "" {
 				contents = append(contents, acp.ToolCallContent{
 					Type:    "content",
 					Content: &acp.ContentBlock{Type: "text", Text: truncateWithLimit("[DIFF]\n"+preview, maxText)},
 				})
 			}
+			// The ACP diff content variant requires "path" and "newText"
+			// verbatim -- an empty string is valid JSON and a legitimate
+			// value (e.g. a delete-all edit produces newText ""). Neither
+			// field may be trimmed or truncated: the client renders this
+			// against the real file and a partial diff would not match it.
+			// "oldText" stays nullable and is only omitted for new files.
+			newText := diff.NewContent
+			var oldPtr *string
+			if !diff.IsNew {
+				oldText := diff.OldContent
+				oldPtr = &oldText
+			}
 			contents = append(contents, acp.ToolCallContent{
 				Type:    "diff",
 				Path:    path,
 				OldText: oldPtr,
-				NewText: newPtr,
+				NewText: &newText,
 			})
 		}
 	}
@@ -947,18 +1089,23 @@ func toolCallOutputContents(result *builtin.Result, maxText int) []acp.ToolCallC
 	return contents
 }
 
+// toolCallKind maps a Buckley tool name to an ACP tool_call kind. The names
+// here must match pkg/tool/builtin's actual Tool.Name() values -- verified
+// against the registry, not the older tool names some clients may remember
+// (shell_command, patch_file, headless_browse, terminal_editor, and
+// mark_resolved were all renamed and no longer exist as registered tools).
 func toolCallKind(name string) string {
 	switch name {
-	case "read_file", "list_directory", "find_files", "file_exists", "get_file_info",
+	case "read_file", "list_directory", "find_files", "file_exists",
 		"git_status", "git_diff", "git_log", "git_blame", "list_merge_conflicts":
 		return acp.ToolKindRead
 	case "search_text", "search_replace", "find_symbol", "find_references", "analyze_complexity", "find_duplicates":
 		return acp.ToolKindSearch
-	case "write_file", "edit_file", "insert_text", "delete_lines", "patch_file", "rename_symbol", "extract_function", "mark_resolved":
+	case "write_file", "edit_file", "insert_text", "delete_lines", "apply_patch", "rename_symbol", "extract_function", "mark_conflict_resolved":
 		return acp.ToolKindEdit
-	case "shell_command", "run_tests", "terminal_editor":
+	case "run_shell", "run_tests", "edit_file_terminal":
 		return acp.ToolKindExecute
-	case "headless_browse":
+	case "browse_url":
 		return acp.ToolKindFetch
 	default:
 		return acp.ToolKindOther
@@ -975,7 +1122,7 @@ func toolCallTitle(name string, params map[string]any) string {
 		if path := toolCallParamString(params, "path"); path != "" {
 			return "Write " + path
 		}
-	case "edit_file", "insert_text", "delete_lines", "patch_file":
+	case "edit_file", "insert_text", "delete_lines", "apply_patch":
 		if path := toolCallParamString(params, "path"); path != "" {
 			return "Edit " + path
 		}
@@ -987,7 +1134,7 @@ func toolCallTitle(name string, params map[string]any) string {
 		if query := toolCallParamString(params, "query"); query != "" {
 			return "Search/replace: " + truncate(query, 80)
 		}
-	case "shell_command":
+	case "run_shell":
 		if cmd := toolCallParamString(params, "command"); cmd != "" {
 			return "Run: " + truncate(cmd, 80)
 		}
@@ -999,15 +1146,35 @@ func toolCallTitle(name string, params map[string]any) string {
 	return name
 }
 
-func toolCallLocations(params map[string]any) []acp.ToolCallLocation {
+func toolCallLocations(params map[string]any, workDir string) []acp.ToolCallLocation {
 	path := toolCallParamString(params, "path")
 	if path == "" {
 		return nil
 	}
-	if abs, err := filepath.Abs(path); err == nil {
-		path = abs
+	return []acp.ToolCallLocation{{Path: resolveACPPath(path, workDir)}}
+}
+
+// resolveACPPath resolves a tool-provided path to an absolute path against
+// the session's working directory -- never the ACP process's own cwd, which
+// can differ from the editor's session/new cwd when serving multiple
+// sessions or workspaces (S2, S9). An already-absolute path is returned
+// cleaned and unchanged.
+func resolveACPPath(path, workDir string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return path
 	}
-	return []acp.ToolCallLocation{{Path: path}}
+	if filepath.IsAbs(path) {
+		return filepath.Clean(path)
+	}
+	workDir = strings.TrimSpace(workDir)
+	if workDir == "" {
+		if abs, err := filepath.Abs(path); err == nil {
+			return abs
+		}
+		return path
+	}
+	return filepath.Clean(filepath.Join(workDir, path))
 }
 
 func toolCallParamString(params map[string]any, key string) string {

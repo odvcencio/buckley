@@ -39,19 +39,19 @@ func TestMachineBridge_TranslatesSpawned(t *testing.T) {
 	if err := json.Unmarshal([]byte(strings.TrimSpace(output)), &notif); err != nil {
 		t.Fatalf("unmarshal notification: %v", err)
 	}
-	if notif.Method != "session/update" {
-		t.Errorf("method = %q, want session/update", notif.Method)
+	if notif.Method != "_machine/notify" {
+		t.Errorf("method = %q, want _machine/notify", notif.Method)
 	}
 
-	var params SessionUpdateNotification
+	var params MachineNotifyParams
 	if err := json.Unmarshal(notif.Params, &params); err != nil {
 		t.Fatalf("unmarshal params: %v", err)
 	}
 	if params.SessionID != "sess-1" {
 		t.Errorf("sessionId = %q", params.SessionID)
 	}
-	if params.Update.SessionUpdate != SessionUpdateMachineAgent {
-		t.Errorf("sessionUpdate = %q", params.Update.SessionUpdate)
+	if params.Kind != MachineEventAgent {
+		t.Errorf("kind = %q", params.Kind)
 	}
 }
 
@@ -84,12 +84,12 @@ func TestMachineBridge_TranslatesStateChange(t *testing.T) {
 		t.Fatalf("unmarshal notification: %v", err)
 	}
 
-	var params SessionUpdateNotification
+	var params MachineNotifyParams
 	if err := json.Unmarshal(notif.Params, &params); err != nil {
 		t.Fatalf("unmarshal params: %v", err)
 	}
-	if params.Update.SessionUpdate != SessionUpdateMachineState {
-		t.Errorf("sessionUpdate = %q", params.Update.SessionUpdate)
+	if params.Kind != MachineEventState {
+		t.Errorf("kind = %q", params.Kind)
 	}
 }
 
@@ -122,12 +122,12 @@ func TestMachineBridge_TranslatesLockAcquired(t *testing.T) {
 		t.Fatalf("unmarshal notification: %v", err)
 	}
 
-	var params SessionUpdateNotification
+	var params MachineNotifyParams
 	if err := json.Unmarshal(notif.Params, &params); err != nil {
 		t.Fatalf("unmarshal params: %v", err)
 	}
-	if params.Update.SessionUpdate != SessionUpdateMachineLock {
-		t.Errorf("sessionUpdate = %q", params.Update.SessionUpdate)
+	if params.Kind != MachineEventLock {
+		t.Errorf("kind = %q", params.Kind)
 	}
 }
 
