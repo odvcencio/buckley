@@ -220,7 +220,10 @@ func renderSessionExportMarkdown(doc SessionExportDocument) string {
 	fmt.Fprintf(&b, "- Messages: %d\n\n", len(doc.Messages))
 
 	for _, msg := range doc.Messages {
-		role := strings.ToUpper(msg.Role[:1]) + msg.Role[1:]
+		role := "Message"
+		if msg.Role != "" {
+			role = strings.ToUpper(msg.Role[:1]) + msg.Role[1:]
+		}
 		if msg.Role == "" {
 			role = "Message"
 		}
