@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -151,6 +152,7 @@ type Runner struct {
 	lastActive          time.Time
 	idleTimeout         time.Duration
 	cancelFunc          context.CancelFunc
+	hookCloser          io.Closer
 	activeCommandID     string
 	interruptedCommands map[string]struct{}
 
@@ -554,6 +556,10 @@ func (r *Runner) Stop() {
 		r.state = StateStopped
 		if r.cancelFunc != nil {
 			r.cancelFunc()
+		}
+		if r.hookCloser != nil {
+			_ = r.hookCloser.Close()
+			r.hookCloser = nil
 		}
 		r.mu.Unlock()
 

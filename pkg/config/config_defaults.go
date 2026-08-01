@@ -393,6 +393,10 @@ func DefaultConfig() *Config {
 		Tools: ToolsConfig{
 			DefaultPoolMode: "full",
 		},
+		Hooks: PluginHooksConfig{
+			Enabled:          false,
+			DefaultTimeoutMs: 3000,
+		},
 		MCP: MCPConfig{
 			Enabled:  false,
 			Servers:  []MCPServerConfig{},
