@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"strings"
 	"time"
 
@@ -132,6 +133,7 @@ type Config struct {
 	Postures       PosturesConfig       `yaml:"postures"`
 	ToolMiddleware ToolMiddlewareConfig `yaml:"tool_middleware"`
 	Tools          ToolsConfig          `yaml:"tools"`
+	Hooks          PluginHooksConfig    `yaml:"hooks"`
 	MCP            MCPConfig            `yaml:"mcp"`
 	ACP            ACPConfig            `yaml:"acp"`
 	Worktrees      WorktreeConfig       `yaml:"worktrees"`
@@ -715,6 +717,40 @@ type ToolsConfig struct {
 	// resolves one (evaluator is nil or its lookup fails). Valid values:
 	// "full" (all tools, default), "standard", "read_only", "simple".
 	DefaultPoolMode string `yaml:"default_pool_mode"`
+}
+
+// PluginHooksConfig gates the plugin hook contract (pkg/tool/external's
+// hook_process.go and hook_runner.go): a long-lived "hook mode" process,
+// spawned per session for any discovered plugin whose manifest declares a
+// hooks: section, that receives telemetry events and can veto tool calls.
+//
+// This section is a global switch layered on top of each plugin's own
+// opt-in: even when Enabled is true, a plugin only receives events or
+// pre-tool veto requests if its own manifest's hooks: section asks for
+// them (see external.ToolManifest.HasHooks).
+type PluginHooksConfig struct {
+	// Enabled gates whether Buckley spawns any plugin hook process at
+	// all. Defaults to false: hook processes are extra long-lived
+	// subprocesses with their own event/veto surface, so -- like MCP --
+	// a project or user must opt in explicitly.
+	Enabled bool `yaml:"enabled"`
+
+	// DefaultTimeoutMs is used for a plugin's pre-tool veto requests when
+	// its own manifest's hooks.pre_tool.timeout_ms is unset. Zero uses
+	// external.DefaultPreToolTimeoutMs (3000ms); kept as a plain int here
+	// rather than importing pkg/tool/external, matching this package's
+	// existing dependency direction (config is cross-cutting and doesn't
+	// import tool subpackages).
+	DefaultTimeoutMs int `yaml:"default_timeout_ms"`
+}
+
+// Validate checks that hooks.default_timeout_ms, when set, is
+// non-negative.
+func (c PluginHooksConfig) Validate() error {
+	if c.DefaultTimeoutMs < 0 {
+		return fmt.Errorf("hooks.default_timeout_ms must be >= 0")
+	}
+	return nil
 }
 
 // MCPConfig defines MCP client settings: which external stdio tool servers

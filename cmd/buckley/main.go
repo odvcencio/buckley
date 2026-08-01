@@ -365,6 +365,11 @@ func executeOneShot(prompt string, cfg *config.Config, mgr *model.Manager, store
 	if err := registry.LoadDefaultPlugins(); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to load some plugins: %v\n", err)
 	}
+	if hookCloser, hookErr := registry.EnableConfiguredHooks(cfg.Hooks.Enabled, time.Duration(cfg.Hooks.DefaultTimeoutMs)*time.Millisecond); hookErr != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to start plugin hooks: %v\n", hookErr)
+	} else if hookCloser != nil {
+		defer hookCloser.Close()
+	}
 	registry.ConfigureContainers(cfg, cwd)
 	registry.SetWorkDir(cwd)
 	registry.Register(&builtin.SkillActivationTool{
@@ -453,6 +458,11 @@ func runExecuteCommand(args []string) error {
 	if err := registry.LoadDefaultPlugins(); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to load some plugins: %v\n", err)
 	}
+	if hookCloser, hookErr := registry.EnableConfiguredHooks(cfg.Hooks.Enabled, time.Duration(cfg.Hooks.DefaultTimeoutMs)*time.Millisecond); hookErr != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to start plugin hooks: %v\n", hookErr)
+	} else if hookCloser != nil {
+		defer hookCloser.Close()
+	}
 	if cwd, err := os.Getwd(); err == nil {
 		registry.ConfigureContainers(cfg, cwd)
 	}
@@ -524,6 +534,11 @@ func runExecuteTaskCommand(args []string) error {
 	registry := tool.NewRegistry()
 	if err := registry.LoadDefaultPlugins(); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to load some plugins: %v\n", err)
+	}
+	if hookCloser, hookErr := registry.EnableConfiguredHooks(cfg.Hooks.Enabled, time.Duration(cfg.Hooks.DefaultTimeoutMs)*time.Millisecond); hookErr != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to start plugin hooks: %v\n", hookErr)
+	} else if hookCloser != nil {
+		defer hookCloser.Close()
 	}
 	if cwd, err := os.Getwd(); err == nil {
 		registry.ConfigureContainers(cfg, cwd)

@@ -3,6 +3,7 @@ package headless
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -201,7 +202,7 @@ func (r *Registry) CreateSession(req CreateSessionRequest) (*SessionInfo, error)
 		return nil, fmt.Errorf("create session: %w", err)
 	}
 
-	tools := r.buildToolRegistry(sessionID, projectPath)
+	tools, hookCloser := r.buildToolRegistry(sessionID, projectPath)
 	if req.ToolPolicy != nil {
 		applyToolPolicy(tools, req.ToolPolicy)
 	}
@@ -233,6 +234,7 @@ func (r *Registry) CreateSession(req CreateSessionRequest) (*SessionInfo, error)
 	if err != nil {
 		return nil, fmt.Errorf("create runner: %w", err)
 	}
+	runner.hookCloser = hookCloser
 
 	// Register runner
 	r.mu.Lock()
@@ -302,7 +304,7 @@ func (r *Registry) EnsureSession(sessionID string) (*Runner, error) {
 		}
 	}
 
-	tools := r.buildToolRegistry(sessionID, project)
+	tools, hookCloser := r.buildToolRegistry(sessionID, project)
 	runner, err := NewRunner(RunnerConfig{
 		Session:       sess,
 		ModelManager:  r.modelManager,
@@ -318,6 +320,7 @@ func (r *Registry) EnsureSession(sessionID string) (*Runner, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create runner: %w", err)
 	}
+	runner.hookCloser = hookCloser
 
 	r.mu.Lock()
 	r.runners[sessionID] = runner
@@ -326,7 +329,7 @@ func (r *Registry) EnsureSession(sessionID string) (*Runner, error) {
 	return runner, nil
 }
 
-func (r *Registry) buildToolRegistry(sessionID string, project string) *tool.Registry {
+func (r *Registry) buildToolRegistry(sessionID string, project string) (*tool.Registry, io.Closer) {
 	tools := tool.NewRegistry()
 	tool.ApplyToolMiddlewareConfig(tools, r.config)
 	if r.config == nil || r.config.ToolMiddleware.MaxResultBytes <= 0 {
@@ -350,11 +353,23 @@ func (r *Registry) buildToolRegistry(sessionID string, project string) *tool.Reg
 	if err := tools.LoadDefaultPlugins(); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to load some plugins: %v\n", err)
 	}
+	var hooks io.Closer
+	hooksEnabled := false
+	hooksTimeout := time.Duration(0)
+	if r.config != nil {
+		hooksEnabled = r.config.Hooks.Enabled
+		hooksTimeout = time.Duration(r.config.Hooks.DefaultTimeoutMs) * time.Millisecond
+	}
+	if hookCloser, hookErr := tools.EnableConfiguredHooks(hooksEnabled, hooksTimeout); hookErr != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to start plugin hooks: %v\n", hookErr)
+	} else if hookCloser != nil {
+		hooks = hookCloser
+	}
 	if strings.TrimSpace(project) != "" {
 		tools.SetWorkDir(project)
 	}
 	tools.EnableDynamicDiscovery(nil)
-	return tools
+	return tools, hooks
 }
 
 func applyToolPolicy(registry *tool.Registry, policy *ToolPolicy) {

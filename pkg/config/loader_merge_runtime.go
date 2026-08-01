@@ -228,3 +228,14 @@ func mergeToolsConfig(base, override *Config, raw map[string]any) {
 		base.Tools.DefaultPoolMode = override.Tools.DefaultPoolMode
 	}
 }
+
+// mergeHooksConfig merges hooks.enabled and hooks.default_timeout_ms (the
+// plugin hook contract's global switch; see PluginHooksConfig).
+func mergeHooksConfig(base, override *Config, raw map[string]any) {
+	if boolFieldSet(raw, "hooks", "enabled") {
+		base.Hooks.Enabled = override.Hooks.Enabled
+	}
+	if boolFieldSet(raw, "hooks", "default_timeout_ms") {
+		base.Hooks.DefaultTimeoutMs = override.Hooks.DefaultTimeoutMs
+	}
+}
