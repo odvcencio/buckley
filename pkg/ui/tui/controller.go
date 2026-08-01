@@ -4,6 +4,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -96,6 +97,7 @@ type SessionState struct {
 	ID            string
 	Conversation  *conversation.Conversation
 	ToolRegistry  *tool.Registry
+	HookCloser    io.Closer
 	SkillRegistry *skill.Registry
 	SkillState    *skill.RuntimeState
 	Streaming     bool
@@ -171,7 +173,7 @@ func newSessionState(cfg *config.Config, store *storage.Store, workDir string, h
 	}
 
 	skillState := skill.NewRuntimeState(sess.Conversation.AddSystemMessage)
-	registry := buildRegistry(cfg, store, workDir, hub, sessionID)
+	registry, hookCloser := buildRegistry(cfg, store, workDir, hub, sessionID)
 	registry.Register(&builtin.SkillActivationTool{
 		Registry:     skills,
 		Conversation: skillState,
@@ -183,6 +185,7 @@ func newSessionState(cfg *config.Config, store *storage.Store, workDir string, h
 	registry.Register(createTool)
 
 	sess.ToolRegistry = registry
+	sess.HookCloser = hookCloser
 	sess.SkillRegistry = skills
 	sess.SkillState = skillState
 
@@ -370,6 +373,13 @@ func (c *Controller) Run() error {
 	if c.telemetryBridge != nil {
 		c.telemetryBridge.Start(context.Background())
 	}
+	defer func() {
+		for _, sess := range c.sessions {
+			if sess != nil && sess.HookCloser != nil {
+				_ = sess.HookCloser.Close()
+			}
+		}
+	}()
 
 	// Show welcome
 	c.app.WelcomeScreen()
@@ -1195,7 +1205,7 @@ const defaultTUIMaxOutputBytes = 100_000
 const defaultTUIToolModelMaxBytes = 24 * 1024
 
 // buildRegistry creates the tool registry with all available tools.
-func buildRegistry(cfg *config.Config, store *storage.Store, workDir string, hub *telemetry.Hub, sessionID string) *tool.Registry {
+func buildRegistry(cfg *config.Config, store *storage.Store, workDir string, hub *telemetry.Hub, sessionID string) (*tool.Registry, io.Closer) {
 	registry := tool.NewRegistry()
 	tool.ApplyToolMiddlewareConfig(registry, cfg)
 	if cfg == nil || cfg.ToolMiddleware.MaxResultBytes <= 0 {
@@ -1222,12 +1232,11 @@ func buildRegistry(cfg *config.Config, store *storage.Store, workDir string, hub
 	if err := registry.LoadDefaultPlugins(); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to load some plugins: %v\n", err)
 	}
+	var hooks io.Closer
 	if hookCloser, hookErr := registry.EnableConfiguredHooks(cfg != nil && cfg.Hooks.Enabled, time.Duration(cfg.Hooks.DefaultTimeoutMs)*time.Millisecond); hookErr != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to start plugin hooks: %v\n", hookErr)
 	} else if hookCloser != nil {
-		// Hook processes are children reading stdin; they exit with this
-		// process, so process-lifetime ownership is the designed cleanup.
-		_ = hookCloser
+		hooks = hookCloser
 	}
 
 	// Set working directory for file tools
@@ -1236,7 +1245,7 @@ func buildRegistry(cfg *config.Config, store *storage.Store, workDir string, hub
 	}
 	registry.EnableDynamicDiscovery(nil)
 
-	return registry
+	return registry, hooks
 }
 
 // listSessions shows persisted sessions for this project, including completed

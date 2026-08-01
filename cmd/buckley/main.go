@@ -368,9 +368,7 @@ func executeOneShot(prompt string, cfg *config.Config, mgr *model.Manager, store
 	if hookCloser, hookErr := registry.EnableConfiguredHooks(cfg.Hooks.Enabled, time.Duration(cfg.Hooks.DefaultTimeoutMs)*time.Millisecond); hookErr != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to start plugin hooks: %v\n", hookErr)
 	} else if hookCloser != nil {
-		// Hook processes are children reading stdin; they exit with this
-		// process, so process-lifetime ownership is the designed cleanup.
-		_ = hookCloser
+		defer hookCloser.Close()
 	}
 	registry.ConfigureContainers(cfg, cwd)
 	registry.SetWorkDir(cwd)
@@ -463,9 +461,7 @@ func runExecuteCommand(args []string) error {
 	if hookCloser, hookErr := registry.EnableConfiguredHooks(cfg.Hooks.Enabled, time.Duration(cfg.Hooks.DefaultTimeoutMs)*time.Millisecond); hookErr != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to start plugin hooks: %v\n", hookErr)
 	} else if hookCloser != nil {
-		// Hook processes are children reading stdin; they exit with this
-		// process, so process-lifetime ownership is the designed cleanup.
-		_ = hookCloser
+		defer hookCloser.Close()
 	}
 	if cwd, err := os.Getwd(); err == nil {
 		registry.ConfigureContainers(cfg, cwd)
@@ -542,9 +538,7 @@ func runExecuteTaskCommand(args []string) error {
 	if hookCloser, hookErr := registry.EnableConfiguredHooks(cfg.Hooks.Enabled, time.Duration(cfg.Hooks.DefaultTimeoutMs)*time.Millisecond); hookErr != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to start plugin hooks: %v\n", hookErr)
 	} else if hookCloser != nil {
-		// Hook processes are children reading stdin; they exit with this
-		// process, so process-lifetime ownership is the designed cleanup.
-		_ = hookCloser
+		defer hookCloser.Close()
 	}
 	if cwd, err := os.Getwd(); err == nil {
 		registry.ConfigureContainers(cfg, cwd)
