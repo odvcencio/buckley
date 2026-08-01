@@ -722,6 +722,18 @@ func (r *Runner) newTurnController() (*agentloop.Controller, error) {
 		},
 		CallModel:     agentloop.ModelCallerFunc(r.callModel),
 		DispatchTools: agentloop.ToolDispatcherFunc(r.dispatchToolCalls),
+		History: agentloop.HistorySinkFunc(func(msg model.Message) {
+			switch {
+			case msg.Role == "assistant" && len(msg.ToolCalls) > 0:
+				r.conv.AddToolCallMessageWithReasoning(msg.ToolCalls, msg.Reasoning, msg.ReasoningDetails)
+			case msg.Role == "assistant":
+				text, _ := model.ExtractTextContent(msg.Content)
+				r.conv.AddAssistantMessageWithReasoningDetails(text, msg.Reasoning, msg.ReasoningDetails)
+			case msg.Role == "tool":
+				text, _ := model.ExtractTextContent(msg.Content)
+				r.conv.AddToolResponseMessage(msg.ToolCallID, msg.Name, text)
+			}
+		}),
 		ContextWindow: func(modelID string) int {
 			if r.modelManager == nil {
 				return 0
