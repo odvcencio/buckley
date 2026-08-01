@@ -3,6 +3,7 @@ package tool
 import (
 	"io"
 	"log/slog"
+	"time"
 
 	"m31labs.dev/buckley/v2/pkg/tool/external"
 )
@@ -23,7 +24,7 @@ func (c *hookRunnerCloser) Close() error {
 //
 // It is a no-op returning (nil, nil) when disabled or when no plugin
 // declares hooks, so callers can wire it unconditionally.
-func (r *Registry) EnableConfiguredHooks(enabled bool) (io.Closer, error) {
+func (r *Registry) EnableConfiguredHooks(enabled bool, defaultVetoTimeout time.Duration) (io.Closer, error) {
 	if r == nil || !enabled {
 		return nil, nil
 	}
@@ -36,6 +37,7 @@ func (r *Registry) EnableConfiguredHooks(enabled bool) (io.Closer, error) {
 		slog.Warn("plugin hook: " + format)
 		_ = args
 	})
+	runner.SetDefaultPreToolTimeout(defaultVetoTimeout)
 	registered := 0
 	for _, ref := range refs {
 		if err := runner.Register(ref.Manifest, ref.ExecPath, ref.WorkDir, ref.Env); err != nil {

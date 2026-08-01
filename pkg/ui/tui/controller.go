@@ -1222,7 +1222,7 @@ func buildRegistry(cfg *config.Config, store *storage.Store, workDir string, hub
 	if err := registry.LoadDefaultPlugins(); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to load some plugins: %v\n", err)
 	}
-	if hookCloser, hookErr := registry.EnableConfiguredHooks(cfg != nil && cfg.Hooks.Enabled); hookErr != nil {
+	if hookCloser, hookErr := registry.EnableConfiguredHooks(cfg != nil && cfg.Hooks.Enabled, time.Duration(cfg.Hooks.DefaultTimeoutMs)*time.Millisecond); hookErr != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to start plugin hooks: %v\n", hookErr)
 	} else if hookCloser != nil {
 		// Hook processes are children reading stdin; they exit with this

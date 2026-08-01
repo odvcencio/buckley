@@ -2,6 +2,7 @@ package external
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -52,6 +53,7 @@ func TestExamplePlugin_HookLogger_DiscoverAndLoad(t *testing.T) {
 	// The example plugin must still behave as an ordinary one-shot tool
 	// (its normal, non-hook invocation), not just a hook subscriber.
 	result, err := found.Execute(map[string]any{})
+	skipIfInterpreterUnavailable(t, err)
 	if err != nil {
 		t.Fatalf("Execute failed: %v", err)
 	}
@@ -74,10 +76,11 @@ func TestExamplePlugin_HookLogger_LogsEventsAndVetoesMarker(t *testing.T) {
 	executable := filepath.Join(dir, "hook_logger.sh")
 
 	runner := NewHookRunner(nil)
-	if err := runner.Register(manifest, executable, dir, map[string]string{
+	if regErr := runner.Register(manifest, executable, dir, map[string]string{
 		"BUCKLEY_HOOK_LOGGER_LOG": logPath,
-	}); err != nil {
-		t.Fatalf("Register failed: %v", err)
+	}); regErr != nil {
+		skipIfInterpreterUnavailable(t, regErr)
+		t.Fatalf("Register failed: %v", regErr)
 	}
 	t.Cleanup(runner.Close)
 
@@ -129,5 +132,16 @@ func TestExamplePlugin_HookLogger_LogsEventsAndVetoesMarker(t *testing.T) {
 	denied, _, _ = runner.Veto(context.Background(), "read_file", map[string]any{})
 	if denied {
 		t.Error("expected the example plugin to allow tools other than its marker tool")
+	}
+}
+
+// skipIfInterpreterUnavailable skips example-plugin tests in execution
+// environments that cannot launch the example's shell wrapper (for
+// example, minimal review sandboxes without /bin/bash). The hook
+// protocol itself stays enforced by the Go testdata plugin tests.
+func skipIfInterpreterUnavailable(t *testing.T, err error) {
+	t.Helper()
+	if err != nil && (errors.Is(err, os.ErrNotExist) || strings.Contains(err.Error(), "no such file or directory")) {
+		t.Skipf("example plugin interpreter unavailable in this environment: %v", err)
 	}
 }

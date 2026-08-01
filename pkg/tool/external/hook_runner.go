@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 
 	"m31labs.dev/buckley/v2/pkg/telemetry"
 )
@@ -25,10 +26,11 @@ type hookPlugin struct {
 // pre-tool-veto middleware (NewPluginVetoMiddleware); its Veto method
 // satisfies that middleware's PluginVetoGate interface structurally.
 type HookRunner struct {
-	mu      sync.Mutex
-	plugins []*hookPlugin
-	unsub   func()
-	wg      sync.WaitGroup
+	defaultPreToolTimeout time.Duration
+	mu                    sync.Mutex
+	plugins               []*hookPlugin
+	unsub                 func()
+	wg                    sync.WaitGroup
 
 	logger func(format string, args ...any)
 }
@@ -39,6 +41,28 @@ type HookRunner struct {
 // them.
 func NewHookRunner(logger func(format string, args ...any)) *HookRunner {
 	return &HookRunner{logger: logger}
+}
+
+// SetDefaultPreToolTimeout sets the global default veto timeout applied to
+// manifests that do not declare their own pre_tool.timeout_ms. Zero or
+// negative keeps the built-in default.
+func (r *HookRunner) SetDefaultPreToolTimeout(d time.Duration) {
+	if r == nil || d <= 0 {
+		return
+	}
+	r.defaultPreToolTimeout = d
+}
+
+// vetoTimeout resolves the timeout for one manifest: manifest-declared
+// first, then the runner's configured global default, then the built-in.
+func (r *HookRunner) vetoTimeout(pre *PreToolHooksConfig) time.Duration {
+	if pre != nil && pre.TimeoutMs > 0 {
+		return pre.TimeoutOrDefault()
+	}
+	if r.defaultPreToolTimeout > 0 {
+		return r.defaultPreToolTimeout
+	}
+	return pre.TimeoutOrDefault()
 }
 
 func (r *HookRunner) logf(format string, args ...any) {
@@ -151,7 +175,7 @@ func (r *HookRunner) Veto(ctx context.Context, toolName string, sanitizedArgs ma
 			continue
 		}
 		pre := p.manifest.Hooks.PreTool
-		decision, err := p.process.RequestVeto(ctx, toolName, sanitizedArgs, pre.TimeoutOrDefault())
+		decision, err := p.process.RequestVeto(ctx, toolName, sanitizedArgs, r.vetoTimeout(pre))
 		if err != nil {
 			if pre.Enforcing {
 				r.logf("plugin %s: pre-tool hook error for %q (enforcing, denying): %v", p.manifest.Name, toolName, err)

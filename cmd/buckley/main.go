@@ -365,7 +365,7 @@ func executeOneShot(prompt string, cfg *config.Config, mgr *model.Manager, store
 	if err := registry.LoadDefaultPlugins(); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to load some plugins: %v\n", err)
 	}
-	if hookCloser, hookErr := registry.EnableConfiguredHooks(cfg.Hooks.Enabled); hookErr != nil {
+	if hookCloser, hookErr := registry.EnableConfiguredHooks(cfg.Hooks.Enabled, time.Duration(cfg.Hooks.DefaultTimeoutMs)*time.Millisecond); hookErr != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to start plugin hooks: %v\n", hookErr)
 	} else if hookCloser != nil {
 		// Hook processes are children reading stdin; they exit with this
@@ -460,7 +460,7 @@ func runExecuteCommand(args []string) error {
 	if err := registry.LoadDefaultPlugins(); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to load some plugins: %v\n", err)
 	}
-	if hookCloser, hookErr := registry.EnableConfiguredHooks(cfg.Hooks.Enabled); hookErr != nil {
+	if hookCloser, hookErr := registry.EnableConfiguredHooks(cfg.Hooks.Enabled, time.Duration(cfg.Hooks.DefaultTimeoutMs)*time.Millisecond); hookErr != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to start plugin hooks: %v\n", hookErr)
 	} else if hookCloser != nil {
 		// Hook processes are children reading stdin; they exit with this
@@ -539,7 +539,7 @@ func runExecuteTaskCommand(args []string) error {
 	if err := registry.LoadDefaultPlugins(); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to load some plugins: %v\n", err)
 	}
-	if hookCloser, hookErr := registry.EnableConfiguredHooks(cfg.Hooks.Enabled); hookErr != nil {
+	if hookCloser, hookErr := registry.EnableConfiguredHooks(cfg.Hooks.Enabled, time.Duration(cfg.Hooks.DefaultTimeoutMs)*time.Millisecond); hookErr != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to start plugin hooks: %v\n", hookErr)
 	} else if hookCloser != nil {
 		// Hook processes are children reading stdin; they exit with this
