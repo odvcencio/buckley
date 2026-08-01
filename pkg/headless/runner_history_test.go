@@ -93,4 +93,26 @@ func TestRunner_SecondRequestCarriesToolCallAndResult(t *testing.T) {
 	if !strings.Contains(raw, `"role":"tool"`) {
 		t.Fatalf("second request missing tool result message: %s", raw)
 	}
+
+	// Persistence: a fresh conversation loaded from storage must contain
+	// exactly one assistant tool-call message, its tool result, and one
+	// final assistant message (no duplicates).
+	reloaded := conversation.New("session-h")
+	if err := reloaded.LoadFromStorage(store); err != nil {
+		t.Fatalf("reload conversation: %v", err)
+	}
+	toolCalls, toolResults, finals := 0, 0, 0
+	for _, m := range reloaded.Messages {
+		switch {
+		case m.Role == "assistant" && len(m.ToolCalls) > 0:
+			toolCalls++
+		case m.Role == "tool":
+			toolResults++
+		case m.Role == "assistant":
+			finals++
+		}
+	}
+	if toolCalls != 1 || toolResults != 1 || finals != 1 {
+		t.Fatalf("persisted transcript wrong: toolCalls=%d toolResults=%d finals=%d", toolCalls, toolResults, finals)
+	}
 }
