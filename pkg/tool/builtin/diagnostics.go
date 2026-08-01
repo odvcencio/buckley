@@ -103,5 +103,10 @@ func boundDiagnostics(text string) string {
 	if len(text) <= postEditDiagnosticsMaxBytes {
 		return text
 	}
-	return text[:postEditDiagnosticsMaxBytes] + fmt.Sprintf("\n... (truncated, %d bytes total)", len(text))
+	marker := fmt.Sprintf("\n... (truncated, %d bytes total)", len(text))
+	keep := postEditDiagnosticsMaxBytes - len(marker)
+	if keep < 0 {
+		keep = 0
+	}
+	return text[:keep] + marker
 }
