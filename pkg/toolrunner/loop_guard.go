@@ -1,7 +1,6 @@
 package toolrunner
 
 import (
-	"fmt"
 	"strings"
 
 	"m31labs.dev/buckley/v2/pkg/agentloop"
@@ -28,11 +27,7 @@ func applyRunnerLoopGuard(governor *agentloop.Governor, record ToolCallRecord, m
 }
 
 func runnerLoopGuardMessage(reason string) string {
-	reason = strings.TrimSpace(reason)
-	if reason == "" {
-		reason = "the harness detected repeated tool activity without new evidence"
-	}
-	return fmt.Sprintf("Buckley stopped the tool loop because %s. Existing tool results remain available; use a different strategy or a narrower follow-up before continuing.", strings.TrimSuffix(reason, "."))
+	return agentloop.GuardStopMessage(reason)
 }
 
 func maxRunnerInt(a, b int) int {
