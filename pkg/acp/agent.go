@@ -180,8 +180,11 @@ func (a *Agent) handleInitialize(ctx context.Context, req *Request) {
 				SSE:  false,
 			},
 			PromptCapabilities: PromptCapabilities{
-				Audio:           false,
-				EmbeddedContext: false,
+				Audio: false,
+				// The prompt content-block parser (extractACPPrompt) already
+				// handles the "resource" content block variant, so embedded
+				// context is genuinely supported (S4).
+				EmbeddedContext: true,
 				Image:           false,
 			},
 			SessionCapabilities: SessionCapabilities{},

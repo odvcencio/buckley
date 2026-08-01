@@ -386,7 +386,7 @@ func executeOneShot(prompt string, cfg *config.Config, mgr *model.Manager, store
 	conv.AddSystemMessage(buildACPSystemPrompt(projectContext, cwd, skills, engine, agentPromptSection(agentProfile)))
 	conv.AddUserMessage(prompt)
 
-	responseText, err := runACPLoop(context.Background(), cfg, mgr, conv, registry, skillState, engine, resolvedModel, nil)
+	responseText, err := runACPLoop(context.Background(), cfg, mgr, conv, registry, skillState, engine, resolvedModel, cwd, nil)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "\nError: %v\n", err)
 		return 1

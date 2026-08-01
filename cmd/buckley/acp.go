@@ -216,7 +216,7 @@ func makePromptHandler(
 		}
 
 		modelOverride := resolveACPModelOverride(cfg, mgr, session.Mode)
-		responseText, err := runACPLoop(ctx, cfg, mgr, state.conv, state.registry, state.skillState, state.engine, modelOverride, stream)
+		responseText, err := runACPLoop(ctx, cfg, mgr, state.conv, state.registry, state.skillState, state.engine, modelOverride, state.workDir, stream)
 		if err != nil {
 			logf("prompt error: %v", err)
 			stream(acp.NewAgentMessageChunk(fmt.Sprintf("\n\nError: %v", err)))
@@ -238,6 +238,10 @@ type acpSessionState struct {
 	skills     *skill.Registry
 	skillState *skill.RuntimeState
 	engine     *rules.Engine
+	// workDir is the session's working directory, used to resolve tool-call
+	// locations and diff paths -- never the ACP process's own cwd, which may
+	// differ from the editor's session/new cwd (S2, S9).
+	workDir string
 }
 
 type acpEmbeddedResource struct {
@@ -360,6 +364,7 @@ func getACPSessionState(
 		skills:     skills,
 		skillState: skillState,
 		engine:     engine,
+		workDir:    workDir,
 	}
 	sessions[session.ID] = state
 	return state
@@ -612,6 +617,7 @@ func runACPLoop(
 	skillState *skill.RuntimeState,
 	engine *rules.Engine,
 	modelOverride string,
+	workDir string,
 	stream acp.StreamFunc,
 ) (string, error) {
 	modelID := resolveACPExecutionModel(cfg, mgr, engine, modelOverride)
@@ -674,7 +680,7 @@ func runACPLoop(
 		lastPhase = sendACPPhaseUpdate(stream, lastPhase, fmt.Sprintf("Executing %d tool call(s)…", len(msg.ToolCalls)))
 		normalizeACPToolCallIDs(msg.ToolCalls)
 		conv.AddToolCallMessageWithReasoning(msg.ToolCalls, msg.Reasoning, msg.ReasoningDetails)
-		lastPhase = executeACPToolCalls(ctx, conv, registry, stream, msg.ToolCalls, toolTurn.AllowedTools, lastPhase)
+		lastPhase = executeACPToolCalls(ctx, conv, registry, stream, msg.ToolCalls, toolTurn.AllowedTools, lastPhase, workDir)
 		toolsExecuted = true
 	}
 }
@@ -774,7 +780,7 @@ func normalizeACPToolCallIDs(calls []model.ToolCall) {
 	}
 }
 
-func executeACPToolCalls(ctx context.Context, conv *conversation.Conversation, registry *tool.Registry, stream acp.StreamFunc, calls []model.ToolCall, allowedTools []string, lastPhase string) string {
+func executeACPToolCalls(ctx context.Context, conv *conversation.Conversation, registry *tool.Registry, stream acp.StreamFunc, calls []model.ToolCall, allowedTools []string, lastPhase string, workDir string) string {
 	for i, tc := range calls {
 		if ctx.Err() != nil {
 			return lastPhase
@@ -783,24 +789,24 @@ func executeACPToolCalls(ctx context.Context, conv *conversation.Conversation, r
 		if err != nil {
 			rawParams := map[string]any{"raw": tc.Function.Arguments}
 			lastPhase = sendACPPhaseUpdate(stream, lastPhase, fmt.Sprintf("Running %s (%d/%d)…", toolCallTitle(tc.Function.Name, nil), i+1, len(calls)))
-			sendACPToolCallStart(stream, tc, rawParams)
+			sendACPToolCallStart(stream, tc, rawParams, workDir)
 			toolText := fmt.Sprintf("Error: invalid tool arguments: %v", err)
 			conv.AddToolResponseMessage(tc.ID, tc.Function.Name, toolText)
 			sendACPToolCallUpdate(stream, tc, rawParams, acp.ToolCallStatusFailed, toolText, map[string]any{
 				"error": err.Error(),
-			}, nil)
+			}, nil, workDir)
 			continue
 		}
 
 		lastPhase = sendACPPhaseUpdate(stream, lastPhase, fmt.Sprintf("Running %s (%d/%d)…", toolCallTitle(tc.Function.Name, params), i+1, len(calls)))
-		sendACPToolCallStart(stream, tc, params)
+		sendACPToolCallStart(stream, tc, params, workDir)
 
 		if !tool.IsToolAllowed(tc.Function.Name, allowedTools) {
 			toolText := fmt.Sprintf("Error: tool %s not allowed by active skills", tc.Function.Name)
 			conv.AddToolResponseMessage(tc.ID, tc.Function.Name, toolText)
 			sendACPToolCallUpdate(stream, tc, params, acp.ToolCallStatusFailed, toolText, map[string]any{
 				"error": toolText,
-			}, nil)
+			}, nil, workDir)
 			continue
 		}
 
@@ -813,7 +819,7 @@ func executeACPToolCalls(ctx context.Context, conv *conversation.Conversation, r
 		if execErr != nil || (result != nil && !result.Success) {
 			status = acp.ToolCallStatusFailed
 		}
-		sendACPToolCallUpdate(stream, tc, params, status, displayText, toolCallRawOutput(result, execErr), result)
+		sendACPToolCallUpdate(stream, tc, params, status, displayText, toolCallRawOutput(result, execErr), result, workDir)
 	}
 	return lastPhase
 }
@@ -832,7 +838,7 @@ func parseACPToolParams(raw string) (map[string]any, error) {
 	return params, nil
 }
 
-func sendACPToolCallStart(stream acp.StreamFunc, call model.ToolCall, params map[string]any) {
+func sendACPToolCallStart(stream acp.StreamFunc, call model.ToolCall, params map[string]any, workDir string) {
 	if stream == nil {
 		return
 	}
@@ -843,12 +849,12 @@ func sendACPToolCallStart(stream acp.StreamFunc, call model.ToolCall, params map
 		Kind:          toolCallKind(call.Function.Name),
 		Status:        acp.ToolCallStatusInProgress,
 		RawInput:      params,
-		Locations:     toolCallLocations(params),
+		Locations:     toolCallLocations(params, workDir),
 	}
 	_ = stream(update)
 }
 
-func sendACPToolCallUpdate(stream acp.StreamFunc, call model.ToolCall, params map[string]any, status, text string, rawOutput any, result *builtin.Result) {
+func sendACPToolCallUpdate(stream acp.StreamFunc, call model.ToolCall, params map[string]any, status, text string, rawOutput any, result *builtin.Result, workDir string) {
 	if stream == nil {
 		return
 	}
@@ -858,7 +864,7 @@ func sendACPToolCallUpdate(stream acp.StreamFunc, call model.ToolCall, params ma
 		Status:        status,
 		RawOutput:     rawOutput,
 	}
-	contents := buildToolCallContents(text, result)
+	contents := buildToolCallContents(text, result, workDir)
 	if len(contents) > 0 {
 		update.Content = contents
 	}
@@ -874,7 +880,7 @@ func sendACPPhaseUpdate(stream acp.StreamFunc, last, message string) string {
 	return message
 }
 
-func buildToolCallContents(text string, result *builtin.Result) []acp.ToolCallContent {
+func buildToolCallContents(text string, result *builtin.Result, workDir string) []acp.ToolCallContent {
 	const maxText = 8000
 	var contents []acp.ToolCallContent
 	if trimmed := strings.TrimSpace(text); trimmed != "" {
@@ -888,12 +894,7 @@ func buildToolCallContents(text string, result *builtin.Result) []acp.ToolCallCo
 		contents = append(contents, toolCallOutputContents(result, maxText)...)
 		if result.DiffPreview != nil {
 			diff := result.DiffPreview
-			path := strings.TrimSpace(diff.FilePath)
-			if path != "" {
-				if abs, err := filepath.Abs(path); err == nil {
-					path = abs
-				}
-			}
+			path := resolveACPPath(diff.FilePath, workDir)
 			if preview := strings.TrimSpace(diff.Preview); preview != "" {
 				contents = append(contents, acp.ToolCallContent{
 					Type:    "content",
@@ -947,18 +948,23 @@ func toolCallOutputContents(result *builtin.Result, maxText int) []acp.ToolCallC
 	return contents
 }
 
+// toolCallKind maps a Buckley tool name to an ACP tool_call kind. The names
+// here must match pkg/tool/builtin's actual Tool.Name() values -- verified
+// against the registry, not the older tool names some clients may remember
+// (shell_command, patch_file, headless_browse, terminal_editor, and
+// mark_resolved were all renamed and no longer exist as registered tools).
 func toolCallKind(name string) string {
 	switch name {
-	case "read_file", "list_directory", "find_files", "file_exists", "get_file_info",
+	case "read_file", "list_directory", "find_files", "file_exists",
 		"git_status", "git_diff", "git_log", "git_blame", "list_merge_conflicts":
 		return acp.ToolKindRead
 	case "search_text", "search_replace", "find_symbol", "find_references", "analyze_complexity", "find_duplicates":
 		return acp.ToolKindSearch
-	case "write_file", "edit_file", "insert_text", "delete_lines", "patch_file", "rename_symbol", "extract_function", "mark_resolved":
+	case "write_file", "edit_file", "insert_text", "delete_lines", "apply_patch", "rename_symbol", "extract_function", "mark_conflict_resolved":
 		return acp.ToolKindEdit
-	case "shell_command", "run_tests", "terminal_editor":
+	case "run_shell", "run_tests", "edit_file_terminal":
 		return acp.ToolKindExecute
-	case "headless_browse":
+	case "browse_url":
 		return acp.ToolKindFetch
 	default:
 		return acp.ToolKindOther
@@ -975,7 +981,7 @@ func toolCallTitle(name string, params map[string]any) string {
 		if path := toolCallParamString(params, "path"); path != "" {
 			return "Write " + path
 		}
-	case "edit_file", "insert_text", "delete_lines", "patch_file":
+	case "edit_file", "insert_text", "delete_lines", "apply_patch":
 		if path := toolCallParamString(params, "path"); path != "" {
 			return "Edit " + path
 		}
@@ -987,7 +993,7 @@ func toolCallTitle(name string, params map[string]any) string {
 		if query := toolCallParamString(params, "query"); query != "" {
 			return "Search/replace: " + truncate(query, 80)
 		}
-	case "shell_command":
+	case "run_shell":
 		if cmd := toolCallParamString(params, "command"); cmd != "" {
 			return "Run: " + truncate(cmd, 80)
 		}
@@ -999,15 +1005,35 @@ func toolCallTitle(name string, params map[string]any) string {
 	return name
 }
 
-func toolCallLocations(params map[string]any) []acp.ToolCallLocation {
+func toolCallLocations(params map[string]any, workDir string) []acp.ToolCallLocation {
 	path := toolCallParamString(params, "path")
 	if path == "" {
 		return nil
 	}
-	if abs, err := filepath.Abs(path); err == nil {
-		path = abs
+	return []acp.ToolCallLocation{{Path: resolveACPPath(path, workDir)}}
+}
+
+// resolveACPPath resolves a tool-provided path to an absolute path against
+// the session's working directory -- never the ACP process's own cwd, which
+// can differ from the editor's session/new cwd when serving multiple
+// sessions or workspaces (S2, S9). An already-absolute path is returned
+// cleaned and unchanged.
+func resolveACPPath(path, workDir string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return path
 	}
-	return []acp.ToolCallLocation{{Path: path}}
+	if filepath.IsAbs(path) {
+		return filepath.Clean(path)
+	}
+	workDir = strings.TrimSpace(workDir)
+	if workDir == "" {
+		if abs, err := filepath.Abs(path); err == nil {
+			return abs
+		}
+		return path
+	}
+	return filepath.Clean(filepath.Join(workDir, path))
 }
 
 func toolCallParamString(params map[string]any, key string) string {

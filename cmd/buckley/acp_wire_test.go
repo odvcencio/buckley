@@ -27,7 +27,7 @@ func TestBuildToolCallContents_DiffAlwaysCarriesPathAndNewText(t *testing.T) {
 		},
 	}
 
-	contents := buildToolCallContents("", result)
+	contents := buildToolCallContents("", result, "")
 	diff := findDiffContent(t, contents)
 
 	data, err := json.Marshal(diff)
@@ -71,7 +71,7 @@ func TestBuildToolCallContents_DiffOmitsOldTextForNewFiles(t *testing.T) {
 		},
 	}
 
-	contents := buildToolCallContents("", result)
+	contents := buildToolCallContents("", result, "")
 	diff := findDiffContent(t, contents)
 
 	if diff.OldText != nil {
@@ -103,7 +103,7 @@ func TestBuildToolCallContents_DiffDoesNotTrimOrTruncate(t *testing.T) {
 		},
 	}
 
-	contents := buildToolCallContents("", result)
+	contents := buildToolCallContents("", result, "")
 	diff := findDiffContent(t, contents)
 
 	if diff.OldText == nil || *diff.OldText != oldContent {

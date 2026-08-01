@@ -117,6 +117,37 @@ func TestShutdown_ReturnsEmptyObjectResult(t *testing.T) {
 	}
 }
 
+// TestAgent_Initialize_AdvertisesEmbeddedContext locks S4: the prompt
+// content-block parser already handles the "resource" variant, so the
+// agent should advertise embeddedContext support rather than leaving
+// clients to assume it is unsupported.
+func TestAgent_Initialize_AdvertisesEmbeddedContext(t *testing.T) {
+	t.Parallel()
+
+	var out bytes.Buffer
+	agent := NewAgent("test", "0.1", AgentHandlers{})
+	agent.transport = NewTransport(strings.NewReader(""), &out)
+
+	req := &Request{JSONRPC: "2.0", ID: "1", Method: "initialize", Params: mustMarshal(t, InitializeParams{ProtocolVersion: ProtocolVersion})}
+	agent.handleInitialize(nil, req) //nolint:staticcheck
+
+	var resp Response
+	if err := json.Unmarshal(bytes.TrimSpace(out.Bytes()), &resp); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	data, err := json.Marshal(resp.Result)
+	if err != nil {
+		t.Fatalf("marshal result: %v", err)
+	}
+	var result InitializeResult
+	if err := json.Unmarshal(data, &result); err != nil {
+		t.Fatalf("unmarshal InitializeResult: %v", err)
+	}
+	if !result.AgentCapabilities.PromptCapabilities.EmbeddedContext {
+		t.Fatal("expected promptCapabilities.embeddedContext = true")
+	}
+}
+
 func mustMarshal(t *testing.T, v any) json.RawMessage {
 	t.Helper()
 	data, err := json.Marshal(v)
