@@ -682,6 +682,7 @@ func printHelp() {
 	fmt.Println("  experiment replay <session-id>   Replay a session with a new model")
 	fmt.Println("  eval [list|run|init|runs|show]   Run project chat eval scenarios")
 	fmt.Println("  serve [--bind host:port]         Start local HTTP/WebSocket server")
+	fmt.Println("  attach [session-id]              Join a running session over loopback gRPC (list if omitted)")
 	fmt.Println("  remote <subcommand>              Remote session operations (attach, sessions, tokens, login, console)")
 	fmt.Println("  batch prune-workspaces           Garbage-collect stale batch workspaces (k8s/CI)")
 	fmt.Println("  git-webhook                      Listen for merge webhooks and run regression/release commands")
@@ -1007,7 +1008,7 @@ func printBashCompletion() {
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
 
-    commands="plan execute execute-task commit pr review review-pr experiment eval serve remote batch git-webhook agent skills skill agent-server lsp acp info config doctor completion worktree rules migrate db resume help version"
+    commands="plan execute execute-task commit pr review review-pr experiment eval serve attach remote batch git-webhook agent skills skill agent-server lsp acp info config doctor completion worktree rules migrate db resume help version"
 
     case "${prev}" in
         buckley)
@@ -1090,6 +1091,7 @@ _buckley() {
         'experiment:Run model comparison experiments'
         'eval:Run project chat eval scenarios'
         'serve:Start local server'
+        'attach:Join a running session over loopback gRPC'
         'remote:Remote session management'
         'batch:Batch helpers (k8s/CI)'
         'git-webhook:Run regression/release webhooks daemon'
@@ -1193,6 +1195,7 @@ complete -c buckley -n __fish_use_subcommand -a review-pr -d 'Review a GitHub pu
 complete -c buckley -n __fish_use_subcommand -a experiment -d 'Run model comparison experiments'
 complete -c buckley -n __fish_use_subcommand -a eval -d 'Run project chat eval scenarios'
 complete -c buckley -n __fish_use_subcommand -a serve -d 'Start local server'
+complete -c buckley -n __fish_use_subcommand -a attach -d 'Join a running session over loopback gRPC'
 complete -c buckley -n __fish_use_subcommand -a remote -d 'Remote session management'
 complete -c buckley -n __fish_use_subcommand -a batch -d 'Batch helpers (k8s/CI)'
 complete -c buckley -n __fish_use_subcommand -a git-webhook -d 'Run regression/release webhooks daemon'
@@ -1295,6 +1298,8 @@ func dispatchSubcommand(args []string) (bool, int) {
 		return true, runCommand(runExecuteCommand, args[1:])
 	case "remote":
 		return true, runCommand(runRemoteCommand, args[1:])
+	case "attach":
+		return true, runCommand(runAttachCommand, args[1:])
 	case "batch":
 		return true, runCommand(runBatchCommand, args[1:])
 	case "git-webhook":

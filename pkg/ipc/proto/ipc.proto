@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package buckley.ipc.v1;
 
-option go_package = "github.com/odvcencio/buckley/pkg/ipc/proto;ipcpb";
+option go_package = "m31labs.dev/buckley/v2/pkg/ipc/proto;ipcpb";
 
 import "google/protobuf/timestamp.proto";
 import "google/protobuf/struct.proto";
@@ -33,6 +33,11 @@ service BuckleyIPC {
 
   // GetSession returns detailed session state including messages and todos.
   rpc GetSession(GetSessionRequest) returns (SessionDetail);
+
+  // IssueSessionToken mints a short-lived per-session token. SendCommand
+  // requires one in addition to the caller's own auth scope; callers with
+  // member-or-higher scope call this once per session before driving it.
+  rpc IssueSessionToken(IssueSessionTokenRequest) returns (SessionTokenResponse);
 
   // ---------------------------------------------------------------------------
   // Headless Sessions (server-side sandboxed execution)
@@ -286,6 +291,15 @@ message PlanSummary {
 message SessionSummaryText {
   string summary = 1;
   google.protobuf.Timestamp generated_at = 2;
+}
+
+message IssueSessionTokenRequest {
+  string session_id = 1;
+}
+
+message SessionTokenResponse {
+  string session_id = 1;
+  string token = 2;
 }
 
 // =============================================================================

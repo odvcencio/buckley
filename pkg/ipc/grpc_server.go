@@ -990,6 +990,51 @@ func (s *GRPCService) GetSession(
 	return connect.NewResponse(detail), nil
 }
 
+// IssueSessionToken mints a short-lived per-session token. SendCommand
+// (and the WorkflowAction/PTY REST paths) require one in addition to the
+// caller's own auth scope; a gRPC-native caller such as `buckley attach`
+// calls this once per session before driving it, instead of going through
+// the REST /api/sessions/{id}/tokens handler.
+func (s *GRPCService) IssueSessionToken(
+	ctx context.Context,
+	req *connect.Request[ipcpb.IssueSessionTokenRequest],
+) (*connect.Response[ipcpb.SessionTokenResponse], error) {
+	if err := requireGRPCScope(ctx, storage.TokenScopeMember); err != nil {
+		return nil, err
+	}
+	if s.server == nil || s.server.store == nil {
+		return nil, connect.NewError(connect.CodeUnavailable, fmt.Errorf("storage unavailable"))
+	}
+
+	principal := principalFromContext(ctx)
+	if principal == nil {
+		return nil, connect.NewError(connect.CodeUnauthenticated, fmt.Errorf("unauthorized"))
+	}
+
+	sessionID := strings.TrimSpace(req.Msg.SessionId)
+	if sessionID == "" {
+		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("missing session id"))
+	}
+
+	session, err := s.server.store.GetSession(sessionID)
+	if err != nil {
+		return nil, connect.NewError(connect.CodeInternal, err)
+	}
+	if session == nil || !principalCanAccessSession(principal, session) {
+		return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("session not found: %s", sessionID))
+	}
+
+	token, err := s.server.issueSessionToken(sessionID)
+	if err != nil {
+		return nil, connect.NewError(connect.CodeInternal, err)
+	}
+
+	return connect.NewResponse(&ipcpb.SessionTokenResponse{
+		SessionId: sessionID,
+		Token:     token,
+	}), nil
+}
+
 // =============================================================================
 // Headless Sessions
 // =============================================================================

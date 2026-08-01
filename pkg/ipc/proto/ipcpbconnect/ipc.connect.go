@@ -42,6 +42,9 @@ const (
 	BuckleyIPCListSessionsProcedure = "/buckley.ipc.v1.BuckleyIPC/ListSessions"
 	// BuckleyIPCGetSessionProcedure is the fully-qualified name of the BuckleyIPC's GetSession RPC.
 	BuckleyIPCGetSessionProcedure = "/buckley.ipc.v1.BuckleyIPC/GetSession"
+	// BuckleyIPCIssueSessionTokenProcedure is the fully-qualified name of the BuckleyIPC's
+	// IssueSessionToken RPC.
+	BuckleyIPCIssueSessionTokenProcedure = "/buckley.ipc.v1.BuckleyIPC/IssueSessionToken"
 	// BuckleyIPCCreateHeadlessSessionProcedure is the fully-qualified name of the BuckleyIPC's
 	// CreateHeadlessSession RPC.
 	BuckleyIPCCreateHeadlessSessionProcedure = "/buckley.ipc.v1.BuckleyIPC/CreateHeadlessSession"
@@ -115,6 +118,10 @@ type BuckleyIPCClient interface {
 	ListSessions(context.Context, *connect.Request[proto.ListSessionsRequest]) (*connect.Response[proto.ListSessionsResponse], error)
 	// GetSession returns detailed session state including messages and todos.
 	GetSession(context.Context, *connect.Request[proto.GetSessionRequest]) (*connect.Response[proto.SessionDetail], error)
+	// IssueSessionToken mints a short-lived per-session token. SendCommand
+	// requires one in addition to the caller's own auth scope; callers with
+	// member-or-higher scope call this once per session before driving it.
+	IssueSessionToken(context.Context, *connect.Request[proto.IssueSessionTokenRequest]) (*connect.Response[proto.SessionTokenResponse], error)
 	// CreateHeadlessSession spawns an isolated session on the server.
 	CreateHeadlessSession(context.Context, *connect.Request[proto.CreateHeadlessRequest]) (*connect.Response[proto.HeadlessSession], error)
 	// DeleteHeadlessSession terminates and cleans up a headless session.
@@ -195,6 +202,12 @@ func NewBuckleyIPCClient(httpClient connect.HTTPClient, baseURL string, opts ...
 			httpClient,
 			baseURL+BuckleyIPCGetSessionProcedure,
 			connect.WithSchema(buckleyIPCMethods.ByName("GetSession")),
+			connect.WithClientOptions(opts...),
+		),
+		issueSessionToken: connect.NewClient[proto.IssueSessionTokenRequest, proto.SessionTokenResponse](
+			httpClient,
+			baseURL+BuckleyIPCIssueSessionTokenProcedure,
+			connect.WithSchema(buckleyIPCMethods.ByName("IssueSessionToken")),
 			connect.WithClientOptions(opts...),
 		),
 		createHeadlessSession: connect.NewClient[proto.CreateHeadlessRequest, proto.HeadlessSession](
@@ -338,6 +351,7 @@ type buckleyIPCClient struct {
 	sendCommand           *connect.Client[proto.CommandRequest, proto.CommandResponse]
 	listSessions          *connect.Client[proto.ListSessionsRequest, proto.ListSessionsResponse]
 	getSession            *connect.Client[proto.GetSessionRequest, proto.SessionDetail]
+	issueSessionToken     *connect.Client[proto.IssueSessionTokenRequest, proto.SessionTokenResponse]
 	createHeadlessSession *connect.Client[proto.CreateHeadlessRequest, proto.HeadlessSession]
 	deleteHeadlessSession *connect.Client[proto.DeleteHeadlessRequest, emptypb.Empty]
 	listHeadlessSessions  *connect.Client[emptypb.Empty, proto.HeadlessSessionList]
@@ -380,6 +394,11 @@ func (c *buckleyIPCClient) ListSessions(ctx context.Context, req *connect.Reques
 // GetSession calls buckley.ipc.v1.BuckleyIPC.GetSession.
 func (c *buckleyIPCClient) GetSession(ctx context.Context, req *connect.Request[proto.GetSessionRequest]) (*connect.Response[proto.SessionDetail], error) {
 	return c.getSession.CallUnary(ctx, req)
+}
+
+// IssueSessionToken calls buckley.ipc.v1.BuckleyIPC.IssueSessionToken.
+func (c *buckleyIPCClient) IssueSessionToken(ctx context.Context, req *connect.Request[proto.IssueSessionTokenRequest]) (*connect.Response[proto.SessionTokenResponse], error) {
+	return c.issueSessionToken.CallUnary(ctx, req)
 }
 
 // CreateHeadlessSession calls buckley.ipc.v1.BuckleyIPC.CreateHeadlessSession.
@@ -503,6 +522,10 @@ type BuckleyIPCHandler interface {
 	ListSessions(context.Context, *connect.Request[proto.ListSessionsRequest]) (*connect.Response[proto.ListSessionsResponse], error)
 	// GetSession returns detailed session state including messages and todos.
 	GetSession(context.Context, *connect.Request[proto.GetSessionRequest]) (*connect.Response[proto.SessionDetail], error)
+	// IssueSessionToken mints a short-lived per-session token. SendCommand
+	// requires one in addition to the caller's own auth scope; callers with
+	// member-or-higher scope call this once per session before driving it.
+	IssueSessionToken(context.Context, *connect.Request[proto.IssueSessionTokenRequest]) (*connect.Response[proto.SessionTokenResponse], error)
 	// CreateHeadlessSession spawns an isolated session on the server.
 	CreateHeadlessSession(context.Context, *connect.Request[proto.CreateHeadlessRequest]) (*connect.Response[proto.HeadlessSession], error)
 	// DeleteHeadlessSession terminates and cleans up a headless session.
@@ -579,6 +602,12 @@ func NewBuckleyIPCHandler(svc BuckleyIPCHandler, opts ...connect.HandlerOption) 
 		BuckleyIPCGetSessionProcedure,
 		svc.GetSession,
 		connect.WithSchema(buckleyIPCMethods.ByName("GetSession")),
+		connect.WithHandlerOptions(opts...),
+	)
+	buckleyIPCIssueSessionTokenHandler := connect.NewUnaryHandler(
+		BuckleyIPCIssueSessionTokenProcedure,
+		svc.IssueSessionToken,
+		connect.WithSchema(buckleyIPCMethods.ByName("IssueSessionToken")),
 		connect.WithHandlerOptions(opts...),
 	)
 	buckleyIPCCreateHeadlessSessionHandler := connect.NewUnaryHandler(
@@ -723,6 +752,8 @@ func NewBuckleyIPCHandler(svc BuckleyIPCHandler, opts ...connect.HandlerOption) 
 			buckleyIPCListSessionsHandler.ServeHTTP(w, r)
 		case BuckleyIPCGetSessionProcedure:
 			buckleyIPCGetSessionHandler.ServeHTTP(w, r)
+		case BuckleyIPCIssueSessionTokenProcedure:
+			buckleyIPCIssueSessionTokenHandler.ServeHTTP(w, r)
 		case BuckleyIPCCreateHeadlessSessionProcedure:
 			buckleyIPCCreateHeadlessSessionHandler.ServeHTTP(w, r)
 		case BuckleyIPCDeleteHeadlessSessionProcedure:
@@ -790,6 +821,10 @@ func (UnimplementedBuckleyIPCHandler) ListSessions(context.Context, *connect.Req
 
 func (UnimplementedBuckleyIPCHandler) GetSession(context.Context, *connect.Request[proto.GetSessionRequest]) (*connect.Response[proto.SessionDetail], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("buckley.ipc.v1.BuckleyIPC.GetSession is not implemented"))
+}
+
+func (UnimplementedBuckleyIPCHandler) IssueSessionToken(context.Context, *connect.Request[proto.IssueSessionTokenRequest]) (*connect.Response[proto.SessionTokenResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("buckley.ipc.v1.BuckleyIPC.IssueSessionToken is not implemented"))
 }
 
 func (UnimplementedBuckleyIPCHandler) CreateHeadlessSession(context.Context, *connect.Request[proto.CreateHeadlessRequest]) (*connect.Response[proto.HeadlessSession], error) {
