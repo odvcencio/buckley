@@ -1,8 +1,8 @@
-// Package acp implements the Zed Agent Communication Protocol (ACP) for editor integration.
+// Package acp implements the Agent Client Protocol (ACP) for editor integration.
 // ACP is a JSON-RPC 2.0 protocol over stdio that standardizes communication between
 // editors (clients) and AI coding agents (servers like Buckley).
 //
-// See: https://agentcommunicationprotocol.com
+// See: https://agentclientprotocol.com
 package acp
 
 import "encoding/json"
@@ -170,7 +170,10 @@ type SessionUpdateNotification struct {
 type SessionUpdate struct {
 	SessionUpdate string `json:"sessionUpdate"`
 	Content       any    `json:"content,omitempty"`
-	ModeID        string `json:"modeId,omitempty"`
+	// CurrentModeID is populated for current_mode_update notifications. The
+	// wire field is "currentModeId" per the ACP schema -- not "modeId" (that
+	// name is reserved for the session/set_mode request parameter).
+	CurrentModeID string `json:"currentModeId,omitempty"`
 	// AvailableCommands is populated for available_commands_update notifications.
 	AvailableCommands []AvailableCommand `json:"availableCommands,omitempty"`
 
@@ -209,6 +212,11 @@ type SetModeResult struct{}
 type CancelParams struct {
 	SessionID string `json:"sessionId"`
 }
+
+// ShutdownResult is the response body for the "_shutdown" extension method.
+// It is an empty object rather than a bare null result, per JSON-RPC 2.0:
+// a response must carry either "result" or "error".
+type ShutdownResult struct{}
 
 // Constructors
 
@@ -251,7 +259,7 @@ func NewAgentThoughtChunk(text string) SessionUpdate {
 
 // NewCurrentModeUpdate notifies the client that the current mode changed.
 func NewCurrentModeUpdate(modeID string) SessionUpdate {
-	return SessionUpdate{SessionUpdate: SessionUpdateCurrentModeUpdate, ModeID: modeID}
+	return SessionUpdate{SessionUpdate: SessionUpdateCurrentModeUpdate, CurrentModeID: modeID}
 }
 
 // ToolCallContent describes output emitted by a tool call.

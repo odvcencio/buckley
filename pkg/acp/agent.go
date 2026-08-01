@@ -376,7 +376,7 @@ func (a *Agent) handleShutdown(ctx context.Context, req *Request) {
 	}
 	a.activePromptsMu.Unlock()
 
-	_ = a.transport.SendResponse(req.ID, nil)
+	_ = a.transport.SendResponse(req.ID, ShutdownResult{})
 }
 
 // Client method helpers (for calling back to the editor)

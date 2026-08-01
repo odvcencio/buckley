@@ -1,4 +1,4 @@
-# Agent Communication Protocol (ACP)
+# Agent Client Protocol (ACP)
 
 **Purpose**: Zed ACP integration for editor agents, with an optional LSP bridge for editors that only speak LSP.
 
