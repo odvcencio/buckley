@@ -168,9 +168,9 @@ type ControllerConfig struct {
 	// projection, and applies the epoch rule (reset and recompile) if the
 	// pinned projection still overflows its budget. All three are
 	// optional; Continuation nil disables continuation entirely.
-	Continuation          *model.ContinuationCoordinator
-	ContinuationEligible  func(modelID string) bool
-	ProviderID            func(modelID string) string
+	Continuation         *model.ContinuationCoordinator
+	ContinuationEligible func(modelID string) bool
+	ProviderID           func(modelID string) string
 
 	// RunLedger, when set, receives one event per model request
 	// (started/completed/failed), one per tool-dispatch batch, and one per
