@@ -365,6 +365,13 @@ func executeOneShot(prompt string, cfg *config.Config, mgr *model.Manager, store
 	if err := registry.LoadDefaultPlugins(); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to load some plugins: %v\n", err)
 	}
+	if hookCloser, hookErr := registry.EnableConfiguredHooks(cfg.Hooks.Enabled); hookErr != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to start plugin hooks: %v\n", hookErr)
+	} else if hookCloser != nil {
+		// Hook processes are children reading stdin; they exit with this
+		// process, so process-lifetime ownership is the designed cleanup.
+		_ = hookCloser
+	}
 	registry.ConfigureContainers(cfg, cwd)
 	registry.SetWorkDir(cwd)
 	registry.Register(&builtin.SkillActivationTool{
@@ -453,6 +460,13 @@ func runExecuteCommand(args []string) error {
 	if err := registry.LoadDefaultPlugins(); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to load some plugins: %v\n", err)
 	}
+	if hookCloser, hookErr := registry.EnableConfiguredHooks(cfg.Hooks.Enabled); hookErr != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to start plugin hooks: %v\n", hookErr)
+	} else if hookCloser != nil {
+		// Hook processes are children reading stdin; they exit with this
+		// process, so process-lifetime ownership is the designed cleanup.
+		_ = hookCloser
+	}
 	if cwd, err := os.Getwd(); err == nil {
 		registry.ConfigureContainers(cfg, cwd)
 	}
@@ -524,6 +538,13 @@ func runExecuteTaskCommand(args []string) error {
 	registry := tool.NewRegistry()
 	if err := registry.LoadDefaultPlugins(); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to load some plugins: %v\n", err)
+	}
+	if hookCloser, hookErr := registry.EnableConfiguredHooks(cfg.Hooks.Enabled); hookErr != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to start plugin hooks: %v\n", hookErr)
+	} else if hookCloser != nil {
+		// Hook processes are children reading stdin; they exit with this
+		// process, so process-lifetime ownership is the designed cleanup.
+		_ = hookCloser
 	}
 	if cwd, err := os.Getwd(); err == nil {
 		registry.ConfigureContainers(cfg, cwd)

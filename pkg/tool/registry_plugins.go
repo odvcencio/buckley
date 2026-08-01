@@ -38,27 +38,25 @@ func (r *Registry) LoadExternalFromMultipleDirs(dirs []string) error {
 
 // LoadDefaultPlugins loads plugins from standard locations
 func (r *Registry) LoadDefaultPlugins() error {
+	return r.LoadExternalFromMultipleDirs(defaultPluginDirs())
+}
+
+// defaultPluginDirs returns the standard plugin locations: user
+// (~/.buckley/plugins), project (./.buckley/plugins), and built-in
+// (./plugins).
+func defaultPluginDirs() []string {
 	dirs := []string{}
 
-	// User plugin directory: ~/.buckley/plugins/
 	homeDir, err := os.UserHomeDir()
 	if err == nil {
-		userPluginDir := filepath.Join(homeDir, ".buckley", "plugins")
-		dirs = append(dirs, userPluginDir)
+		dirs = append(dirs, filepath.Join(homeDir, ".buckley", "plugins"))
 	}
 
-	// Project plugin directory: ./.buckley/plugins/
 	cwd, err := os.Getwd()
 	if err == nil {
-		projectPluginDir := filepath.Join(cwd, ".buckley", "plugins")
-		dirs = append(dirs, projectPluginDir)
+		dirs = append(dirs, filepath.Join(cwd, ".buckley", "plugins"))
+		dirs = append(dirs, filepath.Join(cwd, "plugins"))
 	}
 
-	// Built-in plugin directory: ./plugins/
-	if cwd != "" {
-		builtinPluginDir := filepath.Join(cwd, "plugins")
-		dirs = append(dirs, builtinPluginDir)
-	}
-
-	return r.LoadExternalFromMultipleDirs(dirs)
+	return dirs
 }

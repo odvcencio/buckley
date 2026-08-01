@@ -350,6 +350,13 @@ func (r *Registry) buildToolRegistry(sessionID string, project string) *tool.Reg
 	if err := tools.LoadDefaultPlugins(); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to load some plugins: %v\n", err)
 	}
+	if hookCloser, hookErr := tools.EnableConfiguredHooks(r.config != nil && r.config.Hooks.Enabled); hookErr != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to start plugin hooks: %v\n", hookErr)
+	} else if hookCloser != nil {
+		// Hook processes are children reading stdin; they exit with this
+		// process, so process-lifetime ownership is the designed cleanup.
+		_ = hookCloser
+	}
 	if strings.TrimSpace(project) != "" {
 		tools.SetWorkDir(project)
 	}
