@@ -298,10 +298,14 @@ const (
 )
 
 // --- Buckley Machine Extensions ---
-// These extend the ACP protocol with machine-specific operations
-// for coordinating parallel agents and modality switching.
+// These extend the ACP protocol with machine-specific operations for
+// coordinating parallel agents and modality switching. Per the ACP
+// extensibility convention, every custom method is prefixed with an
+// underscore so it cannot collide with a future spec method, and none of
+// these events ride the standard "sessionUpdate" union -- see
+// MachineNotifyParams and the "_machine/notify" notification below.
 
-// SpawnAgentParams is the request body for "machine/spawn_agent".
+// SpawnAgentParams is the request body for "_machine/spawn_agent".
 type SpawnAgentParams struct {
 	SessionID string `json:"sessionId"`
 	Task      string `json:"task"`
@@ -310,22 +314,22 @@ type SpawnAgentParams struct {
 	Spec      string `json:"spec,omitempty"` // ralph spec text
 }
 
-// SpawnAgentResult is the response for "machine/spawn_agent".
+// SpawnAgentResult is the response for "_machine/spawn_agent".
 type SpawnAgentResult struct {
 	AgentID string `json:"agentId"`
 }
 
-// SteerAgentParams is the request body for "machine/steer_agent".
+// SteerAgentParams is the request body for "_machine/steer_agent".
 type SteerAgentParams struct {
 	SessionID string `json:"sessionId"`
 	AgentID   string `json:"agentId"`
 	Content   string `json:"content"`
 }
 
-// SteerAgentResult is the response for "machine/steer_agent".
+// SteerAgentResult is the response for "_machine/steer_agent".
 type SteerAgentResult struct{}
 
-// ListAgentsParams is the request body for "machine/list_agents".
+// ListAgentsParams is the request body for "_machine/list_agents".
 type ListAgentsParams struct {
 	SessionID string `json:"sessionId"`
 }
@@ -338,27 +342,40 @@ type AgentInfo struct {
 	ParentID string `json:"parentId,omitempty"`
 }
 
-// ListAgentsResult is the response for "machine/list_agents".
+// ListAgentsResult is the response for "_machine/list_agents".
 type ListAgentsResult struct {
 	Agents []AgentInfo `json:"agents"`
 }
 
-// EscalateModeParams is the request body for "machine/escalate_mode".
+// EscalateModeParams is the request body for "_machine/escalate_mode".
 type EscalateModeParams struct {
 	SessionID string `json:"sessionId"`
 	AgentID   string `json:"agentId"`
 	Modality  string `json:"modality"` // target modality
 }
 
-// EscalateModeResult is the response for "machine/escalate_mode".
+// EscalateModeResult is the response for "_machine/escalate_mode".
 type EscalateModeResult struct {
 	PreviousModality string `json:"previousModality"`
 	NewModality      string `json:"newModality"`
 }
 
-// Machine event notification types for session/update.
+// Machine event kinds delivered via "_machine/notify" notifications. These
+// used to ride the standard "sessionUpdate" union as custom tags
+// (machine_state/machine_lock/machine_agent), which broke serde-strict
+// clients that reject an unrecognized sessionUpdate discriminator. They are
+// now a distinct, non-spec notification method instead.
 const (
-	SessionUpdateMachineState = "machine_state"
-	SessionUpdateMachineLock  = "machine_lock"
-	SessionUpdateMachineAgent = "machine_agent"
+	MachineEventState = "machine_state"
+	MachineEventLock  = "machine_lock"
+	MachineEventAgent = "machine_agent"
 )
+
+// MachineNotifyParams is the payload for a "_machine/notify" notification:
+// Buckley's out-of-band channel for agent-swarm telemetry (spawn/state/lock
+// events) that has no equivalent in the ACP session/update union.
+type MachineNotifyParams struct {
+	SessionID string         `json:"sessionId"`
+	Kind      string         `json:"kind"` // one of the MachineEvent* constants
+	Payload   map[string]any `json:"payload,omitempty"`
+}

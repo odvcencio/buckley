@@ -18,7 +18,7 @@ type MachineHandlers struct {
 	OnEscalateMode func(ctx context.Context, params *EscalateModeParams) (*EscalateModeResult, error)
 }
 
-// handleMachineSpawnAgent handles "machine/spawn_agent".
+// handleMachineSpawnAgent handles "_machine/spawn_agent".
 func (a *Agent) handleMachineSpawnAgent(ctx context.Context, req *Request) {
 	params, err := ParseParams[SpawnAgentParams](req)
 	if err != nil {
@@ -40,7 +40,7 @@ func (a *Agent) handleMachineSpawnAgent(ctx context.Context, req *Request) {
 	_ = a.transport.SendResponse(req.ID, result)
 }
 
-// handleMachineSteerAgent handles "machine/steer_agent".
+// handleMachineSteerAgent handles "_machine/steer_agent".
 func (a *Agent) handleMachineSteerAgent(ctx context.Context, req *Request) {
 	params, err := ParseParams[SteerAgentParams](req)
 	if err != nil {
@@ -61,7 +61,7 @@ func (a *Agent) handleMachineSteerAgent(ctx context.Context, req *Request) {
 	_ = a.transport.SendResponse(req.ID, SteerAgentResult{})
 }
 
-// handleMachineListAgents handles "machine/list_agents".
+// handleMachineListAgents handles "_machine/list_agents".
 func (a *Agent) handleMachineListAgents(ctx context.Context, req *Request) {
 	params, err := ParseParams[ListAgentsParams](req)
 	if err != nil {
@@ -83,7 +83,7 @@ func (a *Agent) handleMachineListAgents(ctx context.Context, req *Request) {
 	_ = a.transport.SendResponse(req.ID, result)
 }
 
-// handleMachineEscalateMode handles "machine/escalate_mode".
+// handleMachineEscalateMode handles "_machine/escalate_mode".
 func (a *Agent) handleMachineEscalateMode(ctx context.Context, req *Request) {
 	params, err := ParseParams[EscalateModeParams](req)
 	if err != nil {

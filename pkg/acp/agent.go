@@ -138,15 +138,15 @@ func (a *Agent) handleRequest(ctx context.Context, req *Request) {
 		a.handleSessionSetMode(ctx, req)
 	case "session/cancel":
 		a.handleSessionCancel(ctx, req)
-	case "shutdown":
+	case "_shutdown":
 		a.handleShutdown(ctx, req)
-	case "machine/spawn_agent":
+	case "_machine/spawn_agent":
 		a.handleMachineSpawnAgent(ctx, req)
-	case "machine/steer_agent":
+	case "_machine/steer_agent":
 		a.handleMachineSteerAgent(ctx, req)
-	case "machine/list_agents":
+	case "_machine/list_agents":
 		a.handleMachineListAgents(ctx, req)
-	case "machine/escalate_mode":
+	case "_machine/escalate_mode":
 		a.handleMachineEscalateMode(ctx, req)
 	default:
 		if !IsNotification(req) {

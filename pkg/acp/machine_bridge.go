@@ -7,8 +7,9 @@ import (
 	"m31labs.dev/buckley/v2/pkg/telemetry"
 )
 
-// MachineBridge subscribes to the telemetry Hub and translates machine events
-// into ACP session/update notifications sent via the Agent's transport.
+// MachineBridge subscribes to the telemetry Hub and translates machine
+// events into "_machine/notify" notifications sent via the Agent's
+// transport.
 type MachineBridge struct {
 	agent     *Agent
 	sessionID string
@@ -26,7 +27,7 @@ type MachineBridge struct {
 }
 
 // NewMachineBridge creates a bridge that forwards machine events from the Hub
-// to the ACP client as session/update notifications. allowFullPayloads must
+// to the ACP client as "_machine/notify" notifications. allowFullPayloads must
 // be false unless the operator has explicitly opted in to full tool
 // arguments/results leaving the process over this transport.
 func NewMachineBridge(agent *Agent, hub *telemetry.Hub, sessionID string, allowFullPayloads bool) *MachineBridge {
@@ -70,19 +71,19 @@ func (b *MachineBridge) run(ch <-chan telemetry.Event) {
 		}
 
 		evt = b.prepareEvent(evt)
-		update, ok := b.translate(evt)
+		notif, ok := b.translate(evt)
 		if !ok {
 			continue
 		}
+		notif.SessionID = b.sessionID
 
 		if b.agent.transport != nil {
 			// Notification errors are intentionally ignored: the bridge is
 			// best-effort and a send failure (e.g. closed transport) should
-			// not stop event processing for other subscribers.
-			_ = b.agent.transport.SendNotification("session/update", SessionUpdateNotification{
-				SessionID: b.sessionID,
-				Update:    update,
-			})
+			// not stop event processing for other subscribers. This is a
+			// non-spec extension, so it rides "_machine/notify" -- never
+			// the standard "session/update" sessionUpdate union.
+			_ = b.agent.transport.SendNotification("_machine/notify", notif)
 		}
 	}
 }
@@ -98,12 +99,12 @@ func (b *MachineBridge) prepareEvent(evt telemetry.Event) telemetry.Event {
 	return evt
 }
 
-func (b *MachineBridge) translate(evt telemetry.Event) (SessionUpdate, bool) {
+func (b *MachineBridge) translate(evt telemetry.Event) (MachineNotifyParams, bool) {
 	switch evt.Type {
 	case telemetry.EventMachineSpawned:
-		return SessionUpdate{
-			SessionUpdate: SessionUpdateMachineAgent,
-			Content: map[string]any{
+		return MachineNotifyParams{
+			Kind: MachineEventAgent,
+			Payload: map[string]any{
 				"event":    "spawned",
 				"agentId":  dataStr(evt.Data, "agent_id"),
 				"modality": dataStr(evt.Data, "modality"),
@@ -112,9 +113,9 @@ func (b *MachineBridge) translate(evt telemetry.Event) (SessionUpdate, bool) {
 		}, true
 
 	case telemetry.EventMachineState:
-		return SessionUpdate{
-			SessionUpdate: SessionUpdateMachineState,
-			Content: map[string]any{
+		return MachineNotifyParams{
+			Kind: MachineEventState,
+			Payload: map[string]any{
 				"agentId": dataStr(evt.Data, "agent_id"),
 				"from":    dataStr(evt.Data, "from"),
 				"to":      dataStr(evt.Data, "to"),
@@ -122,9 +123,9 @@ func (b *MachineBridge) translate(evt telemetry.Event) (SessionUpdate, bool) {
 		}, true
 
 	case telemetry.EventMachineCompleted:
-		return SessionUpdate{
-			SessionUpdate: SessionUpdateMachineAgent,
-			Content: map[string]any{
+		return MachineNotifyParams{
+			Kind: MachineEventAgent,
+			Payload: map[string]any{
 				"event":      "completed",
 				"agentId":    dataStr(evt.Data, "agent_id"),
 				"tokensUsed": evt.Data["tokens_used"],
@@ -132,9 +133,9 @@ func (b *MachineBridge) translate(evt telemetry.Event) (SessionUpdate, bool) {
 		}, true
 
 	case telemetry.EventMachineFailed:
-		return SessionUpdate{
-			SessionUpdate: SessionUpdateMachineAgent,
-			Content: map[string]any{
+		return MachineNotifyParams{
+			Kind: MachineEventAgent,
+			Payload: map[string]any{
 				"event":   "failed",
 				"agentId": dataStr(evt.Data, "agent_id"),
 				"error":   dataStr(evt.Data, "error"),
@@ -142,9 +143,9 @@ func (b *MachineBridge) translate(evt telemetry.Event) (SessionUpdate, bool) {
 		}, true
 
 	case telemetry.EventMachineLockAcquired:
-		return SessionUpdate{
-			SessionUpdate: SessionUpdateMachineLock,
-			Content: map[string]any{
+		return MachineNotifyParams{
+			Kind: MachineEventLock,
+			Payload: map[string]any{
 				"event":   "acquired",
 				"agentId": dataStr(evt.Data, "agent_id"),
 				"path":    dataStr(evt.Data, "path"),
@@ -153,9 +154,9 @@ func (b *MachineBridge) translate(evt telemetry.Event) (SessionUpdate, bool) {
 		}, true
 
 	case telemetry.EventMachineLockReleased:
-		return SessionUpdate{
-			SessionUpdate: SessionUpdateMachineLock,
-			Content: map[string]any{
+		return MachineNotifyParams{
+			Kind: MachineEventLock,
+			Payload: map[string]any{
 				"event":   "released",
 				"agentId": dataStr(evt.Data, "agent_id"),
 				"path":    dataStr(evt.Data, "path"),
@@ -163,9 +164,9 @@ func (b *MachineBridge) translate(evt telemetry.Event) (SessionUpdate, bool) {
 		}, true
 
 	case telemetry.EventMachineLockWaiting:
-		return SessionUpdate{
-			SessionUpdate: SessionUpdateMachineLock,
-			Content: map[string]any{
+		return MachineNotifyParams{
+			Kind: MachineEventLock,
+			Payload: map[string]any{
 				"event":   "waiting",
 				"agentId": dataStr(evt.Data, "agent_id"),
 				"path":    dataStr(evt.Data, "path"),
@@ -174,7 +175,7 @@ func (b *MachineBridge) translate(evt telemetry.Event) (SessionUpdate, bool) {
 		}, true
 
 	default:
-		return SessionUpdate{}, false
+		return MachineNotifyParams{}, false
 	}
 }
 
