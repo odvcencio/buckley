@@ -53,6 +53,10 @@ Segment selection:
 - Summarize oldest non-system messages
 - Keep recent messages intact for continuity
 
+Request projection uses the provider's exact token estimate to find the
+largest compacted history that fits the request budget. This avoids leaving
+usable context empty after a coarse compaction retry.
+
 ## Consequences
 
 ### Positive
