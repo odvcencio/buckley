@@ -176,6 +176,10 @@ func (c *Config) Validate() error {
 		}
 	}
 
+	if err := c.MCP.Validate(); err != nil {
+		return err
+	}
+
 	// Validate max compactions
 	if c.Memory.MaxCompactions < 0 {
 		return fmt.Errorf("max compactions must be >= 0, got %d", c.Memory.MaxCompactions)
