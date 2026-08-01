@@ -170,7 +170,7 @@ func TestRunSessionCommand_UnknownSubcommand(t *testing.T) {
 }
 
 func TestRenderSessionExportMarkdownEmptyRoleDoesNotPanic(t *testing.T) {
-	doc := sessionExportDocument{Messages: []sessionExportMessage{{Role: "", Content: "orphan"}}}
+	doc := SessionExportDocument{Messages: []SessionExportMessage{{Role: "", Content: "orphan"}}}
 	out := renderSessionExportMarkdown(doc)
 	if !strings.Contains(out, "Message") || !strings.Contains(out, "orphan") {
 		t.Fatalf("empty-role message not rendered safely: %q", out)
