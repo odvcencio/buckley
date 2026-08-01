@@ -698,6 +698,7 @@ func printHelp() {
 	fmt.Println("  db backup --out <path>           Create a consistent SQLite backup (VACUUM INTO)")
 	fmt.Println("  db restore --in <path> --force   Restore SQLite backup (stop Buckley first)")
 	fmt.Println("  resume <session-id>              Resume a previous session")
+	fmt.Println("  session export <session-id>      Export a session transcript (--format json|markdown)")
 	fmt.Println()
 	fmt.Println("FLAGS:")
 	fmt.Println("  -p <prompt>                      Run prompt in one-shot mode")
@@ -1314,6 +1315,8 @@ func dispatchSubcommand(args []string) (bool, int) {
 		return true, runCommand(runWorktreeCommand, args[1:])
 	case "resume":
 		return false, 0
+	case "session":
+		return true, runCommand(runSessionCommand, args[1:])
 	case "agent-server":
 		return true, runCommand(runAgentServerCommand, args[1:])
 	case "lsp":
