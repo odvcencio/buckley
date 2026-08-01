@@ -14,6 +14,7 @@ import (
 	"github.com/oklog/ulid/v2"
 
 	"m31labs.dev/buckley/v2/pkg/agent"
+	"m31labs.dev/buckley/v2/pkg/agentloop"
 	"m31labs.dev/buckley/v2/pkg/approval"
 	"m31labs.dev/buckley/v2/pkg/config"
 	projectcontext "m31labs.dev/buckley/v2/pkg/context"
@@ -132,6 +133,11 @@ func (e *experimentExecutor) buildRegistry(task *parallel.AgentTask, wtPath stri
 	return registry
 }
 
+// runConversation drives one experiment run's turn loop through the shared
+// turn engine (pkg/agentloop.Controller), closing the gap where this loop
+// sent the raw, unprojected transcript to the model on every round: the
+// engine's projection step now bounds every request the same way the other
+// migrated callers' requests are bounded.
 func (e *experimentExecutor) runConversation(ctx context.Context, modelID string, registry *tool.Registry, prompt string, systemOverride string, temperatureRaw string, maxTokensRaw string) (string, runMetrics, []string, error) {
 	metrics := runMetrics{}
 	filesTouched := map[string]struct{}{}
@@ -162,8 +168,9 @@ func (e *experimentExecutor) runConversation(ctx context.Context, modelID string
 		toolChoice = "auto"
 	}
 
-	maxIterations := 10
-	for iter := 0; iter < maxIterations; iter++ {
+	const maxIterations = 10
+
+	buildRequest := func(ctx context.Context, round int) (model.ChatRequest, error) {
 		req := model.ChatRequest{
 			Model:       modelID,
 			Messages:    messages,
@@ -180,54 +187,46 @@ func (e *experimentExecutor) runConversation(ctx context.Context, modelID string
 		if reasoning := strings.TrimSpace(e.config.Models.Reasoning); reasoning != "" && e.modelManager.SupportsReasoning(modelID) {
 			req.Reasoning = &model.ReasoningConfig{Effort: reasoning}
 		}
+		return req, nil
+	}
 
+	callModel := agentloop.ModelCallerFunc(func(ctx context.Context, req model.ChatRequest, useContinuation bool) (*model.ChatResponse, error) {
 		resp, err := e.modelManager.ChatCompletion(ctx, req)
 		if err != nil {
-			return "", metrics, collectFiles(filesTouched), err
+			return nil, err
 		}
-		if len(resp.Choices) == 0 {
-			return "", metrics, collectFiles(filesTouched), fmt.Errorf("no response choices")
+		if resp == nil || len(resp.Choices) == 0 {
+			return resp, nil
 		}
 		metrics.promptTokens += resp.Usage.PromptTokens
 		metrics.completionTokens += resp.Usage.CompletionTokens
 		totalTokens := metrics.promptTokens + metrics.completionTokens
 		if maxTokens > 0 && totalTokens > maxTokens {
-			return "", metrics, collectFiles(filesTouched), fmt.Errorf("max tokens per run exceeded (%d > %d)", totalTokens, maxTokens)
+			return nil, fmt.Errorf("max tokens per run exceeded (%d > %d)", totalTokens, maxTokens)
 		}
 		if maxCost > 0 {
-			cost, err := e.modelManager.CalculateCostFromTokens(modelID, resp.Usage.PromptTokens, resp.Usage.CompletionTokens)
-			if err != nil {
-				return "", metrics, collectFiles(filesTouched), fmt.Errorf("cost tracking unavailable for model %s: %w", modelID, err)
+			cost, costErr := e.modelManager.CalculateCostFromTokens(modelID, resp.Usage.PromptTokens, resp.Usage.CompletionTokens)
+			if costErr != nil {
+				return nil, fmt.Errorf("cost tracking unavailable for model %s: %w", modelID, costErr)
 			}
 			metrics.totalCost += cost
 			if metrics.totalCost > maxCost {
-				return "", metrics, collectFiles(filesTouched), fmt.Errorf("max cost per run exceeded (%.4f > %.4f)", metrics.totalCost, maxCost)
+				return nil, fmt.Errorf("max cost per run exceeded (%.4f > %.4f)", metrics.totalCost, maxCost)
 			}
 		}
+		return resp, nil
+	})
 
-		choice := resp.Choices[0]
-		if len(choice.Message.ToolCalls) == 0 {
-			text, err := model.ExtractTextContent(choice.Message.Content)
-			if err != nil {
-				return "", metrics, collectFiles(filesTouched), err
-			}
-			return text, metrics, collectFiles(filesTouched), nil
-		}
-
-		for i := range choice.Message.ToolCalls {
-			if choice.Message.ToolCalls[i].ID == "" {
-				choice.Message.ToolCalls[i].ID = fmt.Sprintf("tool-%d", i+1)
-			}
-		}
-		messages = append(messages, choice.Message)
-
-		for _, tc := range choice.Message.ToolCalls {
+	dispatchTools := agentloop.ToolDispatcherFunc(func(ctx context.Context, calls []model.ToolCall) ([]agentloop.ToolOutcome, error) {
+		outcomes := make([]agentloop.ToolOutcome, 0, len(calls))
+		for _, tc := range calls {
 			metrics.toolCalls++
 			payload, filePath, err := executeToolCall(ctx, registry, codec, tc)
-			if err != nil {
-				metrics.toolFailures++
-			} else {
+			success := err == nil
+			if success {
 				metrics.toolSuccesses++
+			} else {
+				metrics.toolFailures++
 			}
 			if filePath != "" {
 				filesTouched[filePath] = struct{}{}
@@ -235,16 +234,58 @@ func (e *experimentExecutor) runConversation(ctx context.Context, modelID string
 			if err != nil {
 				payload = fmt.Sprintf("Error: %v", err)
 			}
-			messages = append(messages, model.Message{
-				Role:       "tool",
-				Content:    payload,
-				ToolCallID: tc.ID,
-				Name:       tc.Function.Name,
-			})
+			outcomes = append(outcomes, agentloop.ToolOutcome{Content: payload, Success: success})
 		}
+		return outcomes, nil
+	})
+
+	history := agentloop.HistorySinkFunc(func(msg model.Message) {
+		messages = append(messages, msg)
+	})
+
+	// This loop never had stagnation detection, only the flat maxIterations
+	// ceiling: raise every repeat/cycle threshold above maxIterations so the
+	// Governor's round limit is the only thing that can stop it early.
+	governor := agentloop.New(agentloop.Config{
+		MaxRounds:          maxIterations,
+		MaxToolCalls:       maxIterations * 8,
+		ExactRepeatLimit:   maxIterations + 1,
+		OutcomeRepeatLimit: maxIterations + 1,
+		CycleMaxLength:     1,
+		CycleRepeats:       maxIterations + 1,
+	})
+
+	controller, err := agentloop.NewController(agentloop.ControllerConfig{
+		Governor:      governor,
+		BuildRequest:  buildRequest,
+		CallModel:     callModel,
+		DispatchTools: dispatchTools,
+		History:       history,
+		ContextWindow: func(modelID string) int {
+			window, _ := e.modelManager.GetContextLength(modelID)
+			return window
+		},
+	})
+	if err != nil {
+		return "", metrics, collectFiles(filesTouched), err
 	}
 
-	return "", metrics, collectFiles(filesTouched), fmt.Errorf("max tool iterations exceeded")
+	result, err := controller.Run(ctx)
+	if err != nil {
+		return "", metrics, collectFiles(filesTouched), err
+	}
+	if result.FinishReason == agentloop.FinishReasonEmptyChoices {
+		return "", metrics, collectFiles(filesTouched), fmt.Errorf("no response choices")
+	}
+	if result.FinishReason == agentloop.FinishReasonLoopGuard || result.FinishReason == agentloop.FinishReasonStepCap {
+		return "", metrics, collectFiles(filesTouched), fmt.Errorf("max tool iterations exceeded")
+	}
+
+	text, err := model.ExtractTextContent(result.Message.Content)
+	if err != nil {
+		return "", metrics, collectFiles(filesTouched), err
+	}
+	return text, metrics, collectFiles(filesTouched), nil
 }
 
 func executeToolCall(ctx context.Context, registry *tool.Registry, codec *toon.Codec, call model.ToolCall) (string, string, error) {
