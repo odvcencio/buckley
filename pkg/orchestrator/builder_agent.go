@@ -11,9 +11,9 @@ import (
 	"sync"
 	"time"
 
+	"m31labs.dev/buckley/v2/pkg/agentloop"
 	"m31labs.dev/buckley/v2/pkg/artifact"
 	"m31labs.dev/buckley/v2/pkg/config"
-	"m31labs.dev/buckley/v2/pkg/conversation"
 	"m31labs.dev/buckley/v2/pkg/encoding/toon"
 	"m31labs.dev/buckley/v2/pkg/model"
 	"m31labs.dev/buckley/v2/pkg/paths"
@@ -350,9 +350,13 @@ func (a *BuilderAgent) generateImplementation(task *Task) (string, error) {
 	return a.generateWithTools(req, task)
 }
 
+// generateWithTools drives the builder's model-and-tool turn loop through
+// the shared turn engine (pkg/agentloop.Controller), which now owns request
+// projection (replacing the direct conversation.CompactModelMessagesForRequest
+// call), tool-call ID backfill, and the round/repeat guard.
 func (a *BuilderAgent) generateWithTools(req model.ChatRequest, task *Task) (string, error) {
 	ctx := context.Background()
-	maxIterations := 10 // Prevent infinite loops
+	const maxIterations = 10 // Prevent infinite loops
 	messages := req.Messages
 	if req.SessionID == "" {
 		req.SessionID = fmt.Sprintf("builder-%d", time.Now().UnixNano())
@@ -381,83 +385,111 @@ func (a *BuilderAgent) generateWithTools(req model.ChatRequest, task *Task) (str
 		}
 	}
 
-	for iter := 0; iter < maxIterations; iter++ {
+	buildRequest := func(ctx context.Context, round int) (model.ChatRequest, error) {
 		var allowedTools []string
 		if skillState != nil {
 			allowedTools = skillState.ToolFilter()
 		}
 
+		roundReq := req
 		if a.toolRegistry != nil {
 			tools := a.toolRegistry.ToOpenAIFunctionsFiltered(allowedTools)
 			if len(tools) > 0 {
-				req.Tools = tools
-				req.ToolChoice = "auto"
+				roundReq.Tools = tools
+				roundReq.ToolChoice = "auto"
 			} else {
-				req.Tools = nil
-				req.ToolChoice = "none"
+				roundReq.Tools = nil
+				roundReq.ToolChoice = "none"
 			}
 		}
+		roundReq.Messages = messages
+		return roundReq, nil
+	}
 
-		// Update request with current messages
-		req.Messages = conversation.CompactModelMessagesForRequest(messages, req, contextWindow)
-
-		// Call model
-		resp, err := a.modelClient.ChatCompletion(ctx, req)
-		if err != nil {
-			if a.toolRegistry != nil && isToolUnsupportedError(err) {
-				req.Tools = nil
-				req.ToolChoice = "none"
-				continue
+	callModel := agentloop.ModelCallerFunc(func(ctx context.Context, chatReq model.ChatRequest, useContinuation bool) (*model.ChatResponse, error) {
+		resp, err := a.modelClient.ChatCompletion(ctx, chatReq)
+		if err == nil {
+			return resp, nil
+		}
+		if a.toolRegistry != nil && isToolUnsupportedError(err) {
+			// The model rejected the tool schema outright: retry this round
+			// once with tools off instead of failing the turn.
+			retryReq := chatReq
+			retryReq.Tools = nil
+			retryReq.ToolChoice = "none"
+			resp, err = a.modelClient.ChatCompletion(ctx, retryReq)
+			if err != nil {
+				return nil, fmt.Errorf("model call failed: %w", err)
 			}
-			return "", fmt.Errorf("model call failed: %w", err)
+			return resp, nil
 		}
-		if len(resp.Choices) == 0 {
-			return "", fmt.Errorf("no response choices from model")
-		}
+		return nil, fmt.Errorf("model call failed: %w", err)
+	})
 
-		choice := resp.Choices[0]
-
-		// If no tool calls, we're done
-		if len(choice.Message.ToolCalls) == 0 {
-			return model.ExtractTextContent(choice.Message.Content)
+	dispatchTools := agentloop.ToolDispatcherFunc(func(ctx context.Context, calls []model.ToolCall) ([]agentloop.ToolOutcome, error) {
+		var allowedTools []string
+		if skillState != nil {
+			allowedTools = skillState.ToolFilter()
 		}
 
-		// Add assistant message with tool calls
-		for i := range choice.Message.ToolCalls {
-			if choice.Message.ToolCalls[i].ID == "" {
-				choice.Message.ToolCalls[i].ID = fmt.Sprintf("tool-%d", i+1)
-			}
-		}
-		messages = append(messages, choice.Message)
-
-		// Execute each tool call
-		for _, tc := range choice.Message.ToolCalls {
+		outcomes := make([]agentloop.ToolOutcome, 0, len(calls))
+		for _, tc := range calls {
 			if !tool.IsToolAllowed(tc.Function.Name, allowedTools) {
-				result := fmt.Sprintf("Error: tool %s not allowed by active skills", tc.Function.Name)
-				messages = append(messages, model.Message{
-					Role:       "tool",
-					Content:    result,
-					ToolCallID: tc.ID,
-					Name:       tc.Function.Name,
+				outcomes = append(outcomes, agentloop.ToolOutcome{
+					Content: fmt.Sprintf("Error: tool %s not allowed by active skills", tc.Function.Name),
+					Success: false,
 				})
 				continue
 			}
 			result, err := a.executeToolCall(tc, task)
+			success := err == nil
 			if err != nil {
 				result = fmt.Sprintf("Error: %v", err)
 			}
-
-			// Add tool response message
-			messages = append(messages, model.Message{
-				Role:       "tool",
-				Content:    result,
-				ToolCallID: tc.ID,
-				Name:       tc.Function.Name,
-			})
+			outcomes = append(outcomes, agentloop.ToolOutcome{Content: result, Success: success})
 		}
+		return outcomes, nil
+	})
+
+	history := agentloop.HistorySinkFunc(func(msg model.Message) {
+		messages = append(messages, msg)
+	})
+
+	// This loop never had stagnation detection, only the flat maxIterations
+	// ceiling: raise every repeat/cycle threshold above maxIterations so the
+	// Governor's round limit is the only thing that can stop it early.
+	governor := agentloop.New(agentloop.Config{
+		MaxRounds:          maxIterations,
+		MaxToolCalls:       maxIterations * 8,
+		ExactRepeatLimit:   maxIterations + 1,
+		OutcomeRepeatLimit: maxIterations + 1,
+		CycleMaxLength:     1,
+		CycleRepeats:       maxIterations + 1,
+	})
+
+	controller, err := agentloop.NewController(agentloop.ControllerConfig{
+		Governor:      governor,
+		BuildRequest:  buildRequest,
+		CallModel:     callModel,
+		DispatchTools: dispatchTools,
+		History:       history,
+		ContextWindow: func(modelID string) int { return contextWindow },
+	})
+	if err != nil {
+		return "", err
 	}
 
-	return "", fmt.Errorf("max tool calling iterations (%d) exceeded", maxIterations)
+	result, err := controller.Run(ctx)
+	if err != nil {
+		return "", err
+	}
+	if result.FinishReason == agentloop.FinishReasonEmptyChoices {
+		return "", fmt.Errorf("no response choices from model")
+	}
+	if result.FinishReason == agentloop.FinishReasonLoopGuard || result.FinishReason == agentloop.FinishReasonStepCap {
+		return "", fmt.Errorf("max tool calling iterations (%d) exceeded", maxIterations)
+	}
+	return model.ExtractTextContent(result.Message.Content)
 }
 
 func (a *BuilderAgent) executeToolCall(tc model.ToolCall, task *Task) (string, error) {
