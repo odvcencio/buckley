@@ -254,12 +254,7 @@ func (r *Runner) finalizeNonToolResponse(msg model.Message, result *Result) erro
 // stop is true, result.Content/FinishReason are already set and
 // OnComplete has already fired, matching the original inline behavior.
 func (r *Runner) runToolDispatchPhase(ctx context.Context, msg model.Message, messages []model.Message, tools []tool.Tool, result *Result, deduper *toolResultDeduper, governor *agentloop.Governor) (updatedMessages []model.Message, stop bool, err error) {
-	toolCalls := msg.ToolCalls
-	for i := range toolCalls {
-		if toolCalls[i].ID == "" {
-			toolCalls[i].ID = fmt.Sprintf("tool-%d", i+1)
-		}
-	}
+	toolCalls := agentloop.BackfillToolCallIDs(msg.ToolCalls)
 
 	messages = append(messages, model.Message{
 		Role:      "assistant",

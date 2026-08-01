@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"m31labs.dev/buckley/v2/pkg/agentloop"
 	"m31labs.dev/buckley/v2/pkg/config"
 	projectcontext "m31labs.dev/buckley/v2/pkg/context"
 	"m31labs.dev/buckley/v2/pkg/conversation"
@@ -139,6 +140,12 @@ type Runner struct {
 	// continuation lazily holds this session's provider continuation cursor
 	// (decision 0001), behind the models.provider_continuation flag.
 	continuation *model.ContinuationCoordinator
+
+	// usage accumulates model.Usage across every round of every turn this
+	// session has run, closing the gap where each round's usage was
+	// published as telemetry but never summed anywhere (the shared turn
+	// engine, pkg/agentloop, now owns that accumulation per turn).
+	usage model.Usage
 
 	state               RunnerState
 	lastActive          time.Time
@@ -350,6 +357,18 @@ func (r *Runner) Model() string {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return strings.TrimSpace(r.modelOverride)
+}
+
+// Usage returns the token usage accumulated across every turn this session
+// has run so far (model.AddUsage applied per round by the shared turn
+// engine, pkg/agentloop.Controller).
+func (r *Runner) Usage() model.Usage {
+	if r == nil {
+		return model.Usage{}
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.usage
 }
 
 // PendingApproval returns any pending approval, or nil.
@@ -603,6 +622,13 @@ func (r *Runner) processUserInput(content string) error {
 	return r.runConversationLoop()
 }
 
+// runConversationLoop drives one turn -- one or more model rounds until the
+// model stops requesting tools -- through the shared turn engine
+// (pkg/agentloop.Controller). It preserves the exact continuation wiring,
+// posture/permission integration, and danger checks handleToolCalls and
+// buildChatRequest already had (both stay directly callable and directly
+// tested); the engine only owns the round loop, projection, ID backfill,
+// usage accumulation, and the loop guard around them.
 func (r *Runner) runConversationLoop() error {
 	ctx, cancel := context.WithCancel(context.Background())
 	r.mu.Lock()
@@ -615,70 +641,97 @@ func (r *Runner) runConversationLoop() error {
 		r.mu.Unlock()
 	}()
 
-	for {
-		if r.State() == StateStopped || r.State() == StatePaused {
-			break
-		}
-
-		// Build request
-		req, useContinuation := r.buildChatRequest()
-
-		// Call model
-		response, err := r.callModel(ctx, req, useContinuation)
-		if err != nil {
-			if errors.Is(err, context.Canceled) {
-				return err
-			}
-			r.emitError("model call failed", err)
-			return err
-		}
-
-		// Extract message from response
-		if len(response.Choices) == 0 {
-			r.emit(RunnerEvent{
-				Type:      EventWarning,
-				SessionID: r.sessionID,
-				Timestamp: time.Now(),
-				Data:      map[string]any{"message": "Model returned empty response - ending conversation"},
-			})
-			break
-		}
-		msg := response.Choices[0].Message
-		content := getMessageContent(msg.Content)
-		reasoning := msg.Reasoning
-
-		// Check for tool calls
-		if len(msg.ToolCalls) > 0 {
-			if err := r.handleToolCalls(ctx, msg); err != nil {
-				if err == context.Canceled {
-					return nil
-				}
-				return err
-			}
-			continue // Loop back for next model call
-		}
-
-		// Regular text response - add to conversation and finish
-		if content != "" {
-			r.conv.AddAssistantMessageWithReasoningDetails(content, reasoning, msg.ReasoningDetails)
-			assistantMsg := r.conv.Messages[len(r.conv.Messages)-1]
-			if err := r.conv.SaveMessage(r.store, assistantMsg); err != nil {
-				r.emitError("failed to save assistant message", err)
-			}
-		} else {
-			// No content and no tool calls - unusual, emit warning
-			r.emit(RunnerEvent{
-				Type:      EventWarning,
-				SessionID: r.sessionID,
-				Timestamp: time.Now(),
-				Data:      map[string]any{"message": "Model returned no content and no tool calls - ending conversation"},
-			})
-		}
-
-		break // No tool calls, conversation complete
+	if r.State() == StateStopped || r.State() == StatePaused {
+		return nil
 	}
 
+	controller, err := r.newTurnController()
+	if err != nil {
+		r.emitError("failed to build turn controller", err)
+		return err
+	}
+
+	result, err := controller.Run(ctx)
+	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			return err
+		}
+		r.emitError("model call failed", err)
+		return err
+	}
+
+	r.mu.Lock()
+	r.usage = model.AddUsage(r.usage, result.Usage)
+	r.mu.Unlock()
+
+	switch result.FinishReason {
+	case agentloop.FinishReasonEmptyChoices:
+		r.emit(RunnerEvent{
+			Type:      EventWarning,
+			SessionID: r.sessionID,
+			Timestamp: time.Now(),
+			Data:      map[string]any{"message": "Model returned empty response - ending conversation"},
+		})
+		return nil
+	case agentloop.FinishReasonLoopGuard, agentloop.FinishReasonStepCap:
+		r.persistFinalAssistantMessage(result.Content, "", nil)
+		return nil
+	}
+
+	content := getMessageContent(result.Message.Content)
+	if content != "" {
+		r.persistFinalAssistantMessage(content, result.Message.Reasoning, result.Message.ReasoningDetails)
+		return nil
+	}
+
+	// No content and no tool calls - unusual, emit warning.
+	r.emit(RunnerEvent{
+		Type:      EventWarning,
+		SessionID: r.sessionID,
+		Timestamp: time.Now(),
+		Data:      map[string]any{"message": "Model returned no content and no tool calls - ending conversation"},
+	})
 	return nil
+}
+
+// persistFinalAssistantMessage appends and saves the turn's closing
+// assistant message, exactly as the pre-engine runConversationLoop did for
+// its "regular text response" branch.
+func (r *Runner) persistFinalAssistantMessage(content, reasoning string, reasoningDetails []model.ReasoningDetail) {
+	r.conv.AddAssistantMessageWithReasoningDetails(content, reasoning, reasoningDetails)
+	assistantMsg := r.conv.Messages[len(r.conv.Messages)-1]
+	if err := r.conv.SaveMessage(r.store, assistantMsg); err != nil {
+		r.emitError("failed to save assistant message", err)
+	}
+}
+
+// newTurnController wires the shared turn engine for one conversation turn.
+// A fresh Governor is created per turn (per user message), matching how the
+// pre-engine loop had no cross-turn round budget either.
+func (r *Runner) newTurnController() (*agentloop.Controller, error) {
+	return agentloop.NewController(agentloop.ControllerConfig{
+		Governor: agentloop.New(agentloop.DefaultConfig()),
+		BuildRequest: func(ctx context.Context, round int) (model.ChatRequest, error) {
+			return r.buildRawChatRequest(r.resolveExecutionModel()), nil
+		},
+		CallModel:     agentloop.ModelCallerFunc(r.callModel),
+		DispatchTools: agentloop.ToolDispatcherFunc(r.dispatchToolCalls),
+		ContextWindow: func(modelID string) int {
+			if r.modelManager == nil {
+				return 0
+			}
+			window, _ := r.modelManager.GetContextLength(modelID)
+			return window
+		},
+		Continuation:         r.continuationCoordinator(),
+		ContinuationEligible: r.continuationEligible,
+		ProviderID: func(modelID string) string {
+			if r.modelManager == nil {
+				return ""
+			}
+			return r.modelManager.ProviderIDForModel(modelID)
+		},
+	})
 }
 
 // continuationEligible reports whether this turn should attempt provider
@@ -708,7 +761,11 @@ func (r *Runner) continuationCoordinator() *model.ContinuationCoordinator {
 }
 
 // buildChatRequest builds the next turn's request and reports whether it
-// should be sent through the continuation-aware path.
+// should be sent through the continuation-aware path. It gathers the raw
+// request (buildRawChatRequest) and projects it (agentloop.ProjectForContinuation)
+// itself, sharing the exact continuation-pin and epoch-rule logic
+// pkg/agentloop.Controller uses for its own projection step, so this
+// directly-tested method and the Controller-driven turn loop never diverge.
 func (r *Runner) buildChatRequest() (model.ChatRequest, bool) {
 	modelID := r.resolveExecutionModel()
 
@@ -719,16 +776,33 @@ func (r *Runner) buildChatRequest() (model.ChatRequest, bool) {
 		useContinuation = coordinator != nil
 	}
 
+	req := r.buildRawChatRequest(modelID)
+
+	contextWindow := 0
+	if r.modelManager != nil {
+		contextWindow, _ = r.modelManager.GetContextLength(modelID)
+	}
+	providerID := ""
+	if useContinuation {
+		providerID = r.modelManager.ProviderIDForModel(modelID)
+	}
+	req = agentloop.ProjectForContinuation(req, contextWindow, coordinator, providerID, useContinuation)
+	return req, useContinuation
+}
+
+// buildRawChatRequest gathers modelID, tools, reasoning configuration, and
+// the full unprojected message transcript for one turn. Callers project
+// req.Messages afterward (buildChatRequest above, or Controller.Run's own
+// projection step) -- always using the full portable transcript here:
+// ToEfficientModelMessages's independent compaction pass would otherwise run
+// first -- redundant work always, and unsafe when a continuation window is
+// active because it is pin-unaware and could strip reasoning from the
+// region the window represents.
+func (r *Runner) buildRawChatRequest(modelID string) model.ChatRequest {
 	req := model.ChatRequest{
 		Model:     modelID,
 		SessionID: r.sessionID,
 	}
-	// Always use the full portable transcript here: ProjectModelMessagesForRequestPinned
-	// below does the only compaction pass for this turn.
-	// ToEfficientModelMessages's independent compaction pass would otherwise
-	// run first -- redundant work always, and unsafe when useContinuation is
-	// set because it is pin-unaware and could strip reasoning from the
-	// region a continuation window represents.
 	req.Messages = r.conv.ToModelMessages()
 	if r.tools != nil && r.modelManager != nil && r.modelManager.SupportsTools(modelID) {
 		req.Tools = r.tools.ToOpenAIFunctionsGoverned(r.evaluator, "interactive", "coding", nil, 0)
@@ -743,31 +817,7 @@ func (r *Runner) buildChatRequest() (model.ChatRequest, bool) {
 		include := true
 		req.IncludeReasoning = &include
 	}
-	contextWindow := 0
-	if r.modelManager != nil {
-		contextWindow, _ = r.modelManager.GetContextLength(modelID)
-	}
-
-	pinnedFromIndex := 0
-	if useContinuation {
-		providerID := r.modelManager.ProviderIDForModel(modelID)
-		coordinator.Restore(providerID, modelID, req.Messages)
-		pinnedFromIndex = coordinator.PinnedFromIndex()
-	}
-
-	rawMessages := req.Messages
-	projected, projection := conversation.ProjectModelMessagesForRequestPinned(rawMessages, req, contextWindow, 1, pinnedFromIndex)
-	if pinnedFromIndex > 0 && projection.ProjectedTokens > projection.BudgetTokens {
-		// Epoch rule (decision 0001): projection cannot fit the request
-		// without compacting inside the region the cursor represents. Reset
-		// the cursor deliberately -- one full recompiled request -- so this
-		// is an intentional epoch boundary rather than a fingerprint
-		// mismatch discovered mid-turn.
-		coordinator.Reset()
-		projected, _ = conversation.ProjectModelMessagesForRequestPinned(rawMessages, req, contextWindow, 1, 0)
-	}
-	req.Messages = projected
-	return req, useContinuation
+	return req
 }
 
 // callModel executes one model turn. When useContinuation is set, it calls
@@ -841,11 +891,42 @@ func (r *Runner) callModel(ctx context.Context, req model.ChatRequest, useContin
 	return resp, err
 }
 
+// handleToolCalls appends msg's tool-call turn to the conversation, then
+// dispatches every call (dispatchToolCalls) and appends each result. It is
+// the direct entry point pkg/headless tests exercise; the Controller-driven
+// turn loop (newTurnController) uses dispatchToolCalls too, so both share
+// one implementation of approval, posture/permission gating, audit
+// logging, and danger checks.
 func (r *Runner) handleToolCalls(ctx context.Context, msg model.Message) error {
 	toolCalls := msg.ToolCalls
-	// Add the tool call message to conversation
 	r.conv.AddToolCallMessageWithReasoning(toolCalls, msg.Reasoning, msg.ReasoningDetails)
 	r.persistLatestConversationMessage()
+
+	outcomes, err := r.dispatchToolCalls(ctx, toolCalls)
+	if err != nil {
+		return err
+	}
+	for i, tc := range toolCalls {
+		outcome := agentloop.ToolOutcome{}
+		if i < len(outcomes) {
+			outcome = outcomes[i]
+		}
+		r.conv.AddToolResponseMessage(tc.ID, tc.Function.Name, outcome.Content)
+		r.persistLatestConversationMessage()
+	}
+	return nil
+}
+
+// dispatchToolCalls executes toolCalls in order -- interactive-shell
+// rejection, approval gating, execution, audit logging, and event emission
+// -- and returns one agentloop.ToolOutcome per call. It never touches
+// r.conv: handleToolCalls above and the Controller-driven turn loop both
+// append the returned outcomes to history themselves, so a posture-parked
+// decision or a rejected approval passes straight through to the model as
+// ordinary (non-error) tool content. A non-nil error means ctx was
+// cancelled while waiting on an approval; the caller aborts the turn.
+func (r *Runner) dispatchToolCalls(ctx context.Context, toolCalls []model.ToolCall) ([]agentloop.ToolOutcome, error) {
+	outcomes := make([]agentloop.ToolOutcome, 0, len(toolCalls))
 
 	for _, tc := range toolCalls {
 		decision := "auto"
@@ -874,8 +955,6 @@ func (r *Runner) handleToolCalls(ctx context.Context, msg model.Message) error {
 			if interactive, ok := args["interactive"].(bool); ok && interactive {
 				message := "Tool execution denied: interactive shell sessions are not supported in headless mode"
 				decision = "rejected"
-				r.conv.AddToolResponseMessage(tc.ID, tc.Function.Name, message)
-				r.persistLatestConversationMessage()
 				r.emit(RunnerEvent{
 					Type:      EventToolCallComplete,
 					SessionID: r.sessionID,
@@ -911,6 +990,7 @@ func (r *Runner) handleToolCalls(ctx context.Context, msg model.Message) error {
 						r.emitError("failed to log tool execution", logErr)
 					}
 				}
+				outcomes = append(outcomes, agentloop.ToolOutcome{Content: message, Success: false})
 				continue
 			}
 		}
@@ -920,13 +1000,11 @@ func (r *Runner) handleToolCalls(ctx context.Context, msg model.Message) error {
 		if r.requiresApproval(tc.Function.Name, args) {
 			approved, err := r.waitForApproval(ctx, tc.ID, tc.Function.Name, args)
 			if err != nil {
-				return err
+				return outcomes, err
 			}
 			if !approved {
 				message := "Tool execution rejected by user"
 				decision = "rejected"
-				r.conv.AddToolResponseMessage(tc.ID, tc.Function.Name, message)
-				r.persistLatestConversationMessage()
 				r.emit(RunnerEvent{
 					Type:      EventToolCallComplete,
 					SessionID: r.sessionID,
@@ -955,6 +1033,7 @@ func (r *Runner) handleToolCalls(ctx context.Context, msg model.Message) error {
 						r.emitError("failed to log tool execution", logErr)
 					}
 				}
+				outcomes = append(outcomes, agentloop.ToolOutcome{Content: message, Success: false})
 				continue
 			}
 			decision = "approved"
@@ -983,8 +1062,6 @@ func (r *Runner) handleToolCalls(ctx context.Context, msg model.Message) error {
 			errorResult := fmt.Sprintf("Error: %v", err)
 			auditEntry.ToolOutput = errorResult
 
-			r.conv.AddToolResponseMessage(tc.ID, tc.Function.Name, errorResult)
-			r.persistLatestConversationMessage()
 			r.emit(RunnerEvent{
 				Type:      EventToolCallComplete,
 				SessionID: r.sessionID,
@@ -1001,15 +1078,13 @@ func (r *Runner) handleToolCalls(ctx context.Context, msg model.Message) error {
 			if logErr := r.store.LogToolExecution(auditEntry); logErr != nil {
 				r.emitError("failed to log tool execution", logErr)
 			}
+			outcomes = append(outcomes, agentloop.ToolOutcome{Content: errorResult, Success: false})
 			continue
 		}
 
 		// Format result
 		resultContent := r.formatToolResult(result)
 		auditEntry.ToolOutput = truncateOutput(resultContent, 10000)
-
-		r.conv.AddToolResponseMessage(tc.ID, tc.Function.Name, resultContent)
-		r.persistLatestConversationMessage()
 
 		r.emit(RunnerEvent{
 			Type:      EventToolCallComplete,
@@ -1027,9 +1102,10 @@ func (r *Runner) handleToolCalls(ctx context.Context, msg model.Message) error {
 		if logErr := r.store.LogToolExecution(auditEntry); logErr != nil {
 			r.emitError("failed to log tool execution", logErr)
 		}
+		outcomes = append(outcomes, agentloop.ToolOutcome{Content: resultContent, Success: result.Success})
 	}
 
-	return nil
+	return outcomes, nil
 }
 
 func (r *Runner) approvalAuditFields(approvalID string) (string, int) {
