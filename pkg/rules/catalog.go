@@ -52,6 +52,7 @@ var factContractSpecs = []factContractSpec{
 	{domain: "permissions/escalation", purpose: "permission escalation routing", facts: PermissionEscalationFacts{}},
 	{domain: "permissions/sandbox", purpose: "sandbox level resolution", facts: SandboxFacts{}},
 	{domain: "permissions/delegation", purpose: "delegation permission checks", facts: DelegationFacts{}},
+	{domain: "permissions/builtin_defaults", purpose: "glob-permission built-in defaults (env/credential denies, destructive bash)", facts: PermissionFacts{}},
 	{domain: "cost/budgets", purpose: "session and account cost budget routing", facts: CostFacts{}},
 	{domain: "cost/rate_limits", purpose: "provider rate-limit routing", facts: RateLimitFacts{}},
 	{domain: "session/compaction", purpose: "session-aware compaction routing", facts: CompactionFacts{}},
