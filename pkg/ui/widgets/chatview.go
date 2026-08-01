@@ -3,6 +3,7 @@ package widgets
 import (
 	"strings"
 
+	"github.com/odvcencio/gotreesitter"
 	"m31labs.dev/buckley/v2/pkg/ui/scrollback"
 	"m31labs.dev/fluffyui/backend"
 	"m31labs.dev/fluffyui/compositor"
@@ -32,10 +33,12 @@ type ChatView struct {
 	searchStyle    backend.Style
 
 	// Markdown rendering
-	mdRenderer  *markdown.Renderer
-	codeBlockBG backend.Style
-	lastSource  string
-	lastContent string
+	mdRenderer   *markdown.Renderer
+	codeBlockBG  backend.Style
+	syntax       codeSyntaxStyles
+	highlighters map[string]*gotreesitter.Highlighter
+	lastSource   string
+	lastContent  string
 
 	// Callbacks
 	onScrollChange    func(top, total, viewHeight int)
@@ -55,6 +58,7 @@ func NewChatView() *ChatView {
 		scrollThumb:    backend.DefaultStyle(),
 		selectionStyle: backend.DefaultStyle().Reverse(true),
 		searchStyle:    backend.DefaultStyle().Reverse(true),
+		syntax:         defaultCodeSyntaxStyles(),
 	}
 }
 
@@ -79,6 +83,21 @@ func (c *ChatView) SetUIStyles(scrollbar, thumb, selection, search backend.Style
 func (c *ChatView) SetMarkdownRenderer(renderer *markdown.Renderer, codeBlockBG backend.Style) {
 	c.mdRenderer = renderer
 	c.codeBlockBG = codeBlockBG
+}
+
+// SetCodeSyntaxStyles configures the theme-aware styles applied to Tree-sitter
+// captures inside fenced code blocks.
+func (c *ChatView) SetCodeSyntaxStyles(text, muted, accent, accentDim, success, warning, info, errorStyle backend.Style) {
+	c.syntax = codeSyntaxStyles{
+		Default:   text,
+		Muted:     muted,
+		Accent:    accent,
+		AccentDim: accentDim,
+		Success:   success,
+		Warning:   warning,
+		Info:      info,
+		Error:     errorStyle,
+	}
 }
 
 // OnScrollChange sets a callback for scroll position changes.
@@ -213,6 +232,7 @@ func (c *ChatView) renderMarkdownLines(content, source string) []scrollback.Line
 			Language:     line.Language,
 		})
 	}
+	c.applyTreeSitterHighlights(lines)
 	return lines
 }
 

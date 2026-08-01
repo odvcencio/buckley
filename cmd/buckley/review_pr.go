@@ -16,7 +16,6 @@ import (
 	"m31labs.dev/buckley/v2/pkg/oneshot"
 	"m31labs.dev/buckley/v2/pkg/oneshot/commands"
 	"m31labs.dev/buckley/v2/pkg/rules"
-	"m31labs.dev/buckley/v2/pkg/terminal"
 	"m31labs.dev/buckley/v2/pkg/transparency"
 )
 
@@ -461,7 +460,7 @@ func reviewContextProvidersForModel(modelID string) []commands.PRContextProvider
 // threshold requires a core maintainer or owner author; otherwise it
 // declines before running any shard (see commands.EvaluatePostingGate).
 func runPRReviewWithOptions(ctx context.Context, prRef string, framework *oneshot.Framework, opts automatedReviewOptions, willPost bool) (*reviewCommandResult, *commands.PRInfo, error) {
-	spinner := terminal.NewSpinner("Fetching PR details...")
+	spinner := newReviewProgress("Fetching PR details...")
 	spinner.Start()
 
 	contextOpts := commands.DefaultPRContextOptions()
@@ -502,6 +501,7 @@ func runPRReviewWithOptions(ctx context.Context, prRef string, framework *onesho
 		HasFeedback:       prCtx.HasReviewFeedback(),
 	})
 	opts = opts.withExecutionPlan(plan)
+	opts = opts.withVerificationTargetBudget(prCtx.Files)
 	if opts.contextReady != nil {
 		if err := opts.contextReady(ctx, prCtx.PR, opts); err != nil {
 			spinner.StopWithError(err.Error())
@@ -619,7 +619,7 @@ func runPRReviewSharded(
 	prCtx *commands.PRContext,
 	audit *transparency.ContextAudit,
 	shards diffsignal.ShardResult,
-	spinner *terminal.Spinner,
+	spinner reviewProgress,
 ) (*reviewCommandResult, *commands.PRInfo, error) {
 	concurrency := opts.concurrency
 	if concurrency <= 0 {
@@ -659,7 +659,8 @@ func runPRReviewSharded(
 
 	run := func(shardCtx context.Context, shard diffsignal.Shard, index int) (*commands.ParsedReview, error) {
 		primary := index == 0
-		prompt := appendReviewExecutionPlan(commands.BuildPRShardPrompt(prCtx, shard, index, len(shards.Shards), primary), opts)
+		shardOpts := opts.withVerificationTargetBudget(shard.Files)
+		prompt := appendReviewExecutionPlan(commands.BuildPRShardPrompt(prCtx, shard, index, len(shards.Shards), primary), shardOpts)
 		reviewDef := commands.ReviewPRDef{
 			ChangedFiles:      shard.Files,
 			ContextIncomplete: prCtx.HasIncompleteContext(),
@@ -672,16 +673,17 @@ func runPRReviewSharded(
 			reviewDef.RequiredFeedbackIDs = prCtx.RequiredFeedbackIDs()
 		}
 		fwResult, runErr := framework.RunRLM(shardCtx, reviewDef, oneshot.RLMRunOpts{
-			UserPrompt:          prompt,
-			MaxRetries:          opts.maxRetries,
-			MaxIterations:       opts.maxIterations,
-			MaxToolCalls:        opts.maxToolCalls,
-			MaxCostUSD:          opts.maxCostUSD,
-			ExplorationTimeout:  opts.explorationTimeout,
-			SynthesisLead:       opts.synthesisLead,
-			VerificationTimeout: opts.verificationTimeout,
-			ModelID:             opts.modelID,
-			ReasoningEffort:     opts.reasoningEffort,
+			UserPrompt:           prompt,
+			MaxRetries:           opts.maxRetries,
+			MaxIterations:        shardOpts.maxIterations,
+			MaxToolCalls:         shardOpts.maxToolCalls,
+			MaxVerificationCalls: shardOpts.maxVerificationCalls,
+			MaxCostUSD:           shardOpts.maxCostUSD,
+			ExplorationTimeout:   shardOpts.explorationTimeout,
+			SynthesisLead:        shardOpts.synthesisLead,
+			VerificationTimeout:  shardOpts.verificationTimeout,
+			ModelID:              shardOpts.modelID,
+			ReasoningEffort:      shardOpts.reasoningEffort,
 			SnapshotPolicy: model.ReviewSnapshotPolicy{
 				Mode:           model.ReviewSnapshotHead,
 				ExpectedCommit: prCtx.PR.HeadSHA,

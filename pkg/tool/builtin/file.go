@@ -213,6 +213,7 @@ func (t *WriteFileTool) Execute(params map[string]any) (*Result, error) {
 		"is_new":  isNew,
 	}
 
+	attachPostEditDiagnostics(result, absPath)
 	return result, nil
 }
 

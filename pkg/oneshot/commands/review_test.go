@@ -658,6 +658,17 @@ func TestReviewVerificationTargetsListsChangedSourcePackages(t *testing.T) {
 	assert.Equal(t, want, got)
 }
 
+func TestReviewVerificationCallBudgetCountsExactTargets(t *testing.T) {
+	got := ReviewVerificationCallBudget([]string{
+		"cmd/buckley/review.go",
+		"pkg/model/client.go",
+		"web/app.ts",
+		"web/button.ts",
+	})
+
+	assert.Equal(t, 4, got)
+}
+
 func TestApprovedPRDocumentationReviewUsesExactDiffLedgerInsteadOfUnrelatedCommands(t *testing.T) {
 	changedFiles := []string{"README.md", "docs/release-notes.mdx"}
 	result := &ReviewRLMResult{Parsed: &ParsedReview{

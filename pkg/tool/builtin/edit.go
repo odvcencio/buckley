@@ -176,7 +176,7 @@ func (t *EditFileTool) Execute(params map[string]any) (*Result, error) {
 		replacements,
 		pluralize(replacements))
 
-	return &Result{
+	result := &Result{
 		Success:       true,
 		ShouldAbridge: true,
 		DiffPreview:   diffPreview,
@@ -191,7 +191,9 @@ func (t *EditFileTool) Execute(params map[string]any) (*Result, error) {
 			"summary": summary,
 			"diff":    diffPreview.Preview,
 		},
-	}, nil
+	}
+	attachPostEditDiagnostics(result, absPath)
+	return result, nil
 }
 
 // generateDiff creates a diff preview between old and new content

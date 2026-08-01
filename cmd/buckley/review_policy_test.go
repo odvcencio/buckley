@@ -133,6 +133,22 @@ func TestReviewExecutionPlanPreservesExplicitTurnOverride(t *testing.T) {
 	}
 }
 
+func TestReviewVerificationTargetBudgetExpandsWithinToolLimit(t *testing.T) {
+	opts := automatedReviewOptions{
+		maxToolCalls:         3,
+		maxVerificationCalls: 1,
+	}.withVerificationTargetBudget([]string{
+		"cmd/buckley/review.go",
+		"pkg/oneshot/commands/review_context.go",
+		"pkg/ui/widgets/chatview.go",
+		"pkg/conversation/context_projection.go",
+	})
+
+	if opts.maxVerificationCalls != 3 {
+		t.Fatalf("maxVerificationCalls = %d, want 3", opts.maxVerificationCalls)
+	}
+}
+
 func TestReviewExecutionPlanBoundsDefaultQwenTurns(t *testing.T) {
 	plan := reviewExecutionPlan{
 		sizeClass:            "broad",

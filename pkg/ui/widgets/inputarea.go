@@ -565,6 +565,10 @@ func (i *InputArea) HandleMessage(msg runtime.Message) runtime.HandleResult {
 	if !ok {
 		return runtime.Unhandled()
 	}
+	if key.Key == terminal.KeyEnter && key.Shift {
+		i.InsertText("\n")
+		return runtime.Handled()
+	}
 
 	if key.Key == terminal.KeyRune {
 		return i.handleRune(key.Rune)

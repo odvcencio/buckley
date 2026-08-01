@@ -34,7 +34,7 @@ OpenAI, Anthropic, Google, and Ollama are also supported. OpenRouter is the defa
 
 | Surface | Command | Use case |
 | --- | --- | --- |
-| TUI | `buckley` | Interactive coding with approvals, streaming, and history |
+| TUI | `buckley` | Interactive coding with approvals, streaming, history, and highlighted code |
 | One-shot | `buckley -p "inspect this repo and fix the failing tests"` | Fast task execution from the terminal |
 | Browser UI | `buckley serve --browser` | Mission Control, approvals, and remote session control |
 | ACP agent | `buckley acp` | Editor agent for ACP-compatible clients |
@@ -52,7 +52,7 @@ buckley review-pr 123 --model codex/auto
 
 The planner, builder, review, and runtime layers share the same governance stack, persistence, and tool registry.
 
-## What 1.1.0 Adds
+## Notable Capabilities
 
 - Fully integrated Arbiter runtime across one-shot, TUI, ACP, and headless execution paths.
 - Shared runtime prompt assembly for repo instructions, project context, working directory, and skills.
@@ -72,7 +72,7 @@ buckley dream
 buckley experiment run "compare-routing" -m z-ai/glm-5.2 -m moonshotai/kimi-k2.7-code -p "Implement feature X"
 ```
 
-`buckley review` examines one immutable snapshot of the selected local scope. Untracked files are excluded by default; repeat `--include-untracked path/to/new.go` to explicitly allowlist worktree files that may be sent to the model, after inspecting them for secrets. Native Codex verification receives a self-contained copy of only the captured commit plus patch; its JSONL command events must prove successful, classifiable build and test runs that cover the changed source paths. Use `--model codex/auto` to select Luna with xhigh reasoning for focused changes, Terra with medium reasoning for standard changes, and Sol with medium reasoning for broad or project reviews. An exact model override remains fixed. API-model inspection tools are rooted to an independently materialized copy of that snapshot and can run only deterministic build/test/check plans in an OS-enforced, read-only-source sandbox. `buckley review-pr` adds the remote PR diff, CI state, submitted reviews, and unresolved inline feedback; run it from a checkout whose `HEAD` is the PR head so verification is pinned to the same revision. API approvals require actual successful verification tool calls—not prose claiming PASS—and build/test evidence must use one applicable toolchain and cover every changed source package. Branch and PR approvals require passing verification, complete evidence, an explicit disposition for every supplied feedback ID, and an independent approval-critic pass. `buckley review -project` is an advisory architecture assessment and cannot issue an approval verdict. `buckley commit` and `buckley pr` use transparent tool-first workflows rather than opaque text-only prompting.
+`buckley review` examines one immutable snapshot of the selected local scope. Untracked files are excluded by default; repeat `--include-untracked path/to/new.go` to explicitly allowlist worktree files that may be sent to the model, after inspecting them for secrets. Native Codex verification receives a self-contained copy of only the captured commit plus patch; its JSONL command events must prove successful, classifiable build and test runs that cover the changed source paths. Use `--model codex/auto` to select Luna with xhigh reasoning for focused changes, Terra with medium reasoning for standard changes, and Sol with medium reasoning for broad or project reviews. An exact model override remains fixed. API-model inspection tools are rooted to an independently materialized copy of that snapshot and can run only deterministic build/test/check plans in an OS-enforced, read-only-source sandbox. `buckley review-pr` adds the remote PR diff, CI state, submitted reviews, and unresolved inline feedback; run it from a checkout whose `HEAD` is the PR head so verification is pinned to the same revision. API approvals require actual successful verification tool calls—not prose claiming PASS—and build/test evidence must use one applicable toolchain and cover every changed source package. Branch and PR approvals require passing verification, complete evidence, an explicit disposition for every supplied feedback ID, and an independent approval-critic pass. `buckley review -project` is an advisory architecture assessment and cannot issue an approval verdict. `buckley commit` and `buckley pr` use transparent tool-first workflows rather than opaque text-only prompting. In the TUI, fenced code blocks use Tree-sitter highlighting when the language grammar is available. Use `Shift+Enter` to add a line without sending and `Alt+C` to copy the latest code block. Conversation projection searches for the largest compacted history that fits the provider request budget.
 
 ## Configuration
 
@@ -115,7 +115,7 @@ Skills layer on top of repository instructions. If a repo already uses `AGENTS.m
 go build ./cmd/buckley
 ```
 
-Primary repo docs live under [`docs/`](/home/draco/work/buckley/docs).
+Primary repo docs live under [`docs/`](docs/).
 
 ## License
 

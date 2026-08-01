@@ -78,6 +78,27 @@ func TestProjectModelMessagesForRequest_EmergencyScaleTightensProjection(t *test
 	}
 }
 
+func TestProjectModelMessagesForRequest_PacksCloseToAvailableBudget(t *testing.T) {
+	messages := make([]model.Message, 72)
+	for i := range messages {
+		messages[i] = model.Message{
+			Role:    "assistant",
+			Content: strings.Repeat("durable implementation evidence ", 180),
+		}
+	}
+	req := model.ChatRequest{Model: "provider", MaxTokens: 2048}
+	originalEstimate := model.EstimateRequestTokens(model.ChatRequest{Model: req.Model, MaxTokens: req.MaxTokens, Messages: messages})
+	_, requestBudget := projectionTokenBudget(req, originalEstimate, 16_384, 1)
+
+	_, stats := ProjectModelMessagesForRequest(messages, req, 16_384, 1)
+	if stats.ProjectedTokens > requestBudget {
+		t.Fatalf("projected tokens = %d, request budget = %d", stats.ProjectedTokens, requestBudget)
+	}
+	if stats.ProjectedTokens < requestBudget*9/10 {
+		t.Fatalf("projected tokens = %d, want at least 90%% of request budget %d", stats.ProjectedTokens, requestBudget)
+	}
+}
+
 func TestProjectModelMessagesForRequestPinned_RepresentedPrefixPassesThroughUntouched(t *testing.T) {
 	messages := make([]model.Message, 60)
 	for i := range messages {

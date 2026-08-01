@@ -82,22 +82,62 @@ func ProjectModelMessagesForRequestPinned(messages []model.Message, req model.Ch
 
 	opts := adaptiveContextOptions(contextWindow, messageBudget, scale)
 	opts.PinnedFromIndex = pinnedFromIndex
+	projected := packProjectionToRequestBudget(messages, req, requestBudget, opts)
+	return finishProjectionStats(projected, req, stats)
+}
+
+// packProjectionToRequestBudget finds the least destructive byte budget whose
+// exact request-token estimate fits. The old fixed 30% shrink loop could leave
+// sizeable usable context empty after a successful retry. Searching the
+// monotonic byte budget keeps as much durable evidence as the request allows.
+func packProjectionToRequestBudget(messages []model.Message, req model.ChatRequest, requestBudget int, opts EfficientContextOptions) []model.Message {
 	projected := CompactModelMessages(messages, opts)
+	if projectionFitsRequestBudget(projected, req, requestBudget) {
+		return projected
+	}
+
+	const minimumBytes = 4 * 1024
+	low := minimumBytes
+	high := opts.MaxBytes - 1
+	var best []model.Message
+	for attempt := 0; attempt < 8 && low <= high; attempt++ {
+		mid := low + (high-low+1)/2
+		candidateOpts := opts
+		candidateOpts.MaxBytes = mid
+		candidate := CompactModelMessages(messages, candidateOpts)
+		if projectionFitsRequestBudget(candidate, req, requestBudget) {
+			best = candidate
+			low = mid + 1
+			continue
+		}
+		high = mid - 1
+	}
+	if best != nil {
+		return best
+	}
+
+	// A pinned continuation prefix or a protocol-critical tool tail can be
+	// larger than the normal floor. Retain the existing emergency squeeze for
+	// that exceptional case, rather than relaxing those correctness invariants.
+	opts.MaxBytes = minimumBytes
 	for attempt := 0; attempt < 5; attempt++ {
-		projectedReq := req
-		projectedReq.Messages = projected
-		if model.EstimateRequestTokens(projectedReq).Total <= requestBudget {
+		projected = CompactModelMessages(messages, opts)
+		if projectionFitsRequestBudget(projected, req, requestBudget) {
 			break
 		}
-		opts.MaxBytes = maxProjectionInt(4*1024, opts.MaxBytes*7/10)
 		opts.RecentMessages = maxProjectionInt(8, opts.RecentMessages*3/4)
 		opts.KeepReasoningRecent = maxProjectionInt(2, opts.KeepReasoningRecent*3/4)
 		opts.OldToolBytes = maxProjectionInt(192, opts.OldToolBytes*3/4)
 		opts.OldToolArgumentBytes = maxProjectionInt(192, opts.OldToolArgumentBytes*3/4)
 		opts.OldAssistantBytes = maxProjectionInt(240, opts.OldAssistantBytes*3/4)
-		projected = CompactModelMessages(messages, opts)
 	}
-	return finishProjectionStats(projected, req, stats)
+	return projected
+}
+
+func projectionFitsRequestBudget(messages []model.Message, req model.ChatRequest, requestBudget int) bool {
+	projectedReq := req
+	projectedReq.Messages = messages
+	return model.EstimateRequestTokens(projectedReq).Total <= requestBudget
 }
 
 // projectionTokenBudget derives the request overhead (everything but message
