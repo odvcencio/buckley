@@ -31,9 +31,9 @@ func TestMergeConfigsFixesZeroOverrideBug(t *testing.T) {
 	override.Artifacts.PlanningDir = ""
 	raw := map[string]any{
 		"cost_management": map[string]any{"session_budget": 0},
-		"retry_policy":     map[string]any{"max_retries": 0},
-		"compaction":       map[string]any{"task_interval": 0},
-		"artifacts":        map[string]any{"planning_dir": ""},
+		"retry_policy":    map[string]any{"max_retries": 0},
+		"compaction":      map[string]any{"task_interval": 0},
+		"artifacts":       map[string]any{"planning_dir": ""},
 	}
 
 	mergeConfigs(base, override, raw, false)
