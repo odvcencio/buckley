@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"m31labs.dev/buckley/v2/pkg/conversation"
+	"m31labs.dev/buckley/v2/pkg/agentloop"
 	"m31labs.dev/buckley/v2/pkg/model"
 	"m31labs.dev/buckley/v2/pkg/tools"
 	"m31labs.dev/buckley/v2/pkg/transparency"
@@ -441,9 +441,51 @@ type ToolExecutor interface {
 	Execute(name string, args json.RawMessage) (string, error)
 }
 
+// oneshotToolLoopGovernorRoundSlack, oneshotToolLoopGovernorMaxToolCalls, and
+// the repeat/cycle limits below tune pkg/agentloop.Governor for
+// InvokeWithTools -- the legacy PR-review tool loop used only as a fallback
+// when no RLM runner is configured (see reviewPRWithLegacyTools in
+// pkg/oneshot/review/pr.go). InvokeWithTools never ran a governor before
+// this migration. A review that re-reads the same handful of files or
+// re-runs the same search while reasoning about different parts of a diff
+// is normal, legitimate behavior, so every limit here sits well above what
+// legacyPRReviewAllowedTools() (read_file, find_files, search_text) issues
+// in practice; StepCap -- not the Governor's own round ceiling -- remains
+// the authoritative "out of iterations" stop, matching the pre-migration
+// maxIterations contract exactly. A stopped review is worse than a governor
+// that never fires.
+const (
+	oneshotToolLoopGovernorRoundSlack         = 20
+	oneshotToolLoopGovernorMaxToolCalls       = 200
+	oneshotToolLoopGovernorExactRepeatLimit   = 8
+	oneshotToolLoopGovernorOutcomeRepeatLimit = 12
+	oneshotToolLoopGovernorCycleMaxLength     = 4
+	oneshotToolLoopGovernorCycleRepeats       = 6
+)
+
+func oneshotToolLoopGovernorConfig(maxIterations int) agentloop.Config {
+	cfg := agentloop.DefaultConfig()
+	cfg.MaxRounds = maxIterations + oneshotToolLoopGovernorRoundSlack
+	cfg.MaxToolCalls = oneshotToolLoopGovernorMaxToolCalls
+	cfg.ExactRepeatLimit = oneshotToolLoopGovernorExactRepeatLimit
+	cfg.OutcomeRepeatLimit = oneshotToolLoopGovernorOutcomeRepeatLimit
+	cfg.CycleMaxLength = oneshotToolLoopGovernorCycleMaxLength
+	cfg.CycleRepeats = oneshotToolLoopGovernorCycleRepeats
+	return cfg
+}
+
 // InvokeWithTools invokes the model with access to multiple tools in a loop.
 // The model can call tools to verify claims before producing a final response.
 // maxIterations limits the number of tool calling rounds (default 10).
+//
+// Migrated onto pkg/agentloop.Controller (the shared turn engine): request
+// projection, tool-call ID backfill, and per-round Governor consultation are
+// now Controller-owned. StepCap carries the exact maxIterations ceiling this
+// method has always enforced -- Controller performs exactly maxIterations
+// model calls before stopping, identical to the old bounded for loop -- so
+// the "max tool iterations reached" contract below is byte-stable.
+// oneshotToolLoopGovernorConfig documents why the Governor's own limits sit
+// well clear of it.
 func (inv *DefaultInvoker) InvokeWithTools(ctx context.Context, systemPrompt, userPrompt string, toolDefs []tools.Definition, executor ToolExecutor, maxIterations int) (string, *transparency.Trace, error) {
 	if maxIterations <= 0 {
 		maxIterations = 10
@@ -463,7 +505,11 @@ func (inv *DefaultInvoker) InvokeWithTools(ctx context.Context, systemPrompt, us
 		toolNames = append(toolNames, td.Name)
 	}
 
-	// Build initial messages
+	// Build initial messages. BuildRequest below always hands Controller the
+	// full, unprojected transcript; Controller's own projection step applies
+	// conversation.ProjectModelMessagesForRequestPinned with pinning
+	// disabled, which is exactly what the pre-migration
+	// conversation.CompactModelMessagesForRequest call did.
 	messages := []model.Message{
 		{Role: "system", Content: systemPrompt},
 		{Role: "user", Content: userPrompt},
@@ -481,13 +527,8 @@ func (inv *DefaultInvoker) InvokeWithTools(ctx context.Context, systemPrompt, us
 
 	var totalTokens transparency.TokenUsage
 	var allToolCalls []tools.ToolCall
-	contextWindow := 0
-	if provider, ok := inv.client.(model.ContextWindowProvider); ok {
-		contextWindow, _ = provider.GetContextLength(inv.model)
-	}
 
-	// Tool loop
-	for iteration := 0; iteration < maxIterations; iteration++ {
+	buildRequest := func(ctx context.Context, round int) (model.ChatRequest, error) {
 		req := model.ChatRequest{
 			Model:      inv.model,
 			Tools:      toolSpecs,
@@ -496,90 +537,116 @@ func (inv *DefaultInvoker) InvokeWithTools(ctx context.Context, systemPrompt, us
 			SessionID:  traceID,
 			Trace:      map[string]string{"trace_id": traceID, "trace_name": "oneshot-tools"},
 		}
-		req.Messages = conversation.CompactModelMessagesForRequest(messages, req, contextWindow)
+		req.Messages = messages
+		return req, nil
+	}
 
+	callModel := agentloop.ModelCallerFunc(func(ctx context.Context, req model.ChatRequest, _ bool) (*model.ChatResponse, error) {
 		resp, err := inv.client.ChatCompletion(ctx, req)
 		if err != nil {
-			builder.WithError(err)
-			trace := builder.Build()
-			return "", trace, fmt.Errorf("model request failed: %w", err)
+			return nil, err
 		}
-
-		// Accumulate tokens
 		totalTokens.Input += resp.Usage.PromptTokens
 		totalTokens.Output += resp.Usage.CompletionTokens
-
-		if len(resp.Choices) == 0 {
-			break
-		}
-
-		choice := resp.Choices[0]
-
-		// Check for reasoning
-		if choice.Message.Reasoning != "" {
-			builder.WithReasoning(choice.Message.Reasoning)
-			totalTokens.Reasoning += estimateTokens(choice.Message.Reasoning)
-		}
-
-		// If no tool calls, we have the final response
-		if len(choice.Message.ToolCalls) == 0 {
-			content := ""
-			if c, ok := choice.Message.Content.(string); ok {
-				content = c
+		if len(resp.Choices) > 0 {
+			if reasoning := resp.Choices[0].Message.Reasoning; reasoning != "" {
+				builder.WithReasoning(reasoning)
+				totalTokens.Reasoning += estimateTokens(reasoning)
 			}
-			builder.WithContent(content)
-
-			// Complete trace
-			cost := inv.pricing.Calculate(totalTokens)
-			trace := builder.Complete(totalTokens, cost)
-
-			// Record in ledger
-			if inv.ledger != nil {
-				inv.ledger.Record(transparency.CostEntry{
-					Model:        inv.model,
-					Tokens:       totalTokens,
-					Cost:         cost,
-					Latency:      trace.Duration,
-					InvocationID: traceID,
-				})
-			}
-
-			return content, trace, nil
 		}
+		return resp, nil
+	})
 
-		// Process tool calls
-		// Add assistant message with tool calls
-		messages = append(messages, choice.Message)
-
-		for _, tc := range choice.Message.ToolCalls {
-			toolCall := tools.ToolCall{
+	dispatchTools := agentloop.ToolDispatcherFunc(func(ctx context.Context, calls []model.ToolCall) ([]agentloop.ToolOutcome, error) {
+		outcomes := make([]agentloop.ToolOutcome, len(calls))
+		for i, tc := range calls {
+			allToolCalls = append(allToolCalls, tools.ToolCall{
 				ID:        tc.ID,
 				Name:      tc.Function.Name,
 				Arguments: json.RawMessage(tc.Function.Arguments),
-			}
-			allToolCalls = append(allToolCalls, toolCall)
+			})
 
-			// Execute tool
 			result, execErr := executor.Execute(tc.Function.Name, json.RawMessage(tc.Function.Arguments))
 			if execErr != nil {
 				result = fmt.Sprintf("Error: %v", execErr)
 			}
-
-			// Add tool result message
-			messages = append(messages, model.Message{
-				Role:       "tool",
-				ToolCallID: tc.ID,
-				Name:       tc.Function.Name,
-				Content:    result,
-			})
+			outcomes[i] = agentloop.ToolOutcome{Content: result, Success: execErr == nil}
 		}
+		return outcomes, nil
+	})
+
+	// Mirrors the pre-migration messages accumulation exactly: only the
+	// assistant tool-call message and its tool results feed the next round's
+	// request. The terminal (no-tool-call) assistant message never lands
+	// here -- it is read from Result.Message below instead. Discriminated on
+	// ToolCalls rather than Role == "assistant", matching the pre-migration
+	// code, which appended choice.Message unconditionally whenever it carried
+	// tool calls without ever inspecting Role.
+	history := agentloop.HistorySinkFunc(func(msg model.Message) {
+		switch {
+		case len(msg.ToolCalls) > 0:
+			messages = append(messages, msg)
+		case msg.Role == "tool":
+			messages = append(messages, msg)
+		}
+	})
+
+	ctrl, err := agentloop.NewController(agentloop.ControllerConfig{
+		Governor:      agentloop.New(oneshotToolLoopGovernorConfig(maxIterations)),
+		StepCap:       maxIterations,
+		BuildRequest:  buildRequest,
+		CallModel:     callModel,
+		DispatchTools: dispatchTools,
+		History:       history,
+		ContextWindow: func(modelID string) int {
+			provider, ok := inv.client.(model.ContextWindowProvider)
+			if !ok {
+				return 0
+			}
+			window, _ := provider.GetContextLength(modelID)
+			return window
+		},
+	})
+	if err != nil {
+		return "", builder.Build(), err
 	}
 
-	// Max iterations reached
-	builder.WithToolCalls(allToolCalls)
-	builder.WithError(fmt.Errorf("max tool iterations (%d) reached", maxIterations))
+	result, runErr := ctrl.Run(ctx)
+	if runErr != nil {
+		builder.WithError(runErr)
+		trace := builder.Build()
+		return "", trace, fmt.Errorf("model request failed: %w", runErr)
+	}
+
+	if result.FinishReason != "" {
+		// StepCap (maxIterations exhausted), the Governor's own backstop, or
+		// an empty provider response all land here: no final answer, same
+		// as the pre-migration "max tool iterations reached" fallback.
+		builder.WithToolCalls(allToolCalls)
+		builder.WithError(fmt.Errorf("max tool iterations (%d) reached", maxIterations))
+		cost := inv.pricing.Calculate(totalTokens)
+		trace := builder.Complete(totalTokens, cost)
+		return "", trace, fmt.Errorf("max tool iterations (%d) reached without final response", maxIterations)
+	}
+
+	content := ""
+	if c, ok := result.Message.Content.(string); ok {
+		content = c
+	}
+	builder.WithContent(content)
+
 	cost := inv.pricing.Calculate(totalTokens)
 	trace := builder.Complete(totalTokens, cost)
 
-	return "", trace, fmt.Errorf("max tool iterations (%d) reached without final response", maxIterations)
+	if inv.ledger != nil {
+		inv.ledger.Record(transparency.CostEntry{
+			Model:        inv.model,
+			Tokens:       totalTokens,
+			Cost:         cost,
+			Latency:      trace.Duration,
+			InvocationID: traceID,
+		})
+	}
+
+	return content, trace, nil
 }
