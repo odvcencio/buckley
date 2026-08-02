@@ -3,11 +3,13 @@ package rlm
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
 	"time"
 
+	"m31labs.dev/buckley/v2/pkg/agentloop"
 	"m31labs.dev/buckley/v2/pkg/bus"
 	"m31labs.dev/buckley/v2/pkg/conversation"
 	"m31labs.dev/buckley/v2/pkg/coordination/security"
@@ -204,7 +206,42 @@ func (r *Runtime) OnIteration(hook IterationHook) {
 	r.hooksMu.Unlock()
 }
 
+// errCoordinatorAnswerReady signals the DispatchTools hook's post-dispatch
+// readiness check (token budget exhausted, confidence threshold met, or
+// set_answer(ready=true) already applied by the tool call itself): the
+// pre-migration coordinator loop's `for ... && !answer.Ready` condition
+// would end the loop right here, without one more model call. Returning
+// this from DispatchTools makes agentloop.Controller stop the turn
+// immediately for the same reason, at the same point, instead of spending
+// one more (budget-exceeding) model round before the caller notices Ready.
+var errCoordinatorAnswerReady = errors.New("rlm: coordinator answer ready")
+
+// coordinatorGovernorConfig tunes pkg/agentloop.Governor for
+// Runtime.Execute. The coordinator's own maxIterations (CoordinatorConfig,
+// normally 10) is already Governor.MaxRounds verbatim -- it was always the
+// authoritative round ceiling, so the migration does not loosen it. Only
+// the repeat/cycle detectors are loosened past pkg/agentloop.DefaultConfig:
+// re-inspecting the same scratchpad key, or delegating a similarly-shaped
+// follow-up task, is normal coordinator behavior and should not trip a
+// guard the coordinator never had before this migration.
+func coordinatorGovernorConfig(maxIterations int) agentloop.Config {
+	cfg := agentloop.DefaultConfig()
+	cfg.MaxRounds = maxIterations
+	cfg.ExactRepeatLimit = 5
+	cfg.OutcomeRepeatLimit = 8
+	return cfg
+}
+
 // Execute runs the coordinator loop for a task.
+//
+// Migrated onto pkg/agentloop.Controller (the shared turn engine): request
+// projection, tool-call ID backfill, and per-round Governor consultation
+// are Controller-owned. The coordinator's own budget/readiness logic (token
+// budget, confidence threshold, set_answer) is unchanged; it decides
+// whether to stop from inside the DispatchTools hook, exactly where the
+// pre-migration loop decided it, and stops Controller immediately via
+// errCoordinatorAnswerReady rather than letting one more model round run
+// after budget or confidence already say the answer is done.
 func (r *Runtime) Execute(ctx context.Context, task string) (*Answer, error) {
 	if r == nil {
 		return nil, fmt.Errorf("runtime is nil")
@@ -289,17 +326,18 @@ func (r *Runtime) Execute(ctx context.Context, task string) (*Answer, error) {
 	sessionID := fmt.Sprintf("rlm-coordinator-%d", start.UnixNano())
 	contextWindow, _ := r.models.GetContextLength(coordinatorModel)
 
-	for answer.Iteration < maxIterations && !answer.Ready {
-		if err := ctx.Err(); err != nil {
-			if err == context.DeadlineExceeded && runtimeDeadline {
-				answer.Ready = true
-				break
-			}
-			return &answer, err
+	buildRequest := func(ctx context.Context, round int) (model.ChatRequest, error) {
+		answer.Iteration = round
+		if round > 1 {
+			// The pre-migration loop appended this at the end of the prior
+			// round once it knew that round would not be the last one;
+			// Controller calls BuildRequest once per round instead, so the
+			// equivalent point is "every round after the first."
+			messages = append(messages, model.Message{
+				Role:    "user",
+				Content: r.buildCoordinatorContext(ctx, task, &answer, start, maxTokens, confidenceThreshold),
+			})
 		}
-
-		answer.Iteration++
-
 		req := model.ChatRequest{
 			Model:      coordinatorModel,
 			Tools:      toolDefs,
@@ -307,48 +345,23 @@ func (r *Runtime) Execute(ctx context.Context, task string) (*Answer, error) {
 			SessionID:  sessionID,
 		}
 		req.Messages = conversation.CompactModelMessagesForRequest(messages, req, contextWindow)
+		return req, nil
+	}
+
+	callModel := agentloop.ModelCallerFunc(func(ctx context.Context, req model.ChatRequest, _ bool) (*model.ChatResponse, error) {
 		resp, err := r.models.ChatCompletion(ctx, req)
 		if err != nil {
-			return &answer, err
+			return nil, err
 		}
 		answer.TokensUsed += resp.Usage.TotalTokens
+		return resp, nil
+	})
 
-		if len(resp.Choices) == 0 {
-			return &answer, fmt.Errorf("no response from coordinator")
-		}
-
-		choice := resp.Choices[0]
-		if len(choice.Message.ToolCalls) == 0 {
-			content := extractText(choice.Message)
-			if content != "" {
-				answer.Content = strings.TrimSpace(content)
-				answer.Ready = true
-			}
-			summaries := r.collectScratchpadSummaries(ctx, 6)
-			r.emitIteration(IterationEvent{
-				Iteration:     answer.Iteration,
-				MaxIterations: maxIterations,
-				Ready:         answer.Ready,
-				TokensUsed:    answer.TokensUsed,
-				Summary:       answer.Content,
-				Scratchpad:    summaries,
-			})
-			break
-		}
-
-		messages = append(messages, model.Message{
-			Role:      "assistant",
-			Content:   choice.Message.Content,
-			ToolCalls: choice.Message.ToolCalls,
-		})
-		toolResults := r.executeCoordinatorTools(ctx, registry, choice.Message.ToolCalls)
-		for _, result := range toolResults {
-			messages = append(messages, model.Message{
-				Role:       "tool",
-				ToolCallID: result.ID,
-				Name:       result.Name,
-				Content:    result.Result,
-			})
+	dispatchTools := agentloop.ToolDispatcherFunc(func(ctx context.Context, calls []model.ToolCall) ([]agentloop.ToolOutcome, error) {
+		toolResults := r.executeCoordinatorTools(ctx, registry, calls)
+		outcomes := make([]agentloop.ToolOutcome, len(toolResults))
+		for i, tr := range toolResults {
+			outcomes[i] = agentloop.ToolOutcome{Content: tr.Result, Success: tr.Success}
 		}
 
 		if answer.TokensUsed >= maxTokens {
@@ -368,12 +381,73 @@ func (r *Runtime) Execute(ctx context.Context, task string) (*Answer, error) {
 			Scratchpad:    summaries,
 		})
 
-		if !answer.Ready {
-			messages = append(messages, model.Message{
-				Role:    "user",
-				Content: r.buildCoordinatorContext(ctx, task, &answer, start, maxTokens, confidenceThreshold),
-			})
+		if answer.Ready {
+			return outcomes, errCoordinatorAnswerReady
 		}
+		return outcomes, nil
+	})
+
+	// Mirrors the pre-migration messages accumulation: the assistant
+	// tool-call message and its tool results feed the next round's request.
+	// The terminal (no-tool-call) assistant message never lands here -- its
+	// content is read from Controller's Result.Message once the loop ends.
+	history := agentloop.HistorySinkFunc(func(msg model.Message) {
+		switch {
+		case len(msg.ToolCalls) > 0:
+			messages = append(messages, msg)
+		case msg.Role == "tool":
+			messages = append(messages, msg)
+		}
+	})
+
+	ctrl, err := agentloop.NewController(agentloop.ControllerConfig{
+		Governor:      agentloop.New(coordinatorGovernorConfig(maxIterations)),
+		BuildRequest:  buildRequest,
+		CallModel:     callModel,
+		DispatchTools: dispatchTools,
+		History:       history,
+	})
+	if err != nil {
+		return &answer, err
+	}
+
+	result, runErr := ctrl.Run(ctx)
+	if runErr != nil {
+		if errors.Is(runErr, errCoordinatorAnswerReady) {
+			answer.Normalize()
+			return &answer, nil
+		}
+		if errors.Is(runErr, context.DeadlineExceeded) && runtimeDeadline {
+			answer.Ready = true
+			answer.Normalize()
+			return &answer, nil
+		}
+		return &answer, runErr
+	}
+
+	switch result.FinishReason {
+	case agentloop.FinishReasonEmptyChoices:
+		return &answer, fmt.Errorf("no response from coordinator")
+	case agentloop.FinishReasonLoopGuard, agentloop.FinishReasonStepCap:
+		// The Governor's own MaxRounds ceiling mirrors the pre-migration
+		// "answer.Iteration < maxIterations" loop condition exactly (see
+		// coordinatorGovernorConfig): falling out here without a final
+		// answer is the same normal, non-error stop the old loop had.
+	default:
+		content := extractText(result.Message)
+		if content != "" {
+			answer.Content = strings.TrimSpace(content)
+			answer.Ready = true
+		}
+		summaries := r.collectScratchpadSummaries(ctx, 6)
+		r.emitIteration(IterationEvent{
+			Iteration:     answer.Iteration,
+			MaxIterations: maxIterations,
+			Ready:         answer.Ready,
+			TokensUsed:    answer.TokensUsed,
+			Summary:       answer.Content,
+			Scratchpad:    summaries,
+		})
 	}
 
 	answer.Normalize()
@@ -510,8 +584,10 @@ func (r *Runtime) executeCoordinatorTools(ctx context.Context, registry *tool.Re
 		res, err := registry.ExecuteWithContext(ctx, name, args)
 		if err != nil {
 			result.Result = fmt.Sprintf("execution error: %v", err)
+			result.Success = false
 		} else {
 			result.Result = r.formatCoordinatorResult(res)
+			result.Success = res != nil && res.Success
 		}
 		results = append(results, result)
 	}
@@ -545,9 +621,10 @@ func (r *Runtime) emitIteration(event IterationEvent) {
 }
 
 type coordinatorToolResult struct {
-	ID     string
-	Name   string
-	Result string
+	ID      string
+	Name    string
+	Result  string
+	Success bool
 }
 
 func (r *Runtime) formatCoordinatorResult(res *builtin.Result) string {

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"m31labs.dev/buckley/v2/pkg/agentloop"
 	"m31labs.dev/buckley/v2/pkg/conversation"
 	"m31labs.dev/buckley/v2/pkg/coordination/security"
 	"m31labs.dev/buckley/v2/pkg/model"
@@ -232,7 +233,78 @@ func normalizeSubAgentReasoning(effort string) string {
 	}
 }
 
-// Execute runs the task to completion and returns a summary for the coordinator.
+// errSubAgentFinalToolRejectionTerminal signals the ToolDispatcher hook's
+// terminal branch of the pre-migration "final tool repair" behavior: the
+// model requested tools during final synthesis a second time (the one
+// allowed repair attempt already used). Execute uses it to stop
+// agentloop.Controller's turn immediately -- result.Summary is already set
+// via summarizeRejectedToolCalls before this is returned -- without
+// surfacing it to the caller as a real failure.
+var errSubAgentFinalToolRejectionTerminal = errors.New("rlm: final tool call rejected during synthesis")
+
+// subAgentGovernorRoundBackstop, subAgentGovernorRoundSlack,
+// subAgentGovernorToolCallBackstop, subAgentGovernorToolCallSlack, and the
+// repeat/cycle limits below tune pkg/agentloop.Governor for SubAgent.Execute
+// -- the primary tool loop behind pkg/oneshot's RLM review path (see
+// pkg/oneshot/rlm_runner.go). SubAgent never ran a governor before this
+// migration, and it has always managed its own round/tool-call ceilings
+// (maxIterations, maxToolCalls, cost/deadline-driven adaptive synthesis).
+// Those mechanisms remain authoritative: the Governor's own MaxRounds and
+// MaxToolCalls sit with generous headroom above whatever SubAgent already
+// enforces, so SubAgent's graceful synthesis-forcing and synthetic
+// "budget exhausted" tool outcomes always fire first. Review runs are
+// typically adaptive (maxIterations == 0, bounded only by deadline/cost),
+// so subAgentGovernorRoundBackstop and subAgentGovernorToolCallBackstop
+// exist purely as a last-resort net against a genuinely runaway loop, not
+// as a limit any legitimate review should approach. The repeat/cycle
+// limits are similarly loosened well past pkg/agentloop.DefaultConfig: a
+// review sub-agent re-reading the same file or re-running verification
+// while examining different parts of a diff is normal, legitimate work.
+// A stopped review is worse than a governor that never fires.
+const (
+	subAgentGovernorRoundBackstop      = 500
+	subAgentGovernorRoundSlack         = 3
+	subAgentGovernorToolCallBackstop   = 500
+	subAgentGovernorToolCallSlack      = 8
+	subAgentGovernorExactRepeatLimit   = 8
+	subAgentGovernorOutcomeRepeatLimit = 12
+	subAgentGovernorCycleMaxLength     = 4
+	subAgentGovernorCycleRepeats       = 6
+)
+
+func subAgentGovernorConfig(maxIterations, maxToolCalls int) agentloop.Config {
+	cfg := agentloop.DefaultConfig()
+	if maxIterations > 0 {
+		cfg.MaxRounds = maxIterations + subAgentGovernorRoundSlack
+	} else {
+		cfg.MaxRounds = subAgentGovernorRoundBackstop
+	}
+	if maxToolCalls > 0 {
+		cfg.MaxToolCalls = maxToolCalls + subAgentGovernorToolCallSlack
+	} else {
+		cfg.MaxToolCalls = subAgentGovernorToolCallBackstop
+	}
+	cfg.ExactRepeatLimit = subAgentGovernorExactRepeatLimit
+	cfg.OutcomeRepeatLimit = subAgentGovernorOutcomeRepeatLimit
+	cfg.CycleMaxLength = subAgentGovernorCycleMaxLength
+	cfg.CycleRepeats = subAgentGovernorCycleRepeats
+	return cfg
+}
+
+// Execute runs the task to completion and returns a summary for the
+// coordinator.
+//
+// Migrated onto pkg/agentloop.Controller (the shared turn engine): request
+// projection and tool-call ID backfill are Controller-owned, and the
+// Governor (see subAgentGovernorConfig) now backstops this loop for the
+// first time. Every other decision -- what to send, whether to synthesize,
+// which tools to allow, and how to spend the cost/token/wall-clock budget
+// -- remains exactly the helper functions this method always called
+// (shouldSynthesize, toolBudgetExhausted, applyCostBudget, executeTools,
+// explorationContext, and friends); Execute only re-homes the round loop
+// onto Controller.Run, wrapped in the same "call Run again on the same
+// Governor" retry pattern pkg/ui/tui's tool loop migration established for
+// its own recoverable per-round errors.
 func (a *SubAgent) Execute(ctx context.Context, task string) (*SubAgentResult, error) {
 	start := time.Now()
 	if strings.TrimSpace(task) == "" {
@@ -260,8 +332,11 @@ func (a *SubAgent) Execute(ctx context.Context, task string) (*SubAgentResult, e
 		}
 	}
 	finalToolRepairUsed := false
+	currentSynthesizing := false
+	lastExploring := false
 
-	for i := 0; maxIterations <= 0 || i < maxIterations; i++ {
+	buildRequest := func(ctx context.Context, round int) (model.ChatRequest, error) {
+		iteration := round - 1
 		req := model.ChatRequest{
 			Model:     a.model,
 			MaxTokens: a.maxOutputTokens,
@@ -276,7 +351,7 @@ func (a *SubAgent) Execute(ctx context.Context, task string) (*SubAgentResult, e
 		}
 		requestMessages := messages
 		synthesizing := false
-		if a.shouldSynthesize(ctx, i, maxIterations, start) || a.toolBudgetExhausted(result) {
+		if a.shouldSynthesize(ctx, iteration, maxIterations, start) || a.toolBudgetExhausted(result) {
 			req.Tools = nil
 			req.ToolChoice = "none"
 			requestMessages = finalSynthesisMessages(messages)
@@ -292,28 +367,26 @@ func (a *SubAgent) Execute(ctx context.Context, task string) (*SubAgentResult, e
 			synthesizing = true
 		}
 		if err := a.applyCostBudget(&req, result); err != nil {
-			finalizeSubAgentResult(result, start)
-			return result, err
+			return model.ChatRequest{}, err
 		}
-		requestCtx, cancelRequest := context.WithCancel(ctx)
+		currentSynthesizing = synthesizing
+		return req, nil
+	}
+
+	callModel := agentloop.ModelCallerFunc(func(ctx context.Context, req model.ChatRequest, _ bool) (*model.ChatResponse, error) {
 		exploring := len(req.Tools) > 0
+		lastExploring = exploring
+		requestCtx, cancelRequest := context.WithCancel(ctx)
 		if exploring {
 			cancelRequest()
 			requestCtx, cancelRequest = a.explorationContext(ctx, start)
 		}
+		defer cancelRequest()
 		resp, err := awaitChatCompletion(requestCtx, func() (*model.ChatResponse, error) {
 			return a.client.ChatCompletion(requestCtx, req)
 		})
-		explorationDeadlineReached := exploring &&
-			errors.Is(err, context.DeadlineExceeded) &&
-			ctx.Err() == nil
-		cancelRequest()
 		if err != nil {
-			if explorationDeadlineReached {
-				continue
-			}
-			finalizeSubAgentResult(result, start)
-			return result, err
+			return nil, err
 		}
 		result.InputTokens += resp.Usage.PromptTokens
 		result.OutputTokens += resp.Usage.CompletionTokens
@@ -323,61 +396,122 @@ func (a *SubAgent) Execute(ctx context.Context, task string) (*SubAgentResult, e
 			turnTokens = resp.Usage.PromptTokens + resp.Usage.CompletionTokens
 		}
 		result.TokensUsed += turnTokens
+		if len(resp.Choices) > 0 {
+			result.FinishReason = strings.TrimSpace(resp.Choices[0].FinishReason)
+		}
+		return resp, nil
+	})
 
-		if len(resp.Choices) == 0 {
-			finalizeSubAgentResult(result, start)
-			return result, fmt.Errorf("no response from model")
+	dispatchTools := agentloop.ToolDispatcherFunc(func(ctx context.Context, calls []model.ToolCall) ([]agentloop.ToolOutcome, error) {
+		if currentSynthesizing {
+			var retry bool
+			messages, maxIterations, retry = prepareFinalToolRepair(messages, maxIterations, finalToolRepairUsed)
+			if retry {
+				finalToolRepairUsed = true
+				outcomes := make([]agentloop.ToolOutcome, len(calls))
+				for i := range calls {
+					outcomes[i] = agentloop.ToolOutcome{
+						Content: "Your final tool request was rejected. Use the completed evidence already in this conversation. " +
+							"Return the complete final answer now without tools.",
+						Success: false,
+					}
+				}
+				return outcomes, nil
+			}
+			result.Summary = summarizeRejectedToolCalls(calls)
+			return nil, errSubAgentFinalToolRejectionTerminal
 		}
 
-		choice := resp.Choices[0]
-		result.FinishReason = strings.TrimSpace(choice.FinishReason)
+		toolCtx, cancelTools := a.explorationContext(ctx, start)
+		defer cancelTools()
+		toolResults, err := a.executeTools(toolCtx, calls, allowedRegistry, allowedSet, result)
+		if err != nil {
+			return nil, err
+		}
+		outcomes := make([]agentloop.ToolOutcome, len(toolResults))
+		for i, tr := range toolResults {
+			outcomes[i] = agentloop.ToolOutcome{Content: tr.Result, Success: tr.Success}
+		}
+		return outcomes, nil
+	})
 
-		if len(choice.Message.ToolCalls) > 0 {
-			if synthesizing {
-				var retry bool
-				messages, maxIterations, retry = prepareFinalToolRepair(
-					messages,
-					maxIterations,
-					finalToolRepairUsed,
-				)
-				if retry {
-					finalToolRepairUsed = true
-					continue
-				}
-				result.Summary = summarizeRejectedToolCalls(choice.Message.ToolCalls)
+	// Mirrors the pre-migration messages accumulation: the assistant
+	// tool-call message and its tool results feed the next round's request.
+	// The terminal (no-tool-call) assistant message never lands here -- it
+	// is read from Controller's Result.Message once the loop ends.
+	history := agentloop.HistorySinkFunc(func(msg model.Message) {
+		switch {
+		case len(msg.ToolCalls) > 0:
+			messages = append(messages, msg)
+		case msg.Role == "tool":
+			messages = append(messages, msg)
+		}
+	})
+
+	ctrl, err := agentloop.NewController(agentloop.ControllerConfig{
+		Governor:      agentloop.New(subAgentGovernorConfig(maxIterations, a.maxToolCalls)),
+		BuildRequest:  buildRequest,
+		CallModel:     callModel,
+		DispatchTools: dispatchTools,
+		History:       history,
+	})
+	if err != nil {
+		finalizeSubAgentResult(result, start)
+		return result, err
+	}
+
+	var runResult *agentloop.Result
+	for {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			finalizeSubAgentResult(result, start)
+			return result, ctxErr
+		}
+		runResult, err = ctrl.Run(ctx)
+		if err != nil {
+			if errors.Is(err, errSubAgentFinalToolRejectionTerminal) {
+				// result.Summary already set by the DispatchTools hook.
+				err = nil
 				break
 			}
-			toolCtx, cancelTools := a.explorationContext(ctx, start)
-			toolResults, err := a.executeTools(toolCtx, choice.Message.ToolCalls, allowedRegistry, allowedSet, result)
-			cancelTools()
-			if err != nil {
-				finalizeSubAgentResult(result, start)
-				return result, err
+			// awaitChatCompletion's request-scoped exploration deadline
+			// expired without the outer ctx itself expiring: retry on the
+			// same Controller/Governor instance, exactly like the
+			// pre-migration for loop's "continue" on this condition.
+			explorationDeadlineReached := lastExploring &&
+				errors.Is(err, context.DeadlineExceeded) &&
+				ctx.Err() == nil
+			if explorationDeadlineReached {
+				continue
 			}
-
-			messages = append(messages, assistantToolCallMessage(choice.Message))
-			for _, tr := range toolResults {
-				messages = append(messages, model.Message{
-					Role:       "tool",
-					ToolCallID: tr.ID,
-					Name:       tr.Name,
-					Content:    tr.Result,
-				})
-			}
-			continue
+			finalizeSubAgentResult(result, start)
+			return result, err
 		}
-
-		content, err := model.ExtractTextContent(choice.Message.Content)
-		if err != nil {
-			content = fmt.Sprintf("%v", choice.Message.Content)
-		}
-		result.Summary = strings.TrimSpace(content)
 		break
+	}
+
+	if err == nil && runResult != nil {
+		switch runResult.FinishReason {
+		case agentloop.FinishReasonEmptyChoices:
+			finalizeSubAgentResult(result, start)
+			return result, fmt.Errorf("no response from model")
+		case agentloop.FinishReasonLoopGuard, agentloop.FinishReasonStepCap:
+			// The Governor's own backstop (round/tool-call ceiling or
+			// repeat/cycle detection) stopped the loop before SubAgent's own
+			// synthesis-forcing logic did. finalizeSubAgentResult below
+			// falls back to summarizeToolCalls when Summary is still empty,
+			// matching the pre-migration "ran out of turns" outcome.
+		default:
+			content, extractErr := model.ExtractTextContent(runResult.Message.Content)
+			if extractErr != nil {
+				content = fmt.Sprintf("%v", runResult.Message.Content)
+			}
+			result.Summary = strings.TrimSpace(content)
+		}
 	}
 
 	finalizeSubAgentResult(result, start)
 	if a.scratchpad != nil {
-		key, err := a.scratchpad.Write(ctx, WriteRequest{
+		key, writeErr := a.scratchpad.Write(ctx, WriteRequest{
 			Type:      EntryTypeAnalysis,
 			Raw:       result.Raw,
 			Summary:   result.Summary,
@@ -385,7 +519,7 @@ func (a *SubAgent) Execute(ctx context.Context, task string) (*SubAgentResult, e
 			CreatedBy: a.id,
 			CreatedAt: time.Now(),
 		})
-		if err == nil {
+		if writeErr == nil {
 			result.RawKey = key
 		}
 	}

@@ -458,6 +458,168 @@ func TestInvokerWithTools_MaxIterations(t *testing.T) {
 	}
 }
 
+// requestCapturingClient records every request it receives, in order, so
+// tests can inspect exactly what pkg/agentloop.Controller assembled into
+// req.Messages each round.
+type requestCapturingClient struct {
+	responses []*model.ChatResponse
+	requests  []model.ChatRequest
+}
+
+func (c *requestCapturingClient) ChatCompletion(ctx context.Context, req model.ChatRequest) (*model.ChatResponse, error) {
+	c.requests = append(c.requests, req)
+	idx := len(c.requests) - 1
+	if idx >= len(c.responses) {
+		return &model.ChatResponse{
+			Choices: []model.Choice{{Message: model.Message{Content: "fallback"}}},
+		}, nil
+	}
+	return c.responses[idx], nil
+}
+
+// TestInvokeWithTools_SecondRequestCarriesToolCallAndResult is the
+// cross-round transcript invariant carried over from the pkg/headless and
+// pkg/ui/tui agentloop.Controller migrations: after round one dispatches a
+// tool, round two's request must contain the assistant tool-call message
+// and its tool result, or the model loops on stale history.
+func TestInvokeWithTools_SecondRequestCarriesToolCallAndResult(t *testing.T) {
+	client := &requestCapturingClient{
+		responses: []*model.ChatResponse{
+			{
+				Choices: []model.Choice{{
+					Message: model.Message{
+						ToolCalls: []model.ToolCall{{
+							ID:       "call_inv_1",
+							Type:     "function",
+							Function: model.FunctionCall{Name: "read_file", Arguments: `{"path":"main.go"}`},
+						}},
+					},
+				}},
+				Usage: model.Usage{PromptTokens: 100, CompletionTokens: 20, TotalTokens: 120},
+			},
+			{
+				Choices: []model.Choice{{Message: model.Message{Content: "done"}}},
+				Usage:   model.Usage{PromptTokens: 150, CompletionTokens: 15, TotalTokens: 165},
+			},
+		},
+	}
+
+	invoker := NewInvoker(InvokerConfig{Client: client, Model: "test-model"})
+	executor := &mockToolExecutor{results: map[string]string{"read_file": "package main"}}
+	toolDefs := []tools.Definition{{
+		Name:       "read_file",
+		Parameters: tools.ObjectSchema(map[string]tools.Property{"path": {Type: "string"}}, ""),
+	}}
+
+	content, _, err := invoker.InvokeWithTools(context.Background(), "system", "user", toolDefs, executor, 10)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if content != "done" {
+		t.Fatalf("content = %q, want %q", content, "done")
+	}
+	if len(client.requests) != 2 {
+		t.Fatalf("expected 2 model requests, got %d", len(client.requests))
+	}
+
+	second := client.requests[1]
+	var sawToolCall, sawToolResult bool
+	for _, msg := range second.Messages {
+		if len(msg.ToolCalls) == 1 && msg.ToolCalls[0].ID == "call_inv_1" {
+			sawToolCall = true
+		}
+		if msg.Role == "tool" && msg.ToolCallID == "call_inv_1" {
+			sawToolResult = true
+			if got, _ := msg.Content.(string); got != "package main" {
+				t.Errorf("tool result content = %q, want %q", got, "package main")
+			}
+		}
+	}
+	if !sawToolCall {
+		t.Fatalf("second request missing assistant tool-call message: %+v", second.Messages)
+	}
+	if !sawToolResult {
+		t.Fatalf("second request missing tool result message: %+v", second.Messages)
+	}
+}
+
+// TestInvokeWithTools_AccumulatesTranscriptAndUsageAcrossRounds is the
+// accumulated-state invariant: after two tool rounds and a final answer, the
+// last request must still carry both prior tool exchanges (not just the
+// most recent one), and reported usage must sum every round Controller ran,
+// proving the migration's per-round token accumulation and multi-round
+// messages accumulation both survive more than one hop.
+func TestInvokeWithTools_AccumulatesTranscriptAndUsageAcrossRounds(t *testing.T) {
+	client := &requestCapturingClient{
+		responses: []*model.ChatResponse{
+			{
+				Choices: []model.Choice{{Message: model.Message{ToolCalls: []model.ToolCall{{
+					ID: "call_a", Type: "function", Function: model.FunctionCall{Name: "read_file", Arguments: `{"path":"a.go"}`},
+				}}}}},
+				Usage: model.Usage{PromptTokens: 100, CompletionTokens: 10},
+			},
+			{
+				Choices: []model.Choice{{Message: model.Message{ToolCalls: []model.ToolCall{{
+					ID: "call_b", Type: "function", Function: model.FunctionCall{Name: "read_file", Arguments: `{"path":"b.go"}`},
+				}}}}},
+				Usage: model.Usage{PromptTokens: 120, CompletionTokens: 12},
+			},
+			{
+				Choices: []model.Choice{{Message: model.Message{Content: "both files read"}}},
+				Usage:   model.Usage{PromptTokens: 140, CompletionTokens: 8},
+			},
+		},
+	}
+
+	invoker := NewInvoker(InvokerConfig{Client: client, Model: "test-model"})
+	executor := &mockToolExecutor{results: map[string]string{"read_file": "ok"}}
+	toolDefs := []tools.Definition{{
+		Name:       "read_file",
+		Parameters: tools.ObjectSchema(map[string]tools.Property{"path": {Type: "string"}}, ""),
+	}}
+
+	content, trace, err := invoker.InvokeWithTools(context.Background(), "system", "user", toolDefs, executor, 10)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if content != "both files read" {
+		t.Fatalf("content = %q, want %q", content, "both files read")
+	}
+	if len(client.requests) != 3 {
+		t.Fatalf("expected 3 model requests, got %d", len(client.requests))
+	}
+
+	final := client.requests[2]
+	callIDs := map[string]bool{}
+	resultIDs := map[string]bool{}
+	for _, msg := range final.Messages {
+		for _, tc := range msg.ToolCalls {
+			callIDs[tc.ID] = true
+		}
+		if msg.Role == "tool" {
+			resultIDs[msg.ToolCallID] = true
+		}
+	}
+	for _, id := range []string{"call_a", "call_b"} {
+		if !callIDs[id] {
+			t.Errorf("final request missing accumulated tool call %q: %+v", id, final.Messages)
+		}
+		if !resultIDs[id] {
+			t.Errorf("final request missing accumulated tool result %q: %+v", id, final.Messages)
+		}
+	}
+
+	if trace.Tokens.Input != 360 { // 100 + 120 + 140
+		t.Errorf("trace.Tokens.Input = %d, want 360", trace.Tokens.Input)
+	}
+	if trace.Tokens.Output != 30 { // 10 + 12 + 8
+		t.Errorf("trace.Tokens.Output = %d, want 30", trace.Tokens.Output)
+	}
+	if len(executor.calls) != 2 {
+		t.Errorf("executor.calls = %v, want 2 calls", executor.calls)
+	}
+}
+
 func TestInvokeStream_WithCallback(t *testing.T) {
 	client := &mockStreamClient{
 		responses: []*model.ChatResponse{
