@@ -156,3 +156,7 @@ require (
 	sigs.k8s.io/structured-merge-diff/v4 v4.4.1 // indirect
 	sigs.k8s.io/yaml v1.3.0 // indirect
 )
+
+retract [v1.0.0, v1.6.2] // Pre-1.0 re-versioning. Use the 0.x line.
+
+retract v0.2.0 // Declares the old github.com module path.
