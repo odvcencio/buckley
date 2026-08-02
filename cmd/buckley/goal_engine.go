@@ -70,7 +70,7 @@ func (e *goalTurnEngine) RunTurn(ctx context.Context, task goalloop.TaskContext)
 	if e.engine != nil {
 		evaluator = rules.NewEngineAdapter(e.engine)
 	}
-	tools := e.registry.ToOpenAIFunctionsGoverned(evaluator, "interactive", "coding", nil, 0)
+	tools := e.registry.ToOpenAIFunctionsGoverned(evaluator, "interactive", "coding", goalTurnAllowedTools(task.Phase), 0)
 	tools = append(tools, goalCompleteToolSchema(), goalBlockedToolSchema())
 
 	buildRequest := func(ctx context.Context, round int) (model.ChatRequest, error) {
@@ -176,6 +176,13 @@ func (e *goalTurnEngine) dispatchGoalTool(ctx context.Context, task goalloop.Tas
 		return agentloop.ToolOutcome{Content: "Blocker recorded. The task will park with this reason.", Success: true}
 	}
 
+	// Enforce the phase allowlist at dispatch too: the model only sees
+	// the narrowed pool, but a hallucinated call to an unoffered tool
+	// must fail here, not execute.
+	if !tool.IsToolAllowed(call.Function.Name, goalTurnAllowedTools(task.Phase)) {
+		return agentloop.ToolOutcome{Content: fmt.Sprintf("Error: tool %s is not available in the %s phase", call.Function.Name, task.Phase)}
+	}
+
 	if registered, ok := e.registry.Get(call.Function.Name); ok {
 		if tool.GetMetadata(registered).Impact != tool.ImpactReadOnly {
 			state.stateChanged = true
@@ -213,6 +220,24 @@ func (e *goalTurnEngine) storeCompletionEvidence(ctx context.Context, task goall
 		return "", fmt.Errorf("store completion evidence: %w", err)
 	}
 	return obj.ID, nil
+}
+
+// goalTurnAllowedTools narrows the tool pool by phase (design 6.3's
+// "cheap verification" intent, expressed through tools rather than a
+// model tier the config does not have): a verify turn can read, search,
+// and run checks, but cannot edit — verification that mutates state is
+// not verification. Execute turns keep the full governed pool (nil = no
+// filter).
+func goalTurnAllowedTools(phase string) []string {
+	if phase != goalloop.PhaseVerify {
+		return nil
+	}
+	return []string{
+		"read_file", "list_directory", "find_files", "file_exists",
+		"search_text", "find_symbol", "find_references",
+		"git_status", "git_diff", "git_log",
+		"run_shell", "run_tests",
+	}
 }
 
 func goalTurnSystemPrompt(task goalloop.TaskContext) string {

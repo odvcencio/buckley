@@ -138,6 +138,44 @@ func TestGoalTurnEngine_BlockedParksWithReason(t *testing.T) {
 	}
 }
 
+// TestGoalTurnAllowedTools locks the verify-phase pool: read, search,
+// and run tools only — no editors — while execute turns are unfiltered.
+func TestGoalTurnAllowedTools(t *testing.T) {
+	t.Parallel()
+	if goalTurnAllowedTools(goalloop.PhaseExecute) != nil {
+		t.Fatal("execute phase must not filter the tool pool")
+	}
+	verify := goalTurnAllowedTools(goalloop.PhaseVerify)
+	allowed := map[string]bool{}
+	for _, name := range verify {
+		allowed[name] = true
+	}
+	for _, want := range []string{"run_tests", "run_shell", "read_file", "git_diff"} {
+		if !allowed[want] {
+			t.Fatalf("verify pool missing %s: %v", want, verify)
+		}
+	}
+	for _, forbidden := range []string{"write_file", "edit_file", "apply_patch"} {
+		if allowed[forbidden] {
+			t.Fatalf("verify pool includes editor %s", forbidden)
+		}
+	}
+}
+
+// TestGoalTurnEngine_VerifyPhaseRejectsEditors locks dispatch-side
+// enforcement: a hallucinated editor call in a verify turn fails
+// instead of executing.
+func TestGoalTurnEngine_VerifyPhaseRejectsEditors(t *testing.T) {
+	t.Parallel()
+	engine, _ := newGoalEngineUnderTest(t, []string{goalEngineTextResponse})
+	outcome := engine.dispatchGoalTool(context.Background(), goalloop.TaskContext{Phase: goalloop.PhaseVerify},
+		model.ToolCall{ID: "call-1", Function: model.FunctionCall{Name: "write_file", Arguments: "{}"}},
+		&goalTurnState{})
+	if outcome.Success || !strings.Contains(outcome.Content, "not available in the verify phase") {
+		t.Fatalf("outcome = %+v, want a phase rejection", outcome)
+	}
+}
+
 // TestGoalTurnEngine_VerifyPhasePrompt locks the phase contract: a
 // verify-phase turn tells the model to verify, not explore.
 func TestGoalTurnEngine_VerifyPhasePrompt(t *testing.T) {
