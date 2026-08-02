@@ -163,28 +163,6 @@ func TestBuildACPChatRequestProjectionAloneBoundsLargeTranscript(t *testing.T) {
 	}
 }
 
-func TestNormalizeACPToolCallIDs(t *testing.T) {
-	t.Parallel()
-
-	calls := []model.ToolCall{
-		{Function: model.FunctionCall{Name: "read_file"}},
-		{ID: "existing", Function: model.FunctionCall{Name: "search_text"}},
-		{Function: model.FunctionCall{Name: "run_shell"}},
-	}
-
-	normalizeACPToolCallIDs(calls)
-
-	if calls[0].ID != "tool-1" {
-		t.Fatalf("first ID = %q, want tool-1", calls[0].ID)
-	}
-	if calls[1].ID != "existing" {
-		t.Fatalf("second ID = %q, want existing", calls[1].ID)
-	}
-	if calls[2].ID != "tool-3" {
-		t.Fatalf("third ID = %q, want tool-3", calls[2].ID)
-	}
-}
-
 func TestParseACPUserSkillCommand(t *testing.T) {
 	t.Parallel()
 

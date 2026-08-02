@@ -608,6 +608,39 @@ func TestRunnerRunSuiteAggregatesFailures(t *testing.T) {
 	}
 }
 
+// TestRunnerRunObservesToolCallsThroughEngine locks the Controller
+// migration's capture-and-strip contract: a response that carries tool
+// calls (despite the request offering no tools) is observed by the
+// max_tool_calls check from the raw response, while the shared engine --
+// which has no ToolDispatcher here -- never tries to dispatch them.
+func TestRunnerRunObservesToolCallsThroughEngine(t *testing.T) {
+	resp := response("test-model", "answer text")
+	resp.Choices[0].Message.ToolCalls = []model.ToolCall{
+		{ID: "call-1", Function: model.FunctionCall{Name: "phantom_tool"}},
+		{ID: "call-2", Function: model.FunctionCall{Name: "phantom_tool"}},
+	}
+	client := &fakeClient{responses: []model.ChatResponse{resp}}
+	runner := Runner{Client: client}
+
+	zero := 0
+	result, err := runner.Run(context.Background(), Scenario{
+		Model: "test-model",
+		Turns: []Turn{{User: "hello", MaxToolCalls: &zero}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "too many tool calls") {
+		t.Fatalf("err=%v want max_tool_calls failure from the raw response", err)
+	}
+	if result == nil || len(result.Turns) != 1 {
+		t.Fatalf("result did not capture the turn: %+v", result)
+	}
+	if result.Turns[0].ToolCalls != 2 {
+		t.Fatalf("turn ToolCalls = %d, want 2 (raw response observation)", result.Turns[0].ToolCalls)
+	}
+	if len(client.requests) != 1 {
+		t.Fatalf("requests = %d, want 1 (the engine must not dispatch or re-call)", len(client.requests))
+	}
+}
+
 func response(modelID, text string) model.ChatResponse {
 	return model.ChatResponse{
 		Model: modelID,

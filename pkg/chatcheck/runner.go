@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+	"m31labs.dev/buckley/pkg/agentloop"
 	"m31labs.dev/buckley/pkg/model"
 )
 
@@ -418,7 +419,7 @@ func (r Runner) Run(ctx context.Context, scenario Scenario) (*Result, error) {
 		if scenario.Timeout > 0 {
 			turnCtx, cancel = context.WithTimeout(ctx, scenario.Timeout)
 		}
-		resp, err := r.Client.ChatCompletion(turnCtx, req)
+		resp, ctrlResult, err := r.runTurn(turnCtx, req)
 		cancel()
 
 		turnResult := TurnResult{
@@ -431,10 +432,6 @@ func (r Runner) Run(ctx context.Context, scenario Scenario) (*Result, error) {
 		if err != nil {
 			return failTurn(result, turnResult, fmt.Errorf("turn %d chat completion: %w", i+1, err))
 		}
-		if resp == nil {
-			err := fmt.Errorf("turn %d chat completion: %w", i+1, model.NilChatResponseError(req))
-			return failTurn(result, turnResult, err)
-		}
 		if strings.TrimSpace(resp.Model) != "" {
 			turnResult.Model = resp.Model
 		}
@@ -442,7 +439,7 @@ func (r Runner) Run(ctx context.Context, scenario Scenario) (*Result, error) {
 		result.Usage.PromptTokens += resp.Usage.PromptTokens
 		result.Usage.CompletionTokens += resp.Usage.CompletionTokens
 		result.Usage.TotalTokens += resp.Usage.TotalTokens
-		if len(resp.Choices) == 0 {
+		if ctrlResult.FinishReason == agentloop.FinishReasonEmptyChoices {
 			err := fmt.Errorf("turn %d chat completion: %w", i+1, model.NoResponseChoicesError(req, resp))
 			return failTurn(result, turnResult, err)
 		}
@@ -481,6 +478,46 @@ func (r Runner) Run(ctx context.Context, scenario Scenario) (*Result, error) {
 	}
 
 	return result, nil
+}
+
+// runTurn drives one scenario turn through the shared turn engine
+// (pkg/agentloop.Controller), which owns request projection and the
+// empty-choices distinction. A chatcheck turn is a single model round: the
+// request offers no tools, and a response that carries tool calls anyway
+// is observed by the turn's checks (max_tool_calls), never dispatched --
+// so CallModel captures the raw response for the checks, then hands the
+// engine a copy with the tool calls stripped, ending the round without a
+// ToolDispatcher. The raw response is non-nil whenever the returned error
+// is nil.
+func (r Runner) runTurn(ctx context.Context, req model.ChatRequest) (*model.ChatResponse, *agentloop.Result, error) {
+	var raw *model.ChatResponse
+	ctrl, err := agentloop.NewController(agentloop.ControllerConfig{
+		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
+			return req, nil
+		},
+		CallModel: agentloop.ModelCallerFunc(func(ctx context.Context, req model.ChatRequest, _ bool) (*model.ChatResponse, error) {
+			resp, err := r.Client.ChatCompletion(ctx, req)
+			if err != nil {
+				return nil, err
+			}
+			if resp == nil {
+				return nil, model.NilChatResponseError(req)
+			}
+			raw = resp
+			if len(resp.Choices) == 0 {
+				return resp, nil
+			}
+			engineCopy := *resp
+			engineCopy.Choices = append([]model.Choice(nil), resp.Choices...)
+			engineCopy.Choices[0].Message.ToolCalls = nil
+			return &engineCopy, nil
+		}),
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	ctrlResult, err := ctrl.Run(ctx)
+	return raw, ctrlResult, err
 }
 
 // turnCheckFunc validates one aspect of a turn's response against turn's
