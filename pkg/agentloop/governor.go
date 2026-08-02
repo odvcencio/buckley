@@ -51,6 +51,9 @@ type Governor struct {
 	exactCounts   map[string]int
 	outcomeCounts map[string]int
 	actionHistory []string
+
+	maxExactCount   int
+	maxOutcomeCount int
 }
 
 // New constructs a progress-aware loop governor.
@@ -98,6 +101,12 @@ func (g *Governor) Observe(name, arguments, result string, success bool) Decisio
 	g.toolCalls++
 	g.exactCounts[exactKey]++
 	g.outcomeCounts[outcomeKey]++
+	if g.exactCounts[exactKey] > g.maxExactCount {
+		g.maxExactCount = g.exactCounts[exactKey]
+	}
+	if g.outcomeCounts[outcomeKey] > g.maxOutcomeCount {
+		g.maxOutcomeCount = g.outcomeCounts[outcomeKey]
+	}
 	// Cycle detection includes the result. Repeating a polling action while its
 	// evidence changes is progress; repeating the same action/evidence sequence is not.
 	g.appendAction(exactKey)
@@ -155,6 +164,50 @@ func (g *Governor) ToolCalls() int {
 		return 0
 	}
 	return g.toolCalls
+}
+
+// RepetitionPressure reports how close the loop is to a repeat-based stop
+// as a 0..1 ratio: the highest observed repeat count relative to its
+// configured limit, across the exact-repeat and outcome-repeat detectors.
+// It is the ProgressController's repetition signal (the design's
+// stagnation nudge, folded into one scalar).
+func (g *Governor) RepetitionPressure() float64 {
+	if g == nil {
+		return 0
+	}
+	pressure := 0.0
+	if g.config.ExactRepeatLimit > 0 {
+		if p := float64(g.maxExactCount) / float64(g.config.ExactRepeatLimit); p > pressure {
+			pressure = p
+		}
+	}
+	if g.config.OutcomeRepeatLimit > 0 {
+		if p := float64(g.maxOutcomeCount) / float64(g.config.OutcomeRepeatLimit); p > pressure {
+			pressure = p
+		}
+	}
+	if pressure > 1 {
+		pressure = 1
+	}
+	return pressure
+}
+
+// evidenceNoveltyMinSamples is the number of observed outcomes below which
+// the novelty signal is reported as unobserved: two tool calls that were
+// both "new" say nothing about stagnation yet.
+const evidenceNoveltyMinSamples = 4
+
+// EvidenceNovelty reports the fraction of observed tool outcomes that were
+// first occurrences (0 = every outcome was a repeat, 1 = all new), and
+// whether enough outcomes exist for the signal to mean anything. Outcome
+// identity uses the same canonicalized evidence hashing the repeat
+// detectors use: a changed content hash is new evidence, a re-read is not.
+func (g *Governor) EvidenceNovelty() (float64, bool) {
+	if g == nil || g.toolCalls == 0 {
+		return 0, false
+	}
+	novelty := float64(len(g.outcomeCounts)) / float64(g.toolCalls)
+	return novelty, g.toolCalls >= evidenceNoveltyMinSamples
 }
 
 func normalizedConfig(config Config) Config {
