@@ -5,7 +5,10 @@
 // See: https://agentclientprotocol.com
 package acp
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"fmt"
+)
 
 // ProtocolVersion is the ACP protocol version we implement.
 const ProtocolVersion uint16 = 1
@@ -123,6 +126,10 @@ type NewSessionParams struct {
 type NewSessionResult struct {
 	SessionID string            `json:"sessionId"`
 	Modes     *SessionModeState `json:"modes,omitempty"`
+	// ConfigOptions advertises session config options (S8) -- e.g. a model
+	// picker -- the same way client support is signaled: by presence in the
+	// response, not a separate capability flag (matching Modes above).
+	ConfigOptions []SessionConfigOption `json:"configOptions,omitempty"`
 }
 
 type LoadSessionParams struct {
@@ -163,7 +170,8 @@ const (
 )
 
 type LoadSessionResult struct {
-	Modes *SessionModeState `json:"modes,omitempty"`
+	Modes         *SessionModeState     `json:"modes,omitempty"`
+	ConfigOptions []SessionConfigOption `json:"configOptions,omitempty"`
 }
 
 // SessionModeState describes the current mode and available modes.
@@ -177,6 +185,119 @@ type SessionMode struct {
 	ID          string `json:"id"`
 	Name        string `json:"name"`
 	Description string `json:"description,omitempty"`
+}
+
+// Session Config Options (S8)
+//
+// Buckley keeps permission modes as modes (SessionModeState above) and
+// exposes models as a config option instead of a mode: CodeCompanion picks
+// models ONLY via session/set_config_option, so models-as-modes are
+// invisible there. See:
+// https://agentclientprotocol.com/protocol/session-setup#session-configuration
+
+// SessionConfigOptionCategory is a semantic hint (UX only, never required
+// for correctness) telling the client what kind of selector this is, so it
+// can place a model picker differently from a generic select box.
+const (
+	SessionConfigCategoryMode         = "mode"
+	SessionConfigCategoryModel        = "model"
+	SessionConfigCategoryModelConfig  = "model_config"
+	SessionConfigCategoryThoughtLevel = "thought_level"
+)
+
+// SessionConfigOption's type-specific "kind" discriminator: a select-style
+// dropdown or a boolean on/off toggle. Flattened onto SessionConfigOption
+// itself on the wire (no nested "kind" object), matching the ACP schema's
+// `#[serde(flatten)]` on SessionConfigKind.
+const (
+	SessionConfigKindSelect  = "select"
+	SessionConfigKindBoolean = "boolean"
+)
+
+// SessionConfigOption describes one session-scoped configuration control:
+// a model picker (category=model, type=select) is the S8 acceptance case,
+// but the shape is generic per the ACP schema.
+type SessionConfigOption struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	Category    string `json:"category,omitempty"`
+	// Type is the flattened kind discriminator: "select" or "boolean".
+	Type string `json:"type"`
+	// CurrentValue holds a string value id for a "select" option or a bool
+	// for a "boolean" option, matching Type.
+	CurrentValue any `json:"currentValue,omitempty"`
+	// Options lists the selectable values for a "select" option; unused for
+	// "boolean".
+	Options []SessionConfigSelectOption `json:"options,omitempty"`
+}
+
+// SessionConfigSelectOption is one selectable value for a "select"
+// SessionConfigOption (e.g. one model in a model picker).
+type SessionConfigSelectOption struct {
+	Value       string `json:"value"`
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+}
+
+// NewModelConfigOption builds a "select" SessionConfigOption for a model
+// picker: category=model, type=select. This is the shape CodeCompanion's
+// model picker looks for via session/set_config_option.
+func NewModelConfigOption(id, name, currentValue string, options []SessionConfigSelectOption) SessionConfigOption {
+	return SessionConfigOption{
+		ID:           id,
+		Name:         name,
+		Category:     SessionConfigCategoryModel,
+		Type:         SessionConfigKindSelect,
+		CurrentValue: currentValue,
+		Options:      options,
+	}
+}
+
+// SetConfigOptionParams is session/set_config_option's request params. The
+// ACP schema flattens the value's own "type"/"value" discriminator onto
+// this object: Type is "boolean" for a boolean value, or absent/any other
+// string for a value-id (the default, untagged fallback) -- see
+// ParseConfigOptionValue.
+type SetConfigOptionParams struct {
+	SessionID string          `json:"sessionId"`
+	ConfigID  string          `json:"configId"`
+	Type      string          `json:"type,omitempty"`
+	Value     json.RawMessage `json:"value"`
+}
+
+// ConfigOptionValue is a parsed session/set_config_option value: exactly
+// one of ValueID (a select option's chosen value id) or Boolean is set.
+type ConfigOptionValue struct {
+	ValueID string
+	Boolean *bool
+}
+
+// ParseConfigOptionValue decodes SetConfigOptionParams' flattened
+// type/value pair into a ConfigOptionValue. A "boolean" type decodes Value
+// as a bool; any other type (including absent, the wire default) decodes
+// Value as a string value id, matching the schema's untagged ValueId
+// fallback variant.
+func ParseConfigOptionValue(params SetConfigOptionParams) (ConfigOptionValue, error) {
+	if params.Type == "boolean" {
+		var b bool
+		if err := json.Unmarshal(params.Value, &b); err != nil {
+			return ConfigOptionValue{}, fmt.Errorf("parse boolean config value: %w", err)
+		}
+		return ConfigOptionValue{Boolean: &b}, nil
+	}
+	var s string
+	if err := json.Unmarshal(params.Value, &s); err != nil {
+		return ConfigOptionValue{}, fmt.Errorf("parse value-id config value: %w", err)
+	}
+	return ConfigOptionValue{ValueID: s}, nil
+}
+
+// SetConfigOptionResult is the response body for
+// "session/set_config_option": the full updated set of configuration
+// options and their current values.
+type SetConfigOptionResult struct {
+	ConfigOptions []SessionConfigOption `json:"configOptions"`
 }
 
 // Prompt Types
@@ -207,6 +328,9 @@ type SessionUpdate struct {
 	CurrentModeID string `json:"currentModeId,omitempty"`
 	// AvailableCommands is populated for available_commands_update notifications.
 	AvailableCommands []AvailableCommand `json:"availableCommands,omitempty"`
+	// ConfigOptions is populated for config_option_update notifications (S8):
+	// the full updated set of session config options after a change.
+	ConfigOptions []SessionConfigOption `json:"configOptions,omitempty"`
 
 	ToolCallID string             `json:"toolCallId,omitempty"`
 	Title      string             `json:"title,omitempty"`
@@ -315,13 +439,14 @@ const (
 // Constructors
 
 const (
-	SessionUpdateUserMessageChunk  = "user_message_chunk"
-	SessionUpdateAgentMessageChunk = "agent_message_chunk"
-	SessionUpdateAgentThoughtChunk = "agent_thought_chunk"
-	SessionUpdateCurrentModeUpdate = "current_mode_update"
-	SessionUpdateAvailableCommands = "available_commands_update"
-	SessionUpdateToolCall          = "tool_call"
-	SessionUpdateToolCallUpdate    = "tool_call_update"
+	SessionUpdateUserMessageChunk   = "user_message_chunk"
+	SessionUpdateAgentMessageChunk  = "agent_message_chunk"
+	SessionUpdateAgentThoughtChunk  = "agent_thought_chunk"
+	SessionUpdateCurrentModeUpdate  = "current_mode_update"
+	SessionUpdateAvailableCommands  = "available_commands_update"
+	SessionUpdateConfigOptionUpdate = "config_option_update"
+	SessionUpdateToolCall           = "tool_call"
+	SessionUpdateToolCallUpdate     = "tool_call_update"
 )
 
 // AvailableCommand describes a slash command advertised by the agent.
@@ -354,6 +479,12 @@ func NewAgentThoughtChunk(text string) SessionUpdate {
 // NewCurrentModeUpdate notifies the client that the current mode changed.
 func NewCurrentModeUpdate(modeID string) SessionUpdate {
 	return SessionUpdate{SessionUpdate: SessionUpdateCurrentModeUpdate, CurrentModeID: modeID}
+}
+
+// NewConfigOptionUpdate notifies the client that session config options
+// changed (S8) -- e.g. after session/set_config_option picks a new model.
+func NewConfigOptionUpdate(options []SessionConfigOption) SessionUpdate {
+	return SessionUpdate{SessionUpdate: SessionUpdateConfigOptionUpdate, ConfigOptions: options}
 }
 
 // ToolCallContent describes output emitted by a tool call.

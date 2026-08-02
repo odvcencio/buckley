@@ -50,6 +50,11 @@ type AgentSession struct {
 	// reads this to spawn the session's own MCP servers; see
 	// cmd/buckley/acp.go's session setup.
 	McpServers []McpServer
+	// ConfigOptions holds the session's current config options (S8) -- e.g.
+	// a model picker -- so handleSessionSetConfigOption can validate a
+	// configId against the known set, the same way Modes backs
+	// handleSessionSetMode.
+	ConfigOptions []SessionConfigOption
 }
 
 // AgentHandlers are callbacks that connect ACP to Buckley's internals.
@@ -78,6 +83,18 @@ type AgentHandlers struct {
 
 	// OnSessionModes provides the session mode list for the client.
 	OnSessionModes func(ctx context.Context, session *AgentSession) (*SessionModeState, error)
+
+	// OnSessionConfigOptions provides the session's initial config options
+	// (S8) -- e.g. a model picker -- returned from session/new and
+	// session/load. A nil/empty result means Buckley advertises no config
+	// options for this session.
+	OnSessionConfigOptions func(ctx context.Context, session *AgentSession) ([]SessionConfigOption, error)
+
+	// OnSetConfigOption applies a session/set_config_option change (S8) --
+	// e.g. CodeCompanion's model picker selecting a different model -- and
+	// returns the full updated set of config options to echo back to the
+	// client and broadcast via config_option_update.
+	OnSetConfigOption func(ctx context.Context, session *AgentSession, configID string, value ConfigOptionValue) ([]SessionConfigOption, error)
 }
 
 // StreamFunc is used to stream updates back to the client.
@@ -165,6 +182,8 @@ func (a *Agent) handleRequest(ctx context.Context, req *Request) {
 		a.handleSessionPrompt(ctx, req)
 	case "session/set_mode":
 		a.handleSessionSetMode(ctx, req)
+	case "session/set_config_option":
+		a.handleSessionSetConfigOption(ctx, req)
 	case "session/cancel":
 		a.handleSessionCancel(ctx, req)
 	case "_shutdown":
@@ -260,7 +279,19 @@ func (a *Agent) handleSessionNew(ctx context.Context, req *Request) {
 		}
 	}
 
-	_ = a.transport.SendResponse(req.ID, NewSessionResult{SessionID: session.ID, Modes: modes})
+	var configOptions []SessionConfigOption
+	if a.handlers.OnSessionConfigOptions != nil {
+		if options, err := a.handlers.OnSessionConfigOptions(ctx, session); err == nil {
+			configOptions = options
+		}
+	}
+	if len(configOptions) > 0 {
+		a.sessionsMu.Lock()
+		session.ConfigOptions = configOptions
+		a.sessionsMu.Unlock()
+	}
+
+	_ = a.transport.SendResponse(req.ID, NewSessionResult{SessionID: session.ID, Modes: modes, ConfigOptions: configOptions})
 }
 
 // handleSessionLoad loads an existing session.
@@ -280,7 +311,7 @@ func (a *Agent) handleSessionLoad(ctx context.Context, req *Request) {
 		return
 	}
 
-	_ = a.transport.SendResponse(req.ID, LoadSessionResult{Modes: session.Modes})
+	_ = a.transport.SendResponse(req.ID, LoadSessionResult{Modes: session.Modes, ConfigOptions: session.ConfigOptions})
 }
 
 // handleSessionPrompt handles a user prompt.
@@ -385,6 +416,55 @@ func (a *Agent) handleSessionSetMode(ctx context.Context, req *Request) {
 			Update:    NewCurrentModeUpdate(params.ModeID),
 		})
 	}
+}
+
+// handleSessionSetConfigOption applies a session/set_config_option change
+// (S8) -- e.g. CodeCompanion's model picker selecting a different model --
+// via AgentHandlers.OnSetConfigOption, then echoes the updated config
+// option set back to the caller and broadcasts it via config_option_update,
+// the same result-plus-notification shape handleSessionSetMode uses for
+// current_mode_update.
+func (a *Agent) handleSessionSetConfigOption(ctx context.Context, req *Request) {
+	params, err := ParseParams[SetConfigOptionParams](req)
+	if err != nil {
+		_ = a.transport.SendError(req.ID, ErrCodeInvalidParams, "Invalid params", err.Error())
+		return
+	}
+
+	a.sessionsMu.RLock()
+	session, exists := a.sessions[params.SessionID]
+	a.sessionsMu.RUnlock()
+	if !exists {
+		_ = a.transport.SendError(req.ID, ErrCodeSessionNotFound, "Session not found", params.SessionID)
+		return
+	}
+
+	value, err := ParseConfigOptionValue(*params)
+	if err != nil {
+		_ = a.transport.SendError(req.ID, ErrCodeInvalidParams, "Invalid config value", err.Error())
+		return
+	}
+
+	if a.handlers.OnSetConfigOption == nil {
+		_ = a.transport.SendError(req.ID, ErrCodeInternal, "Config options not supported", nil)
+		return
+	}
+
+	options, err := a.handlers.OnSetConfigOption(ctx, session, params.ConfigID, value)
+	if err != nil {
+		_ = a.transport.SendError(req.ID, ErrCodeInvalidParams, "Set config option failed", err.Error())
+		return
+	}
+
+	a.sessionsMu.Lock()
+	session.ConfigOptions = options
+	a.sessionsMu.Unlock()
+
+	_ = a.transport.SendResponse(req.ID, SetConfigOptionResult{ConfigOptions: options})
+	_ = a.transport.SendNotification("session/update", SessionUpdateNotification{
+		SessionID: params.SessionID,
+		Update:    NewConfigOptionUpdate(options),
+	})
 }
 
 // handleSessionCancel cancels an active prompt.

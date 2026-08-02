@@ -128,6 +128,24 @@ func runACPCommand(args []string) error {
 		OnSessionModes: func(ctx context.Context, session *acp.AgentSession) (*acp.SessionModeState, error) {
 			return buildACPModelModes(cfg, mgr), nil
 		},
+		// S8: models are also exposed as a session config option
+		// (category "model") alongside the existing modes advertisement --
+		// CodeCompanion picks models ONLY via session/set_config_option, so
+		// models-as-modes alone are invisible there. Both mechanisms share
+		// session.Mode as their one source of truth (see
+		// buildACPModelConfigOptions/applyACPSetModelConfigOption), so a
+		// modes-only client and a config-option-only client never disagree
+		// about which model is active. Permission modes stay as modes;
+		// this only adds a second surface for the model selector.
+		OnSessionConfigOptions: func(ctx context.Context, session *acp.AgentSession) ([]acp.SessionConfigOption, error) {
+			return buildACPModelConfigOptions(cfg, mgr, session), nil
+		},
+		OnSetConfigOption: func(ctx context.Context, session *acp.AgentSession, configID string, value acp.ConfigOptionValue) ([]acp.SessionConfigOption, error) {
+			if configID != acpModelConfigID {
+				return nil, fmt.Errorf("unknown config option %q", configID)
+			}
+			return applyACPSetModelConfigOption(cfg, mgr, session, value)
+		},
 		OnPrompt: promptHandler,
 		OnReadFile: func(ctx context.Context, path string, startLine, endLine int) (string, error) {
 			logf("read file: %s (lines %d-%d)", path, startLine, endLine)
@@ -706,6 +724,79 @@ func resolveACPModelOverride(cfg *config.Config, mgr *model.Manager, modeID stri
 		return ""
 	}
 	return modeID
+}
+
+// acpModelConfigID is the SessionConfigOption.ID for Buckley's model
+// picker (S8) -- the ID a client sends back as configId on
+// session/set_config_option.
+const acpModelConfigID = "model"
+
+// buildACPModelConfigOptions builds the "model" SessionConfigOption (S8):
+// a select-style config option listing every curated model, alongside the
+// existing modes-based model selector (buildACPModelModes). Both read the
+// same curated list and both read/write session.Mode as their one shared
+// source of truth for "which model is active", so a config-option-only
+// client (CodeCompanion) and a modes-only client never disagree.
+func buildACPModelConfigOptions(cfg *config.Config, mgr *model.Manager, session *acp.AgentSession) []acp.SessionConfigOption {
+	curated := curatedModelIDs(cfg, mgr)
+	if len(curated) == 0 {
+		return nil
+	}
+
+	options := make([]acp.SessionConfigSelectOption, 0, len(curated))
+	for _, modelID := range curated {
+		if strings.TrimSpace(modelID) == "" {
+			continue
+		}
+		name := modelID
+		desc := ""
+		if mgr != nil {
+			if info, err := mgr.GetModelInfo(modelID); err == nil {
+				if strings.TrimSpace(info.Name) != "" {
+					name = info.Name
+				}
+				desc = info.Description
+			}
+		}
+		options = append(options, acp.SessionConfigSelectOption{Value: modelID, Name: name, Description: desc})
+	}
+	if len(options) == 0 {
+		return nil
+	}
+
+	// Only trust session.Mode as a model selection when it actually carries
+	// the "model:" prefix -- resolveACPModelOverride treats any other
+	// non-empty, non-"default" string as a literal model override, and
+	// AgentSession's own zero-state default ("normal") is neither empty
+	// nor "default", so it must never reach that path.
+	current := options[0].Value
+	if session != nil && strings.HasPrefix(session.Mode, acpModePrefix) {
+		if override := resolveACPModelOverride(cfg, mgr, session.Mode); override != "" {
+			current = override
+		}
+	}
+
+	return []acp.SessionConfigOption{acp.NewModelConfigOption(acpModelConfigID, "Model", current, options)}
+}
+
+// applyACPSetModelConfigOption handles a session/set_config_option change
+// to the "model" option (S8): it validates the chosen model against the
+// curated catalog and writes session.Mode in place -- the same field
+// resolveACPModelOverride reads for every turn -- so the change takes
+// effect immediately regardless of which selector (modes or config
+// options) the client uses.
+func applyACPSetModelConfigOption(cfg *config.Config, mgr *model.Manager, session *acp.AgentSession, value acp.ConfigOptionValue) ([]acp.SessionConfigOption, error) {
+	modelID := strings.TrimSpace(value.ValueID)
+	if modelID == "" {
+		return nil, fmt.Errorf("model config option requires a value id")
+	}
+	if mgr != nil && !acpCatalogHasModel(mgr, modelID) {
+		return nil, fmt.Errorf("unknown model %q", modelID)
+	}
+	if session != nil {
+		session.Mode = acpModePrefix + modelID
+	}
+	return buildACPModelConfigOptions(cfg, mgr, session), nil
 }
 
 func runACPLoop(
