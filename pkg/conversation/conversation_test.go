@@ -175,6 +175,53 @@ func TestAddToolCallMessageWithReasoningPreservesMultiTurnState(t *testing.T) {
 	}
 }
 
+func TestAddToolCallMessageWithContentPreservesPreamble(t *testing.T) {
+	conv := New("test")
+	toolCalls := []model.ToolCall{
+		{ID: "call_123", Type: "function", Function: model.FunctionCall{Name: "echo", Arguments: "{}"}},
+	}
+
+	conv.AddToolCallMessageWithContent("Let me check that.", toolCalls, "", nil)
+
+	if len(conv.Messages) != 1 {
+		t.Fatalf("expected 1 message, got %d", len(conv.Messages))
+	}
+	msg := conv.Messages[0]
+	if msg.Role != "assistant" {
+		t.Errorf("expected role 'assistant', got %q", msg.Role)
+	}
+	if GetContentAsString(msg.Content) != "Let me check that." {
+		t.Fatalf("preamble content not preserved: %+v", msg)
+	}
+	if len(msg.ToolCalls) != 1 || msg.ToolCalls[0].Function.Name != "echo" {
+		t.Fatalf("tool call not preserved alongside preamble: %+v", msg.ToolCalls)
+	}
+
+	modelMsgs := conv.ToModelMessages()
+	if len(modelMsgs) != 1 {
+		t.Fatalf("expected 1 model message, got %d", len(modelMsgs))
+	}
+	if got := GetContentAsString(modelMsgs[0].Content); got != "Let me check that." {
+		t.Fatalf("preamble not carried into wire history: got %q", got)
+	}
+}
+
+func TestAddToolCallMessageWithReasoningStillHasEmptyContent(t *testing.T) {
+	conv := New("test")
+	toolCalls := []model.ToolCall{
+		{ID: "call_123", Type: "function", Function: model.FunctionCall{Name: "echo", Arguments: "{}"}},
+	}
+
+	conv.AddToolCallMessageWithReasoning(toolCalls, "", nil)
+
+	if len(conv.Messages) != 1 {
+		t.Fatalf("expected 1 message, got %d", len(conv.Messages))
+	}
+	if got := GetContentAsString(conv.Messages[0].Content); got != "" {
+		t.Fatalf("expected no-preamble path to keep empty content, got %q", got)
+	}
+}
+
 func TestAddToolResponseMessage(t *testing.T) {
 	conv := New("test")
 	conv.AddToolResponseMessage("call_123", "read_file", "File contents here")
