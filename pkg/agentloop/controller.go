@@ -172,6 +172,14 @@ type ControllerConfig struct {
 	ContinuationEligible func(modelID string) bool
 	ProviderID           func(modelID string) string
 
+	// Progress, when set, is consulted at the end of every tool round
+	// (section 20, shadow-first rollout): the decision and its policy
+	// trace are recorded to the RunLedger as a controller.decision event.
+	// The engine enforces only stop_safety, and only in dynamic mode;
+	// richer routing (verify, replan, park) is the goal loop's job, so a
+	// shadow controller can never change engine behavior.
+	Progress *ProgressController
+
 	// RunLedger, when set, receives one event per model request
 	// (started/completed/failed), one per tool-dispatch batch, and one per
 	// controller stop decision. RunID and SessionID identify the events;
@@ -208,6 +216,7 @@ func (c *Controller) Run(ctx context.Context) (*Result, error) {
 		return nil, fmt.Errorf("agentloop: nil controller")
 	}
 	result := &Result{}
+	started := time.Now()
 
 	for {
 		if err := ctx.Err(); err != nil {
@@ -317,7 +326,57 @@ func (c *Controller) Run(ctx context.Context) (*Result, error) {
 			c.recordDecision(ctx, stopDecision.Kind, stopDecision.Reason)
 			return result, nil
 		}
+
+		if stop := c.consultProgress(ctx, result, resp.Usage, contextWindow, started); stop {
+			return result, nil
+		}
 	}
+}
+
+// consultProgress runs the section-20 progress policy at the end of one
+// tool round, records the decision with its trace, and reports whether
+// the turn must stop (an applied stop_safety). Every other decision is
+// shadow-recorded only; routing them is goal-loop scope.
+func (c *Controller) consultProgress(ctx context.Context, result *Result, usage model.Usage, contextWindow int, started time.Time) bool {
+	if c.cfg.Progress == nil {
+		return false
+	}
+
+	state := ProgressState{
+		Repetition: c.cfg.Governor.RepetitionPressure(),
+	}
+	state.EvidenceNovelty, state.EvidenceObserved = c.cfg.Governor.EvidenceNovelty()
+	if contextWindow > 0 && usage.PromptTokens > 0 {
+		state.Pressure = float64(usage.PromptTokens) / float64(contextWindow)
+	}
+
+	decision := c.cfg.Progress.Decide(state, FuseCounters{
+		ModelRequests:  result.Rounds,
+		ToolExecutions: result.ToolCalls,
+		Elapsed:        time.Since(started),
+	})
+
+	applied := decision.Apply && decision.Decision == DecideStopSafety
+	trace := make([]map[string]any, 0, len(decision.Trace))
+	for _, step := range decision.Trace {
+		trace = append(trace, map[string]any{"rule": step.Rule, "fired": step.Fired})
+	}
+	c.recordEvent(ctx, runledger.EventControllerDecision, map[string]any{
+		"kind":     "progress_policy",
+		"decision": string(decision.Decision),
+		"reason":   decision.Reason,
+		"mode":     c.cfg.Progress.Mode,
+		"applied":  applied,
+		"trace":    trace,
+	})
+
+	if !applied {
+		return false
+	}
+	result.FinishReason = FinishReasonLoopGuard
+	result.GuardDecision = Decision{Stop: true, Kind: "emergency_fuse", Reason: decision.Reason}
+	result.Content = GuardStopMessage(decision.Reason)
+	return true
 }
 
 func (c *Controller) recordEvent(ctx context.Context, eventType string, payload map[string]any) {
