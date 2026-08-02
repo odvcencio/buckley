@@ -136,7 +136,7 @@ func TestToolLoopContinuation_SecondTurnHitsAndPersistsAcrossRestore(t *testing.
 		t.Fatal("expected continuation to be used for a reasoning-capable model")
 	}
 
-	resp, err := ctrl.callToolLoopTurn(context.Background(), "gpt-5.4", 0, req, &state)
+	resp, err := ctrl.callToolLoopTurn(context.Background(), sess, "gpt-5.4", 0, req, &state)
 	if err != nil {
 		t.Fatalf("callToolLoopTurn(first) error = %v", err)
 	}
@@ -155,7 +155,7 @@ func TestToolLoopContinuation_SecondTurnHitsAndPersistsAcrossRestore(t *testing.
 	conv.AddUserMessage("continue")
 
 	req2, _ := ctrl.buildToolLoopRequestWithState(sess, "gpt-5.4", false, nil, &state)
-	resp2, err := ctrl.callToolLoopTurn(context.Background(), "gpt-5.4", 1, req2, &state)
+	resp2, err := ctrl.callToolLoopTurn(context.Background(), sess, "gpt-5.4", 1, req2, &state)
 	if err != nil {
 		t.Fatalf("callToolLoopTurn(second) error = %v", err)
 	}
@@ -219,7 +219,7 @@ func TestToolLoopContinuation_ErrorFallsBackToStreamingWithoutFailingTurn(t *tes
 	// available in this test, so the fallback attempt errors too -- but the
 	// cursor must still be reset rather than left in a broken state, proving
 	// continuation failure alone never corrupts session state.
-	_, err = ctrl.callToolLoopTurn(context.Background(), "gpt-5.4", 0, req, &state)
+	_, err = ctrl.callToolLoopTurn(context.Background(), sess, "gpt-5.4", 0, req, &state)
 	if err == nil {
 		t.Fatal("expected an error once both the continuation and fallback calls fail")
 	}

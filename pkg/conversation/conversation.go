@@ -143,13 +143,28 @@ func (c *Conversation) AddToolCallMessage(toolCalls []model.ToolCall) {
 	c.AddToolCallMessageWithReasoning(toolCalls, "", nil)
 }
 
-// AddToolCallMessageWithReasoning adds an assistant tool-call message with reasoning state.
+// AddToolCallMessageWithReasoning adds an assistant tool-call message with
+// reasoning state and no content. Most tool-call turns have no preamble;
+// callers with one (a model that writes text before calling a tool) should
+// use AddToolCallMessageWithContent instead so the preamble survives into
+// history.
 func (c *Conversation) AddToolCallMessageWithReasoning(toolCalls []model.ToolCall, reasoning string, reasoningDetails []model.ReasoningDetail) {
+	c.AddToolCallMessageWithContent("", toolCalls, reasoning, reasoningDetails)
+}
+
+// AddToolCallMessageWithContent adds an assistant tool-call message that
+// preserves any preamble text the model wrote before its tool calls (for
+// example, "Let me check that." followed by a tool call). Without this, a
+// preamble is silently dropped from history: the next request would not
+// show the model its own explanatory text, and the transcript's rendered
+// bubble would have no corresponding persisted content to reload from
+// storage. content may be empty, matching AddToolCallMessageWithReasoning.
+func (c *Conversation) AddToolCallMessageWithContent(content string, toolCalls []model.ToolCall, reasoning string, reasoningDetails []model.ReasoningDetail) {
 	msg := Message{
 		Role:             "assistant",
-		Content:          "", // Tool calls don't have content
+		Content:          content,
 		Timestamp:        time.Now(),
-		Tokens:           estimateToolCallTokens(toolCalls) + estimateTokens(reasoning),
+		Tokens:           estimateTokens(content) + estimateToolCallTokens(toolCalls) + estimateTokens(reasoning),
 		ToolCalls:        toolCalls,
 		IsSummary:        false,
 		Reasoning:        reasoning,

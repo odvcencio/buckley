@@ -15,7 +15,7 @@ func (c *Controller) streamResponse(ctx context.Context, prompt string, sess *Se
 
 	turnBoundary := c.beginTurnUndo(sess)
 	modelID := c.prepareStreamRequest(prompt, sess)
-	fullResponse, usage, finishReason, err := c.runToolLoop(ctx, sess, modelID)
+	fullResponse, usage, finishReason, streamed, err := c.runToolLoop(ctx, sess, modelID)
 	c.app.RemoveThinkingIndicator()
 	c.finishTurnUndo(sess, turnBoundary)
 	if c.handleStreamError(ctx, err) {
@@ -25,7 +25,7 @@ func (c *Controller) streamResponse(ctx context.Context, prompt string, sess *Se
 		return
 	}
 
-	c.renderStreamResponse(fullResponse, finishReason)
+	c.renderStreamResponse(fullResponse, finishReason, streamed)
 	c.updateStreamUsage(modelID, fullResponse, usage)
 	if c.processMessageQueue(sess) {
 		return
@@ -70,11 +70,18 @@ func (c *Controller) handleStreamError(ctx context.Context, err error) bool {
 	return true
 }
 
-func (c *Controller) renderStreamResponse(fullResponse, finishReason string) {
-	if fullResponse != "" {
-		c.app.AddMessage(fullResponse, "assistant")
-	} else {
+// renderStreamResponse renders the turn's closing system notices. The
+// assistant answer itself is rendered here only when it was not already
+// streamed live into the transcript (continuation turns, and the
+// reasoning-channel fallback, never stream) -- streamed is true exactly
+// when the transcript already shows fullResponse verbatim, so skipping the
+// AddMessage call here is what keeps streaming from double-rendering the
+// final answer.
+func (c *Controller) renderStreamResponse(fullResponse, finishReason string, streamed bool) {
+	if fullResponse == "" {
 		c.app.AddMessage("(empty response from model)", "system")
+	} else if !streamed {
+		c.app.AddMessage(fullResponse, "assistant")
 	}
 	if notice := modelFinishReasonNotice(finishReason); notice != "" {
 		c.app.AddMessage(notice, "system")
