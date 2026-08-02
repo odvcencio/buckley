@@ -95,6 +95,12 @@ type AgentHandlers struct {
 	// returns the full updated set of config options to echo back to the
 	// client and broadcast via config_option_update.
 	OnSetConfigOption func(ctx context.Context, session *AgentSession, configID string, value ConfigOptionValue) ([]SessionConfigOption, error)
+
+	// OnSessionCommands provides the session's available slash commands
+	// (S6) -- e.g. one per registered skill -- broadcast via
+	// available_commands_update right after session/new. A nil/empty
+	// result means no available_commands_update is sent.
+	OnSessionCommands func(ctx context.Context, session *AgentSession) ([]AvailableCommand, error)
 }
 
 // StreamFunc is used to stream updates back to the client.
@@ -292,6 +298,19 @@ func (a *Agent) handleSessionNew(ctx context.Context, req *Request) {
 	}
 
 	_ = a.transport.SendResponse(req.ID, NewSessionResult{SessionID: session.ID, Modes: modes, ConfigOptions: configOptions})
+
+	// S6: available_commands_update has no equivalent field on
+	// NewSessionResult (unlike modes/configOptions) -- the ACP schema only
+	// ever delivers it as a session/update notification, so it must be
+	// sent separately, after the response.
+	if a.handlers.OnSessionCommands != nil {
+		if commands, err := a.handlers.OnSessionCommands(ctx, session); err == nil && len(commands) > 0 {
+			_ = a.transport.SendNotification("session/update", SessionUpdateNotification{
+				SessionID: session.ID,
+				Update:    NewAvailableCommandsUpdate(commands),
+			})
+		}
+	}
 }
 
 // handleSessionLoad loads an existing session.

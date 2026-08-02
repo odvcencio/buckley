@@ -146,6 +146,19 @@ func runACPCommand(args []string) error {
 			}
 			return applyACPSetModelConfigOption(cfg, mgr, session, value)
 		},
+		// OnSessionCommands (S6) loads the skill registry fresh from disk
+		// rather than reusing the per-prompt session state (getACPSessionState
+		// builds that lazily on the first prompt, after session/new has
+		// already returned). Skill files on disk are the same source of
+		// truth either way, so this stays accurate without forcing eager
+		// session setup at session/new time.
+		OnSessionCommands: func(ctx context.Context, session *acp.AgentSession) ([]acp.AvailableCommand, error) {
+			skills := skill.NewRegistry()
+			if err := skills.LoadAll(); err != nil {
+				logf("load skills warning (session commands): %v", err)
+			}
+			return buildACPAvailableCommands(skills), nil
+		},
 		OnPrompt: promptHandler,
 		OnReadFile: func(ctx context.Context, path string, startLine, endLine int) (string, error) {
 			logf("read file: %s (lines %d-%d)", path, startLine, endLine)
@@ -248,6 +261,15 @@ func makePromptHandler(
 		}
 
 		modelOverride := resolveACPModelOverride(cfg, mgr, session.Mode)
+		// S6: create_skill (reachable as a tool call inside runACPLoop) is
+		// the only thing that changes the set of available commands
+		// mid-session; a before/after count catches it without threading
+		// the skill registry through the whole tool-call loop.
+		skillsBefore := 0
+		if state.skills != nil {
+			skillsBefore = len(state.skills.List())
+		}
+
 		// S1: runACPLoop streams the final message as agent_message_chunk
 		// notifications while the model generates it (see streamACPTurn), so
 		// the returned text is not re-sent here -- doing so would duplicate
@@ -257,6 +279,10 @@ func makePromptHandler(
 			logf("prompt error: %v", err)
 			stream(acp.NewAgentMessageChunk(fmt.Sprintf("\n\nError: %v", err)))
 			return nil, err
+		}
+
+		if state.skills != nil && len(state.skills.List()) != skillsBefore {
+			sendACPAvailableCommandsUpdate(stream, state.skills)
 		}
 
 		return &acp.PromptResult{StopReason: "end_turn"}, nil
@@ -521,6 +547,9 @@ type acpUserSkillCommand struct {
 }
 
 func handleACPUserSkillCommand(prompt string, state *acpSessionState) (bool, string) {
+	if handled, text := handleACPSkillNameCommand(prompt, state); handled {
+		return true, text
+	}
 	cmd, ok := parseACPUserSkillCommand(prompt)
 	if !ok {
 		return false, ""
@@ -535,6 +564,33 @@ func handleACPUserSkillCommand(prompt string, state *acpSessionState) (bool, str
 		return true, "Usage: /skill <name>."
 	}
 	return true, activateACPUserSkill(cmd.name, state)
+}
+
+// handleACPSkillNameCommand recognizes "/<skill-name>" as shorthand for
+// "/skill <skill-name>" (S6): buildACPAvailableCommands advertises each
+// registered skill as its own named command, so a client's command
+// palette can invoke "/code-review" directly rather than the generic
+// "/skill code-review" form -- otherwise an advertised command would not
+// actually do anything when picked. It returns false for anything other
+// than a single "/<token>" that names a registered skill, so ordinary
+// prose starting with "/" and the generic "/skill"/"/skills" commands
+// fall through to parseACPUserSkillCommand unchanged.
+func handleACPSkillNameCommand(prompt string, state *acpSessionState) (bool, string) {
+	if state == nil || state.skills == nil {
+		return false, ""
+	}
+	trimmed := strings.TrimSpace(prompt)
+	if !strings.HasPrefix(trimmed, "/") || strings.ContainsAny(trimmed, " \t\n") {
+		return false, ""
+	}
+	name := strings.TrimPrefix(trimmed, "/")
+	if name == "" || strings.EqualFold(name, "skill") || strings.EqualFold(name, "skills") {
+		return false, ""
+	}
+	if state.skills.GetSkill(name) == nil {
+		return false, ""
+	}
+	return true, activateACPUserSkill(name, state)
 }
 
 func parseACPUserSkillCommand(prompt string) (acpUserSkillCommand, bool) {
@@ -567,6 +623,47 @@ func formatACPAvailableSkills(registry *skill.Registry) string {
 		b.WriteString("- " + name + "\n")
 	}
 	return strings.TrimSpace(b.String())
+}
+
+// buildACPAvailableCommands converts a skill registry into the ACP
+// available_commands_update list (S6): one command per registered skill,
+// named after the skill itself so a client's command palette can invoke it
+// directly (handleACPSkillNameCommand recognizes "/<skill-name>" the same
+// way it recognizes the generic "/skill <name>" form).
+func buildACPAvailableCommands(registry *skill.Registry) []acp.AvailableCommand {
+	if registry == nil {
+		return nil
+	}
+	list := registry.List()
+	if len(list) == 0 {
+		return nil
+	}
+	commands := make([]acp.AvailableCommand, 0, len(list))
+	for _, s := range list {
+		name := strings.TrimSpace(s.GetName())
+		if name == "" {
+			continue
+		}
+		commands = append(commands, acp.AvailableCommand{
+			Name:        name,
+			Description: s.GetDescription(),
+		})
+	}
+	if len(commands) == 0 {
+		return nil
+	}
+	sort.Slice(commands, func(i, j int) bool { return commands[i].Name < commands[j].Name })
+	return commands
+}
+
+// sendACPAvailableCommandsUpdate builds and sends an
+// available_commands_update notification (S6) from registry's current
+// skill set.
+func sendACPAvailableCommandsUpdate(stream acp.StreamFunc, registry *skill.Registry) {
+	if stream == nil {
+		return
+	}
+	_ = stream(acp.NewAvailableCommandsUpdate(buildACPAvailableCommands(registry)))
 }
 
 func activateACPUserSkill(name string, state *acpSessionState) string {

@@ -487,6 +487,13 @@ func NewConfigOptionUpdate(options []SessionConfigOption) SessionUpdate {
 	return SessionUpdate{SessionUpdate: SessionUpdateConfigOptionUpdate, ConfigOptions: options}
 }
 
+// NewAvailableCommandsUpdate notifies the client of the current list of
+// available slash commands (S6) -- sent once after session/new and again
+// whenever the skill set backing those commands changes.
+func NewAvailableCommandsUpdate(commands []AvailableCommand) SessionUpdate {
+	return SessionUpdate{SessionUpdate: SessionUpdateAvailableCommands, AvailableCommands: commands}
+}
+
 // ToolCallContent describes output emitted by a tool call.
 type ToolCallContent struct {
 	Type       string        `json:"type"`
