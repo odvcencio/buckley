@@ -207,6 +207,11 @@ type Store interface {
 
 	// RecordMetricSample appends one metric observation for a run.
 	RecordMetricSample(ctx context.Context, sample AgentMetricSample) (AgentMetricSample, error)
+	// SumMetric returns the sum of every recorded value of metricName
+	// for runID (zero when none exist). Budget governance reads spend
+	// through this: the ledger's samples are the source of truth for
+	// how much a run has cost (section 14.1).
+	SumMetric(ctx context.Context, runID, metricName string) (float64, error)
 
 	// SetLiveSink attaches a best-effort live event sink (see LiveSink).
 	SetLiveSink(sink LiveSink)

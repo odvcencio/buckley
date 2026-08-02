@@ -593,6 +593,19 @@ func (s *SQLiteStore) RecordMetricSample(ctx context.Context, sample AgentMetric
 	return sample, nil
 }
 
+// SumMetric implements Store.
+func (s *SQLiteStore) SumMetric(ctx context.Context, runID, metricName string) (float64, error) {
+	var total float64
+	err := s.db.QueryRowContext(ctx, `
+		SELECT COALESCE(SUM(metric_value), 0) FROM agent_metric_samples
+		WHERE run_id = ? AND metric_name = ?
+	`, runID, metricName).Scan(&total)
+	if err != nil {
+		return 0, fmt.Errorf("runledger: sum metric %s: %w", metricName, err)
+	}
+	return total, nil
+}
+
 // evidenceRowExists checks for evidence_id in evidence_objects, the table
 // owned by pkg/evidence. If that table does not exist in db (the run ledger
 // is being used standalone, without pkg/evidence composed onto the same

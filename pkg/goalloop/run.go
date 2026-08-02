@@ -113,6 +113,14 @@ func (l *Loop) RunTask(ctx context.Context, runID, taskID string, goal Goal, spe
 	started := time.Now()
 	counters := agentloop.FuseCounters{}
 	drive := newDriveState(spec, task.Resume)
+	progress := l.progressFor(goal)
+	// Budget decisions run on the goal's cumulative spend across every
+	// drive and task, read back from the ledger's metric samples — not
+	// on this drive's local total.
+	goalSpent, err := l.ledger.SumMetric(ctx, runID, costUSDMetric)
+	if err != nil {
+		return result, fmt.Errorf("goalloop: read spend for %s: %w", runID, err)
+	}
 
 	for {
 		if err := ctx.Err(); err != nil {
@@ -126,10 +134,14 @@ func (l *Loop) RunTask(ctx context.Context, runID, taskID string, goal Goal, spe
 		}
 		result.Turns++
 		result.SpentUSD += outcome.SpentUSD
+		goalSpent, err = l.recordTurnSpend(ctx, runID, taskID, goal, outcome)
+		if err != nil {
+			return result, err
+		}
 		counters.ModelRequests += outcome.Rounds
 		counters.ToolExecutions += outcome.ToolCalls
 		counters.Elapsed = time.Since(started)
-		counters.SpentUSD = result.SpentUSD
+		counters.SpentUSD = goalSpent
 		drive.absorb(outcome)
 		// A verify phase lasts one turn; the outcome's checks decide
 		// what happens next.
@@ -160,8 +172,8 @@ func (l *Loop) RunTask(ctx context.Context, runID, taskID string, goal Goal, spe
 			return result, l.blockTask(ctx, runID, taskID, outcome.Blocker, drive)
 		}
 
-		decision := l.progress.Decide(progressState(outcome, goal, result.SpentUSD, drive), counters)
-		l.recordDecision(ctx, runID, taskID, decision)
+		decision := progress.Decide(progressState(outcome, goal, goalSpent, drive), counters)
+		l.recordDecision(ctx, runID, taskID, progress.Mode, decision)
 		if decision.Decision == agentloop.DecideContinue || !decision.Apply {
 			continue
 		}
@@ -330,7 +342,7 @@ func (l *Loop) driveCheckpoint(taskID, status string, drive *driveState, blocker
 	}
 }
 
-func (l *Loop) recordDecision(ctx context.Context, runID, taskID string, decision agentloop.ProgressResult) {
+func (l *Loop) recordDecision(ctx context.Context, runID, taskID, mode string, decision agentloop.ProgressResult) {
 	trace := make([]map[string]any, 0, len(decision.Trace))
 	for _, step := range decision.Trace {
 		trace = append(trace, map[string]any{"rule": step.Rule, "fired": step.Fired})
@@ -345,7 +357,7 @@ func (l *Loop) recordDecision(ctx context.Context, runID, taskID string, decisio
 			"kind":     "goal_loop",
 			"decision": string(decision.Decision),
 			"reason":   decision.Reason,
-			"mode":     l.progress.Mode,
+			"mode":     mode,
 			"applied":  decision.Apply && decision.Decision != agentloop.DecideContinue,
 			"trace":    trace,
 		},

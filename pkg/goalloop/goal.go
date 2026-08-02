@@ -83,13 +83,15 @@ type TaskContext struct {
 // loop can act on. SpentUSD and the counters feed the fuse counters;
 // the rest feeds checkpoints and the progress controller.
 type TurnOutcome struct {
-	Rounds       int
-	ToolCalls    int
-	SpentUSD     float64
-	StateChanged bool
-	Summary      string
-	NextActions  []taskstate.NextAction
-	Completed    bool
+	Rounds           int
+	ToolCalls        int
+	SpentUSD         float64
+	PromptTokens     int
+	CompletionTokens int
+	StateChanged     bool
+	Summary          string
+	NextActions      []taskstate.NextAction
+	Completed        bool
 	// CompletedEvidenceID is required when Completed is set: the task's
 	// completion claim must be evidence-linked (spec decision 9).
 	CompletedEvidenceID string
@@ -122,8 +124,10 @@ type Config struct {
 	Engine TurnEngine
 	// Planner is optional; nil decomposes to a single task.
 	Planner Planner
-	// Progress is optional; nil uses a dynamic-mode controller with
-	// the default thresholds and no fuses.
+	// Progress is optional. When set, every drive uses it verbatim;
+	// when nil, each goal's posture expands into its policy bundle
+	// (see progressFor: interactive enforces user budgets without
+	// fuses, frugal and overnight arm fuses with earlier parking).
 	Progress *agentloop.ProgressController
 	// SessionID labels the goal's runs.
 	SessionID string
@@ -147,16 +151,12 @@ func New(cfg Config) (*Loop, error) {
 	if cfg.Checkpoints == nil {
 		return nil, errNoCheckpoints
 	}
-	progress := cfg.Progress
-	if progress == nil {
-		progress = &agentloop.ProgressController{Mode: agentloop.ModeDynamic}
-	}
 	return &Loop{
 		ledger:      cfg.Ledger,
 		checkpoints: cfg.Checkpoints,
 		engine:      cfg.Engine,
 		planner:     cfg.Planner,
-		progress:    progress,
+		progress:    cfg.Progress,
 		sessionID:   cfg.SessionID,
 	}, nil
 }
