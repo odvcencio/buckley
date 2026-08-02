@@ -45,6 +45,11 @@ type AgentSession struct {
 	Environment      map[string]string
 	Mode             string
 	Modes            *SessionModeState
+	// McpServers is the mcpServers array the client sent at session/new
+	// (S5) -- previously parsed then discarded. Buckley's ACP integration
+	// reads this to spawn the session's own MCP servers; see
+	// cmd/buckley/acp.go's session setup.
+	McpServers []McpServer
 }
 
 // AgentHandlers are callbacks that connect ACP to Buckley's internals.
@@ -235,6 +240,7 @@ func (a *Agent) handleSessionNew(ctx context.Context, req *Request) {
 		CreatedAt:        time.Now(),
 		WorkingDirectory: params.Cwd,
 		Mode:             "normal",
+		McpServers:       params.McpServers,
 	}
 
 	a.sessionsMu.Lock()

@@ -116,8 +116,8 @@ type AuthMethod json.RawMessage
 // Session Types
 
 type NewSessionParams struct {
-	Cwd        string            `json:"cwd"`
-	McpServers []json.RawMessage `json:"mcpServers"`
+	Cwd        string      `json:"cwd"`
+	McpServers []McpServer `json:"mcpServers"`
 }
 
 type NewSessionResult struct {
@@ -126,10 +126,41 @@ type NewSessionResult struct {
 }
 
 type LoadSessionParams struct {
-	SessionID  string            `json:"sessionId"`
-	Cwd        string            `json:"cwd"`
-	McpServers []json.RawMessage `json:"mcpServers"`
+	SessionID  string      `json:"sessionId"`
+	Cwd        string      `json:"cwd"`
+	McpServers []McpServer `json:"mcpServers"`
 }
+
+// McpServer describes one entry in session/new's (or session/load's)
+// mcpServers array (S5). Per the ACP schema, stdio is the untagged default
+// variant -- a stdio declaration carries no "type" field on the wire, only
+// name/command/args/env. The http and sse variants carry an explicit
+// "type": "http" | "sse" discriminator plus a url and headers. A single
+// flat struct decodes all three shapes since their field sets do not
+// collide; McpServerKind reports which one a decoded value represents.
+type McpServer struct {
+	Type    string        `json:"type,omitempty"`
+	Name    string        `json:"name"`
+	Command string        `json:"command,omitempty"`
+	Args    []string      `json:"args,omitempty"`
+	Env     []EnvVariable `json:"env,omitempty"`
+	URL     string        `json:"url,omitempty"`
+}
+
+// EnvVariable is one KEY/VALUE pair to set when launching a stdio MCP
+// server (McpServer.Env).
+type EnvVariable struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
+}
+
+// McpServer transport kinds, matched against McpServer.Type. Stdio is the
+// zero-value "" case since it is untagged on the wire.
+const (
+	McpServerKindStdio = ""
+	McpServerKindHTTP  = "http"
+	McpServerKindSSE   = "sse"
+)
 
 type LoadSessionResult struct {
 	Modes *SessionModeState `json:"modes,omitempty"`

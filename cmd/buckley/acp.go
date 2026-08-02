@@ -18,6 +18,7 @@ import (
 	"m31labs.dev/buckley/v2/pkg/config"
 	projectcontext "m31labs.dev/buckley/v2/pkg/context"
 	"m31labs.dev/buckley/v2/pkg/conversation"
+	"m31labs.dev/buckley/v2/pkg/mcp"
 	"m31labs.dev/buckley/v2/pkg/model"
 	"m31labs.dev/buckley/v2/pkg/prompts"
 	"m31labs.dev/buckley/v2/pkg/rules"
@@ -116,11 +117,18 @@ func runACPCommand(args []string) error {
 	// the time a prompt actually runs -- prompts only fire once agent.Serve
 	// is reading messages, well after this assignment completes.
 	var agent *acp.Agent
+	promptHandler, closeACPSessions := makePromptHandler(cfg, mgr, store, projectContext, cwd, logf, &agent)
+	// S5: every session that spawned its own MCP servers (via session/new's
+	// mcpServers) tears them down when this ACP connection ends -- Buckley
+	// does not implement session/close, so process/connection teardown is
+	// the only "session end" signal available.
+	defer closeACPSessions()
+
 	agent = acp.NewAgent("Buckley", version, acp.AgentHandlers{
 		OnSessionModes: func(ctx context.Context, session *acp.AgentSession) (*acp.SessionModeState, error) {
 			return buildACPModelModes(cfg, mgr), nil
 		},
-		OnPrompt: makePromptHandler(cfg, mgr, store, projectContext, cwd, logf, &agent),
+		OnPrompt: promptHandler,
 		OnReadFile: func(ctx context.Context, path string, startLine, endLine int) (string, error) {
 			logf("read file: %s (lines %d-%d)", path, startLine, endLine)
 			data, err := os.ReadFile(path)
@@ -186,18 +194,18 @@ func makePromptHandler(
 	defaultWorkDir string,
 	logf func(string, ...interface{}),
 	agentRef **acp.Agent,
-) func(context.Context, *acp.AgentSession, []acp.ContentBlock, acp.StreamFunc) (*acp.PromptResult, error) {
+) (handler func(context.Context, *acp.AgentSession, []acp.ContentBlock, acp.StreamFunc) (*acp.PromptResult, error), cleanup func()) {
 	sessions := make(map[string]*acpSessionState)
 	var sessionsMu sync.Mutex
 
-	return func(ctx context.Context, session *acp.AgentSession, content []acp.ContentBlock, stream acp.StreamFunc) (*acp.PromptResult, error) {
+	handler = func(ctx context.Context, session *acp.AgentSession, content []acp.ContentBlock, stream acp.StreamFunc) (*acp.PromptResult, error) {
 		prompt := extractACPPrompt(content)
 		if strings.TrimSpace(prompt) == "" {
 			return nil, fmt.Errorf("empty prompt")
 		}
 		logf("prompt: %s", truncate(prompt, 100))
 
-		state := getACPSessionState(&sessionsMu, sessions, session, projectContext, cfg, defaultWorkDir, logf)
+		state := getACPSessionState(ctx, &sessionsMu, sessions, session, projectContext, cfg, defaultWorkDir, logf)
 		state.mu.Lock()
 		defer state.mu.Unlock()
 
@@ -235,6 +243,21 @@ func makePromptHandler(
 
 		return &acp.PromptResult{StopReason: "end_turn"}, nil
 	}
+
+	cleanup = func() {
+		sessionsMu.Lock()
+		defer sessionsMu.Unlock()
+		for id, state := range sessions {
+			if state == nil || state.mcpManager == nil {
+				continue
+			}
+			if err := state.mcpManager.Close(); err != nil {
+				logf("mcp: session %s: close error: %v", id, err)
+			}
+		}
+	}
+
+	return handler, cleanup
 }
 
 type acpSessionState struct {
@@ -248,6 +271,11 @@ type acpSessionState struct {
 	// locations and diff paths -- never the ACP process's own cwd, which may
 	// differ from the editor's session/new cwd (S2, S9).
 	workDir string
+	// mcpManager holds the session's own MCP servers, spawned from
+	// session/new's mcpServers array (S5). Nil when the session declared no
+	// (supported) MCP servers. Torn down by makePromptHandler's cleanup
+	// func when the ACP connection ends.
+	mcpManager *mcp.Manager
 }
 
 type acpEmbeddedResource struct {
@@ -303,6 +331,7 @@ func extractACPPrompt(blocks []acp.ContentBlock) string {
 }
 
 func getACPSessionState(
+	ctx context.Context,
 	mu *sync.Mutex,
 	sessions map[string]*acpSessionState,
 	session *acp.AgentSession,
@@ -350,6 +379,11 @@ func getACPSessionState(
 	registry.Register(createTool)
 	registry.EnableDynamicDiscovery(nil)
 
+	// S5: spawn the session's own MCP servers (session/new's mcpServers,
+	// previously parsed then discarded) and bridge their tools into this
+	// session's registry.
+	mcpManager := attachACPMcpServers(ctx, registry, session.McpServers, logf)
+
 	// Wire todo persistence for the ACP session
 	registry.SetTodoStore(&acpTodoStoreAdapter{sessionID: session.ID})
 
@@ -371,9 +405,69 @@ func getACPSessionState(
 		skillState: skillState,
 		engine:     engine,
 		workDir:    workDir,
+		mcpManager: mcpManager,
 	}
 	sessions[session.ID] = state
 	return state
+}
+
+// attachACPMcpServers spawns and bridges the stdio MCP servers a client
+// declared in session/new's mcpServers array (S5). Only the stdio
+// transport is supported -- Buckley advertises mcpCapabilities.http/sse as
+// false at initialize (see handleInitialize), so http/sse declarations are
+// logged and skipped rather than attempted. A server that fails to connect
+// is logged and skipped too: one misconfigured server must not block the
+// rest of the session's tools, MCP or otherwise. Returns nil when no
+// (supported) server was configured or none connected.
+func attachACPMcpServers(ctx context.Context, registry *tool.Registry, declared []acp.McpServer, logf func(string, ...interface{})) *mcp.Manager {
+	if len(declared) == 0 {
+		return nil
+	}
+
+	mcpCfg := config.MCPConfig{Enabled: true}
+	for _, srv := range declared {
+		name := strings.TrimSpace(srv.Name)
+		if srv.Type != acp.McpServerKindStdio {
+			if logf != nil {
+				logf("mcp: server %q declares unsupported transport %q (only stdio is supported); skipping", name, srv.Type)
+			}
+			continue
+		}
+		if name == "" || strings.TrimSpace(srv.Command) == "" {
+			if logf != nil {
+				logf("mcp: skipping server with missing name or command: %+v", srv)
+			}
+			continue
+		}
+		env := make(map[string]string, len(srv.Env))
+		for _, e := range srv.Env {
+			env[e.Name] = e.Value
+		}
+		mcpCfg.Servers = append(mcpCfg.Servers, config.MCPServerConfig{
+			Name:    name,
+			Command: srv.Command,
+			Args:    append([]string{}, srv.Args...),
+			Env:     config.ExpandMCPEnv(env),
+			Enabled: true,
+		})
+	}
+	if len(mcpCfg.Servers) == 0 {
+		return nil
+	}
+
+	manager, err := mcp.ManagerFromConfig(ctx, mcpCfg)
+	if err != nil && logf != nil {
+		logf("mcp: session server setup: %v", err)
+	}
+	if manager == nil {
+		return nil
+	}
+
+	registered := tool.RegisterMCPTools(registry, manager, mcpCfg)
+	if logf != nil {
+		logf("mcp: bridged %d tool(s) from %d session server(s): %v", len(registered), len(mcpCfg.Servers), registered)
+	}
+	return manager
 }
 
 func buildACPSystemPrompt(projectContext *projectcontext.ProjectContext, workDir string, skills *skill.Registry, engine *rules.Engine, agentProfile string) string {
