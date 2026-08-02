@@ -100,7 +100,22 @@ func (r *Registry) registerBuiltins(cfg registryOptions) {
 
 // applyDefaultKinds sets ACP tool_call kinds for built-in tools.
 func (r *Registry) applyDefaultKinds() {
-	kinds := map[string]string{
+	for name, kind := range defaultToolKinds() {
+		if _, exists := r.tools[name]; exists {
+			r.toolKinds[name] = kind
+		}
+	}
+}
+
+// defaultToolKinds returns the built-in tool name -> ACP tool_call kind map.
+// Every key here must match the tool's actual Name() value, not a prior or
+// assumed name -- renamed tools (apply_patch was patch_file,
+// edit_file_terminal was terminal_editor, mark_conflict_resolved had no
+// entry at all) silently fall out of applyDefaultKinds' existence guard and
+// render as ACP kind "other" instead of their real kind. See
+// TestApplyDefaultKinds_KeysMatchRegisteredTools.
+func defaultToolKinds() map[string]string {
+	return map[string]string{
 		// File read tools
 		"read_file":      "read",
 		"list_directory": "read",
@@ -115,14 +130,16 @@ func (r *Registry) applyDefaultKinds() {
 		"edit_file":      "edit",
 		"insert_text":    "edit",
 		"delete_lines":   "delete",
-		"patch_file":     "edit",
+		"apply_patch":    "edit",
 		"search_replace": "edit",
 
 		// Git tools
-		"git_status": "read",
-		"git_diff":   "read",
-		"git_log":    "read",
-		"git_blame":  "read",
+		"git_status":             "read",
+		"git_diff":               "read",
+		"git_log":                "read",
+		"git_blame":              "read",
+		"list_merge_conflicts":   "read",
+		"mark_conflict_resolved": "edit",
 
 		// Code navigation
 		"find_symbol":            "search",
@@ -172,16 +189,10 @@ func (r *Registry) applyDefaultKinds() {
 		"spawn_subagent": "execute",
 
 		// Misc
-		"create_skill":    "edit",
-		"terminal_editor": "execute",
-		"todo":            "edit",
-		"fluffy_agent":    "execute",
-	}
-
-	for name, kind := range kinds {
-		if _, exists := r.tools[name]; exists {
-			r.toolKinds[name] = kind
-		}
+		"create_skill":       "edit",
+		"edit_file_terminal": "execute",
+		"todo":               "edit",
+		"fluffy_agent":       "execute",
 	}
 }
 
