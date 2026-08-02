@@ -23,15 +23,45 @@ type PRDefinition struct {
 // render reference-only ("Refs #N") — never as GitHub close directives.
 // See pkg/commitmsg for why.
 type PRResult struct {
-	Action        string   `json:"action"`
-	Scope         string   `json:"scope,omitempty"`
-	Title         string   `json:"title"`
-	Summary       string   `json:"summary"`
-	Changes       []string `json:"changes"`
-	Testing       []string `json:"testing,omitempty"`
-	Breaking      bool     `json:"breaking,omitempty"`
-	Issues        []string `json:"issues,omitempty"`
-	ReviewersHint string   `json:"reviewers_hint,omitempty"`
+	Action        string     `json:"action"`
+	Scope         string     `json:"scope,omitempty"`
+	Title         string     `json:"title"`
+	Summary       string     `json:"summary"`
+	Changes       StringList `json:"changes"`
+	Testing       StringList `json:"testing,omitempty"`
+	Breaking      bool       `json:"breaking,omitempty"`
+	Issues        StringList `json:"issues,omitempty"`
+	ReviewersHint string     `json:"reviewers_hint,omitempty"`
+}
+
+// StringList is a []string that also accepts a single JSON string when
+// unmarshalling. Models intermittently return prose ("changes": "Added
+// X") where the schema asks for a list; failing the whole generation
+// over that shape mismatch wastes a validated result (observed twice on
+// 2026-08-02). A bare string becomes its newline-split, bullet-trimmed
+// lines; marshalling always produces a JSON array.
+type StringList []string
+
+// UnmarshalJSON implements json.Unmarshaler.
+func (l *StringList) UnmarshalJSON(data []byte) error {
+	var list []string
+	if err := json.Unmarshal(data, &list); err == nil {
+		*l = list
+		return nil
+	}
+	var single string
+	if err := json.Unmarshal(data, &single); err != nil {
+		return fmt.Errorf("string list: value is neither a string array nor a string")
+	}
+	var out []string
+	for _, line := range strings.Split(single, "\n") {
+		line = strings.TrimSpace(strings.TrimLeft(strings.TrimSpace(line), "-*• "))
+		if line != "" {
+			out = append(out, line)
+		}
+	}
+	*l = out
+	return nil
 }
 
 // Header composes the PR title in the shared commit-header grammar:
