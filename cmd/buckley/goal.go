@@ -14,6 +14,7 @@ import (
 
 	"m31labs.dev/buckley/pkg/evidence"
 	"m31labs.dev/buckley/pkg/goalloop"
+	"m31labs.dev/buckley/pkg/ralph"
 	"m31labs.dev/buckley/pkg/runledger"
 	"m31labs.dev/buckley/pkg/taskstate"
 	"m31labs.dev/buckley/pkg/tool"
@@ -49,11 +50,12 @@ func runGoalCommand(args []string) error {
 // the next `goal run` resumes from durable state.
 func runGoalRun(args []string) error {
 	fs := flag.NewFlagSet("goal run", flag.ContinueOnError)
+	backendName := fs.String("backend", "", "delegate whole tasks to an external CLI backend (claude, codex) instead of the internal engine")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return errors.New("usage: buckley goal run <run-id>")
+		return errors.New("usage: buckley goal run [--backend claude|codex] <run-id>")
 	}
 	runID := strings.TrimSpace(fs.Arg(0))
 
@@ -73,15 +75,29 @@ func runGoalRun(args []string) error {
 	if err != nil {
 		return err
 	}
-	registry := tool.NewRegistry()
-	tool.ApplyToolMiddlewareConfig(registry, cfg)
-	registry.ConfigureContainers(cfg, workDir)
-	registry.SetWorkDir(workDir)
+
+	var engine goalloop.TurnEngine
+	if *backendName != "" {
+		backend, err := goalBackendFor(*backendName)
+		if err != nil {
+			return err
+		}
+		engine, err = ralph.NewBackendTurnEngine(backend, stores.evidence, workDir)
+		if err != nil {
+			return err
+		}
+	} else {
+		registry := tool.NewRegistry()
+		tool.ApplyToolMiddlewareConfig(registry, cfg)
+		registry.ConfigureContainers(cfg, workDir)
+		registry.SetWorkDir(workDir)
+		engine = newGoalTurnEngine(cfg, mgr, registry, stores.evidence, workDir)
+	}
 
 	loop, err := goalloop.New(goalloop.Config{
 		Ledger:      stores.ledger,
 		Checkpoints: stores.checkpoints,
-		Engine:      newGoalTurnEngine(cfg, mgr, registry, stores.evidence, workDir),
+		Engine:      engine,
 		SessionID:   "goal-cli",
 	})
 	if err != nil {
@@ -307,6 +323,24 @@ func runGoalList(args []string) error {
 		fmt.Println("No goals recorded")
 	}
 	return nil
+}
+
+// goalBackendFor builds a named external backend preset (design section
+// 8: external backends as task executors). Unknown names run as a bare
+// command receiving the prompt as its single argument.
+func goalBackendFor(name string) (ralph.Backend, error) {
+	switch name {
+	case "claude":
+		return ralph.NewExternalBackend("claude", "claude", []string{"-p", "{prompt}"}, nil), nil
+	case "codex":
+		return ralph.NewExternalBackend("codex", "codex", []string{"exec", "{prompt}"}, nil), nil
+	default:
+		name = strings.TrimSpace(name)
+		if name == "" {
+			return nil, errors.New("backend name is required")
+		}
+		return ralph.NewExternalBackend(name, name, []string{"{prompt}"}, nil), nil
+	}
 }
 
 func firstGoalEvent(events []runledger.Event) (runledger.Event, bool) {
