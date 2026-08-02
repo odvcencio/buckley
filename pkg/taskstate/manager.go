@@ -71,8 +71,8 @@ func (m *Manager) Save(ctx context.Context, in SaveInput) (runledger.TaskCheckpo
 
 	rendered := RenderMarkdown(in.State)
 	obj, err := m.evidence.Put(ctx, evidence.Object{
-		Kind:      evidence.KindCheckpoint,
-		MediaType: "text/markdown",
+		Kind:       evidence.KindCheckpoint,
+		MediaType:  "text/markdown",
 		InlineBody: []byte(rendered),
 		Metadata: map[string]any{
 			evidence.MetaTaskID:    in.State.TaskID,
