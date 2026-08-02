@@ -30,6 +30,7 @@ type attachOptions struct {
 	Addr      string
 	Token     string
 	SessionID string
+	TUI       bool
 }
 
 // runAttachCommand implements `buckley attach [session-id]`. It speaks the
@@ -49,7 +50,13 @@ func runAttachCommand(args []string) error {
 	defer cancel()
 
 	if opts.SessionID == "" {
+		if opts.TUI {
+			return fmt.Errorf("attach --tui requires a session id")
+		}
 		return runAttachList(ctx, client)
+	}
+	if opts.TUI {
+		return runAttachTUI(ctx, client, opts)
 	}
 	return runAttachSession(ctx, client, opts)
 }
@@ -59,6 +66,7 @@ func parseAttachFlags(args []string) (attachOptions, error) {
 	addr := fs.String("addr", resolveDefaultAttachAddress(), "Address of the local Buckley IPC server")
 	defaultToken := strings.TrimSpace(os.Getenv("BUCKLEY_IPC_TOKEN"))
 	token := fs.String("token", defaultToken, "IPC bearer token (BUCKLEY_IPC_TOKEN by default)")
+	tuiMode := fs.Bool("tui", false, "Observe the session in the full-screen TUI instead of line mode")
 	if err := fs.Parse(args); err != nil {
 		return attachOptions{}, err
 	}
@@ -66,6 +74,7 @@ func parseAttachFlags(args []string) (attachOptions, error) {
 	opts := attachOptions{
 		Addr:  normalizeAttachAddress(*addr),
 		Token: strings.TrimSpace(*token),
+		TUI:   *tuiMode,
 	}
 	if rest := fs.Args(); len(rest) > 0 {
 		opts.SessionID = strings.TrimSpace(rest[0])
@@ -150,17 +159,9 @@ func runAttachSession(ctx context.Context, client ipcpbconnect.BuckleyIPCClient,
 	}
 	fmt.Print(renderSessionHeader(detail.Msg))
 
-	sessionToken := ""
-	tokenCtx, tokenCancel := context.WithTimeout(ctx, 15*time.Second)
-	tokenReq := connect.NewRequest(&ipcpb.IssueSessionTokenRequest{SessionId: opts.SessionID})
-	attachAuthHeader(tokenReq, opts.Token)
-	tokenResp, tokenErr := client.IssueSessionToken(tokenCtx, tokenReq)
-	tokenCancel()
-	if tokenErr != nil {
-		fmt.Fprintf(os.Stderr, "observing only (could not mint a session token to drive it: %v)\n", tokenErr)
-	} else {
-		sessionToken = tokenResp.Msg.GetToken()
-	}
+	sessionToken := mintAttachSessionToken(ctx, client, opts, func(format string, args ...any) {
+		fmt.Fprintf(os.Stderr, format+"\n", args...)
+	})
 
 	streamCtx, streamCancel := context.WithCancel(ctx)
 	defer streamCancel()
@@ -312,6 +313,48 @@ func formatAttachEvent(evt *ipcpb.Event) string {
 	return prefix + evt.GetType()
 }
 
+// mintAttachSessionToken requests the per-session token SendCommand needs.
+// A failure downgrades the attachment to observation-only rather than
+// failing it: notify reports the downgrade and the empty token is the
+// signal both attach modes key off.
+func mintAttachSessionToken(ctx context.Context, client ipcpbconnect.BuckleyIPCClient, opts attachOptions, notify func(format string, args ...any)) string {
+	tokenCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	req := connect.NewRequest(&ipcpb.IssueSessionTokenRequest{SessionId: opts.SessionID})
+	attachAuthHeader(req, opts.Token)
+	resp, err := client.IssueSessionToken(tokenCtx, req)
+	if err != nil {
+		if notify != nil {
+			notify("observing only (could not mint a session token to drive it: %v)", err)
+		}
+		return ""
+	}
+	return resp.Msg.GetToken()
+}
+
+// sendAttachInput forwards one input line as a SendCommand(type=input)
+// call. It reports whether the server accepted the command, the server's
+// rejection message when it did not, and any transport error.
+func sendAttachInput(ctx context.Context, client ipcpbconnect.BuckleyIPCClient, opts attachOptions, sessionToken, line string) (accepted bool, reason string, err error) {
+	sendCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	req := connect.NewRequest(&ipcpb.CommandRequest{
+		SessionId:    opts.SessionID,
+		Type:         "input",
+		Content:      line,
+		SessionToken: sessionToken,
+	})
+	attachAuthHeader(req, opts.Token)
+	resp, err := client.SendCommand(sendCtx, req)
+	if err != nil {
+		return false, "", err
+	}
+	if resp.Msg.GetStatus() != "accepted" {
+		return false, resp.Msg.GetMessage(), nil
+	}
+	return true, "", nil
+}
+
 // attachInputLoop reads stdin lines and forwards each one as a
 // SendCommand(type=input) call: `buckley attach`'s programmatic-driving
 // path. ":q"/":quit"/":exit" detach locally without contacting the server.
@@ -348,22 +391,13 @@ func attachInputLoop(ctx context.Context, client ipcpbconnect.BuckleyIPCClient, 
 				fmt.Fprintln(os.Stderr, "no session token: cannot drive this session (observation only)")
 				continue
 			}
-			sendCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
-			req := connect.NewRequest(&ipcpb.CommandRequest{
-				SessionId:    opts.SessionID,
-				Type:         "input",
-				Content:      line,
-				SessionToken: sessionToken,
-			})
-			attachAuthHeader(req, opts.Token)
-			resp, err := client.SendCommand(sendCtx, req)
-			cancel()
+			accepted, reason, err := sendAttachInput(ctx, client, opts, sessionToken, line)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "send failed: %v\n", err)
 				continue
 			}
-			if resp.Msg.GetStatus() != "accepted" {
-				fmt.Fprintf(os.Stderr, "send rejected: %s\n", resp.Msg.GetMessage())
+			if !accepted {
+				fmt.Fprintf(os.Stderr, "send rejected: %s\n", reason)
 			}
 		}
 	}

@@ -682,7 +682,7 @@ func printHelp() {
 	fmt.Println("  experiment replay <session-id>   Replay a session with a new model")
 	fmt.Println("  eval [list|run|init|runs|show]   Run project chat eval scenarios")
 	fmt.Println("  serve [--bind host:port]         Start local HTTP/WebSocket server")
-	fmt.Println("  attach [session-id]              Join a running session over loopback gRPC (list if omitted)")
+	fmt.Println("  attach [session-id] [--tui]      Join a running session over loopback gRPC (list if omitted; --tui observes full-screen)")
 	fmt.Println("  remote <subcommand>              Remote session operations (attach, sessions, tokens, login, console)")
 	fmt.Println("  batch prune-workspaces           Garbage-collect stale batch workspaces (k8s/CI)")
 	fmt.Println("  git-webhook                      Listen for merge webhooks and run regression/release commands")
