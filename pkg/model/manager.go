@@ -10,8 +10,8 @@ import (
 	"sync"
 	"time"
 
-	"m31labs.dev/buckley/v2/pkg/config"
-	"m31labs.dev/buckley/v2/pkg/telemetry"
+	"m31labs.dev/buckley/pkg/config"
+	"m31labs.dev/buckley/pkg/telemetry"
 )
 
 const catalogFetchTimeout = 30 * time.Second

@@ -8,8 +8,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"m31labs.dev/buckley/v2/pkg/acp"
-	"m31labs.dev/buckley/v2/pkg/tool"
+	"m31labs.dev/buckley/pkg/acp"
+	"m31labs.dev/buckley/pkg/tool"
 )
 
 // acpFakeMCPServerBin holds the path to the compiled pkg/mcp/testdata/
@@ -25,7 +25,7 @@ func TestMain(m *testing.M) {
 	}
 
 	bin := filepath.Join(dir, "fakeserver")
-	build := exec.Command("go", "build", "-o", bin, "m31labs.dev/buckley/v2/pkg/mcp/testdata/fakeserver")
+	build := exec.Command("go", "build", "-o", bin, "m31labs.dev/buckley/pkg/mcp/testdata/fakeserver")
 	if out, err := build.CombinedOutput(); err != nil {
 		fmt.Fprintf(os.Stderr, "acp test setup: building fakeserver: %v\n%s\n", err, out)
 		os.RemoveAll(dir)

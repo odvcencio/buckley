@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"m31labs.dev/buckley/v2/pkg/config"
-	"m31labs.dev/buckley/v2/pkg/model"
+	"m31labs.dev/buckley/pkg/config"
+	"m31labs.dev/buckley/pkg/model"
 )
 
 func newCoordinatorTestManager(t *testing.T, server *httptest.Server) *model.Manager {

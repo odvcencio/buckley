@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"m31labs.dev/buckley/v2/pkg/config"
+	"m31labs.dev/buckley/pkg/config"
 )
 
 // TaskPhase represents a configured execution phase.

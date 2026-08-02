@@ -1,7 +1,7 @@
 package tui
 
 import (
-	"m31labs.dev/buckley/v2/pkg/diffsignal"
+	"m31labs.dev/buckley/pkg/diffsignal"
 )
 
 // shapeDiff runs a raw git diff through diffsignal.Prioritize with the given

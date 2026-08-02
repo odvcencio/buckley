@@ -6,7 +6,7 @@ import (
 	"strings"
 	"sync"
 
-	"m31labs.dev/buckley/v2/pkg/diffsignal"
+	"m31labs.dev/buckley/pkg/diffsignal"
 )
 
 // DefaultSynthesisFanIn bounds how many shard (or intermediate) reviews one

@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"go.uber.org/mock/gomock"
-	"m31labs.dev/buckley/v2/pkg/personality"
+	"m31labs.dev/buckley/pkg/personality"
 )
 
 func TestGeneratorGenerate_PlanningPhase(t *testing.T) {

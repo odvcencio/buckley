@@ -11,7 +11,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"m31labs.dev/buckley/v2/pkg/oneshot"
+	"m31labs.dev/buckley/pkg/oneshot"
 )
 
 // reviewFindingsRegexCache holds regexps compiled from a caller-supplied

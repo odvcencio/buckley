@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
-	"m31labs.dev/buckley/v2/pkg/evidence"
-	"m31labs.dev/buckley/v2/pkg/storage"
+	"m31labs.dev/buckley/pkg/evidence"
+	"m31labs.dev/buckley/pkg/storage"
 )
 
 // SessionExportSchemaVersion identifies the exportable session transcript

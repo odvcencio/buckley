@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"m31labs.dev/buckley/v2/pkg/config"
+	"m31labs.dev/buckley/pkg/config"
 )
 
 func newTestLiteLLMProvider(baseURL string) *LiteLLMProvider {

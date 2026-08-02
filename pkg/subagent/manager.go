@@ -10,8 +10,8 @@ import (
 
 	"github.com/oklog/ulid/v2"
 
-	"m31labs.dev/buckley/v2/pkg/persona"
-	"m31labs.dev/buckley/v2/pkg/telemetry"
+	"m31labs.dev/buckley/pkg/persona"
+	"m31labs.dev/buckley/pkg/telemetry"
 )
 
 const (

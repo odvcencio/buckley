@@ -3,7 +3,7 @@ package rules
 import (
 	"log/slog"
 
-	"m31labs.dev/buckley/v2/pkg/types"
+	"m31labs.dev/buckley/pkg/types"
 )
 
 type ArbiterSandboxResolver struct{ evaluator types.RuleEvaluator }

@@ -11,14 +11,14 @@ import (
 	"sync"
 	"time"
 
-	"m31labs.dev/buckley/v2/pkg/artifact"
-	"m31labs.dev/buckley/v2/pkg/config"
-	"m31labs.dev/buckley/v2/pkg/model"
-	"m31labs.dev/buckley/v2/pkg/paths"
-	"m31labs.dev/buckley/v2/pkg/personality"
-	"m31labs.dev/buckley/v2/pkg/prompts"
-	"m31labs.dev/buckley/v2/pkg/rules"
-	"m31labs.dev/buckley/v2/pkg/tool"
+	"m31labs.dev/buckley/pkg/artifact"
+	"m31labs.dev/buckley/pkg/config"
+	"m31labs.dev/buckley/pkg/model"
+	"m31labs.dev/buckley/pkg/paths"
+	"m31labs.dev/buckley/pkg/personality"
+	"m31labs.dev/buckley/pkg/prompts"
+	"m31labs.dev/buckley/pkg/rules"
+	"m31labs.dev/buckley/pkg/tool"
 )
 
 // ReviewAgent delegates code review to a dedicated model and persists artifacts.

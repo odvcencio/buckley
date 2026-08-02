@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"m31labs.dev/buckley/v2/pkg/conversation"
+	"m31labs.dev/buckley/pkg/conversation"
 )
 
 // maxRecentModels caps the recent-models cycle list.

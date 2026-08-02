@@ -3,7 +3,7 @@ package runtime
 import (
 	"time"
 
-	"m31labs.dev/buckley/v2/pkg/ui/terminal"
+	"m31labs.dev/buckley/pkg/ui/terminal"
 )
 
 // Message represents an event flowing into the UI.

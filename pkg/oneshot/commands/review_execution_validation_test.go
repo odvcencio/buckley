@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"m31labs.dev/buckley/v2/pkg/model"
+	"m31labs.dev/buckley/pkg/model"
 )
 
 func TestValidateReviewEvidenceCoverageRequiresSameToolchainAndChangedPaths(t *testing.T) {

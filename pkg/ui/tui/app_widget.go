@@ -10,8 +10,8 @@ import (
 	"sync"
 	"time"
 
-	"m31labs.dev/buckley/v2/pkg/ui/filepicker"
-	"m31labs.dev/buckley/v2/pkg/ui/widgets"
+	"m31labs.dev/buckley/pkg/ui/filepicker"
+	"m31labs.dev/buckley/pkg/ui/widgets"
 	"m31labs.dev/fluffyui/backend"
 	"m31labs.dev/fluffyui/backend/tcell"
 	"m31labs.dev/fluffyui/markdown"

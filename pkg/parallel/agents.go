@@ -10,7 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"m31labs.dev/buckley/v2/pkg/worktree"
+	"m31labs.dev/buckley/pkg/worktree"
 )
 
 // AgentTask represents a task to be executed by an agent

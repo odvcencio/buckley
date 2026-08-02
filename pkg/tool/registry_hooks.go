@@ -5,7 +5,7 @@ import (
 	"log/slog"
 	"time"
 
-	"m31labs.dev/buckley/v2/pkg/tool/external"
+	"m31labs.dev/buckley/pkg/tool/external"
 )
 
 type hookRunnerCloser struct {

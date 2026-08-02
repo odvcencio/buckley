@@ -4,8 +4,8 @@ import (
 	"testing"
 	"time"
 
-	"m31labs.dev/buckley/v2/pkg/oneshot"
-	"m31labs.dev/buckley/v2/pkg/oneshot/commands"
+	"m31labs.dev/buckley/pkg/oneshot"
+	"m31labs.dev/buckley/pkg/oneshot/commands"
 )
 
 func TestParseCommitCommandOptions(t *testing.T) {

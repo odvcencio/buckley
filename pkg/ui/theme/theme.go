@@ -4,7 +4,7 @@
 package theme
 
 import (
-	"m31labs.dev/buckley/v2/pkg/ui/compositor"
+	"m31labs.dev/buckley/pkg/ui/compositor"
 )
 
 // Theme defines the complete visual language for the TUI.

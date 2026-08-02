@@ -9,7 +9,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"m31labs.dev/buckley/v2/pkg/oneshot/commands"
+	"m31labs.dev/buckley/pkg/oneshot/commands"
 )
 
 const (

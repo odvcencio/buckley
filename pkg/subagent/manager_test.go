@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"m31labs.dev/buckley/v2/pkg/persona"
-	"m31labs.dev/buckley/v2/pkg/telemetry"
+	"m31labs.dev/buckley/pkg/persona"
+	"m31labs.dev/buckley/pkg/telemetry"
 )
 
 type runnerFunc func(context.Context, Request, func(int)) (string, error)

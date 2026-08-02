@@ -6,7 +6,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"m31labs.dev/buckley/v2/pkg/types"
+	"m31labs.dev/buckley/pkg/types"
 )
 
 const (

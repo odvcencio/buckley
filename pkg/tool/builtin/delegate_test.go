@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"m31labs.dev/buckley/v2/pkg/subagent"
+	"m31labs.dev/buckley/pkg/subagent"
 )
 
 type builtinSubagentRunnerFunc func(context.Context, subagent.Request, func(int)) (string, error)

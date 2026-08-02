@@ -10,10 +10,10 @@ import (
 	"strings"
 	"time"
 
-	"m31labs.dev/buckley/v2/pkg/diffsignal"
-	"m31labs.dev/buckley/v2/pkg/oneshot"
-	"m31labs.dev/buckley/v2/pkg/prompts"
-	"m31labs.dev/buckley/v2/pkg/transparency"
+	"m31labs.dev/buckley/pkg/diffsignal"
+	"m31labs.dev/buckley/pkg/oneshot"
+	"m31labs.dev/buckley/pkg/prompts"
+	"m31labs.dev/buckley/pkg/transparency"
 )
 
 // PRInfo contains parsed PR metadata.

@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"m31labs.dev/buckley/v2/pkg/model"
+	"m31labs.dev/buckley/pkg/model"
 )
 
 const modelsRefreshFixture = `{

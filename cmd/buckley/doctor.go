@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	"m31labs.dev/buckley/v2/pkg/chatcheck"
+	"m31labs.dev/buckley/pkg/chatcheck"
 )
 
 const envBuckleyChatCheckModel = "BUCKLEY_CHAT_CHECK_MODEL"

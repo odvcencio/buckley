@@ -50,7 +50,7 @@ jobs:
             exit 1
           fi
           test "$(git describe --tags --exact-match)" = "${RELEASE_TAG}"
-          test "$(go list -m)" = "m31labs.dev/buckley/v2"
+          test "$(go list -m)" = "m31labs.dev/buckley"
           git merge-base --is-ancestor HEAD "origin/main"
           ./scripts/check-release.sh "${RELEASE_TAG}"
 
@@ -71,7 +71,7 @@ jobs:
         run: |
           set -euo pipefail
           for attempt in 1 2 3; do
-            if go install "m31labs.dev/buckley/v2/cmd/buckley@${RELEASE_TAG}"; then
+            if go install "m31labs.dev/buckley/cmd/buckley@${RELEASE_TAG}"; then
               buckley version
               exit 0
             fi

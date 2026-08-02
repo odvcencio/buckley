@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"m31labs.dev/buckley/v2/pkg/sandbox"
+	"m31labs.dev/buckley/pkg/sandbox"
 )
 
 // configValidators lists every per-section validator, in the exact order

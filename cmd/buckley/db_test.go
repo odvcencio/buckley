@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"m31labs.dev/buckley/v2/pkg/storage"
+	"m31labs.dev/buckley/pkg/storage"
 )
 
 func TestDBBackupAndRestore(t *testing.T) {

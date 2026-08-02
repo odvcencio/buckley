@@ -110,7 +110,7 @@ func TestContinuationCursor_SendsOnlyMessagesAfterCommittedAssistant(t *testing.
 			Role:       "tool",
 			ToolCallID: "call_1",
 			Name:       "read_file",
-			Content:    "module m31labs.dev/buckley/v2",
+			Content:    "module m31labs.dev/buckley",
 		},
 	)
 	incremental, err := cursor.Prepare(next)

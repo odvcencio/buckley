@@ -6,7 +6,7 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
-	"m31labs.dev/buckley/v2/pkg/coordination/reliability"
+	"m31labs.dev/buckley/pkg/coordination/reliability"
 )
 
 // Connection represents a P2P connection interface

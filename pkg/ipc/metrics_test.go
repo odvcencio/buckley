@@ -7,10 +7,10 @@ import (
 	"path/filepath"
 	"testing"
 
-	"m31labs.dev/buckley/v2/pkg/config"
-	"m31labs.dev/buckley/v2/pkg/ipc/command"
-	"m31labs.dev/buckley/v2/pkg/orchestrator"
-	"m31labs.dev/buckley/v2/pkg/storage"
+	"m31labs.dev/buckley/pkg/config"
+	"m31labs.dev/buckley/pkg/ipc/command"
+	"m31labs.dev/buckley/pkg/orchestrator"
+	"m31labs.dev/buckley/pkg/storage"
 )
 
 func TestHandleMetricsUnauthorized(t *testing.T) {

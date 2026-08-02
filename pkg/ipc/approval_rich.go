@@ -5,8 +5,8 @@ import (
 	"strings"
 	"time"
 
-	ipcpb "m31labs.dev/buckley/v2/pkg/ipc/proto"
-	"m31labs.dev/buckley/v2/pkg/touch"
+	ipcpb "m31labs.dev/buckley/pkg/ipc/proto"
+	"m31labs.dev/buckley/pkg/touch"
 )
 
 type approvalRichFields struct {

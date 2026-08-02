@@ -7,7 +7,7 @@ import (
 	"sort"
 	"strings"
 
-	"m31labs.dev/buckley/v2/pkg/config"
+	"m31labs.dev/buckley/pkg/config"
 )
 
 const MaxInstructionFileChars = 12000

@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"m31labs.dev/buckley/v2/pkg/bus"
+	"m31labs.dev/buckley/pkg/bus"
 )
 
 // BusBridge connects the MessageBus to the IPC Hub, enabling browser/CLI

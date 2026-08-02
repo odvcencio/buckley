@@ -6,11 +6,11 @@ import (
 	"testing"
 	"time"
 
-	"m31labs.dev/buckley/v2/pkg/config"
-	"m31labs.dev/buckley/v2/pkg/model"
-	"m31labs.dev/buckley/v2/pkg/orchestrator"
-	"m31labs.dev/buckley/v2/pkg/storage"
-	"m31labs.dev/buckley/v2/pkg/tool/builtin"
+	"m31labs.dev/buckley/pkg/config"
+	"m31labs.dev/buckley/pkg/model"
+	"m31labs.dev/buckley/pkg/orchestrator"
+	"m31labs.dev/buckley/pkg/storage"
+	"m31labs.dev/buckley/pkg/tool/builtin"
 )
 
 func TestAnyToInt(t *testing.T) {

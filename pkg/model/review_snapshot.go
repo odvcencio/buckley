@@ -11,7 +11,7 @@ import (
 	"sort"
 	"strings"
 
-	"m31labs.dev/buckley/v2/pkg/diffsignal"
+	"m31labs.dev/buckley/pkg/diffsignal"
 )
 
 // ReviewSnapshotMode selects the exact Git state exposed to native review

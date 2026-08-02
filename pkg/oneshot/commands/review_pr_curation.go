@@ -4,7 +4,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"m31labs.dev/buckley/v2/pkg/transparency"
+	"m31labs.dev/buckley/pkg/transparency"
 )
 
 const (

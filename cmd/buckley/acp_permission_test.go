@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"m31labs.dev/buckley/v2/pkg/acp"
-	"m31labs.dev/buckley/v2/pkg/model"
-	"m31labs.dev/buckley/v2/pkg/tool"
+	"m31labs.dev/buckley/pkg/acp"
+	"m31labs.dev/buckley/pkg/model"
+	"m31labs.dev/buckley/pkg/tool"
 )
 
 // startFakeACPAgentForPermissionTests wires a real *acp.Agent to a pipe pair

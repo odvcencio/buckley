@@ -5,7 +5,7 @@ import (
 	"strings"
 	"time"
 
-	"m31labs.dev/buckley/v2/pkg/tool/builtin"
+	"m31labs.dev/buckley/pkg/tool/builtin"
 )
 
 // ActivityGroupingConfig holds configuration for activity grouping

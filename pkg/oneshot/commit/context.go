@@ -7,8 +7,8 @@ import (
 	"strconv"
 	"strings"
 
-	"m31labs.dev/buckley/v2/pkg/diffsignal"
-	"m31labs.dev/buckley/v2/pkg/transparency"
+	"m31labs.dev/buckley/pkg/diffsignal"
+	"m31labs.dev/buckley/pkg/transparency"
 )
 
 // Context contains all the information needed for commit generation.

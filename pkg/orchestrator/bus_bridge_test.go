@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"m31labs.dev/buckley/v2/pkg/bus"
-	"m31labs.dev/buckley/v2/pkg/telemetry"
+	"m31labs.dev/buckley/pkg/bus"
+	"m31labs.dev/buckley/pkg/telemetry"
 )
 
 func TestTelemetryBusBridge_ForwardsEvents(t *testing.T) {

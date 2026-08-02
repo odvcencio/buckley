@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"m31labs.dev/buckley/v2/pkg/oneshot/commands"
+	"m31labs.dev/buckley/pkg/oneshot/commands"
 )
 
 func TestReviewContextProvider_UsesBoundedSummaryAndAnchors(t *testing.T) {

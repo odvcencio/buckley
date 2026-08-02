@@ -6,9 +6,9 @@ import (
 	"strings"
 	"time"
 
-	"m31labs.dev/buckley/v2/pkg/policy"
-	"m31labs.dev/buckley/v2/pkg/tool/builtin"
-	"m31labs.dev/buckley/v2/pkg/types"
+	"m31labs.dev/buckley/pkg/policy"
+	"m31labs.dev/buckley/pkg/tool/builtin"
+	"m31labs.dev/buckley/pkg/types"
 )
 
 // PermissionGate supplies the layered glob-permission configuration

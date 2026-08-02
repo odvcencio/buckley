@@ -4,10 +4,10 @@ import (
 	"context"
 	"fmt"
 
-	"m31labs.dev/buckley/v2/pkg/config"
-	"m31labs.dev/buckley/v2/pkg/orchestrator"
-	"m31labs.dev/buckley/v2/pkg/storage"
-	"m31labs.dev/buckley/v2/pkg/tool"
+	"m31labs.dev/buckley/pkg/config"
+	"m31labs.dev/buckley/pkg/orchestrator"
+	"m31labs.dev/buckley/pkg/storage"
+	"m31labs.dev/buckley/pkg/tool"
 )
 
 // Agent wraps the orchestrator so callers embedding Buckley programmatically can plan/execute features without the TUI.

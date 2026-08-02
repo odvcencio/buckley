@@ -1,7 +1,7 @@
 package policy
 
 import (
-	"m31labs.dev/buckley/v2/pkg/types"
+	"m31labs.dev/buckley/pkg/types"
 )
 
 // BuiltinDefaultsDomain and BuiltinDefaultsStrategy identify the arbiter

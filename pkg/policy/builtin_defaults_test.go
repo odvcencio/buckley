@@ -3,8 +3,8 @@ package policy
 import (
 	"testing"
 
-	"m31labs.dev/buckley/v2/pkg/rules"
-	"m31labs.dev/buckley/v2/pkg/types"
+	"m31labs.dev/buckley/pkg/rules"
+	"m31labs.dev/buckley/pkg/types"
 )
 
 // parityCases exercises the built-in defaults across denies, asks, and

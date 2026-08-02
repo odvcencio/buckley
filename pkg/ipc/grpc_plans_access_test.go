@@ -8,10 +8,10 @@ import (
 
 	"connectrpc.com/connect"
 
-	"m31labs.dev/buckley/v2/pkg/config"
-	ipcpb "m31labs.dev/buckley/v2/pkg/ipc/proto"
-	"m31labs.dev/buckley/v2/pkg/orchestrator"
-	"m31labs.dev/buckley/v2/pkg/storage"
+	"m31labs.dev/buckley/pkg/config"
+	ipcpb "m31labs.dev/buckley/pkg/ipc/proto"
+	"m31labs.dev/buckley/pkg/orchestrator"
+	"m31labs.dev/buckley/pkg/storage"
 )
 
 func TestGRPCListPlansFiltersByPrincipal(t *testing.T) {

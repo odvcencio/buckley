@@ -12,8 +12,8 @@ import (
 	"github.com/oklog/ulid/v2"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
-	pb "m31labs.dev/buckley/v2/pkg/acp/proto"
-	buckleyversion "m31labs.dev/buckley/v2/pkg/version"
+	pb "m31labs.dev/buckley/pkg/acp/proto"
+	buckleyversion "m31labs.dev/buckley/pkg/version"
 )
 
 // Bridge implements LSP server that bridges to ACP coordinator

@@ -9,7 +9,7 @@ import (
 	"syscall"
 	"time"
 
-	"m31labs.dev/buckley/v2/pkg/acp/lsp"
+	"m31labs.dev/buckley/pkg/acp/lsp"
 )
 
 // runLSPCommand starts the LSP bridge server on stdio

@@ -7,12 +7,12 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"m31labs.dev/buckley/v2/pkg/acp"
-	"m31labs.dev/buckley/v2/pkg/config"
-	"m31labs.dev/buckley/v2/pkg/conversation"
-	"m31labs.dev/buckley/v2/pkg/model"
-	"m31labs.dev/buckley/v2/pkg/rules"
-	"m31labs.dev/buckley/v2/pkg/tool"
+	"m31labs.dev/buckley/pkg/acp"
+	"m31labs.dev/buckley/pkg/config"
+	"m31labs.dev/buckley/pkg/conversation"
+	"m31labs.dev/buckley/pkg/model"
+	"m31labs.dev/buckley/pkg/rules"
+	"m31labs.dev/buckley/pkg/tool"
 )
 
 // TestSendACPUsageUpdate_SendsUsedAndSize locks N1's wire content: used

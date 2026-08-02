@@ -13,8 +13,8 @@ package oneshot
 import (
 	"context"
 
-	"m31labs.dev/buckley/v2/pkg/tools"
-	"m31labs.dev/buckley/v2/pkg/transparency"
+	"m31labs.dev/buckley/pkg/tools"
+	"m31labs.dev/buckley/pkg/transparency"
 )
 
 // Options configures one-shot command behavior.

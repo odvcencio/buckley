@@ -15,9 +15,9 @@ import (
 
 	"connectrpc.com/connect"
 
-	"m31labs.dev/buckley/v2/pkg/config"
-	ipcpb "m31labs.dev/buckley/v2/pkg/ipc/proto"
-	"m31labs.dev/buckley/v2/pkg/ipc/proto/ipcpbconnect"
+	"m31labs.dev/buckley/pkg/config"
+	ipcpb "m31labs.dev/buckley/pkg/ipc/proto"
+	"m31labs.dev/buckley/pkg/ipc/proto/ipcpbconnect"
 )
 
 // defaultAttachAddress is the loopback address `buckley serve` binds by

@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"m31labs.dev/buckley/v2/pkg/storage"
+	"m31labs.dev/buckley/pkg/storage"
 )
 
 type fakeProvider struct{}

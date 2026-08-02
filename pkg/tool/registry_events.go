@@ -7,9 +7,9 @@ import (
 
 	"github.com/oklog/ulid/v2"
 
-	"m31labs.dev/buckley/v2/pkg/telemetry"
-	"m31labs.dev/buckley/v2/pkg/tool/builtin"
-	"m31labs.dev/buckley/v2/pkg/touch"
+	"m31labs.dev/buckley/pkg/telemetry"
+	"m31labs.dev/buckley/pkg/tool/builtin"
+	"m31labs.dev/buckley/pkg/touch"
 )
 
 func (r *Registry) publishShellEvent(eventType telemetry.EventType, data map[string]any) {

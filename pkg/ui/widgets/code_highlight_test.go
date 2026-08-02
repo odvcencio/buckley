@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"m31labs.dev/buckley/v2/pkg/ui/scrollback"
+	"m31labs.dev/buckley/pkg/ui/scrollback"
 	"m31labs.dev/fluffyui/backend"
 	"m31labs.dev/fluffyui/markdown"
 	"m31labs.dev/fluffyui/runtime"

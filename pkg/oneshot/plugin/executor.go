@@ -12,8 +12,8 @@ import (
 	"sync"
 	"time"
 
-	"m31labs.dev/buckley/v2/pkg/oneshot"
-	"m31labs.dev/buckley/v2/pkg/transparency"
+	"m31labs.dev/buckley/pkg/oneshot"
+	"m31labs.dev/buckley/pkg/transparency"
 )
 
 // Executor runs plugin commands.

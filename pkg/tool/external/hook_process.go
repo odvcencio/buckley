@@ -60,7 +60,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"m31labs.dev/buckley/v2/pkg/telemetry"
+	"m31labs.dev/buckley/pkg/telemetry"
 )
 
 // hookMessageKind distinguishes the two message shapes written to a hook

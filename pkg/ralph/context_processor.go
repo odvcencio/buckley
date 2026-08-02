@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"m31labs.dev/buckley/v2/pkg/model"
+	"m31labs.dev/buckley/pkg/model"
 )
 
 // ChatCompleter executes a non-streaming chat completion.

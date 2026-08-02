@@ -10,12 +10,12 @@ import (
 
 	"github.com/oklog/ulid/v2"
 
-	"m31labs.dev/buckley/v2/pkg/config"
-	projectcontext "m31labs.dev/buckley/v2/pkg/context"
-	"m31labs.dev/buckley/v2/pkg/model"
-	"m31labs.dev/buckley/v2/pkg/notify"
-	"m31labs.dev/buckley/v2/pkg/parallel"
-	"m31labs.dev/buckley/v2/pkg/telemetry"
+	"m31labs.dev/buckley/pkg/config"
+	projectcontext "m31labs.dev/buckley/pkg/context"
+	"m31labs.dev/buckley/pkg/model"
+	"m31labs.dev/buckley/pkg/notify"
+	"m31labs.dev/buckley/pkg/parallel"
+	"m31labs.dev/buckley/pkg/telemetry"
 )
 
 // RunnerConfig controls experiment execution behavior.

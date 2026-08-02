@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"m31labs.dev/buckley/v2/pkg/gitwatcher"
-	"m31labs.dev/buckley/v2/pkg/oneshot/commands"
+	"m31labs.dev/buckley/pkg/gitwatcher"
+	"m31labs.dev/buckley/pkg/oneshot/commands"
 )
 
 func TestRunBuckbotCommandRequiresOnDemandPosting(t *testing.T) {

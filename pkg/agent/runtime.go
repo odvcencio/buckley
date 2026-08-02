@@ -12,9 +12,9 @@ import (
 
 	"github.com/oklog/ulid/v2"
 
-	"m31labs.dev/buckley/v2/pkg/bus"
-	"m31labs.dev/buckley/v2/pkg/model"
-	"m31labs.dev/buckley/v2/pkg/tool"
+	"m31labs.dev/buckley/pkg/bus"
+	"m31labs.dev/buckley/pkg/model"
+	"m31labs.dev/buckley/pkg/tool"
 )
 
 // State represents the lifecycle state of an agent.

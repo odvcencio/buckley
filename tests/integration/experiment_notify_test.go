@@ -10,12 +10,12 @@ import (
 	"testing"
 	"time"
 
-	"m31labs.dev/buckley/v2/pkg/config"
-	"m31labs.dev/buckley/v2/pkg/experiment"
-	"m31labs.dev/buckley/v2/pkg/model"
-	"m31labs.dev/buckley/v2/pkg/notify"
-	"m31labs.dev/buckley/v2/pkg/storage"
-	"m31labs.dev/buckley/v2/pkg/worktree"
+	"m31labs.dev/buckley/pkg/config"
+	"m31labs.dev/buckley/pkg/experiment"
+	"m31labs.dev/buckley/pkg/model"
+	"m31labs.dev/buckley/pkg/notify"
+	"m31labs.dev/buckley/pkg/storage"
+	"m31labs.dev/buckley/pkg/worktree"
 )
 
 // mockNotifyAdapter captures notifications for testing

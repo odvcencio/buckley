@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"m31labs.dev/buckley/v2/pkg/model"
+	"m31labs.dev/buckley/pkg/model"
 )
 
 func TestProjectModelMessagesForRequest_PreservesHistoryInLongWindow(t *testing.T) {

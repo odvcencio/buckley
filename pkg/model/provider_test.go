@@ -3,7 +3,7 @@ package model
 import (
 	"testing"
 
-	"m31labs.dev/buckley/v2/pkg/config"
+	"m31labs.dev/buckley/pkg/config"
 )
 
 func TestProviderFactory(t *testing.T) {

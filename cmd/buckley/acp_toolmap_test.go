@@ -4,8 +4,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"m31labs.dev/buckley/v2/pkg/acp"
-	"m31labs.dev/buckley/v2/pkg/tool"
+	"m31labs.dev/buckley/pkg/acp"
+	"m31labs.dev/buckley/pkg/tool"
 )
 
 // TestToolCallKind_MatchesRegisteredToolNames locks S2: the kind/title maps

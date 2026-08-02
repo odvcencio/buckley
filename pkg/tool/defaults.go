@@ -3,10 +3,10 @@ package tool
 import (
 	"time"
 
-	"m31labs.dev/buckley/v2/pkg/config"
-	"m31labs.dev/buckley/v2/pkg/filewatch"
-	"m31labs.dev/buckley/v2/pkg/mission"
-	"m31labs.dev/buckley/v2/pkg/telemetry"
+	"m31labs.dev/buckley/pkg/config"
+	"m31labs.dev/buckley/pkg/filewatch"
+	"m31labs.dev/buckley/pkg/mission"
+	"m31labs.dev/buckley/pkg/telemetry"
 )
 
 // ApplyToolMiddlewareConfig installs the configured timeout, retry, output,

@@ -18,7 +18,7 @@ import (
 	"github.com/creack/pty"
 	"nhooyr.io/websocket"
 
-	"m31labs.dev/buckley/v2/pkg/storage"
+	"m31labs.dev/buckley/pkg/storage"
 )
 
 type ptyMessage struct {

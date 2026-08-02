@@ -5,7 +5,7 @@ import (
 	"os/user"
 	"strings"
 
-	"m31labs.dev/buckley/v2/pkg/config"
+	"m31labs.dev/buckley/pkg/config"
 )
 
 // buildCreateArgs constructs the docker create argument list for a hardened container.

@@ -12,9 +12,9 @@ import (
 	"strings"
 	"time"
 
-	"m31labs.dev/buckley/v2/pkg/gitwatcher"
-	"m31labs.dev/buckley/v2/pkg/model"
-	"m31labs.dev/buckley/v2/pkg/oneshot/commands"
+	"m31labs.dev/buckley/pkg/gitwatcher"
+	"m31labs.dev/buckley/pkg/model"
+	"m31labs.dev/buckley/pkg/oneshot/commands"
 )
 
 var postBuckbotReviewPayloadFn = postBuckbotReviewPayload

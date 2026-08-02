@@ -3,8 +3,8 @@ package ipc
 import (
 	"testing"
 
-	"m31labs.dev/buckley/v2/pkg/config"
-	"m31labs.dev/buckley/v2/pkg/telemetry"
+	"m31labs.dev/buckley/pkg/config"
+	"m31labs.dev/buckley/pkg/telemetry"
 )
 
 type recordingForwarder struct {

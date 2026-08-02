@@ -11,9 +11,9 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
-	"m31labs.dev/buckley/v2/pkg/config"
-	"m31labs.dev/buckley/v2/pkg/mission"
-	"m31labs.dev/buckley/v2/pkg/storage"
+	"m31labs.dev/buckley/pkg/config"
+	"m31labs.dev/buckley/pkg/mission"
+	"m31labs.dev/buckley/pkg/storage"
 )
 
 func TestMissionHandlersRecordActivityAndListAgents(t *testing.T) {

@@ -8,10 +8,10 @@ import (
 
 	"go.uber.org/mock/gomock"
 
-	"m31labs.dev/buckley/v2/pkg/artifact"
-	"m31labs.dev/buckley/v2/pkg/config"
-	"m31labs.dev/buckley/v2/pkg/telemetry"
-	"m31labs.dev/buckley/v2/pkg/tool"
+	"m31labs.dev/buckley/pkg/artifact"
+	"m31labs.dev/buckley/pkg/config"
+	"m31labs.dev/buckley/pkg/telemetry"
+	"m31labs.dev/buckley/pkg/tool"
 )
 
 func TestAuthorizeToolCallDetectsSudo(t *testing.T) {

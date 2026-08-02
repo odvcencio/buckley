@@ -14,7 +14,7 @@ import (
 
 	gomock "go.uber.org/mock/gomock"
 
-	builtin "m31labs.dev/buckley/v2/pkg/tool/builtin"
+	builtin "m31labs.dev/buckley/pkg/tool/builtin"
 )
 
 // MockTool is a mock of Tool interface.

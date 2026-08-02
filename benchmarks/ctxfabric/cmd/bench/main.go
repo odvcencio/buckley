@@ -21,10 +21,10 @@ import (
 	"runtime"
 	"time"
 
-	"m31labs.dev/buckley/v2/benchmarks/ctxfabric/corpus"
-	"m31labs.dev/buckley/v2/pkg/config"
-	"m31labs.dev/buckley/v2/pkg/model"
-	"m31labs.dev/buckley/v2/pkg/tool"
+	"m31labs.dev/buckley/benchmarks/ctxfabric/corpus"
+	"m31labs.dev/buckley/pkg/config"
+	"m31labs.dev/buckley/pkg/model"
+	"m31labs.dev/buckley/pkg/tool"
 )
 
 // ScenarioMetrics is the recorded baseline for a single corpus scenario.

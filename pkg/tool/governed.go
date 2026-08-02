@@ -4,7 +4,7 @@ import (
 	"sort"
 	"strings"
 
-	"m31labs.dev/buckley/v2/pkg/types"
+	"m31labs.dev/buckley/pkg/types"
 )
 
 // RequiredTierForTool infers the permission tier for a tool from its metadata.

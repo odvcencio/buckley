@@ -13,15 +13,15 @@ import (
 	"sync"
 	"time"
 
-	"m31labs.dev/buckley/v2/pkg/bus"
-	"m31labs.dev/buckley/v2/pkg/config"
-	"m31labs.dev/buckley/v2/pkg/graft"
-	"m31labs.dev/buckley/v2/pkg/model"
-	"m31labs.dev/buckley/v2/pkg/orchestrator"
-	"m31labs.dev/buckley/v2/pkg/rlm"
-	"m31labs.dev/buckley/v2/pkg/storage"
-	"m31labs.dev/buckley/v2/pkg/telemetry"
-	"m31labs.dev/buckley/v2/pkg/tool"
+	"m31labs.dev/buckley/pkg/bus"
+	"m31labs.dev/buckley/pkg/config"
+	"m31labs.dev/buckley/pkg/graft"
+	"m31labs.dev/buckley/pkg/model"
+	"m31labs.dev/buckley/pkg/orchestrator"
+	"m31labs.dev/buckley/pkg/rlm"
+	"m31labs.dev/buckley/pkg/storage"
+	"m31labs.dev/buckley/pkg/telemetry"
+	"m31labs.dev/buckley/pkg/tool"
 )
 
 // Runner provides plan execution using the RLM runtime.

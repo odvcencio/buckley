@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"m31labs.dev/buckley/v2/pkg/paths"
+	"m31labs.dev/buckley/pkg/paths"
 )
 
 // NetworkLogEntry represents a single network request/response log entry

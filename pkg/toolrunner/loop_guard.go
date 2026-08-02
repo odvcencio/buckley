@@ -3,7 +3,7 @@ package toolrunner
 import (
 	"strings"
 
-	"m31labs.dev/buckley/v2/pkg/agentloop"
+	"m31labs.dev/buckley/pkg/agentloop"
 )
 
 func newRunnerLoopGovernor(maxRounds int) *agentloop.Governor {

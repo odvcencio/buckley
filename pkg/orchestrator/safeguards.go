@@ -5,7 +5,7 @@ import (
 	"sync"
 	"time"
 
-	"m31labs.dev/buckley/v2/pkg/rules"
+	"m31labs.dev/buckley/pkg/rules"
 )
 
 // RiskLevel represents the severity of a detected risk

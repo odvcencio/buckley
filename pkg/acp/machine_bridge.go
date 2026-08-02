@@ -4,7 +4,7 @@ import (
 	"strings"
 	"sync"
 
-	"m31labs.dev/buckley/v2/pkg/telemetry"
+	"m31labs.dev/buckley/pkg/telemetry"
 )
 
 // MachineBridge subscribes to the telemetry Hub and translates machine

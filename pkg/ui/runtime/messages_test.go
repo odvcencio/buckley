@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"m31labs.dev/buckley/v2/pkg/ui/terminal"
+	"m31labs.dev/buckley/pkg/ui/terminal"
 )
 
 // TestMessages verifies all message types implement the Message interface.

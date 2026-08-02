@@ -11,9 +11,9 @@ import (
 
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"m31labs.dev/buckley/v2/pkg/config"
-	"m31labs.dev/buckley/v2/pkg/mcp"
-	"m31labs.dev/buckley/v2/pkg/policy"
+	"m31labs.dev/buckley/pkg/config"
+	"m31labs.dev/buckley/pkg/mcp"
+	"m31labs.dev/buckley/pkg/policy"
 )
 
 // fakeServerBin holds the path to pkg/mcp's testdata/fakeserver binary,
@@ -29,7 +29,7 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 	bin := filepath.Join(dir, "fakeserver")
-	build := exec.Command("go", "build", "-o", bin, "m31labs.dev/buckley/v2/pkg/mcp/testdata/fakeserver")
+	build := exec.Command("go", "build", "-o", bin, "m31labs.dev/buckley/pkg/mcp/testdata/fakeserver")
 	if out, buildErr := build.CombinedOutput(); buildErr != nil {
 		os.Stderr.WriteString(string(out))
 		os.RemoveAll(dir)

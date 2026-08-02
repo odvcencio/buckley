@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 
-	"m31labs.dev/buckley/v2/pkg/oneshot"
-	"m31labs.dev/buckley/v2/pkg/transparency"
+	"m31labs.dev/buckley/pkg/oneshot"
+	"m31labs.dev/buckley/pkg/transparency"
 )
 
 // Runner executes the commit generation flow.

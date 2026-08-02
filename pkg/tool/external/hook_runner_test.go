@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"m31labs.dev/buckley/v2/pkg/telemetry"
+	"m31labs.dev/buckley/pkg/telemetry"
 )
 
 func manifestWithHooks(name string, events []string, preTool *PreToolHooksConfig) *ToolManifest {

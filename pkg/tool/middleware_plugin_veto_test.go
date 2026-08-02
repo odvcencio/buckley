@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"m31labs.dev/buckley/v2/pkg/tool/builtin"
+	"m31labs.dev/buckley/pkg/tool/builtin"
 )
 
 // stubVetoGate is a PluginVetoGate test double that records every call and
