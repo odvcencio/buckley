@@ -6,14 +6,17 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"m31labs.dev/buckley/pkg/evidence"
 	"m31labs.dev/buckley/pkg/goalloop"
 	"m31labs.dev/buckley/pkg/runledger"
 	"m31labs.dev/buckley/pkg/taskstate"
+	"m31labs.dev/buckley/pkg/tool"
 )
 
 // runGoalCommand implements `buckley goal <start|status|list>` (goal-loop
@@ -33,9 +36,87 @@ func runGoalCommand(args []string) error {
 		return runGoalList(args[1:])
 	case "report":
 		return runGoalReport(args[1:])
+	case "run":
+		return runGoalRun(args[1:])
 	default:
-		return fmt.Errorf("unknown goal subcommand %q (want start, status, list, or report)", args[0])
+		return fmt.Errorf("unknown goal subcommand %q (want start, status, list, report, or run)", args[0])
 	}
+}
+
+// runGoalRun drives a recorded goal against the live model stack until
+// the queue drains, the budget parks the work, or the user interrupts.
+// Interruption is safe by construction: every drive exit checkpoints, so
+// the next `goal run` resumes from durable state.
+func runGoalRun(args []string) error {
+	fs := flag.NewFlagSet("goal run", flag.ContinueOnError)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return errors.New("usage: buckley goal run <run-id>")
+	}
+	runID := strings.TrimSpace(fs.Arg(0))
+
+	cfg, mgr, store, err := initDependenciesFn()
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+
+	stores, cleanup, err := openGoalStores()
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+
+	workDir, err := os.Getwd()
+	if err != nil {
+		return err
+	}
+	registry := tool.NewRegistry()
+	tool.ApplyToolMiddlewareConfig(registry, cfg)
+	registry.ConfigureContainers(cfg, workDir)
+	registry.SetWorkDir(workDir)
+
+	loop, err := goalloop.New(goalloop.Config{
+		Ledger:      stores.ledger,
+		Checkpoints: stores.checkpoints,
+		Engine:      newGoalTurnEngine(cfg, mgr, registry, stores.evidence, workDir),
+		SessionID:   "goal-cli",
+	})
+	if err != nil {
+		return err
+	}
+
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+
+	goal, specs, err := loop.LoadGoal(ctx, runID)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("Running goal %s: %s\n", runID, goal.Statement)
+	if goal.BudgetUSD > 0 {
+		fmt.Printf("Budget: $%.2f · posture: %s\n", goal.BudgetUSD, goal.Posture)
+	}
+
+	results, err := loop.Drain(ctx, runID, goal, specs)
+	for _, result := range results {
+		line := fmt.Sprintf("  [%s] %s — %d turn(s), $%.2f", result.Status, result.TaskID, result.Turns, result.SpentUSD)
+		if result.Decision != "" {
+			line += " (" + string(result.Decision) + ")"
+		}
+		fmt.Println(line)
+	}
+	if err != nil {
+		if ctx.Err() != nil {
+			fmt.Println("Interrupted; progress is checkpointed. Rerun `buckley goal run` to continue.")
+			return nil
+		}
+		return err
+	}
+	fmt.Printf("Queue drained. Report: buckley goal report %s\n", runID)
+	return nil
 }
 
 // runGoalReport prints the goal's morning report (design 7.3): the
@@ -213,10 +294,11 @@ func firstGoalEvent(events []runledger.Event) (runledger.Event, bool) {
 	return runledger.Event{}, false
 }
 
-// goalStores bundles the two durable stores the goal loop composes.
+// goalStores bundles the durable stores the goal loop composes.
 type goalStores struct {
 	ledger      *runledger.SQLiteStore
 	checkpoints *taskstate.Manager
+	evidence    *evidence.SQLiteStore
 }
 
 // openGoalStores opens the shared ledger database: evidence and run
@@ -244,7 +326,7 @@ func openGoalStores() (*goalStores, func(), error) {
 		_ = ev.Close()
 		return nil, nil, err
 	}
-	return &goalStores{ledger: ledger, checkpoints: checkpoints}, func() { _ = ev.Close() }, nil
+	return &goalStores{ledger: ledger, checkpoints: checkpoints, evidence: ev}, func() { _ = ev.Close() }, nil
 }
 
 func newGoalLoop() (*goalloop.Loop, func(), error) {
