@@ -5,7 +5,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"m31labs.dev/buckley/v2/pkg/diffsignal"
+	"m31labs.dev/buckley/pkg/diffsignal"
 )
 
 func TestDefaultBranchContextOptions(t *testing.T) {

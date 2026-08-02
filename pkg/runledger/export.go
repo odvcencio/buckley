@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"time"
 
-	"m31labs.dev/buckley/v2/pkg/evidence"
+	"m31labs.dev/buckley/pkg/evidence"
 )
 
 // RunExport is the exportable, redacted document for one run's durable

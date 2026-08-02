@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"m31labs.dev/buckley/v2/pkg/telemetry"
+	"m31labs.dev/buckley/pkg/telemetry"
 )
 
 // warnCollector is a thread-safe sink for HookProcess/HookRunner warning

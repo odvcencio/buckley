@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"m31labs.dev/buckley/v2/pkg/evidence"
+	"m31labs.dev/buckley/pkg/evidence"
 )
 
 func TestExportRun_RedactsPayloadSecrets(t *testing.T) {

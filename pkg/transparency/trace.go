@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"time"
 
-	"m31labs.dev/buckley/v2/pkg/tools"
+	"m31labs.dev/buckley/pkg/tools"
 )
 
 // Trace captures everything about an LLM invocation.

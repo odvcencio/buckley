@@ -9,9 +9,9 @@ import (
 	"strings"
 	"testing"
 
-	"m31labs.dev/buckley/v2/pkg/model"
-	"m31labs.dev/buckley/v2/pkg/rlm"
-	"m31labs.dev/buckley/v2/pkg/transparency"
+	"m31labs.dev/buckley/pkg/model"
+	"m31labs.dev/buckley/pkg/rlm"
+	"m31labs.dev/buckley/pkg/transparency"
 )
 
 func TestNativeCodexReviewRunsWithoutCatalogPricing(t *testing.T) {

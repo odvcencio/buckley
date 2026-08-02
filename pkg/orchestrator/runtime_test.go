@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"m31labs.dev/buckley/v2/pkg/types"
+	"m31labs.dev/buckley/pkg/types"
 )
 
 // --- Static test doubles ---

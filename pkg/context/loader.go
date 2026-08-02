@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"m31labs.dev/buckley/v2/pkg/conversation"
+	"m31labs.dev/buckley/pkg/conversation"
 )
 
 // ProjectContext holds parsed AGENTS.md content

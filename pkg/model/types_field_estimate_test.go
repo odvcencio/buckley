@@ -51,7 +51,7 @@ func TestEstimateRequestTokens_TracksMarshalBaseline(t *testing.T) {
 							}},
 						},
 					},
-					{Role: "tool", ToolCallID: "call_1", Name: "read_file", Content: "module m31labs.dev/buckley/v2\n\ngo 1.24\n"},
+					{Role: "tool", ToolCallID: "call_1", Name: "read_file", Content: "module m31labs.dev/buckley\n\ngo 1.24\n"},
 					{Role: "tool", ToolCallID: "call_2", Name: "grep", Content: "require (\n\tgithub.com/foo v1.2.3\n)\n"},
 				},
 				Tools: []map[string]any{

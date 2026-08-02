@@ -1,9 +1,9 @@
 package orchestrator
 
 import (
-	"m31labs.dev/buckley/v2/pkg/artifact"
-	"m31labs.dev/buckley/v2/pkg/config"
-	"m31labs.dev/buckley/v2/pkg/docs"
+	"m31labs.dev/buckley/pkg/artifact"
+	"m31labs.dev/buckley/pkg/config"
+	"m31labs.dev/buckley/pkg/docs"
 )
 
 // artifactPipeline centralizes documentation and artifact generation.

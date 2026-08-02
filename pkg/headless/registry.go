@@ -11,15 +11,15 @@ import (
 	"sync"
 	"time"
 
-	"m31labs.dev/buckley/v2/pkg/config"
-	"m31labs.dev/buckley/v2/pkg/giturl"
-	"m31labs.dev/buckley/v2/pkg/ipc/command"
-	"m31labs.dev/buckley/v2/pkg/mission"
-	"m31labs.dev/buckley/v2/pkg/model"
-	"m31labs.dev/buckley/v2/pkg/session"
-	"m31labs.dev/buckley/v2/pkg/storage"
-	"m31labs.dev/buckley/v2/pkg/telemetry"
-	"m31labs.dev/buckley/v2/pkg/tool"
+	"m31labs.dev/buckley/pkg/config"
+	"m31labs.dev/buckley/pkg/giturl"
+	"m31labs.dev/buckley/pkg/ipc/command"
+	"m31labs.dev/buckley/pkg/mission"
+	"m31labs.dev/buckley/pkg/model"
+	"m31labs.dev/buckley/pkg/session"
+	"m31labs.dev/buckley/pkg/storage"
+	"m31labs.dev/buckley/pkg/telemetry"
+	"m31labs.dev/buckley/pkg/tool"
 )
 
 // CreateSessionRequest contains parameters for creating a headless session.

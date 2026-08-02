@@ -9,10 +9,10 @@ import (
 	"strings"
 	"testing"
 
-	"m31labs.dev/buckley/v2/pkg/config"
-	"m31labs.dev/buckley/v2/pkg/conversation"
-	"m31labs.dev/buckley/v2/pkg/model"
-	"m31labs.dev/buckley/v2/pkg/storage"
+	"m31labs.dev/buckley/pkg/config"
+	"m31labs.dev/buckley/pkg/conversation"
+	"m31labs.dev/buckley/pkg/model"
+	"m31labs.dev/buckley/pkg/storage"
 )
 
 func newContinuationTestConfig(baseURL string) *config.Config {

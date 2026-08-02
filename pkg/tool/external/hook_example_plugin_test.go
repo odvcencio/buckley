@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"m31labs.dev/buckley/v2/pkg/telemetry"
+	"m31labs.dev/buckley/pkg/telemetry"
 )
 
 // examplePluginDir resolves the repository's real working example plugin

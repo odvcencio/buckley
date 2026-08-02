@@ -9,11 +9,11 @@ import (
 
 	"go.uber.org/mock/gomock"
 
-	"m31labs.dev/buckley/v2/pkg/artifact"
-	"m31labs.dev/buckley/v2/pkg/config"
-	orchestratorMocks "m31labs.dev/buckley/v2/pkg/orchestrator/mocks"
-	"m31labs.dev/buckley/v2/pkg/storage"
-	"m31labs.dev/buckley/v2/pkg/tool"
+	"m31labs.dev/buckley/pkg/artifact"
+	"m31labs.dev/buckley/pkg/config"
+	orchestratorMocks "m31labs.dev/buckley/pkg/orchestrator/mocks"
+	"m31labs.dev/buckley/pkg/storage"
+	"m31labs.dev/buckley/pkg/tool"
 )
 
 func newTestWorkflowManager(t *testing.T, modelClient ModelClient) (*WorkflowManager, *storage.Store, func()) {

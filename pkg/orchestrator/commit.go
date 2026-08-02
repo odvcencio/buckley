@@ -10,10 +10,10 @@ import (
 	"strings"
 	"time"
 
-	"m31labs.dev/buckley/v2/pkg/commitmsg"
-	"m31labs.dev/buckley/v2/pkg/config"
-	"m31labs.dev/buckley/v2/pkg/model"
-	"m31labs.dev/buckley/v2/pkg/prompts"
+	"m31labs.dev/buckley/pkg/commitmsg"
+	"m31labs.dev/buckley/pkg/config"
+	"m31labs.dev/buckley/pkg/model"
+	"m31labs.dev/buckley/pkg/prompts"
 )
 
 type CommitGenerator struct {

@@ -7,11 +7,11 @@ import (
 	"sort"
 	"strings"
 
-	"m31labs.dev/buckley/v2/pkg/agentloop"
-	"m31labs.dev/buckley/v2/pkg/conversation"
-	"m31labs.dev/buckley/v2/pkg/model"
-	"m31labs.dev/buckley/v2/pkg/tool"
-	"m31labs.dev/buckley/v2/pkg/tool/builtin"
+	"m31labs.dev/buckley/pkg/agentloop"
+	"m31labs.dev/buckley/pkg/conversation"
+	"m31labs.dev/buckley/pkg/model"
+	"m31labs.dev/buckley/pkg/tool"
+	"m31labs.dev/buckley/pkg/tool/builtin"
 )
 
 type toolLoopState struct {

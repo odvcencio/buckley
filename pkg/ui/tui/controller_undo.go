@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 
-	"m31labs.dev/buckley/v2/pkg/conversation"
-	"m31labs.dev/buckley/v2/pkg/ui/shadowgit"
+	"m31labs.dev/buckley/pkg/conversation"
+	"m31labs.dev/buckley/pkg/ui/shadowgit"
 )
 
 // maxUndoDepth caps how many turns /undo can walk back, bounding both

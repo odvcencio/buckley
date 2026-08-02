@@ -5,7 +5,7 @@ import (
 	"testing"
 
 	"google.golang.org/protobuf/types/known/emptypb"
-	"m31labs.dev/buckley/v2/pkg/sdk"
+	"m31labs.dev/buckley/pkg/sdk"
 )
 
 func TestNewService(t *testing.T) {

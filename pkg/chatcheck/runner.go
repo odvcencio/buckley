@@ -14,7 +14,7 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
-	"m31labs.dev/buckley/v2/pkg/model"
+	"m31labs.dev/buckley/pkg/model"
 )
 
 const (

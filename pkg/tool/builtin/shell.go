@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"m31labs.dev/buckley/v2/pkg/sandbox"
+	"m31labs.dev/buckley/pkg/sandbox"
 )
 
 const maxShellProgressBytes = 32 * 1024

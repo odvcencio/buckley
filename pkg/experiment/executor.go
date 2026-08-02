@@ -13,18 +13,18 @@ import (
 
 	"github.com/oklog/ulid/v2"
 
-	"m31labs.dev/buckley/v2/pkg/agent"
-	"m31labs.dev/buckley/v2/pkg/agentloop"
-	"m31labs.dev/buckley/v2/pkg/approval"
-	"m31labs.dev/buckley/v2/pkg/config"
-	projectcontext "m31labs.dev/buckley/v2/pkg/context"
-	"m31labs.dev/buckley/v2/pkg/encoding/toon"
-	"m31labs.dev/buckley/v2/pkg/model"
-	"m31labs.dev/buckley/v2/pkg/parallel"
-	"m31labs.dev/buckley/v2/pkg/telemetry"
-	"m31labs.dev/buckley/v2/pkg/tool"
-	"m31labs.dev/buckley/v2/pkg/tool/builtin"
-	"m31labs.dev/buckley/v2/pkg/touch"
+	"m31labs.dev/buckley/pkg/agent"
+	"m31labs.dev/buckley/pkg/agentloop"
+	"m31labs.dev/buckley/pkg/approval"
+	"m31labs.dev/buckley/pkg/config"
+	projectcontext "m31labs.dev/buckley/pkg/context"
+	"m31labs.dev/buckley/pkg/encoding/toon"
+	"m31labs.dev/buckley/pkg/model"
+	"m31labs.dev/buckley/pkg/parallel"
+	"m31labs.dev/buckley/pkg/telemetry"
+	"m31labs.dev/buckley/pkg/tool"
+	"m31labs.dev/buckley/pkg/tool/builtin"
+	"m31labs.dev/buckley/pkg/touch"
 )
 
 type experimentExecutor struct {

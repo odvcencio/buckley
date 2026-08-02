@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"m31labs.dev/buckley/v2/pkg/tools"
+	"m31labs.dev/buckley/pkg/tools"
 )
 
 // VerificationTools provides read-only tools for code review verification.

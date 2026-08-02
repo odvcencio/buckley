@@ -3,8 +3,8 @@ package tui
 import (
 	"testing"
 
-	"m31labs.dev/buckley/v2/pkg/config"
-	"m31labs.dev/buckley/v2/pkg/conversation"
+	"m31labs.dev/buckley/pkg/config"
+	"m31labs.dev/buckley/pkg/conversation"
 	"m31labs.dev/fluffyui/backend/sim"
 )
 

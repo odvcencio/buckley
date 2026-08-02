@@ -31,7 +31,7 @@ Not done. Over-engineered in spots. Documentation sparse. But it ships.
 ## Install
 
 ```bash
-go install m31labs.dev/buckley/v2/cmd/buckley@latest
+go install m31labs.dev/buckley/cmd/buckley@latest
 export OPENROUTER_API_KEY="your-key"
 buckley
 ```

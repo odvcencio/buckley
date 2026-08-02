@@ -8,9 +8,9 @@ import (
 	"time"
 
 	"go.uber.org/mock/gomock"
-	"m31labs.dev/buckley/v2/pkg/config"
-	"m31labs.dev/buckley/v2/pkg/orchestrator/mocks"
-	"m31labs.dev/buckley/v2/pkg/storage"
+	"m31labs.dev/buckley/pkg/config"
+	"m31labs.dev/buckley/pkg/orchestrator/mocks"
+	"m31labs.dev/buckley/pkg/storage"
 )
 
 func TestNewPlanner(t *testing.T) {

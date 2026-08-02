@@ -3,7 +3,7 @@ package conversation
 import (
 	"math"
 
-	"m31labs.dev/buckley/v2/pkg/model"
+	"m31labs.dev/buckley/pkg/model"
 )
 
 // ContextProjectionStats describes how durable conversation history was

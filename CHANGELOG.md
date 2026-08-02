@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-08-01
+
+Buckley returned to a pre-1.0 version line at 0.4.0. Sections are in
+reverse chronological order, not version order. Releases 1.1.0 through
+2.3.0 predate 0.4.0.
+
+### Added
+- ACP sessions bridge session-scoped MCP servers into the tool registry and advertise skills as invokable slash commands.
+- ACP sessions also expose model selection through session config options and report token usage after each model round.
+
+### Changed
+- The module path drops the `/v2` semantic-import-version suffix used since 2.0.0: `m31labs.dev/buckley/v2` becomes `m31labs.dev/buckley`.
+- The TUI tool loop streams assistant text live as it arrives from the model, replacing the buffered full-response render with incremental transcript updates.
+- The TUI, oneshot review pipeline, and RLM sub-agent and coordinator loops migrate onto the shared `pkg/agentloop.Controller` turn engine. This engine replaces four separate hand-rolled tool loops with one governed implementation.
+- Config loading replaces about 30 hand-written per-section merge functions and manual environment-variable overrides with a single reflection-driven walker keyed on struct tags.
+- ACP sessions stream assistant text and reasoning per token instead of buffering a full turn.
+
+### Fixed
+- Tool-call preamble text, for example "Let me check that.", now survives into persisted conversation history. The wire-format request sent back to the model also keeps this preamble, instead of dropping it.
+- ACP tool kind mappings match current tool names after renames (`patch_file` to `apply_patch`, `terminal_editor` to `edit_file_terminal`).
+
 ## [2.3.0] - 2026-08-02
 
 ### Added
@@ -187,7 +208,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Config, docs hierarchy, and complexity-tool regressions that blocked `./scripts/test.sh`.
 - Routed raw model IDs now resolve correctly for capability checks and tool/reasoning support lookups.
 
-## [1.0.0] - 2026-01-04
+## 1.0.0 - 2026-01-04
+
+No git tag exists for this release; the version jumped directly from
+here to 1.1.0.
 
 ### Added
 - Multi-agent coordination system with conflict-aware scheduling.
@@ -225,7 +249,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Telemetry is local-only by default.
 - Plugin discovery limited to local paths only.
 
-[Unreleased]: https://github.com/odvcencio/buckley/compare/v2.2.0...HEAD
+[Unreleased]: https://github.com/odvcencio/buckley/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/odvcencio/buckley/compare/v2.3.0...v0.4.0
 [2.3.0]: https://github.com/odvcencio/buckley/compare/v2.2.0...v2.3.0
 [2.2.0]: https://github.com/odvcencio/buckley/compare/v2.1.0...v2.2.0
 [2.1.0]: https://github.com/odvcencio/buckley/compare/v2.0.0...v2.1.0
@@ -238,4 +263,3 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [1.3.0]: https://github.com/odvcencio/buckley/releases/tag/v1.3.0
 [1.2.0]: https://github.com/odvcencio/buckley/releases/tag/v1.2.0
 [1.1.0]: https://github.com/odvcencio/buckley/releases/tag/v1.1.0
-[1.0.0]: https://github.com/odvcencio/buckley/releases/tag/v1.0.0

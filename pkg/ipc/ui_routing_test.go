@@ -11,7 +11,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
-	"m31labs.dev/buckley/v2/pkg/storage"
+	"m31labs.dev/buckley/pkg/storage"
 )
 
 func TestBrowserUIDoesNotShadowAPI(t *testing.T) {

@@ -5242,7 +5242,7 @@ const file_ipc_proto_rawDesc = "" +
 	"\vGetAuditLog\x12\".buckley.ipc.v1.GetAuditLogRequest\x1a .buckley.ipc.v1.AuditLogResponse\x12b\n" +
 	"\rSubscribePush\x12'.buckley.ipc.v1.PushSubscriptionRequest\x1a(.buckley.ipc.v1.PushSubscriptionResponse\x12Q\n" +
 	"\x0fUnsubscribePush\x12&.buckley.ipc.v1.UnsubscribePushRequest\x1a\x16.google.protobuf.Empty\x12S\n" +
-	"\x11GetVAPIDPublicKey\x12\x16.google.protobuf.Empty\x1a&.buckley.ipc.v1.VAPIDPublicKeyResponseB,Z*m31labs.dev/buckley/v2/pkg/ipc/proto;ipcpbb\x06proto3"
+	"\x11GetVAPIDPublicKey\x12\x16.google.protobuf.Empty\x1a&.buckley.ipc.v1.VAPIDPublicKeyResponseB)Z'm31labs.dev/buckley/pkg/ipc/proto;ipcpbb\x06proto3"
 
 var (
 	file_ipc_proto_rawDescOnce sync.Once

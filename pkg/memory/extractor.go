@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"strings"
 
-	"m31labs.dev/buckley/v2/pkg/model"
-	"m31labs.dev/buckley/v2/pkg/storage"
+	"m31labs.dev/buckley/pkg/model"
+	"m31labs.dev/buckley/pkg/storage"
 )
 
 // ExtractionPattern defines a memory extraction prompt.

@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"m31labs.dev/buckley/v2/pkg/telemetry"
-	"m31labs.dev/buckley/v2/pkg/ui/widgets"
+	"m31labs.dev/buckley/pkg/telemetry"
+	"m31labs.dev/buckley/pkg/ui/widgets"
 	"m31labs.dev/fluffyui/backend/sim"
 )
 

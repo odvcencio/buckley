@@ -11,8 +11,8 @@ import (
 	"strings"
 	"time"
 
-	"m31labs.dev/buckley/v2/pkg/browser"
-	browserdpb "m31labs.dev/buckley/v2/pkg/browser/adapters/servo/proto"
+	"m31labs.dev/buckley/pkg/browser"
+	browserdpb "m31labs.dev/buckley/pkg/browser/adapters/servo/proto"
 )
 
 // Runtime is a Servo-backed browser runtime implementation.

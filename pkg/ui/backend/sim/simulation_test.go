@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"m31labs.dev/buckley/v2/pkg/ui/backend"
-	"m31labs.dev/buckley/v2/pkg/ui/terminal"
+	"m31labs.dev/buckley/pkg/ui/backend"
+	"m31labs.dev/buckley/pkg/ui/terminal"
 )
 
 func TestBackend_BasicRendering(t *testing.T) {

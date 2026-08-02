@@ -17,7 +17,7 @@ import (
 	sqlite "modernc.org/sqlite"
 	sqlite3 "modernc.org/sqlite/lib"
 
-	"m31labs.dev/buckley/v2/pkg/storage"
+	"m31labs.dev/buckley/pkg/storage"
 )
 
 // DefaultRedactionVersion is applied to an Event when the caller does not

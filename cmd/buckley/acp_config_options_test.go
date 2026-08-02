@@ -3,8 +3,8 @@ package main
 import (
 	"testing"
 
-	"m31labs.dev/buckley/v2/pkg/acp"
-	"m31labs.dev/buckley/v2/pkg/config"
+	"m31labs.dev/buckley/pkg/acp"
+	"m31labs.dev/buckley/pkg/config"
 )
 
 // TestBuildACPModelConfigOptions_ListsCuratedModels locks S8: the model

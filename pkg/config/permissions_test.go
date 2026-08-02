@@ -5,8 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"m31labs.dev/buckley/v2/pkg/config"
-	"m31labs.dev/buckley/v2/pkg/policy"
+	"m31labs.dev/buckley/pkg/config"
+	"m31labs.dev/buckley/pkg/policy"
 )
 
 func TestDefaultConfig_Postures(t *testing.T) {

@@ -6,9 +6,9 @@ import (
 	"strings"
 	"time"
 
-	"m31labs.dev/buckley/v2/pkg/conversation"
-	"m31labs.dev/buckley/v2/pkg/model"
-	"m31labs.dev/buckley/v2/pkg/runledger"
+	"m31labs.dev/buckley/pkg/conversation"
+	"m31labs.dev/buckley/pkg/model"
+	"m31labs.dev/buckley/pkg/runledger"
 )
 
 // Controller is the shared turn engine (G6): one type that owns a full

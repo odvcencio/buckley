@@ -11,9 +11,9 @@ import (
 
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"m31labs.dev/buckley/v2/pkg/config"
-	"m31labs.dev/buckley/v2/pkg/mcp"
-	"m31labs.dev/buckley/v2/pkg/tool/builtin"
+	"m31labs.dev/buckley/pkg/config"
+	"m31labs.dev/buckley/pkg/mcp"
+	"m31labs.dev/buckley/pkg/tool/builtin"
 )
 
 // CategoryExternal groups tools bridged in from external MCP servers. It is

@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"m31labs.dev/buckley/v2/pkg/parallel"
+	"m31labs.dev/buckley/pkg/parallel"
 )
 
 func TestNewReporter(t *testing.T) {

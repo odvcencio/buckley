@@ -11,10 +11,10 @@ import (
 	"strconv"
 	"strings"
 
-	"m31labs.dev/buckley/v2/pkg/agentspec"
-	projectcontext "m31labs.dev/buckley/v2/pkg/context"
-	"m31labs.dev/buckley/v2/pkg/orchestrator"
-	"m31labs.dev/buckley/v2/pkg/tool"
+	"m31labs.dev/buckley/pkg/agentspec"
+	projectcontext "m31labs.dev/buckley/pkg/context"
+	"m31labs.dev/buckley/pkg/orchestrator"
+	"m31labs.dev/buckley/pkg/tool"
 )
 
 func runAgentCommand(args []string) error {

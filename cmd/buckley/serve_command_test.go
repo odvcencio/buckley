@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"m31labs.dev/buckley/v2/pkg/config"
+	"m31labs.dev/buckley/pkg/config"
 )
 
 func TestParseServeCommandOptions(t *testing.T) {

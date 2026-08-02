@@ -15,7 +15,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
-	pb "m31labs.dev/buckley/v2/pkg/acp/proto"
+	pb "m31labs.dev/buckley/pkg/acp/proto"
 )
 
 // mockStreamTaskClient implements the streaming client interface

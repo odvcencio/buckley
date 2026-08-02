@@ -5,8 +5,8 @@ import (
 	"errors"
 	"testing"
 
-	"m31labs.dev/buckley/v2/pkg/model"
-	"m31labs.dev/buckley/v2/pkg/runledger"
+	"m31labs.dev/buckley/pkg/model"
+	"m31labs.dev/buckley/pkg/runledger"
 )
 
 // recordingHistory captures every message Controller appends, in order.

@@ -14,8 +14,8 @@ import (
 	"sync"
 	"time"
 
-	apperrors "m31labs.dev/buckley/v2/pkg/errors"
-	"m31labs.dev/buckley/v2/pkg/storage"
+	apperrors "m31labs.dev/buckley/pkg/errors"
+	"m31labs.dev/buckley/pkg/storage"
 )
 
 // rateLimiter provides simple per-key rate limiting.

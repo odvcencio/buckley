@@ -5,12 +5,12 @@ import (
 	"os"
 	"strings"
 
-	"m31labs.dev/buckley/v2/pkg/config"
-	"m31labs.dev/buckley/v2/pkg/model"
-	"m31labs.dev/buckley/v2/pkg/oneshot"
-	"m31labs.dev/buckley/v2/pkg/storage"
-	"m31labs.dev/buckley/v2/pkg/tool"
-	"m31labs.dev/buckley/v2/pkg/transparency"
+	"m31labs.dev/buckley/pkg/config"
+	"m31labs.dev/buckley/pkg/model"
+	"m31labs.dev/buckley/pkg/oneshot"
+	"m31labs.dev/buckley/pkg/storage"
+	"m31labs.dev/buckley/pkg/tool"
+	"m31labs.dev/buckley/pkg/transparency"
 )
 
 const (

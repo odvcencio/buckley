@@ -7,8 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"m31labs.dev/buckley/v2/pkg/diffsignal"
-	"m31labs.dev/buckley/v2/pkg/transparency"
+	"m31labs.dev/buckley/pkg/diffsignal"
+	"m31labs.dev/buckley/pkg/transparency"
 )
 
 // ContextGatherer collects context from various sources for plugin execution.

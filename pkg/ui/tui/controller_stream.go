@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"strings"
 
-	"m31labs.dev/buckley/v2/pkg/model"
-	"m31labs.dev/buckley/v2/pkg/telemetry"
+	"m31labs.dev/buckley/pkg/model"
+	"m31labs.dev/buckley/pkg/telemetry"
 )
 
 // streamResponse handles the AI response streaming for a specific session.

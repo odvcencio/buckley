@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/pmezard/go-difflib/difflib"
-	"m31labs.dev/buckley/v2/pkg/approval"
+	"m31labs.dev/buckley/pkg/approval"
 )
 
 const diffLineLimit = 200

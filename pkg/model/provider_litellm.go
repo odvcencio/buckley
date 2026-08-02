@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"m31labs.dev/buckley/v2/pkg/config"
+	"m31labs.dev/buckley/pkg/config"
 )
 
 // LiteLLMProvider connects to a LiteLLM proxy with OpenAI-compatible APIs.

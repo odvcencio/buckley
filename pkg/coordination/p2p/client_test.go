@@ -8,7 +8,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"m31labs.dev/buckley/v2/pkg/coordination/reliability"
+	"m31labs.dev/buckley/pkg/coordination/reliability"
 )
 
 func TestNewP2PClient(t *testing.T) {

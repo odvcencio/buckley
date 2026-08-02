@@ -3,7 +3,7 @@ package theme
 import (
 	"testing"
 
-	"m31labs.dev/buckley/v2/pkg/ui/compositor"
+	"m31labs.dev/buckley/pkg/ui/compositor"
 )
 
 func TestDefaultTheme(t *testing.T) {

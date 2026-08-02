@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"unicode/utf8"
 
-	"m31labs.dev/buckley/v2/pkg/encoding/toon"
-	"m31labs.dev/buckley/v2/pkg/tool/builtin"
+	"m31labs.dev/buckley/pkg/encoding/toon"
+	"m31labs.dev/buckley/pkg/tool/builtin"
 )
 
 var resultCodec = toon.New(true)

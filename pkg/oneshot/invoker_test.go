@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"testing"
 
-	"m31labs.dev/buckley/v2/pkg/model"
-	"m31labs.dev/buckley/v2/pkg/tools"
-	"m31labs.dev/buckley/v2/pkg/transparency"
+	"m31labs.dev/buckley/pkg/model"
+	"m31labs.dev/buckley/pkg/tools"
+	"m31labs.dev/buckley/pkg/transparency"
 )
 
 // mockClient implements ModelClient for testing.

@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"m31labs.dev/buckley/v2/pkg/diffsignal"
+	"m31labs.dev/buckley/pkg/diffsignal"
 )
 
 // minifiedSegment returns a diff segment for a file with a very long single

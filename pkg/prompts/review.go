@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"time"
 
-	"m31labs.dev/buckley/v2/pkg/personality"
+	"m31labs.dev/buckley/pkg/personality"
 )
 
 // ReviewBranchWithToolsPrompt returns the prompt for local branch review with verification tools.

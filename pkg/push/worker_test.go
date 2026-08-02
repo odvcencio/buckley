@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"m31labs.dev/buckley/v2/pkg/storage"
+	"m31labs.dev/buckley/pkg/storage"
 )
 
 func TestWorker_SendToSession_FiltersByPrincipal(t *testing.T) {

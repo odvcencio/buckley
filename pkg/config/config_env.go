@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"m31labs.dev/buckley/v2/pkg/giturl"
+	"m31labs.dev/buckley/pkg/giturl"
 )
 
 // applyEnvOverrides applies environment variable overrides with a single

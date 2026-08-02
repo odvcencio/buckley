@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package buckley.ipc.v1;
 
-option go_package = "m31labs.dev/buckley/v2/pkg/ipc/proto;ipcpb";
+option go_package = "m31labs.dev/buckley/pkg/ipc/proto;ipcpb";
 
 import "google/protobuf/timestamp.proto";
 import "google/protobuf/struct.proto";

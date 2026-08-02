@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"m31labs.dev/buckley/v2/pkg/bus"
+	"m31labs.dev/buckley/pkg/bus"
 )
 
 func TestNewWorkerPool(t *testing.T) {

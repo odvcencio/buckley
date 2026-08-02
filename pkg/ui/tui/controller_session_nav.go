@@ -6,8 +6,8 @@ import (
 	"strings"
 	"time"
 
-	"m31labs.dev/buckley/v2/pkg/runledger"
-	"m31labs.dev/buckley/v2/pkg/ui/widgets"
+	"m31labs.dev/buckley/pkg/runledger"
+	"m31labs.dev/buckley/pkg/ui/widgets"
 )
 
 // refreshSessionNav rebuilds the navigator's Sessions section: the current

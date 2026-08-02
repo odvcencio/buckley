@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 
 	"gopkg.in/yaml.v3"
-	"m31labs.dev/buckley/v2/pkg/envdetect"
+	"m31labs.dev/buckley/pkg/envdetect"
 )
 
 // Generator creates docker-compose files from environment profiles

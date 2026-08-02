@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"m31labs.dev/buckley/v2/pkg/experiment"
+	"m31labs.dev/buckley/pkg/experiment"
 )
 
 func TestParseExperimentDiffOptions(t *testing.T) {

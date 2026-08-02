@@ -10,9 +10,9 @@ import (
 	"connectrpc.com/connect"
 	"github.com/go-chi/chi/v5"
 
-	ipcpb "m31labs.dev/buckley/v2/pkg/ipc/proto"
-	"m31labs.dev/buckley/v2/pkg/ipc/proto/ipcpbconnect"
-	"m31labs.dev/buckley/v2/pkg/storage"
+	ipcpb "m31labs.dev/buckley/pkg/ipc/proto"
+	"m31labs.dev/buckley/pkg/ipc/proto/ipcpbconnect"
+	"m31labs.dev/buckley/pkg/storage"
 )
 
 func TestGRPCSubscribeAllSessionsFiltersByPrincipal(t *testing.T) {

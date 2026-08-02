@@ -6,10 +6,10 @@ import (
 	"testing"
 	"time"
 
-	"m31labs.dev/buckley/v2/pkg/config"
-	"m31labs.dev/buckley/v2/pkg/conversation"
-	"m31labs.dev/buckley/v2/pkg/runledger"
-	"m31labs.dev/buckley/v2/pkg/ui/widgets"
+	"m31labs.dev/buckley/pkg/config"
+	"m31labs.dev/buckley/pkg/conversation"
+	"m31labs.dev/buckley/pkg/runledger"
+	"m31labs.dev/buckley/pkg/ui/widgets"
 	"m31labs.dev/fluffyui/backend/sim"
 )
 

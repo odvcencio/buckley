@@ -8,9 +8,9 @@ import (
 	"sync"
 	"time"
 
-	"m31labs.dev/buckley/v2/pkg/telemetry"
-	"m31labs.dev/buckley/v2/pkg/touch"
-	"m31labs.dev/buckley/v2/pkg/ui/widgets"
+	"m31labs.dev/buckley/pkg/telemetry"
+	"m31labs.dev/buckley/pkg/touch"
+	"m31labs.dev/buckley/pkg/ui/widgets"
 )
 
 // TelemetryUIBridge forwards telemetry events to the TUI for sidebar updates.

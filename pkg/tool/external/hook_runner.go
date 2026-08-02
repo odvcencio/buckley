@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"m31labs.dev/buckley/v2/pkg/telemetry"
+	"m31labs.dev/buckley/pkg/telemetry"
 )
 
 // hookPlugin pairs a plugin's manifest with its running hook process.

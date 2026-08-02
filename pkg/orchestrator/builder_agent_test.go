@@ -7,11 +7,11 @@ import (
 	"testing"
 
 	"go.uber.org/mock/gomock"
-	"m31labs.dev/buckley/v2/pkg/config"
-	"m31labs.dev/buckley/v2/pkg/model"
-	orchmocks "m31labs.dev/buckley/v2/pkg/orchestrator/mocks"
-	"m31labs.dev/buckley/v2/pkg/tool"
-	"m31labs.dev/buckley/v2/pkg/tool/builtin"
+	"m31labs.dev/buckley/pkg/config"
+	"m31labs.dev/buckley/pkg/model"
+	orchmocks "m31labs.dev/buckley/pkg/orchestrator/mocks"
+	"m31labs.dev/buckley/pkg/tool"
+	"m31labs.dev/buckley/pkg/tool/builtin"
 )
 
 func TestBuilderGenerateWithTools_AppendsToolResultsAndContinues(t *testing.T) {

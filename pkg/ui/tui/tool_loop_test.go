@@ -6,11 +6,11 @@ import (
 	"strings"
 	"testing"
 
-	"m31labs.dev/buckley/v2/pkg/conversation"
-	"m31labs.dev/buckley/v2/pkg/model"
-	"m31labs.dev/buckley/v2/pkg/telemetry"
-	"m31labs.dev/buckley/v2/pkg/tool"
-	"m31labs.dev/buckley/v2/pkg/tool/builtin"
+	"m31labs.dev/buckley/pkg/conversation"
+	"m31labs.dev/buckley/pkg/model"
+	"m31labs.dev/buckley/pkg/telemetry"
+	"m31labs.dev/buckley/pkg/tool"
+	"m31labs.dev/buckley/pkg/tool/builtin"
 	"m31labs.dev/fluffyui/backend/sim"
 )
 

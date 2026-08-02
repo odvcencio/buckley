@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"m31labs.dev/buckley/v2/pkg/reviewsandbox"
+	"m31labs.dev/buckley/pkg/reviewsandbox"
 )
 
 type fakeReviewVerifier struct {

@@ -7,9 +7,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	"m31labs.dev/buckley/v2/pkg/containerexec"
-	"m31labs.dev/buckley/v2/pkg/containers"
-	"m31labs.dev/buckley/v2/pkg/envdetect"
+	"m31labs.dev/buckley/pkg/containerexec"
+	"m31labs.dev/buckley/pkg/containers"
+	"m31labs.dev/buckley/pkg/envdetect"
 )
 
 // CreateWithContainers creates a worktree and sets up containers

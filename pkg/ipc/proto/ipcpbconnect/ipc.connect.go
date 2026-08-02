@@ -9,7 +9,7 @@ import (
 	context "context"
 	errors "errors"
 	emptypb "google.golang.org/protobuf/types/known/emptypb"
-	proto "m31labs.dev/buckley/v2/pkg/ipc/proto"
+	proto "m31labs.dev/buckley/pkg/ipc/proto"
 	http "net/http"
 	strings "strings"
 )

@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	"m31labs.dev/buckley/v2/pkg/coordination/events"
+	"m31labs.dev/buckley/pkg/coordination/events"
 )
 
 // SubscribeMessage represents a subscription request from a client

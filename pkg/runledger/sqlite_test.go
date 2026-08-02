@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"m31labs.dev/buckley/v2/pkg/evidence"
+	"m31labs.dev/buckley/pkg/evidence"
 )
 
 func newTestStore(t *testing.T) *SQLiteStore {

@@ -13,9 +13,9 @@ import (
 	"sync"
 	"time"
 
-	"m31labs.dev/buckley/v2/pkg/config"
-	"m31labs.dev/buckley/v2/pkg/reviewsandbox"
-	"m31labs.dev/buckley/v2/pkg/telemetry"
+	"m31labs.dev/buckley/pkg/config"
+	"m31labs.dev/buckley/pkg/reviewsandbox"
+	"m31labs.dev/buckley/pkg/telemetry"
 )
 
 const (

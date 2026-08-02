@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"m31labs.dev/buckley/v2/pkg/config"
+	"m31labs.dev/buckley/pkg/config"
 )
 
 // fakeContinuationStore is an in-memory ContinuationStore for coordinator tests.

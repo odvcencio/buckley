@@ -12,7 +12,7 @@ import (
 	"fmt"
 	"time"
 
-	"m31labs.dev/buckley/v2/pkg/config"
+	"m31labs.dev/buckley/pkg/config"
 )
 
 // errBatchUnsupported is returned by every BatchCoordinator method in

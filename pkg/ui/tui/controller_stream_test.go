@@ -3,7 +3,7 @@ package tui
 import (
 	"testing"
 
-	"m31labs.dev/buckley/v2/pkg/model"
+	"m31labs.dev/buckley/pkg/model"
 )
 
 func TestStreamUsageStats_UsesProviderUsage(t *testing.T) {

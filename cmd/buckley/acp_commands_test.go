@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"m31labs.dev/buckley/v2/pkg/acp"
-	"m31labs.dev/buckley/v2/pkg/skill"
+	"m31labs.dev/buckley/pkg/acp"
+	"m31labs.dev/buckley/pkg/skill"
 )
 
 // TestBuildACPAvailableCommands_ListsSkillsSorted locks S6: every

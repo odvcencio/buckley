@@ -5,7 +5,7 @@ import (
 	"strings"
 	"sync"
 
-	"m31labs.dev/buckley/v2/pkg/diffsignal"
+	"m31labs.dev/buckley/pkg/diffsignal"
 )
 
 // PostingGateConfig controls whether a review that will be posted back to a

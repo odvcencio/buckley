@@ -7,9 +7,9 @@ import (
 	"sync"
 	"time"
 
-	"m31labs.dev/buckley/v2/pkg/config"
-	"m31labs.dev/buckley/v2/pkg/rules"
-	"m31labs.dev/buckley/v2/pkg/tool/builtin"
+	"m31labs.dev/buckley/pkg/config"
+	"m31labs.dev/buckley/pkg/rules"
+	"m31labs.dev/buckley/pkg/tool/builtin"
 )
 
 // PlanningCoordinator manages the brainstorm → refine → commit flow

@@ -13,7 +13,7 @@ import (
 	reflect "reflect"
 
 	gomock "go.uber.org/mock/gomock"
-	personality "m31labs.dev/buckley/v2/pkg/personality"
+	personality "m31labs.dev/buckley/pkg/personality"
 )
 
 // MockPersonaProvider is a mock of PersonaProvider interface.

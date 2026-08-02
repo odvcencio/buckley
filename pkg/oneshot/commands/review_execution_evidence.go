@@ -7,7 +7,7 @@ import (
 	"strings"
 	"unicode"
 
-	"m31labs.dev/buckley/v2/pkg/model"
+	"m31labs.dev/buckley/pkg/model"
 )
 
 const (

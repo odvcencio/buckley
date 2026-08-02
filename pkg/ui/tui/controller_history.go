@@ -4,8 +4,8 @@ import (
 	"encoding/json"
 	"strings"
 
-	"m31labs.dev/buckley/v2/pkg/conversation"
-	"m31labs.dev/buckley/v2/pkg/model"
+	"m31labs.dev/buckley/pkg/conversation"
+	"m31labs.dev/buckley/pkg/model"
 )
 
 func renderConversationHistory(app *WidgetApp, messages []conversation.Message) {

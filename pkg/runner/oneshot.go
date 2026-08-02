@@ -3,8 +3,8 @@ package runner
 import (
 	"context"
 
-	"m31labs.dev/buckley/v2/pkg/orchestrator"
-	"m31labs.dev/buckley/v2/pkg/types"
+	"m31labs.dev/buckley/pkg/orchestrator"
+	"m31labs.dev/buckley/pkg/types"
 )
 
 // OneShotResult is the structured output of a oneshot execution.

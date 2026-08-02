@@ -23,10 +23,10 @@ import (
 	"github.com/go-chi/chi/v5"
 	"nhooyr.io/websocket"
 
-	"m31labs.dev/buckley/v2/pkg/config"
-	"m31labs.dev/buckley/v2/pkg/ipc/command"
-	"m31labs.dev/buckley/v2/pkg/ipc/proto/ipcpbconnect"
-	"m31labs.dev/buckley/v2/pkg/storage"
+	"m31labs.dev/buckley/pkg/config"
+	"m31labs.dev/buckley/pkg/ipc/command"
+	"m31labs.dev/buckley/pkg/ipc/proto/ipcpbconnect"
+	"m31labs.dev/buckley/pkg/storage"
 )
 
 func TestMissionControlSmokeFlow(t *testing.T) {

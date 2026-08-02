@@ -4,8 +4,8 @@ import (
 	"sort"
 	"strings"
 
-	"m31labs.dev/buckley/v2/pkg/model"
-	"m31labs.dev/buckley/v2/pkg/ui/widgets"
+	"m31labs.dev/buckley/pkg/model"
+	"m31labs.dev/buckley/pkg/ui/widgets"
 )
 
 func buildModelPickerItems(catalog []model.ModelInfo, mgr *model.Manager, execID, planID, reviewID string, curated map[string]struct{}) ([]widgets.PaletteItem, map[string]model.ModelInfo) {

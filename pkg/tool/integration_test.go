@@ -7,10 +7,10 @@ import (
 	"testing"
 	"time"
 
-	"m31labs.dev/buckley/v2/pkg/mission"
-	"m31labs.dev/buckley/v2/pkg/storage"
-	"m31labs.dev/buckley/v2/pkg/telemetry"
-	"m31labs.dev/buckley/v2/pkg/tool/builtin"
+	"m31labs.dev/buckley/pkg/mission"
+	"m31labs.dev/buckley/pkg/storage"
+	"m31labs.dev/buckley/pkg/telemetry"
+	"m31labs.dev/buckley/pkg/tool/builtin"
 	"m31labs.dev/fluffyui/progress"
 	"m31labs.dev/fluffyui/toast"
 )

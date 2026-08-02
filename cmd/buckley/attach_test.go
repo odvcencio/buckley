@@ -8,7 +8,7 @@ import (
 	"google.golang.org/protobuf/types/known/structpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	ipcpb "m31labs.dev/buckley/v2/pkg/ipc/proto"
+	ipcpb "m31labs.dev/buckley/pkg/ipc/proto"
 )
 
 func TestNormalizeAttachAddress(t *testing.T) {

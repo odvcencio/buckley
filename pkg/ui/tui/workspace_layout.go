@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"time"
 
-	"m31labs.dev/buckley/v2/pkg/ui/widgets"
+	"m31labs.dev/buckley/pkg/ui/widgets"
 	"m31labs.dev/fluffyui/runtime"
 )
 

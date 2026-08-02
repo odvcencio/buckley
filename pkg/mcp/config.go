@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"m31labs.dev/buckley/v2/pkg/config"
+	"m31labs.dev/buckley/pkg/config"
 )
 
 // ManagerFromConfig validates cfg, builds a Manager from its enabled
