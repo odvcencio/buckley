@@ -181,6 +181,8 @@ func runGoalStart(args []string) error {
 	fs.Var(&criteria, "criteria", "acceptance criterion (repeatable)")
 	var constraints goalStringList
 	fs.Var(&constraints, "constraint", "constraint (repeatable)")
+	var tasks goalStringList
+	fs.Var(&tasks, "task", "explicit task, in queue order (repeatable; omit to run the goal as one task)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -189,7 +191,7 @@ func runGoalStart(args []string) error {
 	}
 	statement := strings.TrimSpace(strings.Join(fs.Args(), " "))
 
-	loop, cleanup, err := newGoalLoop()
+	loop, cleanup, err := newGoalLoopWithTasks(tasks)
 	if err != nil {
 		return err
 	}
@@ -388,20 +390,45 @@ func openGoalStores() (*goalStores, func(), error) {
 }
 
 func newGoalLoop() (*goalloop.Loop, func(), error) {
+	return newGoalLoopWithTasks(nil)
+}
+
+// newGoalLoopWithTasks wires the loop with an explicit manual
+// decomposition when tasks are given: each --task line becomes one
+// TaskSpec, priority following queue order. The model-driven planner
+// stays a port for later; manual decomposition is the daily-use path.
+func newGoalLoopWithTasks(tasks []string) (*goalloop.Loop, func(), error) {
 	stores, cleanup, err := openGoalStores()
 	if err != nil {
 		return nil, nil, err
 	}
-	loop, err := goalloop.New(goalloop.Config{
+	cfg := goalloop.Config{
 		Ledger:      stores.ledger,
 		Checkpoints: stores.checkpoints,
 		SessionID:   "goal-cli",
-	})
+	}
+	if len(tasks) > 0 {
+		specs := make([]goalloop.TaskSpec, 0, len(tasks))
+		for i, title := range tasks {
+			specs = append(specs, goalloop.TaskSpec{Title: title, Priority: i + 1})
+		}
+		cfg.Planner = staticGoalPlanner{specs: specs}
+	}
+	loop, err := goalloop.New(cfg)
 	if err != nil {
 		cleanup()
 		return nil, nil, err
 	}
 	return loop, cleanup, nil
+}
+
+// staticGoalPlanner returns a fixed decomposition (the --task flags).
+type staticGoalPlanner struct {
+	specs []goalloop.TaskSpec
+}
+
+func (p staticGoalPlanner) Decompose(context.Context, goalloop.Goal) ([]goalloop.TaskSpec, error) {
+	return p.specs, nil
 }
 
 // resolveLedgerDBPath locates the run ledger database, following the same
