@@ -57,12 +57,23 @@ type Planner interface {
 	Decompose(ctx context.Context, goal Goal) ([]TaskSpec, error)
 }
 
+// Turn phases. The loop sets Phase on the TaskContext so the engine can
+// shape the turn: execute works the task; verify runs cheap checks and
+// attaches evidence instead of exploring further (design 5.4).
+const (
+	PhaseExecute = "execute"
+	PhaseVerify  = "verify"
+)
+
 // TaskContext is everything one turn needs to know about its task.
 type TaskContext struct {
 	RunID  string
 	TaskID string
 	Goal   Goal
 	Spec   TaskSpec
+	// Phase is PhaseExecute or PhaseVerify; the controller's verify
+	// routing flips it (design section 5.2 step 3).
+	Phase string
 	// Resume carries the compiled checkpoint context when the task has
 	// one; nil on a fresh task.
 	Resume *taskstate.ResumeContext
@@ -83,6 +94,15 @@ type TurnOutcome struct {
 	// completion claim must be evidence-linked (spec decision 9).
 	CompletedEvidenceID string
 	Blocker             *taskstate.Blocker
+	// Checks reports verification entries the turn ran or discovered,
+	// merged into the task's checkpoint by check name. A pass entry
+	// must carry the evidence object ID of the check's output (machine
+	// checks attach command output as evidence, design 5.4).
+	Checks []taskstate.VerificationEntry
+	// Questions are deferred user questions (design 5.5): the loop
+	// never blocks on them — they land on the checkpoint for the
+	// morning report, and only tasks a question names as blocking park.
+	Questions []taskstate.Question
 }
 
 // TurnEngine executes one model turn for a task. Every migrated loop
