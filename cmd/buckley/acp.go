@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"m31labs.dev/buckley/pkg/acp"
+	"m31labs.dev/buckley/pkg/agentloop"
 	"m31labs.dev/buckley/pkg/config"
 	projectcontext "m31labs.dev/buckley/pkg/context"
 	"m31labs.dev/buckley/pkg/conversation"
@@ -896,6 +897,33 @@ func applyACPSetModelConfigOption(cfg *config.Config, mgr *model.Manager, sessio
 	return buildACPModelConfigOptions(cfg, mgr, session), nil
 }
 
+// acpLoopState carries the per-prompt-turn state the Controller hooks
+// share: whether tools are still offered (a tools-unsupported provider
+// error clears it mid-turn), the tool filter the current round advertised,
+// whether any round has executed tools yet (the finalize-nudge gate), and
+// the last phase update sent (sendACPPhaseUpdate dedupes on it).
+type acpLoopState struct {
+	useTools        bool
+	toolTurnEnabled bool
+	allowedTools    []string
+	toolsExecuted   bool
+	lastPhase       string
+	// contextWindow is resolved once per prompt turn (the model does not
+	// change mid-turn) and paired with each round's model.Usage to report
+	// usage_update as "tokens used out of this context window" (N1).
+	contextWindow int
+}
+
+// runACPLoop drives one ACP prompt turn through the shared turn engine
+// (pkg/agentloop.Controller): the engine owns the round loop, tool-call ID
+// backfill, history ordering, and -- new with this migration -- a Governor
+// backstop the hand-rolled loop never had, so a repeating tool loop now
+// stops with an explanation instead of running until the client cancels.
+// The ACP-specific pieces (per-delta streaming (S1), per-round usage
+// updates (N1), phase updates, the client permission flow, and the
+// tool-use/finalize nudges) stay exactly as they were, wired in as
+// Controller hooks or applied between Controller.Run attempts. See
+// newACPLoopController.
 func runACPLoop(
 	ctx context.Context,
 	cfg *config.Config,
@@ -912,79 +940,181 @@ func runACPLoop(
 	stream acp.StreamFunc,
 ) (string, error) {
 	modelID := resolveACPExecutionModel(cfg, mgr, engine, modelOverride)
-	evaluator := newACPEvaluator(engine)
-	useTools := acpModelCanUseTools(registry, mgr, modelID)
-	// N1: contextWindow is resolved once per prompt turn (the model does
-	// not change mid-turn) and paired with each round's model.Usage to
-	// report usage_update as "tokens used out of this context window".
-	contextWindow := 0
-	if mgr != nil {
-		contextWindow, _ = mgr.GetContextLength(modelID)
+	state := &acpLoopState{
+		useTools: acpModelCanUseTools(registry, mgr, modelID),
 	}
+	if mgr != nil {
+		state.contextWindow, _ = mgr.GetContextLength(modelID)
+	}
+
+	ctrl, err := newACPLoopController(cfg, mgr, conv, registry, skillState, engine, modelID, workDir, sessionID, agent, logf, stream, state)
+	if err != nil {
+		return "", err
+	}
+
 	nudgeCount := 0
 	finalizeNudgeCount := 0
-	toolsExecuted := false
-	lastPhase := ""
+	// The nudge and tools-unsupported paths re-run the same Controller:
+	// its per-turn state lives in state and the Governor, so a re-run
+	// continues the turn (round count included) rather than starting over.
 	for {
 		if ctx.Err() != nil {
 			return "", ctx.Err()
 		}
-
-		lastPhase = sendACPPhaseUpdate(stream, lastPhase, "Thinking…")
-
-		toolTurn := buildACPToolTurn(registry, skillState, evaluator, useTools)
-		useTools = toolTurn.UseTools
-		req := buildACPChatRequest(cfg, mgr, engine, conv, modelID, toolTurn)
-
-		// S1: stream the turn so agent_message_chunk/agent_thought_chunk
-		// reach the client per provider delta, instead of buffering the
-		// whole turn and sending one chunk at the end.
-		msg, usage, err := streamACPTurn(ctx, mgr, req, stream)
+		result, err := ctrl.Run(ctx)
 		if err != nil {
-			if useTools && isToolUnsupportedError(err) {
-				useTools = false
+			if state.useTools && isToolUnsupportedError(err) {
+				state.useTools = false
 				continue
 			}
 			return "", err
+		}
+
+		switch result.FinishReason {
+		case agentloop.FinishReasonLoopGuard:
+			// The Governor stopped a runaway tool loop. Surface the stop
+			// message as the turn's answer so the client sees why instead
+			// of an opaque error.
+			_ = stream(acp.NewAgentMessageChunk(result.Content))
+			conv.AddAssistantMessage(result.Content)
+			return result.Content, nil
+		case agentloop.FinishReasonEmptyChoices:
+			// streamACPTurn already turns an empty stream into
+			// model.NoResponseChoicesError before Controller sees it; this
+			// branch is defensive.
+			return "", fmt.Errorf("model returned an empty response")
+		}
+
+		msg := result.Message
+		text, err := model.ExtractTextContent(msg.Content)
+		if err != nil {
+			return "", err
+		}
+		if strings.TrimSpace(text) == "" && state.toolsExecuted {
+			if finalizeNudgeCount == 0 {
+				finalizeNudgeCount++
+				conv.AddUserMessage("Return the final answer now using the completed tool results. Do not leave the response empty.")
+				continue
+			}
+			return "", fmt.Errorf("model returned an empty final response after tool execution")
+		}
+		if shouldNudgeACPToolUse(state.useTools, state.toolTurnEnabled, nudgeCount, text) {
+			nudgeCount++
+			conv.AddUserMessage("Use tools to take action now. Pick a tool and call it; do not answer with prose alone.")
+			continue
+		}
+		if strings.TrimSpace(text) == "" {
+			return "", fmt.Errorf("model returned an empty response")
+		}
+		sendACPPhaseUpdate(stream, state.lastPhase, "Finalizing response…")
+		conv.AddAssistantMessageWithReasoningDetails(text, msg.Reasoning, msg.ReasoningDetails)
+		return text, nil
+	}
+}
+
+// newACPLoopController wires the shared turn engine for one ACP prompt
+// turn. Every hook delegates to the same ACP-specific logic this file
+// always used, so the migration changes only who drives the round loop:
+//
+//   - BuildRequest sends the round's "Thinking…" phase update, re-derives
+//     the governed tool turn (the skill tool filter can change mid-turn via
+//     activate_skill), and builds the request via buildACPChatRequest --
+//     whose single CompactModelMessagesForRequest pass stays the one
+//     ACP-side compaction; Controller's own projection on top of that
+//     already-bounded list is a no-op, matching the TUI migration's shape.
+//   - CallModel is streamACPTurn (S1 per-delta streaming) plus the round's
+//     usage_update (N1), adapted to the non-streaming response shape
+//     Controller consumes.
+//   - DispatchTools executes each call via dispatchACPToolCall: phase
+//     updates, tool_call/tool_call_update notifications, the skill
+//     allowlist, and the client permission flow (M3), unchanged.
+//   - History persists exactly what the old loop persisted: the assistant
+//     tool-call message and each tool result. The turn's final answer is
+//     not appended here -- runACPLoop still owns it, because a nudged
+//     (empty or prose-only) response is dropped from the transcript
+//     entirely, exactly as before.
+func newACPLoopController(
+	cfg *config.Config,
+	mgr *model.Manager,
+	conv *conversation.Conversation,
+	registry *tool.Registry,
+	skillState *skill.RuntimeState,
+	engine *rules.Engine,
+	modelID string,
+	workDir string,
+	sessionID string,
+	agent *acp.Agent,
+	logf func(string, ...interface{}),
+	stream acp.StreamFunc,
+	state *acpLoopState,
+) (*agentloop.Controller, error) {
+	evaluator := newACPEvaluator(engine)
+
+	buildRequest := func(ctx context.Context, round int) (model.ChatRequest, error) {
+		state.lastPhase = sendACPPhaseUpdate(stream, state.lastPhase, "Thinking…")
+		toolTurn := buildACPToolTurn(registry, skillState, evaluator, state.useTools)
+		state.useTools = toolTurn.UseTools
+		state.toolTurnEnabled = toolTurn.Enabled
+		state.allowedTools = toolTurn.AllowedTools
+		return buildACPChatRequest(cfg, mgr, engine, conv, modelID, toolTurn), nil
+	}
+
+	callModel := agentloop.ModelCallerFunc(func(ctx context.Context, req model.ChatRequest, _ bool) (*model.ChatResponse, error) {
+		msg, usage, err := streamACPTurn(ctx, mgr, req, stream)
+		if err != nil {
+			return nil, err
 		}
 		// N1: the round's usage is available right after the round
 		// completes -- report it immediately rather than waiting for the
 		// whole prompt turn to finish, so a multi-round tool turn shows
 		// live context-window growth.
-		sendACPUsageUpdate(stream, usage, contextWindow)
-
-		if len(msg.ToolCalls) == 0 {
-			text, err := model.ExtractTextContent(msg.Content)
-			if err != nil {
-				return "", err
-			}
-			if strings.TrimSpace(text) == "" && toolsExecuted {
-				if finalizeNudgeCount == 0 {
-					finalizeNudgeCount++
-					conv.AddUserMessage("Return the final answer now using the completed tool results. Do not leave the response empty.")
-					continue
-				}
-				return "", fmt.Errorf("model returned an empty final response after tool execution")
-			}
-			if shouldNudgeACPToolUse(useTools, toolTurn.Enabled, nudgeCount, text) {
-				nudgeCount++
-				conv.AddUserMessage("Use tools to take action now. Pick a tool and call it; do not answer with prose alone.")
-				continue
-			}
-			if strings.TrimSpace(text) == "" {
-				return "", fmt.Errorf("model returned an empty response")
-			}
-			sendACPPhaseUpdate(stream, lastPhase, "Finalizing response…")
-			conv.AddAssistantMessageWithReasoningDetails(text, msg.Reasoning, msg.ReasoningDetails)
-			return text, nil
+		sendACPUsageUpdate(stream, usage, state.contextWindow)
+		resp := &model.ChatResponse{
+			Model:   req.Model,
+			Choices: []model.Choice{{Message: msg}},
 		}
+		if usage != nil {
+			resp.Usage = *usage
+		}
+		return resp, nil
+	})
 
-		lastPhase = sendACPPhaseUpdate(stream, lastPhase, fmt.Sprintf("Executing %d tool call(s)…", len(msg.ToolCalls)))
-		normalizeACPToolCallIDs(msg.ToolCalls)
-		conv.AddToolCallMessageWithReasoning(msg.ToolCalls, msg.Reasoning, msg.ReasoningDetails)
-		lastPhase = executeACPToolCalls(ctx, conv, registry, stream, msg.ToolCalls, toolTurn.AllowedTools, lastPhase, workDir, sessionID, agent, logf)
-		toolsExecuted = true
-	}
+	dispatch := agentloop.ToolDispatcherFunc(func(ctx context.Context, calls []model.ToolCall) ([]agentloop.ToolOutcome, error) {
+		state.lastPhase = sendACPPhaseUpdate(stream, state.lastPhase, fmt.Sprintf("Executing %d tool call(s)…", len(calls)))
+		outcomes := make([]agentloop.ToolOutcome, 0, len(calls))
+		for i, tc := range calls {
+			if ctx.Err() != nil {
+				return outcomes, ctx.Err()
+			}
+			outcomes = append(outcomes, dispatchACPToolCall(ctx, registry, stream, tc, i+1, len(calls), state, workDir, sessionID, agent, logf))
+		}
+		state.toolsExecuted = true
+		return outcomes, nil
+	})
+
+	history := agentloop.HistorySinkFunc(func(msg model.Message) {
+		switch {
+		case msg.Role == "assistant" && len(msg.ToolCalls) > 0:
+			conv.AddToolCallMessageWithReasoning(msg.ToolCalls, msg.Reasoning, msg.ReasoningDetails)
+		case msg.Role == "tool":
+			conv.AddToolResponseMessage(msg.ToolCallID, msg.Name, model.ExtractTextContentOrEmpty(msg.Content))
+		}
+	})
+
+	return agentloop.NewController(agentloop.ControllerConfig{
+		Governor:      agentloop.New(agentloop.DefaultConfig()),
+		BuildRequest:  buildRequest,
+		CallModel:     callModel,
+		DispatchTools: dispatch,
+		History:       history,
+		ContextWindow: func(mid string) int {
+			if mgr == nil {
+				return 0
+			}
+			window, _ := mgr.GetContextLength(mid)
+			return window
+		},
+	})
 }
 
 // streamACPTurn drains a streaming chat completion for one runACPLoop
@@ -1173,67 +1303,59 @@ func shouldNudgeACPToolUse(useTools, toolsEnabled bool, nudgeCount int, text str
 		(strings.TrimSpace(text) == "" || shouldNudgeForTools(text))
 }
 
-func normalizeACPToolCallIDs(calls []model.ToolCall) {
-	for i := range calls {
-		if calls[i].ID == "" {
-			calls[i].ID = fmt.Sprintf("tool-%d", i+1)
-		}
+// dispatchACPToolCall runs one tool call for the Controller's dispatcher:
+// phase update, tool_call start notification, the skill allowlist, the
+// client permission flow (M3), execution, and the tool_call_update result
+// notification. It returns the model-facing text as an agentloop.ToolOutcome
+// -- the Controller appends it to the conversation via the History sink, so
+// this function no longer writes to the transcript itself.
+func dispatchACPToolCall(ctx context.Context, registry *tool.Registry, stream acp.StreamFunc, tc model.ToolCall, index, total int, state *acpLoopState, workDir string, sessionID string, agent *acp.Agent, logf func(string, ...interface{})) agentloop.ToolOutcome {
+	params, err := parseACPToolParams(tc.Function.Arguments)
+	if err != nil {
+		rawParams := map[string]any{"raw": tc.Function.Arguments}
+		state.lastPhase = sendACPPhaseUpdate(stream, state.lastPhase, fmt.Sprintf("Running %s (%d/%d)…", toolCallTitle(tc.Function.Name, nil), index, total))
+		sendACPToolCallStart(stream, tc, rawParams, workDir)
+		toolText := fmt.Sprintf("Error: invalid tool arguments: %v", err)
+		sendACPToolCallUpdate(stream, tc, rawParams, acp.ToolCallStatusFailed, toolText, map[string]any{
+			"error": err.Error(),
+		}, nil, workDir)
+		return agentloop.ToolOutcome{Content: toolText}
 	}
-}
 
-func executeACPToolCalls(ctx context.Context, conv *conversation.Conversation, registry *tool.Registry, stream acp.StreamFunc, calls []model.ToolCall, allowedTools []string, lastPhase string, workDir string, sessionID string, agent *acp.Agent, logf func(string, ...interface{})) string {
-	for i, tc := range calls {
-		if ctx.Err() != nil {
-			return lastPhase
-		}
-		params, err := parseACPToolParams(tc.Function.Arguments)
-		if err != nil {
-			rawParams := map[string]any{"raw": tc.Function.Arguments}
-			lastPhase = sendACPPhaseUpdate(stream, lastPhase, fmt.Sprintf("Running %s (%d/%d)…", toolCallTitle(tc.Function.Name, nil), i+1, len(calls)))
-			sendACPToolCallStart(stream, tc, rawParams, workDir)
-			toolText := fmt.Sprintf("Error: invalid tool arguments: %v", err)
-			conv.AddToolResponseMessage(tc.ID, tc.Function.Name, toolText)
-			sendACPToolCallUpdate(stream, tc, rawParams, acp.ToolCallStatusFailed, toolText, map[string]any{
-				"error": err.Error(),
-			}, nil, workDir)
-			continue
-		}
+	state.lastPhase = sendACPPhaseUpdate(stream, state.lastPhase, fmt.Sprintf("Running %s (%d/%d)…", toolCallTitle(tc.Function.Name, params), index, total))
+	sendACPToolCallStart(stream, tc, params, workDir)
 
-		lastPhase = sendACPPhaseUpdate(stream, lastPhase, fmt.Sprintf("Running %s (%d/%d)…", toolCallTitle(tc.Function.Name, params), i+1, len(calls)))
-		sendACPToolCallStart(stream, tc, params, workDir)
-
-		if !tool.IsToolAllowed(tc.Function.Name, allowedTools) {
-			toolText := fmt.Sprintf("Error: tool %s not allowed by active skills", tc.Function.Name)
-			conv.AddToolResponseMessage(tc.ID, tc.Function.Name, toolText)
-			sendACPToolCallUpdate(stream, tc, params, acp.ToolCallStatusFailed, toolText, map[string]any{
-				"error": toolText,
-			}, nil, workDir)
-			continue
-		}
-
-		if allowed, reason := requestACPToolPermission(ctx, agent, registry, sessionID, tc, params, workDir, logf); !allowed {
-			toolText := fmt.Sprintf("Permission denied for %s: %s", tc.Function.Name, reason)
-			result := &builtin.Result{Success: false, Error: toolText}
-			conv.AddToolResponseMessage(tc.ID, tc.Function.Name, toolText)
-			sendACPToolCallUpdate(stream, tc, params, acp.ToolCallStatusFailed, toolText, map[string]any{
-				"error":  toolText,
-				"denied": true,
-			}, result, workDir)
-			continue
-		}
-
-		result, execErr := executeACPToolCall(ctx, registry, tc.Function.Name, params, tc.ID)
-		toolText := formatACPToolResult(result, execErr)
-		displayText := formatACPToolDisplay(result, execErr)
-		conv.AddToolResponseMessage(tc.ID, tc.Function.Name, toolText)
-
-		status := acp.ToolCallStatusCompleted
-		if execErr != nil || (result != nil && !result.Success) {
-			status = acp.ToolCallStatusFailed
-		}
-		sendACPToolCallUpdate(stream, tc, params, status, displayText, toolCallRawOutput(result, execErr), result, workDir)
+	if !tool.IsToolAllowed(tc.Function.Name, state.allowedTools) {
+		toolText := fmt.Sprintf("Error: tool %s not allowed by active skills", tc.Function.Name)
+		sendACPToolCallUpdate(stream, tc, params, acp.ToolCallStatusFailed, toolText, map[string]any{
+			"error": toolText,
+		}, nil, workDir)
+		return agentloop.ToolOutcome{Content: toolText}
 	}
-	return lastPhase
+
+	if allowed, reason := requestACPToolPermission(ctx, agent, registry, sessionID, tc, params, workDir, logf); !allowed {
+		toolText := fmt.Sprintf("Permission denied for %s: %s", tc.Function.Name, reason)
+		result := &builtin.Result{Success: false, Error: toolText}
+		sendACPToolCallUpdate(stream, tc, params, acp.ToolCallStatusFailed, toolText, map[string]any{
+			"error":  toolText,
+			"denied": true,
+		}, result, workDir)
+		return agentloop.ToolOutcome{Content: toolText}
+	}
+
+	result, execErr := executeACPToolCall(ctx, registry, tc.Function.Name, params, tc.ID)
+	toolText := formatACPToolResult(result, execErr)
+	displayText := formatACPToolDisplay(result, execErr)
+
+	status := acp.ToolCallStatusCompleted
+	if execErr != nil || (result != nil && !result.Success) {
+		status = acp.ToolCallStatusFailed
+	}
+	sendACPToolCallUpdate(stream, tc, params, status, displayText, toolCallRawOutput(result, execErr), result, workDir)
+	return agentloop.ToolOutcome{
+		Content: toolText,
+		Success: execErr == nil && result != nil && result.Success,
+	}
 }
 
 // acpPermissionRequestTimeout bounds how long Buckley waits for a live
