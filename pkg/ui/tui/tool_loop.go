@@ -558,9 +558,14 @@ func hasAnyToolParam(params map[string]any, names ...string) bool {
 	return false
 }
 
+// recordToolLoopCalls persists this round's tool-call turn, preserving any
+// preamble text the model wrote before the calls (msg.Content) so it
+// survives into wire history for subsequent requests -- see
+// conversation.AddToolCallMessageWithContent.
 func (c *Controller) recordToolLoopCalls(sess *SessionState, calls []model.ToolCall, msg model.Message) {
 	c.app.SetStatus(fmt.Sprintf("Model requested %d tool call(s)", len(calls)))
-	sess.Conversation.AddToolCallMessageWithReasoning(calls, msg.Reasoning, msg.ReasoningDetails)
+	preamble := model.ExtractTextContentOrEmpty(msg.Content)
+	sess.Conversation.AddToolCallMessageWithContent(preamble, calls, msg.Reasoning, msg.ReasoningDetails)
 	c.saveLatestConversationMessage(sess)
 }
 
