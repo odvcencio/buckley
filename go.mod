@@ -153,3 +153,5 @@ require (
 	sigs.k8s.io/structured-merge-diff/v4 v4.4.1 // indirect
 	sigs.k8s.io/yaml v1.3.0 // indirect
 )
+
+retract [v2.0.0, v2.4.0] // Pre-1.0 re-versioning; use the 0.x line.
