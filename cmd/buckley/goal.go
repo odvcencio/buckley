@@ -206,11 +206,13 @@ func runGoalStart(args []string) error {
 
 func runGoalStatus(args []string) error {
 	fs := flag.NewFlagSet("goal status", flag.ContinueOnError)
+	watch := fs.Bool("watch", false, "re-render every few seconds until interrupted")
+	interval := fs.Duration("interval", 10*time.Second, "watch refresh interval")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return errors.New("usage: buckley goal status <run-id>")
+		return errors.New("usage: buckley goal status [--watch] <run-id>")
 	}
 	runID := strings.TrimSpace(fs.Arg(0))
 
@@ -219,8 +221,30 @@ func runGoalStatus(args []string) error {
 		return err
 	}
 	defer cleanup()
-	ctx := context.Background()
 
+	if !*watch {
+		return printGoalStatus(context.Background(), stores, runID)
+	}
+
+	// Watch mode: a second terminal's cheap observation loop while
+	// `goal run` drives in the first. Reads only durable state, so it
+	// never disturbs the run.
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+	for {
+		if err := printGoalStatus(ctx, stores, runID); err != nil {
+			return err
+		}
+		fmt.Println("---")
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-time.After(*interval):
+		}
+	}
+}
+
+func printGoalStatus(ctx context.Context, stores *goalStores, runID string) error {
 	tree, err := runledger.LoadGoalTree(ctx, stores.ledger, runID)
 	if err != nil {
 		return fmt.Errorf("load goal %s: %w", runID, err)
