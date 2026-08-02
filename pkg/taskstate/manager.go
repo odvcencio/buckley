@@ -86,8 +86,16 @@ func (m *Manager) Save(ctx context.Context, in SaveInput) (runledger.TaskCheckpo
 	}
 
 	parentID := ""
-	if latest, err := m.ledger.LatestTaskCheckpoint(ctx, in.State.TaskID); err == nil {
+	latest, err := m.ledger.LatestTaskCheckpoint(ctx, in.State.TaskID)
+	switch {
+	case err == nil:
 		parentID = latest.CheckpointID
+	case errors.Is(err, runledger.ErrNotFound):
+		// First checkpoint for this task: a genuine root.
+	default:
+		// A transient read error must fail the save; treating it as "no
+		// parent" would silently fork the version chain.
+		return runledger.TaskCheckpoint{}, fmt.Errorf("taskstate: read latest checkpoint: %w", err)
 	}
 
 	saved, err := m.ledger.CreateTaskCheckpoint(ctx, runledger.TaskCheckpoint{
@@ -127,8 +135,11 @@ type ResumeContext struct {
 // an older version or replan.
 func (m *Manager) Resume(ctx context.Context, taskID string) (ResumeContext, error) {
 	cp, err := m.ledger.LatestTaskCheckpoint(ctx, taskID)
-	if err != nil {
+	if errors.Is(err, runledger.ErrNotFound) {
 		return ResumeContext{}, fmt.Errorf("%w: %s", ErrNoCheckpoint, taskID)
+	}
+	if err != nil {
+		return ResumeContext{}, fmt.Errorf("taskstate: read latest checkpoint: %w", err)
 	}
 	state, err := Unmarshal(cp.StateJSON)
 	if err != nil {

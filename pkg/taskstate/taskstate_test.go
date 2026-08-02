@@ -340,6 +340,50 @@ func TestManager_ResumeUnknownTask(t *testing.T) {
 	}
 }
 
+// failingLedger simulates a transient database error on reads so tests can
+// prove that Save and Resume fail loudly instead of silently forking the
+// checkpoint chain (a read error is not the same as "no checkpoint yet").
+type failingLedger struct {
+	err error
+}
+
+func (f failingLedger) CreateTaskCheckpoint(context.Context, runledger.TaskCheckpoint) (runledger.TaskCheckpoint, error) {
+	return runledger.TaskCheckpoint{}, errors.New("unreachable: save must fail before writing")
+}
+
+func (f failingLedger) LatestTaskCheckpoint(context.Context, string) (runledger.TaskCheckpoint, error) {
+	return runledger.TaskCheckpoint{}, f.err
+}
+
+type nopEvidence struct{}
+
+func (nopEvidence) Put(_ context.Context, obj evidence.Object) (evidence.Object, error) {
+	obj.ID = "ev_nop"
+	return obj, nil
+}
+
+func TestManager_TransientLedgerErrorFailsLoudly(t *testing.T) {
+	t.Parallel()
+
+	transient := errors.New("database is locked")
+	mgr, err := NewManager(failingLedger{err: transient}, nopEvidence{})
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	if _, err := mgr.Save(context.Background(), SaveInput{State: validState(), Reason: TriggerPressure}); !errors.Is(err, transient) {
+		t.Fatalf("Save with transient read error = %v, want the transient error surfaced", err)
+	}
+
+	_, err = mgr.Resume(context.Background(), "task-001")
+	if errors.Is(err, ErrNoCheckpoint) {
+		t.Fatal("Resume treated a transient read error as ErrNoCheckpoint")
+	}
+	if !errors.Is(err, transient) {
+		t.Fatalf("Resume with transient read error = %v, want the transient error surfaced", err)
+	}
+}
+
 func TestVerificationDebt(t *testing.T) {
 	t.Parallel()
 	s := validState()
