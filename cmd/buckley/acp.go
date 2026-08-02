@@ -18,6 +18,7 @@ import (
 	"m31labs.dev/buckley/v2/pkg/config"
 	projectcontext "m31labs.dev/buckley/v2/pkg/context"
 	"m31labs.dev/buckley/v2/pkg/conversation"
+	"m31labs.dev/buckley/v2/pkg/mcp"
 	"m31labs.dev/buckley/v2/pkg/model"
 	"m31labs.dev/buckley/v2/pkg/prompts"
 	"m31labs.dev/buckley/v2/pkg/rules"
@@ -116,11 +117,49 @@ func runACPCommand(args []string) error {
 	// the time a prompt actually runs -- prompts only fire once agent.Serve
 	// is reading messages, well after this assignment completes.
 	var agent *acp.Agent
+	promptHandler, closeACPSessions := makePromptHandler(cfg, mgr, store, projectContext, cwd, logf, &agent)
+	// S5: every session that spawned its own MCP servers (via session/new's
+	// mcpServers) tears them down when this ACP connection ends -- Buckley
+	// does not implement session/close, so process/connection teardown is
+	// the only "session end" signal available.
+	defer closeACPSessions()
+
 	agent = acp.NewAgent("Buckley", version, acp.AgentHandlers{
 		OnSessionModes: func(ctx context.Context, session *acp.AgentSession) (*acp.SessionModeState, error) {
 			return buildACPModelModes(cfg, mgr), nil
 		},
-		OnPrompt: makePromptHandler(cfg, mgr, store, projectContext, cwd, logf, &agent),
+		// S8: models are also exposed as a session config option
+		// (category "model") alongside the existing modes advertisement --
+		// CodeCompanion picks models ONLY via session/set_config_option, so
+		// models-as-modes alone are invisible there. Both mechanisms share
+		// session.Mode as their one source of truth (see
+		// buildACPModelConfigOptions/applyACPSetModelConfigOption), so a
+		// modes-only client and a config-option-only client never disagree
+		// about which model is active. Permission modes stay as modes;
+		// this only adds a second surface for the model selector.
+		OnSessionConfigOptions: func(ctx context.Context, session *acp.AgentSession) ([]acp.SessionConfigOption, error) {
+			return buildACPModelConfigOptions(cfg, mgr, session), nil
+		},
+		OnSetConfigOption: func(ctx context.Context, session *acp.AgentSession, configID string, value acp.ConfigOptionValue) ([]acp.SessionConfigOption, error) {
+			if configID != acpModelConfigID {
+				return nil, fmt.Errorf("unknown config option %q", configID)
+			}
+			return applyACPSetModelConfigOption(cfg, mgr, session, value)
+		},
+		// OnSessionCommands (S6) loads the skill registry fresh from disk
+		// rather than reusing the per-prompt session state (getACPSessionState
+		// builds that lazily on the first prompt, after session/new has
+		// already returned). Skill files on disk are the same source of
+		// truth either way, so this stays accurate without forcing eager
+		// session setup at session/new time.
+		OnSessionCommands: func(ctx context.Context, session *acp.AgentSession) ([]acp.AvailableCommand, error) {
+			skills := skill.NewRegistry()
+			if err := skills.LoadAll(); err != nil {
+				logf("load skills warning (session commands): %v", err)
+			}
+			return buildACPAvailableCommands(skills), nil
+		},
+		OnPrompt: promptHandler,
 		OnReadFile: func(ctx context.Context, path string, startLine, endLine int) (string, error) {
 			logf("read file: %s (lines %d-%d)", path, startLine, endLine)
 			data, err := os.ReadFile(path)
@@ -186,18 +225,18 @@ func makePromptHandler(
 	defaultWorkDir string,
 	logf func(string, ...interface{}),
 	agentRef **acp.Agent,
-) func(context.Context, *acp.AgentSession, []acp.ContentBlock, acp.StreamFunc) (*acp.PromptResult, error) {
+) (handler func(context.Context, *acp.AgentSession, []acp.ContentBlock, acp.StreamFunc) (*acp.PromptResult, error), cleanup func()) {
 	sessions := make(map[string]*acpSessionState)
 	var sessionsMu sync.Mutex
 
-	return func(ctx context.Context, session *acp.AgentSession, content []acp.ContentBlock, stream acp.StreamFunc) (*acp.PromptResult, error) {
+	handler = func(ctx context.Context, session *acp.AgentSession, content []acp.ContentBlock, stream acp.StreamFunc) (*acp.PromptResult, error) {
 		prompt := extractACPPrompt(content)
 		if strings.TrimSpace(prompt) == "" {
 			return nil, fmt.Errorf("empty prompt")
 		}
 		logf("prompt: %s", truncate(prompt, 100))
 
-		state := getACPSessionState(&sessionsMu, sessions, session, projectContext, cfg, defaultWorkDir, logf)
+		state := getACPSessionState(ctx, &sessionsMu, sessions, session, projectContext, cfg, defaultWorkDir, logf)
 		state.mu.Lock()
 		defer state.mu.Unlock()
 
@@ -222,19 +261,47 @@ func makePromptHandler(
 		}
 
 		modelOverride := resolveACPModelOverride(cfg, mgr, session.Mode)
-		responseText, err := runACPLoop(ctx, cfg, mgr, state.conv, state.registry, state.skillState, state.engine, modelOverride, state.workDir, session.ID, agent, logf, stream)
+		// S6: create_skill (reachable as a tool call inside runACPLoop) is
+		// the only thing that changes the set of available commands
+		// mid-session; a before/after count catches it without threading
+		// the skill registry through the whole tool-call loop.
+		skillsBefore := 0
+		if state.skills != nil {
+			skillsBefore = len(state.skills.List())
+		}
+
+		// S1: runACPLoop streams the final message as agent_message_chunk
+		// notifications while the model generates it (see streamACPTurn), so
+		// the returned text is not re-sent here -- doing so would duplicate
+		// every turn's content on the wire.
+		_, err := runACPLoop(ctx, cfg, mgr, state.conv, state.registry, state.skillState, state.engine, modelOverride, state.workDir, session.ID, agent, logf, stream)
 		if err != nil {
 			logf("prompt error: %v", err)
 			stream(acp.NewAgentMessageChunk(fmt.Sprintf("\n\nError: %v", err)))
 			return nil, err
 		}
 
-		if responseText != "" {
-			stream(acp.NewAgentMessageChunk(responseText))
+		if state.skills != nil && len(state.skills.List()) != skillsBefore {
+			sendACPAvailableCommandsUpdate(stream, state.skills)
 		}
 
 		return &acp.PromptResult{StopReason: "end_turn"}, nil
 	}
+
+	cleanup = func() {
+		sessionsMu.Lock()
+		defer sessionsMu.Unlock()
+		for id, state := range sessions {
+			if state == nil || state.mcpManager == nil {
+				continue
+			}
+			if err := state.mcpManager.Close(); err != nil {
+				logf("mcp: session %s: close error: %v", id, err)
+			}
+		}
+	}
+
+	return handler, cleanup
 }
 
 type acpSessionState struct {
@@ -248,6 +315,11 @@ type acpSessionState struct {
 	// locations and diff paths -- never the ACP process's own cwd, which may
 	// differ from the editor's session/new cwd (S2, S9).
 	workDir string
+	// mcpManager holds the session's own MCP servers, spawned from
+	// session/new's mcpServers array (S5). Nil when the session declared no
+	// (supported) MCP servers. Torn down by makePromptHandler's cleanup
+	// func when the ACP connection ends.
+	mcpManager *mcp.Manager
 }
 
 type acpEmbeddedResource struct {
@@ -303,6 +375,7 @@ func extractACPPrompt(blocks []acp.ContentBlock) string {
 }
 
 func getACPSessionState(
+	ctx context.Context,
 	mu *sync.Mutex,
 	sessions map[string]*acpSessionState,
 	session *acp.AgentSession,
@@ -350,6 +423,11 @@ func getACPSessionState(
 	registry.Register(createTool)
 	registry.EnableDynamicDiscovery(nil)
 
+	// S5: spawn the session's own MCP servers (session/new's mcpServers,
+	// previously parsed then discarded) and bridge their tools into this
+	// session's registry.
+	mcpManager := attachACPMcpServers(ctx, registry, session.McpServers, logf)
+
 	// Wire todo persistence for the ACP session
 	registry.SetTodoStore(&acpTodoStoreAdapter{sessionID: session.ID})
 
@@ -371,9 +449,69 @@ func getACPSessionState(
 		skillState: skillState,
 		engine:     engine,
 		workDir:    workDir,
+		mcpManager: mcpManager,
 	}
 	sessions[session.ID] = state
 	return state
+}
+
+// attachACPMcpServers spawns and bridges the stdio MCP servers a client
+// declared in session/new's mcpServers array (S5). Only the stdio
+// transport is supported -- Buckley advertises mcpCapabilities.http/sse as
+// false at initialize (see handleInitialize), so http/sse declarations are
+// logged and skipped rather than attempted. A server that fails to connect
+// is logged and skipped too: one misconfigured server must not block the
+// rest of the session's tools, MCP or otherwise. Returns nil when no
+// (supported) server was configured or none connected.
+func attachACPMcpServers(ctx context.Context, registry *tool.Registry, declared []acp.McpServer, logf func(string, ...interface{})) *mcp.Manager {
+	if len(declared) == 0 {
+		return nil
+	}
+
+	mcpCfg := config.MCPConfig{Enabled: true}
+	for _, srv := range declared {
+		name := strings.TrimSpace(srv.Name)
+		if srv.Type != acp.McpServerKindStdio {
+			if logf != nil {
+				logf("mcp: server %q declares unsupported transport %q (only stdio is supported); skipping", name, srv.Type)
+			}
+			continue
+		}
+		if name == "" || strings.TrimSpace(srv.Command) == "" {
+			if logf != nil {
+				logf("mcp: skipping server with missing name or command: %+v", srv)
+			}
+			continue
+		}
+		env := make(map[string]string, len(srv.Env))
+		for _, e := range srv.Env {
+			env[e.Name] = e.Value
+		}
+		mcpCfg.Servers = append(mcpCfg.Servers, config.MCPServerConfig{
+			Name:    name,
+			Command: srv.Command,
+			Args:    append([]string{}, srv.Args...),
+			Env:     config.ExpandMCPEnv(env),
+			Enabled: true,
+		})
+	}
+	if len(mcpCfg.Servers) == 0 {
+		return nil
+	}
+
+	manager, err := mcp.ManagerFromConfig(ctx, mcpCfg)
+	if err != nil && logf != nil {
+		logf("mcp: session server setup: %v", err)
+	}
+	if manager == nil {
+		return nil
+	}
+
+	registered := tool.RegisterMCPTools(registry, manager, mcpCfg)
+	if logf != nil {
+		logf("mcp: bridged %d tool(s) from %d session server(s): %v", len(registered), len(mcpCfg.Servers), registered)
+	}
+	return manager
 }
 
 func buildACPSystemPrompt(projectContext *projectcontext.ProjectContext, workDir string, skills *skill.Registry, engine *rules.Engine, agentProfile string) string {
@@ -409,6 +547,9 @@ type acpUserSkillCommand struct {
 }
 
 func handleACPUserSkillCommand(prompt string, state *acpSessionState) (bool, string) {
+	if handled, text := handleACPSkillNameCommand(prompt, state); handled {
+		return true, text
+	}
 	cmd, ok := parseACPUserSkillCommand(prompt)
 	if !ok {
 		return false, ""
@@ -423,6 +564,33 @@ func handleACPUserSkillCommand(prompt string, state *acpSessionState) (bool, str
 		return true, "Usage: /skill <name>."
 	}
 	return true, activateACPUserSkill(cmd.name, state)
+}
+
+// handleACPSkillNameCommand recognizes "/<skill-name>" as shorthand for
+// "/skill <skill-name>" (S6): buildACPAvailableCommands advertises each
+// registered skill as its own named command, so a client's command
+// palette can invoke "/code-review" directly rather than the generic
+// "/skill code-review" form -- otherwise an advertised command would not
+// actually do anything when picked. It returns false for anything other
+// than a single "/<token>" that names a registered skill, so ordinary
+// prose starting with "/" and the generic "/skill"/"/skills" commands
+// fall through to parseACPUserSkillCommand unchanged.
+func handleACPSkillNameCommand(prompt string, state *acpSessionState) (bool, string) {
+	if state == nil || state.skills == nil {
+		return false, ""
+	}
+	trimmed := strings.TrimSpace(prompt)
+	if !strings.HasPrefix(trimmed, "/") || strings.ContainsAny(trimmed, " \t\n") {
+		return false, ""
+	}
+	name := strings.TrimPrefix(trimmed, "/")
+	if name == "" || strings.EqualFold(name, "skill") || strings.EqualFold(name, "skills") {
+		return false, ""
+	}
+	if state.skills.GetSkill(name) == nil {
+		return false, ""
+	}
+	return true, activateACPUserSkill(name, state)
 }
 
 func parseACPUserSkillCommand(prompt string) (acpUserSkillCommand, bool) {
@@ -455,6 +623,47 @@ func formatACPAvailableSkills(registry *skill.Registry) string {
 		b.WriteString("- " + name + "\n")
 	}
 	return strings.TrimSpace(b.String())
+}
+
+// buildACPAvailableCommands converts a skill registry into the ACP
+// available_commands_update list (S6): one command per registered skill,
+// named after the skill itself so a client's command palette can invoke it
+// directly (handleACPSkillNameCommand recognizes "/<skill-name>" the same
+// way it recognizes the generic "/skill <name>" form).
+func buildACPAvailableCommands(registry *skill.Registry) []acp.AvailableCommand {
+	if registry == nil {
+		return nil
+	}
+	list := registry.List()
+	if len(list) == 0 {
+		return nil
+	}
+	commands := make([]acp.AvailableCommand, 0, len(list))
+	for _, s := range list {
+		name := strings.TrimSpace(s.GetName())
+		if name == "" {
+			continue
+		}
+		commands = append(commands, acp.AvailableCommand{
+			Name:        name,
+			Description: s.GetDescription(),
+		})
+	}
+	if len(commands) == 0 {
+		return nil
+	}
+	sort.Slice(commands, func(i, j int) bool { return commands[i].Name < commands[j].Name })
+	return commands
+}
+
+// sendACPAvailableCommandsUpdate builds and sends an
+// available_commands_update notification (S6) from registry's current
+// skill set.
+func sendACPAvailableCommandsUpdate(stream acp.StreamFunc, registry *skill.Registry) {
+	if stream == nil {
+		return
+	}
+	_ = stream(acp.NewAvailableCommandsUpdate(buildACPAvailableCommands(registry)))
 }
 
 func activateACPUserSkill(name string, state *acpSessionState) string {
@@ -614,6 +823,79 @@ func resolveACPModelOverride(cfg *config.Config, mgr *model.Manager, modeID stri
 	return modeID
 }
 
+// acpModelConfigID is the SessionConfigOption.ID for Buckley's model
+// picker (S8) -- the ID a client sends back as configId on
+// session/set_config_option.
+const acpModelConfigID = "model"
+
+// buildACPModelConfigOptions builds the "model" SessionConfigOption (S8):
+// a select-style config option listing every curated model, alongside the
+// existing modes-based model selector (buildACPModelModes). Both read the
+// same curated list and both read/write session.Mode as their one shared
+// source of truth for "which model is active", so a config-option-only
+// client (CodeCompanion) and a modes-only client never disagree.
+func buildACPModelConfigOptions(cfg *config.Config, mgr *model.Manager, session *acp.AgentSession) []acp.SessionConfigOption {
+	curated := curatedModelIDs(cfg, mgr)
+	if len(curated) == 0 {
+		return nil
+	}
+
+	options := make([]acp.SessionConfigSelectOption, 0, len(curated))
+	for _, modelID := range curated {
+		if strings.TrimSpace(modelID) == "" {
+			continue
+		}
+		name := modelID
+		desc := ""
+		if mgr != nil {
+			if info, err := mgr.GetModelInfo(modelID); err == nil {
+				if strings.TrimSpace(info.Name) != "" {
+					name = info.Name
+				}
+				desc = info.Description
+			}
+		}
+		options = append(options, acp.SessionConfigSelectOption{Value: modelID, Name: name, Description: desc})
+	}
+	if len(options) == 0 {
+		return nil
+	}
+
+	// Only trust session.Mode as a model selection when it actually carries
+	// the "model:" prefix -- resolveACPModelOverride treats any other
+	// non-empty, non-"default" string as a literal model override, and
+	// AgentSession's own zero-state default ("normal") is neither empty
+	// nor "default", so it must never reach that path.
+	current := options[0].Value
+	if session != nil && strings.HasPrefix(session.Mode, acpModePrefix) {
+		if override := resolveACPModelOverride(cfg, mgr, session.Mode); override != "" {
+			current = override
+		}
+	}
+
+	return []acp.SessionConfigOption{acp.NewModelConfigOption(acpModelConfigID, "Model", current, options)}
+}
+
+// applyACPSetModelConfigOption handles a session/set_config_option change
+// to the "model" option (S8): it validates the chosen model against the
+// curated catalog and writes session.Mode in place -- the same field
+// resolveACPModelOverride reads for every turn -- so the change takes
+// effect immediately regardless of which selector (modes or config
+// options) the client uses.
+func applyACPSetModelConfigOption(cfg *config.Config, mgr *model.Manager, session *acp.AgentSession, value acp.ConfigOptionValue) ([]acp.SessionConfigOption, error) {
+	modelID := strings.TrimSpace(value.ValueID)
+	if modelID == "" {
+		return nil, fmt.Errorf("model config option requires a value id")
+	}
+	if mgr != nil && !acpCatalogHasModel(mgr, modelID) {
+		return nil, fmt.Errorf("unknown model %q", modelID)
+	}
+	if session != nil {
+		session.Mode = acpModePrefix + modelID
+	}
+	return buildACPModelConfigOptions(cfg, mgr, session), nil
+}
+
 func runACPLoop(
 	ctx context.Context,
 	cfg *config.Config,
@@ -632,6 +914,13 @@ func runACPLoop(
 	modelID := resolveACPExecutionModel(cfg, mgr, engine, modelOverride)
 	evaluator := newACPEvaluator(engine)
 	useTools := acpModelCanUseTools(registry, mgr, modelID)
+	// N1: contextWindow is resolved once per prompt turn (the model does
+	// not change mid-turn) and paired with each round's model.Usage to
+	// report usage_update as "tokens used out of this context window".
+	contextWindow := 0
+	if mgr != nil {
+		contextWindow, _ = mgr.GetContextLength(modelID)
+	}
 	nudgeCount := 0
 	finalizeNudgeCount := 0
 	toolsExecuted := false
@@ -647,7 +936,10 @@ func runACPLoop(
 		useTools = toolTurn.UseTools
 		req := buildACPChatRequest(cfg, mgr, engine, conv, modelID, toolTurn)
 
-		resp, err := mgr.ChatCompletion(ctx, req)
+		// S1: stream the turn so agent_message_chunk/agent_thought_chunk
+		// reach the client per provider delta, instead of buffering the
+		// whole turn and sending one chunk at the end.
+		msg, usage, err := streamACPTurn(ctx, mgr, req, stream)
 		if err != nil {
 			if useTools && isToolUnsupportedError(err) {
 				useTools = false
@@ -655,11 +947,12 @@ func runACPLoop(
 			}
 			return "", err
 		}
-		if len(resp.Choices) == 0 {
-			return "", model.NoResponseChoicesError(req, resp)
-		}
+		// N1: the round's usage is available right after the round
+		// completes -- report it immediately rather than waiting for the
+		// whole prompt turn to finish, so a multi-round tool turn shows
+		// live context-window growth.
+		sendACPUsageUpdate(stream, usage, contextWindow)
 
-		msg := resp.Choices[0].Message
 		if len(msg.ToolCalls) == 0 {
 			text, err := model.ExtractTextContent(msg.Content)
 			if err != nil {
@@ -692,6 +985,105 @@ func runACPLoop(
 		lastPhase = executeACPToolCalls(ctx, conv, registry, stream, msg.ToolCalls, toolTurn.AllowedTools, lastPhase, workDir, sessionID, agent, logf)
 		toolsExecuted = true
 	}
+}
+
+// streamACPTurn drains a streaming chat completion for one runACPLoop
+// iteration, forwarding each content delta as its own agent_message_chunk
+// and each reasoning delta as its own agent_thought_chunk to the client as
+// they arrive (S1), instead of buffering the whole turn and sending one
+// chunk at the end. It mirrors mgr.ChatCompletion's return shape -- one
+// accumulated Message plus Usage -- once the stream ends, so callers built
+// around the non-streaming response shape do not have to change.
+//
+// It drains both chunkChan and errChan to completion (looping until both
+// are nil) rather than returning on the first ready channel: ChatCompletion
+// providers close both channels at the end of a successful stream, and a
+// select is not guaranteed to observe a still-buffered chunk before an
+// already-closed error channel. See pkg/ui/tui/tool_loop.go's
+// callToolLoopModel for the same drain pattern.
+func streamACPTurn(ctx context.Context, mgr *model.Manager, req model.ChatRequest, stream acp.StreamFunc) (model.Message, *model.Usage, error) {
+	req.Stream = true
+	chunks, errs := mgr.ChatCompletionStream(ctx, req)
+
+	acc := model.NewStreamAccumulator()
+	receivedChoice := false
+	for chunks != nil || errs != nil {
+		select {
+		case <-ctx.Done():
+			return model.Message{}, nil, ctx.Err()
+		case chunk, ok := <-chunks:
+			if !ok {
+				chunks = nil
+				continue
+			}
+			acc.Add(chunk)
+			for _, choice := range chunk.Choices {
+				receivedChoice = true
+				forwardACPStreamDelta(stream, choice.Delta)
+			}
+		case err, ok := <-errs:
+			if !ok {
+				errs = nil
+				continue
+			}
+			if err != nil {
+				return model.Message{}, nil, err
+			}
+		}
+	}
+
+	if !receivedChoice {
+		return model.Message{}, nil, model.NoResponseChoicesError(req, &model.ChatResponse{Model: req.Model})
+	}
+
+	msg := acc.Message()
+	if msg.Role == "" {
+		msg.Role = "assistant"
+	}
+	return msg, acc.Usage(), nil
+}
+
+// forwardACPStreamDelta streams one chunk's delta immediately: content as an
+// agent_message_chunk, reasoning as an agent_thought_chunk. OpenRouter's
+// reasoning_details blocks take precedence over the legacy reasoning field
+// when both are present on the same delta (they carry the same content in
+// a richer shape). Buckley sends one ACP update per provider delta rather
+// than re-tokenizing -- the provider's own SSE chunking is already the
+// "per token" granularity ACP clients render incrementally.
+func forwardACPStreamDelta(stream acp.StreamFunc, delta model.MessageDelta) {
+	if stream == nil {
+		return
+	}
+	if len(delta.ReasoningDetails) > 0 {
+		for _, rd := range delta.ReasoningDetails {
+			text := rd.Text
+			if text == "" {
+				text = rd.Summary
+			}
+			if text != "" {
+				_ = stream(acp.NewAgentThoughtChunk(text))
+			}
+		}
+	} else if delta.Reasoning != "" {
+		_ = stream(acp.NewAgentThoughtChunk(delta.Reasoning))
+	}
+	if delta.Content != "" {
+		_ = stream(acp.NewAgentMessageChunk(delta.Content))
+	}
+}
+
+// sendACPUsageUpdate emits a usage_update session update (N1) for one
+// model round-trip: used is that round's total token count (from
+// model.Usage, available once the round's streaming completes), size is
+// the model's context window. It is a no-op when usage or the context
+// window is unavailable rather than sending a misleading zero/zero
+// update. Buckley does not track a per-request USD cost here, so the
+// optional cost field is left unset.
+func sendACPUsageUpdate(stream acp.StreamFunc, usage *model.Usage, contextWindow int) {
+	if stream == nil || usage == nil || contextWindow <= 0 {
+		return
+	}
+	_ = stream(acp.NewUsageUpdate(uint64(usage.TotalTokens), uint64(contextWindow), nil))
 }
 
 const acpMaxToolNudges = 2
