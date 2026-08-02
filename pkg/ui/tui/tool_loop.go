@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 
+	"m31labs.dev/buckley/v2/pkg/agentloop"
 	"m31labs.dev/buckley/v2/pkg/conversation"
 	"m31labs.dev/buckley/v2/pkg/model"
 	"m31labs.dev/buckley/v2/pkg/tool"
@@ -17,11 +18,21 @@ type toolLoopState struct {
 	useTools       bool
 	totalUsage     model.Usage
 	progress       toolLoopProgress
-	governor       toolLoopGovernor
+	governor       *agentloop.Governor
 	guardReason    string
 	contextScale   float64
 	contextRetries int
 	projection     conversation.ContextProjectionStats
+
+	// lastProviderFinishReason is the raw finish_reason string the provider
+	// reported on the most recent model call (e.g. "stop", "length",
+	// "tool_calls"), captured by newToolLoopController's CallModel hook.
+	// agentloop.Controller.Result.FinishReason is a different, Controller-
+	// owned abstraction (empty on a normal completion) that never surfaces
+	// the provider's own value, so runToolLoop reads this field instead
+	// once Controller reports a normal completion -- modelFinishReasonNotice
+	// and readyStatusForFinishReason both key off the provider's reason.
+	lastProviderFinishReason string
 
 	// continuation and useContinuation carry this turn's provider
 	// continuation decision (decision 0001), behind the
@@ -56,35 +67,74 @@ type toolLoopProgress struct {
 	roundRenderedText string
 }
 
-type toolLoopIterationResult struct {
-	done         bool
-	message      model.Message
-	finishReason string
-}
-
+// runToolLoop drives one interactive assistant turn through the shared turn
+// engine (pkg/agentloop.Controller): it owns the round loop, the round
+// ceiling, tool-call ID backfill, and Governor consultation that this
+// package used to hand-roll, while the TUI-specific pieces --
+// projection/continuation (buildToolLoopRequestWithState), the streaming
+// model call (callToolLoopTurn), tool execution and progress rendering
+// (toolLoopExecuteOne), and conversation persistence (recordToolLoopCalls,
+// AddToolResponseMessage) -- stay exactly as they were, wired in as
+// Controller hooks. See newToolLoopController.
 func (c *Controller) runToolLoop(ctx context.Context, sess *SessionState, modelID string) (string, *model.Usage, string, bool, error) {
 	if err := c.validateToolLoopInputs(sess); err != nil {
 		return "", nil, "", false, err
 	}
 
 	state := c.newToolLoopState(sess, modelID)
-	for iter := 0; ; iter++ {
-		if state.governor != nil {
-			decision := state.governor.BeginRound()
-			if decision.Stop {
-				return c.finishGuardedToolLoop(ctx, sess, modelID, &state, decision.Reason)
-			}
+	allowedTools := toolLoopAllowedTools(sess)
+
+	ctrl, err := c.newToolLoopController(sess, modelID, allowedTools, &state)
+	if err != nil {
+		return "", nil, "", false, err
+	}
+
+	// accumulatedUsage sums every Controller.Run attempt's internally
+	// accumulated usage, including attempts that later errored (a context-
+	// length or tools-unsupported retry starts a fresh Result{} on the same
+	// Controller/Governor, so usage from rounds that already succeeded
+	// before the error would otherwise be lost). This mirrors the pre-engine
+	// loop, where state.totalUsage accumulated across every outer-loop
+	// iteration including retries.
+	var accumulatedUsage model.Usage
+	for {
+		if ctx.Err() != nil {
+			return "", nil, "", false, ctx.Err()
 		}
-		result, err := c.runToolLoopIteration(ctx, sess, modelID, iter, &state)
+		result, err := ctrl.Run(ctx)
+		if result != nil {
+			accumulatedUsage = model.AddUsage(accumulatedUsage, result.Usage)
+		}
 		if err != nil {
+			// The context/tools-unsupported fallbacks mutate state
+			// (contextScale/contextRetries, useTools) and ask for a retry by
+			// returning nil; Controller.Run is safe to call again on the
+			// same instance since its per-round state lives in state and
+			// state.governor, not in the Controller value itself. This
+			// mirrors the pre-engine outer loop, where a recoverable error
+			// simply continued to the next iteration on the same governor.
+			if retryErr := c.handleToolLoopModelError(err, &state); retryErr == nil {
+				continue
+			}
 			return "", nil, "", false, err
 		}
-		if state.guardReason != "" {
-			return c.finishGuardedToolLoop(ctx, sess, modelID, &state, state.guardReason)
+
+		switch result.FinishReason {
+		case agentloop.FinishReasonLoopGuard:
+			state.totalUsage = accumulatedUsage
+			return c.finishGuardedToolLoop(ctx, sess, modelID, &state, result.GuardDecision.Reason)
+		case agentloop.FinishReasonEmptyChoices:
+			// callToolLoopModel already turns an empty stream response into
+			// a hard error (model.NoResponseChoicesError) before it ever
+			// reaches Controller, matching the pre-engine behavior where an
+			// empty response failed the turn; this branch is defensive.
+			return "", nil, "", false, fmt.Errorf("model returned no response choices")
 		}
-		if result.done {
-			return c.finishToolLoopResponse(sess, result.message, state.totalUsage, result.finishReason, &state)
-		}
+		// result.FinishReason == "" here (Controller's own abstraction for a
+		// normal completion); the provider's raw finish_reason -- what
+		// modelFinishReasonNotice and readyStatusForFinishReason key off --
+		// is state.lastProviderFinishReason, captured by the CallModel hook.
+		return c.finishToolLoopResponse(sess, result.Message, accumulatedUsage, state.lastProviderFinishReason, &state)
 	}
 }
 
@@ -136,26 +186,106 @@ func (c *Controller) continuationEligible(modelID string) bool {
 	return c.modelMgr.SupportsContinuation(modelID)
 }
 
-func (c *Controller) runToolLoopIteration(ctx context.Context, sess *SessionState, modelID string, iteration int, state *toolLoopState) (toolLoopIterationResult, error) {
-	if ctx.Err() != nil {
-		return toolLoopIterationResult{}, ctx.Err()
+// newToolLoopController wires the shared turn engine (pkg/agentloop) for
+// one interactive turn. Every hook delegates to the same TUI-specific logic
+// this package always used, so the migration changes only who drives the
+// round loop:
+//
+//   - BuildRequest re-derives and re-projects the request every round via
+//     buildToolLoopRequestWithState (continuation pinning, the epoch rule,
+//     and the context-scale retry all stay exactly as they were); it also
+//     records the 1-based round number Controller assigns so CallModel can
+//     reproduce the old 0-based "iteration" the status line expects.
+//   - CallModel is callToolLoopTurn: the continuation-aware call for an
+//     eligible round, or the streaming call otherwise. Repaired tool-call
+//     names (normalizeToolLoopCalls) are applied here, before Controller
+//     ever sees the response, so the corrected name is what gets persisted
+//     to history and dispatched -- matching the pre-engine order exactly.
+//   - DispatchTools executes each call via toolLoopExecuteOne, the same
+//     execution/progress/formatting core executeToolLoopCall uses.
+//   - History persists exactly what recordToolLoopCalls and
+//     AddToolResponseMessage always did; Controller calls it once per
+//     assistant tool-call message and once per tool result, never for the
+//     turn's final answer (finishToolLoopResponse still owns that, so nothing
+//     double-appends).
+//   - Governor is state.governor directly, so Controller's round ceiling and
+//     per-call Observe() consultation share the one instance this turn's
+//     other guard-adjacent code (contextScale retries, finishGuardedToolLoop)
+//     already references.
+//
+// The one behavior this intentionally does not preserve: a mid-batch guard
+// stop no longer skips remaining calls in the same parallel tool-call
+// batch, since Controller consults the Governor once per call only after
+// Dispatch returns the whole batch's outcomes. Parallel tool calls are
+// already suppressed via ParallelToolCalls=false whenever the provider
+// advertises support for it, so this narrows to providers that both omit
+// that parameter and have a model choose multiple calls in one turn.
+func (c *Controller) newToolLoopController(sess *SessionState, modelID string, allowedTools []string, state *toolLoopState) (*agentloop.Controller, error) {
+	currentRound := 0
+
+	buildRequest := func(ctx context.Context, round int) (model.ChatRequest, error) {
+		currentRound = round
+		req, nextUseTools := c.buildToolLoopRequestWithState(sess, modelID, state.useTools, allowedTools, state)
+		state.useTools = nextUseTools
+		return req, nil
 	}
 
-	allowedTools := toolLoopAllowedTools(sess)
-	req, nextUseTools := c.buildToolLoopRequestWithState(sess, modelID, state.useTools, allowedTools, state)
-	state.useTools = nextUseTools
+	// useContinuation (Controller's parameter) is ignored: state.useContinuation,
+	// set by buildToolLoopRequestWithState just above, already carries this
+	// round's continuation decision, and callToolLoopTurn reads it directly.
+	callModel := agentloop.ModelCallerFunc(func(ctx context.Context, req model.ChatRequest, _ bool) (*model.ChatResponse, error) {
+		iteration := currentRound - 1
+		if iteration < 0 {
+			iteration = 0
+		}
+		resp, err := c.callToolLoopTurn(ctx, sess, modelID, iteration, req, state)
+		if err != nil {
+			return nil, err
+		}
+		if resp != nil && len(resp.Choices) > 0 {
+			resp.Choices[0].Message.ToolCalls = normalizeToolLoopCalls(sess.ToolRegistry, resp.Choices[0].Message.ToolCalls, allowedTools)
+			state.lastProviderFinishReason = resp.Choices[0].FinishReason
+		}
+		return resp, nil
+	})
 
-	resp, err := c.callToolLoopTurn(ctx, sess, modelID, iteration, req, state)
-	if err != nil {
-		return toolLoopIterationResult{}, c.handleToolLoopModelError(err, state)
-	}
-	state.totalUsage = model.AddUsage(state.totalUsage, resp.Usage)
+	dispatch := agentloop.ToolDispatcherFunc(func(ctx context.Context, calls []model.ToolCall) ([]agentloop.ToolOutcome, error) {
+		outcomes := make([]agentloop.ToolOutcome, 0, len(calls))
+		for i, tc := range calls {
+			if ctx.Err() != nil {
+				return outcomes, ctx.Err()
+			}
+			modelResult, result, execErr := c.toolLoopExecuteOne(ctx, sess, tc, i+1, len(calls), allowedTools, state)
+			success := execErr == nil && result != nil && result.Success
+			outcomes = append(outcomes, agentloop.ToolOutcome{Content: modelResult, Success: success})
+		}
+		return outcomes, nil
+	})
 
-	choice, err := firstToolLoopChoice(req, resp)
-	if err != nil {
-		return toolLoopIterationResult{}, err
-	}
-	return c.handleToolLoopChoice(ctx, sess, choice.Message, allowedTools, choice.FinishReason, state), nil
+	history := agentloop.HistorySinkFunc(func(msg model.Message) {
+		switch {
+		case msg.Role == "assistant" && len(msg.ToolCalls) > 0:
+			c.recordToolLoopCalls(sess, msg.ToolCalls, msg)
+		case msg.Role == "tool":
+			sess.Conversation.AddToolResponseMessage(msg.ToolCallID, msg.Name, model.ExtractTextContentOrEmpty(msg.Content))
+			c.saveLatestConversationMessage(sess)
+		}
+	})
+
+	return agentloop.NewController(agentloop.ControllerConfig{
+		Governor:      state.governor,
+		BuildRequest:  buildRequest,
+		CallModel:     callModel,
+		DispatchTools: dispatch,
+		History:       history,
+		ContextWindow: func(mid string) int {
+			if c.modelMgr == nil {
+				return 0
+			}
+			window, _ := c.modelMgr.GetContextLength(mid)
+			return window
+		},
+	})
 }
 
 // callToolLoopTurn executes one model turn, using the continuation-aware
@@ -204,21 +334,6 @@ func (c *Controller) handleToolLoopModelError(err error, state *toolLoopState) e
 		return nil
 	}
 	return err
-}
-
-func (c *Controller) handleToolLoopChoice(ctx context.Context, sess *SessionState, msg model.Message, allowedTools []string, finishReason string, state *toolLoopState) toolLoopIterationResult {
-	if len(msg.ToolCalls) == 0 {
-		return toolLoopIterationResult{
-			done:         true,
-			message:      msg,
-			finishReason: finishReason,
-		}
-	}
-
-	toolCalls := normalizeToolLoopCalls(sess.ToolRegistry, msg.ToolCalls, allowedTools)
-	c.recordToolLoopCalls(sess, toolCalls, msg)
-	c.executeToolLoopCalls(ctx, sess, toolCalls, allowedTools, state)
-	return toolLoopIterationResult{}
 }
 
 func toolLoopAllowedTools(sess *SessionState) []string {
@@ -569,44 +684,35 @@ func (c *Controller) recordToolLoopCalls(sess *SessionState, calls []model.ToolC
 	c.saveLatestConversationMessage(sess)
 }
 
-func (c *Controller) executeToolLoopCalls(ctx context.Context, sess *SessionState, calls []model.ToolCall, allowedTools []string, state *toolLoopState) {
-	for i, tc := range calls {
-		if ctx.Err() != nil || (state != nil && state.guardReason != "") {
-			return
-		}
-		c.executeToolLoopCall(ctx, sess, tc, i+1, len(calls), allowedTools, state)
-		if state != nil && state.guardReason != "" {
-			return
-		}
-	}
-}
-
-func (c *Controller) executeToolLoopCall(ctx context.Context, sess *SessionState, tc model.ToolCall, index, total int, allowedTools []string, state *toolLoopState) {
+// toolLoopExecuteOne runs one tool call -- argument parsing, registry and
+// active-skill allow checks, shell-output-streaming context, execution, the
+// per-call transcript progress messages (appendToolCallProgress/
+// appendToolResultProgress), and model-facing result formatting -- and
+// reports the formatted content plus the raw result/error so a caller can
+// derive success and apply its own guard/history handling. This is the core
+// both executeToolLoopCall (kept for direct callers and its own tests) and
+// the agentloop.Controller-driven Dispatcher (newToolLoopController) share;
+// neither the loop guard nor conversation persistence happens here.
+func (c *Controller) toolLoopExecuteOne(ctx context.Context, sess *SessionState, tc model.ToolCall, index, total int, allowedTools []string, state *toolLoopState) (string, *builtin.Result, error) {
 	c.appendToolCallProgress(state, tc)
 	params, err := parseToolParams(tc.Function.Arguments)
 	if err != nil {
 		guardErr := fmt.Errorf("invalid arguments: %w", err)
 		message := fmt.Sprintf("Error: invalid tool arguments: %v", err)
-		message += applyToolLoopGuard(state, tc, nil, guardErr, message)
 		c.appendToolResultProgress(state, tc.Function.Name, nil, guardErr)
-		c.addToolLoopResponse(sess, tc, message)
-		return
+		return message, nil, guardErr
 	}
 	if sess.ToolRegistry == nil {
 		guardErr := fmt.Errorf("tool registry unavailable")
 		message := "Error: tool registry unavailable"
-		message += applyToolLoopGuard(state, tc, nil, guardErr, message)
 		c.appendToolResultProgress(state, tc.Function.Name, nil, guardErr)
-		c.addToolLoopResponse(sess, tc, message)
-		return
+		return message, nil, guardErr
 	}
 	if !tool.IsToolAllowed(tc.Function.Name, allowedTools) {
-		err := fmt.Errorf("tool %s not allowed by active skills", tc.Function.Name)
-		message := "Error: " + err.Error()
-		message += applyToolLoopGuard(state, tc, nil, err, message)
-		c.appendToolResultProgress(state, tc.Function.Name, nil, err)
-		c.addToolLoopResponse(sess, tc, message)
-		return
+		notAllowedErr := fmt.Errorf("tool %s not allowed by active skills", tc.Function.Name)
+		message := "Error: " + notAllowedErr.Error()
+		c.appendToolResultProgress(state, tc.Function.Name, nil, notAllowedErr)
+		return message, nil, notAllowedErr
 	}
 	if params == nil {
 		params = make(map[string]any)
@@ -622,6 +728,17 @@ func (c *Controller) executeToolLoopCall(ctx context.Context, sess *SessionState
 	c.app.StopProcessStatus()
 	c.appendToolResultProgress(state, tc.Function.Name, result, execErr)
 	modelResult := formatToolResultForModel(result, execErr)
+	return modelResult, result, execErr
+}
+
+// executeToolLoopCall runs one tool call and applies the loop guard and
+// history persistence directly, matching the pre-engine behavior exactly.
+// The agentloop.Controller-driven turn loop no longer calls this -- its
+// Dispatcher hook calls toolLoopExecuteOne and lets Controller apply the
+// Governor and History itself -- but this stays as the single-call entry
+// point its own tests exercise.
+func (c *Controller) executeToolLoopCall(ctx context.Context, sess *SessionState, tc model.ToolCall, index, total int, allowedTools []string, state *toolLoopState) {
+	modelResult, result, execErr := c.toolLoopExecuteOne(ctx, sess, tc, index, total, allowedTools, state)
 	modelResult += applyToolLoopGuard(state, tc, result, execErr, modelResult)
 	c.addToolLoopResponse(sess, tc, modelResult)
 }

@@ -12,12 +12,14 @@ import (
 	"m31labs.dev/buckley/v2/pkg/tool/builtin"
 )
 
-type toolLoopGovernor interface {
-	BeginRound() agentloop.Decision
-	Observe(name, arguments, result string, success bool) agentloop.Decision
-}
-
-func newInteractiveToolLoopGovernor() toolLoopGovernor {
+// newInteractiveToolLoopGovernor builds the shared loop governor
+// (pkg/agentloop) an interactive turn consults every round: it is passed
+// directly as agentloop.ControllerConfig.Governor (see
+// Controller.newToolLoopController) so the round-ceiling check and every
+// tool-call Observe() consultation run through the one shared engine
+// instance, matching how pkg/headless and other Controller-driven callers
+// consult it.
+func newInteractiveToolLoopGovernor() *agentloop.Governor {
 	return agentloop.New(agentloop.DefaultConfig())
 }
 
