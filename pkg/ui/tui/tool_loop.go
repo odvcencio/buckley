@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 
+	"m31labs.dev/buckley/v2/pkg/agentloop"
 	"m31labs.dev/buckley/v2/pkg/conversation"
 	"m31labs.dev/buckley/v2/pkg/model"
 	"m31labs.dev/buckley/v2/pkg/tool"
@@ -17,11 +18,21 @@ type toolLoopState struct {
 	useTools       bool
 	totalUsage     model.Usage
 	progress       toolLoopProgress
-	governor       toolLoopGovernor
+	governor       *agentloop.Governor
 	guardReason    string
 	contextScale   float64
 	contextRetries int
 	projection     conversation.ContextProjectionStats
+
+	// lastProviderFinishReason is the raw finish_reason string the provider
+	// reported on the most recent model call (e.g. "stop", "length",
+	// "tool_calls"), captured by newToolLoopController's CallModel hook.
+	// agentloop.Controller.Result.FinishReason is a different, Controller-
+	// owned abstraction (empty on a normal completion) that never surfaces
+	// the provider's own value, so runToolLoop reads this field instead
+	// once Controller reports a normal completion -- modelFinishReasonNotice
+	// and readyStatusForFinishReason both key off the provider's reason.
+	lastProviderFinishReason string
 
 	// continuation and useContinuation carry this turn's provider
 	// continuation decision (decision 0001), behind the
@@ -35,37 +46,95 @@ type toolLoopProgress struct {
 	started       bool
 	reasoningOpen bool
 	reasoning     strings.Builder
+
+	// textOpen, textBuf, roundRendered, and roundRenderedText track this
+	// round's live-streamed assistant text bubble. textOpen is true while a
+	// seeded assistant message is open for StreamChunk appends; textBuf
+	// mirrors the raw deltas sent so far. closeTextProgress sets
+	// roundRendered once the bubble closes and roundRenderedText to
+	// whatever text the transcript now shows for it -- textBuf's raw
+	// stream, or the finalized message content if closeTextProgress had to
+	// correct the bubble (inline tool-call-token models, where
+	// FinalizeWithTokenParsing strips markup that already rendered live).
+	// All four reset at the top of every callToolLoopModel call, so
+	// finishToolLoopResponse can tell whether the message it is about to
+	// persist already matches what's on screen (no double-render) or still
+	// needs a discrete AddMessage (continuation turns, empty responses, and
+	// the reasoning-channel fallback never stream).
+	textOpen          bool
+	textBuf           strings.Builder
+	roundRendered     bool
+	roundRenderedText string
 }
 
-type toolLoopIterationResult struct {
-	done         bool
-	message      model.Message
-	finishReason string
-}
-
-func (c *Controller) runToolLoop(ctx context.Context, sess *SessionState, modelID string) (string, *model.Usage, string, error) {
+// runToolLoop drives one interactive assistant turn through the shared turn
+// engine (pkg/agentloop.Controller): it owns the round loop, the round
+// ceiling, tool-call ID backfill, and Governor consultation that this
+// package used to hand-roll, while the TUI-specific pieces --
+// projection/continuation (buildToolLoopRequestWithState), the streaming
+// model call (callToolLoopTurn), tool execution and progress rendering
+// (toolLoopExecuteOne), and conversation persistence (recordToolLoopCalls,
+// AddToolResponseMessage) -- stay exactly as they were, wired in as
+// Controller hooks. See newToolLoopController.
+func (c *Controller) runToolLoop(ctx context.Context, sess *SessionState, modelID string) (string, *model.Usage, string, bool, error) {
 	if err := c.validateToolLoopInputs(sess); err != nil {
-		return "", nil, "", err
+		return "", nil, "", false, err
 	}
 
 	state := c.newToolLoopState(sess, modelID)
-	for iter := 0; ; iter++ {
-		if state.governor != nil {
-			decision := state.governor.BeginRound()
-			if decision.Stop {
-				return c.finishGuardedToolLoop(ctx, sess, modelID, &state, decision.Reason)
-			}
+	allowedTools := toolLoopAllowedTools(sess)
+
+	ctrl, err := c.newToolLoopController(sess, modelID, allowedTools, &state)
+	if err != nil {
+		return "", nil, "", false, err
+	}
+
+	// accumulatedUsage sums every Controller.Run attempt's internally
+	// accumulated usage, including attempts that later errored (a context-
+	// length or tools-unsupported retry starts a fresh Result{} on the same
+	// Controller/Governor, so usage from rounds that already succeeded
+	// before the error would otherwise be lost). This mirrors the pre-engine
+	// loop, where state.totalUsage accumulated across every outer-loop
+	// iteration including retries.
+	var accumulatedUsage model.Usage
+	for {
+		if ctx.Err() != nil {
+			return "", nil, "", false, ctx.Err()
 		}
-		result, err := c.runToolLoopIteration(ctx, sess, modelID, iter, &state)
+		result, err := ctrl.Run(ctx)
+		if result != nil {
+			accumulatedUsage = model.AddUsage(accumulatedUsage, result.Usage)
+		}
 		if err != nil {
-			return "", nil, "", err
+			// The context/tools-unsupported fallbacks mutate state
+			// (contextScale/contextRetries, useTools) and ask for a retry by
+			// returning nil; Controller.Run is safe to call again on the
+			// same instance since its per-round state lives in state and
+			// state.governor, not in the Controller value itself. This
+			// mirrors the pre-engine outer loop, where a recoverable error
+			// simply continued to the next iteration on the same governor.
+			if retryErr := c.handleToolLoopModelError(err, &state); retryErr == nil {
+				continue
+			}
+			return "", nil, "", false, err
 		}
-		if state.guardReason != "" {
-			return c.finishGuardedToolLoop(ctx, sess, modelID, &state, state.guardReason)
+
+		switch result.FinishReason {
+		case agentloop.FinishReasonLoopGuard:
+			state.totalUsage = accumulatedUsage
+			return c.finishGuardedToolLoop(ctx, sess, modelID, &state, result.GuardDecision.Reason)
+		case agentloop.FinishReasonEmptyChoices:
+			// callToolLoopModel already turns an empty stream response into
+			// a hard error (model.NoResponseChoicesError) before it ever
+			// reaches Controller, matching the pre-engine behavior where an
+			// empty response failed the turn; this branch is defensive.
+			return "", nil, "", false, fmt.Errorf("model returned no response choices")
 		}
-		if result.done {
-			return c.finishToolLoopResponse(sess, result.message, state.totalUsage, result.finishReason)
-		}
+		// result.FinishReason == "" here (Controller's own abstraction for a
+		// normal completion); the provider's raw finish_reason -- what
+		// modelFinishReasonNotice and readyStatusForFinishReason key off --
+		// is state.lastProviderFinishReason, captured by the CallModel hook.
+		return c.finishToolLoopResponse(sess, result.Message, accumulatedUsage, state.lastProviderFinishReason, &state)
 	}
 }
 
@@ -117,26 +186,106 @@ func (c *Controller) continuationEligible(modelID string) bool {
 	return c.modelMgr.SupportsContinuation(modelID)
 }
 
-func (c *Controller) runToolLoopIteration(ctx context.Context, sess *SessionState, modelID string, iteration int, state *toolLoopState) (toolLoopIterationResult, error) {
-	if ctx.Err() != nil {
-		return toolLoopIterationResult{}, ctx.Err()
+// newToolLoopController wires the shared turn engine (pkg/agentloop) for
+// one interactive turn. Every hook delegates to the same TUI-specific logic
+// this package always used, so the migration changes only who drives the
+// round loop:
+//
+//   - BuildRequest re-derives and re-projects the request every round via
+//     buildToolLoopRequestWithState (continuation pinning, the epoch rule,
+//     and the context-scale retry all stay exactly as they were); it also
+//     records the 1-based round number Controller assigns so CallModel can
+//     reproduce the old 0-based "iteration" the status line expects.
+//   - CallModel is callToolLoopTurn: the continuation-aware call for an
+//     eligible round, or the streaming call otherwise. Repaired tool-call
+//     names (normalizeToolLoopCalls) are applied here, before Controller
+//     ever sees the response, so the corrected name is what gets persisted
+//     to history and dispatched -- matching the pre-engine order exactly.
+//   - DispatchTools executes each call via toolLoopExecuteOne, the same
+//     execution/progress/formatting core executeToolLoopCall uses.
+//   - History persists exactly what recordToolLoopCalls and
+//     AddToolResponseMessage always did; Controller calls it once per
+//     assistant tool-call message and once per tool result, never for the
+//     turn's final answer (finishToolLoopResponse still owns that, so nothing
+//     double-appends).
+//   - Governor is state.governor directly, so Controller's round ceiling and
+//     per-call Observe() consultation share the one instance this turn's
+//     other guard-adjacent code (contextScale retries, finishGuardedToolLoop)
+//     already references.
+//
+// The one behavior this intentionally does not preserve: a mid-batch guard
+// stop no longer skips remaining calls in the same parallel tool-call
+// batch, since Controller consults the Governor once per call only after
+// Dispatch returns the whole batch's outcomes. Parallel tool calls are
+// already suppressed via ParallelToolCalls=false whenever the provider
+// advertises support for it, so this narrows to providers that both omit
+// that parameter and have a model choose multiple calls in one turn.
+func (c *Controller) newToolLoopController(sess *SessionState, modelID string, allowedTools []string, state *toolLoopState) (*agentloop.Controller, error) {
+	currentRound := 0
+
+	buildRequest := func(ctx context.Context, round int) (model.ChatRequest, error) {
+		currentRound = round
+		req, nextUseTools := c.buildToolLoopRequestWithState(sess, modelID, state.useTools, allowedTools, state)
+		state.useTools = nextUseTools
+		return req, nil
 	}
 
-	allowedTools := toolLoopAllowedTools(sess)
-	req, nextUseTools := c.buildToolLoopRequestWithState(sess, modelID, state.useTools, allowedTools, state)
-	state.useTools = nextUseTools
+	// useContinuation (Controller's parameter) is ignored: state.useContinuation,
+	// set by buildToolLoopRequestWithState just above, already carries this
+	// round's continuation decision, and callToolLoopTurn reads it directly.
+	callModel := agentloop.ModelCallerFunc(func(ctx context.Context, req model.ChatRequest, _ bool) (*model.ChatResponse, error) {
+		iteration := currentRound - 1
+		if iteration < 0 {
+			iteration = 0
+		}
+		resp, err := c.callToolLoopTurn(ctx, sess, modelID, iteration, req, state)
+		if err != nil {
+			return nil, err
+		}
+		if resp != nil && len(resp.Choices) > 0 {
+			resp.Choices[0].Message.ToolCalls = normalizeToolLoopCalls(sess.ToolRegistry, resp.Choices[0].Message.ToolCalls, allowedTools)
+			state.lastProviderFinishReason = resp.Choices[0].FinishReason
+		}
+		return resp, nil
+	})
 
-	resp, err := c.callToolLoopTurn(ctx, modelID, iteration, req, state)
-	if err != nil {
-		return toolLoopIterationResult{}, c.handleToolLoopModelError(err, state)
-	}
-	state.totalUsage = model.AddUsage(state.totalUsage, resp.Usage)
+	dispatch := agentloop.ToolDispatcherFunc(func(ctx context.Context, calls []model.ToolCall) ([]agentloop.ToolOutcome, error) {
+		outcomes := make([]agentloop.ToolOutcome, 0, len(calls))
+		for i, tc := range calls {
+			if ctx.Err() != nil {
+				return outcomes, ctx.Err()
+			}
+			modelResult, result, execErr := c.toolLoopExecuteOne(ctx, sess, tc, i+1, len(calls), allowedTools, state)
+			success := execErr == nil && result != nil && result.Success
+			outcomes = append(outcomes, agentloop.ToolOutcome{Content: modelResult, Success: success})
+		}
+		return outcomes, nil
+	})
 
-	choice, err := firstToolLoopChoice(req, resp)
-	if err != nil {
-		return toolLoopIterationResult{}, err
-	}
-	return c.handleToolLoopChoice(ctx, sess, choice.Message, allowedTools, choice.FinishReason, state), nil
+	history := agentloop.HistorySinkFunc(func(msg model.Message) {
+		switch {
+		case msg.Role == "assistant" && len(msg.ToolCalls) > 0:
+			c.recordToolLoopCalls(sess, msg.ToolCalls, msg)
+		case msg.Role == "tool":
+			sess.Conversation.AddToolResponseMessage(msg.ToolCallID, msg.Name, model.ExtractTextContentOrEmpty(msg.Content))
+			c.saveLatestConversationMessage(sess)
+		}
+	})
+
+	return agentloop.NewController(agentloop.ControllerConfig{
+		Governor:      state.governor,
+		BuildRequest:  buildRequest,
+		CallModel:     callModel,
+		DispatchTools: dispatch,
+		History:       history,
+		ContextWindow: func(mid string) int {
+			if c.modelMgr == nil {
+				return 0
+			}
+			window, _ := c.modelMgr.GetContextLength(mid)
+			return window
+		},
+	})
 }
 
 // callToolLoopTurn executes one model turn, using the continuation-aware
@@ -145,9 +294,9 @@ func (c *Controller) runToolLoopIteration(ctx context.Context, sess *SessionStat
 // projected message list either way, so a continuation error can retry
 // through the normal streaming path with the same request: a broken
 // continuation never fails the turn.
-func (c *Controller) callToolLoopTurn(ctx context.Context, modelID string, iteration int, req model.ChatRequest, state *toolLoopState) (*model.ChatResponse, error) {
+func (c *Controller) callToolLoopTurn(ctx context.Context, sess *SessionState, modelID string, iteration int, req model.ChatRequest, state *toolLoopState) (*model.ChatResponse, error) {
 	if !state.useContinuation || state.continuation == nil {
-		return c.callToolLoopModel(ctx, req, modelID, iteration, state)
+		return c.callToolLoopModel(ctx, req, modelID, iteration, sess, state)
 	}
 
 	// Predict hit/reset for the in-flight status line from whether the
@@ -172,7 +321,7 @@ func (c *Controller) callToolLoopTurn(ctx context.Context, modelID string, itera
 	if c.app != nil {
 		c.app.SetStatus("Continuation unavailable; retrying without it")
 	}
-	return c.callToolLoopModel(ctx, req, modelID, iteration, state)
+	return c.callToolLoopModel(ctx, req, modelID, iteration, sess, state)
 }
 
 func (c *Controller) handleToolLoopModelError(err error, state *toolLoopState) error {
@@ -185,21 +334,6 @@ func (c *Controller) handleToolLoopModelError(err error, state *toolLoopState) e
 		return nil
 	}
 	return err
-}
-
-func (c *Controller) handleToolLoopChoice(ctx context.Context, sess *SessionState, msg model.Message, allowedTools []string, finishReason string, state *toolLoopState) toolLoopIterationResult {
-	if len(msg.ToolCalls) == 0 {
-		return toolLoopIterationResult{
-			done:         true,
-			message:      msg,
-			finishReason: finishReason,
-		}
-	}
-
-	toolCalls := normalizeToolLoopCalls(sess.ToolRegistry, msg.ToolCalls, allowedTools)
-	c.recordToolLoopCalls(sess, toolCalls, msg)
-	c.executeToolLoopCalls(ctx, sess, toolCalls, allowedTools, state)
-	return toolLoopIterationResult{}
 }
 
 func toolLoopAllowedTools(sess *SessionState) []string {
@@ -296,7 +430,7 @@ func (c *Controller) buildToolLoopRequestWithState(sess *SessionState, modelID s
 	return req, useTools
 }
 
-func (c *Controller) callToolLoopModel(ctx context.Context, req model.ChatRequest, modelID string, iteration int, state *toolLoopState) (*model.ChatResponse, error) {
+func (c *Controller) callToolLoopModel(ctx context.Context, req model.ChatRequest, modelID string, iteration int, sess *SessionState, state *toolLoopState) (*model.ChatResponse, error) {
 	status := modelProcessStatus(modelID, iteration, len(req.Tools), req.Reasoning)
 	if estimate := model.EstimateRequestTokens(req); estimate.Total >= 1000 {
 		status += fmt.Sprintf(", ~%.1fk input", float64(estimate.Total)/1000)
@@ -315,6 +449,10 @@ func (c *Controller) callToolLoopModel(ctx context.Context, req model.ChatReques
 	if state != nil {
 		state.progress.reasoningOpen = false
 		state.progress.reasoning.Reset()
+		state.progress.textOpen = false
+		state.progress.textBuf.Reset()
+		state.progress.roundRendered = false
+		state.progress.roundRenderedText = ""
 	}
 
 	var responseID string
@@ -324,6 +462,7 @@ func (c *Controller) callToolLoopModel(ctx context.Context, req model.ChatReques
 	for chunks != nil || errs != nil {
 		select {
 		case <-ctx.Done():
+			c.closeTextProgress(state, sess, "")
 			return nil, ctx.Err()
 		case chunk, ok := <-chunks:
 			if !ok {
@@ -340,6 +479,7 @@ func (c *Controller) callToolLoopModel(ctx context.Context, req model.ChatReques
 			for _, choice := range chunk.Choices {
 				receivedChoice = true
 				c.appendReasoningProgress(state, choice.Delta)
+				c.appendTextProgress(state, sess, choice.Delta.Content)
 				if choice.FinishReason != nil {
 					finishReason = *choice.FinishReason
 				}
@@ -350,12 +490,14 @@ func (c *Controller) callToolLoopModel(ctx context.Context, req model.ChatReques
 				continue
 			}
 			if err != nil {
+				c.closeTextProgress(state, sess, "")
 				return nil, err
 			}
 		}
 	}
 
 	message := accumulator.FinalizeWithTokenParsing()
+	c.closeTextProgress(state, sess, model.ExtractTextContentOrEmpty(message.Content))
 	if !receivedChoice {
 		return nil, model.NoResponseChoicesError(req, &model.ChatResponse{ID: responseID, Model: responseModel})
 	}
@@ -401,6 +543,55 @@ func (c *Controller) appendReasoningProgress(state *toolLoopState, delta model.M
 	c.app.ReplaceLastMessage(display)
 }
 
+// appendTextProgress streams one assistant text delta into the transcript:
+// it seeds an empty assistant bubble on the first non-empty delta this
+// round (so StreamChunk has something to append into), then forwards the
+// delta through the existing StreamChunk/coalescer machinery. text is
+// buffered in state.progress.textBuf so closeTextProgress can detect a
+// token-parsing correction (inline tool-call markup) once the round
+// finishes.
+func (c *Controller) appendTextProgress(state *toolLoopState, sess *SessionState, text string) {
+	if c == nil || c.app == nil || state == nil || sess == nil || text == "" {
+		return
+	}
+	if !state.progress.started {
+		state.progress.started = true
+	}
+	// A new assistant bubble is about to become the last message; any
+	// reasoning bubble that was open no longer is.
+	state.progress.reasoningOpen = false
+	if !state.progress.textOpen {
+		c.app.AddMessage("", "assistant")
+		state.progress.textOpen = true
+	}
+	state.progress.textBuf.WriteString(text)
+	c.app.StreamChunk(sess.ID, text)
+}
+
+// closeTextProgress finalizes this round's streamed assistant bubble, if
+// one is open. finalText is the round's finalized message content (post
+// token-parsing); when it differs from what was actually streamed -- the
+// inline tool-call-token models, where FinalizeWithTokenParsing strips
+// markup that already rendered live -- the bubble is corrected in place
+// before it closes, so no double-render still yields a transcript that
+// matches persisted history exactly.
+func (c *Controller) closeTextProgress(state *toolLoopState, sess *SessionState, finalText string) {
+	if c == nil || c.app == nil || state == nil || !state.progress.textOpen {
+		return
+	}
+	rendered := state.progress.textBuf.String()
+	if finalText != "" && finalText != rendered {
+		c.app.ReplaceLastMessage(finalText)
+		rendered = finalText
+	}
+	if sess != nil {
+		c.app.StreamEnd(sess.ID, "")
+	}
+	state.progress.textOpen = false
+	state.progress.roundRendered = true
+	state.progress.roundRenderedText = rendered
+}
+
 func visibleReasoningDetails(details []model.ReasoningDetail) string {
 	var b strings.Builder
 	for _, detail := range details {
@@ -420,18 +611,27 @@ func firstToolLoopChoice(req model.ChatRequest, resp *model.ChatResponse) (model
 	return resp.Choices[0], nil
 }
 
-func (c *Controller) finishToolLoopResponse(sess *SessionState, msg model.Message, totalUsage model.Usage, finishReason string) (string, *model.Usage, string, error) {
+// finishToolLoopResponse persists the turn's final assistant message and
+// reports whether it was already rendered live: state.progress reflects the
+// most recent callToolLoopModel call, which streams and closes its bubble
+// before returning, so a match here means the transcript already shows text
+// identical to what's being persisted (no double-render needed). A
+// continuation turn, an empty response, or the reasoning-channel fallback
+// never streamed, so the caller still renders those with a discrete
+// AddMessage.
+func (c *Controller) finishToolLoopResponse(sess *SessionState, msg model.Message, totalUsage model.Usage, finishReason string, state *toolLoopState) (string, *model.Usage, string, bool, error) {
 	c.app.SetStatus("Finalizing response")
 	text, err := model.ExtractTextContent(msg.Content)
 	if err != nil {
-		return "", nil, "", err
+		return "", nil, "", false, err
 	}
 	if text == "" && strings.TrimSpace(msg.Reasoning) != "" {
 		text = msg.Reasoning
 	}
 	sess.Conversation.AddAssistantMessageWithReasoningDetails(text, msg.Reasoning, msg.ReasoningDetails)
 	c.saveLatestConversationMessage(sess)
-	return text, &totalUsage, finishReason, nil
+	streamed := state != nil && state.progress.roundRendered && text != "" && state.progress.roundRenderedText == text
+	return text, &totalUsage, finishReason, streamed, nil
 }
 
 func normalizeToolLoopCalls(registry *tool.Registry, calls []model.ToolCall, allowedTools []string) []model.ToolCall {
@@ -473,50 +673,46 @@ func hasAnyToolParam(params map[string]any, names ...string) bool {
 	return false
 }
 
+// recordToolLoopCalls persists this round's tool-call turn, preserving any
+// preamble text the model wrote before the calls (msg.Content) so it
+// survives into wire history for subsequent requests -- see
+// conversation.AddToolCallMessageWithContent.
 func (c *Controller) recordToolLoopCalls(sess *SessionState, calls []model.ToolCall, msg model.Message) {
 	c.app.SetStatus(fmt.Sprintf("Model requested %d tool call(s)", len(calls)))
-	sess.Conversation.AddToolCallMessageWithReasoning(calls, msg.Reasoning, msg.ReasoningDetails)
+	preamble := model.ExtractTextContentOrEmpty(msg.Content)
+	sess.Conversation.AddToolCallMessageWithContent(preamble, calls, msg.Reasoning, msg.ReasoningDetails)
 	c.saveLatestConversationMessage(sess)
 }
 
-func (c *Controller) executeToolLoopCalls(ctx context.Context, sess *SessionState, calls []model.ToolCall, allowedTools []string, state *toolLoopState) {
-	for i, tc := range calls {
-		if ctx.Err() != nil || (state != nil && state.guardReason != "") {
-			return
-		}
-		c.executeToolLoopCall(ctx, sess, tc, i+1, len(calls), allowedTools, state)
-		if state != nil && state.guardReason != "" {
-			return
-		}
-	}
-}
-
-func (c *Controller) executeToolLoopCall(ctx context.Context, sess *SessionState, tc model.ToolCall, index, total int, allowedTools []string, state *toolLoopState) {
+// toolLoopExecuteOne runs one tool call -- argument parsing, registry and
+// active-skill allow checks, shell-output-streaming context, execution, the
+// per-call transcript progress messages (appendToolCallProgress/
+// appendToolResultProgress), and model-facing result formatting -- and
+// reports the formatted content plus the raw result/error so a caller can
+// derive success and apply its own guard/history handling. This is the core
+// both executeToolLoopCall (kept for direct callers and its own tests) and
+// the agentloop.Controller-driven Dispatcher (newToolLoopController) share;
+// neither the loop guard nor conversation persistence happens here.
+func (c *Controller) toolLoopExecuteOne(ctx context.Context, sess *SessionState, tc model.ToolCall, index, total int, allowedTools []string, state *toolLoopState) (string, *builtin.Result, error) {
 	c.appendToolCallProgress(state, tc)
 	params, err := parseToolParams(tc.Function.Arguments)
 	if err != nil {
 		guardErr := fmt.Errorf("invalid arguments: %w", err)
 		message := fmt.Sprintf("Error: invalid tool arguments: %v", err)
-		message += applyToolLoopGuard(state, tc, nil, guardErr, message)
 		c.appendToolResultProgress(state, tc.Function.Name, nil, guardErr)
-		c.addToolLoopResponse(sess, tc, message)
-		return
+		return message, nil, guardErr
 	}
 	if sess.ToolRegistry == nil {
 		guardErr := fmt.Errorf("tool registry unavailable")
 		message := "Error: tool registry unavailable"
-		message += applyToolLoopGuard(state, tc, nil, guardErr, message)
 		c.appendToolResultProgress(state, tc.Function.Name, nil, guardErr)
-		c.addToolLoopResponse(sess, tc, message)
-		return
+		return message, nil, guardErr
 	}
 	if !tool.IsToolAllowed(tc.Function.Name, allowedTools) {
-		err := fmt.Errorf("tool %s not allowed by active skills", tc.Function.Name)
-		message := "Error: " + err.Error()
-		message += applyToolLoopGuard(state, tc, nil, err, message)
-		c.appendToolResultProgress(state, tc.Function.Name, nil, err)
-		c.addToolLoopResponse(sess, tc, message)
-		return
+		notAllowedErr := fmt.Errorf("tool %s not allowed by active skills", tc.Function.Name)
+		message := "Error: " + notAllowedErr.Error()
+		c.appendToolResultProgress(state, tc.Function.Name, nil, notAllowedErr)
+		return message, nil, notAllowedErr
 	}
 	if params == nil {
 		params = make(map[string]any)
@@ -532,6 +728,17 @@ func (c *Controller) executeToolLoopCall(ctx context.Context, sess *SessionState
 	c.app.StopProcessStatus()
 	c.appendToolResultProgress(state, tc.Function.Name, result, execErr)
 	modelResult := formatToolResultForModel(result, execErr)
+	return modelResult, result, execErr
+}
+
+// executeToolLoopCall runs one tool call and applies the loop guard and
+// history persistence directly, matching the pre-engine behavior exactly.
+// The agentloop.Controller-driven turn loop no longer calls this -- its
+// Dispatcher hook calls toolLoopExecuteOne and lets Controller apply the
+// Governor and History itself -- but this stays as the single-call entry
+// point its own tests exercise.
+func (c *Controller) executeToolLoopCall(ctx context.Context, sess *SessionState, tc model.ToolCall, index, total int, allowedTools []string, state *toolLoopState) {
+	modelResult, result, execErr := c.toolLoopExecuteOne(ctx, sess, tc, index, total, allowedTools, state)
 	modelResult += applyToolLoopGuard(state, tc, result, execErr, modelResult)
 	c.addToolLoopResponse(sess, tc, modelResult)
 }
