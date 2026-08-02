@@ -7,8 +7,8 @@ import "time"
 // defaults to the spec's initial baseline (feature disabled) and no runtime
 // code reads this struct yet; it is scaffolding only.
 type ContextFabricConfig struct {
-	Enabled         bool                          `yaml:"enabled"`
-	Shadow          bool                          `yaml:"shadow"`
+	Enabled         bool                          `yaml:"enabled" env:"BUCKLEY_CONTEXT_FABRIC_ENABLED"`
+	Shadow          bool                          `yaml:"shadow" env:"BUCKLEY_CONTEXT_FABRIC_SHADOW"`
 	PolicyVersion   string                        `yaml:"policy_version"`
 	Renderer        string                        `yaml:"renderer"`
 	OutputFormat    string                        `yaml:"output_format"`
@@ -49,7 +49,7 @@ type ContextFabricCheckpointConfig struct {
 // AgentControllerConfig selects the next-action policy that drives the
 // durable agent runtime.
 type AgentControllerConfig struct {
-	Mode          string                             `yaml:"mode"` // legacy | shadow | dynamic
+	Mode          string                             `yaml:"mode" env:"BUCKLEY_AGENT_CONTROLLER_MODE"` // legacy | shadow | dynamic
 	PolicyVersion string                             `yaml:"policy_version"`
 	Critic        AgentControllerCriticConfig        `yaml:"critic"`
 	EmergencyFuse AgentControllerEmergencyFuseConfig `yaml:"emergency_fuse"`
@@ -85,7 +85,7 @@ type AgentOperationsConfig struct {
 // MetricsConfig controls local-first measurement and optional aggregate
 // export. Raw source and transcripts stay local by default.
 type MetricsConfig struct {
-	Enabled           bool `yaml:"enabled"`
-	Export            bool `yaml:"export"`
+	Enabled           bool `yaml:"enabled" env:"BUCKLEY_METRICS_ENABLED"`
+	Export            bool `yaml:"export" env:"BUCKLEY_METRICS_EXPORT"`
 	IncludeRawContent bool `yaml:"include_raw_content"`
 }

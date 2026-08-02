@@ -9,9 +9,43 @@ import (
 	"m31labs.dev/buckley/v2/pkg/sandbox"
 )
 
-// Validate checks configuration values for correctness and returns an error for any invalid settings.
+// configValidators lists every per-section validator, in the exact order
+// the original monolithic Validate checked them. Validate stops at the
+// first error, so this order is part of the behavioral contract: given a
+// config with more than one violation, callers see the same error string
+// they saw before this decomposition.
+var configValidators = []func(*Config) error{
+	validateTrustLevel,
+	validateExecutionModes,
+	validateReasoning,
+	validateApprovalMode,
+	validateSandbox,
+	validateToolMiddleware,
+	validateToolsPoolMode,
+	validatePromptCache,
+	validateQuirkProbability,
+	validateCompactionThresholds,
+	validateBatch,
+	validateIPC,
+	validateWorktrees,
+	func(c *Config) error { return c.MCP.Validate() },
+	func(c *Config) error { return c.Hooks.Validate() },
+	validateMemoryLimits,
+}
+
+// Validate checks configuration values for correctness and returns an
+// error for the first invalid setting found, walking configValidators in
+// order.
 func (c *Config) Validate() error {
-	// Validate trust level
+	for _, validate := range configValidators {
+		if err := validate(c); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateTrustLevel(c *Config) error {
 	validTrustLevels := map[string]bool{
 		"conservative": true,
 		"balanced":     true,
@@ -20,7 +54,10 @@ func (c *Config) Validate() error {
 	if !validTrustLevels[c.Orchestrator.TrustLevel] {
 		return fmt.Errorf("invalid trust level: %s (must be conservative, balanced, or autonomous)", c.Orchestrator.TrustLevel)
 	}
+	return nil
+}
 
+func validateExecutionModes(c *Config) error {
 	validModes := map[string]bool{
 		"classic": true,
 		"rlm":     true,
@@ -31,18 +68,26 @@ func (c *Config) Validate() error {
 	if strings.TrimSpace(c.Oneshot.Mode) != "" && !validModes[strings.ToLower(c.Oneshot.Mode)] {
 		return fmt.Errorf("invalid oneshot mode: %s (valid: classic, rlm)", c.Oneshot.Mode)
 	}
-	if reasoning := strings.ToLower(strings.TrimSpace(c.Models.Reasoning)); reasoning != "" {
-		validReasoning := map[string]bool{
-			"auto": true,
-			"off":  true, "none": true,
-			"minimal": true, "low": true, "medium": true, "high": true, "xhigh": true,
-		}
-		if !validReasoning[reasoning] {
-			return fmt.Errorf("invalid reasoning level: %s (valid: auto, off, minimal, low, medium, high, xhigh)", c.Models.Reasoning)
-		}
-	}
+	return nil
+}
 
-	// Validate approval mode
+func validateReasoning(c *Config) error {
+	reasoning := strings.ToLower(strings.TrimSpace(c.Models.Reasoning))
+	if reasoning == "" {
+		return nil
+	}
+	validReasoning := map[string]bool{
+		"auto": true,
+		"off":  true, "none": true,
+		"minimal": true, "low": true, "medium": true, "high": true, "xhigh": true,
+	}
+	if !validReasoning[reasoning] {
+		return fmt.Errorf("invalid reasoning level: %s (valid: auto, off, minimal, low, medium, high, xhigh)", c.Models.Reasoning)
+	}
+	return nil
+}
+
+func validateApprovalMode(c *Config) error {
 	validApprovalModes := map[string]bool{
 		"ask": true, "explicit": true, "manual": true,
 		"safe": true, "readonly": true,
@@ -52,6 +97,10 @@ func (c *Config) Validate() error {
 	if c.Approval.Mode != "" && !validApprovalModes[strings.ToLower(c.Approval.Mode)] {
 		return fmt.Errorf("invalid approval mode: %s (valid: ask, safe, auto, yolo)", c.Approval.Mode)
 	}
+	return nil
+}
+
+func validateSandbox(c *Config) error {
 	sandboxMode, err := parseSandboxMode(c.Sandbox.Mode)
 	if err != nil {
 		return err
@@ -68,7 +117,10 @@ func (c *Config) Validate() error {
 	if c.Sandbox.DockerSandbox.Enabled && strings.TrimSpace(c.Sandbox.DockerSandbox.Image) == "" {
 		return fmt.Errorf("sandbox.docker.image is required when docker sandbox is enabled")
 	}
+	return nil
+}
 
+func validateToolMiddleware(c *Config) error {
 	if c.ToolMiddleware.DefaultTimeout < 0 {
 		return fmt.Errorf("tool_middleware.default_timeout must be >= 0")
 	}
@@ -95,33 +147,45 @@ func (c *Config) Validate() error {
 	if c.ToolMiddleware.Retry.Jitter < 0 {
 		return fmt.Errorf("tool_middleware.retry.jitter must be >= 0")
 	}
+	return nil
+}
 
-	if mode := strings.TrimSpace(c.Tools.DefaultPoolMode); mode != "" {
-		validPoolModes := map[string]bool{
-			"full": true, "standard": true, "read_only": true, "simple": true,
-		}
-		if !validPoolModes[strings.ToLower(mode)] {
-			return fmt.Errorf("invalid tools.default_pool_mode: %s (valid: full, standard, read_only, simple)", c.Tools.DefaultPoolMode)
-		}
+func validateToolsPoolMode(c *Config) error {
+	mode := strings.TrimSpace(c.Tools.DefaultPoolMode)
+	if mode == "" {
+		return nil
 	}
+	validPoolModes := map[string]bool{
+		"full": true, "standard": true, "read_only": true, "simple": true,
+	}
+	if !validPoolModes[strings.ToLower(mode)] {
+		return fmt.Errorf("invalid tools.default_pool_mode: %s (valid: full, standard, read_only, simple)", c.Tools.DefaultPoolMode)
+	}
+	return nil
+}
+
+func validatePromptCache(c *Config) error {
 	if c.PromptCache.SystemMessages < 0 {
 		return fmt.Errorf("prompt_cache.system_messages must be >= 0")
 	}
 	if c.PromptCache.TailMessages < 0 {
 		return fmt.Errorf("prompt_cache.tail_messages must be >= 0")
 	}
-	if retention := strings.ToLower(strings.TrimSpace(c.PromptCache.Retention)); retention != "" {
-		if retention != "in-memory" && retention != "24h" {
-			return fmt.Errorf("prompt_cache.retention must be in-memory or 24h")
-		}
+	retention := strings.ToLower(strings.TrimSpace(c.PromptCache.Retention))
+	if retention != "" && retention != "in-memory" && retention != "24h" {
+		return fmt.Errorf("prompt_cache.retention must be in-memory or 24h")
 	}
+	return nil
+}
 
-	// Validate quirk probability
+func validateQuirkProbability(c *Config) error {
 	if c.Personality.QuirkProbability < 0 || c.Personality.QuirkProbability > 1 {
 		return fmt.Errorf("quirk probability must be between 0 and 1, got %f", c.Personality.QuirkProbability)
 	}
+	return nil
+}
 
-	// Validate compaction threshold
+func validateCompactionThresholds(c *Config) error {
 	if c.Memory.AutoCompactThreshold < 0 || c.Memory.AutoCompactThreshold > 1 {
 		return fmt.Errorf("auto compact threshold must be between 0 and 1, got %f", c.Memory.AutoCompactThreshold)
 	}
@@ -131,29 +195,35 @@ func (c *Config) Validate() error {
 	if c.Compaction.CompactionRatio < 0 || c.Compaction.CompactionRatio > 1 {
 		return fmt.Errorf("compaction ratio must be between 0 and 1, got %f", c.Compaction.CompactionRatio)
 	}
+	return nil
+}
 
-	// Validate batch config
-	if c.Batch.Enabled {
-		if strings.TrimSpace(c.Batch.JobTemplate.Image) == "" {
-			return fmt.Errorf("batch.job_template.image is required when batch execution is enabled")
-		}
-		if len(c.Batch.JobTemplate.Command) == 0 {
-			return fmt.Errorf("batch.job_template.command must include at least one element")
-		}
-		if len(c.Batch.JobTemplate.Args) == 0 {
-			return fmt.Errorf("batch.job_template.args must include at least one element containing placeholders for plan/task IDs")
-		}
-		if strings.TrimSpace(c.Batch.JobTemplate.WorkspaceMountPath) == "" {
-			return fmt.Errorf("batch.job_template.workspace_mount_path cannot be empty")
-		}
-		if c.Batch.RemoteBranch.Enabled && strings.TrimSpace(c.Batch.RemoteBranch.Prefix) == "" {
-			return fmt.Errorf("batch.remote_branch.prefix cannot be empty when remote branches are enabled")
-		}
-		if c.Batch.RemoteBranch.Enabled && strings.TrimSpace(c.Batch.RemoteBranch.RemoteName) == "" {
-			c.Batch.RemoteBranch.RemoteName = "origin"
-		}
+func validateBatch(c *Config) error {
+	if !c.Batch.Enabled {
+		return nil
 	}
+	if strings.TrimSpace(c.Batch.JobTemplate.Image) == "" {
+		return fmt.Errorf("batch.job_template.image is required when batch execution is enabled")
+	}
+	if len(c.Batch.JobTemplate.Command) == 0 {
+		return fmt.Errorf("batch.job_template.command must include at least one element")
+	}
+	if len(c.Batch.JobTemplate.Args) == 0 {
+		return fmt.Errorf("batch.job_template.args must include at least one element containing placeholders for plan/task IDs")
+	}
+	if strings.TrimSpace(c.Batch.JobTemplate.WorkspaceMountPath) == "" {
+		return fmt.Errorf("batch.job_template.workspace_mount_path cannot be empty")
+	}
+	if c.Batch.RemoteBranch.Enabled && strings.TrimSpace(c.Batch.RemoteBranch.Prefix) == "" {
+		return fmt.Errorf("batch.remote_branch.prefix cannot be empty when remote branches are enabled")
+	}
+	if c.Batch.RemoteBranch.Enabled && strings.TrimSpace(c.Batch.RemoteBranch.RemoteName) == "" {
+		c.Batch.RemoteBranch.RemoteName = "origin"
+	}
+	return nil
+}
 
+func validateIPC(c *Config) error {
 	if c.IPC.BasicAuthEnabled {
 		if strings.TrimSpace(c.IPC.BasicAuthUsername) == "" {
 			return fmt.Errorf("ipc.basic_auth_username is required when basic auth is enabled")
@@ -167,24 +237,21 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("ipc.bind %q is not loopback: enable ipc.require_token or ipc.basic_auth_enabled", c.IPC.Bind)
 		}
 	}
+	return nil
+}
 
-	// Validate worktree path writability hint
-	if c.Worktrees.RootPath != "" && c.Worktrees.UseContainers {
-		expanded := expandHomeDir(c.Worktrees.RootPath)
-		if !filepath.IsAbs(expanded) {
-			return fmt.Errorf("worktrees.root_path should be an absolute path when use_containers is enabled, got: %s", c.Worktrees.RootPath)
-		}
+func validateWorktrees(c *Config) error {
+	if c.Worktrees.RootPath == "" || !c.Worktrees.UseContainers {
+		return nil
 	}
-
-	if err := c.MCP.Validate(); err != nil {
-		return err
+	expanded := expandHomeDir(c.Worktrees.RootPath)
+	if !filepath.IsAbs(expanded) {
+		return fmt.Errorf("worktrees.root_path should be an absolute path when use_containers is enabled, got: %s", c.Worktrees.RootPath)
 	}
+	return nil
+}
 
-	if err := c.Hooks.Validate(); err != nil {
-		return err
-	}
-
-	// Validate max compactions
+func validateMemoryLimits(c *Config) error {
 	if c.Memory.MaxCompactions < 0 {
 		return fmt.Errorf("max compactions must be >= 0, got %d", c.Memory.MaxCompactions)
 	}
@@ -194,7 +261,6 @@ func (c *Config) Validate() error {
 	if c.Memory.RetrievalMaxTokens < 0 {
 		return fmt.Errorf("retrieval_max_tokens must be >= 0, got %d", c.Memory.RetrievalMaxTokens)
 	}
-
 	return nil
 }
 

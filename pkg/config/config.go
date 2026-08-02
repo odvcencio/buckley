@@ -139,21 +139,24 @@ type Config struct {
 	Worktrees      WorktreeConfig       `yaml:"worktrees"`
 	Experiment     ExperimentConfig     `yaml:"experiment"`
 	Batch          BatchConfig          `yaml:"batch"`
-	GitClone       giturl.ClonePolicy   `yaml:"git_clone"`
-	IPC            IPCConfig            `yaml:"ipc"`
-	CostManagement CostConfig           `yaml:"cost_management"`
-	RetryPolicy    RetryPolicy          `yaml:"retry_policy"`
-	Artifacts      ArtifactsConfig      `yaml:"artifacts"`
-	Workflow       WorkflowConfig       `yaml:"workflow"`
-	Compaction     CompactionConfig     `yaml:"compaction"`
-	UI             UIConfig             `yaml:"ui"`
-	WebUI          WebUIConfig          `yaml:"web_ui"`
-	Commenting     CommentingConfig     `yaml:"commenting"`
-	GitEvents      GitEventsConfig      `yaml:"git_events"`
-	Buckbot        BuckbotConfig        `yaml:"buckbot"`
-	Input          InputConfig          `yaml:"input"`
-	Diagnostics    DiagnosticsConfig    `yaml:"diagnostics"`
-	Notify         NotifyConfig         `yaml:"notify"`
+	// GitClone is pkg/giturl.ClonePolicy, outside pkg/config, so its
+	// fields can't carry an env struct tag; envGitClone (config_env.go)
+	// owns all seven of its env vars instead.
+	GitClone       giturl.ClonePolicy `yaml:"git_clone"`
+	IPC            IPCConfig          `yaml:"ipc"`
+	CostManagement CostConfig         `yaml:"cost_management"`
+	RetryPolicy    RetryPolicy        `yaml:"retry_policy"`
+	Artifacts      ArtifactsConfig    `yaml:"artifacts"`
+	Workflow       WorkflowConfig     `yaml:"workflow"`
+	Compaction     CompactionConfig   `yaml:"compaction"`
+	UI             UIConfig           `yaml:"ui"`
+	WebUI          WebUIConfig        `yaml:"web_ui"`
+	Commenting     CommentingConfig   `yaml:"commenting"`
+	GitEvents      GitEventsConfig    `yaml:"git_events"`
+	Buckbot        BuckbotConfig      `yaml:"buckbot"`
+	Input          InputConfig        `yaml:"input"`
+	Diagnostics    DiagnosticsConfig  `yaml:"diagnostics"`
+	Notify         NotifyConfig       `yaml:"notify"`
 
 	// Context Fabric / durable agent runtime scaffolding. All flags default
 	// off or to current (legacy) behavior; no runtime code reads these yet.
@@ -165,35 +168,44 @@ type Config struct {
 
 // NotifyConfig controls async notifications for human-in-the-loop workflows
 type NotifyConfig struct {
-	Enabled  bool           `yaml:"enabled"`
+	Enabled  bool           `yaml:"enabled" env:"BUCKLEY_NOTIFY_ENABLED"`
 	Telegram TelegramConfig `yaml:"telegram"`
 	Slack    SlackConfig    `yaml:"slack"`
 }
 
-// TelegramConfig configures Telegram notifications
+// TelegramConfig configures Telegram notifications. BotToken implicitly
+// enables Telegram when set (see the envTelegram hook in config_env.go),
+// so this whole struct is hook-owned rather than tag-dispatched.
 type TelegramConfig struct {
-	Enabled  bool   `yaml:"enabled"`
-	BotToken string `yaml:"bot_token"` // From @BotFather
-	ChatID   string `yaml:"chat_id"`   // User or group chat ID
+	Enabled  bool   `yaml:"enabled"`   // BUCKLEY_TELEGRAM_ENABLED
+	BotToken string `yaml:"bot_token"` // BUCKLEY_TELEGRAM_BOT_TOKEN, from @BotFather
+	ChatID   string `yaml:"chat_id"`   // BUCKLEY_TELEGRAM_CHAT_ID, user or group chat ID
 }
 
-// SlackConfig configures Slack notifications
+// SlackConfig configures Slack notifications. WebhookURL implicitly
+// enables Slack when set (see the envSlack hook in config_env.go), so
+// this whole struct is hook-owned rather than tag-dispatched.
 type SlackConfig struct {
-	Enabled    bool   `yaml:"enabled"`
-	WebhookURL string `yaml:"webhook_url"` // Incoming webhook URL
-	Channel    string `yaml:"channel"`     // Optional channel override
+	Enabled    bool   `yaml:"enabled"`     // BUCKLEY_SLACK_ENABLED
+	WebhookURL string `yaml:"webhook_url"` // BUCKLEY_SLACK_WEBHOOK_URL, incoming webhook URL
+	Channel    string `yaml:"channel"`     // BUCKLEY_SLACK_CHANNEL, optional channel override
 }
 
 // ModelConfig defines model preferences
 type ModelConfig struct {
-	Planning        string              `yaml:"planning"`
-	Execution       string              `yaml:"execution"`
-	Review          string              `yaml:"review"`
+	Planning        string              `yaml:"planning" env:"BUCKLEY_MODEL_PLANNING"`
+	Execution       string              `yaml:"execution" env:"BUCKLEY_MODEL_EXECUTION"`
+	Review          string              `yaml:"review" env:"BUCKLEY_MODEL_REVIEW"`
 	Curated         []string            `yaml:"curated"`
 	VisionFallback  []string            `yaml:"vision_fallback"` // Ordered list of vision models to try
 	FallbackChains  map[string][]string `yaml:"fallback_chains"`
 	DefaultProvider string              `yaml:"default_provider"` // Default provider (openrouter, openai, anthropic, google, codex)
-	Reasoning       string              `yaml:"reasoning"`        // Reasoning level: "off", "minimal", "low", "medium", "high", "xhigh", or "" for auto-detect
+	// Reasoning level: "off", "minimal", "low", "medium", "high", "xhigh",
+	// or "" for auto-detect. BUCKLEY_MODEL_REASONING and its legacy
+	// fallback BUCKLEY_REASONING are handled by the envReasoning hook
+	// (config_env.go), not the generic env-tag dispatcher, because a
+	// fallback var name needs hook logic.
+	Reasoning string `yaml:"reasoning"`
 
 	// ProviderContinuation opts into provider-native continuation state
 	// (decision 0001) for models/providers that support it. Off by default.
@@ -249,7 +261,13 @@ func (c *Config) GetUtilityTodoPlanModel() string {
 	return DefaultUtilityModel
 }
 
-// ProviderConfig defines provider settings and API keys
+// ProviderConfig defines provider settings and API keys. Every section
+// below is hook-owned in config_env.go (envOpenRouterProvider,
+// envOpenAIProvider, envAnthropicProvider, envGoogleProvider,
+// envOllamaProvider, envLiteLLMProvider, envCodexProvider) instead of
+// tag-dispatched: ProviderSettings is reused across five providers with
+// different env var names and different implicit-enable rules per
+// provider, so a struct tag on the shared type can't express it.
 type ProviderConfig struct {
 	OpenRouter   ProviderSettings  `yaml:"openrouter"`
 	OpenAI       ProviderSettings  `yaml:"openai"`
@@ -303,7 +321,10 @@ type PromptCacheConfig struct {
 	Retention      string   `yaml:"retention"`
 }
 
-// EncodingConfig controls serialization preferences.
+// EncodingConfig controls serialization preferences. UseToon has two env
+// vars -- BUCKLEY_USE_TOON (symmetric) and BUCKLEY_DISABLE_TOON
+// (one-directional: only ever turns it off) -- so it's handled by the
+// envUseToon hook (config_env.go), not the generic dispatcher.
 type EncodingConfig struct {
 	UseToon bool `yaml:"use_toon"`
 }
@@ -342,7 +363,7 @@ type MemoryConfig struct {
 type OrchestratorConfig struct {
 	MaxSelfHealAttempts int    `yaml:"max_self_heal_attempts"`
 	MaxReviewCycles     int    `yaml:"max_review_cycles"`
-	TrustLevel          string `yaml:"trust_level"` // conservative, balanced, autonomous
+	TrustLevel          string `yaml:"trust_level" env:"BUCKLEY_TRUST_LEVEL"` // conservative, balanced, autonomous
 	AutoWorkflow        bool   `yaml:"auto_workflow"`
 
 	// Planning mode configuration
@@ -356,12 +377,12 @@ const (
 
 // ExecutionModeConfig controls the default execution strategy.
 type ExecutionModeConfig struct {
-	Mode string `yaml:"mode"`
+	Mode string `yaml:"mode" env:"BUCKLEY_EXECUTION_MODE"`
 }
 
 // OneshotModeConfig controls the strategy for one-shot commands.
 type OneshotModeConfig struct {
-	Mode string `yaml:"mode"`
+	Mode string `yaml:"mode" env:"BUCKLEY_ONESHOT_MODE"`
 }
 
 // RLMConfig controls the Recursive Language Model runtime.
@@ -438,6 +459,10 @@ type InputConfig struct {
 
 // DiagnosticsConfig controls diagnostic logging and debugging behavior.
 type DiagnosticsConfig struct {
+	// NetworkLogsEnabled has two env vars -- BUCKLEY_NETWORK_LOGS_ENABLED
+	// (symmetric) and BUCKLEY_DISABLE_NETWORK_LOGS (one-directional: only
+	// ever turns it off) -- so it's handled by the envNetworkLogs hook
+	// (config_env.go), not the generic dispatcher.
 	NetworkLogsEnabled bool `yaml:"network_logs_enabled"`
 	// TelemetryPayloadsOverNetwork controls whether full tool call arguments
 	// and results are included in telemetry events sent over network
@@ -471,7 +496,7 @@ type ApprovalConfig struct {
 	// - safe: Read anything, write to workspace only, no shell/network without approval
 	// - auto: Full workspace access, approval for external operations
 	// - yolo: Full autonomy (dangerous, use with caution)
-	Mode string `yaml:"mode"`
+	Mode string `yaml:"mode" env:"BUCKLEY_APPROVAL_MODE"`
 
 	// TrustedPaths are additional paths with write access (beyond workspace)
 	TrustedPaths []string `yaml:"trusted_paths"`
@@ -495,9 +520,12 @@ type ApprovalConfig struct {
 // SandboxConfig controls command sandboxing for tool execution.
 type SandboxConfig struct {
 	// Mode sets the sandbox level: disabled, readonly, workspace, strict
-	Mode string `yaml:"mode"`
+	Mode string `yaml:"mode" env:"BUCKLEY_TOOL_SANDBOX_MODE"`
 
-	// AllowUnsafe must be true to allow mode=disabled.
+	// AllowUnsafe must be true to allow mode=disabled. BUCKLEY_UNSAFE is
+	// handled by the envSandboxAllowUnsafe hook (config_env.go), not the
+	// generic dispatcher, because it only ever sets true (an unset or
+	// false env var must not clear an operator's explicit yaml opt-in).
 	AllowUnsafe bool `yaml:"allow_unsafe"`
 
 	// WorkspacePath is the default working directory for sandbox checks.
@@ -516,13 +544,13 @@ type SandboxConfig struct {
 	DeniedCommands []string `yaml:"denied_commands"`
 
 	// AllowNetwork permits network access when true.
-	AllowNetwork bool `yaml:"allow_network"`
+	AllowNetwork bool `yaml:"allow_network" env:"BUCKLEY_TOOL_SANDBOX_ALLOW_NETWORK"`
 
 	// Timeout caps command runtime (0 = no timeout).
-	Timeout time.Duration `yaml:"timeout"`
+	Timeout time.Duration `yaml:"timeout" env:"BUCKLEY_TOOL_SANDBOX_TIMEOUT"`
 
 	// MaxOutputBytes caps command output (0 = unlimited).
-	MaxOutputBytes int64 `yaml:"max_output_bytes"`
+	MaxOutputBytes int64 `yaml:"max_output_bytes" env:"BUCKLEY_TOOL_SANDBOX_MAX_OUTPUT_BYTES"`
 
 	// DockerSandbox configures OS-level Docker container isolation.
 	DockerSandbox DockerSandboxConfig `yaml:"docker"`
@@ -530,10 +558,14 @@ type SandboxConfig struct {
 
 // DockerSandboxConfig controls Docker-based OS-level sandboxing for tool execution.
 type DockerSandboxConfig struct {
-	Enabled          bool                 `yaml:"enabled"`
-	Image            string               `yaml:"image"`
-	WorkspaceMount   string               `yaml:"workspace_mount"`
-	ReadOnlyRoot     bool                 `yaml:"read_only_root"`
+	Enabled        bool   `yaml:"enabled" env:"BUCKLEY_DOCKER_SANDBOX_ENABLED"`
+	Image          string `yaml:"image" env:"BUCKLEY_DOCKER_SANDBOX_IMAGE"`
+	WorkspaceMount string `yaml:"workspace_mount"`
+	ReadOnlyRoot   bool   `yaml:"read_only_root"`
+	// NetworkEnabled (BUCKLEY_DOCKER_SANDBOX_NETWORK) is a *bool so a
+	// project config can distinguish "not set" from "set to false"; the
+	// generic dispatcher only supports value types, so this is handled by
+	// the envDockerNetwork hook (config_env.go).
 	NetworkEnabled   *bool                `yaml:"network_enabled,omitempty"`
 	Resources        ResourceLimitsConfig `yaml:"resources"`
 	Security         SecurityConfig       `yaml:"security"`
@@ -618,6 +650,9 @@ type PostureConfig struct {
 // PosturesConfig configures named posture layers and posture selection.
 type PosturesConfig struct {
 	// Default selects the active posture when BUCKLEY_POSTURE is unset.
+	// BUCKLEY_POSTURE is trimmed before the empty check (unlike the
+	// generic dispatcher's untrimmed string fields), so it's handled by
+	// the envPosture hook (config_env.go).
 	Default string                   `yaml:"default"`
 	Layers  map[string]PostureConfig `yaml:"layers"`
 }
@@ -629,15 +664,20 @@ type WorktreeConfig struct {
 	ContainerService string `yaml:"container_service"`
 }
 
-// ExperimentConfig controls experiment execution defaults.
+// ExperimentConfig controls experiment execution defaults. MaxConcurrent,
+// DefaultTimeout, MaxCostPerRun, and MaxTokensPerRun only apply their env
+// var when the parsed value is positive (an explicit 0 or a negative
+// value is treated as unset, not as "disable"), so those four are
+// handled by the envExperimentPositive* hooks (config_env.go) rather than
+// the generic dispatcher.
 type ExperimentConfig struct {
-	Enabled         bool          `yaml:"enabled"`
-	MaxConcurrent   int           `yaml:"max_concurrent"`
-	DefaultTimeout  time.Duration `yaml:"default_timeout"`
-	WorktreeRoot    string        `yaml:"worktree_root"`
-	CleanupOnDone   bool          `yaml:"cleanup_on_done"`
-	MaxCostPerRun   float64       `yaml:"max_cost_per_run"`
-	MaxTokensPerRun int           `yaml:"max_tokens_per_run"`
+	Enabled         bool          `yaml:"enabled" env:"BUCKLEY_EXPERIMENT_ENABLED"`
+	MaxConcurrent   int           `yaml:"max_concurrent"`  // BUCKLEY_EXPERIMENT_MAX_CONCURRENT (positive only)
+	DefaultTimeout  time.Duration `yaml:"default_timeout"` // BUCKLEY_EXPERIMENT_DEFAULT_TIMEOUT (positive only)
+	WorktreeRoot    string        `yaml:"worktree_root" env:"BUCKLEY_EXPERIMENT_WORKTREE_ROOT"`
+	CleanupOnDone   bool          `yaml:"cleanup_on_done" env:"BUCKLEY_EXPERIMENT_CLEANUP_ON_DONE"`
+	MaxCostPerRun   float64       `yaml:"max_cost_per_run"`   // BUCKLEY_EXPERIMENT_MAX_COST_PER_RUN (positive only)
+	MaxTokensPerRun int           `yaml:"max_tokens_per_run"` // BUCKLEY_EXPERIMENT_MAX_TOKENS_PER_RUN (positive only)
 }
 
 // ACPConfig controls ACP services and event storage.
@@ -664,18 +704,24 @@ type NATSConfig struct {
 	RequestTimeout time.Duration `yaml:"request_timeout"`
 }
 
-// IPCConfig controls Buckley's HTTP/WebSocket server.
+// IPCConfig controls Buckley's HTTP/WebSocket server. BasicAuthEnabled is
+// also implicitly set to true, after every env var below applies, when
+// BasicAuthUsername and BasicAuthPassword are both non-empty and it isn't
+// already true -- regardless of whether those two values came from env
+// vars or from a config.yaml file. See applyEnvOverrides's post-check
+// (config_env.go); that one rule isn't tied to a single env var, so it
+// isn't a per-field hook.
 type IPCConfig struct {
 	Enabled           bool     `yaml:"enabled"`
 	Bind              string   `yaml:"bind"`
 	EnableBrowser     bool     `yaml:"enable_browser"`
 	AllowedOrigins    []string `yaml:"allowed_origins"`
-	PublicMetrics     bool     `yaml:"public_metrics"`
+	PublicMetrics     bool     `yaml:"public_metrics" env:"BUCKLEY_PUBLIC_METRICS"`
 	RequireToken      bool     `yaml:"require_token"`
-	BasicAuthEnabled  bool     `yaml:"basic_auth_enabled"`
-	BasicAuthUsername string   `yaml:"basic_auth_username"`
-	BasicAuthPassword string   `yaml:"basic_auth_password"`
-	PushSubject       string   `yaml:"push_subject"` // mailto: or https: URL for VAPID (e.g., mailto:admin@example.com)
+	BasicAuthEnabled  bool     `yaml:"basic_auth_enabled" env:"BUCKLEY_BASIC_AUTH_ENABLED"`
+	BasicAuthUsername string   `yaml:"basic_auth_username" env:"BUCKLEY_BASIC_AUTH_USER"`
+	BasicAuthPassword string   `yaml:"basic_auth_password" env:"BUCKLEY_BASIC_AUTH_PASSWORD"`
+	PushSubject       string   `yaml:"push_subject" env:"BUCKLEY_PUSH_SUBJECT"` // mailto: or https: URL for VAPID (e.g., mailto:admin@example.com)
 }
 
 // CostConfig defines budget limits
@@ -870,7 +916,7 @@ type UIConfig struct {
 
 // WebUIConfig defines web UI integration settings.
 type WebUIConfig struct {
-	BaseURL string `yaml:"base_url"`
+	BaseURL string `yaml:"base_url" env:"BUCKLEY_WEB_URL"`
 }
 
 // CommentingConfig defines code commenting requirements

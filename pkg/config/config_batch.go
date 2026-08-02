@@ -2,7 +2,7 @@ package config
 
 // BatchConfig controls containerized task execution
 type BatchConfig struct {
-	Enabled           bool                    `yaml:"enabled"`
+	Enabled           bool                    `yaml:"enabled" env:"BUCKLEY_BATCH_ENABLED"`
 	Namespace         string                  `yaml:"namespace"`
 	Kubeconfig        string                  `yaml:"kubeconfig"`
 	WaitForCompletion bool                    `yaml:"wait_for_completion"`
