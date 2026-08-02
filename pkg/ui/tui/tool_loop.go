@@ -35,6 +35,25 @@ type toolLoopProgress struct {
 	started       bool
 	reasoningOpen bool
 	reasoning     strings.Builder
+
+	// textOpen, textBuf, roundRendered, and roundRenderedText track this
+	// round's live-streamed assistant text bubble. textOpen is true while a
+	// seeded assistant message is open for StreamChunk appends; textBuf
+	// mirrors the raw deltas sent so far. closeTextProgress sets
+	// roundRendered once the bubble closes and roundRenderedText to
+	// whatever text the transcript now shows for it -- textBuf's raw
+	// stream, or the finalized message content if closeTextProgress had to
+	// correct the bubble (inline tool-call-token models, where
+	// FinalizeWithTokenParsing strips markup that already rendered live).
+	// All four reset at the top of every callToolLoopModel call, so
+	// finishToolLoopResponse can tell whether the message it is about to
+	// persist already matches what's on screen (no double-render) or still
+	// needs a discrete AddMessage (continuation turns, empty responses, and
+	// the reasoning-channel fallback never stream).
+	textOpen          bool
+	textBuf           strings.Builder
+	roundRendered     bool
+	roundRenderedText string
 }
 
 type toolLoopIterationResult struct {
@@ -43,9 +62,9 @@ type toolLoopIterationResult struct {
 	finishReason string
 }
 
-func (c *Controller) runToolLoop(ctx context.Context, sess *SessionState, modelID string) (string, *model.Usage, string, error) {
+func (c *Controller) runToolLoop(ctx context.Context, sess *SessionState, modelID string) (string, *model.Usage, string, bool, error) {
 	if err := c.validateToolLoopInputs(sess); err != nil {
-		return "", nil, "", err
+		return "", nil, "", false, err
 	}
 
 	state := c.newToolLoopState(sess, modelID)
@@ -58,13 +77,13 @@ func (c *Controller) runToolLoop(ctx context.Context, sess *SessionState, modelI
 		}
 		result, err := c.runToolLoopIteration(ctx, sess, modelID, iter, &state)
 		if err != nil {
-			return "", nil, "", err
+			return "", nil, "", false, err
 		}
 		if state.guardReason != "" {
 			return c.finishGuardedToolLoop(ctx, sess, modelID, &state, state.guardReason)
 		}
 		if result.done {
-			return c.finishToolLoopResponse(sess, result.message, state.totalUsage, result.finishReason)
+			return c.finishToolLoopResponse(sess, result.message, state.totalUsage, result.finishReason, &state)
 		}
 	}
 }
@@ -126,7 +145,7 @@ func (c *Controller) runToolLoopIteration(ctx context.Context, sess *SessionStat
 	req, nextUseTools := c.buildToolLoopRequestWithState(sess, modelID, state.useTools, allowedTools, state)
 	state.useTools = nextUseTools
 
-	resp, err := c.callToolLoopTurn(ctx, modelID, iteration, req, state)
+	resp, err := c.callToolLoopTurn(ctx, sess, modelID, iteration, req, state)
 	if err != nil {
 		return toolLoopIterationResult{}, c.handleToolLoopModelError(err, state)
 	}
@@ -145,9 +164,9 @@ func (c *Controller) runToolLoopIteration(ctx context.Context, sess *SessionStat
 // projected message list either way, so a continuation error can retry
 // through the normal streaming path with the same request: a broken
 // continuation never fails the turn.
-func (c *Controller) callToolLoopTurn(ctx context.Context, modelID string, iteration int, req model.ChatRequest, state *toolLoopState) (*model.ChatResponse, error) {
+func (c *Controller) callToolLoopTurn(ctx context.Context, sess *SessionState, modelID string, iteration int, req model.ChatRequest, state *toolLoopState) (*model.ChatResponse, error) {
 	if !state.useContinuation || state.continuation == nil {
-		return c.callToolLoopModel(ctx, req, modelID, iteration, state)
+		return c.callToolLoopModel(ctx, req, modelID, iteration, sess, state)
 	}
 
 	// Predict hit/reset for the in-flight status line from whether the
@@ -172,7 +191,7 @@ func (c *Controller) callToolLoopTurn(ctx context.Context, modelID string, itera
 	if c.app != nil {
 		c.app.SetStatus("Continuation unavailable; retrying without it")
 	}
-	return c.callToolLoopModel(ctx, req, modelID, iteration, state)
+	return c.callToolLoopModel(ctx, req, modelID, iteration, sess, state)
 }
 
 func (c *Controller) handleToolLoopModelError(err error, state *toolLoopState) error {
@@ -296,7 +315,7 @@ func (c *Controller) buildToolLoopRequestWithState(sess *SessionState, modelID s
 	return req, useTools
 }
 
-func (c *Controller) callToolLoopModel(ctx context.Context, req model.ChatRequest, modelID string, iteration int, state *toolLoopState) (*model.ChatResponse, error) {
+func (c *Controller) callToolLoopModel(ctx context.Context, req model.ChatRequest, modelID string, iteration int, sess *SessionState, state *toolLoopState) (*model.ChatResponse, error) {
 	status := modelProcessStatus(modelID, iteration, len(req.Tools), req.Reasoning)
 	if estimate := model.EstimateRequestTokens(req); estimate.Total >= 1000 {
 		status += fmt.Sprintf(", ~%.1fk input", float64(estimate.Total)/1000)
@@ -315,6 +334,10 @@ func (c *Controller) callToolLoopModel(ctx context.Context, req model.ChatReques
 	if state != nil {
 		state.progress.reasoningOpen = false
 		state.progress.reasoning.Reset()
+		state.progress.textOpen = false
+		state.progress.textBuf.Reset()
+		state.progress.roundRendered = false
+		state.progress.roundRenderedText = ""
 	}
 
 	var responseID string
@@ -324,6 +347,7 @@ func (c *Controller) callToolLoopModel(ctx context.Context, req model.ChatReques
 	for chunks != nil || errs != nil {
 		select {
 		case <-ctx.Done():
+			c.closeTextProgress(state, sess, "")
 			return nil, ctx.Err()
 		case chunk, ok := <-chunks:
 			if !ok {
@@ -340,6 +364,7 @@ func (c *Controller) callToolLoopModel(ctx context.Context, req model.ChatReques
 			for _, choice := range chunk.Choices {
 				receivedChoice = true
 				c.appendReasoningProgress(state, choice.Delta)
+				c.appendTextProgress(state, sess, choice.Delta.Content)
 				if choice.FinishReason != nil {
 					finishReason = *choice.FinishReason
 				}
@@ -350,12 +375,14 @@ func (c *Controller) callToolLoopModel(ctx context.Context, req model.ChatReques
 				continue
 			}
 			if err != nil {
+				c.closeTextProgress(state, sess, "")
 				return nil, err
 			}
 		}
 	}
 
 	message := accumulator.FinalizeWithTokenParsing()
+	c.closeTextProgress(state, sess, model.ExtractTextContentOrEmpty(message.Content))
 	if !receivedChoice {
 		return nil, model.NoResponseChoicesError(req, &model.ChatResponse{ID: responseID, Model: responseModel})
 	}
@@ -401,6 +428,55 @@ func (c *Controller) appendReasoningProgress(state *toolLoopState, delta model.M
 	c.app.ReplaceLastMessage(display)
 }
 
+// appendTextProgress streams one assistant text delta into the transcript:
+// it seeds an empty assistant bubble on the first non-empty delta this
+// round (so StreamChunk has something to append into), then forwards the
+// delta through the existing StreamChunk/coalescer machinery. text is
+// buffered in state.progress.textBuf so closeTextProgress can detect a
+// token-parsing correction (inline tool-call markup) once the round
+// finishes.
+func (c *Controller) appendTextProgress(state *toolLoopState, sess *SessionState, text string) {
+	if c == nil || c.app == nil || state == nil || sess == nil || text == "" {
+		return
+	}
+	if !state.progress.started {
+		state.progress.started = true
+	}
+	// A new assistant bubble is about to become the last message; any
+	// reasoning bubble that was open no longer is.
+	state.progress.reasoningOpen = false
+	if !state.progress.textOpen {
+		c.app.AddMessage("", "assistant")
+		state.progress.textOpen = true
+	}
+	state.progress.textBuf.WriteString(text)
+	c.app.StreamChunk(sess.ID, text)
+}
+
+// closeTextProgress finalizes this round's streamed assistant bubble, if
+// one is open. finalText is the round's finalized message content (post
+// token-parsing); when it differs from what was actually streamed -- the
+// inline tool-call-token models, where FinalizeWithTokenParsing strips
+// markup that already rendered live -- the bubble is corrected in place
+// before it closes, so no double-render still yields a transcript that
+// matches persisted history exactly.
+func (c *Controller) closeTextProgress(state *toolLoopState, sess *SessionState, finalText string) {
+	if c == nil || c.app == nil || state == nil || !state.progress.textOpen {
+		return
+	}
+	rendered := state.progress.textBuf.String()
+	if finalText != "" && finalText != rendered {
+		c.app.ReplaceLastMessage(finalText)
+		rendered = finalText
+	}
+	if sess != nil {
+		c.app.StreamEnd(sess.ID, "")
+	}
+	state.progress.textOpen = false
+	state.progress.roundRendered = true
+	state.progress.roundRenderedText = rendered
+}
+
 func visibleReasoningDetails(details []model.ReasoningDetail) string {
 	var b strings.Builder
 	for _, detail := range details {
@@ -420,18 +496,27 @@ func firstToolLoopChoice(req model.ChatRequest, resp *model.ChatResponse) (model
 	return resp.Choices[0], nil
 }
 
-func (c *Controller) finishToolLoopResponse(sess *SessionState, msg model.Message, totalUsage model.Usage, finishReason string) (string, *model.Usage, string, error) {
+// finishToolLoopResponse persists the turn's final assistant message and
+// reports whether it was already rendered live: state.progress reflects the
+// most recent callToolLoopModel call, which streams and closes its bubble
+// before returning, so a match here means the transcript already shows text
+// identical to what's being persisted (no double-render needed). A
+// continuation turn, an empty response, or the reasoning-channel fallback
+// never streamed, so the caller still renders those with a discrete
+// AddMessage.
+func (c *Controller) finishToolLoopResponse(sess *SessionState, msg model.Message, totalUsage model.Usage, finishReason string, state *toolLoopState) (string, *model.Usage, string, bool, error) {
 	c.app.SetStatus("Finalizing response")
 	text, err := model.ExtractTextContent(msg.Content)
 	if err != nil {
-		return "", nil, "", err
+		return "", nil, "", false, err
 	}
 	if text == "" && strings.TrimSpace(msg.Reasoning) != "" {
 		text = msg.Reasoning
 	}
 	sess.Conversation.AddAssistantMessageWithReasoningDetails(text, msg.Reasoning, msg.ReasoningDetails)
 	c.saveLatestConversationMessage(sess)
-	return text, &totalUsage, finishReason, nil
+	streamed := state != nil && state.progress.roundRendered && text != "" && state.progress.roundRenderedText == text
+	return text, &totalUsage, finishReason, streamed, nil
 }
 
 func normalizeToolLoopCalls(registry *tool.Registry, calls []model.ToolCall, allowedTools []string) []model.ToolCall {

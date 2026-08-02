@@ -82,7 +82,7 @@ func contextProjectionStatus(stats conversation.ContextProjectionStats) string {
 	return label
 }
 
-func (c *Controller) finishGuardedToolLoop(ctx context.Context, sess *SessionState, modelID string, state *toolLoopState, reason string) (string, *model.Usage, string, error) {
+func (c *Controller) finishGuardedToolLoop(ctx context.Context, sess *SessionState, modelID string, state *toolLoopState, reason string) (string, *model.Usage, string, bool, error) {
 	reason = strings.TrimSpace(reason)
 	if reason == "" {
 		reason = "tool execution stopped because the harness detected no forward progress"
@@ -119,7 +119,7 @@ func (c *Controller) finishGuardedToolLoop(ctx context.Context, sess *SessionSta
 		state.projection = projection
 	}
 
-	resp, err := c.callToolLoopModel(ctx, req, modelID, 0, state)
+	resp, err := c.callToolLoopModel(ctx, req, modelID, 0, sess, state)
 	if err != nil {
 		return c.finishGuardFallback(sess, state, reason, err)
 	}
@@ -138,7 +138,7 @@ func (c *Controller) finishGuardedToolLoop(ctx context.Context, sess *SessionSta
 	if state != nil {
 		usage = state.totalUsage
 	}
-	return c.finishToolLoopResponse(sess, choice.Message, usage, "loop_guard")
+	return c.finishToolLoopResponse(sess, choice.Message, usage, "loop_guard", state)
 }
 
 func completePendingToolResponses(messages []model.Message, reason string) []model.Message {
@@ -187,7 +187,7 @@ func completePendingToolResponses(messages []model.Message, reason string) []mod
 	return result
 }
 
-func (c *Controller) finishGuardFallback(sess *SessionState, state *toolLoopState, reason string, cause error) (string, *model.Usage, string, error) {
+func (c *Controller) finishGuardFallback(sess *SessionState, state *toolLoopState, reason string, cause error) (string, *model.Usage, string, bool, error) {
 	text := "I stopped the tool loop because " + strings.TrimSuffix(reason, ".") + ". " +
 		"The evidence gathered so far remains available in the activity inspector. A different strategy or a narrower follow-up is needed before more tool execution would be useful."
 	if cause != nil {
@@ -197,5 +197,5 @@ func (c *Controller) finishGuardFallback(sess *SessionState, state *toolLoopStat
 	if state != nil {
 		usage = state.totalUsage
 	}
-	return c.finishToolLoopResponse(sess, model.Message{Role: "assistant", Content: text}, usage, "loop_guard")
+	return c.finishToolLoopResponse(sess, model.Message{Role: "assistant", Content: text}, usage, "loop_guard", state)
 }
