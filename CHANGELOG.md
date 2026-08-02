@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.3.0] - 2026-08-02
+
+### Added
+- Canopy-backed code analysis tools (`code_callgraph`, `code_refs`, `code_impact`) and a post-edit Go diagnostics probe that reports compile errors in the tool result.
+- Tiller-compatible persona registry with persona-aware subagent spawning, model tier pins, and typed escalation denial.
+- Layered glob permission policy (posture, project, user, built-in) with arbiter evaluation, credential-read denial in every mode, and an `unattended` posture that parks ask decisions.
+- MCP client support: stdio servers configured under `mcp.servers` become permission-governed `mcp_<server>_<tool>` tools.
+- Plugin hook contract for process plugins: sanitized telemetry event subscriptions and a pre-tool veto surface with advisory and enforcing modes.
+- Model variant presets with `Alt+M` cycling, recent-model cycling with `Alt+R`, `/undo` and `/redo` over shadow-git snapshots, a run-tree session navigator, `buckley session export`, and `buckley models refresh`.
+- Shared turn engine (`pkg/agentloop.Controller`) driving the experiment, builder-agent, and headless loops with uniform projection, usage accounting, governor checks, and run-ledger events.
+- `buckley attach` joins a running session over loopback gRPC: list sessions, stream events, and send input from a second terminal.
+- ACP client permission flow: editors receive `session/request_permission` before any non-read-only tool runs.
+
+### Changed
+- ACP wire compliance: `currentModeId` field name, diff content always carries `path` and `newText` without trimming or truncation, custom extensions moved under underscore-prefixed methods, and tool kind and title maps match the real tool names.
+- Headless turns record tool exchanges into conversation history and persist them as they land.
+
+### Fixed
+- Continuation window survives compaction: the represented prefix stays byte-identical, commits carry the full request fingerprints, and restore accepts caller-shaped model identities.
+
 ## [2.2.0] - 2026-08-01
 
 ### Added
@@ -206,6 +226,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Plugin discovery limited to local paths only.
 
 [Unreleased]: https://github.com/odvcencio/buckley/compare/v2.2.0...HEAD
+[2.3.0]: https://github.com/odvcencio/buckley/compare/v2.2.0...v2.3.0
 [2.2.0]: https://github.com/odvcencio/buckley/compare/v2.1.0...v2.2.0
 [2.1.0]: https://github.com/odvcencio/buckley/compare/v2.0.0...v2.1.0
 [2.0.0]: https://github.com/odvcencio/buckley/compare/v1.6.1...v2.0.0
