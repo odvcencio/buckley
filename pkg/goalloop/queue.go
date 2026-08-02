@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"time"
 
 	"m31labs.dev/buckley/pkg/runledger"
 	"m31labs.dev/buckley/pkg/taskstate"
@@ -21,6 +22,13 @@ type QueueItem struct {
 	// prefers tasks whose next action is cheap verification when debt
 	// is high (G7 refines this; G6 orders by priority then creation).
 	NextActions []taskstate.NextAction
+
+	blocker *taskstate.Blocker
+}
+
+// retryDue reports whether a blocker's retry timer exists and has passed.
+func retryDue(blocker *taskstate.Blocker) bool {
+	return blocker != nil && blocker.RetryAfter != nil && !blocker.RetryAfter.After(time.Now())
 }
 
 // BuildQueue rebuilds the next-action queue for a goal run purely from
@@ -59,13 +67,22 @@ func (l *Loop) BuildQueue(ctx context.Context, runID string) ([]QueueItem, error
 		if resumed, err := l.checkpoints.Resume(ctx, taskID); err == nil {
 			item.Status = resumed.State.Status
 			item.NextActions = resumed.State.NextActions
+			item.blocker = resumed.State.Blocker
 		} else if !errors.Is(err, taskstate.ErrNoCheckpoint) {
 			return nil, fmt.Errorf("goalloop: resume %s: %w", taskID, err)
 		}
 
 		switch item.Status {
-		case taskstate.StatusCompleted, taskstate.StatusBlocked, taskstate.StatusParked:
+		case taskstate.StatusCompleted:
 			continue
+		case taskstate.StatusBlocked, taskstate.StatusParked:
+			// Retry-after unparking (design 5.5): a blocked or parked
+			// task whose retry timer has passed re-enters the queue;
+			// one with no timer waits for an external state change.
+			if !retryDue(item.blocker) {
+				continue
+			}
+			item.Status = taskstate.StatusPending
 		}
 		items = append(items, ordered{item: item, seq: created.Sequence})
 	}
