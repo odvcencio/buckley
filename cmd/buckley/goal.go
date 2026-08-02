@@ -31,9 +31,36 @@ func runGoalCommand(args []string) error {
 		return runGoalStatus(args[1:])
 	case "list":
 		return runGoalList(args[1:])
+	case "report":
+		return runGoalReport(args[1:])
 	default:
-		return fmt.Errorf("unknown goal subcommand %q (want start, status, or list)", args[0])
+		return fmt.Errorf("unknown goal subcommand %q (want start, status, list, or report)", args[0])
 	}
+}
+
+// runGoalReport prints the goal's morning report (design 7.3): the
+// durable roll-up the overnight posture leaves for the user.
+func runGoalReport(args []string) error {
+	fs := flag.NewFlagSet("goal report", flag.ContinueOnError)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return errors.New("usage: buckley goal report <run-id>")
+	}
+
+	loop, cleanup, err := newGoalLoop()
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+
+	report, err := loop.Report(context.Background(), strings.TrimSpace(fs.Arg(0)))
+	if err != nil {
+		return err
+	}
+	fmt.Print(goalloop.RenderReport(report))
+	return nil
 }
 
 // goalStringList collects a repeatable string flag.

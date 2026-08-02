@@ -212,6 +212,10 @@ type Store interface {
 	// through this: the ledger's samples are the source of truth for
 	// how much a run has cost (section 14.1).
 	SumMetric(ctx context.Context, runID, metricName string) (float64, error)
+	// SumMetricByTask returns metricName totals per task for runID.
+	// Samples with no task dimension aggregate under the empty key.
+	// The morning report's spend-by-node section reads this.
+	SumMetricByTask(ctx context.Context, runID, metricName string) (map[string]float64, error)
 
 	// SetLiveSink attaches a best-effort live event sink (see LiveSink).
 	SetLiveSink(sink LiveSink)
