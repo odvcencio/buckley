@@ -222,15 +222,15 @@ func makePromptHandler(
 		}
 
 		modelOverride := resolveACPModelOverride(cfg, mgr, session.Mode)
-		responseText, err := runACPLoop(ctx, cfg, mgr, state.conv, state.registry, state.skillState, state.engine, modelOverride, state.workDir, session.ID, agent, logf, stream)
+		// S1: runACPLoop streams the final message as agent_message_chunk
+		// notifications while the model generates it (see streamACPTurn), so
+		// the returned text is not re-sent here -- doing so would duplicate
+		// every turn's content on the wire.
+		_, err := runACPLoop(ctx, cfg, mgr, state.conv, state.registry, state.skillState, state.engine, modelOverride, state.workDir, session.ID, agent, logf, stream)
 		if err != nil {
 			logf("prompt error: %v", err)
 			stream(acp.NewAgentMessageChunk(fmt.Sprintf("\n\nError: %v", err)))
 			return nil, err
-		}
-
-		if responseText != "" {
-			stream(acp.NewAgentMessageChunk(responseText))
 		}
 
 		return &acp.PromptResult{StopReason: "end_turn"}, nil
@@ -647,7 +647,10 @@ func runACPLoop(
 		useTools = toolTurn.UseTools
 		req := buildACPChatRequest(cfg, mgr, engine, conv, modelID, toolTurn)
 
-		resp, err := mgr.ChatCompletion(ctx, req)
+		// S1: stream the turn so agent_message_chunk/agent_thought_chunk
+		// reach the client per provider delta, instead of buffering the
+		// whole turn and sending one chunk at the end.
+		msg, _, err := streamACPTurn(ctx, mgr, req, stream)
 		if err != nil {
 			if useTools && isToolUnsupportedError(err) {
 				useTools = false
@@ -655,11 +658,7 @@ func runACPLoop(
 			}
 			return "", err
 		}
-		if len(resp.Choices) == 0 {
-			return "", model.NoResponseChoicesError(req, resp)
-		}
 
-		msg := resp.Choices[0].Message
 		if len(msg.ToolCalls) == 0 {
 			text, err := model.ExtractTextContent(msg.Content)
 			if err != nil {
@@ -691,6 +690,91 @@ func runACPLoop(
 		conv.AddToolCallMessageWithReasoning(msg.ToolCalls, msg.Reasoning, msg.ReasoningDetails)
 		lastPhase = executeACPToolCalls(ctx, conv, registry, stream, msg.ToolCalls, toolTurn.AllowedTools, lastPhase, workDir, sessionID, agent, logf)
 		toolsExecuted = true
+	}
+}
+
+// streamACPTurn drains a streaming chat completion for one runACPLoop
+// iteration, forwarding each content delta as its own agent_message_chunk
+// and each reasoning delta as its own agent_thought_chunk to the client as
+// they arrive (S1), instead of buffering the whole turn and sending one
+// chunk at the end. It mirrors mgr.ChatCompletion's return shape -- one
+// accumulated Message plus Usage -- once the stream ends, so callers built
+// around the non-streaming response shape do not have to change.
+//
+// It drains both chunkChan and errChan to completion (looping until both
+// are nil) rather than returning on the first ready channel: ChatCompletion
+// providers close both channels at the end of a successful stream, and a
+// select is not guaranteed to observe a still-buffered chunk before an
+// already-closed error channel. See pkg/ui/tui/tool_loop.go's
+// callToolLoopModel for the same drain pattern.
+func streamACPTurn(ctx context.Context, mgr *model.Manager, req model.ChatRequest, stream acp.StreamFunc) (model.Message, *model.Usage, error) {
+	req.Stream = true
+	chunks, errs := mgr.ChatCompletionStream(ctx, req)
+
+	acc := model.NewStreamAccumulator()
+	receivedChoice := false
+	for chunks != nil || errs != nil {
+		select {
+		case <-ctx.Done():
+			return model.Message{}, nil, ctx.Err()
+		case chunk, ok := <-chunks:
+			if !ok {
+				chunks = nil
+				continue
+			}
+			acc.Add(chunk)
+			for _, choice := range chunk.Choices {
+				receivedChoice = true
+				forwardACPStreamDelta(stream, choice.Delta)
+			}
+		case err, ok := <-errs:
+			if !ok {
+				errs = nil
+				continue
+			}
+			if err != nil {
+				return model.Message{}, nil, err
+			}
+		}
+	}
+
+	if !receivedChoice {
+		return model.Message{}, nil, model.NoResponseChoicesError(req, &model.ChatResponse{Model: req.Model})
+	}
+
+	msg := acc.Message()
+	if msg.Role == "" {
+		msg.Role = "assistant"
+	}
+	return msg, acc.Usage(), nil
+}
+
+// forwardACPStreamDelta streams one chunk's delta immediately: content as an
+// agent_message_chunk, reasoning as an agent_thought_chunk. OpenRouter's
+// reasoning_details blocks take precedence over the legacy reasoning field
+// when both are present on the same delta (they carry the same content in
+// a richer shape). Buckley sends one ACP update per provider delta rather
+// than re-tokenizing -- the provider's own SSE chunking is already the
+// "per token" granularity ACP clients render incrementally.
+func forwardACPStreamDelta(stream acp.StreamFunc, delta model.MessageDelta) {
+	if stream == nil {
+		return
+	}
+	if len(delta.ReasoningDetails) > 0 {
+		for _, rd := range delta.ReasoningDetails {
+			text := rd.Text
+			if text == "" {
+				text = rd.Summary
+			}
+			if text != "" {
+				_ = stream(acp.NewAgentThoughtChunk(text))
+			}
+		}
+	} else if delta.Reasoning != "" {
+		_ = stream(acp.NewAgentThoughtChunk(delta.Reasoning))
+	}
+	if delta.Content != "" {
+		_ = stream(acp.NewAgentMessageChunk(delta.Content))
 	}
 }
 
