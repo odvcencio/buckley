@@ -72,6 +72,22 @@ func TestCheckpointState_Validate(t *testing.T) {
 			wantErr: "required verification",
 		},
 		{
+			name: "completed with unevidenced completed item",
+			mutate: func(s *CheckpointState) {
+				s.Status = StatusCompleted
+				s.Checks[1].Status = VerificationPass
+				s.Checks[1].EvidenceID = "ev_2"
+				s.Completed = append(s.Completed, CompletedItem{Text: "undocumented claim"})
+			},
+			wantErr: "has no evidence id",
+		},
+		{
+			name: "in flight with unevidenced completed item is debt, not an error",
+			mutate: func(s *CheckpointState) {
+				s.Completed = append(s.Completed, CompletedItem{Text: "pending claim"})
+			},
+		},
+		{
 			name: "completed with blocker",
 			mutate: func(s *CheckpointState) {
 				s.Status = StatusCompleted
@@ -330,8 +346,13 @@ func TestVerificationDebt(t *testing.T) {
 	if got := s.VerificationDebt(); got != 1 {
 		t.Fatalf("debt = %d, want 1 (one pending check)", got)
 	}
+	s.Completed = append(s.Completed, CompletedItem{Text: "unverified claim"})
+	if got := s.VerificationDebt(); got != 2 {
+		t.Fatalf("debt = %d, want 2 (pending check plus unevidenced claim)", got)
+	}
 	s.Checks[1].Status = VerificationPass
 	s.Checks[1].EvidenceID = "ev_2"
+	s.Completed[1].EvidenceID = "ev_3"
 	if got := s.VerificationDebt(); got != 0 {
 		t.Fatalf("debt = %d, want 0", got)
 	}

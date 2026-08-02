@@ -58,8 +58,10 @@ type CheckpointState struct {
 }
 
 // CompletedItem is one evidence-linked completed claim. Claims require
-// evidence (spec decision 9); EvidenceID may be empty only for items still
-// awaiting verification, which then must appear in Checks as debt.
+// evidence (spec decision 9): an item may carry an empty EvidenceID only
+// while the task is still in flight — it then counts as verification debt
+// (see VerificationDebt) — and a task cannot reach StatusCompleted while
+// any completed item is unevidenced (see Validate).
 type CompletedItem struct {
 	Text       string `json:"text"`
 	EvidenceID string `json:"evidence_id,omitempty"`
@@ -157,6 +159,11 @@ func (s CheckpointState) Validate() error {
 				return fmt.Errorf("taskstate: task cannot complete: required verification %q is %s", v.Check, v.Status)
 			}
 		}
+		for i, item := range s.Completed {
+			if strings.TrimSpace(item.EvidenceID) == "" {
+				return fmt.Errorf("taskstate: task cannot complete: completed item %d (%q) has no evidence id", i, item.Text)
+			}
+		}
 		if s.Blocker != nil {
 			return fmt.Errorf("taskstate: task cannot complete with an active blocker")
 		}
@@ -167,13 +174,19 @@ func (s CheckpointState) Validate() error {
 	return nil
 }
 
-// VerificationDebt is the count of verification entries that are not an
-// evidenced pass. The controller's risk-weighted debt scalar builds on
-// this; the raw count is the schema-level building block.
+// VerificationDebt counts unresolved verification: checks that are not an
+// evidenced pass, plus completed items that carry no evidence yet. The
+// controller's risk-weighted debt scalar builds on this; the raw count is
+// the schema-level building block.
 func (s CheckpointState) VerificationDebt() int {
 	debt := 0
 	for _, v := range s.Checks {
 		if v.Status != VerificationPass {
+			debt++
+		}
+	}
+	for _, item := range s.Completed {
+		if strings.TrimSpace(item.EvidenceID) == "" {
 			debt++
 		}
 	}

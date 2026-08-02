@@ -22,7 +22,6 @@ type CheckpointLedger interface {
 // which the ledger row then references by ID.
 type EvidenceWriter interface {
 	Put(ctx context.Context, object evidence.Object) (evidence.Object, error)
-	Get(ctx context.Context, id string) (evidence.Object, error)
 }
 
 // Manager persists checkpoints and compiles resume context. It composes

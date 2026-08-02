@@ -46,7 +46,7 @@ func RenderMarkdown(s CheckpointState) string {
 	if len(s.Checks) > 0 {
 		b.WriteString("\n# Verification\n")
 		b.WriteString("| Check | Scope | Status | Evidence |\n")
-		b.WriteString("|---|---|---:|---|\n")
+		b.WriteString("|---|---|---|---|\n")
 		for _, v := range s.Checks {
 			evidence := "—"
 			if v.EvidenceID != "" {
