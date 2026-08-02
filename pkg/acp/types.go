@@ -331,6 +331,14 @@ type SessionUpdate struct {
 	// ConfigOptions is populated for config_option_update notifications (S8):
 	// the full updated set of session config options after a change.
 	ConfigOptions []SessionConfigOption `json:"configOptions,omitempty"`
+	// UsageUsed/UsageSize/UsageCost are populated for usage_update
+	// notifications (N1). Wire field names are "used"/"size"/"cost" --
+	// prefixed here to stay unambiguous alongside every other kind's
+	// fields on this shared struct. Pointers (rather than bare
+	// zero-value-omits-on-marshal ints) so a genuine 0 still serializes.
+	UsageUsed *uint64 `json:"used,omitempty"`
+	UsageSize *uint64 `json:"size,omitempty"`
+	UsageCost *Cost   `json:"cost,omitempty"`
 
 	ToolCallID string             `json:"toolCallId,omitempty"`
 	Title      string             `json:"title,omitempty"`
@@ -445,9 +453,17 @@ const (
 	SessionUpdateCurrentModeUpdate  = "current_mode_update"
 	SessionUpdateAvailableCommands  = "available_commands_update"
 	SessionUpdateConfigOptionUpdate = "config_option_update"
+	SessionUpdateUsageUpdate        = "usage_update"
 	SessionUpdateToolCall           = "tool_call"
 	SessionUpdateToolCallUpdate     = "tool_call_update"
 )
+
+// Cost is the optional cumulative session cost carried by a usage_update
+// notification (N1).
+type Cost struct {
+	Amount   float64 `json:"amount"`
+	Currency string  `json:"currency"`
+}
 
 // AvailableCommand describes a slash command advertised by the agent.
 type AvailableCommand struct {
@@ -492,6 +508,14 @@ func NewConfigOptionUpdate(options []SessionConfigOption) SessionUpdate {
 // whenever the skill set backing those commands changes.
 func NewAvailableCommandsUpdate(commands []AvailableCommand) SessionUpdate {
 	return SessionUpdate{SessionUpdate: SessionUpdateAvailableCommands, AvailableCommands: commands}
+}
+
+// NewUsageUpdate reports context window and cost usage after a turn (N1):
+// used is the token count consumed, size is the model's total context
+// window. cost may be nil -- Buckley does not always have a per-request
+// USD figure available.
+func NewUsageUpdate(used, size uint64, cost *Cost) SessionUpdate {
+	return SessionUpdate{SessionUpdate: SessionUpdateUsageUpdate, UsageUsed: &used, UsageSize: &size, UsageCost: cost}
 }
 
 // ToolCallContent describes output emitted by a tool call.

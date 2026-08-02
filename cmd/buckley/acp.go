@@ -914,6 +914,13 @@ func runACPLoop(
 	modelID := resolveACPExecutionModel(cfg, mgr, engine, modelOverride)
 	evaluator := newACPEvaluator(engine)
 	useTools := acpModelCanUseTools(registry, mgr, modelID)
+	// N1: contextWindow is resolved once per prompt turn (the model does
+	// not change mid-turn) and paired with each round's model.Usage to
+	// report usage_update as "tokens used out of this context window".
+	contextWindow := 0
+	if mgr != nil {
+		contextWindow, _ = mgr.GetContextLength(modelID)
+	}
 	nudgeCount := 0
 	finalizeNudgeCount := 0
 	toolsExecuted := false
@@ -932,7 +939,7 @@ func runACPLoop(
 		// S1: stream the turn so agent_message_chunk/agent_thought_chunk
 		// reach the client per provider delta, instead of buffering the
 		// whole turn and sending one chunk at the end.
-		msg, _, err := streamACPTurn(ctx, mgr, req, stream)
+		msg, usage, err := streamACPTurn(ctx, mgr, req, stream)
 		if err != nil {
 			if useTools && isToolUnsupportedError(err) {
 				useTools = false
@@ -940,6 +947,11 @@ func runACPLoop(
 			}
 			return "", err
 		}
+		// N1: the round's usage is available right after the round
+		// completes -- report it immediately rather than waiting for the
+		// whole prompt turn to finish, so a multi-round tool turn shows
+		// live context-window growth.
+		sendACPUsageUpdate(stream, usage, contextWindow)
 
 		if len(msg.ToolCalls) == 0 {
 			text, err := model.ExtractTextContent(msg.Content)
@@ -1058,6 +1070,20 @@ func forwardACPStreamDelta(stream acp.StreamFunc, delta model.MessageDelta) {
 	if delta.Content != "" {
 		_ = stream(acp.NewAgentMessageChunk(delta.Content))
 	}
+}
+
+// sendACPUsageUpdate emits a usage_update session update (N1) for one
+// model round-trip: used is that round's total token count (from
+// model.Usage, available once the round's streaming completes), size is
+// the model's context window. It is a no-op when usage or the context
+// window is unavailable rather than sending a misleading zero/zero
+// update. Buckley does not track a per-request USD cost here, so the
+// optional cost field is left unset.
+func sendACPUsageUpdate(stream acp.StreamFunc, usage *model.Usage, contextWindow int) {
+	if stream == nil || usage == nil || contextWindow <= 0 {
+		return
+	}
+	_ = stream(acp.NewUsageUpdate(uint64(usage.TotalTokens), uint64(contextWindow), nil))
 }
 
 const acpMaxToolNudges = 2
