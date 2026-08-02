@@ -31,6 +31,13 @@ func TestDefaultConfig_Hooks(t *testing.T) {
 	}
 }
 
+// The TestMergeHooksConfig_* tests below called the section-specific
+// mergeHooksConfig function before the reflection-driven rewrite. That
+// function no longer exists: hooks.* now merges through mergeConfigs's
+// default field-by-field walk (pkg/config/merge.go), same as most other
+// sections. These tests keep their original names and assertions and now
+// exercise the same behavior through the single public entry point.
+
 func TestMergeHooksConfig_EnabledAndTimeoutOverride(t *testing.T) {
 	base := DefaultConfig()
 	if base.Hooks.Enabled {
@@ -45,7 +52,7 @@ func TestMergeHooksConfig_EnabledAndTimeoutOverride(t *testing.T) {
 		},
 	}
 
-	mergeHooksConfig(base, override, raw)
+	mergeConfigs(base, override, raw, false)
 
 	if !base.Hooks.Enabled {
 		t.Fatal("expected hooks.enabled to be overridden to true")
@@ -60,7 +67,7 @@ func TestMergeHooksConfig_PreservesDefaultsWhenNotOverridden(t *testing.T) {
 	override := &Config{}
 	raw := map[string]any{}
 
-	mergeHooksConfig(base, override, raw)
+	mergeConfigs(base, override, raw, false)
 
 	if base.Hooks.Enabled {
 		t.Fatal("expected hooks.enabled to remain false when not present in raw config")

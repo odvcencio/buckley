@@ -125,6 +125,13 @@ func TestExpandMCPEnv_Empty(t *testing.T) {
 	}
 }
 
+// The TestMergeMCPConfig_* tests below called the section-specific
+// mergeMCPConfig function before the reflection-driven rewrite. That
+// function no longer exists: mcp.servers now merges through mergeConfigs
+// (pkg/config/merge.go), driven by the mergeMCPServers strategy hook.
+// These tests keep their original names and assertions and now exercise
+// the same behavior through the single public entry point.
+
 func TestMergeMCPConfig_ServersByName(t *testing.T) {
 	base := DefaultConfig()
 	base.MCP.Servers = []MCPServerConfig{
@@ -142,7 +149,7 @@ func TestMergeMCPConfig_ServersByName(t *testing.T) {
 		},
 	}
 
-	mergeMCPConfig(base, override, raw)
+	mergeConfigs(base, override, raw, false)
 
 	if len(base.MCP.Servers) != 3 {
 		t.Fatalf("expected 3 merged servers, got %d: %+v", len(base.MCP.Servers), base.MCP.Servers)
@@ -176,7 +183,7 @@ func TestMergeMCPConfig_EnabledAndMaxToolsOverride(t *testing.T) {
 		},
 	}
 
-	mergeMCPConfig(base, override, raw)
+	mergeConfigs(base, override, raw, false)
 
 	if !base.MCP.Enabled {
 		t.Fatal("expected mcp.enabled to be overridden to true")
@@ -191,7 +198,7 @@ func TestMergeMCPConfig_PreservesDefaultsWhenNotOverridden(t *testing.T) {
 	override := &Config{}
 	raw := map[string]any{}
 
-	mergeMCPConfig(base, override, raw)
+	mergeConfigs(base, override, raw, false)
 
 	if base.MCP.Enabled {
 		t.Fatal("expected mcp.enabled to remain false when not present in raw config")
