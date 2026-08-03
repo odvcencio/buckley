@@ -2,6 +2,7 @@ package execmode
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -334,4 +335,67 @@ func main() {
 	if !strings.Contains(result.Stdout, "blocked=5") {
 		t.Fatalf("stdout = %q, want all five checks to hold\nstderr:\n%s", result.Stdout, result.Stderr)
 	}
+}
+
+// TestBroker_GuidanceAndRicherCapabilities locks the efficiency
+// affordances: listing a file returns actionable guidance rather than a
+// bare error, WalkDir returns the whole tree in one call, and the glob
+// filter narrows a search to matching file names.
+func TestBroker_GuidanceAndRicherCapabilities(t *testing.T) {
+	t.Parallel()
+	workspace := newWorkspace(t)
+	broker, err := NewBroker(workspace, &recordingSink{})
+	if err != nil {
+		t.Fatalf("NewBroker: %v", err)
+	}
+
+	_, err = broker.filesList(map[string]any{"dir": "greeting.txt"})
+	if err == nil || !strings.Contains(err.Error(), "use ReadFile") {
+		t.Fatalf("listing a file returned %v, want ReadFile guidance", err)
+	}
+
+	out, err := broker.filesList(map[string]any{"dir": ".", "recursive": true})
+	if err != nil {
+		t.Fatalf("recursive list: %v", err)
+	}
+	entries := out.(map[string]any)["entries"].([]string)
+	var sawNested bool
+	for _, entry := range entries {
+		if entry == "sub/notes.md" {
+			sawNested = true
+		}
+	}
+	if !sawNested {
+		t.Fatalf("recursive list = %v, want the nested file", entries)
+	}
+
+	if got := globSearchCount(t, broker, "needle", "*.md"); got != 1 {
+		t.Fatalf("glob search matches = %d, want 1", got)
+	}
+	if got := globSearchCount(t, broker, "needle", "*.go"); got != 0 {
+		t.Fatalf("non-matching glob returned %d matches", got)
+	}
+}
+
+// globSearchCount counts matches through a JSON round-trip so the test
+// does not depend on the broker's anonymous result struct.
+func globSearchCount(t *testing.T, broker *Broker, pattern, glob string) int {
+	t.Helper()
+	out, err := broker.searchText(map[string]any{"pattern": pattern, "glob": glob})
+	if err != nil {
+		t.Fatalf("search %q glob %q: %v", pattern, glob, err)
+	}
+	raw, err := json.Marshal(out)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var decoded struct {
+		Matches []struct {
+			File string `json:"file"`
+		} `json:"matches"`
+	}
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	return len(decoded.Matches)
 }

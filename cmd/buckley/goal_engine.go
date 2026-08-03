@@ -39,6 +39,11 @@ type goalTurnEngine struct {
 	evidence evidence.Store
 	engine   *rules.Engine
 	workDir  string
+	// codeMode narrows the offered tool pool to the code-execution
+	// surface. The whole premise of code mode is that one programmable
+	// surface replaces a catalog of verbs; leaving the full catalog
+	// loaded would pay the schema cost the surface exists to avoid.
+	codeMode bool
 }
 
 func newGoalTurnEngine(cfg *config.Config, mgr *model.Manager, registry *tool.Registry, ev evidence.Store, workDir string) *goalTurnEngine {
@@ -48,6 +53,11 @@ func newGoalTurnEngine(cfg *config.Config, mgr *model.Manager, registry *tool.Re
 	}
 	return &goalTurnEngine{cfg: cfg, mgr: mgr, registry: registry, evidence: ev, engine: engine, workDir: workDir}
 }
+
+// codeModeTools is the narrow pool a code-mode turn offers: the program
+// surface, one escape hatch for actions programs cannot take (shell),
+// and the file editor, since exec programs are read-only by design.
+var codeModeTools = []string{"exec_program", "run_shell", "edit_file", "write_file"}
 
 // goalTurnState collects what one turn's tool calls report.
 type goalTurnState struct {
@@ -62,7 +72,7 @@ func (e *goalTurnEngine) RunTurn(ctx context.Context, task goalloop.TaskContext)
 	modelID := model.ResolvePhaseModel(e.cfg, e.mgr, e.engine, "execution", "")
 	state := &goalTurnState{}
 	messages := []model.Message{
-		{Role: "system", Content: goalTurnSystemPrompt(task)},
+		{Role: "system", Content: goalTurnSystemPrompt(task, e.codeMode)},
 		{Role: "user", Content: goalTurnUserPrompt(task)},
 	}
 
@@ -70,7 +80,11 @@ func (e *goalTurnEngine) RunTurn(ctx context.Context, task goalloop.TaskContext)
 	if e.engine != nil {
 		evaluator = rules.NewEngineAdapter(e.engine)
 	}
-	tools := e.registry.ToOpenAIFunctionsGoverned(evaluator, "interactive", "coding", goalTurnAllowedTools(task.Phase), 0)
+	allowed := goalTurnAllowedTools(task.Phase)
+	if e.codeMode {
+		allowed = intersectToolNames(allowed, codeModeTools)
+	}
+	tools := e.registry.ToOpenAIFunctionsGoverned(evaluator, "interactive", "coding", allowed, 0)
 	tools = append(tools, goalCompleteToolSchema(), goalBlockedToolSchema())
 
 	buildRequest := func(ctx context.Context, round int) (model.ChatRequest, error) {
@@ -176,11 +190,15 @@ func (e *goalTurnEngine) dispatchGoalTool(ctx context.Context, task goalloop.Tas
 		return agentloop.ToolOutcome{Content: "Blocker recorded. The task will park with this reason.", Success: true}
 	}
 
-	// Enforce the phase allowlist at dispatch too: the model only sees
-	// the narrowed pool, but a hallucinated call to an unoffered tool
-	// must fail here, not execute.
-	if !tool.IsToolAllowed(call.Function.Name, goalTurnAllowedTools(task.Phase)) {
-		return agentloop.ToolOutcome{Content: fmt.Sprintf("Error: tool %s is not available in the %s phase", call.Function.Name, task.Phase)}
+	// Enforce the allowlist at dispatch too: the model only sees the
+	// narrowed pool, but a hallucinated call to an unoffered tool must
+	// fail here, not execute.
+	allowed := goalTurnAllowedTools(task.Phase)
+	if e.codeMode {
+		allowed = intersectToolNames(allowed, codeModeTools)
+	}
+	if !tool.IsToolAllowed(call.Function.Name, allowed) {
+		return agentloop.ToolOutcome{Content: fmt.Sprintf("Error: tool %s is not available in this turn", call.Function.Name)}
 	}
 
 	if registered, ok := e.registry.Get(call.Function.Name); ok {
@@ -243,7 +261,26 @@ func goalTurnAllowedTools(phase string) []string {
 	}
 }
 
-func goalTurnSystemPrompt(task goalloop.TaskContext) string {
+// intersectToolNames narrows an allowlist by another. A nil base means
+// "everything allowed", so the narrower list wins outright.
+func intersectToolNames(base, narrow []string) []string {
+	if len(base) == 0 {
+		return narrow
+	}
+	baseSet := make(map[string]bool, len(base))
+	for _, name := range base {
+		baseSet[name] = true
+	}
+	out := make([]string, 0, len(narrow))
+	for _, name := range narrow {
+		if baseSet[name] {
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
+func goalTurnSystemPrompt(task goalloop.TaskContext, codeMode bool) string {
 	var b strings.Builder
 	b.WriteString("You are Buckley working one task of a durable goal. Use tools to do real work; do not describe work you have not done.\n\n")
 	fmt.Fprintf(&b, "Goal: %s\n", task.Goal.Statement)
@@ -259,6 +296,10 @@ func goalTurnSystemPrompt(task goalloop.TaskContext) string {
 	}
 	if task.Phase == goalloop.PhaseVerify {
 		b.WriteString("\nThis is a VERIFY turn: run the cheapest checks that prove or disprove the work (build, tests, lint). Do not explore or edit beyond what verification needs.\n")
+	}
+	if codeMode {
+		b.WriteString("\nCODE MODE: prefer one exec_program run over a chain of read/search calls — plan the whole investigation as a program, run it once, and read the printed result. " +
+			"Iterate inside this turn: if the program fails to compile or a caps call errors, fix the source and call exec_program again immediately. Never end the turn to retry a program.\n")
 	}
 	b.WriteString("\nWhen the task is genuinely done, call " + goalCompleteToolName + " with a short factual summary. ")
 	b.WriteString("If you cannot proceed without something you lack (credentials, a decision, missing state), call " + goalBlockedToolName + " instead of guessing.")

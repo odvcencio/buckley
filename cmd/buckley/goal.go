@@ -152,7 +152,9 @@ func runGoalRun(args []string) error {
 			}
 			registry.Register(execTool)
 		}
-		engine = newGoalTurnEngine(cfg, mgr, registry, stores.evidence, workDir)
+		turnEngine := newGoalTurnEngine(cfg, mgr, registry, stores.evidence, workDir)
+		turnEngine.codeMode = *execProgram
+		engine = turnEngine
 	}
 
 	loop, err := goalloop.New(goalloop.Config{

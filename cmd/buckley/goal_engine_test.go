@@ -171,7 +171,7 @@ func TestGoalTurnEngine_VerifyPhaseRejectsEditors(t *testing.T) {
 	outcome := engine.dispatchGoalTool(context.Background(), goalloop.TaskContext{Phase: goalloop.PhaseVerify},
 		model.ToolCall{ID: "call-1", Function: model.FunctionCall{Name: "write_file", Arguments: "{}"}},
 		&goalTurnState{})
-	if outcome.Success || !strings.Contains(outcome.Content, "not available in the verify phase") {
+	if outcome.Success || !strings.Contains(outcome.Content, "not available in this turn") {
 		t.Fatalf("outcome = %+v, want a phase rejection", outcome)
 	}
 }
@@ -184,11 +184,51 @@ func TestGoalTurnEngine_VerifyPhasePrompt(t *testing.T) {
 		Goal:  goalloop.Goal{Statement: "g"},
 		Spec:  goalloop.TaskSpec{Title: "t"},
 		Phase: goalloop.PhaseVerify,
-	})
+	}, false)
 	if !strings.Contains(prompt, "VERIFY turn") {
 		t.Fatalf("verify prompt missing instruction:\n%s", prompt)
 	}
 	if !strings.Contains(prompt, goalCompleteToolName) || !strings.Contains(prompt, goalBlockedToolName) {
 		t.Fatalf("prompt missing goal tool guidance:\n%s", prompt)
+	}
+}
+
+// TestIntersectToolNames locks the code-mode narrowing: an unfiltered
+// base yields the narrow pool outright, and a phase-filtered base keeps
+// only the overlap (verify keeps exec_program and run_shell, drops the
+// editors).
+func TestIntersectToolNames(t *testing.T) {
+	t.Parallel()
+	if got := intersectToolNames(nil, codeModeTools); len(got) != len(codeModeTools) {
+		t.Fatalf("nil base = %v, want the full narrow pool", got)
+	}
+	got := intersectToolNames(goalTurnAllowedTools(goalloop.PhaseVerify), codeModeTools)
+	allowed := map[string]bool{}
+	for _, name := range got {
+		allowed[name] = true
+	}
+	if !allowed["exec_program"] || !allowed["run_shell"] {
+		t.Fatalf("verify code-mode pool = %v, want exec_program and run_shell", got)
+	}
+	if allowed["edit_file"] || allowed["write_file"] {
+		t.Fatalf("verify code-mode pool includes an editor: %v", got)
+	}
+}
+
+// TestGoalTurnSystemPrompt_CodeMode locks the in-turn iteration
+// instruction: without it the model ends its turn to retry a failed
+// program, which is what made the first live run cost seven turns.
+func TestGoalTurnSystemPrompt_CodeMode(t *testing.T) {
+	t.Parallel()
+	task := goalloop.TaskContext{Goal: goalloop.Goal{Statement: "g"}, Spec: goalloop.TaskSpec{Title: "t"}}
+	plain := goalTurnSystemPrompt(task, false)
+	if strings.Contains(plain, "CODE MODE") {
+		t.Fatal("code-mode guidance leaked into a normal turn")
+	}
+	coded := goalTurnSystemPrompt(task, true)
+	for _, want := range []string{"CODE MODE", "Iterate inside this turn", "Never end the turn to retry"} {
+		if !strings.Contains(coded, want) {
+			t.Fatalf("code-mode prompt missing %q:\n%s", want, coded)
+		}
 	}
 }
