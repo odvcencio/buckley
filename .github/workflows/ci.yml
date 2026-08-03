@@ -64,6 +64,15 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      - name: Install bubblewrap (execmode sandbox tests)
+        if: steps.changes.outputs.go == 'true'
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq bubblewrap
+          # Ubuntu 24.04 runners restrict unprivileged user namespaces via
+          # AppArmor, which breaks bwrap (and any userns-based sandbox
+          # probe) with RTM_NEWADDR permission errors. Lift it for tests.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+
       - name: Check changed Go formatting
         if: steps.changes.outputs.go == 'true'
         env:

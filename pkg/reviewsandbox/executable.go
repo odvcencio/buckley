@@ -23,6 +23,11 @@ func trustedExecutableDirectories() []string {
 		// verify modules that have already raised their go directive.
 		candidates = appendGlobDirectoriesDescending(candidates, filepath.Join(home, "sdk", "go*", "bin"))
 	}
+	// CI hosted toolcaches (GitHub Actions setup-go) install below
+	// /opt/hostedtoolcache; without this entry the sandbox falls back to
+	// the runner image's older system Go and modules with a raised go
+	// directive fail verification inside an otherwise-correct sandbox.
+	candidates = appendGlobDirectoriesDescending(candidates, "/opt/hostedtoolcache/go/*/x64/bin")
 	candidates = append(candidates,
 		"/usr/local/go/bin",
 		"/usr/local/bin",

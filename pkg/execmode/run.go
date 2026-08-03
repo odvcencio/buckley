@@ -32,21 +32,51 @@ type Result struct {
 // Runner executes model-written Go programs against a jailed broker. The
 // zero value is unusable; construct with NewRunner.
 type Runner struct {
-	workspaceRoot string
-	audit         AuditSink
-	timeout       time.Duration
+	workspaceRoot    string
+	audit            AuditSink
+	timeout          time.Duration
+	isolation        string
+	allowUnsandboxed bool
+}
+
+// RunnerOption configures NewRunner.
+type RunnerOption func(*Runner)
+
+// WithoutIsolation opts a Runner out of OS sandboxing. Library and test
+// use only: the program then runs with shell-equivalent risk, and the
+// model-facing tool never uses this option.
+func WithoutIsolation() RunnerOption {
+	return func(r *Runner) {
+		r.isolation = IsolationNone
+		r.allowUnsandboxed = true
+	}
 }
 
 // NewRunner wires a Runner. The audit sink is required (see NewBroker).
-func NewRunner(workspaceRoot string, audit AuditSink, timeout time.Duration) (*Runner, error) {
+// Isolation defaults to the strongest available mode and Run refuses to
+// execute when that is not bwrap — an unsandboxed run must be an
+// explicit caller decision, never a silent fallback.
+func NewRunner(workspaceRoot string, audit AuditSink, timeout time.Duration, opts ...RunnerOption) (*Runner, error) {
 	if timeout <= 0 {
 		timeout = DefaultTimeout
 	}
 	if audit == nil {
 		return nil, fmt.Errorf("execmode: an audit sink is required")
 	}
-	return &Runner{workspaceRoot: workspaceRoot, audit: audit, timeout: timeout}, nil
+	runner := &Runner{
+		workspaceRoot: workspaceRoot,
+		audit:         audit,
+		timeout:       timeout,
+		isolation:     DetectIsolation(),
+	}
+	for _, opt := range opts {
+		opt(runner)
+	}
+	return runner, nil
 }
+
+// Isolation reports the mode this Runner executes under.
+func (r *Runner) Isolation() string { return r.isolation }
 
 // Run scaffolds a scratch module around source, starts a per-run broker,
 // and executes the program with a scrubbed environment: the process sees
@@ -90,7 +120,20 @@ func (r *Runner) Run(ctx context.Context, source string) (Result, error) {
 	runCtx, cancel := context.WithTimeout(ctx, r.timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(runCtx, "go", "run", ".")
+	goCache := sharedGoCache()
+	var cmd *exec.Cmd
+	switch {
+	case r.isolation == IsolationBwrap:
+		argv, err := sandboxArgv(scratch, goCache)
+		if err != nil {
+			return Result{}, err
+		}
+		cmd = exec.CommandContext(runCtx, argv[0], argv[1:]...)
+	case r.allowUnsandboxed:
+		cmd = exec.CommandContext(runCtx, "go", "run", ".")
+	default:
+		return Result{}, fmt.Errorf("execmode: OS isolation unavailable (install bubblewrap); refusing to run unsandboxed without an explicit WithoutIsolation opt-in")
+	}
 	cmd.Dir = scratch
 	// Scrubbed environment: nothing from Buckley's process leaks in.
 	// GOCACHE is a shared, content-addressed warm cache — a cold cache
@@ -98,7 +141,7 @@ func (r *Runner) Run(ctx context.Context, source string) (Result, error) {
 	cmd.Env = []string{
 		"PATH=" + os.Getenv("PATH"),
 		"HOME=" + scratch,
-		"GOCACHE=" + sharedGoCache(),
+		"GOCACHE=" + goCache,
 		"GOFLAGS=-mod=mod",
 		"GOPROXY=off",
 		"BUCKLEY_CAPS_SOCKET=" + broker.SocketPath(),
@@ -138,6 +181,35 @@ func (r *Runner) Run(ctx context.Context, source string) (Result, error) {
 		return result, fmt.Errorf("execmode: run: %w", err)
 	}
 	return result, nil
+}
+
+// RunFW transpiles a Ferrous Wheel (.fw) program to Go with the host
+// ferrous-wheel toolchain, then runs it exactly like Run. The transpiler
+// is a trusted host binary (its output is plain Go compiled in the same
+// sandbox); when it is not installed the dialect is unavailable.
+func (r *Runner) RunFW(ctx context.Context, fwSource string) (Result, error) {
+	transpiler, err := exec.LookPath("ferrous-wheel")
+	if err != nil {
+		return Result{}, fmt.Errorf("execmode: ferrous-wheel not installed; the fw dialect is unavailable")
+	}
+	scratch, err := os.MkdirTemp("", "buckley-fw-*")
+	if err != nil {
+		return Result{}, fmt.Errorf("execmode: fw scratch: %w", err)
+	}
+	defer os.RemoveAll(scratch)
+	fwPath := filepath.Join(scratch, "main.fw")
+	if err := os.WriteFile(fwPath, []byte(fwSource), 0o644); err != nil {
+		return Result{}, fmt.Errorf("execmode: write fw source: %w", err)
+	}
+	out, err := exec.CommandContext(ctx, transpiler, "emit", fwPath).Output()
+	if err != nil {
+		detail := err.Error()
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			detail = strings.TrimSpace(string(exitErr.Stderr))
+		}
+		return Result{}, fmt.Errorf("execmode: fw transpile failed: %s", detail)
+	}
+	return r.Run(ctx, string(out))
 }
 
 // sharedGoCache returns the warm build cache all exec programs share.
