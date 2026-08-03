@@ -79,6 +79,7 @@ Check `docs/architecture/decisions/` before making architectural changes. Key de
 | 0008 | Event-driven telemetry | Pub/sub hub for workflow observability |
 | 0009 | RLM runtime | Iterative refinement with tiered model routing |
 | 0010 | Custom TUI runtime | Retained-mode rendering, dirty tracking, testable |
+| 0013 | Code execution surface | One `exec_program` tool over brokered, sandboxed capabilities |
 
 If your change conflicts with an ADR, either follow the existing decision or propose a new ADR.
 

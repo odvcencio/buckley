@@ -26,6 +26,7 @@ Each ADR should include:
 - [ADR 0010: Custom TUI Runtime](0010-custom-tui-runtime.md) – Superseded
 - [ADR 0011: Servo Embedder Browser Runtime](0011-servo-embedder-browser-runtime.md) – Proposed
 - [ADR 0012: FluffyUI Terminal and GoSX Web/Desktop Clients](0012-fluffyui-gosx-client-surfaces.md) – Accepted (staged migration)
+- [ADR 0013: Code Execution Surface with Brokered Capabilities](0013-code-execution-surface.md) – Accepted
 
 ---
 
