@@ -37,6 +37,7 @@ type Runner struct {
 	timeout          time.Duration
 	isolation        string
 	allowUnsandboxed bool
+	capabilities     []string
 }
 
 // RunnerOption configures NewRunner.
@@ -50,6 +51,13 @@ func WithoutIsolation() RunnerOption {
 		r.isolation = IsolationNone
 		r.allowUnsandboxed = true
 	}
+}
+
+// WithCapabilitySet restricts every run to a capability grant (see
+// execmode.ReadOnlySet, execmode.MinimalSet). The default is the full
+// read-only surface.
+func WithCapabilitySet(capabilities ...string) RunnerOption {
+	return func(r *Runner) { r.capabilities = capabilities }
 }
 
 // NewRunner wires a Runner. The audit sink is required (see NewBroker).
@@ -68,6 +76,7 @@ func NewRunner(workspaceRoot string, audit AuditSink, timeout time.Duration, opt
 		audit:         audit,
 		timeout:       timeout,
 		isolation:     DetectIsolation(),
+		capabilities:  ReadOnlySet,
 	}
 	for _, opt := range opts {
 		opt(runner)
@@ -85,11 +94,12 @@ func (r *Runner) Isolation() string { return r.isolation }
 // `package main` program; it may import "execprogram/caps" for the typed
 // capability client the scaffold provides.
 //
-// Isolation boundary: the scrub removes environment secrets and GOPROXY
-// is off, but the process is NOT OS-sandboxed — it runs as the local
-// user with filesystem and network access. Callers exposing Run to a
-// model must say so in their tool contract and treat the surface like
-// shell execution until OS-level isolation lands.
+// Isolation boundary: by default the process runs under bubblewrap with
+// no network, a read-only system view, no workspace mount, and writes
+// confined to scratch; the environment is scrubbed and GOPROXY is off.
+// Run refuses to execute when that sandbox is unavailable unless the
+// caller passed WithoutIsolation, which downgrades the surface to
+// shell-equivalent risk and is for library and test use only.
 func (r *Runner) Run(ctx context.Context, source string) (Result, error) {
 	if len(source) > maxSourceBytes {
 		return Result{}, fmt.Errorf("execmode: source exceeds %d bytes", maxSourceBytes)
@@ -108,7 +118,11 @@ func (r *Runner) Run(ctx context.Context, source string) (Result, error) {
 		return Result{}, err
 	}
 
-	broker, err := NewBroker(r.workspaceRoot, r.audit)
+	// The token outlives the program by a margin only, and the grant is
+	// the run's, not the surface's.
+	broker, err := NewBroker(r.workspaceRoot, r.audit,
+		WithCapabilities(r.capabilities...),
+		WithTokenTTL(r.timeout+time.Minute))
 	if err != nil {
 		return Result{}, err
 	}

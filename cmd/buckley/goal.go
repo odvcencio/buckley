@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"m31labs.dev/buckley/pkg/evidence"
+	"m31labs.dev/buckley/pkg/execmode"
 	"m31labs.dev/buckley/pkg/goalloop"
 	"m31labs.dev/buckley/pkg/ralph"
 	"m31labs.dev/buckley/pkg/runledger"
@@ -105,6 +106,7 @@ func runGoalRun(args []string) error {
 	fs := flag.NewFlagSet("goal run", flag.ContinueOnError)
 	backendName := fs.String("backend", "", "delegate whole tasks to an external CLI backend (claude, codex) instead of the internal engine")
 	execProgram := fs.Bool("exec-program", false, "offer the exec_program code-mode tool (read-only jailed capabilities, fully audited); internal engine only")
+	execCaps := fs.String("exec-caps", "readonly", "capability grant for exec_program: readonly (read, list, search) | minimal (read, list)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -146,7 +148,13 @@ func runGoalRun(args []string) error {
 		registry.ConfigureContainers(cfg, workDir)
 		registry.SetWorkDir(workDir)
 		if *execProgram {
-			execTool, err := newExecProgramTool(workDir, stores.ledger, stores.evidence, runID, "goal-cli")
+			capabilities := execmode.ReadOnlySet
+			if *execCaps == "minimal" {
+				capabilities = execmode.MinimalSet
+			} else if *execCaps != "readonly" {
+				return fmt.Errorf("unknown --exec-caps %q (want readonly or minimal)", *execCaps)
+			}
+			execTool, err := newExecProgramTool(workDir, stores.ledger, stores.evidence, runID, "goal-cli", capabilities)
 			if err != nil {
 				return err
 			}

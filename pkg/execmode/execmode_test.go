@@ -399,3 +399,72 @@ func globSearchCount(t *testing.T, broker *Broker, pattern, glob string) int {
 	}
 	return len(decoded.Matches)
 }
+
+// TestBroker_CapabilityGrantEnforced locks per-run capability scoping: a
+// valid token does not imply every capability. A run granted MinimalSet
+// can read and list but is refused search, and the refusal is audited as
+// a denial rather than an error.
+func TestBroker_CapabilityGrantEnforced(t *testing.T) {
+	t.Parallel()
+	workspace := newWorkspace(t)
+	sink := &recordingSink{}
+	broker, err := NewBroker(workspace, sink, WithCapabilities(MinimalSet...))
+	if err != nil {
+		t.Fatalf("NewBroker: %v", err)
+	}
+	if !broker.Granted(CapFilesRead) || broker.Granted(CapSearchText) {
+		t.Fatalf("grant = read:%v search:%v, want read granted and search withheld",
+			broker.Granted(CapFilesRead), broker.Granted(CapSearchText))
+	}
+	socket := filepath.Join(t.TempDir(), "caps.sock")
+	if err := broker.Start(socket); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer broker.Close()
+
+	ok, err := capsHTTPCall(t, socket, broker.Token(), "/v1/files/read", `{"path":"greeting.txt"}`)
+	if err != nil || ok.status != 200 {
+		t.Fatalf("granted capability failed: status=%d err=%v", ok.status, err)
+	}
+	denied, err := capsHTTPCall(t, socket, broker.Token(), "/v1/search/text", `{"pattern":"needle"}`)
+	if err != nil {
+		t.Fatalf("search call: %v", err)
+	}
+	if denied.status != 403 || !strings.Contains(denied.body, "not granted") {
+		t.Fatalf("ungranted capability = %d %q, want 403", denied.status, denied.body)
+	}
+	records := sink.byMethod(CapSearchText)
+	if len(records) != 1 || records[0].Outcome != "denied" {
+		t.Fatalf("denial audit = %+v, want one denied record", records)
+	}
+}
+
+// TestBroker_ExpiredTokenRejected locks token expiry: a token past its
+// TTL is refused even on the right socket, and the refusal is audited.
+func TestBroker_ExpiredTokenRejected(t *testing.T) {
+	t.Parallel()
+	workspace := newWorkspace(t)
+	sink := &recordingSink{}
+	broker, err := NewBroker(workspace, sink)
+	if err != nil {
+		t.Fatalf("NewBroker: %v", err)
+	}
+	broker.expires = time.Now().Add(-time.Second)
+	socket := filepath.Join(t.TempDir(), "caps.sock")
+	if err := broker.Start(socket); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer broker.Close()
+
+	resp, err := capsHTTPCall(t, socket, broker.Token(), "/v1/files/read", `{"path":"greeting.txt"}`)
+	if err != nil {
+		t.Fatalf("call: %v", err)
+	}
+	if resp.status != 401 || !strings.Contains(resp.body, "expired") {
+		t.Fatalf("expired token = %d %q, want 401 expired", resp.status, resp.body)
+	}
+	records := sink.byMethod(CapFilesRead)
+	if len(records) != 1 || records[0].Detail != "token expired" {
+		t.Fatalf("expiry audit = %+v", records)
+	}
+}
