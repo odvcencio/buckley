@@ -1,3 +1,21 @@
+// Model routing policy.
+//
+// This strategy expresses POLICY, not model identity. Hardcoding vendor
+// model names here made the rules the real configuration: a name in this
+// file silently overrode models.planning / models.execution /
+// models.review in config.yaml, so changing your configured model had no
+// effect on any path that resolves through the rules engine. Operators
+// discovered it only by reading a startup banner.
+//
+// The contract now: emit an empty `model` to mean "use the configured
+// model for this phase". The resolver treats an empty model as deferral
+// and falls back to config (pkg/model/resolver.go resolveRouting).
+//
+// A rule SHOULD name a model only when a specific task genuinely needs a
+// specific model regardless of configuration — a capability the
+// configured model lacks, for example. That is an override, and it will
+// go stale as models change, so state the reason in a comment.
+
 outcome ModelChoice {
     action: string
     model: string
@@ -6,29 +24,27 @@ outcome ModelChoice {
 strategy model_select returns ModelChoice {
     when {
         task.phase == "planning"
-        and model.supports_reasoning
-    } then PlanningReasoner {
-        action: "use",
-        model: "z-ai/glm-5.2",
+    } then PlanningConfigured {
+        action: "use_configured",
+        model: "",
     }
 
     when {
         task.phase == "execution"
-    } then ExecutionModel {
-        action: "use",
-        model: "z-ai/glm-5.2",
+    } then ExecutionConfigured {
+        action: "use_configured",
+        model: "",
     }
 
     when {
         task.phase == "review"
-        and model.supports_reasoning
-    } then ReviewReasoner {
-        action: "use",
-        model: "z-ai/glm-5.2",
+    } then ReviewConfigured {
+        action: "use_configured",
+        model: "",
     }
 
-    else DefaultModel {
-        action: "use",
-        model: "z-ai/glm-5.2",
+    else DefaultConfigured {
+        action: "use_configured",
+        model: "",
     }
 }

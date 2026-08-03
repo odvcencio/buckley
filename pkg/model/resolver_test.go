@@ -43,25 +43,25 @@ func TestResolver_Resolve(t *testing.T) {
 		want    string
 	}{
 		{
-			name:    "planning phase with reasoning routes to glm via arbiter",
+			name:    "planning phase defers to configured model",
 			engine:  engine,
 			checker: &stubReasoningChecker{models: map[string]bool{"config-planning-model": true}},
 			phase:   "planning",
-			want:    "z-ai/glm-5.2",
+			want:    "config-planning-model",
 		},
 		{
-			name:    "execution phase routes to glm via arbiter",
+			name:    "execution phase defers to configured model",
 			engine:  engine,
 			checker: &stubReasoningChecker{},
 			phase:   "execution",
-			want:    "z-ai/glm-5.2",
+			want:    "config-execution-model",
 		},
 		{
-			name:    "review phase with reasoning routes to glm via arbiter",
+			name:    "review phase defers to configured model",
 			engine:  engine,
 			checker: &stubReasoningChecker{models: map[string]bool{"config-review-model": true}},
 			phase:   "review",
-			want:    "z-ai/glm-5.2",
+			want:    "config-review-model",
 		},
 		{
 			name:    "nil engine falls back to config planning",
@@ -92,11 +92,11 @@ func TestResolver_Resolve(t *testing.T) {
 			want:    "config-execution-model",
 		},
 		{
-			name:    "review without reasoning support routes to glm default via arbiter",
+			name:    "review without reasoning support defers to configured model",
 			engine:  engine,
 			checker: &stubReasoningChecker{},
 			phase:   "review",
-			want:    "z-ai/glm-5.2",
+			want:    "config-review-model",
 		},
 	}
 
