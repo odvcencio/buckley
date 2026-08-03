@@ -81,7 +81,10 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
-          if [[ -n "${BASE_SHA}" ]]; then
+          # Same base-availability caveat as the change detection above:
+          # when the base commit is not in the clone, check every Go file
+          # rather than silently checking none.
+          if [[ -n "${BASE_SHA}" ]] && git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null; then
             mapfile -t files < <(git diff --diff-filter=d --name-only "${BASE_SHA}" "${GITHUB_SHA}" -- '*.go')
           else
             mapfile -t files < <(git ls-files '*.go')
