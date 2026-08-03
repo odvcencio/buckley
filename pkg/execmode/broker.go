@@ -53,20 +53,67 @@ type AuditSinkFunc func(record AuditRecord) error
 // Record implements AuditSink.
 func (f AuditSinkFunc) Record(record AuditRecord) error { return f(record) }
 
+// Capability names. A broker serves only the capabilities its grant
+// allows; anything else is denied and audited, even with a valid token.
+const (
+	CapFilesRead  = "files.read"
+	CapFilesList  = "files.list"
+	CapSearchText = "search.text"
+)
+
+// CapabilitySet is a named grant. ReadOnlySet is everything the surface
+// currently offers; MinimalSet drops whole-tree search, which is the
+// expensive capability on a large repository. Personas and phases pick a
+// set; the broker enforces it below the program.
+var (
+	ReadOnlySet = []string{CapFilesRead, CapFilesList, CapSearchText}
+	MinimalSet  = []string{CapFilesRead, CapFilesList}
+)
+
+// DefaultTokenTTL bounds how long a run's capability token is accepted.
+// The socket already dies with the broker; expiry is defense in depth for
+// a token that outlives its run in a log, an env dump, or a core file.
+const DefaultTokenTTL = 30 * time.Minute
+
 // Broker serves the capability surface for one run.
 type Broker struct {
-	root  string
-	token string
-	audit AuditSink
+	root    string
+	token   string
+	audit   AuditSink
+	granted map[string]bool
+	expires time.Time
 
 	server   *http.Server
 	socket   string
 	listener net.Listener
 }
 
+// BrokerOption configures NewBroker.
+type BrokerOption func(*Broker)
+
+// WithCapabilities restricts the broker to a named capability set. The
+// default is ReadOnlySet. An empty grant serves nothing.
+func WithCapabilities(capabilities ...string) BrokerOption {
+	return func(b *Broker) {
+		b.granted = make(map[string]bool, len(capabilities))
+		for _, capability := range capabilities {
+			b.granted[capability] = true
+		}
+	}
+}
+
+// WithTokenTTL overrides how long the run's token is accepted.
+func WithTokenTTL(ttl time.Duration) BrokerOption {
+	return func(b *Broker) {
+		if ttl > 0 {
+			b.expires = time.Now().Add(ttl)
+		}
+	}
+}
+
 // NewBroker jails capabilities to workspaceRoot and wires the audit sink.
-// Both are required; the token is generated per broker.
-func NewBroker(workspaceRoot string, audit AuditSink) (*Broker, error) {
+// Both are required; the token is generated per broker and expires.
+func NewBroker(workspaceRoot string, audit AuditSink, opts ...BrokerOption) (*Broker, error) {
 	if audit == nil {
 		return nil, fmt.Errorf("execmode: an audit sink is required; unaudited capability use is not allowed")
 	}
@@ -78,8 +125,21 @@ func NewBroker(workspaceRoot string, audit AuditSink) (*Broker, error) {
 	if _, err := rand.Read(buf); err != nil {
 		return nil, fmt.Errorf("execmode: generate token: %w", err)
 	}
-	return &Broker{root: root, token: hex.EncodeToString(buf), audit: audit}, nil
+	broker := &Broker{
+		root:    root,
+		token:   hex.EncodeToString(buf),
+		audit:   audit,
+		expires: time.Now().Add(DefaultTokenTTL),
+	}
+	WithCapabilities(ReadOnlySet...)(broker)
+	for _, opt := range opts {
+		opt(broker)
+	}
+	return broker, nil
 }
+
+// Granted reports whether the broker serves a capability.
+func (b *Broker) Granted(capability string) bool { return b.granted[capability] }
 
 // Token returns the per-run bearer token.
 func (b *Broker) Token() string { return b.token }
@@ -97,9 +157,9 @@ func (b *Broker) Start(socketPath string) error {
 	b.socket = socketPath
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/v1/files/read", b.handle("files.read", b.filesRead))
-	mux.HandleFunc("/v1/files/list", b.handle("files.list", b.filesList))
-	mux.HandleFunc("/v1/search/text", b.handle("search.text", b.searchText))
+	mux.HandleFunc("/v1/files/read", b.handle(CapFilesRead, b.filesRead))
+	mux.HandleFunc("/v1/files/list", b.handle(CapFilesList, b.filesList))
+	mux.HandleFunc("/v1/search/text", b.handle(CapSearchText, b.searchText))
 	b.server = &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	go func() { _ = b.server.Serve(listener) }()
 	return nil
@@ -130,6 +190,18 @@ func (b *Broker) handle(method string, capability capabilityFunc) http.HandlerFu
 		if subtle.ConstantTimeCompare([]byte(auth), []byte(b.token)) != 1 {
 			_ = b.audit.Record(AuditRecord{Method: method, Outcome: "denied", Detail: "bad token", Timestamp: time.Now().UTC()})
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		if !b.expires.IsZero() && time.Now().After(b.expires) {
+			_ = b.audit.Record(AuditRecord{Method: method, Outcome: "denied", Detail: "token expired", Timestamp: time.Now().UTC()})
+			http.Error(w, "capability token expired", http.StatusUnauthorized)
+			return
+		}
+		// Grant check sits above the capability itself: a token proves who
+		// is calling, the grant decides what they may call.
+		if !b.granted[method] {
+			_ = b.audit.Record(AuditRecord{Method: method, Outcome: "denied", Detail: "capability not granted to this run", Timestamp: time.Now().UTC()})
+			http.Error(w, "capability "+method+" is not granted to this run", http.StatusForbidden)
 			return
 		}
 

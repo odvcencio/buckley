@@ -34,7 +34,7 @@ func languageOrGo(language string) string {
 	return language
 }
 
-func newExecProgramTool(workspaceRoot string, ledger runledger.Store, ev evidence.Store, runID, sessionID string) (*execProgramTool, error) {
+func newExecProgramTool(workspaceRoot string, ledger runledger.Store, ev evidence.Store, runID, sessionID string, capabilities []string) (*execProgramTool, error) {
 	sink := execmode.AuditSinkFunc(func(record execmode.AuditRecord) error {
 		_, err := ledger.Append(context.Background(), runledger.Event{
 			Type:      "capability.call",
@@ -50,7 +50,11 @@ func newExecProgramTool(workspaceRoot string, ledger runledger.Store, ev evidenc
 		})
 		return err
 	})
-	runner, err := execmode.NewRunner(workspaceRoot, sink, execmode.DefaultTimeout)
+	if len(capabilities) == 0 {
+		capabilities = execmode.ReadOnlySet
+	}
+	runner, err := execmode.NewRunner(workspaceRoot, sink, execmode.DefaultTimeout,
+		execmode.WithCapabilitySet(capabilities...))
 	if err != nil {
 		return nil, err
 	}

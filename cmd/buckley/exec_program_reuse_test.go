@@ -37,7 +37,7 @@ func newReuseTestTool(t *testing.T) (*execProgramTool, evidence.Store, string) {
 	if err != nil {
 		t.Fatalf("StartRun: %v", err)
 	}
-	tool, err := newExecProgramTool(workspace, ledger, ev, run.RunID, "reuse-test")
+	tool, err := newExecProgramTool(workspace, ledger, ev, run.RunID, "reuse-test", nil)
 	if err != nil {
 		t.Fatalf("newExecProgramTool: %v", err)
 	}
