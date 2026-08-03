@@ -51,6 +51,7 @@ func runGoalCommand(args []string) error {
 func runGoalRun(args []string) error {
 	fs := flag.NewFlagSet("goal run", flag.ContinueOnError)
 	backendName := fs.String("backend", "", "delegate whole tasks to an external CLI backend (claude, codex) instead of the internal engine")
+	execProgram := fs.Bool("exec-program", false, "offer the exec_program code-mode tool (read-only jailed capabilities, fully audited); internal engine only")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -91,6 +92,13 @@ func runGoalRun(args []string) error {
 		tool.ApplyToolMiddlewareConfig(registry, cfg)
 		registry.ConfigureContainers(cfg, workDir)
 		registry.SetWorkDir(workDir)
+		if *execProgram {
+			execTool, err := newExecProgramTool(workDir, stores.ledger, runID, "goal-cli")
+			if err != nil {
+				return err
+			}
+			registry.Register(execTool)
+		}
 		engine = newGoalTurnEngine(cfg, mgr, registry, stores.evidence, workDir)
 	}
 
