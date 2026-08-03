@@ -19,12 +19,30 @@ const (
 	IsolationNone  = "none"
 )
 
-// DetectIsolation reports the strongest available isolation mode.
+var (
+	detectOnce sync.Once
+	detected   string
+)
+
+// DetectIsolation reports the strongest WORKING isolation mode. Presence
+// of the bwrap binary is not enough: kernels and container hosts can
+// restrict unprivileged user namespaces (observed on GitHub's Ubuntu
+// 24.04 runners via AppArmor), so detection runs one no-op sandbox and
+// believes the outcome. The probe result is cached for the process.
 func DetectIsolation() string {
-	if _, err := exec.LookPath("bwrap"); err == nil {
-		return IsolationBwrap
-	}
-	return IsolationNone
+	detectOnce.Do(func() {
+		detected = IsolationNone
+		bwrap, err := exec.LookPath("bwrap")
+		if err != nil {
+			return
+		}
+		probe := exec.Command(bwrap, "--unshare-all", "--die-with-parent",
+			"--ro-bind", "/", "/", "--proc", "/proc", "--dev", "/dev", "true")
+		if err := probe.Run(); err == nil {
+			detected = IsolationBwrap
+		}
+	})
+	return detected
 }
 
 var (
