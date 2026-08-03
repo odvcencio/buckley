@@ -530,44 +530,44 @@ func TestEngine_EvalStrategy_Routing_AllScenarios(t *testing.T) {
 		wantModel string
 	}{
 		{
-			name: "planning + reasoning supported: glm",
+			name: "planning + reasoning supported defers to config",
 			facts: map[string]any{
 				"task":  map[string]any{"phase": "planning"},
 				"model": map[string]any{"supports_reasoning": true},
 			},
-			wantModel: "z-ai/glm-5.2",
+			wantModel: "",
 		},
 		{
-			name: "execution phase: glm",
+			name: "execution phase defers to config",
 			facts: map[string]any{
 				"task":  map[string]any{"phase": "execution"},
 				"model": map[string]any{"supports_reasoning": false},
 			},
-			wantModel: "z-ai/glm-5.2",
+			wantModel: "",
 		},
 		{
-			name: "review + reasoning supported: glm",
+			name: "review defers to config",
 			facts: map[string]any{
 				"task":  map[string]any{"phase": "review"},
 				"model": map[string]any{"supports_reasoning": true},
 			},
-			wantModel: "z-ai/glm-5.2",
+			wantModel: "",
 		},
 		{
-			name: "planning + no reasoning: default glm",
+			name: "planning defers to config",
 			facts: map[string]any{
 				"task":  map[string]any{"phase": "planning"},
 				"model": map[string]any{"supports_reasoning": false},
 			},
-			wantModel: "z-ai/glm-5.2",
+			wantModel: "",
 		},
 		{
-			name: "unknown phase: default glm",
+			name: "unknown phase defers to config",
 			facts: map[string]any{
 				"task":  map[string]any{"phase": "unknown"},
 				"model": map[string]any{"supports_reasoning": true},
 			},
-			wantModel: "z-ai/glm-5.2",
+			wantModel: "",
 		},
 	}
 

@@ -136,3 +136,37 @@ render identically on another machine.
   what is needed."
 - **Nothing is pushed for you.** Commits can be prepared; pushing stays a
   deliberate act.
+
+## Delegating from a script or another agent
+
+`scripts/delegate.sh` wraps the loop for programmatic callers: one line
+in, one JSON object out, no prose parsing.
+
+```bash
+scripts/delegate.sh ask "which package owns checkpoint rendering?"
+scripts/delegate.sh goal --budget 2.00 \
+  --task "Fix the failing storage test" \
+  --criteria "go test ./... passes" \
+  "Repair the storage suite"
+scripts/delegate.sh resume <run-id>
+```
+
+Everything human-readable goes to stderr, so `$(...)` capture is always
+valid JSON:
+
+```json
+{
+  "ok": true,
+  "status": "completed",
+  "spend": "0.01 / 0.40",
+  "completed": ["- [x] task-001 — Counted TODO markers ... (`ev_ZVWE...`)"],
+  "blocked": []
+}
+```
+
+Exit codes let a caller branch without reading text: **0** completed,
+**2** parked or partial (needs you — read `.blocked`), **1** failed.
+
+This is the token-economy pattern: an expensive orchestrator describes
+the work in one line, Buckley does the reading, searching, and iterating
+on the configured model, and only the conclusion comes back.
