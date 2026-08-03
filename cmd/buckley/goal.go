@@ -39,9 +39,62 @@ func runGoalCommand(args []string) error {
 		return runGoalReport(args[1:])
 	case "run":
 		return runGoalRun(args[1:])
+	case "audit":
+		return runGoalAudit(args[1:])
 	default:
-		return fmt.Errorf("unknown goal subcommand %q (want start, status, list, report, or run)", args[0])
+		return fmt.Errorf("unknown goal subcommand %q (want start, status, list, report, run, or audit)", args[0])
 	}
+}
+
+// runGoalAudit prints a run's full decision-and-capability trail from
+// the ledger: controller decisions, capability calls, budget events,
+// and task transitions, in order. This is the buckley-native full-truth
+// view — no external observability system required.
+func runGoalAudit(args []string) error {
+	fs := flag.NewFlagSet("goal audit", flag.ContinueOnError)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return errors.New("usage: buckley goal audit <run-id>")
+	}
+	stores, cleanup, err := openGoalStores()
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+
+	events, err := stores.ledger.ListEvents(context.Background(), runledger.EventQuery{RunID: strings.TrimSpace(fs.Arg(0))})
+	if err != nil {
+		return err
+	}
+	shown := 0
+	for _, ev := range events {
+		var line string
+		switch {
+		case ev.Type == "capability.call":
+			line = fmt.Sprintf("caps %-12s %-6s %s", ev.Payload["method"], ev.Payload["outcome"], truncate(fmt.Sprint(ev.Payload["params"]), 80))
+		case ev.Type == runledger.EventControllerDecision:
+			line = fmt.Sprintf("decide %-12s %s", ev.Payload["decision"], truncate(fmt.Sprint(ev.Payload["reason"]), 90))
+		case strings.HasPrefix(ev.Type, "budget."):
+			line = fmt.Sprintf("%s spent=%.2f remaining=%.2f", ev.Type, floatFrom(ev.Payload["spent_usd"]), floatFrom(ev.Payload["remaining"]))
+		case strings.HasPrefix(ev.Type, "task."):
+			line = fmt.Sprintf("%s %s", ev.Type, ev.TaskID)
+		default:
+			continue
+		}
+		fmt.Printf("%s  %s\n", ev.Timestamp.Local().Format("15:04:05"), line)
+		shown++
+	}
+	if shown == 0 {
+		fmt.Println("No audited events for this run")
+	}
+	return nil
+}
+
+func floatFrom(v any) float64 {
+	f, _ := v.(float64)
+	return f
 }
 
 // runGoalRun drives a recorded goal against the live model stack until
@@ -93,7 +146,7 @@ func runGoalRun(args []string) error {
 		registry.ConfigureContainers(cfg, workDir)
 		registry.SetWorkDir(workDir)
 		if *execProgram {
-			execTool, err := newExecProgramTool(workDir, stores.ledger, runID, "goal-cli")
+			execTool, err := newExecProgramTool(workDir, stores.ledger, stores.evidence, runID, "goal-cli")
 			if err != nil {
 				return err
 			}

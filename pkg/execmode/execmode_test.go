@@ -3,6 +3,7 @@ package execmode
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -178,6 +179,9 @@ func TestBroker_RequiresToken(t *testing.T) {
 // audit trail. The environment scrub is asserted from inside the
 // program: a sentinel secret in Buckley's environment must be invisible.
 func TestRunner_EndToEndProgram(t *testing.T) {
+	if DetectIsolation() != IsolationBwrap {
+		t.Skip("bubblewrap not available")
+	}
 	workspace := newWorkspace(t)
 	t.Setenv("BUCKLEY_TEST_SENTINEL_SECRET", "leak-me-if-you-can")
 
@@ -241,6 +245,9 @@ func main() {
 // TestRunner_TimeoutKillsProgram locks the bound: an infinite loop dies
 // at the timeout with a clear error.
 func TestRunner_TimeoutKillsProgram(t *testing.T) {
+	if DetectIsolation() != IsolationBwrap {
+		t.Skip("bubblewrap not available")
+	}
 	workspace := newWorkspace(t)
 	sink := &recordingSink{}
 	runner, err := NewRunner(workspace, sink, 15*time.Second)
@@ -264,5 +271,67 @@ func TestRunner_RejectsNonMainSource(t *testing.T) {
 	}
 	if _, err := runner.Run(context.Background(), `fmt.Println("fragment")`); err == nil {
 		t.Fatal("fragment accepted")
+	}
+}
+
+// TestRunner_SandboxBlocksEscapes locks slice 2's enforcement, from
+// inside a sandboxed program: the host filesystem outside the mount
+// plan is invisible, the network namespace has no route out, system
+// directories are read-only — and the caps socket still works.
+func TestRunner_SandboxBlocksEscapes(t *testing.T) {
+	if DetectIsolation() != IsolationBwrap {
+		t.Skip("bubblewrap not available")
+	}
+	workspace := newWorkspace(t)
+	sink := &recordingSink{}
+	runner, err := NewRunner(workspace, sink, 2*time.Minute)
+	if err != nil {
+		t.Fatalf("NewRunner: %v", err)
+	}
+	if runner.Isolation() != IsolationBwrap {
+		t.Fatalf("isolation = %q, want bwrap", runner.Isolation())
+	}
+
+	const program = `package main
+
+import (
+	"fmt"
+	"net"
+	"os"
+	"time"
+
+	"execprogram/caps"
+)
+
+func main() {
+	checks := 0
+	if _, err := os.ReadFile("/etc/passwd"); err != nil {
+		checks++ // host /etc is not mounted
+	}
+	if _, err := os.ReadDir(os.Getenv("HOST_WORKSPACE")); err != nil {
+		checks++ // the workspace itself is not mounted; caps is the only window
+	}
+	if err := os.WriteFile("/usr/escape-probe", []byte("x"), 0o644); err != nil {
+		checks++ // system dirs are read-only
+	}
+	if _, err := net.DialTimeout("tcp", "1.1.1.1:80", 2*time.Second); err != nil {
+		checks++ // no network namespace route
+	}
+	content, _, err := caps.ReadFile("greeting.txt")
+	if err == nil && content != "" {
+		checks++ // the brokered window still works
+	}
+	fmt.Printf("blocked=%d\n", checks)
+}
+`
+	// The host workspace path rides in via the program source, not env,
+	// so the scrub test elsewhere stays meaningful.
+	result, err := runner.Run(context.Background(), strings.Replace(program,
+		`os.Getenv("HOST_WORKSPACE")`, fmt.Sprintf("%q", workspace), 1))
+	if err != nil {
+		t.Fatalf("Run: %v\nstderr:\n%s", err, result.Stderr)
+	}
+	if !strings.Contains(result.Stdout, "blocked=5") {
+		t.Fatalf("stdout = %q, want all five checks to hold\nstderr:\n%s", result.Stdout, result.Stderr)
 	}
 }
