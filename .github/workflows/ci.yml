@@ -29,7 +29,15 @@ jobs:
         run: |
           set -euo pipefail
 
-          if [[ -z "${BASE_SHA}" ]]; then
+          # The shallow clone may not contain the base commit once main
+          # moves ahead of the branch point, so fetch it on demand. When
+          # the base cannot be resolved at all, treat every surface as
+          # changed: running too much is safe, skipping checks is not.
+          if [[ -n "${BASE_SHA}" ]] && ! git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null; then
+            git fetch --no-tags --depth=1 origin "${BASE_SHA}" 2>/dev/null || true
+          fi
+          if [[ -z "${BASE_SHA}" ]] || ! git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null; then
+            echo "base commit unavailable; treating all surfaces as changed" >&2
             echo "go=true" >> "$GITHUB_OUTPUT"
             echo "ui=true" >> "$GITHUB_OUTPUT"
             echo "release=true" >> "$GITHUB_OUTPUT"
