@@ -237,6 +237,9 @@ func goalTurnAllowedTools(phase string) []string {
 		"search_text", "find_symbol", "find_references",
 		"git_status", "git_diff", "git_log",
 		"run_shell", "run_tests",
+		// exec_program is read-only by construction (jailed broker, no
+		// writes), so code-mode composition is verify-safe.
+		"exec_program",
 	}
 }
 
