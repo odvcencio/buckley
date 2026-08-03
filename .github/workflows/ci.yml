@@ -3,10 +3,6 @@ name: CI
 on:
   pull_request:
     branches: [main]
-    paths-ignore:
-      - '**/*.md'
-      - 'docs/**'
-      - '.github/workflows/docs.yml'
   workflow_dispatch:
 
 concurrency:
@@ -33,7 +29,15 @@ jobs:
         run: |
           set -euo pipefail
 
-          if [[ -z "${BASE_SHA}" ]]; then
+          # The shallow clone may not contain the base commit once main
+          # moves ahead of the branch point, so fetch it on demand. When
+          # the base cannot be resolved at all, treat every surface as
+          # changed: running too much is safe, skipping checks is not.
+          if [[ -n "${BASE_SHA}" ]] && ! git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null; then
+            git fetch --no-tags --depth=1 origin "${BASE_SHA}" 2>/dev/null || true
+          fi
+          if [[ -z "${BASE_SHA}" ]] || ! git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null; then
+            echo "base commit unavailable; treating all surfaces as changed" >&2
             echo "go=true" >> "$GITHUB_OUTPUT"
             echo "ui=true" >> "$GITHUB_OUTPUT"
             echo "release=true" >> "$GITHUB_OUTPUT"
@@ -58,14 +62,12 @@ jobs:
           fi
 
       - name: Set up Go
-        if: steps.changes.outputs.go == 'true'
         uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
           cache: true
 
       - name: Install bubblewrap (execmode sandbox tests)
-        if: steps.changes.outputs.go == 'true'
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq bubblewrap
           # Ubuntu 24.04 runners restrict unprivileged user namespaces via
@@ -79,7 +81,10 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
-          if [[ -n "${BASE_SHA}" ]]; then
+          # Same base-availability caveat as the change detection above:
+          # when the base commit is not in the clone, check every Go file
+          # rather than silently checking none.
+          if [[ -n "${BASE_SHA}" ]] && git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null; then
             mapfile -t files < <(git diff --diff-filter=d --name-only "${BASE_SHA}" "${GITHUB_SHA}" -- '*.go')
           else
             mapfile -t files < <(git ls-files '*.go')
@@ -101,7 +106,6 @@ jobs:
           git diff --exit-code -- go.mod go.sum
 
       - name: Run Go tests
-        if: steps.changes.outputs.go == 'true'
         run: ./scripts/test.sh
 
       - name: Check release metadata

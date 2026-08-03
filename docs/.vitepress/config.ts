@@ -28,34 +28,24 @@ export default defineConfig({
           items: [
             { text: 'Introduction', link: '/' },
             { text: 'CLI Reference', link: '/CLI' },
-            { text: 'Configuration', link: '/CONFIGURATION' },
+            { text: 'Configuration', link: '/CONFIGURATION' }
           ]
         },
         {
-          text: 'Core Concepts',
+          text: 'Operating Buckley',
           items: [
-            { text: 'Skills', link: '/SKILLS' },
-            { text: 'Tools', link: '/TOOLS' },
-            { text: 'Orchestration', link: '/ORCHESTRATION' },
-            { text: 'Experiments', link: '/EXPERIMENTS' },
+            { text: 'Running Goals', link: '/goals' },
+            { text: 'Code Mode', link: '/code-mode' },
+            { text: 'Troubleshooting', link: '/troubleshooting' }
           ]
         },
         {
           text: 'Interfaces',
           items: [
             { text: 'Mission Control (Web)', link: '/MISSION_CONTROL' },
-            { text: 'Editor Integration', link: '/ACP' },
+            { text: 'Editor Integration', link: '/ACP' }
           ]
         },
-        {
-          text: 'Reference',
-          items: [
-            { text: 'Error Handling', link: '/ERRORS' },
-            { text: 'Architecture Decisions', link: '/architecture/decisions/' },
-          ]
-        },
-      ],
-      '/blog/': [
         {
           text: 'Blog',
           items: [

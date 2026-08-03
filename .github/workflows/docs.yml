@@ -6,6 +6,13 @@ on:
     paths:
       - 'docs/**'
       - '.github/workflows/docs.yml'
+  # Build (without deploying) on documentation pull requests. Without
+  # this a docs-only PR reports no checks at all, so a broken nav link or
+  # a missing page is only discovered after it lands on main.
+  pull_request:
+    paths:
+      - 'docs/**'
+      - '.github/workflows/docs.yml'
   workflow_dispatch:
 
 permissions:
@@ -22,9 +29,9 @@ jobs:
     name: Pages
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
+    # The Pages environment and deployment apply to main only; a pull
+    # request run builds and stops.
+    environment: ${{ github.event_name == 'push' && 'github-pages' || '' }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -43,10 +50,12 @@ jobs:
           npm run build
 
       - name: Upload Pages artifact
+        if: github.event_name == 'push'
         uses: actions/upload-pages-artifact@v3
         with:
           path: docs/.vitepress/dist
 
       - name: Deploy Pages
         id: deployment
+        if: github.event_name == 'push'
         uses: actions/deploy-pages@v4
