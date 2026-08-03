@@ -195,38 +195,86 @@ func (b *Broker) filesRead(params map[string]any) (any, error) {
 	return map[string]any{"content": string(data), "truncated": truncated}, nil
 }
 
+// filesList lists a directory, optionally recursively. Recursive listing
+// exists so a program does not pay a model round-trip per subdirectory:
+// one call returns the whole tree, workspace-relative.
 func (b *Broker) filesList(params map[string]any) (any, error) {
 	dir, _ := params["dir"].(string)
 	if dir == "" {
 		dir = "."
 	}
+	recursive, _ := params["recursive"].(bool)
 	full, err := b.jail(dir)
 	if err != nil {
 		return nil, err
 	}
-	entries, err := os.ReadDir(full)
+	// Guidance over bare failure: a program that lists a file has made a
+	// recoverable mistake, and saying so costs the model nothing to fix.
+	if info, statErr := os.Stat(full); statErr == nil && !info.IsDir() {
+		return nil, fmt.Errorf("%s is a file, not a directory; use ReadFile for file contents", dir)
+	}
+
+	var names []string
+	if recursive {
+		err = filepath.WalkDir(full, func(path string, entry os.DirEntry, walkErr error) error {
+			if walkErr != nil || len(names) >= maxListEntries {
+				return walkErr
+			}
+			if path == full {
+				return nil
+			}
+			if entry.IsDir() && skipDirName(entry.Name()) {
+				return filepath.SkipDir
+			}
+			rel, relErr := filepath.Rel(b.root, path)
+			if relErr != nil {
+				return nil
+			}
+			if entry.IsDir() {
+				rel += "/"
+			}
+			names = append(names, rel)
+			return nil
+		})
+	} else {
+		var entries []os.DirEntry
+		entries, err = os.ReadDir(full)
+		for _, entry := range entries {
+			name := entry.Name()
+			if entry.IsDir() {
+				name += "/"
+			}
+			names = append(names, name)
+			if len(names) >= maxListEntries {
+				break
+			}
+		}
+	}
 	if err != nil {
 		return nil, err
 	}
-	names := make([]string, 0, len(entries))
-	for _, entry := range entries {
-		name := entry.Name()
-		if entry.IsDir() {
-			name += "/"
-		}
-		names = append(names, name)
-		if len(names) >= maxListEntries {
-			break
-		}
-	}
 	sort.Strings(names)
-	return map[string]any{"entries": names}, nil
+	return map[string]any{"entries": names, "capped": len(names) >= maxListEntries}, nil
 }
 
+func skipDirName(name string) bool {
+	return name == ".git" || name == "node_modules" || name == "vendor"
+}
+
+// searchText finds literal matches, optionally restricted to files whose
+// base name matches a glob ("*.go"). The glob filter turns "search then
+// filter in the program" into one call, and keeps the result set inside
+// the cap for large repositories.
 func (b *Broker) searchText(params map[string]any) (any, error) {
 	pattern, _ := params["pattern"].(string)
 	if strings.TrimSpace(pattern) == "" {
 		return nil, fmt.Errorf("pattern is required")
+	}
+	glob, _ := params["glob"].(string)
+	if glob != "" {
+		if _, err := filepath.Match(glob, "probe"); err != nil {
+			return nil, fmt.Errorf("invalid glob %q: %w", glob, err)
+		}
 	}
 	type match struct {
 		File string `json:"file"`
@@ -239,10 +287,15 @@ func (b *Broker) searchText(params map[string]any) (any, error) {
 			return walkErr
 		}
 		if entry.IsDir() {
-			if entry.Name() == ".git" || entry.Name() == "node_modules" {
+			if skipDirName(entry.Name()) {
 				return filepath.SkipDir
 			}
 			return nil
+		}
+		if glob != "" {
+			if ok, _ := filepath.Match(glob, entry.Name()); !ok {
+				return nil
+			}
 		}
 		info, err := entry.Info()
 		if err != nil || info.Size() > 2*1024*1024 {

@@ -327,6 +327,17 @@ func ListDir(dir string) ([]string, error) {
 	return out.Entries, err
 }
 
+// WalkDir lists a directory tree in one call, returning
+// workspace-relative paths (directories end in "/"). Prefer this over
+// recursing with ListDir: it is one brokered call instead of many.
+func WalkDir(dir string) ([]string, error) {
+	var out struct {
+		Entries []string ` + "`json:\"entries\"`" + `
+	}
+	err := call("/v1/files/list", map[string]any{"dir": dir, "recursive": true}, &out)
+	return out.Entries, err
+}
+
 // Match is one text-search hit.
 type Match struct {
 	File string ` + "`json:\"file\"`" + `
@@ -336,11 +347,44 @@ type Match struct {
 
 // SearchText finds literal-substring matches across the workspace.
 func SearchText(pattern string) ([]Match, bool, error) {
+	return SearchTextGlob(pattern, "")
+}
+
+// SearchTextGlob restricts SearchText to files whose base name matches a
+// glob, for example "*.go". One call replaces search-then-filter.
+func SearchTextGlob(pattern, glob string) ([]Match, bool, error) {
 	var out struct {
 		Matches []Match ` + "`json:\"matches\"`" + `
 		Capped  bool    ` + "`json:\"capped\"`" + `
 	}
-	err := call("/v1/search/text", map[string]any{"pattern": pattern}, &out)
+	err := call("/v1/search/text", map[string]any{"pattern": pattern, "glob": glob}, &out)
 	return out.Matches, out.Capped, err
 }
 `
+
+// CapsAPICard is the compact API reference and canonical example the
+// exec_program tool description embeds. Teaching the surface up front
+// costs a few hundred prompt tokens once; discovering it by trial costs
+// whole model turns (the first live run spent seven).
+const CapsAPICard = "API (import \"execprogram/caps\"):\n" +
+	"  caps.ReadFile(path string) (content string, truncated bool, err error)\n" +
+	"  caps.ListDir(dir string) (entries []string, err error)        // one level; dirs end in \"/\"\n" +
+	"  caps.WalkDir(dir string) (entries []string, err error)        // whole tree, workspace-relative paths\n" +
+	"  caps.SearchText(pattern string) (m []caps.Match, capped bool, err error)\n" +
+	"  caps.SearchTextGlob(pattern, glob string) (m []caps.Match, capped bool, err error)\n" +
+	"  type Match struct { File string; Line int; Text string }\n" +
+	"Paths are workspace-relative. Example:\n" +
+	"package main\n\n" +
+	"import (\n\t\"fmt\"\n\t\"strings\"\n\n\t\"execprogram/caps\"\n)\n\n" +
+	"func main() {\n" +
+	"\tfiles, err := caps.WalkDir(\".\")\n" +
+	"\tif err != nil {\n\t\tpanic(err)\n\t}\n" +
+	"\tcount := 0\n" +
+	"\tfor _, f := range files {\n" +
+	"\t\tif !strings.HasSuffix(f, \".go\") {\n\t\t\tcontinue\n\t\t}\n" +
+	"\t\tbody, _, err := caps.ReadFile(f)\n" +
+	"\t\tif err != nil {\n\t\t\tcontinue\n\t\t}\n" +
+	"\t\tcount += strings.Count(body, \"TODO\")\n" +
+	"\t}\n" +
+	"\tfmt.Printf(\"todos=%d\\n\", count)\n" +
+	"}"

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"m31labs.dev/buckley/pkg/evidence"
@@ -62,7 +63,12 @@ func newExecProgramTool(workspaceRoot string, ledger runledger.Store, ev evidenc
 func (t *execProgramTool) Name() string { return "exec_program" }
 
 func (t *execProgramTool) Description() string {
-	return "Execute a complete Go program (package main) in an OS sandbox against typed workspace capabilities. Import \"execprogram/caps\" for caps.ReadFile(path), caps.ListDir(dir), and caps.SearchText(pattern); compose, filter, and aggregate in code, then print only the result. The sandbox has no network, a read-only system, and no direct workspace mount — the audited caps client is the only window into the workspace, and writes are confined to the program's scratch directory. Standard library only (no module fetching). Set language to \"fw\" to write Ferrous Wheel instead of Go. Prefer one program over long chains of read/search tool calls."
+	return "Execute a complete Go program (package main) in an OS sandbox against typed workspace capabilities. " +
+		"Compose, filter, and aggregate in code, then print only the result — one program instead of many read/search tool calls. " +
+		"Sandbox: no network, read-only system, no workspace mount (the audited caps client is the only window), writes confined to scratch, standard library only. " +
+		"On a compile error or a caps error, fix the program and call this tool again in THIS turn; do not end the turn to retry. " +
+		"Set language to \"fw\" for Ferrous Wheel. Pass reuse=<evidence-id> to re-run a previous program verbatim with no new source.\n\n" +
+		execmode.CapsAPICard
 }
 
 func (t *execProgramTool) Parameters() builtin.ParameterSchema {
@@ -78,8 +84,11 @@ func (t *execProgramTool) Parameters() builtin.ParameterSchema {
 				Description: "Source dialect",
 				Enum:        []string{"go", "fw"},
 			},
+			"reuse": {
+				Type:        "string",
+				Description: "Evidence ID of a previously executed program to re-run verbatim; omit source when set",
+			},
 		},
-		Required: []string{"source"},
 	}
 }
 
@@ -96,6 +105,29 @@ func (t *execProgramTool) Execute(params map[string]any) (*builtin.Result, error
 func (t *execProgramTool) ExecuteWithContext(ctx context.Context, params map[string]any) (*builtin.Result, error) {
 	source, _ := params["source"].(string)
 	language, _ := params["language"].(string)
+
+	// Stabilized mode: re-running a stored program costs zero model
+	// tokens. The source comes from the evidence store, so a workflow
+	// that already worked never gets re-reasoned.
+	if reuse, _ := params["reuse"].(string); strings.TrimSpace(reuse) != "" {
+		if t.evidence == nil {
+			return nil, fmt.Errorf("exec_program: reuse requires an evidence store")
+		}
+		obj, err := t.evidence.Get(ctx, strings.TrimSpace(reuse))
+		if err != nil {
+			return &builtin.Result{Success: false, Error: fmt.Sprintf("exec_program: reuse %s: %v", reuse, err)}, nil
+		}
+		source = string(obj.InlineBody)
+		if lang, ok := obj.Metadata["language"].(string); ok {
+			language = lang
+		}
+		if strings.TrimSpace(source) == "" {
+			return &builtin.Result{Success: false, Error: fmt.Sprintf("exec_program: evidence %s holds no program source", reuse)}, nil
+		}
+	}
+	if strings.TrimSpace(source) == "" {
+		return &builtin.Result{Success: false, Error: "exec_program: source (or reuse) is required"}, nil
+	}
 
 	programEvidence := ""
 	if t.evidence != nil {
