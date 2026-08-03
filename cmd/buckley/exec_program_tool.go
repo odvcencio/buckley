@@ -15,6 +15,13 @@ import (
 // caps client; the broker below it is read-only, workspace-jailed, and
 // audited to the run ledger. Registration is opt-in per launch
 // (goal run --exec-program), never default.
+//
+// Honesty boundary (review finding on #145): only the CAPABILITY PATH is
+// jailed and audited. The program process runs as the local user without
+// OS sandboxing — the same risk class as run_shell, with a scrubbed
+// environment and GOPROXY off as mitigations. OS-level isolation
+// (namespaces/bwrap or the container sandbox) is slice 2; until then the
+// tool's description says so plainly and the tool stays opt-in.
 type execProgramTool struct {
 	runner *execmode.Runner
 }
@@ -45,7 +52,7 @@ func newExecProgramTool(workspaceRoot string, ledger runledger.Store, runID, ses
 func (t *execProgramTool) Name() string { return "exec_program" }
 
 func (t *execProgramTool) Description() string {
-	return "Execute a complete Go program (package main) against typed, read-only workspace capabilities. Import \"execprogram/caps\" for caps.ReadFile(path), caps.ListDir(dir), and caps.SearchText(pattern); compose, filter, and aggregate in code, then print only the result. Every capability call is audited; the program cannot write files, reach the network, or see credentials. Prefer one program over long chains of read/search tool calls."
+	return "Execute a complete Go program (package main) against typed workspace capabilities. Import \"execprogram/caps\" for caps.ReadFile(path), caps.ListDir(dir), and caps.SearchText(pattern); compose, filter, and aggregate in code, then print only the result. The caps client is workspace-jailed and every caps call is audited; environment variables are scrubbed and module fetching is off. The program process itself is NOT OS-sandboxed: like run_shell, it runs as the local user with filesystem and network access, so only use standard library and caps calls, and never touch paths outside the workspace. Prefer one program over long chains of read/search tool calls."
 }
 
 func (t *execProgramTool) Parameters() builtin.ParameterSchema {

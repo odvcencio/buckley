@@ -54,6 +54,12 @@ func NewRunner(workspaceRoot string, audit AuditSink, timeout time.Duration) (*R
 // inherited secrets, no Buckley state. Source must be a complete
 // `package main` program; it may import "execprogram/caps" for the typed
 // capability client the scaffold provides.
+//
+// Isolation boundary: the scrub removes environment secrets and GOPROXY
+// is off, but the process is NOT OS-sandboxed — it runs as the local
+// user with filesystem and network access. Callers exposing Run to a
+// model must say so in their tool contract and treat the surface like
+// shell execution until OS-level isolation lands.
 func (r *Runner) Run(ctx context.Context, source string) (Result, error) {
 	if len(source) > maxSourceBytes {
 		return Result{}, fmt.Errorf("execmode: source exceeds %d bytes", maxSourceBytes)
