@@ -296,6 +296,198 @@ func (s *SQLiteStore) Append(ctx context.Context, event Event) (Event, error) {
 	return event, dualWriteErr
 }
 
+// BeginStep implements StepJournal. A completed logical step is immutable
+// from the replay perspective: callers receive it with replay=true and use
+// its recorded evidence instead of executing the side effect again. Failed
+// and interrupted steps advance their attempt count while retaining the
+// stable StepID and idempotency key.
+func (s *SQLiteStore) BeginStep(ctx context.Context, step ExecutionStep) (ExecutionStep, bool, error) {
+	if step.IdempotencyKey == "" {
+		step.IdempotencyKey = step.StepID
+	}
+	if err := validateExecutionStep(step); err != nil {
+		return ExecutionStep{}, false, err
+	}
+	if step.Attempt <= 0 {
+		step.Attempt = 1
+	}
+	if step.StartedAt.IsZero() {
+		step.StartedAt = time.Now().UTC()
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return ExecutionStep{}, false, fmt.Errorf("runledger: begin execution step: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	existing, err := scanExecutionStep(tx.QueryRowContext(ctx, `
+		SELECT run_id, task_id, step_id, kind, idempotency_key, status, attempt,
+		       input_digest, output_digest, output_evidence_id, error_text,
+		       started_at, completed_at
+		FROM execution_steps WHERE run_id = ? AND step_id = ?
+	`, step.RunID, step.StepID))
+	if err != nil && !errors.Is(err, ErrStepNotFound) {
+		return ExecutionStep{}, false, fmt.Errorf("runledger: read execution step %s: %w", step.StepID, err)
+	}
+	if err == nil {
+		if existing.IdempotencyKey != step.IdempotencyKey {
+			return ExecutionStep{}, false, fmt.Errorf("runledger: execution step %s idempotency key changed", step.StepID)
+		}
+		if existing.InputDigest != "" && step.InputDigest != "" && existing.InputDigest != step.InputDigest {
+			return ExecutionStep{}, false, fmt.Errorf("runledger: execution step %s input digest changed", step.StepID)
+		}
+		if existing.Status == StepCompleted {
+			if err := tx.Commit(); err != nil {
+				return ExecutionStep{}, false, fmt.Errorf("runledger: commit completed execution step: %w", err)
+			}
+			return existing, true, nil
+		}
+
+		existing.Attempt++
+		existing.Status = StepStarted
+		existing.InputDigest = step.InputDigest
+		existing.OutputDigest = ""
+		existing.OutputEvidenceID = ""
+		existing.Error = ""
+		existing.StartedAt = step.StartedAt
+		existing.CompletedAt = nil
+		_, err = tx.ExecContext(ctx, `
+			UPDATE execution_steps
+			SET status = ?, attempt = ?, input_digest = ?, output_digest = NULL,
+			    output_evidence_id = NULL, error_text = NULL, started_at = ?, completed_at = NULL
+			WHERE run_id = ? AND step_id = ?
+		`, existing.Status, existing.Attempt, nullableStr(existing.InputDigest), sqliteTimestamp(existing.StartedAt),
+			existing.RunID, existing.StepID)
+		if err != nil {
+			return ExecutionStep{}, false, fmt.Errorf("runledger: restart execution step %s: %w", step.StepID, err)
+		}
+		if err := tx.Commit(); err != nil {
+			return ExecutionStep{}, false, fmt.Errorf("runledger: commit execution step %s: %w", step.StepID, err)
+		}
+		return existing, false, nil
+	}
+
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO execution_steps (
+			run_id, task_id, step_id, kind, idempotency_key, status, attempt,
+			input_digest, started_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, step.RunID, nullableStr(step.TaskID), step.StepID, step.Kind, step.IdempotencyKey,
+		StepStarted, step.Attempt, nullableStr(step.InputDigest), sqliteTimestamp(step.StartedAt))
+	if err != nil {
+		return ExecutionStep{}, false, fmt.Errorf("runledger: insert execution step %s: %w", step.StepID, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return ExecutionStep{}, false, fmt.Errorf("runledger: commit execution step %s: %w", step.StepID, err)
+	}
+	step.Status = StepStarted
+	return step, false, nil
+}
+
+// CompleteStep implements StepJournal.
+func (s *SQLiteStore) CompleteStep(ctx context.Context, runID, stepID, outputEvidenceID, outputDigest string, completedAt time.Time) error {
+	if runID == "" || stepID == "" {
+		return fmt.Errorf("runledger: run_id and step_id are required to complete an execution step")
+	}
+	if completedAt.IsZero() {
+		completedAt = time.Now().UTC()
+	}
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE execution_steps
+		SET status = ?, output_evidence_id = ?, output_digest = ?, error_text = NULL, completed_at = ?
+		WHERE run_id = ? AND step_id = ?
+	`, StepCompleted, nullableStr(outputEvidenceID), nullableStr(outputDigest), sqliteTimestamp(completedAt), runID, stepID)
+	if err != nil {
+		return fmt.Errorf("runledger: complete execution step %s: %w", stepID, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("runledger: complete execution step %s: %w", stepID, err)
+	}
+	if n == 0 {
+		return ErrStepNotFound
+	}
+	return nil
+}
+
+// FailStep implements StepJournal.
+func (s *SQLiteStore) FailStep(ctx context.Context, runID, stepID, failure string, completedAt time.Time) error {
+	if runID == "" || stepID == "" {
+		return fmt.Errorf("runledger: run_id and step_id are required to fail an execution step")
+	}
+	if completedAt.IsZero() {
+		completedAt = time.Now().UTC()
+	}
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE execution_steps
+		SET status = ?, error_text = ?, completed_at = ?
+		WHERE run_id = ? AND step_id = ?
+	`, StepFailed, nullableStr(failure), sqliteTimestamp(completedAt), runID, stepID)
+	if err != nil {
+		return fmt.Errorf("runledger: fail execution step %s: %w", stepID, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("runledger: fail execution step %s: %w", stepID, err)
+	}
+	if n == 0 {
+		return ErrStepNotFound
+	}
+	return nil
+}
+
+// GetStep implements StepJournal.
+func (s *SQLiteStore) GetStep(ctx context.Context, runID, stepID string) (ExecutionStep, error) {
+	if runID == "" || stepID == "" {
+		return ExecutionStep{}, fmt.Errorf("runledger: run_id and step_id are required to read an execution step")
+	}
+	return scanExecutionStep(s.db.QueryRowContext(ctx, `
+		SELECT run_id, task_id, step_id, kind, idempotency_key, status, attempt,
+		       input_digest, output_digest, output_evidence_id, error_text,
+		       started_at, completed_at
+		FROM execution_steps WHERE run_id = ? AND step_id = ?
+	`, runID, stepID))
+}
+
+type executionStepScanner interface {
+	Scan(dest ...any) error
+}
+
+func scanExecutionStep(row executionStepScanner) (ExecutionStep, error) {
+	var (
+		step           ExecutionStep
+		taskID         sql.NullString
+		idempotency    sql.NullString
+		inputDigest    sql.NullString
+		outputDigest   sql.NullString
+		outputEvidence sql.NullString
+		failure        sql.NullString
+		startedAtRaw   string
+		completedRaw   sql.NullString
+	)
+	err := row.Scan(&step.RunID, &taskID, &step.StepID, &step.Kind, &idempotency, &step.Status, &step.Attempt,
+		&inputDigest, &outputDigest, &outputEvidence, &failure, &startedAtRaw, &completedRaw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ExecutionStep{}, ErrStepNotFound
+	}
+	if err != nil {
+		return ExecutionStep{}, fmt.Errorf("runledger: scan execution step: %w", err)
+	}
+	step.TaskID = taskID.String
+	step.IdempotencyKey = idempotency.String
+	step.InputDigest = inputDigest.String
+	step.OutputDigest = outputDigest.String
+	step.OutputEvidenceID = outputEvidence.String
+	step.Error = failure.String
+	step.StartedAt = parseSQLiteTimestamp(startedAtRaw)
+	if completedRaw.Valid && completedRaw.String != "" {
+		completed := parseSQLiteTimestamp(completedRaw.String)
+		step.CompletedAt = &completed
+	}
+	return step, nil
+}
+
 // notifyLiveSink calls sink.Notify, recovering from any panic so a broken
 // live sink can never affect the durable write that already committed.
 func notifyLiveSink(sink LiveSink, event Event) {
@@ -823,6 +1015,7 @@ var migrations = []storage.Migration{
 	{Version: 5, Name: "context_usage", Apply: createContextUsageTable},
 	{Version: 6, Name: "task_checkpoints", Apply: createTaskCheckpointsTable},
 	{Version: 7, Name: "agent_metric_samples", Apply: createAgentMetricSamplesTable},
+	{Version: 8, Name: "execution_steps", Apply: createExecutionStepsTable},
 }
 
 func createAgentRunsTable(db *sql.DB) error {
@@ -1003,6 +1196,35 @@ func createAgentMetricSamplesTable(db *sql.DB) error {
 	`)
 	if err != nil {
 		return fmt.Errorf("create agent_metric_samples: %w", err)
+	}
+	return nil
+}
+
+func createExecutionStepsTable(db *sql.DB) error {
+	_, err := db.Exec(`
+		CREATE TABLE IF NOT EXISTS execution_steps (
+			run_id TEXT NOT NULL,
+			task_id TEXT,
+			step_id TEXT NOT NULL,
+			kind TEXT NOT NULL,
+			idempotency_key TEXT NOT NULL,
+			status TEXT NOT NULL,
+			attempt INTEGER NOT NULL,
+			input_digest TEXT,
+			output_digest TEXT,
+			output_evidence_id TEXT,
+			error_text TEXT,
+			started_at TIMESTAMP NOT NULL,
+			completed_at TIMESTAMP,
+			PRIMARY KEY(run_id, step_id),
+			UNIQUE(run_id, idempotency_key),
+			FOREIGN KEY(run_id) REFERENCES agent_runs(run_id) ON DELETE CASCADE
+		);
+		CREATE INDEX IF NOT EXISTS idx_execution_steps_task ON execution_steps(run_id, task_id, started_at);
+		CREATE INDEX IF NOT EXISTS idx_execution_steps_status ON execution_steps(run_id, status, started_at);
+	`)
+	if err != nil {
+		return fmt.Errorf("create execution_steps: %w", err)
 	}
 	return nil
 }

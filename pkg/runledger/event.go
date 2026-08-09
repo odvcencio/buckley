@@ -89,11 +89,13 @@ const (
 	EventModelRequestStarted   = "model.request_started"
 	EventModelRequestCompleted = "model.request_completed"
 	EventModelRequestFailed    = "model.request_failed"
+	EventModelRequestReplayed  = "model.request_replayed"
 
 	EventToolRequested         = "tool.requested"
 	EventToolStarted           = "tool.started"
 	EventToolCompleted         = "tool.completed"
 	EventToolFailed            = "tool.failed"
+	EventToolReplayed          = "tool.replayed"
 	EventToolSkipped           = "tool.skipped"
 	EventToolApprovalRequested = "tool.approval_requested"
 	EventToolApprovalResolved  = "tool.approval_resolved"

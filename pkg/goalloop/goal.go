@@ -69,6 +69,10 @@ const (
 type TaskContext struct {
 	RunID  string
 	TaskID string
+	// TurnID is stable for one drive turn and is derived from the latest
+	// checkpoint generation. Retrying an interrupted turn reuses it, while a
+	// checkpoint advance creates a new generation.
+	TurnID string
 	Goal   Goal
 	Spec   TaskSpec
 	// Phase is PhaseExecute or PhaseVerify; the controller's verify

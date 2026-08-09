@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -16,6 +17,7 @@ import (
 	"m31labs.dev/buckley/pkg/execmode"
 	"m31labs.dev/buckley/pkg/goalloop"
 	"m31labs.dev/buckley/pkg/ralph"
+	"m31labs.dev/buckley/pkg/replay"
 	"m31labs.dev/buckley/pkg/runledger"
 	"m31labs.dev/buckley/pkg/taskstate"
 	"m31labs.dev/buckley/pkg/tool"
@@ -27,7 +29,7 @@ import (
 // UX arrives with G9; this surface creates and inspects goals.
 func runGoalCommand(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: buckley goal <start|status|list> [flags]")
+		return errors.New("usage: buckley goal <start|status|list|report|run|audit|replay> [flags]")
 	}
 	switch args[0] {
 	case "start":
@@ -42,8 +44,10 @@ func runGoalCommand(args []string) error {
 		return runGoalRun(args[1:])
 	case "audit":
 		return runGoalAudit(args[1:])
+	case "replay":
+		return runGoalReplay(args[1:])
 	default:
-		return fmt.Errorf("unknown goal subcommand %q (want start, status, list, report, run, or audit)", args[0])
+		return fmt.Errorf("unknown goal subcommand %q (want start, status, list, report, run, audit, or replay)", args[0])
 	}
 }
 
@@ -77,6 +81,8 @@ func runGoalAudit(args []string) error {
 			line = fmt.Sprintf("caps %-12s %-6s %s", ev.Payload["method"], ev.Payload["outcome"], truncate(fmt.Sprint(ev.Payload["params"]), 80))
 		case ev.Type == runledger.EventControllerDecision:
 			line = fmt.Sprintf("decide %-12s %s", ev.Payload["decision"], truncate(fmt.Sprint(ev.Payload["reason"]), 90))
+		case strings.HasPrefix(ev.Type, "model.") || strings.HasPrefix(ev.Type, "tool."):
+			line = fmt.Sprintf("%-28s step=%s attempt=%v", ev.Type, truncate(fmt.Sprint(ev.Payload["step_id"]), 72), ev.Payload["attempt"])
 		case strings.HasPrefix(ev.Type, "budget."):
 			line = fmt.Sprintf("%s spent=%.2f remaining=%.2f", ev.Type, floatFrom(ev.Payload["spent_usd"]), floatFrom(ev.Payload["remaining"]))
 		case strings.HasPrefix(ev.Type, "task."):
@@ -89,6 +95,56 @@ func runGoalAudit(args []string) error {
 	}
 	if shown == 0 {
 		fmt.Println("No audited events for this run")
+	}
+	return nil
+}
+
+// runGoalReplay verifies a goal's durable replay contract without invoking a
+// model, tool, or external process. It is deliberately read-only: a valid
+// report means completed steps have stable identities and resolvable evidence,
+// not that Buckley should execute them again.
+func runGoalReplay(args []string) error {
+	fs := flag.NewFlagSet("goal replay", flag.ContinueOnError)
+	jsonOutput := fs.Bool("json", false, "print the verification report as JSON")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return errors.New("usage: buckley goal replay [--json] <run-id>")
+	}
+	stores, cleanup, err := openGoalStores()
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+
+	runID := strings.TrimSpace(fs.Arg(0))
+	report, err := replay.Verify(context.Background(), stores.ledger, stores.ledger, stores.evidence, runID)
+	if err != nil {
+		return err
+	}
+	if *jsonOutput {
+		if err := json.NewEncoder(os.Stdout).Encode(report); err != nil {
+			return err
+		}
+		if !report.Valid {
+			return fmt.Errorf("replay verification failed for run %s", runID)
+		}
+		return nil
+	}
+
+	status := "INVALID"
+	if report.Valid {
+		status = "VALID"
+	}
+	fmt.Printf("Replay verification: %s\n", status)
+	fmt.Printf("  run: %s (%s) · events: %d · tasks: %d · steps: %d · evidence: %d\n",
+		report.RunID, report.RunStatus, report.EventCount, report.TaskCount, report.StepCount, report.EvidenceCount)
+	for _, issue := range report.Issues {
+		fmt.Printf("  [%s] %s: %s\n", issue.Severity, issue.Code, issue.Message)
+	}
+	if !report.Valid {
+		return fmt.Errorf("replay verification failed for run %s", runID)
 	}
 	return nil
 }
@@ -160,7 +216,7 @@ func runGoalRun(args []string) error {
 			}
 			registry.Register(execTool)
 		}
-		turnEngine := newGoalTurnEngine(cfg, mgr, registry, stores.evidence, workDir)
+		turnEngine := newGoalTurnEngine(cfg, mgr, registry, stores.ledger, stores.evidence, workDir, "goal-cli")
 		turnEngine.codeMode = *execProgram
 		engine = turnEngine
 	}
