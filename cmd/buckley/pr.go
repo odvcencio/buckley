@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
@@ -369,14 +370,16 @@ func createPR(pr *commands.PRResult, baseBranch string) error {
 		return fmt.Errorf("gh CLI not found (install from https://cli.github.com)")
 	}
 
+	body := pr.FormatBody()
+	if url, ok := openPRForBranch(); ok {
+		return updatePR(url, pr.Header(), body)
+	}
+
 	spinner := terminal.NewSpinner("Creating PR...")
 	spinner.Start()
 
 	ctx, cancel := context.WithTimeout(context.Background(), ghAPITimeout)
 	defer cancel()
-
-	// Create PR using gh
-	body := pr.FormatBody()
 
 	cmd := exec.CommandContext(ctx, "gh", "pr", "create",
 		"--title", pr.Header(),
@@ -392,5 +395,57 @@ func createPR(pr *commands.PRResult, baseBranch string) error {
 	// Extract PR URL from output
 	prURL := strings.TrimSpace(string(output))
 	spinner.StopWithSuccess(fmt.Sprintf("PR created: %s", prURL))
+	return nil
+}
+
+// openPRForBranch reports the current branch's open PR, if one exists.
+// Closed and merged PRs stay untouched: a fresh push after a merge gets
+// a fresh PR.
+func openPRForBranch() (string, bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), ghAPITimeout)
+	defer cancel()
+	output, err := exec.CommandContext(ctx, "gh", "pr", "view", "--json", "state,url").Output()
+	if err != nil {
+		return "", false
+	}
+	return parseOpenPRView(output)
+}
+
+// parseOpenPRView extracts the URL from a `gh pr view --json state,url`
+// payload when the PR is still open.
+func parseOpenPRView(payload []byte) (string, bool) {
+	var view struct {
+		State string `json:"state"`
+		URL   string `json:"url"`
+	}
+	if err := json.Unmarshal(payload, &view); err != nil {
+		return "", false
+	}
+	if view.State != "OPEN" || view.URL == "" {
+		return "", false
+	}
+	return view.URL, true
+}
+
+// updatePR regenerates the existing open PR's title and body in place,
+// so re-running `buckley pr` after new commits refreshes the PR instead
+// of failing with "already exists".
+func updatePR(url, title, body string) error {
+	spinner := terminal.NewSpinner("Updating PR...")
+	spinner.Start()
+
+	ctx, cancel := context.WithTimeout(context.Background(), ghAPITimeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "gh", "pr", "edit", url,
+		"--title", title,
+		"--body", body,
+	)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		spinner.StopWithError(fmt.Sprintf("failed: %s", strings.TrimSpace(string(output))))
+		return fmt.Errorf("gh pr edit failed: %w", err)
+	}
+	spinner.StopWithSuccess(fmt.Sprintf("PR updated: %s", url))
 	return nil
 }

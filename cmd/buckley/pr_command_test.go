@@ -124,3 +124,24 @@ func TestPRRunResultFromFrameworkRejectsUnexpectedValue(t *testing.T) {
 		t.Fatalf("error = %q, want unexpected result type", result.Error)
 	}
 }
+
+func TestParseOpenPRView(t *testing.T) {
+	cases := []struct {
+		name    string
+		payload string
+		wantURL string
+		wantOK  bool
+	}{
+		{"open PR", `{"state":"OPEN","url":"https://github.com/o/r/pull/7"}`, "https://github.com/o/r/pull/7", true},
+		{"merged PR", `{"state":"MERGED","url":"https://github.com/o/r/pull/7"}`, "", false},
+		{"closed PR", `{"state":"CLOSED","url":"https://github.com/o/r/pull/7"}`, "", false},
+		{"missing url", `{"state":"OPEN"}`, "", false},
+		{"garbage", `no such pull request`, "", false},
+	}
+	for _, tc := range cases {
+		url, ok := parseOpenPRView([]byte(tc.payload))
+		if url != tc.wantURL || ok != tc.wantOK {
+			t.Fatalf("%s: parseOpenPRView = (%q, %v), want (%q, %v)", tc.name, url, ok, tc.wantURL, tc.wantOK)
+		}
+	}
+}
