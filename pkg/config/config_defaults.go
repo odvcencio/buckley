@@ -122,10 +122,10 @@ func defaultNATSURL() string {
 func DefaultConfig() *Config {
 	return &Config{
 		Buckbot: BuckbotConfig{
-			Model:                      defaultOpenRouterBuckbotModel,
-			CriticModel:                "",
+			Model:                      defaultBuckbotModel,
+			CriticModel:                defaultBuckbotCriticModel,
 			Reasoning:                  "auto",
-			PerReviewBudgetUSD:         0.15,
+			PerReviewBudgetUSD:         0.60,
 			MonthlyBudgetUSD:           25.00,
 			MaxReviewIterations:        0,
 			MaxValidationAttempts:      2,
