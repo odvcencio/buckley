@@ -335,6 +335,24 @@ func (s *SQLiteStore) Release(ctx context.Context, id, reason string) error {
 	return nil
 }
 
+// ReleaseByReason removes every pin created for one reason, returning
+// how many were released. Run pruning uses it to release a whole run's
+// step-evidence pins in one call.
+func (s *SQLiteStore) ReleaseByReason(ctx context.Context, reason string) (int64, error) {
+	if reason == "" {
+		return 0, fmt.Errorf("evidence: release reason is required")
+	}
+	result, err := s.db.ExecContext(ctx, `DELETE FROM evidence_pins WHERE reason = ?`, reason)
+	if err != nil {
+		return 0, fmt.Errorf("evidence: release pins for %s: %w", reason, err)
+	}
+	released, err := result.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	return released, nil
+}
+
 // isPinned reports whether id has at least one active pin.
 func (s *SQLiteStore) isPinned(ctx context.Context, id string) (bool, error) {
 	var count int
