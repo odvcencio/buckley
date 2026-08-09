@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"m31labs.dev/buckley/pkg/conversation"
+	"m31labs.dev/buckley/pkg/evidence"
 	"m31labs.dev/buckley/pkg/model"
 	"m31labs.dev/buckley/pkg/runledger"
 )
@@ -60,6 +61,10 @@ func (f ModelCallerFunc) Call(ctx context.Context, req model.ChatRequest, useCon
 type ToolOutcome struct {
 	Content string
 	Success bool
+	// EffectClass is an optional caller-provided effect classification such
+	// as readonly, modifying, destructive, or control. It is recorded with
+	// the durable step event so a future retry policy can be conservative.
+	EffectClass string
 }
 
 // ToolDispatcher executes one round's tool calls, in the same order the
@@ -79,6 +84,12 @@ type ToolDispatcherFunc func(ctx context.Context, calls []model.ToolCall) ([]Too
 func (f ToolDispatcherFunc) Dispatch(ctx context.Context, calls []model.ToolCall) ([]ToolOutcome, error) {
 	return f(ctx, calls)
 }
+
+// ToolOutcomeObserver observes a resolved tool outcome after it has either
+// been dispatched or loaded from durable evidence. Observers must keep
+// replay handling side-effect free; replayed is true when the dispatcher was
+// intentionally skipped and the observer is only rehydrating local state.
+type ToolOutcomeObserver func(ctx context.Context, call model.ToolCall, outcome ToolOutcome, replayed bool) error
 
 // HistorySink observes every message Controller appends to the working
 // transcript: the assistant turn (with or without tool calls) and each tool
@@ -154,6 +165,10 @@ type ControllerConfig struct {
 	// DispatchTools is required whenever the model can return tool calls;
 	// Controller errors lazily if a turn needs it and it is unset.
 	DispatchTools ToolDispatcher
+	// ObserveToolOutcome can rehydrate caller-owned in-memory state for a
+	// replayed result without re-executing the tool. It is called for every
+	// resolved outcome after durable evidence is available.
+	ObserveToolOutcome ToolOutcomeObserver
 	// History is optional.
 	History HistorySink
 
@@ -186,9 +201,19 @@ type ControllerConfig struct {
 	// TaskID is optional. Recording is best-effort: a ledger write failure
 	// never fails the turn.
 	RunLedger runledger.Store
-	RunID     string
-	SessionID string
-	TaskID    string
+	// Evidence, when set, captures exact model requests/responses and tool
+	// inputs/results. Evidence failures fail the turn because a replayable
+	// step must not be acknowledged without its result.
+	Evidence evidence.Store
+	// StepJournal, when set, records stable logical steps and reuses completed
+	// outputs instead of executing them again after a restart.
+	StepJournal runledger.StepJournal
+	RunID       string
+	SessionID   string
+	TaskID      string
+	// TurnID is stable across retries of one goal-loop turn. It changes when
+	// the goal loop advances to a new checkpoint generation.
+	TurnID string
 }
 
 // NewController constructs a Controller. BuildRequest and CallModel are
@@ -255,22 +280,75 @@ func (c *Controller) Run(ctx context.Context) (*Result, error) {
 		}
 		req = ProjectForContinuation(req, contextWindow, c.cfg.Continuation, providerID, useContinuation)
 
-		c.recordEvent(ctx, runledger.EventModelRequestStarted, map[string]any{"model": req.Model, "round": result.Rounds})
-		resp, err := c.cfg.CallModel.Call(ctx, req, useContinuation)
+		stepID := StableStepID(c.cfg.RunID, c.cfg.TaskID, c.cfg.TurnID, result.Rounds, "model", 0)
+		inputDigest, err := jsonDigest(req)
 		if err != nil {
-			c.recordEvent(ctx, runledger.EventModelRequestFailed, map[string]any{"model": req.Model, "error": err.Error()})
+			return result, fmt.Errorf("agentloop: digest model request: %w", err)
+		}
+		requestEvidenceID, _, err := c.recordJSONEvidence(ctx, evidence.KindModelRequest, req, stepID, map[string]any{"round": result.Rounds})
+		if err != nil {
 			return result, err
+		}
+		step, replay, err := c.beginStep(ctx, stepID, "model", inputDigest)
+		if err != nil {
+			return result, err
+		}
+		planned := stepPayload(stepID, step.Attempt, inputDigest)
+		planned["model"] = req.Model
+		planned["round"] = result.Rounds
+		if requestEvidenceID != "" {
+			planned["request_evidence_id"] = requestEvidenceID
+		}
+
+		var resp *model.ChatResponse
+		if replay {
+			if step.OutputEvidenceID == "" {
+				return result, fmt.Errorf("agentloop: completed model step %s has no response evidence", stepID)
+			}
+			resp = &model.ChatResponse{}
+			if err := c.loadJSONEvidence(ctx, step.OutputEvidenceID, resp); err != nil {
+				return result, err
+			}
+			planned["replayed"] = true
+			planned["response_evidence_id"] = step.OutputEvidenceID
+			c.recordEventWithEvidence(ctx, runledger.EventModelRequestReplayed, planned, []string{step.OutputEvidenceID})
+		} else {
+			c.recordEvent(ctx, runledger.EventModelRequestPlanned, planned)
+			c.recordEvent(ctx, runledger.EventModelRequestStarted, planned)
+			resp, err = c.cfg.CallModel.Call(ctx, req, useContinuation)
+			if err != nil {
+				c.failStep(ctx, step, err)
+				failed := stepPayload(stepID, step.Attempt, inputDigest)
+				failed["model"] = req.Model
+				failed["round"] = result.Rounds
+				failed["error"] = err.Error()
+				c.recordEvent(ctx, runledger.EventModelRequestFailed, failed)
+				return result, err
+			}
+			responseEvidenceID, outputDigest, err := c.recordJSONEvidence(ctx, evidence.KindModelResponse, resp, stepID, map[string]any{"round": result.Rounds, "model": req.Model})
+			if err != nil {
+				c.failStep(ctx, step, err)
+				return result, err
+			}
+			if err := c.completeStep(ctx, step, responseEvidenceID, outputDigest); err != nil {
+				c.failStep(ctx, step, err)
+				return result, err
+			}
+			completed := stepPayload(stepID, step.Attempt, inputDigest)
+			completed["model"] = req.Model
+			completed["round"] = result.Rounds
+			completed["prompt_tokens"] = resp.Usage.PromptTokens
+			completed["completion_tokens"] = resp.Usage.CompletionTokens
+			if responseEvidenceID != "" {
+				completed["response_evidence_id"] = responseEvidenceID
+			}
+			c.recordEventWithEvidence(ctx, runledger.EventModelRequestCompleted, completed, evidenceIDs(responseEvidenceID))
 		}
 		if resp == nil || len(resp.Choices) == 0 {
 			result.FinishReason = FinishReasonEmptyChoices
 			return result, nil
 		}
 		result.Usage = model.AddUsage(result.Usage, resp.Usage)
-		c.recordEvent(ctx, runledger.EventModelRequestCompleted, map[string]any{
-			"model":             req.Model,
-			"prompt_tokens":     resp.Usage.PromptTokens,
-			"completion_tokens": resp.Usage.CompletionTokens,
-		})
 
 		msg := resp.Choices[0].Message
 		if len(msg.ToolCalls) == 0 {
@@ -285,14 +363,100 @@ func (c *Controller) Run(ctx context.Context) (*Result, error) {
 		if c.cfg.History != nil {
 			c.cfg.History.Append(msg)
 		}
-		if c.cfg.DispatchTools == nil {
-			return result, fmt.Errorf("agentloop: model requested tools but no ToolDispatcher is configured")
+		toolSteps := make([]runledger.ExecutionStep, len(msg.ToolCalls))
+		outcomes := make([]ToolOutcome, len(msg.ToolCalls))
+		replayedTools := make([]bool, len(msg.ToolCalls))
+		pendingCalls := make([]model.ToolCall, 0, len(msg.ToolCalls))
+		pendingIndexes := make([]int, 0, len(msg.ToolCalls))
+		callRecords := make([]map[string]any, len(msg.ToolCalls))
+		for i, call := range msg.ToolCalls {
+			toolStepID := StableStepID(c.cfg.RunID, c.cfg.TaskID, c.cfg.TurnID, result.Rounds, "tool", i)
+			inputDigest, err := jsonDigest(call)
+			if err != nil {
+				return result, fmt.Errorf("agentloop: digest tool request: %w", err)
+			}
+			requestEvidenceID, _, err := c.recordJSONEvidence(ctx, evidence.KindToolRequest, call, toolStepID, map[string]any{"round": result.Rounds, "tool": call.Function.Name})
+			if err != nil {
+				return result, err
+			}
+			step, replay, err := c.beginStep(ctx, toolStepID, "tool", inputDigest)
+			if err != nil {
+				return result, err
+			}
+			toolSteps[i] = step
+			record := stepPayload(toolStepID, step.Attempt, inputDigest)
+			record["tool"] = call.Function.Name
+			record["call_id"] = call.ID
+			if requestEvidenceID != "" {
+				record["request_evidence_id"] = requestEvidenceID
+			}
+			callRecords[i] = record
+			if replay {
+				if step.OutputEvidenceID == "" {
+					return result, fmt.Errorf("agentloop: completed tool step %s has no result evidence", toolStepID)
+				}
+				if err := c.loadJSONEvidence(ctx, step.OutputEvidenceID, &outcomes[i]); err != nil {
+					return result, err
+				}
+				replayedTools[i] = true
+				record["replayed"] = true
+				record["output_evidence_id"] = step.OutputEvidenceID
+				c.recordEventWithEvidence(ctx, runledger.EventToolReplayed, record, []string{step.OutputEvidenceID})
+				continue
+			}
+			c.recordEvent(ctx, runledger.EventToolStarted, record)
+			pendingCalls = append(pendingCalls, call)
+			pendingIndexes = append(pendingIndexes, i)
 		}
 
-		c.recordEvent(ctx, runledger.EventToolRequested, map[string]any{"count": len(msg.ToolCalls)})
-		outcomes, err := c.cfg.DispatchTools.Dispatch(ctx, msg.ToolCalls)
-		if err != nil {
-			return result, err
+		c.recordEvent(ctx, runledger.EventToolRequested, map[string]any{
+			"count":      len(msg.ToolCalls),
+			"round":      result.Rounds,
+			"call_steps": callRecords,
+		})
+		if len(pendingCalls) > 0 {
+			if c.cfg.DispatchTools == nil {
+				return result, fmt.Errorf("agentloop: model requested tools but no ToolDispatcher is configured")
+			}
+			pendingOutcomes, err := c.cfg.DispatchTools.Dispatch(ctx, pendingCalls)
+			if err != nil {
+				for _, index := range pendingIndexes {
+					c.failStep(ctx, toolSteps[index], err)
+					failed := callRecords[index]
+					failed["error"] = err.Error()
+					c.recordEvent(ctx, runledger.EventToolFailed, failed)
+				}
+				return result, err
+			}
+			for position, index := range pendingIndexes {
+				if position < len(pendingOutcomes) {
+					outcomes[index] = pendingOutcomes[position]
+				}
+				outputEvidenceID, outputDigest, evidenceErr := c.recordJSONEvidence(ctx, evidence.KindToolResult, outcomes[index], toolSteps[index].StepID, map[string]any{
+					"round": result.Rounds,
+					"tool":  msg.ToolCalls[index].Function.Name,
+				})
+				if evidenceErr != nil {
+					c.failStep(ctx, toolSteps[index], evidenceErr)
+					return result, evidenceErr
+				}
+				record := callRecords[index]
+				record["effect_class"] = outcomes[index].EffectClass
+				record["success"] = outcomes[index].Success
+				if outputEvidenceID != "" {
+					record["output_evidence_id"] = outputEvidenceID
+				}
+				if outcomes[index].Success {
+					if err := c.completeStep(ctx, toolSteps[index], outputEvidenceID, outputDigest); err != nil {
+						c.failStep(ctx, toolSteps[index], err)
+						return result, err
+					}
+					c.recordEventWithEvidence(ctx, runledger.EventToolCompleted, record, evidenceIDs(outputEvidenceID))
+				} else {
+					c.failStep(ctx, toolSteps[index], fmt.Errorf("tool %s returned an unsuccessful result", msg.ToolCalls[index].Function.Name))
+					c.recordEventWithEvidence(ctx, runledger.EventToolFailed, record, evidenceIDs(outputEvidenceID))
+				}
+			}
 		}
 		result.ToolCalls += len(msg.ToolCalls)
 
@@ -301,6 +465,11 @@ func (c *Controller) Run(ctx context.Context) (*Result, error) {
 			outcome := ToolOutcome{}
 			if i < len(outcomes) {
 				outcome = outcomes[i]
+			}
+			if c.cfg.ObserveToolOutcome != nil {
+				if err := c.cfg.ObserveToolOutcome(ctx, call, outcome, replayedTools[i]); err != nil {
+					return result, fmt.Errorf("agentloop: observe tool %s outcome: %w", call.Function.Name, err)
+				}
 			}
 			content := outcome.Content
 			decision := c.cfg.Governor.Observe(call.Function.Name, call.Function.Arguments, content, outcome.Success)
@@ -380,16 +549,21 @@ func (c *Controller) consultProgress(ctx context.Context, result *Result, usage 
 }
 
 func (c *Controller) recordEvent(ctx context.Context, eventType string, payload map[string]any) {
+	c.recordEventWithEvidence(ctx, eventType, payload, nil)
+}
+
+func (c *Controller) recordEventWithEvidence(ctx context.Context, eventType string, payload map[string]any, evidenceIDs []string) {
 	if c == nil || c.cfg.RunLedger == nil {
 		return
 	}
 	_, _ = c.cfg.RunLedger.Append(ctx, runledger.Event{
-		Type:      eventType,
-		Timestamp: time.Now(),
-		SessionID: c.cfg.SessionID,
-		RunID:     c.cfg.RunID,
-		TaskID:    c.cfg.TaskID,
-		Payload:   payload,
+		Type:        eventType,
+		Timestamp:   time.Now(),
+		SessionID:   c.cfg.SessionID,
+		RunID:       c.cfg.RunID,
+		TaskID:      c.cfg.TaskID,
+		EvidenceIDs: evidenceIDs,
+		Payload:     payload,
 	})
 }
 

@@ -113,6 +113,11 @@ func (l *Loop) RunTask(ctx context.Context, runID, taskID string, goal Goal, spe
 	started := time.Now()
 	counters := agentloop.FuseCounters{}
 	drive := newDriveState(spec, task.Resume)
+	generation := 0
+	if task.Resume != nil {
+		generation = task.Resume.Checkpoint.Version
+	}
+	turnIndex := 0
 	progress := l.progressFor(goal)
 	// Budget decisions run on the goal's cumulative spend across every
 	// drive and task, read back from the ledger's metric samples — not
@@ -128,11 +133,13 @@ func (l *Loop) RunTask(ctx context.Context, runID, taskID string, goal Goal, spe
 		}
 
 		task.Phase = drive.phase
+		task.TurnID = fmt.Sprintf("%s/cp-%03d/turn-%03d", taskID, generation, turnIndex)
 		outcome, err := l.engine.RunTurn(ctx, task)
 		if err != nil {
 			return result, fmt.Errorf("goalloop: turn for %s: %w", taskID, err)
 		}
 		result.Turns++
+		turnIndex++
 		result.SpentUSD += outcome.SpentUSD
 		goalSpent, err = l.recordTurnSpend(ctx, runID, taskID, goal, outcome)
 		if err != nil {
@@ -189,6 +196,8 @@ func (l *Loop) RunTask(ctx context.Context, runID, taskID string, goal Goal, spe
 			if err := l.checkpointTask(ctx, runID, taskID, taskstate.StatusInProgress, drive, nil, taskstate.TriggerPressure); err != nil {
 				return result, err
 			}
+			generation++
+			turnIndex = 0
 			continue
 		case agentloop.DecidePark:
 			result.Status = taskstate.StatusParked

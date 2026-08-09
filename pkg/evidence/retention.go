@@ -36,7 +36,14 @@ func DefaultRetentionPolicy() RetentionPolicy {
 	}
 }
 
-var ephemeralKinds = []Kind{KindToolResult, KindCommandOutput, KindTestOutput}
+var ephemeralKinds = []Kind{
+	KindModelRequest,
+	KindModelResponse,
+	KindToolRequest,
+	KindToolResult,
+	KindCommandOutput,
+	KindTestOutput,
+}
 
 var durableKinds = []Kind{KindCheckpoint, KindReview, KindCommitProposal}
 

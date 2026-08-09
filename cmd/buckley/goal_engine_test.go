@@ -15,6 +15,7 @@ import (
 	"m31labs.dev/buckley/pkg/evidence"
 	"m31labs.dev/buckley/pkg/goalloop"
 	"m31labs.dev/buckley/pkg/model"
+	"m31labs.dev/buckley/pkg/runledger"
 	"m31labs.dev/buckley/pkg/tool"
 )
 
@@ -67,7 +68,15 @@ func newGoalEngineUnderTest(t *testing.T, responses []string) (*goalTurnEngine, 
 	}
 	t.Cleanup(func() { _ = ev.Close() })
 
-	return newGoalTurnEngine(cfg, mgr, tool.NewEmptyRegistry(), ev, dir), ev
+	ledger, err := runledger.NewWithDB(ev.DB())
+	if err != nil {
+		t.Fatalf("runledger.NewWithDB: %v", err)
+	}
+	_, err = ledger.StartRun(context.Background(), runledger.AgentRun{RunID: "run-1", SessionID: "goal-test"})
+	if err != nil {
+		t.Fatalf("StartRun: %v", err)
+	}
+	return newGoalTurnEngine(cfg, mgr, tool.NewEmptyRegistry(), ledger, ev, dir, "goal-test"), ev
 }
 
 // TestGoalTurnEngine_CompletionStoresEvidence locks the completion
@@ -108,6 +117,50 @@ func TestGoalTurnEngine_CompletionStoresEvidence(t *testing.T) {
 	}
 	if !strings.Contains(string(obj.InlineBody), "ported both files; tests green") {
 		t.Fatalf("evidence body missing summary:\n%s", obj.InlineBody)
+	}
+
+	events, err := engine.ledger.ListEvents(context.Background(), runledger.EventQuery{RunID: "run-1"})
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	var sawPlanned, sawCompleted bool
+	for _, event := range events {
+		switch event.Type {
+		case runledger.EventModelRequestPlanned:
+			sawPlanned = event.Payload["step_id"] != nil && event.Payload["input_digest"] != nil
+		case runledger.EventModelRequestCompleted:
+			sawCompleted = event.Payload["response_evidence_id"] != nil && len(event.EvidenceIDs) == 1
+		}
+	}
+	if !sawPlanned || !sawCompleted {
+		t.Fatalf("controller durability events missing planned=%v completed=%v", sawPlanned, sawCompleted)
+	}
+}
+
+func TestGoalTurnEngine_ReplaysControlToolState(t *testing.T) {
+	t.Parallel()
+	args, _ := json.Marshal(map[string]string{"summary": "replayed completion"})
+	engine, _ := newGoalEngineUnderTest(t, []string{
+		goalEngineToolCallResponse(goalCompleteToolName, string(args)),
+		goalEngineTextResponse,
+	})
+	task := goalloop.TaskContext{
+		RunID:  "run-1",
+		TaskID: "task-1",
+		Goal:   goalloop.Goal{Statement: "replay control state"},
+		Spec:   goalloop.TaskSpec{Title: "replay control state"},
+		Phase:  goalloop.PhaseExecute,
+		TurnID: "task-1/cp-000/turn-000",
+	}
+	if _, err := engine.RunTurn(context.Background(), task); err != nil {
+		t.Fatalf("first RunTurn: %v", err)
+	}
+	replayed, err := engine.RunTurn(context.Background(), task)
+	if err != nil {
+		t.Fatalf("replay RunTurn: %v", err)
+	}
+	if !replayed.Completed || replayed.Summary != "replayed completion" {
+		t.Fatalf("replayed outcome = %+v, want restored completion state", replayed)
 	}
 }
 

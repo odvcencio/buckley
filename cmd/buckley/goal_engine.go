@@ -12,6 +12,7 @@ import (
 	"m31labs.dev/buckley/pkg/goalloop"
 	"m31labs.dev/buckley/pkg/model"
 	"m31labs.dev/buckley/pkg/rules"
+	"m31labs.dev/buckley/pkg/runledger"
 	"m31labs.dev/buckley/pkg/taskstate"
 	"m31labs.dev/buckley/pkg/tool"
 )
@@ -33,12 +34,15 @@ const (
 // backstop. Completion claims store their summary as an evidence object,
 // so the G7 verification gate has something real to reference.
 type goalTurnEngine struct {
-	cfg      *config.Config
-	mgr      *model.Manager
-	registry *tool.Registry
-	evidence evidence.Store
-	engine   *rules.Engine
-	workDir  string
+	cfg         *config.Config
+	mgr         *model.Manager
+	registry    *tool.Registry
+	ledger      runledger.Store
+	stepJournal runledger.StepJournal
+	evidence    evidence.Store
+	engine      *rules.Engine
+	workDir     string
+	sessionID   string
 	// codeMode narrows the offered tool pool to the code-execution
 	// surface. The whole premise of code mode is that one programmable
 	// surface replaces a catalog of verbs; leaving the full catalog
@@ -46,12 +50,16 @@ type goalTurnEngine struct {
 	codeMode bool
 }
 
-func newGoalTurnEngine(cfg *config.Config, mgr *model.Manager, registry *tool.Registry, ev evidence.Store, workDir string) *goalTurnEngine {
+func newGoalTurnEngine(cfg *config.Config, mgr *model.Manager, registry *tool.Registry, ledger runledger.Store, ev evidence.Store, workDir, sessionID string) *goalTurnEngine {
 	engine, err := rules.NewDefaultEngine()
 	if err != nil {
 		engine = nil
 	}
-	return &goalTurnEngine{cfg: cfg, mgr: mgr, registry: registry, evidence: ev, engine: engine, workDir: workDir}
+	var stepJournal runledger.StepJournal
+	if journal, ok := ledger.(runledger.StepJournal); ok {
+		stepJournal = journal
+	}
+	return &goalTurnEngine{cfg: cfg, mgr: mgr, registry: registry, ledger: ledger, stepJournal: stepJournal, evidence: ev, engine: engine, workDir: workDir, sessionID: sessionID}
 }
 
 // codeModeTools is the narrow pool a code-mode turn offers: the program
@@ -109,19 +117,57 @@ func (e *goalTurnEngine) RunTurn(ctx context.Context, task goalloop.TaskContext)
 		}
 		return outcomes, nil
 	})
+	observeOutcome := func(_ context.Context, call model.ToolCall, outcome agentloop.ToolOutcome, replayed bool) error {
+		if !replayed {
+			return nil
+		}
+		// Replaying a result must not execute the tool again, but the goal
+		// loop still needs the pure in-memory state that the original
+		// dispatch established (for example, completion or blocking).
+		switch call.Function.Name {
+		case goalCompleteToolName:
+			state.completed = true
+			if params := toolCallParams(call); params != nil {
+				if summary, _ := params["summary"].(string); strings.TrimSpace(summary) != "" {
+					state.completedSummary = strings.TrimSpace(summary)
+				}
+			}
+		case goalBlockedToolName:
+			params := toolCallParams(call)
+			reason, _ := params["reason"].(string)
+			if strings.TrimSpace(reason) == "" {
+				reason = "blocked without a stated reason"
+			}
+			needs, _ := params["needs"].(string)
+			state.blocker = &taskstate.Blocker{Reason: strings.TrimSpace(reason), Needs: strings.TrimSpace(needs)}
+		default:
+			if outcome.EffectClass != "" && outcome.EffectClass != string(tool.ImpactReadOnly) && outcome.EffectClass != "control" {
+				state.stateChanged = true
+			}
+		}
+		return nil
+	}
 	history := agentloop.HistorySinkFunc(func(msg model.Message) {
 		messages = append(messages, msg)
 	})
 
 	ctrl, err := agentloop.NewController(agentloop.ControllerConfig{
-		BuildRequest:  buildRequest,
-		CallModel:     callModel,
-		DispatchTools: dispatch,
-		History:       history,
+		BuildRequest:       buildRequest,
+		CallModel:          callModel,
+		DispatchTools:      dispatch,
+		ObserveToolOutcome: observeOutcome,
+		History:            history,
 		ContextWindow: func(mid string) int {
 			window, _ := e.mgr.GetContextLength(mid)
 			return window
 		},
+		RunLedger:   e.ledger,
+		Evidence:    e.evidence,
+		StepJournal: e.stepJournal,
+		RunID:       task.RunID,
+		SessionID:   e.sessionID,
+		TaskID:      task.TaskID,
+		TurnID:      task.TurnID,
 	})
 	if err != nil {
 		return goalloop.TurnOutcome{}, err
@@ -162,15 +208,23 @@ func (e *goalTurnEngine) RunTurn(ctx context.Context, task goalloop.TaskContext)
 	return outcome, nil
 }
 
+func toolCallParams(call model.ToolCall) map[string]any {
+	params := map[string]any{}
+	if raw := strings.TrimSpace(call.Function.Arguments); raw != "" {
+		if err := json.Unmarshal([]byte(raw), &params); err != nil {
+			return nil
+		}
+	}
+	return params
+}
+
 // dispatchGoalTool executes one tool call: the two goal tools are
 // intercepted here, everything else goes through the governed registry.
 // State change tracks the registry's own impact classification.
 func (e *goalTurnEngine) dispatchGoalTool(ctx context.Context, task goalloop.TaskContext, call model.ToolCall, state *goalTurnState) agentloop.ToolOutcome {
-	params := map[string]any{}
-	if raw := strings.TrimSpace(call.Function.Arguments); raw != "" {
-		if err := json.Unmarshal([]byte(raw), &params); err != nil {
-			return agentloop.ToolOutcome{Content: fmt.Sprintf("Error: invalid tool arguments: %v", err)}
-		}
+	params := toolCallParams(call)
+	if params == nil {
+		return agentloop.ToolOutcome{Content: "Error: invalid tool arguments"}
 	}
 
 	switch call.Function.Name {
@@ -179,7 +233,7 @@ func (e *goalTurnEngine) dispatchGoalTool(ctx context.Context, task goalloop.Tas
 		if summary, _ := params["summary"].(string); strings.TrimSpace(summary) != "" {
 			state.completedSummary = strings.TrimSpace(summary)
 		}
-		return agentloop.ToolOutcome{Content: "Completion recorded. The summary will be stored as evidence.", Success: true}
+		return agentloop.ToolOutcome{Content: "Completion recorded. The summary will be stored as evidence.", Success: true, EffectClass: "control"}
 	case goalBlockedToolName:
 		reason, _ := params["reason"].(string)
 		if strings.TrimSpace(reason) == "" {
@@ -187,7 +241,7 @@ func (e *goalTurnEngine) dispatchGoalTool(ctx context.Context, task goalloop.Tas
 		}
 		needs, _ := params["needs"].(string)
 		state.blocker = &taskstate.Blocker{Reason: strings.TrimSpace(reason), Needs: strings.TrimSpace(needs)}
-		return agentloop.ToolOutcome{Content: "Blocker recorded. The task will park with this reason.", Success: true}
+		return agentloop.ToolOutcome{Content: "Blocker recorded. The task will park with this reason.", Success: true, EffectClass: "control"}
 	}
 
 	// Enforce the allowlist at dispatch too: the model only sees the
@@ -201,20 +255,22 @@ func (e *goalTurnEngine) dispatchGoalTool(ctx context.Context, task goalloop.Tas
 		return agentloop.ToolOutcome{Content: fmt.Sprintf("Error: tool %s is not available in this turn", call.Function.Name)}
 	}
 
+	effectClass := string(tool.ImpactDestructive)
 	if registered, ok := e.registry.Get(call.Function.Name); ok {
+		effectClass = string(tool.GetMetadata(registered).Impact)
 		if tool.GetMetadata(registered).Impact != tool.ImpactReadOnly {
 			state.stateChanged = true
 		}
 	}
 	result, err := e.registry.ExecuteWithContext(ctx, call.Function.Name, params)
 	if err != nil {
-		return agentloop.ToolOutcome{Content: "Error: " + err.Error()}
+		return agentloop.ToolOutcome{Content: "Error: " + err.Error(), EffectClass: effectClass}
 	}
 	if result == nil {
-		return agentloop.ToolOutcome{Content: "No result"}
+		return agentloop.ToolOutcome{Content: "No result", EffectClass: effectClass}
 	}
 	content := formatACPToolResult(result, nil)
-	return agentloop.ToolOutcome{Content: content, Success: result.Success}
+	return agentloop.ToolOutcome{Content: content, Success: result.Success, EffectClass: effectClass}
 }
 
 // storeCompletionEvidence persists the completion summary as an evidence
