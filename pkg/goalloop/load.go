@@ -40,6 +40,7 @@ func (l *Loop) LoadGoal(ctx context.Context, runID string) (Goal, map[string]Tas
 				Description:        payloadString(ev.Payload, "description"),
 				AcceptanceCriteria: payloadStrings(ev.Payload, "acceptance_criteria"),
 				Priority:           payloadInt(ev.Payload, "priority"),
+				Claims:             payloadStrings(ev.Payload, "claims"),
 			}
 		}
 	}

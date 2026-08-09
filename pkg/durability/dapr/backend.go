@@ -28,9 +28,11 @@ import (
 // (spec.durable-execution-dapr, versioning rule).
 const (
 	GoalWorkflowV1     = "buckley.goal.v1"
+	GoalWorkflowV2     = "buckley.goal.v2"
 	TaskWorkflowV1     = "buckley.task.v1"
 	ActivityResumeSeed = "buckley.resume_seed.v1"
 	ActivityNextTask   = "buckley.next_task.v1"
+	ActivityNextBatch  = "buckley.next_batch.v1"
 	ActivityRunTurn    = "buckley.run_turn.v1"
 )
 
@@ -85,8 +87,13 @@ func (b *Backend) Health(ctx context.Context) error {
 // the work-item listener. It returns once the listener is running.
 func (b *Backend) StartWorker(ctx context.Context, runner durability.TaskRunner) error {
 	registry := workflow.NewRegistry()
+	// V1 stays registered so in-flight instances keep their original
+	// orchestration semantics (spec versioning rule); new goals start V2.
 	if err := registry.AddWorkflowN(GoalWorkflowV1, goalWorkflow); err != nil {
 		return fmt.Errorf("dapr: register %s: %w", GoalWorkflowV1, err)
+	}
+	if err := registry.AddWorkflowN(GoalWorkflowV2, goalWorkflowV2); err != nil {
+		return fmt.Errorf("dapr: register %s: %w", GoalWorkflowV2, err)
 	}
 	if err := registry.AddWorkflowN(TaskWorkflowV1, taskWorkflow); err != nil {
 		return fmt.Errorf("dapr: register %s: %w", TaskWorkflowV1, err)
@@ -94,6 +101,7 @@ func (b *Backend) StartWorker(ctx context.Context, runner durability.TaskRunner)
 	activities := map[string]workflow.Activity{
 		ActivityResumeSeed: resumeSeedActivity(runner),
 		ActivityNextTask:   nextTaskActivity(runner),
+		ActivityNextBatch:  nextBatchActivity(runner),
 		ActivityRunTurn:    runTurnActivity(runner),
 	}
 	for name, activity := range activities {
@@ -131,11 +139,11 @@ func (b *Backend) StartGoal(ctx context.Context, start durability.GoalStart) (st
 		return "", fmt.Errorf("dapr: inspect workflow %s: %w", instanceID, err)
 	}
 
-	if _, err := b.client.ScheduleWorkflow(ctx, GoalWorkflowV1,
+	if _, err := b.client.ScheduleWorkflow(ctx, GoalWorkflowV2,
 		workflow.WithInstanceID(instanceID),
 		workflow.WithInput(start),
 	); err != nil {
-		return "", fmt.Errorf("dapr: schedule %s: %w", GoalWorkflowV1, err)
+		return "", fmt.Errorf("dapr: schedule %s: %w", GoalWorkflowV2, err)
 	}
 	return instanceID, nil
 }
