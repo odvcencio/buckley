@@ -2,7 +2,9 @@ package agentloop
 
 import (
 	"context"
+	"encoding/json"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"m31labs.dev/buckley/pkg/evidence"
@@ -139,6 +141,77 @@ func TestController_ReplaysToolResultWithoutExecutingDispatcher(t *testing.T) {
 	}
 	if got, _ := result.Message.Content.(string); got != "after tool" {
 		t.Fatalf("replayed final message = %q, want after tool", got)
+	}
+}
+
+func TestController_LargeToolResultStaysInEvidence(t *testing.T) {
+	ledger, ev, runID := newDurableControllerStores(t)
+	ctx := context.Background()
+	largeResult := strings.Repeat("payload-probe-", 1<<16) // ~900 KiB
+	providerCalls := 0
+	config := ControllerConfig{
+		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
+			return model.ChatRequest{Model: "test-model"}, nil
+		},
+		CallModel: ModelCallerFunc(func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
+			providerCalls++
+			if providerCalls == 1 {
+				return toolCallResponse("call-1", "read_file", `{}`, model.Usage{}), nil
+			}
+			return textResponse("done", model.Usage{}), nil
+		}),
+		DispatchTools: ToolDispatcherFunc(func(context.Context, []model.ToolCall) ([]ToolOutcome, error) {
+			return []ToolOutcome{{Content: largeResult, Success: true, EffectClass: "readonly"}}, nil
+		}),
+		RunLedger:   ledger,
+		Evidence:    ev,
+		StepJournal: ledger,
+		RunID:       runID,
+		SessionID:   "durable-test",
+		TaskID:      "task-1",
+		TurnID:      "task-1/cp-001/turn-000",
+	}
+	controller, err := NewController(config)
+	if err != nil {
+		t.Fatalf("NewController: %v", err)
+	}
+	if _, err := controller.Run(ctx); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	events, err := ledger.ListEvents(ctx, runledger.EventQuery{RunID: runID})
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	var completed *runledger.Event
+	for i := range events {
+		if events[i].Type == runledger.EventToolCompleted {
+			completed = &events[i]
+		}
+	}
+	if completed == nil {
+		t.Fatalf("events = %d, want a tool.completed event", len(events))
+	}
+	encoded, err := json.Marshal(completed.Payload)
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	if len(encoded) > 4096 {
+		t.Fatalf("tool.completed payload is %d bytes, want compact evidence-referenced payload", len(encoded))
+	}
+	if strings.Contains(string(encoded), "payload-probe-payload-probe-") {
+		t.Fatalf("tool.completed payload embeds the tool result body")
+	}
+	evidenceID, _ := completed.Payload["output_evidence_id"].(string)
+	if evidenceID == "" {
+		t.Fatalf("payload = %s, want output_evidence_id", encoded)
+	}
+	obj, err := ev.Get(ctx, evidenceID)
+	if err != nil {
+		t.Fatalf("evidence Get %s: %v", evidenceID, err)
+	}
+	if !strings.Contains(string(obj.InlineBody), "payload-probe-") || len(obj.InlineBody) < len(largeResult) {
+		t.Fatalf("evidence body = %d bytes, want the full tool result", len(obj.InlineBody))
 	}
 }
 

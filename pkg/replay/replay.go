@@ -107,7 +107,10 @@ func Verify(ctx context.Context, ledger runledger.Store, journal runledger.StepJ
 		for _, id := range eventEvidenceIDs(event) {
 			evidenceIDs[id] = true
 		}
-		if requiresOutputEvidence(event.Type) && payloadEvidenceID(event) == "" {
+		// Only step-bearing events fail closed on missing output evidence.
+		// Legacy events already carry a legacy_step_event warning and must
+		// keep old ledgers inspectable.
+		if requiresOutputEvidence(event.Type) && stepID != "" && payloadEvidenceID(event) == "" {
 			report.Issues = append(report.Issues, Issue{Severity: SeverityError, Code: "missing_output_evidence", Message: "completed replayable step has no output evidence", Sequence: event.Sequence, StepID: stepID})
 		}
 
