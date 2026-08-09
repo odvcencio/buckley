@@ -336,7 +336,10 @@ func runGoalRun(args []string) error {
 	execProgram := fs.Bool("exec-program", false, "offer the exec_program code-mode tool (read-only jailed capabilities, fully audited); internal engine only")
 	execCaps := fs.String("exec-caps", "readonly", "capability grant for exec_program: readonly (read, list, search) | minimal (read, list)")
 	durableFlag := fs.String("durable-backend", "", "override execution.durable_backend for this run: local | dapr")
-	maxParallel := fs.Int("max-parallel", 1, "durable backend only: run up to this many claim-independent tasks concurrently")
+	// Parallelism is claims-gated: a task without declared claims always
+	// runs alone, so this bound only applies to tasks that opted in with
+	// disjoint workspace claims. The concurrent path is race-tested.
+	maxParallel := fs.Int("max-parallel", 4, "durable backend only: run up to this many claim-independent tasks concurrently")
 	approvalWait := fs.Duration("approval-wait", 0, "durable backend only: hold parked tasks on a durable approval wait this long (0 disables; resolve with `buckley goal approve`)")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -544,7 +547,7 @@ func runGoalStart(args []string) error {
 	var constraints goalStringList
 	fs.Var(&constraints, "constraint", "constraint (repeatable)")
 	var tasks goalStringList
-	fs.Var(&tasks, "task", "explicit task, in queue order (repeatable; omit to run the goal as one task)")
+	fs.Var(&tasks, "task", "explicit task, in queue order (repeatable; omit to run the goal as one task). Append ' :: path, path' to declare workspace claims so the durable backend can fan tasks out")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -771,8 +774,10 @@ func newGoalLoopWithTasks(tasks []string) (*goalloop.Loop, func(), error) {
 	}
 	if len(tasks) > 0 {
 		specs := make([]goalloop.TaskSpec, 0, len(tasks))
-		for i, title := range tasks {
-			specs = append(specs, goalloop.TaskSpec{Title: title, Priority: i + 1})
+		for i, task := range tasks {
+			spec := parseTaskFlag(task)
+			spec.Priority = i + 1
+			specs = append(specs, spec)
 		}
 		cfg.Planner = staticGoalPlanner{specs: specs}
 	}
@@ -782,6 +787,23 @@ func newGoalLoopWithTasks(tasks []string) (*goalloop.Loop, func(), error) {
 		return nil, nil, err
 	}
 	return loop, cleanup, nil
+}
+
+// parseTaskFlag splits one --task value into its title and optional
+// workspace claims: "port pkg/a :: pkg/a, docs/a.md". Claims let the
+// durable backend fan out claim-independent tasks (spec Phase 2).
+func parseTaskFlag(value string) goalloop.TaskSpec {
+	title, claimText, found := strings.Cut(value, "::")
+	spec := goalloop.TaskSpec{Title: strings.TrimSpace(title)}
+	if !found {
+		return spec
+	}
+	for _, claim := range strings.Split(claimText, ",") {
+		if claim = strings.TrimSpace(claim); claim != "" {
+			spec.Claims = append(spec.Claims, claim)
+		}
+	}
+	return spec
 }
 
 // staticGoalPlanner returns a fixed decomposition (the --task flags).

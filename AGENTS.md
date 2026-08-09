@@ -90,6 +90,7 @@ Key decisions to know before changing architecture:
 | 0009 | RLM runtime | Iterative refinement with tiered model routing |
 | 0010 | Custom TUI runtime | Retained-mode rendering, dirty tracking, testable |
 | 0013 | Code execution surface | One `exec_program` tool over brokered, sandboxed capabilities |
+| 0014 | Durable execution deployment | PostgreSQL state store, `goal worker` process split, single retry owner, run-lifetime evidence pins |
 
 If your change conflicts with a decision, follow it or propose a new one
 as a spore against the space (see the `hyphae` skill).

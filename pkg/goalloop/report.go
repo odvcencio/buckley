@@ -47,11 +47,15 @@ type ReportCheck struct {
 }
 
 // ReportParked is one parked or blocked task with its reason.
+// AwaitingApproval is set when the task's durable workflow is holding
+// an unresolved approval wait, so the report can point the operator at
+// `buckley goal approve`.
 type ReportParked struct {
-	TaskID string
-	Title  string
-	Reason string
-	Needs  string
+	TaskID           string
+	Title            string
+	Reason           string
+	Needs            string
+	AwaitingApproval bool
 }
 
 // ReportSpend is one task's dollar total.
@@ -83,6 +87,21 @@ func (l *Loop) Report(ctx context.Context, runID string) (Report, error) {
 	spendByTask, err := l.ledger.SumMetricByTask(ctx, runID, costUSDMetric)
 	if err != nil {
 		return Report{}, fmt.Errorf("goalloop: spend by task: %w", err)
+	}
+
+	// A parked task whose durable workflow holds an unresolved approval
+	// wait is actionable, not stuck; the report surfaces it.
+	awaitingApproval := map[string]string{}
+	for _, ev := range events {
+		instance := payloadString(ev.Payload, "workflow_instance_id")
+		switch ev.Type {
+		case runledger.EventDurableApprovalWaiting:
+			awaitingApproval[ev.TaskID] = instance
+		case runledger.EventDurableApprovalResolved:
+			if awaitingApproval[ev.TaskID] == instance {
+				delete(awaitingApproval, ev.TaskID)
+			}
+		}
 	}
 
 	type taskRow struct {
@@ -150,6 +169,9 @@ func (l *Loop) Report(ctx context.Context, runID string) (Report, error) {
 			if task.blocker != nil {
 				parked.Reason = task.blocker.Reason
 				parked.Needs = task.blocker.Needs
+			}
+			if _, waiting := awaitingApproval[task.id]; waiting {
+				parked.AwaitingApproval = true
 			}
 			report.Parked = append(report.Parked, parked)
 		}
@@ -243,6 +265,9 @@ func RenderReport(r Report) string {
 			line := fmt.Sprintf("- %s blocked: %s", parked.Title, parked.Reason)
 			if parked.Needs != "" {
 				line += " — needs: " + parked.Needs
+			}
+			if parked.AwaitingApproval {
+				line += fmt.Sprintf(" — awaiting approval: buckley goal approve --task %s %s", parked.TaskID, r.RunID)
 			}
 			b.WriteString(line + "\n")
 		}
