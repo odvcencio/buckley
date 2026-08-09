@@ -17,7 +17,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
-	healthpb "google.golang.org/grpc/health/grpc_health_v1"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 
 	"m31labs.dev/buckley/pkg/durability"
@@ -66,22 +66,54 @@ func ResolveEndpoint(configured string) string {
 	return DefaultEndpoint
 }
 
+// DefaultAppID is the dapr-app-id the backend presents when none is
+// configured. A real sidecar proxies workflow calls by this metadata
+// and rejects requests without it; it must match the sidecar's own
+// --app-id. The emulator ignores it.
+const DefaultAppID = "buckley"
+
+// ResolveAppID picks the app ID: the explicit value, then DAPR_APP_ID,
+// then the default.
+func ResolveAppID(configured string) string {
+	if appID := strings.TrimSpace(configured); appID != "" {
+		return appID
+	}
+	if appID := strings.TrimSpace(os.Getenv("DAPR_APP_ID")); appID != "" {
+		return appID
+	}
+	return DefaultAppID
+}
+
 // New connects a Backend to the sidecar endpoint. The connection is
 // lazy; Health performs the first real round trip.
 func New(endpoint string) (*Backend, error) {
 	endpoint = ResolveEndpoint(endpoint)
-	conn, err := grpc.NewClient(endpoint, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	appID := ResolveAppID("")
+	conn, err := grpc.NewClient(endpoint,
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithUnaryInterceptor(func(ctx context.Context, method string, req, reply any, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
+			return invoker(metadata.AppendToOutgoingContext(ctx, "dapr-app-id", appID), method, req, reply, cc, opts...)
+		}),
+		grpc.WithStreamInterceptor(func(ctx context.Context, desc *grpc.StreamDesc, cc *grpc.ClientConn, method string, streamer grpc.Streamer, opts ...grpc.CallOption) (grpc.ClientStream, error) {
+			return streamer(metadata.AppendToOutgoingContext(ctx, "dapr-app-id", appID), desc, cc, method, opts...)
+		}),
+	)
 	if err != nil {
 		return nil, fmt.Errorf("dapr: connect %s: %w", endpoint, err)
 	}
 	return &Backend{endpoint: endpoint, conn: conn, client: workflow.NewClient(conn)}, nil
 }
 
-// Health checks the sidecar with the standard gRPC health protocol. An
-// Unimplemented response still proves the endpoint answers gRPC.
+// Health probes the workflow API itself: fetching a sentinel instance
+// answers fast from both the sidecar and the emulator, and not-found is
+// the healthy answer. The generic gRPC health service is unusable here:
+// a sidecar proxies it to the (possibly absent) app channel.
 func (b *Backend) Health(ctx context.Context) error {
-	_, err := healthpb.NewHealthClient(b.conn).Check(ctx, &healthpb.HealthCheckRequest{})
-	if err == nil || status.Code(err) == codes.Unimplemented {
+	_, err := b.client.FetchWorkflowMetadata(ctx, "buckley-health-probe")
+	switch {
+	case err == nil, errors.Is(err, api.ErrInstanceNotFound):
+		return nil
+	case status.Code(err) == codes.Unimplemented, status.Code(err) == codes.NotFound:
 		return nil
 	}
 	return fmt.Errorf("dapr: sidecar %s is unreachable: %w (start it with `dapr run` or set execution.dapr_grpc_endpoint)", b.endpoint, err)
