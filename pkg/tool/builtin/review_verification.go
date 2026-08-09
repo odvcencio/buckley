@@ -232,6 +232,12 @@ func (t *RunVerificationTool) ExecuteWithContext(ctx context.Context, params map
 			"evidence":  verificationEvidenceClass(verification),
 			"proves":    verificationProofKinds(verification),
 			"error":     verification.Error,
+			// A failure with no visible output invites invented
+			// conclusions: the abridged view keeps the output tails so
+			// every CONFIRMED_FAIL stays attributable to real text.
+			"stdout_tail": outputTail(verification.Stdout, verificationTailBytes),
+			"stderr_tail": outputTail(verification.Stderr, verificationTailBytes),
+			"truncated":   true,
 		}
 	}
 	return result, nil
@@ -256,11 +262,30 @@ func verificationProofKinds(verification reviewsandbox.Result) []string {
 	}
 }
 
+// verificationTailBytes bounds the per-stream output tail kept in the
+// abridged view.
+const verificationTailBytes = 2_500
+
+// outputTail keeps the end of a stream, where Go builds and tests put
+// the failure summary.
+func outputTail(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return "…" + s[len(s)-n:]
+}
+
 func verificationEvidenceClass(verification reviewsandbox.Result) string {
 	switch {
 	case verification.Status == reviewsandbox.StatusPass && verification.ExitCode == 0:
 		return "CONFIRMED_PASS"
 	case verification.Status == reviewsandbox.StatusFail:
+		// A failure with no captured output or error text proves
+		// nothing attributable; grading it CONFIRMED invites findings
+		// built on invented evidence.
+		if verification.Stdout == "" && verification.Stderr == "" && verification.Error == "" {
+			return "INCONCLUSIVE"
+		}
 		return "CONFIRMED_FAIL"
 	default:
 		return "INCONCLUSIVE"
