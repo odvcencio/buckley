@@ -2,7 +2,6 @@ package goalloop
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"time"
 
@@ -102,112 +101,57 @@ func (l *Loop) RunTask(ctx context.Context, runID, taskID string, goal Goal, spe
 		return TaskResult{}, errNoEngine
 	}
 
-	task := TaskContext{RunID: runID, TaskID: taskID, Goal: goal, Spec: spec, Phase: PhaseExecute}
-	if resumed, err := l.checkpoints.Resume(ctx, taskID); err == nil {
-		task.Resume = &resumed
-	} else if !errors.Is(err, taskstate.ErrNoCheckpoint) {
-		return TaskResult{}, fmt.Errorf("goalloop: resume %s: %w", taskID, err)
-	}
-
 	result := TaskResult{TaskID: taskID, Status: taskstate.StatusInProgress}
 	started := time.Now()
-	counters := agentloop.FuseCounters{}
-	drive := newDriveState(spec, task.Resume)
-	generation := 0
-	if task.Resume != nil {
-		generation = task.Resume.Checkpoint.Version
-	}
-	turnIndex := 0
-	progress := l.progressFor(goal)
-	// Budget decisions run on the goal's cumulative spend across every
-	// drive and task, read back from the ledger's metric samples — not
-	// on this drive's local total.
-	goalSpent, err := l.ledger.SumMetric(ctx, runID, costUSDMetric)
+	seed, err := l.SeedTask(ctx, taskID, spec)
 	if err != nil {
-		return result, fmt.Errorf("goalloop: read spend for %s: %w", runID, err)
+		return TaskResult{}, err
 	}
+	generation := seed.Generation
+	turnIndex := 0
+	snapshot := seed.Drive
+	counters := agentloop.FuseCounters{}
 
 	for {
 		if err := ctx.Err(); err != nil {
 			return result, err
 		}
 
-		task.Phase = drive.phase
-		task.TurnID = fmt.Sprintf("%s/cp-%03d/turn-%03d", taskID, generation, turnIndex)
-		outcome, err := l.engine.RunTurn(ctx, task)
-		if err != nil {
-			return result, fmt.Errorf("goalloop: turn for %s: %w", taskID, err)
-		}
-		result.Turns++
-		turnIndex++
-		result.SpentUSD += outcome.SpentUSD
-		goalSpent, err = l.recordTurnSpend(ctx, runID, taskID, goal, outcome)
+		step, err := l.TurnStep(ctx, TurnStepRequest{
+			RunID:        runID,
+			TaskID:       taskID,
+			Goal:         goal,
+			Spec:         spec,
+			Generation:   generation,
+			TurnIndex:    turnIndex,
+			Drive:        snapshot,
+			Counters:     counters,
+			DriveStarted: started,
+		})
 		if err != nil {
 			return result, err
 		}
-		counters.ModelRequests += outcome.Rounds
-		counters.ToolExecutions += outcome.ToolCalls
-		counters.Elapsed = time.Since(started)
-		counters.SpentUSD = goalSpent
-		drive.absorb(outcome)
-		// A verify phase lasts one turn; the outcome's checks decide
-		// what happens next.
-		drive.phase = PhaseExecute
-
-		if outcome.Completed {
-			finished, err := l.tryFinishTask(ctx, runID, taskID, outcome, drive)
-			if err != nil {
-				return result, err
-			}
-			if finished {
-				result.Status = taskstate.StatusCompleted
-				return result, nil
-			}
-			if drive.prematureCompletions >= 2 {
-				result.Status = taskstate.StatusParked
-				blocker := &taskstate.Blocker{
-					Reason: "completion blocked: required verification is not evidenced",
-					Needs:  "evidence for required checks",
-				}
-				return result, l.parkTask(ctx, runID, taskID, blocker, drive)
-			}
-			drive.phase = PhaseVerify
-			continue
-		}
-		if outcome.Blocker != nil {
-			result.Status = taskstate.StatusBlocked
-			return result, l.blockTask(ctx, runID, taskID, outcome.Blocker, drive)
+		result.Turns++
+		result.SpentUSD += step.TurnSpentUSD
+		snapshot = step.Drive
+		counters = step.Counters
+		turnIndex++
+		if step.Decision != "" {
+			result.Decision = step.Decision
 		}
 
-		decision := progress.Decide(progressState(outcome, goal, goalSpent, drive), counters)
-		l.recordDecision(ctx, runID, taskID, progress.Mode, decision)
-		if decision.Decision == agentloop.DecideContinue || !decision.Apply {
+		switch step.Kind {
+		case StepContinue, StepVerify:
 			continue
-		}
-
-		result.Decision = decision.Decision
-		switch decision.Decision {
-		case agentloop.DecideVerify:
-			// Route the next turn into the verify phase instead of
-			// yielding: cheap verification before more exploration.
-			drive.phase = PhaseVerify
-			continue
-		case agentloop.DecideCheckpoint:
-			if err := l.checkpointTask(ctx, runID, taskID, taskstate.StatusInProgress, drive, nil, taskstate.TriggerPressure); err != nil {
-				return result, err
-			}
+		case StepCheckpoint:
 			generation++
 			turnIndex = 0
 			continue
-		case agentloop.DecidePark:
-			result.Status = taskstate.StatusParked
-			blocker := &taskstate.Blocker{Reason: decision.Reason}
-			return result, l.parkTask(ctx, runID, taskID, blocker, drive)
-		default:
-			// replan, synthesize, and stop_safety end this drive: the
-			// loop yields to the scheduler with a checkpoint; replan and
-			// synthesis passes ride later slices.
-			return result, l.checkpointTask(ctx, runID, taskID, taskstate.StatusInProgress, drive, nil, taskstate.TriggerDecisionRecorded)
+		case StepCompleted, StepBlocked, StepPark:
+			result.Status = step.Status
+			return result, nil
+		default: // StepYield
+			return result, nil
 		}
 	}
 }

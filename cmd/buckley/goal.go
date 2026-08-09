@@ -14,6 +14,10 @@ import (
 	"time"
 
 	"m31labs.dev/buckley/pkg/evidence"
+	"m31labs.dev/buckley/pkg/config"
+	"m31labs.dev/buckley/pkg/durability"
+	daprbackend "m31labs.dev/buckley/pkg/durability/dapr"
+	"m31labs.dev/buckley/pkg/durability/goalrunner"
 	"m31labs.dev/buckley/pkg/execmode"
 	"m31labs.dev/buckley/pkg/goalloop"
 	"m31labs.dev/buckley/pkg/ralph"
@@ -163,6 +167,7 @@ func runGoalRun(args []string) error {
 	backendName := fs.String("backend", "", "delegate whole tasks to an external CLI backend (claude, codex) instead of the internal engine")
 	execProgram := fs.Bool("exec-program", false, "offer the exec_program code-mode tool (read-only jailed capabilities, fully audited); internal engine only")
 	execCaps := fs.String("exec-caps", "readonly", "capability grant for exec_program: readonly (read, list, search) | minimal (read, list)")
+	durableFlag := fs.String("durable-backend", "", "override execution.durable_backend for this run: local | dapr")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -243,6 +248,19 @@ func runGoalRun(args []string) error {
 		fmt.Printf("Budget: $%.2f · posture: %s\n", goal.BudgetUSD, goal.Posture)
 	}
 
+	durableBackend := strings.ToLower(strings.TrimSpace(*durableFlag))
+	if durableBackend == "" {
+		durableBackend = strings.ToLower(strings.TrimSpace(cfg.Execution.DurableBackend))
+	}
+	switch durableBackend {
+	case "", config.DurableBackendLocal:
+		// The in-process loop below is the default.
+	case config.DurableBackendDapr:
+		return runGoalDurable(ctx, cfg, loop, goal, specs, runID)
+	default:
+		return fmt.Errorf("unknown durable backend %q (want local or dapr)", durableBackend)
+	}
+
 	results, err := loop.Drain(ctx, runID, goal, specs)
 	for _, result := range results {
 		line := fmt.Sprintf("  [%s] %s — %d turn(s), $%.2f", result.Status, result.TaskID, result.Turns, result.SpentUSD)
@@ -259,6 +277,53 @@ func runGoalRun(args []string) error {
 		return err
 	}
 	fmt.Printf("Queue drained. Report: buckley goal report %s\n", runID)
+	return nil
+}
+
+// runGoalDurable drives one goal through the Dapr workflow backend
+// (spec.durable-execution-dapr, Phase 1). The worker runs in this
+// process; Dapr owns scheduling, so an interrupt leaves the workflow
+// resumable and a later `goal run` re-attaches to the same instance.
+func runGoalDurable(ctx context.Context, cfg *config.Config, loop *goalloop.Loop, goal goalloop.Goal, specs map[string]goalloop.TaskSpec, runID string) error {
+	backend, err := daprbackend.New(cfg.Execution.DaprGRPCEndpoint)
+	if err != nil {
+		return err
+	}
+	defer backend.Close()
+
+	healthCtx, cancelHealth := context.WithTimeout(ctx, 5*time.Second)
+	defer cancelHealth()
+	if err := backend.Health(healthCtx); err != nil {
+		return err
+	}
+	if err := backend.StartWorker(ctx, goalrunner.New(loop, goal, specs)); err != nil {
+		return err
+	}
+	instanceID, err := backend.StartGoal(ctx, durability.GoalStart{RunID: runID})
+	if err != nil {
+		return err
+	}
+	fmt.Printf("Durable workflow %s running on the dapr backend\n", instanceID)
+
+	status, err := backend.WaitForGoal(ctx, instanceID)
+	if err != nil {
+		if ctx.Err() != nil {
+			fmt.Println("Interrupted; the workflow stays durable under Dapr. Rerun `buckley goal run` to re-attach.")
+			return nil
+		}
+		return err
+	}
+	for _, task := range status.Result.Tasks {
+		line := fmt.Sprintf("  [%s] %s — %d turn(s), $%.2f", task.Status, task.TaskID, task.Turns, task.SpentUSD)
+		if task.Decision != "" {
+			line += " (" + task.Decision + ")"
+		}
+		fmt.Println(line)
+	}
+	if status.Failure != "" {
+		return fmt.Errorf("durable goal %s failed: %s", instanceID, status.Failure)
+	}
+	fmt.Printf("Workflow %s %s. Report: buckley goal report %s\n", instanceID, strings.ToLower(status.RuntimeStatus), runID)
 	return nil
 }
 
