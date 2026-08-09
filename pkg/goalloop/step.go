@@ -255,6 +255,44 @@ func (l *Loop) TurnStep(ctx context.Context, req TurnStepRequest) (TurnStepRespo
 	}
 }
 
+// Unpark readmits a parked task after a durable approval: the latest
+// checkpoint is rewritten in_progress with the blocker cleared, so the
+// queue offers the task again and the next drive seeds a fresh
+// generation from the new checkpoint version.
+func (l *Loop) Unpark(ctx context.Context, runID, taskID, reason string) error {
+	resumed, err := l.checkpoints.Resume(ctx, taskID)
+	if err != nil {
+		return fmt.Errorf("goalloop: unpark %s: %w", taskID, err)
+	}
+	state := resumed.State
+	state.Status = taskstate.StatusInProgress
+	state.Blocker = nil
+	if _, err := l.checkpoints.Save(ctx, taskstate.SaveInput{
+		State:     state,
+		Reason:    taskstate.TriggerDecisionRecorded,
+		SessionID: l.sessionID,
+		RunID:     runID,
+	}); err != nil {
+		return fmt.Errorf("goalloop: unpark checkpoint %s: %w", taskID, err)
+	}
+	_, err = l.ledger.Append(ctx, runledger.Event{
+		Type:      runledger.EventControllerDecision,
+		Timestamp: time.Now().UTC(),
+		SessionID: l.sessionID,
+		RunID:     runID,
+		TaskID:    taskID,
+		Payload: map[string]any{
+			"kind":     "goal_loop",
+			"decision": "unparked_by_approval",
+			"reason":   reason,
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("goalloop: record unpark for %s: %w", taskID, err)
+	}
+	return nil
+}
+
 // recordDurableTurn projects a durable scheduler's identity onto the run
 // ledger, so the Dapr workflow history and Buckley's audit reconcile per
 // spec.durable-execution-dapr. Local drives skip it.

@@ -152,6 +152,13 @@ type Loop struct {
 	sessionID   string
 }
 
+// Ledger exposes the loop's run ledger for adapters that record
+// durable-scheduler events (approval waits, resolutions) alongside the
+// loop's own audit trail.
+func (l *Loop) Ledger() runledger.Store {
+	return l.ledger
+}
+
 // New wires a Loop.
 func New(cfg Config) (*Loop, error) {
 	if cfg.Ledger == nil {
