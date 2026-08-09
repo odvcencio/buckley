@@ -52,6 +52,9 @@ func TestRunVerificationToolSuccessRequiresPassAndZeroExit(t *testing.T) {
 				Argv:     []string{"/usr/local/go/bin/go", "test", "."},
 				ExitCode: test.exitCode,
 				Status:   test.status,
+				// CONFIRMED_FAIL requires attributable output; a silent
+				// failure is INCONCLUSIVE by design.
+				Stderr: "FAIL: TestFocused",
 			}}
 			tool.verifier = fake
 			result, err := tool.Execute(map[string]any{
