@@ -15,7 +15,8 @@ const (
 	defaultOpenRouterModel        = defaultOpenRouterChatModel
 	defaultOpenRouterChatModel    = "z-ai/glm-5.2"
 	defaultOpenRouterUtilityModel = "qwen/qwen3.6-flash"
-	defaultOpenRouterCommitModel  = "qwen/qwen3.7-plus"
+	defaultOpenRouterCommitModel  = "qwen/qwen3.7-flash"
+	defaultOpenRouterBuckbotModel = "qwen/qwen3.7-plus"
 	defaultOpenRouterKimiCode     = "moonshotai/kimi-k2.7-code"
 	defaultOpenRouterQwenMax      = "qwen/qwen3.7-max"
 	legacyOpenRouterChatModel     = "qwen/qwen3.6-max-preview"

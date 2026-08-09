@@ -122,7 +122,7 @@ func defaultNATSURL() string {
 func DefaultConfig() *Config {
 	return &Config{
 		Buckbot: BuckbotConfig{
-			Model:                      defaultOpenRouterCommitModel,
+			Model:                      defaultOpenRouterBuckbotModel,
 			CriticModel:                "",
 			Reasoning:                  "auto",
 			PerReviewBudgetUSD:         0.15,
