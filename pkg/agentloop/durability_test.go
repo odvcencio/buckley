@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"m31labs.dev/buckley/pkg/evidence"
 	"m31labs.dev/buckley/pkg/model"
@@ -212,6 +213,67 @@ func TestController_LargeToolResultStaysInEvidence(t *testing.T) {
 	}
 	if !strings.Contains(string(obj.InlineBody), "payload-probe-") || len(obj.InlineBody) < len(largeResult) {
 		t.Fatalf("evidence body = %d bytes, want the full tool result", len(obj.InlineBody))
+	}
+}
+
+func TestController_StepEvidenceSurvivesRetentionUntilRunReleased(t *testing.T) {
+	ledger, ev, runID := newDurableControllerStores(t)
+	ctx := context.Background()
+	config := ControllerConfig{
+		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
+			return model.ChatRequest{Model: "test-model"}, nil
+		},
+		CallModel: ModelCallerFunc(func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
+			return textResponse("pinned result", model.Usage{}), nil
+		}),
+		RunLedger:   ledger,
+		Evidence:    ev,
+		StepJournal: ledger,
+		RunID:       runID,
+		SessionID:   "durable-test",
+		TaskID:      "task-1",
+		TurnID:      "task-1/cp-001/turn-000",
+	}
+	controller, err := NewController(config)
+	if err != nil {
+		t.Fatalf("NewController: %v", err)
+	}
+	if _, err := controller.Run(ctx); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	// A sweep with the cutoff far in the future reaps every unpinned
+	// ephemeral object; the run's step evidence must survive it.
+	future := time.Now().UTC().Add(365 * 24 * time.Hour)
+	removed, err := ev.Sweep(ctx, evidence.DefaultRetentionPolicy(), future)
+	if err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+	if len(removed) != 0 {
+		t.Fatalf("sweep removed %v, want pinned step evidence retained", removed)
+	}
+	step, err := ledger.GetStep(ctx, runID, StableStepID(runID, "task-1", "task-1/cp-001/turn-000", 1, "model", 0))
+	if err != nil {
+		t.Fatalf("GetStep: %v", err)
+	}
+	if _, err := ev.Get(ctx, step.OutputEvidenceID); err != nil {
+		t.Fatalf("output evidence gone after sweep: %v", err)
+	}
+
+	// Pruning the run releases the pins; the next sweep reaps.
+	released, err := ev.ReleaseByReason(ctx, RunPinReason(runID))
+	if err != nil {
+		t.Fatalf("ReleaseByReason: %v", err)
+	}
+	if released == 0 {
+		t.Fatal("ReleaseByReason released nothing, want the run's step pins")
+	}
+	removed, err = ev.Sweep(ctx, evidence.DefaultRetentionPolicy(), future)
+	if err != nil {
+		t.Fatalf("second Sweep: %v", err)
+	}
+	if len(removed) == 0 {
+		t.Fatal("sweep after release removed nothing, want step evidence reaped")
 	}
 }
 

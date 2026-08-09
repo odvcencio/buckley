@@ -53,9 +53,91 @@ func runGoalCommand(args []string) error {
 		return runGoalReplay(args[1:])
 	case "approve":
 		return runGoalApprove(args[1:])
+	case "worker":
+		return runGoalWorker(args[1:])
 	default:
-		return fmt.Errorf("unknown goal subcommand %q (want start, status, list, report, run, audit, replay, or approve)", args[0])
+		return fmt.Errorf("unknown goal subcommand %q (want start, status, list, report, run, audit, replay, approve, or worker)", args[0])
 	}
+}
+
+// runGoalWorker hosts durable goal activities as a standalone process:
+// it registers the workflows against the Dapr sidecar and serves any
+// goal on the ledger, resolving each run's engine on first use. This is
+// the separately schedulable worker (spec decision 2): one pod runs
+// `buckley goal worker` while `buckley goal run` elsewhere schedules
+// and observes.
+func runGoalWorker(args []string) error {
+	fs := flag.NewFlagSet("goal worker", flag.ContinueOnError)
+	endpoint := fs.String("endpoint", "", "Dapr sidecar gRPC endpoint (default: execution.dapr_grpc_endpoint, DAPR_GRPC_ENDPOINT, or localhost:50001)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return errors.New("usage: buckley goal worker [--endpoint host:port]")
+	}
+
+	cfg, mgr, store, err := initDependenciesFn()
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	stores, cleanup, err := openGoalStores()
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+	workDir, err := os.Getwd()
+	if err != nil {
+		return err
+	}
+
+	registry := tool.NewRegistry()
+	tool.ApplyToolMiddlewareConfig(registry, cfg)
+	registry.ConfigureContainers(cfg, workDir)
+	registry.SetWorkDir(workDir)
+	engine := newGoalTurnEngine(cfg, mgr, registry, stores.ledger, stores.evidence, workDir, "goal-worker")
+
+	loop, err := goalloop.New(goalloop.Config{
+		Ledger:      stores.ledger,
+		Checkpoints: stores.checkpoints,
+		Engine:      engine,
+		SessionID:   "goal-worker",
+	})
+	if err != nil {
+		return err
+	}
+	resolver := goalrunner.NewResolver(func(ctx context.Context, runID string) (*goalrunner.Runner, error) {
+		goal, specs, err := loop.LoadGoal(ctx, runID)
+		if err != nil {
+			return nil, err
+		}
+		return goalrunner.New(loop, goal, specs), nil
+	})
+
+	sidecar := *endpoint
+	if sidecar == "" {
+		sidecar = cfg.Execution.DaprGRPCEndpoint
+	}
+	backend, err := daprbackend.New(sidecar)
+	if err != nil {
+		return err
+	}
+	defer backend.Close()
+
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+	healthCtx, cancelHealth := context.WithTimeout(ctx, 5*time.Second)
+	defer cancelHealth()
+	if err := backend.Health(healthCtx); err != nil {
+		return err
+	}
+	if err := backend.StartWorker(ctx, resolver); err != nil {
+		return err
+	}
+	fmt.Println("Goal worker serving durable workflows; interrupt to stop.")
+	<-ctx.Done()
+	fmt.Println("Goal worker stopping; in-flight state is durable and resumes on the next worker.")
+	return nil
 }
 
 // runGoalApprove resolves a durable approval wait: it finds the parked

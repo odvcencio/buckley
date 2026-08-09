@@ -317,6 +317,43 @@ func TestDaprBackend_WorkerRestartResumesWithoutReexecution(t *testing.T) {
 	}
 }
 
+// TestDaprBackend_ResolverServesGoalFromLedger runs the standalone
+// worker path: the activity host resolves the goal through LoadGoal on
+// first use instead of being constructed for it.
+func TestDaprBackend_ResolverServesGoalFromLedger(t *testing.T) {
+	endpoint := integrationEndpoint(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	loop, _, _, intake, _ := newIntegrationGoal(t, ctx, &completingEngine{}, "resolver goal", nil)
+	resolver := goalrunner.NewResolver(func(ctx context.Context, runID string) (*goalrunner.Runner, error) {
+		goal, specs, err := loop.LoadGoal(ctx, runID)
+		if err != nil {
+			return nil, err
+		}
+		return goalrunner.New(loop, goal, specs), nil
+	})
+
+	backend, err := dapr.New(endpoint)
+	if err != nil {
+		t.Fatalf("dapr.New: %v", err)
+	}
+	t.Cleanup(func() { _ = backend.Close() })
+	if err := backend.StartWorker(ctx, resolver); err != nil {
+		t.Fatalf("StartWorker: %v", err)
+	}
+	instanceID, err := backend.StartGoal(ctx, durability.GoalStart{RunID: intake.RunID})
+	if err != nil {
+		t.Fatalf("StartGoal: %v", err)
+	}
+	status, err := backend.WaitForGoal(ctx, instanceID)
+	if err != nil {
+		t.Fatalf("WaitForGoal: %v", err)
+	}
+	if status.RuntimeStatus != "COMPLETED" || len(status.Result.Tasks) != 1 || status.Result.Tasks[0].Status != taskstate.StatusCompleted {
+		t.Fatalf("status = %+v, want one completed task via resolver", status)
+	}
+}
+
 // runApprovalScenario drives one goal into a durable approval wait,
 // lets decide act on the waiting instance, and returns the terminal
 // goal status plus the run's ledger events.

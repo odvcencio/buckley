@@ -61,7 +61,22 @@ func (c *Controller) recordJSONEvidence(ctx context.Context, kind evidence.Kind,
 	if err != nil {
 		return "", "", fmt.Errorf("agentloop: store %s evidence: %w", kind, err)
 	}
+	// Step evidence is pinned for the run's lifetime so retention sweeps
+	// can never invalidate replay; pruning the run releases the pin
+	// (spec.durable-execution-dapr, evidence retention decision).
+	if c.cfg.RunID != "" {
+		if err := c.cfg.Evidence.Pin(ctx, obj.ID, RunPinReason(c.cfg.RunID)); err != nil {
+			return "", "", fmt.Errorf("agentloop: pin %s evidence: %w", kind, err)
+		}
+	}
 	return obj.ID, obj.ContentSHA256, nil
+}
+
+// RunPinReason is the evidence pin reason for one run's replayable step
+// evidence. Releasing every pin with this reason is part of pruning the
+// run.
+func RunPinReason(runID string) string {
+	return "run:" + runID
 }
 
 func (c *Controller) loadJSONEvidence(ctx context.Context, evidenceID string, target any) error {
