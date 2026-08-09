@@ -69,7 +69,7 @@ func TestDefaultAutomatedReviewOptionsAndOverrides(t *testing.T) {
 	defaults := defaultAutomatedReviewOptions(cfg)
 	if defaults.maxIterations != 0 || defaults.maxRetries != 2 || defaults.maxDiffBytes != 240_000 ||
 		defaults.maxSupportingContextTokens != 12_000 ||
-		defaults.maxCostUSD != 0.15 || defaults.criticReserveUSD != 0 || defaults.approvalCritic ||
+		defaults.maxCostUSD != 0.60 || defaults.criticReserveUSD != 0.60*0.12 || !defaults.approvalCritic ||
 		defaults.reasoningEffort != "medium" || !defaults.adaptiveReasoning {
 		t.Fatalf("defaults = %#v, want Buckbot defaults", defaults)
 	}
@@ -78,9 +78,11 @@ func TestDefaultAutomatedReviewOptionsAndOverrides(t *testing.T) {
 		maxIterations: 5,
 		maxCostUSD:    0.10,
 	})
+	// The critic ships enabled by default, so an overridden budget
+	// recomputes its reserve instead of clearing it.
 	if got.maxIterations != 5 || got.maxRetries != 2 || got.maxDiffBytes != 240_000 ||
 		got.maxSupportingContextTokens != 12_000 ||
-		got.maxCostUSD != 0.10 || got.criticReserveUSD != 0 || got.approvalCritic {
+		got.maxCostUSD != 0.10 || got.criticReserveUSD != 0.012 || !got.approvalCritic {
 		t.Fatalf("overrides = %#v, want selective CLI overrides", got)
 	}
 
