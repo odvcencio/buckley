@@ -38,6 +38,27 @@ type NextTaskResponse struct {
 	Done   bool   `json:"done"`
 }
 
+// TaskClaim pairs a runnable task with the workspace paths it claims.
+type TaskClaim struct {
+	TaskID string   `json:"task_id"`
+	Claims []string `json:"claims,omitempty"`
+}
+
+// NextBatchRequest asks for the next set of runnable tasks whose
+// workspace claims are mutually independent (spec Phase 2 fan-out).
+type NextBatchRequest struct {
+	RunID       string   `json:"run_id"`
+	Deferred    []string `json:"deferred,omitempty"`
+	MaxParallel int      `json:"max_parallel,omitempty"`
+}
+
+// NextBatchResponse lists tasks that may run concurrently. Done means
+// the queue is empty. A task with no claims always arrives alone.
+type NextBatchResponse struct {
+	Tasks []TaskClaim `json:"tasks,omitempty"`
+	Done  bool        `json:"done"`
+}
+
 // TurnRequest asks the host to run exactly one turn. Generation and
 // TurnIndex form the stable turn identity; a backend retry re-sends the
 // same request so completed steps replay from evidence (Phase 0).
@@ -76,14 +97,18 @@ type TurnResponse struct {
 type TaskRunner interface {
 	ResumeSeed(ctx context.Context, runID, taskID string) (ResumeSeed, error)
 	NextTask(ctx context.Context, req NextTaskRequest) (NextTaskResponse, error)
+	NextBatch(ctx context.Context, req NextBatchRequest) (NextBatchResponse, error)
 	RunTurn(ctx context.Context, req TurnRequest) (TurnResponse, error)
 }
 
 // GoalStart describes one durable goal execution. MaxYields bounds how
 // often one task may yield in_progress before it defers to a later run.
+// MaxParallel bounds the fan-out of claim-independent tasks; zero or
+// one keeps the sequential V1 behavior.
 type GoalStart struct {
-	RunID     string `json:"run_id"`
-	MaxYields int    `json:"max_yields,omitempty"`
+	RunID       string `json:"run_id"`
+	MaxYields   int    `json:"max_yields,omitempty"`
+	MaxParallel int    `json:"max_parallel,omitempty"`
 }
 
 // TaskOutcome summarizes one task workflow.

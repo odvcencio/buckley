@@ -48,6 +48,11 @@ type TaskSpec struct {
 	AcceptanceCriteria []string
 	// Priority orders the queue; lower runs first.
 	Priority int
+	// Claims lists the workspace paths this task intends to touch. A
+	// durable scheduler fans out only tasks whose claims are disjoint;
+	// a task with no claims implicitly claims the whole workspace and
+	// never runs in parallel with another task.
+	Claims []string
 }
 
 // Planner decomposes a goal into ordered task specs. The orchestrator

@@ -12,7 +12,7 @@ func TestLoop_LoadGoalRoundTrip(t *testing.T) {
 	t.Parallel()
 	loop, _ := newTestLoop(t, Config{
 		Planner: staticPlanner{specs: []TaskSpec{
-			{Title: "task one", Description: "first", AcceptanceCriteria: []string{"a1"}, Priority: 1},
+			{Title: "task one", Description: "first", AcceptanceCriteria: []string{"a1"}, Priority: 1, Claims: []string{"pkg/one", "docs/one.md"}},
 			{Title: "task two", Priority: 2},
 		}},
 	})
@@ -53,6 +53,9 @@ func TestLoop_LoadGoalRoundTrip(t *testing.T) {
 	one := specs[intake.Tasks[0].TaskID]
 	if one.Title != "task one" || one.Description != "first" || one.Priority != 1 || len(one.AcceptanceCriteria) != 1 {
 		t.Fatalf("spec one = %+v", one)
+	}
+	if len(one.Claims) != 2 || one.Claims[0] != "pkg/one" || one.Claims[1] != "docs/one.md" {
+		t.Fatalf("spec one claims = %+v, want workspace claims round-tripped", one.Claims)
 	}
 
 	if _, _, err := loop.LoadGoal(ctx, "run_missing"); err == nil {

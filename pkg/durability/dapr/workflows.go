@@ -71,6 +71,61 @@ func goalWorkflow(ctx *workflow.WorkflowContext) (any, error) {
 	}
 }
 
+// goalWorkflowV2 adds bounded fan-out (spec Phase 2): each round pulls
+// the largest claim-independent batch and runs one child task workflow
+// per task concurrently. Scheduling every child before awaiting any is
+// what makes them run in parallel; the awaits are the fan-in barrier.
+func goalWorkflowV2(ctx *workflow.WorkflowContext) (any, error) {
+	var start durability.GoalStart
+	if err := ctx.GetInput(&start); err != nil {
+		return nil, fmt.Errorf("goal workflow input: %w", err)
+	}
+	maxYields := start.MaxYields
+	if maxYields <= 0 {
+		maxYields = DefaultMaxYields
+	}
+
+	yields := map[string]int{}
+	calls := 0
+	result := durability.GoalResult{}
+	for {
+		var batch durability.NextBatchResponse
+		if err := ctx.CallActivity(ActivityNextBatch,
+			workflow.WithActivityInput(durability.NextBatchRequest{
+				RunID:       start.RunID,
+				Deferred:    deferredTasks(yields, maxYields),
+				MaxParallel: start.MaxParallel,
+			}),
+		).Await(&batch); err != nil {
+			return result, fmt.Errorf("next batch: %w", err)
+		}
+		if batch.Done || len(batch.Tasks) == 0 {
+			return result, nil
+		}
+
+		children := make([]workflow.Task, len(batch.Tasks))
+		for i, item := range batch.Tasks {
+			calls++
+			children[i] = ctx.CallChildWorkflow(TaskWorkflowV1,
+				workflow.WithChildWorkflowInput(taskStart{RunID: start.RunID, TaskID: item.TaskID}),
+				workflow.WithChildWorkflowInstanceID(fmt.Sprintf("%s::%s::%d", ctx.ID(), item.TaskID, calls)),
+			)
+		}
+		for i, child := range children {
+			var task durability.TaskOutcome
+			if err := child.Await(&task); err != nil {
+				return result, fmt.Errorf("task workflow %s: %w", batch.Tasks[i].TaskID, err)
+			}
+			result.Tasks = append(result.Tasks, task)
+			if task.Status == "in_progress" {
+				yields[task.TaskID]++
+			} else {
+				yields[task.TaskID] = 0
+			}
+		}
+	}
+}
+
 // deferredTasks lists tasks past the yield bound, sorted so replayed
 // workflow histories serialize identically.
 func deferredTasks(yields map[string]int, maxYields int) []string {
@@ -187,6 +242,17 @@ func nextTaskActivity(runner durability.TaskRunner) workflow.Activity {
 			return nil, err
 		}
 		return runner.NextTask(ctx.Context(), req)
+	}
+}
+
+// nextBatchActivity pulls the next claim-independent batch.
+func nextBatchActivity(runner durability.TaskRunner) workflow.Activity {
+	return func(ctx workflow.ActivityContext) (any, error) {
+		var req durability.NextBatchRequest
+		if err := ctx.GetInput(&req); err != nil {
+			return nil, err
+		}
+		return runner.NextBatch(ctx.Context(), req)
 	}
 }
 

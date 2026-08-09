@@ -134,6 +134,65 @@ func TestRunner_DrivesTaskThroughWireForm(t *testing.T) {
 	}
 }
 
+func TestPartitionIndependent(t *testing.T) {
+	t.Parallel()
+	claim := func(id string, paths ...string) durability.TaskClaim {
+		return durability.TaskClaim{TaskID: id, Claims: paths}
+	}
+	ids := func(batch []durability.TaskClaim) []string {
+		var out []string
+		for _, item := range batch {
+			out = append(out, item.TaskID)
+		}
+		return out
+	}
+	cases := []struct {
+		name        string
+		candidates  []durability.TaskClaim
+		maxParallel int
+		want        []string
+	}{
+		{"disjoint claims fan out", []durability.TaskClaim{claim("a", "pkg/a"), claim("b", "pkg/b"), claim("c", "pkg/c")}, 3, []string{"a", "b", "c"}},
+		{"bounded by max parallel", []durability.TaskClaim{claim("a", "pkg/a"), claim("b", "pkg/b"), claim("c", "pkg/c")}, 2, []string{"a", "b"}},
+		{"nested claim conflicts", []durability.TaskClaim{claim("a", "pkg/a"), claim("b", "pkg/a/sub"), claim("c", "pkg/c")}, 3, []string{"a"}},
+		{"no-claims task runs alone", []durability.TaskClaim{claim("a"), claim("b", "pkg/b")}, 3, []string{"a"}},
+		{"no-claims task blocks batch growth", []durability.TaskClaim{claim("a", "pkg/a"), claim("b"), claim("c", "pkg/c")}, 3, []string{"a"}},
+		{"zero max parallel means one", []durability.TaskClaim{claim("a", "pkg/a"), claim("b", "pkg/b")}, 0, []string{"a"}},
+		{"empty queue", nil, 3, nil},
+	}
+	for _, tc := range cases {
+		got := ids(partitionIndependent(tc.candidates, tc.maxParallel))
+		if len(got) != len(tc.want) {
+			t.Fatalf("%s: batch = %v, want %v", tc.name, got, tc.want)
+		}
+		for i := range got {
+			if got[i] != tc.want[i] {
+				t.Fatalf("%s: batch = %v, want %v", tc.name, got, tc.want)
+			}
+		}
+	}
+}
+
+func TestPathsNest(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		a, b string
+		want bool
+	}{
+		{"pkg/a", "pkg/a", true},
+		{"pkg/a", "pkg/a/sub", true},
+		{"pkg/a/sub", "pkg/a", true},
+		{"pkg/a", "pkg/ab", false},
+		{"./pkg/a/", "pkg/a", true},
+		{"cmd", "pkg", false},
+	}
+	for _, tc := range cases {
+		if got := pathsNest(tc.a, tc.b); got != tc.want {
+			t.Fatalf("pathsNest(%q, %q) = %v, want %v", tc.a, tc.b, got, tc.want)
+		}
+	}
+}
+
 // TestRunner_NextTaskHonorsDeferred mirrors the Drain yield rule.
 func TestRunner_NextTaskHonorsDeferred(t *testing.T) {
 	t.Parallel()

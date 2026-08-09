@@ -101,6 +101,7 @@ func (l *Loop) Start(ctx context.Context, goal Goal) (*Intake, error) {
 				"description":         spec.Description,
 				"acceptance_criteria": spec.AcceptanceCriteria,
 				"priority":            spec.Priority,
+				"claims":              spec.Claims,
 			},
 		}); err != nil {
 			return nil, fmt.Errorf("goalloop: record task %q: %w", spec.Title, err)

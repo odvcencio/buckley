@@ -9,6 +9,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"path"
+	"strings"
 	"time"
 
 	"m31labs.dev/buckley/pkg/agentloop"
@@ -58,6 +60,86 @@ func (r *Runner) NextTask(ctx context.Context, req durability.NextTaskRequest) (
 		}
 	}
 	return durability.NextTaskResponse{Done: true}, nil
+}
+
+// NextBatch implements durability.TaskRunner: the next runnable tasks
+// whose workspace claims are mutually independent, in queue order.
+func (r *Runner) NextBatch(ctx context.Context, req durability.NextBatchRequest) (durability.NextBatchResponse, error) {
+	queue, err := r.loop.BuildQueue(ctx, req.RunID)
+	if err != nil {
+		return durability.NextBatchResponse{}, err
+	}
+	deferred := make(map[string]bool, len(req.Deferred))
+	for _, taskID := range req.Deferred {
+		deferred[taskID] = true
+	}
+	candidates := make([]durability.TaskClaim, 0, len(queue))
+	for _, item := range queue {
+		if deferred[item.TaskID] {
+			continue
+		}
+		candidates = append(candidates, durability.TaskClaim{TaskID: item.TaskID, Claims: r.specs[item.TaskID].Claims})
+	}
+	batch := partitionIndependent(candidates, req.MaxParallel)
+	if len(batch) == 0 {
+		return durability.NextBatchResponse{Done: true}, nil
+	}
+	return durability.NextBatchResponse{Tasks: batch}, nil
+}
+
+// partitionIndependent greedily takes tasks in queue order whose claims
+// do not overlap with claims already taken, bounded by maxParallel. A
+// task without claims implicitly claims the whole workspace: it only
+// ever runs alone, and only from the front of the queue.
+func partitionIndependent(candidates []durability.TaskClaim, maxParallel int) []durability.TaskClaim {
+	if maxParallel <= 0 {
+		maxParallel = 1
+	}
+	var batch []durability.TaskClaim
+	var taken []string
+	for _, candidate := range candidates {
+		if len(batch) >= maxParallel {
+			break
+		}
+		if len(candidate.Claims) == 0 {
+			// The whole-workspace claim: alone, and never behind a
+			// batched task it could conflict with.
+			if len(batch) == 0 {
+				return []durability.TaskClaim{candidate}
+			}
+			break
+		}
+		if claimsOverlap(taken, candidate.Claims) {
+			// Queue order is priority order: do not let a later task
+			// jump a conflicting earlier one.
+			break
+		}
+		batch = append(batch, candidate)
+		taken = append(taken, candidate.Claims...)
+	}
+	return batch
+}
+
+// claimsOverlap reports whether any candidate path and any taken path
+// nest inside each other after cleaning.
+func claimsOverlap(taken, candidate []string) bool {
+	for _, have := range taken {
+		for _, want := range candidate {
+			if pathsNest(have, want) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func pathsNest(a, b string) bool {
+	a = path.Clean(strings.TrimPrefix(a, "./"))
+	b = path.Clean(strings.TrimPrefix(b, "./"))
+	if a == b {
+		return true
+	}
+	return strings.HasPrefix(a, b+"/") || strings.HasPrefix(b, a+"/")
 }
 
 // RunTurn implements durability.TaskRunner over Loop.TurnStep.

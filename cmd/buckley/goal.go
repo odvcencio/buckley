@@ -168,6 +168,7 @@ func runGoalRun(args []string) error {
 	execProgram := fs.Bool("exec-program", false, "offer the exec_program code-mode tool (read-only jailed capabilities, fully audited); internal engine only")
 	execCaps := fs.String("exec-caps", "readonly", "capability grant for exec_program: readonly (read, list, search) | minimal (read, list)")
 	durableFlag := fs.String("durable-backend", "", "override execution.durable_backend for this run: local | dapr")
+	maxParallel := fs.Int("max-parallel", 1, "durable backend only: run up to this many claim-independent tasks concurrently")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -256,7 +257,7 @@ func runGoalRun(args []string) error {
 	case "", config.DurableBackendLocal:
 		// The in-process loop below is the default.
 	case config.DurableBackendDapr:
-		return runGoalDurable(ctx, cfg, loop, goal, specs, runID)
+		return runGoalDurable(ctx, cfg, loop, goal, specs, runID, *maxParallel)
 	default:
 		return fmt.Errorf("unknown durable backend %q (want local or dapr)", durableBackend)
 	}
@@ -284,7 +285,7 @@ func runGoalRun(args []string) error {
 // (spec.durable-execution-dapr, Phase 1). The worker runs in this
 // process; Dapr owns scheduling, so an interrupt leaves the workflow
 // resumable and a later `goal run` re-attaches to the same instance.
-func runGoalDurable(ctx context.Context, cfg *config.Config, loop *goalloop.Loop, goal goalloop.Goal, specs map[string]goalloop.TaskSpec, runID string) error {
+func runGoalDurable(ctx context.Context, cfg *config.Config, loop *goalloop.Loop, goal goalloop.Goal, specs map[string]goalloop.TaskSpec, runID string, maxParallel int) error {
 	backend, err := daprbackend.New(cfg.Execution.DaprGRPCEndpoint)
 	if err != nil {
 		return err
@@ -299,7 +300,7 @@ func runGoalDurable(ctx context.Context, cfg *config.Config, loop *goalloop.Loop
 	if err := backend.StartWorker(ctx, goalrunner.New(loop, goal, specs)); err != nil {
 		return err
 	}
-	instanceID, err := backend.StartGoal(ctx, durability.GoalStart{RunID: runID})
+	instanceID, err := backend.StartGoal(ctx, durability.GoalStart{RunID: runID, MaxParallel: maxParallel})
 	if err != nil {
 		return err
 	}
