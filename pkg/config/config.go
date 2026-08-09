@@ -375,9 +375,24 @@ const (
 	ExecutionModeRLM     = "rlm"
 )
 
+// Durable backend names for goal execution (spec.durable-execution-dapr).
+const (
+	DurableBackendLocal = "local"
+	DurableBackendDapr  = "dapr"
+
+	DefaultDurableBackend = DurableBackendLocal
+)
+
 // ExecutionModeConfig controls the default execution strategy.
 type ExecutionModeConfig struct {
 	Mode string `yaml:"mode" env:"BUCKLEY_EXECUTION_MODE"`
+	// DurableBackend selects who schedules goal turns: local (default)
+	// drives them in-process; dapr schedules them as durable workflow
+	// activities through a sidecar.
+	DurableBackend string `yaml:"durable_backend" env:"BUCKLEY_DURABLE_BACKEND"`
+	// DaprGRPCEndpoint overrides the sidecar endpoint; empty falls back
+	// to DAPR_GRPC_ENDPOINT, DAPR_GRPC_PORT, then localhost:50001.
+	DaprGRPCEndpoint string `yaml:"dapr_grpc_endpoint" env:"BUCKLEY_DAPR_GRPC_ENDPOINT"`
 }
 
 // OneshotModeConfig controls the strategy for one-shot commands.

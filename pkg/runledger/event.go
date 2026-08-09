@@ -91,6 +91,10 @@ const (
 	EventModelRequestFailed    = "model.request_failed"
 	EventModelRequestReplayed  = "model.request_replayed"
 
+	// EventDurableTurn correlates one durable-scheduler activity with the
+	// turn it drove: workflow instance ID, generation, and turn index.
+	EventDurableTurn = "durable.turn"
+
 	EventToolRequested         = "tool.requested"
 	EventToolStarted           = "tool.started"
 	EventToolCompleted         = "tool.completed"

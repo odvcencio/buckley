@@ -322,7 +322,8 @@ func DefaultConfig() *Config {
 			},
 		},
 		Execution: ExecutionModeConfig{
-			Mode: DefaultExecutionMode,
+			Mode:           DefaultExecutionMode,
+			DurableBackend: DefaultDurableBackend,
 		},
 		Oneshot: OneshotModeConfig{
 			Mode: DefaultOneshotMode,
