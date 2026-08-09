@@ -52,6 +52,9 @@ func TestRunVerificationToolSuccessRequiresPassAndZeroExit(t *testing.T) {
 				Argv:     []string{"/usr/local/go/bin/go", "test", "."},
 				ExitCode: test.exitCode,
 				Status:   test.status,
+				// CONFIRMED_FAIL requires attributable output; a silent
+				// failure is INCONCLUSIVE by design.
+				Stderr: "FAIL: TestFocused",
 			}}
 			tool.verifier = fake
 			result, err := tool.Execute(map[string]any{
@@ -213,5 +216,71 @@ func TestRunVerificationToolRejectsHostTestRequiredInDocker(t *testing.T) {
 	}
 	if !strings.Contains(result.Error, "Docker") || !strings.Contains(result.Error, "not started") {
 		t.Fatalf("policy rejection error = %q", result.Error)
+	}
+}
+
+func TestRunVerificationToolAbridgedFailureKeepsOutputTails(t *testing.T) {
+	tool, err := NewRunVerificationTool(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake := &fakeReviewVerifier{result: reviewsandbox.Result{
+		Kind:     reviewsandbox.KindTest,
+		Language: reviewsandbox.LanguageGo,
+		Path:     "cmd/buckley",
+		Command:  "go",
+		ExitCode: 1,
+		Status:   reviewsandbox.StatusFail,
+		Stdout:   strings.Repeat("noise line\n", 900),
+		Stderr:   strings.Repeat("x", 6_000) + "\nFAIL: TestSomething assertion mismatch",
+	}}
+	tool.verifier = fake
+	result, err := tool.Execute(map[string]any{
+		"kind":     "test",
+		"language": "go",
+		"path":     "cmd/buckley",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.ShouldAbridge {
+		t.Fatalf("large output result = %#v, want abridged", result)
+	}
+	tail, _ := result.DisplayData["stderr_tail"].(string)
+	if !strings.Contains(tail, "FAIL: TestSomething assertion mismatch") {
+		t.Fatalf("stderr_tail = %q, want the failure summary retained", tail)
+	}
+	if len(tail) > verificationTailBytes+8 {
+		t.Fatalf("stderr_tail is %d bytes, want bounded", len(tail))
+	}
+	if result.DisplayData["evidence"] != "CONFIRMED_FAIL" {
+		t.Fatalf("evidence = %v, want CONFIRMED_FAIL with attributable output", result.DisplayData["evidence"])
+	}
+}
+
+func TestRunVerificationToolSilentFailureIsInconclusive(t *testing.T) {
+	tool, err := NewRunVerificationTool(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake := &fakeReviewVerifier{result: reviewsandbox.Result{
+		Kind:     reviewsandbox.KindTest,
+		Language: reviewsandbox.LanguageGo,
+		Path:     "cmd/buckley",
+		Command:  "go",
+		ExitCode: 1,
+		Status:   reviewsandbox.StatusFail,
+	}}
+	tool.verifier = fake
+	result, err := tool.Execute(map[string]any{
+		"kind":     "test",
+		"language": "go",
+		"path":     "cmd/buckley",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Data["evidence"] != "INCONCLUSIVE" {
+		t.Fatalf("evidence = %v, want INCONCLUSIVE for a failure with no captured output", result.Data["evidence"])
 	}
 }
