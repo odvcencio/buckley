@@ -16,6 +16,7 @@ import (
 	"m31labs.dev/buckley/pkg/agentloop"
 	"m31labs.dev/buckley/pkg/durability"
 	"m31labs.dev/buckley/pkg/goalloop"
+	"m31labs.dev/buckley/pkg/runledger"
 )
 
 // Runner hosts one goal's activities.
@@ -140,6 +141,52 @@ func pathsNest(a, b string) bool {
 		return true
 	}
 	return strings.HasPrefix(a, b+"/") || strings.HasPrefix(b, a+"/")
+}
+
+// RecordApprovalWait implements durability.TaskRunner: the wait lands
+// on the run ledger before the workflow blocks, so `buckley goal
+// approve` can find the child instance to target.
+func (r *Runner) RecordApprovalWait(ctx context.Context, wait durability.ApprovalWait) error {
+	_, err := r.loop.Ledger().Append(ctx, runledger.Event{
+		Type:      runledger.EventDurableApprovalWaiting,
+		Timestamp: time.Now().UTC(),
+		RunID:     wait.RunID,
+		TaskID:    wait.TaskID,
+		Payload: map[string]any{
+			"workflow_instance_id": wait.WorkflowInstanceID,
+			"reason":               wait.Reason,
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("goalrunner: record approval wait: %w", err)
+	}
+	return nil
+}
+
+// ResolveApproval implements durability.TaskRunner. Approved
+// resolutions unpark the task before the resolution is recorded, so a
+// crash between the two retries the whole activity idempotently.
+func (r *Runner) ResolveApproval(ctx context.Context, resolution durability.ApprovalResolution) error {
+	if resolution.Outcome == durability.ApprovalApproved {
+		if err := r.loop.Unpark(ctx, resolution.RunID, resolution.TaskID, resolution.Reason); err != nil {
+			return err
+		}
+	}
+	_, err := r.loop.Ledger().Append(ctx, runledger.Event{
+		Type:      runledger.EventDurableApprovalResolved,
+		Timestamp: time.Now().UTC(),
+		RunID:     resolution.RunID,
+		TaskID:    resolution.TaskID,
+		Payload: map[string]any{
+			"workflow_instance_id": resolution.WorkflowInstanceID,
+			"outcome":              resolution.Outcome,
+			"reason":               resolution.Reason,
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("goalrunner: record approval resolution: %w", err)
+	}
+	return nil
 }
 
 // RunTurn implements durability.TaskRunner over Loop.TurnStep.

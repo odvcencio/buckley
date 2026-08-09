@@ -99,16 +99,62 @@ type TaskRunner interface {
 	NextTask(ctx context.Context, req NextTaskRequest) (NextTaskResponse, error)
 	NextBatch(ctx context.Context, req NextBatchRequest) (NextBatchResponse, error)
 	RunTurn(ctx context.Context, req TurnRequest) (TurnResponse, error)
+	// RecordApprovalWait and ResolveApproval bound one durable approval:
+	// the wait lands on the ledger before the workflow blocks, and the
+	// resolution lands before the workflow acts on it. An approved
+	// resolution unparks the task.
+	RecordApprovalWait(ctx context.Context, wait ApprovalWait) error
+	ResolveApproval(ctx context.Context, resolution ApprovalResolution) error
 }
 
 // GoalStart describes one durable goal execution. MaxYields bounds how
 // often one task may yield in_progress before it defers to a later run.
 // MaxParallel bounds the fan-out of claim-independent tasks; zero or
-// one keeps the sequential V1 behavior.
+// one keeps the sequential V1 behavior. ApprovalWaitMS, when positive,
+// holds a parked task on a durable external-event wait for that many
+// milliseconds before parking it for good.
 type GoalStart struct {
-	RunID       string `json:"run_id"`
-	MaxYields   int    `json:"max_yields,omitempty"`
-	MaxParallel int    `json:"max_parallel,omitempty"`
+	RunID          string `json:"run_id"`
+	MaxYields      int    `json:"max_yields,omitempty"`
+	MaxParallel    int    `json:"max_parallel,omitempty"`
+	ApprovalWaitMS int64  `json:"approval_wait_ms,omitempty"`
+}
+
+// ApprovalEventName is the durable external event a parked task waits
+// on. Approvals target the task's child workflow instance ID, recorded
+// in the durable.approval_waiting ledger event.
+const ApprovalEventName = "approval"
+
+// ApprovalDecision resolves one durable approval wait.
+type ApprovalDecision struct {
+	Approved bool   `json:"approved"`
+	Reason   string `json:"reason,omitempty"`
+}
+
+// ApprovalWait records that a task workflow began a durable approval
+// wait; Resolution records how it ended.
+type ApprovalWait struct {
+	RunID              string `json:"run_id"`
+	TaskID             string `json:"task_id"`
+	WorkflowInstanceID string `json:"workflow_instance_id"`
+	Reason             string `json:"reason,omitempty"`
+}
+
+// ApprovalResolution outcomes.
+const (
+	ApprovalApproved = "approved"
+	ApprovalDenied   = "denied"
+	ApprovalTimedOut = "timed_out"
+)
+
+// ApprovalResolution closes one approval wait. Outcome is approved,
+// denied, or timed_out. An approved resolution also unparks the task.
+type ApprovalResolution struct {
+	RunID              string `json:"run_id"`
+	TaskID             string `json:"task_id"`
+	WorkflowInstanceID string `json:"workflow_instance_id"`
+	Outcome            string `json:"outcome"`
+	Reason             string `json:"reason,omitempty"`
 }
 
 // TaskOutcome summarizes one task workflow.
@@ -141,5 +187,8 @@ type Backend interface {
 	StartWorker(ctx context.Context, runner TaskRunner) error
 	StartGoal(ctx context.Context, start GoalStart) (instanceID string, err error)
 	WaitForGoal(ctx context.Context, instanceID string) (GoalStatus, error)
+	// RaiseApproval delivers an approval decision to the task workflow
+	// instance recorded in the durable.approval_waiting event.
+	RaiseApproval(ctx context.Context, workflowInstanceID string, decision ApprovalDecision) error
 	Close() error
 }

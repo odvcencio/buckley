@@ -94,6 +94,13 @@ const (
 	// EventDurableTurn correlates one durable-scheduler activity with the
 	// turn it drove: workflow instance ID, generation, and turn index.
 	EventDurableTurn = "durable.turn"
+	// EventDurableApprovalWaiting records that a parked task's workflow
+	// is holding a durable external-event wait; the payload carries the
+	// child workflow instance ID an approval must target.
+	EventDurableApprovalWaiting = "durable.approval_waiting"
+	// EventDurableApprovalResolved records how the wait ended:
+	// approved, denied, or timed_out.
+	EventDurableApprovalResolved = "durable.approval_resolved"
 
 	EventToolRequested         = "tool.requested"
 	EventToolStarted           = "tool.started"

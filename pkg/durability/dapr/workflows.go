@@ -76,6 +76,16 @@ func goalWorkflow(ctx *workflow.WorkflowContext) (any, error) {
 // per task concurrently. Scheduling every child before awaiting any is
 // what makes them run in parallel; the awaits are the fan-in barrier.
 func goalWorkflowV2(ctx *workflow.WorkflowContext) (any, error) {
+	return goalFanout(ctx, TaskWorkflowV1, false)
+}
+
+// goalWorkflowV3 keeps the V2 fan-out and schedules approval-aware
+// TaskWorkflowV2 children, threading the goal's approval wait through.
+func goalWorkflowV3(ctx *workflow.WorkflowContext) (any, error) {
+	return goalFanout(ctx, TaskWorkflowV2, true)
+}
+
+func goalFanout(ctx *workflow.WorkflowContext, childWorkflow string, forwardApprovalWait bool) (any, error) {
 	var start durability.GoalStart
 	if err := ctx.GetInput(&start); err != nil {
 		return nil, fmt.Errorf("goal workflow input: %w", err)
@@ -106,8 +116,12 @@ func goalWorkflowV2(ctx *workflow.WorkflowContext) (any, error) {
 		children := make([]workflow.Task, len(batch.Tasks))
 		for i, item := range batch.Tasks {
 			calls++
-			children[i] = ctx.CallChildWorkflow(TaskWorkflowV1,
-				workflow.WithChildWorkflowInput(taskStart{RunID: start.RunID, TaskID: item.TaskID}),
+			child := taskStart{RunID: start.RunID, TaskID: item.TaskID}
+			if forwardApprovalWait {
+				child.ApprovalWaitMS = start.ApprovalWaitMS
+			}
+			children[i] = ctx.CallChildWorkflow(childWorkflow,
+				workflow.WithChildWorkflowInput(child),
 				workflow.WithChildWorkflowInstanceID(fmt.Sprintf("%s::%s::%d", ctx.ID(), item.TaskID, calls)),
 			)
 		}
@@ -143,6 +157,8 @@ func deferredTasks(yields map[string]int, maxYields int) []string {
 type taskStart struct {
 	RunID  string `json:"run_id"`
 	TaskID string `json:"task_id"`
+	// ApprovalWaitMS is consumed by TaskWorkflowV2 only.
+	ApprovalWaitMS int64 `json:"approval_wait_ms,omitempty"`
 }
 
 // taskWorkflow is TaskWorkflowV1: it seeds the drive from the durable
@@ -153,6 +169,76 @@ func taskWorkflow(ctx *workflow.WorkflowContext) (any, error) {
 	if err := ctx.GetInput(&start); err != nil {
 		return nil, fmt.Errorf("task workflow input: %w", err)
 	}
+	return driveTaskTurns(ctx, start)
+}
+
+// taskWorkflowV2 wraps the V1 turn drive with a durable approval wait:
+// a parked task holds on WaitForExternalEvent instead of ending, and an
+// approved decision unparks the task and drives a fresh generation.
+func taskWorkflowV2(ctx *workflow.WorkflowContext) (any, error) {
+	var start taskStart
+	if err := ctx.GetInput(&start); err != nil {
+		return nil, fmt.Errorf("task workflow input: %w", err)
+	}
+	total := durability.TaskOutcome{TaskID: start.TaskID, Status: "in_progress"}
+	for {
+		round, err := driveTaskTurns(ctx, start)
+		total.Turns += round.Turns
+		total.SpentUSD += round.SpentUSD
+		total.Status = round.Status
+		if round.Decision != "" {
+			total.Decision = round.Decision
+		}
+		if err != nil {
+			return total, err
+		}
+		if round.Status != "parked" || start.ApprovalWaitMS <= 0 {
+			return total, nil
+		}
+
+		if err := ctx.CallActivity(ActivityRecordApprovalWait,
+			workflow.WithActivityInput(durability.ApprovalWait{
+				RunID:              start.RunID,
+				TaskID:             start.TaskID,
+				WorkflowInstanceID: ctx.ID(),
+				Reason:             round.Decision,
+			}),
+		).Await(nil); err != nil {
+			return total, fmt.Errorf("record approval wait: %w", err)
+		}
+
+		var decision durability.ApprovalDecision
+		waitErr := ctx.WaitForExternalEvent(durability.ApprovalEventName, time.Duration(start.ApprovalWaitMS)*time.Millisecond).Await(&decision)
+		resolution := durability.ApprovalResolution{
+			RunID:              start.RunID,
+			TaskID:             start.TaskID,
+			WorkflowInstanceID: ctx.ID(),
+			Reason:             decision.Reason,
+		}
+		switch {
+		case waitErr != nil:
+			resolution.Outcome = durability.ApprovalTimedOut
+		case decision.Approved:
+			resolution.Outcome = durability.ApprovalApproved
+		default:
+			resolution.Outcome = durability.ApprovalDenied
+		}
+		if err := ctx.CallActivity(ActivityResolveApproval,
+			workflow.WithActivityInput(resolution),
+		).Await(nil); err != nil {
+			return total, fmt.Errorf("resolve approval: %w", err)
+		}
+		if resolution.Outcome != durability.ApprovalApproved {
+			return total, nil
+		}
+		// Approved: loop. driveTaskTurns re-seeds from the unparked
+		// checkpoint, opening a new generation.
+	}
+}
+
+// driveTaskTurns is the shared turn drive: seed once, then one
+// TurnActivity per turn until the task ends or yields.
+func driveTaskTurns(ctx *workflow.WorkflowContext, start taskStart) (durability.TaskOutcome, error) {
 	outcome := durability.TaskOutcome{TaskID: start.TaskID, Status: "in_progress"}
 
 	var seed durability.ResumeSeed
@@ -253,6 +339,29 @@ func nextBatchActivity(runner durability.TaskRunner) workflow.Activity {
 			return nil, err
 		}
 		return runner.NextBatch(ctx.Context(), req)
+	}
+}
+
+// recordApprovalWaitActivity lands the wait on the ledger before the
+// workflow blocks on the external event.
+func recordApprovalWaitActivity(runner durability.TaskRunner) workflow.Activity {
+	return func(ctx workflow.ActivityContext) (any, error) {
+		var wait durability.ApprovalWait
+		if err := ctx.GetInput(&wait); err != nil {
+			return nil, err
+		}
+		return nil, runner.RecordApprovalWait(ctx.Context(), wait)
+	}
+}
+
+// resolveApprovalActivity records how a wait ended; approvals unpark.
+func resolveApprovalActivity(runner durability.TaskRunner) workflow.Activity {
+	return func(ctx workflow.ActivityContext) (any, error) {
+		var resolution durability.ApprovalResolution
+		if err := ctx.GetInput(&resolution); err != nil {
+			return nil, err
+		}
+		return nil, runner.ResolveApproval(ctx.Context(), resolution)
 	}
 }
 

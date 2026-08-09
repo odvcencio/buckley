@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -33,7 +34,7 @@ import (
 // UX arrives with G9; this surface creates and inspects goals.
 func runGoalCommand(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: buckley goal <start|status|list|report|run|audit|replay> [flags]")
+		return errors.New("usage: buckley goal <start|status|list|report|run|audit|replay|approve> [flags]")
 	}
 	switch args[0] {
 	case "start":
@@ -50,9 +51,94 @@ func runGoalCommand(args []string) error {
 		return runGoalAudit(args[1:])
 	case "replay":
 		return runGoalReplay(args[1:])
+	case "approve":
+		return runGoalApprove(args[1:])
 	default:
-		return fmt.Errorf("unknown goal subcommand %q (want start, status, list, report, run, audit, or replay)", args[0])
+		return fmt.Errorf("unknown goal subcommand %q (want start, status, list, report, run, audit, replay, or approve)", args[0])
 	}
+}
+
+// runGoalApprove resolves a durable approval wait: it finds the parked
+// task's waiting workflow instance on the run ledger and raises the
+// approval event at it through the Dapr backend.
+func runGoalApprove(args []string) error {
+	fs := flag.NewFlagSet("goal approve", flag.ContinueOnError)
+	deny := fs.Bool("deny", false, "deny instead of approve; the task stays parked")
+	reason := fs.String("reason", "", "reason recorded with the decision")
+	taskFlag := fs.String("task", "", "task ID when more than one task is waiting")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return errors.New("usage: buckley goal approve [--deny] [--reason r] [--task task-id] <run-id>")
+	}
+	runID := strings.TrimSpace(fs.Arg(0))
+
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	stores, cleanup, err := openGoalStores()
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+
+	ctx := context.Background()
+	events, err := stores.ledger.ListEvents(ctx, runledger.EventQuery{RunID: runID})
+	if err != nil {
+		return err
+	}
+	// The latest unresolved wait per task is the approval surface.
+	waiting := map[string]string{}
+	for _, ev := range events {
+		instance, _ := ev.Payload["workflow_instance_id"].(string)
+		switch ev.Type {
+		case runledger.EventDurableApprovalWaiting:
+			waiting[ev.TaskID] = instance
+		case runledger.EventDurableApprovalResolved:
+			if waiting[ev.TaskID] == instance {
+				delete(waiting, ev.TaskID)
+			}
+		}
+	}
+	if len(waiting) == 0 {
+		return fmt.Errorf("no task in run %s is waiting for approval", runID)
+	}
+	taskID := strings.TrimSpace(*taskFlag)
+	if taskID == "" {
+		if len(waiting) > 1 {
+			ids := make([]string, 0, len(waiting))
+			for id := range waiting {
+				ids = append(ids, id)
+			}
+			sort.Strings(ids)
+			return fmt.Errorf("multiple tasks are waiting (%s); pass --task", strings.Join(ids, ", "))
+		}
+		for id := range waiting {
+			taskID = id
+		}
+	}
+	instanceID, ok := waiting[taskID]
+	if !ok || instanceID == "" {
+		return fmt.Errorf("task %s is not waiting for approval", taskID)
+	}
+
+	backend, err := daprbackend.New(cfg.Execution.DaprGRPCEndpoint)
+	if err != nil {
+		return err
+	}
+	defer backend.Close()
+	decision := durability.ApprovalDecision{Approved: !*deny, Reason: *reason}
+	if err := backend.RaiseApproval(ctx, instanceID, decision); err != nil {
+		return err
+	}
+	verb := "approved"
+	if *deny {
+		verb = "denied"
+	}
+	fmt.Printf("Task %s %s; the durable workflow resumes on its own.\n", taskID, verb)
+	return nil
 }
 
 // runGoalAudit prints a run's full decision-and-capability trail from
@@ -169,6 +255,7 @@ func runGoalRun(args []string) error {
 	execCaps := fs.String("exec-caps", "readonly", "capability grant for exec_program: readonly (read, list, search) | minimal (read, list)")
 	durableFlag := fs.String("durable-backend", "", "override execution.durable_backend for this run: local | dapr")
 	maxParallel := fs.Int("max-parallel", 1, "durable backend only: run up to this many claim-independent tasks concurrently")
+	approvalWait := fs.Duration("approval-wait", 0, "durable backend only: hold parked tasks on a durable approval wait this long (0 disables; resolve with `buckley goal approve`)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -257,7 +344,7 @@ func runGoalRun(args []string) error {
 	case "", config.DurableBackendLocal:
 		// The in-process loop below is the default.
 	case config.DurableBackendDapr:
-		return runGoalDurable(ctx, cfg, loop, goal, specs, runID, *maxParallel)
+		return runGoalDurable(ctx, cfg, loop, goal, specs, runID, *maxParallel, *approvalWait)
 	default:
 		return fmt.Errorf("unknown durable backend %q (want local or dapr)", durableBackend)
 	}
@@ -285,7 +372,7 @@ func runGoalRun(args []string) error {
 // (spec.durable-execution-dapr, Phase 1). The worker runs in this
 // process; Dapr owns scheduling, so an interrupt leaves the workflow
 // resumable and a later `goal run` re-attaches to the same instance.
-func runGoalDurable(ctx context.Context, cfg *config.Config, loop *goalloop.Loop, goal goalloop.Goal, specs map[string]goalloop.TaskSpec, runID string, maxParallel int) error {
+func runGoalDurable(ctx context.Context, cfg *config.Config, loop *goalloop.Loop, goal goalloop.Goal, specs map[string]goalloop.TaskSpec, runID string, maxParallel int, approvalWait time.Duration) error {
 	backend, err := daprbackend.New(cfg.Execution.DaprGRPCEndpoint)
 	if err != nil {
 		return err
@@ -300,7 +387,7 @@ func runGoalDurable(ctx context.Context, cfg *config.Config, loop *goalloop.Loop
 	if err := backend.StartWorker(ctx, goalrunner.New(loop, goal, specs)); err != nil {
 		return err
 	}
-	instanceID, err := backend.StartGoal(ctx, durability.GoalStart{RunID: runID, MaxParallel: maxParallel})
+	instanceID, err := backend.StartGoal(ctx, durability.GoalStart{RunID: runID, MaxParallel: maxParallel, ApprovalWaitMS: approvalWait.Milliseconds()})
 	if err != nil {
 		return err
 	}

@@ -27,13 +27,17 @@ import (
 // orchestration semantics; behavior changes require new versioned names
 // (spec.durable-execution-dapr, versioning rule).
 const (
-	GoalWorkflowV1     = "buckley.goal.v1"
-	GoalWorkflowV2     = "buckley.goal.v2"
-	TaskWorkflowV1     = "buckley.task.v1"
-	ActivityResumeSeed = "buckley.resume_seed.v1"
-	ActivityNextTask   = "buckley.next_task.v1"
-	ActivityNextBatch  = "buckley.next_batch.v1"
-	ActivityRunTurn    = "buckley.run_turn.v1"
+	GoalWorkflowV1             = "buckley.goal.v1"
+	GoalWorkflowV2             = "buckley.goal.v2"
+	GoalWorkflowV3             = "buckley.goal.v3"
+	TaskWorkflowV1             = "buckley.task.v1"
+	TaskWorkflowV2             = "buckley.task.v2"
+	ActivityResumeSeed         = "buckley.resume_seed.v1"
+	ActivityNextTask           = "buckley.next_task.v1"
+	ActivityNextBatch          = "buckley.next_batch.v1"
+	ActivityRunTurn            = "buckley.run_turn.v1"
+	ActivityRecordApprovalWait = "buckley.record_approval_wait.v1"
+	ActivityResolveApproval    = "buckley.resolve_approval.v1"
 )
 
 // DefaultEndpoint is the conventional local Dapr gRPC endpoint.
@@ -95,14 +99,22 @@ func (b *Backend) StartWorker(ctx context.Context, runner durability.TaskRunner)
 	if err := registry.AddWorkflowN(GoalWorkflowV2, goalWorkflowV2); err != nil {
 		return fmt.Errorf("dapr: register %s: %w", GoalWorkflowV2, err)
 	}
+	if err := registry.AddWorkflowN(GoalWorkflowV3, goalWorkflowV3); err != nil {
+		return fmt.Errorf("dapr: register %s: %w", GoalWorkflowV3, err)
+	}
 	if err := registry.AddWorkflowN(TaskWorkflowV1, taskWorkflow); err != nil {
 		return fmt.Errorf("dapr: register %s: %w", TaskWorkflowV1, err)
 	}
+	if err := registry.AddWorkflowN(TaskWorkflowV2, taskWorkflowV2); err != nil {
+		return fmt.Errorf("dapr: register %s: %w", TaskWorkflowV2, err)
+	}
 	activities := map[string]workflow.Activity{
-		ActivityResumeSeed: resumeSeedActivity(runner),
-		ActivityNextTask:   nextTaskActivity(runner),
-		ActivityNextBatch:  nextBatchActivity(runner),
-		ActivityRunTurn:    runTurnActivity(runner),
+		ActivityResumeSeed:         resumeSeedActivity(runner),
+		ActivityNextTask:           nextTaskActivity(runner),
+		ActivityNextBatch:          nextBatchActivity(runner),
+		ActivityRunTurn:            runTurnActivity(runner),
+		ActivityRecordApprovalWait: recordApprovalWaitActivity(runner),
+		ActivityResolveApproval:    resolveApprovalActivity(runner),
 	}
 	for name, activity := range activities {
 		if err := registry.AddActivityN(name, activity); err != nil {
@@ -139,11 +151,11 @@ func (b *Backend) StartGoal(ctx context.Context, start durability.GoalStart) (st
 		return "", fmt.Errorf("dapr: inspect workflow %s: %w", instanceID, err)
 	}
 
-	if _, err := b.client.ScheduleWorkflow(ctx, GoalWorkflowV2,
+	if _, err := b.client.ScheduleWorkflow(ctx, GoalWorkflowV3,
 		workflow.WithInstanceID(instanceID),
 		workflow.WithInput(start),
 	); err != nil {
-		return "", fmt.Errorf("dapr: schedule %s: %w", GoalWorkflowV2, err)
+		return "", fmt.Errorf("dapr: schedule %s: %w", GoalWorkflowV3, err)
 	}
 	return instanceID, nil
 }
@@ -167,6 +179,17 @@ func (b *Backend) WaitForGoal(ctx context.Context, instanceID string) (durabilit
 		result.Failure = failure.GetErrorMessage()
 	}
 	return result, nil
+}
+
+// RaiseApproval delivers an approval decision to a waiting task
+// workflow instance.
+func (b *Backend) RaiseApproval(ctx context.Context, workflowInstanceID string, decision durability.ApprovalDecision) error {
+	if err := b.client.RaiseEvent(ctx, workflowInstanceID, durability.ApprovalEventName,
+		workflow.WithEventPayload(decision),
+	); err != nil {
+		return fmt.Errorf("dapr: raise approval on %s: %w", workflowInstanceID, err)
+	}
+	return nil
 }
 
 // runtimeStatusName renders the workflow runtime status without copying

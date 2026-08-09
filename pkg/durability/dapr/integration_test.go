@@ -109,6 +109,27 @@ func (e *barrierEngine) RunTurn(ctx context.Context, task goalloop.TaskContext) 
 	}
 }
 
+// approvalEngine parks on premature completion twice, then completes
+// with valid evidence once approval unparks it: turn 1 claims
+// completion without evidence (gate rejects, verify routes), turn 2
+// claims again (second premature claim parks), turn 3 completes.
+type approvalEngine struct {
+	mu                  sync.Mutex
+	calls               int
+	completedEvidenceID string
+}
+
+func (e *approvalEngine) RunTurn(_ context.Context, _ goalloop.TaskContext) (goalloop.TurnOutcome, error) {
+	e.mu.Lock()
+	e.calls++
+	call := e.calls
+	e.mu.Unlock()
+	if call <= 2 {
+		return goalloop.TurnOutcome{Rounds: 1, Completed: true, Summary: "claiming early"}, nil
+	}
+	return goalloop.TurnOutcome{Rounds: 1, Completed: true, CompletedEvidenceID: e.completedEvidenceID, Summary: "done after approval"}, nil
+}
+
 type staticPlanner struct{ specs []goalloop.TaskSpec }
 
 func (p staticPlanner) Decompose(context.Context, goalloop.Goal) ([]goalloop.TaskSpec, error) {
@@ -293,6 +314,128 @@ func TestDaprBackend_WorkerRestartResumesWithoutReexecution(t *testing.T) {
 	}
 	if !report.Valid {
 		t.Fatalf("replay report = %+v, want valid", report)
+	}
+}
+
+// runApprovalScenario drives one goal into a durable approval wait,
+// lets decide act on the waiting instance, and returns the terminal
+// goal status plus the run's ledger events.
+func runApprovalScenario(t *testing.T, approvalWaitMS int64, decide func(t *testing.T, backend *dapr.Backend, waitingInstanceID string)) (durability.GoalStatus, []runledger.Event, int) {
+	t.Helper()
+	endpoint := integrationEndpoint(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	engine := &approvalEngine{}
+	loop, ev, ledger, intake, specs := newIntegrationGoal(t, ctx, engine, "approval goal", nil)
+	completed, err := ev.Put(ctx, evidence.Object{Kind: evidence.KindCheckpoint, MediaType: "text/plain", InlineBody: []byte("approval completion evidence")})
+	if err != nil {
+		t.Fatalf("store completion evidence: %v", err)
+	}
+	engine.completedEvidenceID = completed.ID
+
+	backend, err := dapr.New(endpoint)
+	if err != nil {
+		t.Fatalf("dapr.New: %v", err)
+	}
+	t.Cleanup(func() { _ = backend.Close() })
+	if err := backend.StartWorker(ctx, goalrunner.New(loop, intake.Goal, specs)); err != nil {
+		t.Fatalf("StartWorker: %v", err)
+	}
+	instanceID, err := backend.StartGoal(ctx, durability.GoalStart{RunID: intake.RunID, ApprovalWaitMS: approvalWaitMS})
+	if err != nil {
+		t.Fatalf("StartGoal: %v", err)
+	}
+
+	if decide != nil {
+		// The wait lands on the ledger before the workflow blocks; poll
+		// for it, then resolve.
+		var waitingInstance string
+		for waitingInstance == "" {
+			select {
+			case <-ctx.Done():
+				t.Fatal("approval wait never recorded")
+			case <-time.After(100 * time.Millisecond):
+			}
+			events, err := ledger.ListEvents(ctx, runledger.EventQuery{RunID: intake.RunID})
+			if err != nil {
+				t.Fatalf("ListEvents: %v", err)
+			}
+			for _, ev := range events {
+				if ev.Type == runledger.EventDurableApprovalWaiting {
+					waitingInstance, _ = ev.Payload["workflow_instance_id"].(string)
+				}
+			}
+		}
+		decide(t, backend, waitingInstance)
+	}
+
+	status, err := backend.WaitForGoal(ctx, instanceID)
+	if err != nil {
+		t.Fatalf("WaitForGoal: %v", err)
+	}
+	events, err := ledger.ListEvents(ctx, runledger.EventQuery{RunID: intake.RunID})
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	engine.mu.Lock()
+	calls := engine.calls
+	engine.mu.Unlock()
+	return status, events, calls
+}
+
+func approvalOutcome(events []runledger.Event) string {
+	outcome := ""
+	for _, ev := range events {
+		if ev.Type == runledger.EventDurableApprovalResolved {
+			outcome, _ = ev.Payload["outcome"].(string)
+		}
+	}
+	return outcome
+}
+
+// TestDaprBackend_ApprovalResumesParkedTask: approve → unpark → the
+// task completes in a fresh generation.
+func TestDaprBackend_ApprovalResumesParkedTask(t *testing.T) {
+	status, events, turns := runApprovalScenario(t, 60_000, func(t *testing.T, backend *dapr.Backend, instanceID string) {
+		if err := backend.RaiseApproval(context.Background(), instanceID, durability.ApprovalDecision{Approved: true, Reason: "go ahead"}); err != nil {
+			t.Fatalf("RaiseApproval: %v", err)
+		}
+	})
+	if status.RuntimeStatus != "COMPLETED" || len(status.Result.Tasks) != 1 || status.Result.Tasks[0].Status != taskstate.StatusCompleted {
+		t.Fatalf("status = %+v, want completed task after approval", status)
+	}
+	if turns != 3 {
+		t.Fatalf("engine turns = %d, want 3 (two premature claims, one approved completion)", turns)
+	}
+	if got := approvalOutcome(events); got != durability.ApprovalApproved {
+		t.Fatalf("approval outcome = %q, want approved", got)
+	}
+}
+
+// TestDaprBackend_ApprovalDenyKeepsTaskParked: deny → parked stays.
+func TestDaprBackend_ApprovalDenyKeepsTaskParked(t *testing.T) {
+	status, events, _ := runApprovalScenario(t, 60_000, func(t *testing.T, backend *dapr.Backend, instanceID string) {
+		if err := backend.RaiseApproval(context.Background(), instanceID, durability.ApprovalDecision{Approved: false, Reason: "not yet"}); err != nil {
+			t.Fatalf("RaiseApproval: %v", err)
+		}
+	})
+	if status.RuntimeStatus != "COMPLETED" || len(status.Result.Tasks) != 1 || status.Result.Tasks[0].Status != taskstate.StatusParked {
+		t.Fatalf("status = %+v, want parked task after denial", status)
+	}
+	if got := approvalOutcome(events); got != durability.ApprovalDenied {
+		t.Fatalf("approval outcome = %q, want denied", got)
+	}
+}
+
+// TestDaprBackend_ApprovalTimeoutParks: no decision → the durable timer
+// fires and the task parks exactly as it would without the wait.
+func TestDaprBackend_ApprovalTimeoutParks(t *testing.T) {
+	status, events, _ := runApprovalScenario(t, 900, nil)
+	if status.RuntimeStatus != "COMPLETED" || len(status.Result.Tasks) != 1 || status.Result.Tasks[0].Status != taskstate.StatusParked {
+		t.Fatalf("status = %+v, want parked task after timeout", status)
+	}
+	if got := approvalOutcome(events); got != durability.ApprovalTimedOut {
+		t.Fatalf("approval outcome = %q, want timed_out", got)
 	}
 }
 
