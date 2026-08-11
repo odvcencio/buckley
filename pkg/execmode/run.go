@@ -8,7 +8,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 )
 
@@ -161,16 +160,12 @@ func (r *Runner) Run(ctx context.Context, source string) (Result, error) {
 		"BUCKLEY_CAPS_SOCKET=" + broker.SocketPath(),
 		"BUCKLEY_CAPS_TOKEN=" + broker.Token(),
 	}
-	// `go run` does not forward a SIGKILL to the compiled child, so the
-	// program runs in its own process group and cancellation kills the
-	// whole group; WaitDelay backstops pipe readers held by orphans.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error {
-		if cmd.Process != nil {
-			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		}
-		return nil
-	}
+	// `go run` does not forward a SIGKILL to the compiled child on Unix, so
+	// configureProcess puts the program in its own process group there. The
+	// Windows implementation leaves the standard os/exec cancellation path
+	// intact; the helper keeps this runner portable across release targets.
+	configureProcess(cmd)
+	// WaitDelay backstops pipe readers held by orphans.
 	cmd.WaitDelay = 5 * time.Second
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &limitedWriter{buf: &stdout}
