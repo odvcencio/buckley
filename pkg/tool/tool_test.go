@@ -2,6 +2,9 @@ package tool
 
 import (
 	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -88,5 +91,37 @@ func TestToModelOutputWithLimit_ReturnsValidBoundedPayload(t *testing.T) {
 	}
 	if payload["output_head"] == "" || payload["output_tail"] == "" {
 		t.Fatalf("bounded payload omitted useful boundaries: %#v", payload)
+	}
+}
+
+func TestReadFileModelOutputKeepsPageContinuationForLongFiles(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "campaign.md")
+	lines := make([]string, 1051)
+	for i := range lines {
+		lines[i] = fmt.Sprintf("section %04d %s", i+1, strings.Repeat("x", 72))
+	}
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := (&builtin.ReadFileTool{}).Execute(map[string]any{"path": path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Success || !result.ShouldAbridge {
+		t.Fatalf("read result = %#v, want successful abridged page", result)
+	}
+	encoded, err := ToModelOutput(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(encoded, `"truncated":true`) {
+		t.Fatalf("first page of long file was itself truncated: %s", encoded)
+	}
+	for _, want := range []string{"section 0001", "section 0100", "next_start_line", "1051"} {
+		if !strings.Contains(encoded, want) {
+			t.Fatalf("long-file page omitted %q: %s", want, encoded)
+		}
 	}
 }

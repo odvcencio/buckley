@@ -25,6 +25,7 @@ func TestParseReviewPRCommandOptions(t *testing.T) {
 		"-output", "review.md",
 		"-budget", "0.25",
 		"-max-turns", "3",
+		"-max-tool-calls", "17",
 		"-max-diff-bytes", "80000",
 		"-max-context-tokens", "9000",
 		"-max-validation-attempts", "2",
@@ -55,9 +56,9 @@ func TestParseReviewPRCommandOptions(t *testing.T) {
 	if opts.outputFile != "review.md" {
 		t.Fatalf("outputFile = %q, want review.md", opts.outputFile)
 	}
-	if opts.budgetUSD != 0.25 || opts.maxTurns != 3 || opts.maxDiff != 80_000 || opts.maxSupportingContext != 9_000 || opts.maxRetries != 2 {
-		t.Fatalf("budget controls = $%.2f/%d/%d/%d/%d, want $0.25/3/80000/9000/2",
-			opts.budgetUSD, opts.maxTurns, opts.maxDiff, opts.maxSupportingContext, opts.maxRetries)
+	if opts.budgetUSD != 0.25 || opts.maxTurns != 3 || opts.maxToolCalls != 17 || opts.maxDiff != 80_000 || opts.maxSupportingContext != 9_000 || opts.maxRetries != 2 {
+		t.Fatalf("budget controls = $%.2f/%d/%d/%d/%d/%d, want $0.25/3/17/80000/9000/2",
+			opts.budgetUSD, opts.maxTurns, opts.maxToolCalls, opts.maxDiff, opts.maxSupportingContext, opts.maxRetries)
 	}
 	if opts.prRef != "https://github.com/owner/repo/pull/123" {
 		t.Fatalf("prRef = %q, want PR URL", opts.prRef)
@@ -75,6 +76,11 @@ func TestParseReviewPRCommandOptionsRejectsConflictingBudgetModes(t *testing.T) 
 		t.Fatalf("error = %v, want non-negative budget validation", err)
 	}
 
+	_, err = parseReviewPRCommandOptions([]string{"123", "--max-tool-calls", "-1"})
+	if err == nil || !strings.Contains(err.Error(), "--max-tool-calls must be zero or greater") {
+		t.Fatalf("error = %v, want non-negative tool-call validation", err)
+	}
+
 	opts, err := parseReviewPRCommandOptions([]string{"123", "--no-budget"})
 	if err != nil {
 		t.Fatalf("parseReviewPRCommandOptions(--no-budget) error = %v", err)
@@ -87,7 +93,7 @@ func TestParseReviewPRCommandOptionsRejectsConflictingBudgetModes(t *testing.T) 
 func TestDefaultAutomatedReviewOptionsAndOverrides(t *testing.T) {
 	cfg := config.DefaultConfig()
 	defaults := defaultAutomatedReviewOptions(cfg)
-	if defaults.maxIterations != 0 || defaults.maxRetries != 2 || defaults.maxDiffBytes != 240_000 ||
+	if defaults.maxIterations != 0 || defaults.maxToolCalls != 0 || defaults.maxRetries != 2 || defaults.maxDiffBytes != 240_000 ||
 		defaults.maxSupportingContextTokens != 12_000 ||
 		defaults.maxCostUSD != 0 || defaults.criticReserveUSD != 0 || !defaults.approvalCritic ||
 		defaults.reasoningEffort != "medium" || !defaults.adaptiveReasoning {
@@ -96,11 +102,12 @@ func TestDefaultAutomatedReviewOptionsAndOverrides(t *testing.T) {
 
 	got := defaults.withOverrides(automatedReviewOptions{
 		maxIterations: 5,
+		maxToolCalls:  11,
 		maxCostUSD:    0.10,
 	})
 	// The critic ships enabled by default, so an overridden budget
 	// recomputes its reserve instead of clearing it.
-	if got.maxIterations != 5 || got.maxRetries != 2 || got.maxDiffBytes != 240_000 ||
+	if got.maxIterations != 5 || got.maxToolCalls != 11 || got.maxRetries != 2 || got.maxDiffBytes != 240_000 ||
 		got.maxSupportingContextTokens != 12_000 ||
 		got.maxCostUSD != 0.10 || got.criticReserveUSD != 0.012 || !got.approvalCritic {
 		t.Fatalf("overrides = %#v, want selective CLI overrides", got)
@@ -113,9 +120,10 @@ func TestDefaultAutomatedReviewOptionsAndOverrides(t *testing.T) {
 	}
 
 	cfg.Buckbot.PerReviewBudgetUSD = 0.60
+	cfg.Buckbot.MaxToolCalls = 13
 	configured := defaultAutomatedReviewOptions(cfg)
-	if configured.maxCostUSD != 0.60 || configured.criticReserveUSD != 0.072 {
-		t.Fatalf("configured policy = %#v, want explicit $0.60 cap", configured)
+	if configured.maxCostUSD != 0.60 || configured.maxToolCalls != 13 || configured.criticReserveUSD != 0.072 {
+		t.Fatalf("configured policy = %#v, want explicit $0.60 and tool-call caps", configured)
 	}
 	uncapped := configured.withOverrides(automatedReviewOptions{clearCostBudget: true})
 	if uncapped.maxCostUSD != 0 || uncapped.criticReserveUSD != 0 {
@@ -133,8 +141,8 @@ func TestBoundPRApprovalCriticUsesOnePassOnlyForAuthoritativeCI(t *testing.T) {
 		CIStatus:     "passing (3/3)",
 		CIProvenance: "pull request head",
 	})
-	if passing.criticMaxIterations != 1 || passing.criticMaxToolCalls != 1 {
-		t.Fatalf("passing CI critic = %#v, want one direct pass", passing)
+	if passing.criticMaxIterations != 1 || passing.criticMaxToolCalls != 0 {
+		t.Fatalf("passing CI critic = %#v, want one direct pass without a tool-call cap", passing)
 	}
 
 	pending := boundPRApprovalCritic(base, commands.ReviewPRDef{

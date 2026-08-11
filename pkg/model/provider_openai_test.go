@@ -158,3 +158,53 @@ loop:
 		t.Fatal("expected the malformed chunk to surface as an error, not be silently skipped")
 	}
 }
+
+func TestOpenAIProvider_ChatCompletionStreamRetriesInterruptedStreamBeforeEvents(t *testing.T) {
+	var requests int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		if atomic.AddInt32(&requests, 1) == 1 {
+			return
+		}
+		_, _ = io.WriteString(w, "data: {\"id\":\"1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"recovered\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")
+	}))
+	defer server.Close()
+
+	provider := NewOpenAIProvider("test-key", server.URL, false)
+	provider.httpClient = server.Client()
+	provider.transport.SetRetryConfig(RetryConfig{
+		MaxRetries:          1,
+		MaxRateLimitRetries: 1,
+		InitialInterval:     time.Millisecond,
+		MaxInterval:         time.Millisecond,
+		Multiplier:          1,
+	})
+	chunks, errs := provider.ChatCompletionStream(context.Background(), ChatRequest{
+		Model: "openai/gpt-4o", Messages: []Message{{Role: "user", Content: "hi"}},
+	})
+
+	var received int
+	var streamErr error
+	for chunks != nil || errs != nil {
+		select {
+		case _, ok := <-chunks:
+			if !ok {
+				chunks = nil
+				continue
+			}
+			received++
+		case err, ok := <-errs:
+			if !ok {
+				errs = nil
+				continue
+			}
+			streamErr = err
+		}
+	}
+	if streamErr != nil {
+		t.Fatalf("stream error = %v", streamErr)
+	}
+	if requests != 2 || received != 1 {
+		t.Fatalf("requests=%d chunks=%d, want 2 and 1", requests, received)
+	}
+}

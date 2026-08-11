@@ -246,6 +246,8 @@ type RLMRunOpts struct {
 	MaxIterations int
 
 	// MaxToolCalls bounds inspection and verification calls in one review pass.
+	// Zero leaves tool use unbounded by this per-pass limit; the normal
+	// deadline and runaway-loop governor remain in force.
 	MaxToolCalls int
 
 	// MaxVerificationCalls bounds expensive verification calls in one review
@@ -538,7 +540,9 @@ func (f *Framework) runValidatedRLMPhase(
 				)
 			case rlmValidationRetryEvidence:
 				attemptOpts.MaxIterations = boundedPositiveLimit(attemptOpts.MaxIterations, evidenceRepairMaxIterations)
-				attemptOpts.MaxToolCalls = boundedPositiveLimit(attemptOpts.MaxToolCalls, evidenceRepairMaxToolCalls)
+				if attemptOpts.MaxToolCalls > 0 {
+					attemptOpts.MaxToolCalls = boundedPositiveLimit(attemptOpts.MaxToolCalls, evidenceRepairMaxToolCalls)
+				}
 				attemptOpts.ExplorationTimeout = boundedPositiveDuration(
 					attemptOpts.ExplorationTimeout,
 					evidenceRepairExplorationTimeout,

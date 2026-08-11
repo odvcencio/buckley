@@ -70,6 +70,7 @@ func TestMergeConfigsRespectsBuckbotEfficiencyOverrides(t *testing.T) {
 		CriticModel:                "z-ai/glm-5.2",
 		Reasoning:                  "medium",
 		MaxValidationAttempts:      1,
+		MaxToolCalls:               11,
 		MaxDiffBytes:               60_000,
 		MaxSupportingContextTokens: 9_000,
 	}}
@@ -78,6 +79,7 @@ func TestMergeConfigsRespectsBuckbotEfficiencyOverrides(t *testing.T) {
 			"critic_model":                  "z-ai/glm-5.2",
 			"reasoning":                     "medium",
 			"max_validation_attempts":       1,
+			"max_tool_calls":                11,
 			"max_diff_bytes":                60_000,
 			"max_supporting_context_tokens": 9_000,
 		},
@@ -88,6 +90,7 @@ func TestMergeConfigsRespectsBuckbotEfficiencyOverrides(t *testing.T) {
 	if base.Buckbot.CriticModel != "z-ai/glm-5.2" ||
 		base.Buckbot.Reasoning != "medium" ||
 		base.Buckbot.MaxValidationAttempts != 1 ||
+		base.Buckbot.MaxToolCalls != 11 ||
 		base.Buckbot.MaxDiffBytes != 60_000 ||
 		base.Buckbot.MaxSupportingContextTokens != 9_000 {
 		t.Fatalf("Buckbot overrides not merged: %+v", base.Buckbot)

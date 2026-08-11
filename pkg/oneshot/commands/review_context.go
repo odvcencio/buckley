@@ -19,9 +19,10 @@ import (
 )
 
 const (
-	ReviewScopeBranch   = "branch"
-	ReviewScopeChanges  = "changes"
-	ReviewScopeWorktree = "worktree"
+	ReviewScopeBranch            = "branch"
+	ReviewScopeChanges           = "changes"
+	ReviewScopeWorktree          = "worktree"
+	maxProjectFileInventoryBytes = 96 << 10
 )
 
 // BranchContext contains context for branch review.
@@ -53,6 +54,7 @@ type ProjectContext struct {
 	Branch            string
 	HeadCommit        string
 	Tree              string
+	TrackedFiles      []string
 	GoMod             string
 	PackageJSON       string
 	ReadmeMD          string
@@ -375,6 +377,7 @@ func AssembleProjectContext(opts ProjectContextOptions) (*ProjectContext, *trans
 	}
 
 	tree := buildTrackedTree(trackedFiles, opts.MaxTreeDepth)
+	ctx.TrackedFiles = append([]string(nil), trackedFiles...)
 	if tree != "" {
 		ctx.Tree = tree
 		audit.Add("directory tree", reviewEstimateTokens(tree))
@@ -555,9 +558,17 @@ func BuildProjectPrompt(ctx *ProjectContext) string {
 		sb.WriteString("\n```\n\n")
 	}
 
+	if inventory := buildProjectFileInventory(ctx.TrackedFiles); inventory != "" {
+		sb.WriteString("## Tracked File Inventory (review TOC)\n\n")
+		sb.WriteString("This is the captured Git-visible inventory. Every path must be classified as inspected or explicitly excluded; if the inventory is marked truncated, use find_files before claiming complete coverage.\n\n")
+		sb.WriteString("```text\n")
+		sb.WriteString(inventory)
+		sb.WriteString("\n```\n\n")
+	}
+
 	if ctx.CanopySummary != "" {
 		sb.WriteString("## Primary Project Health Map (Canopy)\n\n")
-		sb.WriteString("Use this structural baseline to choose a small number of high-value inspections. Do not rescan the repository file-by-file.\n\n")
+		sb.WriteString("Use this abridged structural TOC as the repository navigation map: it includes major call sites, direct callers and callees for important flows, complexity hotspots, and structural coverage. Prioritize high-risk paths and boundaries, then expand it into exhaustive repository coverage. It is not a sampling limit and does not replace reading the captured files.\n\n")
 		sb.WriteString("- **Source status**: " + ctx.CanopyStatus + "\n\n")
 		sb.WriteString("```json\n")
 		sb.WriteString(ctx.CanopySummary)
@@ -600,6 +611,33 @@ func BuildProjectPrompt(ctx *ProjectContext) string {
 	}
 
 	return sb.String()
+}
+
+// buildProjectFileInventory renders a compact, deterministic TOC for the
+// captured Git-visible project snapshot. The model can use it to maintain a
+// coverage ledger without receiving file contents up front; a bounded marker
+// makes it impossible to mistake a prompt-size truncation for completeness.
+func buildProjectFileInventory(files []string) string {
+	if len(files) == 0 {
+		return ""
+	}
+
+	ordered := append([]string(nil), files...)
+	sort.Strings(ordered)
+	var sb strings.Builder
+	for _, path := range ordered {
+		path = strings.TrimSpace(filepath.ToSlash(path))
+		if path == "" {
+			continue
+		}
+		if sb.Len()+len(path)+1 > maxProjectFileInventoryBytes {
+			fmt.Fprintf(&sb, "... (inventory truncated after %d bytes; use find_files for complete enumeration)", sb.Len())
+			break
+		}
+		sb.WriteString(path)
+		sb.WriteByte('\n')
+	}
+	return strings.TrimRight(sb.String(), "\n")
 }
 
 // detectBaseBranch tries to find main or master branch. It also returns the

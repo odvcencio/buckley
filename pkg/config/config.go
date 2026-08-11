@@ -972,11 +972,14 @@ type BuckbotConfig struct {
 	// without a dollar ceiling, subject to its normal time and safety controls.
 	PerReviewBudgetUSD float64 `yaml:"per_review_budget_usd"`
 	// MonthlyBudgetUSD is optional. Zero means no configured monthly ceiling.
-	MonthlyBudgetUSD           float64 `yaml:"monthly_budget_usd"`
-	MaxReviewIterations        int     `yaml:"max_review_iterations"`
-	MaxValidationAttempts      int     `yaml:"max_validation_attempts"`
-	MaxDiffBytes               int     `yaml:"max_diff_bytes"`
-	MaxSupportingContextTokens int     `yaml:"max_supporting_context_tokens"`
+	MonthlyBudgetUSD    float64 `yaml:"monthly_budget_usd"`
+	MaxReviewIterations int     `yaml:"max_review_iterations"`
+	// MaxToolCalls is an optional per-pass inspection/verification cap. Zero
+	// lets the review run until its normal timeout and governor safeguards.
+	MaxToolCalls               int `yaml:"max_tool_calls"`
+	MaxValidationAttempts      int `yaml:"max_validation_attempts"`
+	MaxDiffBytes               int `yaml:"max_diff_bytes"`
+	MaxSupportingContextTokens int `yaml:"max_supporting_context_tokens"`
 
 	// PostingCoreAssociations lists the GitHub authorAssociation values
 	// treated as core maintainer/owner for the posted-review size gate

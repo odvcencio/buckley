@@ -28,6 +28,7 @@ func TestParseReviewCommandOptions(t *testing.T) {
 		"-no-interactive",
 		"-budget", "0.20",
 		"-max-turns", "4",
+		"-max-tool-calls", "17",
 		"-max-diff-bytes", "64000",
 		"-max-validation-attempts", "1",
 	})
@@ -71,9 +72,9 @@ func TestParseReviewCommandOptions(t *testing.T) {
 	if opts.interactive {
 		t.Fatal("interactive = true, want false when -no-interactive is set")
 	}
-	if opts.budgetUSD != 0.20 || opts.maxTurns != 4 || opts.maxDiff != 64_000 || opts.maxRetries != 1 {
-		t.Fatalf("budget controls = $%.2f/%d/%d/%d, want $0.20/4/64000/1",
-			opts.budgetUSD, opts.maxTurns, opts.maxDiff, opts.maxRetries)
+	if opts.budgetUSD != 0.20 || opts.maxTurns != 4 || opts.maxToolCalls != 17 || opts.maxDiff != 64_000 || opts.maxRetries != 1 {
+		t.Fatalf("budget controls = $%.2f/%d/%d/%d/%d, want $0.20/4/17/64000/1",
+			opts.budgetUSD, opts.maxTurns, opts.maxToolCalls, opts.maxDiff, opts.maxRetries)
 	}
 }
 
@@ -84,6 +85,21 @@ func TestReviewCommandsReserveEnoughTimeByDefault(t *testing.T) {
 	}
 	if branch.timeout != defaultReviewTimeout {
 		t.Fatalf("branch timeout = %s, want %s", branch.timeout, defaultReviewTimeout)
+	}
+
+	project, err := parseReviewCommandOptions([]string{"--project"})
+	if err != nil {
+		t.Fatalf("parseReviewCommandOptions(--project) error = %v", err)
+	}
+	if project.timeout != defaultProjectReviewTimeout {
+		t.Fatalf("project timeout = %s, want %s", project.timeout, defaultProjectReviewTimeout)
+	}
+	explicitProject, err := parseReviewCommandOptions([]string{"--project", "--timeout", "45s"})
+	if err != nil {
+		t.Fatalf("parseReviewCommandOptions(--project --timeout) error = %v", err)
+	}
+	if explicitProject.timeout != 45*time.Second {
+		t.Fatalf("explicit project timeout = %s, want 45s", explicitProject.timeout)
 	}
 
 	pr, err := parseReviewPRCommandOptions([]string{"123"})
@@ -104,6 +120,11 @@ func TestParseReviewCommandOptionsRejectsConflictingBudgetModes(t *testing.T) {
 	_, err = parseReviewCommandOptions([]string{"--budget", "-0.25"})
 	if err == nil || !strings.Contains(err.Error(), "must be zero or greater") {
 		t.Fatalf("error = %v, want non-negative budget validation", err)
+	}
+
+	_, err = parseReviewCommandOptions([]string{"--max-tool-calls", "-1"})
+	if err == nil || !strings.Contains(err.Error(), "--max-tool-calls must be zero or greater") {
+		t.Fatalf("error = %v, want non-negative tool-call validation", err)
 	}
 
 	opts, err := parseReviewCommandOptions([]string{"--no-budget"})

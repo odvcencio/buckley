@@ -2,6 +2,7 @@ package commands
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -9,6 +10,80 @@ import (
 	"testing"
 	"time"
 )
+
+func TestCollectCanopyProjectSummaryBuildsStructuralTOC(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test helper uses a POSIX shell script")
+	}
+	tempDir := t.TempDir()
+	helper := filepath.Join(tempDir, "canopy")
+	script := `#!/bin/sh
+case "$1:$2" in
+  index:build)
+    out=""
+    previous=""
+    for arg in "$@"; do
+      if [ "$previous" = "--out" ]; then out="$arg"; fi
+      previous="$arg"
+    done
+    if [ -n "$out" ]; then : > "$out"; fi
+    exit 0
+    ;;
+  analyze:summary)
+    printf '%s\n' '{"files":{"total":12,"generated":1,"by_language":{"go":11}},"symbols":{"total":40},"references":{"total":90},"parse_errors":{"count":0},"call_graph":{"total_edges":70,"unresolved":4,"resolution_rate":0.94},"complexity":{"avg_cyclomatic":3.2,"max_cyclomatic":18,"p90_cyclomatic":8,"avg_cognitive":4.1,"max_cognitive":27},"top_fan_in":[{"file":"pkg/a.go","name":"Start","start_line":10,"value":21},{"file":"pkg/b.go","name":"Serve","start_line":20,"value":11}],"top_complex":[{"file":"pkg/c.go","name":"Validate","start_line":30,"value":0,"cyclomatic":18,"cognitive":27,"lines":88}]}'
+    ;;
+  graph:calls)
+    reverse=false
+    for arg in "$@"; do
+      if [ "$arg" = "--reverse" ]; then reverse=true; fi
+    done
+    if $reverse; then
+      printf '%s\n' '{"roots":[{"id":"root","file":"pkg/a.go","package":"p","kind":"function_definition","name":"Start","signature":"func Start()","start_line":10,"end_line":15}],"nodes":[],"edges":[{"caller":{"id":"caller","file":"pkg/entry.go","package":"p","kind":"function_definition","name":"Main","start_line":3},"callee":{"id":"root","file":"pkg/a.go","package":"p","kind":"function_definition","name":"Start","start_line":10},"resolution":"package","count":2,"samples":[{"file":"pkg/entry.go","start_line":4}]}]}'
+    else
+      printf '%s\n' '{"roots":[{"id":"root","file":"pkg/a.go","package":"p","kind":"function_definition","name":"Start","signature":"func Start()","start_line":10,"end_line":15}],"nodes":[],"edges":[{"caller":{"id":"root","file":"pkg/a.go","package":"p","kind":"function_definition","name":"Start","start_line":10},"callee":{"id":"callee","file":"pkg/service.go","package":"p","kind":"function_definition","name":"Run","start_line":44},"resolution":"package","count":1,"samples":[{"file":"pkg/a.go","start_line":12}]}]}'
+    fi
+    ;;
+esac
+`
+	if err := os.WriteFile(helper, []byte(script), 0o755); err != nil {
+		t.Fatalf("write helper: %v", err)
+	}
+	t.Setenv("CANOPY_BIN", helper)
+
+	output, status := collectCanopyProjectSummary(context.Background(), tempDir)
+	if status != "available" {
+		t.Fatalf("status = %q, want available", status)
+	}
+	if len(output) > maxCanopyProjectBytes {
+		t.Fatalf("TOC length = %d, want <= %d", len(output), maxCanopyProjectBytes)
+	}
+	var toc canopyProjectTOC
+	if err := json.Unmarshal([]byte(output), &toc); err != nil {
+		t.Fatalf("decode structural TOC: %v\n%s", err, output)
+	}
+	if toc.Version != 1 {
+		t.Fatalf("TOC version = %d, want 1", toc.Version)
+	}
+	if toc.Summary.Files.Total != 12 || toc.Summary.CallGraph.TotalEdges != 70 {
+		t.Fatalf("summary = %#v", toc.Summary)
+	}
+	if len(toc.MajorCallSites) != 2 {
+		t.Fatalf("major call sites = %d, want 2", len(toc.MajorCallSites))
+	}
+	if len(toc.ImportantFlows) != 3 {
+		t.Fatalf("important flows = %d, want 3", len(toc.ImportantFlows))
+	}
+	flow := toc.ImportantFlows[0]
+	if flow.Status != "available" || len(flow.Callers) != 1 || len(flow.Callees) != 1 {
+		t.Fatalf("first flow = %#v", flow)
+	}
+	if flow.Callers[0].File != "pkg/entry.go" || flow.Callees[0].File != "pkg/service.go" {
+		t.Fatalf("flow edges = %#v", flow)
+	}
+	if !toc.Coverage.CallGraphsComplete || toc.Coverage.FlowsCollected != 3 {
+		t.Fatalf("coverage = %#v", toc.Coverage)
+	}
+}
 
 func TestCollectCanopyReviewEvidenceUsesCacheAndReportsMetrics(t *testing.T) {
 	if runtime.GOOS == "windows" {

@@ -13,15 +13,19 @@ import (
 )
 
 const (
-	defaultReviewTimeout     = 4*time.Minute + 25*time.Second
-	codexReviewModelFocused  = "codex/gpt-5.6-luna"
-	codexReviewModelStandard = "codex/gpt-5.6-terra"
-	codexReviewModelBroad    = "codex/gpt-5.6-sol"
-	qwenReviewExploration    = 100 * time.Second
-	qwenCriticExploration    = 75 * time.Second
-	qwenFocusedReasoning     = 2048
-	qwenStandardReasoning    = 3072
-	qwenBroadReasoning       = 4096
+	defaultReviewTimeout = 4*time.Minute + 25*time.Second
+	// Project reviews default to a longer wall-clock window because their
+	// contract is exhaustive repository coverage rather than a small diff
+	// sample. Callers can still choose an explicit --timeout.
+	defaultProjectReviewTimeout = 20 * time.Minute
+	codexReviewModelFocused     = "codex/gpt-5.6-luna"
+	codexReviewModelStandard    = "codex/gpt-5.6-terra"
+	codexReviewModelBroad       = "codex/gpt-5.6-sol"
+	qwenReviewExploration       = 100 * time.Second
+	qwenCriticExploration       = 75 * time.Second
+	qwenFocusedReasoning        = 2048
+	qwenStandardReasoning       = 3072
+	qwenBroadReasoning          = 4096
 )
 
 type reviewExecutionPlan struct {
@@ -73,14 +77,14 @@ func resolveReviewExecutionPlan(engine *rules.Engine, facts rules.ReviewPlanFact
 		reasoningEffort:      "medium",
 		reasoningMaxTokens:   1536,
 		maxIterations:        5,
-		maxToolCalls:         5,
+		maxToolCalls:         0,
 		maxVerificationCalls: 1,
 		verificationTimeout:  60 * time.Second,
 		explorationTimeout:   50 * time.Second,
 		synthesisLead:        90 * time.Second,
 		criticReserve:        75 * time.Second,
 		criticMaxIterations:  2,
-		criticMaxToolCalls:   2,
+		criticMaxToolCalls:   0,
 		criticExploration:    20 * time.Second,
 		criticSynthesisLead:  45 * time.Second,
 	}
@@ -99,7 +103,7 @@ func resolveReviewExecutionPlan(engine *rules.Engine, facts rules.ReviewPlanFact
 	}
 	plan.reasoningMaxTokens = reviewPlanInt(result.Params["reasoning_max_tokens"], plan.reasoningMaxTokens)
 	plan.maxIterations = reviewPlanInt(result.Params["max_iterations"], plan.maxIterations)
-	plan.maxToolCalls = reviewPlanInt(result.Params["max_tool_calls"], plan.maxToolCalls)
+	plan.maxToolCalls = reviewPlanLimit(result.Params["max_tool_calls"], plan.maxToolCalls)
 	plan.maxVerificationCalls = reviewPlanInt(result.Params["max_verification_calls"], plan.maxVerificationCalls)
 	verificationSeconds := reviewPlanInt(result.Params["verification_timeout_seconds"], int(plan.verificationTimeout/time.Second))
 	explorationSeconds := reviewPlanInt(result.Params["exploration_timeout_seconds"], int(plan.explorationTimeout/time.Second))
@@ -132,6 +136,23 @@ func reviewPlanInt(value any, fallback int) int {
 	return fallback
 }
 
+// reviewPlanLimit is like reviewPlanInt, but permits zero as an intentional
+// unlimited value. Other review-plan fields need a positive value, while a
+// tool-call limit uses zero to mean "let the review run".
+func reviewPlanLimit(value any, fallback int) int {
+	switch number := value.(type) {
+	case int:
+		if number >= 0 {
+			return number
+		}
+	case float64:
+		if number >= 0 {
+			return int(number)
+		}
+	}
+	return fallback
+}
+
 func enabledReviewDuration(enabled bool, value time.Duration) time.Duration {
 	if !enabled {
 		return 0
@@ -143,7 +164,9 @@ func (opts automatedReviewOptions) withExecutionPlan(plan reviewExecutionPlan) a
 	if opts.maxIterations <= 0 {
 		opts.maxIterations = plan.maxIterations
 	}
-	opts.maxToolCalls = plan.maxToolCalls
+	if opts.maxToolCalls <= 0 {
+		opts.maxToolCalls = plan.maxToolCalls
+	}
 	opts.maxVerificationCalls = plan.maxVerificationCalls
 	opts.reasoningMaxTokens = plan.reasoningMaxTokens
 	opts.verificationTimeout = plan.verificationTimeout
@@ -170,7 +193,10 @@ func (opts automatedReviewOptions) withExecutionPlan(plan reviewExecutionPlan) a
 		} else {
 			opts.reasoningMaxTokens = qwenReviewReasoningForEffort(opts.reasoningEffort)
 		}
-		if opts.explorationTimeout < qwenReviewExploration {
+		// A zero exploration timeout is intentional for project reviews: the
+		// outer review deadline and synthesis reserve are the only boundaries.
+		// Preserve it instead of reintroducing a hidden Qwen-only ceiling.
+		if opts.explorationTimeout > 0 && opts.explorationTimeout < qwenReviewExploration {
 			opts.explorationTimeout = qwenReviewExploration
 		}
 		if opts.criticExploration < qwenCriticExploration {
@@ -224,16 +250,28 @@ func qwenReviewReasoningForEffort(effort string) int {
 }
 
 func appendQwenReviewExecutionPlan(prompt string, opts automatedReviewOptions) string {
+	toolLimit := "no per-review tool-call cap"
+	if opts.maxToolCalls > 0 {
+		toolLimit = fmt.Sprintf("%d inspection/verification calls", opts.maxToolCalls)
+	}
+	turnLimit := "no hard per-review model-turn cap"
+	if opts.maxIterations > 0 {
+		turnLimit = fmt.Sprintf("%d model turns", opts.maxIterations)
+	}
+	explorationLimit := "until the synthesis reserve or outer deadline requires finalization"
+	if opts.explorationTimeout > 0 {
+		explorationLimit = fmt.Sprintf("%d seconds", int(opts.explorationTimeout/time.Second))
+	}
 	return prompt + fmt.Sprintf(`
 
 ## Qwen Review Profile
 
-- Scope: %s. Thinking budget: %d tokens per turn. Limits: %d turns, %d inspection/verification calls, %d verification calls.
+- Scope: %s. Thinking budget: %d tokens per turn. Limits: %s, %s, %d verification calls.
 - Read deterministic evidence before summarizing the diff. Treat hypotheses as tests, but treat provider-labeled violations as demonstrated defects unless exact counterevidence disproves them.
 - Rank at most three concrete changed-behavior failures. Prefer identity/provenance mismatches, routing and bypass gates, producer/consumer key drift, and empty or failure paths over broad commentary.
 - For workflow or release changes, trace event input -> checkout ref -> validated commit -> built bytes -> published identifier. Never assume checkout rewrites event variables.
 - Use the supplied diff first. Make one focused first-batch tool call only when a named invariant still lacks proof; do not repeat searches or tests.
-- Finish evidence collection within %d seconds and reserve the final %d seconds for synthesis.
+- Finish evidence collection within %s and reserve the final %d seconds for synthesis.
 - Follow the exact response schema from the system prompt. Account for every changed file, copy Feedback IDs exactly, cite immutable CI precisely, and return only the final review.
 - Start exactly once with one ## Grade: heading. Never restart, repeat, or append a second copy of the review.
 - Put each Finding ID in exactly one Verdict list: CRITICAL and MAJOR are Blockers; MINOR is a Suggestion. Never list the same ID in both.
@@ -241,10 +279,10 @@ func appendQwenReviewExecutionPlan(prompt string, opts automatedReviewOptions) s
 `,
 		strings.ToUpper(opts.sizeClass),
 		opts.reasoningMaxTokens,
-		opts.maxIterations,
-		opts.maxToolCalls,
+		turnLimit,
+		toolLimit,
 		opts.maxVerificationCalls,
-		int(opts.explorationTimeout/time.Second),
+		explorationLimit,
 		int(opts.synthesisLead/time.Second),
 	)
 }
@@ -252,6 +290,18 @@ func appendQwenReviewExecutionPlan(prompt string, opts automatedReviewOptions) s
 func appendReviewExecutionPlan(prompt string, opts automatedReviewOptions) string {
 	if isQwen37PlusReviewModel(opts.modelID) {
 		return appendQwenReviewExecutionPlan(prompt, opts)
+	}
+	turnLimit := "There is no hard per-review model-turn cap; continue until the review is complete or normal timeout/safety controls apply."
+	if opts.maxIterations > 0 {
+		turnLimit = fmt.Sprintf("Use at most %d model turns.", opts.maxIterations)
+	}
+	toolLimit := fmt.Sprintf("Use at most %d total inspection or verification calls.", opts.maxToolCalls)
+	if opts.maxToolCalls <= 0 {
+		toolLimit = "There is no per-review tool-call cap; continue evidence collection until the review is complete or normal timeout/safety controls apply."
+	}
+	explorationLimit := "until the synthesis reserve or outer deadline requires finalization"
+	if opts.explorationTimeout > 0 {
+		explorationLimit = fmt.Sprintf("%d seconds", int(opts.explorationTimeout/time.Second))
 	}
 	return prompt + fmt.Sprintf(`
 
@@ -261,10 +311,11 @@ func appendReviewExecutionPlan(prompt string, opts automatedReviewOptions) strin
 - Model: %s
 - Reasoning effort: %s
 - Limit each model turn to %d reasoning tokens.
-- Use at most %d model turns and %d total inspection or verification calls.
+- %s
+- %s
 - Use at most %d verification calls.
 - Limit each verification command to %d seconds.
-- Finish evidence collection within %d seconds.
+- Finish evidence collection within %s.
 - Keep the final %d seconds for a complete verdict.
 - Return only the final review.
 - Start the first line with "## Grade:".
@@ -313,11 +364,11 @@ func appendReviewExecutionPlan(prompt string, opts automatedReviewOptions) strin
 		opts.modelID,
 		strings.ToUpper(opts.reasoningEffort),
 		opts.reasoningMaxTokens,
-		opts.maxIterations,
-		opts.maxToolCalls,
+		turnLimit,
+		toolLimit,
 		opts.maxVerificationCalls,
 		int(opts.verificationTimeout/time.Second),
-		int(opts.explorationTimeout/time.Second),
+		explorationLimit,
 		int(opts.synthesisLead/time.Second),
 	)
 }

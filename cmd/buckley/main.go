@@ -509,6 +509,15 @@ func executeOneShotWithStepCapAndOutputSchema(prompt string, cfg *config.Config,
 	responseText, err := runACPLoopWithStepCap(context.Background(), cfg, mgr, conv, registry, skillState, engine, resolvedModel, cwd, "", nil, nil, nil, stepCap)
 	if err != nil {
 		codeModeFailure = err
+		var partial *partialStreamTurnError
+		if errors.As(err, &partial) && responseText != "" {
+			fmt.Print(responseText)
+			if !strings.HasSuffix(responseText, "\n") {
+				fmt.Println()
+			}
+			fmt.Println("\n[Stream interrupted — the response above is incomplete.]")
+			fmt.Fprintf(os.Stderr, "One-shot status: incomplete (exit=1; partial_output_bytes=%d)\n", len(responseText))
+		}
 		fmt.Fprintf(os.Stderr, "\nError: %v\n", err)
 		return 1
 	}

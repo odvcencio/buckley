@@ -25,6 +25,12 @@ func TestReadFileTool(t *testing.T) {
 		if _, ok := params.Properties["path"]; !ok {
 			t.Error("Parameters() missing 'path' property")
 		}
+		if _, ok := params.Properties["start_line"]; !ok {
+			t.Error("Parameters() missing 'start_line' property")
+		}
+		if _, ok := params.Properties["end_line"]; !ok {
+			t.Error("Parameters() missing 'end_line' property")
+		}
 	})
 
 	t.Run("read existing file", func(t *testing.T) {
@@ -73,6 +79,62 @@ func TestReadFileTool(t *testing.T) {
 		}
 		if result.DisplayData == nil {
 			t.Error("expected DisplayData to be set for large file")
+		}
+	})
+
+	t.Run("read page returns continuation metadata", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		testFile := filepath.Join(tmpDir, "paged.txt")
+		lines := make([]string, 250)
+		for i := range lines {
+			lines[i] = fmt.Sprintf("line %d", i+1)
+		}
+		content := strings.Join(lines, "\n") + "\n"
+		if err := os.WriteFile(testFile, []byte(content), 0644); err != nil {
+			t.Fatalf("failed to create paged file: %v", err)
+		}
+
+		result, err := tool.Execute(map[string]any{"path": testFile, "start_line": 101, "end_line": 200})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !result.Success || !result.ShouldAbridge {
+			t.Fatalf("result = %+v, want successful abridged page", result)
+		}
+		if got := result.Data["content"]; got != content {
+			t.Fatalf("Data content lost full file: got %T %v", got, got)
+		}
+		display := result.DisplayData["content"].(string)
+		if !strings.HasPrefix(display, "line 101\n") || !strings.HasSuffix(display, "line 200") || strings.Contains(display, "line 201") {
+			t.Fatalf("display page = %q, want lines 101 through 200 only", display)
+		}
+		page := result.DisplayData["page"].(map[string]any)
+		if page["start_line"] != 101 || page["end_line"] != 200 || page["total_lines"] != 250 || page["next_start_line"] != 201 || page["has_more"] != true {
+			t.Fatalf("page metadata = %#v", page)
+		}
+	})
+
+	t.Run("rejects invalid page parameters", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		testFile := filepath.Join(tmpDir, "small.txt")
+		if err := os.WriteFile(testFile, []byte("one\ntwo\n"), 0644); err != nil {
+			t.Fatalf("failed to create small file: %v", err)
+		}
+
+		for name, params := range map[string]map[string]any{
+			"zero start":      {"path": testFile, "start_line": 0},
+			"reverse range":   {"path": testFile, "start_line": 2, "end_line": 1},
+			"oversized range": {"path": testFile, "start_line": 1, "end_line": 101},
+		} {
+			t.Run(name, func(t *testing.T) {
+				result, err := tool.Execute(params)
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				if result.Success {
+					t.Fatalf("expected page validation error, got %+v", result)
+				}
+			})
 		}
 	})
 

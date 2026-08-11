@@ -193,17 +193,34 @@ buckley buckbot --scope branch          # review the current branch
 buckley buckbot repo                    # advisory repository-wide assessment
 buckley buckbot pr 123                  # review a GitHub PR without posting
 buckley buckbot pr 123 --post           # explicitly post that PR review
+buckley buckbot --max-tool-calls 12      # opt into an experimental tool cap
 ```
 
 `buckley buckbot repo` is equivalent to `buckley review --project`. It is
 repository-wide, advisory-only, and cannot issue an approval verdict. Posting
 to GitHub is never implicit: it requires `--post` on a PR review.
 
+Repository reviews start with a complete Git-visible tracked-file inventory and
+an abridged Canopy structural map. The map is a navigable table of contents:
+it includes repository metrics, complexity hotspots, major call sites, and
+direct caller/callee edges for important flows, along with call-graph and parse
+health. The model must expand that map into a coverage ledger for every
+tracked source, test, configuration, and documentation area. Long files are
+read in explicit pages, so a large file is not silently discarded. The report
+declares `COMPLETE` or `PARTIAL` coverage and lists every deferred or excluded
+path. Project reviews default to a 20-minute wall-clock window; use
+`--timeout 45m` (or another explicit duration) for a larger repository.
+
 Buckbot is uncapped by default: a model is allowed to finish its review rather
 than being truncated by an automatic dollar ceiling. Use `--budget <USD>` only
 when a run needs an explicit spending limit. If an older project configuration
 sets `per_review_budget_usd`, use `--no-budget` for a completion-first review.
-Normal timeout, verification, and safety controls still apply.
+Reviews also have no default per-review tool-call cap. Use
+`--max-tool-calls <N>` when experimenting with an expensive model and you want
+an explicit inspection/verification ceiling. The monetary and tool-call caps
+are independent. Project reviews also have no hard model-turn or exploration
+ceiling by default; the ordinary outer timeout, synthesis reserve, verification,
+and governor safety controls still apply.
 
 ### review-pr
 

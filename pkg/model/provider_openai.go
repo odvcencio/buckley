@@ -208,11 +208,5 @@ func (p *OpenAIProvider) invoke(ctx context.Context, req ChatRequest) (*ChatResp
 }
 
 func (p *OpenAIProvider) invokeStream(ctx context.Context, req ChatRequest, chunkChan chan<- StreamChunk) error {
-	body, err := p.transport.DoStream(ctx, p.httpClient, "POST", p.baseURL+"/chat/completions", req, p.setAuthHeaders)
-	if err != nil {
-		return err
-	}
-	defer body.Close()
-
-	return ParseSSEStream(ctx, body, chunkChan)
+	return p.transport.Stream(ctx, p.httpClient, "POST", p.baseURL+"/chat/completions", req, p.setAuthHeaders, chunkChan)
 }

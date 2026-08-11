@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -994,6 +995,10 @@ func runACPLoopWithStepCap(
 		}
 		result, err := ctrl.Run(ctx)
 		if err != nil {
+			var partial *partialStreamTurnError
+			if errors.As(err, &partial) {
+				return partial.text, err
+			}
 			if state.useTools && isToolUnsupportedError(err) {
 				state.useTools = false
 				continue
@@ -1042,6 +1047,20 @@ func runACPLoopWithStepCap(
 		return text, nil
 	}
 }
+
+// partialStreamTurnError preserves only already-emitted assistant text when
+// an SSE connection ends after the provider has started its response. It
+// intentionally excludes reasoning and tool-call fragments: neither is a
+// completed user-facing answer and replaying a turn that may contain a tool
+// call is unsafe.
+type partialStreamTurnError struct {
+	cause error
+	text  string
+}
+
+func (e *partialStreamTurnError) Error() string { return e.cause.Error() }
+
+func (e *partialStreamTurnError) Unwrap() error { return e.cause }
 
 // newACPLoopController wires the shared turn engine for one ACP prompt
 // turn. Every hook delegates to the same ACP-specific logic this file
@@ -1219,6 +1238,10 @@ func streamACPTurn(ctx context.Context, mgr *model.Manager, req model.ChatReques
 				continue
 			}
 			if err != nil {
+				partialText := model.ExtractTextContentOrEmpty(acc.Message().Content)
+				if strings.TrimSpace(partialText) != "" {
+					return model.Message{}, acc.Usage(), &partialStreamTurnError{cause: err, text: partialText}
+				}
 				return model.Message{}, nil, err
 			}
 		}
@@ -1862,19 +1885,11 @@ func formatACPToolResult(result *builtin.Result, err error) string {
 	if result == nil {
 		return "No result"
 	}
-	if !result.Success {
-		return fmt.Sprintf("Error: %s", result.Error)
+	output, outputErr := tool.ToModelOutput(result)
+	if outputErr != nil {
+		return fmt.Sprintf("Error: encoding tool result: %v", outputErr)
 	}
-	if msg, shows := result.DisplayData["message"].(string); shows && msg != "" {
-		return msg
-	}
-	if len(result.Data) > 0 {
-		data, err := json.MarshalIndent(result.Data, "", "  ")
-		if err == nil {
-			return string(data)
-		}
-	}
-	return "Success"
+	return output
 }
 
 func formatACPToolDisplay(result *builtin.Result, err error) string {

@@ -51,7 +51,7 @@ This is a remote PR. Your job is to:
 4. Grade the PR and recommend action
 
 TOOLS AVAILABLE:
-- read_file: See full file context beyond the diff
+- read_file: Read bounded file pages beyond the diff; follow next_start_line until every relevant section is covered
 - find_files: Find related files
 - search_text: Search for patterns, usages, definitions
 - run_verification: Run one focused build, test, or check command in the OS-enforced snapshot sandbox (no arbitrary shell)
@@ -310,25 +310,32 @@ Severity: CRITICAL = security/data loss/crash/build failure; MAJOR = broken beha
 }
 
 func reviewProjectDefault(now time.Time) string {
-	return fmt.Sprintf(`Produce a fast, evidence-bounded project health review.
+	return fmt.Sprintf(`Produce an exhaustive, evidence-backed repository health review.
 
-Use the supplied Canopy summary as the primary structural map. Spend tool calls only on the three highest-risk human-authored hotspots or boundaries it identifies; ignore generated/bundled artifacts unless they are shipped source. Use at most eight read_file/find_files/search_text calls total. Do not inventory the repository or offer generic cleanup.
+Use the supplied Canopy TOC—metrics, major call sites, important-flow caller/callee edges, complexity hotspots, and parse health—as the starting map. It is not a sampling limit and it is not a substitute for inspecting the repository. Enumerate the complete tracked-file inventory, classify every path, and continue inspecting until every human-authored source, test, configuration, and documentation area has been covered. Use the TOC's file:line anchors to open the captured source, then use paginated read_file calls for long files and search_text/find_files to trace consumers and boundaries. Generated, vendored, and build-output files may be excluded only after they are identified and recorded as excluded with a reason.
 
-Every issue needs exact file:line evidence. Distinguish demonstrated findings from sampling limits. This is advisory: never issue a merge approval verdict.
+There is no per-review tool-call or model-turn cap by default. Continue evidence collection until coverage is complete or the caller's ordinary deadline/safety controls require synthesis. Maintain a coverage ledger in the final report and distinguish complete coverage from deadline-limited coverage. Every issue needs exact file:line evidence. This is advisory: never issue a merge approval verdict.
 
 Return exactly:
 
 ## Project Health
 - **Overall**: GOOD|WATCH|POOR
-- **Confidence**: HIGH|MEDIUM|LOW — note Canopy availability and sample limits
+- **Confidence**: HIGH|MEDIUM|LOW — note Canopy availability and any deferred paths
 - **Architecture**: one sentence
 - **Maintainability**: one sentence
 - **Delivery readiness**: one sentence
 
-## Evidence Sampled
-- Canopy metrics used
-- Up to three source areas inspected and why
-- Tool calls used: N/8
+## Evidence Collected
+- Canopy metrics and structural TOC used
+- Coverage ledger entries for every tracked path, boundary, and test area
+- Tool calls used and whether the review reached complete coverage
+
+## Coverage
+- **Inventory**: tracked paths enumerated and classified
+- **Inspected**: source, tests, configuration, documentation, and boundary areas actually read
+- **Excluded**: generated, vendored, binary, or build-output paths with reasons
+- **Deferred**: any paths not inspected before synthesis, or NONE
+- **Completeness**: COMPLETE or PARTIAL — explain the limiting deadline or unavailable evidence
 
 ## Top Actions
 At most three items, ordered by risk/reward:

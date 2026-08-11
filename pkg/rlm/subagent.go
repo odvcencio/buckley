@@ -262,9 +262,13 @@ var errSubAgentFinalToolRejectionTerminal = errors.New("rlm: final tool call rej
 // while examining different parts of a diff is normal, legitimate work.
 // A stopped review is worse than a governor that never fires.
 const (
-	subAgentGovernorRoundBackstop      = 500
+	// The backstops are deliberately high: project reviews may need hundreds
+	// of paged reads/search batches, and the normal outer deadline is the
+	// completion boundary. They remain a last-resort runaway guard for callers
+	// that accidentally omit a deadline or explicit limit.
+	subAgentGovernorRoundBackstop      = 4096
 	subAgentGovernorRoundSlack         = 3
-	subAgentGovernorToolCallBackstop   = 500
+	subAgentGovernorToolCallBackstop   = 4096
 	subAgentGovernorToolCallSlack      = 8
 	subAgentGovernorExactRepeatLimit   = 8
 	subAgentGovernorOutcomeRepeatLimit = 12

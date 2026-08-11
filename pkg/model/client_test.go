@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -536,6 +537,106 @@ func TestClient_ChatCompletionStream_UsesExtendedRateLimitRetryBudget(t *testing
 	}
 	if attempts != 3 || received != 1 {
 		t.Fatalf("attempts=%d chunks=%d want 3 and 1", attempts, received)
+	}
+}
+
+func TestClient_ChatCompletionStream_RetriesInterruptedStreamBeforeEvents(t *testing.T) {
+	attempts := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		w.Header().Set("Content-Type", "text/event-stream")
+		if attempts == 1 {
+			return
+		}
+		_, _ = w.Write([]byte("data: {\"id\":\"test\",\"choices\":[{\"delta\":{\"content\":\"recovered\"}}]}\n\ndata: [DONE]\n\n"))
+	}))
+	defer server.Close()
+
+	client := NewClient("test-key", server.URL)
+	client.SetRetryConfig(RetryConfig{
+		MaxRetries:          1,
+		MaxRateLimitRetries: 1,
+		InitialInterval:     time.Millisecond,
+		MaxInterval:         time.Millisecond,
+		Multiplier:          1,
+	})
+	chunks, errs := client.ChatCompletionStream(context.Background(), ChatRequest{
+		Model: "test/model", Messages: []Message{{Role: "user", Content: "test"}},
+	})
+
+	var received int
+	var streamErr error
+	for chunks != nil || errs != nil {
+		select {
+		case _, ok := <-chunks:
+			if !ok {
+				chunks = nil
+				continue
+			}
+			received++
+		case err, ok := <-errs:
+			if !ok {
+				errs = nil
+				continue
+			}
+			streamErr = err
+		}
+	}
+	if streamErr != nil {
+		t.Fatalf("stream failed after safe retry: %v", streamErr)
+	}
+	if attempts != 2 || received != 1 {
+		t.Fatalf("attempts=%d chunks=%d, want 2 and 1", attempts, received)
+	}
+}
+
+func TestClient_ChatCompletionStream_DoesNotRetryAfterEmittingEvent(t *testing.T) {
+	attempts := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"id\":\"test\",\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n"))
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+	}))
+	defer server.Close()
+
+	client := NewClient("test-key", server.URL)
+	client.SetRetryConfig(RetryConfig{
+		MaxRetries:          3,
+		MaxRateLimitRetries: 3,
+		InitialInterval:     time.Millisecond,
+		MaxInterval:         time.Millisecond,
+		Multiplier:          1,
+	})
+	chunks, errs := client.ChatCompletionStream(context.Background(), ChatRequest{
+		Model: "test/model", Messages: []Message{{Role: "user", Content: "test"}},
+	})
+
+	var received int
+	var streamErr error
+	for chunks != nil || errs != nil {
+		select {
+		case _, ok := <-chunks:
+			if !ok {
+				chunks = nil
+				continue
+			}
+			received++
+		case err, ok := <-errs:
+			if !ok {
+				errs = nil
+				continue
+			}
+			streamErr = err
+		}
+	}
+	if streamErr == nil || !errors.Is(streamErr, io.ErrUnexpectedEOF) {
+		t.Fatalf("stream error = %v, want unexpected EOF", streamErr)
+	}
+	if attempts != 1 || received != 1 {
+		t.Fatalf("attempts=%d chunks=%d, want 1 and 1", attempts, received)
 	}
 }
 
