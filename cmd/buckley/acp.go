@@ -27,6 +27,7 @@ import (
 	"m31labs.dev/buckley/pkg/storage"
 	"m31labs.dev/buckley/pkg/tool"
 	"m31labs.dev/buckley/pkg/tool/builtin"
+	"m31labs.dev/buckley/pkg/types"
 )
 
 const defaultACPSystemPrompt = `You are Buckley, an AI development assistant with access to tools.
@@ -440,8 +441,13 @@ func getACPSessionState(
 	} else {
 		engine = e
 	}
+	if candidate, ok := registry.Get("spawn_subagent"); ok {
+		if subagents, ok := candidate.(*builtin.SubagentTool); ok {
+			subagents.SetEvaluator(newACPEvaluator(engine))
+		}
+	}
 
-	conv.AddSystemMessage(buildACPSystemPrompt(projectContext, workDir, skills, engine, ""))
+	conv.AddSystemMessage(buildACPSystemPrompt(projectContext, workDir, skills, engine, "", hyphaeProjectKnowledgeContext(cfg, workDir)))
 
 	state := &acpSessionState{
 		conv:       conv,
@@ -515,7 +521,7 @@ func attachACPMcpServers(ctx context.Context, registry *tool.Registry, declared 
 	return manager
 }
 
-func buildACPSystemPrompt(projectContext *projectcontext.ProjectContext, workDir string, skills *skill.Registry, engine *rules.Engine, agentProfile string) string {
+func buildACPSystemPrompt(projectContext *projectcontext.ProjectContext, workDir string, skills *skill.Registry, engine *rules.Engine, agentProfile, knowledgeContext string) string {
 	var evaluator *rules.EngineAdapter
 	if engine != nil {
 		evaluator = rules.NewEngineAdapter(engine)
@@ -535,6 +541,7 @@ func buildACPSystemPrompt(projectContext *projectcontext.ProjectContext, workDir
 		BasePrompt:        defaultACPSystemPrompt,
 		AgentProfile:      agentProfile,
 		ProjectContext:    projectRaw,
+		KnowledgeContext:  knowledgeContext,
 		WorkDir:           workDir,
 		RootDir:           workDir,
 		SkillsDescription: skillDescriptions,
@@ -903,11 +910,12 @@ func applyACPSetModelConfigOption(cfg *config.Config, mgr *model.Manager, sessio
 // whether any round has executed tools yet (the finalize-nudge gate), and
 // the last phase update sent (sendACPPhaseUpdate dedupes on it).
 type acpLoopState struct {
-	useTools        bool
-	toolTurnEnabled bool
-	allowedTools    []string
-	toolsExecuted   bool
-	lastPhase       string
+	useTools         bool
+	toolTurnEnabled  bool
+	allowedTools     []string
+	toolsExecuted    bool
+	lastPhase        string
+	codeModeRecovery *tool.CodeModeRecoveryState
 	// contextWindow is resolved once per prompt turn (the model does not
 	// change mid-turn) and paired with each round's model.Usage to report
 	// usage_update as "tokens used out of this context window" (N1).
@@ -939,15 +947,38 @@ func runACPLoop(
 	logf func(string, ...interface{}),
 	stream acp.StreamFunc,
 ) (string, error) {
+	return runACPLoopWithStepCap(ctx, cfg, mgr, conv, registry, skillState, engine, modelOverride, workDir, sessionID, agent, logf, stream, 0)
+}
+
+// runACPLoopWithStepCap is the internal one-shot variant that applies a
+// resolved persona's iteration ceiling. ACP sessions use the zero-value cap
+// and therefore retain their existing behavior.
+func runACPLoopWithStepCap(
+	ctx context.Context,
+	cfg *config.Config,
+	mgr *model.Manager,
+	conv *conversation.Conversation,
+	registry *tool.Registry,
+	skillState *skill.RuntimeState,
+	engine *rules.Engine,
+	modelOverride string,
+	workDir string,
+	sessionID string,
+	agent *acp.Agent,
+	logf func(string, ...interface{}),
+	stream acp.StreamFunc,
+	stepCap int,
+) (string, error) {
 	modelID := resolveACPExecutionModel(cfg, mgr, engine, modelOverride)
 	state := &acpLoopState{
-		useTools: acpModelCanUseTools(registry, mgr, modelID),
+		useTools:         acpModelCanUseTools(registry, mgr, modelID),
+		codeModeRecovery: &tool.CodeModeRecoveryState{},
 	}
 	if mgr != nil {
 		state.contextWindow, _ = mgr.GetContextLength(modelID)
 	}
 
-	ctrl, err := newACPLoopController(cfg, mgr, conv, registry, skillState, engine, modelID, workDir, sessionID, agent, logf, stream, state)
+	ctrl, err := newACPLoopController(cfg, mgr, conv, registry, skillState, engine, modelID, workDir, sessionID, agent, logf, stream, state, stepCap)
 	if err != nil {
 		return "", err
 	}
@@ -1047,6 +1078,7 @@ func newACPLoopController(
 	logf func(string, ...interface{}),
 	stream acp.StreamFunc,
 	state *acpLoopState,
+	stepCap int,
 ) (*agentloop.Controller, error) {
 	evaluator := newACPEvaluator(engine)
 
@@ -1086,7 +1118,7 @@ func newACPLoopController(
 			if ctx.Err() != nil {
 				return outcomes, ctx.Err()
 			}
-			outcomes = append(outcomes, dispatchACPToolCall(ctx, registry, stream, tc, i+1, len(calls), state, workDir, sessionID, agent, logf))
+			outcomes = append(outcomes, dispatchACPToolCall(ctx, registry, evaluator, stream, tc, i+1, len(calls), state, workDir, sessionID, agent, logf))
 		}
 		state.toolsExecuted = true
 		return outcomes, nil
@@ -1102,7 +1134,9 @@ func newACPLoopController(
 	})
 
 	return agentloop.NewController(agentloop.ControllerConfig{
-		Governor:      agentloop.New(agentloop.DefaultConfig()),
+		Governor:      newACPToolLoopGovernor(cfg),
+		StepCap:       stepCap,
+		Progress:      newACPProgressController(cfg),
 		BuildRequest:  buildRequest,
 		CallModel:     callModel,
 		DispatchTools: dispatch,
@@ -1115,6 +1149,34 @@ func newACPLoopController(
 			return window
 		},
 	})
+}
+
+func newACPToolLoopGovernor(cfg *config.Config) *agentloop.Governor {
+	governorConfig := agentloop.DefaultConfig()
+	if cfg != nil {
+		if limit := cfg.AgentController.EmergencyFuse.ModelRequests; limit > 0 {
+			governorConfig.MaxRounds = limit
+		}
+		if limit := cfg.AgentController.EmergencyFuse.ToolExecutions; limit > 0 {
+			governorConfig.MaxToolCalls = limit
+		}
+	}
+	return agentloop.New(governorConfig)
+}
+
+func newACPProgressController(cfg *config.Config) *agentloop.ProgressController {
+	if cfg == nil {
+		return nil
+	}
+	return agentloop.NewProgressController(
+		cfg.AgentController.Mode,
+		cfg.AgentController.PolicyVersion,
+		agentloop.Fuses{
+			ModelRequests:  cfg.AgentController.EmergencyFuse.ModelRequests,
+			ToolExecutions: cfg.AgentController.EmergencyFuse.ToolExecutions,
+			WallTime:       cfg.AgentController.EmergencyFuse.WallTime,
+		},
+	)
 }
 
 // streamACPTurn drains a streaming chat completion for one runACPLoop
@@ -1309,7 +1371,7 @@ func shouldNudgeACPToolUse(useTools, toolsEnabled bool, nudgeCount int, text str
 // notification. It returns the model-facing text as an agentloop.ToolOutcome
 // -- the Controller appends it to the conversation via the History sink, so
 // this function no longer writes to the transcript itself.
-func dispatchACPToolCall(ctx context.Context, registry *tool.Registry, stream acp.StreamFunc, tc model.ToolCall, index, total int, state *acpLoopState, workDir string, sessionID string, agent *acp.Agent, logf func(string, ...interface{})) agentloop.ToolOutcome {
+func dispatchACPToolCall(ctx context.Context, registry *tool.Registry, evaluator types.RuleEvaluator, stream acp.StreamFunc, tc model.ToolCall, index, total int, state *acpLoopState, workDir string, sessionID string, agent *acp.Agent, logf func(string, ...interface{})) agentloop.ToolOutcome {
 	params, err := parseACPToolParams(tc.Function.Arguments)
 	if err != nil {
 		rawParams := map[string]any{"raw": tc.Function.Arguments}
@@ -1345,7 +1407,9 @@ func dispatchACPToolCall(ctx context.Context, registry *tool.Registry, stream ac
 
 	result, execErr := executeACPToolCall(ctx, registry, tc.Function.Name, params, tc.ID)
 	toolText := formatACPToolResult(result, execErr)
+	toolText = tool.AppendCodeModeRecoveryGuidance(toolText, evaluator, registry, state.allowedTools, tc.Function.Name, result, execErr, state.codeModeRecovery)
 	displayText := formatACPToolDisplay(result, execErr)
+	yield := tool.ResultYieldForTool(tc.Function.Name, result, execErr)
 
 	status := acp.ToolCallStatusCompleted
 	if execErr != nil || (result != nil && !result.Success) {
@@ -1353,8 +1417,11 @@ func dispatchACPToolCall(ctx context.Context, registry *tool.Registry, stream ac
 	}
 	sendACPToolCallUpdate(stream, tc, params, status, displayText, toolCallRawOutput(result, execErr), result, workDir)
 	return agentloop.ToolOutcome{
-		Content: toolText,
-		Success: execErr == nil && result != nil && result.Success,
+		Content:       toolText,
+		Success:       execErr == nil && result != nil && result.Success,
+		YieldObserved: yield.Observed,
+		YieldCount:    yield.Count,
+		YieldUnit:     yield.Unit,
 	}
 }
 

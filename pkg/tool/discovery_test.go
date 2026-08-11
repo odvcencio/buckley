@@ -49,6 +49,18 @@ func TestDynamicDiscovery_DefaultCatalogStaysUnderSchemaBudget(t *testing.T) {
 	t.Logf("default dynamic tool schema bytes: %d", len(visible))
 }
 
+func TestDynamicDiscovery_ExposesExecProgramWhenOptInToolIsRegistered(t *testing.T) {
+	registry := NewEmptyRegistry()
+	registry.EnableDynamicDiscovery(nil)
+	registry.Register(&governedTestTool{name: "exec_program"})
+
+	visible := registry.ToOpenAIFunctionsGoverned(nil, "interactive", "coding", nil, 0)
+	names := functionNames(visible)
+	if strings.Join(names, ",") != "exec_program,discover_tools" {
+		t.Fatalf("visible code-mode tools = %v", names)
+	}
+}
+
 func TestToModelOutput_OmitsHarnessOnlyFields(t *testing.T) {
 	result := &builtin.Result{
 		Success:       true,

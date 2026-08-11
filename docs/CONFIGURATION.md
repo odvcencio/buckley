@@ -108,6 +108,68 @@ models:
 | `utility.compaction` | `qwen/qwen3.6-flash` |
 | `utility.todo_plan` | `qwen/qwen3.6-flash` |
 
+### adaptive_protocol
+
+Adaptive protocol compilation is opt-in. It consumes empirical, versioned
+model facts and produces an auditable receipt. It never uses a provider or
+model name as a privilege rule.
+
+```yaml
+adaptive_protocol:
+  # legacy leaves the current runtime unchanged.
+  # shadow records a receipt but does not apply it.
+  # dynamic applies only a pinned profile or immutable SQLite profile.
+  mode: shadow # legacy | shadow | dynamic
+  policy_version: adaptive-protocol-v1
+  auto_code_mode: false
+  max_fanout: 4
+
+  profiles:
+    example/model:
+      version: eval-2026-08-11
+      class: frontier # weak | balanced | frontier
+      sample_size: 120
+      confidence: 0.95
+      measured_at: 2026-08-11T00:00:00Z
+      tool_calls: true
+      native_json_schema: true
+      parallel_tool_calls: true
+      continuation: true
+      code_mode: true
+      context_window_tokens: 131072
+      safe_visible_tool_count: 8
+      tool_reliability: 0.95
+      structured_output_reliability: 0.96
+      parallel_call_reliability: 0.93
+      continuation_reliability: 0.94
+```
+
+The default configuration does not apply a protocol. Use `shadow` to inspect
+receipts first. Dynamic mode narrows tools and caps work from profile facts.
+Automatic read-only code mode still requires a policy decision and a working
+bubblewrap sandbox. Set `BUCKLEY_ADAPTIVE_PROTOCOL_MODE` to override `mode`.
+
+### buckbot
+
+Buckbot is the general-purpose review runtime used by `buckley buckbot`,
+`buckley review`, and `buckley review-pr`.
+
+```yaml
+buckbot:
+  model: openai/gpt-5.6-luna-pro
+  critic_model: qwen/qwen3.8-max
+  reasoning: auto
+  per_review_budget_usd: 0 # 0 means no automatic per-review dollar ceiling
+  monthly_budget_usd: 0    # 0 means no configured monthly dollar ceiling
+  max_review_iterations: 0 # adaptive
+  max_validation_attempts: 2
+```
+
+Cost handling is completion-first by default, regardless of the chosen model.
+Set `per_review_budget_usd` to a positive amount only when a project
+deliberately needs a cap. A caller can set `--budget <USD>` for one capped
+review or `--no-budget` to bypass an existing configured per-review cap.
+
 ### providers
 
 API provider configuration.
@@ -302,7 +364,20 @@ memory:
   retrieval_enabled: true
   retrieval_limit: 5
   retrieval_max_tokens: 1200
+
+  # Discover a locally installed Hyphae space whose name matches the workspace.
+  # Set this only when the workspace and space use different names.
+  hyphae_recall: true
+  hyphae_space: ""
 ```
+
+When `hyphae_recall` is enabled, Buckley checks locally installed spaces with
+`hypha spaces list` when a TUI, one-shot, or ACP session begins. A unique space
+whose final URI segment matches the active workspace directory is made available
+to the agent as durable project knowledge. `hyphae_space` pins a specific
+installed space when that name-based match is unsuitable. Missing Hyphae or no
+matching space is silently treated as no extra context; Buckley never invents a
+space or writes to one directly.
 
 ### cost_management
 
@@ -353,11 +428,10 @@ git_clone:
 
 HTTP/WebSocket server for desktop UI and remote access.
 
-`enable_browser: true` serves the web UI from `--assets <dir>` on disk when
-set, or from the embedded `pkg/ipc/ui.go` filesystem otherwise. The embed is
-gated behind the `webui` build tag (`make build-webui`, ~1.1MB); the default
-`buckley` binary omits it and shows a "built without web UI" fallback page
-when no `--assets` dir is configured.
+`enable_browser: true` serves the embedded GoSX Mission Control UI. Set
+`--assets <dir>` to explicitly override it with an external static directory;
+the default `buckley` binary does not require a browser build tag or a separate
+JavaScript toolchain.
 
 ```yaml
 ipc:

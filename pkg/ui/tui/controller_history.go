@@ -60,6 +60,10 @@ func renderConversationHistoryWith(addMessage func(content, source string), mess
 			startProgress()
 			progress.WriteString("\n  ")
 			progress.WriteString(storedToolResultProgressSummary(msg.Name, content))
+			if guidance := storedCodeModeRecovery(content); guidance != "" {
+				progress.WriteString("\n\n")
+				progress.WriteString(codeModeRecoveryProgress(guidance))
+			}
 		default:
 			flushProgress()
 			if strings.TrimSpace(content) != "" {
@@ -68,6 +72,15 @@ func renderConversationHistoryWith(addMessage func(content, source string), mess
 		}
 	}
 	flushProgress()
+}
+
+func storedCodeModeRecovery(content string) string {
+	const marker = "CODE MODE RECOVERY:"
+	index := strings.Index(content, marker)
+	if index < 0 {
+		return ""
+	}
+	return strings.TrimSpace(content[index:])
 }
 
 func storedToolResultProgressSummary(name, content string) string {

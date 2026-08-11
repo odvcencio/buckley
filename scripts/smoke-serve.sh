@@ -66,7 +66,6 @@ serve_token_mode() {
   "$buckley" serve \
     --bind "127.0.0.1:${port}" \
     --browser \
-    --assets "$ROOT/pkg/ipc/ui" \
     --require-token \
     --generate-token \
     --token-file "$token_file" \
@@ -127,7 +126,6 @@ serve_basic_auth_mode() {
   "$buckley" serve \
     --bind "0.0.0.0:${port}" \
     --browser \
-    --assets "$ROOT/pkg/ipc/ui" \
     --basic-auth-user buckley \
     --basic-auth-pass "buckley-smoke" \
     >"$log_file" 2>&1 &

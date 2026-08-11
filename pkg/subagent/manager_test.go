@@ -155,6 +155,48 @@ func TestManager_PublishesRedactedOutput(t *testing.T) {
 	}
 }
 
+func TestManager_PublishesExecutionContractTelemetry(t *testing.T) {
+	hub := telemetry.NewHub()
+	defer hub.Close()
+	events, unsubscribe := hub.Subscribe()
+	defer unsubscribe()
+	manager := NewManager(runnerFunc(func(_ context.Context, _ Request, _ func(int)) (string, error) {
+		return "done", nil
+	}), 1)
+	manager.SetTelemetry(hub, "parent")
+	t.Cleanup(func() { _ = manager.Close() })
+	spawned, err := manager.SpawnWithOptions(SpawnOptions{
+		Agent: "worker", Task: "inspect", Model: "example/model", Tier: persona.TierExecute, Effort: "medium", StepCap: 7,
+		AllowedTools: []string{"read_file", "find_files"}, WorkspaceClaims: []string{"pkg/subagent"}, Isolation: "worktree", OutputSchema: "buckley.artifact/v1", ApprovalPosture: "safe",
+	})
+	if err != nil {
+		t.Fatalf("SpawnWithOptions: %v", err)
+	}
+	if _, err := manager.Wait(context.Background(), spawned.ID); err != nil {
+		t.Fatalf("Wait: %v", err)
+	}
+	for {
+		select {
+		case event := <-events:
+			if event.Type != telemetry.EventSubagentCompleted {
+				continue
+			}
+			for key, want := range map[string]any{"model": "example/model", "tier": "execute", "effort": "medium", "step_cap": 7, "allowed_tool_count": 2, "isolation": "worktree", "output_schema": "buckley.artifact/v1", "approval_posture": "safe"} {
+				if got := event.Data[key]; got != want {
+					t.Fatalf("telemetry %s = %#v, want %#v: %+v", key, got, want, event.Data)
+				}
+			}
+			claims, ok := event.Data["workspace_claims"].([]string)
+			if !ok || len(claims) != 1 || claims[0] != "pkg/subagent" {
+				t.Fatalf("workspace claims = %#v", event.Data["workspace_claims"])
+			}
+			return
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for subagent completion telemetry")
+		}
+	}
+}
+
 // TestManager_SpawnWithOptionsPersonaPinnedResolvesModel covers item 3's
 // first scenario: a persona-pinned spawn resolves the pinned model, and
 // threads it through to the Runner's Request and the returned Snapshot.

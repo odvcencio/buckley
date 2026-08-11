@@ -38,8 +38,20 @@ type toolLoopState struct {
 	// continuation decision (decision 0001), behind the
 	// models.provider_continuation flag. continuation is nil unless the
 	// session is eligible and the flag is on.
-	continuation    *model.ContinuationCoordinator
-	useContinuation bool
+	continuation     *model.ContinuationCoordinator
+	useContinuation  bool
+	codeModeRecovery *tool.CodeModeRecoveryState
+}
+
+// toolLoopResult keeps provider-owned completion metadata separate from a
+// Buckley-owned harness stop. Conflating these two domains produced the
+// misleading provider finish_reason="loop_guard" notice in the transcript.
+type toolLoopResult struct {
+	Text                 string
+	Usage                *model.Usage
+	ProviderFinishReason string
+	HarnessStopReason    string
+	Streamed             bool
 }
 
 type toolLoopProgress struct {
@@ -76,9 +88,9 @@ type toolLoopProgress struct {
 // (toolLoopExecuteOne), and conversation persistence (recordToolLoopCalls,
 // AddToolResponseMessage) -- stay exactly as they were, wired in as
 // Controller hooks. See newToolLoopController.
-func (c *Controller) runToolLoop(ctx context.Context, sess *SessionState, modelID string) (string, *model.Usage, string, bool, error) {
+func (c *Controller) runToolLoop(ctx context.Context, sess *SessionState, modelID string) (toolLoopResult, error) {
 	if err := c.validateToolLoopInputs(sess); err != nil {
-		return "", nil, "", false, err
+		return toolLoopResult{}, err
 	}
 
 	state := c.newToolLoopState(sess, modelID)
@@ -86,7 +98,7 @@ func (c *Controller) runToolLoop(ctx context.Context, sess *SessionState, modelI
 
 	ctrl, err := c.newToolLoopController(sess, modelID, allowedTools, &state)
 	if err != nil {
-		return "", nil, "", false, err
+		return toolLoopResult{}, err
 	}
 
 	// accumulatedUsage sums every Controller.Run attempt's internally
@@ -99,7 +111,7 @@ func (c *Controller) runToolLoop(ctx context.Context, sess *SessionState, modelI
 	var accumulatedUsage model.Usage
 	for {
 		if ctx.Err() != nil {
-			return "", nil, "", false, ctx.Err()
+			return toolLoopResult{}, ctx.Err()
 		}
 		result, err := ctrl.Run(ctx)
 		if result != nil {
@@ -116,7 +128,7 @@ func (c *Controller) runToolLoop(ctx context.Context, sess *SessionState, modelI
 			if retryErr := c.handleToolLoopModelError(err, &state); retryErr == nil {
 				continue
 			}
-			return "", nil, "", false, err
+			return toolLoopResult{}, err
 		}
 
 		switch result.FinishReason {
@@ -128,7 +140,7 @@ func (c *Controller) runToolLoop(ctx context.Context, sess *SessionState, modelI
 			// a hard error (model.NoResponseChoicesError) before it ever
 			// reaches Controller, matching the pre-engine behavior where an
 			// empty response failed the turn; this branch is defensive.
-			return "", nil, "", false, fmt.Errorf("model returned no response choices")
+			return toolLoopResult{}, fmt.Errorf("model returned no response choices")
 		}
 		// result.FinishReason == "" here (Controller's own abstraction for a
 		// normal completion); the provider's raw finish_reason -- what
@@ -153,8 +165,9 @@ func (c *Controller) newToolLoopState(sess *SessionState, modelID string) toolLo
 		useTools: !c.consumeDisableToolsNextTurn(sess) &&
 			sess.ToolRegistry != nil &&
 			c.modelMgr.SupportsTools(modelID),
-		governor:     newInteractiveToolLoopGovernor(),
-		contextScale: 1,
+		governor:         newInteractiveToolLoopGovernor(c.cfg),
+		contextScale:     1,
+		codeModeRecovery: &tool.CodeModeRecoveryState{},
 	}
 }
 
@@ -257,7 +270,14 @@ func (c *Controller) newToolLoopController(sess *SessionState, modelID string, a
 			}
 			modelResult, result, execErr := c.toolLoopExecuteOne(ctx, sess, tc, i+1, len(calls), allowedTools, state)
 			success := execErr == nil && result != nil && result.Success
-			outcomes = append(outcomes, agentloop.ToolOutcome{Content: modelResult, Success: success})
+			yield := tool.ResultYieldForTool(tc.Function.Name, result, execErr)
+			outcomes = append(outcomes, agentloop.ToolOutcome{
+				Content:       modelResult,
+				Success:       success,
+				YieldObserved: yield.Observed,
+				YieldCount:    yield.Count,
+				YieldUnit:     yield.Unit,
+			})
 		}
 		return outcomes, nil
 	})
@@ -274,6 +294,7 @@ func (c *Controller) newToolLoopController(sess *SessionState, modelID string, a
 
 	return agentloop.NewController(agentloop.ControllerConfig{
 		Governor:      state.governor,
+		Progress:      newInteractiveProgressController(c.cfg),
 		BuildRequest:  buildRequest,
 		CallModel:     callModel,
 		DispatchTools: dispatch,
@@ -619,11 +640,11 @@ func firstToolLoopChoice(req model.ChatRequest, resp *model.ChatResponse) (model
 // continuation turn, an empty response, or the reasoning-channel fallback
 // never streamed, so the caller still renders those with a discrete
 // AddMessage.
-func (c *Controller) finishToolLoopResponse(sess *SessionState, msg model.Message, totalUsage model.Usage, finishReason string, state *toolLoopState) (string, *model.Usage, string, bool, error) {
+func (c *Controller) finishToolLoopResponse(sess *SessionState, msg model.Message, totalUsage model.Usage, providerFinishReason string, state *toolLoopState) (toolLoopResult, error) {
 	c.app.SetStatus("Finalizing response")
 	text, err := model.ExtractTextContent(msg.Content)
 	if err != nil {
-		return "", nil, "", false, err
+		return toolLoopResult{}, err
 	}
 	if text == "" && strings.TrimSpace(msg.Reasoning) != "" {
 		text = msg.Reasoning
@@ -631,7 +652,12 @@ func (c *Controller) finishToolLoopResponse(sess *SessionState, msg model.Messag
 	sess.Conversation.AddAssistantMessageWithReasoningDetails(text, msg.Reasoning, msg.ReasoningDetails)
 	c.saveLatestConversationMessage(sess)
 	streamed := state != nil && state.progress.roundRendered && text != "" && state.progress.roundRenderedText == text
-	return text, &totalUsage, finishReason, streamed, nil
+	return toolLoopResult{
+		Text:                 text,
+		Usage:                &totalUsage,
+		ProviderFinishReason: providerFinishReason,
+		Streamed:             streamed,
+	}, nil
 }
 
 func normalizeToolLoopCalls(registry *tool.Registry, calls []model.ToolCall, allowedTools []string) []model.ToolCall {
@@ -728,6 +754,14 @@ func (c *Controller) toolLoopExecuteOne(ctx context.Context, sess *SessionState,
 	c.app.StopProcessStatus()
 	c.appendToolResultProgress(state, tc.Function.Name, result, execErr)
 	modelResult := formatToolResultForModel(result, execErr)
+	if guidance := tool.CodeModeRecoveryGuidance(c.evaluator, sess.ToolRegistry, allowedTools, tc.Function.Name, result, execErr, state.codeModeRecovery); guidance != "" {
+		if strings.TrimSpace(modelResult) == "" {
+			modelResult = guidance
+		} else {
+			modelResult += "\n\n" + guidance
+		}
+		c.appendCodeModeRecoveryProgress(state, guidance)
+	}
 	return modelResult, result, execErr
 }
 
@@ -783,6 +817,26 @@ func (c *Controller) appendToolResultProgress(state *toolLoopState, name string,
 		state.progress.started = true
 	}
 	c.app.AppendToLastMessage("\n\n" + toolResultProgressSummary(name, result, execErr))
+}
+
+// appendCodeModeRecoveryProgress makes the governed recovery decision visible
+// at the exact failed/low-yield operation, rather than hiding it only in the
+// model-facing tool response. The same text is persisted to tool history by
+// toolLoopExecuteOne for replay and resumed-session rendering.
+func (c *Controller) appendCodeModeRecoveryProgress(state *toolLoopState, guidance string) {
+	if c == nil || c.app == nil || state == nil {
+		return
+	}
+	c.app.AppendToLastMessage("\n\n" + codeModeRecoveryProgress(guidance))
+}
+
+func codeModeRecoveryProgress(guidance string) string {
+	guidance = strings.TrimSpace(guidance)
+	guidance = strings.TrimSpace(strings.TrimPrefix(guidance, "CODE MODE RECOVERY:"))
+	if guidance == "" {
+		return "⚡ Code mode recommended"
+	}
+	return "⚡ Code mode recommended\n\n" + compactMultilineText(guidance, 640)
 }
 
 func toolCallProgressBlock(tc model.ToolCall) string {
@@ -873,6 +927,9 @@ func toolResultProgressSummary(name string, result *builtin.Result, execErr erro
 	if display := strings.TrimSpace(toolDisplayMessage(name, result, nil)); display != "" {
 		return "✓ " + name + " — " + compactStatusText(display, 200)
 	}
+	if yield := tool.ResultYieldForTool(name, result, nil); yield.Observed {
+		return "✓ " + name + " — " + yield.Summary()
+	}
 	return "✓ " + name + " — completed"
 }
 
@@ -905,6 +962,8 @@ func modelFinishReasonNotice(reason string) string {
 		return "Response stopped because the provider reported finish_reason=" + trimmed + ", which usually means the output token limit was reached. Ask Buckley to continue, reduce context, or raise the chat max_tokens setting."
 	case "content_filter", "safety":
 		return "Response stopped because the provider reported finish_reason=" + trimmed + "."
+	case "loop_guard":
+		return "Buckley's harness stopped further tool execution. This was not a provider finish reason."
 	default:
 		return fmt.Sprintf("Response stopped with provider finish_reason=%q.", trimmed)
 	}

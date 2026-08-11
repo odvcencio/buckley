@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 
@@ -11,22 +12,67 @@ import (
 	"m31labs.dev/buckley/pkg/oneshot/commands"
 )
 
-func TestRunBuckbotCommandRequiresOnDemandPosting(t *testing.T) {
-	err := runBuckbotCommand([]string{"--bind", "0.0.0.0:8086"})
+func TestRunBuckbotCommandRoutesGeneralReviews(t *testing.T) {
+	originalReview := runBuckbotReviewFn
+	originalPR := runBuckbotReviewPRFn
+	t.Cleanup(func() {
+		runBuckbotReviewFn = originalReview
+		runBuckbotReviewPRFn = originalPR
+	})
+
+	type call struct {
+		kind string
+		args []string
+	}
+	var calls []call
+	runBuckbotReviewFn = func(args []string) error {
+		calls = append(calls, call{kind: "review", args: append([]string(nil), args...)})
+		return nil
+	}
+	runBuckbotReviewPRFn = func(args []string) error {
+		calls = append(calls, call{kind: "pr", args: append([]string(nil), args...)})
+		return nil
+	}
+
+	tests := []struct {
+		name string
+		args []string
+		want call
+	}{
+		{name: "default local review", want: call{kind: "review"}},
+		{name: "named local review", args: []string{"review", "--scope", "branch"}, want: call{kind: "review", args: []string{"--scope", "branch"}}},
+		{name: "direct review flags", args: []string{"--project", "--no-interactive"}, want: call{kind: "review", args: []string{"--project", "--no-interactive"}}},
+		{name: "repository review", args: []string{"repo", "--no-interactive"}, want: call{kind: "review", args: []string{"--project", "--no-interactive"}}},
+		{name: "project alias", args: []string{"project"}, want: call{kind: "review", args: []string{"--project"}}},
+		{name: "pull request review", args: []string{"pr", "123", "--post"}, want: call{kind: "pr", args: []string{"123", "--post"}}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			calls = nil
+			if err := runBuckbotCommand(tt.args); err != nil {
+				t.Fatalf("runBuckbotCommand(%v) error = %v", tt.args, err)
+			}
+			if len(calls) != 1 {
+				t.Fatalf("calls = %#v, want one", calls)
+			}
+			if calls[0].kind != tt.want.kind || !slices.Equal(calls[0].args, tt.want.args) {
+				t.Fatalf("call = %#v, want %#v", calls[0], tt.want)
+			}
+		})
+	}
+}
+
+func TestRunBuckbotCommandRequiresPRReference(t *testing.T) {
+	err := runBuckbotCommand([]string{"pr"})
 	if err == nil {
-		t.Fatal("runBuckbotCommand() unexpectedly enabled automatic posting")
+		t.Fatal("runBuckbotCommand() error = nil, want usage error")
 	}
 	if code := exitCodeForError(err); code != 2 {
 		t.Fatalf("exit code = %d, want 2", code)
 	}
-	for _, want := range []string{
-		"automatic Buckbot webhook posting is retired",
-		"buckley review-pr <PR> -post",
-		"on-demand GitHub review",
-	} {
-		if !strings.Contains(err.Error(), want) {
-			t.Fatalf("migration error = %q, want %q", err, want)
-		}
+	if !strings.Contains(err.Error(), "buckley buckbot pr <pr-number-or-url>") {
+		t.Fatalf("error = %q, want Buckbot PR usage", err)
 	}
 }
 

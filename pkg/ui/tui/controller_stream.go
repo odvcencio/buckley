@@ -15,7 +15,7 @@ func (c *Controller) streamResponse(ctx context.Context, prompt string, sess *Se
 
 	turnBoundary := c.beginTurnUndo(sess)
 	modelID := c.prepareStreamRequest(prompt, sess)
-	fullResponse, usage, finishReason, streamed, err := c.runToolLoop(ctx, sess, modelID)
+	result, err := c.runToolLoop(ctx, sess, modelID)
 	c.app.RemoveThinkingIndicator()
 	c.finishTurnUndo(sess, turnBoundary)
 	if c.handleStreamError(ctx, err) {
@@ -25,12 +25,16 @@ func (c *Controller) streamResponse(ctx context.Context, prompt string, sess *Se
 		return
 	}
 
-	c.renderStreamResponse(fullResponse, finishReason, streamed)
-	c.updateStreamUsage(modelID, fullResponse, usage)
+	c.renderStreamResponse(result)
+	c.updateStreamUsage(modelID, result.Text, result.Usage)
 	if c.processMessageQueue(sess) {
 		return
 	}
-	c.app.SetStatus(readyStatusForFinishReason(finishReason))
+	if result.HarnessStopReason != "" {
+		c.app.SetStatus("Ready - harness stopped tools")
+	} else {
+		c.app.SetStatus(readyStatusForFinishReason(result.ProviderFinishReason))
+	}
 }
 
 func (c *Controller) finishStreamLifecycle(sess *SessionState) {
@@ -74,18 +78,29 @@ func (c *Controller) handleStreamError(ctx context.Context, err error) bool {
 // assistant answer itself is rendered here only when it was not already
 // streamed live into the transcript (continuation turns, and the
 // reasoning-channel fallback, never stream) -- streamed is true exactly
-// when the transcript already shows fullResponse verbatim, so skipping the
+// when the transcript already shows result.Text verbatim, so skipping the
 // AddMessage call here is what keeps streaming from double-rendering the
 // final answer.
-func (c *Controller) renderStreamResponse(fullResponse, finishReason string, streamed bool) {
-	if fullResponse == "" {
+func (c *Controller) renderStreamResponse(result toolLoopResult) {
+	if result.Text == "" {
 		c.app.AddMessage("(empty response from model)", "system")
-	} else if !streamed {
-		c.app.AddMessage(fullResponse, "assistant")
+	} else if !result.Streamed {
+		c.app.AddMessage(result.Text, "assistant")
 	}
-	if notice := modelFinishReasonNotice(finishReason); notice != "" {
+	if notice := harnessStopReasonNotice(result.HarnessStopReason); notice != "" {
 		c.app.AddMessage(notice, "system")
 	}
+	if notice := modelFinishReasonNotice(result.ProviderFinishReason); notice != "" {
+		c.app.AddMessage(notice, "system")
+	}
+}
+
+func harnessStopReasonNotice(reason string) string {
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		return ""
+	}
+	return "Buckley's harness stopped further tool execution because " + strings.TrimSuffix(reason, ".") + ". This was a Buckley harness decision, not a provider finish reason; the response was synthesized from evidence already gathered."
 }
 
 func (c *Controller) updateStreamUsage(modelID, fullResponse string, usage *model.Usage) {

@@ -11,7 +11,7 @@ configure, run, and troubleshoot Buckley.
 | [Running Goals](goals.md) | Durable long-horizon work, budgets, reports |
 | [Code Mode](code-mode.md) | The sandboxed code-execution surface |
 | [Troubleshooting](troubleshooting.md) | Symptoms and fixes |
-| [Mission Control](MISSION_CONTROL.md) | The web interface |
+| [Mission Control](MISSION_CONTROL.md) | GoSX browser interface |
 | [Editor Integration](ACP.md) | ACP clients (Zed, JetBrains, Neovim) |
 
 ## Architecture, concepts, and decisions

@@ -109,3 +109,43 @@ func TestBrowserUIDoesNotShadowAPI(t *testing.T) {
 		t.Fatalf("expected HTML response for /")
 	}
 }
+
+func TestBrowserUIDefaultsToGoSX(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, err := storage.New(filepath.Join(tmpDir, "buckley.db"))
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	server := NewServer(Config{
+		BindAddress:    "127.0.0.1:0",
+		EnableBrowser:  true,
+		AllowedOrigins: []string{"*"},
+		RequireToken:   true,
+		AuthToken:      "unit-token",
+	}, store, nil, nil, nil, nil, nil, nil)
+
+	router := chi.NewRouter()
+	router.Use(server.corsMiddleware)
+	router.Use(server.securityHeadersMiddleware)
+	router.Use(server.sessionMiddleware)
+	router.Use(server.basicAuthMiddleware)
+	server.mountBrowserUI(router)
+
+	req := httptest.NewRequest(http.MethodGet, "/?token=unit-token", nil)
+	resp := httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("GoSX UI status=%d body=%q", resp.Code, resp.Body.String())
+	}
+	if !strings.Contains(resp.Body.String(), "Mission Control") || strings.Contains(resp.Body.String(), "index.js") {
+		t.Fatalf("expected GoSX Mission Control document, got %q", resp.Body.String())
+	}
+
+	assetReq := httptest.NewRequest(http.MethodGet, "/assets/mission-control.css", nil)
+	assetResp := httptest.NewRecorder()
+	router.ServeHTTP(assetResp, assetReq)
+	if assetResp.Code != http.StatusOK || !strings.Contains(assetResp.Body.String(), "--accent") {
+		t.Fatalf("GoSX CSS status=%d body=%q", assetResp.Code, assetResp.Body.String())
+	}
+}

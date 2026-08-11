@@ -33,6 +33,7 @@ type reviewCommandOptions struct {
 	outputFile      string
 	interactive     bool
 	budgetUSD       float64
+	noBudget        bool
 	maxTurns        int
 	maxDiff         int
 	maxRetries      int
@@ -99,13 +100,20 @@ func parseReviewCommandOptions(args []string) (reviewCommandOptions, error) {
 	outputFile := fs.String("output", "", "write review to file instead of stdout")
 	interactive := fs.Bool("interactive", true, "show interactive menu to fix findings")
 	noInteractive := fs.Bool("no-interactive", false, "disable interactive mode")
-	budgetUSD := fs.Float64("budget", 0, "maximum model spend in USD (0 = Buckbot default)")
+	budgetUSD := fs.Float64("budget", 0, "maximum model spend in USD (0 = configured policy; defaults to uncapped)")
+	noBudget := fs.Bool("no-budget", false, "ignore a configured review cost cap for this run")
 	maxTurns := fs.Int("max-turns", 0, "hard model turn limit per review pass (0 = adaptive)")
 	maxDiff := fs.Int("max-diff-bytes", 0, "maximum prioritized diff bytes (0 = Buckbot default)")
 	maxRetries := fs.Int("max-validation-attempts", 0, "maximum schema-validation attempts (0 = Buckbot default)")
 
 	if err := fs.Parse(args); err != nil {
 		return reviewCommandOptions{}, err
+	}
+	if *budgetUSD < 0 {
+		return reviewCommandOptions{}, fmt.Errorf("--budget must be zero or greater")
+	}
+	if *noBudget && *budgetUSD > 0 {
+		return reviewCommandOptions{}, fmt.Errorf("--no-budget cannot be combined with --budget")
 	}
 
 	opts := reviewCommandOptions{
@@ -122,6 +130,7 @@ func parseReviewCommandOptions(args []string) (reviewCommandOptions, error) {
 		outputFile:      *outputFile,
 		interactive:     *interactive,
 		budgetUSD:       *budgetUSD,
+		noBudget:        *noBudget,
 		maxTurns:        *maxTurns,
 		maxDiff:         *maxDiff,
 		maxRetries:      *maxRetries,
@@ -176,10 +185,11 @@ func runReviewCommand(args []string) error {
 	}
 
 	policy := runtime.policy.withOverrides(automatedReviewOptions{
-		maxIterations: opts.maxTurns,
-		maxRetries:    opts.maxRetries,
-		maxDiffBytes:  opts.maxDiff,
-		maxCostUSD:    opts.budgetUSD,
+		maxIterations:   opts.maxTurns,
+		maxRetries:      opts.maxRetries,
+		maxDiffBytes:    opts.maxDiff,
+		maxCostUSD:      opts.budgetUSD,
+		clearCostBudget: opts.noBudget,
 	})
 	result, reviewErr := runReviewWithPolicy(ctx, opts, runtime.framework, policy)
 

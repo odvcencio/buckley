@@ -83,15 +83,15 @@ func TestRunToolLoopPreservesPreambleAcrossToolCallAndWireHistory(t *testing.T) 
 
 	ctrl := &Controller{app: app, cfg: cfg, modelMgr: mgr, workDir: t.TempDir()}
 
-	text, _, finishReason, _, err := ctrl.runToolLoop(context.Background(), sess, "gpt-4o")
+	result, err := ctrl.runToolLoop(context.Background(), sess, "gpt-4o")
 	if err != nil {
 		t.Fatalf("runToolLoop error: %v", err)
 	}
-	if finishReason != "stop" {
-		t.Fatalf("finishReason = %q, want stop", finishReason)
+	if result.ProviderFinishReason != "stop" {
+		t.Fatalf("finishReason = %q, want stop", result.ProviderFinishReason)
 	}
-	if text != "Done: 42 files." {
-		t.Fatalf("final text = %q, want %q", text, "Done: 42 files.")
+	if result.Text != "Done: 42 files." {
+		t.Fatalf("final text = %q, want %q", result.Text, "Done: 42 files.")
 	}
 
 	// Persisted conversation: user, assistant(preamble+tool_call), tool, assistant(final).

@@ -3,7 +3,7 @@ proto:
 	@echo "Generating protobuf files..."
 	cd pkg/acp/proto && go generate
 	cd pkg/ipc/proto && go generate
-	cd web && ./node_modules/.bin/buf generate
+	@echo "No browser protobuf generation is required; Mission Control is GoSX server-rendered."
 
 .PHONY: proto-install
 proto-install:
@@ -12,21 +12,20 @@ proto-install:
 	go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
 	go install connectrpc.com/connect/cmd/protoc-gen-connect-go@latest
 
-# Web UI targets
+# GoSX Mission Control targets
 .PHONY: web
 web:
-	@echo "Building web UI..."
-	cd web && bun install && bun run build
+	@echo "Checking GoSX Mission Control UI..."
+	go test ./pkg/ipc/gosxui
 
 .PHONY: web-dev
 web-dev:
-	@echo "Starting web dev server..."
-	cd web && bun run dev
+	@echo "GoSX Mission Control is served by the Buckley daemon."
+	@echo "Run: go run ./cmd/buckley serve --browser"
 
 .PHONY: web-install
 web-install:
-	@echo "Installing web dependencies..."
-	cd web && bun install
+	@echo "No browser package installation is required; GoSX is a Go dependency."
 
 # Combined build
 .PHONY: build-cli
@@ -35,7 +34,7 @@ build-cli:
 	CGO_ENABLED=0 go build -ldflags="-s -w" -o buckley ./cmd/buckley
 
 .PHONY: build
-build: web build-cli
+build: build-cli
 
 # Kubernetes batch execution (pkg/orchestrator/batch_coordinator.go) is gated
 # behind the batch_k8s build tag so the default binary does not carry the
@@ -45,14 +44,10 @@ build-batch:
 	@echo "Building buckley (with Kubernetes batch support)..."
 	CGO_ENABLED=0 go build -tags batch_k8s -ldflags="-s -w" -o buckley ./cmd/buckley
 
-# The embedded web UI (pkg/ipc/ui.go, ~1.1MB) is gated behind the webui build
-# tag so the default binary omits it. `buckley serve --browser --assets
-# <dir>` still works without this tag by serving assets from disk; use this
-# target when you need the UI embedded as a fallback with no assets dir.
-.PHONY: build-webui
-build-webui:
-	@echo "Building buckley (with embedded web UI)..."
-	CGO_ENABLED=0 go build -tags webui -ldflags="-s -w" -o buckley ./cmd/buckley
+.PHONY: build-mission-control
+build-mission-control:
+	@echo "Building buckley (with GoSX Mission Control)..."
+	CGO_ENABLED=0 go build -ldflags="-s -w" -o buckley ./cmd/buckley
 
 .PHONY: dev
 dev:
@@ -102,7 +97,6 @@ install-browserd: build-browserd
 clean:
 	@echo "Cleaning build artifacts..."
 	rm -f buckley
-	rm -rf pkg/ipc/ui/assets pkg/ipc/ui/index.html
 
 # Agent E2E Test targets
 .PHONY: agent-test-build

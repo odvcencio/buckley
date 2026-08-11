@@ -168,6 +168,21 @@ func TestProgressController_ShadowModeNeverApplies(t *testing.T) {
 	}
 }
 
+func TestNewProgressController_OnlyEnablesStagedModes(t *testing.T) {
+	t.Parallel()
+
+	if got := NewProgressController(ModeLegacy, "v1", Fuses{}); got != nil {
+		t.Fatalf("legacy controller = %+v, want nil", got)
+	}
+	if got := NewProgressController("typo", "v1", Fuses{}); got != nil {
+		t.Fatalf("unknown controller mode = %+v, want nil", got)
+	}
+	got := NewProgressController(" DYNAMIC ", "v1", Fuses{ModelRequests: 9})
+	if got == nil || got.Mode != ModeDynamic || got.PolicyVersion != "v1" || got.Fuses.ModelRequests != 9 {
+		t.Fatalf("dynamic controller = %+v", got)
+	}
+}
+
 // progressToolCallResponse returns a response carrying one tool call, so
 // a test model can keep the loop in tool rounds until a fuse or guard
 // fires.
@@ -274,6 +289,7 @@ func TestController_ProgressShadowRecordsWithoutActing(t *testing.T) {
 		t.Fatalf("ListEvents: %v", err)
 	}
 	var sawShadowStop bool
+	var sawProgressProjection bool
 	for _, e := range events {
 		if e.Type != runledger.EventControllerDecision {
 			continue
@@ -282,11 +298,23 @@ func TestController_ProgressShadowRecordsWithoutActing(t *testing.T) {
 			if applied, _ := e.Payload["applied"].(bool); applied {
 				t.Fatalf("shadow decision recorded as applied: %+v", e.Payload)
 			}
+			projection, ok := e.Payload["progress"].(map[string]any)
+			if !ok {
+				t.Fatalf("progress decision omitted projection: %+v", e.Payload)
+			}
+			toolCalls, ok := projection["tool_calls"].(float64)
+			if !ok || toolCalls < 1 {
+				t.Fatalf("progress projection omitted observed tool calls: %+v", projection)
+			}
+			sawProgressProjection = true
 			sawShadowStop = true
 		}
 	}
 	if !sawShadowStop {
 		t.Fatal("no shadow stop_safety decision was recorded to the ledger")
+	}
+	if !sawProgressProjection {
+		t.Fatal("no durable progress projection was recorded to the ledger")
 	}
 }
 
@@ -322,6 +350,108 @@ func TestGovernorProgressSignals(t *testing.T) {
 	}
 	if got := fresh.RepetitionPressure(); got > 0.5 {
 		t.Fatalf("RepetitionPressure for distinct outcomes = %.2f, want low", got)
+	}
+}
+
+func TestProgressTracker_ProjectsZeroYieldWithoutCallingItFailure(t *testing.T) {
+	t.Parallel()
+
+	tracker := progressTracker{}
+	tracker.Observe("search_text", ToolOutcome{
+		Content:       `{"success":true,"count":0}`,
+		Success:       true,
+		YieldObserved: true,
+		YieldCount:    0,
+		YieldUnit:     "match",
+	})
+	tracker.Observe("find_files", ToolOutcome{
+		Content:       `{"success":true,"count":0}`,
+		Success:       true,
+		YieldObserved: true,
+		YieldCount:    0,
+		YieldUnit:     "file",
+	})
+	tracker.Observe("list_directory", ToolOutcome{
+		Content:       `{"success":true,"count":3}`,
+		Success:       true,
+		YieldObserved: true,
+		YieldCount:    3,
+		YieldUnit:     "entry",
+	})
+	tracker.Observe("read_file", ToolOutcome{Content: "Error: missing", Success: false})
+
+	got := tracker.Snapshot()
+	if got.ToolCalls != 4 || got.SuccessfulToolCalls != 3 || got.FailedToolCalls != 1 {
+		t.Fatalf("operation totals = %+v", got)
+	}
+	if got.YieldObservedCalls != 3 || got.ZeroYieldCalls != 2 {
+		t.Fatalf("yield totals = %+v", got)
+	}
+	if got.ConsecutiveZeroYieldCalls != 0 {
+		t.Fatalf("positive yield did not reset streak: %+v", got)
+	}
+	if got.LastToolName != "list_directory" || got.LastYieldCount != 3 || got.LastYieldUnit != "entry" {
+		t.Fatalf("last yield = %+v", got)
+	}
+}
+
+func TestController_ExposesProgressProjectionOnNormalCompletion(t *testing.T) {
+	t.Parallel()
+
+	modelCalls := 0
+	ctrl, err := NewController(ControllerConfig{
+		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
+			return model.ChatRequest{Model: "test-model"}, nil
+		},
+		CallModel: ModelCallerFunc(func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
+			modelCalls++
+			if modelCalls == 1 {
+				return progressToolCallResponse("search_text"), nil
+			}
+			return textResponse("done", model.Usage{}), nil
+		}),
+		DispatchTools: ToolDispatcherFunc(func(context.Context, []model.ToolCall) ([]ToolOutcome, error) {
+			return []ToolOutcome{{
+				Content:       `{"success":true,"count":0}`,
+				Success:       true,
+				YieldObserved: true,
+				YieldCount:    0,
+				YieldUnit:     "match",
+			}}, nil
+		}),
+	})
+	if err != nil {
+		t.Fatalf("NewController: %v", err)
+	}
+
+	result, err := ctrl.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if result.FinishReason != "" {
+		t.Fatalf("FinishReason = %q, want normal completion", result.FinishReason)
+	}
+	if result.Progress.ToolCalls != 1 || result.Progress.SuccessfulToolCalls != 1 || result.Progress.FailedToolCalls != 0 {
+		t.Fatalf("operation totals = %+v", result.Progress)
+	}
+	if result.Progress.ZeroYieldCalls != 1 || result.Progress.ConsecutiveZeroYieldCalls != 1 {
+		t.Fatalf("zero-yield progress = %+v", result.Progress)
+	}
+}
+
+func BenchmarkProgressTrackerObserve(b *testing.B) {
+	tracker := progressTracker{}
+	outcome := ToolOutcome{
+		Content:       `{"success":true,"count":0}`,
+		Success:       true,
+		YieldObserved: true,
+		YieldCount:    0,
+		YieldUnit:     "match",
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		tracker.Observe("search_text", outcome)
 	}
 }
 

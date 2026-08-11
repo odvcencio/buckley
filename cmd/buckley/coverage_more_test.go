@@ -109,7 +109,7 @@ func TestCompletionsProduceOutput(t *testing.T) {
 	if !strings.Contains(bash, "complete -F") {
 		t.Fatalf("expected bash completion output, got %q", bash)
 	}
-	if !strings.Contains(bash, " review review-pr ") {
+	if !strings.Contains(bash, " review review-pr buckbot ") {
 		t.Fatalf("bash completion is missing review commands: %q", bash)
 	}
 
@@ -117,7 +117,7 @@ func TestCompletionsProduceOutput(t *testing.T) {
 	if !strings.Contains(zsh, "#compdef buckley") {
 		t.Fatalf("expected zsh completion output, got %q", zsh)
 	}
-	if !strings.Contains(zsh, "'review:Review local changes") || !strings.Contains(zsh, "'review-pr:Review a GitHub") {
+	if !strings.Contains(zsh, "'review:Review local changes") || !strings.Contains(zsh, "'review-pr:Review a GitHub") || !strings.Contains(zsh, "'buckbot:Run Buckley") {
 		t.Fatalf("zsh completion is missing review commands: %q", zsh)
 	}
 
@@ -125,7 +125,7 @@ func TestCompletionsProduceOutput(t *testing.T) {
 	if !strings.Contains(fish, "complete -c buckley") {
 		t.Fatalf("expected fish completion output, got %q", fish)
 	}
-	if !strings.Contains(fish, "-a review ") || !strings.Contains(fish, "-a review-pr ") {
+	if !strings.Contains(fish, "-a review ") || !strings.Contains(fish, "-a review-pr ") || !strings.Contains(fish, "-a buckbot ") {
 		t.Fatalf("fish completion is missing review commands: %q", fish)
 	}
 }

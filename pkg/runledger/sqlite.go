@@ -1016,6 +1016,7 @@ var migrations = []storage.Migration{
 	{Version: 6, Name: "task_checkpoints", Apply: createTaskCheckpointsTable},
 	{Version: 7, Name: "agent_metric_samples", Apply: createAgentMetricSamplesTable},
 	{Version: 8, Name: "execution_steps", Apply: createExecutionStepsTable},
+	{Version: 9, Name: "agent_claims", Apply: createAgentClaimsTable},
 }
 
 func createAgentRunsTable(db *sql.DB) error {
@@ -1225,6 +1226,35 @@ func createExecutionStepsTable(db *sql.DB) error {
 	`)
 	if err != nil {
 		return fmt.Errorf("create execution_steps: %w", err)
+	}
+	return nil
+}
+
+func createAgentClaimsTable(db *sql.DB) error {
+	_, err := db.Exec(`
+		CREATE TABLE IF NOT EXISTS agent_claim_locks (
+			lock_key TEXT PRIMARY KEY,
+			touched_at TIMESTAMP NOT NULL
+		);
+		INSERT OR IGNORE INTO agent_claim_locks (lock_key, touched_at)
+		VALUES ('workspace', CURRENT_TIMESTAMP);
+
+		CREATE TABLE IF NOT EXISTS agent_claims (
+			claim_id TEXT PRIMARY KEY,
+			run_id TEXT NOT NULL,
+			resource TEXT NOT NULL,
+			acquired_at TIMESTAMP NOT NULL,
+			released_at TIMESTAMP,
+			release_reason TEXT,
+			FOREIGN KEY(run_id) REFERENCES agent_runs(run_id) ON DELETE CASCADE
+		);
+		CREATE INDEX IF NOT EXISTS idx_agent_claims_active
+			ON agent_claims(resource, run_id) WHERE released_at IS NULL;
+		CREATE INDEX IF NOT EXISTS idx_agent_claims_run
+			ON agent_claims(run_id, acquired_at);
+	`)
+	if err != nil {
+		return fmt.Errorf("create agent_claims: %w", err)
 	}
 	return nil
 }

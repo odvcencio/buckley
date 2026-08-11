@@ -50,7 +50,7 @@ jobs:
           else
             echo "go=false" >> "$GITHUB_OUTPUT"
           fi
-          if grep -Eq '^web/|^pkg/ipc/ui/|^scripts/build-ui\.sh$' <<<"${changed}"; then
+          if grep -Eq '^pkg/ipc/gosxui/|^pkg/ipc/server\.go$|^scripts/build-ui\.sh$|^Makefile$' <<<"${changed}"; then
             echo "ui=true" >> "$GITHUB_OUTPUT"
           else
             echo "ui=false" >> "$GITHUB_OUTPUT"
@@ -120,14 +120,6 @@ jobs:
           version: v2.13.1
           args: check
 
-      - name: Set up Bun
+      - name: Check GoSX Mission Control UI
         if: steps.changes.outputs.ui == 'true'
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: '1.2.21'
-
-      - name: Build embedded UI
-        if: steps.changes.outputs.ui == 'true'
-        run: |
-          ./scripts/build-ui.sh
-          git diff --exit-code -- pkg/ipc/ui
+        run: ./scripts/build-ui.sh

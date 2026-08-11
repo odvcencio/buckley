@@ -42,7 +42,7 @@ export default defineConfig({
         {
           text: 'Interfaces',
           items: [
-            { text: 'Mission Control (Web)', link: '/MISSION_CONTROL' },
+            { text: 'Mission Control (GoSX)', link: '/MISSION_CONTROL' },
             { text: 'Editor Integration', link: '/ACP' }
           ]
         },

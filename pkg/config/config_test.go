@@ -23,7 +23,8 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.Buckbot.Model != "openai/gpt-5.6-luna-pro" ||
 		cfg.Buckbot.CriticModel != "qwen/qwen3.8-max" ||
 		cfg.Buckbot.Reasoning != "auto" ||
-		cfg.Buckbot.PerReviewBudgetUSD != 0.60 ||
+		cfg.Buckbot.PerReviewBudgetUSD != 0 ||
+		cfg.Buckbot.MonthlyBudgetUSD != 0 ||
 		cfg.Buckbot.MaxReviewIterations != 0 ||
 		cfg.Buckbot.MaxValidationAttempts != 2 ||
 		cfg.Buckbot.MaxDiffBytes != 240_000 ||

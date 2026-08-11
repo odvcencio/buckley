@@ -200,7 +200,7 @@ func renderAgentsContent(opts AgentsOptions) string {
 	b.WriteString("## Commands & Checks\n\n")
 	b.WriteString("- `./scripts/test.sh` – fast validation suite (preferred)\n")
 	b.WriteString("- `GO_TEST_TARGET=all ./scripts/test.sh` – exhaustive Go tests when touching shared libs\n")
-	b.WriteString("- `cd web && bun run build` – build Mission Control UI (if applicable)\n")
+	b.WriteString("- `go test ./pkg/ipc/gosxui` – check GoSX Mission Control UI (if applicable)\n")
 	b.WriteString("- `golangci-lint run` – static analysis for Go packages\n\n")
 
 	b.WriteString("## TODO Workflow Expectations\n\n")
@@ -354,7 +354,7 @@ func renderSubAgentSection(ctx *projectcontext.ProjectContext) string {
 
 func renderTechStackSection(ctx *projectcontext.ProjectContext) string {
 	if ctx == nil || len(ctx.TechStack) == 0 {
-		return "## Tech Stack\n\n- **Language:** Go 1.25+\n- **UI:** TypeScript + React (web/ Mission Control)\n- **Database:** SQLite (WAL mode)\n- **Tooling:** Bubble Tea TUI, Tailwind, Connect/Protobuf\n"
+		return "## Tech Stack\n\n- **Language:** Go 1.25+\n- **UI:** GoSX server-rendered Mission Control\n- **Database:** SQLite (WAL mode)\n- **Tooling:** Bubble Tea TUI, Connect/Protobuf\n"
 	}
 	var b strings.Builder
 	b.WriteString("## Tech Stack\n\n")
