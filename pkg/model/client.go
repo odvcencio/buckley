@@ -1,7 +1,6 @@
 package model
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -574,88 +573,36 @@ func (c *Client) executeStreamRequest(ctx context.Context, req ChatRequest, chun
 			return apiErr
 		}
 
-		// Connection successful, parse SSE stream
-		// Note: Once streaming starts, we don't retry mid-stream
-		defer resp.Body.Close()
-		if err := c.parseSSEStream(ctx, resp.Body, chunkChan); err != nil {
-			return fmt.Errorf("parsing SSE stream: %w", err)
+		// Retrying a stream after it has emitted an event can repeat generated
+		// text or, worse, a tool call. An interrupted connection before the
+		// first event is safe to retry because the caller has observed nothing.
+		events, streamErr := c.parseSSEStreamWithEventCount(ctx, resp.Body, chunkChan)
+		_ = resp.Body.Close()
+		if streamErr != nil {
+			lastErr = fmt.Errorf("parsing SSE stream: %w", streamErr)
+			if events == 0 && c.canRetryModelRequest(attempt, lastErr) {
+				continue
+			}
+			if events == 0 && isRetryableError(lastErr) {
+				return retryExhaustedError(attempt, lastErr)
+			}
+			return lastErr
 		}
 
-		// Stream completed successfully
 		return nil
 	}
 
 }
 
-// parseSSEStream parses Server-Sent Events stream
+// parseSSEStream parses Server-Sent Events stream.
 func (c *Client) parseSSEStream(ctx context.Context, r io.Reader, chunkChan chan<- StreamChunk) error {
-	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024) // 1MB max line
+	return ParseSSEStream(ctx, r, chunkChan)
+}
 
-	for scanner.Scan() {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
-
-		line := scanner.Text()
-
-		// Skip empty lines and comments
-		if line == "" || strings.HasPrefix(line, ":") {
-			continue
-		}
-
-		// Parse SSE field
-		if !strings.HasPrefix(line, "data: ") {
-			continue
-		}
-
-		data := strings.TrimPrefix(line, "data: ")
-
-		// Check for stream end
-		if data == "[DONE]" {
-			return nil
-		}
-
-		// Parse JSON chunk
-		var chunk StreamChunk
-		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
-			return fmt.Errorf("decoding chunk: %w", err)
-		}
-		if chunk.Error != nil {
-			statusCode, _ := strconv.Atoi(strings.TrimSpace(chunk.Error.Code))
-			if statusCode == 0 {
-				statusCode = http.StatusOK
-			}
-			message := strings.TrimSpace(chunk.Error.Message)
-			if message == "" {
-				message = "provider returned a streaming error"
-			}
-			provider, details := providerErrorMetadata(chunk.Error.Metadata)
-			return &APIError{
-				StatusCode: statusCode,
-				Message:    message,
-				Type:       chunk.Error.Type,
-				Code:       chunk.Error.Code,
-				Provider:   provider,
-				Details:    details,
-				Retryable:  statusCode == http.StatusTooManyRequests || statusCode >= 500,
-			}
-		}
-
-		select {
-		case chunkChan <- chunk:
-		case <-ctx.Done():
-			return ctx.Err()
-		}
-	}
-
-	if err := scanner.Err(); err != nil {
-		return fmt.Errorf("reading stream: %w", err)
-	}
-
-	return nil
+// parseSSEStreamWithEventCount reports how many SSE events reached the
+// caller, allowing executeStreamRequest to retry only before any output.
+func (c *Client) parseSSEStreamWithEventCount(ctx context.Context, r io.Reader, chunkChan chan<- StreamChunk) (int, error) {
+	return ParseSSEStreamWithEventCount(ctx, r, chunkChan)
 }
 
 // setHeaders sets common request headers

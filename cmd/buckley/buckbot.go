@@ -90,10 +90,12 @@ func printBuckbotUsage() {
 	fmt.Println("  buckley buckbot")
 	fmt.Println("  buckley buckbot --scope branch")
 	fmt.Println("  buckley buckbot repo --model codex/auto")
+	fmt.Println("  buckley buckbot --max-tool-calls 12")
 	fmt.Println("  buckley buckbot pr 123")
 	fmt.Println("  buckley buckbot pr 123 --post")
 	fmt.Println()
 	fmt.Println("Reviews have no default dollar cap. Use --budget <USD> for an explicit cap or --no-budget to bypass a configured cap.")
+	fmt.Println("Reviews have no default tool-call cap. Use --max-tool-calls <N> for an explicit experimental cap.")
 	fmt.Println("Posting is always explicit: use --post only for a PR review you want Buckbot to write to GitHub.")
 }
 

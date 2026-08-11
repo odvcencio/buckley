@@ -85,11 +85,11 @@ func TestResolveReviewExecutionPlanUsesGovernedSizeClasses(t *testing.T) {
 	})
 	if focused.sizeClass != "focused" || focused.reasoningEffort != "low" ||
 		focused.reasoningMaxTokens != 1024 ||
-		focused.maxIterations != 4 || focused.maxToolCalls != 4 ||
+		focused.maxIterations != 4 || focused.maxToolCalls != 0 ||
 		focused.maxVerificationCalls != 1 ||
 		focused.verificationTimeout != 60*time.Second || focused.explorationTimeout != 45*time.Second ||
 		focused.synthesisLead != 85*time.Second || focused.criticReserve != 70*time.Second ||
-		focused.criticMaxIterations != 2 || focused.criticMaxToolCalls != 2 ||
+		focused.criticMaxIterations != 2 || focused.criticMaxToolCalls != 0 ||
 		focused.criticExploration != 15*time.Second || focused.criticSynthesisLead != 45*time.Second {
 		t.Fatalf("focused plan = %#v", focused)
 	}
@@ -101,11 +101,11 @@ func TestResolveReviewExecutionPlanUsesGovernedSizeClasses(t *testing.T) {
 	})
 	if broad.sizeClass != "broad" || broad.reasoningEffort != "medium" ||
 		broad.reasoningMaxTokens != 2048 ||
-		broad.maxIterations != 6 || broad.maxToolCalls != 6 ||
+		broad.maxIterations != 6 || broad.maxToolCalls != 0 ||
 		broad.maxVerificationCalls != 1 ||
 		broad.verificationTimeout != 60*time.Second || broad.explorationTimeout != 55*time.Second ||
 		broad.synthesisLead != 90*time.Second || broad.criticReserve != 80*time.Second ||
-		broad.criticMaxIterations != 2 || broad.criticMaxToolCalls != 2 ||
+		broad.criticMaxIterations != 2 || broad.criticMaxToolCalls != 0 ||
 		broad.criticExploration != 20*time.Second || broad.criticSynthesisLead != 50*time.Second {
 		t.Fatalf("broad plan = %#v", broad)
 	}
@@ -133,6 +133,18 @@ func TestReviewExecutionPlanPreservesExplicitTurnOverride(t *testing.T) {
 	}
 }
 
+func TestReviewExecutionPlanPreservesExplicitToolCallOverride(t *testing.T) {
+	opts := automatedReviewOptions{maxToolCalls: 27}.withExecutionPlan(reviewExecutionPlan{
+		sizeClass:       "standard",
+		maxIterations:   6,
+		maxToolCalls:    18,
+		reasoningEffort: "medium",
+	})
+	if opts.maxToolCalls != 27 {
+		t.Fatalf("maxToolCalls = %d, want explicit override 27", opts.maxToolCalls)
+	}
+}
+
 func TestReviewVerificationTargetBudgetExpandsWithinToolLimit(t *testing.T) {
 	opts := automatedReviewOptions{
 		maxToolCalls:         3,
@@ -155,6 +167,7 @@ func TestReviewExecutionPlanPreservesQwenAdaptiveTurns(t *testing.T) {
 		maxIterations:        6,
 		maxToolCalls:         6,
 		maxVerificationCalls: 1,
+		explorationTimeout:   10 * time.Second,
 	}
 	bounded := automatedReviewOptions{
 		modelID: "qwen/qwen3.7-plus",
@@ -299,7 +312,8 @@ func TestAppendReviewExecutionPlanGuidesBoundedEvidenceCollection(t *testing.T) 
 		"Model: codex/gpt-5.6-luna",
 		"Reasoning effort: LOW",
 		"Limit each model turn to 2048 reasoning tokens",
-		"at most 8 model turns and 12 total",
+		"Use at most 8 model turns.",
+		"Use at most 12 total inspection or verification calls.",
 		"Limit each verification command to 90 seconds",
 		"Finish evidence collection within 180 seconds",
 		"Keep the final 75 seconds",
@@ -333,6 +347,72 @@ func TestAppendReviewExecutionPlanGuidesBoundedEvidenceCollection(t *testing.T) 
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("prompt missing %q:\n%s", want, prompt)
 		}
+	}
+}
+
+func TestAppendReviewExecutionPlanLeavesToolCallsUnlimitedByDefault(t *testing.T) {
+	prompt := appendReviewExecutionPlan("review this", automatedReviewOptions{
+		sizeClass:          "focused",
+		modelID:            "codex/gpt-5.6-luna",
+		reasoningEffort:    "low",
+		reasoningMaxTokens: 1024,
+		maxIterations:      4,
+		maxToolCalls:       0,
+	})
+	if !strings.Contains(prompt, "There is no per-review tool-call cap") {
+		t.Fatalf("prompt does not explain the default unlimited tool-call policy:\n%s", prompt)
+	}
+	if strings.Contains(prompt, "at most 0 total inspection") {
+		t.Fatalf("prompt incorrectly presents zero as a hard tool-call cap:\n%s", prompt)
+	}
+}
+
+func TestAppendQwenReviewExecutionPlanLeavesToolCallsUnlimitedByDefault(t *testing.T) {
+	prompt := appendReviewExecutionPlan("review this", automatedReviewOptions{
+		sizeClass:            "standard",
+		modelID:              "qwen/qwen3.7-plus",
+		reasoningMaxTokens:   2048,
+		maxIterations:        5,
+		maxToolCalls:         0,
+		maxVerificationCalls: 1,
+	})
+	if !strings.Contains(prompt, "no per-review tool-call cap") {
+		t.Fatalf("Qwen prompt does not explain the default unlimited tool-call policy:\n%s", prompt)
+	}
+	if strings.Contains(prompt, "0 inspection/verification calls") {
+		t.Fatalf("Qwen prompt incorrectly presents zero as a hard tool-call cap:\n%s", prompt)
+	}
+}
+
+func TestProjectReviewExecutionPlanLeavesTurnsToolsAndExplorationUnbounded(t *testing.T) {
+	options := automatedReviewOptions{
+		sizeClass:     "project",
+		modelID:       "qwen/qwen3.7-plus",
+		maxIterations: 0,
+		maxToolCalls:  0,
+	}.withExecutionPlan(reviewExecutionPlan{
+		sizeClass:            "project",
+		maxIterations:        0,
+		maxToolCalls:         0,
+		maxVerificationCalls: 1,
+		explorationTimeout:   0,
+		synthesisLead:        90 * time.Second,
+	})
+	if options.maxIterations != 0 || options.maxToolCalls != 0 || options.explorationTimeout != 0 {
+		t.Fatalf("project review plan reintroduced a hidden ceiling: %#v", options)
+	}
+	prompt := appendReviewExecutionPlan("review this", options)
+	for _, want := range []string{
+		"no hard per-review model-turn cap",
+		"no per-review tool-call cap",
+		"until the synthesis reserve or outer deadline requires finalization",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("project review prompt missing %q:\n%s", want, prompt)
+		}
+	}
+	if strings.Contains(prompt, "100 seconds") {
+		t.Fatalf("Qwen project prompt retained a fixed exploration ceiling:\n%s", prompt)
 	}
 }
 

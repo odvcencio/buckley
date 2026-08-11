@@ -26,6 +26,7 @@ func TestDefaultConfig(t *testing.T) {
 		cfg.Buckbot.PerReviewBudgetUSD != 0 ||
 		cfg.Buckbot.MonthlyBudgetUSD != 0 ||
 		cfg.Buckbot.MaxReviewIterations != 0 ||
+		cfg.Buckbot.MaxToolCalls != 0 ||
 		cfg.Buckbot.MaxValidationAttempts != 2 ||
 		cfg.Buckbot.MaxDiffBytes != 240_000 ||
 		cfg.Buckbot.MaxSupportingContextTokens != 12_000 {

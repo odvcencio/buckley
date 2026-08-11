@@ -815,6 +815,26 @@ func TestRunRLMRetriesExecutionEvidenceFailureWithGuidance(t *testing.T) {
 	}
 }
 
+func TestRunRLMKeepsUnboundedToolCallsDuringEvidenceRepair(t *testing.T) {
+	runner := &scriptedRLMExecutor{
+		responses: []string{"valid", "valid"},
+		providers: []string{"unverified", "verified"},
+	}
+	framework := NewFramework(nil, nil).WithRLMRunner(runner)
+
+	if _, err := framework.RunRLM(context.Background(), executionValidatingRLMDefinition{}, RLMRunOpts{
+		UserPrompt:    "review this change",
+		MaxRetries:    2,
+		MaxIterations: 14,
+		MaxToolCalls:  0,
+	}); err != nil {
+		t.Fatalf("RunRLM() error = %v", err)
+	}
+	if got := runner.toolLimits; len(got) != 2 || got[0] != 0 || got[1] != 0 {
+		t.Fatalf("tool budgets = %v, want [0 0] for an unbounded review", got)
+	}
+}
+
 func TestRunRLMRepairsUntrustedExecutionClaimWithoutMoreTools(t *testing.T) {
 	runner := &scriptedRLMExecutor{
 		responses: []string{"valid", "valid"},

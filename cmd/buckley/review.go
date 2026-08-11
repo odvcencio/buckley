@@ -35,6 +35,7 @@ type reviewCommandOptions struct {
 	budgetUSD       float64
 	noBudget        bool
 	maxTurns        int
+	maxToolCalls    int
 	maxDiff         int
 	maxRetries      int
 }
@@ -96,21 +97,34 @@ func parseReviewCommandOptions(args []string) (reviewCommandOptions, error) {
 	showCost := fs.Bool("cost", true, "show token/cost breakdown")
 	modelFlag := fs.String("model", "", "model to use; codex/auto scales Luna to Terra to Sol")
 	criticModel := fs.String("critic-model", "", "opt-in approval critic model for large or business-critical reviews")
-	timeout := fs.Duration("timeout", defaultReviewTimeout, "total review timeout")
+	timeout := fs.Duration("timeout", defaultReviewTimeout, "total review timeout (project reviews default to 20m)")
 	outputFile := fs.String("output", "", "write review to file instead of stdout")
 	interactive := fs.Bool("interactive", true, "show interactive menu to fix findings")
 	noInteractive := fs.Bool("no-interactive", false, "disable interactive mode")
 	budgetUSD := fs.Float64("budget", 0, "maximum model spend in USD (0 = configured policy; defaults to uncapped)")
 	noBudget := fs.Bool("no-budget", false, "ignore a configured review cost cap for this run")
 	maxTurns := fs.Int("max-turns", 0, "hard model turn limit per review pass (0 = adaptive)")
+	maxToolCalls := fs.Int("max-tool-calls", 0, "maximum inspection/verification tool calls per review pass (0 = unlimited)")
 	maxDiff := fs.Int("max-diff-bytes", 0, "maximum prioritized diff bytes (0 = Buckbot default)")
 	maxRetries := fs.Int("max-validation-attempts", 0, "maximum schema-validation attempts (0 = Buckbot default)")
 
 	if err := fs.Parse(args); err != nil {
 		return reviewCommandOptions{}, err
 	}
+	timeoutWasSet := false
+	fs.Visit(func(flag *flag.Flag) {
+		if flag.Name == "timeout" {
+			timeoutWasSet = true
+		}
+	})
+	if *projectMode && !timeoutWasSet {
+		*timeout = defaultProjectReviewTimeout
+	}
 	if *budgetUSD < 0 {
 		return reviewCommandOptions{}, fmt.Errorf("--budget must be zero or greater")
+	}
+	if *maxToolCalls < 0 {
+		return reviewCommandOptions{}, fmt.Errorf("--max-tool-calls must be zero or greater")
 	}
 	if *noBudget && *budgetUSD > 0 {
 		return reviewCommandOptions{}, fmt.Errorf("--no-budget cannot be combined with --budget")
@@ -132,6 +146,7 @@ func parseReviewCommandOptions(args []string) (reviewCommandOptions, error) {
 		budgetUSD:       *budgetUSD,
 		noBudget:        *noBudget,
 		maxTurns:        *maxTurns,
+		maxToolCalls:    *maxToolCalls,
 		maxDiff:         *maxDiff,
 		maxRetries:      *maxRetries,
 	}
@@ -186,6 +201,7 @@ func runReviewCommand(args []string) error {
 
 	policy := runtime.policy.withOverrides(automatedReviewOptions{
 		maxIterations:   opts.maxTurns,
+		maxToolCalls:    opts.maxToolCalls,
 		maxRetries:      opts.maxRetries,
 		maxDiffBytes:    opts.maxDiff,
 		maxCostUSD:      opts.budgetUSD,
@@ -361,6 +377,7 @@ func runProjectReviewWithPolicy(ctx context.Context, framework *oneshot.Framewor
 		return nil, fmt.Errorf("capture project review snapshot: %w", err)
 	}
 
+	spinner.SetMessage("Building tracked inventory and Canopy structural TOC...")
 	opts := commands.DefaultProjectContextOptions()
 	opts.Context = ctx
 	projectCtx, audit, err := commands.AssembleProjectContext(opts)
@@ -378,16 +395,19 @@ func runProjectReviewWithPolicy(ctx context.Context, framework *oneshot.Framewor
 		return nil, err
 	}
 
+	spinner.SetMessage("Canopy TOC ready; expanding exhaustive repository coverage...")
 	plan := reviewExecutionPlan{
-		sizeClass:            "project",
-		reasoningEffort:      "high",
-		reasoningMaxTokens:   4096,
-		maxIterations:        8,
-		maxToolCalls:         8,
+		sizeClass:          "project",
+		reasoningEffort:    "high",
+		reasoningMaxTokens: 4096,
+		// Project reviews are exhaustive by default. The caller's outer
+		// timeout and the RLM governor remain the safety boundaries.
+		maxIterations:        0,
+		maxToolCalls:         0,
 		maxVerificationCalls: 1,
 		verificationTimeout:  90 * time.Second,
-		explorationTimeout:   3 * time.Minute,
-		synthesisLead:        75 * time.Second,
+		explorationTimeout:   0,
+		synthesisLead:        90 * time.Second,
 	}
 	reviewPolicy = reviewPolicy.withExecutionPlan(plan)
 	spinner.SetMessage(fmt.Sprintf("Running %s review with %s reasoning...", reviewPolicy.sizeClass, reviewPolicy.reasoningEffort))

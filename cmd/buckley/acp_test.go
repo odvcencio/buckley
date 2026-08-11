@@ -7,6 +7,7 @@ import (
 	"m31labs.dev/buckley/pkg/conversation"
 	"m31labs.dev/buckley/pkg/model"
 	"m31labs.dev/buckley/pkg/skill"
+	"m31labs.dev/buckley/pkg/tool/builtin"
 )
 
 func TestShouldNudgeForTools(t *testing.T) {
@@ -57,6 +58,24 @@ func TestShouldNudgeForTools(t *testing.T) {
 				t.Fatalf("shouldNudgeForTools(%q) = %v, want %v", tc.input, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestFormatACPToolResult_UsesModelOutputBoundary(t *testing.T) {
+	fullOnly := strings.Repeat("full-only ", 4*1024)
+	result := &builtin.Result{
+		Success:       true,
+		ShouldAbridge: true,
+		Data:          map[string]any{"content": fullOnly},
+		DisplayData:   map[string]any{"content": "display-only page"},
+	}
+
+	got := formatACPToolResult(result, nil)
+	if strings.Contains(got, fullOnly) {
+		t.Fatalf("model-facing output included full result (%d bytes)", len(got))
+	}
+	if !strings.Contains(got, "display-only page") {
+		t.Fatalf("model-facing output = %q, want display page", got)
 	}
 }
 

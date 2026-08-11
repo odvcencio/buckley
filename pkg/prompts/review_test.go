@@ -239,14 +239,19 @@ func TestBranchReviewPromptStaysCompact(t *testing.T) {
 	}
 }
 
-func TestProjectReviewPromptStaysCompactAndBounded(t *testing.T) {
+func TestProjectReviewPromptStaysCompactAndExhaustive(t *testing.T) {
 	prompt := reviewProjectDefault(time.Unix(0, 0))
 	if len(prompt) > 2_500 {
 		t.Fatalf("project review system prompt grew to %d bytes", len(prompt))
 	}
-	for _, want := range []string{"Canopy", "at most eight", "three highest-risk", "## Project Health"} {
+	for _, want := range []string{"Canopy", "Canopy TOC", "major call sites", "caller/callee", "no per-review tool-call or model-turn cap", "## Evidence Collected", "## Coverage", "## Project Health"} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("project review prompt missing %q", want)
+		}
+	}
+	for _, forbidden := range []string{"at most eight", "three highest-risk"} {
+		if strings.Contains(prompt, forbidden) {
+			t.Fatalf("project review prompt retained hidden sampling limit %q", forbidden)
 		}
 	}
 }

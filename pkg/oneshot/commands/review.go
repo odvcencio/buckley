@@ -68,6 +68,9 @@ func (d ReviewBranchDef) BuildApprovalCriticPrompt(originalPrompt string, primar
 }
 
 // ReviewProjectDef implements oneshot.RLMDefinition for project-wide review.
+// Project reviews are deadline-bounded and governor-protected, but do not
+// impose a fixed model-turn ceiling: the agent must be able to expand from
+// the Canopy TOC into complete repository coverage.
 type ReviewProjectDef struct{}
 
 func (ReviewProjectDef) Name() string { return "review-project" }
@@ -80,7 +83,7 @@ func (ReviewProjectDef) AllowedTools() []string {
 	return []string{"read_file", "find_files", "search_text"}
 }
 
-func (ReviewProjectDef) MaxRLMIterations() int { return 8 }
+func (ReviewProjectDef) MaxRLMIterations() int { return 0 }
 
 func (ReviewProjectDef) ParseResult(response string) (any, error) {
 	return &ReviewRLMResult{
@@ -100,6 +103,16 @@ func (ReviewProjectDef) ValidateResult(result any) error {
 	}
 	if review.Parsed != nil && review.Parsed.Approved {
 		return fmt.Errorf("project review is advisory and cannot issue an approval verdict")
+	}
+	text := strings.TrimSpace(review.Review)
+	if !strings.Contains(text, "## Evidence Collected") && !strings.Contains(text, "## Evidence Sampled") {
+		return fmt.Errorf("project review must include evidence and coverage ledgers")
+	}
+	if !strings.Contains(text, "## Coverage") || !strings.Contains(text, "**Completeness**:") {
+		return fmt.Errorf("project review must include a coverage ledger with completeness")
+	}
+	if !strings.Contains(text, "COMPLETE") && !strings.Contains(text, "PARTIAL") {
+		return fmt.Errorf("project review coverage must declare COMPLETE or PARTIAL")
 	}
 	return nil
 }

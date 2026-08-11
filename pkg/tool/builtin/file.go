@@ -1,7 +1,9 @@
 package builtin
 
 import (
+	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -17,7 +19,7 @@ func (t *ReadFileTool) Name() string {
 }
 
 func (t *ReadFileTool) Description() string {
-	return "Read file contents. Files over 100 lines are summarized in conversation; full content stays available."
+	return "Read file contents in bounded, 1-indexed line pages. Each page is at most 100 lines; use next_start_line from the result to continue."
 }
 
 func (t *ReadFileTool) Parameters() ParameterSchema {
@@ -27,6 +29,14 @@ func (t *ReadFileTool) Parameters() ParameterSchema {
 			"path": {
 				Type:        "string",
 				Description: "Path to the file to read",
+			},
+			"start_line": {
+				Type:        "number",
+				Description: "First line to return (1-indexed, defaults to 1)",
+			},
+			"end_line": {
+				Type:        "number",
+				Description: "Last line to return (1-indexed, inclusive; defaults to start_line + 99)",
 			},
 		},
 		Required: []string{"path"},
@@ -68,39 +78,130 @@ func (t *ReadFileTool) Execute(params map[string]any) (*Result, error) {
 	}
 
 	contentStr := string(content)
-
-	// Abridge large files (> 100 lines) for display
-	shouldAbridge := false
-	displayContent := contentStr
-	const maxDisplayLines = 100
-
-	lines := strings.Split(contentStr, "\n")
-	if len(lines) > maxDisplayLines {
-		shouldAbridge = true
-		displayContent = strings.Join(lines[:maxDisplayLines], "\n")
-		displayContent += fmt.Sprintf("\n... (%d more lines, %d total)", len(lines)-maxDisplayLines, len(lines))
+	lines := fileLines(contentStr)
+	startLine, endLine, explicitPage, err := readFilePage(params, len(lines))
+	if err != nil {
+		return &Result{Success: false, Error: err.Error()}, nil
 	}
+
+	pageLines := lines[startLine-1 : endLine]
+	pageContent := strings.Join(pageLines, "\n")
+	hasMore := endLine < len(lines)
+	page := map[string]any{
+		"start_line":  startLine,
+		"end_line":    endLine,
+		"total_lines": len(lines),
+		"has_more":    hasMore,
+	}
+	if hasMore {
+		page["next_start_line"] = endLine + 1
+	}
+	shouldAbridge := explicitPage || hasMore
 
 	result := &Result{
 		Success: true,
 		Data: map[string]any{
 			"path":    absPath,
-			"content": contentStr, // Full content always in Data
+			"content": contentStr, // Full content remains available to non-model callers.
 			"size":    len(content),
+			"page":    page,
 		},
 		ShouldAbridge: shouldAbridge,
 	}
 
 	if shouldAbridge {
+		preview := fmt.Sprintf("Read %s (lines %d-%d of %d, %d bytes)", filepath.Base(absPath), startLine, endLine, len(lines), len(content))
+		if hasMore {
+			preview += fmt.Sprintf("; continue with start_line=%d", endLine+1)
+		}
 		result.DisplayData = map[string]any{
 			"path":    absPath,
-			"content": displayContent, // Abridged content for display
+			"content": pageContent,
 			"size":    len(content),
-			"preview": fmt.Sprintf("Read %s (%d lines, %d bytes)", filepath.Base(absPath), len(lines), len(content)),
+			"page":    page,
+			"preview": preview,
 		}
 	}
 
 	return result, nil
+}
+
+const readFilePageLines = 100
+
+func fileLines(content string) []string {
+	if content == "" {
+		return nil
+	}
+	lines := strings.Split(content, "\n")
+	if lines[len(lines)-1] == "" {
+		return lines[:len(lines)-1]
+	}
+	return lines
+}
+
+func readFilePage(params map[string]any, totalLines int) (startLine, endLine int, explicitPage bool, err error) {
+	startLine = 1
+	if value, ok := params["start_line"]; ok {
+		explicitPage = true
+		startLine, err = readFileLineNumber("start_line", value)
+		if err != nil {
+			return 0, 0, false, err
+		}
+	}
+
+	endLine = startLine + readFilePageLines - 1
+	if value, ok := params["end_line"]; ok {
+		explicitPage = true
+		endLine, err = readFileLineNumber("end_line", value)
+		if err != nil {
+			return 0, 0, false, err
+		}
+	}
+	if endLine < startLine {
+		return 0, 0, false, fmt.Errorf("end_line must be greater than or equal to start_line")
+	}
+	if endLine-startLine+1 > readFilePageLines {
+		return 0, 0, false, fmt.Errorf("read_file supports pages of at most %d lines; use next_start_line to continue", readFilePageLines)
+	}
+	if totalLines == 0 {
+		if startLine != 1 {
+			return 0, 0, false, fmt.Errorf("start_line %d exceeds empty file", startLine)
+		}
+		return 1, 0, explicitPage, nil
+	}
+	if startLine > totalLines {
+		return 0, 0, false, fmt.Errorf("start_line %d exceeds file length of %d lines", startLine, totalLines)
+	}
+	if endLine > totalLines {
+		endLine = totalLines
+	}
+	return startLine, endLine, explicitPage, nil
+}
+
+func readFileLineNumber(name string, value any) (int, error) {
+	var number float64
+	switch typed := value.(type) {
+	case float64:
+		number = typed
+	case float32:
+		number = float64(typed)
+	case int:
+		number = float64(typed)
+	case int64:
+		number = float64(typed)
+	case json.Number:
+		parsed, err := typed.Int64()
+		if err != nil {
+			return 0, fmt.Errorf("%s parameter must be a positive integer", name)
+		}
+		number = float64(parsed)
+	default:
+		return 0, fmt.Errorf("%s parameter must be a positive integer", name)
+	}
+	if number < 1 || math.Trunc(number) != number || number > math.MaxInt {
+		return 0, fmt.Errorf("%s parameter must be a positive integer", name)
+	}
+	return int(number), nil
 }
 
 // WriteFileTool writes content to a file

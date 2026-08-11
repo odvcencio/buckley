@@ -162,6 +162,7 @@ buckbot:
   per_review_budget_usd: 0 # 0 means no automatic per-review dollar ceiling
   monthly_budget_usd: 0    # 0 means no configured monthly dollar ceiling
   max_review_iterations: 0 # adaptive
+  max_tool_calls: 0         # 0 means unlimited; set for expensive-model experiments
   max_validation_attempts: 2
 ```
 
@@ -169,6 +170,16 @@ Cost handling is completion-first by default, regardless of the chosen model.
 Set `per_review_budget_usd` to a positive amount only when a project
 deliberately needs a cap. A caller can set `--budget <USD>` for one capped
 review or `--no-budget` to bypass an existing configured per-review cap.
+Reviews also have no per-review tool-call cap by default. Set
+`buckbot.max_tool_calls` to a positive value for an explicit cap, such as when
+experimenting with an expensive model, or pass `--max-tool-calls N` for one
+run. Zero keeps the cap off; normal timeouts, verification limits, and the
+runaway-loop governor still apply. Repository-wide reviews additionally receive
+a complete tracked-file inventory plus a Canopy structural TOC containing major
+call sites, important-flow caller/callee edges, complexity hotspots, and
+parse/call-graph health. They are expected to maintain a `COMPLETE`/`PARTIAL`
+coverage ledger. They default to a 20-minute
+outer timeout; pass `--timeout` when a larger repository needs more time.
 
 ### providers
 

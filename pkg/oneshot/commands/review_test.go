@@ -56,7 +56,7 @@ func TestReviewDefinitionsExposeOnlySnapshotReviewTools(t *testing.T) {
 	projectTools := (ReviewProjectDef{}).AllowedTools()
 	assert.Equal(t, []string{"read_file", "find_files", "search_text"}, projectTools)
 	assert.NotContains(t, projectTools, "run_verification")
-	assert.Equal(t, 8, (ReviewProjectDef{}).MaxRLMIterations())
+	assert.Equal(t, 0, (ReviewProjectDef{}).MaxRLMIterations())
 
 	for _, definition := range definitions {
 		t.Run(definition.name, func(t *testing.T) {
@@ -322,9 +322,13 @@ func TestBuildBranchPrompt_RepositoryPolicySuppressesHostTestPlan(t *testing.T) 
 
 func TestBuildProjectPrompt(t *testing.T) {
 	ctx := &ProjectContext{
-		RepoRoot:  "/home/user/project",
-		Branch:    "main",
-		Tree:      ".\n├── cmd\n└── pkg",
+		RepoRoot: "/home/user/project",
+		Branch:   "main",
+		Tree:     ".\n├── cmd\n└── pkg",
+		TrackedFiles: []string{
+			"pkg/orchestrator/orchestrator.go",
+			"cmd/buckley/main.go",
+		},
 		GoMod:     "module github.com/user/project",
 		RecentLog: "abc123 Initial commit",
 	}
@@ -338,9 +342,31 @@ func TestBuildProjectPrompt(t *testing.T) {
 	assert.Contains(t, prompt, "Project Structure")
 	assert.Contains(t, prompt, "cmd")
 	assert.Contains(t, prompt, "pkg")
+	assert.Contains(t, prompt, "Tracked File Inventory (review TOC)")
+	assert.Contains(t, prompt, "cmd/buckley/main.go")
+	assert.Contains(t, prompt, "pkg/orchestrator/orchestrator.go")
 	assert.Contains(t, prompt, "go.mod")
 	assert.Contains(t, prompt, "module github.com/user/project")
 	assert.Contains(t, prompt, "Recent Git History")
+}
+
+func TestBuildProjectFileInventoryMarksPromptSizeTruncation(t *testing.T) {
+	files := make([]string, 0, 2)
+	files = append(files, strings.Repeat("a", maxProjectFileInventoryBytes))
+	files = append(files, "after.txt")
+
+	inventory := buildProjectFileInventory(files)
+	assert.Contains(t, inventory, "inventory truncated")
+	assert.Contains(t, inventory, "use find_files for complete enumeration")
+}
+
+func TestReviewProjectDefRequiresCoverageLedger(t *testing.T) {
+	def := ReviewProjectDef{}
+	valid := &ReviewRLMResult{Review: "## Evidence Collected\n- files\n\n## Coverage\n- **Completeness**: PARTIAL — deadline\n"}
+	assert.NoError(t, def.ValidateResult(valid))
+
+	missing := &ReviewRLMResult{Review: "## Project Health\n- okay\n"}
+	assert.ErrorContains(t, def.ValidateResult(missing), "coverage ledger")
 }
 
 func TestBuildProjectPrompt_WithAllFields(t *testing.T) {
@@ -410,21 +436,23 @@ func TestBranchContext_Fields(t *testing.T) {
 
 func TestProjectContext_Fields(t *testing.T) {
 	ctx := ProjectContext{
-		RepoRoot:    "/root",
-		Branch:      "main",
-		HeadCommit:  strings.Repeat("a", 40),
-		Tree:        "tree",
-		GoMod:       "gomod",
-		PackageJSON: "pkg",
-		ReadmeMD:    "readme",
-		AgentsMD:    "agents",
-		RecentLog:   "log",
+		RepoRoot:     "/root",
+		Branch:       "main",
+		HeadCommit:   strings.Repeat("a", 40),
+		Tree:         "tree",
+		TrackedFiles: []string{"main.go"},
+		GoMod:        "gomod",
+		PackageJSON:  "pkg",
+		ReadmeMD:     "readme",
+		AgentsMD:     "agents",
+		RecentLog:    "log",
 	}
 
 	assert.Equal(t, "/root", ctx.RepoRoot)
 	assert.Equal(t, "main", ctx.Branch)
 	assert.Len(t, ctx.HeadCommit, 40)
 	assert.NotEmpty(t, ctx.Tree)
+	assert.Contains(t, ctx.TrackedFiles, "main.go")
 	assert.NotEmpty(t, ctx.GoMod)
 	assert.NotEmpty(t, ctx.PackageJSON)
 	assert.NotEmpty(t, ctx.ReadmeMD)
@@ -886,7 +914,7 @@ func TestReviewProjectDef_Interface(t *testing.T) {
 	assert.NotContains(t, def.AllowedTools(), "run_verification")
 	assert.NotContains(t, def.AllowedTools(), "write_file")
 
-	advisory, err := def.ParseResult("## Project Status\nArchitecture assessment only")
+	advisory, err := def.ParseResult("## Evidence Collected\n- source\n\n## Coverage\n- **Completeness**: COMPLETE\n")
 	assert.NoError(t, err)
 	assert.NoError(t, def.ValidateResult(advisory))
 	assert.ErrorContains(t, def.ValidateResult(&ReviewRLMResult{
@@ -2638,6 +2666,11 @@ func TestAssembleProjectContextUsesTrackedWorktreeEvidenceOnly(t *testing.T) {
 			t.Fatalf("tracked project tree missing %q:\n%s", want, ctx.Tree)
 		}
 	}
+	for _, want := range []string{"README.md", "go.mod", "src/tracked.go", "staged.go"} {
+		if !containsString(ctx.TrackedFiles, want) {
+			t.Fatalf("tracked project inventory missing %q: %v", want, ctx.TrackedFiles)
+		}
+	}
 	for _, forbidden := range []string{"package.json", "AGENTS.md", "untracked-dir", "secret.go", "will-be-deleted.txt"} {
 		if strings.Contains(ctx.Tree, forbidden) {
 			t.Fatalf("project tree leaked excluded path %q:\n%s", forbidden, ctx.Tree)
@@ -2647,9 +2680,21 @@ func TestAssembleProjectContextUsesTrackedWorktreeEvidenceOnly(t *testing.T) {
 	if !strings.Contains(prompt, "Git-visible tracked files only; untracked and index-hidden paths are intentionally excluded") {
 		t.Fatalf("project prompt did not disclose tracked-only snapshot:\n%s", prompt)
 	}
+	if !strings.Contains(prompt, "Tracked File Inventory (review TOC)") || !strings.Contains(prompt, "src/tracked.go") {
+		t.Fatalf("project prompt omitted tracked-file inventory:\n%s", prompt)
+	}
 	if strings.Contains(prompt, "untracked instructions") || strings.Contains(prompt, `"private": false`) {
 		t.Fatalf("project prompt leaked untracked config:\n%s", prompt)
 	}
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }
 
 func TestAssembleProjectContextIncludesTrackedNestedAgentsChain(t *testing.T) {

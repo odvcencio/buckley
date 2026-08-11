@@ -41,6 +41,7 @@ type reviewPRCommandOptions struct {
 	budgetUSD            float64
 	noBudget             bool
 	maxTurns             int
+	maxToolCalls         int
 	maxDiff              int
 	maxSupportingContext int
 	maxRetries           int
@@ -61,6 +62,7 @@ func parseReviewPRCommandOptions(args []string) (reviewPRCommandOptions, error) 
 	budgetUSD := fs.Float64("budget", 0, "maximum model spend in USD (0 = configured policy; defaults to uncapped)")
 	noBudget := fs.Bool("no-budget", false, "ignore a configured review cost cap for this run")
 	maxTurns := fs.Int("max-turns", 0, "hard model turn limit per review pass (0 = adaptive)")
+	maxToolCalls := fs.Int("max-tool-calls", 0, "maximum inspection/verification tool calls per review pass (0 = unlimited)")
 	maxDiff := fs.Int("max-diff-bytes", 0, "maximum prioritized diff bytes (0 = Buckbot default)")
 	maxSupportingContext := fs.Int("max-context-tokens", 0, "maximum supporting-context tokens; diff and evidence IDs are protected (0 = Buckbot default)")
 	maxRetries := fs.Int("max-validation-attempts", 0, "maximum schema-validation attempts (0 = Buckbot default)")
@@ -73,6 +75,9 @@ func parseReviewPRCommandOptions(args []string) (reviewPRCommandOptions, error) 
 	}
 	if *budgetUSD < 0 {
 		return reviewPRCommandOptions{}, fmt.Errorf("--budget must be zero or greater")
+	}
+	if *maxToolCalls < 0 {
+		return reviewPRCommandOptions{}, fmt.Errorf("--max-tool-calls must be zero or greater")
 	}
 	if *noBudget && *budgetUSD > 0 {
 		return reviewPRCommandOptions{}, fmt.Errorf("--no-budget cannot be combined with --budget")
@@ -93,6 +98,7 @@ func parseReviewPRCommandOptions(args []string) (reviewPRCommandOptions, error) 
 		budgetUSD:            *budgetUSD,
 		noBudget:             *noBudget,
 		maxTurns:             *maxTurns,
+		maxToolCalls:         *maxToolCalls,
 		maxDiff:              *maxDiff,
 		maxSupportingContext: *maxSupportingContext,
 		maxRetries:           *maxRetries,
@@ -142,7 +148,7 @@ func reviewPRFlagName(arg string) (string, bool) {
 
 func reviewPRFlagTakesValue(name string) bool {
 	switch name {
-	case "model", "critic-model", "timeout", "output", "budget", "max-turns", "max-diff-bytes", "max-context-tokens", "max-validation-attempts",
+	case "model", "critic-model", "timeout", "output", "budget", "max-turns", "max-tool-calls", "max-diff-bytes", "max-context-tokens", "max-validation-attempts",
 		"shards", "concurrency":
 		return true
 	default:
@@ -201,6 +207,7 @@ func runReviewPRCommand(args []string) error {
 
 	policy := runtime.policy.withOverrides(automatedReviewOptions{
 		maxIterations:              opts.maxTurns,
+		maxToolCalls:               opts.maxToolCalls,
 		maxRetries:                 opts.maxRetries,
 		maxDiffBytes:               opts.maxDiff,
 		maxSupportingContextTokens: opts.maxSupportingContext,
@@ -406,6 +413,7 @@ func defaultAutomatedReviewOptions(cfg *config.Config) automatedReviewOptions {
 	}
 	opts := automatedReviewOptions{
 		maxIterations:              cfg.Buckbot.MaxReviewIterations,
+		maxToolCalls:               cfg.Buckbot.MaxToolCalls,
 		maxRetries:                 cfg.Buckbot.MaxValidationAttempts,
 		maxDiffBytes:               cfg.Buckbot.MaxDiffBytes,
 		maxSupportingContextTokens: cfg.Buckbot.MaxSupportingContextTokens,
@@ -424,6 +432,9 @@ func defaultAutomatedReviewOptions(cfg *config.Config) automatedReviewOptions {
 func (defaults automatedReviewOptions) withOverrides(overrides automatedReviewOptions) automatedReviewOptions {
 	if overrides.maxIterations > 0 {
 		defaults.maxIterations = overrides.maxIterations
+	}
+	if overrides.maxToolCalls > 0 {
+		defaults.maxToolCalls = overrides.maxToolCalls
 	}
 	if overrides.maxRetries > 0 {
 		defaults.maxRetries = overrides.maxRetries
@@ -590,7 +601,7 @@ func boundPRApprovalCritic(opts automatedReviewOptions, def commands.ReviewPRDef
 		return opts
 	}
 	opts.criticMaxIterations = 1
-	opts.criticMaxToolCalls = 1
+	opts.criticMaxToolCalls = 0
 	return opts
 }
 

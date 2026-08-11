@@ -220,9 +220,8 @@ func (t *ProviderTransport) Do(ctx context.Context, httpClient *http.Client, met
 
 // DoStream marshals payload, retries the initial connection with the same
 // 429/5xx semantics as Do, and returns the open response body once connected
-// with a 200 status. Mid-stream retry is out of scope, matching Client: once
-// bytes start flowing the caller (typically via ParseSSEStream) owns error
-// handling for the rest of the stream.
+// with a 200 status. Callers that consume OpenAI-compatible SSE should prefer
+// Stream so an interruption before the first event can be retried safely.
 func (t *ProviderTransport) DoStream(ctx context.Context, httpClient *http.Client, method, url string, payload any, setHeaders HeaderFunc) (io.ReadCloser, error) {
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -287,6 +286,80 @@ func (t *ProviderTransport) DoStream(ctx context.Context, httpClient *http.Clien
 		return nil, err
 	}
 	return result, nil
+}
+
+// Stream executes an OpenAI-compatible SSE request. It retries an interrupted
+// response only if no event reached chunkChan, avoiding duplicate text or a
+// replayed tool call after the provider has started its response.
+func (t *ProviderTransport) Stream(ctx context.Context, httpClient *http.Client, method, url string, payload any, setHeaders HeaderFunc, chunkChan chan<- StreamChunk) error {
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("marshaling request: %w", err)
+	}
+
+	call := func() error {
+		var lastErr error
+		for attempt := 0; ; attempt++ {
+			if attempt > 0 {
+				delay := t.calculateRetryDelay(attempt, lastErr)
+				select {
+				case <-ctx.Done():
+					return errors.Join(ctx.Err(), lastErr)
+				case <-time.After(delay):
+				}
+			}
+
+			httpReq, err := http.NewRequestWithContext(ctx, method, url, bytes.NewReader(body))
+			if err != nil {
+				return fmt.Errorf("creating request: %w", err)
+			}
+			httpReq.Header.Set("Content-Type", "application/json")
+			httpReq.Header.Set("Accept", "text/event-stream")
+			if setHeaders != nil {
+				setHeaders(httpReq)
+			}
+			if err := t.waitForRateLimit(ctx); err != nil {
+				return err
+			}
+
+			resp, err := httpClient.Do(httpReq)
+			if err != nil {
+				lastErr = err
+				if t.canRetry(attempt, lastErr) {
+					continue
+				}
+				return retryExhaustedError(attempt, lastErr)
+			}
+			if resp.StatusCode != http.StatusOK {
+				apiErr := parseProviderError(resp)
+				resp.Body.Close()
+				lastErr = apiErr
+				if t.canRetry(attempt, apiErr) {
+					continue
+				}
+				if isRetryableError(apiErr) {
+					return retryExhaustedError(attempt, apiErr)
+				}
+				return apiErr
+			}
+
+			events, streamErr := ParseSSEStreamWithEventCount(ctx, resp.Body, chunkChan)
+			_ = resp.Body.Close()
+			if streamErr == nil {
+				return nil
+			}
+			lastErr = fmt.Errorf("parsing SSE stream: %w", streamErr)
+			if events == 0 && t.canRetry(attempt, lastErr) {
+				continue
+			}
+			if events == 0 && isRetryableError(lastErr) {
+				return retryExhaustedError(attempt, lastErr)
+			}
+			return lastErr
+		}
+	}
+
+	return t.runWithBreaker(call)
 }
 
 // parseProviderError mirrors Client.parseError: it reads and classifies a
@@ -361,13 +434,22 @@ func parseProviderError(resp *http.Response) *APIError {
 // a structured *APIError instead of being forwarded as if it were a normal
 // delta.
 func ParseSSEStream(ctx context.Context, r io.Reader, chunkChan chan<- StreamChunk) error {
+	_, err := ParseSSEStreamWithEventCount(ctx, r, chunkChan)
+	return err
+}
+
+// ParseSSEStreamWithEventCount parses an OpenAI-compatible SSE response and
+// reports how many events were delivered. A stream without [DONE] ended
+// incompletely even when its connection reached EOF without a scanner error.
+func ParseSSEStreamWithEventCount(ctx context.Context, r io.Reader, chunkChan chan<- StreamChunk) (int, error) {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024) // 1MB max line
+	events := 0
 
 	for scanner.Scan() {
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return events, ctx.Err()
 		default:
 		}
 
@@ -381,12 +463,12 @@ func ParseSSEStream(ctx context.Context, r io.Reader, chunkChan chan<- StreamChu
 
 		data := strings.TrimPrefix(line, "data: ")
 		if data == "[DONE]" {
-			return nil
+			return events, nil
 		}
 
 		var chunk StreamChunk
 		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
-			return fmt.Errorf("decoding chunk: %w", err)
+			return events, fmt.Errorf("decoding chunk: %w", err)
 		}
 		if chunk.Error != nil {
 			statusCode, _ := strconv.Atoi(strings.TrimSpace(chunk.Error.Code))
@@ -398,7 +480,7 @@ func ParseSSEStream(ctx context.Context, r io.Reader, chunkChan chan<- StreamChu
 				message = "provider returned a streaming error"
 			}
 			provider, details := providerErrorMetadata(chunk.Error.Metadata)
-			return &APIError{
+			return events, &APIError{
 				StatusCode: statusCode,
 				Message:    message,
 				Type:       chunk.Error.Type,
@@ -411,13 +493,14 @@ func ParseSSEStream(ctx context.Context, r io.Reader, chunkChan chan<- StreamChu
 
 		select {
 		case chunkChan <- chunk:
+			events++
 		case <-ctx.Done():
-			return ctx.Err()
+			return events, ctx.Err()
 		}
 	}
 
 	if err := scanner.Err(); err != nil {
-		return fmt.Errorf("reading stream: %w", err)
+		return events, fmt.Errorf("reading stream: %w", err)
 	}
-	return nil
+	return events, io.ErrUnexpectedEOF
 }

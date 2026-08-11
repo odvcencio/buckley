@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -196,6 +197,42 @@ func TestStreamACPTurn_ForwardsReasoningPerChunk(t *testing.T) {
 
 	if msg.Reasoning != strings.Join(wantReasoning, "") {
 		t.Fatalf("accumulated reasoning = %q, want %q", msg.Reasoning, strings.Join(wantReasoning, ""))
+	}
+}
+
+func TestStreamACPTurn_PreservesPartialContentAfterInterruptedStream(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		acpSSEChunk(t, w, "partial answer", "private reasoning", "")
+		// Deliberately omit [DONE] to simulate a provider connection reset.
+	}))
+	t.Cleanup(server.Close)
+
+	cfg := config.DefaultConfig()
+	cfg.Providers.OpenAI.Enabled = true
+	cfg.Providers.OpenAI.APIKey = "test-key"
+	cfg.Providers.OpenAI.BaseURL = server.URL
+	cfg.Models.DefaultProvider = "openai"
+	mgr, err := model.NewManager(cfg)
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	msg, _, err := streamACPTurn(context.Background(), mgr, model.ChatRequest{
+		Model: "gpt-4o", Messages: []model.Message{{Role: "user", Content: "hi"}},
+	}, nil)
+	if msg.Content != nil {
+		t.Fatalf("message content = %v, want no completed message", msg.Content)
+	}
+	var partial *partialStreamTurnError
+	if !errors.As(err, &partial) {
+		t.Fatalf("error = %v, want partialStreamTurnError", err)
+	}
+	if partial.text != "partial answer" {
+		t.Fatalf("partial text = %q, want assistant content only", partial.text)
+	}
+	if strings.Contains(partial.text, "private reasoning") {
+		t.Fatalf("partial text leaked reasoning: %q", partial.text)
 	}
 }
 

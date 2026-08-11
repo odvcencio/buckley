@@ -128,6 +128,7 @@ func DefaultConfig() *Config {
 			PerReviewBudgetUSD:         0,
 			MonthlyBudgetUSD:           0,
 			MaxReviewIterations:        0,
+			MaxToolCalls:               0,
 			MaxValidationAttempts:      2,
 			MaxDiffBytes:               240_000,
 			MaxSupportingContextTokens: 12_000,
