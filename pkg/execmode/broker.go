@@ -13,6 +13,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"net"
 	"net/http"
 	"os"
@@ -27,7 +28,9 @@ const (
 	maxReadBytes = 256 * 1024
 	// maxSearchResults bounds one text search.
 	maxSearchResults = 200
-	// maxListEntries bounds one directory listing.
+	// maxListEntries bounds one files.list response. The generated client
+	// transparently follows next_cursor, so programs still receive complete
+	// listings without one oversized broker response.
 	maxListEntries = 500
 )
 
@@ -267,15 +270,19 @@ func (b *Broker) filesRead(params map[string]any) (any, error) {
 	return map[string]any{"content": string(data), "truncated": truncated}, nil
 }
 
-// filesList lists a directory, optionally recursively. Recursive listing
-// exists so a program does not pay a model round-trip per subdirectory:
-// one call returns the whole tree, workspace-relative.
+// filesList returns one bounded page of a directory listing. Recursive listing
+// lets the generated client fetch a whole tree without model round-trips; the
+// client follows next_cursor transparently and returns workspace-relative paths.
 func (b *Broker) filesList(params map[string]any) (any, error) {
 	dir, _ := params["dir"].(string)
 	if dir == "" {
 		dir = "."
 	}
 	recursive, _ := params["recursive"].(bool)
+	cursor, err := listCursor(params["cursor"])
+	if err != nil {
+		return nil, err
+	}
 	full, err := b.jail(dir)
 	if err != nil {
 		return nil, err
@@ -286,10 +293,14 @@ func (b *Broker) filesList(params map[string]any) (any, error) {
 		return nil, fmt.Errorf("%s is a file, not a directory; use ReadFile for file contents", dir)
 	}
 
-	var names []string
+	var (
+		names   []string
+		hasMore bool
+	)
 	if recursive {
+		seen := 0
 		err = filepath.WalkDir(full, func(path string, entry os.DirEntry, walkErr error) error {
-			if walkErr != nil || len(names) >= maxListEntries {
+			if walkErr != nil {
 				return walkErr
 			}
 			if path == full {
@@ -297,6 +308,14 @@ func (b *Broker) filesList(params map[string]any) (any, error) {
 			}
 			if entry.IsDir() && skipDirName(entry.Name()) {
 				return filepath.SkipDir
+			}
+			if seen < cursor {
+				seen++
+				return nil
+			}
+			if len(names) >= maxListEntries {
+				hasMore = true
+				return fs.SkipAll
 			}
 			rel, relErr := filepath.Rel(b.root, path)
 			if relErr != nil {
@@ -306,27 +325,55 @@ func (b *Broker) filesList(params map[string]any) (any, error) {
 				rel += "/"
 			}
 			names = append(names, rel)
+			seen++
 			return nil
 		})
 	} else {
 		var entries []os.DirEntry
 		entries, err = os.ReadDir(full)
-		for _, entry := range entries {
+		if cursor > len(entries) {
+			cursor = len(entries)
+		}
+		end := cursor + maxListEntries
+		if end > len(entries) {
+			end = len(entries)
+		}
+		for _, entry := range entries[cursor:end] {
 			name := entry.Name()
 			if entry.IsDir() {
 				name += "/"
 			}
 			names = append(names, name)
-			if len(names) >= maxListEntries {
-				break
-			}
 		}
+		hasMore = end < len(entries)
 	}
 	if err != nil {
 		return nil, err
 	}
 	sort.Strings(names)
-	return map[string]any{"entries": names, "capped": len(names) >= maxListEntries}, nil
+	return map[string]any{
+		"entries":     names,
+		"capped":      hasMore,
+		"next_cursor": cursor + len(names),
+	}, nil
+}
+
+func listCursor(value any) (int, error) {
+	if value == nil {
+		return 0, nil
+	}
+	switch cursor := value.(type) {
+	case int:
+		if cursor >= 0 {
+			return cursor, nil
+		}
+	case float64:
+		asInt := int(cursor)
+		if cursor >= 0 && float64(asInt) == cursor {
+			return asInt, nil
+		}
+	}
+	return 0, fmt.Errorf("cursor must be a non-negative integer")
 }
 
 func skipDirName(name string) bool {

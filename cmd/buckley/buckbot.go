@@ -19,6 +19,8 @@ import (
 
 var postBuckbotReviewPayloadFn = postBuckbotReviewPayload
 var runBuckbotGitHubFn = runBuckbotGitHub
+var runBuckbotReviewFn = runReviewCommand
+var runBuckbotReviewPRFn = runReviewPRCommand
 
 type buckbotPoster func(context.Context, gitwatcher.PullRequestEvent, string) error
 
@@ -53,10 +55,46 @@ func waitForBuckbotRetry(ctx context.Context, delay time.Duration) error {
 }
 
 func runBuckbotCommand(args []string) error {
-	_ = args
-	return withExitCode(fmt.Errorf(
-		"automatic Buckbot webhook posting is retired; use `buckley review-pr <PR> -post` for an on-demand GitHub review",
-	), 2)
+	if len(args) == 0 {
+		return runBuckbotReviewFn(nil)
+	}
+
+	switch strings.ToLower(strings.TrimSpace(args[0])) {
+	case "review", "local":
+		return runBuckbotReviewFn(args[1:])
+	case "repo", "project":
+		return runBuckbotReviewFn(append([]string{"--project"}, args[1:]...))
+	case "pr", "pull-request", "review-pr":
+		if len(args) == 1 {
+			return withExitCode(fmt.Errorf("usage: buckley buckbot pr <pr-number-or-url> [flags]"), 2)
+		}
+		return runBuckbotReviewPRFn(args[1:])
+	case "help", "--help", "-h":
+		printBuckbotUsage()
+		return nil
+	default:
+		return runBuckbotReviewFn(args)
+	}
+}
+
+func printBuckbotUsage() {
+	fmt.Println("Buckbot - Buckley's general-purpose review agent")
+	fmt.Println()
+	fmt.Println("USAGE:")
+	fmt.Println("  buckley buckbot [review flags]        Review the current local scope")
+	fmt.Println("  buckley buckbot repo [review flags]   Review the repository as an advisory assessment")
+	fmt.Println("  buckley buckbot pr <number|url> [flags]")
+	fmt.Println("                                        Review a GitHub pull request")
+	fmt.Println()
+	fmt.Println("EXAMPLES:")
+	fmt.Println("  buckley buckbot")
+	fmt.Println("  buckley buckbot --scope branch")
+	fmt.Println("  buckley buckbot repo --model codex/auto")
+	fmt.Println("  buckley buckbot pr 123")
+	fmt.Println("  buckley buckbot pr 123 --post")
+	fmt.Println()
+	fmt.Println("Reviews have no default dollar cap. Use --budget <USD> for an explicit cap or --no-budget to bypass a configured cap.")
+	fmt.Println("Posting is always explicit: use --post only for a PR review you want Buckbot to write to GitHub.")
 }
 
 func postBuckbotReview(ctx context.Context, event gitwatcher.PullRequestEvent, review string) error {

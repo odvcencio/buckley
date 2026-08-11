@@ -14,7 +14,7 @@ Flags:
   --all          Enable heavier checks (equivalent to --race --all-tests)
   --race         Run tests with the Go race detector
   --all-tests    Run GO_TEST_TARGET=all ./scripts/test.sh
-  --skip-ui      Skip embedded UI build check (requires bun)
+  --skip-ui      Skip GoSX Mission Control UI check
   --skip-helm    Skip helm lint (requires helm)
   --skip-gitleaks Skip secret scan (requires gitleaks)
   --skip-gosec   Skip gosec scan (requires gosec)
@@ -92,13 +92,8 @@ echo "==> go build"
 CGO_ENABLED=0 go build -o buckley ./cmd/buckley
 
 if [[ "$skip_ui" == "0" ]]; then
-  if command -v bun >/dev/null 2>&1; then
-    echo "==> embedded UI build"
-    ./scripts/build-ui.sh
-    git diff --exit-code -- pkg/ipc/ui
-  else
-    echo "warning: bun not found; skipping UI build check (--skip-ui to silence)" >&2
-  fi
+  echo "==> GoSX Mission Control UI"
+  ./scripts/build-ui.sh
 fi
 
 if [[ "$skip_helm" == "0" ]]; then

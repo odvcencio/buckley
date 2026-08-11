@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"m31labs.dev/buckley/pkg/config"
 	"m31labs.dev/buckley/pkg/conversation"
 	"m31labs.dev/buckley/pkg/model"
 	"m31labs.dev/buckley/pkg/tool/builtin"
@@ -12,7 +13,7 @@ import (
 )
 
 func TestApplyToolLoopGuardWarnsThenStops(t *testing.T) {
-	state := &toolLoopState{governor: newInteractiveToolLoopGovernor()}
+	state := &toolLoopState{governor: newInteractiveToolLoopGovernor(nil)}
 	call := model.ToolCall{Function: model.FunctionCall{Name: "read_file", Arguments: `{"path":"same.go"}`}}
 	result := &builtin.Result{Success: true}
 
@@ -25,6 +26,54 @@ func TestApplyToolLoopGuardWarnsThenStops(t *testing.T) {
 	_ = applyToolLoopGuard(state, call, result, nil, "same")
 	if !strings.Contains(state.guardReason, "same action") {
 		t.Fatalf("guard reason = %q", state.guardReason)
+	}
+}
+
+func TestInteractiveToolLoopGovernorUsesConfiguredEmergencyFuse(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.AgentController.EmergencyFuse.ModelRequests = 40
+	governor := newInteractiveToolLoopGovernor(cfg)
+
+	for round := 1; round <= 40; round++ {
+		if decision := governor.BeginRound(); decision.Stop {
+			t.Fatalf("round %d stopped early: %+v", round, decision)
+		}
+	}
+	decision := governor.BeginRound()
+	if !decision.Stop || !strings.Contains(decision.Reason, "40-round") {
+		t.Fatalf("round 41 decision = %+v, want configured 40-round stop", decision)
+	}
+}
+
+func TestInteractiveToolLoopGovernorAllowsTranscriptSizedProgress(t *testing.T) {
+	governor := newInteractiveToolLoopGovernor(config.DefaultConfig())
+	for round := 1; round <= 40; round++ {
+		if decision := governor.BeginRound(); decision.Stop {
+			t.Fatalf("productive round %d stopped: %+v", round, decision)
+		}
+		decision := governor.Observe(
+			"read_file",
+			fmt.Sprintf(`{"path":"file-%d.go"}`, round),
+			fmt.Sprintf("new evidence %d", round),
+			true,
+		)
+		if decision.Stop {
+			t.Fatalf("productive tool call %d stopped: %+v", round, decision)
+		}
+	}
+}
+
+func TestInteractiveProgressControllerHonorsRolloutMode(t *testing.T) {
+	cfg := config.DefaultConfig()
+	if got := newInteractiveProgressController(cfg); got != nil {
+		t.Fatalf("legacy progress controller = %+v, want nil", got)
+	}
+	cfg.AgentController.Mode = "shadow"
+	cfg.AgentController.PolicyVersion = "progress-v2"
+	cfg.AgentController.EmergencyFuse.ModelRequests = 41
+	got := newInteractiveProgressController(cfg)
+	if got == nil || got.Mode != "shadow" || got.PolicyVersion != "progress-v2" || got.Fuses.ModelRequests != 41 {
+		t.Fatalf("interactive progress controller = %+v", got)
 	}
 }
 

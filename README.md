@@ -17,13 +17,20 @@ Agents working with Buckley should use the [using-buckley](https://github.com/od
 - One shared runtime powers TUI chat, `buckley -p`, headless sessions, ACP editor flows, and browser control.
 - Arbiter governs planning/execution/review model routing, reasoning effort, tool pools, timeouts, approvals, and escalation.
 - Runtime prompt assembly automatically pulls in `AGENTS.md`, `CLAUDE.md`, `.claude/instructions.md`, project context, and active skills.
-- Tool use is first-class. Buckley ships with 38 built-in tool entry points plus skills, plugins, telemetry, approvals, and SQLite-backed persistence.
+- When available, local Hyphae project spaces are discovered and offered as
+  durable decision and lesson context across TUI, one-shot, and ACP sessions.
+- Tool use is first-class. Buckley ships with a broad built-in tool surface plus skills, plugins, telemetry, approvals, and SQLite-backed persistence.
 - Sessions survive crashes. Plans, approvals, telemetry, and artifacts stay resumable.
+- Adaptive Harness v1 distinguishes a successful empty search from a failure,
+  then recommends one audited code-mode program when primitive exploration is
+  no longer efficient.
+- Subagents carry durable execution contracts and workspace claims. Typed
+  artifacts and model-profile receipts make their work inspectable and replayable.
 
 ## Quick Start
 
 ```bash
-go install m31labs.dev/buckley/cmd/buckley@v0.4.0
+go install m31labs.dev/buckley/cmd/buckley@v0.5.0
 export OPENROUTER_API_KEY="your-key"
 buckley
 ```
@@ -36,7 +43,7 @@ OpenAI, Anthropic, Google, and Ollama are also supported. OpenRouter is the defa
 | --- | --- | --- |
 | TUI | `buckley` | Interactive coding with approvals, streaming, history, and highlighted code |
 | One-shot | `buckley -p "inspect this repo and fix the failing tests"` | Fast task execution from the terminal |
-| Browser UI | `buckley serve --browser` | Mission Control, approvals, and remote session control |
+| Browser UI | `buckley serve --browser` | Local Mission Control with session control, approvals, and live telemetry |
 | ACP agent | `buckley acp` | Editor agent for ACP-compatible clients |
 | LSP bridge | `buckley lsp` | LSP editor integration on stdio |
 
@@ -47,6 +54,7 @@ buckley plan "add auth" "support email/password login"
 buckley execute <plan-id>
 buckley review
 buckley review-pr 123
+buckley buckbot repo
 buckley review-pr 123 --model codex/auto
 ```
 
@@ -59,6 +67,16 @@ The planner, builder, review, and runtime layers share the same governance stack
 - Governed tool exposure with role/task-aware pool filtering before tool calls are shown to the model.
 - Anthropic tool calling and tool-result round-tripping, so Claude-class models can participate in the same tool loop.
 - Better model resolution for routed raw IDs such as unqualified Claude model names.
+- Progress-aware tool outcomes that preserve explicit yield counts and avoid
+  treating a successful empty search as a tool failure.
+- Audited, bubblewrap-isolated code mode for batched repository analysis, with
+  one-time recovery guidance when a tool cannot efficiently answer a task.
+- Durable subagent coordination, child contracts, workspace claims, steering,
+  and replayable evidence.
+- Artifact v1 output contracts and deterministic projections for terminal,
+  JSON, Markdown++, SARIF, FluffyUI, and ACP clients.
+- Versioned empirical model profiles and Arbiter receipts that make dynamic
+  protocol choices measurable, bounded, and reversible.
 
 ## Commands People Actually Use
 
@@ -67,12 +85,13 @@ buckley commit
 buckley pr
 buckley review
 buckley review-pr 123
+buckley buckbot repo
 buckley hunt
 buckley dream
 buckley experiment run "compare-routing" -m z-ai/glm-5.2 -m moonshotai/kimi-k2.7-code -p "Implement feature X"
 ```
 
-`buckley review` examines one immutable snapshot of the selected local scope. Untracked files are excluded by default; repeat `--include-untracked path/to/new.go` to explicitly allowlist worktree files that may be sent to the model, after inspecting them for secrets. Native Codex verification receives a self-contained copy of only the captured commit plus patch; its JSONL command events must prove successful, classifiable build and test runs that cover the changed source paths. Use `--model codex/auto` to select Luna with xhigh reasoning for focused changes, Terra with medium reasoning for standard changes, and Sol with medium reasoning for broad or project reviews. An exact model override remains fixed. API-model inspection tools are rooted to an independently materialized copy of that snapshot and can run only deterministic build/test/check plans in an OS-enforced, read-only-source sandbox. `buckley review-pr` adds the remote PR diff, CI state, submitted reviews, and unresolved inline feedback; run it from a checkout whose `HEAD` is the PR head so verification is pinned to the same revision. API approvals require actual successful verification tool calls—not prose claiming PASS—and build/test evidence must use one applicable toolchain and cover every changed source package. Branch and PR approvals require passing verification, complete evidence, an explicit disposition for every supplied feedback ID, and an independent approval-critic pass. `buckley review -project` is an advisory architecture assessment and cannot issue an approval verdict. `buckley commit` and `buckley pr` use transparent tool-first workflows rather than opaque text-only prompting. In the TUI, fenced code blocks use Tree-sitter highlighting when the language grammar is available. Use `Shift+Enter` to add a line without sending and `Alt+C` to copy the latest code block. Conversation projection searches for the largest compacted history that fits the provider request budget.
+`buckley buckbot` is the general-purpose name for Buckley's review agent: use it for a local review, `buckley buckbot repo` for a repository-wide advisory assessment, or `buckley buckbot pr <PR> --post` for an explicitly posted GitHub review. Buckbot has no automatic dollar cap by default, so any configured model can complete a review at its normal depth; use `--budget <USD>` only when a specific run needs a spend ceiling. `buckley review` examines one immutable snapshot of the selected local scope. Untracked files are excluded by default; repeat `--include-untracked path/to/new.go` to explicitly allowlist worktree files that may be sent to the model, after inspecting them for secrets. Native Codex verification receives a self-contained copy of only the captured commit plus patch; its JSONL command events must prove successful, classifiable build and test runs that cover the changed source paths. Use `--model codex/auto` to select Luna with xhigh reasoning for focused changes, Terra with medium reasoning for standard changes, and Sol with medium reasoning for broad or project reviews. An exact model override remains fixed. API-model inspection tools are rooted to an independently materialized copy of that snapshot and can run only deterministic build/test/check plans in an OS-enforced, read-only-source sandbox. `buckley review-pr` adds the remote PR diff, CI state, submitted reviews, and unresolved inline feedback; run it from a checkout whose `HEAD` is the PR head so verification is pinned to the same revision. API approvals require actual successful verification tool calls—not prose claiming PASS—and build/test evidence must use one applicable toolchain and cover every changed source package. Branch and PR approvals require passing verification, complete evidence, an explicit disposition for every supplied feedback ID, and an independent approval-critic pass. `buckley review -project` is an advisory architecture assessment and cannot issue an approval verdict. `buckley commit` and `buckley pr` use transparent tool-first workflows rather than opaque text-only prompting. In the TUI, fenced code blocks use Tree-sitter highlighting when the language grammar is available. Use `Shift+Enter` to add a line without sending and `Alt+C` to copy the latest code block. Conversation projection searches for the largest compacted history that fits the provider request budget.
 
 ## Configuration
 

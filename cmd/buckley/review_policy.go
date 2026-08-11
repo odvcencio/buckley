@@ -142,9 +142,6 @@ func enabledReviewDuration(enabled bool, value time.Duration) time.Duration {
 func (opts automatedReviewOptions) withExecutionPlan(plan reviewExecutionPlan) automatedReviewOptions {
 	if opts.maxIterations <= 0 {
 		opts.maxIterations = plan.maxIterations
-		if isQwen37PlusReviewModel(opts.modelID) && opts.maxIterations > 2 {
-			opts.maxIterations = 2
-		}
 	}
 	opts.maxToolCalls = plan.maxToolCalls
 	opts.maxVerificationCalls = plan.maxVerificationCalls

@@ -21,6 +21,7 @@ func TestBuildRuntimeSystemPrompt_IncludesRuntimeContext(t *testing.T) {
 		BasePrompt:        "Base prompt",
 		AgentProfile:      "Agent: verifier\nAgent Instructions:\nRun tests.",
 		ProjectContext:    "Project context block",
+		KnowledgeContext:  "Hyphae Project Knowledge:\n- Available: hypha://m31labs/buckley",
 		WorkDir:           workDir,
 		RootDir:           root,
 		SkillsDescription: "Skills:\n- Example skill",
@@ -35,6 +36,7 @@ func TestBuildRuntimeSystemPrompt_IncludesRuntimeContext(t *testing.T) {
 		"Repository Instructions:",
 		"Use focused edits.",
 		"Project Context:\nProject context block",
+		"Hyphae Project Knowledge:\n- Available: hypha://m31labs/buckley",
 		"Working Directory: " + workDir,
 		"Skills:\n- Example skill",
 	} {

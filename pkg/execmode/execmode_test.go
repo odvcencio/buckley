@@ -377,6 +377,96 @@ func TestBroker_GuidanceAndRicherCapabilities(t *testing.T) {
 	}
 }
 
+func TestBroker_FilesListPaginatesWithoutSilentTruncation(t *testing.T) {
+	workspace := t.TempDir()
+	for i := 0; i < maxListEntries+17; i++ {
+		path := filepath.Join(workspace, fmt.Sprintf("file-%04d.go", i))
+		if err := os.WriteFile(path, nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	broker, err := NewBroker(workspace, &recordingSink{})
+	if err != nil {
+		t.Fatalf("NewBroker: %v", err)
+	}
+
+	first, err := broker.filesList(map[string]any{"dir": ".", "recursive": true})
+	if err != nil {
+		t.Fatalf("first page: %v", err)
+	}
+	firstPage := first.(map[string]any)
+	if got := len(firstPage["entries"].([]string)); got != maxListEntries {
+		t.Fatalf("first page entries = %d, want %d", got, maxListEntries)
+	}
+	if capped, _ := firstPage["capped"].(bool); !capped {
+		t.Fatal("first page capped = false, want another page")
+	}
+	cursor, _ := firstPage["next_cursor"].(int)
+	if cursor != maxListEntries {
+		t.Fatalf("first page next_cursor = %d, want %d", cursor, maxListEntries)
+	}
+
+	second, err := broker.filesList(map[string]any{
+		"dir":       ".",
+		"recursive": true,
+		"cursor":    cursor,
+	})
+	if err != nil {
+		t.Fatalf("second page: %v", err)
+	}
+	secondPage := second.(map[string]any)
+	if got := len(secondPage["entries"].([]string)); got != 17 {
+		t.Fatalf("second page entries = %d, want 17", got)
+	}
+	if capped, _ := secondPage["capped"].(bool); capped {
+		t.Fatal("second page capped = true, want complete listing")
+	}
+}
+
+func TestRunner_WalkDirPaginatesCompleteTree(t *testing.T) {
+	if DetectIsolation() != IsolationBwrap {
+		t.Skip("bubblewrap unavailable")
+	}
+	workspace := t.TempDir()
+	bulk := filepath.Join(workspace, "bulk")
+	if err := os.MkdirAll(bulk, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	want := maxListEntries + 17
+	for i := 0; i < want; i++ {
+		path := filepath.Join(bulk, fmt.Sprintf("file-%04d.go", i))
+		if err := os.WriteFile(path, nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runner, err := NewRunner(workspace, &recordingSink{}, DefaultTimeout)
+	if err != nil {
+		t.Fatalf("NewRunner: %v", err)
+	}
+	result, err := runner.Run(context.Background(), `package main
+
+import (
+	"fmt"
+
+	"execprogram/caps"
+)
+
+func main() {
+	files, err := caps.WalkDir("bulk")
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println(len(files))
+}
+`)
+	if err != nil {
+		t.Fatalf("Run: %v\nstderr:\n%s", err, result.Stderr)
+	}
+	if got := strings.TrimSpace(result.Stdout); got != fmt.Sprint(want) {
+		t.Fatalf("stdout = %q, want %d complete entries", got, want)
+	}
+}
+
 // globSearchCount counts matches through a JSON round-trip so the test
 // does not depend on the broker's anonymous result struct.
 func globSearchCount(t *testing.T, broker *Broker, pattern, glob string) int {

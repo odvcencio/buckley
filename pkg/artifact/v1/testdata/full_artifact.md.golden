@@ -1,0 +1,77 @@
+# Harness review
+
+Status: `completed` · Kind: `review` · Artifact: `art_c9b01b9476943945d998`
+
+The durable harness result is ready for verification.
+
+## Summary
+
+A typed artifact keeps every client in agreement.
+
+- **Mode:** dynamic
+- **Workers:** 3
+
+
+| Metric | Value |
+| --- | --- |
+| p95 | 12 ms |
+
+
+````go
+fmt.Println("```")
+````
+
+Diff for `pkg/harness.go`
+
+```diff
+- old
++ new
+```
+
+- [x] Tests pass
+- [ ] Benchmark — run before release
+
+
+### [LOW] Visible state
+
+Show zero-result searches clearly.
+
+Confidence: 0.90
+
+**verification:** `passed` (12 ms)
+
+unit tests passed
+
+- **allocs:** 0
+
+- `ev_operation` — test output
+
+
+`ev_block` — operation transcript
+
+## Findings
+### [HIGH] Recoverable worker loss
+
+A lost worker must become resumable instead of disappearing.
+
+Location: `pkg/subagent/coordinator.go:42-45`
+
+Confidence: 0.95
+
+Recommendation: Persist the result before releasing claims.
+
+Evidence:
+- `ev_finding` — run ledger
+
+
+## Diagnostics
+- **WARNING** `harness.replay`: Replay is waiting for an evidence fetch. (`pkg/evidence/store.go:12`)
+
+## Evidence
+- `ev_summary` — summary evidence (test\_output)
+
+## Next actions
+- Run the performance suite. (`high`)
+
+## Incomplete
+- Cross-platform benchmark is pending.

@@ -286,7 +286,7 @@ func TestToolApprovalRequiredRespectsToolPolicyList(t *testing.T) {
 }
 
 func TestBuildHeadlessSystemPromptIncludesAgentProfile(t *testing.T) {
-	prompt := buildHeadlessSystemPrompt("", "Agent: browser\nAgent Instructions:\nUse approval gates.", nil, &storage.Session{ProjectPath: "/tmp/project"}, nil)
+	prompt := buildHeadlessSystemPrompt("", "Agent: browser\nAgent Instructions:\nUse approval gates.", nil, &storage.Session{ProjectPath: "/tmp/project"}, nil, "")
 	for _, want := range []string{
 		"Agent Profile:\nAgent: browser",
 		"Agent Instructions:\nUse approval gates.",

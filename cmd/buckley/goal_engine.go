@@ -11,6 +11,7 @@ import (
 	"m31labs.dev/buckley/pkg/evidence"
 	"m31labs.dev/buckley/pkg/goalloop"
 	"m31labs.dev/buckley/pkg/model"
+	"m31labs.dev/buckley/pkg/prompts"
 	"m31labs.dev/buckley/pkg/rules"
 	"m31labs.dev/buckley/pkg/runledger"
 	"m31labs.dev/buckley/pkg/taskstate"
@@ -270,7 +271,15 @@ func (e *goalTurnEngine) dispatchGoalTool(ctx context.Context, task goalloop.Tas
 		return agentloop.ToolOutcome{Content: "No result", EffectClass: effectClass}
 	}
 	content := formatACPToolResult(result, nil)
-	return agentloop.ToolOutcome{Content: content, Success: result.Success, EffectClass: effectClass}
+	yield := tool.ResultYieldForTool(call.Function.Name, result, nil)
+	return agentloop.ToolOutcome{
+		Content:       content,
+		Success:       result.Success,
+		EffectClass:   effectClass,
+		YieldObserved: yield.Observed,
+		YieldCount:    yield.Count,
+		YieldUnit:     yield.Unit,
+	}
 }
 
 // storeCompletionEvidence persists the completion summary as an evidence
@@ -354,8 +363,7 @@ func goalTurnSystemPrompt(task goalloop.TaskContext, codeMode bool) string {
 		b.WriteString("\nThis is a VERIFY turn: run the cheapest checks that prove or disprove the work (build, tests, lint). Do not explore or edit beyond what verification needs.\n")
 	}
 	if codeMode {
-		b.WriteString("\nCODE MODE: prefer one exec_program run over a chain of read/search calls — plan the whole investigation as a program, run it once, and read the printed result. " +
-			"Iterate inside this turn: if the program fails to compile or a caps call errors, fix the source and call exec_program again immediately. Never end the turn to retry a program.\n")
+		b.WriteString("\n" + prompts.CodeModeSystemPrompt + "\n")
 	}
 	b.WriteString("\nWhen the task is genuinely done, call " + goalCompleteToolName + " with a short factual summary. ")
 	b.WriteString("If you cannot proceed without something you lack (credentials, a decision, missing state), call " + goalBlockedToolName + " instead of guessing.")

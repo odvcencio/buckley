@@ -35,6 +35,8 @@ const (
 type Request struct {
 	ID              string
 	ParentSessionID string
+	ParentRunID     string
+	TaskID          string
 	Agent           string
 	Spec            string
 	Task            string
@@ -59,6 +61,17 @@ type Request struct {
 	// loop enforces this yet; it is threaded through for a Runner that
 	// does support an iteration budget to honor.
 	StepCap int
+	// AllowedTools is the resolved capability allowlist. Nil means the
+	// persona and caller left it unconstrained; an empty non-nil list means
+	// explicitly no tools.
+	AllowedTools []string
+	// The remaining fields are adapter-neutral execution constraints supplied
+	// by a coordinator.
+	Effort          string
+	WorkspaceClaims []string
+	Isolation       string
+	OutputSchema    string
+	ApprovalPosture string
 }
 
 type Runner interface {
@@ -68,6 +81,8 @@ type Runner interface {
 type Snapshot struct {
 	ID              string    `json:"id"`
 	ParentSessionID string    `json:"parent_session_id,omitempty"`
+	ParentRunID     string    `json:"parent_run_id,omitempty"`
+	TaskID          string    `json:"task_id,omitempty"`
 	Agent           string    `json:"agent,omitempty"`
 	Spec            string    `json:"spec,omitempty"`
 	Task            string    `json:"task,omitempty"`
@@ -79,10 +94,22 @@ type Snapshot struct {
 	Error           string    `json:"error,omitempty"`
 	// Persona, Model, and Tier are empty unless the spawn resolved a
 	// persona via SpawnOptions.Persona; see Request for their meaning.
-	Persona string       `json:"persona,omitempty"`
-	Model   string       `json:"model,omitempty"`
-	Tier    persona.Tier `json:"tier,omitempty"`
+	Persona         string       `json:"persona,omitempty"`
+	Model           string       `json:"model,omitempty"`
+	Tier            persona.Tier `json:"tier,omitempty"`
+	StepCap         int          `json:"step_cap,omitempty"`
+	AllowedTools    []string     `json:"allowed_tools,omitempty"`
+	Effort          string       `json:"effort,omitempty"`
+	WorkspaceClaims []string     `json:"workspace_claims,omitempty"`
+	Isolation       string       `json:"isolation,omitempty"`
+	OutputSchema    string       `json:"output_schema,omitempty"`
+	ApprovalPosture string       `json:"approval_posture,omitempty"`
 }
+
+// LifecycleObserver receives a copy of a child snapshot whenever its PID or
+// terminal state becomes known. It is invoked outside the manager lock so a
+// durable adapter can record lifecycle facts without blocking peers.
+type LifecycleObserver func(Snapshot)
 
 type run struct {
 	snapshot Snapshot
@@ -101,6 +128,7 @@ type Manager struct {
 	wg            sync.WaitGroup
 	personas      *persona.Registry
 	parentPersona persona.Persona
+	observer      LifecycleObserver
 }
 
 func NewManager(runner Runner, maxConcurrent int) *Manager {
@@ -142,18 +170,48 @@ func (m *Manager) SetPersonaContext(registry *persona.Registry, parent persona.P
 	m.mu.Unlock()
 }
 
+// SetLifecycleObserver installs the optional observer used by durable
+// coordinator adapters. Passing nil disables observation.
+func (m *Manager) SetLifecycleObserver(observer LifecycleObserver) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	m.observer = observer
+	m.mu.Unlock()
+}
+
 // SpawnOptions is the additive, persona-aware counterpart to Spawn's
 // positional arguments. Spawn builds one from its arguments and calls
 // SpawnWithOptions; existing Spawn call sites are unaffected.
 type SpawnOptions struct {
-	Agent          string
-	Spec           string
-	Task           string
-	TimeoutSeconds int
+	// ID is the stable child-run identity supplied by a durable coordinator.
+	// Empty keeps legacy ULID generation.
+	ID              string
+	ParentSessionID string
+	ParentRunID     string
+	TaskID          string
+	Agent           string
+	Spec            string
+	Task            string
+	TimeoutSeconds  int
 	// Persona is an optional persona name (bare or "@name") resolved
 	// against the registry passed to SetPersonaContext. Empty means "no
 	// persona": Spawn's legacy behavior, no escalation check performed.
 	Persona string
+	// The remaining fields are already-resolved execution constraints. A
+	// persona may narrow or replace its model, tier, prompt, tool allowlist,
+	// and step cap; the local manager threads the final values to Runner.
+	Model           string
+	Tier            persona.Tier
+	SystemPrompt    string
+	AllowedTools    []string
+	StepCap         int
+	Effort          string
+	WorkspaceClaims []string
+	Isolation       string
+	OutputSchema    string
+	ApprovalPosture string
 }
 
 func (m *Manager) Spawn(agent, spec, task string, timeoutSeconds int) (Snapshot, error) {
@@ -183,10 +241,11 @@ func (m *Manager) SpawnWithOptions(opts SpawnOptions) (Snapshot, error) {
 
 	var (
 		personaName  string
-		model        string
-		tier         persona.Tier
-		systemPrompt string
-		stepCap      int
+		model        = strings.TrimSpace(opts.Model)
+		tier         = opts.Tier
+		systemPrompt = strings.TrimSpace(opts.SystemPrompt)
+		stepCap      = opts.StepCap
+		allowedTools = copyStrings(opts.AllowedTools)
 	)
 	if personaName = strings.TrimSpace(opts.Persona); personaName != "" {
 		m.mu.RLock()
@@ -194,6 +253,9 @@ func (m *Manager) SpawnWithOptions(opts SpawnOptions) (Snapshot, error) {
 		parentPersona := m.parentPersona
 		m.mu.RUnlock()
 
+		if registry == nil {
+			return Snapshot{}, fmt.Errorf("subagent: persona registry is unavailable")
+		}
 		child, ok := registry.Resolve(personaName)
 		if !ok {
 			return Snapshot{}, fmt.Errorf("subagent: persona not found: %s", personaName)
@@ -202,10 +264,17 @@ func (m *Manager) SpawnWithOptions(opts SpawnOptions) (Snapshot, error) {
 		if err != nil {
 			return Snapshot{}, fmt.Errorf("subagent: spawn denied: %w", err)
 		}
-		model = child.Model
+		if strings.TrimSpace(child.Model) != "" {
+			model = child.Model
+		}
 		tier = resolvedTier
-		systemPrompt = child.Prompt
-		stepCap = child.StepCap
+		if strings.TrimSpace(child.Prompt) != "" {
+			systemPrompt = child.Prompt
+		}
+		if child.StepCap > 0 {
+			stepCap = child.StepCap
+		}
+		allowedTools = intersectTools(allowedTools, child.AllowedTools)
 	}
 
 	m.mu.Lock()
@@ -217,7 +286,14 @@ func (m *Manager) SpawnWithOptions(opts SpawnOptions) (Snapshot, error) {
 		m.mu.Unlock()
 		return Snapshot{}, fmt.Errorf("subagent concurrency limit reached: %d", m.maxConcurrent)
 	}
-	id := ulid.Make().String()
+	id := strings.TrimSpace(opts.ID)
+	if id == "" {
+		id = ulid.Make().String()
+	}
+	if _, exists := m.runs[id]; exists {
+		m.mu.Unlock()
+		return Snapshot{}, fmt.Errorf("subagent run already exists: %s", id)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	if opts.TimeoutSeconds > 0 {
 		ctx, cancel = context.WithTimeout(context.Background(), time.Duration(opts.TimeoutSeconds)*time.Second)
@@ -225,7 +301,9 @@ func (m *Manager) SpawnWithOptions(opts SpawnOptions) (Snapshot, error) {
 	current := &run{
 		snapshot: Snapshot{
 			ID:              id,
-			ParentSessionID: m.parentSession,
+			ParentSessionID: firstNonEmpty(strings.TrimSpace(opts.ParentSessionID), m.parentSession),
+			ParentRunID:     strings.TrimSpace(opts.ParentRunID),
+			TaskID:          strings.TrimSpace(opts.TaskID),
 			Agent:           strings.TrimSpace(opts.Agent),
 			Spec:            strings.TrimSpace(opts.Spec),
 			Task:            boundedTask(task),
@@ -234,6 +312,13 @@ func (m *Manager) SpawnWithOptions(opts SpawnOptions) (Snapshot, error) {
 			Persona:         personaName,
 			Model:           model,
 			Tier:            tier,
+			StepCap:         stepCap,
+			AllowedTools:    copyStrings(allowedTools),
+			Effort:          strings.TrimSpace(opts.Effort),
+			WorkspaceClaims: copyStrings(opts.WorkspaceClaims),
+			Isolation:       strings.TrimSpace(opts.Isolation),
+			OutputSchema:    strings.TrimSpace(opts.OutputSchema),
+			ApprovalPosture: strings.TrimSpace(opts.ApprovalPosture),
 		},
 		cancel: cancel,
 		done:   make(chan struct{}),
@@ -247,6 +332,8 @@ func (m *Manager) SpawnWithOptions(opts SpawnOptions) (Snapshot, error) {
 	go m.run(ctx, current, Request{
 		ID:              id,
 		ParentSessionID: snapshot.ParentSessionID,
+		ParentRunID:     snapshot.ParentRunID,
+		TaskID:          snapshot.TaskID,
 		Agent:           snapshot.Agent,
 		Spec:            snapshot.Spec,
 		Task:            task,
@@ -256,6 +343,12 @@ func (m *Manager) SpawnWithOptions(opts SpawnOptions) (Snapshot, error) {
 		Tier:            tier,
 		SystemPrompt:    systemPrompt,
 		StepCap:         stepCap,
+		AllowedTools:    copyStrings(allowedTools),
+		Effort:          snapshot.Effort,
+		WorkspaceClaims: copyStrings(snapshot.WorkspaceClaims),
+		Isolation:       snapshot.Isolation,
+		OutputSchema:    snapshot.OutputSchema,
+		ApprovalPosture: snapshot.ApprovalPosture,
 	})
 	return snapshot, nil
 }
@@ -270,6 +363,7 @@ func (m *Manager) run(ctx context.Context, current *run, request Request) {
 		snapshot := current.snapshot
 		m.mu.Unlock()
 		m.publish(telemetry.EventSubagentState, snapshot, "")
+		m.observe(snapshot)
 	})
 
 	m.mu.Lock()
@@ -291,6 +385,7 @@ func (m *Manager) run(ctx context.Context, current *run, request Request) {
 	snapshot := current.snapshot
 	m.mu.Unlock()
 	m.publish(eventType, snapshot, snapshot.Error)
+	m.observe(snapshot)
 }
 
 func (m *Manager) List() []Snapshot {
@@ -410,6 +505,36 @@ func (m *Manager) publish(eventType telemetry.EventType, snapshot Snapshot, errT
 		"pid":               snapshot.PID,
 		"provider":          "buckley",
 	}
+	if snapshot.Persona != "" {
+		data["persona"] = snapshot.Persona
+	}
+	if snapshot.Model != "" {
+		data["model"] = snapshot.Model
+	}
+	if snapshot.Tier != "" {
+		data["tier"] = string(snapshot.Tier)
+	}
+	if snapshot.Effort != "" {
+		data["effort"] = snapshot.Effort
+	}
+	if snapshot.StepCap > 0 {
+		data["step_cap"] = snapshot.StepCap
+	}
+	if snapshot.Isolation != "" {
+		data["isolation"] = snapshot.Isolation
+	}
+	if snapshot.OutputSchema != "" {
+		data["output_schema"] = snapshot.OutputSchema
+	}
+	if snapshot.ApprovalPosture != "" {
+		data["approval_posture"] = snapshot.ApprovalPosture
+	}
+	if len(snapshot.AllowedTools) > 0 {
+		data["allowed_tool_count"] = len(snapshot.AllowedTools)
+	}
+	if len(snapshot.WorkspaceClaims) > 0 {
+		data["workspace_claims"] = telemetry.SanitizeValue(copyStrings(snapshot.WorkspaceClaims), "workspace_claims", maxTaskTelemetryBytes)
+	}
 	if snapshot.Task != "" {
 		data["task"] = telemetry.SanitizeText(snapshot.Task, maxTaskTelemetryBytes)
 	}
@@ -431,6 +556,69 @@ func (m *Manager) publish(eventType telemetry.EventType, snapshot Snapshot, errT
 		TaskID:    snapshot.ID,
 		Data:      data,
 	})
+}
+
+func (m *Manager) observe(snapshot Snapshot) {
+	if m == nil {
+		return
+	}
+	m.mu.RLock()
+	observer := m.observer
+	m.mu.RUnlock()
+	if observer != nil {
+		observer(snapshot)
+	}
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value = strings.TrimSpace(value); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func copyStrings(values []string) []string {
+	if values == nil {
+		return nil
+	}
+	out := make([]string, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	return out
+}
+
+// intersectTools preserves nil's "unconstrained" semantics and otherwise
+// applies the persona allowlist as a non-broadening capability boundary.
+func intersectTools(requested, personaTools []string) []string {
+	if personaTools == nil {
+		return copyStrings(requested)
+	}
+	personaSet := make(map[string]struct{}, len(personaTools))
+	for _, value := range copyStrings(personaTools) {
+		personaSet[value] = struct{}{}
+	}
+	if requested == nil {
+		return copyStrings(personaTools)
+	}
+	out := make([]string, 0, len(requested))
+	for _, value := range copyStrings(requested) {
+		if _, ok := personaSet[value]; ok {
+			out = append(out, value)
+		}
+	}
+	return out
 }
 
 func boundedOutput(output string) string {

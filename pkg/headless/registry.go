@@ -29,10 +29,17 @@ type CreateSessionRequest struct {
 	Branch      string            `json:"branch,omitempty"`
 	Env         map[string]string `json:"env,omitempty"`
 	Model       string            `json:"model,omitempty"`
+	Agent       string            `json:"agent,omitempty"`
+	Subagent    string            `json:"subagent,omitempty"`
 	Prompt      string            `json:"prompt,omitempty"`
 	IdleTimeout string            `json:"idleTimeout,omitempty"`
 	Limits      *ResourceLimits   `json:"limits,omitempty"`
 	ToolPolicy  *ToolPolicy       `json:"toolPolicy,omitempty"`
+
+	// AgentProfile is resolved by the authenticated IPC layer from the
+	// project-local agent catalog. It is intentionally not accepted from JSON
+	// so callers cannot smuggle arbitrary system instructions into a session.
+	AgentProfile string `json:"-"`
 }
 
 // SessionInfo provides summary information about a headless session.
@@ -216,7 +223,13 @@ func (r *Registry) CreateSession(req CreateSessionRequest) (*SessionInfo, error)
 		tools.SetMaxExecTimeSeconds(req.ToolPolicy.MaxExecTimeSeconds)
 	}
 
-	// Create runner
+	// Create runner. A per-session profile resolved by IPC takes precedence over
+	// the server-wide profile; this lets the browser launch different agents and
+	// subagents without changing daemon configuration.
+	agentProfile := strings.TrimSpace(req.AgentProfile)
+	if agentProfile == "" {
+		agentProfile = r.agentProfile
+	}
 	runner, err := NewRunner(RunnerConfig{
 		Session:       sess,
 		ModelManager:  r.modelManager,
@@ -229,7 +242,7 @@ func (r *Registry) CreateSession(req CreateSessionRequest) (*SessionInfo, error)
 		ModelOverride: modelID,
 		ToolPolicy:    req.ToolPolicy,
 		MaxRuntime:    maxRuntime,
-		AgentProfile:  r.agentProfile,
+		AgentProfile:  agentProfile,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("create runner: %w", err)
@@ -395,7 +408,7 @@ func applyToolPolicy(registry *tool.Registry, policy *ToolPolicy) {
 		denied[name] = struct{}{}
 	}
 
-	if len(allowed) == 0 && len(denied) == 0 {
+	if policy.AllowedTools == nil && len(denied) == 0 {
 		return
 	}
 
@@ -410,7 +423,7 @@ func applyToolPolicy(registry *tool.Registry, policy *ToolPolicy) {
 		if _, ok := denied[name]; ok {
 			return false
 		}
-		if len(allowed) > 0 {
+		if policy.AllowedTools != nil {
 			_, ok := allowed[name]
 			return ok
 		}

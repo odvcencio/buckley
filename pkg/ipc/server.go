@@ -277,6 +277,7 @@ func (s *Server) Start(ctx context.Context) error {
 
 	// Mission Control routes
 	s.setupMissionRoutes(api)
+	s.setupAgentRoutes(api)
 
 	// Headless session routes
 	s.setupHeadlessRoutes(api)
@@ -362,7 +363,7 @@ func (s *Server) Start(ctx context.Context) error {
 			if s.cfg.StaticDir != "" {
 				s.logger.Printf("serving static assets from %s", s.cfg.StaticDir)
 			} else {
-				s.logger.Printf("serving embedded web UI")
+				s.logger.Printf("serving embedded GoSX Mission Control UI")
 			}
 		} else {
 			s.logger.Printf("browser UI disabled (enable ipc.enable_browser to serve UI)")
@@ -399,11 +400,23 @@ func (s *Server) validateStartupConfig() error {
 
 func (s *Server) mountBrowserUI(router *chi.Mux) {
 	staticDir := strings.TrimSpace(s.cfg.StaticDir)
+	if staticDir == "" {
+		uiHandler := s.newGoSXUIHandler()
+		router.NotFound(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodPost {
+				http.NotFound(w, r)
+				return
+			}
+			uiHandler.ServeHTTP(w, r)
+		})
+		return
+	}
+
 	var uiFS iofs.FS
 	if staticDir != "" {
 		info, err := os.Stat(staticDir)
 		if err != nil || !info.IsDir() {
-			s.logger.Printf("warning: static assets directory %q unavailable, falling back to embedded UI", staticDir)
+			s.logger.Printf("warning: static assets directory %q unavailable, falling back to GoSX UI", staticDir)
 			staticDir = ""
 		}
 	}
@@ -411,13 +424,15 @@ func (s *Server) mountBrowserUI(router *chi.Mux) {
 		uiFS = os.DirFS(staticDir)
 	}
 	if uiFS == nil {
-		embeddedFS, err := GetEmbeddedUI()
-		if err != nil {
-			s.logger.Printf("warning: failed to load embedded UI: %v", err)
-			router.Get("/", s.handleRoot)
-			return
-		}
-		uiFS = embeddedFS
+		uiHandler := s.newGoSXUIHandler()
+		router.NotFound(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodPost {
+				http.NotFound(w, r)
+				return
+			}
+			uiHandler.ServeHTTP(w, r)
+		})
+		return
 	}
 
 	fileServer := http.FileServer(http.FS(uiFS))
@@ -1986,8 +2001,8 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 	mode := "API only"
 	hint := "Enable the browser UI with ipc.enable_browser: true (or run `buckley serve --browser`)."
 	if s.cfg.EnableBrowser {
-		mode = "Built without web UI"
-		hint = "This binary was built without the embedded web UI (requires -tags webui, see `make build-webui`). Serve assets from disk instead with `buckley serve --browser --assets <dir>`."
+		mode = "GoSX Mission Control"
+		hint = "The embedded GoSX Mission Control UI is available. Use `--assets <dir>` only when overriding it with an external static directory."
 	}
 	fmt.Fprintf(w, `<!doctype html>
 <html lang="en">

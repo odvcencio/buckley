@@ -95,6 +95,26 @@ func TestReviewCommandsReserveEnoughTimeByDefault(t *testing.T) {
 	}
 }
 
+func TestParseReviewCommandOptionsRejectsConflictingBudgetModes(t *testing.T) {
+	_, err := parseReviewCommandOptions([]string{"--budget", "0.25", "--no-budget"})
+	if err == nil || !strings.Contains(err.Error(), "cannot be combined") {
+		t.Fatalf("error = %v, want conflicting budget modes", err)
+	}
+
+	_, err = parseReviewCommandOptions([]string{"--budget", "-0.25"})
+	if err == nil || !strings.Contains(err.Error(), "must be zero or greater") {
+		t.Fatalf("error = %v, want non-negative budget validation", err)
+	}
+
+	opts, err := parseReviewCommandOptions([]string{"--no-budget"})
+	if err != nil {
+		t.Fatalf("parseReviewCommandOptions(--no-budget) error = %v", err)
+	}
+	if !opts.noBudget {
+		t.Fatal("noBudget = false, want true")
+	}
+}
+
 func TestNewReviewProgressHonorsQuietMode(t *testing.T) {
 	previous := quietMode
 	t.Cleanup(func() { quietMode = previous })

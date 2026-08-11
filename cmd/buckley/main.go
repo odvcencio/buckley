@@ -26,6 +26,7 @@ import (
 	acppb "m31labs.dev/buckley/pkg/acp/proto"
 	acpserver "m31labs.dev/buckley/pkg/acp/server"
 	"m31labs.dev/buckley/pkg/agentspec"
+	artifactv1 "m31labs.dev/buckley/pkg/artifact/v1"
 	"m31labs.dev/buckley/pkg/config"
 	projectcontext "m31labs.dev/buckley/pkg/context"
 	projectconversation "m31labs.dev/buckley/pkg/conversation"
@@ -35,10 +36,14 @@ import (
 	"m31labs.dev/buckley/pkg/gts"
 	"m31labs.dev/buckley/pkg/ipc"
 	"m31labs.dev/buckley/pkg/ipc/command"
+	knowledgehyphae "m31labs.dev/buckley/pkg/knowledge/hyphae"
 	"m31labs.dev/buckley/pkg/model"
 	"m31labs.dev/buckley/pkg/orchestrator"
+	"m31labs.dev/buckley/pkg/prompts"
+	"m31labs.dev/buckley/pkg/protocol"
 	rlmrunner "m31labs.dev/buckley/pkg/rlm/runner"
 	"m31labs.dev/buckley/pkg/rules"
+	"m31labs.dev/buckley/pkg/runledger"
 	"m31labs.dev/buckley/pkg/setup"
 	"m31labs.dev/buckley/pkg/skill"
 	"m31labs.dev/buckley/pkg/storage"
@@ -118,6 +123,7 @@ type startupOptions struct {
 	configPath       string
 	modelOverride    string
 	agentPath        string
+	codeMode         bool
 	plainModeSet     bool
 	plainMode        bool
 }
@@ -269,7 +275,7 @@ func main() {
 	// Handle one-shot prompt mode (-p flag)
 	if promptFlag != "" {
 		// Prompt provided via -p flag
-		exitCode := executeOneShot(promptFlag, cfg, modelManager, store, projectContext, planStore, agentProfile, modelOverrideFlag, nil)
+		exitCode := executeOneShot(promptFlag, cfg, modelManager, store, projectContext, planStore, agentProfile, modelOverrideFlag, nil, opts.codeMode)
 		os.Exit(exitCode)
 	}
 
@@ -285,7 +291,7 @@ func main() {
 			}
 			if len(lines) > 0 {
 				prompt := strings.Join(lines, "\n")
-				exitCode := executeOneShot(prompt, cfg, modelManager, store, projectContext, planStore, agentProfile, modelOverrideFlag, nil)
+				exitCode := executeOneShot(prompt, cfg, modelManager, store, projectContext, planStore, agentProfile, modelOverrideFlag, nil, opts.codeMode)
 				os.Exit(exitCode)
 			}
 		}
@@ -294,18 +300,38 @@ func main() {
 	telemetryHub := telemetry.NewHub()
 	defer telemetryHub.Close()
 
+	var codeRuntime *codeModeRuntime
+	var codeModeToolFactory tui.CodeModeToolFactory
+	var codeModeRunLedger runledger.Store
+	if opts.codeMode {
+		codeRuntime, err = openCodeModeRuntime(cwd)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error enabling code mode: %v\n", err)
+			os.Exit(1)
+		}
+		codeModeToolFactory = codeRuntime.Tool
+		codeModeRunLedger = codeRuntime.RunLedger()
+	}
+
 	// Create and run TUI
 	ctrl, err := tui.NewController(tui.ControllerConfig{
-		Config:        cfg,
-		ModelManager:  modelManager,
-		Store:         store,
-		ProjectCtx:    projectContext,
-		Telemetry:     telemetryHub,
-		SessionID:     resumeSessionID,
-		AgentProfile:  agentPromptSection(agentProfile),
-		ModelOverride: modelOverrideFlag,
+		Config:              cfg,
+		ModelManager:        modelManager,
+		Store:               store,
+		ProjectCtx:          projectContext,
+		Telemetry:           telemetryHub,
+		SessionID:           resumeSessionID,
+		AgentProfile:        agentPromptSection(agentProfile),
+		KnowledgeContext:    hyphaeProjectKnowledgeContext(cfg, cwd),
+		ModelOverride:       modelOverrideFlag,
+		CodeModeToolFactory: codeModeToolFactory,
+		RunLedger:           codeModeRunLedger,
+		SubagentEvidence:    codeRuntime.EvidenceStore(),
 	})
 	if err != nil {
+		if codeRuntime != nil {
+			_ = codeRuntime.Fail(err)
+		}
 		fmt.Fprintf(os.Stderr, "Error creating TUI: %v\n", err)
 		os.Exit(1)
 	}
@@ -318,16 +344,43 @@ func main() {
 		ctrl.Stop()
 	}()
 
-	if err := ctrl.Run(); err != nil {
-		fmt.Fprintf(os.Stderr, "Error running TUI: %v\n", err)
+	runErr := ctrl.Run()
+	var codeModeCloseErr error
+	if codeRuntime != nil {
+		if runErr != nil {
+			codeModeCloseErr = codeRuntime.Fail(runErr)
+		} else {
+			codeModeCloseErr = codeRuntime.Close()
+		}
+	}
+	if runErr != nil {
+		fmt.Fprintf(os.Stderr, "Error running TUI: %v\n", runErr)
 		os.Exit(1)
+	}
+	if codeModeCloseErr != nil {
+		fmt.Fprintf(os.Stderr, "Warning: closing code mode: %v\n", codeModeCloseErr)
 	}
 }
 
 // executeOneShot executes a single prompt and exits
-func executeOneShot(prompt string, cfg *config.Config, mgr *model.Manager, store *storage.Store, projectContext *projectcontext.ProjectContext, planStore orchestrator.PlanStore, agentProfile *agentspec.RuntimeProfile, modelOverride string, allowedTools []string) int {
-	_ = store
+func executeOneShot(prompt string, cfg *config.Config, mgr *model.Manager, store *storage.Store, projectContext *projectcontext.ProjectContext, planStore orchestrator.PlanStore, agentProfile *agentspec.RuntimeProfile, modelOverride string, allowedTools []string, codeMode bool) int {
+	return executeOneShotWithStepCap(prompt, cfg, mgr, store, projectContext, planStore, agentProfile, modelOverride, allowedTools, codeMode, 0)
+}
+
+// executeOneShotWithStepCap keeps the public one-shot path unchanged while
+// allowing a resolved subagent persona to enforce its iteration contract in
+// the shared ACP loop.
+func executeOneShotWithStepCap(prompt string, cfg *config.Config, mgr *model.Manager, store *storage.Store, projectContext *projectcontext.ProjectContext, planStore orchestrator.PlanStore, agentProfile *agentspec.RuntimeProfile, modelOverride string, allowedTools []string, codeMode bool, stepCap int) int {
+	return executeOneShotWithStepCapAndOutputSchema(prompt, cfg, mgr, store, projectContext, planStore, agentProfile, modelOverride, allowedTools, codeMode, stepCap, "")
+}
+
+// executeOneShotWithStepCapAndOutputSchema adds the output-contract control
+// plane to the normal one-shot path. The submit_artifact tool is deliberately
+// registered only for Artifact v1 child runs so ordinary interactive prompts
+// keep their small, familiar tool surface.
+func executeOneShotWithStepCapAndOutputSchema(prompt string, cfg *config.Config, mgr *model.Manager, store *storage.Store, projectContext *projectcontext.ProjectContext, planStore orchestrator.PlanStore, agentProfile *agentspec.RuntimeProfile, modelOverride string, allowedTools []string, codeMode bool, stepCap int, outputSchema string) int {
 	_ = planStore
+	outputSchema = strings.TrimSpace(outputSchema)
 
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -372,6 +425,62 @@ func executeOneShot(prompt string, cfg *config.Config, mgr *model.Manager, store
 	}
 	registry.ConfigureContainers(cfg, cwd)
 	registry.SetWorkDir(cwd)
+	adaptiveProtocol, protocolAvailable := compileOneShotAdaptiveProtocol(cfg, mgr, store, engine, resolvedModel, registry, outputSchema)
+	if protocolAvailable && !quietMode {
+		fmt.Fprintf(os.Stderr, "protocol: %s (%s; policy=%s; mode=%s)\n", adaptiveProtocol.ProtocolID, adaptiveProtocol.Receipt.PolicyOutcome, adaptiveProtocol.Receipt.PolicyVersion, adaptiveProtocol.Mode)
+	}
+	if protocolAvailable && adaptiveProtocol.Mode == protocol.ModeDynamic {
+		if executionStage := adaptiveProtocolExecutionStage(*adaptiveProtocol); executionStage.MaxTurns > 0 && (stepCap == 0 || executionStage.MaxTurns < stepCap) {
+			stepCap = executionStage.MaxTurns
+		}
+	}
+	var artifactSubmission *builtin.ArtifactSubmission
+	artifactContract := artifactv1.OutputContract{}
+	if outputSchema == artifactv1.SchemaVersion {
+		artifactContract = artifactv1.NegotiatedOutput(artifactv1.ProviderCapabilities{
+			ToolCalls: mgr == nil || mgr.SupportsTools(resolvedModel),
+		})
+		if artifactContract.Mode == artifactv1.OutputSubmitArtifact {
+			artifactSubmission = &builtin.ArtifactSubmission{}
+			registry.Register(&builtin.SubmitArtifactTool{Submission: artifactSubmission})
+		}
+	}
+	autoCodeMode := protocolAvailable && adaptiveProtocol.Mode == protocol.ModeDynamic && adaptiveProtocolExecutionStage(*adaptiveProtocol).CodeMode == "auto_read_only"
+	enableCodeMode := codeMode || autoCodeMode
+	var codeRuntime *codeModeRuntime
+	var codeModeFailure error
+	if enableCodeMode {
+		codeRuntime, err = openCodeModeRuntime(cwd)
+		if err != nil {
+			if autoCodeMode && !codeMode {
+				fmt.Fprintf(os.Stderr, "Warning: adaptive protocol kept code mode at suggest because isolated execution is unavailable: %v\n", err)
+				autoCodeMode = false
+			} else {
+				fmt.Fprintf(os.Stderr, "Error enabling code mode: %v\n", err)
+				return 1
+			}
+		} else {
+			defer func() {
+				var closeErr error
+				if codeModeFailure != nil {
+					closeErr = codeRuntime.Fail(codeModeFailure)
+				} else {
+					closeErr = codeRuntime.Close()
+				}
+				if closeErr != nil {
+					fmt.Fprintf(os.Stderr, "Warning: closing code mode: %v\n", closeErr)
+				}
+			}()
+			codeTool, toolErr := codeRuntime.Tool("oneshot")
+			if toolErr != nil {
+				codeModeFailure = toolErr
+				fmt.Fprintf(os.Stderr, "Error enabling code mode: %v\n", toolErr)
+				return 1
+			}
+			registry.Register(codeTool)
+			registry.SetToolKind(codeTool.Name(), "execute")
+		}
+	}
 	registry.Register(&builtin.SkillActivationTool{
 		Registry:     skills,
 		Conversation: skillState,
@@ -379,17 +488,46 @@ func executeOneShot(prompt string, cfg *config.Config, mgr *model.Manager, store
 	createTool := &builtin.CreateSkillTool{Registry: skills}
 	createTool.SetWorkDir(cwd)
 	registry.Register(createTool)
-	if toolFilter := resolveOneShotToolFilter(agentProfile, registry, allowedTools); toolFilter != nil {
+	toolFilter := resolveOneShotToolFilter(agentProfile, registry, allowedTools)
+	if protocolAvailable && adaptiveProtocol.Mode == protocol.ModeDynamic {
+		toolFilter = applyProtocolToolFilter(toolFilter, adaptiveProtocol.VisibleTools)
+	}
+	if toolFilter = ensureRequiredOneShotTools(toolFilter, artifactSubmission != nil, codeRuntime != nil); toolFilter != nil {
 		skillState.SetToolFilter(toolFilter)
 	}
 
-	conv.AddSystemMessage(buildACPSystemPrompt(projectContext, cwd, skills, engine, agentPromptSection(agentProfile)))
+	systemPrompt := buildACPSystemPrompt(projectContext, cwd, skills, engine, agentPromptSection(agentProfile), hyphaeProjectKnowledgeContext(cfg, cwd))
+	if _, enabled := registry.Get("exec_program"); enabled {
+		systemPrompt += "\n\n" + prompts.CodeModeSystemPrompt
+	}
+	if outputSchema == artifactv1.SchemaVersion {
+		systemPrompt = artifactv1.ArtifactPrompt(systemPrompt, artifactContract)
+	}
+	conv.AddSystemMessage(systemPrompt)
 	conv.AddUserMessage(prompt)
 
-	responseText, err := runACPLoop(context.Background(), cfg, mgr, conv, registry, skillState, engine, resolvedModel, cwd, "", nil, nil, nil)
+	responseText, err := runACPLoopWithStepCap(context.Background(), cfg, mgr, conv, registry, skillState, engine, resolvedModel, cwd, "", nil, nil, nil, stepCap)
 	if err != nil {
+		codeModeFailure = err
 		fmt.Fprintf(os.Stderr, "\nError: %v\n", err)
 		return 1
+	}
+
+	if outputSchema == artifactv1.SchemaVersion {
+		artifact, artifactErr := resolveOneShotArtifact(responseText, artifactContract, artifactSubmission)
+		if artifactErr != nil {
+			codeModeFailure = artifactErr
+			fmt.Fprintf(os.Stderr, "\nError: %v\n", artifactErr)
+			return 1
+		}
+		artifactJSON, renderErr := artifactv1.RenderJSON(artifact)
+		artifactErr = renderErr
+		if artifactErr != nil {
+			codeModeFailure = fmt.Errorf("render artifact output: %w", artifactErr)
+			fmt.Fprintf(os.Stderr, "\nError: %v\n", codeModeFailure)
+			return 1
+		}
+		responseText = string(artifactJSON)
 	}
 
 	if responseText != "" {
@@ -398,7 +536,181 @@ func executeOneShot(prompt string, cfg *config.Config, mgr *model.Manager, store
 	if !strings.HasSuffix(responseText, "\n") {
 		fmt.Println()
 	}
+	codeModeFailure = nil
 	return 0
+}
+
+func ensureRequiredOneShotTools(filter []string, artifactRequired, codeModeRequired bool) []string {
+	if filter == nil {
+		return filter
+	}
+	tools := append([]string(nil), filter...)
+	if artifactRequired {
+		tools = append(tools, "submit_artifact")
+	}
+	if codeModeRequired {
+		tools = append(tools, "exec_program")
+	}
+	return cleanToolNames(tools)
+}
+
+func applyProtocolToolFilter(filter, protocolTools []string) []string {
+	protocolTools = cleanToolNames(protocolTools)
+	if len(protocolTools) == 0 {
+		return filter
+	}
+	if filter == nil {
+		return protocolTools
+	}
+	return intersectAgentRunTools(filter, protocolTools)
+}
+
+func adaptiveProtocolExecutionStage(value protocol.Protocol) protocol.Stage {
+	if len(value.Stages) == 0 {
+		return protocol.Stage{}
+	}
+	return value.Stages[len(value.Stages)-1]
+}
+
+func compileOneShotAdaptiveProtocol(cfg *config.Config, mgr *model.Manager, store *storage.Store, engine *rules.Engine, modelID string, registry *tool.Registry, outputSchema string) (*protocol.Protocol, bool) {
+	if cfg == nil {
+		return nil, false
+	}
+	mode := strings.ToLower(strings.TrimSpace(cfg.AdaptiveProtocol.Mode))
+	if mode != protocol.ModeShadow && mode != protocol.ModeDynamic {
+		return nil, false
+	}
+	profile, found, err := oneShotBehaviorProfile(cfg, mgr, store, modelID)
+	if err != nil {
+		if !quietMode {
+			fmt.Fprintf(os.Stderr, "Warning: adaptive protocol profile ignored: %v\n", err)
+		}
+		return nil, false
+	}
+	if !found {
+		return nil, false
+	}
+	candidateTools := make([]string, 0)
+	if registry != nil {
+		for _, candidate := range registry.List() {
+			if candidate != nil {
+				candidateTools = append(candidateTools, candidate.Name())
+			}
+		}
+	}
+	var evaluator types.RuleEvaluator
+	if engine != nil {
+		evaluator = rules.NewEngineAdapter(engine)
+	}
+	compiled, err := protocol.NewCompiler(evaluator, protocol.CompilerConfig{
+		Mode:          mode,
+		PolicyVersion: cfg.AdaptiveProtocol.PolicyVersion,
+		MaxFanout:     cfg.AdaptiveProtocol.MaxFanout,
+		AutoCodeMode:  cfg.AdaptiveProtocol.AutoCodeMode,
+	}).Compile(protocol.TaskRequest{
+		Phase:          "execution",
+		TaskClass:      "coding",
+		Risk:           "medium",
+		NeedsArtifact:  strings.TrimSpace(outputSchema) == artifactv1.SchemaVersion,
+		CandidateTools: candidateTools,
+	}, profile)
+	if err != nil {
+		if !quietMode {
+			fmt.Fprintf(os.Stderr, "Warning: adaptive protocol compilation failed: %v\n", err)
+		}
+		return nil, false
+	}
+	return &compiled, true
+}
+
+// oneShotBehaviorProfile gives an explicit config profile precedence so an
+// operator can pin or roll back a protocol deterministically. In its absence,
+// the latest immutable aggregate profile from the local SQLite adapter is
+// eligible; the resulting version and digest still land in the receipt.
+func oneShotBehaviorProfile(cfg *config.Config, mgr *model.Manager, store *storage.Store, modelID string) (protocol.BehaviorProfile, bool, error) {
+	modelID = strings.TrimSpace(modelID)
+	if cfg != nil {
+		if source, ok := cfg.AdaptiveProtocol.Profiles[modelID]; ok {
+			profile, err := protocolProfileFromConfig(modelID, mgr, source)
+			return profile, true, err
+		}
+	}
+	if store == nil {
+		return protocol.BehaviorProfile{}, false, nil
+	}
+	profile, found, err := storage.NewBehaviorProfileStore(store).Latest(context.Background(), modelID)
+	if err != nil || !found {
+		return protocol.BehaviorProfile{}, found, err
+	}
+	return profile, true, nil
+}
+
+func protocolProfileFromConfig(modelID string, mgr *model.Manager, source config.ModelBehaviorProfileConfig) (protocol.BehaviorProfile, error) {
+	measuredAt := time.Time{}
+	if value := strings.TrimSpace(source.MeasuredAt); value != "" {
+		parsed, err := time.Parse(time.RFC3339, value)
+		if err != nil {
+			return protocol.BehaviorProfile{}, fmt.Errorf("parse measured_at: %w", err)
+		}
+		measuredAt = parsed
+	}
+	provider := ""
+	if mgr != nil {
+		provider = mgr.ProviderIDForModel(modelID)
+	}
+	profile := protocol.BehaviorProfile{
+		SchemaVersion: protocol.ProfileSchemaVersion,
+		ModelID:       strings.TrimSpace(modelID),
+		Provider:      provider,
+		Version:       strings.TrimSpace(source.Version),
+		Class:         protocol.ModelClass(strings.TrimSpace(source.Class)),
+		SampleSize:    source.SampleSize,
+		Confidence:    source.Confidence,
+		MeasuredAt:    measuredAt,
+		Capabilities: protocol.Capabilities{
+			ToolCalls:            source.ToolCalls,
+			NativeJSONSchema:     source.NativeJSONSchema,
+			ParallelToolCalls:    source.ParallelToolCalls,
+			Continuation:         source.Continuation,
+			Reasoning:            source.Reasoning,
+			CodeMode:             source.CodeMode,
+			ContextWindowTokens:  source.ContextWindowTokens,
+			SafeVisibleToolCount: source.SafeVisibleToolCount,
+		},
+		Metrics: protocol.BehaviorMetrics{
+			ToolReliability:             source.ToolReliability,
+			ArgumentRepairReliability:   source.ArgumentRepairReliability,
+			StructuredOutputReliability: source.StructuredOutputReliability,
+			ParallelCallReliability:     source.ParallelCallReliability,
+			EditFidelity:                source.EditFidelity,
+			VerificationPassRate:        source.VerificationPassRate,
+			EffectiveContextTokens:      source.EffectiveContextTokens,
+			ContinuationReliability:     source.ContinuationReliability,
+			LatencyP50MS:                source.LatencyP50MS,
+			LatencyP95MS:                source.LatencyP95MS,
+			CostUSDPerMTokens:           source.CostUSDPerMTokens,
+		},
+	}
+	if err := profile.Validate(); err != nil {
+		return protocol.BehaviorProfile{}, err
+	}
+	return profile, nil
+}
+
+func resolveOneShotArtifact(response string, contract artifactv1.OutputContract, submission *builtin.ArtifactSubmission) (artifactv1.Artifact, error) {
+	if submission != nil {
+		if artifact, ok := submission.Artifact(); ok {
+			return artifact, nil
+		}
+	}
+	artifact, _, err := artifactv1.DecodeProviderOutput(context.Background(), []byte(response), contract.Mode, artifactv1.DecodeOptions{})
+	if err != nil {
+		if contract.Mode == artifactv1.OutputSubmitArtifact {
+			return artifactv1.Artifact{}, fmt.Errorf("required artifact output was not submitted through submit_artifact or returned as valid JSON: %w", err)
+		}
+		return artifactv1.Artifact{}, fmt.Errorf("required artifact output is invalid: %w", err)
+	}
+	return artifact, nil
 }
 
 func runPlanCommand(args []string) error {
@@ -687,7 +999,7 @@ func printHelp() {
 	fmt.Println("  remote <subcommand>              Remote session operations (attach, sessions, tokens, login, console)")
 	fmt.Println("  batch prune-workspaces           Garbage-collect stale batch workspaces (k8s/CI)")
 	fmt.Println("  git-webhook                      Listen for merge webhooks and run regression/release commands")
-	fmt.Println("  buckbot                          Retired; use review-pr <PR> -post")
+	fmt.Println("  buckbot [review|repo|pr] ...      Buckley's general-purpose review agent")
 	fmt.Println("  agent init [path]                Create a filesystem-first agent/ layout")
 	fmt.Println("  agent list                       List discovered project agent profiles")
 	fmt.Println("  agent check [--project|path]     Validate a Buckley agent profile")
@@ -725,6 +1037,7 @@ func printHelp() {
 	fmt.Println("  --no-color                       Disable colored output")
 	fmt.Println("  --tui                            Use rich TUI interface")
 	fmt.Println("  --plain                          Use plain scrollback mode")
+	fmt.Println("  --code-mode                      Offer audited exec_program for batched repository analysis (requires bubblewrap)")
 	fmt.Println("  --agent <path>                   Load a buckley.agent/v1 runtime profile for this session")
 	fmt.Println("  -m, --model <id>                 Use model for this chat session (for example codex/gpt-5.4-mini)")
 	fmt.Println("  --encoding json|toon             Set serialization format")
@@ -740,6 +1053,7 @@ func printHelp() {
 	fmt.Println("  BUCKLEY_MODEL_PLANNING           Override planning model")
 	fmt.Println("  BUCKLEY_MODEL_EXECUTION          Override execution model")
 	fmt.Println("  BUCKLEY_MODEL_REVIEW             Override review model")
+	fmt.Println("  BUCKLEY_CODE_MODE               Enable audited exec_program in interactive or one-shot mode")
 	fmt.Println("  BUCKLEY_MODEL_COMMIT             Override model for `buckley commit`")
 	fmt.Println("  BUCKLEY_MODEL_PR                 Override model for `buckley pr`")
 	fmt.Println("  BUCKLEY_ONESHOT_BACKEND          Override one-shot backend: api, codex, or claude")
@@ -1009,15 +1323,19 @@ func printBashCompletion() {
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
 
-    commands="plan execute execute-task commit pr review review-pr experiment eval serve attach goal remote batch git-webhook agent skills skill agent-server lsp acp info config doctor completion worktree rules migrate db resume help version"
+    commands="plan execute execute-task commit pr review review-pr buckbot experiment eval serve attach goal remote batch git-webhook agent skills skill agent-server lsp acp info config doctor completion worktree rules migrate db resume help version"
 
     case "${prev}" in
         buckley)
-            COMPREPLY=( $(compgen -W "${commands} --help --version --tui --plain --quiet --no-color --config --agent" -- "${cur}") )
+            COMPREPLY=( $(compgen -W "${commands} --help --version --tui --plain --code-mode --quiet --no-color --config --agent" -- "${cur}") )
             return 0
             ;;
         batch)
             COMPREPLY=( $(compgen -W "prune-workspaces" -- "${cur}") )
+            return 0
+            ;;
+        buckbot)
+            COMPREPLY=( $(compgen -W "review local repo project pr pull-request review-pr --help" -- "${cur}") )
             return 0
             ;;
         agent)
@@ -1089,6 +1407,7 @@ _buckley() {
         'pr:Create pull request'
         'review:Review local changes with repository context'
         'review-pr:Review a GitHub pull request'
+        'buckbot:Run Buckley’s general-purpose review agent'
         'experiment:Run model comparison experiments'
         'eval:Run project chat eval scenarios'
         'serve:Start local server'
@@ -1126,6 +1445,7 @@ _buckley() {
         '--no-color[Disable colored output]' \
         '--tui[Use rich TUI interface]' \
         '--plain[Use plain scrollback mode]' \
+        '--code-mode[Offer audited exec_program for batched repository analysis]' \
         '-v[Show version]' \
         '--version[Show version]' \
         '-h[Show help]' \
@@ -1141,6 +1461,9 @@ _buckley() {
             case $words[1] in
                 batch)
                     _values 'batch command' prune-workspaces
+                    ;;
+                buckbot)
+                    _values 'Buckbot review mode' review local repo project pr pull-request review-pr
                     ;;
                 agent)
                     _values 'agent command' init list check show info subagents run invoke
@@ -1194,6 +1517,8 @@ complete -c buckley -n __fish_use_subcommand -a commit -d 'Create action-style c
 complete -c buckley -n __fish_use_subcommand -a pr -d 'Create pull request'
 complete -c buckley -n __fish_use_subcommand -a review -d 'Review local changes with repository context'
 complete -c buckley -n __fish_use_subcommand -a review-pr -d 'Review a GitHub pull request'
+complete -c buckley -n __fish_use_subcommand -a buckbot -d 'Run Buckley’s general-purpose review agent'
+complete -c buckley -n '__fish_seen_subcommand_from buckbot' -a 'review local repo project pr pull-request review-pr'
 complete -c buckley -n __fish_use_subcommand -a experiment -d 'Run model comparison experiments'
 complete -c buckley -n __fish_use_subcommand -a eval -d 'Run project chat eval scenarios'
 complete -c buckley -n __fish_use_subcommand -a serve -d 'Start local server'
@@ -1228,6 +1553,7 @@ complete -c buckley -s q -l quiet -d 'Suppress non-essential output'
 complete -c buckley -l no-color -d 'Disable colored output'
 complete -c buckley -l tui -d 'Use rich TUI interface'
 complete -c buckley -l plain -d 'Use plain scrollback mode'
+complete -c buckley -l code-mode -d 'Offer audited exec_program for batched repository analysis'
 complete -c buckley -s v -l version -d 'Show version'
 complete -c buckley -s h -l help -d 'Show help'
 
@@ -1425,6 +1751,9 @@ func startupOptionsFromEnv() *startupOptions {
 	if val, ok := parseBoolEnv("NO_COLOR"); ok {
 		opts.noColor = val
 	}
+	if val, ok := parseBoolEnv("BUCKLEY_CODE_MODE"); ok {
+		opts.codeMode = val
+	}
 	return opts
 }
 
@@ -1455,6 +1784,11 @@ func (s *startupFlagState) consumeStartupFlag(opts *startupOptions, arg string, 
 	case "--tui":
 		opts.plainModeSet = true
 		opts.plainMode = false
+	case "--code-mode":
+		if !beforeCommand {
+			return false
+		}
+		opts.codeMode = true
 	case "-p":
 		s.pending = startupPendingPrompt
 	case "--encoding":
@@ -1621,6 +1955,13 @@ func agentPromptSection(profile *agentspec.RuntimeProfile) string {
 		return ""
 	}
 	return profile.PromptSection()
+}
+
+func hyphaeProjectKnowledgeContext(cfg *config.Config, workDir string) string {
+	if cfg == nil || !cfg.Memory.HyphaeRecall {
+		return ""
+	}
+	return knowledgehyphae.ProjectKnowledgeContext(context.Background(), workDir, cfg.Memory.HyphaeSpace)
 }
 
 func resolveOneShotToolFilter(profile *agentspec.RuntimeProfile, registry *tool.Registry, explicitAllowed []string) []string {

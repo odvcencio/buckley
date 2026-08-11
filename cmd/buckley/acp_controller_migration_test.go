@@ -27,6 +27,35 @@ type acpProbeTool struct {
 	calls int
 }
 
+func TestACPToolLoopGovernorUsesConfiguredEmergencyFuse(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.AgentController.EmergencyFuse.ModelRequests = 40
+	governor := newACPToolLoopGovernor(cfg)
+	for round := 1; round <= 40; round++ {
+		if decision := governor.BeginRound(); decision.Stop {
+			t.Fatalf("round %d stopped early: %+v", round, decision)
+		}
+	}
+	decision := governor.BeginRound()
+	if !decision.Stop || !strings.Contains(decision.Reason, "40-round") {
+		t.Fatalf("round 41 decision = %+v, want configured 40-round stop", decision)
+	}
+}
+
+func TestACPProgressControllerHonorsRolloutMode(t *testing.T) {
+	cfg := config.DefaultConfig()
+	if got := newACPProgressController(cfg); got != nil {
+		t.Fatalf("legacy progress controller = %+v, want nil", got)
+	}
+	cfg.AgentController.Mode = "dynamic"
+	cfg.AgentController.PolicyVersion = "progress-v2"
+	cfg.AgentController.EmergencyFuse.ToolExecutions = 73
+	got := newACPProgressController(cfg)
+	if got == nil || got.Mode != "dynamic" || got.PolicyVersion != "progress-v2" || got.Fuses.ToolExecutions != 73 {
+		t.Fatalf("ACP progress controller = %+v", got)
+	}
+}
+
 func (p *acpProbeTool) Name() string        { return "stub_probe" }
 func (p *acpProbeTool) Description() string { return "test probe" }
 func (p *acpProbeTool) Parameters() builtin.ParameterSchema {
@@ -228,6 +257,6 @@ func TestRunACPLoop_GovernorStopsRepeatingToolLoop(t *testing.T) {
 	// count is the Governor's contract, not this test's. It just must not
 	// have run unbounded.
 	if probe.callCount() >= 32 {
-		t.Fatalf("probe executed %d times, want a guard stop well below the 32-round ceiling", probe.callCount())
+		t.Fatalf("probe executed %d times, want the repeat guard to stop well before the emergency ceiling", probe.callCount())
 	}
 }

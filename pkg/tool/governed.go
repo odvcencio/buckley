@@ -114,7 +114,26 @@ func GovernedToolNames(registry *Registry, evaluator types.RuleEvaluator, role, 
 func (r *Registry) ToOpenAIFunctionsGoverned(evaluator types.RuleEvaluator, role, taskType string, baseAllowed []string, budgetUtil float64) []map[string]any {
 	names := GovernedToolNames(r, evaluator, role, taskType, baseAllowed, budgetUtil)
 	names = r.filterDiscoveredToolNames(names)
-	return r.ToOpenAIFunctionsFiltered(names)
+	functions := r.ToOpenAIFunctionsFiltered(names)
+	return prioritizeOpenAIFunction(functions, "exec_program")
+}
+
+func prioritizeOpenAIFunction(functions []map[string]any, name string) []map[string]any {
+	for i, function := range functions {
+		definition, _ := function["function"].(map[string]any)
+		if definition["name"] != name {
+			continue
+		}
+		if i == 0 {
+			return functions
+		}
+		prioritized := make([]map[string]any, 0, len(functions))
+		prioritized = append(prioritized, function)
+		prioritized = append(prioritized, functions[:i]...)
+		prioritized = append(prioritized, functions[i+1:]...)
+		return prioritized
+	}
+	return functions
 }
 
 func matchesPoolMode(t Tool, mode string) bool {

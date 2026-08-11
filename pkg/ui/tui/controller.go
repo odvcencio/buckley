@@ -19,6 +19,7 @@ import (
 	projectcontext "m31labs.dev/buckley/pkg/context"
 	"m31labs.dev/buckley/pkg/conversation"
 	"m31labs.dev/buckley/pkg/diffsignal"
+	"m31labs.dev/buckley/pkg/evidence"
 	"m31labs.dev/buckley/pkg/model"
 	"m31labs.dev/buckley/pkg/prompts"
 	"m31labs.dev/buckley/pkg/rules"
@@ -57,9 +58,11 @@ type Controller struct {
 	telemetryBridge *TelemetryUIBridge
 
 	// State
-	workDir       string
-	agentProfile  string
-	modelOverride string
+	workDir             string
+	agentProfile        string
+	knowledgeContext    string
+	modelOverride       string
+	codeModeToolFactory CodeModeToolFactory
 
 	// modelVariant is the name of the active reasoning preset (see
 	// conversation.ModelVariant), cycled by keybind. Empty until the user
@@ -75,7 +78,8 @@ type Controller struct {
 
 	// runLedger is the optional read-only run ledger backing the
 	// navigator's Sessions section (see ControllerConfig.RunLedger).
-	runLedger runledger.Store
+	runLedger        runledger.Store
+	subagentEvidence evidence.Store
 	// sessionRunNodes maps a run ID shown in the navigator back to its
 	// materialized run-tree node, so a click can show that run's state in
 	// the inspector. Rebuilt on every refreshSessionNav call; nil when the
@@ -137,25 +141,35 @@ type turnUndoRecord struct {
 	messages       []conversation.Message
 }
 
+// CodeModeToolFactory creates the per-session exec_program tool. The command
+// layer owns its durable stores and supplies this factory only for an explicit
+// code-mode launch, keeping the TUI independent of the concrete adapter.
+type CodeModeToolFactory func(sessionID string) (tool.Tool, error)
+
 // ControllerConfig configures the controller.
 type ControllerConfig struct {
-	Config        *config.Config
-	ModelManager  *model.Manager
-	Store         *storage.Store
-	ProjectCtx    *projectcontext.ProjectContext
-	Telemetry     *telemetry.Hub
-	SessionID     string // Resume session, empty for new
-	AgentProfile  string
-	ModelOverride string // CLI --model override, takes precedence over routing rules
+	Config              *config.Config
+	ModelManager        *model.Manager
+	Store               *storage.Store
+	ProjectCtx          *projectcontext.ProjectContext
+	Telemetry           *telemetry.Hub
+	SessionID           string // Resume session, empty for new
+	AgentProfile        string
+	KnowledgeContext    string // Optional, bounded project-memory guidance
+	ModelOverride       string // CLI --model override, takes precedence over routing rules
+	CodeModeToolFactory CodeModeToolFactory
 
 	// RunLedger is an optional, read-only run ledger consulted for the
 	// navigator's Sessions section (see Pillar D: session tree). When nil,
 	// or when no run exists for the current session, the navigator falls
 	// back to the flat session list.
 	RunLedger runledger.Store
+	// SubagentEvidence enables durable AgentCoordinator adapters for the
+	// session-local spawn_subagent tool when RunLedger is also present.
+	SubagentEvidence evidence.Store
 }
 
-func newSessionState(cfg *config.Config, store *storage.Store, workDir string, hub *telemetry.Hub, sessionID string, loadMessages bool) (*SessionState, error) {
+func newSessionState(cfg *config.Config, store *storage.Store, workDir string, hub *telemetry.Hub, sessionID string, loadMessages bool, codeModeToolFactory CodeModeToolFactory, subagentLedger runledger.Store, subagentEvidence evidence.Store) (*SessionState, error) {
 	sess := &SessionState{
 		ID:           sessionID,
 		Conversation: conversation.New(sessionID),
@@ -183,6 +197,24 @@ func newSessionState(cfg *config.Config, store *storage.Store, workDir string, h
 		createTool.SetWorkDir(workDir)
 	}
 	registry.Register(createTool)
+	if codeModeToolFactory != nil {
+		codeTool, err := codeModeToolFactory(sessionID)
+		if err != nil {
+			if hookCloser != nil {
+				_ = hookCloser.Close()
+			}
+			return nil, fmt.Errorf("create code-mode tool for session %s: %w", sessionID, err)
+		}
+		if codeTool == nil || codeTool.Name() != "exec_program" {
+			if hookCloser != nil {
+				_ = hookCloser.Close()
+			}
+			return nil, fmt.Errorf("create code-mode tool for session %s: factory returned %T", sessionID, codeTool)
+		}
+		registry.Register(codeTool)
+		registry.SetToolKind(codeTool.Name(), "execute")
+	}
+	configureRegistrySubagentDurability(registry, subagentLedger, subagentEvidence)
 
 	sess.ToolRegistry = registry
 	sess.HookCloser = hookCloser
@@ -190,6 +222,19 @@ func newSessionState(cfg *config.Config, store *storage.Store, workDir string, h
 	sess.SkillState = skillState
 
 	return sess, nil
+}
+
+func configureRegistrySubagentDurability(registry *tool.Registry, ledger runledger.Store, store evidence.Store) {
+	if registry == nil || ledger == nil || store == nil {
+		return
+	}
+	candidate, ok := registry.Get("spawn_subagent")
+	if !ok {
+		return
+	}
+	if subagents, ok := candidate.(*builtin.SubagentTool); ok {
+		subagents.SetDurability(ledger, store)
+	}
 }
 
 // NewController creates a new TUI controller.
@@ -238,23 +283,29 @@ func NewController(cfg ControllerConfig) (*Controller, error) {
 	}
 
 	ctrl := &Controller{
-		app:            app,
-		cfg:            cfg.Config,
-		modelMgr:       cfg.ModelManager,
-		store:          cfg.Store,
-		projectCtx:     cfg.ProjectCtx,
-		registry:       projectSessions[currentIdx].ToolRegistry,
-		conversation:   projectSessions[currentIdx].Conversation,
-		telemetry:      cfg.Telemetry,
-		rulesEngine:    rulesEngine,
-		evaluator:      evaluator,
-		resolver:       resolver,
-		workDir:        workDir,
-		agentProfile:   strings.TrimSpace(cfg.AgentProfile),
-		modelOverride:  strings.TrimSpace(cfg.ModelOverride),
-		sessions:       projectSessions,
-		currentSession: currentIdx,
-		runLedger:      cfg.RunLedger,
+		app:                 app,
+		cfg:                 cfg.Config,
+		modelMgr:            cfg.ModelManager,
+		store:               cfg.Store,
+		projectCtx:          cfg.ProjectCtx,
+		registry:            projectSessions[currentIdx].ToolRegistry,
+		conversation:        projectSessions[currentIdx].Conversation,
+		telemetry:           cfg.Telemetry,
+		rulesEngine:         rulesEngine,
+		evaluator:           evaluator,
+		resolver:            resolver,
+		workDir:             workDir,
+		agentProfile:        strings.TrimSpace(cfg.AgentProfile),
+		knowledgeContext:    strings.TrimSpace(cfg.KnowledgeContext),
+		modelOverride:       strings.TrimSpace(cfg.ModelOverride),
+		codeModeToolFactory: cfg.CodeModeToolFactory,
+		sessions:            projectSessions,
+		currentSession:      currentIdx,
+		runLedger:           cfg.RunLedger,
+		subagentEvidence:    cfg.SubagentEvidence,
+	}
+	for _, session := range projectSessions {
+		configureSessionSubagentPolicy(session, evaluator)
 	}
 
 	// Create telemetry bridge for sidebar updates
@@ -284,6 +335,19 @@ func NewController(cfg ControllerConfig) (*Controller, error) {
 	return ctrl, nil
 }
 
+func configureSessionSubagentPolicy(session *SessionState, evaluator types.RuleEvaluator) {
+	if session == nil || session.ToolRegistry == nil {
+		return
+	}
+	candidate, ok := session.ToolRegistry.Get("spawn_subagent")
+	if !ok {
+		return
+	}
+	if subagents, ok := candidate.(*builtin.SubagentTool); ok {
+		subagents.SetEvaluator(evaluator)
+	}
+}
+
 func loadOrCreateControllerSessions(cfg ControllerConfig, workDir string) ([]*SessionState, int, error) {
 	projectSessions, err := loadActiveProjectSessions(cfg, workDir)
 	if err != nil {
@@ -302,7 +366,7 @@ func loadActiveProjectSessions(cfg ControllerConfig, workDir string) ([]*Session
 		if s.ProjectPath != workDir || s.Status != storage.SessionStatusActive {
 			continue
 		}
-		sess, err := newSessionState(cfg.Config, cfg.Store, workDir, cfg.Telemetry, s.ID, true)
+		sess, err := newSessionState(cfg.Config, cfg.Store, workDir, cfg.Telemetry, s.ID, true, cfg.CodeModeToolFactory, cfg.RunLedger, cfg.SubagentEvidence)
 		if err != nil {
 			return nil, err
 		}
@@ -364,7 +428,7 @@ func createControllerSession(cfg ControllerConfig, workDir, sessionID string) (*
 	if err := cfg.Store.CreateSession(sess); err != nil {
 		return nil, fmt.Errorf("create session: %w", err)
 	}
-	return newSessionState(cfg.Config, cfg.Store, workDir, cfg.Telemetry, sessionID, false)
+	return newSessionState(cfg.Config, cfg.Store, workDir, cfg.Telemetry, sessionID, false, cfg.CodeModeToolFactory, cfg.RunLedger, cfg.SubagentEvidence)
 }
 
 // Run starts the TUI controller.
@@ -1036,11 +1100,12 @@ func (c *Controller) newSession() {
 	}
 
 	// Create new session state and add to list
-	newSess, err := newSessionState(c.cfg, c.store, c.workDir, c.telemetry, newSessionID, false)
+	newSess, err := newSessionState(c.cfg, c.store, c.workDir, c.telemetry, newSessionID, false, c.codeModeToolFactory, c.runLedger, c.subagentEvidence)
 	if err != nil {
 		c.app.AddMessage("Error creating session: "+err.Error(), "system")
 		return
 	}
+	configureSessionSubagentPolicy(newSess, c.evaluator)
 	c.sessions = append([]*SessionState{newSess}, c.sessions...)
 	c.currentSession = 0
 	c.conversation = newSess.Conversation
@@ -1146,6 +1211,9 @@ func takeSuffixBytes(s string, n int) string {
 // buildSystemPrompt constructs the system prompt.
 func (c *Controller) buildSystemPrompt(sess *SessionState) string {
 	basePrompt := prompts.DefaultToolUseSystemPrompt + "\n\nIf the user asks to create a new skill, call create_skill to save it."
+	if sessionCodeModeEnabled(sess) {
+		basePrompt += "\n\n" + prompts.CodeModeSystemPrompt
+	}
 	projectRaw := ""
 	if c.projectCtx != nil {
 		projectRaw = c.projectCtx.RawContent
@@ -1159,6 +1227,7 @@ func (c *Controller) buildSystemPrompt(sess *SessionState) string {
 		BasePrompt:        basePrompt,
 		AgentProfile:      c.agentProfile,
 		ProjectContext:    projectRaw,
+		KnowledgeContext:  c.knowledgeContext,
 		WorkDir:           c.workDir,
 		RootDir:           c.workDir,
 		SkillsDescription: skillDescriptions,
@@ -1166,6 +1235,14 @@ func (c *Controller) buildSystemPrompt(sess *SessionState) string {
 		ModelTier:         model.InferModelTier(model.ResolvePhaseModel(c.cfg, c.modelMgr, c.rulesEngine, "execution", c.modelOverride)),
 		GTSAvailable:      commandAvailable("gts"),
 	})
+}
+
+func sessionCodeModeEnabled(sess *SessionState) bool {
+	if sess == nil || sess.ToolRegistry == nil {
+		return false
+	}
+	_, ok := sess.ToolRegistry.Get("exec_program")
+	return ok
 }
 
 // handleFileSelect processes file selection from the picker.
@@ -1333,11 +1410,12 @@ func (c *Controller) resumeSession(reference string) {
 		c.app.AddMessage("Could not resume session: "+err.Error(), "system")
 		return
 	}
-	sess, err := newSessionState(c.cfg, c.store, c.workDir, c.telemetry, target.ID, true)
+	sess, err := newSessionState(c.cfg, c.store, c.workDir, c.telemetry, target.ID, true, c.codeModeToolFactory, c.runLedger, c.subagentEvidence)
 	if err != nil {
 		c.app.AddMessage("Could not load session: "+err.Error(), "system")
 		return
 	}
+	configureSessionSubagentPolicy(sess, c.evaluator)
 	c.sessions = append([]*SessionState{sess}, c.sessions...)
 	c.currentSession = 0
 	c.switchToSessionLocked(0)

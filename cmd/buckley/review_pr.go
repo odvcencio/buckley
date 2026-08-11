@@ -39,6 +39,7 @@ type reviewPRCommandOptions struct {
 	outputFile           string
 	prRef                string
 	budgetUSD            float64
+	noBudget             bool
 	maxTurns             int
 	maxDiff              int
 	maxSupportingContext int
@@ -57,7 +58,8 @@ func parseReviewPRCommandOptions(args []string) (reviewPRCommandOptions, error) 
 	criticModel := fs.String("critic-model", "", "opt-in approval critic model for large or business-critical reviews")
 	timeout := fs.Duration("timeout", defaultReviewTimeout, "total review timeout")
 	outputFile := fs.String("output", "", "write review to file instead of stdout")
-	budgetUSD := fs.Float64("budget", 0, "maximum model spend in USD (0 = Buckbot default)")
+	budgetUSD := fs.Float64("budget", 0, "maximum model spend in USD (0 = configured policy; defaults to uncapped)")
+	noBudget := fs.Bool("no-budget", false, "ignore a configured review cost cap for this run")
 	maxTurns := fs.Int("max-turns", 0, "hard model turn limit per review pass (0 = adaptive)")
 	maxDiff := fs.Int("max-diff-bytes", 0, "maximum prioritized diff bytes (0 = Buckbot default)")
 	maxSupportingContext := fs.Int("max-context-tokens", 0, "maximum supporting-context tokens; diff and evidence IDs are protected (0 = Buckbot default)")
@@ -68,6 +70,12 @@ func parseReviewPRCommandOptions(args []string) (reviewPRCommandOptions, error) 
 
 	if err := fs.Parse(interspersedReviewPRArgs(args)); err != nil {
 		return reviewPRCommandOptions{}, err
+	}
+	if *budgetUSD < 0 {
+		return reviewPRCommandOptions{}, fmt.Errorf("--budget must be zero or greater")
+	}
+	if *noBudget && *budgetUSD > 0 {
+		return reviewPRCommandOptions{}, fmt.Errorf("--no-budget cannot be combined with --budget")
 	}
 
 	if fs.NArg() != 1 || fs.Arg(0) == "" {
@@ -83,6 +91,7 @@ func parseReviewPRCommandOptions(args []string) (reviewPRCommandOptions, error) 
 		outputFile:           *outputFile,
 		prRef:                fs.Arg(0),
 		budgetUSD:            *budgetUSD,
+		noBudget:             *noBudget,
 		maxTurns:             *maxTurns,
 		maxDiff:              *maxDiff,
 		maxSupportingContext: *maxSupportingContext,
@@ -196,6 +205,7 @@ func runReviewPRCommand(args []string) error {
 		maxDiffBytes:               opts.maxDiff,
 		maxSupportingContextTokens: opts.maxSupportingContext,
 		maxCostUSD:                 opts.budgetUSD,
+		clearCostBudget:            opts.noBudget,
 		forceSinglePass:            opts.forceSinglePass,
 		forceShards:                opts.forceShards,
 		concurrency:                opts.concurrency,
@@ -311,6 +321,7 @@ type automatedReviewOptions struct {
 	maxDiffBytes               int
 	maxSupportingContextTokens int
 	maxCostUSD                 float64
+	clearCostBudget            bool
 	criticReserveUSD           float64
 	approvalCritic             bool
 	verificationTimeout        time.Duration
@@ -423,9 +434,12 @@ func (defaults automatedReviewOptions) withOverrides(overrides automatedReviewOp
 	if overrides.maxSupportingContextTokens > 0 {
 		defaults.maxSupportingContextTokens = overrides.maxSupportingContextTokens
 	}
-	if overrides.maxCostUSD > 0 {
+	if overrides.clearCostBudget {
+		defaults.maxCostUSD = 0
+		defaults.criticReserveUSD = 0
+	} else if overrides.maxCostUSD > 0 {
 		defaults.maxCostUSD = overrides.maxCostUSD
-		if defaults.criticReserveUSD > 0 {
+		if defaults.approvalCritic {
 			defaults.criticReserveUSD = overrides.maxCostUSD * 0.12
 		}
 	}

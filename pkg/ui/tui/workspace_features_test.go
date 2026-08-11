@@ -97,6 +97,21 @@ func TestTelemetryBridgeCapturesSubagentOutput(t *testing.T) {
 	}
 }
 
+func TestTelemetryBridgeRendersSubagentExecutionContract(t *testing.T) {
+	hub := telemetry.NewHub()
+	defer hub.Close()
+	bridge := NewTelemetryUIBridge(hub, nil)
+	bridge.handleEvent(telemetry.Event{Type: telemetry.EventSubagentCompleted, TaskID: "agent-contract", Data: map[string]any{
+		"agent": "reviewer", "model": "example/frontier", "state": "completed", "task": "review coordinator", "persona": "review", "tier": "execute", "effort": "high", "step_cap": 12, "allowed_tool_count": 4, "isolation": "worktree", "output_schema": "buckley.artifact/v1", "approval_posture": "safe", "workspace_claims": []string{"pkg/subagent", "pkg/tool"},
+	}})
+	record := bridge.activities["agent-contract"]
+	for _, want := range []string{"agent:reviewer · example/frontier", "Execution contract:", "Model: example/frontier", "Step cap: 12", "Visible tools: 4", "Workspace claims:", "pkg/subagent"} {
+		if !strings.Contains(record.Title+"\n"+record.Detail, want) {
+			t.Fatalf("subagent card missing %q: %+v", want, record)
+		}
+	}
+}
+
 func TestTelemetryBridgeStreamsShellOutputIntoRunningDetail(t *testing.T) {
 	hub := telemetry.NewHub()
 	defer hub.Close()

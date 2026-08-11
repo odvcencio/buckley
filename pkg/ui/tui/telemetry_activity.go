@@ -57,9 +57,12 @@ func (b *TelemetryUIBridge) handleSubagentActivity(event telemetry.Event) {
 	record.ID = id
 	record.Kind = "subagent"
 	label := firstNonEmpty(getString(event.Data, "agent"), getString(event.Data, "provider"), "subagent")
+	if modelID := strings.TrimSpace(getString(event.Data, "model")); modelID != "" {
+		label += " · " + modelID
+	}
 	record.Title = "agent:" + label
 	record.Status = subagentActivityStatus(event)
-	record.Summary = firstNonEmpty(getString(event.Data, "task"), getString(event.Data, "state"), string(record.Status))
+	record.Summary = subagentActivitySummary(event.Data, record.Status)
 	if record.StartedAt.IsZero() {
 		record.StartedAt = activityTimestamp(event.Timestamp)
 	}
@@ -267,6 +270,40 @@ func subagentActivityDetail(data map[string]any) string {
 	if task := strings.TrimSpace(getString(data, "task")); task != "" {
 		sections = append(sections, "Task:\n"+task)
 	}
+	var contract []string
+	if persona := strings.TrimSpace(getString(data, "persona")); persona != "" {
+		contract = append(contract, "Persona: "+persona)
+	}
+	if modelID := strings.TrimSpace(getString(data, "model")); modelID != "" {
+		contract = append(contract, "Model: "+modelID)
+	}
+	if tier := strings.TrimSpace(getString(data, "tier")); tier != "" {
+		contract = append(contract, "Tier: "+tier)
+	}
+	if effort := strings.TrimSpace(getString(data, "effort")); effort != "" {
+		contract = append(contract, "Effort: "+effort)
+	}
+	if cap, ok := getNumber(data, "step_cap"); ok && cap > 0 {
+		contract = append(contract, fmt.Sprintf("Step cap: %d", cap))
+	}
+	if count, ok := getNumber(data, "allowed_tool_count"); ok {
+		contract = append(contract, fmt.Sprintf("Visible tools: %d", count))
+	}
+	if isolation := strings.TrimSpace(getString(data, "isolation")); isolation != "" {
+		contract = append(contract, "Isolation: "+isolation)
+	}
+	if schema := strings.TrimSpace(getString(data, "output_schema")); schema != "" {
+		contract = append(contract, "Output schema: "+schema)
+	}
+	if posture := strings.TrimSpace(getString(data, "approval_posture")); posture != "" {
+		contract = append(contract, "Approval: "+posture)
+	}
+	if len(contract) > 0 {
+		sections = append(sections, "Execution contract:\n"+strings.Join(contract, "\n"))
+	}
+	if claims := activityStringList(data, "workspace_claims"); len(claims) > 0 {
+		sections = append(sections, "Workspace claims:\n"+strings.Join(claims, "\n"))
+	}
 	if spec := strings.TrimSpace(getString(data, "spec")); spec != "" {
 		sections = append(sections, "Spec: "+spec)
 	}
@@ -280,6 +317,51 @@ func subagentActivityDetail(data map[string]any) string {
 		sections = append(sections, "Error:\n"+errText)
 	}
 	return strings.Join(sections, "\n\n")
+}
+
+func subagentActivitySummary(data map[string]any, status widgets.ActivityStatus) string {
+	task := strings.TrimSpace(getString(data, "task"))
+	state := firstNonEmpty(strings.TrimSpace(getString(data, "state")), string(status))
+	if task == "" {
+		return state
+	}
+	return state + " · " + truncate(task, 200)
+}
+
+func activityStringList(data map[string]any, key string) []string {
+	if data == nil {
+		return nil
+	}
+	value := data[key]
+	var raw []string
+	switch typed := value.(type) {
+	case []string:
+		raw = typed
+	case []any:
+		for _, item := range typed {
+			if text, ok := item.(string); ok {
+				raw = append(raw, text)
+			}
+		}
+	}
+	if len(raw) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(raw))
+	result := make([]string, 0, len(raw))
+	for _, item := range raw {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+		if _, ok := seen[item]; ok {
+			continue
+		}
+		seen[item] = struct{}{}
+		result = append(result, item)
+	}
+	sort.Strings(result)
+	return result
 }
 
 func (b *TelemetryUIBridge) collectActivities() []widgets.ActivityRecord {

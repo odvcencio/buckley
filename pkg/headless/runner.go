@@ -22,6 +22,7 @@ import (
 	projectcontext "m31labs.dev/buckley/pkg/context"
 	"m31labs.dev/buckley/pkg/conversation"
 	"m31labs.dev/buckley/pkg/ipc/command"
+	knowledgehyphae "m31labs.dev/buckley/pkg/knowledge/hyphae"
 	"m31labs.dev/buckley/pkg/model"
 	"m31labs.dev/buckley/pkg/orchestrator"
 	"m31labs.dev/buckley/pkg/policy"
@@ -246,6 +247,11 @@ func NewRunner(cfg RunnerConfig) (*Runner, error) {
 	if rulesEngine != nil {
 		evaluator = rules.NewEngineAdapter(rulesEngine)
 	}
+	if candidate, ok := tools.Get("spawn_subagent"); ok {
+		if subagents, ok := candidate.(*builtin.SubagentTool); ok {
+			subagents.SetEvaluator(evaluator)
+		}
+	}
 
 	// Wire the layered glob-permission engine (pkg/policy) as an additional
 	// approval layer: every tool call now also consults posture, project,
@@ -266,7 +272,7 @@ func NewRunner(cfg RunnerConfig) (*Runner, error) {
 
 	// Inject system prompt if this is a fresh conversation (no messages yet)
 	if len(conv.Messages) == 0 {
-		conv.AddSystemMessage(buildHeadlessSystemPrompt(cfg.SystemPrompt, cfg.AgentProfile, projectCtx, cfg.Session, evaluator))
+		conv.AddSystemMessage(buildHeadlessSystemPrompt(cfg.SystemPrompt, cfg.AgentProfile, projectCtx, cfg.Session, evaluator, headlessHyphaeProjectKnowledgeContext(sessionCfg, cfg.Session)))
 	}
 
 	// Initialize policy engine if not provided
@@ -1125,7 +1131,14 @@ func (r *Runner) dispatchToolCalls(ctx context.Context, toolCalls []model.ToolCa
 		if logErr := r.store.LogToolExecution(auditEntry); logErr != nil {
 			r.emitError("failed to log tool execution", logErr)
 		}
-		outcomes = append(outcomes, agentloop.ToolOutcome{Content: resultContent, Success: result.Success})
+		yield := tool.ResultYieldForTool(tc.Function.Name, result, nil)
+		outcomes = append(outcomes, agentloop.ToolOutcome{
+			Content:       resultContent,
+			Success:       result.Success,
+			YieldObserved: yield.Observed,
+			YieldCount:    yield.Count,
+			YieldUnit:     yield.Unit,
+		})
 	}
 
 	return outcomes, nil
@@ -2110,7 +2123,7 @@ func (r *Runner) approvalMode() string {
 	}
 }
 
-func buildHeadlessSystemPrompt(basePrompt string, agentProfile string, projectCtx *projectcontext.ProjectContext, sess *storage.Session, evaluator types.RuleEvaluator) string {
+func buildHeadlessSystemPrompt(basePrompt string, agentProfile string, projectCtx *projectcontext.ProjectContext, sess *storage.Session, evaluator types.RuleEvaluator, knowledgeContext string) string {
 	projectRaw := ""
 	if projectCtx != nil {
 		projectRaw = projectCtx.RawContent
@@ -2124,16 +2137,24 @@ func buildHeadlessSystemPrompt(basePrompt string, agentProfile string, projectCt
 	}
 
 	return prompts.BuildRuntimeSystemPrompt(prompts.RuntimePromptInput{
-		Evaluator:      evaluator,
-		BasePrompt:     defaultIfEmpty(basePrompt, defaultHeadlessSystemPrompt),
-		AgentProfile:   agentProfile,
-		ProjectContext: projectRaw,
-		WorkDir:        workDir,
-		RootDir:        rootDir,
-		TaskType:       "coding",
-		ModelTier:      model.InferModelTier(""),
-		GTSAvailable:   binaryAvailable("gts"),
+		Evaluator:        evaluator,
+		BasePrompt:       defaultIfEmpty(basePrompt, defaultHeadlessSystemPrompt),
+		AgentProfile:     agentProfile,
+		ProjectContext:   projectRaw,
+		KnowledgeContext: knowledgeContext,
+		WorkDir:          workDir,
+		RootDir:          rootDir,
+		TaskType:         "coding",
+		ModelTier:        model.InferModelTier(""),
+		GTSAvailable:     binaryAvailable("gts"),
 	})
+}
+
+func headlessHyphaeProjectKnowledgeContext(cfg *config.Config, sess *storage.Session) string {
+	if cfg == nil || !cfg.Memory.HyphaeRecall || sess == nil {
+		return ""
+	}
+	return knowledgehyphae.ProjectKnowledgeContext(context.Background(), sess.ProjectPath, cfg.Memory.HyphaeSpace)
 }
 
 // buildHeadlessPermissionGate assembles the layered glob-permission

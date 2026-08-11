@@ -10,7 +10,7 @@ if [[ -z "$config" || ! -f "$config" ]]; then
   exit 1
 fi
 
-for command in docker goreleaser bun; do
+for command in docker goreleaser; do
   if ! command -v "$command" >/dev/null 2>&1; then
     echo "$command is required" >&2
     exit 1

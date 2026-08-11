@@ -61,6 +61,67 @@ type ProgressState struct {
 	// TaskDone reports that the task's acceptance criteria are met and
 	// only synthesis/reporting remains.
 	TaskDone bool
+	// ToolCalls, SuccessfulToolCalls, FailedToolCalls, and the yield fields
+	// are the observed operation projection. They make completed empty
+	// searches distinguishable from tool failures without asking a model to
+	// infer it from prose.
+	ToolCalls                 int
+	SuccessfulToolCalls       int
+	FailedToolCalls           int
+	YieldObservedCalls        int
+	ZeroYieldCalls            int
+	ConsecutiveZeroYieldCalls int
+}
+
+// ProgressSnapshot is the provider-neutral operation summary accumulated by
+// Controller. It is compact enough for a ledger event, TUI operation card,
+// ACP projection, or partial-result artifact.
+type ProgressSnapshot struct {
+	ToolCalls                 int    `json:"tool_calls"`
+	SuccessfulToolCalls       int    `json:"successful_tool_calls"`
+	FailedToolCalls           int    `json:"failed_tool_calls"`
+	YieldObservedCalls        int    `json:"yield_observed_calls"`
+	ZeroYieldCalls            int    `json:"zero_yield_calls"`
+	ConsecutiveZeroYieldCalls int    `json:"consecutive_zero_yield_calls"`
+	LastToolName              string `json:"last_tool_name,omitempty"`
+	LastYieldCount            int    `json:"last_yield_count,omitempty"`
+	LastYieldUnit             string `json:"last_yield_unit,omitempty"`
+}
+
+type progressTracker struct {
+	snapshot ProgressSnapshot
+}
+
+func (t *progressTracker) Observe(toolName string, outcome ToolOutcome) {
+	if t == nil {
+		return
+	}
+	t.snapshot.ToolCalls++
+	if outcome.Success {
+		t.snapshot.SuccessfulToolCalls++
+	} else {
+		t.snapshot.FailedToolCalls++
+	}
+	if !outcome.YieldObserved {
+		return
+	}
+	t.snapshot.YieldObservedCalls++
+	t.snapshot.LastToolName = strings.TrimSpace(toolName)
+	t.snapshot.LastYieldCount = outcome.YieldCount
+	t.snapshot.LastYieldUnit = strings.TrimSpace(outcome.YieldUnit)
+	if outcome.YieldCount == 0 {
+		t.snapshot.ZeroYieldCalls++
+		t.snapshot.ConsecutiveZeroYieldCalls++
+		return
+	}
+	t.snapshot.ConsecutiveZeroYieldCalls = 0
+}
+
+func (t *progressTracker) Snapshot() ProgressSnapshot {
+	if t == nil {
+		return ProgressSnapshot{}
+	}
+	return t.snapshot
 }
 
 // FuseCounters are the monotonic run totals the emergency fuses compare
@@ -90,6 +151,21 @@ const (
 	ModeShadow  = "shadow"
 	ModeDynamic = "dynamic"
 )
+
+// NewProgressController returns a configured controller only for the staged
+// rollout modes. Legacy and unknown modes deliberately leave the shared turn
+// engine unchanged, so a configuration typo cannot silently activate routing.
+func NewProgressController(mode, policyVersion string, fuses Fuses) *ProgressController {
+	mode = strings.ToLower(strings.TrimSpace(mode))
+	if mode != ModeShadow && mode != ModeDynamic {
+		return nil
+	}
+	return &ProgressController{
+		Mode:          mode,
+		PolicyVersion: strings.TrimSpace(policyVersion),
+		Fuses:         fuses,
+	}
+}
 
 // ProgressThresholds are the deterministic policy's cut points. The zero
 // value takes the spec defaults.

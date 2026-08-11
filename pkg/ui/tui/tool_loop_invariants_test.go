@@ -68,7 +68,7 @@ func TestRunToolLoop_SecondRequestCarriesToolCallAndResult(t *testing.T) {
 
 	ctrl := &Controller{app: app, cfg: cfg, modelMgr: mgr, workDir: t.TempDir()}
 
-	if _, _, _, _, err := ctrl.runToolLoop(context.Background(), sess, "gpt-4o"); err != nil {
+	if _, err := ctrl.runToolLoop(context.Background(), sess, "gpt-4o"); err != nil {
 		t.Fatalf("runToolLoop error: %v", err)
 	}
 	if len(bodies) != 2 {
@@ -152,7 +152,7 @@ func TestRunToolLoop_ReloadedTranscriptMatchesInMemory(t *testing.T) {
 
 	ctrl := &Controller{app: app, cfg: cfg, modelMgr: mgr, store: store, workDir: t.TempDir()}
 
-	if _, _, _, _, err := ctrl.runToolLoop(context.Background(), sess, "gpt-4o"); err != nil {
+	if _, err := ctrl.runToolLoop(context.Background(), sess, "gpt-4o"); err != nil {
 		t.Fatalf("runToolLoop error: %v", err)
 	}
 

@@ -2,11 +2,14 @@ package tui
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"m31labs.dev/buckley/pkg/config"
+	"m31labs.dev/buckley/pkg/prompts"
 	"m31labs.dev/buckley/pkg/storage"
+	"m31labs.dev/buckley/pkg/tool"
 )
 
 func newControllerSessionTestConfig(t *testing.T) (ControllerConfig, *storage.Store, string) {
@@ -147,5 +150,35 @@ func TestLoadOrCreateControllerSessions_SelectsRequestedActiveSession(t *testing
 	}
 	if sessions[current].ID != "old" {
 		t.Fatalf("current session ID = %q, want old", sessions[current].ID)
+	}
+}
+
+func TestLoadOrCreateControllerSessions_RegistersCodeModePerSession(t *testing.T) {
+	cfg, _, workDir := newControllerSessionTestConfig(t)
+	var createdFor string
+	cfg.CodeModeToolFactory = func(sessionID string) (tool.Tool, error) {
+		createdFor = sessionID
+		return repairNameTool{name: "exec_program"}, nil
+	}
+
+	sessions, current, err := loadOrCreateControllerSessions(cfg, workDir)
+	if err != nil {
+		t.Fatalf("loadOrCreateControllerSessions: %v", err)
+	}
+	sess := sessions[current]
+	if createdFor != sess.ID {
+		t.Fatalf("code-mode tool created for %q, want %q", createdFor, sess.ID)
+	}
+	if _, ok := sess.ToolRegistry.Get("exec_program"); !ok {
+		t.Fatal("exec_program was not registered")
+	}
+	if kind := sess.ToolRegistry.ToolKind("exec_program"); kind != "execute" {
+		t.Fatalf("exec_program kind = %q, want execute", kind)
+	}
+
+	ctrl := &Controller{cfg: cfg.Config, workDir: workDir}
+	systemPrompt := ctrl.buildSystemPrompt(sess)
+	if !strings.Contains(systemPrompt, prompts.CodeModeSystemPrompt) {
+		t.Fatal("code-mode session prompt omitted batching instructions")
 	}
 }

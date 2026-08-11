@@ -2,8 +2,14 @@ package builtin
 
 import (
 	"context"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
+	"m31labs.dev/buckley/pkg/agentcoord"
+	"m31labs.dev/buckley/pkg/evidence"
+	"m31labs.dev/buckley/pkg/runledger"
 	"m31labs.dev/buckley/pkg/subagent"
 )
 
@@ -11,6 +17,85 @@ type builtinSubagentRunnerFunc func(context.Context, subagent.Request, func(int)
 
 func (f builtinSubagentRunnerFunc) Run(ctx context.Context, request subagent.Request, started func(int)) (string, error) {
 	return f(ctx, request, started)
+}
+
+func TestSubagentCommandArgs_GenericProfileIsScopedAndCleanedUp(t *testing.T) {
+	args, cleanup, err := subagentCommandArgs(subagent.Request{Task: "inspect this"})
+	if err != nil {
+		t.Fatalf("subagentCommandArgs: %v", err)
+	}
+	if len(args) != 5 || args[0] != "agent" || args[1] != "run" || args[3] != "worker" || args[4] != "inspect this" {
+		t.Fatalf("generic args = %v", args)
+	}
+	profilePath := args[2]
+	data, err := os.ReadFile(profilePath)
+	if err != nil {
+		t.Fatalf("read generic profile: %v", err)
+	}
+	if !strings.Contains(string(data), "version: buckley.agent/v1") || !strings.Contains(string(data), "name: worker") {
+		t.Fatalf("generic profile = %q", data)
+	}
+	cleanup()
+	if _, err := os.Stat(profilePath); !os.IsNotExist(err) {
+		t.Fatalf("generic profile should be removed, stat err=%v", err)
+	}
+}
+
+func TestSubagentCommandArgs_NamedProjectProfileRemainsDirect(t *testing.T) {
+	args, cleanup, err := subagentCommandArgs(subagent.Request{Agent: "reviewer", Spec: "daily", Task: "inspect this"})
+	if err != nil {
+		t.Fatalf("subagentCommandArgs: %v", err)
+	}
+	defer cleanup()
+	if got, want := strings.Join(args, "|"), "agent|run|--project|--spec|daily|reviewer|inspect this"; got != want {
+		t.Fatalf("named args = %q, want %q", got, want)
+	}
+}
+
+func TestSubagentTool_SetDurabilityBuildsReplayableCoordinator(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "subagents.db")
+	evidenceStore, err := evidence.New(dbPath)
+	if err != nil {
+		t.Fatalf("open evidence: %v", err)
+	}
+	t.Cleanup(func() { _ = evidenceStore.Close() })
+	ledger, err := runledger.NewWithDB(evidenceStore.DB())
+	if err != nil {
+		t.Fatalf("open ledger: %v", err)
+	}
+	manager := subagent.NewManager(builtinSubagentRunnerFunc(func(_ context.Context, _ subagent.Request, started func(int)) (string, error) {
+		started(71)
+		return "durable review", nil
+	}), 1)
+	t.Cleanup(func() { _ = manager.Close() })
+
+	tool := &SubagentTool{manager: manager}
+	tool.SetTelemetry(nil, "session-durable-tool")
+	tool.SetDurability(ledger, evidenceStore)
+	coordinator := tool.getCoordinator()
+	run, err := coordinator.Spawn(context.Background(), agentcoord.TaskSpec{
+		RunID:           "run-durable-tool",
+		ParentSessionID: "session-durable-tool",
+		Task:            "inspect the patch",
+		WorkspaceClaims: []string{"pkg/tool"},
+	})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	completed, err := coordinator.Wait(context.Background(), run.ID)
+	if err != nil {
+		t.Fatalf("Wait: %v", err)
+	}
+	if completed.State != agentcoord.RunCompleted || len(completed.Result.EvidenceRefs) < 2 {
+		t.Fatalf("completed = %+v", completed)
+	}
+	durable, err := ledger.GetRun(context.Background(), run.ID)
+	if err != nil {
+		t.Fatalf("GetRun: %v", err)
+	}
+	if durable.Status != string(agentcoord.RunCompleted) || durable.Backend != "local-process" {
+		t.Fatalf("durable projection = %+v", durable)
+	}
 }
 
 func TestSplitOneShotOutput(t *testing.T) {
@@ -405,13 +490,13 @@ func TestSubagentTool(t *testing.T) {
 		if err != nil || !spawned.Success {
 			t.Fatalf("spawn result=%+v err=%v", spawned, err)
 		}
-		run := spawned.Data["run"].(subagent.Snapshot)
+		run := spawned.Data["run"].(agentcoord.Run)
 		finished, err := managedTool.Execute(map[string]any{"action": "wait", "id": run.ID, "timeout_seconds": 5})
 		if err != nil || !finished.Success {
 			t.Fatalf("wait result=%+v err=%v", finished, err)
 		}
-		got := finished.Data["run"].(subagent.Snapshot)
-		if got.State != subagent.StateCompleted || got.Output != "review complete" || got.PID != 99 {
+		got := finished.Data["run"].(agentcoord.Run)
+		if got.State != agentcoord.RunCompleted || got.Result.Summary != "review complete" || got.PID != 99 {
 			t.Fatalf("unexpected completed run: %+v", got)
 		}
 	})

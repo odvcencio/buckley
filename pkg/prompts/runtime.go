@@ -20,12 +20,17 @@ Operate like a disciplined senior engineer:
 - never claim a command ran, a file changed, or a test passed unless it actually happened
 - keep final answers concise once the work is done`
 
+// CodeModeSystemPrompt teaches a tool-using model how to exploit the optional
+// exec_program surface. Callers append it only when that tool is registered.
+const CodeModeSystemPrompt = `CODE MODE: prefer one exec_program run over a chain of read/search calls. Plan the investigation as a complete program, compose and filter inside the sandbox, and print only the evidence needed for the next decision. Iterate inside this turn: if the program does not compile or a capability call fails, fix it and call exec_program again immediately. Never end the turn to retry a program.`
+
 // RuntimePromptInput describes the runtime context used to assemble a system prompt.
 type RuntimePromptInput struct {
 	Evaluator         types.RuleEvaluator
 	BasePrompt        string
 	AgentProfile      string
 	ProjectContext    string
+	KnowledgeContext  string
 	WorkDir           string
 	RootDir           string
 	SkillsDescription string
@@ -73,6 +78,11 @@ func BuildRuntimeSystemPrompt(input RuntimePromptInput) string {
 		builder.AddSection("project_context", "Project Context:\n"+projectContext, true)
 	}
 
+	knowledgeContext := strings.TrimSpace(input.KnowledgeContext)
+	if knowledgeContext != "" {
+		builder.AddSection("durable_knowledge", knowledgeContext, true)
+	}
+
 	if workDir != "" {
 		builder.AddSection("working_directory", fmt.Sprintf("Working Directory: %s", workDir), true)
 	}
@@ -86,7 +96,7 @@ func BuildRuntimeSystemPrompt(input RuntimePromptInput) string {
 		ModelTier:        defaultString(input.ModelTier, "standard"),
 		TaskType:         defaultString(input.TaskType, "coding"),
 		GitDiffLines:     input.GitDiffLines,
-		InstructionChars: len(agentProfile) + len(instructionsSection) + len(projectContext),
+		InstructionChars: len(agentProfile) + len(instructionsSection) + len(projectContext) + len(knowledgeContext),
 		GTSAvailable:     input.GTSAvailable,
 	})
 

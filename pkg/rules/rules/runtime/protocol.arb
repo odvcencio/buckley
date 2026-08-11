@@ -1,0 +1,79 @@
+// Adaptive execution protocol policy.
+//
+// Profile facts carry capability and observed behavior; this policy decides
+// how much choice, fan-out, and continuation the harness may grant. It never
+// identifies a provider or model by name, so operators can revise profile
+// facts or override this policy without hidden vendor switches.
+
+outcome ProtocolChoice {
+    name: string
+    visible_tool_count: number
+    max_turns: number
+    max_fanout: number
+    context_source: string
+    code_mode: string
+    continuation: bool
+    verification_depth: string
+    architect_editor_split: bool
+}
+
+strategy compile returns ProtocolChoice {
+    when {
+        model.class == "weak"
+    } then WeakTypedStages {
+        name: "weak_typed_stages",
+        visible_tool_count: 4,
+        max_turns: 10,
+        max_fanout: 1,
+        context_source: "canopy_ranked",
+        code_mode: "suggest",
+        continuation: false,
+        verification_depth: "focused",
+        architect_editor_split: true,
+    }
+
+    when {
+        model.class == "frontier"
+        and task.parallelizable == true
+        and task.risk != "high"
+        and rollout.dynamic == true
+        and rollout.auto_code_mode == true
+        and model.code_mode == true
+    } then FrontierParallel {
+        name: "frontier_parallel",
+        visible_tool_count: 12,
+        max_turns: 36,
+        max_fanout: 3,
+        context_source: "canopy_ranked",
+        code_mode: "auto_read_only",
+        continuation: true,
+        verification_depth: "risk_triggered",
+        architect_editor_split: false,
+    }
+
+    when {
+        model.class == "frontier"
+    } then FrontierHorizon {
+        name: "frontier_horizon",
+        visible_tool_count: 12,
+        max_turns: 36,
+        max_fanout: 1,
+        context_source: "canopy_ranked",
+        code_mode: "suggest",
+        continuation: true,
+        verification_depth: "risk_triggered",
+        architect_editor_split: false,
+    }
+
+    else BalancedProtocol {
+        name: "balanced_protocol",
+        visible_tool_count: 8,
+        max_turns: 20,
+        max_fanout: 1,
+        context_source: "canopy_ranked",
+        code_mode: "suggest",
+        continuation: false,
+        verification_depth: "focused",
+        architect_editor_split: false,
+    }
+}

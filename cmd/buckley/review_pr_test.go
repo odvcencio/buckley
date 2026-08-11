@@ -64,12 +64,32 @@ func TestParseReviewPRCommandOptions(t *testing.T) {
 	}
 }
 
+func TestParseReviewPRCommandOptionsRejectsConflictingBudgetModes(t *testing.T) {
+	_, err := parseReviewPRCommandOptions([]string{"123", "--budget", "0.25", "--no-budget"})
+	if err == nil || !strings.Contains(err.Error(), "cannot be combined") {
+		t.Fatalf("error = %v, want conflicting budget modes", err)
+	}
+
+	_, err = parseReviewPRCommandOptions([]string{"123", "--budget", "-0.25"})
+	if err == nil || !strings.Contains(err.Error(), "must be zero or greater") {
+		t.Fatalf("error = %v, want non-negative budget validation", err)
+	}
+
+	opts, err := parseReviewPRCommandOptions([]string{"123", "--no-budget"})
+	if err != nil {
+		t.Fatalf("parseReviewPRCommandOptions(--no-budget) error = %v", err)
+	}
+	if !opts.noBudget {
+		t.Fatal("noBudget = false, want true")
+	}
+}
+
 func TestDefaultAutomatedReviewOptionsAndOverrides(t *testing.T) {
 	cfg := config.DefaultConfig()
 	defaults := defaultAutomatedReviewOptions(cfg)
 	if defaults.maxIterations != 0 || defaults.maxRetries != 2 || defaults.maxDiffBytes != 240_000 ||
 		defaults.maxSupportingContextTokens != 12_000 ||
-		defaults.maxCostUSD != 0.60 || defaults.criticReserveUSD != 0.60*0.12 || !defaults.approvalCritic ||
+		defaults.maxCostUSD != 0 || defaults.criticReserveUSD != 0 || !defaults.approvalCritic ||
 		defaults.reasoningEffort != "medium" || !defaults.adaptiveReasoning {
 		t.Fatalf("defaults = %#v, want Buckbot defaults", defaults)
 	}
@@ -90,6 +110,16 @@ func TestDefaultAutomatedReviewOptionsAndOverrides(t *testing.T) {
 	withCritic := defaultAutomatedReviewOptions(cfg).withOverrides(automatedReviewOptions{maxCostUSD: 0.10})
 	if withCritic.criticReserveUSD != 0.012 || !withCritic.approvalCritic {
 		t.Fatalf("critic policy = %#v, want enabled with $0.012 reserve", withCritic)
+	}
+
+	cfg.Buckbot.PerReviewBudgetUSD = 0.60
+	configured := defaultAutomatedReviewOptions(cfg)
+	if configured.maxCostUSD != 0.60 || configured.criticReserveUSD != 0.072 {
+		t.Fatalf("configured policy = %#v, want explicit $0.60 cap", configured)
+	}
+	uncapped := configured.withOverrides(automatedReviewOptions{clearCostBudget: true})
+	if uncapped.maxCostUSD != 0 || uncapped.criticReserveUSD != 0 {
+		t.Fatalf("uncapped policy = %#v, want no monetary cap", uncapped)
 	}
 }
 
