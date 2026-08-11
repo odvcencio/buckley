@@ -1,12 +1,14 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"io"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -14,6 +16,8 @@ import (
 	"m31labs.dev/buckley/pkg/config"
 	"m31labs.dev/buckley/pkg/model"
 	"m31labs.dev/buckley/pkg/orchestrator"
+	"m31labs.dev/buckley/pkg/protocol"
+	"m31labs.dev/buckley/pkg/rules"
 	"m31labs.dev/buckley/pkg/storage"
 	"m31labs.dev/buckley/pkg/tool"
 )
@@ -38,9 +42,92 @@ func TestParseBoolEnv(t *testing.T) {
 	}
 }
 
+func TestCompileOneShotAdaptiveProtocolFromVersionedProfile(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.AdaptiveProtocol.Mode = "dynamic"
+	cfg.AdaptiveProtocol.PolicyVersion = "eval-policy-v1"
+	cfg.AdaptiveProtocol.AutoCodeMode = true
+	cfg.AdaptiveProtocol.Profiles = map[string]config.ModelBehaviorProfileConfig{"example/model": {
+		Version:                     "eval-2026-08-11",
+		Class:                       "frontier",
+		SampleSize:                  100,
+		Confidence:                  0.95,
+		MeasuredAt:                  "2026-08-11T00:00:00Z",
+		ToolCalls:                   true,
+		ParallelToolCalls:           true,
+		Continuation:                true,
+		CodeMode:                    true,
+		SafeVisibleToolCount:        10,
+		ToolReliability:             0.95,
+		StructuredOutputReliability: 0.96,
+		ParallelCallReliability:     0.96,
+		ContinuationReliability:     0.96,
+	}}
+	engine, err := rules.NewDefaultEngine()
+	if err != nil {
+		t.Fatalf("NewDefaultEngine: %v", err)
+	}
+	compiled, ok := compileOneShotAdaptiveProtocol(cfg, nil, nil, engine, "example/model", tool.NewRegistry(), "")
+	if !ok || compiled == nil {
+		t.Fatal("expected configured profile to compile a protocol")
+	}
+	stage := adaptiveProtocolExecutionStage(*compiled)
+	if compiled.Mode != "dynamic" || compiled.Receipt.PolicyVersion != "eval-policy-v1" || compiled.Receipt.PolicyOutcome != "frontier_horizon" || stage.MaxFanout != 1 || stage.CodeMode != "suggest" {
+		t.Fatalf("unexpected one-shot protocol: %+v", compiled)
+	}
+}
+
+func TestOneShotProtocolToolFiltersPreserveControlTools(t *testing.T) {
+	if got := applyProtocolToolFilter(nil, []string{"read_file", "find_files"}); !reflect.DeepEqual(got, []string{"read_file", "find_files"}) {
+		t.Fatalf("unrestricted protocol filter = %v", got)
+	}
+	if got := applyProtocolToolFilter([]string{"read_file", "write_file"}, []string{"read_file", "find_files"}); !reflect.DeepEqual(got, []string{"read_file"}) {
+		t.Fatalf("explicit protocol filter = %v", got)
+	}
+	if got := ensureRequiredOneShotTools([]string{}, true, true); !reflect.DeepEqual(got, []string{"submit_artifact", "exec_program"}) {
+		t.Fatalf("required control tools = %v", got)
+	}
+}
+
+func TestOneShotBehaviorProfileUsesDurableStoreWithoutConfigPin(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.AdaptiveProtocol.Mode = "dynamic"
+	store, err := storage.New(":memory:")
+	if err != nil {
+		t.Fatalf("storage.New: %v", err)
+	}
+	defer store.Close()
+	profile := protocol.BehaviorProfile{
+		SchemaVersion: protocol.ProfileSchemaVersion,
+		ModelID:       "stored/model",
+		Version:       "eval-v3",
+		Class:         protocol.ClassWeak,
+		SampleSize:    30,
+		Confidence:    0.9,
+		MeasuredAt:    time.Date(2026, 8, 11, 0, 0, 0, 0, time.UTC),
+		Capabilities:  protocol.Capabilities{ToolCalls: true},
+		Metrics: protocol.BehaviorMetrics{
+			ToolReliability:             0.8,
+			ArgumentRepairReliability:   0.8,
+			StructuredOutputReliability: 0.8,
+			ParallelCallReliability:     0.8,
+			EditFidelity:                0.8,
+			VerificationPassRate:        0.8,
+			ContinuationReliability:     0.8,
+		},
+	}
+	if err := storage.NewBehaviorProfileStore(store).Put(context.Background(), profile); err != nil {
+		t.Fatalf("persist profile: %v", err)
+	}
+	got, found, err := oneShotBehaviorProfile(cfg, nil, store, "stored/model")
+	if err != nil || !found || got.Version != "eval-v3" {
+		t.Fatalf("oneShotBehaviorProfile = %+v, %v, %v", got, found, err)
+	}
+}
+
 func TestParseStartupOptionsFlagsAndFiltering(t *testing.T) {
 	t.Setenv("BUCKLEY_QUIET", "1")
-	raw := []string{"--encoding=json", "--model", "codex/gpt-5.4-mini", "--agent", "agent.yaml", "-p", "hello", "--config=proj.yaml", "plan", "feat", "do", "thing"}
+	raw := []string{"--encoding=json", "--model", "codex/gpt-5.4-mini", "--agent", "agent.yaml", "--code-mode", "-p", "hello", "--config=proj.yaml", "plan", "feat", "do", "thing"}
 	opts, err := parseStartupOptions(raw)
 	if err != nil {
 		t.Fatalf("parseStartupOptions error: %v", err)
@@ -62,6 +149,9 @@ func TestParseStartupOptionsFlagsAndFiltering(t *testing.T) {
 	}
 	if opts.agentPath != "agent.yaml" {
 		t.Fatalf("agentPath=%q want agent.yaml", opts.agentPath)
+	}
+	if !opts.codeMode {
+		t.Fatal("expected --code-mode to enable code mode")
 	}
 	if got := opts.args; len(got) != 4 || got[0] != "plan" {
 		t.Fatalf("args=%v want plan feat do thing", got)
@@ -181,6 +271,30 @@ func TestParseStartupOptionsAgentEnvDefault(t *testing.T) {
 	}
 	if opts.agentPath != "flag-agent.yaml" {
 		t.Fatalf("agentPath=%q want flag-agent.yaml", opts.agentPath)
+	}
+}
+
+func TestParseStartupOptionsCodeModeEnvAndSubcommandBoundary(t *testing.T) {
+	t.Setenv("BUCKLEY_CODE_MODE", "true")
+	opts, err := parseStartupOptions([]string{"--plain"})
+	if err != nil {
+		t.Fatalf("parseStartupOptions error: %v", err)
+	}
+	if !opts.codeMode {
+		t.Fatal("expected BUCKLEY_CODE_MODE to enable code mode")
+	}
+
+	t.Setenv("BUCKLEY_CODE_MODE", "false")
+	opts, err = parseStartupOptions([]string{"goal", "run", "--code-mode", "run-1"})
+	if err != nil {
+		t.Fatalf("parseStartupOptions error: %v", err)
+	}
+	if opts.codeMode {
+		t.Fatal("subcommand-local --code-mode must not become a global launch flag")
+	}
+	want := []string{"goal", "run", "--code-mode", "run-1"}
+	if strings.Join(opts.args, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("args=%v want %v", opts.args, want)
 	}
 }
 

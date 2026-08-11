@@ -143,6 +143,10 @@ const (
 	EventSubagentFailed         = "subagent.failed"
 	EventSubagentCancelled      = "subagent.cancelled"
 	EventSubagentHandoffCreated = "subagent.handoff_created"
+	EventSubagentMessageSent    = "subagent.message_sent"
+	EventSubagentSteered        = "subagent.steered"
+	EventSubagentClaimed        = "subagent.claimed"
+	EventSubagentReleased       = "subagent.released"
 
 	EventBudgetUpdated   = "budget.updated"
 	EventBudgetWarning   = "budget.warning"

@@ -9,7 +9,7 @@ import (
 )
 
 func TestToolLoopGuard_WarnsThenStopsIdenticalExecution(t *testing.T) {
-	state := &toolLoopState{governor: newInteractiveToolLoopGovernor()}
+	state := &toolLoopState{governor: newInteractiveToolLoopGovernor(nil)}
 	call := model.ToolCall{Function: model.FunctionCall{Name: "run_tests", Arguments: `{"path":"./..."}`}}
 	result := &builtin.Result{Success: false, Error: "failed"}
 
@@ -28,7 +28,7 @@ func TestToolLoopGuard_WarnsThenStopsIdenticalExecution(t *testing.T) {
 }
 
 func TestToolLoopGuard_DifferentResultDoesNotCountAsExactRepeat(t *testing.T) {
-	state := &toolLoopState{governor: newInteractiveToolLoopGovernor()}
+	state := &toolLoopState{governor: newInteractiveToolLoopGovernor(nil)}
 	call := model.ToolCall{Function: model.FunctionCall{Name: "run_tests", Arguments: `{}`}}
 	result := &builtin.Result{Success: false, Error: "failed"}
 

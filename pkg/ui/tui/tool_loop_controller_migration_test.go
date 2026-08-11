@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -67,15 +68,18 @@ func TestRunToolLoopControllerStopsOnExactRepeatAndSynthesizes(t *testing.T) {
 
 	ctrl := &Controller{app: app, cfg: cfg, modelMgr: mgr, workDir: t.TempDir()}
 
-	text, _, finishReason, _, err := ctrl.runToolLoop(context.Background(), sess, "gpt-4o")
+	result, err := ctrl.runToolLoop(context.Background(), sess, "gpt-4o")
 	if err != nil {
 		t.Fatalf("runToolLoop error: %v", err)
 	}
-	if finishReason != "loop_guard" {
-		t.Fatalf("finishReason = %q, want loop_guard", finishReason)
+	if result.ProviderFinishReason != "" {
+		t.Fatalf("provider finish reason = %q, want empty for a harness-owned stop", result.ProviderFinishReason)
 	}
-	if text != "Stopping due to repeats." {
-		t.Fatalf("final text = %q, want the guard-recovery synthesis text", text)
+	if !strings.Contains(result.HarnessStopReason, "same action") {
+		t.Fatalf("harness stop reason = %q, want exact-repeat reason", result.HarnessStopReason)
+	}
+	if result.Text != "Stopping due to repeats." {
+		t.Fatalf("final text = %q, want the guard-recovery synthesis text", result.Text)
 	}
 	if atomic.LoadInt32(&callCount) != 4 {
 		t.Fatalf("expected exactly 4 requests (3 repeats + 1 recovery), got %d", callCount)
@@ -151,12 +155,12 @@ func TestRunToolLoopControllerRetriesWithoutToolsOnUnsupportedError(t *testing.T
 
 	ctrl := &Controller{app: app, cfg: cfg, modelMgr: mgr, workDir: t.TempDir()}
 
-	text, _, _, _, err := ctrl.runToolLoop(context.Background(), sess, "gpt-4o")
+	result, err := ctrl.runToolLoop(context.Background(), sess, "gpt-4o")
 	if err != nil {
 		t.Fatalf("runToolLoop error: %v", err)
 	}
-	if text != "No tools, but the answer is 42." {
-		t.Fatalf("final text = %q", text)
+	if result.Text != "No tools, but the answer is 42." {
+		t.Fatalf("final text = %q", result.Text)
 	}
 	if atomic.LoadInt32(&requestsWithTools) != 1 {
 		t.Fatalf("expected exactly 1 request advertising tools, got %d", requestsWithTools)
@@ -166,7 +170,7 @@ func TestRunToolLoopControllerRetriesWithoutToolsOnUnsupportedError(t *testing.T
 	}
 
 	last := conv.Messages[len(conv.Messages)-1]
-	if last.Role != "assistant" || conversation.GetContentAsString(last.Content) != text {
+	if last.Role != "assistant" || conversation.GetContentAsString(last.Content) != result.Text {
 		t.Fatalf("final answer not persisted after tools-off retry: %+v", last)
 	}
 }
@@ -211,7 +215,7 @@ func TestRunToolLoopControllerExhaustsContextRetriesThenFails(t *testing.T) {
 
 	ctrl := &Controller{app: app, cfg: cfg, modelMgr: mgr, workDir: t.TempDir()}
 
-	_, _, _, _, err = ctrl.runToolLoop(context.Background(), sess, "gpt-4o")
+	_, err = ctrl.runToolLoop(context.Background(), sess, "gpt-4o")
 	if err == nil {
 		t.Fatal("expected the third context-length error to be returned to the caller")
 	}

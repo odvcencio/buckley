@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"m31labs.dev/buckley/pkg/agentloop"
+	"m31labs.dev/buckley/pkg/config"
 	"m31labs.dev/buckley/pkg/conversation"
 	"m31labs.dev/buckley/pkg/model"
 	"m31labs.dev/buckley/pkg/tool/builtin"
@@ -19,8 +20,35 @@ import (
 // tool-call Observe() consultation run through the one shared engine
 // instance, matching how pkg/headless and other Controller-driven callers
 // consult it.
-func newInteractiveToolLoopGovernor() *agentloop.Governor {
-	return agentloop.New(agentloop.DefaultConfig())
+func newInteractiveToolLoopGovernor(cfg *config.Config) *agentloop.Governor {
+	governorConfig := agentloop.DefaultConfig()
+	if cfg != nil {
+		if limit := cfg.AgentController.EmergencyFuse.ModelRequests; limit > 0 {
+			governorConfig.MaxRounds = limit
+		}
+		if limit := cfg.AgentController.EmergencyFuse.ToolExecutions; limit > 0 {
+			governorConfig.MaxToolCalls = limit
+		}
+	}
+	return agentloop.New(governorConfig)
+}
+
+// newInteractiveProgressController opts interactive turns into the shared
+// progress projection only when the configured rollout mode says so. The
+// Governor remains the distant hard backstop in every mode.
+func newInteractiveProgressController(cfg *config.Config) *agentloop.ProgressController {
+	if cfg == nil {
+		return nil
+	}
+	return agentloop.NewProgressController(
+		cfg.AgentController.Mode,
+		cfg.AgentController.PolicyVersion,
+		agentloop.Fuses{
+			ModelRequests:  cfg.AgentController.EmergencyFuse.ModelRequests,
+			ToolExecutions: cfg.AgentController.EmergencyFuse.ToolExecutions,
+			WallTime:       cfg.AgentController.EmergencyFuse.WallTime,
+		},
+	)
 }
 
 func applyToolLoopGuard(state *toolLoopState, call model.ToolCall, result *builtin.Result, execErr error, modelResult string) string {
@@ -84,7 +112,7 @@ func contextProjectionStatus(stats conversation.ContextProjectionStats) string {
 	return label
 }
 
-func (c *Controller) finishGuardedToolLoop(ctx context.Context, sess *SessionState, modelID string, state *toolLoopState, reason string) (string, *model.Usage, string, bool, error) {
+func (c *Controller) finishGuardedToolLoop(ctx context.Context, sess *SessionState, modelID string, state *toolLoopState, reason string) (toolLoopResult, error) {
 	reason = strings.TrimSpace(reason)
 	if reason == "" {
 		reason = "tool execution stopped because the harness detected no forward progress"
@@ -104,7 +132,8 @@ func (c *Controller) finishGuardedToolLoop(ctx context.Context, sess *SessionSta
 	req.Messages = append(req.Messages, model.Message{
 		Role: "system",
 		Content: "Buckley's harness stopped further tool execution because " + reason + ". " +
-			"Do not call another tool. Use only evidence already present in the conversation, state any remaining uncertainty, and give the user the most useful concise final response you can.",
+			"Do not call another tool. Use only evidence already present in the conversation, state any remaining uncertainty, and give the user the most useful concise final response you can. " +
+			"Do not paraphrase or speculate about why tools stopped; Buckley reports that deterministic reason separately.",
 	})
 
 	contextWindow := 0
@@ -140,7 +169,9 @@ func (c *Controller) finishGuardedToolLoop(ctx context.Context, sess *SessionSta
 	if state != nil {
 		usage = state.totalUsage
 	}
-	return c.finishToolLoopResponse(sess, choice.Message, usage, "loop_guard", state)
+	result, finishErr := c.finishToolLoopResponse(sess, choice.Message, usage, "", state)
+	result.HarnessStopReason = reason
+	return result, finishErr
 }
 
 func completePendingToolResponses(messages []model.Message, reason string) []model.Message {
@@ -189,7 +220,7 @@ func completePendingToolResponses(messages []model.Message, reason string) []mod
 	return result
 }
 
-func (c *Controller) finishGuardFallback(sess *SessionState, state *toolLoopState, reason string, cause error) (string, *model.Usage, string, bool, error) {
+func (c *Controller) finishGuardFallback(sess *SessionState, state *toolLoopState, reason string, cause error) (toolLoopResult, error) {
 	text := "I stopped the tool loop because " + strings.TrimSuffix(reason, ".") + ". " +
 		"The evidence gathered so far remains available in the activity inspector. A different strategy or a narrower follow-up is needed before more tool execution would be useful."
 	if cause != nil {
@@ -199,5 +230,7 @@ func (c *Controller) finishGuardFallback(sess *SessionState, state *toolLoopStat
 	if state != nil {
 		usage = state.totalUsage
 	}
-	return c.finishToolLoopResponse(sess, model.Message{Role: "assistant", Content: text}, usage, "loop_guard", state)
+	result, err := c.finishToolLoopResponse(sess, model.Message{Role: "assistant", Content: text}, usage, "", state)
+	result.HarnessStopReason = reason
+	return result, err
 }

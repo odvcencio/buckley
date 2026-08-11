@@ -13,6 +13,7 @@ import (
 // discover_tools without bloating every model turn.
 var DefaultDiscoveryTools = []string{
 	"discover_tools",
+	"exec_program",
 	"read_file",
 	"search_text",
 	"find_files",

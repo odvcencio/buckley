@@ -163,10 +163,11 @@ type Config struct {
 
 	// Context Fabric / durable agent runtime scaffolding. All flags default
 	// off or to current (legacy) behavior; no runtime code reads these yet.
-	ContextFabric   ContextFabricConfig   `yaml:"context_fabric"`
-	AgentController AgentControllerConfig `yaml:"agent_controller"`
-	AgentOperations AgentOperationsConfig `yaml:"agent_operations"`
-	Metrics         MetricsConfig         `yaml:"metrics"`
+	ContextFabric    ContextFabricConfig    `yaml:"context_fabric"`
+	AgentController  AgentControllerConfig  `yaml:"agent_controller"`
+	AdaptiveProtocol AdaptiveProtocolConfig `yaml:"adaptive_protocol"`
+	AgentOperations  AgentOperationsConfig  `yaml:"agent_operations"`
+	Metrics          MetricsConfig          `yaml:"metrics"`
 }
 
 // NotifyConfig controls async notifications for human-in-the-loop workflows
@@ -357,9 +358,12 @@ type MemoryConfig struct {
 	// prevent local Buckley operation.
 	RalphCompatibility bool `yaml:"ralph_compatibility"`
 	HyphaeRecall       bool `yaml:"hyphae_recall"`
-	HyphaePromotion    bool `yaml:"hyphae_promotion"`
-	TillerInterchange  bool `yaml:"tiller_interchange"`
-	GraftVCS           bool `yaml:"graft_vcs"`
+	// HyphaeSpace optionally pins an installed Hyphae space for this project.
+	// When empty, Buckley matches the active workspace directory name.
+	HyphaeSpace       string `yaml:"hyphae_space"`
+	HyphaePromotion   bool   `yaml:"hyphae_promotion"`
+	TillerInterchange bool   `yaml:"tiller_interchange"`
+	GraftVCS          bool   `yaml:"graft_vcs"`
 }
 
 // OrchestratorConfig controls feature orchestration
@@ -954,16 +958,20 @@ type GitEventsConfig struct {
 	FailureCommand     string `yaml:"failure_command"`
 }
 
-// BuckbotConfig controls on-demand pull-request reviews. Enabled, Secret, and
-// WebhookBind remain for configuration compatibility with the retired daemon.
+// BuckbotConfig controls Buckley's general-purpose review runtime. Enabled,
+// Secret, and WebhookBind remain for configuration compatibility with the
+// retired webhook daemon.
 type BuckbotConfig struct {
-	Enabled                    bool    `yaml:"enabled"`
-	Secret                     string  `yaml:"secret"`
-	WebhookBind                string  `yaml:"webhook_bind"`
-	Model                      string  `yaml:"model"`
-	CriticModel                string  `yaml:"critic_model"`
-	Reasoning                  string  `yaml:"reasoning"`
-	PerReviewBudgetUSD         float64 `yaml:"per_review_budget_usd"`
+	Enabled     bool   `yaml:"enabled"`
+	Secret      string `yaml:"secret"`
+	WebhookBind string `yaml:"webhook_bind"`
+	Model       string `yaml:"model"`
+	CriticModel string `yaml:"critic_model"`
+	Reasoning   string `yaml:"reasoning"`
+	// PerReviewBudgetUSD is an optional explicit cap. Zero lets a review run
+	// without a dollar ceiling, subject to its normal time and safety controls.
+	PerReviewBudgetUSD float64 `yaml:"per_review_budget_usd"`
+	// MonthlyBudgetUSD is optional. Zero means no configured monthly ceiling.
 	MonthlyBudgetUSD           float64 `yaml:"monthly_budget_usd"`
 	MaxReviewIterations        int     `yaml:"max_review_iterations"`
 	MaxValidationAttempts      int     `yaml:"max_validation_attempts"`

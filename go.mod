@@ -45,6 +45,7 @@ require (
 	k8s.io/client-go v0.30.3
 	m31labs.dev/arbiter v1.7.0
 	m31labs.dev/fluffyui v0.6.3
+	m31labs.dev/gosx v0.37.1
 	m31labs.dev/mdpp v0.4.7
 	modernc.org/sqlite v1.34.5
 	nhooyr.io/websocket v1.8.17
@@ -54,8 +55,16 @@ require (
 	github.com/cenkalti/backoff/v4 v4.3.0 // indirect
 	github.com/dapr/kit v0.18.0 // indirect
 	github.com/go-jose/go-jose/v4 v4.1.3 // indirect
+	github.com/klauspost/cpuid/v2 v2.0.9 // indirect
+	github.com/odvcencio/corkscrewdb v0.2.0 // indirect
+	github.com/odvcencio/turboquant v0.1.3 // indirect
 	github.com/spiffe/go-spiffe/v2 v2.6.0 // indirect
 	golang.org/x/exp v0.0.0-20250106191152-7588d65b2ba8 // indirect
+	lukechampine.com/blake3 v1.4.1 // indirect
+	m31labs.dev/eos v0.1.4 // indirect
+	m31labs.dev/mll v0.1.0 // indirect
+	m31labs.dev/prism v0.1.3 // indirect
+	m31labs.dev/turboquant v0.2.0 // indirect
 )
 
 require (
@@ -141,7 +150,7 @@ require (
 	go.opentelemetry.io/otel/metric v1.43.0 // indirect
 	go.yaml.in/yaml/v2 v2.4.2 // indirect
 	golang.org/x/crypto v0.51.0 // indirect
-	golang.org/x/image v0.35.0 // indirect
+	golang.org/x/image v0.38.0 // indirect
 	golang.org/x/oauth2 v0.35.0 // indirect
 	golang.org/x/sys v0.45.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260401024825-9d38bb4040a9 // indirect

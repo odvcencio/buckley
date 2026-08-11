@@ -55,7 +55,7 @@ buckley
 | Mode | Command | Use Case |
 |------|---------|----------|
 | **TUI** | `buckley` | Interactive terminal with streaming and approvals |
-| **Web** | `buckley serve --browser` | Browser-based Mission Control |
+| **GoSX** | `buckley serve --browser` | Server-rendered Mission Control |
 | **API** | `buckley api` | Headless for CI/CD integration |
 
 ### The Workflow
@@ -71,6 +71,7 @@ buckley commit    # AI-generated commit message from staged changes
 buckley pr        # AI-generated PR description
 buckley review    # Code review current changes
 buckley review-pr 123 # Review a GitHub PR, CI, and unresolved feedback
+buckley buckbot repo # Repository-wide advisory review
 buckley hunt      # Scan codebase for improvements
 buckley dream     # Architectural analysis
 ```

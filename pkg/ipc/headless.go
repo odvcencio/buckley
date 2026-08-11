@@ -96,6 +96,10 @@ func (s *Server) handleCreateHeadlessSession(w http.ResponseWriter, r *http.Requ
 		project = s.projectRoot
 	}
 	if headless.IsGitURL(project) {
+		if strings.TrimSpace(req.Agent) != "" || strings.TrimSpace(req.Subagent) != "" {
+			respondError(w, http.StatusBadRequest, fmt.Errorf("agent selection requires a local project path"))
+			return
+		}
 		if parsed, err := url.Parse(project); err == nil && strings.EqualFold(strings.TrimSpace(parsed.Scheme), "file") {
 			respondError(w, http.StatusBadRequest, fmt.Errorf("file:// git URLs are not supported; provide a local path within the project root instead"))
 			return
@@ -138,6 +142,18 @@ func (s *Server) handleCreateHeadlessSession(w http.ResponseWriter, r *http.Requ
 		}
 	}
 	req.Project = absProject
+	if strings.TrimSpace(req.Agent) != "" || strings.TrimSpace(req.Subagent) != "" {
+		profile, profileModel, profilePolicy, profileErr := s.resolveHeadlessAgentSelection(absProject, req.Agent, req.Subagent)
+		if profileErr != nil {
+			respondError(w, http.StatusBadRequest, profileErr)
+			return
+		}
+		req.AgentProfile = profile
+		req.ToolPolicy = mergeHeadlessToolPolicies(req.ToolPolicy, profilePolicy)
+		if strings.TrimSpace(req.Model) == "" {
+			req.Model = profileModel
+		}
+	}
 
 	info, err := s.headlessRegistry.CreateSession(req)
 	if err != nil {

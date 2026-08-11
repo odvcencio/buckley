@@ -11,8 +11,13 @@ import (
 	"sync"
 	"time"
 
+	"m31labs.dev/buckley/pkg/agentcoord"
+	"m31labs.dev/buckley/pkg/evidence"
+	"m31labs.dev/buckley/pkg/persona"
+	"m31labs.dev/buckley/pkg/runledger"
 	"m31labs.dev/buckley/pkg/subagent"
 	"m31labs.dev/buckley/pkg/telemetry"
+	"m31labs.dev/buckley/pkg/types"
 )
 
 // delegationCheck performs guardrail checks before delegation
@@ -475,13 +480,17 @@ func (t *BuckleyTool) ExecuteWithContext(ctx context.Context, params map[string]
 
 // SubagentTool manages asynchronous Buckley child-agent runs.
 type SubagentTool struct {
-	mu       sync.Mutex
-	manager  *subagent.Manager
-	workDir  string
-	hub      *telemetry.Hub
-	session  string
-	command  string
-	maxChild int
+	mu          sync.Mutex
+	manager     *subagent.Manager
+	coordinator agentcoord.Coordinator
+	evaluator   types.RuleEvaluator
+	workDir     string
+	hub         *telemetry.Hub
+	session     string
+	command     string
+	maxChild    int
+	ledger      runledger.Store
+	evidence    evidence.Store
 }
 
 func (t *SubagentTool) Name() string {
@@ -498,8 +507,8 @@ func (t *SubagentTool) Parameters() ParameterSchema {
 		Properties: map[string]PropertySchema{
 			"action": {
 				Type:        "string",
-				Description: "Management action: spawn, list, status, wait, or cancel (default spawn)",
-				Enum:        []string{"spawn", "list", "status", "wait", "cancel"},
+				Description: "Management action: spawn, list, status, wait, steer, send, messages, cancel, claim, or release (default spawn)",
+				Enum:        []string{"spawn", "list", "status", "wait", "steer", "send", "messages", "cancel", "claim", "release"},
 				Default:     "spawn",
 			},
 			"agent": {
@@ -510,13 +519,55 @@ func (t *SubagentTool) Parameters() ParameterSchema {
 				Type:        "string",
 				Description: "Optional project agent spec selector used with a named subagent.",
 			},
+			"persona": {
+				Type:        "string",
+				Description: "Optional discovered persona to resolve before starting the child.",
+			},
+			"model": {
+				Type:        "string",
+				Description: "Optional pinned model for the child execution contract.",
+			},
+			"effort": {
+				Type:        "string",
+				Description: "Optional reasoning effort for the child execution contract.",
+			},
+			"allowed_tools": {
+				Type:        "array",
+				Description: "Optional explicit child tool allowlist; an empty array disables tools.",
+				Items:       &PropertySchema{Type: "string"},
+			},
+			"step_cap": {
+				Type:        "integer",
+				Description: "Optional maximum model/tool iterations for the child.",
+			},
+			"approval_posture": {
+				Type:        "string",
+				Description: "Optional child approval posture: ask, safe, auto, or yolo.",
+			},
+			"output_schema": {
+				Type:        "string",
+				Description: "Optional required structured output schema identifier.",
+			},
 			"initial_task": {
 				Type:        "string",
 				Description: "Task for action=spawn.",
 			},
 			"id": {
 				Type:        "string",
-				Description: "Child run ID for status, wait, or cancel.",
+				Description: "Child run ID for status, wait, steer, messages, cancel, claim, or release.",
+			},
+			"message": {
+				Type:        "string",
+				Description: "Message body for steer or send.",
+			},
+			"resources": {
+				Type:        "array",
+				Description: "Workspace-relative paths to claim or release.",
+				Items:       &PropertySchema{Type: "string"},
+			},
+			"reason": {
+				Type:        "string",
+				Description: "Optional reason for cancellation or claim release.",
 			},
 			"timeout_seconds": {
 				Type:        "integer",
@@ -539,15 +590,23 @@ func (t *SubagentTool) ExecuteWithContext(ctx context.Context, params map[string
 	if action == "" {
 		action = "spawn"
 	}
-	manager := t.getManager()
+	coordinator := t.getCoordinator()
 	switch action {
 	case "spawn":
-		return t.spawn(manager, params)
+		return t.spawn(ctx, coordinator, params)
 	case "list":
-		runs := manager.List()
+		session, _ := t.runtimeContext()
+		runs, err := coordinator.List(ctx, agentcoord.RunFilter{ParentSessionID: session})
+		if err != nil {
+			return &Result{Success: false, Error: err.Error()}, nil
+		}
 		return &Result{Success: true, Data: map[string]any{"runs": runs, "count": len(runs)}}, nil
 	case "status":
-		return subagentStatusResult(manager, delegateStringParam(params, "id"))
+		run, err := coordinator.Status(ctx, delegateStringParam(params, "id"))
+		if err != nil {
+			return &Result{Success: false, Error: err.Error()}, nil
+		}
+		return subagentRunResult(run), nil
 	case "wait":
 		id := delegateStringParam(params, "id")
 		seconds := parseInt(params["timeout_seconds"], 300)
@@ -556,17 +615,56 @@ func (t *SubagentTool) ExecuteWithContext(ctx context.Context, params map[string
 		}
 		waitCtx, cancel := context.WithTimeout(ctx, time.Duration(seconds)*time.Second)
 		defer cancel()
-		snapshot, err := manager.Wait(waitCtx, id)
+		run, err := coordinator.Wait(waitCtx, id)
 		if err != nil {
 			return &Result{Success: false, Error: err.Error()}, nil
 		}
-		return subagentSnapshotResult(snapshot), nil
+		return subagentRunResult(run), nil
+	case "steer":
+		message, err := coordinator.Steer(ctx, delegateStringParam(params, "id"), delegateStringParam(params, "message"))
+		if err != nil {
+			return &Result{Success: false, Error: err.Error()}, nil
+		}
+		return &Result{Success: true, Data: map[string]any{"message": message}, DisplayData: map[string]any{"summary": fmt.Sprintf("Steering queued for subagent %s", message.To)}, ShouldAbridge: true}, nil
+	case "send":
+		id := delegateStringParam(params, "id")
+		message, err := coordinator.Send(ctx, agentcoord.Message{
+			RunID:   id,
+			To:      id,
+			From:    "parent",
+			Kind:    "message",
+			Content: delegateStringParam(params, "message"),
+		})
+		if err != nil {
+			return &Result{Success: false, Error: err.Error()}, nil
+		}
+		return &Result{Success: true, Data: map[string]any{"message": message}, DisplayData: map[string]any{"summary": fmt.Sprintf("Message queued for subagent %s", message.To)}, ShouldAbridge: true}, nil
+	case "messages":
+		messages, err := coordinator.Messages(ctx, delegateStringParam(params, "id"))
+		if err != nil {
+			return &Result{Success: false, Error: err.Error()}, nil
+		}
+		return &Result{Success: true, Data: map[string]any{"messages": messages, "count": len(messages)}}, nil
 	case "cancel":
-		snapshot, err := manager.Cancel(delegateStringParam(params, "id"))
+		run, err := coordinator.Cancel(ctx, delegateStringParam(params, "id"), delegateStringParam(params, "reason"))
 		if err != nil {
 			return &Result{Success: false, Error: err.Error()}, nil
 		}
-		return &Result{Success: true, Data: map[string]any{"run": snapshot}, DisplayData: map[string]any{"summary": "Subagent cancellation requested"}, ShouldAbridge: true}, nil
+		result := subagentRunResult(run)
+		result.DisplayData = map[string]any{"summary": "Subagent cancellation requested"}
+		return result, nil
+	case "claim":
+		claim, err := coordinator.Claim(ctx, agentcoord.ClaimRequest{RunID: delegateStringParam(params, "id"), Resources: delegateStringSliceParam(params, "resources")})
+		if err != nil {
+			return &Result{Success: false, Error: err.Error()}, nil
+		}
+		return &Result{Success: true, Data: map[string]any{"claim": claim}, DisplayData: map[string]any{"summary": fmt.Sprintf("Subagent %s claimed %d resource(s)", claim.RunID, len(claim.Resources))}, ShouldAbridge: true}, nil
+	case "release":
+		id := delegateStringParam(params, "id")
+		if err := coordinator.Release(ctx, agentcoord.ClaimRequest{RunID: id, Resources: delegateStringSliceParam(params, "resources")}, delegateStringParam(params, "reason")); err != nil {
+			return &Result{Success: false, Error: err.Error()}, nil
+		}
+		return &Result{Success: true, Data: map[string]any{"id": id}, DisplayData: map[string]any{"summary": fmt.Sprintf("Subagent %s claim release recorded", id)}, ShouldAbridge: true}, nil
 	default:
 		return &Result{Success: false, Error: fmt.Sprintf("unknown subagent action: %s", action)}, nil
 	}
@@ -589,6 +687,49 @@ func (t *SubagentTool) SetTelemetry(hub *telemetry.Hub, sessionID string) {
 	}
 }
 
+// SetCoordinator injects a shared AgentCoordinator. It is primarily used by
+// hosts that already own durable run/evidence stores; without one, this tool
+// constructs the compatible local-process adapter lazily.
+func (t *SubagentTool) SetCoordinator(coordinator agentcoord.Coordinator) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	t.coordinator = coordinator
+	t.mu.Unlock()
+}
+
+// SetEvaluator wires Arbiter delegation policy into the local coordinator.
+// The existing delegation depth/rate guard remains an emergency fuse only.
+func (t *SubagentTool) SetEvaluator(evaluator types.RuleEvaluator) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	t.evaluator = evaluator
+	coordinator := t.coordinator
+	t.mu.Unlock()
+	if local, ok := coordinator.(*subagent.Coordinator); ok {
+		local.SetAdmissionPolicy(subagent.NewArbiterAdmissionPolicy(evaluator))
+	}
+}
+
+// SetDurability supplies the shared run ledger and evidence store before the
+// local coordinator is first created. The tool remains usable without this
+// optional adapter, but hosts that provide both stores get durable child-run
+// identity, mailboxes, claims, and replayable reports.
+func (t *SubagentTool) SetDurability(ledger runledger.Store, store evidence.Store) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	if t.coordinator == nil {
+		t.ledger = ledger
+		t.evidence = store
+	}
+	t.mu.Unlock()
+}
+
 func (t *SubagentTool) Close() error {
 	t.mu.Lock()
 	manager := t.manager
@@ -599,9 +740,11 @@ func (t *SubagentTool) Close() error {
 	return manager.Close()
 }
 
-func (t *SubagentTool) getManager() *subagent.Manager {
+func (t *SubagentTool) getCoordinator() agentcoord.Coordinator {
 	t.mu.Lock()
-	defer t.mu.Unlock()
+	createdManager := false
+	var manager *subagent.Manager
+	workDir := t.workDir
 	if t.manager == nil {
 		maxChild := t.maxChild
 		if maxChild <= 0 {
@@ -609,11 +752,53 @@ func (t *SubagentTool) getManager() *subagent.Manager {
 		}
 		t.manager = subagent.NewManager(&buckleySubagentRunner{command: t.command, workDir: t.workDir}, maxChild)
 		t.manager.SetTelemetry(t.hub, t.session)
+		createdManager = true
 	}
-	return t.manager
+	manager = t.manager
+	if t.coordinator == nil {
+		opts := []subagent.CoordinatorOption{
+			subagent.WithAdmissionPolicy(subagent.NewArbiterAdmissionPolicy(t.evaluator)),
+		}
+		if t.ledger != nil || t.evidence != nil {
+			opts = append(opts, subagent.WithRunLedger(t.ledger), subagent.WithEvidence(t.evidence))
+		}
+		t.coordinator = subagent.NewCoordinator(t.manager, opts...)
+	}
+	coordinator := t.coordinator
+	t.mu.Unlock()
+
+	if createdManager {
+		configureSubagentPersonas(manager, workDir)
+	}
+	return coordinator
 }
 
-func (t *SubagentTool) spawn(manager *subagent.Manager, params map[string]any) (*Result, error) {
+func configureSubagentPersonas(manager *subagent.Manager, workDir string) {
+	if manager == nil {
+		return
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		home = ""
+	}
+	registry, err := persona.Discover(strings.TrimSpace(workDir), home)
+	if err != nil {
+		return
+	}
+	manager.SetPersonaContext(registry, persona.Persona{})
+}
+
+func (t *SubagentTool) runtimeContext() (string, types.RuleEvaluator) {
+	if t == nil {
+		return "", nil
+	}
+	t.mu.Lock()
+	session, evaluator := t.session, t.evaluator
+	t.mu.Unlock()
+	return session, evaluator
+}
+
+func (t *SubagentTool) spawn(ctx context.Context, coordinator agentcoord.Coordinator, params map[string]any) (*Result, error) {
 	task := delegateStringParam(params, "initial_task")
 	if task == "" {
 		return &Result{Success: false, Error: "initial_task parameter must be a non-empty string"}, nil
@@ -622,42 +807,42 @@ func (t *SubagentTool) spawn(manager *subagent.Manager, params map[string]any) (
 		return &Result{Success: false, Error: err.Error()}, nil
 	}
 	guard := GetDelegationGuard()
-	if guard.GetCurrentDepth() >= 2 {
-		return &Result{Success: false, Error: fmt.Sprintf("subagent spawn blocked at delegation depth %d", guard.GetCurrentDepth())}, nil
-	}
 	timeout := parseInt(params["timeout_seconds"], 300)
 	if timeout <= 0 || timeout > 3600 {
 		timeout = 300
 	}
-	snapshot, err := manager.Spawn(delegateStringParam(params, "agent"), delegateStringParam(params, "spec"), task, timeout)
+	session, _ := t.runtimeContext()
+	run, err := coordinator.Spawn(ctx, agentcoord.TaskSpec{
+		ParentSessionID: session,
+		Agent:           delegateStringParam(params, "agent"),
+		Spec:            delegateStringParam(params, "spec"),
+		Task:            task,
+		Persona:         delegateStringParam(params, "persona"),
+		Model:           delegateStringParam(params, "model"),
+		Effort:          delegateStringParam(params, "effort"),
+		AllowedTools:    delegateStringSliceParam(params, "allowed_tools"),
+		StepCap:         parseInt(params["step_cap"], 0),
+		TimeoutSeconds:  timeout,
+		WorkspaceClaims: delegateStringSliceParam(params, "resources"),
+		OutputSchema:    delegateStringParam(params, "output_schema"),
+		ApprovalPosture: delegateStringParam(params, "approval_posture"),
+		DelegationDepth: guard.GetCurrentDepth(),
+	})
 	if err != nil {
 		return &Result{Success: false, Error: err.Error()}, nil
 	}
-	return &Result{
-		Success: true,
-		Data:    map[string]any{"run": snapshot},
-		DisplayData: map[string]any{
-			"summary": fmt.Sprintf("Subagent %s started", snapshot.ID),
-		},
-		ShouldAbridge: true,
-	}, nil
+	result := subagentRunResult(run)
+	result.DisplayData = map[string]any{"summary": fmt.Sprintf("Subagent %s started", run.ID)}
+	return result, nil
 }
 
-func subagentStatusResult(manager *subagent.Manager, id string) (*Result, error) {
-	snapshot, ok := manager.Status(id)
-	if !ok {
-		return &Result{Success: false, Error: fmt.Sprintf("subagent not found: %s", strings.TrimSpace(id))}, nil
-	}
-	return subagentSnapshotResult(snapshot), nil
-}
-
-func subagentSnapshotResult(snapshot subagent.Snapshot) *Result {
+func subagentRunResult(run agentcoord.Run) *Result {
 	return &Result{
-		Success: snapshot.State != subagent.StateFailed,
-		Data:    map[string]any{"run": snapshot},
-		Error:   snapshot.Error,
+		Success: run.State != agentcoord.RunFailed && run.State != agentcoord.RunBlocked,
+		Data:    map[string]any{"run": run},
+		Error:   run.Result.Error,
 		DisplayData: map[string]any{
-			"summary": fmt.Sprintf("Subagent %s is %s", snapshot.ID, snapshot.State),
+			"summary": fmt.Sprintf("Subagent %s is %s", run.ID, run.State),
 		},
 		ShouldAbridge: true,
 	}
@@ -666,6 +851,40 @@ func subagentSnapshotResult(snapshot subagent.Snapshot) *Result {
 func delegateStringParam(params map[string]any, key string) string {
 	value, _ := params[key].(string)
 	return strings.TrimSpace(value)
+}
+
+func delegateStringSliceParam(params map[string]any, key string) []string {
+	value, ok := params[key]
+	if !ok || value == nil {
+		return nil
+	}
+	var raw []string
+	switch typed := value.(type) {
+	case []string:
+		raw = append(raw, typed...)
+	case []any:
+		for _, item := range typed {
+			if text, ok := item.(string); ok {
+				raw = append(raw, text)
+			}
+		}
+	case string:
+		raw = strings.Split(typed, ",")
+	}
+	seen := make(map[string]struct{}, len(raw))
+	out := make([]string, 0, len(raw))
+	for _, item := range raw {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+		if _, exists := seen[item]; exists {
+			continue
+		}
+		seen[item] = struct{}{}
+		out = append(out, item)
+	}
+	return out
 }
 
 type buckleySubagentRunner struct {
@@ -685,19 +904,18 @@ func (r *buckleySubagentRunner) Run(ctx context.Context, request subagent.Reques
 			command = resolved
 		}
 	}
-	var args []string
-	if request.Agent == "" {
-		args = []string{"-p", request.Task}
-	} else {
-		args = []string{"agent", "run", "--project"}
-		if request.Spec != "" {
-			args = append(args, "--spec", request.Spec)
-		}
-		args = append(args, request.Agent, request.Task)
+	args, cleanup, err := subagentCommandArgs(request)
+	if err != nil {
+		return "", err
+	}
+	defer cleanup()
+	contract, err := subagent.EncodeChildContract(subagent.ChildContractFromRequest(request))
+	if err != nil {
+		return "", err
 	}
 	cmd := exec.CommandContext(ctx, command, args...)
 	cmd.Dir = r.workDir
-	cmd.Env = GetDelegationGuard().PrepareChildEnv()
+	cmd.Env = replaceEnvironmentValue(GetDelegationGuard().PrepareChildEnv(), subagent.ChildContractEnv, contract)
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -708,7 +926,7 @@ func (r *buckleySubagentRunner) Run(ctx context.Context, request subagent.Reques
 	if started != nil {
 		started(cmd.Process.Pid)
 	}
-	err := cmd.Wait()
+	err = cmd.Wait()
 	output := strings.TrimSpace(stdout.String())
 	if diagnostic := strings.TrimSpace(stderr.String()); diagnostic != "" {
 		if output != "" {
@@ -720,4 +938,43 @@ func (r *buckleySubagentRunner) Run(ctx context.Context, request subagent.Reques
 		return output, fmt.Errorf("buckley subagent: %w", err)
 	}
 	return output, nil
+}
+
+func subagentCommandArgs(request subagent.Request) ([]string, func(), error) {
+	if agent := strings.TrimSpace(request.Agent); agent != "" {
+		args := []string{"agent", "run", "--project"}
+		if spec := strings.TrimSpace(request.Spec); spec != "" {
+			args = append(args, "--spec", spec)
+		}
+		return append(args, agent, request.Task), func() {}, nil
+	}
+
+	file, err := os.CreateTemp("", "buckley-subagent-*.yaml")
+	if err != nil {
+		return nil, nil, fmt.Errorf("create generic subagent profile: %w", err)
+	}
+	path := file.Name()
+	const profile = "version: buckley.agent/v1\nname: buckley-subprocess\nsubagents:\n  - name: worker\n"
+	if _, err := file.WriteString(profile); err != nil {
+		_ = file.Close()
+		_ = os.Remove(path)
+		return nil, nil, fmt.Errorf("write generic subagent profile: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		_ = os.Remove(path)
+		return nil, nil, fmt.Errorf("close generic subagent profile: %w", err)
+	}
+	return []string{"agent", "run", path, "worker", request.Task}, func() { _ = os.Remove(path) }, nil
+}
+
+func replaceEnvironmentValue(env []string, key, value string) []string {
+	prefix := key + "="
+	out := append([]string(nil), env...)
+	for i, entry := range out {
+		if strings.HasPrefix(entry, prefix) {
+			out[i] = prefix + value
+			return out
+		}
+	}
+	return append(out, prefix+value)
 }

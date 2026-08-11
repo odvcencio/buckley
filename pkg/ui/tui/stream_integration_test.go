@@ -75,29 +75,29 @@ func TestRunToolLoopStreamsAssistantTextLiveWithoutDoubleRender(t *testing.T) {
 
 	ctrl := &Controller{app: app, cfg: cfg, modelMgr: mgr, workDir: t.TempDir()}
 
-	text, _, finishReason, streamed, err := ctrl.runToolLoop(context.Background(), sess, "gpt-4o")
+	result, err := ctrl.runToolLoop(context.Background(), sess, "gpt-4o")
 	if err != nil {
 		t.Fatalf("runToolLoop error: %v", err)
 	}
-	if finishReason != "stop" {
-		t.Fatalf("finishReason = %q, want stop", finishReason)
+	if result.ProviderFinishReason != "stop" {
+		t.Fatalf("finishReason = %q, want stop", result.ProviderFinishReason)
 	}
-	if !streamed {
+	if !result.Streamed {
 		t.Fatal("expected runToolLoop to report the final answer as already streamed")
 	}
-	if text != "Hello, world!" {
-		t.Fatalf("final text = %q, want %q", text, "Hello, world!")
+	if result.Text != "Hello, world!" {
+		t.Fatalf("final text = %q, want %q", result.Text, "Hello, world!")
 	}
 
 	// Mirror the production call path (controller_stream.go's
 	// streamResponse): renderStreamResponse runs after runToolLoop and is
 	// exactly what must skip re-adding the answer when streamed is true.
-	ctrl.renderStreamResponse(text, finishReason, streamed)
+	ctrl.renderStreamResponse(result)
 
 	// Persisted history matches the streamed answer exactly.
 	last := conv.Messages[len(conv.Messages)-1]
-	if last.Role != "assistant" || conversation.GetContentAsString(last.Content) != text {
-		t.Fatalf("persisted assistant message = %+v, want content %q", last, text)
+	if last.Role != "assistant" || conversation.GetContentAsString(last.Content) != result.Text {
+		t.Fatalf("persisted assistant message = %+v, want content %q", last, result.Text)
 	}
 
 	seeds := 0
@@ -132,8 +132,8 @@ func TestRunToolLoopStreamsAssistantTextLiveWithoutDoubleRender(t *testing.T) {
 	if !sawStreamDone {
 		t.Fatal("expected a StreamDone message to close the streamed bubble")
 	}
-	if streamedText.String() != text {
-		t.Fatalf("streamed text = %q, want it to equal the final persisted content %q exactly", streamedText.String(), text)
+	if streamedText.String() != result.Text {
+		t.Fatalf("streamed text = %q, want it to equal the final persisted content %q exactly", streamedText.String(), result.Text)
 	}
 }
 
@@ -178,25 +178,25 @@ func TestRunToolLoopContinuationDoesNotStream(t *testing.T) {
 
 	ctrl := &Controller{app: app, cfg: cfg, modelMgr: mgr, workDir: t.TempDir()}
 
-	text, _, finishReason, streamed, err := ctrl.runToolLoop(context.Background(), sess, "gpt-5.4")
+	result, err := ctrl.runToolLoop(context.Background(), sess, "gpt-5.4")
 	if err != nil {
 		t.Fatalf("runToolLoop error: %v", err)
 	}
-	if streamed {
+	if result.Streamed {
 		t.Fatal("continuation turns must not report streamed=true")
 	}
-	if text != "non-streamed answer" {
-		t.Fatalf("final text = %q", text)
+	if result.Text != "non-streamed answer" {
+		t.Fatalf("final text = %q", result.Text)
 	}
 
-	ctrl.renderStreamResponse(text, finishReason, streamed)
+	ctrl.renderStreamResponse(result)
 
 	discreteFinal := 0
 	sawStreamChunk := false
 	for _, m := range drainAllMessages(app) {
 		switch v := m.(type) {
 		case AddMessageMsg:
-			if v.Source == "assistant" && v.Content == text {
+			if v.Source == "assistant" && v.Content == result.Text {
 				discreteFinal++
 			}
 		case StreamChunk:

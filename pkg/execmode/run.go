@@ -332,24 +332,43 @@ func ReadFile(path string) (content string, truncated bool, err error) {
 	return out.Content, out.Truncated, err
 }
 
-// ListDir lists a workspace-relative directory; directories end in "/".
-func ListDir(dir string) ([]string, error) {
-	var out struct {
-		Entries []string ` + "`json:\"entries\"`" + `
-	}
-	err := call("/v1/files/list", map[string]any{"dir": dir}, &out)
-	return out.Entries, err
+type listPage struct {
+	Entries    []string ` + "`json:\"entries\"`" + `
+	Capped     bool     ` + "`json:\"capped\"`" + `
+	NextCursor int      ` + "`json:\"next_cursor\"`" + `
 }
 
-// WalkDir lists a directory tree in one call, returning
-// workspace-relative paths (directories end in "/"). Prefer this over
-// recursing with ListDir: it is one brokered call instead of many.
-func WalkDir(dir string) ([]string, error) {
-	var out struct {
-		Entries []string ` + "`json:\"entries\"`" + `
+func listAll(dir string, recursive bool) ([]string, error) {
+	var entries []string
+	cursor := 0
+	for {
+		var out listPage
+		params := map[string]any{"dir": dir, "recursive": recursive, "cursor": cursor}
+		if err := call("/v1/files/list", params, &out); err != nil {
+			return nil, err
+		}
+		entries = append(entries, out.Entries...)
+		if !out.Capped {
+			return entries, nil
+		}
+		if out.NextCursor <= cursor {
+			return nil, fmt.Errorf("caps files/list pagination did not advance from cursor %d", cursor)
+		}
+		cursor = out.NextCursor
 	}
-	err := call("/v1/files/list", map[string]any{"dir": dir, "recursive": true}, &out)
-	return out.Entries, err
+}
+
+// ListDir lists a complete workspace-relative directory; directories end in
+// "/". Broker response pagination is transparent to callers.
+func ListDir(dir string) ([]string, error) {
+	return listAll(dir, false)
+}
+
+// WalkDir lists a complete directory tree in one program-level call, returning
+// workspace-relative paths (directories end in "/"). Broker response
+// pagination is transparent to callers.
+func WalkDir(dir string) ([]string, error) {
+	return listAll(dir, true)
 }
 
 // Match is one text-search hit.

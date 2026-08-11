@@ -21,11 +21,9 @@ buckley.exe
 *.so
 *.dylib
 
-# Node workspaces (UI assets are committed under pkg/ipc/ui)
+# Node workspaces (the Buckley UI is GoSX and has no browser package tree)
 node_modules/
 web/node_modules/
-web/dist/
-web/.vite/
 apps/**/node_modules/
 docs/site/node_modules/
 docs/site/docs/.vitepress/cache/

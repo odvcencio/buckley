@@ -7,6 +7,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-08-11
+
+### Added
+- Adaptive Harness v1: provider-neutral progress accounting now records exact
+  tool yield, including a successful `0 matches` search result.
+- Governed code-mode recovery. Buckley prominently recommends the audited,
+  bubblewrap-isolated `exec_program` surface after an eligible tool failure or
+  repeated successful zero-yield exploration.
+- Durable subagent coordination with explicit child contracts, mailbox
+  steering, dependency state, workspace claims, approval posture, evidence,
+  and replayable lifecycle events.
+- `buckley.artifact/v1` with validation, bounded repair, tool submission,
+  durable evidence, legacy migration, and deterministic terminal, Markdown++,
+  JSON, SARIF, FluffyUI, and ACP projections.
+- Immutable empirical model-behavior profiles in SQLite and a policy-receipted
+  protocol compiler. Profiles select bounded tool scope, fanout, continuation,
+  verification, typed output, and code-mode posture without model-name rules.
+- Restored `buckley buckbot` as the general-purpose review agent, with local,
+  repository-wide advisory, and explicitly posted PR review routes.
+- Local-first Hyphae project-space discovery now gives TUI, one-shot, and ACP
+  agents bounded guidance for recalling durable project decisions and lessons.
+
+### Changed
+- Buckbot reviews are completion-first and have no automatic dollar cap by
+  default. An explicit CLI or configuration budget remains available for
+  cost-sensitive CI and unattended runs.
+- Removed the legacy Qwen-specific two-turn review clamp; configured models
+  now receive the same governed review-turn budget for the selected scope.
+- The TUI activity inspector now exposes subagent execution contracts:
+  persona, model, tier, effort, turn cap, isolation, output schema, approval
+  posture, allowed-tool count, and workspace claims.
+- Search and tool telemetry preserve measured yields across TUI, ACP,
+  headless, and durable-goal surfaces. Successful empty results are no longer
+  presented as failed searches.
+- Adaptive protocol rollout remains opt-in. Shadow mode emits receipts only;
+  dynamic mode applies only explicitly versioned, measured profiles.
+- Replaced the bespoke React/Vite/Bun Mission Control browser bundle with a
+  server-rendered GoSX application embedded in the Buckley binary. Native HTML
+  actions, HTTP-only session cookies, bounded live refresh, and the existing
+  PTY transport keep browser control aligned with the daemon without a second
+  client runtime.
+
+### Performance
+- The progress hot path and subagent status lookup remain allocation-free.
+- Protocol compilation now materializes only the active artifact contract,
+  reducing the measured allocation volume by about 9x and allocation count by
+  about 11x compared with the eager-schema baseline.
+
 ## [0.4.0] - 2026-08-01
 
 Buckley returned to a pre-1.0 version line at 0.4.0. Sections are in
@@ -249,7 +297,8 @@ here to 1.1.0.
 - Telemetry is local-only by default.
 - Plugin discovery limited to local paths only.
 
-[Unreleased]: https://github.com/odvcencio/buckley/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/odvcencio/buckley/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/odvcencio/buckley/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/odvcencio/buckley/compare/v2.3.0...v0.4.0
 [2.3.0]: https://github.com/odvcencio/buckley/compare/v2.2.0...v2.3.0
 [2.2.0]: https://github.com/odvcencio/buckley/compare/v2.1.0...v2.2.0

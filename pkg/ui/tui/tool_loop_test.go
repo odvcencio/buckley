@@ -46,6 +46,16 @@ func TestModelFinishReasonNotice(t *testing.T) {
 	if !strings.Contains(got, "content_filter") {
 		t.Fatalf("content_filter notice should include reason, got %q", got)
 	}
+
+	got = modelFinishReasonNotice("loop_guard")
+	if strings.Contains(got, "provider finish_reason") || !strings.Contains(got, "harness") {
+		t.Fatalf("loop_guard must be identified as harness-owned, got %q", got)
+	}
+
+	got = harnessStopReasonNotice("tool loop exceeded the 32-round harness limit")
+	if !strings.Contains(got, "32-round") || !strings.Contains(got, "not a provider finish reason") {
+		t.Fatalf("harness stop notice should preserve the exact cause, got %q", got)
+	}
 }
 
 func TestShouldDisableToolsForPrompt(t *testing.T) {
@@ -146,6 +156,29 @@ func TestToolProgressSummariesIncludeIntentAndFailureReason(t *testing.T) {
 	got := toolResultProgressSummary("run_shell", result, nil)
 	if !strings.Contains(got, "compile error: missing symbol") || !strings.Contains(got, "command exited with code 1") {
 		t.Fatalf("tool result summary omitted failure reason: %q", got)
+	}
+}
+
+func TestToolProgressSummaryShowsSuccessfulZeroYield(t *testing.T) {
+	got := toolResultProgressSummary("search_text", &builtin.Result{
+		Success: true,
+		Data:    map[string]any{"count": 0},
+	}, nil)
+	if !strings.Contains(got, "✓ search_text") || !strings.Contains(got, "0 matches") {
+		t.Fatalf("zero-yield success was not visible in transcript summary: %q", got)
+	}
+	if strings.Contains(got, "✗") {
+		t.Fatalf("zero-yield success was rendered as a failure: %q", got)
+	}
+}
+
+func TestCodeModeRecoveryProgressMakesRecommendedActionProminent(t *testing.T) {
+	got := codeModeRecoveryProgress("CODE MODE RECOVERY: use exec_program to inspect the repository in one bounded program")
+	if !strings.Contains(got, "⚡ Code mode recommended") || !strings.Contains(got, "exec_program") {
+		t.Fatalf("code mode progress = %q", got)
+	}
+	if stored := storedCodeModeRecovery(`{"success":true}\n\nCODE MODE RECOVERY: use exec_program`); !strings.Contains(stored, "exec_program") {
+		t.Fatalf("stored code mode recovery = %q", stored)
 	}
 }
 

@@ -32,7 +32,9 @@ const (
 	KindReview          Kind = "review"
 	KindCommitProposal  Kind = "commit_proposal"
 	KindCheckpoint      Kind = "checkpoint"
+	KindSubagentTask    Kind = "subagent_task"
 	KindSubagentReport  Kind = "subagent_report"
+	KindSubagentMessage Kind = "subagent_message"
 	KindMemoryRecall    Kind = "memory_recall"
 )
 

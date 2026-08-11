@@ -1,5 +1,5 @@
 # Build stage
-FROM golang:1.25-alpine AS builder
+FROM golang:1.26-alpine AS builder
 
 RUN apk add --no-cache git
 
@@ -17,10 +17,9 @@ ARG VERSION=dev
 ARG COMMIT=unknown
 ARG BUILD_DATE=unknown
 
-# -tags webui embeds pkg/ipc/ui as a fallback UI filesystem; this image also
-# serves --assets /app/assets directly (see COPY below), but the embed keeps
-# the server functional if that mount is ever missing.
-RUN CGO_ENABLED=0 go build -tags webui -ldflags="-s -w \
+# GoSX Mission Control is compiled into the binary. An external assets
+# directory remains available as an explicit compatibility override.
+RUN CGO_ENABLED=0 go build -ldflags="-s -w \
     -X main.version=${VERSION} \
     -X main.commit=${COMMIT} \
     -X main.buildDate=${BUILD_DATE}" \
@@ -44,9 +43,6 @@ RUN addgroup -g 1000 buckley && \
 # Copy binary
 COPY --from=builder /buckley /usr/local/bin/buckley
 
-# Copy web assets
-COPY --from=builder /src/pkg/ipc/ui /app/assets
-
 # Setup directories
 RUN mkdir -p /home/buckley/.buckley /buckley/projects /buckley/shared && \
     chown -R buckley:buckley /home/buckley /buckley
@@ -61,4 +57,4 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
 EXPOSE 4488
 
 ENTRYPOINT ["buckley"]
-CMD ["serve", "--bind", "0.0.0.0:4488", "--browser", "--assets", "/app/assets", "--require-token", "--generate-token", "--token-file", "~/.buckley/ipc-token"]
+CMD ["serve", "--bind", "0.0.0.0:4488", "--browser", "--require-token", "--generate-token", "--token-file", "~/.buckley/ipc-token"]

@@ -177,6 +177,7 @@ var migrations = []Migration{
 	{16, "normalize_legacy_timestamps", normalizeLegacyTimestamps},
 	{17, "normalize_session_lifecycle_timestamps", normalizeLegacyTimestamps},
 	{18, "provider_continuations", ensureProviderContinuationsSchema},
+	{19, "model_behavior_profiles", ensureModelBehaviorProfilesSchema},
 }
 
 func sqliteTimestamp(value time.Time) string {
@@ -259,6 +260,24 @@ func ensureProviderContinuationsSchema(db *sql.DB) error {
 	)`)
 	if err != nil {
 		return fmt.Errorf("create provider_continuations: %w", err)
+	}
+	return nil
+}
+
+func ensureModelBehaviorProfilesSchema(db *sql.DB) error {
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS model_behavior_profiles (
+		model_id TEXT NOT NULL,
+		profile_version TEXT NOT NULL,
+		profile_digest TEXT NOT NULL,
+		profile_json TEXT NOT NULL,
+		measured_at TIMESTAMP,
+		created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		PRIMARY KEY (model_id, profile_version)
+	)`); err != nil {
+		return fmt.Errorf("create model_behavior_profiles: %w", err)
+	}
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_model_behavior_profiles_latest ON model_behavior_profiles(model_id, measured_at, profile_version)`); err != nil {
+		return fmt.Errorf("index model_behavior_profiles: %w", err)
 	}
 	return nil
 }

@@ -12,8 +12,10 @@ import (
 	"strings"
 
 	"m31labs.dev/buckley/pkg/agentspec"
+	artifactv1 "m31labs.dev/buckley/pkg/artifact/v1"
 	projectcontext "m31labs.dev/buckley/pkg/context"
 	"m31labs.dev/buckley/pkg/orchestrator"
+	"m31labs.dev/buckley/pkg/subagent"
 	"m31labs.dev/buckley/pkg/tool"
 )
 
@@ -1010,22 +1012,26 @@ type agentRunOptions struct {
 }
 
 type agentRunPreviewSnapshot struct {
-	Source       string   `json:"source,omitempty"`
-	Agent        string   `json:"agent,omitempty"`
-	Subagent     string   `json:"subagent"`
-	Project      bool     `json:"project,omitempty"`
-	SpecSelector string   `json:"spec_selector,omitempty"`
-	AgentPath    string   `json:"agent_path,omitempty"`
-	Model        string   `json:"model"`
-	ToolTier     string   `json:"tool_tier"`
-	ToolFilter   string   `json:"tool_filter"`
-	AllowedTools []string `json:"allowed_tools"`
-	DeniedTools  []string `json:"denied_tools,omitempty"`
-	Skills       []string `json:"skills,omitempty"`
-	ApprovalMode string   `json:"approval_mode,omitempty"`
-	MaxToolCalls int      `json:"max_tool_calls,omitempty"`
-	Instructions bool     `json:"instructions"`
-	Task         string   `json:"task"`
+	Source          string   `json:"source,omitempty"`
+	Agent           string   `json:"agent,omitempty"`
+	Subagent        string   `json:"subagent"`
+	Project         bool     `json:"project,omitempty"`
+	SpecSelector    string   `json:"spec_selector,omitempty"`
+	AgentPath       string   `json:"agent_path,omitempty"`
+	Model           string   `json:"model"`
+	ToolTier        string   `json:"tool_tier"`
+	ToolFilter      string   `json:"tool_filter"`
+	AllowedTools    []string `json:"allowed_tools"`
+	DeniedTools     []string `json:"denied_tools,omitempty"`
+	Skills          []string `json:"skills,omitempty"`
+	ApprovalMode    string   `json:"approval_mode,omitempty"`
+	MaxToolCalls    int      `json:"max_tool_calls,omitempty"`
+	ResolvedTier    string   `json:"resolved_tier,omitempty"`
+	ReasoningEffort string   `json:"reasoning_effort,omitempty"`
+	StepCap         int      `json:"step_cap,omitempty"`
+	OutputSchema    string   `json:"output_schema,omitempty"`
+	Instructions    bool     `json:"instructions"`
+	Task            string   `json:"task"`
 }
 
 func runAgentRun(args []string) error {
@@ -1041,6 +1047,15 @@ func runAgentRun(args []string) error {
 	subProfile, err := profile.SubagentProfile(opts.subagent)
 	if err != nil {
 		return err
+	}
+	childContract, contractPresent, err := subagent.DecodeChildContract(os.Getenv(subagent.ChildContractEnv))
+	if err != nil {
+		return err
+	}
+	if contractPresent {
+		if err := applyAgentRunChildContract(subProfile, childContract); err != nil {
+			return err
+		}
 	}
 	if opts.toolTier != "" {
 		subProfile.Spec.Tools.Tier = opts.toolTier
@@ -1062,6 +1077,9 @@ func runAgentRun(args []string) error {
 	defer store.Close()
 
 	subProfile.ApplyToConfig(cfg)
+	if contractPresent && childContract.Effort != "" {
+		cfg.Models.Reasoning = childContract.Effort
+	}
 	modelOverride := strings.TrimSpace(subProfile.Spec.Models.Execution)
 	if opts.model != "" {
 		applyStartupModelOverride(cfg, opts.model)
@@ -1081,7 +1099,16 @@ func runAgentRun(args []string) error {
 	}
 	planStore := orchestrator.NewFilePlanStore(cfg.Artifacts.PlanningDir)
 	allowedTools := append([]string(nil), subProfile.Spec.Tools.Allow...)
-	exitCode := executeOneShot(formatSubagentTask(opts.subagent, opts.task), cfg, mgr, store, projectCtx, planStore, subProfile, modelOverride, allowedTools)
+	stepCap := 0
+	outputSchema := ""
+	if contractPresent {
+		stepCap = childContract.StepCap
+		outputSchema = strings.TrimSpace(childContract.OutputSchema)
+	}
+	if outputSchema == "" && subProfile != nil && subProfile.Spec != nil {
+		outputSchema = strings.TrimSpace(subProfile.Spec.Metadata["buckley.output_schema"])
+	}
+	exitCode := executeOneShotWithStepCapAndOutputSchema(formatSubagentTask(opts.subagent, opts.task), cfg, mgr, store, projectCtx, planStore, subProfile, modelOverride, allowedTools, false, stepCap, outputSchema)
 	if exitCode != 0 {
 		return withExitCode(fmt.Errorf("agent run failed"), exitCode)
 	}
@@ -1179,6 +1206,113 @@ func loadAgentRunProfile(opts agentRunOptions) (*agentspec.RuntimeProfile, error
 		return nil, err
 	}
 	return agentspec.LoadRuntimeProfile(path)
+}
+
+// applyAgentRunChildContract applies a parent-resolved child contract after a
+// named project subagent profile has been resolved. Every applied setting can
+// only narrow or pin the child: the parent cannot use this overlay to remove
+// an existing deny rule or turn a no-tools tier back on.
+func applyAgentRunChildContract(profile *agentspec.RuntimeProfile, contract subagent.ChildContract) error {
+	if profile == nil || profile.Spec == nil {
+		return fmt.Errorf("subagent child contract requires an agent profile")
+	}
+	spec := profile.Spec
+	if modelID := strings.TrimSpace(contract.Model); modelID != "" {
+		spec.Models.Chat = modelID
+		spec.Models.Execution = modelID
+	}
+	if effort := strings.ToLower(strings.TrimSpace(contract.Effort)); effort != "" {
+		if !validAgentRunReasoningEffort(effort) {
+			return fmt.Errorf("invalid subagent child contract reasoning effort %q", contract.Effort)
+		}
+		contract.Effort = effort
+	}
+	if contract.StepCap < 0 {
+		return fmt.Errorf("subagent child contract step cap must not be negative")
+	}
+	if contract.ToolsConstrained {
+		allowed := cleanToolNames(contract.AllowedTools)
+		if len(allowed) == 0 {
+			spec.Tools.Tier = "none"
+			spec.Tools.Allow = []string{}
+		} else if strings.TrimSpace(spec.Tools.Tier) != "none" {
+			existing := cleanToolNames(spec.Tools.Allow)
+			if len(existing) == 0 {
+				spec.Tools.Allow = allowed
+			} else {
+				spec.Tools.Allow = intersectAgentRunTools(existing, allowed)
+			}
+		}
+	}
+	if posture := strings.TrimSpace(contract.ApprovalPosture); posture != "" {
+		if !validAgentApprovalMode(posture) {
+			return fmt.Errorf("invalid subagent child contract approval posture %q", contract.ApprovalPosture)
+		}
+		spec.Policies.ApprovalMode = posture
+	}
+	if spec.Metadata == nil {
+		spec.Metadata = make(map[string]string)
+	}
+	if tier := strings.TrimSpace(contract.Tier); tier != "" {
+		spec.Metadata["buckley.resolved_tier"] = tier
+	}
+	if contract.Effort != "" {
+		spec.Metadata["buckley.reasoning_effort"] = contract.Effort
+	}
+	if contract.StepCap > 0 {
+		spec.Metadata["buckley.step_cap"] = strconv.Itoa(contract.StepCap)
+	}
+	if outputSchema := strings.TrimSpace(contract.OutputSchema); outputSchema != "" {
+		spec.Metadata["buckley.output_schema"] = outputSchema
+		spec.Instructions.Prompt = appendAgentRunPrompt(spec.Instructions.Prompt, agentRunOutputSchemaPrompt(outputSchema))
+	}
+	if prompt := strings.TrimSpace(contract.SystemPrompt); prompt != "" {
+		spec.Instructions.Prompt = appendAgentRunPrompt(spec.Instructions.Prompt, prompt)
+	}
+	return nil
+}
+
+func agentRunOutputSchemaPrompt(schema string) string {
+	if schema == artifactv1.SchemaVersion {
+		return "Final-output contract: use the buckley.artifact/v1 output protocol exposed by the harness. If submit_artifact is available, call it exactly once; otherwise return exactly one JSON object with no surrounding prose."
+	}
+	return "Final-output contract: return a result conforming to the requested schema " + schema + "."
+}
+
+func appendAgentRunPrompt(existing, addition string) string {
+	existing = strings.TrimSpace(existing)
+	addition = strings.TrimSpace(addition)
+	switch {
+	case existing == "":
+		return addition
+	case addition == "":
+		return existing
+	default:
+		return existing + "\n\n" + addition
+	}
+}
+
+func intersectAgentRunTools(left, right []string) []string {
+	rightSet := make(map[string]struct{}, len(right))
+	for _, name := range cleanToolNames(right) {
+		rightSet[name] = struct{}{}
+	}
+	out := make([]string, 0, len(left))
+	for _, name := range cleanToolNames(left) {
+		if _, ok := rightSet[name]; ok {
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
+func validAgentRunReasoningEffort(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "auto", "off", "none", "minimal", "low", "medium", "high", "xhigh":
+		return true
+	default:
+		return false
+	}
 }
 
 func resolveProjectAgentSpecPath(selector string) (string, error) {
@@ -1284,6 +1418,18 @@ func renderAgentRunPreview(opts agentRunOptions, profile *agentspec.RuntimeProfi
 	if snapshot.MaxToolCalls > 0 {
 		fmt.Fprintf(&b, "Max tool calls: %d\n", snapshot.MaxToolCalls)
 	}
+	if snapshot.ResolvedTier != "" {
+		fmt.Fprintf(&b, "Resolved tier: %s\n", snapshot.ResolvedTier)
+	}
+	if snapshot.ReasoningEffort != "" {
+		fmt.Fprintf(&b, "Reasoning effort: %s\n", snapshot.ReasoningEffort)
+	}
+	if snapshot.StepCap > 0 {
+		fmt.Fprintf(&b, "Step cap: %d\n", snapshot.StepCap)
+	}
+	if snapshot.OutputSchema != "" {
+		fmt.Fprintf(&b, "Output schema: %s\n", snapshot.OutputSchema)
+	}
 	if snapshot.Instructions {
 		b.WriteString("Instructions: yes\n")
 	}
@@ -1314,6 +1460,12 @@ func buildAgentRunPreviewSnapshot(opts agentRunOptions, profile *agentspec.Runti
 		sort.Strings(snapshot.Skills)
 		snapshot.ApprovalMode = strings.TrimSpace(profile.Spec.Policies.ApprovalMode)
 		snapshot.MaxToolCalls = profile.Spec.Policies.MaxToolCalls
+		snapshot.ResolvedTier = strings.TrimSpace(profile.Spec.Metadata["buckley.resolved_tier"])
+		snapshot.ReasoningEffort = strings.TrimSpace(profile.Spec.Metadata["buckley.reasoning_effort"])
+		snapshot.OutputSchema = strings.TrimSpace(profile.Spec.Metadata["buckley.output_schema"])
+		if value := strings.TrimSpace(profile.Spec.Metadata["buckley.step_cap"]); value != "" {
+			snapshot.StepCap, _ = strconv.Atoi(value)
+		}
 		snapshot.Instructions = strings.TrimSpace(profile.Spec.Instructions.Prompt) != ""
 	} else {
 		snapshot.ToolFilter = "unrestricted"

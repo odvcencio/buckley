@@ -37,11 +37,6 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Set up Bun
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: '1.2.21'
-
       - name: Validate release tag
         run: |
           set -euo pipefail

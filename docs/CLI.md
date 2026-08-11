@@ -21,6 +21,7 @@ buckley [FLAGS] [COMMAND] [ARGS...]
 | `--plain` | | Force plain scrollback mode (default when piped) |
 | `--encoding <format>` | | Set serialization format: `json` or `toon` |
 | `--json` | | Shortcut for `--encoding json` |
+| `--code-mode` | | Offer audited, isolated `exec_program` for batched repository analysis |
 | `-p <prompt>` | | Run a single prompt and exit (one-shot mode) |
 
 ## Exit Codes
@@ -180,6 +181,30 @@ buckley pr --dry-run          # Preview PR title and body
 buckley pr --base develop     # Target specific base branch
 ```
 
+### buckbot
+
+Buckbot is Buckley's general-purpose review agent. It uses the same governed
+review runtime as `review` and `review-pr`, while making the review intent
+explicit in scripts, CI, and team workflows.
+
+```bash
+buckley buckbot                         # review current local scope
+buckley buckbot --scope branch          # review the current branch
+buckley buckbot repo                    # advisory repository-wide assessment
+buckley buckbot pr 123                  # review a GitHub PR without posting
+buckley buckbot pr 123 --post           # explicitly post that PR review
+```
+
+`buckley buckbot repo` is equivalent to `buckley review --project`. It is
+repository-wide, advisory-only, and cannot issue an approval verdict. Posting
+to GitHub is never implicit: it requires `--post` on a PR review.
+
+Buckbot is uncapped by default: a model is allowed to finish its review rather
+than being truncated by an automatic dollar ceiling. Use `--budget <USD>` only
+when a run needs an explicit spending limit. If an older project configuration
+sets `per_review_budget_usd`, use `--no-budget` for a completion-first review.
+Normal timeout, verification, and safety controls still apply.
+
 ### review-pr
 
 Review a GitHub pull request. The command uses dry-run output by default.
@@ -194,9 +219,6 @@ an eyes reaction, an intake comment, and the final review.
 
 Buckbot binds review evidence to one PR head and its CI state. Re-run a review
 when the head or CI checks change during a long-running pass.
-
-The `buckley buckbot` webhook daemon is retired. Use
-`buckley review-pr <PR> -post` for each on-demand review.
 
 ### Prose style (ASD-STE100)
 
@@ -230,15 +252,15 @@ buckley serve [OPTIONS]
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--bind` | `127.0.0.1:4488` | Address to bind |
-| `--browser` | `false` | Enable browser UI |
-| `--assets` | | Path to static assets for browser |
+| `--browser` | `false` | Enable the embedded GoSX Mission Control UI |
+| `--assets` | | Optional external static UI override |
 | `--allow-origin` | | Additional allowed CORS origins (repeatable) |
 | `--require-token` | `false` | Require authentication token |
 | `--auth-token` | | Set authentication token |
 
 **Example:**
 ```bash
-# Serve the embedded Mission Control UI
+# Serve the embedded GoSX Mission Control UI
 buckley serve --browser
 
 # Production (with auth)
@@ -517,6 +539,8 @@ When running in interactive mode, use `/` prefix for commands:
 | `BUCKLEY_PR_BASE` | Override PR base branch |
 | `BUCKLEY_TRUST_LEVEL` | Trust level: conservative, balanced, autonomous |
 | `BUCKLEY_APPROVAL_MODE` | Approval mode: ask, safe, auto, yolo |
+| `BUCKLEY_CODE_MODE` | Enable audited code mode for interactive or one-shot use |
+| `BUCKLEY_ADAPTIVE_PROTOCOL_MODE` | Override adaptive protocol mode: legacy, shadow, or dynamic |
 | `BUCKLEY_USE_TOON` | Enable TOON encoding (true/false) |
 | `BUCKLEY_DISABLE_TOON` | Disable TOON encoding (true/false) |
 | `BUCKLEY_QUIET` | Suppress non-essential output |

@@ -1,0 +1,35 @@
+outcome CodeModeRecovery {
+    action: string
+    message: string
+}
+
+strategy failure_recovery returns CodeModeRecovery {
+    when {
+        code_mode.available == true
+        and recovery.already_recommended == false
+        and tool.failed == true
+        and failure.kind == "tool_error"
+        and tool.name in ["read_file", "search_text", "find_files", "list_directory", "file_exists"]
+    } then RecommendExecProgram {
+        action: "recommend_exec_program",
+        message: "CODE MODE RECOVERY: This repository-tool failure is a good fit for exec_program. Call exec_program next with one complete Go program that uses execprogram/caps to walk, read, search, compose, and print the exact evidence needed. Do not keep chaining or retrying primitive read/search calls; if the program fails, repair and rerun it in this turn.",
+    }
+
+    when {
+        code_mode.available == true
+        and recovery.already_recommended == false
+        and tool.failed == false
+        and tool.yield_observed == true
+        and tool.yield_count == 0
+        and repository.zero_yield_streak >= 2
+        and tool.name in ["search_text", "find_files", "list_directory"]
+    } then RecommendExecProgramAfterLowYield {
+        action: "recommend_exec_program",
+        message: "CODE MODE RECOVERY: The recent repository queries completed successfully but returned 0 results. This is not a tool failure. Use exec_program next with one complete Go program that uses execprogram/caps to inspect, filter, join, and print the exact evidence needed instead of continuing primitive search/list calls.",
+    }
+
+    else ContinueNormally {
+        action: "continue",
+        message: "",
+    }
+}

@@ -9,13 +9,10 @@ let backendProcess;
 const IPC_BIND = process.env.BUCKLEY_IPC_BIND || '127.0.0.1:4488';
 const AUTH_TOKEN = process.env.BUCKLEY_IPC_TOKEN || '';
 const BUCKLEY_BIN = resolveBuckleyBin(process.env.BUCKLEY_BIN);
-const UI_ASSETS_DIR = process.env.BUCKLEY_UI_ASSETS_DIR || '';
 const bindInfo = parseBind(IPC_BIND);
 const DEFAULT_UI_URL = `http://${formatHost(bindInfo.host)}:${bindInfo.port}`;
-const UI_URL = normalizeURL(process.env.BUCKLEY_UI_URL || process.env.VITE_DEV_SERVER_URL || DEFAULT_UI_URL);
-const SPAWN_BACKEND = process.env.BUCKLEY_SPAWN_BACKEND === '1' || !process.env.BUCKLEY_UI_URL;
-
-const isDev = Boolean(process.env.VITE_DEV_SERVER_URL);
+const UI_URL = normalizeURL(process.env.BUCKLEY_UI_URL || DEFAULT_UI_URL);
+const SPAWN_BACKEND = process.env.BUCKLEY_SPAWN_BACKEND !== '0';
 
 function startBackend() {
   if (!SPAWN_BACKEND) {
@@ -28,10 +25,6 @@ function startBackend() {
   if (AUTH_TOKEN) {
     args.push('--auth-token', AUTH_TOKEN);
   }
-  if (UI_ASSETS_DIR) {
-    args.push('--assets', UI_ASSETS_DIR);
-  }
-
   backendProcess = spawn(BUCKLEY_BIN, args, { stdio: 'inherit' });
   backendProcess.on('exit', (code, signal) => {
     const exitLabel = signal ?? code ?? 'unknown';
@@ -182,12 +175,7 @@ async function createWindow() {
     await waitForBackend();
   }
 
-  if (isDev) {
-    await mainWindow.loadURL(UI_URL);
-    mainWindow.webContents.openDevTools({ mode: 'detach' });
-  } else {
-    await mainWindow.loadURL(UI_URL);
-  }
+  await mainWindow.loadURL(UI_URL);
 }
 
 app.on('ready', async () => {

@@ -149,7 +149,7 @@ func TestReviewVerificationTargetBudgetExpandsWithinToolLimit(t *testing.T) {
 	}
 }
 
-func TestReviewExecutionPlanBoundsDefaultQwenTurns(t *testing.T) {
+func TestReviewExecutionPlanPreservesQwenAdaptiveTurns(t *testing.T) {
 	plan := reviewExecutionPlan{
 		sizeClass:            "broad",
 		maxIterations:        6,
@@ -159,10 +159,10 @@ func TestReviewExecutionPlanBoundsDefaultQwenTurns(t *testing.T) {
 	bounded := automatedReviewOptions{
 		modelID: "qwen/qwen3.7-plus",
 	}.withExecutionPlan(plan)
-	if bounded.maxIterations != 2 || bounded.maxToolCalls != 6 ||
+	if bounded.maxIterations != 6 || bounded.maxToolCalls != 6 ||
 		bounded.explorationTimeout != qwenReviewExploration ||
 		bounded.criticExploration != qwenCriticExploration {
-		t.Fatalf("bounded Qwen plan = %#v, want two turns and Qwen exploration windows", bounded)
+		t.Fatalf("Qwen plan = %#v, want governed turn budget and Qwen exploration windows", bounded)
 	}
 
 	explicit := automatedReviewOptions{

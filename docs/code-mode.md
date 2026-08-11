@@ -5,7 +5,32 @@ instead of making a dozen tool calls. It writes ordinary Go against a
 small typed capability client, Buckley runs it in a sandbox, and only the
 printed result comes back.
 
-It is off by default. Turn it on per run:
+It is off by default. Turn it on for an interactive or one-shot session:
+
+```bash
+buckley --code-mode
+buckley --code-mode -p "assess this repository"
+```
+
+## When Buckley recommends it
+
+Buckley keeps a successful empty search distinct from a failed tool call. The
+TUI shows `0 matches` when the adapter measured no result. It does not call
+that a failure.
+
+When an eligible read tool fails, or two successful repository explorations
+produce zero yield in one episode, Buckley shows one prominent **Code mode
+recommended** card. The recommendation explains that the tools worked but did
+not produce useful evidence. It suggests one bounded `exec_program` instead
+of repeating primitive calls.
+
+The recommendation is not activation. Code mode stays unavailable without a
+working bubblewrap sandbox, and cancellation, permission denial, and
+`exec_program` itself never trigger recovery. In adaptive `dynamic` protocol
+mode, automatic read-only code mode also needs an explicitly versioned model
+profile and a policy decision.
+
+Durable goals retain their existing per-run flag:
 
 ```bash
 buckley goal run --exec-program <run-id>
