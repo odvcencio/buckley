@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-08-11
+
+### Added
+- Canopy-backed repository review table of contents with file/language and
+  symbol inventories, parse health, call-graph edges, complexity hotspots,
+  and caller/callee anchors for important flows.
+- Line-paginated `read_file` results with total-line counts, continuation
+  cursors, and explicit page bounds so long files can be inspected completely
+  without losing evidence to output truncation.
+- Explicit review controls for total timeout and optional tool-call limits;
+  repository reviews default to a 20-minute completion window.
+
+### Changed
+- Repository-wide Buckbot reviews are completion-first and have no implicit
+  per-review model-turn or inspection-call cap. The normal deadline and
+  governor remain safety boundaries, while cost-sensitive callers can opt in
+  to `--max-tool-calls`.
+- Review prompts now require a tracked-file coverage ledger, evidence section,
+  and an explicit `COMPLETE` or `PARTIAL` result, using the Canopy TOC as a
+  navigation map rather than a sampling limit.
+- OpenAI-compatible streaming retries are limited to interruptions before the
+  first event, preventing duplicated tool calls or text after a provider has
+  started responding while preserving partial assistant text for recovery.
+
+### Fixed
+- Long-file review caveats caused by a single truncated read; agents can now
+  follow `next_start_line` until every relevant page has been inspected.
+- ACP tool-result formatting now uses the canonical model-output encoder, and
+  partial stream failures no longer replay unsafe reasoning or tool-call
+  fragments.
+
 ## [0.5.0] - 2026-08-11
 
 ### Added
@@ -297,7 +328,8 @@ here to 1.1.0.
 - Telemetry is local-only by default.
 - Plugin discovery limited to local paths only.
 
-[Unreleased]: https://github.com/odvcencio/buckley/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/odvcencio/buckley/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/odvcencio/buckley/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/odvcencio/buckley/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/odvcencio/buckley/compare/v2.3.0...v0.4.0
 [2.3.0]: https://github.com/odvcencio/buckley/compare/v2.2.0...v2.3.0

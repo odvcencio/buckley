@@ -30,7 +30,7 @@ Agents working with Buckley should use the [using-buckley](https://github.com/od
 ## Quick Start
 
 ```bash
-go install m31labs.dev/buckley/cmd/buckley@v0.5.0
+go install m31labs.dev/buckley/cmd/buckley@v0.6.0
 export OPENROUTER_API_KEY="your-key"
 buckley
 ```
