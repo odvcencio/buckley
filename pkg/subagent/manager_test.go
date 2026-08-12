@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"m31labs.dev/buckley/pkg/agentcoord"
 	"m31labs.dev/buckley/pkg/persona"
 	"m31labs.dev/buckley/pkg/telemetry"
 )
@@ -15,6 +16,16 @@ type runnerFunc func(context.Context, Request, func(int)) (string, error)
 
 func (f runnerFunc) Run(ctx context.Context, request Request, started func(int)) (string, error) {
 	return f(ctx, request, started)
+}
+
+type interactiveRunnerFunc func(context.Context, Request, func(int), <-chan CommandDelivery) (string, error)
+
+func (f interactiveRunnerFunc) Run(ctx context.Context, request Request, started func(int)) (string, error) {
+	return f(ctx, request, started, nil)
+}
+
+func (f interactiveRunnerFunc) RunInteractive(ctx context.Context, request Request, started func(int), commands <-chan CommandDelivery) (string, error) {
+	return f(ctx, request, started, commands)
 }
 
 func TestManager_SpawnTracksParentAndCompletion(t *testing.T) {
@@ -71,6 +82,41 @@ func TestManager_CancelStopsOnlyRequestedChild(t *testing.T) {
 		t.Fatalf("second state = %s, want running", running.State)
 	}
 	_, _ = manager.Cancel(second.ID)
+}
+
+func TestManager_DeliverAcknowledgesInteractiveRunner(t *testing.T) {
+	received := make(chan agentcoord.Message, 1)
+	manager := NewManager(interactiveRunnerFunc(func(ctx context.Context, _ Request, started func(int), commands <-chan CommandDelivery) (string, error) {
+		started(8)
+		select {
+		case delivery := <-commands:
+			received <- delivery.Message
+			delivery.Acknowledge(nil)
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
+		<-ctx.Done()
+		return "", ctx.Err()
+	}), 1)
+	t.Cleanup(func() { _ = manager.Close() })
+
+	run, err := manager.Spawn("reviewer", "", "inspect", 0)
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	message := agentcoord.Message{ID: "msg-live", RunID: run.ID, To: run.ID, From: "parent", Content: "inspect the caller"}
+	if err := manager.Deliver(context.Background(), run.ID, message); err != nil {
+		t.Fatalf("Deliver: %v", err)
+	}
+	select {
+	case got := <-received:
+		if got.ID != message.ID || got.Content != message.Content {
+			t.Fatalf("delivered message = %+v", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("interactive runner did not receive command")
+	}
+	_, _ = manager.Cancel(run.ID)
 }
 
 func TestManager_PublishesLifecycleTelemetry(t *testing.T) {

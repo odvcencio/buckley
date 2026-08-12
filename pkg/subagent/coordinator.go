@@ -581,9 +581,8 @@ func (c *Coordinator) Wait(ctx context.Context, id string) (agentcoord.AgentRun,
 	return run, fmt.Errorf("subagent run %s is durable but has no attached local worker; resume it before waiting", id)
 }
 
-// Steer persists a high-priority human direction for a child. Local process
-// workers do not claim live stdin delivery, so the result truthfully reports
-// queued until an adapter consumes the mailbox.
+// Steer persists a high-priority human direction for a child. Interactive
+// adapters may then claim live delivery; detached workers remain queued.
 func (c *Coordinator) Steer(ctx context.Context, id, content string) (agentcoord.AgentMessage, error) {
 	return c.Send(ctx, agentcoord.AgentMessage{
 		RunID:    strings.TrimSpace(id),
@@ -595,9 +594,9 @@ func (c *Coordinator) Steer(ctx context.Context, id, content string) (agentcoord
 	})
 }
 
-// Send writes a durable mailbox entry. Message bodies live in evidence; events
-// carry bounded previews and evidence references so telemetry never becomes a
-// hidden content store.
+// Send writes a durable mailbox entry before attempting live delivery. Message
+// bodies live in evidence; events carry bounded previews and evidence
+// references so telemetry never becomes a hidden content store.
 func (c *Coordinator) Send(ctx context.Context, message agentcoord.AgentMessage) (agentcoord.AgentMessage, error) {
 	if c == nil {
 		return agentcoord.AgentMessage{}, fmt.Errorf("subagent coordinator is unavailable")
@@ -647,6 +646,15 @@ func (c *Coordinator) Send(ctx context.Context, message agentcoord.AgentMessage)
 		return agentcoord.AgentMessage{}, err
 	}
 	c.addMailbox(message)
+	if c.manager != nil {
+		if err := c.manager.Deliver(ctx, message.RunID, message); err == nil {
+			message.Delivery = "delivered"
+			c.updateMailboxDelivery(message.ID, message.RunID, message.Delivery)
+			if err := c.appendMessageDelivery(ctx, message); err != nil {
+				c.noteDurabilityError(message.RunID, err)
+			}
+		}
+	}
 	return message, nil
 }
 
@@ -669,19 +677,35 @@ func (c *Coordinator) Messages(ctx context.Context, id string) ([]agentcoord.Age
 	}
 	events, err := c.ledger.ListEvents(ctx, runledger.EventQuery{RunID: id, Types: []string{
 		runledger.EventSubagentMessageSent,
+		runledger.EventSubagentMessageDelivered,
 		runledger.EventSubagentSteered,
 	}})
 	if err != nil {
 		return nil, fmt.Errorf("list subagent mailbox: %w", err)
 	}
 	messages := make([]agentcoord.AgentMessage, 0, len(events))
+	positions := make(map[string]int, len(events))
+	delivered := make(map[string]struct{})
 	for _, event := range events {
+		if event.Type == runledger.EventSubagentMessageDelivered {
+			messageID := mapString(event.Payload, "message_id")
+			if index, ok := positions[messageID]; ok {
+				messages[index].Delivery = "delivered"
+			} else if messageID != "" {
+				delivered[messageID] = struct{}{}
+			}
+			continue
+		}
 		message := messageFromEvent(event)
+		if _, ok := delivered[message.ID]; ok {
+			message.Delivery = "delivered"
+		}
 		if len(message.EvidenceRefs) > 0 && c.evidence != nil {
 			if object, err := c.evidence.Get(ctx, message.EvidenceRefs[0]); err == nil {
 				message.Content = string(object.InlineBody)
 			}
 		}
+		positions[message.ID] = len(messages)
 		messages = append(messages, message)
 	}
 	return messages, nil
@@ -1114,6 +1138,15 @@ func (c *Coordinator) appendMessage(ctx context.Context, message agentcoord.Agen
 	}, message.EvidenceRefs)
 }
 
+func (c *Coordinator) appendMessageDelivery(ctx context.Context, message agentcoord.AgentMessage) error {
+	spec, _ := c.taskSpec(message.RunID)
+	return c.append(ctx, spec, runledger.EventSubagentMessageDelivered, map[string]any{
+		"message_id": message.ID,
+		"to":         message.To,
+		"delivery":   "delivered",
+	}, nil)
+}
+
 func (c *Coordinator) append(ctx context.Context, spec agentcoord.AgentTaskSpec, eventType string, payload map[string]any, evidenceIDs []string) error {
 	if c == nil || c.ledger == nil {
 		return nil
@@ -1398,6 +1431,22 @@ func (c *Coordinator) addMailbox(message agentcoord.AgentMessage) {
 		mailbox = append([]agentcoord.AgentMessage(nil), mailbox[len(mailbox)-c.mailboxLimit:]...)
 	}
 	c.mailboxes[message.RunID] = mailbox
+}
+
+func (c *Coordinator) updateMailboxDelivery(messageID, runID, delivery string) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	mailbox := c.mailboxes[runID]
+	for index := len(mailbox) - 1; index >= 0; index-- {
+		if mailbox[index].ID == messageID {
+			mailbox[index].Delivery = delivery
+			c.mailboxes[runID] = mailbox
+			return
+		}
+	}
 }
 
 func (c *Coordinator) localMessages(runID string) []agentcoord.AgentMessage {

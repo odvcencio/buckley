@@ -151,6 +151,61 @@ func TestCoordinator_SteerQueuesReadableMailbox(t *testing.T) {
 	_, _ = coordinator.Cancel(context.Background(), run.ID, "test complete")
 }
 
+func TestCoordinator_SendDeliversLiveAndPersistsDelivery(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "ledger.db")
+	evidenceStore, err := evidence.New(dbPath)
+	if err != nil {
+		t.Fatalf("open evidence: %v", err)
+	}
+	t.Cleanup(func() { _ = evidenceStore.Close() })
+	ledger, err := runledger.NewWithDB(evidenceStore.DB())
+	if err != nil {
+		t.Fatalf("open ledger: %v", err)
+	}
+	received := make(chan agentcoord.Message, 1)
+	manager := NewManager(interactiveRunnerFunc(func(ctx context.Context, _ Request, started func(int), commands <-chan CommandDelivery) (string, error) {
+		started(10)
+		select {
+		case delivery := <-commands:
+			received <- delivery.Message
+			delivery.Acknowledge(nil)
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
+		<-ctx.Done()
+		return "", ctx.Err()
+	}), 1)
+	t.Cleanup(func() { _ = manager.Close() })
+	coordinator := NewCoordinator(manager, WithRunLedger(ledger), WithEvidence(evidenceStore))
+	run, err := coordinator.Spawn(context.Background(), agentcoord.TaskSpec{RunID: "run-live-mail", ParentSessionID: "session-live-mail", Task: "investigate"})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	message, err := coordinator.Send(context.Background(), agentcoord.Message{RunID: run.ID, To: run.ID, From: "parent", Kind: "message", Content: "check the hot path"})
+	if err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if message.Delivery != "delivered" {
+		t.Fatalf("delivery = %q, want delivered", message.Delivery)
+	}
+	select {
+	case got := <-received:
+		if got.Content != "check the hot path" {
+			t.Fatalf("received = %+v", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("interactive runner did not receive command")
+	}
+	messages, err := coordinator.Messages(context.Background(), run.ID)
+	if err != nil {
+		t.Fatalf("Messages: %v", err)
+	}
+	if len(messages) != 1 || messages[0].Delivery != "delivered" || messages[0].Content != "check the hot path" {
+		t.Fatalf("messages = %+v", messages)
+	}
+	_, _ = coordinator.Cancel(context.Background(), run.ID, "test complete")
+}
+
 func TestCoordinator_DurableLifecycleStoresEvidenceAndSurvivesWorkerLoss(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "ledger.db")
 	evidenceStore, err := evidence.New(dbPath)

@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"m31labs.dev/buckley/pkg/agentcoord"
 	"m31labs.dev/buckley/pkg/evidence"
@@ -49,6 +50,45 @@ func TestSubagentCommandArgs_NamedProjectProfileRemainsDirect(t *testing.T) {
 	defer cleanup()
 	if got, want := strings.Join(args, "|"), "agent|run|--project|--spec|daily|reviewer|inspect this"; got != want {
 		t.Fatalf("named args = %q, want %q", got, want)
+	}
+}
+
+func TestBuckleySubagentRunner_TransportsLiveCommandMailbox(t *testing.T) {
+	script := filepath.Join(t.TempDir(), "mailbox-child.sh")
+	content := `#!/bin/sh
+i=0
+while [ "$i" -lt 200 ]; do
+  if [ -s "$BUCKLEY_SUBAGENT_MAILBOX_V1" ]; then
+    cat "$BUCKLEY_SUBAGENT_MAILBOX_V1"
+    exit 0
+  fi
+  i=$((i + 1))
+  sleep 0.01
+done
+exit 2
+`
+	if err := os.WriteFile(script, []byte(content), 0o700); err != nil {
+		t.Fatalf("write helper: %v", err)
+	}
+	manager := subagent.NewManager(&buckleySubagentRunner{command: script, workDir: t.TempDir()}, 1)
+	t.Cleanup(func() { _ = manager.Close() })
+	run, err := manager.Spawn("", "", "wait for command", 5)
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	deliveryCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := manager.Deliver(deliveryCtx, run.ID, agentcoord.Message{ID: "msg-transport", RunID: run.ID, To: run.ID, From: "parent", Content: "inspect live"}); err != nil {
+		t.Fatalf("Deliver: %v", err)
+	}
+	waitCtx, waitCancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer waitCancel()
+	finished, err := manager.Wait(waitCtx, run.ID)
+	if err != nil {
+		t.Fatalf("Wait: %v", err)
+	}
+	if finished.State != subagent.StateCompleted || !strings.Contains(finished.Output, "inspect live") {
+		t.Fatalf("finished = %+v", finished)
 	}
 }
 
@@ -500,4 +540,66 @@ func TestSubagentTool(t *testing.T) {
 			t.Fatalf("unexpected completed run: %+v", got)
 		}
 	})
+}
+
+func TestSubagentTool_GroupSendAndCancel(t *testing.T) {
+	manager := subagent.NewManager(builtinSubagentRunnerFunc(func(ctx context.Context, _ subagent.Request, started func(int)) (string, error) {
+		started(101)
+		<-ctx.Done()
+		return "", ctx.Err()
+	}), 3)
+	t.Cleanup(func() { _ = manager.Close() })
+	tool := &SubagentTool{manager: manager}
+	tool.SetTelemetry(nil, "session-group-control")
+	coordinator := tool.getCoordinator()
+
+	spawn := func(agent, task string) string {
+		run, err := coordinator.Spawn(context.Background(), agentcoord.TaskSpec{ParentSessionID: "session-group-control", Agent: agent, Task: task})
+		if err != nil {
+			t.Fatalf("spawn %s: %v", agent, err)
+		}
+		return run.ID
+	}
+	first := spawn("reviewer", "review one")
+	second := spawn("reviewer", "review two")
+	third := spawn("coder", "implement")
+
+	sent, err := tool.Execute(map[string]any{"action": "send", "id": "agent:reviewer", "message": "report blockers now"})
+	if err != nil || !sent.Success {
+		t.Fatalf("group send: result=%+v err=%v", sent, err)
+	}
+	if got := sent.Data["succeeded"].(int); got != 2 {
+		t.Fatalf("group send succeeded = %d, want 2", got)
+	}
+	for _, id := range []string{first, second} {
+		messages, err := tool.Execute(map[string]any{"action": "messages", "id": id})
+		if err != nil || !messages.Success || messages.Data["count"].(int) != 1 {
+			t.Fatalf("messages %s: result=%+v err=%v", id, messages, err)
+		}
+	}
+	coderMessages, err := tool.Execute(map[string]any{"action": "messages", "id": third})
+	if err != nil || !coderMessages.Success || coderMessages.Data["count"].(int) != 0 {
+		t.Fatalf("coder messages: result=%+v err=%v", coderMessages, err)
+	}
+
+	cancelled, err := tool.Execute(map[string]any{"action": "cancel", "id": "all", "reason": "test complete"})
+	if err != nil || !cancelled.Success || cancelled.Data["succeeded"].(int) != 3 {
+		t.Fatalf("cancel all: result=%+v err=%v", cancelled, err)
+	}
+}
+
+func TestSubagentTool_UserSpawnBypassesModelCooldown(t *testing.T) {
+	manager := subagent.NewManager(builtinSubagentRunnerFunc(func(ctx context.Context, _ subagent.Request, started func(int)) (string, error) {
+		started(102)
+		<-ctx.Done()
+		return "", ctx.Err()
+	}), 2)
+	t.Cleanup(func() { _ = manager.Close() })
+	tool := &SubagentTool{manager: manager}
+	for _, task := range []string{"first explicit task", "second explicit task"} {
+		result, err := tool.ExecuteUserCommand(context.Background(), map[string]any{"action": "spawn", "initial_task": task})
+		if err != nil || !result.Success {
+			t.Fatalf("explicit spawn %q: result=%+v err=%v", task, result, err)
+		}
+	}
 }

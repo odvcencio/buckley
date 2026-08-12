@@ -75,6 +75,10 @@ func TestCompileOneShotAdaptiveProtocolFromVersionedProfile(t *testing.T) {
 	if compiled.Mode != "dynamic" || compiled.Receipt.PolicyVersion != "eval-policy-v1" || compiled.Receipt.PolicyOutcome != "frontier_horizon" || stage.MaxFanout != 1 || stage.CodeMode != "suggest" {
 		t.Fatalf("unexpected one-shot protocol: %+v", compiled)
 	}
+	wantTools := []string{"read_file", "search_text", "code_impact", "code_refs", "apply_patch", "run_tests", "git_diff", "git_status", "find_files", "code_callgraph"}
+	if !reflect.DeepEqual(compiled.VisibleTools, wantTools) {
+		t.Fatalf("one-shot protocol tools = %v, want %v", compiled.VisibleTools, wantTools)
+	}
 }
 
 func TestOneShotProtocolToolFiltersPreserveControlTools(t *testing.T) {

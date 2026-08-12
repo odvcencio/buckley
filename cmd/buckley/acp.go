@@ -26,6 +26,7 @@ import (
 	"m31labs.dev/buckley/pkg/rules"
 	"m31labs.dev/buckley/pkg/skill"
 	"m31labs.dev/buckley/pkg/storage"
+	"m31labs.dev/buckley/pkg/subagent"
 	"m31labs.dev/buckley/pkg/tool"
 	"m31labs.dev/buckley/pkg/tool/builtin"
 	"m31labs.dev/buckley/pkg/types"
@@ -917,6 +918,7 @@ type acpLoopState struct {
 	toolsExecuted    bool
 	lastPhase        string
 	codeModeRecovery *tool.CodeModeRecoveryState
+	childMailbox     *subagent.FileMailboxReader
 	// contextWindow is resolved once per prompt turn (the model does not
 	// change mid-turn) and paired with each round's model.Usage to report
 	// usage_update as "tokens used out of this context window" (N1).
@@ -971,9 +973,17 @@ func runACPLoopWithStepCap(
 	stepCap int,
 ) (string, error) {
 	modelID := resolveACPExecutionModel(cfg, mgr, engine, modelOverride)
+	childMailbox, mailboxPresent, err := subagent.OpenChildMailboxFromEnv()
+	if err != nil {
+		return "", err
+	}
+	if mailboxPresent {
+		defer childMailbox.Close()
+	}
 	state := &acpLoopState{
 		useTools:         acpModelCanUseTools(registry, mgr, modelID),
 		codeModeRecovery: &tool.CodeModeRecoveryState{},
+		childMailbox:     childMailbox,
 	}
 	if mgr != nil {
 		state.contextWindow, _ = mgr.GetContextLength(modelID)
@@ -1019,6 +1029,13 @@ func runACPLoopWithStepCap(
 			// model.NoResponseChoicesError before Controller sees it; this
 			// branch is defensive.
 			return "", fmt.Errorf("model returned an empty response")
+		}
+		commands, err := drainChildMailbox(conv, state.childMailbox)
+		if err != nil {
+			return "", err
+		}
+		if commands > 0 {
+			continue
 		}
 
 		msg := result.Message
@@ -1102,6 +1119,9 @@ func newACPLoopController(
 	evaluator := newACPEvaluator(engine)
 
 	buildRequest := func(ctx context.Context, round int) (model.ChatRequest, error) {
+		if _, err := drainChildMailbox(conv, state.childMailbox); err != nil {
+			return model.ChatRequest{}, err
+		}
 		state.lastPhase = sendACPPhaseUpdate(stream, state.lastPhase, "Thinking…")
 		toolTurn := buildACPToolTurn(registry, skillState, evaluator, state.useTools)
 		state.useTools = toolTurn.UseTools

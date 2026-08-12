@@ -144,7 +144,7 @@ func (c *Compiler) Compile(request TaskRequest, profile BehaviorProfile) (Protoc
 		source = "legacy"
 	}
 	choice = clampChoice(choice, request, profile, c.config)
-	tools := selectTools(request.CandidateTools, c.config.DefaultToolList, choice.VisibleToolCount)
+	tools := selectTools(request.CandidateTools, c.config.DefaultToolList, choice.ToolOrder, choice.VisibleToolCount)
 	output := artifactv1.NegotiatedOutputDescriptor(artifactv1.ProviderCapabilities{
 		NativeJSONSchema: profile.Capabilities.NativeJSONSchema,
 		ToolCalls:        profile.Capabilities.ToolCalls,
@@ -216,6 +216,7 @@ func (c *Compiler) Compile(request TaskRequest, profile BehaviorProfile) (Protoc
 type protocolChoice struct {
 	Name                 string
 	VisibleToolCount     int
+	ToolOrder            []string
 	MaxTurns             int
 	MaxFanout            int
 	ContextSource        string
@@ -233,9 +234,11 @@ func (c *Compiler) resolveChoice(facts map[string]any, class ModelClass) (protoc
 	if err != nil {
 		return fallbackChoice(class), "fallback_policy_error", nil
 	}
+	name := firstNonEmpty(strings.TrimSpace(result.String("name")), "arbiter")
 	choice := protocolChoice{
-		Name:                 firstNonEmpty(strings.TrimSpace(result.String("name")), "arbiter"),
+		Name:                 name,
 		VisibleToolCount:     result.Int("visible_tool_count"),
+		ToolOrder:            toolOrderForOutcome(name),
 		MaxTurns:             result.Int("max_turns"),
 		MaxFanout:            result.Int("max_fanout"),
 		ContextSource:        firstNonEmpty(strings.TrimSpace(result.String("context_source")), "canopy_ranked"),
@@ -251,7 +254,17 @@ func (c *Compiler) resolveChoice(facts map[string]any, class ModelClass) (protoc
 // profile when policy is unavailable. It is a transparent safe mode, not an
 // alternate policy engine.
 func fallbackChoice(_ ModelClass) protocolChoice {
-	return protocolChoice{Name: "policy_fallback", VisibleToolCount: 4, MaxTurns: 10, MaxFanout: 1, ContextSource: "canopy_ranked", CodeMode: "suggest", VerificationDepth: "focused", ArchitectEditorSplit: true}
+	return protocolChoice{
+		Name:                 "policy_fallback",
+		VisibleToolCount:     4,
+		ToolOrder:            codingCoreToolOrder,
+		MaxTurns:             10,
+		MaxFanout:            1,
+		ContextSource:        "canopy_ranked",
+		CodeMode:             "suggest",
+		VerificationDepth:    "focused",
+		ArchitectEditorSplit: true,
+	}
 }
 
 func conservativeChoice() protocolChoice {
@@ -342,7 +355,7 @@ func protocolFacts(request TaskRequest, profile BehaviorProfile, class ModelClas
 	}
 }
 
-func selectTools(requestTools, defaults []string, limit int) []string {
+func selectTools(requestTools, defaults, preferred []string, limit int) []string {
 	tools := requestTools
 	if len(tools) == 0 {
 		tools = defaults
@@ -351,10 +364,63 @@ func selectTools(requestTools, defaults []string, limit int) []string {
 	if limit <= 0 || len(tools) == 0 {
 		return nil
 	}
-	if len(tools) > limit {
-		tools = tools[:limit]
+	capacity := limit
+	if len(tools) < capacity {
+		capacity = len(tools)
 	}
-	return tools
+	selected := make([]string, 0, capacity)
+	appendAvailable := func(tool string) bool {
+		index := sort.SearchStrings(tools, tool)
+		if index >= len(tools) || tools[index] != tool {
+			return false
+		}
+		for _, selectedTool := range selected {
+			if selectedTool == tool {
+				return false
+			}
+		}
+		selected = append(selected, tool)
+		return len(selected) == limit
+	}
+	for _, tool := range preferred {
+		if appendAvailable(tool) {
+			return selected
+		}
+	}
+	for _, tool := range tools {
+		if appendAvailable(tool) {
+			return selected
+		}
+	}
+	return selected
+}
+
+// Outcome tool bundles are execution vocabulary; Arbiter owns the governed
+// choice of outcome. Reusing immutable slices keeps protocol compilation free
+// of repeated policy-payload parsing.
+var (
+	evidenceCoreToolOrder = []string{"read_file", "search_text", "code_refs", "git_diff", "find_files", "code_impact", "git_status", "code_callgraph", "run_tests", "apply_patch", "exec_program"}
+	codingCoreToolOrder   = []string{"read_file", "search_text", "apply_patch", "run_tests", "find_files", "code_refs", "git_diff", "git_status", "code_impact", "exec_program", "run_shell"}
+	balancedToolOrder     = []string{"read_file", "search_text", "apply_patch", "run_tests", "find_files", "code_refs", "git_diff", "git_status", "code_impact", "code_callgraph", "exec_program", "run_shell"}
+	frontierParallelTools = []string{"exec_program", "read_file", "search_text", "code_impact", "code_refs", "apply_patch", "run_tests", "git_diff", "git_status", "find_files", "code_callgraph", "spawn_subagent", "run_shell", "edit_file"}
+	frontierHorizonTools  = []string{"exec_program", "read_file", "search_text", "code_impact", "code_refs", "apply_patch", "run_tests", "git_diff", "git_status", "find_files", "code_callgraph", "run_shell", "edit_file"}
+)
+
+func toolOrderForOutcome(name string) []string {
+	switch name {
+	case "weak_evidence_stages":
+		return evidenceCoreToolOrder
+	case "weak_typed_stages", "policy_fallback":
+		return codingCoreToolOrder
+	case "frontier_parallel":
+		return frontierParallelTools
+	case "frontier_horizon":
+		return frontierHorizonTools
+	case "balanced_protocol":
+		return balancedToolOrder
+	default:
+		return nil
+	}
 }
 
 func normalizedTools(values []string) []string {

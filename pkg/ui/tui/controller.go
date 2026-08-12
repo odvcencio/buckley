@@ -619,6 +619,9 @@ func (c *Controller) handleCommand(text string) {
 		}
 		c.submitPrompt(prompt, true)
 
+	case "/agent", "/agents":
+		c.handleSubagentCommand(parts[1:])
+
 	case "/plans":
 		c.showPlans()
 
@@ -638,6 +641,11 @@ func (c *Controller) handleCommand(text string) {
   /redo                - Restore a turn /undo reverted
   /steer <message>     - Interrupt and redirect the active response
   /queue <message>     - Run a follow-up after the active response
+  /agents              - List active subagents
+  /agent spawn [@name] <task> - Start a generic or named subagent
+  /agent send <target> <message> - Command one, a group, or all subagents
+  /agent steer <target> <message> - Send high-priority user steering
+  /agent cancel <target> [reason] - Cancel one, a group, or all subagents
   /sessions, /tabs     - List active sessions
   /next, /n            - Switch to next session
   /prev, /p            - Switch to previous session

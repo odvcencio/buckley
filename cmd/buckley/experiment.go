@@ -43,7 +43,7 @@ type experimentDiffOptions struct {
 
 func runExperimentCommand(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: buckley experiment <run|list|show|diff|replay>")
+		return fmt.Errorf("usage: buckley experiment <run|list|show|diff|replay|profile>")
 	}
 	switch args[0] {
 	case "run":
@@ -56,6 +56,8 @@ func runExperimentCommand(args []string) error {
 		return runExperimentDiff(args[1:])
 	case "replay":
 		return runExperimentReplay(args[1:])
+	case "profile":
+		return runExperimentProfile(args[1:])
 	default:
 		return fmt.Errorf("unknown experiment command: %s", args[0])
 	}

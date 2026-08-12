@@ -2,6 +2,7 @@ package subagent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/oklog/ulid/v2"
 
+	"m31labs.dev/buckley/pkg/agentcoord"
 	"m31labs.dev/buckley/pkg/persona"
 	"m31labs.dev/buckley/pkg/telemetry"
 )
@@ -17,6 +19,7 @@ import (
 const (
 	DefaultMaxConcurrent = 4
 	maxCapturedOutput    = 256 * 1024
+	defaultCommandBuffer = 64
 	// maxTaskTelemetryBytes matches boundedTask's snapshot-level bound so the
 	// telemetry copy of a task description is never larger than the
 	// snapshot value it was derived from.
@@ -78,6 +81,34 @@ type Runner interface {
 	Run(ctx context.Context, request Request, started func(pid int)) (string, error)
 }
 
+// InteractiveRunner is an optional local adapter capability. Existing runners
+// remain valid; capable runners acknowledge each command after transporting it
+// into the live child process.
+type InteractiveRunner interface {
+	RunInteractive(ctx context.Context, request Request, started func(pid int), commands <-chan CommandDelivery) (string, error)
+}
+
+// ErrLiveDeliveryUnavailable means a command remains safely queued because no
+// attached adapter can transport it into the running child.
+var ErrLiveDeliveryUnavailable = errors.New("live subagent command delivery is unavailable")
+
+// CommandDelivery pairs a durable message with a one-shot transport ack.
+type CommandDelivery struct {
+	Message agentcoord.Message
+	ack     chan error
+}
+
+// Acknowledge reports whether the live adapter accepted the command.
+func (d CommandDelivery) Acknowledge(err error) {
+	if d.ack == nil {
+		return
+	}
+	select {
+	case d.ack <- err:
+	default:
+	}
+}
+
 type Snapshot struct {
 	ID              string    `json:"id"`
 	ParentSessionID string    `json:"parent_session_id,omitempty"`
@@ -115,6 +146,7 @@ type run struct {
 	snapshot Snapshot
 	cancel   context.CancelFunc
 	done     chan struct{}
+	commands chan CommandDelivery
 }
 
 type Manager struct {
@@ -320,8 +352,9 @@ func (m *Manager) SpawnWithOptions(opts SpawnOptions) (Snapshot, error) {
 			OutputSchema:    strings.TrimSpace(opts.OutputSchema),
 			ApprovalPosture: strings.TrimSpace(opts.ApprovalPosture),
 		},
-		cancel: cancel,
-		done:   make(chan struct{}),
+		cancel:   cancel,
+		done:     make(chan struct{}),
+		commands: make(chan CommandDelivery, defaultCommandBuffer),
 	}
 	m.runs[id] = current
 	snapshot := current.snapshot
@@ -357,14 +390,21 @@ func (m *Manager) run(ctx context.Context, current *run, request Request) {
 	defer m.wg.Done()
 	defer close(current.done)
 
-	output, err := m.runner.Run(ctx, request, func(pid int) {
+	started := func(pid int) {
 		m.mu.Lock()
 		current.snapshot.PID = pid
 		snapshot := current.snapshot
 		m.mu.Unlock()
 		m.publish(telemetry.EventSubagentState, snapshot, "")
 		m.observe(snapshot)
-	})
+	}
+	var output string
+	var err error
+	if interactive, ok := m.runner.(InteractiveRunner); ok {
+		output, err = interactive.RunInteractive(ctx, request, started, current.commands)
+	} else {
+		output, err = m.runner.Run(ctx, request, started)
+	}
 
 	m.mu.Lock()
 	current.snapshot.FinishedAt = time.Now()
@@ -386,6 +426,44 @@ func (m *Manager) run(ctx context.Context, current *run, request Request) {
 	m.mu.Unlock()
 	m.publish(eventType, snapshot, snapshot.Error)
 	m.observe(snapshot)
+}
+
+// Deliver transports one command to an attached interactive child. It does
+// not persist the command; Coordinator owns durable mailbox ordering first.
+func (m *Manager) Deliver(ctx context.Context, id string, message agentcoord.Message) error {
+	if m == nil {
+		return ErrLiveDeliveryUnavailable
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	id = strings.TrimSpace(id)
+	m.mu.RLock()
+	current, ok := m.runs[id]
+	_, interactive := m.runner.(InteractiveRunner)
+	if !ok || !interactive || current.snapshot.State != StateRunning {
+		m.mu.RUnlock()
+		return fmt.Errorf("%w: %s", ErrLiveDeliveryUnavailable, id)
+	}
+	commands, done := current.commands, current.done
+	m.mu.RUnlock()
+
+	delivery := CommandDelivery{Message: message, ack: make(chan error, 1)}
+	select {
+	case commands <- delivery:
+	case <-done:
+		return fmt.Errorf("%w: %s", ErrLiveDeliveryUnavailable, id)
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	select {
+	case err := <-delivery.ack:
+		return err
+	case <-done:
+		return fmt.Errorf("%w: %s", ErrLiveDeliveryUnavailable, id)
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (m *Manager) List() []Snapshot {

@@ -18,6 +18,24 @@ outcome ProtocolChoice {
 }
 
 strategy compile returns ProtocolChoice {
+    // Read-only tasks need an evidence loop, not mutation tools. Ordering is
+    // intentional: the compiler skips unavailable entries, then fills any
+    // remaining slots deterministically from the host's candidate set.
+    when {
+        model.class == "weak"
+        and task.class in ["review", "analysis", "research", "audit"]
+    } then WeakEvidenceStages {
+        name: "weak_evidence_stages",
+        visible_tool_count: 4,
+        max_turns: 10,
+        max_fanout: 1,
+        context_source: "canopy_ranked",
+        code_mode: "suggest",
+        continuation: false,
+        verification_depth: "focused",
+        architect_editor_split: true,
+    }
+
     when {
         model.class == "weak"
     } then WeakTypedStages {

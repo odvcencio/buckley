@@ -498,7 +498,7 @@ func (t *SubagentTool) Name() string {
 }
 
 func (t *SubagentTool) Description() string {
-	return "Spawn and manage bounded Buckley subagents. Use named project agent profiles when available, then list, inspect, wait for, or cancel child runs by ID."
+	return "Spawn and manage bounded Buckley subagents. Address one run, comma-separated runs, an agent:<name> group, or all active children with send, steer, and cancel."
 }
 
 func (t *SubagentTool) Parameters() ParameterSchema {
@@ -507,7 +507,7 @@ func (t *SubagentTool) Parameters() ParameterSchema {
 		Properties: map[string]PropertySchema{
 			"action": {
 				Type:        "string",
-				Description: "Management action: spawn, list, status, wait, steer, send, messages, cancel, claim, or release (default spawn)",
+				Description: "Management action: spawn, list, status, wait, steer (human priority), send (parent command), messages, cancel, claim, or release (default spawn)",
 				Enum:        []string{"spawn", "list", "status", "wait", "steer", "send", "messages", "cancel", "claim", "release"},
 				Default:     "spawn",
 			},
@@ -554,7 +554,7 @@ func (t *SubagentTool) Parameters() ParameterSchema {
 			},
 			"id": {
 				Type:        "string",
-				Description: "Child run ID for status, wait, steer, messages, cancel, claim, or release.",
+				Description: "Child run ID. For steer, send, or cancel, may also be comma-separated IDs, agent:<name>, role:<name>, active, or all.",
 			},
 			"message": {
 				Type:        "string",
@@ -583,6 +583,17 @@ func (t *SubagentTool) Execute(params map[string]any) (*Result, error) {
 }
 
 func (t *SubagentTool) ExecuteWithContext(ctx context.Context, params map[string]any) (*Result, error) {
+	return t.executeWithContext(ctx, params, false)
+}
+
+// ExecuteUserCommand runs an explicit human control request. It bypasses only
+// the model anti-recursion cooldown; coordinator admission, concurrency,
+// workspace claims, and child execution policy remain in force.
+func (t *SubagentTool) ExecuteUserCommand(ctx context.Context, params map[string]any) (*Result, error) {
+	return t.executeWithContext(ctx, params, true)
+}
+
+func (t *SubagentTool) executeWithContext(ctx context.Context, params map[string]any, userInitiated bool) (*Result, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -593,7 +604,7 @@ func (t *SubagentTool) ExecuteWithContext(ctx context.Context, params map[string
 	coordinator := t.getCoordinator()
 	switch action {
 	case "spawn":
-		return t.spawn(ctx, coordinator, params)
+		return t.spawn(ctx, coordinator, params, userInitiated)
 	case "list":
 		session, _ := t.runtimeContext()
 		runs, err := coordinator.List(ctx, agentcoord.RunFilter{ParentSessionID: session})
@@ -621,24 +632,9 @@ func (t *SubagentTool) ExecuteWithContext(ctx context.Context, params map[string
 		}
 		return subagentRunResult(run), nil
 	case "steer":
-		message, err := coordinator.Steer(ctx, delegateStringParam(params, "id"), delegateStringParam(params, "message"))
-		if err != nil {
-			return &Result{Success: false, Error: err.Error()}, nil
-		}
-		return &Result{Success: true, Data: map[string]any{"message": message}, DisplayData: map[string]any{"summary": fmt.Sprintf("Steering queued for subagent %s", message.To)}, ShouldAbridge: true}, nil
+		return t.messageTargets(ctx, coordinator, "steer", params)
 	case "send":
-		id := delegateStringParam(params, "id")
-		message, err := coordinator.Send(ctx, agentcoord.Message{
-			RunID:   id,
-			To:      id,
-			From:    "parent",
-			Kind:    "message",
-			Content: delegateStringParam(params, "message"),
-		})
-		if err != nil {
-			return &Result{Success: false, Error: err.Error()}, nil
-		}
-		return &Result{Success: true, Data: map[string]any{"message": message}, DisplayData: map[string]any{"summary": fmt.Sprintf("Message queued for subagent %s", message.To)}, ShouldAbridge: true}, nil
+		return t.messageTargets(ctx, coordinator, "send", params)
 	case "messages":
 		messages, err := coordinator.Messages(ctx, delegateStringParam(params, "id"))
 		if err != nil {
@@ -646,13 +642,7 @@ func (t *SubagentTool) ExecuteWithContext(ctx context.Context, params map[string
 		}
 		return &Result{Success: true, Data: map[string]any{"messages": messages, "count": len(messages)}}, nil
 	case "cancel":
-		run, err := coordinator.Cancel(ctx, delegateStringParam(params, "id"), delegateStringParam(params, "reason"))
-		if err != nil {
-			return &Result{Success: false, Error: err.Error()}, nil
-		}
-		result := subagentRunResult(run)
-		result.DisplayData = map[string]any{"summary": "Subagent cancellation requested"}
-		return result, nil
+		return t.cancelTargets(ctx, coordinator, params)
 	case "claim":
 		claim, err := coordinator.Claim(ctx, agentcoord.ClaimRequest{RunID: delegateStringParam(params, "id"), Resources: delegateStringSliceParam(params, "resources")})
 		if err != nil {
@@ -798,13 +788,15 @@ func (t *SubagentTool) runtimeContext() (string, types.RuleEvaluator) {
 	return session, evaluator
 }
 
-func (t *SubagentTool) spawn(ctx context.Context, coordinator agentcoord.Coordinator, params map[string]any) (*Result, error) {
+func (t *SubagentTool) spawn(ctx context.Context, coordinator agentcoord.Coordinator, params map[string]any, userInitiated bool) (*Result, error) {
 	task := delegateStringParam(params, "initial_task")
 	if task == "" {
 		return &Result{Success: false, Error: "initial_task parameter must be a non-empty string"}, nil
 	}
-	if err := delegationCheck("spawn_subagent"); err != nil {
-		return &Result{Success: false, Error: err.Error()}, nil
+	if !userInitiated {
+		if err := delegationCheck("spawn_subagent"); err != nil {
+			return &Result{Success: false, Error: err.Error()}, nil
+		}
 	}
 	guard := GetDelegationGuard()
 	timeout := parseInt(params["timeout_seconds"], 300)
@@ -893,6 +885,14 @@ type buckleySubagentRunner struct {
 }
 
 func (r *buckleySubagentRunner) Run(ctx context.Context, request subagent.Request, started func(pid int)) (string, error) {
+	return r.run(ctx, request, started, nil)
+}
+
+func (r *buckleySubagentRunner) RunInteractive(ctx context.Context, request subagent.Request, started func(pid int), commands <-chan subagent.CommandDelivery) (string, error) {
+	return r.run(ctx, request, started, commands)
+}
+
+func (r *buckleySubagentRunner) run(ctx context.Context, request subagent.Request, started func(pid int), commands <-chan subagent.CommandDelivery) (string, error) {
 	command := strings.TrimSpace(r.command)
 	if command == "" {
 		command = os.Args[0]
@@ -913,9 +913,20 @@ func (r *buckleySubagentRunner) Run(ctx context.Context, request subagent.Reques
 	if err != nil {
 		return "", err
 	}
+	var mailbox *subagent.FileMailbox
+	if commands != nil {
+		mailbox, err = subagent.NewFileMailbox()
+		if err != nil {
+			return "", err
+		}
+		defer mailbox.Close()
+	}
 	cmd := exec.CommandContext(ctx, command, args...)
 	cmd.Dir = r.workDir
 	cmd.Env = replaceEnvironmentValue(GetDelegationGuard().PrepareChildEnv(), subagent.ChildContractEnv, contract)
+	if mailbox != nil {
+		cmd.Env = replaceEnvironmentValue(cmd.Env, subagent.ChildMailboxEnv, mailbox.Path())
+	}
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -926,7 +937,16 @@ func (r *buckleySubagentRunner) Run(ctx context.Context, request subagent.Reques
 	if started != nil {
 		started(cmd.Process.Pid)
 	}
+	stopRelay := make(chan struct{})
+	relayStopped := make(chan struct{})
+	if mailbox != nil {
+		go relaySubagentCommands(ctx, mailbox, commands, stopRelay, relayStopped)
+	} else {
+		close(relayStopped)
+	}
 	err = cmd.Wait()
+	close(stopRelay)
+	<-relayStopped
 	output := strings.TrimSpace(stdout.String())
 	if diagnostic := strings.TrimSpace(stderr.String()); diagnostic != "" {
 		if output != "" {
@@ -938,6 +958,20 @@ func (r *buckleySubagentRunner) Run(ctx context.Context, request subagent.Reques
 		return output, fmt.Errorf("buckley subagent: %w", err)
 	}
 	return output, nil
+}
+
+func relaySubagentCommands(ctx context.Context, mailbox *subagent.FileMailbox, commands <-chan subagent.CommandDelivery, stop <-chan struct{}, stopped chan<- struct{}) {
+	defer close(stopped)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-stop:
+			return
+		case delivery := <-commands:
+			delivery.Acknowledge(mailbox.Append(delivery.Message))
+		}
+	}
 }
 
 func subagentCommandArgs(request subagent.Request) ([]string, func(), error) {

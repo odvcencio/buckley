@@ -1001,6 +1001,7 @@ func printHelp() {
 	fmt.Println("  experiment show <id|name>        Show experiment results (--format terminal|markdown)")
 	fmt.Println("  experiment diff <id|name>        Compare variant outputs side-by-side")
 	fmt.Println("  experiment replay <session-id>   Replay a session with a new model")
+	fmt.Println("  experiment profile <id|name>     Calibrate model behavior from measured runs")
 	fmt.Println("  eval [list|run|init|runs|show]   Run project chat eval scenarios")
 	fmt.Println("  serve [--bind host:port]         Start local HTTP/WebSocket server")
 	fmt.Println("  attach [session-id] [--tui]      Join a running session over loopback gRPC (list if omitted; --tui observes full-screen)")
@@ -1372,7 +1373,7 @@ func printBashCompletion() {
             return 0
             ;;
         experiment)
-            COMPREPLY=( $(compgen -W "run" -- "${cur}") )
+            COMPREPLY=( $(compgen -W "run list show diff replay profile" -- "${cur}") )
             return 0
             ;;
         eval)
@@ -1481,7 +1482,7 @@ _buckley() {
                     _values 'skills command' init list show
                     ;;
                 experiment)
-                    _values 'experiment command' run
+                    _values 'experiment command' run list show diff replay profile
                     ;;
                 eval)
                     _values 'eval command' init list run runs show artifacts
@@ -1596,6 +1597,11 @@ complete -c buckley -n '__fish_seen_subcommand_from doctor; and __fish_seen_subc
 
 # Experiment subcommands
 complete -c buckley -n '__fish_seen_subcommand_from experiment' -a run -d 'Run an experiment'
+complete -c buckley -n '__fish_seen_subcommand_from experiment' -a list -d 'List experiments'
+complete -c buckley -n '__fish_seen_subcommand_from experiment' -a show -d 'Show experiment results'
+complete -c buckley -n '__fish_seen_subcommand_from experiment' -a diff -d 'Compare experiment variants'
+complete -c buckley -n '__fish_seen_subcommand_from experiment' -a replay -d 'Replay a session with a new model'
+complete -c buckley -n '__fish_seen_subcommand_from experiment' -a profile -d 'Calibrate model behavior from measured runs'
 
 # Eval subcommands
 complete -c buckley -n '__fish_seen_subcommand_from eval' -a init -d 'Create a project chat eval scenario'

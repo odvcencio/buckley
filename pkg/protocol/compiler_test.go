@@ -32,7 +32,7 @@ func TestCompiler_WeakProfileProducesDeterministicNarrowTypedProtocol(t *testing
 		Complexity:     40,
 		Risk:           "medium",
 		NeedsArtifact:  true,
-		CandidateTools: []string{"write_file", "read_file", "find_files", "run_tests", "exec_program", "read_file"},
+		CandidateTools: []string{"activate_skill", "analyze_complexity", "apply_patch", "browse_url", "read_file", "search_text", "run_tests", "write_file", "read_file"},
 	}
 	first, err := compiler.Compile(request, profile)
 	if err != nil {
@@ -51,8 +51,34 @@ func TestCompiler_WeakProfileProducesDeterministicNarrowTypedProtocol(t *testing
 	if len(first.VisibleTools) != 4 || len(first.Stages) != 2 || first.Stages[0].Role != "architect" || first.Stages[1].Role != "editor" {
 		t.Fatalf("weak protocol did not narrow into typed stages: %+v", first)
 	}
+	wantTools := []string{"read_file", "search_text", "apply_patch", "run_tests"}
+	if !reflect.DeepEqual(first.VisibleTools, wantTools) {
+		t.Fatalf("weak protocol tools = %v, want coherent working set %v", first.VisibleTools, wantTools)
+	}
 	if first.Stages[1].MaxFanout != 1 || first.Stages[1].CodeMode != "suggest" || first.Output.Mode != artifactv1.OutputNativeJSONSchema {
 		t.Fatalf("unexpected weak execution stage/output: %+v", first)
+	}
+}
+
+func TestCompiler_WeakReadOnlyTaskPrioritizesEvidenceTools(t *testing.T) {
+	engine, err := rules.NewDefaultEngine()
+	if err != nil {
+		t.Fatalf("NewDefaultEngine: %v", err)
+	}
+	compiler := NewCompiler(rules.NewEngineAdapter(engine), CompilerConfig{Mode: ModeDynamic})
+	request := TaskRequest{
+		TaskClass:      "review",
+		Risk:           "low",
+		NeedsArtifact:  true,
+		CandidateTools: []string{"activate_skill", "apply_patch", "code_refs", "git_diff", "read_file", "run_tests", "search_text"},
+	}
+	protocol, err := compiler.Compile(request, testProfile(ClassWeak))
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	wantTools := []string{"read_file", "search_text", "code_refs", "git_diff"}
+	if protocol.Receipt.PolicyOutcome != "weak_evidence_stages" || !reflect.DeepEqual(protocol.VisibleTools, wantTools) {
+		t.Fatalf("weak review protocol = %+v, want evidence tools %v", protocol, wantTools)
 	}
 }
 
@@ -78,7 +104,7 @@ func TestCompiler_FrontierParallelismIsEarnedAndRiskBounded(t *testing.T) {
 		Risk:           "medium",
 		Parallelizable: true,
 		NeedsArtifact:  true,
-		CandidateTools: []string{"z", "y", "x", "w", "v", "u", "t", "s", "r", "q", "p", "o"},
+		CandidateTools: []string{"activate_skill", "apply_patch", "code_callgraph", "code_impact", "code_refs", "exec_program", "find_files", "git_diff", "git_status", "read_file", "run_shell", "run_tests", "search_text", "spawn_subagent"},
 	}
 	protocol, err := compiler.Compile(request, profile)
 	if err != nil {
@@ -91,6 +117,10 @@ func TestCompiler_FrontierParallelismIsEarnedAndRiskBounded(t *testing.T) {
 	if len(protocol.VisibleTools) != 10 || protocol.Output.Mode != artifactv1.OutputSubmitArtifact {
 		t.Fatalf("frontier contract = %+v", protocol)
 	}
+	wantTools := []string{"exec_program", "read_file", "search_text", "code_impact", "code_refs", "apply_patch", "run_tests", "git_diff", "git_status", "find_files"}
+	if !reflect.DeepEqual(protocol.VisibleTools, wantTools) {
+		t.Fatalf("frontier protocol tools = %v, want %v", protocol.VisibleTools, wantTools)
+	}
 	request.Risk = "high"
 	riskBound, err := compiler.Compile(request, profile)
 	if err != nil {
@@ -98,6 +128,19 @@ func TestCompiler_FrontierParallelismIsEarnedAndRiskBounded(t *testing.T) {
 	}
 	if riskBound.Stages[0].MaxFanout != 1 {
 		t.Fatalf("high risk must serialize work, got %+v", riskBound.Stages[0])
+	}
+}
+
+func TestSelectTools_PolicyOrderSkipsMissingAndFillsDeterministically(t *testing.T) {
+	got := selectTools(
+		[]string{"zeta", "run_tests", "read_file", "apply_patch", "alpha"},
+		nil,
+		[]string{"missing", "read_file", "search_text", "apply_patch", "run_tests"},
+		4,
+	)
+	want := []string{"read_file", "apply_patch", "run_tests", "alpha"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("selectTools = %v, want %v", got, want)
 	}
 }
 
