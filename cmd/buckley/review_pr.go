@@ -343,6 +343,7 @@ type automatedReviewOptions struct {
 	modelID                    string
 	reasoningEffort            string
 	reasoningMaxTokens         int
+	maxOutputTokens            int
 	adaptiveCodexModel         bool
 	adaptiveReasoning          bool
 	engine                     *rules.Engine
@@ -471,7 +472,7 @@ func (defaults automatedReviewOptions) withOverrides(overrides automatedReviewOp
 
 func reviewContextProvidersForModel(modelID string) []commands.PRContextProvider {
 	providers := []commands.PRContextProvider{knowledgehyphae.NewReviewContextProvider()}
-	if isQwen37PlusReviewModel(modelID) {
+	if isQwenReviewModel(modelID) {
 		providers = append(providers, commands.NewWorkflowRiskContextProvider())
 	}
 	return providers

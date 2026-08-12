@@ -1050,14 +1050,42 @@ type ModelCatalog struct {
 
 // ModelInfo represents information about a model
 type ModelInfo struct {
-	ID                  string       `json:"id"`
-	Name                string       `json:"name"`
-	Description         string       `json:"description"`
-	ContextLength       int          `json:"context_length"`
+	ID            string `json:"id"`
+	Name          string `json:"name"`
+	Description   string `json:"description"`
+	ContextLength int    `json:"context_length"`
+	// MaxCompletionTokens is the provider-advertised completion ceiling. It
+	// is optional because not every provider publishes one. OpenRouter nests
+	// this value under top_provider; UnmarshalJSON promotes it here so callers
+	// can safely clamp large synthesis requests without hard-coding model IDs.
+	MaxCompletionTokens int          `json:"max_completion_tokens,omitempty"`
 	Pricing             ModelPricing `json:"pricing"`
 	Created             int64        `json:"created"` // Unix timestamp
 	Architecture        Architecture `json:"architecture,omitempty"`
 	SupportedParameters []string     `json:"supported_parameters,omitempty"`
+}
+
+// UnmarshalJSON accepts the common top-level catalog shape and OpenRouter's
+// nested top_provider.max_completion_tokens capability in one place.
+func (m *ModelInfo) UnmarshalJSON(data []byte) error {
+	type modelInfoAlias ModelInfo
+	var base modelInfoAlias
+	if err := json.Unmarshal(data, &base); err != nil {
+		return err
+	}
+	var capabilities struct {
+		TopProvider struct {
+			MaxCompletionTokens int `json:"max_completion_tokens"`
+		} `json:"top_provider"`
+	}
+	if err := json.Unmarshal(data, &capabilities); err != nil {
+		return err
+	}
+	*m = ModelInfo(base)
+	if m.MaxCompletionTokens <= 0 {
+		m.MaxCompletionTokens = capabilities.TopProvider.MaxCompletionTokens
+	}
+	return nil
 }
 
 // Architecture contains model architecture details

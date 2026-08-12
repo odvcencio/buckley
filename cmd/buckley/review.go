@@ -400,6 +400,7 @@ func runProjectReviewWithPolicy(ctx context.Context, framework *oneshot.Framewor
 		sizeClass:          "project",
 		reasoningEffort:    "high",
 		reasoningMaxTokens: 4096,
+		maxOutputTokens:    projectReviewOutputTokenBudget,
 		// Project reviews are exhaustive by default. The caller's outer
 		// timeout and the RLM governor remain the safety boundaries.
 		maxIterations:        0,
@@ -427,6 +428,7 @@ func runProjectReviewWithPolicy(ctx context.Context, framework *oneshot.Framewor
 		ModelID:                  reviewPolicy.modelID,
 		ReasoningEffort:          reviewPolicy.reasoningEffort,
 		ReasoningMaxTokens:       reviewPolicy.reasoningMaxTokens,
+		MaxOutputTokens:          reviewPolicy.maxOutputTokens,
 		SnapshotPolicy:           policy,
 		ReviewSnapshot:           snapshot,
 	})
@@ -608,14 +610,23 @@ func appendReviewAttemptDiagnostics(review string, trace *transparency.Trace) st
 		attemptTrace := attempt.Trace
 		fmt.Fprintf(
 			&b,
-			"\n### %s attempt %d\n\n- Finish reason: `%s`\n- Tokens: %d input and %d output\n- Duration: %s\n",
+			"\n### %s attempt %d\n\n- Model: `%s` via `%s`\n- Finish reason: `%s`\n- Tokens: %d input and %d output\n- Duration: %s\n",
 			reviewAttemptPhase(attempt.Phase),
 			attempt.Attempt,
+			attemptTrace.Model,
+			attemptTrace.Provider,
 			reviewAttemptFinishReason(attemptTrace),
 			attemptTrace.Tokens.Input,
 			attemptTrace.Tokens.Output,
 			attemptTrace.Duration.Round(time.Millisecond),
 		)
+		if request := attemptTrace.Request; request != nil {
+			fmt.Fprintf(&b, "- Request limits: %d completion tokens", request.MaxTokens)
+			if request.ReasoningMaxTokens > 0 {
+				fmt.Fprintf(&b, " (%d reasoning tokens)", request.ReasoningMaxTokens)
+			}
+			b.WriteString("\n")
+		}
 		if excerpt := reviewAttemptExcerpt(attemptTrace.Content, 4000); excerpt != "" {
 			b.WriteString("\nResponse excerpt:\n\n> ")
 			b.WriteString(strings.ReplaceAll(excerpt, "\n", "\n> "))

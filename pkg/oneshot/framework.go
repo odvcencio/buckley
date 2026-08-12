@@ -49,13 +49,17 @@ type RLMExecutionOpts struct {
 	MaxIterations        int
 	MaxToolCalls         int
 	MaxVerificationCalls int
-	MaxCostUSD           float64
-	ExplorationTimeout   time.Duration
-	SynthesisLead        time.Duration
-	VerificationTimeout  time.Duration
-	ModelID              string
-	ReasoningEffort      string
-	ReasoningMaxTokens   int
+	// MaxOutputTokens is the total provider completion budget, including
+	// reasoning tokens when the provider counts reasoning against completion.
+	// Zero preserves the legacy reasoning-derived limit.
+	MaxOutputTokens     int
+	MaxCostUSD          float64
+	ExplorationTimeout  time.Duration
+	SynthesisLead       time.Duration
+	VerificationTimeout time.Duration
+	ModelID             string
+	ReasoningEffort     string
+	ReasoningMaxTokens  int
 }
 
 // ToolInvoker runs a single tool-shaped one-shot model invocation.
@@ -254,6 +258,11 @@ type RLMRunOpts struct {
 	// pass. Zero leaves verification bounded only by MaxToolCalls.
 	MaxVerificationCalls int
 
+	// MaxOutputTokens is the total completion budget for each model turn. A
+	// project review can raise this above the small default used by concise
+	// branch reviews; provider metadata still clamps it to a safe maximum.
+	MaxOutputTokens int
+
 	// MaxCostUSD is a hard best-effort cost ceiling shared by validation
 	// retries and the approval critic. Zero leaves cost unconstrained.
 	MaxCostUSD float64
@@ -359,6 +368,7 @@ func (f *Framework) RunRLM(ctx context.Context, def RLMDefinition, opts RLMRunOp
 		ReviewSnapshot:       snapshot,
 		MaxToolCalls:         opts.MaxToolCalls,
 		MaxVerificationCalls: opts.MaxVerificationCalls,
+		MaxOutputTokens:      opts.MaxOutputTokens,
 		ExplorationTimeout:   opts.ExplorationTimeout,
 		SynthesisLead:        opts.SynthesisLead,
 		VerificationTimeout:  opts.VerificationTimeout,
@@ -538,6 +548,9 @@ func (f *Framework) runValidatedRLMPhase(
 					attemptOpts.ReasoningMaxTokens,
 					textRepairReasoningMaxTokens,
 				)
+				// Keep an explicit report budget during repair. The old path
+				// recomputed the total ceiling from the 512-token repair reasoning
+				// cap and truncated long project reports at 4,608 tokens.
 			case rlmValidationRetryEvidence:
 				attemptOpts.MaxIterations = boundedPositiveLimit(attemptOpts.MaxIterations, evidenceRepairMaxIterations)
 				if attemptOpts.MaxToolCalls > 0 {
@@ -733,10 +746,17 @@ func buildRLMValidationRetryPrompt(
 	}
 	if retryMode == rlmValidationRetryClean && previous != nil && strings.TrimSpace(previous.Response) != "" {
 		rejected := sanitizeCleanRepairResponse(previous.Response)
-		return basePrompt + "\n\n" + rejection +
-			"Complete one clean repair with no tool calls. Use only the supplied evidence. " +
+		repairInstruction := "Complete one clean repair with no tool calls. Use only the supplied evidence. " +
 			"Do not emit tool-call markup, tool-call JSON, progress text, or a plan. " +
-			"Start with the required review format. Return the complete final review.\n\nREJECTED RESPONSE:\n" +
+			"Start with the required review format. Return the complete final review."
+		if strings.Contains(strings.ToLower(validationErr.Error()), "token limit") {
+			repairInstruction = "The prior response stopped at the provider token limit. Complete one compact clean repair with no tool calls. " +
+				"Preserve the strongest evidence, use compact ledgers and concise prose, and never omit a required section. " +
+				"Do not emit tool-call markup, tool-call JSON, progress text, or a plan. " +
+				"Start with the required review format and return the complete final review."
+		}
+		return basePrompt + "\n\n" + rejection +
+			repairInstruction + "\n\nREJECTED RESPONSE:\n" +
 			rejected
 	}
 	return basePrompt + "\n\n" + rejection +

@@ -21,10 +21,11 @@ func TestSaveAndLoadCatalogCache_RoundTrips(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "nested", "model_catalog.json")
 	original := map[string]ModelInfo{
 		"openai/gpt-4o": {
-			ID:            "openai/gpt-4o",
-			Name:          "GPT-4o",
-			ContextLength: 128000,
-			Pricing:       ModelPricing{Prompt: 2.5, Completion: 10},
+			ID:                  "openai/gpt-4o",
+			Name:                "GPT-4o",
+			ContextLength:       128000,
+			MaxCompletionTokens: 16384,
+			Pricing:             ModelPricing{Prompt: 2.5, Completion: 10},
 		},
 		"anthropic/claude-4.5": {
 			ID:   "anthropic/claude-4.5",
@@ -45,6 +46,9 @@ func TestSaveAndLoadCatalogCache_RoundTrips(t *testing.T) {
 	}
 	if loaded["openai/gpt-4o"].ContextLength != 128000 {
 		t.Fatalf("loaded gpt-4o ContextLength = %d, want 128000", loaded["openai/gpt-4o"].ContextLength)
+	}
+	if loaded["openai/gpt-4o"].MaxCompletionTokens != 16384 {
+		t.Fatalf("loaded gpt-4o MaxCompletionTokens = %d, want 16384", loaded["openai/gpt-4o"].MaxCompletionTokens)
 	}
 	if loaded["anthropic/claude-4.5"].Name != "Claude 4.5" {
 		t.Fatalf("loaded claude Name = %q, want Claude 4.5", loaded["anthropic/claude-4.5"].Name)

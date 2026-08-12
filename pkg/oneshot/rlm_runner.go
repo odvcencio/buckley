@@ -147,12 +147,17 @@ func (r *RLMRunner) Run(ctx context.Context, systemPrompt, task string, allowedT
 		reasoningEffort = override
 	}
 	maxCostUSD := effectiveRLMMaxCostUSD(providerID, opts.MaxCostUSD)
+	requestedOutputTokens := opts.MaxOutputTokens
+	if requestedOutputTokens <= 0 {
+		requestedOutputTokens = reviewRLMOutputTokenLimit(opts.ReasoningMaxTokens)
+	}
+	maxOutputTokens := effectiveRLMOutputTokenLimit(r.models, modelToUse, requestedOutputTokens)
 	agentCfg := rlm.SubAgentInstanceConfig{
 		ID:                   fmt.Sprintf("oneshot-%d", time.Now().UnixNano()),
 		Model:                modelToUse,
 		Reasoning:            reasoningEffort,
 		ReasoningMaxTokens:   opts.ReasoningMaxTokens,
-		MaxOutputTokens:      reviewRLMOutputTokenLimit(opts.ReasoningMaxTokens),
+		MaxOutputTokens:      maxOutputTokens,
 		SystemPrompt:         systemPrompt,
 		MaxIterations:        opts.MaxIterations,
 		MaxToolCalls:         opts.MaxToolCalls,
@@ -227,11 +232,11 @@ func (r *RLMRunner) Run(ctx context.Context, systemPrompt, task string, allowedT
 	for _, tc := range agentResult.ToolCalls {
 		toolNames = append(toolNames, tc.Name)
 	}
-	if len(toolNames) > 0 {
-		builder.WithRequest(&transparency.RequestTrace{
-			Tools: toolNames,
-		})
-	}
+	builder.WithRequest(&transparency.RequestTrace{
+		Tools:              toolNames,
+		MaxTokens:          maxOutputTokens,
+		ReasoningMaxTokens: opts.ReasoningMaxTokens,
+	})
 
 	builder.WithContent(response)
 	builder.WithResponse(&transparency.ResponseTrace{
@@ -282,6 +287,31 @@ func reviewRLMOutputTokenLimit(reasoningMaxTokens int) int {
 	// OpenRouter counts reasoning against the completion limit. Keep the
 	// existing final-answer allowance in addition to the thinking budget.
 	return reasoningMaxTokens + 4096
+}
+
+// effectiveRLMOutputTokenLimit applies an explicit task budget and then caps
+// it with the provider's advertised completion ceiling when available. A
+// missing catalog entry is deliberately non-fatal: providers that do not
+// publish a limit retain the caller's requested budget.
+func effectiveRLMOutputTokenLimit(models *model.Manager, modelID string, configured int) int {
+	if configured <= 0 {
+		return configured
+	}
+	if models == nil {
+		return configured
+	}
+	info, err := models.GetModelInfo(modelID)
+	if err != nil || info == nil || info.MaxCompletionTokens <= 0 {
+		return configured
+	}
+	return clampRLMOutputTokenLimit(configured, info.MaxCompletionTokens)
+}
+
+func clampRLMOutputTokenLimit(configured, providerMax int) int {
+	if configured <= 0 || providerMax <= 0 {
+		return configured
+	}
+	return min(configured, providerMax)
 }
 
 func effectiveRLMMaxCostUSD(providerID string, configured float64) float64 {

@@ -28,6 +28,7 @@ type cacheModelInfo struct {
 	Name                string       `json:"name"`
 	Description         string       `json:"description"`
 	ContextLength       int          `json:"context_length"`
+	MaxCompletionTokens int          `json:"max_completion_tokens,omitempty"`
 	Pricing             cachePricing `json:"pricing"`
 	Created             int64        `json:"created"`
 	Architecture        Architecture `json:"architecture,omitempty"`
@@ -62,6 +63,7 @@ func LoadCatalogCache(path string) (map[string]ModelInfo, error) {
 			Name:                entry.Name,
 			Description:         entry.Description,
 			ContextLength:       entry.ContextLength,
+			MaxCompletionTokens: entry.MaxCompletionTokens,
 			Pricing:             ModelPricing{Prompt: entry.Pricing.Prompt, Completion: entry.Pricing.Completion},
 			Created:             entry.Created,
 			Architecture:        entry.Architecture,
@@ -88,6 +90,7 @@ func SaveCatalogCache(path string, catalog map[string]ModelInfo) error {
 			Name:                info.Name,
 			Description:         info.Description,
 			ContextLength:       info.ContextLength,
+			MaxCompletionTokens: info.MaxCompletionTokens,
 			Pricing:             cachePricing{Prompt: info.Pricing.Prompt, Completion: info.Pricing.Completion},
 			Created:             info.Created,
 			Architecture:        info.Architecture,

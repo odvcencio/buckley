@@ -80,6 +80,10 @@ type RequestTrace struct {
 
 	// MaxTokens limit
 	MaxTokens int `json:"max_tokens,omitempty"`
+
+	// ReasoningMaxTokens is the hidden-reasoning budget when the provider
+	// exposes one separately from the total completion limit.
+	ReasoningMaxTokens int `json:"reasoning_max_tokens,omitempty"`
 }
 
 // MessageTrace is a simplified message for tracing.

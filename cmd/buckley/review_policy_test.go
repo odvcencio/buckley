@@ -194,6 +194,28 @@ func TestReviewExecutionPlanPreservesQwenAdaptiveTurns(t *testing.T) {
 	}
 }
 
+func TestReviewExecutionPlanRecognizesQwen38MaxProfile(t *testing.T) {
+	options := automatedReviewOptions{
+		modelID:           "qwen/qwen3.8-max",
+		adaptiveReasoning: true,
+	}.withExecutionPlan(reviewExecutionPlan{
+		sizeClass:          "project",
+		reasoningEffort:    "high",
+		reasoningMaxTokens: 1024,
+		maxOutputTokens:    projectReviewOutputTokenBudget,
+	})
+	if options.reasoningMaxTokens != qwenBroadReasoning {
+		t.Fatalf("Qwen3.8 Max reasoning budget = %d, want %d", options.reasoningMaxTokens, qwenBroadReasoning)
+	}
+	if options.maxOutputTokens != projectReviewOutputTokenBudget {
+		t.Fatalf("Qwen3.8 Max output budget = %d, want %d", options.maxOutputTokens, projectReviewOutputTokenBudget)
+	}
+	prompt := appendReviewExecutionPlan("review this", options)
+	if !strings.Contains(prompt, "Final response budget: 32768 completion tokens") {
+		t.Fatalf("Qwen3.8 prompt omitted final response budget:\n%s", prompt)
+	}
+}
+
 func TestReviewExecutionPlanAdaptsQwenReasoningBudget(t *testing.T) {
 	tests := []struct {
 		size string

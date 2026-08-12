@@ -151,6 +151,23 @@ func TestModelPricing_UnmarshalJSON(t *testing.T) {
 	}
 }
 
+func TestModelInfoUnmarshalJSONPromotesOpenRouterCompletionLimit(t *testing.T) {
+	var info ModelInfo
+	if err := json.Unmarshal([]byte(`{
+		"id":"qwen/qwen3.8-max",
+		"context_length":1000000,
+		"top_provider":{"max_completion_tokens":131072}
+	}`), &info); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
+	if info.ID != "qwen/qwen3.8-max" || info.ContextLength != 1000000 {
+		t.Fatalf("model info = %#v", info)
+	}
+	if info.MaxCompletionTokens != 131072 {
+		t.Fatalf("MaxCompletionTokens = %d, want 131072", info.MaxCompletionTokens)
+	}
+}
+
 func TestMessage_UnmarshalJSONCapturesReasoning(t *testing.T) {
 	var msg Message
 	raw := `{"role":"assistant","content":null,"reasoning":"update(deps): refresh deps"}`

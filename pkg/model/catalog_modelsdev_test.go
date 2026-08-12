@@ -141,6 +141,9 @@ func TestMergeModelsDevCatalog_AddsNewAndUpdatesExisting(t *testing.T) {
 	if gpt4o.ContextLength != 128000 {
 		t.Fatalf("gpt-4o ContextLength = %d, want 128000", gpt4o.ContextLength)
 	}
+	if gpt4o.MaxCompletionTokens != 16384 {
+		t.Fatalf("gpt-4o MaxCompletionTokens = %d, want 16384", gpt4o.MaxCompletionTokens)
+	}
 	if gpt4o.Pricing.Prompt != 2.5 || gpt4o.Pricing.Completion != 10 {
 		t.Fatalf("gpt-4o Pricing = %+v, want {2.5 10}", gpt4o.Pricing)
 	}

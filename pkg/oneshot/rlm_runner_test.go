@@ -40,6 +40,27 @@ func TestReviewRLMOutputTokenLimitRequiresGovernedReasoning(t *testing.T) {
 	}
 }
 
+func TestClampRLMOutputTokenLimitUsesProviderCapability(t *testing.T) {
+	tests := []struct {
+		name        string
+		configured  int
+		providerMax int
+		want        int
+	}{
+		{name: "provider ceiling", configured: 32768, providerMax: 131072, want: 32768},
+		{name: "smaller provider", configured: 32768, providerMax: 8192, want: 8192},
+		{name: "unknown provider ceiling", configured: 32768, providerMax: 0, want: 32768},
+		{name: "unbounded request", configured: 0, providerMax: 8192, want: 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := clampRLMOutputTokenLimit(tt.configured, tt.providerMax); got != tt.want {
+				t.Fatalf("clampRLMOutputTokenLimit(%d, %d) = %d, want %d", tt.configured, tt.providerMax, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestFormatIncompleteRLMResponseRetainsCompletedEvidence(t *testing.T) {
 	result := &rlm.SubAgentResult{
 		Summary:      "Inspected the sharding contract.",

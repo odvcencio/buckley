@@ -119,6 +119,9 @@ func MergeModelsDevCatalog(base map[string]ModelInfo, catalog ModelsDevCatalog) 
 			if m.Limit.Context > 0 {
 				info.ContextLength = m.Limit.Context
 			}
+			if m.Limit.Output > 0 {
+				info.MaxCompletionTokens = m.Limit.Output
+			}
 			if m.Cost.Input > 0 || m.Cost.Output > 0 {
 				info.Pricing = ModelPricing{Prompt: m.Cost.Input, Completion: m.Cost.Output}
 			}

@@ -26,12 +26,16 @@ const (
 	qwenFocusedReasoning        = 2048
 	qwenStandardReasoning       = 3072
 	qwenBroadReasoning          = 4096
+	// Project reports carry a complete inventory, coverage ledger, and action
+	// evidence. The runner clamps this to the provider's advertised maximum.
+	projectReviewOutputTokenBudget = 32768
 )
 
 type reviewExecutionPlan struct {
 	sizeClass            string
 	reasoningEffort      string
 	reasoningMaxTokens   int
+	maxOutputTokens      int
 	maxIterations        int
 	maxToolCalls         int
 	maxVerificationCalls int
@@ -167,6 +171,9 @@ func (opts automatedReviewOptions) withExecutionPlan(plan reviewExecutionPlan) a
 	if opts.maxToolCalls <= 0 {
 		opts.maxToolCalls = plan.maxToolCalls
 	}
+	if plan.maxOutputTokens > 0 {
+		opts.maxOutputTokens = plan.maxOutputTokens
+	}
 	opts.maxVerificationCalls = plan.maxVerificationCalls
 	opts.reasoningMaxTokens = plan.reasoningMaxTokens
 	opts.verificationTimeout = plan.verificationTimeout
@@ -187,7 +194,7 @@ func (opts automatedReviewOptions) withExecutionPlan(plan reviewExecutionPlan) a
 			opts.reasoningEffort = codexReviewReasoningForSize(plan.sizeClass)
 		}
 	}
-	if isQwen37PlusReviewModel(opts.modelID) {
+	if isQwenReviewModel(opts.modelID) {
 		if opts.adaptiveReasoning {
 			opts.reasoningMaxTokens = qwenReviewReasoningForSize(plan.sizeClass)
 		} else {
@@ -218,9 +225,12 @@ func (opts automatedReviewOptions) withVerificationTargetBudget(changedFiles []s
 	return opts
 }
 
-func isQwen37PlusReviewModel(modelID string) bool {
+func isQwenReviewModel(modelID string) bool {
 	modelID = strings.ToLower(strings.TrimSpace(modelID))
-	return modelID == "qwen/qwen3.7-plus" || strings.HasSuffix(modelID, "/qwen3.7-plus")
+	return modelID == "qwen/qwen3.7-plus" ||
+		strings.HasSuffix(modelID, "/qwen3.7-plus") ||
+		modelID == "qwen/qwen3.8-max" ||
+		strings.HasSuffix(modelID, "/qwen3.8-max")
 }
 
 func qwenReviewReasoningForSize(sizeClass string) int {
@@ -272,6 +282,7 @@ func appendQwenReviewExecutionPlan(prompt string, opts automatedReviewOptions) s
 - For workflow or release changes, trace event input -> checkout ref -> validated commit -> built bytes -> published identifier. Never assume checkout rewrites event variables.
 - Use the supplied diff first. Make one focused first-batch tool call only when a named invariant still lacks proof; do not repeat searches or tests.
 - Finish evidence collection within %s and reserve the final %d seconds for synthesis.
+- Final response budget: %s. Use compact ledgers, but never omit required sections to fit.
 - Follow the exact response schema from the system prompt. Account for every changed file, copy Feedback IDs exactly, cite immutable CI precisely, and return only the final review.
 - Start exactly once with one ## Grade: heading. Never restart, repeat, or append a second copy of the review.
 - Put each Finding ID in exactly one Verdict list: CRITICAL and MAJOR are Blockers; MINOR is a Suggestion. Never list the same ID in both.
@@ -284,11 +295,12 @@ func appendQwenReviewExecutionPlan(prompt string, opts automatedReviewOptions) s
 		opts.maxVerificationCalls,
 		explorationLimit,
 		int(opts.synthesisLead/time.Second),
+		reviewOutputBudgetText(opts),
 	)
 }
 
 func appendReviewExecutionPlan(prompt string, opts automatedReviewOptions) string {
-	if isQwen37PlusReviewModel(opts.modelID) {
+	if isQwenReviewModel(opts.modelID) {
 		return appendQwenReviewExecutionPlan(prompt, opts)
 	}
 	turnLimit := "There is no hard per-review model-turn cap; continue until the review is complete or normal timeout/safety controls apply."
@@ -311,6 +323,7 @@ func appendReviewExecutionPlan(prompt string, opts automatedReviewOptions) strin
 - Model: %s
 - Reasoning effort: %s
 - Limit each model turn to %d reasoning tokens.
+- Final response budget: %s. Use compact ledgers, but never omit required sections to fit.
 - %s
 - %s
 - Use at most %d verification calls.
@@ -364,6 +377,7 @@ func appendReviewExecutionPlan(prompt string, opts automatedReviewOptions) strin
 		opts.modelID,
 		strings.ToUpper(opts.reasoningEffort),
 		opts.reasoningMaxTokens,
+		reviewOutputBudgetText(opts),
 		turnLimit,
 		toolLimit,
 		opts.maxVerificationCalls,
@@ -371,6 +385,13 @@ func appendReviewExecutionPlan(prompt string, opts automatedReviewOptions) strin
 		explorationLimit,
 		int(opts.synthesisLead/time.Second),
 	)
+}
+
+func reviewOutputBudgetText(opts automatedReviewOptions) string {
+	if opts.maxOutputTokens > 0 {
+		return fmt.Sprintf("%d completion tokens after provider capability clamping", opts.maxOutputTokens)
+	}
+	return "provider-derived completion budget (reasoning budget plus final-answer allowance)"
 }
 
 func isAdaptiveCodexReviewSelector(modelID string) bool {

@@ -345,6 +345,7 @@ func TestReviewResultFromRLMPreservesIncompleteState(t *testing.T) {
 				Content:  "raw rejected response",
 				Duration: 2 * time.Second,
 				Tokens:   transparency.TokenUsage{Input: 120, Output: 30},
+				Request:  &transparency.RequestTrace{MaxTokens: 32768, ReasoningMaxTokens: 4096},
 				Response: &transparency.ResponseTrace{FinishReason: "stop"},
 			},
 		}}},
@@ -357,6 +358,7 @@ func TestReviewResultFromRLMPreservesIncompleteState(t *testing.T) {
 		"Review attempt diagnostics",
 		"Finish reason: `stop`",
 		"120 input and 30 output",
+		"Request limits: 32768 completion tokens (4096 reasoning tokens)",
 		"raw rejected response",
 	} {
 		if !strings.Contains(got.reviewText, want) {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -53,6 +54,7 @@ type scriptedRLMExecutor struct {
 	models             []string
 	reasoning          []string
 	reasoningMax       []int
+	maxOutput          []int
 	maxCosts           []float64
 	finishReasons      []string
 	deadlines          []time.Time
@@ -72,6 +74,7 @@ func (s *scriptedRLMExecutor) Run(ctx context.Context, system string, task strin
 	s.models = append(s.models, opts.ModelID)
 	s.reasoning = append(s.reasoning, opts.ReasoningEffort)
 	s.reasoningMax = append(s.reasoningMax, opts.ReasoningMaxTokens)
+	s.maxOutput = append(s.maxOutput, opts.MaxOutputTokens)
 	s.maxCosts = append(s.maxCosts, opts.MaxCostUSD)
 	deadline, _ := ctx.Deadline()
 	s.deadlines = append(s.deadlines, deadline)
@@ -514,6 +517,33 @@ func TestRunRLMRepairsTokenLimitedResponseOnce(t *testing.T) {
 	}
 	if !strings.Contains(runner.prompts[2], "token limit") {
 		t.Fatalf("clean repair omitted the finish reason: %q", runner.prompts[2])
+	}
+	if !strings.Contains(runner.prompts[2], "compact clean repair") || !strings.Contains(runner.prompts[2], "never omit a required section") {
+		t.Fatalf("token-limit repair did not request compact complete output: %q", runner.prompts[2])
+	}
+}
+
+func TestRunRLMTokenLimitRepairPreservesExplicitOutputBudget(t *testing.T) {
+	runner := &scriptedRLMExecutor{
+		responses:     []string{"incomplete", "truncated review", "valid"},
+		finishReasons: []string{"stop", "length", "stop"},
+	}
+	framework := NewFramework(nil, nil).WithRLMRunner(runner)
+
+	result, err := framework.RunRLM(context.Background(), validatingRLMDefinition{}, RLMRunOpts{
+		UserPrompt:         "review the complete repository",
+		MaxRetries:         2,
+		ReasoningMaxTokens: 4096,
+		MaxOutputTokens:    32768,
+	})
+	if err != nil {
+		t.Fatalf("RunRLM() error = %v", err)
+	}
+	if result.Value != "valid" || result.Attempts != 3 {
+		t.Fatalf("result = %#v, want one clean repair after truncation", result)
+	}
+	if got, want := runner.maxOutput, []int{32768, 32768, 32768}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("output token budgets = %v, want %v", got, want)
 	}
 }
 
