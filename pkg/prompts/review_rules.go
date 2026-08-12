@@ -13,7 +13,7 @@ const (
 	// UNRESOLVED falsification conclusion to Remarks instead of Findings.
 	RuleDisprovedOrUnresolvedGoesToRemarks = "- If Falsification concludes DISPROVED or UNRESOLVED, move concerns to Remarks or omit them."
 
-	// RuleVerificationInFirstBatch requires required verification calls in
-	// the first tool-call batch instead of deferring them to synthesis.
-	RuleVerificationInFirstBatch = "- Put required verification in the first tool-call batch. Do not defer it until final synthesis."
+	// RuleUseHarnessVerificationEvidence keeps model-selected tools focused on
+	// analysis after Buckley has completed the deterministic verification plan.
+	RuleUseHarnessVerificationEvidence = "- Use Buckley's harness-collected verification evidence first. Do not repeat a passing command; rerun only failed or unavailable evidence when a focused retry can resolve it."
 )

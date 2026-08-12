@@ -197,20 +197,25 @@ func (e *Executor) Verify(parent context.Context, request Request) Result {
 	result.Command = resolved
 	result.Argv = append([]string{resolved}, plan.args...)
 
-	// The Codex sandbox is the preferred launcher whenever it is installed,
-	// independent of which model backend is driving the review: it is a pure
-	// OS-isolation launcher here, not a review model. When Codex is missing,
-	// a recognized Go build/test/check command still runs under a native,
-	// equally OS-enforced (bubblewrap) sandbox instead of failing outright.
-	codex, codexErr := e.resolveCodex()
+	// Go verification prefers the native bubblewrap launcher. Its isolated
+	// network namespace permits loopback sockets while denying external
+	// network access, so ordinary httptest and nested verifier tests remain
+	// usable. It also avoids a Codex subprocess and its preflight on every Go
+	// target. Other languages use the Codex sandbox, and Go falls back to it
+	// when bubblewrap is unavailable.
 	var bwrap string
 	var bwrapErr error
-	nativeGoEligible := codexErr != nil && language == LanguageGo
-	if nativeGoEligible {
+	if language == LanguageGo {
 		bwrap, bwrapErr = e.lookPath("bwrap")
 	}
-	if codexErr != nil && (!nativeGoEligible || bwrapErr != nil) {
-		if nativeGoEligible {
+	useNativeGo := language == LanguageGo && bwrapErr == nil
+	var codex string
+	var codexErr error
+	if !useNativeGo {
+		codex, codexErr = e.resolveCodex()
+	}
+	if !useNativeGo && codexErr != nil {
+		if language == LanguageGo {
 			result.Error = fmt.Sprintf(
 				"no verification sandbox executor is available: Codex was not found (%v) and the native Go sandbox (bwrap) was not found (%v)",
 				codexErr, bwrapErr)
@@ -253,18 +258,18 @@ func (e *Executor) Verify(parent context.Context, request Request) Result {
 	var output commandOutput
 	var runErr error
 	var launchFailure, launcherLabel string
-	if codexErr == nil {
-		launcherLabel = "Codex sandbox"
-		output, runErr, launchFailure = e.runViaCodex(ctx, codex, params)
-	} else {
+	if useNativeGo {
 		launcherLabel = "native Go sandbox"
 		output, runErr, launchFailure = e.runViaNativeGo(ctx, bwrap, params)
+	} else {
+		launcherLabel = "Codex sandbox"
+		output, runErr, launchFailure = e.runViaCodex(ctx, codex, params)
 	}
 	if launchFailure != "" {
 		result.Error = launchFailure
 		return result
 	}
-	return classifyVerificationRun(result, request, language, timeout, launcherLabel, output, runErr)
+	return classifyVerificationRun(result, request, language, timeout, launcherLabel, output, runErr, ctx.Err())
 }
 
 // resolveCodex resolves the configured or trusted Codex sandbox executable.
@@ -371,7 +376,11 @@ func (e *Executor) runViaNativeGo(ctx context.Context, bwrap string, params laun
 	for _, readRoot := range readRoots {
 		args = append(args, "--ro-bind", readRoot, readRoot)
 	}
-	for _, optional := range []string{"/lib", "/lib64"} {
+	// Usr-merged distributions expose these as root-level symlinks. Binding
+	// their resolved directories recreates the conventional paths inside the
+	// otherwise empty bubblewrap root, which Git local transports and script
+	// shebangs still invoke directly.
+	for _, optional := range []string{"/bin", "/sbin", "/lib", "/lib64"} {
 		args = append(args, "--ro-bind-try", optional, optional)
 	}
 	args = append(args,
@@ -416,23 +425,35 @@ func (e *Executor) runViaNativeGo(ctx context.Context, bwrap string, params laun
 // classifyVerificationRun applies the shared PASS/FAIL/UNAVAILABLE
 // classification to a completed sandbox launch, independent of which
 // launcher produced it.
-func classifyVerificationRun(result Result, request Request, language Language, timeout time.Duration, launcherLabel string, output commandOutput, runErr error) Result {
+func classifyVerificationRun(result Result, request Request, language Language, timeout time.Duration, launcherLabel string, output commandOutput, runErr, contextErr error) Result {
 	result.Stdout = output.Stdout
 	result.Stderr = output.Stderr
 	result.ExitCode = output.ExitCode
 	result.Duration = output.Duration
 	result.Truncated = output.Truncated
 	if runErr != nil {
-		if errors.Is(runErr, context.DeadlineExceeded) {
+		if errors.Is(contextErr, context.DeadlineExceeded) || errors.Is(runErr, context.DeadlineExceeded) {
 			result.ExitCode = 124
 			result.Status = StatusUnavailable
 			result.Error = fmt.Sprintf("verification timed out after %s", timeout)
+			return result
+		}
+		if errors.Is(contextErr, context.Canceled) || errors.Is(runErr, context.Canceled) {
+			result.ExitCode = -1
+			result.Status = StatusUnavailable
+			result.Error = "verification canceled before completion"
 			return result
 		}
 		// An ExitError means the OS sandbox ran and the verification command
 		// returned a real failure. Launcher/profile failures are unavailable.
 		var exitErr *exec.ExitError
 		if errors.As(runErr, &exitErr) {
+			if verificationOutputShowsSandboxRestriction(output.Stdout + "\n" + output.Stderr) {
+				result.Status = StatusUnavailable
+				result.ExitCode = -1
+				result.Error = "verification requires a capability denied by the review sandbox"
+				return result
+			}
 			result.Status = StatusFail
 			if result.ExitCode < 0 {
 				result.ExitCode = exitErr.ExitCode()
@@ -446,6 +467,12 @@ func classifyVerificationRun(result Result, request Request, language Language, 
 		return result
 	}
 	if output.ExitCode != 0 {
+		if verificationOutputShowsSandboxRestriction(output.Stdout + "\n" + output.Stderr) {
+			result.Status = StatusUnavailable
+			result.ExitCode = -1
+			result.Error = "verification requires a capability denied by the review sandbox"
+			return result
+		}
 		result.Status = StatusFail
 		result.Error = "verification command failed"
 		return result
@@ -457,6 +484,22 @@ func classifyVerificationRun(result Result, request Request, language Language, 
 	}
 	result.Status = StatusPass
 	return result
+}
+
+func verificationOutputShowsSandboxRestriction(output string) bool {
+	output = strings.ToLower(output)
+	for _, markers := range [][2]string{
+		{"listen tcp", "operation not permitted"},
+		{"socket", "operation not permitted"},
+		{"bwrap", "operation not permitted"},
+		{"namespace", "operation not permitted"},
+		{"netlink_route", "operation not permitted"},
+	} {
+		if strings.Contains(output, markers[0]) && strings.Contains(output, markers[1]) {
+			return true
+		}
+	}
+	return false
 }
 
 func (e *Executor) prepareRuntime() (string, func(), error) {

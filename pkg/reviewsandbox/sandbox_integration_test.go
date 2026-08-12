@@ -78,9 +78,6 @@ func TestBoundary(t *testing.T) {
 // no-network invariants as the Codex-launched sandbox. It exercises the real
 // bubblewrap launcher end to end; it does not mock lookPath or run.
 func TestNativeGoSandboxBoundary(t *testing.T) {
-	if _, err := trustedLookPath("codex"); err == nil {
-		t.Skip("a trusted Codex installation is present; it takes priority over the native Go sandbox")
-	}
 	if _, err := trustedLookPath("bwrap"); err != nil {
 		t.Skipf("trusted bubblewrap installation not found: %v", err)
 	}
@@ -116,6 +113,11 @@ func TestBoundary(t *testing.T) {
     if err := os.WriteFile("/tmp/native-sandbox-escape-probe", []byte("forbidden"), 0600); err == nil {
         t.Fatal("the shared /tmp root was writable outside the private runtime directory")
     }
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("isolated loopback listener was unavailable: %v", err)
+	}
+	listener.Close()
     connection, err := net.DialTimeout("tcp", "1.1.1.1:53", 250*time.Millisecond)
     if err == nil {
         connection.Close()

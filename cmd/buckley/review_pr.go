@@ -240,6 +240,9 @@ func runReviewPRCommand(args []string) error {
 		printReviewContextAudit(result.contextAudit)
 	}
 	if reviewErr != nil {
+		if !quietMode && result != nil {
+			printReviewAttemptCounts(result)
+		}
 		if result == nil || !result.incomplete || strings.TrimSpace(result.reviewText) == "" {
 			return reviewErr
 		}

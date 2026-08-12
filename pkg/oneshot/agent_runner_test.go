@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"m31labs.dev/buckley/pkg/model"
 	"m31labs.dev/buckley/pkg/rlm"
@@ -177,6 +178,87 @@ func TestReviewSnapshotRegistryExplicitlyRegistersSealedVerification(t *testing.
 	}
 	if got := registry.ToolKind("run_verification"); got != "execute" {
 		t.Fatalf("run_verification kind = %q, want execute", got)
+	}
+}
+
+func TestCollectAgentEvidenceRetainsSnapshotVerificationResult(t *testing.T) {
+	repo := t.TempDir()
+	runReviewRegistryGit(t, repo, "init", "-q")
+	runReviewRegistryGit(t, repo, "config", "user.email", "test@example.com")
+	runReviewRegistryGit(t, repo, "config", "user.name", "Test User")
+	for path, content := range map[string]string{
+		"go.mod":           "module example.test/evidence\n\ngo 1.24\n",
+		"evidence.go":      "package evidence\n\nfunc Value() int { return 1 }\n",
+		"evidence_test.go": "package evidence\n\nimport \"testing\"\n\nfunc TestValue(t *testing.T) { if Value() != 1 { t.Fatal(\"bad value\") } }\n",
+	} {
+		if err := os.WriteFile(filepath.Join(repo, path), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runReviewRegistryGit(t, repo, "add", ".")
+	runReviewRegistryGit(t, repo, "commit", "-m", "initial")
+
+	snapshot, err := model.CaptureReviewSnapshot(context.Background(), repo, model.ReviewSnapshotPolicy{Mode: model.ReviewSnapshotHead})
+	if err != nil {
+		t.Fatalf("CaptureReviewSnapshot: %v", err)
+	}
+	runner := &AgentRunner{}
+	calls, err := runner.CollectAgentEvidence(context.Background(), []AgentEvidenceRequest{{
+		Tool: "run_verification",
+		Parameters: map[string]any{
+			"kind": "test", "language": "go", "path": ".",
+		},
+	}}, AgentExecutionOpts{ReviewSnapshot: snapshot, VerificationTimeout: 5 * time.Second})
+	if err != nil {
+		t.Fatalf("CollectAgentEvidence: %v", err)
+	}
+	if len(calls) != 1 || calls[0].ID != "host-evidence-1" || calls[0].Name != "run_verification" {
+		t.Fatalf("calls = %#v, want one stable host evidence call", calls)
+	}
+	if status, _ := calls[0].Data["status"].(string); strings.TrimSpace(status) == "" {
+		t.Fatalf("host evidence discarded verification status: %#v", calls[0])
+	}
+}
+
+func TestCollectAgentEvidenceDoesNotReadUntrackedLiveSource(t *testing.T) {
+	repo := t.TempDir()
+	runReviewRegistryGit(t, repo, "init", "-q")
+	runReviewRegistryGit(t, repo, "config", "user.email", "test@example.com")
+	runReviewRegistryGit(t, repo, "config", "user.name", "Test User")
+	if err := os.WriteFile(filepath.Join(repo, "go.mod"), []byte("module example.test/evidence\n\ngo 1.24\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	basePath := filepath.Join(repo, "evidence.go")
+	if err := os.WriteFile(basePath, []byte("package evidence\n\nfunc Value() int { return 1 }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runReviewRegistryGit(t, repo, "add", ".")
+	runReviewRegistryGit(t, repo, "commit", "-m", "initial")
+	if err := os.WriteFile(basePath, []byte("package evidence\n\nfunc Value() int { return missing() }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "helper.go"), []byte("package evidence\n\nfunc missing() int { return 1 }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot, err := model.CaptureReviewSnapshot(context.Background(), repo, model.ReviewSnapshotPolicy{Mode: model.ReviewSnapshotTrackedWorktree})
+	if err != nil {
+		t.Fatalf("CaptureReviewSnapshot: %v", err)
+	}
+	calls, err := (&AgentRunner{}).CollectAgentEvidence(context.Background(), []AgentEvidenceRequest{{
+		Tool: "run_verification",
+		Parameters: map[string]any{
+			"kind": "test", "language": "go", "path": ".",
+		},
+	}}, AgentExecutionOpts{ReviewSnapshot: snapshot, VerificationTimeout: 5 * time.Second})
+	if err != nil {
+		t.Fatalf("CollectAgentEvidence: %v", err)
+	}
+	if len(calls) != 1 || calls[0].Success {
+		t.Fatalf("calls = %#v, want failed verification without untracked helper", calls)
+	}
+	if status, _ := calls[0].Data["status"].(string); status != "FAIL" {
+		t.Fatalf("status = %q, want FAIL: %#v", status, calls[0])
 	}
 }
 

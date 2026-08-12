@@ -21,6 +21,7 @@ const (
 	evidenceRepairExplorationTimeout = 2 * time.Minute
 	evidenceRepairSynthesisLead      = 30 * time.Second
 	textRepairReasoningMaxTokens     = 512
+	cleanRepairOutputTokenBudget     = 131072
 )
 
 // Framework provides a single execution engine for all oneshot commands.
@@ -40,6 +41,13 @@ type Framework struct {
 // this narrow interface makes validation/retry behavior independently testable.
 type AgentExecutor interface {
 	Run(ctx context.Context, systemPrompt, task string, allowedTools []string, opts AgentExecutionOpts) (*AgentResult, error)
+}
+
+// AgentEvidenceCollector executes a definition's deterministic evidence plan
+// without relying on model tool selection. Production AgentRunner implements
+// this against the same immutable snapshot registry used by review agents.
+type AgentEvidenceCollector interface {
+	CollectAgentEvidence(ctx context.Context, requests []AgentEvidenceRequest, opts AgentExecutionOpts) ([]AgentToolCall, error)
 }
 
 // AgentExecutionOpts is immutable execution metadata shared by every sub-agent
@@ -143,6 +151,17 @@ type RunResult struct {
 
 	// IncompleteReason records why validation could not finish.
 	IncompleteReason string
+
+	// HostEvidence contains deterministic evidence collected once by the
+	// framework before model synthesis. It remains authoritative across every
+	// primary and approval-critic repair attempt.
+	HostEvidence []AgentToolCall
+
+	// ToolEvidence and CommandEvidence retain every completed evidence-bearing
+	// call across validation repairs. Callers can salvage or persist this work
+	// even when a later provider response is incomplete.
+	ToolEvidence    []AgentToolCall
+	CommandEvidence []model.CommandExecutionEvidence
 }
 
 // Run executes a oneshot command using the unified pipeline:
@@ -319,11 +338,12 @@ type AgentRunOpts struct {
 
 // RunAgent executes an agent-based oneshot command:
 //  1. Validate the tool agent runner is configured
-//  2. Execute the sub-agent with multi-turn tool access
-//  3. Parse the free-form response into typed output
-//  4. Retry incomplete or inconsistent results through semantic validation
-//  5. Send validated approvals through an independent critic when required
-//  6. Return the final result with transparency and attempt counts
+//  2. Collect definition-required evidence against the immutable snapshot
+//  3. Execute the sub-agent with multi-turn tool access
+//  4. Parse the free-form response into typed output
+//  5. Retry incomplete or inconsistent results without discarding evidence
+//  6. Send validated approvals through an independent critic when required
+//  7. Return the final result with transparency and attempt counts
 func (f *Framework) RunAgent(ctx context.Context, def AgentDefinition, opts AgentRunOpts) (*RunResult, error) {
 	if f.agentRunner == nil {
 		return nil, fmt.Errorf("agent runner is required for command %q (configure with WithAgentRunner)", def.Name())
@@ -382,6 +402,16 @@ func (f *Framework) RunAgent(ctx context.Context, def AgentDefinition, opts Agen
 		executionOpts.MaxIterations = budget.MaxAgentIterations()
 	}
 
+	hostEvidence, evidencePrompt, err := f.collectPlannedAgentEvidence(ctx, def, opts, executionOpts)
+	if err != nil {
+		return result, err
+	}
+	result.HostEvidence = append([]AgentToolCall(nil), hostEvidence...)
+	if evidencePrompt != "" {
+		audit.Add("host verification evidence", contextEstimateTokens(evidencePrompt))
+		basePrompt = strings.TrimSpace(basePrompt) + "\n\n" + evidencePrompt
+	}
+
 	primaryBudget := opts.MaxCostUSD
 	if primaryBudget > 0 && opts.ApprovalCriticReserveUSD > 0 {
 		primaryBudget -= opts.ApprovalCriticReserveUSD
@@ -391,10 +421,13 @@ func (f *Framework) RunAgent(ctx context.Context, def AgentDefinition, opts Agen
 	}
 	executionOpts.MaxCostUSD = primaryBudget
 	primaryCtx, cancelPrimary := contextWithReservedTime(ctx, opts.ApprovalCriticReserve)
-	primary := f.runValidatedAgentPhase(primaryCtx, f.agentRunner, def, def.SystemPrompt(), basePrompt, maxRetries, "primary", executionOpts)
+	primary := f.runValidatedAgentPhase(primaryCtx, f.agentRunner, def, def.SystemPrompt(), basePrompt, maxRetries, "primary", executionOpts, hostEvidence)
 	cancelPrimary()
 	result.Attempts = primary.attempts
 	result.PrimaryAttempts = primary.attempts
+	result.ToolEvidence = append([]AgentToolCall(nil), hostEvidence...)
+	result.ToolEvidence = append(result.ToolEvidence, primary.toolCalls...)
+	result.CommandEvidence = append([]model.CommandExecutionEvidence(nil), primary.commandEvidence...)
 	traceAttempts := append([]transparency.TraceAttempt(nil), primary.traces...)
 	result.Trace = transparency.AggregateTraceAttempts(traceAttempts)
 	if primary.err != nil {
@@ -453,9 +486,12 @@ func (f *Framework) RunAgent(ctx context.Context, def AgentDefinition, opts Agen
 		maxRetries,
 		"approval critic",
 		criticExecutionOpts,
+		hostEvidence,
 	)
 	result.Attempts += critic.attempts
 	result.CriticAttempts = critic.attempts
+	result.ToolEvidence = append(result.ToolEvidence, critic.toolCalls...)
+	result.CommandEvidence = append(result.CommandEvidence, critic.commandEvidence...)
 	traceAttempts = append(traceAttempts, critic.traces...)
 	result.Trace = transparency.AggregateTraceAttempts(traceAttempts)
 	if critic.err != nil {
@@ -502,11 +538,26 @@ func contextWithReservedTime(ctx context.Context, reserve time.Duration) (contex
 }
 
 type agentPhaseResult struct {
-	value    any
-	traces   []transparency.TraceAttempt
-	attempts int
-	cost     float64
-	err      error
+	value           any
+	traces          []transparency.TraceAttempt
+	toolCalls       []AgentToolCall
+	commandEvidence []model.CommandExecutionEvidence
+	attempts        int
+	cost            float64
+	err             error
+}
+
+type agentPhaseEvidence struct {
+	toolCalls       []AgentToolCall
+	commandEvidence []model.CommandExecutionEvidence
+}
+
+type agentAttemptValidation struct {
+	value       any
+	updateValue bool
+	err         error
+	retryMode   agentValidationRetryMode
+	cleanRepair bool
 }
 
 type agentValidationRetryMode uint8
@@ -527,64 +578,27 @@ func (f *Framework) runValidatedAgentPhase(
 	maxRetries int,
 	phase string,
 	executionOpts AgentExecutionOpts,
+	hostEvidence []AgentToolCall,
 ) agentPhaseResult {
 	userPrompt := basePrompt
 	var result agentPhaseResult
 	var lastErr error
+	evidence := agentPhaseEvidence{toolCalls: append([]AgentToolCall(nil), hostEvidence...)}
 	retryMode := agentValidationRetryFull
 	attemptLimit := maxRetries
 	cleanRepairUsed := false
 
 	for attempt := 0; attempt < attemptLimit; attempt++ {
-		traceIndex := -1
-		attemptOpts := executionOpts
-		if attempt > 0 {
-			switch retryMode {
-			case agentValidationRetryText, agentValidationRetryClean:
-				attemptOpts.MaxIterations = 1
-				attemptOpts.MaxToolCalls = 0
-				attemptOpts.ExplorationTimeout = 0
-				attemptOpts.ReasoningMaxTokens = boundedPositiveLimit(
-					attemptOpts.ReasoningMaxTokens,
-					textRepairReasoningMaxTokens,
-				)
-				// Keep an explicit report budget during repair. The old path
-				// recomputed the total ceiling from the 512-token repair reasoning
-				// cap and truncated long project reports at 4,608 tokens.
-			case agentValidationRetryEvidence:
-				attemptOpts.MaxIterations = boundedPositiveLimit(attemptOpts.MaxIterations, evidenceRepairMaxIterations)
-				if attemptOpts.MaxToolCalls > 0 {
-					attemptOpts.MaxToolCalls = boundedPositiveLimit(attemptOpts.MaxToolCalls, evidenceRepairMaxToolCalls)
-				}
-				attemptOpts.ExplorationTimeout = boundedPositiveDuration(
-					attemptOpts.ExplorationTimeout,
-					evidenceRepairExplorationTimeout,
-				)
-				attemptOpts.SynthesisLead = boundedPositiveDuration(
-					attemptOpts.SynthesisLead,
-					evidenceRepairSynthesisLead,
-				)
-			}
-		}
-		if executionOpts.MaxCostUSD > 0 {
-			attemptOpts.MaxCostUSD = executionOpts.MaxCostUSD - result.cost
-			if attemptOpts.MaxCostUSD <= 0 {
-				result.err = fmt.Errorf("agent %s cost budget exhausted for %q after %d attempts", phase, def.Name(), result.attempts)
-				return result
-			}
+		attemptOpts, err := agentPhaseAttemptOptions(executionOpts, retryMode, attempt, result.cost)
+		if err != nil {
+			result.err = fmt.Errorf("agent %s cost budget exhausted for %q after %d attempts", phase, def.Name(), result.attempts)
+			return result
 		}
 		result.attempts++
-		agentResult, err := runner.Run(ctx, systemPrompt, userPrompt, def.AllowedTools(), attemptOpts)
-		if agentResult != nil && agentResult.Trace != nil {
-			result.cost += agentResult.Trace.Cost
-			result.traces = append(result.traces, transparency.TraceAttempt{
-				Phase:   phase,
-				Attempt: attempt + 1,
-				Trace:   agentResult.Trace,
-			})
-			traceIndex = len(result.traces) - 1
-		}
-		if err != nil {
+		agentResult, runErr := runner.Run(ctx, systemPrompt, userPrompt, def.AllowedTools(), attemptOpts)
+		validationExecution := evidence.accumulate(&result, agentResult)
+		traceIndex := recordAgentPhaseTrace(&result, agentResult, phase, attempt+1)
+		if runErr != nil {
 			if agentResult != nil && strings.TrimSpace(agentResult.Response) != "" {
 				// Preserve parseable partial work for callers that explicitly
 				// handle incomplete results. Keep an earlier rejected response
@@ -593,53 +607,22 @@ func (f *Framework) runValidatedAgentPhase(
 					result.value, _ = def.ParseResult(agentResult.Response)
 				}
 			}
-			result.err = fmt.Errorf("agent %s execution failed for %q: %w", phase, def.Name(), err)
+			result.err = fmt.Errorf("agent %s execution failed for %q: %w", phase, def.Name(), runErr)
 			return result
 		}
-		if agentResult == nil {
-			lastErr = fmt.Errorf("agent runner returned no result")
-			retryMode = agentValidationRetryFull
-		} else if incompleteErr := incompleteAgentOutputError(agentResult); incompleteErr != nil {
-			// Preserve the rejected value for diagnostics, but never validate or
-			// accept an incomplete provider response.
-			result.value, _ = def.ParseResult(agentResult.Response)
-			lastErr = incompleteErr
-			retryMode = agentValidationRetryClean
+		validation := validateAgentPhaseAttempt(def, agentResult, validationExecution)
+		if validation.updateValue {
+			result.value = validation.value
+		}
+		lastErr = validation.err
+		retryMode = validation.retryMode
+		if validation.cleanRepair {
 			if cleanRepairUsed {
 				result.err = agentValidationFailure(phase, def.Name(), result.attempts, lastErr)
 				return result
 			}
 			cleanRepairUsed = true
-			if requiredAttempts := attempt + 3; attemptLimit < requiredAttempts {
-				attemptLimit = requiredAttempts
-			}
-		} else {
-			result.value, lastErr = def.ParseResult(agentResult.Response)
-			if lastErr != nil {
-				retryMode = agentValidationRetryText
-			}
-			if lastErr == nil {
-				if validator, ok := def.(AgentResultValidator); ok {
-					lastErr = validator.ValidateResult(result.value)
-					if lastErr != nil {
-						retryMode = agentValidationRetryText
-						if IsAgentExecutionEvidenceRequired(lastErr) {
-							retryMode = agentValidationRetryEvidence
-						}
-					}
-				}
-			}
-			if lastErr == nil {
-				if validator, ok := def.(AgentExecutionValidator); ok {
-					lastErr = validator.ValidateAgentExecution(result.value, agentResult)
-					if lastErr != nil {
-						retryMode = agentValidationRetryText
-						if IsAgentExecutionEvidenceRequired(lastErr) {
-							retryMode = agentValidationRetryEvidence
-						}
-					}
-				}
-			}
+			attemptLimit = max(attemptLimit, attempt+3)
 		}
 		if lastErr == nil {
 			return result
@@ -651,6 +634,7 @@ func (f *Framework) runValidatedAgentPhase(
 		userPrompt = buildAgentValidationRetryPrompt(
 			basePrompt,
 			agentResult,
+			validationExecution,
 			phase,
 			lastErr,
 			retryMode,
@@ -659,6 +643,101 @@ func (f *Framework) runValidatedAgentPhase(
 
 	result.err = agentValidationFailure(phase, def.Name(), result.attempts, lastErr)
 	return result
+}
+
+func agentPhaseAttemptOptions(base AgentExecutionOpts, retryMode agentValidationRetryMode, attempt int, spentCost float64) (AgentExecutionOpts, error) {
+	opts := base
+	if attempt > 0 {
+		switch retryMode {
+		case agentValidationRetryText, agentValidationRetryClean:
+			opts.MaxIterations = 1
+			opts.MaxToolCalls = 0
+			opts.ExplorationTimeout = 0
+			opts.ReasoningMaxTokens = boundedPositiveLimit(opts.ReasoningMaxTokens, textRepairReasoningMaxTokens)
+			if retryMode == agentValidationRetryClean {
+				// The provider has already demonstrated that the original ceiling
+				// cannot hold a complete report. A clean repair is prose-only and
+				// receives a larger explicit ceiling; AgentRunner still clamps it
+				// to the provider's advertised maximum.
+				opts.MaxOutputTokens = max(opts.MaxOutputTokens, cleanRepairOutputTokenBudget)
+			}
+			// Keep the explicit report budget. Recomputing it from the repair
+			// reasoning ceiling truncates otherwise valid long reviews.
+		case agentValidationRetryEvidence:
+			opts.MaxIterations = boundedPositiveLimit(opts.MaxIterations, evidenceRepairMaxIterations)
+			if opts.MaxToolCalls > 0 {
+				opts.MaxToolCalls = boundedPositiveLimit(opts.MaxToolCalls, evidenceRepairMaxToolCalls)
+			}
+			opts.ExplorationTimeout = boundedPositiveDuration(opts.ExplorationTimeout, evidenceRepairExplorationTimeout)
+			opts.SynthesisLead = boundedPositiveDuration(opts.SynthesisLead, evidenceRepairSynthesisLead)
+		}
+	}
+	if base.MaxCostUSD <= 0 {
+		return opts, nil
+	}
+	opts.MaxCostUSD = base.MaxCostUSD - spentCost
+	if opts.MaxCostUSD <= 0 {
+		return AgentExecutionOpts{}, fmt.Errorf("cost budget exhausted")
+	}
+	return opts, nil
+}
+
+func (e *agentPhaseEvidence) accumulate(result *agentPhaseResult, current *AgentResult) *AgentResult {
+	if current != nil {
+		e.toolCalls = append(e.toolCalls, current.ToolCalls...)
+		e.commandEvidence = append(e.commandEvidence, current.ExecutionEvidence...)
+		result.toolCalls = append(result.toolCalls, current.ToolCalls...)
+		result.commandEvidence = append(result.commandEvidence, current.ExecutionEvidence...)
+	}
+	return agentResultWithAccumulatedEvidence(current, e.toolCalls, e.commandEvidence)
+}
+
+func recordAgentPhaseTrace(result *agentPhaseResult, current *AgentResult, phase string, attempt int) int {
+	if current == nil || current.Trace == nil {
+		return -1
+	}
+	result.cost += current.Trace.Cost
+	result.traces = append(result.traces, transparency.TraceAttempt{
+		Phase:   phase,
+		Attempt: attempt,
+		Trace:   current.Trace,
+	})
+	return len(result.traces) - 1
+}
+
+func validateAgentPhaseAttempt(def AgentDefinition, current, execution *AgentResult) agentAttemptValidation {
+	if current == nil {
+		return agentAttemptValidation{err: fmt.Errorf("agent runner returned no result"), retryMode: agentValidationRetryFull}
+	}
+	if err := incompleteAgentOutputError(current); err != nil {
+		value, _ := def.ParseResult(current.Response)
+		return agentAttemptValidation{
+			value:       value,
+			updateValue: true,
+			err:         err,
+			retryMode:   agentValidationRetryClean,
+			cleanRepair: true,
+		}
+	}
+
+	value, err := def.ParseResult(current.Response)
+	if err == nil {
+		if validator, ok := def.(AgentResultValidator); ok {
+			err = validator.ValidateResult(value)
+		}
+	}
+	if err == nil {
+		if validator, ok := def.(AgentExecutionValidator); ok {
+			err = validator.ValidateAgentExecution(value, execution)
+		}
+	}
+	retryMode := agentValidationRetryText
+	if err == nil {
+		retryMode = agentValidationRetryFull
+	} else if IsAgentExecutionEvidenceRequired(err) {
+		retryMode = agentValidationRetryEvidence
+	}
+	return agentAttemptValidation{value: value, updateValue: true, err: err, retryMode: retryMode}
 }
 
 func agentValidationFailure(phase, definition string, attempts int, err error) error {
@@ -714,14 +793,21 @@ func endsWithToolCallMarkup(response string) bool {
 func buildAgentValidationRetryPrompt(
 	basePrompt string,
 	previous *AgentResult,
+	accumulatedEvidence *AgentResult,
 	phase string,
 	validationErr error,
 	retryMode agentValidationRetryMode,
 ) string {
+	withEvidence := func(prompt string) string {
+		if evidence := formatAccumulatedAgentEvidence(accumulatedEvidence); evidence != "" {
+			return prompt + "\n\n" + evidence
+		}
+		return prompt
+	}
 	rejection := "QUALITY GATE: The previous " + phase + " review was rejected: " +
 		strings.TrimSpace(validationErr.Error()) + ". "
 	if retryMode == agentValidationRetryText && previous != nil && strings.TrimSpace(previous.Response) != "" {
-		return basePrompt + "\n\n" + rejection +
+		return withEvidence(basePrompt + "\n\n" + rejection +
 			"First apply every exact correction named in the rejection, then repair format or schema issues. " +
 			"If one finding ID appears in both Blockers and Suggestions, preserve the finding and its evidence; remove it only from the list that conflicts with its severity (CRITICAL or MAJOR means Blockers, MINOR means Suggestions). " +
 			"If coverage ledger paths differ, preserve valid File entries, add every exact missing path, remove every exact unexpected path, and reconcile the final ledger against the rejection. " +
@@ -735,14 +821,14 @@ func buildAgentValidationRetryPrompt(
 			"For that verdict, write `- **Recommendation**: NEEDS DISCUSSION` and `- **Blockers**: NONE`. Never put NEEDS DISCUSSION in Blockers. " +
 			"Never return findings with a DISPROVED or UNRESOLVED conclusion. " +
 			"Return one complete review in the required format.\n\nPRIOR REVIEW:\n" +
-			previous.Response
+			previous.Response)
 	}
 	if retryMode == agentValidationRetryEvidence && previous != nil && strings.TrimSpace(previous.Response) != "" {
-		return basePrompt + "\n\n" + rejection +
+		return withEvidence(basePrompt + "\n\n" + rejection +
 			"Gather only the missing evidence with the available tools. Run each required verification before synthesis. " +
 			"Do not repeat inspection unless new evidence contradicts the prior review. " +
 			"Return one complete review in the required format.\n\nPRIOR REVIEW:\n" +
-			previous.Response
+			previous.Response)
 	}
 	if retryMode == agentValidationRetryClean && previous != nil && strings.TrimSpace(previous.Response) != "" {
 		rejected := sanitizeCleanRepairResponse(previous.Response)
@@ -755,12 +841,12 @@ func buildAgentValidationRetryPrompt(
 				"Do not emit tool-call markup, tool-call JSON, progress text, or a plan. " +
 				"Start with the required review format and return the complete final review."
 		}
-		return basePrompt + "\n\n" + rejection +
+		return withEvidence(basePrompt + "\n\n" + rejection +
 			repairInstruction + "\n\nREJECTED RESPONSE:\n" +
-			rejected
+			rejected)
 	}
-	return basePrompt + "\n\n" + rejection +
-		"Re-run the review from the supplied evidence and return a complete, internally consistent review in the required format."
+	return withEvidence(basePrompt + "\n\n" + rejection +
+		"Re-run the review from the supplied evidence and return a complete, internally consistent review in the required format.")
 }
 
 func sanitizeCleanRepairResponse(response string) string {

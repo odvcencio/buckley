@@ -2,8 +2,10 @@ package oneshot
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"m31labs.dev/buckley/pkg/model"
@@ -292,6 +294,119 @@ func (r *AgentRunner) Run(ctx context.Context, systemPrompt, task string, allowe
 		return result, fmt.Errorf("execute task: %w", executionErr)
 	}
 	return result, nil
+}
+
+// CollectAgentEvidence executes a host-owned evidence plan against the same
+// immutable snapshot boundary used by the review agent. The model never has to
+// remember to request these calls, and later validation repairs can reuse the
+// results without rerunning them.
+func (r *AgentRunner) CollectAgentEvidence(ctx context.Context, requests []AgentEvidenceRequest, opts AgentExecutionOpts) ([]AgentToolCall, error) {
+	if len(requests) == 0 {
+		return nil, nil
+	}
+	if opts.ReviewSnapshot == nil {
+		return nil, fmt.Errorf("agent evidence collection requires an immutable review snapshot")
+	}
+
+	workDir, cleanup, err := model.PrepareReviewWorkspace(ctx, opts.ReviewSnapshot)
+	if err != nil {
+		return nil, fmt.Errorf("materialize agent evidence snapshot: %w", err)
+	}
+	defer cleanup()
+	root, err := model.ReviewWorkspaceRepositoryRoot(ctx, workDir)
+	if err != nil {
+		return nil, fmt.Errorf("resolve agent evidence snapshot root: %w", err)
+	}
+
+	allowedTools := make([]string, 0, len(requests))
+	seenTools := make(map[string]struct{}, len(requests))
+	for _, request := range requests {
+		name := strings.TrimSpace(request.Tool)
+		if name == "" {
+			return nil, fmt.Errorf("agent evidence request tool is required")
+		}
+		if _, seen := seenTools[name]; seen {
+			continue
+		}
+		seenTools[name] = struct{}{}
+		allowedTools = append(allowedTools, name)
+	}
+
+	codexCommand := ""
+	if r != nil && r.models != nil {
+		codexCommand = r.models.ReviewSandboxCommand()
+	}
+	registry, err := newReviewSnapshotRegistryWithLimits(root, allowedTools, opts.VerificationTimeout, codexCommand)
+	if err != nil {
+		return nil, fmt.Errorf("create agent evidence registry: %w", err)
+	}
+	defer func() { _ = registry.Close() }()
+
+	calls := make([]AgentToolCall, len(requests))
+	jobs := make(chan int)
+	workers := min(len(requests), 4)
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for range workers {
+		go func() {
+			defer wg.Done()
+			for index := range jobs {
+				calls[index] = collectAgentEvidenceRequest(ctx, registry, index, requests[index])
+			}
+		}()
+	}
+	for index := range requests {
+		jobs <- index
+	}
+	close(jobs)
+	wg.Wait()
+
+	verifyCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	verifyErr := model.VerifyReviewWorkspace(verifyCtx, workDir, opts.ReviewSnapshot)
+	cancel()
+	if verifyErr != nil {
+		return nil, fmt.Errorf("agent evidence collection changed the captured source snapshot: %w", verifyErr)
+	}
+	return calls, nil
+}
+
+func collectAgentEvidenceRequest(ctx context.Context, registry *tool.Registry, index int, request AgentEvidenceRequest) AgentToolCall {
+	callID := fmt.Sprintf("host-evidence-%d", index+1)
+	parameters := make(map[string]any, len(request.Parameters)+1)
+	for key, value := range request.Parameters {
+		parameters[key] = value
+	}
+	arguments, _ := json.Marshal(request.Parameters)
+	parameters[tool.ToolCallIDParam] = callID
+
+	started := time.Now()
+	result, err := registry.ExecuteWithContext(ctx, strings.TrimSpace(request.Tool), parameters)
+	call := AgentToolCall{
+		ID:        callID,
+		Name:      strings.TrimSpace(request.Tool),
+		Arguments: string(arguments),
+		Duration:  time.Since(started),
+	}
+	if err != nil {
+		call.Result = fmt.Sprintf("execution error: %v", err)
+		return call
+	}
+	if result == nil {
+		call.Result = "execution returned no result"
+		return call
+	}
+	call.Success = result.Success
+	call.Data = make(map[string]any, len(result.Data))
+	for key, value := range result.Data {
+		call.Data[key] = value
+	}
+	encoded, encodeErr := tool.ToModelOutput(result)
+	if encodeErr != nil {
+		call.Result = fmt.Sprintf("encode evidence result: %v", encodeErr)
+		return call
+	}
+	call.Result = encoded
+	return call
 }
 
 func convertAgentToolCalls(calls []rlm.SubAgentToolCall) []AgentToolCall {

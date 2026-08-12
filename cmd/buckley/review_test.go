@@ -295,11 +295,18 @@ func TestReviewResultFromAgentExposesPrimaryAndCriticAttempts(t *testing.T) {
 		Attempts:        3,
 		PrimaryAttempts: 1,
 		CriticAttempts:  2,
+		HostEvidence: []oneshot.AgentToolCall{
+			{Name: "run_verification", Success: true},
+			{Name: "run_verification", Success: false},
+		},
 	}, nil)
 
 	if got.attempts != 3 || got.primary != 1 || got.criticAttempts != 2 {
 		t.Fatalf("attempt counts = total:%d primary:%d critic:%d, want 3/1/2",
 			got.attempts, got.primary, got.criticAttempts)
+	}
+	if got.hostEvidence != 2 || got.hostPasses != 1 {
+		t.Fatalf("host evidence = %d total/%d passed, want 2/1", got.hostEvidence, got.hostPasses)
 	}
 }
 
@@ -336,8 +343,15 @@ func TestReviewValidationRepairLinesExplainBoundedRetries(t *testing.T) {
 }
 
 func TestReviewResultFromAgentPreservesIncompleteState(t *testing.T) {
+	exitCode := 0
 	got := reviewResultFromAgent(&oneshot.RunResult{
 		Value: &commands.ReviewAgentResult{Review: "partial review"},
+		ToolEvidence: []oneshot.AgentToolCall{{
+			ID: "host-evidence-1", Name: "run_verification", Arguments: `{"kind":"test"}`, Result: "status PASS", Success: true,
+		}},
+		CommandEvidence: []model.CommandExecutionEvidence{{
+			Command: "go test ./pkg/oneshot", Status: "completed", ExitCode: &exitCode, AggregatedOutput: "ok pkg/oneshot",
+		}},
 		Trace: &transparency.Trace{Attempts: []transparency.TraceAttempt{{
 			Phase:   "primary",
 			Attempt: 1,
@@ -355,6 +369,9 @@ func TestReviewResultFromAgentPreservesIncompleteState(t *testing.T) {
 	for _, want := range []string{
 		"Incomplete review",
 		"partial review",
+		"Preserved execution evidence",
+		"host-evidence-1",
+		"go test ./pkg/oneshot",
 		"Review attempt diagnostics",
 		"Finish reason: `stop`",
 		"120 input and 30 output",

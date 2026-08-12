@@ -58,6 +58,11 @@ type scriptedAgentExecutor struct {
 	maxCosts           []float64
 	finishReasons      []string
 	deadlines          []time.Time
+	toolCallBatches    [][]AgentToolCall
+	executionBatches   [][]model.CommandExecutionEvidence
+	evidenceRequests   [][]AgentEvidenceRequest
+	hostEvidence       []AgentToolCall
+	hostEvidenceErr    error
 }
 
 func (s *scriptedAgentExecutor) Run(ctx context.Context, system string, task string, allowedTools []string, opts AgentExecutionOpts) (*AgentResult, error) {
@@ -98,7 +103,29 @@ func (s *scriptedAgentExecutor) Run(ctx context.Context, system string, task str
 		finishReason = s.finishReasons[0]
 		s.finishReasons = s.finishReasons[1:]
 	}
-	return &AgentResult{Response: response, FinishReason: finishReason, Trace: trace, ProviderID: provider}, nil
+	var toolCalls []AgentToolCall
+	if len(s.toolCallBatches) > 0 {
+		toolCalls = s.toolCallBatches[0]
+		s.toolCallBatches = s.toolCallBatches[1:]
+	}
+	var executionEvidence []model.CommandExecutionEvidence
+	if len(s.executionBatches) > 0 {
+		executionEvidence = s.executionBatches[0]
+		s.executionBatches = s.executionBatches[1:]
+	}
+	return &AgentResult{
+		Response:          response,
+		FinishReason:      finishReason,
+		Trace:             trace,
+		ProviderID:        provider,
+		ToolCalls:         toolCalls,
+		ExecutionEvidence: executionEvidence,
+	}, nil
+}
+
+func (s *scriptedAgentExecutor) CollectAgentEvidence(_ context.Context, requests []AgentEvidenceRequest, _ AgentExecutionOpts) ([]AgentToolCall, error) {
+	s.evidenceRequests = append(s.evidenceRequests, append([]AgentEvidenceRequest(nil), requests...))
+	return append([]AgentToolCall(nil), s.hostEvidence...), s.hostEvidenceErr
 }
 
 type validatingAgentDefinition struct{}
@@ -109,7 +136,71 @@ type textRepairExecutionValidatingAgentDefinition struct{ validatingAgentDefinit
 
 type budgetedAgentDefinition struct{ validatingAgentDefinition }
 
+type plannedEvidenceAgentDefinition struct{ validatingAgentDefinition }
+
+type accumulatedEvidenceAgentDefinition struct{ validatingAgentDefinition }
+
+type multiRequestEvidenceAgentDefinition struct{ plannedEvidenceAgentDefinition }
+
+type accumulatedNativeEvidenceAgentDefinition struct{ validatingAgentDefinition }
+
 func (budgetedAgentDefinition) MaxAgentIterations() int { return 8 }
+
+func (plannedEvidenceAgentDefinition) AgentEvidenceRequests() []AgentEvidenceRequest {
+	return []AgentEvidenceRequest{{
+		Tool: "run_verification",
+		Parameters: map[string]any{
+			"kind":     "test",
+			"language": "go",
+			"path":     "pkg/oneshot",
+		},
+	}}
+}
+
+func (multiRequestEvidenceAgentDefinition) AgentEvidenceRequests() []AgentEvidenceRequest {
+	requests := (plannedEvidenceAgentDefinition{}).AgentEvidenceRequests()
+	return append(requests, AgentEvidenceRequest{
+		Tool: "run_verification",
+		Parameters: map[string]any{
+			"kind":     "test",
+			"language": "go",
+			"path":     "pkg/model",
+		},
+	})
+}
+
+func (plannedEvidenceAgentDefinition) ValidateAgentExecution(_ any, execution *AgentResult) error {
+	if !agentExecutionHasSuccessfulTool(execution, "run_verification") {
+		return RequireAgentExecutionEvidence(fmt.Errorf("missing host verification evidence"))
+	}
+	return nil
+}
+
+func (accumulatedEvidenceAgentDefinition) ValidateAgentExecution(_ any, execution *AgentResult) error {
+	if !agentExecutionHasSuccessfulTool(execution, "run_verification") {
+		return RequireAgentExecutionEvidence(fmt.Errorf("earlier verification evidence was discarded"))
+	}
+	return nil
+}
+
+func (accumulatedNativeEvidenceAgentDefinition) ValidateAgentExecution(_ any, execution *AgentResult) error {
+	if execution == nil || len(execution.ExecutionEvidence) == 0 {
+		return RequireAgentExecutionEvidence(fmt.Errorf("earlier native verification evidence was discarded"))
+	}
+	return nil
+}
+
+func agentExecutionHasSuccessfulTool(execution *AgentResult, name string) bool {
+	if execution == nil {
+		return false
+	}
+	for _, call := range execution.ToolCalls {
+		if call.Name == name && call.Success {
+			return true
+		}
+	}
+	return false
+}
 
 func (executionValidatingAgentDefinition) ValidateAgentExecution(_ any, execution *AgentResult) error {
 	if execution == nil || execution.ProviderID != "verified" {
@@ -568,7 +659,30 @@ func TestRunAgentTokenLimitRepairPreservesExplicitOutputBudget(t *testing.T) {
 	if result.Value != "valid" || result.Attempts != 3 {
 		t.Fatalf("result = %#v, want one clean repair after truncation", result)
 	}
-	if got, want := runner.maxOutput, []int{32768, 32768, 32768}; !reflect.DeepEqual(got, want) {
+	if got, want := runner.maxOutput, []int{32768, 32768, cleanRepairOutputTokenBudget}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("output token budgets = %v, want %v", got, want)
+	}
+}
+
+func TestRunAgentTokenLimitRepairEscapesReasoningDerivedCeiling(t *testing.T) {
+	runner := &scriptedAgentExecutor{
+		responses:     []string{"truncated review", "valid"},
+		finishReasons: []string{"length", "stop"},
+	}
+	framework := NewFramework(nil, nil).WithAgentRunner(runner)
+
+	result, err := framework.RunAgent(context.Background(), validatingAgentDefinition{}, AgentRunOpts{
+		UserPrompt:         "review the complete repository",
+		MaxRetries:         1,
+		ReasoningMaxTokens: 4096,
+	})
+	if err != nil {
+		t.Fatalf("RunAgent() error = %v", err)
+	}
+	if result.Value != "valid" || result.Attempts != 2 {
+		t.Fatalf("result = %#v, want a completed clean repair", result)
+	}
+	if got, want := runner.maxOutput, []int{0, cleanRepairOutputTokenBudget}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("output token budgets = %v, want %v", got, want)
 	}
 }
@@ -580,6 +694,7 @@ func TestBuildAgentValidationRetryPromptHardensTextRepair(t *testing.T) {
 	prompt := buildAgentValidationRetryPrompt(
 		"review this exact diff",
 		previous,
+		nil,
 		"primary",
 		validationErr,
 		agentValidationRetryText,
@@ -603,6 +718,139 @@ func TestBuildAgentValidationRetryPromptHardensTextRepair(t *testing.T) {
 	}
 	if !strings.Contains(prompt, "review this exact diff") {
 		t.Fatalf("text repair prompt omitted the original evidence: %q", prompt)
+	}
+}
+
+func TestRunAgentCollectsRequiredEvidenceBeforeModelSynthesis(t *testing.T) {
+	hostCall := AgentToolCall{
+		ID:        "host-evidence-1",
+		Name:      "run_verification",
+		Arguments: `{"kind":"test","language":"go","path":"pkg/oneshot"}`,
+		Result:    `success: true status: PASS`,
+		Success:   true,
+	}
+	runner := &scriptedAgentExecutor{
+		responses:    []string{"valid"},
+		hostEvidence: []AgentToolCall{hostCall},
+	}
+	framework := NewFramework(nil, nil).WithAgentRunner(runner)
+
+	result, err := framework.RunAgent(context.Background(), plannedEvidenceAgentDefinition{}, AgentRunOpts{
+		UserPrompt:           "review this exact diff",
+		MaxRetries:           1,
+		MaxVerificationCalls: 1,
+		ReviewSnapshot:       testReviewSnapshot(t, model.ReviewSnapshotHead, strings.Repeat("a", 40)),
+		SnapshotPolicy:       model.ReviewSnapshotPolicy{Mode: model.ReviewSnapshotHead},
+	})
+	if err != nil {
+		t.Fatalf("RunAgent() error = %v", err)
+	}
+	if result.Attempts != 1 || len(result.HostEvidence) != 1 {
+		t.Fatalf("result = %#v, want one model attempt and one host evidence call", result)
+	}
+	if len(runner.evidenceRequests) != 1 || len(runner.evidenceRequests[0]) != 1 {
+		t.Fatalf("evidence requests = %#v, want one deterministic plan", runner.evidenceRequests)
+	}
+	if len(runner.prompts) != 1 {
+		t.Fatalf("model prompts = %d, want one", len(runner.prompts))
+	}
+	for _, want := range []string{
+		"Harness-Collected Verification Evidence",
+		"immutable review snapshot",
+		"Do not claim the verification tools were unavailable",
+		"run_verification",
+		"status: PASS",
+	} {
+		if !strings.Contains(runner.prompts[0], want) {
+			t.Fatalf("model prompt omitted %q:\n%s", want, runner.prompts[0])
+		}
+	}
+	if source := result.ContextAudit.Sources(); len(source) == 0 {
+		t.Fatal("host evidence was omitted from context accounting")
+	}
+}
+
+func TestRunAgentPreservesToolEvidenceAcrossSchemaRepair(t *testing.T) {
+	runner := &scriptedAgentExecutor{
+		responses: []string{"incomplete", "valid"},
+		toolCallBatches: [][]AgentToolCall{
+			{{Name: "run_verification", Arguments: `{"kind":"test"}`, Result: "PASS", Success: true}},
+			nil,
+		},
+	}
+	framework := NewFramework(nil, nil).WithAgentRunner(runner)
+
+	result, err := framework.RunAgent(context.Background(), accumulatedEvidenceAgentDefinition{}, AgentRunOpts{
+		UserPrompt: "review this change",
+		MaxRetries: 2,
+	})
+	if err != nil {
+		t.Fatalf("RunAgent() error = %v", err)
+	}
+	if result.Attempts != 2 || result.Value != "valid" {
+		t.Fatalf("result = %#v, want valid repair after two attempts", result)
+	}
+	if len(result.ToolEvidence) != 1 || result.ToolEvidence[0].Name != "run_verification" {
+		t.Fatalf("durable tool evidence = %#v, want the first attempt's verification", result.ToolEvidence)
+	}
+	for _, want := range []string{
+		"Durable Evidence From Earlier Attempts",
+		"do not report them as unavailable",
+		"run_verification",
+		"PASS",
+	} {
+		if !strings.Contains(runner.prompts[1], want) {
+			t.Fatalf("repair prompt omitted %q:\n%s", want, runner.prompts[1])
+		}
+	}
+}
+
+func TestRunAgentPreservesNativeEvidenceAcrossSchemaRepair(t *testing.T) {
+	exitCode := 0
+	runner := &scriptedAgentExecutor{
+		responses: []string{"incomplete", "valid"},
+		executionBatches: [][]model.CommandExecutionEvidence{
+			{{Command: "go test ./pkg/oneshot", AggregatedOutput: "ok", ExitCode: &exitCode, Status: "completed"}},
+			nil,
+		},
+	}
+	framework := NewFramework(nil, nil).WithAgentRunner(runner)
+
+	result, err := framework.RunAgent(context.Background(), accumulatedNativeEvidenceAgentDefinition{}, AgentRunOpts{
+		UserPrompt: "review this change",
+		MaxRetries: 2,
+	})
+	if err != nil {
+		t.Fatalf("RunAgent() error = %v", err)
+	}
+	if result.Attempts != 2 || result.Value != "valid" {
+		t.Fatalf("result = %#v, want valid repair after two attempts", result)
+	}
+	if len(result.CommandEvidence) != 1 || result.CommandEvidence[0].Command != "go test ./pkg/oneshot" {
+		t.Fatalf("durable command evidence = %#v, want the first attempt's command", result.CommandEvidence)
+	}
+	for _, want := range []string{"Durable Evidence From Earlier Attempts", "go test ./pkg/oneshot", "Exit code: `0`"} {
+		if !strings.Contains(runner.prompts[1], want) {
+			t.Fatalf("repair prompt omitted %q:\n%s", want, runner.prompts[1])
+		}
+	}
+}
+
+func TestRunAgentFailsBeforeModelWhenEvidenceLimitCannotCoverPlan(t *testing.T) {
+	runner := &scriptedAgentExecutor{responses: []string{"valid"}}
+	framework := NewFramework(nil, nil).WithAgentRunner(runner)
+	def := multiRequestEvidenceAgentDefinition{plannedEvidenceAgentDefinition{}}
+
+	result, err := framework.RunAgent(context.Background(), def, AgentRunOpts{
+		MaxVerificationCalls: 1,
+		ReviewSnapshot:       testReviewSnapshot(t, model.ReviewSnapshotHead, strings.Repeat("b", 40)),
+		SnapshotPolicy:       model.ReviewSnapshotPolicy{Mode: model.ReviewSnapshotHead},
+	})
+	if err == nil || !strings.Contains(err.Error(), "needs 2 verification calls") {
+		t.Fatalf("RunAgent() error = %v, want evidence-plan limit failure", err)
+	}
+	if result == nil || result.Attempts != 0 || len(runner.prompts) != 0 {
+		t.Fatalf("result = %#v, prompts = %d, want fail-fast before model synthesis", result, len(runner.prompts))
 	}
 }
 
@@ -831,6 +1079,16 @@ func assertFloatSliceNear(t *testing.T, got, want []float64) {
 			t.Fatalf("values = %v, want %v", got, want)
 		}
 	}
+}
+
+func testReviewSnapshot(t *testing.T, mode model.ReviewSnapshotMode, commit string) *model.ReviewSnapshot {
+	t.Helper()
+	root := t.TempDir()
+	snapshot, err := model.NewReviewSnapshot(mode, root, root, commit, nil)
+	if err != nil {
+		t.Fatalf("NewReviewSnapshot: %v", err)
+	}
+	return snapshot
 }
 
 func TestRunAgentRetriesExecutionEvidenceFailureWithGuidance(t *testing.T) {

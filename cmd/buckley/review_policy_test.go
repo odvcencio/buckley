@@ -85,9 +85,10 @@ func TestResolveReviewExecutionPlanUsesGovernedSizeClasses(t *testing.T) {
 	})
 	if focused.sizeClass != "focused" || focused.reasoningEffort != "low" ||
 		focused.reasoningMaxTokens != 1024 ||
+		focused.maxOutputTokens != projectReviewOutputTokenBudget ||
 		focused.maxIterations != 4 || focused.maxToolCalls != 0 ||
 		focused.maxVerificationCalls != 1 ||
-		focused.verificationTimeout != 60*time.Second || focused.explorationTimeout != 45*time.Second ||
+		focused.verificationTimeout != 90*time.Second || focused.explorationTimeout != 45*time.Second ||
 		focused.synthesisLead != 85*time.Second || focused.criticReserve != 70*time.Second ||
 		focused.criticMaxIterations != 2 || focused.criticMaxToolCalls != 0 ||
 		focused.criticExploration != 15*time.Second || focused.criticSynthesisLead != 45*time.Second {
@@ -101,9 +102,10 @@ func TestResolveReviewExecutionPlanUsesGovernedSizeClasses(t *testing.T) {
 	})
 	if broad.sizeClass != "broad" || broad.reasoningEffort != "medium" ||
 		broad.reasoningMaxTokens != 2048 ||
+		broad.maxOutputTokens != projectReviewOutputTokenBudget ||
 		broad.maxIterations != 6 || broad.maxToolCalls != 0 ||
 		broad.maxVerificationCalls != 1 ||
-		broad.verificationTimeout != 60*time.Second || broad.explorationTimeout != 55*time.Second ||
+		broad.verificationTimeout != 3*time.Minute || broad.explorationTimeout != 55*time.Second ||
 		broad.synthesisLead != 90*time.Second || broad.criticReserve != 80*time.Second ||
 		broad.criticMaxIterations != 2 || broad.criticMaxToolCalls != 0 ||
 		broad.criticExploration != 20*time.Second || broad.criticSynthesisLead != 50*time.Second {
@@ -374,7 +376,7 @@ func TestAppendReviewExecutionPlanGuidesBoundedEvidenceCollection(t *testing.T) 
 		"Write the Falsification conclusion as one bare token",
 		"Write Findings only when Falsification concludes PROVED",
 		"Require a current failing input, violated invariant, failing check, or reproducible behavior",
-		"Put required verification in the first tool-call batch",
+		"Use Buckley's harness-collected verification evidence first",
 		"Report an INCONCLUSIVE verification as UNAVAILABLE",
 		"Move possible rename, regeneration, test drift, and private test-hook concerns to Remarks",
 		"Do not expose analysis, repair commentary, progress text, or a plan",
@@ -478,7 +480,7 @@ func TestAppendReviewExecutionPlanReusesSharedRuleConstants(t *testing.T) {
 	for _, rule := range []string{
 		prompts.RuleFindingsRequireProvedFalsification,
 		prompts.RuleDisprovedOrUnresolvedGoesToRemarks,
-		prompts.RuleVerificationInFirstBatch,
+		prompts.RuleUseHarnessVerificationEvidence,
 	} {
 		if !strings.Contains(prompt, rule) {
 			t.Fatalf("bounded review plan missing shared rule %q:\n%s", rule, prompt)

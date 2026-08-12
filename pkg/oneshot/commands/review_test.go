@@ -470,7 +470,11 @@ func TestReviewAgentResult_Fields(t *testing.T) {
 }
 
 func TestApprovedAPIReviewRequiresSuccessfulVerificationToolEvidence(t *testing.T) {
-	result := &ReviewAgentResult{Parsed: &ParsedReview{Approved: true}}
+	result := &ReviewAgentResult{Parsed: &ParsedReview{
+		Approved:          true,
+		BuildVerification: VerificationPass,
+		TestVerification:  VerificationPass,
+	}}
 	execution := &oneshot.AgentResult{ProviderID: "openai"}
 	changedFiles := []string{"pkg/oneshot/commands/review.go"}
 	assert.ErrorContains(t, validateReviewExecutionEvidence(result, execution, changedFiles), "does not cover")
@@ -507,6 +511,17 @@ func TestApprovedAPIReviewRequiresSuccessfulVerificationToolEvidence(t *testing.
 	execution.ProviderID = "codex"
 	execution.ToolCalls = nil
 	assert.ErrorContains(t, validateReviewExecutionEvidence(result, execution, changedFiles), "does not cover")
+
+	execution.ToolCalls = []oneshot.AgentToolCall{{
+		ID:      "host-evidence-1",
+		Name:    "run_verification",
+		Success: true,
+		Data: map[string]any{
+			"kind": "test", "language": "go", "path": "pkg/oneshot/commands", "pattern": "", "status": "PASS", "exit_code": 0,
+		},
+	}}
+	assert.NoError(t, validateReviewExecutionEvidence(result, execution, changedFiles))
+	execution.ToolCalls = nil
 
 	exitZero := 0
 	execution.ExecutionEvidence = []model.CommandExecutionEvidence{
@@ -694,6 +709,67 @@ func TestReviewVerificationCallBudgetCountsExactTargets(t *testing.T) {
 	})
 
 	assert.Equal(t, 4, got)
+}
+
+func TestReviewEvidencePlanIsDeterministicAndComplete(t *testing.T) {
+	requests := reviewVerificationEvidenceRequests([]string{
+		"cmd/buckley/review.go",
+		"pkg/model/client.go",
+		"web/app.ts",
+		"web/button.ts",
+	})
+	want := []struct {
+		kind     string
+		language string
+		path     string
+	}{
+		{kind: "test", language: "go", path: "cmd/buckley"},
+		{kind: "test", language: "go", path: "pkg/model"},
+		{kind: "build", language: "node", path: "web"},
+		{kind: "test", language: "node", path: "web"},
+	}
+	if len(requests) != len(want) {
+		t.Fatalf("evidence requests = %#v, want %d", requests, len(want))
+	}
+	for index, expected := range want {
+		request := requests[index]
+		assert.Equal(t, "run_verification", request.Tool)
+		assert.Equal(t, expected.kind, request.Parameters["kind"])
+		assert.Equal(t, expected.language, request.Parameters["language"])
+		assert.Equal(t, expected.path, request.Parameters["path"])
+	}
+}
+
+func TestReviewEvidencePlanHandlesDocumentationAndUnknownConfiguration(t *testing.T) {
+	assert.Empty(t, reviewVerificationEvidenceRequests([]string{"README.md", "docs/release.md"}))
+
+	requests := reviewVerificationEvidenceRequests([]string{"release.yaml"})
+	if len(requests) != 2 {
+		t.Fatalf("configuration evidence requests = %#v, want root build and test", requests)
+	}
+	assert.Equal(t, "build", requests[0].Parameters["kind"])
+	assert.Equal(t, "test", requests[1].Parameters["kind"])
+	for _, request := range requests {
+		assert.Equal(t, "auto", request.Parameters["language"])
+		assert.Equal(t, ".", request.Parameters["path"])
+	}
+	assert.Equal(t, 2, ReviewVerificationCallBudget([]string{"release.yaml"}))
+}
+
+func TestReviewDefinitionsSkipHostEvidenceOnlyForAuthoritativeRemoteCI(t *testing.T) {
+	branch := ReviewBranchDef{ChangedFiles: []string{"pkg/model/client.go"}}
+	assert.Len(t, branch.AgentEvidenceRequests(), 1)
+
+	pending := ReviewPRDef{
+		ChangedFiles: []string{"pkg/model/client.go"},
+		CIStatus:     "pending (2/3)",
+		CIProvenance: prCISourceHead,
+	}
+	assert.Len(t, pending.AgentEvidenceRequests(), 1)
+
+	passing := pending
+	passing.CIStatus = "passing (3/3)"
+	assert.Empty(t, passing.AgentEvidenceRequests())
 }
 
 func TestApprovedPRDocumentationReviewUsesExactDiffLedgerInsteadOfUnrelatedCommands(t *testing.T) {

@@ -55,7 +55,7 @@ func TestReviewPromptsMakeApprovalVerificationPolicyExplicit(t *testing.T) {
 		"Documentation-only exception",
 		"exact changed claims, links, or diff hunks",
 		"Mixed, source, and configuration changes do not qualify",
-		"For Go, call run_verification with kind=test",
+		"For Go, harness-collected run_verification kind=test",
 		"CONFIRMED_PASS",
 		"INCONCLUSIVE",
 		"**Recommendation**: APPROVE / REQUEST CHANGES / NEEDS DISCUSSION",
@@ -174,7 +174,7 @@ func TestReviewPromptsShareRuleConstants(t *testing.T) {
 		}
 	}
 	branch := reviewBranchWithToolsDefault(time.Unix(0, 0))
-	for _, rule := range append(rules, RuleVerificationInFirstBatch) {
+	for _, rule := range append(rules, RuleUseHarnessVerificationEvidence) {
 		if !strings.Contains(branch, rule) {
 			t.Fatalf("branch prompt missing shared rule %q", rule)
 		}

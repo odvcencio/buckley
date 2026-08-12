@@ -84,6 +84,22 @@ type AgentDefinition interface {
 	ParseResult(response string) (any, error)
 }
 
+// AgentEvidenceRequest is one deterministic tool invocation that the harness
+// must complete before model synthesis. It is intentionally data-only so
+// command definitions can describe required evidence without depending on a
+// concrete tool registry.
+type AgentEvidenceRequest struct {
+	Tool       string
+	Parameters map[string]any
+}
+
+// AgentEvidencePlanner optionally declares evidence that is required for every
+// valid execution of an agent command. The framework collects this evidence
+// once against the immutable snapshot and carries it across validation repairs.
+type AgentEvidencePlanner interface {
+	AgentEvidenceRequests() []AgentEvidenceRequest
+}
+
 // AgentExecutionBudget optionally caps model/tool iterations for commands where
 // bounded sampling is part of the product contract.
 type AgentExecutionBudget interface {

@@ -80,10 +80,11 @@ func resolveReviewExecutionPlan(engine *rules.Engine, facts rules.ReviewPlanFact
 		sizeClass:            "standard",
 		reasoningEffort:      "medium",
 		reasoningMaxTokens:   1536,
+		maxOutputTokens:      projectReviewOutputTokenBudget,
 		maxIterations:        5,
 		maxToolCalls:         0,
 		maxVerificationCalls: 1,
-		verificationTimeout:  60 * time.Second,
+		verificationTimeout:  2 * time.Minute,
 		explorationTimeout:   50 * time.Second,
 		synthesisLead:        90 * time.Second,
 		criticReserve:        75 * time.Second,
@@ -292,7 +293,7 @@ func appendQwenReviewExecutionPlan(prompt string, opts automatedReviewOptions) s
 - Read deterministic evidence before summarizing the diff. Treat hypotheses as tests, but treat provider-labeled violations as demonstrated defects unless exact counterevidence disproves them.
 - Rank at most three concrete changed-behavior failures. Prefer identity/provenance mismatches, routing and bypass gates, producer/consumer key drift, and empty or failure paths over broad commentary.
 - For workflow or release changes, trace event input -> checkout ref -> validated commit -> built bytes -> published identifier. Never assume checkout rewrites event variables.
-- Use the supplied diff first. Put every required verification target in the first tool-call batch, alongside only the focused inspections needed for named invariants; do not repeat successful searches or tests.
+- Use the supplied diff and harness-collected verification evidence first. Spend tool calls on focused inspections for named invariants; do not repeat successful searches or verification.
 - Finish evidence collection within %s and reserve the final %d seconds for synthesis.
 - Final response budget: %s. Use compact ledgers, but never omit required sections to fit.
 - Follow the exact response schema from the system prompt. Account for every changed file, copy Feedback IDs exactly, cite immutable CI precisely, and return only the final review.
@@ -375,8 +376,8 @@ func appendReviewExecutionPlan(prompt string, opts automatedReviewOptions) strin
 - Treat repository verification directives as execution policy. Never replace a required Docker or CI gate with a host command.
 - A self-selected verification timeout is a review limitation. It cannot create a Finding, Blocker, FAIL state, or Grade C.
 - Use exact Go test names. The verification tool anchors the complete -run alternation.
-- For Go approval evidence, call run_verification with kind=test. Go kind=build does not execute tests.
-`+prompts.RuleVerificationInFirstBatch+`
+- For Go approval evidence, use the harness-collected run_verification kind=test result. Go kind=build does not execute tests.
+`+prompts.RuleUseHarnessVerificationEvidence+`
 - Omit ASD-STE100, comment-length, wording, naming, and style observations from every section.
 - Move possible rename, regeneration, test drift, and private test-hook concerns to Remarks.
 - Do not expose analysis, repair commentary, progress text, or a plan.

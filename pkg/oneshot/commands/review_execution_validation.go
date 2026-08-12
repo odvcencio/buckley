@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strings"
 
+	"m31labs.dev/buckley/pkg/oneshot"
 	"m31labs.dev/buckley/pkg/reviewpolicy"
 )
 
@@ -36,19 +37,48 @@ func appendReviewVerificationTargets(sb *strings.Builder, changedFiles []string,
 // calls required to satisfy the generated target plan. Go tests cover both
 // build and test evidence, while other languages need one call for each.
 func ReviewVerificationCallBudget(changedFiles []string) int {
-	budget := 0
-	for _, target := range reviewVerificationTargets(changedFiles) {
-		language, _, ok := strings.Cut(target, ": ")
+	return len(reviewVerificationEvidenceRequests(changedFiles))
+}
+
+func reviewVerificationEvidenceRequests(changedFiles []string) []oneshot.AgentEvidenceRequest {
+	if len(changedFiles) == 0 || reviewChangedFilesDocumentationOnly(changedFiles) {
+		return nil
+	}
+	targets := reviewVerificationTargets(changedFiles)
+	if len(targets) == 0 {
+		return []oneshot.AgentEvidenceRequest{
+			verificationEvidenceRequest("build", "auto", "."),
+			verificationEvidenceRequest("test", "auto", "."),
+		}
+	}
+
+	requests := make([]oneshot.AgentEvidenceRequest, 0, len(targets)*2)
+	for _, target := range targets {
+		language, path, ok := strings.Cut(target, ": ")
 		if !ok {
 			continue
 		}
 		if language == "go" {
-			budget++
+			requests = append(requests, verificationEvidenceRequest("test", language, path))
 			continue
 		}
-		budget += 2
+		requests = append(requests,
+			verificationEvidenceRequest("build", language, path),
+			verificationEvidenceRequest("test", language, path),
+		)
 	}
-	return budget
+	return requests
+}
+
+func verificationEvidenceRequest(kind, language, path string) oneshot.AgentEvidenceRequest {
+	return oneshot.AgentEvidenceRequest{
+		Tool: "run_verification",
+		Parameters: map[string]any{
+			"kind":     kind,
+			"language": language,
+			"path":     path,
+		},
+	}
 }
 
 func hasNestedGoVerificationTarget(targets []string) bool {

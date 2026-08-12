@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"regexp"
@@ -280,6 +281,42 @@ func TestExecutorClassifiesCommandFailureAndSandboxUnavailable(t *testing.T) {
 		}
 	})
 
+	t.Run("parent cancellation with killed process is inconclusive", func(t *testing.T) {
+		exitErr := exec.Command("sh", "-c", "exit 9").Run()
+		result := classifyVerificationRun(
+			Result{Kind: KindTest, Language: LanguageGo},
+			Request{Kind: KindTest},
+			LanguageGo,
+			time.Second,
+			"Codex sandbox",
+			commandOutput{ExitCode: 9, Stderr: "process killed"},
+			exitErr,
+			context.Canceled,
+		)
+		if result.Status != StatusUnavailable || result.ExitCode != -1 ||
+			!strings.Contains(result.Error, "canceled") {
+			t.Fatalf("canceled command = %#v", result)
+		}
+	})
+
+	t.Run("sandbox capability denial is unavailable", func(t *testing.T) {
+		exitErr := exec.Command("sh", "-c", "exit 1").Run()
+		result := classifyVerificationRun(
+			Result{Kind: KindTest, Language: LanguageGo},
+			Request{Kind: KindTest},
+			LanguageGo,
+			time.Second,
+			"Codex sandbox",
+			commandOutput{ExitCode: 1, Stderr: "listen tcp6 [::1]:0: socket: operation not permitted"},
+			exitErr,
+			nil,
+		)
+		if result.Status != StatusUnavailable || result.ExitCode != -1 ||
+			!strings.Contains(result.Error, "denied by the review sandbox") {
+			t.Fatalf("sandbox denial = %#v", result)
+		}
+	})
+
 	t.Run("successful command with no tests", func(t *testing.T) {
 		executor := testExecutor(t)
 		calls := 0
@@ -297,7 +334,7 @@ func TestExecutorClassifiesCommandFailureAndSandboxUnavailable(t *testing.T) {
 	})
 }
 
-func TestExecutorPrefersCodexOverNativeGoWhenBothAvailable(t *testing.T) {
+func TestExecutorPrefersNativeGoSandboxWhenBothLaunchersAreAvailable(t *testing.T) {
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module example.test/review\n\ngo 1.25\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -324,12 +361,47 @@ func TestExecutorPrefersCodexOverNativeGoWhenBothAvailable(t *testing.T) {
 	if result.Status != StatusPass {
 		t.Fatalf("verification = %#v", result)
 	}
+	if len(invocations) != 1 {
+		t.Fatalf("invocations = %d, want one native Go sandbox run", len(invocations))
+	}
+	if invocation := invocations[0]; invocation.Name != "/usr/bin/bwrap" {
+		t.Fatalf("launcher = %q, want native bwrap sandbox", invocation.Name)
+	}
+}
+
+func TestExecutorFallsBackToCodexForGoWhenNativeSandboxIsUnavailable(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module example.test/review\n\ngo 1.25\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	executor := NewExecutorWithCodexCommand("/usr/bin/true")
+	executor.lookPath = func(name string) (string, error) {
+		switch name {
+		case "go":
+			return "/usr/local/go/bin/go", nil
+		case "true":
+			return "/usr/bin/true", nil
+		case "bwrap":
+			return "", errors.New("trusted executable \"bwrap\" was not found")
+		default:
+			return "", errors.New("unexpected executable: " + name)
+		}
+	}
+	var invocations []commandInvocation
+	executor.run = func(_ context.Context, invocation commandInvocation, _ int) (commandOutput, error) {
+		invocations = append(invocations, invocation)
+		return commandOutput{ExitCode: 0}, nil
+	}
+	result := executor.Verify(context.Background(), Request{SnapshotRoot: root, Kind: KindBuild, Language: LanguageGo})
+	if result.Status != StatusPass {
+		t.Fatalf("verification = %#v", result)
+	}
 	if len(invocations) != 2 {
 		t.Fatalf("invocations = %d, want Codex preflight + run", len(invocations))
 	}
 	for _, invocation := range invocations {
 		if invocation.Name != "/usr/bin/true" {
-			t.Fatalf("launcher = %q, want Codex to be preferred over the native bwrap sandbox when both are available", invocation.Name)
+			t.Fatalf("launcher = %q, want Codex fallback", invocation.Name)
 		}
 	}
 }
@@ -370,6 +442,9 @@ func TestExecutorRoutesGoVerificationToNativeSandboxWhenCodexUnavailable(t *test
 	}
 	if indexOf(invocation.Args, "--unshare-net") < 0 {
 		t.Fatalf("native sandbox args omit network isolation: %#v", invocation.Args)
+	}
+	if indexOf(invocation.Args, "/bin") < 0 || indexOf(invocation.Args, "/sbin") < 0 {
+		t.Fatalf("native sandbox args omit standard executable aliases: %#v", invocation.Args)
 	}
 	wantArgv := []string{"/usr/local/go/bin/go", "test", "-count=1", "-v", "-run", "^(TestFocused)$", "."}
 	separator := indexOf(invocation.Args, "--")

@@ -22,6 +22,7 @@ func TestAppendReviewExecutionPlanUsesCompactQwenProfile(t *testing.T) {
 		"## Qwen Review Profile",
 		"Thinking budget: 2048 tokens",
 		"Read deterministic evidence before summarizing the diff",
+		"harness-collected verification evidence first",
 		"provider-labeled violations as demonstrated defects",
 		"event input -> checkout ref -> validated commit -> built bytes -> published identifier",
 		"Never assume checkout rewrites event variables",
@@ -36,6 +37,9 @@ func TestAppendReviewExecutionPlanUsesCompactQwenProfile(t *testing.T) {
 	}
 	if strings.Contains(prompt, "ASD-STE100") {
 		t.Fatalf("Qwen profile inherited verbose generic policy:\n%s", prompt)
+	}
+	if strings.Contains(strings.ToLower(prompt), "put every required verification target") {
+		t.Fatalf("Qwen profile asks the model to duplicate host verification:\n%s", prompt)
 	}
 	if len(prompt) > 2500 {
 		t.Fatalf("Qwen profile = %d bytes, want compact profile", len(prompt))

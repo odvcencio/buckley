@@ -33,6 +33,10 @@ func (ReviewBranchDef) AllowedTools() []string {
 	return reviewAllowedTools()
 }
 
+func (d ReviewBranchDef) AgentEvidenceRequests() []oneshot.AgentEvidenceRequest {
+	return reviewVerificationEvidenceRequests(d.ChangedFiles)
+}
+
 func (ReviewBranchDef) ParseResult(response string) (any, error) {
 	return parseFinalReviewResult(response)
 }
@@ -153,6 +157,13 @@ func (d ReviewPRDef) AllowedTools() []string {
 		return allowed
 	}
 	return allowed[:len(allowed)-1]
+}
+
+func (d ReviewPRDef) AgentEvidenceRequests() []oneshot.AgentEvidenceRequest {
+	if d.authoritativeRemoteCIPasses() {
+		return nil
+	}
+	return reviewVerificationEvidenceRequests(d.ChangedFiles)
 }
 
 func (d ReviewPRDef) authoritativeRemoteCIPasses() bool {
@@ -316,6 +327,9 @@ func validateReviewExecutionEvidence(result any, execution *oneshot.AgentResult,
 	if err := validateInconclusiveVerificationClaims(review.Parsed, execution); err != nil {
 		return err
 	}
+	if err := validateReportedHostVerification(review.Parsed, execution); err != nil {
+		return err
+	}
 	if !review.Parsed.Approved {
 		return nil
 	}
@@ -332,21 +346,16 @@ func validateReviewExecutionEvidence(result any, execution *oneshot.AgentResult,
 	if execution == nil {
 		return fmt.Errorf("approved review is missing execution evidence")
 	}
+	var trusted []reviewCommandEvidenceDetails
 	if strings.EqualFold(strings.TrimSpace(execution.ProviderID), "codex") {
-		var trusted []reviewCommandEvidenceDetails
 		for _, evidence := range execution.ExecutionEvidence {
 			details, trustworthy := classifyReviewCommandEvidenceDetails(evidence)
 			if trustworthy {
 				trusted = append(trusted, details)
 			}
 		}
-		if err := validateReviewEvidenceCoverage(changedFiles, trusted); err != nil {
-			return fmt.Errorf("native Codex approval requires classifiable snapshot-root evidence: %w", err)
-		}
-		return nil
 	}
 
-	var trusted []reviewCommandEvidenceDetails
 	for _, call := range execution.ToolCalls {
 		if call.Name != "run_verification" || !call.Success {
 			continue
@@ -381,6 +390,9 @@ func validateReviewExecutionEvidence(result any, execution *oneshot.AgentResult,
 		})
 	}
 	if err := validateReviewEvidenceCoverage(changedFiles, trusted); err != nil {
+		if strings.EqualFold(strings.TrimSpace(execution.ProviderID), "codex") {
+			return fmt.Errorf("native Codex approval requires classifiable snapshot-root or harness-collected evidence: %w", err)
+		}
 		return fmt.Errorf("API-backed approval requires successful snapshot-bound run_verification evidence: %w; for Go, call kind=test because kind=build does not execute tests", err)
 	}
 	return nil

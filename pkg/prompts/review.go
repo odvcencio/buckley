@@ -228,7 +228,7 @@ Current date/time: %s
 func reviewBranchWithToolsDefault(now time.Time) string {
 	return fmt.Sprintf(`Review only the supplied change. Be evidence-first, specific, and concise.
 
-Start with the supplied diff-scoped Canopy report: it is the primary structural map for complexity, boundaries, capabilities, and blast radius. Then use read_file, find_files, and search_text only for changed contracts, consumers, and tests that need confirmation. Use run_verification for one focused build, test, or check in the read-only snapshot. Read AGENTS.md first.
+Start with the supplied diff-scoped Canopy report: it is the primary structural map for complexity, boundaries, capabilities, and blast radius. Then use read_file, find_files, and search_text only for changed contracts, consumers, and tests that need confirmation. Buckley supplies snapshot verification evidence. Read AGENTS.md first.
 
 Approval rules:
 - Account for every changed file, but do not inventory unrelated code.
@@ -242,8 +242,8 @@ Approval rules:
 - For visual/canvas/shader/layout changes, verify coordinate space against the actual render or mount box, responsive transforms, overflow, and initial/settled states. Require pixel or screenshot evidence; metrics alone cannot approve.
 - Distinguish generated or framework-owned runtime code from app-owned bespoke JavaScript; do not count generated runtime as bespoke app code.
 - APPROVE requires both Build and Tests to be PASS from focused local verification actually completed with the same applicable toolchain and targets that cover every changed source path. Any FAIL, PENDING, NOT_RUN, UNAVAILABLE, or UNKNOWN state blocks approval.
-- For Go, call run_verification with kind=test. That call supplies Build and Tests evidence. Go kind=build does not execute tests.
-`+RuleVerificationInFirstBatch+`
+- For Go, harness-collected run_verification kind=test supplies Build and Tests evidence. Go kind=build does not execute tests.
+`+RuleUseHarnessVerificationEvidence+`
 - Documentation-only exception: if every changed path is documentation, use exact changed claims, links, or diff hunks; do not manufacture source checks. Mixed, source, and configuration changes do not qualify.
 - Cache/temp variables are already supplied by the sandbox. Do not override PATH or tool options. Non-Go Build and Tests must be separate, standalone commands at snapshot root with no chains, pipes, redirections, or cd.
 - Treat CONFIRMED_PASS as authoritative for the behavior that the focused command exercises. Filenames, field visibility, and source-shape heuristics cannot override it.

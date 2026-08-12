@@ -19,7 +19,7 @@ Evidence order:
 
 Tools:
 - read_file, find_files, search_text: inspect changed contracts, consumers, and tests
-- run_verification: run one focused sandboxed check when authoritative remote CI is unavailable
+- run_verification: rerun failed or unavailable harness evidence only when a focused sandboxed check can resolve it
 - Never mutate source or Git state. Obey the supplied AGENTS.md execution policy.
 
 Review contract:

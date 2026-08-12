@@ -51,15 +51,19 @@ type reviewCommandRuntime struct {
 }
 
 type reviewCommandResult struct {
-	reviewText     string
-	parsed         *commands.ParsedReview
-	trace          *transparency.Trace
-	contextAudit   *transparency.ContextAudit
-	attempts       int
-	primary        int
-	criticAttempts int
-	incomplete     bool
-	incompleteWhy  string
+	reviewText      string
+	parsed          *commands.ParsedReview
+	trace           *transparency.Trace
+	contextAudit    *transparency.ContextAudit
+	attempts        int
+	primary         int
+	criticAttempts  int
+	hostEvidence    int
+	hostPasses      int
+	toolEvidence    []oneshot.AgentToolCall
+	commandEvidence []model.CommandExecutionEvidence
+	incomplete      bool
+	incompleteWhy   string
 }
 
 // reviewProgress keeps model-review output machine-readable when the caller
@@ -213,6 +217,9 @@ func runReviewCommand(args []string) error {
 		printReviewContextAudit(result.contextAudit)
 	}
 	if reviewErr != nil {
+		if !quietMode && result != nil {
+			printReviewAttemptCounts(result)
+		}
 		if result == nil || !result.incomplete || strings.TrimSpace(result.reviewText) == "" {
 			return reviewErr
 		}
@@ -586,14 +593,60 @@ func reviewResultFromAgent(fwResult *oneshot.RunResult, audit *transparency.Cont
 	result.attempts = fwResult.Attempts
 	result.primary = fwResult.PrimaryAttempts
 	result.criticAttempts = fwResult.CriticAttempts
+	result.hostEvidence = len(fwResult.HostEvidence)
+	for _, call := range fwResult.HostEvidence {
+		if call.Success {
+			result.hostPasses++
+		}
+	}
+	result.toolEvidence = append([]oneshot.AgentToolCall(nil), fwResult.ToolEvidence...)
+	result.commandEvidence = append([]model.CommandExecutionEvidence(nil), fwResult.CommandEvidence...)
 	result.incomplete = fwResult.Incomplete
 	result.incompleteWhy = fwResult.IncompleteReason
 	if result.incomplete {
+		result.reviewText = appendReviewEvidenceDiagnostics(result.reviewText, result.toolEvidence, result.commandEvidence)
 		result.reviewText = appendReviewAttemptDiagnostics(result.reviewText, result.trace)
 		result.reviewText = markIncompleteReview(result.reviewText, result.incompleteWhy)
 		result.parsed = nil
 	}
 	return result
+}
+
+func appendReviewEvidenceDiagnostics(review string, toolCalls []oneshot.AgentToolCall, commands []model.CommandExecutionEvidence) string {
+	if len(toolCalls) == 0 && len(commands) == 0 {
+		return review
+	}
+	var b strings.Builder
+	b.WriteString(strings.TrimSpace(review))
+	b.WriteString("\n\n## Preserved execution evidence\n")
+	for _, call := range toolCalls {
+		status := "FAILED_OR_UNAVAILABLE"
+		if call.Success {
+			status = "PASS"
+		}
+		fmt.Fprintf(&b, "\n- `%s` `%s`: %s", strings.TrimSpace(call.ID), strings.TrimSpace(call.Name), status)
+		if call.Duration > 0 {
+			fmt.Fprintf(&b, " in %s", call.Duration.Round(time.Millisecond))
+		}
+		if arguments := reviewAttemptExcerpt(call.Arguments, 1000); arguments != "" {
+			fmt.Fprintf(&b, "\n  - Arguments: `%s`", strings.ReplaceAll(arguments, "`", "'"))
+		}
+		if output := reviewAttemptExcerpt(call.Result, 3000); output != "" {
+			fmt.Fprintf(&b, "\n  - Result: `%s`", strings.ReplaceAll(strings.ReplaceAll(output, "`", "'"), "\n", " "))
+		}
+		b.WriteString("\n")
+	}
+	for _, command := range commands {
+		fmt.Fprintf(&b, "\n- Native command `%s`: %s", reviewAttemptExcerpt(command.Command, 1000), reviewAttemptExcerpt(command.Status, 100))
+		if command.ExitCode != nil {
+			fmt.Fprintf(&b, " (exit %d)", *command.ExitCode)
+		}
+		if output := reviewAttemptExcerpt(command.AggregatedOutput, 3000); output != "" {
+			fmt.Fprintf(&b, "\n  - Output: `%s`", strings.ReplaceAll(strings.ReplaceAll(output, "`", "'"), "\n", " "))
+		}
+		b.WriteString("\n")
+	}
+	return strings.TrimSpace(b.String())
 }
 
 func appendReviewAttemptDiagnostics(review string, trace *transparency.Trace) string {
@@ -686,7 +739,18 @@ func reviewSalvageDestination(outputFile string) string {
 }
 
 func printReviewAttemptCounts(result *reviewCommandResult) {
-	if result == nil || result.attempts == 0 {
+	if result == nil {
+		return
+	}
+	if result.hostEvidence > 0 {
+		termOut.Dim(
+			"Harness verification: %d passed · %d failed or unavailable · %d total",
+			result.hostPasses,
+			result.hostEvidence-result.hostPasses,
+			result.hostEvidence,
+		)
+	}
+	if result.attempts == 0 {
 		return
 	}
 	termOut.Dim(
