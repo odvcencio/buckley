@@ -190,7 +190,7 @@ func ProjectShardCostWithContext(
 }
 
 // ShardRunFunc runs one shard through a review pass and returns its
-// completed result. Callers (the CLI) implement this against the RLM
+// completed result. Callers (the CLI) implement this against the agent
 // framework; RunPRShardsConcurrently is framework-agnostic so it can be
 // tested with a fake implementation.
 type ShardRunFunc func(ctx context.Context, shard diffsignal.Shard, index int) (*ParsedReview, error)

@@ -547,7 +547,7 @@ func runPRReviewWithOptions(ctx context.Context, prRef string, framework *onesho
 		ApprovalCritic:              opts.approvalCritic,
 	}
 	opts = boundPRApprovalCritic(opts, reviewDef)
-	fwResult, runErr := framework.RunRLM(ctx, reviewDef, oneshot.RLMRunOpts{
+	fwResult, runErr := framework.RunAgent(ctx, reviewDef, oneshot.AgentRunOpts{
 		UserPrompt:               userPrompt,
 		Audit:                    audit,
 		MaxRetries:               opts.maxRetries,
@@ -575,7 +575,7 @@ func runPRReviewWithOptions(ctx context.Context, prRef string, framework *onesho
 
 	if runErr != nil {
 		spinner.StopWithError(runErr.Error())
-		partial := reviewResultFromRLM(fwResult, audit)
+		partial := reviewResultFromAgent(fwResult, audit)
 		if strings.TrimSpace(partial.reviewText) != "" {
 			return partial, prCtx.PR, fmt.Errorf("review failed: %w", runErr)
 		}
@@ -585,7 +585,7 @@ func runPRReviewWithOptions(ctx context.Context, prRef string, framework *onesho
 	if err := commands.RevalidatePRContext(prCtx); err != nil {
 		spinner.StopWithError(err.Error())
 		revalidationErr := fmt.Errorf("review target changed or could not be revalidated: %w", err)
-		partial := reviewResultFromRLM(fwResult, audit)
+		partial := reviewResultFromAgent(fwResult, audit)
 		partial.incomplete = true
 		partial.incompleteWhy = revalidationErr.Error()
 		partial.reviewText = markIncompleteReview(partial.reviewText, partial.incompleteWhy)
@@ -594,7 +594,7 @@ func runPRReviewWithOptions(ctx context.Context, prRef string, framework *onesho
 	}
 
 	spinner.StopWithSuccess("PR review complete")
-	return reviewResultFromRLM(fwResult, audit), prCtx.PR, nil
+	return reviewResultFromAgent(fwResult, audit), prCtx.PR, nil
 }
 
 func boundPRApprovalCritic(opts automatedReviewOptions, def commands.ReviewPRDef) automatedReviewOptions {
@@ -698,7 +698,7 @@ func runPRReviewSharded(
 			reviewDef.RequiresFeedbackDisposition = prCtx.HasReviewFeedback()
 			reviewDef.RequiredFeedbackIDs = prCtx.RequiredFeedbackIDs()
 		}
-		fwResult, runErr := framework.RunRLM(shardCtx, reviewDef, oneshot.RLMRunOpts{
+		fwResult, runErr := framework.RunAgent(shardCtx, reviewDef, oneshot.AgentRunOpts{
 			UserPrompt:           prompt,
 			MaxRetries:           opts.maxRetries,
 			MaxIterations:        shardOpts.maxIterations,
@@ -718,7 +718,7 @@ func runPRReviewSharded(
 		if runErr != nil {
 			return nil, runErr
 		}
-		result, ok := fwResult.Value.(*commands.ReviewRLMResult)
+		result, ok := fwResult.Value.(*commands.ReviewAgentResult)
 		if !ok || result.Parsed == nil {
 			return nil, fmt.Errorf("shard %d produced no parsed review", index+1)
 		}

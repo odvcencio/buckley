@@ -290,8 +290,8 @@ func TestParseReviewCommandOptionsRequiresExplicitSafeUntrackedMode(t *testing.T
 	}
 }
 
-func TestReviewResultFromRLMExposesPrimaryAndCriticAttempts(t *testing.T) {
-	got := reviewResultFromRLM(&oneshot.RunResult{
+func TestReviewResultFromAgentExposesPrimaryAndCriticAttempts(t *testing.T) {
+	got := reviewResultFromAgent(&oneshot.RunResult{
 		Attempts:        3,
 		PrimaryAttempts: 1,
 		CriticAttempts:  2,
@@ -303,12 +303,12 @@ func TestReviewResultFromRLMExposesPrimaryAndCriticAttempts(t *testing.T) {
 	}
 }
 
-func TestReviewResultFromRLMIgnoresTypedNilReview(t *testing.T) {
-	var typedNil *commands.ReviewRLMResult
-	got := reviewResultFromRLM(&oneshot.RunResult{Value: typedNil}, nil)
+func TestReviewResultFromAgentIgnoresTypedNilReview(t *testing.T) {
+	var typedNil *commands.ReviewAgentResult
+	got := reviewResultFromAgent(&oneshot.RunResult{Value: typedNil}, nil)
 
 	if got == nil {
-		t.Fatal("reviewResultFromRLM() = nil, want an empty result")
+		t.Fatal("reviewResultFromAgent() = nil, want an empty result")
 	}
 	if got.reviewText != "" || got.parsed != nil {
 		t.Fatalf("review result = %#v, want no review content", got)
@@ -335,9 +335,9 @@ func TestReviewValidationRepairLinesExplainBoundedRetries(t *testing.T) {
 	}
 }
 
-func TestReviewResultFromRLMPreservesIncompleteState(t *testing.T) {
-	got := reviewResultFromRLM(&oneshot.RunResult{
-		Value: &commands.ReviewRLMResult{Review: "partial review"},
+func TestReviewResultFromAgentPreservesIncompleteState(t *testing.T) {
+	got := reviewResultFromAgent(&oneshot.RunResult{
+		Value: &commands.ReviewAgentResult{Review: "partial review"},
 		Trace: &transparency.Trace{Attempts: []transparency.TraceAttempt{{
 			Phase:   "primary",
 			Attempt: 1,

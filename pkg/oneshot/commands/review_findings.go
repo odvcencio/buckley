@@ -316,7 +316,7 @@ func ValidateParsedReview(parsed *ParsedReview, opts ReviewValidationOptions) er
 			if parsed.BuildVerification == VerificationUnavailable {
 				return err
 			}
-			return oneshot.RequireRLMExecutionEvidence(err)
+			return oneshot.RequireAgentExecutionEvidence(err)
 		}
 		if parsed.TestVerification != VerificationPass {
 			err := fmt.Errorf(
@@ -326,7 +326,7 @@ func ValidateParsedReview(parsed *ParsedReview, opts ReviewValidationOptions) er
 			if parsed.TestVerification == VerificationUnavailable {
 				return err
 			}
-			return oneshot.RequireRLMExecutionEvidence(err)
+			return oneshot.RequireAgentExecutionEvidence(err)
 		}
 		if opts.RequirePassingRemoteCI {
 			ciState := parseRemoteCIState(opts.CIStatus)

@@ -24,27 +24,27 @@ const (
 )
 
 // Framework provides a single execution engine for all oneshot commands.
-// It replaces the duplicated Runner types in commit/, pr/, and rlm/.
+// It replaces the duplicated Runner types in commit/, pr/, and review/.
 //
 // The framework routes execution based on which interface a definition implements:
 //   - Definition    -> single-tool invoke+retry (commit, PR)
-//   - RLMDefinition -> full RLM sub-agent with multi-turn tool access (review)
+//   - AgentDefinition -> one multi-turn tool agent (review)
 type Framework struct {
 	invoker              ToolInvoker
-	rlmRunner            RLMExecutor
-	approvalCriticRunner RLMExecutor
+	agentRunner          AgentExecutor
+	approvalCriticRunner AgentExecutor
 	engine               *rules.Engine
 }
 
-// RLMExecutor runs a multi-turn agent task. Keeping the framework dependent on
+// AgentExecutor runs a multi-turn agent task. Keeping the framework dependent on
 // this narrow interface makes validation/retry behavior independently testable.
-type RLMExecutor interface {
-	Run(ctx context.Context, systemPrompt, task string, allowedTools []string, opts RLMExecutionOpts) (*RLMResult, error)
+type AgentExecutor interface {
+	Run(ctx context.Context, systemPrompt, task string, allowedTools []string, opts AgentExecutionOpts) (*AgentResult, error)
 }
 
-// RLMExecutionOpts is immutable execution metadata shared by every sub-agent
-// invocation in one RunRLM call.
-type RLMExecutionOpts struct {
+// AgentExecutionOpts is immutable execution metadata shared by every sub-agent
+// invocation in one RunAgent call.
+type AgentExecutionOpts struct {
 	ReviewSnapshot       *model.ReviewSnapshot
 	MaxIterations        int
 	MaxToolCalls         int
@@ -69,7 +69,7 @@ type ToolInvoker interface {
 
 // NewFramework creates a new oneshot framework.
 // The invoker is required for Definition-based commands.
-// Use WithRLMRunner to enable RLMDefinition-based commands.
+// Use WithAgentRunner to enable AgentDefinition-based commands.
 func NewFramework(invoker ToolInvoker, engine *rules.Engine) *Framework {
 	return &Framework{
 		invoker: invoker,
@@ -77,12 +77,12 @@ func NewFramework(invoker ToolInvoker, engine *rules.Engine) *Framework {
 	}
 }
 
-// WithRLMRunner returns a copy of the framework with the given RLM runner.
-// This enables execution of RLMDefinition-based commands (e.g., review).
-func (f *Framework) WithRLMRunner(runner RLMExecutor) *Framework {
+// WithAgentRunner returns a copy of the framework with the given tool agent runner.
+// This enables execution of AgentDefinition-based commands (e.g., review).
+func (f *Framework) WithAgentRunner(runner AgentExecutor) *Framework {
 	return &Framework{
 		invoker:              f.invoker,
-		rlmRunner:            runner,
+		agentRunner:          runner,
 		approvalCriticRunner: f.approvalCriticRunner,
 		engine:               f.engine,
 	}
@@ -90,10 +90,10 @@ func (f *Framework) WithRLMRunner(runner RLMExecutor) *Framework {
 
 // WithApprovalCriticRunner uses a separately priced model for the independent
 // approval gate while retaining the primary reviewer for all other outcomes.
-func (f *Framework) WithApprovalCriticRunner(runner RLMExecutor) *Framework {
+func (f *Framework) WithApprovalCriticRunner(runner AgentExecutor) *Framework {
 	return &Framework{
 		invoker:              f.invoker,
-		rlmRunner:            f.rlmRunner,
+		agentRunner:          f.agentRunner,
 		approvalCriticRunner: runner,
 		engine:               f.engine,
 	}
@@ -137,7 +137,7 @@ type RunResult struct {
 	CriticAttempts int
 
 	// Incomplete reports that Value contains only salvaged work from an
-	// interrupted RLM run. Callers may persist or display it, but must not treat
+	// interrupted agent run. Callers may persist or display it, but must not treat
 	// it as a validated result or approval.
 	Incomplete bool
 
@@ -234,9 +234,9 @@ func (f *Framework) Run(ctx context.Context, def Definition, opts RunOpts) (*Run
 	}, fmt.Errorf("failed after %d attempts for command %q", maxRetries, def.Name())
 }
 
-// RLMRunOpts configures an RLM framework execution.
-type RLMRunOpts struct {
-	// UserPrompt is the task prompt sent to the RLM agent.
+// AgentRunOpts configures a tool agent framework execution.
+type AgentRunOpts struct {
+	// UserPrompt is the task prompt sent to the agent.
 	UserPrompt string
 
 	// Audit is an optional pre-built context audit for transparency.
@@ -317,16 +317,16 @@ type RLMRunOpts struct {
 	ReviewSnapshot *model.ReviewSnapshot
 }
 
-// RunRLM executes an RLM-based oneshot command using the full sub-agent pipeline:
-//  1. Validate the RLM runner is configured
+// RunAgent executes an agent-based oneshot command:
+//  1. Validate the tool agent runner is configured
 //  2. Execute the sub-agent with multi-turn tool access
 //  3. Parse the free-form response into typed output
 //  4. Retry incomplete or inconsistent results through semantic validation
 //  5. Send validated approvals through an independent critic when required
 //  6. Return the final result with transparency and attempt counts
-func (f *Framework) RunRLM(ctx context.Context, def RLMDefinition, opts RLMRunOpts) (*RunResult, error) {
-	if f.rlmRunner == nil {
-		return nil, fmt.Errorf("RLM runner is required for command %q (configure with WithRLMRunner)", def.Name())
+func (f *Framework) RunAgent(ctx context.Context, def AgentDefinition, opts AgentRunOpts) (*RunResult, error) {
+	if f.agentRunner == nil {
+		return nil, fmt.Errorf("agent runner is required for command %q (configure with WithAgentRunner)", def.Name())
 	}
 
 	// Build audit if not provided
@@ -335,7 +335,7 @@ func (f *Framework) RunRLM(ctx context.Context, def RLMDefinition, opts RLMRunOp
 		audit = transparency.NewContextAudit()
 	}
 	if opts.UserPrompt != "" {
-		audit.Add("user prompt", contextEstimateTokens(opts.UserPrompt))
+		audit.AddRemainder("prompt framing", contextEstimateTokens(opts.UserPrompt))
 	}
 
 	basePrompt := opts.UserPrompt
@@ -364,7 +364,7 @@ func (f *Framework) RunRLM(ctx context.Context, def RLMDefinition, opts RLMRunOp
 			)
 		}
 	}
-	executionOpts := RLMExecutionOpts{
+	executionOpts := AgentExecutionOpts{
 		ReviewSnapshot:       snapshot,
 		MaxToolCalls:         opts.MaxToolCalls,
 		MaxVerificationCalls: opts.MaxVerificationCalls,
@@ -378,8 +378,8 @@ func (f *Framework) RunRLM(ctx context.Context, def RLMDefinition, opts RLMRunOp
 	}
 	if opts.MaxIterations > 0 {
 		executionOpts.MaxIterations = opts.MaxIterations
-	} else if budget, ok := def.(RLMExecutionBudget); ok {
-		executionOpts.MaxIterations = budget.MaxRLMIterations()
+	} else if budget, ok := def.(AgentExecutionBudget); ok {
+		executionOpts.MaxIterations = budget.MaxAgentIterations()
 	}
 
 	primaryBudget := opts.MaxCostUSD
@@ -391,7 +391,7 @@ func (f *Framework) RunRLM(ctx context.Context, def RLMDefinition, opts RLMRunOp
 	}
 	executionOpts.MaxCostUSD = primaryBudget
 	primaryCtx, cancelPrimary := contextWithReservedTime(ctx, opts.ApprovalCriticReserve)
-	primary := f.runValidatedRLMPhase(primaryCtx, f.rlmRunner, def, def.SystemPrompt(), basePrompt, maxRetries, "primary", executionOpts)
+	primary := f.runValidatedAgentPhase(primaryCtx, f.agentRunner, def, def.SystemPrompt(), basePrompt, maxRetries, "primary", executionOpts)
 	cancelPrimary()
 	result.Attempts = primary.attempts
 	result.PrimaryAttempts = primary.attempts
@@ -405,7 +405,7 @@ func (f *Framework) RunRLM(ctx context.Context, def RLMDefinition, opts RLMRunOp
 	}
 
 	result.Value = primary.value
-	criticDef, hasCritic := def.(RLMApprovalCritic)
+	criticDef, hasCritic := def.(AgentApprovalCritic)
 	if !hasCritic || !criticDef.RequiresApprovalCritic(primary.value) {
 		result.Value = primary.value
 		return result, nil
@@ -440,11 +440,11 @@ func (f *Framework) RunRLM(ctx context.Context, def RLMDefinition, opts RLMRunOp
 	}
 	criticRunner := f.approvalCriticRunner
 	if criticRunner == nil {
-		criticRunner = f.rlmRunner
+		criticRunner = f.agentRunner
 	} else {
 		criticExecutionOpts.ModelID = ""
 	}
-	critic := f.runValidatedRLMPhase(
+	critic := f.runValidatedAgentPhase(
 		ctx,
 		criticRunner,
 		def,
@@ -459,7 +459,7 @@ func (f *Framework) RunRLM(ctx context.Context, def RLMDefinition, opts RLMRunOp
 	traceAttempts = append(traceAttempts, critic.traces...)
 	result.Trace = transparency.AggregateTraceAttempts(traceAttempts)
 	if critic.err != nil {
-		if hasRLMValue(critic.value) {
+		if hasAgentValue(critic.value) {
 			result.Value = critic.value
 		}
 		result.Incomplete = true
@@ -474,7 +474,7 @@ func (f *Framework) RunRLM(ctx context.Context, def RLMDefinition, opts RLMRunOp
 	return result, nil
 }
 
-func hasRLMValue(value any) bool {
+func hasAgentValue(value any) bool {
 	if value == nil {
 		return false
 	}
@@ -501,7 +501,7 @@ func contextWithReservedTime(ctx context.Context, reserve time.Duration) (contex
 	return context.WithDeadline(ctx, deadline.Add(-reserve))
 }
 
-type rlmPhaseResult struct {
+type agentPhaseResult struct {
 	value    any
 	traces   []transparency.TraceAttempt
 	attempts int
@@ -509,29 +509,29 @@ type rlmPhaseResult struct {
 	err      error
 }
 
-type rlmValidationRetryMode uint8
+type agentValidationRetryMode uint8
 
 const (
-	rlmValidationRetryFull rlmValidationRetryMode = iota
-	rlmValidationRetryText
-	rlmValidationRetryEvidence
-	rlmValidationRetryClean
+	agentValidationRetryFull agentValidationRetryMode = iota
+	agentValidationRetryText
+	agentValidationRetryEvidence
+	agentValidationRetryClean
 )
 
-func (f *Framework) runValidatedRLMPhase(
+func (f *Framework) runValidatedAgentPhase(
 	ctx context.Context,
-	runner RLMExecutor,
-	def RLMDefinition,
+	runner AgentExecutor,
+	def AgentDefinition,
 	systemPrompt string,
 	basePrompt string,
 	maxRetries int,
 	phase string,
-	executionOpts RLMExecutionOpts,
-) rlmPhaseResult {
+	executionOpts AgentExecutionOpts,
+) agentPhaseResult {
 	userPrompt := basePrompt
-	var result rlmPhaseResult
+	var result agentPhaseResult
 	var lastErr error
-	retryMode := rlmValidationRetryFull
+	retryMode := agentValidationRetryFull
 	attemptLimit := maxRetries
 	cleanRepairUsed := false
 
@@ -540,7 +540,7 @@ func (f *Framework) runValidatedRLMPhase(
 		attemptOpts := executionOpts
 		if attempt > 0 {
 			switch retryMode {
-			case rlmValidationRetryText, rlmValidationRetryClean:
+			case agentValidationRetryText, agentValidationRetryClean:
 				attemptOpts.MaxIterations = 1
 				attemptOpts.MaxToolCalls = 0
 				attemptOpts.ExplorationTimeout = 0
@@ -551,7 +551,7 @@ func (f *Framework) runValidatedRLMPhase(
 				// Keep an explicit report budget during repair. The old path
 				// recomputed the total ceiling from the 512-token repair reasoning
 				// cap and truncated long project reports at 4,608 tokens.
-			case rlmValidationRetryEvidence:
+			case agentValidationRetryEvidence:
 				attemptOpts.MaxIterations = boundedPositiveLimit(attemptOpts.MaxIterations, evidenceRepairMaxIterations)
 				if attemptOpts.MaxToolCalls > 0 {
 					attemptOpts.MaxToolCalls = boundedPositiveLimit(attemptOpts.MaxToolCalls, evidenceRepairMaxToolCalls)
@@ -569,44 +569,44 @@ func (f *Framework) runValidatedRLMPhase(
 		if executionOpts.MaxCostUSD > 0 {
 			attemptOpts.MaxCostUSD = executionOpts.MaxCostUSD - result.cost
 			if attemptOpts.MaxCostUSD <= 0 {
-				result.err = fmt.Errorf("RLM %s cost budget exhausted for %q after %d attempts", phase, def.Name(), result.attempts)
+				result.err = fmt.Errorf("agent %s cost budget exhausted for %q after %d attempts", phase, def.Name(), result.attempts)
 				return result
 			}
 		}
 		result.attempts++
-		rlmResult, err := runner.Run(ctx, systemPrompt, userPrompt, def.AllowedTools(), attemptOpts)
-		if rlmResult != nil && rlmResult.Trace != nil {
-			result.cost += rlmResult.Trace.Cost
+		agentResult, err := runner.Run(ctx, systemPrompt, userPrompt, def.AllowedTools(), attemptOpts)
+		if agentResult != nil && agentResult.Trace != nil {
+			result.cost += agentResult.Trace.Cost
 			result.traces = append(result.traces, transparency.TraceAttempt{
 				Phase:   phase,
 				Attempt: attempt + 1,
-				Trace:   rlmResult.Trace,
+				Trace:   agentResult.Trace,
 			})
 			traceIndex = len(result.traces) - 1
 		}
 		if err != nil {
-			if rlmResult != nil && strings.TrimSpace(rlmResult.Response) != "" {
+			if agentResult != nil && strings.TrimSpace(agentResult.Response) != "" {
 				// Preserve parseable partial work for callers that explicitly
 				// handle incomplete results. Keep an earlier rejected response
 				// when the new attempt contains only an execution salvage.
-				if result.value == nil || !rlmResult.Incomplete {
-					result.value, _ = def.ParseResult(rlmResult.Response)
+				if result.value == nil || !agentResult.Incomplete {
+					result.value, _ = def.ParseResult(agentResult.Response)
 				}
 			}
-			result.err = fmt.Errorf("RLM %s execution failed for %q: %w", phase, def.Name(), err)
+			result.err = fmt.Errorf("agent %s execution failed for %q: %w", phase, def.Name(), err)
 			return result
 		}
-		if rlmResult == nil {
-			lastErr = fmt.Errorf("RLM runner returned no result")
-			retryMode = rlmValidationRetryFull
-		} else if incompleteErr := incompleteRLMOutputError(rlmResult); incompleteErr != nil {
+		if agentResult == nil {
+			lastErr = fmt.Errorf("agent runner returned no result")
+			retryMode = agentValidationRetryFull
+		} else if incompleteErr := incompleteAgentOutputError(agentResult); incompleteErr != nil {
 			// Preserve the rejected value for diagnostics, but never validate or
 			// accept an incomplete provider response.
-			result.value, _ = def.ParseResult(rlmResult.Response)
+			result.value, _ = def.ParseResult(agentResult.Response)
 			lastErr = incompleteErr
-			retryMode = rlmValidationRetryClean
+			retryMode = agentValidationRetryClean
 			if cleanRepairUsed {
-				result.err = rlmValidationFailure(phase, def.Name(), result.attempts, lastErr)
+				result.err = agentValidationFailure(phase, def.Name(), result.attempts, lastErr)
 				return result
 			}
 			cleanRepairUsed = true
@@ -614,28 +614,28 @@ func (f *Framework) runValidatedRLMPhase(
 				attemptLimit = requiredAttempts
 			}
 		} else {
-			result.value, lastErr = def.ParseResult(rlmResult.Response)
+			result.value, lastErr = def.ParseResult(agentResult.Response)
 			if lastErr != nil {
-				retryMode = rlmValidationRetryText
+				retryMode = agentValidationRetryText
 			}
 			if lastErr == nil {
-				if validator, ok := def.(RLMResultValidator); ok {
+				if validator, ok := def.(AgentResultValidator); ok {
 					lastErr = validator.ValidateResult(result.value)
 					if lastErr != nil {
-						retryMode = rlmValidationRetryText
-						if IsRLMExecutionEvidenceRequired(lastErr) {
-							retryMode = rlmValidationRetryEvidence
+						retryMode = agentValidationRetryText
+						if IsAgentExecutionEvidenceRequired(lastErr) {
+							retryMode = agentValidationRetryEvidence
 						}
 					}
 				}
 			}
 			if lastErr == nil {
-				if validator, ok := def.(RLMExecutionValidator); ok {
-					lastErr = validator.ValidateRLMExecution(result.value, rlmResult)
+				if validator, ok := def.(AgentExecutionValidator); ok {
+					lastErr = validator.ValidateAgentExecution(result.value, agentResult)
 					if lastErr != nil {
-						retryMode = rlmValidationRetryText
-						if IsRLMExecutionEvidenceRequired(lastErr) {
-							retryMode = rlmValidationRetryEvidence
+						retryMode = agentValidationRetryText
+						if IsAgentExecutionEvidenceRequired(lastErr) {
+							retryMode = agentValidationRetryEvidence
 						}
 					}
 				}
@@ -648,24 +648,24 @@ func (f *Framework) runValidatedRLMPhase(
 			result.traces[traceIndex].ValidationError = strings.TrimSpace(lastErr.Error())
 		}
 
-		userPrompt = buildRLMValidationRetryPrompt(
+		userPrompt = buildAgentValidationRetryPrompt(
 			basePrompt,
-			rlmResult,
+			agentResult,
 			phase,
 			lastErr,
 			retryMode,
 		)
 	}
 
-	result.err = rlmValidationFailure(phase, def.Name(), result.attempts, lastErr)
+	result.err = agentValidationFailure(phase, def.Name(), result.attempts, lastErr)
 	return result
 }
 
-func rlmValidationFailure(phase, definition string, attempts int, err error) error {
+func agentValidationFailure(phase, definition string, attempts int, err error) error {
 	return fmt.Errorf("%s review validation failed after %d attempts for %q: %w", phase, attempts, definition, err)
 }
 
-func incompleteRLMOutputError(result *RLMResult) error {
+func incompleteAgentOutputError(result *AgentResult) error {
 	if result == nil {
 		return nil
 	}
@@ -711,16 +711,16 @@ func endsWithToolCallMarkup(response string) bool {
 	return false
 }
 
-func buildRLMValidationRetryPrompt(
+func buildAgentValidationRetryPrompt(
 	basePrompt string,
-	previous *RLMResult,
+	previous *AgentResult,
 	phase string,
 	validationErr error,
-	retryMode rlmValidationRetryMode,
+	retryMode agentValidationRetryMode,
 ) string {
 	rejection := "QUALITY GATE: The previous " + phase + " review was rejected: " +
 		strings.TrimSpace(validationErr.Error()) + ". "
-	if retryMode == rlmValidationRetryText && previous != nil && strings.TrimSpace(previous.Response) != "" {
+	if retryMode == agentValidationRetryText && previous != nil && strings.TrimSpace(previous.Response) != "" {
 		return basePrompt + "\n\n" + rejection +
 			"First apply every exact correction named in the rejection, then repair format or schema issues. " +
 			"If one finding ID appears in both Blockers and Suggestions, preserve the finding and its evidence; remove it only from the list that conflicts with its severity (CRITICAL or MAJOR means Blockers, MINOR means Suggestions). " +
@@ -737,14 +737,14 @@ func buildRLMValidationRetryPrompt(
 			"Return one complete review in the required format.\n\nPRIOR REVIEW:\n" +
 			previous.Response
 	}
-	if retryMode == rlmValidationRetryEvidence && previous != nil && strings.TrimSpace(previous.Response) != "" {
+	if retryMode == agentValidationRetryEvidence && previous != nil && strings.TrimSpace(previous.Response) != "" {
 		return basePrompt + "\n\n" + rejection +
 			"Gather only the missing evidence with the available tools. Run each required verification before synthesis. " +
 			"Do not repeat inspection unless new evidence contradicts the prior review. " +
 			"Return one complete review in the required format.\n\nPRIOR REVIEW:\n" +
 			previous.Response
 	}
-	if retryMode == rlmValidationRetryClean && previous != nil && strings.TrimSpace(previous.Response) != "" {
+	if retryMode == agentValidationRetryClean && previous != nil && strings.TrimSpace(previous.Response) != "" {
 		rejected := sanitizeCleanRepairResponse(previous.Response)
 		repairInstruction := "Complete one clean repair with no tool calls. Use only the supplied evidence. " +
 			"Do not emit tool-call markup, tool-call JSON, progress text, or a plan. " +

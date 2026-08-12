@@ -444,7 +444,7 @@ type ToolExecutor interface {
 // oneshotToolLoopGovernorRoundSlack, oneshotToolLoopGovernorMaxToolCalls, and
 // the repeat/cycle limits below tune pkg/agentloop.Governor for
 // InvokeWithTools -- the legacy PR-review tool loop used only as a fallback
-// when no RLM runner is configured (see reviewPRWithLegacyTools in
+// when no agent runner is configured (see reviewPRWithLegacyTools in
 // pkg/oneshot/review/pr.go). InvokeWithTools never ran a governor before
 // this migration. A review that re-reads the same handful of files or
 // re-runs the same search while reasoning about different parts of a diff

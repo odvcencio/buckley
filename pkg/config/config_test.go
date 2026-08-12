@@ -151,6 +151,12 @@ func TestInvalidExecutionModeFailsValidation(t *testing.T) {
 	if err := cfg.Validate(); err == nil {
 		t.Fatalf("expected validation to fail for invalid oneshot mode")
 	}
+
+	cfg = config.DefaultConfig()
+	cfg.Oneshot.Mode = config.ExecutionModeRLM
+	if err := cfg.Validate(); err == nil {
+		t.Fatalf("expected validation to reject RLM as a oneshot mode")
+	}
 }
 
 func TestDefaultToolPoolModeIsFull(t *testing.T) {

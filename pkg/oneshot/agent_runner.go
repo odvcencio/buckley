@@ -13,10 +13,10 @@ import (
 	"m31labs.dev/buckley/pkg/transparency"
 )
 
-// RLMRunner executes oneshot tasks using the full RLM tool ecosystem.
-// This provides access to all built-in tools (read, write, bash, glob, grep, etc.)
-// instead of limited custom tool definitions.
-type RLMRunner struct {
+// AgentRunner executes oneshot tasks with one multi-turn tool-using agent.
+// It deliberately does not claim RLM semantics: the coordinator, parallel
+// subagents, shared scratchpad, and confidence loop live in pkg/rlm.Runtime.
+type AgentRunner struct {
 	models    *model.Manager
 	registry  *tool.Registry
 	ledger    *transparency.CostLedger
@@ -24,8 +24,8 @@ type RLMRunner struct {
 	reasoning string
 }
 
-// RLMRunnerConfig configures the RLM runner.
-type RLMRunnerConfig struct {
+// AgentRunnerConfig configures the tool agent runner.
+type AgentRunnerConfig struct {
 	Models          *model.Manager
 	Registry        *tool.Registry
 	Ledger          *transparency.CostLedger
@@ -33,19 +33,19 @@ type RLMRunnerConfig struct {
 	ReasoningEffort string
 }
 
-// NewRLMRunner creates an RLM-based runner.
-func NewRLMRunner(cfg RLMRunnerConfig) *RLMRunner {
-	return &RLMRunner{
+// NewAgentRunner creates a tool agent runner.
+func NewAgentRunner(cfg AgentRunnerConfig) *AgentRunner {
+	return &AgentRunner{
 		models:    cfg.Models,
 		registry:  cfg.Registry,
 		ledger:    cfg.Ledger,
 		modelID:   cfg.ModelID,
-		reasoning: normalizeRLMReasoningEffort(cfg.ReasoningEffort),
+		reasoning: normalizeAgentReasoningEffort(cfg.ReasoningEffort),
 	}
 }
 
-// RLMResult contains the result of an RLM task execution.
-type RLMResult struct {
+// AgentResult contains the result of one tool agent execution.
+type AgentResult struct {
 	// Response is the final text response
 	Response string
 
@@ -56,7 +56,7 @@ type RLMResult struct {
 	FinishReason string
 
 	// ToolCalls lists all tools that were called
-	ToolCalls []rlm.SubAgentToolCall
+	ToolCalls []AgentToolCall
 
 	// TokensUsed is the total token consumption
 	TokensUsed int
@@ -82,11 +82,24 @@ type RLMResult struct {
 	ExecutionEvidence []model.CommandExecutionEvidence
 }
 
-// Run executes a task with full RLM tool access.
+// AgentToolCall is the provider-neutral record of one tool invocation.
+// The oneshot API owns this shape so callers do not depend on pkg/rlm merely
+// because AgentRunner reuses that runtime's subagent implementation.
+type AgentToolCall struct {
+	ID        string
+	Name      string
+	Arguments string
+	Result    string
+	Data      map[string]any
+	Success   bool
+	Duration  time.Duration
+}
+
+// Run executes a task with multi-turn tool access.
 // The systemPrompt sets the agent's role/behavior.
 // The task is the user's request to execute.
 // allowedTools can restrict which tools are available (nil = all tools).
-func (r *RLMRunner) Run(ctx context.Context, systemPrompt, task string, allowedTools []string, opts RLMExecutionOpts) (*RLMResult, error) {
+func (r *AgentRunner) Run(ctx context.Context, systemPrompt, task string, allowedTools []string, opts AgentExecutionOpts) (*AgentResult, error) {
 	if r.models == nil {
 		return nil, fmt.Errorf("model manager required")
 	}
@@ -95,7 +108,7 @@ func (r *RLMRunner) Run(ctx context.Context, systemPrompt, task string, allowedT
 	}
 
 	start := time.Now()
-	traceID := fmt.Sprintf("rlm-%d", time.Now().UnixNano())
+	traceID := fmt.Sprintf("agent-%d", time.Now().UnixNano())
 
 	// Determine model for sub-agent
 	modelToUse := strings.TrimSpace(opts.ModelID)
@@ -143,17 +156,18 @@ func (r *RLMRunner) Run(ctx context.Context, systemPrompt, task string, allowedT
 
 	// Create sub-agent configuration
 	reasoningEffort := r.reasoning
-	if override := normalizeRLMReasoningEffort(opts.ReasoningEffort); override != "" {
+	if override := normalizeAgentReasoningEffort(opts.ReasoningEffort); override != "" {
 		reasoningEffort = override
 	}
-	maxCostUSD := effectiveRLMMaxCostUSD(providerID, opts.MaxCostUSD)
+	maxCostUSD := effectiveAgentMaxCostUSD(providerID, opts.MaxCostUSD)
 	requestedOutputTokens := opts.MaxOutputTokens
 	if requestedOutputTokens <= 0 {
-		requestedOutputTokens = reviewRLMOutputTokenLimit(opts.ReasoningMaxTokens)
+		requestedOutputTokens = reviewAgentOutputTokenLimit(opts.ReasoningMaxTokens)
 	}
-	maxOutputTokens := effectiveRLMOutputTokenLimit(r.models, modelToUse, requestedOutputTokens)
-	agentCfg := rlm.SubAgentInstanceConfig{
+	maxOutputTokens := effectiveAgentOutputTokenLimit(r.models, modelToUse, requestedOutputTokens)
+	agentCfg := rlm.SubAgentConfig{
 		ID:                   fmt.Sprintf("oneshot-%d", time.Now().UnixNano()),
+		SessionID:            traceID,
 		Model:                modelToUse,
 		Reasoning:            reasoningEffort,
 		ReasoningMaxTokens:   opts.ReasoningMaxTokens,
@@ -199,15 +213,15 @@ func (r *RLMRunner) Run(ctx context.Context, systemPrompt, task string, allowedT
 	duration := time.Since(start)
 	response := agentResult.Summary
 	if executionErr != nil {
-		response = formatIncompleteRLMResponse(agentResult, executionErr)
+		response = formatIncompleteAgentResponse(agentResult, executionErr)
 	}
 
 	// Build result
-	result := &RLMResult{
+	result := &AgentResult{
 		Response:          response,
 		Incomplete:        executionErr != nil,
 		FinishReason:      agentResult.FinishReason,
-		ToolCalls:         agentResult.ToolCalls,
+		ToolCalls:         convertAgentToolCalls(agentResult.ToolCalls),
 		TokensUsed:        agentResult.TokensUsed,
 		InputTokens:       agentResult.InputTokens,
 		OutputTokens:      agentResult.OutputTokens,
@@ -257,7 +271,7 @@ func (r *RLMRunner) Run(ctx context.Context, systemPrompt, task string, allowedT
 				pricing.OutputPerMillion = info.Pricing.Completion
 			}
 		}
-		cost = effectiveRLMInvocationCost(providerID, pricing, tokens)
+		cost = effectiveAgentInvocationCost(providerID, pricing, tokens)
 	}
 
 	result.Trace = builder.Complete(tokens, cost)
@@ -280,7 +294,26 @@ func (r *RLMRunner) Run(ctx context.Context, systemPrompt, task string, allowedT
 	return result, nil
 }
 
-func reviewRLMOutputTokenLimit(reasoningMaxTokens int) int {
+func convertAgentToolCalls(calls []rlm.SubAgentToolCall) []AgentToolCall {
+	if len(calls) == 0 {
+		return nil
+	}
+	converted := make([]AgentToolCall, len(calls))
+	for i, call := range calls {
+		converted[i] = AgentToolCall{
+			ID:        call.ID,
+			Name:      call.Name,
+			Arguments: call.Arguments,
+			Result:    call.Result,
+			Data:      call.Data,
+			Success:   call.Success,
+			Duration:  call.Duration,
+		}
+	}
+	return converted
+}
+
+func reviewAgentOutputTokenLimit(reasoningMaxTokens int) int {
 	if reasoningMaxTokens <= 0 {
 		return 0
 	}
@@ -289,11 +322,11 @@ func reviewRLMOutputTokenLimit(reasoningMaxTokens int) int {
 	return reasoningMaxTokens + 4096
 }
 
-// effectiveRLMOutputTokenLimit applies an explicit task budget and then caps
+// effectiveAgentOutputTokenLimit applies an explicit task budget and then caps
 // it with the provider's advertised completion ceiling when available. A
 // missing catalog entry is deliberately non-fatal: providers that do not
 // publish a limit retain the caller's requested budget.
-func effectiveRLMOutputTokenLimit(models *model.Manager, modelID string, configured int) int {
+func effectiveAgentOutputTokenLimit(models *model.Manager, modelID string, configured int) int {
 	if configured <= 0 {
 		return configured
 	}
@@ -304,17 +337,17 @@ func effectiveRLMOutputTokenLimit(models *model.Manager, modelID string, configu
 	if err != nil || info == nil || info.MaxCompletionTokens <= 0 {
 		return configured
 	}
-	return clampRLMOutputTokenLimit(configured, info.MaxCompletionTokens)
+	return clampAgentOutputTokenLimit(configured, info.MaxCompletionTokens)
 }
 
-func clampRLMOutputTokenLimit(configured, providerMax int) int {
+func clampAgentOutputTokenLimit(configured, providerMax int) int {
 	if configured <= 0 || providerMax <= 0 {
 		return configured
 	}
 	return min(configured, providerMax)
 }
 
-func effectiveRLMMaxCostUSD(providerID string, configured float64) float64 {
+func effectiveAgentMaxCostUSD(providerID string, configured float64) float64 {
 	if providerID == "codex" {
 		// Native Codex execution has no per-token API price that Buckley can
 		// enforce. Keep its turn, tool, and elapsed-time budgets authoritative.
@@ -323,14 +356,14 @@ func effectiveRLMMaxCostUSD(providerID string, configured float64) float64 {
 	return configured
 }
 
-func effectiveRLMInvocationCost(providerID string, pricing transparency.ModelPricing, tokens transparency.TokenUsage) float64 {
+func effectiveAgentInvocationCost(providerID string, pricing transparency.ModelPricing, tokens transparency.TokenUsage) float64 {
 	if providerID == "codex" {
 		return 0
 	}
 	return pricing.Calculate(tokens)
 }
 
-func formatIncompleteRLMResponse(result *rlm.SubAgentResult, cause error) string {
+func formatIncompleteAgentResponse(result *rlm.SubAgentResult, cause error) string {
 	var b strings.Builder
 	b.WriteString("> [!WARNING]\n")
 	b.WriteString("> **Incomplete agent result — salvaged from completed work.**\n")
@@ -426,7 +459,7 @@ func newReviewSnapshotRegistryWithLimits(root string, allowedTools []string, ver
 	return registry, nil
 }
 
-func normalizeRLMReasoningEffort(effort string) string {
+func normalizeAgentReasoningEffort(effort string) string {
 	switch strings.ToLower(strings.TrimSpace(effort)) {
 	case "minimal", "low", "medium", "high", "xhigh":
 		return strings.ToLower(strings.TrimSpace(effort))
@@ -436,8 +469,8 @@ func normalizeRLMReasoningEffort(effort string) string {
 }
 
 // RunWithAudit executes a task and includes context audit in the trace.
-func (r *RLMRunner) RunWithAudit(ctx context.Context, systemPrompt, task string, allowedTools []string, audit *transparency.ContextAudit) (*RLMResult, error) {
-	result, err := r.Run(ctx, systemPrompt, task, allowedTools, RLMExecutionOpts{})
+func (r *AgentRunner) RunWithAudit(ctx context.Context, systemPrompt, task string, allowedTools []string, audit *transparency.ContextAudit) (*AgentResult, error) {
+	result, err := r.Run(ctx, systemPrompt, task, allowedTools, AgentExecutionOpts{})
 	if err != nil {
 		return nil, err
 	}

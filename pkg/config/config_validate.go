@@ -65,8 +65,8 @@ func validateExecutionModes(c *Config) error {
 	if strings.TrimSpace(c.Execution.Mode) != "" && !validModes[strings.ToLower(c.Execution.Mode)] {
 		return fmt.Errorf("invalid execution mode: %s (valid: classic, rlm)", c.Execution.Mode)
 	}
-	if strings.TrimSpace(c.Oneshot.Mode) != "" && !validModes[strings.ToLower(c.Oneshot.Mode)] {
-		return fmt.Errorf("invalid oneshot mode: %s (valid: classic, rlm)", c.Oneshot.Mode)
+	if mode := strings.ToLower(strings.TrimSpace(c.Oneshot.Mode)); mode != "" && mode != ExecutionModeClassic {
+		return fmt.Errorf("invalid oneshot mode: %s (valid: classic; RLM is only an execution mode)", c.Oneshot.Mode)
 	}
 	validBackends := map[string]bool{
 		DurableBackendLocal: true,

@@ -85,6 +85,24 @@ func (ca *ContextAudit) AddTruncated(name string, tokens, originalTokens int) {
 	ca.total += tokens
 }
 
+// AddRemainder accounts only for the untracked portion of a known aggregate.
+// It is useful when a rendered prompt contains sources already recorded in the
+// audit: adding the whole prompt again would double-count every source.
+func (ca *ContextAudit) AddRemainder(name string, aggregateTokens int) {
+	ca.mu.Lock()
+	defer ca.mu.Unlock()
+
+	remainder := aggregateTokens - ca.total
+	if remainder <= 0 {
+		return
+	}
+	ca.sources = append(ca.sources, ContextSource{
+		Name:   name,
+		Tokens: remainder,
+	})
+	ca.total += remainder
+}
+
 // Sources returns all context sources, sorted by token count descending.
 func (ca *ContextAudit) Sources() []ContextSource {
 	ca.mu.Lock()

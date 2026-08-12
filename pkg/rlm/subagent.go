@@ -93,6 +93,7 @@ type SubAgent struct {
 
 	client     *model.Manager
 	registry   *tool.Registry
+	sessionID  string
 	scratchpad ScratchpadWriter
 	conflicts  *ConflictDetector
 	approver   *security.ToolApprover
@@ -101,7 +102,11 @@ type SubAgent struct {
 
 // SubAgentConfig configures a sub-agent execution.
 type SubAgentConfig struct {
-	ID                   string
+	ID string
+	// SessionID identifies this agent loop to model providers. When empty,
+	// RLM sub-agents receive the conventional rlm-subagent identity. Neutral
+	// callers such as Buckbot set their own identity instead.
+	SessionID            string
 	Model                string
 	Reasoning            string
 	ReasoningMaxTokens   int
@@ -118,9 +123,6 @@ type SubAgentConfig struct {
 	ReviewSnapshot       *model.ReviewSnapshot
 	ToolTier             string // role_permissions tier for runtime validation
 }
-
-// SubAgentInstanceConfig preserves the merged oneshot runner API.
-type SubAgentInstanceConfig = SubAgentConfig
 
 // SubAgentDeps provides shared dependencies.
 type SubAgentDeps struct {
@@ -196,6 +198,10 @@ func NewSubAgent(cfg SubAgentConfig, deps SubAgentDeps) (*SubAgent, error) {
 		}
 		allowedTools[name] = struct{}{}
 	}
+	sessionID := strings.TrimSpace(cfg.SessionID)
+	if sessionID == "" {
+		sessionID = "rlm-subagent-" + cfg.ID
+	}
 
 	return &SubAgent{
 		id:                   cfg.ID,
@@ -217,6 +223,7 @@ func NewSubAgent(cfg SubAgentConfig, deps SubAgentDeps) (*SubAgent, error) {
 		toolTier:             cfg.ToolTier,
 		client:               deps.Models,
 		registry:             deps.Registry,
+		sessionID:            sessionID,
 		scratchpad:           deps.Scratchpad,
 		conflicts:            deps.Conflicts,
 		approver:             deps.Approver,
@@ -240,13 +247,13 @@ func normalizeSubAgentReasoning(effort string) string {
 // agentloop.Controller's turn immediately -- result.Summary is already set
 // via summarizeRejectedToolCalls before this is returned -- without
 // surfacing it to the caller as a real failure.
-var errSubAgentFinalToolRejectionTerminal = errors.New("rlm: final tool call rejected during synthesis")
+var errSubAgentFinalToolRejectionTerminal = errors.New("agent: final tool call rejected during synthesis")
 
 // subAgentGovernorRoundBackstop, subAgentGovernorRoundSlack,
 // subAgentGovernorToolCallBackstop, subAgentGovernorToolCallSlack, and the
 // repeat/cycle limits below tune pkg/agentloop.Governor for SubAgent.Execute
-// -- the primary tool loop behind pkg/oneshot's RLM review path (see
-// pkg/oneshot/rlm_runner.go). SubAgent never ran a governor before this
+// -- the primary tool loop reused by pkg/oneshot's AgentRunner (see
+// pkg/oneshot/agent_runner.go). SubAgent never ran a governor before this
 // migration, and it has always managed its own round/tool-call ceilings
 // (maxIterations, maxToolCalls, cost/deadline-driven adaptive synthesis).
 // Those mechanisms remain authoritative: the Governor's own MaxRounds and
@@ -345,7 +352,7 @@ func (a *SubAgent) Execute(ctx context.Context, task string) (*SubAgentResult, e
 			Model:     a.model,
 			MaxTokens: a.maxOutputTokens,
 			Tools:     toolDefs,
-			SessionID: "rlm-subagent-" + a.id,
+			SessionID: a.sessionID,
 			ToolChoice: func() string {
 				if len(toolDefs) == 0 {
 					return "none"

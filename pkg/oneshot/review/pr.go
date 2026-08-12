@@ -70,9 +70,9 @@ func (r *Runner) ReviewPR(ctx context.Context, prRef string) (*RunResult, error)
 	systemPrompt := prompts.ReviewPRPrompt(time.Now())
 	userPrompt := buildPRPrompt(prCtx)
 
-	// Prefer RLM for full tool access
-	if r.rlmRunner != nil {
-		result, err := r.reviewPRWithRLM(ctx, prCtx, systemPrompt, userPrompt, audit)
+	// Prefer the tool agent for full tool access
+	if r.agentRunner != nil {
+		result, err := r.reviewPRWithAgent(ctx, prCtx, systemPrompt, userPrompt, audit)
 		if err != nil {
 			return nil, err
 		}
@@ -83,18 +83,18 @@ func (r *Runner) ReviewPR(ctx context.Context, prRef string) (*RunResult, error)
 	return r.reviewPRWithLegacyTools(ctx, prCtx, systemPrompt, userPrompt, audit)
 }
 
-// reviewPRWithRLM runs a PR review using full RLM tool ecosystem.
-func (r *Runner) reviewPRWithRLM(ctx context.Context, prCtx *PRContext, systemPrompt, userPrompt string, audit *transparency.ContextAudit) (*RunResult, error) {
+// reviewPRWithAgent runs a PR review using one multi-turn tool agent.
+func (r *Runner) reviewPRWithAgent(ctx context.Context, prCtx *PRContext, systemPrompt, userPrompt string, audit *transparency.ContextAudit) (*RunResult, error) {
 	result := &RunResult{ContextAudit: audit, PRInfo: prCtx.PR}
 
-	rlmResult, err := r.rlmRunner.Run(ctx, systemPrompt, userPrompt, legacyPRReviewAllowedTools(), oneshot.RLMExecutionOpts{})
+	agentResult, err := r.agentRunner.Run(ctx, systemPrompt, userPrompt, legacyPRReviewAllowedTools(), oneshot.AgentExecutionOpts{})
 	if err != nil {
 		result.Error = err
 		return result, nil
 	}
 
-	result.Review = rlmResult.Response
-	result.Trace = rlmResult.Trace
+	result.Review = agentResult.Response
+	result.Trace = agentResult.Trace
 	return result, nil
 }
 

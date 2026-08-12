@@ -60,7 +60,7 @@ None.
 // from this worktree, runs `buckley review -scope branch` non-interactively
 // in a temp git repo against a trivial synthetic diff, and points every
 // provider at a mock OpenAI-compatible server. buckley review always routes
-// through oneshot.RLMRunner -> rlm.SubAgent.Execute (see
+// through oneshot.AgentRunner -> rlm.SubAgent.Execute (see
 // cmd/buckley/review.go newReviewCommandRuntime), so a clean exit with the
 // mock's review text on stdout is direct evidence that the
 // agentloop.Controller-based SubAgent.Execute migration drives the command

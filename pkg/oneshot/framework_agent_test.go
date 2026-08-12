@@ -13,31 +13,31 @@ import (
 	"m31labs.dev/buckley/pkg/transparency"
 )
 
-type partialRLMExecutor struct {
-	result *RLMResult
+type partialAgentExecutor struct {
+	result *AgentResult
 	err    error
 }
 
-func (p partialRLMExecutor) Run(context.Context, string, string, []string, RLMExecutionOpts) (*RLMResult, error) {
+func (p partialAgentExecutor) Run(context.Context, string, string, []string, AgentExecutionOpts) (*AgentResult, error) {
 	return p.result, p.err
 }
 
-type deadlineAfterRejectedRLMExecutor struct {
+type deadlineAfterRejectedAgentExecutor struct {
 	calls int
 }
 
-func (r *deadlineAfterRejectedRLMExecutor) Run(context.Context, string, string, []string, RLMExecutionOpts) (*RLMResult, error) {
+func (r *deadlineAfterRejectedAgentExecutor) Run(context.Context, string, string, []string, AgentExecutionOpts) (*AgentResult, error) {
 	r.calls++
 	if r.calls == 1 {
-		return &RLMResult{Response: "prior rejected review", FinishReason: "stop"}, nil
+		return &AgentResult{Response: "prior rejected review", FinishReason: "stop"}, nil
 	}
-	return &RLMResult{
+	return &AgentResult{
 		Response:   "> [!WARNING]\n> **Incomplete agent result.**\n\nNo completed model output.",
 		Incomplete: true,
 	}, context.DeadlineExceeded
 }
 
-type scriptedRLMExecutor struct {
+type scriptedAgentExecutor struct {
 	responses          []string
 	systems            []string
 	prompts            []string
@@ -60,7 +60,7 @@ type scriptedRLMExecutor struct {
 	deadlines          []time.Time
 }
 
-func (s *scriptedRLMExecutor) Run(ctx context.Context, system string, task string, allowedTools []string, opts RLMExecutionOpts) (*RLMResult, error) {
+func (s *scriptedAgentExecutor) Run(ctx context.Context, system string, task string, allowedTools []string, opts AgentExecutionOpts) (*AgentResult, error) {
 	s.systems = append(s.systems, system)
 	s.prompts = append(s.prompts, task)
 	s.tools = append(s.tools, append([]string(nil), allowedTools...))
@@ -98,124 +98,124 @@ func (s *scriptedRLMExecutor) Run(ctx context.Context, system string, task strin
 		finishReason = s.finishReasons[0]
 		s.finishReasons = s.finishReasons[1:]
 	}
-	return &RLMResult{Response: response, FinishReason: finishReason, Trace: trace, ProviderID: provider}, nil
+	return &AgentResult{Response: response, FinishReason: finishReason, Trace: trace, ProviderID: provider}, nil
 }
 
-type validatingRLMDefinition struct{}
+type validatingAgentDefinition struct{}
 
-type executionValidatingRLMDefinition struct{ validatingRLMDefinition }
+type executionValidatingAgentDefinition struct{ validatingAgentDefinition }
 
-type textRepairExecutionValidatingRLMDefinition struct{ validatingRLMDefinition }
+type textRepairExecutionValidatingAgentDefinition struct{ validatingAgentDefinition }
 
-type budgetedRLMDefinition struct{ validatingRLMDefinition }
+type budgetedAgentDefinition struct{ validatingAgentDefinition }
 
-func (budgetedRLMDefinition) MaxRLMIterations() int { return 8 }
+func (budgetedAgentDefinition) MaxAgentIterations() int { return 8 }
 
-func (executionValidatingRLMDefinition) ValidateRLMExecution(_ any, execution *RLMResult) error {
+func (executionValidatingAgentDefinition) ValidateAgentExecution(_ any, execution *AgentResult) error {
 	if execution == nil || execution.ProviderID != "verified" {
-		return RequireRLMExecutionEvidence(fmt.Errorf("missing execution evidence"))
+		return RequireAgentExecutionEvidence(fmt.Errorf("missing execution evidence"))
 	}
 	return nil
 }
 
-func (textRepairExecutionValidatingRLMDefinition) ValidateRLMExecution(_ any, execution *RLMResult) error {
+func (textRepairExecutionValidatingAgentDefinition) ValidateAgentExecution(_ any, execution *AgentResult) error {
 	if execution == nil || execution.ProviderID != "verified" {
 		return fmt.Errorf("reported execution evidence is not present")
 	}
 	return nil
 }
 
-func (validatingRLMDefinition) Name() string         { return "review-test" }
-func (validatingRLMDefinition) SystemPrompt() string { return "review" }
-func (validatingRLMDefinition) AllowedTools() []string {
+func (validatingAgentDefinition) Name() string         { return "review-test" }
+func (validatingAgentDefinition) SystemPrompt() string { return "review" }
+func (validatingAgentDefinition) AllowedTools() []string {
 	return []string{"read_file", "run_shell"}
 }
 
-type criticRLMDefinition struct{}
+type criticAgentDefinition struct{}
 
-type executionCriticRLMDefinition struct{ criticRLMDefinition }
+type executionCriticAgentDefinition struct{ criticAgentDefinition }
 
 type pointerCriticResult struct {
 	approved bool
 }
 
-type typedNilCriticRLMDefinition struct{}
+type typedNilCriticAgentDefinition struct{}
 
-func (typedNilCriticRLMDefinition) Name() string           { return "typed-nil-critic-test" }
-func (typedNilCriticRLMDefinition) SystemPrompt() string   { return "primary reviewer" }
-func (typedNilCriticRLMDefinition) AllowedTools() []string { return nil }
-func (typedNilCriticRLMDefinition) ParseResult(response string) (any, error) {
+func (typedNilCriticAgentDefinition) Name() string           { return "typed-nil-critic-test" }
+func (typedNilCriticAgentDefinition) SystemPrompt() string   { return "primary reviewer" }
+func (typedNilCriticAgentDefinition) AllowedTools() []string { return nil }
+func (typedNilCriticAgentDefinition) ParseResult(response string) (any, error) {
 	if response == "approve" {
 		return &pointerCriticResult{approved: true}, nil
 	}
 	return (*pointerCriticResult)(nil), fmt.Errorf("malformed review")
 }
-func (typedNilCriticRLMDefinition) ValidateResult(result any) error {
+func (typedNilCriticAgentDefinition) ValidateResult(result any) error {
 	if value, ok := result.(*pointerCriticResult); !ok || value == nil || !value.approved {
 		return fmt.Errorf("malformed review")
 	}
 	return nil
 }
-func (typedNilCriticRLMDefinition) RequiresApprovalCritic(result any) bool {
+func (typedNilCriticAgentDefinition) RequiresApprovalCritic(result any) bool {
 	value, ok := result.(*pointerCriticResult)
 	return ok && value != nil && value.approved
 }
-func (typedNilCriticRLMDefinition) ApprovalCriticSystemPrompt() string {
+func (typedNilCriticAgentDefinition) ApprovalCriticSystemPrompt() string {
 	return "adversarial critic"
 }
-func (typedNilCriticRLMDefinition) BuildApprovalCriticPrompt(string, any) (string, error) {
+func (typedNilCriticAgentDefinition) BuildApprovalCriticPrompt(string, any) (string, error) {
 	return "check the approval", nil
 }
 
-func (executionCriticRLMDefinition) ValidateRLMExecution(result any, execution *RLMResult) error {
+func (executionCriticAgentDefinition) ValidateAgentExecution(result any, execution *AgentResult) error {
 	if result == "approve" && (execution == nil || execution.ProviderID != "verified") {
 		return fmt.Errorf("approval lacks current-attempt execution evidence")
 	}
 	return nil
 }
 
-func (criticRLMDefinition) Name() string         { return "critic-review-test" }
-func (criticRLMDefinition) SystemPrompt() string { return "primary reviewer" }
-func (criticRLMDefinition) AllowedTools() []string {
+func (criticAgentDefinition) Name() string         { return "critic-review-test" }
+func (criticAgentDefinition) SystemPrompt() string { return "primary reviewer" }
+func (criticAgentDefinition) AllowedTools() []string {
 	return []string{"read_file"}
 }
-func (criticRLMDefinition) ParseResult(response string) (any, error) { return response, nil }
-func (criticRLMDefinition) ValidateResult(result any) error {
+func (criticAgentDefinition) ParseResult(response string) (any, error) { return response, nil }
+func (criticAgentDefinition) ValidateResult(result any) error {
 	if result != "approve" && result != "request-changes" {
 		return fmt.Errorf("malformed review")
 	}
 	return nil
 }
-func (criticRLMDefinition) RequiresApprovalCritic(result any) bool { return result == "approve" }
-func (criticRLMDefinition) ApprovalCriticSystemPrompt() string     { return "adversarial critic" }
-func (criticRLMDefinition) BuildApprovalCriticPrompt(originalPrompt string, primaryResult any) (string, error) {
+func (criticAgentDefinition) RequiresApprovalCritic(result any) bool { return result == "approve" }
+func (criticAgentDefinition) ApprovalCriticSystemPrompt() string     { return "adversarial critic" }
+func (criticAgentDefinition) BuildApprovalCriticPrompt(originalPrompt string, primaryResult any) (string, error) {
 	return "ORIGINAL EVIDENCE:\n" + originalPrompt + "\nPRIOR REVIEW:\n" + fmt.Sprint(primaryResult), nil
 }
-func (validatingRLMDefinition) ParseResult(response string) (any, error) { return response, nil }
-func (validatingRLMDefinition) ValidateResult(result any) error {
+func (validatingAgentDefinition) ParseResult(response string) (any, error) { return response, nil }
+func (validatingAgentDefinition) ValidateResult(result any) error {
 	if result != "valid" {
 		return fmt.Errorf("missing coverage evidence")
 	}
 	return nil
 }
 
-func TestRunRLMRetriesValidationFailureWithGuidance(t *testing.T) {
-	runner := &scriptedRLMExecutor{
+func TestRunAgentRetriesValidationFailureWithGuidance(t *testing.T) {
+	runner := &scriptedAgentExecutor{
 		responses: []string{"incomplete", "valid"},
 		traces: []*transparency.Trace{
-			newTestRLMTrace("primary-1", 100, 10, 0.01),
-			newTestRLMTrace("primary-2", 120, 12, 0.01),
+			newTestAgentTrace("primary-1", 100, 10, 0.01),
+			newTestAgentTrace("primary-2", 120, 12, 0.01),
 		},
 	}
-	framework := NewFramework(nil, nil).WithRLMRunner(runner)
+	framework := NewFramework(nil, nil).WithAgentRunner(runner)
 
-	result, err := framework.RunRLM(context.Background(), validatingRLMDefinition{}, RLMRunOpts{
+	result, err := framework.RunAgent(context.Background(), validatingAgentDefinition{}, AgentRunOpts{
 		UserPrompt:    "review this change",
 		MaxRetries:    2,
 		MaxIterations: 8,
 	})
 	if err != nil {
-		t.Fatalf("RunRLM() error = %v", err)
+		t.Fatalf("RunAgent() error = %v", err)
 	}
 	if got, want := result.Value, any("valid"); got != want {
 		t.Fatalf("result.Value = %#v, want %#v", got, want)
@@ -264,17 +264,43 @@ func TestRunRLMRetriesValidationFailureWithGuidance(t *testing.T) {
 	}
 }
 
-func TestRunRLMValidationRepairPreservesExactManifestAndEvidence(t *testing.T) {
-	runner := &scriptedRLMExecutor{responses: []string{"incomplete", "valid"}}
-	framework := NewFramework(nil, nil).WithRLMRunner(runner)
+func TestRunAgentContextAuditAccountsRenderedPromptOnce(t *testing.T) {
+	runner := &scriptedAgentExecutor{responses: []string{"valid"}}
+	framework := NewFramework(nil, nil).WithAgentRunner(runner)
+	audit := transparency.NewContextAudit()
+	audit.Add("worktree changes", 800)
+	audit.Add("AGENTS.md", 100)
+	prompt := strings.Repeat("x", 4000)
+
+	result, err := framework.RunAgent(context.Background(), validatingAgentDefinition{}, AgentRunOpts{
+		UserPrompt: prompt,
+		Audit:      audit,
+		MaxRetries: 1,
+	})
+	if err != nil {
+		t.Fatalf("RunAgent() error = %v", err)
+	}
+	if got := result.ContextAudit.TotalTokens(); got != 1000 {
+		t.Fatalf("context audit total = %d, want rendered prompt estimate 1000", got)
+	}
+	for _, source := range result.ContextAudit.Sources() {
+		if source.Name == "user prompt" {
+			t.Fatalf("context audit double-counted the assembled prompt: %#v", result.ContextAudit.Sources())
+		}
+	}
+}
+
+func TestRunAgentValidationRepairPreservesExactManifestAndEvidence(t *testing.T) {
+	runner := &scriptedAgentExecutor{responses: []string{"incomplete", "valid"}}
+	framework := NewFramework(nil, nil).WithAgentRunner(runner)
 	prompt := "EXACT MANIFEST:\n- first.go\n- second.go\n\nEVIDENCE:\nverified at head-sha"
 
-	_, err := framework.RunRLM(context.Background(), validatingRLMDefinition{}, RLMRunOpts{
+	_, err := framework.RunAgent(context.Background(), validatingAgentDefinition{}, AgentRunOpts{
 		UserPrompt: prompt,
 		MaxRetries: 2,
 	})
 	if err != nil {
-		t.Fatalf("RunRLM() error = %v", err)
+		t.Fatalf("RunAgent() error = %v", err)
 	}
 	if len(runner.prompts) != 2 {
 		t.Fatalf("attempts = %d, want 2", len(runner.prompts))
@@ -287,20 +313,20 @@ func TestRunRLMValidationRepairPreservesExactManifestAndEvidence(t *testing.T) {
 	}
 }
 
-func TestRunRLMToolSummaryRepairRestoresOriginalEvidence(t *testing.T) {
-	runner := &scriptedRLMExecutor{responses: []string{
+func TestRunAgentToolSummaryRepairRestoresOriginalEvidence(t *testing.T) {
+	runner := &scriptedAgentExecutor{responses: []string{
 		"Executed 3 tool calls: read_file, read_file, search_text",
 		"valid",
 	}}
-	framework := NewFramework(nil, nil).WithRLMRunner(runner)
+	framework := NewFramework(nil, nil).WithAgentRunner(runner)
 
-	result, err := framework.RunRLM(context.Background(), validatingRLMDefinition{}, RLMRunOpts{
+	result, err := framework.RunAgent(context.Background(), validatingAgentDefinition{}, AgentRunOpts{
 		UserPrompt:    "review this exact diff",
 		MaxRetries:    2,
 		MaxIterations: 3,
 	})
 	if err != nil {
-		t.Fatalf("RunRLM() error = %v", err)
+		t.Fatalf("RunAgent() error = %v", err)
 	}
 	if got, want := result.Value, any("valid"); got != want {
 		t.Fatalf("result.Value = %#v, want %#v", got, want)
@@ -320,25 +346,25 @@ func TestRunRLMToolSummaryRepairRestoresOriginalEvidence(t *testing.T) {
 	}
 }
 
-func TestRunRLMRepairsSavedUnfinishedToolCallOnce(t *testing.T) {
+func TestRunAgentRepairsSavedUnfinishedToolCallOnce(t *testing.T) {
 	const savedFailure = `I need to address the rejection: my prior review concluded DISPROVED for the main policy risk, yet the gate demands I either PROVE or DISPROVE the strongest plausible failure. Looking at the evidence more carefully, the policy change IS intentional (the detail string is transparent), but the filesAuthoritative flag is objectively misleading when the files API failed. Let me verify concrete behavior by inspecting the actual code lines and running a focused verification.
 
 <tool_call>`
-	runner := &scriptedRLMExecutor{responses: []string{
+	runner := &scriptedAgentExecutor{responses: []string{
 		"incomplete",
 		savedFailure,
 		"valid",
 	}}
-	framework := NewFramework(nil, nil).WithRLMRunner(runner)
+	framework := NewFramework(nil, nil).WithAgentRunner(runner)
 
-	result, err := framework.RunRLM(context.Background(), validatingRLMDefinition{}, RLMRunOpts{
+	result, err := framework.RunAgent(context.Background(), validatingAgentDefinition{}, AgentRunOpts{
 		UserPrompt:    "review this exact diff and manifest",
 		MaxRetries:    2,
 		MaxIterations: 8,
 		MaxToolCalls:  12,
 	})
 	if err != nil {
-		t.Fatalf("RunRLM() error = %v", err)
+		t.Fatalf("RunAgent() error = %v", err)
 	}
 	if result.Value != "valid" || result.Attempts != 3 {
 		t.Fatalf("result = %#v, want valid result after three attempts", result)
@@ -365,7 +391,7 @@ func TestRunRLMRepairsSavedUnfinishedToolCallOnce(t *testing.T) {
 	}
 }
 
-func TestRunRLMRepairsSavedBalancedToolCallOnce(t *testing.T) {
+func TestRunAgentRepairsSavedBalancedToolCallOnce(t *testing.T) {
 	const savedFailure = `I'll conduct a fresh, rigorous review of this PR. Let me start by examining the project guidance, diff, and structural evidence.
 
 ## Analysis
@@ -379,7 +405,7 @@ go test ./pkg/oneshot/commands -run TestAssemblePRContext
 </parameter>
 </function>
 </tool_call>`
-	runner := &scriptedRLMExecutor{
+	runner := &scriptedAgentExecutor{
 		responses: []string{
 			"incomplete",
 			savedFailure,
@@ -387,16 +413,16 @@ go test ./pkg/oneshot/commands -run TestAssemblePRContext
 		},
 		finishReasons: []string{"stop", "stop", "stop"},
 	}
-	framework := NewFramework(nil, nil).WithRLMRunner(runner)
+	framework := NewFramework(nil, nil).WithAgentRunner(runner)
 
-	result, err := framework.RunRLM(context.Background(), validatingRLMDefinition{}, RLMRunOpts{
+	result, err := framework.RunAgent(context.Background(), validatingAgentDefinition{}, AgentRunOpts{
 		UserPrompt:    "review this exact diff and manifest",
 		MaxRetries:    2,
 		MaxIterations: 8,
 		MaxToolCalls:  12,
 	})
 	if err != nil {
-		t.Fatalf("RunRLM() error = %v", err)
+		t.Fatalf("RunAgent() error = %v", err)
 	}
 	if result.Value != "valid" || result.Attempts != 3 {
 		t.Fatalf("result = %#v, want valid result after three attempts", result)
@@ -426,19 +452,19 @@ go test ./pkg/oneshot/commands -run TestAssemblePRContext
 	}
 }
 
-func TestRunRLMRepairsFinalToolCallFinishReasonDirectly(t *testing.T) {
-	runner := &scriptedRLMExecutor{
+func TestRunAgentRepairsFinalToolCallFinishReasonDirectly(t *testing.T) {
+	runner := &scriptedAgentExecutor{
 		responses:     []string{"Executed 5 tool calls: read_file", "valid"},
 		finishReasons: []string{"tool_calls", "stop"},
 	}
-	framework := NewFramework(nil, nil).WithRLMRunner(runner)
+	framework := NewFramework(nil, nil).WithAgentRunner(runner)
 
-	result, err := framework.RunRLM(context.Background(), validatingRLMDefinition{}, RLMRunOpts{
+	result, err := framework.RunAgent(context.Background(), validatingAgentDefinition{}, AgentRunOpts{
 		UserPrompt: "review this exact diff",
 		MaxRetries: 2,
 	})
 	if err != nil {
-		t.Fatalf("RunRLM() error = %v", err)
+		t.Fatalf("RunAgent() error = %v", err)
 	}
 	if result.Value != "valid" || result.Attempts != 2 {
 		t.Fatalf("result = %#v, want one direct clean repair", result)
@@ -451,19 +477,19 @@ func TestRunRLMRepairsFinalToolCallFinishReasonDirectly(t *testing.T) {
 	}
 }
 
-func TestRunRLMCleanRepairRetainsOneTextCorrection(t *testing.T) {
-	runner := &scriptedRLMExecutor{
+func TestRunAgentCleanRepairRetainsOneTextCorrection(t *testing.T) {
+	runner := &scriptedAgentExecutor{
 		responses:     []string{"Executed 5 tool calls: read_file", "grade B approval", "valid"},
 		finishReasons: []string{"tool_calls", "stop", "stop"},
 	}
-	framework := NewFramework(nil, nil).WithRLMRunner(runner)
+	framework := NewFramework(nil, nil).WithAgentRunner(runner)
 
-	result, err := framework.RunRLM(context.Background(), validatingRLMDefinition{}, RLMRunOpts{
+	result, err := framework.RunAgent(context.Background(), validatingAgentDefinition{}, AgentRunOpts{
 		UserPrompt: "review this exact diff",
 		MaxRetries: 2,
 	})
 	if err != nil {
-		t.Fatalf("RunRLM() error = %v", err)
+		t.Fatalf("RunAgent() error = %v", err)
 	}
 	if result.Value != "valid" || result.Attempts != 3 {
 		t.Fatalf("result = %#v, want one text correction after clean repair", result)
@@ -476,41 +502,41 @@ func TestRunRLMCleanRepairRetainsOneTextCorrection(t *testing.T) {
 	}
 }
 
-func TestRunRLMRejectsRepeatedUnfinishedToolCallsWithoutLoop(t *testing.T) {
+func TestRunAgentRejectsRepeatedUnfinishedToolCallsWithoutLoop(t *testing.T) {
 	const malformed = "review progress\n\n<tool_call>"
-	runner := &scriptedRLMExecutor{responses: []string{
+	runner := &scriptedAgentExecutor{responses: []string{
 		"incomplete",
 		malformed,
 		malformed,
 		"valid",
 	}}
-	framework := NewFramework(nil, nil).WithRLMRunner(runner)
+	framework := NewFramework(nil, nil).WithAgentRunner(runner)
 
-	result, err := framework.RunRLM(context.Background(), validatingRLMDefinition{}, RLMRunOpts{
+	result, err := framework.RunAgent(context.Background(), validatingAgentDefinition{}, AgentRunOpts{
 		UserPrompt: "review this change",
 		MaxRetries: 2,
 	})
 	if err == nil || !strings.Contains(err.Error(), "unfinished tool-call markup") {
-		t.Fatalf("RunRLM() error = %v, want unfinished tool-call rejection", err)
+		t.Fatalf("RunAgent() error = %v, want unfinished tool-call rejection", err)
 	}
 	if result == nil || result.Attempts != 3 || len(runner.prompts) != 3 {
 		t.Fatalf("result = %#v, prompts = %d, want exactly three attempts", result, len(runner.prompts))
 	}
 }
 
-func TestRunRLMRepairsTokenLimitedResponseOnce(t *testing.T) {
-	runner := &scriptedRLMExecutor{
+func TestRunAgentRepairsTokenLimitedResponseOnce(t *testing.T) {
+	runner := &scriptedAgentExecutor{
 		responses:     []string{"incomplete", "truncated review", "valid"},
 		finishReasons: []string{"stop", "length", "stop"},
 	}
-	framework := NewFramework(nil, nil).WithRLMRunner(runner)
+	framework := NewFramework(nil, nil).WithAgentRunner(runner)
 
-	result, err := framework.RunRLM(context.Background(), validatingRLMDefinition{}, RLMRunOpts{
+	result, err := framework.RunAgent(context.Background(), validatingAgentDefinition{}, AgentRunOpts{
 		UserPrompt: "review this change",
 		MaxRetries: 2,
 	})
 	if err != nil {
-		t.Fatalf("RunRLM() error = %v", err)
+		t.Fatalf("RunAgent() error = %v", err)
 	}
 	if result.Value != "valid" || result.Attempts != 3 {
 		t.Fatalf("result = %#v, want one clean repair after truncation", result)
@@ -523,21 +549,21 @@ func TestRunRLMRepairsTokenLimitedResponseOnce(t *testing.T) {
 	}
 }
 
-func TestRunRLMTokenLimitRepairPreservesExplicitOutputBudget(t *testing.T) {
-	runner := &scriptedRLMExecutor{
+func TestRunAgentTokenLimitRepairPreservesExplicitOutputBudget(t *testing.T) {
+	runner := &scriptedAgentExecutor{
 		responses:     []string{"incomplete", "truncated review", "valid"},
 		finishReasons: []string{"stop", "length", "stop"},
 	}
-	framework := NewFramework(nil, nil).WithRLMRunner(runner)
+	framework := NewFramework(nil, nil).WithAgentRunner(runner)
 
-	result, err := framework.RunRLM(context.Background(), validatingRLMDefinition{}, RLMRunOpts{
+	result, err := framework.RunAgent(context.Background(), validatingAgentDefinition{}, AgentRunOpts{
 		UserPrompt:         "review the complete repository",
 		MaxRetries:         2,
 		ReasoningMaxTokens: 4096,
 		MaxOutputTokens:    32768,
 	})
 	if err != nil {
-		t.Fatalf("RunRLM() error = %v", err)
+		t.Fatalf("RunAgent() error = %v", err)
 	}
 	if result.Value != "valid" || result.Attempts != 3 {
 		t.Fatalf("result = %#v, want one clean repair after truncation", result)
@@ -547,16 +573,16 @@ func TestRunRLMTokenLimitRepairPreservesExplicitOutputBudget(t *testing.T) {
 	}
 }
 
-func TestBuildRLMValidationRetryPromptHardensTextRepair(t *testing.T) {
+func TestBuildAgentValidationRetryPromptHardensTextRepair(t *testing.T) {
 	validationErr := fmt.Errorf("coverage ledger does not exactly match changed files: missing app/build/page.gsx; unexpected app/old/page.gsx")
-	previous := &RLMResult{Response: "## Coverage Ledger\n- File: app/page.gsx\n\n## Review\nNo findings."}
+	previous := &AgentResult{Response: "## Coverage Ledger\n- File: app/page.gsx\n\n## Review\nNo findings."}
 
-	prompt := buildRLMValidationRetryPrompt(
+	prompt := buildAgentValidationRetryPrompt(
 		"review this exact diff",
 		previous,
 		"primary",
 		validationErr,
-		rlmValidationRetryText,
+		agentValidationRetryText,
 	)
 
 	for _, want := range []string{
@@ -580,16 +606,16 @@ func TestBuildRLMValidationRetryPromptHardensTextRepair(t *testing.T) {
 	}
 }
 
-func TestRunRLMPreservesPartialValueOnExecutionDeadline(t *testing.T) {
-	trace := newTestRLMTrace("partial", 100, 10, 0.01)
-	framework := NewFramework(nil, nil).WithRLMRunner(partialRLMExecutor{
-		result: &RLMResult{Response: "incomplete evidence", Trace: trace},
+func TestRunAgentPreservesPartialValueOnExecutionDeadline(t *testing.T) {
+	trace := newTestAgentTrace("partial", 100, 10, 0.01)
+	framework := NewFramework(nil, nil).WithAgentRunner(partialAgentExecutor{
+		result: &AgentResult{Response: "incomplete evidence", Trace: trace},
 		err:    context.DeadlineExceeded,
 	})
 
-	result, err := framework.RunRLM(context.Background(), validatingRLMDefinition{}, RLMRunOpts{MaxRetries: 1})
+	result, err := framework.RunAgent(context.Background(), validatingAgentDefinition{}, AgentRunOpts{MaxRetries: 1})
 	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("RunRLM() error = %v, want deadline", err)
+		t.Fatalf("RunAgent() error = %v, want deadline", err)
 	}
 	if result == nil || !result.Incomplete || result.Value != "incomplete evidence" {
 		t.Fatalf("partial result = %#v, want incomplete parsed value", result)
@@ -602,16 +628,16 @@ func TestRunRLMPreservesPartialValueOnExecutionDeadline(t *testing.T) {
 	}
 }
 
-func TestRunRLMDeadlineKeepsEarlierRejectedResponse(t *testing.T) {
-	runner := &deadlineAfterRejectedRLMExecutor{}
-	framework := NewFramework(nil, nil).WithRLMRunner(runner)
+func TestRunAgentDeadlineKeepsEarlierRejectedResponse(t *testing.T) {
+	runner := &deadlineAfterRejectedAgentExecutor{}
+	framework := NewFramework(nil, nil).WithAgentRunner(runner)
 
-	result, err := framework.RunRLM(context.Background(), validatingRLMDefinition{}, RLMRunOpts{
+	result, err := framework.RunAgent(context.Background(), validatingAgentDefinition{}, AgentRunOpts{
 		UserPrompt: "review this change",
 		MaxRetries: 2,
 	})
 	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("RunRLM() error = %v, want deadline", err)
+		t.Fatalf("RunAgent() error = %v, want deadline", err)
 	}
 	if result == nil || result.Value != "prior rejected review" {
 		t.Fatalf("result = %#v, want the earlier rejected response", result)
@@ -621,34 +647,34 @@ func TestRunRLMDeadlineKeepsEarlierRejectedResponse(t *testing.T) {
 	}
 }
 
-func TestRunRLMAppliesDefinitionIterationBudget(t *testing.T) {
-	runner := &scriptedRLMExecutor{responses: []string{"valid"}}
-	framework := NewFramework(nil, nil).WithRLMRunner(runner)
-	if _, err := framework.RunRLM(context.Background(), budgetedRLMDefinition{}, RLMRunOpts{}); err != nil {
-		t.Fatalf("RunRLM() error = %v", err)
+func TestRunAgentAppliesDefinitionIterationBudget(t *testing.T) {
+	runner := &scriptedAgentExecutor{responses: []string{"valid"}}
+	framework := NewFramework(nil, nil).WithAgentRunner(runner)
+	if _, err := framework.RunAgent(context.Background(), budgetedAgentDefinition{}, AgentRunOpts{}); err != nil {
+		t.Fatalf("RunAgent() error = %v", err)
 	}
 	if len(runner.iterations) != 1 || runner.iterations[0] != 8 {
 		t.Fatalf("iteration budgets = %v, want [8]", runner.iterations)
 	}
 }
 
-func TestRunRLMAppliesCallerIterationBudget(t *testing.T) {
-	runner := &scriptedRLMExecutor{responses: []string{"valid"}}
-	framework := NewFramework(nil, nil).WithRLMRunner(runner)
-	if _, err := framework.RunRLM(context.Background(), budgetedRLMDefinition{}, RLMRunOpts{
+func TestRunAgentAppliesCallerIterationBudget(t *testing.T) {
+	runner := &scriptedAgentExecutor{responses: []string{"valid"}}
+	framework := NewFramework(nil, nil).WithAgentRunner(runner)
+	if _, err := framework.RunAgent(context.Background(), budgetedAgentDefinition{}, AgentRunOpts{
 		MaxIterations: 3,
 	}); err != nil {
-		t.Fatalf("RunRLM() error = %v", err)
+		t.Fatalf("RunAgent() error = %v", err)
 	}
 	if len(runner.iterations) != 1 || runner.iterations[0] != 3 {
 		t.Fatalf("iteration budgets = %v, want [3]", runner.iterations)
 	}
 }
 
-func TestRunRLMPropagatesBoundedReviewPlan(t *testing.T) {
-	runner := &scriptedRLMExecutor{responses: []string{"valid"}}
-	framework := NewFramework(nil, nil).WithRLMRunner(runner)
-	if _, err := framework.RunRLM(context.Background(), validatingRLMDefinition{}, RLMRunOpts{
+func TestRunAgentPropagatesBoundedReviewPlan(t *testing.T) {
+	runner := &scriptedAgentExecutor{responses: []string{"valid"}}
+	framework := NewFramework(nil, nil).WithAgentRunner(runner)
+	if _, err := framework.RunAgent(context.Background(), validatingAgentDefinition{}, AgentRunOpts{
 		MaxRetries:          1,
 		MaxIterations:       8,
 		MaxToolCalls:        12,
@@ -659,7 +685,7 @@ func TestRunRLMPropagatesBoundedReviewPlan(t *testing.T) {
 		ReasoningEffort:     "low",
 		ReasoningMaxTokens:  2048,
 	}); err != nil {
-		t.Fatalf("RunRLM() error = %v", err)
+		t.Fatalf("RunAgent() error = %v", err)
 	}
 	if len(runner.toolLimits) != 1 || runner.toolLimits[0] != 12 {
 		t.Fatalf("tool limits = %v, want [12]", runner.toolLimits)
@@ -684,56 +710,56 @@ func TestRunRLMPropagatesBoundedReviewPlan(t *testing.T) {
 	}
 }
 
-func TestRunRLMSharesCostBudgetAcrossRetries(t *testing.T) {
-	runner := &scriptedRLMExecutor{
+func TestRunAgentSharesCostBudgetAcrossRetries(t *testing.T) {
+	runner := &scriptedAgentExecutor{
 		responses: []string{"incomplete", "valid"},
 		traces: []*transparency.Trace{
-			newTestRLMTrace("primary-1", 100, 10, 0.12),
-			newTestRLMTrace("primary-2", 100, 10, 0.02),
+			newTestAgentTrace("primary-1", 100, 10, 0.12),
+			newTestAgentTrace("primary-2", 100, 10, 0.02),
 		},
 	}
-	framework := NewFramework(nil, nil).WithRLMRunner(runner)
+	framework := NewFramework(nil, nil).WithAgentRunner(runner)
 
-	_, err := framework.RunRLM(context.Background(), validatingRLMDefinition{}, RLMRunOpts{
+	_, err := framework.RunAgent(context.Background(), validatingAgentDefinition{}, AgentRunOpts{
 		MaxRetries:               2,
 		MaxCostUSD:               0.20,
 		ApprovalCriticReserveUSD: 0.05,
 	})
 	if err != nil {
-		t.Fatalf("RunRLM() error = %v", err)
+		t.Fatalf("RunAgent() error = %v", err)
 	}
 	assertFloatSliceNear(t, runner.maxCosts, []float64{0.15, 0.03})
 }
 
-func TestRunRLMApprovalCriticReceivesRemainingTotalBudget(t *testing.T) {
-	runner := &scriptedRLMExecutor{
+func TestRunAgentApprovalCriticReceivesRemainingTotalBudget(t *testing.T) {
+	runner := &scriptedAgentExecutor{
 		responses: []string{"approve", "approve"},
 		traces: []*transparency.Trace{
-			newTestRLMTrace("primary", 100, 10, 0.10),
-			newTestRLMTrace("critic", 100, 10, 0.05),
+			newTestAgentTrace("primary", 100, 10, 0.10),
+			newTestAgentTrace("critic", 100, 10, 0.05),
 		},
 	}
-	framework := NewFramework(nil, nil).WithRLMRunner(runner)
+	framework := NewFramework(nil, nil).WithAgentRunner(runner)
 
-	_, err := framework.RunRLM(context.Background(), criticRLMDefinition{}, RLMRunOpts{
+	_, err := framework.RunAgent(context.Background(), criticAgentDefinition{}, AgentRunOpts{
 		MaxRetries:               1,
 		MaxCostUSD:               0.20,
 		ApprovalCriticReserveUSD: 0.05,
 	})
 	if err != nil {
-		t.Fatalf("RunRLM() error = %v", err)
+		t.Fatalf("RunAgent() error = %v", err)
 	}
 	assertFloatSliceNear(t, runner.maxCosts, []float64{0.15, 0.10})
 }
 
-func TestRunRLMReservesTimeAndBoundsApprovalCritic(t *testing.T) {
-	runner := &scriptedRLMExecutor{responses: []string{"approve", "approve"}}
-	framework := NewFramework(nil, nil).WithRLMRunner(runner)
+func TestRunAgentReservesTimeAndBoundsApprovalCritic(t *testing.T) {
+	runner := &scriptedAgentExecutor{responses: []string{"approve", "approve"}}
+	framework := NewFramework(nil, nil).WithAgentRunner(runner)
 	parentDeadline := time.Now().Add(10 * time.Minute)
 	ctx, cancel := context.WithDeadline(context.Background(), parentDeadline)
 	defer cancel()
 
-	_, err := framework.RunRLM(ctx, criticRLMDefinition{}, RLMRunOpts{
+	_, err := framework.RunAgent(ctx, criticAgentDefinition{}, AgentRunOpts{
 		MaxRetries:               1,
 		MaxIterations:            6,
 		MaxToolCalls:             6,
@@ -745,7 +771,7 @@ func TestRunRLMReservesTimeAndBoundsApprovalCritic(t *testing.T) {
 		CriticSynthesisLead:      50 * time.Second,
 	})
 	if err != nil {
-		t.Fatalf("RunRLM() error = %v", err)
+		t.Fatalf("RunAgent() error = %v", err)
 	}
 	if len(runner.deadlines) != 2 {
 		t.Fatalf("phase deadlines = %v, want primary and critic", runner.deadlines)
@@ -773,16 +799,16 @@ func TestRunRLMReservesTimeAndBoundsApprovalCritic(t *testing.T) {
 	}
 }
 
-func TestRunRLMUsesDedicatedApprovalCriticRunner(t *testing.T) {
-	primary := &scriptedRLMExecutor{responses: []string{"approve"}}
-	critic := &scriptedRLMExecutor{responses: []string{"request-changes"}}
+func TestRunAgentUsesDedicatedApprovalCriticRunner(t *testing.T) {
+	primary := &scriptedAgentExecutor{responses: []string{"approve"}}
+	critic := &scriptedAgentExecutor{responses: []string{"request-changes"}}
 	framework := NewFramework(nil, nil).
-		WithRLMRunner(primary).
+		WithAgentRunner(primary).
 		WithApprovalCriticRunner(critic)
 
-	result, err := framework.RunRLM(context.Background(), criticRLMDefinition{}, RLMRunOpts{MaxRetries: 1})
+	result, err := framework.RunAgent(context.Background(), criticAgentDefinition{}, AgentRunOpts{MaxRetries: 1})
 	if err != nil {
-		t.Fatalf("RunRLM() error = %v", err)
+		t.Fatalf("RunAgent() error = %v", err)
 	}
 	if result.Value != "request-changes" {
 		t.Fatalf("result.Value = %#v, want dedicated critic result", result.Value)
@@ -807,14 +833,14 @@ func assertFloatSliceNear(t *testing.T, got, want []float64) {
 	}
 }
 
-func TestRunRLMRetriesExecutionEvidenceFailureWithGuidance(t *testing.T) {
-	runner := &scriptedRLMExecutor{
+func TestRunAgentRetriesExecutionEvidenceFailureWithGuidance(t *testing.T) {
+	runner := &scriptedAgentExecutor{
 		responses: []string{"valid", "valid"},
 		providers: []string{"unverified", "verified"},
 	}
-	framework := NewFramework(nil, nil).WithRLMRunner(runner)
+	framework := NewFramework(nil, nil).WithAgentRunner(runner)
 
-	result, err := framework.RunRLM(context.Background(), executionValidatingRLMDefinition{}, RLMRunOpts{
+	result, err := framework.RunAgent(context.Background(), executionValidatingAgentDefinition{}, AgentRunOpts{
 		UserPrompt:         "review this change",
 		MaxRetries:         2,
 		MaxIterations:      14,
@@ -823,7 +849,7 @@ func TestRunRLMRetriesExecutionEvidenceFailureWithGuidance(t *testing.T) {
 		SynthesisLead:      time.Minute,
 	})
 	if err != nil {
-		t.Fatalf("RunRLM() error = %v", err)
+		t.Fatalf("RunAgent() error = %v", err)
 	}
 	if result.Attempts != 2 || result.PrimaryAttempts != 2 {
 		t.Fatalf("attempt counts = total:%d primary:%d, want 2/2", result.Attempts, result.PrimaryAttempts)
@@ -845,34 +871,34 @@ func TestRunRLMRetriesExecutionEvidenceFailureWithGuidance(t *testing.T) {
 	}
 }
 
-func TestRunRLMKeepsUnboundedToolCallsDuringEvidenceRepair(t *testing.T) {
-	runner := &scriptedRLMExecutor{
+func TestRunAgentKeepsUnboundedToolCallsDuringEvidenceRepair(t *testing.T) {
+	runner := &scriptedAgentExecutor{
 		responses: []string{"valid", "valid"},
 		providers: []string{"unverified", "verified"},
 	}
-	framework := NewFramework(nil, nil).WithRLMRunner(runner)
+	framework := NewFramework(nil, nil).WithAgentRunner(runner)
 
-	if _, err := framework.RunRLM(context.Background(), executionValidatingRLMDefinition{}, RLMRunOpts{
+	if _, err := framework.RunAgent(context.Background(), executionValidatingAgentDefinition{}, AgentRunOpts{
 		UserPrompt:    "review this change",
 		MaxRetries:    2,
 		MaxIterations: 14,
 		MaxToolCalls:  0,
 	}); err != nil {
-		t.Fatalf("RunRLM() error = %v", err)
+		t.Fatalf("RunAgent() error = %v", err)
 	}
 	if got := runner.toolLimits; len(got) != 2 || got[0] != 0 || got[1] != 0 {
 		t.Fatalf("tool budgets = %v, want [0 0] for an unbounded review", got)
 	}
 }
 
-func TestRunRLMRepairsUntrustedExecutionClaimWithoutMoreTools(t *testing.T) {
-	runner := &scriptedRLMExecutor{
+func TestRunAgentRepairsUntrustedExecutionClaimWithoutMoreTools(t *testing.T) {
+	runner := &scriptedAgentExecutor{
 		responses: []string{"valid", "valid"},
 		providers: []string{"unverified", "verified"},
 	}
-	framework := NewFramework(nil, nil).WithRLMRunner(runner)
+	framework := NewFramework(nil, nil).WithAgentRunner(runner)
 
-	result, err := framework.RunRLM(context.Background(), textRepairExecutionValidatingRLMDefinition{}, RLMRunOpts{
+	result, err := framework.RunAgent(context.Background(), textRepairExecutionValidatingAgentDefinition{}, AgentRunOpts{
 		UserPrompt:    "review this change",
 		MaxRetries:    2,
 		MaxIterations: 8,
@@ -899,9 +925,9 @@ func TestRunRLMRepairsUntrustedExecutionClaimWithoutMoreTools(t *testing.T) {
 	}
 }
 
-func TestRunRLMApprovalCriticApproves(t *testing.T) {
-	runner := &scriptedRLMExecutor{responses: []string{"approve", "approve"}}
-	framework := NewFramework(nil, nil).WithRLMRunner(runner)
+func TestRunAgentApprovalCriticApproves(t *testing.T) {
+	runner := &scriptedAgentExecutor{responses: []string{"approve", "approve"}}
+	framework := NewFramework(nil, nil).WithAgentRunner(runner)
 	root := t.TempDir()
 	snapshot, err := model.NewReviewSnapshot(
 		model.ReviewSnapshotHead,
@@ -914,7 +940,7 @@ func TestRunRLMApprovalCriticApproves(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	result, err := framework.RunRLM(context.Background(), criticRLMDefinition{}, RLMRunOpts{
+	result, err := framework.RunAgent(context.Background(), criticAgentDefinition{}, AgentRunOpts{
 		UserPrompt: "diff evidence",
 		MaxRetries: 2,
 		SnapshotPolicy: model.ReviewSnapshotPolicy{
@@ -924,7 +950,7 @@ func TestRunRLMApprovalCriticApproves(t *testing.T) {
 		ReviewSnapshot: snapshot,
 	})
 	if err != nil {
-		t.Fatalf("RunRLM() error = %v", err)
+		t.Fatalf("RunAgent() error = %v", err)
 	}
 	if result.Value != "approve" {
 		t.Fatalf("result.Value = %#v, want critic approval", result.Value)
@@ -941,20 +967,20 @@ func TestRunRLMApprovalCriticApproves(t *testing.T) {
 	}
 }
 
-func TestRunRLMDedicatedCriticKeepsItsConfiguredModel(t *testing.T) {
-	primary := &scriptedRLMExecutor{responses: []string{"approve"}}
-	critic := &scriptedRLMExecutor{responses: []string{"approve"}}
+func TestRunAgentDedicatedCriticKeepsItsConfiguredModel(t *testing.T) {
+	primary := &scriptedAgentExecutor{responses: []string{"approve"}}
+	critic := &scriptedAgentExecutor{responses: []string{"approve"}}
 	framework := NewFramework(nil, nil).
-		WithRLMRunner(primary).
+		WithAgentRunner(primary).
 		WithApprovalCriticRunner(critic)
 
-	_, err := framework.RunRLM(context.Background(), criticRLMDefinition{}, RLMRunOpts{
+	_, err := framework.RunAgent(context.Background(), criticAgentDefinition{}, AgentRunOpts{
 		UserPrompt: "diff evidence",
 		MaxRetries: 1,
 		ModelID:    "codex/gpt-5.6-sol",
 	})
 	if err != nil {
-		t.Fatalf("RunRLM() error = %v", err)
+		t.Fatalf("RunAgent() error = %v", err)
 	}
 	if got := primary.models; len(got) != 1 || got[0] != "codex/gpt-5.6-sol" {
 		t.Fatalf("primary models = %v, want adaptive Sol override", got)
@@ -964,9 +990,9 @@ func TestRunRLMDedicatedCriticKeepsItsConfiguredModel(t *testing.T) {
 	}
 }
 
-func TestRunRLMRejectsSuppliedSnapshotAtUnexpectedCommit(t *testing.T) {
-	runner := &scriptedRLMExecutor{responses: []string{"request-changes"}}
-	framework := NewFramework(nil, nil).WithRLMRunner(runner)
+func TestRunAgentRejectsSuppliedSnapshotAtUnexpectedCommit(t *testing.T) {
+	runner := &scriptedAgentExecutor{responses: []string{"request-changes"}}
+	framework := NewFramework(nil, nil).WithAgentRunner(runner)
 	root := t.TempDir()
 	snapshot, err := model.NewReviewSnapshot(
 		model.ReviewSnapshotHead,
@@ -979,7 +1005,7 @@ func TestRunRLMRejectsSuppliedSnapshotAtUnexpectedCommit(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	result, err := framework.RunRLM(context.Background(), criticRLMDefinition{}, RLMRunOpts{
+	result, err := framework.RunAgent(context.Background(), criticAgentDefinition{}, AgentRunOpts{
 		UserPrompt: "diff evidence",
 		MaxRetries: 2,
 		SnapshotPolicy: model.ReviewSnapshotPolicy{
@@ -989,26 +1015,26 @@ func TestRunRLMRejectsSuppliedSnapshotAtUnexpectedCommit(t *testing.T) {
 		ReviewSnapshot: snapshot,
 	})
 	if err == nil || !strings.Contains(err.Error(), "does not match expected commit") {
-		t.Fatalf("RunRLM() error = %v, want expected-commit mismatch", err)
+		t.Fatalf("RunAgent() error = %v, want expected-commit mismatch", err)
 	}
 	if result == nil {
-		t.Fatal("RunRLM() result = nil, want transparent partial result")
+		t.Fatal("RunAgent() result = nil, want transparent partial result")
 	}
 	if len(runner.prompts) != 0 {
 		t.Fatalf("model invocations = %d, want zero", len(runner.prompts))
 	}
 }
 
-func TestRunRLMApprovalCriticRequestChangesWins(t *testing.T) {
-	runner := &scriptedRLMExecutor{responses: []string{"approve", "request-changes"}}
-	framework := NewFramework(nil, nil).WithRLMRunner(runner)
+func TestRunAgentApprovalCriticRequestChangesWins(t *testing.T) {
+	runner := &scriptedAgentExecutor{responses: []string{"approve", "request-changes"}}
+	framework := NewFramework(nil, nil).WithAgentRunner(runner)
 
-	result, err := framework.RunRLM(context.Background(), criticRLMDefinition{}, RLMRunOpts{
+	result, err := framework.RunAgent(context.Background(), criticAgentDefinition{}, AgentRunOpts{
 		UserPrompt: "diff evidence",
 		MaxRetries: 2,
 	})
 	if err != nil {
-		t.Fatalf("RunRLM() error = %v", err)
+		t.Fatalf("RunAgent() error = %v", err)
 	}
 	if result.Value != "request-changes" {
 		t.Fatalf("result.Value = %#v, want conservative critic result", result.Value)
@@ -1016,19 +1042,19 @@ func TestRunRLMApprovalCriticRequestChangesWins(t *testing.T) {
 	assertReviewAttemptCounts(t, result, 2, 1, 1)
 }
 
-func TestRunRLMDoesNotReusePrimaryExecutionEvidenceForCritic(t *testing.T) {
-	runner := &scriptedRLMExecutor{
+func TestRunAgentDoesNotReusePrimaryExecutionEvidenceForCritic(t *testing.T) {
+	runner := &scriptedAgentExecutor{
 		responses: []string{"approve", "approve", "request-changes"},
 		providers: []string{"verified", "unverified", "unverified"},
 	}
-	framework := NewFramework(nil, nil).WithRLMRunner(runner)
+	framework := NewFramework(nil, nil).WithAgentRunner(runner)
 
-	result, err := framework.RunRLM(context.Background(), executionCriticRLMDefinition{}, RLMRunOpts{
+	result, err := framework.RunAgent(context.Background(), executionCriticAgentDefinition{}, AgentRunOpts{
 		UserPrompt: "diff evidence",
 		MaxRetries: 2,
 	})
 	if err != nil {
-		t.Fatalf("RunRLM() error = %v", err)
+		t.Fatalf("RunAgent() error = %v", err)
 	}
 	if result.Value != "request-changes" {
 		t.Fatalf("result.Value = %#v, want critic non-approval", result.Value)
@@ -1039,16 +1065,16 @@ func TestRunRLMDoesNotReusePrimaryExecutionEvidenceForCritic(t *testing.T) {
 	}
 }
 
-func TestRunRLMNonApprovalSkipsCritic(t *testing.T) {
-	runner := &scriptedRLMExecutor{responses: []string{"request-changes"}}
-	framework := NewFramework(nil, nil).WithRLMRunner(runner)
+func TestRunAgentNonApprovalSkipsCritic(t *testing.T) {
+	runner := &scriptedAgentExecutor{responses: []string{"request-changes"}}
+	framework := NewFramework(nil, nil).WithAgentRunner(runner)
 
-	result, err := framework.RunRLM(context.Background(), criticRLMDefinition{}, RLMRunOpts{
+	result, err := framework.RunAgent(context.Background(), criticAgentDefinition{}, AgentRunOpts{
 		UserPrompt: "diff evidence",
 		MaxRetries: 2,
 	})
 	if err != nil {
-		t.Fatalf("RunRLM() error = %v", err)
+		t.Fatalf("RunAgent() error = %v", err)
 	}
 	if result.Value != "request-changes" {
 		t.Fatalf("result.Value = %#v, want primary non-approval", result.Value)
@@ -1059,16 +1085,16 @@ func TestRunRLMNonApprovalSkipsCritic(t *testing.T) {
 	}
 }
 
-func TestRunRLMApprovalCriticRetriesMalformedResultAndExposesCounts(t *testing.T) {
-	runner := &scriptedRLMExecutor{responses: []string{"approve", "malformed", "request-changes"}}
-	framework := NewFramework(nil, nil).WithRLMRunner(runner)
+func TestRunAgentApprovalCriticRetriesMalformedResultAndExposesCounts(t *testing.T) {
+	runner := &scriptedAgentExecutor{responses: []string{"approve", "malformed", "request-changes"}}
+	framework := NewFramework(nil, nil).WithAgentRunner(runner)
 
-	result, err := framework.RunRLM(context.Background(), criticRLMDefinition{}, RLMRunOpts{
+	result, err := framework.RunAgent(context.Background(), criticAgentDefinition{}, AgentRunOpts{
 		UserPrompt: "diff evidence",
 		MaxRetries: 2,
 	})
 	if err != nil {
-		t.Fatalf("RunRLM() error = %v", err)
+		t.Fatalf("RunAgent() error = %v", err)
 	}
 	if result.Value != "request-changes" {
 		t.Fatalf("result.Value = %#v, want corrected critic result", result.Value)
@@ -1085,16 +1111,16 @@ func TestRunRLMApprovalCriticRetriesMalformedResultAndExposesCounts(t *testing.T
 	}
 }
 
-func TestRunRLMCriticFailurePreservesPrimaryWhenCriticValueIsTypedNil(t *testing.T) {
-	runner := &scriptedRLMExecutor{responses: []string{"approve", "malformed"}}
-	framework := NewFramework(nil, nil).WithRLMRunner(runner)
+func TestRunAgentCriticFailurePreservesPrimaryWhenCriticValueIsTypedNil(t *testing.T) {
+	runner := &scriptedAgentExecutor{responses: []string{"approve", "malformed"}}
+	framework := NewFramework(nil, nil).WithAgentRunner(runner)
 
-	result, err := framework.RunRLM(context.Background(), typedNilCriticRLMDefinition{}, RLMRunOpts{
+	result, err := framework.RunAgent(context.Background(), typedNilCriticAgentDefinition{}, AgentRunOpts{
 		UserPrompt: "diff evidence",
 		MaxRetries: 1,
 	})
 	if err == nil || !strings.Contains(err.Error(), "approval critic review validation failed") {
-		t.Fatalf("RunRLM() error = %v, want critic validation error", err)
+		t.Fatalf("RunAgent() error = %v, want critic validation error", err)
 	}
 	primary, ok := result.Value.(*pointerCriticResult)
 	if !ok || primary == nil || !primary.approved {
@@ -1105,25 +1131,25 @@ func TestRunRLMCriticFailurePreservesPrimaryWhenCriticValueIsTypedNil(t *testing
 	}
 }
 
-func TestRunRLMAggregatesEveryPrimaryRetryAndCriticTrace(t *testing.T) {
+func TestRunAgentAggregatesEveryPrimaryRetryAndCriticTrace(t *testing.T) {
 	traces := []*transparency.Trace{
-		newTestRLMTrace("primary-1", 100, 10, 0.01),
-		newTestRLMTrace("primary-2", 200, 20, 0.02),
-		newTestRLMTrace("critic-1", 300, 30, 0.03),
-		newTestRLMTrace("critic-2", 400, 40, 0.04),
+		newTestAgentTrace("primary-1", 100, 10, 0.01),
+		newTestAgentTrace("primary-2", 200, 20, 0.02),
+		newTestAgentTrace("critic-1", 300, 30, 0.03),
+		newTestAgentTrace("critic-2", 400, 40, 0.04),
 	}
-	runner := &scriptedRLMExecutor{
+	runner := &scriptedAgentExecutor{
 		responses: []string{"malformed", "approve", "malformed", "request-changes"},
 		traces:    traces,
 	}
-	framework := NewFramework(nil, nil).WithRLMRunner(runner)
+	framework := NewFramework(nil, nil).WithAgentRunner(runner)
 
-	result, err := framework.RunRLM(context.Background(), criticRLMDefinition{}, RLMRunOpts{
+	result, err := framework.RunAgent(context.Background(), criticAgentDefinition{}, AgentRunOpts{
 		UserPrompt: "diff evidence",
 		MaxRetries: 2,
 	})
 	if err != nil {
-		t.Fatalf("RunRLM() error = %v", err)
+		t.Fatalf("RunAgent() error = %v", err)
 	}
 	assertReviewAttemptCounts(t, result, 4, 2, 2)
 	if result.Trace == nil {
@@ -1149,7 +1175,7 @@ func TestRunRLMAggregatesEveryPrimaryRetryAndCriticTrace(t *testing.T) {
 	}
 }
 
-func newTestRLMTrace(id string, input, output int, cost float64) *transparency.Trace {
+func newTestAgentTrace(id string, input, output int, cost float64) *transparency.Trace {
 	return &transparency.Trace{
 		ID:        id,
 		Timestamp: time.Unix(int64(input), 0),
@@ -1170,18 +1196,18 @@ func assertReviewAttemptCounts(t *testing.T, result *RunResult, total, primary, 
 	}
 }
 
-func TestRunRLMReturnsValidationErrorAfterRetryBudget(t *testing.T) {
-	runner := &scriptedRLMExecutor{responses: []string{"bad", "still bad"}}
-	framework := NewFramework(nil, nil).WithRLMRunner(runner)
+func TestRunAgentReturnsValidationErrorAfterRetryBudget(t *testing.T) {
+	runner := &scriptedAgentExecutor{responses: []string{"bad", "still bad"}}
+	framework := NewFramework(nil, nil).WithAgentRunner(runner)
 
-	result, err := framework.RunRLM(context.Background(), validatingRLMDefinition{}, RLMRunOpts{
+	result, err := framework.RunAgent(context.Background(), validatingAgentDefinition{}, AgentRunOpts{
 		UserPrompt: "review this change",
 		MaxRetries: 2,
 	})
 	if err == nil || !strings.Contains(err.Error(), "after 2 attempts") {
-		t.Fatalf("RunRLM() error = %v, want exhausted validation error", err)
+		t.Fatalf("RunAgent() error = %v, want exhausted validation error", err)
 	}
 	if result == nil || !result.Incomplete || result.Value != "still bad" {
-		t.Fatalf("RunRLM() result = %#v, want last rejected value preserved as incomplete", result)
+		t.Fatalf("RunAgent() result = %#v, want last rejected value preserved as incomplete", result)
 	}
 }

@@ -150,7 +150,7 @@ func (p *CodexCLIProvider) ChatCompletion(ctx context.Context, req ChatRequest) 
 	var commandEnv []string
 	cleanupWorkspace := func() {}
 	if req.ReviewSnapshot != nil {
-		// Reproduce the descriptor captured once by Framework.RunRLM. Codex may
+		// Reproduce the descriptor captured once by Framework.RunAgent. Codex may
 		// run focused verification against a read-only disposable worktree while
 		// build tools write only beneath a private temporary directory. Reproduction
 		// failures are fatal: falling back to the live checkout could expose state

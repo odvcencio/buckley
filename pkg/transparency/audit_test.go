@@ -104,3 +104,32 @@ func TestContextAuditMergeNil(t *testing.T) {
 		t.Errorf("expected total 100, got %d", total)
 	}
 }
+
+func TestContextAuditAddRemainderAvoidsDoubleCounting(t *testing.T) {
+	audit := NewContextAudit()
+	audit.Add("git diff", 800)
+	audit.Add("AGENTS.md", 100)
+
+	audit.AddRemainder("prompt framing", 1000)
+	audit.AddRemainder("already accounted", 950)
+
+	if total := audit.TotalTokens(); total != 1000 {
+		t.Fatalf("total = %d, want aggregate prompt total 1000", total)
+	}
+	sources := audit.Sources()
+	if len(sources) != 3 {
+		t.Fatalf("sources = %d, want 3", len(sources))
+	}
+	found := false
+	for _, source := range sources {
+		if source.Name == "prompt framing" && source.Tokens == 100 {
+			found = true
+		}
+		if source.Name == "already accounted" {
+			t.Fatal("non-positive remainder should not be recorded")
+		}
+	}
+	if !found {
+		t.Fatalf("prompt framing remainder missing: %#v", sources)
+	}
+}

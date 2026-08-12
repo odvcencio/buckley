@@ -153,7 +153,7 @@ type ChatRequest struct {
 	PromptCache          *PromptCache      `json:"-"`
 	// ReviewSnapshot pins native verification to the immutable Git state
 	// captured once for an entire review run. Native providers materialize it;
-	// API-backed review tools are bound to the same descriptor by the RLM runner.
+	// API-backed review tools are bound to the same descriptor by the agent runner.
 	ReviewSnapshot *ReviewSnapshot `json:"-"`
 }
 

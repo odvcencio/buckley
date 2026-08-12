@@ -270,14 +270,14 @@ func newReviewCommandRuntime(cfg *config.Config, mgr *model.Manager) (*reviewCom
 		registry.ConfigureContainers(cfg, cwd)
 	}
 
-	rlmRunner := oneshot.NewRLMRunner(oneshot.RLMRunnerConfig{
+	agentRunner := oneshot.NewAgentRunner(oneshot.AgentRunnerConfig{
 		Models:          mgr,
 		Registry:        registry,
 		Ledger:          ledger,
 		ModelID:         modelID,
 		ReasoningEffort: reasoningEffort,
 	})
-	framework := oneshot.NewFramework(nil, arbEngine).WithRLMRunner(rlmRunner)
+	framework := oneshot.NewFramework(nil, arbEngine).WithAgentRunner(agentRunner)
 	policy := defaultAutomatedReviewOptions(cfg)
 	policy.modelID = modelID
 	policy.adaptiveCodexModel = isAdaptiveCodexReviewSelector(resolveReviewModelSelector(cfg))
@@ -291,7 +291,7 @@ func newReviewCommandRuntime(cfg *config.Config, mgr *model.Manager) (*reviewCom
 	criticReasoning := ""
 	criticModel, criticReasoning = config.SplitReasoningSuffix(criticModel)
 	if criticModel != "" && criticModel != modelID {
-		criticRunner := oneshot.NewRLMRunner(oneshot.RLMRunnerConfig{
+		criticRunner := oneshot.NewAgentRunner(oneshot.AgentRunnerConfig{
 			Models:          mgr,
 			Registry:        registry,
 			Ledger:          ledger,
@@ -402,7 +402,7 @@ func runProjectReviewWithPolicy(ctx context.Context, framework *oneshot.Framewor
 		reasoningMaxTokens: 4096,
 		maxOutputTokens:    projectReviewOutputTokenBudget,
 		// Project reviews are exhaustive by default. The caller's outer
-		// timeout and the RLM governor remain the safety boundaries.
+		// timeout and the agent governor remain the safety boundaries.
 		maxIterations:        0,
 		maxToolCalls:         0,
 		maxVerificationCalls: 1,
@@ -413,7 +413,7 @@ func runProjectReviewWithPolicy(ctx context.Context, framework *oneshot.Framewor
 	reviewPolicy = reviewPolicy.withExecutionPlan(plan)
 	spinner.SetMessage(fmt.Sprintf("Running %s review with %s reasoning...", reviewPolicy.sizeClass, reviewPolicy.reasoningEffort))
 	userPrompt := appendReviewExecutionPlan(commands.BuildProjectPrompt(projectCtx), reviewPolicy)
-	fwResult, runErr := framework.RunRLM(ctx, commands.ReviewProjectDef{}, oneshot.RLMRunOpts{
+	fwResult, runErr := framework.RunAgent(ctx, commands.ReviewProjectDef{}, oneshot.AgentRunOpts{
 		UserPrompt:               userPrompt,
 		Audit:                    audit,
 		MaxRetries:               reviewPolicy.maxRetries,
@@ -434,7 +434,7 @@ func runProjectReviewWithPolicy(ctx context.Context, framework *oneshot.Framewor
 	})
 	if runErr != nil {
 		spinner.StopWithError(runErr.Error())
-		partial := reviewResultFromRLM(fwResult, audit)
+		partial := reviewResultFromAgent(fwResult, audit)
 		if strings.TrimSpace(partial.reviewText) != "" {
 			return partial, fmt.Errorf("review failed: %w", runErr)
 		}
@@ -442,7 +442,7 @@ func runProjectReviewWithPolicy(ctx context.Context, framework *oneshot.Framewor
 	}
 
 	spinner.StopWithSuccess("Project review complete")
-	return reviewResultFromRLM(fwResult, audit), nil
+	return reviewResultFromAgent(fwResult, audit), nil
 }
 
 func runBranchReviewWithPolicy(ctx context.Context, opts reviewCommandOptions, framework *oneshot.Framework, reviewPolicy automatedReviewOptions) (*reviewCommandResult, error) {
@@ -503,7 +503,7 @@ func runBranchReviewWithPolicy(ctx context.Context, opts reviewCommandOptions, f
 		ContextIncomplete: branchCtx.DiffTruncated || branchCtx.UnstagedTruncated || branchCtx.ContextIncomplete,
 		ApprovalCritic:    reviewPolicy.approvalCritic,
 	}
-	fwResult, runErr := framework.RunRLM(ctx, reviewDef, oneshot.RLMRunOpts{
+	fwResult, runErr := framework.RunAgent(ctx, reviewDef, oneshot.AgentRunOpts{
 		UserPrompt:               userPrompt,
 		Audit:                    audit,
 		MaxRetries:               reviewPolicy.maxRetries,
@@ -528,7 +528,7 @@ func runBranchReviewWithPolicy(ctx context.Context, opts reviewCommandOptions, f
 	})
 	if runErr != nil {
 		spinner.StopWithError(runErr.Error())
-		partial := reviewResultFromRLM(fwResult, audit)
+		partial := reviewResultFromAgent(fwResult, audit)
 		if strings.TrimSpace(partial.reviewText) != "" {
 			return partial, fmt.Errorf("review failed: %w", runErr)
 		}
@@ -536,7 +536,7 @@ func runBranchReviewWithPolicy(ctx context.Context, opts reviewCommandOptions, f
 	}
 
 	spinner.StopWithSuccess(fmt.Sprintf("%s review complete", titleReviewScope(reviewScope)))
-	return reviewResultFromRLM(fwResult, audit), nil
+	return reviewResultFromAgent(fwResult, audit), nil
 }
 
 func branchReviewSnapshotPolicy(scope string, includeUnstaged bool, untrackedPaths []string) model.ReviewSnapshotPolicy {
@@ -573,14 +573,14 @@ func reviewChangedFilePaths(files []commands.FileChange) []string {
 	return paths
 }
 
-func reviewResultFromRLM(fwResult *oneshot.RunResult, audit *transparency.ContextAudit) *reviewCommandResult {
+func reviewResultFromAgent(fwResult *oneshot.RunResult, audit *transparency.ContextAudit) *reviewCommandResult {
 	result := &reviewCommandResult{contextAudit: audit}
 	if fwResult == nil {
 		return result
 	}
-	if rlmResult, ok := fwResult.Value.(*commands.ReviewRLMResult); ok && rlmResult != nil {
-		result.reviewText = rlmResult.Review
-		result.parsed = rlmResult.Parsed
+	if agentResult, ok := fwResult.Value.(*commands.ReviewAgentResult); ok && agentResult != nil {
+		result.reviewText = agentResult.Review
+		result.parsed = agentResult.Parsed
 	}
 	result.trace = fwResult.Trace
 	result.attempts = fwResult.Attempts
@@ -945,7 +945,7 @@ func buildReviewMenuItems(parsed *commands.ParsedReview) []terminal.MenuItem {
 	return items
 }
 
-// fixFinding uses the framework's RLM execution to apply a fix for a finding.
+// fixFinding uses the framework's tool agent execution to apply a fix.
 func fixFinding(ctx context.Context, finding *commands.Finding, mgr *model.Manager, registry *tool.Registry, modelID, reasoningEffort string, ledger *transparency.CostLedger, timeout time.Duration) error {
 	termOut.Newline()
 	termOut.Header(fmt.Sprintf("Fixing %s: %s", finding.ID, finding.Title))
@@ -960,18 +960,18 @@ func fixFinding(ctx context.Context, finding *commands.Finding, mgr *model.Manag
 	// Build fix prompt
 	prompt := buildFixPrompt(finding)
 
-	// Create RLM runner for fix
-	rlmRunner := oneshot.NewRLMRunner(oneshot.RLMRunnerConfig{
+	// Create the tool agent runner for the fix.
+	agentRunner := oneshot.NewAgentRunner(oneshot.AgentRunnerConfig{
 		Models:          mgr,
 		Registry:        registry,
 		ModelID:         modelID,
 		ReasoningEffort: reasoningEffort,
 		Ledger:          ledger,
 	})
-	framework := oneshot.NewFramework(nil, nil).WithRLMRunner(rlmRunner)
+	framework := oneshot.NewFramework(nil, nil).WithAgentRunner(agentRunner)
 
-	// Execute fix using framework's RLM path
-	fwResult, err := framework.RunRLM(fixCtx, commands.FixFindingDef{}, oneshot.RLMRunOpts{
+	// Execute the fix using the framework's agent path.
+	fwResult, err := framework.RunAgent(fixCtx, commands.FixFindingDef{}, oneshot.AgentRunOpts{
 		UserPrompt: prompt,
 	})
 	if err != nil {

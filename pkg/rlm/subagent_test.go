@@ -82,6 +82,31 @@ func TestNewSubAgentValidation(t *testing.T) {
 	}
 }
 
+func TestNewSubAgentSessionIdentity(t *testing.T) {
+	registry := tool.NewEmptyRegistry()
+	deps := SubAgentDeps{Models: &model.Manager{}, Registry: registry}
+
+	runtimeAgent, err := NewSubAgent(SubAgentConfig{ID: "worker-1", Model: "test-model"}, deps)
+	if err != nil {
+		t.Fatalf("NewSubAgent(default session): %v", err)
+	}
+	if got := runtimeAgent.sessionID; got != "rlm-subagent-worker-1" {
+		t.Fatalf("default session ID = %q, want RLM identity", got)
+	}
+
+	reviewAgent, err := NewSubAgent(SubAgentConfig{
+		ID:        "reviewer-1",
+		SessionID: "agent-review-1",
+		Model:     "test-model",
+	}, deps)
+	if err != nil {
+		t.Fatalf("NewSubAgent(custom session): %v", err)
+	}
+	if got := reviewAgent.sessionID; got != "agent-review-1" {
+		t.Fatalf("custom session ID = %q, want neutral caller identity", got)
+	}
+}
+
 func TestBudgetedMaxOutputTokensReservesInputAndCapsCompletion(t *testing.T) {
 	pricing := model.ModelPricing{Prompt: 0.72, Completion: 3.50}
 	got, err := budgetedMaxOutputTokens(pricing, 40_000, 0.10, 0.15)

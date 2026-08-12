@@ -60,20 +60,20 @@ type Definition interface {
 	Unmarshal(result json.RawMessage) (any, error)
 }
 
-// RLMDefinition describes a oneshot command that requires full RLM sub-agent
-// execution with multi-turn tool access.
+// AgentDefinition describes a oneshot command that requires one autonomous
+// tool-using agent with multi-turn access.
 //
-// Commands implementing this interface are dispatched through RunRLM instead
+// Commands implementing this interface are dispatched through RunAgent instead
 // of the single-tool invoke+retry loop used by Definition.
 //
 // The framework detects which interface a definition implements and routes:
-//   - Definition     -> single-tool invoke+retry (commit, PR)
-//   - RLMDefinition  -> full RLM sub-agent execution (review)
-type RLMDefinition interface {
+//   - Definition      -> single-tool invoke+retry (commit, PR)
+//   - AgentDefinition -> one multi-turn tool agent (review)
+type AgentDefinition interface {
 	// Name returns the command name.
 	Name() string
 
-	// SystemPrompt returns the system prompt for the RLM agent.
+	// SystemPrompt returns the system prompt for the agent.
 	SystemPrompt() string
 
 	// AllowedTools returns exact registry tool names the agent may use
@@ -84,70 +84,70 @@ type RLMDefinition interface {
 	ParseResult(response string) (any, error)
 }
 
-// RLMExecutionBudget optionally caps model/tool iterations for commands where
+// AgentExecutionBudget optionally caps model/tool iterations for commands where
 // bounded sampling is part of the product contract.
-type RLMExecutionBudget interface {
-	MaxRLMIterations() int
+type AgentExecutionBudget interface {
+	MaxAgentIterations() int
 }
 
-// RLMResultValidator optionally adds semantic validation to an RLM command.
-// RunRLM retries responses that fail this validation, using the validation
+// AgentResultValidator optionally adds semantic validation to an agent command.
+// RunAgent retries responses that fail this validation, using the validation
 // error as corrective guidance for the next attempt.
-type RLMResultValidator interface {
+type AgentResultValidator interface {
 	ValidateResult(result any) error
 }
 
-// RLMExecutionValidator optionally validates that claims in the parsed result
+// AgentExecutionValidator optionally validates that claims in the parsed result
 // are backed by evidence from the just-completed agent execution. Review
 // definitions use this to prevent an API model from claiming passing local
 // verification without successful snapshot-bound verification tool calls.
-type RLMExecutionValidator interface {
-	ValidateRLMExecution(result any, execution *RLMResult) error
+type AgentExecutionValidator interface {
+	ValidateAgentExecution(result any, execution *AgentResult) error
 }
 
-// RLMExecutionEvidenceRequiredError marks a validation failure that needs new
+// AgentExecutionEvidenceRequiredError marks a validation failure that needs new
 // inspection or verification evidence. A text-only repair cannot resolve it.
-type RLMExecutionEvidenceRequiredError struct {
+type AgentExecutionEvidenceRequiredError struct {
 	err error
 }
 
-func (e *RLMExecutionEvidenceRequiredError) Error() string {
+func (e *AgentExecutionEvidenceRequiredError) Error() string {
 	if e == nil || e.err == nil {
-		return "RLM execution evidence is required"
+		return "agent execution evidence is required"
 	}
 	return e.err.Error()
 }
 
-func (e *RLMExecutionEvidenceRequiredError) Unwrap() error {
+func (e *AgentExecutionEvidenceRequiredError) Unwrap() error {
 	if e == nil {
 		return nil
 	}
 	return e.err
 }
 
-// RequireRLMExecutionEvidence marks an error for a bounded tool-enabled retry.
-func RequireRLMExecutionEvidence(err error) error {
+// RequireAgentExecutionEvidence marks an error for a bounded tool-enabled retry.
+func RequireAgentExecutionEvidence(err error) error {
 	if err == nil {
 		return nil
 	}
-	return &RLMExecutionEvidenceRequiredError{err: err}
+	return &AgentExecutionEvidenceRequiredError{err: err}
 }
 
-// IsRLMExecutionEvidenceRequired reports whether validation needs new evidence.
-func IsRLMExecutionEvidenceRequired(err error) bool {
-	var target *RLMExecutionEvidenceRequiredError
+// IsAgentExecutionEvidenceRequired reports whether validation needs new evidence.
+func IsAgentExecutionEvidenceRequired(err error) bool {
+	var target *AgentExecutionEvidenceRequiredError
 	return errors.As(err, &target)
 }
 
-// RLMApprovalCritic optionally requires an independent adversarial pass after
-// the primary RLM result has been parsed and validated. Review definitions use
+// AgentApprovalCritic optionally requires an independent adversarial pass after
+// the primary agent result has been parsed and validated. Review definitions use
 // this to make an approval provisional until a fresh sub-agent has searched the
 // same evidence for missed blockers and returned its own validated review.
 //
 // The framework only invokes the critic when RequiresApprovalCritic returns
 // true. The critic result is parsed and validated through the original
-// RLMDefinition and becomes the final result.
-type RLMApprovalCritic interface {
+// AgentDefinition and becomes the final result.
+type AgentApprovalCritic interface {
 	// RequiresApprovalCritic reports whether the validated primary result needs
 	// an independent second pass.
 	RequiresApprovalCritic(result any) bool

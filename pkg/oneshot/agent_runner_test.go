@@ -15,32 +15,32 @@ import (
 )
 
 func TestNativeCodexReviewRunsWithoutCatalogPricing(t *testing.T) {
-	if got := effectiveRLMMaxCostUSD("codex", 0.15); got != 0 {
+	if got := effectiveAgentMaxCostUSD("codex", 0.15); got != 0 {
 		t.Fatalf("Codex cost budget = %v, want zero", got)
 	}
-	if got := effectiveRLMMaxCostUSD("openrouter", 0.15); got != 0.15 {
+	if got := effectiveAgentMaxCostUSD("openrouter", 0.15); got != 0.15 {
 		t.Fatalf("OpenRouter cost budget = %v, want 0.15", got)
 	}
 	pricing := transparency.ModelPricing{InputPerMillion: 1, OutputPerMillion: 2}
 	tokens := transparency.TokenUsage{Input: 1_000_000, Output: 1_000_000}
-	if got := effectiveRLMInvocationCost("codex", pricing, tokens); got != 0 {
+	if got := effectiveAgentInvocationCost("codex", pricing, tokens); got != 0 {
 		t.Fatalf("Codex invocation cost = %v, want zero", got)
 	}
-	if got := effectiveRLMInvocationCost("openrouter", pricing, tokens); got != 3 {
+	if got := effectiveAgentInvocationCost("openrouter", pricing, tokens); got != 3 {
 		t.Fatalf("OpenRouter invocation cost = %v, want 3", got)
 	}
 }
 
-func TestReviewRLMOutputTokenLimitRequiresGovernedReasoning(t *testing.T) {
-	if got := reviewRLMOutputTokenLimit(0); got != 0 {
+func TestReviewAgentOutputTokenLimitRequiresGovernedReasoning(t *testing.T) {
+	if got := reviewAgentOutputTokenLimit(0); got != 0 {
 		t.Fatalf("ungoverned output limit = %d, want zero", got)
 	}
-	if got := reviewRLMOutputTokenLimit(1024); got != 5120 {
+	if got := reviewAgentOutputTokenLimit(1024); got != 5120 {
 		t.Fatalf("governed output limit = %d, want 5120", got)
 	}
 }
 
-func TestClampRLMOutputTokenLimitUsesProviderCapability(t *testing.T) {
+func TestClampAgentOutputTokenLimitUsesProviderCapability(t *testing.T) {
 	tests := []struct {
 		name        string
 		configured  int
@@ -54,14 +54,14 @@ func TestClampRLMOutputTokenLimitUsesProviderCapability(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := clampRLMOutputTokenLimit(tt.configured, tt.providerMax); got != tt.want {
-				t.Fatalf("clampRLMOutputTokenLimit(%d, %d) = %d, want %d", tt.configured, tt.providerMax, got, tt.want)
+			if got := clampAgentOutputTokenLimit(tt.configured, tt.providerMax); got != tt.want {
+				t.Fatalf("clampAgentOutputTokenLimit(%d, %d) = %d, want %d", tt.configured, tt.providerMax, got, tt.want)
 			}
 		})
 	}
 }
 
-func TestFormatIncompleteRLMResponseRetainsCompletedEvidence(t *testing.T) {
+func TestFormatIncompleteAgentResponseRetainsCompletedEvidence(t *testing.T) {
 	result := &rlm.SubAgentResult{
 		Summary:      "Inspected the sharding contract.",
 		InputTokens:  120,
@@ -75,7 +75,7 @@ func TestFormatIncompleteRLMResponseRetainsCompletedEvidence(t *testing.T) {
 		}},
 	}
 
-	got := formatIncompleteRLMResponse(result, errors.Join(context.DeadlineExceeded, errors.New("provider still working")))
+	got := formatIncompleteAgentResponse(result, errors.Join(context.DeadlineExceeded, errors.New("provider still working")))
 	for _, want := range []string{"Incomplete agent result", "not a completed or validated result", "Inspected the sharding contract", "search_text", "found aggregate gate", "120 input", "1"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("salvage output missing %q:\n%s", want, got)

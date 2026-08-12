@@ -161,6 +161,22 @@ func TestReviewVerificationTargetBudgetExpandsWithinToolLimit(t *testing.T) {
 	}
 }
 
+func TestReviewVerificationTargetBudgetRemainsUnlimitedWithUnlimitedTools(t *testing.T) {
+	opts := automatedReviewOptions{
+		maxToolCalls:         0,
+		maxVerificationCalls: 1,
+	}.withVerificationTargetBudget([]string{
+		"cmd/buckley/review.go",
+		"pkg/oneshot/commands/review_context.go",
+		"pkg/ui/widgets/chatview.go",
+		"pkg/conversation/context_projection.go",
+	})
+
+	if opts.maxVerificationCalls != 0 {
+		t.Fatalf("maxVerificationCalls = %d, want no hidden verification ceiling", opts.maxVerificationCalls)
+	}
+}
+
 func TestReviewExecutionPlanPreservesQwenAdaptiveTurns(t *testing.T) {
 	plan := reviewExecutionPlan{
 		sizeClass:            "broad",
@@ -387,6 +403,9 @@ func TestAppendReviewExecutionPlanLeavesToolCallsUnlimitedByDefault(t *testing.T
 	if strings.Contains(prompt, "at most 0 total inspection") {
 		t.Fatalf("prompt incorrectly presents zero as a hard tool-call cap:\n%s", prompt)
 	}
+	if !strings.Contains(prompt, "There is no separate verification-call cap") {
+		t.Fatalf("prompt does not explain the default unlimited verification policy:\n%s", prompt)
+	}
 }
 
 func TestAppendQwenReviewExecutionPlanLeavesToolCallsUnlimitedByDefault(t *testing.T) {
@@ -396,13 +415,16 @@ func TestAppendQwenReviewExecutionPlanLeavesToolCallsUnlimitedByDefault(t *testi
 		reasoningMaxTokens:   2048,
 		maxIterations:        5,
 		maxToolCalls:         0,
-		maxVerificationCalls: 1,
+		maxVerificationCalls: 0,
 	})
 	if !strings.Contains(prompt, "no per-review tool-call cap") {
 		t.Fatalf("Qwen prompt does not explain the default unlimited tool-call policy:\n%s", prompt)
 	}
 	if strings.Contains(prompt, "0 inspection/verification calls") {
 		t.Fatalf("Qwen prompt incorrectly presents zero as a hard tool-call cap:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "no separate verification-call cap") {
+		t.Fatalf("Qwen prompt does not explain the default unlimited verification policy:\n%s", prompt)
 	}
 }
 

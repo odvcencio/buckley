@@ -214,8 +214,16 @@ func (opts automatedReviewOptions) withExecutionPlan(plan reviewExecutionPlan) a
 }
 
 func (opts automatedReviewOptions) withVerificationTargetBudget(changedFiles []string) automatedReviewOptions {
+	if opts.maxToolCalls <= 0 {
+		// Unlimited reviews must not acquire a second, hidden ceiling merely
+		// because Buckley generated an exact target list. Models may need to
+		// retry an invalid or inconclusive command; the outer deadline and loop
+		// governor remain the safety boundary.
+		opts.maxVerificationCalls = 0
+		return opts
+	}
 	budget := commands.ReviewVerificationCallBudget(changedFiles)
-	if budget <= opts.maxVerificationCalls || opts.maxToolCalls <= 0 {
+	if budget <= opts.maxVerificationCalls {
 		return opts
 	}
 	if budget > opts.maxToolCalls {
@@ -272,15 +280,19 @@ func appendQwenReviewExecutionPlan(prompt string, opts automatedReviewOptions) s
 	if opts.explorationTimeout > 0 {
 		explorationLimit = fmt.Sprintf("%d seconds", int(opts.explorationTimeout/time.Second))
 	}
+	verificationLimit := "no separate verification-call cap"
+	if opts.maxVerificationCalls > 0 {
+		verificationLimit = fmt.Sprintf("%d verification calls", opts.maxVerificationCalls)
+	}
 	return prompt + fmt.Sprintf(`
 
 ## Qwen Review Profile
 
-- Scope: %s. Thinking budget: %d tokens per turn. Limits: %s, %s, %d verification calls.
+- Scope: %s. Thinking budget: %d tokens per turn. Limits: %s, %s, %s.
 - Read deterministic evidence before summarizing the diff. Treat hypotheses as tests, but treat provider-labeled violations as demonstrated defects unless exact counterevidence disproves them.
 - Rank at most three concrete changed-behavior failures. Prefer identity/provenance mismatches, routing and bypass gates, producer/consumer key drift, and empty or failure paths over broad commentary.
 - For workflow or release changes, trace event input -> checkout ref -> validated commit -> built bytes -> published identifier. Never assume checkout rewrites event variables.
-- Use the supplied diff first. Make one focused first-batch tool call only when a named invariant still lacks proof; do not repeat searches or tests.
+- Use the supplied diff first. Put every required verification target in the first tool-call batch, alongside only the focused inspections needed for named invariants; do not repeat successful searches or tests.
 - Finish evidence collection within %s and reserve the final %d seconds for synthesis.
 - Final response budget: %s. Use compact ledgers, but never omit required sections to fit.
 - Follow the exact response schema from the system prompt. Account for every changed file, copy Feedback IDs exactly, cite immutable CI precisely, and return only the final review.
@@ -292,7 +304,7 @@ func appendQwenReviewExecutionPlan(prompt string, opts automatedReviewOptions) s
 		opts.reasoningMaxTokens,
 		turnLimit,
 		toolLimit,
-		opts.maxVerificationCalls,
+		verificationLimit,
 		explorationLimit,
 		int(opts.synthesisLead/time.Second),
 		reviewOutputBudgetText(opts),
@@ -315,6 +327,10 @@ func appendReviewExecutionPlan(prompt string, opts automatedReviewOptions) strin
 	if opts.explorationTimeout > 0 {
 		explorationLimit = fmt.Sprintf("%d seconds", int(opts.explorationTimeout/time.Second))
 	}
+	verificationLimit := "There is no separate verification-call cap; retry failed or inconclusive required targets when useful."
+	if opts.maxVerificationCalls > 0 {
+		verificationLimit = fmt.Sprintf("Use at most %d verification calls.", opts.maxVerificationCalls)
+	}
 	return prompt + fmt.Sprintf(`
 
 ## Bounded Review Plan
@@ -326,7 +342,7 @@ func appendReviewExecutionPlan(prompt string, opts automatedReviewOptions) strin
 - Final response budget: %s. Use compact ledgers, but never omit required sections to fit.
 - %s
 - %s
-- Use at most %d verification calls.
+- %s
 - Limit each verification command to %d seconds.
 - Finish evidence collection within %s.
 - Keep the final %d seconds for a complete verdict.
@@ -380,7 +396,7 @@ func appendReviewExecutionPlan(prompt string, opts automatedReviewOptions) strin
 		reviewOutputBudgetText(opts),
 		turnLimit,
 		toolLimit,
-		opts.maxVerificationCalls,
+		verificationLimit,
 		int(opts.verificationTimeout/time.Second),
 		explorationLimit,
 		int(opts.synthesisLead/time.Second),

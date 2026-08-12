@@ -10,10 +10,10 @@ import (
 	"m31labs.dev/buckley/pkg/prompts"
 )
 
-// ReviewBranchDef implements oneshot.RLMDefinition for branch code review.
+// ReviewBranchDef implements oneshot.AgentDefinition for branch code review.
 //
 // Unlike commit/PR which use single-tool invoke+retry, review runs a full
-// RLM sub-agent with multi-turn, snapshot-bound inspection and verification
+// tool agent with multi-turn, snapshot-bound inspection and verification
 // tools. Verification can execute only constrained build/test/check commands
 // inside an OS-enforced read-only-source sandbox.
 // The agent produces free-form markdown which is parsed into structured data.
@@ -38,7 +38,7 @@ func (ReviewBranchDef) ParseResult(response string) (any, error) {
 }
 
 func (d ReviewBranchDef) ValidateResult(result any) error {
-	review, ok := result.(*ReviewRLMResult)
+	review, ok := result.(*ReviewAgentResult)
 	if !ok {
 		return fmt.Errorf("unexpected branch review result type %T", result)
 	}
@@ -51,7 +51,7 @@ func (d ReviewBranchDef) ValidateResult(result any) error {
 	})
 }
 
-func (d ReviewBranchDef) ValidateRLMExecution(result any, execution *oneshot.RLMResult) error {
+func (d ReviewBranchDef) ValidateAgentExecution(result any, execution *oneshot.AgentResult) error {
 	return validateReviewExecutionEvidence(result, execution, d.ChangedFiles)
 }
 
@@ -67,7 +67,7 @@ func (d ReviewBranchDef) BuildApprovalCriticPrompt(originalPrompt string, primar
 	return buildApprovalCriticPrompt(originalPrompt, primaryResult, false)
 }
 
-// ReviewProjectDef implements oneshot.RLMDefinition for project-wide review.
+// ReviewProjectDef implements oneshot.AgentDefinition for project-wide review.
 // Project reviews are deadline-bounded and governor-protected, but do not
 // impose a fixed model-turn ceiling: the agent must be able to expand from
 // the Canopy TOC into complete repository coverage.
@@ -83,10 +83,10 @@ func (ReviewProjectDef) AllowedTools() []string {
 	return []string{"read_file", "find_files", "search_text"}
 }
 
-func (ReviewProjectDef) MaxRLMIterations() int { return 0 }
+func (ReviewProjectDef) MaxAgentIterations() int { return 0 }
 
 func (ReviewProjectDef) ParseResult(response string) (any, error) {
-	return &ReviewRLMResult{
+	return &ReviewAgentResult{
 		Review: response,
 		Parsed: ParseReview(response),
 	}, nil
@@ -97,7 +97,7 @@ func (ReviewProjectDef) ParseResult(response string) (any, error) {
 // schema, so it must never smuggle an approval verdict past the branch/PR
 // evidence and critic requirements.
 func (ReviewProjectDef) ValidateResult(result any) error {
-	review, ok := result.(*ReviewRLMResult)
+	review, ok := result.(*ReviewAgentResult)
 	if !ok {
 		return fmt.Errorf("unexpected project review result type %T", result)
 	}
@@ -117,7 +117,7 @@ func (ReviewProjectDef) ValidateResult(result any) error {
 	return nil
 }
 
-// ReviewPRDef implements oneshot.RLMDefinition for PR review.
+// ReviewPRDef implements oneshot.AgentDefinition for PR review.
 type ReviewPRDef struct {
 	ChangedFiles                []string
 	ContextIncomplete           bool
@@ -131,7 +131,7 @@ type ReviewPRDef struct {
 
 func (ReviewPRDef) Name() string { return "review-pr" }
 
-func (d ReviewPRDef) MaxRLMIterations() int { return d.MaxIterations }
+func (d ReviewPRDef) MaxAgentIterations() int { return d.MaxIterations }
 
 func (d ReviewPRDef) SystemPrompt() string {
 	prompt := prompts.ReviewPRPrompt(time.Now())
@@ -175,7 +175,7 @@ func (ReviewPRDef) ParseResult(response string) (any, error) {
 }
 
 func (d ReviewPRDef) ValidateResult(result any) error {
-	review, ok := result.(*ReviewRLMResult)
+	review, ok := result.(*ReviewAgentResult)
 	if !ok {
 		return fmt.Errorf("unexpected PR review result type %T", result)
 	}
@@ -195,12 +195,12 @@ func (d ReviewPRDef) ValidateResult(result any) error {
 
 var finalReviewGradeHeadingRE = regexp.MustCompile(`^## Grade:\s*\[?[A-F]\]?\s*$`)
 
-func parseFinalReviewResult(response string) (*ReviewRLMResult, error) {
+func parseFinalReviewResult(response string) (*ReviewAgentResult, error) {
 	review, err := canonicalFinalReview(response)
 	if err != nil {
 		return nil, err
 	}
-	return &ReviewRLMResult{
+	return &ReviewAgentResult{
 		Review: review,
 		Parsed: ParseReview(review),
 	}, nil
@@ -239,7 +239,7 @@ func canonicalFinalReview(response string) (string, error) {
 	return review, nil
 }
 
-func validateFinalReviewResult(review *ReviewRLMResult) error {
+func validateFinalReviewResult(review *ReviewAgentResult) error {
 	if review == nil {
 		return fmt.Errorf("final review result is missing")
 	}
@@ -299,8 +299,8 @@ func reviewFenceMarker(line string) string {
 	}
 }
 
-func (d ReviewPRDef) ValidateRLMExecution(result any, execution *oneshot.RLMResult) error {
-	review, ok := result.(*ReviewRLMResult)
+func (d ReviewPRDef) ValidateAgentExecution(result any, execution *oneshot.AgentResult) error {
+	review, ok := result.(*ReviewAgentResult)
 	if ok && review.Parsed != nil && review.Parsed.Approved &&
 		d.authoritativeRemoteCIPasses() {
 		return nil
@@ -308,8 +308,8 @@ func (d ReviewPRDef) ValidateRLMExecution(result any, execution *oneshot.RLMResu
 	return validateReviewExecutionEvidence(result, execution, d.ChangedFiles)
 }
 
-func validateReviewExecutionEvidence(result any, execution *oneshot.RLMResult, changedFiles []string) error {
-	review, ok := result.(*ReviewRLMResult)
+func validateReviewExecutionEvidence(result any, execution *oneshot.AgentResult, changedFiles []string) error {
+	review, ok := result.(*ReviewAgentResult)
 	if !ok || review.Parsed == nil {
 		return nil
 	}
@@ -386,7 +386,7 @@ func validateReviewExecutionEvidence(result any, execution *oneshot.RLMResult, c
 	return nil
 }
 
-func validateInconclusiveVerificationClaims(parsed *ParsedReview, execution *oneshot.RLMResult) error {
+func validateInconclusiveVerificationClaims(parsed *ParsedReview, execution *oneshot.AgentResult) error {
 	if parsed == nil || execution == nil {
 		return nil
 	}
@@ -511,12 +511,12 @@ func (d ReviewPRDef) BuildApprovalCriticPrompt(originalPrompt string, primaryRes
 }
 
 func reviewResultIsApproved(result any) bool {
-	review, ok := result.(*ReviewRLMResult)
+	review, ok := result.(*ReviewAgentResult)
 	return ok && review.Parsed != nil && review.Parsed.Approved
 }
 
 func buildApprovalCriticPrompt(originalPrompt string, primaryResult any, directEvidencePass bool) (string, error) {
-	review, ok := primaryResult.(*ReviewRLMResult)
+	review, ok := primaryResult.(*ReviewAgentResult)
 	if !ok || review.Parsed == nil {
 		return "", fmt.Errorf("unexpected approval result type %T", primaryResult)
 	}
@@ -550,7 +550,7 @@ The prior review is included only so you can challenge its claims. Do not trust 
 ` + outcomeInstructions, nil
 }
 
-// FixFindingDef implements oneshot.RLMDefinition for applying a fix to a finding.
+// FixFindingDef implements oneshot.AgentDefinition for applying a fix to a finding.
 type FixFindingDef struct{}
 
 func (FixFindingDef) Name() string { return "fix-finding" }
@@ -592,8 +592,8 @@ func (FixFindingDef) ParseResult(response string) (any, error) {
 	}, nil
 }
 
-// ReviewRLMResult is the typed output from a review RLM execution.
-type ReviewRLMResult struct {
+// ReviewAgentResult is the typed output from a review agent execution.
+type ReviewAgentResult struct {
 	// Review is the full markdown review text.
 	Review string
 

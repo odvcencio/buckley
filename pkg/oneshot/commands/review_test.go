@@ -12,7 +12,6 @@ import (
 	"m31labs.dev/buckley/pkg/diffsignal"
 	"m31labs.dev/buckley/pkg/model"
 	"m31labs.dev/buckley/pkg/oneshot"
-	"m31labs.dev/buckley/pkg/rlm"
 )
 
 func TestDefaultBranchContextOptions(t *testing.T) {
@@ -56,7 +55,7 @@ func TestReviewDefinitionsExposeOnlySnapshotReviewTools(t *testing.T) {
 	projectTools := (ReviewProjectDef{}).AllowedTools()
 	assert.Equal(t, []string{"read_file", "find_files", "search_text"}, projectTools)
 	assert.NotContains(t, projectTools, "run_verification")
-	assert.Equal(t, 0, (ReviewProjectDef{}).MaxRLMIterations())
+	assert.Equal(t, 0, (ReviewProjectDef{}).MaxAgentIterations())
 
 	for _, definition := range definitions {
 		t.Run(definition.name, func(t *testing.T) {
@@ -362,10 +361,10 @@ func TestBuildProjectFileInventoryMarksPromptSizeTruncation(t *testing.T) {
 
 func TestReviewProjectDefRequiresCoverageLedger(t *testing.T) {
 	def := ReviewProjectDef{}
-	valid := &ReviewRLMResult{Review: "## Evidence Collected\n- files\n\n## Coverage\n- **Completeness**: PARTIAL — deadline\n"}
+	valid := &ReviewAgentResult{Review: "## Evidence Collected\n- files\n\n## Coverage\n- **Completeness**: PARTIAL — deadline\n"}
 	assert.NoError(t, def.ValidateResult(valid))
 
-	missing := &ReviewRLMResult{Review: "## Project Health\n- okay\n"}
+	missing := &ReviewAgentResult{Review: "## Project Health\n- okay\n"}
 	assert.ErrorContains(t, def.ValidateResult(missing), "coverage ledger")
 }
 
@@ -460,8 +459,8 @@ func TestProjectContext_Fields(t *testing.T) {
 	assert.NotEmpty(t, ctx.RecentLog)
 }
 
-func TestReviewRLMResult_Fields(t *testing.T) {
-	result := ReviewRLMResult{
+func TestReviewAgentResult_Fields(t *testing.T) {
+	result := ReviewAgentResult{
 		Review: "Some review content",
 		Parsed: nil,
 	}
@@ -471,19 +470,19 @@ func TestReviewRLMResult_Fields(t *testing.T) {
 }
 
 func TestApprovedAPIReviewRequiresSuccessfulVerificationToolEvidence(t *testing.T) {
-	result := &ReviewRLMResult{Parsed: &ParsedReview{Approved: true}}
-	execution := &oneshot.RLMResult{ProviderID: "openai"}
+	result := &ReviewAgentResult{Parsed: &ParsedReview{Approved: true}}
+	execution := &oneshot.AgentResult{ProviderID: "openai"}
 	changedFiles := []string{"pkg/oneshot/commands/review.go"}
 	assert.ErrorContains(t, validateReviewExecutionEvidence(result, execution, changedFiles), "does not cover")
 
-	execution.ToolCalls = []rlm.SubAgentToolCall{
+	execution.ToolCalls = []oneshot.AgentToolCall{
 		{Name: "run_verification", Success: true, Data: map[string]any{
 			"kind": "test", "language": "go", "path": "pkg/oneshot/commands", "pattern": "", "status": "PASS", "exit_code": 0,
 		}},
 	}
 	assert.NoError(t, validateReviewExecutionEvidence(result, execution, changedFiles))
 
-	execution.ToolCalls = []rlm.SubAgentToolCall{
+	execution.ToolCalls = []oneshot.AgentToolCall{
 		{Name: "run_verification", Success: true, Data: map[string]any{
 			"kind": "build", "language": "go", "path": "pkg/oneshot/commands", "pattern": "", "status": "PASS", "exit_code": 0,
 		}},
@@ -535,7 +534,7 @@ func TestApprovedAPIReviewRequiresSuccessfulVerificationToolEvidence(t *testing.
 }
 
 func TestReviewExecutionRejectsTimeoutAsProvedFindingEvidence(t *testing.T) {
-	result := &ReviewRLMResult{Parsed: &ParsedReview{
+	result := &ReviewAgentResult{Parsed: &ParsedReview{
 		Falsification:           "The focused test timed out, so serialization is broken.\n- **Conclusion**: PROVED",
 		FalsificationConclusion: FalsificationProved,
 		Findings: []Finding{{
@@ -544,9 +543,9 @@ func TestReviewExecutionRejectsTimeoutAsProvedFindingEvidence(t *testing.T) {
 			Evidence: "The focused round-trip test timed out.",
 		}},
 	}}
-	execution := &oneshot.RLMResult{
+	execution := &oneshot.AgentResult{
 		ProviderID: "openai",
-		ToolCalls: []rlm.SubAgentToolCall{{
+		ToolCalls: []oneshot.AgentToolCall{{
 			Name:    "run_verification",
 			Success: false,
 			Result:  "verification timed out after 30s",
@@ -565,7 +564,7 @@ func TestReviewExecutionRejectsTimeoutAsProvedFindingEvidence(t *testing.T) {
 }
 
 func TestReviewExecutionKeepsTimeoutNeutralForGradeAndFindings(t *testing.T) {
-	result := &ReviewRLMResult{Parsed: &ParsedReview{
+	result := &ReviewAgentResult{Parsed: &ParsedReview{
 		Grade:                   GradeC,
 		BuildVerification:       VerificationPass,
 		TestVerification:        VerificationFail,
@@ -578,9 +577,9 @@ func TestReviewExecutionKeepsTimeoutNeutralForGradeAndFindings(t *testing.T) {
 			Impact:   "The review could not verify the parser change.",
 		}},
 	}}
-	execution := &oneshot.RLMResult{
+	execution := &oneshot.AgentResult{
 		ProviderID: "openai",
-		ToolCalls: []rlm.SubAgentToolCall{{
+		ToolCalls: []oneshot.AgentToolCall{{
 			Name:    "run_verification",
 			Success: false,
 			Result:  "repository verification timed out after 75s",
@@ -604,12 +603,12 @@ func TestReviewExecutionKeepsTimeoutNeutralForGradeAndFindings(t *testing.T) {
 }
 
 func TestReviewExecutionAllowsConfirmedTestFailure(t *testing.T) {
-	result := &ReviewRLMResult{Parsed: &ParsedReview{
+	result := &ReviewAgentResult{Parsed: &ParsedReview{
 		TestVerification: VerificationFail,
 	}}
-	execution := &oneshot.RLMResult{
+	execution := &oneshot.AgentResult{
 		ProviderID: "openai",
-		ToolCalls: []rlm.SubAgentToolCall{{
+		ToolCalls: []oneshot.AgentToolCall{{
 			Name:    "run_verification",
 			Success: false,
 			Result:  "focused assertion failed",
@@ -699,7 +698,7 @@ func TestReviewVerificationCallBudgetCountsExactTargets(t *testing.T) {
 
 func TestApprovedPRDocumentationReviewUsesExactDiffLedgerInsteadOfUnrelatedCommands(t *testing.T) {
 	changedFiles := []string{"README.md", "docs/release-notes.mdx"}
-	result := &ReviewRLMResult{Parsed: &ParsedReview{
+	result := &ReviewAgentResult{Parsed: &ParsedReview{
 		Approved: true,
 		CoverageEntries: []CoverageEntry{
 			{Path: "README.md", Evidence: "checked the installation claim against the changed command example"},
@@ -708,14 +707,14 @@ func TestApprovedPRDocumentationReviewUsesExactDiffLedgerInsteadOfUnrelatedComma
 	}}
 	def := ReviewPRDef{ChangedFiles: changedFiles}
 
-	assert.NoError(t, def.ValidateRLMExecution(result, nil))
+	assert.NoError(t, def.ValidateAgentExecution(result, nil))
 
 	result.Parsed.CoverageEntries = result.Parsed.CoverageEntries[:1]
-	assert.ErrorContains(t, def.ValidateRLMExecution(result, nil), "documentation-only approval requires exact changed-file diff evidence")
+	assert.ErrorContains(t, def.ValidateAgentExecution(result, nil), "documentation-only approval requires exact changed-file diff evidence")
 }
 
 func TestApprovedPRUsesAuthoritativeRemoteCIInsteadOfDuplicateLocalSuite(t *testing.T) {
-	result := &ReviewRLMResult{Parsed: &ParsedReview{Approved: true}}
+	result := &ReviewAgentResult{Parsed: &ParsedReview{Approved: true}}
 
 	for _, provenance := range []string{prCISourceHead, prCISourceBase} {
 		def := ReviewPRDef{
@@ -723,7 +722,7 @@ func TestApprovedPRUsesAuthoritativeRemoteCIInsteadOfDuplicateLocalSuite(t *test
 			CIStatus:     "passing (4/4)",
 			CIProvenance: provenance,
 		}
-		assert.NoError(t, def.ValidateRLMExecution(result, nil))
+		assert.NoError(t, def.ValidateAgentExecution(result, nil))
 	}
 
 	pending := ReviewPRDef{
@@ -731,14 +730,14 @@ func TestApprovedPRUsesAuthoritativeRemoteCIInsteadOfDuplicateLocalSuite(t *test
 		CIStatus:     "pending (3/4)",
 		CIProvenance: prCISourceHead,
 	}
-	assert.ErrorContains(t, pending.ValidateRLMExecution(result, nil), "missing execution evidence")
+	assert.ErrorContains(t, pending.ValidateAgentExecution(result, nil), "missing execution evidence")
 
 	untrusted := ReviewPRDef{
 		ChangedFiles: []string{"pkg/model/client.go"},
 		CIStatus:     "passing (4/4)",
 		CIProvenance: "working tree",
 	}
-	assert.ErrorContains(t, untrusted.ValidateRLMExecution(result, nil), "missing execution evidence")
+	assert.ErrorContains(t, untrusted.ValidateAgentExecution(result, nil), "missing execution evidence")
 }
 
 func TestReviewPRRuntimeAcceptsExactChangelogDocumentationLedger(t *testing.T) {
@@ -783,33 +782,33 @@ None.
 	if err := def.ValidateResult(result); err != nil {
 		t.Fatalf("ValidateResult: %v", err)
 	}
-	if err := def.ValidateRLMExecution(result, nil); err != nil {
-		t.Fatalf("ValidateRLMExecution: %v", err)
+	if err := def.ValidateAgentExecution(result, nil); err != nil {
+		t.Fatalf("ValidateAgentExecution: %v", err)
 	}
 }
 
 func TestApprovedPRDocumentationExceptionRejectsMixedOrNonDocumentationChanges(t *testing.T) {
-	result := &ReviewRLMResult{Parsed: &ParsedReview{
+	result := &ReviewAgentResult{Parsed: &ParsedReview{
 		Approved: true,
 		CoverageEntries: []CoverageEntry{
 			{Path: "README.md", Evidence: "reviewed the changed documentation claim"},
 			{Path: "config/release.yaml", Evidence: "reviewed the changed release configuration"},
 		},
 	}}
-	execution := &oneshot.RLMResult{ProviderID: "codex"}
+	execution := &oneshot.AgentResult{ProviderID: "codex"}
 
 	mixed := ReviewPRDef{ChangedFiles: []string{"README.md", "config/release.yaml"}}
-	assert.ErrorContains(t, mixed.ValidateRLMExecution(result, execution), "requires repo-root build and test evidence")
+	assert.ErrorContains(t, mixed.ValidateAgentExecution(result, execution), "requires repo-root build and test evidence")
 
 	result.Parsed.CoverageEntries = result.Parsed.CoverageEntries[:1]
 	branch := ReviewBranchDef{ChangedFiles: []string{"README.md"}}
-	assert.NoError(t, branch.ValidateRLMExecution(result, nil))
+	assert.NoError(t, branch.ValidateAgentExecution(result, nil))
 
 	result.Parsed.CoverageEntries = nil
-	assert.ErrorContains(t, branch.ValidateRLMExecution(result, nil), "documentation-only approval requires exact changed-file diff evidence")
+	assert.ErrorContains(t, branch.ValidateAgentExecution(result, nil), "documentation-only approval requires exact changed-file diff evidence")
 
 	sourceBranch := ReviewBranchDef{ChangedFiles: []string{"README.md", "main.go"}}
-	assert.ErrorContains(t, sourceBranch.ValidateRLMExecution(result, execution), "does not cover changed source paths")
+	assert.ErrorContains(t, sourceBranch.ValidateAgentExecution(result, execution), "does not cover changed source paths")
 }
 
 func TestReviewBranchDef_Interface(t *testing.T) {
@@ -825,11 +824,11 @@ func TestReviewBranchDef_Interface(t *testing.T) {
 	assert.NoError(t, err)
 	assert.NotNil(t, result)
 
-	rlmResult, ok := result.(*ReviewRLMResult)
+	agentResult, ok := result.(*ReviewAgentResult)
 	assert.True(t, ok)
-	assert.Equal(t, "## Grade: A\n\nLooks good", rlmResult.Review)
-	assert.NotNil(t, rlmResult.Parsed)
-	assert.Equal(t, GradeA, rlmResult.Parsed.Grade)
+	assert.Equal(t, "## Grade: A\n\nLooks good", agentResult.Review)
+	assert.NotNil(t, agentResult.Parsed)
+	assert.Equal(t, GradeA, agentResult.Parsed.Grade)
 }
 
 func TestReviewResultCanonicalizationStripsAnalysisPreamble(t *testing.T) {
@@ -852,7 +851,7 @@ The evidence is sufficient.
 		t.Run(parse.name, func(t *testing.T) {
 			result, err := parse.run(response)
 			assert.NoError(t, err)
-			parsed, ok := result.(*ReviewRLMResult)
+			parsed, ok := result.(*ReviewAgentResult)
 			assert.True(t, ok)
 			assert.Equal(t, canonical, parsed.Review)
 			assert.Equal(t, canonical, parsed.Parsed.RawReview)
@@ -896,7 +895,7 @@ func TestReviewValidationRejectsNonCanonicalFinalEnvelope(t *testing.T) {
 	canonical := completeReviewWithCoverage("- **File**: `ratchet.go` — reviewed the exact changed file.\n" +
 		"- **Feedback disposition**: `NONE_SUPPLIED` — no prior feedback was supplied.\n" +
 		"- **Verification**: focused test passed.")
-	result := &ReviewRLMResult{
+	result := &ReviewAgentResult{
 		Review: "Raw analysis must not be posted.\n\n" + canonical,
 		Parsed: ParseReview(canonical),
 	}
@@ -917,7 +916,7 @@ func TestReviewProjectDef_Interface(t *testing.T) {
 	advisory, err := def.ParseResult("## Evidence Collected\n- source\n\n## Coverage\n- **Completeness**: COMPLETE\n")
 	assert.NoError(t, err)
 	assert.NoError(t, def.ValidateResult(advisory))
-	assert.ErrorContains(t, def.ValidateResult(&ReviewRLMResult{
+	assert.ErrorContains(t, def.ValidateResult(&ReviewAgentResult{
 		Parsed: &ParsedReview{Approved: true},
 	}), "advisory")
 }
@@ -1710,7 +1709,7 @@ func TestReviewApprovalRequiresNormalizedPassingBuildAndTests(t *testing.T) {
 			assert.NoError(t, err)
 			validationErr := def.ValidateResult(result)
 			assert.ErrorContains(t, validationErr, "requires Build status PASS")
-			assert.Equal(t, state != "UNAVAILABLE", oneshot.IsRLMExecutionEvidenceRequired(validationErr))
+			assert.Equal(t, state != "UNAVAILABLE", oneshot.IsAgentExecutionEvidenceRequired(validationErr))
 		})
 		t.Run("tests "+state, func(t *testing.T) {
 			review := strings.Replace(base, "- Tests: PASS", "- Tests: "+state, 1)
@@ -1718,7 +1717,7 @@ func TestReviewApprovalRequiresNormalizedPassingBuildAndTests(t *testing.T) {
 			assert.NoError(t, err)
 			validationErr := def.ValidateResult(result)
 			assert.ErrorContains(t, validationErr, "requires Tests status PASS")
-			assert.Equal(t, state != "UNAVAILABLE", oneshot.IsRLMExecutionEvidenceRequired(validationErr))
+			assert.Equal(t, state != "UNAVAILABLE", oneshot.IsAgentExecutionEvidenceRequired(validationErr))
 		})
 	}
 
@@ -1737,7 +1736,7 @@ func TestReviewApprovalRequiresNormalizedPassingBuildAndTests(t *testing.T) {
 			assert.NoError(t, err)
 			validationErr := def.ValidateResult(result)
 			assert.ErrorContains(t, validationErr, tc.wantMessage)
-			assert.False(t, oneshot.IsRLMExecutionEvidenceRequired(validationErr))
+			assert.False(t, oneshot.IsAgentExecutionEvidenceRequired(validationErr))
 		})
 	}
 }
@@ -1808,7 +1807,7 @@ func TestReviewFeedbackLedgerRequiresExactPerIDDisposition(t *testing.T) {
 	assert.Equal(t, []FeedbackEntry{
 		{ID: "thread:PRRT_1", Status: FeedbackAddressed, Evidence: "focused test proves the requested boundary fix."},
 		{ID: "review:123", Status: FeedbackDisputed, Evidence: "source trace proves the concern does not apply."},
-	}, result.(*ReviewRLMResult).Parsed.FeedbackEntries)
+	}, result.(*ReviewAgentResult).Parsed.FeedbackEntries)
 
 	bareStatus := completeReviewWithCoverage(
 		fileLine + disposition +
@@ -1821,7 +1820,7 @@ func TestReviewFeedbackLedgerRequiresExactPerIDDisposition(t *testing.T) {
 	assert.Equal(t, []FeedbackEntry{
 		{ID: "thread:PRRT_1", Status: FeedbackAddressed, Evidence: "focused test proves the requested boundary fix."},
 		{ID: "review:123", Status: FeedbackDisputed, Evidence: "source trace proves the concern does not apply."},
-	}, result.(*ReviewRLMResult).Parsed.FeedbackEntries)
+	}, result.(*ReviewAgentResult).Parsed.FeedbackEntries)
 	assert.NoError(t, def.ValidateResult(result))
 
 	tests := []struct {
@@ -1877,7 +1876,7 @@ func TestReviewFeedbackDispositionRequiresIDsWhenContextSaysFeedbackExists(t *te
 	def := ReviewBranchDef{ChangedFiles: []string{"ratchet.go"}}
 	result, err := def.ParseResult(review)
 	assert.NoError(t, err)
-	err = ValidateParsedReview(result.(*ReviewRLMResult).Parsed, ReviewValidationOptions{
+	err = ValidateParsedReview(result.(*ReviewAgentResult).Parsed, ReviewValidationOptions{
 		ChangedFiles:                []string{"ratchet.go"},
 		RequiresFeedbackDisposition: true,
 	})

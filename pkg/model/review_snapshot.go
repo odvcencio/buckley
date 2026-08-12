@@ -108,7 +108,7 @@ func NewReviewSnapshot(mode ReviewSnapshotMode, repositoryRoot, workDir, commit 
 }
 
 // CaptureReviewSnapshot captures one exact Git descriptor for a complete
-// Framework.RunRLM execution. Passing an empty workDir uses the current working
+// Framework.RunAgent execution. Passing an empty workDir uses the current working
 // directory.
 func CaptureReviewSnapshot(ctx context.Context, workDir string, policy ReviewSnapshotPolicy) (*ReviewSnapshot, error) {
 	if policy.Mode == ReviewSnapshotNone {

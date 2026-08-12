@@ -15,17 +15,17 @@ import (
 
 // Runner executes the review flow.
 type Runner struct {
-	// RLM-based execution (preferred - full tool access)
-	rlmRunner *oneshot.RLMRunner
+	// agent-based execution (preferred - full tool access)
+	agentRunner *oneshot.AgentRunner
 
-	// Legacy invoker (fallback if RLM not configured)
+	// Legacy invoker (fallback if an agent runner is not configured)
 	invoker *oneshot.DefaultInvoker
 	ledger  *transparency.CostLedger
 }
 
 // RunnerConfig configures the review runner.
 type RunnerConfig struct {
-	// For RLM-based execution (preferred)
+	// For agent-based execution (preferred)
 	Models   *model.Manager
 	Registry *tool.Registry
 	ModelID  string
@@ -36,7 +36,7 @@ type RunnerConfig struct {
 }
 
 // NewRunner creates a review runner.
-// If Models and Registry are provided, uses RLM for full tool access.
+// If Models and Registry are provided, uses one multi-turn tool agent.
 // Otherwise falls back to legacy invoker with limited tools.
 func NewRunner(cfg RunnerConfig) *Runner {
 	r := &Runner{
@@ -44,9 +44,9 @@ func NewRunner(cfg RunnerConfig) *Runner {
 		ledger:  cfg.Ledger,
 	}
 
-	// Prefer RLM if configured
+	// Prefer the tool agent if configured
 	if cfg.Models != nil && cfg.Registry != nil && cfg.ModelID != "" {
-		r.rlmRunner = oneshot.NewRLMRunner(oneshot.RLMRunnerConfig{
+		r.agentRunner = oneshot.NewAgentRunner(oneshot.AgentRunnerConfig{
 			Models:   cfg.Models,
 			Registry: cfg.Registry,
 			Ledger:   cfg.Ledger,
@@ -98,36 +98,36 @@ func (r *Runner) ReviewBranch(ctx context.Context, opts BranchContextOptions) (*
 	systemPrompt := prompts.ReviewBranchWithToolsPrompt(time.Now())
 	userPrompt := buildBranchPrompt(branchCtx)
 
-	// Prefer RLM for full tool access
-	if r.rlmRunner != nil {
-		return r.reviewWithRLM(ctx, systemPrompt, userPrompt, audit)
+	// Prefer the tool agent for full tool access
+	if r.agentRunner != nil {
+		return r.reviewWithAgent(ctx, systemPrompt, userPrompt, audit)
 	}
 
 	// Fallback to legacy invoker (should not happen in production)
 	return r.reviewWithLegacyInvoker(ctx, systemPrompt, userPrompt, audit)
 }
 
-// reviewWithRLM runs a review using the full RLM tool ecosystem.
-func (r *Runner) reviewWithRLM(ctx context.Context, systemPrompt, userPrompt string, audit *transparency.ContextAudit) (*RunResult, error) {
+// reviewWithAgent runs a review using the one multi-turn tool agent.
+func (r *Runner) reviewWithAgent(ctx context.Context, systemPrompt, userPrompt string, audit *transparency.ContextAudit) (*RunResult, error) {
 	result := &RunResult{ContextAudit: audit}
 
 	// Reviews inspect the checkout but never mutate it. Native agent providers
 	// receive the same policy and enforce their own read-only execution sandbox.
 	allowedTools := []string{"read_file", "find_files", "search_text"}
 
-	rlmResult, err := r.rlmRunner.Run(ctx, systemPrompt, userPrompt, allowedTools, oneshot.RLMExecutionOpts{})
+	agentResult, err := r.agentRunner.Run(ctx, systemPrompt, userPrompt, allowedTools, oneshot.AgentExecutionOpts{})
 	if err != nil {
 		result.Error = err
 		return result, nil
 	}
 
-	result.Review = rlmResult.Response
-	result.Trace = rlmResult.Trace
+	result.Review = agentResult.Response
+	result.Trace = agentResult.Trace
 	return result, nil
 }
 
 // reviewWithLegacyInvoker runs a review using the legacy invoker with limited tools.
-// This is a fallback for when RLM is not configured.
+// This is a fallback for when an agent runner is not configured.
 func (r *Runner) reviewWithLegacyInvoker(ctx context.Context, systemPrompt, userPrompt string, audit *transparency.ContextAudit) (*RunResult, error) {
 	result := &RunResult{ContextAudit: audit}
 
@@ -161,9 +161,9 @@ func (r *Runner) ReviewProject(ctx context.Context, opts ProjectContextOptions) 
 	systemPrompt := prompts.ReviewProjectPrompt(time.Now())
 	userPrompt := buildProjectPrompt(projectCtx)
 
-	// Prefer RLM for full tool access
-	if r.rlmRunner != nil {
-		return r.reviewWithRLM(ctx, systemPrompt, userPrompt, audit)
+	// Prefer the tool agent for full tool access
+	if r.agentRunner != nil {
+		return r.reviewWithAgent(ctx, systemPrompt, userPrompt, audit)
 	}
 
 	// Fallback to legacy invoker
@@ -285,12 +285,12 @@ type FixResult struct {
 	Error error
 }
 
-// FixFinding applies a fix for a single finding using RLM.
+// FixFinding applies a fix for a single finding using a tool agent.
 func (r *Runner) FixFinding(ctx context.Context, finding *Finding, prompt string) (*FixResult, error) {
 	result := &FixResult{}
 
-	if r.rlmRunner == nil {
-		result.Error = fmt.Errorf("rlm not configured - cannot apply fixes")
+	if r.agentRunner == nil {
+		result.Error = fmt.Errorf("agent runner not configured - cannot apply fixes")
 		return result, nil
 	}
 
@@ -300,17 +300,17 @@ func (r *Runner) FixFinding(ctx context.Context, finding *Finding, prompt string
 	// Run with full tool access for fixing
 	allowedTools := []string{"read", "glob", "grep", "bash", "write"}
 
-	rlmResult, err := r.rlmRunner.Run(ctx, systemPrompt, prompt, allowedTools, oneshot.RLMExecutionOpts{})
+	agentResult, err := r.agentRunner.Run(ctx, systemPrompt, prompt, allowedTools, oneshot.AgentExecutionOpts{})
 	if err != nil {
 		result.Error = err
 		return result, nil
 	}
 
-	result.Summary = rlmResult.Response
-	result.Trace = rlmResult.Trace
+	result.Summary = agentResult.Response
+	result.Trace = agentResult.Trace
 
 	// Extract changed files from tool calls
-	for _, tc := range rlmResult.ToolCalls {
+	for _, tc := range agentResult.ToolCalls {
 		if tc.Name == "write" {
 			// Parse the file path from arguments
 			// This is a simplification - actual parsing would depend on argument format
