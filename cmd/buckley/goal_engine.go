@@ -153,6 +153,7 @@ func (e *goalTurnEngine) RunTurn(ctx context.Context, task goalloop.TaskContext)
 	})
 
 	ctrl, err := agentloop.NewController(agentloop.ControllerConfig{
+		FinalizeOnStop:     true,
 		BuildRequest:       buildRequest,
 		CallModel:          callModel,
 		DispatchTools:      dispatch,
@@ -176,6 +177,9 @@ func (e *goalTurnEngine) RunTurn(ctx context.Context, task goalloop.TaskContext)
 
 	result, err := ctrl.Run(ctx)
 	if err != nil {
+		return goalloop.TurnOutcome{}, err
+	}
+	if err := result.RequireConclusive(); err != nil {
 		return goalloop.TurnOutcome{}, err
 	}
 

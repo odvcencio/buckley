@@ -1,6 +1,8 @@
 package dapr
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"time"
@@ -85,7 +87,57 @@ func goalWorkflowV3(ctx *workflow.WorkflowContext) (any, error) {
 	return goalFanout(ctx, TaskWorkflowV2, true)
 }
 
+// goalWorkflowV4 binds every turn to the goal's recorded workspace and
+// finalizes Buckley's canonical run row before the workflow returns. Older
+// workflow versions stay registered for in-flight histories.
+func goalWorkflowV4(ctx *workflow.WorkflowContext) (any, error) {
+	var start durability.GoalStart
+	if err := ctx.GetInput(&start); err != nil {
+		return nil, fmt.Errorf("goal workflow input: %w", err)
+	}
+
+	value, runErr := goalFanoutV4(ctx, TaskWorkflowV3, true)
+	result, ok := value.(durability.GoalResult)
+	if !ok {
+		result = durability.GoalResult{}
+		if runErr == nil {
+			runErr = fmt.Errorf("goal workflow produced unexpected result %T", value)
+		}
+	}
+	finalization := durability.GoalFinalization{
+		RunID:              start.RunID,
+		WorkspaceRoot:      start.WorkspaceRoot,
+		WorkflowInstanceID: ctx.ID(),
+		Incomplete:         result.Status == durability.GoalResultIncomplete,
+	}
+	if runErr != nil {
+		finalization.Failure = runErr.Error()
+	}
+	finalizeErr := ctx.CallActivity(ActivityFinalizeGoal,
+		workflow.WithActivityInput(finalization),
+		workflow.WithActivityRetryPolicy(turnRetryPolicy),
+	).Await(nil)
+	if finalizeErr != nil {
+		if runErr != nil {
+			return result, fmt.Errorf("%v; finalize goal: %w", runErr, finalizeErr)
+		}
+		return result, fmt.Errorf("finalize goal: %w", finalizeErr)
+	}
+	return result, runErr
+}
+
 func goalFanout(ctx *workflow.WorkflowContext, childWorkflow string, forwardApprovalWait bool) (any, error) {
+	return goalFanoutWithMode(ctx, childWorkflow, forwardApprovalWait, false)
+}
+
+// goalFanoutV4 waits for every child scheduled in a batch before returning a
+// failure. Earlier workflow versions retain their original fail-fast history;
+// V4 needs the stronger barrier so finalization cannot race a sibling child.
+func goalFanoutV4(ctx *workflow.WorkflowContext, childWorkflow string, forwardApprovalWait bool) (any, error) {
+	return goalFanoutWithMode(ctx, childWorkflow, forwardApprovalWait, true)
+}
+
+func goalFanoutWithMode(ctx *workflow.WorkflowContext, childWorkflow string, forwardApprovalWait, waitForAllChildren bool) (any, error) {
 	var start durability.GoalStart
 	if err := ctx.GetInput(&start); err != nil {
 		return nil, fmt.Errorf("goal workflow input: %w", err)
@@ -110,26 +162,29 @@ func goalFanout(ctx *workflow.WorkflowContext, childWorkflow string, forwardAppr
 			return result, fmt.Errorf("next batch: %w", err)
 		}
 		if batch.Done || len(batch.Tasks) == 0 {
+			if waitForAllChildren {
+				result = markDeferredGoalResult(result, yields, maxYields)
+			}
 			return result, nil
 		}
 
-		children := make([]workflow.Task, len(batch.Tasks))
+		children := make([]scheduledChild, len(batch.Tasks))
 		for i, item := range batch.Tasks {
 			calls++
-			child := taskStart{RunID: start.RunID, TaskID: item.TaskID}
+			child := taskStart{RunID: start.RunID, TaskID: item.TaskID, WorkspaceRoot: start.WorkspaceRoot}
 			if forwardApprovalWait {
 				child.ApprovalWaitMS = start.ApprovalWaitMS
 			}
-			children[i] = ctx.CallChildWorkflow(childWorkflow,
-				workflow.WithChildWorkflowInput(child),
-				workflow.WithChildWorkflowInstanceID(fmt.Sprintf("%s::%s::%d", ctx.ID(), item.TaskID, calls)),
-			)
-		}
-		for i, child := range children {
-			var task durability.TaskOutcome
-			if err := child.Await(&task); err != nil {
-				return result, fmt.Errorf("task workflow %s: %w", batch.Tasks[i].TaskID, err)
+			children[i] = scheduledChild{
+				taskID: item.TaskID,
+				task: ctx.CallChildWorkflow(childWorkflow,
+					workflow.WithChildWorkflowInput(child),
+					workflow.WithChildWorkflowInstanceID(fmt.Sprintf("%s::%s::%d", ctx.ID(), item.TaskID, calls)),
+				),
 			}
+		}
+		outcomes, batchErr := awaitScheduledChildren(children, waitForAllChildren)
+		for _, task := range outcomes {
 			result.Tasks = append(result.Tasks, task)
 			if task.Status == "in_progress" {
 				yields[task.TaskID]++
@@ -137,7 +192,51 @@ func goalFanout(ctx *workflow.WorkflowContext, childWorkflow string, forwardAppr
 				yields[task.TaskID] = 0
 			}
 		}
+		if batchErr != nil {
+			return result, batchErr
+		}
 	}
+}
+
+type childTask interface {
+	Await(any) error
+}
+
+type scheduledChild struct {
+	taskID string
+	task   childTask
+}
+
+// awaitScheduledChildren is the V4 fan-in barrier. When waitForAll is true,
+// an early child failure is remembered while every already-scheduled sibling
+// is still awaited; only then is the combined error returned for finalization.
+func awaitScheduledChildren(children []scheduledChild, waitForAll bool) ([]durability.TaskOutcome, error) {
+	outcomes := make([]durability.TaskOutcome, 0, len(children))
+	var childErrors []error
+	for _, child := range children {
+		var outcome durability.TaskOutcome
+		if err := child.task.Await(&outcome); err != nil {
+			wrapped := fmt.Errorf("task workflow %s: %w", child.taskID, err)
+			if !waitForAll {
+				return outcomes, wrapped
+			}
+			childErrors = append(childErrors, wrapped)
+			continue
+		}
+		if outcome.TaskID == "" {
+			outcome.TaskID = child.taskID
+		}
+		outcomes = append(outcomes, outcome)
+	}
+	return outcomes, errors.Join(childErrors...)
+}
+
+func markDeferredGoalResult(result durability.GoalResult, yields map[string]int, maxYields int) durability.GoalResult {
+	result.DeferredTasks = deferredTasks(yields, maxYields)
+	if len(result.DeferredTasks) > 0 {
+		result.Status = durability.GoalResultIncomplete
+	}
+	return result
 }
 
 // deferredTasks lists tasks past the yield bound, sorted so replayed
@@ -155,9 +254,10 @@ func deferredTasks(yields map[string]int, maxYields int) []string {
 
 // taskStart is the child workflow input.
 type taskStart struct {
-	RunID  string `json:"run_id"`
-	TaskID string `json:"task_id"`
-	// ApprovalWaitMS is consumed by TaskWorkflowV2 only.
+	RunID         string `json:"run_id"`
+	TaskID        string `json:"task_id"`
+	WorkspaceRoot string `json:"workspace_root,omitempty"`
+	// ApprovalWaitMS is consumed by approval-aware task workflows.
 	ApprovalWaitMS int64 `json:"approval_wait_ms,omitempty"`
 }
 
@@ -169,20 +269,30 @@ func taskWorkflow(ctx *workflow.WorkflowContext) (any, error) {
 	if err := ctx.GetInput(&start); err != nil {
 		return nil, fmt.Errorf("task workflow input: %w", err)
 	}
-	return driveTaskTurns(ctx, start)
+	return driveTaskTurns(ctx, start, ActivityRunTurn)
 }
 
 // taskWorkflowV2 wraps the V1 turn drive with a durable approval wait:
 // a parked task holds on WaitForExternalEvent instead of ending, and an
 // approved decision unparks the task and drives a fresh generation.
 func taskWorkflowV2(ctx *workflow.WorkflowContext) (any, error) {
+	return taskWorkflowWithApproval(ctx, ActivityRunTurn)
+}
+
+// taskWorkflowV3 preserves durable approval behavior while scheduling the
+// workspace-bound turn activity introduced with GoalWorkflowV4.
+func taskWorkflowV3(ctx *workflow.WorkflowContext) (any, error) {
+	return taskWorkflowWithApproval(ctx, ActivityRunTurnV2)
+}
+
+func taskWorkflowWithApproval(ctx *workflow.WorkflowContext, turnActivity string) (any, error) {
 	var start taskStart
 	if err := ctx.GetInput(&start); err != nil {
 		return nil, fmt.Errorf("task workflow input: %w", err)
 	}
 	total := durability.TaskOutcome{TaskID: start.TaskID, Status: "in_progress"}
 	for {
-		round, err := driveTaskTurns(ctx, start)
+		round, err := driveTaskTurns(ctx, start, turnActivity)
 		total.Turns += round.Turns
 		total.SpentUSD += round.SpentUSD
 		total.Status = round.Status
@@ -238,7 +348,7 @@ func taskWorkflowV2(ctx *workflow.WorkflowContext) (any, error) {
 
 // driveTaskTurns is the shared turn drive: seed once, then one
 // TurnActivity per turn until the task ends or yields.
-func driveTaskTurns(ctx *workflow.WorkflowContext, start taskStart) (durability.TaskOutcome, error) {
+func driveTaskTurns(ctx *workflow.WorkflowContext, start taskStart, turnActivity string) (durability.TaskOutcome, error) {
 	outcome := durability.TaskOutcome{TaskID: start.TaskID, Status: "in_progress"}
 
 	var seed durability.ResumeSeed
@@ -256,10 +366,11 @@ func driveTaskTurns(ctx *workflow.WorkflowContext, start taskStart) (durability.
 
 	for {
 		var turn durability.TurnResponse
-		if err := ctx.CallActivity(ActivityRunTurn,
+		if err := ctx.CallActivity(turnActivity,
 			workflow.WithActivityInput(durability.TurnRequest{
 				RunID:              start.RunID,
 				TaskID:             start.TaskID,
+				WorkspaceRoot:      start.WorkspaceRoot,
 				Generation:         generation,
 				TurnIndex:          turnIndex,
 				Drive:              drive,
@@ -365,15 +476,55 @@ func resolveApprovalActivity(runner durability.TaskRunner) workflow.Activity {
 	}
 }
 
-// runTurnActivity is TurnActivity: one Buckley turn per invocation,
-// side effects owned by the host, output recorded durably before the
-// workflow runtime sees success.
+// finalizeGoalActivity reconciles workflow completion with the canonical run
+// lifecycle before Dapr records the workflow as terminal.
+func finalizeGoalActivity(runner durability.TaskRunner) workflow.Activity {
+	return func(ctx workflow.ActivityContext) (any, error) {
+		var finalization durability.GoalFinalization
+		if err := ctx.GetInput(&finalization); err != nil {
+			return nil, err
+		}
+		return nil, finalizeGoal(ctx.Context(), runner, finalization)
+	}
+}
+
+func finalizeGoal(ctx context.Context, runner durability.TaskRunner, finalization durability.GoalFinalization) error {
+	finalizer, ok := runner.(durability.GoalFinalizer)
+	if !ok {
+		return fmt.Errorf("dapr: task runner does not support V4 goal finalization")
+	}
+	return finalizer.FinalizeGoal(ctx, finalization)
+}
+
+// runTurnActivity is the legacy V1 adapter kept for in-flight workflow
+// histories whose serialized input predates workspace identity.
 func runTurnActivity(runner durability.TaskRunner) workflow.Activity {
+	return turnActivity(selectTurnActivity(runner, true))
+}
+
+// runTurnActivityV2 enforces the serialized run/workspace identity before a
+// new workflow can execute a turn.
+func runTurnActivityV2(runner durability.TaskRunner) workflow.Activity {
+	return turnActivity(selectTurnActivity(runner, false))
+}
+
+type turnActivityFunc func(context.Context, durability.TurnRequest) (durability.TurnResponse, error)
+
+func selectTurnActivity(runner durability.TaskRunner, legacy bool) turnActivityFunc {
+	if legacy {
+		if legacyRunner, ok := runner.(durability.LegacyTaskRunner); ok {
+			return legacyRunner.RunLegacyTurn
+		}
+	}
+	return runner.RunTurn
+}
+
+func turnActivity(run turnActivityFunc) workflow.Activity {
 	return func(ctx workflow.ActivityContext) (any, error) {
 		var req durability.TurnRequest
 		if err := ctx.GetInput(&req); err != nil {
 			return nil, err
 		}
-		return runner.RunTurn(ctx.Context(), req)
+		return run(ctx.Context(), req)
 	}
 }

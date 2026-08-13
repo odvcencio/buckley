@@ -18,16 +18,39 @@ Supply it — an environment variable, a decision, a credential — and rerun
 queue automatically once the timer elapses.
 
 **A run spent more than the budget.**
-Budgets are enforced per turn: a turn that begins under the ceiling runs
-to completion, so the total can overshoot by roughly one turn's cost. Set
-the ceiling with that headroom, and check `budget.*` events in the audit
-to see where the line was crossed.
+Goal budgets are enforced at turn boundaries, so a turn that begins under a
+goal ceiling runs to completion. Explicit child model-request ceilings are
+all-in. Cost ceilings use conservative pre-dispatch pricing: Buckley clamps or
+rejects a request whose input/output envelope does not fit, and it refuses to
+accept the response or dispatch its tools if the provider later reports usage
+above the remainder. This is not provider-side payment authorization, so an
+upstream invoice can still differ after dispatch. Buckley attempts a
+tools-disabled synthesis request only when allowance remains and otherwise
+reports the child incomplete. Check `budget.*` and controller events in the
+audit to see which boundary stopped the run.
 
 **A goal seems stuck repeating itself.**
 The loop governor stops repeated actions that produce no new evidence and
 says so in the turn output. If it fires often, the task is probably
 underspecified — rewrite it as a concrete outcome with an acceptance
 check.
+
+**A run stopped at a guard or action ceiling.**
+After useful tool evidence exists, Buckley makes one tools-disabled synthesis
+request. If that request succeeds, its answer is returned with the original
+stop reason retained in telemetry. If it fails, calls another tool, or returns
+empty output, the run is explicitly incomplete; it is not reported as a
+successful child result. Zero-valued child model, tool, time, and cost limits
+add no child-specific ceiling, but repetition/cycle protection, provider
+limits, cancellation, and operator emergency fuses still apply.
+
+**A subagent reports that its output ceiling was reached.**
+Buckley keeps only a 256 KiB head/tail preview in memory and streams the full
+retained transcript to a private 32 MiB spool. It pins that transcript as
+evidence before cleanup. Crossing the disk ceiling is reported as an explicit
+incomplete failure with observed and retained byte counts, so reduce noisy
+logging or split the task before retrying; Buckley will not silently call the
+truncated preview complete.
 
 **`goal run` says the task queue is empty.**
 Completed, blocked, and parked tasks leave the queue. `buckley goal
@@ -62,8 +85,21 @@ content-addressed, so subsequent runs land in well under a second.
 ## Sessions and models
 
 **`HTTP 402` from the provider.**
-Out of credits on the configured provider. Top up, or point
-`models.execution` at a cheaper model in `~/.buckley/config.yaml`.
+OpenRouter may reject a request before generation because the requested output
+allowance reserves more credit than the account can cover. When the structured
+error says how many tokens are affordable, Buckley retries with a smaller
+allowance and keeps the exact requested model; it does not substitute a cheaper
+model. It makes at most two reductions, and a streaming request is retried only
+before the first response event. A generic `insufficient credits` response has
+no safe usable allowance and remains final. Top up the account or deliberately
+select another model.
+
+An error such as `Prompt tokens limit exceeded: X > Y` is different: OpenRouter
+authorized only `Y` prompt tokens for the account's current credit balance. It
+is not Buckley's search ceiling or the model's published context window, and
+shrinking the completion allowance cannot make that prompt admissible. Supply a
+smaller review context or add credit; Buckley still keeps the exact requested
+model and never routes around the rejection.
 
 **Model responses stop mid-stream.**
 Check the provider's status first. Buckley retries transient failures and

@@ -8,10 +8,15 @@ import (
 	"sync"
 	"time"
 
+	"m31labs.dev/buckley/pkg/evidence"
+	"m31labs.dev/buckley/pkg/execmode"
 	"m31labs.dev/buckley/pkg/model"
+	"m31labs.dev/buckley/pkg/prompts"
 	"m31labs.dev/buckley/pkg/rlm"
+	"m31labs.dev/buckley/pkg/runledger"
 	"m31labs.dev/buckley/pkg/tool"
 	"m31labs.dev/buckley/pkg/tool/builtin"
+	"m31labs.dev/buckley/pkg/tool/execprogram"
 	"m31labs.dev/buckley/pkg/transparency"
 )
 
@@ -24,6 +29,8 @@ type AgentRunner struct {
 	ledger    *transparency.CostLedger
 	modelID   string
 	reasoning string
+	runLedger runledger.Store
+	evidence  evidence.Store
 }
 
 // AgentRunnerConfig configures the tool agent runner.
@@ -33,6 +40,11 @@ type AgentRunnerConfig struct {
 	Ledger          *transparency.CostLedger
 	ModelID         string
 	ReasoningEffort string
+	// ReviewRunLedger and ReviewEvidence enable audited exec_program on
+	// immutable API review snapshots. Both are required; when either is absent
+	// the review retains the ordinary bounded read/search tool set.
+	ReviewRunLedger runledger.Store
+	ReviewEvidence  evidence.Store
 }
 
 // NewAgentRunner creates a tool agent runner.
@@ -43,6 +55,8 @@ func NewAgentRunner(cfg AgentRunnerConfig) *AgentRunner {
 		ledger:    cfg.Ledger,
 		modelID:   cfg.ModelID,
 		reasoning: normalizeAgentReasoningEffort(cfg.ReasoningEffort),
+		runLedger: cfg.ReviewRunLedger,
+		evidence:  cfg.ReviewEvidence,
 	}
 }
 
@@ -122,6 +136,8 @@ func (r *AgentRunner) Run(ctx context.Context, systemPrompt, task string, allowe
 	snapshotWorkDir := ""
 	cleanupSnapshot := func() {}
 	closeAgentRegistry := false
+	reviewCodeModeRunID := ""
+	reviewCodeModeStatus := "failed"
 	if opts.ReviewSnapshot != nil {
 		if providerID == "codex" || strings.HasPrefix(modelToUse, "codex/") {
 			// Codex uses its native shell in a separately materialized workspace;
@@ -140,6 +156,7 @@ func (r *AgentRunner) Run(ctx context.Context, systemPrompt, task string, allowe
 			}
 			agentRegistry, err = newReviewSnapshotRegistryWithLimits(
 				snapshotRoot,
+				opts.ReviewSnapshot.RepositoryRoot(),
 				allowedTools,
 				opts.VerificationTimeout,
 				r.models.ReviewSandboxCommand(),
@@ -148,12 +165,30 @@ func (r *AgentRunner) Run(ctx context.Context, systemPrompt, task string, allowe
 				cleanupSnapshot()
 				return nil, err
 			}
+			if reviewToolAllowed(allowedTools, "exec_program") && r.runLedger != nil && r.evidence != nil && execmode.DetectIsolation() == execmode.IsolationBwrap {
+				reviewCodeModeRunID, err = registerReviewCodeModeTool(ctx, agentRegistry, snapshotRoot, r.runLedger, r.evidence, traceID, modelToUse, providerID)
+				if err != nil {
+					cleanupSnapshot()
+					_ = agentRegistry.Close()
+					return nil, fmt.Errorf("enable review code mode: %w", err)
+				}
+			}
 			closeAgentRegistry = true
 		}
 	}
 	defer cleanupSnapshot()
+	if reviewCodeModeRunID != "" {
+		defer func() {
+			_ = r.runLedger.EndRun(context.Background(), reviewCodeModeRunID, reviewCodeModeStatus, time.Now().UTC(), map[string]any{
+				"surface": "review-code-mode",
+			})
+		}()
+	}
 	if closeAgentRegistry {
 		defer func() { _ = agentRegistry.Close() }()
+	}
+	if _, codeModeEnabled := agentRegistry.Get("exec_program"); codeModeEnabled {
+		systemPrompt = strings.TrimSpace(systemPrompt) + "\n\n" + prompts.CodeModeSystemPrompt
 	}
 
 	// Create sub-agent configuration
@@ -210,6 +245,9 @@ func (r *AgentRunner) Run(ctx context.Context, systemPrompt, task string, allowe
 			return nil, fmt.Errorf("execute task: %w", executionErr)
 		}
 		return nil, fmt.Errorf("execute task returned no result")
+	}
+	if executionErr == nil {
+		reviewCodeModeStatus = "completed"
 	}
 
 	duration := time.Since(start)
@@ -296,6 +334,36 @@ func (r *AgentRunner) Run(ctx context.Context, systemPrompt, task string, allowe
 	return result, nil
 }
 
+func reviewToolAllowed(allowedTools []string, name string) bool {
+	for _, candidate := range allowedTools {
+		if strings.TrimSpace(candidate) == name {
+			return true
+		}
+	}
+	return false
+}
+
+func registerReviewCodeModeTool(ctx context.Context, registry *tool.Registry, root string, ledger runledger.Store, ev evidence.Store, sessionID, modelID, providerID string) (string, error) {
+	run, err := ledger.StartRun(ctx, runledger.AgentRun{
+		SessionID:  sessionID,
+		AgentID:    "buckbot",
+		ModelID:    modelID,
+		ProviderID: providerID,
+		Backend:    "review-code-mode",
+	})
+	if err != nil {
+		return "", fmt.Errorf("start review code-mode run: %w", err)
+	}
+	program, err := execprogram.NewProgramTool(root, ledger, ev, run.RunID, sessionID, execmode.ReadOnlySet)
+	if err != nil {
+		_ = ledger.EndRun(context.Background(), run.RunID, "failed", time.Now().UTC(), map[string]any{"error": err.Error()})
+		return "", err
+	}
+	registry.Register(program)
+	registry.SetToolKind(program.Name(), "execute")
+	return run.RunID, nil
+}
+
 // CollectAgentEvidence executes a host-owned evidence plan against the same
 // immutable snapshot boundary used by the review agent. The model never has to
 // remember to request these calls, and later validation repairs can reuse the
@@ -336,7 +404,7 @@ func (r *AgentRunner) CollectAgentEvidence(ctx context.Context, requests []Agent
 	if r != nil && r.models != nil {
 		codexCommand = r.models.ReviewSandboxCommand()
 	}
-	registry, err := newReviewSnapshotRegistryWithLimits(root, allowedTools, opts.VerificationTimeout, codexCommand)
+	registry, err := newReviewSnapshotRegistryWithLimits(root, opts.ReviewSnapshot.RepositoryRoot(), allowedTools, opts.VerificationTimeout, codexCommand)
 	if err != nil {
 		return nil, fmt.Errorf("create agent evidence registry: %w", err)
 	}
@@ -536,15 +604,15 @@ func salvageText(value string, limit int) string {
 }
 
 func newReviewSnapshotRegistry(root string, allowedTools []string, codexCommand ...string) (*tool.Registry, error) {
-	return newReviewSnapshotRegistryWithLimits(root, allowedTools, 0, codexCommand...)
+	return newReviewSnapshotRegistryWithLimits(root, "", allowedTools, 0, codexCommand...)
 }
 
-func newReviewSnapshotRegistryWithLimits(root string, allowedTools []string, verificationTimeout time.Duration, codexCommand ...string) (*tool.Registry, error) {
+func newReviewSnapshotRegistryWithLimits(root, sourceRoot string, allowedTools []string, verificationTimeout time.Duration, codexCommand ...string) (*tool.Registry, error) {
 	allowed := make(map[string]struct{}, len(allowedTools))
 	for _, name := range allowedTools {
 		name = strings.TrimSpace(name)
 		switch name {
-		case "read_file", "find_files", "search_text", "run_verification":
+		case "read_file", "find_files", "search_text", "run_verification", "exec_program":
 			allowed[name] = struct{}{}
 		case "":
 			continue
@@ -560,7 +628,7 @@ func newReviewSnapshotRegistryWithLimits(root string, allowedTools []string, ver
 		return ok
 	}))
 	if _, enabled := allowed["run_verification"]; enabled {
-		verification, err := builtin.NewRunVerificationTool(root, codexCommand...)
+		verification, err := builtin.NewRunVerificationToolWithSource(root, sourceRoot, codexCommand...)
 		if err != nil {
 			return nil, fmt.Errorf("create sealed review verification tool: %w", err)
 		}

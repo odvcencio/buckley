@@ -24,6 +24,12 @@ import (
 // set one explicitly.
 const DefaultRedactionVersion = "runledger-redaction-v1"
 
+const (
+	appendBusyRetryWindow = 5 * time.Second
+	appendBusyBaseDelay   = 2 * time.Millisecond
+	appendBusyMaxDelay    = 50 * time.Millisecond
+)
+
 // ErrRalphDualWriteFailed wraps a RalphSink error returned alongside a
 // successfully persisted Event (section 14.1: Ralph dual-write is best
 // effort and must never affect canonical durability).
@@ -49,9 +55,10 @@ var ErrRalphDualWriteFailed = errors.New("runledger: ralph dual-write failed")
 type SQLiteStore struct {
 	db *sql.DB
 
-	mu        sync.RWMutex
-	liveSink  LiveSink
-	ralphSink RalphSink
+	appendGate chan struct{}
+	mu         sync.RWMutex
+	liveSink   LiveSink
+	ralphSink  RalphSink
 }
 
 var _ Store = (*SQLiteStore)(nil)
@@ -103,7 +110,7 @@ func New(dbPath string) (*SQLiteStore, error) {
 		return nil, fmt.Errorf("runledger: run migrations: %w", err)
 	}
 
-	return &SQLiteStore{db: db}, nil
+	return newSQLiteStore(db), nil
 }
 
 // NewWithDB wraps an already-open *sql.DB, applying the run ledger schema
@@ -119,7 +126,13 @@ func NewWithDB(db *sql.DB) (*SQLiteStore, error) {
 	if err := runMigrations(db); err != nil {
 		return nil, fmt.Errorf("runledger: run migrations: %w", err)
 	}
-	return &SQLiteStore{db: db}, nil
+	return newSQLiteStore(db), nil
+}
+
+func newSQLiteStore(db *sql.DB) *SQLiteStore {
+	gate := make(chan struct{}, 1)
+	gate <- struct{}{}
+	return &SQLiteStore{db: db, appendGate: gate}
 }
 
 // Close closes the underlying database connection opened by New. It must
@@ -202,7 +215,8 @@ func (s *SQLiteStore) EndRun(ctx context.Context, runID, status string, endedAt 
 		return fmt.Errorf("runledger: marshal outcome: %w", err)
 	}
 	res, err := s.db.ExecContext(ctx, `
-		UPDATE agent_runs SET status = ?, ended_at = ?, outcome_json = ? WHERE run_id = ?
+		UPDATE agent_runs SET status = ?, ended_at = ?, outcome_json = ?
+		WHERE run_id = ? AND ended_at IS NULL
 	`, status, sqliteTimestamp(endedAt), outcomeJSON, runID)
 	if err != nil {
 		return fmt.Errorf("runledger: end run %s: %w", runID, err)
@@ -212,7 +226,17 @@ func (s *SQLiteStore) EndRun(ctx context.Context, runID, status string, endedAt 
 		return fmt.Errorf("runledger: end run %s: %w", runID, err)
 	}
 	if n == 0 {
-		return ErrNotFound
+		existing, getErr := s.GetRun(ctx, runID)
+		if getErr != nil {
+			return getErr
+		}
+		if existing.EndedAt != nil && existing.Status == status {
+			return nil
+		}
+		if existing.EndedAt != nil {
+			return fmt.Errorf("runledger: run %s already ended as %s", runID, existing.Status)
+		}
+		return fmt.Errorf("runledger: end run %s did not update its lifecycle", runID)
 	}
 	return nil
 }
@@ -254,34 +278,13 @@ func (s *SQLiteStore) Append(ctx context.Context, event Event) (Event, error) {
 		return Event{}, fmt.Errorf("runledger: marshal receipt_ids: %w", err)
 	}
 
-	tx, err := s.db.BeginTx(ctx, nil)
+	event, inserted, err := s.appendWithGate(ctx, event, payloadJSON, evidenceIDsJSON, receiptIDsJSON)
 	if err != nil {
-		return Event{}, fmt.Errorf("runledger: begin append: %w", err)
+		return Event{}, err
 	}
-	defer func() { _ = tx.Rollback() }()
-
-	var seq int64
-	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(sequence), 0) + 1 FROM run_events WHERE run_id = ?`, event.RunID).Scan(&seq); err != nil {
-		return Event{}, fmt.Errorf("runledger: compute sequence: %w", err)
+	if !inserted {
+		return event, nil
 	}
-
-	_, err = tx.ExecContext(ctx, `
-		INSERT INTO run_events (
-			event_id, run_id, sequence, event_type, timestamp, task_id, agent_id,
-			model_id, provider_id, backend, snapshot_id, payload_json,
-			evidence_ids_json, receipt_ids_json, redaction_version
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, event.ID, event.RunID, seq, event.Type, sqliteTimestamp(event.Timestamp), nullableStr(event.TaskID),
-		nullableStr(event.AgentID), nullableStr(event.ModelID), nullableStr(event.ProviderID), nullableStr(event.Backend),
-		nullableStr(event.SnapshotID), payloadJSON, evidenceIDsJSON, receiptIDsJSON, event.Redaction)
-	if err != nil {
-		return Event{}, fmt.Errorf("runledger: insert event: %w", err)
-	}
-
-	if err := tx.Commit(); err != nil {
-		return Event{}, fmt.Errorf("runledger: commit append: %w", err)
-	}
-	event.Sequence = seq
 
 	liveSink, ralphSink := s.sinks()
 	notifyLiveSink(liveSink, event)
@@ -294,6 +297,149 @@ func (s *SQLiteStore) Append(ctx context.Context, event Event) (Event, error) {
 	}
 
 	return event, dualWriteErr
+}
+
+func (s *SQLiteStore) appendWithGate(ctx context.Context, event Event, payloadJSON, evidenceIDsJSON, receiptIDsJSON any) (Event, bool, error) {
+	// SQLite permits only one writer. Serializing this store's appenders avoids
+	// wasteful read-to-write upgrade collisions on externally owned connections,
+	// while the retry below still covers writers using another store wrapper.
+	select {
+	case <-ctx.Done():
+		return Event{}, false, fmt.Errorf("runledger: append interrupted: %w", ctx.Err())
+	case <-s.appendGate:
+	}
+	defer func() { s.appendGate <- struct{}{} }()
+	return s.appendWithBusyRetry(ctx, event, payloadJSON, evidenceIDsJSON, receiptIDsJSON)
+}
+
+func (s *SQLiteStore) appendWithBusyRetry(ctx context.Context, event Event, payloadJSON, evidenceIDsJSON, receiptIDsJSON any) (Event, bool, error) {
+	retryCtx, cancel := context.WithTimeout(ctx, appendBusyRetryWindow)
+	defer cancel()
+
+	var lastBusyErr error
+	for attempt := 0; ; attempt++ {
+		appended, inserted, err := s.appendOnce(retryCtx, event, payloadJSON, evidenceIDsJSON, receiptIDsJSON)
+		if err == nil {
+			return appended, inserted, nil
+		}
+		if !isBusyError(err) {
+			if ctx.Err() != nil {
+				return Event{}, false, fmt.Errorf("runledger: append retry interrupted: %w", ctx.Err())
+			}
+			if retryCtx.Err() != nil && lastBusyErr != nil {
+				return Event{}, false, fmt.Errorf("runledger: append busy retry exhausted after %s: %w", appendBusyRetryWindow, lastBusyErr)
+			}
+			return Event{}, false, err
+		}
+		lastBusyErr = err
+		if retryCtx.Err() != nil {
+			if ctx.Err() != nil {
+				return Event{}, false, fmt.Errorf("runledger: append retry interrupted: %w", ctx.Err())
+			}
+			return Event{}, false, fmt.Errorf("runledger: append busy retry exhausted after %s: %w", appendBusyRetryWindow, lastBusyErr)
+		}
+
+		delay := appendBusyMaxDelay
+		if attempt < 5 {
+			delay = appendBusyBaseDelay << attempt
+		}
+		if delay > appendBusyMaxDelay {
+			delay = appendBusyMaxDelay
+		}
+		if event.ID != "" {
+			delay += time.Duration(event.ID[len(event.ID)-1]%7) * time.Millisecond
+		}
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return Event{}, false, fmt.Errorf("runledger: append retry interrupted: %w", ctx.Err())
+		case <-retryCtx.Done():
+			timer.Stop()
+			if ctx.Err() != nil {
+				return Event{}, false, fmt.Errorf("runledger: append retry interrupted: %w", ctx.Err())
+			}
+			return Event{}, false, fmt.Errorf("runledger: append busy retry exhausted after %s: %w", appendBusyRetryWindow, lastBusyErr)
+		case <-timer.C:
+		}
+	}
+}
+
+func (s *SQLiteStore) appendOnce(ctx context.Context, event Event, payloadJSON, evidenceIDsJSON, receiptIDsJSON any) (Event, bool, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Event{}, false, fmt.Errorf("runledger: begin append: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var (
+		existingRunID      string
+		existingSequence   int64
+		existingType       string
+		existingTaskID     sql.NullString
+		existingAgentID    sql.NullString
+		existingModelID    sql.NullString
+		existingProviderID sql.NullString
+		existingBackend    sql.NullString
+		existingSnapshotID sql.NullString
+		existingPayload    sql.NullString
+		existingEvidence   sql.NullString
+		existingReceipts   sql.NullString
+		existingRedaction  string
+	)
+	err = tx.QueryRowContext(ctx, `
+		SELECT run_id, sequence, event_type, task_id, agent_id, model_id,
+		       provider_id, backend, snapshot_id, payload_json,
+		       evidence_ids_json, receipt_ids_json, redaction_version
+		FROM run_events WHERE event_id = ?
+	`, event.ID).Scan(
+		&existingRunID, &existingSequence, &existingType, &existingTaskID,
+		&existingAgentID, &existingModelID, &existingProviderID,
+		&existingBackend, &existingSnapshotID, &existingPayload,
+		&existingEvidence, &existingReceipts, &existingRedaction,
+	)
+	if err == nil {
+		if existingRunID != event.RunID || existingType != event.Type ||
+			existingTaskID.String != event.TaskID || existingAgentID.String != event.AgentID ||
+			existingModelID.String != event.ModelID || existingProviderID.String != event.ProviderID ||
+			existingBackend.String != event.Backend || existingSnapshotID.String != event.SnapshotID ||
+			existingPayload.String != nullableJSONText(payloadJSON) || existingEvidence.String != nullableJSONText(evidenceIDsJSON) ||
+			existingReceipts.String != nullableJSONText(receiptIDsJSON) || existingRedaction != event.Redaction {
+			return Event{}, false, fmt.Errorf("runledger: event id %s conflicts with an existing immutable event", event.ID)
+		}
+		if err := tx.Commit(); err != nil {
+			return Event{}, false, fmt.Errorf("runledger: commit idempotent append: %w", err)
+		}
+		event.Sequence = existingSequence
+		return event, false, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return Event{}, false, fmt.Errorf("runledger: read event id %s: %w", event.ID, err)
+	}
+
+	var seq int64
+	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(sequence), 0) + 1 FROM run_events WHERE run_id = ?`, event.RunID).Scan(&seq); err != nil {
+		return Event{}, false, fmt.Errorf("runledger: compute sequence: %w", err)
+	}
+
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO run_events (
+			event_id, run_id, sequence, event_type, timestamp, task_id, agent_id,
+			model_id, provider_id, backend, snapshot_id, payload_json,
+			evidence_ids_json, receipt_ids_json, redaction_version
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, event.ID, event.RunID, seq, event.Type, sqliteTimestamp(event.Timestamp), nullableStr(event.TaskID),
+		nullableStr(event.AgentID), nullableStr(event.ModelID), nullableStr(event.ProviderID), nullableStr(event.Backend),
+		nullableStr(event.SnapshotID), payloadJSON, evidenceIDsJSON, receiptIDsJSON, event.Redaction)
+	if err != nil {
+		return Event{}, false, fmt.Errorf("runledger: insert event: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return Event{}, false, fmt.Errorf("runledger: commit append: %w", err)
+	}
+	event.Sequence = seq
+	return event, true, nil
 }
 
 // BeginStep implements StepJournal. A completed logical step is immutable
@@ -769,13 +915,49 @@ func (s *SQLiteStore) RecordMetricSample(ctx context.Context, sample AgentMetric
 	if err != nil {
 		return AgentMetricSample{}, fmt.Errorf("runledger: marshal dimensions: %w", err)
 	}
-	res, err := s.db.ExecContext(ctx, `
-		INSERT INTO agent_metric_samples (run_id, task_id, metric_name, metric_value, unit, dimensions_json, timestamp)
-		VALUES (?, ?, ?, ?, ?, ?, ?)
-	`, sample.RunID, nullableStr(sample.TaskID), sample.MetricName, sample.Value, nullableStr(sample.Unit),
+	statement := `
+		INSERT INTO agent_metric_samples (run_id, task_id, idempotency_key, metric_name, metric_value, unit, dimensions_json, timestamp)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+	if strings.TrimSpace(sample.IdempotencyKey) != "" {
+		statement = `
+			INSERT INTO agent_metric_samples (run_id, task_id, idempotency_key, metric_name, metric_value, unit, dimensions_json, timestamp)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT(run_id, idempotency_key)
+			WHERE idempotency_key IS NOT NULL AND idempotency_key <> ''
+			DO NOTHING`
+	}
+	res, err := s.db.ExecContext(ctx, statement, sample.RunID, nullableStr(sample.TaskID), nullableStr(sample.IdempotencyKey), sample.MetricName, sample.Value, nullableStr(sample.Unit),
 		dimensionsJSON, sqliteTimestamp(sample.Timestamp))
 	if err != nil {
 		return AgentMetricSample{}, fmt.Errorf("runledger: insert metric sample: %w", err)
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return AgentMetricSample{}, fmt.Errorf("runledger: metric sample rows affected: %w", err)
+	}
+	if affected == 0 && strings.TrimSpace(sample.IdempotencyKey) != "" {
+		var (
+			existingTask       sql.NullString
+			existingMetric     string
+			existingValue      float64
+			existingUnit       sql.NullString
+			existingDimensions sql.NullString
+		)
+		if err := s.db.QueryRowContext(ctx, `
+			SELECT id, task_id, metric_name, metric_value, unit, dimensions_json
+			FROM agent_metric_samples WHERE run_id = ? AND idempotency_key = ?
+		`, sample.RunID, sample.IdempotencyKey).Scan(
+			&sample.ID, &existingTask, &existingMetric, &existingValue,
+			&existingUnit, &existingDimensions,
+		); err != nil {
+			return AgentMetricSample{}, fmt.Errorf("runledger: read idempotent metric sample: %w", err)
+		}
+		if existingTask.String != sample.TaskID || existingMetric != sample.MetricName ||
+			existingValue != sample.Value || existingUnit.String != sample.Unit ||
+			existingDimensions.String != nullableJSONText(dimensionsJSON) {
+			return AgentMetricSample{}, fmt.Errorf("runledger: metric idempotency key %s conflicts with an existing immutable sample", sample.IdempotencyKey)
+		}
+		return sample, nil
 	}
 	id, err := res.LastInsertId()
 	if err != nil {
@@ -878,6 +1060,14 @@ func marshalJSONMap(m map[string]any) (any, error) {
 	return string(raw), nil
 }
 
+func nullableJSONText(value any) string {
+	if value == nil {
+		return ""
+	}
+	text, _ := value.(string)
+	return text
+}
+
 func unmarshalJSONMap(raw string) (map[string]any, error) {
 	if raw == "" {
 		return nil, nil
@@ -955,8 +1145,8 @@ func parseSQLiteTimestamp(raw string) time.Time {
 func isBusyError(err error) bool {
 	var sqliteErr *sqlite.Error
 	if errors.As(err, &sqliteErr) {
-		code := sqliteErr.Code()
-		return code == sqlite3.SQLITE_BUSY || code == sqlite3.SQLITE_LOCKED
+		primaryCode := sqliteErr.Code() & 0xff
+		return primaryCode == sqlite3.SQLITE_BUSY || primaryCode == sqlite3.SQLITE_LOCKED
 	}
 	return false
 }
@@ -1017,6 +1207,7 @@ var migrations = []storage.Migration{
 	{Version: 7, Name: "agent_metric_samples", Apply: createAgentMetricSamplesTable},
 	{Version: 8, Name: "execution_steps", Apply: createExecutionStepsTable},
 	{Version: 9, Name: "agent_claims", Apply: createAgentClaimsTable},
+	{Version: 10, Name: "metric_idempotency", Apply: addMetricIdempotency},
 }
 
 func createAgentRunsTable(db *sql.DB) error {
@@ -1197,6 +1388,16 @@ func createAgentMetricSamplesTable(db *sql.DB) error {
 	`)
 	if err != nil {
 		return fmt.Errorf("create agent_metric_samples: %w", err)
+	}
+	return nil
+}
+
+func addMetricIdempotency(db *sql.DB) error {
+	if _, err := db.Exec(`ALTER TABLE agent_metric_samples ADD COLUMN idempotency_key TEXT`); err != nil {
+		return fmt.Errorf("add metric idempotency key: %w", err)
+	}
+	if _, err := db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_metrics_idempotency ON agent_metric_samples(run_id, idempotency_key) WHERE idempotency_key IS NOT NULL AND idempotency_key <> ''`); err != nil {
+		return fmt.Errorf("create metric idempotency index: %w", err)
 	}
 	return nil
 }

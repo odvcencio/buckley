@@ -96,6 +96,19 @@ func TestEndRun(t *testing.T) {
 	if got.Outcome["ok"] != true {
 		t.Fatalf("Outcome = %+v, want ok=true", got.Outcome)
 	}
+	if err := store.EndRun(ctx, run.RunID, "completed", end.Add(time.Minute), map[string]any{"ok": false}); err != nil {
+		t.Fatalf("idempotent EndRun() error = %v", err)
+	}
+	again, err := store.GetRun(ctx, run.RunID)
+	if err != nil {
+		t.Fatalf("GetRun() after repeated end error = %v", err)
+	}
+	if again.EndedAt == nil || !again.EndedAt.Equal(end) || again.Outcome["ok"] != true {
+		t.Fatalf("repeated EndRun changed terminal record: %+v", again)
+	}
+	if err := store.EndRun(ctx, run.RunID, "failed", end.Add(time.Minute), nil); err == nil {
+		t.Fatal("EndRun changed an existing terminal status")
+	}
 }
 
 func TestEndRun_NotFound(t *testing.T) {
@@ -146,6 +159,115 @@ func TestAppend_SequenceAssignment(t *testing.T) {
 	}
 	if third.Sequence != 3 {
 		t.Fatalf("third Sequence = %d, want 3 (caller value must be ignored)", third.Sequence)
+	}
+}
+
+func TestAppend_StableIDIsIdempotent(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	run, err := store.StartRun(ctx, AgentRun{SessionID: "sess-1"})
+	if err != nil {
+		t.Fatalf("StartRun() error = %v", err)
+	}
+	event := Event{
+		ID:      StableEventID("durable-turn", run.RunID, "task-1", "turn-1"),
+		RunID:   run.RunID,
+		TaskID:  "task-1",
+		Type:    EventDurableTurn,
+		Payload: map[string]any{"turn": 1},
+	}
+	first, err := store.Append(ctx, event)
+	if err != nil {
+		t.Fatalf("Append() first error = %v", err)
+	}
+	second, err := store.Append(ctx, event)
+	if err != nil {
+		t.Fatalf("Append() retry error = %v", err)
+	}
+	if second.Sequence != first.Sequence {
+		t.Fatalf("retry Sequence = %d, want %d", second.Sequence, first.Sequence)
+	}
+	events, err := store.ListEvents(ctx, EventQuery{RunID: run.RunID})
+	if err != nil {
+		t.Fatalf("ListEvents() error = %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("ListEvents() returned %d events, want 1", len(events))
+	}
+
+	event.Payload = map[string]any{"turn": 2}
+	if _, err := store.Append(ctx, event); err == nil {
+		t.Fatal("Append() accepted conflicting immutable event ID")
+	}
+}
+
+func TestAppend_StableIDAcrossStoreWrappersNotifiesSinksOnce(t *testing.T) {
+	store, evidenceStore := newComposedStores(t)
+	otherStore, err := NewWithDB(evidenceStore.DB())
+	if err != nil {
+		t.Fatalf("second NewWithDB() error = %v", err)
+	}
+	ctx := context.Background()
+	run, err := store.StartRun(ctx, AgentRun{SessionID: "sess-idempotent-writers"})
+	if err != nil {
+		t.Fatalf("StartRun() error = %v", err)
+	}
+
+	var sinkMu sync.Mutex
+	liveCalls := 0
+	ralphCalls := 0
+	liveSink := sinkFunc(func(Event) {
+		sinkMu.Lock()
+		defer sinkMu.Unlock()
+		liveCalls++
+	})
+	ralphSink := ralphSinkFunc(func(context.Context, Event) error {
+		sinkMu.Lock()
+		defer sinkMu.Unlock()
+		ralphCalls++
+		return nil
+	})
+	store.SetLiveSink(liveSink)
+	store.SetRalphSink(ralphSink)
+	otherStore.SetLiveSink(liveSink)
+	otherStore.SetRalphSink(ralphSink)
+
+	event := Event{
+		ID:      StableEventID("shared-idempotent-event", run.RunID),
+		RunID:   run.RunID,
+		Type:    EventDurableTurn,
+		Payload: map[string]any{"turn": 1},
+	}
+	type appendResult struct {
+		event Event
+		err   error
+	}
+	start := make(chan struct{})
+	results := make(chan appendResult, 2)
+	for _, target := range []*SQLiteStore{store, otherStore} {
+		go func(target *SQLiteStore) {
+			<-start
+			appended, err := target.Append(ctx, event)
+			results <- appendResult{event: appended, err: err}
+		}(target)
+	}
+	close(start)
+	first := <-results
+	second := <-results
+	for i, result := range []appendResult{first, second} {
+		if result.err != nil {
+			t.Fatalf("Append() result %d error = %v", i, result.err)
+		}
+		if result.event.Sequence != 1 {
+			t.Fatalf("Append() result %d sequence = %d, want 1", i, result.event.Sequence)
+		}
+	}
+
+	sinkMu.Lock()
+	defer sinkMu.Unlock()
+	if liveCalls != 1 || ralphCalls != 1 {
+		t.Fatalf("idempotent sink calls = live %d, ralph %d; want one each", liveCalls, ralphCalls)
 	}
 }
 
@@ -278,6 +400,176 @@ func TestAppend_ConcurrentWriters(t *testing.T) {
 		if !seen[i] {
 			t.Fatalf("missing sequence %d (gap under concurrency)", i)
 		}
+	}
+}
+
+func TestAppend_ConcurrentWritersOnSharedDeferredConnection(t *testing.T) {
+	store, evidenceStore := newComposedStores(t)
+	otherStore, err := NewWithDB(evidenceStore.DB())
+	if err != nil {
+		t.Fatalf("second NewWithDB() error = %v", err)
+	}
+	ctx := context.Background()
+
+	run, err := store.StartRun(ctx, AgentRun{SessionID: "sess-shared-writers"})
+	if err != nil {
+		t.Fatalf("StartRun() error = %v", err)
+	}
+
+	const n = 40
+	start := make(chan struct{})
+	errCh := make(chan error, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			target := store
+			if i%2 == 1 {
+				target = otherStore
+			}
+			_, err := target.Append(ctx, Event{
+				RunID:   run.RunID,
+				Type:    EventToolStarted,
+				Payload: map[string]any{"writer": i},
+			})
+			if err != nil {
+				errCh <- err
+			}
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		t.Fatalf("concurrent shared Append() error = %v", err)
+	}
+
+	events, err := store.ListEvents(ctx, EventQuery{RunID: run.RunID})
+	if err != nil {
+		t.Fatalf("ListEvents() error = %v", err)
+	}
+	if len(events) != n {
+		t.Fatalf("ListEvents() returned %d events, want %d", len(events), n)
+	}
+	for i, event := range events {
+		if event.Sequence != int64(i+1) {
+			t.Fatalf("events[%d].Sequence = %d, want %d", i, event.Sequence, i+1)
+		}
+	}
+}
+
+func TestAppend_SharedDeferredWriterWaitsForContentionAndKeepsGateUsable(t *testing.T) {
+	store, evidenceStore := newComposedStores(t)
+	ctx := context.Background()
+
+	run, err := store.StartRun(ctx, AgentRun{SessionID: "sess-shared-contention"})
+	if err != nil {
+		t.Fatalf("StartRun() error = %v", err)
+	}
+
+	competingTx, err := evidenceStore.DB().Begin()
+	if err != nil {
+		t.Fatalf("begin competing transaction: %v", err)
+	}
+	t.Cleanup(func() { _ = competingTx.Rollback() })
+	if _, err := competingTx.Exec(`UPDATE agent_runs SET status = status WHERE run_id = ?`, run.RunID); err != nil {
+		t.Fatalf("acquire competing write lock: %v", err)
+	}
+	lockStarted := time.Now()
+
+	firstDone := make(chan error, 1)
+	go func() {
+		_, err := store.Append(ctx, Event{RunID: run.RunID, Type: EventToolStarted})
+		firstDone <- err
+	}()
+
+	acquireDeadline := time.Now().Add(time.Second)
+	for len(store.appendGate) != 0 && time.Now().Before(acquireDeadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if len(store.appendGate) != 0 {
+		t.Fatal("first Append() did not acquire the append gate")
+	}
+
+	queuedCtx, cancel := context.WithTimeout(ctx, 30*time.Millisecond)
+	queuedStarted := time.Now()
+	_, queuedErr := store.Append(queuedCtx, Event{RunID: run.RunID, Type: EventToolStarted})
+	cancel()
+	if !errors.Is(queuedErr, context.DeadlineExceeded) {
+		t.Fatalf("queued Append() error = %v, want context deadline exceeded", queuedErr)
+	}
+	if elapsed := time.Since(queuedStarted); elapsed > 250*time.Millisecond {
+		t.Fatalf("queued Append() cancellation took %s, want <= 250ms", elapsed)
+	}
+
+	if remaining := time.Until(lockStarted.Add(500 * time.Millisecond)); remaining > 0 {
+		time.Sleep(remaining)
+	}
+	if err := competingTx.Rollback(); err != nil {
+		t.Fatalf("release competing write lock: %v", err)
+	}
+
+	select {
+	case err := <-firstDone:
+		if err != nil {
+			t.Fatalf("Append() after 500ms contention error = %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Append() did not complete after competing writer released")
+	}
+
+	postReleaseCtx, postReleaseCancel := context.WithTimeout(ctx, time.Second)
+	defer postReleaseCancel()
+	appended, err := store.Append(postReleaseCtx, Event{RunID: run.RunID, Type: EventToolCompleted})
+	if err != nil {
+		t.Fatalf("Append() after gate release error = %v", err)
+	}
+	if appended.Sequence != 2 {
+		t.Fatalf("Append() after gate release sequence = %d, want 2", appended.Sequence)
+	}
+}
+
+func TestAppend_RetryCancellationReleasesGate(t *testing.T) {
+	store, evidenceStore := newComposedStores(t)
+	ctx := context.Background()
+	run, err := store.StartRun(ctx, AgentRun{SessionID: "sess-retry-cancel"})
+	if err != nil {
+		t.Fatalf("StartRun() error = %v", err)
+	}
+
+	competingTx, err := evidenceStore.DB().Begin()
+	if err != nil {
+		t.Fatalf("begin competing transaction: %v", err)
+	}
+	t.Cleanup(func() { _ = competingTx.Rollback() })
+	if _, err := competingTx.Exec(`UPDATE agent_runs SET status = status WHERE run_id = ?`, run.RunID); err != nil {
+		t.Fatalf("acquire competing write lock: %v", err)
+	}
+
+	retryCtx, cancel := context.WithTimeout(ctx, 30*time.Millisecond)
+	retryStarted := time.Now()
+	_, retryErr := store.Append(retryCtx, Event{RunID: run.RunID, Type: EventToolStarted})
+	cancel()
+	if !errors.Is(retryErr, context.DeadlineExceeded) {
+		t.Fatalf("retrying Append() error = %v, want context deadline exceeded", retryErr)
+	}
+	if elapsed := time.Since(retryStarted); elapsed > 250*time.Millisecond {
+		t.Fatalf("retrying Append() cancellation took %s, want <= 250ms", elapsed)
+	}
+	if err := competingTx.Rollback(); err != nil {
+		t.Fatalf("release competing write lock: %v", err)
+	}
+
+	postCancelCtx, postCancel := context.WithTimeout(ctx, time.Second)
+	defer postCancel()
+	appended, err := store.Append(postCancelCtx, Event{RunID: run.RunID, Type: EventToolCompleted})
+	if err != nil {
+		t.Fatalf("Append() after retry cancellation error = %v", err)
+	}
+	if appended.Sequence != 1 {
+		t.Fatalf("Append() after retry cancellation sequence = %d, want 1", appended.Sequence)
 	}
 }
 
@@ -632,6 +924,37 @@ func TestRecordMetricSample(t *testing.T) {
 	}
 	if sample.ID == 0 {
 		t.Fatalf("expected generated sample ID")
+	}
+}
+
+func TestRecordMetricSample_IdempotencyKeyDeduplicatesRetry(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	run, err := store.StartRun(ctx, AgentRun{SessionID: "sess-metric-retry"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sample := AgentMetricSample{
+		RunID: run.RunID, MetricName: "cost_usd", Value: 0.75, Unit: "usd", IdempotencyKey: "turn:task-1:0:0:cost_usd",
+	}
+	first, err := store.RecordMetricSample(ctx, sample)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := store.RecordMetricSample(ctx, sample)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.ID == 0 || second.ID != first.ID {
+		t.Fatalf("sample IDs = %d/%d, want one durable observation", first.ID, second.ID)
+	}
+	total, err := store.SumMetric(ctx, run.RunID, "cost_usd")
+	if err != nil || total != 0.75 {
+		t.Fatalf("SumMetric = %.2f, %v; want 0.75", total, err)
+	}
+	sample.Value = 1.25
+	if _, err := store.RecordMetricSample(ctx, sample); err == nil {
+		t.Fatal("RecordMetricSample accepted a conflicting idempotency key")
 	}
 }
 

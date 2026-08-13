@@ -451,9 +451,9 @@ type ToolExecutor interface {
 // is normal, legitimate behavior, so every limit here sits well above what
 // legacyPRReviewAllowedTools() (read_file, find_files, search_text) issues
 // in practice; StepCap -- not the Governor's own round ceiling -- remains
-// the authoritative "out of iterations" stop, matching the pre-migration
-// maxIterations contract exactly. A stopped review is worse than a governor
-// that never fires.
+// the authoritative end of tool execution. A stopped review is worse than a
+// governor that never fires, so the stopped transcript gets a reserved final
+// synthesis request instead of being discarded.
 const (
 	oneshotToolLoopGovernorRoundSlack         = 20
 	oneshotToolLoopGovernorMaxToolCalls       = 200
@@ -482,10 +482,9 @@ func oneshotToolLoopGovernorConfig(maxIterations int) agentloop.Config {
 // projection, tool-call ID backfill, and per-round Governor consultation are
 // now Controller-owned. StepCap carries the exact maxIterations ceiling this
 // method has always enforced -- Controller performs exactly maxIterations
-// model calls before stopping, identical to the old bounded for loop -- so
-// the "max tool iterations reached" contract below is byte-stable.
-// oneshotToolLoopGovernorConfig documents why the Governor's own limits sit
-// well clear of it.
+// tool-enabled model calls before stopping actions, then reserves one
+// tools-disabled request to synthesize the accumulated evidence. An unusable
+// synthesis is returned as an explicit incomplete turn.
 func (inv *DefaultInvoker) InvokeWithTools(ctx context.Context, systemPrompt, userPrompt string, toolDefs []tools.Definition, executor ToolExecutor, maxIterations int) (string, *transparency.Trace, error) {
 	if maxIterations <= 0 {
 		maxIterations = 10
@@ -592,12 +591,13 @@ func (inv *DefaultInvoker) InvokeWithTools(ctx context.Context, systemPrompt, us
 	})
 
 	ctrl, err := agentloop.NewController(agentloop.ControllerConfig{
-		Governor:      agentloop.New(oneshotToolLoopGovernorConfig(maxIterations)),
-		StepCap:       maxIterations,
-		BuildRequest:  buildRequest,
-		CallModel:     callModel,
-		DispatchTools: dispatchTools,
-		History:       history,
+		Governor:       agentloop.New(oneshotToolLoopGovernorConfig(maxIterations)),
+		StepCap:        maxIterations,
+		FinalizeOnStop: true,
+		BuildRequest:   buildRequest,
+		CallModel:      callModel,
+		DispatchTools:  dispatchTools,
+		History:        history,
 		ContextWindow: func(modelID string) int {
 			provider, ok := inv.client.(model.ContextWindowProvider)
 			if !ok {
@@ -613,27 +613,55 @@ func (inv *DefaultInvoker) InvokeWithTools(ctx context.Context, systemPrompt, us
 
 	result, runErr := ctrl.Run(ctx)
 	if runErr != nil {
-		builder.WithError(runErr)
-		trace := builder.Build()
-		return "", trace, fmt.Errorf("model request failed: %w", runErr)
-	}
-
-	if result.FinishReason != "" {
-		// StepCap (maxIterations exhausted), the Governor's own backstop, or
-		// an empty provider response all land here: no final answer, same
-		// as the pre-migration "max tool iterations reached" fallback.
 		builder.WithToolCalls(allToolCalls)
-		builder.WithError(fmt.Errorf("max tool iterations (%d) reached", maxIterations))
+		builder.WithError(runErr)
+		content := ""
+		if result != nil {
+			content = result.Content
+			if content != "" {
+				builder.WithContent(content)
+			}
+		}
+		if result != nil && result.Termination.Kind != "" {
+			builder.WithResponse(&transparency.ResponseTrace{
+				FinishReason: result.FinishReason,
+				StopReason:   result.Termination.Reason,
+			})
+		}
 		cost := inv.pricing.Calculate(totalTokens)
 		trace := builder.Complete(totalTokens, cost)
-		return "", trace, fmt.Errorf("max tool iterations (%d) reached without final response", maxIterations)
+		return content, trace, fmt.Errorf("model request failed: %w", runErr)
+	}
+	if completionErr := result.RequireConclusive(); completionErr != nil {
+		builder.WithToolCalls(allToolCalls)
+		builder.WithError(completionErr)
+		if result.Content != "" {
+			builder.WithContent(result.Content)
+		}
+		if result.Termination.Kind != "" {
+			builder.WithResponse(&transparency.ResponseTrace{
+				FinishReason: result.FinishReason,
+				StopReason:   result.Termination.Reason,
+			})
+		}
+		cost := inv.pricing.Calculate(totalTokens)
+		trace := builder.Complete(totalTokens, cost)
+		return result.Content, trace, completionErr
 	}
 
-	content := ""
-	if c, ok := result.Message.Content.(string); ok {
-		content = c
+	content, extractErr := model.ExtractTextContent(result.Message.Content)
+	if extractErr != nil {
+		builder.WithError(extractErr)
+		return "", builder.Build(), fmt.Errorf("extract final response: %w", extractErr)
 	}
+	builder.WithToolCalls(allToolCalls)
 	builder.WithContent(content)
+	if result.Termination.Kind != "" {
+		builder.WithResponse(&transparency.ResponseTrace{
+			FinishReason: result.FinishReason,
+			StopReason:   result.Termination.Reason,
+		})
+	}
 
 	cost := inv.pricing.Calculate(totalTokens)
 	trace := builder.Complete(totalTokens, cost)

@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"m31labs.dev/buckley/pkg/acp"
+	"m31labs.dev/buckley/pkg/agentloop"
 	"m31labs.dev/buckley/pkg/config"
 	"m31labs.dev/buckley/pkg/conversation"
 	"m31labs.dev/buckley/pkg/model"
@@ -276,5 +277,41 @@ func TestRunACPLoop_StreamsPerTokenWithNoDuplicateFinalChunk(t *testing.T) {
 	gotFinal := strings.Join(gotChunks, "")
 	if gotFinal != wantFinal {
 		t.Fatalf("concatenated agent_message_chunk content = %q, want %q (must equal final message with no duplicate trailing chunk)", gotFinal, wantFinal)
+	}
+}
+
+func TestRunACPLoop_RejectsProviderTruncationFinishReason(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		acpSSEChunk(t, w, "partial answer", "", "length")
+		_, _ = io.WriteString(w, "data: [DONE]\n\n")
+	}))
+	t.Cleanup(server.Close)
+
+	cfg := config.DefaultConfig()
+	cfg.Providers.OpenAI.Enabled = true
+	cfg.Providers.OpenAI.APIKey = "test-key"
+	cfg.Providers.OpenAI.BaseURL = server.URL
+	cfg.Models.DefaultProvider = "openai"
+	mgr, err := model.NewManager(cfg)
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	conv := conversation.New("session-truncated")
+	conv.AddUserMessage("answer")
+
+	text, err := runACPLoop(
+		context.Background(), cfg, mgr, conv, tool.NewEmptyRegistry(), nil, nil,
+		"acp-test/no-tools-model", "", "session-truncated", nil,
+		func(string, ...interface{}) {}, (&collectingStream{}).fn,
+	)
+	var incomplete *agentloop.IncompleteTurnError
+	if err == nil || !errors.As(err, &incomplete) || !strings.Contains(err.Error(), "truncated at its output limit") {
+		t.Fatalf("error = %v, want provider truncation rejected as incomplete", err)
+	}
+	if text != "" {
+		t.Fatalf("text = %q, want no conclusive answer", text)
 	}
 }

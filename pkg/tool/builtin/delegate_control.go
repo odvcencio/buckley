@@ -102,14 +102,20 @@ func (t *SubagentTool) resolveTargets(ctx context.Context, coordinator agentcoor
 		if len(ids) == 0 {
 			return nil, true, fmt.Errorf("subagent run selector is required")
 		}
+		if err := t.requireTargetsInCurrentSession(ctx, coordinator, ids); err != nil {
+			return nil, true, err
+		}
 		return ids, true, nil
 	default:
+		if err := t.requireTargetsInCurrentSession(ctx, coordinator, []string{selector}); err != nil {
+			return nil, false, err
+		}
 		return []string{selector}, false, nil
 	}
 	if grouped && lower != "all" && lower != "active" && groupName == "" {
 		return nil, true, fmt.Errorf("subagent agent selector requires a name")
 	}
-	session, _ := t.runtimeContext()
+	session, _, _, _ := t.runtimeContext()
 	runs, err := coordinator.List(ctx, agentcoord.RunFilter{ParentSessionID: session})
 	if err != nil {
 		return nil, true, err
@@ -128,6 +134,15 @@ func (t *SubagentTool) resolveTargets(ctx context.Context, coordinator agentcoor
 		return nil, true, fmt.Errorf("no active subagents match selector %q", selector)
 	}
 	return targets, true, nil
+}
+
+func (t *SubagentTool) requireTargetsInCurrentSession(ctx context.Context, coordinator agentcoord.Coordinator, ids []string) error {
+	for _, id := range ids {
+		if _, err := t.runInCurrentSession(ctx, coordinator, id); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func subagentBatchResult(action, selector string, targets []string, messages []agentcoord.Message, runs []agentcoord.Run, failures []subagentControlFailure) *Result {

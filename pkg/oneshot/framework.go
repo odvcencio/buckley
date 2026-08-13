@@ -3,6 +3,7 @@ package oneshot
 import (
 	"context"
 	"fmt"
+	"math"
 	"reflect"
 	"strings"
 	"time"
@@ -348,6 +349,12 @@ func (f *Framework) RunAgent(ctx context.Context, def AgentDefinition, opts Agen
 	if f.agentRunner == nil {
 		return nil, fmt.Errorf("agent runner is required for command %q (configure with WithAgentRunner)", def.Name())
 	}
+	if !finiteNonNegativeAgentBudget(opts.MaxCostUSD) {
+		return nil, fmt.Errorf("max cost USD must be finite and non-negative")
+	}
+	if !finiteNonNegativeAgentBudget(opts.ApprovalCriticReserveUSD) {
+		return nil, fmt.Errorf("approval critic reserve USD must be finite and non-negative")
+	}
 
 	// Build audit if not provided
 	audit := opts.Audit
@@ -475,7 +482,11 @@ func (f *Framework) RunAgent(ctx context.Context, def AgentDefinition, opts Agen
 	if criticRunner == nil {
 		criticRunner = f.agentRunner
 	} else {
+		// A dedicated runner owns both its model and its reasoning effort. Keep
+		// shared token bounds, but do not let the primary review plan overwrite
+		// an explicitly configured critic effort.
 		criticExecutionOpts.ModelID = ""
+		criticExecutionOpts.ReasoningEffort = ""
 	}
 	critic := f.runValidatedAgentPhase(
 		ctx,
@@ -508,6 +519,10 @@ func (f *Framework) RunAgent(ctx context.Context, def AgentDefinition, opts Agen
 	// authoritative final review.
 	result.Value = critic.value
 	return result, nil
+}
+
+func finiteNonNegativeAgentBudget(value float64) bool {
+	return value >= 0 && !math.IsNaN(value) && !math.IsInf(value, 0)
 }
 
 func hasAgentValue(value any) bool {

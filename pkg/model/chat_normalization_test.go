@@ -190,6 +190,37 @@ func TestApplyProviderTransformsAddsLiteLLMNoopToolForToolHistory(t *testing.T) 
 	}
 }
 
+func TestApplyProviderTransformsPreservesLiteLLMNoToolFinalizationIntent(t *testing.T) {
+	req := ChatRequest{
+		Model:      "litellm/claude",
+		ToolChoice: "none",
+		Messages: []Message{
+			{Role: "user", Content: "inspect"},
+			{
+				Role: "assistant",
+				ToolCalls: []ToolCall{{
+					ID:   "call-1",
+					Type: "function",
+					Function: FunctionCall{
+						Name:      "read_file",
+						Arguments: `{"path":"README.md"}`,
+					},
+				}},
+			},
+			{Role: "tool", ToolCallID: "call-1", Name: "read_file", Content: "contents"},
+		},
+	}
+
+	got := applyProviderTransforms(req, "litellm")
+
+	if len(got.Tools) != 1 {
+		t.Fatalf("expected compatibility noop tool, got %+v", got.Tools)
+	}
+	if got.ToolChoice != "none" {
+		t.Fatalf("tool choice=%q want explicit no-tool finalization intent", got.ToolChoice)
+	}
+}
+
 func TestApplyProviderTransformsDropsToolChoiceWithoutTools(t *testing.T) {
 	req := ChatRequest{
 		Model:      "x-ai/grok-4.5",

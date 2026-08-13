@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -1070,6 +1071,19 @@ func runAgentRun(args []string) error {
 		return nil
 	}
 
+	modelOverride := strings.TrimSpace(subProfile.Spec.Models.Execution)
+	if opts.model != "" {
+		modelOverride = opts.model
+	} else if modelOverrideFlag != "" {
+		modelOverride = modelOverrideFlag
+	}
+	// initDependencies constructs and initializes provider routing. Put the
+	// resolved child pin into the startup override before that boundary so a
+	// native provider is available and an OpenRouter fallback chain cannot
+	// silently substitute another model.
+	restoreModelOverride := applyCommandModelOverride(modelOverride)
+	defer restoreModelOverride()
+
 	cfg, mgr, store, err := initDependenciesFn()
 	if err != nil {
 		return err
@@ -1080,14 +1094,8 @@ func runAgentRun(args []string) error {
 	if contractPresent && childContract.Effort != "" {
 		cfg.Models.Reasoning = childContract.Effort
 	}
-	modelOverride := strings.TrimSpace(subProfile.Spec.Models.Execution)
-	if opts.model != "" {
-		applyStartupModelOverride(cfg, opts.model)
-		modelOverride = opts.model
-	} else if modelOverrideFlag != "" {
-		applyStartupModelOverride(cfg, modelOverrideFlag)
-		modelOverride = modelOverrideFlag
-	}
+	modelOverride = normalizeModelIDWithReasoning(cfg, modelOverride)
+	disableConfiguredModelFallbacks(cfg, modelOverride)
 
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -1099,20 +1107,51 @@ func runAgentRun(args []string) error {
 	}
 	planStore := orchestrator.NewFilePlanStore(cfg.Artifacts.PlanningDir)
 	allowedTools := append([]string(nil), subProfile.Spec.Tools.Allow...)
-	stepCap := 0
+	limits := acpLoopLimits{}
 	outputSchema := ""
 	if contractPresent {
-		stepCap = childContract.StepCap
+		limits, err = acpLoopLimitsFromChildContract(childContract)
+		if err != nil {
+			return err
+		}
 		outputSchema = strings.TrimSpace(childContract.OutputSchema)
 	}
 	if outputSchema == "" && subProfile != nil && subProfile.Spec != nil {
 		outputSchema = strings.TrimSpace(subProfile.Spec.Metadata["buckley.output_schema"])
 	}
-	exitCode := executeOneShotWithStepCapAndOutputSchema(formatSubagentTask(opts.subagent, opts.task), cfg, mgr, store, projectCtx, planStore, subProfile, modelOverride, allowedTools, false, stepCap, outputSchema)
+	exitCode := executeOneShotWithLimitsAndOutputSchema(formatSubagentTask(opts.subagent, opts.task), cfg, mgr, store, projectCtx, planStore, subProfile, modelOverride, allowedTools, false, limits, outputSchema)
 	if exitCode != 0 {
 		return withExitCode(fmt.Errorf("agent run failed"), exitCode)
 	}
 	return nil
+}
+
+func acpLoopLimitsFromChildContract(contract subagent.ChildContract) (acpLoopLimits, error) {
+	if contract.Budget.MaxCostUSD < 0 || math.IsNaN(contract.Budget.MaxCostUSD) || math.IsInf(contract.Budget.MaxCostUSD, 0) {
+		return acpLoopLimits{}, fmt.Errorf("subagent child contract max_cost_usd must be finite and non-negative")
+	}
+	return acpLoopLimits{
+		StepCap:           contract.StepCap,
+		MaxToolCalls:      contract.Budget.MaxToolCalls,
+		MaxModelRequests:  contract.Budget.MaxModelRequests,
+		MaxElapsedSeconds: minPositiveChildLimit(contract.TimeoutSeconds, contract.Budget.MaxElapsedSecond),
+		MaxCostUSD:        contract.Budget.MaxCostUSD,
+		RunID:             strings.TrimSpace(contract.RunID),
+		ParentRunID:       strings.TrimSpace(contract.ParentRunID),
+		TaskID:            strings.TrimSpace(contract.TaskID),
+		ParentSessionID:   strings.TrimSpace(contract.ParentSessionID),
+		ChildContract:     true,
+	}, nil
+}
+
+func minPositiveChildLimit(values ...int) int {
+	minimum := 0
+	for _, value := range values {
+		if value > 0 && (minimum == 0 || value < minimum) {
+			minimum = value
+		}
+	}
+	return minimum
 }
 
 func parseAgentRunArgs(args []string) (agentRunOptions, error) {

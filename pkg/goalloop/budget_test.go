@@ -2,6 +2,7 @@ package goalloop
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"m31labs.dev/buckley/pkg/agentloop"
@@ -112,5 +113,39 @@ func TestLoop_SpendTelemetryIsCumulativeAcrossTasks(t *testing.T) {
 	}
 	if !sawUpdated || !sawExhausted {
 		t.Fatalf("budget events: updated=%v exhausted=%v, want both", sawUpdated, sawExhausted)
+	}
+}
+
+func TestLoop_RecordTurnSpendRetryIsIdempotent(t *testing.T) {
+	loop, ledger := newTestLoop(t, Config{})
+	ctx := context.Background()
+	intake, err := loop.Start(ctx, Goal{Statement: "retry a durable turn", BudgetUSD: 2})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	taskID := intake.Tasks[0].TaskID
+	outcome := TurnOutcome{SpentUSD: 0.75, PromptTokens: 100, CompletionTokens: 25}
+	key := fmt.Sprintf("turn:%s:%s:%d:%d", intake.RunID, taskID, 1, 2)
+
+	for attempt := 0; attempt < 2; attempt++ {
+		spent, err := loop.recordTurnSpend(ctx, intake.RunID, taskID, intake.Goal, outcome, key)
+		if err != nil {
+			t.Fatalf("recordTurnSpend attempt %d: %v", attempt+1, err)
+		}
+		if spent != 0.75 {
+			t.Fatalf("attempt %d spend = %.2f, want 0.75", attempt+1, spent)
+		}
+	}
+
+	events, err := ledger.ListEvents(ctx, runledger.EventQuery{RunID: intake.RunID, Types: []string{runledger.EventBudgetUpdated}})
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("budget events = %d, want 1", len(events))
+	}
+	prompt, err := ledger.SumMetric(ctx, intake.RunID, promptTokensMetric)
+	if err != nil || prompt != 100 {
+		t.Fatalf("prompt tokens = %.0f, %v; want 100", prompt, err)
 	}
 }

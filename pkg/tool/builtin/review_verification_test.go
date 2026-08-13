@@ -103,6 +103,76 @@ func TestRunVerificationToolSuccessRequiresPassAndZeroExit(t *testing.T) {
 	}
 }
 
+func TestRunVerificationToolNoTestFilesIsBuildOnlyPass(t *testing.T) {
+	tool, err := NewRunVerificationTool(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	tool.verifier = &fakeReviewVerifier{result: reviewsandbox.Result{
+		Kind:        reviewsandbox.KindTest,
+		Language:    reviewsandbox.LanguageGo,
+		Path:        "pkg/version",
+		Command:     "/usr/local/go/bin/go",
+		Argv:        []string{"/usr/local/go/bin/go", "test", "."},
+		ExitCode:    0,
+		Status:      reviewsandbox.StatusPass,
+		Stdout:      "? m31labs.dev/buckley/pkg/version [no test files]",
+		NoTestFiles: true,
+	}}
+
+	result, err := tool.Execute(map[string]any{
+		"kind":     "test",
+		"language": "go",
+		"path":     "pkg/version",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Success || result.Data["evidence"] != "CONFIRMED_PASS" || result.Data["no_test_files"] != true {
+		t.Fatalf("no-test verification = %#v", result)
+	}
+	proofs, ok := result.Data["proves"].([]string)
+	if !ok || len(proofs) != 1 || proofs[0] != "build" {
+		t.Fatalf("no-test proofs = %#v, want build only", result.Data["proves"])
+	}
+}
+
+func TestRunVerificationToolNodeNoTestScriptIsTypedNotApplicable(t *testing.T) {
+	tool, err := NewRunVerificationTool(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	tool.verifier = &fakeReviewVerifier{result: reviewsandbox.Result{
+		Kind:         reviewsandbox.KindTest,
+		Language:     reviewsandbox.LanguageNode,
+		Path:         "docs",
+		Argv:         []string{},
+		ExitCode:     -1,
+		Status:       reviewsandbox.StatusNotApplicable,
+		NoTestScript: true,
+	}}
+
+	result, err := tool.Execute(map[string]any{
+		"kind":     "test",
+		"language": "node",
+		"path":     "docs/.vitepress",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Success || result.Data["status"] != "NOT_APPLICABLE" || result.Data["evidence"] != "NO_TEST_GATE" || result.Data["no_test_script"] != true {
+		t.Fatalf("no-test-script evidence = %#v", result)
+	}
+	if result.Data["command"] != "" || result.Data["exit_code"] != -1 {
+		t.Fatalf("no-test-script evidence claimed a process launch: %#v", result.Data)
+	}
+	argv, argvOK := result.Data["argv"].([]string)
+	proofs, proofsOK := result.Data["proves"].([]string)
+	if !argvOK || len(argv) != 0 || !proofsOK || len(proofs) != 1 || proofs[0] != "test-policy" {
+		t.Fatalf("no-test-script argv/proofs = %#v / %#v", result.Data["argv"], result.Data["proves"])
+	}
+}
+
 func TestRunVerificationToolClampsRequestedTimeoutToReviewPlan(t *testing.T) {
 	tool, err := NewRunVerificationTool(t.TempDir())
 	if err != nil {
@@ -140,7 +210,8 @@ func TestRunVerificationToolClampsRequestedTimeoutToReviewPlan(t *testing.T) {
 
 func TestRunVerificationToolUsesCallerContextAndSealedRoot(t *testing.T) {
 	root := t.TempDir()
-	tool, err := NewRunVerificationTool(root)
+	sourceRoot := t.TempDir()
+	tool, err := NewRunVerificationToolWithSource(root, sourceRoot)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -167,6 +238,12 @@ func TestRunVerificationToolUsesCallerContextAndSealedRoot(t *testing.T) {
 	if fake.request.SnapshotRoot != tool.snapshotRoot || fake.request.SnapshotRoot == "" {
 		t.Fatalf("verifier was not bound to sealed snapshot: %#v", fake.request)
 	}
+	if fake.request.SourceRoot != tool.sourceRoot || fake.request.SourceRoot != sourceRoot {
+		t.Fatalf("verifier was not bound to internal source root: %#v", fake.request)
+	}
+	if _, exposed := tool.Parameters().Properties["source_root"]; exposed {
+		t.Fatal("host-owned source root was exposed in model-controlled parameters")
+	}
 }
 
 func TestNewRunVerificationToolRejectsInvalidSnapshot(t *testing.T) {
@@ -176,6 +253,76 @@ func TestNewRunVerificationToolRejectsInvalidSnapshot(t *testing.T) {
 	if _, err := NewRunVerificationTool(t.TempDir() + "/missing"); err == nil {
 		t.Fatal("missing snapshot root was accepted")
 	}
+}
+
+// TestRunVerificationToolCurrentDocsBuild exercises the production sealed tool
+// against this checkout's real offline Node install. It is opt-in because it
+// requires an installed Codex OS sandbox and the developer's docs/node_modules.
+func TestRunVerificationToolCurrentDocsBuild(t *testing.T) {
+	if os.Getenv("BUCKLEY_TEST_CODEX_SANDBOX") != "1" {
+		t.Skip("set BUCKLEY_TEST_CODEX_SANDBOX=1 to exercise the current docs build")
+	}
+	repositoryRoot, err := filepath.Abs(filepath.Join("..", "..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{
+		filepath.Join(repositoryRoot, "docs", "package.json"),
+		filepath.Join(repositoryRoot, "docs", "package-lock.json"),
+		filepath.Join(repositoryRoot, "docs", "node_modules", ".package-lock.json"),
+	} {
+		if _, err := os.Stat(path); err != nil {
+			t.Skipf("current docs offline install is unavailable: %v", err)
+		}
+	}
+	snapshotRoot := t.TempDir()
+	if err := copyDocsSnapshotForVerification(filepath.Join(repositoryRoot, "docs"), filepath.Join(snapshotRoot, "docs")); err != nil {
+		t.Fatal(err)
+	}
+	command := strings.TrimSpace(os.Getenv("BUCKLEY_TEST_CODEX_COMMAND"))
+	tool, err := NewRunVerificationToolWithSource(snapshotRoot, repositoryRoot, command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tool.Close()
+	result, err := tool.Execute(map[string]any{"kind": "build", "language": "node", "path": "docs/.vitepress", "timeout_seconds": 300})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Success {
+		t.Fatalf("sealed docs build = %#v", result)
+	}
+}
+
+func copyDocsSnapshotForVerification(source, destination string) error {
+	return filepath.WalkDir(source, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		relative, err := filepath.Rel(source, path)
+		if err != nil {
+			return err
+		}
+		if relative == "node_modules" && entry.IsDir() {
+			return filepath.SkipDir
+		}
+		target := filepath.Join(destination, relative)
+		if entry.IsDir() {
+			return os.MkdirAll(target, 0o755)
+		}
+		if entry.Type()&os.ModeSymlink != 0 {
+			link, err := os.Readlink(path)
+			if err != nil {
+				return err
+			}
+			return os.Symlink(link, target)
+		}
+		content, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(target, content, 0o644)
+	})
 }
 
 func TestRunVerificationToolRejectsHostTestRequiredInDocker(t *testing.T) {

@@ -169,24 +169,25 @@ func runReviewPRCommand(args []string) error {
 		return err
 	}
 
-	restoreModelOverride := applyCommandModelOverride(opts.model)
+	primaryModelOverride := strings.TrimSpace(opts.model)
+	if primaryModelOverride == "" {
+		primaryModelOverride = strings.TrimSpace(os.Getenv("BUCKLEY_MODEL_REVIEW"))
+	}
+	restoreModelOverride := applyCommandModelOverride(primaryModelOverride)
 	defer restoreModelOverride()
 
-	cfg, mgr, store, err := initDependenciesFn()
+	cfg, mgr, store, err := initReviewDependenciesFn(opts.criticModel)
 	if store != nil {
 		defer store.Close()
 	}
 	if err != nil {
 		return fmt.Errorf("init dependencies: %w", err)
 	}
-	if strings.TrimSpace(opts.criticModel) != "" {
-		cfg.Buckbot.CriticModel = strings.TrimSpace(opts.criticModel)
-	}
-
 	runtime, err := newReviewCommandRuntime(cfg, mgr)
 	if err != nil {
-		return fmt.Errorf("no model configured (set BUCKLEY_MODEL_REVIEW or configure models.review)")
+		return fmt.Errorf("initialize review runtime: %w", err)
 	}
+	defer runtime.Close()
 
 	reviewTimeout := opts.timeout
 	if opts.post && reviewTimeout > defaultReviewTimeout {

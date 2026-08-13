@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
+	"math"
 	"os"
 	"os/exec"
 	"strconv"
@@ -487,6 +489,8 @@ type SubagentTool struct {
 	workDir     string
 	hub         *telemetry.Hub
 	session     string
+	runID       string
+	taskID      string
 	command     string
 	maxChild    int
 	ledger      runledger.Store
@@ -498,7 +502,7 @@ func (t *SubagentTool) Name() string {
 }
 
 func (t *SubagentTool) Description() string {
-	return "Spawn and manage bounded Buckley subagents. Address one run, comma-separated runs, an agent:<name> group, or all active children with send, steer, and cancel."
+	return "Spawn and manage Buckley subagents with optional explicit limits. Address one run, comma-separated runs, an agent:<name> group, or all active children with send, steer, and cancel."
 }
 
 func (t *SubagentTool) Parameters() ParameterSchema {
@@ -538,7 +542,23 @@ func (t *SubagentTool) Parameters() ParameterSchema {
 			},
 			"step_cap": {
 				Type:        "integer",
-				Description: "Optional maximum model/tool iterations for the child.",
+				Description: "Optional maximum model/tool iterations for the child; omitted or zero is unbounded.",
+			},
+			"max_tool_calls": {
+				Type:        "integer",
+				Description: "Optional maximum child tool executions; omitted or zero is unbounded.",
+			},
+			"max_model_requests": {
+				Type:        "integer",
+				Description: "Optional maximum child model requests; omitted or zero is unbounded.",
+			},
+			"max_elapsed_seconds": {
+				Type:        "integer",
+				Description: "Optional child wall-time budget in seconds; omitted or zero is unbounded.",
+			},
+			"max_cost_usd": {
+				Type:        "number",
+				Description: "Optional child model-spend ceiling in USD; omitted or zero is unbounded.",
 			},
 			"approval_posture": {
 				Type:        "string",
@@ -571,8 +591,7 @@ func (t *SubagentTool) Parameters() ParameterSchema {
 			},
 			"timeout_seconds": {
 				Type:        "integer",
-				Description: "Maximum child runtime for spawn, or maximum wait duration for wait (default 300)",
-				Default:     300,
+				Description: "Optional maximum child runtime for spawn (unset is unbounded), or maximum wait duration for wait (default 300).",
 			},
 		},
 	}
@@ -606,20 +625,23 @@ func (t *SubagentTool) executeWithContext(ctx context.Context, params map[string
 	case "spawn":
 		return t.spawn(ctx, coordinator, params, userInitiated)
 	case "list":
-		session, _ := t.runtimeContext()
+		session, _, _, _ := t.runtimeContext()
 		runs, err := coordinator.List(ctx, agentcoord.RunFilter{ParentSessionID: session})
 		if err != nil {
 			return &Result{Success: false, Error: err.Error()}, nil
 		}
 		return &Result{Success: true, Data: map[string]any{"runs": runs, "count": len(runs)}}, nil
 	case "status":
-		run, err := coordinator.Status(ctx, delegateStringParam(params, "id"))
+		run, err := t.runInCurrentSession(ctx, coordinator, delegateStringParam(params, "id"))
 		if err != nil {
 			return &Result{Success: false, Error: err.Error()}, nil
 		}
 		return subagentRunResult(run), nil
 	case "wait":
 		id := delegateStringParam(params, "id")
+		if _, err := t.runInCurrentSession(ctx, coordinator, id); err != nil {
+			return &Result{Success: false, Error: err.Error()}, nil
+		}
 		seconds := parseInt(params["timeout_seconds"], 300)
 		if seconds <= 0 || seconds > 3600 {
 			seconds = 300
@@ -636,6 +658,9 @@ func (t *SubagentTool) executeWithContext(ctx context.Context, params map[string
 	case "send":
 		return t.messageTargets(ctx, coordinator, "send", params)
 	case "messages":
+		if _, err := t.runInCurrentSession(ctx, coordinator, delegateStringParam(params, "id")); err != nil {
+			return &Result{Success: false, Error: err.Error()}, nil
+		}
 		messages, err := coordinator.Messages(ctx, delegateStringParam(params, "id"))
 		if err != nil {
 			return &Result{Success: false, Error: err.Error()}, nil
@@ -644,13 +669,20 @@ func (t *SubagentTool) executeWithContext(ctx context.Context, params map[string
 	case "cancel":
 		return t.cancelTargets(ctx, coordinator, params)
 	case "claim":
-		claim, err := coordinator.Claim(ctx, agentcoord.ClaimRequest{RunID: delegateStringParam(params, "id"), Resources: delegateStringSliceParam(params, "resources")})
+		id := delegateStringParam(params, "id")
+		if _, err := t.runInCurrentSession(ctx, coordinator, id); err != nil {
+			return &Result{Success: false, Error: err.Error()}, nil
+		}
+		claim, err := coordinator.Claim(ctx, agentcoord.ClaimRequest{RunID: id, Resources: delegateStringSliceParam(params, "resources")})
 		if err != nil {
 			return &Result{Success: false, Error: err.Error()}, nil
 		}
 		return &Result{Success: true, Data: map[string]any{"claim": claim}, DisplayData: map[string]any{"summary": fmt.Sprintf("Subagent %s claimed %d resource(s)", claim.RunID, len(claim.Resources))}, ShouldAbridge: true}, nil
 	case "release":
 		id := delegateStringParam(params, "id")
+		if _, err := t.runInCurrentSession(ctx, coordinator, id); err != nil {
+			return &Result{Success: false, Error: err.Error()}, nil
+		}
 		if err := coordinator.Release(ctx, agentcoord.ClaimRequest{RunID: id, Resources: delegateStringSliceParam(params, "resources")}, delegateStringParam(params, "reason")); err != nil {
 			return &Result{Success: false, Error: err.Error()}, nil
 		}
@@ -675,6 +707,19 @@ func (t *SubagentTool) SetTelemetry(hub *telemetry.Hub, sessionID string) {
 	if manager != nil {
 		manager.SetTelemetry(hub, sessionID)
 	}
+}
+
+// SetExecutionContext supplies the current run/task lineage used when this
+// agent delegates again. The spawned child gets the current run as its parent;
+// its own task identity remains independently generated by the coordinator.
+func (t *SubagentTool) SetExecutionContext(runID, taskID string) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	t.runID = strings.TrimSpace(runID)
+	t.taskID = strings.TrimSpace(taskID)
+	t.mu.Unlock()
 }
 
 // SetCoordinator injects a shared AgentCoordinator. It is primarily used by
@@ -778,14 +823,30 @@ func configureSubagentPersonas(manager *subagent.Manager, workDir string) {
 	manager.SetPersonaContext(registry, persona.Persona{})
 }
 
-func (t *SubagentTool) runtimeContext() (string, types.RuleEvaluator) {
+func (t *SubagentTool) runtimeContext() (string, string, string, types.RuleEvaluator) {
 	if t == nil {
-		return "", nil
+		return "", "", "", nil
 	}
 	t.mu.Lock()
-	session, evaluator := t.session, t.evaluator
+	session, runID, taskID, evaluator := t.session, t.runID, t.taskID, t.evaluator
 	t.mu.Unlock()
-	return session, evaluator
+	return session, runID, taskID, evaluator
+}
+
+// runInCurrentSession enforces the host-supplied session boundary. An empty
+// session deliberately preserves compatibility for embedded callers that do
+// not wire execution lineage.
+func (t *SubagentTool) runInCurrentSession(ctx context.Context, coordinator agentcoord.Coordinator, id string) (agentcoord.Run, error) {
+	id = strings.TrimSpace(id)
+	run, err := coordinator.Status(ctx, id)
+	if err != nil {
+		return agentcoord.Run{}, err
+	}
+	session, _, _, _ := t.runtimeContext()
+	if session != "" && strings.TrimSpace(run.ParentSessionID) != session {
+		return agentcoord.Run{}, fmt.Errorf("subagent not found: %s", id)
+	}
+	return run, nil
 }
 
 func (t *SubagentTool) spawn(ctx context.Context, coordinator agentcoord.Coordinator, params map[string]any, userInitiated bool) (*Result, error) {
@@ -793,19 +854,25 @@ func (t *SubagentTool) spawn(ctx context.Context, coordinator agentcoord.Coordin
 	if task == "" {
 		return &Result{Success: false, Error: "initial_task parameter must be a non-empty string"}, nil
 	}
+	maxCostUSD, err := parseNonNegativeFloatParam(params["max_cost_usd"], 0)
+	if err != nil {
+		return &Result{Success: false, Error: "max_cost_usd " + err.Error()}, nil
+	}
 	if !userInitiated {
 		if err := delegationCheck("spawn_subagent"); err != nil {
 			return &Result{Success: false, Error: err.Error()}, nil
 		}
 	}
 	guard := GetDelegationGuard()
-	timeout := parseInt(params["timeout_seconds"], 300)
-	if timeout <= 0 || timeout > 3600 {
-		timeout = 300
+	timeout := parseInt(params["timeout_seconds"], 0)
+	session, parentRunID, parentTaskID, _ := t.runtimeContext()
+	metadata := map[string]string(nil)
+	if parentTaskID != "" {
+		metadata = map[string]string{"parent_task_id": parentTaskID}
 	}
-	session, _ := t.runtimeContext()
 	run, err := coordinator.Spawn(ctx, agentcoord.TaskSpec{
 		ParentSessionID: session,
+		ParentRunID:     parentRunID,
 		Agent:           delegateStringParam(params, "agent"),
 		Spec:            delegateStringParam(params, "spec"),
 		Task:            task,
@@ -815,10 +882,17 @@ func (t *SubagentTool) spawn(ctx context.Context, coordinator agentcoord.Coordin
 		AllowedTools:    delegateStringSliceParam(params, "allowed_tools"),
 		StepCap:         parseInt(params["step_cap"], 0),
 		TimeoutSeconds:  timeout,
+		Budget: agentcoord.Budget{
+			MaxToolCalls:     parseInt(params["max_tool_calls"], 0),
+			MaxModelRequests: parseInt(params["max_model_requests"], 0),
+			MaxElapsedSecond: parseInt(params["max_elapsed_seconds"], 0),
+			MaxCostUSD:       maxCostUSD,
+		},
 		WorkspaceClaims: delegateStringSliceParam(params, "resources"),
 		OutputSchema:    delegateStringParam(params, "output_schema"),
 		ApprovalPosture: delegateStringParam(params, "approval_posture"),
 		DelegationDepth: guard.GetCurrentDepth(),
+		Metadata:        metadata,
 	})
 	if err != nil {
 		return &Result{Success: false, Error: err.Error()}, nil
@@ -828,9 +902,43 @@ func (t *SubagentTool) spawn(ctx context.Context, coordinator agentcoord.Coordin
 	return result, nil
 }
 
+func parseNonNegativeFloatParam(value any, defaultValue float64) (float64, error) {
+	if value == nil {
+		return defaultValue, nil
+	}
+	var parsed float64
+	switch typed := value.(type) {
+	case float64:
+		parsed = typed
+	case float32:
+		parsed = float64(typed)
+	case int:
+		parsed = float64(typed)
+	case int64:
+		parsed = float64(typed)
+	case string:
+		text := strings.TrimSpace(typed)
+		if text == "" {
+			return defaultValue, nil
+		}
+		var err error
+		parsed, err = strconv.ParseFloat(text, 64)
+		if err != nil {
+			return 0, fmt.Errorf("must be a number")
+		}
+	default:
+		return 0, fmt.Errorf("must be a number")
+	}
+	if parsed < 0 || math.IsNaN(parsed) || math.IsInf(parsed, 0) {
+		return 0, fmt.Errorf("must be finite and non-negative")
+	}
+	return parsed, nil
+}
+
 func subagentRunResult(run agentcoord.Run) *Result {
+	success := run.State == agentcoord.RunQueued || run.State == agentcoord.RunRunning || run.State == agentcoord.RunCompleted
 	return &Result{
-		Success: run.State != agentcoord.RunFailed && run.State != agentcoord.RunBlocked,
+		Success: success,
 		Data:    map[string]any{"run": run},
 		Error:   run.Result.Error,
 		DisplayData: map[string]any{
@@ -880,44 +988,78 @@ func delegateStringSliceParam(params map[string]any, key string) []string {
 }
 
 type buckleySubagentRunner struct {
-	command string
-	workDir string
+	command          string
+	workDir          string
+	outputSpoolLimit int64
 }
 
 func (r *buckleySubagentRunner) Run(ctx context.Context, request subagent.Request, started func(pid int)) (string, error) {
-	return r.run(ctx, request, started, nil)
+	return r.runLegacy(ctx, request, started, nil)
 }
 
 func (r *buckleySubagentRunner) RunInteractive(ctx context.Context, request subagent.Request, started func(pid int), commands <-chan subagent.CommandDelivery) (string, error) {
-	return r.run(ctx, request, started, commands)
+	return r.runLegacy(ctx, request, started, commands)
 }
 
-func (r *buckleySubagentRunner) run(ctx context.Context, request subagent.Request, started func(pid int), commands <-chan subagent.CommandDelivery) (string, error) {
+func (r *buckleySubagentRunner) RunCaptured(ctx context.Context, request subagent.Request, started func(pid int)) (subagent.CapturedOutput, error) {
+	return r.runCaptured(ctx, request, started, nil)
+}
+
+func (r *buckleySubagentRunner) RunInteractiveCaptured(ctx context.Context, request subagent.Request, started func(pid int), commands <-chan subagent.CommandDelivery) (subagent.CapturedOutput, error) {
+	return r.runCaptured(ctx, request, started, commands)
+}
+
+func (r *buckleySubagentRunner) runLegacy(ctx context.Context, request subagent.Request, started func(pid int), commands <-chan subagent.CommandDelivery) (string, error) {
+	capture, runErr := r.runCaptured(ctx, request, started, commands)
+	if capture.SpoolPath == "" {
+		if runErr != nil {
+			return "", runErr
+		}
+		return "", fmt.Errorf("buckley subagent output spool is unavailable")
+	}
+	if capture.SpoolPath != "" {
+		defer os.Remove(capture.SpoolPath)
+	}
+	body, readErr := os.ReadFile(capture.SpoolPath)
+	output := strings.TrimSpace(string(body))
+	if readErr != nil {
+		return output, fmt.Errorf("read buckley subagent output: %w", readErr)
+	}
+	if runErr != nil {
+		return output, runErr
+	}
+	if capture.Truncated {
+		return output, fmt.Errorf("buckley subagent output exceeded its %d-byte disk ceiling after observing %d bytes; result is incomplete", capture.LimitBytes, capture.ObservedBytes)
+	}
+	return output, nil
+}
+
+func (r *buckleySubagentRunner) runCaptured(ctx context.Context, request subagent.Request, started func(pid int), commands <-chan subagent.CommandDelivery) (subagent.CapturedOutput, error) {
 	command := strings.TrimSpace(r.command)
 	if command == "" {
 		command = os.Args[0]
 		if _, err := os.Stat(command); err != nil {
 			resolved, lookupErr := exec.LookPath("buckley")
 			if lookupErr != nil {
-				return "", fmt.Errorf("buckley executable not found")
+				return subagent.CapturedOutput{}, fmt.Errorf("buckley executable not found")
 			}
 			command = resolved
 		}
 	}
 	args, cleanup, err := subagentCommandArgs(request)
 	if err != nil {
-		return "", err
+		return subagent.CapturedOutput{}, err
 	}
 	defer cleanup()
 	contract, err := subagent.EncodeChildContract(subagent.ChildContractFromRequest(request))
 	if err != nil {
-		return "", err
+		return subagent.CapturedOutput{}, err
 	}
 	var mailbox *subagent.FileMailbox
 	if commands != nil {
 		mailbox, err = subagent.NewFileMailbox()
 		if err != nil {
-			return "", err
+			return subagent.CapturedOutput{}, err
 		}
 		defer mailbox.Close()
 	}
@@ -927,12 +1069,19 @@ func (r *buckleySubagentRunner) run(ctx context.Context, request subagent.Reques
 	if mailbox != nil {
 		cmd.Env = replaceEnvironmentValue(cmd.Env, subagent.ChildMailboxEnv, mailbox.Path())
 	}
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+	limit := r.outputSpoolLimit
+	if limit <= 0 {
+		limit = subagent.DefaultOutputSpoolLimit
+	}
+	spool, err := newBoundedSubagentSpool(limit)
+	if err != nil {
+		return subagent.CapturedOutput{}, err
+	}
+	cmd.Stdout = spool
+	cmd.Stderr = spool
 	if err := cmd.Start(); err != nil {
-		return "", fmt.Errorf("start buckley subagent: %w", err)
+		_ = spool.remove()
+		return subagent.CapturedOutput{}, fmt.Errorf("start buckley subagent: %w", err)
 	}
 	if started != nil {
 		started(cmd.Process.Pid)
@@ -944,20 +1093,141 @@ func (r *buckleySubagentRunner) run(ctx context.Context, request subagent.Reques
 	} else {
 		close(relayStopped)
 	}
-	err = cmd.Wait()
+	runErr := cmd.Wait()
 	close(stopRelay)
 	<-relayStopped
-	output := strings.TrimSpace(stdout.String())
-	if diagnostic := strings.TrimSpace(stderr.String()); diagnostic != "" {
-		if output != "" {
-			output += "\n"
+	capture, captureErr := spool.finish()
+	if captureErr != nil {
+		if runErr != nil {
+			return capture, fmt.Errorf("buckley subagent: %v; capture output: %w", runErr, captureErr)
 		}
-		output += diagnostic
+		return capture, fmt.Errorf("capture buckley subagent output: %w", captureErr)
 	}
+	if runErr != nil {
+		return capture, fmt.Errorf("buckley subagent: %w", runErr)
+	}
+	return capture, nil
+}
+
+const subagentOutputPreviewLimit = 256 * 1024
+
+type boundedSubagentSpool struct {
+	mu       sync.Mutex
+	file     *os.File
+	limit    int64
+	written  int64
+	observed int64
+}
+
+func newBoundedSubagentSpool(limit int64) (*boundedSubagentSpool, error) {
+	if limit <= 0 {
+		return nil, fmt.Errorf("subagent output spool limit must be positive")
+	}
+	file, err := os.CreateTemp("", "buckley-subagent-output-*.log")
 	if err != nil {
-		return output, fmt.Errorf("buckley subagent: %w", err)
+		return nil, fmt.Errorf("create subagent output spool: %w", err)
 	}
-	return output, nil
+	return &boundedSubagentSpool{file: file, limit: limit}, nil
+}
+
+func (s *boundedSubagentSpool) Write(p []byte) (int, error) {
+	if s == nil || s.file == nil {
+		return 0, fmt.Errorf("subagent output spool is closed")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	original := len(p)
+	s.observed += int64(original)
+	remaining := s.limit - s.written
+	if remaining <= 0 {
+		return original, nil
+	}
+	retained := p
+	if int64(len(retained)) > remaining {
+		retained = retained[:int(remaining)]
+	}
+	written, err := s.file.Write(retained)
+	s.written += int64(written)
+	if err != nil {
+		return written, err
+	}
+	if written != len(retained) {
+		return written, io.ErrShortWrite
+	}
+	// Discarding bytes beyond the explicit ceiling is intentional. Returning
+	// the original length keeps a verbose child from failing on a closed pipe;
+	// Manager turns this into an explicit incomplete terminal result.
+	return original, nil
+}
+
+func (s *boundedSubagentSpool) finish() (subagent.CapturedOutput, error) {
+	if s == nil || s.file == nil {
+		return subagent.CapturedOutput{}, fmt.Errorf("subagent output spool is unavailable")
+	}
+	s.mu.Lock()
+	path := s.file.Name()
+	written := s.written
+	observed := s.observed
+	closeErr := s.file.Close()
+	s.file = nil
+	s.mu.Unlock()
+	capture := subagent.CapturedOutput{
+		SpoolPath:     path,
+		ObservedBytes: observed,
+		CapturedBytes: written,
+		LimitBytes:    s.limit,
+		Truncated:     observed > written,
+	}
+	if closeErr != nil {
+		return capture, closeErr
+	}
+	preview, err := readSubagentSpoolPreview(path, written)
+	if err != nil {
+		return capture, err
+	}
+	capture.Preview = preview
+	return capture, nil
+}
+
+func (s *boundedSubagentSpool) remove() error {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	path := ""
+	if s.file != nil {
+		path = s.file.Name()
+		_ = s.file.Close()
+		s.file = nil
+	}
+	s.mu.Unlock()
+	if path == "" {
+		return nil
+	}
+	return os.Remove(path)
+}
+
+func readSubagentSpoolPreview(path string, size int64) (string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+	if size <= subagentOutputPreviewLimit {
+		body, err := io.ReadAll(io.LimitReader(file, size))
+		return strings.TrimSpace(string(body)), err
+	}
+	const marker = "\n... subagent output preview elided ...\n"
+	half := (subagentOutputPreviewLimit - len(marker)) / 2
+	head := make([]byte, half)
+	if _, err := io.ReadFull(file, head); err != nil {
+		return "", err
+	}
+	tail := make([]byte, half)
+	if _, err := file.ReadAt(tail, size-int64(half)); err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(head) + marker + string(tail)), nil
 }
 
 func relaySubagentCommands(ctx context.Context, mailbox *subagent.FileMailbox, commands <-chan subagent.CommandDelivery, stop <-chan struct{}, stopped chan<- struct{}) {

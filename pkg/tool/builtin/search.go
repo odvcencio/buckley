@@ -1,6 +1,7 @@
 package builtin
 
 import (
+	"bufio"
 	"bytes"
 	"fmt"
 	"os"
@@ -19,7 +20,7 @@ func (t *SearchTextTool) Name() string {
 }
 
 func (t *SearchTextTool) Description() string {
-	return "Search for text patterns in files using regex. Supports glob filtering and context lines."
+	return "Search text with regex, globs, context, hidden repository paths, and bounded pages. Use next_offset until absent to exhaust a large result set; .git is excluded."
 }
 
 func (t *SearchTextTool) Parameters() ParameterSchema {
@@ -53,6 +54,16 @@ func (t *SearchTextTool) Parameters() ParameterSchema {
 				Type:        "string",
 				Description: "Glob pattern to include (repeatable)",
 			},
+			"offset": {
+				Type:        "integer",
+				Description: "Zero-based record offset for paging large result sets (default 0)",
+				Default:     0,
+			},
+			"limit": {
+				Type:        "integer",
+				Description: "Maximum match/context records returned per page (default 50, max 500)",
+				Default:     50,
+			},
 		},
 		Required: []string{"query"},
 	}
@@ -71,14 +82,19 @@ func (t *SearchTextTool) Execute(params map[string]any) (*Result, error) {
 	if p, ok := params["path"].(string); ok && strings.TrimSpace(p) != "" {
 		searchPath = p
 	}
-	effectiveSearchPath := searchPath
+	absSearchPath, effectiveSearchPath, pathErr := resolveRelPath(t.workDir, searchPath)
+	if pathErr != nil {
+		return &Result{Success: false, Error: pathErr.Error()}, nil
+	}
+	if _, statErr := os.Stat(absSearchPath); statErr != nil {
+		return &Result{Success: false, Error: fmt.Sprintf("failed to inspect search path: %v", statErr)}, nil
+	}
 	workDir := strings.TrimSpace(t.workDir)
-	if workDir != "" {
-		if _, rel, err := resolveRelPath(workDir, searchPath); err != nil {
-			return &Result{Success: false, Error: err.Error()}, nil
-		} else if strings.TrimSpace(rel) != "" {
-			effectiveSearchPath = rel
-		}
+	if strings.TrimSpace(effectiveSearchPath) == "" {
+		effectiveSearchPath = "."
+	}
+	if effectiveSearchPath == "-" {
+		effectiveSearchPath = "./-"
 	}
 
 	caseSensitive := true
@@ -88,6 +104,14 @@ func (t *SearchTextTool) Execute(params map[string]any) (*Result, error) {
 
 	contextBefore := parseInt(params["context_before"], 0)
 	contextAfter := parseInt(params["context_after"], 0)
+	offset := parseInt(params["offset"], 0)
+	limit := parseInt(params["limit"], 50)
+	if offset < 0 {
+		return &Result{Success: false, Error: "offset must not be negative"}, nil
+	}
+	if limit <= 0 || limit > 500 {
+		return &Result{Success: false, Error: "limit must be between 1 and 500"}, nil
+	}
 
 	globs := extractGlobParams(params["glob"])
 
@@ -100,7 +124,7 @@ func (t *SearchTextTool) Execute(params map[string]any) (*Result, error) {
 
 	if useRG {
 		args := []string{
-			"--no-config", "--no-follow", "--with-filename", "--line-number", "--column", "--no-heading", "--color", "never",
+			"--no-config", "--no-follow", "--hidden", "--glob", "!.git/**", "--with-filename", "--line-number", "--column", "--no-heading", "--color", "never",
 			"--field-match-separator=\x1e", "--field-context-separator=\x1f", "--no-context-separator",
 		}
 		if !caseSensitive {
@@ -119,9 +143,18 @@ func (t *SearchTextTool) Execute(params map[string]any) (*Result, error) {
 		cmd = exec.CommandContext(ctx, "rg", args...)
 		toolName = "rg"
 	} else {
-		args := []string{"-n", "-r"}
+		args := []string{"-n", "-r", "-H", "-Z", "--exclude-dir=.git", "--binary-files=without-match"}
 		if !caseSensitive {
 			args = append(args, "-i")
+		}
+		if contextBefore > 0 {
+			args = append(args, fmt.Sprintf("-B%d", contextBefore))
+		}
+		if contextAfter > 0 {
+			args = append(args, fmt.Sprintf("-A%d", contextAfter))
+		}
+		for _, glob := range globs {
+			args = append(args, "--include="+glob)
 		}
 		args = append(args, "--", query, effectiveSearchPath)
 		cmd = exec.CommandContext(ctx, "grep", args...)
@@ -132,17 +165,51 @@ func (t *SearchTextTool) Execute(params map[string]any) (*Result, error) {
 	}
 	cmd.Env = mergeEnv(cmd.Env, t.env)
 
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return &Result{Success: false, Error: fmt.Sprintf("search output: %v", err)}, nil
+	}
+	stderr := newCappedSearchBuffer(64 << 10)
+	cmd.Stderr = stderr
+	if err := cmd.Start(); err != nil {
+		return &Result{Success: false, Error: fmt.Sprintf("search failed: %v", err)}, nil
+	}
 
-	err := cmd.Run()
+	matches := make([]map[string]any, 0, limit)
+	matchCount := 0
+	recordCount := 0
+	scanner := bufio.NewScanner(stdout)
+	scanner.Buffer(make([]byte, 64<<10), 4<<20)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		match := parseSearchLine(line)
+		if match == nil {
+			continue
+		}
+		if recordCount >= offset && len(matches) < limit {
+			matches = append(matches, match)
+		}
+		recordCount++
+		if match["kind"] == "match" {
+			matchCount++
+		}
+	}
+	scanErr := scanner.Err()
+	if scanErr != nil && cmd.Process != nil {
+		_ = cmd.Process.Kill()
+	}
+	err = cmd.Wait()
 	if ctx.Err() != nil {
 		return &Result{
 			Success: false,
 			Error:   "search command timed out",
 		}, nil
+	}
+	if scanErr != nil {
+		return &Result{Success: false, Error: fmt.Sprintf("search output could not be parsed safely: %v", scanErr)}, nil
 	}
 	exitCode := 0
 	if err != nil {
@@ -156,13 +223,15 @@ func (t *SearchTextTool) Execute(params map[string]any) (*Result, error) {
 		}
 	}
 
-	output := stdout.String()
-	if exitCode == 1 && strings.TrimSpace(output) == "" {
+	if exitCode == 1 && recordCount == 0 {
 		return &Result{
 			Success: true,
 			Data: map[string]any{
 				"matches": []map[string]any{},
 				"count":   0,
+				"records": 0,
+				"offset":  0,
+				"limit":   limit,
 				"tool":    toolName,
 			},
 		}, nil
@@ -174,51 +243,84 @@ func (t *SearchTextTool) Execute(params map[string]any) (*Result, error) {
 		}, nil
 	}
 
-	matchLines := strings.Split(strings.TrimRight(output, "\n"), "\n")
-	matches := make([]map[string]any, 0, len(matchLines))
-	matchCount := 0
-
-	for _, line := range matchLines {
-		if strings.TrimSpace(line) == "" {
-			continue
-		}
-		match := parseSearchLine(line)
-		if match != nil {
-			matches = append(matches, match)
-			if match["kind"] == "match" {
-				matchCount++
-			}
-		}
+	pageStart := offset
+	pageEnd := pageStart + len(matches)
+	data := map[string]any{
+		"matches": matches,
+		"count":   matchCount,
+		"records": recordCount,
+		"tool":    toolName,
+		"offset":  pageStart,
+		"limit":   limit,
+		"summary": pagedSearchSummary(matchCount, recordCount, pageStart, pageEnd),
 	}
-
-	const maxDisplayMatches = 50
-	shouldAbridge := len(matches) > maxDisplayMatches
-
-	result := &Result{
-		Success: true,
-		Data: map[string]any{
-			"matches": matches,
-			"count":   matchCount,
-			"tool":    toolName,
-		},
-		ShouldAbridge: shouldAbridge,
+	if offset+len(matches) < recordCount {
+		data["next_offset"] = offset + len(matches)
 	}
+	return &Result{Success: true, Data: data}, nil
+}
 
-	// Limit matches shown in conversation
-	if shouldAbridge {
-		displayMatches := matches[:maxDisplayMatches]
-		result.DisplayData = map[string]any{
-			"matches": displayMatches,
-			"count":   matchCount,
-			"tool":    toolName,
-			"summary": fmt.Sprintf("Found %d matches (showing first %d records including context)", matchCount, maxDisplayMatches),
-		}
+func pagedSearchSummary(matches, records, start, end int) string {
+	if end <= start {
+		return fmt.Sprintf("Found %d matches in %d records (no records at offset %d)", matches, records, start)
 	}
+	return fmt.Sprintf("Found %d matches in %d records (showing records %d-%d including context)", matches, records, start+1, end)
+}
 
-	return result, nil
+type cappedSearchBuffer struct {
+	remaining int
+	buf       bytes.Buffer
+}
+
+func newCappedSearchBuffer(limit int) *cappedSearchBuffer {
+	return &cappedSearchBuffer{remaining: max(limit, 0)}
+}
+
+func (b *cappedSearchBuffer) Write(p []byte) (int, error) {
+	written := len(p)
+	if b != nil && b.remaining > 0 {
+		keep := min(len(p), b.remaining)
+		_, _ = b.buf.Write(p[:keep])
+		b.remaining -= keep
+	}
+	return written, nil
+}
+
+func (b *cappedSearchBuffer) String() string {
+	if b == nil {
+		return ""
+	}
+	return b.buf.String()
 }
 
 func parseSearchLine(line string) map[string]any {
+	if strings.Contains(line, "\x00") {
+		parts := strings.SplitN(line, "\x00", 2)
+		if len(parts) != 2 {
+			return nil
+		}
+		rest := parts[1]
+		separator := strings.IndexByte(rest, ':')
+		kind := "match"
+		if contextSeparator := strings.IndexByte(rest, '-'); separator < 0 || (contextSeparator >= 0 && contextSeparator < separator) {
+			separator = contextSeparator
+			kind = "context"
+		}
+		if separator <= 0 {
+			return nil
+		}
+		content := rest[separator+1:]
+		match := content
+		contextText := ""
+		if kind == "context" {
+			match = ""
+			contextText = content
+		}
+		return map[string]any{
+			"path": strings.TrimSpace(parts[0]), "line": parseInt(rest[:separator], 0),
+			"column": 0, "match": match, "context": contextText, "kind": kind,
+		}
+	}
 	if strings.Contains(line, "\x1f") {
 		parts := strings.SplitN(line, "\x1f", 3)
 		if len(parts) != 3 {

@@ -2,6 +2,7 @@ package builtin
 
 import (
 	"context"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -89,6 +90,73 @@ exit 2
 	}
 	if finished.State != subagent.StateCompleted || !strings.Contains(finished.Output, "inspect live") {
 		t.Fatalf("finished = %+v", finished)
+	}
+}
+
+func TestBuckleySubagentRunner_TransportsExecutionEnvelope(t *testing.T) {
+	script := filepath.Join(t.TempDir(), "contract-child.sh")
+	content := `#!/bin/sh
+printf '%s' "$BUCKLEY_SUBAGENT_CONTRACT_V1"
+`
+	if err := os.WriteFile(script, []byte(content), 0o700); err != nil {
+		t.Fatalf("write helper: %v", err)
+	}
+	runner := &buckleySubagentRunner{command: script, workDir: t.TempDir()}
+	output, err := runner.Run(context.Background(), subagent.Request{
+		ID:              "run-child",
+		ParentRunID:     "run-parent",
+		ParentSessionID: "session-parent",
+		TaskID:          "task-child",
+		Task:            "inspect",
+		StepCap:         9,
+		TimeoutSeconds:  80,
+		Budget: agentcoord.Budget{
+			MaxToolCalls:     15,
+			MaxModelRequests: 12,
+			MaxElapsedSecond: 60,
+			MaxCostUSD:       2.25,
+		},
+	}, nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	contract, present, err := subagent.DecodeChildContract(output)
+	if err != nil || !present {
+		t.Fatalf("DecodeChildContract: present=%t err=%v output=%q", present, err, output)
+	}
+	if contract.RunID != "run-child" || contract.ParentRunID != "run-parent" || contract.ParentSessionID != "session-parent" || contract.TaskID != "task-child" {
+		t.Fatalf("transported lineage = %+v", contract)
+	}
+	if contract.StepCap != 9 || contract.TimeoutSeconds != 80 || contract.Budget.MaxToolCalls != 15 || contract.Budget.MaxModelRequests != 12 || contract.Budget.MaxElapsedSecond != 60 || contract.Budget.MaxCostUSD != 2.25 {
+		t.Fatalf("transported limits = %+v", contract)
+	}
+}
+
+func TestBuckleySubagentRunner_HighVolumeOutputUsesBoundedSpool(t *testing.T) {
+	script := filepath.Join(t.TempDir(), "verbose-child.sh")
+	content := "#!/bin/sh\ndd if=/dev/zero bs=1048576 count=8 2>/dev/null\n"
+	if err := os.WriteFile(script, []byte(content), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	const limit = int64(64 * 1024)
+	runner := &buckleySubagentRunner{command: script, workDir: t.TempDir(), outputSpoolLimit: limit}
+	capture, err := runner.RunCaptured(context.Background(), subagent.Request{Task: "emit lots of output"}, nil)
+	if err != nil {
+		t.Fatalf("RunCaptured: %v", err)
+	}
+	defer os.Remove(capture.SpoolPath)
+	if !capture.Truncated || capture.ObservedBytes != 8*1024*1024 || capture.CapturedBytes != limit || capture.LimitBytes != limit {
+		t.Fatalf("capture = %+v", capture)
+	}
+	if int64(len(capture.Preview)) > limit {
+		t.Fatalf("preview retained %d bytes in memory, disk ceiling is %d", len(capture.Preview), limit)
+	}
+	info, err := os.Stat(capture.SpoolPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Size() != limit {
+		t.Fatalf("spool size = %d, want %d", info.Size(), limit)
 	}
 }
 
@@ -540,6 +608,236 @@ func TestSubagentTool(t *testing.T) {
 			t.Fatalf("unexpected completed run: %+v", got)
 		}
 	})
+}
+
+func TestSubagentRunResult_OnlyActiveOrCompletedStatesSucceed(t *testing.T) {
+	for _, tt := range []struct {
+		state agentcoord.RunState
+		want  bool
+	}{
+		{state: agentcoord.RunQueued, want: true},
+		{state: agentcoord.RunRunning, want: true},
+		{state: agentcoord.RunCompleted, want: true},
+		{state: agentcoord.RunFailed, want: false},
+		{state: agentcoord.RunBlocked, want: false},
+		{state: agentcoord.RunCancelled, want: false},
+		{state: agentcoord.RunResumable, want: false},
+	} {
+		result := subagentRunResult(agentcoord.Run{ID: "child", State: tt.state})
+		if result.Success != tt.want {
+			t.Fatalf("state %q success = %v, want %v", tt.state, result.Success, tt.want)
+		}
+	}
+}
+
+func TestSubagentTool_SpawnPropagatesExplicitEnvelopeWithoutDefaults(t *testing.T) {
+	requests := make(chan subagent.Request, 2)
+	manager := subagent.NewManager(builtinSubagentRunnerFunc(func(_ context.Context, request subagent.Request, _ func(int)) (string, error) {
+		requests <- request
+		return "done", nil
+	}), 2)
+	t.Cleanup(func() { _ = manager.Close() })
+	tool := &SubagentTool{manager: manager}
+	tool.SetTelemetry(nil, "session-parent")
+	tool.SetExecutionContext("run-parent", "task-parent")
+	tool.SetCoordinator(subagent.NewCoordinator(manager))
+
+	result, err := tool.ExecuteUserCommand(context.Background(), map[string]any{
+		"action":              "spawn",
+		"initial_task":        "inspect",
+		"step_cap":            12,
+		"timeout_seconds":     90,
+		"max_tool_calls":      21,
+		"max_model_requests":  14,
+		"max_elapsed_seconds": 75,
+		"max_cost_usd":        1.5,
+	})
+	if err != nil || !result.Success {
+		t.Fatalf("spawn result=%+v err=%v", result, err)
+	}
+	request := <-requests
+	if request.ParentSessionID != "session-parent" || request.ParentRunID != "run-parent" || request.StepCap != 12 || request.TimeoutSeconds != 90 {
+		t.Fatalf("request lineage/limits = %+v", request)
+	}
+	if request.Budget.MaxToolCalls != 21 || request.Budget.MaxModelRequests != 14 || request.Budget.MaxElapsedSecond != 75 || request.Budget.MaxCostUSD != 1.5 {
+		t.Fatalf("request budget = %+v", request)
+	}
+
+	result, err = tool.ExecuteUserCommand(context.Background(), map[string]any{"action": "spawn", "initial_task": "unbounded"})
+	if err != nil || !result.Success {
+		t.Fatalf("unbounded spawn result=%+v err=%v", result, err)
+	}
+	request = <-requests
+	if request.TimeoutSeconds != 0 || request.StepCap != 0 || request.Budget != (agentcoord.Budget{}) {
+		t.Fatalf("unbounded spawn gained defaults: %+v", request)
+	}
+}
+
+func TestSubagentTool_SpawnRejectsInvalidCostBeforeCoordinator(t *testing.T) {
+	tool := &SubagentTool{}
+	for _, value := range []any{math.NaN(), math.Inf(1), math.Inf(-1), "NaN", "+Inf", -0.01, "bogus"} {
+		result, err := tool.ExecuteUserCommand(context.Background(), map[string]any{
+			"action":       "spawn",
+			"initial_task": "inspect",
+			"max_cost_usd": value,
+		})
+		if err != nil {
+			t.Fatalf("ExecuteUserCommand(%v): %v", value, err)
+		}
+		if result.Success || !strings.Contains(result.Error, "max_cost_usd") {
+			t.Fatalf("ExecuteUserCommand(%v) = %+v", value, result)
+		}
+	}
+}
+
+func TestSubagentTool_DirectActionsCannotCrossSession(t *testing.T) {
+	manager := subagent.NewManager(builtinSubagentRunnerFunc(func(ctx context.Context, _ subagent.Request, started func(int)) (string, error) {
+		started(201)
+		<-ctx.Done()
+		return "", ctx.Err()
+	}), 2)
+	t.Cleanup(func() { _ = manager.Close() })
+	tool := &SubagentTool{manager: manager}
+	tool.SetTelemetry(nil, "session-local")
+	coordinator := tool.getCoordinator()
+
+	foreign, err := coordinator.Spawn(context.Background(), agentcoord.TaskSpec{ParentSessionID: "session-foreign", Task: "foreign work"})
+	if err != nil {
+		t.Fatalf("spawn foreign run: %v", err)
+	}
+	if _, err := coordinator.Claim(context.Background(), agentcoord.ClaimRequest{RunID: foreign.ID, Resources: []string{"foreign/held"}}); err != nil {
+		t.Fatalf("seed foreign claim: %v", err)
+	}
+
+	for _, tt := range []struct {
+		name   string
+		params map[string]any
+	}{
+		{name: "status", params: map[string]any{"action": "status", "id": foreign.ID}},
+		{name: "wait", params: map[string]any{"action": "wait", "id": foreign.ID, "timeout_seconds": 1}},
+		{name: "messages", params: map[string]any{"action": "messages", "id": foreign.ID}},
+		{name: "send", params: map[string]any{"action": "send", "id": foreign.ID, "message": "cross-session command"}},
+		{name: "steer", params: map[string]any{"action": "steer", "id": foreign.ID, "message": "cross-session priority"}},
+		{name: "cancel", params: map[string]any{"action": "cancel", "id": foreign.ID, "reason": "cross-session cancel"}},
+		{name: "claim", params: map[string]any{"action": "claim", "id": foreign.ID, "resources": []string{"foreign/new"}}},
+		{name: "release", params: map[string]any{"action": "release", "id": foreign.ID, "resources": []string{"foreign/held"}}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := tool.Execute(tt.params)
+			if err != nil {
+				t.Fatalf("Execute: %v", err)
+			}
+			wantError := "subagent not found: " + foreign.ID
+			if result.Success || result.Error != wantError {
+				t.Fatalf("result = %+v, want access denial %q", result, wantError)
+			}
+		})
+	}
+
+	foreignStatus, err := coordinator.Status(context.Background(), foreign.ID)
+	if err != nil {
+		t.Fatalf("foreign status: %v", err)
+	}
+	if foreignStatus.State.Terminal() {
+		t.Fatalf("foreign run was mutated to terminal state: %+v", foreignStatus)
+	}
+	if got := strings.Join(foreignStatus.Claims, ","); got != "foreign/held" {
+		t.Fatalf("foreign claims = %q, want only seeded claim", got)
+	}
+	foreignMessages, err := coordinator.Messages(context.Background(), foreign.ID)
+	if err != nil {
+		t.Fatalf("foreign messages: %v", err)
+	}
+	if len(foreignMessages) != 0 {
+		t.Fatalf("foreign mailbox received cross-session messages: %+v", foreignMessages)
+	}
+}
+
+func TestSubagentTool_CommaTargetsArePreflightedBeforeControl(t *testing.T) {
+	for _, action := range []string{"send", "steer", "cancel"} {
+		t.Run(action, func(t *testing.T) {
+			manager := subagent.NewManager(builtinSubagentRunnerFunc(func(ctx context.Context, _ subagent.Request, started func(int)) (string, error) {
+				started(202)
+				<-ctx.Done()
+				return "", ctx.Err()
+			}), 2)
+			t.Cleanup(func() { _ = manager.Close() })
+			tool := &SubagentTool{manager: manager}
+			tool.SetTelemetry(nil, "session-local")
+			coordinator := tool.getCoordinator()
+			local, err := coordinator.Spawn(context.Background(), agentcoord.TaskSpec{ParentSessionID: "session-local", Task: "local work"})
+			if err != nil {
+				t.Fatalf("spawn local run: %v", err)
+			}
+			foreign, err := coordinator.Spawn(context.Background(), agentcoord.TaskSpec{ParentSessionID: "session-foreign", Task: "foreign work"})
+			if err != nil {
+				t.Fatalf("spawn foreign run: %v", err)
+			}
+			params := map[string]any{
+				"action":  action,
+				"id":      local.ID + "," + foreign.ID,
+				"message": "must not be partially delivered",
+				"reason":  "must not be partially cancelled",
+			}
+			result, err := tool.Execute(params)
+			if err != nil {
+				t.Fatalf("Execute: %v", err)
+			}
+			wantError := "subagent not found: " + foreign.ID
+			if result.Success || result.Error != wantError {
+				t.Fatalf("result = %+v, want access denial %q", result, wantError)
+			}
+			localStatus, err := coordinator.Status(context.Background(), local.ID)
+			if err != nil {
+				t.Fatalf("local status: %v", err)
+			}
+			if localStatus.State.Terminal() {
+				t.Fatalf("local run was partially cancelled: %+v", localStatus)
+			}
+			localMessages, err := coordinator.Messages(context.Background(), local.ID)
+			if err != nil {
+				t.Fatalf("local messages: %v", err)
+			}
+			if len(localMessages) != 0 {
+				t.Fatalf("local mailbox was partially mutated: %+v", localMessages)
+			}
+		})
+	}
+}
+
+func TestSubagentTool_EmptySessionPreservesDirectIDCompatibility(t *testing.T) {
+	manager := subagent.NewManager(builtinSubagentRunnerFunc(func(_ context.Context, _ subagent.Request, started func(int)) (string, error) {
+		started(203)
+		return "done", nil
+	}), 2)
+	t.Cleanup(func() { _ = manager.Close() })
+	tool := &SubagentTool{manager: manager}
+	coordinator := tool.getCoordinator()
+	first, err := coordinator.Spawn(context.Background(), agentcoord.TaskSpec{ParentSessionID: "external-session", Task: "first"})
+	if err != nil {
+		t.Fatalf("spawn first run: %v", err)
+	}
+	second, err := coordinator.Spawn(context.Background(), agentcoord.TaskSpec{ParentSessionID: "other-external-session", Task: "second"})
+	if err != nil {
+		t.Fatalf("spawn second run: %v", err)
+	}
+
+	status, err := tool.Execute(map[string]any{"action": "status", "id": first.ID})
+	if err != nil || !status.Success {
+		t.Fatalf("legacy status result=%+v err=%v", status, err)
+	}
+	sent, err := tool.Execute(map[string]any{"action": "send", "id": first.ID + "," + second.ID, "message": "legacy broadcast"})
+	if err != nil || !sent.Success || sent.Data["succeeded"].(int) != 2 {
+		t.Fatalf("legacy comma send result=%+v err=%v", sent, err)
+	}
+	claimed, err := tool.Execute(map[string]any{"action": "claim", "id": first.ID, "resources": []string{"legacy/path"}})
+	if err != nil || !claimed.Success {
+		t.Fatalf("legacy claim result=%+v err=%v", claimed, err)
+	}
+	released, err := tool.Execute(map[string]any{"action": "release", "id": first.ID, "resources": []string{"legacy/path"}})
+	if err != nil || !released.Success {
+		t.Fatalf("legacy release result=%+v err=%v", released, err)
+	}
 }
 
 func TestSubagentTool_GroupSendAndCancel(t *testing.T) {

@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"sort"
 	"strings"
@@ -38,9 +39,10 @@ const (
 type Status string
 
 const (
-	StatusPass        Status = "PASS"
-	StatusFail        Status = "FAIL"
-	StatusUnavailable Status = "UNAVAILABLE"
+	StatusPass          Status = "PASS"
+	StatusFail          Status = "FAIL"
+	StatusNotApplicable Status = "NOT_APPLICABLE"
+	StatusUnavailable   Status = "UNAVAILABLE"
 )
 
 const (
@@ -50,10 +52,13 @@ const (
 	maximumMaxOutput            = 2 * 1024 * 1024
 	maximumPatternBytes         = 4096
 	verificationProcessWaitTime = 2 * time.Second
+	maximumWorkspaceBytes       = 2 << 30
+	maximumWorkspaceEntries     = 500_000
 )
 
 type Request struct {
 	SnapshotRoot   string
+	SourceRoot     string
 	Kind           Kind
 	Language       Language
 	Path           string
@@ -63,20 +68,24 @@ type Request struct {
 }
 
 type Result struct {
-	Kind      Kind
-	Language  Language
-	Path      string
-	Pattern   string
-	Command   string
-	Argv      []string
-	ExitCode  int
-	Status    Status
-	Stdout    string
-	Stderr    string
-	Duration  time.Duration
-	Truncated bool
-	Error     string
+	Kind         Kind
+	Language     Language
+	Path         string
+	Pattern      string
+	Command      string
+	Argv         []string
+	ExitCode     int
+	Status       Status
+	Stdout       string
+	Stderr       string
+	Duration     time.Duration
+	Truncated    bool
+	NoTestFiles  bool
+	NoTestScript bool
+	Error        string
 }
+
+var errNodeTestScriptNotDeclared = errors.New("package.json has no test script")
 
 type Verifier interface {
 	Verify(context.Context, Request) Result
@@ -177,8 +186,27 @@ func (e *Executor) Verify(parent context.Context, request Request) Result {
 		return result
 	}
 	result.Language = language
+	if language == LanguageNode {
+		workDir, err = resolveNodePackageDirectory(root, workDir)
+		if err != nil {
+			result.Error = err.Error()
+			return result
+		}
+		relativePath, err = filepath.Rel(root, workDir)
+		if err != nil {
+			result.Error = fmt.Sprintf("normalize promoted Node package path: %v", err)
+			return result
+		}
+		result.Path = filepath.ToSlash(filepath.Clean(relativePath))
+	}
 	plan, err := verificationPlan(request.Kind, language, request.Pattern, workDir)
 	if err != nil {
+		if errors.Is(err, errNodeTestScriptNotDeclared) {
+			result.Status = StatusNotApplicable
+			result.Argv = []string{}
+			result.NoTestScript = true
+			return result
+		}
 		result.Error = err.Error()
 		return result
 	}
@@ -254,7 +282,31 @@ func (e *Executor) Verify(parent context.Context, request Request) Result {
 	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
 
-	params := launchParams{root: root, workDir: workDir, resolved: resolved, plan: plan, runtimeDir: runtimeDir, maxOutput: maxOutput}
+	_, writableWorkDir, cleanupWorkspace, err := e.prepareWritableWorkspace(ctx, root, relativePath, runtimeDir)
+	if err != nil {
+		result.Error = fmt.Sprintf("prepare writable verification workspace: %v", err)
+		return result
+	}
+	defer cleanupWorkspace()
+	var additionalReadRoots []string
+	if language == LanguageNode {
+		nodeModulesRoot, projectionErr := projectNodeDependencies(root, request.SourceRoot, relativePath, writableWorkDir)
+		if projectionErr != nil {
+			result.Error = projectionErr.Error()
+			return result
+		}
+		additionalReadRoots = append(additionalReadRoots, nodeModulesRoot)
+	}
+
+	params := launchParams{
+		root:       root,
+		workDir:    writableWorkDir,
+		resolved:   resolved,
+		plan:       plan,
+		runtimeDir: runtimeDir,
+		maxOutput:  maxOutput,
+		readRoots:  additionalReadRoots,
+	}
 	var output commandOutput
 	var runErr error
 	var launchFailure, launcherLabel string
@@ -303,6 +355,7 @@ type launchParams struct {
 	plan       plan
 	runtimeDir string
 	maxOutput  int
+	readRoots  []string
 }
 
 // runViaCodex launches the resolved verification command inside Codex's OS
@@ -314,7 +367,8 @@ func (e *Executor) runViaCodex(ctx context.Context, codex string, params launchP
 	if canonical, evalErr := filepath.EvalSymlinks(params.resolved); evalErr == nil {
 		readRoots = append(readRoots, filepath.Dir(canonical))
 	}
-	policyArgs := PermissionArgsWithReadRoots(codex, params.runtimeDir, readRoots...)
+	readRoots = append(readRoots, params.readRoots...)
+	policyArgs := verificationPermissionArgsWithReadRoots(codex, params.runtimeDir, readRoots...)
 	preflightExecutable, preflightErr := e.lookPath("true")
 	if preflightErr != nil {
 		return commandOutput{}, nil, fmt.Sprintf("Codex sandbox preflight is unavailable: %v", preflightErr)
@@ -352,9 +406,9 @@ func (e *Executor) runViaCodex(ctx context.Context, codex string, params launchP
 // runViaNativeGo launches a recognized Go build/test/check command through a
 // bubblewrap (bwrap) mount- and network-namespace sandbox when Codex is not
 // installed. It enforces the same invariants as the Codex path: the entire
-// immutable snapshot root and Go toolchain are bind-mounted read-only, the
-// only writable location is the private per-run runtime directory, and the
-// network namespace is unshared so the process has no network access.
+// immutable snapshot root and Go toolchain are bind-mounted read-only. The
+// command runs in a disposable copy below the private runtime directory, which
+// is the only writable location, and the network namespace is unshared.
 func (e *Executor) runViaNativeGo(ctx context.Context, bwrap string, params launchParams) (commandOutput, error, string) {
 	goRoot := filepath.Dir(filepath.Dir(params.resolved))
 	readRoots := []string{params.root, goRoot}
@@ -477,7 +531,13 @@ func classifyVerificationRun(result Result, request Request, language Language, 
 		result.Error = "verification command failed"
 		return result
 	}
-	if request.Kind == KindTest && verificationOutputShowsNoTests(language, output.Stdout+"\n"+output.Stderr) {
+	combinedOutput := output.Stdout + "\n" + output.Stderr
+	if request.Kind == KindTest && verificationOutputShowsNoTestFiles(language, combinedOutput) {
+		result.NoTestFiles = true
+		result.Status = StatusPass
+		return result
+	}
+	if request.Kind == KindTest && verificationOutputShowsNoTests(language, combinedOutput) {
 		result.Status = StatusFail
 		result.Error = "verification command completed without executing tests"
 		return result
@@ -532,7 +592,260 @@ func (e *Executor) prepareRuntime() (string, func(), error) {
 	return runtimeDir, func() {}, nil
 }
 
+// prepareWritableWorkspace copies one immutable snapshot into a disposable
+// directory below the private runtime. Verification may create repo-relative
+// fixtures, caches, and logs there without mutating the review evidence used by
+// the agent or by later verification calls.
+func (e *Executor) prepareWritableWorkspace(ctx context.Context, snapshotRoot, relativePath, runtimeDir string) (string, string, func(), error) {
+	if e == nil || e.tempDir == nil {
+		return "", "", func() {}, fmt.Errorf("verification workspace allocator is unavailable")
+	}
+	workspaces := filepath.Join(runtimeDir, "workspaces")
+	if err := os.MkdirAll(workspaces, 0o700); err != nil {
+		return "", "", func() {}, err
+	}
+	writableRoot, err := e.tempDir(workspaces, "run-*")
+	if err != nil {
+		return "", "", func() {}, err
+	}
+	cleanup := func() {
+		if e.removeAll != nil {
+			_ = e.removeAll(writableRoot)
+		}
+	}
+	if err := copyReviewWorkspace(ctx, snapshotRoot, writableRoot); err != nil {
+		cleanup()
+		return "", "", func() {}, err
+	}
+	writableWorkDir := filepath.Join(writableRoot, filepath.FromSlash(relativePath))
+	info, err := os.Stat(writableWorkDir)
+	if err != nil || !info.IsDir() {
+		cleanup()
+		if err == nil {
+			err = fmt.Errorf("not a directory")
+		}
+		return "", "", func() {}, fmt.Errorf("resolve copied verification path: %w", err)
+	}
+	return writableRoot, writableWorkDir, cleanup, nil
+}
+
+func copyReviewWorkspace(ctx context.Context, sourceRoot, destinationRoot string) error {
+	sourceRoot = filepath.Clean(sourceRoot)
+	copyBuffer := make([]byte, 128*1024)
+	var copiedBytes int64
+	var copiedEntries int
+	return filepath.WalkDir(sourceRoot, func(sourcePath string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		relative, err := filepath.Rel(sourceRoot, sourcePath)
+		if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+			return fmt.Errorf("copy path escapes immutable snapshot")
+		}
+		if relative == "." {
+			return os.Chmod(destinationRoot, 0o700)
+		}
+		copiedEntries++
+		if copiedEntries > maximumWorkspaceEntries {
+			return fmt.Errorf("snapshot exceeds %d-entry verification workspace limit", maximumWorkspaceEntries)
+		}
+		destinationPath := filepath.Join(destinationRoot, relative)
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		switch {
+		case entry.IsDir():
+			return os.Mkdir(destinationPath, info.Mode().Perm()|0o700)
+		case info.Mode().IsRegular():
+			if info.Size() < 0 || copiedBytes > maximumWorkspaceBytes-info.Size() {
+				return fmt.Errorf("snapshot exceeds %d-byte verification workspace limit", maximumWorkspaceBytes)
+			}
+			copiedBytes += info.Size()
+			return copyReviewFile(ctx, sourcePath, destinationPath, info.Mode().Perm()|0o600, copyBuffer)
+		case info.Mode()&os.ModeSymlink != 0:
+			target, err := os.Readlink(sourcePath)
+			if err != nil {
+				return err
+			}
+			lexicalTarget := filepath.Join(filepath.Dir(sourcePath), target)
+			if filepath.IsAbs(target) || !pathWithinRoot(sourceRoot, lexicalTarget) {
+				return fmt.Errorf("snapshot symlink %q escapes the repository", relative)
+			}
+			if resolved, resolveErr := filepath.EvalSymlinks(sourcePath); resolveErr == nil && !pathWithinRoot(sourceRoot, resolved) {
+				return fmt.Errorf("snapshot symlink %q resolves outside the repository", relative)
+			}
+			return os.Symlink(target, destinationPath)
+		default:
+			return fmt.Errorf("snapshot path %q has unsupported mode %s", relative, info.Mode())
+		}
+	})
+}
+
+func copyReviewFile(ctx context.Context, sourcePath, destinationPath string, mode os.FileMode, buffer []byte) error {
+	source, err := os.Open(sourcePath)
+	if err != nil {
+		return err
+	}
+	defer source.Close()
+	destination, err := os.OpenFile(destinationPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, mode)
+	if err != nil {
+		return err
+	}
+	// Hide os.File.ReadFrom so CopyBuffer reuses the invocation-wide buffer
+	// instead of allocating one fallback buffer for every source file.
+	_, copyErr := io.CopyBuffer(struct{ io.Writer }{destination}, contextReader{ctx: ctx, reader: source}, buffer)
+	closeErr := destination.Close()
+	if copyErr != nil {
+		return copyErr
+	}
+	return closeErr
+}
+
+type contextReader struct {
+	ctx    context.Context
+	reader io.Reader
+}
+
+func (r contextReader) Read(buffer []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return r.reader.Read(buffer)
+}
+
+func pathWithinRoot(root, candidate string) bool {
+	relative, err := filepath.Rel(filepath.Clean(root), filepath.Clean(candidate))
+	return err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
+}
+
+type nodeLockPackage struct {
+	Version   json.RawMessage `json:"version"`
+	Resolved  json.RawMessage `json:"resolved"`
+	Integrity json.RawMessage `json:"integrity"`
+	Link      json.RawMessage `json:"link"`
+}
+
+type nodePackageLock struct {
+	Packages map[string]nodeLockPackage `json:"packages"`
+}
+
+// projectNodeDependencies exposes an ambient install only when it is exact
+// evidence for the immutable package being verified. The source repository is
+// host-owned input, never model-controlled, and only the validated
+// node_modules directory becomes a read root.
+func projectNodeDependencies(snapshotRoot, sourceRoot, packagePath, writablePackage string) (string, error) {
+	sourceRoot = strings.TrimSpace(sourceRoot)
+	if sourceRoot == "" {
+		return "", fmt.Errorf("Node verification dependencies are unavailable: source repository root is not sealed")
+	}
+	canonicalSource, err := filepath.EvalSymlinks(filepath.Clean(sourceRoot))
+	if err != nil {
+		return "", fmt.Errorf("Node verification dependencies are unavailable: resolve source repository root: %w", err)
+	}
+	info, err := os.Stat(canonicalSource)
+	if err != nil || !info.IsDir() {
+		return "", fmt.Errorf("Node verification dependencies are unavailable: source repository root is not a directory")
+	}
+	sourcePackage := filepath.Join(canonicalSource, filepath.FromSlash(packagePath))
+	resolvedPackage, err := filepath.EvalSymlinks(sourcePackage)
+	if err != nil || !pathWithinRoot(canonicalSource, resolvedPackage) {
+		return "", fmt.Errorf("Node verification dependencies are unavailable: source package escapes repository root")
+	}
+
+	for _, name := range []string{"package.json", "package-lock.json"} {
+		snapshotContent, readSnapshotErr := readRegularFileWithin(snapshotRoot, filepath.Join(snapshotRoot, filepath.FromSlash(packagePath), name))
+		sourceContent, readSourceErr := readRegularFileWithin(canonicalSource, filepath.Join(resolvedPackage, name))
+		if readSnapshotErr != nil || readSourceErr != nil {
+			return "", fmt.Errorf("Node verification dependencies are unavailable: %s is missing or unsafe", name)
+		}
+		if !bytes.Equal(snapshotContent, sourceContent) {
+			return "", fmt.Errorf("Node verification dependencies are unavailable: source %s does not match immutable snapshot", name)
+		}
+	}
+
+	rootLockPath := filepath.Join(resolvedPackage, "package-lock.json")
+	installedLockPath := filepath.Join(resolvedPackage, "node_modules", ".package-lock.json")
+	rootLockContent, rootErr := readRegularFileWithin(canonicalSource, rootLockPath)
+	installedLockContent, installedErr := readRegularFileWithin(canonicalSource, installedLockPath)
+	if rootErr != nil || installedErr != nil {
+		return "", fmt.Errorf("Node verification dependencies are unavailable: node_modules lock identity is missing or unsafe")
+	}
+	var expected, installed nodePackageLock
+	if json.Unmarshal(rootLockContent, &expected) != nil || json.Unmarshal(installedLockContent, &installed) != nil || expected.Packages == nil || installed.Packages == nil {
+		return "", fmt.Errorf("Node verification dependencies are unavailable: package lock identity is invalid")
+	}
+	delete(expected.Packages, "")
+	if !reflect.DeepEqual(expected.Packages, installed.Packages) {
+		return "", fmt.Errorf("Node verification dependencies are unavailable: node_modules does not exactly match package-lock.json")
+	}
+
+	nodeModules := filepath.Join(resolvedPackage, "node_modules")
+	canonicalModules, err := filepath.EvalSymlinks(nodeModules)
+	if err != nil || !pathWithinRoot(canonicalSource, canonicalModules) {
+		return "", fmt.Errorf("Node verification dependencies are unavailable: node_modules escapes repository root")
+	}
+	info, err = os.Stat(canonicalModules)
+	if err != nil || !info.IsDir() {
+		return "", fmt.Errorf("Node verification dependencies are unavailable: node_modules is not a directory")
+	}
+	if err := validateNodeModulesSymlinks(canonicalModules); err != nil {
+		return "", fmt.Errorf("Node verification dependencies are unavailable: %w", err)
+	}
+	projection := filepath.Join(writablePackage, "node_modules")
+	if _, err := os.Lstat(projection); err == nil || !os.IsNotExist(err) {
+		return "", fmt.Errorf("Node verification dependencies are unavailable: immutable snapshot already contains node_modules")
+	}
+	if err := os.Symlink(canonicalModules, projection); err != nil {
+		return "", fmt.Errorf("Node verification dependencies are unavailable: project node_modules: %w", err)
+	}
+	return canonicalModules, nil
+}
+
+func validateNodeModulesSymlinks(nodeModulesRoot string) error {
+	entries := 0
+	return filepath.WalkDir(nodeModulesRoot, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		entries++
+		if entries > maximumWorkspaceEntries {
+			return fmt.Errorf("node_modules exceeds %d-entry verification limit", maximumWorkspaceEntries)
+		}
+		if entry.Type()&os.ModeSymlink == 0 {
+			return nil
+		}
+		resolved, err := filepath.EvalSymlinks(path)
+		if err != nil {
+			return fmt.Errorf("node_modules symlink %q is unresolved", path)
+		}
+		if !pathWithinRoot(nodeModulesRoot, resolved) {
+			return fmt.Errorf("node_modules symlink %q escapes the validated dependency root", path)
+		}
+		return nil
+	})
+}
+
+func readRegularFileWithin(root, path string) ([]byte, error) {
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("not a regular file")
+	}
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil || !pathWithinRoot(root, resolved) {
+		return nil, fmt.Errorf("path escapes root")
+	}
+	return os.ReadFile(resolved)
+}
+
 var rustRunningNonZeroTestsRE = regexp.MustCompile(`(?m)\brunning\s+[1-9][0-9]*\s+tests?\b`)
+
+func verificationOutputShowsNoTestFiles(language Language, output string) bool {
+	return language == LanguageGo && strings.Contains(strings.ToLower(output), "[no test files]")
+}
 
 func verificationOutputShowsNoTests(language Language, output string) bool {
 	lower := strings.ToLower(output)
@@ -666,6 +979,61 @@ func resolveSnapshotDirectory(snapshotRoot, requested string) (string, string, e
 	return filepath.Clean(root), filepath.Clean(candidate), nil
 }
 
+// resolveNodePackageDirectory promotes a nested Node verification target to
+// its nearest package root. The walk is bounded by the already-canonicalized
+// immutable snapshot root, and a package.json symlink must resolve inside that
+// same snapshot before it can select a package.
+func resolveNodePackageDirectory(snapshotRoot, requestedDir string) (string, error) {
+	root, err := filepath.EvalSymlinks(filepath.Clean(snapshotRoot))
+	if err != nil {
+		return "", fmt.Errorf("resolve immutable snapshot root for Node verification: %w", err)
+	}
+	current, err := filepath.EvalSymlinks(filepath.Clean(requestedDir))
+	if err != nil {
+		return "", fmt.Errorf("resolve Node verification path: %w", err)
+	}
+	if !pathWithinRoot(root, current) {
+		return "", fmt.Errorf("node verification path escapes immutable snapshot")
+	}
+
+	for {
+		manifestPath := filepath.Join(current, "package.json")
+		info, err := os.Lstat(manifestPath)
+		switch {
+		case err == nil:
+			resolvedManifest, resolveErr := filepath.EvalSymlinks(manifestPath)
+			if resolveErr != nil {
+				return "", fmt.Errorf("resolve package.json: %w", resolveErr)
+			}
+			if !pathWithinRoot(root, resolvedManifest) {
+				return "", fmt.Errorf("package.json escapes immutable snapshot")
+			}
+			if info.Mode()&os.ModeSymlink != 0 {
+				info, err = os.Stat(resolvedManifest)
+				if err != nil {
+					return "", fmt.Errorf("stat package.json: %w", err)
+				}
+			}
+			if !info.Mode().IsRegular() {
+				return "", fmt.Errorf("package.json is not a regular file")
+			}
+			return current, nil
+		case !os.IsNotExist(err):
+			return "", fmt.Errorf("inspect package.json: %w", err)
+		}
+
+		if current == root {
+			break
+		}
+		parent := filepath.Dir(current)
+		if parent == current || !pathWithinRoot(root, parent) {
+			break
+		}
+		current = parent
+	}
+	return "", fmt.Errorf("no package.json found at or above verification path within immutable snapshot")
+}
+
 func resolveLanguage(language Language, workDir string) (Language, error) {
 	if language == "" {
 		language = LanguageAuto
@@ -794,6 +1162,9 @@ func nodeScriptForKind(kind Kind, workDir string) (string, error) {
 	}
 	script := string(kind)
 	if strings.TrimSpace(manifest.Scripts[script]) == "" {
+		if kind == KindTest {
+			return "", errNodeTestScriptNotDeclared
+		}
 		return "", fmt.Errorf("package.json has no %q script", script)
 	}
 	return script, nil

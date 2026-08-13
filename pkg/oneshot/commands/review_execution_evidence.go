@@ -11,8 +11,9 @@ import (
 )
 
 const (
-	reviewEvidenceBuild = "build"
-	reviewEvidenceTest  = "test"
+	reviewEvidenceBuild      = "build"
+	reviewEvidenceTest       = "test"
+	reviewEvidenceTestPolicy = "test-policy"
 )
 
 type reviewCoverageTarget struct {

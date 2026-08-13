@@ -26,6 +26,7 @@ func TestSaveAndLoadCatalogCache_RoundTrips(t *testing.T) {
 			ContextLength:       128000,
 			MaxCompletionTokens: 16384,
 			Pricing:             ModelPricing{Prompt: 2.5, Completion: 10},
+			PricingKnown:        true,
 		},
 		"anthropic/claude-4.5": {
 			ID:   "anthropic/claude-4.5",
@@ -49,6 +50,9 @@ func TestSaveAndLoadCatalogCache_RoundTrips(t *testing.T) {
 	}
 	if loaded["openai/gpt-4o"].MaxCompletionTokens != 16384 {
 		t.Fatalf("loaded gpt-4o MaxCompletionTokens = %d, want 16384", loaded["openai/gpt-4o"].MaxCompletionTokens)
+	}
+	if !loaded["openai/gpt-4o"].PricingKnown {
+		t.Fatal("loaded gpt-4o lost authoritative pricing marker")
 	}
 	if loaded["anthropic/claude-4.5"].Name != "Claude 4.5" {
 		t.Fatalf("loaded claude Name = %q, want Claude 4.5", loaded["anthropic/claude-4.5"].Name)

@@ -65,6 +65,16 @@ func TestParseReviewPRCommandOptions(t *testing.T) {
 	}
 }
 
+func TestRunReviewPRCommandInitializesExactNativeCriticBeforeProviders(t *testing.T) {
+	const critic = "codex/gpt-5.6-sol-xhigh"
+	sentinel := expectExactCriticDependencyInitialization(t, critic)
+
+	err := runReviewPRCommand([]string{"123", "--critic-model", critic})
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("runReviewPRCommand() error = %v, want %v", err, sentinel)
+	}
+}
+
 func TestParseReviewPRCommandOptionsRejectsConflictingBudgetModes(t *testing.T) {
 	_, err := parseReviewPRCommandOptions([]string{"123", "--budget", "0.25", "--no-budget"})
 	if err == nil || !strings.Contains(err.Error(), "cannot be combined") {

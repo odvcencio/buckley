@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
+	"os"
 	"path"
 	"sort"
 	"strings"
@@ -22,7 +24,8 @@ import (
 const defaultMailboxLimit = 256
 
 // AdmissionDecision is the policy-owned narrowing applied before a child is
-// started. Zero limits leave the corresponding task specification unchanged.
+// started. Positive policy limits are hard maxima, including when the caller
+// omitted its own limit.
 type AdmissionDecision struct {
 	Allowed        bool
 	Reason         string
@@ -271,11 +274,17 @@ func (c *Coordinator) applyAdmission(ctx context.Context, spec *agentcoord.Agent
 		}
 		return fmt.Errorf("subagent spawn denied: %s", reason)
 	}
-	if decision.TimeoutSeconds > 0 && (spec.TimeoutSeconds <= 0 || spec.TimeoutSeconds > decision.TimeoutSeconds) {
+	if decision.TimeoutSeconds > 0 && (spec.TimeoutSeconds == 0 || spec.TimeoutSeconds > decision.TimeoutSeconds) {
 		spec.TimeoutSeconds = decision.TimeoutSeconds
 	}
-	if decision.StepCap > 0 && (spec.StepCap <= 0 || spec.StepCap > decision.StepCap) {
+	if decision.TimeoutSeconds > 0 && (spec.Budget.MaxElapsedSecond == 0 || spec.Budget.MaxElapsedSecond > decision.TimeoutSeconds) {
+		spec.Budget.MaxElapsedSecond = decision.TimeoutSeconds
+	}
+	if decision.StepCap > 0 && (spec.StepCap == 0 || spec.StepCap > decision.StepCap) {
 		spec.StepCap = decision.StepCap
+	}
+	if decision.StepCap > 0 && (spec.Budget.MaxModelRequests == 0 || spec.Budget.MaxModelRequests > decision.StepCap) {
+		spec.Budget.MaxModelRequests = decision.StepCap
 	}
 	return nil
 }
@@ -322,6 +331,7 @@ func spawnOptionsFromTask(spec agentcoord.AgentTaskSpec) SpawnOptions {
 		Spec:            spec.Spec,
 		Task:            spec.Task,
 		TimeoutSeconds:  spec.TimeoutSeconds,
+		Budget:          spec.Budget,
 		Persona:         spec.Persona,
 		Model:           spec.Model,
 		Tier:            persona.Tier(spec.Tier),
@@ -355,7 +365,10 @@ func normalizeTaskSpec(spec agentcoord.AgentTaskSpec) (agentcoord.AgentTaskSpec,
 	if spec.Task == "" {
 		return agentcoord.AgentTaskSpec{}, fmt.Errorf("subagent task is required")
 	}
-	if spec.TimeoutSeconds < 0 || spec.StepCap < 0 || spec.DelegationDepth < 0 {
+	if math.IsNaN(spec.Budget.MaxCostUSD) || math.IsInf(spec.Budget.MaxCostUSD, 0) {
+		return agentcoord.AgentTaskSpec{}, fmt.Errorf("subagent max_cost_usd must be finite")
+	}
+	if spec.TimeoutSeconds < 0 || spec.StepCap < 0 || spec.DelegationDepth < 0 || spec.Budget.MaxToolCalls < 0 || spec.Budget.MaxModelRequests < 0 || spec.Budget.MaxElapsedSecond < 0 || spec.Budget.MaxCostUSD < 0 {
 		return agentcoord.AgentTaskSpec{}, fmt.Errorf("subagent limits cannot be negative")
 	}
 	spec.Dependencies = uniqueStrings(spec.Dependencies)
@@ -954,12 +967,27 @@ func (c *Coordinator) storeTerminalReport(ctx context.Context, spec agentcoord.A
 	if c == nil || c.ledger == nil {
 		return nil, nil
 	}
+	output := snapshot.Output
+	if snapshot.OutputSpoolPath != "" {
+		body, err := os.ReadFile(snapshot.OutputSpoolPath)
+		if err != nil {
+			return nil, fmt.Errorf("read subagent output spool: %w", err)
+		}
+		if snapshot.CapturedBytes > 0 && int64(len(body)) != snapshot.CapturedBytes {
+			return nil, fmt.Errorf("read subagent output spool: got %d bytes, want %d", len(body), snapshot.CapturedBytes)
+		}
+		output = string(body)
+	}
 	rawBody, err := json.Marshal(map[string]any{
-		"state":       snapshot.State,
-		"output":      snapshot.Output,
-		"error":       snapshot.Error,
-		"started_at":  snapshot.StartedAt,
-		"finished_at": snapshot.FinishedAt,
+		"state":                 snapshot.State,
+		"output":                output,
+		"output_preview":        snapshot.Output,
+		"output_bytes":          snapshot.OutputBytes,
+		"captured_output_bytes": snapshot.CapturedBytes,
+		"output_truncated":      snapshot.OutputTruncated,
+		"error":                 snapshot.Error,
+		"started_at":            snapshot.StartedAt,
+		"finished_at":           snapshot.FinishedAt,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("marshal subagent report: %w", err)
@@ -981,7 +1009,9 @@ func (c *Coordinator) storeTerminalReport(ctx context.Context, spec agentcoord.A
 	if err := c.evidence.Pin(ctx, raw.ID, "run:"+snapshot.ID); err != nil {
 		return nil, fmt.Errorf("pin subagent report: %w", err)
 	}
-	artifact, err := c.terminalArtifact(spec, snapshot, artifactv1.EvidenceRef{
+	artifactSnapshot := snapshot
+	artifactSnapshot.Output = output
+	artifact, err := c.terminalArtifact(spec, artifactSnapshot, artifactv1.EvidenceRef{
 		ID:    raw.ID,
 		Label: "raw subagent report",
 		Kind:  string(evidence.KindSubagentReport),
@@ -1123,7 +1153,10 @@ func (c *Coordinator) storeMessage(ctx context.Context, message agentcoord.Agent
 }
 
 func (c *Coordinator) appendMessage(ctx context.Context, message agentcoord.AgentMessage) error {
-	spec, _ := c.taskSpec(message.RunID)
+	spec, err := c.taskSpecForRun(ctx, message.RunID)
+	if err != nil {
+		return err
+	}
 	eventType := runledger.EventSubagentMessageSent
 	if message.Kind == "steer" {
 		eventType = runledger.EventSubagentSteered
@@ -1139,7 +1172,10 @@ func (c *Coordinator) appendMessage(ctx context.Context, message agentcoord.Agen
 }
 
 func (c *Coordinator) appendMessageDelivery(ctx context.Context, message agentcoord.AgentMessage) error {
-	spec, _ := c.taskSpec(message.RunID)
+	spec, err := c.taskSpecForRun(ctx, message.RunID)
+	if err != nil {
+		return err
+	}
 	return c.append(ctx, spec, runledger.EventSubagentMessageDelivered, map[string]any{
 		"message_id": message.ID,
 		"to":         message.To,
@@ -1187,6 +1223,32 @@ func (c *Coordinator) taskSpec(runID string) (agentcoord.AgentTaskSpec, bool) {
 	spec, ok := c.runs[strings.TrimSpace(runID)]
 	c.mu.RUnlock()
 	return spec, ok
+}
+
+func (c *Coordinator) taskSpecForRun(ctx context.Context, runID string) (agentcoord.AgentTaskSpec, error) {
+	runID = strings.TrimSpace(runID)
+	if spec, ok := c.taskSpec(runID); ok {
+		return spec, nil
+	}
+	if c == nil || c.ledger == nil {
+		return agentcoord.AgentTaskSpec{}, fmt.Errorf("subagent not found: %s", runID)
+	}
+	durable, err := c.ledger.GetRun(ctx, runID)
+	if err != nil {
+		return agentcoord.AgentTaskSpec{}, fmt.Errorf("get durable subagent run %s: %w", runID, err)
+	}
+	if durable.Backend != c.adapter {
+		return agentcoord.AgentTaskSpec{}, fmt.Errorf("subagent not found: %s", runID)
+	}
+	return agentcoord.AgentTaskSpec{
+		ID:              durable.TaskID,
+		RunID:           durable.RunID,
+		ParentRunID:     durable.ParentRunID,
+		ParentSessionID: durable.SessionID,
+		Agent:           durable.AgentID,
+		Model:           durable.ModelID,
+		Budget:          budgetFromMap(durable.Budget),
+	}, nil
 }
 
 func (c *Coordinator) agentRunFromSnapshot(snapshot Snapshot) agentcoord.AgentRun {
@@ -1286,6 +1348,8 @@ func taskSpecFromSnapshot(snapshot Snapshot) agentcoord.AgentTaskSpec {
 		Effort:          snapshot.Effort,
 		AllowedTools:    copyStrings(snapshot.AllowedTools),
 		StepCap:         snapshot.StepCap,
+		TimeoutSeconds:  snapshot.TimeoutSeconds,
+		Budget:          snapshot.Budget,
 		WorkspaceClaims: copyStrings(snapshot.WorkspaceClaims),
 		Isolation:       snapshot.Isolation,
 		OutputSchema:    snapshot.OutputSchema,

@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"testing"
 )
 
@@ -96,6 +97,39 @@ func TestSearchTextTool(t *testing.T) {
 		}
 	})
 
+	t.Run("pages large result sets", func(t *testing.T) {
+		if !toolExists("rg") {
+			t.Skip("ripgrep is required for stable paging coverage")
+		}
+		tmpDir := t.TempDir()
+		content := ""
+		for i := 0; i < 60; i++ {
+			content += "needle\n"
+		}
+		if err := os.WriteFile(filepath.Join(tmpDir, "many.txt"), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		first, err := tool.Execute(map[string]any{"query": "needle", "path": tmpDir})
+		if err != nil || !first.Success || first.Data["next_offset"] != 50 {
+			t.Fatalf("first page = %#v, %v", first, err)
+		}
+		second, err := tool.Execute(map[string]any{"query": "needle", "path": tmpDir, "offset": 50})
+		if err != nil || !second.Success {
+			t.Fatalf("second page = %#v, %v", second, err)
+		}
+		matches := second.Data["matches"].([]map[string]any)
+		if len(matches) != 10 || matches[0]["line"] != 51 {
+			t.Fatalf("second page matches = %#v", matches)
+		}
+		pastEnd, err := tool.Execute(map[string]any{"query": "needle", "path": tmpDir, "offset": 999})
+		if err != nil || !pastEnd.Success {
+			t.Fatalf("past-end page = %#v, %v", pastEnd, err)
+		}
+		if summary, _ := pastEnd.Data["summary"].(string); !strings.Contains(summary, "no records at offset 999") {
+			t.Fatalf("past-end summary = %q", summary)
+		}
+	})
+
 	t.Run("search with context lines", func(t *testing.T) {
 		tmpDir := t.TempDir()
 		content := "line1\nline2\ntarget\nline4\nline5"
@@ -143,12 +177,21 @@ func TestSearchTextTool(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		// Should fail for nonexistent path
 		if result.Success {
-			// Some implementations might return empty results instead of error
-			t.Logf("search in nonexistent path returned success")
+			t.Fatal("search in nonexistent path returned a false exhaustive success")
 		}
 	})
+}
+
+func TestParseSearchLine_GrepNullFilenamePreservesMatchText(t *testing.T) {
+	match := parseSearchLine("dir/a.go\x007:needle:with:colons")
+	if match == nil || match["path"] != "dir/a.go" || match["line"] != 7 || match["match"] != "needle:with:colons" || match["kind"] != "match" {
+		t.Fatalf("grep match = %#v", match)
+	}
+	contextLine := parseSearchLine("dir/a.go\x006-before")
+	if contextLine == nil || contextLine["line"] != 6 || contextLine["context"] != "before" || contextLine["kind"] != "context" {
+		t.Fatalf("grep context = %#v", contextLine)
+	}
 }
 
 func TestSearchTextToolConfinesRipgrepOptionsAndSymlinks(t *testing.T) {
@@ -215,6 +258,37 @@ func TestSearchTextToolPreservesRipgrepContextEvidence(t *testing.T) {
 		matches[1]["kind"] != "match" || matches[1]["match"] != "target evidence" ||
 		matches[2]["kind"] != "context" || matches[2]["context"] != "after evidence" {
 		t.Fatalf("context evidence was not preserved: %#v", matches)
+	}
+}
+
+func TestSearchTextToolIncludesHiddenRepositoryFilesButNotGitMetadata(t *testing.T) {
+	if !toolExists("rg") {
+		t.Skip("ripgrep is required for hidden-file coverage")
+	}
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, ".github", "workflows"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".github", "workflows", "ci.yml"), []byte("release-audit-needle\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".git", "config"), []byte("release-audit-needle\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	tool := &SearchTextTool{}
+	tool.SetWorkDir(root)
+	result, err := tool.Execute(map[string]any{"query": "release-audit-needle", "path": "."})
+	if err != nil || !result.Success {
+		t.Fatalf("hidden search = %#v, err=%v", result, err)
+	}
+	matches, _ := result.Data["matches"].([]map[string]any)
+	path, _ := matches[0]["path"].(string)
+	if len(matches) != 1 || strings.TrimPrefix(path, "./") != ".github/workflows/ci.yml" {
+		t.Fatalf("hidden search matches = %#v, want only workflow", matches)
 	}
 }
 

@@ -664,6 +664,11 @@ func (r *Runner) runConversationLoop() error {
 	}
 
 	result, err := controller.Run(ctx)
+	if result != nil {
+		r.mu.Lock()
+		r.usage = model.AddUsage(r.usage, result.Usage)
+		r.mu.Unlock()
+	}
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
 			return err
@@ -671,10 +676,10 @@ func (r *Runner) runConversationLoop() error {
 		r.emitError("model call failed", err)
 		return err
 	}
-
-	r.mu.Lock()
-	r.usage = model.AddUsage(r.usage, result.Usage)
-	r.mu.Unlock()
+	if err := result.RequireConclusive(); err != nil {
+		r.emitError("agent turn incomplete", err)
+		return err
+	}
 
 	switch result.FinishReason {
 	case agentloop.FinishReasonEmptyChoices:
@@ -686,8 +691,15 @@ func (r *Runner) runConversationLoop() error {
 		})
 		return nil
 	case agentloop.FinishReasonLoopGuard, agentloop.FinishReasonStepCap:
-		r.persistFinalAssistantMessage(result.Content, "", nil)
-		return nil
+		r.emit(RunnerEvent{
+			Type:      EventWarning,
+			SessionID: r.sessionID,
+			Timestamp: time.Now(),
+			Data: map[string]any{
+				"message":     "Harness stopped further tools and finalized from existing evidence",
+				"stop_reason": result.Termination.Reason,
+			},
+		})
 	}
 
 	content := getMessageContent(result.Message.Content)
@@ -722,7 +734,8 @@ func (r *Runner) persistFinalAssistantMessage(content, reasoning string, reasoni
 // pre-engine loop had no cross-turn round budget either.
 func (r *Runner) newTurnController() (*agentloop.Controller, error) {
 	return agentloop.NewController(agentloop.ControllerConfig{
-		Governor: agentloop.New(agentloop.DefaultConfig()),
+		Governor:       agentloop.New(agentloop.DefaultConfig()),
+		FinalizeOnStop: true,
 		BuildRequest: func(ctx context.Context, round int) (model.ChatRequest, error) {
 			return r.buildRawChatRequest(r.resolveExecutionModel()), nil
 		},

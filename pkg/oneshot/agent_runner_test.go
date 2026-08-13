@@ -10,8 +10,11 @@ import (
 	"testing"
 	"time"
 
+	"m31labs.dev/buckley/pkg/evidence"
+	"m31labs.dev/buckley/pkg/execmode"
 	"m31labs.dev/buckley/pkg/model"
 	"m31labs.dev/buckley/pkg/rlm"
+	"m31labs.dev/buckley/pkg/runledger"
 	"m31labs.dev/buckley/pkg/transparency"
 )
 
@@ -160,6 +163,73 @@ func TestReviewSnapshotRegistryReadsOnlyMaterializedState(t *testing.T) {
 func TestReviewSnapshotRegistryRejectsNonReviewTools(t *testing.T) {
 	if _, err := newReviewSnapshotRegistry(t.TempDir(), []string{"read_file", "run_shell"}); err == nil {
 		t.Fatal("snapshot registry accepted an executable tool")
+	}
+}
+
+func TestReviewSnapshotRegistryAcceptsAuditedCodeModeSurface(t *testing.T) {
+	registry, err := newReviewSnapshotRegistry(t.TempDir(), []string{"exec_program", "read_file"})
+	if err != nil {
+		t.Fatalf("newReviewSnapshotRegistry: %v", err)
+	}
+	defer registry.Close()
+	if _, exists := registry.Get("exec_program"); exists {
+		t.Fatal("exec_program must be explicitly wired with durable stores")
+	}
+}
+
+func TestRegisterReviewCodeModeToolReadsThroughAuditedSnapshotCapabilities(t *testing.T) {
+	if execmode.DetectIsolation() != execmode.IsolationBwrap {
+		t.Skip("bubblewrap is required for the real review code-mode test")
+	}
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "sample.txt"), []byte("snapshot truth\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dbPath := filepath.Join(t.TempDir(), "ledger.db")
+	ev, err := evidence.New(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ev.Close()
+	ledger, err := runledger.NewWithDB(ev.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry, err := newReviewSnapshotRegistry(root, []string{"exec_program", "read_file"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer registry.Close()
+
+	runID, err := registerReviewCodeModeTool(context.Background(), registry, root, ledger, ev, "review-session", "x-ai/grok-4.6", "openrouter")
+	if err != nil {
+		t.Fatalf("registerReviewCodeModeTool: %v", err)
+	}
+	if runID == "" {
+		t.Fatal("review code mode did not create a durable run")
+	}
+	result, err := registry.Execute("exec_program", map[string]any{
+		"source": `package main
+import (
+    "fmt"
+    "execprogram/caps"
+)
+func main() {
+    body, _, err := caps.ReadFile("sample.txt")
+    if err != nil { panic(err) }
+    fmt.Print(body)
+}`,
+	})
+	if err != nil || result == nil || !result.Success {
+		t.Fatalf("exec_program = %#v, %v", result, err)
+	}
+	stdout, _ := result.Data["stdout"].(string)
+	if stdout != "snapshot truth\n" {
+		t.Fatalf("stdout = %q, want immutable snapshot content", stdout)
+	}
+	objects, err := ev.Query(context.Background(), evidence.Query{RunID: runID})
+	if err != nil || len(objects) < 2 {
+		t.Fatalf("durable code-mode evidence = %d, %v; want source and output", len(objects), err)
 	}
 }
 

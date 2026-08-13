@@ -2,10 +2,34 @@
 
 Buckley can drive goals through a durable workflow backend. A worker
 process is disposable: workflow history, the run ledger, and evidence
-survive a crash, and a restarted worker resumes without repeating a
-completed model call or tool effect. The design is canonical in the
-Hyphae space (`hypha recall "durable execution"`); this page is the
-operator surface.
+survive a crash, and a restarted worker replays completed, journaled steps
+instead of executing them again. The design is canonical in the Hyphae space
+(`hypha recall "durable execution"`); this page is the operator surface.
+
+New v4 workflows bind every activity to the goal's normalized workspace and
+run ID. A worker started in another directory rejects the activity before the
+agent loop runs. The workflow finalizes Buckley's canonical run row before it
+reports completion, so `report`, `audit`, and `replay` agree on terminal state.
+V1–V3 histories remain attachable through their versioned adapter; because
+those old records contain no workspace identity, resume them from the original
+directory.
+
+## Resumable generations
+
+One canonical run may use several short-lived workflow generations. The first
+keeps the compatible identity `goal-<run-id>`; an incomplete bounded-yield exit
+continues as `goal-<run-id>::resume::1`, then `::resume::2`, and so on. Each
+terminal generation records one immutable `durable.goal_generation` ledger
+event. The scheduler captures that event as a fence before contacting Dapr, so
+concurrent `goal run` commands contend for the same next identity instead of
+skipping ahead or duplicating work.
+
+When a generation defers tasks, the command says so explicitly and prints the
+rerun command. Run it again to continue. The next generation inherits the
+original V4 workspace, yield, fan-out, and approval settings from workflow
+history; changing rerun flags cannot silently mutate an existing run's durable
+contract. A completed or failed canonical run never starts another generation:
+inspect it with `buckley goal report` instead.
 
 ## Run a goal durably
 
@@ -39,8 +63,9 @@ shows both.
 
 ## Standalone worker
 
-Run the activity host as its own process. It serves any goal on the
-ledger and resolves each run on first use:
+Run the activity host as its own process. It resolves ledger goals whose
+recorded workspace matches the directory where the worker starts. A foreign
+workspace is rejected before any task activity executes:
 
 ```bash
 buckley goal worker --endpoint localhost:50001
@@ -48,6 +73,19 @@ buckley goal worker --endpoint localhost:50001
 
 Interrupting the worker is safe. In-flight state is durable and the
 next worker resumes it.
+
+## At-least-once activity boundary
+
+Dapr activities are delivered at least once. Buckley's step journal prevents
+re-execution after a result has been durably recorded. One ambiguous window
+still exists for a modifying or destructive tool: the worker can crash after
+the external effect succeeds but before its result receipt is stored. A retry
+cannot prove whether that effect happened and may repeat it.
+
+Until effect-aware reconciliation and adapter idempotency keys are complete,
+do not describe Dapr execution as exactly-once. Keep approval gates enabled for
+non-idempotent tools, prefer tools with their own idempotency support, and use
+`buckley goal audit` to inspect an interrupted modifying step before resuming.
 
 ## Sidecar or emulator
 

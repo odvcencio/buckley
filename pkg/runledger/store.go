@@ -120,14 +120,17 @@ type TaskCheckpoint struct {
 // AgentMetricSample is one row of the agent_metric_samples table (section
 // 14.4): a single observed metric value for a run.
 type AgentMetricSample struct {
-	ID         int64
-	RunID      string
-	TaskID     string
-	MetricName string
-	Value      float64
-	Unit       string
-	Dimensions map[string]any
-	Timestamp  time.Time
+	ID int64
+	// IdempotencyKey identifies one logical observation across activity
+	// retries. Empty preserves append-only legacy behavior.
+	IdempotencyKey string
+	RunID          string
+	TaskID         string
+	MetricName     string
+	Value          float64
+	Unit           string
+	Dimensions     map[string]any
+	Timestamp      time.Time
 }
 
 // EventQuery selects events for ListEvents.

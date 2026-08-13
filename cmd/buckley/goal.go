@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -111,7 +112,7 @@ func runGoalWorker(args []string) error {
 		if err != nil {
 			return nil, err
 		}
-		return goalrunner.New(loop, goal, specs), nil
+		return goalrunner.New(loop, runID, workDir, goal, specs)
 	})
 
 	sidecar := *endpoint
@@ -429,7 +430,7 @@ func runGoalRun(args []string) error {
 	case "", config.DurableBackendLocal:
 		// The in-process loop below is the default.
 	case config.DurableBackendDapr:
-		return runGoalDurable(ctx, cfg, loop, goal, specs, runID, *maxParallel, *approvalWait)
+		return runGoalDurable(ctx, cfg, loop, goal, specs, runID, workDir, *maxParallel, *approvalWait)
 	default:
 		return fmt.Errorf("unknown durable backend %q (want local or dapr)", durableBackend)
 	}
@@ -456,8 +457,20 @@ func runGoalRun(args []string) error {
 // runGoalDurable drives one goal through the Dapr workflow backend
 // (spec.durable-execution-dapr, Phase 1). The worker runs in this
 // process; Dapr owns scheduling, so an interrupt leaves the workflow
-// resumable and a later `goal run` re-attaches to the same instance.
-func runGoalDurable(ctx context.Context, cfg *config.Config, loop *goalloop.Loop, goal goalloop.Goal, specs map[string]goalloop.TaskSpec, runID string, maxParallel int, approvalWait time.Duration) error {
+// resumable and a later `goal run` attaches to the active generation or
+// starts the next deterministic generation after a bounded-yield exit.
+func runGoalDurable(ctx context.Context, cfg *config.Config, loop *goalloop.Loop, goal goalloop.Goal, specs map[string]goalloop.TaskSpec, runID, workDir string, maxParallel int, approvalWait time.Duration) error {
+	if err := ensureDurableGoalRunOpen(ctx, loop.Ledger(), runID); err != nil {
+		return err
+	}
+	// Capture the immutable generation fence before any sidecar or worker
+	// setup. Overlapping invocations that began against the same ledger state
+	// must target the same generation even if one finishes while the other is
+	// still starting its runtime connection.
+	resumeAfter, err := durableGoalResumeFence(ctx, loop.Ledger(), runID)
+	if err != nil {
+		return err
+	}
 	backend, err := daprbackend.New(cfg.Execution.DaprGRPCEndpoint)
 	if err != nil {
 		return err
@@ -469,10 +482,20 @@ func runGoalDurable(ctx context.Context, cfg *config.Config, loop *goalloop.Loop
 	if err := backend.Health(healthCtx); err != nil {
 		return err
 	}
-	if err := backend.StartWorker(ctx, goalrunner.New(loop, goal, specs)); err != nil {
+	runner, worker, err := newDurableGoalRunners(loop, runID, workDir, goal, specs)
+	if err != nil {
 		return err
 	}
-	instanceID, err := backend.StartGoal(ctx, durability.GoalStart{RunID: runID, MaxParallel: maxParallel, ApprovalWaitMS: approvalWait.Milliseconds()})
+	if err := backend.StartWorker(ctx, worker); err != nil {
+		return err
+	}
+	instanceID, err := backend.StartGoal(ctx, durability.GoalStart{
+		RunID:                         runID,
+		WorkspaceRoot:                 runner.WorkspaceRoot(),
+		MaxParallel:                   maxParallel,
+		ApprovalWaitMS:                approvalWait.Milliseconds(),
+		ResumeAfterWorkflowInstanceID: resumeAfter,
+	})
 	if err != nil {
 		return err
 	}
@@ -486,6 +509,13 @@ func runGoalDurable(ctx context.Context, cfg *config.Config, loop *goalloop.Loop
 		}
 		return err
 	}
+	// V1-V3 workflow histories predate the durable finalization activity.
+	// Reconcile at the observer boundary as well; V4 already finalized and
+	// treats this repeated terminal status as a no-op. A bounded-yield V4
+	// result is explicitly incomplete and must leave the canonical run open.
+	if err := runner.FinalizeGoal(ctx, goalFinalizationForStatus(runID, runner.WorkspaceRoot(), instanceID, status)); err != nil {
+		return err
+	}
 	for _, task := range status.Result.Tasks {
 		line := fmt.Sprintf("  [%s] %s — %d turn(s), $%.2f", task.Status, task.TaskID, task.Turns, task.SpentUSD)
 		if task.Decision != "" {
@@ -493,11 +523,157 @@ func runGoalDurable(ctx context.Context, cfg *config.Config, loop *goalloop.Loop
 		}
 		fmt.Println(line)
 	}
-	if status.Failure != "" {
-		return fmt.Errorf("durable goal %s failed: %s", instanceID, status.Failure)
+	if failure := durableGoalFailure(status); failure != "" {
+		return fmt.Errorf("durable goal %s failed: %s", instanceID, failure)
+	}
+	if status.Result.Status == durability.GoalResultIncomplete {
+		fmt.Println(durableGoalIncompleteMessage(instanceID, runID, len(status.Result.DeferredTasks)))
+		return nil
 	}
 	fmt.Printf("Workflow %s %s. Report: buckley goal report %s\n", instanceID, strings.ToLower(status.RuntimeStatus), runID)
 	return nil
+}
+
+func durableGoalIncompleteMessage(instanceID, runID string, deferred int) string {
+	return fmt.Sprintf("Workflow %s completed a bounded generation with %d deferred task(s). Rerun `buckley goal run %s` to continue in the next durable generation.", instanceID, deferred, runID)
+}
+
+func ensureDurableGoalRunOpen(ctx context.Context, ledger runledger.Store, runID string) error {
+	run, err := ledger.GetRun(ctx, runID)
+	if err != nil {
+		return fmt.Errorf("load canonical run %s before durable execution: %w", runID, err)
+	}
+	if run.EndedAt != nil {
+		return fmt.Errorf("goal run %s is already finalized as %s; inspect it with `buckley goal report %s`", runID, run.Status, runID)
+	}
+	return nil
+}
+
+func durableGoalResumeFence(ctx context.Context, ledger runledger.Store, runID string) (string, error) {
+	events, err := ledger.ListEvents(ctx, runledger.EventQuery{
+		RunID: runID,
+		Types: []string{runledger.EventDurableGoalGeneration},
+	})
+	if err != nil {
+		return "", fmt.Errorf("load durable generations for run %s: %w", runID, err)
+	}
+	latestGeneration := -1
+	latestInstanceID := ""
+	seen := make(map[int]durableGoalGenerationFact, len(events))
+	for _, event := range events {
+		fact, err := decodeDurableGoalGenerationFact(runID, event)
+		if err != nil {
+			return "", err
+		}
+		if prior, ok := seen[fact.generation]; ok && prior != fact {
+			return "", fmt.Errorf("durable generation %d for run %s has conflicting ledger facts", fact.generation, runID)
+		}
+		seen[fact.generation] = fact
+		if !fact.incomplete || fact.failed {
+			continue
+		}
+		if fact.generation > latestGeneration {
+			latestGeneration = fact.generation
+			latestInstanceID = fact.instanceID
+		}
+	}
+	return latestInstanceID, nil
+}
+
+type durableGoalGenerationFact struct {
+	instanceID string
+	generation int
+	incomplete bool
+	failed     bool
+}
+
+func decodeDurableGoalGenerationFact(runID string, event runledger.Event) (durableGoalGenerationFact, error) {
+	payload := event.Payload
+	payloadRunID, ok := payload["run_id"].(string)
+	if !ok || payloadRunID != runID {
+		return durableGoalGenerationFact{}, fmt.Errorf("durable generation event %s has invalid run_id", event.ID)
+	}
+	instanceID, ok := payload["workflow_instance_id"].(string)
+	if !ok || strings.TrimSpace(instanceID) == "" {
+		return durableGoalGenerationFact{}, fmt.Errorf("durable generation event %s has invalid workflow_instance_id", event.ID)
+	}
+	parsedGeneration, err := durableWorkflowGeneration(runID, instanceID)
+	if err != nil {
+		return durableGoalGenerationFact{}, err
+	}
+	generationValue, ok := payload["generation"].(float64)
+	if !ok || generationValue != float64(parsedGeneration) {
+		return durableGoalGenerationFact{}, fmt.Errorf("durable generation event %s has invalid generation", event.ID)
+	}
+	incomplete, ok := payload["incomplete"].(bool)
+	if !ok {
+		return durableGoalGenerationFact{}, fmt.Errorf("durable generation event %s has invalid incomplete flag", event.ID)
+	}
+	failed, ok := payload["failure"].(bool)
+	if !ok {
+		return durableGoalGenerationFact{}, fmt.Errorf("durable generation event %s has invalid failure flag", event.ID)
+	}
+	return durableGoalGenerationFact{
+		instanceID: instanceID,
+		generation: parsedGeneration,
+		incomplete: incomplete,
+		failed:     failed,
+	}, nil
+}
+
+func durableWorkflowGeneration(runID, instanceID string) (int, error) {
+	root := "goal-" + runID
+	if instanceID == root {
+		return 0, nil
+	}
+	prefix := root + "::resume::"
+	if !strings.HasPrefix(instanceID, prefix) {
+		return 0, fmt.Errorf("durable workflow %s does not belong to run %s", instanceID, runID)
+	}
+	raw := strings.TrimPrefix(instanceID, prefix)
+	generation, err := strconv.Atoi(raw)
+	if err != nil || generation <= 0 || strconv.Itoa(generation) != raw {
+		return 0, fmt.Errorf("durable workflow %s has an invalid resume generation", instanceID)
+	}
+	return generation, nil
+}
+
+func newDurableGoalRunners(loop *goalloop.Loop, runID, workDir string, goal goalloop.Goal, specs map[string]goalloop.TaskSpec) (*goalrunner.Runner, *goalrunner.Resolver, error) {
+	local, err := goalrunner.New(loop, runID, workDir, goal, specs)
+	if err != nil {
+		return nil, nil, err
+	}
+	worker := goalrunner.NewResolver(func(ctx context.Context, requestedRunID string) (*goalrunner.Runner, error) {
+		requestedGoal, requestedSpecs, err := loop.LoadGoal(ctx, requestedRunID)
+		if err != nil {
+			return nil, err
+		}
+		return goalrunner.New(loop, requestedRunID, workDir, requestedGoal, requestedSpecs)
+	})
+	return local, worker, nil
+}
+
+func goalFinalizationForStatus(runID, workspaceRoot, instanceID string, status durability.GoalStatus) durability.GoalFinalization {
+	return durability.GoalFinalization{
+		RunID:              runID,
+		WorkspaceRoot:      workspaceRoot,
+		WorkflowInstanceID: instanceID,
+		Incomplete:         status.Result.Status == durability.GoalResultIncomplete,
+		Failure:            durableGoalFailure(status),
+	}
+}
+
+func durableGoalFailure(status durability.GoalStatus) string {
+	if failure := strings.TrimSpace(status.Failure); failure != "" {
+		return failure
+	}
+	runtimeStatus := strings.ToUpper(strings.TrimSpace(status.RuntimeStatus))
+	switch runtimeStatus {
+	case "FAILED", "CANCELED", "TERMINATED":
+		return "durable workflow ended with status " + strings.ToLower(runtimeStatus)
+	default:
+		return ""
+	}
 }
 
 // runGoalReport prints the goal's morning report (design 7.3): the
@@ -555,6 +731,10 @@ func runGoalStart(args []string) error {
 		return errors.New("usage: buckley goal start [flags] \"<statement>\"")
 	}
 	statement := strings.TrimSpace(strings.Join(fs.Args(), " "))
+	workspaceRoot, err := os.Getwd()
+	if err != nil {
+		return err
+	}
 
 	loop, cleanup, err := newGoalLoopWithTasks(tasks)
 	if err != nil {
@@ -569,6 +749,7 @@ func runGoalStart(args []string) error {
 		BudgetUSD:          *budget,
 		Posture:            *posture,
 		ApprovalMode:       *approval,
+		WorkspaceRoot:      workspaceRoot,
 	})
 	if err != nil {
 		return err

@@ -2,8 +2,7 @@ import { defineConfig } from 'vitepress'
 
 export default defineConfig({
   title: 'Buckley',
-  description: 'The AI development assistant that doesn\'t waste your time',
-  ignoreDeadLinks: true,
+  description: 'Tool-first AI agent harness for serious repository work',
 
   head: [
     ['link', { rel: 'icon', type: 'image/png', href: '/favicon.png' }],
@@ -17,7 +16,7 @@ export default defineConfig({
 
     nav: [
       { text: 'Docs', link: '/' },
-      { text: 'Blog', link: '/blog/' },
+      { text: 'Blog', link: '/blog/2026-01-04-introducing-buckley' },
       { text: 'GitHub', link: 'https://github.com/odvcencio/buckley' }
     ],
 
@@ -49,7 +48,7 @@ export default defineConfig({
         {
           text: 'Blog',
           items: [
-            { text: 'All Posts', link: '/blog/' },
+            { text: 'Introducing Buckley', link: '/blog/2026-01-04-introducing-buckley' },
           ]
         }
       ]

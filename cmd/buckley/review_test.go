@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -9,9 +10,63 @@ import (
 	"m31labs.dev/buckley/pkg/model"
 	"m31labs.dev/buckley/pkg/oneshot"
 	"m31labs.dev/buckley/pkg/oneshot/commands"
+	"m31labs.dev/buckley/pkg/storage"
 	"m31labs.dev/buckley/pkg/terminal"
 	"m31labs.dev/buckley/pkg/transparency"
 )
+
+func expectExactCriticDependencyInitialization(t *testing.T, expected string) error {
+	t.Helper()
+
+	previousInit := initReviewDependenciesFn
+	previousModelOverride := modelOverrideFlag
+	modelOverrideFlag = ""
+	t.Cleanup(func() {
+		initReviewDependenciesFn = previousInit
+		modelOverrideFlag = previousModelOverride
+	})
+
+	sentinel := errors.New("stop after critic dependency assertion")
+	initReviewDependenciesFn = func(criticModel string) (*config.Config, *model.Manager, *storage.Store, error) {
+		if criticModel != expected {
+			t.Fatalf("critic dependency override = %q, want %q", criticModel, expected)
+		}
+
+		cfg := config.DefaultConfig()
+		cfg.Providers.OpenRouter.Enabled = false
+		cfg.Providers.OpenRouter.APIKey = ""
+		normalized, _ := config.SplitReasoningSuffix(expected)
+		cfg.Models.FallbackChains[normalized] = []string{"openrouter/fallback"}
+
+		applyReviewCriticModelOverride(cfg, criticModel)
+		if cfg.Buckbot.CriticModel != expected {
+			t.Fatalf("configured critic = %q, want %q", cfg.Buckbot.CriticModel, expected)
+		}
+		if !cfg.Providers.Codex.Enabled {
+			t.Fatal("explicit Codex critic did not enable the native provider")
+		}
+		if _, ok := cfg.Models.FallbackChains[normalized]; ok {
+			t.Fatalf("explicit critic %q retained a fallback chain", normalized)
+		}
+
+		mgr, err := model.NewManager(cfg)
+		if err != nil {
+			t.Fatalf("model.NewManager() error = %v", err)
+		}
+		if got := mgr.ProviderIDForModel(normalized); got != "codex" {
+			t.Fatalf("critic provider = %q, want native codex", got)
+		}
+		info, err := mgr.GetModelInfo(normalized)
+		if err != nil {
+			t.Fatalf("exact critic model was not registered: %v", err)
+		}
+		if info.ID != normalized {
+			t.Fatalf("registered critic = %q, want %q", info.ID, normalized)
+		}
+		return nil, nil, nil, sentinel
+	}
+	return sentinel
+}
 
 func TestParseReviewCommandOptions(t *testing.T) {
 	opts, err := parseReviewCommandOptions([]string{
@@ -76,6 +131,148 @@ func TestParseReviewCommandOptions(t *testing.T) {
 		t.Fatalf("budget controls = $%.2f/%d/%d/%d/%d, want $0.20/4/17/64000/1",
 			opts.budgetUSD, opts.maxTurns, opts.maxToolCalls, opts.maxDiff, opts.maxRetries)
 	}
+}
+
+func TestRunReviewCommandInitializesExactNativeCriticBeforeProviders(t *testing.T) {
+	const critic = "codex/gpt-5.6-sol-xhigh"
+	sentinel := expectExactCriticDependencyInitialization(t, critic)
+
+	err := runReviewCommand([]string{"--critic-model", critic, "--no-interactive"})
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("runReviewCommand() error = %v, want %v", err, sentinel)
+	}
+}
+
+func TestApplyReviewCriticModelOverrideActivatesConfiguredNativeProvider(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Buckbot.CriticModel = "codex/gpt-5.6-sol-xhigh"
+	cfg.Providers.Codex.Enabled = false
+	cfg.Models.DefaultProvider = "openrouter"
+	cfg.Models.Reasoning = "low"
+	primaryReview := cfg.Models.Review
+	primaryExecution := cfg.Models.Execution
+
+	applyReviewCriticModelOverride(cfg, "")
+
+	if !cfg.Providers.Codex.Enabled {
+		t.Fatal("configured Codex critic did not enable the native provider")
+	}
+	if cfg.Models.DefaultProvider != "openrouter" || cfg.Models.Review != primaryReview || cfg.Models.Execution != primaryExecution {
+		t.Fatalf("critic changed primary routing: provider=%q review=%q execution=%q", cfg.Models.DefaultProvider, cfg.Models.Review, cfg.Models.Execution)
+	}
+	if cfg.Models.Reasoning != "low" {
+		t.Fatalf("critic reasoning suffix changed primary reasoning to %q", cfg.Models.Reasoning)
+	}
+	if cfg.Buckbot.CriticModel != "codex/gpt-5.6-sol-xhigh" {
+		t.Fatalf("critic model = %q, want suffix preserved", cfg.Buckbot.CriticModel)
+	}
+
+	mgr, err := model.NewManager(cfg)
+	if err != nil {
+		t.Fatalf("model.NewManager() error = %v", err)
+	}
+	if got := mgr.ProviderIDForModel("codex/gpt-5.6-sol"); got != "codex" {
+		t.Fatalf("configured critic provider = %q, want native codex", got)
+	}
+	if _, err := mgr.GetModelInfo("codex/gpt-5.6-sol"); err != nil {
+		t.Fatalf("configured critic model was not registered: %v", err)
+	}
+}
+
+func TestResolveReviewCriticRuntimeSeparatesExplicitReasoningFromEnvPrimary(t *testing.T) {
+	previous := modelOverrideFlag
+	modelOverrideFlag = ""
+	t.Cleanup(func() { modelOverrideFlag = previous })
+	t.Setenv("BUCKLEY_MODEL_REVIEW", "qwen/qwen3.7-plus-medium")
+
+	tests := []struct {
+		name         string
+		critic       string
+		wantModel    string
+		wantEffort   string
+		wantSeparate bool
+	}{
+		{
+			name:         "same model distinct explicit effort",
+			critic:       "qwen/qwen3.7-plus-xhigh",
+			wantModel:    "qwen/qwen3.7-plus",
+			wantEffort:   "xhigh",
+			wantSeparate: true,
+		},
+		{
+			name:         "different model explicit effort",
+			critic:       "openai/gpt-5.6-luna-pro-xhigh",
+			wantModel:    "openai/gpt-5.6-luna-pro",
+			wantEffort:   "xhigh",
+			wantSeparate: true,
+		},
+		{
+			name:         "same model same explicit effort",
+			critic:       "qwen/qwen3.7-plus-medium",
+			wantModel:    "qwen/qwen3.7-plus",
+			wantEffort:   "medium",
+			wantSeparate: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := config.DefaultConfig()
+			cfg.Buckbot.CriticModel = tt.critic
+			primaryModel := resolveReviewModel(cfg)
+			primaryReasoning := resolveReviewReasoningEffort(cfg, reviewReasoningChecker{supported: true}, primaryModel, reviewReasoningOverride())
+
+			criticModel, criticReasoning, dedicated := resolveReviewCriticRuntime(
+				cfg,
+				reviewReasoningChecker{supported: true},
+				primaryModel,
+				primaryReasoning,
+			)
+			if primaryModel != "qwen/qwen3.7-plus" || primaryReasoning != "medium" {
+				t.Fatalf("primary selection = %q/%q, want qwen/qwen3.7-plus/medium", primaryModel, primaryReasoning)
+			}
+			if criticModel != tt.wantModel || criticReasoning != tt.wantEffort || dedicated != tt.wantSeparate {
+				t.Fatalf("critic selection = %q/%q separate=%t, want %q/%q separate=%t",
+					criticModel, criticReasoning, dedicated, tt.wantModel, tt.wantEffort, tt.wantSeparate)
+			}
+		})
+	}
+}
+
+func TestResolveReviewCriticRuntimeSeparatesPinnedCriticFromAdaptivePrimary(t *testing.T) {
+	previous := modelOverrideFlag
+	t.Cleanup(func() { modelOverrideFlag = previous })
+	t.Setenv("BUCKLEY_MODEL_REVIEW", "")
+
+	t.Run("adaptive model may move away from baseline", func(t *testing.T) {
+		modelOverrideFlag = "codex/auto"
+		cfg := config.DefaultConfig()
+		cfg.Buckbot.CriticModel = codexReviewModelStandard
+		primaryModel := resolveReviewModel(cfg)
+		primaryReasoning := resolveReviewReasoningEffort(cfg, reviewReasoningChecker{supported: true}, primaryModel, reviewReasoningOverride())
+
+		criticModel, _, dedicated := resolveReviewCriticRuntime(cfg, reviewReasoningChecker{supported: true}, primaryModel, primaryReasoning)
+		if primaryModel != codexReviewModelStandard || criticModel != codexReviewModelStandard || !dedicated {
+			t.Fatalf("adaptive model selection = primary:%q critic:%q separate:%t, want pinned Terra critic",
+				primaryModel, criticModel, dedicated)
+		}
+	})
+
+	t.Run("adaptive reasoning may move away from initial effort", func(t *testing.T) {
+		modelOverrideFlag = ""
+		cfg := config.DefaultConfig()
+		cfg.Buckbot.Model = "qwen/qwen3.7-plus"
+		cfg.Buckbot.CriticModel = "qwen/qwen3.7-plus-xhigh"
+		cfg.Buckbot.Reasoning = "auto"
+		primaryModel := resolveReviewModel(cfg)
+		primaryReasoning := resolveReviewReasoningEffort(cfg, reviewReasoningChecker{supported: true}, primaryModel, reviewReasoningOverride())
+
+		criticModel, criticReasoning, dedicated := resolveReviewCriticRuntime(cfg, reviewReasoningChecker{supported: true}, primaryModel, primaryReasoning)
+		if criticModel != primaryModel || criticReasoning != "xhigh" || !dedicated {
+			t.Fatalf("adaptive reasoning selection = primary:%q/%q critic:%q/%q separate:%t, want dedicated xhigh critic",
+				primaryModel, primaryReasoning, criticModel, criticReasoning, dedicated)
+		}
+	})
 }
 
 func TestReviewCommandsReserveEnoughTimeByDefault(t *testing.T) {
@@ -296,8 +493,15 @@ func TestReviewResultFromAgentExposesPrimaryAndCriticAttempts(t *testing.T) {
 		PrimaryAttempts: 1,
 		CriticAttempts:  2,
 		HostEvidence: []oneshot.AgentToolCall{
-			{Name: "run_verification", Success: true},
+			{Name: "run_verification", Success: true, Data: map[string]any{"status": "PASS"}},
 			{Name: "run_verification", Success: false},
+			{
+				Name: "run_verification", Success: true,
+				Data: map[string]any{
+					"kind": "test", "language": "node", "status": "NOT_APPLICABLE",
+					"evidence": "NO_TEST_GATE", "no_test_script": true,
+				},
+			},
 		},
 	}, nil)
 
@@ -305,8 +509,48 @@ func TestReviewResultFromAgentExposesPrimaryAndCriticAttempts(t *testing.T) {
 		t.Fatalf("attempt counts = total:%d primary:%d critic:%d, want 3/1/2",
 			got.attempts, got.primary, got.criticAttempts)
 	}
-	if got.hostEvidence != 2 || got.hostPasses != 1 {
-		t.Fatalf("host evidence = %d total/%d passed, want 2/1", got.hostEvidence, got.hostPasses)
+	if got.hostEvidence != 3 || got.hostPasses != 1 || got.hostNotApplicable != 1 {
+		t.Fatalf("host evidence = %d total/%d passed/%d not applicable, want 3/1/1",
+			got.hostEvidence, got.hostPasses, got.hostNotApplicable)
+	}
+	if summary := reviewHostEvidenceSummary(got); summary != "Harness verification: 1 passed · 1 not applicable · 1 failed or unavailable · 3 total" {
+		t.Fatalf("host evidence summary = %q", summary)
+	}
+}
+
+func TestReviewEvidencePresentationStatusKeepsNoTestGateDistinctFromPass(t *testing.T) {
+	typed := oneshot.AgentToolCall{
+		Name: "run_verification", Success: true,
+		Data: map[string]any{
+			"kind": "test", "language": "node", "status": "NOT_APPLICABLE",
+			"evidence": "NO_TEST_GATE", "no_test_script": true,
+		},
+	}
+	if got := reviewEvidencePresentationStatus(typed); got != "NOT_APPLICABLE" {
+		t.Fatalf("typed no-test gate status = %q", got)
+	}
+	if got := reviewEvidencePresentationStatus(oneshot.AgentToolCall{
+		Name: "read_file", Success: true, Data: map[string]any{"status": "completed"},
+	}); got != "PASS" {
+		t.Fatalf("ordinary successful tool status = %q", got)
+	}
+
+	for name, mutate := range map[string]func(*oneshot.AgentToolCall){
+		"missing policy evidence": func(call *oneshot.AgentToolCall) { call.Data["evidence"] = "CONFIRMED_PASS" },
+		"wrong language":          func(call *oneshot.AgentToolCall) { call.Data["language"] = "go" },
+		"unsuccessful":            func(call *oneshot.AgentToolCall) { call.Success = false },
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidate := typed
+			candidate.Data = make(map[string]any, len(typed.Data))
+			for key, value := range typed.Data {
+				candidate.Data[key] = value
+			}
+			mutate(&candidate)
+			if got := reviewEvidencePresentationStatus(candidate); got != "FAILED_OR_UNAVAILABLE" {
+				t.Fatalf("malformed no-test gate status = %q", got)
+			}
+		})
 	}
 }
 
@@ -346,9 +590,20 @@ func TestReviewResultFromAgentPreservesIncompleteState(t *testing.T) {
 	exitCode := 0
 	got := reviewResultFromAgent(&oneshot.RunResult{
 		Value: &commands.ReviewAgentResult{Review: "partial review"},
-		ToolEvidence: []oneshot.AgentToolCall{{
-			ID: "host-evidence-1", Name: "run_verification", Arguments: `{"kind":"test"}`, Result: "status PASS", Success: true,
-		}},
+		ToolEvidence: []oneshot.AgentToolCall{
+			{
+				ID: "host-evidence-1", Name: "run_verification", Arguments: `{"kind":"test","language":"go"}`, Result: "status PASS", Success: true,
+				Data: map[string]any{"status": "PASS"},
+			},
+			{
+				ID: "host-evidence-2", Name: "run_verification", Arguments: `{"kind":"test","language":"node","path":"docs"}`,
+				Result: "status NOT_APPLICABLE evidence NO_TEST_GATE", Success: true,
+				Data: map[string]any{
+					"kind": "test", "language": "node", "status": "NOT_APPLICABLE",
+					"evidence": "NO_TEST_GATE", "no_test_script": true,
+				},
+			},
+		},
 		CommandEvidence: []model.CommandExecutionEvidence{{
 			Command: "go test ./pkg/oneshot", Status: "completed", ExitCode: &exitCode, AggregatedOutput: "ok pkg/oneshot",
 		}},
@@ -371,6 +626,7 @@ func TestReviewResultFromAgentPreservesIncompleteState(t *testing.T) {
 		"partial review",
 		"Preserved execution evidence",
 		"host-evidence-1",
+		"`host-evidence-2` `run_verification`: NOT_APPLICABLE",
 		"go test ./pkg/oneshot",
 		"Review attempt diagnostics",
 		"Finish reason: `stop`",
@@ -387,5 +643,8 @@ func TestReviewResultFromAgentPreservesIncompleteState(t *testing.T) {
 	}
 	if got.parsed != nil {
 		t.Fatal("incomplete review must not retain a parsed merge verdict")
+	}
+	if strings.Contains(got.reviewText, "`host-evidence-2` `run_verification`: PASS") {
+		t.Fatal("incomplete salvage rendered typed NO_TEST_GATE as PASS")
 	}
 }

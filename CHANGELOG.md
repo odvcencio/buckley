@@ -7,6 +7,107 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-08-13
+
+### Added
+- A shared conclusive-turn contract for production agent loops. When a safety
+  guard, explicit budget, or empty provider response stops tool work after
+  evidence exists, Buckley reserves a tools-disabled synthesis request when
+  the declared request and cost ceilings still permit it; otherwise the turn
+  exits explicitly incomplete without overshooting. Failed synthesis is never
+  projected as a successful but disposable answer.
+- Versioned child execution envelopes carrying run/session/task lineage and
+  optional model-request, tool-call, elapsed-time, cost, and persona selections
+  through local process boundaries.
+- Audited read-only `exec_program` access for API-model Buckbot reviews over
+  immutable review snapshots when bubblewrap is available. Program source,
+  capability reads, and output are retained as review evidence.
+- A shared, session-scoped agent tree for GoSX Mission Control, including
+  parent/child relationships, persona, model, task, and retained terminal
+  status.
+- Dapr goal workflow v4 with canonical workspace identity, run-bound workers,
+  version-compatible legacy activities, and idempotent terminal run
+  reconciliation.
+- Host-owned review evidence collection that preserves authoritative build and
+  test results across validation and repair passes.
+- Empirical model profiling from completed experiment runs, append-only child
+  mailboxes for live parent commands, and policy-defined tool ordering for
+  evidence-efficient protocols.
+
+### Changed
+- A zero-valued child budget no longer inherits the old 32-round, 96-tool, or
+  300-second child ceilings. Repetition and cycle detection plus operator-wide
+  emergency fuses remain active. Explicit request, tool, and time ceilings are
+  all-in. Cost-bounded requests are admitted only when a conservative priced
+  input/output envelope fits; a provider-reported accounting breach is retained
+  but its answer and tool calls are rejected. Policy maxima also bound omitted
+  values when governance requires them.
+- Headless execution has one canonical approval owner. The legacy Mission
+  middleware no longer creates a second client-invisible gate after a user has
+  approved a tool call.
+- `find_files` now evaluates repository-relative recursive globs and bounded
+  brace alternatives such as `src/**/*.ts` and `**/*.{go,rs}` instead of
+  matching every pattern against the basename only. File and text discovery
+  validate their search roots, include tracked hidden paths such as `.github`
+  while excluding `.git`, and expose continuation offsets. Each result retains
+  only its requested page rather than a repository-sized hidden payload.
+- OpenRouter credit-preauthorization errors that state an affordable output
+  allowance are retried with a smaller completion envelope while preserving
+  the exact requested model and routing. Generic payment failures remain
+  final, and streams are never replayed after their first event.
+- Review completion and reasoning budgets now survive validation and repair
+  retries, while provider-advertised output ceilings are enforced without
+  silently changing an exact model selection.
+- Explicit command, environment, critic, persona, and child-contract model pins
+  are applied before provider initialization and disable configured fallback
+  chains for those IDs, so evaluation commands and subagents cannot silently
+  substitute a different OpenRouter model. Dedicated review critics also retain
+  their own reasoning effort, including when they share the primary model ID.
+
+### Fixed
+- Parallel tool batches are trimmed before dispatch to the remaining tool
+  allowance, so an explicit call ceiling cannot be overshot by the final
+  batch.
+- Tool-capable models that emit a sole XML-style invocation while tools are
+  unavailable receive one explicit corrective continuation; a repeated
+  pseudo-call exits incomplete instead of being accepted as final prose.
+- Buckbot preserves valid review prose while deterministically supplying an
+  omitted Summary heading, so inexpensive models do not lose an otherwise
+  evidence-grounded review to a purely structural omission.
+- ACP, headless, goal, one-shot, builder, and RLM loops no longer discard
+  gathered evidence when a harness ceiling fires or report an incomplete
+  child process as completed.
+- A partially completed tool batch now journals every returned prefix receipt
+  before surfacing cancellation or dispatch failure. Durable retry replays that
+  evidence and executes only the unresolved suffix.
+- Direct subagent controls enforce session lineage before reading or mutating
+  a run, including atomic validation of multi-run selectors.
+- Child stdout and stderr stream into a private 32 MiB disk spool while only a
+  256 KiB head/tail preview stays in memory. The complete retained transcript
+  is pinned as evidence before cleanup; reaching the disk ceiling is an
+  explicit incomplete failure with byte counts rather than silent truncation.
+- Durable workers reject foreign run/workspace activity, old workflows can
+  still attach through their versioned adapter, and report, replay, and run
+  lifecycle views agree on terminal status.
+- Retried durable turns deduplicate spend metrics and logical audit events;
+  Dapr fan-out waits for every scheduled sibling, and deferred work remains
+  resumable rather than being sealed as a terminal success.
+- Bounded-yield Dapr exits now record immutable, idempotent generation facts
+  and resume through deterministic `goal-<run>::resume::<n>` instances. A
+  ledger-captured generation fence makes concurrent and retried schedulers
+  converge on exactly one successor while terminal runs stay observation-only.
+- Shared-database run-ledger appends serialize local writers and retry complete
+  transactions through bounded SQLite contention, preserving event ordering,
+  idempotency, and responsive cancellation instead of leaking `SQLITE_BUSY`.
+- GoSX Mission Control keeps the nested agent tree reachable at desktop, tablet,
+  and phone widths through native disclosures, with distinct running, starting,
+  and queued status colors instead of hiding live work on narrow screens.
+
+### Performance
+- The recursive brace-glob benchmark inventories a 1,000-file tree in
+  low-single-digit milliseconds on the release test host, keeping exhaustive
+  review discovery cheap enough to use by default.
+
 ## [0.6.0] - 2026-08-11
 
 ### Added
@@ -328,7 +429,8 @@ here to 1.1.0.
 - Telemetry is local-only by default.
 - Plugin discovery limited to local paths only.
 
-[Unreleased]: https://github.com/odvcencio/buckley/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/odvcencio/buckley/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/odvcencio/buckley/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/odvcencio/buckley/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/odvcencio/buckley/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/odvcencio/buckley/compare/v2.3.0...v0.4.0

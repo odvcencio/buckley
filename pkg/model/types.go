@@ -125,6 +125,13 @@ type PromptCache struct {
 	TailMessages   int
 }
 
+// StreamOptions controls provider streaming metadata. It is populated only
+// for providers that explicitly support the option; leaving it nil preserves
+// the ordinary streaming wire shape for every other adapter.
+type StreamOptions struct {
+	IncludeUsage bool `json:"include_usage"`
+}
+
 // ChatRequest represents a chat completion request to an LLM provider.
 type ChatRequest struct {
 	Model                string            `json:"model"`
@@ -134,6 +141,7 @@ type ChatRequest struct {
 	MaxTokens            int               `json:"max_tokens,omitempty"`
 	MaxCompletionTokens  int               `json:"max_completion_tokens,omitempty"`
 	Stream               bool              `json:"stream"`
+	StreamOptions        *StreamOptions    `json:"stream_options,omitempty"`
 	Tools                []map[string]any  `json:"tools,omitempty"`               // OpenAI function definitions
 	ToolChoice           string            `json:"tool_choice,omitempty"`         // "auto", "none", or specific function
 	ParallelToolCalls    *bool             `json:"parallel_tool_calls,omitempty"` // OpenRouter/OpenAI parallel tool calls
@@ -972,6 +980,10 @@ func estimateFixedRequestBytes(req ChatRequest) int {
 
 	n += jsonKeyValueBytes("stream", jsonBoolBytes(req.Stream))
 	fields++
+	if req.StreamOptions != nil {
+		n += jsonKeyValueBytes("stream_options", estimateStreamOptionsBytes(*req.StreamOptions))
+		fields++
+	}
 
 	// Tools is intentionally skipped: EstimateRequestTokens computes it via
 	// estimateToolsBytes, same as the marshal-based split.
@@ -1043,6 +1055,10 @@ func estimateFixedRequestBytes(req ChatRequest) int {
 	return n
 }
 
+func estimateStreamOptionsBytes(options StreamOptions) int {
+	return 2 + jsonKeyValueBytes("include_usage", jsonBoolBytes(options.IncludeUsage))
+}
+
 // ModelCatalog represents the list of available models
 type ModelCatalog struct {
 	Data []ModelInfo `json:"data"`
@@ -1060,6 +1076,10 @@ type ModelInfo struct {
 	// can safely clamp large synthesis requests without hard-coding model IDs.
 	MaxCompletionTokens int          `json:"max_completion_tokens,omitempty"`
 	Pricing             ModelPricing `json:"pricing"`
+	// PricingKnown records that a provider catalog explicitly supplied both
+	// prompt and completion prices. It distinguishes an authoritative free
+	// model from a zero-value ModelPricing whose prices are simply unavailable.
+	PricingKnown        bool         `json:"-"`
 	Created             int64        `json:"created"` // Unix timestamp
 	Architecture        Architecture `json:"architecture,omitempty"`
 	SupportedParameters []string     `json:"supported_parameters,omitempty"`
@@ -1077,15 +1097,37 @@ func (m *ModelInfo) UnmarshalJSON(data []byte) error {
 		TopProvider struct {
 			MaxCompletionTokens int `json:"max_completion_tokens"`
 		} `json:"top_provider"`
+		Pricing map[string]json.RawMessage `json:"pricing"`
 	}
 	if err := json.Unmarshal(data, &capabilities); err != nil {
 		return err
 	}
 	*m = ModelInfo(base)
+	m.PricingKnown = explicitPricingValue(capabilities.Pricing["prompt"]) &&
+		explicitPricingValue(capabilities.Pricing["completion"])
 	if m.MaxCompletionTokens <= 0 {
 		m.MaxCompletionTokens = capabilities.TopProvider.MaxCompletionTokens
 	}
 	return nil
+}
+
+func explicitPricingValue(raw json.RawMessage) bool {
+	if len(raw) == 0 {
+		return false
+	}
+	var value any
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return false
+	}
+	switch value := value.(type) {
+	case float64:
+		return true
+	case string:
+		_, err := strconv.ParseFloat(value, 64)
+		return err == nil
+	default:
+		return false
+	}
 }
 
 // Architecture contains model architecture details

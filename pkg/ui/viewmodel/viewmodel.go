@@ -30,6 +30,7 @@ type SessionState struct {
 	ActiveToolCalls []ToolCall  `json:"activeToolCalls,omitempty"`
 	RecentFiles     []FileTouch `json:"recentFiles,omitempty"`
 	ActiveTouches   []CodeTouch `json:"activeTouches,omitempty"`
+	AgentRuns       []AgentRun  `json:"agentRuns,omitempty"`
 }
 
 // SessionStatus summarizes high-level state and whether we are waiting on the user.
@@ -138,6 +139,22 @@ type CodeTouch struct {
 	Ranges    []LineRange `json:"ranges,omitempty"`
 	StartedAt time.Time   `json:"startedAt"`
 	ExpiresAt time.Time   `json:"expiresAt,omitempty"`
+}
+
+// AgentRun is a stable telemetry-derived agent node. ParentID refers to
+// another agent run when one is known, otherwise to ParentSessionID.
+type AgentRun struct {
+	ID              string     `json:"id"`
+	ParentID        string     `json:"parentId,omitempty"`
+	ParentSessionID string     `json:"parentSessionId,omitempty"`
+	Agent           string     `json:"agent,omitempty"`
+	Persona         string     `json:"persona,omitempty"`
+	Model           string     `json:"model,omitempty"`
+	Status          string     `json:"status"`
+	Task            string     `json:"task,omitempty"`
+	StartedAt       time.Time  `json:"startedAt,omitempty"`
+	UpdatedAt       time.Time  `json:"updatedAt,omitempty"`
+	Children        []AgentRun `json:"children,omitempty"`
 }
 
 // LineRange defines a 1-based inclusive line span.

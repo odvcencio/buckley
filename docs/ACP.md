@@ -1,144 +1,75 @@
 # Agent Client Protocol (ACP)
 
-**Purpose**: Zed ACP integration for editor agents, with an optional LSP bridge for editors that only speak LSP.
+Buckley exposes its tool-first agent runtime to editors through ACP over
+JSON-RPC stdio. A separate LSP bridge can connect an LSP-only editor to
+Buckley's optional gRPC coordinator.
 
----
+## ACP over stdio
 
-## What ACP Does
+Configure an ACP-capable editor to launch:
 
-ACP lets editors talk to Buckley directly for agent sessions, tool calls, and editor context without switching to a terminal. Buckley supports ACP over stdio via `buckley acp` and can expose an ACP gRPC server for editor bridges. Editors that only speak LSP can use `buckley lsp` as an adapter.
-
-**Not in scope**: Multi-agent orchestration, agent swarms, P2P mesh. That's a separate system.
-
----
-
-## Architecture
-
-```
-┌──────────────┐  ACP (stdio/gRPC)  ┌──────────────┐
-│              │ ←───────────────→ │              │
-│  Editor      │                   │  Buckley     │
-│  (Zed ACP)   │                   │  ACP Server  │
-└──────────────┘                   └──────────────┘
+```bash
+buckley acp
 ```
 
-The optional LSP bridge adapts ACP to LSP and:
-1. Speaks LSP over stdio to the editor
-2. Translates requests into ACP calls
-3. Streams responses back to the editor
+Use `--workdir <path>` to select the repository and `--log <path>` for a
+private diagnostic log. The stdio agent supports:
 
----
+- session creation, prompting, cancellation, and per-session conversation state;
+- streamed answer and reasoning chunks, usage updates, and tool-call status;
+- model selection through ACP modes and session configuration options;
+- skill discovery and activation through the editor's command palette;
+- embedded text resources and client-provided stdio MCP servers;
+- client permission requests for governed tool calls, with Buckley's local risk
+  policy as a bounded fallback when the client cannot answer.
 
-## LSP Bridge Extensions
+Buckley advertises only capabilities it implements. Durable session loading,
+image/audio prompts, and HTTP/SSE MCP servers are not advertised by the stdio
+agent.
 
-These `$/buckley/*` methods are specific to the LSP bridge, not the ACP protocol itself.
+## Optional gRPC coordinator
 
-Standard LSP plus custom methods in the `$/buckley/*` namespace:
-
-### Phase 1: Text Q&A
-
-```typescript
-// Request: buckley/ask
-interface AskRequest {
-  question: string;
-  context?: {
-    activeFile?: string;
-    selection?: Range;
-    openFiles?: string[];
-  };
-}
-
-// Response
-interface AskResponse {
-  answer: string;
-  references?: CodeReference[];
-}
-```
-
-Ask questions about code. Buckley reads context from open files.
-
-### Phase 2: Task Streaming
-
-```typescript
-// Request: buckley/executeTask
-interface ExecuteTaskRequest {
-  task: string;
-  context?: SessionContext;
-}
-
-// Notification: $/buckley/taskProgress
-interface TaskProgressNotification {
-  taskId: string;
-  status: "pending" | "in_progress" | "completed" | "failed";
-  progress?: number;
-  message?: string;
-  toolExecutions?: ToolExecution[];
-}
-```
-
-Execute multi-step tasks with real-time progress in the editor.
-
-### Phase 3: Tool Approvals
-
-```typescript
-// Request: buckley/approveTool
-interface ToolApprovalRequest {
-  tool: string;
-  parameters: Record<string, any>;
-  risk: "low" | "medium" | "high" | "destructive";
-}
-
-// Response
-interface ToolApprovalResponse {
-  approved: boolean;
-  remember?: boolean;  // Trust this tool going forward
-}
-```
-
-Editor prompts you before Buckley runs risky operations.
-
----
-
-## Configuration
+`buckley serve` starts the local coordinator automatically on
+`127.0.0.1:50051` when the HTTP server is bound to loopback and `acp.listen` is
+otherwise empty. Configure it explicitly when another process, such as the LSP
+bridge, needs a stable endpoint:
 
 ```yaml
 # ~/.buckley/config.yaml
 acp:
   listen: "127.0.0.1:50051"
   event_store: sqlite
-  allow_insecure_local: false
+  allow_insecure_local: true
 ```
 
----
+An insecure coordinator is accepted only on loopback. Non-loopback listeners
+require a server certificate, key, and client CA for mutual TLS. See the
+[configuration reference](./CONFIGURATION.md#acp) for the full settings.
 
-## Editor Setup
+## LSP bridge
 
-### Zed
+An LSP-only editor can launch:
 
-Install the Buckley extension (when available) and configure it to launch `buckley acp` (see `zed-settings.json`).
+```bash
+buckley lsp --coordinator 127.0.0.1:50051 --agent-id editor
+```
 
-### VS Code
+The bridge speaks LSP JSON-RPC over stdio and forwards its implemented custom
+`buckley/textQuery` request to the coordinator. The bridge package also exposes
+coordinator-backed streaming, inline-completion, edit, and editor-state APIs to
+integrations that call those APIs directly; the stdio command does not
+advertise unimplemented standard LSP capabilities.
 
-Install the Buckley extension if ACP support is available, or run the LSP bridge with `buckley lsp`.
+## Editor setup
 
-### Other Editors
-
-ACP-capable editors should launch `buckley acp` over stdio. LSP-only editors can point at `buckley lsp`.
-
----
-
-## Implementation Status
-
-| Phase | Feature | Status |
-|-------|---------|--------|
-| 1 | Text Q&A | 🚧 In progress |
-| 2 | Task streaming | 📋 Planned |
-| 3 | Tool approvals | 📋 Planned |
-| 4 | Deep integration | 📋 Future |
-
----
+- ACP-compatible editors should launch `buckley acp` directly.
+- LSP-only integrations should start `buckley serve` (or another configured
+  coordinator) and point `buckley lsp` at its gRPC address.
+- Keep ACP on stdio and coordinator traffic on loopback unless the configured
+  mutual-TLS boundary is required.
 
 ## Related
 
-- [Multi-Agent Orchestration](./ORCHESTRATION.md) - Agent swarms and coordination
-- [CLI Reference](./CLI.md) - Terminal interface
+- [CLI Reference](./CLI.md) - terminal commands and flags
+- [Configuration](./CONFIGURATION.md#acp) - ACP event store, listener, and TLS
+- [Mission Control](./MISSION_CONTROL.md) - local browser control and telemetry

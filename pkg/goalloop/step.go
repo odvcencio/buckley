@@ -168,7 +168,8 @@ func (l *Loop) TurnStep(ctx context.Context, req TurnStepRequest) (TurnStepRespo
 		Rounds:       outcome.Rounds,
 		ToolCalls:    outcome.ToolCalls,
 	}
-	goalSpent, err := l.recordTurnSpend(ctx, req.RunID, req.TaskID, req.Goal, outcome)
+	metricKey := fmt.Sprintf("turn:%s:%s:%d:%d", req.RunID, req.TaskID, req.Generation, req.TurnIndex)
+	goalSpent, err := l.recordTurnSpend(ctx, req.RunID, req.TaskID, req.Goal, outcome, metricKey)
 	if err != nil {
 		return TurnStepResponse{}, err
 	}
@@ -301,6 +302,15 @@ func (l *Loop) recordDurableTurn(ctx context.Context, req TurnStepRequest, resp 
 		return
 	}
 	_, _ = l.ledger.Append(ctx, runledger.Event{
+		ID: runledger.StableEventID(
+			runledger.EventDurableTurn,
+			req.RunID,
+			req.TaskID,
+			req.WorkflowInstanceID,
+			req.ActivityName,
+			fmt.Sprintf("%d", req.Generation),
+			fmt.Sprintf("%d", req.TurnIndex),
+		),
 		Type:      runledger.EventDurableTurn,
 		Timestamp: time.Now().UTC(),
 		SessionID: l.sessionID,

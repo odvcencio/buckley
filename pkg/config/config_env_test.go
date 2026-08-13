@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"math"
+	"testing"
+)
 
 // TestApplyEnvOverridesOneDirectionalToggles asserts BUCKLEY_DISABLE_TOON
 // and BUCKLEY_DISABLE_NETWORK_LOGS only ever turn their field off: a
@@ -105,6 +108,18 @@ func TestApplyEnvOverridesExperimentPositiveOnlyGuards(t *testing.T) {
 	}
 	if cfg.Experiment.MaxTokensPerRun != 12345 {
 		t.Errorf("expected max_tokens_per_run=12345 to apply, got %d", cfg.Experiment.MaxTokensPerRun)
+	}
+}
+
+func TestApplyEnvOverridesExperimentCostRejectsNonFinite(t *testing.T) {
+	for _, value := range []string{"NaN", "+Inf", "Inf", "-Inf"} {
+		cfg := DefaultConfig()
+		want := cfg.Experiment.MaxCostPerRun
+		t.Setenv("BUCKLEY_EXPERIMENT_MAX_COST_PER_RUN", value)
+		ApplyEnvOverridesForTest(cfg)
+		if cfg.Experiment.MaxCostPerRun != want || math.IsInf(cfg.Experiment.MaxCostPerRun, 0) || math.IsNaN(cfg.Experiment.MaxCostPerRun) {
+			t.Fatalf("env %q set max cost to %v, want %v", value, cfg.Experiment.MaxCostPerRun, want)
+		}
 	}
 }
 

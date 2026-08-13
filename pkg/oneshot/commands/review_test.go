@@ -44,7 +44,7 @@ func TestDefaultProjectContextOptions(t *testing.T) {
 }
 
 func TestReviewDefinitionsExposeOnlySnapshotReviewTools(t *testing.T) {
-	want := []string{"read_file", "find_files", "search_text", "run_verification"}
+	want := []string{"exec_program", "read_file", "find_files", "search_text", "run_verification"}
 	definitions := []struct {
 		name  string
 		tools []string
@@ -53,7 +53,7 @@ func TestReviewDefinitionsExposeOnlySnapshotReviewTools(t *testing.T) {
 		{name: "pull request", tools: (ReviewPRDef{}).AllowedTools()},
 	}
 	projectTools := (ReviewProjectDef{}).AllowedTools()
-	assert.Equal(t, []string{"read_file", "find_files", "search_text"}, projectTools)
+	assert.Equal(t, []string{"exec_program", "read_file", "find_files", "search_text"}, projectTools)
 	assert.NotContains(t, projectTools, "run_verification")
 	assert.Equal(t, 0, (ReviewProjectDef{}).MaxAgentIterations())
 
@@ -488,6 +488,14 @@ func TestApprovedAPIReviewRequiresSuccessfulVerificationToolEvidence(t *testing.
 
 	execution.ToolCalls = []oneshot.AgentToolCall{
 		{Name: "run_verification", Success: true, Data: map[string]any{
+			"kind": "test", "language": "go", "path": "pkg/oneshot/commands", "pattern": "", "status": "PASS", "exit_code": 0,
+			"no_test_files": true, "proves": []string{"build", "test"},
+		}},
+	}
+	assert.ErrorContains(t, validateReviewExecutionEvidence(result, execution, changedFiles), "test:pkg/oneshot/commands/review.go")
+
+	execution.ToolCalls = []oneshot.AgentToolCall{
+		{Name: "run_verification", Success: true, Data: map[string]any{
 			"kind": "build", "language": "go", "path": "pkg/oneshot/commands", "pattern": "", "status": "PASS", "exit_code": 0,
 		}},
 		{Name: "run_verification", Success: false, Data: map[string]any{
@@ -740,6 +748,88 @@ func TestReviewEvidencePlanIsDeterministicAndComplete(t *testing.T) {
 	}
 }
 
+func TestPlannedNodeEvidenceAcceptsOnlyBuildPlusTypedNoTestPolicy(t *testing.T) {
+	changedFiles := []string{"docs/.vitepress/config.ts"}
+	requests := reviewVerificationEvidenceRequests(changedFiles)
+	if len(requests) != 2 {
+		t.Fatalf("planned docs evidence = %#v, want build and test-policy probes", requests)
+	}
+	for index, kind := range []string{"build", "test"} {
+		if requests[index].Tool != "run_verification" || requests[index].Parameters["kind"] != kind ||
+			requests[index].Parameters["language"] != "node" || requests[index].Parameters["path"] != "docs/.vitepress" {
+			t.Fatalf("planned docs evidence %d = %#v", index, requests[index])
+		}
+	}
+
+	reviewText := completeReviewWithCoverage(
+		"- **File**: `docs/.vitepress/config.ts` — reviewed the changed Node configuration and package gate.\n" +
+			"- **Feedback disposition**: `NONE_SUPPLIED` — no prior feedback was supplied.\n" +
+			"- **Verification**: the package build passed and trusted NO_TEST_GATE evidence found no declared test script.",
+	)
+	reviewText = strings.Replace(reviewText, "- Tests: PASS", "- Tests: NOT_APPLICABLE — package.json declares no test script", 1)
+	definition := ReviewBranchDef{ChangedFiles: changedFiles}
+	parsedResult, err := definition.ParseResult(reviewText)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := parsedResult.(*ReviewAgentResult)
+	if result.Parsed.TestVerification != VerificationNotApplicable {
+		t.Fatalf("parsed test state = %q", result.Parsed.TestVerification)
+	}
+	if err := definition.ValidateResult(result); err != nil {
+		t.Fatalf("typed no-test review result rejected: %v", err)
+	}
+	build := oneshot.AgentToolCall{
+		ID: "host-evidence-1", Name: "run_verification", Success: true,
+		Data: map[string]any{
+			"kind": "build", "language": "node", "path": "docs", "pattern": "",
+			"command": "/usr/bin/npm", "argv": []string{"/usr/bin/npm", "--offline", "run", "build"},
+			"status": "PASS", "evidence": "CONFIRMED_PASS", "exit_code": 0, "proves": []string{"build"},
+		},
+	}
+	noTestGate := oneshot.AgentToolCall{
+		ID: "host-evidence-2", Name: "run_verification", Success: true,
+		Data: map[string]any{
+			"kind": "test", "language": "node", "path": "docs", "pattern": "",
+			"command": "", "argv": []string{}, "status": "NOT_APPLICABLE", "evidence": "NO_TEST_GATE",
+			"exit_code": -1, "proves": []string{"test-policy"}, "no_test_script": true,
+		},
+	}
+	execution := &oneshot.AgentResult{ProviderID: "openai", ToolCalls: []oneshot.AgentToolCall{build, noTestGate}}
+	if err := definition.ValidateAgentExecution(result, execution); err != nil {
+		t.Fatalf("build plus typed no-test policy rejected: %v", err)
+	}
+
+	execution.ToolCalls = []oneshot.AgentToolCall{noTestGate}
+	if err := validateReviewExecutionEvidence(result, execution, changedFiles); err == nil || !strings.Contains(err.Error(), "build:docs/.vitepress/config.ts") {
+		t.Fatalf("no-test policy without build error = %v", err)
+	}
+
+	malformed := noTestGate
+	malformed.Data = map[string]any{}
+	for key, value := range noTestGate.Data {
+		malformed.Data[key] = value
+	}
+	malformed.Data["evidence"] = "CONFIRMED_PASS"
+	execution.ToolCalls = []oneshot.AgentToolCall{build, malformed}
+	if err := validateReviewExecutionEvidence(result, execution, changedFiles); err == nil {
+		t.Fatal("untyped no-test claim satisfied approval")
+	}
+
+	failedTest := noTestGate
+	failedTest.Success = false
+	failedTest.Data = map[string]any{
+		"kind": "test", "language": "node", "path": "docs", "pattern": "", "command": "/usr/bin/npm",
+		"argv": []string{"/usr/bin/npm", "--offline", "run", "test"}, "status": "FAIL", "evidence": "CONFIRMED_FAIL", "exit_code": 1,
+		"stderr": "1 failing test",
+	}
+	result.Parsed.TestVerification = VerificationFail
+	execution.ToolCalls = []oneshot.AgentToolCall{build, failedTest}
+	if err := validateReviewExecutionEvidence(result, execution, changedFiles); err == nil {
+		t.Fatal("declared failing Node test satisfied approval")
+	}
+}
+
 func TestReviewEvidencePlanHandlesDocumentationAndUnknownConfiguration(t *testing.T) {
 	assert.Empty(t, reviewVerificationEvidenceRequests([]string{"README.md", "docs/release.md"}))
 
@@ -931,6 +1021,110 @@ The evidence is sufficient.
 			assert.True(t, ok)
 			assert.Equal(t, canonical, parsed.Review)
 			assert.Equal(t, canonical, parsed.Parsed.RawReview)
+		})
+	}
+}
+
+func TestReviewResultCanonicalizationInsertsMissingSummaryHeadingForLeadProse(t *testing.T) {
+	response := `## Grade: F
+The changed fetch path accepts private-network redirect targets and exposes internal services.
+
+## Repository Health
+The failure is isolated to redirect target validation.
+
+## CI Status
+- Build: PASS
+- Tests: PASS
+
+## Coverage
+- **File**: ` + "`pkg/fetch/fetch.go`" + ` — traced redirect handling through the changed fetch path.
+- **Feedback disposition**: ` + "`NONE_SUPPLIED`" + ` — no prior feedback was supplied.
+- **Verification**: focused redirect tests passed.
+
+## Invariant Audit
+- Outbound requests must reject private-network targets before every connection.
+
+## Falsification
+- **Strongest plausible failure**: a public URL can redirect to a private-network address.
+- **Evidence**: the redirect callback forwards the resolved private address without revalidation.
+- **Conclusion**: PROVED
+
+## Findings
+### FINDING-001: [CRITICAL] Redirects bypass private-network target validation
+- **File**: pkg/fetch/fetch.go:42
+- **Evidence**: The redirect callback follows the resolved private address without applying the initial target guard.
+- **Business Impact**: An attacker can reach internal services through the public fetch endpoint.
+- **Fix**: Apply the same target validation to every redirect before connecting.
+
+## Verdict
+- **Recommendation**: REQUEST CHANGES
+- **Blockers**: FINDING-001
+- **Suggestions**: None`
+
+	result, err := (ReviewBranchDef{ChangedFiles: []string{"pkg/fetch/fetch.go"}}).ParseResult(response)
+	assert.NoError(t, err)
+	review, ok := result.(*ReviewAgentResult)
+	assert.True(t, ok)
+	assert.Equal(t,
+		"The changed fetch path accepts private-network redirect targets and exposes internal services.",
+		review.Parsed.Summary,
+	)
+	assert.Contains(t, review.Review, "## Grade: F\n## Summary\nThe changed fetch path")
+	assert.NoError(t, (ReviewBranchDef{ChangedFiles: []string{"pkg/fetch/fetch.go"}}).ValidateResult(result))
+}
+
+func TestReviewResultCanonicalizationLeavesExplicitSummaryUnchanged(t *testing.T) {
+	review := "## Grade: B\n\n## Summary\nExisting summary.\n\n## Repository Health\nNeeds work."
+
+	canonical, err := canonicalFinalReview(review)
+	assert.NoError(t, err)
+	assert.Equal(t, review, canonical)
+}
+
+func TestReviewResultCanonicalizationDoesNotInventSummaryWithoutLeadProse(t *testing.T) {
+	review := strings.Replace(
+		completeReviewWithCoverage("- **File**: `ratchet.go` — reviewed the changed behavior.\n"+
+			"- **Feedback disposition**: `NONE_SUPPLIED` — no prior feedback was supplied.\n"+
+			"- **Verification**: focused tests passed."),
+		"\n\n## Summary\nThe exact changed-file contract is covered.\n",
+		"",
+		1,
+	)
+
+	result, err := (ReviewBranchDef{ChangedFiles: []string{"ratchet.go"}}).ParseResult(review)
+	assert.NoError(t, err)
+	parsed := result.(*ReviewAgentResult)
+	assert.Equal(t, review, parsed.Review)
+	assert.Empty(t, parsed.Parsed.Summary)
+	assert.ErrorContains(t,
+		(ReviewBranchDef{ChangedFiles: []string{"ratchet.go"}}).ValidateResult(result),
+		"summary",
+	)
+}
+
+func TestReviewResultCanonicalizationDoesNotMangleFencesOrOtherHeadings(t *testing.T) {
+	tests := []struct {
+		name   string
+		review string
+	}{
+		{
+			name: "fenced lead content",
+			review: "## Grade: B\n\n```markdown\nExample prose.\n## Repository Health\n```\n\n" +
+				"## CI Status\n- Build: PASS\n- Tests: PASS",
+		},
+		{
+			name: "level-three lead heading",
+			review: "## Grade: B\n\n### Assessment\nExisting structured content.\n\n" +
+				"## Repository Health\nNeeds work.",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			canonical, err := canonicalFinalReview(tt.review)
+			assert.NoError(t, err)
+			assert.Equal(t, tt.review, canonical)
+			assert.NotContains(t, canonical, "## Summary")
 		})
 	}
 }

@@ -176,6 +176,9 @@ func (p *GoogleProvider) toGenerateContentRequest(req ChatRequest) (*googleReque
 	payload := &googleRequest{
 		Model: normalizeModelForProvider(req.Model, "google"),
 	}
+	if req.MaxTokens > 0 {
+		payload.GenerationConfig = &googleGenerationConfig{MaxOutputTokens: req.MaxTokens}
+	}
 
 	for _, msg := range req.Messages {
 		text := messageContentToText(msg.Content)
@@ -198,9 +201,14 @@ func (p *GoogleProvider) toGenerateContentRequest(req ChatRequest) (*googleReque
 }
 
 type googleRequest struct {
-	Model             string          `json:"-"`
-	Contents          []googleContent `json:"contents"`
-	SystemInstruction []googlePart    `json:"system_instruction,omitempty"`
+	Model             string                  `json:"-"`
+	Contents          []googleContent         `json:"contents"`
+	SystemInstruction []googlePart            `json:"system_instruction,omitempty"`
+	GenerationConfig  *googleGenerationConfig `json:"generationConfig,omitempty"`
+}
+
+type googleGenerationConfig struct {
+	MaxOutputTokens int `json:"maxOutputTokens,omitempty"`
 }
 
 type googleContent struct {
@@ -214,7 +222,8 @@ type googlePart struct {
 
 type googleResponse struct {
 	Candidates []struct {
-		Content googleContent `json:"content"`
+		Content      googleContent `json:"content"`
+		FinishReason string        `json:"finishReason"`
 	} `json:"candidates"`
 	Usage struct {
 		PromptTokens    int `json:"promptTokenCount"`
@@ -232,6 +241,10 @@ func (g googleResponse) toChatResponse(model string) (*ChatResponse, error) {
 		textParts = append(textParts, part.Text)
 	}
 	content := strings.Join(textParts, "\n")
+	finishReason := strings.TrimSpace(g.Candidates[0].FinishReason)
+	if finishReason == "" {
+		finishReason = "stop"
+	}
 	msg := Message{
 		Role:    "assistant",
 		Content: content,
@@ -244,7 +257,7 @@ func (g googleResponse) toChatResponse(model string) (*ChatResponse, error) {
 			{
 				Index:        0,
 				Message:      msg,
-				FinishReason: "stop",
+				FinishReason: finishReason,
 			},
 		},
 		Usage: Usage{

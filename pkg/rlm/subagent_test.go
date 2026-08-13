@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -104,6 +105,19 @@ func TestNewSubAgentSessionIdentity(t *testing.T) {
 	}
 	if got := reviewAgent.sessionID; got != "agent-review-1" {
 		t.Fatalf("custom session ID = %q, want neutral caller identity", got)
+	}
+}
+
+func TestNewSubAgentRejectsNonFiniteCostBudget(t *testing.T) {
+	deps := SubAgentDeps{Models: &model.Manager{}, Registry: tool.NewEmptyRegistry()}
+	for _, value := range []float64{math.NaN(), math.Inf(1), math.Inf(-1), -0.01} {
+		_, err := NewSubAgent(SubAgentConfig{ID: "worker", Model: "test-model", MaxCostUSD: value}, deps)
+		if err == nil || !strings.Contains(err.Error(), "finite and non-negative") {
+			t.Fatalf("NewSubAgent(MaxCostUSD=%v) error = %v", value, err)
+		}
+	}
+	if _, err := NewSubAgent(SubAgentConfig{ID: "worker", Model: "test-model"}, deps); err != nil {
+		t.Fatalf("zero unbounded MaxCostUSD rejected: %v", err)
 	}
 }
 

@@ -3,11 +3,13 @@ package reviewsandbox
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -30,6 +32,49 @@ func TestPermissionArgsEnforceReadOnlySnapshotPrivateTempAndNoNetwork(t *testing
 		if !strings.Contains(joined, want) {
 			t.Fatalf("permission args omitted %q:\n%s", want, joined)
 		}
+	}
+}
+
+func TestVerificationPermissionArgsKeepSnapshotReadOnlyAndDisposableWorkspaceWritable(t *testing.T) {
+	runtimeDir := t.TempDir()
+	snapshotRoot := t.TempDir()
+	args := verificationPermissionArgsWithReadRoots("/usr/bin/true", runtimeDir, snapshotRoot)
+	joined := strings.Join(args, "\n")
+	for _, want := range []string{
+		`":workspace_roots" = { "." = "write" }`,
+		strconv.Quote(filepath.Clean(snapshotRoot)) + ` = "read"`,
+		`":tmpdir" = "write"`,
+		`network={ enabled = false }`,
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("verification permission args omitted %q:\n%s", want, joined)
+		}
+	}
+}
+
+func TestExecutablePackageReadRootRequiresManifestBinMapping(t *testing.T) {
+	root := t.TempDir()
+	packageRoot := filepath.Join(root, "lib", "node_modules", "npm")
+	launcher := filepath.Join(packageRoot, "bin", "npm-cli.js")
+	if err := os.MkdirAll(filepath.Dir(launcher), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(launcher, []byte("#!/usr/bin/env node\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	manifest := filepath.Join(packageRoot, "package.json")
+	if err := os.WriteFile(manifest, []byte(`{"name":"npm","bin":{"npm":"bin/npm-cli.js"}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := executablePackageReadRoot(launcher); got != packageRoot {
+		t.Fatalf("package read root = %q, want %q", got, packageRoot)
+	}
+	if err := os.WriteFile(manifest, []byte(`{"name":"unrelated","bin":{"other":"bin/other.js"}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := executablePackageReadRoot(launcher); got != "" {
+		t.Fatalf("unrelated manifest granted package read root %q", got)
 	}
 }
 
@@ -143,6 +188,9 @@ func TestExecutorReportsPassWithExactArgvAndNormalizedScope(t *testing.T) {
 	if err := os.MkdirAll(pkg, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(root, "package.json"), []byte(`{"scripts":{"build":"vite build"}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(filepath.Join(pkg, "go.mod"), []byte("module example.test/review\n\ngo 1.25\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -183,6 +231,445 @@ func TestExecutorReportsPassWithExactArgvAndNormalizedScope(t *testing.T) {
 	if strings.Contains(strings.Join(invocations[1].Env, "\n"), "OPENAI_API_KEY") {
 		t.Fatal("restricted command environment leaked credentials")
 	}
+}
+
+func TestExecutorPromotesNestedNodeVerificationToPackageRoot(t *testing.T) {
+	root := t.TempDir()
+	packageRoot := filepath.Join(root, "docs")
+	if err := os.MkdirAll(filepath.Join(packageRoot, ".vitepress"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	manifest := []byte(`{"name":"docs","scripts":{"build":"vitepress build"}}`)
+	lock := []byte(`{"lockfileVersion":3,"packages":{"":{"name":"docs"},"node_modules/vitepress":{"version":"1.6.4","resolved":"https://registry.npmjs.org/vitepress/-/vitepress-1.6.4.tgz","integrity":"sha512-test"}}}`)
+	if err := os.WriteFile(filepath.Join(packageRoot, "package.json"), manifest, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(packageRoot, "package-lock.json"), lock, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sourceRoot := t.TempDir()
+	sourcePackage := filepath.Join(sourceRoot, "docs")
+	if err := os.MkdirAll(filepath.Join(sourcePackage, "node_modules"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, content := range map[string][]byte{"package.json": manifest, "package-lock.json": lock} {
+		if err := os.WriteFile(filepath.Join(sourcePackage, name), content, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	installedLock := []byte(`{"lockfileVersion":3,"packages":{"node_modules/vitepress":{"version":"1.6.4","resolved":"https://registry.npmjs.org/vitepress/-/vitepress-1.6.4.tgz","integrity":"sha512-test"}}}`)
+	if err := os.WriteFile(filepath.Join(sourcePackage, "node_modules", ".package-lock.json"), installedLock, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	executor := NewExecutorWithCodexCommand("/usr/bin/true")
+	executor.lookPath = func(name string) (string, error) {
+		switch name {
+		case "npm":
+			return "/usr/bin/npm", nil
+		case "true":
+			return "/usr/bin/true", nil
+		default:
+			return "", errors.New("unexpected executable: " + name)
+		}
+	}
+	runtimeParent := t.TempDir()
+	runtimeDir := filepath.Join(runtimeParent, "runtime")
+	writableRoot := filepath.Join(runtimeDir, "workspaces", "workspace")
+	executor.tempDir = func(dir, pattern string) (string, error) {
+		switch pattern {
+		case "buckley-review-verification-*":
+			if dir != "" {
+				return "", fmt.Errorf("runtime parent = %q, want empty", dir)
+			}
+			return runtimeDir, os.Mkdir(runtimeDir, 0o700)
+		case "run-*":
+			if dir != filepath.Join(runtimeDir, "workspaces") {
+				return "", fmt.Errorf("workspace parent = %q", dir)
+			}
+			return writableRoot, os.Mkdir(writableRoot, 0o700)
+		default:
+			return "", fmt.Errorf("unexpected temporary directory pattern %q", pattern)
+		}
+	}
+	var invocations []commandInvocation
+	executor.run = func(_ context.Context, invocation commandInvocation, _ int) (commandOutput, error) {
+		invocations = append(invocations, invocation)
+		if len(invocations) == 2 {
+			projected, err := filepath.EvalSymlinks(filepath.Join(invocation.Dir, "node_modules"))
+			if err != nil {
+				t.Fatalf("projected node_modules: %v", err)
+			}
+			want, err := filepath.EvalSymlinks(filepath.Join(sourcePackage, "node_modules"))
+			if err != nil || projected != want {
+				t.Fatalf("projected node_modules = %q, want %q (err=%v)", projected, want, err)
+			}
+			joined := strings.Join(invocation.Args, "\n")
+			if !strings.Contains(joined, strconv.Quote(want)+` = "read"`) {
+				t.Fatalf("sandbox policy omitted exact node_modules read root %q", want)
+			}
+			if strings.Contains(joined, strconv.Quote(sourceRoot)+` = "read"`) {
+				t.Fatalf("sandbox policy granted broad source repository read root %q", sourceRoot)
+			}
+		}
+		return commandOutput{ExitCode: 0, Stdout: "ok"}, nil
+	}
+
+	result := executor.Verify(context.Background(), Request{
+		SnapshotRoot: root,
+		SourceRoot:   sourceRoot,
+		Kind:         KindBuild,
+		Language:     LanguageNode,
+		Path:         "docs/.vitepress",
+	})
+	if result.Status != StatusPass || result.ExitCode != 0 {
+		t.Fatalf("verification = %#v", result)
+	}
+	if result.Path != "docs" {
+		t.Fatalf("promoted result path = %q, want docs", result.Path)
+	}
+	wantArgv := []string{"/usr/bin/npm", "--offline", "run", "build"}
+	if !reflect.DeepEqual(result.Argv, wantArgv) {
+		t.Fatalf("argv = %#v, want %#v", result.Argv, wantArgv)
+	}
+	if len(invocations) != 2 {
+		t.Fatalf("invocations = %d, want sandbox preflight + verification", len(invocations))
+	}
+	wantWorkDir := filepath.Join(writableRoot, "docs")
+	for index, invocation := range invocations {
+		if invocation.Dir != wantWorkDir {
+			t.Fatalf("invocation %d workdir = %q, want %q", index, invocation.Dir, wantWorkDir)
+		}
+		changeDir := indexOf(invocation.Args, "-C")
+		if changeDir < 0 || changeDir+1 >= len(invocation.Args) || invocation.Args[changeDir+1] != wantWorkDir {
+			t.Fatalf("invocation %d sandbox workdir args = %#v", index, invocation.Args)
+		}
+	}
+	separator := indexOf(invocations[1].Args, "--")
+	if separator < 0 || !reflect.DeepEqual(invocations[1].Args[separator+1:], wantArgv) {
+		t.Fatalf("sandbox did not receive exact npm argv: %#v", invocations[1].Args)
+	}
+}
+
+func TestExecutorReturnsTypedNodeNoTestPolicyWithoutLaunching(t *testing.T) {
+	root := t.TempDir()
+	packageRoot := filepath.Join(root, "docs")
+	if err := os.MkdirAll(filepath.Join(packageRoot, ".vitepress"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(packageRoot, "package.json"), []byte(`{"scripts":{"build":"vitepress build"}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	executor := NewExecutor()
+	executor.lookPath = func(name string) (string, error) {
+		t.Fatalf("executable lookup %q occurred for a package with no declared test gate", name)
+		return "", errors.New("unreachable")
+	}
+	executor.run = func(context.Context, commandInvocation, int) (commandOutput, error) {
+		t.Fatal("verification command launched for a package with no declared test gate")
+		return commandOutput{}, nil
+	}
+
+	result := executor.Verify(context.Background(), Request{
+		SnapshotRoot: root,
+		Kind:         KindTest,
+		Language:     LanguageNode,
+		Path:         "docs/.vitepress",
+	})
+	if result.Status != StatusNotApplicable || result.ExitCode != -1 || !result.NoTestScript || result.Error != "" {
+		t.Fatalf("no-test-script result = %#v", result)
+	}
+	if result.Path != "docs" || result.Command != "" || len(result.Argv) != 0 {
+		t.Fatalf("no-test-script launch metadata = %#v", result)
+	}
+}
+
+func TestDeclaredNodeTestScriptStillRequiresRealPass(t *testing.T) {
+	workDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(workDir, "package.json"), []byte(`{"scripts":{"build":"vite build","test":"vitest run"}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	planned, err := verificationPlan(KindTest, LanguageNode, "", workDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if planned.command != "npm" || !reflect.DeepEqual(planned.args, []string{"--offline", "run", "test"}) {
+		t.Fatalf("declared test plan = %#v", planned)
+	}
+
+	result := classifyVerificationRun(
+		Result{Kind: KindTest, Language: LanguageNode, Command: "/usr/bin/npm", Argv: []string{"/usr/bin/npm", "--offline", "run", "test"}},
+		Request{Kind: KindTest},
+		LanguageNode,
+		time.Minute,
+		"Codex sandbox",
+		commandOutput{ExitCode: 1, Stderr: "1 failing test"},
+		nil,
+		nil,
+	)
+	if result.Status != StatusFail || result.ExitCode != 1 || result.NoTestScript {
+		t.Fatalf("declared failing test result = %#v", result)
+	}
+}
+
+func TestProjectNodeDependenciesRequiresExactLockIdentityAndContainedSymlinks(t *testing.T) {
+	t.Run("matching install with ordinary bin symlink", func(t *testing.T) {
+		fixture := newNodeProjectionFixture(t)
+		got, err := projectNodeDependencies(fixture.snapshotRoot, fixture.sourceRoot, "docs", fixture.writablePackage)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != fixture.nodeModules {
+			t.Fatalf("node_modules root = %q, want %q", got, fixture.nodeModules)
+		}
+		projected, err := filepath.EvalSymlinks(filepath.Join(fixture.writablePackage, "node_modules"))
+		if err != nil || projected != fixture.nodeModules {
+			t.Fatalf("projected node_modules = %q, err=%v", projected, err)
+		}
+	})
+
+	for _, test := range []struct {
+		name   string
+		mutate func(t *testing.T, fixture nodeProjectionFixture)
+		want   string
+	}{
+		{
+			name: "source manifest mismatch",
+			mutate: func(t *testing.T, fixture nodeProjectionFixture) {
+				t.Helper()
+				if err := os.WriteFile(filepath.Join(fixture.sourcePackage, "package.json"), []byte(`{"name":"other"}`), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+			want: "does not match immutable snapshot",
+		},
+		{
+			name: "installed lock identity mismatch",
+			mutate: func(t *testing.T, fixture nodeProjectionFixture) {
+				t.Helper()
+				content := []byte(`{"lockfileVersion":3,"packages":{"node_modules/vitepress":{"version":"1.6.5","resolved":"registry:test","integrity":"sha512-test","link":false}}}`)
+				if err := os.WriteFile(filepath.Join(fixture.nodeModules, ".package-lock.json"), content, 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+			want: "does not exactly match",
+		},
+		{
+			name: "missing versus false link identity",
+			mutate: func(t *testing.T, fixture nodeProjectionFixture) {
+				t.Helper()
+				content := []byte(`{"lockfileVersion":3,"packages":{"node_modules/vitepress":{"version":"1.6.4","resolved":"registry:test","integrity":"sha512-test"}}}`)
+				if err := os.WriteFile(filepath.Join(fixture.nodeModules, ".package-lock.json"), content, 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+			want: "does not exactly match",
+		},
+		{
+			name: "dependency symlink escape",
+			mutate: func(t *testing.T, fixture nodeProjectionFixture) {
+				t.Helper()
+				outside := t.TempDir()
+				if err := os.Symlink(outside, filepath.Join(fixture.nodeModules, "vitepress", "escape")); err != nil {
+					t.Skipf("symlinks unavailable: %v", err)
+				}
+			},
+			want: "escapes the validated dependency root",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newNodeProjectionFixture(t)
+			test.mutate(t, fixture)
+			_, err := projectNodeDependencies(fixture.snapshotRoot, fixture.sourceRoot, "docs", fixture.writablePackage)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("projection error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestExecutorClassifiesNodeDependencyMismatchUnavailableBeforeLaunch(t *testing.T) {
+	fixture := newNodeProjectionFixture(t)
+	if err := os.WriteFile(filepath.Join(fixture.nodeModules, ".package-lock.json"), []byte(`{"packages":{}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	executor := NewExecutorWithCodexCommand("/usr/bin/true")
+	executor.lookPath = func(name string) (string, error) {
+		switch name {
+		case "npm":
+			return "/usr/bin/npm", nil
+		case "true":
+			return "/usr/bin/true", nil
+		default:
+			return "", errors.New("unexpected executable: " + name)
+		}
+	}
+	executor.run = func(context.Context, commandInvocation, int) (commandOutput, error) {
+		t.Fatal("sandbox launched with mismatched ambient Node dependencies")
+		return commandOutput{}, nil
+	}
+	result := executor.Verify(context.Background(), Request{
+		SnapshotRoot: fixture.snapshotRoot,
+		SourceRoot:   fixture.sourceRoot,
+		Kind:         KindBuild,
+		Language:     LanguageNode,
+		Path:         "docs",
+	})
+	if result.Status != StatusUnavailable || result.ExitCode != -1 || !strings.Contains(result.Error, "does not exactly match") {
+		t.Fatalf("mismatched Node install result = %#v", result)
+	}
+}
+
+type nodeProjectionFixture struct {
+	snapshotRoot    string
+	sourceRoot      string
+	sourcePackage   string
+	nodeModules     string
+	writablePackage string
+}
+
+func newNodeProjectionFixture(t *testing.T) nodeProjectionFixture {
+	t.Helper()
+	fixture := nodeProjectionFixture{snapshotRoot: t.TempDir(), sourceRoot: t.TempDir(), writablePackage: t.TempDir()}
+	fixture.sourcePackage = filepath.Join(fixture.sourceRoot, "docs")
+	fixture.nodeModules = filepath.Join(fixture.sourcePackage, "node_modules")
+	snapshotPackage := filepath.Join(fixture.snapshotRoot, "docs")
+	for _, directory := range []string{snapshotPackage, filepath.Join(fixture.nodeModules, "vitepress"), filepath.Join(fixture.nodeModules, ".bin")} {
+		if err := os.MkdirAll(directory, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	manifest := []byte(`{"name":"docs","scripts":{"build":"vitepress build"}}`)
+	lock := []byte(`{"lockfileVersion":3,"packages":{"":{"name":"docs"},"node_modules/vitepress":{"version":"1.6.4","resolved":"registry:test","integrity":"sha512-test","link":false}}}`)
+	for _, directory := range []string{snapshotPackage, fixture.sourcePackage} {
+		for name, content := range map[string][]byte{"package.json": manifest, "package-lock.json": lock} {
+			if err := os.WriteFile(filepath.Join(directory, name), content, 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	installed := []byte(`{"lockfileVersion":3,"packages":{"node_modules/vitepress":{"version":"1.6.4","resolved":"registry:test","integrity":"sha512-test","link":false}}}`)
+	if err := os.WriteFile(filepath.Join(fixture.nodeModules, ".package-lock.json"), installed, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(fixture.nodeModules, "vitepress", "cli.js"), []byte("ok"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join("..", "vitepress", "cli.js"), filepath.Join(fixture.nodeModules, ".bin", "vitepress")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	return fixture
+}
+
+func TestResolveNodePackageDirectoryUsesNearestManifest(t *testing.T) {
+	root := t.TempDir()
+	nestedPackage := filepath.Join(root, "packages", "site")
+	requested := filepath.Join(nestedPackage, "src", "components")
+	if err := os.MkdirAll(requested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, manifest := range []string{
+		filepath.Join(root, "package.json"),
+		filepath.Join(nestedPackage, "package.json"),
+	} {
+		if err := os.WriteFile(manifest, []byte(`{"scripts":{"build":"vite build"}}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, err := resolveNodePackageDirectory(root, requested)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != nestedPackage {
+		t.Fatalf("package root = %q, want nearest manifest %q", got, nestedPackage)
+	}
+}
+
+func TestExecutorReturnsUnavailableWhenNodePackageManifestIsAbsent(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "docs", ".vitepress"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	executor := NewExecutor()
+	executor.lookPath = func(name string) (string, error) {
+		t.Fatalf("executable lookup %q occurred without a snapshot-bound package manifest", name)
+		return "", os.ErrNotExist
+	}
+	executor.run = func(context.Context, commandInvocation, int) (commandOutput, error) {
+		t.Fatal("verification launched without a snapshot-bound package manifest")
+		return commandOutput{}, nil
+	}
+
+	result := executor.Verify(context.Background(), Request{
+		SnapshotRoot: root,
+		Kind:         KindBuild,
+		Language:     LanguageNode,
+		Path:         "docs/.vitepress",
+	})
+	if result.Status != StatusUnavailable || result.ExitCode != -1 {
+		t.Fatalf("verification = %#v", result)
+	}
+	if result.Path != "docs/.vitepress" {
+		t.Fatalf("unavailable result path = %q, want original normalized path", result.Path)
+	}
+	if !strings.Contains(result.Error, "no package.json found") || !strings.Contains(result.Error, "immutable snapshot") {
+		t.Fatalf("error = %q", result.Error)
+	}
+}
+
+func TestExecutorRejectsNodePackageResolutionOutsideSnapshot(t *testing.T) {
+	t.Run("requested directory symlink", func(t *testing.T) {
+		root := t.TempDir()
+		outside := t.TempDir()
+		if err := os.WriteFile(filepath.Join(outside, "package.json"), []byte(`{"scripts":{"build":"outside"}}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(outside, filepath.Join(root, "escape")); err != nil {
+			t.Skipf("symlinks unavailable: %v", err)
+		}
+
+		result := NewExecutor().Verify(context.Background(), Request{
+			SnapshotRoot: root,
+			Kind:         KindBuild,
+			Language:     LanguageNode,
+			Path:         "escape",
+		})
+		if result.Status != StatusUnavailable || !strings.Contains(result.Error, "escapes immutable snapshot") {
+			t.Fatalf("verification = %#v", result)
+		}
+	})
+
+	t.Run("package manifest symlink", func(t *testing.T) {
+		root := t.TempDir()
+		packageRoot := filepath.Join(root, "docs")
+		if err := os.MkdirAll(filepath.Join(packageRoot, ".vitepress"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		outside := filepath.Join(t.TempDir(), "package.json")
+		if err := os.WriteFile(outside, []byte(`{"scripts":{"build":"outside"}}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(outside, filepath.Join(packageRoot, "package.json")); err != nil {
+			t.Skipf("symlinks unavailable: %v", err)
+		}
+		executor := NewExecutor()
+		executor.lookPath = func(name string) (string, error) {
+			t.Fatalf("executable lookup %q followed an escaping package manifest", name)
+			return "", os.ErrNotExist
+		}
+
+		result := executor.Verify(context.Background(), Request{
+			SnapshotRoot: root,
+			Kind:         KindBuild,
+			Language:     LanguageNode,
+			Path:         "docs/.vitepress",
+		})
+		if result.Status != StatusUnavailable || !strings.Contains(result.Error, "package.json escapes immutable snapshot") {
+			t.Fatalf("verification = %#v", result)
+		}
+	})
 }
 
 func TestVerificationPlanAcceptsLongFocusedGoPattern(t *testing.T) {
@@ -328,10 +815,152 @@ func TestExecutorClassifiesCommandFailureAndSandboxUnavailable(t *testing.T) {
 			return commandOutput{ExitCode: 0, Stdout: "? example.test/review [no test files]"}, nil
 		}
 		result := executor.Verify(context.Background(), Request{SnapshotRoot: root, Kind: KindTest, Language: LanguageGo})
-		if result.Status != StatusFail || result.ExitCode != 0 || !strings.Contains(result.Error, "without executing tests") {
+		if result.Status != StatusPass || result.ExitCode != 0 || !result.NoTestFiles || result.Error != "" {
 			t.Fatalf("no-test result = %#v", result)
 		}
 	})
+}
+
+func TestExecutorRunsVerificationInDisposableWritableWorkspace(t *testing.T) {
+	root := t.TempDir()
+	pkg := filepath.Join(root, "pkg", "orchestrator")
+	if err := os.MkdirAll(pkg, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module example.test/review\n\ngo 1.25\n"), 0o444); err != nil {
+		t.Fatal(err)
+	}
+	tracked := filepath.Join(pkg, "tracked.go")
+	if err := os.WriteFile(tracked, []byte("package orchestrator\n"), 0o444); err != nil {
+		t.Fatal(err)
+	}
+
+	executor := testExecutor(t)
+	calls := 0
+	var copiedWorkDir string
+	executor.run = func(_ context.Context, invocation commandInvocation, _ int) (commandOutput, error) {
+		calls++
+		if calls == 1 {
+			return commandOutput{ExitCode: 0}, nil
+		}
+		copiedWorkDir = invocation.Dir
+		if pathWithinRoot(root, copiedWorkDir) {
+			t.Fatalf("verification ran inside immutable snapshot: %q", copiedWorkDir)
+		}
+		if content, err := os.ReadFile(filepath.Join(copiedWorkDir, "tracked.go")); err != nil || string(content) != "package orchestrator\n" {
+			t.Fatalf("copied source = %q, err=%v", content, err)
+		}
+		if err := os.MkdirAll(filepath.Join(copiedWorkDir, ".buckley", "logs"), 0o700); err != nil {
+			t.Fatalf("repo-relative log directory was not writable: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(copiedWorkDir, "tracked.go"), []byte("package changed\n"), 0o600); err != nil {
+			t.Fatalf("disposable tracked file was not writable: %v", err)
+		}
+		return commandOutput{ExitCode: 0, Stdout: "ok"}, nil
+	}
+
+	result := executor.Verify(context.Background(), Request{
+		SnapshotRoot: root,
+		Kind:         KindTest,
+		Language:     LanguageGo,
+		Path:         "pkg/orchestrator",
+	})
+	if result.Status != StatusPass || result.ExitCode != 0 {
+		t.Fatalf("verification = %#v", result)
+	}
+	if calls != 2 || copiedWorkDir == "" {
+		t.Fatalf("sandbox calls = %d, copied workdir = %q", calls, copiedWorkDir)
+	}
+	if _, err := os.Stat(copiedWorkDir); !os.IsNotExist(err) {
+		t.Fatalf("disposable workspace was not removed: %v", err)
+	}
+	if content, err := os.ReadFile(tracked); err != nil || string(content) != "package orchestrator\n" {
+		t.Fatalf("immutable source changed to %q, err=%v", content, err)
+	}
+	if _, err := os.Stat(filepath.Join(pkg, ".buckley")); !os.IsNotExist(err) {
+		t.Fatalf("repo-relative output escaped into immutable snapshot: %v", err)
+	}
+}
+
+func TestCopyReviewWorkspaceRejectsEscapingSymlinkAndOversizedTree(t *testing.T) {
+	t.Run("escaping symlink", func(t *testing.T) {
+		source := t.TempDir()
+		outside := t.TempDir()
+		if err := os.Symlink(outside, filepath.Join(source, "escape")); err != nil {
+			t.Skipf("symlinks unavailable: %v", err)
+		}
+		destination := t.TempDir()
+		err := copyReviewWorkspace(context.Background(), source, destination)
+		if err == nil || !strings.Contains(err.Error(), "escapes") {
+			t.Fatalf("escaping symlink error = %v", err)
+		}
+	})
+
+	t.Run("oversized file", func(t *testing.T) {
+		source := t.TempDir()
+		file := filepath.Join(source, "generated.bin")
+		if err := os.WriteFile(file, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Truncate(file, maximumWorkspaceBytes+1); err != nil {
+			t.Skipf("sparse files unavailable: %v", err)
+		}
+		destination := t.TempDir()
+		err := copyReviewWorkspace(context.Background(), source, destination)
+		if err == nil || !strings.Contains(err.Error(), "byte verification workspace limit") {
+			t.Fatalf("oversized workspace error = %v", err)
+		}
+	})
+}
+
+func BenchmarkDisposableVerificationWorkspace(b *testing.B) {
+	source := strings.TrimSpace(os.Getenv("BUCKLEY_REVIEW_BENCHMARK_ROOT"))
+	if source == "" {
+		source = b.TempDir()
+		payload := []byte(strings.Repeat("verification-copy\n", 2048))
+		for index := range 256 {
+			directory := filepath.Join(source, "pkg", fmt.Sprintf("package-%03d", index/16))
+			if err := os.MkdirAll(directory, 0o755); err != nil {
+				b.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(directory, fmt.Sprintf("file-%03d.go", index)), payload, 0o644); err != nil {
+				b.Fatal(err)
+			}
+		}
+	}
+	source, err := filepath.Abs(source)
+	if err != nil {
+		b.Fatal(err)
+	}
+	var sourceBytes int64
+	if err := filepath.WalkDir(source, func(_ string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if info, infoErr := entry.Info(); infoErr != nil {
+			return infoErr
+		} else if info.Mode().IsRegular() {
+			sourceBytes += info.Size()
+		}
+		return nil
+	}); err != nil {
+		b.Fatal(err)
+	}
+	runtimeDir := b.TempDir()
+	if err := PrepareRuntime(runtimeDir); err != nil {
+		b.Fatal(err)
+	}
+	executor := NewExecutor()
+	b.SetBytes(sourceBytes)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		_, _, cleanup, err := executor.prepareWritableWorkspace(context.Background(), source, ".", runtimeDir)
+		if err != nil {
+			b.Fatal(err)
+		}
+		cleanup()
+	}
 }
 
 func TestExecutorPrefersNativeGoSandboxWhenBothLaunchersAreAvailable(t *testing.T) {

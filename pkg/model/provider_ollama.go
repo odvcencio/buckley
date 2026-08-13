@@ -78,6 +78,7 @@ func (p *OllamaProvider) FetchCatalog() (*ModelCatalog, error) {
 				Prompt:     0,
 				Completion: 0,
 			},
+			PricingKnown: true,
 			Architecture: Architecture{
 				Modality: "text",
 			},

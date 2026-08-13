@@ -54,7 +54,7 @@ Two or three sentences describing behavior and business impact.
 
 ## CI Status
 - Build: PASS|FAIL|PENDING|NOT_RUN|UNAVAILABLE|UNKNOWN — exact evidence
-- Tests: PASS|FAIL|PENDING|NOT_RUN|UNAVAILABLE|UNKNOWN — exact evidence
+- Tests: PASS|FAIL|NOT_APPLICABLE|PENDING|NOT_RUN|UNAVAILABLE|UNKNOWN — exact execution or typed NO_TEST_GATE evidence
 - Other checks: status
 
 ## Coverage

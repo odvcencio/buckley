@@ -1,4 +1,4 @@
 package version
 
 // Release is the current Buckley release version.
-const Release = "0.6.0"
+const Release = "0.7.0"

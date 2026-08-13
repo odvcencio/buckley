@@ -121,6 +121,9 @@ func appendAgentToolEvidence(b *strings.Builder, calls []AgentToolCall) {
 		if call.Success {
 			status = "PASS"
 		}
+		if value, _ := call.Data["status"].(string); call.Success && strings.EqualFold(strings.TrimSpace(value), "NOT_APPLICABLE") {
+			status = "NOT_APPLICABLE"
+		}
 		fmt.Fprintf(b, "\n- Call %d: `%s` — %s", index+1, boundedAgentEvidenceText(call.Name, 200), status)
 		if call.Duration > 0 {
 			fmt.Fprintf(b, " (%s)", call.Duration.Round(1_000_000))

@@ -16,6 +16,7 @@ import (
 	"m31labs.dev/buckley/pkg/ipc/gosxui"
 	"m31labs.dev/buckley/pkg/model"
 	"m31labs.dev/buckley/pkg/storage"
+	"m31labs.dev/buckley/pkg/ui/viewmodel"
 )
 
 type gosxBackend struct {
@@ -107,6 +108,9 @@ func (b gosxBackend) Load(_ context.Context, r *http.Request) (gosxui.PageData, 
 			data.Todos = todoViews(todos)
 		}
 		data.Approvals = b.pendingApprovals(data.Current.ID)
+		if data.CanWrite && s.runtimeTracker != nil {
+			data.AgentRuns = agentViews(s.runtimeTracker.GetAgentRuns(data.Current.ID))
+		}
 		data.Refresh = isLiveSession(data.Current.Status) || len(data.Approvals) > 0
 	}
 
@@ -117,30 +121,6 @@ func (b gosxBackend) Load(_ context.Context, r *http.Request) (gosxui.PageData, 
 	if project != "" {
 		if discovery, discoveryErr := agentspec.DiscoverProjectSpecs(project); discoveryErr == nil {
 			data.AgentSpecs = agentSpecViews(discovery.Specs)
-		}
-	}
-	if data.CanWrite && s.missionStore != nil {
-		if agents, agentErr := s.missionStore.ListActiveAgents(24 * time.Hour); agentErr == nil {
-			for _, agent := range agents {
-				if agent == nil {
-					continue
-				}
-				if agent.SessionID != "" {
-					session, sessionErr := s.store.GetSession(agent.SessionID)
-					if sessionErr != nil || session == nil || !principalCanAccessSession(principal, session) {
-						continue
-					}
-				}
-				data.MissionAgents = append(data.MissionAgents, gosxui.MissionAgentView{
-					ID:            agent.AgentID,
-					SessionID:     agent.SessionID,
-					Type:          agent.AgentType,
-					Status:        agent.Status,
-					Action:        agent.CurrentAction,
-					LastActivity:  formatGoSXTime(agent.LastActivity),
-					PendingChange: agent.PendingChanges,
-				})
-			}
 		}
 	}
 	data.Models = modelViews(s.models)
@@ -347,6 +327,27 @@ func agentSpecViews(specs []agentspec.DiscoveredSpec) []gosxui.AgentSpecView {
 	result := make([]gosxui.AgentSpecView, 0, len(specs))
 	for _, spec := range specs {
 		result = append(result, gosxui.AgentSpecView{Path: spec.Path, Name: spec.Name, Kind: spec.Kind, Summary: spec.Summary, Subagents: append([]string(nil), spec.Subagents...), Valid: spec.Valid, Error: spec.Error})
+	}
+	return result
+}
+
+func agentViews(runs []viewmodel.AgentRun) []gosxui.AgentView {
+	if len(runs) == 0 {
+		return nil
+	}
+	result := make([]gosxui.AgentView, 0, len(runs))
+	for _, run := range runs {
+		result = append(result, gosxui.AgentView{
+			ID:              run.ID,
+			ParentID:        run.ParentID,
+			ParentSessionID: run.ParentSessionID,
+			Agent:           run.Agent,
+			Persona:         run.Persona,
+			Model:           run.Model,
+			Status:          run.Status,
+			Task:            run.Task,
+			Children:        agentViews(run.Children),
+		})
 	}
 	return result
 }

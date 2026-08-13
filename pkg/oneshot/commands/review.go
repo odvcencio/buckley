@@ -84,7 +84,7 @@ func (ReviewProjectDef) SystemPrompt() string {
 }
 
 func (ReviewProjectDef) AllowedTools() []string {
-	return []string{"read_file", "find_files", "search_text"}
+	return reviewInspectionTools()
 }
 
 func (ReviewProjectDef) MaxAgentIterations() int { return 0 }
@@ -178,7 +178,11 @@ func (d ReviewPRDef) AuthoritativeRemoteCIPasses() bool {
 }
 
 func reviewAllowedTools() []string {
-	return []string{"read_file", "find_files", "search_text", "run_verification"}
+	return append(reviewInspectionTools(), "run_verification")
+}
+
+func reviewInspectionTools() []string {
+	return []string{"exec_program", "read_file", "find_files", "search_text"}
 }
 
 func (ReviewPRDef) ParseResult(response string) (any, error) {
@@ -204,7 +208,12 @@ func (d ReviewPRDef) ValidateResult(result any) error {
 	})
 }
 
-var finalReviewGradeHeadingRE = regexp.MustCompile(`^## Grade:\s*\[?[A-F]\]?\s*$`)
+var (
+	finalReviewGradeHeadingRE    = regexp.MustCompile(`^## Grade:\s*\[?[A-F]\]?\s*$`)
+	finalReviewSummaryHeadingRE  = regexp.MustCompile(`^##[ \t]+Summary[ \t]*$`)
+	finalReviewLevelTwoHeadingRE = regexp.MustCompile(`^##(?:[ \t]+.*)?[ \t]*$`)
+	finalReviewATXHeadingRE      = regexp.MustCompile(`^#{1,6}(?:[ \t]+.*)?[ \t]*$`)
+)
 
 func parseFinalReviewResult(response string) (*ReviewAgentResult, error) {
 	review, err := canonicalFinalReview(response)
@@ -244,10 +253,85 @@ func canonicalFinalReview(response string) (string, error) {
 	}
 
 	review := strings.TrimSpace(strings.Join(lines[start:], "\n"))
+	review = normalizeImplicitReviewSummary(review)
 	if err := validateCanonicalFinalReview(review); err != nil {
 		return "", err
 	}
 	return review, nil
+}
+
+// normalizeImplicitReviewSummary repairs one narrow provider formatting drift:
+// substantive lead prose placed between the Grade heading and the next level-2
+// section. It preserves every existing line and inserts only the missing
+// heading. Other malformed envelopes still flow unchanged to validation.
+func normalizeImplicitReviewSummary(review string) string {
+	lines := strings.Split(review, "\n")
+	if len(lines) < 3 || !finalReviewGradeHeadingRE.MatchString(lines[0]) || reviewHasSummaryHeading(lines) {
+		return review
+	}
+
+	leadProse := -1
+	fence := ""
+	for i := 1; i < len(lines); i++ {
+		line := lines[i]
+		if marker := reviewFenceMarker(line); marker != "" {
+			switch fence {
+			case "":
+				if leadProse < 0 {
+					return review
+				}
+				fence = marker
+			case marker:
+				fence = ""
+			}
+			continue
+		}
+		if fence != "" {
+			continue
+		}
+
+		if finalReviewLevelTwoHeadingRE.MatchString(line) {
+			if leadProse < 0 {
+				return review
+			}
+			normalized := make([]string, 0, len(lines)+1)
+			normalized = append(normalized, lines[:leadProse]...)
+			normalized = append(normalized, "## Summary")
+			normalized = append(normalized, lines[leadProse:]...)
+			return strings.Join(normalized, "\n")
+		}
+
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		if leadProse < 0 && finalReviewATXHeadingRE.MatchString(line) {
+			return review
+		}
+		if leadProse < 0 {
+			leadProse = i
+		}
+	}
+
+	return review
+}
+
+func reviewHasSummaryHeading(lines []string) bool {
+	fence := ""
+	for _, line := range lines {
+		if marker := reviewFenceMarker(line); marker != "" {
+			switch fence {
+			case "":
+				fence = marker
+			case marker:
+				fence = ""
+			}
+			continue
+		}
+		if fence == "" && finalReviewSummaryHeadingRE.MatchString(line) {
+			return true
+		}
+	}
+	return false
 }
 
 func validateFinalReviewResult(review *ReviewAgentResult) error {
@@ -367,6 +451,17 @@ func validateReviewExecutionEvidence(result any, execution *oneshot.AgentResult,
 		stdout, _ := call.Data["stdout"].(string)
 		status, _ := call.Data["status"].(string)
 		exitCode, ok := reviewEvidenceExitCode(call.Data["exit_code"])
+		if reviewNoTestScriptPolicyEvidence(call.Data) {
+			trusted = append(trusted, reviewCommandEvidenceDetails{
+				Kind:     reviewEvidenceTestPolicy,
+				Language: "node",
+				Targets: []reviewCoverageTarget{{
+					Path:      path,
+					Recursive: true,
+				}},
+			})
+			continue
+		}
 		if !ok || exitCode != 0 || status != "PASS" {
 			continue
 		}
@@ -380,14 +475,16 @@ func validateReviewExecutionEvidence(result any, execution *oneshot.AgentResult,
 			(language != "go" || kind != reviewEvidenceTest || !goReviewOutputProvesTestExecution(stdout)) {
 			continue
 		}
-		trusted = append(trusted, reviewCommandEvidenceDetails{
-			Kind:     kind,
-			Language: language,
-			Targets: []reviewCoverageTarget{{
-				Path:      path,
-				Recursive: language != "go",
-			}},
-		})
+		for _, provedKind := range reviewVerificationProofKinds(call.Data, kind) {
+			trusted = append(trusted, reviewCommandEvidenceDetails{
+				Kind:     provedKind,
+				Language: language,
+				Targets: []reviewCoverageTarget{{
+					Path:      path,
+					Recursive: language != "go",
+				}},
+			})
+		}
 	}
 	if err := validateReviewEvidenceCoverage(changedFiles, trusted); err != nil {
 		if strings.EqualFold(strings.TrimSpace(execution.ProviderID), "codex") {
@@ -396,6 +493,111 @@ func validateReviewExecutionEvidence(result any, execution *oneshot.AgentResult,
 		return fmt.Errorf("API-backed approval requires successful snapshot-bound run_verification evidence: %w; for Go, call kind=test because kind=build does not execute tests", err)
 	}
 	return nil
+}
+
+func reviewVerificationProofKinds(data map[string]any, legacyKind string) []string {
+	if noTestScript, _ := data["no_test_script"].(bool); noTestScript {
+		if reviewVerificationHasExactTestPolicyProof(data["proves"]) {
+			return []string{reviewEvidenceTestPolicy}
+		}
+		return nil
+	}
+	// A successful Go test command with no test files proves compilation, not
+	// execution. Keep this fail-closed even if stale or malformed evidence also
+	// claims a test proof.
+	if noTestFiles, _ := data["no_test_files"].(bool); noTestFiles {
+		return []string{reviewEvidenceBuild}
+	}
+	raw, present := data["proves"]
+	if !present {
+		// Compatibility for persisted evidence created before run_verification
+		// emitted explicit proof kinds.
+		return []string{legacyKind}
+	}
+	var values []string
+	switch proofs := raw.(type) {
+	case []string:
+		values = proofs
+	case []any:
+		for _, proof := range proofs {
+			if value, ok := proof.(string); ok {
+				values = append(values, value)
+			}
+		}
+	default:
+		return nil
+	}
+	seen := make(map[string]bool, len(values))
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.ToLower(strings.TrimSpace(value))
+		if (value == reviewEvidenceBuild || value == reviewEvidenceTest) && !seen[value] {
+			seen[value] = true
+			result = append(result, value)
+		}
+	}
+	return result
+}
+
+func reviewVerificationHasExactTestPolicyProof(raw any) bool {
+	switch proofs := raw.(type) {
+	case []string:
+		return len(proofs) == 1 && strings.EqualFold(strings.TrimSpace(proofs[0]), reviewEvidenceTestPolicy)
+	case []any:
+		if len(proofs) != 1 {
+			return false
+		}
+		proof, ok := proofs[0].(string)
+		return ok && strings.EqualFold(strings.TrimSpace(proof), reviewEvidenceTestPolicy)
+	default:
+		return false
+	}
+}
+
+func reviewNoTestScriptPolicyEvidence(data map[string]any) bool {
+	if data == nil {
+		return false
+	}
+	noTestScript, _ := data["no_test_script"].(bool)
+	kind, _ := data["kind"].(string)
+	language, _ := data["language"].(string)
+	path, _ := data["path"].(string)
+	pattern, _ := data["pattern"].(string)
+	status, _ := data["status"].(string)
+	evidence, _ := data["evidence"].(string)
+	command, commandPresent := data["command"].(string)
+	exitCode, exitPresent := reviewEvidenceExitCode(data["exit_code"])
+	argv, argvPresent := reviewVerificationArgv(data["argv"])
+	proofs := reviewVerificationProofKinds(data, reviewEvidenceTest)
+	return noTestScript &&
+		strings.EqualFold(strings.TrimSpace(kind), reviewEvidenceTest) &&
+		strings.EqualFold(strings.TrimSpace(language), "node") &&
+		normalizeReviewEvidencePath(path) != "" &&
+		strings.TrimSpace(pattern) == "" &&
+		strings.EqualFold(strings.TrimSpace(status), string(VerificationNotApplicable)) &&
+		strings.EqualFold(strings.TrimSpace(evidence), "NO_TEST_GATE") &&
+		commandPresent && strings.TrimSpace(command) == "" &&
+		exitPresent && exitCode == -1 && argvPresent && len(argv) == 0 &&
+		len(proofs) == 1 && proofs[0] == reviewEvidenceTestPolicy
+}
+
+func reviewVerificationArgv(raw any) ([]string, bool) {
+	switch values := raw.(type) {
+	case []string:
+		return append([]string(nil), values...), true
+	case []any:
+		result := make([]string, 0, len(values))
+		for _, value := range values {
+			text, ok := value.(string)
+			if !ok {
+				return nil, false
+			}
+			result = append(result, text)
+		}
+		return result, true
+	default:
+		return nil, false
+	}
 }
 
 func validateInconclusiveVerificationClaims(parsed *ParsedReview, execution *oneshot.AgentResult) error {

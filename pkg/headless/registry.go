@@ -14,7 +14,6 @@ import (
 	"m31labs.dev/buckley/pkg/config"
 	"m31labs.dev/buckley/pkg/giturl"
 	"m31labs.dev/buckley/pkg/ipc/command"
-	"m31labs.dev/buckley/pkg/mission"
 	"m31labs.dev/buckley/pkg/model"
 	"m31labs.dev/buckley/pkg/session"
 	"m31labs.dev/buckley/pkg/storage"
@@ -358,11 +357,9 @@ func (r *Registry) buildToolRegistry(sessionID string, project string) (*tool.Re
 	if r.telemetry != nil && strings.TrimSpace(sessionID) != "" {
 		tools.EnableTelemetry(r.telemetry, sessionID)
 	}
-	if r.store != nil && r.config != nil && r.config.Workflow.IncrementalApproval {
-		missionStore := mission.NewStore(r.store.DB())
-		tools.EnableMissionControl(missionStore, "buckley-headless", true, 15*time.Minute)
-		tools.UpdateMissionSession(sessionID)
-	}
+	// Runner owns the durable approval gate for headless sessions. Installing
+	// the legacy Mission middleware here would create a second, client-invisible
+	// approval after Runner has already approved the same tool call.
 	if err := tools.LoadDefaultPlugins(); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to load some plugins: %v\n", err)
 	}

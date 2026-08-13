@@ -2,6 +2,7 @@ package viewmodel
 
 import (
 	"context"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -29,6 +30,7 @@ type sessionRuntime struct {
 	runningTools  map[string]ToolCall
 	recentFiles   []FileTouch
 	activeTouches map[string]CodeTouch
+	agentRuns     map[string]AgentRun
 }
 
 // NewRuntimeStateTracker creates a tracker that subscribes to telemetry events.
@@ -94,6 +96,20 @@ func (t *RuntimeStateTracker) GetRuntimeState(sessionID string) (isStreaming boo
 	return isStreaming, tools, files, touches
 }
 
+// GetAgentRuns returns a deterministic parent/child projection for one
+// session. Terminal runs are retained so clients can render lifecycle state,
+// not only the currently running children.
+func (t *RuntimeStateTracker) GetAgentRuns(sessionID string) []AgentRun {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+
+	sess := t.sessions[sessionID]
+	if sess == nil || len(sess.agentRuns) == 0 {
+		return nil
+	}
+	return buildAgentRunTree(sess.agentRuns)
+}
+
 // SetStreaming directly sets the streaming state for a session.
 // This is called by the orchestrator/controller when streaming starts/ends.
 func (t *RuntimeStateTracker) SetStreaming(sessionID string, streaming bool) {
@@ -126,7 +142,11 @@ func (t *RuntimeStateTracker) handleEvent(event telemetry.Event) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	sess := t.getOrCreateSession(event.SessionID)
+	sessionID := event.SessionID
+	if isSubagentEvent(event.Type) {
+		sessionID = firstNonEmpty(sessionID, getString(event.Data, "parent_session_id"))
+	}
+	sess := t.getOrCreateSession(sessionID)
 
 	switch event.Type {
 	case telemetry.EventModelStreamStarted:
@@ -230,6 +250,13 @@ func (t *RuntimeStateTracker) handleEvent(event telemetry.Event) {
 		if sess.activeTouches != nil {
 			delete(sess.activeTouches, event.TaskID)
 		}
+
+	// Subagents remain in the shared projection through terminal state so
+	// clients can display the outcome instead of losing the row on completion.
+	case telemetry.EventSubagentSpawned, telemetry.EventSubagentState,
+		telemetry.EventSubagentCompleted, telemetry.EventSubagentFailed,
+		telemetry.EventSubagentCancelled:
+		t.updateAgentRun(sess, event, sessionID)
 	}
 }
 
@@ -243,10 +270,161 @@ func (t *RuntimeStateTracker) getOrCreateSession(sessionID string) *sessionRunti
 		sess = &sessionRuntime{
 			runningTools:  make(map[string]ToolCall),
 			activeTouches: make(map[string]CodeTouch),
+			agentRuns:     make(map[string]AgentRun),
 		}
 		t.sessions[sessionID] = sess
 	}
 	return sess
+}
+
+func (t *RuntimeStateTracker) updateAgentRun(sess *sessionRuntime, event telemetry.Event, sessionID string) {
+	if sess == nil {
+		return
+	}
+	id := firstNonEmpty(strings.TrimSpace(event.TaskID), getString(event.Data, "agent_id"))
+	if id == "" {
+		return
+	}
+	if sess.agentRuns == nil {
+		sess.agentRuns = make(map[string]AgentRun)
+	}
+
+	run := sess.agentRuns[id]
+	run.ID = id
+	parentSessionID := firstNonEmpty(getString(event.Data, "parent_session_id"), run.ParentSessionID, sessionID)
+	explicitParentID := firstNonEmpty(getString(event.Data, "parent_run_id"), getString(event.Data, "parent_agent_id"))
+	run.ParentSessionID = parentSessionID
+	run.ParentID = firstNonEmpty(explicitParentID, run.ParentID, parentSessionID)
+	if run.ParentID == run.ID {
+		run.ParentID = parentSessionID
+	}
+
+	run.Agent = firstNonEmpty(getString(event.Data, "agent"), run.Agent, getString(event.Data, "provider"))
+	run.Persona = firstNonEmpty(getString(event.Data, "persona"), run.Persona)
+	run.Model = firstNonEmpty(getString(event.Data, "model"), run.Model)
+	run.Task = firstNonEmpty(getString(event.Data, "task"), run.Task)
+
+	status := normalizeAgentStatus(getString(event.Data, "state"))
+	switch event.Type {
+	case telemetry.EventSubagentCompleted:
+		status = "completed"
+	case telemetry.EventSubagentFailed:
+		status = "failed"
+	case telemetry.EventSubagentCancelled:
+		status = "cancelled"
+	}
+	if isTerminalAgentStatus(run.Status) && !isTerminalAgentStatus(status) {
+		status = run.Status
+	}
+	run.Status = firstNonEmpty(status, run.Status, "running")
+
+	updatedAt := event.Timestamp
+	if updatedAt.IsZero() {
+		updatedAt = time.Now()
+	}
+	if run.StartedAt.IsZero() {
+		run.StartedAt = updatedAt
+	}
+	run.UpdatedAt = updatedAt
+	run.Children = nil
+	sess.agentRuns[id] = run
+}
+
+func buildAgentRunTree(source map[string]AgentRun) []AgentRun {
+	if len(source) == 0 {
+		return nil
+	}
+	nodes := make(map[string]AgentRun, len(source))
+	childIDs := make(map[string][]string, len(source))
+	rootIDs := make([]string, 0, len(source))
+	allIDs := make([]string, 0, len(source))
+	for id, run := range source {
+		run.Children = nil
+		nodes[id] = run
+		allIDs = append(allIDs, id)
+	}
+	for id, run := range nodes {
+		if run.ParentID != "" && run.ParentID != id {
+			if _, ok := nodes[run.ParentID]; ok {
+				childIDs[run.ParentID] = append(childIDs[run.ParentID], id)
+				continue
+			}
+		}
+		rootIDs = append(rootIDs, id)
+	}
+	sortAgentRunIDs(rootIDs, nodes)
+	sortAgentRunIDs(allIDs, nodes)
+	for parentID := range childIDs {
+		sortAgentRunIDs(childIDs[parentID], nodes)
+	}
+
+	state := make(map[string]uint8, len(nodes))
+	var build func(string) AgentRun
+	build = func(id string) AgentRun {
+		run := nodes[id]
+		state[id] = 1
+		for _, childID := range childIDs[id] {
+			if state[childID] != 0 {
+				continue
+			}
+			run.Children = append(run.Children, build(childID))
+		}
+		state[id] = 2
+		return run
+	}
+
+	result := make([]AgentRun, 0, len(rootIDs))
+	for _, id := range rootIDs {
+		if state[id] == 0 {
+			result = append(result, build(id))
+		}
+	}
+	// Malformed cyclic parent data must not make an agent disappear. Promote
+	// any unvisited nodes to roots in the same deterministic order.
+	for _, id := range allIDs {
+		if state[id] == 0 {
+			result = append(result, build(id))
+		}
+	}
+	return result
+}
+
+func sortAgentRunIDs(ids []string, nodes map[string]AgentRun) {
+	sort.Slice(ids, func(i, j int) bool {
+		left, right := nodes[ids[i]], nodes[ids[j]]
+		if !left.StartedAt.Equal(right.StartedAt) {
+			return left.StartedAt.Before(right.StartedAt)
+		}
+		return left.ID < right.ID
+	})
+}
+
+func isSubagentEvent(eventType telemetry.EventType) bool {
+	switch eventType {
+	case telemetry.EventSubagentSpawned, telemetry.EventSubagentState,
+		telemetry.EventSubagentCompleted, telemetry.EventSubagentFailed,
+		telemetry.EventSubagentCancelled:
+		return true
+	default:
+		return false
+	}
+}
+
+func normalizeAgentStatus(status string) string {
+	status = strings.ToLower(strings.TrimSpace(status))
+	if status == "canceled" {
+		return "cancelled"
+	}
+	return status
+}
+
+func isTerminalAgentStatus(status string) bool {
+	switch normalizeAgentStatus(status) {
+	case "completed", "failed", "cancelled":
+		return true
+	default:
+		return false
+	}
 }
 
 // addRecentFile adds a file to the recent files list.

@@ -129,7 +129,9 @@ type Server struct {
 	projectRoot      string
 	workflow         *orchestrator.WorkflowManager
 	viewAssembler    *viewmodel.Assembler
+	viewPatchMu      sync.Mutex
 	viewPatchWG      sync.WaitGroup
+	viewPatchClosing bool
 	runtimeTracker   *viewmodel.RuntimeStateTracker
 	headlessRegistry HeadlessRegistry
 	grpcService      *GRPCService
@@ -206,6 +208,8 @@ func shouldPersistEvent(eventType string) bool {
 
 // Start runs the HTTP server until the context is cancelled.
 func (s *Server) Start(ctx context.Context) error {
+	defer s.waitForViewPatches()
+
 	if err := s.validateStartupConfig(); err != nil {
 		return err
 	}
@@ -2170,6 +2174,11 @@ func (s *Server) readClient(ctx context.Context, c *client) {
 }
 
 func (s *Server) onStorageEvent(event storage.Event) {
+	if s == nil || !s.beginViewPatch() {
+		return
+	}
+	defer s.viewPatchWG.Done()
+
 	ipcEvent := Event{
 		Type:      string(event.Type),
 		SessionID: event.SessionID,
@@ -2180,18 +2189,29 @@ func (s *Server) onStorageEvent(event storage.Event) {
 	s.hub.Broadcast(ipcEvent)
 
 	if event.SessionID != "" && s.viewAssembler != nil {
-		s.viewPatchWG.Add(1)
-		go func(sessionID string) {
-			defer s.viewPatchWG.Done()
-			s.broadcastViewPatch(sessionID)
-		}(event.SessionID)
+		s.broadcastViewPatch(event.SessionID)
 	}
 }
 
+func (s *Server) beginViewPatch() bool {
+	s.viewPatchMu.Lock()
+	defer s.viewPatchMu.Unlock()
+	if s.viewPatchClosing {
+		return false
+	}
+	s.viewPatchWG.Add(1)
+	return true
+}
+
+// waitForViewPatches permanently closes observer admission, then drains work
+// admitted before shutdown began.
 func (s *Server) waitForViewPatches() {
 	if s == nil {
 		return
 	}
+	s.viewPatchMu.Lock()
+	s.viewPatchClosing = true
+	s.viewPatchMu.Unlock()
 	s.viewPatchWG.Wait()
 }
 

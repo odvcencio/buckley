@@ -6,6 +6,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/PuerkitoBio/goquery"
 )
 
 type testBackend struct {
@@ -97,5 +99,102 @@ func TestNewHandlerRendersTokenGate(t *testing.T) {
 	handler.ServeHTTP(resp, httptest.NewRequest(http.MethodGet, "http://localhost/", nil))
 	if resp.Code != http.StatusOK || !strings.Contains(resp.Body.String(), "IPC token") {
 		t.Fatalf("expected token gate, status=%d body=%q", resp.Code, resp.Body.String())
+	}
+}
+
+func TestNewHandlerRendersSharedAgentProjection(t *testing.T) {
+	backend := &testBackend{data: PageData{
+		Authenticated: true,
+		PrincipalName: "member",
+		Scope:         "member",
+		CanWrite:      true,
+		Current:       &SessionView{ID: "session-1", Project: "/tmp/repo", Status: "active"},
+		AgentRuns: []AgentView{{
+			ID:              "agent-parent",
+			ParentID:        "session-1",
+			ParentSessionID: "session-1",
+			Agent:           "reviewer",
+			Persona:         "review",
+			Model:           "example/frontier",
+			Status:          "running",
+			Task:            "review the repository",
+			Children: []AgentView{{
+				ID:              "agent-child",
+				ParentID:        "agent-parent",
+				ParentSessionID: "session-1",
+				Agent:           "researcher",
+				Persona:         "research",
+				Model:           "example/cheap",
+				Status:          "completed",
+				Task:            "trace call sites",
+			}},
+		}},
+	}}
+	handler := NewHandler(backend)
+
+	resp := httptest.NewRecorder()
+	handler.ServeHTTP(resp, httptest.NewRequest(http.MethodGet, "http://localhost/?session=session-1", nil))
+	if resp.Code != http.StatusOK {
+		t.Fatalf("GET / status=%d", resp.Code)
+	}
+	body := resp.Body.String()
+	for _, want := range []string{
+		"Agent activity",
+		`data-agent-id="agent-parent"`,
+		`data-parent-id="session-1"`,
+		"review · reviewer",
+		"running · example/frontier · parent session-1",
+		"review the repository",
+		`data-agent-id="agent-child"`,
+		`data-parent-id="agent-parent"`,
+		"research · researcher",
+		"completed · example/cheap · parent agent-parent",
+		"trace call sites",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("agent projection missing %q: %s", want, body)
+		}
+	}
+	if strings.Index(body, `data-agent-id="agent-parent"`) > strings.Index(body, `data-agent-id="agent-child"`) {
+		t.Fatalf("child rendered before parent: %s", body)
+	}
+
+	doc, err := goquery.NewDocumentFromReader(strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("parse rendered document: %v", err)
+	}
+	if _, checked := doc.Find("#side-toggle-agent-activity").Attr("checked"); !checked {
+		t.Fatal("agent activity should start expanded on narrow layouts when runs exist")
+	}
+	if _, checked := doc.Find("#side-toggle-agent-catalog").Attr("checked"); checked {
+		t.Fatal("agent catalog should start collapsed on narrow layouts")
+	}
+	if got := doc.Find("#side-toggle-agent-activity + label + .side-section-body [data-agent-id]").Length(); got != 2 {
+		t.Fatalf("responsive agent activity contains %d runs, want 2", got)
+	}
+}
+
+func TestMissionControlCSSKeepsNarrowAgentSectionsReachable(t *testing.T) {
+	handler := NewHandler(&testBackend{data: PageData{Authenticated: true}})
+	asset := httptest.NewRecorder()
+	handler.ServeHTTP(asset, httptest.NewRequest(http.MethodGet, "http://localhost/assets/mission-control.css", nil))
+	if asset.Code != http.StatusOK {
+		t.Fatalf("CSS status=%d", asset.Code)
+	}
+	css := asset.Body.String()
+	for _, want := range []string{
+		".status-running",
+		".status-starting",
+		".status-queued",
+		".side-section-toggle { display: none; }",
+		".side-section-toggle { display: block; height: 1px;",
+		".side-section-toggle:not(:checked) ~ .side-section-body",
+	} {
+		if !strings.Contains(css, want) {
+			t.Fatalf("responsive CSS missing %q", want)
+		}
+	}
+	if strings.Contains(css, ".side-section:nth-child(n+2)") {
+		t.Fatal("narrow CSS still removes the agent sections")
 	}
 }

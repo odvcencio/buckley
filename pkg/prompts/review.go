@@ -92,7 +92,7 @@ NON-NEGOTIABLE REVIEW RULES:
 - Pending, unknown, absent, or stale remote CI is a merge gate, not a proved current failure. When no proved finding or unresolved feedback exists, use Grade B with NEEDS DISCUSSION.
 - Missing duplicate verification alone requires Grade B with NEEDS DISCUSSION, not Grade C or a procedural blocker.
 - Keep a pending or unavailable CI condition in CI Status and Remarks. Do not list the condition as a Blocker or Finding.
-- Build and Tests must each start with exactly one normalized state: PASS, FAIL, PENDING, NOT_RUN, UNAVAILABLE, or UNKNOWN. Do not write arbitrary prose in place of the state.
+- Build and Tests start with one state: PASS, FAIL, NOT_APPLICABLE, PENDING, NOT_RUN, UNAVAILABLE, or UNKNOWN. Tests NOT_APPLICABLE requires trusted NO_TEST_GATE; never infer it from missing tools.
 - PASS must cite the focused command or named remote checks that passed. FAIL, PENDING, NOT_RUN, UNAVAILABLE, and UNKNOWN never permit approval.
 - If the diff or GitHub context is marked partial/truncated, do not approve; state exactly what evidence is missing.
 - Anchor each finding to the smallest changed right-side line that demonstrates the defect. GitHub must accept the line as an inline comment.
@@ -160,7 +160,7 @@ Grading criteria:
 
 ## CI Status
 - Build: PASS|FAIL|PENDING|NOT_RUN|UNAVAILABLE|UNKNOWN — command or named remote-check evidence
-- Tests: PASS|FAIL|PENDING|NOT_RUN|UNAVAILABLE|UNKNOWN — command or named remote-check evidence
+- Tests: PASS|FAIL|NOT_APPLICABLE|PENDING|NOT_RUN|UNAVAILABLE|UNKNOWN — command, typed NO_TEST_GATE policy, or named remote-check evidence
 - Other checks: status
 
 ## Coverage
@@ -241,11 +241,11 @@ Approval rules:
 - For framework-generated or convention-shaped state, trace the real producer, serializer, runtime binding, and consumer key shape; cover success, failure, empty/default, and redirect/reload.
 - For visual/canvas/shader/layout changes, verify coordinate space against the actual render or mount box, responsive transforms, overflow, and initial/settled states. Require pixel or screenshot evidence; metrics alone cannot approve.
 - Distinguish generated or framework-owned runtime code from app-owned bespoke JavaScript; do not count generated runtime as bespoke app code.
-- APPROVE requires both Build and Tests to be PASS from focused local verification actually completed with the same applicable toolchain and targets that cover every changed source path. Any FAIL, PENDING, NOT_RUN, UNAVAILABLE, or UNKNOWN state blocks approval.
+- APPROVE requires Build PASS plus Tests PASS, or trusted NO_TEST_GATE for a Node package with no test script. Evidence must cover every changed source path with the same applicable toolchain and targets. Any FAIL, PENDING, NOT_RUN, UNAVAILABLE, or UNKNOWN state blocks approval.
 - For Go, harness-collected run_verification kind=test supplies Build and Tests evidence. Go kind=build does not execute tests.
 `+RuleUseHarnessVerificationEvidence+`
 - Documentation-only exception: if every changed path is documentation, use exact changed claims, links, or diff hunks; do not manufacture source checks. Mixed, source, and configuration changes do not qualify.
-- Cache/temp variables are already supplied by the sandbox. Do not override PATH or tool options. Non-Go Build and Tests must be separate, standalone commands at snapshot root with no chains, pipes, redirections, or cd.
+- Cache/temp defaults are already supplied by the sandbox. Non-Go Build and Tests use separate snapshot-root commands; no chains, pipes, redirects, or cd.
 - Treat CONFIRMED_PASS as authoritative for the behavior that the focused command exercises. Filenames, field visibility, and source-shape heuristics cannot override it.
 - Treat INCONCLUSIVE, timeout, cancellation, and unavailable results as unknown evidence. Never use them to prove a failure or create a Finding.
 - Treat claims as hypotheses. Report only proven findings with exact file:line evidence and a concrete fix. If evidence is incomplete or truncated, do not approve.
@@ -268,7 +268,7 @@ Two or three sentences on behavior and impact.
 
 ## Build & Test Status
 - Build: PASS|FAIL|PENDING|NOT_RUN|UNAVAILABLE|UNKNOWN — exact focused evidence
-- Tests: PASS|FAIL|PENDING|NOT_RUN|UNAVAILABLE|UNKNOWN — exact focused evidence
+- Tests: PASS|FAIL|NOT_APPLICABLE|PENDING|NOT_RUN|UNAVAILABLE|UNKNOWN — exact focused execution or typed NO_TEST_GATE evidence
 
 ## Coverage
 - **File**: `+"`"+`path/to/changed-file`+"`"+` — hunks, contract/invariant, evidence

@@ -21,7 +21,7 @@ func appendReviewVerificationTargets(sb *strings.Builder, changedFiles []string,
 		return
 	}
 	sb.WriteString("## Required Local Verification Targets\n\n")
-	sb.WriteString("For each Go target, call `run_verification` once with `kind=test`; that call supplies build and test evidence. Do not use `kind=build` because it does not execute tests. For other languages, call both kinds. Use each exact language and repository-relative path.\n\n")
+	sb.WriteString("For each Go target, call `run_verification` once with `kind=test`; that call supplies build and test evidence. Do not use `kind=build` because it does not execute tests. For other languages, call both kinds. A Node package without a declared test script returns typed NOT_APPLICABLE policy evidence, which is valid only alongside a successful build for the same changed files. Use each exact language and repository-relative path.\n\n")
 	if hasNestedGoVerificationTarget(targets) {
 		sb.WriteString("Never call `run_verification` with Go `path: .` for these nested targets. A root `go test .` does not cover them and wastes a verification call; use each exact Go directory listed below.\n\n")
 	}
@@ -218,7 +218,8 @@ func reviewEvidenceCoversFile(evidence []reviewCommandEvidenceDetails, language,
 	fileDir := filepath.ToSlash(filepath.Dir(file))
 	for _, item := range evidence {
 		kindMatches := item.Kind == kind ||
-			(language == "go" && kind == reviewEvidenceBuild && item.Kind == reviewEvidenceTest)
+			(language == "go" && kind == reviewEvidenceBuild && item.Kind == reviewEvidenceTest) ||
+			(language == "node" && kind == reviewEvidenceTest && item.Kind == reviewEvidenceTestPolicy)
 		if !kindMatches || item.Language != language {
 			continue
 		}

@@ -88,7 +88,7 @@ models:
 
   # Utility models for lightweight tasks
   utility:
-    commit: qwen/qwen3.6-flash
+    commit: qwen/qwen3.7-flash
     pr: qwen/qwen3.6-flash
     compaction: qwen/qwen3.6-flash
     todo_plan: qwen/qwen3.6-flash
@@ -103,7 +103,7 @@ models:
 | `review` | `z-ai/glm-5.2` |
 | `default_provider` | `openrouter` |
 | `reasoning` | `""` (auto-detect) |
-| `utility.commit` | `qwen/qwen3.6-flash` |
+| `utility.commit` | `qwen/qwen3.7-flash` |
 | `utility.pr` | `qwen/qwen3.6-flash` |
 | `utility.compaction` | `qwen/qwen3.6-flash` |
 | `utility.todo_plan` | `qwen/qwen3.6-flash` |
@@ -148,6 +148,8 @@ The default configuration does not apply a protocol. Use `shadow` to inspect
 receipts first. Dynamic mode narrows tools and caps work from profile facts.
 Automatic read-only code mode still requires a policy decision and a working
 bubblewrap sandbox. Set `BUCKLEY_ADAPTIVE_PROTOCOL_MODE` to override `mode`.
+This adaptive-session setting does not disable Buckbot's audited read-only code
+mode over immutable API review snapshots.
 
 ### buckbot
 
@@ -852,5 +854,5 @@ Dependencies:
 ## See Also
 
 - [CLI Reference](CLI.md)
-- [Error Codes](ERRORS.md)
-- [Release Process](RELEASE.md)
+- [Troubleshooting](troubleshooting.md)
+- [Running Durable Goals](goals.md)

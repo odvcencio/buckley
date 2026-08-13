@@ -3,6 +3,8 @@ package subagent
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -28,6 +30,17 @@ func (f interactiveRunnerFunc) RunInteractive(ctx context.Context, request Reque
 	return f(ctx, request, started, commands)
 }
 
+type capturedRunnerFunc func(context.Context, Request, func(int)) (CapturedOutput, error)
+
+func (f capturedRunnerFunc) Run(ctx context.Context, request Request, started func(int)) (string, error) {
+	capture, err := f(ctx, request, started)
+	return capture.Preview, err
+}
+
+func (f capturedRunnerFunc) RunCaptured(ctx context.Context, request Request, started func(int)) (CapturedOutput, error) {
+	return f(ctx, request, started)
+}
+
 func TestManager_SpawnTracksParentAndCompletion(t *testing.T) {
 	manager := NewManager(runnerFunc(func(_ context.Context, request Request, started func(int)) (string, error) {
 		if request.ParentSessionID != "parent-1" || request.Agent != "reviewer" || request.Task != "inspect this" {
@@ -49,6 +62,133 @@ func TestManager_SpawnTracksParentAndCompletion(t *testing.T) {
 	}
 	if finished.State != StateCompleted || finished.ParentSessionID != "parent-1" || finished.Task != "inspect this" || finished.PID != 42 || finished.Output != "complete output" {
 		t.Fatalf("unexpected snapshot: %+v", finished)
+	}
+}
+
+func TestManager_OutputSpoolCeilingFailsExplicitlyAndCleansUp(t *testing.T) {
+	spoolPath := filepath.Join(t.TempDir(), "child-output.log")
+	if err := os.WriteFile(spoolPath, []byte(strings.Repeat("x", 64)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	manager := NewManager(capturedRunnerFunc(func(context.Context, Request, func(int)) (CapturedOutput, error) {
+		return CapturedOutput{
+			Preview:       "bounded preview",
+			SpoolPath:     spoolPath,
+			ObservedBytes: 1024,
+			CapturedBytes: 64,
+			LimitBytes:    64,
+			Truncated:     true,
+		}, nil
+	}), 1)
+	spoolVisible := make(chan bool, 1)
+	manager.SetLifecycleObserver(func(snapshot Snapshot) {
+		if snapshotTerminal(snapshot.State) {
+			_, err := os.Stat(snapshot.OutputSpoolPath)
+			spoolVisible <- err == nil
+		}
+	})
+	t.Cleanup(func() { _ = manager.Close() })
+
+	spawned, err := manager.Spawn("reviewer", "", "produce a large report", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	finished, err := manager.Wait(context.Background(), spawned.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if finished.State != StateFailed || !finished.OutputTruncated || finished.OutputBytes != 1024 || finished.CapturedBytes != 64 {
+		t.Fatalf("finished = %+v", finished)
+	}
+	if !strings.Contains(finished.Error, "64-byte disk ceiling") || !strings.Contains(finished.Error, "result is incomplete") {
+		t.Fatalf("error = %q", finished.Error)
+	}
+	if !<-spoolVisible {
+		t.Fatal("terminal observer could not read the output spool")
+	}
+	if _, err := os.Stat(spoolPath); !os.IsNotExist(err) {
+		t.Fatalf("output spool was not removed after observation: %v", err)
+	}
+}
+
+func TestManager_UsesStrictestExplicitElapsedLimit(t *testing.T) {
+	deadlines := make(chan time.Duration, 1)
+	manager := NewManager(runnerFunc(func(ctx context.Context, request Request, _ func(int)) (string, error) {
+		deadline, ok := ctx.Deadline()
+		if !ok {
+			deadlines <- 0
+		} else {
+			deadlines <- time.Until(deadline)
+		}
+		if request.TimeoutSeconds != 30 || request.Budget.MaxElapsedSecond != 10 {
+			t.Fatalf("request limits = %+v", request)
+		}
+		return "done", nil
+	}), 1)
+	t.Cleanup(func() { _ = manager.Close() })
+
+	spawned, err := manager.SpawnWithOptions(SpawnOptions{
+		Task:           "inspect",
+		TimeoutSeconds: 30,
+		Budget:         agentcoord.Budget{MaxElapsedSecond: 10},
+	})
+	if err != nil {
+		t.Fatalf("SpawnWithOptions: %v", err)
+	}
+	remaining := <-deadlines
+	if remaining <= 9*time.Second || remaining > 10*time.Second {
+		t.Fatalf("deadline remaining = %s, want strict 10s limit", remaining)
+	}
+	if _, err := manager.Wait(context.Background(), spawned.ID); err != nil {
+		t.Fatalf("Wait: %v", err)
+	}
+}
+
+func TestManager_ZeroElapsedLimitsRemainUnbounded(t *testing.T) {
+	deadlinePresent := make(chan bool, 1)
+	manager := NewManager(runnerFunc(func(ctx context.Context, request Request, _ func(int)) (string, error) {
+		_, ok := ctx.Deadline()
+		deadlinePresent <- ok
+		if request.TimeoutSeconds != 0 || request.Budget.MaxElapsedSecond != 0 {
+			t.Fatalf("request limits = %+v", request)
+		}
+		return "done", nil
+	}), 1)
+	t.Cleanup(func() { _ = manager.Close() })
+
+	spawned, err := manager.SpawnWithOptions(SpawnOptions{Task: "inspect"})
+	if err != nil {
+		t.Fatalf("SpawnWithOptions: %v", err)
+	}
+	if <-deadlinePresent {
+		t.Fatal("zero child elapsed limits unexpectedly created a deadline")
+	}
+	if _, err := manager.Wait(context.Background(), spawned.ID); err != nil {
+		t.Fatalf("Wait: %v", err)
+	}
+}
+
+func TestManager_ElapsedLimitIsFailedNotUserCancelled(t *testing.T) {
+	manager := NewManager(runnerFunc(func(ctx context.Context, _ Request, started func(int)) (string, error) {
+		started(12)
+		<-ctx.Done()
+		return "", ctx.Err()
+	}), 1)
+	t.Cleanup(func() { _ = manager.Close() })
+
+	spawned, err := manager.SpawnWithOptions(SpawnOptions{
+		Task:   "bounded",
+		Budget: agentcoord.Budget{MaxElapsedSecond: 1},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	finished, err := manager.Wait(context.Background(), spawned.ID)
+	if err != nil {
+		t.Fatalf("Wait: %v", err)
+	}
+	if finished.State != StateFailed || !strings.Contains(finished.Error, "elapsed-time limit exceeded") {
+		t.Fatalf("finished = %+v, want failed elapsed-limit result", finished)
 	}
 }
 
@@ -212,7 +352,7 @@ func TestManager_PublishesExecutionContractTelemetry(t *testing.T) {
 	manager.SetTelemetry(hub, "parent")
 	t.Cleanup(func() { _ = manager.Close() })
 	spawned, err := manager.SpawnWithOptions(SpawnOptions{
-		Agent: "worker", Task: "inspect", Model: "example/model", Tier: persona.TierExecute, Effort: "medium", StepCap: 7,
+		Agent: "worker", ParentRunID: "parent-run", Task: "inspect", Model: "example/model", Tier: persona.TierExecute, Effort: "medium", StepCap: 7,
 		AllowedTools: []string{"read_file", "find_files"}, WorkspaceClaims: []string{"pkg/subagent"}, Isolation: "worktree", OutputSchema: "buckley.artifact/v1", ApprovalPosture: "safe",
 	})
 	if err != nil {
@@ -227,7 +367,7 @@ func TestManager_PublishesExecutionContractTelemetry(t *testing.T) {
 			if event.Type != telemetry.EventSubagentCompleted {
 				continue
 			}
-			for key, want := range map[string]any{"model": "example/model", "tier": "execute", "effort": "medium", "step_cap": 7, "allowed_tool_count": 2, "isolation": "worktree", "output_schema": "buckley.artifact/v1", "approval_posture": "safe"} {
+			for key, want := range map[string]any{"parent_run_id": "parent-run", "state": "completed", "model": "example/model", "tier": "execute", "effort": "medium", "step_cap": 7, "allowed_tool_count": 2, "isolation": "worktree", "output_schema": "buckley.artifact/v1", "approval_posture": "safe"} {
 				if got := event.Data[key]; got != want {
 					t.Fatalf("telemetry %s = %#v, want %#v: %+v", key, got, want, event.Data)
 				}

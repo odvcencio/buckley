@@ -3,11 +3,11 @@ layout: home
 
 hero:
   name: Buckley
-  text: AI dev assistant that remembers what you're doing
-  tagline: Sessions survive crashes. Four trust levels. Loop detection. Multi-model experiments. Built by someone who uses it daily.
+  text: Tool-first AI agent harness for serious repository work
+  tagline: Durable sessions, governed tools, capable subagents, and one shared runtime across terminal, browser, ACP, and LSP.
   image:
     src: /logo.jpg
-    alt: Buckley - your AI development companion
+    alt: Buckley tool-first AI agent harness
   actions:
     - theme: brand
       text: Get Started
@@ -43,20 +43,22 @@ features:
 ## Quick Start
 
 ```bash
-go install m31labs.dev/buckley/cmd/buckley@v0.4.0
+go install m31labs.dev/buckley/cmd/buckley@v0.7.0
 export OPENROUTER_API_KEY="your-key"
 buckley
 ```
 
 ## Core Concepts
 
-### Three Ways to Use It
+### Five Ways to Use It
 
 | Mode | Command | Use Case |
 |------|---------|----------|
 | **TUI** | `buckley` | Interactive terminal with streaming and approvals |
-| **GoSX** | `buckley serve --browser` | Server-rendered Mission Control |
-| **API** | `buckley api` | Headless for CI/CD integration |
+| **One-shot** | `buckley -p "inspect this repo"` | Scriptable task execution |
+| **GoSX** | `buckley serve --browser` | Local Mission Control with live agent telemetry |
+| **ACP** | `buckley acp` | ACP-compatible editor agent over stdio |
+| **LSP** | `buckley lsp` | Coordinator-backed LSP editor bridge |
 
 ### The Workflow
 
@@ -100,11 +102,11 @@ providers:
 |------|--------------|
 | [CLI Reference](./CLI.md) | Commands, flags, shortcuts |
 | [Configuration](./CONFIGURATION.md) | All config options |
-| [Skills](./SKILLS.md) | Workflow guidance system |
-| [Tools](./TOOLS.md) | Built-in tools reference |
-| [Orchestration](./ORCHESTRATION.md) | Multi-agent coordination |
+| [Running Goals](./goals.md) | Durable long-horizon work |
+| [Code Mode](./code-mode.md) | Audited repository analysis |
+| [Troubleshooting](./troubleshooting.md) | Symptoms and fixes |
+| [Mission Control](./MISSION_CONTROL.md) | Browser interface and telemetry |
 | [Editor Integration](./ACP.md) | Zed ACP (optional LSP bridge) |
-| [Architecture Decisions](./architecture/decisions/) | Design rationale |
 
 ## Open Source
 

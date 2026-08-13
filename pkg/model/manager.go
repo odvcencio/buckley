@@ -2,6 +2,7 @@ package model
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"regexp"
@@ -325,7 +326,7 @@ func (m *Manager) ChatCompletion(ctx context.Context, req ChatRequest) (*ChatRes
 	req = applyProviderTransforms(req, provider.ID())
 	req = m.applyPromptCache(req, provider.ID())
 	req.Model = normalizeModelForProvider(req.Model, provider.ID())
-	resp, err := provider.ChatCompletion(ctx, req)
+	resp, err := chatCompletionWithAffordableOutputRetry(ctx, provider, req)
 	if err != nil {
 		return nil, err
 	}
@@ -336,6 +337,24 @@ func (m *Manager) ChatCompletion(ctx context.Context, req ChatRequest) (*ChatRes
 		return nil, NoResponseChoicesError(req, resp)
 	}
 	return resp, nil
+}
+
+func chatCompletionWithAffordableOutputRetry(ctx context.Context, provider Provider, req ChatRequest) (*ChatResponse, error) {
+	for attempt := 0; ; attempt++ {
+		resp, err := provider.ChatCompletion(ctx, req)
+		if err == nil || provider.ID() != "openrouter" || attempt >= maxAffordableOutputRetries {
+			return resp, err
+		}
+		affordable, ok := affordableOutputTokenLimit(err)
+		if !ok {
+			return nil, err
+		}
+		next, lowered := lowerRequestOutputLimit(req, affordable)
+		if !lowered {
+			return nil, err
+		}
+		req = next
+	}
 }
 
 // SupportsContinuation reports whether the provider selected for modelID
@@ -374,7 +393,25 @@ func (m *Manager) ChatCompletionWithContinuation(ctx context.Context, continuati
 	req.Model = normalizeModelForProvider(req.Model, provider.ID())
 	continuationReq.Request = req
 
-	resp, err := client.ChatCompletionWithContinuation(ctx, continuationReq)
+	var (
+		resp *ContinuationResponse
+		err  error
+	)
+	for attempt := 0; ; attempt++ {
+		resp, err = client.ChatCompletionWithContinuation(ctx, continuationReq)
+		if err == nil || provider.ID() != "openrouter" || attempt >= maxAffordableOutputRetries {
+			break
+		}
+		affordable, ok := affordableOutputTokenLimit(err)
+		if !ok {
+			break
+		}
+		next, lowered := lowerRequestOutputLimit(continuationReq.Request, affordable)
+		if !lowered {
+			break
+		}
+		continuationReq.Request = next
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -403,11 +440,86 @@ func (m *Manager) ChatCompletionStream(ctx context.Context, req ChatRequest) (<-
 	req = applyProviderTransforms(req, provider.ID())
 	req = m.applyPromptCache(req, provider.ID())
 	req.Model = normalizeModelForProvider(req.Model, provider.ID())
-	return provider.ChatCompletionStream(ctx, req)
+	if provider.ID() != "openrouter" {
+		return provider.ChatCompletionStream(ctx, req)
+	}
+	return chatCompletionStreamWithAffordableOutputRetry(ctx, provider, req)
+}
+
+// chatCompletionStreamWithAffordableOutputRetry retries only a provider
+// rejection that arrives before the first stream chunk. Once any content,
+// reasoning, usage, or tool-call delta has been observed, replaying the request
+// could duplicate externally visible work and the original error is final.
+func chatCompletionStreamWithAffordableOutputRetry(ctx context.Context, provider Provider, req ChatRequest) (<-chan StreamChunk, <-chan error) {
+	chunksOut := make(chan StreamChunk, 10)
+	errorsOut := make(chan error, 1)
+
+	go func() {
+		defer close(chunksOut)
+		defer close(errorsOut)
+
+		for attempt := 0; ; attempt++ {
+			chunks, errStream := provider.ChatCompletionStream(ctx, req)
+			sawChunk := false
+			var terminalErr error
+			for chunks != nil || errStream != nil {
+				select {
+				case <-ctx.Done():
+					if terminalErr != nil {
+						errorsOut <- errors.Join(ctx.Err(), terminalErr)
+					} else {
+						errorsOut <- ctx.Err()
+					}
+					return
+				case chunk, ok := <-chunks:
+					if !ok {
+						chunks = nil
+						continue
+					}
+					sawChunk = true
+					select {
+					case chunksOut <- chunk:
+					case <-ctx.Done():
+						errorsOut <- ctx.Err()
+						return
+					}
+				case err, ok := <-errStream:
+					if !ok {
+						errStream = nil
+						continue
+					}
+					if err != nil {
+						terminalErr = err
+					}
+				}
+			}
+
+			if terminalErr == nil {
+				return
+			}
+			if sawChunk || attempt >= maxAffordableOutputRetries {
+				errorsOut <- terminalErr
+				return
+			}
+			affordable, ok := affordableOutputTokenLimit(terminalErr)
+			if !ok {
+				errorsOut <- terminalErr
+				return
+			}
+			next, lowered := lowerRequestOutputLimit(req, affordable)
+			if !lowered {
+				errorsOut <- terminalErr
+				return
+			}
+			req = next
+		}
+	}()
+
+	return chunksOut, errorsOut
 }
 
 func (m *Manager) applyFallbackChain(req ChatRequest, selectedModel, providerID string) ChatRequest {
-	if m == nil || m.config == nil || providerID != "openrouter" || len(req.Models) > 0 {
+	if m == nil || m.config == nil || providerID != "openrouter" || len(req.Models) > 0 || requestDisablesFallbacks(req) {
 		return req
 	}
 
@@ -449,6 +561,15 @@ func (m *Manager) applyFallbackChain(req ChatRequest, selectedModel, providerID 
 		req.Provider["allow_fallbacks"] = true
 	}
 	return req
+}
+
+func requestDisablesFallbacks(req ChatRequest) bool {
+	allowFallbacks, present := req.Provider["allow_fallbacks"]
+	if !present {
+		return false
+	}
+	enabled, ok := allowFallbacks.(bool)
+	return ok && !enabled
 }
 
 func applyProviderTransforms(req ChatRequest, providerID string) ChatRequest {

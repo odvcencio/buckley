@@ -10,6 +10,7 @@ import (
 
 	"m31labs.dev/buckley/pkg/config"
 	"m31labs.dev/buckley/pkg/model"
+	"m31labs.dev/buckley/pkg/telemetry"
 )
 
 func newCoordinatorTestManager(t *testing.T, server *httptest.Server) *model.Manager {
@@ -154,5 +155,68 @@ func TestRuntimeExecute_AccumulatesStateAcrossRounds(t *testing.T) {
 	final := bodies[2]
 	if !strings.Contains(final, "call_coord_1") || !strings.Contains(final, "call_coord_2") {
 		t.Fatalf("final request missing accumulated tool calls: %s", final)
+	}
+}
+
+func TestRuntimeExecute_RoundGuardFinalizesAndReportsTermination(t *testing.T) {
+	var bodies []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		bodies = append(bodies, string(body))
+		w.Header().Set("Content-Type", "application/json")
+		if len(bodies) == 1 {
+			_, _ = io.WriteString(w, `{
+				"id":"chatcmpl-1","model":"gpt-4o",
+				"choices":[{"index":0,"message":{"role":"assistant","tool_calls":[{"id":"call_coord_guard","type":"function","function":{"name":"set_answer","arguments":"{\"content\":\"partial\",\"ready\":false,\"confidence\":0.1}"}}]},"finish_reason":"tool_calls"}],
+				"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}
+			}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{
+			"id":"chatcmpl-2","model":"gpt-4o",
+			"choices":[{"index":0,"message":{"role":"assistant","content":"guarded final synthesis"},"finish_reason":"stop"}],
+			"usage":{"prompt_tokens":30,"completion_tokens":10,"total_tokens":40}
+		}`)
+	}))
+	defer server.Close()
+
+	mgr := newCoordinatorTestManager(t, server)
+	hub := telemetry.NewHub()
+	events, unsubscribe := hub.Subscribe()
+	defer unsubscribe()
+	cfg := DefaultConfig()
+	cfg.Coordinator.MaxIterations = 1
+	rt, err := NewRuntime(cfg, RuntimeDeps{Models: mgr, Telemetry: hub, SessionID: "guard-session"})
+	if err != nil {
+		t.Fatalf("NewRuntime: %v", err)
+	}
+
+	answer, err := rt.Execute(context.Background(), "answer from available evidence")
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if answer.Content != "guarded final synthesis" || !answer.Ready {
+		t.Fatalf("answer = %+v, want conclusive guard synthesis", answer)
+	}
+	if answer.TokensUsed != 55 {
+		t.Fatalf("TokensUsed = %d, want finalization usage included", answer.TokensUsed)
+	}
+	if len(bodies) != 2 || !strings.Contains(bodies[1], "stopped further tool execution") {
+		t.Fatalf("finalization request missing or ungrounded: %v", bodies)
+	}
+
+	foundTermination := false
+	for {
+		select {
+		case event := <-events:
+			if event.Type == telemetry.EventDebug && event.Data["source"] == "rlm.controller" {
+				foundTermination = event.Data["termination_kind"] == "round_limit" && event.Data["finalization_attempted"] == true
+			}
+		default:
+			if !foundTermination {
+				t.Fatal("missing RLM controller termination telemetry")
+			}
+			return
+		}
 	}
 }

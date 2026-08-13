@@ -144,6 +144,7 @@ func (a *Assembler) BuildSessionState(_ context.Context, sessionID string) (*Ses
 		state.ActiveToolCalls = tools
 		state.RecentFiles = files
 		state.ActiveTouches = touches
+		state.AgentRuns = a.runtime.GetAgentRuns(sess.ID)
 	}
 
 	return state, nil

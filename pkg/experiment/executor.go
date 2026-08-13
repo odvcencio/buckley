@@ -71,6 +71,7 @@ func (e *experimentExecutor) Execute(ctx context.Context, task *parallel.AgentTa
 	registry := e.buildRegistry(task, wtPath)
 	output, metrics, files, err := e.runConversation(runCtx, modelID, registry, task.Prompt, task.Context["system_prompt"], task.Context["temperature"], task.Context["max_tokens"])
 	result.Duration = time.Since(start)
+	result.Output = output
 	diffFiles, diffStats, diffErr := diffStatsFromWorktree(wtPath)
 	if diffErr == nil {
 		files = mergeFiles(files, diffFiles)
@@ -93,7 +94,6 @@ func (e *experimentExecutor) Execute(ctx context.Context, task *parallel.AgentTa
 	}
 
 	result.Success = true
-	result.Output = output
 	return result, nil
 }
 
@@ -272,13 +272,18 @@ func (e *experimentExecutor) runConversation(ctx context.Context, modelID string
 
 	result, err := controller.Run(ctx)
 	if err != nil {
-		return "", metrics, collectFiles(filesTouched), err
+		output := ""
+		if result != nil {
+			output = result.Content
+		}
+		return output, metrics, collectFiles(filesTouched), err
 	}
-	if result.FinishReason == agentloop.FinishReasonEmptyChoices {
-		return "", metrics, collectFiles(filesTouched), fmt.Errorf("no response choices")
-	}
-	if result.FinishReason == agentloop.FinishReasonLoopGuard || result.FinishReason == agentloop.FinishReasonStepCap {
-		return "", metrics, collectFiles(filesTouched), fmt.Errorf("max tool iterations exceeded")
+	if conclusiveErr := result.RequireConclusive(); conclusiveErr != nil {
+		output := ""
+		if result != nil {
+			output = result.Content
+		}
+		return output, metrics, collectFiles(filesTouched), conclusiveErr
 	}
 
 	text, err := model.ExtractTextContent(result.Message.Content)

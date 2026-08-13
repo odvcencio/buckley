@@ -200,3 +200,63 @@ func TestSubAgentExecute_AccumulatesTokensAndToolCallsAcrossRounds(t *testing.T)
 		t.Fatalf("final request missing accumulated tool calls: %s", final)
 	}
 }
+
+func TestSubAgentExecute_GuardFinalizesAndPreservesTermination(t *testing.T) {
+	const guardedToolCalls = subAgentGovernorCycleRepeats
+	var bodies []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		bodies = append(bodies, string(body))
+		w.Header().Set("Content-Type", "application/json")
+		if len(bodies) <= guardedToolCalls {
+			_, _ = io.WriteString(w, `{
+				"id":"chatcmpl-tool","model":"gpt-4o",
+				"choices":[{"index":0,"message":{"role":"assistant","tool_calls":[{"id":"call_repeat","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"main.go\"}"}}]},"finish_reason":"tool_calls"}],
+				"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}
+			}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{
+			"id":"chatcmpl-final","model":"gpt-4o",
+			"choices":[{"index":0,"message":{"role":"assistant","content":"synthesized repeated evidence"},"finish_reason":"stop"}],
+			"usage":{"prompt_tokens":30,"completion_tokens":10,"total_tokens":40}
+		}`)
+	}))
+	defer server.Close()
+
+	mgr := newSubAgentTestManager(t, server)
+	registry := tool.NewEmptyRegistry()
+	registry.Register(fakeReadTool{name: "read_file", body: "same evidence"})
+	agent, err := NewSubAgent(SubAgentConfig{
+		ID: "guard-agent", Model: "gpt-4o", MaxIterations: 20, AllowedTools: []string{"read_file"},
+	}, SubAgentDeps{Models: mgr, Registry: registry})
+	if err != nil {
+		t.Fatalf("NewSubAgent: %v", err)
+	}
+
+	result, err := agent.Execute(context.Background(), "inspect main.go")
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if result.Summary != "synthesized repeated evidence" {
+		t.Fatalf("Summary = %q, want final synthesis", result.Summary)
+	}
+	if result.TerminationKind != "action_cycle" || !strings.Contains(result.TerminationReason, "repeating 1-step cycle") {
+		t.Fatalf("termination = %q/%q", result.TerminationKind, result.TerminationReason)
+	}
+	if !result.FinalizationAttempted || result.FinalizationError != "" {
+		t.Fatalf("finalization metadata = tried %v error %q", result.FinalizationAttempted, result.FinalizationError)
+	}
+	if len(result.ToolCalls) != guardedToolCalls || len(bodies) != guardedToolCalls+1 {
+		t.Fatalf("tool/model calls = %d/%d, want %d/%d", len(result.ToolCalls), len(bodies), guardedToolCalls, guardedToolCalls+1)
+	}
+	if result.TokensUsed != guardedToolCalls*15+40 {
+		t.Fatalf("TokensUsed = %d, want finalization usage included", result.TokensUsed)
+	}
+	if !strings.Contains(string(result.Raw), `"termination_kind":"action_cycle"`) {
+		t.Fatalf("raw result omitted termination: %s", result.Raw)
+	}
+	if !strings.Contains(bodies[len(bodies)-1], "stopped further tool execution") {
+		t.Fatalf("finalization request omitted stop context: %s", bodies[len(bodies)-1])
+	}
+}

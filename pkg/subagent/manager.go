@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -19,7 +20,10 @@ import (
 const (
 	DefaultMaxConcurrent = 4
 	maxCapturedOutput    = 256 * 1024
-	defaultCommandBuffer = 64
+	// DefaultOutputSpoolLimit bounds child output retained on disk. Process
+	// runners should stream into a spool instead of accumulating output in RAM.
+	DefaultOutputSpoolLimit int64 = 32 * 1024 * 1024
+	defaultCommandBuffer          = 64
 	// maxTaskTelemetryBytes matches boundedTask's snapshot-level bound so the
 	// telemetry copy of a task description is never larger than the
 	// snapshot value it was derived from.
@@ -44,6 +48,7 @@ type Request struct {
 	Spec            string
 	Task            string
 	TimeoutSeconds  int
+	Budget          agentcoord.Budget
 	// Persona is the persona name resolved for this spawn, empty when the
 	// spawn did not request one. Set via SpawnOptions.Persona.
 	Persona string
@@ -59,10 +64,8 @@ type Request struct {
 	// context; Task itself stays the task instruction, unmodified.
 	SystemPrompt string
 	// StepCap is the resolved persona's iteration budget (0 means unset).
-	// buckley's current Runner implementations spawn a single bounded
-	// child process rather than iterating in-process, so no manager-level
-	// loop enforces this yet; it is threaded through for a Runner that
-	// does support an iteration budget to honor.
+	// The local Buckley process runner carries it in ChildContract so the
+	// child's shared ACP controller enforces it.
 	StepCap int
 	// AllowedTools is the resolved capability allowlist. Nil means the
 	// persona and caller left it unconstrained; an empty non-nil list means
@@ -86,6 +89,30 @@ type Runner interface {
 // into the live child process.
 type InteractiveRunner interface {
 	RunInteractive(ctx context.Context, request Request, started func(pid int), commands <-chan CommandDelivery) (string, error)
+}
+
+// CapturedOutput transfers ownership of a bounded temporary output spool to
+// Manager. Preview is safe for snapshots and telemetry; SpoolPath is available
+// only while the terminal lifecycle observer is running and is then removed.
+type CapturedOutput struct {
+	Preview       string
+	SpoolPath     string
+	ObservedBytes int64
+	CapturedBytes int64
+	LimitBytes    int64
+	Truncated     bool
+}
+
+// CapturedRunner is an optional process-adapter capability that avoids
+// materializing an unbounded child transcript in memory.
+type CapturedRunner interface {
+	RunCaptured(ctx context.Context, request Request, started func(pid int)) (CapturedOutput, error)
+}
+
+// InteractiveCapturedRunner combines bounded output capture with live command
+// delivery. Manager prefers it over the legacy string-returning interface.
+type InteractiveCapturedRunner interface {
+	RunInteractiveCaptured(ctx context.Context, request Request, started func(pid int), commands <-chan CommandDelivery) (CapturedOutput, error)
 }
 
 // ErrLiveDeliveryUnavailable means a command remains safely queued because no
@@ -123,18 +150,26 @@ type Snapshot struct {
 	FinishedAt      time.Time `json:"finished_at,omitempty"`
 	Output          string    `json:"output,omitempty"`
 	Error           string    `json:"error,omitempty"`
+	OutputBytes     int64     `json:"output_bytes,omitempty"`
+	CapturedBytes   int64     `json:"captured_output_bytes,omitempty"`
+	OutputTruncated bool      `json:"output_truncated,omitempty"`
+	// OutputSpoolPath is intentionally process-local and never serialized. A
+	// lifecycle observer may consume it synchronously before Manager removes it.
+	OutputSpoolPath string `json:"-"`
 	// Persona, Model, and Tier are empty unless the spawn resolved a
 	// persona via SpawnOptions.Persona; see Request for their meaning.
-	Persona         string       `json:"persona,omitempty"`
-	Model           string       `json:"model,omitempty"`
-	Tier            persona.Tier `json:"tier,omitempty"`
-	StepCap         int          `json:"step_cap,omitempty"`
-	AllowedTools    []string     `json:"allowed_tools,omitempty"`
-	Effort          string       `json:"effort,omitempty"`
-	WorkspaceClaims []string     `json:"workspace_claims,omitempty"`
-	Isolation       string       `json:"isolation,omitempty"`
-	OutputSchema    string       `json:"output_schema,omitempty"`
-	ApprovalPosture string       `json:"approval_posture,omitempty"`
+	Persona         string            `json:"persona,omitempty"`
+	Model           string            `json:"model,omitempty"`
+	Tier            persona.Tier      `json:"tier,omitempty"`
+	StepCap         int               `json:"step_cap,omitempty"`
+	AllowedTools    []string          `json:"allowed_tools,omitempty"`
+	Effort          string            `json:"effort,omitempty"`
+	WorkspaceClaims []string          `json:"workspace_claims,omitempty"`
+	Isolation       string            `json:"isolation,omitempty"`
+	OutputSchema    string            `json:"output_schema,omitempty"`
+	ApprovalPosture string            `json:"approval_posture,omitempty"`
+	TimeoutSeconds  int               `json:"timeout_seconds,omitempty"`
+	Budget          agentcoord.Budget `json:"budget,omitempty"`
 }
 
 // LifecycleObserver receives a copy of a child snapshot whenever its PID or
@@ -145,6 +180,7 @@ type LifecycleObserver func(Snapshot)
 type run struct {
 	snapshot Snapshot
 	cancel   context.CancelFunc
+	deadline bool
 	done     chan struct{}
 	commands chan CommandDelivery
 }
@@ -227,6 +263,7 @@ type SpawnOptions struct {
 	Spec            string
 	Task            string
 	TimeoutSeconds  int
+	Budget          agentcoord.Budget
 	// Persona is an optional persona name (bare or "@name") resolved
 	// against the registry passed to SetPersonaContext. Empty means "no
 	// persona": Spawn's legacy behavior, no escalation check performed.
@@ -303,7 +340,7 @@ func (m *Manager) SpawnWithOptions(opts SpawnOptions) (Snapshot, error) {
 		if strings.TrimSpace(child.Prompt) != "" {
 			systemPrompt = child.Prompt
 		}
-		if child.StepCap > 0 {
+		if child.StepCap > 0 && (stepCap <= 0 || child.StepCap < stepCap) {
 			stepCap = child.StepCap
 		}
 		allowedTools = intersectTools(allowedTools, child.AllowedTools)
@@ -327,8 +364,10 @@ func (m *Manager) SpawnWithOptions(opts SpawnOptions) (Snapshot, error) {
 		return Snapshot{}, fmt.Errorf("subagent run already exists: %s", id)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	if opts.TimeoutSeconds > 0 {
-		ctx, cancel = context.WithTimeout(context.Background(), time.Duration(opts.TimeoutSeconds)*time.Second)
+	deadlineBound := false
+	if timeoutSeconds := minPositiveInt(opts.TimeoutSeconds, opts.Budget.MaxElapsedSecond); timeoutSeconds > 0 {
+		ctx, cancel = context.WithTimeout(context.Background(), time.Duration(timeoutSeconds)*time.Second)
+		deadlineBound = true
 	}
 	current := &run{
 		snapshot: Snapshot{
@@ -351,8 +390,11 @@ func (m *Manager) SpawnWithOptions(opts SpawnOptions) (Snapshot, error) {
 			Isolation:       strings.TrimSpace(opts.Isolation),
 			OutputSchema:    strings.TrimSpace(opts.OutputSchema),
 			ApprovalPosture: strings.TrimSpace(opts.ApprovalPosture),
+			TimeoutSeconds:  opts.TimeoutSeconds,
+			Budget:          opts.Budget,
 		},
 		cancel:   cancel,
+		deadline: deadlineBound,
 		done:     make(chan struct{}),
 		commands: make(chan CommandDelivery, defaultCommandBuffer),
 	}
@@ -371,6 +413,7 @@ func (m *Manager) SpawnWithOptions(opts SpawnOptions) (Snapshot, error) {
 		Spec:            snapshot.Spec,
 		Task:            task,
 		TimeoutSeconds:  opts.TimeoutSeconds,
+		Budget:          opts.Budget,
 		Persona:         personaName,
 		Model:           model,
 		Tier:            tier,
@@ -386,6 +429,16 @@ func (m *Manager) SpawnWithOptions(opts SpawnOptions) (Snapshot, error) {
 	return snapshot, nil
 }
 
+func minPositiveInt(values ...int) int {
+	minimum := 0
+	for _, value := range values {
+		if value > 0 && (minimum == 0 || value < minimum) {
+			minimum = value
+		}
+	}
+	return minimum
+}
+
 func (m *Manager) run(ctx context.Context, current *run, request Request) {
 	defer m.wg.Done()
 	defer close(current.done)
@@ -398,19 +451,21 @@ func (m *Manager) run(ctx context.Context, current *run, request Request) {
 		m.publish(telemetry.EventSubagentState, snapshot, "")
 		m.observe(snapshot)
 	}
-	var output string
-	var err error
-	if interactive, ok := m.runner.(InteractiveRunner); ok {
-		output, err = interactive.RunInteractive(ctx, request, started, current.commands)
-	} else {
-		output, err = m.runner.Run(ctx, request, started)
-	}
+	capture, err := m.runCaptured(ctx, request, started, current.commands)
 
 	m.mu.Lock()
 	current.snapshot.FinishedAt = time.Now()
-	current.snapshot.Output = boundedOutput(output)
+	current.snapshot.Output = boundedOutput(capture.Preview)
+	current.snapshot.OutputBytes = capture.ObservedBytes
+	current.snapshot.CapturedBytes = capture.CapturedBytes
+	current.snapshot.OutputTruncated = capture.Truncated
+	current.snapshot.OutputSpoolPath = capture.SpoolPath
 	eventType := telemetry.EventSubagentCompleted
 	switch {
+	case errors.Is(ctx.Err(), context.DeadlineExceeded) && current.deadline:
+		current.snapshot.State = StateFailed
+		current.snapshot.Error = "subagent elapsed-time limit exceeded: " + ctx.Err().Error()
+		eventType = telemetry.EventSubagentFailed
 	case ctx.Err() != nil:
 		current.snapshot.State = StateCancelled
 		current.snapshot.Error = ctx.Err().Error()
@@ -419,13 +474,85 @@ func (m *Manager) run(ctx context.Context, current *run, request Request) {
 		current.snapshot.State = StateFailed
 		current.snapshot.Error = err.Error()
 		eventType = telemetry.EventSubagentFailed
+	case capture.Truncated:
+		current.snapshot.State = StateFailed
+		current.snapshot.Error = outputTruncationMessage(capture)
+		eventType = telemetry.EventSubagentFailed
 	default:
 		current.snapshot.State = StateCompleted
+	}
+	if capture.Truncated && !strings.Contains(current.snapshot.Error, "output capture") {
+		current.snapshot.Error = firstNonEmpty(current.snapshot.Error+"; "+outputTruncationMessage(capture), outputTruncationMessage(capture))
 	}
 	snapshot := current.snapshot
 	m.mu.Unlock()
 	m.publish(eventType, snapshot, snapshot.Error)
 	m.observe(snapshot)
+	if capture.SpoolPath != "" {
+		_ = os.Remove(capture.SpoolPath)
+		m.mu.Lock()
+		current.snapshot.OutputSpoolPath = ""
+		m.mu.Unlock()
+	}
+}
+
+func (m *Manager) runCaptured(ctx context.Context, request Request, started func(int), commands <-chan CommandDelivery) (CapturedOutput, error) {
+	if interactive, ok := m.runner.(InteractiveCapturedRunner); ok {
+		return interactive.RunInteractiveCaptured(ctx, request, started, commands)
+	}
+	if captured, ok := m.runner.(CapturedRunner); ok {
+		return captured.RunCaptured(ctx, request, started)
+	}
+	var output string
+	var err error
+	if interactive, ok := m.runner.(InteractiveRunner); ok {
+		output, err = interactive.RunInteractive(ctx, request, started, commands)
+	} else {
+		output, err = m.runner.Run(ctx, request, started)
+	}
+	return captureLegacyOutput(output), err
+}
+
+func captureLegacyOutput(output string) CapturedOutput {
+	capture := CapturedOutput{
+		Preview:       boundedOutput(output),
+		ObservedBytes: int64(len(output)),
+		CapturedBytes: int64(len(output)),
+		LimitBytes:    DefaultOutputSpoolLimit,
+	}
+	if len(output) <= maxCapturedOutput {
+		return capture
+	}
+	file, err := os.CreateTemp("", "buckley-subagent-output-*.log")
+	if err != nil {
+		capture.Truncated = true
+		capture.CapturedBytes = 0
+		return capture
+	}
+	limit := int64(len(output))
+	if limit > DefaultOutputSpoolLimit {
+		limit = DefaultOutputSpoolLimit
+		capture.Truncated = true
+	}
+	written, writeErr := file.WriteString(output[:int(limit)])
+	closeErr := file.Close()
+	if writeErr != nil || closeErr != nil || int64(written) != limit {
+		_ = os.Remove(file.Name())
+		capture.Truncated = true
+		capture.CapturedBytes = int64(written)
+		return capture
+	}
+	capture.SpoolPath = file.Name()
+	capture.CapturedBytes = int64(written)
+	return capture
+}
+
+func outputTruncationMessage(capture CapturedOutput) string {
+	limit := capture.LimitBytes
+	if limit <= 0 {
+		limit = capture.CapturedBytes
+	}
+	return fmt.Sprintf("subagent output capture exceeded its %d-byte disk ceiling after observing %d bytes; result is incomplete", limit, capture.ObservedBytes)
 }
 
 // Deliver transports one command to an attached interactive child. It does
@@ -579,9 +706,12 @@ func (m *Manager) publish(eventType telemetry.EventType, snapshot Snapshot, errT
 		"agent_id":          snapshot.ID,
 		"parent_session_id": snapshot.ParentSessionID,
 		"agent":             snapshot.Agent,
-		"state":             snapshot.State,
+		"state":             string(snapshot.State),
 		"pid":               snapshot.PID,
 		"provider":          "buckley",
+	}
+	if snapshot.ParentRunID != "" {
+		data["parent_run_id"] = snapshot.ParentRunID
 	}
 	if snapshot.Persona != "" {
 		data["persona"] = snapshot.Persona
@@ -597,6 +727,21 @@ func (m *Manager) publish(eventType telemetry.EventType, snapshot Snapshot, errT
 	}
 	if snapshot.StepCap > 0 {
 		data["step_cap"] = snapshot.StepCap
+	}
+	if snapshot.TimeoutSeconds > 0 {
+		data["timeout_seconds"] = snapshot.TimeoutSeconds
+	}
+	if snapshot.Budget.MaxToolCalls > 0 {
+		data["max_tool_calls"] = snapshot.Budget.MaxToolCalls
+	}
+	if snapshot.Budget.MaxModelRequests > 0 {
+		data["max_model_requests"] = snapshot.Budget.MaxModelRequests
+	}
+	if snapshot.Budget.MaxElapsedSecond > 0 {
+		data["max_elapsed_seconds"] = snapshot.Budget.MaxElapsedSecond
+	}
+	if snapshot.Budget.MaxCostUSD > 0 {
+		data["max_cost_usd"] = snapshot.Budget.MaxCostUSD
 	}
 	if snapshot.Isolation != "" {
 		data["isolation"] = snapshot.Isolation
@@ -618,6 +763,13 @@ func (m *Manager) publish(eventType telemetry.EventType, snapshot Snapshot, errT
 	}
 	if snapshot.Output != "" {
 		data["output"] = telemetry.SanitizeText(snapshot.Output, telemetry.MaxResultBytes)
+	}
+	if snapshot.OutputBytes > 0 {
+		data["output_bytes"] = snapshot.OutputBytes
+		data["captured_output_bytes"] = snapshot.CapturedBytes
+	}
+	if snapshot.OutputTruncated {
+		data["output_truncated"] = true
 	}
 	if snapshot.Spec != "" {
 		data["spec"] = snapshot.Spec

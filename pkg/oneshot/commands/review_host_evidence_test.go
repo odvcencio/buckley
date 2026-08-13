@@ -49,6 +49,34 @@ func TestAggregateHostVerificationKeepsFailureAndUnavailableConclusive(t *testin
 	}
 }
 
+func TestAggregateHostVerificationPreservesTypedNodeNoTestPolicy(t *testing.T) {
+	calls := []oneshot.AgentToolCall{
+		{
+			ID: "host-evidence-1", Name: "run_verification", Success: true,
+			Data: map[string]any{
+				"kind": "build", "language": "node", "path": "docs", "pattern": "",
+				"status": "PASS", "evidence": "CONFIRMED_PASS", "exit_code": 0, "proves": []string{"build"},
+			},
+		},
+		{
+			ID: "host-evidence-2", Name: "run_verification", Success: true,
+			Data: map[string]any{
+				"kind": "test", "language": "node", "path": "docs", "pattern": "", "command": "", "argv": []string{},
+				"status": "NOT_APPLICABLE", "evidence": "NO_TEST_GATE", "exit_code": -1,
+				"proves": []string{"test-policy"}, "no_test_script": true,
+			},
+		},
+	}
+	aggregate := aggregateHostVerification(calls)
+	if aggregate.build != VerificationPass || aggregate.test != VerificationNotApplicable {
+		t.Fatalf("typed no-test aggregate = %#v", aggregate)
+	}
+	parsed := &ParsedReview{BuildVerification: VerificationPass, TestVerification: VerificationNotApplicable}
+	if err := validateReportedHostVerification(parsed, &oneshot.AgentResult{ToolCalls: calls}); err != nil {
+		t.Fatalf("typed no-test report rejected: %v", err)
+	}
+}
+
 func TestValidateReportedHostVerificationIgnoresModelOwnedCalls(t *testing.T) {
 	execution := &oneshot.AgentResult{ToolCalls: []oneshot.AgentToolCall{{
 		ID: "provider-call-1", Name: "run_verification", Success: true,

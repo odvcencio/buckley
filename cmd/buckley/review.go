@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"m31labs.dev/buckley/pkg/config"
+	"m31labs.dev/buckley/pkg/execmode"
 	"m31labs.dev/buckley/pkg/model"
 	"m31labs.dev/buckley/pkg/oneshot"
 	"m31labs.dev/buckley/pkg/oneshot/commands"
@@ -48,22 +49,24 @@ type reviewCommandRuntime struct {
 	modelID         string
 	reasoningEffort string
 	policy          automatedReviewOptions
+	durableCleanup  func()
 }
 
 type reviewCommandResult struct {
-	reviewText      string
-	parsed          *commands.ParsedReview
-	trace           *transparency.Trace
-	contextAudit    *transparency.ContextAudit
-	attempts        int
-	primary         int
-	criticAttempts  int
-	hostEvidence    int
-	hostPasses      int
-	toolEvidence    []oneshot.AgentToolCall
-	commandEvidence []model.CommandExecutionEvidence
-	incomplete      bool
-	incompleteWhy   string
+	reviewText        string
+	parsed            *commands.ParsedReview
+	trace             *transparency.Trace
+	contextAudit      *transparency.ContextAudit
+	attempts          int
+	primary           int
+	criticAttempts    int
+	hostEvidence      int
+	hostPasses        int
+	hostNotApplicable int
+	toolEvidence      []oneshot.AgentToolCall
+	commandEvidence   []model.CommandExecutionEvidence
+	incomplete        bool
+	incompleteWhy     string
 }
 
 // reviewProgress keeps model-review output machine-readable when the caller
@@ -172,24 +175,25 @@ func runReviewCommand(args []string) error {
 		return err
 	}
 
-	restoreModelOverride := applyCommandModelOverride(opts.model)
+	primaryModelOverride := strings.TrimSpace(opts.model)
+	if primaryModelOverride == "" {
+		primaryModelOverride = strings.TrimSpace(os.Getenv("BUCKLEY_MODEL_REVIEW"))
+	}
+	restoreModelOverride := applyCommandModelOverride(primaryModelOverride)
 	defer restoreModelOverride()
 
-	cfg, mgr, store, err := initDependenciesFn()
+	cfg, mgr, store, err := initReviewDependenciesFn(opts.criticModel)
 	if store != nil {
 		defer store.Close()
 	}
 	if err != nil {
 		return fmt.Errorf("init dependencies: %w", err)
 	}
-	if strings.TrimSpace(opts.criticModel) != "" {
-		cfg.Buckbot.CriticModel = strings.TrimSpace(opts.criticModel)
-	}
-
 	runtime, err := newReviewCommandRuntime(cfg, mgr)
 	if err != nil {
-		return fmt.Errorf("no model configured (set BUCKLEY_MODEL_REVIEW or configure models.review)")
+		return fmt.Errorf("initialize review runtime: %w", err)
 	}
+	defer runtime.Close()
 
 	ctx, cancel := context.WithTimeout(context.Background(), opts.timeout)
 	defer cancel()
@@ -260,6 +264,40 @@ func runReviewCommand(args []string) error {
 	return nil
 }
 
+func applyReviewCriticModelOverride(cfg *config.Config, modelID string) {
+	if cfg == nil {
+		return
+	}
+
+	explicitModel := strings.TrimSpace(modelID)
+	if explicitModel != "" {
+		cfg.Buckbot.CriticModel = explicitModel
+		disableConfiguredModelFallbacks(cfg, explicitModel)
+		modelID = explicitModel
+	} else {
+		modelID = strings.TrimSpace(cfg.Buckbot.CriticModel)
+	}
+	if modelID == "" {
+		return
+	}
+
+	normalized, _ := config.SplitReasoningSuffix(modelID)
+	if !strings.HasPrefix(normalized, "codex/") {
+		return
+	}
+	cfg.Providers.Codex.Enabled = true
+	if cfg.Providers.ModelRouting == nil {
+		cfg.Providers.ModelRouting = make(map[string]string)
+	}
+	cfg.Providers.ModelRouting["codex/"] = "codex"
+	for _, configured := range cfg.Providers.Codex.Models {
+		if strings.TrimSpace(configured) == normalized {
+			return
+		}
+	}
+	cfg.Providers.Codex.Models = append(cfg.Providers.Codex.Models, normalized)
+}
+
 func newReviewCommandRuntime(cfg *config.Config, mgr *model.Manager) (*reviewCommandRuntime, error) {
 	modelID := resolveReviewModel(cfg)
 	if modelID == "" {
@@ -277,13 +315,25 @@ func newReviewCommandRuntime(cfg *config.Config, mgr *model.Manager) (*reviewCom
 		registry.ConfigureContainers(cfg, cwd)
 	}
 
-	agentRunner := oneshot.NewAgentRunner(oneshot.AgentRunnerConfig{
+	runnerConfig := oneshot.AgentRunnerConfig{
 		Models:          mgr,
 		Registry:        registry,
 		Ledger:          ledger,
 		ModelID:         modelID,
 		ReasoningEffort: reasoningEffort,
-	})
+	}
+	var durableCleanup func()
+	if execmode.DetectIsolation() == execmode.IsolationBwrap {
+		stores, cleanup, openErr := openGoalStores()
+		if openErr != nil {
+			_ = registry.Close()
+			return nil, fmt.Errorf("open review code-mode stores: %w", openErr)
+		}
+		durableCleanup = cleanup
+		runnerConfig.ReviewRunLedger = stores.ledger
+		runnerConfig.ReviewEvidence = stores.evidence
+	}
+	agentRunner := oneshot.NewAgentRunner(runnerConfig)
 	framework := oneshot.NewFramework(nil, arbEngine).WithAgentRunner(agentRunner)
 	policy := defaultAutomatedReviewOptions(cfg)
 	policy.modelID = modelID
@@ -291,19 +341,16 @@ func newReviewCommandRuntime(cfg *config.Config, mgr *model.Manager) (*reviewCom
 	policy.reasoningEffort = reasoningEffort
 	policy.adaptiveReasoning = reviewReasoningIsAdaptive(cfg, reviewReasoningOverride())
 	policy.engine = arbEngine
-	criticModel := ""
-	if cfg != nil {
-		criticModel = strings.TrimSpace(cfg.Buckbot.CriticModel)
-	}
-	criticReasoning := ""
-	criticModel, criticReasoning = config.SplitReasoningSuffix(criticModel)
-	if criticModel != "" && criticModel != modelID {
+	criticModel, criticReasoning, dedicatedCritic := resolveReviewCriticRuntime(cfg, mgr, modelID, reasoningEffort)
+	if dedicatedCritic {
 		criticRunner := oneshot.NewAgentRunner(oneshot.AgentRunnerConfig{
 			Models:          mgr,
 			Registry:        registry,
 			Ledger:          ledger,
 			ModelID:         criticModel,
-			ReasoningEffort: resolveReviewReasoningEffort(cfg, mgr, criticModel, criticReasoning),
+			ReasoningEffort: criticReasoning,
+			ReviewRunLedger: runnerConfig.ReviewRunLedger,
+			ReviewEvidence:  runnerConfig.ReviewEvidence,
 		})
 		framework = framework.WithApprovalCriticRunner(criticRunner)
 		policy.criticReserveUSD = policy.maxCostUSD * 0.12
@@ -319,7 +366,37 @@ func newReviewCommandRuntime(cfg *config.Config, mgr *model.Manager) (*reviewCom
 		modelID:         modelID,
 		reasoningEffort: reasoningEffort,
 		policy:          policy,
+		durableCleanup:  durableCleanup,
 	}, nil
+}
+
+func resolveReviewCriticRuntime(cfg *config.Config, checker model.ReasoningChecker, primaryModel, primaryReasoning string) (string, string, bool) {
+	criticModel := ""
+	if cfg != nil {
+		criticModel = strings.TrimSpace(cfg.Buckbot.CriticModel)
+	}
+	criticModel, explicitReasoning := config.SplitReasoningSuffix(criticModel)
+	if criticModel == "" {
+		return "", "", false
+	}
+	criticReasoning := resolveReviewReasoningEffort(cfg, checker, criticModel, explicitReasoning)
+	primaryModelAdaptive := isAdaptiveCodexReviewSelector(resolveReviewModelSelector(cfg))
+	primaryReasoningAdaptive := reviewReasoningIsAdaptive(cfg, reviewReasoningOverride())
+	dedicated := criticModel != primaryModel || primaryModelAdaptive ||
+		(explicitReasoning != "" && (primaryReasoningAdaptive || criticReasoning != primaryReasoning))
+	return criticModel, criticReasoning, dedicated
+}
+
+func (r *reviewCommandRuntime) Close() {
+	if r == nil {
+		return
+	}
+	if r.registry != nil {
+		_ = r.registry.Close()
+	}
+	if r.durableCleanup != nil {
+		r.durableCleanup()
+	}
 }
 
 func reviewReasoningOverride() string {
@@ -595,8 +672,11 @@ func reviewResultFromAgent(fwResult *oneshot.RunResult, audit *transparency.Cont
 	result.criticAttempts = fwResult.CriticAttempts
 	result.hostEvidence = len(fwResult.HostEvidence)
 	for _, call := range fwResult.HostEvidence {
-		if call.Success {
+		switch reviewEvidencePresentationStatus(call) {
+		case "PASS":
 			result.hostPasses++
+		case "NOT_APPLICABLE":
+			result.hostNotApplicable++
 		}
 	}
 	result.toolEvidence = append([]oneshot.AgentToolCall(nil), fwResult.ToolEvidence...)
@@ -620,10 +700,7 @@ func appendReviewEvidenceDiagnostics(review string, toolCalls []oneshot.AgentToo
 	b.WriteString(strings.TrimSpace(review))
 	b.WriteString("\n\n## Preserved execution evidence\n")
 	for _, call := range toolCalls {
-		status := "FAILED_OR_UNAVAILABLE"
-		if call.Success {
-			status = "PASS"
-		}
+		status := reviewEvidencePresentationStatus(call)
 		fmt.Fprintf(&b, "\n- `%s` `%s`: %s", strings.TrimSpace(call.ID), strings.TrimSpace(call.Name), status)
 		if call.Duration > 0 {
 			fmt.Fprintf(&b, " in %s", call.Duration.Round(time.Millisecond))
@@ -647,6 +724,28 @@ func appendReviewEvidenceDiagnostics(review string, toolCalls []oneshot.AgentToo
 		b.WriteString("\n")
 	}
 	return strings.TrimSpace(b.String())
+}
+
+func reviewEvidencePresentationStatus(call oneshot.AgentToolCall) string {
+	status, _ := call.Data["status"].(string)
+	status = strings.ToUpper(strings.TrimSpace(status))
+	if status == "NOT_APPLICABLE" {
+		evidence, _ := call.Data["evidence"].(string)
+		kind, _ := call.Data["kind"].(string)
+		language, _ := call.Data["language"].(string)
+		noTestScript, _ := call.Data["no_test_script"].(bool)
+		if call.Success && strings.EqualFold(strings.TrimSpace(call.Name), "run_verification") &&
+			strings.EqualFold(strings.TrimSpace(evidence), "NO_TEST_GATE") &&
+			strings.EqualFold(strings.TrimSpace(kind), "test") &&
+			strings.EqualFold(strings.TrimSpace(language), "node") && noTestScript {
+			return "NOT_APPLICABLE"
+		}
+		return "FAILED_OR_UNAVAILABLE"
+	}
+	if call.Success {
+		return "PASS"
+	}
+	return "FAILED_OR_UNAVAILABLE"
 }
 
 func appendReviewAttemptDiagnostics(review string, trace *transparency.Trace) string {
@@ -743,12 +842,7 @@ func printReviewAttemptCounts(result *reviewCommandResult) {
 		return
 	}
 	if result.hostEvidence > 0 {
-		termOut.Dim(
-			"Harness verification: %d passed · %d failed or unavailable · %d total",
-			result.hostPasses,
-			result.hostEvidence-result.hostPasses,
-			result.hostEvidence,
-		)
+		termOut.Dim("%s", reviewHostEvidenceSummary(result))
 	}
 	if result.attempts == 0 {
 		return
@@ -762,6 +856,23 @@ func printReviewAttemptCounts(result *reviewCommandResult) {
 	for _, line := range reviewValidationRepairLines(result.trace) {
 		termOut.Dim("Review repair: %s", line)
 	}
+}
+
+func reviewHostEvidenceSummary(result *reviewCommandResult) string {
+	if result == nil || result.hostEvidence <= 0 {
+		return ""
+	}
+	failedOrUnavailable := result.hostEvidence - result.hostPasses - result.hostNotApplicable
+	if failedOrUnavailable < 0 {
+		failedOrUnavailable = 0
+	}
+	return fmt.Sprintf(
+		"Harness verification: %d passed · %d not applicable · %d failed or unavailable · %d total",
+		result.hostPasses,
+		result.hostNotApplicable,
+		failedOrUnavailable,
+		result.hostEvidence,
+	)
 }
 
 func reviewValidationRepairLines(trace *transparency.Trace) []string {

@@ -1,6 +1,10 @@
 package config
 
-import "testing"
+import (
+	"math"
+	"strings"
+	"testing"
+)
 
 // TestValidateReportsFirstViolationInOriginalOrder locks in the
 // decomposition's ordering contract: Validate walks configValidators in
@@ -63,5 +67,29 @@ func TestValidateBatchNormalizesRemoteBranchNameAsSideEffect(t *testing.T) {
 	}
 	if cfg.Batch.RemoteBranch.RemoteName != "origin" {
 		t.Fatalf("expected remote_branch.remote_name to default to origin, got %q", cfg.Batch.RemoteBranch.RemoteName)
+	}
+}
+
+func TestValidateRejectsNonFinitePublicAgentCostLimits(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		set  func(*Config)
+	}{
+		{name: "experiment NaN", set: func(c *Config) { c.Experiment.MaxCostPerRun = math.NaN() }},
+		{name: "experiment infinity", set: func(c *Config) { c.Experiment.MaxCostPerRun = math.Inf(1) }},
+		{name: "buckbot review negative", set: func(c *Config) { c.Buckbot.PerReviewBudgetUSD = -1 }},
+		{name: "buckbot review infinity", set: func(c *Config) { c.Buckbot.PerReviewBudgetUSD = math.Inf(1) }},
+		{name: "buckbot monthly NaN", set: func(c *Config) { c.Buckbot.MonthlyBudgetUSD = math.NaN() }},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := DefaultConfig()
+			tt.set(cfg)
+			if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "finite and non-negative") {
+				t.Fatalf("Validate error = %v", err)
+			}
+		})
+	}
+	if err := DefaultConfig().Validate(); err != nil {
+		t.Fatalf("zero/default budgets rejected: %v", err)
 	}
 }

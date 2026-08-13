@@ -25,6 +25,7 @@ func TestLoop_LoadGoalRoundTrip(t *testing.T) {
 		BudgetUSD:          9.5,
 		Posture:            PostureOvernight,
 		ApprovalMode:       "safe",
+		WorkspaceRoot:      t.TempDir(),
 	}
 	intake, err := loop.Start(ctx, original)
 	if err != nil {
@@ -37,6 +38,9 @@ func TestLoop_LoadGoalRoundTrip(t *testing.T) {
 	}
 	if goal.Statement != original.Statement || goal.Posture != original.Posture || goal.ApprovalMode != original.ApprovalMode {
 		t.Fatalf("goal = %+v, want %+v", goal, original)
+	}
+	if goal.WorkspaceRoot != original.WorkspaceRoot {
+		t.Fatalf("workspace root = %q, want %q", goal.WorkspaceRoot, original.WorkspaceRoot)
 	}
 	if goal.BudgetUSD != 9.5 {
 		t.Fatalf("budget = %v, want 9.5", goal.BudgetUSD)

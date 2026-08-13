@@ -114,6 +114,10 @@ func aggregateHostVerification(calls []oneshot.AgentToolCall) hostVerificationAg
 			}
 			continue
 		}
+		if state == VerificationNotApplicable {
+			aggregate.set(reviewEvidenceTest, state)
+			continue
+		}
 		aggregate.set(kind, state)
 	}
 	return aggregate
@@ -135,10 +139,12 @@ func mergeHostVerificationState(current, next VerificationState) VerificationSta
 	priority := func(state VerificationState) int {
 		switch state {
 		case VerificationFail:
-			return 3
+			return 4
 		case VerificationUnavailable:
-			return 2
+			return 3
 		case VerificationPass:
+			return 2
+		case VerificationNotApplicable:
 			return 1
 		default:
 			return 0
@@ -151,6 +157,9 @@ func mergeHostVerificationState(current, next VerificationState) VerificationSta
 }
 
 func hostEvidenceState(call oneshot.AgentToolCall) VerificationState {
+	if call.Success && reviewNoTestScriptPolicyEvidence(call.Data) {
+		return VerificationNotApplicable
+	}
 	status, _ := call.Data["status"].(string)
 	evidence, _ := call.Data["evidence"].(string)
 	switch {

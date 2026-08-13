@@ -10,11 +10,20 @@ import (
 )
 
 type stubProvider struct {
-	id          string
-	catalog     ModelCatalog
-	lastRequest ChatRequest
-	response    *ChatResponse
-	nilResponse bool
+	id             string
+	catalog        ModelCatalog
+	lastRequest    ChatRequest
+	requests       []ChatRequest
+	errors         []error
+	streamRequests []ChatRequest
+	streamPlans    []stubStreamPlan
+	response       *ChatResponse
+	nilResponse    bool
+}
+
+type stubStreamPlan struct {
+	chunks []StreamChunk
+	err    error
 }
 
 type refreshingStubProvider struct {
@@ -44,6 +53,14 @@ func (s *stubProvider) GetModelInfo(modelID string) (*ModelInfo, error) {
 
 func (s *stubProvider) ChatCompletion(ctx context.Context, req ChatRequest) (*ChatResponse, error) {
 	s.lastRequest = req
+	s.requests = append(s.requests, req)
+	if len(s.errors) > 0 {
+		err := s.errors[0]
+		s.errors = s.errors[1:]
+		if err != nil {
+			return nil, err
+		}
+	}
 	if s.nilResponse {
 		return nil, nil
 	}
@@ -60,13 +77,170 @@ func (s *stubProvider) ChatCompletion(ctx context.Context, req ChatRequest) (*Ch
 	}, nil
 }
 
+func TestChatCompletionRetriesAffordableOpenRouterOutputWithoutChangingModel(t *testing.T) {
+	provider := &stubProvider{
+		id: "openrouter",
+		catalog: ModelCatalog{Data: []ModelInfo{{
+			ID:            "x-ai/grok-4.6",
+			ContextLength: 500_000,
+		}}},
+		errors: []error{&APIError{
+			StatusCode: 402,
+			Message:    "This request requires more credits, or fewer max_tokens. You requested up to 32768 tokens, but can only afford 4156.",
+		}},
+	}
+	mgr := &Manager{
+		config:         &config.Config{},
+		providers:      map[string]Provider{"openrouter": provider},
+		providerOrder:  []string{"openrouter"},
+		catalog:        map[string]ModelInfo{"x-ai/grok-4.6": provider.catalog.Data[0]},
+		providerModels: map[string][]string{"openrouter": {"x-ai/grok-4.6"}},
+		modelProviders: map[string]string{"x-ai/grok-4.6": "openrouter"},
+	}
+
+	reasoning := &ReasoningConfig{MaxTokens: 3000}
+	resp, err := mgr.ChatCompletion(context.Background(), ChatRequest{
+		Model:      "x-ai/grok-4.6",
+		MaxTokens:  32768,
+		Reasoning:  reasoning,
+		Messages:   []Message{{Role: "user", Content: "review"}},
+		ToolChoice: "none",
+	})
+	if err != nil || resp == nil {
+		t.Fatalf("ChatCompletion() = %#v, %v", resp, err)
+	}
+	if len(provider.requests) != 2 {
+		t.Fatalf("requests = %d, want one safe retry", len(provider.requests))
+	}
+	retry := provider.requests[1]
+	if retry.Model != "x-ai/grok-4.6" || len(retry.Models) != 0 {
+		t.Fatalf("retry changed exact model routing: model=%q fallbacks=%v", retry.Model, retry.Models)
+	}
+	if retry.MaxTokens != 3948 {
+		t.Fatalf("retry MaxTokens = %d, want 3948", retry.MaxTokens)
+	}
+	if retry.Reasoning == reasoning || retry.Reasoning.MaxTokens != 1974 {
+		t.Fatalf("retry reasoning = %#v, want copied 1974-token allowance", retry.Reasoning)
+	}
+	if reasoning.MaxTokens != 3000 {
+		t.Fatalf("original request reasoning mutated to %d", reasoning.MaxTokens)
+	}
+}
+
+func TestChatCompletionDoesNotRetryGenericPaymentFailure(t *testing.T) {
+	provider := &stubProvider{
+		id:     "openrouter",
+		errors: []error{&APIError{StatusCode: 402, Message: "insufficient credits"}},
+	}
+	mgr := &Manager{
+		config:         &config.Config{},
+		providers:      map[string]Provider{"openrouter": provider},
+		providerOrder:  []string{"openrouter"},
+		catalog:        map[string]ModelInfo{"x-ai/grok-4.6": {ID: "x-ai/grok-4.6"}},
+		providerModels: map[string][]string{"openrouter": {"x-ai/grok-4.6"}},
+		modelProviders: map[string]string{"x-ai/grok-4.6": "openrouter"},
+	}
+
+	_, err := mgr.ChatCompletion(context.Background(), ChatRequest{Model: "x-ai/grok-4.6", MaxTokens: 32768})
+	if err == nil {
+		t.Fatal("expected payment failure")
+	}
+	if len(provider.requests) != 1 {
+		t.Fatalf("requests = %d, generic payment failure must not retry", len(provider.requests))
+	}
+}
+
 func (s *stubProvider) ChatCompletionStream(ctx context.Context, req ChatRequest) (<-chan StreamChunk, <-chan error) {
 	s.lastRequest = req
-	chunks := make(chan StreamChunk)
+	s.streamRequests = append(s.streamRequests, req)
+	var plan stubStreamPlan
+	if len(s.streamPlans) > 0 {
+		plan = s.streamPlans[0]
+		s.streamPlans = s.streamPlans[1:]
+	}
+	chunks := make(chan StreamChunk, len(plan.chunks))
 	errs := make(chan error, 1)
+	for _, chunk := range plan.chunks {
+		chunks <- chunk
+	}
+	if plan.err != nil {
+		errs <- plan.err
+	}
 	close(chunks)
 	close(errs)
 	return chunks, errs
+}
+
+func TestChatCompletionStreamRetriesAffordableOutputBeforeFirstChunk(t *testing.T) {
+	provider := &stubProvider{
+		id: "openrouter",
+		streamPlans: []stubStreamPlan{
+			{err: &APIError{StatusCode: 402, Message: "You requested up to 32768 tokens, but can only afford 4156."}},
+			{chunks: []StreamChunk{{Choices: []StreamChoice{{Delta: MessageDelta{Content: "grounded result"}}}}}},
+		},
+	}
+	mgr := &Manager{
+		config:         &config.Config{},
+		providers:      map[string]Provider{"openrouter": provider},
+		providerOrder:  []string{"openrouter"},
+		catalog:        map[string]ModelInfo{"x-ai/grok-4.6": {ID: "x-ai/grok-4.6"}},
+		providerModels: map[string][]string{"openrouter": {"x-ai/grok-4.6"}},
+		modelProviders: map[string]string{"x-ai/grok-4.6": "openrouter"},
+	}
+
+	chunks, errs := mgr.ChatCompletionStream(context.Background(), ChatRequest{
+		Model:     "x-ai/grok-4.6",
+		MaxTokens: 32768,
+	})
+	var content string
+	for chunk := range chunks {
+		for _, choice := range chunk.Choices {
+			content += choice.Delta.Content
+		}
+	}
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("stream error: %v", err)
+		}
+	}
+	if content != "grounded result" {
+		t.Fatalf("content = %q", content)
+	}
+	if len(provider.streamRequests) != 2 {
+		t.Fatalf("stream requests = %d, want one safe retry", len(provider.streamRequests))
+	}
+	if retry := provider.streamRequests[1]; retry.Model != "x-ai/grok-4.6" || retry.MaxTokens != 3948 || len(retry.Models) != 0 {
+		t.Fatalf("retry changed exact routing or output limit: %+v", retry)
+	}
+}
+
+func TestChatCompletionStreamNeverRetriesAfterFirstChunk(t *testing.T) {
+	provider := &stubProvider{
+		id: "openrouter",
+		streamPlans: []stubStreamPlan{{
+			chunks: []StreamChunk{{Choices: []StreamChoice{{Delta: MessageDelta{Content: "partial"}}}}},
+			err:    &APIError{StatusCode: 402, Message: "can only afford 4156"},
+		}},
+	}
+	mgr := &Manager{
+		config:         &config.Config{},
+		providers:      map[string]Provider{"openrouter": provider},
+		providerOrder:  []string{"openrouter"},
+		catalog:        map[string]ModelInfo{"x-ai/grok-4.6": {ID: "x-ai/grok-4.6"}},
+		providerModels: map[string][]string{"openrouter": {"x-ai/grok-4.6"}},
+		modelProviders: map[string]string{"x-ai/grok-4.6": "openrouter"},
+	}
+
+	chunks, errs := mgr.ChatCompletionStream(context.Background(), ChatRequest{Model: "x-ai/grok-4.6", MaxTokens: 32768})
+	for range chunks {
+	}
+	var gotErr error
+	for err := range errs {
+		gotErr = err
+	}
+	if gotErr == nil || len(provider.streamRequests) != 1 {
+		t.Fatalf("error=%v stream requests=%d, want original error with no replay", gotErr, len(provider.streamRequests))
+	}
 }
 
 func TestInitializeFallsBackWhenModelsMissing(t *testing.T) {

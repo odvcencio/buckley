@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"reflect"
 	"strings"
 	"testing"
@@ -16,6 +17,32 @@ import (
 type partialAgentExecutor struct {
 	result *AgentResult
 	err    error
+}
+
+func TestRunAgentRejectsNonFiniteCostBudgetsBeforeExecution(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		opts AgentRunOpts
+	}{
+		{name: "max cost NaN", opts: AgentRunOpts{MaxCostUSD: math.NaN()}},
+		{name: "max cost positive infinity", opts: AgentRunOpts{MaxCostUSD: math.Inf(1)}},
+		{name: "max cost negative infinity", opts: AgentRunOpts{MaxCostUSD: math.Inf(-1)}},
+		{name: "max cost negative", opts: AgentRunOpts{MaxCostUSD: -0.01}},
+		{name: "critic reserve NaN", opts: AgentRunOpts{ApprovalCriticReserveUSD: math.NaN()}},
+		{name: "critic reserve infinity", opts: AgentRunOpts{ApprovalCriticReserveUSD: math.Inf(1)}},
+		{name: "critic reserve negative", opts: AgentRunOpts{ApprovalCriticReserveUSD: -0.01}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			runner := &scriptedAgentExecutor{responses: []string{`{"grade":"A","summary":"unused"}`}}
+			framework := NewFramework(nil, nil).WithAgentRunner(runner)
+			if _, err := framework.RunAgent(context.Background(), validatingAgentDefinition{}, tt.opts); err == nil || !strings.Contains(err.Error(), "finite and non-negative") {
+				t.Fatalf("RunAgent error = %v", err)
+			}
+			if len(runner.prompts) != 0 {
+				t.Fatal("invalid budget reached agent execution")
+			}
+		})
+	}
 }
 
 func (p partialAgentExecutor) Run(context.Context, string, string, []string, AgentExecutionOpts) (*AgentResult, error) {
@@ -770,6 +797,26 @@ func TestRunAgentCollectsRequiredEvidenceBeforeModelSynthesis(t *testing.T) {
 	}
 }
 
+func TestFormatHostAgentEvidenceDoesNotRenderNoTestPolicyAsPass(t *testing.T) {
+	formatted := formatHostAgentEvidence([]AgentToolCall{{
+		ID:      "host-evidence-1",
+		Name:    "run_verification",
+		Success: true,
+		Data: map[string]any{
+			"status":         "NOT_APPLICABLE",
+			"evidence":       "NO_TEST_GATE",
+			"no_test_script": true,
+		},
+		Result: "status: NOT_APPLICABLE evidence: NO_TEST_GATE no_test_script: true",
+	}})
+	if !strings.Contains(formatted, "run_verification` — NOT_APPLICABLE") {
+		t.Fatalf("typed no-test policy was not rendered explicitly:\n%s", formatted)
+	}
+	if strings.Contains(formatted, "run_verification` — PASS") {
+		t.Fatalf("typed no-test policy was projected as test PASS:\n%s", formatted)
+	}
+}
+
 func TestRunAgentPreservesToolEvidenceAcrossSchemaRepair(t *testing.T) {
 	runner := &scriptedAgentExecutor{
 		responses: []string{"incomplete", "valid"},
@@ -1233,9 +1280,11 @@ func TestRunAgentDedicatedCriticKeepsItsConfiguredModel(t *testing.T) {
 		WithApprovalCriticRunner(critic)
 
 	_, err := framework.RunAgent(context.Background(), criticAgentDefinition{}, AgentRunOpts{
-		UserPrompt: "diff evidence",
-		MaxRetries: 1,
-		ModelID:    "codex/gpt-5.6-sol",
+		UserPrompt:         "diff evidence",
+		MaxRetries:         1,
+		ModelID:            "codex/gpt-5.6-sol",
+		ReasoningEffort:    "medium",
+		ReasoningMaxTokens: 3072,
 	})
 	if err != nil {
 		t.Fatalf("RunAgent() error = %v", err)
@@ -1245,6 +1294,15 @@ func TestRunAgentDedicatedCriticKeepsItsConfiguredModel(t *testing.T) {
 	}
 	if got := critic.models; len(got) != 1 || got[0] != "" {
 		t.Fatalf("critic models = %v, want configured runner model", got)
+	}
+	if got := primary.reasoning; len(got) != 1 || got[0] != "medium" {
+		t.Fatalf("primary reasoning = %v, want [medium]", got)
+	}
+	if got := critic.reasoning; len(got) != 1 || got[0] != "" {
+		t.Fatalf("critic reasoning override = %v, want configured runner effort", got)
+	}
+	if got := critic.reasoningMax; len(got) != 1 || got[0] != 3072 {
+		t.Fatalf("critic reasoning token limits = %v, want shared [3072]", got)
 	}
 }
 

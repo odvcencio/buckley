@@ -1,6 +1,7 @@
 package config
 
 import (
+	"math"
 	"os"
 	"reflect"
 	"strconv"
@@ -378,7 +379,7 @@ func envExperimentDefaultTimeout(ctx envCtx, field reflect.Value, path []string)
 // only when it parses as a positive float.
 func envExperimentMaxCostPerRun(ctx envCtx, field reflect.Value, path []string) {
 	if v := strings.TrimSpace(os.Getenv("BUCKLEY_EXPERIMENT_MAX_COST_PER_RUN")); v != "" {
-		if n, err := strconv.ParseFloat(v, 64); err == nil && n > 0 {
+		if n, err := strconv.ParseFloat(v, 64); err == nil && n > 0 && !math.IsInf(n, 0) && !math.IsNaN(n) {
 			field.SetFloat(n)
 		}
 	}

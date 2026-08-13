@@ -34,6 +34,7 @@ func (l *Loop) LoadGoal(ctx context.Context, runID string) (Goal, map[string]Tas
 			goal.Constraints = payloadStrings(ev.Payload, "constraints")
 			goal.Posture = payloadString(ev.Payload, "posture")
 			goal.ApprovalMode = payloadString(ev.Payload, "approval_mode")
+			goal.WorkspaceRoot = payloadString(ev.Payload, "workspace_root")
 		case "task":
 			specs[ev.TaskID] = TaskSpec{
 				Title:              payloadString(ev.Payload, "title"),

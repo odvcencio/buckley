@@ -5,12 +5,20 @@ instead of making a dozen tool calls. It writes ordinary Go against a
 small typed capability client, Buckley runs it in a sandbox, and only the
 printed result comes back.
 
-It is off by default. Turn it on for an interactive or one-shot session:
+It is off by default for interactive and ordinary one-shot sessions. Turn it
+on explicitly for either surface:
 
 ```bash
 buckley --code-mode
 buckley --code-mode -p "assess this repository"
 ```
+
+API-model Buckbot reviews are the exception. Their source already lives in an
+immutable review snapshot, so Buckley automatically offers audited read-only
+`exec_program` when bubblewrap and the durable evidence stores are available.
+The program has no network and no live-workspace mount. If isolation is not
+available, the review keeps the ordinary snapshot-rooted read/search tools;
+Buckley never falls back to unsandboxed execution.
 
 ## When Buckley recommends it
 
@@ -28,7 +36,8 @@ The recommendation is not activation. Code mode stays unavailable without a
 working bubblewrap sandbox, and cancellation, permission denial, and
 `exec_program` itself never trigger recovery. In adaptive `dynamic` protocol
 mode, automatic read-only code mode also needs an explicitly versioned model
-profile and a policy decision.
+profile and a policy decision. That adaptive rule applies to ordinary agent
+sessions; Buckbot's immutable review-snapshot rule is described above.
 
 Durable goals retain their existing per-run flag:
 
@@ -134,7 +143,10 @@ exec_program(reuse: "ev_TWKNOERODJAXX2PYALFKWOP76F")
 ```
 
 Pay the model once to write a workflow; after that it is just compute.
-The IDs appear in `buckley goal report` and `buckley goal audit`.
+For durable goals, the IDs appear in `buckley goal report` and
+`buckley goal audit`. Buckbot snapshot programs are stored under a dedicated
+review-code-mode run tied to the review trace, and their calls and output remain
+in the review transcript; they are not presented as goal-audit entries.
 
 ## What code mode is not
 

@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path"
+	"strconv"
 	"strings"
 	"time"
 
@@ -21,18 +22,76 @@ import (
 
 // Runner hosts one goal's activities.
 type Runner struct {
-	loop  *goalloop.Loop
-	goal  goalloop.Goal
-	specs map[string]goalloop.TaskSpec
+	loop          *goalloop.Loop
+	runID         string
+	workspaceRoot string
+	legacyRoot    bool
+	goal          goalloop.Goal
+	specs         map[string]goalloop.TaskSpec
 }
 
-// New wires a Runner for one loaded goal.
-func New(loop *goalloop.Loop, goal goalloop.Goal, specs map[string]goalloop.TaskSpec) *Runner {
-	return &Runner{loop: loop, goal: goal, specs: specs}
+// New wires a Runner for exactly one loaded goal and worker workspace. A
+// missing or mismatched identity fails closed before the worker can register
+// with Dapr and receive activities.
+func New(loop *goalloop.Loop, runID, workerRoot string, goal goalloop.Goal, specs map[string]goalloop.TaskSpec) (*Runner, error) {
+	runID = strings.TrimSpace(runID)
+	if runID == "" {
+		return nil, fmt.Errorf("goalrunner: run ID is required")
+	}
+	actualRoot, err := goalloop.NormalizeWorkspaceRoot(workerRoot)
+	if err != nil {
+		return nil, fmt.Errorf("goalrunner: resolve worker workspace for run %s: %w", runID, err)
+	}
+	if strings.TrimSpace(goal.WorkspaceRoot) == "" {
+		return &Runner{loop: loop, runID: runID, workspaceRoot: actualRoot, legacyRoot: true, goal: goal, specs: specs}, nil
+	}
+	expectedRoot, err := goalloop.NormalizeWorkspaceRoot(goal.WorkspaceRoot)
+	if err != nil {
+		return nil, fmt.Errorf("goalrunner: load workspace identity for run %s: %w", runID, err)
+	}
+	if actualRoot != expectedRoot {
+		return nil, fmt.Errorf("goalrunner: workspace mismatch for run %s: worker is %s, goal requires %s", runID, actualRoot, expectedRoot)
+	}
+	return &Runner{loop: loop, runID: runID, workspaceRoot: expectedRoot, goal: goal, specs: specs}, nil
+}
+
+// WorkspaceRoot returns the normalized worker root bound to this runner. For
+// a legacy goal with no serialized root, this is the narrow trust boundary
+// chosen by the worker operator when starting or resuming that goal.
+func (r *Runner) WorkspaceRoot() string {
+	if r == nil {
+		return ""
+	}
+	return r.workspaceRoot
+}
+
+func (r *Runner) validateRun(runID string) error {
+	runID = strings.TrimSpace(runID)
+	if runID == "" {
+		return fmt.Errorf("goalrunner: request carries no run ID")
+	}
+	if runID != r.runID {
+		return fmt.Errorf("goalrunner: runner for run %s rejected foreign run %s", r.runID, runID)
+	}
+	return nil
+}
+
+func (r *Runner) validateWorkspace(root string) error {
+	requestRoot, err := goalloop.NormalizeWorkspaceRoot(root)
+	if err != nil {
+		return fmt.Errorf("goalrunner: request for run %s has no valid workspace identity: %w", r.runID, err)
+	}
+	if requestRoot != r.workspaceRoot {
+		return fmt.Errorf("goalrunner: request workspace mismatch for run %s: got %s, want %s", r.runID, requestRoot, r.workspaceRoot)
+	}
+	return nil
 }
 
 // ResumeSeed implements durability.TaskRunner.
 func (r *Runner) ResumeSeed(ctx context.Context, runID, taskID string) (durability.ResumeSeed, error) {
+	if err := r.validateRun(runID); err != nil {
+		return durability.ResumeSeed{}, err
+	}
 	seed, err := r.loop.SeedTask(ctx, taskID, r.specs[taskID])
 	if err != nil {
 		return durability.ResumeSeed{}, err
@@ -47,6 +106,9 @@ func (r *Runner) ResumeSeed(ctx context.Context, runID, taskID string) (durabili
 // NextTask implements durability.TaskRunner with the Drain selection
 // rule: first queue item that the workflow has not deferred.
 func (r *Runner) NextTask(ctx context.Context, req durability.NextTaskRequest) (durability.NextTaskResponse, error) {
+	if err := r.validateRun(req.RunID); err != nil {
+		return durability.NextTaskResponse{}, err
+	}
 	queue, err := r.loop.BuildQueue(ctx, req.RunID)
 	if err != nil {
 		return durability.NextTaskResponse{}, err
@@ -66,6 +128,9 @@ func (r *Runner) NextTask(ctx context.Context, req durability.NextTaskRequest) (
 // NextBatch implements durability.TaskRunner: the next runnable tasks
 // whose workspace claims are mutually independent, in queue order.
 func (r *Runner) NextBatch(ctx context.Context, req durability.NextBatchRequest) (durability.NextBatchResponse, error) {
+	if err := r.validateRun(req.RunID); err != nil {
+		return durability.NextBatchResponse{}, err
+	}
 	queue, err := r.loop.BuildQueue(ctx, req.RunID)
 	if err != nil {
 		return durability.NextBatchResponse{}, err
@@ -147,6 +212,9 @@ func pathsNest(a, b string) bool {
 // on the run ledger before the workflow blocks, so `buckley goal
 // approve` can find the child instance to target.
 func (r *Runner) RecordApprovalWait(ctx context.Context, wait durability.ApprovalWait) error {
+	if err := r.validateRun(wait.RunID); err != nil {
+		return err
+	}
 	_, err := r.loop.Ledger().Append(ctx, runledger.Event{
 		Type:      runledger.EventDurableApprovalWaiting,
 		Timestamp: time.Now().UTC(),
@@ -167,6 +235,9 @@ func (r *Runner) RecordApprovalWait(ctx context.Context, wait durability.Approva
 // resolutions unpark the task before the resolution is recorded, so a
 // crash between the two retries the whole activity idempotently.
 func (r *Runner) ResolveApproval(ctx context.Context, resolution durability.ApprovalResolution) error {
+	if err := r.validateRun(resolution.RunID); err != nil {
+		return err
+	}
 	if resolution.Outcome == durability.ApprovalApproved {
 		if err := r.loop.Unpark(ctx, resolution.RunID, resolution.TaskID, resolution.Reason); err != nil {
 			return err
@@ -189,8 +260,33 @@ func (r *Runner) ResolveApproval(ctx context.Context, resolution durability.Appr
 	return nil
 }
 
-// RunTurn implements durability.TaskRunner over Loop.TurnStep.
+// RunTurn implements the workspace-bound V2 activity over Loop.TurnStep.
 func (r *Runner) RunTurn(ctx context.Context, req durability.TurnRequest) (durability.TurnResponse, error) {
+	if err := r.validateRun(req.RunID); err != nil {
+		return durability.TurnResponse{}, err
+	}
+	if err := r.validateWorkspace(req.WorkspaceRoot); err != nil {
+		return durability.TurnResponse{}, err
+	}
+	return r.runTurn(ctx, req)
+}
+
+// RunLegacyTurn serves only in-flight V1/V2 task histories whose serialized
+// requests have no workspace field. The run identity remains mandatory; the
+// workspace is the one bound when this Runner was constructed.
+func (r *Runner) RunLegacyTurn(ctx context.Context, req durability.TurnRequest) (durability.TurnResponse, error) {
+	if err := r.validateRun(req.RunID); err != nil {
+		return durability.TurnResponse{}, err
+	}
+	if strings.TrimSpace(req.WorkspaceRoot) != "" {
+		if err := r.validateWorkspace(req.WorkspaceRoot); err != nil {
+			return durability.TurnResponse{}, err
+		}
+	}
+	return r.runTurn(ctx, req)
+}
+
+func (r *Runner) runTurn(ctx context.Context, req durability.TurnRequest) (durability.TurnResponse, error) {
 	var drive goalloop.DriveSnapshot
 	if len(req.Drive) > 0 {
 		if err := json.Unmarshal(req.Drive, &drive); err != nil {
@@ -229,4 +325,98 @@ func (r *Runner) RunTurn(ctx context.Context, req durability.TurnRequest) (durab
 		Rounds:       step.Rounds,
 		ToolCalls:    step.ToolCalls,
 	}, nil
+}
+
+// FinalizeGoal implements durability.GoalFinalizer. The report is the canonical
+// task roll-up, so copying its status to the run row keeps report and replay
+// views consistent. Repeated delivery of the same terminal status is a no-op.
+func (r *Runner) FinalizeGoal(ctx context.Context, finalization durability.GoalFinalization) error {
+	if err := r.validateRun(finalization.RunID); err != nil {
+		return err
+	}
+	if err := r.validateWorkspace(finalization.WorkspaceRoot); err != nil {
+		return err
+	}
+	failure := strings.TrimSpace(finalization.Failure)
+	report, err := r.loop.Report(ctx, r.runID)
+	if err != nil {
+		return fmt.Errorf("goalrunner: build final report for run %s: %w", r.runID, err)
+	}
+	if failure == "" && (finalization.Incomplete || report.Status == "pending" || report.Status == "partial") {
+		// Pending and partial reports still contain resumable work. V4 marks
+		// bounded-yield exits explicitly, while the report guard also protects
+		// legacy observer-side reconciliation from sealing the same run.
+		return r.recordGoalGeneration(ctx, finalization, false)
+	}
+	status := report.Status
+	if failure != "" {
+		status = "failed"
+	}
+	run, err := r.loop.Ledger().GetRun(ctx, r.runID)
+	if err != nil {
+		return fmt.Errorf("goalrunner: load run %s for finalization: %w", r.runID, err)
+	}
+	if run.EndedAt != nil {
+		if run.Status != status {
+			return fmt.Errorf("goalrunner: run %s already finalized as %s, cannot finalize as %s", r.runID, run.Status, status)
+		}
+		return r.recordGoalGeneration(ctx, finalization, failure != "")
+	}
+	outcome := map[string]any{
+		"workflow_instance_id": finalization.WorkflowInstanceID,
+		"goal_status":          report.Status,
+		"spent_usd":            report.SpentUSD,
+	}
+	if finalization.Failure != "" {
+		outcome["failure"] = finalization.Failure
+	}
+	if err := r.loop.Ledger().EndRun(ctx, r.runID, status, time.Now().UTC(), outcome); err != nil {
+		return fmt.Errorf("goalrunner: finalize run %s: %w", r.runID, err)
+	}
+	return r.recordGoalGeneration(ctx, finalization, failure != "")
+}
+
+func (r *Runner) recordGoalGeneration(ctx context.Context, finalization durability.GoalFinalization, failed bool) error {
+	instanceID := finalization.WorkflowInstanceID
+	if strings.TrimSpace(instanceID) == "" {
+		return fmt.Errorf("goalrunner: workflow instance ID is required for run %s finalization", r.runID)
+	}
+	generation, err := workflowGeneration(r.runID, instanceID)
+	if err != nil {
+		return err
+	}
+	_, err = r.loop.Ledger().Append(ctx, runledger.Event{
+		ID:        runledger.StableEventID("durable-goal-generation", r.runID, instanceID),
+		Type:      runledger.EventDurableGoalGeneration,
+		Timestamp: time.Now().UTC(),
+		RunID:     r.runID,
+		Payload: map[string]any{
+			"run_id":               r.runID,
+			"workflow_instance_id": instanceID,
+			"generation":           generation,
+			"incomplete":           finalization.Incomplete,
+			"failure":              failed,
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("goalrunner: record workflow generation %s: %w", instanceID, err)
+	}
+	return nil
+}
+
+func workflowGeneration(runID, instanceID string) (int, error) {
+	root := "goal-" + runID
+	if instanceID == root {
+		return 0, nil
+	}
+	prefix := root + "::resume::"
+	if !strings.HasPrefix(instanceID, prefix) {
+		return 0, fmt.Errorf("goalrunner: workflow instance %s does not belong to run %s", instanceID, runID)
+	}
+	raw := strings.TrimPrefix(instanceID, prefix)
+	generation, err := strconv.Atoi(raw)
+	if err != nil || generation <= 0 || strconv.Itoa(generation) != raw {
+		return 0, fmt.Errorf("goalrunner: workflow instance %s has an invalid resume generation", instanceID)
+	}
+	return generation, nil
 }

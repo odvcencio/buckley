@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"m31labs.dev/buckley/pkg/agentloop"
 	"m31labs.dev/buckley/pkg/config"
 	"m31labs.dev/buckley/pkg/model"
 	"m31labs.dev/buckley/pkg/orchestrator"
@@ -358,6 +359,22 @@ func TestApplyStartupModelOverrideEnablesCodex(t *testing.T) {
 	}
 }
 
+func TestApplyStartupModelOverrideDisablesConfiguredFallbacks(t *testing.T) {
+	cfg := config.DefaultConfig()
+	if len(cfg.Models.FallbackChains["z-ai/glm-5.2"]) == 0 {
+		t.Fatal("default GLM fallback chain missing from test setup")
+	}
+
+	applyStartupModelOverride(cfg, "z-ai/glm-5.2")
+
+	if cfg.Models.Execution != "z-ai/glm-5.2" {
+		t.Fatalf("execution model = %q, want exact normalized override", cfg.Models.Execution)
+	}
+	if _, exists := cfg.Models.FallbackChains["z-ai/glm-5.2"]; exists {
+		t.Fatal("explicit command model retained a configured fallback chain")
+	}
+}
+
 func TestApplyCommandModelOverrideRestoresPreviousValue(t *testing.T) {
 	previous := modelOverrideFlag
 	modelOverrideFlag = "openai/gpt-5.4"
@@ -534,6 +551,34 @@ func TestRunCommandTreatsFlagHelpAsSuccess(t *testing.T) {
 	}
 }
 
+func TestPrintOneShotFailure_PreservesIncompleteTurnOutput(t *testing.T) {
+	err := &agentloop.IncompleteTurnError{
+		FinishReason:      agentloop.FinishReasonStepCap,
+		Reason:            "the child reached its explicit model-request limit",
+		FinalizationError: "provider returned an empty synthesis",
+	}
+	var stdout string
+	exitCode := 0
+	stderr := captureStderr(t, func() {
+		stdout = captureStdout(t, func() {
+			exitCode = printOneShotFailure("Buckley stopped after preserving three tool results.", err)
+		})
+	})
+
+	if exitCode != 1 {
+		t.Fatalf("exit code = %d, want 1 for incomplete result", exitCode)
+	}
+	if !strings.Contains(stdout, "preserving three tool results") || !strings.Contains(stdout, "Incomplete result") {
+		t.Fatalf("stdout = %q, want preserved content with an explicit incomplete marker", stdout)
+	}
+	if strings.Contains(strings.ToLower(stdout), "completed successfully") {
+		t.Fatalf("stdout = %q, must not claim successful completion", stdout)
+	}
+	if !strings.Contains(stderr, "One-shot status: incomplete (exit=1") || !strings.Contains(stderr, "final synthesis failed") {
+		t.Fatalf("stderr = %q, want non-zero incomplete status and cause", stderr)
+	}
+}
+
 func captureStdout(t *testing.T, fn func()) string {
 	t.Helper()
 	old := os.Stdout
@@ -571,7 +616,7 @@ func TestDispatchSubcommandHelpVersionAndBatch(t *testing.T) {
 			t.Fatalf("help handled=%v code=%d", handled, code)
 		}
 	})
-	if !strings.Contains(helpOut, "Buckley - AI Development Assistant") {
+	if !strings.Contains(helpOut, "Buckley - Tool-First AI Agent Harness") {
 		t.Fatalf("unexpected help output: %q", helpOut)
 	}
 	if !strings.Contains(helpOut, "commit [--dry-run]") {

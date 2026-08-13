@@ -63,11 +63,14 @@ type NextBatchResponse struct {
 // TurnIndex form the stable turn identity; a backend retry re-sends the
 // same request so completed steps replay from evidence (Phase 0).
 type TurnRequest struct {
-	RunID      string          `json:"run_id"`
-	TaskID     string          `json:"task_id"`
-	Generation int             `json:"generation"`
-	TurnIndex  int             `json:"turn_index"`
-	Drive      json.RawMessage `json:"drive,omitempty"`
+	RunID  string `json:"run_id"`
+	TaskID string `json:"task_id"`
+	// WorkspaceRoot binds the activity to the canonical directory recorded
+	// for the goal. Workers reject a request for any other workspace.
+	WorkspaceRoot string          `json:"workspace_root"`
+	Generation    int             `json:"generation"`
+	TurnIndex     int             `json:"turn_index"`
+	Drive         json.RawMessage `json:"drive,omitempty"`
 	// Drive-scoped counters the workflow accumulates as explicit state.
 	ModelRequests  int   `json:"model_requests,omitempty"`
 	ToolExecutions int   `json:"tool_executions,omitempty"`
@@ -107,6 +110,21 @@ type TaskRunner interface {
 	ResolveApproval(ctx context.Context, resolution ApprovalResolution) error
 }
 
+// LegacyTaskRunner optionally narrows compatibility handling for in-flight
+// TaskWorkflowV1/V2 histories whose serialized turn input predates
+// WorkspaceRoot. Runners that do not implement it receive the same request
+// through TaskRunner.RunTurn, preserving the pre-V4 public interface.
+type LegacyTaskRunner interface {
+	RunLegacyTurn(ctx context.Context, req TurnRequest) (TurnResponse, error)
+}
+
+// GoalFinalizer is the optional V4 lifecycle capability. Keeping it separate
+// preserves source compatibility for pre-V4 TaskRunner adapters; V4 execution
+// fails explicitly when a registered runner cannot reconcile terminal state.
+type GoalFinalizer interface {
+	FinalizeGoal(ctx context.Context, finalization GoalFinalization) error
+}
+
 // GoalStart describes one durable goal execution. MaxYields bounds how
 // often one task may yield in_progress before it defers to a later run.
 // MaxParallel bounds the fan-out of claim-independent tasks; zero or
@@ -115,9 +133,30 @@ type TaskRunner interface {
 // milliseconds before parking it for good.
 type GoalStart struct {
 	RunID          string `json:"run_id"`
+	WorkspaceRoot  string `json:"workspace_root"`
 	MaxYields      int    `json:"max_yields,omitempty"`
 	MaxParallel    int    `json:"max_parallel,omitempty"`
 	ApprovalWaitMS int64  `json:"approval_wait_ms,omitempty"`
+	// ResumeAfterWorkflowInstanceID is the immutable incomplete-generation
+	// fence read from Buckley's canonical run ledger. When set, the backend may
+	// schedule only the immediately following generation. It is scheduler
+	// control state; resumed workflows inherit execution settings from
+	// generation zero instead of serializing this field into their input.
+	ResumeAfterWorkflowInstanceID string `json:"-"`
+}
+
+// GoalFinalization asks the activity host to reconcile a terminal workflow
+// with Buckley's canonical run lifecycle. Failure is empty for a normal
+// workflow completion.
+type GoalFinalization struct {
+	RunID              string `json:"run_id"`
+	WorkspaceRoot      string `json:"workspace_root"`
+	WorkflowInstanceID string `json:"workflow_instance_id"`
+	// Incomplete means the workflow intentionally stopped after bounded
+	// yields with resumable tasks still open. The activity must not seal the
+	// canonical run in that case.
+	Incomplete bool   `json:"incomplete,omitempty"`
+	Failure    string `json:"failure,omitempty"`
 }
 
 // ApprovalEventName is the durable external event a parked task waits
@@ -169,7 +208,15 @@ type TaskOutcome struct {
 // GoalResult is the goal workflow's output.
 type GoalResult struct {
 	Tasks []TaskOutcome `json:"tasks"`
+	// Status is set to incomplete when bounded yields defer one or more
+	// resumable tasks. It stays empty for legacy and ordinary terminal
+	// results so existing workflow output remains wire-compatible.
+	Status        string   `json:"status,omitempty"`
+	DeferredTasks []string `json:"deferred_tasks,omitempty"`
 }
+
+// Goal result statuses.
+const GoalResultIncomplete = "incomplete"
 
 // GoalStatus reports a workflow instance the caller waited on.
 type GoalStatus struct {

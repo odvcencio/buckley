@@ -1,6 +1,9 @@
 # Mission Control (GoSX UI)
 
-Mission Control is Buckley’s browser UI for monitoring and steering sessions. It’s designed to feel like “terminal control from anywhere”: a live transcript, workflow controls, approvals, and a real PTY connected to the host running Buckley.
+Mission Control is Buckley’s local browser UI for monitoring and steering
+sessions. It presents the live transcript, workflow controls, approvals,
+session telemetry, and the shared agent/subagent tree while the daemon remains
+the sole execution authority.
 
 ## Visual System
 
@@ -13,11 +16,10 @@ refactor changes hierarchy and density, not the visual identity.
 - **Typography:** Space Grotesk for display and navigation, Inter for body copy,
   and JetBrains Mono for paths, commands, model IDs, and telemetry. Keep the
   existing minor-third (1.2) scale in `pkg/ipc/gosxui/styles.css`.
-- **Palette:** `--color-void` is the dominant canvas, `--color-abyss` and
-  `--color-depth` form the secondary shell layers, and `--color-accent` is the
-  reserved action/selection accent. Use `--color-warning` for attention,
-  `--color-error` for blocked/destructive state, and `--color-success` only for
-  confirmed completion. New UI must consume the existing `--color-*` tokens.
+- **Palette:** `--void` is the dominant canvas, `--abyss` and `--depth` form
+  the secondary shell layers, and `--accent` is the reserved action/selection
+  accent. New UI must consume the custom properties already defined in
+  `pkg/ipc/gosxui/styles.css`.
 - **Contrast:** primary text targets at least 7:1 against the void (AAA), body
   text at least 4.5:1 (AA), and muted metadata at least 3:1 for large text.
   Focus indicators use the accent border/glow tokens and remain visible in
@@ -26,9 +28,8 @@ refactor changes hierarchy and density, not the visual identity.
   durations and `ease-out`/`ease-out-expo`; never animate every transcript row.
   All non-essential motion remains disabled by the existing reduced-motion
   media query.
-- **Spacing:** retain the existing 4px base scale and tokenized Tailwind
-  spacing. New surfaces should prefer compact 4px rhythm and 6–10px corner
-  radii over the legacy 2xl card treatment.
+- **Spacing:** retain the existing compact plain-CSS rhythm and 6–10px corner
+  radii instead of introducing a second styling system.
 
 The new product hierarchy is **attention → run → steering → evidence →
 infrastructure**. Mission Control is an agent/workspace manager: directories
@@ -40,18 +41,19 @@ runtime.
 ## What You Get
 
 - **Workspaces**: group active work by repository/directory, with attention counts and compact run lists
-- **Agents and subagents**: inspect the project-local agent catalog and active runtime agents, then launch a selected profile
+- **Agents and subagents**: inspect the project-local agent catalog plus the
+  shared runtime tree, including nested parent/child runs, persona, model,
+  task, and retained completed/failed/cancelled status, then launch a selected
+  profile
 - **Start work**: create a daemon-owned run in a directory with an optional agent, subagent, model override, and initial task
 - **Transcript**: read the live conversation transcript (user/assistant/system)
 - **Controls**: pause/resume, steer, queue input, interrupt a running workflow, and send messages or slash commands
 - **Approvals**: approve/reject pending tool calls when Buckley’s safety gate requests it
-- **Run inspector**: compact status windows for workflow, todos, approvals, activity, and terminal on the selected run
-- **Agent actions**: inspect live tool, model, subagent, approval, and task events without turning the browser into a second agent runtime
-- **Telemetry**: see explicit tool yields, code-mode recommendations, and durable operation state beside the transcript
+- **Run inspector**: compact status windows for workflow, todos, approvals, and basic session metrics
+- **Agent activity**: follow nested run status, task, persona, and model from the shared telemetry projection without turning the browser into a second agent runtime
 - **Terminal bridge**: the selected run’s authenticated `/ws/pty` endpoint stays
-  available to terminal clients rooted at the session’s worktree
-- **Operator console** (operator scope): manage API tokens, remote settings, and audit history
-- **Mobile-first UX**: the workspace picker and run inspector become focused drawers on small screens
+  available to a separate terminal client rooted at the session’s worktree;
+  the current GoSX page does not embed a terminal
 
 ## Quick Start
 
@@ -106,6 +108,11 @@ server, uses native forms for authenticated actions, and keeps the daemon as
 the only agent runtime. GoSX navigation and a bounded refresh keep active runs
 current without a client-side React bundle. The existing PTY WebSocket remains
 the terminal transport.
+
+The browser and IPC assembler consume the same telemetry-derived agent
+projection; GoSX does not query the retired Mission active-agent list. For
+headless sessions, the runner is also the single canonical approval owner, so
+an approved write cannot stall behind a second browser-invisible Mission gate.
 
 ## Protocol / Endpoints
 

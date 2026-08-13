@@ -18,6 +18,7 @@ import (
 // command or arbitrary argv.
 type RunVerificationTool struct {
 	snapshotRoot   string
+	sourceRoot     string
 	codexCommand   string
 	verifier       reviewsandbox.Verifier
 	maxOutputBytes int
@@ -28,6 +29,17 @@ type RunVerificationTool struct {
 // It is intentionally not registered as a general builtin and implements no
 // SetWorkDir method. Review registries must opt in and register it explicitly.
 func NewRunVerificationTool(snapshotRoot string, codexCommand ...string) (*RunVerificationTool, error) {
+	return newRunVerificationTool(snapshotRoot, "", codexCommand...)
+}
+
+// NewRunVerificationToolWithSource additionally seals the host-owned source
+// repository used for validated, read-only offline dependency projection. The
+// source root is never exposed in the model-controlled tool schema.
+func NewRunVerificationToolWithSource(snapshotRoot, sourceRoot string, codexCommand ...string) (*RunVerificationTool, error) {
+	return newRunVerificationTool(snapshotRoot, sourceRoot, codexCommand...)
+}
+
+func newRunVerificationTool(snapshotRoot, sourceRoot string, codexCommand ...string) (*RunVerificationTool, error) {
 	root, err := filepath.Abs(strings.TrimSpace(snapshotRoot))
 	if err != nil || strings.TrimSpace(snapshotRoot) == "" {
 		return nil, fmt.Errorf("immutable review snapshot root is required")
@@ -40,12 +52,28 @@ func NewRunVerificationTool(snapshotRoot string, codexCommand ...string) (*RunVe
 	if err != nil || !info.IsDir() {
 		return nil, fmt.Errorf("immutable review snapshot root is not a directory")
 	}
+	canonicalSource := ""
+	if strings.TrimSpace(sourceRoot) != "" {
+		canonicalSource, err = filepath.Abs(strings.TrimSpace(sourceRoot))
+		if err != nil {
+			return nil, fmt.Errorf("resolve review source repository root: %w", err)
+		}
+		canonicalSource, err = filepath.EvalSymlinks(canonicalSource)
+		if err != nil {
+			return nil, fmt.Errorf("resolve review source repository root: %w", err)
+		}
+		info, err = os.Stat(canonicalSource)
+		if err != nil || !info.IsDir() {
+			return nil, fmt.Errorf("review source repository root is not a directory")
+		}
+	}
 	command := ""
 	if len(codexCommand) > 0 {
 		command = strings.TrimSpace(codexCommand[0])
 	}
 	return &RunVerificationTool{
 		snapshotRoot: filepath.Clean(root),
+		sourceRoot:   canonicalSource,
 		codexCommand: command,
 		verifier:     reviewsandbox.NewSessionExecutorWithCodexCommand(command),
 	}, nil
@@ -80,7 +108,7 @@ func (t *RunVerificationTool) SetTimeoutLimit(limit time.Duration) {
 func (t *RunVerificationTool) Name() string { return "run_verification" }
 
 func (t *RunVerificationTool) Description() string {
-	return "Run a focused build, test, or check in the immutable review snapshot. AGENTS.md rules are enforced before launch. Requests needing Docker, CI, or another unavailable surface return INCONCLUSIVE, not a host command. For Go approval evidence use kind=test (compiles and runs tests). Source is read-only, build output is private, network is disabled."
+	return "Run a focused build, test, or check against the immutable review snapshot. AGENTS.md rules are enforced before launch. Requests needing Docker, CI, or another unavailable surface return INCONCLUSIVE, not a host command. For Go approval evidence use kind=test (compiles and runs available tests); packages with no test files return build-only proof. A Node package with no declared test script returns explicit NOT_APPLICABLE test-policy evidence without launching a command; approval still requires its build gate to pass. The command runs in a private disposable copy, the source snapshot stays read-only, and network is disabled."
 }
 
 func (t *RunVerificationTool) Parameters() ParameterSchema {
@@ -186,6 +214,7 @@ func (t *RunVerificationTool) ExecuteWithContext(ctx context.Context, params map
 	}
 	verification := verifier.Verify(ctx, reviewsandbox.Request{
 		SnapshotRoot:   t.snapshotRoot,
+		SourceRoot:     t.sourceRoot,
 		Kind:           reviewsandbox.Kind(kind),
 		Language:       reviewsandbox.Language(language),
 		Path:           path,
@@ -195,25 +224,28 @@ func (t *RunVerificationTool) ExecuteWithContext(ctx context.Context, params map
 	})
 
 	data := map[string]any{
-		"kind":        string(verification.Kind),
-		"language":    string(verification.Language),
-		"path":        verification.Path,
-		"pattern":     verification.Pattern,
-		"command":     verification.Command,
-		"argv":        append([]string(nil), verification.Argv...),
-		"exit_code":   verification.ExitCode,
-		"status":      string(verification.Status),
-		"evidence":    verificationEvidenceClass(verification),
-		"proves":      verificationProofKinds(verification),
-		"stdout":      verification.Stdout,
-		"stderr":      verification.Stderr,
-		"error":       verification.Error,
-		"duration_ms": verification.Duration.Milliseconds(),
-		"truncated":   verification.Truncated,
+		"kind":           string(verification.Kind),
+		"language":       string(verification.Language),
+		"path":           verification.Path,
+		"pattern":        verification.Pattern,
+		"command":        verification.Command,
+		"argv":           append([]string(nil), verification.Argv...),
+		"exit_code":      verification.ExitCode,
+		"status":         string(verification.Status),
+		"evidence":       verificationEvidenceClass(verification),
+		"proves":         verificationProofKinds(verification),
+		"stdout":         verification.Stdout,
+		"stderr":         verification.Stderr,
+		"error":          verification.Error,
+		"duration_ms":    verification.Duration.Milliseconds(),
+		"truncated":      verification.Truncated,
+		"no_test_files":  verification.NoTestFiles,
+		"no_test_script": verification.NoTestScript,
 	}
 	result := &Result{
-		Success: verification.Status == reviewsandbox.StatusPass && verification.ExitCode == 0,
-		Data:    data,
+		Success: (verification.Status == reviewsandbox.StatusPass && verification.ExitCode == 0) ||
+			(verification.Status == reviewsandbox.StatusNotApplicable && verification.NoTestScript && verification.ExitCode == -1),
+		Data: data,
 	}
 	if verification.Error != "" {
 		result.Error = verification.Error
@@ -235,19 +267,29 @@ func (t *RunVerificationTool) ExecuteWithContext(ctx context.Context, params map
 			// A failure with no visible output invites invented
 			// conclusions: the abridged view keeps the output tails so
 			// every CONFIRMED_FAIL stays attributable to real text.
-			"stdout_tail": outputTail(verification.Stdout, verificationTailBytes),
-			"stderr_tail": outputTail(verification.Stderr, verificationTailBytes),
-			"truncated":   true,
+			"stdout_tail":    outputTail(verification.Stdout, verificationTailBytes),
+			"stderr_tail":    outputTail(verification.Stderr, verificationTailBytes),
+			"truncated":      true,
+			"no_test_files":  verification.NoTestFiles,
+			"no_test_script": verification.NoTestScript,
 		}
 	}
 	return result, nil
 }
 
 func verificationProofKinds(verification reviewsandbox.Result) []string {
+	if verification.Status == reviewsandbox.StatusNotApplicable && verification.NoTestScript &&
+		verification.Language == reviewsandbox.LanguageNode && verification.Kind == reviewsandbox.KindTest &&
+		verification.ExitCode == -1 {
+		return []string{"test-policy"}
+	}
 	if verification.Status != reviewsandbox.StatusPass || verification.ExitCode != 0 {
 		return []string{}
 	}
 	if verification.Language == reviewsandbox.LanguageGo && verification.Kind == reviewsandbox.KindTest {
+		if verification.NoTestFiles {
+			return []string{"build"}
+		}
 		return []string{"build", "test"}
 	}
 	switch verification.Kind {
@@ -277,6 +319,10 @@ func outputTail(s string, n int) string {
 
 func verificationEvidenceClass(verification reviewsandbox.Result) string {
 	switch {
+	case verification.Status == reviewsandbox.StatusNotApplicable && verification.NoTestScript &&
+		verification.Language == reviewsandbox.LanguageNode && verification.Kind == reviewsandbox.KindTest &&
+		verification.ExitCode == -1:
+		return "NO_TEST_GATE"
 	case verification.Status == reviewsandbox.StatusPass && verification.ExitCode == 0:
 		return "CONFIRMED_PASS"
 	case verification.Status == reviewsandbox.StatusFail:

@@ -6,6 +6,7 @@ import (
 	"math"
 	"os"
 	"os/exec"
+	pathpkg "path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -512,7 +513,7 @@ func (t *FindFilesTool) Name() string {
 }
 
 func (t *FindFilesTool) Description() string {
-	return "Find files matching a glob pattern (e.g. '*.go'), recursively, skipping dependency and build-output directories."
+	return "Find files recursively with repository-relative globs and bounded pages, skipping dependency and build-output directories. Use next_offset until absent to exhaust a large result set."
 }
 
 func (t *FindFilesTool) Parameters() ParameterSchema {
@@ -527,6 +528,16 @@ func (t *FindFilesTool) Parameters() ParameterSchema {
 				Type:        "string",
 				Description: "Base directory to search from (default: current directory)",
 				Default:     ".",
+			},
+			"offset": {
+				Type:        "integer",
+				Description: "Zero-based match offset for paging large result sets (default 0)",
+				Default:     0,
+			},
+			"limit": {
+				Type:        "integer",
+				Description: "Maximum matches returned to the model per page (default 200, max 1000)",
+				Default:     200,
 			},
 		},
 		Required: []string{"pattern"},
@@ -546,6 +557,14 @@ func (t *FindFilesTool) Execute(params map[string]any) (*Result, error) {
 	if bp, ok := params["base_path"].(string); ok && bp != "" {
 		basePath = bp
 	}
+	offset := parseInt(params["offset"], 0)
+	limit := parseInt(params["limit"], 200)
+	if offset < 0 {
+		return &Result{Success: false, Error: "offset must not be negative"}, nil
+	}
+	if limit <= 0 || limit > 1000 {
+		return &Result{Success: false, Error: "limit must be between 1 and 1000"}, nil
+	}
 
 	absBasePath, err := resolvePath(t.workDir, basePath)
 	if err != nil {
@@ -554,13 +573,26 @@ func (t *FindFilesTool) Execute(params map[string]any) (*Result, error) {
 			Error:   err.Error(),
 		}, nil
 	}
+	baseInfo, err := os.Stat(absBasePath)
+	if err != nil {
+		return &Result{Success: false, Error: fmt.Sprintf("failed to inspect base path: %v", err)}, nil
+	}
+	if !baseInfo.IsDir() {
+		return &Result{Success: false, Error: fmt.Sprintf("base path is not a directory: %s", basePath)}, nil
+	}
+	expandedPatterns, err := expandFindFilesPatterns(pattern)
+	if err != nil {
+		return &Result{Success: false, Error: fmt.Sprintf("invalid glob pattern: %v", err)}, nil
+	}
+	patterns := compileFindFilesPatterns(expandedPatterns)
 
-	var matches []string
-	err = filepath.Walk(absBasePath, func(path string, info os.FileInfo, err error) error {
+	matches := make([]string, 0, limit)
+	matchCount := 0
+	err = filepath.WalkDir(absBasePath, func(path string, entry os.DirEntry, err error) error {
 		if err != nil {
-			return nil // Skip errors
+			return err
 		}
-		if info.IsDir() {
+		if entry.IsDir() {
 			if shouldSkipFindFilesDir(path, absBasePath) {
 				return filepath.SkipDir
 			}
@@ -572,13 +604,14 @@ func (t *FindFilesTool) Execute(params map[string]any) (*Result, error) {
 			return nil
 		}
 
-		matched, err := filepath.Match(pattern, filepath.Base(path))
-		if err != nil {
-			return nil
-		}
-
-		if matched {
-			matches = append(matches, relPath)
+		relPath = filepath.ToSlash(relPath)
+		if matchesFindFilesPattern(patterns, relPath) {
+			// WalkDir visits entries in lexical order, so retain only this page
+			// instead of materializing and sorting the repository-wide corpus.
+			if matchCount >= offset && len(matches) < limit {
+				matches = append(matches, relPath)
+			}
+			matchCount++
 		}
 
 		return nil
@@ -590,28 +623,191 @@ func (t *FindFilesTool) Execute(params map[string]any) (*Result, error) {
 			Error:   fmt.Sprintf("failed to search files: %v", err),
 		}, nil
 	}
+	pageStart := offset
+	pageEnd := pageStart + len(matches)
+	data := map[string]any{
+		"pattern": pattern,
+		"matches": matches,
+		"count":   matchCount,
+		"offset":  pageStart,
+		"limit":   limit,
+		"summary": pagedFindFilesSummary(pattern, matchCount, pageStart, pageEnd),
+	}
+	if offset+len(matches) < matchCount {
+		data["next_offset"] = offset + len(matches)
+	}
+	return &Result{Success: true, Data: data}, nil
+}
 
-	result := &Result{
-		Success: true,
-		Data: map[string]any{
-			"pattern": pattern,
-			"matches": matches,
-			"count":   len(matches),
-		},
+func pagedFindFilesSummary(pattern string, count, start, end int) string {
+	if end <= start {
+		return fmt.Sprintf("Found %d files matching %q (no records at offset %d)", count, pattern, start)
+	}
+	return fmt.Sprintf("Found %d files matching %q (showing %d-%d)", count, pattern, start+1, end)
+}
+
+const maxFindFilesPatternExpansions = 64
+
+// expandFindFilesPatterns adds the small brace-alternation surface models
+// commonly use for repository inventories (for example **/*.{go,rs,ts}).
+// Expansion is bounded so a tool argument cannot create unbounded matching
+// work. Each expanded pattern is validated before the filesystem walk.
+func expandFindFilesPatterns(pattern string) ([]string, error) {
+	pattern = filepath.ToSlash(strings.TrimSpace(pattern))
+	pattern = strings.TrimPrefix(pattern, "./")
+	if pattern == "" {
+		return nil, fmt.Errorf("pattern is empty")
 	}
 
-	const maxDisplayMatches = 200
-	if len(matches) > maxDisplayMatches {
-		result.ShouldAbridge = true
-		result.DisplayData = map[string]any{
-			"pattern": pattern,
-			"matches": matches[:maxDisplayMatches],
-			"count":   len(matches),
-			"summary": fmt.Sprintf("Found %d files matching %q (showing first %d)", len(matches), pattern, maxDisplayMatches),
+	patterns := []string{pattern}
+	for {
+		expanded := false
+		next := make([]string, 0, len(patterns))
+		for _, candidate := range patterns {
+			open := strings.IndexByte(candidate, '{')
+			if open < 0 {
+				next = append(next, candidate)
+				continue
+			}
+			closeOffset := strings.IndexByte(candidate[open+1:], '}')
+			if closeOffset < 0 {
+				return nil, fmt.Errorf("unclosed brace")
+			}
+			closeIndex := open + 1 + closeOffset
+			choices := strings.Split(candidate[open+1:closeIndex], ",")
+			if len(choices) < 2 {
+				return nil, fmt.Errorf("brace expression must contain alternatives")
+			}
+			for _, choice := range choices {
+				choice = strings.TrimSpace(choice)
+				if choice == "" {
+					return nil, fmt.Errorf("brace expression contains an empty alternative")
+				}
+				next = append(next, candidate[:open]+choice+candidate[closeIndex+1:])
+				if len(next) > maxFindFilesPatternExpansions {
+					return nil, fmt.Errorf("brace expansion exceeds %d patterns", maxFindFilesPatternExpansions)
+				}
+			}
+			expanded = true
+		}
+		patterns = next
+		if !expanded {
+			break
 		}
 	}
 
-	return result, nil
+	for _, candidate := range patterns {
+		segments := strings.Split(candidate, "/")
+		for _, segment := range segments {
+			if segment == "**" {
+				continue
+			}
+			if _, err := pathpkg.Match(segment, "probe"); err != nil {
+				return nil, err
+			}
+		}
+	}
+	return patterns, nil
+}
+
+type findFilesPattern struct {
+	basename string
+	segments []string
+}
+
+func compileFindFilesPatterns(patterns []string) []findFilesPattern {
+	compiled := make([]findFilesPattern, 0, len(patterns))
+	for _, pattern := range patterns {
+		if !strings.Contains(pattern, "/") {
+			compiled = append(compiled, findFilesPattern{basename: pattern})
+			continue
+		}
+		compiled = append(compiled, findFilesPattern{segments: strings.Split(pattern, "/")})
+	}
+	return compiled
+}
+
+func matchesFindFilesPattern(patterns []findFilesPattern, relPath string) bool {
+	relPath = filepath.ToSlash(strings.TrimPrefix(relPath, "./"))
+	base := pathpkg.Base(relPath)
+	var pathSegments []string
+	for _, pattern := range patterns {
+		if pattern.basename != "" {
+			matched, _ := pathpkg.Match(pattern.basename, base)
+			if matched {
+				return true
+			}
+			continue
+		}
+		if pathSegments == nil {
+			pathSegments = strings.Split(relPath, "/")
+		}
+		if matchFindFilesSegments(pattern.segments, pathSegments) {
+			return true
+		}
+	}
+	return false
+}
+
+func matchFindFilesSegments(pattern, name []string) bool {
+	doubleStars := 0
+	for _, segment := range pattern {
+		if segment == "**" {
+			doubleStars++
+		}
+	}
+	if doubleStars <= 1 {
+		return matchFindFilesSegmentsLinear(pattern, name)
+	}
+
+	type state struct{ pattern, name int }
+	stateCapacity := (len(pattern) + 1) * (len(name) + 1)
+	memo := make(map[state]bool, stateCapacity)
+	seen := make(map[state]bool, stateCapacity)
+	var match func(int, int) bool
+	match = func(patternIndex, nameIndex int) bool {
+		key := state{pattern: patternIndex, name: nameIndex}
+		if seen[key] {
+			return memo[key]
+		}
+		seen[key] = true
+
+		matched := false
+		switch {
+		case patternIndex == len(pattern):
+			matched = nameIndex == len(name)
+		case pattern[patternIndex] == "**":
+			matched = match(patternIndex+1, nameIndex) ||
+				(nameIndex < len(name) && match(patternIndex, nameIndex+1))
+		case nameIndex < len(name):
+			segmentMatched, err := pathpkg.Match(pattern[patternIndex], name[nameIndex])
+			matched = err == nil && segmentMatched && match(patternIndex+1, nameIndex+1)
+		}
+		memo[key] = matched
+		return matched
+	}
+	return match(0, 0)
+}
+
+// A single ** has no overlapping wildcard states, which makes this common
+// repository pattern linear without allocating a memo table for every file.
+func matchFindFilesSegmentsLinear(pattern, name []string) bool {
+	if len(pattern) == 0 {
+		return len(name) == 0
+	}
+	if pattern[0] == "**" {
+		for offset := 0; offset <= len(name); offset++ {
+			if matchFindFilesSegmentsLinear(pattern[1:], name[offset:]) {
+				return true
+			}
+		}
+		return false
+	}
+	if len(name) == 0 {
+		return false
+	}
+	matched, err := pathpkg.Match(pattern[0], name[0])
+	return err == nil && matched && matchFindFilesSegmentsLinear(pattern[1:], name[1:])
 }
 
 func shouldSkipFindFilesDir(path, base string) bool {

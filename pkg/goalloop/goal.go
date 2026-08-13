@@ -10,6 +10,9 @@ package goalloop
 
 import (
 	"context"
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -26,11 +29,41 @@ type Goal struct {
 	Constraints        []string
 	Deadline           time.Time
 	BudgetUSD          float64
+	// WorkspaceRoot is the canonical directory this goal is allowed to
+	// execute against. Durable workers compare it with their configured
+	// work directory before accepting any activity for the goal.
+	WorkspaceRoot string
 	// Posture names the budget posture (interactive | frugal |
 	// overnight). G8 turns postures into policy bundles; G6 records it.
 	Posture string
 	// ApprovalMode is the ADR 0006 tier that applies while unattended.
 	ApprovalMode string
+}
+
+// NormalizeWorkspaceRoot resolves a workspace directory to one stable local
+// identity. Symlinks are resolved so a worker cannot appear to match a goal
+// while addressing a different directory through an alias.
+func NormalizeWorkspaceRoot(root string) (string, error) {
+	root = strings.TrimSpace(root)
+	if root == "" {
+		return "", fmt.Errorf("goalloop: workspace root is required")
+	}
+	abs, err := filepath.Abs(root)
+	if err != nil {
+		return "", fmt.Errorf("goalloop: resolve workspace root: %w", err)
+	}
+	resolved, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		return "", fmt.Errorf("goalloop: resolve workspace root %s: %w", abs, err)
+	}
+	info, err := os.Stat(resolved)
+	if err != nil {
+		return "", fmt.Errorf("goalloop: inspect workspace root %s: %w", resolved, err)
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("goalloop: workspace root is not a directory: %s", resolved)
+	}
+	return filepath.Clean(resolved), nil
 }
 
 // Validate rejects a goal the loop could not run or resume meaningfully.

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -136,18 +137,22 @@ type SubAgentDeps struct {
 
 // SubAgentResult captures the outcome of a sub-agent task.
 type SubAgentResult struct {
-	AgentID           string
-	ModelUsed         string
-	Summary           string
-	FinishReason      string
-	RawKey            string
-	Raw               []byte
-	TokensUsed        int
-	InputTokens       int
-	OutputTokens      int
-	Duration          time.Duration
-	ToolCalls         []SubAgentToolCall
-	ExecutionEvidence []model.CommandExecutionEvidence
+	AgentID               string
+	ModelUsed             string
+	Summary               string
+	FinishReason          string
+	TerminationKind       string
+	TerminationReason     string
+	FinalizationAttempted bool
+	FinalizationError     string
+	RawKey                string
+	Raw                   []byte
+	TokensUsed            int
+	InputTokens           int
+	OutputTokens          int
+	Duration              time.Duration
+	ToolCalls             []SubAgentToolCall
+	ExecutionEvidence     []model.CommandExecutionEvidence
 }
 
 // SubAgentToolCall records a tool invocation.
@@ -174,6 +179,9 @@ func NewSubAgent(cfg SubAgentConfig, deps SubAgentDeps) (*SubAgent, error) {
 	}
 	if strings.TrimSpace(cfg.Model) == "" {
 		return nil, fmt.Errorf("model required")
+	}
+	if cfg.MaxCostUSD < 0 || math.IsNaN(cfg.MaxCostUSD) || math.IsInf(cfg.MaxCostUSD, 0) {
+		return nil, fmt.Errorf("sub-agent max cost USD must be finite and non-negative")
 	}
 
 	prompt := strings.TrimSpace(cfg.SystemPrompt)
@@ -315,7 +323,9 @@ func subAgentGovernorConfig(maxIterations, maxToolCalls int) agentloop.Config {
 // explorationContext, and friends); Execute only re-homes the round loop
 // onto Controller.Run, wrapped in the same "call Run again on the same
 // Governor" retry pattern pkg/ui/tui's tool loop migration established for
-// its own recoverable per-round errors.
+// its own recoverable per-round errors. A Governor intervention reserves one
+// final no-tools synthesis, and its original stop metadata remains on the
+// SubAgentResult for auditability.
 func (a *SubAgent) Execute(ctx context.Context, task string) (*SubAgentResult, error) {
 	start := time.Now()
 	if strings.TrimSpace(task) == "" {
@@ -460,11 +470,12 @@ func (a *SubAgent) Execute(ctx context.Context, task string) (*SubAgentResult, e
 	})
 
 	ctrl, err := agentloop.NewController(agentloop.ControllerConfig{
-		Governor:      agentloop.New(subAgentGovernorConfig(maxIterations, a.maxToolCalls)),
-		BuildRequest:  buildRequest,
-		CallModel:     callModel,
-		DispatchTools: dispatchTools,
-		History:       history,
+		Governor:       agentloop.New(subAgentGovernorConfig(maxIterations, a.maxToolCalls)),
+		FinalizeOnStop: true,
+		BuildRequest:   buildRequest,
+		CallModel:      callModel,
+		DispatchTools:  dispatchTools,
+		History:        history,
 	})
 	if err != nil {
 		finalizeSubAgentResult(result, start)
@@ -478,6 +489,12 @@ func (a *SubAgent) Execute(ctx context.Context, task string) (*SubAgentResult, e
 			return result, ctxErr
 		}
 		runResult, err = ctrl.Run(ctx)
+		if runResult != nil && runResult.Termination.Kind != "" {
+			result.TerminationKind = runResult.Termination.Kind
+			result.TerminationReason = runResult.Termination.Reason
+			result.FinalizationAttempted = runResult.Termination.FinalizationAttempted
+			result.FinalizationError = runResult.Termination.FinalizationError
+		}
 		if err != nil {
 			if errors.Is(err, errSubAgentFinalToolRejectionTerminal) {
 				// result.Summary already set by the DispatchTools hook.
@@ -501,23 +518,20 @@ func (a *SubAgent) Execute(ctx context.Context, task string) (*SubAgentResult, e
 	}
 
 	if err == nil && runResult != nil {
+		if completionErr := runResult.RequireConclusive(); completionErr != nil {
+			finalizeSubAgentResult(result, start)
+			return result, completionErr
+		}
 		switch runResult.FinishReason {
 		case agentloop.FinishReasonEmptyChoices:
 			finalizeSubAgentResult(result, start)
 			return result, fmt.Errorf("no response from model")
-		case agentloop.FinishReasonLoopGuard, agentloop.FinishReasonStepCap:
-			// The Governor's own backstop (round/tool-call ceiling or
-			// repeat/cycle detection) stopped the loop before SubAgent's own
-			// synthesis-forcing logic did. finalizeSubAgentResult below
-			// falls back to summarizeToolCalls when Summary is still empty,
-			// matching the pre-migration "ran out of turns" outcome.
-		default:
-			content, extractErr := model.ExtractTextContent(runResult.Message.Content)
-			if extractErr != nil {
-				content = fmt.Sprintf("%v", runResult.Message.Content)
-			}
-			result.Summary = strings.TrimSpace(content)
 		}
+		content, extractErr := model.ExtractTextContent(runResult.Message.Content)
+		if extractErr != nil {
+			content = fmt.Sprintf("%v", runResult.Message.Content)
+		}
+		result.Summary = strings.TrimSpace(content)
 	}
 
 	finalizeSubAgentResult(result, start)
@@ -1114,15 +1128,19 @@ func marshalSubAgentRaw(result *SubAgentResult) []byte {
 		return nil
 	}
 	payload := map[string]any{
-		"summary":            result.Summary,
-		"finish_reason":      result.FinishReason,
-		"tool_calls":         result.ToolCalls,
-		"execution_evidence": result.ExecutionEvidence,
-		"tokens_used":        result.TokensUsed,
-		"input_tokens":       result.InputTokens,
-		"output_tokens":      result.OutputTokens,
-		"model":              result.ModelUsed,
-		"agent_id":           result.AgentID,
+		"summary":                result.Summary,
+		"finish_reason":          result.FinishReason,
+		"termination_kind":       result.TerminationKind,
+		"termination_reason":     result.TerminationReason,
+		"finalization_attempted": result.FinalizationAttempted,
+		"finalization_error":     result.FinalizationError,
+		"tool_calls":             result.ToolCalls,
+		"execution_evidence":     result.ExecutionEvidence,
+		"tokens_used":            result.TokensUsed,
+		"input_tokens":           result.InputTokens,
+		"output_tokens":          result.OutputTokens,
+		"model":                  result.ModelUsed,
+		"agent_id":               result.AgentID,
 	}
 	encoded, err := json.Marshal(payload)
 	if err != nil {

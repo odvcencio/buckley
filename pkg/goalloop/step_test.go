@@ -137,3 +137,31 @@ func TestLoop_TurnStepSkipsDurableEventLocally(t *testing.T) {
 		}
 	}
 }
+
+func TestLoop_RecordDurableTurnRetryIsIdempotent(t *testing.T) {
+	loop, ledger := newTestLoop(t, Config{})
+	ctx := context.Background()
+	intake, err := loop.Start(ctx, Goal{Statement: "record a durable turn"})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	req := TurnStepRequest{
+		RunID:              intake.RunID,
+		TaskID:             intake.Tasks[0].TaskID,
+		Generation:         3,
+		TurnIndex:          4,
+		WorkflowInstanceID: "wf-retry",
+		ActivityName:       "run_turn.v2",
+	}
+	resp := TurnStepResponse{Kind: StepContinue}
+	loop.recordDurableTurn(ctx, req, resp)
+	loop.recordDurableTurn(ctx, req, resp)
+
+	events, err := ledger.ListEvents(ctx, runledger.EventQuery{RunID: intake.RunID, Types: []string{runledger.EventDurableTurn}})
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("durable turn events = %d, want 1", len(events))
+	}
+}

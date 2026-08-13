@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -521,6 +522,92 @@ func TestFindFilesTool(t *testing.T) {
 			t.Errorf("expected 1 match, got %d", len(matches))
 		}
 	})
+}
+
+func TestFindFilesTool_RecursiveAndPaged(t *testing.T) {
+	tool := &FindFilesTool{}
+
+	t.Run("matches recursive path glob", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		for _, name := range []string{"src/root.ts", "src/nested/view.ts", "other/view.ts", "src/nested/view.go"} {
+			path := filepath.Join(tmpDir, filepath.FromSlash(name))
+			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte("source"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+
+		result, err := tool.Execute(map[string]any{"pattern": "src/**/*.ts", "base_path": tmpDir})
+		if err != nil || !result.Success {
+			t.Fatalf("recursive find = %#v, %v", result, err)
+		}
+		matches := result.Data["matches"].([]string)
+		want := []string{"src/nested/view.ts", "src/root.ts"}
+		if !reflect.DeepEqual(matches, want) {
+			t.Fatalf("matches = %#v, want %#v", matches, want)
+		}
+	})
+
+	t.Run("expands extension alternatives", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		for _, name := range []string{"main.go", "src/lib.rs", "src/readme.md"} {
+			path := filepath.Join(tmpDir, filepath.FromSlash(name))
+			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte("source"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+
+		result, err := tool.Execute(map[string]any{"pattern": "**/*.{go,rs}", "base_path": tmpDir})
+		if err != nil || !result.Success {
+			t.Fatalf("brace find = %#v, %v", result, err)
+		}
+		matches := result.Data["matches"].([]string)
+		want := []string{"main.go", "src/lib.rs"}
+		if !reflect.DeepEqual(matches, want) {
+			t.Fatalf("matches = %#v, want %#v", matches, want)
+		}
+	})
+
+	t.Run("reports invalid glob", func(t *testing.T) {
+		result, err := tool.Execute(map[string]any{"pattern": "src/[", "base_path": t.TempDir()})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result.Success || !strings.Contains(result.Error, "invalid glob pattern") {
+			t.Fatalf("result = %#v, want explicit invalid-pattern failure", result)
+		}
+	})
+
+	t.Run("reports missing base directory", func(t *testing.T) {
+		missing := filepath.Join(t.TempDir(), "does-not-exist")
+		result, err := tool.Execute(map[string]any{"pattern": "*.go", "base_path": missing})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result.Success || !strings.Contains(result.Error, "failed to inspect base path") {
+			t.Fatalf("result = %#v, want explicit missing-base failure", result)
+		}
+	})
+
+	t.Run("rejects a file as the base directory", func(t *testing.T) {
+		root := t.TempDir()
+		baseFile := filepath.Join(root, "main.go")
+		if err := os.WriteFile(baseFile, []byte("package main\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		result, err := tool.Execute(map[string]any{"pattern": "*.go", "base_path": baseFile})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result.Success || !strings.Contains(result.Error, "not a directory") {
+			t.Fatalf("result = %#v, want explicit non-directory failure", result)
+		}
+	})
 
 	t.Run("skips dependency directories", func(t *testing.T) {
 		tmpDir := t.TempDir()
@@ -568,20 +655,73 @@ func TestFindFilesTool(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if !result.ShouldAbridge {
-			t.Fatal("expected large result set to be abridged")
-		}
 		if result.Data["count"].(int) != 205 {
 			t.Fatalf("full result count = %v, want 205", result.Data["count"])
 		}
-		displayMatches, ok := result.DisplayData["matches"].([]string)
+		displayMatches, ok := result.Data["matches"].([]string)
 		if !ok {
-			t.Fatalf("display matches type = %T, want []string", result.DisplayData["matches"])
+			t.Fatalf("page matches type = %T, want []string", result.Data["matches"])
 		}
 		if len(displayMatches) != 200 {
 			t.Fatalf("display matches length = %d, want 200", len(displayMatches))
 		}
+		if result.Data["next_offset"] != 200 {
+			t.Fatalf("next_offset = %v, want 200", result.Data["next_offset"])
+		}
+
+		second, err := tool.Execute(map[string]any{
+			"pattern":   "*.go",
+			"base_path": tmpDir,
+			"offset":    200,
+		})
+		if err != nil || !second.Success {
+			t.Fatalf("second page = %#v, %v", second, err)
+		}
+		secondMatches := second.Data["matches"].([]string)
+		if len(secondMatches) != 5 || secondMatches[0] != "file-200.go" {
+			t.Fatalf("second page matches = %#v", secondMatches)
+		}
+
+		pastEnd, err := tool.Execute(map[string]any{
+			"pattern": "*.go", "base_path": tmpDir, "offset": 999,
+		})
+		if err != nil || !pastEnd.Success {
+			t.Fatalf("past-end page = %#v, %v", pastEnd, err)
+		}
+		if got := pastEnd.Data["matches"].([]string); len(got) != 0 {
+			t.Fatalf("past-end matches = %#v, want empty", got)
+		}
+		if summary, _ := pastEnd.Data["summary"].(string); !strings.Contains(summary, "no records at offset 999") {
+			t.Fatalf("past-end summary = %q", summary)
+		}
 	})
+}
+
+func BenchmarkFindFilesRecursiveBraceGlob(b *testing.B) {
+	root := b.TempDir()
+	for dir := 0; dir < 20; dir++ {
+		for file := 0; file < 50; file++ {
+			path := filepath.Join(root, fmt.Sprintf("pkg-%02d", dir), fmt.Sprintf("file-%03d.go", file))
+			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+				b.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte("package benchmark\n"), 0o644); err != nil {
+				b.Fatal(err)
+			}
+		}
+	}
+	tool := &FindFilesTool{}
+	b.ResetTimer()
+	b.ReportAllocs()
+	for range b.N {
+		result, err := tool.Execute(map[string]any{
+			"pattern":   "**/*.{go,rs,ts}",
+			"base_path": root,
+		})
+		if err != nil || result == nil || !result.Success {
+			b.Fatalf("Execute = %#v, %v", result, err)
+		}
+	}
 }
 
 func TestSearchReplaceTool(t *testing.T) {

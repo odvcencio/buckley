@@ -7,6 +7,7 @@ import (
 	"m31labs.dev/buckley/pkg/conversation"
 	"m31labs.dev/buckley/pkg/model"
 	"m31labs.dev/buckley/pkg/skill"
+	"m31labs.dev/buckley/pkg/tool"
 	"m31labs.dev/buckley/pkg/tool/builtin"
 )
 
@@ -96,6 +97,42 @@ func TestShouldNudgeACPToolUseHonorsLimitAndToolAvailability(t *testing.T) {
 	}
 	if shouldNudgeACPToolUse(true, true, acpMaxToolNudges, "I'll search the repo first.") {
 		t.Fatal("did not expect nudge after max nudges")
+	}
+}
+
+func TestSoleKnownACPToolInvocationMarkup(t *testing.T) {
+	t.Parallel()
+
+	registry := tool.NewRegistry()
+	exactDeepSeek := `<search_text>
+<query>reserved synthesis request Tools nil ToolChoice none</query>
+<path>/home/draco/work/buckley</path>
+</search_text>`
+	proseExample := "A provider might return this example:\n" + exactDeepSeek
+	fencedExample := "```xml\n" + exactDeepSeek + "\n```"
+
+	tests := []struct {
+		name     string
+		text     string
+		wantTool string
+		want     bool
+	}{
+		{name: "deepseek xml invocation", text: exactDeepSeek, wantTool: "search_text", want: true},
+		{name: "prose example remains prose", text: proseExample},
+		{name: "fenced code example remains prose", text: fencedExample},
+		{name: "ordinary answer", text: "The search_text tool accepts query and path parameters."},
+		{name: "unknown tool", text: `<invented_tool><query>value</query></invented_tool>`},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			toolName, got := soleKnownACPToolInvocationMarkup(tc.text, registry)
+			if got != tc.want || toolName != tc.wantTool {
+				t.Fatalf("soleKnownACPToolInvocationMarkup() = (%q, %v), want (%q, %v)", toolName, got, tc.wantTool, tc.want)
+			}
+		})
 	}
 }
 

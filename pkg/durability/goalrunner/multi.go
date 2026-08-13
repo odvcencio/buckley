@@ -83,6 +83,16 @@ func (r *Resolver) RunTurn(ctx context.Context, req durability.TurnRequest) (dur
 	return runner.RunTurn(ctx, req)
 }
 
+// RunLegacyTurn implements durability.LegacyTaskRunner for in-flight workflow
+// histories that predate serialized workspace identity.
+func (r *Resolver) RunLegacyTurn(ctx context.Context, req durability.TurnRequest) (durability.TurnResponse, error) {
+	runner, err := r.runner(ctx, req.RunID)
+	if err != nil {
+		return durability.TurnResponse{}, err
+	}
+	return runner.RunLegacyTurn(ctx, req)
+}
+
 // RecordApprovalWait implements durability.TaskRunner.
 func (r *Resolver) RecordApprovalWait(ctx context.Context, wait durability.ApprovalWait) error {
 	runner, err := r.runner(ctx, wait.RunID)
@@ -101,4 +111,15 @@ func (r *Resolver) ResolveApproval(ctx context.Context, resolution durability.Ap
 	return runner.ResolveApproval(ctx, resolution)
 }
 
+// FinalizeGoal implements durability.GoalFinalizer.
+func (r *Resolver) FinalizeGoal(ctx context.Context, finalization durability.GoalFinalization) error {
+	runner, err := r.runner(ctx, finalization.RunID)
+	if err != nil {
+		return err
+	}
+	return runner.FinalizeGoal(ctx, finalization)
+}
+
 var _ durability.TaskRunner = (*Resolver)(nil)
+var _ durability.LegacyTaskRunner = (*Resolver)(nil)
+var _ durability.GoalFinalizer = (*Resolver)(nil)

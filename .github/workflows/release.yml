@@ -24,7 +24,7 @@ jobs:
   release:
     name: Release
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
         with:
@@ -37,6 +37,11 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      - name: Install bubblewrap (execmode sandbox tests)
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq bubblewrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+
       - name: Validate release tag
         run: |
           set -euo pipefail
@@ -48,6 +53,37 @@ jobs:
           test "$(go list -m)" = "m31labs.dev/buckley"
           git merge-base --is-ancestor HEAD "origin/main"
           ./scripts/check-release.sh "${RELEASE_TAG}"
+
+      - name: Check Go formatting
+        run: |
+          set -euo pipefail
+          mapfile -t files < <(git ls-files '*.go')
+          unformatted="$(gofmt -l "${files[@]}")"
+          if [[ -n "${unformatted}" ]]; then
+            echo "gofmt required on:" >&2
+            echo "${unformatted}" >&2
+            exit 1
+          fi
+
+      - name: Check module metadata
+        run: |
+          go mod tidy
+          git diff --exit-code -- go.mod go.sum
+
+      - name: Run Go tests
+        env:
+          GO_TEST_DISABLE_CACHE: "1"
+        run: ./scripts/test.sh
+
+      - name: Check GoSX Mission Control UI
+        run: ./scripts/build-ui.sh
+
+      - name: Check GoReleaser configuration
+        uses: goreleaser/goreleaser-action@v7
+        with:
+          distribution: goreleaser
+          version: v2.13.1
+          args: check
 
       - name: Publish GitHub release
         uses: goreleaser/goreleaser-action@v7
@@ -65,11 +101,20 @@ jobs:
           GONOSUMDB: m31labs.dev
         run: |
           set -euo pipefail
-          for attempt in 1 2 3; do
-            if go install "m31labs.dev/buckley/cmd/buckley@${RELEASE_TAG}"; then
-              buckley version
+          release_bin="${RUNNER_TEMP}/release-bin"
+          mkdir -p "${release_bin}"
+          for attempt in 1 2 3 4 5 6; do
+            if GOBIN="${release_bin}" go install "m31labs.dev/buckley/cmd/buckley@${RELEASE_TAG}"; then
+              version_output="$("${release_bin}/buckley" version)"
+              echo "${version_output}"
+              first_line="${version_output%%$'\n'*}"
+              expected="Buckley ${RELEASE_TAG#v}"
+              if [[ "${first_line}" != "${expected}" ]]; then
+                echo "installed version mismatch: got '${first_line}', want '${expected}'" >&2
+                exit 1
+              fi
               exit 0
             fi
-            sleep 5
+            sleep 10
           done
           exit 1

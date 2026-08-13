@@ -4,7 +4,10 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"math"
 	"strings"
+
+	"m31labs.dev/buckley/pkg/agentcoord"
 )
 
 // ChildContractEnv carries the resolved, versioned execution contract from a
@@ -23,16 +26,22 @@ const (
 // preserves the important nil-versus-empty distinction: an empty allowlist
 // means no tools, while an unconstrained task inherits the child profile.
 type ChildContract struct {
-	SchemaVersion    string   `json:"schema_version"`
-	Model            string   `json:"model,omitempty"`
-	Tier             string   `json:"tier,omitempty"`
-	Effort           string   `json:"effort,omitempty"`
-	SystemPrompt     string   `json:"system_prompt,omitempty"`
-	AllowedTools     []string `json:"allowed_tools,omitempty"`
-	ToolsConstrained bool     `json:"tools_constrained,omitempty"`
-	StepCap          int      `json:"step_cap,omitempty"`
-	ApprovalPosture  string   `json:"approval_posture,omitempty"`
-	OutputSchema     string   `json:"output_schema,omitempty"`
+	SchemaVersion    string            `json:"schema_version"`
+	RunID            string            `json:"run_id,omitempty"`
+	ParentRunID      string            `json:"parent_run_id,omitempty"`
+	ParentSessionID  string            `json:"parent_session_id,omitempty"`
+	TaskID           string            `json:"task_id,omitempty"`
+	Model            string            `json:"model,omitempty"`
+	Tier             string            `json:"tier,omitempty"`
+	Effort           string            `json:"effort,omitempty"`
+	SystemPrompt     string            `json:"system_prompt,omitempty"`
+	AllowedTools     []string          `json:"allowed_tools,omitempty"`
+	ToolsConstrained bool              `json:"tools_constrained,omitempty"`
+	StepCap          int               `json:"step_cap,omitempty"`
+	TimeoutSeconds   int               `json:"timeout_seconds,omitempty"`
+	Budget           agentcoord.Budget `json:"budget,omitempty"`
+	ApprovalPosture  string            `json:"approval_posture,omitempty"`
+	OutputSchema     string            `json:"output_schema,omitempty"`
 }
 
 // ChildContractFromRequest selects the resolved fields that must survive the
@@ -41,6 +50,10 @@ type ChildContract struct {
 func ChildContractFromRequest(request Request) ChildContract {
 	return ChildContract{
 		SchemaVersion:    childContractVersion,
+		RunID:            strings.TrimSpace(request.ID),
+		ParentRunID:      strings.TrimSpace(request.ParentRunID),
+		ParentSessionID:  strings.TrimSpace(request.ParentSessionID),
+		TaskID:           strings.TrimSpace(request.TaskID),
 		Model:            strings.TrimSpace(request.Model),
 		Tier:             strings.TrimSpace(string(request.Tier)),
 		Effort:           strings.TrimSpace(request.Effort),
@@ -48,6 +61,8 @@ func ChildContractFromRequest(request Request) ChildContract {
 		AllowedTools:     copyStrings(request.AllowedTools),
 		ToolsConstrained: request.AllowedTools != nil,
 		StepCap:          request.StepCap,
+		TimeoutSeconds:   request.TimeoutSeconds,
+		Budget:           request.Budget,
 		ApprovalPosture:  strings.TrimSpace(request.ApprovalPosture),
 		OutputSchema:     strings.TrimSpace(request.OutputSchema),
 	}
@@ -105,6 +120,12 @@ func validateChildContract(contract ChildContract) error {
 	}
 	if contract.StepCap < 0 {
 		return fmt.Errorf("subagent child contract step_cap must not be negative")
+	}
+	if math.IsNaN(contract.Budget.MaxCostUSD) || math.IsInf(contract.Budget.MaxCostUSD, 0) {
+		return fmt.Errorf("subagent child contract max_cost_usd must be finite")
+	}
+	if contract.TimeoutSeconds < 0 || contract.Budget.MaxToolCalls < 0 || contract.Budget.MaxModelRequests < 0 || contract.Budget.MaxElapsedSecond < 0 || contract.Budget.MaxCostUSD < 0 {
+		return fmt.Errorf("subagent child contract limits must not be negative")
 	}
 	if len(strings.TrimSpace(contract.OutputSchema)) > 256 {
 		return fmt.Errorf("subagent child contract output_schema exceeds 256 bytes")

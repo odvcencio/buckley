@@ -2,6 +2,7 @@ package model
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -10,6 +11,54 @@ import (
 	"testing"
 	"time"
 )
+
+func TestGoogleProvider_RequestEnforcesMaxOutputTokens(t *testing.T) {
+	provider := NewGoogleProvider("test-key", "", false)
+	payload, err := provider.toGenerateContentRequest(ChatRequest{
+		Model:     "google/gemini-2.0-flash",
+		MaxTokens: 321,
+		Messages:  []Message{{Role: "user", Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("toGenerateContentRequest: %v", err)
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	var wire map[string]json.RawMessage
+	if err := json.Unmarshal(encoded, &wire); err != nil {
+		t.Fatalf("decode request: %v", err)
+	}
+	if _, ok := wire["generation_config"]; ok {
+		t.Fatalf("request used wrong generation_config key: %s", encoded)
+	}
+	var generationConfig map[string]int
+	if err := json.Unmarshal(wire["generationConfig"], &generationConfig); err != nil {
+		t.Fatalf("decode generationConfig: %v (request %s)", err, encoded)
+	}
+	if got := generationConfig["maxOutputTokens"]; got != 321 {
+		t.Fatalf("generationConfig.maxOutputTokens = %d, want 321 (request %s)", got, encoded)
+	}
+}
+
+func TestGoogleResponse_PropagatesMaxTokensFinishReason(t *testing.T) {
+	var wire googleResponse
+	if err := json.Unmarshal([]byte(`{
+		"candidates":[{"content":{"role":"model","parts":[{"text":"partial"}]},"finishReason":"MAX_TOKENS"}],
+		"usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":2,"totalTokenCount":5}
+	}`), &wire); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+
+	resp, err := wire.toChatResponse("gemini-2.0-flash")
+	if err != nil {
+		t.Fatalf("toChatResponse: %v", err)
+	}
+	if len(resp.Choices) != 1 || resp.Choices[0].FinishReason != "MAX_TOKENS" {
+		t.Fatalf("finish reason = %#v, want MAX_TOKENS", resp.Choices)
+	}
+}
 
 // TestGoogleProvider_ChatCompletionRetriesTransientError proves the
 // migration onto the shared ProviderTransport: a transient 429 is retried

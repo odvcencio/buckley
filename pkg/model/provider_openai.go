@@ -162,6 +162,10 @@ func (p *OpenAIProvider) GetModelInfo(modelID string) (*ModelInfo, error) {
 // ChatCompletion executes a completion request via OpenAI.
 func (p *OpenAIProvider) ChatCompletion(ctx context.Context, req ChatRequest) (*ChatResponse, error) {
 	req.Stream = false
+	// stream_options is a streaming-only OpenAI field. Cost-bounded request
+	// normalization includes it in the conservative admission envelope, but
+	// ordinary non-streaming dispatch must not put it on the wire.
+	req.StreamOptions = nil
 	return p.invoke(ctx, req)
 }
 

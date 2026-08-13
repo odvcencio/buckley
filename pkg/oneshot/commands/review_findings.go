@@ -78,12 +78,13 @@ type CoverageEntry struct {
 type VerificationState string
 
 const (
-	VerificationPass        VerificationState = "PASS"
-	VerificationFail        VerificationState = "FAIL"
-	VerificationPending     VerificationState = "PENDING"
-	VerificationNotRun      VerificationState = "NOT_RUN"
-	VerificationUnavailable VerificationState = "UNAVAILABLE"
-	VerificationUnknown     VerificationState = "UNKNOWN"
+	VerificationPass          VerificationState = "PASS"
+	VerificationFail          VerificationState = "FAIL"
+	VerificationNotApplicable VerificationState = "NOT_APPLICABLE"
+	VerificationPending       VerificationState = "PENDING"
+	VerificationNotRun        VerificationState = "NOT_RUN"
+	VerificationUnavailable   VerificationState = "UNAVAILABLE"
+	VerificationUnknown       VerificationState = "UNKNOWN"
 )
 
 // FeedbackDisposition records whether prior review feedback was supplied and
@@ -197,7 +198,59 @@ func ValidateParsedReview(parsed *ParsedReview, opts ReviewValidationOptions) er
 	if parsed == nil {
 		return fmt.Errorf("parsed review is missing")
 	}
+	if problems := parsedReviewValidationProblems(parsed, opts); len(problems) > 0 {
+		return fmt.Errorf("review validation failed: %s", strings.Join(problems, "; "))
+	}
+	return validateParsedReviewDecision(parsed, opts)
+}
+
+func parsedReviewValidationProblems(parsed *ParsedReview, opts ReviewValidationOptions) []string {
 	var problems []string
+	if missing := missingParsedReviewEvidence(parsed); len(missing) > 0 {
+		problems = append(problems, "review is missing required evidence: "+strings.Join(missing, ", "))
+	}
+	if parsed.BuildVerification == "" {
+		problems = append(
+			problems,
+			fmt.Sprintf("build status must start with one exact verification state: %s", verificationStateList()),
+		)
+	}
+	if parsed.TestVerification == "" {
+		problems = append(
+			problems,
+			fmt.Sprintf("tests status must start with one exact verification state: %s", verificationStateList()),
+		)
+	}
+	if problem := parsedReviewVerdictConsistencyProblem(parsed); problem != "" {
+		problems = append(problems, problem)
+	}
+	for _, err := range []error{
+		validateFindingDisposition(parsed),
+		validateDemonstratedFindings(parsed.Findings),
+		validateFalsificationDisposition(parsed),
+	} {
+		if err != nil {
+			problems = append(problems, err.Error())
+		}
+	}
+	if strings.TrimSpace(parsed.Verdict) != "" {
+		if err := validateVerdictDisposition(parsed); err != nil {
+			problems = append(problems, err.Error())
+		}
+	}
+	if err := validateProceduralGateGrade(parsed); err != nil {
+		problems = append(problems, err.Error())
+	}
+	if strings.TrimSpace(parsed.Coverage) != "" {
+		if err := validateCoverageLedger(parsed.CoverageEntries, opts.ChangedFiles); err != nil {
+			problems = append(problems, err.Error())
+		}
+	}
+	problems = append(problems, parsedReviewFeedbackProblems(parsed, opts)...)
+	return problems
+}
+
+func missingParsedReviewEvidence(parsed *ParsedReview) []string {
 	var missing []string
 	if parsed.Grade == "" {
 		missing = append(missing, "grade")
@@ -228,51 +281,25 @@ func ValidateParsedReview(parsed *ParsedReview, opts ReviewValidationOptions) er
 	if strings.TrimSpace(parsed.Verdict) == "" {
 		missing = append(missing, "Verdict section")
 	}
-	if len(missing) > 0 {
-		problems = append(problems, "review is missing required evidence: "+strings.Join(missing, ", "))
+	return missing
+}
+
+func parsedReviewVerdictConsistencyProblem(parsed *ParsedReview) string {
+	if strings.TrimSpace(parsed.Verdict) == "" {
+		return ""
 	}
-	if parsed.BuildVerification == "" {
-		problems = append(
-			problems,
-			fmt.Sprintf("build status must start with one exact verification state: %s", verificationStateList()),
-		)
+	verdictApproved, err := parseVerdictApproval(parsed.Verdict)
+	if err != nil {
+		return fmt.Sprintf("invalid Verdict decision: %v", err)
 	}
-	if parsed.TestVerification == "" {
-		problems = append(
-			problems,
-			fmt.Sprintf("tests status must start with one exact verification state: %s", verificationStateList()),
-		)
+	if verdictApproved != parsed.Approved {
+		return "verdict decision is inconsistent with the parsed approval state"
 	}
-	if strings.TrimSpace(parsed.Verdict) != "" {
-		verdictApproved, err := parseVerdictApproval(parsed.Verdict)
-		if err != nil {
-			problems = append(problems, fmt.Sprintf("invalid Verdict decision: %v", err))
-		} else if verdictApproved != parsed.Approved {
-			problems = append(problems, "verdict decision is inconsistent with the parsed approval state")
-		}
-	}
-	if err := validateFindingDisposition(parsed); err != nil {
-		problems = append(problems, err.Error())
-	}
-	if err := validateDemonstratedFindings(parsed.Findings); err != nil {
-		problems = append(problems, err.Error())
-	}
-	if err := validateFalsificationDisposition(parsed); err != nil {
-		problems = append(problems, err.Error())
-	}
-	if strings.TrimSpace(parsed.Verdict) != "" {
-		if err := validateVerdictDisposition(parsed); err != nil {
-			problems = append(problems, err.Error())
-		}
-	}
-	if err := validateProceduralGateGrade(parsed); err != nil {
-		problems = append(problems, err.Error())
-	}
-	if strings.TrimSpace(parsed.Coverage) != "" {
-		if err := validateCoverageLedger(parsed.CoverageEntries, opts.ChangedFiles); err != nil {
-			problems = append(problems, err.Error())
-		}
-	}
+	return ""
+}
+
+func parsedReviewFeedbackProblems(parsed *ParsedReview, opts ReviewValidationOptions) []string {
+	var problems []string
 	if opts.RequiresFeedbackDisposition && len(opts.RequiredFeedbackIDs) == 0 {
 		problems = append(
 			problems,
@@ -297,86 +324,118 @@ func ValidateParsedReview(parsed *ParsedReview, opts ReviewValidationOptions) er
 	if err := validateFeedbackLedger(parsed.FeedbackEntries, opts.RequiredFeedbackIDs); err != nil {
 		problems = append(problems, err.Error())
 	}
-	if len(problems) > 0 {
-		return fmt.Errorf("review validation failed: %s", strings.Join(problems, "; "))
-	}
+	return problems
+}
 
-	if parsed.Approved {
-		if parsed.FalsificationConclusion != FalsificationDisproved {
-			return fmt.Errorf("an approval requires a DISPROVED falsification conclusion, got %s", parsed.FalsificationConclusion)
+func validateParsedReviewDecision(parsed *ParsedReview, opts ReviewValidationOptions) error {
+	if !parsed.Approved {
+		if parsed.Grade == GradeA {
+			return fmt.Errorf("grade A is inconsistent with a non-approval verdict")
 		}
-		if opts.ContextIncomplete {
-			return fmt.Errorf("an approval cannot be issued from incomplete or truncated review context")
-		}
-		if parsed.BuildVerification != VerificationPass {
-			err := fmt.Errorf(
-				"an approval requires Build status PASS, got %s",
-				parsed.BuildVerification,
-			)
-			if parsed.BuildVerification == VerificationUnavailable {
-				return err
-			}
-			return oneshot.RequireAgentExecutionEvidence(err)
-		}
-		if parsed.TestVerification != VerificationPass {
-			err := fmt.Errorf(
-				"an approval requires Tests status PASS, got %s",
-				parsed.TestVerification,
-			)
-			if parsed.TestVerification == VerificationUnavailable {
-				return err
-			}
-			return oneshot.RequireAgentExecutionEvidence(err)
-		}
-		if opts.RequirePassingRemoteCI {
-			ciState := parseRemoteCIState(opts.CIStatus)
-			if ciState != VerificationPass {
-				return fmt.Errorf("an approval requires authoritative remote CI PASS, got %s from %q", ciState, opts.CIStatus)
-			}
-			switch opts.CIProvenance {
-			case prCISourceHead:
-			case prCISourceBase:
-				if !reviewChangedFilesDocumentationOnly(opts.ChangedFiles) {
-					return fmt.Errorf("immutable-base CI can authorize only a documentation-only approval")
-				}
-			default:
-				return fmt.Errorf("an approval requires explicit remote CI provenance, got %q", opts.CIProvenance)
-			}
-		}
-		for _, feedback := range parsed.FeedbackEntries {
-			if feedback.Status == FeedbackUnresolved {
-				return fmt.Errorf("an approval is inconsistent with unresolved feedback %s", feedback.ID)
-			}
-		}
-		if len(parsed.Blockers) > 0 {
-			return fmt.Errorf("approval is inconsistent with blockers: %s", strings.Join(parsed.Blockers, ", "))
-		}
-		for _, finding := range parsed.Findings {
-			if finding.Severity == SeverityCritical || finding.Severity == SeverityMajor {
-				return fmt.Errorf("approval is inconsistent with blocking finding %s", finding.ID)
-			}
-		}
-		var qualityProblems []string
-		if parsed.Grade != GradeA {
-			qualityProblems = append(qualityProblems, fmt.Sprintf("grade is %s instead of A", parsed.Grade))
-		}
-		if len(parsed.Findings) > 0 {
-			qualityProblems = append(qualityProblems, "Findings is not empty")
-		}
-		if len(parsed.Suggestions) > 0 {
-			qualityProblems = append(qualityProblems, "Suggestions is not empty")
-		}
-		if len(qualityProblems) > 0 {
-			return fmt.Errorf(
-				"approval quality gate failed: %s; remove non-defect observations or return a non-approval verdict for demonstrated defects",
-				strings.Join(qualityProblems, ", "),
-			)
-		}
-	} else if parsed.Grade == GradeA {
-		return fmt.Errorf("grade A is inconsistent with a non-approval verdict")
+		return nil
 	}
-
+	for _, validate := range []func() error{
+		func() error { return validateApprovalEvidence(parsed, opts) },
+		func() error { return validateApprovalRemoteCI(opts) },
+		func() error { return validateApprovalDisposition(parsed) },
+		func() error { return validateApprovalQuality(parsed) },
+	} {
+		if err := validate(); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+func validateApprovalEvidence(parsed *ParsedReview, opts ReviewValidationOptions) error {
+	if parsed.FalsificationConclusion != FalsificationDisproved {
+		return fmt.Errorf("an approval requires a DISPROVED falsification conclusion, got %s", parsed.FalsificationConclusion)
+	}
+	if opts.ContextIncomplete {
+		return fmt.Errorf("an approval cannot be issued from incomplete or truncated review context")
+	}
+	if parsed.BuildVerification != VerificationPass {
+		err := fmt.Errorf(
+			"an approval requires Build status PASS, got %s",
+			parsed.BuildVerification,
+		)
+		if parsed.BuildVerification == VerificationUnavailable {
+			return err
+		}
+		return oneshot.RequireAgentExecutionEvidence(err)
+	}
+	if parsed.TestVerification != VerificationPass && parsed.TestVerification != VerificationNotApplicable {
+		err := fmt.Errorf(
+			"an approval requires Tests status PASS, got %s",
+			parsed.TestVerification,
+		)
+		if parsed.TestVerification == VerificationUnavailable || parsed.TestVerification == VerificationNotApplicable {
+			return err
+		}
+		return oneshot.RequireAgentExecutionEvidence(err)
+	}
+	if parsed.TestVerification == VerificationNotApplicable && opts.RequirePassingRemoteCI {
+		return fmt.Errorf("an authoritative remote-CI approval must report Tests PASS; NOT_APPLICABLE requires typed local package-policy evidence")
+	}
+	return nil
+}
+
+func validateApprovalRemoteCI(opts ReviewValidationOptions) error {
+	if !opts.RequirePassingRemoteCI {
+		return nil
+	}
+	ciState := parseRemoteCIState(opts.CIStatus)
+	if ciState != VerificationPass {
+		return fmt.Errorf("an approval requires authoritative remote CI PASS, got %s from %q", ciState, opts.CIStatus)
+	}
+	switch opts.CIProvenance {
+	case prCISourceHead:
+		return nil
+	case prCISourceBase:
+		if !reviewChangedFilesDocumentationOnly(opts.ChangedFiles) {
+			return fmt.Errorf("immutable-base CI can authorize only a documentation-only approval")
+		}
+		return nil
+	default:
+		return fmt.Errorf("an approval requires explicit remote CI provenance, got %q", opts.CIProvenance)
+	}
+}
+
+func validateApprovalDisposition(parsed *ParsedReview) error {
+	for _, feedback := range parsed.FeedbackEntries {
+		if feedback.Status == FeedbackUnresolved {
+			return fmt.Errorf("an approval is inconsistent with unresolved feedback %s", feedback.ID)
+		}
+	}
+	if len(parsed.Blockers) > 0 {
+		return fmt.Errorf("approval is inconsistent with blockers: %s", strings.Join(parsed.Blockers, ", "))
+	}
+	for _, finding := range parsed.Findings {
+		if finding.Severity == SeverityCritical || finding.Severity == SeverityMajor {
+			return fmt.Errorf("approval is inconsistent with blocking finding %s", finding.ID)
+		}
+	}
+	return nil
+}
+
+func validateApprovalQuality(parsed *ParsedReview) error {
+	var qualityProblems []string
+	if parsed.Grade != GradeA {
+		qualityProblems = append(qualityProblems, fmt.Sprintf("grade is %s instead of A", parsed.Grade))
+	}
+	if len(parsed.Findings) > 0 {
+		qualityProblems = append(qualityProblems, "Findings is not empty")
+	}
+	if len(parsed.Suggestions) > 0 {
+		qualityProblems = append(qualityProblems, "Suggestions is not empty")
+	}
+	if len(qualityProblems) == 0 {
+		return nil
+	}
+	return fmt.Errorf(
+		"approval quality gate failed: %s; remove non-defect observations or return a non-approval verdict for demonstrated defects",
+		strings.Join(qualityProblems, ", "),
+	)
 }
 
 func validateProceduralGateGrade(parsed *ParsedReview) error {
@@ -573,7 +632,7 @@ func validateVerdictDisposition(parsed *ParsedReview) error {
 }
 
 func verificationStateList() string {
-	return "PASS, FAIL, PENDING, NOT_RUN, UNAVAILABLE, or UNKNOWN"
+	return "PASS, FAIL, NOT_APPLICABLE, PENDING, NOT_RUN, UNAVAILABLE, or UNKNOWN"
 }
 
 func parseVerificationState(value string) VerificationState {
@@ -596,7 +655,7 @@ func parseVerificationState(value string) VerificationState {
 	}
 	state := VerificationState(strings.ToUpper(strings.TrimSpace(fields[0])))
 	switch state {
-	case VerificationPass, VerificationFail, VerificationPending, VerificationNotRun, VerificationUnavailable, VerificationUnknown:
+	case VerificationPass, VerificationFail, VerificationNotApplicable, VerificationPending, VerificationNotRun, VerificationUnavailable, VerificationUnknown:
 		return state
 	default:
 		return ""

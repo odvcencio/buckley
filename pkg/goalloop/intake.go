@@ -51,6 +51,13 @@ func (l *Loop) Start(ctx context.Context, goal Goal) (*Intake, error) {
 	if err := goal.Validate(); err != nil {
 		return nil, err
 	}
+	if strings.TrimSpace(goal.WorkspaceRoot) != "" {
+		workspaceRoot, err := NormalizeWorkspaceRoot(goal.WorkspaceRoot)
+		if err != nil {
+			return nil, err
+		}
+		goal.WorkspaceRoot = workspaceRoot
+	}
 
 	specs, err := l.decompose(ctx, goal)
 	if err != nil {
@@ -80,6 +87,7 @@ func (l *Loop) Start(ctx context.Context, goal Goal) (*Intake, error) {
 			"constraints":         goal.Constraints,
 			"posture":             goal.Posture,
 			"approval_mode":       goal.ApprovalMode,
+			"workspace_root":      goal.WorkspaceRoot,
 		},
 	}); err != nil {
 		return nil, fmt.Errorf("goalloop: record goal: %w", err)

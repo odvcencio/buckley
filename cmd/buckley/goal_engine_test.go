@@ -191,6 +191,51 @@ func TestGoalTurnEngine_BlockedParksWithReason(t *testing.T) {
 	}
 }
 
+func TestGoalTurnEngine_GuardStopReturnsFinalSynthesis(t *testing.T) {
+	t.Parallel()
+	args, _ := json.Marshal(map[string]string{"reason": "waiting on service", "needs": "service access"})
+	blocked := goalEngineToolCallResponse(goalBlockedToolName, string(args))
+	engine, _ := newGoalEngineUnderTest(t, []string{blocked, blocked, blocked, goalEngineTextResponse})
+
+	outcome, err := engine.RunTurn(context.Background(), goalloop.TaskContext{
+		RunID: "run-1", TaskID: "task-guard", TurnID: "turn-guard",
+		Goal: goalloop.Goal{Statement: "inspect service"}, Spec: goalloop.TaskSpec{Title: "inspect service"},
+	})
+	if err != nil {
+		t.Fatalf("RunTurn: %v", err)
+	}
+	if outcome.Summary != "wrapped up" {
+		t.Fatalf("summary = %q, want guard-stop synthesis", outcome.Summary)
+	}
+	if outcome.Rounds != 3 || outcome.ToolCalls != 3 {
+		t.Fatalf("outcome = %+v, want three guarded tool rounds", outcome)
+	}
+	if outcome.PromptTokens != 280 || outcome.CompletionTokens != 35 {
+		t.Fatalf("usage = %d/%d, want finalization usage included", outcome.PromptTokens, outcome.CompletionTokens)
+	}
+
+	events, err := engine.ledger.ListEvents(context.Background(), runledger.EventQuery{RunID: "run-1", TaskID: "task-guard"})
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	wantKinds := map[string]bool{"exact_repeat": false, "finalization_started": false, "finalization_completed": false}
+	for _, event := range events {
+		if event.Type != runledger.EventControllerDecision {
+			continue
+		}
+		if kind, _ := event.Payload["kind"].(string); kind != "" {
+			if _, ok := wantKinds[kind]; ok {
+				wantKinds[kind] = true
+			}
+		}
+	}
+	for kind, found := range wantKinds {
+		if !found {
+			t.Errorf("missing controller decision %q in %+v", kind, events)
+		}
+	}
+}
+
 // TestGoalTurnAllowedTools locks the verify-phase pool: read, search,
 // and run tools only — no editors — while execute turns are unfiltered.
 func TestGoalTurnAllowedTools(t *testing.T) {

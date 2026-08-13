@@ -25,6 +25,7 @@ import (
 
 	acppb "m31labs.dev/buckley/pkg/acp/proto"
 	acpserver "m31labs.dev/buckley/pkg/acp/server"
+	"m31labs.dev/buckley/pkg/agentloop"
 	"m31labs.dev/buckley/pkg/agentspec"
 	artifactv1 "m31labs.dev/buckley/pkg/artifact/v1"
 	"m31labs.dev/buckley/pkg/config"
@@ -71,6 +72,10 @@ var agentProfileFlag string
 
 // initDependenciesFn allows tests to stub dependency initialization without hitting the network.
 var initDependenciesFn = initDependencies
+
+// initReviewDependenciesFn keeps explicit review-only model overrides inside
+// dependency construction so provider registration sees every selected model.
+var initReviewDependenciesFn = initReviewDependencies
 
 // orchestratorRunner captures the subset of orchestrator behavior the CLI needs.
 // It enables unit-testing CLI subcommands without live model calls.
@@ -379,8 +384,13 @@ func executeOneShotWithStepCap(prompt string, cfg *config.Config, mgr *model.Man
 // registered only for Artifact v1 child runs so ordinary interactive prompts
 // keep their small, familiar tool surface.
 func executeOneShotWithStepCapAndOutputSchema(prompt string, cfg *config.Config, mgr *model.Manager, store *storage.Store, projectContext *projectcontext.ProjectContext, planStore orchestrator.PlanStore, agentProfile *agentspec.RuntimeProfile, modelOverride string, allowedTools []string, codeMode bool, stepCap int, outputSchema string) int {
+	return executeOneShotWithLimitsAndOutputSchema(prompt, cfg, mgr, store, projectContext, planStore, agentProfile, modelOverride, allowedTools, codeMode, acpLoopLimits{StepCap: stepCap}, outputSchema)
+}
+
+func executeOneShotWithLimitsAndOutputSchema(prompt string, cfg *config.Config, mgr *model.Manager, store *storage.Store, projectContext *projectcontext.ProjectContext, planStore orchestrator.PlanStore, agentProfile *agentspec.RuntimeProfile, modelOverride string, allowedTools []string, codeMode bool, limits acpLoopLimits, outputSchema string) int {
 	_ = planStore
 	outputSchema = strings.TrimSpace(outputSchema)
+	stepCap := limits.StepCap
 
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -425,13 +435,23 @@ func executeOneShotWithStepCapAndOutputSchema(prompt string, cfg *config.Config,
 	}
 	registry.ConfigureContainers(cfg, cwd)
 	registry.SetWorkDir(cwd)
+	if candidate, ok := registry.Get("spawn_subagent"); ok {
+		if subagents, ok := candidate.(*builtin.SubagentTool); ok {
+			if limits.ChildContract {
+				subagents.SetTelemetry(nil, limits.ParentSessionID)
+			}
+			subagents.SetExecutionContext(limits.RunID, limits.TaskID)
+		}
+	}
 	adaptiveProtocol, protocolAvailable := compileOneShotAdaptiveProtocol(cfg, mgr, store, engine, resolvedModel, registry, outputSchema)
 	if protocolAvailable && !quietMode {
 		fmt.Fprintf(os.Stderr, "protocol: %s (%s; policy=%s; mode=%s)\n", adaptiveProtocol.ProtocolID, adaptiveProtocol.Receipt.PolicyOutcome, adaptiveProtocol.Receipt.PolicyVersion, adaptiveProtocol.Mode)
 	}
 	if protocolAvailable && adaptiveProtocol.Mode == protocol.ModeDynamic {
 		if executionStage := adaptiveProtocolExecutionStage(*adaptiveProtocol); executionStage.MaxTurns > 0 && (stepCap == 0 || executionStage.MaxTurns < stepCap) {
-			stepCap = executionStage.MaxTurns
+			if !limits.ChildContract || stepCap > 0 {
+				stepCap = executionStage.MaxTurns
+			}
 		}
 	}
 	var artifactSubmission *builtin.ArtifactSubmission
@@ -506,20 +526,17 @@ func executeOneShotWithStepCapAndOutputSchema(prompt string, cfg *config.Config,
 	conv.AddSystemMessage(systemPrompt)
 	conv.AddUserMessage(prompt)
 
-	responseText, err := runACPLoopWithStepCap(context.Background(), cfg, mgr, conv, registry, skillState, engine, resolvedModel, cwd, "", nil, nil, nil, stepCap)
+	runCtx := context.Background()
+	var cancel context.CancelFunc
+	if limits.MaxElapsedSeconds > 0 {
+		runCtx, cancel = context.WithTimeout(runCtx, time.Duration(limits.MaxElapsedSeconds)*time.Second)
+		defer cancel()
+	}
+	limits.StepCap = stepCap
+	responseText, err := runACPLoopWithLimits(runCtx, cfg, mgr, conv, registry, skillState, engine, resolvedModel, cwd, limits.ParentSessionID, nil, nil, nil, limits)
 	if err != nil {
 		codeModeFailure = err
-		var partial *partialStreamTurnError
-		if errors.As(err, &partial) && responseText != "" {
-			fmt.Print(responseText)
-			if !strings.HasSuffix(responseText, "\n") {
-				fmt.Println()
-			}
-			fmt.Println("\n[Stream interrupted — the response above is incomplete.]")
-			fmt.Fprintf(os.Stderr, "One-shot status: incomplete (exit=1; partial_output_bytes=%d)\n", len(responseText))
-		}
-		fmt.Fprintf(os.Stderr, "\nError: %v\n", err)
-		return 1
+		return printOneShotFailure(responseText, err)
 	}
 
 	if outputSchema == artifactv1.SchemaVersion {
@@ -547,6 +564,31 @@ func executeOneShotWithStepCapAndOutputSchema(prompt string, cfg *config.Config,
 	}
 	codeModeFailure = nil
 	return 0
+}
+
+func printOneShotFailure(responseText string, err error) int {
+	var partial *partialStreamTurnError
+	var incomplete *agentloop.IncompleteTurnError
+	switch {
+	case errors.As(err, &partial) && responseText != "":
+		fmt.Print(responseText)
+		if !strings.HasSuffix(responseText, "\n") {
+			fmt.Println()
+		}
+		fmt.Println("\n[Stream interrupted — the response above is incomplete.]")
+		fmt.Fprintf(os.Stderr, "One-shot status: incomplete (exit=1; partial_output_bytes=%d)\n", len(responseText))
+	case errors.As(err, &incomplete):
+		if responseText != "" {
+			fmt.Print(responseText)
+			if !strings.HasSuffix(responseText, "\n") {
+				fmt.Println()
+			}
+			fmt.Println("\n[Incomplete result — completed evidence was preserved, but final synthesis did not complete.]")
+		}
+		fmt.Fprintf(os.Stderr, "One-shot status: incomplete (exit=1; preserved_output_bytes=%d)\n", len(responseText))
+	}
+	fmt.Fprintf(os.Stderr, "\nError: %v\n", err)
+	return 1
 }
 
 func ensureRequiredOneShotTools(filter []string, artifactRequired, codeModeRequired bool) []string {
@@ -916,6 +958,14 @@ func pushBranch(remote, branch string) error {
 }
 
 func initDependencies() (*config.Config, *model.Manager, *storage.Store, error) {
+	return initDependenciesWithReviewCritic("", false)
+}
+
+func initReviewDependencies(criticModel string) (*config.Config, *model.Manager, *storage.Store, error) {
+	return initDependenciesWithReviewCritic(criticModel, true)
+}
+
+func initDependenciesWithReviewCritic(criticModel string, prepareReviewCritic bool) (*config.Config, *model.Manager, *storage.Store, error) {
 	ensureBuckleyRuntimeIgnored()
 
 	// Load configuration
@@ -934,6 +984,9 @@ func initDependencies() (*config.Config, *model.Manager, *storage.Store, error) 
 		agentProfile.ApplyToConfig(cfg)
 	}
 	applyStartupModelOverride(cfg, modelOverrideFlag)
+	if prepareReviewCritic {
+		applyReviewCriticModelOverride(cfg, criticModel)
+	}
 	tool.SetResultEncoding(cfg.Encoding.UseToon)
 
 	cwd, err := os.Getwd()
@@ -974,7 +1027,7 @@ func initDependencies() (*config.Config, *model.Manager, *storage.Store, error) 
 }
 
 func printHelp() {
-	fmt.Println("Buckley - AI Development Assistant")
+	fmt.Println("Buckley - Tool-First AI Agent Harness")
 	fmt.Println()
 	fmt.Println("USAGE:")
 	fmt.Println("  buckley [FLAGS] [COMMAND]")
@@ -1936,6 +1989,7 @@ func applyStartupModelOverride(cfg *config.Config, modelID string) {
 	if modelID == "" {
 		return
 	}
+	disableConfiguredModelFallbacks(cfg, modelID)
 
 	cfg.Models.Execution = modelID
 	if strings.HasPrefix(modelID, "codex/") {
@@ -1954,6 +2008,19 @@ func applyStartupModelOverride(cfg *config.Config, modelID string) {
 		if strings.TrimSpace(cfg.Models.Reasoning) == "" {
 			cfg.Models.Reasoning = "xhigh"
 		}
+	}
+}
+
+// disableConfiguredModelFallbacks makes an explicit command selection exact.
+// Config-selected defaults may still use their declared fallback chains, but
+// a user-supplied model must never be silently replaced during evaluation.
+func disableConfiguredModelFallbacks(cfg *config.Config, modelID string) {
+	if cfg == nil || cfg.Models.FallbackChains == nil {
+		return
+	}
+	modelID, _ = config.SplitReasoningSuffix(strings.TrimSpace(modelID))
+	if modelID != "" {
+		delete(cfg.Models.FallbackChains, modelID)
 	}
 }
 

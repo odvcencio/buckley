@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -37,9 +38,19 @@ import (
 )
 
 func TestBoundary(t *testing.T) {
-    if err := os.WriteFile("source-mutation", []byte("forbidden"), 0600); err == nil {
-        t.Fatal("immutable source directory was writable")
-    }
+	if err := os.WriteFile("source-mutation", []byte("disposable"), 0600); err != nil {
+		t.Fatalf("disposable verification directory was not writable: %v", err)
+	}
+	logDir := filepath.Join(".buckley", "logs")
+	if err := os.MkdirAll(logDir, 0700); err != nil {
+		t.Fatalf("repo-relative log directory was not writable: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(logDir, "review.jsonl"), []byte("ok"), 0600); err != nil {
+		t.Fatalf("repo-relative log was not writable: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(` + strconv.Quote(root) + `, "source-mutation"), []byte("forbidden"), 0600); err == nil {
+		t.Fatal("immutable snapshot root was writable")
+	}
     marker := filepath.Join(os.TempDir(), "private-temp-write")
     if err := os.WriteFile(marker, []byte("ok"), 0600); err != nil {
         t.Fatalf("private temp directory was not writable: %v", err)
@@ -55,7 +66,15 @@ func TestBoundary(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	result := NewExecutorWithCodexCommand(codexCommand).Verify(context.Background(), Request{
+	executor := NewExecutorWithCodexCommand(codexCommand)
+	trusted := executor.lookPath
+	executor.lookPath = func(name string) (string, error) {
+		if name == "bwrap" {
+			return "", os.ErrNotExist
+		}
+		return trusted(name)
+	}
+	result := executor.Verify(context.Background(), Request{
 		SnapshotRoot: root,
 		Kind:         KindTest,
 		Language:     LanguageGo,
@@ -67,6 +86,9 @@ func TestBoundary(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(root, "source-mutation")); !os.IsNotExist(err) {
 		t.Fatalf("sandbox mutated source snapshot: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, ".buckley")); !os.IsNotExist(err) {
+		t.Fatalf("sandbox created repo-relative state in source snapshot: %v", err)
 	}
 	if strings.TrimSpace(result.Pattern) != "^TestBoundary$" {
 		t.Fatalf("trusted pattern not retained: %q", result.Pattern)
@@ -100,9 +122,19 @@ import (
 )
 
 func TestBoundary(t *testing.T) {
-    if err := os.WriteFile("source-mutation", []byte("forbidden"), 0600); err == nil {
-        t.Fatal("immutable source directory was writable")
-    }
+	if err := os.WriteFile("source-mutation", []byte("disposable"), 0600); err != nil {
+		t.Fatalf("disposable verification directory was not writable: %v", err)
+	}
+	logDir := filepath.Join(".buckley", "logs")
+	if err := os.MkdirAll(logDir, 0700); err != nil {
+		t.Fatalf("repo-relative log directory was not writable: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(logDir, "review.jsonl"), []byte("ok"), 0600); err != nil {
+		t.Fatalf("repo-relative log was not writable: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(` + strconv.Quote(root) + `, "source-mutation"), []byte("forbidden"), 0600); err == nil {
+		t.Fatal("immutable snapshot root was writable")
+	}
     marker := filepath.Join(os.TempDir(), "private-temp-write")
     if err := os.WriteFile(marker, []byte("ok"), 0600); err != nil {
         t.Fatalf("private temp directory was not writable: %v", err)
@@ -141,5 +173,8 @@ func TestBoundary(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(root, "source-mutation")); !os.IsNotExist(err) {
 		t.Fatalf("sandbox mutated source snapshot: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, ".buckley")); !os.IsNotExist(err) {
+		t.Fatalf("sandbox created repo-relative state in source snapshot: %v", err)
 	}
 }

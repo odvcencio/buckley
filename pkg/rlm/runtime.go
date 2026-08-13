@@ -241,7 +241,9 @@ func coordinatorGovernorConfig(maxIterations int) agentloop.Config {
 // whether to stop from inside the DispatchTools hook, exactly where the
 // pre-migration loop decided it, and stops Controller immediately via
 // errCoordinatorAnswerReady rather than letting one more model round run
-// after budget or confidence already say the answer is done.
+// after budget or confidence already say the answer is done. If the shared
+// Governor intervenes first, Controller reserves a tools-disabled synthesis
+// and Execute accepts only its conclusive final message.
 func (r *Runtime) Execute(ctx context.Context, task string) (*Answer, error) {
 	if r == nil {
 		return nil, fmt.Errorf("runtime is nil")
@@ -401,17 +403,21 @@ func (r *Runtime) Execute(ctx context.Context, task string) (*Answer, error) {
 	})
 
 	ctrl, err := agentloop.NewController(agentloop.ControllerConfig{
-		Governor:      agentloop.New(coordinatorGovernorConfig(maxIterations)),
-		BuildRequest:  buildRequest,
-		CallModel:     callModel,
-		DispatchTools: dispatchTools,
-		History:       history,
+		Governor:       agentloop.New(coordinatorGovernorConfig(maxIterations)),
+		FinalizeOnStop: true,
+		BuildRequest:   buildRequest,
+		CallModel:      callModel,
+		DispatchTools:  dispatchTools,
+		History:        history,
 	})
 	if err != nil {
 		return &answer, err
 	}
 
 	result, runErr := ctrl.Run(ctx)
+	if result != nil && result.Termination.Kind != "" {
+		r.emitTermination(result.Termination)
+	}
 	if runErr != nil {
 		if errors.Is(runErr, errCoordinatorAnswerReady) {
 			answer.Normalize()
@@ -424,32 +430,28 @@ func (r *Runtime) Execute(ctx context.Context, task string) (*Answer, error) {
 		}
 		return &answer, runErr
 	}
+	if completionErr := result.RequireConclusive(); completionErr != nil {
+		return &answer, completionErr
+	}
 
 	switch result.FinishReason {
 	case agentloop.FinishReasonEmptyChoices:
 		return &answer, fmt.Errorf("no response from coordinator")
-	case agentloop.FinishReasonLoopGuard, agentloop.FinishReasonStepCap:
-		// The Governor's own MaxRounds ceiling mirrors the pre-migration
-		// "answer.Iteration < maxIterations" loop condition exactly (see
-		// coordinatorGovernorConfig): falling out here without a final
-		// answer is the same normal, non-error stop the old loop had.
-	default:
-		content := extractText(result.Message)
-		if content != "" {
-			answer.Content = strings.TrimSpace(content)
-			answer.Ready = true
-		}
-		summaries := r.collectScratchpadSummaries(ctx, 6)
-		r.emitIteration(IterationEvent{
-			Iteration:     answer.Iteration,
-			MaxIterations: maxIterations,
-			Ready:         answer.Ready,
-			TokensUsed:    answer.TokensUsed,
-			Summary:       answer.Content,
-			Scratchpad:    summaries,
-		})
 	}
-
+	content := extractText(result.Message)
+	if content != "" {
+		answer.Content = strings.TrimSpace(content)
+		answer.Ready = true
+	}
+	summaries := r.collectScratchpadSummaries(ctx, 6)
+	r.emitIteration(IterationEvent{
+		Iteration:     answer.Iteration,
+		MaxIterations: maxIterations,
+		Ready:         answer.Ready,
+		TokensUsed:    answer.TokensUsed,
+		Summary:       answer.Content,
+		Scratchpad:    summaries,
+	})
 	answer.Normalize()
 	return &answer, nil
 }
@@ -618,6 +620,23 @@ func (r *Runtime) emitIteration(event IterationEvent) {
 			Data:      data,
 		})
 	}
+}
+
+func (r *Runtime) emitTermination(termination agentloop.Termination) {
+	if r == nil || r.telemetry == nil {
+		return
+	}
+	r.telemetry.Publish(telemetry.Event{
+		Type:      telemetry.EventDebug,
+		SessionID: r.sessionID,
+		Data: map[string]any{
+			"source":                 "rlm.controller",
+			"termination_kind":       termination.Kind,
+			"termination_reason":     termination.Reason,
+			"finalization_attempted": termination.FinalizationAttempted,
+			"finalization_error":     termination.FinalizationError,
+		},
+	})
 }
 
 type coordinatorToolResult struct {

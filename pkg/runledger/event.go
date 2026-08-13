@@ -10,6 +10,8 @@
 package runledger
 
 import (
+	"crypto/sha256"
+	"strings"
 	"time"
 
 	"github.com/oklog/ulid/v2"
@@ -48,6 +50,16 @@ type Event struct {
 // NewEventID returns a new ULID string suitable for Event.ID.
 func NewEventID() string {
 	return ulid.Make().String()
+}
+
+// StableEventID derives a deterministic event ID for retryable logical
+// operations. Re-appending the same logical event is therefore idempotent,
+// while ordinary events should continue to use NewEventID.
+func StableEventID(parts ...string) string {
+	digest := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
+	var id ulid.ULID
+	copy(id[:], digest[:len(id)])
+	return id.String()
 }
 
 // Required event types (section 14.3). Grouped by subsystem for
@@ -94,6 +106,10 @@ const (
 	// EventDurableTurn correlates one durable-scheduler activity with the
 	// turn it drove: workflow instance ID, generation, and turn index.
 	EventDurableTurn = "durable.turn"
+	// EventDurableGoalGeneration records the immutable terminal fact for one
+	// top-level durable goal workflow generation. Incomplete generations leave
+	// the canonical run open but remain visible to audit and replay.
+	EventDurableGoalGeneration = "durable.goal_generation"
 	// EventDurableApprovalWaiting records that a parked task's workflow
 	// is holding a durable external-event wait; the payload carries the
 	// child workflow instance ID an approval must target.

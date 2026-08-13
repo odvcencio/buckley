@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -31,6 +32,7 @@ var configValidators = []func(*Config) error{
 	func(c *Config) error { return c.MCP.Validate() },
 	func(c *Config) error { return c.Hooks.Validate() },
 	validateMemoryLimits,
+	validateAgentCostLimits,
 }
 
 // Validate checks configuration values for correctness and returns an
@@ -267,6 +269,23 @@ func validateMemoryLimits(c *Config) error {
 	}
 	if c.Memory.RetrievalMaxTokens < 0 {
 		return fmt.Errorf("retrieval_max_tokens must be >= 0, got %d", c.Memory.RetrievalMaxTokens)
+	}
+	return nil
+}
+
+func validateAgentCostLimits(c *Config) error {
+	limits := []struct {
+		name  string
+		value float64
+	}{
+		{name: "experiment.max_cost_per_run", value: c.Experiment.MaxCostPerRun},
+		{name: "buckbot.per_review_budget_usd", value: c.Buckbot.PerReviewBudgetUSD},
+		{name: "buckbot.monthly_budget_usd", value: c.Buckbot.MonthlyBudgetUSD},
+	}
+	for _, limit := range limits {
+		if limit.value < 0 || math.IsNaN(limit.value) || math.IsInf(limit.value, 0) {
+			return fmt.Errorf("%s must be finite and non-negative", limit.name)
+		}
 	}
 	return nil
 }

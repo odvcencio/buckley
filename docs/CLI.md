@@ -222,6 +222,33 @@ are independent. Project reviews also have no hard model-turn or exploration
 ceiling by default; the ordinary outer timeout, synthesis reserve, verification,
 and governor safety controls still apply.
 
+Child runs use an explicit execution contract. `step_cap`, `max_tool_calls`,
+`max_model_requests`, `max_elapsed_seconds`, `max_cost_usd`, and
+`timeout_seconds` can narrow an individual `spawn_subagent` request. Zero or an
+omitted value means no contract-specific ceiling; repetition/cycle protection,
+provider limits, cancellation, and operator emergency fuses still apply. When
+action work stops after gathering evidence, Buckley reserves a final
+tools-disabled synthesis request when the declared model-request and cost
+ceilings still allow it. Model-request, tool, and elapsed ceilings are hard
+harness limits. A cost ceiling is a conservative client-side admission limit,
+not provider-side payment authorization: Buckley prices an explicit input and
+output envelope before dispatch and rejects a response and all of its tool
+calls if provider-reported usage crosses the remainder. Provider billing or
+token accounting can still differ after a request has been accepted upstream.
+The child is explicitly incomplete whenever Buckley cannot safely admit or use
+the request.
+Child stdout and stderr stream to a private 32 MiB spool; snapshots keep only a
+256 KiB head/tail preview, while the retained transcript is pinned to evidence
+before the spool is removed. A child that reaches the spool ceiling fails
+explicitly with observed and retained byte counts.
+
+For API models, Buckbot automatically exposes audited read-only code mode on
+the immutable review snapshot when bubblewrap is working. This lets a model
+compose repository-wide inventories and cross-file checks in one program
+without network access or a mount of the live checkout. If the sandbox is
+unavailable, Buckbot keeps the ordinary snapshot-rooted inspection tools. An
+exact `--model` value remains exact in both cases.
+
 ### review-pr
 
 Review a GitHub pull request. The command uses dry-run output by default.
@@ -470,7 +497,8 @@ buckley git-webhook --bind 127.0.0.1:8085
 buckley git-webhook --bind 0.0.0.0:8085 --secret <webhook-secret>
 ```
 
-See [Regression Gate documentation](../README.md#regression-gate--release-automation) for configuration.
+See the [`git_events` configuration](./CONFIGURATION.md#git_events) for the
+listener and release-command settings.
 
 ### agent-server
 
@@ -633,5 +661,6 @@ fi
 ## See Also
 
 - [Configuration Reference](CONFIGURATION.md)
-- [Error Codes](ERRORS.md)
-- [Release Process](RELEASE.md)
+- [Troubleshooting](troubleshooting.md)
+- [Running Durable Goals](goals.md)
+- [Mission Control](MISSION_CONTROL.md)

@@ -530,11 +530,11 @@ func hasBlockingFinding(findings []Finding) bool {
 }
 
 // verificationRank orders VerificationState from best to worst for
-// worst-of aggregation across shards; PASS is the only state better than
-// treating the merged status as unresolved.
+// worst-of aggregation across shards; PASS and a typed NOT_APPLICABLE policy
+// are the only conclusive non-failure states.
 func verificationRank(state VerificationState) int {
 	switch state {
-	case VerificationPass:
+	case VerificationPass, VerificationNotApplicable:
 		return 0
 	case VerificationPending:
 		return 1

@@ -166,6 +166,16 @@ func (g *Governor) ToolCalls() int {
 	return g.toolCalls
 }
 
+// RemainingToolCalls reports how many additional calls the Governor can
+// admit before its hard tool ceiling. Controller uses this before dispatching
+// a parallel batch so the last batch cannot overshoot an explicit budget.
+func (g *Governor) RemainingToolCalls() int {
+	if g == nil {
+		return 0
+	}
+	return max(g.config.MaxToolCalls-g.toolCalls, 0)
+}
+
 // RepetitionPressure reports how close the loop is to a repeat-based stop
 // as a 0..1 ratio: the highest observed repeat count relative to its
 // configured limit, across the exact-repeat and outcome-repeat detectors.

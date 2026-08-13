@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -128,13 +129,27 @@ func (c *Controller) runToolLoop(ctx context.Context, sess *SessionState, modelI
 			if retryErr := c.handleToolLoopModelError(err, &state); retryErr == nil {
 				continue
 			}
+			var incomplete *agentloop.IncompleteTurnError
+			if result != nil && errors.As(err, &incomplete) {
+				usage := accumulatedUsage
+				return toolLoopResult{
+					Text:              result.Content,
+					Usage:             &usage,
+					HarnessStopReason: result.Termination.Reason,
+				}, err
+			}
 			return toolLoopResult{}, err
+		}
+		if completionErr := result.RequireConclusive(); completionErr != nil {
+			usage := accumulatedUsage
+			return toolLoopResult{Text: result.Content, Usage: &usage, HarnessStopReason: result.Termination.Reason}, completionErr
 		}
 
 		switch result.FinishReason {
 		case agentloop.FinishReasonLoopGuard:
-			state.totalUsage = accumulatedUsage
-			return c.finishGuardedToolLoop(ctx, sess, modelID, &state, result.GuardDecision.Reason)
+			finished, finishErr := c.finishToolLoopResponse(sess, result.Message, accumulatedUsage, "", &state)
+			finished.HarnessStopReason = result.Termination.Reason
+			return finished, finishErr
 		case agentloop.FinishReasonEmptyChoices:
 			// callToolLoopModel already turns an empty stream response into
 			// a hard error (model.NoResponseChoicesError) before it ever
@@ -293,12 +308,13 @@ func (c *Controller) newToolLoopController(sess *SessionState, modelID string, a
 	})
 
 	return agentloop.NewController(agentloop.ControllerConfig{
-		Governor:      state.governor,
-		Progress:      newInteractiveProgressController(c.cfg),
-		BuildRequest:  buildRequest,
-		CallModel:     callModel,
-		DispatchTools: dispatch,
-		History:       history,
+		Governor:       state.governor,
+		Progress:       newInteractiveProgressController(c.cfg),
+		FinalizeOnStop: true,
+		BuildRequest:   buildRequest,
+		CallModel:      callModel,
+		DispatchTools:  dispatch,
+		History:        history,
 		ContextWindow: func(mid string) int {
 			if c.modelMgr == nil {
 				return 0

@@ -70,7 +70,7 @@ type PageData struct {
 	Todos         []TodoView
 	Approvals     []ApprovalView
 	AgentSpecs    []AgentSpecView
-	MissionAgents []MissionAgentView
+	AgentRuns     []AgentView
 	Models        []ModelView
 	Refresh       bool
 }
@@ -108,14 +108,16 @@ type AgentSpecView struct {
 	Error     string
 }
 
-type MissionAgentView struct {
-	ID            string
-	SessionID     string
-	Type          string
-	Status        string
-	Action        string
-	LastActivity  string
-	PendingChange int
+type AgentView struct {
+	ID              string
+	ParentID        string
+	ParentSessionID string
+	Agent           string
+	Persona         string
+	Model           string
+	Status          string
+	Task            string
+	Children        []AgentView
 }
 
 type MessageView struct {
@@ -314,24 +316,38 @@ func renderMissionControl(data PageData) gosx.Node {
 
 func renderSidebar(data PageData) gosx.Node {
 	sections := []gosx.Node{
-		gosx.El("section", cls("side-section"),
-			gosx.El("div", cls("section-heading"), gosx.El("span", gosx.Text("Directories")), gosx.El("span", cls("count"), gosx.Text(strconv.Itoa(len(data.Workspaces))))),
-			renderWorkspaces(data.Workspaces, data.Current),
-		),
+		renderSideSection("directories", "Directories", len(data.Workspaces), true, renderWorkspaces(data.Workspaces, data.Current)),
 	}
 	sections = append(sections,
-		gosx.El("section", cls("side-section"),
-			gosx.El("div", cls("section-heading"), gosx.El("span", gosx.Text("Agent catalog")), gosx.El("span", cls("count"), gosx.Text(strconv.Itoa(len(data.AgentSpecs))))),
-			renderAgentSpecs(data.AgentSpecs),
-		),
-		gosx.El("section", cls("side-section"),
-			gosx.El("div", cls("section-heading"), gosx.El("span", gosx.Text("Active agents")), gosx.El("span", cls("count"), gosx.Text(strconv.Itoa(len(data.MissionAgents))))),
-			renderMissionAgents(data.MissionAgents),
-		),
+		renderSideSection("agent-catalog", "Agent catalog", len(data.AgentSpecs), false, renderAgentSpecs(data.AgentSpecs)),
+		renderSideSection("agent-activity", "Agent activity", countAgentViews(data.AgentRuns), len(data.AgentRuns) > 0, renderAgentRuns(data.AgentRuns)),
 	)
 	return gosx.El("aside", cls("sidebar"),
 		gosx.El("div", cls("sidebar-head"), gosx.El("div", cls("eyebrow"), gosx.Text("WORKSPACE OPERATIONS")), gosx.El("h2", gosx.Text("Work in motion")), gosx.El("p", cls("muted"), gosx.Text("Directories are the control plane. Runs, agents, and evidence stay attached to the worktree."))),
 		el("div", cls("sidebar-scroll"), sections...),
+	)
+}
+
+func renderSideSection(id, label string, count int, narrowExpanded bool, body gosx.Node) gosx.Node {
+	toggleID := "side-toggle-" + id
+	toggleAttrs := []any{
+		gosx.Attr("class", "side-section-toggle"),
+		gosx.Attr("type", "checkbox"),
+		gosx.Attr("id", toggleID),
+	}
+	if narrowExpanded {
+		toggleAttrs = append(toggleAttrs, gosx.BoolAttr("checked"))
+	}
+	return gosx.El("section", cls("side-section"),
+		gosx.El("input", gosx.Attrs(toggleAttrs...)),
+		gosx.El("label", gosx.Attrs(gosx.Attr("class", "section-heading"), gosx.Attr("for", toggleID)),
+			gosx.El("span", gosx.Text(label)),
+			gosx.El("span", cls("section-heading-meta"),
+				gosx.El("span", cls("count"), gosx.Text(strconv.Itoa(count))),
+				gosx.El("span", gosx.Attrs(gosx.Attr("class", "section-chevron"), gosx.Attr("aria-hidden", "true")), gosx.Text("⌄")),
+			),
+		),
+		gosx.El("div", cls("side-section-body"), body),
 	)
 }
 
@@ -377,16 +393,55 @@ func renderAgentSpecs(specs []AgentSpecView) gosx.Node {
 	return el("div", cls("agent-list"), children...)
 }
 
-func renderMissionAgents(agents []MissionAgentView) gosx.Node {
+func renderAgentRuns(agents []AgentView) gosx.Node {
 	if len(agents) == 0 {
 		return gosx.El("p", cls("muted empty"), gosx.Text("No recent agent activity."))
 	}
 	children := make([]gosx.Node, 0, len(agents))
 	for _, agent := range agents {
-		label := firstNonEmpty(agent.Type, agent.ID)
-		children = append(children, gosx.El("div", cls("agent-row"), gosx.El("span", cls("status-dot status-"+safeStatus(agent.Status)), gosx.Text("")), gosx.El("span", cls("truncate"), gosx.Text(label)), gosx.El("span", cls("muted tiny truncate"), gosx.Text(firstNonEmpty(agent.Action, agent.Status)))))
+		children = append(children, renderAgentRun(agent))
 	}
 	return el("div", cls("agent-list"), children...)
+}
+
+func renderAgentRun(agent AgentView) gosx.Node {
+	label := firstNonEmpty(agent.Persona, agent.Agent, agent.ID)
+	if agent.Persona != "" && agent.Agent != "" && agent.Persona != agent.Agent {
+		label = agent.Persona + " · " + agent.Agent
+	}
+	meta := []string{firstNonEmpty(agent.Status, "unknown")}
+	if agent.Model != "" {
+		meta = append(meta, agent.Model)
+	}
+	if agent.ParentID != "" {
+		meta = append(meta, "parent "+agent.ParentID)
+	}
+	parts := []gosx.Node{
+		gosx.El("div", cls("agent-row"),
+			gosx.El("span", cls("status-dot status-"+safeStatus(agent.Status)), gosx.Text("")),
+			gosx.El("span", cls("truncate"), gosx.Text(label)),
+			gosx.El("span", cls("muted tiny truncate"), gosx.Text(strings.Join(meta, " · "))),
+		),
+	}
+	if agent.Task != "" {
+		parts = append(parts, gosx.El("p", cls("muted tiny truncate"), gosx.Text(agent.Task)))
+	}
+	if len(agent.Children) > 0 {
+		parts = append(parts, renderAgentRuns(agent.Children))
+	}
+	return el("div", gosx.Attrs(
+		gosx.Attr("class", "agent-card"),
+		gosx.Attr("data-agent-id", agent.ID),
+		gosx.Attr("data-parent-id", agent.ParentID),
+	), parts...)
+}
+
+func countAgentViews(agents []AgentView) int {
+	count := 0
+	for _, agent := range agents {
+		count += 1 + countAgentViews(agent.Children)
+	}
+	return count
 }
 
 func renderDetail(data PageData) gosx.Node {

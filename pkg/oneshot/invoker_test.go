@@ -3,9 +3,12 @@ package oneshot
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"strings"
 	"testing"
 
+	"m31labs.dev/buckley/pkg/agentloop"
 	"m31labs.dev/buckley/pkg/model"
 	"m31labs.dev/buckley/pkg/tools"
 	"m31labs.dev/buckley/pkg/transparency"
@@ -403,9 +406,11 @@ func TestInvokerWithTools_ToolLoop(t *testing.T) {
 type multiResponseClient struct {
 	responses []*model.ChatResponse
 	callCount int
+	requests  []model.ChatRequest
 }
 
 func (m *multiResponseClient) ChatCompletion(ctx context.Context, req model.ChatRequest) (*model.ChatResponse, error) {
+	m.requests = append(m.requests, req)
 	if m.callCount >= len(m.responses) {
 		return &model.ChatResponse{
 			Choices: []model.Choice{{Message: model.Message{Content: "fallback"}}},
@@ -416,12 +421,11 @@ func (m *multiResponseClient) ChatCompletion(ctx context.Context, req model.Chat
 	return resp, nil
 }
 
-func TestInvokerWithTools_MaxIterations(t *testing.T) {
-	// Always return tool calls - should hit max iterations
+func TestInvokerWithTools_MaxIterationsFinalizesFromEvidence(t *testing.T) {
 	client := &multiResponseClient{
-		responses: make([]*model.ChatResponse, 5),
+		responses: make([]*model.ChatResponse, 4),
 	}
-	for i := range client.responses {
+	for i := 0; i < 3; i++ {
 		client.responses[i] = &model.ChatResponse{
 			Choices: []model.Choice{{
 				Message: model.Message{
@@ -433,6 +437,10 @@ func TestInvokerWithTools_MaxIterations(t *testing.T) {
 				},
 			}},
 		}
+	}
+	client.responses[3] = &model.ChatResponse{
+		Choices: []model.Choice{{Message: model.Message{Role: "assistant", Content: "final evidence summary"}}},
+		Usage:   model.Usage{PromptTokens: 30, CompletionTokens: 10, TotalTokens: 40},
 	}
 
 	invoker := NewInvoker(InvokerConfig{
@@ -446,15 +454,65 @@ func TestInvokerWithTools_MaxIterations(t *testing.T) {
 		Parameters: tools.ObjectSchema(map[string]tools.Property{}, ""),
 	}}
 
-	_, _, err := invoker.InvokeWithTools(
+	content, trace, err := invoker.InvokeWithTools(
 		context.Background(), "system", "user",
 		toolDefs, executor, 3,
 	)
-	if err == nil {
-		t.Fatal("expected max iterations error")
+	if err != nil {
+		t.Fatalf("InvokeWithTools: %v", err)
+	}
+	if content != "final evidence summary" {
+		t.Fatalf("content = %q, want final synthesis", content)
 	}
 	if len(executor.calls) != 3 {
 		t.Errorf("expected 3 tool calls, got %d", len(executor.calls))
+	}
+	if client.callCount != 4 {
+		t.Fatalf("model calls = %d, want 3 tool rounds plus one finalization", client.callCount)
+	}
+	finalReq := client.requests[3]
+	if len(finalReq.Tools) != 0 || finalReq.ToolChoice != "none" {
+		t.Fatalf("finalization request still exposed tools: choice=%q tools=%d", finalReq.ToolChoice, len(finalReq.Tools))
+	}
+	if trace.Response == nil || trace.Response.FinishReason != agentloop.FinishReasonStepCap || !strings.Contains(trace.Response.StopReason, "3-step") {
+		t.Fatalf("trace response = %#v, want preserved step-cap termination", trace.Response)
+	}
+	if trace.Tokens.Input != 30 || trace.Tokens.Output != 10 {
+		t.Fatalf("trace tokens = %+v, want finalization usage included", trace.Tokens)
+	}
+}
+
+func TestInvokerWithTools_FinalizationFailureIsIncomplete(t *testing.T) {
+	client := &multiResponseClient{responses: []*model.ChatResponse{
+		{Choices: []model.Choice{{Message: model.Message{ToolCalls: []model.ToolCall{{
+			ID: "call_1", Type: "function", Function: model.FunctionCall{Name: "read_file", Arguments: `{}`},
+		}}}}}},
+		{Choices: []model.Choice{{Message: model.Message{Role: "assistant"}}}},
+	}}
+	invoker := NewInvoker(InvokerConfig{Client: client, Model: "test-model"})
+	executor := &mockToolExecutor{results: map[string]string{"read_file": "evidence"}}
+
+	content, trace, err := invoker.InvokeWithTools(context.Background(), "system", "user", []tools.Definition{{
+		Name: "read_file", Parameters: tools.ObjectSchema(map[string]tools.Property{}, ""),
+	}}, executor, 1)
+	var incomplete *agentloop.IncompleteTurnError
+	if !errors.As(err, &incomplete) {
+		t.Fatalf("error = %v, want IncompleteTurnError", err)
+	}
+	if !strings.Contains(content, "Buckley stopped after the 1-step persona limit") {
+		t.Fatalf("content = %q, want preserved harness stop result", content)
+	}
+	if trace == nil || trace.Response == nil || trace.Response.FinishReason != agentloop.FinishReasonStepCap {
+		t.Fatalf("trace = %#v, want explicit step-cap termination", trace)
+	}
+	if trace.Error == "" || !strings.Contains(trace.Error, "final synthesis failed") {
+		t.Fatalf("trace error = %q, want finalization failure", trace.Error)
+	}
+	if trace.Content != content {
+		t.Fatalf("trace content = %q, want preserved result %q", trace.Content, content)
+	}
+	if len(trace.ToolCalls) != 1 || trace.ToolCalls[0].Name != "read_file" {
+		t.Fatalf("trace tool calls = %+v, want completed read_file call", trace.ToolCalls)
 	}
 }
 

@@ -25,7 +25,7 @@ func TestReviewPromptsRequireEvidenceCoverageAndExactTools(t *testing.T) {
 				"NONE_SUPPLIED",
 				"**Feedback**: `feedback-id-exactly-as-supplied`",
 				"ADDRESSED|DISPUTED|DISPOSITIONED|UNRESOLVED",
-				"PASS|FAIL|PENDING|NOT_RUN|UNAVAILABLE|UNKNOWN",
+				"PASS|FAIL|NOT_APPLICABLE|PENDING|NOT_RUN|UNAVAILABLE|UNKNOWN",
 				"every changed file",
 				"ratchet",
 				"AGENTS.md",
@@ -47,8 +47,7 @@ func TestReviewPromptsRequireEvidenceCoverageAndExactTools(t *testing.T) {
 func TestReviewPromptsMakeApprovalVerificationPolicyExplicit(t *testing.T) {
 	branch := reviewBranchWithToolsDefault(time.Unix(0, 0))
 	for _, want := range []string{
-		"APPROVE requires both Build and Tests to be PASS",
-		"focused local verification actually completed",
+		"APPROVE requires Build PASS plus Tests PASS, or trusted NO_TEST_GATE",
 		"same applicable toolchain",
 		"cover every changed source path",
 		"Any FAIL, PENDING, NOT_RUN, UNAVAILABLE, or UNKNOWN state blocks approval",

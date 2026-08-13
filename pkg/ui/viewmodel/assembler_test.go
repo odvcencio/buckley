@@ -8,6 +8,7 @@ import (
 
 	"m31labs.dev/buckley/pkg/orchestrator"
 	"m31labs.dev/buckley/pkg/storage"
+	"m31labs.dev/buckley/pkg/telemetry"
 )
 
 func TestToPlanSnapshotNormalizesStatuses(t *testing.T) {
@@ -397,6 +398,37 @@ func TestBuildSessionState_FullSession(t *testing.T) {
 	}
 	if len(state.Todos) > 0 && state.Todos[0].Content != "Test task" {
 		t.Errorf("expected todo content 'Test task', got %q", state.Todos[0].Content)
+	}
+}
+
+func TestBuildSessionState_IncludesSharedAgentProjection(t *testing.T) {
+	store, err := storage.New(t.TempDir() + "/test.db")
+	if err != nil {
+		t.Fatalf("storage.New: %v", err)
+	}
+	defer store.Close()
+
+	session := &storage.Session{ID: "session-agents", ProjectPath: t.TempDir(), Status: storage.SessionStatusActive}
+	if err := store.CreateSession(session); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	tracker := NewRuntimeStateTracker(nil)
+	tracker.handleEvent(telemetry.Event{
+		Type:      telemetry.EventSubagentSpawned,
+		SessionID: session.ID,
+		TaskID:    "agent-1",
+		Data:      map[string]any{"persona": "review", "model": "example/model", "task": "review changes"},
+	})
+
+	state, err := NewAssembler(store, nil, nil).WithRuntimeTracker(tracker).BuildSessionState(context.Background(), session.ID)
+	if err != nil {
+		t.Fatalf("BuildSessionState: %v", err)
+	}
+	if state == nil || len(state.AgentRuns) != 1 {
+		t.Fatalf("session agent projection = %+v", state)
+	}
+	if run := state.AgentRuns[0]; run.ID != "agent-1" || run.Persona != "review" || run.Model != "example/model" || run.Task != "review changes" {
+		t.Fatalf("session agent run = %+v", run)
 	}
 }
 

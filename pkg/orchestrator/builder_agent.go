@@ -457,7 +457,8 @@ func (a *BuilderAgent) generateWithTools(req model.ChatRequest, task *Task) (str
 
 	// This loop never had stagnation detection, only the flat maxIterations
 	// ceiling: raise every repeat/cycle threshold above maxIterations so the
-	// Governor's round limit is the only thing that can stop it early.
+	// Governor's round limit is the only thing that can stop tool execution.
+	// Controller then reserves one no-tools synthesis from the collected evidence.
 	governor := agentloop.New(agentloop.Config{
 		MaxRounds:          maxIterations,
 		MaxToolCalls:       maxIterations * 8,
@@ -468,12 +469,13 @@ func (a *BuilderAgent) generateWithTools(req model.ChatRequest, task *Task) (str
 	})
 
 	controller, err := agentloop.NewController(agentloop.ControllerConfig{
-		Governor:      governor,
-		BuildRequest:  buildRequest,
-		CallModel:     callModel,
-		DispatchTools: dispatchTools,
-		History:       history,
-		ContextWindow: func(modelID string) int { return contextWindow },
+		Governor:       governor,
+		FinalizeOnStop: true,
+		BuildRequest:   buildRequest,
+		CallModel:      callModel,
+		DispatchTools:  dispatchTools,
+		History:        history,
+		ContextWindow:  func(modelID string) int { return contextWindow },
 	})
 	if err != nil {
 		return "", err
@@ -481,13 +483,28 @@ func (a *BuilderAgent) generateWithTools(req model.ChatRequest, task *Task) (str
 
 	result, err := controller.Run(ctx)
 	if err != nil {
+		if result != nil && result.Termination.Kind != "" {
+			a.logEvent(task.ID, builderEventToolResult, map[string]string{
+				"status":             "incomplete_after_harness_stop",
+				"termination_kind":   result.Termination.Kind,
+				"termination_reason": result.Termination.Reason,
+				"finalization_error": result.Termination.FinalizationError,
+			})
+		}
+		return "", err
+	}
+	if err := result.RequireConclusive(); err != nil {
 		return "", err
 	}
 	if result.FinishReason == agentloop.FinishReasonEmptyChoices {
 		return "", fmt.Errorf("no response choices from model")
 	}
-	if result.FinishReason == agentloop.FinishReasonLoopGuard || result.FinishReason == agentloop.FinishReasonStepCap {
-		return "", fmt.Errorf("max tool calling iterations (%d) exceeded", maxIterations)
+	if result.Termination.Kind != "" {
+		a.logEvent(task.ID, builderEventToolResult, map[string]string{
+			"status":             "finalized_after_harness_stop",
+			"termination_kind":   result.Termination.Kind,
+			"termination_reason": result.Termination.Reason,
+		})
 	}
 	return model.ExtractTextContent(result.Message.Content)
 }

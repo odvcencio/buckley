@@ -88,11 +88,11 @@ func fusesFor(goal Goal) agentloop.Fuses {
 // 80% and 100% marks. It returns the goal's cumulative spend after this
 // turn. Metric writes are the budget's source of truth, so a write
 // failure is an error, not best-effort.
-func (l *Loop) recordTurnSpend(ctx context.Context, runID, taskID string, goal Goal, outcome TurnOutcome) (float64, error) {
+func (l *Loop) recordTurnSpend(ctx context.Context, runID, taskID string, goal Goal, outcome TurnOutcome, idempotencyPrefix string) (float64, error) {
 	samples := []runledger.AgentMetricSample{
-		{RunID: runID, TaskID: taskID, MetricName: costUSDMetric, Value: outcome.SpentUSD, Unit: "usd"},
-		{RunID: runID, TaskID: taskID, MetricName: promptTokensMetric, Value: float64(outcome.PromptTokens), Unit: "tokens"},
-		{RunID: runID, TaskID: taskID, MetricName: completionTokensMetric, Value: float64(outcome.CompletionTokens), Unit: "tokens"},
+		{RunID: runID, TaskID: taskID, IdempotencyKey: idempotencyPrefix + ":" + costUSDMetric, MetricName: costUSDMetric, Value: outcome.SpentUSD, Unit: "usd"},
+		{RunID: runID, TaskID: taskID, IdempotencyKey: idempotencyPrefix + ":" + promptTokensMetric, MetricName: promptTokensMetric, Value: float64(outcome.PromptTokens), Unit: "tokens"},
+		{RunID: runID, TaskID: taskID, IdempotencyKey: idempotencyPrefix + ":" + completionTokensMetric, MetricName: completionTokensMetric, Value: float64(outcome.CompletionTokens), Unit: "tokens"},
 	}
 	for _, sample := range samples {
 		if sample.Value == 0 {
@@ -119,6 +119,7 @@ func (l *Loop) recordTurnSpend(ctx context.Context, runID, taskID string, goal G
 		eventType = runledger.EventBudgetWarning
 	}
 	_, _ = l.ledger.Append(ctx, runledger.Event{
+		ID:        runledger.StableEventID("goal-budget-turn", idempotencyPrefix),
 		Type:      eventType,
 		Timestamp: time.Now().UTC(),
 		SessionID: l.sessionID,

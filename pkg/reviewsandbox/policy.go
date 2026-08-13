@@ -1,6 +1,7 @@
 package reviewsandbox
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"sort"
@@ -20,11 +21,22 @@ func PermissionArgs(command, runtimeDir string) []string {
 // PermissionArgsWithReadRoots is PermissionArgs plus narrowly-scoped,
 // read-only toolchain or dependency roots required by the verification run.
 func PermissionArgsWithReadRoots(command, runtimeDir string, additionalReadRoots ...string) []string {
+	return permissionArgsWithWorkspaceAccess(command, runtimeDir, "read", additionalReadRoots...)
+}
+
+// verificationPermissionArgsWithReadRoots grants writes only to the
+// disposable workspace selected with codex sandbox -C. The immutable snapshot
+// remains an explicit read-only root supplied by the verification executor.
+func verificationPermissionArgsWithReadRoots(command, runtimeDir string, additionalReadRoots ...string) []string {
+	return permissionArgsWithWorkspaceAccess(command, runtimeDir, "write", additionalReadRoots...)
+}
+
+func permissionArgsWithWorkspaceAccess(command, runtimeDir, workspaceAccess string, additionalReadRoots ...string) []string {
 	readRoots := append(reviewReadRoots(command), additionalReadRoots...)
 	readRoots = canonicalExistingDirectories(readRoots)
 	filesystem := []string{
 		strconv.Quote(":minimal") + ` = "read"`,
-		strconv.Quote(":workspace_roots") + ` = { "." = "read" }`,
+		strconv.Quote(":workspace_roots") + ` = { "." = ` + strconv.Quote(workspaceAccess) + ` }`,
 		strconv.Quote(":tmpdir") + ` = "write"`,
 	}
 	for _, root := range readRoots {
@@ -167,8 +179,84 @@ func appendExecutableReadRoots(candidates []string, executable string) []string 
 	candidates = append(candidates, filepath.Dir(executable))
 	if canonical, err := filepath.EvalSymlinks(executable); err == nil {
 		candidates = append(candidates, filepath.Dir(canonical))
+		if packageRoot := executablePackageReadRoot(canonical); packageRoot != "" {
+			candidates = append(candidates, packageRoot)
+		}
 	}
 	return candidates
+}
+
+// executablePackageReadRoot returns the narrow package directory required by
+// a trusted script launcher such as npm. A package root is accepted only when
+// its manifest explicitly maps a bin entry back to the canonical executable;
+// an unrelated ancestor package.json never widens sandbox read access.
+func executablePackageReadRoot(executable string) string {
+	canonical, err := filepath.Abs(strings.TrimSpace(executable))
+	if err != nil || strings.TrimSpace(executable) == "" {
+		return ""
+	}
+	if resolved, resolveErr := filepath.EvalSymlinks(canonical); resolveErr == nil {
+		canonical = resolved
+	} else {
+		return ""
+	}
+	info, err := os.Stat(canonical)
+	if err != nil || !info.Mode().IsRegular() {
+		return ""
+	}
+
+	current := filepath.Dir(canonical)
+	for range 8 {
+		manifestPath := filepath.Join(current, "package.json")
+		content, readErr := os.ReadFile(manifestPath)
+		if readErr == nil {
+			var manifest struct {
+				Bin json.RawMessage `json:"bin"`
+			}
+			if json.Unmarshal(content, &manifest) == nil && packageBinMapsExecutable(current, manifest.Bin, canonical) {
+				return current
+			}
+		} else if !os.IsNotExist(readErr) {
+			return ""
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			break
+		}
+		current = parent
+	}
+	return ""
+}
+
+func packageBinMapsExecutable(packageRoot string, raw json.RawMessage, executable string) bool {
+	var single string
+	if json.Unmarshal(raw, &single) == nil && packageBinTargetMatches(packageRoot, single, executable) {
+		return true
+	}
+	var entries map[string]string
+	if json.Unmarshal(raw, &entries) != nil {
+		return false
+	}
+	for _, target := range entries {
+		if packageBinTargetMatches(packageRoot, target, executable) {
+			return true
+		}
+	}
+	return false
+}
+
+func packageBinTargetMatches(packageRoot, target, executable string) bool {
+	target = strings.TrimSpace(target)
+	if target == "" || filepath.IsAbs(target) {
+		return false
+	}
+	candidate := filepath.Clean(filepath.Join(packageRoot, filepath.FromSlash(target)))
+	relative, err := filepath.Rel(packageRoot, candidate)
+	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return false
+	}
+	resolved, err := filepath.EvalSymlinks(candidate)
+	return err == nil && filepath.Clean(resolved) == filepath.Clean(executable)
 }
 
 func canonicalExistingDirectories(candidates []string) []string {
