@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -52,10 +53,10 @@ func TestValidator_ValidatePreconditions_MissingTools(t *testing.T) {
 	validator := NewValidator(registry, ".")
 
 	task := &Task{
-		ID:           "1",
-		Title:        "Non-existent tool task",
-		Description:  "Use a tool that definitely doesn't exist xyzabc123",
-		Verification: []string{"Run `xyzabc123 --do-something` to verify"},
+		ID:            "1",
+		Title:         "Non-existent tool task",
+		Description:   "Use a tool that definitely doesn't exist xyzabc123",
+		RequiredTools: []string{"xyzabc123"},
 	}
 
 	result := validator.ValidatePreconditions(task)
@@ -81,6 +82,114 @@ func TestValidator_ValidatePreconditions_MissingTools(t *testing.T) {
 	}
 }
 
+// TestValidator_ProseBacktickIdentifiersAreNotTools locks in the fix for the
+// bug where the validator read the first word of every backtick span in the
+// task prose and demanded a tool of that name. Plans quote code identifiers
+// and file names that way, so execution never started.
+func TestValidator_ProseBacktickIdentifiersAreNotTools(t *testing.T) {
+	tmpDir := t.TempDir()
+	registry := tool.NewRegistry()
+	validator := NewValidator(registry, tmpDir)
+
+	for _, name := range []string{"store.go", "service.go"} {
+		path := filepath.Join(tmpDir, name)
+		if err := os.WriteFile(path, []byte("package main\n"), 0644); err != nil {
+			t.Fatalf("Failed to create %s: %v", name, err)
+		}
+	}
+
+	task := &Task{
+		ID:    "1",
+		Title: "Harden `persistLocked` in `store.go`",
+		Type:  TaskTypeImplementation,
+		Description: "Review `persistLocked` in `store.go` and mirror the change " +
+			"into `service.go`, `page.server.go`, and `gridiron.js`.",
+		Files: []string{"store.go", "service.go"},
+		Verification: []string{
+			"Verify existing signature and logic of `persistLocked` in `store.go`",
+			"Confirm `page.server.go` still imports `service.go` helpers",
+			"Check that `gridiron.js` keeps the same export surface",
+		},
+	}
+
+	tools := validator.requiredTools(task)
+	if len(tools) != 0 {
+		t.Errorf("Expected no required tools from prose, got %v", tools)
+	}
+
+	result := validator.ValidatePreconditions(task)
+	if result == nil {
+		t.Fatal("ValidatePreconditions returned nil")
+	}
+
+	if len(result.MissingTools) != 0 {
+		t.Errorf("Prose identifiers were reported as missing tools: %v", result.MissingTools)
+	}
+	if !result.Valid {
+		t.Errorf("Expected validation to pass, got errors: %v", result.Errors)
+	}
+}
+
+// TestValidator_DeclaredToolsStillChecked proves the structured field keeps
+// its power: a declared tool that is absent must still fail the task.
+func TestValidator_DeclaredToolsStillChecked(t *testing.T) {
+	tmpDir := t.TempDir()
+	registry := tool.NewRegistry()
+	validator := NewValidator(registry, tmpDir)
+
+	task := &Task{
+		ID:            "1",
+		Title:         "Deploy with a missing binary",
+		Type:          TaskTypeAnalysis,
+		Description:   "Roll out the release.",
+		Verification:  []string{"Confirm `deployStack` ran"},
+		RequiredTools: []string{"totally-not-installed-xyzabc123"},
+	}
+
+	result := validator.ValidatePreconditions(task)
+	if result == nil {
+		t.Fatal("ValidatePreconditions returned nil")
+	}
+
+	if result.Valid {
+		t.Error("Expected validation to fail for a declared missing tool")
+	}
+
+	if len(result.MissingTools) != 1 || result.MissingTools[0] != "totally-not-installed-xyzabc123" {
+		t.Errorf("Expected only the declared tool to be missing, got %v", result.MissingTools)
+	}
+}
+
+// TestValidator_DeclaredToolsResolveFromRegistryOrPath confirms the validator
+// keeps both resolution paths: the tool registry and the system PATH.
+func TestValidator_DeclaredToolsResolveFromRegistryOrPath(t *testing.T) {
+	tmpDir := t.TempDir()
+	registry := tool.NewRegistry()
+	validator := NewValidator(registry, tmpDir)
+
+	task := &Task{
+		ID:            "1",
+		Title:         "Run the build",
+		Type:          TaskTypeAnalysis,
+		Description:   "Build the module.",
+		RequiredTools: []string{"go", "  ", "go"},
+	}
+
+	if _, err := exec.LookPath("go"); err != nil {
+		t.Skip("go not in PATH")
+	}
+
+	tools := validator.requiredTools(task)
+	if len(tools) != 1 || tools[0] != "go" {
+		t.Errorf("Expected deduplicated [go], got %v", tools)
+	}
+
+	result := validator.ValidatePreconditions(task)
+	if len(result.MissingTools) != 0 {
+		t.Errorf("Expected no missing tools, got %v", result.MissingTools)
+	}
+}
+
 func TestValidator_ValidatePreconditions_EnvVars(t *testing.T) {
 	registry := tool.NewRegistry()
 	validator := NewValidator(registry, ".")
@@ -103,59 +212,60 @@ func TestValidator_ValidatePreconditions_EnvVars(t *testing.T) {
 	}
 }
 
-func TestValidator_ExtractRequiredTools(t *testing.T) {
+func TestValidator_RequiredTools(t *testing.T) {
 	registry := tool.NewRegistry()
 	validator := NewValidator(registry, ".")
 
 	tests := []struct {
-		name         string
-		description  string
-		verification []string
-		wantTools    []string
+		name          string
+		description   string
+		verification  []string
+		requiredTools []string
+		wantTools     []string
 	}{
 		{
-			name:        "go tool",
-			description: "Run go tests",
-			wantTools:   []string{"go"},
+			name:          "declared go tool",
+			description:   "Run go tests",
+			requiredTools: []string{"go"},
+			wantTools:     []string{"go"},
 		},
 		{
-			name:         "npm tool",
-			description:  "Build project",
-			verification: []string{"npm run build"},
-			wantTools:    []string{"npm"},
+			name:          "declared npm tool",
+			description:   "Build project",
+			verification:  []string{"npm run build"},
+			requiredTools: []string{"npm"},
+			wantTools:     []string{"npm"},
 		},
 		{
-			name:        "docker tool",
-			description: "Build container image with docker",
-			wantTools:   []string{"docker"},
+			name:          "blank entries dropped",
+			description:   "Deploy infrastructure",
+			requiredTools: []string{"terraform", "", "   "},
+			wantTools:     []string{"terraform"},
 		},
 		{
-			name:        "terraform tool",
-			description: "Deploy infrastructure with terraform",
-			wantTools:   []string{"terraform"},
+			name:         "prose alone declares nothing",
+			description:  "Build container image with docker and run `docker compose up`",
+			verification: []string{"Run `make build` and check `main.go`"},
+			wantTools:    nil,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			task := &Task{
-				Description:  tt.description,
-				Verification: tt.verification,
+				Description:   tt.description,
+				Verification:  tt.verification,
+				RequiredTools: tt.requiredTools,
 			}
 
-			tools := validator.extractRequiredTools(task)
+			tools := validator.requiredTools(task)
 
-			// Check that expected tools are found (when available in PATH)
-			t.Logf("Extracted tools: %v", tools)
-
-			toolFound := make(map[string]bool)
-			for _, tool := range tools {
-				toolFound[tool] = true
+			if len(tools) != len(tt.wantTools) {
+				t.Fatalf("Expected tools %v, got %v", tt.wantTools, tools)
 			}
-
-			for _, want := range tt.wantTools {
-				if !toolFound[want] {
-					t.Errorf("Expected to extract tool %s, but didn't find it", want)
+			for i, want := range tt.wantTools {
+				if tools[i] != want {
+					t.Errorf("Expected tool %s at index %d, got %s", want, i, tools[i])
 				}
 			}
 		})
@@ -467,43 +577,14 @@ func TestValidator_MarkdownVerificationSteps(t *testing.T) {
 		t.Fatal("ValidatePreconditions returned nil")
 	}
 
-	// Should not extract common verbs as tools
-	commonVerbs := []string{"Run", "Execute", "Generate", "Verify", "Create", "Add", "Document"}
-	for _, tool := range result.MissingTools {
-		for _, verb := range commonVerbs {
-			if strings.EqualFold(tool, verb) {
-				t.Errorf("Incorrectly extracted common verb as tool: %s", tool)
-			}
-		}
+	// Markdown verification prose must never produce a required tool.
+	if len(result.MissingTools) != 0 {
+		t.Errorf("Verification prose produced missing tools: %v", result.MissingTools)
 	}
 
-	// Should extract actual tools from backticks
-	tools := validator.extractRequiredTools(task)
-	t.Logf("Extracted tools: %v", tools)
-
-	// Should have extracted actual commands like "find", "go", "tree"
-	hasFind := false
-	hasGo := false
-	for _, tool := range tools {
-		if tool == "find" {
-			hasFind = true
-		}
-		if tool == "go" {
-			hasGo = true
-		}
-		// Make sure no common verbs
-		for _, verb := range commonVerbs {
-			if strings.EqualFold(tool, verb) {
-				t.Errorf("Found common verb in extracted tools: %s", tool)
-			}
-		}
-	}
-
-	if !hasFind {
-		t.Log("Note: 'find' not extracted (may be expected depending on extraction logic)")
-	}
-	if !hasGo {
-		t.Log("Note: 'go' not extracted (may be expected depending on extraction logic)")
+	tools := validator.requiredTools(task)
+	if len(tools) != 0 {
+		t.Errorf("Expected no required tools from verification prose, got %v", tools)
 	}
 
 	// Glob patterns in Files should not cause directory validation errors

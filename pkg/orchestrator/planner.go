@@ -50,6 +50,12 @@ type Task struct {
 	EstimatedTime string     `json:"estimated_time"`
 	Verification  []string   `json:"verification"`
 	Status        TaskStatus `json:"status"`
+
+	// RequiredTools lists the tools the task cannot run without. Only this
+	// structured field gates precondition validation. The validator never
+	// reads tool names out of Title, Description, or Verification prose,
+	// because those fields hold backtick-quoted code identifiers.
+	RequiredTools []string `json:"required_tools,omitempty"`
 }
 
 type TaskType string

@@ -82,8 +82,8 @@ func (v *Validator) ValidatePreconditions(task *Task) *ValidationResult {
 
 // checkTools verifies all required tools are available
 func (v *Validator) checkTools(task *Task, result *ValidationResult) error {
-	// Extract tool names from task description and verification steps
-	tools := v.extractRequiredTools(task)
+	// Only the structured RequiredTools field gates execution.
+	tools := v.requiredTools(task)
 
 	for _, toolName := range tools {
 		toolName = strings.TrimSpace(toolName)
@@ -109,93 +109,30 @@ func (v *Validator) checkTools(task *Task, result *ValidationResult) error {
 	return nil
 }
 
-// extractRequiredTools extracts tool names from task
-func (v *Validator) extractRequiredTools(task *Task) []string {
+// requiredTools returns the tools that the task declares in its structured
+// RequiredTools field.
+//
+// The validator does not read tool names out of Title, Description, or
+// Verification. An earlier version harvested the first word of each
+// backtick-quoted span in Verification. Plans write prose such as
+// "Verify the logic of `persistLocked` in `store.go`", so that heuristic
+// turned code identifiers and file names into required tool names and
+// blocked execution. Prose is prose. Only a declared field can gate a run.
+func (v *Validator) requiredTools(task *Task) []string {
+	if task == nil {
+		return nil
+	}
+
 	var tools []string
 	seen := make(map[string]bool)
 
-	// Check task description for common tools
-	patterns := []struct {
-		pattern string
-		tool    string
-	}{
-		{"npm ", "npm"},
-		{"go ", "go"},
-		{"cargo ", "cargo"},
-		{"make ", "make"},
-		{"docker ", "docker"},
-		{"python ", "python"},
-		{"ruby ", "ruby"},
-		{"java ", "java"},
-		{"javac ", "javac"},
-		{"git ", "git"},
-		{"gh ", "gh"},
-		{"aws ", "aws"},
-		{"gcloud ", "gcloud"},
-		{"terraform ", "terraform"},
-		{"kubectl ", "kubectl"},
-		{"helm ", "helm"},
-		{"ansible ", "ansible"},
-	}
-
-	lowerDesc := strings.ToLower(task.Description)
-	for _, p := range patterns {
-		if strings.Contains(lowerDesc, p.pattern) && !seen[p.tool] {
-			tools = append(tools, p.tool)
-			seen[p.tool] = true
+	for _, name := range task.RequiredTools {
+		name = strings.TrimSpace(name)
+		if name == "" || seen[name] {
+			continue
 		}
-	}
-
-	// Exact word matching for known tool names in the description.
-	words := strings.Fields(lowerDesc)
-	for _, word := range words {
-		clean := strings.Trim(word, ".,:;")
-		for _, p := range patterns {
-			target := strings.TrimSpace(p.pattern)
-			if clean == target && !seen[p.tool] {
-				tools = append(tools, p.tool)
-				seen[p.tool] = true
-			}
-		}
-	}
-
-	// Check verification steps
-	for _, verification := range task.Verification {
-		for _, p := range patterns {
-			if strings.Contains(strings.ToLower(verification), p.pattern) && !seen[p.tool] {
-				tools = append(tools, p.tool)
-				seen[p.tool] = true
-			}
-		}
-	}
-
-	// Extract tools from backtick-enclosed commands in verification steps.
-	// This avoids false positives from natural language descriptions.
-	for _, verification := range task.Verification {
-		for {
-			startIdx := strings.Index(verification, "`")
-			if startIdx == -1 {
-				break
-			}
-			remaining := verification[startIdx+1:]
-			endIdx := strings.Index(remaining, "`")
-			if endIdx == -1 {
-				break
-			}
-
-			command := remaining[:endIdx]
-			fields := strings.Fields(command)
-			if len(fields) > 0 {
-				candidate := strings.TrimSpace(fields[0])
-				if candidate != "" && !seen[candidate] {
-					tools = append(tools, candidate)
-					seen[candidate] = true
-				}
-			}
-
-			// Move past this backtick pair for next iteration
-			verification = remaining[endIdx+1:]
-		}
+		tools = append(tools, name)
+		seen[name] = true
 	}
 
 	return tools
