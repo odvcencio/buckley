@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.2] - 2026-08-17
+
+### Fixed
+- Balanced and in-depth reviews now emit. Branch, pull request, and shard
+  reviews never passed the planned completion budget to the runner, so the
+  request fell back to a derived ceiling of the reasoning budget plus 4096
+  tokens while the prompt told the model it had 32768. The in-depth schema
+  requires one coverage entry per changed file, which does not fit in the
+  smaller ceiling, so those reviews were truncated and discarded. All three
+  paths now pass the budget the plan already computed, as project reviews
+  already did.
+- A repair keeps at least the completion budget of the attempt it repairs. Text
+  repair shrinks the reasoning ceiling, and the runner derives an implicit
+  completion budget from that ceiling, so a repair received less room than the
+  attempt whose output the gate rejected. The model could not restate the prior
+  review and add the missing section, so it exchanged one required section for
+  another and the repair loop did not converge.
+- A review that fails validation writes its artifact again instead of
+  discarding it. The artifact carries the incomplete-review banner, states that
+  it is not a merge verdict, and leaves the parsed verdict empty; the approval
+  gate and the GitHub post both remain unreachable on the failure path, and the
+  command still exits non-zero.
+- The OpenRouter privacy fallback fires when the zero-data-retention route is
+  rate limited, not only when no such route exists. OpenRouter answers 429 when
+  a zero-data-retention endpoint pool is saturated, and the configured
+  zdr_then_data_collection_deny policy could not fire, so the request failed
+  while a permitted route was free. Transient rate limits do not reach this
+  check, and an explicitly pinned zero-data-retention policy is never
+  downgraded.
+
+
 ## [0.8.1] - 2026-08-17
 
 ### Fixed
@@ -482,7 +513,8 @@ here to 1.1.0.
 - Telemetry is local-only by default.
 - Plugin discovery limited to local paths only.
 
-[Unreleased]: https://github.com/odvcencio/buckley/compare/v0.8.1...HEAD
+[Unreleased]: https://github.com/odvcencio/buckley/compare/v0.8.2...HEAD
+[0.8.2]: https://github.com/odvcencio/buckley/compare/v0.8.1...v0.8.2
 [0.8.1]: https://github.com/odvcencio/buckley/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/odvcencio/buckley/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/odvcencio/buckley/compare/v0.6.0...v0.7.0

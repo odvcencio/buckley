@@ -254,7 +254,7 @@ func runReviewCommand(args []string) error {
 		if opts.showCost && result != nil && result.trace != nil {
 			printReviewCost(result.trace, runtime.ledger)
 		}
-		return reviewCommandFailure(reviewErr, result)
+		return salvageIncompleteReview(opts.outputFile, reviewErr, result)
 	}
 
 	if result.reviewText == "" {
@@ -283,6 +283,29 @@ func runReviewCommand(args []string) error {
 	}
 
 	return nil
+}
+
+// salvageIncompleteReview writes the artifact from a review run that failed
+// validation, then returns the error to report.
+//
+// The artifact cannot be mistaken for a verdict. reviewResultFromAgent stamps
+// it with markIncompleteReview, which states that it is not a merge verdict and
+// must not be used as an approval, and it leaves parsed nil so no verdict is
+// derived from it. Both the approval gate and the GitHub post sit on the
+// reviewErr == nil path and stay unreachable here, and the command still exits
+// non-zero.
+//
+// Discarding the text instead destroys completed work the caller has already
+// paid for. A run that spends several hundred thousand tokens and then fails one
+// schema check should still show how far it got.
+func salvageIncompleteReview(outputFile string, reviewErr error, result *reviewCommandResult) error {
+	if result == nil || !result.incomplete || strings.TrimSpace(result.reviewText) == "" {
+		return reviewCommandFailure(reviewErr, result)
+	}
+	if err := writeReviewOutput(outputFile, result.reviewText); err != nil {
+		return fmt.Errorf("%w; also failed to write salvaged review: %v", reviewErr, err)
+	}
+	return fmt.Errorf("%w; incomplete review salvaged%s", reviewErr, reviewSalvageDestination(outputFile))
 }
 
 // reviewCommandFailure keeps incomplete model output out of the review
@@ -663,6 +686,7 @@ func runBranchReviewWithPolicy(ctx context.Context, opts reviewCommandOptions, f
 		ModelID:                  reviewPolicy.modelID,
 		ReasoningEffort:          reviewPolicy.reasoningEffort,
 		ReasoningMaxTokens:       reviewPolicy.reasoningMaxTokens,
+		MaxOutputTokens:          reviewPolicy.maxOutputTokens,
 		SnapshotPolicy:           policy,
 		ReviewSnapshot:           snapshot,
 	})

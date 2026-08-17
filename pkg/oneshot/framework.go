@@ -668,6 +668,15 @@ func agentPhaseAttemptOptions(base AgentExecutionOpts, retryMode agentValidation
 			opts.MaxIterations = 1
 			opts.MaxToolCalls = 0
 			opts.ExplorationTimeout = 0
+			// Pin the completion budget before the reasoning ceiling shrinks.
+			// AgentRunner derives an implicit budget from ReasoningMaxTokens when
+			// no explicit one is set, so shrinking reasoning first would hand the
+			// repair less room than the attempt it repairs. The model then cannot
+			// restate the prior review plus the section the gate asked for, and it
+			// trades one mandatory section for another instead of converging.
+			if opts.MaxOutputTokens <= 0 {
+				opts.MaxOutputTokens = reviewAgentOutputTokenLimit(opts.ReasoningMaxTokens)
+			}
 			opts.ReasoningMaxTokens = boundedPositiveLimit(opts.ReasoningMaxTokens, textRepairReasoningMaxTokens)
 			if retryMode == agentValidationRetryClean {
 				// The provider has already demonstrated that the original ceiling

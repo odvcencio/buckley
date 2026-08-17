@@ -275,7 +275,7 @@ func runReviewPRCommand(args []string) error {
 		if opts.showCost && result != nil && result.trace != nil {
 			printReviewCost(result.trace, runtime.ledger)
 		}
-		return reviewCommandFailure(reviewErr, result)
+		return salvageIncompleteReview(opts.outputFile, reviewErr, result)
 	}
 
 	if result.reviewText == "" {
@@ -621,6 +621,7 @@ func runPRReviewWithOptions(ctx context.Context, prRef string, framework *onesho
 		ModelID:                  opts.modelID,
 		ReasoningEffort:          opts.reasoningEffort,
 		ReasoningMaxTokens:       opts.reasoningMaxTokens,
+		MaxOutputTokens:          opts.maxOutputTokens,
 		SnapshotPolicy: model.ReviewSnapshotPolicy{
 			Mode:           model.ReviewSnapshotHead,
 			ExpectedCommit: prCtx.PR.HeadSHA,
@@ -765,6 +766,8 @@ func runPRReviewSharded(
 			VerificationTimeout:  shardOpts.verificationTimeout,
 			ModelID:              shardOpts.modelID,
 			ReasoningEffort:      shardOpts.reasoningEffort,
+			ReasoningMaxTokens:   shardOpts.reasoningMaxTokens,
+			MaxOutputTokens:      shardOpts.maxOutputTokens,
 			SnapshotPolicy: model.ReviewSnapshotPolicy{
 				Mode:           model.ReviewSnapshotHead,
 				ExpectedCommit: prCtx.PR.HeadSHA,
