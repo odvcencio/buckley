@@ -467,7 +467,8 @@ here to 1.1.0.
 - Telemetry is local-only by default.
 - Plugin discovery limited to local paths only.
 
-[Unreleased]: https://github.com/odvcencio/buckley/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/odvcencio/buckley/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/odvcencio/buckley/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/odvcencio/buckley/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/odvcencio/buckley/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/odvcencio/buckley/compare/v0.4.0...v0.5.0
