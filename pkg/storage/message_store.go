@@ -293,7 +293,7 @@ func (s *Store) GetMessages(sessionID string, limit int, offset int) ([]Message,
 		SELECT id, session_id, role, content, content_json, content_type, tool_calls, tool_call_id, name, reasoning, reasoning_details, timestamp, tokens, is_summary, COALESCE(is_truncated, FALSE)
 		FROM messages
 		WHERE session_id = ?
-		ORDER BY timestamp ASC
+		ORDER BY timestamp ASC, id ASC
 		LIMIT ? OFFSET ?
 	`
 	rows, err := s.db.Query(query, sessionID, limit, offset)

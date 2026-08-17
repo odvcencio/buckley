@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-08-17
+
+### Fixed
+- Message history is returned in chronological order. Timestamps are stored as
+  text and ordered as text, and `time.RFC3339Nano` removes trailing zeros. A
+  time whose nanoseconds ended in zero serialized shorter than its neighbours,
+  and the shorter string sorted after the longer one, because `Z` is above any
+  digit. Messages written in the same millisecond could come back out of order,
+  and `LIMIT`/`OFFSET` paging over that order could repeat or skip a row.
+  Buckley now writes a fixed nine-digit fraction, and migration 20 rewrites the
+  stored values.
+- `GetMessages` breaks ties on the row identifier, which matches the other
+  message queries and keeps paging stable.
+
+
 ## [0.8.0] - 2026-08-16
 
 ### Added
@@ -467,7 +482,8 @@ here to 1.1.0.
 - Telemetry is local-only by default.
 - Plugin discovery limited to local paths only.
 
-[Unreleased]: https://github.com/odvcencio/buckley/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/odvcencio/buckley/compare/v0.8.1...HEAD
+[0.8.1]: https://github.com/odvcencio/buckley/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/odvcencio/buckley/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/odvcencio/buckley/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/odvcencio/buckley/compare/v0.5.0...v0.6.0

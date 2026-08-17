@@ -179,10 +179,21 @@ var migrations = []SQLiteMigration{
 	{17, "normalize_session_lifecycle_timestamps", normalizeLegacyTimestamps},
 	{18, "provider_continuations", ensureProviderContinuationsSchema},
 	{19, "model_behavior_profiles", ensureModelBehaviorProfilesSchema},
+	{20, "normalize_fixed_width_timestamps", normalizeLegacyTimestamps},
 }
 
+// sqliteTimestampLayout keeps every fractional second at nine digits.
+//
+// Timestamps are stored as TEXT and ordered as TEXT. time.RFC3339Nano removes
+// trailing zeros, so a time whose nanoseconds end in zero serializes shorter
+// than its neighbours: ".0174334Z" sorts after ".017433497Z" because "Z" is
+// above "9" in ASCII. Rows then come back out of chronological order, and
+// LIMIT/OFFSET paging over that order can repeat or skip a row. A fixed width
+// makes the lexicographic order match the chronological one.
+const sqliteTimestampLayout = "2006-01-02T15:04:05.000000000Z07:00"
+
 func sqliteTimestamp(value time.Time) string {
-	return value.UTC().Format(time.RFC3339Nano)
+	return value.UTC().Format(sqliteTimestampLayout)
 }
 
 func normalizeLegacyTimestamps(db MigrationDB) error {
